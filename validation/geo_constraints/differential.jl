@@ -43,7 +43,8 @@ function find_gmsh_api()
     error("Gmsh 4.15.2 Julia API not found; set GMSH_JULIA_API")
 end
 
-include(find_gmsh_api())
+const GMSH_API_PATH=find_gmsh_api()
+include(GMSH_API_PATH)
 gmsh.GMSH_API_VERSION == TARGET_GMSH_VERSION || error(
     "expected Gmsh API $TARGET_GMSH_VERSION, got $(gmsh.GMSH_API_VERSION)")
 
@@ -700,6 +701,30 @@ end
 results = String[]
 gaps = String[]
 
+# The negative cases are independent: gmsh_run previously cleared model and
+# parser state before every source. Preserve all six rejection assertions in
+# one child, whose exit releases the pinned parser's leaked file handles.
+error_cases=filter(case->case.mode==:error,CASES)
+all(case->case.dim==0,error_cases) || error(
+    "invalid-source primary child only supports parser rejection cases")
+mktempdir() do folder
+    paths=String[]
+    for case in error_cases
+        path=joinpath(folder,string(case.name)*".geo")
+        write(path,case.source)
+        push!(paths,path)
+    end
+    script=joinpath(@__DIR__,"error_primary.jl")
+    project=normpath(joinpath(@__DIR__,"..",".."))
+    run(`$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$project $script $GMSH_API_PATH $paths`)
+    # Deletion proves Windows file handles are released after the child has
+    # exited; mktempdir subsequently removes the empty folder.
+    for path in paths
+        rm(path)
+        ispath(path) && error("primary fixture was not removed: $path")
+    end
+end
+
 gmsh.initialize(String[], false, false)
 try
     gmsh.option.setNumber("General.Terminal", 0)
@@ -713,7 +738,7 @@ try
 
     for case in CASES
         t = tessella_run(case.source, case.dim)
-        g = mktemp() do path, io
+        g = case.mode==:error ? (error="primary child rejected source",) : mktemp() do path, io
             write(io, case.source)
             close(io)
             gmsh_run(path, case.dim)

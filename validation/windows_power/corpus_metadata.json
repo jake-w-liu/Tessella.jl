@@ -1,0 +1,36 @@
+{
+  "gmsh_version": "4.15.2",
+  "gmsh_library_sha256": "6cac3eefb477265d9fa60bbd869dbbbf7c7ca4cb308c0f8f2b43e91d43de3c1c",
+  "gmsh_executable_sha256": "317c43391e5b1fab3a1dd80dc5245dad6e2d087910f4b8ebc234bd6d4b8f41a1",
+  "case_count": 2874,
+  "precision_bits": [
+    53,
+    64,
+    24
+  ],
+  "control_word_mode_bits": [
+    512,
+    1536,
+    2560,
+    3584,
+    768,
+    1792,
+    2816,
+    3840,
+    0,
+    1024,
+    2048,
+    3072
+  ],
+  "random_seed": 221097,
+  "corpus_sha256": "71bc0963d24b8b409b84c126005d66c48ca521b58f7dc79a870743335af46bee",
+  "primary_script_sha256": "7764a0deacbf5fbf787d7389969d7293a3387ca19a666543662432d2777d060b",
+  "nan_comparison": "bitwise for DLL corpus; category after CLI text output",
+  "reference": "Gmsh parser x^y; Python assigns exact Float64 input bits",
+  "source_urls": [
+    "https://raw.githubusercontent.com/mingw-w64/mingw-w64/master/mingw-w64-crt/math/x86/pow.def.h",
+    "https://raw.githubusercontent.com/mingw-w64/mingw-w64/master/mingw-w64-crt/math/powi.def.h",
+    "https://raw.githubusercontent.com/mingw-w64/mingw-w64/master/mingw-w64-crt/math/x86/log2l.S",
+    "https://raw.githubusercontent.com/mingw-w64/mingw-w64/master/mingw-w64-crt/math/x86/exp2l.S"
+  ]
+}

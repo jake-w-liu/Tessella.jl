@@ -32,6 +32,142 @@ function cramer_circumcenter(a,b,c,d)
     D=d3(A); (d3([rhs A[:,2] A[:,3]])/D, d3([A[:,1] rhs A[:,3]])/D, d3([A[:,1] A[:,2] rhs])/D)
 end
 
+# Twelve cones over the outward-oriented unit-cube faces, with an off-center
+# interior vertex. Reversing each face supplies positive tetrahedron order
+# without using a production orientation predicate to build the oracle fixture.
+function _optimize_tagged_cube_star()
+    coordinates=Float64[0 1 1 0 0 1 1 0 .12;
+                        0 0 1 1 0 0 1 1 .34;
+                        0 0 0 0 1 1 1 1 .71]
+    faces=Int32[1 1 5 5 1 1 2 2 3 3 4 4;
+                3 4 6 7 2 6 3 7 4 8 1 5;
+                2 3 7 8 6 5 7 6 8 7 5 8]
+    edges=Int32[1 2 3 4 5 6 7 8 1 2 3 4;
+                2 3 4 1 6 7 8 5 5 6 7 8]
+    cells=vcat(faces[[1,3,2],:],fill(Int32(9),1,12))
+    return Mesh(coordinates;segs=edges,tris=faces,tets=cells,
+                seg_tag=Int32.(1:12),tri_tag=Int32.(21:32),
+                tet_tag=Int32.(41:52))
+end
+
+# Independent rational determinant sum, rather than the production volume
+# function: fixed cube boundary and positive cone cells must total exactly one.
+function _optimize_exact_volume(mesh)
+    R=Rational{BigInt}
+    total=zero(R)
+    for cell in eachcol(mesh.tets)
+        a,b,c,d=cell
+        u=R.(mesh.coords[:,b])-R.(mesh.coords[:,a])
+        v=R.(mesh.coords[:,c])-R.(mesh.coords[:,a])
+        w=R.(mesh.coords[:,d])-R.(mesh.coords[:,a])
+        total+=(u[1]*(v[2]*w[3]-v[3]*w[2])-
+                u[2]*(v[1]*w[3]-v[3]*w[1])+
+                u[3]*(v[1]*w[2]-v[2]*w[1]))/6
+    end
+    return total
+end
+
+@testset "optimization returns independent buffers and preserves the unit cube" begin
+    input=_optimize_tagged_cube_star()
+    buffers=fieldnames(Mesh)
+    snapshot=map(field->copy(getfield(input,field)),buffers)
+    @test validate(input).ok
+    @test _optimize_exact_volume(input)==1
+    variants=(
+        (mesh->smooth_laplacian(mesh;iters=0)),
+        (mesh->smooth_laplacian(mesh;iters=1,relax=.5)),
+        (mesh->smooth_laplacian(mesh;iters=3,relax=.9)),
+        (mesh->smooth_odt(mesh;iters=0)),
+        (mesh->smooth_odt(mesh;iters=1)),
+        (mesh->smooth_odt(mesh;iters=3)),
+        (mesh->smooth_optimize(mesh;iters=0)),
+        (mesh->smooth_optimize(mesh;iters=1,sliver_deg=35.)),
+        (mesh->smooth_optimize(mesh;iters=2,sliver_deg=35.,
+                               movable=trues(nnodes(mesh)))),
+        (mesh->smooth_optimize(mesh;iters=2,sliver_deg=35.,
+                               movable=falses(nnodes(mesh)))),
+        (mesh->first(remove_slivers(mesh;max_rounds=0))),
+        (mesh->first(remove_slivers(mesh;max_rounds=1,sliver_deg=35.))),
+        (mesh->first(remove_slivers(mesh;max_rounds=3,sliver_deg=35.))),
+    )
+    for optimize in variants
+        result=optimize(input)
+        @test validate(result).ok
+        @test _optimize_exact_volume(result)==1
+        @test result.coords[:,1:8]==input.coords[:,1:8]
+        # Independent SHA-256 of the literal sorted, padded little-endian
+        # connectivity records and family/count delimiters of this fixture.
+        @test mesh_crc(result).sha==
+            "b52840703e69c865b608b1671cf1c290616f62b9c49e7d424f68567fd7e2524d"
+        for field in buffers
+            @test getfield(result,field)!==getfield(input,field)
+            field===:coords || (@test getfield(result,field)==getfield(input,field))
+        end
+        @test all(getfield(input,field)==saved for (field,saved) in zip(buffers,snapshot))
+        # Exercise every nonempty returned buffer, including metadata. Object
+        # identity alone would miss distinct array headers sharing storage.
+        result.coords[1,1]+=.125
+        for field in (:segs,:tris,:tets)
+            matrix=getfield(result,field)
+            matrix[1,1]=mod(matrix[1,1],nnodes(result))+1
+        end
+        for field in (:seg_tag,:tri_tag,:tet_tag)
+            getfield(result,field)[1]+=1
+        end
+        @test all(getfield(input,field)==saved for (field,saved) in zip(buffers,snapshot))
+    end
+end
+
+# A tagged segment and triangle in each disjoint right tetrahedron keep every
+# serialized buffer nonempty. All vertices are on the boundary, so these cases
+# isolate public validation/setup/output costs while still using real kernels.
+function _optimize_allocation_mesh(count::Int)
+    coordinates=zeros(3,4count)
+    for index in 0:count-1
+        first=4index+1;x=3.0index
+        coordinates[:,first].=(x,0.,0.)
+        coordinates[:,first+1].=(x+1,0.,0.)
+        coordinates[:,first+2].=(x,1.,0.)
+        coordinates[:,first+3].=(x,0.,1.)
+    end
+    cells=reshape(Int32.(1:4count),4,:)
+    return Mesh(coordinates;tets=cells,segs=cells[1:2,:],tris=cells[1:3,:],
+                seg_tag=fill(Int32(7),count),tri_tag=fill(Int32(8),count),
+                tet_tag=fill(Int32(9),count))
+end
+
+function _optimize_warmed_allocation(operation,mesh)
+    operation(mesh)
+    minimum_bytes=typemax(Int)
+    for _ in 1:5
+        minimum_bytes=min(minimum_bytes,@allocated operation(mesh))
+    end
+    return minimum_bytes
+end
+
+@testset "optimization allocation budgets for tagged boundary meshes" begin
+    for count in (1000,2000,4000)
+        mesh=_optimize_allocation_mesh(count)
+        @test validate(mesh).ok
+        # One detached payload plus 10% and 4 KiB for array headers/setup.
+        # The former redundant copy used approximately twice the payload.
+        payload=sum(sizeof(getfield(mesh,field)) for field in fieldnames(Mesh))
+        @test _optimize_warmed_allocation(Tessella.Optimize._copy_mesh,mesh)<=
+              ceil(Int,1.1payload)+4096
+        # Warmed Julia 1.12/1.13 measurements at 1k/2k/4k cells establish these
+        # linear budgets with fixed setup slack. Reintroducing the old full
+        # connectivity/tag pre-copy exceeds each unchanged budget at every size.
+        @test _optimize_warmed_allocation(
+            m->smooth_laplacian(m;iters=1),mesh)<=2660count+16384
+        @test _optimize_warmed_allocation(
+            m->smooth_odt(m;iters=1),mesh)<=1260count+16384
+        @test _optimize_warmed_allocation(
+            m->smooth_optimize(m;iters=1),mesh)<=1260count+16384
+        @test _optimize_warmed_allocation(
+            m->remove_slivers(m;max_rounds=1),mesh)<=300count+16384
+    end
+end
+
 @testset "Optimize (Stage 4)" begin
 
     @testset "public parameter and metadata contracts" begin

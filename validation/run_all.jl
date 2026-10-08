@@ -92,6 +92,14 @@ control_flow_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes
 println("  command: ", control_flow_command)
 run(control_flow_command)
 
+if Sys.iswindows() && Sys.ARCH===:x86_64
+    println("\n── windows_power ──  DLL and standalone Gmsh 4.15.2 power differential")
+    windows_power_script=joinpath(HERE,"windows_power","differential.jl")
+    windows_power_command=`$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --threads=4 --project=$size_field_project $windows_power_script`
+    println("  command: ",windows_power_command)
+    run(windows_power_command)
+end
+
 println("\n── geo_transforms ──  entity-level Gmsh 4.15.2 .geo transform differential")
 geo_transform_script = joinpath(HERE, "geo_transforms", "differential.jl")
 geo_transform_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $geo_transform_script`

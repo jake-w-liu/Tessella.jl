@@ -46,6 +46,7 @@ using Tessella
     # Stage 0 — Foundations (CRC-gated, DEVELOPMENT.md discipline).
     include("core/predicates_test.jl")   # exact predicates vs exact-rational oracle
     include("core/gmsh_libm_test.jl")    # exact exponent oracle for Windows integer powers
+    include("core/gmsh_windows_power_test.jl") # pinned Windows powers, task scope and FPU resources
     include("core/allocation_audit_test.jl") # closure-boxing scan + hot-kernel allocation bounds
     include("core/meshtypes_test.jl")    # mesh container, topology, quality, checksum
     include("core/mesh_entity_topology_test.jl") # automatic/manual global edge/face ids
@@ -57,6 +58,7 @@ using Tessella
     include("core/transform_test.jl")    # validated affine transforms + orientation preservation
     include("interfaces/io_test.jl")     # .msh v2/v4 round-trip, STL, .geo scan
     include("interfaces/stream_cleanup_test.jl") # reader failure closes OS handles
+    include("interfaces/cli_precision_test.jl") # standalone Windows power precision and task isolation
     include("core/elements_test.jl")     # fixed/special Gmsh 4.15.2 records + mixed entity I/O
     include("meshing/recombine_test.jl") # deterministic triangle-to-quad recombination
     include("meshing/refine_test.jl")    # deterministic one-level uniform simplex refinement

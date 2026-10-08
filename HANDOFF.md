@@ -30,6 +30,70 @@ meshing must be independent; Gmsh 4.15.2 is only a differential oracle.
 
 ## Current increment
 
+`main` contains pushed `c33a446` (extreme powers, CRC means, STL buckets and
+two independently repaired validation harnesses). The next verified code
+increment is in `C:/tmp/tessella_deep_audit_next_20261009`, branch
+`codex/deep-audit-next-20261009`, based on that same commit. It implements
+native Windows power parity with task-local CLI precision context, redundant
+Optimize copy removal, explicit-angle odd-count Blossom fallback and tuple
+workspaces, and process-isolated negative GEO oracle cleanup.
+
+Both full package V2 runs are terminal exit 0 with 1,527,223 assertions;
+do not relaunch them. Logs/results:
+`C:/tmp/tessella_deep_audit_next_full112_20261009_v2*` and
+`C:/tmp/tessella_deep_audit_next_full113_20261009_v2*`.
+Wrappers elapsed 2,326.287/1,877.328 seconds. All 499 inputs are held by
+`C:/tmp/tessella_deep_audit_next_freeze_20261009_v2.json`, SHA256
+`4f17fb7cf3c7bf55d2a47edb22a64a9584267f588a3ebfc93ac18608058065f7`.
+An earlier V1 freeze included generated Python bytecode; those two package
+process trees were deliberately interrupted and are not successful gates.
+The corrected V2 excludes bytecode and includes the ignore rule.
+
+V3 adds only `.gitattributes` as the 500th release input:
+`C:/tmp/tessella_deep_audit_next_freeze_20261009_v3.json`, SHA256
+`482c36b7ea281aad5c9f1b4fa6f38a7342b7c954c21478357813d53955abd19d`.
+All tested runtime inputs remain byte-identical. The rule keeps the four
+hash-bound `validation/windows_power` files unchanged on actual checkouts
+with either `core.autocrlf` setting. Proof:
+`C:/tmp/tessella_next_release_checkout_proof_20261009.txt`.
+Independent checkout/configuration review passes.
+Integration preserves all unrelated main bytes and immutable fixtures.
+All 21 selected paths are exact copies. The 47 unselected worktree differences
+are independently proven to be only LF/CRLF representation. Main V4 binding:
+`C:/tmp/tessella_deep_audit_main_freeze_20261009_v4.json`, SHA256
+`c3522b14e519ed1aeb944cfb3f23f34c16e19d82fc361c016a1d1b9620abae20`.
+Raw-byte lineage proof: `C:/tmp/tessella_main_integration_proof_20261009.json`.
+Additional implementation review, primary/CRC and warmed allocation evidence
+is preserved in:
+`C:/tmp/tessella_optimize_installed_increment_report.txt`,
+`C:/tmp/tessella_recombine_installed_increment_report_20261009.txt`, and
+`C:/tmp/tessella_constraints_cleanup_increment_report.txt`.
+
+Next aggregate session 74410 and main remainder session 73444 no longer
+have tool handles or owned OS process trees. Neither writes a terminal result;
+do not infer exit 0 or a known failure code. Next log stops launching the
+affine-transform child after changed power/constraint and preceding children
+pass. Main remainder stops launching embedded-Surface after embedded-Line
+passes. Preserve those incomplete logs and resume remaining exact children
+against an explicitly bound tree. Do not describe suffix evidence as a
+successful original aggregate. Main and next input hashes are rechecked
+before any integration; no live frozen job is silently changed.
+
+The full audit remains open. Higher actual-input implementation is evolving
+in `C:/tmp/tessella_higher_impl_20261009` and is not ready to promote.
+Real attached-Point birth-history, deleted-Line and periodic-authority
+contracts must pass independent oracles and stable full gates. Reconcile its
+physical-coordinate recombination adapter with this increment's accepted
+odd-count/tuple implementation; do not overwrite it with old whole files.
+The batched function-space proposal
+`C:/tmp/tessella_mfs_driver_proposal_20261009.jl` already preserves the
+original golden SHA and all orientations on both runtimes. Promote and run
+the actual installed driver as a separate verified harness increment.
+Even-count primary matching failure/closure and extreme-aspect quad-quality
+underflow remain separate confirmed recombination findings.
+
+## Previous arithmetic/STL/CRC increment (`c33a446`, pushed)
+
 Fresh audit on 2026-10-09 starts from clean local/remote `main` at `7ca0698`.
 The free-B4/lifecycle increment `b2966fd` is already pushed. Current working
 changes fix Windows integer powers, finite CRC mean overflow and guarded
@@ -71,9 +135,9 @@ preexisting birth-label discrepancy (native maximum 810 versus primary 846).
 Second suffix session 62770 is also terminal exit 1 after 102.717 seconds:
 location/Jacobian/quadrature children pass, then function-space high-order
 Hex arrays exhaust memory. No failed gate is counted as passed.
-Publish the scoped arithmetic/STL/CRC and repaired-harness increment after
-its completed package/changed-path/independent checks; continue the broader
-audit and generation/history/resource fixes. All current production changes
+The scoped arithmetic/STL/CRC and repaired-harness increment was committed
+and pushed as `c33a446` after its package/changed-path/independent checks.
+Continue the broader audit and generation/history/resource fixes. Its changes
 are outside the unchanged API/Model/generation code that reproduces the
 birth-label discrepancy on both current main and detached audit base.
 `STATUS.md` records the fresh audit matrix and open findings.

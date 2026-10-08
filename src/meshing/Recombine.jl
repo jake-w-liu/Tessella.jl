@@ -113,19 +113,17 @@ function _gmsh_recombine_pair_measure(coords,nodes::NTuple{4,Int32})
         scale=max(scale,abs(coords[axis,Int(node)]))
     end
     scale>0 || return 0.0
-    points=Vector{NTuple{3,Float64}}(undef,4)
-    for i in 1:4
-        node=Int(nodes[i])
-        points[i]=(coords[1,node]/scale,coords[2,node]/scale,coords[3,node]/scale)
-    end
-    edges=Vector{NTuple{3,Float64}}(undef,4)
-    corners=Vector{NTuple{3,Float64}}(undef,4)
-    for i in 1:4
-        edges[i]=_sub3(points[mod1(i+1,4)],points[i])
-    end
+    # Keep the four fixed points and edge/corner workspaces in tuples. Spell
+    # out the points so the updated scale does not escape in a closure.
+    n1=Int(nodes[1]);n2=Int(nodes[2]);n3=Int(nodes[3]);n4=Int(nodes[4])
+    points=((coords[1,n1]/scale,coords[2,n1]/scale,coords[3,n1]/scale),
+            (coords[1,n2]/scale,coords[2,n2]/scale,coords[3,n2]/scale),
+            (coords[1,n3]/scale,coords[2,n3]/scale,coords[3,n3]/scale),
+            (coords[1,n4]/scale,coords[2,n4]/scale,coords[3,n4]/scale))
+    edges=ntuple(i->_sub3(points[mod1(i+1,4)],points[i]),4)
+    corners=ntuple(i->_cross3(edges[i],edges[mod1(i+1,4)]),4)
     deviation=0.0
     for i in 1:4
-        corners[i]=_cross3(edges[i],edges[mod1(i+1,4)])
         previous=edges[mod1(i-1,4)];current=edges[i]
         angle=min(180.0,atan(_norm3(_cross3(previous,current)),
             -_dot3(previous,current))*(180.0/pi))
@@ -201,8 +199,10 @@ projected quadrangles with matching physical tags and quality at least
 `min_quality` are accepted. Unpaired triangles are retained unless `full_quad`
 is requested. Segment connectivity and all per-cell physical tags are preserved
 by default. `recombine_angle` optionally applies the pinned Gmsh strict
-signed corner-angle measure admission to greedy pairing; successful Blossom
-matching and `full_quad` retain their existing matching contract.
+signed corner-angle measure admission to greedy pairing. With an explicit angle,
+an odd triangle count makes `:blossom` fall back to that greedy pass, as in pinned
+Gmsh. Even-count Blossom matching ignores the angle. Without an angle, `:blossom`
+retains the standalone maximum-cardinality matching contract.
 
 The input must be a validated surface/curve mesh without tetrahedra. This is a
 surface recombination operation; it does not generate a structured grid or modify
@@ -270,7 +270,9 @@ function recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
           alg=MergeSort)
 
     used=falses(size(triangles,2));accepted=_QuadCandidate[]
-    if algorithm===:blossom
+    # Pinned Gmsh falls back to its angle-filtered greedy pass when the
+    # triangle count is odd. With no angle, keep the standalone matching API.
+    if algorithm===:blossom && (angle===nothing || iseven(size(triangles,2)))
         n=size(triangles,2)
         adj=[Int[] for _ in 1:n]
         bypair=Dict{Tuple{Int,Int},_QuadCandidate}()
@@ -295,11 +297,6 @@ function recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
             used[v]=true; used[u]=true
             push!(accepted,candidate)
         end
-        if full_quad && any(!,used)
-            leftover=count(!,used)
-            throw(ArgumentError(
-                "recombine_triangles: full_quad requested but $leftover triangles remain unmatched"))
-        end
     else
         for candidate in candidates
             first=Int(candidate.first_triangle);second=Int(candidate.second_triangle)
@@ -310,6 +307,12 @@ function recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
                 used[first]=true;used[second]=true;push!(accepted,candidate)
             end
         end
+    end
+
+    if full_quad && any(!,used)
+        leftover=count(!,used)
+        throw(ArgumentError(
+            "recombine_triangles: full_quad requested but $leftover triangles remain unmatched"))
     end
 
     blocks=Elements.ElementBlock[]

@@ -10,6 +10,131 @@ function _recombine_square(;width=1.0,tags=Int32[7,7],reverse_second=false)
     return Mesh(coords;segs=segs,tris=tris,seg_tag=Int32[2,2,3,3],tri_tag=tags)
 end
 
+module RecombineAngleRegressionTests
+using Test,Tessella
+
+function pentagon()
+    Mesh(Float64[0 1 1 0 -1;0 0 1 1 .5;0 0 0 0 0];
+        tris=Int32[1 1 1;2 3 4;3 4 5],tri_tag=fill(Int32(7),3),
+        segs=Int32[1 2 3 4 5;2 3 4 5 1],seg_tag=fill(Int32(9),5))
+end
+
+function exact_area(mesh)
+    coords=Rational{BigInt}.(mesh.coords)
+    area=zero(Rational{BigInt})
+    cells=mesh isa Mesh ? (mesh.tris,) :
+        (block.nodes for block in mesh.blocks if block.msh in (2,3))
+    for nodes in cells,cell in axes(nodes,2)
+        for i in axes(nodes,1)
+            a=nodes[i,cell];b=nodes[mod1(i+1,size(nodes,1)),cell]
+            area+=(coords[1,a]*coords[2,b]-coords[1,b]*coords[2,a])/2
+        end
+    end
+    return area
+end
+
+@testset "Pinned odd-count Blossom greedy fallback" begin
+    # Gmsh 4.15.2 warns that Blossom cannot run on three triangles. The
+    # angle .5 greedy pass selects the nonsquare pair (1,3,4,5); above 1
+    # it selects the square (1,2,3,4). Pair identities come from primary replay.
+    mesh=pentagon();snapshot=(copy(mesh.coords),copy(mesh.tris),copy(mesh.tri_tag))
+    for (angle,triangle,quad) in ((.5,Int32[1,2,3],Int32[1,3,4,5]),
+                                 (1.,Int32[1,2,3],Int32[1,3,4,5]),
+                                 (1.01,Int32[1,4,5],Int32[1,2,3,4]))
+        result=recombine_triangles(mesh;algorithm=:blossom,recombine_angle=angle)
+        @test [b.msh for b in result.blocks]==[1,2,3]
+        @test result.blocks[2].nodes==reshape(triangle,3,1)
+        @test result.blocks[3].nodes==reshape(quad,4,1)
+        @test result.blocks[2].tags==result.blocks[3].tags==Int32[7]
+        @test result.blocks[1].nodes==mesh.segs && result.blocks[1].tags==mesh.seg_tag
+        @test exact_area(result)==exact_area(mesh)==3//2
+        @test Tessella.Elements.validate(result).ok
+        @test (mesh.coords,mesh.tris,mesh.tri_tag)==snapshot
+        @test_throws ArgumentError recombine_triangles(mesh;algorithm=:blossom,
+            recombine_angle=angle,full_quad=true)
+    end
+    protected=Set([(Int32(1),Int32(4))])
+    retained=recombine_triangles(mesh;algorithm=:blossom,recombine_angle=.5,
+        protected_edges=protected)
+    @test [b.msh for b in retained.blocks]==[1,2]
+    @test retained.blocks[2].nodes==mesh.tris
+    @test exact_area(retained)==3//2
+    # The no-angle public core continues to provide maximum-cardinality
+    # matching independently of Gmsh's explicit-angle fallback behavior.
+    matched=recombine_triangles(mesh;algorithm=:blossom)
+    @test matched.blocks[3].nodes==reshape(Int32[1,2,3,4],4,1)
+    square=Mesh(mesh.coords[:,1:4];tris=mesh.tris[:,1:2])
+    for angle in (0.,.5,1.)
+        result=recombine_triangles(square;algorithm=:blossom,
+            recombine_angle=angle,full_quad=true,preserve_segments=false)
+        @test only(result.blocks).msh==3
+        @test only(result.blocks).nodes==reshape(Int32[1,2,3,4],4,1)
+    end
+    for angle in (-1.,90.01,NaN,Inf,true,".5")
+        @test_throws ArgumentError recombine_triangles(mesh;algorithm=:blossom,
+            recombine_angle=angle)
+    end
+end
+
+@testset "Public recombine forwards the odd-count angle and edge exclusions" begin
+    api=Tessella.API
+    for (protect,expected_types,triangle,quad) in
+            ((false,Int32[2,3],UInt64[1,2,3],UInt64[1,3,4,5]),
+             (true,Int32[2],UInt64[1,2,3,1,3,4,1,4,5],UInt64[]))
+        try
+            mesh=pentagon();api.initialize();api.option("Mesh.Renumber",0)
+            api.option("Mesh.RecombinationAlgorithm",1)
+            protect && api.model.add_discrete_entity(1,11)
+            api.model.add_discrete_entity(2,1,protect ? [11] : Int[])
+            api.mesh.add_nodes(2,1,UInt64.(1:5),vec(mesh.coords))
+            api.mesh.add_elements_by_type(1,2,[101,102,103],UInt64.(vec(mesh.tris)))
+            protect && api.mesh.add_elements_by_type(11,1,[104],[1,4])
+            before=api.mesh.get_nodes()
+            api.mesh.set_recombine(2,1,.5);api.mesh.recombine()
+            types,ids,nodes=api.mesh.get_elements(2,1)
+            @test types==expected_types
+            @test nodes[1]==triangle
+            @test api.mesh.get_nodes()==before
+            if protect
+                @test ids==[UInt64[101,102,103]]
+                @test api.mesh.get_elements(1,11)[3]==[UInt64[1,4]]
+            else
+                @test ids[1]==UInt64[101]
+                @test Set(nodes[2])==Set(quad)
+                points=[api.mesh.get_node(node)[1] for node in nodes[2]]
+                @test sum(points[i][1]*points[mod1(i+1,4)][2]-
+                    points[mod1(i+1,4)][1]*points[i][2] for i in 1:4)/2==1
+            end
+        finally
+            api.finalize()
+        end
+    end
+end
+
+@noinline function measure_allocated(coords,nodes,count)
+    f=Tessella.Recombine._gmsh_recombine_pair_measure
+    total=0.0
+    for _ in 1:count
+        total+=f(coords,nodes)
+    end
+    return total
+end
+
+@testset "Fixed corner-angle measure uses bounded workspace" begin
+    nodes=(Int32(1),Int32(2),Int32(3),Int32(4))
+    for scale in (1e-300,1e-150,1.,1e150,1e300)
+        square=Float64[0 1 1 0;0 0 1 1;0 0 0 0].*scale
+        trapezoid=Float64[0 2 1 0;0 0 1 1;0 0 0 0].*scale
+        # Independent corner angles are 90/90/90/90 and 90/45/135/90 degrees.
+        @test Tessella.Recombine._gmsh_recombine_pair_measure(square,nodes)==1
+        @test Tessella.Recombine._gmsh_recombine_pair_measure(trapezoid,nodes)≈.5 atol=2eps()
+        measure_allocated(square,nodes,1000)
+        bytes=minimum(@allocated(measure_allocated(square,nodes,1000)) for _ in 1:5)
+        @test bytes<=64
+    end
+end
+end # module RecombineAngleRegressionTests
+
 function _recombine_grid(n::Int)
     n>0 || throw(ArgumentError("grid extent must be positive"))
     side=n+1;coords=Matrix{Float64}(undef,3,side^2)
@@ -72,6 +197,11 @@ end
     recombine_triangles(mesh)
     GC.gc()
     return @allocated recombine_triangles(mesh)
+end
+
+@noinline function _recombine_angle_grid_allocated(mesh,angle)
+    recombine_triangles(mesh;recombine_angle=angle)
+    return minimum(@allocated(recombine_triangles(mesh;recombine_angle=angle)) for _ in 1:5)
 end
 
 @testset "deterministic triangle-to-quadrangle recombination" begin
@@ -186,6 +316,14 @@ end
         @test small>0
         @test large>small
         @test large<=5.25small+262_144
+        # Warmed complete public calls, including validation/output ownership.
+        # The measured former three-vector corner workspace exceeds this budget
+        # at all sizes; leave room for allocator size classes and fixed setup.
+        for n in (16,32,64),angle in (.5,1.01)
+            mesh=_recombine_grid(n)
+            bytes=_recombine_angle_grid_allocated(mesh,angle)
+            @test bytes<=1800n^2+16_384
+        end
     end
 
     @testset "scale and translation invariance" begin
