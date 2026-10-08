@@ -61,6 +61,7 @@ using Tessella
     include("interfaces/cli_precision_test.jl") # standalone Windows power precision and task isolation
     include("core/elements_test.jl")     # fixed/special Gmsh 4.15.2 records + mixed entity I/O
     include("meshing/recombine_test.jl") # deterministic triangle-to-quad recombination
+    include("meshing/recombine_matching_test.jl") # independent graph oracle, native closure/retry and linear scratch
     include("meshing/refine_test.jl")    # deterministic one-level uniform simplex refinement
     include("structured/transfinite_test.jl") # validated four-sided planar structured patches
     include("structured/transfinite_curve_test.jl") # straight Progression/Bump/Beta/HWall laws

@@ -27,7 +27,7 @@ to Gmsh.
 module API
 
 using ..Predicates: orient3
-using ..Recombine: recombine_triangles
+using ..Recombine: recombine_triangles, _recombine_triangles
 using ..Elements: ElementBlock, msh_family, msh_dimension, msh_spec
 using ..Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
 using ..Model: add_surface_loop!, add_volume!
@@ -8121,10 +8121,13 @@ end
 
 # The pinned GFace pair filter uses actual MLine edge identities, not
 # carrier ownership alone: an empty embedded curve excludes no pair.
-function _recombine_excluded_edges(model,cached,class,dim::Int,tag::Int)
+function _recombine_excluded_edges(model,cached,class,dim::Int,tag::Int;
+                                   embedded_only::Bool=false)
     curves=Set{Int32}()
-    for (bdim,child) in model_boundary(model,[(dim,tag)],false,false,false)
-        bdim==1 && push!(curves,Int32(abs(child)))
+    if !embedded_only
+        for (bdim,child) in model_boundary(model,[(dim,tag)],false,false,false)
+            bdim==1 && push!(curves,Int32(abs(child)))
+        end
     end
     for (bdim,child) in get(model.embeds,(dim,tag),Tuple{Int,Int}[])
         bdim==1 && push!(curves,Int32(abs(child)))
@@ -8187,6 +8190,13 @@ function _recombine()
                     edge=minmax(nodes[i],nodes[j]);incidence[edge]=get(incidence,edge,0)+1
                 end
             end
+            # Native adjacency orders MEdge keys by public node labels. Keep
+            # temporary dense indices in that order while retaining each first
+            # triangle's directed edge and the original physical coordinates.
+            sort!(sub_tags);empty!(position)
+            for (index,node) in enumerate(sub_tags)
+                position[node]=Int32(index)
+            end
             coords=Matrix{Float64}(undef,3,length(sub_tags))
             for (index,node) in enumerate(sub_tags)
                 value=_mesh_public_node_coords(staged,cached,node)
@@ -8211,25 +8221,32 @@ function _recombine()
                     candidates+=1
                 end
             end
-            result=recombine_triangles(Mesh(coords;tris=cells);algorithm=algorithm,
-                protected_edges=protected,recombine_angle=angle)
+            embedded=Set{NTuple{2,Int32}}()
+            for (a,b) in _recombine_excluded_edges(staged,cached,class,dim,tag;
+                                                    embedded_only=true)
+                haskey(position,a) && haskey(position,b) || continue
+                push!(embedded,minmax(position[a],position[b]))
+            end
+            details=_recombine_triangles(Mesh(coords;tris=cells);algorithm=algorithm,
+                protected_edges=protected,recombine_angle=angle,embedded_edges=embedded)
+            result=details.mesh
             size(result.coords,2)==length(sub_tags) || throw(ArgumentError(
                 "$caller: recombination with newly created nodes is not implemented"))
             # Every eligible first-order pair consumes one temporary factory
             # label BEFORE convexity/angle screening in the pinned constructor.
-            # This models its first pair pass; Blossom retry and later topology
-            # optimization remain outside the native fixed-node kernel.
+            # A failed native perfect match reconstructs every temporary pair
+            # for its greedy retry. Later topology optimization is separate.
             quadrangles=0
             for block in result.blocks
                 block isa ElementBlock && block.msh==3 || continue
                 quadrangles+=size(block.nodes,2)
             end
             limit=UInt64(typemax(Int32))
-            # Both counts are nonnegative Int; their UInt64 sum cannot overflow.
-            reservation=UInt64(candidates)+UInt64(quadrangles)
-            (maximum_element>limit || reservation>limit-maximum_element) &&
+            pair_reservation=UInt64(candidates)*UInt64(details.primary_pair_passes)
+            (maximum_element>limit || pair_reservation>limit-maximum_element ||
+             UInt64(quadrangles)>limit-maximum_element-pair_reservation) &&
                 throw(ArgumentError("$caller: recombined element tags exceed Int32"))
-            maximum_element+=UInt64(candidates)
+            maximum_element+=pair_reservation
             target=record
             if target===nothing
                 target=DiscreteEntity()

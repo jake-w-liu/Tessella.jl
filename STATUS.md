@@ -23,6 +23,64 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Recombination closure, priority and range verification (2026-10-09)
+
+Even-count explicit-angle Blossom now tests the pinned primary's complete
+boundary closure graph before selecting its greedy retry. Internal unmatched
+triangles alone do not imply retry. Private pass counts reserve both native
+pair-construction births with checked public tag limits before publication;
+the standalone API keeps its existing return and no-angle matching contract.
+Protected and embedded edges retain their exclusions.
+
+Greedy priority follows directed triangle edges, native corner evaluation,
+NaN comparisons and the observed comparator-only sorting order, including
+large and tied cases. An adapted permissive HP/SGI sort keeps its full notices
+in source and supporting documentation. Priority is cached once per pair;
+this adds a measured linear buffer while reducing repeated transcendental
+work. A 16,384-pair constructor takes about 2.83–3.01 ms versus 27.2 ms,
+using 1.11 MB versus 0.66 MB. Complete 64-by-64 grid loops at angle 1.01
+take 8.34–9.90 ms versus 53–54 ms, using 6.71 MB versus 6.37 MB.
+These are bounded measurements; speed and allocation do not improve uniformly.
+
+Domain quality now handles independently scaled edges and exact represented
+geometry when cancellation requires it. A valid positive score that rounds
+to zero remains eligible only at zero minimum quality; every positive
+Float64 threshold rejects it. Degenerate and folded cells remain rejected. The exact
+rational helper can allocate: one tested shear requires about 48.9 kB per
+helper call. The current candidate repeats that helper when its score rounds
+to zero; a separate verified allocation optimization remains to be admitted.
+Native angle admission retains the primary's raw arithmetic separately.
+
+Exhaustive independent graphs through six vertices verify matching size and
+mate validity; reused Edmonds workspaces reduce the measured 4,096-vertex
+temporary allocation from about 136 MB to 133 kB with the same returned
+payload. Both focused installed routes pass 70,447 assertions. Actual API
+and standalone primary controls cover small and large pair order, ties,
+NaNs, grids and all twelve x87 modes. The original 32-case AddVerts driver
+passes on both runtimes with unchanged checks and byte-identical log SHA256
+`8424d63a25c51593d4ac0814e5f460e37fcf5aa26db3f48409b9705fe36d68cd`.
+
+Complete package gates on Julia 1.12.7/1.13.1 pass 1,596,587 assertions each,
+with explicit child bounds checks, terminal exit 0 and all 504 frozen inputs
+held. Wrapper times are 2191.502/1783.222 seconds;
+log SHA256 values are
+`2ba0f2eae497d851cd3fd38c5224bf3cfd4943767ea5ad4c2713e6e1350a012c` and
+`2eb7a729a8680fe785f6fa632e691c9c70bb92efa50bc052cbb47322e0f833e2`. Tested manifest SHA256:
+`94a9c46cf027168b98467c0e211f37654df693f7ee74ef00f3838c52d1f6f0c2`.
+The published sort removes nine comment trailing spaces and an unused EOF line; both runtimes
+prove identical parsed syntax and all 100 line positions. Supporting legal
+notice whitespace is trimmed with every word preserved. Existing fixtures
+and all unrelated main inputs remain held. The prior Julia 1.12 run stalled
+in Windows error reporting during recorded system commit exhaustion and was
+deliberately stopped; its exception cause is unconfirmed. Only the completed
+rerun is admitted. Independent focused report SHA256:
+`aa52ef5803aa5f20161e3abbe703b539594a0094c3fea9eff02954a8c242f6c2`.
+
+Weighted optimality and general native tie policy, higher-generation identity
+history, classified MSH reuse and the full P1–P6 aggregate remain under audit.
+Neighboring native Exp/Log/Sin/Cos are independently verified candidates
+awaiting complete package gates. No category release completes the full goal.
+
 ### Windows atan2 verification (2026-10-09)
 
 The native Windows x86_64 atan2 shim now executes `FPATAN` with balanced
@@ -59,10 +117,11 @@ A separate final TLS/error/resource route passes nine assertions, including
 The independent installed FPATAN report SHA256 is
 `3693560b0afffc26a091f1e1fc851211a9e7a6cf3d82256255072c3493bb2c24`.
 
-The full audit remains active. Fresh controls also find outstanding
-neighboring Exp/Log/Sin/Cos precision/range gaps. Weighted matching,
-directed/NaN pair priority, extreme-aspect quality, actual higher-generation
-history and classified MSH reuse remain separate evolving increments.
+The full audit remains active. Exp/Log/Sin/Cos precision/range gaps have a
+separately verified candidate awaiting full package gates. The recombination
+increment above covers directed/NaN priority and extreme-range domain quality.
+Weighted matching, actual higher-generation history and classified MSH reuse
+remain separate evolving increments.
 
 ### Current MSH-width oracle cleanup (2026-10-09)
 
