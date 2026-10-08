@@ -8,6 +8,7 @@
 # Completeness : cross-format (v2→v4→v2) preserves connectivity CRC exactly.
 
 using Test
+using Random: MersenneTwister
 import Tessella
 using Tessella.MeshTypes
 using Tessella.IO
@@ -557,6 +558,97 @@ end
             (0.18,0.18,0.18, 0.,10.,0., 1.,10.,0.)]
         ma = Tessella.IO._weld_triangles(apart,0.0071) # distance≈0.139 > tol≈0.100
         @test nnodes(ma)==6 && ntris(ma)==2
+
+        # Rounded subtraction followed by reciprocal multiplication formerly
+        # put these nearby vertices two buckets apart, outside the +/-1 search.
+        # Exact rational differences independently prove that they must weld.
+        origin=-0.3620260566669231
+        left=0.6500958438339137;right=0.6500958438339143
+        absolute_tol=5.832977704348238e-16
+        relative_tol=absolute_tol/hypot(right-origin,0.2)
+        @test Rational{BigInt}(right)-Rational{BigInt}(left)<
+              Rational{BigInt}(absolute_tol)
+        rounded_buckets=NTuple{9,Float64}[
+            (origin,0.,0.,left,0.,0.,origin,0.1,0.),
+            (right,0.,0.,left,0.2,0.,origin,0.1,0.)]
+        rounded_mesh=Tessella.IO._weld_triangles(rounded_buckets,relative_tol)
+        @test nnodes(rounded_mesh)==4 && ntris(rounded_mesh)==2
+        @test rounded_mesh.tris==Int32[1 2;2 4;3 3]
+        @test validate(rounded_mesh).ok
+        rounded_path=joinpath(dir,"rounded_bucket_patch.stl")
+        open(rounded_path,"w") do stream
+            println(stream,"solid rounded")
+            for triangle in rounded_buckets
+                println(stream,"facet normal 0 0 1\nouter loop")
+                for offset in (1,4,7)
+                    println(stream,"vertex ",triangle[offset]," ",
+                            triangle[offset+1]," ",triangle[offset+2])
+                end
+                println(stream,"endloop\nendfacet")
+            end
+            println(stream,"endsolid rounded")
+        end
+        public_patch=read_stl(rounded_path;merge_tol=relative_tol)
+        @test public_patch.coords==rounded_mesh.coords
+        @test public_patch.tris==Int32[1 2;2 4;3 3]
+        @test_throws ArgumentError read_stl(
+            rounded_path;merge_tol=relative_tol,max_nodes=3)
+
+        # Compare every guarded bucket decision with a separate exact-rational
+        # oracle, including integer boundaries and tiny/huge finite scales.
+        bucket_rng=MersenneTwister(0x57454c44)
+        for exponent in (-1000,-900,-400,-50,0,50,400,900,1000)
+            for shift in (0,1,10,30,48,51), sample in 1:16
+                bucket_origin=-ldexp(rand(bucket_rng),exponent)
+                bucket_value=ldexp(rand(bucket_rng),exponent)
+                bucket_tol=ldexp(1+rand(bucket_rng),exponent-shift)
+                bucket_inverse=inv(bucket_tol)
+                isfinite(bucket_inverse) || continue # existing exact bucket mode
+                expected=floor(Int,
+                    (Rational{BigInt}(bucket_value)-Rational{BigInt}(bucket_origin)) /
+                    Rational{BigInt}(bucket_tol))
+                @test Tessella.IO._stl_bucket_index(
+                    bucket_value,bucket_origin,bucket_tol,bucket_inverse)==expected
+            end
+        end
+        for tolerance in (0.125,2.0^-900,2.0^900,floatmin(Float64)/2,
+                          nextfloat(floatmin(Float64)/4))
+            for index in (1,7,17,1<<20,1<<40,(1<<51)-3)
+                bucket_value=index*tolerance
+                for value in (prevfloat(bucket_value),bucket_value,nextfloat(bucket_value))
+                    expected=floor(Int,Rational{BigInt}(value)/Rational{BigInt}(tolerance))
+                    @test Tessella.IO._stl_bucket_index(
+                        value,0.,tolerance,inv(tolerance))==expected
+                end
+            end
+        end
+        maximum_bucket=floatmax(Float64)
+        for (value,bucket_origin) in ((maximum_bucket,0.),
+                (maximum_bucket/2,-maximum_bucket/2),
+                (prevfloat(maximum_bucket),0.),(nextfloat(0.),0.))
+            expected=floor(Int,
+                (Rational{BigInt}(value)-Rational{BigInt}(bucket_origin)) /
+                Rational{BigInt}(maximum_bucket))
+            @test Tessella.IO._stl_bucket_index(
+                value,bucket_origin,maximum_bucket,inv(maximum_bucket))==expected
+        end
+        measure_bucket(f)=(f();@allocated f())
+        @test measure_bucket(()->Tessella.IO._stl_bucket_index(
+            left,origin,absolute_tol,inv(absolute_tol)))==0
+        @test measure_bucket(()->Tessella.IO._stl_bucket_index(
+            1.,0.,0.125,8.))==0
+
+        # A subnormal tolerance has an infinite reciprocal and uses the existing
+        # rational bucket mode. Its corrected patch has the same four-node topology.
+        tiny_x=1e-310;tiny_y=2e-310;tiny_right=nextfloat(tiny_x)
+        tiny_tol=2nextfloat(0.)
+        tiny_relative=tiny_tol/hypot(tiny_right,tiny_y)
+        tiny_patch=Tessella.IO._weld_triangles(NTuple{9,Float64}[
+            (0.,0.,0.,tiny_x,0.,0.,0.,tiny_x,0.),
+            (tiny_right,0.,0.,tiny_x,tiny_y,0.,0.,tiny_x,0.)],tiny_relative)
+        @test nnodes(tiny_patch)==4 && ntris(tiny_patch)==2
+        @test tiny_patch.tris==Int32[1 2;2 4;3 3]
+        @test validate(tiny_patch).ok
 
         limited=joinpath(dir,"limited.stl")
         write(limited,"solid limited\nfacet normal 0 0 1\nouter loop\n" *

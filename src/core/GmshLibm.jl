@@ -219,8 +219,18 @@ end
 function _win_powi(x::Float64, n::Int64)
     neg = n < 0
     e = neg ? -n : n
-    r, re = 1.0, 0
-    b, be = x, 0
+    # A finite Float64 base contributes at most 1023 binary exponent bits
+    # per factor. Int64 integer powers can therefore require more than 64
+    # exponent bits; Int128 keeps every squaring and sum exact without
+    # allocating. Wrapping an Int accumulator reverses overflow/underflow.
+    r, re = 1.0, Int128(0)
+    b, be = x, Int128(0)
+    # Normalize an already-large base before its first square. Otherwise
+    # x*x can overflow before extraction, losing a representable reciprocal
+    # power such as (2^512)^(-2) = 2^(-1024).
+    if abs(b) >= 7.237005577332262e75
+        b, s = _powi_extract(b); be += s
+    end
     while e > 0
         if isodd(e)
             r *= b; re += be
@@ -235,7 +245,18 @@ function _win_powi(x::Float64, n::Int64)
         e >>= 1
     end
     m = neg ? 1.0 / r : r
-    return ldexp(m, neg ? -re : re)
+    final_exponent = neg ? -re : re
+    # ldexp takes a machine Int. Exponents outside that range are already
+    # far beyond Float64's range; retain the sign of the actual mantissa.
+    final_exponent > typemax(Int) && return copysign(Inf, m)
+    final_exponent < typemin(Int) && return copysign(0.0, m)
+    # Julia's ldexp can prematurely return zero for m<1 at exponent -1074.
+    # Scale to units of the minimum subnormal first (still an exact normal
+    # operation), then let one hardware multiplication round the final value.
+    # The bounded mantissa makes the intermediate safe from overflow.
+    final_exponent < -1022 &&
+        return ldexp(m, Int(final_exponent)+1074) * 5.0e-324
+    return ldexp(m, Int(final_exponent))
 end
 
 function _win_pow(x::Float64, y::Float64)

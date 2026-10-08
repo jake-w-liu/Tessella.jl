@@ -101,12 +101,20 @@ function add_probe_nodes(points; entity_tags=nothing)
         length(point) == 3 || error("probe point $i is not three-dimensional")
         PROBE_SERIAL[] += 1
         entity = entity_tags === nothing ? PROBE_SERIAL[] : Int(entity_tags[i])
-        node = UInt64(PROBE_SERIAL[] + 1_000_000_000)
+        # NodeData storage in the pinned oracle scales with the maximum node
+        # tag: billion-scale probe IDs allocate about 8 GB per retained view.
+        # Use the next unused tag without disturbing existing fixture nodes.
+        node = UInt64(gmsh.model.mesh.getMaxNodeTag()) + UInt64(1)
         gmsh.model.addDiscreteEntity(0, entity)
         gmsh.model.mesh.addNodes(0, entity, UInt64[node], Float64[point...])
-        gmsh.model.mesh.addElementsByType(entity, 15, UInt64[node], UInt64[node])
+        # Node and element namespaces are independent. Automatic element tags
+        # avoid collisions with preexisting cells in the Octree fixture.
+        gmsh.model.mesh.addElementsByType(entity, 15, UInt64[], UInt64[node])
         tags[i] = node
     end
+    _, element_tags, _ = gmsh.model.mesh.getElements()
+    allunique(reduce(vcat, element_tags; init=UInt64[])) || error(
+        "Gmsh field probe has duplicate element tags")
     return tags
 end
 

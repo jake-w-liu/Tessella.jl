@@ -1271,9 +1271,13 @@ try
         # setNode parity: both engines move node tag 1.
         gmsh.model.mesh.setNode(1,[9.0,8.0,7.0],[])
         Tessella.API.mesh.set_node(1,[9.0,8.0,7.0])
-        Tuple(gmsh.model.mesh.getNode(1)[1])==Tuple(reshape(
-            Tessella.API.mesh.get_nodes()[2],3,:)[:,1]) || error(
+        Tuple(gmsh.model.mesh.getNode(1)[1])==Tuple(
+            Tessella.API.mesh.get_node(1)[1]) || error(
             "set_node coordinate update differed")
+        public_tags,public_coords,_=Tessella.API.mesh.get_nodes()
+        public_row=findfirst(==(UInt64(1)),public_tags)
+        public_row!==nothing && Tuple(reshape(public_coords,3,:)[:,public_row])==
+            (9.0,8.0,7.0) || error("set_node bulk public-tag coordinate differed")
         _rejects_argument(()->Tessella.API.mesh.set_node(99,[0,0,0.0])) ||
             error("Tessella moved an unknown node")
         gmsh_rejected=false
@@ -1287,9 +1291,27 @@ try
         Tessella.API.mesh.renumber_nodes()
         gmsh.model.mesh.renumberElements()
         Tessella.API.mesh.renumber_elements()
-        _rejects_argument(
-            ()->Tessella.API.mesh.renumber_nodes([1],[99])) || error(
-            "Tessella accepted a sparse node renumbering")
+        # Classified caches now retain public labels independently of dense
+        # coordinate rows. Both engines support sparse simultaneous remapping;
+        # unspecified labels are reassigned, so verify their coordinate multiset.
+        for (engine,get_nodes,get_node,renumber) in (
+                ("gmsh",gmsh.model.mesh.getNodes,gmsh.model.mesh.getNode,
+                 gmsh.model.mesh.renumberNodes),
+                ("tessella",Tessella.API.mesh.get_nodes,Tessella.API.mesh.get_node,
+                 Tessella.API.mesh.renumber_nodes))
+            _,coordinates_before,_=get_nodes()
+            moved=copy(get_node(1)[1])
+            renumber([1],[99])
+            tags_after,coordinates_after,_=get_nodes()
+            !(UInt64(1) in tags_after) && UInt64(99) in tags_after || error(
+                "$engine sparse node renumbering did not move the public label")
+            get_node(99)[1]==moved || error(
+                "$engine sparse node renumbering changed its coordinate")
+            sort!(map(Tuple,eachcol(reshape(coordinates_before,3,:))))==
+                sort!(map(Tuple,eachcol(reshape(coordinates_after,3,:)))) || error(
+                "$engine sparse node renumbering changed the coordinate multiset")
+            renumber([99],[1])
+        end
         # Unpartitioned-cache parity calls return empty or no-op in both.
         isempty(gmsh.model.mesh.getGhostElements(2,1)[1]) || error(
             "Gmsh reported ghost elements")

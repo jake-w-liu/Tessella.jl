@@ -30,6 +30,121 @@ meshing must be independent; Gmsh 4.15.2 is only a differential oracle.
 
 ## Current increment
 
+Fresh audit on 2026-10-09 starts from clean local/remote `main` at `7ca0698`.
+The free-B4/lifecycle increment `b2966fd` is already pushed. Current working
+changes fix Windows integer powers, finite CRC mean overflow and guarded
+STL buckets; focused 1.12.7/1.13.1 tests pass. Both full package sessions
+finished successfully against the 491-input manifest
+`C:/tmp/tessella_deep_debug_20261009_freeze.json`, SHA256
+`ffe1ce2360d1d8ea5827582bd1354caf86712e88999bf2975a6e89caf3d88474`.
+Package logs/results use `C:/tmp/tessella_deep_debug_full112*` and
+`C:/tmp/tessella_deep_debug_full113*`. Aggregate validation initially fails
+in the size-field primary view harness; `C:/tmp/tessella_deep_debug_validation112*`
+records that failure. The independently verified compact node/automatic
+element-tag repair is applied only to that validation driver; all package
+source/project and test inputs remain held. V2 binds all 491 final inputs in
+`C:/tmp/tessella_deep_debug_20261009_freeze_v2.json`, SHA256
+`83fda5f1cc9b5a65337f6b2e620ac29bf6187468207c1afc3f6ca9e62c3038cc`.
+The repeated aggregate uses `C:/tmp/tessella_deep_debug_validation112_v2*`.
+Aggregate112 V2 session 33657 is terminal exit 1 after 3,623.080 seconds;
+do not relaunch it. The mesh-data child incorrectly assumes public tag 1
+is private coordinate row 1 after renumbering, then requires sparse public
+renumbering to reject. Independent primary checks verify the corrected
+tag-based comparison and supported sparse remapping. V3 changes only this
+validation driver, holding all production/project and package-test bytes.
+V3 manifest `C:/tmp/tessella_deep_debug_20261009_freeze_v3.json` SHA256
+`19dfda518d730e171511c274bbc8ddee766761cd1ef03aa84bb99b1679d90d78`.
+Complete repaired-child sessions are 24806 (112) and 89097 (113), with logs
+`C:/tmp/tessella_mesh_data_queries_v3_112*` and `_113*`. Exact unchanged
+suffix replay session 26461 uses
+`C:/tmp/tessella_validation_remainder112_20261009_final.log` and the V3
+audit sidecar. This replay retains every remaining original child and
+volume/report tail; its results must not be described as an exit-0 original
+aggregate. Poll those actual handles/results before resuming checks.
+The complete repaired child is terminal exit 0 on both runtimes; do not
+relaunch it. Logs are byte-identical, SHA256
+`b499540de3f585ffae2b1da49acffbdf25daa4cfd0595436970f13d9c6af7004`.
+Remainder session 26461 is terminal exit 1 after 656.580 seconds at
+generation-0/1. Its first five children pass; four stale blocker assertions
+fail, and focused primary/base controls independently expose a real
+preexisting birth-label discrepancy (native maximum 810 versus primary 846).
+Second suffix session 62770 is also terminal exit 1 after 102.717 seconds:
+location/Jacobian/quadrature children pass, then function-space high-order
+Hex arrays exhaust memory. No failed gate is counted as passed.
+Publish the scoped arithmetic/STL/CRC and repaired-harness increment after
+its completed package/changed-path/independent checks; continue the broader
+audit and generation/history/resource fixes. All current production changes
+are outside the unchanged API/Model/generation code that reproduces the
+birth-label discrepancy on both current main and detached audit base.
+`STATUS.md` records the fresh audit matrix and open findings.
+Package113 session 62326 is terminal exit 0: 1,526,667 checks pass in 33m03.7s.
+Do not relaunch it. Its result JSON and complete log above are authoritative.
+Package112 session 36658 is terminal exit 0: 1,526,667 checks pass in 41m01.0s.
+Do not relaunch it. Both package handles have been drained and closed.
+
+Higher-generation current-source reproducers are
+`C:/tmp/higher_audit_20261009.jl`, `higher_missing_top_20261009.jl`,
+`higher_point_audit_20261009.jl` and `higher_oracle_20261009.py`.
+The isolated `tessella_onlyempty_higher` candidate fixes some closure/order
+cases but still fails actual retained-Curve consumption by Surface generation;
+do not copy entire old-base files into main. Its authority preparation also
+has measured quadratic many-Point allocation, and its old resource reports
+do not bind its current source. A wider Windows power sweep confirms the
+signed Int32 fast-path cutoff and additional near-one accuracy mismatches;
+the next arithmetic increment must resolve these against the pinned binary.
+These fixes do not complete the full active parity/audit goal.
+
+Concrete next proofs are preserved outside the frozen tree:
+
+- `C:/tmp/tessella_pow_cutoff_audit/README.md` and `pow_candidate.jl` provide
+  native x87 power parity, signed Int32 admission, fractional/special-case
+  handling, reciprocal restart, zero allocation and state restoration. The
+  complete PC53/PC64 corpus passes 45,984 comparisons. API/direct GEO inherits
+  caller precision like the DLL; the scoped CLI PC64 prototype matches the
+  standalone executable and passes 103 boundary checks per runtime. Preserve
+  explicit Windows x86_64 guards; do not equate CLI and DLL startup precision.
+- `C:/tmp/tessella_optimize_copy_full_audit_report.txt` and
+  `Tessella_Optimize_copy_candidate.jl` verify redundant pre-copy removal on
+  both runtimes, with 273 targeted and 96 existing checks each. Keep internal
+  coordinate workspaces and the validating, copying Mesh constructor.
+- `C:/tmp/higher_candidate_audit_20261009.md` and
+  `higher_curve_and_authority_scratch_20261009.patch` record transfinite actual
+  Curve input and compact authority proofs. The original candidate remains
+  unchanged; generic/closed/periodic/displaced input and full release gates
+  remain necessary. Preserve newer main changes during selective integration.
+
+Current release review finds no introduced regression. It also verifies that
+the wider Windows rounding findings are present in the audit base. Finish
+the bounded changed-path checks, commit
+and push the verified arithmetic/STL/CRC increment to main, then continue these real
+implementations. The user's push authorization remains in force.
+
+The next isolated implementation is `C:/tmp/tessella_deep_audit_next_20261009`
+on `codex/deep-audit-next-20261009`. It contains native Windows x87 power
+parity with task-local CLI precision, measured redundant Optimize copy
+removal, explicit-angle odd-count Blossom fallback and tuple workspaces,
+and a child process for invalid constraint-oracle cases that otherwise
+leak Gmsh parser file handles. Production/tests and all eight new inputs
+are frozen: 499-input manifest
+`C:/tmp/tessella_deep_audit_next_freeze_20261009_v2.json`, SHA256
+`4f17fb7cf3c7bf55d2a47edb22a64a9584267f588a3ebfc93ac18608058065f7`.
+The initial snapshot accidentally included generated Python bytecode. Its
+package runs were intentionally interrupted; V2 excludes bytecode and binds
+the new `.gitignore`, with all production/test/corpus bytes unchanged.
+Full package sessions 14226 (112) and 92819 (113) use
+`C:/tmp/tessella_deep_audit_next_full112_20261009_v2*` and `_full113_20261009_v2*`.
+Full aggregate session 74410 uses
+`C:/tmp/tessella_deep_audit_next_validation112_20261009_v2*`.
+Keep this tree held while they run. Root owns its two test includes and
+Windows-only aggregate child; point `GMSH_EXECUTABLE` at the actual pinned
+native gmsh.exe, because Python's gmsh.bat uses hosted DLL precision.
+The broader higher-generation implementation is separately owned in
+`C:/tmp/tessella_higher_impl_20261009`; do not replace main or this held tree
+with whole older candidate files. Reconcile its physical-coordinate
+Recombine adapter explicitly with the newer odd-fallback/tuple core.
+
+## Prior free-B4 and lifecycle release state
+
 Continue in `C:/tmp/tessella_nonew_b4_free` on `codex/nonew-b4-free`, from
 verified and pushed `5479d738fe2191d747653ae143d222dfbae6e392`. Main and the
 recombined worktree are clean. Their 471 frozen input blobs and remote main
@@ -2045,7 +2160,7 @@ rejection pin updated in `test/interfaces/post_view_io_test.jl`.
   topology, transforms of arbitrary CAD entities, full `.geo` execution,
   unrecognized CAD topology.
 - **P4/P5/P6**: mixed-element generation/recombination beyond first-order
-  surface pairing, non-simplex hierarchical bases (Pyramid/Trihedron),
+  surface pairing,
   partitioning/parallel paths, views/plugins depth, CLI/GUI/post-processing,
   long-tail formats, and the standing requirement-by-requirement differential
   corpus vs Gmsh 4.15.2.

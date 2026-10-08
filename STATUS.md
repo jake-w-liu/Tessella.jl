@@ -23,9 +23,97 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
-### Active parity increment
+### Fresh audit in progress (2026-10-09)
 
-The current joint candidate in `C:/tmp/tessella_nonew_b4_free`, based on
+The audit starts from clean local/remote `main` at `7ca0698`, including the
+pushed free-B4/lifecycle increment `b2966fd`. The complete P1–P6 scope in
+`PLAN.md` remains active. The previous candidate/release narratives below
+are historical evidence; they do not prove completion of the current tree.
+
+| Audit dimension | Current evidence and remaining work |
+|---|---|
+| Domain and numerical correctness | Exact power-of-two and high-precision circumsphere oracles verify the current arithmetic fixes. Wider pinned-primary arithmetic sweeps and full package/CRC gates remain part of the audit. |
+| Implementation and API lifecycle | Fresh Julia 1.12.7/1.13.1 versus Gmsh 4.15.2 controls confirm unfinished higher-generation reuse, lower-dimensional closure, global order conversion and edited Point/Curve consumption. |
+| Memory and resources | Guarded STL buckets retain zero allocation in tested ordinary decisions; paired 1k/2k/4k-facet and CRC measurements preserve retained payloads and show no proportional allocation increase. Immediate stream cleanup passes on both runtimes. Broader kernels remain under audit. |
+| Performance | Paired warmed samples verify the changed STL/CRC paths. This is bounded evidence, not a claim that the whole codebase is fully optimized. |
+| Configuration and dependency boundaries | Julia 1.12.7/1.13.1 and installed Gmsh 4.15.2 are checked. The size-field oracle-view failure is repaired. The repeated aggregate exposes outdated public-node assertions; the repaired child and unchanged remaining children are running. |
+
+The verified arithmetic/STL/CRC increment corrects Windows integer-power exponent wrapping,
+initial-base overflow that erased reciprocal subnormals, minimum-subnormal
+scaling, finite `mesh_crc` radius-edge mean overflow, and missed STL vertex
+welding caused by rounded bucket arithmetic. The original failures are
+reproduced independently. Focused tests pass on both supported runtimes:
+768 power checks, 2,509 MeshTypes checks, 1,324 I/O checks, 76 boxing/hot-kernel
+checks, and 14 immediate-stream-cleanup checks. The 201 scalar-power and
+four geometry-control-flow primary differentials are integrated into the
+existing aggregate child; the final Julia 1.13.1 run passes bit-for-bit.
+Both full package gates pass 1,526,667 checks: Julia 1.12.7 in 41m01.0s
+and Julia 1.13.1 in 33m03.7s, with all production/project and test inputs
+held. The initial 491-input freeze remains unchanged apart from the separately
+verified size-field validation harness repair; no package test consumes that
+driver. The corrected 491-input V2 freeze is held through the repeated
+aggregate's terminal failure. V3 changes only the independently verified
+mesh-data validation repair; production/project and package-test bytes
+remain held. These fixes are verified by both full package runs, changed-path
+primary/CRC/resource checks and independent review. The complete parity audit
+remains open; the aggregate is not green.
+
+The initial aggregate failed because billion-scale probe node IDs force
+Gmsh's model-backed NodeData to allocate roughly 8 GB per retained view.
+The harness now chooses the next unused compact node tag and lets Gmsh
+allocate unique Point element tags, preserving all fields, coordinates,
+tolerances and explicit context skips. Global element-tag uniqueness is
+checked after each probe batch. Independent complete primary runs pass on
+both runtimes: 23 direct cases, 63 samples and five mesh cases. The repeated
+aggregate passes the repaired size-field child, control-flow/numerical,
+geometry/model, uniform-refinement and affine-transform children, then fails
+at a stale mesh-data assertion after 3,623.080 seconds. It compares public
+node tag 1 with private coordinate row 1 after a label swap. The driver now
+queries the public tag, independently checks its bulk tag-to-row mapping,
+and verifies supported sparse renumbering against both engines instead of
+requiring rejection. The complete repaired child passes on both runtimes,
+with identical derived and refinement checksums, in 224.788/171.540 seconds.
+An exact, guarded sequential replay of the original unchanged aggregate
+suffix covers every remaining child and original volume/report tail.
+These partial results do not turn the failed aggregate into an exit-0 run.
+
+The remainder passes simplex/mixed topology, mixed-cache/queries/refinement,
+location, Jacobians and quadrature, then exposes two further open gates.
+The generation-0/1 child has 9,384 passes and four obsolete blocker assertions;
+independent current-main and unchanged `7ca0698` probes also confirm a real
+preexisting birth-tag discrepancy after attached Point generation: native
+maximum element tag 810 versus primary 846. Missing lower-dimensional products
+in fresh Volume generation contribute to this history gap. This finding belongs
+to the active higher-generation implementation and is not relabeled as a
+driver-only repair. The function-space child encounters memory errors while
+holding full primary/native high-order Hex arrays for 40,320 orientations and
+20 points; its unchanged source and bounded-batch equivalence are under audit.
+Neither failed gate is represented as passed. These broader findings do not
+delay publication of the independently verified arithmetic/STL/CRC fixes.
+
+Confirmed unfinished higher-generation contracts include Point/Line cells
+missing from fresh Surface/Volume aggregates, completed Curve mesh edits and
+counts lost during higher generation, `Mesh.MeshOnlyEmpty` reuse, independent
+discrete-Curve P2 elevation, target dimensions with only lower-dimensional
+entities, and multiple or displaced incident native Point mesh vertices.
+The earlier `tessella_onlyempty_higher` candidate is not ready to promote: fresh
+checks show Surface generation ignoring retained Curve input, and its
+per-entity authority preparation allocates quadratically on many Point
+entities. A separate wider power sweep also confirms that the Windows
+integer-path admission boundary, near-one large-exponent results, fractional
+and special-case powers, and reciprocal rounding need another implementation
+pass. These findings stay open after this increment. Independent release
+review covers 3,136 additional large-base integer-power cases on each runtime:
+all 98 changed results improve to the primary and no introduced mismatch is
+found. Fourteen reciprocal mismatches remain unchanged from the audit base.
+Removing redundant buffer copies in `Optimize._copy_mesh` is also a confirmed
+next allocation improvement: at 1k/2k/4k tets, warmed allocation falls from
+233,018/464,954/928,922 to 116,501/232,485/464,501 bytes in a detached scratch
+comparison, with identical CRCs and independently owned output buffers.
+
+### Prior free-B4 and lifecycle increment (`b2966fd`)
+
+The verified joint increment in `C:/tmp/tessella_nonew_b4_free`, based on
 verified and pushed `5479d73`, integrates free B4 extrusion, native sparse
 public labels, Point identity preservation and API triangle recombination.
 Its corrected V2 freeze binds 490 raw inputs and the scoped index; the reopened
@@ -101,7 +189,7 @@ higher-generation parity claim is made. Generic duplicate-Point refinement is
 verified in this joint increment. Cross-Surface periodicity and broader roadmap
 tracks remain unfinished.
 
-### Latest verified increment (`5479d73`)
+### Prior verified increment (`5479d73`)
 
 Arbitrary-length recombined B4 strips and the native GEO Line source-sampling
 fix are implemented and verified in `C:/tmp/tessella_nonew_b4_strip`, from verified

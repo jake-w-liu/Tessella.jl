@@ -365,6 +365,44 @@ end
         @test validate(e).ok           # vacuously valid; empty-region detection is caller's job
     end
 
+    @testset "mesh_crc retains finite extreme radius-edge means" begin
+        for heights in ((5e-309,5e-309,5e-309), (5e-309,6e-309,8e-309))
+            coords=zeros(3,12)
+            for (cell,height) in enumerate(heights)
+                first=4cell-3;offset=3.0*(cell-1)
+                coords[:,first].=(offset,0.0,0.0)
+                coords[:,first+1].=(offset+1.0,0.0,0.0)
+                coords[:,first+2].=(offset,1.0,0.0)
+                coords[:,first+3].=(offset,0.0,height)
+            end
+            cells=reshape(Int32.(1:12),4,3)
+            # The circumsphere of an axis tet has radius
+            # sqrt(1+1+h^2)/2 and shortest edge h. High precision computes
+            # its mean without the production quality or CRC routines.
+            expected=setprecision(BigFloat,256) do
+                ratios=[sqrt(2+BigFloat(h)^2)/(2BigFloat(h)) for h in heights]
+                (Float64(minimum(ratios)),Float64(sum(ratios)/length(ratios)))
+            end
+            for order in ((1,2,3),(3,2,1),(2,1,3))
+                mesh=Mesh(coords;tets=cells[:,collect(order)])
+                @test validate(mesh).ok
+                actual=mesh_crc(mesh).radius_edge
+                @test all(isfinite,actual)
+                @test actual[1]≈expected[1] rtol=8eps(Float64)
+                @test actual[2]≈expected[2] rtol=8eps(Float64)
+            end
+            flat_coords=Float64[9 10 9 9;0 0 1 0;0 0 0 0]
+            mixed=Mesh(hcat(coords,flat_coords);
+                       tets=hcat(cells,Int32[13,14,15,16]))
+            @test mesh_crc(mixed).radius_edge[2]==Inf
+        end
+        # Degenerate geometry still has an infinite quality ratio, including
+        # when it follows finite ratios that overflow the running sum.
+        coords=Float64[0 1 0 0;0 0 1 0;0 0 0 0]
+        flat=Mesh(coords;tets=reshape(Int32[1,2,3,4],4,1))
+        @test mesh_crc(flat).radius_edge==(Inf,Inf)
+    end
+
     @testset "validate rejects duplicate / empty-boundary tet complexes" begin
         # Regression: two identical tets give every face incidence 2, so a manifold test
         # of "no face in >2 tets" alone wrongly accepted them (empty boundary, physically

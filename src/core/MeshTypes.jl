@@ -1019,6 +1019,7 @@ function mesh_crc(m::Mesh)
     lo,hi=_bounding_box(m)
     # tet quality aggregates
     dmin = Inf; dsum = 0.0; remin = Inf; resum = 0.0; nt = ntets(m)
+    radius_sum_overflowed = false
     @inbounds for t in 1:nt
         a = node(m, m.tets[1,t]); b = node(m, m.tets[2,t])
         c = node(m, m.tets[3,t]); d = node(m, m.tets[4,t])
@@ -1026,10 +1027,24 @@ function mesh_crc(m::Mesh)
         dmn < dmin && (dmin = dmn); dsum += dmn
         re = tet_radius_edge(a, b, c, d)
         re < remin && (remin = re)
-        resum += re
+        if radius_sum_overflowed
+            # Ratios are nonnegative, so this online mean cannot overflow
+            # when the individual ratios are finite. A truly infinite ratio
+            # still produces an infinite mean on subsequent cells.
+            resum = isinf(resum) || isinf(re) ? Inf : resum + (re-resum)/t
+        else
+            total = resum + re
+            if isinf(total) && isfinite(resum) && isfinite(re)
+                resum = resum/t + re/t
+                radius_sum_overflowed = true
+            else
+                resum = total
+            end
+        end
     end
     dihedral = nt == 0 ? (0.0, 0.0) : (dmin, dsum/nt)
-    radedge  = nt == 0 ? (0.0, 0.0) : (remin, resum/nt)
+    radedge  = nt == 0 ? (0.0, 0.0) :
+               (remin, radius_sum_overflowed ? resum : resum/nt)
     nbf = nt == 0 ? 0 : length(first(boundary_faces(m.tets)))
 
     return (n_nodes = nnodes(m), n_segs = nsegs(m), n_tris = ntris(m), n_tets = nt,

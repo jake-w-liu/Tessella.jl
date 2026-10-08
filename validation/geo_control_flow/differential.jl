@@ -159,6 +159,31 @@ try
                 samples[] += 1
             end
         end
+
+        # Scalar powers exercise the parser's arithmetic path independently
+        # of finite Point-coordinate admission. Windows integer squaring must
+        # preserve both huge overflow direction and reciprocal subnormals.
+        power_cases=String[
+            "(2 ^ $power) ^ ($count)"
+            for power in (-1023,-538,-537,-512,-58,-2,0,2,58,512,537,538,1023)
+            for count in (-9e18,-4e18,-3425408785282518016.0,-1074.0,-3.0,-2.0,
+                          -1.0,0.0,1.0,2.0,3.0,1074.0,3425408785282518016.0,4e18,9e18)
+        ]
+        append!(power_cases,("(1e155) ^ (-2)","(-2 ^ 350) ^ (-3)",
+                             "(-2 ^ 58) ^ 3425408785282518016",
+                             "(-5.647527718625593e161) ^ (-2)",
+                             "(1e161) ^ (-2)","(1e162) ^ (-2)"))
+        for (case_index,expression) in enumerate(power_cases)
+            path=joinpath(directory,"power$case_index.geo")
+            write(path,"audit_power = $expression;\n")
+            actual=Tessella.GeoExec.execute_geo(path).values["audit_power"]
+            gmsh.clear()
+            gmsh.open(path)
+            expected=only(gmsh.parser.getNumber("audit_power"))
+            reinterpret(UInt64,actual)==reinterpret(UInt64,expected) || error(
+                "power $expression differs: Tessella=$actual Gmsh=$expected")
+        end
+        println("GEO_POWER_DIFFERENTIAL_OK cases=$(length(power_cases)) bit_exact=1")
     end
 
     println("GEO_CONTROL_FLOW_DIFFERENTIAL_OK gmsh=$runtime_version " *
