@@ -3213,6 +3213,7 @@ function _brep_materialize_boolean!(m::GeoModel,t::Int,op::Symbol,
         # derives them from incident edges
         for p in points
             delete!(m.point_size,p)
+            delete!(m.point_w,p)
         end
         ctag=Vector{Int}(undef,length(res_edges))
         for (i,e) in enumerate(res_edges)
@@ -3524,6 +3525,7 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
         # vertices carry no explicit mesh-size constraint
         for p in points
             delete!(m.point_size,p)
+            delete!(m.point_w,p)
         end
         ctag=Vector{Int}(undef,length(res_edges))
         for (i,e) in enumerate(res_edges)

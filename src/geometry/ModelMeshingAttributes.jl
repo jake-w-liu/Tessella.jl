@@ -1835,7 +1835,10 @@ function _parametrize_discrete_curve!(m::GeoModel,record::DiscreteEntity,
         end
         push!(lengths,total)
     end
-    overall=sum(lengths)
+    overall=0.0
+    for k in eachindex(lengths)
+        overall+=lengths[k]
+    end
     overall>0 || throw(ArgumentError(
         "$caller: discrete curve has zero total length"))
     offset=0.0

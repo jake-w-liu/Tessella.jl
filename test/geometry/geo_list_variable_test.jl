@@ -88,6 +88,28 @@ end
         @test occursin(message,sprint(showerror,err))
     end
 
+    # Unary minus on a stored list (`-y()`) must not mutate the variable —
+    # upstream splices a copy of `s.value`, not the stored vector itself.
+    parsed=_execute_list_variable_source(
+        "y() = {1, 2.5, -3, 4}; x() = {-y(), y()};")
+    @test parsed.lists["x"]==[-1.0,-2.5,3.0,-4.0,1.0,2.5,-3.0,4.0]
+    @test parsed.lists["y"]==[1.0,2.5,-3.0,4.0]
+    parsed=_execute_list_variable_source(
+        "y() = {1, 2}; z = -y(); x() = {z, y()};")
+    @test parsed.lists["x"]==[-1.0,1.0,2.0]
+    @test parsed.lists["y"]==[1.0,2.0]
+
+    # `Unique` is std::sort + std::unique: -0.0 and 0.0 are equivalent and
+    # collapse to the first element of the run.
+    parsed=_execute_list_variable_source(
+        "y() = {1, 2.5, -3, 4}; x() = -0 * {y[0], -2:0, 2:5}; " *
+        "x() = Unique(x());")
+    @test length(parsed.lists["x"])==1
+    @test parsed.lists["x"][1]===-0.0
+    parsed=_execute_list_variable_source(
+        "y() = {3, 1, 3, 2}; x() = Unique(y());")
+    @test parsed.lists["x"]==[1.0,2.0,3.0]
+
     @test isempty(Docs.undocumented_names(Tessella.GeoExec;private=false))
     @test isempty(Test.detect_ambiguities(Tessella.GeoExec;recursive=true))
 end

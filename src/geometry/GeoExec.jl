@@ -3554,7 +3554,7 @@ function _geo_exec_vexpr5_rest(raw::AbstractString,
                                caller::AbstractString)
     s=String(strip(raw))
     isempty(s) && _geo_syntax_abort(";")
-    acc=ntuple(_->0.0,5);sign=1.0;expect_term=true
+    acc=nothing;sign=1.0;expect_term=true
     while !isempty(s)
         if expect_term
             while startswith(s,"+") || startswith(s,"-")
@@ -3584,7 +3584,10 @@ function _geo_exec_vexpr5_rest(raw::AbstractString,
                     (paren ? "exactly 3 components" : "3 to 5 components") *
                     "; got $np")
             end
-            acc=acc .+ sign .* evaluated
+            # A lone `VExpr_Single` is assigned, not accumulated — its signed
+            # zeros survive (`{-0,...}` keeps -0.0); later terms still add.
+            acc=acc===nothing ? sign .* evaluated :
+                                acc .+ sign .* evaluated
             s=String(strip(rest));sign=1.0;expect_term=false
         else
             if s[1]=='+' || s[1]=='-'
@@ -4287,9 +4290,12 @@ end
 # set).
 function _geo_mean_plane(points::Vector{NTuple{3,Float64}})
     n=length(points)
-    cx=sum(point->point[1],points)/n
-    cy=sum(point->point[2],points)/n
-    cz=sum(point->point[3],points)/n
+    cx=0.0; cy=0.0; cz=0.0
+    @inbounds for i in 1:n
+        point=points[i]
+        cx+=point[1]; cy+=point[2]; cz+=point[3]
+    end
+    cx/=n; cy/=n; cz/=n
     centered=Matrix{Float64}(undef,n,3)
     for (index,point) in pairs(points)
         centered[index,1]=point[1]-cx

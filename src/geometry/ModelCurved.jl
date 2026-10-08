@@ -1198,6 +1198,7 @@ function _occ_materialize_rollback!(m::GeoModel, points, curves, loops,
     for point in points
         delete!(m.points,point)
         delete!(m.point_size,point)
+        delete!(m.point_w,point)
     end
     return nothing
 end
@@ -1236,6 +1237,7 @@ function _materialize_cylinder!(m::GeoModel, base::NTuple{3,Float64},
         push!(points,_add_occ_point!(m,w_bot))
         for p in points
             delete!(m.point_size,p)
+            delete!(m.point_w,p)
         end
         p_top,p_bot=points
         top_center=_occ_translated(base,n,h)
@@ -1305,6 +1307,7 @@ function _materialize_sphere!(m::GeoModel, center::NTuple{3,Float64},
         push!(points,_add_occ_point!(m,w_s))
         for p in points
             delete!(m.point_size,p)
+            delete!(m.point_w,p)
         end
         p_n,p_s=points
         push!(curves,_add_occ_degenerate!(m,p_n))
@@ -1367,6 +1370,7 @@ function _materialize_cone!(m::GeoModel, base::NTuple{3,Float64},
         push!(points,_add_occ_point!(m,w_bot))
         for p in points
             delete!(m.point_size,p)
+            delete!(m.point_w,p)
         end
         p_top,p_bot=points
         top_center=_occ_translated(base,n,mpT[2])
@@ -1473,6 +1477,7 @@ function _materialize_torus!(m::GeoModel, center::NTuple{3,Float64},
         end
         for p in points
             delete!(m.point_size,p)
+            delete!(m.point_w,p)
         end
         if full
             p_rim=points[1]

@@ -179,6 +179,10 @@ function _model_identity_point_state(
     # Point sizes are optional: materialized primitive corners carry none.
     point_size=_model_identity_rekey(
         m.point_size,old_tag,new_tag,caller,"Point size")
+    # So is the hidden homogeneous coordinate (`Vertex::w` → `point_w`):
+    # it rides along to the retagged vertex like the coordinate itself.
+    point_w=_model_identity_rekey(
+        m.point_w,old_tag,new_tag,caller,"Point homogeneous coordinate")
     curves=copy(m.curves)
     for (curve,(first_point,last_point)) in m.curves
         (first_point==new_tag || last_point==new_tag) && throw(ArgumentError(
@@ -209,8 +213,8 @@ function _model_identity_point_state(
         geom.sphere_center==old_tag || continue
         surface_geometry[surf]=(sphere_center=new_tag,)
     end
-    return (points=points,point_size=point_size,curves=curves,
-            curve_control_points=curve_control_points,
+    return (points=points,point_size=point_size,point_w=point_w,
+            curves=curves,curve_control_points=curve_control_points,
             surface_geometry=surface_geometry)
 end
 
@@ -373,6 +377,7 @@ function model_set_tag!(m::GeoModel,dim,tag,new_tag)
     if dimension==0
         m.points=dimension_state.points
         m.point_size=dimension_state.point_size
+        m.point_w=dimension_state.point_w
         m.curves=dimension_state.curves
         m.curve_control_points=dimension_state.curve_control_points
         m.surface_geometry=dimension_state.surface_geometry

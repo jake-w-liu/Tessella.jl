@@ -6436,7 +6436,14 @@ function _rb_fan_steiner(Px,Py,Pz, facets::Vector{NTuple{3,Int32}})
     oriented === nothing && return nothing
     nn = length(Px); nf = length(oriented)
     vt(i) = (Px[i], Py[i], Pz[i])
-    vc = (sum(Px)/nn, sum(Py)/nn, sum(Pz)/nn)
+    # Base.sum reassociates (SIMD/pairwise) differently across Julia
+    # versions; the sequential loop keeps the result byte-identical on every
+    # supported runtime.
+    sx=0.0; sy=0.0; sz=0.0
+    @inbounds for i in 1:nn
+        sx += Px[i]; sy += Py[i]; sz += Pz[i]
+    end
+    vc = (sx/nn, sy/nn, sz/nn)
     fcx=0.0; fcy=0.0; fcz=0.0
     @inbounds for (a,b,c) in oriented
         fcx += (Px[a]+Px[b]+Px[c])/3; fcy += (Py[a]+Py[b]+Py[c])/3; fcz += (Pz[a]+Pz[b]+Pz[c])/3
