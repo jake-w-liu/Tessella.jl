@@ -17,7 +17,11 @@ const _COHERENCE_RTOL = 1e-8
 # (encoding representability checks); `steps` are the per-pass matrices Gmsh
 # applies to each owned vertex, in order — `Rotate` is three passes
 # (translate by -origin, rotate, translate by +origin), so coordinates match
-# Gmsh's rounding bit-for-bit. `occ` carries the gp_Trsf/gp_GTrsf equivalent —
+# Gmsh's rounding bit-for-bit. Each step's fourth row also rewrites the
+# vertex's hidden `w` (Geo.cpp `Vertex::w` → `m.point_w`): every built-in
+# matrix except `Symmetry` has row 3 = (0,0,0,1), so only `Symmetry` lets w
+# drift — and the drifted w then scales the homogeneous column of every later
+# step on that vertex. `occ` carries the gp_Trsf/gp_GTrsf equivalent —
 # (linear, loc) applied as M·p + loc — used for OCC-geometry records and
 # OCC-owned vertices, where `occ.rotate`'s Rodrigues matrix rounds
 # differently from Gmsh's SetRotationMatrix.
@@ -80,11 +84,35 @@ end
     end
 end
 
+# The same `vecmat4x4` pass threading the vertex's hidden homogeneous
+# coordinate: vec=(x,y,z,w), all four output rows are computed, and pos[3]
+# becomes the new w — exactly Geo.cpp's `v->w() = pos[3]` writeback.
+@inline function _gmsh_matvec4x4_w(mat::NTuple{16,Float64},
+                                   p::NTuple{3,Float64}, w::Float64)
+    v=(p[1],p[2],p[3],w)
+    pos=ntuple(4) do i
+        acc=0.0
+        for j in 1:4
+            acc+=mat[4*(i-1)+j]*v[j]
+        end
+        acc
+    end
+    return (pos[1],pos[2],pos[3]),pos[4]
+end
+
 @inline function _affine_apply_steps(t::_AffineTransform, p::NTuple{3,Float64})
     for step in t.steps
         p=_gmsh_matvec4x4(step,p)
     end
     return p
+end
+
+@inline function _affine_apply_steps_w(t::_AffineTransform,
+                                       p::NTuple{3,Float64}, w::Float64)
+    for step in t.steps
+        p,w=_gmsh_matvec4x4_w(step,p,w)
+    end
+    return p,w
 end
 
 @inline function _affine_apply(t::_AffineTransform, p::NTuple{3,Float64})
@@ -271,13 +299,17 @@ function _affine_symmetry(a, b, c, d, caller)
     B=_finite_scalar(b,caller,"symmetry plane coefficient B")
     C=_finite_scalar(c,caller,"symmetry plane coefficient C")
     D=_finite_scalar(d,caller,"symmetry plane coefficient D")
-    p=fma(C,C,fma(A,A,B*B))
+    # The shipped binary does not fma-contract `SetSymmetryMatrix`: plain
+    # rounded ops in the source's left-assoc order. Row 3 carries Gmsh's
+    # upstream quirk `matrix[3][0] = B*C*F` (instead of 0) — it rewrites the
+    # vertex's hidden w on every application.
+    p=A*A+B*B+C*C
     p==0.0 && (p=1e-12)
     F=-2.0/p
-    step=(fma(A*A,F,1.0), A*B*F, A*C*F, A*D*F,
-          A*B*F, fma(B*B,F,1.0), B*C*F, B*D*F,
-          A*C*F, B*C*F, fma(C*C,F,1.0), C*D*F,
-          0.0,0.0,0.0,1.0)
+    step=(1.0+A*A*F, A*B*F, A*C*F, A*D*F,
+          A*B*F, 1.0+B*B*F, B*C*F, B*D*F,
+          A*C*F, B*C*F, 1.0+C*C*F, C*D*F,
+          B*C*F, 0.0, 0.0, 1.0)
     L=(step[1],step[2],step[3],step[5],step[6],step[7],step[9],step[10],step[11])
     # occ.symmetrize routes through gp_GTrsf with the identical vectorial
     # part and translation column.
@@ -328,12 +360,22 @@ function transform_entities!(m::GeoModel, t::_AffineTransform,
         a,b=m.curves[ct]
         push!(occ_pts,a); push!(occ_pts,b)
     end
-    coords=[(tag,_finite_result(
-                tag in occ_pts ? _occ_trsf_apply(t,m.points[tag]) :
-                                 _affine_apply_steps(t,m.points[tag]),caller))
+    coords=[if tag in occ_pts
+                (tag,_finite_result(_occ_trsf_apply(t,m.points[tag]),caller),
+                 nothing)
+            else
+                # `vecmat4x4` threads the vertex's hidden w through every step
+                # and writes row 3 back — `Symmetry`'s (B·C·F,0,0,1) row is
+                # what lets it drift off 1 upstream.
+                w=get(m.point_w,tag,1.0)
+                p,nw=_affine_apply_steps_w(t,m.points[tag],w)
+                (tag,_finite_result(p,caller),nw)
+            end
             for tag in move]
-    for (tag,p) in coords
+    for (tag,p,nw) in coords
         m.points[tag]=p
+        nw===nothing && continue   # OCC-geometry vertices keep w untouched
+        nw==1.0 ? delete!(m.point_w,tag) : (m.point_w[tag]=nw)
     end
     for plan in plans
         _apply_volume_plan!(m,plan)
@@ -886,6 +928,8 @@ function _merge_points!(m::GeoModel,eps)
             rewired==cps || (m.curve_control_points[c]=rewired)
         end
         delete!(m.points,drop); delete!(m.point_size,drop)
+        # The merge survivor keeps its own w; the dropped vertex's dies with it.
+        delete!(m.point_w,drop)
         _drop_entity_state!(m,0,drop)
     end
     m.next_tag[1]=isempty(m.points) ? 0 : maximum(keys(m.points))
@@ -1068,7 +1112,9 @@ function _drop_entity_state!(m::GeoModel, dim::Int, tag::Int)
     delete!(m.meshing.size_at_params,key)
     delete!(m.meshing.size_from_boundary,key)
     delete!(m.meshing.attached,key)
-    if dim==1
+    if dim==0
+        delete!(m.point_w,tag)
+    elseif dim==1
         delete!(m.meshing.transfinite_curves,tag)
         delete!(m.meshing.degenerated,tag)
         delete!(m.curve_control_points,tag)

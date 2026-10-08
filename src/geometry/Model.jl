@@ -260,6 +260,13 @@ Base.:(==)(a::ModelMeshingAttributes,b::ModelMeshingAttributes)=
 mutable struct GeoModel
     points::Dict{Int,NTuple{3,Float64}}
     point_size::Dict{Int,Float64}
+    # Hidden per-vertex homogeneous coordinate, mirroring `Vertex::w` in
+    # Gmsh's Geo.cpp: initialized to 1 and rewritten by `vecmat4x4` to row 3
+    # of every transform matrix applied to the vertex. Sparse — only values
+    # != 1.0 are stored (absent means 1.0). `Symmetry`'s upstream
+    # `matrix[3][0] = B*C*F` quirk lets w drift off 1, after which it scales
+    # the homogeneous column of every subsequent transform on that vertex.
+    point_w::Dict{Int,Float64}
     curves::Dict{Int,NTuple{2,Int}}
     # Additional coincident vertices attached to a curve, mirroring the
     # control-point copies Gmsh's `Duplicata` creates for every duplicated
@@ -337,6 +344,7 @@ dimension. Geometry is added explicitly and can then be meshed with
 [`mesh_model_surface`](@ref) or [`mesh_model_volume`](@ref).
 """
 GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
+                      Dict{Int,Float64}(),
                       Dict{Int,NTuple{2,Int}}(), Dict{Int,Vector{Int}}(),
                       Dict{Int,Symbol}(), Dict{Int,NamedTuple}(),
                       Dict{Int,Vector{Float64}}(),
@@ -1495,6 +1503,7 @@ function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0,
         # identically to the encoding-only primitive it replaces.
         for corner in p
             delete!(m.point_size,corner)
+            delete!(m.point_w,corner)
         end
         # Gmsh addBox edge order and directions.
         for edge in ((p[2],p[1]),(p[1],p[3]),(p[4],p[3]),(p[2],p[4]),
@@ -1533,6 +1542,7 @@ function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0,
         end
         for point in created_points
             delete!(m.points,point);delete!(m.point_size,point)
+            delete!(m.point_w,point)
         end
         rethrow()
     end

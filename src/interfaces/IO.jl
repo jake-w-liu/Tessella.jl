@@ -20,9 +20,9 @@ module IO
 
 using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets, node, validate
 using ..Elements: MSH_PHYSICAL_NAME_MAX_BYTES, _copy_physical_names, MixedMesh
-using ..GmshLibm: _gm_sin, _gm_cos, _gm_tan, _gm_asin, _gm_acos, _gm_atan,
-                  _gm_atan2, _gm_sinh, _gm_cosh, _gm_tanh, _gm_exp, _gm_log,
-                  _gm_log10, _gm_pow
+using ..GmshLibm: _gm87_sin, _gm87_cos, _gm_tan, _gm_asin, _gm_acos, _gm_atan,
+                  _gm87_atan2, _gm_sinh, _gm_cosh, _gm_tanh, _gm87_exp, _gm87_log,
+                  _gm_log10, _gm87_pow
 using Printf: @printf, @sprintf, Format, format
 
 export read_msh, write_msh, MshFile
@@ -2962,23 +2962,20 @@ function _geo_apply_binary(parser::_GeoExprParser,kind::Symbol,a::Float64,
     value=try
         if kind==:percent
             # Gmsh's grammar evaluates `%` as `(int)lhs % (int)rhs`, not as
-            # floating-point fmod (Gmsh.y, FExpr).  Reject the C++ undefined
-            # cases instead of depending on a platform-specific conversion or
-            # integer trap.
-            ta=trunc(a);tb=trunc(b)
-            int_min=Float64(typemin(Int32));int_max=Float64(typemax(Int32))
-            (int_min<=ta<=int_max && int_min<=tb<=int_max) ||
-                _geo_expr_error(parser,
-                    "modulo operands are outside Gmsh's signed 32-bit integer range",pos)
-            ia=Int32(ta);ib=Int32(tb)
+            # floating-point fmod (Gmsh.y, FExpr). Operands take the shipped
+            # binary's `cvttsd2si` conversion; `ib == 0` and `INT_MIN % -1`
+            # trap the x86 `idiv` — the process dies upstream, so an explicit
+            # diagnostic is the faithful non-crashing equivalent.
+            ia=_geo_int32_operand(parser,a,"modulo",pos)
+            ib=_geo_int32_operand(parser,b,"modulo",pos)
             iszero(ib) && _geo_expr_error(parser,
                 "modulo divisor truncates to zero",pos)
             ia==typemin(Int32) && ib==Int32(-1) && _geo_expr_error(parser,
-                "modulo is outside its signed 32-bit integer domain",pos)
+                "modulo overflows the signed 32-bit quotient",pos)
             rem(ia,ib)
         else
             kind==:plus ? a+b : kind==:minus ? a-b : kind==:star ? a*b :
-            kind==:slash ? a/b : _gm_pow(a,b)
+            kind==:slash ? a/b : _gm87_pow(a,b)
         end
     catch err
         err isa InterruptException && rethrow()
@@ -2997,29 +2994,29 @@ function _geo_apply_function(parser::_GeoExprParser,name::String,
     elseif name=="Asin"; _gm_asin
     elseif name=="Atan"; _gm_atan
     elseif name=="Ceil"; ceil
-    elseif name=="Cos"; _gm_cos
+    elseif name=="Cos"; _gm87_cos
     elseif name=="Cosh"; _gm_cosh
-    elseif name=="Exp"; _gm_exp
+    elseif name=="Exp"; _gm87_exp
     elseif name=="Fabs" || name=="Abs"; abs
     elseif name=="Floor"; floor
-    elseif name=="Log"; _gm_log
+    elseif name=="Log"; _gm87_log
     elseif name=="Log10"; _gm_log10
-    elseif name=="Round"; x->round(x,RoundNearestTiesUp)
+    elseif name=="Round"; x->floor(x+0.5)
     elseif name=="Sqrt"; sqrt
-    elseif name=="Sin"; _gm_sin
+    elseif name=="Sin"; _gm87_sin
     elseif name=="Sinh"; _gm_sinh
     elseif name=="Step"; x->x<0 ? 0.0 : 1.0
     elseif name=="Tan"; _gm_tan
     elseif name=="Tanh"; _gm_tanh
     else; nothing
     end
-    binary=if name=="Atan2"; _gm_atan2
+    binary=if name=="Atan2"; _gm87_atan2
     elseif name=="Fmod" || name=="Modulo"; rem
     # Gmsh 4.15.2 spells this as sqrt(a*a + b*b); preserve its overflow and
     # underflow behavior (execution keeps the IEEE754 Inf/NaN like upstream).
     elseif name=="Hypot"; (a,b)->sqrt(a*a+b*b)
-    elseif name=="Max"; max
-    elseif name=="Min"; min
+    elseif name=="Max"; (a,b)->a<b ? b : a
+    elseif name=="Min"; (a,b)->b<a ? b : a
     else; nothing
     end
     if unary!==nothing
@@ -3200,19 +3197,21 @@ function _geo_parse_bitwise!(parser::_GeoExprParser)
     return value
 end
 
-# `(int)value` — the C double→int cast is undefined outside the Int32 range
-# and on non-finite input; fail explicitly there.
+# `(int)value` — upstream compiles the double→int conversion to `cvttsd2si`:
+# in-range doubles truncate toward zero; out-of-range and non-finite inputs
+# produce the x86 "integer indefinite" value 0x80000000 (`typemin(Int32)`).
+# Deterministic on the shipped binary, so the full domain is emulated.
 function _geo_int32_operand(parser::_GeoExprParser,value::Float64,
                             operation::AbstractString,pos::Int)
     t=trunc(value)
     (isfinite(value) && Float64(typemin(Int32))<=t<=Float64(typemax(Int32))) ||
-        _geo_expr_error(parser,"$operation operand is outside Gmsh's signed " *
-                               "32-bit integer range",pos)
+        return typemin(Int32)
     return Int32(t)
 end
 
-# `((int)a >> (int)b)` / `<<` — C int shifts; the count outside [0,31] is UB
-# upstream, so it is rejected rather than emulated.
+# `((int)a >> (int)b)` / `<<` — compiled to x86 SAR/SHL upstream: the count is
+# masked to 5 bits, `>>` is arithmetic, `<<` wraps. Deterministic on the
+# shipped binary, so the full domain is emulated rather than rejected.
 function _geo_apply_shift(parser::_GeoExprParser,kind::Symbol,a::Float64,
                           b::Float64,pos::Int)
     # The params scan keeps its documented arithmetic subset.
@@ -3221,9 +3220,8 @@ function _geo_apply_shift(parser::_GeoExprParser,kind::Symbol,a::Float64,
         "supported arithmetic subset",pos)
     ia=_geo_int32_operand(parser,a,"shift",pos)
     ib=_geo_int32_operand(parser,b,"shift",pos)
-    0<=ib<32 || _geo_expr_error(
-        parser,"shift count is outside the 32-bit shift range",pos)
-    return Float64(kind==:shift_left ? ia<<ib : ia>>ib)
+    count=Int(ib & Int32(31))
+    return Float64(kind==:shift_left ? ia<<count : ia>>count)
 end
 
 function _geo_parse_unary!(parser::_GeoExprParser)
@@ -5904,12 +5902,16 @@ function _geo_multi_term_values(raw::AbstractString,
     if star!==nothing
         rhs=String(strip(source[nextind(source,star):end]))
         startswith(rhs,"{") && _geo_syntax_abort("{")
+        lhs_source=String(strip(
+            source[firstindex(source):prevind(source,star)]))
+        # A loose top-level operator before the `*` (a ternary arm, a range
+        # colon, a comparison, ...) binds the `*` inside its operand — this
+        # is not a `FExpr '*' FExpr_Multi` form; fall back to the scalar path.
+        _geo_loose_top_level_token(lhs_source)!==nothing && return nothing
         rhs_values=_geo_multi_term_values(rhs,context,caller,limit,depth+1)
         rhs_values===nothing && return nothing
         lhs=try
-            _geo_eval_numeric(
-                String(strip(source[firstindex(source):prevind(source,star)])),
-                context,"$caller multiplier")
+            _geo_eval_numeric(lhs_source,context,"$caller multiplier")
         catch err
             err isa InterruptException && rethrow()
             err isa ArgumentError || rethrow()
@@ -5951,7 +5953,7 @@ function _geo_multi_term_values(raw::AbstractString,
         denominator=nraw-1
         return name=="LinSpace" ?
             [a+(b-a)*Float64(i)/denominator for i in 0:n-1] :
-            [10.0^(a+(b-a)*Float64(i)/denominator) for i in 0:n-1]
+            [_gm87_pow(10.0,a+(b-a)*Float64(i)/denominator) for i in 0:n-1]
     elseif name=="Catenary"
         args=_geo_split_args(inner,"$caller Catenary")
         length(args)==6 || _geo_syntax_abort(")")
@@ -5983,7 +5985,20 @@ function _geo_multi_term_values(raw::AbstractString,
 end
 
 # `std::sort` + `std::unique` — sorted with duplicates removed.
-_geo_unique_sorted(values::Vector{Float64})=unique(sort(values))
+function _geo_unique_sorted(values::Vector{Float64})
+    # `lt=<` is C++ `operator<`: -0.0 and 0.0 are equivalent (MergeSort keeps
+    # their input order), and `==` collapses them — the first of a run wins.
+    sorted=sort(values;lt=<,alg=MergeSort)
+    result=Float64[]
+    isempty(sorted) && return result
+    last=sorted[1];push!(result,last)
+    @inbounds for i in 2:length(sorted)
+        if !(sorted[i]==last)
+            last=sorted[i];push!(result,last)
+        end
+    end
+    return result
+end
 
 # `catenary` from `src/numeric/Numeric.cpp`: solve `y = a + 1/b cosh(b(x-c))`
 # through (x0,y0), (x1,y1) with lowest point ys by `newton_fd` (finite-
@@ -6385,7 +6400,9 @@ end
 function _geo_symbol_payload(context::_GeoNumericContext,name::String,
                              caller::AbstractString)
     if haskey(context.lists,name)
-        return context.lists[name]
+        # Copy: callers may negate the payload in place (`-x()`), which must
+        # not mutate the stored variable.
+        return copy(context.lists[name])
     elseif haskey(context.values,name)
         return Float64[context.values[name]]
     end

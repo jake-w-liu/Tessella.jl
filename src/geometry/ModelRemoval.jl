@@ -187,6 +187,7 @@ function _model_removal_state(
 
     points=copy(m.points)
     point_size=copy(m.point_size)
+    point_w=copy(m.point_w)
     curves=copy(m.curves)
     curve_control_points=copy(m.curve_control_points)
     curve_types=copy(m.curve_types)
@@ -197,7 +198,7 @@ function _model_removal_state(
     surface_geometry=copy(m.surface_geometry)
     volumes=copy(m.volumes)
     for tag in removed_tags[1]
-        delete!(points,tag);delete!(point_size,tag)
+        delete!(points,tag);delete!(point_size,tag);delete!(point_w,tag)
     end
     for tag in removed_tags[2]
         delete!(curves,tag)
@@ -353,7 +354,7 @@ function _model_removal_state(
     filter!(compound->!any(member->(compound.first,member) in removed,
                            compound.second),meshing.compounds)
 
-    return (;points,point_size,curves,curve_control_points,curve_types,
+    return (;points,point_size,point_w,curves,curve_control_points,curve_types,
             curve_geometry,curve_params,loops,surfaces,surface_types,
             surface_geometry,
             surface_loops,volumes,
@@ -391,6 +392,7 @@ function remove_entities!(m::GeoModel,dim_tags,recursive=false)
 
     m.points=state.points
     m.point_size=state.point_size
+    m.point_w=state.point_w
     m.curves=state.curves
     m.curve_control_points=state.curve_control_points
     m.curve_types=state.curve_types
@@ -603,6 +605,7 @@ function _geo_delete_entities!(m::GeoModel,dim_tags;recursive::Bool=false)
 
     m.points=state.points
     m.point_size=state.point_size
+    m.point_w=state.point_w
     m.curves=state.curves
     m.curve_control_points=state.curve_control_points
     m.curve_types=state.curve_types
@@ -648,7 +651,7 @@ User variables and the current factory are exec-layer state and are untouched
 here.
 """
 function _geo_reset_model_geometry!(m::GeoModel)
-    empty!(m.points);empty!(m.point_size)
+    empty!(m.points);empty!(m.point_size);empty!(m.point_w)
     empty!(m.curves);empty!(m.curve_control_points);empty!(m.curve_types)
     empty!(m.curve_geometry);empty!(m.curve_params)
     empty!(m.loops)

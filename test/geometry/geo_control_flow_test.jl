@@ -521,4 +521,80 @@ end
     bits=_execute_control_source("x = 6 & 3; y = 4 | 1; z = 5 & 3.7; w = 0.5 | 2;")
     @test bits.values["x"]==2.0 && bits.values["y"]==5.0
     @test bits.values["z"]==1.0 && bits.values["w"]==2.0
+
+    # Bitwise/shift operands and counts take the shipped binary's x86
+    # semantics (Gmsh 4.15.2 verified): `cvttsd2si` truncation, the
+    # 0x80000000 "integer indefinite" value on out-of-range/non-finite
+    # operands, and a 5-bit masked shift count.
+    hw=_execute_control_source(
+        "a = 6 >> 255; b = 1 << 32; c = 255 & 1e30; d = -3 | 2; " *
+        "e = 5 >> Sqrt(-1); f = 1 << -1; g = 6.9 >> 1.9; h = 1e30 >> 1; " *
+        "i = 4294967295 & -1; j = -2147483648 >> 31; " *
+        "k = (Pi - 12) ^ +0.25 % 100; l = -7 % 3; m = 7 % -3;")
+    @test hw.values["a"]==0.0      # 255 & 31 = 31; 6 >> 31 = 0
+    @test hw.values["b"]==1.0      # 32 & 31 = 0; 1 << 0 = 1
+    @test hw.values["c"]==0.0      # int-indefinite & 0xFF = 0
+    @test hw.values["d"]==-1.0     # -3 | 2 = -1
+    @test hw.values["e"]==5.0      # NaN count -> 0x80000000 & 31 = 0
+    @test hw.values["f"]==-2147483648.0  # -1 & 31 = 31; 1 << 31 wraps
+    @test hw.values["g"]==3.0      # trunc(6.9) >> trunc(1.9) = 6 >> 1
+    @test hw.values["h"]==-1073741824.0  # int-indefinite >> 1
+    @test hw.values["i"]==-2147483648.0  # out-of-range -> int-indefinite
+    @test hw.values["j"]==-1.0     # arithmetic right shift
+    @test hw.values["k"]==-48.0    # int-indefinite % 100 = -48
+    @test hw.values["l"]==-1.0     # C remainder: sign follows dividend
+    @test hw.values["m"]==1.0
+    # `% 0` and `INT_MIN % -1` trap the x86 `idiv` upstream — the process
+    # dies — so an explicit diagnostic is the faithful equivalent here.
+    @test _control_error("x = 5 % 0;") isa ArgumentError
+    @test _control_error("x = -2147483648 % -1;") isa ArgumentError
+
+    # `^` edge semantics (Gmsh 4.15.2 verified): `x^0 = 1` even for NaN x;
+    # `(±1)^±Inf = 1`; integer exponents use binary squaring — parity flips
+    # the sign of negative bases and ±Inf bases (odd → -Inf/-0, even →
+    # +Inf/+0) — while integer exponents past the Int64 range are all even
+    # and square `|x|`; positive overflow of the y·log2(x) chain is `Inf`.
+    pe=_execute_control_source(
+        "a = Sqrt(-1) ^ 0; b = (-1) ^ Exp(999); c = 1 ^ (-Exp(999)); " *
+        "d = (-Exp(999)) ^ 0.5; e = (-Exp(999)) ^ 3; " *
+        "f = (-Exp(999)) ^ (-3); g = (-Exp(999)) ^ (-2); " *
+        "h = (-1) ^ 1e30; i = (-2) ^ 1e30; j = 2 ^ 1e19; k = 0.5 ^ (-1e30); " *
+        "l = (-1) ^ (4.5e15 + 1); m = (-1) ^ 4.5e15; n = 2 ^ (-1074);")
+    @test pe.values["a"]==1.0        # NaN^0 = 1
+    @test pe.values["b"]==1.0        # (-1)^Inf = 1
+    @test pe.values["c"]==1.0        # 1^(-Inf) = 1
+    @test pe.values["d"]==Inf        # (-Inf)^non-integer = +Inf
+    @test pe.values["e"]==-Inf       # odd integer parity
+    @test pe.values["f"]===-0.0      # odd negative parity
+    @test pe.values["g"]==0.0 && !signbit(pe.values["g"])  # even: +0
+    @test pe.values["h"]==1.0        # |y|≥2^63 integer → even → |x|^y
+    @test pe.values["i"]==Inf        # (-2)^1e30 = +Inf
+    @test pe.values["j"]==Inf        # positive chain overflow → Inf
+    @test pe.values["k"]==Inf        # 0.5^(-1e30) overflows + 
+    @test pe.values["l"]==-1.0       # odd squaring parity on -1
+    @test pe.values["m"]==1.0        # even squaring parity on -1
+    @test pe.values["n"]==5e-324     # tracked-exponent subnormal squaring
+
+    # Trig past the x87 FPU range (|x| ≥ 2^63) takes mingw's assembly
+    # fallback — `fldpi; fadd; fprem1` — reducing modulo `2·round64(π_hw)`
+    # rather than the 66-bit constant the in-range `fsin`/`fcos` use.
+    # All values verified bit-for-bit against the Windows gmsh.exe; other
+    # platforms link the system libm upstream, so the pins are Windows-only.
+    if Sys.iswindows()
+        x87=_execute_control_source(
+            "a = Sin(1e300); b = Cos(1e300); c = Sin(9.5e18); " *
+            "d = Cos(9.5e18); e = Sin(-9.3e18); f = Cos(-9.3e18); " *
+            "g = Sin(1e19); h = Cos(1e19); " *
+            "i = Sin(4.5e15); j = Cos(4.5e15);")
+        @test x87.values["a"]===0.9790015909522538
+        @test x87.values["b"]===0.20385260585274806
+        @test x87.values["c"]===-0.9819889907942527
+        @test x87.values["d"]===0.18893814320799576
+        @test x87.values["e"]===0.7158654763735572
+        @test x87.values["f"]===-0.6982382256339594
+        @test x87.values["g"]===-0.8556574595436565
+        @test x87.values["h"]===-0.517542570159495
+        @test x87.values["i"]===0.06881493122288082
+        @test x87.values["j"]===0.9976294428497939
+    end
 end

@@ -601,3 +601,77 @@ end
     @test sort!(collect(keys(r.model.curves)))==[1]
     @test haskey(r.model.points,4)
 end
+
+@testset ".geo hidden vertex w channel (Symmetry row-3 quirk)" begin
+    # Gmsh's `Vertex::w` is rewritten to row 3 of every applied matrix, and
+    # `SetSymmetryMatrix` leaves row 3 = (B*C*F, 0, 0, 1) — so Symmetry drifts
+    # w off 1 and the drifted w scales the homogeneous column of every later
+    # transform on that vertex. References are bitwise gmsh-4.15.2 output.
+    r=_execute_transform_source("""
+        Point(1) = {0.001, -2, 0.1, 1};
+        Symmetry {0.001, -0.3, 0.1, 0.7} { Point{1}; }
+        Translate {-0.5, -0.3, -2} { Point{1}; }
+        """)
+    @test r.model.points[1]==
+        (-0.52549975500245005,5.5597474025259741,-4.5211757882421182)
+    @test r.model.point_w[1]≈1.0005999940000601
+
+    # The shipped binary does not fma-contract `SetSymmetryMatrix`: plain
+    # `A*A+B*B+C*C` / `1+A*A*F` rounding (1-ulp difference vs fma versions).
+    r=_execute_transform_source("""
+        Point(1) = {-1, -1, -1, 1};
+        Symmetry {-3, -3, -2.7, 0.5} { Point{1}; }
+        """)
+    @test r.model.points[1]==
+        (1.1826809015421118,1.1826809015421118,0.96441281138790069)
+
+    # `Duplicata` copies reset w to 1 (`CopyVertex` does not copy w): the copy
+    # translates by exactly (1,0,0) while the original's drifted w keeps
+    # scaling its own later Translate.
+    r=_execute_transform_source("""
+        Point(1) = {0.001, -2, 0.1, 1};
+        Symmetry {0.001, -0.3, 0.1, 0.7} { Point{1}; }
+        Translate {1,0,0} { Duplicata{Point{1};} }
+        Translate {1,0,0} { Point{1}; }
+        """)
+    @test r.model.points[1]==
+        (0.97540023599764003,5.8599274007259918,-2.5199758002419976)
+    @test r.model.points[2]==
+        (0.97480024199757997,5.8599274007259918,-2.5199758002419976)
+    @test r.model.point_w[1]≈1.0005999940000601
+    @test !haskey(r.model.point_w,2)
+
+    # w compounds across chained Symmetry statements, then scales the
+    # Translate offset column.
+    r=_execute_transform_source("""
+        Point(1) = {0.3, -1.1, 0.7, 1};
+        Symmetry {0.2, -0.5, 0.9, 0.1} { Point{1}; }
+        Symmetry {-0.4, 1.1, -0.7, 0.3} { Point{1}; }
+        """)
+    @test r.model.points[1]==
+        (0.51098729227761464,-1.8020332355816226,-0.27077223851417426)
+    r=_execute_transform_source("""
+        Point(1) = {0.3, -1.1, 0.7, 1};
+        Symmetry {0.2, -0.5, 0.9, 0.1} { Point{1}; }
+        Symmetry {-0.4, 1.1, -0.7, 0.3} { Point{1}; }
+        Translate {0.2, -0.8, 1.5} { Point{1}; }
+        """)
+    @test r.model.points[1]==
+        (0.72906744868035167,-2.6743538611925706,1.3648289345063536)
+
+    # Non-Symmetry transforms write row 3 = (0,0,0,1) back to w: a translate
+    # on a fresh vertex leaves the sparse map empty.
+    r=_execute_transform_source("""
+        Point(1) = {1, 2, 3, 1};
+        Translate {0.5, 0, 0} { Point{1}; }
+        """)
+    @test isempty(r.model.point_w)
+
+    # Retagging carries the hidden w to the new tag.
+    r=_execute_transform_source("""
+        Point(1) = {0.001, -2, 0.1, 1};
+        Symmetry {0.001, -0.3, 0.1, 0.7} { Point{1}; }
+        """)
+    Tessella.Model.model_set_tag!(r.model,0,1,5)
+    @test !haskey(r.model.point_w,1) && r.model.point_w[5]≈1.0005999940000601
+end

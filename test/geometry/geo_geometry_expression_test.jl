@@ -151,6 +151,45 @@ end
     @test occursin("expanded list exceeds 65536 entries",
                    sprint(showerror,range_error))
 
+    # A top-level `*` inside a ternary arm is not an `FExpr '*' FExpr_Multi`
+    # split — the ternary binds looser, so `1 ? 2 * 3 : 4` evaluates to 6.
+    ternary=_execute_geometry_expression_source(
+        "x = 1 ? 2 * 3 : 4; y = 0 ? 2 * 3 : 4; Point(1) = {x, y, 0, 1};")
+    @test ternary.model.points[1]==(6.0,4.0,0.0)
+
+    # Upstream `Round()` is `floor(x + 0.5)` and `Max`/`Min` are
+    # std::max/std::min (`a<b ? b : a`), which keep the operand's signed zero
+    # and pick by operand order when an argument is NaN.
+    functions=_execute_geometry_expression_source(
+        "r1 = Round(0.49999999999999994); r2 = Round(4503599627370497); " *
+        "r3 = Round(-0.3); r4 = Round(-2.5); r5 = Round(2.5); " *
+        "r6 = Round(-1.5); m1 = Max(-0, 0); m2 = Max(0, -0); " *
+        "m3 = Min(0, -0); m4 = Min(-0, 0); m5 = Max(1, Sqrt(-1)); " *
+        "m6 = Min(1, Sqrt(-1)); " *
+        "Point(1) = {r1, r2, r3, 1}; Point(2) = {r4, r5, r6, 1}; " *
+        "Point(3) = {m1, m2, m3, 1}; Point(4) = {m4, m5, m6, 1};")
+    fp=functions.model.points
+    @test fp[1][1]===1.0
+    @test fp[1][2]===4503599627370498.0
+    @test fp[1][3]===0.0 && !signbit(fp[1][3])
+    @test fp[2][1]===-2.0
+    @test fp[2][2]===3.0
+    @test fp[2][3]===-1.0
+    @test fp[3][1]===-0.0
+    @test fp[3][2]===0.0 && !signbit(fp[3][2])
+    @test fp[3][3]===0.0 && !signbit(fp[3][3])
+    @test fp[4][1]===-0.0
+    @test fp[4][2]===1.0
+    @test fp[4][3]===1.0
+
+    # A lone `VExpr_Single` is assigned verbatim — `-0` keeps its sign.
+    signed_zero=_execute_geometry_expression_source(
+        "Point(1) = {-0, -Sin(0), 0, 1};")
+    sz=signed_zero.model.points[1]
+    @test sz[1]===-0.0
+    @test sz[2]===-0.0
+    @test sz[3]===0.0 && !signbit(sz[3])
+
     @test isempty(Docs.undocumented_names(Tessella.GeoExec;private=false))
     @test isempty(Test.detect_ambiguities(Tessella.GeoExec;recursive=true))
 end
