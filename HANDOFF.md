@@ -8,6 +8,57 @@ allocation efficiency for each increment, push verified changes to main and
 continue. Individual category releases do not complete this goal. Production
 meshing must be independent; Gmsh 4.15.2 is only a differential oracle.
 
+## Current recombination release (2026-10-09)
+
+This verified increment follows `c31f772` on main: complete even boundary
+closure/checked two-pass birth reservations, deterministic native directed
+priority/NaN sorting, extreme-range domain quality and linear matching scratch.
+Root-owned source is `C:/tmp/tessella_recombine_release_20261009`.
+All 504 original inputs remain frozen by manifest
+`C:/tmp/tessella_recombine_release_freeze_20261009_v1.json`, SHA256
+`94a9c46cf027168b98467c0e211f37654df693f7ee74ef00f3838c52d1f6f0c2`.
+Both full package gates pass 1,596,587 assertions with explicit child bounds
+checks, actual exit 0 and no drift. Julia 1.12.7/1.13.1 wrapper times:
+2191.502/1783.222 seconds.
+Receipts: `C:/tmp/tessella_recombine_release_full_20261009_112_v2_result.json`
+and `_113_v1_result.json`. Log SHA256 values:
+`2ba0f2eae497d851cd3fd38c5224bf3cfd4943767ea5ad4c2713e6e1350a012c` and
+`2eb7a729a8680fe785f6fa632e691c9c70bb92efa50bc052cbb47322e0f833e2`.
+Original 32-case AddVerts checks pass both runtimes, with identical log
+SHA256 `8424d63a25c51593d4ac0814e5f460e37fcf5aa26db3f48409b9705fe36d68cd`.
+
+Published source/test delta is seven paths; FPATAN remains the accepted main
+leaf. GmshPairSort's comment-only whitespace projection is
+`885b27f87be8d9753d9ee2eaf7b7f1b45a472a539c10229c01ad3ce46af725fe`;
+both runtimes prove exact parsed AST/all 100 line positions. Its full HP/SGI
+supporting notices are retained. Recombine source SHA256:
+`3efa6d42cae5201c758de8d23e1103860e3883dc9e2cf91b9a42658a4e06e1cb`;
+API source SHA256:
+`9981ae8276413ae352cc3a94460811bc3a211992a86c0a26a3b2ec6685fa0e36`.
+Independent focused report: `C:/tmp/tessella_priority_and_aspect_installed_report_v1_20261009.json`,
+SHA256 `aa52ef5803aa5f20161e3abbe703b539594a0094c3fea9eff02954a8c242f6c2`.
+
+The first Julia 1.12 run was deliberately stopped after verified WER linkage/stall;
+Windows recorded 99.854% system commit exhaustion. Its exact exception remains
+unknown: the initially selected 0x20474343 event belongs to a different consumer.
+Corrected independent attribution report:
+`C:/tmp/tessella_recombine_release_112_fault_attribution_independent_20261009/report.json`,
+SHA256 `5ee7e386991e6f59db9c3a4eba8fac01805682af19687adb30c460ef11eefebf`.
+Preserve that incomplete attempt and completed rerun separately.
+
+Native math candidate has passed both focused, independent actual public
+consumer/state/resource routes and the original four geometry gates. Current
+505-input V2 manifest SHA256 is
+`6e94352566718eb6143f166661d13909db1158d9989570add0557143290489e4`;
+math source `e0b34c1101723d6590e8ef12c0e2bc3384ca56f8fdfc8c37082a343b7055c044`.
+Its two V2 deltas are comments only, with identical parsed syntax and line
+positions on both runtimes. Full math package gates remain required.
+Weighted kernel, actual higher-generation lifecycle and classified import
+work remain separate; original higher fullPkg113 v2 is terminal1, not a pass.
+Stale pre-P2 integer support-label expectations require independently justified
+remapping; producer regressions still require fixes and fresh complete gates.
+The full audit and user goal remain active.
+
 ## Current Windows atan2 release (2026-10-09)
 
 The bounded increment follows `f6937be` on main. It contains only the native
@@ -43,8 +94,8 @@ They are incomplete, not package-test verdicts. The original 32-case
 AddVerts differential did finish with terminal exit 0 on both runtimes.
 The new priority/aspect worktree is `C:/tmp/tessella_priority_fix_20261009`;
 it preserves the accepted even/private API/workspace and FPATAN changes.
-Its broader primary controls, permissive SGI sort provenance and permanent
-focused checks pass; full package gates remain required. Weighted optimality/ties and
+Its broader primary controls, permissive SGI sort provenance, permanent
+focused checks and fresh root full gates pass, as recorded above. Weighted optimality/ties and
 higher-generation/import work continue in their separate owned trees.
 No category release completes the full user goal.
 
