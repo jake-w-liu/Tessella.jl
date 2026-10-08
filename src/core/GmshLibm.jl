@@ -86,13 +86,16 @@ _gm_libm_available() = _GM_LIBM.sin[] != C_NULL
 # are statically linked: mingwex's x87-FPU implementations. Those compute in
 # 80-bit extended registers — a 64-bit significand — and trigonometric
 # argument reduction uses the FPU's 66-bit π constant (0x3.243F6A8885A308D3),
-# not msvcrt's algorithms. `pow` uses binary squaring for integer exponents
-# and the extended-precision `y·log2(x)` chain otherwise.
+# not msvcrt's algorithms. `pow` uses binary squaring for signed Int32
+# integer exponents and the extended-register `y·log2(x)` chain otherwise.
 #
-# The functions below emulate that hardware semantics: each elementary step
-# is rounded to the 64-bit extended significand through `BigFloat` (MPFR
-# precision 64), then stored back to `Float64`. Verified bit-for-bit against
-# the 4.15.2 Windows binary on fuzzed differential sweeps.
+# The existing trigonometric/exponential shims retain their MPFR emulation.
+# Power executes the native x87 instructions on Windows x86_64: transcendental
+# instructions retain extended values while arithmetic observes the caller's
+# control word. Hosted Gmsh DLLs inherit that word; the standalone executable
+# starts with 64-bit arithmetic precision. A task-local CLI context selects
+# that precision only during the non-yielding native power kernel, so file I/O
+# and task scheduling cannot leak hardware state into another Julia task.
 # ---------------------------------------------------------------------------
 
 const _X87_LIM = 9.223372036854776e18    # 2^63 — FPU trig reduction range limit
@@ -207,96 +210,151 @@ function _win_log(x::Float64)
     return Float64(_x87e(l2 * _X87_LN2[]))
 end
 
-# Binary squaring matching the binary's integer-exponent path. Mantissas are
-# plain `Float64` products — bit-identical to naive squaring — but excess
-# exponent is tracked separately so `x^n` past the overflow boundary (e.g.
-# `2^-1074`) still scales correctly instead of collapsing through `Inf`.
-@inline function _powi_extract(v::Float64)
-    isfinite(v) || return (v, 0)
-    s = exponent(v)
-    return ldexp(v, -s), s
-end
-function _win_powi(x::Float64, n::Int64)
-    neg = n < 0
-    e = neg ? -n : n
-    # A finite Float64 base contributes at most 1023 binary exponent bits
-    # per factor. Int64 integer powers can therefore require more than 64
-    # exponent bits; Int128 keeps every squaring and sum exact without
-    # allocating. Wrapping an Int accumulator reverses overflow/underflow.
-    r, re = 1.0, Int128(0)
-    b, be = x, Int128(0)
-    # Normalize an already-large base before its first square. Otherwise
-    # x*x can overflow before extraction, losing a representable reciprocal
-    # power such as (2^512)^(-2) = 2^(-1024).
-    if abs(b) >= 7.237005577332262e75
-        b, s = _powi_extract(b); be += s
+# MinGW's pow.def.h admits the complete signed Int32 range, inclusively.
+# Larger integral exponents use log2l/exp2l, whose rounding is observably
+# different from repeated Float64 squaring near one.
+const _WIN_X87_NATIVE = Sys.iswindows() && Sys.ARCH === :x86_64
+const _WIN_CLI_PRECISION_KEY = gensym(:TessellaCLIPrecision)
+
+@static if Sys.iswindows() && Sys.ARCH === :x86_64
+    @inline function _win_x87_control_word()
+        Base.llvmcall(raw"""
+            %word = alloca i16, align 2
+            call void asm sideeffect "fnstcw ($0)", "r,~{memory}"(ptr %word)
+            %result = load i16, ptr %word, align 2
+            ret i16 %result
+            """,UInt16,Tuple{})
     end
-    while e > 0
-        if isodd(e)
-            r *= b; re += be
-            if abs(r) >= 7.237005577332262e75      # 2^256 — keep products finite
-                r, s = _powi_extract(r); re += s
-            end
-        end
-        b *= b; be += be
-        if abs(b) >= 7.237005577332262e75
-            b, s = _powi_extract(b); be += s
-        end
-        e >>= 1
+
+    @inline function _win_x87_set_control_word!(word::UInt16)
+        Base.llvmcall(raw"""
+            %slot = alloca i16, align 2
+            store i16 %0, ptr %slot, align 2
+            call void asm sideeffect "fldcw ($0)", "r,~{memory},~{fpsr}"(ptr %slot)
+            ret void
+            """,Cvoid,Tuple{UInt16},word)
     end
-    m = neg ? 1.0 / r : r
-    final_exponent = neg ? -re : re
-    # ldexp takes a machine Int. Exponents outside that range are already
-    # far beyond Float64's range; retain the sign of the actual mantissa.
-    final_exponent > typemax(Int) && return copysign(Inf, m)
-    final_exponent < typemin(Int) && return copysign(0.0, m)
-    # Julia's ldexp can prematurely return zero for m<1 at exponent -1074.
-    # Scale to units of the minimum subnormal first (still an exact normal
-    # operation), then let one hardware multiplication round the final value.
-    # The bounded mantissa makes the intermediate safe from overflow.
-    final_exponent < -1022 &&
-        return ldexp(m, Int(final_exponent)+1074) * 5.0e-324
-    return ldexp(m, Int(final_exponent))
+
+    @inline function _win_x87_sqrt(x::Float64)
+        Base.llvmcall(raw"""
+            %input = alloca double, align 8
+            %out = alloca double, align 8
+            store double %0, ptr %input, align 8
+            call void asm sideeffect "fldl ($1); fsqrt; fstpl ($0)", "r,r,~{st},~{memory},~{fpsr}"(ptr %out,ptr %input)
+            %result = load double, ptr %out, align 8
+            ret double %result
+            """,Float64,Tuple{Float64},x)
+    end
+
+    # Independent native implementation of the log2l/exp2l instruction path.
+    # Positive finite x and finite y are admitted by _win_pow. The logarithm
+    # chooses FYL2XP1 for |x-1|<=0.29 in the caller's arithmetic precision;
+    # otherwise it uses FYL2X. No extended intermediate is stored as Float64.
+    # Only exponent truncation changes the control word, which is restored
+    # before F2XM1/FSCALE. All x87 stack entries are popped before returning.
+    @inline function _win_x87_powlog(x::Float64,y::Float64)
+        Base.llvmcall(raw"""
+            %xs = alloca double, align 8
+            %ys = alloca double, align 8
+            %out = alloca double, align 8
+            %limit = alloca double, align 8
+            %cw = alloca [2 x i16], align 2
+            %cwnew = getelementptr [2 x i16], ptr %cw, i64 0, i64 1
+            store double %0, ptr %xs, align 8
+            store double %1, ptr %ys, align 8
+            store double 0x3FD28F5C28F5C28F, ptr %limit, align 8
+            call void asm sideeffect "fld1; fldl ($1); fld %st(0); fsub %st(2), %st(0); fld %st(0); fabs; fldl ($5); fcomip %st(1), %st(0); fstp %st(0); jae 0f; fstp %st(0); fyl2x; jmp 1f; 0: fstp %st(1); fyl2xp1; 1: fldl ($2); fmulp; fld %st(0); fnstcw ($3); movzwl ($3), %eax; orb $$12, %ah; movw %ax, ($4); fldcw ($4); frndint; fldcw ($3); fsubr %st(0), %st(1); fxch; f2xm1; fld1; faddp; fscale; fstp %st(1); fstpl ($0)", "r,r,r,r,r,r,~{rax},~{st},~{st(1)},~{st(2)},~{st(3)},~{st(4)},~{memory},~{dirflag},~{fpsr},~{flags}"(ptr %out,ptr %xs,ptr %ys,ptr %cw,ptr %cwnew,ptr %limit)
+            %result = load double, ptr %out, align 8
+            ret double %result
+            """,Float64,Tuple{Float64,Float64},x,y)
+    end
 end
 
-function _win_pow(x::Float64, y::Float64)
-    y == 0.0 && return 1.0                          # NaN^0 = 1, like fdlibm
-    (isnan(x) || isnan(y)) && return x + y
+@inline function _with_win_cli_precision(callback::F) where F
+    @static if Sys.iswindows() && Sys.ARCH === :x86_64
+        # Base restores the previous task-local value in finally, including
+        # nested calls and exceptions. Hardware state is untouched here: the
+        # callback may yield or migrate to a different OS thread during I/O.
+        return task_local_storage(callback,_WIN_CLI_PRECISION_KEY,true)
+    else
+        return callback()
+    end
+end
+
+@inline function _win_cli_precision()
+    # Reading an absent key must not initialize a task's storage on a hot API
+    # path. The task field is nothing until a task-local value has been set.
+    storage=current_task().storage
+    return storage!==nothing && get(storage,_WIN_CLI_PRECISION_KEY,false)===true
+end
+
+function _win_powi_product(base::Float64,exponent::UInt32)
+    result=isodd(exponent) ? base : 1.0
+    exponent>>=1
+    while true
+        base*=base
+        isodd(exponent) && (result*=base)
+        exponent>>=1
+        exponent==0 && return result
+    end
+end
+
+function _win_powi(x::Float64,n::Int32)
+    base=abs(x)
+    # Widen before negation: typemin(Int32) belongs to the primary fast path.
+    exponent=UInt32(n<0 ? -Int64(n) : n)
+    result=exponent==0 ? 1.0 : exponent==1 ? base :
+           _win_powi_product(base,exponent)
+    if n<0
+        # MinGW retries an overflowing reciprocal power with 1/base first.
+        # This retains representable subnormals with the primary's rounding.
+        result=isinf(result) && base>1.0 ?
+            _win_powi_product(1.0/base,exponent) : 1.0/result
+    end
+    return signbit(x) && isodd(n) ? -result : result
+end
+
+@inline _win_pow_odd(y::Float64)=isinteger(y) &&
+    abs(y)<9007199254740992.0 && isodd(Int64(y))
+
+function _win_pow(x::Float64,y::Float64)
+    _WIN_X87_NATIVE || return _gm_pow(x,y)
+    if _win_cli_precision()
+        saved=_win_x87_control_word()
+        _win_x87_set_control_word!((saved&0xfcff)|UInt16(0x0300))
+        try
+            # This kernel contains no Julia allocation, callbacks, or yielding
+            # operations. Restore this OS thread before task scheduling resumes.
+            return _win_pow_native(x,y)
+        finally
+            _win_x87_set_control_word!(saved)
+        end
+    end
+    return _win_pow_native(x,y)
+end
+
+function _win_pow_native(x::Float64,y::Float64)
+    (y==0.0 || x==1.0) && return 1.0
+    isnan(x) && return x
+    isnan(y) && return y
+    if x==0.0
+        magnitude=y<0.0 ? Inf : 0.0
+        return signbit(x) && _win_pow_odd(y) ? -magnitude : magnitude
+    end
     if isinf(y)
-        absx = abs(x)
-        absx == 1.0 && return 1.0                   # pow(±1, ±Inf) = 1
-        return (absx > 1) == (y > 0) ? Inf : 0.0
+        abs(x)==1.0 && return 1.0
+        return (abs(x)>1.0)==(y>0.0) ? Inf : 0.0
     end
     if isinf(x)
-        # (-Inf)^y: an odd-integer exponent flips the sign; every other
-        # exponent (non-integer included) behaves like +Inf^y. Doubles
-        # ≥ 2^53 are all even, so `isodd` settles parity wherever it applies.
-        if x < 0.0 && isinteger(y) && abs(y) < _X87_LIM &&
-           isodd(Int64(y))
-            return y > 0.0 ? -Inf : -0.0
-        end
-        return y > 0.0 ? Inf : 0.0
+        magnitude=y>0.0 ? Inf : 0.0
+        return signbit(x) && _win_pow_odd(y) ? -magnitude : magnitude
     end
-    if isinteger(y) && abs(y) < _X87_LIM
-        return _win_powi(x, Int64(y))
-    end
-    if x < 0.0
-        # Integer exponents past the Int64 range are all even — the binary
-        # squares |x|. Non-integer exponents on a negative base are the
-        # x87 indefinite NaN.
-        isinteger(y) || return (x - x) / (x - x)
-        x = -x
-    end
-    x == 0.0 && return y < 0 ? Inf : 0.0
-    l2 = _x87e(log2(_x87b(x)))
-    v = _x87e(_x87b(y) * l2)
-    vf = Float64(v)
-    vf >= _X87_LIM && return Inf
-    vf <= -_X87_LIM && return 0.0
-    k = round(Int64, vf)
-    f = _x87e(v - k)
-    s = _x87e(BigFloat(2; precision=256) ^ BigFloat(f; precision=256))
-    return Float64(s * exp2(BigFloat(k; precision=256)))
+    isinteger(y) && typemin(Int32)<=y<=typemax(Int32) &&
+        return _win_powi(x,Int32(y))
+    x<0.0 && !isinteger(y) && return -NaN
+    y==0.5 && return _win_x87_sqrt(x)
+    magnitude=_win_x87_powlog(abs(x),y)
+    return x<0.0 && _win_pow_odd(y) ? -magnitude : magnitude
 end
 
 function _win_atan2(y::Float64, x::Float64)

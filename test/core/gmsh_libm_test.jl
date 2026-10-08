@@ -2,9 +2,9 @@ using Test
 using Tessella
 
 @testset "Windows integer powers preserve large exponent direction" begin
-    # Powers of two have an independent exact exponent oracle. The previous
-    # Int64 exponent accumulator wrapped before the final Float64 scaling,
-    # reversing overflow and underflow for some large integer exponents.
+    # Powers of two have an independent exact exponent oracle. Large integer
+    # exponents belong to the primary log2l/exp2l path; their product must retain
+    # its overflow/underflow direction rather than wrap an integer accumulator.
     for power in (-1023,-1000,-538,-537,-512,-58,-20,-2,-1,0,1,2,20,58,
                   512,537,538,1000,1023),
         count in (-9e18,-4e18,-3425408785282518016.0,-1e18,-1075.0,-1074.0,
@@ -26,7 +26,7 @@ using Tessella
         @test Tessella.GmshLibm._win_pow(base,-2.0) ===
               Float64(inv(BigFloat(base;precision=256)^2))
     end
-    # Widened exponent tracking must keep this integer fast path allocation-free.
+    # Large integral exponents use native extended registers without allocation.
     measure(f)=(f(); @allocated f())
     for count in (3425408785282518016.0,-3425408785282518016.0,4500000000000001.0)
         @test measure(()->Tessella.GmshLibm._win_pow(2.0^58,count))==0

@@ -6,6 +6,10 @@ Manifest.toml
 *.jl.mem
 .DS_Store
 
+# Python validation bytecode
+__pycache__/
+*.py[cod]
+
 # Test / build artifacts
 /test/tmp/
 /test/artifacts/*.tmp

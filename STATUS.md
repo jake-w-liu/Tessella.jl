@@ -23,7 +23,76 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
-### Fresh audit in progress (2026-10-09)
+### Current verified audit increment (2026-10-09)
+
+The first arithmetic/STL/CRC and validation-harness increment is pushed to
+`main` as `c33a446`. The following independently reviewed increment is based
+on that commit. The complete P1–P6 roadmap and full audit remain active.
+
+- Windows x86-64 power evaluation now follows the pinned binary's signed
+  Int32 integer admission, reciprocal restart, fractional and special-value
+  paths, and x87 arithmetic. Direct API/GEO calls inherit caller precision;
+  CLI evaluation uses task-local context and short, non-yielding hardware
+  precision scopes. Exceptions, nested calls, yielding tasks and migrating
+  workers restore their own state. The required aggregate power child passes
+  2,874 inputs in all twelve precision/rounding modes and 132 standalone
+  native-executable comparisons. Independent additional raw-bit/NaN probes
+  pass 65,544 comparisons on the two supported runtimes. Warmed 1k/2k/4k
+  scalar loops allocate zero bytes. Other Windows transcendental paths and
+  execution on other platforms remain separate audit surfaces.
+- The three smoothers and mesh-copy/removal paths avoid redundant copies
+  before the ordinary validating, copying `Mesh` constructor. Internal
+  coordinate workspaces and detached output ownership are preserved.
+  Each runtime passes 363 focused and 259 resource assertions, including
+  exact-rational unit-cube volume and literal connectivity CRCs. Tagged
+  1k/2k/4k-tet probes save at least 48 bytes per tet for each smoother and
+  144 bytes per tet for copy/removal, with identical retained output.
+- Explicit-angle Blossom recombination of an odd triangle count follows
+  the primary's angle-filtered greedy fallback. Tuple corner workspaces
+  preserve represented-value arithmetic while removing 480 bytes per
+  candidate call. Each runtime passes 237 focused, 452 primary, 33 resource
+  and 10,084 tuple assertions. Public 8,192-triangle grids save roughly
+  1.97–5.01 MB with identical CRCs and validated detached output. Even-count
+  primary perfect-matching failure/closure behavior and extreme-aspect
+  quality underflow remain confirmed open findings.
+- All six negative GEO-constraint oracle cases run in a bounded child
+  process, whose exit releases the primary parser's leaked Windows file
+  handles. All 32 positive and six negative cases remain required; the full
+  38-case driver passes on both runtimes with byte-identical logs and no
+  cleanup warnings. Unexpected acceptance and child failure still fail.
+- `.gitattributes` preserves exact bytes for the hash-bound Windows-power
+  artifacts. Actual Git index checkouts with `core.autocrlf=true` and `false`
+  reproduce all four source/data hashes. Without this rule the Windows
+  corpus checksum changed on checkout. Python bytecode is ignored.
+
+Both full package gates pass **1,527,223 checks** against the same 499-input
+V2 binding: Julia 1.12.7 in 38m40.5s (wrapper 2,326.287 seconds) and
+Julia 1.13.1 in 31m12.2s (wrapper 1,877.328 seconds). Log SHA256 values are
+`7c18b904fd98a2bbac7366d6ff76a978cbd60201b57518c83a2e5f062eaf0e2a`
+and `c5abacbe20917cdedbab059dbab96ca5298bd01fd5a233349e8f5cd05d44243c`.
+The final 500-input V3 binding adds only `.gitattributes`, retaining every
+tested runtime/project/test/validation/data byte; its SHA256 is
+`482c36b7ea281aad5c9f1b4fa6f38a7342b7c954c21478357813d53955abd19d`.
+Integration into main preserves every unrelated main byte, including immutable
+fixtures. All 21 selected paths match the tested candidate exactly. Forty-seven
+unselected files differ between the worktrees solely by LF/CRLF representation;
+their raw-byte normalization is independently compared and recorded. The
+explicit 500-input main V4 binding SHA256 is
+`c3522b14e519ed1aeb944cfb3f23f34c16e19d82fc361c016a1d1b9620abae20`.
+
+The next aggregate passes the changed Windows-power and constraint children
+and the preceding geometry/model/refinement children, then stops during the
+affine-transform child without a terminal result. The earlier main remainder
+passes through embedded-Line validation, then stops during embedded-Surface
+validation without a terminal result. OS inspection confirms both owned
+process trees are absent; these runs are incomplete and are not counted as
+aggregate passes. Remaining exact children are being resumed. The existing
+higher-generation birth-identity gap and full-array function-space resource
+failure also remain open gates. The independently verified batched
+function-space proposal preserves the original golden checksum and all
+40,320 Hex orientations; installed-driver promotion is the next harness step.
+
+### First arithmetic/STL/CRC audit increment (`c33a446`)
 
 The audit starts from clean local/remote `main` at `7ca0698`, including the
 pushed free-B4/lifecycle increment `b2966fd`. The complete P1–P6 scope in

@@ -13,6 +13,7 @@ using ..GeoExec: execute_geo, geo_entity_mesh
 using ..IO: write_msh
 using ..Model: model_periodic_constraints, model_to_mixed
 using ..Elements: write_mixed_msh, MixedMesh
+using ..GmshLibm: _with_win_cli_precision
 
 export main
 
@@ -70,8 +71,18 @@ periodic volume relations are mesh-inert and unserialized, matching Gmsh 4.15.2.
 Independent periodic curves in volumes remain blocked.
 Duplicate or conflicting flags, multiple inputs, ignored output arguments, and any
 output that aliases the input are rejected.
+On Windows x86_64, power expressions select the standalone Gmsh executable's
+64-bit x87 arithmetic precision in a task-local execution context. Each native
+power operation restores the complete caller control word before returning.
+Direct API and `execute_geo` calls retain caller precision.
 """
 function main(args::AbstractVector{<:AbstractString})
+    return _with_win_cli_precision() do
+        _main(args)
+    end
+end
+
+function _main(args::AbstractVector{<:AbstractString})
     length(args)<=_MAX_ARGUMENTS || throw(ArgumentError(
         "tessella: more than $_MAX_ARGUMENTS command-line arguments"))
     isempty(args) && throw(ArgumentError("tessella: missing input file"))
@@ -113,8 +124,11 @@ function main(args::AbstractVector{<:AbstractString})
         result.mesh===nothing && throw(ErrorException("tessella: no mesh produced"))
         constraints=model_periodic_constraints(result.model)
         target=nothing
+        # The parsed dimension is settled before closure capture. Capturing
+        # mutable dim would box every use in this execution function.
+        mesh_dimension=dim
         embedded=any(
-            pair->pair.first[1]==dim && !isempty(pair.second),
+            pair->pair.first[1]==mesh_dimension && !isempty(pair.second),
             pairs(result.model.embeds))
         targets=dim==2 ? result.model.surfaces : result.model.volumes
         if length(targets)==1

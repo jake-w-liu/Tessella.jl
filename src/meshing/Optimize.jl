@@ -187,8 +187,8 @@ function smooth_laplacian(m::Mesh; iters::Integer=5, relax::Real=1.0)
             ok || (coords[1,v]=ox; coords[2,v]=oy; coords[3,v]=oz)
         end
     end
-    return Mesh(coords; segs=copy(m.segs), tris=copy(m.tris), tets=copy(m.tets),
-                seg_tag=copy(m.seg_tag), tri_tag=copy(m.tri_tag), tet_tag=copy(m.tet_tag))
+    return Mesh(coords; segs=m.segs, tris=m.tris, tets=m.tets,
+                seg_tag=m.seg_tag, tri_tag=m.tri_tag, tet_tag=m.tet_tag)
 end
 
 """
@@ -261,8 +261,8 @@ function smooth_odt(m::Mesh; iters::Integer=5)
             ok || (coords[1,v]=ox; coords[2,v]=oy; coords[3,v]=oz)
         end
     end
-    return Mesh(coords; segs=copy(m.segs), tris=copy(m.tris), tets=copy(m.tets),
-                seg_tag=copy(m.seg_tag), tri_tag=copy(m.tri_tag), tet_tag=copy(m.tet_tag))
+    return Mesh(coords; segs=m.segs, tris=m.tris, tets=m.tets,
+                seg_tag=m.seg_tag, tri_tag=m.tri_tag, tet_tag=m.tet_tag)
 end
 
 """
@@ -325,8 +325,8 @@ function smooth_optimize(m::Mesh; iters::Integer=8, sliver_deg::Real=10.0,
             end
         end
     end
-    return Mesh(coords; segs=copy(m.segs), tris=copy(m.tris), tets=copy(m.tets),
-                seg_tag=copy(m.seg_tag), tri_tag=copy(m.tri_tag), tet_tag=copy(m.tet_tag))
+    return Mesh(coords; segs=m.segs, tris=m.tris, tets=m.tets,
+                seg_tag=m.seg_tag, tri_tag=m.tri_tag, tet_tag=m.tet_tag)
 end
 
 # Every quality/smoothing contract assumes a finite, positively oriented
@@ -408,9 +408,10 @@ function remove_slivers(m::Mesh; max_rounds::Integer=8, sliver_deg::Real=10.0)
                   min_dihedral_before = q0.min_dihedral_deg, min_dihedral_after = qf.min_dihedral_deg)
 end
 
-@inline _copy_mesh(m::Mesh)=Mesh(copy(m.coords);segs=copy(m.segs),tris=copy(m.tris),
-    tets=copy(m.tets),seg_tag=copy(m.seg_tag),tri_tag=copy(m.tri_tag),
-    tet_tag=copy(m.tet_tag))
+# Mesh validates and copies every supplied buffer. Passing the original arrays
+# preserves detached output ownership without creating an extra copy first.
+@inline _copy_mesh(m::Mesh)=Mesh(m.coords;segs=m.segs,tris=m.tris,
+    tets=m.tets,seg_tag=m.seg_tag,tri_tag=m.tri_tag,tet_tag=m.tet_tag)
 
 # star quality = min over incident tets of min(min_dihedral, π − max_dihedral): a
 # sliver (needle OR cap) drives this toward 0. Maximizing it removes both sliver types.
