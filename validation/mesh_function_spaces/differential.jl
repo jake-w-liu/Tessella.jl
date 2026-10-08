@@ -223,6 +223,12 @@ end
 
 function _write_floats!(stream,label,values)
     _function_checksum_header!(stream,label,length(values))
+    _write_float_chunk!(stream,values)
+end
+
+# Append a bounded orientation batch under the original single record header.
+# Orientation-major batches preserve the full-array checksum byte protocol.
+function _write_float_chunk!(stream,values)
     used=0
     for value in values
         _function_put_u64!(stream.buffer,used+1,reinterpret(UInt64,Float64(value)))
@@ -662,16 +668,19 @@ try
             local gmsh_basis
             try
                 gmsh_basis=gmsh.model.mesh.getBasisFunctions(
-                    element_type,nodal_coordinates,space)
-            catch
+                    element_type,nodal_coordinates,space,Int32[0])
+            catch err
+                # Allocation, memory-access and interruption failures are
+                # oracle failures, never semantic unsupported-family evidence.
+                err isa ErrorException || rethrow()
                 _rejects_argument(()->Tessella.API.mesh.get_basis_functions(
-                    element_type,nodal_coordinates,space)) || error(
+                    element_type,nodal_coordinates,space,Int32[0])) || error(
                     "type-$element_type $space: Gmsh rejected but Tessella " *
                     "accepted")
                 continue
             end
             tessella_basis=Tessella.API.mesh.get_basis_functions(
-                element_type,nodal_coordinates,space)
+                element_type,nodal_coordinates,space,Int32[0])
             label="type-$element_type $space high-order"
             _compare_exact("$label components",gmsh_basis[1],tessella_basis[1])
             _compare_float("$label basis",gmsh_basis[2],tessella_basis[2])
@@ -718,7 +727,28 @@ try
             _write_ints!(
                 stream,"$label:meta",
                 (tessella_basis[1],tessella_basis[3],gmsh_key_count))
-            _write_floats!(stream,"$label:selected",tessella_basis[2])
+            # Compare every original point/function for every orientation,
+            # retaining at most 128 primary/native orientation blocks. Keep
+            # the historic (full-array) selected-label checksum record intact.
+            per_orientation=length(tessella_basis[2])
+            _function_checksum_header!(stream,"$label:selected",
+                orientation_count*per_orientation)
+            for first_orientation in 0:128:orientation_count-1
+                last_orientation=min(first_orientation+127,orientation_count-1)
+                batch=Int32.(first_orientation:last_orientation)
+                oracle=gmsh.model.mesh.getBasisFunctions(
+                    element_type,nodal_coordinates,space,batch)
+                native=Tessella.API.mesh.get_basis_functions(
+                    element_type,nodal_coordinates,space,batch)
+                _compare_exact("$label batch components",gmsh_basis[1],oracle[1])
+                _compare_exact("$label batch native components",gmsh_basis[1],native[1])
+                _compare_exact("$label batch orientations",orientation_count,oracle[3])
+                _compare_exact("$label batch native orientations",orientation_count,native[3])
+                _compare_exact("$label batch length",length(batch)*per_orientation,length(native[2]))
+                _compare_float("$label basis orientations $first_orientation:$last_orientation",
+                    oracle[2],native[2])
+                _write_float_chunk!(stream,native[2])
+            end
             high_order_case_count+=1
         end
 

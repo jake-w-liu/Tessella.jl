@@ -23,11 +23,47 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
-### Current verified audit increment (2026-10-09)
+### Current function-space validation repair (2026-10-09)
+
+The Windows-power/CLI, Optimize and recombination increment is pushed to
+`main` as `b373b5b`. The function-space differential now compares complete
+high-order orientation sets in ascending batches of 128 rather than retaining
+both complete result arrays simultaneously. All original 20 points, every
+function, all 40,320 Hex orientations, selected-orientation spread checks,
+key/catalog checks and numerical tolerances remain required. The original
+single checksum record header and orientation-major bytes are preserved.
+Memory-access, allocation and interruption errors propagate instead of being
+classified as unsupported semantics.
+
+Independent full-array versus batched proofs pass 9,951 assertions on each
+supported runtime, including exact equality to each engine's original array
+slices and checksum bytes. The largest paired returned arrays shrink from
+11,612,160,000 to 36,864,000 bytes, a factor of 315. This measures returned
+array payload, not peak process RSS or a universal speed improvement.
+
+The actual installed complete driver passes on Julia 1.12.7 and 1.13.1,
+with terminal exit 0 and all 500 V5 inputs held. Driver times are
+127.470/103.999 seconds; wrappers take 153.534/124.245 seconds. Both retain
+124 fixed nodal types/248 cases, 20 family aliases, 384 actual-order cases,
+16 explicit-order cases and 14 non-simplex order-one H1 cases. The unchanged
+golden SHA256 is
+`b28f429e11b56c08f8b39999b892a7132cdd9d7eed79a5cf2e63835fdf525ac4`;
+maximum absolute difference on the current promoted base is
+`1.172741143307121e-6`. The 500-input V5 manifest SHA256 is
+`4f4358a3278ffd921320db1fed9fe836b1c393ea9679fd39dd0ad49a9ad95359`.
+Only the validation driver differs from V4; production, project, tests and
+immutable artifacts remain held. The completed full package gates below
+still verify the unchanged production/test inputs. The exact remaining
+aggregate suffix is running under this explicit V5 binding. Its unfinished
+results and the separate higher-generation birth-identity failure do not
+constitute an aggregate pass or completion of the full audit.
+
+### Windows-power and allocation increment (`b373b5b`, pushed)
 
 The first arithmetic/STL/CRC and validation-harness increment is pushed to
-`main` as `c33a446`. The following independently reviewed increment is based
-on that commit. The complete P1–P6 roadmap and full audit remain active.
+`main` as `c33a446`. The independently reviewed Windows-power and allocation
+increment is pushed as `b373b5b`, based on that commit. The complete P1–P6
+roadmap and full audit remain active.
 
 - Windows x86-64 power evaluation now follows the pinned binary's signed
   Int32 integer admission, reciprocal restart, fractional and special-value
