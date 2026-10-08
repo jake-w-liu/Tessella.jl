@@ -89,8 +89,8 @@ _gm_libm_available() = _GM_LIBM.sin[] != C_NULL
 # not msvcrt's algorithms. `pow` uses binary squaring for signed Int32
 # integer exponents and the extended-register `y·log2(x)` chain otherwise.
 #
-# The existing trigonometric/exponential shims retain their MPFR emulation.
-# Power executes the native x87 instructions on Windows x86_64: transcendental
+# The sine/cosine and exponential shims retain their MPFR emulation.
+# Power and atan2 execute native x87 instructions on Windows x86_64: transcendental
 # instructions retain extended values while arithmetic observes the caller's
 # control word. Hosted Gmsh DLLs inherit that word; the standalone executable
 # starts with 64-bit arithmetic precision. A task-local CLI context selects
@@ -235,6 +235,19 @@ const _WIN_CLI_PRECISION_KEY = gensym(:TessellaCLIPrecision)
             """,Cvoid,Tuple{UInt16},word)
     end
 
+    @inline function _win_x87_atan2(y::Float64,x::Float64)
+        Base.llvmcall(raw"""
+            %yp = alloca double, align 8
+            %xp = alloca double, align 8
+            %out = alloca double, align 8
+            store double %0, ptr %yp, align 8
+            store double %1, ptr %xp, align 8
+            call void asm sideeffect "fldl ($1); fldl ($2); fpatan; fstpl ($0)", "r,r,r,~{st},~{st(1)},~{memory},~{fpsr}"(ptr %out, ptr %yp, ptr %xp)
+            %answer = load double, ptr %out, align 8
+            ret double %answer
+            """,Float64,Tuple{Float64,Float64},y,x)
+    end
+
     @inline function _win_x87_sqrt(x::Float64)
         Base.llvmcall(raw"""
             %input = alloca double, align 8
@@ -359,6 +372,9 @@ end
 
 function _win_atan2(y::Float64, x::Float64)
     (isnan(y) || isnan(x)) && return y + x
+    # FPATAN has fixed internal precision; its Float64 store obeys caller RC.
+    # It needs no CLI precision override and leaves the stack/control word intact.
+    _WIN_X87_NATIVE && return _win_x87_atan2(y,x)
     return Float64(_x87e(atan(_x87b(y), _x87b(x))))
 end
 
