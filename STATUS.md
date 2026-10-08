@@ -23,7 +23,41 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
-### Current function-space validation repair (2026-10-09)
+### Current MSH-width oracle cleanup (2026-10-09)
+
+The function-space memory repair is pushed as `16ca900`. The exact remaining
+aggregate suffix then passes all fourteen semantic children and the original
+five-solid/coax/report tail with terminal exit 0 in 1,911.994 seconds and
+all 500 V5 inputs held. Its log SHA256 is
+`e8f7fb9e63b611e6c02368c0ca85d0ff3c7674a1c2feabff3c0f5f96a47125b6`.
+This completes that explicitly bounded remainder; the separate generation
+birth-history gate and full current aggregate remain open.
+
+The successful remainder still logs `EBUSY` cleanup errors in the MSH-width
+child. An independent primary-only control proves that Gmsh 4.15.2 retains
+the file handle after rejecting a four-byte binary-width header, including
+after `clear` and `finalize`; a valid eight-byte file closes immediately.
+Process exit releases the rejected file. The driver now confines only that
+expected negative oracle open to a child process, then explicitly deletes
+the fixture before temporary-directory cleanup. The child's expected
+`ErrorException` and exact width diagnostic are required; unexpected
+acceptance, missing input, unrelated errors and child failure remain failures.
+The original native narrow-header/structural/signature checks and fresh
+primary default-width element-count check remain unchanged.
+
+Both complete installed drivers pass on Julia 1.12.7/1.13.1 with byte-identical
+logs, SHA256
+`9f9447fa833a69a2c00884479241236676bb75544d9cf2d8c2866d45f7fa66a8`,
+and no cleanup warnings. Valid-wide and missing-input negative controls
+fail explicitly for their expected reasons. The new 501-input V6 binding
+changes only this validation driver and adds its child helper; production,
+project, package tests and existing artifacts remain unchanged. V6 SHA256:
+`7e55dbcedf3965bc0df6109e88abc3133bf7ead56e398728f02d079823fd7f23`.
+The full P1–P6 audit continues with higher-generation actual-input/lifecycle
+contracts, even matching/greedy priority and extreme-range quad quality.
+Those production candidates remain in separate worktrees until verified.
+
+### Function-space validation repair (`16ca900`, pushed)
 
 The Windows-power/CLI, Optimize and recombination increment is pushed to
 `main` as `b373b5b`. The function-space differential now compares complete

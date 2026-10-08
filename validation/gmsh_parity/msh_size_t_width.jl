@@ -26,7 +26,8 @@ function find_gmsh_api()
     end
     error("could not locate gmsh.jl")
 end
-include(find_gmsh_api())
+const GMSH_API=find_gmsh_api()
+include(GMSH_API)
 
 function mesh_signature(mesh)
     return (mesh.coords,
@@ -75,14 +76,13 @@ mktempdir() do dir
         # Pinned Gmsh must reject the narrow file: its 64-bit reader requires
         # sizeof(size_t)=8, which is why the writer gates this behind
         # gmsh_compatible=false.
-        rejected=false
-        try
-            gmsh.clear()
-            gmsh.open(narrow)
-        catch
-            rejected=true
-        end
-        rejected || error("Gmsh 4.15.2 accepted a 4-byte size_t file")
+        # The pinned reader keeps its rejected file handle open even after
+        # clear/finalize. Confine this one negative oracle open to a child;
+        # process exit must release the handle before fixture cleanup.
+        error_oracle=joinpath(@__DIR__,"msh_width_error_primary.jl")
+        project=normpath(joinpath(@__DIR__,"..",".."))
+        run(`$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$project $error_oracle $GMSH_API $narrow`)
+        rm(narrow)
 
         wide=joinpath(dir,"tessella-wide.msh")
         Elements.write_mixed_msh(wide,read;binary=true)
@@ -91,8 +91,8 @@ mktempdir() do dir
         gmsh.finalize()
     end
 
-    # A failed open poisons Gmsh's model state, so verify the default-width
-    # file loads identically in a fresh session.
+    # Keep the original fresh-session default-width check. The rejected
+    # narrow-file open above affects only the completed child process.
     gmsh.initialize(["gmsh","-v","0"])
     try
         gmsh.open(joinpath(dir,"tessella-wide.msh"))
