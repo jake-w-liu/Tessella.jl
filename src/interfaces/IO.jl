@@ -20,6 +20,7 @@ module IO
 
 using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets, node, validate
 using ..Elements: MSH_PHYSICAL_NAME_MAX_BYTES, _copy_physical_names, MixedMesh
+using ..Predicates: _two_diff_tail
 using ..GmshLibm: _gm87_sin, _gm87_cos, _gm_tan, _gm_asin, _gm_acos, _gm_atan,
                   _gm87_atan2, _gm_sinh, _gm_cosh, _gm_tanh, _gm87_exp, _gm87_log,
                   _gm_log10, _gm87_pow
@@ -1099,6 +1100,54 @@ function _read_stl_binary(path,facet_limit::Int=Int(typemax(Int32)))
     end
 end
 
+# Compare an exact represented-coordinate difference with an integer multiple
+# of the tolerance. Since the multiplier is an exactly represented integer,
+# both exact terms are multiples of the smallest subnormal: a zero FMA residual
+# is an exact zero, including subnormal tolerances. Only cancellation with the
+# subtraction tail can require the rational fallback.
+@inline function _stl_bucket_sign(shift::Float64,tail::Float64,
+                                  tolerance::Float64,index::Int)
+    residual=fma(-Float64(index),tolerance,shift)
+    tail==0.0 && return sign(residual)
+    residual==0.0 && return sign(tail)
+    total=residual+tail
+    abs(total)>4eps(Float64)*(abs(residual)+abs(tail)) && return sign(total)
+    return nothing
+end
+
+@inline function _stl_bucket_exact(value::Float64,origin::Float64,
+                                   tolerance::Float64)
+    return floor(Int,(Rational{BigInt}(value)-Rational{BigInt}(origin)) /
+                     Rational{BigInt}(tolerance))
+end
+
+function _stl_bucket_index(value::Float64,origin::Float64,
+                            tolerance::Float64,inverse::Float64)
+    shift=value-origin
+    scaled=shift*inverse
+    scaled<0.5 && return 0
+    index=floor(Int,scaled)
+    fraction=scaled-Float64(index)
+    # Subtraction, reciprocal and multiplication together have relative error
+    # below 8eps, including a subnormal reciprocal (1/floatmax >= 2^-1024).
+    # Away from an integer boundary, this certifies the exact quotient's floor.
+    min(fraction,1.0-fraction)>8eps(Float64)*scaled && return index
+    tail=_two_diff_tail(value,origin,shift)
+    isfinite(tail) || return _stl_bucket_exact(value,origin,tolerance)
+    while true
+        lower=_stl_bucket_sign(shift,tail,tolerance,index)
+        lower===nothing && return _stl_bucket_exact(value,origin,tolerance)
+        if lower<0
+            index-=1
+            continue
+        end
+        upper=_stl_bucket_sign(shift,tail,tolerance,index+1)
+        upper===nothing && return _stl_bucket_exact(value,origin,tolerance)
+        upper<0 && return index
+        index+=1
+    end
+end
+
 function _weld_triangles(tris_xyz::Vector{NTuple{9,Float64}}, reltol::Real,
                          node_limit::Int=Int(typemax(Int32)))
     isempty(tris_xyz) && return Mesh(Matrix{Float64}(undef, 3, 0))
@@ -1171,11 +1220,9 @@ function _weld_triangles(tris_xyz::Vector{NTuple{9,Float64}}, reltol::Real,
     corner=lo; weld_tol=tol; exact_buckets=exact_bucket
     function bucket_component(value::Float64,origin::Float64)
         if exact_buckets
-            ratio=(Rational{BigInt}(value)-Rational{BigInt}(origin)) /
-                  Rational{BigInt}(weld_tol)
-            return floor(Int,ratio)
+            return _stl_bucket_exact(value,origin,weld_tol)
         end
-        return floor(Int,(value-origin)*inv)
+        return _stl_bucket_index(value,origin,weld_tol,inv)
     end
     keyof(p)=(bucket_component(p[1],corner[1]),bucket_component(p[2],corner[2]),
               bucket_component(p[3],corner[3]))

@@ -575,6 +575,22 @@ end
     @test pe.values["m"]==1.0        # even squaring parity on -1
     @test pe.values["n"]==5e-324     # tracked-exponent subnormal squaring
 
+    # Finite integer exponents still exceed a machine Int's accumulated
+    # binary scaling range. Exact powers of two prove the overflow direction;
+    # the pinned Windows Gmsh parser independently returns Inf/0/0/Inf.
+    large_powers=_execute_control_source(
+        "a = (2 ^ 58) ^ 3425408785282518016; " *
+        "b = (2 ^ 58) ^ (-3425408785282518016); " *
+        "c = (2 ^ (-58)) ^ 3425408785282518016; " *
+        "d = (2 ^ (-58)) ^ (-3425408785282518016); " *
+        "e = (2 ^ 512) ^ (-2); f = (2 ^ 537) ^ (-2);")
+    @test large_powers.values["a"]===Inf
+    @test large_powers.values["b"]===0.0
+    @test large_powers.values["c"]===0.0
+    @test large_powers.values["d"]===Inf
+    @test large_powers.values["e"]===ldexp(1.0,-1024)
+    @test large_powers.values["f"]===ldexp(1.0,-1074)
+
     # Trig past the x87 FPU range (|x| ≥ 2^63) takes mingw's assembly
     # fallback — `fldpi; fadd; fprem1` — reducing modulo `2·round64(π_hw)`
     # rather than the 66-bit constant the in-range `fsin`/`fcos` use.

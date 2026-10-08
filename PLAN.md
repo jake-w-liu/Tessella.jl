@@ -697,8 +697,9 @@ orders use Gmsh's tensor transitions, and Prism composes the matching Triangle
 and Line rules.
 Bounded `CompositeGaussN` rules use native Gauss--Legendre, Duffy, and
 Gauss--Jacobi construction with checked point counts. Gmsh 4.15.2 defines no
-Trihedron integration rule. Pyramid/Trihedron hierarchical spaces remain
-pending. `get_basis_functions_orientation` accepts nondefault
+Trihedron integration rule or Pyramid/Trihedron hierarchical spaces; their
+explicit rejection matches the pinned release rather than representing a
+missing parity implementation. `get_basis_functions_orientation` accepts nondefault
 `task`/`num_tasks` (contiguous slice; `task>=num_tasks` is empty where Gmsh 4.15.2
 segfaults); reference quadrature, basis-function, and key queries take no task
 parameters in Gmsh 4.15.2 and neither do these.
