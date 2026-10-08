@@ -30,6 +30,52 @@ meshing must be independent; Gmsh 4.15.2 is only a differential oracle.
 
 ## Current increment
 
+The function-space validation repair is pushed as `16ca900`; remote and
+local `main` matched. The remaining fourteen semantic children and original
+five-solid/coax/report tail are now terminal exit 0, session 52147 drained.
+Wrapper elapsed 1,911.994 seconds; all 500 V5 inputs held. Log SHA256:
+`e8f7fb9e63b611e6c02368c0ca85d0ff3c7674a1c2feabff3c0f5f96a47125b6`.
+Completion ledger:
+`C:/tmp/tessella_validation_remainder112_d_main_v5_completion_20261009.json`,
+SHA256 `dcc403ad98c2783074aaff0408af848b444d949b313c13840bcd46d939f22c3c`.
+This bounded semantic success does not constitute an original/full aggregate
+pass. It still emits MSH-width primary-file cleanup errors.
+
+Current validation-only repair confines only the expected narrow binary-width
+rejection to `validation/gmsh_parity/msh_width_error_primary.jl`. Independent
+primary-only control proves the pinned reader locks that file after rejection,
+clear and finalize; process exit releases it. A valid wide-file control closes
+immediately. Parent native narrow signature/header/structural checks and
+fresh-session primary wide-count check remain intact. Explicit deletion after
+child exit makes cleanup failure fail the driver. Only the precise expected
+width error is counted as rejection; valid-wide-as-negative and missing-input
+controls fail for their expected reasons.
+
+Both actual installed complete drivers are terminal exit 0 and drained:
+`C:/tmp/tessella_msh_width_cleanup_20261009_112.log` and `_113.log`.
+Logs are identical, SHA256
+`9f9447fa833a69a2c00884479241236676bb75544d9cf2d8c2866d45f7fa66a8`,
+with no cleanup warnings. Main V6 manifest:
+`C:/tmp/tessella_deep_audit_main_freeze_20261009_v6.json`, 501 inputs,
+SHA256 `7e55dbcedf3965bc0df6109e88abc3133bf7ead56e398728f02d079823fd7f23`.
+Only the width driver and new child helper change from V5. Production,
+project, package tests and existing artifacts remain held. Self-contained
+cleanup proof: `C:/tmp/tessella_msh_width_cleanup_report_20261009.json`,
+SHA256 `b0fb0af65fc25c09ec355b505ca83d9af9d27b660b1e0602acbfa90131e92e5e`.
+No main frozen jobs remain. Preserve terminal and interrupted evidence;
+do not restart finished package/child/remainder gates.
+
+Unpromoted production work continues in
+`C:/tmp/tessella_higher_impl_20261009` (actual-input producer/lifecycle),
+`C:/tmp/tessella_recombine_even_20261009` (full-closure retry, greedy priority,
+factory labels and matching workspace reuse), and
+`C:/tmp/tessella_deep_audit_quality_20261009` (guarded domain quad quality).
+Keep their owned hunks separate until explicit integration and stable global
+gates. Full weighted/tie behavior, primary angular compatibility and the
+broader P1–P6 roadmap remain active; bounded checks do not prove completion.
+
+## Function-space validation repair (`16ca900`, pushed)
+
 The code/configuration increment described below is pushed as `b373b5b`;
 remote and local `main` matched after push. The current validation-only change
 is `validation/mesh_function_spaces/differential.jl`, exact SHA256
