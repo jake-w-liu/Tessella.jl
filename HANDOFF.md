@@ -8,6 +8,46 @@ allocation efficiency for each increment, push verified changes to main and
 continue. Individual category releases do not complete this goal. Production
 meshing must be independent; Gmsh 4.15.2 is only a differential oracle.
 
+## Current Windows atan2 release (2026-10-09)
+
+The bounded increment follows `f6937be` on main. It contains only the native
+Windows x86_64 FPATAN leaf and 55 scalar regression assertions, plus current
+documentation. Tested source is isolated at
+`C:/tmp/tessella_atan2_release_20261009`, branch
+`codex/atan2-release-20261009`.
+GmshLibm SHA256: `144ee960f66f93b9151a1a2453e14870e4966dac2ac5256b21189adc6cc30238`;
+scalar-test SHA256: `d8657524654beb5565958e110a0aac32cc94a71a994b920900adf2674b851332`.
+All 501 inputs are bound by
+`C:/tmp/tessella_atan2_release_freeze_20261009_v1.json`, SHA256
+`a03c046808026bee3158d4cc13c3f28ec59819930e0b299029f14c21520165c7`.
+Both complete package jobs are terminal exit 0 and drained, with explicit
+`Pkg.test(julia_args=["--check-bounds=yes"])`, no input drift and 1,527,278
+assertions per runtime. Wrapper times are
+2259.455/1803.152 seconds on Julia 1.12.7/1.13.1.
+Results are `C:/tmp/tessella_atan2_release_full_20261009_112_v1_result.json`
+and `_113_v1_result.json`; log SHA256 values are
+`d3223469693e409ccd3f222779333ca23d91836406b8f1c818b5a04291ef109d` and
+`6b64ff8a6dce78eca4fe7ec13d5feb88a737c6179a24312ce0dea50238a26e05`.
+The expected slow-external-process fixture EPIPE stack is not a package
+failure; both parent results and complete summaries are successful.
+Independent scalar/context proofs and final nine-check TLS/error/resource
+review bind the same source/test bytes. Preserve these completed receipts;
+do not restart them. Other Windows math shims remain under audit.
+
+The older joint even/quality/atan2 package jobs (51093/30925, 502-input V1)
+were intentionally interrupted after an independent actual-primary control
+found reachable NaN priority ordering differences. Their wrapper cancellation
+left Julia children alive; the four owned process IDs were checked against
+their original start window/native images/parent links, then stopped.
+They are incomplete, not package-test verdicts. The original 32-case
+AddVerts differential did finish with terminal exit 0 on both runtimes.
+The new priority/aspect worktree is `C:/tmp/tessella_priority_fix_20261009`;
+it preserves the accepted even/private API/workspace and FPATAN changes.
+Its broader primary controls, permissive SGI sort provenance and permanent
+focused checks pass; full package gates remain required. Weighted optimality/ties and
+higher-generation/import work continue in their separate owned trees.
+No category release completes the full user goal.
+
 ## Environment
 
 - Julia compat: `1.12 - 1.13` (Project.toml). Verified on 1.12.7, 1.13.0, 1.13.1.

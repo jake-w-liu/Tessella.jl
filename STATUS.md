@@ -23,6 +23,47 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Windows atan2 verification (2026-10-09)
+
+The native Windows x86_64 atan2 shim now executes `FPATAN` with balanced
+stack-local operands. Its Float64 store obeys the caller's rounding mode;
+the instruction's internal precision is independent of the x87 precision
+setting, so no CLI hardware override is needed. The existing NaN guard and
+non-native emulation remain. This increment changes only `GmshLibm.jl` and
+its scalar regression tests; the evolving recombination/generation work is
+separate.
+
+Both installed scalar-parser proofs pass all 2,364 pairs in twelve control
+word modes (24/53/64-bit precision, four rounding directions), with zero
+primary mismatches, preserved control word/stack top and 83 context checks
+per runtime. The former BigFloat implementation disagrees on 1,150 downward,
+1,200 upward and 373 toward-zero cases in each precision mode. Nine literal
+primary scalar fixtures, exact state checks and bounded-workspace checks add
+55 permanent assertions. Warmed 10,000-call loops use zero bytes, compared
+with 5,459,680–5,459,872 bytes before; the measured scalar loops take about
+0.40 ms versus 48.8–49.6 ms. These are scalar-kernel measurements, not a
+whole-mesher speedup claim.
+
+The 501-input candidate binding is
+`a03c046808026bee3158d4cc13c3f28ec59819930e0b299029f14c21520165c7`.
+Only those two source/test inputs differ from main's V6 binding; all other
+main input bytes and existing artifacts are held. Complete package gates
+with explicit child bounds checks pass on Julia 1.12.7/1.13.1, with
+1,527,278 assertions on each runtime, terminal exit 0 and no input drift.
+Wrapper times are 2259.455/1803.152 seconds;
+log SHA256 values are
+`d3223469693e409ccd3f222779333ca23d91836406b8f1c818b5a04291ef109d` and
+`6b64ff8a6dce78eca4fe7ec13d5feb88a737c6179a24312ce0dea50238a26e05`.
+A separate final TLS/error/resource route passes nine assertions, including
+10,000 finite/NaN/zero iterations preserving the control word and stack top.
+The independent installed FPATAN report SHA256 is
+`3693560b0afffc26a091f1e1fc851211a9e7a6cf3d82256255072c3493bb2c24`.
+
+The full audit remains active. Fresh controls also find outstanding
+neighboring Exp/Log/Sin/Cos precision/range gaps. Weighted matching,
+directed/NaN pair priority, extreme-aspect quality, actual higher-generation
+history and classified MSH reuse remain separate evolving increments.
+
 ### Current MSH-width oracle cleanup (2026-10-09)
 
 The function-space memory repair is pushed as `16ca900`. The exact remaining
