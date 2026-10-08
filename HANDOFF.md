@@ -30,6 +30,46 @@ meshing must be independent; Gmsh 4.15.2 is only a differential oracle.
 
 ## Current increment
 
+The code/configuration increment described below is pushed as `b373b5b`;
+remote and local `main` matched after push. The current validation-only change
+is `validation/mesh_function_spaces/differential.jl`, exact SHA256
+`15377e0ff75b7d0da22c3335920561edbd86ec2836f704c3dfd6e2773186c1a5`.
+It batches all original orientations in groups of 128, retaining all original
+points/functions, spread/key checks, tolerances and checksum bytes. Resource
+errors propagate rather than masquerading as unsupported semantics.
+
+Both actual installed-driver runs are terminal exit 0 and drained; do not
+relaunch them. Logs/results:
+`C:/tmp/tessella_mfs_installed_main_v5_20261009_112*` and `_113*`.
+Driver times 127.470/103.999 seconds; wrappers 153.534/124.245 seconds.
+Log SHA256 values:
+`308a3ec0d6c1668f8324bda4a42759a7d044bef27623e3dfcbd7ccc4253a2f3a`
+and `ff58d9229c3fecd8caa2b1a5a87212feb353fd7b657f84b0de0860ab7db186ed`.
+Golden SHA256 remains
+`b28f429e11b56c08f8b39999b892a7132cdd9d7eed79a5cf2e63835fdf525ac4`;
+current-base maximum difference is `1.172741143307121e-6`.
+Independent batch/full-array proofs pass 9,951 assertions per runtime.
+Largest paired returned array payload is 36,864,000 bytes versus the original
+11,612,160,000; this is not a peak-RSS claim.
+
+Main V5 JSON: `C:/tmp/tessella_deep_audit_main_freeze_20261009_v5.json`,
+SHA256 `4f4358a3278ffd921320db1fed9fe836b1c393ea9679fd39dd0ad49a9ad95359`.
+Ordered 500-input TSV: `C:/tmp/tessella_deep_audit_main_v5_20261009_inputs.tsv`,
+SHA256 `38bc84f0ac84044d77fc7ebe67f44d6b03ca637155f5a6fe923096da8fb2cf9c`.
+Only this validation driver changes from V4. Production/project/package tests
+and immutable artifacts remain unchanged; both completed 1,527,223-check
+package results remain applicable. Self-contained installed proof:
+`C:/tmp/tessella_mfs_installed_main_v5_report_20261009.json`, SHA256
+`0070e6cabd4b63a41ffd49e72023eea60714b9461eeacaaf21b8cdba334d9aca`.
+Remaining suffix session 52147 starts at embedded-Surface and retains all
+fourteen original children plus solid/coax/report tail. Its log/result prefix
+is `C:/tmp/tessella_validation_remainder112_d_main_v5_20261009`.
+Keep all 500 inputs fixed while it runs; docs are outside that binding.
+Neither this harness repair nor partial suffix results resolve the separate
+higher-generation birth-history gate or complete the full parity/audit goal.
+
+## Windows-power and allocation increment (`b373b5b`, pushed)
+
 `main` contains pushed `c33a446` (extreme powers, CRC means, STL buckets and
 two independently repaired validation harnesses). The next verified code
 increment is in `C:/tmp/tessella_deep_audit_next_20261009`, branch
