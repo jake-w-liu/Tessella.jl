@@ -117,29 +117,43 @@ function cylinder_surface(center,axis,radius,height;nθ=24,nz=2,
         return _certify_cylindrical_point(
             point,c,ez,R,z,"cylinder_surface")
     end
-    V=Tuple{Float64,Float64,Float64}[]
-    sizehint!(V,nodes)
+    # Counts are checked before allocation; fill the owned work matrices
+    # directly while retaining the certified point and triangle order.
+    C=Matrix{Float64}(undef,3,nodes)
+    cursor=1
     for j in 0:nlevels-1, i in 0:ntheta-1
-        push!(V,on(2π*i/ntheta,H*(j/(nlevels-1))))
+        p=on(2π*i/ntheta,H*(j/(nlevels-1)))
+        C[1,cursor]=p[1];C[2,cursor]=p[2];C[3,cursor]=p[3]
+        cursor+=1
     end
-    ci=length(V)+1
-    push!(V,_certify_cylindrical_point(c,c,ez,0.0,0.0,
-                                       "cylinder_surface"))
-    cti=length(V)+1
+    ci=cursor
+    p=_certify_cylindrical_point(c,c,ez,0.0,0.0,"cylinder_surface")
+    C[1,cursor]=p[1];C[2,cursor]=p[2];C[3,cursor]=p[3]
+    cursor+=1
+    cti=cursor
     top=_geometry_point(c[1]+H*ez[1],c[2]+H*ez[2],c[3]+H*ez[3],
                         "cylinder_surface")
-    push!(V,_certify_cylindrical_point(top,c,ez,0.0,H,
-                                       "cylinder_surface"))
+    p=_certify_cylindrical_point(top,c,ez,0.0,H,"cylinder_surface")
+    C[1,cursor]=p[1];C[2,cursor]=p[2];C[3,cursor]=p[3]
+    cursor+=1
+    cursor==nodes+1 || throw(ErrorException(
+        "cylinder_surface: internal node count invariant failed"))
     idx(j,i)=(j-1)*ntheta + mod(i,ntheta) + 1
-    Tr=NTuple{3,Int32}[]
-    for j in 1:nlevels-1, i in 0:ntheta-1                            # wall (outward)
+    tm=Matrix{Int32}(undef,3,triangles)
+    face=1
+    for j in 1:nlevels-1, i in 0:ntheta-1
         a=idx(j,i);b=idx(j,i+1);cc=idx(j+1,i+1);d=idx(j+1,i)
-        push!(Tr,(Int32(a),Int32(b),Int32(cc))); push!(Tr,(Int32(a),Int32(cc),Int32(d)))
+        tm[1,face]=Int32(a);tm[2,face]=Int32(b);tm[3,face]=Int32(cc);face+=1
+        tm[1,face]=Int32(a);tm[2,face]=Int32(cc);tm[3,face]=Int32(d);face+=1
     end
-    for i in 0:ntheta-1; push!(Tr,(Int32(ci),Int32(idx(1,i+1)),Int32(idx(1,i)))); end   # bottom cap
-    for i in 0:ntheta-1; push!(Tr,(Int32(cti),Int32(idx(nlevels,i)),Int32(idx(nlevels,i+1)))); end # top cap
-    C=Matrix{Float64}(undef,3,length(V)); for (k,p) in enumerate(V); C[:,k]=[p...]; end
-    tm=Matrix{Int32}(undef,3,length(Tr)); for (k,f) in enumerate(Tr); tm[:,k]=Int32[f...]; end
+    for i in 0:ntheta-1
+        tm[1,face]=Int32(ci);tm[2,face]=Int32(idx(1,i+1));tm[3,face]=Int32(idx(1,i));face+=1
+    end
+    for i in 0:ntheta-1
+        tm[1,face]=Int32(cti);tm[2,face]=Int32(idx(nlevels,i));tm[3,face]=Int32(idx(nlevels,i+1));face+=1
+    end
+    face==triangles+1 || throw(ErrorException(
+        "cylinder_surface: internal triangle count invariant failed"))
     return _checked_surface(Mesh(C; tris=tm),"cylinder_surface")
 end
 

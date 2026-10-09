@@ -15,7 +15,7 @@ merged into main and pushed, with clean worktrees at completion. Inspect the
 repository and local history autonomously; do not ask the user questions.
 Reading Devin conversation history on this PC is explicitly authorized.
 
-Devin's active Tessella session is `casual-turn`. Its transcript is at
+Devin's stopped Tessella session is `casual-turn`. Its transcript is at
 `C:/Users/User/AppData/Roaming/Devin/cli/transcripts/casual-turn.json`;
 live continuation metadata is in the adjacent CLI `sessions.db`. The saved
 transcript can lag the live session: the indexed database showed activity
@@ -26,8 +26,11 @@ Its worktree is `C:/tmp/tessella_resume_all_20261008`, branch
 base-commit statement is stale. At the read-only inventory it had 47 modified
 and 81 new Source files, plus 175 changed/new test Julia files. Direct current
 fixes concern transformed box primitive metadata and embedded face/edge
-carrier preservation; regeneration after `set_size` is still under investigation.
-Do not treat this uncommitted tree as a finished, verified release.
+carrier preservation. Final indexed history records a stop before full
+differential/resource checks, rebase and push. The final changes are captured;
+the last blanket-clear API delta contradicts native immediate-query and imported
+record retention controls and is not admitted. A correct generation policy is
+under independent verification. Preserve the original work and the final capture.
 
 Read-only reconciliation inventory:
 `C:/tmp/tessella_devin_reconciliation_inventory_20261009.json`, SHA256
@@ -63,8 +66,10 @@ candidate's initial raw Quad/Hex order comparison remains unresolved.
 Diagnostic packet SHA256:
 `78b81599cd130c5a634d293b4451cffaac5958400a760c5c4aca63b151a26321`.
 
-Primitive public focuses passed 139 assertions on both runtimes, but the
-joint primitive/guard release remains held. Weighted default-stage production
+The primitive buffer increment passes 139 public assertions and 1,597,092
+full package assertions on both supported runtimes, all 505 inputs and notices
+held. Its two source/test files are published independently of the held guard.
+Weighted default-stage production
 integration and Curve13 embedded-sheet recovery are also incomplete.
 All P1-P6 requirements and the full user goal remain active.
 
