@@ -8,6 +8,66 @@ allocation efficiency for each increment, push verified changes to main and
 continue. Individual category releases do not complete this goal. Production
 meshing must be independent; Gmsh 4.15.2 is only a differential oracle.
 
+## Active aggregate failure and Devin reconciliation (2026-10-09)
+
+The user requires finished Devin fixes to be reconciled with this audit,
+merged into main and pushed, with clean worktrees at completion. Inspect the
+repository and local history autonomously; do not ask the user questions.
+Reading Devin conversation history on this PC is explicitly authorized.
+
+Devin's active Tessella session is `casual-turn`. Its transcript is at
+`C:/Users/User/AppData/Roaming/Devin/cli/transcripts/casual-turn.json`;
+live continuation metadata is in the adjacent CLI `sessions.db`. The saved
+transcript can lag the live session: the indexed database showed activity
+at 03:38 UTC after the transcript's 03:10 final saved step. Read session history
+without modifying the database or interrupting Devin's processes.
+Its worktree is `C:/tmp/tessella_resume_all_20261008`, branch
+`codex/resume-all-20261008`, actual HEAD `b2966fd`. The transcript's older
+base-commit statement is stale. At the read-only inventory it had 47 modified
+and 81 new Source files, plus 175 changed/new test Julia files. Direct current
+fixes concern transformed box primitive metadata and embedded face/edge
+carrier preservation; regeneration after `set_size` is still under investigation.
+Do not treat this uncommitted tree as a finished, verified release.
+
+Read-only reconciliation inventory:
+`C:/tmp/tessella_devin_reconciliation_inventory_20261009.json`, SHA256
+`fcc83ec35a77e7b401d2602b91f33a61c3aa20c9434d1085f550025b72e1ffbc`.
+It records 78 registered worktrees, 59 dirty and 1,279 file/hash variants unique
+to one tree. Local branch commits were ancestors of origin/main; unique
+pending edits still require preservation. No cleanup/reset was performed.
+Rebind active files before integrating; retain accepted main math,
+recombination and notice bytes in a coherent candidate and run the required
+both-runtime gates before promotion. Clean worktrees only after their unique
+changes are integrated or safely preserved.
+
+The aggregate guard candidate at
+`C:/tmp/tessella_validation_case_release_20261009`, frozen manifest SHA256
+`534ab94aaf80a526d36ded213f6a29b0863690dd4db997238527759ee7625c4c`,
+passes both full package gates with 1,597,098 assertions and both five-basecase
+routes. Both actual full aggregates failed at `api_generate01/differential.jl`
+with 9,384 passes/four failures/zero errors, source inputs held, and no final
+report. Root sessions 35748/44121 are drained actual exit 1; do not poll them
+again or apply the prepared finalizer as a successful release.
+Aggregate log SHA256 values are
+`aa4d1dad179405afd3ba323a6e7ac7578342338d6b97542d4ac322c0350bb154`
+(1.13) and
+`e12f8c3d03152a564b7854d627c66477634c473e619c93e0fefb5deabb514d44`
+(1.12).
+
+The original native sparse cube diagnostic exposes missing initial lower
+products on main: two cells through 778 versus Gmsh's 27 through 803, followed
+by element 810 versus 846 after generating dimension 1. Complete closure and
+birth history are required; do not restore an obsolete blocker or hardcode
+a 36-counter increment merely to make the old assertions green. The higher
+candidate's initial raw Quad/Hex order comparison remains unresolved.
+Diagnostic packet SHA256:
+`78b81599cd130c5a634d293b4451cffaac5958400a760c5c4aca63b151a26321`.
+
+Primitive public focuses passed 139 assertions on both runtimes, but the
+joint primitive/guard release remains held. Weighted default-stage production
+integration and Curve13 embedded-sheet recovery are also incomplete.
+All P1-P6 requirements and the full user goal remain active.
+
 ## Current exact-quality reuse release (2026-10-09)
 
 This bounded increment follows native math commit `dff308f`. Only
@@ -48,8 +108,8 @@ source also allocates. Only the subsequent normal complete gates are admitted.
 No notices are recopied from the older raw candidate: accepted Windows
 `c5415f49` and HP/SGI `8bd1c6b5` notice bytes remain exactly held.
 
-The separately prepared aggregate basecase guard still needs its actual
-Tessella/full-package/aggregate evidence before promotion. Weighted public
+The separately prepared aggregate basecase guard now has actual basecase and
+full-package passes; both full aggregates failed as recorded above. Weighted public
 policy, higher-generation identity and classified-import work remain separate.
 The complete audit and user goal remain active; no full current aggregate
 success or fully optimized whole pipeline is claimed.
