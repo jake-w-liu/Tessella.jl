@@ -177,12 +177,13 @@ _quad_quality_range(coords,nodes::NTuple{4,Int32})=
     first(_quad_quality_range_result(coords,nodes))
 
 
-function _quad_quality(coords,nodes::NTuple{4,Int32})
+function _quad_quality_result(coords,nodes::NTuple{4,Int32},
+                              ::Val{CandidateRecovery}) where {CandidateRecovery}
     scale=0.0
     @inbounds for node in nodes,d in 1:3
         scale=max(scale,abs(coords[d,Int(node)]))
     end
-    scale>0 || return 0.0
+    scale>0 || return (0.0,false)
     # explicit points: a closure over the reassigned `scale` would box it
     n1=Int(nodes[1]);n2=Int(nodes[2]);n3=Int(nodes[3]);n4=Int(nodes[4])
     points=((coords[1,n1]/scale,coords[2,n1]/scale,coords[3,n1]/scale),
@@ -192,34 +193,42 @@ function _quad_quality(coords,nodes::NTuple{4,Int32})
     edges=ntuple(i->_sub3(points[mod1(i+1,4)],points[i]),4)
     @inbounds for i in 1:4
         _quad_span_cancellation(coords,nodes[i],nodes[mod1(i+1,4)],edges[i],scale) &&
-            return _quad_quality_range(coords,nodes)
+            return _quad_quality_range_result(coords,nodes)
     end
     (_quad_span_cancellation(coords,nodes[1],nodes[3],_sub3(points[3],points[1]),scale) ||
      _quad_span_cancellation(coords,nodes[1],nodes[4],_sub3(points[4],points[1]),scale)) &&
-        return _quad_quality_range(coords,nodes)
+        return _quad_quality_range_result(coords,nodes)
     lengths=ntuple(i->_norm3(edges[i]),4)
     minimum_length=minimum(lengths);maximum_length=maximum(lengths)
-    minimum_length>0 && isfinite(maximum_length) || return _quad_quality_range(coords,nodes)
+    minimum_length>0 && isfinite(maximum_length) || return _quad_quality_range_result(coords,nodes)
     minimum_sine=1.0
     @inbounds for i in 1:4
         previous=edges[mod1(i-1,4)]
         current=edges[i]
         denominator=lengths[mod1(i-1,4)]*lengths[i]
-        denominator>=floatmin(Float64) || return _quad_quality_range(coords,nodes)
+        denominator>=floatmin(Float64) || return _quad_quality_range_result(coords,nodes)
         sine=_norm3(_cross3(previous,current))/denominator
         minimum_sine=min(minimum_sine,sine)
     end
     normal1=_cross3(_sub3(points[2],points[1]),_sub3(points[3],points[1]))
     normal2=_cross3(_sub3(points[3],points[1]),_sub3(points[4],points[1]))
     norm1=_norm3(normal1);norm2=_norm3(normal2)
-    norm1>0 && norm2>0 || return _quad_quality_range(coords,nodes)
+    norm1>0 && norm2>0 || return _quad_quality_range_result(coords,nodes)
     denominator=norm1*norm2
-    denominator>=floatmin(Float64) || return _quad_quality_range(coords,nodes)
+    denominator>=floatmin(Float64) || return _quad_quality_range_result(coords,nodes)
     alignment=_dot3(normal1,normal2)/denominator
-    alignment>0 || return 0.0
+    if !(alignment>0)
+        # The scalar interface historically returns zero here. Candidate
+        # admission recovers represented geometry, including a positive
+        # normal alignment cancelled by the healthy floating-point path.
+        return CandidateRecovery ? _quad_quality_range_result(coords,nodes) : (0.0,false)
+    end
     quality=min(minimum_length/maximum_length,minimum_sine,min(alignment,1.0))
-    return isfinite(quality) && quality>0 ? clamp(quality,0.0,1.0) : _quad_quality_range(coords,nodes)
+    return isfinite(quality) && quality>0 ? (clamp(quality,0.0,1.0),true) : _quad_quality_range_result(coords,nodes)
 end
+
+_quad_quality(coords,nodes::NTuple{4,Int32})=
+    first(_quad_quality_result(coords,nodes,Val(false)))
 
 # Pinned Gmsh qualityMeasures.cpp qmQuadrangle::eta; RecombineTriangle
 # uses this signed corner-angle measure for the strict greedy angle admission.
@@ -333,11 +342,8 @@ function _candidate(coords,triangles,first_triangle::Int32,second_triangle::Int3
     opposite2=_third_vertex(triangle2,first_u,first_v)
     nodes=_rotate_quad_minimum((first_u,opposite2,first_v,opposite1))
     _strict_convex_projection(coords,nodes) || return nothing
-    quality=_quad_quality(coords,nodes)
-    if quality==0.0
-        quality,valid=_quad_quality_range_result(coords,nodes)
-        valid || return nothing
-    end
+    quality,valid=_quad_quality_result(coords,nodes,Val(true))
+    valid || return nothing
     return _QuadCandidate(first_triangle,second_triangle,nodes,quality,edge)
 end
 

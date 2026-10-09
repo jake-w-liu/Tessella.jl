@@ -23,6 +23,55 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Recombination exact-quality reuse (2026-10-09)
+
+Candidate admission now keeps the quality score and represented-geometry
+validity together, so a valid score rounded to zero performs its exact range
+calculation once. The existing scalar fast path and the candidate's exact
+recovery remain distinct: a near-perpendicular fixture keeps scalar zero
+while candidate admission recovers its positive represented alignment.
+Every existing recombination test byte is retained; no eta, priority,
+matching policy, public return contract or quality threshold changes.
+
+Independent exact-rational geometry and nearby folded controls verify the
+score/validity boundary. Forty-four permanent assertions cover seven exact
+geometry controls, sixteen allocation/ownership checks and twenty-one public
+threshold, detached-output and error controls. Both normal compiled installed
+focuses pass 70,917 assertions, including all previous matching, priority,
+native public-label and layout checks, with all 505 inputs and notices held.
+
+Ordinary scalar/candidate loops remain zero-allocation. On the tested shear
+of width 1e200, candidate allocation falls from 97,712 to 48,856 bytes on
+Julia 1.12 and from 98,096 to 49,048 bytes on Julia 1.13. At width 1e300 it
+falls from 110,368 to 55,184 and from 110,752 to 55,376 bytes respectively.
+These are warmed per-candidate temporary allocations, not RSS or whole-mesher
+claims. The original paired 309-fixture leaf proofs retain their original
+V1 binding and exact source/test hashes; the reconciled V2 foundation keeps
+accepted native math, API, corrected GEO test, sort and notice contents.
+
+Complete package gates pass 1,597,073 assertions each on Julia 1.12.7/1.13.1,
+with explicit child bounds, actual exit 0 and all 505 frozen inputs held.
+Wrapper times are 2170.511/1738.597 seconds;
+log SHA256 values are
+`23c77a8a69ae9dd1d4879248133a41930ca1ece143c8b419eb2efed70431ddd9` and
+`607eeb3ec8449ccd9d976588bfbd3da4f551e4f5eba7822a9df70336646013e7`. Tested V2 manifest SHA256:
+`4dbee7dd84e5ce33e685a1962cebd6fbf6bb7212c1f5ddc46caa0f07ec9288fe`.
+Independent installed candidate packet SHA256:
+`29fc4f5ddd6cc7961a54ba75cd2e71b8bdb113cc45e76275262df4fa2737e8a4`.
+Only Recombine source and its existing test file differ from the preceding
+505-input main map; the other 503 inputs and published notices remain exact.
+
+The optimizer-disabled focus is retained as exit 1 with 70,866 passes,
+51 allocation-budget failures and zero errors. Its new public semantics
+passed, but it is not an admitted successful focus. Under the same disabled
+configuration the preceding source also allocates on its ordinary quality
+loop; normal compiled old/new loops both allocate zero. The successful normal
+gates above retain their distinct receipts.
+
+Weighted policy, actual higher-generation/import behavior, the separately
+verified aggregate basecase guard and the full P1–P6 aggregate remain under
+audit. This bounded resource increment does not complete the user goal.
+
 ### Native Windows Exp/Log/Sin/Cos verification (2026-10-09)
 
 Windows x86_64 scalar parser functions now use balanced native x87 kernels.
@@ -124,8 +173,8 @@ geometry when cancellation requires it. A valid positive score that rounds
 to zero remains eligible only at zero minimum quality; every positive
 Float64 threshold rejects it. Degenerate and folded cells remain rejected. The exact
 rational helper can allocate: one tested shear requires about 48.9 kB per
-helper call. The current candidate repeats that helper when its score rounds
-to zero; a separate verified allocation optimization remains to be admitted.
+helper call. That matching snapshot repeated the helper when its score rounded
+to zero; the subsequent quality reuse increment above removes this duplicate.
 Native angle admission retains the primary's raw arithmetic separately.
 
 Exhaustive independent graphs through six vertices verify matching size and
