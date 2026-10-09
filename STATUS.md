@@ -23,6 +23,29 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Final run closure and preserved integration (2026-10-09)
+
+Published code remains `1e696f0` (cylinder buffers), with both complete package
+gates passing 1,597,092 assertions. This closure changes documentation only.
+The full P1–P6 implementation and aggregate goal remains incomplete.
+
+Unreleased V17 integration is archived at local commit
+`ec9ea82071285d07adfbb4cc94b534c35457c8ae`, with 1,957 inputs / 191 Source files.
+Its Box/Point metadata fixes pass 26,371 scoped checks on each Julia version;
+the new permanent UID/TF tests still require final runtime qualification.
+The final B4 candidate failed with 131,535 passes / 8 failures / 5 errors in
+emitted Source-chain certification. The AutoCoherence run failed with 2,914
+passes / 10 failures / 7 errors; fixes and a corrected twist corpus are
+prepared but unrun. Ordinary curved Layers classification, public recombine
+lifecycle and broader parity remain unfinished. These candidates are held off
+main; no bug-free combined release is claimed.
+
+Raw changes/indexes/all refs and complete standalone trials are preserved in
+verified archives under `C:/tmp/tessella_final_handoff_20261009/` before cleanup.
+The detailed [latest handoff](HANDOFF.md#final-closure-and-resume-instructions-2026-10-09)
+lists exact failures, preserved branches, artifact hashes, restoration commands,
+both-runtime gates and the remaining P1–P6 implementation steps.
+
 ### Cylinder construction buffers (2026-10-09)
 
 `cylinder_surface` fills checked, owned coordinate and connectivity matrices

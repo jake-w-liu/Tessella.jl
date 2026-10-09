@@ -8,6 +8,230 @@ allocation efficiency for each increment, push verified changes to main and
 continue. Individual category releases do not complete this goal. Production
 meshing must be independent; Gmsh 4.15.2 is only a differential oracle.
 
+## Final closure and resume instructions (2026-10-09)
+
+This is the authoritative latest state; older sections below are historical.
+The user requested closure because the weekly limit is nearly reached, a clean
+worktree, a push to main, and a detailed record of unfinished work. The full
+P1–P6 parity goal is **not complete**. Known integration failures remain; no
+claim of a bug-free or fully optimized combined release is made.
+
+### Published code and preserved integration
+
+Main's latest verified code is `1e696f042f20c8b83a098279973a0fbadeab4dc7`
+(cylinder construction buffers), already pushed. Both complete package runs
+passed **1,597,092 assertions each** on Julia 1.12.7 and 1.13.1. The closure
+commit changes HANDOFF/STATUS only, so those code/test bytes remain unchanged.
+
+The reconciled, unfinished integration is preserved locally at commit
+`ec9ea82071285d07adfbb4cc94b534c35457c8ae`, branch
+`codex/combined-verified-native-20261009`. It contains the V17 candidate:
+1,957 inputs / 191 Julia Source files. It is **not merged to main** because
+the complete combined gates have not passed. Its raw freeze is
+`C:/tmp/tessella_combined_verified_native_freeze_20261009_v17_generic_tests.json`,
+SHA256 `f49c179af409cd7f068f4e97925be91b900eb201ef7637d6ed52ebbffd0469f8`.
+The archival commit preserves original bytes, including recorded whitespace
+check failures in raw oracle/probe files; it is not a release qualification.
+
+Devin's session `casual-turn` was stopped before its full gates and merge.
+Its unique work, indexes and branch references are preserved. The final
+blanket record-clear delta is withheld: native setter/import controls retain
+those records. Do not apply that delta or drop the preserved stash
+`7f1b8eb596a7aa18568edf8ef704049eaa18e504` as a cleanup shortcut.
+
+### Durable artifacts
+
+All final artifacts live under `C:/tmp/tessella_final_handoff_20261009/`.
+Each ZIP has a manifest and completion receipt verifying every entry against
+its original SHA256. Keep this directory with the repository backup.
+
+| Artifact | Contents / SHA256 |
+|---|---|
+| `repository_before_cleanup.bundle` | All local refs, including the unfinished integration commit and stash, before worktree removal. `git bundle verify` passed. |
+| `repository_final.bundle` | Final all-ref backup after the documentation push; verify using the final closure receipt. |
+| `raw_worktrees_and_refs.zip` | Content-addressed raw changes, original indexes, historical/current preservation manifests and the pre-cleanup bundle; 2,858 verified entries. SHA `01ce7524eff06dffcbf32450da1eec8442cfb3bc58e12721eeca9549809fdc57`. |
+| `higher/higher_sources_and_proofs_20261009_v2.zip` | Four complete standalone trials, metadata/Sheet/ordinary-Layers proof and patch packets, native fixtures and results; 8,849 verified entries. SHA `cfa5c7d1340921d90f8b7bc14419dc2b56f6d6da1b7ac47a004361feb64a24d2`. |
+| `resource/b4_resource_handoff.zip` | Complete B4 trial, original/native/paired captures, Source/transport patches, failed full gate and restoration scripts; 2,093 verified entries. SHA `de476e10a8435bfdbe110af092650fc5a7c594c970f2377a7fa99428833570d7`. |
+| `root/root_sources_and_proofs.zip` | Complete AutoCoherence V4 trial, corrected native controls, failed run, foundation evidence, metadata grafts and final-gate helpers; 2,243 verified entries. SHA `de037ab8c8ddac2c4dc2601b4c0b51f4ac6b6426acbe27475f9383f08dba964d`. |
+| `parity/parity_complete_20261009.zip` | Complete public-recombine standalone snapshot, sealed V3 packet and native/leaf evidence; 4,147 verified entries. SHA `e2eb5f4f1b5faf3e70e691207a161161fec238ba659a1ae9bcf6d58c76a0dc05`. |
+
+The current raw worktree inventory is
+`C:/tmp/tessella_worktree_preservation_20261009/current_manifest_v4_final.json`,
+SHA `5708f521f1ae6c1ab6165861bad322c4c597d8e7463a70f38d1649ec733fbeed`.
+It preserves modified/untracked files and indexes, plus ignored records in
+every non-main tree scheduled for removal. Previous inventories preserve the
+pre-archive candidate and the 70 worktrees cleaned earlier. No branch refs are
+deleted. `cleanup_completion.json`, SHA
+`97c27e7e59ea0dc750f055d17d7612d8d127064e77e580b57952adb501b5bc9d`,
+records the 13 completed removals and confirms only the main worktree remains.
+Main is checked clean after the documentation commit/push. Standalone source copies
+are not registered Git worktrees; their ZIPs preserve them separately.
+
+### Scoped checks already completed in the integration
+
+The following evidence is valid only for its exact frozen inputs; it does not
+replace whole-package or aggregate acceptance.
+
+| Increment | Actual evidence |
+|---|---|
+| Point UID / volume metadata / factory routing | Both Julia versions passed 26,371 checks. Original Box carrier restored: 809 nodes / 3,471 Tets / CRC `685ae426e57a88732577b13e644113e0bff790099eb0e7292071cc2b8bb77678`; positive unit volume, exact outer shell and all Lines retained. Six full native setter/regeneration states, including unused Point102, match XYZ/UV/owners/cells/tags/maxima. |
+| Embedded Sheet PLC | Both isolated versions passed 8,234 checks; exact six embedded Lines, four Sheet facets, outer shell, positive unit-volume mesh. Permanent PLC test also passed in the later 1.13 foundation. Native SDK 878 Tets and Tessella 944 Tets are not a fixed-count parity assertion. |
+| Regeneration policy | 1,070 scoped checks; keep native immediate/imported records and exact setter lifecycle behavior. |
+| Matching / numeric / planar increments | Exact matching artifact transport; API plan Core.Box repair; generated closure source-origin correction; Plane/Point and 37,920-row numeric fixtures. Existing native identity and allocation assertions remain mandatory. |
+| Ordered matching workspace | Both leaves passed 37,906 checks, preserving 5,178 graph outputs and resource bounds; previous direct 64k allocation controls pass on 1.13. Final combined 1.12/whole gates remain required. |
+| New permanent generic tests | Installed in V17 with exact original native JSON and lossless TOML. Six original states are qualified, but added missing/duplicate UID, foreign-owner, changed-XYZ, ambiguous Surface, generated-interior, orphan/Line, TF and reverse checks have not yet run in the final combined gate. |
+
+### Confirmed failures and precise next work
+
+1. **B4 emitted Source certification.** The final isolated 1.13 gate exited 1:
+   **131,535 passed / 8 failed / 5 errors**, all 1,952 inputs and external
+   bindings held. New `_extrude_nonew_b4_geometry` wrongly recertifies emitted
+   canonical Source coordinates against retained native Curve samples and
+   throws `actual native Curve chain is absent from retained source mesh`.
+   The eight failures are incomplete resource-row checks, not measured
+   allocation-growth violations. Most N/M/P2/paired stages were therefore
+   unrun. Do not treat this as a resource pass or run 1.12 unchanged.
+   Restore `resource/README.md` and its complete candidate. Bind the existing
+   Source row/chain identities explicitly by UID and literal incidence, then
+   certify emitted coordinates independently. Do not rematch identities by
+   coordinate proximity or skip the geometric certificate. Retain every
+   original audit, CRC, layer/source size and `2.15*previous+65536` budget.
+   Re-run both complete B4 resources on 1.13, then 1.12 after a real pass.
+
+2. **B4 geometry/actual view distinction.** Paired captures proved canonical
+   emitted Source coordinates were applied only at base rows while 3,500
+   higher rows retained native XY. The prepared Source patch supplies explicit
+   indexed column provenance and re-emits columns/body means without changing
+   actual UID/owner/UV. Original resource extraction also compared actual
+   products against a canonical emitted oracle; native evidence disproves that
+   cross-view premise. A separate narrow transport patch preserves the original
+   geometric assertions/CRC/budgets and adds actual Source→actual Volume audits.
+   It cannot qualify without the Source fix. Graft hunks onto V17 APIHigher
+   `94a40c74...`; never overwrite the qualified metadata helper wholesale.
+
+3. **AutoCoherence, CAD queries and GEO rotation.** Last 1.13 gate exited 1:
+   **2,914 passed / 10 failed / 7 errors**, all frozen inputs held. V4 is prepared
+   but unrun. It forwards option0/1 through all transform/extrusion entry paths;
+   read-only CAD boundary queries retain literal incidence while meshing keeps
+   its strict shell certificate; only built-in GEO rotation uses the existing
+   native `_gm87_sincos` pair. OCC keeps its independently verified old shim.
+   Native/stdlib leaves prove the Pi/2 residual and zero allocation/CW restore.
+   Three new twist fixtures were corrected to translation/axis/origin order;
+   old invalid-axis evidence and failed gate are retained, other 20 controls
+   unchanged. Run the corrected 23 native snapshots and all original three
+   geometry test files on both versions after the ordinary Layers fix below.
+   Mode2 degenerate removal is still open; the native flagged-Line control
+   demonstrates the missing behavior. Native AutoCoherence0 CAD/history and
+   retained-node parity is separate from emitted geometry: original B4 has
+   44 Points / 20 Curves and 8,052 global native nodes, not the old compact
+   8-Point / 6,012-or-6,017-node Tessella state.
+
+4. **Ordinary Layers curved classification.** The original
+   `test/geometry/geo_extrude_test.jl:751` fixed-axis rotation case reaches
+   planar `model_to_mixed` and rejects Point10 on curved ruled Surface16.
+   Native exact fixture succeeds with 10 nodes / 3 Prism6 / 11 outer faces.
+   The one-file prototype is prepared-only, SHA
+   `b8a743fabb0d0638e5ce0c6a74e16c14fbd9ee465fae1e157777bca0912c910f`.
+   Restore Higher's packet, finish operation-owned row/position provenance,
+   distinguish boundary and embedded support, consume edited actual Source
+   instead of CAD-only Curve samples, and prove full shell/Line/positive-cell
+   conformity. Non-recombined late subdivision/history and QuadTri require
+   separate proof. Do not weaken the planar guard or apply the prototype based
+   on syntax checks alone.
+
+5. **Public recombine lifecycle.** Restore Parity's sealed
+   `weighted_recombine_lifecycle_projected_packet_v3_20261009` and complete
+   1,964-input/191-Source snapshot, freeze SHA
+   `f946c31c40d2f7c76c3aca588a20cec6acb7ae31c08afac807e1ed95ff4e5445`.
+   The prepared API `0ec282e9...→559a2c8d...` and helper
+   `d4079e1b...→e20d1d66...` implement public2→0/3→1 aliases, prior native Msg
+   skip behavior, unconditional automatic renumber including empty/skipped
+   products, historical maxima and constructor receipts, and lookup invalidation
+   only after renumber. Twenty selector, 18 process-isolated lifecycle and two
+   lookup controls are strict primary evidence. Both leaf versions pass; actual
+   public execution has never launched. Run the bound O2 focus on both versions
+   before any graft. Generation-time full-quad2/3 is a separate missing feature.
+
+6. **Missing Face UV and general matching ties.** ClosestPoint approximation
+   failed 11,172 of 24,192 expanded native Plane controls. Derive the actual
+   optimization/stopping policy; do not ship the simple sampled-grid shortcut.
+   The 5,178 graph corpus preserves optimal costs, but 441 general-graph native
+   endpoint identities remain unresolved. Independent DP proves multiple optima
+   for 379 small cases; 62 larger cases lack that proof. API/CLI alternatives on
+   repeated inputs do not waive every fixed directed-identity assertion. Keep
+   unique/bipartite/native-pinned identity tests intact. Missing Curve UV's
+   straight-Line repair is scoped; full warning API behavior remains open.
+
+7. **Full gate and historical heap regression.** The V15 foundation failed
+   with 1,560,528 passed / 71 failed / 6 errors. Box/generic failures were fixed
+   subsequently in V16/V17; B4 failures remain and the full foundation has not
+   been rerun on V17. The old transformed OCC Box/Dilate2/Rotateπ/2 run exited
+   `0xC0000374` in GMP/GC/finalization/retriangulation; old Source/thread/heap
+   inputs were not fully bound. Restore the exact original block packet and
+   replay it on both current versions, then both complete Pkg tests. Do not
+   describe it as a fixed bug or merely OOM without that evidence.
+
+### Resume and publish sequence
+
+1. Verify the final bundle and ZIP manifests. Fetch/clone the repository and
+   restore the local integration ref from the bundle. Create a new empty
+   worktree at `ec9ea82071285d07adfbb4cc94b534c35457c8ae`; do not alter main.
+   Use the raw inventory/object store if exact pre-Git newline bytes or an
+   original unmerged index must be restored. Archive restore scripts refuse
+   overwrites. Original temporary worktree paths were removed after preservation.
+2. Restore the standalone ZIPs into new empty directories. Follow each
+   RESTORE/README file. Runners/manifests contain original absolute paths:
+   rebind root/tree paths and hashes into new versioned receipts; retain old
+   receipts as historical, not passes for relocated or edited inputs.
+3. Fix the confirmed blockers above in that order, then graft only reviewed
+   hunks. Run the installed new generic UID/TF tests and complete foundation
+   including raw nine native products, six generic states and all resource
+   stages. No original tolerance/budget/CRC change without independent proof.
+4. Use Julia **1.12.7 and 1.13.1**, normal **O2**, default inlining,
+   `--check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G`.
+   Heap hint is not a cap. Serialize cold package runs; require freshly measured
+   physical **and** virtual free memory greater than 30 GiB. Preserve intentional
+   four-thread probes. O0/inlining-off leaves and prepare/parse success are not
+   package acceptance. Never stop an unowned ASCENT/DiffMoM/Devin process.
+5. Rebind `root_evidence/tessella_combined_durable_gate_20261009.py` to the new
+   freeze. Run `--runtime 113 --mode pkg --manifest <new.json>
+   --manifest-sha256 <newSHA> --output-prefix <unused-prefix>`, then runtime112.
+   Require actual0, full success marker and all input/tool hashes held.
+6. Prepare fresh isolated aggregate copies using the archived preparation
+   helper's `--manifest`, `--manifest-sha256`, `--version <unused-number>`.
+   Both full aggregate runs must exit0 and produce fresh complete
+   `validation/REPORT.md`. Old V15 aggregate copies were prepared only and are
+   known invalid after later fixes. Do not reuse them or call partial children
+   an aggregate pass.
+7. Review source licensing/notices; restricted/GPL reference implementations
+   are oracle material, not production replacements. Commit each verified
+   increment, update STATUS/HANDOFF around its actual evidence, merge to main,
+   push and check exact remote HEAD. Archive fresh raw edits/indexes/all refs
+   before any further worktree cleanup.
+
+### Remaining roadmap beyond the immediate failures
+
+PLAN's full parity target supersedes the historical bounded non-claims. P1–P6
+remain in progress. Continue requirement-by-requirement with native fixtures:
+
+- **P1:** full native automatic sizing internals and direct anisotropic/metric
+  meshing/adaptation, broader field-driven generation and remaining field options.
+- **P2:** general families/orders and unstructured mixed/high-order generation,
+  remaining certification/catalog/special-format contracts and complete entity
+  metadata lifecycles.
+- **P3:** general BREP/OCC-equivalent and unclassified NURBS topology, arbitrary
+  CAD transformations/Booleans/imports, remaining `.geo` syntax/options and
+  automatic coherence/history behavior.
+- **P4:** full-quad generation, remaining structured/unstructured algorithms,
+  nonlinear/primitive/boundary-layer/high-order/wrapped recombination and
+  projection, broader adaptation and periodic/embedded recovery.
+- **P5:** remaining API/options/formats, partitioning/parallel workflow, complete
+  views/plugins/CLI/GUI/post-processing; current headless/bounded slices are not
+  whole-Gmsh parity.
+- **P6:** complete tutorial/API differential corpus and final requirement audit.
+  A few very large passing assertion totals do not establish these missing
+  capabilities. Revisit explicit gaps in PLAN/STATUS, not only current failures.
+
 ## Active aggregate failure and Devin reconciliation (2026-10-09)
 
 The user requires finished Devin fixes to be reconciled with this audit,
