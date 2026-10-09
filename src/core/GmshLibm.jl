@@ -89,12 +89,12 @@ _gm_libm_available() = _GM_LIBM.sin[] != C_NULL
 # not msvcrt's algorithms. `pow` uses binary squaring for signed Int32
 # integer exponents and the extended-register `y·log2(x)` chain otherwise.
 #
-# The sine/cosine and exponential shims retain their MPFR emulation.
-# Power and atan2 execute native x87 instructions on Windows x86_64: transcendental
+# Native Windows x86_64 shims use balanced x87 instruction chains; other
+# Windows architectures retain MPFR emulation. Transcendental
 # instructions retain extended values while arithmetic observes the caller's
 # control word. Hosted Gmsh DLLs inherit that word; the standalone executable
 # starts with 64-bit arithmetic precision. A task-local CLI context selects
-# that precision only during the non-yielding native power kernel, so file I/O
+# that precision only during the non-yielding native scalar kernels, so file I/O
 # and task scheduling cannot leak hardware state into another Julia task.
 # ---------------------------------------------------------------------------
 
@@ -176,6 +176,7 @@ function _x87_trig(r::BigFloat)
 end
 
 function _win_sincos(x::Float64)
+    _WIN_X87_NATIVE && return _win_x87_cli_call(_win_x87_sincos,x)
     ax = abs(x)
     if ax < _X87_LIM
         ax <= _X87_PI_HI/2 && return (Float64(_x87e(sin(_x87b(x)))),
@@ -192,6 +193,7 @@ end
 function _win_exp(x::Float64)
     (isnan(x) || x == Inf) && return x
     x == -Inf && return 0.0
+    _WIN_X87_NATIVE && return _win_x87_cli_call(_win_x87_exp,x)
     v = _x87e(_x87b(x) * _X87_L2E[])
     vf = Float64(v)
     abs(vf) >= _X87_LIM && return vf > 0 ? Inf : 0.0
@@ -206,6 +208,7 @@ function _win_log(x::Float64)
     x < 0.0 && return NaN
     x == 0.0 && return -Inf
     x == Inf && return x
+    _WIN_X87_NATIVE && return _win_x87_cli_call(_win_x87_log,x)
     l2 = _x87e(log2(_x87b(x)))
     return Float64(_x87e(l2 * _X87_LN2[]))
 end
@@ -234,6 +237,117 @@ const _WIN_CLI_PRECISION_KEY = gensym(:TessellaCLIPrecision)
             ret void
             """,Cvoid,Tuple{UInt16},word)
     end
+
+    # Native exp adapted from MinGW exp.def.h on 2026-10-09. Stack-local
+    # buffers replace the original ABI return; all x87 operands are popped.
+    # Pinned source: mingw-w64 commit2bcf06abc9ec5f8f73c743896b815a7a7654f9ae.
+    # The split constants avoid loss in x*log2(e) in every caller precision mode.
+    # /*
+    #  This Software is provided under the Zope Public License (ZPL) Version 2.1.
+    #
+    #  Copyright (c) 2009, 2010 by the mingw-w64 project
+    #
+    #  See the AUTHORS file for the list of contributors to the mingw-w64 project.
+    #
+    #  This license has been certified as open source. It has also been designated
+    #  as GPL compatible by the Free Software Foundation (FSF).
+    #
+    #  Redistribution and use in source and binary forms, with or without
+    #  modification, are permitted provided that the following conditions are met:
+    #
+    #    1. Redistributions in source code must retain the accompanying copyright
+    #       notice, this list of conditions, and the following disclaimer.
+    #    2. Redistributions in binary form must reproduce the accompanying
+    #       copyright notice, this list of conditions, and the following disclaimer
+    #       in the documentation and/or other materials provided with the
+    #       distribution.
+    #    3. Names of the copyright holders must not be used to endorse or promote
+    #       products derived from this software without prior written permission
+    #       from the copyright holders.
+    #    4. The right to distribute this software or to use it for any purpose does
+    #       not give you the right to use Servicemarks (sm) or Trademarks (tm) of
+    #       the copyright holders.  Use of them is covered by separate agreement
+    #       with the copyright holders.
+    #    5. If any files are modified, you must cause the modified files to carry
+    #       prominent notices stating that you changed the files and the date of
+    #       any change.
+    #
+    #  Disclaimer
+    #
+    #  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY EXPRESSED
+    #  OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+    #  OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
+    #  EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY DIRECT, INDIRECT,
+    #  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+    #  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA,
+    #  OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+    #  LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+    #  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
+    #  EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+    # */
+    # The trig range-reduction policy uses public-domain sinl_internal.S and
+    # cosl_internal.S from that source. Full supporting notices are retained in
+    # docs/third_party/windows_math.txt. Log uses a guarded, stack-local
+    # FYL2X/FYL2XP1 chain with FLDLN2, preserving the represented x-1 near unity.
+    @inline function _win_x87_exp(x::Float64)
+        isnan(x) && return x
+        x==0.0 && return 1.
+        x>7.09782712893383996843e2 && return Inf
+        x< -7.45133219101941108420e2 && return 0.
+        Base.llvmcall(raw"""
+            %input = alloca double, align 8
+            %out = alloca double, align 8
+            %c0 = alloca double, align 8
+            %c1 = alloca x86_fp80, align 16
+            %cw = alloca [2 x i16], align 2
+            %newcw = getelementptr [2 x i16], ptr %cw, i64 0, i64 1
+            store double %0, ptr %input, align 8
+            store double 1.44268798828125, ptr %c0, align 8
+            store x86_fp80 0xK3FEDECA5705FC2EEFA20, ptr %c1, align 16
+            call void asm sideeffect "fldl ($1); fldl2e; fmul %st(1), %st; fnstcw ($4); movzwl ($4), %eax; orb $$12, %ah; movw %ax, ($5); fldcw ($5); frndint; fld %st(1); frndint; fldcw ($4); fld %st(1); fldl ($2); fld %st(2); fmul %st(1), %st; fsubp %st, %st(2); fld %st(4); fsub %st(3), %st; fmulp %st, %st(1); faddp %st, %st(1); fldt ($3); fmul %st(4), %st; faddp %st, %st(1); f2xm1; fld1; faddp; fstp %st(1); fscale; fstp %st(1); fstp %st(1); fstpl ($0)", "r,r,r,r,r,r,~{rax},~{st},~{st(1)},~{st(2)},~{st(3)},~{st(4)},~{st(5)},~{memory},~{fpsr},~{flags}"(ptr %out,ptr %input,ptr %c0,ptr %c1,ptr %cw,ptr %newcw)
+            %value = load double, ptr %out, align 8
+            ret double %value
+            """,Float64,Tuple{Float64},x)
+    end
+
+    @inline function _win_x87_sin(x::Float64)
+        !isfinite(x) && return isnan(x) ? x : NaN
+        Base.llvmcall(raw"""
+            %input = alloca double, align 8
+            %out = alloca double, align 8
+            store double %0, ptr %input, align 8
+            call void asm sideeffect "fldl ($1); fsin; fnstsw %ax; testl $$1024, %eax; jz 1f; fldpi; fadd %st(0); fxch %st(1); 0: fprem1; fnstsw %ax; testl $$1024, %eax; jnz 0b; fstp %st(1); fsin; 1: fstpl ($0)", "r,r,~{rax},~{st},~{st(1)},~{memory},~{fpsr},~{flags}"(ptr %out,ptr %input)
+            %value = load double, ptr %out, align 8
+            ret double %value
+            """,Float64,Tuple{Float64},x)
+    end
+
+    @inline function _win_x87_cos(x::Float64)
+        !isfinite(x) && return isnan(x) ? x : NaN
+        Base.llvmcall(raw"""
+            %input = alloca double, align 8
+            %out = alloca double, align 8
+            store double %0, ptr %input, align 8
+            call void asm sideeffect "fldl ($1); fcos; fnstsw %ax; testl $$1024, %eax; jz 1f; fldpi; fadd %st(0); fxch %st(1); 0: fprem1; fnstsw %ax; testl $$1024, %eax; jnz 0b; fstp %st(1); fcos; 1: fstpl ($0)", "r,r,~{rax},~{st},~{st(1)},~{memory},~{fpsr},~{flags}"(ptr %out,ptr %input)
+            %value = load double, ptr %out, align 8
+            ret double %value
+            """,Float64,Tuple{Float64},x)
+    end
+
+    @inline function _win_x87_log(x::Float64)
+        Base.llvmcall(raw"""
+            %input = alloca double, align 8
+            %out = alloca double, align 8
+            %limit = alloca double, align 8
+            store double %0, ptr %input, align 8
+            store double 0x3FD28F5C28F5C28F, ptr %limit, align 8
+            call void asm sideeffect "fldln2; fldl ($1); fld1; fsubr %st(1), %st(0); fld %st(0); fabs; fldl ($2); fcomip %st(1), %st(0); fstp %st(0); jae 0f; fstp %st(0); fyl2x; jmp 1f; 0: fstp %st(1); fyl2xp1; 1: fstpl ($0)", "r,r,r,~{st},~{st(1)},~{st(2)},~{st(3)},~{st(4)},~{memory},~{dirflag},~{fpsr},~{flags}"(ptr %out,ptr %input,ptr %limit)
+            %value = load double, ptr %out, align 8
+            ret double %value
+            """,Float64,Tuple{Float64},x)
+    end
+
+    @inline _win_x87_sincos(x::Float64)=(_win_x87_sin(x),_win_x87_cos(x))
 
     @inline function _win_x87_atan2(y::Float64,x::Float64)
         Base.llvmcall(raw"""
@@ -299,6 +413,22 @@ end
     # path. The task field is nothing until a task-local value has been set.
     storage=current_task().storage
     return storage!==nothing && get(storage,_WIN_CLI_PRECISION_KEY,false)===true
+end
+
+# A CLI kernel cannot allocate, yield, perform I/O or call user callbacks.
+# The task-local selector may outlive scheduling; hardware is changed only
+# around this bounded native call and is restored before returning to Julia.
+@inline function _win_x87_cli_call(kernel::F,x::Float64) where F
+    if _win_cli_precision()
+        saved=_win_x87_control_word()
+        _win_x87_set_control_word!((saved&UInt16(0xfcff))|UInt16(0x0300))
+        try
+            return kernel(x)
+        finally
+            _win_x87_set_control_word!(saved)
+        end
+    end
+    return kernel(x)
 end
 
 function _win_powi_product(base::Float64,exponent::UInt32)
@@ -428,16 +558,18 @@ end
 # `_gm87_*` — the statically-linked mingwex x87 implementations. `.geo` FExpr
 # evaluation mirrors code compiled inside `libgmsh` itself: on Windows that
 # binary is pure MinGW, so expression-visible `Sin`/`Cos`/`Exp`/`Log`/`^`/
-# `Atan2` values take the emulated `_win_*` semantics verified bit-for-bit
-# against gmsh.exe (the evaluator already allocates for `BigFloat`). Off
-# Windows upstream links the platform `libm` dynamically, so the family
+# `Atan2` values use native x87 kernels on Windows x86_64, with BigFloat
+# emulation on other Windows architectures. On other operating systems,
+# upstream links the platform `libm` dynamically, so the family
 # aliases `_gm_*`. Everywhere else stays on `_gm_*`: transform matrices and
 # geometry-evaluation internals run in zero-allocation hot paths and their
 # captured upstream outputs were established under the system-libm
 # resolution.
 # ---------------------------------------------------------------------------
-@inline _gm87_sin(x::Float64) = Sys.iswindows() ? _win_sincos(x)[1] : _gm_sin(x)
-@inline _gm87_cos(x::Float64) = Sys.iswindows() ? _win_sincos(x)[2] : _gm_cos(x)
+@inline _gm87_sin(x::Float64) = Sys.iswindows() ?
+    (_WIN_X87_NATIVE ? _win_x87_cli_call(_win_x87_sin,x) : _win_sincos(x)[1]) : _gm_sin(x)
+@inline _gm87_cos(x::Float64) = Sys.iswindows() ?
+    (_WIN_X87_NATIVE ? _win_x87_cli_call(_win_x87_cos,x) : _win_sincos(x)[2]) : _gm_cos(x)
 @inline _gm87_exp(x::Float64) = Sys.iswindows() ? _win_exp(x) : _gm_exp(x)
 @inline _gm87_log(x::Float64) = Sys.iswindows() ? _win_log(x) : _gm_log(x)
 @inline _gm87_pow(x::Float64, y::Float64) =

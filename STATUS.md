@@ -23,6 +23,83 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Native Windows Exp/Log/Sin/Cos verification (2026-10-09)
+
+Windows x86_64 scalar parser functions now use balanced native x87 kernels.
+Exp follows the pinned MinGW split-constant instruction path, including its
+range guards and short truncation scopes. Log uses the primary's near-one
+branch, preserving directed signed zero. Sin/Cos use hardware range reduction
+with the caller's control word, including huge finite inputs. Ordinary API
+evaluation inherits precision/rounding; CLI task context selects 64-bit
+precision only around non-yielding kernels and restores it before Julia
+callbacks or scheduling. Existing special-value guards and other-platform
+fallbacks remain. Source and supporting files retain the full MinGW ZPL2.1
+and public-domain notices and modification date.
+
+Both runtime prototype controls pass 151,248 Exp/Sin/Cos and 50,868 Log
+scalar comparisons across twelve precision/rounding modes with zero primary
+mismatches. Independent installed state routes pass 3,668 assertions each,
+plus 624 special-value/NaN-payload checks each. Actual GeoExec/IO consumers
+pass 117 assertions each, including 1,620 primary API scalar values and 484
+standalone CLI values. Control words, stack tops, pre-existing stack values,
+task nesting, exceptions and scheduling are checked. Warmed 10,000-call
+native facade/CLI loops allocate zero bytes. This is bounded Windows evidence;
+other architectures and whole-mesher performance are not claimed.
+
+The permanent 48-record primary mode fixture and state/resource/error checks
+add 426 assertions. The original 1,386 math/CLI checks remain intact. A separate
+16-assertion control-flow correction preserves all ten standalone executable
+literals under CLI context and adds ten direct DLL/API53 bit pins with control
+word/task-state restoration checks. The two huge-angle precision lanes were
+independently reproduced against the actual executable and DLL, respectively.
+Both corrected installed focused runs pass 1,559 assertions, including the full
+173-assertion GEO control-flow test file. Independent lane proof SHA256:
+`428eb5e15748ab5ba90e1bdb2b45644fcabb6aadbc6ce3713189126dc6b85665`. The
+original control-flow, transforms, Extrude and curved-geometry drivers pass
+on both supported runtimes with identical logs and unchanged tolerances:
+4/17/34/8 cases and 28/113/419/127 samples, plus 201 scalar powers and six
+expected Extrude errors. Historical transforms/Extrude/curved ULP allowances
+remain; this is not a claim that every geometry sample is primary-bit-exact.
+
+Complete package gates pass 1,597,029 assertions on Julia 1.12.7/1.13.1,
+with explicit child bounds checks, actual exit 0 and all 505 inputs held.
+Wrapper times are 2223.867/1798.018 seconds;
+log SHA256 values are
+`31e7f4dddfed1e20179e31a823466df00fc77df67456f7c9d0f2e66209bb98c8` and
+`20ea13f60597f098183dc742682d13a90366071d5365f7ed0374f7995f552e57`. Frozen candidate manifest SHA256:
+`5307ce3af3e371be59951f80a21f9b5ec9bf46d4608ae2ac6fc5af6170a0bdbb`.
+Original native-math V1 primary/geometry receipts retain explicit lineage
+through two comment-only V2 projections, with identical syntax and 335/100
+line positions proved on both runtimes. The corrected candidate additionally
+retains the already-published Sort EOF bytes, independently proving all 100
+positions unchanged. Only math source/test, the new scalar artifact and the
+justified GEO precision-lane fixture differ from preceding main's input map;
+existing artifacts remain held. Corrected candidate packet SHA256:
+`acda2e0fe4acded2c5eea202e92a504267dc4c99858de69f23cb7ceec5a165bc`.
+Independent installed review SHA256:
+`374fbad54648852c023f98358af95f76b19a6ae1bfc0befc2a2d25265e839c68`.
+
+The original native-math V2 full Julia 1.13 run exited 1 with 1,597,005
+passes, eight failures and zero errors: its huge Sin/Cos test used standalone
+CLI64 expectations in direct API53 execution. Every actual failed value
+exactly matches the pinned DLL at API53. Original log SHA256:
+`e5fbc2e96379ad7d581150f2739615cc0132779404874809e9df69b2ae8b33f7`.
+The concurrent original Julia 1.12 attempt was deliberately superseded after
+1,478.571 seconds (24m39s); only its verified worker was stopped and its
+parent ended naturally. Its wrapper exit 1 is an incomplete interruption,
+not a semantic test pass or failure. Its all-505-held log SHA256 is
+`69626d86f7e9854735dce6619152a9f634573f22637c0ac316b7930974e31017`.
+Both original attempts remain immutable and are excluded from the admitted
+corrected full gates above.
+
+Other failed or superseded harness attempts remain separate: an invalid
+primary 0/0 expression, compiler/shell memory failures, an intentionally
+stopped reader and a legacy Windows PowerShell quoting failure are not
+successful checks. The completed valid-source routes and full gates above
+are the admitted evidence. Weighted matching, higher-generation lifecycle,
+classified import and the exceptional-quality allocation increment remain
+under audit. The full P1–P6 goal and current aggregate remain open.
+
 ### Recombination closure, priority and range verification (2026-10-09)
 
 Even-count explicit-angle Blossom now tests the pinned primary's complete
@@ -78,8 +155,8 @@ rerun is admitted. Independent focused report SHA256:
 
 Weighted optimality and general native tie policy, higher-generation identity
 history, classified MSH reuse and the full P1–P6 aggregate remain under audit.
-Neighboring native Exp/Log/Sin/Cos are independently verified candidates
-awaiting complete package gates. No category release completes the full goal.
+Neighboring native Exp/Log/Sin/Cos subsequently pass complete package gates,
+as recorded above. No category release completes the full goal.
 
 ### Windows atan2 verification (2026-10-09)
 
@@ -118,7 +195,7 @@ The independent installed FPATAN report SHA256 is
 `3693560b0afffc26a091f1e1fc851211a9e7a6cf3d82256255072c3493bb2c24`.
 
 The full audit remains active. Exp/Log/Sin/Cos precision/range gaps have a
-separately verified candidate awaiting full package gates. The recombination
+separately verified release recorded above. The recombination
 increment above covers directed/NaN priority and extreme-range domain quality.
 Weighted matching, actual higher-generation history and classified MSH reuse
 remain separate evolving increments.

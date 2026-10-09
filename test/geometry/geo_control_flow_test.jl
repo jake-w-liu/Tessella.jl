@@ -592,16 +592,26 @@ end
     @test large_powers.values["f"]===ldexp(1.0,-1074)
 
     # Trig past the x87 FPU range (|x| ≥ 2^63) takes mingw's assembly
-    # fallback — `fldpi; fadd; fprem1` — reducing modulo `2·round64(π_hw)`
-    # rather than the 66-bit constant the in-range `fsin`/`fcos` use.
+    # fallback — `fldpi; fadd; fprem1` — reducing modulo twice π_hw rounded
+    # at the current hardware precision, unlike in-range `fsin`/`fcos`.
     # All values verified bit-for-bit against the Windows gmsh.exe; other
     # platforms link the system libm upstream, so the pins are Windows-only.
+    # These CLI pins use the standalone executable's PC64 precision. Direct
+    # DLL/API calls instead retain the caller's precision and rounding.
     if Sys.iswindows()
-        x87=_execute_control_source(
+        x87_source=
             "a = Sin(1e300); b = Cos(1e300); c = Sin(9.5e18); " *
             "d = Cos(9.5e18); e = Sin(-9.3e18); f = Cos(-9.3e18); " *
             "g = Sin(1e19); h = Cos(1e19); " *
-            "i = Sin(4.5e15); j = Cos(4.5e15);")
+            "i = Sin(4.5e15); j = Cos(4.5e15);"
+        gmsh_math=Tessella.GmshLibm
+        x87_cli_context=gmsh_math._win_cli_precision()
+        x87_control_word=Sys.ARCH===:x86_64 ? gmsh_math._win_x87_control_word() : nothing
+        x87=gmsh_math._with_win_cli_precision(() -> _execute_control_source(x87_source))
+        @test gmsh_math._win_cli_precision()===x87_cli_context
+        if Sys.ARCH===:x86_64
+            @test gmsh_math._win_x87_control_word()===x87_control_word
+        end
         @test x87.values["a"]===0.9790015909522538
         @test x87.values["b"]===0.20385260585274806
         @test x87.values["c"]===-0.9819889907942527
@@ -612,5 +622,32 @@ end
         @test x87.values["h"]===-0.517542570159495
         @test x87.values["i"]===0.06881493122288082
         @test x87.values["j"]===0.9976294428497939
+
+        if Sys.ARCH===:x86_64
+            # Literal bits independently captured from the pinned Gmsh 4.15.2
+            # DLL parser at PC53/nearest for this exact program. The first eight
+            # differ from the standalone PC64 executable; i/j are controls.
+            api53_bits=(
+                0xbfe52ec076f4df9b,0x3fe7fc3f18dde1db,
+                0xbfeff980b1087879,0xbfa46346948342ef,
+                0xbfe9ffde57a992ae,0xbfe2a7cd22d091a2,
+                0xbfefc07dab441d63,0xbfbfd0b0ce36e482,
+                0x3fb19ddaf71429c6,0x3fefec9494d2214f,
+            )
+            api53_word=(x87_control_word & UInt16(0xf0ff)) | UInt16(0x0200)
+            try
+                gmsh_math._win_x87_set_control_word!(api53_word)
+                api53=_execute_control_source(x87_source)
+                @test gmsh_math._win_x87_control_word()===api53_word
+                @test gmsh_math._win_cli_precision()===x87_cli_context
+                for (name,expected) in zip(("a","b","c","d","e","f","g","h","i","j"),api53_bits)
+                    @test reinterpret(UInt64,api53.values[name])===expected
+                end
+            finally
+                gmsh_math._win_x87_set_control_word!(x87_control_word)
+            end
+            @test gmsh_math._win_x87_control_word()===x87_control_word
+            @test gmsh_math._win_cli_precision()===x87_cli_context
+        end
     end
 end
