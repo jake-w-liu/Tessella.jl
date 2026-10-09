@@ -837,3 +837,121 @@ end
     end
 end
 end # module RecombineNativePriorityRegressionTests
+
+module RecombineQualityReuseRegressionTests
+using Test,Tessella
+const R=Tessella.Recombine
+const NODES=(Int32(1),Int32(2),Int32(3),Int32(4))
+const TRIANGLES=Int32[1 1;2 3;3 4]
+
+candidate(coords)=R._candidate(coords,TRIANGLES,Int32(1),Int32(2),
+    Int32(3),Int32(1),Int32(1),Int32(3),(Int32(1),Int32(3)))
+
+# For the unit square with heights (0,a,0,b), the two diagonal triangle
+# normals are (-a,a,1) and (b,-b,1). This exact represented-coordinate
+# calculation is independent of production scaling and cancellation guards.
+function perpendicular_alignment(a,b)
+    a,b=Rational{BigInt}(a),Rational{BigInt}(b)
+    numerator=1-2a*b
+    score=setprecision(BigFloat,512) do
+        Float64(BigFloat(numerator)/sqrt(BigFloat((1+2a*a)*(1+2b*b))))
+    end
+    return numerator,score
+end
+
+@noinline function candidate_sum(coords,repetitions)
+    total=0.0
+    for _ in 1:repetitions
+        value=candidate(coords)
+        value===nothing && throw(ErrorException("expected a valid quality fixture"))
+        total+=value.quality
+    end
+    return total
+end
+
+@noinline function range_sum(coords,repetitions)
+    total=0.0
+    for _ in 1:repetitions
+        score,valid=R._quad_quality_range_result(coords,NODES)
+        valid || throw(ErrorException("expected valid represented geometry"))
+        total+=score
+    end
+    return total
+end
+
+@testset "Scalar zero and positive represented candidate remain distinct" begin
+    coords=Float64[0 1 1 0;0 0 1 1;0 .7 0 .5/.7]
+    snapshot=copy(coords)
+    numerator,expected=perpendicular_alignment(coords[3,2],coords[3,4])
+    @test numerator>0 && expected>0
+    # The preceding scalar contract intentionally returns zero after its
+    # rounded dot-product cancellation. Candidate admission recovers the
+    # positive represented alignment and must keep that separate behavior.
+    @test R._quad_quality(coords,NODES)===0.0
+    @test candidate(coords).quality==expected
+    @test candidate(coords).nodes==NODES
+    @test coords==snapshot
+    for height in (prevfloat(coords[3,4]),nextfloat(coords[3,4]))
+        nearby=copy(coords);nearby[3,4]=height
+        numerator,_=perpendicular_alignment(nearby[3,2],height)
+        @test (candidate(nearby)!==nothing)==(numerator>0)
+    end
+end
+
+@testset "Candidate exact range work has a single helper allocation budget" begin
+    healthy=Float64[0 1 1 0;0 0 1 1;0 0 0 0]
+    axis=Float64[0 1e200 1e200 0;0 0 1e-200 1e-200;0 0 0 0]
+    for coords in (healthy,axis)
+        snapshot=copy(coords)
+        candidate_sum(coords,1000)
+        @test minimum(@allocated(candidate_sum(coords,1000)) for _ in 1:3)==0
+        @test candidate(coords)!==nothing
+        @test coords==snapshot
+    end
+    for width in (1e200,1e300)
+        height=1/width
+        coords=Float64[0 width 2width width;0 0 height height;0 0 0 0]
+        snapshot=copy(coords)
+        # Exact projected area is positive and the smallest corner sine is
+        # bounded by h/w, below half of Float64's least positive value.
+        w,h=Rational{BigInt}(width),Rational{BigInt}(height)
+        @test w*h>0 && h/w<Rational{BigInt}(nextfloat(0.0))/2
+        @test candidate(coords).quality===0.0
+        repetitions=16
+        candidate_sum(coords,repetitions);range_sum(coords,repetitions)
+        helper_bytes=minimum(@allocated(range_sum(coords,repetitions)) for _ in 1:3)
+        candidate_bytes=minimum(@allocated(candidate_sum(coords,repetitions)) for _ in 1:3)
+        @test helper_bytes>32_000repetitions
+        # The budget admits one exact geometric computation plus fixed call
+        # overhead. The prior duplicate evaluation exceeded it by about2x.
+        @test candidate_bytes<=helper_bytes+1024
+        @test coords==snapshot
+    end
+end
+
+@testset "Recovered quality threshold keeps public ownership and geometry" begin
+    coords=Float64[0 1 1 0;0 0 1 1;0 .7 0 .5/.7]
+    _,quality=perpendicular_alignment(coords[3,2],coords[3,4])
+    mesh=Mesh(coords;tris=TRIANGLES,tri_tag=Int32[7,7])
+    before=mesh_crc(mesh);snapshot=(copy(mesh.coords),copy(mesh.tris),copy(mesh.tri_tag))
+    for algorithm in (:greedy,:blossom)
+        result=recombine_triangles(mesh;algorithm,min_quality=quality,
+            preserve_segments=false,full_quad=algorithm===:blossom)
+        @test Tessella.Elements.validate(result).ok
+        @test only(result.blocks).msh==3
+        @test only(result.blocks).nodes==reshape(Int32[1,2,3,4],4,1)
+        @test only(result.blocks).tags==Int32[7]
+        @test result.coords==mesh.coords && result.coords!==mesh.coords
+        rejected=recombine_triangles(mesh;algorithm,min_quality=nextfloat(quality),
+            preserve_segments=false)
+        @test only(rejected.blocks).msh==2
+        @test only(rejected.blocks).nodes==mesh.tris
+        @test only(rejected.blocks).tags==mesh.tri_tag
+        result.coords[1,1]=17.0;only(result.blocks).tags[1]=Int32(19)
+        @test mesh_crc(mesh)==before
+        @test (mesh.coords,mesh.tris,mesh.tri_tag)==snapshot
+    end
+    @test_throws ArgumentError recombine_triangles(mesh;algorithm=:blossom,
+        min_quality=nextfloat(quality),full_quad=true)
+end
+end # module RecombineQualityReuseRegressionTests

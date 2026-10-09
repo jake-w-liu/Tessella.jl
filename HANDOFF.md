@@ -8,6 +8,52 @@ allocation efficiency for each increment, push verified changes to main and
 continue. Individual category releases do not complete this goal. Production
 meshing must be independent; Gmsh 4.15.2 is only a differential oracle.
 
+## Current exact-quality reuse release (2026-10-09)
+
+This bounded increment follows native math commit `dff308f`. Only
+`src/meshing/Recombine.jl` and its existing regression file change, plus
+STATUS/HANDOFF. The remaining 503 source/test/config/artifact inputs and both
+published full notices remain exact. Source/test SHA256 values:
+`83a2997149df90776c2ce3b2f2ba737479eadfae1206fa783ade0d06cad2f3d8` and
+`5dd702bb8ab79403fed0693c43a0aa87d6dfb0ca430ff1a78f0e48f9a26abaa4`.
+
+The private candidate uses one score/validity result and performs exceptional
+exact recovery once. A scalar-zero/candidate-positive cancellation fixture
+preserves the preceding distinct contracts. Independent represented-coordinate
+geometry, ordinary zero-allocation, helper-once budgets and public
+threshold/ownership/error regressions add 44 assertions. Both actual normal
+installed focuses pass 70,917 checks, all 505 V2 inputs and notices held.
+The paired 309-fixture scratch leaf proofs remain historical V1 receipts on
+the same exact source/test bytes; do not relabel them as new V2 full gates.
+
+Both complete package gates pass 1,597,073 assertions with explicit child
+bounds, actual exit 0 and no drift on Julia 1.12.7/1.13.1. Tested source:
+`C:/tmp/tessella_quality_reuse_release_20261009`; manifest SHA256:
+`4dbee7dd84e5ce33e685a1962cebd6fbf6bb7212c1f5ddc46caa0f07ec9288fe`.
+Wrapper times: 2170.511/1738.597 seconds.
+Receipts: `C:/tmp/tessella_quality_reuse_release_full_20261009_112_v1_result.json`
+and `_113_v1_result.json`; log SHA256 values:
+`23c77a8a69ae9dd1d4879248133a41930ca1ece143c8b419eb2efed70431ddd9` and
+`607eeb3ec8449ccd9d976588bfbd3da4f551e4f5eba7822a9df70336646013e7`.
+Independent final candidate packet:
+`C:/tmp/tessella_quality_reuse_installed_candidate_packet_20261009_v2.json`,
+SHA256 `29fc4f5ddd6cc7961a54ba75cd2e71b8bdb113cc45e76275262df4fa2737e8a4`.
+
+The width1e200 candidate temporary allocations halve to 48,856/49,048 bytes
+on the two runtimes; width1e300 halves to 55,184/55,376 bytes. Ordinary loops
+stay zero-allocation. This is a bounded candidate measurement, not a full
+mesher performance claim. The deliberately optimizer-disabled focus had
+51 allocation failures and is retained as failed; same-configuration old
+source also allocates. Only the subsequent normal complete gates are admitted.
+No notices are recopied from the older raw candidate: accepted Windows
+`c5415f49` and HP/SGI `8bd1c6b5` notice bytes remain exactly held.
+
+The separately prepared aggregate basecase guard still needs its actual
+Tessella/full-package/aggregate evidence before promotion. Weighted public
+policy, higher-generation identity and classified-import work remain separate.
+The complete audit and user goal remain active; no full current aggregate
+success or fully optimized whole pipeline is claimed.
+
 ## Current native Windows math release (2026-10-09)
 
 This verified increment follows recombination commit `de98b0c` on main.
@@ -60,10 +106,9 @@ parent exited naturally and all505 original inputs remained held. Other
 failed/superseded consumer and launcher attempts also remain separate. No
 restart is needed for completed admitted primary/geometry checks.
 
-Next source increment removes duplicate exact-quality recovery; its separate
-scratch source `83a29971` across 309 fixtures passes 2,819 checks per runtime and halves
-tested shear allocations while preserving scalar/candidate semantics.
-It still needs its own permanent integration/full gates. Weighted public
+The subsequent exact-quality reuse increment above admits the preserved
+`83a29971` candidate with permanent public tests and fresh full package gates.
+Its earlier 309-fixture scratch measurements retain their original binding. Weighted public
 policy and actual higher-generation/import source/test repairs remain in
 owned worktrees. Original higher fullPkg113 v2 failed; do not promote that
 whole producer tree or overwrite accepted API/math files. The complete audit
