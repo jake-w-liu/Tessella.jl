@@ -8,6 +8,67 @@ allocation efficiency for each increment, push verified changes to main and
 continue. Individual category releases do not complete this goal. Production
 meshing must be independent; Gmsh 4.15.2 is only a differential oracle.
 
+## Current native Windows math release (2026-10-09)
+
+This verified increment follows recombination commit `de98b0c` on main.
+Balanced x87 Exp/Log/Sin/Cos preserve primary caller/CLI precision and range
+behavior without warmed kernel allocation. The meaningful source/test/artifact delta is four
+paths, plus full supporting notices and documentation; the remaining 501
+main input bytes remain held. The corrected frozen505 source at
+`C:/tmp/tessella_native_math_corrected_release_20261009` passes both complete package
+gates: 1,597,029 assertions each, explicit child bounds, actual exit 0,
+no drift. Manifest SHA256:
+`5307ce3af3e371be59951f80a21f9b5ec9bf46d4608ae2ac6fc5af6170a0bdbb`.
+GmshLibm source SHA256:
+`e0b34c1101723d6590e8ef12c0e2bc3384ca56f8fdfc8c37082a343b7055c044`;
+test SHA256: `9c8141adec533f8a674924b28d6b1c14081c98da0cc193bd741a8f0c1b800262`;
+new literal primary artifact SHA256:
+`dd6cf6f6dbfb7769cc669e000f13a5642ca8e02641423cdddbe674be3482a117`;
+GEO control-flow fixture SHA256:
+`fa04934a1a2bffc8f79679925be85e66e478519a304dee45e1ffa8e9b3b1c066`.
+Wrapper times are 2223.867/1798.018 seconds.
+Receipts: `C:/tmp/tessella_native_math_corrected_release_full_20261009_112_v1_result.json`
+and `_113_v1_result.json`; log SHA256 values:
+`31e7f4dddfed1e20179e31a823466df00fc77df67456f7c9d0f2e66209bb98c8` and
+`20ea13f60597f098183dc742682d13a90366071d5365f7ed0374f7995f552e57`.
+
+Both corrected focused routes (1,559 assertions, including the unchanged
+1,386 math/CLI checks), independent installed state (3,668) and valid public
+consumer (117) routes pass. Ten original executable CLI literals remain
+unchanged; 16 additional independently verified direct API53/context
+assertions justify the prior test-lane repair. Independent exact lane proof:
+`C:/tmp/tessella_huge_trig_lane_independent_review_20261009.json`, SHA256
+`428eb5e15748ab5ba90e1bdb2b45644fcabb6aadbc6ce3713189126dc6b85665`. Original four geometry gates pass each runtime with unchanged
+checks/tolerances and byte-identical logs. Final bounded independent report:
+`C:/tmp/tessella_native_math_independent_review_final_20261009.json`, SHA256
+`374fbad54648852c023f98358af95f76b19a6ae1bfc0befc2a2d25265e839c68`.
+Original V1 source/proofs remain immutable; original V2 changes only two
+comments/whitespace inputs, with parsed AST/all 335 and 100 line positions
+proved exact in 11 checks per runtime. The corrected foundation retains
+published Sort885 bytes through the additional six-check/100-position EOF
+projection and changes only the justified GEO test lane. No production
+instructions changed after the independently verified E0 native candidate.
+Preserve the original full113 failure (1,597,005 pass/8 fail/0 error, exit1,
+log SHA256 `e5fbc2e96379ad7d581150f2739615cc0132779404874809e9df69b2ae8b33f7`)
+and the original full112 deliberately superseded attempt (24m39s, wrapper1,
+log SHA256 `69626d86f7e9854735dce6619152a9f634573f22637c0ac316b7930974e31017`)
+separately from corrected successful gates. The latter is incomplete, not a
+semantic test result; ledger:
+`C:/tmp/tessella_native_math_release_full_20261009_112_v2_superseded.json`.
+Its exact owned worker19836 was stopped after verifying image/start/ancestry;
+parent exited naturally and all505 original inputs remained held. Other
+failed/superseded consumer and launcher attempts also remain separate. No
+restart is needed for completed admitted primary/geometry checks.
+
+Next source increment removes duplicate exact-quality recovery; its separate
+scratch source `83a29971` across 309 fixtures passes 2,819 checks per runtime and halves
+tested shear allocations while preserving scalar/candidate semantics.
+It still needs its own permanent integration/full gates. Weighted public
+policy and actual higher-generation/import source/test repairs remain in
+owned worktrees. Original higher fullPkg113 v2 failed; do not promote that
+whole producer tree or overwrite accepted API/math files. The complete audit
+and P1–P6 goal remain active; no full current aggregate pass is claimed.
+
 ## Current recombination release (2026-10-09)
 
 This verified increment follows `c31f772` on main: complete even boundary
@@ -46,13 +107,11 @@ Corrected independent attribution report:
 SHA256 `5ee7e386991e6f59db9c3a4eba8fac01805682af19687adb30c460ef11eefebf`.
 Preserve that incomplete attempt and completed rerun separately.
 
-Native math candidate has passed both focused, independent actual public
-consumer/state/resource routes and the original four geometry gates. Current
-505-input V2 manifest SHA256 is
-`6e94352566718eb6143f166661d13909db1158d9989570add0557143290489e4`;
-math source `e0b34c1101723d6590e8ef12c0e2bc3384ca56f8fdfc8c37082a343b7055c044`.
-Its two V2 deltas are comments only, with identical parsed syntax and line
-positions on both runtimes. Full math package gates remain required.
+The subsequent corrected native math release is recorded above. Its original
+505-input V2 primary/geometry proof foundation remains preserved through the
+verified comment/EOF lineage; its old full113 failed and full112 superseded
+attempts are not admitted as successful gates. Corrected full package gates
+use the separate 505-input `5307ce3a` binding and explicit GEO precision lanes.
 Weighted kernel, actual higher-generation lifecycle and classified import
 work remain separate; original higher fullPkg113 v2 is terminal1, not a pass.
 Stale pre-P2 integer support-label expectations require independently justified

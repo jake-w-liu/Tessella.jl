@@ -114,3 +114,105 @@ const G=Tessella.GmshLibm
     end
 end
 end # module WindowsAtan2RegressionTests
+
+module WindowsNativeMathRegressionTests
+using Test,Tessella
+const G=Tessella.GmshLibm
+
+@static if Sys.iswindows() && Sys.ARCH===:x86_64
+    using ..WindowsAtan2RegressionTests: x87_stack_top
+    const fixture=readlines(joinpath(@__DIR__,"..","artifacts","windows_math_primary.txt"))
+    const input_row=only(filter(line->startswith(line,"# inputbits "),fixture))
+    const inputs=[reinterpret(Float64,parse(UInt64,part;base=16))
+        for part in split(input_row)[3:end]]
+    const records=[(parse(UInt16,parts[1];base=16),parts[2],
+        [parse(UInt64,part;base=16) for part in parts[3:end]])
+        for parts in (split(line) for line in fixture if !startswith(line,"#"))]
+    const functions=Dict("Exp"=>G._gm87_exp,"Log"=>G._gm87_log,
+        "Sin"=>G._gm87_sin,"Cos"=>G._gm87_cos)
+
+    function mode_values(f::F,word) where F
+        values=Vector{UInt64}(undef,length(inputs))
+        saved=G._win_x87_control_word();before=x87_stack_top()
+        observed=UInt16(0);top_held=false
+        try
+            G._win_x87_set_control_word!(word)
+            @inbounds for index in eachindex(inputs)
+                values[index]=reinterpret(UInt64,f(inputs[index]))
+            end
+            observed=G._win_x87_control_word();top_held=x87_stack_top()==before
+        finally
+            G._win_x87_set_control_word!(saved)
+        end
+        return values,observed,top_held
+    end
+
+    @noinline function repeated_calls(f::F,count) where F
+        total=0.0
+        for index in 1:count
+            total+=f(.25+index/32768.)
+        end
+        return total
+    end
+
+    @testset "Windows native math primary modes, CLI and bounded workspace" begin
+        saved=G._win_x87_control_word()
+        for f in values(functions)
+            f(1.)
+        end
+        @test length(records)==48
+        for (bits,label,expected) in records
+            word=(saved&UInt16(0xf0ff))|bits
+            values,observed,top_held=mode_values(functions[label],word)
+            @test values==expected
+            @test observed==word
+            @test top_held
+            @test G._win_x87_control_word()==saved
+        end
+        expected_cli=Dict((bits&UInt16(0x0c00),label)=>values
+            for (bits,label,values) in records if bits&UInt16(0x0300)==0x0300)
+        G._with_win_cli_precision() do
+            for (bits,label,_) in records
+                word=(saved&UInt16(0xf0ff))|bits
+                values,observed,top_held=mode_values(functions[label],word)
+                @test values==expected_cli[(bits&UInt16(0x0c00),label)]
+                @test observed==word
+                @test top_held
+                @test G._win_x87_control_word()==saved
+            end
+        end
+        @test !G._win_cli_precision()
+        for f in values(functions)
+            repeated_calls(f,1000)
+            for count in (1000,2000,4000)
+                @test minimum(@allocated(repeated_calls(f,count)) for _ in 1:3)==0
+            end
+            G._with_win_cli_precision() do
+                repeated_calls(f,1000)
+                for count in (1000,2000,4000)
+                    @test minimum(@allocated(repeated_calls(f,count)) for _ in 1:3)==0
+                end
+            end
+        end
+        @test isequal(G._gm87_exp(-Inf),0.)
+        @test G._gm87_exp(Inf)==Inf
+        @test G._gm87_log(-0.)==-Inf
+        @test G._gm87_log(Inf)==Inf
+        @test isnan(G._gm87_log(-1.))
+        for f in values(functions)
+            @test isnan(f(NaN))
+        end
+        @test isnan(G._gm87_sin(Inf))
+        @test isnan(G._gm87_cos(-Inf))
+        @test isequal(G._gm87_sin(-0.),-0.)
+        @test G._gm87_sincos(.125)==(G._gm87_sin(.125),G._gm87_cos(.125))
+        @test_throws ErrorException G._with_win_cli_precision() do
+            G._gm87_exp(.125);G._gm87_log(.125)
+            G._gm87_sincos(1e300)
+            error("native math CLI unwind")
+        end
+        @test !G._win_cli_precision()
+        @test G._win_x87_control_word()==saved
+    end
+end
+end # module WindowsNativeMathRegressionTests
