@@ -232,3 +232,51 @@ end
                                                 nθ=16,nz=2))).ok
     end
 end
+
+
+function cylinder_surface_build_allocations(sectors)
+    GC.gc()
+    return @allocated cylinder_surface((0.,0.,0.),(0.,0.,1.),1.,2.;
+                                       nθ=sectors,nz=2)
+end
+
+function checked_cylinder_arrays_allocations(surface)
+    GC.gc()
+    return @allocated Tessella.Geometry._checked_surface(
+        Mesh(surface.coords;tris=surface.tris),"cylinder_surface")
+end
+
+@testset "Cylinder construction owns bounded output buffers" begin
+    for (axis,sectors,levels) in (((1.,0.,0.),7,2),
+                                  ((0.,1.,0.),12,5),
+                                  ((2.,3.,4.),17,4))
+        center=[1.,-2.,.5];direction=collect(axis)
+        center_before=copy(center);direction_before=copy(direction)
+        radius=1.25;height=2.5
+        surface=cylinder_surface(center,direction,radius,height;nθ=sectors,nz=levels)
+        @test (nnodes(surface),ntris(surface))==(sectors*levels+2,2sectors*levels)
+        @test validate(surface).ok && is_meshable(surface)[1]
+        expected=.5*sectors*sinpi(2/sectors)*radius^2*height
+        @test signed_surface_volume(surface) ≈ expected rtol=1e-12
+        @test center==center_before && direction==direction_before
+        before=copy(surface.coords)
+        center[1]+=10.;direction[1]+=10.
+        @test surface.coords==before
+    end
+
+    for sectors in (256,1024)
+        surface=cylinder_surface((0.,0.,0.),(0.,0.,1.),1.,2.;nθ=sectors,nz=2)
+        cylinder_surface_build_allocations(sectors)
+        checked_cylinder_arrays_allocations(surface)
+        built=minimum(cylinder_surface_build_allocations(sectors) for _ in 1:3)
+        checked=minimum(checked_cylinder_arrays_allocations(surface) for _ in 1:3)
+        payload=sizeof(surface.coords)+sizeof(surface.tris)
+        # Both routes retain the validating Mesh constructor and complete
+        # surface checks on the same represented coordinates/connectivity.
+        # Construction gets a two-payload allowance plus a fixed 32 KiB;
+        # a temporary array per column or duplicate growing tuple buffers
+        # exceed this budget without changing the validation baseline.
+        @test built <= checked+2payload+32_768
+        @test (nnodes(surface),ntris(surface))==(2sectors+2,4sectors)
+    end
+end

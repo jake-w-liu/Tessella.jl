@@ -23,6 +23,24 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Cylinder construction buffers (2026-10-09)
+
+`cylinder_surface` fills checked, owned coordinate and connectivity matrices
+directly. The certified point arithmetic, triangle order, validating Mesh
+constructor and complete surface-healing checks remain byte-for-byte or
+behaviorally unchanged. Existing CRC fixtures and test prefixes are retained.
+Nineteen permanent checks cover oblique/axis frames, analytic prism volume,
+input detachment and construction allocation relative to the same full
+validation route. Public focuses pass 139 assertions on each supported runtime.
+
+Both complete bounds-checked package gates pass 1,597,092 assertions on Julia
+1.12.7/1.13.1 with actual exit 0; all 505 frozen executable inputs and both
+published notices remain unchanged during each run. Only Geometry and its
+test file differ from the preceding main source map. Paired public controls
+save 160,869 bytes at 1,024 triangles and about 682,000 bytes at 4,096 triangles.
+These are temporary construction allocations, not whole-mesher CPU or RSS
+claims. The broader native-generation integration and aggregate audit continue.
+
 ### Active aggregate audit and concurrent fixes (2026-10-09)
 
 The aggregate basecase guard remains a candidate, not a published meshing fix.
@@ -46,17 +64,19 @@ The higher-generation candidate matches these counts and high-water labels;
 its initial raw Quad/Hex ordering still needs verification. No repaired
 production source or aggregate success is claimed here.
 
-The separate cylinder buffer candidate passes 139 public checks on each
-runtime, including existing geometry regressions and paired output/allocation
-controls. Its joint package/aggregate release remains held; these focused
-results do not establish a whole-pipeline performance improvement.
+The cylinder buffer increment is published independently after both complete
+package gates and the 139-assertion public focuses. The aggregate guard and
+native-generation candidate remain separate unfinished integration work.
 
 Concurrent Devin work was identified from this PC's CLI history in session
 `casual-turn`, at `C:/tmp/tessella_resume_all_20261008` on
 `codex/resume-all-20261008`. Its actual git base is `b2966fd`; it contains
-uncommitted native-generation work and ongoing fixes, including transformed
-box metadata and embedded-cell preservation. Devin is still investigating
-regeneration after a Point size change. These changes are not merge-ready.
+uncommitted native-generation fixes, including transformed box metadata and
+embedded-cell preservation. Final indexed history records that Devin stopped;
+its full differential/resource checks and merge were unfinished. The final
+changes are captured in the integration checkout. Its last blanket record-clear
+change is withheld because native setter/import controls retain those records;
+the correct regeneration policy is being verified independently.
 Reconciliation must retain the accepted math/recombination fixes on main,
 verify the combined source, merge finished fixes, push main and leave the
 worktrees clean after preserving all unique work. P1-P6 remain IN PROGRESS.
