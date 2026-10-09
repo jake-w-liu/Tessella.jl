@@ -23,6 +23,44 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Active aggregate audit and concurrent fixes (2026-10-09)
+
+The aggregate basecase guard remains a candidate, not a published meshing fix.
+Its frozen 506-input candidate passes both complete bounds-checked package
+gates: 1,597,098 assertions on Julia 1.12.7 and 1.13.1, actual exit 0 and no
+input drift. The five actual Tessella/Gmsh basecases also pass on both runtimes.
+Full `validation/run_all.jl` runs nevertheless exit 1 on both runtimes at
+`api_generate01/differential.jl`: 9,384 passes, four failures and zero errors.
+Neither run reaches the remaining children or produces a complete report.
+The candidate is therefore held until the generation defect and independently
+disproved blocker expectations are corrected and the full gates are rerun.
+
+A separate probe of the original sparse attached-Point cube setup confirms
+a current generation-history gap on main. After `generate(3)`, Tessella
+publishes Point777 and Hex778; Gmsh 4.15.2 publishes eight Points, twelve Lines,
+six Quads and one Hex through element 803. Subsequent `generate(1)` reaches
+element 810 in Tessella and 846 in Gmsh. The repair must publish the complete
+initial lower-dimensional products and preserve their ownership and birth
+identities. A counter adjustment alone cannot repair the missing prestate.
+The higher-generation candidate matches these counts and high-water labels;
+its initial raw Quad/Hex ordering still needs verification. No repaired
+production source or aggregate success is claimed here.
+
+The separate cylinder buffer candidate passes 139 public checks on each
+runtime, including existing geometry regressions and paired output/allocation
+controls. Its joint package/aggregate release remains held; these focused
+results do not establish a whole-pipeline performance improvement.
+
+Concurrent Devin work was identified from this PC's CLI history in session
+`casual-turn`, at `C:/tmp/tessella_resume_all_20261008` on
+`codex/resume-all-20261008`. Its actual git base is `b2966fd`; it contains
+uncommitted native-generation work and ongoing fixes, including transformed
+box metadata and embedded-cell preservation. Devin is still investigating
+regeneration after a Point size change. These changes are not merge-ready.
+Reconciliation must retain the accepted math/recombination fixes on main,
+verify the combined source, merge finished fixes, push main and leave the
+worktrees clean after preserving all unique work. P1-P6 remain IN PROGRESS.
+
 ### Recombination exact-quality reuse (2026-10-09)
 
 Candidate admission now keeps the quality score and represented-geometry
