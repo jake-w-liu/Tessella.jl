@@ -8,9 +8,199 @@ allocation efficiency for each increment, push verified changes to main and
 continue. Individual category releases do not complete this goal. Production
 meshing must be independent; Gmsh 4.15.2 is only a differential oracle.
 
+## Continuation handoff (2026-10-10)
+
+**This section supersedes the older closures below.** The user requested a
+handoff because the session limit is nearly reached. Finish every remaining
+implementation and every planned item in the next session; the P1–P6 goal is
+unfinished. The user explicitly requires **normal Git pushes of verified
+implementations to `main`**. Do not stop at an outline, scoped proof, or category
+release, and do not mark the overall goal complete while any required work remains.
+This handoff updates documentation only; the new integration is not published code.
+
+Start by reading `C:/tmp/tessella_session_handoff_20261010/INDEX.json` and the
+three agent handoffs it identifies. It binds the final current-job outcomes,
+Source qualifications, live process inventory, archives, and continuation tools.
+Keep that directory and the referenced `C:/tmp` candidates with the repository.
+Apply `C:/Users/User/.codex/skills/deep-debug/SKILL.md`: investigate confirmed
+defects, repair them, verify real callers, resources and performance, then audit
+the complete result. Do not rerun unchanged green scopes without a new reason.
+
+### Current candidates and published baseline
+
+| State | Exact location and evidence |
+|---|---|
+| Published code | Still `1e696f042f20c8b83a098279973a0fbadeab4dc7`; subsequent main commits, including this handoff, change documentation only. Its old 1,597,092-check package runs do not qualify the new integration. |
+| Root V24 | `C:/tmp/tessella_integration_resume_20261009`, branch `codex/integration-resume-20261009`, HEAD `ec9ea82071285d07adfbb4cc94b534c35457c8ae`, preserved dirty integration. 2,118 protected inputs / 206 Source files / 570 src-and-test Julia files. Checkpoint `C:/tmp/tessella_combined_candidate_checkpoint_20261010_v24.json`, SHA256 `fad2ae6e8397d678f430bc2ea0b1dfd55c36f0f425c74bdd9e4eaf0ad2d00720`; ZIP SHA256 `67783d7b552906c8b607c3afa4a3cda4c5a860decc7c4c276f110b4b01c0ef83`. Not a qualified combined release. |
+| Release V6 | `C:/tmp/tessella_main_release_integration_20261010`, branch `codex/main-release-integration-20261010`, based on pre-handoff main `11332f5c215d17d2fc3adf7114c394c34a6b11f4`. 2,126 protected inputs / 206 Source files; preserves eight Main-only artifacts. Prepared receipt `C:/tmp/tessella_main_release_integration_prepared_20261010_v6.json`, SHA256 `a1beb16dc9461aa8689d836e2244d1469af4326dfdfb4084d595d85af6415763`; verified ZIP SHA256 `2bb38925f91a6ac48e168cf110903bb3119d40e21f94ac096a6e40a240d6aa52`. Uncommitted and unqualified. |
+| Root progress | `C:/tmp/tessella_root_implementation_progress_main_push_20261010_v22.json`, SHA256 `3129eb4ba28c1ea721cb0c38b61e1a037946a217447c0c13355316b787eed2f5`; final handoff INDEX supersedes its subsequently completed live-job entries. |
+
+Root V24 already includes the independently verified fractional joining-edge
+direction fix, operation-owned curve evaluation cache and typed options, and
+native lookup `ErrorException` correction. Scoped Source checks passed BOTH:
+fractional 26,642, curve 34,291, and lookup 1,627. The nine original public lookup
+bodies still require BOTH. The last whole original transfinite focus passed
+4,518 per runtime on older V22; it does not qualify V24 or the final release.
+
+Release V6 adds 30 narrow fixture `-text` rules, restores 18 fixtures to their
+original declared byte hashes, and restores `APIMixedQueries.jl` to its original
+LF SHA256 `b453eb5f7c2751efc0eebc38ce8cef14e3d834494963947dbce4036a483011a4`
+with one Source `-text` rule. Git clean and checkout under autocrlf true/false/input
+were verified. No expected Native hash, Native literal content, Julia test body,
+or normalized Source content was changed. Root V24 remains byte-unchanged.
+
+### Adopt the existing public reader before starting another
+
+The sole long-running facade is Auto V7: owned Julia PID **14232**, outer tool
+session **10690**, created `2026-10-10T14:42:54.5018161+08:00`, parent PID 29572.
+Output is `C:/tmp/tessella_cad_surface_p2_public_20261010_113_v7/runtime.log`
+directly, not `gate/runtime.log`. Check the final INDEX/agent handoff and actual
+PID identity before adopting it. Last observation still had original grading
+probe 8 of 12 unfinished; rows 1–74 were constructed, 75–78 absent. Construction
+entry is not completion evidence. Known failures in this old candidate include
+12 curved XYZ/UV words and 16 lower-dimensional factory values.
+
+Allow natural termination, really wait/drain, and seal full post hashes. Do not
+kill/restart it merely for elapsed time, rerun its known-red counterpart, or start
+another facade/Pkg/aggregate process while it is alive. The winding-down Source
+jobs are separately recorded with their final outcomes in the handoff INDEX.
+
+Use fresh physical **and** available commit memory above 30 GiB before each
+guarded launch. Keep normal `-O2`, default inlining, bounds checks, startup/history
+off, one thread and one GC thread, and the established 2 GiB heap hint where the
+runner specifies it. Preserve original explicit four-thread resource tests.
+Source-only controls are not whole package/facade qualifications.
+
+### Implementation and public verification queue
+
+1. Finish the qualified Ordinary public replacement, then BOTH whole public
+   bodies. Preserve old V3 instead of launching its reachable known defect.
+   Ordinary V9 first-order reference passed BOTH 5,963; actual cache operators
+   V10 passed BOTH 4,376; strict production constructor transport V11 passed
+   BOTH 6,065. Joint V11 is
+   `C:/tmp/tessella_ordinary_layers_hybrid_import_transition_joint_qualification_20261010_v11.json`,
+   SHA256 `fc2525d10959ca6f146af84ee6e47d631342925bbbf9494c696b9fda52ad4193`.
+   Source GEO V18 passed BOTH 7,352 after correcting an AST-loader issue without
+   changing V17 Source. Joint
+   `C:/tmp/tessella_ordinary_layers_hybrid_import_geo_joint_qualification_20261010_v18.json`,
+   SHA256 `41788e617713e130e072f9a46e7b01673c441b836771e651b64debf1cef23f27`.
+   Full literal
+   GEO Mesh3 and cold/warm Generate3 histories remain required. Preserve DONE
+   across DeleteMeshes and perform real post-SetOrder1 constructor UID transport.
+2. Run the frozen Recombine 3,221-input candidate BOTH, using its 18 unchanged
+   whole public files and exact runner/preparation from the Recombine handoff.
+   Actual append/auto-renumber Source V10 passed BOTH 35,010 and live UID0 V7
+   passed BOTH 10,876; neither replaces that public gate. Its constructor transport
+   must be reconciled with Ordinary's separate first-order UID transport.
+3. Run corrected Curved V9 whole public BOTH: 16 complete files, including the
+   original 15 unchanged bodies. Freeze receipt
+   `C:/tmp/tessella_cad_surface_p2_public_freeze_20261010_v9/receipt_frozen_v9.json`,
+   SHA256 `48111d9b4dd2e07dac93fd225965e0f9711d4ed4a72d3cef19a6c2d17ba7f5e9`.
+   Source BOTH 3,003 passed; joint
+   `C:/tmp/tessella_curved_refine_context_candidate_20261010_v9/receipt_source_math_joint_v9.json`,
+   SHA256 `511e6d09c0d435b2fe0815135bfe0ae3cdf0f05a87896c97aa9cbf7dc61f7c3c`.
+   The narrow repair preserves admitted owners/parameters before raw refinement
+   placement, retains generic reclassification defaults and final ownership
+   assignment, and preserves actual explicit prior-reclassification behavior.
+   Two new Native fixture `-text` rules belong in the selected graft.
+4. Run the NEW composed Periodic dependency V7 public BOTH after Curved V9,
+   preserving the old known-red Periodic V6 freeze. V7 incorporates three reviewed
+   cache/refinement dependency hunks while retaining all periodic additions.
+   Its corrected combined Source focus passed BOTH 5,482 per runtime. Joint
+   `C:/tmp/tessella_periodic_curved_dependencies_candidate_20261010_v7/receipt_source_math_joint_v7_2.json`,
+   SHA256 `7be917f1713baeb54da794951afd6574617ca5fc139ee6e73a895e86c0fa4ed9`.
+   New 21-file public freeze
+   `C:/tmp/tessella_surface_periodic_curved_public_freeze_20261010_v7/receipt_frozen_v7.json`,
+   SHA256 `392317a1d1a99bdf9092cb03785af743eb6c7b331492a758dc115ca94eed34dd`;
+   exact new runner/preparation are in the Auto handoff.
+5. Run NativeLookup's nine original public bodies BOTH, then the COMPLETE
+   Point/Line quality, empty/signed labels, allocation and method-origin focus
+   BOTH. The whole-file pins for `API.jl`, `APINativeMeshTags.jl`, and
+   `APITaggedMutations.jl` are historical and differ after real Source changes.
+   Qualify the actual final methods, native payloads, Core.Box checks and original
+   growth budgets before updating their provenance pins. Preserve portable exact
+   Source bytes; do not waive the guards or replace Native expected values.
+6. Finish the writer/P2/basis work in the Recombine handoff. Existing text/basis
+   Source BOTH 12,225 is qualified only for its frozen candidate. New Source V6
+   plus the corrected constructor-history helper passed those originals, actual
+   `_ModelSlot` history, and four P2 Pyramid payload/basis controls. Latest V11
+   finished **12,417 pass / 9 fail / 0 errors**, all 8,673 inputs held, with no 1.12
+   run: nine multi-model logger comparisons lack Native's
+   `Info: Exporting multi-mesh view in separate files` before cache rebuilding.
+   Fix the actual writer route, preserve all existing assertions, then run BOTH;
+   the following eight density controls were not reached. The UID0 earlier
+   failure was a confirmed harness history defect: constructor maxima103/301
+   survive renumbering and writing; capture Slot before renumber. Do not change
+   correct Source density policy or original captures to accommodate that defect.
+
+Select only reviewed Source/test/fixture hunks with exact inverses, preserve
+dependencies, and run their whole public gates before final Root/release grafts.
+Never copy entire divergent agent trees over the integration. Frozen inputs,
+archives and failed outcomes must remain immutable. The latest documentation
+push advances Main beyond the release's old `11332` base; prepare final release
+history from current Main without overwriting this handoff or old snapshots.
+
+### Integer matching remains a real unfinished parity item
+
+The production integer fallback is unchanged. Private positive-root RotationV1
+is still red: 5,113/5,178 ordered matches, zero cost errors, 4,225 exact node-dual
+vectors and 3,985 exact cut groups. It regresses 22 cases against the private
+FreeEndpoint baseline. Full opaque Native certificates were independently decoded
+and proved feasible/tight with equal primal/dual objectives for all 5,178 cases;
+this does not prove our chronology or matching parity. Baseline full diagnostics
+are 5,111 ordered / 4,137 node-dual / 3,948 cut exact. Singleton bootstrap reproduces
+the missing nested zero 5/7 hierarchy in `expansion_search_1047`, but is red at 5,091;
+its rotation union is red at 5,094. Failed trace controls remain enforced. No private
+candidate is approved for production and no known-red 1.12 repetition is needed.
+
+Use the full literal/certificate drivers and all strict 5,178 order/cost,
+1,550 observed rounding states, six permanent trace controls and certificate
+assertions. Full Native primary SHA256 is
+`6bc96d37f32f7f7f83a886c00a2f23ccf231e6c79e8f6a676532437ea4711cd9`;
+full decoded fixture is `C:/tmp/tessella_matching_all_integral_certificate_cases_20261010_v1.jl`,
+SHA256 `335d358b4e372f8d87f14c2a1383a401e9a83a3c3146aa038cc11204fa179f73`.
+Implement independently from the existing BSD/NetworkX-derived Julia code and
+mathematical evidence. **Do not read/port Gmsh's Native matching algorithm Source**;
+only permitted opaque API outputs and our own observer wrapper may be used.
+No case-name, size, cost-pattern or Native-value dispatch is acceptable.
+
+### Required release closure and remaining roadmap
+
+Complete every still-planned P1–P6 item in PLAN/STATUS, including fields/adaptation/
+metric paths, general CAD/topologies/transforms/GEO, mixed/shared/OnlyEmpty and
+higher-order generation, ordinary Layers/caps/B1/transformed carriers, recombine,
+partition/ghost/parallel identity, formats/views/UI/plugins and their full
+requirement-by-requirement differential corpus. Earlier scoped green items do
+not close their broader tracks.
+
+Final combined acceptance still requires all original resource files and budgets,
+actual-vs-emitted B4 provenance, the original transformed Box test (four iterations,
+volume 8, tolerance 1e-12 and GC), complete `Pkg.test()` BOTH with normal options,
+the fresh isolated complete aggregate BOTH against pinned Gmsh 4.15.2 (all five
+cases per runtime, complete REPORT and real termination), and ASCENT's 21 HFSS
+regressions. Preserve original tolerances, allocation caps, Source-origin checks,
+fixtures and test bodies. Resolve the sole release Manifest through actual Pkg
+operations and preserve Main-only artifacts. Review final diff, commit verified
+implementations, **normal `git push origin main`**, and verify the remote SHA.
+No force push, reset, stash deletion or premature completion claim.
+
+The SDK writer failure-stream preference is pending: Native leaves an OS handle
+and buffered bytes alive through finalize, releasing them only at process exit.
+Our Source closes the stream correctly before throwing. Six call-time byte checks
+remain unresolved; exact final bytes, errors, state and counters match. Keep the
+actual Native handle evidence and pending preference in the Recombine handoff.
+No error-stream edit or waiver has been authorized by a user answer.
+
+Preserve stash `7f1b8eb596a7aa18568edf8ef704049eaa18e504`, all existing refs,
+raw inverses, failed runs and archives. Do not apply the old blanket record-clear
+delta. Root math runner V2 checks missing package directories before any child;
+use `C:/tmp/tessella_root_math_guarded_runner_20261010_v2.py` with fresh unique
+outputs and explicit bindings. Actual terminal drain and complete post hashes
+are required. Old gate schemas/counts do not automatically bind V24's plain SHA map.
+
 ## Final closure and resume instructions (2026-10-09)
 
-This is the authoritative latest state; older sections below are historical.
+This older closure is historical; the 2026-10-10 handoff above supersedes it.
 The user requested closure because the weekly limit is nearly reached, a clean
 worktree, a push to main, and a detailed record of unfinished work. The full
 P1–P6 parity goal is **not complete**. Known integration failures remain; no
