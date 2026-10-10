@@ -6,11 +6,19 @@ diagnostics. It was created for the ASCENT electromagnetics workflow after gmsh
 4.13.1 and 4.15.2-git left the enclosure/coax acceptance geometry with zero volume
 elements.
 
-The original simplex-mesher roadmap is complete through Stage 6. Development has now
-expanded toward independent Gmsh 4.15.2 feature and behavioral parity, with
-ASCENT-relevant meshing capabilities implemented first. That parity target is **not
-complete**. Bounds-checked package and focused gates for each implementation
-increment are recorded in [`STATUS.md`](STATUS.md).
+The original simplex-mesher roadmap is complete through Stage 6. The broader
+Gmsh 4.15.2 feature and behavioral parity goal remains **in progress across all
+P1–P6 tracks**, with ASCENT meshing capabilities prioritized.
+
+As of 2026-10-10, the published production-code baseline is `1e696f0`; later Main
+commits record documentation. The implemented scope below describes that baseline.
+The preserved Root V24 and release V6 integrations are uncommitted candidates
+without complete combined-release qualification. Their focused successes do not
+close the remaining parity work. Continue from the
+[2026-10-10 handoff](HANDOFF.md#continuation-handoff-2026-10-10) and its
+[handoff index](C:/tmp/tessella_session_handoff_20261010/INDEX.json), which record
+reader ownership, exact candidates, remaining implementations and verification
+order. [`STATUS.md`](STATUS.md) retains dated verification evidence.
 The separate external ASCENT solve campaign is recorded in [`ASCENT.md`](ASCENT.md).
 Tessella supports Julia 1.12.x and 1.13.x; [`Project.toml`](Project.toml) is the
 machine-readable runtime contract.
@@ -249,7 +257,7 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   consistent eligible cap and terminal shared-face choices; upstream pointer
   ordering can produce other admissible connectivity.
 
-P1 through P4 remain **in progress**. Current non-claims include boundary-layer
+All P1–P6 parity tracks remain **in progress**. Published-scope non-claims include boundary-layer
 topologies beyond the certified multi-region fan layouts, the full Gmsh
 automatic-sizing pipeline, materially warped unstructured surface fills,
 general tensor/metric meshing parity, general OpenCASCADE/unclassified NURBS CAD, and full
@@ -685,7 +693,9 @@ completeness. ASCENT remains Tessella's primary solver consumer.
 
 ## Verification
 
-Run the mandatory gates with Julia 1.12.x:
+Run the mandatory gates on both Julia 1.12.x and 1.13.x. Follow the
+[continuation handoff](HANDOFF.md#continuation-handoff-2026-10-10) reader-adoption
+and resource rules before starting another verification process:
 
 ```sh
 julia --project --check-bounds=yes -e 'using Pkg; Pkg.test()'
@@ -726,7 +736,8 @@ rules.
 - [`validation/`](validation/) — workflow-specific external-tool and solver-facing
   fixtures, with shared harness code in `support`
 - [`PLAN.md`](PLAN.md) — architecture and scope boundary
-- [`STATUS.md`](STATUS.md) — current package verification record
+- [`STATUS.md`](STATUS.md) — dated verification evidence and continuation state
+- [`HANDOFF.md`](HANDOFF.md#continuation-handoff-2026-10-10) — remaining implementation, reader ownership and release requirements
 - [`ASCENT.md`](ASCENT.md) — external solver integration and HFSS campaign
 
 ## License

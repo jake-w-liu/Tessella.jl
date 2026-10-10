@@ -1,7 +1,15 @@
-# HFSS 22-case native meshing (STATUS #12, meshing half)
+# HFSS 22-case representative native meshing
 
-Every geometry in the HFSS v10 User Guide worked examples (ch. 5–10) meshed **from
-scratch with Tessella's own primitives / raw triangulated surfaces — no gmsh, no
+Status reviewed **2026-10-10**: this page describes the representative 22-case meshing campaign.
+The authoritative [handoff](../../HANDOFF.md#continuation-handoff-2026-10-10)
+separates published code and historical results from **Root V24** and
+**Release V6**, which remain unqualified combined candidates. No rerun
+is claimed here. Tessella supports Julia **1.12.x and 1.13.x**; follow
+the [validation launch guidance](../README.md#run) for both runtimes.
+
+The recorded campaign built a representative geometry for every HFSS v10
+User Guide worked example (ch. 5–10), meshed **from scratch with Tessella's own
+primitives / raw triangulated surfaces — no gmsh, no
 OpenCASCADE**. Each `build_case(id)` returns a valid, watertight, conforming tet mesh
 of a representative geometry of that case's class (topology / shape; exact guide
 dimensions are not required for the meshing demonstration).
@@ -9,7 +17,7 @@ dimensions are not required for the meshing demonstration).
 Run the whole set:
 
 ```
-julia --project=<Tessella.jl> validation/hfss_cases/hfss_case_meshes.jl
+julia +1.12 -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=/path/to/Tessella.jl validation/hfss_cases/hfss_case_meshes.jl
 ```
 
 It prints, per case, `tets / valid / watertight / volume`. The set is also
@@ -17,7 +25,7 @@ regression-pinned in `test/integration/hfss_cases_test.jl` (all 22 assert valid 
 box-assembly cases assert exact volume; multi-region cases assert conforming
 interfaces + every region filled).
 
-## Coverage (22/22 valid + watertight)
+## Recorded representative coverage (22/22 valid + watertight)
 
 | case | geometry | Tessella route |
 |---|---|---|
@@ -48,9 +56,12 @@ interfaces + every region filled).
 
 This is the **meshing** half of the 22-case regression. The full-wave **solve** of
 each case is the ASCENT project's external campaign. Case **9.2 (the enclosure) is
-the only gmsh-impossible case** — the one that motivates Tessella's existence — and
-it is meshed at its literal `.geo` dimensions **and solved in ASCENT**
+the case with a recorded gmsh empty-volume failure** in this campaign.
+Its literal `.geo` dimensions were reconstructed **and solved in ASCENT**
 (`validation/enclosure_literal/`, `CASE_9_2_OK`). The compact 9.2 stand-in here
 (pin-in-cavity) is the same class; the literal fixture lives in `enclosure_literal/`.
-The other 21 cases are not gmsh failures — standard tools mesh them — so meshing them
-with Tessella demonstrates coverage rather than filling a capability gap.
+The campaign did not identify the other 21 representative cases as gmsh
+failures. Their native meshes demonstrate representative topology coverage;
+they do not reproduce every guide dimension, CAD imprint, solver response or
+current release contract. The dated enclosure solve and the remaining external
+22-case full-wave campaign are separate qualifications.

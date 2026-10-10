@@ -23,6 +23,29 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Continuation handoff and unfinished integration (2026-10-10)
+
+The user requested a session-limit handoff after the current checks. Published
+code remains `1e696f0`; this handoff changes documentation only. The full P1–P6
+implementation goal is incomplete, and verified implementations must be pushed
+normally to `main` as work continues.
+
+Root V24 (2,118 protected inputs / 206 Source files) and release V6 (2,126 inputs)
+are preserved locally, unqualified and unmerged. Release Git transport repairs
+preserve original Native/hash expectations and all test bodies. Fractional,
+curve, native exception, constructor transport and curved refinement Source
+focuses have scoped BOTH evidence; whole public callers, final integration,
+original resources/Box/ASCENT, complete package and fresh aggregate BOTH remain
+required. Private integer matching remains red and is not promoted. The latest
+writer job passed 12,417 checks but failed 9 new logger comparisons; its next fix
+and unreached density checks are recorded.
+
+Read the [authoritative continuation handoff](HANDOFF.md#continuation-handoff-2026-10-10)
+and `C:/tmp/tessella_session_handoff_20261010/INDEX.json` for final current-job
+outcomes, exact archives/runner paths, remaining implementation requirements,
+and ownership of the live Auto V7 public reader. Adopt and drain that process
+before launching another facade. No claim of a complete combined release is made.
+
 ### Final run closure and preserved integration (2026-10-09)
 
 Published code remains `1e696f0` (cylinder buffers), with both complete package

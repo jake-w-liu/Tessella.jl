@@ -1,13 +1,20 @@
 # QuadTriNoNewVerts differential
 
+Status reviewed **2026-10-10**: this page describes the bounded NoNew drivers, saved captures and recorded certificates.
+The authoritative [handoff](../../HANDOFF.md#continuation-handoff-2026-10-10)
+separates published code and historical results from **Root V24** and
+**Release V6**, which remain unqualified combined candidates. No rerun
+is claimed here. Tessella supports Julia **1.12.x and 1.13.x**; follow
+the [validation launch guidance](../README.md#run) for both runtimes.
+
 Run against the pinned Gmsh 4.15.2 Julia binding and runtime:
 
 ```sh
-GMSH_JULIA_API=/path/to/gmsh.jl julia --project=. --check-bounds=yes validation/quadtri_nonew/differential.jl
+GMSH_JULIA_API=/path/to/gmsh.jl julia +1.12 -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. validation/quadtri_nonew/differential.jl
 ```
 
 `QUADTRI_NONEW_CASE` filters fixture names. `QUADTRI_NONEW_ORACLE_ONLY=1`
-certifies the Gmsh side while native integration is being completed.
+certifies only the Gmsh side. It does not qualify native integration or release.
 
 The P1 matrix contains 20 cases with one nondegenerate source quadrangle,
 positive uniform and grouped layer counts ending at normalized height 1.0,
@@ -77,7 +84,7 @@ evaluate them back to the actual node coordinates. Separate provenance counters
 record this difference; the saved raw partial arrays remain in the artifact.
 
 Run the independent allocation and payload gate with normal compilation:
-`julia --project=. --check-bounds=yes validation/quadtri_nonew/two_tri_resources.jl`.
+`julia +1.12 -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. validation/quadtri_nonew/two_tri_resources.jl`.
 It needs no Gmsh installation. Both lateral policies pass through standalone,
 GEO, classified projection and public API generation at 1,000, 2,000 and 4,000
 intervals. Each measured output receives a complete linear audit of actual
@@ -139,8 +146,10 @@ and lateral surface plan.
 The recorded Gmsh oracle demonstrates real allocator dependence. The same
 one-quad, three-layer, free-lateral input can contain 16 Tet + 1 Pyr,
 12 Tet + 3 Pyr, or 8 Tet + 5 Pyr. Counts alone are insufficient; every outcome must pass
-the independent certificates. Exact equality to a random oracle connectivity
-is not required. RecombLaterals counts and centroid are stable, while its two
+the independent certificates. A captured allocator-dependent connectivity is
+not a universal golden pin for this bounded geometry comparison. The full goal
+retains causal input, identity, ordered-query and operator-history parity
+requirements. RecombLaterals counts and centroid are stable, while its two
 observed typed signatures correspond to the two admissible cap diagonals.
 Native repeated execution must preserve its complete mixed-mesh CRC. Global
 GEO meshes retain the existing CAD/control point parts; these are separate from
@@ -165,7 +174,9 @@ quadratic support, verify shared node identity and complete primary cell
 preservation, and integrate positive Gauss4 Jacobians to the analytic affine
 volume. Gmsh and native P2 meshes are certified against their own P1 cells,
 because upstream pointer choices can select different admissible complexes.
-High-order `.geo SetOrder` and curved CAD P2 placement remain separate blockers.
+This historical slice did not qualify general high-order `.geo SetOrder` or
+curved CAD P2 placement. New operation-history and curved-factory Source proofs
+and their pending public gates are recorded in the current handoff.
 
 Full or multiple pure revolutions require global intersection planning. Positive
 local volume alone does not certify nonadjacent interiors are disjoint. The
@@ -255,8 +266,8 @@ or binding is needed. An optional final argument naming a file in an existing
 directory writes the measured rows and input hashes as TOML.
 
 ```sh
-/path/to/julia-1.12.7/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/quad_patch_resources.jl
-/path/to/julia-1.13.1/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/quad_patch_resources.jl
+/path/to/julia-1.12.7/bin/julia -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. validation/quadtri_nonew/quad_patch_resources.jl
+/path/to/julia-1.13.1/bin/julia -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. validation/quadtri_nonew/quad_patch_resources.jl
 ```
 
 Each run produces 24 rows: standalone volume, GEO, classified projection and
@@ -281,8 +292,8 @@ Run the separate quad-strip resource gate with normal compilation and bounds
 checks on both runtimes; it needs no Gmsh installation or binding:
 
 ```sh
-/path/to/julia-1.12.7/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/quad_strip_resources.jl
-/path/to/julia-1.13.1/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/quad_strip_resources.jl
+/path/to/julia-1.12.7/bin/julia -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. validation/quadtri_nonew/quad_strip_resources.jl
+/path/to/julia-1.13.1/bin/julia -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. validation/quadtri_nonew/quad_strip_resources.jl
 ```
 
 The strip gate produces 24 path/policy/scale rows: standalone volume, GEO,
@@ -302,7 +313,7 @@ actual boxed-local positive control. It also scans generated keyword bodies,
 including optional positional wrappers, and verifies a boxed keyword control.
 Input hashes must remain unchanged.
 These reproducible commands describe the gate. Final strip resource and full
-release results are recorded in the repository's `STATUS.md`.
+release results are recorded in [STATUS.md](../../STATUS.md) and the authoritative handoff.
 
 The quad-strip replay reads sixteen captured Gmsh 4.15.2 P1/P2 products from
 `test/artifacts/quadtri_nonew_quad_strip_oracle.toml`, without remeshing them.
@@ -383,8 +394,8 @@ Run the separate three-Quad strip resource gate with normal compilation and
 bounds checks on both runtimes; it does not require Gmsh:
 
 ```sh
-/path/to/julia-1.12.7/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/three_quad_strip_resources.jl
-/path/to/julia-1.13.1/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/three_quad_strip_resources.jl
+/path/to/julia-1.12.7/bin/julia -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. validation/quadtri_nonew/three_quad_strip_resources.jl
+/path/to/julia-1.13.1/bin/julia -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. validation/quadtri_nonew/three_quad_strip_resources.jl
 ```
 
 The gate measures 24 path/policy/scale rows at 1,000, 2,000 and 4,000 intervals
@@ -454,8 +465,8 @@ Run the separate four-Quad strip resource gate with normal compilation and
 bounds checks on both runtimes; it does not require Gmsh:
 
 ```sh
-/path/to/julia-1.12.7/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/four_quad_strip_resources.jl
-/path/to/julia-1.13.1/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/four_quad_strip_resources.jl
+/path/to/julia-1.12.7/bin/julia -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. validation/quadtri_nonew/four_quad_strip_resources.jl
+/path/to/julia-1.13.1/bin/julia -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. validation/quadtri_nonew/four_quad_strip_resources.jl
 ```
 
 The 24 path/policy/scale rows cover 1,000, 2,000 and 4,000 intervals for
@@ -508,8 +519,8 @@ Run the rectangular-grid resource gate with normal compilation and bounds
 checks on both supported runtimes; it does not require Gmsh:
 
 ```sh
-/path/to/julia-1.12.7/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/rect_grid_resources.jl
-/path/to/julia-1.13.1/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/rect_grid_resources.jl
+/path/to/julia-1.12.7/bin/julia -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. validation/quadtri_nonew/rect_grid_resources.jl
+/path/to/julia-1.13.1/bin/julia -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. validation/quadtri_nonew/rect_grid_resources.jl
 ```
 
 The gate measures 24 P1 path/policy/scale rows at 500, 1,000 and 2,000
@@ -522,21 +533,21 @@ and independent audits follow measurement. The unchanged doubling bound is
 supports. Full-cell P1 maps, parent partitions, opposite typed faces, P2
 ownership/closure/UVs and true `Core.Box` controls are checked. Input hashes
 must remain stable. Release success requires completed guarded resource,
-strict and package runs recorded in STATUS.md.
+strict and package runs recorded in [STATUS.md](../../STATUS.md) and the authoritative handoff.
 
 ## Arbitrary-length recombined B4 strips
 
 The strict driver adds twelve independently captured M5/M7/M9 all-boundary
 strips, with one or three intervals, both normal signs, unit/skew/rounded
 geometry and literal Progression/Bump controls. Select them with
-`QUADTRI_NONEW_CASE=b4_rec_strip`. The earlier194 cases retain their contracts.
+`QUADTRI_NONEW_CASE=b4_rec_strip`. The earlier 194 cases retain their contracts.
 The saved artifact keeps exact recipes, source parameters, Float64 bits,
 typed cells, real centers, full-reference map bounds, interpolation supports,
 carrier proofs and stored/computed UV records. The pinned oracle's body-center
 warnings remain recorded; the driver checks their exact expected form and
-rejects Error diagnostics. The twelve captures contain84 real terminal
-centers and384 empty stored Surface UV records. Native computed UVs must
-reevaluate the actual queried coordinates within the unchanged2e-11 tolerance.
+rejects Error diagnostics. The twelve captures contain 84 real terminal
+centers and 384 empty stored Surface UV records. Native computed UVs must
+reevaluate the actual queried coordinates within the unchanged 2e-11 tolerance.
 
 The source admits exactly one Quad across and at least five along, using the
 same actual regular-disk incidence, strict convexity and Jordan boundary
@@ -544,28 +555,28 @@ proof as the rectangular path. Original source-column ordinals determine one
 consistent terminal rank; public oracle node tags do not substitute for its
 pointer order. Earlier macros are whole Hex8 cells. Each terminal macro emits
 its actual strictly interior mean and a fully certified seven-cell fan.
-For M source Quads and N intervals, family counts are2M Tet4, M(N-1) Hex8
-and5M Pyr5; P1/P2 node counts are2(M+1)(N+1)+M and(12M+6)N+14M+3.
+For M source Quads and N intervals, family counts are 2M Tet4, M(N-1) Hex8
+and 5M Pyr5; P1/P2 node counts are 2(M+1)(N+1)+M and (12M+6)N+14M+3.
 Actual primary/support identities determine carriers, including the real
 Volume centers and their radial supports. Independent exact reference maps
 certify every actual linear/quadratic cell and macro integral.
 
-Two retained M7 Progression4 recipes exposed a preexisting source-sampling
+Two retained M7 Progression 4 recipes exposed a preexisting source-sampling
 error on a length-two offset Line. The native GEO Line density route now uses
-the pinned bounded1e-5 first derivative and numerically integrated length.
+the pinned bounded 1e-5 first derivative and numerically integrated length.
 It preserves public exact evaluation and the separate recombination-count
 protocol. The strict native products pass the original coordinate tolerance;
 the artifact preserves the earlier failed source-only evidence as provenance.
 Other unfinished source categories remain work under the active full-parity
 goal. Resource and final package release results
-are recorded separately in STATUS.md after the candidate is frozen.
+are recorded separately in [STATUS.md](../../STATUS.md) and the handoff after the candidate is frozen.
 
 Run the recombined B4 resource gate with normal compilation and bounds checks
 on both supported runtimes; it does not require Gmsh:
 
 ```sh
-/path/to/julia-1.12.7/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/b4_rec_strip_resources.jl
-/path/to/julia-1.13.1/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/b4_rec_strip_resources.jl
+/path/to/julia-1.12.7/bin/julia -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. validation/quadtri_nonew/b4_rec_strip_resources.jl
+/path/to/julia-1.13.1/bin/julia -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. validation/quadtri_nonew/b4_rec_strip_resources.jl
 ```
 
 The gate measures twelve P1 construction rows: five source Quads with 500,
@@ -613,7 +624,7 @@ mesh lifecycle; ordinary recipes separately exercise real generate(3).
 Run the allocation gate with normal compilation and bounds checks:
 
 ```sh
-julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/b4_free_strip_resources.jl
+julia +1.12 -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. validation/quadtri_nonew/b4_free_strip_resources.jl
 ```
 
 It measures actual plan, emission, standalone, GEO, projection, classification,
@@ -632,11 +643,12 @@ metadata/refinement/order adapters and API recombination bodies. Analytical
 disjoint unit-right triangles measure actual label-table allocation and retained
 size at 1000/2000/4000 cells, with unchanged `2.15*previous+65536` growth bounds.
 These measurements are additional to the existing free geometry growth rows.
-The focused joint AST check covers 234 actual bodies with zero Core.Box on
-both supported runtimes; final resource runs must bind the final joint tree.
-Repeated 2D Curve retention and global quadratic discrete-Curve elevation
-remain separate confirmed generation-phase implementation work. The allocator
+The recorded focused joint AST check covered 234 actual bodies with zero Core.Box
+on both supported runtimes; final resource runs must bind the final joint tree.
+This historical resource campaign did not qualify repeated 2D Curve retention
+or global quadratic discrete-Curve elevation. Consult the handoff for their
+current implementation and verification state. The allocator
 fixture uses independently proved stable discrete Point records and preserves
 the original unresolved-reference rejection controls.
 Release success requires completed guarded package,
-strict and all family resource checks, recorded in STATUS.md.
+strict and all family resource checks, recorded in [STATUS.md](../../STATUS.md) and the authoritative handoff.

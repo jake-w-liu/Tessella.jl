@@ -1,5 +1,12 @@
 # Recombined affine transfinite-hexahedron differential
 
+Status reviewed **2026-10-10**: this page describes the bounded affine hexahedron driver.
+The authoritative [handoff](../../HANDOFF.md#continuation-handoff-2026-10-10)
+separates published code and historical results from **Root V24** and
+**Release V6**, which remain unqualified combined candidates. No rerun
+is claimed here. Tessella supports Julia **1.12.x and 1.13.x**; follow
+the [validation launch guidance](../README.md#run) for both runtimes.
+
 `differential.jl` checks the bounded `mesh_transfinite_hex` implementation
 against the installed Gmsh 4.15.2 Julia API without writing geometry or mesh
 files. It builds axis-aligned and sheared affine six-face volumes for every
@@ -36,10 +43,10 @@ pinned Homebrew build leaves coordinate residuals around `1e-12`. Node matching
 therefore uses `65536eps(Float64) * max(coordinate_scale, 1)`. Connectivity
 comparisons remain exact after mapping.
 
-Run the persistent gate with the supported Julia 1.12 runtime:
+Run the persistent gate on both supported runtimes (repeat with `+1.13`):
 
 ```sh
-julia +1.12 --project=. --startup-file=no --check-bounds=yes \
+julia +1.12 -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. \
   validation/transfinite_hex/differential.jl
 ```
 
@@ -55,7 +62,11 @@ constant-memory internal-face pairing, exact boundary-face equality,
 deterministic CRCs, pre-allocation count limits, and linear allocation growth
 are separate gates.
 
-This bounded increment does not support five-face degeneracies, curved/warped
+This bounded driver does not cover five-face degeneracies, curved/warped
 or independently discretized faces, nonuniform curve laws, partial
 recombination into prisms or pyramids, QuadTri, holes, multiple blocks,
 periodic seams, embedded entities, or high-order elements.
+
+These driver exclusions are not a repository-wide support table. The handoff
+records newer compact, periodic and actual-source transfinite proofs separately;
+its older scoped qualifications do not qualify Root V24 or Release V6.

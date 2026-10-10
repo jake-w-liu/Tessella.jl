@@ -1,18 +1,24 @@
 # Validation — Tessella vs external mesh tools
 
-Independent cross-validation of Tessella against established open-source meshers
-(currently **gmsh**). The convention: for every geometry, mesh the *same domain*
-with both tools and compare against a shared oracle — the **analytic volume** — plus
-element quality and wall-clock time. This checks that Tessella is not merely
-self-consistent but agrees with an independent implementation, and quantifies where
-it is more accurate or faster.
+Independent cross-validation uses pinned Gmsh 4.15.2 as a development oracle;
+production meshing remains Julia-native. The geometric case report compares
+represented domains, analytic volume, element quality and wall-clock time.
+Focused differentials separately check public identities, ordered typed cells,
+coordinates, ownership, raw and computed parameters, lifecycle state, diagnostics
+and allocation behavior. Volume agreement alone does not establish those contracts.
+
+Status reviewed **2026-10-10**: the authoritative [handoff](../HANDOFF.md#continuation-handoff-2026-10-10)
+supersedes earlier completion statements. Published code and dated captures are
+separate from **Root V24** and **Release V6**, which remain unqualified combined
+candidates. Existing scoped Source proofs do not qualify the pending public,
+resource, aggregate or package release. No validation was rerun for this documentation update.
 
 ## Layout
 
 ```
 validation/
-  run_all.jl             # driver: runs every case, writes REPORT.md
-  REPORT.md              # generated results table (git-ignored until you run it)
+  run_all.jl             # aggregate: selected mandatory children and case report
+  REPORT.md              # generated case report; git-ignored, not a release certificate
   support/
     common.jl            # helpers: gmsh runner, tet metrics, comparison
   size_fields/
@@ -122,11 +128,30 @@ are git-ignored.
 
 ## Run
 
-Use the supported Julia 1.12.x runtime:
+Tessella supports **Julia 1.12.x and 1.13.x** (`Project.toml`); the recorded
+qualification runtimes are 1.12.7 and 1.13.1. From the repository root, use the
+Juliaup selectors below, or substitute the corresponding installed executable:
 
 ```sh
-julia --project=. --check-bounds=yes validation/run_all.jl
+julia +1.12 -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. validation/run_all.jl
+julia +1.13 -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. validation/run_all.jl
 ```
+
+Follow the current handoff queue before launching: adopt and drain the existing
+owned reader, keep one facade/package/aggregate reader, and require fresh physical
+and available commit memory above 30 GiB. Bind the actual package path, exact
+inputs, executable and driver; capture the actual exit, drain the process and
+verify post-run hashes. Use normal `-O2` and default inlining. Debug runs with
+`--compile=min` or disabled compiled modules are not release qualification.
+Keep each resource test's original thread settings, including explicit four-thread
+children; the aggregate already launches its Windows power probe with four threads.
+
+Examples in the subdirectory READMEs use `+1.12`; repeat with `+1.13` unless both
+executables are listed. The `sh` environment assignment and backslash continuation
+syntax are for POSIX shells. In PowerShell set `$env:GMSH_JULIA_API` separately
+and place the Julia invocation on one line. Put the pinned Gmsh CLI on `PATH`
+and select its matching binding/DLL; individual drivers also accept their
+documented `GMSH_EXECUTABLE` setting.
 
 The aggregate gate requires the Gmsh 4.15.2 CLI and matching Julia API. It launches
 the size-field, constant-range, uniform-refinement, whole-cache affine,
@@ -137,7 +162,8 @@ fixed-element catalog,
 quadratic-tetrahedron, four-sided transfinite, straight transfinite
 curve-law, three-sided transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, recombined-hexahedron, and `.geo`
-meshing-constraint/Delete-lifecycle differentials as
+meshing-constraint/Delete-lifecycle, mixed cache/query/refinement, 0D/1D generation,
+transfinite QuadTri, AddVerts and NoNew differentials as
 mandatory bounds-checked children. It also runs focused box, square, cone,
 cylinder, Boolean snapshot/Delete lifecycle, NURBS/IGES, classified Point/Line-In-Surface and
 Surface-In-Volume projection with nested sheet constraints and a hole, native `.geo`,
@@ -156,7 +182,9 @@ boundary-layer parity cases.
 The NURBS child both imports Gmsh-generated IGES and has Gmsh import and mesh
 Tessella-generated type 126/128/144 records. Missing or wrong-version Gmsh,
 failed probes, and parity mismatches make the aggregate command fail. Mesh-case
-results print to the terminal and to `validation/REPORT.md`.
+results print to the terminal and to `validation/REPORT.md`. The aggregate
+contains selected probes; it does not replace every planned public body, family
+resource gate or the complete package tests listed in the handoff.
 
 ## What each case checks
 
@@ -167,11 +195,12 @@ results print to the terminal and to `validation/REPORT.md`.
 | 03_box_tunnel | box with a through-tunnel | V = 24 exact | genus-1 flat solid |
 | 04_hollow_box | box minus interior cavity | V = 35 exact | Boolean-difference (CSG) solid |
 | 05_sphere | ball | V = 4/3·πR³ | curved-surface fidelity |
-| 06_enclosure_coax | ASCENT coax feed-through | volumes non-empty | the acceptance case: gmsh 4.13/4.15 leave the air/case/pin volumes **empty**; Tessella's native pipeline targets filling them |
+| 06_enclosure_coax | ASCENT coax feed-through | volumes non-empty | historical acceptance capture: tested gmsh 4.13/4.15 runs left air/case/pin volumes **empty**; literal CAD parity remains separate from the native reconstruction |
 
-Flat solids give an *exact* analytic volume, so a passing row is a hard correctness
-cross-check. Curved solids expose the geometric-fidelity trade-off honestly (each
-tool is exact for its own surface model).
+Flat solids give an *exact* analytic volume, so a passing row supplies a volume
+cross-check. It must be accompanied by conformity, cell-map and identity audits.
+Curved solids compare each represented surface model with the analytic curved
+volume; neither a small volume error nor a successful report proves exact CAD parity.
 
 ## Adding a case
 

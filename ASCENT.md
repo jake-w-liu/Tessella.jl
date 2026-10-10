@@ -1,21 +1,36 @@
 # ASCENT integration & HFSS solve campaign — status tracker
 
+## Current continuation status (2026-10-10)
+
+The solver measurements and campaign audit below are **historical evidence from
+2026-08-11 through 2026-08-13**. They were not rerun during this documentation
+review and do not qualify Root V24, release V6, or a new full-wave campaign.
+Tessella currently supports Julia 1.12.x and 1.13.x; the older external solver
+results retain their original environment and provenance.
+
+Use [`HANDOFF.md`, continuation 2026-10-10](HANDOFF.md#continuation-handoff-2026-10-10)
+for current implementation/verification, live reader ownership, and the required
+normal push to `main`. The full parity goal remains unfinished; Root V24 and
+release V6 remain unqualified at that handoff. No new ASCENT/HFSS result is claimed.
+
 **Scope of this file:** everything about Tessella *feeding* the external ASCENT FEM
 solver and the HFSS validation campaign. Tessella's own development (the mesher:
 kernels, recovery, CSG, sizing, I/O) is tracked in `STATUS.md`; this file tracks only
 the ASCENT-facing work.
 
-ASCENT is an **external** solver (source + proprietary HFSS reference data at
-`/Users/jake/EMPIRE/projects/ongoing/2026_066`, never pushed to this repo). Per the
-user (2026-08-12), ASCENT integration is a **future verification step** run *after* the
-mesher is complete; it needs external artifacts (the ASCENT binary + proprietary HFSS
-datasets), so it is not part of the Tessella package goal itself. Tessella's job is to
-produce solver-consumable meshes; ASCENT's job is to solve on them.
+ASCENT is an **external** solver. Its historical source and proprietary HFSS data
+were recorded at `/Users/jake/EMPIRE/projects/ongoing/2026_066`; those artifacts
+are never pushed to this repo. The
+2026-08-12 instruction treated the wider ASCENT campaign as a future external
+verification step after mesher completion. Continuing it requires the real
+ASCENT binary and proprietary HFSS datasets in that project's environment;
+their availability on the current machine has not been reverified here.
+Tessella's job is to produce solver-consumable meshes; ASCENT's job is to solve on them.
 
 Nothing here is faked — a fabricated solve result would violate `DEVELOPMENT.md`'s CRC
 bar exactly as a silent bad mesh would.
 
-## Bottom line
+## Historical campaign snapshot (2026-08-12/13)
 
 - **Mesh drop-in: VERIFIED.** A Tessella MSH v4.1 loads whole into ASCENT's real parser
   (`GmshDiscreteModel`, GridapGmsh 0.7.4) with material volumes *and* boundary-condition
@@ -30,7 +45,7 @@ bar exactly as a silent bad mesh would.
   ASCENT compute; the geometries are already meshed natively by Tessella — see
   `STATUS.md` / `validation/hfss_cases/`).
 
-## Verified handshake + solve proofs (`validation/`)
+## Recorded handshake + solve proofs (`validation/`)
 
 | proof | tag | what it shows |
 |---|---|---|
@@ -42,11 +57,11 @@ bar exactly as a silent bad mesh would.
 | Cavity eigenmode | `CAVITY_EIGENMODE_OK` (`validation/ascent_cavity_eigenmode/`) | ASCENT's eigenmode solver computes a PEC cavity's resonant frequency on a Tessella mesh to within **0.046 %** of the closed-form analytic value (249.711 vs 249.827 MHz) — a complete geometry→mesh→solve→compare-to-reference regression with an independent analytic oracle, the exact shape of an HFSS cavity example |
 | Case 9.2 solve | `CASE_9_2_OK` (`validation/enclosure_literal/solve_case_9_2.jl`) | the enclosure — the one case gmsh cannot mesh (0 tets) — is meshed natively by Tessella and ASCENT assembles + solves the Maxwell FEM system on that mesh (107 DOF, complex-symmetric, manufactured-solution field recovered to 1.5e-12) |
 
-## The 22-case HFSS regression
+## Historical 22-case HFSS audit
 
 The HFSS v10 User Guide worked examples (ch. 5–10). Independent audit at
-`2026_066/HFSS_MASTER_TRACKER.md` / `HFSS_22CASE_COMPARISON.html`: **all 22 cases are
-already solved + audited in the ASCENT project** (all PASS vs. the guide — 9 exact, 8
+`2026_066/HFSS_MASTER_TRACKER.md` / `HFSS_22CASE_COMPARISON.html` recorded by
+2026-08-13: **all 22 cases were solved + audited in the ASCENT project** (all PASS vs. the guide — 9 exact, 8
 qualitative, 4 verified-residual, 1 unscored; every ASCENT result traces to a real
 solve-output file, none fabricated). Those audited solves used ASCENT's standard
 (gmsh-era) mesh pipeline.
@@ -56,7 +71,8 @@ solve-output file, none fabricated). Those audited solves used ASCENT's standard
   Tessella's existence ("the geo-emitter + gmsh **cannot mesh** the coax"). Tessella
   meshes it natively (gmsh: 0 tets) and ASCENT solves it (`CASE_9_2_OK`).
 - **The other 21 are NOT gmsh failures** — ASCENT's standard pipeline already meshed
-  them — so re-meshing them with Tessella adds no capability Tessella exists to provide.
+  them. That historical observation does not complete an end-to-end campaign
+  using Tessella meshes.
 - Tessella nonetheless meshes **all 22 case geometry classes natively** (representative
   geometries; `validation/hfss_cases/`, tracked in `STATUS.md`), so the mesher covers
   the whole guide.
@@ -65,12 +81,11 @@ solve-output file, none fabricated). Those audited solves used ASCENT's standard
 meshes — build each antenna geometry + ports/sources/radiation-BC/frequency-sweep in
 ASCENT + solve + post-process (S-params / gain / far-field) + compare to the guide
 figure. Examples: 5.1 UHF probe, 5.2 conical horn, 5.3 probe-fed patch, 10.1
-silicon-spiral inductor. The guide reference values **are** available (the ASCENT
-project's `HFSS_22CASE_COMPARISON.html` / `hfss/ug.txt` / guide PDF), so this is not a
-missing-data blocker; it is the ASCENT project's **multi-week full-wave solver campaign
-that uses Tessella as the mesher** — a different kind of work than a Tessella
-meshing/geometry capability, and of low incremental value since 21 of the 22 are not
-gmsh failures.
+silicon-spiral inductor. The historical campaign recorded guide references in
+`HFSS_22CASE_COMPARISON.html` / `hfss/ug.txt` / the guide PDF. Check those artifacts
+and the actual solver environment before continuing; no fresh reference-data
+availability or full-wave result is claimed here. This external campaign remains
+separate from, and does not substitute for, Tessella's current package parity gates.
 
 ## Why the enclosure needs Tessella (gmsh-failure diagnosis, carried from the ASCENT campaign 2026-08-11)
 

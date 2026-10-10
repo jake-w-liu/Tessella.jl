@@ -1,5 +1,21 @@
 # Size-field differential status
 
+## Current continuation status (2026-10-10)
+
+The coverage classification and terminal measurements below describe this scoped
+runner and its historical evidence. The 2026-08-21 command/results are preserved
+verbatim and were not rerun for this review. They do not qualify Root V24 or
+release V6, which remain unqualified at the
+[2026-10-10 handoff](../../HANDOFF.md#continuation-handoff-2026-10-10).
+
+Current development/verification supports Julia 1.12.x and 1.13.x. Use the
+[current invocation guidance](README.md) on both, after adopting the handoff's
+live reader and following its source/tool/memory guards. Context skips and
+separately implemented behaviors remain outside this runner's direct proof;
+retain the remaining full-parity implementation and validation work. A scoped
+pass does not complete or publish an implementation; the normal verified push
+to `main` remains required.
+
 Target: Gmsh 4.15.2. The runner requires both the Gmsh CLI and Julia API; a
 missing runtime, wrong version, failed probe, or parity mismatch exits nonzero.
 Intentional context gaps are printed as `CONTEXT_SKIP` and counted separately.
@@ -15,7 +31,7 @@ Intentional context gaps are printed as `CONTEXT_SKIP` and counted separately.
 | Implemented, not directly covered | first-order scalar/vector line, triangle, quadrangle, tetrahedron, hexahedron, prism, and pyramid `PostView` interpolation; multiple-time-step selection; mixed-component views under Gmsh dominant-kind precedence (tensor > vector > scalar); tensor scalar operator and `PostViewAnisoField` tensor-to-metric evaluation; high-order/custom-interpolation `PostView` element data (order-2 `X2` records and two-/four-matrix `INTERPOLATION_SCHEME` bindings, evaluated exactly including curved geometry maps) — no Gmsh-side evaluator exists, since Gmsh's `PostView` field accepts first-order views only | Separately checked by focused probes/tests, but this runner directly probes only scalar-point views. |
 | Explicit context skip/non-claim | anisotropic metric tensors/metric-driven meshing, boundary-layer element topology, `AutomaticMeshSizeField`, and materially warped quadrangles | No equivalent public oracle/shared model state exists for these. No parity claim is made. |
 
-## Known Gmsh probe constraints
+## Recorded Gmsh probe constraints
 
 - VERIFIED probe constraint: an `Octree` view probe before any Gmsh mesh pass
   crashed in `OctreeField::Cell::evaluate`. The runner performs a real mesh
@@ -27,7 +43,7 @@ Intentional context gaps are printed as `CONTEXT_SKIP` and counted separately.
   provide an honest directional 1-D metric comparison. It is reported as a
   context skip, not accepted with a loose tolerance.
 
-## Last measured result
+## Historical measured result (2026-08-21)
 
 On 2026-08-21, with `/opt/homebrew/bin/gmsh` and the matching Homebrew Julia
 API/library, this bounds-checked command exited 0:

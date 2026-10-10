@@ -1,14 +1,28 @@
 # Stage-4 size refinement — measured findings
 
-**Resolution (shipped):** `works_mesh_box_kuhn.jl` demonstrates
+## Current continuation status (2026-10-10)
+
+The measurements below are historical exploratory results; their capture date
+is not recorded here. Numeric results and the failed approaches are retained,
+and were not rerun during this review. The recorded structured box resolution
+does not establish full Gmsh parity or qualify Root V24/release V6.
+
+Read the [current handoff](../../HANDOFF.md#continuation-handoff-2026-10-10)
+and [current roadmap/status](../../STATUS.md) for source qualification, live
+reader ownership, and unfinished general refinement work. Current verification
+uses Julia 1.12.x and 1.13.x with bound source/oracle inputs; verified changes
+require a normal push to `main`. An old exploratory failure is not a theorem
+that other algorithms cannot satisfy the size/conformity goal.
+
+**Recorded structured resolution:** `works_mesh_box_kuhn.jl` demonstrates
 [`mesh_box`](../../src/meshing/Mesh3D.jl) — a **correct, sliver-free, size-controlled**
 tet mesher for axis-aligned boxes (Kuhn/Freudenthal explicit subdivision):
 `maxedge ≤ hmax`, exact volume, `validate.ok`, watertight (boundary χ=2), min
-dihedral 45°/≥42° — for arbitrary `hmax`. It covers the enclosure's box regions.
+dihedral 45°/≥42° — for the tested positive `hmax` values. It covers the enclosure's box regions.
 The three failures below are *why the naive routes don't work* and what pointed
 at the explicit-connectivity fix `mesh_box` uses.
 
-**Extended (shipped):** [`mesh_box_regions`](../../src/meshing/Mesh3D.jl) generalizes the
+**Recorded multi-region extension:** [`mesh_box_regions`](../../src/meshing/Mesh3D.jl) generalizes the
 same explicit-lattice route to a **shared global grid with per-cell region
 classification** — conforming, size-controlled, **multi-region** meshing of
 **unions / differences / nestings of axis-aligned boxes** (native box CSG). This
@@ -27,10 +41,10 @@ box `hmax=1` ≈ 200 s, `hmax=2` did not finish in 10 min on this machine) and
 **(b) fails on a regular tetrahedron** (small solid angles → invalid mesh), the
 classic Delaunay-refinement small-angle failure. It is therefore **not shipped**
 (slow + small-angle-fragile + redundant with `mesh_box` for the boxes it handles);
-the explicit-lattice `mesh_box`/`mesh_box_regions` route is strictly better for
-axis-aligned geometry. Robust general **curved / arbitrary-angle** refinement
-remains the research-grade open item (boundary recovery + Shewchuk terminator with
-small-angle protection).
+the recorded explicit-lattice `mesh_box`/`mesh_box_regions` route avoids those
+failures for the tested axis-aligned geometry. This historical attempt left
+general **curved / arbitrary-angle** refinement unfinished; retain its independent
+boundary, validity, size, termination, and small-angle checks in the active roadmap.
 
 Three naive approaches were built and **measured** to fail on a convex box `[0,4]³`:
 
@@ -46,21 +60,29 @@ equal length among the remaining corners — interior insertion can never shorte
 fixed boundary edge, and a fine boundary alone leaves long interior diagonals.
 (3) A regular lattice is *maximally* cospherical-degenerate; Delaunay of
 cospherical points is ambiguous and the exact+SoS kernel resolves ties
-deterministically but not always into a *valid* tetrahedralization — a correct BCC
-mesh must emit the **known BCC connectivity explicitly**, not Delaunay the lattice.
+deterministically, while the tested insertion route still produced invalid
+tetrahedralizations. These measurements motivated emitting **known BCC connectivity
+explicitly** instead of relying on that degeneracy-sensitive insertion path.
 
-**Conclusion (measured, not assumed).** A genuine 3-D size bound requires
-**boundary-conforming Delaunay refinement** — Steiner points inserted *and*
-boundary sub-faces split under an encroachment rule (Shewchuk's terminator),
-which is divergence-prone near small input angles and is a research-grade
-component, out of single-session scope.
+**Scope of the measured conclusion.** The three tested Delaunay insertion
+strategies did not provide a reliable general 3-D size bound. Boundary-conforming
+Delaunay refinement, with Steiner insertion and boundary splitting under an
+encroachment rule, is one possible further route; the structured box method above
+already supplies a bound without that route. The historical failures do not prove
+other methods impossible. General refinement and small-angle/termination handling
+remain implementation and verification obligations in the current roadmap.
 
 **Acceptance test for a future correct implementation.** On the box, for a sweep
 of `hmax`: `refine → maxedge ≤ hmax`, with `validate.ok`, `is_delaunay3`, exact
 preserved volume, and a bounded vertex count (termination).
 
-Run either script with:
+The scripts are exploratory reproductions, including intentionally failing
+attempts; they are not interchangeable passing closure gates. When a new change
+justifies a replay, use each supported Julia runtime under the handoff guards:
 
+```sh
+julia --project=. --startup-file=no --history-file=no --check-bounds=yes -O2 --threads=1 --gcthreads=1 validation/stage4_size_refinement/<script>.jl
 ```
-julia --project=. validation/stage4_size_refinement/<script>.jl
-```
+
+This invocation was not executed during the documentation review. Preserve and
+classify the actual outcome rather than converting a failure into a passing claim.

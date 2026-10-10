@@ -1,5 +1,12 @@
 # Finite `.geo` range differential
 
+Status reviewed **2026-10-10**: this page describes the bounded constant-range parser differential.
+The authoritative [handoff](../../HANDOFF.md#continuation-handoff-2026-10-10)
+separates published code and historical results from **Root V24** and
+**Release V6**, which remain unqualified combined candidates. No rerun
+is claimed here. Tessella supports Julia **1.12.x and 1.13.x**; follow
+the [validation launch guidance](../README.md#run) for both runtimes.
+
 `differential.jl` compares Tessella's bounded constant-list expansion with the
 installed Gmsh 4.15.2 parser through its Julia API. It checks bit-exact Float64
 values for two- and three-term `start:end[:increment]` lists, repeated-addition
@@ -13,10 +20,10 @@ the `FExpr '%' FExpr` action). The gate requires both the Gmsh 4.15.2 CLI and
 matching Julia API and exits nonzero on a missing runtime, version mismatch, or any
 value mismatch.
 
-Run it with the supported Julia 1.12 runtime:
+Run it on both supported runtimes (repeat the command with `+1.13`):
 
 ```sh
-julia +1.12 --project=. --startup-file=no --check-bounds=yes \
+julia +1.12 -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. \
   validation/geo_ranges/differential.jl
 ```
 

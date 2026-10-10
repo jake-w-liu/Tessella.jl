@@ -2,9 +2,19 @@
 
 Tessella is a Julia-native mesh generator for the ASCENT electromagnetics workflow.
 It is an independent implementation informed by Gmsh's architecture. The original
-simplex-mesher roadmap is complete; the active goal is now full Gmsh 4.15.2 feature
-and behavioral parity, prioritized by ASCENT meshing value. The parity goal is not
-complete. The live verification record is [`STATUS.md`](STATUS.md).
+simplex-mesher roadmap is complete; the active goal is full Gmsh 4.15.2 feature
+and behavioral parity, prioritized by ASCENT meshing value. All P1–P6 parity tracks
+remain **in progress**.
+
+As of 2026-10-10, published production code remains `1e696f0`; later Main commits
+record documentation. The architecture and implemented-scope descriptions below
+refer to that baseline unless a dated candidate is named. Preserved Root V24 and
+release V6 are uncommitted integrations without complete combined-release
+qualification. Use the [2026-10-10 handoff](HANDOFF.md#continuation-handoff-2026-10-10)
+and [handoff index](C:/tmp/tessella_session_handoff_20261010/INDEX.json) for exact
+continuation state, reader ownership, candidate hashes and verification order.
+[`STATUS.md`](STATUS.md) retains dated verification evidence. Julia 1.12.x and
+1.13.x are both required runtime lines.
 
 ## Target scope
 
@@ -1021,7 +1031,30 @@ explicitly, naming both stages, rather than producing a defective mesh.
 The external HFSS solve campaign remains tracked in [`ASCENT.md`](ASCENT.md); it is a
 consumer-side validation track, not a substitute for the parity work above.
 
-## Next implementation increment
+## Continuation priorities (2026-10-10)
+
+The complete P1–P6 target remains open. Adopt and naturally drain the existing
+Curved V7 reader, seal its post-run guards, and release the sole facade slot before
+starting another public gate. Follow the exact queue in the
+[continuation handoff](HANDOFF.md#implementation-and-public-verification-queue)
+and [handoff index](C:/tmp/tessella_session_handoff_20261010/INDEX.json).
+
+Remaining work includes the corrected Ordinary, Recombine, Curved V9 and composed
+Periodic dependency V7 whole public gates on both runtimes; NativeLookup and
+affected source-provenance guards; unresolved ordered matching and writer/P2
+behavior; and all broader algorithms, fields, CAD, formats, API, UI/postprocessing
+and differential-corpus requirements. Source-only and focused successes qualify
+only their exact frozen inputs. They do not qualify the combined release, close
+a broad parity track or replace aggregate and resource gates. Complete the
+remaining implementations and required verification before committing and normally
+pushing the combined changes to Main.
+
+## Historical implementation record (through 2026-10-09)
+
+The following records retain their original bounded scopes, counts and worktree
+provenance. Pending or in-progress candidate states describe those checkpoints;
+they are not the continuation queue. The 2026-10-10 handoff above supersedes their
+next-step statements.
 
 Synchronized API generation in dimensions zero and one is implemented in
 `APIGenerate01.jl`, with detached preparation and atomic publication. Tagged
@@ -1134,7 +1167,7 @@ strict native replay passes all 146 scoped cases, the shared AddVerts
 differential passes 32 cases and all eight resource gates pass on unchanged
 438 frozen production/test/validation inputs and scoped index.
 
-The current bounded four-Quad path is implemented: ten actual boundary
+The bounded four-Quad checkpoint implemented: ten actual boundary
 vertices, native five-/two-node chains and an 81-state cap relation coupling
 three shared faces. Eight original and 16 geometric variants have independent
 primary map/capacity/support proofs. Its preparatory source-only comparison passed
@@ -1202,35 +1235,41 @@ geometry/API, strict differential and resource checks passed in
 `C:/tmp/tessella_nonew_b4_strip`, from verified and pushed `9806d5b`.
 Both supported runtimes passed 1,311,533 package assertions, the strict replay
 passed 206 cases, and all 14 resource gates passed 101,383,766 actual checks.
-The current free B4 increment in `C:/tmp/tessella_nonew_b4_free` completes
+The preserved free B4 checkpoint in `C:/tmp/tessella_nonew_b4_free` completed
 physical face propagation before final factory dispatch. An actual retained
 problem emits its certified mean-centered fan in any interval, including
 nonterminal intervals and later factory-eligible masks. Node/cell admission
 reserves `V(N+1)+MN` and `12MN` before level/column allocation. The permanent
-factory/fan/preflight tests pass 58,593 on each supported runtime; complete
-geometry/API/P2, strict and resource release verification remains in progress.
+factory/fan/preflight tests passed 58,593 on each supported runtime; complete
+geometry/API/P2, strict and resource release verification was still pending at
+that checkpoint. Later selected retained/direct checks are recorded in the
+2026-10-10 handoff and do not qualify the whole Root V24 or release V6 integration.
 B1 categories, other source topologies, transformed products, mixed roots and
 shared neighbors/regions remain unfinished phases with precise blockers.
 
-The same joint candidate implements geometry-preserving native public label
-plans, Point identity binding before record cleanup and API recombination
-allocation/angle contracts. The combined actual AST scan passes 234 bodies
+That preserved joint candidate implemented geometry-preserving native public
+label plans, Point identity binding before record cleanup and API recombination
+allocation/angle contracts. Its combined actual AST scan passed 234 bodies
 on both supported runtimes with no Core.Box. Final joint package, strict and
-resource release checks are pending. Other recombination callers are under
-independent review.
+resource release checks were pending at that checkpoint; subsequent scoped
+recombination evidence and remaining callers are tracked in the 2026-10-10 handoff.
 
-Checked per-entity products and higher generation reuse/OnlyEmpty are being
-implemented in isolated `C:/tmp/tessella_onlyempty_higher`. Repeated 2D Curve
-primary retention and global quadratic elevation of independent discrete
-Curves are independently confirmed unfinished contracts in this track.
-Actual 3D Source/cap/lateral ingestion, generation completion status and
-extruded-region phase priority must follow the pinned independent authority.
+The historical isolated `C:/tmp/tessella_onlyempty_higher` checkpoint addressed
+checked per-entity products and higher generation reuse/OnlyEmpty. Repeated 2D
+Curve primary retention and global quadratic elevation of independent discrete
+Curves were unfinished there. Later selected lifecycle and retained-generation
+checks are recorded separately in the 2026-10-10 handoff; complete affected public
+suites and final combined verification remain required. Actual 3D Source/cap/lateral
+ingestion, generation completion status and extruded-region phase priority must
+follow the pinned independent authority.
 
 Native curved-CAD P2 placement/refinement, remaining higher-dimensional public
-tag lifecycle, duplicate-Point refinement admission, cross-Surface periodicity,
-meshing algorithms and fields, broad formats/API, and UI/postprocessing remain
-unfinished tracks. Unsafe raw native
-P2 fixtures that crash the pinned Gmsh library are recorded oracle gaps.
+tag lifecycle, general duplicate-Point admission/lifecycle, cross-Surface
+periodicity, meshing algorithms and fields, broad formats/API, and UI/postprocessing
+remain unfinished broad tracks. The corrected curved and periodic candidates
+require whole public qualification; already verified bounded Point and retained
+controls do not close the general tracks. Unsafe raw native P2 fixtures that crash
+the pinned Gmsh library remain recorded oracle gaps.
 
 ## Verification discipline
 

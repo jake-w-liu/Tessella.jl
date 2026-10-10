@@ -1,10 +1,17 @@
 # Affine transfinite-volume differential
 
+Status reviewed **2026-10-10**: this page describes the bounded affine six-face volume driver.
+The authoritative [handoff](../../HANDOFF.md#continuation-handoff-2026-10-10)
+separates published code and historical results from **Root V24** and
+**Release V6**, which remain unqualified combined candidates. No rerun
+is claimed here. Tessella supports Julia **1.12.x and 1.13.x**; follow
+the [validation launch guidance](../README.md#run) for both runtimes.
+
 This gate checks the bounded `mesh_transfinite_volume` implementation against
 the installed Gmsh 4.15.2 API, entirely in memory:
 
 ```sh
-julia --project=. --startup-file=no --check-bounds=yes \
+julia +1.12 -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. \
   validation/transfinite_volume/differential.jl
 ```
 
@@ -42,10 +49,13 @@ Gmsh applies to the negative literal v/u-free orders); boundary cells
 compare canonically per face tag since outward winding legitimately
 differs from Gmsh's surface winding. Gmsh's rejection is a logged
 `Msg::Error` (no exception and no 3-D elements), mirrored by the kernel's
-`ArgumentError`.
+`ArgumentError`. This is the bounded kernel diagnostic comparison;
+it is not a claim that every public native API uses that exception class.
 
 This gate does not cover five-face degeneracies (the prism differential
 does), curved or independently discretized faces under recombination,
 nonuniform curve laws, QuadTri,
-holes, multiple blocks, periodic seams, or high-order elements. Those remain
-explicitly unsupported by this bounded increment.
+holes, multiple blocks, periodic seams, or high-order elements. These are
+exclusions of this bounded driver, not a repository-wide support statement.
+New actual-source and logical-grid transfinite evidence is recorded separately
+in the handoff and does not qualify the current combined release.

@@ -1,7 +1,16 @@
 # Literal ENC-COAX geometry — meshed natively from the `.geo` primitives
 
-**Verified 2026-08-13.** The enclosure coax feed-through is the project's reason to exist
-(gmsh 4.13/4.15 produce **0 volume tets**). Its `.geo` (`test/fixtures/enclosure_coax_junction.geo`)
+Status reviewed **2026-10-10**: this page describes the dated literal-enclosure reconstruction and external solver capture.
+The authoritative [handoff](../../HANDOFF.md#continuation-handoff-2026-10-10)
+separates published code and historical results from **Root V24** and
+**Release V6**, which remain unqualified combined candidates. No rerun
+is claimed here. Tessella supports Julia **1.12.x and 1.13.x**; follow
+the [validation launch guidance](../README.md#run) for both runtimes.
+
+**Historical capture verified 2026-08-13.** Tested gmsh 4.13/4.15 runs on the
+enclosure coax fixture produced **0 volume tets**. This is a captured oracle
+outcome, not a claim that every current Gmsh configuration fails. Its `.geo`
+(`test/fixtures/enclosure_coax_junction.geo`)
 is fully parametric — every solid is a gmsh `Box` or `Cylinder` primitive.
 
 `reconstruct.jl` **parses those literal primitives directly** (no OpenCASCADE evaluation) and
@@ -19,15 +28,15 @@ surface BC groups: radiation=68 pin_pec=16 case_pec=26 resistor=1 p1=1
 and the written MSH v4.1 carries the **complete literal physical-group structure** — 4 volumes
 (coax_pin/slot/air/case) + 5 BC surfaces (radiation, coax_pin_pecskin, case_pecskin, resistor,
 p1_surface) — all of which load into ASCENT's parser (`LITERAL_HANDSHAKE_OK`, 9/9 groups) —
-solver-consumable, the geometry gmsh leaves empty.
+solver-consumable in that captured environment, where the tested gmsh runs left volumes empty.
 
 ## Scope
 
 This meshes the **four literal physical volumes** (pin/slot/air/case — every gmsh Box/Cylinder
 *volume* primitive, at the exact fixture dimensions) and tags the **five literal BC surfaces**
 (radiation, the pin/case PEC skins, and the resistor + p1 port patches), so the mesh carries the
-`.geo`'s complete physical-group structure and loads whole in ASCENT — the exact place gmsh 4.13/
-4.15 produce 0 tets. What is *not* reproduced is the **exact OpenCASCADE `BooleanFragments` imprint
+`.geo`'s complete physical-group structure and loaded whole in the captured ASCENT
+environment. The tested gmsh 4.13/4.15 runs produced 0 tets. What is *not* reproduced is the **exact OpenCASCADE `BooleanFragments` imprint
 interfaces** (the precise curved shield/bore boundaries and the exact resistor/p1 surface geometry).
 Those remain pending CAD-parity work and are represented here as topologically tagged BC surface
 patches rather than OCC-imprinted geometry.
@@ -40,9 +49,13 @@ the fast topology reconstruction reported above.
 ## Reproduce
 
 ```
-julia --project=<Tessella.jl> validation/enclosure_literal/reconstruct.jl        # parse + mesh + write .msh
-julia --project=<Tessella.jl> validation/enclosure_literal/reconstruct.jl --apply-fields
-julia --project=<2026_066/ASCENT> validation/enclosure_literal/handshake.jl      # confirm it loads in ASCENT
+julia +1.12 -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=/path/to/Tessella.jl validation/enclosure_literal/reconstruct.jl # parse + mesh + write .msh
+julia +1.12 -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=/path/to/Tessella.jl validation/enclosure_literal/reconstruct.jl --apply-fields
+julia --project=/path/to/ASCENT validation/enclosure_literal/handshake.jl      # confirm it loads in ASCENT
 ```
 
-The generated `.msh` is a git-ignored build artifact.
+Use the Julia version and dependencies required by the external ASCENT project
+for its handshake command. The generated `.msh` is a git-ignored build artifact.
+The dated topology reconstruction and group-loading results do not qualify
+BooleanFragments CAD parity, the field-refinement scalability path, or the
+current combined release.

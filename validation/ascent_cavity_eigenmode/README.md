@@ -1,9 +1,16 @@
 # ASCENT cavity-eigenmode physics validation on a Tessella mesh
 
-**Verified 2026-08-13.** The strongest "ready for ASCENT to use" proof: ASCENT computes a real
-**physical result** — the resonant frequency of a cavity — on a Tessella-generated mesh, and it
-matches the **closed-form analytic reference**. This is exactly the structure of an HFSS regression
-case (geometry → mesh → solve → compare to a known reference), run end-to-end here.
+Status reviewed **2026-10-10**: this page describes the dated ASCENT cavity capture below.
+The authoritative [handoff](../../HANDOFF.md#continuation-handoff-2026-10-10)
+separates published code and historical results from **Root V24** and
+**Release V6**, which remain unqualified combined candidates. No rerun
+is claimed here. Tessella supports Julia **1.12.x and 1.13.x**; follow
+the [validation launch guidance](../README.md#run) for both runtimes.
+
+**Historical capture verified 2026-08-13.** ASCENT computed cavity resonant
+frequencies on a Tessella-generated mesh and compared them with the closed-form
+analytic reference. This captured case exercised geometry → mesh → solve → compare.
+It has not been rerun on the current integration candidates.
 
 A rectangular PEC cavity `a×b×d` has analytic resonances `f_mnp = (c/2)·√((m/a)²+(n/b)²+(p/d)²)`.
 For `a=1, b=0.5, d=0.75 m` the dominant TE101 mode is `f = (c/2)·√(1/a²+1/d²) = 249.827 MHz`.
@@ -30,13 +37,15 @@ a first-principles reference.
 This is a *complete physics regression case* on a Tessella mesh with an independent (analytic)
 oracle — the same shape as an HFSS UserGuide cavity example. The literal 22 HFSS cases run this
 pipeline on the guide's specific antenna/microwave geometries (OCC-built, proprietary reference
-data) — the remaining external campaign; this proves the mesh→solve→validate loop it is built on.
+data) — the remaining external campaign; the dated capture demonstrates the mesh→solve→validate loop for this cavity.
 
 ## Reproduce
 
 ```
-julia --project=<Tessella.jl>        validation/ascent_cavity_eigenmode/generate_cavity.jl
-julia --project=<2026_066/ASCENT>    validation/ascent_cavity_eigenmode/solve_eigenmode.jl
+julia +1.12 -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=/path/to/Tessella.jl validation/ascent_cavity_eigenmode/generate_cavity.jl
+julia --project=/path/to/ASCENT    validation/ascent_cavity_eigenmode/solve_eigenmode.jl
 ```
 
-The generated `cavity.msh` is a git-ignored build artifact.
+Use the Julia version and dependencies required by the external ASCENT project
+for the solve command; Tessella's 1.12/1.13 support does not qualify either ASCENT
+environment. The generated `cavity.msh` is a git-ignored build artifact.

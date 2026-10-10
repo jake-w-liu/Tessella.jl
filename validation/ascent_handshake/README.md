@@ -1,13 +1,22 @@
 # ASCENT drop-in mesh handshake — Tessella `.msh` → ASCENT `load_mesh`
 
-**Verified 2026-08-12.** The concrete "ready for ASCENT" proof: a mesh produced by
-Tessella is ingested by ASCENT's real mesh loader without modification.
+Status reviewed **2026-10-10**: this page describes the dated ASCENT loading and solve captures below.
+The authoritative [handoff](../../HANDOFF.md#continuation-handoff-2026-10-10)
+separates published code and historical results from **Root V24** and
+**Release V6**, which remain unqualified combined candidates. No rerun
+is claimed here. Tessella supports Julia **1.12.x and 1.13.x**; follow
+the [validation launch guidance](../README.md#run) for both runtimes.
 
-ASCENT loads a solver mesh via `ASCENT.load_mesh(path)` (`ASCENT/src/core/mesh.jl`),
+**Historical capture verified 2026-08-12.** ASCENT's mesh loader ingested the
+recorded Tessella mesh without modification. The solve capture below is dated
+2026-08-13; neither capture qualifies the current integration candidates.
+
+In the captured ASCENT environment, a solver mesh loads via `ASCENT.load_mesh(path)` (`ASCENT/src/core/mesh.jl`),
 which calls `GmshDiscreteModel(path)` (GridapGmsh 0.7.4 / gmsh_jll 4.9.3) to build a
 Gridap `DiscreteModel`, then **requires ≥1 top-dimensional physical group** (a physical
-volume in 3-D) — else it throws. So Tessella is a drop-in mesher iff a Tessella-written
-`.msh` parses into a Gridap model carrying the region volumes as physical groups.
+volume in 3-D) — else it throws. The fixture therefore checks that the written
+`.msh` preserves the region groups required by that loader. Loading alone does
+not qualify every geometry, boundary condition or solver contract.
 
 ## Case
 
@@ -31,18 +40,21 @@ HANDSHAKE_OK
 
 GridapGmsh parses the Tessella mesh cleanly and every region volume surfaces as a
 top-dimensional physical group — i.e. `ASCENT.load_mesh` returns a valid `MeshData`.
-**Tessella meshes are solver-consumable by ASCENT with no format bridge.**
+**This captured mesh was consumed by the recorded ASCENT environment with no format bridge.**
 
 ## Reproduce
 
 ```
 # 1. Tessella env — produce the mesh (writes ascent_coax.msh here, git-ignored)
-julia --project=<Tessella.jl> validation/ascent_handshake/generate.jl
+julia +1.12 -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=/path/to/Tessella.jl validation/ascent_handshake/generate.jl
 # 2. ASCENT env — confirm it loads (GridapGmsh is an ASCENT dep, not a Tessella one)
-julia --project=<2026_066/ASCENT> validation/ascent_handshake/handshake.jl
+julia --project=/path/to/ASCENT validation/ascent_handshake/handshake.jl
 ```
 
-The generated `.msh` is a build artifact (git-ignored) — regenerate it with step 1.
+Use the Julia version and dependencies required by the external ASCENT project
+for step 2; its recorded GridapGmsh/gmsh_jll versions are capture provenance,
+not a claim about current upstream releases. The generated `.msh` is a
+git-ignored build artifact — regenerate it with step 1.
 The full 22-case HFSS regression (mesh each guide geometry with Tessella → ASCENT
 solve → compare) builds on this handshake and needs the ASCENT solver + datasets
 (local, not in this repo).

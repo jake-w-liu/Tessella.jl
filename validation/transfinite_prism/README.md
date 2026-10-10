@@ -1,5 +1,12 @@
 # Five-face transfinite-prism differential
 
+Status reviewed **2026-10-10**: this page describes the bounded affine five-face prism driver.
+The authoritative [handoff](../../HANDOFF.md#continuation-handoff-2026-10-10)
+separates published code and historical results from **Root V24** and
+**Release V6**, which remain unqualified combined candidates. No rerun
+is claimed here. Tessella supports Julia **1.12.x and 1.13.x**; follow
+the [validation launch guidance](../README.md#run) for both runtimes.
+
 `differential.jl` checks `mesh_transfinite_prism` against the installed Gmsh
 4.15.2 Julia API without writing geometry or mesh files. It builds affine
 five-face prisms in canonical corner order, forces the legacy collapsed
@@ -31,10 +38,10 @@ for `src/mesh/meshGRegionTransfinite.cpp` and
 `59e045f19b8118c4522f2056d5357f24319560005fd65e809104e79e70a12ee2`
 for `src/mesh/meshGFaceTransfinite.cpp`.
 
-Run:
+Run on both supported runtimes (repeat with `+1.13`):
 
 ```sh
-julia --project=. --startup-file=no --check-bounds=yes \
+julia +1.12 -O2 --startup-file=no --history-file=no --check-bounds=yes --threads=1 --gcthreads=1 --heap-size-hint=2G --project=. \
   validation/transfinite_prism/differential.jl
 ```
 
@@ -46,3 +53,6 @@ path, curved or independently discretized faces, nonuniform curve laws,
 recombination, QuadTri, holes, multiple blocks, periodic seams, or high-order
 elements. It also does not claim coordinate scales whose derived cell measures
 overflow Float64, even when the coordinates themselves remain finite.
+
+The compact-source and other transfinite extensions have separate evidence in
+the handoff. They are not covered by this legacy collapsed-prism driver.
