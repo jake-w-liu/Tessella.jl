@@ -78,7 +78,8 @@ function _model_removal_has_boundary_owner(
     for ((entity_dimension,entity_tag),entity) in m.discrete
         _model_removal_exists(m,removed,entity_dimension,entity_tag) ||
             continue
-        (dimension,tag) in entity.boundary && return true
+        any(entry->entry[1]==dimension && abs(entry[2])==tag,
+            entity.boundary) && return true
     end
     if dimension==0
         # A point is owned by every live curve that wires it — as an endpoint
@@ -126,7 +127,7 @@ function _model_removal_boundary(
     m::GeoModel,dimension::Int,tag::Int,caller::AbstractString)
     discrete=get(m.discrete,(dimension,tag),nothing)
     discrete!==nothing && return Tuple{Int,Int}[
-        (bdim,btag) for (bdim,btag) in discrete.boundary]
+        (bdim,abs(btag)) for (bdim,btag) in discrete.boundary]
     if dimension==0
         return Tuple{Int,Int}[]
     elseif dimension==1
@@ -319,7 +320,8 @@ function _model_removal_state(
     for (key,entity) in m.discrete
         key in removed && continue
         retained=DiscreteEntity(
-            NTuple{2,Int}[b for b in entity.boundary if !(b in removed)],
+            NTuple{2,Int}[b for b in entity.boundary
+                          if !((b[1],abs(b[2])) in removed)],
             copy(entity.node_tags),copy(entity.node_coords),
             copy(entity.node_params),copy(entity.element_types),
             copy(entity.element_tags),

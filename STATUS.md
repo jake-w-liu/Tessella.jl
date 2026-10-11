@@ -187,6 +187,30 @@ smoke gained a declared-BRep testset and the ordinary default suite is
 high-order cells, periodic/parametric topology, triple junctions, coincident
 support roles).
 
+### Signed non-partition entity boundaries on MSH4 import (2026-10-12)
+
+Devin landed the PART01 transport slice: `_geo_merge_discrete!` no longer
+normalizes imported ordinary entity `boundary` tags to `abs`, matching the
+MSH4 `$Entities` convention (sign encodes orientation) and the signed
+`DiscreteEntity.boundary`/`add_discrete_entity!` representation. Imported
+declared Curve start/end and Surface border orientations now survive, so
+imported declared-BRep meshes partition through the unchanged certificate
+and `get_boundary(oriented=true)` parity holds after `open`/`merge`.
+A static audit fixed every sign-unsafe `DiscreteEntity.boundary` consumer:
+identity lookups use `abs` while orientation-sensitive paths keep the sign —
+boundary-record mesh traversal and boundary-node merging, upward
+adjacency/liveness, curve endpoint extraction and closed-curve detection,
+displaced-point membership, node-ownership checks, removal ownership/
+recursion/filtering, retagging (sign-preserving), transform merge
+references, recursive boundary descent, spatial face lookup and unreferenced
+cleanup. Focused checks pass127/127 on both Julia1.12.7 and1.13.1 with a new
+27-assertion import testset (signed bounds survive MSH4, the imported mesh
+partitions with the same assignment, unpartition restores signed bounds);
+the declared-BRep default smoke gained three import assertions and the
+ordinary default suite is **259/259 on both** runtimes, actual exit0.
+PART01 remains open (mixed/high-order cells, periodic/parametric topology,
+triple junctions, coincident support roles).
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

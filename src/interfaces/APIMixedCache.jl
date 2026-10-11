@@ -548,7 +548,8 @@ function _mixed_captured_curve_p2(mesh,model,block,column,owner,node_entities,pa
     for position in @view block.nodes[:,column]
         node_owner=node_entities[position]
         (node_owner==owner || node_owner[1]==0 &&
-            (0,Int(node_owner[2])) in record.boundary) || throw(ArgumentError(
+            any(entry->entry[1]==0 && abs(entry[2])==node_owner[2],
+                record.boundary)) || throw(ArgumentError(
             "$caller: captured Curve[$(entity[2])] references an unrelated node owner"))
         all(isfinite,@view mesh.coords[:,position]) || throw(ArgumentError(
             "$caller: captured Curve[$(entity[2])] has non-finite coordinates"))

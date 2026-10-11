@@ -205,6 +205,64 @@ end
     end
 end
 
+@testset "imported declared BRep retains signed bounds and partitions" begin
+    try
+        fixture!();original=A.mesh.get_elements()
+        mktempdir() do directory
+            A.option("Mesh.MshFileVersion",4.1);A.option("Mesh.SaveAll",1)
+            A.option("Mesh.Binary",0)
+            path=joinpath(directory,"declared.msh");A.write(path)
+            A.model.add("imported lower BRep");A.open(path)
+        end
+        # Signed declared bounds survive the MSH4 transport.
+        @test A.model.get_boundary([(1,41)],false,true,false)==[(0,1),(0,-2)]
+        @test A.model.get_boundary([(2,31)],false,true,false)==[(1,41),(1,45),(1,-44)]
+        @test A.model.get_boundary([(3,11)],false,true,false)==
+            [(2,31),(2,32),(2,33),(2,34),(2,35),(2,36)]
+        # Unoriented queries still normalize the stored signs.
+        @test Set(A.model.get_boundary([(1,41)],false,false,false))==
+            Set([(0,1),(0,2)])
+        # The imported declared topology partitions like the generated one.
+        A.option("Mesh.PartitionCreateTopology",1)
+        A.option("Mesh.PartitionCreateGhostCells",1)
+        partition!()
+        @test A.model.get_number_of_partitions()==2
+        point_children=Dict(p=>child(0,p) for p in 1:5)
+        curve_children=Dict(c=>child(1,c) for (c,_,_) in CURVES)
+        surface_children=Dict(s=>child(2,s) for (s,_,_) in SURFACES)
+        interface=only(tag for (_,tag) in A.model.get_entities(2)
+            if A.model.get_parent(2,tag)==(3,11))
+        region1=only(tag for (_,tag) in A.model.get_entities(3)
+            if A.model.get_parent(3,tag)==(3,11) && A.model.get_partitions(3,tag)==[1])
+        region2=only(tag for (_,tag) in A.model.get_entities(3)
+            if A.model.get_parent(3,tag)==(3,11) && A.model.get_partitions(3,tag)==[2])
+        @test Set(A.model.get_boundary([(1,curve_children[41])],false,true,false))==
+            Set([(0,point_children[1]),(0,-point_children[2])])
+        @test Set(A.model.get_boundary([(2,surface_children[31])],false,true,false))==
+            Set([(1,curve_children[41]),(1,curve_children[45]),(1,-curve_children[44])])
+        @test Set(abs.(last.(A.model.get_boundary([(2,interface)],false,true,false))))==
+            Set([curve_children[41],curve_children[42],curve_children[43]])
+        @test closed_region(region1) && closed_region(region2)
+        for (index,(curve,cells,_)) in enumerate(CURVES)
+            ids,nodes=family(1,curve_children[curve],1)
+            @test ids==UInt64[700+index] && Tuple(vec(nodes))==only(cells)
+        end
+        for point in 1:5
+            ids,nodes=family(0,point_children[point],15)
+            @test ids==UInt64[800+point] && vec(nodes)==UInt64[10+point]
+        end
+        A.mesh.unpartition()
+        @test A.model.get_entities()==[(0,1),(0,2),(0,3),(0,4),(0,5),
+            (1,41),(1,42),(1,43),(1,44),(1,45),(1,46),(1,47),(1,48),(1,49),
+            (2,31),(2,32),(2,33),(2,34),(2,35),(2,36),(3,11)]
+        @test A.mesh.get_elements()==original
+        @test A.model.get_boundary([(1,44)],false,true,false)==[(0,1),(0,-4)]
+        @test closed_region(11)
+    finally
+        A.finalize()
+    end
+end
+
 @testset "closed declared Curve bounds a partition interface" begin
     try
         A.finalize();A.initialize();A.model.add("closed curve")

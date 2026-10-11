@@ -1223,8 +1223,10 @@ function _model_discrete_curve_grade_params(m::GeoModel,curve::Integer,
     field=_ModelCurveEntityField(m,options,String(caller))
     boundary=record.boundary
     endpoints=length(boundary)>=2 ?
-        (boundary[1],boundary[2]) : (nothing,nothing)
-    closed=!isempty(boundary) && first(boundary)==last(boundary)
+        ((boundary[1][1],abs(boundary[1][2])),(boundary[2][1],abs(boundary[2][2]))) :
+        (nothing,nothing)
+    closed=!isempty(boundary) && first(boundary)[1]==last(boundary)[1] &&
+        abs(first(boundary)[2])==abs(last(boundary)[2])
     size_function=u->_model_discrete_curve_bgm(
         m,curve,u,γ(u),t0,t1,boundary,options,caller)
     _,parameters=mesh_curve(
@@ -1424,10 +1426,11 @@ function _model_require_point_mesh_geometry(m::GeoModel,caller::AbstractString)
     for ((dim,tag),record) in _discrete_mesh_records_model(m)
         dim==1 || continue
         for (boundary_dim,point) in record.boundary
-            boundary_dim==0 && point in displaced || continue
-            throw(ArgumentError("$caller: native Point[$point] has an attached " *
-                "mesh vertex off its geometry and is incident to Curve[$tag]; " *
-                "boundary meshing from displaced native vertices is not implemented"))
+            boundary_dim==0 && abs(point) in displaced || continue
+            throw(ArgumentError("$caller: native Point[$(abs(point))] has an " *
+                "attached mesh vertex off its geometry and is incident to " *
+                "Curve[$tag]; boundary meshing from displaced native " *
+                "vertices is not implemented"))
         end
     end
     for (entity,embedded) in m.embeds, (dim,point) in embedded
@@ -1492,7 +1495,7 @@ function _model_mesh_part_node_entities(m::GeoModel,dim::Int,tag::Int,mesh,
         endpoints=if haskey(m.curves,tag)
             unique!(collect(m.curves[tag]))
         else
-            Int[point for (boundary_dim,point) in record.boundary if boundary_dim==0]
+            Int[abs(point) for (boundary_dim,point) in record.boundary if boundary_dim==0]
         end
         # Remeshed discrete curves use their boundary vertices, while the
         # stored record need not enumerate those vertices in curve order.
@@ -1667,7 +1670,9 @@ function _model_curve_mesh_parts(m::GeoModel,caller::AbstractString)
             _,frames=_discrete_eval_setup(m,1,tag,caller)
             γ=u->_discrete_curve_point(frames,u,caller)
             us=Float64.(params)
-            closed=!isempty(record.boundary) && first(record.boundary)==last(record.boundary)
+            closed=!isempty(record.boundary) &&
+                first(record.boundary)[1]==last(record.boundary)[1] &&
+                abs(first(record.boundary)[2])==abs(last(record.boundary)[2])
             if closed && length(us)>1
                 _,hi=_model_curve_param_bounds(m,tag,caller)
                 us[end]>=hi && (us=us[1:end-1])

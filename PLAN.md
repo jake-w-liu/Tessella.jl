@@ -207,7 +207,9 @@ original Surface borders by literal incidence. [Declared lower BRep](docs/partit
 Line2 Curve and
 Point15 Point topology now partitions into signed Curve→Point and
 Surface→Curve child closures with literal shared `partitions` and unchanged
-original cell/node UIDs. General lower/mixed-family topology beyond linear
+original cell/node UIDs. MSH4 import preserves signed non-partition
+`boundary` tags, so imported declared-BRep meshes partition through the
+unchanged certificate. General lower/mixed-family topology beyond linear
 declared BRep, coincident-support roles, triple junctions and parallel
 production remain open.
 

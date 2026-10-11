@@ -410,11 +410,11 @@ function _dist_volume_faces(m::GeoModel,tag::Int,caller::AbstractString)
             bdim==2 || throw(ArgumentError(
                 "$caller: discrete Volume[$tag] boundary ($bdim,$btag) is " *
                 "not a surface"))
-            (haskey(m.surfaces,btag) ||
-             haskey(m.discrete,(2,btag))) || throw(ArgumentError(
+            (haskey(m.surfaces,abs(btag)) ||
+             haskey(m.discrete,(2,abs(btag)))) || throw(ArgumentError(
                 "$caller: discrete Volume[$tag] references unknown " *
                 "Surface[$btag]"))
-            push!(faces,btag)
+            push!(faces,abs(btag))
         end
         isempty(faces) && throw(ArgumentError(
             "$caller: discrete Volume[$tag] has no declared boundary to " *

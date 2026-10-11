@@ -158,7 +158,8 @@ function _model_native_curve_curvature(m::GeoModel,adapter::_ModelHighOrderCurve
     kind===:line && return 0.0
     if kind===:discrete
         boundary=m.discrete[(1,adapter.tag)].boundary
-        closed=!isempty(boundary) && first(boundary)==last(boundary)
+        closed=!isempty(boundary) && first(boundary)[1]==last(boundary)[1] &&
+            abs(first(boundary)[2])==abs(last(boundary)[2])
         return _model_discrete_curve_curvature(adapter.geometry,u,closed,caller)
     end
     if kind in (:occ_circle,:occ_line,:occ_degenerate)

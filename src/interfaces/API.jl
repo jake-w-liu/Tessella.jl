@@ -4066,7 +4066,8 @@ function _append_record_boundary_nodes!(tags,coordinates,parameters,
     seen=Set{Tuple{Int,Int}}()
     stack=reverse!(collect(record.boundary))
     while !isempty(stack)
-        key=pop!(stack)
+        popped=pop!(stack)
+        key=(popped[1],abs(popped[2]))
         key in seen && continue
         push!(seen,key)
         boundary_record=_model_mesh_record(m,key[1],key[2])
@@ -4547,7 +4548,8 @@ function _get_nodes_for_physical_group(dim,tag)
                     record.node_coords[1,i],record.node_coords[2,i],
                     record.node_coords[3,i])
             end
-            append!(queue,Tuple{Int,Int}.(record.boundary))
+            append!(queue,Tuple{Int,Int}[
+                (pair[1],abs(pair[2])) for pair in record.boundary])
         end
         ordered=sort!(collect(keys(merged)))
         return ordered,
@@ -5710,7 +5712,7 @@ function _mesh_clear_selection(model,cached,class,pairs)
     end
     # Uncached discrete records can add a parent absent from the cache catalog.
     for ((dim,tag),record) in model.discrete, (bdim,btag) in record.boundary
-        push!(get!(()->Tuple{Int,Int32}[],upward,(bdim,Int32(btag))),
+        push!(get!(()->Tuple{Int,Int32}[],upward,(bdim,Int32(abs(btag)))),
               (dim,Int32(tag)))
     end
     cleared=Set{Tuple{Int,Int32}}()

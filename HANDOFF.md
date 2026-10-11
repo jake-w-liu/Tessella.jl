@@ -291,9 +291,20 @@ high-order cells, periodic/parametric topology, triple junctions and
 distinct coincident support roles. Note: `generate` always materializes a
 vertex node plus Point15 cell for every dim-0 entity, so a missing Point
 carrier is only reachable through non-generated models (imports or direct
-model edits), and `A.open` normalizes original non-partition boundary signs
-to `abs`, which currently blocks partition certificate reuse on imported
-declared Curve bounds — both documented pre-existing behaviors.
+model edits).
+
+The follow-on transport slice is also landed: `_geo_merge_discrete!` now
+preserves signed non-partition `boundary` tags on MSH4 import (the
+`$Entities` sign encodes orientation, matching `add_discrete_entity!`'s
+signed storage), so imported declared Curve/Surface bounds partition
+through the unchanged certificate and oriented `get_boundary` parity holds
+after `open`/`merge`. A static audit normalized every sign-unsafe
+`DiscreteEntity.boundary` consumer to `abs` identity lookups (generation,
+removal, retagging — sign-preserving — transforms, adjacency, spatial and
+unreferenced-cleanup paths). Focused checks pass127/127 on both runtimes
+with a new 27-assertion import testset; the declared-BRep default smoke
+gained three import assertions and the ordinary default suite is now
+**259/259 on both**, actual exit0.
 
 ### Current Devin transfer and final verified batch
 

@@ -50,10 +50,14 @@ ownership or cell identity, and no Point roles are manufactured without an
 actual Point15 carrier.
 
 Ghosts, `$PartitionedEntities`/`$GhostElements` MSH4 transport, public
-import and `mesh.unpartition()` follow the established producer semantics:
-imported partition children retain signed boundaries while original
-non-partition entities normalize to `abs` per existing import behavior, and
-unpartition restores the original entities, cells and declared boundaries.
+import and `mesh.unpartition()` follow the established producer semantics.
+MSH4 import preserves the signed `boundary` tags the `$Entities` section
+stores (sign encodes orientation, matching `add_discrete_entity!`'s signed
+storage) for partition children and original non-partition entities alike,
+so an imported declared-BRep mesh partitions through the unchanged
+certificate and oriented `get_boundary` parity holds after `open`/`merge`;
+unpartition restores the original entities, cells and declared signed
+boundaries.
 
 ## Guards and scope
 

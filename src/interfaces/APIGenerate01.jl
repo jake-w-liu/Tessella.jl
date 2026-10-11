@@ -304,7 +304,7 @@ function _dim01_curve_endpoint_counts(m)
     end
     for ((dimension,curve),record) in m.discrete
         dimension==1 && !haskey(m.curves,curve) || continue
-        points=Set(tag for (dim,tag) in record.boundary if dim==0)
+        points=Set(abs(tag) for (dim,tag) in record.boundary if dim==0)
         for point in points
             counts[point]=get(counts,point,0)+1
         end
@@ -357,7 +357,7 @@ function _dim01_emit_curve!(assembly,m,curve,params,first_nodes;
     if endpoints===nothing
         record=_dim01_record(m,(1,curve))
         points=record===nothing ? Int[] :
-            Int[tag for (dim,tag) in record.boundary if dim==0]
+            Int[abs(tag) for (dim,tag) in record.boundary if dim==0]
         length(points) in (1,2) || throw(ArgumentError(
             "$(assembly.caller): parametrized discrete Curve[$curve] " *
             "needs one or two boundary points"))
@@ -590,9 +590,9 @@ function _dim01_discrete_curve_parameter(assembly,m,curve,geometry,position,poin
     if !isempty(boundary)
         begin_point=first(boundary)
         end_point=last(boundary)
-        begin_position=get(point_positions,(begin_point[1],Int32(begin_point[2])),Int32(0))
-        end_position=get(point_positions,(end_point[1],Int32(end_point[2])),Int32(0))
-        periodic=begin_point==end_point
+        begin_position=get(point_positions,(begin_point[1],Int32(abs(begin_point[2]))),Int32(0))
+        end_position=get(point_positions,(end_point[1],Int32(abs(end_point[2]))),Int32(0))
+        periodic=begin_point[1]==end_point[1] && abs(begin_point[2])==abs(end_point[2])
         periodic_end && periodic && position==end_position && return geometry.t1
         position==begin_position && return geometry.t0
         position==end_position && return geometry.t1
@@ -616,7 +616,7 @@ function _api_p2_curve_parameter(m,curve,geometry,position,point,parameter,point
     if endpoints===nothing
         record=get(m.discrete,(1,curve),nothing)
         boundary=record===nothing ? Tuple{Int,Int}[] : record.boundary
-        endpoints=length(boundary)>=2 ? (first(boundary)[2],last(boundary)[2]) : nothing
+        endpoints=length(boundary)>=2 ? (abs(first(boundary)[2]),abs(last(boundary)[2])) : nothing
     end
     if endpoints!==nothing
         first_position=get(point_positions,(0,Int32(endpoints[1])),Int32(0))
@@ -646,7 +646,8 @@ function _dim01_captured_curve_p2(assembly,m,cell)
         get(assembly.node_positions,node.tag,Int32(0))==position || throw(ArgumentError(
             "$(assembly.caller): captured Curve[$(entity[2])] loses its current node identity"))
         (node.owner==cell.owner || node.owner[1]==0 &&
-            (0,Int(node.owner[2])) in record.boundary) || throw(ArgumentError(
+            any(entry->entry[1]==0 && abs(entry[2])==node.owner[2],
+                record.boundary)) || throw(ArgumentError(
             "$(assembly.caller): captured Curve[$(entity[2])] references an unrelated node owner"))
         all(isfinite,node.point) || throw(ArgumentError(
             "$(assembly.caller): captured Curve[$(entity[2])] has non-finite coordinates"))

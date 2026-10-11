@@ -49,6 +49,8 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 38.1 s | 259 | ~39 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 41.5 s | 259 | ~42 s |
 | Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 37.5 s | 256 | ~70 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 40.8 s | 256 | ~75 s |
 | Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 36.3 s | 249 | ~70 s |
@@ -96,15 +98,18 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 256-assertion bodies took37.5/40.8 s onJulia1.12.7/1.13.1.
+The current 259-assertion bodies took38.1/41.5 s onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. Logs and actual exit-zero receipts are
 `test/tmp/ordinary_default_224_{112,113}_20261011.*`. The same252 Source files
-remained frozen throughout both calls. The latest increment adds a declared
-Curve/Point lower-BRep partition testset (7 assertions);
-`test/interfaces/api_partition_lower_brep_functional_test.jl` is the opt-in
-fixture (100 assertions on both runtimes). The preceding increment added three cheap
+remained frozen throughout both calls. The latest increment adds three
+cheap MSH4 signed-boundary import checks to the declared-BRep default
+smoke (now10 assertions) plus a 27-assertion import testset in
+`test/interfaces/api_partition_lower_brep_functional_test.jl`, now
+127 assertions on both runtimes. The preceding increment adds a declared
+Curve/Point lower-BRep partition testset (7 assertions) on that fixture's
+original 100 assertions. The preceding increment added three cheap
 meridian-certified `TOROIDAL_SURFACE` segment checks;
 `test/geometry/brep_step_torus_segment_functional_test.jl` is the opt-in
 segment fixture (boundary-only — toroidal fills remain a hard tetrahedralizer

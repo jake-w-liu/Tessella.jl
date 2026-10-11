@@ -695,7 +695,8 @@ function _model_identity_discrete_map(
         new_key=key==(dimension,old_tag) ? (dimension,new_tag) : key
         migrated=DiscreteEntity(
             NTuple{2,Int}[
-                b==(dimension,old_tag) ? (dimension,new_tag) : b
+                b[1]==dimension && abs(b[2])==old_tag ?
+                    (dimension,sign(b[2])*new_tag) : b
                 for b in entity.boundary],
             copy(entity.node_tags),copy(entity.node_coords),
             copy(entity.node_params),copy(entity.element_types),

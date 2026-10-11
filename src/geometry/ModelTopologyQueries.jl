@@ -221,10 +221,11 @@ function _model_recursive_boundary(
             if sub===nothing
                 for b in _model_direct_boundary(
                         m,edim,etag,caller;canonical_orientation=true)
-                    push!(stack,b)
+                    push!(stack,(b[1],abs(b[2])))
                 end
             else
-                append!(stack,sub.boundary)
+                append!(stack,Tuple{Int,Int}[
+                    (b[1],abs(b[2])) for b in sub.boundary])
             end
         end
         return result
@@ -361,7 +362,7 @@ function model_adjacencies(m::GeoModel,dim,tag)
     # (dim, tag) entry makes the holder an upward parent.
     for ((bdim,btag),entity) in m.discrete
         bdim==dimension+1 || continue
-        any(pair->pair[1]==dimension && pair[2]==entity_tag,
+        any(pair->pair[1]==dimension && abs(pair[2])==entity_tag,
             entity.boundary) && push!(upward,btag)
     end
     return sort!(unique!(upward)),downward

@@ -1764,11 +1764,14 @@ end
 # Delete a discrete entity when no remaining entity lists it as a boundary;
 # recurse into its own boundary so orphaned chains clean up fully.
 function _drop_unreferenced_discrete!(m::GeoModel,key::Tuple{Int,Int})
+    key=(key[1],abs(key[2]))
     haskey(m.discrete,key) || return nothing
     for (_,record) in m.discrete
-        key in record.boundary && return nothing
+        any(entry->entry[1]==key[1] && abs(entry[2])==key[2],
+            record.boundary) && return nothing
     end
-    children=Tuple{Int,Int}[entity for entity in m.discrete[key].boundary]
+    children=Tuple{Int,Int}[(entity[1],abs(entity[2]))
+                          for entity in m.discrete[key].boundary]
     delete!(m.discrete,key)
     for child in children
         _drop_unreferenced_discrete!(m,child)

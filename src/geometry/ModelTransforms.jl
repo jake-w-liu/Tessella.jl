@@ -1163,7 +1163,8 @@ function _rewire_entity_refs!(m::GeoModel, dim::Int, drop::Int, keep::Int)
     discrete=Dict{Tuple{Int,Int},DiscreteEntity}()
     for (key,ent) in m.discrete
         new_key=key==(dim,drop) ? (dim,keep) : key
-        ent.boundary=unique!([b==(dim,drop) ? (dim,keep) : b
+        ent.boundary=unique!([b[1]==dim && abs(b[2])==drop ?
+                              (dim,sign(b[2])*keep) : b
                               for b in ent.boundary])
         discrete[new_key]=ent
     end
@@ -1171,7 +1172,8 @@ function _rewire_entity_refs!(m::GeoModel, dim::Int, drop::Int, keep::Int)
     attached=Dict{Tuple{Int,Int},DiscreteEntity}()
     for (key,ent) in m.meshing.attached
         new_key=key==(dim,drop) ? (dim,keep) : key
-        ent.boundary=unique!([b==(dim,drop) ? (dim,keep) : b
+        ent.boundary=unique!([b[1]==dim && abs(b[2])==drop ?
+                              (dim,sign(b[2])*keep) : b
                               for b in ent.boundary])
         attached[new_key]=ent
     end

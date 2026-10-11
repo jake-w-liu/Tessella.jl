@@ -1120,7 +1120,8 @@ function model_curvature(m::GeoModel,dim,tag,parametric_coordinates)
             geometry=_model_discrete_curve_geometry(m,entity_tag)
             if geometry!==nothing
                 boundary=m.discrete[(1,entity_tag)].boundary
-                closed=!isempty(boundary) && first(boundary)==last(boundary)
+                closed=!isempty(boundary) && first(boundary)[1]==last(boundary)[1] &&
+                    abs(first(boundary)[2])==abs(last(boundary)[2])
                 return Float64[_model_discrete_curve_curvature(
                     geometry,parameter,closed,caller) for parameter in values]
             end
