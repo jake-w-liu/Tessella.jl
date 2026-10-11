@@ -289,9 +289,11 @@ including proper [unit-scale Cartesian targets](docs/step_cartesian_rigid_target
 [Direct product-usage assemblies](docs/step_relationship_assemblies.md) now bind
 complete single-root NAUO/CDSR/IDT graphs and actual rigid frames, with
 [SI source/placement length transport](docs/step_relationship_si_units.md) into
-millimetre output coordinates.
-Nested usages, conversion-based units, other assembly transformations and
-analytic Face maps remain open. See
+millimetre output coordinates. Nested product-usage DAGs expand every reachable
+root-to-leaf path with per-edge contexts/frames, path-order rigid composition and
+single leaf scaling.
+Conversion-based units, mixed mapped/product workflows, other assembly
+transformations and analytic Face maps remain open. See
 [mesh import scope](docs/cad_mesh_imports.md). The entity kernel records native
 boxes, cylinders, spheres, cones, toruses, Boolean volumes (operation-time
 operand snapshots for meshing plus a materialized result boundary for

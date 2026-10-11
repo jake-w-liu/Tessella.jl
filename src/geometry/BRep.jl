@@ -19,7 +19,8 @@ module BRep
 using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
 using ..Mesh3D: tetrahedralize
 using ..MeshTypes: Mesh, validate, nnodes, ntets, tet_volume, node, bounding_box
-using ..Elements: MixedMesh, ElementBlock, MixedEntity, MixedEntityData
+using ..Elements: MixedMesh, ElementBlock, MixedEntity, MixedEntityData,
+                  MSH_PHYSICAL_NAME_MAX_BYTES
 using ..Predicates: orient2
 import ..Mesh2D
 using ..NURBS: NURBSCurve, NURBSSurface
@@ -333,6 +334,12 @@ per source solid in source-ID order. Strictly disjoint bounding boxes certify
 separation; touching/overlapping boxes are an explicit unsupported context.
 Explicit rigid mapped occurrences through one shape-definition root are supported;
 see `docs/step_mapped_occurrences.md` for placement and assembly restrictions.
+Nested `NEXT_ASSEMBLY_USAGE_OCCURRENCE` product graphs are expanded along every
+root-to-leaf path of a single-rooted acyclic DAG; each edge binds its actual
+parent/child representations, frames and SI unit contexts, physical rigid
+transforms compose in path order, leaf geometry scales once by its own declared
+factor, and separate occurrence identities are emitted per path. Definitions
+with outgoing usages carry placement frames only; leaves bind one closed solid.
 This mesh import does not reconstruct analytic CAD Face/Curve parametrization.
 Nonplanar or nonlinear
 face geometry, open shells, mixed point-cloud topology, and files without a

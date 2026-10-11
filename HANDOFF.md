@@ -12,11 +12,37 @@ small real fixtures. Full native-oracle sweeps, source/AST audits, memory stress
 benchmarks, the 22 HFSS cases, aggregate validation, and external ASCENT solves
 are opt-in campaigns. See [test/README.md](test/README.md).
 
+### Nested STEP product-usage DAGs verified (2026-10-11)
+
+Devin resumed the checklist and completed CAD01. `BRepStepRelationships.jl` now
+expands a single-rooted reachable acyclic `NEXT_ASSEMBLY_USAGE_OCCURRENCE` DAG
+along every root-to-leaf path: each edge binds its literal parent/child product
+definitions, representations, actual member AXIS2 frames and SI unit witnesses;
+definitions with outgoing usages carry placement frames only and each leaf binds
+exactly one supported closed solid. Physical rigid transforms compose in path
+order, leaf source geometry scales once by its own declared context factor,
+intermediate factors transport frame origins, and repeated definitions emit
+separate occurrence identities whose names stay inside the MSH physical-name
+bound. Reachability, cycle, orphan, inventory and per-edge-context failures
+reject atomically; existing direct and mapped controls are unchanged.
+
+Focused `test/geometry/brep_step_relationship_nested_functional_test.jl`
+passes61/61 including noncommuting frames, root-m/intermediate-cm/leaf-mm
+coordinate transport, shared intermediate/leaf definitions, positive fill,
+MSH4 ASCII/binary round-trip identity and malformed/cycle/orphan rejection.
+Direct54, SI52, mapped31, cartesian43 and assembly96 regressions all pass.
+The ordinary default suite is now **227/227 on both** Julia1.12.7 and1.13.1,
+actual exit0; the committed nested fixtures live under
+`test/fixtures/brep_relationship_nested_*.step`. Mixed mapped/product graphs,
+multiple roots and multiple solids per leaf remain CAD02; conversion-based
+units remain CAD03.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop
 new implementation. [DEVIN_HANDOFF.md](DEVIN_HANDOFF.md) is the current complete
-known checklist, with27 required work areas, completion criteria and portable
+known checklist, with27 required work areas (CAD01 now done,26 open), completion
+criteria and portable
 evidence. Tessella's full P1–P6 goal is unfinished. Continue that checklist from
 current `origin/main`; older dated sections and temporary candidates below are
 historical evidence, not the current continuation queue.

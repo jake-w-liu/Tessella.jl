@@ -24,10 +24,24 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Nested STEP product-usage DAGs (2026-10-11)
+
+Devin completed checklist CAD01. `BRepStepRelationships.jl` expands a
+single-rooted reachable acyclic NAUO product DAG along every root-to-leaf path
+with per-edge parent/child representation, AXIS2 frame and SI unit witnesses,
+frame-only intermediate definitions, exactly one supported closed solid per
+leaf, path-order rigid transform composition, single leaf context scaling and
+separate bounded per-path occurrence identities. Focused nested checks pass61/61;
+direct54, SI52, mapped31, cartesian43 and assembly96 regressions all pass; the
+ordinary default suite is **227/227 on both Julia1.12.7 and1.13.1**, actual
+exit0. See `docs/step_relationship_assemblies.md` and
+`test/geometry/brep_step_relationship_nested_functional_test.jl`.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The
-[Devin checklist](DEVIN_HANDOFF.md) records27 known open work areas, precise
+[Devin checklist](DEVIN_HANDOFF.md) records27 known work areas (CAD01 done,26
+open), precise
 completion requirements, prepared nested STEP/rigid periodic designs and
 portable evidence. **Full P1–P6 parity remains unfinished.** New implementation
 has stopped for transfer; the next owner must complete every required work area.

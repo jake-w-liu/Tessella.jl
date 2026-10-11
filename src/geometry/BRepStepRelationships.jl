@@ -147,8 +147,8 @@ function _step_relationship_import(entities,fill_solids)
     selected(kind)=sort!([entity for entity in values(entities) if kind in kinds(entity)];by=entity->entity.id)
     usages=selected("NEXT_ASSEMBLY_USAGE_OCCURRENCE")
     !isempty(usages) && length(usages)<=4096 ||
-        throw(ArgumentError("import_step: assembly needs one to 4096 actual direct usages"))
-    parents=Set{Int}();children=Set{Int}()
+        throw(ArgumentError("import_step: assembly needs one to 4096 actual usages"))
+    parents=Set{Int}();children=Set{Int}();outgoing=Dict{Int,Vector{StepEntity}}()
     for usage in usages
         usage.kind=="NEXT_ASSEMBLY_USAGE_OCCURRENCE" && length(usage.args)==6 &&
             all(value->value isa AbstractString,usage.args[1:3]) &&
@@ -157,12 +157,41 @@ function _step_relationship_import(entities,fill_solids)
         parent=_step_relationship_entity(entities,usage.args[4],"PRODUCT_DEFINITION")
         child=_step_relationship_entity(entities,usage.args[5],"PRODUCT_DEFINITION")
         push!(parents,parent.id);push!(children,child.id)
+        push!(get!(Vector{StepEntity},outgoing,parent.id),usage)
     end
-    length(parents)==1 && isempty(intersect(parents,children)) ||
-        throw(ArgumentError("import_step: only acyclic direct usages from one assembly root are supported"))
-    definitions=union(parents,children)
+    roots=setdiff(parents,children)
+    length(roots)==1 || throw(ArgumentError(
+        "import_step: assembly usages need exactly one actual root product definition"))
+    root=only(roots);definitions=union(parents,children)
     Set(entity.id for entity in selected("PRODUCT_DEFINITION"))==definitions ||
         throw(ArgumentError("import_step: assembly has unreachable product definitions"))
+    # The literal usage graph must be rooted, reachable and acyclic before any
+    # expansion, fill or factory use. A definition can be both child and parent.
+    reached=Set{Int}([root]);pending=[root]
+    while !isempty(pending)
+        definition=pop!(pending)
+        for usage in get(outgoing,definition,StepEntity[])
+            child=usage.args[5][2]
+            child in reached || (push!(reached,child);push!(pending,child))
+        end
+    end
+    reached==definitions || throw(ArgumentError(
+        "import_step: assembly has definitions unreachable from its root"))
+    indegree=Dict{Int,Int}(definition=>0 for definition in definitions)
+    for usage in usages
+        child=usage.args[5][2];indegree[child]+=1
+    end
+    queue=[definition for definition in definitions if indegree[definition]==0]
+    processed=0
+    while !isempty(queue)
+        definition=pop!(queue);processed+=1
+        for usage in get(outgoing,definition,StepEntity[])
+            child=usage.args[5][2]
+            (indegree[child]-=1)==0 && push!(queue,child)
+        end
+    end
+    processed==length(definitions) || throw(ArgumentError(
+        "import_step: assembly product usages form a cycle"))
     products=Dict{Int,StepEntity}();formations=Set{Int}()
     representations=Dict{Int,NamedTuple}();shape_definitions=Set{Int}()
     for definition in selected("PRODUCT_DEFINITION")
@@ -204,17 +233,20 @@ function _step_relationship_import(entities,fill_solids)
     Set(entity.id for entity in values(entities) if entity.kind in _STEP_OCCURRENCE_REPRESENTATIONS)==
         Set(info.representation.id for info in values(representations)) ||
         throw(ArgumentError("import_step: assembly has unselected shape representations"))
-    root=only(parents);root_info=representations[root]
-    all(item->item.kind=="AXIS2_PLACEMENT_3D",root_info.items) ||
-        throw(ArgumentError("import_step: assembly root must contain placement frames only"))
+    # Definitions with outgoing usages carry placement frames only; leaf
+    # definitions bind exactly one supported closed solid plus frames.
+    for definition in parents
+        all(item->item.kind=="AXIS2_PLACEMENT_3D",representations[definition].items) ||
+            throw(ArgumentError("import_step: assembly definitions with usages must contain placement frames only"))
+    end
     solid_roots=Dict(entity.id=>entity for entity in _step_solid_roots(entities))
     solids=Dict{Int,StepEntity}()
-    for child in children
-        info=representations[child]
+    for leaf in setdiff(children,parents)
+        info=representations[leaf]
         source=[item for item in info.items if haskey(solid_roots,item.id)]
         length(source)==1 && all(item->item.kind=="AXIS2_PLACEMENT_3D" || item.id==only(source).id,info.items) ||
             throw(ArgumentError("import_step: each assembly leaf must bind one actual closed solid"))
-        solids[child]=only(source)
+        solids[leaf]=only(source)
     end
     Set(keys(solid_roots))==Set(solid.id for solid in values(solids)) ||
         throw(ArgumentError("import_step: assembly has unplaced closed-solid definitions"))
@@ -239,13 +271,14 @@ function _step_relationship_import(entities,fill_solids)
         length(relationship)==4 && all(value->value isa AbstractString,relationship[1:2]) &&
             length(transformed)==1 && isempty(parts["SHAPE_REPRESENTATION_RELATIONSHIP"].args) ||
             throw(ArgumentError("import_step: assembly relationship is truncated"))
-        child=usage.args[5][2];info=representations[child]
+        parent=usage.args[4][2];child=usage.args[5][2]
+        info=representations[child];parent_info=representations[parent]
         relationship[3]==(:ref,info.representation.id) &&
-            relationship[4]==(:ref,root_info.representation.id) ||
+            relationship[4]==(:ref,parent_info.representation.id) ||
             throw(ArgumentError("import_step: relationship direction disagrees with parent/child usage"))
-        info.context!=root_info.context && all(
-            info.unit_witnesses[kind].name==root_info.unit_witnesses[kind].name &&
-            info.unit_witnesses[kind].prefix==root_info.unit_witnesses[kind].prefix
+        info.context!=parent_info.context && all(
+            info.unit_witnesses[kind].name==parent_info.unit_witnesses[kind].name &&
+            info.unit_witnesses[kind].prefix==parent_info.unit_witnesses[kind].prefix
             for kind in ("PLANE_ANGLE_UNIT","SOLID_ANGLE_UNIT")) ||
             throw(ArgumentError("import_step: assembly needs distinct compatible three-dimensional SI contexts"))
         transform=_step_relationship_entity(entities,transformed[1],"ITEM_DEFINED_TRANSFORMATION")
@@ -254,12 +287,11 @@ function _step_relationship_import(entities,fill_solids)
             throw(ArgumentError("import_step: assembly item transformation is truncated"))
         source=_step_relationship_entity(entities,transform.args[3],"AXIS2_PLACEMENT_3D")
         target=_step_relationship_entity(entities,transform.args[4],"AXIS2_PLACEMENT_3D")
-        source.id in (item.id for item in info.items) && target.id in (item.id for item in root_info.items) ||
+        source.id in (item.id for item in info.items) && target.id in (item.id for item in parent_info.items) ||
             throw(ArgumentError("import_step: assembly transform frames are not literal representation members"))
         rigid=_step_relationship_transform(entities,transform.args[3],transform.args[4],
-            info.unit_witnesses,root_info.unit_witnesses)
-        source_factor=info.unit_witnesses["LENGTH_UNIT"].factor
-        placements[usage.id]=(;usage,child,rigid,source_factor)
+            info.unit_witnesses,parent_info.unit_witnesses)
+        placements[usage.id]=(;usage,parent,child,rigid)
         push!(shape_definitions,shape.id);push!(relations,relation.id);push!(transforms,transform.id)
     end
     Set(keys(placements))==Set(usage.id for usage in usages) &&
@@ -269,28 +301,95 @@ function _step_relationship_import(entities,fill_solids)
         Set(entity.id for entity in selected("REPRESENTATION_RELATIONSHIP"))==relations &&
         Set(entity.id for entity in selected("SHAPE_REPRESENTATION_RELATIONSHIP"))==relations ||
         throw(ArgumentError("import_step: assembly placement inventory is incomplete or orphaned"))
-    records=NamedTuple[];surfaces=Dict{Int,Mesh}();node_count=0;triangle_count=0
+    records=NamedTuple[];surfaces=Dict{Int,Mesh}();counts=[0,0]
     root_product=products[root]
-    for usage in usages
-        placement=placements[usage.id];solid=solids[placement.child]
+    active=Set{Int}([root]);consumed=Set{Int}()
+    function path_label(with_names)
+        parts=String["STEP PRODUCT #$(root_product.id) $(root_product.args[2])"]
+        for (usage,product) in edges
+            push!(parts,"NAUO #$(usage.id)"*(with_names ? " $(usage.args[2])" : ""))
+            push!(parts,"PRODUCT #$(product.id)"*(with_names ? " $(product.args[2])" : ""))
+        end
+        return join(parts,"/")
+    end
+    function fit_text(text,budget)
+        ncodeunits(text)<=budget && return text
+        used=0;stop=0
+        for index in eachindex(text)
+            size=ncodeunits(text[index])
+            used+size>budget && break
+            used+=size;stop=index
+        end
+        return text[1:stop]
+    end
+    function occurrence_name(leaf)
+        # MSH physical names are bounded; deeper paths compact gracefully while
+        # retaining the literal root/usage/product/solid identifier chain.
+        budget=MSH_PHYSICAL_NAME_MAX_BYTES-ncodeunits(" boundary")
+        leaf_text="$(solids[leaf].kind) #$(solids[leaf].id)"
+        name=path_label(true)*"/"*leaf_text
+        ncodeunits(name)<=budget && return name
+        parts=String["STEP PRODUCT #$(root_product.id) $(root_product.args[2])"]
+        for (usage,product) in edges
+            push!(parts,"NAUO #$(usage.id) $(usage.args[2])")
+            push!(parts,"PRODUCT #$(product.id)")
+        end
+        name=join(parts,"/")*"/"*leaf_text
+        ncodeunits(name)<=budget && return name
+        ids=split(path_label(false),"/")
+        head=fit_text(first(ids),budget-ncodeunits("/...")-ncodeunits(leaf_text))
+        tail=String[leaf_text];rest=budget-ncodeunits(head)-ncodeunits("/...")-ncodeunits(leaf_text)
+        for segment in Iterators.reverse(ids[2:end])
+            ncodeunits(segment)+1<=rest || break
+            pushfirst!(tail,segment);rest-=ncodeunits(segment)+1
+        end
+        return head*"/..."*join(tail,"/")
+    end
+    function emit(leaf,transform)
+        solid=solids[leaf]
         surface=get!(surfaces,solid.id) do
             _step_root_surface(solid,entities)
         end
-        node_count=_checked_brep_add(node_count,nnodes(surface),0,"import_step","assembly occurrence nodes")
-        triangle_count=_checked_brep_add(triangle_count,size(surface.tris,2),0,"import_step","assembly occurrence triangles")
-        node_count<=_BREP_MAX_SURFACE_NODES && triangle_count<=_BREP_MAX_SURFACE_TRIS ||
+        counts[1]=_checked_brep_add(counts[1],nnodes(surface),0,"import_step","assembly occurrence nodes")
+        counts[2]=_checked_brep_add(counts[2],size(surface.tris,2),0,"import_step","assembly occurrence triangles")
+        counts[1]<=_BREP_MAX_SURFACE_NODES && counts[2]<=_BREP_MAX_SURFACE_TRIS ||
             throw(ArgumentError("import_step: product usages exceed assembly surface storage limits"))
-        rotation,translation=placement.rigid
+        rotation,translation=transform
+        source_factor=representations[leaf].unit_witnesses["LENGTH_UNIT"].factor
         coordinates=Matrix{Float64}(undef,size(surface.coords))
         for column in axes(coordinates,2),i in 1:3
-            coordinates[i,column]=translation[i]+sum(rotation[i][j]*(placement.source_factor*surface.coords[j,column]) for j in 1:3)
+            coordinates[i,column]=translation[i]+sum(rotation[i][j]*(source_factor*surface.coords[j,column]) for j in 1:3)
         end
         all(isfinite,coordinates) || throw(ArgumentError("import_step: assembly occurrence coordinates are nonfinite"))
-        product=products[placement.child]
-        name="STEP PRODUCT #$(root_product.id) $(root_product.args[2])/NAUO #$(usage.id) $(usage.args[2])/" *
-            "PRODUCT #$(product.id) $(product.args[2])/$(solid.kind) #$(solid.id)"
-        push!(records,(;name,surface=Mesh(coordinates;tris=surface.tris)))
+        push!(records,(name=occurrence_name(leaf),surface=Mesh(coordinates;tris=surface.tris)))
     end
+    function expand(definition,transform,edges,depth)
+        depth<=128 || throw(ArgumentError("import_step: assembly product-usage nesting exceeds 128"))
+        for usage in get(outgoing,definition,StepEntity[])
+            placement=placements[usage.id];child=placement.child
+            child in active && throw(ArgumentError(
+                "import_step: assembly product usages form a cycle"))
+            push!(consumed,usage.id)
+            composed=_step_occurrence_compose(transform,placement.rigid)
+            product=products[child]
+            push!(edges,(usage,product))
+            if haskey(solids,child)
+                length(records)<4096 || throw(ArgumentError(
+                    "import_step: more than 4096 solid occurrences"))
+                emit(child,composed)
+            else
+                push!(active,child)
+                expand(child,composed,edges,depth+1)
+                delete!(active,child)
+            end
+            pop!(edges)
+        end
+        return nothing
+    end
+    edges=Tuple{StepEntity,StepEntity}[]
+    expand(root,_STEP_OCCURRENCE_IDENTITY,edges,0)
+    consumed==Set(usage.id for usage in usages) || throw(ArgumentError(
+        "import_step: assembly usages are unreachable from their root"))
     length(records)>1 && return _brep_assembly(records,fill_solids,"import_step")
     surface=only(records).surface
     validate(surface).ok || throw(ArgumentError("import_step: invalid product-usage solid"))

@@ -6,7 +6,8 @@ topology, NURBS and fields, `.geo` parameter reading, bounded 1D/2D/3D meshing,
 structured patches, refinement and recombination, quadratic tetrahedra,
 MSH/STL I/O, API state, query ownership and failure atomicity, plus small matching
 and compact surface coverage regressions, list/model-view format checks and
-independent multi-root CAD boundaries and planar Face holes, IGES143
+independent multi-root CAD boundaries, nested STEP product-usage DAG paths
+and planar Face holes, IGES143
 boundaries and explicit plane UV/rigid-transform chains, complete quadratic
 Hex, Pyramid13 and orders3–10 Curve VTK export, actual two-Tet partition
 interfaces, closed Tri3-BRep seam transport and ghost queries, complete

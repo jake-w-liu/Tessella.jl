@@ -18,19 +18,31 @@ millimetres. [SI length transport](step_relationship_si_units.md) documents
 declarations remain unprefixed radians/steradians. An optional uncertainty
 measure must retain the literal selected context length-unit reference.
 
-One root product may have direct leaf usages, including repeated uses of the
-same solid definition. Each leaf binds one supported closed solid. The
-importer consumes the complete product, shape, usage, relationship, transform
-and solid inventories before emission. Missing, ambiguous or orphan bindings,
-nested/cyclic usages, mixed mapped-item workflows, reversed relationships,
-unsupported contexts/transforms and touching or overlapping occurrence boxes
-reject explicitly. Nested/general STEP assemblies, conversion-based units and
-ordinary/mapped root unit conversion remain open.
+One root product may have direct or nested leaf usages, including repeated
+uses of the same solid or intermediate definition. The usage graph must be a
+single-rooted reachable acyclic DAG over literal `PRODUCT_DEFINITION` nodes;
+unique root selection, reachability and cycle checks run before expansion.
+Definitions with outgoing usages carry placement frames only. Each leaf binds
+one supported closed solid. Each edge binds the actual child and parent
+representations, context witnesses and member frames, and physical rigid
+transforms compose in parent-to-child order; the shared intermediate length
+factor converts only its literal frame origins, while the leaf's raw source
+rows scale once by its own declared factor. Every root-to-leaf usage path emits
+a separate occurrence, so a DAG can emit more occurrences than its usage count.
+The importer consumes the complete product, shape, usage, relationship,
+transform and solid inventories before emission. Missing, ambiguous or orphan
+bindings, cyclic usages, multiple roots, mixed mapped-item workflows, reversed
+relationships, nonmember transform frames, unsupported contexts/transforms and
+touching or overlapping occurrence boxes reject explicitly. Mixed
+geometry/children representations, multi-solid leaves, conversion-based units
+and ordinary/mapped root unit conversion remain open.
 
 Every occurrence receives separate mesh rows, UIDs and discrete Surface/Region
-owners. Names retain the root product, actual usage and leaf/solid path. Existing
-closed-shell, independent bounding-box, positive-fill and storage certificates
-apply. Definitions are not emitted at their original placement as extra solids.
+owners. Names retain the root product and the literal usage/product/solid path
+in path order; deeper paths compact product labels and identifier segments to
+stay inside the bounded MSH physical-name transport. Existing closed-shell,
+independent bounding-box, positive-fill and storage certificates apply.
+Definitions are not emitted at their original placement as extra solids.
 This mesh import does not reconstruct analytic CAD parameterization.
 
 ## Evidence and qualification
@@ -63,6 +75,13 @@ The obsolete centimetre-rejection control now checks an undeclared STEP prefix,
 after the separate 52-assertion SI conversion qualification passed. This bounded
 history does not establish optimized compiler or general assembly/unit-conversion
 parity. It adds no default volume run.
+
+The nested-DAG module `test/geometry/brep_step_relationship_nested_functional_test.jl`
+imports the retained two-level millimetre and metre/centimetre/millimetre
+fixtures, checks the composed noncommuting bounds against the opaque public
+observations, a shared-intermediate diamond expansion, one actual fill with
+MSH4 ASCII/binary identity transport, and nine malformed graph/cycle/orphan
+rejections. The direct and mapped producers remain unchanged controls.
 
 The [STEP relationship schema](https://downloads.steptools.com/docs/stp_aim/html/t_representation_relationship_with_transformation.html)
 declares the distinct-context and transform-item membership requirements.
