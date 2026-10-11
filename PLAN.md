@@ -209,9 +209,11 @@ Point15 Point topology now partitions into signed Curve→Point and
 Surface→Curve child closures with literal shared `partitions` and unchanged
 original cell/node UIDs. MSH4 import preserves signed non-partition
 `boundary` tags, so imported declared-BRep meshes partition through the
-unchanged certificate. General lower/mixed-family topology beyond linear
-declared BRep, coincident-support roles, triple junctions and parallel
-production remain open.
+unchanged certificate. The declared-BRep producer now covers every linear
+cell family — Quad4 surfaces and Hex8/Prism6/Pyr5 volumes — through the
+canonical `MeshEntityTopology` facet cycles and per-type interface blocks.
+High-order cells, periodic/parametric topology, coincident-support roles,
+triple junctions, bare non-Tet4 volumes and parallel production remain open.
 
 An explicit [variable-tensor ordinary Surface constructor](docs/metric_model_surfaces.md)
 consumes actual lower Point/Line products and certifies the sampled world metric

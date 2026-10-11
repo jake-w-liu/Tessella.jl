@@ -211,6 +211,28 @@ ordinary default suite is **259/259 on both** runtimes, actual exit0.
 PART01 remains open (mixed/high-order cells, periodic/parametric topology,
 triple junctions, coincident support roles).
 
+### Mixed linear cell families in lower-BRep partition production (2026-10-12)
+
+Devin landed the next PART01 slice: `APIPartitionBRep.jl` now certifies and
+transports every linear cell family — Quad4 surfaces beside Tri3 and
+Hex8/Prism6/Pyr5 volumes beside Tet4 — instead of the Tri3/Tet4-only
+catalog. Facet and edge corner cycles come from the canonical
+`MeshEntityTopology` outward tables (`_simplex_face_patterns`/`_simplex_edge_patterns`),
+support keys and cycle/reversal comparisons are arity-generic, positive
+volume is certified per family by `_volume_cell_signed_volume`, and each
+connected interface component emits per-type Tri3/Quad4 blocks under one
+interface entity with correct primary-side winding. Declared Curve/Point
+topology, signed child bounds, literal cell/node UIDs, physical groups,
+ghosts, node reclassification, MSH4 round-trips and unpartition all keep
+the earlier contract; bare meshes without lower cells still route to the
+Tet4-only producer, and bare non-Tet4 volume meshes remain unsupported.
+Focused checks pass188/188 on both Julia1.12.7 and1.13.1 with a new
+53-assertion mixed testset (Hex8+Pyr5 over Quad4+Tri3 surfaces with a
+declared Curve border on a Quad4 side, and Tet4+Prism6 sharing a Tri3
+interface) plus an 8-assertion atomicity set; the default smoke gained a
+mixed-family partition testset. PART01 remains open (high-order cells,
+periodic/parametric topology, triple junctions, coincident support roles).
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

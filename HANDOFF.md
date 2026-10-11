@@ -306,6 +306,31 @@ with a new 27-assertion import testset; the declared-BRep default smoke
 gained three import assertions and the ordinary default suite is now
 **259/259 on both**, actual exit0.
 
+The mixed linear family slice is also landed: the producer catalog now
+admits Quad4 surfaces and Hex8/Prism6/Pyr5 volumes beside the original
+Tri3/Tet4 set, using the canonical `MeshEntityTopology` outward edge/facet
+cycles (`_simplex_edge_patterns`, `_simplex_face_patterns`) instead of
+hardcoded tri/tet tables. Facet support keys, cycle equality and the
+primary-side reversal are arity-generic; `_volume_cell_signed_volume`
+certifies positive orientation per family at ingest; each connected
+interface component keeps one entity and emits a Tri3 and/or Quad4 block
+by facet type, with declared Curve borders and generated seams handled
+unchanged. `APIPartitionProducer.jl` routes any mesh carrying lower cells
+to the BRep path and `_partition_interface_components` reads per-face edge
+tables, so bare meshes without lower cells still hit the Tet4-only
+producer (and bare non-Tet4 volumes remain unsupported). Focused checks
+pass188/188 on both Julia1.12.7 and1.13.1: a Hex8+Pyr5 fixture over five
+Quad4 and four Tri3 surfaces with a declared Curve/Point border on one
+Quad4 side produces a Quad4 interface, and a Tet4+Prism6 fixture produces
+a Tri3 interface between different volume families — both verified through
+ghosts, physical groups, `validate`, MSH4/public-write round-trips and
+`unpartition`, plus an 8-assertion atomicity set (reversed Hex8/Prism6
+volume, duplicated Quad4 support, omitted Region facet coverage). The
+default smoke `test/functional/partition_brep.jl` gained a mixed-family
+testset (4 assertions). PART01 remains open for high-order cells,
+periodic/parametric topology, triple junctions and distinct coincident
+support roles.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

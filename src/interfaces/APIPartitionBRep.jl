@@ -1,16 +1,34 @@
-# Actual lower Tri3 BRep transport. Interface seams are derived from literal
-# node UID incidence, with one authoritative original cell per UID.
-const _PARTITION_TET_FACETS=((1,3,2),(1,2,4),(2,3,4),(3,1,4))
-const _PARTITION_TRI_EDGES=((1,2),(2,3),(3,1))
+# Actual lower BRep transport across every linear cell family (Point15,
+# Line2, Tri3/Quad4 surfaces and Tet4/Hex8/Prism6/Pyr5 volumes). Interface
+# seams are derived from literal node UID incidence, with one authoritative
+# original cell per UID. Facet and edge corner tables come from the canonical
+# `MeshEntityTopology` outward cycles (Gmsh `MElement` order).
+const _PARTITION_SURFACE_TYPES=(2,3)
+const _PARTITION_VOLUME_TYPES=(4,5,6,7)
 _partition_support(uids)=Tuple(sort!(collect(uids)))
-_partition_cycle_equal(a,b)=any(a==ntuple(i->b[mod1(i+shift,3)],3) for shift in 0:2)
-_partition_cycle_reverse(a,b)=_partition_cycle_equal(a,(b[1],b[3],b[2]))
+_partition_cycle_equal(a,b)=length(a)==length(b) &&
+    any(a==ntuple(i->b[mod1(i+shift,length(b))],length(b)) for shift in 0:length(b)-1)
+_partition_reversed(b)=ntuple(i->i==1 ? b[1] : b[length(b)+2-i],length(b))
+_partition_cycle_reverse(a,b)=_partition_cycle_equal(a,_partition_reversed(b))
+# `(face surface msh type, corner tuple)` for each outward facet cycle of a
+# linear volume family.
+function _partition_volume_facets(msh)
+    facets=Tuple{Int,Tuple{Vararg{Int}}}[]
+    for (surface_type,patterns) in
+            ((2,_simplex_face_patterns(msh,3)),
+             (3,_simplex_face_patterns(msh,4)))
+        for pattern in patterns
+            push!(facets,(surface_type,pattern))
+        end
+    end
+    return facets
+end
 
-function _partition_brep_surface_borders(triangles,caller)
+function _partition_brep_surface_borders(faces,caller)
     incidences=Dict{Int32,Dict{Tuple{UInt64,UInt64},Vector{Tuple{UInt64,UInt64}}}}()
-    for tri in triangles,(a,b) in _PARTITION_TRI_EDGES
-        edges=get!(()->Dict{Tuple{UInt64,UInt64},Vector{Tuple{UInt64,UInt64}}}(),incidences,tri.parent)
-        edge=(tri.uids[a],tri.uids[b]);push!(get!(()->Tuple{UInt64,UInt64}[],edges,minmax(edge...)),edge)
+    for face in faces,(a,b) in _simplex_edge_patterns(face.msh)
+        edges=get!(()->Dict{Tuple{UInt64,UInt64},Vector{Tuple{UInt64,UInt64}}}(),incidences,face.parent)
+        edge=(face.uids[a],face.uids[b]);push!(get!(()->Tuple{UInt64,UInt64}[],edges,minmax(edge...)),edge)
     end
     borders=Dict{Int32,Dict{Tuple{UInt64,UInt64},Tuple{UInt64,UInt64}}}()
     for (parent,edges) in incidences
@@ -32,8 +50,9 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
     class.public_tags!==nothing || throw(ArgumentError("$caller: lower BRep needs actual UID authority"))
     _high_order_overlay(cached)===nothing || throw(ArgumentError("$caller: lower BRep partitioning requires first-order cells"))
     catalog=[row for row in _cache_catalog(cached,class) if !isempty(row[4])]
-    all(row->row[1] in (1,2,4,15),catalog) && any(row->row[1]==4,catalog) || throw(ArgumentError(
-        "$caller: lower BRep partitioning supports Point15/Line2/Tri3/Tet4 only"))
+    all(row->row[1] in (1,2,3,4,5,6,7,15),catalog) &&
+    any(row->row[1] in _PARTITION_VOLUME_TYPES,catalog) || throw(ArgumentError(
+        "$caller: lower BRep partitioning supports linear Point15/Line2/Tri3/Quad4/Tet4/Hex8/Prism6/Pyr5 cells only"))
     cached isa MixedMesh && (cached.partition_data!==nothing || !isempty(cached.periodic_links)) &&
         throw(ArgumentError("$caller: existing partition or periodic topology is unsupported"))
     isempty(model.periodic) && isempty(model.meshing.periodic_uid_history) ||
@@ -54,18 +73,26 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
         throw(ArgumentError("$caller: cached and record BRep rows do not agree"))
     entities,_=_dim01_entities(model,model_entities(model),assembly,eachindex(assembly.nodes))
     blocks=ElementBlock[];owners=Vector{Int32}[];uids=Vector{UInt64}[]
-    triangles=NamedTuple[];tets=NamedTuple[];lines=NamedTuple[];points=NamedTuple[]
+    faces=NamedTuple[];volumes=NamedTuple[];lines=NamedTuple[];points=NamedTuple[]
     for (msh,dim,offset,cells,classified) in catalog
         physical=Int32[_dim01_physical(model,(dim,Int(owner))) for owner in classified]
         push!(blocks,ElementBlock(msh,cells,physical));push!(owners,copy(classified))
         push!(uids,copy(public.element_tags[offset+1:offset+size(cells,2)]))
         for column in axes(cells,2)
             rows=Tuple(cells[:,column]);labels=Tuple(public.node_tags[collect(rows)]);index=offset+column
-            record=(;rows,uids=labels,index,parent=classified[column],part=assignment[index])
-            push!(msh==2 ? triangles : msh==4 ? tets : msh==1 ? lines : points,record)
+            record=(;rows,uids=labels,msh=Int(msh),index,parent=classified[column],part=assignment[index])
+            push!(msh in _PARTITION_SURFACE_TYPES ? faces :
+                  msh in _PARTITION_VOLUME_TYPES ? volumes :
+                  msh==1 ? lines : points,record)
+        end
+        if msh in _PARTITION_VOLUME_TYPES
+            all(column->Model._volume_cell_signed_volume(cached.coords,cells,column,Int(msh))>0,
+                axes(cells,2)) || throw(ArgumentError(
+                "$caller: lower BRep needs positive oriented volume cells"))
         end
     end
-    parents=sort!(unique(tet.parent for tet in tets));surfaces=sort!(unique(tri.parent for tri in triangles))
+    parents=sort!(unique(volume.parent for volume in volumes))
+    surfaces=sort!(unique(face.parent for face in faces))
     curve_parents=sort!(unique(line.parent for line in lines))
     point_parents=sort!(unique(point.parent for point in points))
     all(parent->parent>0 && haskey(model.discrete,(3,Int(parent))),parents) &&
@@ -130,7 +157,7 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
                 "$caller: declared boundary Point $point does not lie on the actual Curve end"))
         end
     end
-    surface_borders=_partition_brep_surface_borders(triangles,caller)
+    surface_borders=_partition_brep_surface_borders(faces,caller)
     used_curves=Set{Int32}()
     for parent in surfaces
         boundary=model.discrete[(2,Int(parent))].boundary
@@ -168,35 +195,37 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
             dim==1 ? (haskey(curve_nodes,tag) && row in curve_nodes[tag]) :
             dim==2 ? tag in surfaces : dim==3 && tag in parents
         end,
-        unique(vcat([collect(cell.rows) for cell in vcat(triangles,tets,lines,points)]...))) ||
+        unique(vcat([collect(cell.rows) for cell in vcat(faces,volumes,lines,points)]...))) ||
         throw(ArgumentError(
             "$caller: referenced lower BRep vertices have inconsistent entity classification"))
-    tet_rows=Matrix{Int32}(undef,4,length(tets))
-    for (column,tet) in enumerate(tets);tet_rows[:,column]=collect(tet.rows);end
-    validate(Mesh(cached.coords;tets=tet_rows)).ok || throw(ArgumentError(
-        "$caller: lower BRep needs positive manifold Tet4 cells"))
-    facets=Dict{NTuple{3,UInt64},Vector{NamedTuple}}();facet_order=NTuple{3,UInt64}[]
-    for tet in tets,face in _PARTITION_TET_FACETS
-        rows=ntuple(i->tet.rows[face[i]],3);labels=ntuple(i->tet.uids[face[i]],3)
+    facets=Dict{Tuple{Vararg{UInt64}},Vector{NamedTuple}}()
+    facet_order=Tuple{Vararg{UInt64}}[]
+    facet_tables=Dict{Int,Vector{Tuple{Int,Tuple{Vararg{Int}}}}}()
+    for volume in volumes,(face_msh,pattern) in
+            get!(()->_partition_volume_facets(volume.msh),facet_tables,volume.msh)
+        rows=ntuple(i->volume.rows[pattern[i]],length(pattern))
+        labels=ntuple(i->volume.uids[pattern[i]],length(pattern))
         key=_partition_support(labels);haskey(facets,key) || push!(facet_order,key)
-        push!(get!(()->NamedTuple[],facets,key),(;rows,uids=labels,tet))
+        push!(get!(()->NamedTuple[],facets,key),(;rows,uids=labels,msh=face_msh,volume))
     end
     for hits in values(facets)
-        length(hits)<=2 || throw(ArgumentError("$caller: lower BRep facet has too many Tet carriers"))
+        length(hits)<=2 || throw(ArgumentError("$caller: lower BRep facet has too many volume carriers"))
         length(hits)==2 && !_partition_cycle_reverse(hits[1].uids,hits[2].uids) &&
-            throw(ArgumentError("$caller: shared Tet facet has inconsistent winding"))
+            throw(ArgumentError("$caller: shared volume facet has inconsistent winding"))
     end
-    triangle_support=Dict{NTuple{3,UInt64},NamedTuple}();lower_edges=Dict{Tuple{UInt64,UInt64},Vector{NamedTuple}}()
-    for tri in triangles
-        key=_partition_support(tri.uids)
-        haskey(triangle_support,key) && throw(ArgumentError("$caller: original BRep repeats a Tri3 support"))
-        triangle_support[key]=tri
+    face_support=Dict{Tuple{Vararg{UInt64}},NamedTuple}()
+    lower_edges=Dict{Tuple{UInt64,UInt64},Vector{NamedTuple}}()
+    for face in faces
+        key=_partition_support(face.uids)
+        haskey(face_support,key) && throw(ArgumentError(
+            "$caller: original BRep repeats a Surface cell support"))
+        face_support[key]=face
         hits=get(facets,key,NamedTuple[])
-        !isempty(hits) && any(hit->hit.tet.part==tri.part,hits) || throw(ArgumentError(
-            "$caller: each lower Tri3 partition must match an actual Tet facet carrier"))
-        for (a,b) in _PARTITION_TRI_EDGES
-            push!(get!(()->NamedTuple[],lower_edges,minmax(tri.uids[a],tri.uids[b])),
-                (uids=(tri.uids[a],tri.uids[b]),rows=(tri.rows[a],tri.rows[b]),tri=tri))
+        !isempty(hits) && any(hit->hit.volume.part==face.part,hits) || throw(ArgumentError(
+            "$caller: each lower Surface cell partition must match an actual volume facet carrier"))
+        for (a,b) in _simplex_edge_patterns(face.msh)
+            push!(get!(()->NamedTuple[],lower_edges,minmax(face.uids[a],face.uids[b])),
+                (uids=(face.uids[a],face.uids[b]),rows=(face.rows[a],face.rows[b]),face))
         end
     end
     declared=Dict{Int32,Vector{Int32}}();used=Set{Int32}()
@@ -204,63 +233,63 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
         boundary=model.discrete[(3,Int(parent))].boundary
         !isempty(boundary) && all(entry->entry[1]==2 && Int32(abs(entry[2])) in surfaces,boundary) &&
             allunique(abs(entry[2]) for entry in boundary) || throw(ArgumentError(
-                "$caller: each Region needs a complete declared Tri3 Surface boundary"))
+                "$caller: each Region needs a complete declared Surface boundary"))
         expected=Set(key for (key,hits) in facets if
-            count(hit->hit.tet.parent==parent,hits)==1)
-        covered=Set{NTuple{3,UInt64}}();declared[parent]=Int32[value for (_,value) in boundary]
+            count(hit->hit.volume.parent==parent,hits)==1)
+        covered=Set{Tuple{Vararg{UInt64}}}();declared[parent]=Int32[value for (_,value) in boundary]
         for (_,signed) in boundary
             surface=Int32(abs(signed));push!(used,surface)
-            for tri in triangles
-                tri.parent==surface || continue
-                key=_partition_support(tri.uids);key in expected && !(key in covered) ||
+            for face in faces
+                face.parent==surface || continue
+                key=_partition_support(face.uids);key in expected && !(key in covered) ||
                     throw(ArgumentError("$caller: declared Surface does not uniquely cover its Region facets"))
-                hit=only(filter(hit->hit.tet.parent==parent,facets[key]))
-                oriented=signed>0 ? tri.uids : (tri.uids[1],tri.uids[3],tri.uids[2])
+                hit=only(filter(hit->hit.volume.parent==parent,facets[key]))
+                oriented=signed>0 ? face.uids : _partition_reversed(face.uids)
                 _partition_cycle_equal(oriented,hit.uids) || throw(ArgumentError(
-                    "$caller: declared Surface sign disagrees with its actual Tet facet winding"))
+                    "$caller: declared Surface sign disagrees with its actual volume facet winding"))
                 push!(covered,key)
             end
         end
         covered==expected || throw(ArgumentError("$caller: declared lower BRep omits Region facets"))
     end
     used==Set(surfaces) || throw(ArgumentError("$caller: unbound lower Surfaces are unsupported"))
-    return (;entities,blocks,owners,uids,public,triangles,tets,lines,points,
+    return (;entities,blocks,owners,uids,public,faces,volumes,lines,points,
         parents,surfaces,curve_parents,point_parents,curve_edges,point_cells,
-        facets,facet_order,triangle_support,lower_edges,declared,surface_borders)
+        facets,facet_order,face_support,lower_edges,declared,surface_borders)
 end
 
 function _partition_brep_boundary_certificate(source,children,part_entities,boundaries,
                                                interfaces,curves,caller;topology)
     surface_faces=Dict{Int32,Vector{NamedTuple}}()
-    for tri in source.triangles
-        child=children[(2,tri.parent,tri.part)]
-        push!(get!(()->NamedTuple[],surface_faces,child),tri)
+    for face in source.faces
+        child=children[(2,face.parent,face.part)]
+        push!(get!(()->NamedTuple[],surface_faces,child),face)
     end
     merge!(surface_faces,interfaces)
     for ((dim,tag),_) in part_entities
         dim==3 || continue
-        expected=Dict{NTuple{3,UInt64},NamedTuple}()
+        expected=Dict{Tuple{Vararg{UInt64}},NamedTuple}()
         for (key,hits) in source.facets
-            selected=[hit for hit in hits if children[(3,hit.tet.parent,hit.tet.part)]==tag]
+            selected=[hit for hit in hits if children[(3,hit.volume.parent,hit.volume.part)]==tag]
             length(selected)==1 && (expected[key]=only(selected))
         end
-        covered=Set{NTuple{3,UInt64}}()
+        covered=Set{Tuple{Vararg{UInt64}}}()
         for signed in boundaries[(dim,tag)],face in surface_faces[abs(signed)]
             key=_partition_support(face.uids)
             haskey(expected,key) && !(key in covered) || throw(ArgumentError(
-                "$caller: child Region boundary repeats or includes a foreign Tet facet"))
-            oriented=signed>0 ? face.uids : (face.uids[1],face.uids[3],face.uids[2])
+                "$caller: child Region boundary repeats or includes a foreign volume facet"))
+            oriented=signed>0 ? face.uids : _partition_reversed(face.uids)
             _partition_cycle_equal(oriented,expected[key].uids) || throw(ArgumentError(
                 "$caller: child Region boundary has inconsistent facet winding"))
             push!(covered,key)
         end
         topology && covered!=Set(keys(expected)) && throw(ArgumentError(
-            "$caller: child Region topology does not cover its complete Tet boundary"))
+            "$caller: child Region topology does not cover its complete volume boundary"))
     end
     topology || return nothing
     for (tag,faces) in surface_faces
         edges=Dict{Tuple{UInt64,UInt64},Vector{Tuple{UInt64,UInt64}}}()
-        for face in faces,(a,b) in _PARTITION_TRI_EDGES
+        for face in faces,(a,b) in _simplex_edge_patterns(face.msh)
             pair=(face.uids[a],face.uids[b]);push!(get!(()->Tuple{UInt64,UInt64}[],edges,minmax(pair...)),pair)
         end
         expected=Dict{Tuple{UInt64,UInt64},Tuple{UInt64,UInt64}}()
@@ -325,18 +354,19 @@ end
 function _partition_brep_production_plan(model,cached,class,count,assignment,caller;
                                          topology::Bool,ghosts::Bool)
     source=_partition_brep_snapshot(model,cached,class,assignment,caller)
-    tet_parts=Int32[tet.part for tet in source.tets]
-    length(unique(tet_parts))==count || throw(ArgumentError("$caller: every partition must own a Tet4"))
+    volume_parts=Int32[volume.part for volume in source.volumes]
+    length(unique(volume_parts))==count || throw(ArgumentError(
+        "$caller: every partition must own a volume cell"))
     topology && any(key->length(source.facets[key])==2 &&
-        source.facets[key][1].tet.part!=source.facets[key][2].tet.part &&
-        haskey(source.triangle_support,key),source.facet_order) && throw(ArgumentError(
-        "$caller: a partition interface coincides with an original Tri3; its distinct geometric roles are not implemented"))
+        source.facets[key][1].volume.part!=source.facets[key][2].volume.part &&
+        haskey(source.face_support,key),source.facet_order) && throw(ArgumentError(
+        "$caller: a partition interface coincides with an original Surface cell; its distinct geometric roles are not implemented"))
     staged=Model._model_mesh_transaction_copy(model)
     part_entities=Dict{Tuple{Int,Int},Elements.MixedEntity}()
     children=Dict{Tuple{Int,Int32,Int32},Int32}()
     interfaces=Dict{Int32,Vector{NamedTuple}}();curves=Dict{Int32,Vector{NamedTuple}}()
     for dim in (2,3)
-        cells=dim==2 ? source.triangles : source.tets
+        cells=dim==2 ? source.faces : source.volumes
         for (parent,part) in sort!(unique((cell.parent,cell.part) for cell in cells))
             tag=Int32(_partition_entity_birth!(staged,dim,caller));children[(dim,parent,part)]=tag
             groups=Model._model_projection_physical_tags(staged,dim,Int(parent))
@@ -360,7 +390,7 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
             members=staged.physical[(1,Int(group))];Int(tag) in members || push!(members,Int(tag))
         end
         edges=source.curve_edges[parent]
-        parts=sort!(unique(Int32[entry.tri.part for edge in edges
+        parts=sort!(unique(Int32[entry.face.part for edge in edges
             for entry in source.lower_edges[minmax(edge.uids...)]]))
         curve_partitions[parent]=parts
         rows=unique(reduce(vcat,[collect(edge.rows) for edge in edges]))
@@ -385,8 +415,8 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
             physical_tags=groups,partitions=parts,parent=(0,Int(parent)))
     end
     flat_owners=Int32[owner for owners in source.owners for owner in owners]
-    for cell in source.triangles;flat_owners[cell.index]=children[(2,cell.parent,cell.part)];end
-    for cell in source.tets;flat_owners[cell.index]=children[(3,cell.parent,cell.part)];end
+    for cell in source.faces;flat_owners[cell.index]=children[(2,cell.parent,cell.part)];end
+    for cell in source.volumes;flat_owners[cell.index]=children[(3,cell.parent,cell.part)];end
     for cell in source.lines;flat_owners[cell.index]=curve_children[cell.parent];end
     for cell in source.points;flat_owners[cell.index]=point_children[cell.parent];end
     blocks=copy(source.blocks);owners=Vector{Int32}[];offset=0
@@ -395,14 +425,15 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
     end
     labels=copy(source.uids);maximum_uid=ELEMENT_TAG_MAX[];cell_count=length(source.public.element_tags)
     boundaries=Dict(key=>Int32[] for key in keys(part_entities))
-    for tet in source.tets
-        child=children[(3,tet.parent,tet.part)]
-        for signed in source.declared[tet.parent],tri in source.triangles
-            tri.parent==abs(signed) || continue
-            hits=source.facets[_partition_support(tri.uids)]
-            any(hit->hit.tet.index==tet.index,hits) || continue
-            face=children[(2,tri.parent,tri.part)]*sign(signed)
-            face in boundaries[(3,Int(child))] || push!(boundaries[(3,Int(child))],face)
+    for volume in source.volumes
+        child=children[(3,volume.parent,volume.part)]
+        for signed in source.declared[volume.parent],face in source.faces
+            face.parent==abs(signed) || continue
+            hits=source.facets[_partition_support(face.uids)]
+            any(hit->hit.volume.index==volume.index,hits) || continue
+            face_child=children[(2,face.parent,face.part)]*sign(signed)
+            face_child in boundaries[(3,Int(child))] ||
+                push!(boundaries[(3,Int(child))],face_child)
         end
     end
     for parent in source.curve_parents
@@ -424,10 +455,11 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
         grouped=Dict{Tuple{Int32,Int32},Vector{NamedTuple}}()
         for key in source.facet_order
             hits=source.facets[key];length(hits)==2 || continue
-            left,right=hits;left.tet.part==right.tet.part && continue
-            child=children[(3,left.tet.parent,left.tet.part)];other=children[(3,right.tet.parent,right.tet.part)]
+            left,right=hits;left.volume.part==right.volume.part && continue
+            child=children[(3,left.volume.parent,left.volume.part)]
+            other=children[(3,right.volume.parent,right.volume.part)]
             push!(get!(()->NamedTuple[],grouped,minmax(child,other)),
-                (rows=left.rows,uids=left.uids,child=child,other=other))
+                (rows=left.rows,uids=left.uids,msh=left.msh,child=child,other=other))
         end
         for pair in sort!(collect(keys(grouped)))
             faces=grouped[pair]
@@ -436,20 +468,34 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
                 cell_count<=typemax(Int32)-length(component) || throw(ArgumentError("$caller: interface cell capacity exceeded"))
                 cell_count+=length(component)
                 members=sort!(Int32[part_entities[(3,Int(child))].partitions[1] for child in pair])
-                interface_faces=NamedTuple[];nodes=Matrix{Int32}(undef,3,length(component));ids=UInt64[]
-                for (column,index) in enumerate(component)
-                    face=faces[index];rows=face.child==primary ? face.rows : (face.rows[1],face.rows[3],face.rows[2])
-                    uids=Tuple(source.public.node_tags[collect(rows)]);nodes[:,column]=collect(rows)
+                interface_faces=NamedTuple[]
+                oriented_rows=Vector{Tuple{Vararg{Int32}}}(undef,length(component))
+                ids=UInt64[]
+                for (slot,index) in enumerate(component)
+                    face=faces[index]
+                    rows=face.child==primary ? face.rows : _partition_reversed(face.rows)
+                    uids=Tuple(source.public.node_tags[collect(rows)])
+                    oriented_rows[slot]=rows
                     maximum_uid<typemax(UInt64) || throw(ArgumentError("$caller: interface UID capacity exceeded"))
-                    maximum_uid+=UInt64(1);push!(ids,maximum_uid);push!(interface_faces,(;rows,uids))
+                    maximum_uid+=UInt64(1);push!(ids,maximum_uid)
+                    push!(interface_faces,(;rows,uids,msh=face.msh))
                 end
-                part_entities[(2,Int(tag))]=Elements.MixedEntity(2,tag,_partition_bounds(cached.coords,unique(vec(nodes)));
+                rows_flat=Int32[row for rows in oriented_rows for row in rows]
+                part_entities[(2,Int(tag))]=Elements.MixedEntity(2,tag,_partition_bounds(cached.coords,unique(rows_flat));
                     partitions=members,parent=part_entities[(3,Int(primary))].parent)
                 boundaries[(2,Int(tag))]=Int32[];interfaces[tag]=interface_faces
-                push!(blocks,ElementBlock(2,nodes));push!(owners,fill(tag,length(ids)));push!(labels,ids)
+                for face_msh in sort!(unique(face.msh for face in interface_faces))
+                    slots=findall(face->face.msh==face_msh,interface_faces)
+                    nodes=Matrix{Int32}(undef,length(oriented_rows[first(slots)]),length(slots))
+                    for (column,slot) in enumerate(slots)
+                        nodes[:,column]=collect(oriented_rows[slot])
+                    end
+                    push!(blocks,ElementBlock(Int(face_msh),nodes))
+                    push!(owners,fill(tag,length(slots)));push!(labels,ids[slots])
+                end
                 for child in pair;push!(boundaries[(3,Int(child))],child==primary ? tag : -tag);end
                 edge_hits=Dict{Tuple{UInt64,UInt64},Vector{NamedTuple}}();edge_order=Tuple{UInt64,UInt64}[]
-                for face in interface_faces,(a,b) in _PARTITION_TRI_EDGES
+                for face in interface_faces,(a,b) in _simplex_edge_patterns(face.msh)
                     key=minmax(face.uids[a],face.uids[b]);haskey(edge_hits,key) || push!(edge_order,key)
                     push!(get!(()->NamedTuple[],edge_hits,key),(uids=(face.uids[a],face.uids[b]),rows=(face.rows[a],face.rows[b])))
                 end
@@ -464,17 +510,17 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
                     if curve_edge!==nothing
                         lower=get(source.lower_edges,key,NamedTuple[])
                         length(lower)==2 &&
-                            sort!(unique!(Int32[edge.tri.part for edge in lower]))==members || throw(ArgumentError(
-                                "$caller: an interface border on a declared Curve must meet actual lower Tri3 carriers on both partition sides"))
+                            sort!(unique!(Int32[edge.face.part for edge in lower]))==members || throw(ArgumentError(
+                                "$caller: an interface border on a declared Curve must meet actual lower Surface carriers on both partition sides"))
                         seam_lookup[key]=(uids=curve_edge.uids,tag=curve_edge.tag)
                         continue
                     end
                     lower=get(source.lower_edges,key,NamedTuple[])
                     length(lower)==2 &&
-                        sort!(Int32[edge.tri.part for edge in lower])==members || throw(ArgumentError(
-                            "$caller: interface seam must meet actual lower Tri3 carriers on both partition sides"))
-                    reference=argmin([children[(2,edge.tri.parent,edge.tri.part)] for edge in lower])
-                    edge=lower[reference];group=(edge.tri.parent,Tuple(members))
+                        sort!(Int32[edge.face.part for edge in lower])==members || throw(ArgumentError(
+                            "$caller: interface seam must meet actual lower Surface carriers on both partition sides"))
+                    reference=argmin([children[(2,edge.face.parent,edge.face.part)] for edge in lower])
+                    edge=lower[reference];group=(edge.face.parent,Tuple(members))
                     haskey(seams,group) || push!(seam_order,group)
                     current=get!(()->NamedTuple[],seams,group)
                     any(existing->_partition_support(existing.uids)==_partition_support(edge.uids),current) ||
@@ -505,9 +551,9 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
         for ((dim,tag),entity) in part_entities
             dim==2 || continue
             faces=haskey(interfaces,Int32(tag)) ? interfaces[Int32(tag)] :
-                [tri for tri in source.triangles if children[(2,tri.parent,tri.part)]==tag]
+                [face for face in source.faces if children[(2,face.parent,face.part)]==tag]
             signs=Dict{Int32,Int}()
-            for face in faces,(a,b) in _PARTITION_TRI_EDGES
+            for face in faces,(a,b) in _simplex_edge_patterns(face.msh)
                 key=minmax(face.uids[a],face.uids[b]);seam=get(seam_lookup,key,nothing);seam===nothing && continue
                 orientation=(face.uids[a],face.uids[b])==seam.uids ? 1 : -1
                 haskey(signs,seam.tag) && signs[seam.tag]!=orientation && throw(ArgumentError("$caller: Surface seam has inconsistent orientation"))
@@ -533,17 +579,20 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
     global_entities=copy(source.entities);ghost_entities=Tuple{Int32,Int32}[];ghost_elements=Elements.MixedGhostElement[]
     if ghosts
         node_parts=[Set{Int32}() for _ in 1:nnodes(cached)]
-        for tet in source.tets,row in tet.rows;push!(node_parts[row],tet.part);end
-        destinations=[Set{Int32}() for _ in source.tets]
-        for (index,tet) in enumerate(source.tets),row in tet.rows;union!(destinations[index],node_parts[row]);end
-        for (index,tet) in enumerate(source.tets)
-            delete!(destinations[index],tet.part);isempty(destinations[index]) && continue
-            push!(ghost_elements,Elements.MixedGhostElement(tet.index,tet.part,sort!(collect(destinations[index]))))
+        for volume in source.volumes,row in volume.rows;push!(node_parts[row],volume.part);end
+        destinations=[Set{Int32}() for _ in source.volumes]
+        for (index,volume) in enumerate(source.volumes),row in volume.rows
+            union!(destinations[index],node_parts[row])
+        end
+        for (index,volume) in enumerate(source.volumes)
+            delete!(destinations[index],volume.part);isempty(destinations[index]) && continue
+            push!(ghost_elements,Elements.MixedGhostElement(volume.index,volume.part,
+                sort!(collect(destinations[index]))))
         end
         for part in 1:count
             tag=Int32(_partition_entity_birth!(staged,3,caller));push!(ghost_entities,(tag,Int32(part)))
-            selected=[tet for (index,tet) in enumerate(source.tets) if Int32(part) in destinations[index]]
-            rows=isempty(selected) ? Int32[] : unique(vcat([collect(tet.rows) for tet in selected]...))
+            selected=[volume for (index,volume) in enumerate(source.volumes) if Int32(part) in destinations[index]]
+            rows=isempty(selected) ? Int32[] : unique(vcat([collect(volume.rows) for volume in selected]...))
             global_entities[(3,Int(tag))]=Elements.MixedEntity(3,tag,_partition_bounds(cached.coords,rows))
         end
     end

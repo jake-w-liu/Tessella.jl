@@ -65,8 +65,9 @@ function _partition_tet_snapshot(model,cached,class,caller)
 end
 
 function _partition_interface_components(faces)
+    edges(face)=_simplex_edge_patterns(get(face,:msh,2))
     incidence=Dict{Tuple{UInt64,UInt64},Vector{Int}}()
-    for (index,face) in enumerate(faces),(a,b) in ((1,2),(2,3),(3,1))
+    for (index,face) in enumerate(faces),(a,b) in edges(face)
         push!(get!(()->Int[],incidence,minmax(face.uids[a],face.uids[b])),index)
     end
     seen=falses(length(faces));components=Vector{Int}[]
@@ -75,7 +76,7 @@ function _partition_interface_components(faces)
         component=Int[seed];seen[seed]=true;cursor=1
         while cursor<=length(component)
             face=faces[component[cursor]];cursor+=1
-            for (a,b) in ((1,2),(2,3),(3,1)),neighbor in incidence[minmax(face.uids[a],face.uids[b])]
+            for (a,b) in edges(face),neighbor in incidence[minmax(face.uids[a],face.uids[b])]
                 seen[neighbor] && continue
                 seen[neighbor]=true;push!(component,neighbor)
             end
@@ -87,7 +88,8 @@ end
 
 function _partition_tet_production_plan(model,cached,class,count,assignment,caller;
                                         topology::Bool,ghosts::Bool)
-    if class!==nothing && any(row->row[1]==2 && !isempty(row[4]),_cache_catalog(cached,class))
+    if class!==nothing && any(row->row[1] in (1,2,3,15) && !isempty(row[4]),
+                              _cache_catalog(cached,class))
         return _partition_brep_production_plan(model,cached,class,count,assignment,caller;topology,ghosts)
     end
     source=_partition_tet_snapshot(model,cached,class,caller)

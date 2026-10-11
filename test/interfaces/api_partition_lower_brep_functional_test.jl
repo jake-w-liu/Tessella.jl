@@ -390,4 +390,294 @@ end
         A.finalize()
     end
 end
+
+const MTOP=Tessella.MeshEntityTopology
+function mixed_facets(msh)
+    out=Tuple{Int,Tuple{Vararg{Int}}}[]
+    for pattern in MTOP._simplex_face_patterns(msh,3);push!(out,(2,pattern));end
+    for pattern in MTOP._simplex_face_patterns(msh,4);push!(out,(3,pattern));end
+    return out
+end
+# A child's closed boundary: every singly-carried volume facet appears exactly
+# once, wound outward, among the cells of its signed boundary surfaces.
+function closed_mixed_region(tag)
+    types,ids,nodes=A.mesh.get_elements(3,tag)
+    hits=Dict{Tuple{Vararg{UInt64}},Vector{Tuple{Vararg{UInt64}}}}()
+    for (msh,flat) in zip(types,nodes)
+        msh in (4,5,6,7) || continue
+        cells=reshape(collect(UInt64,flat),E.msh_num_nodes(msh),:)
+        for cell in eachcol(cells),(face_msh,pattern) in mixed_facets(Int(msh))
+            uids=ntuple(i->cell[pattern[i]],length(pattern))
+            push!(get!(()->Tuple{Vararg{UInt64}}[],hits,_partition_support(uids)),uids)
+        end
+    end
+    exterior=Dict(key=>only(faces) for (key,faces) in hits if length(faces)==1)
+    actual=Dict{Tuple{Vararg{UInt64}},Tuple{Vararg{UInt64}}}()
+    for (_,signed) in A.model.get_boundary([(3,tag)],false,true,false)
+        st,si,sn=A.mesh.get_elements(2,abs(signed))
+        for (msh,flat) in zip(st,sn)
+            cells=reshape(collect(UInt64,flat),E.msh_num_nodes(msh),:)
+            for cell in eachcol(cells)
+                uids=signed>0 ? Tuple(cell) :
+                    ntuple(i->i==1 ? cell[1] : cell[length(cell)+2-i],length(cell))
+                key=_partition_support(uids)
+                haskey(actual,key) && return false
+                actual[key]=uids
+            end
+        end
+    end
+    keys(actual)==keys(exterior) &&
+        all(cycle_any(actual[key],exterior[key]) for key in keys(actual))
+end
+_partition_support(uids)=Tuple(sort(collect(uids)))
+cycle_any(a,b)=length(a)==length(b) &&
+    any(a==ntuple(i->b[mod1(i+shift,length(b))],length(b)) for shift in 0:length(b)-1)
+
+# Unit cube Hex8 with a pyramid cap on its top quad; surfaces 31-35 are the cube
+# sides (Quad4), 36-39 the pyramid laterals (Tri3). Curves 41-44 and points
+# 1,2,5,6 declare the border of surface 32.
+function mixed_fixture!(;region_bounds=[31,32,33,34,35,36,37,38,39],
+                         hex_nodes=[1,2,3,4,5,6,7,8],extra_quad=nothing)
+    A.finalize();A.initialize();A.model.add("mixed hex pyr")
+    A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+    for tag in (1,2,5,6);A.model.add_discrete_entity(0,tag);end
+    A.model.add_discrete_entity(1,41,[1,-2]);A.model.add_discrete_entity(1,42,[2,-6])
+    A.model.add_discrete_entity(1,43,[6,-5]);A.model.add_discrete_entity(1,44,[5,-1])
+    A.model.add_discrete_entity(2,31);A.model.add_discrete_entity(2,32,[41,42,43,44])
+    for tag in 33:39;A.model.add_discrete_entity(2,tag);end
+    A.model.add_discrete_entity(3,11,region_bounds)
+    A.model.add_physical_group(2,[32];tag=220,name="plated")
+    coords=[0. 1. 1. 0. 0. 1. 1. 0. .5;
+            0. 0. 1. 1. 0. 0. 1. 1. .5;
+            0. 0. 0. 0. 1. 1. 1. 1. 1.5]
+    A.mesh.add_nodes(0,1,[1],coords[:,1]);A.mesh.add_nodes(0,2,[2],coords[:,2])
+    A.mesh.add_nodes(0,5,[5],coords[:,5]);A.mesh.add_nodes(0,6,[6],coords[:,6])
+    A.mesh.add_nodes(3,11,[3,4,7,8,9],vec(coords[:,[3,4,7,8,9]]))
+    A.mesh.add_elements_by_type(31,3,[601],[1,4,3,2])
+    A.mesh.add_elements_by_type(32,3,[602],[1,2,6,5])
+    A.mesh.add_elements_by_type(33,3,[603],[1,5,8,4])
+    A.mesh.add_elements_by_type(34,3,[604],[2,3,7,6])
+    A.mesh.add_elements_by_type(35,3,[605],[3,4,8,7])
+    A.mesh.add_elements_by_type(36,2,[606],[5,6,9])
+    A.mesh.add_elements_by_type(37,2,[607],[6,7,9])
+    A.mesh.add_elements_by_type(38,2,[608],[8,5,9])
+    A.mesh.add_elements_by_type(39,2,[609],[7,8,9])
+    extra_quad===nothing || A.mesh.add_elements_by_type(31,3,[610],extra_quad)
+    for (tag,uid,edge) in ((41,701,[1,2]),(42,702,[2,6]),(43,703,[6,5]),(44,704,[5,1]))
+        A.mesh.add_elements_by_type(tag,1,[uid],edge)
+    end
+    A.mesh.add_elements_by_type(1,15,[801],[1]);A.mesh.add_elements_by_type(2,15,[802],[2])
+    A.mesh.add_elements_by_type(5,15,[805],[5]);A.mesh.add_elements_by_type(6,15,[806],[6])
+    A.mesh.add_elements_by_type(11,5,[501],hex_nodes)
+    A.mesh.add_elements_by_type(11,7,[502],[5,6,7,8,9])
+    A.mesh.generate(3)
+    A.option("Mesh.PartitionCreateTopology",1)
+end
+# Tet4 (A,B,C,D) plus a Prism6 (B',D',C',B,D,C) sharing the Tri3 face B,C,D.
+function prism_fixture!()
+    A.finalize();A.initialize();A.model.add("tet prism")
+    A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+    for tag in 31:37;A.model.add_discrete_entity(2,tag);end
+    A.model.add_discrete_entity(3,11,[31,32,33,34,35,36,37])
+    coords=[0. 1. 0. 0. 2. 1. 1.;
+            0. 0. 1. 0. 0. 0. 1.;
+            0. 0. 0. 1. 0. 1. 0.]
+    A.mesh.add_nodes(3,11,1:7,vec(coords))
+    A.mesh.add_elements_by_type(31,2,[601],[1,3,2])
+    A.mesh.add_elements_by_type(32,2,[602],[1,2,4])
+    A.mesh.add_elements_by_type(33,2,[603],[1,4,3])
+    A.mesh.add_elements_by_type(34,2,[604],[5,7,6])
+    A.mesh.add_elements_by_type(35,3,[605],[5,6,4,2])
+    A.mesh.add_elements_by_type(36,3,[606],[5,2,3,7])
+    A.mesh.add_elements_by_type(37,3,[607],[6,7,3,4])
+    A.mesh.add_elements_by_type(11,4,[501],[1,2,3,4])
+    A.mesh.add_elements_by_type(11,6,[502],[5,6,7,2,4,3])
+    A.mesh.generate(3)
+    A.option("Mesh.PartitionCreateTopology",1)
+end
+
+@testset "mixed linear families partition declared BRep" begin
+    try
+        # Hex8 + Pyr5 over Quad4 and Tri3 surfaces, with a declared Curve
+        # border on one Quad4 side and a Quad4 partition interface.
+        mixed_fixture!();original=A.mesh.get_elements()
+        A.option("Mesh.PartitionCreateGhostCells",1)
+        A.mesh.partition(2,[601:609...,701:704...,801,802,805,806,501,502],
+            Int32[1,1,1,1,1,2,2,2,2,1,1,1,1,1,1,1,1,1,2])
+        @test A.model.get_number_of_partitions()==2
+        surface_children=Dict(s=>only(tag for (dim,tag) in A.model.get_entities()
+            if dim==2 && A.model.get_parent(2,tag)==(2,s)) for s in 31:39)
+        curve_children=Dict(c=>child(1,c) for c in 41:44)
+        point_children=Dict(p=>child(0,p) for p in (1,2,5,6))
+        interface=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==2 && A.model.get_parent(2,tag)==(3,11))
+        region1=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==3 && A.model.get_parent(3,tag)==(3,11) && A.model.get_partitions(3,tag)==[1])
+        region2=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==3 && A.model.get_parent(3,tag)==(3,11) && A.model.get_partitions(3,tag)==[2])
+        @test A.model.get_partitions(2,interface)==[1,2]
+        @test family(2,interface,3)==(UInt64[807],reshape(UInt64[5,6,7,8],4,1))
+        @test isempty(family(2,interface,2)[1])
+        # The interface border binds declared Curve 43 (shared by Quad4 and
+        # Tri3 carriers) and three generated seams.
+        interface_curves=Set(abs.(last.(A.model.get_boundary([(2,interface)],false,true,false))))
+        @test curve_children[43] in interface_curves && length(interface_curves)==4
+        seams=setdiff(interface_curves,[curve_children[43]])
+        @test Set(A.model.get_parent.(1,collect(seams)))==Set([(2,33),(2,34),(2,35)])
+        @test all(A.model.get_partitions(1,seam)==[1,2] for seam in seams)
+        @test Set(A.model.get_boundary([(3,region1)],false,true,false))==
+            Set((2,surface_children[s]) for s in 31:35) ∪ Set([(2,interface)])
+        @test Set(A.model.get_boundary([(3,region2)],false,true,false))==
+            Set((2,surface_children[s]) for s in 36:39) ∪ Set([(2,-interface)])
+        @test Set(A.model.get_boundary([(2,surface_children[32])],false,true,false))==
+            Set([(1,curve_children[41]),(1,curve_children[42]),
+                 (1,curve_children[43]),(1,curve_children[44])])
+        @test A.model.get_boundary([(2,surface_children[31])],false,true,false)==
+            [(1,-curve_children[41])]
+        @test A.model.get_boundary([(2,surface_children[36])],false,true,false)==
+            [(1,-curve_children[43])]
+        @test A.model.get_partitions(1,curve_children[43])==[1,2]
+        @test A.model.get_partitions(1,curve_children[41])==[1]
+        @test A.model.get_partitions(0,point_children[5])==[1,2]
+        @test A.model.get_partitions(0,point_children[1])==[1]
+        @test Set(A.model.get_boundary([(1,curve_children[43])],false,true,false))==
+            Set([(0,point_children[6]),(0,-point_children[5])])
+        @test closed_mixed_region(region1) && closed_mixed_region(region2)
+        for (tag,uid,edge) in ((41,701,[1,2]),(42,702,[2,6]),(43,703,[6,5]),(44,704,[5,1]))
+            ids,nodes=family(1,curve_children[tag],1)
+            @test ids==UInt64[uid] && Tuple(vec(nodes))==Tuple(edge)
+        end
+        for (point,uid,node) in ((1,801,1),(2,802,2),(5,805,5),(6,806,6))
+            ids,nodes=family(0,point_children[point],15)
+            @test ids==UInt64[uid] && vec(nodes)==UInt64[node]
+        end
+        @test A.model.get_entities_for_physical_group(2,220)==[32,surface_children[32]]
+        ghost1=only(tag for (tag,part) in A.mesh.get().partition_data.ghost_entities if part==1)
+        ghost2=only(tag for (tag,part) in A.mesh.get().partition_data.ghost_entities if part==2)
+        @test A.mesh.get_ghost_elements(3,ghost1)==(UInt64[502],Int32[2])
+        @test A.mesh.get_ghost_elements(3,ghost2)==(UInt64[501],Int32[1])
+        owned=A.mesh.get()
+        @test Tessella.validate(owned).ok
+        mktempdir() do directory
+            for binary in (false,true)
+                path=joinpath(directory,"mixed-$(binary).msh")
+                E.write_mixed_msh(path,owned;version=4.1,binary)
+                imported=E.read_mixed_msh(path)
+                @test records(imported)==records(owned)
+                @test partition_records(imported)==partition_records(owned)
+            end
+            A.option("Mesh.MshFileVersion",4.1);A.option("Mesh.Binary",0)
+            A.option("Mesh.SaveAll",1)
+            path=joinpath(directory,"public.msh");A.write(path)
+            A.model.add("mixed roundtrip");A.open(path)
+            @test family(2,interface,3)==(UInt64[807],reshape(UInt64[5,6,7,8],4,1))
+            @test Set(A.model.get_boundary([(3,region2)],false,true,false))==
+                Set((2,surface_children[s]) for s in 36:39) ∪ Set([(2,-interface)])
+            @test closed_mixed_region(region1) && closed_mixed_region(region2)
+            A.model.set_current("mixed hex pyr")
+        end
+        A.mesh.unpartition()
+        @test A.mesh.get_elements()==original
+        @test A.model.get_entities()==[(0,1),(0,2),(0,5),(0,6),
+            (1,41),(1,42),(1,43),(1,44),(2,31),(2,32),(2,33),(2,34),(2,35),
+            (2,36),(2,37),(2,38),(2,39),(3,11)]
+        @test A.model.get_boundary([(2,32)],false,true,false)==[(1,41),(1,42),(1,43),(1,44)]
+        # Tet4 + Prism6 share a Tri3 face: a Tri3 interface between mixed
+        # volume families, with Tri3 and Quad4 outer surfaces.
+        prism_fixture!();original=A.mesh.get_elements()
+        A.option("Mesh.PartitionCreateGhostCells",1)
+        A.mesh.partition(2,[601:607...,501,502],Int32[1,1,1,2,2,2,2,1,2])
+        @test A.model.get_number_of_partitions()==2
+        interface=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==2 && A.model.get_parent(2,tag)==(3,11))
+        @test A.model.get_partitions(2,interface)==[1,2]
+        @test family(2,interface,2)==(UInt64[608],reshape(UInt64[4,2,3],3,1))
+        @test isempty(family(2,interface,3)[1])
+        interface_curves=Set(abs.(last.(A.model.get_boundary([(2,interface)],false,true,false))))
+        @test length(interface_curves)==3
+        @test Set(A.model.get_parent.(1,collect(interface_curves)))==
+            Set([(2,31),(2,32),(2,33)])
+        @test all(A.model.get_partitions(1,seam)==[1,2] for seam in interface_curves)
+        region1=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==3 && A.model.get_parent(3,tag)==(3,11) && A.model.get_partitions(3,tag)==[1])
+        region2=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==3 && A.model.get_parent(3,tag)==(3,11) && A.model.get_partitions(3,tag)==[2])
+        surface_children=Dict(s=>only(tag for (dim,tag) in A.model.get_entities()
+            if dim==2 && A.model.get_parent(2,tag)==(2,s)) for s in 31:37)
+        @test Set(A.model.get_boundary([(3,region1)],false,true,false))==
+            Set((2,surface_children[s]) for s in 31:33) ∪ Set([(2,interface)])
+        @test Set(A.model.get_boundary([(3,region2)],false,true,false))==
+            Set((2,surface_children[s]) for s in 34:37) ∪ Set([(2,-interface)])
+        @test closed_mixed_region(region1) && closed_mixed_region(region2)
+        owned=A.mesh.get()
+        @test Tessella.validate(owned).ok
+        A.mesh.unpartition()
+        @test A.mesh.get_elements()==original
+        @test A.model.get_entities()==[(2,31),(2,32),(2,33),(2,34),(2,35),(2,36),(2,37),(3,11)]
+    finally
+        A.finalize()
+    end
+end
+
+@testset "mixed family topology violations reject atomically" begin
+    try
+        # A reversed Hex8 fails the positive-volume certificate.
+        mixed_fixture!(hex_nodes=[1,4,3,2,5,8,7,6])
+        before=snapshot()
+        caught=try
+            A.mesh.partition(2,[601:609...,701:704...,801,802,805,806,501,502],
+                Int32[1,1,1,1,1,2,2,2,2,1,1,1,1,1,1,1,1,1,2]);nothing
+        catch error;error end
+        @test caught isa ArgumentError &&
+            occursin("positive oriented volume cells",sprint(showerror,caught))
+        @test snapshot()==before
+        # A duplicated Quad4 support is a repeated Surface cell role.
+        mixed_fixture!(extra_quad=[1,2,3,4])
+        before=snapshot()
+        caught=try
+            A.mesh.partition(2,[601:610...,701:704...,801,802,805,806,501,502],
+                Int32[1,1,1,1,1,2,2,2,2,1,1,1,1,1,1,1,1,1,1,2]);nothing
+        catch error;error end
+        @test caught isa ArgumentError &&
+            occursin("repeats a Surface cell support",sprint(showerror,caught))
+        @test snapshot()==before
+        # A Region boundary omitting a carried Quad4 leaves facets uncovered.
+        mixed_fixture!(region_bounds=[31,32,33,34,35,36,37,38])
+        before=snapshot()
+        caught=try
+            A.mesh.partition(2,[601:609...,701:704...,801,802,805,806,501,502],
+                Int32[1,1,1,1,1,2,2,2,2,1,1,1,1,1,1,1,1,1,2]);nothing
+        catch error;error end
+        @test caught isa ArgumentError &&
+            occursin("omits Region facets",sprint(showerror,caught))
+        @test snapshot()==before
+        # A Prism6 wound backwards is equally rejected before any mutation.
+        A.finalize();A.initialize();A.model.add("bad prism")
+        A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+        for tag in 31:37;A.model.add_discrete_entity(2,tag);end
+        A.model.add_discrete_entity(3,11,[31,32,33,34,35,36,37])
+        coords=[0. 1. 0. 0. 2. 1. 1.;0. 0. 1. 0. 0. 0. 1.;0. 0. 0. 1. 0. 1. 0.]
+        A.mesh.add_nodes(3,11,1:7,vec(coords))
+        A.mesh.add_elements_by_type(31,2,[601],[1,3,2])
+        A.mesh.add_elements_by_type(32,2,[602],[1,2,4])
+        A.mesh.add_elements_by_type(33,2,[603],[1,4,3])
+        A.mesh.add_elements_by_type(34,2,[604],[5,7,6])
+        A.mesh.add_elements_by_type(35,3,[605],[5,6,4,2])
+        A.mesh.add_elements_by_type(36,3,[606],[5,2,3,7])
+        A.mesh.add_elements_by_type(37,3,[607],[6,7,3,4])
+        A.mesh.add_elements_by_type(11,4,[501],[1,2,3,4])
+        A.mesh.add_elements_by_type(11,6,[502],[5,7,6,2,3,4])
+        A.mesh.generate(3)
+        A.option("Mesh.PartitionCreateTopology",1)
+        before=snapshot()
+        caught=try
+            A.mesh.partition(2,[601:607...,501,502],Int32[1,1,1,2,2,2,2,1,2]);nothing
+        catch error;error end
+        @test caught isa ArgumentError &&
+            occursin("positive oriented volume cells",sprint(showerror,caught))
+        @test snapshot()==before
+    finally
+        A.finalize()
+    end
+end
 end

@@ -1,18 +1,24 @@
 # Declared Curve/Point lower-BRep partition production
 
-This increment extends the lower Tri3 BRep partition producer to inputs that
+This increment extends the lower BRep partition producer to inputs that
 carry genuine pre-existing lower-dimensional BRep: actual `Line2` cells on
 discrete Curve entities and `Point15` cells on discrete Point entities,
 declared through the ordinary signed `add_discrete_entity` boundary lists.
 Earlier increments ([closed seams](partitioned_brep.md),
 [open seams](partitioned_open_seams.md)) admitted only Tri3/Tet4 meshes whose
 Surfaces had no declared Curve boundaries; this slice retains the declared
-topology instead of rejecting it.
+topology instead of rejecting it. A follow-on slice generalizes the cell
+catalog to every linear family — Quad4 surfaces beside Tri3 and
+Hex8/Prism6/Pyr5 volumes beside Tet4.
 
 ## Input certificate
 
-The snapshot admits MSH blocks of types Point15/Line2/Tri3/Tet4 only and
-requires every cell's classified parent to exist as a discrete entity.
+The snapshot admits linear MSH blocks only — Point15, Line2, Tri3, Quad4,
+Tet4, Hex8, Prism6 and Pyr5 — and requires every cell's classified parent
+to exist as a discrete entity. Surface and volume facet/edge cycles come
+from the canonical `MeshEntityTopology` outward tables
+(`_simplex_edge_patterns`, `_simplex_face_patterns`), and every volume cell
+must carry positive signed volume under `_volume_cell_signed_volume`.
 Certification is atomic — the model and cache are untouched on failure:
 
 - Each declared Curve must be one nonbranching directed chain of its actual
@@ -42,8 +48,9 @@ rows. Original cells keep their UIDs and are emitted once under the child
 owner. Child Curve boundaries bind the corresponding Point children with the
 declared signs; child Surface boundaries bind the corresponding Curve
 children signed by actual border orientation; declared Curve edges on an
-interface border require actual lower-Tri3 carriers on both partition sides
-and stay bound to the interface child. Shared nodes reclassify to the lowest
+interface border require actual lower Surface-cell carriers on both partition
+sides and stay bound to the interface child. Shared nodes reclassify to the
+lowest
 actual incident dimension, so curve-end vertices owned by Points classify to
 the Point children. No coordinates or sorted XYZ are used to infer entity
 ownership or cell identity, and no Point roles are manufactured without an
@@ -59,19 +66,32 @@ certificate and oriented `get_boundary` parity holds after `open`/`merge`;
 unpartition restores the original entities, cells and declared signed
 boundaries.
 
+Each connected interface component produces one dim-2 entity carrying a
+Tri3 and/or Quad4 block per its facet types, wound to the primary partition
+side, so Hex↔Pyramid interfaces emit Quad4 cells and Tet↔Prism interfaces
+emit Tri3 cells. Generated seams group by the adjacent original Surface
+parent and partition membership, then chain nonbranchingly per the open-seam
+rules; a declared Curve carrier on an interface border binds the shared
+Curve child instead.
+
 ## Guards and scope
 
-Mixed or high-order cells, periodic or parametric topology, already
-partitioned data, seam branches/triple junctions, coincident original/new
-Tri3 support roles and actual parallel partition algorithms remain guarded
-or open. `generate` always materializes a vertex node plus Point15 cell for
-every dim-0 entity, so a declared Point without a carrier is reachable only
-through non-generated models (imports or direct model edits); the certificate
-rejects it atomically either way.
+High-order cells, periodic or parametric topology, already partitioned
+data, seam branches/triple junctions, coincident original/interface support
+roles and actual parallel partition algorithms remain guarded or open.
+Bare meshes without lower cells still route to the Tet4-only producer and
+bare non-Tet4 volume meshes remain unsupported. `generate` always
+materializes a vertex node plus Point15 cell for every dim-0 entity, so a
+declared Point without a carrier is reachable only through non-generated
+models (imports or direct model edits); the certificate rejects it
+atomically either way.
 
 The qualification uses two Tets, six exterior Tri3 on six Surfaces, nine
 declared open Curves and five declared Points (shared and local), plus a
-closed declared Curve bounding a partition interface. Checks cover child
+closed declared Curve bounding a partition interface; a Hex8+Pyr5 fixture
+over five Quad4 and four Tri3 surfaces with a declared Curve/Point border
+on one Quad4 side (Quad4 interface); and a Tet4+Prism6 fixture sharing a
+Tri3 face across the two volume families (Tri3 interface). Checks cover child
 parents/partitions, signed Curve→Point and Surface→Curve closures, interface
 rim curves, original cell/node UIDs, physical groups, ghost records,
 ASCII/binary MSH4 and public `write`/`open` round-trips, `unpartition`, and

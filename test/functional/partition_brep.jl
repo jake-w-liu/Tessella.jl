@@ -88,3 +88,40 @@ end
         A.finalize()
     end
 end
+
+@testset "Mixed linear family BRep partition" begin
+    A=Tessella.API
+    try
+        # Tet4 + Prism6 share a Tri3 face inside one declared Region; the
+        # partition interface is a Tri3 cell between Quad4 lateral surfaces.
+        A.finalize();A.initialize();A.model.add("mixed partition")
+        A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+        for tag in 31:37;A.model.add_discrete_entity(2,tag);end
+        A.model.add_discrete_entity(3,11,[31,32,33,34,35,36,37])
+        coordinates=[0. 1. 0. 0. 2. 1. 1.;0. 0. 1. 0. 0. 0. 1.;0. 0. 0. 1. 0. 1. 0.]
+        A.mesh.add_nodes(3,11,1:7,vec(coordinates))
+        A.mesh.add_elements_by_type(31,2,[601],[1,3,2])
+        A.mesh.add_elements_by_type(32,2,[602],[1,2,4])
+        A.mesh.add_elements_by_type(33,2,[603],[1,4,3])
+        A.mesh.add_elements_by_type(34,2,[604],[5,7,6])
+        A.mesh.add_elements_by_type(35,3,[605],[5,6,4,2])
+        A.mesh.add_elements_by_type(36,3,[606],[5,2,3,7])
+        A.mesh.add_elements_by_type(37,3,[607],[6,7,3,4])
+        A.mesh.add_elements_by_type(11,4,[501],[1,2,3,4])
+        A.mesh.add_elements_by_type(11,6,[502],[5,6,7,2,4,3])
+        A.mesh.generate(3);A.option("Mesh.PartitionCreateTopology",1)
+        A.mesh.partition(2,[601:607...,501,502],[1,1,1,2,2,2,2,1,2])
+        interface=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==2 && A.model.get_parent(2,tag)==(3,11))
+        types,ids,nodes=A.mesh.get_elements(2,interface)
+        @test A.model.get_number_of_partitions()==2 &&
+            A.model.get_partitions(2,interface)==[1,2]
+        @test types==Int32[2] && only(ids)==[608] && vec(only(nodes))==[4,2,3]
+        @test length(A.model.get_entities(1))==3 &&
+            all(A.model.get_partitions(1,seam)==[1,2] for seam in 1:3)
+        A.mesh.unpartition()
+        @test A.model.get_entities()==[(2,31),(2,32),(2,33),(2,34),(2,35),(2,36),(2,37),(3,11)]
+    finally
+        A.finalize()
+    end
+end
