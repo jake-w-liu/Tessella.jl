@@ -161,6 +161,36 @@ Julia1.12.7 and1.13.1, actual exit0, with `brep_sphere_smoke.jl` added. CAD04
 remains open: general curved trims, periodic/general NURBS topology, nonlinear
 UV charts and the analytic Face/Curve registry are still unimplemented.
 
+### STEP rim-certified CYLINDRICAL_SURFACE shells verified (2026-10-12)
+
+Devin landed the second CAD04 slice in `BRep.jl`. A three-face closed shell —
+one `CYLINDRICAL_SURFACE` lateral face plus two `PLANE` caps — imports as a
+full cylinder through the new `_step_face_edge_bounds` inventory, which
+collects each bound's oriented edge vertices and innermost curve record
+through `SEAM_CURVE`-style wrappers (`_step_oriented_edge` now also returns
+the edge's curve entity). The certificate requires exactly two closed rim
+`CIRCLE`s centred on the cylinder axis with matching radius and axial normal,
+optional open seam segments parallel to the axis, every lateral vertex on the
+surface on a rim, and each cap binding only closed circles of a single rim
+with its `PLANE` containing the rim centre under an axial normal; caps must
+cover both rims. `_chain_ring` now admits sub-three-edge loops only when
+every edge is closed — the single-circle cap bound — while open chains keep
+the previous minimum. Partial arcs, off-axis/wrong-radius circles, off-circle
+vertices, non-axial seams, cap planes missing their rim and unclosed rim sets
+reject as malformed or trimmed; other shapes fall through to the existing
+explicit blockers. Emission uses the shared `cylinder_surface` boundary plus
+unit-factor scaling and validated fill.
+
+Focused `test/geometry/brep_step_cylinder_functional_test.jl` passes30/30 on
+the new hand-written `test/fixtures/brep_occ_cylinder.step` (axial seam plus
+shared rim circles): validated boundary and bounding box, positive outward
+signed volume against πR²H, filled tets all positive with volume inside10%,
+metre-context scaling, and eight rejection shapes. Sphere22, unit43,
+nested63 and mixed48 regressions pass; the ordinary default suite is
+**243/243 on both** Julia1.12.7 and1.13.1, actual exit0, with
+`brep_cylinder_smoke.jl` added. CAD04 remains open for curved trims, NURBS
+topology, nonlinear UV charts and the analytic registry.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

@@ -7,9 +7,11 @@ torus are converted to Tessella surfaces and filled. Closed-shell
 `MANIFOLD_SOLID_BREP`/`FACETED_BREP`/`BREP_WITH_VOIDS` topology bounded by
 planar faces over straight edges imports as the exact polygonal boundary; a
 single unbounded `TOROIDAL_SURFACE` face imports as a parametric torus
-boundary and a single `SPHERICAL_SURFACE` face whose boundary loops collapse
-onto the two poles imports as a full sphere. IGES solids bounded by trimmed
-plane surfaces over line edges
+boundary, a single `SPHERICAL_SURFACE` face whose boundary loops collapse
+onto the two poles imports as a full sphere, and a three-face shell whose
+`CYLINDRICAL_SURFACE` lateral face binds two certified rim circles with
+matching `PLANE` caps imports as a full cylinder. IGES solids bounded by
+trimmed plane surfaces over line edges
 (144→142/141→102/110 or the 186/514/510/508/504/502 MSBO chain) and IGES
 160/198 tori take the same paths. NURBS curves and surfaces
 (STEP `B_SPLINE_*` / IGES 126/128) import as [`NURBSCurve`](@ref) /
@@ -328,9 +330,11 @@ Import one classified STEP solid: a synthetic axis-aligned eight-corner point
 block, `SPHERE`, `RIGHT_CIRCULAR_CYLINDER`, `RIGHT_CIRCULAR_CONE`,
 `TOROIDAL_SURFACE`, or a `MANIFOLD_SOLID_BREP`/`FACETED_BREP`/`BREP_WITH_VOIDS`
 closed shell bounded by planar faces over straight edges (a single unbounded
-`TOROIDAL_SURFACE` face imports as a full torus and a single
+`TOROIDAL_SURFACE` face imports as a full torus, a single
 `SPHERICAL_SURFACE` face whose boundary vertices are only the two poles
-imports as a full sphere). By default the
+imports as a full sphere, and a three-face `CYLINDRICAL_SURFACE`-plus-caps
+shell whose rim circles are certified closed imports as a full cylinder).
+By default the
 classified boundary is tetrahedralized; `fill=false` returns its validated
 closed triangle surface. Multiple explicitly rooted independent solids return a
 classified `MixedMesh`, retaining one discrete closed-shell Surface and Region
@@ -544,12 +548,14 @@ function _step_oriented_edge(entities,oe,curvekinds,caller)
         "$caller: EDGE_CURVE #$(ec.id) has unresolvable vertex geometry"))
     curve=_deref_entity(entities,ec.args[4])
     straight=_step_straight_edge(entities,curve,0,curvekinds)
-    return (eflag ? (v1,v2) : (v2,v1)),straight
+    return (eflag ? (v1,v2) : (v2,v1)),straight,curve
 end
 
 function _chain_ring(edges,caller)
-    length(edges)>=3 || throw(ArgumentError(
-        "$caller: face boundary loop has fewer than three edges"))
+    if length(edges)<3
+        (isempty(edges) || !all(e->e[1]==e[2],edges)) && throw(ArgumentError(
+            "$caller: face boundary loop has fewer than three edges"))
+    end
     for i in 1:length(edges)-1
         edges[i][2]==edges[i+1][1] || throw(ArgumentError(
             "$caller: face boundary edges do not form an ordered closed chain"))
@@ -592,7 +598,7 @@ function _step_loop_ring(entities,loop,curvekinds,caller)
             oe=_deref_entity(entities,r)
             (oe!==nothing && oe.kind=="ORIENTED_EDGE") || throw(ArgumentError(
                 "$caller: EDGE_LOOP #$(loop.id) member is not an ORIENTED_EDGE"))
-            e,st=_step_oriented_edge(entities,oe,curvekinds,caller)
+            e,st,_=_step_oriented_edge(entities,oe,curvekinds,caller)
             straight &= st
             push!(edges,e)
         end
@@ -805,6 +811,264 @@ function _step_sphere_cover(rings,center,z,R)
         end
     end
     return seen_south && seen_north
+end
+
+function _step_cylinder_params(entities,surf,caller)
+    length(surf.args)>=3 || throw(ArgumentError(
+        "$caller: CYLINDRICAL_SURFACE #$(surf.id) is truncated"))
+    R=Float64(surf.args[end])
+    (isfinite(R) && R>0) || throw(ArgumentError(
+        "$caller: CYLINDRICAL_SURFACE #$(surf.id) radius must be positive"))
+    center=(0.0,0.0,0.0); z=(0.0,0.0,1.0)
+    plcref=_first_ref(surf.args)
+    if plcref!==nothing
+        plc=_deref_entity(entities,plcref)
+        if plc!==nothing && plc.kind=="AXIS2_PLACEMENT_3D"
+            p=_deref_point(entities,_first_ref(plc.args))
+            p===nothing || (center=p)
+            refs=[a for a in plc.args if a isa Tuple && a[1]===:ref]
+            if length(refs)>=2
+                d=_deref_direction(entities,refs[2]); d===nothing || (z=d)
+            end
+        end
+    end
+    all(isfinite,center) || throw(ArgumentError(
+        "$caller: CYLINDRICAL_SURFACE #$(surf.id) has a non-finite center"))
+    return center,_brep_vunit(z,caller),R
+end
+
+function _step_plane_frame(entities,surf,caller)
+    plcref=_first_ref(surf.args)
+    plcref===nothing && throw(ArgumentError(
+        "$caller: PLANE #$(surf.id) has no placement"))
+    p0=_deref_point(entities,plcref)
+    p0===nothing && throw(ArgumentError(
+        "$caller: PLANE #$(surf.id) has no location point"))
+    z=_deref_direction(entities,plcref)
+    z===nothing && throw(ArgumentError(
+        "$caller: PLANE #$(surf.id) has no axis direction"))
+    all(isfinite,p0) || throw(ArgumentError(
+        "$caller: PLANE #$(surf.id) has a non-finite location"))
+    return p0,_brep_vunit(z,caller)
+end
+
+# Resolve an edge geometry record through SEAM_CURVE/SURFACE_CURVE-style
+# wrappers to its innermost curve entity, mirroring _step_straight_edge.
+function _step_curve_base(entities,ent,depth)
+    ent===nothing && return nothing
+    ent.kind=="LINE" && return ent
+    if depth<8 && ent.kind in _STEP_BREP_WRAP_KINDS
+        return _step_curve_base(entities,
+            _deref_entity(entities,_first_ref(ent.args)),depth+1)
+    end
+    return ent
+end
+
+# Per-bound edge inventory for curved-face certificates: every bound must be
+# an EDGE_LOOP over ORIENTED_EDGEs; each edge yields its oriented endpoint
+# vertices and innermost curve record.
+function _step_face_edge_bounds(entities,fe,curvekinds,caller)
+    i=_skip_name(fe.args)
+    bounds=fe.args[i]
+    bounds isa Vector || throw(ArgumentError(
+        "$caller: $(fe.kind) #$(fe.id) boundary list is malformed"))
+    isempty(bounds) && throw(ArgumentError(
+        "$caller: $(fe.kind) #$(fe.id) has no face boundaries"))
+    out=Tuple{NTuple{3,Float64},NTuple{3,Float64},Union{Nothing,StepEntity}}[]
+    for bref in bounds
+        be=_deref_entity(entities,bref)
+        (be!==nothing && be.kind in _STEP_BREP_BOUND_KINDS) || throw(ArgumentError(
+            "$caller: $(fe.kind) #$(fe.id) boundary is not a FACE_BOUND/FACE_OUTER_BOUND"))
+        loop=_deref_entity(entities,be.args[2])
+        (loop!==nothing && loop.kind=="EDGE_LOOP") || throw(ArgumentError(
+            "$caller: curved-face certificate requires EDGE_LOOP bounds; saw "*
+            "$(loop===nothing ? "a missing loop" : loop.kind)"))
+        j=_skip_name(loop.args)
+        refs=loop.args[j]
+        refs isa Vector || throw(ArgumentError(
+            "$caller: EDGE_LOOP #$(loop.id) member list is malformed"))
+        for r in refs
+            oe=_deref_entity(entities,r)
+            (oe!==nothing && oe.kind=="ORIENTED_EDGE") || throw(ArgumentError(
+                "$caller: EDGE_LOOP #$(loop.id) member is not an ORIENTED_EDGE"))
+            (v1,v2),_,curve=_step_oriented_edge(entities,oe,curvekinds,caller)
+            base=_step_curve_base(entities,curve,0)
+            base===nothing && throw(ArgumentError(
+                "$caller: EDGE_CURVE geometry of ORIENTED_EDGE #$(oe.id) is unresolvable"))
+            push!(out,(v1,v2,base))
+        end
+    end
+    return out
+end
+
+function _step_circle_frame(entities,ent,caller)
+    length(ent.args)>=3 || throw(ArgumentError(
+        "$caller: CIRCLE #$(ent.id) is truncated"))
+    r=Float64(ent.args[end])
+    (isfinite(r) && r>0) || throw(ArgumentError(
+        "$caller: CIRCLE #$(ent.id) radius must be positive"))
+    center=(0.0,0.0,0.0); z=(0.0,0.0,1.0)
+    plcref=_first_ref(ent.args)
+    if plcref!==nothing
+        plc=_deref_entity(entities,plcref)
+        if plc!==nothing && plc.kind=="AXIS2_PLACEMENT_3D"
+            p=_deref_point(entities,_first_ref(plc.args))
+            p===nothing || (center=p)
+            refs=[a for a in plc.args if a isa Tuple && a[1]===:ref]
+            if length(refs)>=2
+                d=_deref_direction(entities,refs[2]); d===nothing || (z=d)
+            end
+        end
+    end
+    all(isfinite,center) || throw(ArgumentError(
+        "$caller: CIRCLE #$(ent.id) has a non-finite center"))
+    return center,_brep_vunit(z,caller),r
+end
+
+function _brep_axis_dist(p,c,z)
+    d=_brep_vsub(p,c);t=_brep_vdot(d,z)
+    w=(d[1]-t*z[1],d[2]-t*z[2],d[3]-t*z[3])
+    return sqrt(_brep_vdot(w,w))
+end
+
+# A 3-face closed shell — one CYLINDRICAL_SURFACE lateral face and two PLANE
+# caps — covers a full finite cylinder only when the lateral bounds are rim
+# circles (closed EDGE_CURVEs whose CIRCLE records sit on the cylinder axis
+# with matching radius and perpendicular planes) joined by optional axial
+# seam segments, and each cap bounds closed circles sharing one rim. Anything
+# else is a genuine trim and stays unsupported. Returns nothing when the face
+# inventory is not this shape; throws on certified mismatches.
+function _step_cylinder_shell(entities,faces,curvekinds,caller)
+    length(faces)==3 || return nothing
+    cyl_index=0;plane_indices=Int[]
+    for (i,face) in enumerate(faces)
+        face.surf===nothing && return nothing
+        if face.surf.kind=="CYLINDRICAL_SURFACE"
+            cyl_index==0 || return nothing; cyl_index=i
+        elseif face.surf.kind=="PLANE"
+            push!(plane_indices,i)
+        else
+            return nothing
+        end
+    end
+    (cyl_index!=0 && length(plane_indices)==2) || return nothing
+    all(f->f.rings!==nothing,faces) || return nothing
+    cyl_face=faces[cyl_index]
+    c0,z,R=_step_cylinder_params(entities,cyl_face.surf,caller)
+    tol=1e-9*max(R,1.0);atol=1e-9
+
+    fe=_deref_entity(entities,(:ref,cyl_face.id))
+    fe===nothing && throw(ArgumentError(
+        "$caller: cylindrical face #$(cyl_face.id) record is missing"))
+    edges=_step_face_edge_bounds(entities,fe,curvekinds,caller)
+
+    # Rim circles: closed EDGE_CURVEs over CIRCLEs centred on the axis with
+    # radius R and axial normal. Axial seams: open segments parallel to the
+    # axis joining one rim point to the other.
+    qc=NTuple{3,Float64}[]
+    for (v1,v2,base) in edges
+        if base.kind=="CIRCLE"
+            v1==v2 || throw(ArgumentError(
+                "$caller: CIRCLE boundary edge of cylindrical face #"*
+                "$(cyl_face.id) is a partial arc — trimmed cylinders unsupported"))
+            center,cn,cr=_step_circle_frame(entities,base,caller)
+            abs(cr-R)<=tol || throw(ArgumentError(
+                "$caller: rim CIRCLE #$(base.id) radius does not match the "*
+                "cylindrical surface"))
+            abs(_brep_vdot(cn,z))>=1.0-atol || throw(ArgumentError(
+                "$caller: rim CIRCLE #$(base.id) is not perpendicular to the "*
+                "cylinder axis"))
+            _brep_axis_dist(center,c0,z)<=tol || throw(ArgumentError(
+                "$caller: rim CIRCLE #$(base.id) center is off the cylinder axis"))
+            abs(sqrt(_brep_vdot(_brep_vsub(v1,center),_brep_vsub(v1,center)))-cr)<=tol ||
+                throw(ArgumentError(
+                    "$caller: rim CIRCLE #$(base.id) vertex is off the circle"))
+            all(q->sqrt(_brep_vdot(_brep_vsub(q,center),_brep_vsub(q,center)))>tol,qc) &&
+                push!(qc,center)
+        elseif base.kind=="LINE"
+            if v1==v2
+                throw(ArgumentError(
+                    "$caller: seam LINE edge of cylindrical face #"*
+                    "$(cyl_face.id) is closed — expected an axial connector"))
+            end
+            d=_brep_vsub(v2,v1)
+            abs(_brep_vdot(_brep_vunit(d,caller),z))>=1.0-atol || throw(ArgumentError(
+                "$caller: seam edge of cylindrical face #$(cyl_face.id) is "*
+                "not parallel to the cylinder axis"))
+        else
+            push!(curvekinds,base.kind)
+            return nothing
+        end
+    end
+    length(qc)==2 || throw(ArgumentError(
+        "$caller: cylindrical face #$(cyl_face.id) does not bound exactly two "*
+        "rim circles — trimmed cylinders unsupported"))
+
+    # Every lateral vertex lies on the surface on one of the two rims.
+    vertices=NTuple{3,Float64}[]
+    for ring in cyl_face.rings, p in ring
+        all(q->q!=p,vertices) && push!(vertices,p)
+    end
+    for p in vertices
+        abs(_brep_axis_dist(p,c0,z)-R)<=tol || throw(ArgumentError(
+            "$caller: cylindrical face #$(cyl_face.id) boundary vertex is "*
+            "off the cylindrical surface"))
+        any(q->abs(_brep_vdot(_brep_vsub(p,q),z))<=tol,qc) || throw(ArgumentError(
+            "$caller: cylindrical face #$(cyl_face.id) boundary vertex is off "*
+            "both rim circles"))
+    end
+
+    # Caps: each bounds only closed circles sharing one rim, and its PLANE
+    # contains that rim's centre with an axial normal.
+    covered=falses(2)
+    for pi in plane_indices
+        cap=faces[pi]
+        pfe=_deref_entity(entities,(:ref,cap.id))
+        pfe===nothing && throw(ArgumentError(
+            "$caller: cap face #$(cap.id) record is missing"))
+        cedges=_step_face_edge_bounds(entities,pfe,curvekinds,caller)
+        rim=0
+        for (v1,v2,base) in cedges
+            base.kind=="CIRCLE" || (push!(curvekinds,base.kind); return nothing)
+            v1==v2 || throw(ArgumentError(
+                "$caller: cap boundary of cylindrical shell face #$(cap.id) "*
+                "is a partial arc"))
+            center,cn,cr=_step_circle_frame(entities,base,caller)
+            j=findfirst(q->_brep_axis_dist(q,center,z)<=tol &&
+                        abs(_brep_vdot(_brep_vsub(q,center),z))<=tol,qc)
+            j===nothing && throw(ArgumentError(
+                "$caller: cap CIRCLE #$(base.id) does not close a cylinder rim"))
+            rim==0 || rim==j || throw(ArgumentError(
+                "$caller: cap of cylindrical shell face #$(cap.id) bounds "*
+                "both rim planes"))
+            rim=j
+            abs(cr-R)<=tol || throw(ArgumentError(
+                "$caller: cap CIRCLE #$(base.id) radius does not match the rim"))
+            abs(_brep_vdot(cn,z))>=1.0-atol || throw(ArgumentError(
+                "$caller: cap CIRCLE #$(base.id) is not perpendicular to the "*
+                "cylinder axis"))
+            abs(sqrt(_brep_vdot(_brep_vsub(v1,center),_brep_vsub(v1,center)))-cr)<=tol ||
+                throw(ArgumentError(
+                    "$caller: cap CIRCLE #$(base.id) vertex is off the circle"))
+        end
+        rim!=0 || throw(ArgumentError(
+            "$caller: cap of cylindrical shell face #$(cap.id) bounds no rim"))
+        p0,pn=_step_plane_frame(entities,cap.surf,caller)
+        qc_i=qc[rim]
+        abs(_brep_vdot(pn,z))>=1.0-atol || throw(ArgumentError(
+            "$caller: cap PLANE #$(cap.surf.id) is not perpendicular to the "*
+            "cylinder axis"))
+        abs(_brep_vdot(_brep_vsub(qc_i,p0),pn))<=tol || throw(ArgumentError(
+            "$caller: cap PLANE #$(cap.surf.id) does not contain its rim circle"))
+        covered[rim]=true
+    end
+    all(covered) || throw(ArgumentError(
+        "$caller: cylindrical shell caps do not close both rims"))
+
+    t_lo=minimum(_brep_vdot(_brep_vsub(q,c0),z) for q in qc)
+    t_hi=maximum(_brep_vdot(_brep_vsub(q,c0),z) for q in qc)
+    base_center=(c0[1]+t_lo*z[1],c0[2]+t_lo*z[2],c0[3]+t_lo*z[3])
+    return cylinder_surface(base_center,z,R,t_hi-t_lo)
 end
 
 # Pole-free periodic torus boundary: u is the revolution angle, v the meridian
@@ -1129,6 +1393,13 @@ function _step_brep_solid(brep::StepEntity,entities,fill;factor::Float64=1.0)
             surf===nothing || push!(seen,surf.kind)
             push!(faces,(role=role,rings=rings,surf=surf,sense=sense,
                          straight=straight,id=fe.id))
+        end
+    end
+    if any(f->f.surf!==nothing && f.surf.kind=="CYLINDRICAL_SURFACE",faces)
+        cylinder=_step_cylinder_shell(entities,faces,curvekinds,caller)
+        if cylinder!==nothing
+            cylinder=_step_unit_scaled(cylinder,factor)
+            return fill ? _filled(cylinder,caller) : cylinder
         end
     end
     planar=!isempty(faces); ntorus=0; torus_face=nothing; nsphere=0; sphere_face=nothing

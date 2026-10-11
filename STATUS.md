@@ -104,6 +104,26 @@ pass; the ordinary default suite is **240/240 on both Julia1.12.7 and1.13.1**,
 actual exit0, with `brep_sphere_smoke.jl` added. CAD04 remains open (curved
 trims, NURBS topology, nonlinear UV charts, analytic registry).
 
+### STEP rim-certified CYLINDRICAL_SURFACE shells (2026-10-12)
+
+Devin landed the second CAD04 slice: a three-face closed shell of one
+`CYLINDRICAL_SURFACE` lateral face plus two `PLANE` caps imports as a full
+cylinder through a new edge-curve inventory. `_step_face_edge_bounds`
+collects each bound's oriented edge vertices and innermost curve record
+(`SEAM_CURVE`/wrapper-safe), and the certificate requires exactly two
+closed rim `CIRCLE`s centred on the cylinder axis with matching radius and
+axial normal, optional axial seam segments, lateral vertices on the surface
+on a rim, and each cap binding closed circles of one rim inside its plane —
+the cap's `PLANE` must contain the rim centre with an axial normal. Partial
+arcs, off-axis or wrong-radius circles, unclosed rims, non-axial seams and
+vertex inconsistencies reject as malformed/trimmed; `_chain_ring` now admits
+sub-three-edge loops only when every edge is closed (the cap single-circle
+bound). Focused checks pass30/30
+(`test/geometry/brep_step_cylinder_functional_test.jl` on
+`brep_occ_cylinder.step`); sphere22, unit43, nested63 and mixed48
+regressions pass; the ordinary default suite is **243/243 on both
+Julia1.12.7 and1.13.1**, actual exit0, with `brep_cylinder_smoke.jl` added.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

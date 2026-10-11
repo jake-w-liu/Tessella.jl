@@ -22,7 +22,13 @@ supported type-406 property records can accompany the geometry. A single-face
 `MANIFOLD_SOLID_BREP` on an untrimmed `TOROIDAL_SURFACE` imports as a full
 torus; a single-face shell on a `SPHERICAL_SURFACE` whose boundary loops
 collapse onto the two placement poles imports as a full sphere (boundary
-vertices off either pole mean a genuine trim and reject). Every STEP
+vertices off either pole mean a genuine trim and reject). A three-face shell
+of one `CYLINDRICAL_SURFACE` lateral face plus two `PLANE` caps imports as a
+full cylinder when the edge-curve inventory certifies it: lateral bounds hold
+only closed rim `CIRCLE`s centred on the axis with matching radius and axial
+normal plus optional axial seam segments, and each cap bounds closed circles
+sharing one rim inside its plane; partial arcs, off-axis or wrong-radius
+circles, unclosed rims and non-axial seams are genuine trims and reject. Every STEP
 solid or primitive wrapped by a unit-bearing shape representation converts by
 its declared SI or conversion-based length factor into millimetres; a solid
 shared by incompatible factors rejects as ambiguous and representations
