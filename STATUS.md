@@ -90,6 +90,20 @@ regressions pass; the ordinary default suite is **237/237 on both Julia1.12.7
 and1.13.1**, actual exit0. See `docs/step_relationship_si_units.md` and
 `test/geometry/brep_step_units_functional_test.jl`.
 
+### STEP closed-face SPHERICAL_SURFACE solids (2026-10-12)
+
+Devin landed the first CAD04 slice: a single-face closed shell on a
+`SPHERICAL_SURFACE` whose boundary loops collapse onto the two computed
+placement poles now imports as a full sphere via the shared
+`sphere_surface` boundary, unit-factor scaling and validated fill. Vertices
+off either pole mean a genuine trim and reject explicitly; multi-face
+spherical shells keep the unsupported-topology blocker. Focused checks
+pass22/22 (`test/geometry/brep_step_sphere_functional_test.jl` on the new
+`brep_occ_sphere.step` fixture); unit43, nested63 and mixed48 regressions
+pass; the ordinary default suite is **240/240 on both Julia1.12.7 and1.13.1**,
+actual exit0, with `brep_sphere_smoke.jl` added. CAD04 remains open (curved
+trims, NURBS topology, nonlinear UV charts, analytic registry).
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

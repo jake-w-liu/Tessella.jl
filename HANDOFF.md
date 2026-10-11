@@ -134,6 +134,33 @@ suite is **237/237 on both** Julia1.12.7 and1.13.1, actual exit0, with
 `brep_unit_conversion_smoke.jl` added. Derived/unsupported unit categories
 outside the three declared dimensions remain explicit blockers.
 
+### STEP closed-face SPHERICAL_SURFACE solids verified (2026-10-12)
+
+Devin landed the first CAD04 slice in `BRep.jl`. A closed shell containing a
+single `SPHERICAL_SURFACE` face now imports as a full sphere through the same
+closed-face route as the torus: `_step_sphere_params` resolves the placement
+origin, unit-normalized axis and positive radius, and `_step_sphere_cover`
+certifies the face covers the complete surface — every boundary-loop vertex
+must collapse onto the two computed poles (the OCC seam-plus-degenerate-poles
+layout) with both poles actually traversed. Certified faces take the shared
+`sphere_surface` geodesic boundary plus the usual unit-factor scaling and
+fill; a boundary vertex off either pole is a genuine trim (cap, equator or
+wavy boundary) and rejects with the explicit "trimmed SPHERICAL_SURFACE faces
+are not supported (full sphere only)" message, and multi-face spherical shells
+still fall through to the unsupported-topology blocker. Truncated records,
+non-positive radii and non-finite centers reject as malformed.
+
+Focused `test/geometry/brep_step_sphere_functional_test.jl` passes22/22 on the
+new hand-written `test/fixtures/brep_occ_sphere.step` (seam meridian plus
+degenerate pole edges): validated 128-triangle boundary on radius2.5,
+positive outward signed volume against `4πR³/3`, filled tets all positive
+with volume inside10%, placement-axis flip preserving the pole set, metre
+context scaling to2500mm, and four rejection shapes. Unit43, nested63 and
+mixed48 regressions pass; the ordinary default suite is **240/240 on both**
+Julia1.12.7 and1.13.1, actual exit0, with `brep_sphere_smoke.jl` added. CAD04
+remains open: general curved trims, periodic/general NURBS topology, nonlinear
+UV charts and the analytic Face/Curve registry are still unimplemented.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

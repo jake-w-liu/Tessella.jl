@@ -7,7 +7,9 @@ torus are converted to Tessella surfaces and filled. Closed-shell
 `MANIFOLD_SOLID_BREP`/`FACETED_BREP`/`BREP_WITH_VOIDS` topology bounded by
 planar faces over straight edges imports as the exact polygonal boundary; a
 single unbounded `TOROIDAL_SURFACE` face imports as a parametric torus
-boundary. IGES solids bounded by trimmed plane surfaces over line edges
+boundary and a single `SPHERICAL_SURFACE` face whose boundary loops collapse
+onto the two poles imports as a full sphere. IGES solids bounded by trimmed
+plane surfaces over line edges
 (144→142/141→102/110 or the 186/514/510/508/504/502 MSBO chain) and IGES
 160/198 tori take the same paths. NURBS curves and surfaces
 (STEP `B_SPLINE_*` / IGES 126/128) import as [`NURBSCurve`](@ref) /
@@ -326,7 +328,9 @@ Import one classified STEP solid: a synthetic axis-aligned eight-corner point
 block, `SPHERE`, `RIGHT_CIRCULAR_CYLINDER`, `RIGHT_CIRCULAR_CONE`,
 `TOROIDAL_SURFACE`, or a `MANIFOLD_SOLID_BREP`/`FACETED_BREP`/`BREP_WITH_VOIDS`
 closed shell bounded by planar faces over straight edges (a single unbounded
-`TOROIDAL_SURFACE` face also imports as a full torus). By default the
+`TOROIDAL_SURFACE` face imports as a full torus and a single
+`SPHERICAL_SURFACE` face whose boundary vertices are only the two poles
+imports as a full sphere). By default the
 classified boundary is tetrahedralized; `fill=false` returns its validated
 closed triangle surface. Multiple explicitly rooted independent solids return a
 classified `MixedMesh`, retaining one discrete closed-shell Surface and Region
@@ -759,6 +763,50 @@ function _step_torus_face(entities,surf,fill,caller)
     return fill ? _filled(surface,caller) : surface
 end
 
+function _step_sphere_params(entities,surf,caller)
+    length(surf.args)>=3 || throw(ArgumentError(
+        "$caller: SPHERICAL_SURFACE #$(surf.id) is truncated"))
+    R=Float64(surf.args[end])
+    (isfinite(R) && R>0) || throw(ArgumentError(
+        "$caller: SPHERICAL_SURFACE #$(surf.id) radius must be positive"))
+    center=(0.0,0.0,0.0); z=(0.0,0.0,1.0)
+    plcref=_first_ref(surf.args)
+    if plcref!==nothing
+        plc=_deref_entity(entities,plcref)
+        if plc!==nothing && plc.kind=="AXIS2_PLACEMENT_3D"
+            p=_deref_point(entities,_first_ref(plc.args))
+            p===nothing || (center=p)
+            refs=[a for a in plc.args if a isa Tuple && a[1]===:ref]
+            if length(refs)>=2
+                d=_deref_direction(entities,refs[2]); d===nothing || (z=d)
+            end
+        end
+    end
+    all(isfinite,center) || throw(ArgumentError(
+        "$caller: SPHERICAL_SURFACE #$(surf.id) has a non-finite center"))
+    return center,_brep_vunit(z,caller),R
+end
+
+# A single SPHERICAL_SURFACE face covers the complete sphere only when every
+# boundary vertex collapses onto the two poles and at least one ring traverses
+# both — the seam-plus-degenerate-poles closed-face layout. Any non-pole
+# vertex marks a genuine trim (cap, equator, wavy boundary) which stays
+# unsupported rather than guessing at covered area.
+function _step_sphere_cover(rings,center,z,R)
+    isempty(rings) && return false
+    south=ntuple(i->center[i]-R*z[i],3);north=ntuple(i->center[i]+R*z[i],3)
+    tol=1e-9*max(R,1.0);seen_south=false;seen_north=false
+    for ring in rings
+        for point in ring
+            on_south=sum((point[i]-south[i])^2 for i in 1:3)<=tol*tol
+            on_north=sum((point[i]-north[i])^2 for i in 1:3)<=tol*tol
+            (on_south || on_north) || return false
+            seen_south |= on_south;seen_north |= on_north
+        end
+    end
+    return seen_south && seen_north
+end
+
 # Pole-free periodic torus boundary: u is the revolution angle, v the meridian
 # angle; the parametric rectangle wraps so seam vertices are shared by index.
 function _torus_surface(center,Z,X,R,r,caller)
@@ -1083,7 +1131,7 @@ function _step_brep_solid(brep::StepEntity,entities,fill;factor::Float64=1.0)
                          straight=straight,id=fe.id))
         end
     end
-    planar=!isempty(faces); ntorus=0; torus_face=nothing
+    planar=!isempty(faces); ntorus=0; torus_face=nothing; nsphere=0; sphere_face=nothing
     for face in faces
         face.rings===nothing && (planar=false; continue)
         isempty(face.rings) && (planar=false;continue)
@@ -1094,6 +1142,8 @@ function _step_brep_solid(brep::StepEntity,entities,fill;factor::Float64=1.0)
             _check_plane_face(entities,face.surf,ring,face.sense,face.id,caller)
         elseif face.surf.kind=="TOROIDAL_SURFACE"
             planar=false; ntorus+=1; torus_face=face; continue
+        elseif face.surf.kind=="SPHERICAL_SURFACE"
+            planar=false; nsphere+=1; sphere_face=face; continue
         else
             planar=false; push!(curvekinds,"face surface $(face.surf.kind)"); continue
         end
@@ -1110,8 +1160,17 @@ function _step_brep_solid(brep::StepEntity,entities,fill;factor::Float64=1.0)
         surface=_step_unit_scaled(surface,factor)
         return fill ? _filled(surface,caller) : surface
     end
+    if nsphere==1 && length(faces)==1 && sphere_face.rings!==nothing
+        center,z,R=_step_sphere_params(entities,sphere_face.surf,caller)
+        if _step_sphere_cover(sphere_face.rings,center,z,R)
+            surface=_step_unit_scaled(sphere_surface(center,R),factor)
+            return fill ? _filled(surface,caller) : surface
+        end
+    end
     ntorus==1 && length(faces)==1 && throw(ArgumentError(
         "$caller: trimmed TOROIDAL_SURFACE faces are not supported (full torus only)"))
+    nsphere==1 && length(faces)==1 && throw(ArgumentError(
+        "$caller: trimmed SPHERICAL_SURFACE faces are not supported (full sphere only)"))
     kinds=sort!(collect(union(seen,curvekinds)))
     isempty(kinds) && push!(kinds,"unrecognized topology")
     throw(ArgumentError(

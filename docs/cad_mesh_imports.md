@@ -18,7 +18,11 @@ boxes overlap. Boxes are never used to discover, split or replace source
 roots. Point-cloud box imports retain their original single-solid behavior.
 Multi-root IGES identities must be positive, odd, unique and consistent with
 the directory-entry type. Unsupported geometric entity types are rejected;
-supported type-406 property records can accompany the geometry. Every STEP
+supported type-406 property records can accompany the geometry. A single-face
+`MANIFOLD_SOLID_BREP` on an untrimmed `TOROIDAL_SURFACE` imports as a full
+torus; a single-face shell on a `SPHERICAL_SURFACE` whose boundary loops
+collapse onto the two placement poles imports as a full sphere (boundary
+vertices off either pole mean a genuine trim and reject). Every STEP
 solid or primitive wrapped by a unit-bearing shape representation converts by
 its declared SI or conversion-based length factor into millimetres; a solid
 shared by incompatible factors rejects as ambiguous and representations
