@@ -28,7 +28,8 @@ NURBS topology remains a separate implementation track.
 Supported planar STEP/IGES Faces can have one outer wire and disjoint inner
 wires. STEP uses FACE_OUTER_BOUND when present; otherwise one wire must uniquely
 contain the others. IGES144 and MSBO510 retain their literal outer/inner wire
-roles. Tessella CDT triangulates the domain without adding unbound vertices.
+roles; IGES143 preserves multiple declared boundary groups and certifies one
+unique containing outer wire. Tessella CDT triangulates the domain without adding unbound vertices.
 Crossing, touching, overlap, wrong winding, nested holes, ambiguous outer roles
 and nonplanarity reject. The existing closed-shell and positive-fill checks
 certify the result; single-wire Faces retain their previous path.
@@ -37,4 +38,9 @@ The default hole check imports a static public-OCC-exported STEP square tube
 with fill=false. Full functional checks also cover filled analytic volume 0.75
 and IGES144/510 layouts. The own POLY_LOOP STEP and MSBO fixtures test supported
 mesh-parser records; those two fixtures do not claim native CAD import parity.
-IGES143 multiple boundaries and general curved Face trimming remain unfinished.
+IGES141 admits representation types 0/1. IGES142 uses its 3-D model curve
+pointer, rather than interpreting its UV pointer as XYZ; UV-only curves reject
+until a parameter-to-model mapping is implemented. General curved Face trimming
+remains unfinished. These field meanings follow the primary
+[Boundary schema](https://occt3d.com/dev/doc/refman/html/class_i_g_e_s_geom___boundary.html)
+and [CurveOnSurface schema](https://occt3d.com/dev/doc/refman/html/class_i_g_e_s_geom___curve_on_surface.html).

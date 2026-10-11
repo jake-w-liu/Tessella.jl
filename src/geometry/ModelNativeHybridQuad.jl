@@ -31,7 +31,9 @@ struct _ModelNativeHybridPyramidProduction
 end
 
 function _model_native_hybrid_quad_plan(source_uids,source_coordinates,quads,
-                                      node_clock::UInt64,caller)
+                                      node_clock::UInt64,caller;normal_factor::Float64=0.0)
+    isfinite(normal_factor) && normal_factor>=0.0 || throw(ArgumentError(
+        "$caller: hybrid Quad normal-apex factor must be finite and nonnegative"))
     size(source_coordinates,1)==3 && size(source_coordinates,2)==length(source_uids) &&
         all(!iszero,source_uids) && allunique(source_uids) && all(isfinite,source_coordinates) &&
         node_clock>=maximum(source_uids;init=UInt64(0)) || throw(ArgumentError(
@@ -66,6 +68,22 @@ function _model_native_hybrid_quad_plan(source_uids,source_coordinates,quads,
         # Native SPoint3 uses this exact left-to-right quarter-sum operation.
         point=ntuple(axis->((source_coordinates[axis,base[1]]+source_coordinates[axis,base[2]]+
             source_coordinates[axis,base[3]]+source_coordinates[axis,base[4]])*0.25),3)
+        if normal_factor>0.0
+            a,b,c,d=map(row->Tuple(source_coordinates[:,row]),base)
+            orient3(a,b,c,d)==0 || throw(ArgumentError(
+                "$caller: hybrid normal-apex constructor requires planar Quads"))
+            u=ntuple(axis->b[axis]-a[axis],3);v=ntuple(axis->c[axis]-a[axis],3)
+            # Native normal3points normalizes this first-three-corner cross.
+            normal=(u[2]*v[3]-u[3]*v[2],-u[1]*v[3]+u[3]*v[1],u[1]*v[2]-u[2]*v[1])
+            magnitude=sqrt(normal[1]*normal[1]+normal[2]*normal[2]+normal[3]*normal[3])
+            isfinite(magnitude) && magnitude>0.0 || throw(ArgumentError(
+                "$caller: hybrid normal-apex Quad has a degenerate normal"))
+            inverse=1.0/magnitude;normal=ntuple(axis->normal[axis]*inverse,3)
+            diagonal=ntuple(axis->a[axis]-c[axis],3)
+            diameter=sqrt(diagonal[1]*diagonal[1]+diagonal[2]*diagonal[2]+diagonal[3]*diagonal[3])
+            offset=normal_factor*diameter
+            point=ntuple(axis->point[axis]+offset*normal[axis],3)
+        end
         all(isfinite,point) || throw(ArgumentError("$caller: hybrid Quad centroid is not finite"))
         coordinates[:,apex].=point;push!(tags,apex_uid)
         for side in 1:4
@@ -75,6 +93,51 @@ function _model_native_hybrid_quad_plan(source_uids,source_coordinates,quads,
     end
     return _ModelNativeHybridQuadPlan(UInt64.(source_uids),copy(source_coordinates),tags,
         coordinates,facets,births,node_clock,last)
+end
+
+# A negative option consumes actual Face winding. Restrict admission to a
+# convex shell whose literal Quad normals place all recorded births strictly
+# inside; do not repair winding or clamp an exterior apex to a different point.
+function _model_native_hybrid_normal_apex_certificate(plan,constructor,caller)
+    plan.source_uids==constructor.node_uids &&
+        isequal(plan.source_coordinates,constructor.coordinates) || throw(ArgumentError(
+        "$caller: hybrid normal-apex constructor lost its fixed actual Source"))
+    panels=vcat(constructor.triangles,constructor.quads)
+    positions=Dict(uid=>row for (row,uid) in enumerate(constructor.node_uids))
+    boundary=Set(uid for panel in panels for uid in panel.nodes)
+    coordinate(uid)=Tuple(constructor.coordinates[:,positions[uid]])
+    allunique(Tuple(plan.coordinates[:,row]) for row in axes(plan.coordinates,2)) ||
+        throw(ArgumentError("$caller: hybrid normal-apex birth aliases another constructor vertex"))
+    for panel in panels
+        triangles=length(panel.nodes)==3 ? (panel.nodes,) :
+            ((panel.nodes[1],panel.nodes[2],panel.nodes[3]),
+             (panel.nodes[1],panel.nodes[3],panel.nodes[4]))
+        for triangle in triangles
+            a,b,c=map(coordinate,triangle)
+            sides=[orient3(a,b,c,coordinate(uid)) for uid in boundary]
+            all(isfinite,sides) || throw(ArgumentError(
+                "$caller: hybrid normal-apex shell halfspaces are not finite"))
+            signs=Set(sign(side) for side in sides if side!=0)
+            length(signs)==1 || throw(ArgumentError(
+                "$caller: hybrid normal-apex constructor requires a certified convex shell"))
+            for birth in plan.births
+                side=orient3(a,b,c,birth.point)
+                isfinite(side) && side!=0 && sign(side)==only(signs) || throw(ArgumentError(
+                    "$caller: hybrid normal-apex birth is outside or on the shell boundary"))
+            end
+        end
+    end
+    return nothing
+end
+
+function _model_native_hybrid_normal_apex_fixed_certificate(plan,mesh,uids,caller)
+    positions=Dict(uid=>row for (row,uid) in enumerate(uids))
+    for birth in plan.births
+        row=get(positions,birth.apex_uid,0)
+        row>0 && isequal(Tuple(mesh.coords[:,row]),birth.point) || throw(ArgumentError(
+            "$caller: hybrid negative-factor apex lost its actual birth UID/XYZ"))
+    end
+    return nothing
 end
 
 # This final constructor consumes already-bound, relocated apex rows. The

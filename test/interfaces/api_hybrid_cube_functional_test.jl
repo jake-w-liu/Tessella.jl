@@ -96,16 +96,16 @@ function public_cells()
     return result
 end
 
-@testset "OptimizePyramids public integer option" begin
+@testset "OptimizePyramids public double option" begin
     A.initialize()
     try
         @test A.option("Mesh.OptimizePyramids")==0.0
         A.option("Mesh.OptimizePyramids",0)
         @test A.option("Mesh.OptimizePyramids")==0.0
         A.option("Mesh.OptimizePyramids",-1.7)
-        @test A.option("Mesh.OptimizePyramids")==-1.0
+        @test A.option("Mesh.OptimizePyramids")==-1.7
         @test_throws ArgumentError A.option("Mesh.OptimizePyramids",NaN)
-        @test A.option("Mesh.OptimizePyramids")==-1.0
+        @test A.option("Mesh.OptimizePyramids")==-1.7
         A.option("Mesh.OptimizePyramids",0)
     finally
         A.finalize()

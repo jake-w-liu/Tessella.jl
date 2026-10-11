@@ -7813,6 +7813,7 @@ function _geo_mesh_actual_higher(m,dim,context,caller)
         recombine_node_repositioning=working.meshing.recombine_node_repositioning,
         recombine_minimum_quality=working.meshing.recombine_minimum_quality,
         native_smoothing=working.meshing.native_smoothing,
+        optimize_pyramids=something(_geo_option_number(context,"Mesh",0,"OptimizePyramids"),0.0),
         second_order_linear=working.meshing.second_order_linear,
         transfinite_tri=working.meshing.transfinite_tri,
         lc_extend_from_boundary=working.meshing.lc_extend_from_boundary,order)

@@ -1,3 +1,23 @@
+# Default checks avoid optimizing the large production dispatchers. Compiler
+# coverage is opt-in with TESSELLA_TEST_COMPILER=optimized (see README.md).
+let mode=get(ENV,"TESSELLA_TEST_COMPILER","minimal")
+    mode in ("minimal","optimized") || error(
+        "TESSELLA_TEST_COMPILER must be minimal or optimized")
+    options=Base.JLOptions()
+    coverage_file=options.output_code_coverage==C_NULL ? "" : unsafe_string(options.output_code_coverage)
+    # Base.julia_cmd deliberately omits fixed coverage filenames in children.
+    fixed_coverage=!isempty(coverage_file) && !occursin("%p",coverage_file)
+    if mode=="minimal" && options.compile_enabled!=3 && !fixed_coverage
+        project=Base.active_project()
+        project===nothing && error("Run functional tests with --project=.")
+        command=`$(Base.julia_cmd()) --project=$(dirname(project)) --startup-file=no --check-bounds=yes --compile=min -O0 $(abspath(@__FILE__)) $ARGS`
+        println("Running small functional checks with minimal compilation.")
+        flush(stdout)
+        run(command)
+        exit(0)
+    end
+end
+
 using Test
 using LinearAlgebra
 using Tessella
@@ -22,4 +42,8 @@ include("functional/fixtures.jl")
     include("functional/cli_information.jl")
     include("functional/vtk_complete_hex.jl")
     include("functional/brep_planar_faceholes_smoke.jl")
+    include("functional/constant_metric_box.jl")
+    include("functional/constant_metric_regions.jl")
+    include("functional/pyramid_option.jl")
+    include("functional/brep_bounded143_smoke.jl")
 end

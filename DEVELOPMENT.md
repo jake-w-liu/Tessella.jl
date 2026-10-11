@@ -78,12 +78,14 @@ Run the default suite on **both Julia 1.12 and Julia 1.13** using the same final
 source. Record the runtime, effective flags and measured duration:
 
 ```sh
-julia --project=. --startup-file=no --compile=min -O0 -e 'using Pkg; Pkg.test(; julia_args=["--startup-file=no", "--check-bounds=yes", "--compile=min", "-O0"])'
+julia --project=. --startup-file=no --check-bounds=yes -e 'using Pkg; Pkg.test()'
 ```
 
 Use this compilation mode for routine functional checks. For compiler-focused
-checks, run the same assertions with normal `-O2`, omitting `--compile=min` from
-both Julia and `julia_args`. Keep functional and compiler timing receipts clear
+checks, set `TESSELLA_TEST_COMPILER=optimized` and run the same assertions with
+normal `-O2`, omitting `--compile=min` from both Julia and `julia_args`.
+Ordinary default invocation otherwise relaunches in minimal compilation before
+loading Tessella; see the exact opt-in command in `test/README.md`. Keep functional and compiler timing receipts clear
 about which mode was measured.
 
 Run additional focused regressions relevant to a change when needed. The

@@ -24,6 +24,50 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Concise default, metric grids, IGES143 and Pyramid settings (2026-10-11)
+
+Ordinary `Pkg.test()` now relaunches the small functional suite with minimal
+compilation before loading Tessella. The active project and ordinary coverage
+flags are preserved; a fixed custom coverage filename keeps its original
+invocation. Optimized compiler checks require `TESSELLA_TEST_COMPILER=optimized`.
+No external mesher or solver runs in the default suite.
+
+The combined Source passes **190/190** on both supported runtimes with bounds
+checks and one thread: Julia 1.12.7 actual exit 0 in **47.66 s**, body **10.3 s**;
+Julia 1.13.1 actual exit 0 in **37.80 s**, body **8.8 s**. These are ordinary
+package invocations with no test compiler override. Logs and receipts:
+`test/tmp/ordinary_default_190_{112,113}_20261011.*`.
+
+Explicit constant `Metric3` box generation certifies every actual edge against
+the tensor bound. Shared grids retain adjacent material tags, literal interface
+planes, priority and void semantics. Allocation limits conservatively cover the
+entire bounding grid before compaction. Focused checks: box43 on Julia1.12.7,
+actual exit 0 in40.86 s including precompilation; Regions40 on Julia1.13.1,
+actual exit 0 in18.10 s warm. See [metric scope](docs/constant_metric_boxes.md).
+General variable-metric/native mesher parity remains open.
+
+IGES143 retains multiple planar boundary groups. Representation141 accepts0/1;
+Curve142 correctly distinguishes UV and model-space curves, prioritizes a real
+model-space curve and rejects unmapped UV-only input. Existing closed-shell and
+positive-volume certificates remain. Focused/default53 pass on Julia1.13.1,
+actual exit 0 in71.51 s. See [CAD scope](docs/cad_mesh_imports.md). Explicit
+Type190 UV mapping and general curved trimming remain unfinished.
+
+`OptimizePyramids` retains finite floating-point settings. A negative factor
+places and freezes certified inward normal apices in one convex hybrid Region;
+nonnegative values other than1 use the existing real relocation kernel.
+Focused positive/negative72 pass on Julia1.13.1, actual exit 0 in77.52 s.
+The existing cube/batch35 regression passes on integrated Julia1.12.7,
+actual exit 0 in41.18 s. GEO/CLI generation now uses local settings without
+reading or changing unrelated API state: its focused35 pass on Julia1.13.1,
+actual exit 0 in54.62 s. See [negative factors](docs/hybrid_normal_apices.md),
+[relocation](docs/hybrid_relocate_modes.md) and [frontend scope](docs/geo_pyramid_option_scope.md).
+Winslow1, nonzero batch modes, general embedding and periodic composition remain open.
+
+Full P1–P6 parity remains in progress. Next isolated tasks are explicit IGES190
+plane UV charts, genuine Winslow optimization and partition interface/ghost
+production. All larger native/solver/stress campaigns remain opt-in.
+
 ### Planar Face holes, quadratic VTK and embedded hybrid Point (2026-10-11)
 
 Planar STEP/IGES Face imports retain outer/inner wires and triangulate their
@@ -61,9 +105,9 @@ both supported runtimes with minimal compilation, bounds checks and one thread:
 Julia 1.12.7 actual exit 0 in 38.97 seconds (body 7.2 s); Julia 1.13.1 actual
 exit 0 in 42.20 seconds (body 6.2 s). Receipts/logs:
 `test/tmp/final_default_112_20261011.*` and `final_default_113_20261011.*`.
-Historical native/solver/stress suites remain opt-in. Full P1–P6 parity is open;
-next isolated tasks are IGES143 planar boundaries, constant-tensor box generation
-and nonzero pyramid behavior.
+These receipts describe published `02ab1b1` (remote verified). The subsequent
+metric/IGES143/Pyramid integration is recorded above; these180-check timings
+remain historical. Full P1–P6 parity stays open.
 
 ### CLI sizing, order and information controls (2026-10-11)
 

@@ -332,4 +332,10 @@ using Tessella
     include(joinpath(@__DIR__, "..", "interfaces/api_vtk_p2_families_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_hybrid_embedded_point_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/brep_planar_faceholes_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "meshing/constant_metric_box_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "meshing/constant_metric_regions_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "interfaces/api_hybrid_normal_apex_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "geometry/brep_bounded143_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "interfaces/api_hybrid_relocate_modes_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "interfaces/geo_hybrid_pyramid_options_functional_test.jl"))
 end

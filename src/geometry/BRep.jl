@@ -1080,7 +1080,7 @@ supported type 156 Cylinder/Cone layouts, a type 160/198 torus, a full-torus
 type 120 Surface of Revolution (full-circle generatrix in an axial plane,
 full 2π sweep — the OCC export layout), or a
 closed-shell polyhedron bounded by trimmed planar faces over line edges —
-either through type 144 trimmed surfaces on type 108/190 planes with
+either through type 143 bounded or type 144 trimmed surfaces on type 108/190 planes with
 142/141→102/110 boundaries, or through the type 186/514/510/508/504/502
 manifold-solid chain. `fill=true` returns a validated tetrahedral mesh and
 `fill=false` returns the closed triangle boundary. Multiple independent source
@@ -1450,17 +1450,16 @@ function _iges_boundary(types,params,bad,de,curvekinds,caller)
     if t==142
         length(rec)>=5 || throw(ArgumentError(
             "$caller: curve-on-surface #$de is truncated"))
-        bp=_iges_param_int(rec,4,caller,"curve-on-surface model curve")
-        cp=_iges_param_int(rec,5,caller,"curve-on-surface parameter curve")
-        tgt=bp!=0 ? bp : cp
-        tgt!=0 || throw(ArgumentError(
-            "$caller: curve-on-surface #$de has no boundary curve"))
-        return _iges_boundary(types,params,bad,tgt,curvekinds,caller)
+        _iges_param_int(rec,4,caller,"curve-on-surface parameter curve")
+        model=_iges_param_int(rec,5,caller,"curve-on-surface model curve")
+        model!=0 || throw(ArgumentError(
+            "$caller: curve-on-surface #$de needs a model-space boundary; UV-only curves are unsupported"))
+        return _iges_boundary(types,params,bad,model,curvekinds,caller)
     elseif t==141
         length(rec)>=5 || throw(ArgumentError("$caller: boundary #$de is truncated"))
         btype=_iges_param_int(rec,2,caller,"boundary type")
-        btype in (1,2) || throw(ArgumentError(
-            "$caller: boundary #$de uses only parameter-space curves"))
+        btype in (0,1) || throw(ArgumentError(
+            "$caller: boundary #$de has invalid representation type $btype"))
         nb=_iges_param_int(rec,5,caller,"boundary curve count")
         segs=Tuple{NTuple{3,Float64},NTuple{3,Float64}}[]
         i=6
@@ -1639,20 +1638,40 @@ function _iges_brep_faces(types,params,bad,msbo,trimmed,bounded,caller)
     for de in bounded
         rec=_iges_rec(params,bad,de,caller)
         length(rec)>=4 || throw(ArgumentError("$caller: bounded surface #$de is truncated"))
-        _iges_param_int(rec,2,caller,"bounded surface type")
+        _iges_param_int(rec,1,caller,"bounded surface entity type")==143 || throw(ArgumentError(
+            "$caller: bounded surface #$de parameter type disagrees with its directory entry"))
+        representation=_iges_param_int(rec,2,caller,"bounded surface type")
+        representation in (0,1) || throw(ArgumentError(
+            "$caller: bounded surface #$de has invalid representation type $representation"))
         surf_de=_iges_param_int(rec,3,caller,"bounded surface base")
         nb=_iges_param_int(rec,4,caller,"bounded surface boundary count")
         nb>=1 || throw(ArgumentError("$caller: bounded surface #$de has no boundaries"))
-        nb==1 || throw(ArgumentError(
-            "$caller: bounded surface #$de has $nb boundaries — face holes are not supported"))
         length(rec)>=4+nb || throw(ArgumentError("$caller: bounded surface #$de is truncated"))
         stype=get(types,surf_de,0)
         stype!=0 || throw(ArgumentError(
             "$caller: bounded surface #$de references missing surface #$surf_de"))
         push!(seen,stype)
-        ring=_iges_boundary(types,params,bad,
-            _iges_param_int(rec,5,caller,"bounded surface boundary"),curvekinds,caller)
-        push!(facerecs,(ring===nothing ? Vector{NTuple{3,Float64}}[] : [ring],1,surf_de))
+        refs=[_iges_param_int(rec,4+index,caller,"bounded surface boundary") for index in 1:nb]
+        allunique(refs) || throw(ArgumentError("$caller: bounded surface #$de repeats a boundary"))
+        rings=Vector{NTuple{3,Float64}}[]
+        for boundary in refs
+            boundary_type=get(types,boundary,0)
+            if boundary_type in (141,142)
+                boundary_rec=_iges_rec(params,bad,boundary,caller)
+                _iges_param_int(boundary_rec,1,caller,"boundary entity type")==boundary_type ||
+                    throw(ArgumentError("$caller: boundary #$boundary parameter type disagrees with its directory entry"))
+                surface_index=boundary_type==141 ? 4 : 3
+                _iges_param_int(boundary_rec,surface_index,caller,"boundary surface")==surf_de ||
+                    throw(ArgumentError("$caller: bounded surface #$de and boundary #$boundary reference different surfaces"))
+            end
+            ring=_iges_boundary(types,params,bad,boundary,curvekinds,caller)
+            if ring===nothing
+                empty!(rings);break
+            end
+            push!(rings,ring)
+        end
+        length(rings)>1 && (rings=_brep_face_outer_wire_order(rings,caller))
+        push!(facerecs,(rings,1,surf_de))
     end
     return facerecs,curvekinds,seen
 end

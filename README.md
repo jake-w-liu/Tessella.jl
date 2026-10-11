@@ -12,9 +12,10 @@ P1–P6 tracks**, with ASCENT meshing capabilities prioritized.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 180 assertions on Julia 1.12.7 and 1.13.1; minimally compiled
-test bodies took 7.2 and 6.2 seconds. Cold package runs took 38.97 and 42.20
-seconds including precompilation.
+suite now passes 190 assertions on Julia 1.12.7 and 1.13.1. Ordinary
+`Pkg.test()` automatically selects minimal compilation; test bodies took
+10.3 and 8.8 seconds. Cold package runs took 47.66 and 37.80 seconds including
+precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
 and [test/README.md](test/README.md) describes routine and extended tests.
@@ -36,6 +37,13 @@ One translated copied Surface pair is supported in an
 interior [embedded Point](docs/embedded_hybrid_points.md) can be recovered in a
 convex hybrid shell. Supported planar STEP/IGES Faces retain outer/inner wires
 and triangulate holes; general curved CAD trimming remains open.
+
+Explicit [constant-tensor box grids](docs/constant_metric_boxes.md) retain
+directional edge bounds, shared material interfaces and voids. Single convex
+hybrid Regions support [negative pyramid factors](docs/hybrid_normal_apices.md)
+and [nonnegative relocation settings](docs/hybrid_relocate_modes.md) other than
+the separate Winslow mode. [GEO and CLI calls](docs/geo_pyramid_option_scope.md)
+use their own generation option context.
 
 ```julia
 using Tessella
@@ -714,12 +722,13 @@ The default package suite checks functionality and correctness with small real
 fixtures and analytic invariants. Run it on Julia 1.12.x and 1.13.x:
 
 ```sh
-julia --project=. --startup-file=no --compile=min -O0 -e 'using Pkg; Pkg.test(; julia_args=["--startup-file=no", "--check-bounds=yes", "--compile=min", "-O0"])'
+julia --project=. --startup-file=no --check-bounds=yes -e 'using Pkg; Pkg.test()'
 ```
 
-This routine command reduces compilation of unused native planning paths. For
-the same assertions with normal optimized compilation, use `-O2` and omit
-`--compile=min` from both Julia and `julia_args`.
+Ordinary `Pkg.test()` also selects minimal compilation automatically before
+loading Tessella. For the same assertions with normal optimized compilation,
+set `TESSELLA_TEST_COMPILER=optimized`, use `-O2` and omit `--compile=min` from
+both Julia and `julia_args`; see the exact command in [test/README.md](test/README.md).
 
 It covers geometry, bounded meshing, refinement, high-order elements, I/O and
 API ownership, state and errors without external tools. Exhaustive native sweeps,

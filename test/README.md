@@ -6,13 +6,17 @@ topology, NURBS and fields, `.geo` parameter reading, bounded 1D/2D/3D meshing,
 structured patches, refinement and recombination, quadratic tetrahedra,
 MSH/STL I/O, API state, query ownership and failure atomicity, plus small matching
 and compact surface coverage regressions, list/model-view format checks and
-independent multi-root CAD boundaries and planar Face holes, complete quadratic
-Hex VTK export, plus CLI help/version. It needs
+independent multi-root CAD boundaries and planar Face holes, IGES143
+boundaries, complete quadratic Hex VTK export, directional constant-tensor
+box and shared-material grids, floating-point Pyramid options and CLI help/version. It needs
 no external mesher or solver.
 
-Run the default suite from the repository root. For routine functional checks,
-minimal compilation avoids compiling large native planning paths that these
-small fixtures do not use:
+Run the default suite from the repository root. The runner automatically uses
+minimal compilation for small functional checks. Ordinary `Pkg.test()` and
+standalone invocation relaunch once with the same active project when needed,
+before loading Tessella. Child failures propagate. Fixed custom coverage
+filenames retain the original invocation; normal coverage flags are inherited.
+This keeps large production dispatcher optimization out of routine tests:
 
 ```powershell
 julia --project=. --startup-file=no --check-bounds=yes --compile=min -O0 test/runtests.jl
@@ -21,22 +25,24 @@ julia --project=. --startup-file=no --check-bounds=yes --compile=min -O0 test/ru
 `Pkg.test()` runs the same default suite in Julia's package test environment:
 
 ```powershell
-julia --project=. --startup-file=no --compile=min -O0 -e 'using Pkg; Pkg.test(; julia_args=["--startup-file=no", "--check-bounds=yes", "--compile=min", "-O0"])'
+julia --project=. --startup-file=no --check-bounds=yes -e 'using Pkg; Pkg.test()'
 ```
 
-For checks of the normal optimized compiler path, run the same assertions with
-normal compilation:
+For checks of the normal optimized compiler path, explicitly opt in to the
+same assertions with normal compilation:
 
 ```powershell
-julia --project=. --startup-file=no -O2 -e 'using Pkg; Pkg.test(; julia_args=["--startup-file=no", "--check-bounds=yes", "-O2"])'
+julia --project=. --startup-file=no -O2 -e 'ENV["TESSELLA_TEST_COMPILER"]="optimized"; using Pkg; Pkg.test(; julia_args=["--startup-file=no", "--check-bounds=yes", "-O2"])'
 ```
 
 Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
-| Julia 1.12.7 | `--compile=min -O0`, current `Pkg.test()` | 180 | 38.97 s |
-| Julia 1.13.1 | `--compile=min -O0`, current `Pkg.test()` | 180 | 42.20 s |
+| Julia 1.12.7 | Ordinary `Pkg.test()`, automatic minimal compilation | 190 | 47.66 s |
+| Julia 1.13.1 | Ordinary `Pkg.test()`, automatic minimal compilation | 190 | 37.80 s |
+| Julia 1.12.7 | `--compile=min -O0`, preceding `Pkg.test()` | 180 | 38.97 s |
+| Julia 1.13.1 | `--compile=min -O0`, preceding `Pkg.test()` | 180 | 42.20 s |
 | Julia 1.13.1 | `--compile=min -O0`, earlier CLI `test/runtests.jl`, warm | 173 | 5.71 s |
 | Julia 1.13.1 | `--compile=min -O0`, preceding CAD/model/periodic `Pkg.test()` | 171 | 40.61 s |
 | Julia 1.13.1 | `--compile=min -O0`, earlier CLI/list increment `Pkg.test()` | 163 | 36.41 s |
@@ -44,8 +50,12 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 180-assertion package bodies took 7.2 s on Julia 1.12.7 and 6.2 s
-on Julia 1.13.1. Cold elapsed times include about 30/34 s of precompilation.
+The current 190-assertion package bodies took 10.3 s on Julia 1.12.7 and 8.8 s
+on Julia 1.13.1. Cold elapsed times include about 32/26 s of precompilation.
+These ordinary invocations verify the automatic runner in each package test
+environment. Logs and actual exit-0 receipts are
+`test/tmp/ordinary_default_190_{112,113}_20261011.*`. The earlier 180-assertion
+bodies took 7.2/6.2 s; those explicit minimal-compilation receipts are historical.
 The earlier 173-assertion standalone run took 5.71 s overall, with a 5.3 s
 body. The preceding 171-assertion package run also had a 5.3 s body. The earlier 163-assertion check took 1.4 s.
 The earlier 157-assertion routine check took

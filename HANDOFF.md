@@ -12,7 +12,7 @@ small real fixtures. Full native-oracle sweeps, source/AST audits, memory stress
 benchmarks, the 22 HFSS cases, aggregate validation, and external ASCENT solves
 are opt-in campaigns. See [test/README.md](test/README.md).
 
-Current integration starts from Devin's `C:/tmp/tessella_suite_slim_v1` Source
+The initial takeover integration starts from Devin's `C:/tmp/tessella_suite_slim_v1` Source
 and preserves Main's accepted cylinder, libm and recombination fixes. It adds
 curved owner-preserving refinement, periodic order/refinement UID history,
 seeded matching, compact-cap atomic coverage, model/list view writers and
@@ -25,7 +25,7 @@ and rejects nonfinite, fractional and overflowing selectors. Cross fields
 sample the actual public Tri3 union and use node UID adjacency, including
 mixed caches with lower/volume blocks and caller-owned cells.
 
-Current bounded verification:
+Initial takeover verification:
 
 - Normal Julia 1.12.7 functional suite: 157/157, exit 0, 301.75 seconds,
   including 36.14 seconds of precompilation. Most time was first API compilation.
@@ -120,7 +120,8 @@ The current standalone default passes 173/173, actual exit 0 in 5.71 s warm;
 body 5.3 s. No new cold package timing is claimed for this increment. Logs:
 `test/tmp/cli_options_20261011_v3.*` and `functional_default_cli_20261011.*`.
 
-The next integrated increment completes planar Face holes, VTK Quad9/Hex27/
+Published `02ab1b17324d317dd5faca1fe449dcb24b9dcd53` (remote verified)
+completes planar Face holes, VTK Quad9/Hex27/
 Prism18, checked UInt64 view-data tags and one genuinely embedded Point in a
 convex hybrid Region. Final frozen packets:
 `C:/tmp/tessella_takeover_brep_faceholes_20261011/selected_faceholes_packet.json`
@@ -144,11 +145,49 @@ Root's earlier integrated Julia1.12 view regression passed 109/109 in 6.18 s.
 See [CAD](docs/cad_mesh_imports.md), [view](docs/model_view_exports.md) and
 [embedded Point](docs/embedded_hybrid_points.md) scopes.
 
-Next isolated implementations: IGES143 multiple planar boundaries, explicit
-constant Metric3 box generation and actual nonzero pyramid behavior. Existing
-refinement and Surface meshing already consume directional metrics; structured
-constant-tensor box construction is a bounded additional path, not full native
-metric parity. Never infer full roadmap closure from the current package check.
+The current qualified increment adds IGES143 multiple planar boundaries,
+explicit constant Metric3 box/shared-Region grids and actual nonzero Pyramid
+behavior. The ordinary default runner automatically uses minimal compilation;
+190/190 pass on both final-source runtimes, actual exit 0: Julia1.12.7
+47.66 s/body10.3 s; Julia1.13.1 37.80 s/body8.8 s. Logs/receipts:
+`test/tmp/ordinary_default_190_{112,113}_20261011.*`. These invocations use
+no compiler override; optimized compiler checks are explicitly opt-in.
+
+Frozen selected packets and focused actual-exit-0 evidence:
+
+- `C:/tmp/tessella_takeover_constant_metric_box_20261011/ready.json`:43 checks,
+  Julia1.12.7,40.86 s. Root includes only3 default assertions.
+- `C:/tmp/tessella_takeover_constant_metric_regions_20261011/ready.json`:40 checks,
+  Julia1.13.1,18.10 s warm. Only2 default assertions; full bounding-grid limits
+  are intentionally conservative. Preserve failed attempt1: cavity face count
+ 14 was an incorrect test expectation, corrected independently to28.
+- `C:/tmp/tessella_takeover_brep_bounded143_20261011/selected_bounded143_packet.json`:
+ 53 checks,Julia1.13.1,71.51 s. Type141 representations0/1 and142 UV/model curve
+ decoding are corrected; UV-only inputs still reject until a real chart exists.
+- `C:/tmp/tessella_hybrid_normal_apex_20261011/frozen_packet_sha256.json`,
+ superseded for positive-mode support by
+ `C:/tmp/tessella_hybrid_relocate_modes_20261011/frozen_packet_sha256.json`:
+ 72 checks,Julia1.13.1,77.52 s. Negative apices retain actual UID/XYZ/embedded
+ Point provenance; other nonnegative values except1 run the old relocation
+ kernel. Winslow1 and nonzero batches remain guarded. Root's corrected existing
+ cube/batch35 passes Julia1.12.7,actual0/41.18 s (`hybrid_cube_112_current_20261011.*`).
+- `C:/tmp/tessella_geo_pyramid_options_20261011/frozen_packet_sha256.json`:
+ 35 checks,Julia1.13.1,54.62 s. Exact three-file snapshot/context transport
+ preserves unrelated API state and CLI output on local unsupported-mode errors.
+ No costly generation check was added to the default suite.
+
+See [metric grids](docs/constant_metric_boxes.md), [CAD imports](docs/cad_mesh_imports.md),
+[negative factors](docs/hybrid_normal_apices.md), [relocation](docs/hybrid_relocate_modes.md)
+and [frontend context](docs/geo_pyramid_option_scope.md). Existing refinement
+and Surface meshing already consume directional metrics. Structured constant-
+tensor grids add genuine bounded generation, not full native metric parity.
+Never infer roadmap closure from a package check.
+
+Current isolated work after this increment: `devin_reconcile` prepares explicit
+IGES190 Form1 planar UV mapping; `concise_tests` designs the genuine Winslow1
+kernel; `implementation_audit` inspects partition interface/ghost production.
+All work is isolated, with Main Source/runtime ownership coordinated by Root.
+Do not copy an entire candidate tree or start an old historical native gate.
 
 The public hybrid regression fixed missing OptimizePyramids registration,
 omitted TF Surface constructor transport, and narrow batch snapshot dictionary
@@ -177,15 +216,16 @@ backlog rather than the older expensive verification queue:
 2. Complete general CAD assembly and trimmed/periodic NURBS topology. Recognized
    explicit independent STEP/IGES mesh roots are implemented; CAD occurrence
    transforms, analytic Face reconstruction and general assembly are still open.
-   Planar STEP/IGES Face holes are implemented; curved trims and general NURBS
-   topology remain unfinished.
+   Planar STEP/IGES Face holes, including143 boundaries, are implemented;
+   explicit190 UV mapping, curved trims and general NURBS topology remain unfinished.
 3. Complete curved analytic Surface high-order placement and generated Surface/
    Volume orders above two. Curve orders 1–10 are already implemented.
 4. Complete general metric-driven generation and the native automatic-sizing
    octree path. Existing Surface meshing and Volume refinement consume directional
-   metrics; field evaluation alone does not close P1.
+   metrics; constant-tensor boxes/shared-Region grids now generate meshes too.
+   Variable-metric generation and automatic-sizing parity remain unfinished.
 5. Extend mixed-surface relocation and hybrid/high-order optimization, including
-   nonzero pyramid optimization and Netgen-equivalent behavior.
+   Winslow1, nonzero multi-Region Pyramid modes and Netgen-equivalent behavior.
 6. Complete remaining ordinary meshing algorithms and curved/boundary-layer
    recombination contexts; retain the current working planar paths.
 7. Complete boundary-layer Extrude and pipe frontends beyond ordinary Layers.

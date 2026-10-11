@@ -798,7 +798,7 @@ function option(name::AbstractString, value::Real)
                         "Mesh.Algorithm","Mesh.Algorithm3D","Mesh.SecondOrderLinear",
                         "Mesh.SecondOrderIncomplete","Mesh.RecombineOptimizeTopology",
                         "Mesh.RecombineNodeRepositioning","Mesh.Smoothing","General.AbortOnError",
-                        "Mesh.Optimize","Mesh.OptimizeNetgen","Mesh.OptimizePyramids",
+                        "Mesh.Optimize","Mesh.OptimizeNetgen",
                         "General.Terminal","General.Verbosity")
             # Gmsh stores `(int)val` — truncation, not a 0/1 restriction.
             v=Float64(_geo_signed_gmsh_int_value(v,"API.option"))
@@ -810,6 +810,9 @@ function option(name::AbstractString, value::Real)
             v=_geo_option_store_value("Mesh","RandomSeed",v,"API.option")
         elseif key=="Mesh.RandomFactor3D"
             # Native storage retains this finite double, including zero.
+        elseif key=="Mesh.OptimizePyramids"
+            # Native storage retains this finite double; negative values select
+            # normal-offset Pyramid births instead of Pyramid relocation.
         elseif key=="Mesh.ToleranceEdgeLength"
             v>=0 || throw(ArgumentError(
                 "API.option: ToleranceEdgeLength must be nonnegative"))
@@ -2449,6 +2452,7 @@ function _generation_meshing_options(order::Int)
         recombine_node_repositioning=Int(OPTIONS["Mesh.RecombineNodeRepositioning"]),
         recombine_minimum_quality=OPTIONS["Mesh.RecombineMinimumQuality"],
         native_smoothing=Int(OPTIONS["Mesh.Smoothing"]),
+        optimize_pyramids=OPTIONS["Mesh.OptimizePyramids"],
         second_order_linear=!iszero(OPTIONS["Mesh.SecondOrderLinear"]),
         transfinite_tri=Int(OPTIONS["Mesh.TransfiniteTri"]),
         lc_extend_from_boundary=Int(OPTIONS["Mesh.MeshSizeExtendFromBoundary"]),

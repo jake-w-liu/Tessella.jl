@@ -133,8 +133,13 @@ function _model_native_hybrid_periodic_boundary_certificate(m,tag,constructor,pa
 end
 
 function _model_native_hybrid_volume_production(m,tag,constructor,options,births,caller;
-                                                size_field=nothing,periodic_surface_pairs=nothing)
+                                                size_field=nothing,periodic_surface_pairs=nothing,
+                                                optimize_pyramids::Float64=0.0)
     _model_native_hybrid_volume_scope(m,tag,constructor,caller)
+    # Native selects Winslow only for exactly 1. Other nonnegative doubles
+    # execute the same original relocation kernel as 0, rather than disabling it.
+    isfinite(optimize_pyramids) && optimize_pyramids!=1.0 || throw(ArgumentError(
+        "$caller: native hybrid Winslow Pyramid optimization (Mesh.OptimizePyramids=1) is not implemented"))
     m.meshing.algorithm_3d==1 &&
         (isempty(get(m.embeds,(3,tag),NTuple{2,Int}[])) || constructor.embedded_point!==nothing) &&
         !get(m.meshing.reverse,(3,tag),false) && get(m.meshing.smoothing,(3,tag),0)==0 || throw(ArgumentError(
@@ -146,7 +151,9 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
     element_clock=births===nothing ? maximum((uid for tags in constructor.input.mesh.entity_data.external_element_tags for uid in tags);init=UInt64(0)) : births.element_high_water
     work=_ModelNativeVolumeBirths(node_clock,element_clock)
     plan=_model_native_hybrid_quad_plan(constructor.node_uids,constructor.coordinates,
-        constructor.quads,node_clock,caller)
+        constructor.quads,node_clock,caller;
+        normal_factor=optimize_pyramids<0.0 ? -optimize_pyramids : 0.0)
+    optimize_pyramids<0.0 && _model_native_hybrid_normal_apex_certificate(plan,constructor,caller)
     work.source=Mesh(plan.source_coordinates);work.node_tags=copy(plan.node_uids)
     work.node_high_water=plan.node_high_water
     fan=copy(plan.fan_facets)
@@ -169,8 +176,11 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
         node_high_water=work.node_high_water,element_high_water=work.element_high_water,seeds)
     smoothed=ModelNativeHybridInsertion.smooth(insertion,length(plan.node_uids),
         m.meshing.native_smoothing,caller)
-    relocated=ModelNativeHybridRelocate.relocate(plan,smoothed.mesh,caller;
-        birth_order=constructor.pyramid_order,node_uids=insertion.node_numbers)
+    # Native negative factors select the normal-offset births and skip the
+    # Pyramid smoother; Tet insertion/optimization keep these shell rows fixed.
+    relocated=optimize_pyramids<0.0 ? smoothed.mesh :
+        ModelNativeHybridRelocate.relocate(plan,smoothed.mesh,caller;
+            birth_order=constructor.pyramid_order,node_uids=insertion.node_numbers)
     pyramids=_model_native_hybrid_pyramid_production(plan,relocated.coords,
         insertion.element_high_water,caller;birth_order=constructor.pyramid_order)
     work.cell_source=relocated;work.element_tags=insertion.element_numbers
@@ -180,6 +190,8 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
         NTuple{3,Int32}[],NTuple{2,Int32}[],caller)
     blocks=ElementBlock[ElementBlock(4,copy(mesh.tets)),ElementBlock(7,pyramids.nodes)]
     mixed=MixedMesh(mesh.coords,blocks)
+    optimize_pyramids<0.0 && _model_native_hybrid_normal_apex_fixed_certificate(
+        plan,mixed,work.node_tags,caller)
     validate(mixed).ok || throw(ArgumentError("$caller: hybrid Volume produces invalid typed cells"))
     _model_native_hybrid_volume_certificate(mixed,work.node_tags,constructor,caller)
     _model_native_hybrid_embedded_point_certificate(mixed,work.node_tags,constructor,caller)

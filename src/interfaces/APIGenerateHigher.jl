@@ -1764,6 +1764,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
                                surface_parts=Tuple{Int,Union{Mesh,MixedMesh},_MeshClassification,Vector{Int32}}[],
                                native_orphan_births=nothing,
                                periodic_surface_pairs=nothing,
+                               optimize_pyramids::Float64=0.0,
                                retained_surfaces=Set{Tuple{Int,Int32}}(),
                                surface_constructor_inputs=Dict{Tuple{Int,Int32},MixedMesh}())
     have=Set(cell.owner for cell in assembly.cells)
@@ -1819,7 +1820,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
             !haskey(m.meshing.transfinite_volumes,tag) &&
             !isempty(m.volumes[tag]) && !Model._model_factory_volume_encoding(m,tag) &&
             Model._model_native_hybrid_volume_input(m,tag,input,assembly.caller)!==nothing,meshed)
-        iszero(OPTIONS["Mesh.OptimizePyramids"]) || throw(ArgumentError(
+        iszero(optimize_pyramids) || throw(ArgumentError(
             "$(assembly.caller): this native hybrid batch requires Mesh.OptimizePyramids=0"))
         births=Model._ModelNativeVolumeBirths(assembly.node_max,assembly.cell_max)
         hybrid_batch=Model._model_native_hybrid_batch_production(m,meshed,input,options,births,
@@ -1843,14 +1844,13 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
                 _extrude_scope=scope,_extrude_working_model=true,_mesh_input=input,
                 _mesh1d_options=options,_return_volume_production=true,
                 _periodic_surface_pairs=periodic_surface_pairs,
+                _optimize_pyramids=optimize_pyramids,
                 _mesh_node_high_water=assembly.node_max,_mesh_element_high_water=assembly.cell_max,
                 _geometry_points=_higher_geometry_source_points(assembly,geometry_birth)) : hybrid_batch.products[tag]
             production isa Union{Model._ModelVolumeGeometryProduction,Model._ModelNativeHybridVolumeProduction} &&
                 _higher_native_region_surface_order!(assembly,m,tag)
             mesh=production.mesh
             if production isa Model._ModelNativeHybridVolumeProduction
-                iszero(OPTIONS["Mesh.OptimizePyramids"]) || throw(ArgumentError(
-                    "$(assembly.caller): this native hybrid constructor requires Mesh.OptimizePyramids=0"))
                 hybrid_production=production
             end
             source_node_max=production.node_high_water
@@ -2404,6 +2404,7 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
                              size_field,source_nodes=length(high_order),ranks,old_supports=high_order,
                              geometry_parts,surface_parts,geometry_cells,geometry_birth,native_orphan_births,
                              periodic_surface_pairs=periodic_pairs,
+                             optimize_pyramids=Float64(get(generation_meshing,:optimize_pyramids,0.0)),
                              retained_surfaces,
                              surface_constructor_inputs)
     end
