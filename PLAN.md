@@ -8,9 +8,9 @@ remain **in progress**.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 214 assertions on Julia 1.12.7 and 1.13.1. Ordinary
+suite now passes 218 assertions on Julia 1.12.7 and 1.13.1. Ordinary
 `Pkg.test()` automatically selects minimal compilation; test bodies took
-11.1 and 10.9 seconds. Cold package runs took 49.28 and 38.93 seconds including
+11.1 and 10.8 seconds. Cold package runs took 45.41 and 38.66 seconds including
 precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
@@ -158,9 +158,11 @@ and [one translated copied Surface pair in a hybrid Region](docs/periodic_hybrid
 Complete Quad9, Hex27 and Prism18 and edge-only Quad8, Hex20, Prism15 and
 Pyramid13 VTK layouts, planar STEP/IGES Face holes, and
 [one embedded Point in a convex hybrid Region](docs/embedded_hybrid_points.md)
-are also implemented. General high-order formats, periodic multi-Region
-composition, embedded Curve/Surface hybrid recovery and full CAD/NURBS assembly
-topology remain open.
+are also implemented. Current additions include catalogued high-order VTK,
+retained Point/Curve collections and one/two-Tri embedded sheets, and one
+translated copied Surface pair per separate hybrid Region. Incomplete
+high-order formats, shared/general-affine periodic Region composition, broader
+hybrid recovery and full CAD/NURBS assembly topology remain open.
 
 ## Gmsh parity tracks
 
@@ -177,7 +179,9 @@ membership-cell decomposition and preserve-numbering tag rebinding, Box/Cylinder
 
 Explicit [constant-tensor box grids](docs/constant_metric_boxes.md) now generate
 direction-aware meshes, including shared material interfaces and voids. They
-use conservative axis-aligned grids; general variable-metric generation is open.
+use conservative axis-aligned grids. Variable tensors also drive the explicit
+planar Surface constructor and API below; variable-metric volumes and full
+native metric-algorithm parity remain open.
 Single convex hybrid Regions admit negative normal-offset Pyramid factors and
 nonnegative values with actual relocation or the separate
 [Winslow optimizer](docs/hybrid_winslow.md) at `1.0`, retaining existing
@@ -199,9 +203,14 @@ topology and parallel production remain open.
 
 An explicit [variable-tensor ordinary Surface constructor](docs/metric_model_surfaces.md)
 consumes actual lower Point/Line products and certifies the sampled world metric
-on every emitted edge. Its scalar/native API routes remain unchanged.
+on every emitted edge. The [explicit API endpoint](docs/api_metric_surfaces.md)
+uses the selected session tensor background and publishes classification and
+UIDs atomically. Ordinary native algorithm dispatch remains unchanged.
 [Atomic model opening](docs/model_import.md) imports true GEO/MSH files while
 retaining prior slots/views and stages all API option/cache/diagnostic publication.
+[Atomic session merging](docs/model_merge.md) executes real GEO against existing
+entities/fields or merges literal MSH records while retaining current slot identity.
+[CLI mesh checks](docs/cli_controls.md) validate MSH structure without generation.
 
 P1 does not yet claim octree-identical parity with Gmsh's HXT/p4est
 `AutomaticMeshSizeField` internals (the native field remains a documented
@@ -209,8 +218,8 @@ closest-vertex discrete analogue, though curvature, `nPointsPerGap`
 local-feature-size, `hBulk`, and `gradation`/`smoothing` stages are
 implemented and wired into `.geo` and API-session model contexts),
 materially warped
-quadrangles beyond transfinite ruled-surface patches, direct tensor or
-metric-meshing parity, or full
+quadrangles beyond transfinite ruled-surface patches, full native tensor or
+metric-algorithm parity, or full
 `.geo`/CAD-model execution. Mixed-element generation now flows through the
 model pipeline — recombined surfaces and transfinite volumes merge into
 `MixedMesh` products with per-entity blocks, classified projection, and
@@ -1103,11 +1112,11 @@ plane UV/rigid matrix chains, one periodic hybrid pair, embedded Point/Curve/Sur
 nonzero Pyramid Region batches, constant-tensor grids and bare/complete-Tri3
 partition topology. Direct model MSH export, multiple Point/Curve constraints,
 open partition seams and literal prismatic fill are implemented within their
-linked scopes. The handoff lists genuine remaining Source work. Current isolated
-implementations target translated periodic Region batches and direct session
-merging. One/two-Tri sheet admission and an explicit variable-metric planar
-constructor are implemented; broader sheet/metric/native algorithm contexts
-remain genuine Source work.
+linked scopes. Translated periodic pairs in separate Region components, the
+explicit tensor API, atomic session merging and read-only CLI mesh checks are
+also implemented. Current isolated work extends rigid STEP Cartesian targets,
+larger retained planar sheets and list-POS importing. Broader sheet/metric/native
+algorithm contexts remain genuine Source work.
 
 Use small functional regressions for routine verification, then normally commit
 and push verified implementations to `main`. Native-oracle sweeps, resource and

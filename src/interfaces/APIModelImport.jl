@@ -32,11 +32,16 @@ function _model_import_diagnostics(options)
         emit(:info,@sprintf("Done recombining 2D mesh (Wall %gs, CPU %gs)",elapsed,consumed),values)
     end
     hooks=(emit=emit,error=reject,errors=()->errors[],cpu=_native_diagnostic_cpu_time,done=done)
-    return (;errors,last_error,events,hooks,begin_mesh,
-        input_error=message->reject(message,options))
+    input_error=function (message,abort=get(options,"General.AbortOnError",2.0))
+        values=copy(options)
+        values["General.AbortOnError"]=Float64(abort)
+        return reject(message,values)
+    end
+    return (;errors,last_error,events,hooks,begin_mesh,input_error)
 end
 
-function _model_import_execute_geo(path,dimension,options,diagnostics;legacy=false)
+function _model_import_execute_geo(path,dimension,options,diagnostics;legacy=false,
+        initial_model=nothing,initial_mesh_context=nothing,initial_fields=nothing)
     return execute_geo(path;mesh_dim=dimension,
         _initial_mesh_algorithms=(algorithm_2d=Int(options["Mesh.Algorithm"]),
             algorithm_3d=Int(options["Mesh.Algorithm3D"]),
@@ -55,7 +60,9 @@ function _model_import_execute_geo(path,dimension,options,diagnostics;legacy=fal
         _initial_numeric_option_callback=(family,member,value)->
             _model_import_option!(options,family,member,value),
         _initial_recombine_diagnostics=diagnostics.hooks,
-        _initial_model_name=legacy ? nothing : splitext(basename(path))[1])
+        _initial_model_name=legacy ? nothing : splitext(basename(path))[1],
+        _initial_model=initial_model,_initial_mesh_context=initial_mesh_context,
+        _initial_fields=initial_fields)
 end
 
 function _model_import_lookup(receipt,model,caller)
@@ -92,13 +99,13 @@ function _model_import_view_name(section,caller)
     return Elements._unescape_mixed_name(encoded)
 end
 
-function _model_import_views(slot,caller)
+function _model_import_views(slot,caller;sections=nothing)
     mesh=slot.mesh
     mesh isa MixedMesh || return _SessionView[]
     views=_SessionView[];positions=Dict{Tuple{String,String},Int}()
     element_tags=reduce(vcat,mesh.entity_data.external_element_tags;init=UInt64[])
     cell_nodes=[copy(block.nodes[:,column]) for block in mesh.blocks for column in axes(block.nodes,2)]
-    for section in mesh.data_sections
+    for section in (sections===nothing ? mesh.data_sections : sections)
         name=_model_import_view_name(section,caller);kind=section.name
         key=(name,kind)
         position=get(positions,key,0)
@@ -146,7 +153,14 @@ function _model_import_prepare(path,dimension;legacy=false)
     result=extension==".msh" ? GeoExec._geo_stage_mesh_file(path;
         context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[]) :
         _model_import_execute_geo(path,dimension,options,diagnostics;legacy)
-    model=deepcopy(result.model);authority=model.meshing.mesh_authority
+    return _model_import_prepare_result(result,path,options,diagnostics;legacy,caller)
+end
+
+function _model_import_prepare_result(result,path,options,diagnostics;legacy=false,
+        caller="API.open",detached_result=false,view_sections=nothing)
+    extension=lowercase(splitext(path)[2])
+    model=detached_result ? result.model : deepcopy(result.model)
+    authority=model.meshing.mesh_authority
     mesh=authority!==nothing && authority.mesh!==nothing ? authority.mesh :
         result.mesh===nothing ? nothing : _copy_mesh(result.mesh)
     class=if authority!==nothing && authority.mesh!==nothing
@@ -199,7 +213,7 @@ function _model_import_prepare(path,dimension;legacy=false)
         slot.boundary_layer_fields=copy(result.params.boundary_layer_fields)
     end
     lookup=_model_import_lookup(result.native_element_lookup_receipt,model,caller)
-    views=legacy ? _SessionView[] : _model_import_views(slot,caller)
+    views=legacy ? _SessionView[] : _model_import_views(slot,caller;sections=view_sections)
     view_tags=Int[];next_tag=VIEW_TAG_MAX[]
     for _ in views
         next_tag=Base.checked_add(next_tag,1)

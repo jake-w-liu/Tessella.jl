@@ -12,7 +12,7 @@ module CLI
 using ..GeoExec: execute_geo, geo_entity_mesh
 using ..IO: write_msh
 using ..Model: model_periodic_constraints, model_to_mixed
-using ..Elements: write_mixed_msh, MixedMesh, simplex_to_mixed
+using ..Elements: write_mixed_msh, read_mixed_msh, MixedMesh, simplex_to_mixed, validate
 using ..GmshLibm: _with_win_cli_precision
 
 export main
@@ -20,11 +20,13 @@ export main
 const _HELP="""
 Usage: tessella file.geo [-1|-2|-3] [-o output.msh] [-format msh2|msh4] [-bin]
        [-clscale value] [-clmin value] [-clmax value] [-order int]
+       tessella file.msh -check
        tessella -help | -version
 
 Mesh size bounds apply before the positive size factor. CLI numeric options
 have priority over .geo assignments. Curve orders 1-10 are supported;
 Surface/Volume generation supports the orders documented in README.md.
+-check validates MSH structure and duplicate cells without generation or output.
 """
 
 const _NUMERIC_FLAGS=Dict("-clscale"=>"Mesh.MeshSizeFactor",
@@ -94,6 +96,10 @@ binary output. Output flags require a meshing dimension.
 these values retain priority over script assignments, including option aliases.
 `-help`/`--help` and `-version`/`--version` print and return their text without
 an input file. Informational flags must be used alone.
+`file.msh -check` validates finite coordinates, connectivity, identities,
+metadata and duplicate cells and returns its input path without writing.
+This read-only mode rejects generation, sizing and output options. It does not
+certify curved-element Jacobians or reproduce native diagnostic chronology.
 Accepted syntax and blockers follow [`Tessella.GeoExec.execute_geo`](@ref).
 Parsing-only mode returns the input path. Meshing writes an atomic MSH file
 and returns its path. Native periodic/embedded surface meshes and embedded volume
@@ -136,7 +142,7 @@ function _main(args::AbstractVector{<:AbstractString})
     numeric_options=Dict{String,Float64}()
     path=nothing;dim=0;outfile=nothing;version=4.1;binary=false
     dimension_seen=false;output_seen=false
-    format_seen=false;binary_seen=false
+    format_seen=false;binary_seen=false;check_seen=false
     i=1
     while i<=length(tokens)
         a=tokens[i]
@@ -166,6 +172,9 @@ function _main(args::AbstractVector{<:AbstractString})
                 "tessella: duplicate $a flag"))
             i+=1;i<=length(tokens) || throw(ArgumentError("tessella: $a needs a value"))
             numeric_options[option]=_numeric_argument(a,tokens[i])
+        elseif a=="-check"
+            check_seen && throw(ArgumentError("tessella: duplicate -check flag"))
+            check_seen=true
         elseif a=="-bin"
             binary_seen && throw(ArgumentError("tessella: duplicate -bin flag"))
             binary=true;binary_seen=true
@@ -178,6 +187,16 @@ function _main(args::AbstractVector{<:AbstractString})
         i+=1
     end
     path===nothing && throw(ArgumentError("tessella: missing input file"))
+    if check_seen
+        (dimension_seen || output_seen || format_seen || binary_seen || !isempty(numeric_options)) &&
+            throw(ArgumentError("tessella: -check cannot be combined with generation, sizing or output options"))
+        lowercase(splitext(path)[2])==".msh" || throw(ArgumentError(
+            "tessella: -check requires an MSH input"))
+        mesh=read_mixed_msh(path)
+        diagnostic=validate(mesh)
+        diagnostic.ok || throw(ArgumentError("tessella: inconsistent mesh: "*join(diagnostic.messages,"; ")))
+        return path
+    end
     dim==0 && outfile!==nothing && throw(ArgumentError(
         "tessella: -o requires -1, -2 or -3"))
     dim==0 && (format_seen || binary_seen) && throw(ArgumentError(

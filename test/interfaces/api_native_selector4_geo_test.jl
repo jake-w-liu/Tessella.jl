@@ -6,7 +6,7 @@ const B=getfield(parentmodule(@__MODULE__),:APINativeBipartiteTests)
 const C=getfield(parentmodule(@__MODULE__),:APINativeSelector4CompleteTests)
 call(f,args...;kwargs...)=Base.invokelatest(f,args...;kwargs...)
 fingerprint(value)=begin io=IOBuffer();serialize(io,value);take!(io);end
-@testset "actual GEO selector4 parser/importer preserves native records and completed prefixes" begin
+@testset "GEO selector4 keeps native success records and atomic import failures" begin
     directory=joinpath(@__DIR__,"../artifacts/native_selector4_geo_primary_v5")
     raw=joinpath(directory,"primary.json")
     projection=joinpath(directory,"primary.toml")
@@ -39,6 +39,8 @@ fingerprint(value)=begin io=IOBuffer();serialize(io,value);take!(io);end
                 path=joinpath(temporary,"recombine.geo")
                 write(path,prefix*"RecombineMesh;\n")
                 call(A.logger.start)
+                before_last_error=call(A.logger.get_last_error)
+                before_errors=A.NATIVE_LOOKUP_QUERY_ERRORS[]
                 failure,out,err=C.capture(()->call(A.open_geo!,path))
                 expected=only(case["exceptions"])
                 if isempty(expected)
@@ -48,13 +50,24 @@ fingerprint(value)=begin io=IOBuffer();serialize(io,value);take!(io);end
                     @test failure!==nothing && sprint(showerror,failure)==expected
                 end
                 @test fingerprint((original,cached))==before
-                @test C.timing_projection.(call(A.logger.get))==C.timing_projection.(case["logger"])
-                @test out==case["stdout"]
-                @test err==case["stderr"]
-                B.state(case["after"])
-                @test call(A.logger.get_last_error)==case["after"]["last_error"]
-                @test A.NATIVE_LOOKUP_QUERY_ERRORS[]==Int(get(case,"prior_error",false))+
-                    count(startswith("Error: "),case["logger"])
+                if isempty(expected)
+                    @test C.timing_projection.(call(A.logger.get))==C.timing_projection.(case["logger"])
+                    @test out==case["stdout"]
+                    @test err==case["stderr"]
+                    B.state(case["after"])
+                    @test call(A.logger.get_last_error)==case["after"]["last_error"]
+                    @test A.NATIVE_LOOKUP_QUERY_ERRORS[]==Int(get(case,"prior_error",false))+
+                        count(startswith("Error: "),case["logger"])
+                else
+                    # Retained SDK failure rows describe native partial
+                    # prefixes. The current API stages all publication.
+                    @test A.CURRENT[]===original && A.LAST_MESH[]===cached
+                    @test isempty(call(A.logger.get)) && isempty(out) && isempty(err)
+                    rollback=deepcopy(case["before"]);rollback["last_error"]=before_last_error
+                    B.state(rollback)
+                    @test call(A.logger.get_last_error)==before_last_error
+                    @test A.NATIVE_LOOKUP_QUERY_ERRORS[]==before_errors
+                end
                 @test call(A.option,"Mesh.RecombinationAlgorithm")==4
                 @test call(A.option,"Mesh.Renumber")==case["renumber"]
                 call(A.logger.stop)

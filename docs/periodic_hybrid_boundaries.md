@@ -1,4 +1,4 @@
-# Translated periodic boundaries in a hybrid Region
+# Translated periodic boundaries in hybrid Regions
 
 The public mesh API supports one ordinary explicit Region whose current planar
 Tri3/Quad4 shell contains quadrangles and one translated periodic Surface pair.
@@ -21,12 +21,37 @@ verify the recorded identities; they do not select periodic node pairs.
 The constructor checks exact lower ownership, complete copied UID coverage,
 affine coordinates, ordered Surface cells, exterior incidence, and total signed
 volume before publication. Multiple periodic pairs, nontranslation transforms,
-missing copy history, and periodic multi-Region batches remain outside this
-increment and are rejected atomically.
+missing or incomplete copy history, and cross-Region boundary pairs remain
+outside this admission and are rejected atomically.
+
+A multi-Region hybrid batch can also consume a single translated Surface pair
+per Region when each selected Region forms its own declared Face component.
+Both paired Surfaces must belong to that Region. This batch admission uses
+default `Mesh.OptimizePyramids=0`; shared-Surface periodic components and other
+Pyramid modes remain guarded. Each pair consumes actual fresh copy events or
+retained live published copy history. Every Region is certified before any
+volume RNG or factory clock is consumed, after partitioning, and after the
+batch's final optimization. No periodic pairs are inferred from coordinates.
+Per-Region positive typed cells, exact exterior/UID ownership and analytic
+volume certificates remain required.
 
 The bounded regression is
 [`api_periodic_hybrid_functional_test.jl`](../test/interfaces/api_periodic_hybrid_functional_test.jl).
 
-One strictly interior Point also has a bounded
-[embedded hybrid context](embedded_hybrid_points.md); general embedded recovery
-and periodic multi-Region composition remain open.
+The batch fixture is
+[`api_periodic_hybrid_batch_functional_test.jl`](../test/interfaces/api_periodic_hybrid_batch_functional_test.jl).
+It generates two small unit Regions once, checks their independent volume and
+exterior certificates, preserves lower ownership/cells, checks primary and P2
+periodic query pairs, and verifies classified MSH4 transport. The default MSH4
+writer saves the primary pairs; the live P2 query includes the quadratic pairs.
+Missing copy events,
+nontranslation and cross-Region relations reject without publishing a mesh.
+Cross-Region relations are rejected by the existing lower Surface preflight.
+The complete actual event inventory is also checked against an intentionally
+incomplete snapshot. This full fixture is opt-in; default tests gain no volume
+generation.
+
+A strictly interior Point, retained Curve chains and one- or two-triangle
+[planar sheets](hybrid_embedded_surfaces.md) have separate bounded embedded
+contexts. Combining embeddings with multiple periodic Regions and general
+shared periodic components remains outside this admission.

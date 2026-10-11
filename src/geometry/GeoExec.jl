@@ -717,7 +717,10 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
                      _initial_numeric_option_callback=nothing,
                      _initial_recombine_partial_callback=nothing,
                      _initial_recombine_diagnostics=nothing,
-                     _initial_model_name=nothing)
+                     _initial_model_name=nothing,
+                     _initial_model=nothing,
+                     _initial_mesh_context=nothing,
+                     _initial_fields=nothing)
     isfile(path) || throw(ArgumentError("execute_geo: missing file $path"))
     mesh_dim isa Bool && throw(ArgumentError("execute_geo: mesh_dim must not be Bool"))
     dim=try
@@ -728,9 +731,13 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
     end
     dim in 0:3 || throw(ArgumentError("execute_geo: mesh_dim must be in 0:3"))
     params=read_geo_params(path)
-    model=GeoModel()
+    # A model-file merge supplies an operation-owned detached model and context.
+    # Ordinary standalone/open execution still starts with an empty model.
+    model=_initial_model===nothing ? GeoModel() : _initial_model
+    model isa GeoModel || throw(ArgumentError("execute_geo: initial model must be a GeoModel"))
     _initial_model_name===nothing || (model.name=String(_initial_model_name))
     context=_GeoNumericContext()
+    _initial_mesh_context===nothing || _geo_seed_mesh_context!(context,_initial_mesh_context)
     context.native_context_lc=_initial_context_lc
     context.native_context_forced_bbox=_initial_context_forced_bbox
     context.native_mesh_error_callback=_initial_mesh_error_callback
@@ -789,6 +796,11 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
     # `GeoExecution` exposes the executed end state. `Field[i].member = v`
     # writes mutate it so a mid-file `Mesh n` sees the final option values.
     context.fields=empty!(params.fields)
+    if _initial_fields!==nothing
+        merge!(context.fields,deepcopy(_initial_fields.fields))
+        context.background_field=_initial_fields.background_field
+        context.boundary_layer_fields=copy(_initial_fields.boundary_layer_fields)
+    end
     # `.geo` execution softens variable-read misses into `yymsg(0)` + 0, like
     # `treat_Struct_FullName_Float` — the accumulated errors throw at the end.
     context.soft_unknown_reads=true
@@ -802,6 +814,14 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
     # X{...}`, ...) are side-effecting or model-reading value terms in the
     # `.geo` grammar; the numeric evaluator calls back through this hook.
     allocator_state=_GeoTagAllocatorState()
+    if _initial_model!==nothing
+        _geo_allocator_resync_model!(allocator_state,model)
+        allocator_state.physical_group_max=model.physical_tag_max
+        allocator_state.live_fields=Set(Int(tag) for tag in keys(context.fields))
+        for ((dimension,entity),physicals) in model.entity_physicals,physical in physicals
+            push!(get!(() -> Int[],context.raw_physicals,(dimension,physical)),entity)
+        end
+    end
     context.exec_hook=src->_geo_exec_value_term(
         model,src,context,allocator_state)
     statements=_geo_exec_statements(path)
@@ -854,6 +874,17 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
     end
     _geo_sync_mesh_algorithms!(model,context)
     _geo_sync_native_surface_controls!(model,context)
+    if _initial_fields!==nothing
+        # The execution map is shared with params.fields; selection commands
+        # live on the context and need their literal final values transported.
+        values=ntuple(length(fieldnames(GeoParams))) do index
+            name=fieldnames(GeoParams)[index]
+            name===:background_field ? context.background_field :
+                name===:boundary_layer_fields ? copy(context.boundary_layer_fields) :
+                getfield(params,index)
+        end
+        params=GeoParams(values...)
+    end
     return GeoExecution(model,mesh,params,transfinite_tri,context.values,
                         context.lists,context.strings,
                         copy(context.exec_warnings),context.msg_error_count,

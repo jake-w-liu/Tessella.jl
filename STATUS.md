@@ -24,7 +24,46 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
-### Current model opening, mapped STEP, planar sheets and variable tensors (2026-10-11)
+### Current tensor API, periodic batches, session merge and CLI checks (2026-10-11)
+
+The final ordinary suite passes **218/218 on both Julia1.12/1.13**, actual exit0
+on the same frozen249 Source files: **45.41 s/body11.1 s** onJulia1.12.7 and
+**38.66 s/body10.8 s** onJulia1.13.1. Actual receipts and Source map:
+`test/tmp/ordinary_default_218_{112,113}_20261011.*` and
+`test/tmp/ordinary_default_218_frozen_source_20261011.json`.
+
+The [explicit tensor API](docs/api_metric_surfaces.md) passes47 focused checks
+onJulia1.13, actual0/49.80 s including loading. It retains lower Curve cell UIDs,
+correctly captures regeneration constructor rows, applies selected background
+wrappers once and publishes classification atomically. Native7/BAMG stays open.
+
+[Separate periodic hybrid Regions](docs/periodic_hybrid_boundaries.md) pass74
+focused checks onJulia1.12, actual0/67.52 s. Each consumes its own actual copied
+translation pair with complete lower certificates. Default MSH4 retains primary
+pairs; live P2 queries include high-order pairs. General/shared contexts remain open.
+
+[Atomic current-model merging](docs/model_merge.md) passes46 focused+2default
+checks onJulia1.13, actual0/44.52 s. Existing slots/views/filename, literal metadata,
+seeded GEO fields/entities, unmeshed periodic declarations, clearing commands and
+actual unchanged Surface constructors pass. A pinned native stale lookup error
+is handled through the same explicit public cache rebuild in the fixture.
+
+[CLI mesh checking](docs/cli_controls.md) passes20 opt-in checks onJulia1.13,
+actual0/35.63 s including loading; two read-only checks enter the default.
+It validates MSH structure and duplicates without generation or output.
+
+A focused legacy reader passes133 checks onJulia1.12, actual0/5.28 s warm.
+It fixes the staged homology callback's real arity/early-diagnostic defect and
+updates three older opt-in failure contracts while retaining native-success
+and direct API diagnostic expectations. Failed receipts remain archived.
+
+The [current handoff](HANDOFF.md#takeover-2026-10-11) records exact packets and
+qualification boundaries. This Source follows publishedMaind1d7088; normal Git
+publication records the increment. Full P1–P6 completion remains unfinished.
+Current isolated work covers rigid Cartesian mapped targets, larger planar
+sheets and list-POS importing. Expensive parity/solver campaigns stay opt-in.
+
+### Preceding model opening, mapped STEP, planar sheets and variable tensors (2026-10-11)
 
 The final combined ordinary suite passes **214/214 on both Julia1.12/1.13**,
 actual zero on the same frozen Source: Julia1.12.7 **49.28 s**, body**11.1 s**;
@@ -60,7 +99,8 @@ was corrected after its exact interval dump; production bounds were unchanged.
 Native scalar/API paths remain separate; native7/BAMG is still unfinished.
 
 The [current handoff](HANDOFF.md#takeover-2026-10-11) binds Source packets,
-failed receipts and the next periodic/API-metric/session-merge implementations.
+failed receipts and the periodic/API-metric/session-merge implementations
+subsequently integrated above.
 This batch follows publishedMainf0bb385; the overall P1–P6 goal remains active.
 
 ### Preceding direct model export, embedded sheets/collections and open seams (2026-10-11)

@@ -12,9 +12,9 @@ P1–P6 tracks**, with ASCENT meshing capabilities prioritized.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 214 assertions on Julia 1.12.7 and 1.13.1. Ordinary
+suite now passes 218 assertions on Julia 1.12.7 and 1.13.1. Ordinary
 `Pkg.test()` automatically selects minimal compilation; test bodies took
-11.1 and 10.9 seconds. Cold package runs took 49.28 and 38.93 seconds including
+11.1 and 10.8 seconds. Cold package runs took 45.41 and 38.66 seconds including
 precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
@@ -24,21 +24,23 @@ remain Julia 1.12.x and 1.13.x.
 
 The CLI accepts `file.geo -1|-2|-3`, `-o output.msh`, `-format msh2|msh4`
 and `-bin`, with `-clscale`, `-clmin`, `-clmax` and `-order` controls.
-`-help` and `-version` work without an input file; see [CLI controls](docs/cli_controls.md).
+`-help` and `-version` work without an input file. `file.msh -check` validates
+mesh structure without generation or writing; see [CLI controls](docs/cli_controls.md).
 One-dimensional output keeps classified Point/Curve ownership,
 physical names, periodic node pairs and configured Curve orders.
 List-based views export POS, TXT, CSV and legacy VTK with all time steps;
 see [list export formats](docs/list_view_exports.md) for their data layout.
 [Atomic model opening](docs/model_import.md) uses `API.open` for GEO/MSH files,
-preserving prior models and held views. [Direct model MSH export](docs/model_export.md) uses `API.write` with physical
+preserving prior models and held views. [Atomic session merging](docs/model_merge.md)
+executes against the current model and retains its slot and filename. [Direct model MSH export](docs/model_export.md) uses `API.write` with physical
 selection, ASCII/binary encodings and retained metadata. Model views also
 export [CSV and VTK](docs/model_view_exports.md), preserving
 UIDs, ownership, sparse time steps and full supported connectivity. Recognized
 independent STEP/IGES solids import as [classified mixed meshes](docs/cad_mesh_imports.md).
 [Mapped STEP occurrences](docs/step_mapped_occurrences.md) retain actual rigid
 placement and nested instance paths.
-One translated copied Surface pair is supported in an
-[ordinary hybrid Region](docs/periodic_hybrid_boundaries.md), and a strictly
+One translated copied Surface pair is supported per Region in separate
+[ordinary hybrid components](docs/periodic_hybrid_boundaries.md), and a strictly
 interior [embedded Point](docs/embedded_hybrid_points.md) or one connected
 [embedded Line2 Curve](docs/hybrid_embedded_curves.md), or one retained
 [Tri3 Surface](docs/hybrid_embedded_surfaces.md) can be recovered in a convex
@@ -53,7 +55,9 @@ coordinate and boundary triangle.
 Explicit [constant-tensor box grids](docs/constant_metric_boxes.md) retain
 directional edge bounds, shared material interfaces and voids. An explicit
 [variable-tensor Surface constructor](docs/metric_model_surfaces.md) refines
-ordinary planar triangles while retaining lower boundary identities. Single convex
+ordinary planar triangles while retaining lower boundary identities. The
+[explicit tensor API](docs/api_metric_surfaces.md) consumes the selected tensor
+background without changing ordinary algorithm dispatch. Single convex
 hybrid Regions support [negative pyramid factors](docs/hybrid_normal_apices.md)
 and [nonnegative relocation settings](docs/hybrid_relocate_modes.md), including
 the separate [Winslow optimizer](docs/hybrid_winslow.md).

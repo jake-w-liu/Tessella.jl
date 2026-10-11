@@ -6,11 +6,14 @@ function _geo_homology_error_callback(context)
     haskey(context.option_numbers,key) ||
         context.native_mesh_error_callback!==nothing || return nothing
     return function (message)
-        _geo_msg_error!(context,message)
         abort=get(context.option_numbers,key,2.0)
         if context.native_mesh_error_callback!==nothing
+            # A staged API importer owns diagnostic publication. Preserve
+            # this execution's count without printing before it can commit.
+            context.suppress_diagnostics || (context.msg_error_count+=1)
             context.native_mesh_error_callback(String(message),abort)
         else
+            _geo_msg_error!(context,message)
             (abort==2 || abort==3) && throw(ErrorException(message))
             abort==4 && exit(1)
         end

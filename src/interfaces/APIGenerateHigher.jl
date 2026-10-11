@@ -966,7 +966,8 @@ function _higher_transfinite_constructor_input(actual,events,assembly,tag)
 end
 
 function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
-                                size_field=nothing,source_nodes=length(assembly.nodes),ranks=nothing,
+                                size_field=nothing,metric_surface=nothing,
+                                source_nodes=length(assembly.nodes),ranks=nothing,
                                 old_supports=nothing,geometry_parts=nothing,dimension=2,
                                  geometry_cells=nothing,geometry_birth=nothing,
                                  geometry_alternates=nothing,curve_births=Dict{Tuple{Int,Int32},Vector{UInt64}}(),
@@ -1036,7 +1037,11 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
     end
     units=_higher_surface_units(m,_generate_units(m,2,sort!(meshed)),assembly.caller)
     for tags in units
-        products=length(tags)==1 ? [(tags[1],mesh_model_surface(m,tags[1];
+        products=metric_surface!==nothing ? [(only(tags),mesh_model_surface(m,only(tags),size_field;
+            max_metric_edge=metric_surface.max_metric_edge,max_nodes=metric_surface.max_nodes,
+            max_triangles=metric_surface.max_triangles,_mesh_input=input,_mesh1d_options=options,
+            _mesh_node_high_water=assembly.node_max,_mesh_element_high_water=assembly.cell_max,
+            _return_surface_production=true))] : length(tags)==1 ? [(tags[1],mesh_model_surface(m,tags[1];
             size_field=size_field,_extrude_scope=scope,_mesh_input=input,_mesh1d_options=options,
             _mesh_node_high_water=assembly.node_max,_return_surface_production=true,
             _mesh_element_high_water=assembly.cell_max,
@@ -1108,7 +1113,8 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
                         haskey(m.meshing.transfinite_surfaces,tag)
                     actual_product=Model._model_mesh_product(input,2,tag;
                         caller=assembly.caller,
-                        producer_order=source_binding.constructor_mesh!==nothing || transfinite_events)
+                        producer_order=source_binding.constructor_mesh!==nothing || transfinite_events ||
+                            metric_surface!==nothing)
                     if transfinite_events
                         constructor=_higher_transfinite_constructor_input(actual_product,
                             assembly.cells[first_cell_event:end],assembly,tag)
@@ -1736,11 +1742,12 @@ function _higher_surface_constructor_publication(authority,constructors,cells,no
     return Model._model_mesh_with_surface_constructor_inputs(authority,rebound;caller)
 end
 
-function _higher_retained_periodic_surface_pairs!(pairs,m,retained,caller)
+function _higher_retained_periodic_surface_pairs!(pairs,m,retained,caller;slave_tags=nothing)
     pairs===nothing && return nothing
     for constraint in Model.model_periodic_constraints(m)
         constraint.dim==2 || continue
         slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
+        slave_tags===nothing || slave in slave_tags || continue
         haskey(pairs,slave) && continue
         (2,Int32(slave)) in retained && (2,Int32(master)) in retained || continue
         history=get(m.meshing.periodic_uid_history,(2,slave),nothing)
@@ -1820,9 +1827,17 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
             !haskey(m.meshing.transfinite_volumes,tag) &&
             !isempty(m.volumes[tag]) && !Model._model_factory_volume_encoding(m,tag) &&
             Model._model_native_hybrid_volume_input(m,tag,input,assembly.caller)!==nothing,meshed)
+        if retained_periodic && m.meshing.algorithm_3d==1
+            # Only selected hybrid Regions consume retained copy events here.
+            # Other retained model relations keep their own planner admission.
+            slave_tags=Set(Int(constraint.slave_entity) for tag in meshed
+                for constraint in Model._model_volume_periodic_surface_constraints(m,tag,assembly.caller))
+            _higher_retained_periodic_surface_pairs!(periodic_surface_pairs,m,retained_surfaces,
+                assembly.caller;slave_tags)
+        end
         births=Model._ModelNativeVolumeBirths(assembly.node_max,assembly.cell_max)
         hybrid_batch=Model._model_native_hybrid_batch_production(m,meshed,input,options,births,
-            assembly.caller;size_field,optimize_pyramids)
+            assembly.caller;size_field,optimize_pyramids,periodic_surface_pairs)
         hybrid_batch_receipt=_higher_native_hybrid_batch_receipt(assembly,m,hybrid_batch,input,
             meshed,assembly.caller)
     end
@@ -2306,6 +2321,7 @@ end
 function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
         options::Model._ModelMesh1DOptions,caller;generation_meshing,
         element_order=1,renumber=true,save_all=false,linear=false,incomplete=false,size_field=nothing,
+        metric_surface=nothing,
         initial_max_node_tag=UInt64(0),initial_max_element_tag=UInt64(0),
         preserve_geometry=false,geometry_layout=:top,geometry_merge=nothing)
     dimension in (2,3) || throw(ArgumentError("$caller: dim must be two or three"))
@@ -2316,6 +2332,9 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
     # transfinite, extrusion and periodic construction paths. An early API
     # whitelist would reject those specialized paths before their dispatch.
     entities=model_entities(m)
+    metric_surface===nothing || (dimension==2 && element_order==1 &&
+        [(dim,tag) for (dim,tag) in entities if dim>=2]==[(2,metric_surface.tag)]) ||
+        throw(ArgumentError("$caller: metric Surface request must select the sole two-dimensional entity"))
     assembly=_Dim01Assembly(_Dim01Node[],_Dim01Cell[],Dict{UInt64,Int32}(),
         UInt64(initial_max_node_tag),UInt64(initial_max_element_tag),
         Int(typemax(Int32)),Int(typemax(Int32)),String(caller))
@@ -2339,7 +2358,16 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
     _higher_native_parameters!(assembly,m)
     _higher_complete_ranks!(ranks,assembly)
     sort!(assembly.cells;by=_dim01_cell_order,alg=Base.Sort.MergeSort)
-    high_order=_dim01_first_order!(assembly,m)
+    high_order=if metric_surface===nothing
+        _dim01_first_order!(assembly,m)
+    else
+        # This explicit tensor endpoint retains actual lower cells. Native
+        # generation's SetOrder1 factory renews even linear cell identities;
+        # admit existing linear input instead of running that reconstruction.
+        all(cell->cell.owner[1]==0 || msh_spec(cell.msh).order==1,assembly.cells) ||
+            throw(ArgumentError("$caller: metric Surface input must contain only first-order cells"))
+        falses(length(assembly.nodes))
+    end
     first_order_constructor_inputs=Dict{Tuple{Int,Int32},MixedMesh}()
     if old!==nothing && !phases.one && !isempty(old.surface_constructor_inputs)
         expected=Set(uid for constructor in values(old.surface_constructor_inputs)
@@ -2392,7 +2420,7 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
         end
         filter!(cell->cell.source_tag===nothing || !(cell.owner in discarded),assembly.cells)
         _,_,retained_surfaces=_higher_surface_phase!(assembly,m,options,entities,discarded,done;
-                               size_field,source_nodes=length(high_order),ranks,old_supports=high_order,
+                               size_field,metric_surface,source_nodes=length(high_order),ranks,old_supports=high_order,
                                 geometry_parts=surface_parts,dimension,geometry_cells,
                                 geometry_birth,geometry_alternates,curve_births,periodic_pairs,native_orphan_births,native_recombine_events,
                                 surface_constructor_inputs)

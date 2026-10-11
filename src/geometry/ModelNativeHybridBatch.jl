@@ -37,8 +37,26 @@ function _model_native_hybrid_groups(m,regions,input,caller)
     return groups,receipts
 end
 
+# Disjoint periodic Regions consume the same actual Surface copy events as
+# the single-Region producer. The complete lower constructor binding precedes
+# RNG/factory use; coordinates only verify those explicit UID events.
+function _model_native_hybrid_batch_periodic_certificate(m,receipt,pairs,optimize_pyramids,caller)
+    for tag in receipt.regions
+        constraints=_model_volume_periodic_surface_constraints(m,tag,caller)
+        isempty(constraints) && continue
+        length(receipt.regions)==1 && iszero(optimize_pyramids) || throw(ArgumentError(
+            "$caller: periodic hybrid batches require separated Regions and default Pyramid optimization"))
+        constructor=_model_native_hybrid_volume_input(m,tag,receipt.input,caller)
+        constructor!==nothing || throw(ArgumentError(
+            "$caller: periodic hybrid batch Region lacks its actual lower constructor"))
+        _model_native_hybrid_periodic_boundary_certificate(m,tag,constructor,pairs,caller)
+    end
+    return nothing
+end
+
 function _model_native_hybrid_batch_production(m,regions,input,options,births,caller;
-                                                size_field=nothing,optimize_pyramids::Float64=0.0)
+                                                size_field=nothing,optimize_pyramids::Float64=0.0,
+                                                periodic_surface_pairs=nothing)
     isfinite(optimize_pyramids) || throw(ArgumentError("$caller: hybrid batch Pyramid setting must be finite"))
     options.optimize_netgen==0 || throw(ArgumentError("$caller: hybrid batch Netgen optimization is not implemented"))
     groups,receipts=_model_native_hybrid_groups(m,regions,input,caller)
@@ -46,9 +64,11 @@ function _model_native_hybrid_batch_production(m,regions,input,options,births,ca
     _model_native_hybrid_global_size_seeds(m,input,caller)
     for receipt in receipts,tag in receipt.regions
         m.meshing.algorithm_3d==1 && isempty(get(m.embeds,(3,tag),NTuple{2,Int}[])) &&
-            !get(m.meshing.reverse,(3,tag),false) && get(m.meshing.smoothing,(3,tag),0)==0 &&
-            isempty(_model_volume_periodic_surface_constraints(m,tag,caller)) || throw(ArgumentError(
+            !get(m.meshing.reverse,(3,tag),false) && get(m.meshing.smoothing,(3,tag),0)==0 || throw(ArgumentError(
                 "$caller: hybrid batch has unsupported selected Region planner attributes"))
+    end
+    for receipt in receipts
+        _model_native_hybrid_batch_periodic_certificate(m,receipt,periodic_surface_pairs,optimize_pyramids,caller)
     end
     deferred=_ModelMesh1DOptions((name===:optimize ? 0 : getfield(options,name)
         for name in fieldnames(_ModelMesh1DOptions))...)
@@ -58,7 +78,7 @@ function _model_native_hybrid_batch_production(m,regions,input,options,births,ca
     for receipt in receipts
         current=_ModelNativeVolumeBirths(node_clock,element_clock)
         group=_model_native_hybrid_connected_production(m,receipt,deferred,current,caller;
-            size_field,optimize_pyramids)
+            size_field,optimize_pyramids,periodic_surface_pairs)
         for (tag,product) in group.products
             haskey(products,tag) && throw(ArgumentError("$caller: hybrid batch repeats a selected Region product"))
             products[tag]=product
@@ -88,6 +108,7 @@ function _model_native_hybrid_batch_production(m,regions,input,options,births,ca
             plans[tag],mixed,product.boundary_node_tags,caller)
         validate(mixed).ok || throw(ArgumentError("$caller: hybrid batch produces invalid typed cells"))
         _model_native_hybrid_volume_certificate(mixed,product.boundary_node_tags,product.constructor,caller)
+        _model_native_hybrid_periodic_boundary_certificate(m,tag,product.constructor,periodic_surface_pairs,caller)
         geometry=_model_explicit_volume_geometry(m,tag,caller;_mesh_input=input,_mesh1d_options=options)
         _model_certify_explicit_volume_semantics(mixed,tag,geometry.expected_volume,
             geometry.comparison_scale,caller)

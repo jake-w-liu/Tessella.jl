@@ -56,8 +56,9 @@ evidence for the current atomic behavior.
 
 The `open` binding is local to API. Internal view-writer stream calls explicitly
 use `Base.open`, and no filename method is added to `Base.open`. `Elements`
-readers remain available for detached mesh reads. A session `merge(filename)`
-frontend remains separate work; the existing GEO `Merge` statement is supported.
+readers remain available for detached mesh reads. The separate
+[session `merge(filename)` frontend](model_merge.md) stages changes against the
+current model while retaining its slot; GEO `Merge` statements remain supported.
 
 The opt-in regression `test/interfaces/api_model_import_functional_test.jl`
 passed 74 checks. A second opt-in regression,
@@ -78,3 +79,12 @@ three-node mesh generation. Public Gmsh 4.15.2 controls cover model/filename/vie
 empty-current reuse, duplicate names, and declared GEO names. The
 [Gmsh API manual](https://www.gmsh.info/doc/texinfo/gmsh.html) distinguishes opening
 a new model from merging model data into the current model.
+
+A later bounded rollback regression fixes the staged homology callback to
+accept the actual AbortOnError value and journal errors before publication.
+Standalone GEO diagnostics retain their behavior. The updated numeric, homology
+and selector4 opt-in expectations assert atomic failed file opening; native
+success records and direct API diagnostic expectations remain unchanged. The
+focused Julia1.12 reader passed133 checks in5.28 s warm, including3 syntax
+checks and130 public behavior checks. Earlier actual MethodError and harness
+setup failures remain archived in the current handoff.

@@ -57,3 +57,8 @@ initial coarse-boundary fixture rejection and the corrected fixture target.
 Actual TF3 retained intervals produced a norm2.0000000000052314, so target2.0
 was too tight; target2.01 passes the same strict independent norm certificate.
 The failed receipt and actual boundary dump remain preserved.
+
+The [explicit tensor API endpoint](api_metric_surfaces.md) exposes this
+constructor using the selected session background field and staged
+classification/UID publication. It retains the ordinary native algorithm
+dispatch and its BAMG guard.

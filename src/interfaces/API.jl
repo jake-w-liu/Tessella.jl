@@ -34,6 +34,10 @@ write(stream::Base.IO,values...)=Base.write(stream,values...)
 # The filename importer has its own binding; stream I/O remains Base.open.
 function open end
 
+# Model-file merge is local; existing NamedTuple/Dict merges retain Base behavior.
+function merge end
+merge(values...)=Base.merge(values...)
+
 using ..Predicates: orient3, O3DERRBOUND_A
 using ..Recombine: recombine_triangles, _recombine_triangles
 using ..Elements: ElementBlock, msh_family, msh_dimension, msh_spec
@@ -121,7 +125,7 @@ import ..GeoExec
 using ..GeoExec: execute_geo
 using ..Post: Post
 
-export initialize, finalize, clear, option, model, mesh, open_geo!, write, open
+export initialize, finalize, clear, option, model, mesh, open_geo!, write, open, merge
 
 # Entity classification snapshot for the session mesh cache, derived from the
 # canonical `model_to_mixed` projection at generation time. `mesh` is the exact
@@ -8595,12 +8599,14 @@ include("APIGenerate01Geometry.jl")
 include("APITaggedMutations.jl")
 include("APIGenerationLabels.jl")
 include("APIGenerateHigher.jl")
+include("APIMetricSurface.jl")
 include("APINativeRecombine.jl")
 include("APINativeRecombineViews.jl")
 include("APINativeViewPartition.jl")
 include("APINativeViewWriter.jl")
 include("APIModelExport.jl")
 include("APIModelImport.jl")
+include("APIModelMerge.jl")
 include("APINativeOptimize.jl")
 include("APINativeRelocate3D.jl")
 include("APIMeshHomologyNative.jl")
@@ -9820,7 +9826,7 @@ end
 
 """Gmsh-style mesh generation, mutation, bulk retrieval, and periodic operations."""
 module mesh
-using ..API: _generate,_get_mesh,_get_nodes,_get_node,
+using ..API: _generate,_generate_metric_surface,_get_mesh,_get_nodes,_get_node,
              _get_nodes_for_physical_group,_get_embedded,_get_sizes,
              _get_elements,_get_element,
              _get_element_types,
@@ -9873,6 +9879,26 @@ priority. Tags, classified ownership and coincident source identities survive
 queries and supported mutations. Failed generation leaves the live state intact.
 """
 generate(dim::Integer)=_generate(dim)
+
+"""
+    generate_metric_surface(tag; max_metric_edge=1.0,
+                            max_nodes=10_000_000, max_triangles=20_000_000)
+
+Mesh the model's single linear Plane Surface using its selected tensor-valued
+background field. This Tessella endpoint uses conforming interior-edge bisection
+and certifies each actual edge against the full metric at its endpoints and
+midpoint. Existing straight boundary Curve cells must already satisfy the bound;
+they are retained rather than split. Mesh size bounds and factor are applied once
+by the selected background wrapper. Mesh.Renumber and Mesh.SaveAll retain their
+usual publication semantics.
+
+The first scope excludes Regions, transfinite or recombined Surfaces, extrusion,
+periodicity, embeddings, explicit Surface smoothing, and MeshOnlyEmpty/OnlyVisible.
+ElementOrder and held input cells must be first order. Failed production leaves
+the mesh, classifications and UID clocks unchanged. This endpoint does not
+select or implement native BAMG algorithm 7.
+"""
+generate_metric_surface(tag;kwargs...)=_generate_metric_surface(tag;kwargs...)
 get()=_get_mesh()
 
 """

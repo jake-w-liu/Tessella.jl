@@ -24,7 +24,7 @@ function check_state(expected)
     end
     @test [A.mesh.get_max_node_tag(),A.mesh.get_max_element_tag()]==UInt64.(expected["maxima"])
 end
-@testset "native GEO numeric options persist and inherit into API generation" begin
+@testset "GEO numeric options persist on success and roll back on import failure" begin
     artifact=joinpath(ROOT,"test","artifacts","numeric_geo_option_native_v1.toml")
     packet=TOML.parsefile(artifact)
     @test bytes2hex(sha256(replace(read(artifact,String),"\r\n"=>"\n")))==
@@ -42,6 +42,7 @@ end
                     A.mesh.add_nodes(0,77,[777],[7.0,7.0,7.0])
                     A.mesh.add_elements_by_type(77,15,[888],[777])
                 end
+                before_options=Dict(key=>A.option(key) for key in keys(expected["options"]))
                 before=(A.model.get_entities(),A.mesh.get_nodes(),A.mesh.get_elements(),
                     A.mesh.get_max_node_tag(),A.mesh.get_max_element_tag())
                 mktempdir() do directory
@@ -55,7 +56,10 @@ end
                         failure isa ErrorException && (@test sprint(showerror,failure)==expected["failure"])
                     end
                 end
-                for (key,value) in expected["options"]
+                # Native failure snapshots retain file writes; API import
+                # now stages those writes until successful publication.
+                wanted_options=isempty(expected["failure"]) ? expected["options"] : before_options
+                for (key,value) in wanted_options
                     @test bits([A.option(key)])==bits([value])
                 end
                 if name=="aborting"

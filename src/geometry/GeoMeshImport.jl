@@ -428,6 +428,29 @@ function _geo_stage_mesh_file(file;context_lc=1.0,forced_bbox=false)
         native_element_lookup_receipt=context.native_element_lookup_receipt)
 end
 
+# Seed only actual operation-owned mesh state, retaining carrier/event bindings.
+function _geo_seed_mesh_context!(context,seed)
+    for name in (:mesh,:mesh_parts,:mesh_part_rows,:mesh_geometry_parts,
+            :mesh_node_owner,:mesh_node_parametric,:mesh_node_max,:mesh_element_max,
+            :native_element_lookup_receipt)
+        setfield!(context,name,getproperty(seed,name))
+    end
+    return nothing
+end
+
+function _geo_stage_mesh_merge(file,model,seed;context_lc=1.0,forced_bbox=false)
+    context=_GeoNumericContext();_geo_seed_mesh_context!(context,seed)
+    context.file_name=String(file)
+    context.native_context_lc=context_lc
+    context.native_context_forced_bbox=forced_bbox
+    _geo_import_mesh_file!(model,context,file,"API.merge")
+    return (model=model,mesh=context.mesh,params=nothing,transfinite_tri=nothing,
+        mesh_node_max=context.mesh_node_max,mesh_element_max=context.mesh_element_max,
+        native_context_lc=context.native_context_lc,
+        native_context_forced_bbox=context.native_context_forced_bbox,
+        native_element_lookup_receipt=context.native_element_lookup_receipt)
+end
+
 function _geo_import_mesh_file!(m,context,file,caller)
     _geo_import_cleared_native_factory!(m,context,file,caller) && return nothing
     mixed,identities=Elements._read_mixed_msh_with_identities(file)
@@ -489,6 +512,12 @@ function _geo_import_mesh_file!(m,context,file,caller)
         end
         authority=Model._ModelMeshAuthority(authority.mesh,authority.products,authority.done,
             authority.private_rank,native_inputs,carrier,rows,producer_rows,authority.carrier_cells)
+        # Untouched Surface products keep their actual producer constructor
+        # vectors. Their literal UID/owner/cyclic connectivity is revalidated;
+        # imports that add nodes or cells on that owner invalidate its receipt.
+        constructors=Dict(owner=>constructor for (owner,constructor) in
+            previous.surface_constructor_inputs if !(owner in touched))
+        authority=Model._model_mesh_with_surface_constructor_inputs(authority,constructors;caller)
     end
     # Construct the complete candidate and all product slices before records
     # are changed; unsupported import guards cannot leave half-imported cells.
@@ -496,6 +525,10 @@ function _geo_import_mesh_file!(m,context,file,caller)
     carrier_owners=_geo_actual_carrier_owners(authority,carrier)
     geometry_receipt=_geo_geometry_rebind_receipt(authority,carrier,
         context.mesh_geometry_parts,nothing,caller)
+    if previous!==nothing && previous.emitted_geometry!==nothing && geometry_receipt!==nothing
+        authority=Model._model_mesh_with_emitted_receipt(authority,
+            geometry_receipt.parts,geometry_receipt.rows;caller)
+    end
     _geo_merge_discrete!(m,incoming,caller)
     # Later imports can raise the model dimension; previous Ghost entities
     # retain the kind and partition chosen at their own read-time event.

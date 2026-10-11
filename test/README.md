@@ -11,7 +11,8 @@ boundaries and explicit plane UV/rigid-transform chains, complete quadratic
 Hex, Pyramid13 and orders3–10 Curve VTK export, actual two-Tet partition
 interfaces, closed Tri3-BRep seam transport and ghost queries, complete
 catalogued high-order Surface/Volume VTK, directional constant-tensor
-box and shared-material grids, floating-point Pyramid options and CLI help/version. It needs
+box and shared-material grids, floating-point Pyramid options, CLI help/version
+and read-only MSH checking, plus atomic current-model opening and merging. It needs
 no external mesher or solver.
 
 Run the default suite from the repository root. The runner automatically uses
@@ -42,8 +43,10 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
-| Julia 1.12.7 | Ordinary `Pkg.test()`, automatic minimal compilation | 214 | 49.28 s |
-| Julia 1.13.1 | Ordinary `Pkg.test()`, automatic minimal compilation | 214 | 38.93 s |
+| Julia 1.12.7 | Ordinary `Pkg.test()`, automatic minimal compilation | 218 | 45.41 s |
+| Julia 1.13.1 | Ordinary `Pkg.test()`, automatic minimal compilation | 218 | 38.66 s |
+| Julia 1.12.7 | Preceding ordinary package invocation | 214 | 49.28 s |
+| Julia 1.13.1 | Preceding ordinary package invocation | 214 | 38.93 s |
 | Julia 1.12.7 | Preceding ordinary package invocation | 209 | 46.49 s |
 | Julia 1.13.1 | Preceding ordinary package invocation | 209 | 39.23 s |
 | Julia 1.12.7 | Preceding ordinary package invocation | 207 | 45.23 s |
@@ -65,11 +68,15 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 214-assertion package bodies took 11.1/10.9 s on Julia 1.12.7/1.13.1.
-Cold elapsed times include about 31/25 s of precompilation.
+The current 218-assertion package bodies took11.1/10.8 s onJulia1.12.7/1.13.1.
+Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. Logs and actual exit-zero receipts are
-`test/tmp/ordinary_default_214_{112,113}_20261011.*`. The preceding 209-check
+`test/tmp/ordinary_default_218_{112,113}_20261011.*`. The same249 Source files
+remained frozen throughout both calls. Only two file-merge and two read-only
+CLI assertions were added; periodic Volume, tensor production, native and solver
+campaigns remain opt-in. The preceding214-check bodies took11.1/10.9 s and
+qualify their own Source. The preceding 209-check
 bodies took 11.1/10.7 s and qualify their own Source. The preceding 207-check
 bodies took 10.1 s on both runtimes and qualify their own Source. The preceding203-check
 bodies took10.4 s on both; their receipts remain separate. The preceding 201-check

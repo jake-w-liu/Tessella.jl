@@ -243,7 +243,8 @@ function (background::_ModelNativeHybridRegionBackground)(x,y,z,tag)
 end
 
 function _model_native_hybrid_connected_production(m,component,options,births,caller;
-                                                   size_field=nothing,optimize_pyramids::Float64=0.0)
+                                                   size_field=nothing,optimize_pyramids::Float64=0.0,
+                                                   periodic_surface_pairs=nothing)
     # Tet optimization is deferred until every selected component has
     # completed construction with its continuing global factory clocks.
     component isa _ModelNativeHybridComponentReceipt && !isempty(component.regions) &&
@@ -256,10 +257,10 @@ function _model_native_hybrid_connected_production(m,component,options,births,ca
         "$caller: hybrid connected production changes its current declared Region or lower constructor receipt"))
     for tag in component.regions
         isempty(get(m.embeds,(3,tag),NTuple{2,Int}[])) &&
-            !get(m.meshing.reverse,(3,tag),false) && get(m.meshing.smoothing,(3,tag),0)==0 &&
-            isempty(_model_volume_periodic_surface_constraints(m,tag,caller)) || throw(ArgumentError(
+            !get(m.meshing.reverse,(3,tag),false) && get(m.meshing.smoothing,(3,tag),0)==0 || throw(ArgumentError(
                 "$caller: hybrid connected production has unsupported current Region planner attributes"))
     end
+    _model_native_hybrid_batch_periodic_certificate(m,component,periodic_surface_pairs,optimize_pyramids,caller)
     triangles=_model_native_hybrid_global_triangles(m,component.input,caller)
     seeds=_model_native_hybrid_global_size_seeds(m,component.input,caller)
     constructor=component.constructor
@@ -332,6 +333,7 @@ function _model_native_hybrid_connected_production(m,component,options,births,ca
         region_constructor=_model_native_hybrid_volume_input(m,tag,component.input,caller)
         region_constructor!==nothing || throw(ArgumentError("$caller: hybrid connected Region loses its current lower constructor"))
         _model_native_hybrid_volume_certificate(mixed,node_uids,region_constructor,caller)
+        _model_native_hybrid_periodic_boundary_certificate(m,tag,region_constructor,periodic_surface_pairs,caller)
         products[tag]=_ModelNativeHybridVolumeProduction(mixed,node_uids,insertion.node_high_water,
             work.temporary_elements,vcat(insertion.element_numbers[tet_columns],pyramids.element_tags[pyramid_columns]),
             pyramids.element_high_water,component.input,region_constructor,

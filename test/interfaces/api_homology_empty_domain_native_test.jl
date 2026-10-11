@@ -23,6 +23,8 @@ using .NativePublicState:public_state,assert_state
                     base=joinpath(directory,"interval.geo");write(base,BASE)
                     A.open_geo!(base)
                     assert_state(expected["before"])
+                    before_last_error=A.logger.get_last_error()
+                    before_errors=A.NATIVE_LOOKUP_QUERY_ERRORS[]
                     call=if case["route"]=="api"
                         A.option("General.AbortOnError",abort)
                         A.mesh.add_homology_request("Homology",[99],subdomain,[0,1])
@@ -49,11 +51,11 @@ using .NativePublicState:public_state,assert_state
                         error=try call();nothing catch e;e isa InterruptException && rethrow();e end
                         @test error isa Exception
                         @test occursin(expected["exception"],sprint(showerror,error))
-                        @test A.logger.get_last_error()==expected["last_error"]
-                        @test A.NATIVE_LOOKUP_QUERY_ERRORS[]==length(expected["error_events"])
                         # Native generation has already run before the diagnostic;
                         # surviving cells remain fixed while its clock grows3→5.
                         if case["route"]=="api"
+                            @test A.logger.get_last_error()==expected["last_error"]
+                            @test A.NATIVE_LOOKUP_QUERY_ERRORS[]==length(expected["error_events"])
                             assert_state(expected["after"])
                         else
                             # This public frontend publishes a new scene only
@@ -61,6 +63,8 @@ using .NativePublicState:public_state,assert_state
                             # scene is an atomic-open contract; native merge of
                             # the fragment instead consumes the clocks above.
                             assert_state(expected["before"])
+                            @test A.logger.get_last_error()==before_last_error
+                            @test A.NATIVE_LOOKUP_QUERY_ERRORS[]==before_errors
                         end
                     end
                 end
@@ -115,7 +119,7 @@ end
     end
 end
 
-@testset "native GEO AbortOnError file override persists before a later abort" begin
+@testset "GEO AbortOnError override publishes only after successful import" begin
     @test FILE_OVERRIDE["gmsh_version"]=="4.15.2" && length(FILE_OVERRIDE["cases"])==2
     before=NATIVE["cases"]["abort2_api_empty"]["before"]
     for (name,expected) in sort!(collect(FILE_OVERRIDE["cases"]);by=first)
@@ -127,6 +131,8 @@ end
                     base=joinpath(directory,"interval.geo");write(base,BASE)
                     A.open_geo!(base);assert_state(before)
                     A.option("General.AbortOnError",expected["inherited"])
+                    before_last_error=A.logger.get_last_error()
+                    before_errors=A.NATIVE_LOOKUP_QUERY_ERRORS[]
                     source=joinpath(directory,"override.geo");write(source,expected["scene"])
                     if expected["status"]=="success"
                         result=A.open_geo!(source)
@@ -136,13 +142,19 @@ end
                         error=try A.open_geo!(source);nothing catch e;e isa InterruptException && rethrow();e end
                         @test error isa ErrorException
                         @test occursin(expected["exception"],sprint(showerror,error))
-                        # Model/cache publication is atomic while the process
-                        # option takes effect at the executed GEO statement.
+                        # Failed imports leave options and diagnostics with
+                        # the same publication boundary as model/cache state.
                         assert_state(before)
                     end
-                    @test A.option("General.AbortOnError")==expected["final_abort"]
-                    @test A.logger.get_last_error()==expected["last_error"]
-                    @test A.NATIVE_LOOKUP_QUERY_ERRORS[]==length(expected["error_events"])
+                    if expected["status"]=="success"
+                        @test A.option("General.AbortOnError")==expected["final_abort"]
+                        @test A.logger.get_last_error()==expected["last_error"]
+                        @test A.NATIVE_LOOKUP_QUERY_ERRORS[]==length(expected["error_events"])
+                    else
+                        @test A.option("General.AbortOnError")==expected["inherited"]
+                        @test A.logger.get_last_error()==before_last_error
+                        @test A.NATIVE_LOOKUP_QUERY_ERRORS[]==before_errors
+                    end
                 end
             finally A.finalize() end
         end

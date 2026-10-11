@@ -12,7 +12,72 @@ small real fixtures. Full native-oracle sweeps, source/AST audits, memory stress
 benchmarks, the 22 HFSS cases, aggregate validation, and external ASCENT solves
 are opt-in campaigns. See [test/README.md](test/README.md).
 
-### Current atomic model opening, mapped STEP, planar sheets and variable metrics
+### Current tensor API, periodic batches, session merge and CLI checking
+
+The combined Source passes ordinary **218/218 on BOTH** supported runtimes,
+actual exit0 on the same frozen249 Source files: Julia1.12.7 **45.41 s/body11.1 s**;
+Julia1.13.1 **38.66 s/body10.8 s**. Receipts:
+`test/tmp/ordinary_default_218_{112,113}_20261011.*`; exact Source map:
+`test/tmp/ordinary_default_218_frozen_source_20261011.json`, aggregateSHA
+`073c58f46f55dec91e10c05c456f424e7185969dc9a4b97d3ce3168a5e35e158`.
+Only two file-merge and two read-only CLI checks enter the default. Native,
+actual hybrid Volume, tensor production and solver campaigns remain opt-in.
+
+Reviewed packets and bounded qualifications:
+
+- `C:/tmp/tessella_takeover_api_metric_surface_20261011/ready.json`:
+  explicit [tensor API](docs/api_metric_surfaces.md), three Source paths,
+  opt-in47 and scope doc. Actual47/47, Julia1.13 exit0/49.80 s including loading.
+  Selected tensor background, factor/caps once, exact retained lower cells,
+  classified UID publication and regeneration pass. Earlier failures exposed
+  native first-order reconstruction renewing retained Line labels and unused
+  predecessor rows entering constructor capture; tensor-only transport fixes
+  both. Ordinary generation and the native7/BAMG guard remain unchanged.
+- `C:/tmp/tessella_hybrid_periodic_batch_20261011/selected_periodic_batch_packet.json`:
+  three Source paths, opt-in74 and [periodic scope](docs/periodic_hybrid_boundaries.md).
+  Actual74/74, Julia1.12 exit0/67.52 s. One translated actual copied Surface pair
+  per separate hybrid Region, default Pyramid optimization and pre/post-volume
+  lower certificates pass. Cross/shared Region, general affine and missing-copy
+  contexts retain precise guards. Live P2 queries have9 pairs; default MSH4
+  stores4 primary pairs. Native renumbering changes old interior tag roles.
+  V1/V2 incorrect fixture assumptions remain archived; Source stayed frozen.
+- `C:/tmp/tessella_takeover_model_merge_20261011/selected_model_merge_packet.json`:
+  five Source paths, opt-in46+default2 and [merge scope](docs/model_merge.md).
+  Actual48/48, Julia1.13 exit0/44.52 s. Current slot/name/filename/view bindings,
+  literal MSH2/4 four encodings and UID metadata, seeded GEO entities/fields,
+  periodic geometry before meshing, clearing commands and unchanged actual
+  Quad constructor receipts pass. Review fixed export-only seeding and absent
+  post-GEO authority handling. Native public cache observation reproduces the
+  raw-node held-writer error; the fixture uses public explicit cache rebuilding,
+  preserving native lookup semantics. Parse and prior failed receipts remain.
+- `C:/tmp/tessella_cli_check_20261011/cli_check_v1.receipt.json`:
+  [read-only CLI MSH checking](docs/cli_controls.md), one Source path,
+  opt-in20+default2. Actual exit0, Julia1.13/35.63 s including loading. All four
+  encodings, unchanged files, duplicate/missing-reference errors and conflicting
+  flags pass. This is structural validation, not curved-Jacobian certification.
+- `C:/tmp/tessella_atomic_open_legacy_tests_20261011/review/receipts/attempt3.*`:
+  actual133/133, Julia1.12 exit0/5.28 s warm (3 syntax+130 public checks).
+  A real staged homology callback arity defect produced MethodError; it now
+  accepts the actual AbortOnError value and stages diagnostics without direct
+  precommit stderr. Standalone behavior remains. Three older opt-in tests now
+  assert atomic GEO-failure state/options/diagnostics; original native success
+  and direct API errors remain. Two failed harness receipts are preserved.
+
+Root composed independent Higher metric/periodic deltas and API metric/merge
+bindings against their saved bases, retaining the shared homology fix. Selected
+integration manifests are `test/tmp/integrated_periodic_api_metric_paths_20261011.json`
+and `test/tmp/integrated_model_merge_paths_20261011.json`. Only selected files
+were promoted; unrelated untracked files and failed receipts remain.
+This implementation increment follows publishedMain`d1d7088`; Git records its
+normal publication SHA and the remote is checked after pushing.
+
+Next isolated work is rigid Cartesian STEP mapped targets (`concise_tests`),
+actual n-gon planar sheets (`implementation_audit`), and lossless list-POS
+open/merge importing (`devin_reconcile`). Their candidate proofs are separate
+from this published Source. Continue the full genuine backlog below; P1–P6
+remain open and the active goal must not be marked complete.
+
+### Preceding atomic model opening, mapped STEP, planar sheets and variable metrics
 
 The merged Source adds atomic direct GEO/MSH opening, literal rigid mapped
 STEP occurrences, one/two-Tri embedded planar sheets and an explicit variable
@@ -77,9 +142,8 @@ Only selected paths were copied; all saved Source bases matched (LF normalizatio
 for Git is accounted for). Source remained frozen during final package checks.
 Preserve the two unrelated untracked files and all failed receipts.
 
-Next isolated Source: translated periodic pairs in two separated hybrid Regions
-(`concise_tests`), an explicit API metric frontend (`implementation_audit`),
-and direct session `merge` staging (`devin_reconcile`). Native6 opaque tensor
+Those periodic/API-metric/session-merge packets are integrated in the current
+section above. Native6 opaque tensor
 controls keep the same actual mesh when transverse tensor entries change;
 native7 changes interiors and is a real BAMG kernel gap. Keep native6 semantics
 and the native7 guard; do not relabel bisection as BAMG. Continue the full remaining
@@ -494,8 +558,9 @@ backlog rather than the older expensive verification queue:
    one actual connected Line2 Curve in a convex hybrid Region is also implemented.
    One strictly interior planar Surface with one or two actual Tri3 cells and
    actual Point/Line boundaries is implemented too. Multiple retained Point/Curve constraints are implemented
-   in one convex Region. Periodic multi-Region, sheets beyond two Tri cells,
-   Quad sheets and general
+   in one convex Region. Separate periodic Region components now admit one
+   translated pair each. Shared/cross-Region and general-affine periodic contexts,
+   sheets beyond two Tri cells, Quad sheets and general
    hybrid recovery remain open.
    Public region reverse/smoothing are
    native no-ops, so they are not missing Gmsh Region features.
@@ -518,7 +583,8 @@ backlog rather than the older expensive verification queue:
    metrics; constant-tensor boxes/shared-Region grids now generate meshes too.
    An explicit variable-tensor ordinary planar Surface constructor is implemented,
    with unchanged lower boundaries and a sampled metric-edge certificate.
-   Native anisotropic algorithm/API behavior, variable-metric volumes and
+   Its explicit API frontend consumes the selected tensor background. Full
+   native anisotropic algorithm behavior, variable-metric volumes and
    automatic-sizing parity remain unfinished.
 5. Extend mixed-surface relocation and hybrid/high-order optimization and
    Netgen-equivalent behavior. Winslow1 and nonzero separate/shared-Tri Region
@@ -539,7 +605,8 @@ backlog rather than the older expensive verification queue:
    are implemented within the linked format scopes. CLI sizing/order and
    standalone help/version controls are implemented too. Direct current-model
    MSH2.2/4.1 writing and atomic direct GEO/MSH opening are implemented.
-   Session merging and additional formats remain open.
+   Atomic session GEO/MSH merging and read-only CLI MSH checking are implemented.
+   List-POS importing and additional formats remain open.
 10. Close native matching chronology and requirement-level differential parity.
     Large P6/HFSS/ASCENT campaigns remain opt-in verification, not routine tests.
 
