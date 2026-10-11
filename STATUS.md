@@ -145,6 +145,31 @@ default suite is **246/246 on both Julia1.12.7 and1.13.1**, actual exit0,
 with `brep_cone_smoke.jl` added. CAD04 remains open (curved trims, NURBS
 topology, nonlinear UV charts, analytic registry).
 
+### STEP meridian-certified TOROIDAL_SURFACE segments (2026-10-12)
+
+Devin landed the fourth CAD04 slice: a three-face shell of one
+`TOROIDAL_SURFACE` lateral face plus two `PLANE` caps imports as a
+partial-angle torus segment. `_step_torus_segment_shell` certifies rim
+`CIRCLE`s of the minor radius centred on the tube circle inside meridian
+planes containing the axis, optional open seam arcs on surface parallels
+(`(rho-R)^2+h^2=r^2`), lateral vertices on the surface on a rim plane, and
+caps each binding closed circles of one rim in its meridian plane; cap
+face orientations disambiguate the two complementary sweeps (lower cap
+outward normal opposes the revolution tangent, upper agrees). Emission
+uses the new `_torus_segment_surface` partial generator (non-wrapped
+revolution rows plus meridian cap fans). Focused checks pass27/27
+(`test/geometry/brep_step_torus_segment_functional_test.jl` on new
+`brep_occ_torus_segment.step`, a quarter torus R=3,r=1): validated
+boundary, bounding box, positive outward signed volume against the
+analytic segment volume, metre-context scaling, eight rejection shapes,
+single-face torus regression. Toroidal boundaries remain hard
+tetrahedralizer inputs (the pre-existing full-torus fill was never
+exercised; `fill=true` grinds through bounded recovery before its
+explicit blocker), so checks exercise `fill=false`. The ordinary default
+suite is **249/249 on both Julia1.12.7 and1.13.1**, actual exit0, with
+`brep_torus_segment_smoke.jl` added. CAD04 remains open (curved trims,
+NURBS topology, nonlinear UV charts, analytic registry).
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

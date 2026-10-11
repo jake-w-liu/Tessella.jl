@@ -222,6 +222,39 @@ volume inside10%, metre-context scaling, ten rejection shapes, and the
 `brep_cone_smoke.jl` added. CAD04 remains open for curved trims, NURBS
 topology, nonlinear UV charts and the analytic registry.
 
+### STEP meridian-certified TOROIDAL_SURFACE segments verified (2026-10-12)
+
+Devin landed the fourth CAD04 slice in `BRep.jl`. A three-face closed shell
+— one `TOROIDAL_SURFACE` lateral face plus two `PLANE` caps — imports as a
+partial-angle torus segment through `_step_torus_segment_shell` and the new
+`_torus_segment_surface` generator (revolution rows swept over the certified
+u-span without wraparound, plus a fan disc per meridian end cap). The
+certificate requires rim `CIRCLE`s of the minor radius centred on the tube
+centre circle in meridian planes containing the axis, optional open seam
+arcs on genuine surface parallels satisfying `(rho-R)^2+h^2=r^2`, every
+lateral vertex on the torus on a rim plane, and caps each binding closed
+circles of a single rim inside its meridian plane. Because two rims bound
+two complementary sweeps, the cap face orientations select the
+materialized segment: the lower cap's outward normal opposes the
+revolution tangent while the upper agrees; same-sign or non-axial
+orientations reject. Partial-meridian rims, off-band or off-surface seam
+parallels, non-meridian rims and cap/rim mismatches reject as malformed or
+trimmed; other shapes keep the existing explicit blockers.
+
+Focused `test/geometry/brep_step_torus_segment_functional_test.jl` passes
+27/27 on the new hand-written `test/fixtures/brep_occ_torus_segment.step`
+(quarter torus R=3,r=1 with an outer-equator seam): validated boundary and
+bounding box, tube-distance law on the lateral nodes, positive outward
+signed volume against `1.5*pi^2`, metre-context scaling, eight rejection
+shapes, and the single-face full-torus regression. Toroidal boundaries
+(full torus or segment) are hard inputs for the current tetrahedralizer —
+the pre-existing full-torus fill was never exercised and a bounded
+recovery grind precedes the explicit blocker — so checks exercise
+`fill=false`. The ordinary default suite is **249/249 on both**
+Julia1.12.7 and1.13.1, actual exit0, with `brep_torus_segment_smoke.jl`
+added. CAD04 remains open for curved trims, NURBS topology, nonlinear UV
+charts and the analytic registry.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

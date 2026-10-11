@@ -35,7 +35,17 @@ axis with axial normals and the radius the semi-angle predicts at that axial
 coordinate, a closed degenerate edge at the apex for a pointed cone, and
 seam segments whose carrier line passes through the apex; off-law radii,
 non-generator seams, missing caps and unclosed rim/apex sets reject as
-malformed or trimmed. Every STEP
+malformed or trimmed. A `TOROIDAL_SURFACE` lateral face plus two `PLANE`
+caps imports as a partial-angle torus segment when the inventory certifies
+it: rim `CIRCLE`s of the minor radius centred on the tube circle inside
+meridian planes containing the axis, optional open seam arcs on surface
+parallels joining the rims, and caps each binding closed circles of one
+rim in its meridian plane. The cap face orientations choose between the
+two complementary sweeps; inconsistent orientations, off-surface parallels
+and non-meridian rims reject. Toroidal boundaries (full torus or segment)
+are hard inputs for the current tetrahedralizer: `fill=true` can spend a
+long recovery before its explicit blocker, so segment checks exercise
+`fill=false`. Every STEP
 solid or primitive wrapped by a unit-bearing shape representation converts by
 its declared SI or conversion-based length factor into millimetres; a solid
 shared by incompatible factors rejects as ambiguous and representations

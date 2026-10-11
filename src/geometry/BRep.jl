@@ -10,9 +10,12 @@ single unbounded `TOROIDAL_SURFACE` face imports as a parametric torus
 boundary, a single `SPHERICAL_SURFACE` face whose boundary loops collapse
 onto the two poles imports as a full sphere, a three-face shell whose
 `CYLINDRICAL_SURFACE` lateral face binds two certified rim circles with
-matching `PLANE` caps imports as a full cylinder, and a `CONICAL_SURFACE`
+matching `PLANE` caps imports as a full cylinder, a `CONICAL_SURFACE`
 lateral face whose certified rim circles (and apex, for a full cone) are
-closed by `PLANE` caps imports as a full cone or frustum. IGES solids
+closed by `PLANE` caps imports as a full cone or frustum, and a
+`TOROIDAL_SURFACE` lateral face bounded by two meridian rim circles closed
+by `PLANE` caps imports as a partial-angle torus segment whose cap face
+orientations select the materialized sweep. IGES solids
 bounded by
 trimmed plane surfaces over line edges
 (144→142/141→102/110 or the 186/514/510/508/504/502 MSBO chain) and IGES
@@ -338,7 +341,9 @@ closed shell bounded by planar faces over straight edges (a single unbounded
 imports as a full sphere, a three-face `CYLINDRICAL_SURFACE`-plus-caps
 shell whose rim circles are certified closed imports as a full cylinder,
 and a `CONICAL_SURFACE`-plus-caps shell whose rims (and apex) are
-certified imports as a full cone or frustum).
+certified imports as a full cone or frustum; a `TOROIDAL_SURFACE`-plus-caps
+shell whose meridian rim circles are certified imports as a partial-angle
+torus segment).
 By default the
 classified boundary is tetrahedralized; `fill=false` returns its validated
 closed triangle surface. Multiple explicitly rooted independent solids return a
@@ -1275,6 +1280,201 @@ function _step_conical_shell(entities,faces,curvekinds,caller)
     return cone_surface(lo[1],z,lo[2],hi[2],hi[3]-lo[3])
 end
 
+# A three-face closed shell — one TOROIDAL_SURFACE lateral face and two PLANE
+# caps — covers a partial-angle torus segment only when the lateral bounds
+# are two rim CIRCLEs lying in meridian planes (each perpendicular to the
+# equatorial plane, containing the axis, centred on the tube circle with the
+# minor radius) joined by optional open seam arcs on surface parallels, and
+# each cap binds closed circles of one rim in the same meridian plane. The
+# cap face orientations disambiguate which of the two complementary segments
+# is materialized: the outward cap normal at the lower end opposes the
+# revolution tangent while the upper end agrees with it. Anything else is a
+# genuine trim and stays unsupported. Returns nothing when the face
+# inventory is not this shape; throws on certified mismatches.
+function _step_torus_segment_shell(entities,faces,curvekinds,caller)
+    length(faces)==3 || return nothing
+    torus_index=0;plane_indices=Int[]
+    for (i,face) in enumerate(faces)
+        face.surf===nothing && return nothing
+        if face.surf.kind=="TOROIDAL_SURFACE"
+            torus_index==0 || return nothing; torus_index=i
+        elseif face.surf.kind=="PLANE"
+            push!(plane_indices,i)
+        else
+            return nothing
+        end
+    end
+    (torus_index!=0 && length(plane_indices)==2) || return nothing
+    all(f->f.rings!==nothing,faces) || return nothing
+    torus_face=faces[torus_index]
+    center,z,x,R,r=_step_torus_params(entities,torus_face.surf,caller)
+    z=_brep_vunit(z,caller)
+    x=x===nothing ? _brep_default_x(z,caller) : _brep_ortho(x,z,caller)
+    y=_brep_vcross(z,x)
+    tol=1e-9*max(R,1.0);atol=1e-9
+
+    fe=_deref_entity(entities,(:ref,torus_face.id))
+    fe===nothing && throw(ArgumentError(
+        "$caller: toroidal face #$(torus_face.id) record is missing"))
+    edges=_step_face_edge_bounds(entities,fe,curvekinds,caller)
+
+    # Rim circles carry (centre, normal). Open CIRCLE edges are seam
+    # candidates: arcs on surface parallels (coaxial, axial normal, radius
+    # within the tube band) joining one rim plane to the other.
+    qc=Tuple{NTuple{3,Float64},NTuple{3,Float64}}[]
+    seams=Tuple{NTuple{3,Float64},NTuple{3,Float64}}[]
+    for (v1,v2,base) in edges
+        if base.kind!="CIRCLE"
+            push!(curvekinds,base.kind)
+            return nothing
+        end
+        center_c,cn,cr=_step_circle_frame(entities,base,caller)
+        if v1==v2
+            # Meridian rim: minor radius, on the tube centre circle, in a
+            # vertical plane containing the axis.
+            abs(cr-r)<=tol || throw(ArgumentError(
+                "$caller: rim CIRCLE #$(base.id) radius does not match the "*
+                "toroidal surface"))
+            abs(_brep_axis_dist(center_c,center,z)-R)<=tol ||
+                throw(ArgumentError(
+                    "$caller: rim CIRCLE #$(base.id) center is off the tube "*
+                    "circle"))
+            abs(_brep_vdot(_brep_vsub(center_c,center),z))<=tol ||
+                throw(ArgumentError(
+                    "$caller: rim CIRCLE #$(base.id) center is off the "*
+                    "equatorial plane"))
+            abs(_brep_vdot(cn,z))<=atol || throw(ArgumentError(
+                "$caller: rim CIRCLE #$(base.id) does not lie in a meridian "*
+                "plane"))
+            abs(_brep_vdot(_brep_vsub(center,center_c),cn))<=tol ||
+                throw(ArgumentError(
+                    "$caller: rim CIRCLE #$(base.id) plane does not contain "*
+                    "the torus axis"))
+            abs(sqrt(_brep_vdot(_brep_vsub(v1,center_c),_brep_vsub(v1,center_c)))-cr)<=tol ||
+                throw(ArgumentError(
+                    "$caller: rim CIRCLE #$(base.id) vertex is off the circle"))
+            all(q->sqrt(_brep_vdot(_brep_vsub(q[1],center_c),_brep_vsub(q[1],center_c)))>tol,qc) &&
+                push!(qc,(center_c,cn))
+        else
+            # Parallel seam arc: coaxial circle with axial normal whose
+            # radius stays inside the tube band.
+            _brep_axis_dist(center_c,center,z)<=tol || throw(ArgumentError(
+                "$caller: seam CIRCLE #$(base.id) is not a surface parallel "*
+                "— trimmed tori unsupported"))
+            abs(_brep_vdot(cn,z))>=1.0-atol || throw(ArgumentError(
+                "$caller: seam CIRCLE #$(base.id) is not a surface parallel "*
+                "— trimmed tori unsupported"))
+            (cr>=R-r-tol && cr<=R+r+tol && cr>tol) || throw(ArgumentError(
+                "$caller: seam CIRCLE #$(base.id) radius is outside the "*
+                "torus band — trimmed tori unsupported"))
+            h=_brep_vdot(_brep_vsub(center_c,center),z)
+            abs(sqrt((cr-R)*(cr-R)+h*h)-r)<=tol || throw(ArgumentError(
+                "$caller: seam CIRCLE #$(base.id) is off the toroidal "*
+                "surface — trimmed tori unsupported"))
+            push!(seams,(v1,v2))
+        end
+    end
+    length(qc)==2 || throw(ArgumentError(
+        "$caller: toroidal face #$(torus_face.id) does not bound exactly two "*
+        "rim circles — trimmed tori unsupported"))
+
+    # Every lateral vertex sits on the torus and on a rim plane; seam
+    # endpoints must land on the rim planes too.
+    onrim(p)=any(q->abs(_brep_vdot(_brep_vsub(p,q[1]),q[2]))<=tol,qc)
+    for (v1,v2) in seams
+        (onrim(v1) && onrim(v2)) || throw(ArgumentError(
+            "$caller: seam arc of toroidal face #$(torus_face.id) does not "*
+            "join the rim circles"))
+    end
+    vertices=NTuple{3,Float64}[]
+    for ring in torus_face.rings, p in ring
+        all(q->q!=p,vertices) && push!(vertices,p)
+    end
+    for p in vertices
+        w=_brep_vsub(p,center)
+        rho=_brep_axis_dist(p,center,z); t=_brep_vdot(w,z)
+        d=sqrt((rho-R)*(rho-R)+t*t)
+        abs(d-r)<=tol || throw(ArgumentError(
+            "$caller: toroidal face #$(torus_face.id) boundary vertex is off "*
+            "the toroidal surface"))
+        onrim(p) || throw(ArgumentError(
+            "$caller: toroidal face #$(torus_face.id) boundary vertex is off "*
+            "both rim planes"))
+    end
+
+    # Caps: each bounds only closed circles sharing one rim, and its PLANE
+    # is that rim's meridian plane.
+    covered=falses(2); cap_rim=zeros(Int,2)
+    for (ci,pi) in enumerate(plane_indices)
+        cap=faces[pi]
+        pfe=_deref_entity(entities,(:ref,cap.id))
+        pfe===nothing && throw(ArgumentError(
+            "$caller: cap face #$(cap.id) record is missing"))
+        cedges=_step_face_edge_bounds(entities,pfe,curvekinds,caller)
+        rim=0
+        for (v1,v2,base) in cedges
+            base.kind=="CIRCLE" || (push!(curvekinds,base.kind); return nothing)
+            v1==v2 || throw(ArgumentError(
+                "$caller: cap boundary of toroidal shell face #$(cap.id) is "*
+                "a partial arc"))
+            center_c,cn,cr=_step_circle_frame(entities,base,caller)
+            j=findfirst(q->sqrt(_brep_vdot(_brep_vsub(q[1],center_c),_brep_vsub(q[1],center_c)))<=tol &&
+                        abs(_brep_vdot(q[2],cn))>=1.0-atol &&
+                        abs(cr-r)<=tol,qc)
+            j===nothing && throw(ArgumentError(
+                "$caller: cap CIRCLE #$(base.id) does not close a torus rim"))
+            rim==0 || rim==j || throw(ArgumentError(
+                "$caller: cap of toroidal shell face #$(cap.id) bounds "*
+                "both rim planes"))
+            rim=j
+            abs(sqrt(_brep_vdot(_brep_vsub(v1,center_c),_brep_vsub(v1,center_c)))-cr)<=tol ||
+                throw(ArgumentError(
+                    "$caller: cap CIRCLE #$(base.id) vertex is off the circle"))
+        end
+        rim!=0 || throw(ArgumentError(
+            "$caller: cap of toroidal shell face #$(cap.id) bounds no rim"))
+        p0,pn=_step_plane_frame(entities,cap.surf,caller)
+        abs(_brep_vdot(pn,qc[rim][2]))>=1.0-atol || throw(ArgumentError(
+            "$caller: cap PLANE #$(cap.surf.id) is not a meridian plane"))
+        abs(_brep_vdot(_brep_vsub(qc[rim][1],p0),pn))<=tol || throw(ArgumentError(
+            "$caller: cap PLANE #$(cap.surf.id) does not contain its rim circle"))
+        covered[rim]=true; cap_rim[ci]=rim
+    end
+    all(covered) || throw(ArgumentError(
+        "$caller: toroidal shell caps do not close both rims"))
+
+    # The two complementary u-spans share these rims; the cap face
+    # orientations pick the materialized one. At the lower end the solid's
+    # outward cap normal opposes the revolution tangent; at the upper end it
+    # agrees.
+    u=(0.0,0.0); s=(0.0,0.0)
+    for (k,pi) in enumerate(plane_indices)
+        cap=faces[pi]
+        w=_brep_vsub(qc[cap_rim[k]][1],center)
+        t=_brep_vdot(w,z)
+        ud=_brep_vunit((w[1]-t*z[1],w[2]-t*z[2],w[3]-t*z[3]),caller)
+        uu=atan(_brep_vdot(ud,y),_brep_vdot(ud,x))
+        tang=(-sin(uu)*x[1]+cos(uu)*y[1],
+              -sin(uu)*x[2]+cos(uu)*y[2],
+              -sin(uu)*x[3]+cos(uu)*y[3])
+        _,pn=_step_plane_frame(entities,cap.surf,caller)
+        nout=cap.sense ? pn : (-pn[1],-pn[2],-pn[3])
+        si=_brep_vdot(nout,tang)
+        abs(si)>=1.0-atol || throw(ArgumentError(
+            "$caller: cap face #$(cap.id) orientation does not align with "*
+            "the revolution direction"))
+        u=Base.setindex(u,uu,k); s=Base.setindex(s,si,k)
+    end
+    s[1]*s[2]<0 || throw(ArgumentError(
+        "$caller: toroidal shell cap orientations are inconsistent"))
+    lo_i=s[1]<0 ? 1 : 2
+    u0=u[lo_i]
+    sweep=mod(u[3-lo_i]-u0,2π)
+    (sweep>atol && sweep<2π-atol) || throw(ArgumentError(
+        "$caller: toroidal shell rims do not bound a partial-angle segment"))
+    return _torus_segment_surface(center,z,x,R,r,u0,sweep,caller)
+end
+
 # Pole-free periodic torus boundary: u is the revolution angle, v the meridian
 # angle; the parametric rectangle wraps so seam vertices are shared by index.
 function _torus_surface(center,Z,X,R,r,caller)
@@ -1312,6 +1512,64 @@ function _torus_surface(center,Z,X,R,r,caller)
     diag=validate(surface)
     diag.ok || throw(ErrorException(
         "$caller: torus boundary mesh is invalid — "*join(diag.messages,"; ")))
+    return surface
+end
+
+# Partial-angle torus segment: u sweeps [u0,u0+sweep) while v keeps the full
+# meridian wrap; each end caps with a fan disc in the meridian plane. The
+# lateral quad split mirrors _torus_surface without the u wraparound.
+function _torus_segment_surface(center,Z,X,R,r,u0,sweep,caller)
+    z=_brep_vunit(Z,caller)
+    x=X===nothing ? _brep_default_x(z,caller) : _brep_ortho(X,z,caller)
+    y=_brep_vcross(z,x)
+    nv=_BREP_TORUS_NV
+    nu=max(4,ceil(Int,_BREP_TORUS_NU*sweep/(2π)))
+    nn=_checked_brep_mul(nu+1,nv,caller,"torus segment node count")
+    nn=_checked_brep_add(nn,2,caller,"torus segment node count")
+    nn<=_BREP_MAX_SURFACE_NODES || throw(ArgumentError(
+        "$caller: torus segment boundary exceeds the surface node limit"))
+    nt=_checked_brep_add(_checked_brep_mul(2,_checked_brep_mul(nu,nv,caller,
+        "torus segment triangle count"),caller,"torus segment triangle count"),
+        _checked_brep_mul(2,nv,caller,"torus segment triangle count"),
+        caller,"torus segment triangle count")
+    nt<=_BREP_MAX_SURFACE_TRIS || throw(ArgumentError(
+        "$caller: torus segment boundary exceeds the surface triangle limit"))
+    C=Matrix{Float64}(undef,3,nn)
+    for i in 0:nu
+        u=u0+sweep*i/nu; cu=cos(u); su=sin(u)
+        for j in 0:nv-1
+            v=2π*j/nv; cv=cos(v); sv=sin(v)
+            rho=R+r*cv
+            idx=i*nv+j+1
+            C[1,idx]=center[1]+rho*(cu*x[1]+su*y[1])+r*sv*z[1]
+            C[2,idx]=center[2]+rho*(cu*x[2]+su*y[2])+r*sv*z[2]
+            C[3,idx]=center[3]+rho*(cu*x[3]+su*y[3])+r*sv*z[3]
+        end
+    end
+    lo=(nn-1); hi=nn
+    for (k,u,cap) in ((1,u0,lo),(2,u0+sweep,hi))
+        cu=cos(u); su=sin(u)
+        C[1,cap]=center[1]+R*(cu*x[1]+su*y[1])
+        C[2,cap]=center[2]+R*(cu*x[2]+su*y[2])
+        C[3,cap]=center[3]+R*(cu*x[3]+su*y[3])
+    end
+    T=Matrix{Int32}(undef,3,nt); k=0
+    for i in 0:nu-1, j in 0:nv-1
+        a=Int32(i*nv+j+1);        b=Int32((i+1)*nv+j+1)
+        c=Int32((i+1)*nv+((j+1)%nv)+1); d=Int32(i*nv+((j+1)%nv)+1)
+        k+=1; T[:,k]=[a;b;c]
+        k+=1; T[:,k]=[a;c;d]
+    end
+    for j in 0:nv-1
+        a=Int32(j+1); b=Int32((j+1)%nv+1)
+        k+=1; T[:,k]=[lo;a;b]
+        c=Int32(nu*nv+j+1); d=Int32(nu*nv+(j+1)%nv+1)
+        k+=1; T[:,k]=[hi;d;c]
+    end
+    surface=Mesh(C;tris=T)
+    diag=validate(surface)
+    diag.ok || throw(ErrorException(
+        "$caller: torus segment boundary mesh is invalid — "*join(diag.messages,"; ")))
     return surface
 end
 
@@ -1611,6 +1869,14 @@ function _step_brep_solid(brep::StepEntity,entities,fill;factor::Float64=1.0)
         if cone!==nothing
             cone=_step_unit_scaled(cone,factor)
             return fill ? _filled(cone,caller) : cone
+        end
+    end
+    if any(f->f.surf!==nothing && f.surf.kind=="TOROIDAL_SURFACE",faces) &&
+       length(faces)>1
+        segment=_step_torus_segment_shell(entities,faces,curvekinds,caller)
+        if segment!==nothing
+            segment=_step_unit_scaled(segment,factor)
+            return fill ? _filled(segment,caller) : segment
         end
     end
     planar=!isempty(faces); ntorus=0; torus_face=nothing; nsphere=0; sphere_face=nothing
