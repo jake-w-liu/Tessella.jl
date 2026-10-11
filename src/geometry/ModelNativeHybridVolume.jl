@@ -20,7 +20,7 @@ function _model_native_hybrid_registration_rows(constructor,plan,insertion,node_
         allunique(insertion.node_numbers) && allunique(node_uids) && all(!iszero,node_uids) ||
         throw(ArgumentError("$caller: hybrid registration lacks its actual insertion/Quad birth trace"))
     current=_model_native_hybrid_constructor_input(constructor.input,constructor.boundaries,
-        constructor.node_uids,constructor.coordinates,caller)
+        constructor.node_uids,constructor.coordinates,caller;embedded_point=constructor.embedded_point)
     isequal(current,constructor) || throw(ArgumentError(
         "$caller: hybrid registration changes its restored Region constructor"))
     positions=Dict(uid=>Int32(row) for (row,uid) in enumerate(node_uids))
@@ -61,14 +61,18 @@ function _model_native_hybrid_volume_input(m,tag,input,caller)
         end
     end
     quads || return nothing
-    # meshGRegion's initial MVertex set uses current Face cell incidence.
-    # Unreferenced lower rows remain global records, outside this constructor.
+    embedded_point=_model_native_hybrid_embedded_point_input(m,tag,input,caller)
+    embedded_point===nothing || push!(used,embedded_point.record.uid)
+    # The initial MVertex set consumes actual Face incidence and the selected
+    # embedded Point constructor. Other unreferenced lower rows stay global.
     ids=sort!(collect(used))
     rows=Dict(uid=>Int32(row) for (row,uid) in enumerate(data.external_node_tags))
     all(uid->haskey(rows,uid),ids) || throw(ArgumentError(
         "$caller: hybrid Source cell UID has no current authoritative vertex"))
     coords=actual.coords[:,Int32[rows[uid] for uid in ids]]
-    return _model_native_hybrid_constructor_input(input,boundaries,ids,coords,caller)
+    constructor=_model_native_hybrid_constructor_input(input,boundaries,ids,coords,caller;embedded_point)
+    _model_native_hybrid_point_containment_certificate(constructor,caller)
+    return constructor
 end
 
 # Admit one translated boundary pair only from copyMesh's actual UID events.
@@ -131,7 +135,8 @@ end
 function _model_native_hybrid_volume_production(m,tag,constructor,options,births,caller;
                                                 size_field=nothing,periodic_surface_pairs=nothing)
     _model_native_hybrid_volume_scope(m,tag,constructor,caller)
-    m.meshing.algorithm_3d==1 && isempty(get(m.embeds,(3,tag),NTuple{2,Int}[])) &&
+    m.meshing.algorithm_3d==1 &&
+        (isempty(get(m.embeds,(3,tag),NTuple{2,Int}[])) || constructor.embedded_point!==nothing) &&
         !get(m.meshing.reverse,(3,tag),false) && get(m.meshing.smoothing,(3,tag),0)==0 || throw(ArgumentError(
         "$caller: hybrid Volume requires its owned ordinary Delaunay constructor without additional planner attributes"))
     _model_native_hybrid_periodic_boundary_certificate(m,tag,constructor,periodic_surface_pairs,caller)
@@ -177,6 +182,7 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
     mixed=MixedMesh(mesh.coords,blocks)
     validate(mixed).ok || throw(ArgumentError("$caller: hybrid Volume produces invalid typed cells"))
     _model_native_hybrid_volume_certificate(mixed,work.node_tags,constructor,caller)
+    _model_native_hybrid_embedded_point_certificate(mixed,work.node_tags,constructor,caller)
     _model_native_hybrid_periodic_boundary_certificate(m,tag,constructor,periodic_surface_pairs,caller)
     geometry=_model_explicit_volume_geometry(m,tag,caller;_mesh_input=constructor.input,_mesh1d_options=options)
     _model_certify_explicit_volume_semantics(mixed,tag,geometry.expected_volume,

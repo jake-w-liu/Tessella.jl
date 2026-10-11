@@ -26,3 +26,7 @@ increment and are rejected atomically.
 
 The bounded regression is
 [`api_periodic_hybrid_functional_test.jl`](../test/interfaces/api_periodic_hybrid_functional_test.jl).
+
+One strictly interior Point also has a bounded
+[embedded hybrid context](embedded_hybrid_points.md); general embedded recovery
+and periodic multi-Region composition remain open.

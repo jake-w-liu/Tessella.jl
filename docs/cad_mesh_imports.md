@@ -24,3 +24,17 @@ This operation returns a mesh. It does not populate the Model/OCC registry,
 reconstruct analytic CAD Face/Curve parameter maps or STEP occurrence
 transforms, or provide general assembly/Boolean topology. Trimmed and periodic
 NURBS topology remains a separate implementation track.
+
+Supported planar STEP/IGES Faces can have one outer wire and disjoint inner
+wires. STEP uses FACE_OUTER_BOUND when present; otherwise one wire must uniquely
+contain the others. IGES144 and MSBO510 retain their literal outer/inner wire
+roles. Tessella CDT triangulates the domain without adding unbound vertices.
+Crossing, touching, overlap, wrong winding, nested holes, ambiguous outer roles
+and nonplanarity reject. The existing closed-shell and positive-fill checks
+certify the result; single-wire Faces retain their previous path.
+
+The default hole check imports a static public-OCC-exported STEP square tube
+with fill=false. Full functional checks also cover filled analytic volume 0.75
+and IGES144/510 layouts. The own POLY_LOOP STEP and MSBO fixtures test supported
+mesh-parser records; those two fixtures do not claim native CAD import parity.
+IGES143 multiple boundaries and general curved Face trimming remain unfinished.

@@ -93,6 +93,48 @@ function _native_model_view_csv_payload(exports,kind)
     return take!(io)
 end
 
+# Complete quadratic VTK cells use these parametric node identities. The
+# reference lattice is independent of model coordinates, external UIDs and
+# discontinuous nodal values. See the corresponding Kitware VTK cell classes.
+function _native_model_vtk_quadratic_layout(msh,caller)
+    type,reference = if msh==10
+        (28,((0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.),
+             (.5,0.,0.),(1.,.5,0.),(.5,1.,0.),(0.,.5,0.),(.5,.5,0.)))
+    elseif msh==12
+        (29,((0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.),
+             (0.,0.,1.),(1.,0.,1.),(1.,1.,1.),(0.,1.,1.),
+             (.5,0.,0.),(1.,.5,0.),(.5,1.,0.),(0.,.5,0.),
+             (.5,0.,1.),(1.,.5,1.),(.5,1.,1.),(0.,.5,1.),
+             (0.,0.,.5),(1.,0.,.5),(1.,1.,.5),(0.,1.,.5),
+             (0.,.5,.5),(1.,.5,.5),(.5,0.,.5),(.5,1.,.5),
+             (.5,.5,0.),(.5,.5,1.),(.5,.5,.5)))
+    elseif msh==13
+        (32,((0.,0.,0.),(1.,0.,0.),(0.,1.,0.),
+             (0.,0.,1.),(1.,0.,1.),(0.,1.,1.),
+             (.5,0.,0.),(.5,.5,0.),(0.,.5,0.),
+             (.5,0.,1.),(.5,.5,1.),(0.,.5,1.),
+             (0.,0.,.5),(1.,0.,.5),(0.,1.,.5),
+             (.5,0.,.5),(.5,.5,.5),(0.,.5,.5)))
+    else
+        throw(ArgumentError("$caller: unsupported complete quadratic VTK cell type $msh"))
+    end
+    local_nodes=Elements.lagrange_nodes(msh)
+    identities=Dict{NTuple{3,Float64},Int}()
+    for node in axes(local_nodes,2)
+        identity=ntuple(3) do axis
+            value=local_nodes[axis,node]
+            msh==10 ? (axis==3 ? value : (value+1)/2) :
+                (msh==12 || axis==3 ? (value+1)/2 : value)
+        end
+        haskey(identities,identity) && throw(ArgumentError(
+            "$caller: duplicate canonical node identity for Gmsh element type $msh"))
+        identities[identity]=node
+    end
+    length(identities)==length(reference) && all(haskey(identities,node) for node in reference) ||
+        throw(ArgumentError("$caller: incomplete canonical node mapping for Gmsh element type $msh"))
+    return (type=type,order=[identities[node] for node in reference])
+end
+
 function _native_model_view_vtk_cell(msh,caller)
     linear=msh==15 ? 1 : msh==1 ? 3 : msh==2 ? 5 : msh==3 ? 9 :
         msh==4 ? 10 : msh==5 ? 12 : msh==6 ? 13 : msh==7 ? 14 : nothing
@@ -104,6 +146,7 @@ function _native_model_view_vtk_cell(msh,caller)
     # Gmsh's last two tetrahedral mid-edge nodes are (3,4),(2,4);
     # VTK's are (2,4),(3,4). Geometry and nodal data stay bound to the same UID.
     msh==11 && return (type=24,order=[1,2,3,4,5,6,7,8,10,9])
+    msh in (10,12,13) && return _native_model_vtk_quadratic_layout(msh,caller)
     throw(ArgumentError("$caller: VTK model export has no complete node ordering for Gmsh element type $msh"))
 end
 

@@ -24,7 +24,50 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Planar Face holes, quadratic VTK and embedded hybrid Point (2026-10-11)
+
+Planar STEP/IGES Face imports retain outer/inner wires and triangulate their
+literal domains with Tessella CDT. Missing STEP outer labels require a unique
+containment certificate; touching, crossing, nesting, nonplanarity and invalid
+winding reject. Existing closed-shell/positive-volume certificates and the
+single-wire path remain. The focused run passes 159/159 on Julia 1.13.1,
+actual exit 0 in 131.50 seconds including precompilation: 59 hole checks,
+96 prior assembly checks and four default boundary-only checks. It includes a
+genuine public-OCC-exported STEP square tube of analytic volume 0.75. See
+[mesh CAD scope](docs/cad_mesh_imports.md); curved trimming remains open.
+
+Model VTK adds complete Quad9, Hex27 and Prism18 reference-node layouts.
+View-data row tags now use the existing checked UInt64 validator instead of a
+signed Int parser. Invalid tags reject before mutation; exact identities and
+all vector/time rows persist. Pyramid14 still rejects before opening output.
+The isolated Julia 1.13.1 run passes 112/112, actual exit 0 in 39.76 seconds;
+Root's integrated Julia 1.12.7 full regression passes 109/109 in 6.18 seconds.
+Its package/default checks include the separate three Hex27 assertions.
+Public native observations confirm element-tag constructor normalization;
+huge native model-view calls faulted, so their Tessella support has no native
+parity claim. See [model export scope](docs/model_view_exports.md).
+
+A single strictly interior Point is now consumed from its actual Point15/UID
+constructor in one convex explicit hybrid Region. Exact coordinates, Point
+ownership and UID survive internal Volume stages; a closed connected Tet star
+proves volume incidence. Outside/boundary Points and missing provenance reject
+atomically. Point23 plus existing periodic47 pass 70/70 on Julia 1.13.1,
+actual exit 0 in 87.07 seconds including precompilation. See
+[embedded scope](docs/embedded_hybrid_points.md); general embedded hybrid
+Curves/Surfaces and multi-Region contexts remain open.
+
+The same final integrated Source passes 180/180 default package assertions on
+both supported runtimes with minimal compilation, bounds checks and one thread:
+Julia 1.12.7 actual exit 0 in 38.97 seconds (body 7.2 s); Julia 1.13.1 actual
+exit 0 in 42.20 seconds (body 6.2 s). Receipts/logs:
+`test/tmp/final_default_112_20261011.*` and `final_default_113_20261011.*`.
+Historical native/solver/stress suites remain opt-in. Full P1–P6 parity is open;
+next isolated tasks are IGES143 planar boundaries, constant-tensor box generation
+and nonzero pyramid behavior.
+
 ### CLI sizing, order and information controls (2026-10-11)
+
+Published and normally pushed as `a36070f`; the remote SHA was verified.
 
 The CLI adds `-clscale`, `-clmin`, `-clmax` and `-order`, plus standalone
 `-help`/`--help` and `-version`/`--version`. Forced numeric values retain

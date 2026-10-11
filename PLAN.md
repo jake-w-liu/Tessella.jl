@@ -8,9 +8,9 @@ remain **in progress**.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 173 assertions; its minimally compiled test body took 5.3 seconds
-on Julia 1.13.1 (5.71 seconds warm overall). The preceding 171-assertion cold
-package run took 40.61 seconds including precompilation.
+suite now passes 180 assertions on Julia 1.12.7 and 1.13.1; minimally compiled
+test bodies took 7.2 and 6.2 seconds. Cold package runs took 38.97 and 42.20
+seconds including precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
 and [test/README.md](test/README.md) describes routine and extended tests.
@@ -154,8 +154,11 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 Current bounded additions include [CLI sizing/order controls](docs/cli_controls.md),
 [model CSV/VTK exports](docs/model_view_exports.md)
 and [one translated copied Surface pair in a hybrid Region](docs/periodic_hybrid_boundaries.md).
-General high-order format coverage, periodic multi-Region composition, embedded
-hybrid recovery, and full CAD/NURBS assembly topology remain open.
+Complete Quad9, Hex27 and Prism18 VTK layouts, planar STEP/IGES Face holes, and
+[one embedded Point in a convex hybrid Region](docs/embedded_hybrid_points.md)
+are also implemented. General high-order formats, periodic multi-Region
+composition, embedded Curve/Surface hybrid recovery and full CAD/NURBS assembly
+topology remain open.
 
 ## Gmsh parity tracks
 
@@ -236,7 +239,8 @@ complex rational instances) and IGES 126/128 import as native NURBS objects, wit
 IGES NURBS export. Any other topology is
 an explicit failure listing the seen entity types. Multiple recognized explicit roots
 with strictly disjoint bounding boxes return classified independent mixed meshes;
-this does not reconstruct CAD assembly occurrences or analytic Face maps. See
+supported planar Faces can retain disjoint inner wires and triangulate their
+holes. This does not reconstruct CAD assembly occurrences or analytic Face maps. See
 [mesh import scope](docs/cad_mesh_imports.md). The entity kernel records native
 boxes, cylinders, spheres, cones, toruses, Boolean volumes (operation-time
 operand snapshots for meshing plus a materialized result boundary for

@@ -1404,8 +1404,9 @@ function _higher_hybrid_volume_input_classification(assembly,m,production,input,
     mesh=production.mesh;source_tags=production.boundary_node_tags
     constructor=production.constructor
     Model._model_native_hybrid_constructor_input(input,constructor.boundaries,
-        constructor.node_uids,constructor.coordinates,caller)
+        constructor.node_uids,constructor.coordinates,caller;embedded_point=constructor.embedded_point)
     Model._model_native_hybrid_volume_certificate(mesh,source_tags,constructor,caller)
+    Model._model_native_hybrid_embedded_point_certificate(mesh,source_tags,constructor,caller)
     length(source_tags)==nnodes(mesh) && allunique(source_tags) && all(!iszero,source_tags) ||
         throw(ArgumentError("$caller: hybrid Volume lacks complete current UID rows"))
     actual=input.mesh;data=actual.entity_data

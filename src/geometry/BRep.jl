@@ -20,6 +20,8 @@ using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
 using ..Mesh3D: tetrahedralize
 using ..MeshTypes: Mesh, validate, nnodes, ntets, tet_volume, node, bounding_box
 using ..Elements: MixedMesh, ElementBlock, MixedEntity, MixedEntityData
+using ..Predicates: orient2
+import ..Mesh2D
 using ..NURBS: NURBSCurve, NURBSSurface
 
 export import_step, import_iges, parse_step_entities
@@ -405,6 +407,7 @@ function _filled(surface::Mesh, caller)
 end
 
 include("BRepAssembly.jl")
+include("BRepPlanarFaces.jl")
 
 # ── closed-shell BRep solids (planar polyhedra and full tori) ─────────────────
 
@@ -571,6 +574,7 @@ function _step_face_parts(entities,fe,curvekinds,caller)
         flag===nothing || (sense=flag)
     end
     rings=Vector{NTuple{3,Float64}}[]
+    outer=Int[]
     straight=true
     for bref in bounds
         be=_deref_entity(entities,bref)
@@ -587,6 +591,17 @@ function _step_face_parts(entities,fe,curvekinds,caller)
         flag=_brep_enum(be.args[3])
         flag===nothing || flag || reverse!(ring)
         push!(rings,ring)
+        be.kind=="FACE_OUTER_BOUND" && push!(outer,length(rings))
+    end
+    if length(rings)>1
+        length(outer)<=1 || throw(ArgumentError(
+            "$caller: holed face #$(fe.id) declares multiple FACE_OUTER_BOUND wires"))
+        if isempty(outer)
+            rings=_brep_face_outer_wire_order(rings,caller)
+        else
+            index=only(outer)
+            rings=vcat(rings[index:index],rings[1:index-1],rings[index+1:end])
+        end
     end
     return rings,surf,sense,straight
 end
@@ -1026,9 +1041,7 @@ function _step_brep_solid(brep::StepEntity,entities,fill)
     planar=!isempty(faces); ntorus=0; torus_face=nothing
     for face in faces
         face.rings===nothing && (planar=false; continue)
-        length(face.rings)>1 && throw(ArgumentError(
-            "$caller: face #$(face.id) has $(length(face.rings)) boundary loops — "*
-            "inner loops (holes) are not supported"))
+        isempty(face.rings) && (planar=false;continue)
         ring=face.rings[1]
         if face.surf===nothing
             _check_poly_face(ring,face.id,caller)
@@ -1042,8 +1055,7 @@ function _step_brep_solid(brep::StepEntity,entities,fill)
         face.straight || (planar=false)
     end
     if planar
-        rings=[only(f.rings) for f in faces]
-        surface=_polyhedral_surface(rings,[f.role for f in faces],caller)
+        surface=_polyhedral_surface_faces([f.rings for f in faces],[f.role for f in faces],caller)
         return fill ? _filled(surface,caller) : surface
     end
     if ntorus==1 && length(faces)==1 && torus_face.rings!==nothing &&
@@ -1498,14 +1510,13 @@ function _iges_face144(types,params,bad,de,curvekinds,caller)
     n2=_iges_param_int(rec,4,caller,"inner-boundary count")
     n2>=0 || throw(ArgumentError("$caller: trimmed surface #$de has a negative inner count"))
     length(rec)>=5+n2 || throw(ArgumentError("$caller: trimmed surface #$de is truncated"))
-    n2==0 || throw(ArgumentError(
-        "$caller: trimmed surface #$de has $n2 inner boundaries — face holes are not supported"))
     stype=get(types,surf_de,0)
     stype!=0 || throw(ArgumentError(
         "$caller: trimmed surface #$de references missing surface #$surf_de"))
     n1==0 || n1==1 || throw(ArgumentError(
         "$caller: trimmed surface #$de outer-boundary flag $n1 is invalid"))
     if n1==0
+        n2==0 || throw(ArgumentError("$caller: trimmed surface #$de has inner wires without an outer wire"))
         stype==198 || throw(ArgumentError(
             "$caller: trimmed surface #$de on type $stype has no outer boundary"))
         return Vector{NTuple{3,Float64}}[],stype,surf_de
@@ -1514,7 +1525,13 @@ function _iges_face144(types,params,bad,de,curvekinds,caller)
     ptro!=0 || throw(ArgumentError(
         "$caller: trimmed surface #$de has no outer boundary"))
     ring=_iges_boundary(types,params,bad,ptro,curvekinds,caller)
-    rings=ring===nothing ? Vector{NTuple{3,Float64}}[] : Vector{NTuple{3,Float64}}[ring]
+    ring===nothing && return Vector{NTuple{3,Float64}}[],stype,surf_de
+    rings=Vector{NTuple{3,Float64}}[ring]
+    for index in 1:n2
+        inner=_iges_boundary(types,params,bad,_iges_param_int(rec,5+index,caller,"inner boundary"),curvekinds,caller)
+        inner===nothing && return Vector{NTuple{3,Float64}}[],stype,surf_de
+        push!(rings,inner)
+    end
     return rings,stype,surf_de
 end
 
@@ -1526,17 +1543,22 @@ function _iges_face510(types,params,bad,de,curvekinds,caller)
     length(rec)>=4 || throw(ArgumentError("$caller: face #$de is truncated"))
     surf_de=_iges_param_int(rec,2,caller,"face surface")
     n=_iges_param_int(rec,3,caller,"face loop count")
-    _iges_param_int(rec,4,caller,"face outer-loop flag")
+    outer=_iges_param_int(rec,4,caller,"face outer-loop flag")
     n>=1 || throw(ArgumentError("$caller: face #$de has no boundary loops"))
-    n==1 || throw(ArgumentError(
-        "$caller: face #$de has $n loops — inner loops (holes) are not supported"))
+    n==1 || outer in (0,1) || throw(ArgumentError(
+        "$caller: holed face #$de has an invalid outer-loop flag"))
     length(rec)>=4+n || throw(ArgumentError("$caller: face #$de is truncated"))
     stype=get(types,surf_de,0)
     stype!=0 || throw(ArgumentError(
         "$caller: face #$de references missing surface #$surf_de"))
-    ring=_iges_loop508(types,params,bad,
-        _iges_param_int(rec,5,caller,"face loop"),curvekinds,caller)
-    rings=ring===nothing ? Vector{NTuple{3,Float64}}[] : Vector{NTuple{3,Float64}}[ring]
+    rings=Vector{NTuple{3,Float64}}[]
+    for index in 1:n
+        ring=_iges_loop508(types,params,bad,
+            _iges_param_int(rec,4+index,caller,"face loop"),curvekinds,caller)
+        ring===nothing && return Vector{NTuple{3,Float64}}[],stype,surf_de
+        push!(rings,ring)
+    end
+    n>1 && outer==0 && (rings=_brep_face_outer_wire_order(rings,caller))
     return rings,stype,surf_de
 end
 
@@ -1571,10 +1593,9 @@ function _iges_plane_params(types,params,bad,surf_de,caller)
     return nothing
 end
 
-# Returns (ring, orientation flip) pairs grouped per face, plus surface types.
+# Return literal wire groups per Face, preserving outer/inner boundary roles.
 function _iges_brep_faces(types,params,bad,msbo,trimmed,bounded,caller)
-    facerecs=Tuple{Vector{NTuple{3,Float64}},Int,Int}[]  # (ring, role, surf_de)
-    flips=Bool[]
+    facerecs=Tuple{Vector{Vector{NTuple{3,Float64}}},Int,Int}[]
     curvekinds=Set{Int}(); seen=Set{Int}()
     for de in msbo
         rec=_iges_rec(params,bad,de,caller)
@@ -1605,22 +1626,15 @@ function _iges_brep_faces(types,params,bad,msbo,trimmed,bounded,caller)
                 flip=(fof==0)!=(sflag==0)
                 for r in rings
                     flip && reverse!(r)
-                    push!(facerecs,(r,role,surf_de))
                 end
-                isempty(rings) && push!(facerecs,(NTuple{3,Float64}[],role,surf_de))
+                push!(facerecs,(rings,role,surf_de))
             end
         end
     end
     for de in trimmed
         rings,stype,surf_de=_iges_face144(types,params,bad,de,curvekinds,caller)
         push!(seen,stype)
-        if isempty(rings)
-            push!(facerecs,(NTuple{3,Float64}[],1,surf_de))
-        else
-            for r in rings
-                push!(facerecs,(r,1,surf_de))
-            end
-        end
+        push!(facerecs,(rings,1,surf_de))
     end
     for de in bounded
         rec=_iges_rec(params,bad,de,caller)
@@ -1638,7 +1652,7 @@ function _iges_brep_faces(types,params,bad,msbo,trimmed,bounded,caller)
         push!(seen,stype)
         ring=_iges_boundary(types,params,bad,
             _iges_param_int(rec,5,caller,"bounded surface boundary"),curvekinds,caller)
-        push!(facerecs,(ring===nothing ? NTuple{3,Float64}[] : ring,1,surf_de))
+        push!(facerecs,(ring===nothing ? Vector{NTuple{3,Float64}}[] : [ring],1,surf_de))
     end
     return facerecs,curvekinds,seen
 end
@@ -1646,28 +1660,32 @@ end
 function _iges_brep_surface(types,params,bad,transforms,msbo,trimmed,bounded,caller)
     facerecs,curvekinds,seen=_iges_brep_faces(types,params,bad,msbo,trimmed,bounded,caller)
     planar=!isempty(facerecs); ntorus=0; torus_de=0
-    rings=Vector{NTuple{3,Float64}}[]; roles=Int[]
-    for (ring,role,surf_de) in facerecs
+    face_rings=Vector{Vector{NTuple{3,Float64}}}[]; roles=Int[]
+    for (rings,role,surf_de) in facerecs
         stype=get(types,surf_de,0)
         if stype==198 || stype==120
             planar=false; ntorus+=1; torus_de=surf_de; continue
         end
         if stype==108 || stype==190
-            isempty(ring) && (planar=false; continue)
+            isempty(rings) && (planar=false; continue)
             plane=_iges_plane_params(types,params,bad,surf_de,caller)
             nrm,p0=plane
-            scale=_ring_scale(ring)
-            _check_coplanar(ring,nrm,p0,1e-9*max(scale,1.0),surf_de,caller)
-            push!(rings,ring); push!(roles,role); continue
+            for ring in rings
+                scale=_ring_scale(ring)
+                _check_coplanar(ring,nrm,p0,1e-9*max(scale,1.0),surf_de,caller)
+            end
+            push!(face_rings,rings); push!(roles,role); continue
         end
         planar=false
     end
     if planar
-        surface=_polyhedral_surface(rings,roles,caller)
+        surface=_polyhedral_surface_faces(face_rings,roles,caller)
         return surface
     end
     if ntorus==1 && length(facerecs)==1
-        ring=facerecs[1][1]
+        rings=facerecs[1][1]
+        length(rings)<=1 || throw(ArgumentError("$caller: holed curved faces are not supported"))
+        ring=isempty(rings) ? NTuple{3,Float64}[] : only(rings)
         if get(types,torus_de,0)==120
             return _iges_torus120(
                 types,params,bad,transforms,torus_de,ring,caller)

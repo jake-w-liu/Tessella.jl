@@ -12,9 +12,9 @@ P1–P6 tracks**, with ASCENT meshing capabilities prioritized.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 173 assertions; its minimally compiled test body took 5.3 seconds
-on Julia 1.13.1 (5.71 seconds warm overall). The preceding 171-assertion cold
-package run took 40.61 seconds including precompilation.
+suite now passes 180 assertions on Julia 1.12.7 and 1.13.1; minimally compiled
+test bodies took 7.2 and 6.2 seconds. Cold package runs took 38.97 and 42.20
+seconds including precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
 and [test/README.md](test/README.md) describes routine and extended tests.
@@ -32,7 +32,10 @@ Model views also export [CSV and VTK](docs/model_view_exports.md), preserving
 UIDs, ownership, sparse time steps and full supported connectivity. Recognized
 independent STEP/IGES solids import as [classified mixed meshes](docs/cad_mesh_imports.md).
 One translated copied Surface pair is supported in an
-[ordinary hybrid Region](docs/periodic_hybrid_boundaries.md).
+[ordinary hybrid Region](docs/periodic_hybrid_boundaries.md), and a strictly
+interior [embedded Point](docs/embedded_hybrid_points.md) can be recovered in a
+convex hybrid shell. Supported planar STEP/IGES Faces retain outer/inner wires
+and triangulate holes; general curved CAD trimming remains open.
 
 ```julia
 using Tessella

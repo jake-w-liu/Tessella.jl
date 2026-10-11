@@ -329,4 +329,7 @@ using Tessella
     include(joinpath(@__DIR__, "..", "interfaces/api_model_view_export_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_periodic_hybrid_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/cli_options_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "interfaces/api_vtk_p2_families_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "interfaces/api_hybrid_embedded_point_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "geometry/brep_planar_faceholes_functional_test.jl"))
 end

@@ -17,9 +17,11 @@ node UIDs. Data records retain every stored component row, time and UID;
 
 Model VTK writes ASCII legacy unstructured grids. Linear Point, Line,
 Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism and Pyramid cells, plus
-quadratic Line3, Triangle6 and Tetrahedron10, are supported. Other higher-order
-layouts fail before opening the destination. Cells retain their full supported
-connectivity; the Tet10 edge-node permutation preserves existing identities.
+quadratic Line3, Triangle6, Tetrahedron10, Quad9, Hex27 and Prism18, are supported.
+Other higher-order layouts fail before opening the destination. Complete quadratic
+layouts use the VTK reference-node ordering, with connectivity and data bound to
+the original UIDs. Pyramid14 still rejects: the standard quadratic VTK pyramid
+has 13 nodes, so dropping its additional node would lose stored data.
 
 NodeData uses point arrays, ElementData uses cell arrays, and ElementNodeData
 uses separate per-cell points to preserve discontinuous values. Unreferenced
@@ -42,3 +44,9 @@ supports `vtktypeuint64` for exact identities and NaN for missing values.
 Its [quadratic tetrahedron topology](https://github.com/Kitware/VTK/blob/master/Common/DataModel/vtkQuadraticTetra.cxx)
 defines the target mid-edge order. Reader compatibility was reviewed in the
 primary source; an external VTK reader was not run locally.
+
+Model-data row tags accept checked UInt64 identities, including values beyond
+signed Int64. Boolean, negative, nonintegral and overflowing tags are rejected
+before mutation. This follows Tessella's owned UID storage; huge model-view tags
+are not a pinned native-parity claim. Their public native observation faulted,
+while the bounded Tessella regression verifies data and exact export identities.

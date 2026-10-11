@@ -20,4 +20,6 @@ include("functional/fixtures.jl")
     include("functional/brep_assembly_smoke.jl")
     include("functional/model_view_export.jl")
     include("functional/cli_information.jl")
+    include("functional/vtk_complete_hex.jl")
+    include("functional/brep_planar_faceholes_smoke.jl")
 end

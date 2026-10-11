@@ -16,10 +16,11 @@ review and do not qualify Root V24, release V6, or a new full-wave campaign.
 Tessella currently supports Julia 1.12.x and 1.13.x; the older external solver
 results retain their original environment and provenance.
 
-Use [`HANDOFF.md`, continuation 2026-10-10](HANDOFF.md#continuation-handoff-2026-10-10)
-for current implementation/verification, live reader ownership, and the required
-normal push to `main`. The full parity goal remains unfinished; Root V24 and
-release V6 remain unqualified at that handoff. No new ASCENT/HFSS result is claimed.
+For current implementation, verification and process ownership, use the
+[2026-10-11 takeover handoff](HANDOFF.md#takeover-2026-10-11). Root V24 and
+release V6 were unqualified at the historical 2026-10-10 handoff; the takeover
+records the subsequent reviewed integration and normal pushes to `main`.
+The full parity goal remains unfinished. No new ASCENT/HFSS result is claimed.
 
 **Scope of this file:** everything about Tessella *feeding* the external ASCENT FEM
 solver and the HFSS validation campaign. Tessella's own development (the mesher:

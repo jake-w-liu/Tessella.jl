@@ -112,18 +112,43 @@ the periodic v2 wrapper failed only on a missing copied prism artifact despite
 47 passing periodic checks; the later integrated wrapper above actually exits 0.
 The final CAD schema guard supersedes only the earlier 95-check candidate.
 
-The subsequent CLI increment adds forced sizing/order flags and standalone
+Published `a36070f32d2594a94911c2e7efe905d1f1745105` (remote verified)
+adds forced sizing/order flags and standalone
 help/version commands; see [controls](docs/cli_controls.md). Its focused public
 regression plus default checks pass 29 assertions, actual exit 0 in 4.08 s warm.
 The current standalone default passes 173/173, actual exit 0 in 5.71 s warm;
 body 5.3 s. No new cold package timing is claimed for this increment. Logs:
 `test/tmp/cli_options_20261011_v3.*` and `functional_default_cli_20261011.*`.
 
-Next isolated work is planar CAD Face holes at
-`C:/tmp/tessella_takeover_brep_faceholes_20261011`, quadratic non-simplex VTK
-layouts at `C:/tmp/tessella_takeover_vtk_p2_families_20261011`, and genuinely
-embedded-Point hybrid fill. These next candidates still require actual small
-public checks. Never infer full roadmap closure from the current package check.
+The next integrated increment completes planar Face holes, VTK Quad9/Hex27/
+Prism18, checked UInt64 view-data tags and one genuinely embedded Point in a
+convex hybrid Region. Final frozen packets:
+`C:/tmp/tessella_takeover_brep_faceholes_20261011/selected_faceholes_packet.json`
+(159 actual exit 0 / 131.50 s),
+`C:/tmp/tessella_takeover_vtk_p2_families_20261011/ready.json`
+(112 actual exit 0 / 39.76 s), and
+`C:/tmp/tessella_hybrid_embedded_point_20261011/FINAL_PACKET.md`
+(Point23 + periodic47, 70 actual exit 0 / 87.07 s).
+Their full regressions remain opt-in. Default gained only three Hex27 and
+four boundary-only CAD assertions. Preserve failed P2 fixture receipts;
+requested/actual element UID normalization was a fixture assumption, not a
+writer loss. The final UInt64 view parser is an actual owned-data fix; huge
+native view calls faulted and are not a parity claim.
+
+Root composed only the qualified view-tag hunk into current API.jl, preserving
+Main's newer setter dispatch. Both final package checks use the same integrated
+Source and pass 180/180, actual exit 0: Julia 1.12.7 38.97 s/body7.2 s;
+Julia 1.13.1 42.20 s/body6.2 s. Logs and receipts:
+`test/tmp/final_default_112_20261011.*` and `final_default_113_20261011.*`.
+Root's earlier integrated Julia1.12 view regression passed 109/109 in 6.18 s.
+See [CAD](docs/cad_mesh_imports.md), [view](docs/model_view_exports.md) and
+[embedded Point](docs/embedded_hybrid_points.md) scopes.
+
+Next isolated implementations: IGES143 multiple planar boundaries, explicit
+constant Metric3 box generation and actual nonzero pyramid behavior. Existing
+refinement and Surface meshing already consume directional metrics; structured
+constant-tensor box construction is a bounded additional path, not full native
+metric parity. Never infer full roadmap closure from the current package check.
 
 The public hybrid regression fixed missing OptimizePyramids registration,
 omitted TF Surface constructor transport, and narrow batch snapshot dictionary
@@ -145,16 +170,20 @@ backlog rather than the older expensive verification queue:
 
 1. Extend hybrid/ordinary region composition to embedded and general periodic contexts.
    Multi-region batching and one translated copied pair in a single hybrid Region
-   are implemented; periodic multi-Region and embedded hybrid recovery remain open.
+   and one strictly interior Point in a convex hybrid Region are implemented;
+   periodic multi-Region and embedded Curve/Surface hybrid recovery remain open.
    Public region reverse/smoothing are
    native no-ops, so they are not missing Gmsh Region features.
 2. Complete general CAD assembly and trimmed/periodic NURBS topology. Recognized
    explicit independent STEP/IGES mesh roots are implemented; CAD occurrence
    transforms, analytic Face reconstruction and general assembly are still open.
+   Planar STEP/IGES Face holes are implemented; curved trims and general NURBS
+   topology remain unfinished.
 3. Complete curved analytic Surface high-order placement and generated Surface/
    Volume orders above two. Curve orders 1–10 are already implemented.
-4. Implement directional metric-driven meshing and the native automatic-sizing
-   octree path; scalar field evaluation alone does not close P1.
+4. Complete general metric-driven generation and the native automatic-sizing
+   octree path. Existing Surface meshing and Volume refinement consume directional
+   metrics; field evaluation alone does not close P1.
 5. Extend mixed-surface relocation and hybrid/high-order optimization, including
    nonzero pyramid optimization and Netgen-equivalent behavior.
 6. Complete remaining ordinary meshing algorithms and curved/boundary-layer

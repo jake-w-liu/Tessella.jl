@@ -9158,10 +9158,7 @@ function _view_add_model_data(tag,step,model_name,data_type,tags,data,
         view=_session_view(tag,caller)
         entity_tags=Vector{UInt64}(undef,length(tags))
         for (i,value) in enumerate(tags)
-            entry=_mesh_query_integer(value,caller,"tags entry")
-            entry>=0 || throw(ArgumentError(
-                "$caller: tags entry must be nonnegative"))
-            entity_tags[i]=UInt64(entry)
+            entity_tags[i]=_mesh_query_uid(value,caller,"tags entry")
         end
         flat=nested ? [value for row in data for value in row] : data
         counts=nested ? Int32[length(row) for row in data] :
