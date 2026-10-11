@@ -457,7 +457,7 @@ end
 
 # addListData stores one element at a time: all x coordinates, then all y,
 # all z, and component/node values for every time step (Gmsh tutorial x3).
-function _native_list_view_pos(view,caller)
+function _native_list_view_pos(view,caller;name=view.name)
     elements=Post.PosElement[]
     for type_key in view.list_types
         layout=get(Post._POS_RECORD_TYPES,type_key,nothing)
@@ -483,7 +483,109 @@ function _native_list_view_pos(view,caller)
             push!(elements,Post.PosElement(kind,coords,values))
         end
     end
-    return Post.PosView(view.name;elements)
+    return Post.PosView(name;elements)
+end
+
+
+# Raw TXT uses the model writer's numeric corner records. CSV separates the
+# same fields with commas. A row is one element/time pair, with the step, time,
+# list entity (0), element ordinal, XYZ and components repeated per corner.
+function _native_list_view_text_payload(parsed,separator::Char)
+    io=IOBuffer()
+    for step in eachindex(parsed.time),(ordinal,element) in enumerate(parsed.elements)
+        first_value=true
+        for node in axes(element.coords,2)
+            for value in (step-1,parsed.time[step],0,ordinal-1)
+                first_value || print(io,separator)
+                @printf(io,"%.17g",value);first_value=false
+            end
+            for axis in 1:3
+                print(io,separator);@printf(io,"%.17g",element.coords[axis,node])
+            end
+            for component in axes(element.values,1)
+                print(io,separator);@printf(io,"%.17g",element.values[component,node,step])
+            end
+        end
+        separator==' ' && print(io,' ')
+        println(io)
+    end
+    return take!(io)
+end
+
+function _native_list_view_vtk_values(io,elements,step)
+    for element in elements,node in axes(element.values,2)
+        for component in axes(element.values,1)
+            component==1 || print(io,' ')
+            @printf(io,"%.17g",element.values[component,node,step])
+        end
+        println(io)
+    end
+end
+
+function _native_list_view_vtk_payload(parsed,caller)
+    elements=parsed.elements
+    components=isempty(elements) ? 1 : size(first(elements).values,1)
+    all(element->size(element.values,1)==components,elements) || throw(ArgumentError(
+        "$caller: VTK list export requires a common scalar, vector or tensor component count"))
+    cell_types=(point=1,line=3,triangle=5,quadrangle=9,tetrahedron=10,
+        hexahedron=12,prism=13,pyramid=14)
+    all(element->haskey(cell_types,element.kind) && element.scheme===nothing &&
+        isempty(element.suffix),elements) || throw(ArgumentError(
+        "$caller: VTK list export supports only linear point, line, triangle, quadrangle, "*
+        "tetrahedron, hexahedron, prism and pyramid cells"))
+    points=foldl((count,element)->Base.checked_add(count,size(element.coords,2)),elements;init=0)
+    cell_size=Base.checked_add(points,length(elements))
+    io=IOBuffer()
+    println(io,"# vtk DataFile Version 2.0\nTessella list view\nASCII\nDATASET UNSTRUCTURED_GRID")
+    println(io,"POINTS ",points," double")
+    # A list element owns its corner values. Coincident coordinates cannot
+    # identify shared points: adjacent elements may carry discontinuous data.
+    for element in elements,node in axes(element.coords,2)
+        @printf(io,"%.17g %.17g %.17g\n",element.coords[1,node],element.coords[2,node],element.coords[3,node])
+    end
+    println(io,"CELLS ",length(elements),' ',cell_size)
+    offset=0
+    for element in elements
+        count=size(element.coords,2);print(io,count)
+        for node in 0:count-1;print(io,' ',offset+node);end
+        println(io);offset+=count
+    end
+    println(io,"CELL_TYPES ",length(elements))
+    for element in elements;println(io,getproperty(cell_types,element.kind));end
+    println(io,"FIELD FieldData 1\nTIME 1 ",length(parsed.time)," double")
+    for (step,time) in enumerate(parsed.time)
+        step==1 || print(io,' ');@printf(io,"%.17g",time)
+    end
+    println(io)
+    println(io,"POINT_DATA ",points)
+    if components==9
+        # Legacy TENSORS are symmetric. A FIELD array retains all nine public
+        # tensor components, including nonsymmetric input, for every time step.
+        println(io,"FIELD ListData ",length(parsed.time))
+        for step in eachindex(parsed.time)
+            println(io,"step_",step-1," 9 ",points," double")
+            _native_list_view_vtk_values(io,elements,step)
+        end
+    else
+        for step in eachindex(parsed.time)
+            if components==1
+                println(io,"SCALARS step_",step-1," double 1\nLOOKUP_TABLE default")
+            else
+                println(io,"VECTORS step_",step-1," double")
+            end
+            _native_list_view_vtk_values(io,elements,step)
+        end
+    end
+    return take!(io)
+end
+
+function _native_list_view_payload(parsed,extension,caller)
+    extension==".txt" && return _native_list_view_text_payload(parsed,' ')
+    extension==".csv" && return _native_list_view_text_payload(parsed,',')
+    extension==".vtk" && return _native_list_view_vtk_payload(parsed,caller)
+    extension==".pos" || throw(ArgumentError("$caller: unsupported list export format"))
+    io=IOBuffer();Post.write_pos(io,parsed)
+    return take!(io)
 end
 
 function _view_write(tag,filename,append=false)
@@ -496,14 +598,21 @@ function _view_write(tag,filename,append=false)
         extension in (".msh",".pos",".txt",".csv",".vtk") || throw(ArgumentError(
             "$caller: this view export format is not implemented"))
         if isempty(view.model_step_ranges)
-            extension==".pos" || throw(ArgumentError(
-                "$caller: list-based views currently support only .pos export"))
-            parsed=_native_list_view_pos(view,caller)
-            io=IOBuffer();Post.write_pos(io,parsed);bytes=take!(io)
+            extension in (".pos",".txt",".csv",".vtk") || throw(ArgumentError(
+                "$caller: list-based views support .pos, .txt, .csv and .vtk export"))
+            extension==".vtk" && append_value && throw(ArgumentError(
+                "$caller: appending list data to a VTK file is not supported"))
+            # Text/VTK need the checked geometry/value decoder but do not use
+            # POS's quoted view name grammar.
+            parsed=_native_list_view_pos(view,caller;name=extension==".pos" ? view.name : "")
+            bytes=_native_list_view_payload(parsed,extension,caller)
             Sys.iswindows() && (bytes=Vector{UInt8}(codeunits(replace(String(bytes),"\n"=>"\r\n"))))
             _native_diagnostic_emit_locked(:info,"Writing '$filename'...")
-            !iszero(get(OPTIONS,"PostProcessing.Binary",0.0)) &&
-                _native_diagnostic_emit_locked(:warning,"Only parsed .pos files can be exported for this view type")
+            if !iszero(get(OPTIONS,"PostProcessing.Binary",0.0))
+                message=extension==".pos" ? "Only parsed .pos files can be exported for this view type" :
+                    "Only ASCII list data can be exported in $extension format"
+                _native_diagnostic_emit_locked(:warning,message)
+            end
             open(filename,append_value ? "a" : "w") do stream;write(stream,bytes);end
             _native_diagnostic_emit_locked(:info,"Done writing '$filename'")
             return nothing

@@ -52,7 +52,8 @@ It checks one cube and two-region batching, positive volume, exterior UID
 conformity, public model-view MSH export and failure atomicity.
 
 Raw diagnostic/failed receipts remain in `test/tmp/` and the C:/tmp packets;
-only actual drained exit-0 runs are green. Source is frozen for these checks.
+only actual drained exit-0 runs are green. These checks describe the published
+integration commit `4cbfbe7c912925b5a3a515e601931c3bf9ab65c4`.
 
 The former Auto reader recorded in the 2026-10-10 handoff has finished. Root
 stopped only the positively identified, superseded 80-file test profiler
@@ -61,11 +62,36 @@ Julia jobs and the older native probe were left alone. The old >30 GiB/global
 sole-reader workflow is historical; use proportionate resources and coordinate
 package checks without blocking small independent leaves.
 
-This Main revision integrates the prepared implementation and replaces the
-previous unmerged-candidate state. Normally push this verified revision, then
-continue the actual implementation backlog below. All owned test processes
-have drained; no live test process needs adoption. Routine package testing is
-now concise, with the previous multi-hour suites retained only as opt-in.
+The prepared implementation was committed and normally pushed to `main` as
+`4cbfbe7`; the remote SHA was verified. It replaces the previous unmerged
+candidate state. All takeover test processes drained. Routine package testing
+is now concise, with the previous multi-hour suites retained only as opt-in.
+
+The next verified Main increment adds `mesh_dim=1`, CLI `-1`,
+`-format msh2|msh4` and `-bin`; it writes the actual classified Curve product
+with physical names, periodic node maps and supported element order. List
+views export TXT/CSV/VTK with all supported components and time steps; see
+[format semantics](docs/list_view_exports.md). Public reverse applies only
+to Curves/Surfaces and smoothing only to Surfaces, so region-level setters
+are native no-ops. Direct `GeoModel` extensions and hybrid certificates remain
+unchanged. An obsolete extended negative-volume assertion was corrected.
+
+This increment's routine package check passes 163/163 on Julia 1.13.1,
+actual exit 0 in 36.41 seconds including precompilation; body 1.4 seconds.
+CLI regression: 42/42, Julia 1.13.1, actual exit 0 in 36.20 seconds; body
+3.5 seconds. List full/default regression: 101/101, Julia 1.12.7, actual exit
+0 in 1.50 seconds warm. API dimension dispatch: 34/34, Julia 1.12.7, actual
+exit 0 in 42.71 seconds including 31.73 seconds of precompilation. All used
+one thread, bounds checks and minimal compilation. Root logs are under
+`test/tmp/functional_pkg_113_increment_20261011` and
+`test/tmp/cli_curve_functional_v3_20261011`; isolated list/API packets retain
+their first failed harness receipts and actual green reruns.
+
+Next isolated work: independent multi-solid STEP/IGES mesh imports at
+`C:/tmp/tessella_takeover_brep_assemblies_20261011`, model-format CSV/VTK
+exports, and translated periodic hybrid boundary composition. These next
+candidates are unqualified until their actual small public checks pass;
+never infer full roadmap closure from the current package check.
 
 The public hybrid regression fixed missing OptimizePyramids registration,
 omitted TF Surface constructor transport, and narrow batch snapshot dictionary
@@ -85,8 +111,9 @@ Historical snapshots and failed receipts below qualify only their own dates.
 Continue actual features, ordered by ASCENT value. This is a concrete Source
 backlog rather than the older expensive verification queue:
 
-1. Extend hybrid/ordinary region composition to embedded, periodic, reverse and
-   per-region smoothing contexts. Multi-region batching itself is implemented.
+1. Extend hybrid/ordinary region composition to embedded and periodic contexts.
+   Multi-region batching is implemented. Public region reverse/smoothing are
+   native no-ops, so they are not missing Gmsh Region features.
 2. Support multi-solid CAD assembly import and trimmed/periodic NURBS topology.
 3. Complete curved analytic Surface high-order placement and generated Surface/
    Volume orders above two. Curve orders 1–10 are already implemented.
@@ -99,7 +126,8 @@ backlog rather than the older expensive verification queue:
 7. Complete boundary-layer Extrude and pipe frontends beyond ordinary Layers.
 8. Implement partition interface/ghost topology and parallel production paths;
    partition assignment and metadata preservation are already implemented.
-9. Complete mixed model/list view export, remaining formats and post/CLI actions.
+9. Complete mixed model-view export, remaining formats and post/CLI actions.
+   List TXT/CSV/VTK and Curve CLI generation/version/binary flags are implemented.
 10. Close native matching chronology and requirement-level differential parity.
     Large P6/HFSS/ASCENT campaigns remain opt-in verification, not routine tests.
 

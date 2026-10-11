@@ -878,8 +878,8 @@ end
     end
     _API.initialize()
     try
-        # set_reverse on a volume flips every tetrahedron; classification and
-        # entity queries keep working on the intentionally inverted complex.
+        # Native setReverse only changes Curve/Surface attributes. A public
+        # dimension-3 call leaves ordinary Volume cells positively oriented.
         _API.model.add_box(0,0,0,1,1,1)
         _API.mesh.set_reverse(3,1)
         _API.mesh.generate(3)
@@ -893,11 +893,12 @@ end
             dot(c-a,cross(b-a,d-a))>0
         end
         # dot(c-a, cross(b-a,d-a)) = -det[b-a,c-a,d-a]: >0 means kernel-
-        # negative, so a fully reversed volume reports every tet negative.
-        @test negative==div(length(flat),4)
+        # negative. Native dimension-3 attribute dispatch is a no-op.
+        @test negative==0
         element_types,_,_=_API.mesh.get_elements(3,1)
         @test element_types==Int32[4]
-        # set_smoothing runs boundary-preserving Laplacian iterations.
+        # Native setSmoothing acts only on Surfaces; the dimension-3 call
+        # leaves ordinary Volume generation unchanged and valid.
         _API.mesh.clear()
         _API.mesh.set_reverse(3,1,false)
         _API.mesh.set_smoothing(3,1,2)

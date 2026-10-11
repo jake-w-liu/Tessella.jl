@@ -26,6 +26,8 @@
         api.mesh.set_transfinite_curve(1, 3)
         api.model.add_physical_group(1, [1]; tag=7, name="wire")
         @test api.model.get_entities(1) == [(1, 1)]
+        @test api.mesh.set_reverse(3, 999, true) === nothing
+        @test api.mesh.set_smoothing(3, 999, 5) === nothing
         @test Set(api.model.get_boundary([(1, 1)], false, false, false)) ==
               Set([(0, 1), (0, 2)])
 

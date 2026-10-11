@@ -8,8 +8,8 @@ remain **in progress**.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite passes 157 assertions; its minimally compiled test body took 1.6 seconds
-on Julia 1.12.7, with a 37-second cold package run including precompilation.
+suite now passes 163 assertions; its minimally compiled test body took 1.4 seconds
+on Julia 1.13.1, with a 36-second cold package run including precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
 and [test/README.md](test/README.md) describes routine and extended tests.
@@ -105,7 +105,7 @@ Tessella
     ├── API         model/mesh/option façade
     ├── APIGenerate01/APITaggedCache/Mutations detached generation and public IDs
     ├── APIMixedCache/Queries/Advanced/Refine native classified mixed lifecycle
-    ├── CLI         `tessella file.geo -2|-3` entry
+    ├── CLI         `tessella file.geo -1|-2|-3` entry
     └── GUI         headless command/state machine
 ```
 
@@ -610,7 +610,10 @@ smoothing steps run after filling, `reverse`/`outward_orientation` flip
 entity meshes, compounds merge member entities into one classification,
 per-entity sizes and boundary point sizes propagate through composed size
 fields. `set_order` converts existing P1/P2 data independently of the generation
-option; legacy simplex P2 caches use a validated overlay that survives supported
+option. Public API smoothing applies only to Surfaces and reverse applies to
+Curves/Surfaces; region-level setters are native no-ops. Direct `GeoModel`
+volume attributes remain Tessella extensions. `set_order` retains the supported
+legacy simplex P2 overlay that survives supported
 refinement, transforms, renumbering, and optimization.
 Its reference maps, inverse coordinates, location, orientations, keys and
 connectivity-derived queries evaluate the retained Tri6/Tet10 nodes. Quadratic
@@ -1038,6 +1041,13 @@ has been integrated into Main, with selected curved, periodic, matching,
 compact-cap coverage and writer fixes. Follow the
 [current handoff](HANDOFF.md#takeover-2026-10-11) for the actual integrated
 checks, publication status and remaining work.
+
+The next verified increment adds Curve CLI generation (`-1`), MSH version and
+binary flags, complete list-view TXT/CSV/VTK export, and native dimension
+dispatch for reverse/smoothing. List exports retain all supported components
+and steps; [format semantics](docs/list_view_exports.md) explain their layout
+and deliberate CSV/VTK differences from the pinned SDK. General model-format
+exports, multi-solid CAD and periodic hybrid composition remain in progress.
 
 Use small functional regressions for routine verification, then normally commit
 and push verified implementations to `main`. Native-oracle sweeps, resource and

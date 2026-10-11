@@ -24,11 +24,40 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Curve CLI, list exports and API dimension dispatch (2026-10-11)
+
+The CLI supports `-1`, `-format msh2|msh4` and `-bin`. Classified Curve
+output preserves physical names, Point/Curve ownership, periodic pairs and
+configured quadratic elements. Its focused public regression passes 42/42
+on Julia 1.13.1, actual exit 0 in 36.20 seconds including precompilation;
+the functional body took 3.5 seconds.
+
+List views now export TXT, comma-separated CSV and legacy VTK, retaining
+all time steps and scalar/vector/tensor components. VTK uses independent
+element corners and real topology. Payload validation precedes opening the
+target. The focused regression plus four default checks pass 101/101 on
+Julia 1.12.7, actual exit 0 in 1.50 seconds warm. See
+[format semantics](docs/list_view_exports.md), including the intentional
+CSV/VTK extension differences from the pinned SDK.
+
+Public `set_smoothing` applies only to Surfaces and `set_reverse` only to
+Curves/Surfaces. Region-level calls now follow the native no-op semantics;
+strict hybrid certificates and direct `GeoModel` extensions are retained.
+The focused public Tet/hybrid/Surface regression passes 34/34 on Julia 1.12.7,
+actual exit 0 in 42.71 seconds including 31.73 seconds of precompilation.
+An obsolete extended assertion expecting inverted volume elements was corrected.
+
+The integrated routine package check passes 163/163 on Julia 1.13.1,
+actual exit 0 in 36.41 seconds including precompilation, with a 1.4-second
+test body. These checks used one thread, bounds checking and minimal compilation.
+Full P1–P6 parity remains open. Multi-solid imports, model-format exports and
+periodic hybrid composition are the next isolated implementation tasks.
+
 ### Implementation takeover and concise tests (2026-10-11)
 
 Devin's uncommitted Source is integrated into Main with reviewed curved,
 periodic, matching, compact-cap coverage and writer fixes. Routine testing now
-uses 157 small functional assertions. Historical native, resource, HFSS and
+started with 157 small functional assertions. Historical native, resource, HFSS and
 external solver campaigns are opt-in; see [test instructions](test/README.md).
 
 The corrected functional suite passes on Julia 1.12.7 at normal `-O2` with
@@ -46,7 +75,8 @@ hybrid public regression passes 35/35 on Julia 1.13.1, including single/two-regi
 generation and failure atomicity. It fixed missing option registration, TF
 constructor publication and heterogeneous batch snapshot types.
 
-The prepared Source is integrated in this Main revision; 385 referenced opt-in
+The prepared Source is published on `main` as `4cbfbe7` (remote SHA verified);
+385 referenced opt-in
 fixture/adapter files and their byte-preservation rules are retained. No complete
 extended suite or external solver success is claimed. Optional wrapped-counter
 probes remain unqualified after an early retained-UID collision.

@@ -12,13 +12,19 @@ P1–P6 tracks**, with ASCENT meshing capabilities prioritized.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite passes 157 assertions; its minimally compiled test body took 1.6 seconds
-on Julia 1.12.7, with a 37-second cold package run including precompilation.
+suite now passes 163 assertions; its minimally compiled test body took 1.4 seconds
+on Julia 1.13.1, with a 36-second cold package run including precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
 and [test/README.md](test/README.md) describes routine and extended tests.
 [`STATUS.md`](STATUS.md) retains dated verification evidence. Supported runtimes
 remain Julia 1.12.x and 1.13.x.
+
+The CLI accepts `file.geo -1|-2|-3`, `-o output.msh`, `-format msh2|msh4`
+and `-bin`. One-dimensional output keeps classified Point/Curve ownership,
+physical names, periodic node pairs and configured Curve orders.
+List-based views export POS, TXT, CSV and legacy VTK with all time steps;
+see [list export formats](docs/list_view_exports.md) for their data layout.
 
 ```julia
 using Tessella
@@ -500,6 +506,9 @@ scoping, and `generate` meshes multi-entity selections. Queries on a
 present-but-unmeshed model return empty data like Gmsh 4.15.2. Generation uses
 `Mesh.ElementOrder`; `set_order` converts the existing mesh to validated P1/P2
 products, with the supported legacy simplex overlay.
+Public `set_smoothing` applies only to Surfaces, and `set_reverse` applies
+only to Curves and Surfaces. Other integer dimensions are no-ops, matching
+the pinned native API, including region-level calls.
 Legacy simplex P2 edits retain actual midpoint geometry through relabeling,
 selection, affine maps, and repeated order-two requests. Primary-node edits
 change only the requested node. Refinement and optimization of edited curved

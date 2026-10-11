@@ -1,7 +1,7 @@
 """
     CLI
 
-Command-line façade: `tessella file.geo -2|-3` executes the bounded `.geo`
+Command-line façade: `tessella file.geo -1|-2|-3` executes the bounded `.geo`
 subset and writes `file.msh`. Supported periodic and embedded surface entities
 and embedded volume entities, including nested sheet constraints and periodic
 planar boundaries of explicit volume shells, are written with classified MSH4
@@ -12,7 +12,7 @@ module CLI
 using ..GeoExec: execute_geo, geo_entity_mesh
 using ..IO: write_msh
 using ..Model: model_periodic_constraints, model_to_mixed
-using ..Elements: write_mixed_msh, MixedMesh
+using ..Elements: write_mixed_msh, MixedMesh, simplex_to_mixed
 using ..GmshLibm: _with_win_cli_precision
 
 export main
@@ -58,9 +58,11 @@ end
 """
     main(args) -> String
 
-Execute one `.geo` input with optional `-2` or `-3` meshing and `-o output`.
+Execute one `.geo` input with optional `-1`, `-2` or `-3` meshing and `-o output`.
+`-format msh2|msh4` selects MSH 2.2 or 4.1 (the default), and `-bin` selects
+binary output. Output flags require a meshing dimension.
 Accepted syntax and blockers follow [`Tessella.GeoExec.execute_geo`](@ref).
-Parsing-only mode returns the input path. Meshing writes an atomic MSH 4.1 file
+Parsing-only mode returns the input path. Meshing writes an atomic MSH file
 and returns its path. Native periodic/embedded surface meshes and embedded volume
 meshes include their supported classified entity, cell, and node records, including
 nested point/curve constraints on an embedded sheet and explicit volume boundaries.
@@ -69,6 +71,8 @@ chains. Periodic `-3` output supports planar boundary-surface relations on one
 explicit volume shell and retains their induced point/curve relations. Stored
 periodic volume relations are mesh-inert and unserialized, matching Gmsh 4.15.2.
 Independent periodic curves in volumes remain blocked.
+One-dimensional output preserves Point/Curve ownership, physical groups,
+periodic node maps and the configured Curve element order.
 Duplicate or conflicting flags, multiple inputs, ignored output arguments, and any
 output that aliases the input are rejected.
 On Windows x86_64, power expressions select the standalone Gmsh executable's
@@ -87,15 +91,16 @@ function _main(args::AbstractVector{<:AbstractString})
         "tessella: more than $_MAX_ARGUMENTS command-line arguments"))
     isempty(args) && throw(ArgumentError("tessella: missing input file"))
     tokens=_copy_arguments(args)
-    path=nothing;dim=0;outfile=nothing
+    path=nothing;dim=0;outfile=nothing;version=4.1;binary=false
     dimension_seen=false;output_seen=false
+    format_seen=false;binary_seen=false
     i=1
     while i<=length(tokens)
         a=tokens[i]
-        if a in ("-2","-3")
+        if a in ("-1","-2","-3")
             dimension_seen && throw(ArgumentError(
                 "tessella: duplicate or conflicting dimension flag $a"))
-            dim=a=="-2" ? 2 : 3
+            dim=a=="-1" ? 1 : a=="-2" ? 2 : 3
             dimension_seen=true
         elseif a=="-o"
             output_seen && throw(ArgumentError("tessella: duplicate -o flag"))
@@ -104,6 +109,17 @@ function _main(args::AbstractVector{<:AbstractString})
                 "tessella: -o needs a path, got flag $(tokens[i])"))
             outfile=_path_argument(tokens[i],"output")
             output_seen=true
+        elseif a=="-format"
+            format_seen && throw(ArgumentError("tessella: duplicate -format flag"))
+            i+=1;i<=length(tokens) || throw(ArgumentError("tessella: -format needs msh2 or msh4"))
+            format=tokens[i]
+            format in ("msh2","msh4") || throw(ArgumentError(
+                "tessella: unsupported output format $format; supported: msh2, msh4"))
+            version=format=="msh2" ? 2.2 : 4.1
+            format_seen=true
+        elseif a=="-bin"
+            binary_seen && throw(ArgumentError("tessella: duplicate -bin flag"))
+            binary=true;binary_seen=true
         elseif startswith(a,"-")
             throw(ArgumentError("tessella: unsupported flag $a"))
         else
@@ -114,7 +130,9 @@ function _main(args::AbstractVector{<:AbstractString})
     end
     path===nothing && throw(ArgumentError("tessella: missing input file"))
     dim==0 && outfile!==nothing && throw(ArgumentError(
-        "tessella: -o requires -2 or -3"))
+        "tessella: -o requires -1, -2 or -3"))
+    dim==0 && (format_seen || binary_seen) && throw(ArgumentError(
+        "tessella: output format flags require -1, -2 or -3"))
     destination=dim==0 ? nothing : (outfile===nothing ? _default_output(path) : outfile)
     destination!==nothing && _same_file_target(path,destination) && throw(ArgumentError(
         "tessella: output path must not alias the input file"))
@@ -122,6 +140,13 @@ function _main(args::AbstractVector{<:AbstractString})
     result=execute_geo(path;mesh_dim=dim)
     if dim>0
         result.mesh===nothing && throw(ErrorException("tessella: no mesh produced"))
+        if dim==1
+            authority=result.model.meshing.mesh_authority
+            authority!==nothing && authority.mesh!==nothing || throw(ErrorException(
+                "tessella: one-dimensional generation omitted its classified mesh"))
+            write_mixed_msh(destination,authority.mesh;version,binary)
+            return destination
+        end
         constraints=model_periodic_constraints(result.model)
         target=nothing
         # The parsed dimension is settled before closure capture. Capturing
@@ -140,9 +165,11 @@ function _main(args::AbstractVector{<:AbstractString})
                        !isempty(result.model.volumes[target])
         if isempty(constraints) && !embedded && !explicit_shell
             if result.mesh isa MixedMesh
-                write_mixed_msh(destination,result.mesh;version=4.1)
+                write_mixed_msh(destination,result.mesh;version,binary)
+            elseif binary
+                write_mixed_msh(destination,simplex_to_mixed(result.mesh);version,binary)
             else
-                write_msh(destination,result.mesh;version=4.1)
+                write_msh(destination,result.mesh;version)
             end
         else
             entity_name=dim==2 ? "surface" : "volume"
@@ -169,7 +196,7 @@ function _main(args::AbstractVector{<:AbstractString})
             isempty(missing_relations) || throw(ArgumentError(
                 "tessella: selected $entity_name projection omits periodic " *
                 "relations $missing_relations"))
-            write_mixed_msh(destination,projected;version=4.1)
+            write_mixed_msh(destination,projected;version,binary)
         end
         return destination
     end

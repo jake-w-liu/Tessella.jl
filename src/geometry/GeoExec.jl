@@ -630,7 +630,7 @@ end
     execute_geo(path; mesh_dim=0) -> GeoExecution
 
 Execute Tessella's documented bounded `.geo` subset into a new [`GeoModel`](@ref).
-Use `mesh_dim=2` or `3` to mesh the remaining surfaces or volumes — multiple
+Use `mesh_dim=1`, `2` or `3` to mesh curves, surfaces or volumes — multiple
 entities merge on bitwise coordinates like a `Mesh n` statement; `mesh_dim=0`
 only builds the model. Geometry statements outside the bounded
 subset and malformed input raise `ArgumentError` instead of being partially
@@ -722,7 +722,7 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
         err isa InterruptException && rethrow()
         throw(ArgumentError("execute_geo: mesh_dim exceeds the platform Int range"))
     end
-    dim in (0,2,3) || throw(ArgumentError("execute_geo: mesh_dim must be 0, 2, or 3"))
+    dim in 0:3 || throw(ArgumentError("execute_geo: mesh_dim must be in 0:3"))
     params=read_geo_params(path)
     model=GeoModel()
     context=_GeoNumericContext()
@@ -803,10 +803,13 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
     # mesh-operation statements; the mesh_dim keyword still generates on
     # request.
     mesh=context.mesh
-    if dim in (2,3)
+    if dim in 1:3
         _geo_sync_meshing_options!(model,context)
     end
-    if dim==2
+    if dim==1
+        mesh,context.mesh_node_owner=_geo_mesh_model(model,1,context)
+        context.mesh=mesh
+    elseif dim==2
         isempty(model.surfaces) && throw(ArgumentError("execute_geo: Mesh 2 requested but no surfaces exist"))
         # Upstream `Mesh n` meshes every entity of dimension <= n regardless
         # of entity count: vertex parts (including orphan `Point` entities),

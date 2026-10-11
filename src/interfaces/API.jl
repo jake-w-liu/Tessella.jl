@@ -7764,14 +7764,23 @@ end
 
 function _set_smoothing(dim,tag,val)
     lock(STATE_LOCK) do
-        set_smoothing!(_model_locked(),dim,tag,val)
+        current=_model_locked()
+        dimension=_mesh_query_integer(dim,"API.mesh.set_smoothing","dim")
+        # Native setSmoothing only looks up and changes a GFace. Other
+        # integer dimensions ignore both the entity tag and the value.
+        dimension==2 || return nothing
+        set_smoothing!(current,dimension,tag,val)
     end
     return nothing
 end
 
 function _set_reverse_attribute(dim,tag,val=true)
     lock(STATE_LOCK) do
-        set_reverse!(_model_locked(),dim,tag,val)
+        current=_model_locked()
+        dimension=_mesh_query_integer(dim,"API.mesh.set_reverse","dim")
+        # Native setReverse changes GEdge/GFace attributes, never GRegion.
+        dimension in (1,2) || return nothing
+        set_reverse!(current,dimension,tag,val)
     end
     return nothing
 end
@@ -10846,16 +10855,18 @@ set_recombine(dim,tag,angle=45.0)=_set_recombine_attribute(dim,tag,angle)
     set_smoothing(dim, tag, val)
 
 Record `val` Laplace-smoother iterations applied to the mesh of entity
-`(dim, tag)` during generation, matching Gmsh's `setSmoothing`.
+`(2, tag)` during generation, matching Gmsh's `setSmoothing`. Other integer
+dimensions are no-ops and do not look up `tag`.
 """
 set_smoothing(dim,tag,val)=_set_smoothing(dim,tag,val)
 
 """
     set_reverse(dim, tag, val=true)
 
-Record a reverse-orientation constraint on entity `(dim, tag)`, matching
+Record a reverse-orientation constraint on a Curve or Surface, matching
 Gmsh's `setReverse` — generated element orientations are flipped relative to
-the natural orientation when `val` is true.
+the natural orientation when `val` is true. Other integer dimensions are
+no-ops and do not look up `tag`.
 """
 set_reverse(dim,tag,val=true)=_set_reverse_attribute(dim,tag,val)
 
@@ -11125,7 +11136,7 @@ remove(tag)=_view_remove(tag)
 get_index(tag)=_view_get_index(tag)
 "Return the tags of all views, in increasing tag order."
 get_tags()=_view_get_tags()
-"Write model data and its associated meshes; append preserves the existing file."
+"Write list or model view data using the filename's supported export format."
 write(tag,filename,append=false)=_view_write(tag,filename,append)
 """Add per-element list `data` of `data_type` for `numEle` elements."""
 add_list_data(tag,data_type,num_ele,data)=
