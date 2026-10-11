@@ -592,6 +592,8 @@ end
 
 @inline _node(i::Int, j::Int) = Int32((i * (i + 1)) ÷ 2 + j + 1)
 
+@inline _project_point(project,point,row::Int32)=project(point)
+
 function _fill_segments!(segments, tags, divisions::Int, side_tags)
     cursor = 0
     @inbounds for i in 0:divisions-1
@@ -981,7 +983,7 @@ function mesh_transfinite_triangle(side1,
                 all(isfinite, normalized) || throw(ArgumentError(
                     "$_CALLER: transfinite interpolation generated a non-finite coordinate"))
                 physical = _physical_point(normalized, origin, scale)
-                point = project === nothing ? physical : project(physical)
+                point = project === nothing ? physical : _project_point(project,physical,_node(i,j))
                 all(isfinite, point) || throw(ArgumentError(
                     "$_CALLER: surface projection generated a non-finite " *
                     "coordinate"))
@@ -1429,7 +1431,7 @@ function mesh_transfinite_triangle_collapsed(side1,
             # evaluation for ruled-surface fills (gmsh interpolates a ruled
             # face's interior in real space then projects it back onto the
             # surface parametrization).
-            point = project === nothing ? physical : project(physical)
+            point = project === nothing ? physical : _project_point(project,physical,_collapsed_node(i,j,height))
             all(isfinite, point) || throw(ArgumentError(
                 "$_COLLAPSED_CALLER: surface projection generated a " *
                 "non-finite coordinate"))

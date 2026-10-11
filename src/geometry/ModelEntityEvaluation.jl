@@ -1,3 +1,5 @@
+include("ModelSurfaceClosestPoint.jl")
+
 function _model_evaluation_values(
     values,stride::Int,caller::AbstractString,what::AbstractString)
     (values isa AbstractVector || values isa Tuple) || throw(ArgumentError(
@@ -105,6 +107,8 @@ end
 
 function _model_plane_frame(
     m::GeoModel,tag::Int,caller::AbstractString)
+    native=_gmsh_native_surface_evaluation_frame(m,tag,caller)
+    native===nothing || return native
     geometry=_model_plane_geometry(m,tag,caller)
     normal=(geometry.properties[1],geometry.properties[2],
             geometry.properties[3])
@@ -140,6 +144,8 @@ end
 function _model_plane_point(
     plane,first_parameter,second_parameter,caller::AbstractString,
     point_index::Int)
+    hasproperty(plane,:native_frame) && return _surface_metric_lift(
+        plane.native_frame,first_parameter,second_parameter)
     R=Rational{BigInt}
     u=R(first_parameter);v=R(second_parameter)
     return ntuple(3) do axis
@@ -171,6 +177,8 @@ end
 function _model_plane_parameters(
     plane,coordinate::NTuple{3,Float64},caller::AbstractString,
     point_index::Int)
+    hasproperty(plane,:native_frame) && return _gmsh_native_surface_parameters(
+        plane.native_frame,coordinate)
     exact=_model_plane_parameters_exact(plane,coordinate)
     return ntuple(axis->_model_rational_float(
         exact[axis],caller,"Plane parameter for point $point_index"),2)
@@ -212,6 +220,7 @@ function _model_plane_contains(
 end
 
 function _model_plane_parameter_bounds(plane,caller::AbstractString)
+    hasproperty(plane,:native_bounds) && return plane.native_bounds
     parameters=NTuple{2,Float64}[
         _model_plane_parameters(plane,coordinate,caller,index)
         for (index,coordinate) in pairs(plane.coordinates)]
@@ -281,6 +290,10 @@ end
         return (first[1]+parameter*(last[1]-first[1]),
                 first[2]+parameter*(last[2]-first[2]),
                 first[3]+parameter*(last[3]-first[3]))
+    end
+    adapter=_model_high_order_curve_geometry(m,tag,caller)
+    if adapter!==nothing && adapter.kind in (:arc,:spline)
+        return _model_high_order_curve_point(adapter,parameter,caller)
     end
     return _model_curve_point(m,tag,parameter,caller)
 end
@@ -406,6 +419,19 @@ function _ruled_surface_point(m::GeoModel,tag::Int,u::Float64,v::Float64,
     center=_ruled_sphere_center(m,tag,gens,caller)
     if length(gens)>=4
         S=(corner(1),corner(2),corner(3),corner(4))
+        link=get(m.meshing.extrude_sources,(2,tag),nothing)
+        spec=get(m.meshing.extrude_specs,(2,tag),nothing)
+        # A bound translated Line lateral evaluates its source and sweep
+        # directly. Blending the four straight boundary curves introduces
+        # cancellation that changes its native inverse parameters.
+        if length(gens)==4 && center===nothing && link!==nothing &&
+                link[1]==1 && link[2]==gens[1] && spec!==nothing &&
+                spec.type===:translate && !_occ_surface_entity(m,tag) &&
+                all(curve->_curve_type(m,abs(curve))===:line,gens) &&
+                _extrude_at(spec,S[1],1.0,caller)==S[4] &&
+                _extrude_at(spec,S[2],1.0,caller)==S[3]
+            return _extrude_at(spec,_ruled_curve_point(m,gens[1],u,caller),v,caller)
+        end
         return _ruled_qua_point(m,gens,S,u,v,center,caller)
     end
     S=(corner(1),corner(2),corner(3))
@@ -514,16 +540,83 @@ end
 
 # `invert_singular_matrix3x3` — the SVD pseudo-inverse `V·W⁻¹·Uᵀ` with the
 # 1e-16 singular-value cutoff.
+# Independent two-sided Jacobi factorization for a square 3x3 matrix. A square
+# matrix needs no rectangular QR reduction. Track both orthogonal factors and
+# divide each left singular vector before the final ordered scalar product.
 function _invert_singular3x3(mat::Matrix{Float64})
-    factor=LinearAlgebra.svd(mat;alg=LinearAlgebra.QRIteration())
-    inverse=zeros(Float64,3,3)
-    for i in 1:3
-        w=factor.S[i]
-        abs(w)>1e-16 || continue
-        invw=1.0/w
-        for row in 1:3, column in 1:3
-            inverse[row,column]+=factor.Vt[i,row]*invw*factor.U[column,i]
+    size(mat)==(3,3) && all(isfinite,mat) || throw(ArgumentError("ruled inverse requires a finite 3x3 matrix"))
+    scale=maximum(abs,mat);scale==0.0 && return zeros(3,3)
+    work=mat./scale
+    left=[i==j ? 1.0 : 0.0 for i in 1:3,j in 1:3]
+    right=copy(left)
+    maximum_diagonal=maximum(abs(work[i,i]) for i in 1:3)
+    converged=false
+    for sweep in 1:100
+        changed=false
+        for (first,second) in ((2,1),(3,1),(3,2))
+            threshold=max(floatmin(Float64),2.0*eps(Float64)*maximum_diagonal)
+            max(abs(work[first,second]),abs(work[second,first]))>threshold || continue
+            changed=true
+            a=work[first,first];b=work[first,second]
+            c=work[second,first];d=work[second,second]
+            skew=c-b
+            if abs(skew)<floatmin(Float64)
+                polar_cosine=1.0;polar_sine=0.0
+            else
+                ratio=(a+d)/skew
+                denominator=sqrt(1.0+ratio*ratio)
+                polar_cosine=ratio/denominator;polar_sine=1.0/denominator
+            end
+            left_diagonal=polar_cosine*a+polar_sine*c
+            right_diagonal=-polar_sine*b+polar_cosine*d
+            symmetric=polar_cosine*b+polar_sine*d
+            if abs(symmetric)<floatmin(Float64)
+                cosine=1.0;sine=0.0
+            else
+                difference=(left_diagonal-right_diagonal)/(2.0*abs(symmetric))
+                magnitude=1.0/(abs(difference)+sqrt(1.0+difference*difference))
+                tangent=difference>0.0 ? magnitude : -magnitude
+                cosine=1.0/sqrt(1.0+tangent*tangent)
+                sine=-copysign(1.0,symmetric)*tangent*cosine
+            end
+            left_cosine=polar_cosine*cosine+polar_sine*sine
+            left_sine=polar_sine*cosine-polar_cosine*sine
+            for column in 1:3
+                x=work[first,column];y=work[second,column]
+                work[first,column]=left_cosine*x+left_sine*y
+                work[second,column]=-left_sine*x+left_cosine*y
+            end
+            for row in 1:3
+                x=work[row,first];y=work[row,second]
+                work[row,first]=cosine*x-sine*y
+                work[row,second]=sine*x+cosine*y
+                x=right[row,first];y=right[row,second]
+                right[row,first]=cosine*x-sine*y
+                right[row,second]=sine*x+cosine*y
+                x=left[row,first];y=left[row,second]
+                left[row,first]=left_cosine*x+left_sine*y
+                left[row,second]=-left_sine*x+left_cosine*y
+            end
+            maximum_diagonal=max(maximum_diagonal,abs(work[first,first]),abs(work[second,second]))
         end
+        if !changed;converged=true;break;end
+    end
+    converged || throw(ArgumentError("ruled square Jacobi iteration did not converge"))
+    values=Float64[abs(work[i,i])*scale for i in 1:3]
+    for col in 1:3
+        if work[col,col]<0.0
+            for row in 1:3;left[row,col]=-left[row,col];end
+        end
+    end
+    order=sortperm(values;rev=true,alg=Base.Sort.MergeSort)
+    values=values[order];left=left[:,order];right=right[:,order]
+    divided=zeros(3,3)
+    for i in 1:3,j in 1:3
+        abs(values[i])>1.e-16 && (divided[i,j]+=left[j,i]/values[i])
+    end
+    inverse=zeros(3,3)
+    for i in 1:3,j in 1:3,k in 1:3
+        inverse[i,j]+=right[i,k]*divided[k,j]
     end
     return inverse
 end
@@ -700,8 +793,16 @@ function _model_curve_point(
     caller::AbstractString,
     index::Int=1
 )
+    if haskey(m.discrete,(1,tag))
+        _,frames=_discrete_eval_setup(m,1,tag,caller)
+        return _discrete_curve_point(frames,parameter,caller)
+    end
     occ=_occ_geometry_checked(m,tag,caller)
-    if occ!==nothing && occ.occ===:circle
+    if occ!==nothing && occ.occ===:surface_iso
+        return _model_surface_iso_point(occ,parameter)
+    elseif occ!==nothing && occ.occ===:copied_curve
+        return first(_model_occ_curve_d2(occ.curve,parameter))
+    elseif occ!==nothing && occ.occ===:circle
         return _occ_circle_point(occ,parameter)
     elseif occ!==nothing && occ.occ===:degenerate
         # `_trimmed->point(_curve2d->Value(par))` — the pcurve-backed pole
@@ -840,7 +941,15 @@ function model_derivative(m::GeoModel,dim,tag,parametric_coordinates;
     end
     if dimension==1
         occ=_occ_geometry_checked(m,entity_tag,caller)
-        if occ!==nothing && occ.occ===:circle
+        if occ!==nothing && occ.occ===:surface_iso
+            for parameter in values
+                append!(output,_model_surface_iso_d1(occ,parameter))
+            end
+        elseif occ!==nothing && occ.occ===:copied_curve
+            for parameter in values
+                append!(output,_model_occ_curve_d2(occ.curve,parameter)[2])
+            end
+        elseif occ!==nothing && occ.occ===:circle
             sizehint!(output,3length(values))
             for parameter in values
                 append!(output,_occ_circle_derivative(occ,parameter))
@@ -921,6 +1030,14 @@ function model_second_derivative(m::GeoModel,dim,tag,parametric_coordinates;
         parametric_coordinates,dimension,caller,"parametric coordinates")
     if haskey(m.discrete,(dimension,entity_tag))
         multiplier=dimension==1 ? 3 : 9
+        geometry=dimension==1 ? _model_discrete_curve_geometry(m,entity_tag) : nothing
+        if geometry!==nothing
+            output=Float64[]
+            for parameter in values
+                append!(output,_model_discrete_curve_second_derivative(geometry,parameter,caller))
+            end
+            return output
+        end
         return zeros(Float64,multiplier*(length(values)÷dimension))
     end
     if dimension==1
@@ -999,6 +1116,15 @@ function model_curvature(m::GeoModel,dim,tag,parametric_coordinates)
     values=_model_evaluation_values(
         parametric_coordinates,dimension,caller,"parametric coordinates")
     if haskey(m.discrete,(dimension,entity_tag))
+        if dimension==1
+            geometry=_model_discrete_curve_geometry(m,entity_tag)
+            if geometry!==nothing
+                boundary=m.discrete[(1,entity_tag)].boundary
+                closed=!isempty(boundary) && first(boundary)==last(boundary)
+                return Float64[_model_discrete_curve_curvature(
+                    geometry,parameter,closed,caller) for parameter in values]
+            end
+        end
         return zeros(Float64,length(values)÷dimension)
     end
     if dimension==1
@@ -1077,6 +1203,55 @@ function model_principal_curvatures(m::GeoModel,tag,parametric_coordinates)
            first_directions,second_directions
 end
 
+
+# gmshFace::normal deliberately orients the normal separately from the
+# mean Plane used by point()/firstDer(). Keep every UV/frame/lift byte intact.
+# Numeric::angle_plan uses a zero-preserving normalization and signed atan2.
+function _model_native_plane_angle(point,first,last,normal)
+    a=Mesh2D._gmsh_normalize3(Mesh2D._gmsh_sub3(first,point))
+    b=Mesh2D._gmsh_normalize3(Mesh2D._gmsh_sub3(last,point))
+    return _myatan2(Mesh2D._gmsh_dot3(Mesh2D._gmsh_cross3(a,b),normal),
+                    Mesh2D._gmsh_dot3(a,b))
+end
+
+function _model_native_plane_query_normal(m::GeoModel,tag::Int,plane,u,v,
+                                         caller,warn)
+    normal=plane.normal
+    point=_model_plane_point(plane,u,v,caller,1)
+    samples=10
+    for attempt in 1:11
+        angle=0.0
+        for loop in m.surfaces[tag],signed_curve in m.loops[loop]
+            curve=abs(signed_curve)
+            segments=_curve_type(m,curve)===:line &&
+                length(get(m.curve_control_points,curve,Int[])) in (0,2) ? 1 : samples
+            # InterpolateCurve's negative record maps 1-u onto the original
+            # ubeg/uend interval. Positive records receive the literal u.
+            low,high=_model_curve_param_bounds(m,curve,caller)
+            for segment in 0:segments-1
+                first=Float64(segment)/Float64(segments)
+                last=Float64(segment+1)/Float64(segments)
+                if signed_curve<0
+                    first=low+(high-low)*(1.0-first)
+                    last=low+(high-low)*(1.0-last)
+                end
+                a=_gmsh_native_curve_sample(m,curve,first,caller)
+                b=_gmsh_native_curve_sample(m,curve,last,caller)
+                angle+=_model_native_plane_angle(point,a,b,normal)
+            end
+        end
+        if abs(angle)>=0.5
+            return angle>0.0 ? normal : (-normal[1],-normal[2],-normal[3])
+        end
+        samples*=2
+        if attempt==11
+            warn===nothing || warn("Could not orient normal of surface $tag")
+            return normal
+        end
+    end
+    return normal
+end
+
 """
 Return the unit normal of an explicit surface: exterior-loop-oriented for an
 explicit Plane, the `InterpolateSurface` fd cross for a ruled patch, the OCC
@@ -1084,7 +1259,7 @@ or discrete evaluator otherwise. `old_ruled_surface` selects the legacy
 `Geometry.OldRuledSurface` triangular-blend algorithm.
 """
 function model_normal(m::GeoModel,tag,parametric_coordinates;
-                      old_ruled_surface::Bool=false)
+                      old_ruled_surface::Bool=false,warn=nothing)
     caller="model_normal"
     _,entity_tag=_model_metadata_entity(m,2,tag,caller)
     values=_model_evaluation_values(
@@ -1129,10 +1304,13 @@ function model_normal(m::GeoModel,tag,parametric_coordinates;
         end
         return output
     end
-    normal=_model_plane_frame(m,entity_tag,caller).normal
+    plane=_model_plane_frame(m,entity_tag,caller)
     output=Float64[]
     sizehint!(output,3*(length(values)÷2))
-    for _ in 1:2:length(values)
+    for index in 1:2:length(values)
+        normal=hasproperty(plane,:native_frame) ?
+            _model_native_plane_query_normal(m,entity_tag,plane,
+                values[index],values[index+1],caller,warn) : plane.normal
         append!(output,normal)
     end
     return output
@@ -1165,7 +1343,9 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates;
         for index in 1:3:length(values)
             point=(values[index],values[index+1],values[index+2])
             if dimension==1
-                push!(output,_discrete_curve_param(frames,point))
+                geometry=_model_discrete_curve_geometry(m,entity_tag)
+                _,parameter=_model_discrete_curve_xyz_to_u(geometry,point,_model_lc(m),caller)
+                push!(output,parameter)
             else
                 push!(output,_discrete_surface_param(frames,point)...)
             end
@@ -1256,6 +1436,12 @@ function model_parametrization_bounds(m::GeoModel,dim,tag)
     dimension==0 && return Float64[],Float64[]
     if haskey(m.discrete,(dimension,entity_tag))
         record=m.discrete[(dimension,entity_tag)]
+        if dimension==1
+            geometry=_model_discrete_curve_geometry(m,entity_tag)
+            geometry===nothing && throw(ArgumentError(
+                "$caller: discrete Curve[$entity_tag] has no geometry; run mesh.create_geometry first"))
+            return [geometry.t0],[geometry.t1]
+        end
         coords=_model_record_node_coords(m)
         frames=_discrete_element_frames(
             m,record,dimension,coords,caller)
@@ -1414,9 +1600,9 @@ end
 """
     model_closest_point(model, dim, tag, coordinates)
 
-Project concatenated 3-D coordinates onto an explicit Line or Plane. Line
-parameters are clamped to the trimmed segment; Plane projections can lie outside
-its boundary loops.
+Project concatenated 3-D coordinates onto a supported Curve or Surface. Built-in
+ruled patches use their signed curve evaluators and parameter search. Plane
+projections can lie outside their boundary loops.
 """
 function model_closest_point(m::GeoModel,dim,tag,coordinates)
     caller="model_closest_point"
@@ -1431,10 +1617,10 @@ function model_closest_point(m::GeoModel,dim,tag,coordinates)
         for index in 1:3:length(values)
             point=(values[index],values[index+1],values[index+2])
             if dimension==1
-                parameter=_discrete_curve_param(frames,point)
+                geometry=_model_discrete_curve_geometry(m,entity_tag)
+                closest_point,parameter=_model_discrete_curve_closest_point(geometry,point,caller)
                 push!(parameters,parameter)
-                _model_append_point!(closest,
-                    _discrete_curve_point(frames,parameter,caller))
+                _model_append_point!(closest,closest_point)
             else
                 uv=_discrete_surface_param(frames,point)
                 append!(parameters,uv)
@@ -1462,8 +1648,12 @@ function model_closest_point(m::GeoModel,dim,tag,coordinates)
         get(m.surface_geometry,entity_tag,nothing) : nothing
     occ_surface=surface_geometry!==nothing &&
         hasproperty(surface_geometry,:occ)
-    plane=dimension==2 && !occ_surface ?
+    ruled_surface=dimension==2 && !occ_surface &&
+        _model_high_order_ruled_surface(m,entity_tag,caller)
+    plane=dimension==2 && !occ_surface && !ruled_surface ?
         _model_plane_frame(m,entity_tag,caller) : nothing
+    native_bounds=plane!==nothing && hasproperty(plane,:native_frame) ?
+        _model_plane_parameter_bounds(plane,caller) : nothing
     lc=occ_surface ? _model_lc(m) : 0.0
     for index in 1:3:length(values)
         point_index=(index+2)÷3
@@ -1506,6 +1696,14 @@ function model_closest_point(m::GeoModel,dim,tag,coordinates)
             # extremum, or the unrestricted-surface minimization fallback.
             u,v,xyz=_occ_surface_closest(surface_geometry,coordinate,lc)
             append!(parameters,(u,v))
+            _model_append_point!(closest,xyz)
+        elseif ruled_surface
+            xyz,uv,_=_model_closest_ruled_native(m,entity_tag,coordinate,caller)
+            append!(parameters,uv)
+            _model_append_point!(closest,xyz)
+        elseif native_bounds!==nothing
+            xyz,uv,_=_model_closest_plane_native(plane,coordinate,native_bounds...)
+            append!(parameters,uv)
             _model_append_point!(closest,xyz)
         else
             exact=_model_plane_parameters_exact(plane,coordinate)
@@ -1621,7 +1819,7 @@ end
 # `aux_params` (nodes owned by boundary entities).
 
 # Parametric coordinates of `node` with respect to `record`'s entity.
-function _record_param_of(record::DiscreteEntity,node::Int32,dim::Int)
+function _record_param_of(record::DiscreteEntity,node::UInt64,dim::Int)
     column=findfirst(==(node),record.node_tags)
     if column!==nothing
         size(record.node_params,1)>=dim || return nothing
@@ -1635,8 +1833,8 @@ end
 
 # (corner tags, corner params, corner coords) for one element of `record`.
 function _discrete_element_frame(m::GeoModel,record::DiscreteEntity,
-                                 msh_type::Int,nodes::Vector{Int32},
-                                 coords::Dict{Int32,NTuple{3,Float64}},
+                                 msh_type::Int,nodes::Vector{UInt64},
+                                 coords::Dict{UInt64,NTuple{3,Float64}},
                                  caller::AbstractString)
     count=msh_family(msh_type)===:qua ? 4 :
           msh_family(msh_type)===:lin ? 2 : 3
@@ -1659,7 +1857,7 @@ end
 # All (params, coords) corner frames of `record`'s dim-`dim` elements. Quads
 # split into two corner triangles so parametric location is uniform.
 function _discrete_element_frames(m::GeoModel,record::DiscreteEntity,dim::Int,
-                                  coords::Dict{Int32,NTuple{3,Float64}},
+                                  coords::Dict{UInt64,NTuple{3,Float64}},
                                   caller::AbstractString)
     frames=Tuple{Vector{Vector{Float64}},Vector{NTuple{3,Float64}}}[]
     for (index,msh_type) in enumerate(record.element_types)
@@ -1789,6 +1987,12 @@ function _discrete_eval_setup(m::GeoModel,dimension::Int,tag::Int,
     record=get(m.discrete,(dimension,tag),nothing)
     record===nothing && throw(ArgumentError(
         "$caller: entity ($dimension,$tag) is not discrete"))
+    if dimension==1
+        geometry=_model_discrete_curve_geometry(m,tag)
+        geometry===nothing && throw(ArgumentError(
+            "$caller: discrete Curve[$tag] has no geometry; run mesh.create_geometry first"))
+        return record,geometry.frames
+    end
     coords=_model_record_node_coords(m)
     frames=_discrete_element_frames(m,record,dimension,coords,caller)
     isempty(frames) && throw(ArgumentError(
@@ -1796,32 +2000,19 @@ function _discrete_eval_setup(m::GeoModel,dimension::Int,tag::Int,
     return record,frames
 end
 
-# Evaluate a discrete curve at normalized parameter `t` in [0,1].
+# Evaluate the geometry table; inclusive knot ties use its first segment.
+function _discrete_curve_frame_index(frames,t)
+    0.0<=t<=length(frames) || return 0
+    return max(1,ceil(Int,t))
+end
+
 function _discrete_curve_point(frames,t::Float64,caller::AbstractString)
-    best=nothing;best_distance=Inf
-    for (params,points) in frames
-        pa,pb=params[1][1],params[2][1]
-        lo,hi=minmax(pa,pb)
-        if lo-1e-12<=t<=hi+1e-12 && hi>lo
-            local_t=clamp((t-pa)/(pb-pa),0.0,1.0)
-            a,b=points[1],points[2]
-            return (a[1]+local_t*(b[1]-a[1]),
-                    a[2]+local_t*(b[2]-a[2]),
-                    a[3]+local_t*(b[3]-a[3]))
-        end
-        distance=min(abs(t-pa),abs(t-pb))
-        if distance<best_distance
-            best_distance=distance
-            best=(pa<pb ? (points[1],points[2],pa,pb) :
-                         (points[2],points[1],pb,pa))
-        end
-    end
-    best===nothing && throw(ArgumentError(
-        "$caller: parameter $t is outside the curve's range"))
-    a,b,lo,hi=best
-    local_t=clamp((t-lo)/(hi-lo),0.0,1.0)
-    return (a[1]+local_t*(b[1]-a[1]),a[2]+local_t*(b[2]-a[2]),
-            a[3]+local_t*(b[3]-a[3]))
+    index=_discrete_curve_frame_index(frames,t)
+    index==0 && return (0.0,0.0,0.0)
+    params,points=frames[index]
+    local_t=(t-params[1][1])/(params[2][1]-params[1][1])
+    a,b=points[1],points[2]
+    return (a[1]+local_t*(b[1]-a[1]),a[2]+local_t*(b[2]-a[2]),a[3]+local_t*(b[3]-a[3]))
 end
 
 # Inverse map: closest point on the discrete curve → its stored parameter.
@@ -1839,28 +2030,10 @@ end
 
 # Segment direction d(xyz)/dt of the discrete-curve frame containing `t`.
 function _discrete_curve_derivative(frames,t::Float64,caller::AbstractString)
-    best=nothing;best_distance=Inf
-    for (params,points) in frames
-        pa,pb=params[1][1],params[2][1]
-        lo,hi=minmax(pa,pb)
-        if lo-1e-12<=t<=hi+1e-12 && hi>lo
-            a,b=points[1],points[2]
-            scale=(pb-pa)
-            return ((b[1]-a[1])/scale,(b[2]-a[2])/scale,(b[3]-a[3])/scale)
-        end
-        distance=min(abs(t-pa),abs(t-pb))
-        if distance<best_distance
-            best_distance=distance
-            best=(params,points)
-        end
-    end
-    best===nothing && throw(ArgumentError(
-        "$caller: parameter $t is outside the curve's range"))
-    params,points=best
-    pa,pb=params[1][1],params[2][1]
-    pb==pa && throw(ArgumentError("$caller: degenerate curve segment"))
-    a,b=points[1],points[2]
-    scale=pb-pa
+    index=_discrete_curve_frame_index(frames,t)
+    index==0 && return (0.0,0.0,0.0)
+    params,points=frames[index]
+    a,b=points[1],points[2];scale=params[2][1]-params[1][1]
     return ((b[1]-a[1])/scale,(b[2]-a[2])/scale,(b[3]-a[3])/scale)
 end
 

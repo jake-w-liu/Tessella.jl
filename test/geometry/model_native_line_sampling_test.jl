@@ -111,7 +111,7 @@ end
             Point(1)={0,0,0,1};Point(2)={1,0,0,1};Line(1)={1,2};
             Transfinite Curve{1}=$(length(expected)) Using $law $coefficient;
             """;dim=1)
-        mesh=Tessella.geo_entity_mesh(execution,1,1)
+        mesh=Tessella.geo_entity_mesh(execution,1,1;geometry=true)
         params=execution.model.curve_params[1]
         @test size(mesh.coords,2)==length(expected)
         @test size(mesh.segs,2)==length(expected)-1
@@ -128,7 +128,7 @@ end
             Transfinite Curve{1}=6 Using $law $coefficient;
             """;dim=1)
         @test execution.model.curve_params[1]≈collect(range(0.,1.;length=6)) atol=2e-15 rtol=0
-        @test size(Tessella.geo_entity_mesh(execution,1,1).segs,2)==5
+        @test size(Tessella.geo_entity_mesh(execution,1,1;geometry=true).segs,2)==5
     end
 end
 

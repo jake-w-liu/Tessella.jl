@@ -2,6 +2,7 @@ using Test
 using Tessella
 using Tessella.MeshTypes: mesh_crc, nnodes, node, ntets, tet_volume
 using Tessella.Elements: mixed_crc
+include("geo_geometry_expression_native_helpers.jl")
 
 const _GEO_GEOMETRY_EXPRESSION_FIXTURE=normpath(joinpath(
     @__DIR__,"..","fixtures","geo_geometry_expressions.geo"))
@@ -50,10 +51,10 @@ end
 
     meshed=execute_geo(_GEO_GEOMETRY_EXPRESSION_FIXTURE;mesh_dim=3)
     @test validate(meshed.mesh).ok
-    @test nnodes(meshed.mesh)==139
-    @test ntets(meshed.mesh)==457
+    @test nnodes(meshed.mesh)==81
+    @test ntets(meshed.mesh)==184
     @test mesh_crc(meshed.mesh).sha==
-          "48656cd230252b831ec240081289d7c6f9103626726f2e4aa8728e1c764c49a7"
+          "a648e22f1ae8d58bce2638ed1533b5826755fdd8c67f53c9fb4b1ed243cbccd9"
     volume=sum(tet_volume(
         node(meshed.mesh,meshed.mesh.tets[1,cell]),
         node(meshed.mesh,meshed.mesh.tets[2,cell]),
@@ -63,10 +64,11 @@ end
     @test volume≈1.0 atol=1e-12
     projected=model_to_mixed(meshed.model,
         geo_entity_mesh(meshed,3,60),3,60)
+    GeometryExpressionNativeControls.check(meshed,projected)
     @test validate(projected).ok
     @test projected.physical_names==model.physical_names
     @test mixed_crc(projected).sha==
-          "8b76bf2a3c0f74cea3b1081dc9eb79627801b1a99ec7b250aaa899766a6e8d0a"
+          "7e1b27f1cd12b46c765b72e222f33f30d60a62759077746f5a747f296ed5fb90"
 
     optional_size=_execute_geometry_expression_source(
         "Point(1 + 0.9) = {0, 1, 2};")

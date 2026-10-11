@@ -8,10 +8,10 @@ end
 const _QSC=QuadTriNoNewQuadStripCertificates
 
 function _qsc_product(f;entry=false)
-    geometry=_QSC.execute(f.source;dim=entry ? 3 : 0)
+    geometry=_QSC.execute(f.source;dim=0)
     out=Int.(geometry.lists["sweep"]);m=geometry.model
     source=mesh_model_surface(m,f.surface)
-    volume=entry ? geo_entity_mesh(geometry,3,out[2]) : mesh_model_volume(m,out[2])
+    volume=mesh_model_volume(m,out[2])
     cert=_QSC.certify(volume,f,source)
     @test validate(volume).ok
     base=source.coords[f.axes[3],1]
@@ -31,9 +31,22 @@ function _qsc_product(f;entry=false)
     @test count(o->o[1]==3,projected.entity_data.node_entities)==(f.laterals ? 2 : 0)
     parts=[(2,s,mesh_model_surface(m,s)) for s in (f.surface,out[1],out[3:end]...)]
     @test _QSC.Quad.surface_faces(parts,volume)==Set(keys(cert.boundary))
-    @test _QSC.Quad.surface_faces(_QSC.execute(f.source;dim=2).mesh_parts,volume)==Set(keys(cert.boundary))
+    # Keep the original Model certificate/projection in its private row space.
+    # Independently certify all actual GEO products and their complete shell;
+    # copied native heap-pointer minima do not equal public dense-row minima.
+    actual=_QSC.execute(f.source;dim=3)
+    @test Int.(actual.lists["sweep"])==out
+    actual_source=geo_entity_mesh(actual,2,f.surface)
+    actual_volume=geo_entity_mesh(actual,3,out[2])
+    actual_cert=_QSC.certify(actual_volume,f,actual_source;native_top=false)
+    @test validate(actual_volume).ok
+    @test _QSC.Quad.surface_faces(actual.actual_mesh_parts,actual_volume)==Set(keys(actual_cert.boundary))
+    @test Set(actual_source.entity_data.external_node_tags)<=Set(actual_volume.entity_data.external_node_tags)
+    @test length(actual_cert.centers)==length(cert.centers)
+    entry && @test actual.mesh!==nothing
+    return_geometry=entry ? actual : geometry
     @test _QSC.Quad.typed_signature(mesh_model_volume(m,out[2]))==_QSC.Quad.typed_signature(volume)
-    return (;geometry,source,volume,cert,projected)
+    return (;geometry=return_geometry,source,volume,cert,projected)
 end
 
 function _qsc_atomic(f,diagnostic)

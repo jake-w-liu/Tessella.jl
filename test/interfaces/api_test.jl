@@ -3,6 +3,7 @@ using LinearAlgebra
 using Tessella
 using Tessella.MeshTypes: mesh_crc, nnodes, node, ntets, tet_volume, validate
 
+include("default_box_optimizer_full_native_helpers.jl")
 const _API=Tessella.API
 
 @testset "API field tag allocation follows each model's live fields" begin
@@ -83,23 +84,26 @@ end
         @test validate(generated).ok
         expected_crc=mesh_crc(generated)
         @test expected_crc.sha==
-              "685ae426e57a88732577b13e644113e0bff790099eb0e7292071cc2b8bb77678"
+              "ec97caf92e736f8590fe61176430799f103bbe3804756c0577ab56c1d6f4a52e"
+        native=DefaultBoxOptimizerFullNativeV1.check(_API,generated)
+        native_state=native["state"]
         node_tags,node_coordinates,node_parameters=_API.mesh.get_nodes()
-        @test node_tags==UInt64.(1:size(generated.coords,2))
-        @test reshape(node_coordinates,3,:)==generated.coords
+        @test node_tags==UInt64.(native_state["global_nodes"]["uids"])
+        @test DefaultBoxOptimizerFullNativeV1.bits(node_coordinates)==native_state["global_nodes"]["XYZ_bits"]
         @test isempty(node_parameters)
         element_types,element_tags,element_nodes=_API.mesh.get_elements()
-        @test element_types==Int32[4]
-        @test element_tags==[UInt64.(1:ntets(generated))]
-        @test element_nodes==[UInt64.(vec(generated.tets))]
-        @test _API.mesh.get_element_types()==Int32[4]
+        @test element_types==Int32.(native_state["global_elements"]["types"])
+        @test element_tags==[UInt64.(block) for block in native_state["global_elements"]["uids"]]
+        @test element_nodes==[UInt64.(block) for block in native_state["global_elements"]["connectivity"]]
+        @test _API.mesh.get_element_types()==Int32.(native_state["global_elements"]["types"])
         @test _API.mesh.get_elements_by_type(4)==
-              (UInt64.(1:ntets(generated)),UInt64.(vec(generated.tets)))
+              (UInt64.(native_state["global_elements"]["uids"][3]),
+               UInt64.(native_state["global_elements"]["connectivity"][3]))
         type_node_tags,type_node_coordinates,type_node_parameters=
             _API.mesh.get_nodes_by_element_type(4)
-        @test type_node_tags==UInt64.(vec(generated.tets))
-        @test reshape(type_node_coordinates,3,:)==
-              generated.coords[:,Int.(type_node_tags)]
+        @test type_node_tags==UInt64.(native_state["global_elements"]["connectivity"][3])
+        @test DefaultBoxOptimizerFullNativeV1.bits(type_node_coordinates)==
+              DefaultBoxOptimizerFullNativeV1.node_bits(native,type_node_tags)
         # Gmsh packs per-node parameters on the owning Line/Plane entity, so the
         # by-type query reports parameters for classified boundary nodes.
         @test !isempty(type_node_parameters)
@@ -108,7 +112,7 @@ end
         @test length(_API.mesh.get_element_edge_nodes(4))==12ntets(generated)
         @test length(_API.mesh.get_element_face_nodes(4,3))==12ntets(generated)
         @test _API.mesh.get_max_node_tag()==UInt64(size(generated.coords,2))
-        @test _API.mesh.get_max_element_tag()==UInt64(ntets(generated))
+        @test _API.mesh.get_max_element_tag()==UInt64(native_state["maxima"][2])
 
         cached=_API.mesh.get()
         @test cached!==generated && cached.coords!==generated.coords
@@ -196,7 +200,7 @@ end
             @test periodic_result.mesh!==nothing
             periodic_crc=mesh_crc(periodic_result.mesh)
             @test periodic_crc.sha==
-                  "393550fabf46b3bf286058d17df8b7ee344eb5abf05a290b123f99ac80102854"
+                  "24267272c06e456695f3f7e19bcf9441e7b4c2701803d5da620a6db44961d6c0"
             periodic_mapping=_API.mesh.get_periodic_nodes(1,2)
             @test periodic_mapping.master_entity==4
             @test length(periodic_mapping.slave_nodes)==3
@@ -321,8 +325,9 @@ end
         @test _API.model.add_point(0.75,0.75,0.75;tag=102)==102
         initial=_API.mesh.generate(3)
         @test validate(initial).ok
+        DefaultBoxOptimizerFullNativeV1.check(_API,initial;unused_points=true)
         @test mesh_crc(initial).sha==
-              "685ae426e57a88732577b13e644113e0bff790099eb0e7292071cc2b8bb77678"
+              "ec97caf92e736f8590fe61176430799f103bbe3804756c0577ab56c1d6f4a52e"
 
         @test _API.mesh.set_size((0=>101,0=>102),0.25)===nothing
         @test _API.CURRENT[].point_size[101]==0.25

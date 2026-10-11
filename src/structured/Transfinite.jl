@@ -798,6 +798,8 @@ end
     return point
 end
 
+@inline _interpolate_point(interpolate,u,v,i::Int,j::Int)=interpolate(u,v)
+
 @inline _node(i::Int,j::Int,width::Int)=Int32(i+1+j*width)
 
 @inline function _right_diagonal(arrangement::Symbol,i::Int,j::Int)
@@ -1068,7 +1070,7 @@ function mesh_transfinite_patch(side1::AbstractVector,side2::AbstractVector,
                 _coons(left[j+1],right[j+1],bottom[i+1],top[i+1],
                        c2,c3,c4,u[i+1],v[j+1]),origin,scale)
         else
-            interpolate(u[i+1],v[j+1])
+            _interpolate_point(interpolate,u[i+1],v[j+1],i,j)
         end
         all(isfinite,point) || throw(ArgumentError(
             "mesh_transfinite_patch: transfinite interpolation generated a non-finite coordinate"))

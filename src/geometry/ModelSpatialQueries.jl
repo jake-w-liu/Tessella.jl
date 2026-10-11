@@ -183,6 +183,16 @@ end
 function _model_curve_bounding_box(
     m::GeoModel,curve::Int,caller::AbstractString)
     occ=_occ_geometry_checked(m,curve,caller)
+    if occ!==nothing && occ.occ===:surface_iso
+        surface=occ.face.patch.surface
+        controls=occ.axis==1 ? @view(surface.controls[:,occ.fixed==first(surface.knots_v) ? 1 : size(surface.controls,2)]) :
+                              @view(surface.controls[occ.fixed==first(surface.knots_u) ? 1 : size(surface.controls,1),:])
+        return ntuple(6) do index
+            axis=mod1(index,3)
+            values=(point[axis] for point in controls)
+            index<=3 ? minimum(values)-1e-7 : maximum(values)+1e-7
+        end
+    end
     occ===nothing || return _model_bounds_checked(
         occ.occ===:circle ? _occ_circle_bounding_box(occ) :
         occ.occ===:line ? _model_bounds_from_points(
@@ -248,6 +258,14 @@ function _model_entity_bounding_box(
         return _model_curve_bounding_box(m,tag,caller)
     elseif dimension==2
         surface_geometry=get(m.surface_geometry,tag,nothing)
+        if _model_nurbs_surface(surface_geometry)
+            controls=surface_geometry.patch.surface.controls
+            return ntuple(6) do index
+                axis=mod1(index,3)
+                values=(point[axis] for point in controls)
+                index<=3 ? minimum(values)-1e-7 : maximum(values)+1e-7
+            end
+        end
         # A sphere's wire only spans a single meridian; its face bbox is the
         # analytic ball box. Cylinder/cone faces reduce to their end circles,
         # which the boundary-curve union already covers exactly.
@@ -681,7 +699,7 @@ function _dist_face_project(m::GeoModel,stag::Int,q::NTuple{3,Float64},
     if kind===:plane
         plane=_model_plane_frame(m,stag,caller)
         exact=_model_plane_parameters_exact(plane,q)
-        xyz=_model_plane_point(plane,exact[1],exact[2],caller,1)
+        xyz=NTuple{3,Float64}(_model_plane_point(plane,exact[1],exact[2],caller,1))
         state=_dist_plane_state(m,stag,plane,xyz,caller)
         if state!==:out
             return _sqdist(q,xyz),xyz

@@ -71,7 +71,8 @@ function _extrude_nonew_b4_strip_counts(source::_ExtrudeNoNewRectGridSource,
 end
 
 function _extrude_nonew_b4_strip_plan(source::_ExtrudeNoNewRectGridSource,
-        levels::Vector{Float64},refs::Vector{NTuple{2,Int32}},recombined::Bool,caller)
+        levels::Vector{Float64},refs::Vector{NTuple{2,Int32}},recombined::Bool,caller;
+        top_states=nothing)
     recombined || _extrude_nonew_b4_strip_plan_error(caller,
         "free lateral faces require the pending all-boundary propagation planner")
     intervals=length(refs)
@@ -86,9 +87,11 @@ function _extrude_nonew_b4_strip_plan(source::_ExtrudeNoNewRectGridSource,
             _extrude_nonew_b4_strip_plan_error(caller,"layer levels collapse in Float64")
     end
     families,faces,cells=_extrude_nonew_b4_strip_counts(source,intervals,caller)
+    supplied=_model_mesh_top_states(top_states,cells,caller)
     top_states=Vector{UInt8}(undef,cells)
     for cell in 1:cells
-        top_states[cell]=_extrude_nonew_b4_strip_top_state(source.source_cells[cell])
+        top_states[cell]=supplied===nothing ?
+            _extrude_nonew_b4_strip_top_state(source.source_cells[cell]) : supplied[cell]
     end
     return _ExtrudeNoNewB4StripCatalog(source,top_states,families,faces,cells,
         true,levels,refs)

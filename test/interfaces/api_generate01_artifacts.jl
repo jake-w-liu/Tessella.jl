@@ -39,6 +39,8 @@ function records()
         end
         for (curve,a,b) in ((1,1,2),(2,3,4))
             api.model.add_line(a,b;tag=curve)
+        end
+        for curve in 1:2
             api.mesh.set_transfinite_curve(curve,3)
         end
         api.model.add_physical_group(1,[1];tag=7,name="selected curve")

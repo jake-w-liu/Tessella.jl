@@ -100,7 +100,7 @@ function _qpc_source_progression_case(laterals)
         "Transfinite Curve{1,2,3,4}=3;"=>"Transfinite Curve{1,2,3,4}=3 Using Progression 4;")))
     geometry=_QPC.execute(fixture.source;dim=3)
     source=mesh_model_surface(geometry.model,fixture.surface)
-    volume=geo_entity_mesh(geometry,3,Int(geometry.lists["sweep"][2]))
+    volume=geo_entity_mesh(geometry,3,Int(geometry.lists["sweep"][2]);geometry=true)
     certificate=_QPC.certify(volume,fixture,source)
     @test certificate.total==1
     # Saved Gmsh 4.15.2 native density samples; the stepwise primitive is
@@ -167,7 +167,7 @@ end
             fixture=_QPC.fixture("product";plane,winding,height=direction*1.5,laterals,layers=profile,shape)
             geometry=_QPC.execute(fixture.source;dim=3)
             source=mesh_model_surface(geometry.model,fixture.surface)
-            volume=geo_entity_mesh(geometry,3,Int(geometry.lists["sweep"][2]))
+            volume=geo_entity_mesh(geometry,3,Int(geometry.lists["sweep"][2]);geometry=true)
             cert=_QPC.certify(volume,fixture,source)
             @test cert.ncell==(laterals ? 4(length(fixture.levels)-2)+12 : 24(length(fixture.levels)-1)-4)
             @test Tessella.validate(volume).ok
@@ -183,7 +183,7 @@ end
                 layers=:nonbinary,shape=:rounded)
             geometry=_QPC.execute(fixture.source;dim=3)
             source=mesh_model_surface(geometry.model,fixture.surface)
-            cert=_QPC.certify(geo_entity_mesh(geometry,3,Int(geometry.lists["sweep"][2])),fixture,source)
+            cert=_QPC.certify(geo_entity_mesh(geometry,3,Int(geometry.lists["sweep"][2]);geometry=true),fixture,source)
             @test length(cert.source.chains)==4 && length(cert.source.shared)==4
             for curve in fixture.curve_tags
                 @test length(geometry.model.curve_params[curve])==3
@@ -204,7 +204,7 @@ end
                                  winding=-1,pins=:opposite,tags=:sparse)
             geometry=_QPC.execute(fixture.source;dim=3)
             source=mesh_model_surface(geometry.model,fixture.surface)
-            volume=geo_entity_mesh(geometry,3,Int(geometry.lists["sweep"][2]))
+            volume=geo_entity_mesh(geometry,3,Int(geometry.lists["sweep"][2]);geometry=true)
             cert=_QPC.certify(volume,fixture,source)
             _qpc_projection(geometry,fixture,source,volume,cert)
             surface_only=_QPC.execute(fixture.source;dim=2)
@@ -233,7 +233,7 @@ end
             fixture=_QPC.fixture("adjacent";plane,height=direction,laterals,layers=:four,offset)
             geometry=_QPC.execute(fixture.source;dim=3)
             source=mesh_model_surface(geometry.model,fixture.surface)
-            volume=geo_entity_mesh(geometry,3,Int(geometry.lists["sweep"][2]))
+            volume=geo_entity_mesh(geometry,3,Int(geometry.lists["sweep"][2]);geometry=true)
             cert=_QPC.certify(volume,fixture,source)
             @test abs.(diff(cert.heights))==fill(.25,4)
             @test cert.total==1
@@ -243,7 +243,7 @@ end
             fixture=_QPC.fixture("tiny";scale=2.0^exponent,height=2.0^exponent,laterals,layers=:graded)
             geometry=_QPC.execute(fixture.source;dim=3)
             source=mesh_model_surface(geometry.model,fixture.surface)
-            cert=_QPC.certify(geo_entity_mesh(geometry,3,Int(geometry.lists["sweep"][2])),fixture,source)
+            cert=_QPC.certify(geo_entity_mesh(geometry,3,Int(geometry.lists["sweep"][2]);geometry=true),fixture,source)
             @test cert.total==_QPC.Q(2.0^exponent)^3
         end
     end
@@ -256,7 +256,7 @@ end
             Physical Volume("body",103)={sweep[1]};
             """
             geometry=_QPC.execute(text;dim=3)
-            volume=geo_entity_mesh(geometry,3,Int(geometry.lists["sweep"][2]))
+            volume=geo_entity_mesh(geometry,3,Int(geometry.lists["sweep"][2]);geometry=true)
             classified=model_to_mixed(geometry.model,volume,3,Int(geometry.lists["sweep"][2]))
             @test classified.physical_names==Dict((2,101)=>"source",(2,102)=>"top",(3,103)=>"body")
             @test all(all(==(103),b.tags) for b in classified.blocks if msh_dimension(b.msh)==3)

@@ -82,3 +82,48 @@ using Tessella.GUI: GuiState, camera_reset!, gui_command!, gui_new!
 
     @test isempty(Docs.undocumented_names(Tessella.GUI;private=false))
 end
+
+import Serialization
+
+@testset "GUI box extent admission preserves the owned session" begin
+    A=Tessella.API
+    s=GuiState()
+    # This control observes the complete freshly initialized GUI/model/cache
+    # graph, including native lookup state and process-global Msg values.
+    function owned_payload()
+        lock(A.STATE_LOCK) do
+            output=IOBuffer()
+            Serialization.serialize(output,(s,A.CURRENT[],A.MODEL_SLOTS,
+                A.LAST_MESH[],A.LAST_MESH_CLASS[],A.LAST_MESH_LOCATOR[],
+                A.LAST_MESH_EDGES[],A.LAST_MESH_FACES[],
+                A.NATIVE_LOOKUP_CATALOGUES,A.NATIVE_LOOKUP_QUERY_ERRORS[],
+                A.NATIVE_MSG_LAST_ERROR[],A.NATIVE_CONTEXT_LC[],
+                A.NATIVE_CONTEXT_FORCED_BBOX[],A.OPTIONS))
+            take!(output)
+        end
+    end
+    try
+        gui_new!(s)
+        before=owned_payload()
+        for axis in 1:3, invalid in ("-1", "0", "-0.0")
+            dimensions=["1","1","1"]
+            dimensions[axis]=invalid
+            command="box 0 0 0 "*join(dimensions," ")*" 1"
+            error=try
+                gui_command!(s,command)
+                nothing
+            catch caught
+                caught
+            end
+            @test error isa ArgumentError
+            @test error isa ArgumentError && occursin(
+                "box dimensions must be positive",sprint(showerror,error))
+            @test owned_payload()==before
+        end
+        @test gui_command!(s,"box 0 0 0 1 1 1 1")===s
+        @test s.log==["new model","box 1"]
+        @test (3,1) in A.model.get_entities()
+    finally
+        A.finalize()
+    end
+end

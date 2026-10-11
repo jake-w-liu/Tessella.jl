@@ -117,7 +117,7 @@ end
     try
         _MESH_DATA_API.initialize()
         @test _MESH_DATA_API.mesh.get_nodes()==(UInt64[],Float64[],Float64[])
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_node(1)
+        @test_throws ErrorException _MESH_DATA_API.mesh.get_node(1)
         @test _MESH_DATA_API.mesh.get_elements()==
               (Int32[],Vector{UInt64}[],Vector{UInt64}[])
         @test _MESH_DATA_API.mesh.get_element_types()==Int32[]
@@ -682,8 +682,8 @@ end
             @test length(element_nodes)==3
             @test Set(element_nodes)⊆Set(surface_with_boundary)
         end
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_element(0)
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_element(
+        @test_throws ErrorException _MESH_DATA_API.mesh.get_element(0)
+        @test_throws ErrorException _MESH_DATA_API.mesh.get_element(
             length(tags[1])+1)
         @test_throws ArgumentError _MESH_DATA_API.mesh.get_element(1.5)
         # Single-node queries report coordinates, owner, and owner parameters.
@@ -702,7 +702,8 @@ end
             end
         end
         for bad in (0,length(dense_nodes)+1,1.5,true)
-            @test_throws ArgumentError _MESH_DATA_API.mesh.get_node(bad)
+            exception=bad isa Integer && !(bad isa Bool) ? ErrorException : ArgumentError
+            @test_throws exception _MESH_DATA_API.mesh.get_node(bad)
         end
         # Type-funnel queries resolve the tag in the type's own dimension.
         filtered_tags,filtered_nodes=

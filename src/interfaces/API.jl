@@ -26,10 +26,12 @@ to Gmsh.
 """
 module API
 
-using ..Predicates: orient3
+using ..Predicates: orient3, O3DERRBOUND_A
 using ..Recombine: recombine_triangles, _recombine_triangles
 using ..Elements: ElementBlock, msh_family, msh_dimension, msh_spec
 using ..Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
+using ..Mesh3D: _gopt_gamma
+using ..Model: add_bezier_surface!, add_bspline_surface!
 using ..Model: add_surface_loop!, add_volume!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 using ..Model: _remove_volume_entity!
@@ -45,6 +47,7 @@ using ..Model: model_entity_type, model_entity_properties, model_parent,
                model_number_of_partitions, model_partitions
 using ..Model: model_value, model_derivative, model_second_derivative,
                model_curvature, model_principal_curvatures, model_normal
+using ..Model: _model_native_curve_evaluate, _model_native_curve_parametrization
 using ..Model: model_parametrization, model_parametrization_bounds,
                model_is_inside, model_closest_point, model_distance,
                model_reparametrize_on_surface
@@ -75,7 +78,7 @@ using ..Model: _model_entity_known, _model_fresh_element_tag,
 using ..MeshTypes: Mesh, node, nnodes, nsegs, ntris, ntets, validate,
                    boundary_edges
 using ..IO: read_stl, GeoParams, GeoFieldSpec, _geo_split_list_or_argerr,
-            _geo_signed_gmsh_int_value
+            _geo_signed_gmsh_int_value, _geo_option_store_value
 using ..SizeField: AbstractSizeField, build_geo_size_field, _build_geo_field, PostViewField
 using ..MeshEntityTopology: MeshEdgeTopology, MeshFaceTopology,
                             _mesh_edge_topology, _mesh_face_topology,
@@ -107,8 +110,9 @@ using ..Optimize: smooth_optimize, _laplacian_smooth_tri_cache
 using ..HighOrder: HighOrder, P2Mesh, P2TriMesh, p2_trimesh, p2_tetmesh
 using ..Model: _compound_surface_meshes
 using ..GeoExec: execute_geo
+using ..Post: Post
 
-export initialize, finalize, option, model, mesh, open_geo!
+export initialize, finalize, clear, option, model, mesh, open_geo!
 
 # Entity classification snapshot for the session mesh cache, derived from the
 # canonical `model_to_mixed` projection at generation time. `mesh` is the exact
@@ -118,6 +122,8 @@ export initialize, finalize, option, model, mesh, open_geo!
 # `seg/tri/tet_entities[c]` is the entity tag owning cell column `c`;
 # `boundaries[(dim,tag)]` lists the entity's boundary tags one dimension down.
 include("APITaggedCache.jl")
+include("APINativeMeshTags.jl")
+include("APIPartitionNative.jl")
 
 struct _MeshClassification
     mesh::Union{Mesh,MixedMesh}
@@ -135,7 +141,27 @@ struct _MeshClassification
     edge_entities::Dict{NTuple{2,Int32},Tuple{Int,Int32}}
     face_entities::Dict{NTuple{3,Int32},Tuple{Int,Int32}}
     quad_entities::Dict{NTuple{4,Int32},Tuple{Int,Int32}}
+    node_parametric::Vector{Union{Nothing,Vector{Float64}}}
+    mid_parametric::Dict{NTuple{2,Int32},Union{Nothing,Vector{Float64}}}
+    mid_keys::Dict{Int32,NTuple{2,Int32}}
 end
+
+_MeshClassification(mesh,entity,entities,node_entities,boundaries,segs,tris,tets,
+                    cells,tags,edges,faces,quads,parameters,mids)=
+    _MeshClassification(mesh,entity,entities,node_entities,boundaries,segs,tris,tets,
+        cells,tags,edges,faces,quads,parameters,mids,Dict{Int32,NTuple{2,Int32}}())
+
+_MeshClassification(mesh,entity,entities,node_entities,boundaries,segs,tris,tets,
+                    cells,tags,edges,faces,quads,parameters)=
+    _MeshClassification(mesh,entity,entities,node_entities,boundaries,segs,tris,tets,
+        cells,tags,edges,faces,quads,parameters,
+        Dict{NTuple{2,Int32},Union{Nothing,Vector{Float64}}}())
+
+_MeshClassification(mesh,entity,entities,node_entities,boundaries,segs,tris,tets,
+                    cells,tags,edges,faces,quads)=
+    _MeshClassification(mesh,entity,entities,node_entities,boundaries,segs,tris,tets,
+        cells,tags,edges,faces,quads,
+        Union{Nothing,Vector{Float64}}[nothing for _ in node_entities])
 
 _MeshClassification(mesh,entity,entities,node_entities,boundaries,segs,tris,tets,
                     cells,tags,edges,faces)=
@@ -158,6 +184,15 @@ _MeshClassification(mesh,entity,entities,node_entities,boundaries,segs,tris,tets
 
 const CURRENT = Ref{Union{Nothing,GeoModel}}(nothing)
 const DEFAULT_OPTIONS = Dict{String,Float64}(
+    "General.AbortOnError"=>2.0,
+    "General.Terminal"=>1.0,
+    "General.Verbosity"=>5.0,
+    "Mesh.Algorithm"=>6.0,
+    "Mesh.Algorithm3D"=>1.0,
+    "Mesh.Optimize"=>1.0,
+    "Mesh.OptimizeThreshold"=>0.3,
+    "Mesh.OptimizeNetgen"=>0.0,
+    "Mesh.OptimizePyramids"=>0.0,
     "Mesh.MeshSizeMin"=>0.0,
     "Mesh.MeshSizeMax"=>1.0e22,
     "Mesh.MeshSizeFactor"=>1.0,
@@ -167,6 +202,10 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "Mesh.FlexibleTransfinite"=>0.0,
     "Mesh.RecombineAll"=>0.0,
     "Mesh.RecombinationAlgorithm"=>1.0,
+    "Mesh.RecombineOptimizeTopology"=>5.0,
+    "Mesh.RecombineNodeRepositioning"=>1.0,
+    "Mesh.RecombineMinimumQuality"=>0.01,
+    "Mesh.Smoothing"=>1.0,
     "Mesh.MeshSizeExtendFromBoundary"=>1.0,
     "Mesh.TransfiniteTri"=>0.0,
     "Mesh.MeshSizeFromPoints"=>1.0,
@@ -181,9 +220,18 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "Mesh.MeshOnlyEmpty"=>0.0,
     "Mesh.MeshOnlyVisible"=>0.0,
     "Mesh.MaxRetries"=>10.0,
+    "Mesh.RandomSeed"=>1.0,
+    "Mesh.RandomFactor3D"=>1e-12,
     "Mesh.Renumber"=>1.0,
     "Mesh.SaveAll"=>0.0,
-    "Mesh.ElementOrder"=>1.0)
+    "Mesh.MshFileVersion"=>4.1,
+    "Mesh.Binary"=>0.0,
+    "PostProcessing.Binary"=>0.0,
+    "PostProcessing.SaveMesh"=>1.0,
+    "PostProcessing.SaveInterpolationMatrices"=>1.0,
+    "Mesh.ElementOrder"=>1.0,
+    "Mesh.SecondOrderLinear"=>0.0,
+    "Mesh.SecondOrderIncomplete"=>0.0)
 const _OPTION_ALIASES=Dict{String,String}(
     "Mesh.CharacteristicLengthMin"=>"Mesh.MeshSizeMin",
     "Mesh.CharacteristicLengthMax"=>"Mesh.MeshSizeMax",
@@ -201,7 +249,7 @@ const LAST_MESH_EDGES = Ref{Union{Nothing,MeshEdgeTopology}}(nothing)
 const LAST_MESH_FACES = Ref{Union{Nothing,MeshFaceTopology}}(nothing)
 const MODEL_NAME = Ref{String}("")
 const MODEL_FILE_NAME = Ref{String}("")
-const ELEMENT_VISIBILITY = Ref{Dict{Int,Int32}}(Dict{Int,Int32}())
+const ELEMENT_VISIBILITY = Ref{Dict{UInt64,Int32}}(Dict{UInt64,Int32}())
 const STATE_LOCK = ReentrantLock()
 
 # Session size fields (`model.mesh.field`): each entry owns its kind and its
@@ -218,6 +266,9 @@ const FIELD_SPECS = Ref{Dict{Int,_ApiField}}(Dict{Int,_ApiField}())
 const FIELD_TAG_MAX = Ref(0)
 const NODE_TAG_MAX = Ref{UInt64}(0)
 const ELEMENT_TAG_MAX = Ref{UInt64}(0)
+# Producer-owned wrap events, persisted per model. They do not follow live UID maxima.
+const NODE_COUNTER_WRAPPED = Ref(false)
+const ELEMENT_COUNTER_WRAPPED = Ref(false)
 const BACKGROUND_FIELD = Ref(0)
 const BOUNDARY_LAYER_FIELDS = Ref{Vector{Int}}(Int[])
 
@@ -251,9 +302,9 @@ mutable struct _ModelSlot
     locator::Union{Nothing,SimplexLocator}
     edges::Union{Nothing,MeshEdgeTopology}
     faces::Union{Nothing,MeshFaceTopology}
-    visibility::Dict{Int,Int32}
+    visibility::Dict{UInt64,Int32}
     window_visibility::Dict{Int,Int32}
-    window_element_visibility::Dict{Int,Dict{Int,Int32}}
+    window_element_visibility::Dict{Int,Dict{UInt64,Int32}}
     partition::Union{Nothing,_MeshPartition}
     high_order::Union{Nothing,P2Mesh,P2TriMesh}
     high_order_mids::Vector{Tuple{Int,Int32}}
@@ -263,6 +314,8 @@ mutable struct _ModelSlot
     boundary_layer_fields::Vector{Int}
     node_tag_max::UInt64
     element_tag_max::UInt64
+    node_counter_wrapped::Bool
+    element_counter_wrapped::Bool
 end
 
 const MODEL_SLOTS = _ModelSlot[]
@@ -271,10 +324,10 @@ function _new_slot(name::AbstractString)
     model=GeoModel()
     model.meshing.transfinite_tri=Int(OPTIONS["Mesh.TransfiniteTri"])
     return _ModelSlot(String(name),"",model,nothing,nothing,nothing,
-                      nothing,nothing,Dict{Int,Int32}(),Dict{Int,Int32}(),
-                      Dict{Int,Dict{Int,Int32}}(),nothing,nothing,
+                      nothing,nothing,Dict{UInt64,Int32}(),Dict{Int,Int32}(),
+                      Dict{Int,Dict{UInt64,Int32}}(),nothing,nothing,
                       Tuple{Int,Int32}[],
-                      Dict{Int,_ApiField}(),0,0,Int[],UInt64(0),UInt64(0))
+                      Dict{Int,_ApiField}(),0,0,Int[],UInt64(0),UInt64(0),false,false)
 end
 
 function _current_slot_index_locked()
@@ -307,6 +360,8 @@ function _slot_capture_locked!()
     slot.boundary_layer_fields=BOUNDARY_LAYER_FIELDS[]
     slot.node_tag_max=NODE_TAG_MAX[]
     slot.element_tag_max=ELEMENT_TAG_MAX[]
+    slot.node_counter_wrapped=NODE_COUNTER_WRAPPED[]
+    slot.element_counter_wrapped=ELEMENT_COUNTER_WRAPPED[]
     # `visibility` is a shared Dict object; its contents need no copy.
     return nothing
 end
@@ -333,6 +388,8 @@ function _slot_load_locked!(slot::_ModelSlot)
     BOUNDARY_LAYER_FIELDS[]=slot.boundary_layer_fields
     NODE_TAG_MAX[]=slot.node_tag_max
     ELEMENT_TAG_MAX[]=slot.element_tag_max
+    NODE_COUNTER_WRAPPED[]=slot.node_counter_wrapped
+    ELEMENT_COUNTER_WRAPPED[]=slot.element_counter_wrapped
     return nothing
 end
 
@@ -351,38 +408,57 @@ function _slot_clear_globals_locked!()
     LAST_MESH_HIGH_ORDER[]=nothing
     LAST_MESH_HIGH_ORDER_MESH[]=nothing
     LAST_MESH_HIGH_ORDER_MIDS[]=Tuple{Int,Int32}[]
-    ELEMENT_VISIBILITY[]=Dict{Int,Int32}()
+    ELEMENT_VISIBILITY[]=Dict{UInt64,Int32}()
     FIELD_SPECS[]=Dict{Int,_ApiField}()
     FIELD_TAG_MAX[]=0
     BACKGROUND_FIELD[]=0
     BOUNDARY_LAYER_FIELDS[]=Int[]
     NODE_TAG_MAX[]=0
     ELEMENT_TAG_MAX[]=0
+    NODE_COUNTER_WRAPPED[]=false
+    ELEMENT_COUNTER_WRAPPED[]=false
     return nothing
 end
 
 function _replace_mesh_cache_locked!(mesh::Union{Nothing,Mesh,MixedMesh},
                                      class::Union{Nothing,_MeshClassification}=
-                                         nothing;preserve_visibility::Bool=false)
+                                         nothing;preserve_visibility::Bool=false,
+                                         preserve_source_inputs::Bool=false,
+                                         reconcile_records::Bool=true)
     class!==nothing && class.mesh!==mesh && throw(ArgumentError(
         "API: internal classification record does not match the cached mesh"))
-    if class!==nothing && class.public_tags!==nothing && mesh isa MixedMesh &&
+    current=CURRENT[]
+    if current!==nothing && current.meshing.mesh_authority!==nothing
+        previous_authority=current.meshing.mesh_authority
+        current.meshing.mesh_authority=mesh===nothing ?
+            (preserve_source_inputs ? previous_authority : nothing) :
+            previous_authority.mesh===mesh ? previous_authority :
+            preserve_source_inputs && previous_authority.mesh===nothing ? previous_authority :
+            previous_authority.mesh!==nothing && mesh isa MixedMesh && mesh.entity_data!==nothing ?
+                Model._model_mesh_rebind_authority(previous_authority,mesh) :
+                Model._ModelMeshAuthority(nothing,
+                    Dict{Tuple{Int,Int32},Model._ModelMeshProduct}(),previous_authority.done,UInt64[])
+    end
+    if reconcile_records && class!==nothing && class.public_tags!==nothing && mesh isa MixedMesh &&
             !isempty(class.public_tags.authority)
         m=CURRENT[]
         if m!==nothing
+            uncovered=_cache_uncovered_records(m,_mesh_public_tags(LAST_MESH[]))
             identity=Dict(tag=>tag for tag in class.public_tags.node_tags)
-            _dim01_reconcile_records!(m,collect(class.public_tags.authority),mesh,identity)
+            _dim01_reconcile_records!(m,collect(class.public_tags.authority),mesh,identity;
+                runtime_parameters=class.node_parametric)
+            _restore_cache_uncovered_records!(m,uncovered,class.public_tags)
         end
     end
     LAST_MESH[]=mesh
     LAST_MESH_CLASS[]=class
     if mesh!==nothing
         table=class===nothing ? nothing : class.public_tags
-        NODE_TAG_MAX[]=max(NODE_TAG_MAX[],table===nothing ? UInt64(nnodes(mesh)) :
-            maximum(table.node_tags;init=UInt64(0)))
+        NODE_COUNTER_WRAPPED[] || (NODE_TAG_MAX[]=max(NODE_TAG_MAX[],
+            table===nothing ? UInt64(nnodes(mesh)) : maximum(table.node_tags;init=UInt64(0))))
         _,_,total=_mesh_element_offsets(mesh)
-        ELEMENT_TAG_MAX[]=max(ELEMENT_TAG_MAX[],table===nothing ? UInt64(total) :
-            maximum(table.element_tags;init=UInt64(0)))
+        ELEMENT_COUNTER_WRAPPED[] || (ELEMENT_TAG_MAX[]=max(ELEMENT_TAG_MAX[],
+            table===nothing ? UInt64(total) : maximum(table.element_tags;init=UInt64(0))))
     end
     LAST_MESH_LOCATOR[]=nothing
     isdefined(@__MODULE__,:LAST_MIXED_MESH_LOCATOR) &&
@@ -555,13 +631,17 @@ function _replace_mesh_cache_with_overlay_locked!(cache,class,caller;
         _prepare_high_order_overlay(cache,class,caller;certify) :
         _prepare_preserved_high_order_overlay(cache,class,LAST_MESH[],overlay,
             caller;primary_map)
+    mid_parameters=prepared===nothing || class===nothing ? nothing :
+        _relocation_prepare_mid_parameters(staged_model===nothing ? _model_locked() : staged_model,
+            cache,class,prepared[1],prepared[2])
     if staged_model!==nothing
+        staged_model.meshing.size_callback=_model_locked().meshing.size_callback
         index=_current_slot_index_locked()
         index!=0 && (MODEL_SLOTS[index].model=staged_model)
         CURRENT[]=staged_model
     end
     _replace_mesh_cache_locked!(cache,class;preserve_visibility)
-    prepared===nothing || _set_high_order_overlay(prepared[1],cache,prepared[2])
+    prepared===nothing || _set_high_order_overlay(prepared[1],cache,prepared[2];mid_parameters)
     return cache
 end
 
@@ -570,6 +650,9 @@ function _cached_classification_locked(mesh::Union{Mesh,MixedMesh})
     (class===nothing || class.mesh!==mesh) && return nothing
     return class
 end
+
+include("APINativeContext.jl")
+include("APINativeLookup.jl")
 
 """
     initialize()
@@ -580,6 +663,8 @@ mesh and restoring supported options to their defaults.
 function initialize()
     lock(STATE_LOCK) do
         empty!(OPTIONS);merge!(OPTIONS,DEFAULT_OPTIONS)
+        _reset_native_context_locked!()
+        _native_lookup_reset_locked!()
         empty!(MODEL_SLOTS)
         push!(MODEL_SLOTS,_new_slot(""))
         _slot_load_locked!(MODEL_SLOTS[1])
@@ -592,6 +677,7 @@ end
 """End the API session, discard its model and cached mesh, and restore option defaults."""
 function finalize()
     lock(STATE_LOCK) do
+        _native_lookup_reset_locked!()
         empty!(MODEL_SLOTS)
         _slot_clear_globals_locked!()
         empty!(OPTIONS);merge!(OPTIONS,DEFAULT_OPTIONS)
@@ -601,17 +687,46 @@ function finalize()
     return nothing
 end
 
+"""Remove all models and views while retaining session options and native bounding-box context."""
+function clear()
+    return lock(STATE_LOCK) do
+        _model_locked()
+        for slot in MODEL_SLOTS
+            _native_lookup_remove_slot_locked!(slot)
+        end
+        empty!(MODEL_SLOTS);push!(MODEL_SLOTS,_new_slot(""))
+        _slot_load_locked!(MODEL_SLOTS[1])
+        empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=0
+        return nothing
+    end
+end
+
 function _model_locked()
     CURRENT[]===nothing && throw(ArgumentError(
         "API: no current model; call initialize() or model.add(name) first"))
     return CURRENT[]
 end
 
-function _with_model(f::Function;invalidate::Bool=false)
+include("APINativeDiagnostics.jl")
+
+"""Diagnostics from the native mesh/query Msg paths implemented by this API."""
+module logger
+using ..API: _native_mesh_last_error,_native_logger_start,_native_logger_stop,_native_logger_get
+get_last_error()=_native_mesh_last_error()
+start()=_native_logger_start()
+stop()=_native_logger_stop()
+get()=_native_logger_get()
+end
+
+function _with_model(f::Function;invalidate::Bool=false,preserve_source_inputs::Bool=false,
+                     synchronize_geometry::Bool=false)
     return lock(STATE_LOCK) do
         current=_model_locked()
         result=f(current)
-        invalidate && _replace_mesh_cache_locked!(nothing)
+        # Immediate model factories update the live model. Only explicit GEO
+        # synchronization replays its declarations and resets meshing laws.
+        synchronize_geometry && _synchronize_native_context_locked!(current)
+        invalidate && _replace_mesh_cache_locked!(nothing;preserve_source_inputs)
         result
     end
 end
@@ -645,6 +760,7 @@ function option(name::AbstractString)
     key=get(_OPTION_ALIASES,String(name),String(name))
     return lock(STATE_LOCK) do
         _model_locked()
+        key=="General.BoundingBoxSize" && return NATIVE_CONTEXT_LC[]
         haskey(OPTIONS,key) || throw(ArgumentError("API.option: unknown option $name"))
         OPTIONS[key]
     end
@@ -653,6 +769,7 @@ function option(name::AbstractString, value::Real)
     key=get(_OPTION_ALIASES,String(name),String(name))
     return lock(STATE_LOCK) do
         _model_locked()
+        key=="General.BoundingBoxSize" && return NATIVE_CONTEXT_LC[]
         haskey(OPTIONS,key) || throw(ArgumentError("API.option: unknown option $name"))
         value isa Bool && throw(ArgumentError("API.option: value must not be Bool"))
         v=try
@@ -677,12 +794,22 @@ function option(name::AbstractString, value::Real)
                         "Mesh.MeshSizeExtendFromBoundary","Mesh.MeshSizeFromPoints",
                         "Mesh.MeshSizeFromCurvature","Mesh.MeshOnlyEmpty",
                         "Mesh.MeshOnlyVisible","Mesh.MaxRetries","Mesh.Renumber",
-                        "Mesh.ElementOrder","Mesh.SaveAll","Geometry.OldRuledSurface")
+                        "Mesh.ElementOrder","Mesh.SaveAll","Geometry.OldRuledSurface",
+                        "Mesh.Algorithm","Mesh.Algorithm3D","Mesh.SecondOrderLinear",
+                        "Mesh.SecondOrderIncomplete","Mesh.RecombineOptimizeTopology",
+                        "Mesh.RecombineNodeRepositioning","Mesh.Smoothing","General.AbortOnError",
+                        "Mesh.Optimize","Mesh.OptimizeNetgen","Mesh.OptimizePyramids",
+                        "General.Terminal","General.Verbosity")
             # Gmsh stores `(int)val` — truncation, not a 0/1 restriction.
             v=Float64(_geo_signed_gmsh_int_value(v,"API.option"))
+            key=="Mesh.Algorithm3D" && v==2 && (v=1.0)
         elseif key in ("Mesh.MinLineNodes","Mesh.MinCircleNodes","Mesh.MinCurveNodes")
             minimum=key=="Mesh.MinCurveNodes" ? 1 : 2
             v=Float64(max(minimum,_geo_signed_gmsh_int_value(v,"API.option")))
+        elseif key=="Mesh.RandomSeed"
+            v=_geo_option_store_value("Mesh","RandomSeed",v,"API.option")
+        elseif key=="Mesh.RandomFactor3D"
+            # Native storage retains this finite double, including zero.
         elseif key=="Mesh.ToleranceEdgeLength"
             v>=0 || throw(ArgumentError(
                 "API.option: ToleranceEdgeLength must be nonnegative"))
@@ -690,6 +817,8 @@ function option(name::AbstractString, value::Real)
             # `opt_mesh_algo_recombine` truncates and resets out-of-[0,4] to 0.
             v=Float64((i=_geo_signed_gmsh_int_value(v,"API.option");
                        (i<0 || i>4) ? 0 : i))
+        elseif key=="Mesh.RecombineMinimumQuality"
+            # opt_mesh_recombine_minimum_quality stores the supplied double.
         else
             v>0 || throw(ArgumentError(
                 "API.option: $key must be positive"))
@@ -744,6 +873,7 @@ function _model_remove()
         index=_current_slot_index_locked()
         index!=0 || throw(ArgumentError(
             "API.model.remove: the current model is not in the model list"))
+        _native_lookup_remove_slot_locked!(MODEL_SLOTS[index])
         deleteat!(MODEL_SLOTS,index)
         if isempty(MODEL_SLOTS)
             _slot_clear_globals_locked!()
@@ -936,21 +1066,29 @@ _get_entity_properties(dim,tag)=_with_model() do current
 end
 
 _get_value(dim,tag,parametric_coord)=_with_model() do current
+    native=_model_native_curve_evaluate(current,dim,tag,parametric_coord,:value)
+    native===nothing || return native
     model_value(current,dim,tag,parametric_coord;
         old_ruled_surface=!iszero(OPTIONS["Geometry.OldRuledSurface"]))
 end
 
 _get_derivative(dim,tag,parametric_coord)=_with_model() do current
+    native=_model_native_curve_evaluate(current,dim,tag,parametric_coord,:derivative)
+    native===nothing || return native
     model_derivative(current,dim,tag,parametric_coord;
         old_ruled_surface=!iszero(OPTIONS["Geometry.OldRuledSurface"]))
 end
 
 _get_second_derivative(dim,tag,parametric_coord)=_with_model() do current
+    native=_model_native_curve_evaluate(current,dim,tag,parametric_coord,:second_derivative)
+    native===nothing || return native
     model_second_derivative(current,dim,tag,parametric_coord;
         old_ruled_surface=!iszero(OPTIONS["Geometry.OldRuledSurface"]))
 end
 
 _get_curvature(dim,tag,parametric_coord)=_with_model() do current
+    native=_model_native_curve_evaluate(current,dim,tag,parametric_coord,:curvature)
+    native===nothing || return native
     model_curvature(current,dim,tag,parametric_coord)
 end
 
@@ -963,9 +1101,12 @@ _get_normal(tag,parametric_coord)=_with_model() do current
         old_ruled_surface=!iszero(OPTIONS["Geometry.OldRuledSurface"]))
 end
 
-_api_model_parametrization(current,dim,tag,coord)=
-    model_parametrization(current,dim,tag,coord;
+function _api_model_parametrization(current,dim,tag,coord)
+    native=_model_native_curve_parametrization(current,dim,tag,coord)
+    native===nothing || return native
+    return model_parametrization(current,dim,tag,coord;
         old_ruled_surface=!iszero(OPTIONS["Geometry.OldRuledSurface"]))
+end
 
 _get_parametrization(dim,tag,coord)=_with_model() do current
     _api_model_parametrization(current,dim,tag,coord)
@@ -1010,8 +1151,27 @@ _get_color(dim,tag)=_with_model() do current
     model_entity_color(current,dim,tag)
 end
 
-_set_coordinates(tag,x,y,z)=_with_model(invalidate=true) do current
-    set_point_coordinates!(current,tag,x,y,z)
+function _set_coordinates(tag,x,y,z)
+    return lock(STATE_LOCK) do
+        current=_model_locked()
+        _,point_tag=Model._model_metadata_entity(current,0,tag,"set_point_coordinates!")
+        cached=LAST_MESH[]
+        class=cached===nothing ? nothing : _cached_classification_locked(cached)
+        position=class===nothing ? nothing : findfirst(==((0,Int32(point_tag))),class.node_entities)
+        first_node=position===nothing ? nothing : _cache_node_tag(class.public_tags,position)
+        plan=Model._model_point_position_plan(current,point_tag,x,y,z;first_node)
+        if position!==nothing
+            Model._model_point_position_update!(plan.updates,cached.coords,position,
+                "set_point_coordinates!")
+            overlay=_high_order_overlay(cached)
+            overlay===nothing || Model._model_point_position_update!(plan.updates,
+                overlay.coords,position,"set_point_coordinates!")
+        end
+        Model._model_commit_point_position!(current,plan)
+        LAST_MESH_LOCATOR[]=nothing
+        LAST_MIXED_MESH_LOCATOR[]=nothing
+        return nothing
+    end
 end
 
 _set_attribute(name,values)=_with_model() do current
@@ -1037,14 +1197,15 @@ end
 
 _get_number_of_partitions()=_with_model() do current
     partition=LAST_MESH_PARTITION[]
-    (partition===nothing || partition.mesh!==LAST_MESH[]) && return 0
+    (partition===nothing || partition.mesh!==LAST_MESH[]) &&
+        return model_number_of_partitions(current)
     return partition.num_partitions
 end
 
 _get_partitions(dim,tag)=_with_model() do current
-    model_partitions(current,dim,tag)
+    imported=model_partitions(current,dim,tag)
     partition=LAST_MESH_PARTITION[]
-    (partition===nothing || partition.mesh!==LAST_MESH[]) && return Int[]
+    (partition===nothing || partition.mesh!==LAST_MESH[]) && return imported
     class=LAST_MESH_CLASS[]
     (class===nothing || class.mesh!==partition.mesh) && return Int[]
     cached=partition.mesh
@@ -1070,7 +1231,7 @@ function _set_entity_name(dim,tag,name)
         current=_model_locked()
         before=model_entity_name(current,dim,tag)
         after=set_entity_name!(current,dim,tag,name)
-        after==before || _replace_mesh_cache_locked!(nothing)
+        after==before || _replace_mesh_cache_locked!(nothing;preserve_source_inputs=true)
         nothing
     end
 end
@@ -1080,12 +1241,12 @@ function _remove_entity_name(name)
         "API.model.remove_entity_name: name must be a string"))
     return lock(STATE_LOCK) do
         current=_model_locked()
-        remove_entity_name!(current,name)>0 && _replace_mesh_cache_locked!(nothing)
+        remove_entity_name!(current,name)>0 && _replace_mesh_cache_locked!(nothing;preserve_source_inputs=true)
         nothing
     end
 end
 
-_set_tag(dim,tag,new_tag)=_with_model(invalidate=true) do current
+_set_tag(dim,tag,new_tag)=_with_model(invalidate=true,preserve_source_inputs=true) do current
     model_set_tag!(current,dim,tag,new_tag)
     nothing
 end
@@ -1155,7 +1316,9 @@ end
 
 """Gmsh-style geometry-model, topology, and Physical-group operations for the active [`API`](@ref) session."""
 module model
+import ...Model
 using ..API: _with_model, add_point!, add_line!, add_curve_loop!, add_plane_surface!
+using ..API: add_bezier_surface!, add_bspline_surface!
 using ..API: add_surface_loop!, add_volume!
 using ..API: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!, embed!, add_physical_group!
 using ..API: _remove_volume_entity!
@@ -1177,40 +1340,70 @@ using ..API: _set_visibility, _get_visibility, _set_color, _get_color
 using ..API: _set_coordinates, _set_attribute, _get_attribute,
              _get_attribute_names, _remove_attribute
 using ..API: _get_entity_name, _set_entity_name, _remove_entity_name, _set_tag
+using ..API: _synchronize_native_context
 using ..API: _remove_entities
 using ..API: _get_current, _set_current, _get_file_name, _set_file_name,
              _model_add, _model_remove, _model_list, _set_visibility_per_window,
              _add_discrete_entity
-add_point(x,y,z;tag=0,meshSize=1.0)=_with_model(invalidate=true) do m
-    add_point!(m,x,y,z;tag=tag,mesh_size=meshSize)
+include("APIOCCShapeRegistry.jl")
+
+function add_point(x,y,z;tag=0,meshSize=1.0)
+    lc=try
+        Float64(meshSize)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("API.model.add_point: meshSize must be Float64-representable"))
+    end
+    isfinite(lc) || throw(ArgumentError(
+        "API.model.add_point: meshSize must be finite"))
+    return _with_model(invalidate=true,preserve_source_inputs=true,
+        synchronize_geometry=true) do m
+        # `gmshVertex` keeps the `lc` component verbatim — `lc <= 0` is the
+        # unset default (`point_size` reads fall back to 0), matching
+        # `model.geo.add_point` and the `Point` statement parser.
+        result=add_point!(m,x,y,z;tag=tag,mesh_size=lc>0 ? lc : 1.0)
+        lc<=0 && (m.point_size[result]=lc)
+        Model._native_geo_kernel_admit_point!(m,result)
+        result
+    end
 end
-add_line(a,b;tag=0)=_with_model(invalidate=true) do m
-    add_line!(m,a,b;tag=tag)
+add_line(a,b;tag=0)=_with_model(invalidate=true,synchronize_geometry=true) do m
+    result=add_line!(m,a,b;tag=tag)
+    Model._native_geo_kernel_admit_curve!(m,result)
+    result
 end
-add_curve_loop(curves;tag=0)=_with_model(invalidate=true) do m
+add_curve_loop(curves;tag=0)=_with_model(invalidate=true,synchronize_geometry=true) do m
     add_curve_loop!(m,curves;tag=tag)
 end
-add_plane_surface(loops;tag=0)=_with_model(invalidate=true) do m
+add_plane_surface(loops;tag=0)=_with_model(invalidate=true,synchronize_geometry=true) do m
     add_plane_surface!(m,loops;tag=tag)
 end
+add_bezier_surface(points,num_points_u;kwargs...)=_with_model(invalidate=true,
+    synchronize_geometry=true) do m
+    add_bezier_surface!(m,points,num_points_u;kwargs...)
+end
+add_bspline_surface(points,num_points_u;kwargs...)=_with_model(invalidate=true,
+    synchronize_geometry=true) do m
+    add_bspline_surface!(m,points,num_points_u;kwargs...)
+end
 """Add a connected closed planar-surface shell to the active model."""
-add_surface_loop(surfaces;tag=0)=_with_model(invalidate=true) do m
+add_surface_loop(surfaces;tag=0)=_with_model(invalidate=true,synchronize_geometry=true) do m
     add_surface_loop!(m,surfaces;tag=tag)
 end
 """Add a volume from an exterior surface loop and optional cavity loops."""
-add_volume(surface_loops;tag=0)=_with_model(invalidate=true) do m
+add_volume(surface_loops;tag=0)=_with_model(invalidate=true,synchronize_geometry=true) do m
     add_volume!(m,surface_loops;tag=tag)
 end
-add_box(x,y,z,dx,dy,dz;tag=0)=_with_model(invalidate=true) do m
+add_box(x,y,z,dx,dy,dz;tag=0)=_with_model(invalidate=true,synchronize_geometry=true) do m
     add_box!(m,x,y,z,dx,dy,dz;tag=tag)
 end
-add_cylinder(x,y,z,dx,dy,dz,r;tag=0)=_with_model(invalidate=true) do m
+add_cylinder(x,y,z,dx,dy,dz,r;tag=0)=_with_model(invalidate=true,synchronize_geometry=true) do m
     add_cylinder!(m,x,y,z,dx,dy,dz,r;tag=tag)
 end
-add_sphere(x,y,z,r;tag=0)=_with_model(invalidate=true) do m
+add_sphere(x,y,z,r;tag=0)=_with_model(invalidate=true,synchronize_geometry=true) do m
     add_sphere!(m,x,y,z,r;tag=tag)
 end
-add_cone(x,y,z,dx,dy,dz,r1,r2;tag=0)=_with_model(invalidate=true) do m
+add_cone(x,y,z,dx,dy,dz,r1,r2;tag=0)=_with_model(invalidate=true,synchronize_geometry=true) do m
     add_cone!(m,x,y,z,dx,dy,dz,r1,r2;tag=tag)
 end
 embed(dim,tags,target_dim,target_tag)=_with_model(invalidate=true) do m
@@ -1265,6 +1458,25 @@ remove_entities(dim_tags,recursive=false)=
 """Add a Physical group; `tag=0` allocates globally across entity dimensions."""
 add_physical_group(dim,tags;tag=0,name="")=_with_model(invalidate=true) do m
     add_physical_group!(m,dim,tags;tag=tag,name=name)
+end
+
+"""Refresh the session geometry context from the current synchronized model."""
+synchronize()=_synchronize_native_context()
+
+"""Built-in geometry synchronization for the live model."""
+module geo
+using ...API: _synchronize_native_context,_add_native_geo_point,_add_native_geo_line,
+    _add_native_geo_curve_loop,_add_native_geo_plane_surface
+add_point(x,y,z;meshSize=0.0,tag=-1)=_add_native_geo_point(x,y,z;meshSize,tag)
+add_line(first,last;tag=-1)=_add_native_geo_line(first,last;tag)
+add_curve_loop(curves;tag=-1)=_add_native_geo_curve_loop(curves;tag)
+add_plane_surface(loops;tag=-1)=_add_native_geo_plane_surface(loops;tag)
+synchronize()=_synchronize_native_context()
+module mesh
+using ....API: _set_native_geo_transfinite_curve
+set_transfinite_curve(tag,num_nodes,mesh_type="Progression",coef=1.0)=
+    _set_native_geo_transfinite_curve(tag,num_nodes,mesh_type,coef)
+end
 end
 
 """Return detached, sorted native model `(dimension, tag)` pairs."""
@@ -1443,7 +1655,7 @@ set_color(dim_tags,r,g,b,a=255,recursive=false)=
 """Return an existing entity's RGBA color, defaulting to `(0,0,255,0)`."""
 get_color(dim,tag)=_get_color(dim,tag)
 
-"""Replace one existing explicit Point's finite coordinates and invalidate the mesh."""
+"""Replace an explicit Point's finite coordinates and its classified mesh node; preserve cells."""
 set_coordinates(tag,x,y,z)=_set_coordinates(tag,x,y,z)
 
 """Set detached string values for a global model attribute."""
@@ -1705,21 +1917,24 @@ end
 function _api_rebind_class(class,mesh::Mesh;
         node_entities=class.node_entities,seg_entities=class.seg_entities,
         tri_entities=class.tri_entities,tet_entities=class.tet_entities,
-        primary_map=nothing,selections=nothing)
+        primary_map=nothing,selections=nothing,node_parametric=nothing)
     edges,faces,quads=primary_map===nothing && selections===nothing ?
         (class.edge_entities,class.face_entities,class.quad_entities) :
         _api_remap_support_entities(class,mesh,primary_map)
     cells=Dict{Int,Vector{Int32}}(1=>seg_entities,2=>tri_entities,4=>tet_entities)
+    parameters=node_parametric===nothing ?
+        _relocation_rebind_parameters(class,mesh,primary_map) : node_parametric
     return _MeshClassification(mesh,class.entity,class.entities,node_entities,
         class.boundaries,seg_entities,tri_entities,tet_entities,cells,
-        _native_rebind_public_tags(class,mesh;primary_map,selections),edges,faces,quads)
+        _native_rebind_public_tags(class,mesh;primary_map,selections),edges,faces,quads,
+        parameters,_relocation_rebind_mid_parameters(class,primary_map))
 end
 
 function _classify_cached_mesh(m::GeoModel,mesh::Mesh,dim::Int,tag::Int,
-                               cache::Mesh;_extrude_scope=nothing)
+                               cache::Mesh;_extrude_scope=nothing,_mesh_input=nothing)
     classified=try
         dim==2 ? model_to_mixed(m,mesh,tag;_extrude_scope=_extrude_scope) :
-                 model_to_mixed(m,mesh,dim,tag;_extrude_scope=_extrude_scope)
+                 model_to_mixed(m,mesh,dim,tag;_extrude_scope=_extrude_scope,_mesh_input)
     catch err
         err isa InterruptException && rethrow()
         return nothing
@@ -1772,7 +1987,8 @@ function _classify_cached_mesh(m::GeoModel,mesh::Mesh,dim::Int,tag::Int,
         cache,(dim,Int32(tag)),[(dim,Int32(tag))],copy(data.node_entities),
         boundaries,seg_entities,tri_entities,tet_entities,
         Dict{Int,Vector{Int32}}(1=>seg_entities,2=>tri_entities,4=>tet_entities),
-        nothing,edges,faces,quads)
+        nothing,edges,faces,quads,
+        _relocation_legacy_parameters(m,cache,data.node_entities,data.node_parametric))
 end
 
 # Classification certifies positive volumes even when the published cache
@@ -1802,6 +2018,7 @@ function _merge_classified_parts(parts,remaps,seg_keeps,merged::Mesh,
                                  caller::AbstractString)
     entities=Tuple{Int,Int32}[]
     node_entities=fill((0,Int32(0)),nnodes(merged))
+    node_parametric=Union{Nothing,Vector{Float64}}[nothing for _ in 1:nnodes(merged)]
     boundaries=Dict{Tuple{Int,Int32},Vector{Int32}}()
     seg_entities=Int32[];tri_entities=Int32[];tet_entities=Int32[]
     edge_entities=Dict{NTuple{2,Int32},Tuple{Int,Int32}}()
@@ -1845,6 +2062,9 @@ function _merge_classified_parts(parts,remaps,seg_keeps,merged::Mesh,
         end
         for (column,entity) in enumerate(class.node_entities)
             owner=_merged_node_owner(node_entities[remap[column]],entity)
+            if owner==entity
+                node_parametric[remap[column]]=class.node_parametric[column]
+            end
             node_entities[remap[column]]=owner
         end
         for (key,tags) in class.boundaries
@@ -1865,7 +2085,7 @@ function _merge_classified_parts(parts,remaps,seg_keeps,merged::Mesh,
         merged,entities[1],entities,node_entities,boundaries,
         seg_entities,tri_entities,tet_entities,
         Dict{Int,Vector{Int32}}(1=>seg_entities,2=>tri_entities,4=>tet_entities),
-        nothing,edge_entities,face_entities,quad_entities)
+        nothing,edge_entities,face_entities,quad_entities,node_parametric)
 end
 
 @inline function _merged_node_owner(current,next)
@@ -1882,9 +2102,9 @@ end
 # merged per-cell entity vectors remain index-aligned.
 function _merge_entity_meshes(parts,caller::AbstractString;
                               require_positive_tets::Bool=true,
-                              node_entities=nothing)
+                              node_entities=nothing,node_identities=nothing,cell_identities=nothing)
     any(part->part[2] isa MixedMesh,parts) &&
-        return _merge_mixed_entity_meshes(parts,caller;node_entities=node_entities)
+        return _merge_mixed_entity_meshes(parts,caller;node_entities,node_identities,cell_identities)
     index=Dict{Tuple{Int,Int32,NTuple{3,Float64}},Int32}()
     coordinates=NTuple{3,Float64}[]
     node_capacity=0
@@ -1895,12 +2115,20 @@ function _merge_entity_meshes(parts,caller::AbstractString;
     sizehint!(coordinates,node_capacity)
     remaps=Vector{Vector{Int32}}(undef,length(parts))
     for (part,(tag,mesh)) in enumerate(parts)
+        node_identities===nothing || length(node_identities[part])==nnodes(mesh) ||
+            throw(ArgumentError("$caller: produced vertex identities do not align with geometry rows"))
         remap=Vector{Int32}(undef,nnodes(mesh))
         for node in 1:nnodes(mesh)
             owner=node_entities===nothing || node_entities[part]===nothing ?
                 (-1,Int32(0)) : node_entities[part][node]
             point=ntuple(axis->mesh.coords[axis,node]+0.0,3)
-            key=(owner[1],owner[2],point)
+            # A completed producer can bind its own row identities. Distinct
+            # caller vertices on the same entity may share coordinates.
+            identity=node_identities===nothing ? nothing : node_identities[part][node]
+            identity===nothing || identity>0 || throw(ArgumentError(
+                "$caller: produced vertex identity must be positive"))
+            key=identity===nothing ? (owner[1],owner[2],point) :
+                (typemin(Int),Int32(identity),point)
             remap[node]=get!(index,key) do
                 length(coordinates)<typemax(Int32) || throw(ArgumentError(
                     "$caller: merged mesh exceeds the Int32 node limit"))
@@ -1931,16 +2159,38 @@ function _merge_entity_meshes(parts,caller::AbstractString;
     seen_segs=Set{NTuple{2,Int32}}()
     sizehint!(seen_segs,counts[1])
     seg_keeps=[falses(nsegs(mesh)) for (_,mesh) in parts]
+    binding_type=Model._model_mesh_cell_binding_type(cell_identities)
+    bindings=cell_identities===nothing ? nothing : [binding_type[],binding_type[],binding_type[]]
+    segment_slots=cell_identities===nothing ? nothing : Dict{NTuple{2,Int32},Int}()
     seg_count=0
     for (part,(_,mesh)) in enumerate(parts)
         remap=remaps[part]
+        if cell_identities!==nothing
+            length(cell_identities[part])==3 && all(length(tags)==size(cells,2) for
+                (tags,cells) in zip(cell_identities[part],(mesh.segs,mesh.tris,mesh.tets))) ||
+                throw(ArgumentError("$caller: produced cell identities do not align with geometry"))
+        end
         for cell in axes(mesh.segs,2)
             a=remap[mesh.segs[1,cell]];b=remap[mesh.segs[2,cell]]
             key=a<b ? (a,b) : (b,a)
-            key in seen_segs && continue
+            if key in seen_segs
+                if bindings!==nothing
+                    slot=segment_slots[key];tag=cell_identities[part][1][cell]
+                    old=bindings[1][slot]
+                    Model._model_mesh_missing_cell_binding(old,binding_type) ||
+                        Model._model_mesh_missing_cell_binding(tag,binding_type) || old==tag || throw(ArgumentError(
+                        "$caller: merged segment has conflicting actual cell identities"))
+                    Model._model_mesh_missing_cell_binding(old,binding_type) && (bindings[1][slot]=tag)
+                end
+                continue
+            end
             push!(seen_segs,key)
             seg_keeps[part][cell]=true
             seg_count+=1
+            if bindings!==nothing
+                segment_slots[key]=seg_count
+                push!(bindings[1],cell_identities[part][1][cell])
+            end
             segs[1,seg_count]=a;segs[2,seg_count]=b
             push!(seg_tag,mesh.seg_tag[cell])
         end
@@ -1956,6 +2206,10 @@ function _merge_entity_meshes(parts,caller::AbstractString;
         end
         append!(tri_tag,mesh.tri_tag)
         append!(tet_tag,mesh.tet_tag)
+        if bindings!==nothing
+            append!(bindings[2],cell_identities[part][2])
+            append!(bindings[3],cell_identities[part][3])
+        end
         tri_count+=ntris(mesh);tet_count+=ntets(mesh)
     end
     segs=Matrix{Int32}(segs[:,1:seg_count])
@@ -1968,30 +2222,7 @@ function _merge_entity_meshes(parts,caller::AbstractString;
     diag=validate(merged;require_positive_tets=require_positive_tets)
     diag.ok || throw(ErrorException(
         "$caller: merged mesh is invalid — "*join(diag.messages,"; ")))
-    return merged,remaps,seg_keeps
-end
-
-# Gmsh meshing-algorithm selection consumed by generation: this build's
-# kernels are the Delaunay-family surface mesher and the tetrahedral filler —
-# the choices `model.mesh.set_algorithm` maps onto. Other algorithm ids are
-# rejected loudly rather than silently ignored.
-const _GENERATE_SURFACE_ALGORITHMS=(Int32(1),Int32(2),Int32(3))
-const _GENERATE_VOLUME_ALGORITHMS=(Int32(1),)
-
-function _validate_generate_algorithms(m::GeoModel,dimension::Int,
-                                       caller::AbstractString)
-    supported=dimension==2 ? _GENERATE_SURFACE_ALGORITHMS :
-               _GENERATE_VOLUME_ALGORITHMS
-    entities=dimension==2 ? m.surfaces : m.volumes
-    for ((adim,atag),algorithm) in m.meshing.algorithm
-        adim==dimension || continue
-        haskey(entities,atag) || continue
-        Int32(algorithm) in supported || throw(ArgumentError(
-            "$caller: mesh algorithm $algorithm on " *
-            "$(_MESH_ENTITY_LABELS[dimension+1])[$atag] is not implemented; " *
-            "supported: $(join(Int.(supported),", "))"))
-    end
-    return nothing
+    return bindings===nothing ? (merged,remaps,seg_keeps) : (merged,remaps,seg_keeps,bindings)
 end
 
 _p2_cells(p::P2TriMesh)=p.tri6
@@ -2065,11 +2296,18 @@ function _append_p2_midnodes!(node_tags,coordinates,parameters,
         end
     end
     if parametric && dim in (1,2)
-        values=Vector{Float64}(undef,Base.checked_mul(3,length(mids)))
-        @inbounds for (position,mid) in enumerate(mids),axis in 1:3
-            values[3position-3+axis]=overlay.coords[axis,n0+mid]
+        class=_cached_classification_locked(cached)
+        for mid in mids
+            index=n0+mid
+            owner=LAST_MESH_HIGH_ORDER_MIDS[][mid]
+            if class!==nothing && owner==(dim,Int32(tag))
+                value=get(class.mid_parametric,_relocation_mid_key(class,index),nothing)
+                value===nothing || append!(parameters,value)
+            else
+                append!(parameters,_api_model_parametrization(model,dim,tag,
+                    collect(@view overlay.coords[:,index])))
+            end
         end
-        append!(parameters,_api_model_parametrization(model,dim,tag,values))
     end
     return nothing
 end
@@ -2115,7 +2353,19 @@ function _high_order_overlay(cached::Union{Nothing,Mesh})
 end
 
 function _set_high_order_overlay(p2,cached::Union{Nothing,Mesh},
-                                 mids=Tuple{Int,Int32}[])
+                                 mids=Tuple{Int,Int32}[];mid_parameters=nothing)
+    if p2!==nothing && cached!==nothing
+        class=_cached_classification_locked(cached)
+        if class!==nothing
+            prepared=mid_parameters===nothing ?
+                _relocation_prepare_mid_parameters(_model_locked(),cached,class,p2,mids) : mid_parameters
+            _relocation_publish_mid_parameters!(class,prepared)
+        end
+    elseif p2===nothing
+        previous=LAST_MESH[]
+        class=previous===nothing ? nothing : _cached_classification_locked(previous)
+        class===nothing || empty!(class.mid_parametric)
+    end
     LAST_MESH_HIGH_ORDER[]=p2
     LAST_MESH_HIGH_ORDER_MESH[]=p2===nothing ? nothing : cached
     LAST_MESH_HIGH_ORDER_MIDS[]=mids
@@ -2189,20 +2439,34 @@ function _generate_units(m::GeoModel,dimension::Int,entities::Vector{Int})
 end
 
 function _generation_meshing_options(order::Int)
-    return (flexible_transfinite=!iszero(OPTIONS["Mesh.FlexibleTransfinite"]),
+    return (algorithm_2d=Int(OPTIONS["Mesh.Algorithm"]),
+        algorithm_3d=Int(OPTIONS["Mesh.Algorithm3D"]),
+        flexible_transfinite=!iszero(OPTIONS["Mesh.FlexibleTransfinite"]),
         lc_factor=OPTIONS["Mesh.MeshSizeFactor"],
         recombine_all=!iszero(OPTIONS["Mesh.RecombineAll"]),
         recombine_algo=Int(OPTIONS["Mesh.RecombinationAlgorithm"]),
+        recombine_topology_passes=Int(OPTIONS["Mesh.RecombineOptimizeTopology"]),
+        recombine_node_repositioning=Int(OPTIONS["Mesh.RecombineNodeRepositioning"]),
+        recombine_minimum_quality=OPTIONS["Mesh.RecombineMinimumQuality"],
+        native_smoothing=Int(OPTIONS["Mesh.Smoothing"]),
+        second_order_linear=!iszero(OPTIONS["Mesh.SecondOrderLinear"]),
         transfinite_tri=Int(OPTIONS["Mesh.TransfiniteTri"]),
         lc_extend_from_boundary=Int(OPTIONS["Mesh.MeshSizeExtendFromBoundary"]),
         order=order)
 end
 
 function _apply_generation_meshing_options!(m::GeoModel,settings)
+    m.meshing.algorithm_2d=settings.algorithm_2d
+    m.meshing.algorithm_3d=settings.algorithm_3d
     m.meshing.flexible_transfinite=settings.flexible_transfinite
     m.meshing.lc_factor=settings.lc_factor
     m.meshing.recombine_all=settings.recombine_all
     m.meshing.recombine_algo=settings.recombine_algo
+    m.meshing.recombine_topology_passes=settings.recombine_topology_passes
+    m.meshing.recombine_node_repositioning=settings.recombine_node_repositioning
+    m.meshing.recombine_minimum_quality=settings.recombine_minimum_quality
+    m.meshing.native_smoothing=settings.native_smoothing
+    m.meshing.second_order_linear=settings.second_order_linear
     m.meshing.transfinite_tri=settings.transfinite_tri
     m.meshing.lc_extend_from_boundary=settings.lc_extend_from_boundary
     m.meshing.order=settings.order
@@ -2214,7 +2478,7 @@ end
 # independent discrete and unrelated native records remain available.
 function _reconcile_generated_records!(m::GeoModel,cache,class,dimension::Int,
                                        node_count::Int,caller;validate::Bool=true)
-    isempty(m.meshing.attached) && isempty(m.discrete) && return Dict{Int32,Tuple{Int,Int}}()
+    isempty(m.meshing.attached) && isempty(m.discrete) && return Dict{UInt64,Tuple{Int,Int}}()
     class===nothing && throw(ArgumentError(
         "$caller: attached mesh records require generated ownership metadata"))
     covered=Set{Tuple{Int,Int}}((dim,Int(tag)) for (dim,tag) in class.entities)
@@ -2227,7 +2491,7 @@ function _reconcile_generated_records!(m::GeoModel,cache,class,dimension::Int,
             push!(covered,(dim-1,Int(child)))
         end
     end
-    removed_nodes=Dict{Int32,Tuple{Int,Int}}()
+    removed_nodes=Dict{UInt64,Tuple{Int,Int}}()
     for (entity,record) in m.meshing.attached
         entity[1]==0 && continue
         (entity in covered || entity[1]>dimension) || continue
@@ -2278,7 +2542,7 @@ function _validate_record_cache_labels(m::GeoModel,cache,class,node_count::Int,
     return nothing
 end
 
-function _generate(dim::Integer)
+function _generate_native_lookup_live(dim::Integer)
     dim isa Bool && throw(ArgumentError("API.mesh.generate: dim must not be Bool"))
     dimension=try
         Int(dim)
@@ -2291,10 +2555,9 @@ function _generate(dim::Integer)
         caller="API.mesh.generate"
         dimension in 0:3 || throw(ArgumentError("$caller: dim must be in 0:3"))
         order=Int(OPTIONS["Mesh.ElementOrder"])
-        order in (1,2) || throw(ArgumentError(
-            "$caller: mesh order $order is not supported (supported: 1, 2)"))
+        1<=order<=10 ||
+            throw(ArgumentError("$caller: unsupported mesh order $order for dimension $dimension"))
         previous=LAST_MESH[]
-        labeled=previous!==nothing && _mesh_public_tags(previous)!==nothing
         if dimension<=1
             cached=LAST_MESH[]
             class=cached===nothing ? nothing : _cached_classification_locked(cached)
@@ -2304,111 +2567,54 @@ function _generate(dim::Integer)
             end
             plan=_generate_dim01_plan(source_model,actual,actual_class,dimension,
                 _session_mesh1d_options(source_model,caller),caller;
-                element_order=order,renumber=!iszero(OPTIONS["Mesh.Renumber"]),
+                element_order=order,linear=!iszero(OPTIONS["Mesh.SecondOrderLinear"]),
+                incomplete=!iszero(OPTIONS["Mesh.SecondOrderIncomplete"]),
+                renumber=!iszero(OPTIONS["Mesh.Renumber"]),
                 save_all=!iszero(OPTIONS["Mesh.SaveAll"]),
                 initial_max_node_tag=NODE_TAG_MAX[],
                 initial_max_element_tag=ELEMENT_TAG_MAX[],
+                initial_node_counter_wrapped=NODE_COUNTER_WRAPPED[],
+                initial_element_counter_wrapped=ELEMENT_COUNTER_WRAPPED[],
                 generation_meshing=_generation_meshing_options(order))
+            _higher_capture_dim01_authority!(plan)
             _commit_tagged_plan_locked!(plan;preserve_visibility=true,
                                        element_tag_map=plan.visibility_tag_map)
-            return _copy_mesh(plan.mesh)
+            # Native renumber/completed generation clears lookup state before
+            # queued homology can report an error from the published mesh.
+            _native_lookup_invalidate_locked!()
+            # Native generation runs queued homology after publishing its
+            # completed mesh, including the constructor clocks on an error.
+            isempty(CURRENT[].meshing.homology_requests) || _compute_homology()
+            return _copy_mesh(plan.geometry_carrier)
         end
-        m=deepcopy(source_model)
-        Model._model_require_point_mesh_geometry(m,caller)
-        point_sources=_generation_point_sources(m,previous,caller)
-        _validate_generate_algorithms(m,dimension,caller)
-        # Generation-scoped `Mesh.*` options are upstream global CTX state —
-        # mirror them into the model before meshing (`CharacteristicLengthFactor`
-        # and `MeshSizeFactor` share one stored `lcFactor` via the alias in
-        # `option`).
-        _apply_generation_meshing_options!(m,_generation_meshing_options(order))
-        size_field=_session_size_field_locked(m)
-        extrude_scope=Model._extrude_nonew_scope(
-            m,caller;size_field=size_field,_working_model=true)
-        parts=Tuple{Int,Union{Mesh,MixedMesh}}[]
-        if dimension==2
-            isempty(m.surfaces) && throw(ArgumentError("$caller: no surfaces"))
-            units=_generate_units(m,2,sort!(collect(keys(m.surfaces))))
-            for tags in units
-                if length(tags)==1
-                    push!(parts,(tags[1],mesh_model_surface(
-                        m,tags[1];size_field=size_field,
-                        _extrude_scope=extrude_scope)))
-                else
-                    for (tag,mesh) in _compound_surface_meshes(
-                            m,tags,caller;size_field=size_field)
-                        push!(parts,(tag,mesh))
-                    end
-                end
-            end
-        elseif dimension==3
-            isempty(m.volumes) && throw(ArgumentError("$caller: no volumes"))
-            for tag in sort!(collect(keys(m.volumes)))
-                push!(parts,(tag,mesh_model_volume(
-                    m,tag;size_field=size_field,_extrude_scope=extrude_scope,
-                    _extrude_working_model=true)))
-            end
-        else
-            throw(ArgumentError("$caller: dim must be 2 or 3"))
+        class=previous===nothing ? nothing : _cached_classification_locked(previous)
+        actual,actual_class=_dim01_actual_cache(previous,class;
+            physical_names=source_model.physical_names)
+        authority=source_model.meshing.mesh_authority
+        preserve_geometry=iszero(OPTIONS["Mesh.MeshOnlyEmpty"]) &&
+            (previous===nothing || previous isa Mesh ||
+             (authority!==nothing && authority.carrier isa Mesh))
+        # Lower-dimensional generation must not infer the unrelated volume
+        # producer tree. Resolve the higher planner only on this executed route.
+        plan=Base.inferencebarrier(_generate_higher_plan)(source_model,actual,actual_class,dimension,
+            _session_mesh1d_options(source_model,caller),caller;
+            generation_meshing=_generation_meshing_options(order),element_order=order,
+            linear=!iszero(OPTIONS["Mesh.SecondOrderLinear"]),
+            incomplete=!iszero(OPTIONS["Mesh.SecondOrderIncomplete"]),
+            renumber=!iszero(OPTIONS["Mesh.Renumber"]),
+            save_all=!iszero(OPTIONS["Mesh.SaveAll"]),
+            size_field=_session_size_field_locked(source_model),
+            initial_max_node_tag=NODE_TAG_MAX[],initial_max_element_tag=ELEMENT_TAG_MAX[],
+            preserve_geometry)
+        _commit_tagged_plan_locked!(plan;preserve_visibility=true,
+            element_tag_map=plan.visibility_tag_map)
+        for (kind,message) in get(plan,:native_recombine_events,())
+            kind===:error ? _native_mesh_input_error_locked(message) :
+                _native_diagnostic_emit_locked(kind,message)
         end
-        classified=[(tag,mesh,_classify_cached_mesh(
-                         m,_classification_skeleton(
-                             mesh,dimension==3 &&
-                                 get(m.meshing.reverse,(3,tag),false)),
-                         dimension,tag,mesh;_extrude_scope=extrude_scope))
-                    for (tag,mesh) in parts]
-        node_owners=[class===nothing ? nothing : class.node_entities
-                     for (_,_,class) in classified]
-        generated,remaps,seg_keeps=_merge_entity_meshes(
-            parts,caller;node_entities=node_owners,require_positive_tets=!any(
-                tag->get(m.meshing.reverse,(dimension,tag),false),
-                (tag for (tag,_) in parts)))
-        cache=_copy_mesh(generated)
-        class=_merge_classified_parts(classified,remaps,seg_keeps,cache,caller)
-        overlay=nothing
-        mids=Tuple{Int,Int32}[]
-        if cache isa MixedMesh
-            if order==2
-                _mixed_require_linear_cad(m,class,caller)
-                if any(block->msh_spec(block.msh).family!==:pnt &&
-                        msh_spec(block.msh).order!=2,cache.blocks)
-                    linear,linear_class=_mixed_linear_cache(cache,class)
-                    cache,class=_mixed_quadratic_cache(linear,linear_class,caller)
-                else
-                    cache,class=_mixed_prune_unused(cache,class)
-                    _api_p2_constructed_mesh_certify(cache,caller)
-                end
-            elseif any(block->msh_spec(block.msh).family!==:pnt &&
-                    msh_spec(block.msh).order!=1,cache.blocks)
-                cache,class=_mixed_linear_cache(cache,class)
-            end
-        elseif order==2
-            overlay=dimension==2 ? p2_trimesh(cache) :
-                p2_tetmesh(cache;require_positive_tets=false)
-            _api_p2_overlay_certify(overlay,caller)
-            entities=class===nothing ? [0] : Int.(last.(class.entities))
-            mids=_p2_mid_owners(overlay,cache,class,dimension,entities)
-        end
-        point_bindings=_generation_bind_point_records!(m,cache,class,point_sources,caller)
-        actual_node_count=overlay===nothing ? nnodes(cache) : nnodes(overlay)
-        removed_nodes=_reconcile_generated_records!(m,cache,class,dimension,
-            actual_node_count,caller;validate=false)
-        surviving_identities=any(pair->!isempty(last(pair).node_tags) ||
-            !isempty(last(pair).element_tags),Model._discrete_mesh_records_model(m))
-        activate_labels=labeled || !isempty(point_sources) || surviving_identities
-        cache,class=_generation_public_labels!(m,previous,cache,class,overlay,mids,
-            point_bindings,activate_labels,!iszero(OPTIONS["Mesh.Renumber"]),caller)
-        activate_labels || _validate_generated_cache_references(m,previous,caller)
-        _validate_record_cache_labels(m,cache,class,actual_node_count,caller,removed_nodes)
-        max_node,max_element=_tagged_mesh_max_tags(m,cache,class===nothing ? nothing : class.public_tags)
-        index=_current_slot_index_locked()
-        index!=0 && (MODEL_SLOTS[index].model=m)
-        CURRENT[]=m
-        _replace_mesh_cache_locked!(cache,class)
-        overlay===nothing || _set_high_order_overlay(overlay,cache,mids)
-        NODE_TAG_MAX[]=max(NODE_TAG_MAX[],max_node)
-        ELEMENT_TAG_MAX[]=max(ELEMENT_TAG_MAX[],max_element)
-        generated isa MixedMesh ? _copy_mesh(LAST_MESH[]) : generated
+        _native_lookup_invalidate_locked!()
+        isempty(CURRENT[].meshing.homology_requests) || _compute_homology()
+        _copy_mesh(plan.model.meshing.mesh_authority.carrier)
     end
 end
 
@@ -2432,7 +2638,13 @@ end
 
 function _get_mesh()
     return lock(STATE_LOCK) do
-        _copy_mesh(_cached_mesh_locked("API.mesh.get"))
+        cached=_cached_mesh_locked("API.mesh.get")
+        model=_model_locked()
+        authority=model.meshing.mesh_authority
+        view=authority!==nothing && authority.mesh===cached && authority.carrier isa Union{Mesh,MixedMesh} ?
+             (authority.carrier isa MixedMesh ? _higher_mixed_geometry_view(authority,"API.mesh.get";model) :
+              authority.carrier) : cached
+        _copy_mesh(view)
     end
 end
 
@@ -2547,7 +2759,7 @@ end
 function _mesh_entity_cell_positions(class::_MeshClassification,msh::Int,
                                      entity::Int)
     class.mesh isa MixedMesh &&
-        return findall(==(Int32(entity)),get(class.cell_entities,msh,Int32[]))
+        return _public_bulk_family_positions(_model_locked(),class,msh,entity)
     cell_entities=msh==1 ? class.seg_entities :
                   msh==2 ? class.tri_entities :
                   msh==4 ? class.tet_entities : Int32[]
@@ -2558,12 +2770,18 @@ end
 # `nothing` for the complete block and otherwise the 1-based column indices of
 # the cells classified on the requested entity.
 function _mesh_query_type_block(mesh::Union{Mesh,MixedMesh},element_type,tag,
-                                caller::AbstractString)
+                                caller::AbstractString;classification=_cached_classification_locked(mesh))
     msh=_mesh_query_integer(element_type,caller,"element_type")
     spec=msh_spec(msh)
     entity=_mesh_query_integer(tag,caller,"tag")
-    entity<0 && return msh,_mesh_element_block(mesh,msh),nothing
-    class=_cached_classification_locked(mesh)
+    if entity<0
+        model=_model_locked()
+        positions=mesh isa MixedMesh && classification!==nothing &&
+            _native_has_ghost_entities(model) ?
+            _public_bulk_family_positions(model,classification,msh,entity) : nothing
+        return msh,_mesh_element_block(mesh,msh),positions
+    end
+    class=classification
     class===nothing && throw(ArgumentError(
         "$caller: entity-specific data require mesh classification metadata; " *
         "use a negative tag to query the complete cache"))
@@ -2577,20 +2795,21 @@ end
 # Query the actually published family, while using primary classification only
 # to select its entity columns. The replaced top-dimensional linear block is
 # absent; lower-dimensional linear cells retain their original representation.
-function _published_mesh_query_type_block(cached,element_type,tag,caller)
+function _published_mesh_query_type_block(cached,element_type,tag,caller;
+        classification=_cached_classification_locked(cached))
     overlay=_high_order_overlay(cached)
     if overlay!==nothing
         msh=_mesh_query_integer(element_type,caller,"element_type")
         if msh==_p2_etype(overlay)
             _,_,positions=_mesh_query_type_block(cached,
-                Int(_p2_skeleton_etype(overlay)),tag,caller)
+                Int(_p2_skeleton_etype(overlay)),tag,caller;classification)
             return overlay,msh,(_p2_tag_offset(cached,overlay),_p2_cells(overlay)),positions
         elseif msh==_p2_skeleton_etype(overlay)
-            _mesh_query_type_block(cached,msh,tag,caller)
+            _mesh_query_type_block(cached,msh,tag,caller;classification)
             return cached,msh,nothing,Int[]
         end
     end
-    msh,block,positions=_mesh_query_type_block(cached,element_type,tag,caller)
+    msh,block,positions=_mesh_query_type_block(cached,element_type,tag,caller;classification)
     return cached,msh,block,positions
 end
 
@@ -2785,7 +3004,7 @@ end
 function _get_element_by_coordinates(x,y,z,dim=-1,strict=false)
     caller="API.mesh.get_element_by_coordinates"
     return lock(STATE_LOCK) do
-        cached=_cached_mesh_locked(caller)
+        cached,class=_mesh_query_pair_locked(caller)
         p=_mesh_query_point(x,y,z,caller)
         dimension=_mesh_query_dimension(dim,caller)
         strict_mode=_mesh_query_bool(strict,caller,"strict")
@@ -2800,7 +3019,7 @@ function _get_element_by_coordinates(x,y,z,dim=-1,strict=false)
         end
         overlay=_high_order_overlay(cached)
         tags=overlay===nothing ? _locate_elements(
-            _cached_mesh_locator_locked(cached),p,dimension,strict_mode,caller) :
+            _mesh_query_locator_locked(cached),p,dimension,strict_mode,caller) :
             _legacy_p2_locate_elements(cached,overlay,p,dimension,strict_mode,caller)
         if isempty(tags) && dimension<0
             point_mesh,point_tags=_public_point_locations(_model_locked(),cached,p,strict_mode,caller)
@@ -2812,8 +3031,8 @@ function _get_element_by_coordinates(x,y,z,dim=-1,strict=false)
             end
         end
         isempty(tags) && _no_element_at_coordinates(caller,p)
-        table=_mesh_public_tags(cached)
-        ordered=_mesh_public_location_order(cached,tags)
+        table=class===nothing ? nothing : class.public_tags
+        ordered=_mesh_public_location_order(cached,tags,table)
         element_tag=first(ordered)
         record=overlay===nothing ? mesh_element_record(cached,element_tag) :
             _legacy_p2_element_record(cached,overlay,Int(element_tag))
@@ -2828,16 +3047,16 @@ end
 function _get_elements_by_coordinates(x,y,z,dim=-1,strict=false)
     caller="API.mesh.get_elements_by_coordinates"
     return lock(STATE_LOCK) do
-        cached=_cached_mesh_locked(caller)
+        cached,class=_mesh_query_pair_locked(caller)
         p=_mesh_query_point(x,y,z,caller)
         dimension=_mesh_query_dimension(dim,caller)
         strict_mode=_mesh_query_bool(strict,caller,"strict")
         overlay=_high_order_overlay(cached)
         tags=overlay===nothing ? _locate_elements(
-            _cached_mesh_locator_locked(cached),p,dimension,strict_mode,caller) :
+            _mesh_query_locator_locked(cached),p,dimension,strict_mode,caller) :
             _legacy_p2_locate_elements(cached,overlay,p,dimension,strict_mode,caller)
-        table=_mesh_public_tags(cached)
-        result=_cache_element_tags(table,_mesh_public_location_order(cached,tags))
+        table=class===nothing ? nothing : class.public_tags
+        result=_cache_element_tags(table,_mesh_public_location_order(cached,tags,table))
         if dimension in (-1,0)
             point_mesh,point_tags=_public_point_locations(_model_locked(),cached,p,strict_mode,caller)
             if point_mesh!==nothing
@@ -2859,29 +3078,33 @@ function _get_elements_by_coordinates(x,y,z,dim=-1,strict=false)
     end
 end
 
-function _mesh_public_location_order(mesh,tags)
-    table=_mesh_public_tags(mesh)
+function _mesh_public_location_order(mesh,tags,table=_mesh_public_tags(mesh))
     table===nothing && return tags
     return sort(tags;by=tag->(-Int(msh_dimension(mesh_element_record(mesh,tag).element_type)),
                              _cache_element_tag(table,tag)))
 end
 
-function _mesh_public_element_index(mesh,value,caller)
+function _mesh_public_element_index(mesh,value,caller,
+                                    class=_cached_classification_locked(mesh))
     _,_,total=_mesh_element_offsets(mesh)
-    return _cache_element_index(_mesh_public_tags(mesh),value,total,caller)
+    table=class===nothing ? nothing : class.public_tags
+    return _cache_element_index(table,value,total,caller)
 end
 
 function _get_local_coordinates_in_element(element_tag,x,y,z)
     caller="API.mesh.get_local_coordinates_in_element"
     return lock(STATE_LOCK) do
-        cached=_cached_mesh_locked(caller)
+        public_tag=_mesh_query_uid(element_tag,caller,"element_tag")
+        _native_lookup_require_element_locked(public_tag,caller)===nothing &&
+            return (0.0,0.0,0.0)
+        cached,class=_mesh_query_pair_locked(caller)
         p=_mesh_query_point(x,y,z,caller)
         point_mesh=_public_point_record_mesh(_model_locked(),cached,element_tag,caller)
         if point_mesh!==nothing
             coordinates,_,_=_local_coordinates(point_mesh,1,p,caller)
-            return _require_local_coordinates(coordinates,caller,Int(element_tag))
+            return _require_local_coordinates(coordinates,caller,element_tag)
         end
-        tag=_mesh_public_element_index(cached,element_tag,caller)
+        tag=_mesh_public_element_index(cached,element_tag,caller,class)
         overlay=_high_order_overlay(cached)
         coordinates,_,_=overlay===nothing ? _local_coordinates(cached,tag,p,caller) :
             _legacy_p2_local_coordinates(cached,overlay,tag,p,caller)
@@ -2893,16 +3116,26 @@ function _get_element_qualities(element_tags,quality_name="minSICN",
                                 task=0,num_tasks=1)
     caller="API.mesh.get_element_qualities"
     return lock(STATE_LOCK) do
-        cached=_cached_mesh_locked(caller)
+        cached,class=_mesh_query_pair_locked(caller)
         task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
         selected=_mesh_task_tags(element_tags,task_index,task_count,caller)
+        present=Bool[_native_lookup_require_element_locked(
+            _cache_checked_public_tag(tag,caller,"element"),caller)!==nothing for tag in selected]
+        if !all(present)
+            result=zeros(Float64,length(selected))
+            for index in eachindex(selected)
+                present[index] || continue
+                result[index]=only(_get_element_qualities((selected[index],),quality_name))
+            end
+            return result
+        end
         overlay=_high_order_overlay(cached)
         if overlay!==nothing
             name=MeshElementQuality._quality_name(quality_name,caller)
             offset=_p2_tag_offset(cached,overlay)
             result=Vector{Float64}(undef,length(selected))
             for (index,element) in enumerate(selected)
-                position=_mesh_public_element_index(cached,element,caller)
+                position=_mesh_public_element_index(cached,element,caller,class)
                 result[index]=offset<position<=offset+size(_p2_cells(overlay),2) ?
                     _legacy_p2_quality(overlay,position-offset,name,caller) :
                     only(mesh_element_qualities(cached,(position,),name))
@@ -2910,7 +3143,7 @@ function _get_element_qualities(element_tags,quality_name="minSICN",
             return result
         end
         mesh_element_qualities(cached,
-            [_mesh_public_element_index(cached,tag,caller) for tag in selected],quality_name)
+            [_mesh_public_element_index(cached,tag,caller,class) for tag in selected],quality_name)
     end
 end
 
@@ -2936,7 +3169,7 @@ end
 function _get_jacobians(element_type,local_coord,tag=-1,task=0,num_tasks=1)
     caller="API.mesh.get_jacobians"
     return lock(STATE_LOCK) do
-        cached=_cached_mesh_locked(caller)
+        cached,class=_mesh_query_pair_locked(caller)
         if _mesh_query_integer(element_type,caller,"element_type")==15
             point_mesh=_public_point_query_mesh(_model_locked(),cached,
                 _mesh_query_integer(tag,caller,"tag"),caller)
@@ -2951,7 +3184,7 @@ function _get_jacobians(element_type,local_coord,tag=-1,task=0,num_tasks=1)
             requested=_mesh_query_integer(element_type,caller,"element_type")
             if requested==_p2_etype(overlay)
                 _,_,positions=_mesh_query_type_block(cached,
-                    Int(_p2_skeleton_etype(overlay)),tag,caller)
+                    Int(_p2_skeleton_etype(overlay)),tag,caller;classification=class)
                 task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
                 selected=positions===nothing ? _mesh_task_range(
                     size(_p2_cells(overlay),2),task_index,task_count) :
@@ -2960,35 +3193,44 @@ function _get_jacobians(element_type,local_coord,tag=-1,task=0,num_tasks=1)
                     _p2_tag_offset(cached,overlay),caller)
             elseif requested==_p2_skeleton_etype(overlay)
                 # This family is replaced in the public element product.
-                _mesh_query_type_block(cached,requested,tag,caller)
+                _mesh_query_type_block(cached,requested,tag,caller;classification=class)
                 _mesh_query_tasks(task,num_tasks,caller)
                 return _legacy_p2_jacobians(overlay,local_coord,1:0,
                     _p2_tag_offset(cached,overlay),caller)
             end
         end
         msh,block,positions=_mesh_query_type_block(
-            cached,element_type,tag,caller)
+            cached,element_type,tag,caller;classification=class)
         task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
         if positions!==nothing
             selected=_mesh_task_range(
                 length(positions),task_index,task_count)
+            composed=_mesh_query_composed_jacobians(cached,class,msh,local_coord,positions[selected],caller)
+            composed===nothing || return composed
             return mesh_jacobians(
                 cached,msh,local_coord,positions[selected])
         end
         count=block===nothing ? 0 : size(block[2],2)
+        selected=_mesh_task_range(count,task_index,task_count)
+        composed=_mesh_query_composed_jacobians(cached,class,msh,local_coord,selected,caller)
+        composed===nothing || return composed
         mesh_jacobians(
-            cached,msh,local_coord,
-            _mesh_task_range(count,task_index,task_count))
+            cached,msh,local_coord,selected)
     end
 end
 
 function _get_jacobian(element_tag,local_coord)
     caller="API.mesh.get_jacobian"
     return lock(STATE_LOCK) do
-        cached=_cached_mesh_locked(caller)
+        public_tag=_mesh_query_uid(element_tag,caller,"element_tag")
+        _native_lookup_require_element_locked(public_tag,caller)===nothing &&
+            return Float64[],Float64[],Float64[]
+        cached,class=_mesh_query_pair_locked(caller)
         point_mesh=_public_point_record_mesh(_model_locked(),cached,element_tag,caller)
         point_mesh===nothing || return mesh_jacobian(point_mesh,1,local_coord)
-        tag=_mesh_public_element_index(cached,element_tag,caller)
+        tag=_mesh_public_element_index(cached,element_tag,caller,class)
+        composed=_mesh_query_composed_jacobian(cached,class,tag,local_coord,caller)
+        composed===nothing || return composed
         overlay=_high_order_overlay(cached)
         if overlay!==nothing
             offset=_p2_tag_offset(cached,overlay)
@@ -3003,6 +3245,9 @@ end
 
 function _get_basis_functions(element_type,local_coord,function_space_type,
                               wanted_orientations=Int32[])
+    native=_native_cell_basis_functions(element_type,local_coord,function_space_type,
+                                        wanted_orientations)
+    native===nothing || return native
     return mesh_basis_functions(
         element_type,local_coord,function_space_type,wanted_orientations;
         caller="API.mesh.get_basis_functions")
@@ -3018,7 +3263,7 @@ function _get_basis_functions_orientation(element_type,function_space_type,
                                           tag=-1,task=0,num_tasks=1)
     caller="API.mesh.get_basis_functions_orientation"
     return lock(STATE_LOCK) do
-        cached=_cached_mesh_locked(caller)
+        cached,class=_mesh_query_pair_locked(caller)
         if _mesh_query_integer(element_type,caller,"element_type")==15
             point_mesh=_public_point_query_mesh(_model_locked(),cached,
                 _mesh_query_integer(tag,caller,"tag"),caller)
@@ -3029,7 +3274,7 @@ function _get_basis_functions_orientation(element_type,function_space_type,
             end
         end
         query_mesh,msh,block,positions=_published_mesh_query_type_block(
-            cached,element_type,tag,caller)
+            cached,element_type,tag,caller;classification=class)
         task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
         if query_mesh isa Union{P2TriMesh,P2Mesh}
             count=positions===nothing ? size(block[2],2) : length(positions)
@@ -3037,6 +3282,16 @@ function _get_basis_functions_orientation(element_type,function_space_type,
             selected=positions===nothing ? task_columns : positions[task_columns]
             return _legacy_p2_basis_orientations(query_mesh,selected,
                 function_space_type;caller=caller)
+        end
+        public=_mesh_query_detached_public(cached,class)
+        if public!==nothing
+            query_space=MeshFunctionSpaces._function_space(function_space_type,caller)
+            _,query_family,_,_=MeshFunctionSpaces._basis_element_contract(msh,query_space,caller)
+            block===nothing && return Int32[]
+            query_count=positions===nothing ? size(block[2],2) : length(positions)
+            query_columns=_mesh_task_range(query_count,task_index,task_count)
+            query_selected=positions===nothing ? query_columns : positions[query_columns]
+            return Int32[_mixed_cell_orientation(cached,block[2],cell,query_space,query_family,public) for cell in query_selected]
         end
         if cached isa Mesh && _mesh_public_tags(cached)!==nothing
             space=MeshFunctionSpaces._function_space(function_space_type,caller)
@@ -3065,10 +3320,10 @@ function _get_basis_functions_orientation_for_element(
     element_tag,function_space_type)
     caller="API.mesh.get_basis_functions_orientation_for_element"
     return lock(STATE_LOCK) do
-        cached=_cached_mesh_locked(caller)
+        cached,class=_mesh_query_pair_locked(caller)
         point_mesh=_public_point_record_mesh(_model_locked(),cached,element_tag,caller)
         point_mesh===nothing || return mesh_basis_orientation(point_mesh,1,function_space_type;caller)
-        tag=_mesh_public_element_index(cached,element_tag,caller)
+        tag=_mesh_public_element_index(cached,element_tag,caller,class)
         overlay=_high_order_overlay(cached)
         if overlay!==nothing
             offset=_p2_tag_offset(cached,overlay)
@@ -3076,6 +3331,14 @@ function _get_basis_functions_orientation_for_element(
                 return only(_legacy_p2_basis_orientations(overlay,
                     tag-offset:tag-offset,function_space_type;caller=caller))
             end
+        end
+        public=_mesh_query_detached_public(cached,class)
+        if public!==nothing
+            query_record=mesh_element_record(cached,tag)
+            query_space=MeshFunctionSpaces._function_space(function_space_type,caller)
+            _,query_family,_,_=MeshFunctionSpaces._basis_element_contract(Int(query_record.element_type),query_space,caller)
+            query_cells=reshape(Int32.(query_record.node_tags),length(query_record.node_tags),1)
+            return _mixed_cell_orientation(cached,query_cells,1,query_space,query_family,public)
         end
         if cached isa Mesh && _mesh_public_tags(cached)!==nothing
             record=mesh_element_record(cached,tag)
@@ -3112,7 +3375,7 @@ function _get_keys(element_type,function_space_type,tag=-1,
                    return_coord=true)
     caller="API.mesh.get_keys"
     return lock(STATE_LOCK) do
-        cached=_cached_mesh_locked(caller)
+        cached,class=_mesh_query_pair_locked(caller)
         if _mesh_query_integer(element_type,caller,"element_type")==15
             point_mesh=_public_point_query_mesh(_model_locked(),cached,
                 _mesh_query_integer(tag,caller,"tag"),caller)
@@ -3120,11 +3383,10 @@ function _get_keys(element_type,function_space_type,tag=-1,
                 LAST_MESH_EDGES[],LAST_MESH_FACES[];return_coord,caller)
         end
         query_mesh,msh,block,positions=_published_mesh_query_type_block(
-            cached,element_type,tag,caller)
+            cached,element_type,tag,caller;classification=class)
         needs_edges,needs_faces=_hierarchical_key_catalog_needs(
             function_space_type,msh_spec(msh).family)
-        edge_replacement=LAST_MESH_EDGES[]
-        face_replacement=LAST_MESH_FACES[]
+        edge_replacement,face_replacement=_mesh_query_key_catalogs(cached,class)
         selected_cells=nothing
         if block!==nothing
             _,cells=block
@@ -3156,10 +3418,12 @@ function _get_keys(element_type,function_space_type,tag=-1,
                 return_coord=return_coord,caller=caller)
         end
         block!==nothing || return result
-        needs_edges && (LAST_MESH_EDGES[]=edge_replacement)
-        needs_faces && (LAST_MESH_FACES[]=face_replacement)
-        return cached isa Mesh && query_mesh===cached ?
-            _native_public_keys(cached,result,msh,function_space_type) : result
+        cached===LAST_MESH[] && needs_edges && (LAST_MESH_EDGES[]=edge_replacement)
+        cached===LAST_MESH[] && needs_faces && (LAST_MESH_FACES[]=face_replacement)
+        public=_mesh_query_detached_public(cached,class)
+        return public!==nothing ? _native_public_keys(cached,result,msh,function_space_type,public) :
+            cached isa Mesh && query_mesh===cached ?
+                _native_public_keys(cached,result,msh,function_space_type) : result
     end
 end
 
@@ -3167,18 +3431,20 @@ function _get_keys_for_element(element_tag,function_space_type,
                                return_coord=true)
     caller="API.mesh.get_keys_for_element"
     return lock(STATE_LOCK) do
-        cached=_cached_mesh_locked(caller)
+        public_tag=_mesh_query_uid(element_tag,caller,"element_tag")
+        _native_lookup_require_element_locked(public_tag,caller)===nothing &&
+            return Int32[],UInt64[],Float64[]
+        cached,class=_mesh_query_pair_locked(caller)
         point_mesh=_public_point_record_mesh(_model_locked(),cached,element_tag,caller)
         point_mesh===nothing || return mesh_keys_for_element(point_mesh,1,function_space_type,
             LAST_MESH_EDGES[],LAST_MESH_FACES[];return_coord,caller)
-        tag=_mesh_public_element_index(cached,element_tag,caller)
+        tag=_mesh_public_element_index(cached,element_tag,caller,class)
         overlay=_high_order_overlay(cached)
         record=overlay===nothing ? mesh_element_record(cached,tag) :
             _legacy_p2_element_record(cached,overlay,tag)
         needs_edges,needs_faces=_hierarchical_key_catalog_needs(
             function_space_type,msh_spec(Int(record.element_type)).family)
-        edge_replacement=LAST_MESH_EDGES[]
-        face_replacement=LAST_MESH_FACES[]
+        edge_replacement,face_replacement=_mesh_query_key_catalogs(cached,class)
         cells=reshape(Int32.(record.node_tags),length(record.node_tags),1)
         if needs_edges
             edge_replacement=_mesh_edge_topology_for_cells(
@@ -3198,10 +3464,13 @@ function _get_keys_for_element(element_tag,function_space_type,
                 cached,tag,function_space_type,edge_replacement,face_replacement;
                 return_coord=return_coord,caller=caller)
         end
-        needs_edges && (LAST_MESH_EDGES[]=edge_replacement)
-        needs_faces && (LAST_MESH_FACES[]=face_replacement)
-        return cached isa Mesh && (overlay===nothing || record.element_type!=_p2_etype(overlay)) ?
-            _native_public_keys(cached,result,Int(record.element_type),function_space_type) : result
+        cached===LAST_MESH[] && needs_edges && (LAST_MESH_EDGES[]=edge_replacement)
+        cached===LAST_MESH[] && needs_faces && (LAST_MESH_FACES[]=face_replacement)
+        public=_mesh_query_detached_public(cached,class)
+        return public!==nothing ?
+            _native_public_keys(cached,result,Int(record.element_type),function_space_type,public) :
+            cached isa Mesh && (overlay===nothing || record.element_type!=_p2_etype(overlay)) ?
+                _native_public_keys(cached,result,Int(record.element_type),function_space_type) : result
     end
 end
 
@@ -3487,6 +3756,36 @@ end
 function _mesh_entity_parameters(model::GeoModel,mesh::Union{Mesh,MixedMesh,P2TriMesh,P2Mesh},dim::Int,tag::Int,
                                  indices::Vector{Int})
     (dim==1 || dim==2) || return Float64[]
+    class=mesh isa Union{Mesh,MixedMesh} ? _cached_classification_locked(mesh) : nothing
+    if class!==nothing
+        values=Float64[]
+        for index in indices
+            if class.node_entities[index]==(dim,Int32(tag))
+                parameter=class.node_parametric[index]
+                parameter===nothing || append!(values,@view parameter[1:min(dim,length(parameter))])
+            elseif !haskey(model.discrete,(dim,tag))
+                append!(values,_api_model_parametrization(model,dim,tag,
+                    collect(@view mesh.coords[:,index])))
+            end
+        end
+        return values
+    end
+    if mesh isa Mesh
+        class=_cached_classification_locked(mesh)
+        if class!==nothing
+            values=Float64[]
+            for index in indices
+                if class.node_entities[index]==(dim,Int32(tag))
+                    parameter=class.node_parametric[index]
+                    parameter!==nothing && length(parameter)==dim && append!(values,parameter)
+                else
+                    append!(values,_api_model_parametrization(model,dim,tag,
+                        collect(@view mesh.coords[:,index])))
+                end
+            end
+            return values
+        end
+    end
     if mesh isa MixedMesh && mesh.entity_data!==nothing
         stored=mesh.entity_data.node_parametric
         table=_mesh_public_tags(mesh)
@@ -3532,9 +3831,77 @@ function _mesh_public_tags(mesh)
     return class===nothing ? nothing : class.public_tags
 end
 
+# A record on an authority-covered entity holds both cache-mirrored entries
+# (rebuilt from generated cells) and caller-owned entries. Reads must see only
+# the caller-owned ones: any tag published by the cache is answered there.
+function _record_uncovered_view(public::_CachePublicTags,record::DiscreteEntity)
+    node_positions=Int[]
+    for (index,tag) in enumerate(record.node_tags)
+        haskey(public.node_indices,UInt64(tag)) || push!(node_positions,index)
+    end
+    element_positions=Int[]
+    for (index,tag) in enumerate(record.element_tags)
+        haskey(public.element_indices,UInt64(tag)) || push!(element_positions,index)
+    end
+    (isempty(node_positions) && isempty(element_positions)) && return nothing
+    kept=Set{UInt64}(record.node_tags[node_positions])
+    filtered=DiscreteEntity(copy(record.boundary),record.node_tags[node_positions],
+        record.node_coords[:,node_positions],
+        size(record.node_params,2)==length(record.node_tags) ?
+            record.node_params[:,node_positions] : copy(record.node_params),
+        record.element_types[element_positions],
+        record.element_tags[element_positions],
+        record.element_nodes[element_positions],
+        Dict{UInt64,Vector{Float64}}(tag=>params for (tag,params) in record.aux_params if tag in kept),
+        Dict{UInt64,Vector{Float64}}(tag=>params for (tag,params) in record.node_native_params if tag in kept),
+        record.geometry_parametrized)
+    return filtered
+end
+
+function _cache_uncovered_records(model,public)
+    records=Dict{Tuple{Int,Int},DiscreteEntity}()
+    public===nothing && return records
+    for (owner,record) in Model._discrete_mesh_records_model(model)
+        _cache_covers_record(public,owner...) || continue
+        uncovered=_record_uncovered_view(public,record)
+        uncovered===nothing || (records[owner]=deepcopy(uncovered))
+    end
+    return records
+end
+
+# Cache publication refreshes its mirrored rows without deleting separate
+# caller-owned entries on the same entity. Recheck the new cache labels: a
+# completed operation may have incorporated those entries into its product.
+function _restore_cache_uncovered_records!(model,records,public)
+    for (owner,saved) in records
+        uncovered=_record_uncovered_view(public,saved)
+        uncovered===nothing && continue
+        target=_raw_model_mesh_record(model,owner...)
+        target===nothing && throw(ArgumentError(
+            "API mesh publication: caller-owned record loses entity $owner"))
+        for record in (target,uncovered),position in eachindex(record.node_tags)
+            tag=record.node_tags[position]
+            parameter=Model._model_mesh_node_parameters(record,position)
+            target.node_native_params[tag]=parameter===nothing ? Float64[] : copy(parameter)
+        end
+        append!(target.node_tags,uncovered.node_tags)
+        target.node_coords=hcat(target.node_coords,uncovered.node_coords)
+        target.node_params=size(target.node_params,1)==size(uncovered.node_params,1) ?
+            hcat(target.node_params,uncovered.node_params) : zeros(0,length(target.node_tags))
+        append!(target.element_types,uncovered.element_types)
+        append!(target.element_tags,uncovered.element_tags)
+        append!(target.element_nodes,deepcopy(uncovered.element_nodes))
+        merge!(target.aux_params,deepcopy(uncovered.aux_params))
+    end
+    return nothing
+end
+
 function _model_mesh_record(m::GeoModel,dim::Int,tag::Int)
-    _cache_covers_record(_mesh_public_tags(LAST_MESH[]),dim,tag) && return nothing
-    return _raw_model_mesh_record(m,dim,tag)
+    public=_mesh_public_tags(LAST_MESH[])
+    record=_raw_model_mesh_record(m,dim,tag)
+    record===nothing && return nothing
+    _cache_covers_record(public,dim,tag) || return record
+    return _record_uncovered_view(public,record)
 end
 
 # A cache-only node reference in a surviving record has no record coordinate
@@ -3549,18 +3916,26 @@ function _validate_generated_cache_references(model,previous,caller;retained_nod
         public=_cache_public_tags(previous;node_count=count)
     end
     records=Model._discrete_mesh_records_model(model)
+    # Only tags owned by a record outright survive a regeneration. Record
+    # entries that merely mirror cache-published labels do not establish
+    # record identity, and elements already mirrored in the cache are
+    # rebuilt from the new cells rather than validated as raw records.
     owned=Set{UInt64}()
-    for (_,record) in records
-        union!(owned,UInt64.(record.node_tags))
+    for (_,record) in records, tag in record.node_tags
+        external=UInt64(tag)
+        haskey(public.node_indices,external) || push!(owned,external)
     end
-    for ((dim,tag),record) in records,connectivity in record.element_nodes,node in connectivity
-        external=UInt64(node)
-        external in owned && continue
-        external in retained_nodes && continue
-        haskey(public.node_indices,external) || continue
-        throw(ArgumentError(
-            "$caller: surviving record ($dim,$tag) references prior cache-only " *
-            "node tag $node; regeneration has no retained-node identity for it"))
+    for ((dim,tag),record) in records,position in eachindex(record.element_nodes)
+        haskey(public.element_indices,UInt64(record.element_tags[position])) && continue
+        for node in record.element_nodes[position]
+            external=UInt64(node)
+            external in owned && continue
+            external in retained_nodes && continue
+            haskey(public.node_indices,external) || continue
+            throw(ArgumentError(
+                "$caller: surviving record ($dim,$tag) references prior cache-only " *
+                "node tag $node; regeneration has no retained-node identity for it"))
+        end
     end
     return nothing
 end
@@ -3576,16 +3951,20 @@ function _validate_retained_cache_references(model,previous,proposed_class,calle
     public===nothing && return nothing
     records=Model._discrete_mesh_records_model(model)
     owned=Set{UInt64}()
-    for (_,record) in records
-        union!(owned,UInt64.(record.node_tags))
+    for (_,record) in records, tag in record.node_tags
+        external=UInt64(tag)
+        haskey(old_public.node_indices,external) || push!(owned,external)
     end
-    for ((dim,tag),record) in records,connectivity in record.element_nodes,node in connectivity
-        external=UInt64(node)
-        external in owned && continue
-        haskey(old_public.node_indices,external) || continue
-        haskey(public.node_indices,external) && continue
-        throw(ArgumentError(
-            "$caller: surviving record ($dim,$tag) references removed cache-only node tag $node"))
+    for ((dim,tag),record) in records,position in eachindex(record.element_nodes)
+        haskey(old_public.element_indices,UInt64(record.element_tags[position])) && continue
+        for node in record.element_nodes[position]
+            external=UInt64(node)
+            external in owned && continue
+            haskey(old_public.node_indices,external) || continue
+            haskey(public.node_indices,external) && continue
+            throw(ArgumentError(
+                "$caller: surviving record ($dim,$tag) references removed cache-only node tag $node"))
+        end
     end
     return nothing
 end
@@ -3598,17 +3977,25 @@ function _cache_classifies_entity(dim,tag)
     return key in class.entities || key in class.node_entities || haskey(class.boundaries,key)
 end
 
-"""`(dim, tag, record)` triples in sorted order for every record holding data."""
+"""(dim, tag, record)` triples in sorted order for every record holding data.
+Records on authority-covered entities answer only their caller-owned entries
+(cache-mirrored entries are read through the generated cache); with
+`include_authoritative` every stored record is returned verbatim."""
 function _discrete_mesh_records(m::GeoModel;include_authoritative=false)
+    public=include_authoritative ? nothing : _mesh_public_tags(LAST_MESH[])
     pairs=Tuple{Int,Int,DiscreteEntity}[]
     for (key,record) in m.discrete
-        !include_authoritative && _cache_covers_record(
-            _mesh_public_tags(LAST_MESH[]),key...) && continue
+        if !include_authoritative && _cache_covers_record(public,key...)
+            record=_record_uncovered_view(public,record)
+            record===nothing && continue
+        end
         push!(pairs,(key[1],key[2],record))
     end
     for (key,record) in m.meshing.attached
-        !include_authoritative && _cache_covers_record(
-            _mesh_public_tags(LAST_MESH[]),key...) && continue
+        if !include_authoritative && _cache_covers_record(public,key...)
+            record=_record_uncovered_view(public,record)
+            record===nothing && continue
+        end
         push!(pairs,(key[1],key[2],record))
     end
     return sort!(pairs;by=entry->(entry[1],entry[2]))
@@ -3618,7 +4005,7 @@ end
 # attached record. Record node tags are globally unique, so connectivity may
 # reference nodes owned by a different (boundary) entity's record.
 function _record_node_index(m::GeoModel)
-    index=Dict{Int32,Tuple{DiscreteEntity,Int}}()
+    index=Dict{UInt64,Tuple{DiscreteEntity,Int}}()
     for (_,_,record) in _discrete_mesh_records(m;include_authoritative=true)
         for (i,tag) in enumerate(record.node_tags)
             index[tag]=(record,i)
@@ -3629,12 +4016,17 @@ end
 
 # Append a record's nodes to running tag/coordinate/parametric arrays.
 function _append_record_nodes!(tags,coordinates,parameters,record,
-                               parametric::Bool)
+                               parametric::Bool;query_dim=size(record.node_params,1))
     for i in eachindex(record.node_tags)
         push!(tags,UInt64(record.node_tags[i]))
         append!(coordinates,@view(record.node_coords[:,i]))
     end
-    parametric && append!(parameters,vec(record.node_params))
+    if parametric && query_dim>0
+        for position in eachindex(record.node_tags)
+            stored=Model._model_mesh_node_parameters(record,position)
+            stored===nothing || append!(parameters,@view stored[1:min(query_dim,length(stored))])
+        end
+    end
     return nothing
 end
 
@@ -3776,6 +4168,8 @@ function _merged_element_data(m::GeoModel,cached,dimension::Int)
     end
     overlay=_high_order_overlay(cached)
     class=cached===nothing ? nothing : _cached_classification_locked(cached)
+    ghost_positions=class!==nothing && _native_has_ghost_entities(m) ?
+        _public_bulk_ghost_positions(m) : nothing
     if class===nothing
         # Unclassified cache: flat type blocks first, then record blocks.
         if cached!==nothing
@@ -3797,7 +4191,7 @@ function _merged_element_data(m::GeoModel,cached,dimension::Int)
         end
         for (edim,etag,record) in _discrete_mesh_records(m)
             (dimension<0 || edim==dimension) || continue
-            rtypes,rtags,rnodes=_record_element_blocks(record)
+            rtypes,rtags,rnodes=_record_bulk_element_blocks(record,edim)
             for i in eachindex(rtypes)
                 emit!(rtypes[i],rtags[i],rnodes[i])
             end
@@ -3810,9 +4204,12 @@ function _merged_element_data(m::GeoModel,cached,dimension::Int)
             end
             sort!(unique!(tags))
             for etag in tags
+                _public_bulk_entity_visible(m,dim,etag;ghost_positions) || continue
+                curve_type=dim==1 ? _mesh_curve_first_type(m,cached,class,etag;ghost_positions) : nothing
                 for (etype,_,offset,cells,cell_owners) in _cache_catalog(cached,class)
                     Int(msh_spec(etype).dim)==dim || continue
-                    positions=findall(==(Int32(etag)),cell_owners)
+                    dim==1 && etype!=curve_type && continue
+                    positions=_public_bulk_cell_positions(m,dim,cell_owners,etag;offset,ghost_positions)
                     isempty(positions) && continue
                     if overlay!==nothing &&
                             _p2_skeleton_etype(overlay)==etype
@@ -3827,8 +4224,9 @@ function _merged_element_data(m::GeoModel,cached,dimension::Int)
                 end
                 record=_model_mesh_record(m,dim,etag)
                 if record!==nothing
-                    rtypes,rtags,rnodes=_record_element_blocks(record)
+                    rtypes,rtags,rnodes=_record_bulk_element_blocks(record,dim)
                     for i in eachindex(rtypes)
+                        dim==1 && rtypes[i]!=curve_type && continue
                         emit!(rtypes[i],rtags[i],rnodes[i])
                     end
                 end
@@ -3898,7 +4296,7 @@ function _get_nodes(dim=-1,tag=-1,include_boundary=false,
                 coordinates=Float64[]
                 parameters=Float64[]
                 _append_record_nodes!(
-                    node_tags,coordinates,parameters,record,parametric)
+                    node_tags,coordinates,parameters,record,parametric;query_dim=dimension)
                 boundary && _append_record_boundary_nodes!(
                     node_tags,coordinates,parameters,model,record,
                     dimension,parametric)
@@ -3916,7 +4314,7 @@ function _get_nodes(dim=-1,tag=-1,include_boundary=false,
                 node_tags=UInt64[];coordinates=Float64[]
                 parameters=Float64[]
                 record===nothing || _append_record_nodes!(
-                    node_tags,coordinates,parameters,record,parametric)
+                    node_tags,coordinates,parameters,record,parametric;query_dim=dimension)
                 boundary && _append_native_boundary_nodes!(
                     node_tags,coordinates,parameters,model,cached,dimension,entity,parametric)
                 return node_tags,coordinates,parameters
@@ -3937,7 +4335,7 @@ function _get_nodes(dim=-1,tag=-1,include_boundary=false,
                 Float64[]
             if record!==nothing
                 _append_record_nodes!(
-                    node_tags,coordinates,parameters,record,parametric)
+                    node_tags,coordinates,parameters,record,parametric;query_dim=dimension)
             end
             boundary && !haskey(model.discrete,(dimension,entity)) &&
                 _append_native_boundary_nodes!(node_tags,coordinates,parameters,
@@ -3984,7 +4382,7 @@ function _get_nodes(dim=-1,tag=-1,include_boundary=false,
         for (edim,etag,record) in _discrete_mesh_records(model)
             edim==dimension || continue
             _append_record_nodes!(
-                node_tags,coordinates,parameters,record,parametric)
+                node_tags,coordinates,parameters,record,parametric;query_dim=dimension)
             if boundary
                 haskey(model.discrete,(edim,etag)) ?
                     _append_record_boundary_nodes!(node_tags,coordinates,parameters,model,record,dimension,parametric) :
@@ -3995,19 +4393,19 @@ function _get_nodes(dim=-1,tag=-1,include_boundary=false,
     end
 end
 
-function _get_node(node_tag)
+function _get_node_native_lookup_live(node_tag)
     caller="API.mesh.get_node"
     return lock(STATE_LOCK) do
         model=_model_locked()
-        tag=_mesh_query_integer(node_tag,caller,"node_tag")
+        tag=_mesh_query_uid(node_tag,caller,"node_tag")
         # Discrete and attached records carry caller-assigned tags — check them
         # first so a sparse tag resolves even without a generated mesh.
-        tag32=0<tag<=typemax(Int32) ? Int32(tag) : Int32(-1)
+        tag32=tag
         for (edim,etag,record) in _discrete_mesh_records(model)
             position=findfirst(==(tag32),record.node_tags)
             position===nothing && continue
-            parameters=size(record.node_params,1)>0 ?
-                vec(record.node_params[:,position]) : Float64[]
+            stored=Model._model_mesh_node_parameters(record,position)
+            parameters=stored===nothing ? Float64[] : copy(stored)
             return vec(record.node_coords[:,position]),parameters,edim,etag
         end
         cached=_cached_mesh_locked(caller)
@@ -4022,14 +4420,14 @@ function _get_node(node_tag)
             "metadata; generate a mesh so the cache owns entity ownership"))
         if tag>nnodes(cached)
             dimension,entity=LAST_MESH_HIGH_ORDER_MIDS[][tag-nnodes(cached)]
-            parameters=dimension in (1,2) ? vec(_api_model_parametrization(
-                model,dimension,Int(entity),
-                vec(overlay.coords[:,tag]))) : Float64[]
+            key=_relocation_mid_key(class,tag)
+            stored=get(class.mid_parametric,key,nothing)
+            parameters=stored===nothing ? Float64[] : copy(stored)
             return vec(overlay.coords[:,tag]),parameters,dimension,Int(entity)
         end
         dimension,entity=class.node_entities[tag]
-        parameters=_mesh_entity_parameters(
-            model,cached,dimension,Int(entity),[tag])
+        stored=class.node_parametric[tag]
+        parameters=stored===nothing ? Float64[] : copy(stored)
         return cached.coords[:,tag],parameters,dimension,Int(entity)
     end
 end
@@ -4204,7 +4602,7 @@ function _get_elements(dim=-1,tag=-1)
                 haskey(model.discrete,(dimension,entity)) &&
                 _model_mesh_record(model,dimension,entity)!==nothing &&
                 !_cache_classifies_entity(dimension,entity)
-            return _record_element_blocks(model.discrete[(dimension,entity)])
+            return _record_bulk_element_blocks(model.discrete[(dimension,entity)],dimension)
         end
         cached=LAST_MESH[]
         (dimension<0 || entity<0) &&
@@ -4221,21 +4619,25 @@ function _get_elements(dim=-1,tag=-1)
             attached=_model_mesh_record(model,dimension,entity)
             return attached===nothing ?
                 (Int32[],Vector{UInt64}[],Vector{UInt64}[]) :
-                _record_element_blocks(attached)
+                _record_bulk_element_blocks(attached,dimension)
         end
         class=_cached_classification_locked(cached)
         class===nothing && throw(ArgumentError(
             "$caller: entity-specific elements require mesh classification " *
             "metadata; use a negative tag to query a complete dimension"))
         _mesh_classified_entity(model,class,dimension,entity,caller)
+        _public_bulk_entity_visible(model,dimension,entity) ||
+            return (Int32[],Vector{UInt64}[],Vector{UInt64}[])
         blocks=_cache_catalog(cached,class)
         element_types=Int32[]
         element_tags=Vector{Vector{UInt64}}()
         node_tags=Vector{Vector{UInt64}}()
         overlay=_high_order_overlay(cached)
+        curve_type=dimension==1 ? _mesh_curve_first_type(model,cached,class,entity) : nothing
         for (element_type,block_dimension,offset,cells,owners) in blocks
             block_dimension==dimension || continue
-            positions=findall(==(Int32(entity)),owners)
+            dimension==1 && element_type!=curve_type && continue
+            positions=_public_bulk_cell_positions(model,dimension,owners,entity;offset)
             isempty(positions) && continue
             if overlay!==nothing && _p2_skeleton_etype(overlay)==element_type
                 push!(element_types,_p2_etype(overlay))
@@ -4248,8 +4650,9 @@ function _get_elements(dim=-1,tag=-1)
         end
         attached=_model_mesh_record(model,dimension,entity)
         if attached!==nothing
-            rtypes,rtags,rnodes=_record_element_blocks(attached)
+            rtypes,rtags,rnodes=_record_bulk_element_blocks(attached,dimension)
             for i in eachindex(rtypes)
+                dimension==1 && rtypes[i]!=curve_type && continue
                 merge_into=findfirst(==(rtypes[i]),element_types)
                 if merge_into===nothing
                     push!(element_types,rtypes[i])
@@ -4261,8 +4664,7 @@ function _get_elements(dim=-1,tag=-1)
                 end
             end
         end
-        ordering=sortperm(element_types)
-        return element_types[ordering],element_tags[ordering],node_tags[ordering]
+        return _cache_grouped_element_data(element_types,element_tags,node_tags)
     end
 end
 
@@ -4276,13 +4678,29 @@ function _get_element_types(dim=-1,tag=-1)
                 haskey(model.discrete,(dimension,entity)) &&
                 _model_mesh_record(model,dimension,entity)!==nothing &&
                 !_cache_classifies_entity(dimension,entity)
-            types,_,_=_record_element_blocks(model.discrete[(dimension,entity)])
+            types,_,_=_record_bulk_element_blocks(model.discrete[(dimension,entity)],dimension)
             return types
         end
         cached=LAST_MESH[]
         if dimension<0 || entity<0
+            if _native_has_ghost_entities(model)
+                types,_,_=_merged_element_data(model,LAST_MESH[],dimension)
+                return types
+            end
             result=cached===nothing ? Int32[] :
                 _mesh_element_types(cached,dimension)
+            cache_class=cached===nothing ? nothing : _cached_classification_locked(cached)
+            if cached isa MixedMesh && cache_class!==nothing
+                first_curve_types=Dict{Int32,Int32}()
+                for (msh,dim,_,cells,owners) in _cache_catalog(cached,cache_class)
+                    dim==1 || continue
+                    for owner in owners
+                        get!(first_curve_types,owner,Int32(msh))
+                    end
+                end
+                advertised=Set(values(first_curve_types))
+                filter!(msh->msh_family(msh)!==:lin || msh in advertised,result)
+            end
             overlay=_high_order_overlay(cached)
             if overlay!==nothing
                 skeleton=_p2_skeleton_etype(overlay)
@@ -4293,7 +4711,9 @@ function _get_element_types(dim=-1,tag=-1)
             end
             for (edim,etag,record) in _discrete_mesh_records(model)
                 (dimension<0 || dimension==edim) || continue
-                for element_type in record.element_types
+                types=edim==1 && !isempty(record.element_types) ?
+                    (first(record.element_types),) : record.element_types
+                for element_type in types
                     element_type in result || push!(result,element_type)
                 end
             end
@@ -4307,7 +4727,7 @@ function _get_element_types(dim=-1,tag=-1)
                     "$(_MESH_ENTITY_LABELS[dimension+1])[$entity]"))
             attached=_model_mesh_record(model,dimension,entity)
             return attached===nothing ? Int32[] :
-                _record_element_blocks(attached)[1]
+                _record_bulk_element_blocks(attached,dimension)[1]
         end
         class=_cached_classification_locked(cached)
         class===nothing && throw(ArgumentError(
@@ -4315,13 +4735,22 @@ function _get_element_types(dim=-1,tag=-1)
             "classification metadata; use a negative tag to query a complete " *
             "dimension"))
         _mesh_classified_entity(model,class,dimension,entity,caller)
+        _public_bulk_entity_visible(model,dimension,entity) || return Int32[]
         result=Int32[]
         if cached isa MixedMesh
-            for (msh,dim,_,cells,owners) in _cache_catalog(cached,class)
-                dim==dimension && any(==(Int32(entity)),owners) && push!(result,msh)
+            curve_type=dimension==1 ? _mesh_curve_first_type(model,cached,class,entity) : nothing
+            for (msh,dim,offset,cells,owners) in _cache_catalog(cached,class)
+                dim==dimension || continue
+                dimension==1 && msh!=curve_type && continue
+                isempty(_public_bulk_cell_positions(model,dim,owners,entity;offset)) || push!(result,msh)
             end
             attached=_model_mesh_record(model,dimension,entity)
-            attached===nothing || append!(result,attached.element_types)
+            if attached!==nothing
+                for msh in attached.element_types
+                    dimension==1 && msh!=curve_type && continue
+                    push!(result,msh)
+                end
+            end
             return sort!(unique!(result))
         end
         overlay=_high_order_overlay(cached)
@@ -4343,14 +4772,14 @@ function _get_element_types(dim=-1,tag=-1)
     end
 end
 
-function _get_element(element_tag)
+function _get_element_native_lookup_live(element_tag)
     caller="API.mesh.get_element"
     return lock(STATE_LOCK) do
         model=_model_locked()
-        tag=_mesh_query_integer(element_tag,caller,"element_tag")
+        tag=_mesh_query_uid(element_tag,caller,"element_tag")
         # Discrete/attached element tags are caller-assigned and sparse —
         # resolve them before the dense generated range.
-        tag32=0<tag<=typemax(Int32) ? Int32(tag) : Int32(-1)
+        tag32=tag
         for (edim,etag,record) in _discrete_mesh_records(model)
             position=findfirst(==(tag32),record.element_tags)
             position===nothing && continue
@@ -4438,6 +4867,7 @@ function _get_elements_by_type(element_type,tag=-1,task=0,num_tasks=1)
         positions=nothing
         offset=0
         ncache=0
+        cache_spans=nothing
         if cached!==nothing
             class=_cached_classification_locked(cached)
             overlay=_high_order_overlay(cached)
@@ -4456,6 +4886,24 @@ function _get_elements_by_type(element_type,tag=-1,task=0,num_tasks=1)
                     positions=_mesh_entity_cell_positions(
                         class,Int(_p2_skeleton_etype(overlay)),entity)
                     ncache=length(positions)
+                end
+            elseif cached isa MixedMesh
+                entity<0 || begin
+                    class===nothing && throw(ArgumentError(
+                        "$caller: entity-specific data require mesh classification metadata"))
+                    haskey(model.discrete,(spec.dim,entity)) ||
+                        _mesh_classified_entity(model,class,spec.dim,entity,caller)
+                end
+                cache_spans=Tuple{Int,Matrix{Int32},Union{Nothing,Vector{Int}}}[]
+                for (kind,_,block_offset,block_cells,owners) in _cache_catalog(cached,class)
+                    kind==msh32 || continue
+                    columns=_native_has_ghost_entities(model) ?
+                        _public_bulk_cell_positions(model,spec.dim,owners,entity;offset=block_offset) :
+                        entity<0 ? nothing : findall(==(Int32(entity)),owners)
+                    count=columns===nothing ? size(block_cells,2) : length(columns)
+                    count==0 && continue
+                    push!(cache_spans,(block_offset,block_cells,columns))
+                    ncache=Base.checked_add(ncache,count)
                 end
             elseif overlay===nothing || Int32(msh)!=_p2_skeleton_etype(overlay)
                 block=_mesh_element_block(cached,msh)
@@ -4488,7 +4936,23 @@ function _get_elements_by_type(element_type,tag=-1,task=0,num_tasks=1)
         node_tags=UInt64[]
         if first_selected<=ncache
             cache_end=min(last_selected,ncache)
-            if positions===nothing
+            if cache_spans!==nothing
+                preceding=0
+                public=_mesh_public_tags(cached)
+                for (block_offset,block_cells,block_positions) in cache_spans
+                    count=block_positions===nothing ? size(block_cells,2) : length(block_positions)
+                    left=max(first_selected,preceding+1)-preceding
+                    right=min(cache_end,preceding+count)-preceding
+                    if left<=right
+                        chosen=block_positions===nothing ? (left:right) :
+                            @view block_positions[left:right]
+                        append!(tags,_cache_element_tags(public,block_offset .+ chosen))
+                        append!(node_tags,_cache_node_tags(public,vec(@view block_cells[:,chosen])))
+                    end
+                    preceding+=count
+                    preceding>=cache_end && break
+                end
+            elseif positions===nothing
                 columns=first_selected:cache_end
                 append!(tags,_cache_element_tags(_mesh_public_tags(cached),offset .+ columns))
                 append!(node_tags,_cache_node_tags(_mesh_public_tags(cached),vec(@view cells[:,columns])))
@@ -4536,7 +5000,7 @@ function _record_nodes_of_type(m::GeoModel,msh::Int32,tag::Int,
                     # a node owned by a different-dim record contributes a
                     # resized (zero-padded) parameter column.
                     column=if owned===nothing
-                        _get_node(node)[2]
+                        _get_node_native_lookup_live(node)[2]
                     else
                         owner,position=owned
                         size(owner.node_params,2)==length(owner.node_tags) ?
@@ -4583,12 +5047,22 @@ function _get_nodes_by_element_type(element_type,tag=-1,
             requested_spec=msh_spec(msh32)
             _mesh_query_type_block(cached,element_type,tag,caller)
             overlay=_high_order_overlay(cached)
-            for (stored_msh,_,_,_,_) in _cache_catalog(cached)
+            class=_cached_classification_locked(cached)
+            for (stored_msh,stored_dim,stored_offset,stored_cells,stored_owners) in _cache_catalog(cached,class)
                 msh_spec(stored_msh).family==requested_spec.family || continue
                 published_msh=overlay!==nothing && stored_msh==_p2_skeleton_etype(overlay) ?
                     Int(_p2_etype(overlay)) : Int(stored_msh)
-                query_mesh,_,block,positions=_published_mesh_query_type_block(
-                    cached,published_msh,tag,caller)
+                if cached isa MixedMesh
+                    # Parent-family node queries follow actual element order,
+                    # including interleaved polynomial orders on one entity.
+                    query_mesh=cached
+                    block=(0,stored_cells)
+                    positions=entity<0 && !_native_has_ghost_entities(model) ? nothing :
+                        _public_bulk_cell_positions(model,Int(stored_dim),stored_owners,entity;offset=stored_offset)
+                else
+                    query_mesh,_,block,positions=_published_mesh_query_type_block(
+                        cached,published_msh,tag,caller)
+                end
                 if block!==nothing
                     _,cells=block
                     selected=cells[:,_mesh_selected_columns(cells,positions)]
@@ -4649,7 +5123,7 @@ end
 # Node-tag lists of record elements of type `msh` on entity `tag` (all records
 # when `tag` is negative).
 function _record_cells_of_type(m::GeoModel,msh::Int32,tag::Int)
-    cells=Vector{Int32}[]
+    cells=Vector{UInt64}[]
     edim_filter=tag<0 ? -1 : Int(msh_spec(msh).dim)
     for (edim,etag,record) in _discrete_mesh_records(m)
         (tag<0 || (etag==tag && edim==edim_filter)) || continue
@@ -4759,7 +5233,7 @@ end
 
 # `patterns` applied to record-element node-tag lists — the record equivalent
 # of `_mesh_pattern_nodes`.
-function _record_pattern_nodes(cells::Vector{Vector{Int32}},patterns)
+function _record_pattern_nodes(cells::Vector{Vector{UInt64}},patterns)
     isempty(patterns) && return UInt64[]
     result=UInt64[]
     for cell in cells,pattern in patterns,local_node in pattern
@@ -4866,6 +5340,7 @@ end
 function _get_max_node_tag()
     return lock(STATE_LOCK) do
         model=_model_locked()
+        NODE_COUNTER_WRAPPED[] && return NODE_TAG_MAX[]
         cached=LAST_MESH[]
         overlay=_high_order_overlay(cached)
         maximum_tag=overlay===nothing ?
@@ -4874,7 +5349,7 @@ function _get_max_node_tag()
         table===nothing || (maximum_tag=maximum(table.node_tags;init=UInt64(0)))
         for (_,_,record) in _discrete_mesh_records(model)
             isempty(record.node_tags) ||
-                (maximum_tag=max(maximum_tag,Int(maximum(record.node_tags))))
+                (maximum_tag=max(maximum_tag,maximum(record.node_tags)))
         end
         return max(UInt64(maximum_tag),NODE_TAG_MAX[])
     end
@@ -4883,6 +5358,7 @@ end
 function _get_max_element_tag()
     return lock(STATE_LOCK) do
         model=_model_locked()
+        ELEMENT_COUNTER_WRAPPED[] && return ELEMENT_TAG_MAX[]
         cached=LAST_MESH[]
         _,_,total=cached===nothing ? (0,0,0) : _mesh_element_offsets(cached)
         maximum_tag=total
@@ -4890,7 +5366,7 @@ function _get_max_element_tag()
         table===nothing || (maximum_tag=maximum(table.element_tags;init=UInt64(0)))
         for (_,_,record) in _discrete_mesh_records(model)
             isempty(record.element_tags) ||
-                (maximum_tag=max(maximum_tag,Int(maximum(record.element_tags))))
+                (maximum_tag=max(maximum_tag,maximum(record.element_tags)))
         end
         return max(UInt64(maximum_tag),ELEMENT_TAG_MAX[])
     end
@@ -4903,7 +5379,7 @@ end
 # carrier. Actual parent boundary triangles also certify the newly introduced
 # interior edges of their four child faces.
 function _inherit_refined_classification(class::_MeshClassification,
-                                         refined::Mesh,cache::Mesh)
+                                         refined::Mesh,cache::Mesh,model::GeoModel)
     mesh=class.mesh
     function inherit(cells::AbstractMatrix{Int32},entities,fanout)
         isempty(entities) && return entities
@@ -4972,25 +5448,40 @@ function _inherit_refined_classification(class::_MeshClassification,
     _api_check_support_conflicts(edge_conflicts,face_conflicts,quad_conflicts)
     all(owner->owner!=(0,Int32(0)),node_entities) || throw(ArgumentError(
         "API.mesh.refine: actual primary-edge carrier metadata is incomplete"))
+    parameters=Union{Nothing,Vector{Float64}}[nothing for _ in 1:nnodes(refined)]
+    for old in eachindex(used)
+        used[old] || continue
+        parameters[remap[old]]=class.node_parametric[old]
+    end
+    for index in compact_nodes+1:nnodes(refined)
+        dim,tag=node_entities[index]
+        dim in (1,2) && _relocation_native_entity(model,dim,Int(tag)) || continue
+        parameters[index]=_api_model_parametrization(model,dim,Int(tag),
+            collect(@view refined.coords[:,index]))
+    end
     return _MeshClassification(cache,class.entity,class.entities,
         node_entities,class.boundaries,seg_entities,tri_entities,
         tet_entities,Dict{Int,Vector{Int32}}(1=>seg_entities,2=>tri_entities,4=>tet_entities),
-        nothing,edge_entities,face_entities,quad_entities)
+        nothing,edge_entities,face_entities,quad_entities,parameters)
 end
 
-function _refine(;max_nodes=typemax(Int32),max_cells=typemax(Int32))
+function _refine_native_lookup_live(;max_nodes=typemax(Int32),max_cells=typemax(Int32))
     return lock(STATE_LOCK) do
         m=_model_locked()
         cached=LAST_MESH[]
-        cached===nothing && throw(ArgumentError(
-            "API.mesh.refine: no mesh; call API.mesh.generate first"))
+        if cached===nothing
+            any(entry->!isempty(entry[3].element_tags),
+                _discrete_mesh_records(m;include_authoritative=true)) &&
+                return _mixed_refine_raw_locked!(m,max_nodes,max_cells)
+            throw(ArgumentError("API.mesh.refine: no mesh; call API.mesh.generate first"))
+        end
         cached isa MixedMesh && return _mixed_refine_locked!(m,cached,max_nodes,max_cells)
         overlay=_high_order_overlay(cached)
         (overlay===nothing || _high_order_overlay_is_straight(overlay)) ||
             throw(ArgumentError(
                 "API.mesh.refine: curved quadratic simplex refinement is not " *
                 "implemented; existing actual midpoint geometry is retained"))
-        staged_model=overlay===nothing ? nothing : deepcopy(m)
+        staged_model=overlay===nothing ? nothing : Model._model_mesh_transaction_copy(m)
         # `reverse` may legitimately invert tets; refinement preserves
         # orientation, so an inverted input yields an inverted (but otherwise
         # structurally valid) output — bypass only the orientation check.
@@ -5005,7 +5496,7 @@ function _refine(;max_nodes=typemax(Int32),max_cells=typemax(Int32))
             # Refinement changes the actual subdivision, including layered
             # source grids. Inherit certified parent supports for single and
             # multiple entities instead of reprojecting onto the old topology.
-            _inherit_refined_classification(class,refined,cache)
+            _inherit_refined_classification(class,refined,cache,m)
         end
         if class!==nothing && class.public_tags!==nothing
             public=class.public_tags
@@ -5152,6 +5643,7 @@ end
 # Drop every node and element stored on a discrete/attached record, keeping
 # the entity itself (Gmsh's `clear` removes mesh data, not entities).
 function _record_clear!(record)
+    empty!(record.node_native_params)
     empty!(record.node_tags)
     record.node_coords=Matrix{Float64}(undef,3,0)
     record.node_params=Matrix{Float64}(undef,size(record.node_params,1),0)
@@ -5161,13 +5653,62 @@ function _record_clear!(record)
     return nothing
 end
 
-function _clear_mesh(dim_tags=())
+# GModel::deleteMesh checks each requested entity in declaration order. A
+# boundary remains meshed while a direct upward entity still has elements;
+# clearing that parent earlier in the selection makes the boundary eligible.
+function _mesh_clear_selection(model,cached,class,pairs)
+    live=Set{Tuple{Int,Int32}}()
+    if cached!==nothing
+        for (_,dim,_,cells,owners) in _cache_catalog(cached,class)
+            isempty(cells) || union!(live,((dim,owner) for owner in owners))
+        end
+    end
+    for (dim,tag,record) in _discrete_mesh_records(model)
+        any(!isempty,record.element_tags) && push!(live,(dim,Int32(tag)))
+    end
+    upward=Dict{Tuple{Int,Int32},Vector{Tuple{Int,Int32}}}()
+    if class!==nothing
+        for ((dim,tag),boundaries) in class.boundaries
+            dim==0 && continue
+            for boundary in boundaries
+                push!(get!(()->Tuple{Int,Int32}[],upward,(dim-1,abs(boundary))),
+                      (dim,tag))
+            end
+        end
+    else
+        for (dim,tag) in pairs
+            parents,_=model_adjacencies(model,dim,tag)
+            upward[(dim,Int32(tag))]=Tuple{Int,Int32}[
+                (dim+1,Int32(parent)) for parent in parents]
+        end
+    end
+    # Uncached discrete records can add a parent absent from the cache catalog.
+    for ((dim,tag),record) in model.discrete, (bdim,btag) in record.boundary
+        push!(get!(()->Tuple{Int,Int32}[],upward,(bdim,Int32(btag))),
+              (dim,Int32(tag)))
+    end
+    cleared=Set{Tuple{Int,Int32}}()
+    for (dim,tag) in pairs
+        owner=(dim,Int32(tag))
+        parents=get(upward,owner,nothing)
+        parents!==nothing && any(parent->parent in live,parents) && continue
+        push!(cleared,owner)
+        delete!(live,owner)
+    end
+    return cleared
+end
+
+function _clear_mesh_native_lookup_live(dim_tags=())
     caller="API.mesh.clear"
     return lock(STATE_LOCK) do
         model=_model_locked()
         pairs=_mesh_parse_dim_tags(dim_tags,caller)
         if isempty(pairs)
+            cleared_authority=Model._model_mesh_cleared_authority(model.meshing.mesh_authority)
+            Model._model_periodic_uid_clear!(model.meshing.periodic_uid_history,
+                collect(keys(model.meshing.periodic_uid_history)))
             _replace_mesh_cache_locked!(nothing)
+            model.meshing.mesh_authority=cleared_authority
             for (_,_,record) in _discrete_mesh_records(model)
                 _record_clear!(record)
             end
@@ -5181,19 +5722,34 @@ function _clear_mesh(dim_tags=())
         cached!==nothing && class===nothing && throw(ArgumentError(
             "$caller: entity-selective clearing requires mesh classification " *
             "metadata; pass an empty collection to clear the complete cache"))
-        cleared=class===nothing ? nothing : _mesh_selected_entities(model,class,pairs,caller)
-        staged=cached===nothing ? model : deepcopy(model)
+        if class!==nothing
+            for (dim,tag) in pairs
+                _mesh_classified_entity(model,class,dim,tag,caller)
+            end
+        end
+        cleared=_mesh_clear_selection(model,cached,class,pairs)
+        isempty(cleared) && return nothing
+        staged=Model._model_mesh_transaction_copy(model)
+        staged.meshing.size_callback=model.meshing.size_callback
         for (dim,tag) in pairs
+            (dim,Int32(tag)) in cleared || continue
             record=_raw_model_mesh_record(staged,dim,tag)
             record===nothing || _record_clear!(record)
             dim==1 && delete!(staged.curve_params,tag)
         end
-        cached===nothing && return nothing
+        if cached===nothing
+            _periodic_uid_history_clear!(staged,model,nothing,nothing,nothing,nothing,cleared)
+            index=_current_slot_index_locked()
+            index!=0 && (MODEL_SLOTS[index].model=staged)
+            CURRENT[]=staged
+            return nothing
+        end
         overlay=_high_order_overlay(cached)
         node_map=Ref{Union{Nothing,Vector{Int32}}}(nothing)
         replacement,record=cached isa Mesh ?
             _clear_classified_mesh(cached,class,cleared;node_map) :
             _clear_classified_mesh(cached,class,cleared)
+        _periodic_uid_history_clear!(staged,model,cached,class,replacement,record,cleared)
         if replacement!==cached
             if replacement isa MixedMesh && record.public_tags!==nothing
                 replacement,record=_mixed_refresh_periodic_links(staged,replacement,record,caller)
@@ -5220,7 +5776,7 @@ function _affine_transform_mesh(affine,dim_tags=())
         pairs=_mesh_parse_dim_tags(dim_tags,caller)
         cached=LAST_MESH[]
         staged_model=cached isa Mesh && _high_order_overlay(cached)!==nothing ?
-            deepcopy(model) : nothing
+            Model._model_mesh_transaction_copy(model) : nothing
         staged_model===nothing || (model=staged_model)
         cached===nothing && isempty(model.discrete) &&
             isempty(model.meshing.attached) && throw(ArgumentError(
@@ -5236,7 +5792,9 @@ function _affine_transform_mesh(affine,dim_tags=())
                 (Int(p[1]),Int(p[2])) for p in pairs)
         end
         orientation=_determinant_sign(coefficients,caller)
-        for (edim,etag,record) in _discrete_mesh_records(model)
+        # Authoritative records include covered entities: caller-owned entries
+        # on them transform here while mirrored rows are rebuilt from the cache.
+        for (edim,etag,record) in _discrete_mesh_records(model;include_authoritative=true)
             (selected_record_keys===nothing ||
              (edim,etag) in selected_record_keys) || continue
             record.node_coords=matrix*record.node_coords .+
@@ -5333,9 +5891,8 @@ function _record_remove_elements!(record,element_tags,caller::AbstractString)
     end
     keep=trues(length(record.element_tags))
     for value in element_tags
-        entry=_mesh_query_integer(value,caller,"element_tags entry")
-        entry32=typemin(Int32)<=entry<=typemax(Int32) ? Int32(entry) :
-            Int32(0)
+        entry=_mesh_query_uid(value,caller,"element_tags entry")
+        entry32=entry
         position=findfirst(==(entry32),record.element_tags)
         position===nothing && throw(ArgumentError(
             "$caller: element $entry is not classified on this entity"))
@@ -5347,35 +5904,43 @@ function _record_remove_elements!(record,element_tags,caller::AbstractString)
     return nothing
 end
 
-function _remove_elements(dim,tag,element_tags=())
+function _remove_elements_native_lookup_live(dim,tag,element_tags=())
     caller="API.mesh.remove_elements"
     return lock(STATE_LOCK) do
+        selected_tags=element_tags
         model=_model_locked()
         dimension=_mesh_query_integer(dim,caller,"dim")
         dimension in 0:3 || throw(ArgumentError(
             "$caller: dim must be in 0:3"))
         entity=_mesh_query_integer(tag,caller,"tag")
-        (element_tags isa AbstractVector || element_tags isa Tuple) ||
+        (selected_tags isa AbstractVector || selected_tags isa Tuple) ||
             throw(ArgumentError(
                 "$caller: element_tags must be a vector or tuple of " *
                 "element tags"))
         cached=LAST_MESH[]
         class=cached===nothing ? nothing : _cached_classification_locked(cached)
         if class!==nothing && class.public_tags!==nothing
-            return _remove_public_elements_locked!(model,cached,class,dimension,entity,element_tags,caller)
+            return _remove_public_elements_locked!(model,cached,class,dimension,entity,selected_tags,caller)
         end
-        record=_model_mesh_record(model,dimension,entity)
+        # Discrete records own their full element namespace. Native attached
+        # records can coexist with an admitted legacy cache on the same entity.
+        record=get(model.discrete,(dimension,entity),nothing)
         if record!==nothing
-            _record_remove_elements!(record,element_tags,caller)
+            _record_remove_elements!(record,selected_tags,caller)
             return nothing
         end
         attached=_model_mesh_record(model,dimension,entity)
+        pending_attached_tags=nothing
         if attached!==nothing
-            if isempty(element_tags)
-                _record_remove_elements!(attached,element_tags,caller)
+            if isempty(selected_tags)
+                if cached===nothing
+                    _record_remove_elements!(attached,selected_tags,caller)
+                    return nothing
+                end
+                pending_attached_tags=()
             else
                 listed=Set{Int32}()
-                for value in element_tags
+                for value in selected_tags
                     entry=_mesh_query_integer(value,caller,
                                               "element_tags entry")
                     typemin(Int32)<=entry<=typemax(Int32) &&
@@ -5383,14 +5948,16 @@ function _remove_elements(dim,tag,element_tags=())
                 end
                 record_listed=intersect(listed,Set(attached.element_tags))
                 if !isempty(record_listed)
-                    _record_remove_elements!(
-                        attached,[Int(t) for t in record_listed],caller)
-                    element_tags=Any[v for v in element_tags
+                    pending_attached_tags=collect(record_listed)
+                    selected_tags=Any[v for v in selected_tags
                                      if !(v in record_listed)]
                     # A nonempty selection consumed entirely by record
                     # elements must not fall through to the remove-all
                     # semantics of an empty list.
-                    isempty(element_tags) && return nothing
+                    if isempty(selected_tags)
+                        _record_remove_elements!(attached,pending_attached_tags,caller)
+                        return nothing
+                    end
                 end
             end
         end
@@ -5400,8 +5967,12 @@ function _remove_elements(dim,tag,element_tags=())
             "$caller: removing elements requires mesh classification " *
             "metadata; generate a mesh so the cache owns entity ownership"))
         _mesh_classified_entity(model,class,dimension,entity,caller)
-        cached isa MixedMesh && return _mixed_remove_elements(
-            cached,class,dimension,entity,element_tags,caller)
+        if cached isa MixedMesh
+            _mixed_remove_elements(cached,class,dimension,entity,selected_tags,caller)
+            pending_attached_tags===nothing ||
+                _record_remove_elements!(attached,pending_attached_tags,caller)
+            return nothing
+        end
         triangle_offset,tetrahedron_offset,total=_mesh_element_offsets(cached)
         # The simplex cache owns no dimension-0 cells; a Point selection can
         # only no-op on an empty list or reject tags classified elsewhere.
@@ -5411,17 +5982,17 @@ function _remove_elements(dim,tag,element_tags=())
         owners=dimension==0 ? Int32[] :
                dimension==1 ? class.seg_entities :
                dimension==2 ? class.tri_entities : class.tet_entities
-        (element_tags isa AbstractVector || element_tags isa Tuple) ||
+        (selected_tags isa AbstractVector || selected_tags isa Tuple) ||
             throw(ArgumentError(
                 "$caller: element_tags must be a vector or tuple of " *
                 "dense element tags"))
         dropped=falses(size(cells,2))
-        if isempty(element_tags)
+        if isempty(selected_tags)
             for column in axes(cells,2)
                 owners[column]==Int32(entity) && (dropped[column]=true)
             end
         else
-            for value in element_tags
+            for value in selected_tags
                 dense=_cache_element_index(class.public_tags,value,total,caller)
                 (1<=dense<=total) || throw(ArgumentError(
                     "$caller: unknown element $dense; expected a dense tag " *
@@ -5443,6 +6014,10 @@ function _remove_elements(dim,tag,element_tags=())
         end
         any(dropped) &&
             _remove_element_columns(cached,class,dimension,dropped)
+        # No attached mutation is published until every cache selection and
+        # retained-overlay preparation above has completed successfully.
+        pending_attached_tags===nothing ||
+            _record_remove_elements!(attached,pending_attached_tags,caller)
         return nothing
     end
 end
@@ -5451,9 +6026,13 @@ end
 # with a negative determinant. First-order types follow Gmsh's per-type swaps;
 # other types keep the first node and reverse the remainder, which flips the
 # orientation of every linear face convention.
-function _record_reverse_connectivity!(msh::Int32,nodes::Vector{Int32})
+function _record_reverse_connectivity!(msh::Int32,nodes::Union{Vector{Int32},Vector{UInt64}})
     n=length(nodes)
     n<2 && return nothing
+    if msh_spec(Int(msh)).order>1
+        nodes[:]=nodes[_mixed_reverse_permutation(Int(msh))]
+        return nothing
+    end
     if msh==Int32(1)                      # 2-node line
         nodes[1],nodes[2]=nodes[2],nodes[1]
     elseif msh==Int32(2)                  # triangle
@@ -5463,13 +6042,13 @@ function _record_reverse_connectivity!(msh::Int32,nodes::Vector{Int32})
     elseif msh==Int32(4)                  # tetrahedron
         nodes[1],nodes[2]=nodes[2],nodes[1]
     elseif msh==Int32(5)                  # hexahedron
-        nodes[2],nodes[4]=nodes[4],nodes[2]
-        nodes[6],nodes[8]=nodes[8],nodes[6]
+        nodes[1],nodes[3]=nodes[3],nodes[1]
+        nodes[5],nodes[7]=nodes[7],nodes[5]
     elseif msh==Int32(6)                  # prism
-        nodes[2],nodes[3]=nodes[3],nodes[2]
-        nodes[5],nodes[6]=nodes[6],nodes[5]
+        nodes[1],nodes[2]=nodes[2],nodes[1]
+        nodes[4],nodes[5]=nodes[5],nodes[4]
     elseif msh==Int32(7)                  # pyramid
-        nodes[2],nodes[4]=nodes[4],nodes[2]
+        nodes[1],nodes[3]=nodes[3],nodes[1]
     else
         nodes[2:end]=reverse(nodes[2:end])
     end
@@ -5495,7 +6074,7 @@ function _reverse_simplex_columns!(cells::AbstractMatrix{Int32},positions)
     return nothing
 end
 
-function _reverse_mesh(dim_tags=())
+function _reverse_mesh_native_lookup_live(dim_tags=())
     caller="API.mesh.reverse"
     return lock(STATE_LOCK) do
         model=_model_locked()
@@ -5517,7 +6096,7 @@ function _reverse_mesh(dim_tags=())
                  _mesh_selected_entities(model,class,pairs,caller)
         record_keys=isempty(pairs) ? nothing :
                     Set{Tuple{Int,Int}}(pairs)
-        for (edim,etag,record) in _discrete_mesh_records(model)
+        for (edim,etag,record) in _discrete_mesh_records(model;include_authoritative=true)
             (record_keys===nothing || (edim,etag) in record_keys) ||
                 continue
             for i in eachindex(record.element_nodes)
@@ -5557,7 +6136,7 @@ function _reverse_mesh(dim_tags=())
     end
 end
 
-function _reverse_elements(element_tags)
+function _reverse_elements_native_lookup_live(element_tags)
     caller="API.mesh.reverse_elements"
     return lock(STATE_LOCK) do
         model=_model_locked()
@@ -5566,23 +6145,26 @@ function _reverse_elements(element_tags)
             throw(ArgumentError(
                 "$caller: element_tags must be a vector or tuple of " *
                 "element tags"))
-        pending=Int[_mesh_query_integer(value,caller,"element_tags entry")
+        pending=UInt64[_mesh_query_uid(value,caller,"element_tags entry")
                     for value in element_tags]
-        # Caller-assigned record element tags resolve first.
+        # Caller-assigned record element tags resolve first. A tag published
+        # by the cache is owned there even when a covered record mirrors it.
         if !isempty(pending)
-            remaining=Int[]
+            public=_mesh_public_tags(LAST_MESH[])
+            remaining=UInt64[]
             for dense in pending
                 found=false
-                dense32=typemin(Int32)<=dense<=typemax(Int32) ?
-                        Int32(dense) : Int32(0)
-                for (_,_,record) in _discrete_mesh_records(model)
-                    position=findfirst(==(dense32),record.element_tags)
-                    position===nothing && continue
-                    _record_reverse_connectivity!(
-                        record.element_types[position],
-                        record.element_nodes[position])
-                    found=true
-                    break
+                dense32=dense
+                if public===nothing || !haskey(public.element_indices,dense32)
+                    for (_,_,record) in _discrete_mesh_records(model;include_authoritative=true)
+                        position=findfirst(==(dense32),record.element_tags)
+                        position===nothing && continue
+                        _record_reverse_connectivity!(
+                            record.element_types[position],
+                            record.element_nodes[position])
+                        found=true
+                        break
+                    end
                 end
                 found || push!(remaining,dense)
             end
@@ -5592,10 +6174,10 @@ function _reverse_elements(element_tags)
         cached===nothing && throw(ArgumentError(
             "$caller: no mesh; call API.mesh.generate first"))
         if cached isa MixedMesh
-            _,_,total=_mesh_element_offsets(cached)
-            class=_cached_classification_locked(cached)
-            pending=[_cache_element_index(class.public_tags,tag,total,caller) for tag in pending]
-            replacement,new_class=_mixed_reverse_cache(cached,class;tags=Set(pending))
+            _,_,mixed_total=_mesh_element_offsets(cached)
+            mixed_class=_cached_classification_locked(cached)
+            mixed_pending=[_cache_element_index(mixed_class.public_tags,tag,mixed_total,caller) for tag in pending]
+            replacement,new_class=_mixed_reverse_cache(cached,mixed_class;tags=Set(mixed_pending))
             _replace_mesh_cache_locked!(replacement,new_class;preserve_visibility=true)
             return nothing
         end
@@ -5619,10 +6201,10 @@ function _reverse_elements(element_tags)
         _reverse_simplex_columns!(replacement.tris,per_block[2])
         _reverse_simplex_columns!(replacement.tets,per_block[3])
         overlay=_high_order_overlay(cached)
-        class=_cached_classification_locked(cached)
-        new_class=class===nothing ? nothing : _api_rebind_class(class,replacement)
+        final_class=_cached_classification_locked(cached)
+        new_class=final_class===nothing ? nothing : _api_rebind_class(final_class,replacement)
         _replace_mesh_cache_with_overlay_locked!(replacement,new_class,caller;
-            overlay,certify=false,preserve_visibility=class!==nothing && class.public_tags!==nothing)
+            overlay,certify=false,preserve_visibility=final_class!==nothing && final_class.public_tags!==nothing)
         return nothing
     end
 end
@@ -5636,10 +6218,10 @@ function _record_dedup_nodes!(records,pairs,cache_keepers)
     selected=pairs===nothing ? nothing :
              Set{Tuple{Int,Int}}(pairs)
     # coord key → (tag, is_cache)
-    keepers=Dict{NTuple{3,Float64},Tuple{Int32,Bool}}()
+    keepers=Dict{NTuple{3,Float64},Tuple{UInt64,Bool}}()
     cache_keepers===nothing || merge!(keepers,cache_keepers)
-    remap=Dict{Int32,Int32}()
-    deleted=Set{Int32}()
+    remap=Dict{UInt64,UInt64}()
+    deleted=Set{UInt64}()
     for (edim,etag,record) in records
         (selected===nothing || (edim,etag) in selected) || continue
         for i in eachindex(record.node_tags)
@@ -5682,6 +6264,7 @@ function _record_dedup_nodes!(records,pairs,cache_keepers)
         size(record.node_params,2)==length(keep) &&
             (record.node_params=record.node_params[:,keep])
         filter!(pair->!(first(pair) in deleted),record.aux_params)
+        filter!(pair->!(first(pair) in deleted),record.node_native_params)
     end
     return true
 end
@@ -5695,7 +6278,7 @@ function _remove_duplicate_nodes(dim_tags=())
         model=_model_locked()
         pairs=_mesh_parse_dim_tags(dim_tags,caller)
         cached=LAST_MESH[]
-        records=_discrete_mesh_records(model)
+        records=_discrete_mesh_records(model;include_authoritative=true)
         cached isa MixedMesh && return _mixed_remove_duplicate_nodes!(model,cached,pairs,records,caller)
         if cached===nothing
             isempty(records) && throw(ArgumentError(
@@ -5743,13 +6326,13 @@ function _remove_duplicate_nodes(dim_tags=())
             # Surviving cache nodes keep their new dense tags; coincident
             # record nodes merge onto them (dense positions cannot hold
             # caller-assigned tags, so the cache member must win).
-            cache_keepers=Dict{NTuple{3,Float64},Tuple{Int32,Bool}}()
+            cache_keepers=Dict{NTuple{3,Float64},Tuple{UInt64,Bool}}()
             for node in 1:count
                 keep[node] || continue
                 key=NTuple{3,Float64}((cached.coords[1,node],
                                        cached.coords[2,node],
                                        cached.coords[3,node]))
-                cache_keepers[key]=(Int32(_cache_node_tag(class===nothing ? nothing : class.public_tags,node)),true)
+                cache_keepers[key]=(_cache_node_tag(class===nothing ? nothing : class.public_tags,node),true)
             end
             coordinates=cached.coords[:,keep]
             blocks=Vector{Matrix{Int32}}(undef,3)
@@ -5790,8 +6373,8 @@ function _remove_duplicate_nodes(dim_tags=())
             if geometry!==nothing
                 for node in nnodes(new_mesh)+1:nnodes(geometry)
                     key=Tuple(geometry.coords[:,node])
-                    get!(cache_keepers,key,(Int32(_cache_node_tag(new_class===nothing ? nothing :
-                        new_class.public_tags,node)),true))
+                    get!(cache_keepers,key,(_cache_node_tag(new_class===nothing ? nothing :
+                        new_class.public_tags,node),true))
                 end
             end
             for (_,_,record) in records
@@ -5810,14 +6393,14 @@ function _remove_duplicate_nodes(dim_tags=())
         # No cache duplicates: still merge records against unchanged cache
         # coordinates when the selection admits both.
         isempty(records) && return nothing
-        cache_keepers=Dict{NTuple{3,Float64},Tuple{Int32,Bool}}()
+        cache_keepers=Dict{NTuple{3,Float64},Tuple{UInt64,Bool}}()
         for node in 1:count
             (scan_cache && (selected===nothing ||
              class.node_entities[node] in selected)) || continue
             key=NTuple{3,Float64}((cached.coords[1,node],
                                    cached.coords[2,node],
                                    cached.coords[3,node]))
-            cache_keepers[key]=(Int32(_cache_node_tag(class===nothing ? nothing : class.public_tags,node)),true)
+            cache_keepers[key]=(_cache_node_tag(class===nothing ? nothing : class.public_tags,node),true)
         end
         overlay=_high_order_overlay(cached)
         if overlay!==nothing
@@ -5825,7 +6408,7 @@ function _remove_duplicate_nodes(dim_tags=())
                 owner=LAST_MESH_HIGH_ORDER_MIDS[][node-count]
                 (scan_cache && (selected===nothing || owner in selected)) || continue
                 get!(cache_keepers,Tuple(overlay.coords[:,node]),
-                    (Int32(_cache_node_tag(class===nothing ? nothing : class.public_tags,node)),true))
+                    (_cache_node_tag(class===nothing ? nothing : class.public_tags,node),true))
             end
         end
         _record_dedup_nodes!(records,record_pairs,cache_keepers)
@@ -5865,7 +6448,7 @@ function _remove_duplicate_elements(dim_tags=())
         model=_model_locked()
         pairs=_mesh_parse_dim_tags(dim_tags,caller)
         cached=LAST_MESH[]
-        records=_discrete_mesh_records(model)
+        records=_discrete_mesh_records(model;include_authoritative=true)
         cached isa MixedMesh && return _mixed_remove_duplicate_elements!(model,cached,pairs,records,caller)
         if cached===nothing
             isempty(records) && throw(ArgumentError(
@@ -6007,15 +6590,14 @@ function _get_duplicate_nodes(dim_tags=())
     end
 end
 
-# Set one node's Cartesian coordinates — Gmsh 4.15.2 `setNode`. Parametric
-# coordinates are not stored: `get_node`/`get_nodes` recompute them from the
-# owning entity's geometry, so a nonempty `parametric_coord` is rejected rather
-# than silently ignored.
+# Set one node's Cartesian coordinates and optional retained native parameters.
+# An empty parameter request preserves the original native parametrization.
 function _set_node(node_tag,coord,parametric_coord=Float64[])
     caller="API.mesh.set_node"
     return lock(STATE_LOCK) do
         model=_model_locked()
-        tag=_mesh_query_integer(node_tag,caller,"node_tag")
+        tag=_mesh_query_uid(node_tag,caller,"node_tag")
+        _native_lookup_require_node_locked(tag,caller) || return nothing
         (coord isa AbstractVector || coord isa Tuple) ||
             throw(ArgumentError(
                 "$caller: coord must be a vector or tuple of 3 coordinates"))
@@ -6028,24 +6610,24 @@ function _set_node(node_tag,coord,parametric_coord=Float64[])
          parametric_coord isa Tuple) || throw(ArgumentError(
             "$caller: parametric_coord must be a vector or tuple"))
         # Caller-assigned record nodes resolve before the dense cache so a
-        # sparse tag updates its stored coordinate row in place.
-        tag32=0<tag<=typemax(Int32) ? Int32(tag) : Int32(-1)
-        for (_,_,record) in _discrete_mesh_records(model)
-            position=findfirst(==(tag32),record.node_tags)
-            position===nothing && continue
-            params=nothing
-            if !isempty(parametric_coord)
-                length(parametric_coord)==size(record.node_params,1) ||
-                    throw(ArgumentError(
-                        "$caller: parametric_coord must hold " *
-                        "$(size(record.node_params,1)) coordinates"))
-                params=Float64[Float64(c) for c in parametric_coord]
-                all(isfinite,params) || throw(ArgumentError(
-                    "$caller: parametric coordinates must be finite"))
+        # sparse tag updates its stored coordinate row in place. A tag the
+        # cache publishes stays cache-owned even when a covered record
+        # mirrors it, so record lookup only considers caller-owned tags.
+        tag32=tag
+        public=_mesh_public_tags(LAST_MESH[])
+        record_owned=public===nothing || !haskey(public.node_indices,tag32)
+        if record_owned
+            for (_,_,record) in _discrete_mesh_records(model;include_authoritative=true)
+                position=findfirst(==(tag32),record.node_tags)
+                position===nothing && continue
+                params=_mesh_update_node_parameters(Model._model_mesh_node_parameters(record,position),
+                    parametric_coord,caller)
+                record.node_coords[:,position]=values
+                record.node_native_params[tag32]=params===nothing ? Float64[] : params
+                params===nothing || size(record.node_params,1)!=length(params) ||
+                    (record.node_params[:,position]=params)
+                return nothing
             end
-            record.node_coords[:,position]=values
-            params===nothing || (record.node_params[:,position]=params)
-            return nothing
         end
         cached=_cached_mesh_locked(caller)
         overlay=_high_order_overlay(cached)
@@ -6055,9 +6637,14 @@ function _set_node(node_tag,coord,parametric_coord=Float64[])
             (tag<=nnodes(overlay)) || throw(ArgumentError(
                 "$caller: unknown node $tag; expected a dense tag in " *
                 "1:$(nnodes(overlay))"))
-            isempty(parametric_coord) || throw(ArgumentError(
-                "$caller: parametric coordinates are recomputed from the " *
-                "owning entity; pass an empty parametric_coord"))
+            class=_cached_classification_locked(cached)
+            if !isempty(parametric_coord)
+                class===nothing && throw(ArgumentError("$caller: midpoint has no stored parametrization"))
+                key=_relocation_mid_key(class,tag)
+                previous=get(class.mid_parametric,key,nothing)
+                params=_mesh_update_node_parameters(previous,parametric_coord,caller)
+                class.mid_parametric[key]=params
+            end
             overlay.coords[:,tag]=values
             return nothing
         end
@@ -6065,43 +6652,45 @@ function _set_node(node_tag,coord,parametric_coord=Float64[])
         (1<=tag<=count) || throw(ArgumentError(
             "$caller: unknown node $tag; expected a dense tag in 1:$count"))
         if cached isa MixedMesh && cached.entity_data!==nothing && _mesh_public_tags(cached)!==nothing
-            parameters=copy(cached.entity_data.node_parametric)
-            if !isempty(parametric_coord)
-                previous=parameters[tag]
-                previous!==nothing && length(parametric_coord)==length(previous) ||
-                    throw(ArgumentError("$caller: parametric_coord must match the stored node parametrization"))
-                values_param=Float64[Float64(c) for c in parametric_coord]
-                all(isfinite,values_param) || throw(ArgumentError(
-                    "$caller: parametric coordinates must be finite"))
-                parameters[tag]=values_param
-            end
+            class=_cached_classification_locked(cached)
+            runtime=deepcopy(class.node_parametric)
+            runtime[tag]=_mesh_update_node_parameters(runtime[tag],parametric_coord,caller)
+            parameters=Union{Nothing,Vector{Float64}}[
+                value!==nothing && length(value)==owner[1] ? value : nothing
+                for (owner,value) in zip(class.node_entities,runtime)]
             coordinates=copy(cached.coords)
             coordinates[:,tag]=values
             replacement=_mixed_rebuild_metadata(cached,cached.blocks;
                 coords=coordinates,node_parametric=parameters)
-            class=_cached_classification_locked(cached)
-            _replace_mesh_cache_locked!(replacement,_mixed_rebind_class(class,replacement);
+            _replace_mesh_cache_locked!(replacement,_mixed_rebind_class(class,replacement;
+                node_parametric=runtime);
                                         preserve_visibility=true)
             return nothing
         end
-        isempty(parametric_coord) || throw(ArgumentError(
-            "$caller: parametric coordinates are recomputed from the owning " *
-            "entity; pass an empty parametric_coord"))
+        class=_cached_classification_locked(cached)
+        stored_parameters=class===nothing ? nothing : copy(class.node_parametric)
+        if !isempty(parametric_coord)
+            class===nothing && throw(ArgumentError(
+                "$caller: stored node parameters require mesh classification"))
+            previous=stored_parameters===nothing ? nothing : stored_parameters[tag]
+            parameters=_mesh_update_node_parameters(previous,parametric_coord,caller)
+            stored_parameters===nothing || (stored_parameters[tag]=parameters)
+        end
         coordinates=copy(cached.coords)
         coordinates[:,tag]=values
         if cached isa MixedMesh
             replacement=_mixed_with_coordinates(cached,coordinates)
             class=_cached_classification_locked(cached)
             _replace_mesh_cache_locked!(replacement,class===nothing ? nothing :
-                _mixed_rebind_class(class,replacement))
+                _mixed_rebind_class(class,replacement;node_parametric=stored_parameters))
             return nothing
         end
         replacement=Mesh(coordinates;segs=cached.segs,tris=cached.tris,
                          tets=cached.tets,seg_tag=cached.seg_tag,
                          tri_tag=cached.tri_tag,tet_tag=cached.tet_tag)
         overlay=_high_order_overlay(cached)
-        class=_cached_classification_locked(cached)
-        new_class=class===nothing ? nothing : _api_rebind_class(class,replacement)
+        new_class=class===nothing ? nothing :
+            _api_rebind_class(class,replacement;node_parametric=stored_parameters)
         prepared=nothing
         if overlay!==nothing
             edited=deepcopy(overlay)
@@ -6151,28 +6740,14 @@ end
 # Validate the whole request before either sparse records or a dense cache is
 # changed. A pair list denotes a simultaneous mapping, including swaps/cycles.
 function _mesh_renumber_pairs(old_tags,new_tags,caller,label)
-    (old_tags isa AbstractVector || old_tags isa Tuple) || throw(ArgumentError(
-        "$caller: old_tags must be a vector or tuple of $label tags"))
-    (new_tags isa AbstractVector || new_tags isa Tuple) || throw(ArgumentError(
-        "$caller: new_tags must be a vector or tuple of $label tags"))
-    length(old_tags)==length(new_tags) || throw(ArgumentError(
-        "$caller: old_tags and new_tags must have the same length"))
-    parsed=map((old_tags,new_tags),("old_tags","new_tags")) do values,name
-        tags=Int[_mesh_query_integer(v,caller,"$name entry") for v in values]
-        all(t->0<t<=typemax(Int32),tags) || throw(ArgumentError(
-            "$caller: $name must contain positive Int32 tags"))
-        length(unique(tags))==length(tags) || throw(ArgumentError(
-            "$caller: $name must contain unique tags"))
-        tags
-    end
-    return parsed
+    return _tagged_renumber_lists(old_tags,new_tags,caller,label)
 end
 
 # Construct the sparse mapping without mutating it so dense validation can
 # finish first. New tags must not collide with an unrenamed or reserved tag.
 function _record_renumbering(records,old_list,new_list,label,caller,
                             reserved::Int=0)
-    record_tags=Dict{Int32,DiscreteEntity}()
+    record_tags=Dict{UInt64,DiscreteEntity}()
     for record in records
         source=label=="node" ? record.node_tags : record.element_tags
         for tag in source
@@ -6182,17 +6757,14 @@ function _record_renumbering(records,old_list,new_list,label,caller,
             record_tags[tag]=record
         end
     end
-    renames=Dict{Int32,Int32}()
+    renames=Dict{UInt64,UInt64}()
     for (old_value,new_value) in zip(old_list,new_list)
-        old=_mesh_query_integer(old_value,caller,"old_tags entry")
-        new=_mesh_query_integer(new_value,caller,"new_tags entry")
-        typemin(Int32)<=old<=typemax(Int32) || continue
-        haskey(record_tags,Int32(old)) || continue
-        (1<=new<=typemax(Int32)) || throw(ArgumentError(
-            "$caller: new_tags entry $new must be a positive Int32 tag"))
+        old=_mesh_query_uid(old_value,caller,"old_tags entry")
+        new=_mesh_query_uid(new_value,caller,"new_tags entry")
+        haskey(record_tags,old) || continue
         new<=reserved && throw(ArgumentError(
             "$caller: new tag $new collides with an existing $label tag"))
-        renames[Int32(old)]=Int32(new)
+        renames[old]=new
     end
     for (old,new) in renames
         haskey(record_tags,new) && !haskey(renames,new) &&
@@ -6203,7 +6775,11 @@ function _record_renumbering(records,old_list,new_list,label,caller,
 end
 
 function _record_renumber!(records,renames,label)
-    for record in records
+    parameters=label=="node" ? [(Dict(get(renames,tag,tag)=>copy(value)
+        for (tag,value) in record.node_native_params),
+        Dict(get(renames,tag,tag)=>copy(value) for (tag,value) in record.aux_params))
+        for record in records] : nothing
+    for (position,record) in enumerate(records)
         tags=label=="node" ? record.node_tags : record.element_tags
         for i in eachindex(tags)
             tags[i]=get(renames,tags[i],tags[i])
@@ -6213,11 +6789,12 @@ function _record_renumber!(records,renames,label)
         for connectivity in record.element_nodes, i in eachindex(connectivity)
             connectivity[i]=get(renames,connectivity[i],connectivity[i])
         end
+        record.node_native_params,record.aux_params=parameters[position]
     end
     return nothing
 end
 
-function _renumber_nodes(old_tags=(),new_tags=())
+function _renumber_nodes_native_lookup_live(old_tags=(),new_tags=())
     caller="API.mesh.renumber_nodes"
     return lock(STATE_LOCK) do
         model=_model_locked()
@@ -6234,33 +6811,9 @@ function _renumber_nodes(old_tags=(),new_tags=())
         if cached===nothing
             isempty(records) && throw(ArgumentError(
                 "$caller: no mesh; call API.mesh.generate first"))
-            # Record-only session: an empty pair list compacts every node to
-            # 1:n in entity order; explicit pairs remap sparse tags directly.
-            if isempty(old_list)
-                mapping32=Dict{Int32,Int32}()
-                next=Int32(1)
-                for record in records, tag in record.node_tags
-                    mapping32[tag]=next
-                    next+=Int32(1)
-                end
-                for record in records
-                    for i in eachindex(record.node_tags)
-                        record.node_tags[i]=mapping32[record.node_tags[i]]
-                    end
-                    for connectivity in record.element_nodes
-                        for i in eachindex(connectivity)
-                            connectivity[i]=get(
-                                mapping32,connectivity[i],connectivity[i])
-                        end
-                    end
-                end
-                return nothing
-            end
-            renames=_record_renumbering(records,old_list,new_list,"node",caller)
-            _record_renumber!(records,renames,"node")
-            return nothing
+            return _native_record_renumber_labels_locked!(model,records,old_tags,new_tags,true,caller)
         end
-        record_tag_set=Set{Int32}()
+        record_tag_set=Set{UInt64}()
         for record in records, tag in record.node_tags
             push!(record_tag_set,tag)
         end
@@ -6269,7 +6822,7 @@ function _renumber_nodes(old_tags=(),new_tags=())
         record_old=Int[]
         record_new=Int[]
         for (old,new) in zip(old_list,new_list)
-            if Int32(old) in record_tag_set
+            if old in record_tag_set
                 push!(record_old,old)
                 push!(record_new,new)
             else
@@ -6286,7 +6839,7 @@ function _renumber_nodes(old_tags=(),new_tags=())
             # record nodes compact — to count+1.. in entity order, with
             # record connectivity rewritten through the same mapping.
             isempty(old_list) || return nothing
-            mapping32=Dict{Int32,Int32}()
+            mapping32=Dict{UInt64,UInt64}()
             next=Int32(nnodes(cached)+1)
             for record in records, tag in record.node_tags
                 mapping32[tag]=next
@@ -6322,7 +6875,7 @@ function _renumber_nodes(old_tags=(),new_tags=())
             selections=[collect(axes(cells,2)) for (_,cells,_) in _cache_native_blocks(cached)]
             new_mesh,new_class=_mixed_select_columns(cached,class,selections;node_order=order)
             for (old,new) in enumerate(mapping)
-                renames[Int32(old)]=new
+                renames[UInt64(old)]=UInt64(new)
             end
             _record_renumber!(records,renames,"node")
             _replace_mesh_cache_locked!(new_mesh,new_class)
@@ -6350,7 +6903,7 @@ function _renumber_nodes(old_tags=(),new_tags=())
             _prepare_preserved_high_order_overlay(new_mesh,new_class,cached,
                 overlay,caller;primary_map=inverse)
         for (old,new) in enumerate(mapping)
-            renames[Int32(old)]=new
+            renames[UInt64(old)]=UInt64(new)
         end
         _record_renumber!(records,renames,"node")
         _replace_mesh_cache_with_overlay_locked!(new_mesh,new_class,caller;
@@ -6360,7 +6913,7 @@ function _renumber_nodes(old_tags=(),new_tags=())
 end
 
 # Public labels rename cells simultaneously without moving their dense slots.
-function _renumber_elements(old_tags=(),new_tags=())
+function _renumber_elements_native_lookup_live(old_tags=(),new_tags=())
     caller="API.mesh.renumber_elements"
     return lock(STATE_LOCK) do
         model=_model_locked()
@@ -6377,22 +6930,10 @@ function _renumber_elements(old_tags=(),new_tags=())
         if cached===nothing
             isempty(records) && throw(ArgumentError(
                 "$caller: no mesh; call API.mesh.generate first"))
-            if isempty(old_list)
-                next=Int32(1)
-                for record in records
-                    for i in eachindex(record.element_tags)
-                        record.element_tags[i]=next
-                        next+=Int32(1)
-                    end
-                end
-                return nothing
-            end
-            renames=_record_renumbering(records,old_list,new_list,"element",caller)
-            _record_renumber!(records,renames,"element")
-            return nothing
+            return _native_record_renumber_labels_locked!(model,records,old_tags,new_tags,false,caller)
         end
         triangle_offset,tetrahedron_offset,total=_mesh_element_offsets(cached)
-        record_tag_set=Set{Int32}()
+        record_tag_set=Set{UInt64}()
         for record in records, etag in record.element_tags
             push!(record_tag_set,etag)
         end
@@ -6401,7 +6942,7 @@ function _renumber_elements(old_tags=(),new_tags=())
         record_old=Int[]
         record_new=Int[]
         for (old,new) in zip(old_list,new_list)
-            if 0<old<=typemax(Int32) && Int32(old) in record_tag_set
+            if old in record_tag_set
                 push!(record_old,old)
                 push!(record_new,new)
             else
@@ -6512,7 +7053,7 @@ function _remove_public_elements_locked!(model,cached,class,dimension,entity,ele
             push!(dense,index)
         end
     end
-    staged=deepcopy(model)
+    staged=Model._model_mesh_transaction_copy(model)
     if record!==nothing && (isempty(element_tags) || !isempty(record_tags))
         target=_raw_model_mesh_record(staged,dimension,entity)
         _record_remove_elements!(target,isempty(element_tags) ? UInt64[] : record_tags,caller)
@@ -6542,8 +7083,7 @@ function _remove_public_elements_locked!(model,cached,class,dimension,entity,ele
     return nothing
 end
 
-function _native_public_keys(mesh,result,msh,function_space_type)
-    public=_mesh_public_tags(mesh)
+function _native_public_keys(mesh,result,msh,function_space_type,public=_mesh_public_tags(mesh))
     public===nothing && return result
     types,entities,coordinates=result
     space=MeshFunctionSpaces._function_space(function_space_type,"API.mesh key query")
@@ -6572,14 +7112,21 @@ end
 # native Mesh keeps the exact overlay object and geometric locator; table
 # replacement only changes the inverse used by public scalar queries.
 function _commit_renumber_labels_locked!(plan)
+    _higher_prepare_api_plan_authority!(plan)
+    plan.model.meshing.size_callback=_model_locked().meshing.size_callback
     _validate_retained_cache_references(plan.model,LAST_MESH[],plan.class,"API.mesh label mutation")
+    mid_parameters=plan.preserved_overlay===nothing || plan.class===nothing ? nothing :
+        _relocation_prepare_mid_parameters(plan.model,plan.mesh,plan.class,
+            plan.preserved_overlay,plan.preserved_mid_owners)
     index=_current_slot_index_locked()
     remap(flags)=plan.element_tag_map===nothing ? copy(flags) :
-        Dict{Int,Int32}(Int(get(plan.element_tag_map,UInt64(tag),UInt64(tag)))=>flag
+        Dict{UInt64,Int32}(get(plan.element_tag_map,UInt64(tag),UInt64(tag))=>flag
             for (tag,flag) in flags)
     visibility=remap(ELEMENT_VISIBILITY[])
     windows=index==0 ? nothing : Dict(window=>remap(flags)
         for (window,flags) in MODEL_SLOTS[index].window_element_visibility)
+    view_plan=_native_recombine_views_plan(plan;renumber=true,
+        kind=get(plan,:native_view_kind,nothing))
     if index!=0
         MODEL_SLOTS[index].model=plan.model
         MODEL_SLOTS[index].window_element_visibility=windows
@@ -6594,13 +7141,69 @@ function _commit_renumber_labels_locked!(plan)
         LAST_MIXED_MESH_LOCATOR[]=nothing
     end
     _set_high_order_overlay(plan.preserved_overlay,
-        plan.mesh isa Mesh ? plan.mesh : nothing,plan.preserved_mid_owners)
+        plan.mesh isa Mesh ? plan.mesh : nothing,plan.preserved_mid_owners;mid_parameters)
     NODE_TAG_MAX[]=plan.max_node_tag
     ELEMENT_TAG_MAX[]=plan.max_element_tag
+    for (kind,message) in get(plan,:native_renumber_mapping_events,())
+        _native_diagnostic_emit_locked(kind,message)
+    end
+    for (kind,message) in get(plan,:native_uid_data_events,())
+        _native_diagnostic_emit_locked(kind,message)
+    end
+    _native_recombine_views_publish!(view_plan)
     return nothing
 end
 
 # Reorder one entity's cells of one element type — Gmsh 4.15.2's
+function _reorder_combined_elements_locked!(model,cached,class,msh,entity,ordering,caller)
+    staged=Model._model_mesh_transaction_copy(model)
+    actual,actual_class=_dim01_actual_cache(cached,class;physical_names=model.physical_names)
+    assembly=_Dim01Assembly(_Dim01Node[],_Dim01Cell[],Dict{UInt64,Int32}(),
+        NODE_TAG_MAX[],ELEMENT_TAG_MAX[],typemax(Int32),typemax(Int32),String(caller))
+    source_nodes=_dim01_ingest!(assembly,staged,actual,actual_class;preserve_source_order=true)
+    sort!(assembly.cells;by=_dim01_cell_order,alg=Base.Sort.MergeSort)
+    positions=findall(cell->cell.msh==msh && cell.owner==(Elements.msh_dimension(msh),Int32(entity)),
+        assembly.cells)
+    (ordering isa AbstractVector || ordering isa Tuple) || throw(ArgumentError(
+        "$caller: ordering must be a vector or tuple of 0-based source positions"))
+    permutation=Int[_mesh_query_integer(value,caller,"ordering entry") for value in ordering]
+    sort(permutation)==collect(0:length(positions)-1) || throw(ArgumentError(
+        "$caller: ordering must be a permutation of 0:$(length(positions)-1)"))
+    assembly.cells[positions]=assembly.cells[positions[permutation.+1]]
+    plan=_dim01_finish!(assembly,staged,model_entities(staged),Set{Tuple{Int,Int32}}(),
+        falses(length(assembly.nodes)),false,false;source_mesh=actual,
+        source_node_positions=source_nodes)
+    if actual isa MixedMesh && (!isempty(actual.ancillary_sections) || !isempty(actual.data_sections) ||
+            actual.partition_data!==nothing)
+        ancillary=copy(actual.ancillary_sections)
+        source_nodes=actual.entity_data.external_node_tags
+        source_cells=reduce(vcat,actual.entity_data.external_element_tags;init=UInt64[])
+        for section in actual.data_sections
+            uid=Elements._msh_uid_from_dense(section;node_tags=source_nodes,
+                element_tags=source_cells,initial=section.name=="NodeData" ? length(source_nodes) : length(source_cells))
+            push!(ancillary,Elements._msh_uid_ancillary(uid))
+        end
+        result=plan.mesh
+        partition=actual.partition_data
+        if partition!==nothing
+            destination=Dict(uid=>index for (index,uid) in enumerate(
+                reduce(vcat,result.entity_data.external_element_tags;init=UInt64[])))
+            ghosts=Elements.MixedGhostElement[Elements.MixedGhostElement(
+                destination[source_cells[ghost.element]],ghost.partition,ghost.ghost_partitions)
+                for ghost in partition.ghost_elements]
+            partition=Elements.MixedPartitionData(partition.num_partitions;
+                entities=partition.entities,ghost_entities=partition.ghost_entities,ghost_elements=ghosts)
+        end
+        result=MixedMesh(result.coords,result.blocks;physical_names=result.physical_names,
+            entity_data=result.entity_data,elementary_entities=result.elementary_entities,
+            periodic_links=result.periodic_links,ancillary_sections=ancillary,
+            partition_data=partition)
+        plan=merge(plan,(mesh=result,class=_mixed_rebind_class(plan.class,result),))
+    end
+    _commit_tagged_plan_locked!(plan;preserve_visibility=true)
+    return nothing
+end
+
 # `reorderElements`, whose `ordering` holds 0-based source positions:
 # `ordering[new_position]` is the column that moves there. Elements keep their
 # stored tags and entity ownership.
@@ -6613,6 +7216,13 @@ function _reorder_elements(element_type,tag,ordering)
         dimension=spec.dim
         entity=_mesh_query_integer(tag,caller,"tag")
         record=_model_mesh_record(model,dimension,entity)
+        cached=LAST_MESH[]
+        class=cached===nothing ? nothing : _cached_classification_locked(cached)
+        if record!==nothing && class!==nothing && class.public_tags!==nothing &&
+                _cache_covers_record(class.public_tags,dimension,entity) &&
+                any(==(Int32(msh)),record.element_types)
+            return _reorder_combined_elements_locked!(model,cached,class,msh,entity,ordering,caller)
+        end
         if record!==nothing && haskey(model.discrete,(dimension,entity)) &&
                 !_cache_classifies_entity(dimension,entity)
             # Discrete/attached record elements reorder in place: ordering
@@ -6813,30 +7423,26 @@ function _embed(dim,tags,in_dim,in_tag)
     end
 end
 
-# `optimize` maps Gmsh's default tetrahedral mesh optimizer onto the validated
-# boundary-preserving `smooth_optimize` kernel. Connectivity and the
-# index-aligned classification snapshot carry over unchanged because only node
-# coordinates move and boundary nodes are fixed. A `dimTags` selection freezes
-# every node incident to unselected elements; "Laplace2D"/"Relocate2D" run
-# isotropic Laplacian smoothing on a triangle cache. Optimizer names with no
-# implemented kernel fail explicitly.
+# Default aliases visit native region tetrahedra and retain actual identities.
+# The existing relocation methods operate on their supported simplex caches.
 function _optimize_mesh(method="",force=false,niter=1,dim_tags=())
     caller="API.mesh.optimize"
     method isa AbstractString || throw(ArgumentError(
         "$caller: method must be a string"))
-    # Method names map onto the implemented kernels: the default quality
-    # optimizer is the tetrahedral relocation smoother (Gmsh's "Gmsh" and
-    # "Relocate3D" roles), and the 2-D methods run Laplacian smoothing on a
-    # triangle cache. Netgen and the high-order optimizers need machinery
-    # this build does not have.
     method in ("","Gmsh","Optimize","Relocate3D","Laplace2D","Relocate2D") ||
         throw(ArgumentError(
             "$caller: unknown or unsupported optimizer \"$method\""))
     force isa Bool || throw(ArgumentError("$caller: force must be Bool"))
     iterations=_mesh_query_integer(niter,caller,"niter")
-    iterations>=0 || throw(ArgumentError("$caller: niter must be nonnegative"))
-    pairs=_mesh_parse_dim_tags(dim_tags,caller)
+    native_default=method in ("","Gmsh","Optimize")
+    native_relocate3d=method=="Relocate3D"
+    native_tagged=native_default || native_relocate3d
+    native_tagged || iterations>=0 || throw(ArgumentError("$caller: niter must be nonnegative"))
+    pairs=native_tagged ? _native_optimize_selection(dim_tags,caller) :
+                          _mesh_parse_dim_tags(dim_tags,caller)
     return lock(STATE_LOCK) do
+        native_default && return _native_default_optimize_locked!(force,pairs,caller)
+        native_relocate3d && return _native_relocate3d_locked!(iterations,pairs,caller)
         model=_model_locked()
         cached=_cached_mesh_locked(caller)
         if cached isa MixedMesh
@@ -6903,17 +7509,17 @@ end
 # Per-element visibility is display state only: Gmsh 4.15.2 stores the raw
 # value (default 1), accepts unknown tags silently in both directions, and
 # reports 0 for them on read.
-function _mesh_has_public_element(m,cached,tag::Int)
+function _mesh_has_public_element(m,cached,tag::Integer)
     if cached!==nothing
         table=_mesh_public_tags(cached)
         if table===nothing
             1<=tag<=_mesh_element_offsets(cached)[3] && return true
-        elseif tag>0 && haskey(table.element_indices,UInt64(tag))
+        elseif tag>=0 && haskey(table.element_indices,UInt64(tag))
             return true
         end
     end
-    0<tag<=typemax(Int32) || return false
-    return any(entry->Int32(tag) in entry[3].element_tags,_discrete_mesh_records(m))
+    tag>=0 || return false
+    return any(entry->UInt64(tag) in entry[3].element_tags,_discrete_mesh_records(m))
 end
 
 function _set_mesh_visibility(element_tags,value)
@@ -6928,10 +7534,10 @@ function _set_mesh_visibility(element_tags,value)
         model=_model_locked()
         cached=LAST_MESH[]
         for raw in element_tags
-            tag=_mesh_query_integer(raw,caller,"element_tags entry")
+            tag=_mesh_query_uid(raw,caller,"element_tags entry")
             # Unknown element tags are dropped like Gmsh, so a later
             # `get_visibility` still reports 0 for them.
-            _mesh_has_public_element(model,cached,tag) &&
+            _native_lookup_element_locked(tag)!==nothing &&
                 (ELEMENT_VISIBILITY[][tag]=Int32(flag))
         end
         return nothing
@@ -6942,7 +7548,7 @@ end
 # state only.
 function _set_mesh_visibility_per_window(tag,value,window_index)
     caller="API.mesh.set_visibility_per_window"
-    element_tag=_mesh_query_integer(tag,caller,"tag")
+    element_tag=_mesh_query_uid(tag,caller,"tag")
     flag=_mesh_query_integer(value,caller,"value")
     typemin(Int32)<=flag<=typemax(Int32) || throw(ArgumentError(
         "$caller: value $value is out of range"))
@@ -6952,11 +7558,11 @@ function _set_mesh_visibility_per_window(tag,value,window_index)
     return lock(STATE_LOCK) do
         model=_model_locked()
         cached=LAST_MESH[]
-        _mesh_has_public_element(model,cached,element_tag) || return nothing
+        _native_lookup_element_locked(element_tag)===nothing && return nothing
         index=_current_slot_index_locked()
         index==0 && throw(ArgumentError(
             "$caller: the current model is not in the model list"))
-        per_window=get!(Dict{Int,Int32},
+        per_window=get!(Dict{UInt64,Int32},
                         MODEL_SLOTS[index].window_element_visibility,window)
         per_window[element_tag]=Int32(flag)
         return nothing
@@ -6973,8 +7579,8 @@ function _get_mesh_visibility(element_tags)
         cached=LAST_MESH[]
         values=Int32[]
         for raw in element_tags
-            tag=_mesh_query_integer(raw,caller,"element_tags entry")
-            present=_mesh_has_public_element(model,cached,tag)
+            tag=_mesh_query_uid(raw,caller,"element_tags entry")
+            present=_native_lookup_element_locked(tag)!==nothing
             push!(values,present ? get(ELEMENT_VISIBILITY[],tag,Int32(1)) : Int32(0))
         end
         return values
@@ -7214,15 +7820,12 @@ function _set_compound(dim,tags)
 end
 
 function _set_outward_orientation(tag)
-    lock(STATE_LOCK) do
-        set_outward_orientation!(_model_locked(),tag)
-    end
-    return nothing
+    return _orient_mesh_outward(tag)
 end
 
 # `setOrder` acts on the existing mesh. Mesh.ElementOrder is independent global
 # state and controls the postprocessing of the next generation.
-function _set_order(order)
+function _set_order_native_lookup_live(order)
     lock(STATE_LOCK) do
         model=_model_locked()
         previous_order=model.meshing.order
@@ -7235,27 +7838,30 @@ function _set_order(order)
             return nothing
         end
         class=cached===nothing ? nothing : _cached_classification_locked(cached)
-        if cached isa Mesh && class!==nothing && class.public_tags!==nothing
+        if order<=2 && cached isa Mesh && class!==nothing && class.public_tags!==nothing
             model.meshing.order=previous_order
             plan=_native_set_order_labels_plan(model,cached,class,Int(order),"API.mesh.set_order")
             _commit_renumber_labels_locked!(plan)
             return nothing
         end
-        if cached isa MixedMesh && cached.entity_data===nothing && class!==nothing && class.public_tags!==nothing
+        if order<=2 && cached isa MixedMesh && cached.entity_data===nothing && class!==nothing && class.public_tags!==nothing
             model.meshing.order=previous_order
             plan=_native_mixed_set_order_labels_plan(model,cached,class,Int(order),"API.mesh.set_order")
             _commit_renumber_labels_locked!(plan)
             return nothing
         end
-        if raw_mesh || (class!==nothing && class.public_tags!==nothing)
+        if raw_mesh || (class!==nothing && (class.public_tags!==nothing || order>2))
             model.meshing.order=previous_order
-            plan=_set_order_dim01_plan(model,cached,class,Int(order),"API.mesh.set_order";
+            actual,actual_class=_dim01_actual_cache(cached,class;physical_names=model.physical_names)
+            plan=_set_order_dim01_plan(model,actual,actual_class,Int(order),"API.mesh.set_order";
                 initial_max_node_tag=NODE_TAG_MAX[],initial_max_element_tag=ELEMENT_TAG_MAX[],
                 renumber=!iszero(OPTIONS["Mesh.Renumber"]),
                 save_all=!iszero(OPTIONS["Mesh.SaveAll"]),
-                only_visible=!iszero(OPTIONS["Mesh.MeshOnlyVisible"]))
+                only_visible=!iszero(OPTIONS["Mesh.MeshOnlyVisible"]),
+                linear=!iszero(OPTIONS["Mesh.SecondOrderLinear"]),
+                incomplete=!iszero(OPTIONS["Mesh.SecondOrderIncomplete"]))
             plan.model.meshing.order=Int(order)
-            authority=class===nothing ? plan.authority : class.public_tags.authority
+            authority=class===nothing || class.public_tags===nothing ? plan.authority : class.public_tags.authority
             _commit_tagged_plan_locked!(plan;authority,
                                        preserve_visibility=true,
                                        element_tag_map=plan.visibility_tag_map)
@@ -7288,8 +7894,8 @@ function _native_set_order_labels_plan(model,cached::Mesh,class,order,caller)
             append!(nodes,@view public.node_tags[nnodes(cached)+1:end])
         else
             count=nnodes(overlay)-nnodes(cached)
-            max_node<=typemax(Int32)-count || throw(ArgumentError(
-                "$caller: elevated public node tags exceed Int32"))
+            UInt64(count)<=typemax(UInt64)-max_node || throw(ArgumentError(
+                "$caller: elevated public node tags exceed UInt64"))
             append!(nodes,max_node .+ UInt64.(1:count));max_node+=count
         end
     end
@@ -7304,8 +7910,8 @@ function _native_set_order_labels_plan(model,cached::Mesh,class,order,caller)
             append!(entries,[(owners[column],offset+column) for column in axes(cells,2)])
         end
         sort!(entries;by=first,alg=Base.Sort.MergeSort)
-        max_element<=typemax(Int32)-length(entries) || throw(ArgumentError(
-            "$caller: rebuilt public element tags exceed Int32"))
+        UInt64(length(entries))<=typemax(UInt64)-max_element || throw(ArgumentError(
+            "$caller: rebuilt public element tags exceed UInt64"))
         mapping=Dict(tag=>tag for tag in tags)
         for (_,index) in entries
             max_element+=1;mapping[tags[index]]=max_element;tags[index]=max_element
@@ -7313,7 +7919,7 @@ function _native_set_order_labels_plan(model,cached::Mesh,class,order,caller)
     end
     table=_cache_public_tags(cached;authority=public.authority,node_tags=nodes,
         element_tags=tags,node_count=length(nodes),caller)
-    staged=deepcopy(model);staged.meshing.order=order
+    staged=Model._model_mesh_transaction_copy(model);staged.meshing.order=order
     return (model=staged,mesh=cached,class=_classification_with_public_tags(class,table),
         element_tag_map=mapping,max_node_tag=max_node,max_element_tag=max_element,
         preserved_overlay=overlay,preserved_mid_owners=mids)
@@ -7323,14 +7929,15 @@ function _native_mixed_set_order_labels_plan(model,cached::MixedMesh,class,order
     mesh=cached;new_class=class;mapping=nothing
     maximum_element=ELEMENT_TAG_MAX[]
     if any(block->msh_spec(block.msh).family!==:pnt && msh_spec(block.msh).order!=order,cached.blocks)
-        order==2 && _mixed_require_linear_cad(model,class,caller)
+        order==2 && iszero(OPTIONS["Mesh.SecondOrderLinear"]) && _mixed_require_linear_cad(model,class,caller)
         linear,linear_class=_mixed_linear_cache(cached,class)
         mesh,new_class=order==1 ? (linear,linear_class) :
-            _mixed_quadratic_cache(linear,linear_class,caller)
+            _mixed_quadratic_cache(linear,linear_class,caller;model,
+                linear=!iszero(OPTIONS["Mesh.SecondOrderLinear"]))
         public=new_class.public_tags
         count=sum(length(block.tags) for block in mesh.blocks if block.msh!=15;init=0)
-        maximum_element<=typemax(Int32)-count || throw(ArgumentError(
-            "$caller: rebuilt public element tags exceed Int32"))
+        UInt64(count)<=typemax(UInt64)-maximum_element || throw(ArgumentError(
+            "$caller: rebuilt public element tags exceed UInt64"))
         labels=copy(public.element_tags)
         offset=0
         for block in mesh.blocks
@@ -7347,7 +7954,7 @@ function _native_mixed_set_order_labels_plan(model,cached::MixedMesh,class,order
             element_tags=labels,caller)
         new_class=_classification_with_public_tags(new_class,table)
     end
-    staged=deepcopy(model);staged.meshing.order=order
+    staged=Model._model_mesh_transaction_copy(model);staged.meshing.order=order
     return (model=staged,mesh=mesh,class=new_class,element_tag_map=mapping,
         max_node_tag=max(NODE_TAG_MAX[],maximum(new_class.public_tags.node_tags;init=UInt64(0))),
         max_element_tag=maximum_element,preserved_overlay=nothing,
@@ -7355,14 +7962,17 @@ function _native_mixed_set_order_labels_plan(model,cached::MixedMesh,class,order
 end
 
 function _commit_tagged_plan_locked!(plan;authority=plan.authority,
-        preserve_visibility::Bool=false,element_tag_map=nothing)
+        preserve_visibility::Bool=false,element_tag_map=nothing,
+        reconcile_records::Bool=true)
+    _higher_prepare_api_plan_authority!(plan)
+    plan.model.meshing.size_callback=_model_locked().meshing.size_callback
     class=_classification_with_public_tags(plan.class,
         _cache_public_tags(plan.mesh;authority))
     _validate_retained_cache_references(plan.model,LAST_MESH[],class,"API.mesh tagged mutation")
     index=_current_slot_index_locked()
     if preserve_visibility && element_tag_map!==nothing
         function remap_flags!(flags)
-            replacement=Dict{Int,Int32}(Int(element_tag_map[UInt64(tag)])=>flag
+            replacement=Dict{UInt64,Int32}(element_tag_map[UInt64(tag)]=>flag
                 for (tag,flag) in flags if haskey(element_tag_map,UInt64(tag)))
             empty!(flags)
             merge!(flags,replacement)
@@ -7376,9 +7986,19 @@ function _commit_tagged_plan_locked!(plan;authority=plan.authority,
     end
     index!=0 && (MODEL_SLOTS[index].model=plan.model)
     CURRENT[]=plan.model
-    _replace_mesh_cache_locked!(plan.mesh,class;preserve_visibility)
-    NODE_TAG_MAX[]=max(NODE_TAG_MAX[],plan.max_node_tag)
-    ELEMENT_TAG_MAX[]=max(ELEMENT_TAG_MAX[],plan.max_element_tag)
+    _replace_mesh_cache_locked!(plan.mesh,class;preserve_visibility,reconcile_records)
+    if hasproperty(plan,:node_counter_wrapped) && plan.node_counter_wrapped
+        NODE_TAG_MAX[]=plan.max_node_tag
+        NODE_COUNTER_WRAPPED[]=true
+    elseif !NODE_COUNTER_WRAPPED[]
+        NODE_TAG_MAX[]=max(NODE_TAG_MAX[],plan.max_node_tag)
+    end
+    if hasproperty(plan,:element_counter_wrapped) && plan.element_counter_wrapped
+        ELEMENT_TAG_MAX[]=plan.max_element_tag
+        ELEMENT_COUNTER_WRAPPED[]=true
+    elseif !ELEMENT_COUNTER_WRAPPED[]
+        ELEMENT_TAG_MAX[]=max(ELEMENT_TAG_MAX[],plan.max_element_tag)
+    end
     return nothing
 end
 
@@ -7386,87 +8006,127 @@ function _edit_mesh_records_locked!(edit)
     model=_model_locked()
     cached=LAST_MESH[]
     class=cached===nothing ? nothing : _cached_classification_locked(cached)
-    staged=deepcopy(model)
+    staged=Model._model_mesh_transaction_copy(model)
+    staged.meshing.size_callback=model.meshing.size_callback
     edit(staged)
-    if cached isa MixedMesh && cached.entity_data!==nothing && class!==nothing && class.public_tags!==nothing
-        assembly=_Dim01Assembly(_Dim01Node[],_Dim01Cell[],Dict{UInt64,Int32}(),
-            NODE_TAG_MAX[],ELEMENT_TAG_MAX[],typemax(Int32),typemax(Int32),
-            "API mesh record edit")
-        _dim01_ingest!(assembly,staged,cached,class)
-        plan=_dim01_finish!(assembly,staged,model_entities(staged),
-            Set{Tuple{Int,Int32}}(),falses(length(assembly.nodes)),false,false)
-        _commit_tagged_plan_locked!(plan;preserve_visibility=true)
-    else
-        proposed_class=class
-        if class!==nothing
-            overlay=_high_order_overlay(cached)
-            public=class.public_tags===nothing ? _cache_public_tags(cached;
-                node_count=overlay===nothing ? nnodes(cached) : nnodes(overlay)) : class.public_tags
-            for ((dim,tag),record) in Model._discrete_mesh_records_model(staged)
-                _cache_covers_record(public,dim,tag) && continue
-                any(tag->haskey(public.node_indices,UInt64(tag)),record.node_tags) &&
-                    throw(ArgumentError("API mesh record edit: public node tag conflicts with the native cache"))
-                any(tag->haskey(public.element_indices,UInt64(tag)),record.element_tags) &&
-                    throw(ArgumentError("API mesh record edit: public element tag conflicts with the native cache"))
-            end
-            proposed_class=_classification_with_public_tags(class,public)
+    proposed_class=class
+    if class!==nothing
+        overlay=_high_order_overlay(cached)
+        public=class.public_tags===nothing ? _cache_public_tags(cached;
+            node_count=overlay===nothing ? nnodes(cached) : nnodes(overlay)) : class.public_tags
+        for ((dim,tag),record) in Model._discrete_mesh_records_model(staged)
+            _cache_covers_record(public,dim,tag) && continue
+            any(tag->haskey(public.node_indices,UInt64(tag)),record.node_tags) &&
+                throw(ArgumentError("API mesh record edit: public node tag conflicts with the native cache"))
+            any(tag->haskey(public.element_indices,UInt64(tag)),record.element_tags) &&
+                throw(ArgumentError("API mesh record edit: public element tag conflicts with the native cache"))
         end
-        index=_current_slot_index_locked()
-        index!=0 && (MODEL_SLOTS[index].model=staged)
-        CURRENT[]=staged
-        LAST_MESH_CLASS[]=proposed_class
-        for (_,_,record) in _discrete_mesh_records(staged;include_authoritative=true)
-            NODE_TAG_MAX[]=max(NODE_TAG_MAX[],maximum(UInt64.(record.node_tags);init=UInt64(0)))
-            ELEMENT_TAG_MAX[]=max(ELEMENT_TAG_MAX[],maximum(UInt64.(record.element_tags);init=UInt64(0)))
-        end
+        proposed_class=_classification_with_public_tags(class,public)
+    end
+    index=_current_slot_index_locked()
+    index!=0 && (MODEL_SLOTS[index].model=staged)
+    CURRENT[]=staged
+    LAST_MESH_CLASS[]=proposed_class
+    for (_,_,record) in _discrete_mesh_records(staged;include_authoritative=true)
+        NODE_COUNTER_WRAPPED[] || (NODE_TAG_MAX[]=max(NODE_TAG_MAX[],
+            maximum(record.node_tags;init=UInt64(0))))
+        ELEMENT_COUNTER_WRAPPED[] || (ELEMENT_TAG_MAX[]=max(ELEMENT_TAG_MAX[],
+            maximum(record.element_tags;init=UInt64(0))))
     end
     return nothing
 end
 
-function _add_nodes(dim,tag,node_tags,coord,parametric_coord=Float64[])
-    lock(STATE_LOCK) do
-        _edit_mesh_records_locked!() do m
-            tags=node_tags
-            if (node_tags isa AbstractVector || node_tags isa Tuple) && isempty(node_tags) &&
-                    (coord isa AbstractVector || coord isa Tuple) && length(coord)%3==0
-                count=length(coord)÷3
-                NODE_TAG_MAX[]<=typemax(Int32)-count || throw(ArgumentError(
-                    "API.mesh.add_nodes: automatic node tags exceed Int32"))
-                tags=NODE_TAG_MAX[] .+ UInt64.(1:count)
-            end
-            add_discrete_nodes!(m,dim,tag,tags,coord,parametric_coord)
-        end
-    end
-    return nothing
-end
-
-function _mesh_allocate_element_tags(element_types,element_tags,node_tags)
-    (element_types isa AbstractVector || element_types isa Tuple) &&
-        (element_tags isa AbstractVector || element_tags isa Tuple) &&
+function _add_nodes_native_lookup_live(dim,tag,node_tags,coord,parametric_coord=Float64[])
+    caller="API.mesh.add_nodes"
+    return lock(STATE_LOCK) do
+        # Native addNodes validates the owner and vector lengths before any
+        # MVertex constructor can advance the unsigned allocation clock.
+        model_caller="add_discrete_nodes!"
+        dimension=Model._dimension(dim,model_caller)
+        entity=Model._tag(tag,model_caller,dimension)
+        Model._model_entity_known(_model_locked(),dimension,entity) ||
+            return _native_mesh_input_error_locked(
+                "$(_MESH_ENTITY_LABELS[dimension+1]) $entity does not exist")
         (node_tags isa AbstractVector || node_tags isa Tuple) &&
-        length(element_types)==length(element_tags)==length(node_tags) || return element_tags
-    maximum_tag=ELEMENT_TAG_MAX[]
-    for tags in element_tags
-        (tags isa AbstractVector || tags isa Tuple) || return element_tags
-        for tag in tags
-            tag isa Integer && !(tag isa Bool) && 0<tag<=typemax(Int32) || return element_tags
-            maximum_tag=max(maximum_tag,UInt64(tag))
+            (coord isa AbstractVector || coord isa Tuple) || throw(ArgumentError(
+                "$caller: tags and coordinates must be vectors or tuples"))
+        length(coord)%3==0 || return _native_mesh_input_error_locked("Wrong number of coordinates")
+        count=length(coord)÷3
+        isempty(node_tags) || length(node_tags)==count ||
+            return _native_mesh_input_error_locked("Wrong number of coordinates")
+        (parametric_coord isa AbstractVector || parametric_coord isa Tuple) ||
+            throw(ArgumentError("$model_caller: params must be a flat vector or tuple"))
+        isempty(parametric_coord) || length(parametric_coord)==dimension*count ||
+            return _native_mesh_input_error_locked("Wrong number of parametric coordinates")
+        for value in coord
+            Model._mesh_attr_finite(value,model_caller,"coords entry")
         end
+        for value in parametric_coord
+            Model._mesh_attr_finite(value,model_caller,"params entry")
+        end
+        requested_tags=UInt64[_mesh_query_uid(value,caller,"node tag") for value in node_tags]
+        maximum_tag=NODE_TAG_MAX[]
+        tags=Vector{UInt64}(undef,count)
+        for index in 1:count
+            requested=isempty(requested_tags) ? UInt64(0) : requested_tags[index]
+            automatic=iszero(requested)
+            uid=automatic ? _native_mesh_next_uid(maximum_tag,caller) : requested
+            automatic && iszero(uid) && (NODE_COUNTER_WRAPPED[]=true)
+            tags[index]=uid
+            maximum_tag=automatic ? uid : max(maximum_tag,uid)
+        end
+        NODE_TAG_MAX[]=maximum_tag
+        _edit_mesh_records_locked!() do model
+            add_discrete_nodes!(model,dim,tag,tags,coord,parametric_coord)
+        end
+        return nothing
     end
-    result=collect(element_tags)
-    for index in eachindex(element_types)
-        isempty(result[index]) || continue
-        nodes=node_tags[index]
-        (nodes isa AbstractVector || nodes isa Tuple) || return element_tags
-        width=Elements.msh_num_nodes(element_types[index])
-        length(nodes)%width==0 || return element_tags
-        count=length(nodes)÷width
-        maximum_tag<=typemax(Int32)-count || throw(ArgumentError(
-            "API.mesh.add_elements: automatic element tags exceed Int32"))
-        result[index]=maximum_tag .+ UInt64.(1:count)
-        maximum_tag+=UInt64(count)
+end
+
+# Blocks publish in native API order. A failed factory batch still retains
+# constructor births that preceded its missing-node error.
+function _native_add_element_block_locked!(dim,tag,mtype,requested_tags,nodes,caller)
+    (requested_tags isa AbstractVector || requested_tags isa Tuple) &&
+        (nodes isa AbstractVector || nodes isa Tuple) || throw(ArgumentError(
+            "$caller: element tags and connectivity must be vectors or tuples"))
+    width=msh_spec(mtype).nnodes
+    length(nodes)%width==0 || throw(ArgumentError("$caller: invalid element connectivity count"))
+    count=length(nodes)÷width
+    isempty(requested_tags) || length(requested_tags)==count || throw(ArgumentError(
+        "$caller: element tag and connectivity counts differ"))
+    model=_model_locked()
+    Model._discrete_data(model,dim,tag,caller)
+    known=Set{UInt64}(_record_edit_cache_nodes())
+    seen=Set{UInt64}()
+    for (_,record) in Model._discrete_mesh_records_model(model)
+        union!(known,record.node_tags);union!(seen,record.element_tags)
     end
-    return result
+    connectivity=UInt64[_mesh_query_uid(node,caller,"node tag") for node in nodes]
+    tags=Vector{UInt64}(undef,count)
+    for index in 1:count
+        for slot in width*(index-1)+1:width*index
+            node=connectivity[slot]
+            if !(node in known)
+                NATIVE_LOOKUP_QUERY_ERRORS[]+=1
+                iszero(OPTIONS["General.AbortOnError"]) && return false
+                throw(ArgumentError("Unknown node $node"))
+            end
+        end
+        requested=isempty(requested_tags) ? UInt64(0) :
+            _mesh_query_uid(requested_tags[index],caller,"element tag")
+        converted=_native_element_constructor_uid(requested)
+        automatic=iszero(converted)
+        uid=automatic ? _native_mesh_next_uid(ELEMENT_TAG_MAX[],caller) : converted
+        automatic && iszero(uid) && (ELEMENT_COUNTER_WRAPPED[]=true)
+        uid in seen && throw(ArgumentError("$caller: duplicate element tag $uid"))
+        push!(seen,uid);tags[index]=uid
+        ELEMENT_TAG_MAX[]=automatic ? uid : max(ELEMENT_TAG_MAX[],uid)
+    end
+    _edit_mesh_records_locked!() do staged
+        add_discrete_elements!(staged,dim,tag,[mtype],[tags],[connectivity];
+            _known_node_tags=_record_edit_cache_nodes())
+    end
+    return true
 end
 
 function _record_edit_cache_nodes()
@@ -7479,42 +8139,60 @@ function _record_edit_cache_nodes()
     return _cache_public_tags(cached;node_count=count).node_tags
 end
 
-function _add_elements(dim,tag,element_types,element_tags,node_tags)
-    lock(STATE_LOCK) do
-        _edit_mesh_records_locked!() do m
-            tags=_mesh_allocate_element_tags(element_types,element_tags,node_tags)
-            add_discrete_elements!(m,dim,tag,element_types,tags,node_tags;
-                _known_node_tags=_record_edit_cache_nodes())
+function _add_elements_native_lookup_live(dim,tag,element_types,element_tags,node_tags)
+    caller="API.mesh.add_elements"
+    return lock(STATE_LOCK) do
+        (element_types isa AbstractVector || element_types isa Tuple) &&
+            (element_tags isa AbstractVector || element_tags isa Tuple) &&
+            (node_tags isa AbstractVector || node_tags isa Tuple) &&
+            length(element_types)==length(element_tags)==length(node_tags) ||
+            throw(ArgumentError("$caller: block arrays must have equal lengths"))
+        dimension=Model._dimension(dim,caller)
+        owner=Model._tag(tag,caller,dimension)
+        for index in eachindex(element_types)
+            kind=_mesh_query_integer(element_types[index],caller,"element type")
+            _native_add_element_block_locked!(dimension,owner,kind,
+                element_tags[index],node_tags[index],caller) || return nothing
         end
+        return nothing
     end
-    return nothing
 end
 
-function _add_elements_by_type(tag,element_type,element_tags,node_tags)
+function _add_elements_by_type_native_lookup_live(tag,element_type,element_tags,node_tags)
     caller="API.mesh.add_elements_by_type"
     mtype=_mesh_query_integer(element_type,caller,"element_type")
-    # Gmsh derives the entity dimension from the element type, then looks the
-    # entity up by tag ("Surface 1 does not exist" for a type-2 element).
     dim=Int(msh_spec(mtype).dim)
     return lock(STATE_LOCK) do
         current=_model_locked()
-        _model_entity_known(current,dim,tag) || throw(ArgumentError(
-            "$caller: $(_MESH_ENTITY_LABELS[dim+1]) $tag does not exist"))
-        _edit_mesh_records_locked!() do m
-            tags=_mesh_allocate_element_tags([mtype],[element_tags],[node_tags])
-            add_discrete_elements!(m,dim,tag,[mtype],tags,[node_tags];
-                _known_node_tags=_record_edit_cache_nodes())
-        end
+        owner=Model._tag(tag,caller,dim)
+        _model_entity_known(current,dim,owner) || throw(ArgumentError(
+            "$caller: $(_MESH_ENTITY_LABELS[dim+1]) $owner does not exist"))
+        _native_add_element_block_locked!(dim,owner,mtype,element_tags,node_tags,caller)
+        return nothing
     end
-    return nothing
 end
 
 function _add_homology_request(kind="Homology",domain_tags=Int[],
                                subdomain_tags=Int[],dims=Int[])
     lock(STATE_LOCK) do
-        add_homology_request!(_model_locked();kind=kind,
-                              domain_tags=domain_tags,
-                              subdomain_tags=subdomain_tags,dims=dims)
+        model=_model_locked();caller="add_homology_request!"
+        kind isa AbstractString || throw(ArgumentError("$caller: kind must be a string"))
+        domain=Int[Model._mesh_attr_positive_int(t,caller,"domain_tags entry") for t in domain_tags]
+        subdomain=Int[Model._mesh_attr_positive_int(t,caller,"subdomain_tags entry") for t in subdomain_tags]
+        all(>=(0),Iterators.flatten((domain,subdomain))) || throw(ArgumentError(
+            "$caller: entity tags must be non-negative"))
+        dimensions=Int[]
+        for raw in dims
+            value=Model._mesh_attr_positive_int(raw,caller,"dims entry")
+            typemin(Cint)<=value<=typemax(Cint) || throw(ArgumentError(
+                "$caller: dims entry $value exceeds the native Cint range"))
+            push!(dimensions,value)
+        end
+        # The native API queues kind/dimension words verbatim; computeHomology
+        # later filters dimensions and emits Msg diagnostics. The standalone
+        # Model builder keeps its stricter supported-kind/dimension guards.
+        push!(model.meshing.homology_requests,
+            (kind=String(kind),domain=domain,subdomain=subdomain,dims=dimensions))
     end
     return nothing
 end
@@ -7526,29 +8204,46 @@ function _clear_homology_requests()
     return nothing
 end
 
-# The native model owns no mesh partitions: ghosts and unpartitioning are
-# empty no-ops, and meshing failures surface through the raised error rather
-# than through post-hoc error lists.
+# Imported partition entities retain their native parent and Ghost receipts.
 function _get_ghost_elements(dim,tag)
     caller="API.mesh.get_ghost_elements"
     return lock(STATE_LOCK) do
         model=_model_locked()
-        cached=_cached_mesh_locked(caller)
+        cached=LAST_MESH[]
         dimension=_mesh_query_integer(dim,caller,"dim")
         dimension in 0:3 || throw(ArgumentError(
             "$caller: dim must be in 0:3"))
         entity=_mesh_query_integer(tag,caller,"tag")
-        class=_cached_classification_locked(cached)
-        class===nothing && throw(ArgumentError(
-            "$caller: ghost queries require mesh classification metadata"))
-        _mesh_classified_entity(model,class,dimension,entity,caller)
-        return UInt64[],Int32[]
+        class=cached===nothing ? nothing : _cached_classification_locked(cached)
+        if class===nothing
+            Model._model_metadata_entity(model,dimension,entity,caller)
+        else
+            _mesh_classified_entity(model,class,dimension,entity,caller)
+        end
+        receipt=get(model.meshing.imported_entities,(dimension,entity),nothing)
+        (receipt===nothing || !startswith(receipt.kind,"Ghost ")) &&
+            return UInt64[],Int32[]
+        cached===nothing && return UInt64[],Int32[]
+        tags=UInt64[];partitions=Int32[]
+        public=class===nothing ? _cache_public_tags(cached) : class.public_tags
+        for (uid,part) in get(model.meshing.imported_ghost_elements,
+                (dimension,entity),Tuple{UInt64,Int32}[])
+            public!==nothing && haskey(public.element_indices,uid) || continue
+            push!(tags,uid);push!(partitions,part)
+        end
+        return tags,partitions
     end
 end
 
 _unpartition()=lock(STATE_LOCK) do
-    _model_locked()
-    _cached_mesh_locked("API.mesh.unpartition")
+    model=_model_locked()
+    cached=LAST_MESH[]
+    class=cached===nothing ? nothing : _cached_classification_locked(cached)
+    plan=_imported_unpartition_plan(model,cached,class,"API.mesh.unpartition")
+    plan===nothing || _commit_tagged_plan_locked!(plan;preserve_visibility=true,
+        element_tag_map=plan.visibility_tag_map)
+    model=_model_locked()
+    model.meshing.imported_num_partitions=0
     LAST_MESH_PARTITION[]=nothing
     return nothing
 end
@@ -7684,61 +8379,30 @@ _get_last_node_error()=UInt64[]
 
 function _rebuild_node_cache(only_if_necessary=true)
     caller="API.mesh.rebuild_node_cache"
-    _mesh_query_bool(only_if_necessary,caller,"only_if_necessary")
+    flag=_mesh_query_bool(only_if_necessary,caller,"only_if_necessary")
     lock(STATE_LOCK) do
         _model_locked()
-        _cached_mesh_locked(caller)
+        _native_lookup_rebuild_nodes_locked!(flag)
     end
     return nothing
 end
 
 function _rebuild_element_cache(only_if_necessary=true)
     caller="API.mesh.rebuild_element_cache"
-    _mesh_query_bool(only_if_necessary,caller,"only_if_necessary")
+    flag=_mesh_query_bool(only_if_necessary,caller,"only_if_necessary")
     lock(STATE_LOCK) do
         _model_locked()
-        _cached_mesh_locked(caller)
+        _native_lookup_rebuild_elements_locked!(flag)
     end
     return nothing
 end
 
 # Node ownership is derived from the generating entity at classification time
-# and maintained through every mutation, so geometric relocation and
-# element-based reclassification are identity operations; both validate their
-# arguments and the session state like Gmsh.
-function _relocate_nodes(dim=-1,tag=-1)
-    caller="API.mesh.relocate_nodes"
-    return lock(STATE_LOCK) do
-        model=_model_locked()
-        cached=_cached_mesh_locked(caller)
-        dimension=_mesh_query_integer(dim,caller,"dim")
-        (-1<=dimension<=3) || throw(ArgumentError(
-            "$caller: dim must be -1 or in 0:3"))
-        entity=_mesh_query_integer(tag,caller,"tag")
-        class=_cached_classification_locked(cached)
-        entity>=0 || return nothing
-        if entity>0
-            if dimension<0
-                throw(ArgumentError(
-                    "$caller: a nonnegative tag requires a dimension in 0:3"))
-            end
-            class===nothing && throw(ArgumentError(
-                "$caller: entity-selective relocation requires mesh " *
-                "classification metadata"))
-            _mesh_classified_entity(model,class,dimension,entity,caller)
-        end
-        return nothing
-    end
-end
+# Element-based reclassification remains separate from geometric relocation.
+include("APIMeshRelocation.jl")
+include("APIMeshOrientation.jl")
 
-function _reclassify_nodes()
-    caller="API.mesh.reclassify_nodes"
-    return lock(STATE_LOCK) do
-        _model_locked()
-        _cached_mesh_locked(caller)
-        return nothing
-    end
-end
+include("APIMeshReclassification.jl")
 
 function _set_size(dim_tags,size)
     caller="API.mesh.set_size"
@@ -7763,13 +8427,23 @@ function _set_size(dim_tags,size)
             "$caller: only dimension-0 Point entities are supported"))
         push!(point_tags,pair[2])
     end
-    return _with_model(invalidate=true) do current
+    return _with_model() do current
         set_point_mesh_size!(current,point_tags,size)
     end
 end
 
 function _set_periodic(dim,slave_entities,master_entities,affine;atol=1e-12)
     return _with_model(invalidate=true) do current
+        if dim==2
+            _mesh_query_integer(dim,"API.mesh.set_periodic","dim")
+            staged=Model._model_periodic_surface_native_declaration(
+                current,slave_entities,master_entities,affine,atol,"API.mesh.set_periodic")
+            staged.meshing.size_callback=current.meshing.size_callback
+            index=_current_slot_index_locked()
+            index!=0 && (MODEL_SLOTS[index].model=staged)
+            CURRENT[]=staged
+            return nothing
+        end
         set_periodic!(
             current,dim,slave_entities,master_entities,affine;atol=atol)
     end
@@ -7780,9 +8454,31 @@ function _get_periodic_nodes(dim,slave_entity,include_high_order_nodes=false)
         current=_model_locked()
         include_high_order=_mesh_query_bool(include_high_order_nodes,
             "API.mesh.get_periodic_nodes","include_high_order_nodes")
+        if dim==2
+            caller="API.mesh.get_periodic_nodes"
+            _mesh_query_integer(dim,caller,"dim")
+            slave=_mesh_query_integer(slave_entity,caller,"slave_entity")
+            if !_model_entity_known(current,2,slave)
+                _native_mesh_input_error_locked("Surface $slave does not exist")
+                return (master_entity=Int32(0),slave_nodes=UInt64[],
+                    master_nodes=UInt64[],affine=Float64[])
+            end
+            history=get(current.meshing.periodic_uid_history,(2,slave),nothing)
+            history===nothing || return Model._model_periodic_uid_query(history,include_high_order)
+        end
         cached=LAST_MESH[]
-        cached===nothing && throw(ArgumentError(
-            "API.mesh.get_periodic_nodes: no mesh"))
+        if cached===nothing
+            caller="API.mesh.get_periodic_nodes"
+            dimension=_mesh_query_integer(dim,caller,"dim")
+            0<=dimension<=3 || throw(ArgumentError("$caller: dim is out of range"))
+            slave=_mesh_query_integer(slave_entity,caller,"slave_entity")
+            _model_entity_known(current,dimension,slave) || throw(ArgumentError(
+                "$caller: unknown entity ($dimension,$slave)"))
+            constraint=get(current.periodic,(dimension,slave),nothing)
+            return (master_entity=constraint===nothing ? Int32(slave) : constraint.master_entity,
+                slave_nodes=UInt64[],master_nodes=UInt64[],
+                affine=constraint===nothing || constraint.affine===nothing ? Float64[] : collect(constraint.affine))
+        end
         if dim==1 && cached isa MixedMesh && _mesh_public_tags(cached)!==nothing
             caller="API.mesh.get_periodic_nodes"
             dimension=_mesh_query_integer(dim,caller,"dim")
@@ -7794,7 +8490,32 @@ function _get_periodic_nodes(dim,slave_entity,include_high_order_nodes=false)
             return (master_entity=mapping.master_entity,
                 slave_nodes=_cache_node_tags(class.public_tags,mapping.slave_nodes),
                 master_nodes=_cache_node_tags(class.public_tags,mapping.master_nodes),
-                affine=mapping.affine)
+                affine=mapping.affine===nothing ? Float64[] : collect(mapping.affine))
+        end
+        if dim==2 && cached isa MixedMesh
+            caller="API.mesh.get_periodic_nodes"
+            slave=_mesh_query_integer(slave_entity,caller,"slave_entity")
+            _model_entity_known(current,2,slave) || throw(ArgumentError("$caller: unknown Surface[$slave]"))
+            for link in cached.periodic_links
+                link.dim==2 && link.slave_entity==slave || continue
+                public=_mesh_public_tags(cached)
+                keep=if include_high_order
+                    trues(length(link.slave_nodes))
+                else
+                    class=_cached_classification_locked(cached)
+                    s=_periodic_surface_catalog(cached,class,slave,caller).primary
+                    m=_periodic_surface_catalog(cached,class,link.master_entity,caller).primary
+                    [a in s && b in m for (a,b) in zip(link.slave_nodes,link.master_nodes)]
+                end
+                return (master_entity=link.master_entity,
+                    slave_nodes=_cache_node_tags(public,link.slave_nodes[keep]),
+                    master_nodes=_cache_node_tags(public,link.master_nodes[keep]),
+                    affine=link.affine===nothing ? Float64[] : collect(link.affine))
+            end
+            constraint=get(current.periodic,(2,slave),nothing)
+            return (master_entity=constraint===nothing ? Int32(slave) : constraint.master_entity,
+                slave_nodes=UInt64[],master_nodes=UInt64[],
+                affine=constraint===nothing || constraint.affine===nothing ? Float64[] : collect(constraint.affine))
         end
         if include_high_order && (_high_order_overlay(cached)!==nothing ||
                 any(block->msh_spec(block[1]).order>1,_cache_native_blocks(cached)))
@@ -7803,10 +8524,10 @@ function _get_periodic_nodes(dim,slave_entity,include_high_order_nodes=false)
         end
         mapping=model_periodic_nodes(current,cached,dim,slave_entity)
         public=_mesh_public_tags(cached)
-        public===nothing && return mapping
         return (master_entity=mapping.master_entity,
             slave_nodes=_cache_node_tags(public,mapping.slave_nodes),
-            master_nodes=_cache_node_tags(public,mapping.master_nodes),affine=mapping.affine)
+            master_nodes=_cache_node_tags(public,mapping.master_nodes),
+            affine=mapping.affine===nothing ? Float64[] : collect(mapping.affine))
     end
 end
 
@@ -7817,20 +8538,41 @@ include("APILegacyP2QualityBounds.jl")
 include("APIMixedAdvanced.jl")
 include("APIMixedRefine.jl")
 include("APIGenerate01.jl")
+include("APICurveInterpolation.jl")
+include("APICurveOrder.jl")
+include("APICellPlacement.jl")
+include("APICellOrder.jl")
+include("APICellReference.jl")
+include("APICellInverse.jl")
+include("APICellQuality.jl")
+include("APICellPyramidQuality.jl")
+include("APICellBezier.jl")
+include("APICellSampleQuality.jl")
+include("APICellIsotropy.jl")
+include("APIRawQueries.jl")
+include("APIGenerate01Geometry.jl")
 include("APITaggedMutations.jl")
 include("APIGenerationLabels.jl")
+include("APIGenerateHigher.jl")
+include("APINativeRecombine.jl")
+include("APINativeRecombineViews.jl")
+include("APINativeViewPartition.jl")
+include("APINativeViewWriter.jl")
+include("APINativeOptimize.jl")
+include("APINativeRelocate3D.jl")
+include("APIMeshHomologyNative.jl")
 
 """Gmsh-style mesh generation, mutation, bulk retrieval, and periodic operations."""
 # Per-entity element list across the simplex cache (dim-matched blocks) and
 # the entity's discrete/attached record — the input cells for homology.
 function _entity_all_elements(m::GeoModel,cached,class,dim::Int,tag::Int)
-    out=Tuple{Int32,Vector{Int32}}[]
+    out=Tuple{Int32,Vector{UInt64}}[]
     if cached!==nothing && class!==nothing
         for (msh_type,dimension,_,cells,owners) in _cache_catalog(cached,class)
             dimension==dim || continue
             for column in axes(cells,2)
                 owners[column]==tag || continue
-                push!(out,(msh_type,Int32.(_cache_node_tags(class.public_tags,
+                push!(out,(msh_type,UInt64.(_cache_node_tags(class.public_tags,
                                                          @view cells[:,column]))))
             end
         end
@@ -7853,7 +8595,7 @@ function _compute_homology()
         cached=LAST_MESH[]
         class=cached===nothing ? nothing :
               _cached_classification_locked(cached)
-        cells=Dict{Tuple{Int,Int},Vector{Tuple{Int32,Vector{Int32}}}}()
+        cells=Dict{Tuple{Int,Int},Vector{Tuple{Int32,Vector{UInt64}}}}()
         if class!==nothing
             for (_,dim,_,_,owners) in _cache_catalog(cached,class)
                 for tag in unique(owners)
@@ -7869,17 +8611,36 @@ function _compute_homology()
         for (edim,etag,record) in _discrete_mesh_records(m)
             key=(edim,etag)
             haskey(cells,key) && continue
-            entries=Tuple{Int32,Vector{Int32}}[]
+            entries=Tuple{Int32,Vector{UInt64}}[]
             for index in eachindex(record.element_types)
                 push!(entries,(record.element_types[index],
                                copy(record.element_nodes[index])))
             end
             isempty(entries) || (cells[key]=entries)
         end
-        isempty(cells) && return Tuple{Int,Int}[]
-        return Tuple{Int,Int}[pair for pair in
-            compute_homology!(m,cells;
-                              requests=m.meshing.homology_requests)]
+        # Chain storage creates actual cells and changes the priority of
+        # their vertex owners. Publish both through the same detached plan
+        # used by reclassifyNodes so cached queries immediately see them.
+        staged=_reclassify_model_copy(m)
+        coordinates=_homology_public_coordinates(m,cached,class)
+        element_counter_report=Ref{Tuple{UInt64,Bool}}(
+            (ELEMENT_TAG_MAX[],ELEMENT_COUNTER_WRAPPED[]))
+        output=Tuple{Int,Int}[pair for pair in
+            compute_homology!(staged,cells;
+                              requests=staged.meshing.homology_requests,
+                              coordinates,
+                              initial_max_element_tag=ELEMENT_TAG_MAX[],
+                              initial_element_counter_wrapped=ELEMENT_COUNTER_WRAPPED[],
+                              element_counter_report,
+                              error_callback=_native_mesh_input_error_locked)]
+        isempty(output) && return output
+        plan=_reclassify_nodes_plan(staged,cached,class,caller;
+            node_max=NODE_TAG_MAX[],element_max=ELEMENT_TAG_MAX[])
+        # Reclassification preserves UID identities; retain the constructor clock.
+        plan=merge(plan,(max_element_tag=element_counter_report[][1],
+                         element_counter_wrapped=element_counter_report[][2]))
+        _commit_tagged_plan_locked!(plan;preserve_visibility=true,reconcile_records=false)
+        return output
     end
 end
 
@@ -7910,7 +8671,7 @@ function _tagged_periodic_keys(m,cached,class,msh,function_space_type,entity,fla
     return Int32(mapping.master_entity),types,copy(types),keys,masters,coordinates,slave_coordinates
 end
 
-function _get_periodic_keys(element_type,function_space_type,tag,
+function _get_periodic_keys_native_lookup_live(element_type,function_space_type,tag,
                             return_coord=true)
     caller="API.mesh.get_periodic_keys"
     msh_type=_mesh_query_integer(element_type,caller,"elementType")
@@ -7942,16 +8703,16 @@ function _get_periodic_keys(element_type,function_space_type,tag,
         end
         master_tag=constraint===nothing ? Int32(entity_tag) :
                     Int32(constraint.master_entity)
-        pairing=Dict{Int32,Int32}()
+        pairing=Dict{UInt64,UInt64}()
         if constraint!==nothing && cached!==nothing && class!==nothing
             mapping=model_periodic_nodes(m,cached,dimension,Int(entity_tag))
             for (slave_node,master_node) in zip(mapping.slave_nodes,
                                                 mapping.master_nodes)
                 public=_mesh_public_tags(cached)
-                pairing[Int32(_cache_node_tag(public,slave_node))]=Int32(_cache_node_tag(public,master_node))
+                pairing[_cache_node_tag(public,slave_node)]=_cache_node_tag(public,master_node)
             end
         end
-        incidences=Vector{Int32}[]
+        incidences=Vector{UInt64}[]
         if cached!==nothing && class!==nothing
             block=_mesh_element_block(cached,msh_type)
             if block!==nothing
@@ -7960,7 +8721,7 @@ function _get_periodic_keys(element_type,function_space_type,tag,
                 if !isempty(owners)
                     for column in axes(cells,2)
                         owners[column]==entity_tag || continue
-                        push!(incidences,Int32.(_cache_node_tags(class.public_tags,cells[:,column])))
+                        push!(incidences,_cache_node_tags(class.public_tags,cells[:,column]))
                     end
                 end
             end
@@ -7974,7 +8735,7 @@ function _get_periodic_keys(element_type,function_space_type,tag,
         end
         if constraint!==nothing && !isempty(incidences)
             master_record=_model_mesh_record(m,dimension,Int(master_tag))
-            master_nodes=Dict{NTuple{3,Float64},Int32}()
+            master_nodes=Dict{NTuple{3,Float64},UInt64}()
             if master_record!==nothing
                 for column in eachindex(master_record.node_tags)
                     master_nodes[
@@ -7989,7 +8750,7 @@ function _get_periodic_keys(element_type,function_space_type,tag,
                         continue
                     master_nodes[(cached.coords[1,node],
                                   cached.coords[2,node],
-                                  cached.coords[3,node])]=Int32(_cache_node_tag(class.public_tags,node))
+                                  cached.coords[3,node])]=_cache_node_tag(class.public_tags,node)
                 end
             end
             # An orientation-only curve relation has no transform: the
@@ -8068,7 +8829,7 @@ function _entity_record(m::GeoModel,dim::Int,tag::Int)
 end
 
 function _entity_tri_elements(m::GeoModel,cached,class,dim::Int,tag::Int)
-    entries=Tuple{Int32,Vector{Int32}}[]
+    entries=Tuple{UInt64,Vector{UInt64}}[]
     cache_cols=Int[]
     # The P2 overlay publishes MSH9; its linear skeleton is not MSH2 input.
     if cached isa Mesh && class!==nothing && _high_order_overlay(cached)===nothing
@@ -8077,10 +8838,8 @@ function _entity_tri_elements(m::GeoModel,cached,class,dim::Int,tag::Int)
             class.tri_entities[column]==tag || continue
             element=_cache_element_tag(class.public_tags,triangle_offset+column)
             nodes=_cache_node_tags(class.public_tags,cached.tris[:,column])
-            element<=typemax(Int32) && all(n->n<=typemax(Int32),nodes) ||
-                throw(ArgumentError("API.mesh.recombine: source labels exceed the record Int32 range"))
             push!(cache_cols,column)
-            push!(entries,(Int32(element),Int32.(nodes)))
+            push!(entries,(element,nodes))
         end
     end
     record=_entity_record(m,dim,tag)
@@ -8095,7 +8854,7 @@ end
 
 # Global coordinates for public tag-addressed connectivity, including actual
 # native overlay rows and records that reference cache-owned nodes.
-function _mesh_node_coords(m::GeoModel,cached,tag::Int32)
+function _mesh_node_coords(m::GeoModel,cached,tag::Integer)
     if cached!==nothing
         public=_mesh_public_tags(cached)
         overlay=_high_order_overlay(cached)
@@ -8115,7 +8874,7 @@ function _mesh_node_coords(m::GeoModel,cached,tag::Int32)
             record.node_coords[3,column])
 end
 
-function _mesh_public_node_coords(model,cached,tag::Int32)
+function _mesh_public_node_coords(model,cached,tag::Integer)
     return _mesh_node_coords(model,cached,tag)
 end
 
@@ -8132,14 +8891,12 @@ function _recombine_excluded_edges(model,cached,class,dim::Int,tag::Int;
     for (bdim,child) in get(model.embeds,(dim,tag),Tuple{Int,Int}[])
         bdim==1 && push!(curves,Int32(abs(child)))
     end
-    excluded=Set{NTuple{2,Int32}}()
+    excluded=Set{NTuple{2,UInt64}}()
     if cached isa Mesh && class!==nothing
         for column in axes(cached.segs,2)
             class.seg_entities[column] in curves || continue
             nodes=_cache_node_tags(class.public_tags,@view cached.segs[:,column])
-            all(n->n<=typemax(Int32),nodes) || throw(ArgumentError(
-                "API.mesh.recombine: boundary labels exceed the record Int32 range"))
-            push!(excluded,minmax(Int32(nodes[1]),Int32(nodes[2])))
+            push!(excluded,minmax(nodes[1],nodes[2]))
         end
     end
     for curve in sort!(collect(curves))
@@ -8160,148 +8917,45 @@ function _recombine()
     caller="API.mesh.recombine"
     return lock(STATE_LOCK) do
         original=_model_locked()
-        settings=sort!(collect(original.meshing.recombine);by=first)
-        isempty(settings) && return nothing
         cached=LAST_MESH[]
         class=cached===nothing ? nothing : _cached_classification_locked(cached)
-        cached isa MixedMesh && any(block->msh_spec(block.msh).family===:tri && !isempty(block.nodes),cached.blocks) &&
-            throw(ArgumentError("$caller: triangle recombination within a native mixed cache is not implemented"))
-        algorithm=Int(OPTIONS["Mesh.RecombinationAlgorithm"]) in (1,3) ? :blossom : :greedy
-        staged=deepcopy(original)
-        dropped=cached isa Mesh ? falses(ntris(cached)) : Bool[]
-        maximum_element=_get_max_element_tag()
-        changed=false
-        record_entities=Set{Tuple{Int,Int32}}()
-        for ((dim,tag),angle) in settings
-            dim==2 || continue
-            _model_entity_known(staged,dim,tag) || throw(ArgumentError("$caller: unknown entity ($dim, $tag)"))
-            entries,cache_cols,record=_entity_tri_elements(staged,cached,class,dim,tag)
-            length(entries)<2 && continue
-            sub_tags=Int32[];position=Dict{Int32,Int32}()
-            old_triangles=Dict{NTuple{3,Int32},Vector{Int32}}()
-            incidence=Dict{NTuple{2,Int32},Int}()
-            for (element,nodes) in entries
-                push!(get!(()->Int32[],old_triangles,Tuple(sort(nodes))),element)
-                for node in nodes
-                    haskey(position,node) && continue
-                    position[node]=Int32(length(sub_tags)+1);push!(sub_tags,node)
-                end
-                for (i,j) in ((1,2),(2,3),(3,1))
-                    edge=minmax(nodes[i],nodes[j]);incidence[edge]=get(incidence,edge,0)+1
-                end
-            end
-            # Native adjacency orders MEdge keys by public node labels. Keep
-            # temporary dense indices in that order while retaining each first
-            # triangle's directed edge and the original physical coordinates.
-            sort!(sub_tags);empty!(position)
-            for (index,node) in enumerate(sub_tags)
-                position[node]=Int32(index)
-            end
-            coords=Matrix{Float64}(undef,3,length(sub_tags))
-            for (index,node) in enumerate(sub_tags)
-                value=_mesh_public_node_coords(staged,cached,node)
-                value===nothing && throw(ArgumentError("$caller: node $node has no coordinates"))
-                coords[:,index].=value
-            end
-            cells=Matrix{Int32}(undef,3,length(entries))
-            for (column,(_,nodes)) in enumerate(entries)
-                length(nodes)==3 || throw(ArgumentError("$caller: non-triangle element in recombine scope"))
-                for row in 1:3
-                    cells[row,column]=position[nodes[row]]
-                end
-            end
-            excluded=_recombine_excluded_edges(staged,cached,class,dim,tag)
-            protected=Set{NTuple{2,Int32}}()
-            candidates=0
-            for ((a,b),count) in incidence
-                count==2 || continue
-                if (a,b) in excluded
-                    push!(protected,minmax(position[a],position[b]))
+        wall=time_ns();cpu=_native_diagnostic_cpu_time()
+        skipped=!iszero(OPTIONS["General.AbortOnError"]) && NATIVE_LOOKUP_QUERY_ERRORS[]>0
+        plan=_api_native_recombine_plan(original,cached,class,caller;
+            options=OPTIONS,initial_max_node_tag=NODE_TAG_MAX[],
+            initial_max_element_tag=ELEMENT_TAG_MAX[],
+            node_counter_wrapped=NODE_COUNTER_WRAPPED[],
+            element_counter_wrapped=ELEMENT_COUNTER_WRAPPED[],
+            boundary_layer_context=!isempty(BOUNDARY_LAYER_FIELDS[]),
+            skip_recombination=skipped)
+        view_plan=_native_recombine_views_plan(plan;
+            renumber=!iszero(OPTIONS["Mesh.Renumber"]))
+        skipped || _native_diagnostic_emit_locked(:info,"Recombining 2D mesh...")
+        if plan!==nothing && get(plan,:publication_required,true)
+            _commit_tagged_plan_locked!(plan;preserve_visibility=true,
+                element_tag_map=plan.visibility_tag_map,reconcile_records=false)
+        end
+        if plan!==nothing
+            for (kind,message) in get(plan,:native_recombine_events,())
+                if kind===:error
+                    _native_mesh_input_error_locked(message)
+                elseif kind===:fault
+                    # Preserve native failure without performing an invalid
+                    # memory access or recording a Msg error that did not occur.
+                    throw(ErrorException(message))
                 else
-                    candidates+=1
+                    _native_diagnostic_emit_locked(kind,message)
                 end
             end
-            embedded=Set{NTuple{2,Int32}}()
-            for (a,b) in _recombine_excluded_edges(staged,cached,class,dim,tag;
-                                                    embedded_only=true)
-                haskey(position,a) && haskey(position,b) || continue
-                push!(embedded,minmax(position[a],position[b]))
-            end
-            details=_recombine_triangles(Mesh(coords;tris=cells);algorithm=algorithm,
-                protected_edges=protected,recombine_angle=angle,embedded_edges=embedded)
-            result=details.mesh
-            size(result.coords,2)==length(sub_tags) || throw(ArgumentError(
-                "$caller: recombination with newly created nodes is not implemented"))
-            # Every eligible first-order pair consumes one temporary factory
-            # label BEFORE convexity/angle screening in the pinned constructor.
-            # A failed native perfect match reconstructs every temporary pair
-            # for its greedy retry. Later topology optimization is separate.
-            quadrangles=0
-            for block in result.blocks
-                block isa ElementBlock && block.msh==3 || continue
-                quadrangles+=size(block.nodes,2)
-            end
-            limit=UInt64(typemax(Int32))
-            pair_reservation=UInt64(candidates)*UInt64(details.primary_pair_passes)
-            (maximum_element>limit || pair_reservation>limit-maximum_element ||
-             UInt64(quadrangles)>limit-maximum_element-pair_reservation) &&
-                throw(ArgumentError("$caller: recombined element tags exceed Int32"))
-            maximum_element+=pair_reservation
-            target=record
-            if target===nothing
-                target=DiscreteEntity()
-                if haskey(staged.discrete,(dim,tag))
-                    staged.discrete[(dim,tag)]=target
-                else
-                    staged.meshing.attached[(dim,tag)]=target
-                end
-            else
-                keep=findall(!=(Int32(2)),target.element_types)
-                target.element_types=target.element_types[keep]
-                target.element_tags=target.element_tags[keep]
-                target.element_nodes=target.element_nodes[keep]
-            end
-            for block in result.blocks
-                block isa ElementBlock || continue
-                for column in axes(block.nodes,2)
-                    nodes=Vector{Int32}(undef,size(block.nodes,1))
-                    for row in eachindex(nodes)
-                        nodes[row]=sub_tags[block.nodes[row,column]]
-                    end
-                    element=if block.msh==2
-                        previous=get(old_triangles,Tuple(sort(nodes)),nothing)
-                        previous===nothing || isempty(previous) ? throw(ArgumentError("$caller: a retained triangle lost its source identity")) : popfirst!(previous)
-                    else
-                        maximum_element+=UInt64(1);Int32(maximum_element)
-                    end
-                    _record_append_element!(target,block.msh,element,nodes)
-                end
-            end
-            dropped[cache_cols].=true
-            push!(record_entities,(dim,Int32(tag)))
-            changed=true
         end
-        changed || return nothing
-        replacement=cached;replacement_class=class
-        if cached isa Mesh && any(dropped)
-            keep=.!dropped
-            replacement=Mesh(cached.coords;segs=cached.segs,tris=cached.tris[:,keep],tets=cached.tets,
-                seg_tag=cached.seg_tag,tri_tag=cached.tri_tag[keep],tet_tag=cached.tet_tag)
-            replacement_class=_api_rebind_class(class,replacement;tri_entities=class.tri_entities[keep],
-                selections=(collect(axes(cached.segs,2)),findall(keep),collect(axes(cached.tets,2))))
-        end
-        if replacement_class!==nothing && replacement_class.public_tags!==nothing
-            public=replacement_class.public_tags
-            authority=setdiff(public.authority,record_entities)
-            table=_cache_public_tags(replacement;authority,node_tags=public.node_tags,
-                element_tags=public.element_tags,node_count=length(public.node_tags),caller)
-            replacement_class=_classification_with_public_tags(replacement_class,table)
-        end
-        # Complete all rejecting work before one model/cache publication.
-        _replace_mesh_cache_with_overlay_locked!(replacement,replacement_class,caller;
-            overlay=cached===nothing ? nothing : _high_order_overlay(cached),certify=false,
-            preserve_visibility=true,staged_model=staged)
-        ELEMENT_TAG_MAX[]=max(ELEMENT_TAG_MAX[],maximum_element)
+        skipped || _native_diagnostic_recombine_done_locked(wall,cpu;
+            empty=!_api_native_recombine_has_surfaces(original,cached))
+        _native_recombine_views_publish!(view_plan)
+        # Native automatic numbering clears lookup memo even after a skipped
+        # raw stage. With numbering disabled, raw recombination keeps it.
+        (iszero(OPTIONS["Mesh.Renumber"]) ||
+            (plan!==nothing && !get(plan,:native_recombine_finished,true))) ||
+            _native_lookup_invalidate_locked!()
         return nothing
     end
 end
@@ -8311,9 +8965,9 @@ function _model_fresh_node_tag(m::GeoModel,cached)
     result=cached===nothing ? 0 : size(cached.coords,2)
     for (_,_,record) in _discrete_mesh_records(m)
         isempty(record.node_tags) ||
-            (result=max(result,Int(maximum(record.node_tags))))
+            (result=max(result,maximum(record.node_tags)))
     end
-    return Int32(result+1)
+    return _native_mesh_next_uid(UInt64(result),"API node allocator")
 end
 
 # Corner-angle quality of a quadrangle in [0,1]: 1 for a rectangle, 0 when a
@@ -8333,6 +8987,8 @@ function _quad_quality(coords::NTuple{4,NTuple{3,Float64}})
     return worst
 end
 
+include("APIQuadSplit.jl")
+
 function _split_quadrangles(quality=1.0,tag=-1)
     caller="API.mesh.split_quadrangles"
     (quality isa Real && !(quality isa Bool) && isfinite(quality)) ||
@@ -8340,87 +8996,9 @@ function _split_quadrangles(quality=1.0,tag=-1)
     limit=Float64(quality)
     tag_value=_mesh_query_integer(tag,caller,"tag")
     return lock(STATE_LOCK) do
-        m=_model_locked()
-        cached=LAST_MESH[]
-        cached isa MixedMesh && any(block->msh_family(block.msh)===:qua &&
-            !isempty(block.nodes),cached.blocks) && throw(ArgumentError(
-                "$caller: splitting native mixed quadrangle caches is not implemented"))
-        keys=Tuple{Int,Int}[]
-        if tag_value<0
-            for (edim,etag,record) in _discrete_mesh_records(m)
-                edim==2 || continue
-                any(t->msh_family(t)===:qua,record.element_types) ||
-                    continue
-                push!(keys,(edim,etag))
-            end
-        else
-            tag_value<=typemax(Int32) || throw(ArgumentError(
-                "$caller: tag is out of range"))
-            _model_entity_known(m,2,Int(tag_value)) || throw(ArgumentError(
-                "$caller: unknown entity (2, $tag_value)"))
-            push!(keys,(2,Int(tag_value)))
-        end
-        for key in sort!(keys)
-            record=_entity_record(m,key[1],key[2])
-            record===nothing && continue
-            index=_record_node_index(m)
-            fresh=_model_fresh_element_tag(m)
-            index2=1
-            while index2<=length(record.element_types)
-                msh_type=Int(record.element_types[index2])
-                if msh_family(msh_type)!==:qua
-                    index2+=1
-                    continue
-                end
-                nodes=record.element_nodes[index2]
-                corners=nodes[1:4]
-                points=ntuple(k->begin
-                        value=_mesh_node_coords(m,cached,corners[k])
-                        value===nothing && throw(ArgumentError(
-                            "$caller: node $(corners[k]) has no coordinates"))
-                        value
-                    end,4)
-                if _quad_quality(points)>=limit
-                    index2+=1
-                    continue
-                end
-                # Split along the diagonal yielding the better minimum corner
-                # angle: (1,3) vs (2,4).
-                function tri_min(a,b,c)
-                    pa,pb,pc=points[a],points[b],points[c]
-                    u=(pa[1]-pb[1],pa[2]-pb[2],pa[3]-pb[3])
-                    v=(pc[1]-pb[1],pc[2]-pb[2],pc[3]-pb[3])
-                    nu=sqrt(u[1]^2+u[2]^2+u[3]^2)
-                    nv=sqrt(v[1]^2+v[2]^2+v[3]^2)
-                    (nu>0 && nv>0) || return 0.0
-                    return acos(clamp(
-                        (u[1]*v[1]+u[2]*v[2]+u[3]*v[3])/(nu*nv),-1.0,1.0))
-                end
-                a13=min(tri_min(1,2,3),tri_min(3,4,1),
-                        tri_min(2,3,1),tri_min(4,1,3))
-                a24=min(tri_min(2,3,4),tri_min(4,1,2),
-                        tri_min(3,4,2),tri_min(1,2,4))
-                keep=nodes[5:end]
-                if a13>=a24
-                    tri1=vcat(nodes[1:3],keep)
-                    tri2=vcat(nodes[[3,4,1]],keep)
-                else
-                    tri1=vcat(nodes[2:4],keep)
-                    tri2=vcat(nodes[[4,1,2]],keep)
-                end
-                quad_tag=record.element_tags[index2]
-                record.element_types[index2]=Int32(2)
-                record.element_nodes[index2]=tri1
-                _record_append_element!(record,2,Int32(fresh),tri2)
-                fresh+=1
-                index2+=1
-            end
-        end
-        return nothing
+        _native_split_quadrangles(limit,tag_value,caller)
     end
 end
-
-
 
 # ---- session views --------------------------------------------------------
 #
@@ -8438,7 +9016,18 @@ mutable struct _SessionView
     list_counts::Dict{String,Int}
     list_data::Dict{String,Vector{Float64}}
     model_data::Dict{Tuple{Int,String},Tuple{Vector{UInt64},Vector{Float64},Int}}
+    model_contexts::Dict{Tuple{Int,String},NamedTuple}
+    model_kind::Union{Nothing,String}
+    model_step_ranges::Vector{_NativeViewStepRange}
 end
+
+_SessionView(name,numbers,strings,list_types,list_counts,list_data,model_data,model_contexts)=
+    _SessionView(name,numbers,strings,list_types,list_counts,list_data,model_data,
+        model_contexts,nothing,_NativeViewStepRange[])
+
+_SessionView(name,numbers,strings,list_types,list_counts,list_data,model_data)=
+    _SessionView(name,numbers,strings,list_types,list_counts,list_data,model_data,
+        Dict{Tuple{Int,String},NamedTuple}())
 
 _SessionView(name::AbstractString)=_SessionView(
     String(name),Dict{String,Float64}(),Dict{String,String}(),
@@ -8551,24 +9140,61 @@ function _view_add_model_data(tag,step,model_name,data_type,tags,data,
         "$caller: tags must be a vector"))
     (data isa AbstractVector || data isa Tuple) || throw(ArgumentError(
         "$caller: data must be a vector"))
-    length(tags)>0 && length(data)%length(tags)==0 || throw(ArgumentError(
-        "$caller: data length must be a multiple of tags"))
+    nested=!isempty(data) && all(row->row isa AbstractVector || row isa Tuple,data)
+    length(tags)>0 && (nested ? length(data)==length(tags) : length(data)%length(tags)==0) ||
+        throw(ArgumentError("$caller: data rows must align with tags"))
     components=_mesh_query_integer(num_components,caller,"numComponents")
+    partition_value=_mesh_query_integer(partition,caller,"partition")
     return lock(STATE_LOCK) do
         view=_session_view(tag,caller)
         entity_tags=Vector{UInt64}(undef,length(tags))
         for (i,value) in enumerate(tags)
             entry=_mesh_query_integer(value,caller,"tags entry")
-            entry>=1 || throw(ArgumentError(
-                "$caller: tags entry must be positive"))
+            entry>=0 || throw(ArgumentError(
+                "$caller: tags entry must be nonnegative"))
             entity_tags[i]=UInt64(entry)
         end
-        values=Vector{Float64}(undef,length(data))
-        for (i,value) in enumerate(data)
+        flat=nested ? [value for row in data for value in row] : data
+        counts=nested ? Int32[length(row) for row in data] :
+            fill(Int32(length(data)÷length(tags)),length(tags))
+        row_components=_native_view_default_components(String(data_type),components,first(counts))
+        values=Vector{Float64}(undef,length(flat))
+        for (i,value) in enumerate(flat)
             values[i]=_mesh_query_coordinate(value,caller,"data entry")
         end
-        view.model_data[(Int(step_value),String(data_type))]=
-            (entity_tags,values,Int(components))
+        key=(Int(step_value),String(data_type))
+        slot=_native_view_model_slot(String(model_name))
+        initial=_native_view_model_count(slot,String(data_type))
+        if slot===nothing
+            message="Unknown model '$(String(model_name))'"
+            NATIVE_LOOKUP_QUERY_ERRORS[]+=1
+            NATIVE_MSG_LAST_ERROR[]=message
+            _native_diagnostic_emit_locked(:error,message)
+            throw(ArgumentError(message))
+        end
+        storage=_native_view_storage(view,String(data_type),slot,Int(step_value),Int(row_components))
+        range=_native_view_step_range(storage.ranges,Int(step_value))
+        previous=get(storage.contexts,key,nothing)
+        partitions=_native_view_partition_plan(previous===nothing ? Set{Int}() : get(previous,:partitions,Set{Int}()),
+            Int(partition_value);reset=false)
+        old_extent=previous===nothing ? UInt64(0) : previous.extent
+        extent=_native_model_view_extent(entity_tags,initial;previous=old_extent)
+        old_tags,old_values=previous===nothing ? (UInt64[],Float64[]) : storage.data[key][1:2]
+        old_counts=previous===nothing ? Int32[] : previous.counts
+        merged=_native_view_merge_rows(old_tags,old_counts,old_values,entity_tags,counts,values;
+            one_node_width=String(data_type)=="ElementNodeData" && row_components>0 ? Int(row_components) : nothing)
+        warning=String(data_type)=="ElementNodeData" ?
+            _native_view_nodal_row_warning(slot,old_tags,entity_tags,counts,Int(row_components)) : nothing
+        storage.data[key]=(merged.tags,merged.values,Int(row_components))
+        interpolation=_native_view_interpolation_history(storage.contexts)
+        interpolation===nothing && (interpolation=_native_view_interpolation_types(range.model_slot))
+        storage.contexts[key]=(model_slot=range.model_slot,time=Float64(time),counts=merged.counts,extent=extent,partitions=partitions,interpolation_msh=interpolation)
+        view.model_data=storage.data
+        view.model_contexts=storage.contexts
+        view.model_step_ranges=storage.ranges
+        view.model_kind=String(data_type)
+        storage.reset && _native_diagnostic_emit_locked(:warning,"Changing type of view to '$(String(data_type))'")
+        warning===nothing || _native_diagnostic_emit_locked(:warning,warning)
         return nothing
     end
 end
@@ -8587,6 +9213,18 @@ function _view_get_model_data(tag,step)
             push!(types,data_type)
             append!(tags,entity_tags)
             append!(data,values)
+        end
+        if isempty(types)
+            if view.model_kind!==nothing &&
+                    _native_view_step_range(view.model_step_ranges,Int(step_value))!==nothing
+                push!(types,view.model_kind)
+            else
+                message="View with tag $(Int(tag)) does not contain model data for step $(Int(step_value))"
+                NATIVE_LOOKUP_QUERY_ERRORS[]+=1
+                NATIVE_MSG_LAST_ERROR[]=message
+                _native_diagnostic_emit_locked(:error,message)
+                throw(ArgumentError(message))
+            end
         end
         return types,tags,data
     end
@@ -8692,76 +9330,72 @@ function _compute_cross_field()
     return lock(STATE_LOCK) do
         m=_model_locked()
         cached=LAST_MESH[]
-        cached isa MixedMesh && throw(ArgumentError(
-            "$caller: native mixed surface cross fields are not implemented; " *
-            "the implemented kernel requires linear simplex elements"))
+        surface_types=_get_element_types(2,-1)
+        all(==(Int32(2)),surface_types) || throw(ArgumentError(
+            "$caller: cross fields require linear Tri3 Surface elements"))
         elements=NTuple{3,NTuple{3,Float64}}[]
-        # Surface elements from cache and records, in entity order. A volume
-        # cache stores only tets, so fall back to its boundary faces — faces
-        # incident to exactly one tet.
-        if cached!==nothing && size(cached.tris,2)>0
-            for column in axes(cached.tris,2)
-                nodes=cached.tris[:,column]
-                push!(elements,ntuple(k->(
-                    cached.coords[1,nodes[k]],cached.coords[2,nodes[k]],
-                    cached.coords[3,nodes[k]]),3))
+        element_nodes=NTuple{3,UInt64}[]
+        # The public union includes cache cells and only additional caller
+        # records. Mirrored cells are not sampled twice, and a record can
+        # reference vertices owned by the current cache.
+        tags,nodes=_get_elements_by_type(2,-1)
+        length(nodes)==3*length(tags) && allunique(tags) || throw(ArgumentError(
+            "$caller: Surface triangles have ambiguous public identities"))
+        node_tags,coordinates,_=_get_nodes(-1,-1,false,false)
+        node_coordinates=Dict(uid=>ntuple(axis->coordinates[3*(index-1)+axis],3)
+                              for (index,uid) in enumerate(node_tags))
+        for column in eachindex(tags)
+            ids=ntuple(k->UInt64(nodes[3*(column-1)+k]),3)
+            allunique(ids) || throw(ArgumentError(
+                "$caller: Surface triangle $(tags[column]) repeats a node identity"))
+            frame=ntuple(3) do k
+                coordinate=get(node_coordinates,ids[k],nothing)
+                coordinate===nothing && throw(ArgumentError(
+                    "$caller: Surface triangle $(tags[column]) references unknown node $(ids[k])"))
+                coordinate
             end
-        elseif cached!==nothing && size(cached.tets,2)>0
+            push!(elements,frame);push!(element_nodes,ids)
+        end
+        # Retain the legacy tetrahedron-only cache fallback. Classified
+        # mixed volume products use their explicit Surface Tri3 blocks;
+        # lower-dimensional and volume blocks do not enter the field.
+        if isempty(elements) && cached isa Mesh && size(cached.tets,2)>0
+            _high_order_overlay(cached)===nothing || throw(ArgumentError(
+                "$caller: cross fields require a linear tetrahedron boundary"))
             incidence=Dict{NTuple{3,Int32},Int}()
+            public=_mesh_public_tags(cached)
             for column in axes(cached.tets,2)
                 for pattern in _simplex_face_patterns(4,3)
-                    key=_triangle_key(
-                        cached.tets[pattern[1],column],
-                        cached.tets[pattern[2],column],
-                        cached.tets[pattern[3],column])
+                    key=_triangle_key(cached.tets[pattern[1],column],
+                                      cached.tets[pattern[2],column],
+                                      cached.tets[pattern[3],column])
                     incidence[key]=get(incidence,key,0)+1
                 end
             end
+            boundary=Tuple{NTuple{3,NTuple{3,Float64}},NTuple{3,UInt64}}[]
             for (key,count) in incidence
                 count==1 || continue
-                push!(elements,ntuple(k->(
-                    cached.coords[1,key[k]],cached.coords[2,key[k]],
-                    cached.coords[3,key[k]]),3))
+                ids=ntuple(k->_cache_node_tag(public,key[k]),3)
+                frame=ntuple(k->ntuple(axis->cached.coords[axis,key[k]],3),3)
+                push!(boundary,(frame,ids))
             end
-            sort!(elements)
-        end
-        index=_record_node_index(m)
-        for (edim,_,record) in sort!(collect(_discrete_mesh_records(m));
-                                     by=entry->(entry[1],entry[2]))
-            edim==2 || continue
-            for e in eachindex(record.element_types)
-                msh_family(record.element_types[e])===:tri || continue
-                nodes=record.element_nodes[e]
-                length(nodes)>=3 || continue
-                any(k->!haskey(index,nodes[k]),1:3) && continue
-                frame=ntuple(3) do k
-                    record2,column=index[nodes[k]]
-                    (record2.node_coords[1,column],
-                     record2.node_coords[2,column],
-                     record2.node_coords[3,column])
-                end
-                push!(elements,frame)
+            sort!(boundary;by=first)
+            for (frame,ids) in boundary
+                push!(elements,frame);push!(element_nodes,ids)
             end
         end
         isempty(elements) && throw(ArgumentError(
             "$caller: no surface elements to compute a cross field on"))
         normals=Vector{NTuple{3,Float64}}(undef,length(elements))
         directions=Vector{Vector{Float64}}(undef,length(elements))
-        edge_lookup=Dict{NTuple{2,Int},Vector{Int}}()
-        coordinates=NTuple{3,Float64}[]
-        node_position=Dict{NTuple{3,Float64},Int}()
-        element_nodes=Vector{NTuple{3,Int}}(undef,length(elements))
+        edge_lookup=Dict{NTuple{2,UInt64},Vector{Int}}()
         for (i,frame) in enumerate(elements)
             direction,normal=_crossfield_frame(frame)
             (direction===nothing) && throw(ArgumentError(
                 "$caller: degenerate surface element $i"))
             normals[i]=normal
             directions[i]=direction
-            position=ntuple(k->get!(node_position,frame[k]) do
-                push!(coordinates,frame[k])
-                length(coordinates)
-            end,3)
-            element_nodes[i]=position
+            position=element_nodes[i]
             for k in 1:3
                 a=position[k];b=position[mod1(k+1,3)]
                 push!(get!(Vector{Int},edge_lookup,
@@ -8804,10 +9438,8 @@ function _compute_cross_field()
             direction,normal=_crossfield_frame(frame)
             push!(angles,acos(clamp(
                 sum(k->directions[i][k]*direction[k],1:3),-1.0,1.0)))
-            for k in 1:3
-                append!(vectors,frame[k])
-                append!(vectors,directions[i])
-            end
+            for axis in 1:3,node in frame;push!(vectors,node[axis]);end
+            for _ in 1:3;append!(vectors,directions[i]);end
         end
         h_tag=_fresh_view_tag()
         SESSION_VIEWS[h_tag]=_SessionView("H")
@@ -8815,18 +9447,16 @@ function _compute_cross_field()
         _session_view(h_tag,caller).list_counts["ST"]=length(elements)
         h_data=Float64[]
         for (i,frame) in enumerate(elements)
-            for node in frame
-                append!(h_data,node);push!(h_data,sizes[i])
-            end
+            for axis in 1:3,node in frame;push!(h_data,node[axis]);end
+            append!(h_data,fill(sizes[i],3))
         end
         _session_view(h_tag,caller).list_data["ST"]=h_data
         theta_tag=_fresh_view_tag()
         SESSION_VIEWS[theta_tag]=_SessionView("Theta")
         theta_data=Float64[]
         for (i,frame) in enumerate(elements)
-            for node in frame
-                append!(theta_data,node);push!(theta_data,angles[i])
-            end
+            for axis in 1:3,node in frame;push!(theta_data,node[axis]);end
+            append!(theta_data,fill(angles[i],3))
         end
         _session_view(theta_tag,caller).list_types=["ST"]
         _session_view(theta_tag,caller).list_counts["ST"]=length(elements)
@@ -9071,16 +9701,36 @@ function _session_size_field_locked(m::GeoModel;raw::Bool=false)
     function context_fields(spec,config,entities,_params)
         kind=lowercase(spec.kind)
         if kind=="postview"
-            view_tag=haskey(spec.options,"ViewTag") ?
-                tryparse(Int,strip(spec.options["ViewTag"])) :
-                tryparse(Int,strip(get(spec.options,"IField","1")))
-            view_tag===nothing && throw(ArgumentError(
-                "build_geo_size_field: Field[$(spec.tag)].ViewTag must be an integer"))
+            function selector(name,default)
+                haskey(spec.options,name) || return default
+                numeric=tryparse(Float64,strip(spec.options[name]))
+                numeric!==nothing && isfinite(numeric) && isinteger(numeric) || throw(ArgumentError(
+                    "build_geo_size_field: Field[$(spec.tag)].$name must be a finite integer"))
+                return try
+                    Int(numeric)
+                catch error
+                    error isa InterruptException && rethrow()
+                    (error isa InexactError || error isa OverflowError) || rethrow()
+                    throw(ArgumentError(
+                        "build_geo_size_field: Field[$(spec.tag)].$name exceeds the platform Int range"))
+                end
+            end
+            # The shared GEO builder supplies parsed selection/options; validate
+            # the original numeric literals before using its integer selection.
+            view_tag=selector("ViewTag",-1)
+            selector("ViewIndex",0);selector("IView",0)
+            if view_tag<0
+                tags=sort!(collect(keys(SESSION_VIEWS)))
+                index=config.view_index
+                0<=index<length(tags) || throw(ArgumentError(
+                    "build_geo_size_field: PostView Field[$(spec.tag)] references unknown view index $index"))
+                view_tag=tags[index+1]
+            end
             view=get(SESSION_VIEWS,view_tag,nothing)
             view===nothing && throw(ArgumentError(
-                "build_geo_size_field: PostView Field[$(spec.tag)] references " *
-                "unknown view $view_tag"))
-            return _post_view_field(view,spec.tag)
+                "build_geo_size_field: PostView Field[$(spec.tag)] references unknown view $view_tag"))
+            return _post_view_field(view,spec.tag;
+                crop_negative=config.crop_negative_values,use_closest=config.use_closest)
         elseif kind=="automaticmeshsizefield"
             return _automatic_context_field(
                 m,spec,config,entities,"gmsh API")
@@ -9101,7 +9751,7 @@ end
 function _session_mesh1d_options(m::GeoModel,caller::AbstractString)
     tolerance=OPTIONS["Geometry.Tolerance"]
     return Model._ModelMesh1DOptions(
-        Model._model_mesh_lc(m,tolerance,caller),
+        NATIVE_CONTEXT_LC[],
         OPTIONS["Mesh.MeshSizeMin"],OPTIONS["Mesh.MeshSizeMax"],
         OPTIONS["Mesh.MeshSizeFactor"],
         !iszero(OPTIONS["Mesh.MeshSizeFromPoints"]),
@@ -9112,57 +9762,20 @@ function _session_mesh1d_options(m::GeoModel,caller::AbstractString)
         tolerance,!iszero(OPTIONS["Mesh.MeshOnlyEmpty"]),
         !iszero(OPTIONS["Mesh.MeshOnlyVisible"]),Int(OPTIONS["Mesh.MaxRetries"]),
         _session_size_field_locked(m;raw=true),m.meshing.size_callback,
-        nothing,nothing)
+        nothing,message->throw(ErrorException("$caller: $message")),
+        Ref(Model._model_native_random_seed(Int(OPTIONS["Mesh.RandomSeed"]))),
+        OPTIONS["Mesh.RandomFactor3D"],Int(OPTIONS["Mesh.Optimize"]),
+        OPTIONS["Mesh.OptimizeThreshold"],Int(OPTIONS["Mesh.OptimizeNetgen"]))
 end
 
-# Node counts for Gmsh list-data element shapes. "S" is ambiguous between
-# points (1 node) and tetrahedra (4) — Gmsh disambiguates by data length.
-const _VIEW_SHAPE_NODES=Dict{Char,Vector{Int}}(
-    'S'=>[1,4],'L'=>[2],'T'=>[3],'Q'=>[4],'H'=>[8],'I'=>[6],'Y'=>[5])
-
-# Wrap a session view's scalar list data as a `PostViewField` size source.
-# Each element row holds `nodes×3` coordinates then `nodes` scalar values.
-function _post_view_field(view::_SessionView,tag::Int)
+# Decode the public blocked-coordinate layout through the same checked owned
+# list adapter used for POS export. The size-field API retains scalar admission.
+function _post_view_field(view::_SessionView,tag::Int;
+        crop_negative::Bool=true,use_closest::Bool=true)
     caller="build_geo_size_field"
-    coords=Float64[];values=Float64[]
-    element_cells=Pair{Symbol,Matrix{Int32}}[]
-    for type_key in view.list_types
-        length(type_key)==2 || continue
-        type_key[1]=='S' || throw(ArgumentError(
-            "$caller: Field[$tag] requires scalar view data (got $type_key)"))
-        data=view.list_data[type_key]
-        count=view.list_counts[type_key]
-        candidates=get(_VIEW_SHAPE_NODES,type_key[2],nothing)
-        candidates===nothing && throw(ArgumentError(
-            "$caller: unsupported view data type $type_key for Field[$tag]"))
-        nnodes_elem=findfirst(n->count*(n*3+n)==length(data),candidates)
-        nnodes_elem===nothing && throw(ArgumentError(
-            "$caller: $type_key data length $(length(data)) is inconsistent " *
-            "with numEle=$count"))
-        n=candidates[nnodes_elem]
-        connectivity=Matrix{Int32}(undef,n,count)
-        cursor=0
-        for e in 1:count
-            first_node=length(values)+1
-            for k in 1:n
-                append!(coords,data[cursor+1:cursor+3])
-                cursor+=3
-                connectivity[k,e]=Int32(first_node+k-1)
-            end
-            append!(values,data[cursor+1:cursor+n])
-            cursor+=n
-        end
-        key=type_key[2]=='S' ? (n==1 ? :points : :tetrahedra) :
-            type_key[2]=='L' ? :lines :
-            type_key[2]=='T' ? :triangles : type_key[2]=='Q' ? :quadrangles :
-            type_key[2]=='H' ? :hexahedra : type_key[2]=='I' ? :prisms :
-            :pyramids
-        push!(element_cells,key=>connectivity)
-    end
-    isempty(element_cells) && throw(ArgumentError(
-        "$caller: view backing Field[$tag] has no scalar list data"))
-    return PostViewField(reshape(coords,3,:),values;
-                         NamedTuple(element_cells)...)
+    all(type_key->startswith(type_key,"S"),view.list_types) || throw(ArgumentError(
+        "$caller: Field[$tag] requires scalar view data"))
+    return Post.postview_field(_native_list_view_pos(view,caller);crop_negative,use_closest)
 end
 
 """Gmsh-style mesh generation, mutation, bulk retrieval, and periodic operations."""
@@ -9953,14 +10566,18 @@ compute_renumbering(method="RCMK",element_tags=())=
 """
     optimize(method="", force=false, niter=1, dim_tags=())
 
-Optimize the cached mesh in place, matching Gmsh 4.15.2's `optimize`. The empty
-default method (and `"Gmsh"`/`"Relocate3D"`) runs the validated
-boundary-preserving tetrahedral optimizer (`niter` sweeps);
-`"Laplace2D"`/`"Relocate2D"` run isotropic Laplacian smoothing on a triangle
-cache. A nonempty `dim_tags` selection freezes every node incident to
-unselected elements. Other optimizer names fail explicitly. Connectivity and
-entity classification are preserved because only interior node coordinates
-move.
+Optimize the current mesh. The default method and `"Gmsh"`/`"Optimize"` use
+native tetrahedron edge swaps and relocation. These aliases ignore `niter`
+and `dim_tags`; `force=true` admits fully discrete volumes. Transfinite and
+layer-extruded volumes retain their optimizer exclusion. Surviving elements
+keep their identities and interpolation vertices, while new tetrahedra receive
+native constructor identities. Mesh.Renumber controls the final numbering.
+`"Relocate3D"` applies native golden-section relocation to actual linear
+tetrahedra, including explicit tagged records, and ignores `dim_tags`. Moving
+vertices are classified on volumes. Its iteration rule is `niter+2` passes
+except for zero; nonlinear and hybrid relocation remains unsupported.
+`"Laplace2D"` and `"Relocate2D"` retain their existing simplex kernels.
+Other optimizer names fail explicitly.
 """
 optimize(method="",force=false,niter=1,dim_tags=())=
     _optimize_mesh(method,force,niter,dim_tags)
@@ -10165,11 +10782,11 @@ reclassify_nodes()=_reclassify_nodes()
 """
     relocate_nodes(dim=-1, tag=-1)
 
-No-op parity with Gmsh 4.15.2's `relocateNodes`: node ownership derives from
-the generating entity and stays geometry-consistent through every supported
-mutation, so geometric relocation is the identity. `dim=-1, tag=-1` validates
-the whole cache; a nonnegative `tag` additionally requires `dim` in 0:3 and an
-existing classified entity.
+Move selected native Point nodes to their CAD coordinates and Curve/Surface
+nodes to the positions defined by their stored parameters. Missing parameters
+leave coordinates unchanged. Negative dimensions select all entities; a
+negative tag selects every entity of a given dimension. Labels, ownership,
+stored parameters and connectivity are preserved.
 """
 relocate_nodes(dim=-1,tag=-1)=_relocate_nodes(dim,tag)
 
@@ -10246,8 +10863,10 @@ set_reverse(dim,tag,val=true)=_set_reverse_attribute(dim,tag,val)
     set_algorithm(dim, tag, val)
 
 Record the meshing algorithm for entity `(dim, tag)`, matching Gmsh's
-`setAlgorithm`. `dim` must be 2 or 3; unsupported algorithm numbers are stored
-and fail explicitly at `generate` time.
+`setAlgorithm`. Only dimension 2 changes a per-Surface selection; other
+integer dimensions are no-ops. Zero restores the global `Mesh.Algorithm` selection.
+Stored selections are resolved after transfinite, extrusion and periodic-copy
+meshing take precedence.
 """
 set_algorithm(dim,tag,val)=_set_algorithm(dim,tag,val)
 
@@ -10294,8 +10913,9 @@ set_compound(dim,tags)=_set_compound(dim,tags)
 """
     set_outward_orientation(tag)
 
-Record that all boundary surfaces of `Volume[tag]` orient outward, matching
-Gmsh's `setOutwardOrientation`.
+Determine bounding Surface reverse flags from the retained STL and reorient
+existing Surface cells using native CAD normals, matching Gmsh's
+`setOutwardOrientation`.
 """
 set_outward_orientation(tag)=_set_outward_orientation(tag)
 
@@ -10389,6 +11009,36 @@ set_as_boundary_layer(tag)=_field_set_as_boundary_layer(tag)
 end # module field
 end
 
+# This callback is installed only for the selector4 GEO failure boundary.
+# Other parser failures keep the existing open_geo! publication behavior.
+function _native_geo_recombine_partial_publish_locked(model,context)
+    stored_model=deepcopy(model)
+    imported_authority=stored_model.meshing.mesh_authority
+    stored_mesh=imported_authority!==nothing && imported_authority.mesh!==nothing ?
+        imported_authority.mesh : context.mesh===nothing ? nothing : _copy_mesh(context.mesh)
+    stored_class=if imported_authority!==nothing && imported_authority.mesh!==nothing
+        classified=_higher_classification_from_data(stored_mesh,"API.open_geo! selector4 prefix")
+        _mixed_rebind_class(classified,stored_mesh;
+            node_parametric=Model._model_mesh_runtime_parameters(stored_model,stored_mesh))
+    else
+        nothing
+    end
+    index=_current_slot_index_locked()
+    CURRENT[]=stored_model
+    MODEL_FILE_NAME[]=context.file_name
+    if index!=0
+        MODEL_SLOTS[index].model=stored_model
+        MODEL_SLOTS[index].file_name=context.file_name
+    end
+    _replace_mesh_cache_locked!(stored_mesh,stored_class)
+    NODE_TAG_MAX[]=max(NODE_TAG_MAX[],context.mesh_node_max)
+    ELEMENT_TAG_MAX[]=max(ELEMENT_TAG_MAX[],context.mesh_element_max)
+    NATIVE_CONTEXT_LC[]=context.native_context_lc
+    NATIVE_CONTEXT_FORCED_BBOX[]=context.native_context_forced_bbox
+    _native_lookup_import_receipt_locked!(context.native_element_lookup_receipt)
+    return nothing
+end
+
 """
     open_geo!(path; mesh_dim=0)
 
@@ -10399,9 +11049,36 @@ blockers follow [`Tessella.GeoExec.execute_geo`](@ref).
 function open_geo!(path::AbstractString; mesh_dim::Integer=0)
     return lock(STATE_LOCK) do
         _model_locked()
-        result=execute_geo(path;mesh_dim=mesh_dim)
+        result=execute_geo(path;mesh_dim=mesh_dim,
+            _initial_mesh_algorithms=(algorithm_2d=Int(OPTIONS["Mesh.Algorithm"]),
+                algorithm_3d=Int(OPTIONS["Mesh.Algorithm3D"]),
+                recombine_topology_passes=Int(OPTIONS["Mesh.RecombineOptimizeTopology"]),
+                recombine_node_repositioning=Int(OPTIONS["Mesh.RecombineNodeRepositioning"]),
+                recombine_minimum_quality=OPTIONS["Mesh.RecombineMinimumQuality"],
+                native_smoothing=Int(OPTIONS["Mesh.Smoothing"]),
+                second_order_linear=!iszero(OPTIONS["Mesh.SecondOrderLinear"])),
+            _initial_context_lc=NATIVE_CONTEXT_LC[],
+            _initial_context_forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[],
+            _initial_abort_on_error=OPTIONS["General.AbortOnError"],
+            _initial_mesh_error_callback=_native_mesh_input_error_locked,
+            _initial_mesh_begin_callback=_native_mesh_generation_begin_locked,
+            _initial_abort_option_callback=_native_geo_abort_option_locked,
+            _initial_numeric_options=OPTIONS,
+            _initial_numeric_option_callback=_native_geo_numeric_option_locked,
+            _initial_recombine_partial_callback=_native_geo_recombine_partial_publish_locked)
+        NATIVE_CONTEXT_LC[]=result.native_context_lc
+        NATIVE_CONTEXT_FORCED_BBOX[]=result.native_context_forced_bbox
         stored_model=deepcopy(result.model)
-        stored_mesh=result.mesh===nothing ? nothing : _copy_mesh(result.mesh)
+        imported_authority=stored_model.meshing.mesh_authority
+        stored_mesh=imported_authority!==nothing && imported_authority.mesh!==nothing ?
+            imported_authority.mesh : result.mesh===nothing ? nothing : _copy_mesh(result.mesh)
+        stored_class=if imported_authority!==nothing && imported_authority.mesh!==nothing
+            classified=_higher_classification_from_data(stored_mesh,"API.open_geo!")
+            _mixed_rebind_class(classified,stored_mesh;
+                node_parametric=Model._model_mesh_runtime_parameters(stored_model,stored_mesh))
+        else
+            nothing
+        end
         index=_current_slot_index_locked()
         # `Mesh.TransfiniteTri = v` in the file updates the process-global
         # option as Gmsh does; otherwise the file inherits the current option.
@@ -10411,13 +11088,23 @@ function open_geo!(path::AbstractString; mesh_dim::Integer=0)
         else
             OPTIONS["Mesh.TransfiniteTri"]=Float64(result.transfinite_tri)
         end
+        OPTIONS["Mesh.Algorithm"]=Float64(stored_model.meshing.algorithm_2d)
+        OPTIONS["Mesh.Algorithm3D"]=Float64(stored_model.meshing.algorithm_3d)
+        OPTIONS["Mesh.RecombineOptimizeTopology"]=Float64(stored_model.meshing.recombine_topology_passes)
+        OPTIONS["Mesh.RecombineNodeRepositioning"]=Float64(stored_model.meshing.recombine_node_repositioning)
+        OPTIONS["Mesh.RecombineMinimumQuality"]=stored_model.meshing.recombine_minimum_quality
+        OPTIONS["Mesh.Smoothing"]=Float64(stored_model.meshing.native_smoothing)
+        OPTIONS["Mesh.SecondOrderLinear"]=Float64(stored_model.meshing.second_order_linear)
         CURRENT[]=stored_model
         MODEL_FILE_NAME[]=String(path)
         if index!=0
             MODEL_SLOTS[index].model=stored_model
             MODEL_SLOTS[index].file_name=String(path)
         end
-        _replace_mesh_cache_locked!(stored_mesh)
+        _replace_mesh_cache_locked!(stored_mesh,stored_class)
+        NODE_TAG_MAX[]=max(NODE_TAG_MAX[],result.mesh_node_max)
+        ELEMENT_TAG_MAX[]=max(ELEMENT_TAG_MAX[],result.mesh_element_max)
+        _native_lookup_import_receipt_locked!(result.native_element_lookup_receipt)
         result
     end
 end
@@ -10428,7 +11115,7 @@ module view
 using ..API: _view_add,_view_remove,_view_get_index,_view_get_tags,
              _view_add_list_data,_view_get_list_data,_view_add_model_data,
              _view_get_model_data,_view_set_number,_view_get_number,
-             _view_set_string,_view_get_string
+             _view_set_string,_view_get_string,_view_write
 
 """Add a new empty view named `name`, returning its tag."""
 add(name,tag=-1)=_view_add(name,tag)
@@ -10438,6 +11125,8 @@ remove(tag)=_view_remove(tag)
 get_index(tag)=_view_get_index(tag)
 "Return the tags of all views, in increasing tag order."
 get_tags()=_view_get_tags()
+"Write model data and its associated meshes; append preserves the existing file."
+write(tag,filename,append=false)=_view_write(tag,filename,append)
 """Add per-element list `data` of `data_type` for `numEle` elements."""
 add_list_data(tag,data_type,num_ele,data)=
     _view_add_list_data(tag,data_type,num_ele,data)

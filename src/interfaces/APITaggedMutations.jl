@@ -11,54 +11,102 @@ function _tagged_renumber_lists(old_tags,new_tags,caller,kind)
         parsed=UInt64[]
         for value in values
             tag=_cache_checked_public_tag(value,caller,kind)
-            tag<=typemax(Int32) || throw(ArgumentError(
-                "$caller: $name must contain positive Int32 tags"))
             push!(parsed,tag)
         end
         parsed
     end
 end
 
-function _tagged_renumber_order(model,cached,class,node::Bool,caller)
+# GModel::renumberMeshElements numbers saved physical entities first only for
+# an empty mapping. Nonempty mappings are assigned in ordinary CAD order.
+# SaveWithoutOrphans has an independent native policy; this bounded route
+# preserves its existing behavior and covers the default zero setting.
+function _native_empty_element_physical_owners(model)
+    return _native_empty_element_physical_owners(model,!iszero(OPTIONS["Mesh.SaveAll"]))
+end
+
+function _native_empty_element_physical_owners(model,save_all::Bool)
+    physical=Set{Tuple{Int,Int32}}()
+    save_all && return physical
+    for (dim,group) in model_physical_groups(model)
+        for tag in model_entities_for_physical_group(model,dim,group)
+            push!(physical,(dim,Int32(tag)))
+        end
+    end
+    return physical
+end
+
+function _tagged_renumber_order(model,cached,class,node::Bool,caller;
+        overlay=_high_order_overlay(cached),mid_owners=LAST_MESH_HIGH_ORDER_MIDS[],
+        empty_element_mapping=false,save_all=nothing)
     public=class.public_tags
     entries=Tuple{Tuple{Int,Int32},Int,Int,UInt64}[]
     count=node ? length(public.node_tags) : length(public.element_tags)
     for ((dim,tag),record) in Model._discrete_mesh_records_model(model)
-        _cache_covers_record(public,dim,tag) && continue
-        count=Base.checked_add(count,length(node ? record.node_tags : record.element_tags))
+        tags=node ? record.node_tags : record.element_tags
+        if _cache_covers_record(public,dim,tag)
+            indices=node ? public.node_indices : public.element_indices
+            count=Base.checked_add(count,
+                sum(value->!haskey(indices,UInt64(value)),tags;init=0))
+        else
+            count=Base.checked_add(count,length(tags))
+        end
     end
     sizehint!(entries,count)
     if node
         for (position,tag) in enumerate(public.node_tags)
             owner=position<=length(class.node_entities) ? class.node_entities[position] :
-                LAST_MESH_HIGH_ORDER_MIDS[][position-length(class.node_entities)]
+                mid_owners[position-length(class.node_entities)]
             push!(entries,(owner,0,position,tag))
         end
     else
+        ghost_owners=empty_element_mapping && _native_has_ghost_entities(model) ?
+            _imported_ghost_uid_owners(model) : nothing
+        ghost_ranks=ghost_owners===nothing ? nothing : _imported_ghost_uid_ranks(model)
         for (msh,dim,offset,_,owners) in _cache_catalog(cached,class)
-            overlay=_high_order_overlay(cached)
             overlay!==nothing && msh==_p2_skeleton_etype(overlay) && (msh=_p2_etype(overlay))
             for (column,owner) in enumerate(owners)
-                push!(entries,((dim,owner),Int(msh),column,
-                               public.element_tags[offset+column]))
+                uid=public.element_tags[offset+column]
+                receipt=get(model.meshing.imported_entities,(dim,Int(owner)),nothing)
+                if ghost_owners===nothing || receipt===nothing || !startswith(receipt.kind,"Ghost ")
+                    push!(entries,((dim,owner),_native_mesh_element_bucket(msh),column,uid))
+                end
+                ghost_owners===nothing && continue
+                for alias in get(ghost_owners,uid,Tuple{Int,Int32}[])
+                    alias[1]==dim || continue
+                    rank=ghost_ranks[(alias[1],Int(alias[2]))][uid]
+                    push!(entries,(alias,_native_mesh_element_bucket(msh),rank,uid))
+                end
             end
         end
     end
     seen=Set(last(entry) for entry in entries)
     for ((dim,tag),record) in Model._discrete_mesh_records_model(model)
-        _cache_covers_record(public,dim,tag) && continue
+        # On a covered entity, cache-mirrored entries renumber with the cache;
+        # only caller-owned tags enter the record side of the mapping.
+        indices=_cache_covers_record(public,dim,tag) ?
+            (node ? public.node_indices : public.element_indices) : nothing
         tags=node ? record.node_tags : record.element_tags
         for (position,value) in enumerate(tags)
             external=UInt64(value)
+            indices!==nothing && haskey(indices,external) && continue
             external in seen && throw(ArgumentError(
                 "$caller: public $(node ? "node" : "element") tag $external " *
                 "is assigned on more than one entity"))
             push!(seen,external)
-            msh=node ? 0 : Int(record.element_types[position])
+            msh=node ? 0 : _native_mesh_element_bucket(record.element_types[position])
             push!(entries,((dim,Int32(tag)),msh,position,external))
         end
     end
-    sort!(entries;by=entry->(entry[1],entry[2],entry[3]),alg=Base.Sort.MergeSort)
+    physical=empty_element_mapping && !node ?
+        (save_all===nothing ? _native_empty_element_physical_owners(model) :
+         _native_empty_element_physical_owners(model,save_all)) : Set{Tuple{Int,Int32}}()
+    if isempty(physical)
+        sort!(entries;by=entry->(entry[1],entry[2],entry[3]),alg=Base.Sort.MergeSort)
+    else
+        sort!(entries;by=entry->(!(entry[1] in physical),entry[1],entry[2],entry[3]),
+            alg=Base.Sort.MergeSort)
+    end
     return UInt64[last(entry) for entry in entries]
 end
 
@@ -74,13 +122,14 @@ function _tagged_renumber_mapping(order,old_tags,new_tags,caller,kind)
     used=Set{UInt64}()
     sizehint!(mapping,length(order));sizehint!(used,length(order))
     for old in order
-        new=get(requested,old,UInt64(0))
-        if new==0
-            next<typemax(Int32) || throw(ArgumentError(
-                "$caller: renumbered $kind tags exceed Int32"))
-            next+=UInt64(1)
+        if haskey(requested,old)
+            new=requested[old]
+        else
+            next=_native_mesh_next_uid(next,caller)
             new=next
         end
+        kind=="element" && !isempty(requested) &&
+            (new=_native_element_constructor_uid(new))
         new in used && throw(ArgumentError(
             "$caller: renumbering produces duplicate $kind tag $new"))
         push!(used,new)
@@ -90,21 +139,37 @@ function _tagged_renumber_mapping(order,old_tags,new_tags,caller,kind)
 end
 
 function _tagged_record_renumber!(model,mapping,node::Bool)
+    node && Model._model_native_curve_endpoint_remap!(model,mapping)
     for (_,record) in Model._discrete_mesh_records_model(model)
         tags=node ? record.node_tags : record.element_tags
         for position in eachindex(tags)
-            tags[position]=Int32(get(mapping,UInt64(tags[position]),UInt64(tags[position])))
+            tags[position]=get(mapping,tags[position],tags[position])
         end
         node || continue
         for connectivity in record.element_nodes,position in eachindex(connectivity)
-            connectivity[position]=Int32(get(mapping,UInt64(connectivity[position]),
-                                            UInt64(connectivity[position])))
+            connectivity[position]=get(mapping,connectivity[position],connectivity[position])
         end
-        record.aux_params=Dict{Int32,Vector{Float64}}(
-            Int32(get(mapping,UInt64(tag),UInt64(tag)))=>parameters
+        record.aux_params=Dict{UInt64,Vector{Float64}}(
+            get(mapping,tag,tag)=>parameters
             for (tag,parameters) in record.aux_params)
+        record.node_native_params=Dict{UInt64,Vector{Float64}}(
+            get(mapping,tag,tag)=>parameters
+            for (tag,parameters) in record.node_native_params)
     end
     return nothing
+end
+
+function _tagged_renumber_mapping_events(order,old_tags,new_tags,kind)
+    events=Tuple{Symbol,String}[]
+    isempty(old_tags) && return events
+    requested=Dict{UInt64,UInt64}(old=>new for (old,new) in zip(old_tags,new_tags))
+    missing=findfirst(old->!haskey(requested,old),order)
+    if missing!==nothing
+        first=order[missing];last=maximum(values(requested);init=UInt64(0))
+        article=kind=="node" ? "a" : "an"
+        push!(events,(:info,"Mapping does not contain $article $kind tag ($first) - incrementing after last provided tag ($last)"))
+    end
+    return events
 end
 
 function _tagged_mesh_max_tags(model,mesh,public=nothing)
@@ -112,19 +177,21 @@ function _tagged_mesh_max_tags(model,mesh,public=nothing)
     node=maximum(public.node_tags;init=UInt64(0))
     element=maximum(public.element_tags;init=UInt64(0))
     for (_,record) in Model._discrete_mesh_records_model(model)
-        node=max(node,UInt64(maximum(record.node_tags;init=Int32(0))))
-        element=max(element,UInt64(maximum(record.element_tags;init=Int32(0))))
+        node=max(node,UInt64(maximum(record.node_tags;init=UInt64(0))))
+        element=max(element,UInt64(maximum(record.element_tags;init=UInt64(0))))
     end
     return node,element
 end
 
-function _tagged_renumber_plan(model,cached,class,old_list,new_list,kind,caller)
+function _tagged_renumber_plan(model,cached,class,old_list,new_list,kind,caller;
+        overlay=_high_order_overlay(cached),mid_owners=LAST_MESH_HIGH_ORDER_MIDS[],
+        node_max=NODE_TAG_MAX[],element_max=ELEMENT_TAG_MAX[],save_all=nothing,
+        renumber_uid_data::Bool=true)
     node=kind===:node || kind=="node"
     node || kind===:element || kind=="element" || throw(ArgumentError(
         "$caller: renumber kind must be node or element"))
     cached isa Union{Mesh,MixedMesh} && class!==nothing && class.mesh===cached ||
         throw(ArgumentError("$caller: renumbering requires a classified mesh cache"))
-    overlay=_high_order_overlay(cached)
     public=class.public_tags
     if public===nothing
         count=overlay===nothing ? nnodes(cached) : nnodes(overlay)
@@ -133,26 +200,45 @@ function _tagged_renumber_plan(model,cached,class,old_list,new_list,kind,caller)
     end
     label=node ? "node" : "element"
     old_tags,new_tags=_tagged_renumber_lists(old_list,new_list,caller,label)
-    order=_tagged_renumber_order(model,cached,class,node,caller)
-    all(tag->0<tag<=typemax(Int32),order) || throw(ArgumentError(
-        "$caller: retained $label tags exceed Int32"))
+    order=_tagged_renumber_order(model,cached,class,node,caller;overlay,mid_owners,
+        empty_element_mapping=isempty(old_tags),save_all)
     mapping=_tagged_renumber_mapping(order,old_tags,new_tags,caller,label)
-    staged_model=deepcopy(model)
+    mapping_events=_tagged_renumber_mapping_events(order,old_tags,new_tags,label)
+    if !node && isempty(old_tags) && _native_has_ghost_entities(model)
+        # Objects outside every native entity bulk collection keep their tag.
+        for uid in public.element_tags
+            get!(mapping,uid,uid)
+        end
+    end
+    staged_model=Model._model_mesh_transaction_copy(model)
     _tagged_record_renumber!(staged_model,mapping,node)
+    node && Model._model_periodic_uid_remap!(staged_model,mapping)
+    node || Model._model_imported_ghost_remap!(staged_model,mapping)
     node_tags=node ? UInt64[mapping[tag] for tag in public.node_tags] : public.node_tags
     element_tags=node ? public.element_tags : UInt64[mapping[tag] for tag in public.element_tags]
     mesh=cached
+    uid_events=Tuple{Symbol,String}[]
     if cached isa MixedMesh && cached.entity_data!==nothing
         # Labels do not validate or reconstruct an existing mesh. In particular,
         # an edited empty block keeps its stored position and metadata arrays.
         mesh=deepcopy(cached)
         data=mesh.entity_data
         data.external_node_tags[:]=node_tags
+        if any(iszero,node_tags) || any(iszero,element_tags)
+            mesh=Elements._native_mixed_mesh_tags(mesh)
+            data=mesh.entity_data
+        end
         offset=0
         for (index,block) in enumerate(mesh.blocks)
             width=length(block.tags)
             data.external_element_tags[index][:]=element_tags[offset+1:offset+width]
             offset+=width
+        end
+        if renumber_uid_data && any(section->section.uid_context!==nothing,mesh.ancillary_sections)
+            numbered=Elements._msh_uid_numbered_payload(mesh,node ? mapping : nothing,
+                node ? nothing : mapping;kind=node ? :node : :element)
+            mesh.ancillary_sections[:]=numbered.ancillary
+            uid_events=numbered.events
         end
     end
     table=_cache_public_tags(mesh;authority=public.authority,node_tags,element_tags,
@@ -164,9 +250,13 @@ function _tagged_renumber_plan(model,cached,class,old_list,new_list,kind,caller)
     previous_node,previous_element=_tagged_mesh_max_tags(model,cached,public)
     return (model=staged_model,mesh=mesh,class=new_class,
         element_tag_map=node ? nothing : mapping,authority=public.authority,
-        preserved_overlay=overlay,preserved_mid_owners=LAST_MESH_HIGH_ORDER_MIDS[],
-        max_node_tag=max(max_node_tag,previous_node,UInt64(NODE_TAG_MAX[])),
-        max_element_tag=max(max_element_tag,previous_element,UInt64(ELEMENT_TAG_MAX[])))
+        node_tag_map=node ? mapping : Dict(tag=>tag for tag in public.node_tags),
+        preserved_overlay=overlay,preserved_mid_owners=mid_owners,
+        preserve_surface_constructor_inputs=true,
+        native_renumber_mapping_events=mapping_events,
+        native_uid_data_events=uid_events,native_view_kind=node ? :node : :element,
+        max_node_tag=max(max_node_tag,previous_node,UInt64(node_max)),
+        max_element_tag=max(max_element_tag,previous_element,UInt64(element_max)))
 end
 
 function _mixed_remap_periodic_nodes(mesh,remap,caller;drop_removed::Bool=false)
@@ -251,7 +341,7 @@ function _dim01_lift_native_cell(primary_nodes,msh,quadratic,interpolation,calle
 end
 
 function _dim01_native_source_model(m,cached,class,caller)
-    source=deepcopy(m)
+    source=Model._model_mesh_transaction_copy(m)
     primary=falses(nnodes(cached))
     edges=Set{NTuple{2,Int32}}()
     top=Set(class.entities)
@@ -438,7 +528,7 @@ function _dim01_complete_native_cache(m,cached,class,caller)
                                                         collect(@view cached.coords[:,node]))
         end
     end
-    data=Elements.MixedEntityData(metadata;node_entities,node_parametric=parameters,
+    data=Elements._native_mixed_entity_data(metadata;node_entities,node_parametric=parameters,
         external_node_tags=UInt64.(1:nnodes(cached)),block_entities=block_owners,
         external_element_tags=external)
     names=cached isa MixedMesh ? cached.physical_names : m.physical_names

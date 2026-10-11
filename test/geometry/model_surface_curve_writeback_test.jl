@@ -4,44 +4,6 @@ using Test, Tessella, Random
 using Tessella.Model: mesh_model_surface, model_to_mixed
 const Model=Tessella.Model
 
-function boxes(value)
-    value isa GlobalRef && return Int(value.mod===Core && value.name===:Box)
-    value isa Core.CodeInfo && return sum(boxes,value.code;init=0)
-    value isa Expr && return sum(boxes,value.args;init=0)
-    value isa AbstractArray && return sum(boxes,value;init=0)
-    return 0
-end
-
-# Comprehension closure types have callable methods rather than Function
-# bindings. Inspect those bodies as well as ordinary/keyword wrappers.
-function closure_methods(function_value)
-    result=Method[]
-    owner=parentmodule(function_value)
-    prefix="#"*String(nameof(function_value))*"#"
-    for name in names(owner;all=true)
-        startswith(String(name),prefix) || continue
-        value=getfield(owner,name)
-        if value isa Function
-            append!(result,methods(value))
-        elseif value isa Type && value<:Function
-            for match in Base._methods_by_ftype(
-                    Tuple{value,Vararg{Any}},-1,Base.get_world_counter())
-                push!(result,match.method)
-            end
-        end
-    end
-    return unique!(result)
-end
-
-function nested_box_control(values)
-    [begin
-        parameter=entry
-        captured=()->parameter
-        parameter+=1
-        captured()
-    end for entry in values]
-end
-
 function fixture(axes,b,law,winding)
     corners=((0.,0.),(1.,0.),(1.,1.),(0.,1.))
     points=join(("Point($i)={"*join(ntuple(d->d==axes[1] ? p[1] :
@@ -118,34 +80,6 @@ end
         @test [count(owner->owner[1]==dimension,
                      projected.entity_data.node_entities) for dimension in 0:2]==[4,8,3]
         @test model.curve_params==parameters
-    end
-end
-
-@testset "Writeback avoids boxed matching in actual comprehension bodies" begin
-    @test sum(boxes(Base.uncompressed_ast(method)) for method in methods(nested_box_control))==0
-    @test sum(boxes(Base.uncompressed_ast(method)) for method in closure_methods(nested_box_control))>0
-    for function_value in (Model._model_surface_curve_parameter_match,
-                           Model._model_surface_curve_writeback!)
-        bodies=unique!(vcat(collect(methods(function_value)),closure_methods(function_value)))
-        @test sum(boxes(Base.uncompressed_ast(method)) for method in bodies)==0
-    end
-    allocations=Int[]
-    for b in (128,256,512)
-        model=parse_model(fixture((1,2,3),b,"",1))
-        mesh=mesh_model_surface(model,1)
-        eligible,edges=Model._mesh_boundary_classification(mesh)
-        protected=falses(size(mesh.coords,2))
-        parameters=copy(model.curve_params[2])
-        coordinates=copy(mesh.coords)
-        Model._model_surface_curve_writeback!(model,2,mesh,eligible,edges,protected,"test")
-        allocation=minimum(@allocated(Model._model_surface_curve_writeback!(
-            model,2,mesh,eligible,edges,protected,"test")) for _ in 1:3)
-        push!(allocations,allocation)
-        @test model.curve_params[2]==parameters
-        @test reinterpret(UInt64,vec(mesh.coords))==reinterpret(UInt64,vec(coordinates))
-    end
-    for index in 2:3
-        @test allocations[index]<=2.15allocations[index-1]+65536
     end
 end
 

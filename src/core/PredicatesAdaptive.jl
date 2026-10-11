@@ -281,7 +281,7 @@ function _orient2_adaptive(ax, ay, bx, by, cx, cy, detsum::Float64)
 end
 
 function _orient3_adaptive(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz,
-                           permanent::Float64)
+                           permanent::Float64, ::Val{Magnitude}=Val(false)) where {Magnitude}
     adx = ax - dx; bdx = bx - dx; cdx = cx - dx
     ady = ay - dy; bdy = by - dy; cdy = cy - dy
     adz = az - dz; bdz = bz - dz; cdz = cz - dz
@@ -314,7 +314,7 @@ function _orient3_adaptive(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz,
 
     det = _estimate(finlength, s.fin1)
     errbound = O3DERRBOUND_B * permanent
-    (det >= errbound || -det >= errbound) && return _isign(det)
+    (det >= errbound || -det >= errbound) && return Magnitude ? det : _isign(det)
 
     adxtail = _two_diff_tail(ax, dx, adx)
     bdxtail = _two_diff_tail(bx, dx, bdx)
@@ -329,7 +329,7 @@ function _orient3_adaptive(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz,
     if adxtail == 0.0 && bdxtail == 0.0 && cdxtail == 0.0 &&
        adytail == 0.0 && bdytail == 0.0 && cdytail == 0.0 &&
        adztail == 0.0 && bdztail == 0.0 && cdztail == 0.0
-        return _isign(det)
+        return Magnitude ? det : _isign(det)
     end
     (_magnitude_ok3(adxtail) && _magnitude_ok3(bdxtail) && _magnitude_ok3(cdxtail) &&
      _magnitude_ok3(adytail) && _magnitude_ok3(bdytail) && _magnitude_ok3(cdytail) &&
@@ -343,7 +343,7 @@ function _orient3_adaptive(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz,
             bdztail * (cdx * ady - adx * cdy)) +
            (cdz * ((adx * bdytail + bdy * adxtail) - (ady * bdxtail + bdx * adytail)) +
             cdztail * (adx * bdy - bdx * ady))
-    (det >= errbound || -det >= errbound) && return _isign(det)
+    (det >= errbound || -det >= errbound) && return Magnitude ? det : _isign(det)
 
     finnow = s.fin1; finother = s.fin2
 
@@ -570,5 +570,5 @@ function _orient3_adaptive(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz,
         finnow, finother = finother, finnow
     end
 
-    @inbounds return _isign(finnow[finlength])
+    @inbounds return Magnitude ? finnow[finlength] : _isign(finnow[finlength])
 end

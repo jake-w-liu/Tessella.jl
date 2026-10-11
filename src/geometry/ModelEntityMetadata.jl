@@ -31,10 +31,12 @@ curves report `"Line"`, `"Circle"`, or `"Ellipse"`; explicit surfaces report
 function model_entity_type(m::GeoModel,dim,tag)
     dimension,entity_tag=_model_metadata_entity(
         m,dim,tag,"model_entity_type")
-    # Gmsh 4.15.2 names discrete entities "Discrete point", "Discrete curve",
-    # "Discrete surface", "Discrete volume".
+    imported=get(m.meshing.imported_entities,(dimension,entity_tag),nothing)
+    imported===nothing || return imported.kind
+    # A discrete vertex inherits GVertex::geomType()==Point in Gmsh 4.15.2;
+    # the higher-dimensional discrete classes supply their own type names.
     haskey(m.discrete,(dimension,entity_tag)) &&
-        return ("Discrete point","Discrete curve",
+        return ("Point","Discrete curve",
                 "Discrete surface","Discrete volume")[dimension+1]
     return _model_entity_type_name(m,dimension,entity_tag)
 end
@@ -145,29 +147,45 @@ end
 """
     model_parent(model, dim, tag) -> Tuple{Int,Int}
 
-Return the partition parent of an existing entity. Native `GeoModel` entities are
-not partition entities, so the result is always `(-1,-1)`.
+Return an imported partition entity's parent. Ordinary geometry and ghost
+entities return `(-1,-1)`.
 """
 function model_parent(m::GeoModel,dim,tag)
-    _model_metadata_entity(m,dim,tag,"model_parent")
-    return (-1,-1)
+    key=_model_metadata_entity(m,dim,tag,"model_parent")
+    imported=get(m.meshing.imported_entities,key,nothing)
+    return imported===nothing ? (-1,-1) : imported.parent
 end
 
 """
     model_number_of_partitions(model) -> Int
 
 Return the number of mesh partitions represented by the native geometry model.
-`GeoModel` does not own partition entities, so this is always zero.
+Imported MSH partition metadata supplies this count; ordinary geometry models
+have zero partitions.
 """
-model_number_of_partitions(::GeoModel)=0
+model_number_of_partitions(m::GeoModel)=m.meshing.imported_num_partitions
 
 """
     model_partitions(model, dim, tag) -> Vector{Int}
 
-Return a detached list of partitions containing an existing entity. Native
-`GeoModel` entities do not carry partition membership, so the result is empty.
+Return a detached list of partitions containing an existing entity.
+Imported partition and ghost entities retain their file membership. Ordinary
+geometry entities return an empty list.
 """
 function model_partitions(m::GeoModel,dim,tag)
-    _model_metadata_entity(m,dim,tag,"model_partitions")
-    return Int[]
+    key=_model_metadata_entity(m,dim,tag,"model_partitions")
+    imported=get(m.meshing.imported_entities,key,nothing)
+    return imported===nothing ? Int[] : copy(imported.partitions)
+end
+
+function _model_imported_ghost_remap!(m,mapping;drop_removed=false)
+    for members in values(m.meshing.imported_ghost_elements)
+        replacement=Tuple{UInt64,Int32}[]
+        for (uid,partition) in members
+            haskey(mapping,uid) || !drop_removed || continue
+            push!(replacement,(get(mapping,uid,uid),partition))
+        end
+        empty!(members);append!(members,replacement)
+    end
+    return nothing
 end

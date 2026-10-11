@@ -20,15 +20,15 @@ const _MESH_LIFECYCLE_API=Tessella.API
         generated=_MESH_LIFECYCLE_API.mesh.generate(3)
         generated_crc=mesh_crc(generated)
         @test generated_crc.sha==
-              "685ae426e57a88732577b13e644113e0bff790099eb0e7292071cc2b8bb77678"
+              "ec97caf92e736f8590fe61176430799f103bbe3804756c0577ab56c1d6f4a52e"
 
         refined=_MESH_LIFECYCLE_API.mesh.refine()
         refined_crc=mesh_crc(refined)
         @test validate(refined).ok
-        @test refined_crc.n_nodes==5378
-        @test refined_crc.n_tets==27768
+        @test refined_crc.n_nodes==5743
+        @test refined_crc.n_tets==30688
         @test refined_crc.sha==
-              "47c38a1bf517b7e5a23fac3c9bba1f6d501576fa23470514e287ac304d928f74"
+              "7531c4106ab48b0b7ba264d8271a1479dbee695861e8995cf61075657947a40a"
 
         stored=_MESH_LIFECYCLE_API.LAST_MESH[]
         @test stored!==nothing && stored!==refined
@@ -39,23 +39,23 @@ const _MESH_LIFECYCLE_API=Tessella.API
         @test mesh_crc(_MESH_LIFECYCLE_API.mesh.get())==refined_crc
 
         @test_throws ArgumentError _MESH_LIFECYCLE_API.mesh.refine(
-            max_nodes=39682)
+            max_nodes=43332)
         @test mesh_crc(_MESH_LIFECYCLE_API.mesh.get())==refined_crc
         @test_throws ArgumentError _MESH_LIFECYCLE_API.mesh.refine(
-            max_cells=222143)
+            max_cells=255079)
         @test mesh_crc(_MESH_LIFECYCLE_API.mesh.get())==refined_crc
         @test_throws ArgumentError _MESH_LIFECYCLE_API.mesh.refine(
             max_nodes=true)
         @test mesh_crc(_MESH_LIFECYCLE_API.mesh.get())==refined_crc
 
         twice=_MESH_LIFECYCLE_API.mesh.refine(
-            max_nodes=39683,max_cells=222144)
+            max_nodes=43333,max_cells=255080)
         twice_crc=mesh_crc(twice)
         @test validate(twice).ok
-        @test twice_crc.n_nodes==39683
-        @test twice_crc.n_tets==222144
+        @test twice_crc.n_nodes==43333
+        @test twice_crc.n_tets==245504
         @test twice_crc.sha==
-              "b6ae93f66a976980b9c58606aeb6ab4bca671282c3bbb5d69633266a0b57a2f2"
+              "a0e0996c702ab960cef8fc0de4a4f837a7887a97dc2a584c90ff8c00f7ce44c7"
 
         # `mesh.clear` removes only elements classified on the Volume; the
         # materialized corner Points keep their nodes, matching Gmsh's

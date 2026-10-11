@@ -30,15 +30,16 @@ function _legacy_p2_quality_children(v::NTuple{4})
             (bc,cd,bd,ad),(bc,cd,ac,c),(bc,ab,bd,b),(d,cd,bd,ad))
 end
 
-@inline function _legacy_p2_corner_det(frame,normal)
+@inline function _legacy_p2_corner_det(frame,normal;native_determinant=false)
     du,dv,dw=frame
-    return normal===nothing ? MeshElementQuality._det3(du,dv,dw) :
+    return normal===nothing ?
+        (native_determinant ? _legacy_p2_native_det(du,dv,dw) : MeshElementQuality._det3(du,dv,dw)) :
         MeshElementQuality._dot3(normal,MeshElementQuality._cross3(du,dv))
 end
 
-function _legacy_p2_jac_domain(vertices,normal)
-    coefficients=_legacy_p2_det_coefficients(vertices,normal)
-    corners=ntuple(vertex->_legacy_p2_corner_det(vertices[vertex],normal),length(vertices))
+function _legacy_p2_jac_domain(vertices,normal;native_determinant=false)
+    coefficients=_legacy_p2_det_coefficients(vertices,normal;native_determinant)
+    corners=ntuple(vertex->_legacy_p2_corner_det(vertices[vertex],normal;native_determinant),length(vertices))
     return _LegacyP2QualityDomain(vertices,minimum(corners),maximum(corners),
         minimum(coefficients),maximum(coefficients))
 end
@@ -166,7 +167,7 @@ function _legacy_p2_heap_push!(domains,domain,maximum_mode)
 end
 
 function _legacy_p2_subdivide_quality!(domains,normal,min_l,max_l,
-        isotropy::Bool,maximum_mode::Bool)
+        isotropy::Bool,maximum_mode::Bool;native_determinant=false)
     for index in (length(domains)÷2):-1:1
         _legacy_p2_heap_sift!(domains,index,maximum_mode)
     end
@@ -182,7 +183,7 @@ function _legacy_p2_subdivide_quality!(domains,normal,min_l,max_l,
         end
         for vertices in _legacy_p2_quality_children(domain.vertices)
             child=isotropy ? _legacy_p2_icn_domain(vertices,normal) :
-                _legacy_p2_jac_domain(vertices,normal)
+                _legacy_p2_jac_domain(vertices,normal;native_determinant)
             min_l=min(min_l,child.min_l);max_l=max(max_l,child.max_l)
             _legacy_p2_heap_push!(domains,child,maximum_mode)
         end
@@ -190,21 +191,21 @@ function _legacy_p2_subdivide_quality!(domains,normal,min_l,max_l,
     return min_l,max_l
 end
 
-function _legacy_p2_jac_extrema(vertices,normal)
-    initial=_legacy_p2_jac_domain(vertices,normal)
+function _legacy_p2_jac_extrema(vertices,normal;native_determinant=false)
+    initial=_legacy_p2_jac_domain(vertices,normal;native_determinant)
     # A zero polynomial has exact extrema without subdivision. This also
     # avoids a zero tolerance spending the entire upstream subdivision budget.
     initial.min_b==initial.max_b==0 && return 0.0,0.0
     domains=[initial]
     min_l,max_l=_legacy_p2_subdivide_quality!(domains,normal,
-        initial.min_l,initial.max_l,false,false)
-    _legacy_p2_subdivide_quality!(domains,normal,min_l,max_l,false,true)
+        initial.min_l,initial.max_l,false,false;native_determinant)
+    _legacy_p2_subdivide_quality!(domains,normal,min_l,max_l,false,true;native_determinant)
     return minimum(domain.min_b for domain in domains),
            maximum(domain.max_b for domain in domains)
 end
 
-function _legacy_p2_bounded_quality(mesh,vertices,normal,scale,name,caller)
-    min_det,max_det=_legacy_p2_jac_extrema(vertices,normal)
+function _legacy_p2_bounded_quality(mesh,vertices,normal,scale,name,caller;native_determinant=false)
+    min_det,max_det=_legacy_p2_jac_extrema(vertices,normal;native_determinant)
     if name=="minDetJac" || name=="maxDetJac"
         value=name=="minDetJac" ? min_det : max_det
         return _legacy_p2_scaled_quantity(value,scale,length(vertices)-1)

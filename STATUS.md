@@ -9,7 +9,8 @@ The original Stage 0–6 simplex-mesher roadmap is complete and remains the regr
 baseline. The active roadmap now targets independent Gmsh 4.15.2 parity and is **not
 complete**. Work is ordered by ASCENT meshing value before UI and post-processing.
 The active package and verification contract supports Julia 1.12.x and 1.13.x,
-with byte-identical mesh output verified across both lines. Older
+with byte-identical baseline mesh output verified across both lines in the
+last complete release. Older
 runtime measurements retained in the dated history below are provenance, not current
 support or test requirements.
 
@@ -22,6 +23,35 @@ support or test requirements.
 | 4 | uniform sizing, quality metrics, flips, smoothing, sliver reduction | DONE |
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
+
+### Implementation takeover and concise tests (2026-10-11)
+
+Devin's uncommitted Source is integrated into Main with reviewed curved,
+periodic, matching, compact-cap coverage and writer fixes. Routine testing now
+uses 157 small functional assertions. Historical native, resource, HFSS and
+external solver campaigns are opt-in; see [test instructions](test/README.md).
+
+The corrected functional suite passes on Julia 1.12.7 at normal `-O2` with
+bounds checking: 157/157, actual exit 0, 301.75 seconds including 36.14 seconds
+of package precompilation. API generation compilation dominated that run.
+Bounded integrated public checks also pass: writer43 on Julia1.12.7,
+cross-field30 and compact-prism27 on Julia1.13.1, and periodic lifecycle57 on
+Julia1.12.7. Those public checks used minimal compilation and ordinary small
+fixtures. Matching and compact-coverage independent leaves also pass.
+
+Package checks pass 157/157: normal Julia 1.13.1 in 217.47 seconds before the
+final small hybrid fixes, and final-source minimally compiled Julia 1.12.7 in
+37.03 seconds including precompilation (functional body 1.6 seconds). The final
+hybrid public regression passes 35/35 on Julia 1.13.1, including single/two-region
+generation and failure atomicity. It fixed missing option registration, TF
+constructor publication and heterogeneous batch snapshot types.
+
+The prepared Source is integrated in this Main revision; 385 referenced opt-in
+fixture/adapter files and their byte-preservation rules are retained. No complete
+extended suite or external solver success is claimed. Optional wrapped-counter
+probes remain unqualified after an early retained-UID collision.
+Full P1–P6 parity remains open. See the
+[current handoff](HANDOFF.md#takeover-2026-10-11).
 
 ### Continuation handoff and unfinished integration (2026-10-10)
 

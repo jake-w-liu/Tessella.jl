@@ -51,9 +51,9 @@ function _public_point_query_mesh(model,cached,entity,caller;selected_tags=nothi
     cells=zeros(Int32,1,length(selected));entities=Dict{Tuple{Int,Int},Elements.MixedEntity}()
     for (column,index) in enumerate(selected)
         external=nodes[index]
-        coordinate=_mesh_public_node_coords(model,cached,Int32(external))
+        coordinate=_mesh_public_node_coords(model,cached,external)
         coordinate===nothing && throw(ArgumentError("$caller: Point node tag $external has no coordinates"))
-        _,_,_,point=_get_element(tags[index])
+        _,_,_,point=_get_element_native_lookup_live(tags[index])
         position=get(node_positions,external,Int32(0))
         if position==0
             position=Int32(length(external_nodes)+1)
@@ -65,7 +65,7 @@ function _public_point_query_mesh(model,cached,entity,caller;selected_tags=nothi
         get!(entities,(0,point),Elements.MixedEntity(0,point,coordinate))
     end
     isempty(selected) && return nothing
-    data=Elements.MixedEntityData(entities;node_entities=node_owners,
+    data=Elements._native_mixed_entity_data(entities;node_entities=node_owners,
         node_parametric=fill(nothing,length(external_nodes)),external_node_tags=external_nodes,
         block_entities=[cell_owners],external_element_tags=[tags[selected]])
     coords=zeros(3,length(coordinates))
@@ -76,8 +76,7 @@ function _public_point_query_mesh(model,cached,entity,caller;selected_tags=nothi
 end
 
 function _public_point_record_mesh(model,cached,element_tag,caller)
-    tag=_mesh_query_integer(element_tag,caller,"element_tag")
-    0<tag<=typemax(Int32) || throw(ArgumentError("$caller: element_tag must be a positive Int32 tag"))
+    tag=_mesh_query_uid(element_tag,caller,"element_tag")
     for (_,entity,record) in _discrete_mesh_records(model)
         for index in eachindex(record.element_tags)
             record.element_tags[index]==tag && record.element_types[index]==15 || continue
@@ -115,7 +114,7 @@ function _generation_bind_point_records!(model,cache,class,sources,caller)
         bindings[position]=tag
         if record!==nothing
             for (msh,nodes) in zip(record.element_types,record.element_nodes)
-                msh==15 && nodes==Int32[tag] || throw(ArgumentError(
+                msh==15 && nodes==UInt64[tag] || throw(ArgumentError(
                     "$caller: native Point[$point] has an unsupported mesh element identity"))
             end
             empty!(record.node_tags)
@@ -134,9 +133,9 @@ function _generation_public_labels!(model,previous,cache,class,overlay,mids,
         "$caller: public generation labels require classified node ownership"))
     actual_count=overlay===nothing ? nnodes(cache) : nnodes(overlay)
     owners=overlay===nothing ? class.node_entities : vcat(class.node_entities,mids)
-    node_entries=Tuple{Tuple{Int,Int32},Int,Int,UInt64}[]
+    node_entries=Tuple{Tuple{Int,Int32},Int,Int,Union{Nothing,UInt64}}[]
     for position in 1:actual_count
-        push!(node_entries,(owners[position],0,position,get(bindings,position,UInt64(0))))
+        push!(node_entries,(owners[position],0,position,get(bindings,position,nothing)))
     end
     records=Model._discrete_mesh_records_model(model)
     for ((dim,entity),record) in records,(position,tag) in enumerate(record.node_tags)
@@ -146,30 +145,30 @@ function _generation_public_labels!(model,previous,cache,class,overlay,mids,
     node_tags=zeros(UInt64,actual_count)
     node_map=Dict{UInt64,UInt64}()
     next_node=renumber ? UInt64(0) : max(UInt64(NODE_TAG_MAX[]),
-        maximum((entry[4] for entry in node_entries);init=UInt64(0)))
+        maximum((entry[4]===nothing ? UInt64(0) : entry[4] for entry in node_entries);init=UInt64(0)))
     used_nodes=Set{UInt64}()
     for (_,kind,position,old_tag) in node_entries
         tag=old_tag
-        if renumber || old_tag==0
-            next_node<typemax(Int32) || throw(ArgumentError(
-                "$caller: generated public node tags exceed Int32"))
+        if renumber || old_tag===nothing
+            next_node<typemax(UInt64) || throw(ArgumentError(
+                "$caller: generated public node tags exceed UInt64"))
             next_node+=1;tag=next_node
         end
         tag in used_nodes && throw(ArgumentError(
             "$caller: retained public node tag $tag is assigned more than once"))
         push!(used_nodes,tag)
         kind==0 && (node_tags[position]=tag)
-        old_tag==0 || (node_map[old_tag]=tag)
+        old_tag===nothing || (node_map[old_tag]=tag)
     end
     _validate_generated_cache_references(model,previous,caller;
         retained_nodes=Set(values(bindings)))
     _tagged_record_renumber!(model,node_map,true)
     _,_,cell_count=_mesh_element_offsets(cache)
-    cell_entries=Tuple{Tuple{Int,Int32},Int,Int,Int,UInt64}[]
+    cell_entries=Tuple{Tuple{Int,Int32},Int,Int,Int,Union{Nothing,UInt64}}[]
     for (msh,dim,offset,cells,cell_owners) in _cache_catalog(cache,class)
         overlay!==nothing && msh==_p2_skeleton_etype(overlay) && (msh=_p2_etype(overlay))
         for column in axes(cells,2)
-            push!(cell_entries,((dim,cell_owners[column]),Int(msh),0,offset+column,UInt64(0)))
+            push!(cell_entries,((dim,cell_owners[column]),Int(msh),0,offset+column,nothing))
         end
     end
     for ((dim,entity),record) in records,(position,tag) in enumerate(record.element_tags)
@@ -179,20 +178,20 @@ function _generation_public_labels!(model,previous,cache,class,overlay,mids,
     element_tags=zeros(UInt64,cell_count)
     element_map=Dict{UInt64,UInt64}()
     next_element=renumber ? UInt64(0) : max(UInt64(ELEMENT_TAG_MAX[]),
-        maximum((entry[5] for entry in cell_entries);init=UInt64(0)))
+        maximum((entry[5]===nothing ? UInt64(0) : entry[5] for entry in cell_entries);init=UInt64(0)))
     used_elements=Set{UInt64}()
     for (_,_,kind,position,old_tag) in cell_entries
         tag=old_tag
-        if renumber || old_tag==0
-            next_element<typemax(Int32) || throw(ArgumentError(
-                "$caller: generated public element tags exceed Int32"))
+        if renumber || old_tag===nothing
+            next_element<typemax(UInt64) || throw(ArgumentError(
+                "$caller: generated public element tags exceed UInt64"))
             next_element+=1;tag=next_element
         end
         tag in used_elements && throw(ArgumentError(
             "$caller: retained public element tag $tag is assigned more than once"))
         push!(used_elements,tag)
         kind==0 && (element_tags[position]=tag)
-        old_tag==0 || (element_map[old_tag]=tag)
+        old_tag===nothing || (element_map[old_tag]=tag)
     end
     _tagged_record_renumber!(model,element_map,false)
     if cache isa MixedMesh && cache.entity_data!==nothing

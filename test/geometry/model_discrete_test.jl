@@ -36,7 +36,7 @@ end
     state()=deepcopy((model.discrete,model.meshing.attached))
 
     before=state()
-    for entity in (1,2,3), bad in (0,-1,true,big(typemax(Int32))+1,big(2)^100)
+    for entity in (1,2,3), bad in (-1,true,1.5,big(typemax(UInt64))+1,big(2)^100)
         @test_throws ArgumentError add_discrete_nodes!(model,1,entity,
             Any[70,bad],[7.,0,0,8,0,0])
         @test state()==before
@@ -56,7 +56,7 @@ end
     @test state()==before
 
     for (entity,connectivity) in ((1,[10,20]),(2,[30,40]))
-        for bad in (0,-1,true,big(typemax(Int32))+1,big(2)^100,50,60)
+        for bad in (-1,true,1.5,big(typemax(UInt64))+1,big(2)^100,50,60)
             @test_throws ArgumentError add_discrete_elements!(model,1,entity,
                 [1],[Any[70,bad]],[vcat(connectivity,connectivity)])
             @test state()==before
@@ -79,35 +79,56 @@ end
     add_discrete_nodes!(model,1,1,[10,10,typemax(Int32)],
         [4.,0,0,5,0,0,6,0,0],[0.25,0.5,0.75])
     record=model.discrete[(1,1)]
-    @test record.node_tags==Int32[10,20,typemax(Int32)]
+    @test record.node_tags==UInt64[10,20,typemax(Int32)]
     @test record.node_coords==[5. 1 6;0 0 0;0 0 0]
     @test record.node_params==reshape([0.5,1.,0.75],1,3)
     # Element dimension remains independent of its classification entity.
     add_discrete_elements!(model,1,1,[2],[[typemax(Int32)]],
                            [[10,20,typemax(Int32)]])
-    @test record.element_tags==Int32[50,typemax(Int32)]
+    @test record.element_tags==UInt64[50,typemax(Int32)]
     @test record.element_types==Int32[1,2]
     add_discrete_nodes!(model,1,3,[70],[7.,0,0])
-    @test model.meshing.attached[(1,3)].node_tags==Int32[70]
+    @test model.meshing.attached[(1,3)].node_tags==UInt64[70]
+end
+
+
+@testset "raw discrete records retain the full UInt64 identifier domain" begin
+    for uid in (UInt64(0), UInt64(typemax(Int32))+1,
+                UInt64(1)<<63, typemax(UInt64))
+        model=GeoModel()
+        entity=add_discrete_entity!(model,1,1)
+        add_discrete_nodes!(model,1,entity,[uid,UInt64(70)],
+                            [0.,0,0,1,0,0],[0.,1.])
+        record=model.discrete[(1,entity)]
+        @test record.node_tags==UInt64[uid,70]
+        @test eltype(record.node_tags)===UInt64
+        @test record.node_coords==[0. 1.;0. 0.;0. 0.]
+        @test record.node_params==reshape([0.,1.],1,2)
+        add_discrete_elements!(model,1,entity,[1],[[uid]],[[uid,70]])
+        @test record.element_tags==UInt64[uid]
+        @test eltype(record.element_tags)===UInt64
+        @test record.element_types==Int32[1]
+        @test record.element_nodes==[UInt64[uid,70]]
+    end
 end
 
 @testset "boundary turning angles conserve chain edges" begin
     split=Tessella.Model._split_chains_by_angle
-    coords=Dict{Int32,NTuple{3,Float64}}(
+    coords=Dict{UInt64,NTuple{3,Float64}}(
         1=>(0.,0.,0.),2=>(1.,0.,0.),3=>(2.,0.,0.),
         4=>(2.,1.,0.),5=>(1.,1.,0.),6=>(0.,1.,0.))
-    straight=Tuple{Vector{Int32},Bool}[(Int32[1,2,3],false)]
+    straight=Tuple{Vector{UInt64},Bool}[(UInt64[1,2,3],false)]
     @test split(straight,coords,pi/4)==straight
-    corner=Tuple{Vector{Int32},Bool}[(Int32[1,2,3,4],false)]
+    corner=Tuple{Vector{UInt64},Bool}[(UInt64[1,2,3,4],false)]
     @test split(corner,coords,pi/4)==[(Int32[1,2,3],false),(Int32[3,4],false)]
     edges(chains)=sort!([minmax(chain[i],chain[i+1])
         for (chain,_) in chains for i in 1:length(chain)-1])
     # Move and reverse the seam through corners and collinear vertices.
     for reversed in (false,true), shift in 0:5
-        vertices=circshift(Int32[1,2,3,4,5,6],shift)
+        vertices=circshift(UInt64[1,2,3,4,5,6],shift)
         reversed && reverse!(vertices)
         chain=vcat(vertices,vertices[1])
-        input=Tuple{Vector{Int32},Bool}[(chain,true)]
+        input=Tuple{Vector{UInt64},Bool}[(chain,true)]
         result=split(input,coords,pi/4)
         @test length(result)==4
         @test edges(result)==edges(input)
@@ -134,7 +155,7 @@ end
         classify_surfaces!(model;angle=15pi/180,boundary=false)
         surfaces=[record for (key,record) in model.discrete if key[1]==2]
         @test length(surfaces)==1
-        @test only(surfaces).element_tags==Int32.(1:6)
+        @test only(surfaces).element_tags==UInt64.(1:6)
     end
 
     model=GeoModel()

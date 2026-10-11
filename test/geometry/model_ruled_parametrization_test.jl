@@ -1,7 +1,9 @@
-using Test,Tessella
+using Test,Tessella,TOML
 using Tessella.Model: model_value,model_parametrization,add_ruled_surface!
 
 const _RUP_API=Tessella.API
+const _RUP_NATIVE_BOX_INVERSE=TOML.parsefile(joinpath(@__DIR__,"..","artifacts",
+    "native_occ_box_parameter_inverse_bounds_v1.toml"))
 
 function _rup_model(corners)
     model=GeoModel()
@@ -102,9 +104,19 @@ end
         _rup_with_api("SetFactory(\"OpenCASCADE\");Box(1)={1,2,3,4,5,6};",(api,_)->begin
             for old in (0,1)
                 api.option("Geometry.OldRuledSurface",old)
-                parameters=[.25,.75]
+                # Surface1's native bounds are [0,6] x [-5,0]. The old
+                # [.25,.75] query lies outside the trimmed face and takes
+                # Gmsh's nonconvergent fallback; preserve that exact result.
+                oracle=_RUP_NATIVE_BOX_INVERSE["surface1"]
+                @test api.model.get_parametrization_bounds(2,1)==
+                    (oracle["bounds_lower"],oracle["bounds_upper"])
+                parameters=copy(oracle["interior_uv"])
                 point=api.model.get_value(2,1,parameters)
+                @test point==oracle["interior_xyz"]
                 @test api.model.get_parametrization(2,1,point)≈parameters atol=2e-12 rtol=0
+                outside=api.model.get_value(2,1,oracle["outside_uv"])
+                @test outside==oracle["outside_xyz"]
+                @test api.model.get_parametrization(2,1,outside)==oracle["outside_inverse"]
             end
         end)
         api=_RUP_API;api.initialize()

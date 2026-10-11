@@ -1,6 +1,14 @@
 # ASCENT integration & HFSS solve campaign — status tracker
 
-## Current continuation status (2026-10-10)
+## Current testing policy (2026-10-11)
+
+ASCENT loading, physics and HFSS solve campaigns are external opt-in validation.
+They are excluded from routine `Pkg.test()`. The historical solver values below
+remain unchanged; they were not rerun for this takeover and do not qualify the
+current code integration. See [HANDOFF.md](HANDOFF.md#takeover-2026-10-11) and
+[test/README.md](test/README.md) for current implementation and test status.
+
+## Historical continuation status (2026-10-10)
 
 The solver measurements and campaign audit below are **historical evidence from
 2026-08-11 through 2026-08-13**. They were not rerun during this documentation

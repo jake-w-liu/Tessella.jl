@@ -6,7 +6,11 @@ struct _ExtrudeNoNewCompletePlan
     surfaces::Dict{Int,Union{Mesh,MixedMesh}}
     columns::Matrix{NTuple{3,Float64}}
     catalog::Union{_ExtrudeNoNewCatalog,_ExtrudeNoNewTwoTriCatalog,_ExtrudeNoNewQuadPatchCatalog,_ExtrudeNoNewQuadStripCatalog,_ExtrudeNoNewThreeQuadStripCatalog,_ExtrudeNoNewFourQuadStripCatalog,_ExtrudeNoNewRectGridCatalog,_ExtrudeNoNewB4StripCatalog,_ExtrudeNoNewB4Free.Catalog}
+    column_rows::Matrix{Int32}
 end
+
+_ExtrudeNoNewCompletePlan(volume,surfaces,columns,catalog)=
+    _ExtrudeNoNewCompletePlan(volume,surfaces,columns,catalog,Matrix{Int32}(undef,0,0))
 
 struct _ExtrudeNoNewScope
     model::GeoModel
@@ -23,7 +27,7 @@ function _extrude_nonew_scope_contract(m::GeoModel,t::Int,
     link=get(m.meshing.extrude_sources,(3,t),nothing)
     link===nothing && return nothing # The planner diagnoses missing provenance.
     source=abs(link[2])
-    surfaces=Set(abs.(_model_volume_boundary_surfaces(m,t,caller)))
+    surfaces=Set(abs.(_extrude_nonew_boundary_surfaces(m,t,caller)))
     curves=Set{Int}()
     points=Set{Int}()
     for surface in surfaces
@@ -263,18 +267,32 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
                                       min_angle_deg::Real=25.0,
                                       max_periodic_passes=8,
                                       size_field::Union{Nothing,AbstractSizeField}=nothing,
-                                      _working_model::Bool=false)
+                                      _working_model::Bool=false,_mesh_input=nothing,
+                                      _trace_columns::Bool=false)
     working=_working_model ? m : deepcopy(m)
     _extrude_nonew_scope_contract(working,t,caller)
     plan=_extrude_nonew_plan(working,t,caller;min_angle_deg=min_angle_deg,
-        max_periodic_passes=max_periodic_passes,size_field=size_field)
-    volume=_extrude_volume_part(working,plan.sweep,caller)
+        max_periodic_passes=max_periodic_passes,size_field=size_field,_mesh_input=_mesh_input)
+    # The insertion renderer and indexed B4 constructors bind their actual
+    # column rows explicitly. Other indexed families retain their existing
+    # dispatch until they provide the corresponding constructor provenance.
+    traced=_trace_columns && plan.sweep isa _ExtrudeVolumeSweep
+    emitted=traced ? _extrude_volume_part(working,plan.sweep,caller;
+                                          _return_column_rows=true) :
+                    _extrude_volume_part(working,plan.sweep,caller)
+    volume=traced ? emitted.mesh : emitted
+    column_rows=traced ? emitted.column_rows : Matrix{Int32}(undef,0,0)
+    if _trace_columns && plan.sweep isa _ExtrudeNoNewIndexedSweep &&
+            plan.catalog isa Union{_ExtrudeNoNewB4StripCatalog,_ExtrudeNoNewB4Free.Catalog}
+        column_rows=_extrude_nonew_b4_column_rows(plan.sweep,plan.catalog,caller)
+    end
     surfaces=Dict{Int,Union{Mesh,MixedMesh}}(plan.source_tag=>plan.source_mesh)
     quad_patch=plan.catalog isa _ExtrudeNoNewQuadPatchCatalog
     quad_strip=plan.catalog isa _ExtrudeNoNewQuadStripCatalog
     three_quad_strip=plan.catalog isa _ExtrudeNoNewThreeQuadStripCatalog
     four_quad_strip=plan.catalog isa _ExtrudeNoNewFourQuadStripCatalog
     dynamic_grid=plan.catalog isa _ExtrudeNoNewDynamicGridCatalog
+    retained_b4=_extrude_nonew_retained_b4_catalog(plan.catalog)
     params,spec,link=_extrude_entity_params(working,2,plan.top_tag,caller)
     surfaces[plan.top_tag]=quad_patch ?
         _extrude_nonew_quad_patch_top(working,plan.top_tag,params,
@@ -290,6 +308,16 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
         working,plan.top_tag,params,spec,link[2],caller;
         min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
         size_field=size_field,source_mesh=plan.source_mesh)
+    if _mesh_input!==nothing
+        # Every completed family consumes the actual copied-cap vector. The
+        # dynamic B4 planner already consumed its paired Quad diagonals; other
+        # admitted families verify their actual cap against the typed shell
+        # below rather than silently replacing caller topology with a new cap.
+        actual_cap=_model_mesh_product(_mesh_input,2,plan.top_tag;caller)
+        if actual_cap!==nothing && any(block->!isempty(block.nodes),actual_cap.blocks)
+            surfaces[plan.top_tag]=actual_cap
+        end
+    end
     two_tri=plan.catalog isa _ExtrudeNoNewTwoTriCatalog
     for tag in plan.lateral_tags
         params,spec,link=_extrude_entity_params(working,2,tag,caller)
@@ -303,7 +331,7 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
             _extrude_nonew_four_quad_strip_lateral(working,tag,params,link[2],
                 plan.sweep.cols,plan.catalog,plan.edges,caller) : dynamic_grid ?
             _extrude_nonew_rect_grid_lateral(working,tag,params,link[2],
-                plan.sweep.cols,plan.catalog,plan.edges,caller) : two_tri ?
+                plan.sweep.cols,plan.catalog,retained_b4 ? empty(plan.edges) : plan.edges,caller) : two_tri ?
             _extrude_nonew_two_tri_lateral(working,tag,params,link[2],
                 plan.sweep.cols,plan.catalog,plan.edges,caller) :
             _extrude_lateral_mesh(
@@ -315,11 +343,98 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
         _extrude_nonew_four_quad_strip_face_capacity(plan.catalog) : dynamic_grid ?
         _extrude_nonew_dynamic_grid_face_capacity(plan.catalog) : two_tri ?
         (volume isa Mesh ? 16 : 7)*length(plan.catalog.layer_refs)+2 : 0
-    _extrude_nonew_certify_boundary(volume,surfaces,caller;
-        oriented_internal=two_tri || quad_patch || quad_strip || three_quad_strip || four_quad_strip || dynamic_grid,
-        face_capacity=face_capacity)
+    if retained_b4
+        _extrude_nonew_retained_b4_certificate(working,t,volume,surfaces,plan.catalog,caller;
+            face_capacity)
+    else
+        _extrude_nonew_certify_boundary(volume,surfaces,caller;
+            oriented_internal=two_tri || quad_patch || quad_strip || three_quad_strip || four_quad_strip || dynamic_grid,
+            face_capacity=face_capacity)
+    end
     _working_model || (m.curve_params=working.curve_params)
-    return _ExtrudeNoNewCompletePlan(volume,surfaces,plan.sweep.cols,plan.catalog)
+    return _ExtrudeNoNewCompletePlan(volume,surfaces,plan.sweep.cols,plan.catalog,column_rows)
+end
+
+# Both indexed B4 emitters write each primary row through this integer map.
+# Check that map against the completed constructor before another view uses it.
+function _extrude_nonew_b4_column_rows(sweep::_ExtrudeNoNewIndexedSweep,
+        catalog::Union{_ExtrudeNoNewB4StripCatalog,_ExtrudeNoNewB4Free.Catalog},caller)
+    levels,nodes=size(sweep.cols)
+    nodes==length(catalog.source.source_coordinates) || throw(ArgumentError(
+        "$caller: indexed B4 Source column count differs from its constructor"))
+    rows=Matrix{Int32}(undef,levels,nodes)
+    for node in 1:nodes,level in 1:levels
+        row=_extrude_nonew_rect_grid_node(Int32(node),level,levels)
+        0<row<=nnodes(sweep.volume) &&
+            isequal(_extrude_nonew_coordinate(sweep.volume,row),sweep.cols[level,node]) ||
+            throw(ArgumentError("$caller: indexed B4 column loses its constructor row"))
+        rows[level,node]=row
+    end
+    return rows
+end
+
+# Native Source coordinates and emitted Source birth values are separate
+# inputs. Reuse the completed topology decisions while deriving and certifying
+# the emitted columns and body means from the latter, through explicit UIDs.
+function _extrude_nonew_b4_geometry(m::GeoModel,t::Int,completed::_ExtrudeNoNewCompletePlan,
+                                  source_point::F,caller) where F
+    catalog=completed.catalog
+    catalog isa Union{_ExtrudeNoNewB4StripCatalog,_ExtrudeNoNewB4Free.Catalog} || return nothing
+    link=get(m.meshing.extrude_sources,(3,t),nothing)
+    link!==nothing && link[1]==2 || throw(ArgumentError(
+        "$caller: emitted B4 sweep lacks its Source provenance"))
+    source_tag=abs(link[2]);source=completed.surfaces[source_tag]
+    source isa MixedMesh && source.entity_data!==nothing || throw(ArgumentError(
+        "$caller: emitted B4 Source lacks its actual column UIDs"))
+    tags=source.entity_data.external_node_tags
+    length(tags)==size(completed.columns,2) && allunique(tags) || throw(ArgumentError(
+        "$caller: emitted B4 Source UIDs do not align with its columns"))
+    coordinates=copy(source.coords);changed=false
+    for (row,uid) in enumerate(tags)
+        point=source_point(uid)
+        point===nothing && continue
+        old=(coordinates[1,row],coordinates[2,row],coordinates[3,row])
+        isequal(old,point) && continue
+        coordinates[1,row]=point[1];coordinates[2,row]=point[2];coordinates[3,row]=point[3]
+        changed=true
+    end
+    changed || return nothing
+    geometry_source=MixedMesh(coordinates,source.blocks)
+    params,spec,_=_extrude_entity_params(m,3,t,caller)
+    original=catalog.source
+    geometry_data=_extrude_nonew_rect_grid_source(m,source_tag,geometry_source,spec,caller;
+                                                mode=:b4_strip,bound=original)
+    geometry_data.source_cells==original.source_cells &&
+        geometry_data.edges==original.edges && geometry_data.edge_cells==original.edge_cells &&
+        geometry_data.normal_axis==original.normal_axis &&
+        geometry_data.normal_direction==original.normal_direction &&
+        geometry_data.source_orientation==original.source_orientation || throw(ArgumentError(
+            "$caller: emitted B4 Source changes its bound topology or orientation"))
+    geometry_catalog=if catalog isa _ExtrudeNoNewB4StripCatalog
+        _ExtrudeNoNewB4StripCatalog(geometry_data,catalog.top_states,catalog.cell_counts,
+            catalog.face_capacity,catalog.diagonal_count,catalog.recombined,catalog.levels,
+            catalog.layer_refs)
+    else
+        _ExtrudeNoNewB4Free.Catalog(geometry_data,catalog.top_states,catalog.template_indices,
+            catalog.problem_positions,catalog.problem_masks,catalog.cell_counts,
+            catalog.face_capacity,catalog.diagonal_count,catalog.recombined,catalog.levels,
+            catalog.layer_refs)
+    end
+    columns=_extrude_volume_columns(m,t,source_tag,geometry_source,params,spec,catalog.levels,caller)
+    _extrude_nonew_rect_grid_product_certify(columns,geometry_catalog,spec,caller)
+    geometry=if catalog isa _ExtrudeNoNewB4StripCatalog
+        top,laterals=_extrude_nonew_region_boundary(m,t,source_tag,caller;sides=4)
+        _extrude_nonew_b4_strip_finish(m,t,params,source_tag,geometry_source,
+            geometry_catalog,columns,top,laterals,caller).sweep.volume
+    else
+        _ExtrudeNoNewB4Free.emit(geometry_catalog,columns,spec,caller).volume
+    end
+    actual=completed.volume
+    nnodes(geometry)==nnodes(actual) && length(geometry.blocks)==length(actual.blocks) &&
+        all(a.msh==b.msh && a.nodes==b.nodes && a.tags==b.tags
+            for (a,b) in zip(geometry.blocks,actual.blocks)) || throw(ArgumentError(
+                "$caller: emitted B4 geometry changes its bound cell identities"))
+    return geometry
 end
 
 function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
@@ -327,7 +442,8 @@ function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
                                min_angle_deg::Real=25.0,
                                max_periodic_passes=8,
                                size_field::Union{Nothing,AbstractSizeField}=nothing,
-                               _working_model::Bool=false)
+                               _working_model::Bool=false,_mesh_input=nothing,
+                               _trace_columns::Bool=false)
     selected=Int[]
     for tag in tags
         _extrude_is_nonew(_extrude_gate(m,3,tag)) && push!(selected,tag)
@@ -340,7 +456,8 @@ function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
     for tag in selected
         completed=_extrude_nonew_complete_plan(working,tag,caller;
             min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
-            size_field=size_field,_working_model=true)
+            size_field=size_field,_working_model=true,_mesh_input=_mesh_input,
+            _trace_columns=_trace_columns)
         volumes[tag]=completed
         for (surface,part) in completed.surfaces
             haskey(surfaces,surface) && throw(ArgumentError(

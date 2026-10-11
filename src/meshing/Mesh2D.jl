@@ -27,6 +27,7 @@ after operations in the test suite.
 """
 module Mesh2D
 
+import ..Predicates
 using ..Predicates: orient2, orient2_sos, incircle_sos, diametral_sign
 using ..MeshTypes: Mesh, triangle_area
 
@@ -485,7 +486,8 @@ end
 # crossed when `constrained` (CDT-preserving). Returns `(cavity, boundary)`
 # where `boundary` lists the shell edges `(a, b, outside_neighbour)` — the
 # same structure upstream's `recurFindCavity` produces for `insertVertexB`.
-function _delaunay_cavity(T::Triangulation, t0, vid, constrained::Bool)
+function _delaunay_cavity(T::Triangulation, t0, vid, constrained::Bool;
+                          circle_test=_in_circumcircle)
     cavity = Int32[t0]
     incav = Set{Int32}(); push!(incav, t0)
     boundary = Tuple{Int32,Int32,Int32}[]     # (edge_a, edge_b, outside neighbour)
@@ -498,7 +500,7 @@ function _delaunay_cavity(T::Triangulation, t0, vid, constrained::Bool)
             a, b = _edge(T, t, k)
             # a constrained edge is never crossed by the growing cavity (CDT-preserving)
             blocked = constrained && _constrained_edge(T, _skey(a, b))
-            inside = !blocked && nb != 0 && _in_circumcircle(T, nb, vid)
+            inside = !blocked && nb != 0 && circle_test(T, nb, vid)
             if inside
                 push!(incav, nb); push!(cavity, nb); push!(stack, nb)
             else
@@ -1342,16 +1344,24 @@ end
 # `vbgm` holds the background values — identical to `vsize` for initial
 # vertices, `BGM_MeshSize` at the insertion point for Steiner vertices (Inf
 # when no background evaluator exists, so the propagated side governs).
-struct _GmshVertexSizes{F}
+struct _GmshVertexSizes{F,S}
     vsize::Vector{Float64}
     vbgm::Vector{Float64}
     bgm::F
+    trace::S
 end
+_GmshVertexSizes(sizes,background,evaluator)=_GmshVertexSizes(sizes,background,evaluator,nothing)
+
+include("Mesh2DGmshInitialOrder.jl")
+include("Mesh2DGmshInitial.jl")
+include("Mesh2DGmshInitialConversion.jl")
+include("Mesh2DGmshInsertion.jl")
 
 """
     refine!(T; min_angle_deg=25.0, max_area=Inf, size=nothing,
             edge_metric=nothing, size_radius=nothing,
             vertex_sizes=nothing, vertex_bgm=nothing, bgm_size=nothing,
+            gmsh_algorithm=:legacy, gmsh_extend_boundary=true,
             maxsteps=300_000) -> Vector{Bool}
 
 Ruppert refinement of the constrained Delaunay triangulation `T`: split
@@ -1388,10 +1398,25 @@ background evaluator assigned to inserted vertices — upstream's
 `BGM_MeshSize`. In this mode the angle/area bounds still apply when set
 (`min_angle_deg=0` disables them for the pure upstream R/lc criterion), while
 `size`, `size_radius`, and `edge_metric` must be left unset.
+`gmsh_algorithm=:delaunay` uses maximum normalized-circumradius priority.
+`:frontal` uses the active front and Rebay off-center points. These modes
+require `vertex_sizes`, `gmsh_insertion=true`, and disabled angle/area bounds.
+`gmsh_extend_boundary=false` selects the background sizes for triangle radius
+and active-edge point placement. Model supplies finite background evaluations
+and physical plane coordinates for the native algorithm ids 5 and 6.
+`gmsh_vertex_numbers` binds initial vertices to explicit birth labels for the
+reference priority tie rule. `gmsh_vertex_high_water` includes other consumed
+labels. `return_vertex_numbers=true` returns the final interior flags, retained
+birth labels and consumed high water in a native insertion product.
 """
 function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
                  size=nothing, edge_metric=nothing, size_radius=nothing,
                  gmsh_insertion::Bool=false,
+                 gmsh_algorithm::Symbol=:legacy,
+                 gmsh_extend_boundary::Bool=true,
+                 gmsh_vertex_numbers=nothing,gmsh_vertex_high_water=nothing,
+                 return_vertex_numbers::Bool=false,
+                 _gmsh_surface_trace=nothing,
                  vertex_sizes=nothing, vertex_bgm=nothing, bgm_size=nothing,
                  model_vertices=nothing,
                  maxsteps::Integer=300_000)
@@ -1406,6 +1431,21 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
     maxsteps > 0 || throw(ArgumentError("refine!: maxsteps must be positive (got $maxsteps)"))
     maxsteps<=typemax(Int) || throw(ArgumentError("refine!: maxsteps exceeds the platform Int limit"))
     nsteps=Int(maxsteps)
+    gmsh_algorithm in (:legacy,:delaunay,:frontal) || throw(ArgumentError(
+        "refine!: gmsh_algorithm must be :legacy, :delaunay or :frontal"))
+    if gmsh_algorithm!==:legacy
+        gmsh_insertion && vertex_sizes!==nothing || throw(ArgumentError(
+            "refine!: native Delaunay/Frontal modes require " *
+            "gmsh_insertion=true and vertex_sizes"))
+        angle==0 && area==Inf || throw(ArgumentError(
+            "refine!: native Delaunay/Frontal modes require " *
+            "min_angle_deg=0 and max_area=Inf"))
+    elseif gmsh_vertex_numbers!==nothing || gmsh_vertex_high_water!==nothing || return_vertex_numbers
+        throw(ArgumentError("refine!: native vertex numbers require Delaunay/Frontal mode"))
+    end
+    numbers,vertex_high_water=gmsh_algorithm===:legacy ?
+        (nothing,UInt64(0)) : _gmsh_vertex_numbers(
+            T,gmsh_vertex_numbers,gmsh_vertex_high_water)
     B = angle == 0 ? Inf : 1.0 / (2.0*sind(angle))
     interior = Vector{Bool}(collect(classify_interior(T)))
     pointids=Dict{NTuple{2,Float64},Int32}()
@@ -1456,7 +1496,7 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
                 "refine!: vertex_bgm entries must be positive"))
             bg
         end
-        gsizes=_GmshVertexSizes(vsize,vbgm,bgm_size)
+        gsizes=_GmshVertexSizes(vsize,vbgm,bgm_size,_gmsh_surface_trace)
     end
     # Upstream's perpendicular-distance test (`d4 < .4·LL`) applies to shell
     # edges whose endpoints both live on model vertices/curves
@@ -1483,6 +1523,11 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
             "refine!: model_vertices requires gmsh_insertion=true"))
     end
     llsrc=size_radius===nothing ? size : size_radius
+    circle_test=gmsh_algorithm===:legacy ? _in_circumcircle :
+                _GmshSurfaceCircleTest(_gmsh_surface_trace)
+    queue=gmsh_algorithm===:legacy ? nothing : _gmsh_queue_init(
+        T,interior,skipped,gsizes,gmsh_algorithm,gmsh_extend_boundary,
+        numbers,vertex_high_water)
     for _ in 1:nsteps
         # (1) split an encroached subsegment, if any — Gmsh mode never does:
         # `insertVertexB` preserves boundary edges and rejects the point.
@@ -1492,14 +1537,26 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
             continue
         end
         # (2) pick a triangle that violates the angle/area/size criteria
-        t = _find_bad(T, interior, B, area, size,edge_metric,size_radius,
-                      gmsh_insertion ? skipped : nothing, gsizes)
+        t,active_edge=queue===nothing ?
+            (_find_bad(T,interior,B,area,size,edge_metric,size_radius,
+                       gmsh_insertion ? skipped : nothing,gsizes),0) :
+            _gmsh_queue_select!(queue,T,interior,skipped,gsizes,
+                                gmsh_algorithm,gmsh_extend_boundary)
         if t==0
             _assert_operable(T,"refine! result")
-            return interior
+            return _gmsh_surface_insertion_result(interior,queue,return_vertex_numbers)
         end
-        a=_vert(T,t,1); b=_vert(T,t,2); c=_vert(T,t,3)
-        cc = _circumcenter2(_pt(T,a),_pt(T,b),_pt(T,c))
+        a,b,c=_gmsh_surface_triangle_nodes(T,t,_gmsh_surface_trace)
+        candidate=gmsh_algorithm===:frontal ?
+            _gmsh_frontal_point(T,t,active_edge,gsizes,gmsh_extend_boundary) :
+            gmsh_algorithm===:delaunay ?
+                _gmsh_surface_delaunay_point(T,a,b,c,_gmsh_surface_trace) :
+                _circumcenter2(_pt(T,a),_pt(T,b),_pt(T,c))
+        if candidate===nothing
+            push!(skipped,_trikey(T,t))
+            continue
+        end
+        cc=candidate
         if gmsh_insertion
             # Upstream `insertAPoint`: the point is placed first (the exact
             # predicates need its coordinates), the cavity grows from `worst`
@@ -1510,55 +1567,86 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
             # too-close shell edge — leaving `worst` out of the queue.
             key=(cc[1]==0 ? 0.0 : cc[1],cc[2]==0 ? 0.0 : cc[2])
             vid=Int32(0);ptin=Int32(0);lc1=NaN;bg=Inf
+            stored_point_key=false
+            number=UInt64(0)
             cavity=nothing;boundary=nothing
             ok=false
             try
-                if isfinite(cc[1]) && isfinite(cc[2]) && !haskey(pointids,key)
-                    # `BGM_MeshSize` before mutating T: a callback failure cannot
-                    # strand an unreferenced coordinate.
-                    gsizes===nothing || (bg=_gmsh_bgm(gsizes,cc))
+                if isfinite(cc[1]) && isfinite(cc[2]) &&
+                   (queue!==nothing || !haskey(pointids,key))
+                    queue===nothing && gsizes!==nothing &&
+                        (bg=_gmsh_bgm(gsizes,cc))
                     vid=_add_vertex!(T,cc[1],cc[2])
-                    pointids[key]=vid
-                    if _in_circumcircle(T,t,vid)
-                        cavity,boundary=_delaunay_cavity(T,t,vid,true)
-                        ptin=_cavity_container(T,cavity,cc)
+                    if !haskey(pointids,key)
+                        pointids[key]=vid
+                        stored_point_key=true
+                    end
+                    if circle_test(T,t,vid)
+                        cavity,boundary=queue===nothing ? _delaunay_cavity(
+                            T,t,vid,true;circle_test) : _gmsh_delaunay_cavity(T,t,vid,_gmsh_surface_trace)
+                        ptin=_cavity_container(T,cavity,cc;native_semantics=queue!==nothing,
+                                               trace=_gmsh_surface_trace)
                     else
-                        tc=try
-                            locate(T,cc[1],cc[2],vid)
-                        catch err
-                            err isa InterruptException && rethrow()
-                            Int32(0)
+                        tc=if queue===nothing
+                            try
+                                locate(T,cc[1],cc[2],vid)
+                            catch err
+                                err isa InterruptException && rethrow()
+                                Int32(0)
+                            end
+                        else
+                            _gmsh_locate_surface(T,cc,interior,t)
                         end
                         if tc!=0 && tc<=length(interior) && interior[tc] &&
                            !_is_ghost_tri(T,tc)
                             ptin=tc
-                            cavity,boundary=_delaunay_cavity(T,ptin,vid,true)
+                            cavity,boundary=queue===nothing ? _delaunay_cavity(
+                                T,ptin,vid,true;circle_test) : _gmsh_delaunay_cavity(T,ptin,vid,_gmsh_surface_trace)
                         end
                     end
                     if ptin!=0 && gsizes!==nothing
-                        ta=_vert(T,ptin,1);tb=_vert(T,ptin,2);td=_vert(T,ptin,3)
-                        w=_barycentric2(_pt(T,ta),_pt(T,tb),_pt(T,td),cc)
+                        # Native MFaceVertex allocation and BGM evaluation occur
+                        # only after finding a containing actual Surface triangle.
+                        # A rejected insertion still consumes its birth label.
+                        if queue!==nothing
+                            number=_gmsh_next_vertex_number!(queue)
+                            bg=_gmsh_bgm(gsizes,cc;allow_failure=false)
+                        end
+                        ta,tb,td=_gmsh_surface_triangle_nodes(T,ptin,_gmsh_surface_trace)
+                        w=queue===nothing ?
+                            _barycentric2(_pt(T,ta),_pt(T,tb),_pt(T,td),cc) :
+                            _gmsh_barycentric2(_pt(T,ta),_pt(T,tb),_pt(T,td),cc)
                         lc1 = w===nothing ? NaN :
                             w[1]*gsizes.vsize[ta]+w[2]*gsizes.vsize[tb]+
                             w[3]*gsizes.vsize[td]
                     end
                 end
+                if ptin!=0 && gsizes!==nothing && isfinite(lc1) && lc1>0
+                    _gmsh_surface_trace_children!(_gmsh_surface_trace,T,cavity,boundary,
+                        vid,gsizes,lc1,bg)
+                end
                 ok = ptin!=0 &&
                      (gsizes===nothing || (isfinite(lc1) && lc1>0)) &&
                      _gmsh_cavity_accept(T,cavity,boundary,cc,onmodel,
-                                         _ShellLL(T,cc,llsrc,gsizes,lc1,bg))
+                         queue===nothing ? _ShellLL(T,cc,llsrc,gsizes,lc1,bg) :
+                                           _GmshShellLL(gsizes,lc1,bg);
+                         native_semantics=queue!==nothing,
+                         trace=_gmsh_surface_trace,
+                         verify_star_shapeness=gmsh_algorithm!==:delaunay)
             finally
                 # Candidate evaluation has not changed topology. Roll back
                 # its coordinate on rejection and on callback/geometry errors.
                 if !ok && vid!=0
                     pop!(T.x);pop!(T.y);pop!(T.vtri);T.nreal-=1
-                    delete!(pointids,key)
+                    stored_point_key && delete!(pointids,key)
                 end
             end
             if !ok
                 # `forceRadius(0)`/`forceRadius(-1)`: drop the point, keep the
                 # triangle out of the queue.
                 push!(skipped,_trikey(T,t))
+                _gmsh_surface_trace===nothing ||
+                    (_gmsh_surface_trace.radii[_gmsh_triangle_key(T,t)]=ptin==0 ? 0.0 : -1.0)
                 continue
             end
             # A failure past this point is a structural invariant break (a
@@ -1570,6 +1658,12 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
             for nt in newt; _setflag!(interior,nt,true); end
             gsizes===nothing ||
                 (push!(gsizes.vsize,lc1);push!(gsizes.vbgm,bg))
+            queue===nothing || push!(queue.vertex_numbers,number)
+            _gmsh_surface_trace===nothing || push!(_gmsh_surface_trace.world,
+                _gmsh_surface_trace.lift(cc...))
+            queue===nothing || _gmsh_queue_update!(
+                queue,T,newt,interior,skipped,gsizes,
+                gmsh_algorithm,gmsh_extend_boundary)
             continue
         end
         # (3) if the circumcenter encroaches subsegments, split those instead
@@ -1585,11 +1679,13 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
     end
     enc = gmsh_insertion ? nothing : _find_encroached(T)
     T.bad_scan_from=Int32(1)
-    bad = _find_bad(T, interior, B, area, size,edge_metric,size_radius,
-                    gmsh_insertion ? skipped : nothing, gsizes)
+    bad=queue===nothing ? _find_bad(T,interior,B,area,size,edge_metric,
+        size_radius,gmsh_insertion ? skipped : nothing,gsizes) :
+        first(_gmsh_queue_select!(queue,T,interior,skipped,gsizes,
+                                  gmsh_algorithm,gmsh_extend_boundary))
     if enc===nothing&&bad==0
         _assert_operable(T,"refine! result")
-        return interior
+        return _gmsh_surface_insertion_result(interior,queue,return_vertex_numbers)
     end
     remaining = enc === nothing ? "a triangle still violates a quality/area/size bound" :
                                   "constrained segment $(enc) remains encroached"
@@ -1648,12 +1744,14 @@ end
 # First cavity member containing `p`, matching upstream's `ptin` search —
 # barycentric membership with `invMapUV`'s 1e-8 tolerance. Ghost members can
 # never contain an in-domain point.
-function _cavity_container(T::Triangulation,cavity,cc)
+function _cavity_container(T::Triangulation,cavity,cc;native_semantics::Bool=false,
+                           trace=nothing)
     tol=1e-8
     for ct in cavity
         _is_ghost_tri(T,ct) && continue
-        a=_vert(T,ct,1);b=_vert(T,ct,2);c=_vert(T,ct,3)
-        w=_barycentric2(_pt(T,a),_pt(T,b),_pt(T,c),cc)
+        a,b,c=_gmsh_surface_triangle_nodes(T,ct,trace)
+        w=native_semantics ? _gmsh_barycentric2(_pt(T,a),_pt(T,b),_pt(T,c),cc) :
+                            _barycentric2(_pt(T,a),_pt(T,b),_pt(T,c),cc)
         w===nothing && continue
         (w[2]>=-tol && w[3]>=-tol && w[2]<=1+tol && w[3]<=1+tol &&
          w[1]>-tol) && return ct
@@ -1670,7 +1768,13 @@ end
 # or a degenerate new angle (`cosv < -.9999`). `llof(u,v)` resolves `LL` for
 # the candidate triangle `(u,v,new)`.
 function _gmsh_cavity_accept(T::Triangulation,cavity,boundary,cc,
-                             onmodel,llof)
+                             onmodel,llof;native_semantics::Bool=false,
+                             trace=nothing,
+                             verify_star_shapeness::Bool=true)
+    if native_semantics && trace!==nothing
+        return _gmsh_native_trace_cavity_accept(T,cavity,boundary,cc,onmodel,
+            llof,trace,verify_star_shapeness)
+    end
     length(cavity)==1 && return false
     for ct in cavity
         _is_ghost_tri(T,ct) && return false
@@ -1686,18 +1790,22 @@ function _gmsh_cavity_accept(T::Triangulation,cavity,boundary,cc,
     end
     scale=0x1p-250<=magnitude<=0x1p250 ? 1.0 : exp2(exponent(magnitude))
     center=(cc[1]/scale,cc[2]/scale)
+    area=native_semantics ? _gmsh_surface_area2 : _tri_area2
     oldv=0.0
     for ct in cavity
-        oldv+=_tri_area2(_scaled_pt2(T,_vert(T,ct,1),scale),
-                         _scaled_pt2(T,_vert(T,ct,2),scale),
-                         _scaled_pt2(T,_vert(T,ct,3),scale))
+        oldv+=area(_scaled_pt2(T,_vert(T,ct,1),scale),
+                  _scaled_pt2(T,_vert(T,ct,2),scale),
+                  _scaled_pt2(T,_vert(T,ct,3),scale))
     end
     newv=0.0;tooclose=false
     for (u,v,_) in boundary
         pu=_scaled_pt2(T,u,scale);pv=_scaled_pt2(T,v,scale)
-        d1=hypot(center[1]-pu[1],center[2]-pu[2])
-        d2=hypot(center[1]-pv[1],center[2]-pv[2])
-        d3=hypot(pv[1]-pu[1],pv[2]-pu[2])
+        d1=native_semantics ? sqrt((center[1]-pu[1])^2+(center[2]-pu[2])^2) :
+                             hypot(center[1]-pu[1],center[2]-pu[2])
+        d2=native_semantics ? sqrt((center[1]-pv[1])^2+(center[2]-pv[2])^2) :
+                             hypot(center[1]-pv[1],center[2]-pv[2])
+        d3=native_semantics ? sqrt((pv[1]-pu[1])^2+(pv[2]-pu[2])^2) :
+                             hypot(pv[1]-pu[1],pv[2]-pu[2])
         ll=llof(u,v)/scale
         if d1==0.0 || d2==0.0
             tooclose=true
@@ -1710,9 +1818,16 @@ function _gmsh_cavity_accept(T::Triangulation,cavity,boundary,cc,
             end
             (d1*d1+d2*d2-d3*d3)/(2*d1*d2)<-0.9999 && (tooclose=true)
         end
-        newv+=_tri_area2(pu,pv,center)
+        value=area(pu,pv,center)
+        native_semantics && value<1e-25 && (value=1e22)
+        newv+=value
     end
-    abs(oldv-newv) > 1e-12*oldv && return false
+    if native_semantics
+        epsilon=verify_star_shapeness ? 1e-12 : 1e12
+        abs(oldv-newv)<epsilon*oldv || return false
+    else
+        abs(oldv-newv)>1e-12*oldv && return false
+    end
     tooclose && return false
     return true
 end
@@ -1750,16 +1865,16 @@ end
 
 # `BGM_MeshSize` for a candidate point — the background evaluator when one is
 # installed, otherwise Inf so `min(lc, lcBGM)` keeps the propagated side.
-# Candidates are evaluated before `locate` proves them in-domain, so an
-# evaluation error means "no background constraint here" (upstream fields are
-# globally defined and never fail); a returned value that is not a real,
-# positive size remains a contract error.
-function _gmsh_bgm(gsizes::_GmshVertexSizes,cc)
+# The generic legacy path permits an unavailable out-of-domain background
+# value. Native Delaunay/Frontal modes evaluate only after containment and set
+# allow_failure=false so actual evaluator and callback errors propagate.
+function _gmsh_bgm(gsizes::_GmshVertexSizes,cc;allow_failure::Bool=true)
     gsizes.bgm===nothing && return Inf
     raw=try
         gsizes.bgm(cc[1],cc[2])
     catch err
         err isa InterruptException && rethrow()
+        allow_failure || rethrow()
         return Inf
     end
     raw isa Real || throw(ArgumentError(

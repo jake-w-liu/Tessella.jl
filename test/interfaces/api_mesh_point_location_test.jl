@@ -21,6 +21,7 @@ function _mesh_location_install!(mesh;reset_locator=true)
         else
             _MESH_LOCATION_API.LAST_MESH[]=copied
         end
+        _MESH_LOCATION_API._native_lookup_invalidate_locked!()
     end
     return nothing
 end

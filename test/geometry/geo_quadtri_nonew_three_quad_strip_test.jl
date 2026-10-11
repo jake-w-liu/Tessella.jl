@@ -1,4 +1,4 @@
-using Test,Tessella
+using Test,Tessella,TOML
 using Tessella.Elements:MixedMesh,ElementBlock,msh_spec
 using Tessella.MeshTypes:Mesh,nnodes
 using Tessella.Model:mesh_model_surface,mesh_model_volume,model_to_mixed
@@ -6,6 +6,22 @@ if !isdefined(@__MODULE__,:QuadTriNoNewThreeQuadStripCertificates)
     include("quadtri_nonew_three_quad_strip_certificates.jl")
 end
 const _TQSC=QuadTriNoNewThreeQuadStripCertificates
+
+function _tqsc_saved_native_entity(state,dimension,tag)
+    entity=only(e for e in state["entities"] if e["owner"]==[dimension,tag])
+    cells=entity["cells"]
+    uids=sort!(unique(parse.(UInt64,[uid for cell in cells for uid in cell["nodes"]])))
+    rows=Dict(uid=>Int32(row) for (row,uid) in enumerate(uids))
+    bits=Dict(parse(UInt64,node["uid"])=>node["xyz_bits"] for node in state["node_details"])
+    coords=hcat(([reinterpret(Float64,parse(UInt64,bit;base=16)) for bit in bits[uid]] for uid in uids)...)
+    blocks=ElementBlock[]
+    for cell in cells
+        width=msh_spec(cell["type"]).nnodes
+        connected=Int32[rows[parse(UInt64,uid)] for uid in cell["nodes"]]
+        push!(blocks,ElementBlock(cell["type"],reshape(connected,width,length(cell["tags"]))))
+    end
+    return MixedMesh(coords,blocks)
+end
 
 function _tqsc_existing_factories(cert)
     templates=Tessella.Model._extrude_nonew_templates()
@@ -25,10 +41,10 @@ function _tqsc_existing_factories(cert)
 end
 
 function _tqsc_product(f;entry=false)
-    geometry=_TQSC.execute(f.source;dim=entry ? 3 : 0)
+    geometry=_TQSC.execute(f.source;dim=0)
     out=Int.(geometry.lists["sweep"]);m=geometry.model
     source=mesh_model_surface(m,f.surface)
-    volume=entry ? geo_entity_mesh(geometry,3,out[2]) : mesh_model_volume(m,out[2])
+    volume=mesh_model_volume(m,out[2])
     cert=_TQSC.certify(volume,f,source)
     @test validate(volume).ok
     @test nnodes(source)==8 && length(cert.source.cells)==3
@@ -45,9 +61,26 @@ function _tqsc_product(f;entry=false)
     @test [count(o->o[1]==d,owners) for d in 0:3]==[8,4f.intervals+4,4f.intervals-4,f.laterals ? 3 : 0]
     parts=[(2,s,mesh_model_surface(m,s)) for s in (f.surface,out[1],out[3:end]...)]
     @test _TQSC.Quad.surface_faces(parts,volume)==Set(keys(cert.boundary))
-    @test _TQSC.Quad.surface_faces(_TQSC.execute(f.source;dim=2).mesh_parts,volume)==Set(keys(cert.boundary))
+    # The original Model certificate/projection above retains its private
+    # source row identities. Certify the complete actual GEO products in their
+    # own public row space; copied native heap-pointer rank is not public UID
+    # rank, so the existing Model minimum-row cap check stays in that view.
+    actual=_TQSC.execute(f.source;dim=3)
+    actual_out=Int.(actual.lists["sweep"])
+    @test actual_out==out
+    actual_source=geo_entity_mesh(actual,2,f.surface)
+    actual_volume=geo_entity_mesh(actual,3,out[2])
+    actual_cert=_TQSC.certify(actual_volume,f,actual_source;native_top=false)
+    @test validate(actual_volume).ok
+    @test _TQSC.Quad.surface_faces(actual.actual_mesh_parts,actual_volume)==Set(keys(actual_cert.boundary))
+    @test actual_cert.total==cert.total
+    @test Set(actual_source.entity_data.external_node_tags)<=Set(actual_volume.entity_data.external_node_tags)
+    @test length(actual_cert.centers)==length(cert.centers)
+    _tqsc_existing_factories(actual_cert)
+    entry && @test actual.mesh!==nothing
+    return_geometry=entry ? actual : geometry
     @test _TQSC.Quad.typed_signature(mesh_model_volume(m,out[2]))==_TQSC.Quad.typed_signature(volume)
-    return (;geometry,source,volume,cert,projected)
+    return (;geometry=return_geometry,source,volume,cert,projected)
 end
 
 function _tqsc_atomic(f,diagnostic)
@@ -64,6 +97,28 @@ function _tqsc_atomic(f,diagnostic)
 end
 
 @testset "Three actual quadrangles form a conforming NoNew strip" begin
+    @testset "Native copied-pointer forks preserve complete source and shell contracts" begin
+        native=TOML.parsefile(joinpath(@__DIR__,"..","artifacts","three_quad_strip_pointer_forks_native_v1.toml"))
+        @test native["gmsh_version"]=="4.15.2" && native["captured_processes"]==39
+        @test native["native_top_rank_is_copied_heap_pointer"]
+        @test !native["current_exact_raw_cell_parity_claim"]
+        @test native["current_choice_scope"]=="deterministic conforming variant"
+        @test length(native["cases"])==3
+        @test length(unique(row["stable_node_state_sha256"] for row in native["capture_receipts"]))==1
+        fixture=_TQSC.fixture("native_pointer_fork";height=-1.,layers=:one,laterals=false)
+        for row in native["cases"]
+            state=row["state"]
+            source=_tqsc_saved_native_entity(state,2,1)
+            volume=_tqsc_saved_native_entity(state,3,1)
+            cert=_TQSC.certify(volume,fixture,source;oracle=true,native_top=false)
+            @test validate(volume).ok
+            @test cert.total==1//1
+            @test Dict(string(kind)=>count for (kind,count) in cert.families)==row["volume_families"]
+            parts=[(2,e["owner"][2],_tqsc_saved_native_entity(state,2,e["owner"][2])) for e in state["entities"] if e["owner"][1]==2]
+            @test _TQSC.Quad.surface_faces(parts,volume)==Set(keys(cert.boundary))
+            _tqsc_existing_factories(cert)
+        end
+    end
     @testset "Actual source, whole maps, typed shells and projected carriers" begin
         for plane in (:XY,:YZ,:ZX),height in (-1.,1.),laterals in (false,true),layers in (:one,:three,:graded)
             _tqsc_product(_TQSC.fixture("three_strip";plane,height,laterals,layers))

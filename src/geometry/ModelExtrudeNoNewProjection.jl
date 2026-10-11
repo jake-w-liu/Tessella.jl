@@ -72,6 +72,9 @@ function _extrude_nonew_surface_projection(m::GeoModel,mesh,surface::Int,
     owner==0 && return nothing
     working=deepcopy(m)
     completed=if scope===nothing
+        # Tagged actual products have already taken the UID-bound projection
+        # path. A naked standalone product was built from the geometric Source;
+        # replay that same operation rather than substituting attached records.
         _extrude_nonew_complete_plan(working,owner,caller;_working_model=true)
     else
         _extrude_nonew_require_scope(scope,m,caller)
@@ -126,7 +129,7 @@ function _extrude_nonew_surface_projection(m::GeoModel,mesh,surface::Int,
     node_entities=source_data.node_entities[part_to_full]
     all(entity->entity in closure,node_entities) || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts surface has a node outside its entity closure"))
-    data=MixedEntityData(entities;node_entities=node_entities,
+    data=Elements._native_mixed_entity_data(entities;node_entities=node_entities,
         node_parametric=source_data.node_parametric[part_to_full],
         external_node_tags=UInt64.(1:nnodes(mesh)),block_entities=owners,
         external_element_tags=_model_projection_external_elements(blocks))
@@ -176,6 +179,9 @@ function _extrude_nonew_projection_context(m::GeoModel,mesh,volume::Int,
                                             scope=nothing)
     working=deepcopy(m)
     completed=if scope===nothing
+        # Current native UID products are admitted before this geometric path.
+        # Rebuild the naked mesh's geometric Source with the same inputs as its
+        # standalone constructor; attached records can differ by one ULP.
         _extrude_nonew_complete_plan(working,volume,caller;_working_model=true)
     else
         _extrude_nonew_require_scope(scope,m,caller)

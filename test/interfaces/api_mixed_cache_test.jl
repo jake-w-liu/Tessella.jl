@@ -1,9 +1,10 @@
 using Test
 using Tessella
 
-function _api_mixed_square_fixture()
+function _api_mixed_square_fixture(;renumber=1)
     api=Tessella.API
     api.initialize()
+    api.option("Mesh.Renumber",renumber)
     for (x,y) in ((0,0),(1,0),(1,1),(0,1))
         api.model.add_point(x,y,0)
     end
@@ -50,16 +51,29 @@ end
     end
 end
 
-@testset "API generation rejects displaced incident native vertex meshes" begin
+include("../artifacts/displaced_point_generation_primary_v1.jl")
+@testset "API generation retains extra Point nodes by actual entity identity" begin
     api=Tessella.API
-    try
-        before=_api_mixed_square_fixture()
-        api.mesh.add_nodes(0,1,[100],[2.,0,0])
-        @test_throws r"Point\[1\].*off its geometry.*Curve\[1\]" api.mesh.generate(2)
-        @test api.mesh.get().coords==before.coords
-        @test api.mesh.get().blocks[1].nodes==before.blocks[1].nodes
-    finally
-        api.finalize()
+    for row in DISPLACED_POINT_GENERATION_PRIMARY
+        try
+            _api_mixed_square_fixture(;renumber=row["renumber"])
+            api.mesh.add_nodes(0,1,[100],[2.,0,0])
+            @test row["error"]===nothing
+            api.mesh.generate(2)
+            for entity in row["after_generation"]
+                dimension,owner=entity["entity"]
+                tags,coordinates,parameters=api.mesh.get_nodes(dimension,owner,false,true)
+                @test tags==entity["tags"]
+                @test coordinates==entity["coordinates"]
+                @test parameters==entity["parameters"]
+                types,elements,nodes=api.mesh.get_elements(dimension,owner)
+                @test types==entity["types"]
+                @test elements==entity["elements"]
+                @test nodes==entity["nodes"]
+            end
+        finally
+            api.finalize()
+        end
     end
 end
 

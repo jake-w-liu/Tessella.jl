@@ -384,6 +384,232 @@ function _spline_point(g,u::Float64)
     return _nurbs_point(g,u)
 end
 
+# ── Analytic derivatives (size-field/curvature evaluation) ─────────────────
+#
+# The mesh-size integrand `lc(t) = speed(t)/h(t)` feeds adaptive trapezoid
+# integration whose error estimate must fall below the integration
+# precision. A first derivative taken as a `1e-8` finite difference carries
+# a rounding noise floor of `eps·|p|/δ`; differencing it a second time for
+# curvature amplifies that floor by `1/δ` to `O(1)`, which keeps the
+# trapezoid error above `1e-9` until the recursion hits its depth cap (16M+
+# points on a curvature-sized spline). The analytic forms below evaluate
+# the exact span-local bases `_spline_point` already uses. They are used
+# only for curvature/size-field evaluation; the `InterpolateCurve`-mirroring
+# finite differences above remain for the parity-sensitive paths (public
+# derivative API, Newton projections).
+
+function _catmull_rom_frame(cps::Vector{NTuple{3,Float64}},closed::Bool,
+                            u::Float64)
+    n=length(cps)
+    i=trunc(Int,(n-1)*u)
+    i<0 && (i=0)
+    i>=n-1 && (i=n-2)
+    t1=i/(n-1)
+    t2=(i+1)/(n-1)
+    t=(u-t1)/(t2-t1)
+    v1=cps[i+1];v2=cps[i+2]
+    v0=if i==0
+        closed ? cps[n-1] : (2.0*v1[1]-v2[1],2.0*v1[2]-v2[2],2.0*v1[3]-v2[3])
+    else
+        cps[i]
+    end
+    v3=if i==n-2
+        closed ? cps[2] : (2.0*v2[1]-v1[1],2.0*v2[2]-v1[2],2.0*v2[3]-v1[3])
+    else
+        cps[i+3]
+    end
+    return v0,v1,v2,v3,t,Float64(n-1)
+end
+
+# s0 = t²-0.5t³-0.5t, s1 = 1.5t³-2.5t²+1, s2 = 2t²-1.5t³+0.5t, s3 = 0.5t³-0.5t²
+function _catmull_rom_d1(cps::Vector{NTuple{3,Float64}},closed::Bool,u::Float64)
+    v0,v1,v2,v3,t,rate=_catmull_rom_frame(cps,closed,u)
+    t2=t*t
+    s0=fma(-1.5,t2,2t)-0.5
+    s1=fma(4.5,t2,-5t)
+    s2=fma(-4.5,t2,fma(4.0,t,0.5))
+    s3=fma(1.5,t2,-t)
+    return ntuple(axis->rate*(s3*v3[axis]+s2*v2[axis]+s1*v1[axis]+s0*v0[axis]),3)
+end
+
+function _catmull_rom_d2(cps::Vector{NTuple{3,Float64}},closed::Bool,u::Float64)
+    v0,v1,v2,v3,t,rate=_catmull_rom_frame(cps,closed,u)
+    s0=fma(-3.0,t,2.0)
+    s1=fma(9.0,t,-5.0)
+    s2=fma(-9.0,t,4.0)
+    s3=fma(3.0,t,-1.0)
+    return ntuple(axis->rate*rate*(s3*v3[axis]+s2*v2[axis]+s1*v1[axis]+s0*v0[axis]),3)
+end
+
+# Bezier: C'(u) = n·Σ B_{n-1,i}(ΔPᵢ), C''(u) = n(n-1)·Σ B_{n-2,i}(Δ²Pᵢ) —
+# the same De Casteljau evaluator on the difference control polygons.
+function _bezier_d1(cps::Vector{NTuple{3,Float64}},u::Float64)
+    n=length(cps)-1
+    n>=1 || return (0.0,0.0,0.0)
+    d=[ntuple(axis->n*(cps[i+1][axis]-cps[i][axis]),3) for i in 1:n]
+    return _bezier_point(d,u)
+end
+
+function _bezier_d2(cps::Vector{NTuple{3,Float64}},u::Float64)
+    n=length(cps)-1
+    n>=2 || return (0.0,0.0,0.0)
+    d=[ntuple(axis->n*(n-1)*(cps[i+2][axis]-2*cps[i+1][axis]+cps[i][axis]),3)
+       for i in 1:n-1]
+    return _bezier_point(d,u)
+end
+
+# `_ubs_point`'s span selection, returned with the local t and the
+# parameter rate dt/du (`-ncurves` on the reflected right-extremity spans).
+function _ubs_span(cps::Vector{NTuple{3,Float64}},closed::Bool,u::Float64)
+    n=length(cps)
+    ncurves=max(n+(closed ? -1 : -3),1)
+    seg=floor(Int,u*ncurves)
+    icurve=seg==ncurves ? seg-1 : seg   # `iCurve == NbCurves` — u = 1
+    t1=icurve/ncurves
+    t2=(icurve+1)/ncurves
+    t=(u-t1)/(t2-t1)
+    v=ntuple(4) do i
+        k=if closed
+            mod(i-2+icurve,n-1)   # (iCurve-1+i) mod (N-1), 0-based
+        else
+            clamp(icurve+i-1,0,n-1)
+        end
+        cps[k+1]
+    end
+    mat=_UBS_MAT_INTERIOR
+    sign=1.0
+    if !closed
+        mi=icurve
+        if (n>6 && mi>=ncurves-2) || (n>4 && mi==ncurves-1)
+            v=(v[4],v[3],v[2],v[1])
+            t=1.0-t
+            sign=-1.0
+            mi=ncurves-1-mi
+        end
+        if mi==0
+            mat=n==2 ? _UBS_MAT2 : n==3 ? _UBS_MAT3 : n==4 ? _UBS_MAT4 :
+                n==5 ? _UBS_MAT5 : n==6 ? _UBS_MAT6_1 : _UBS_MATEXT_1
+        elseif mi==1
+            mat=n==6 ? _UBS_MAT6_2 : _UBS_MAT7_2  # mat7_2 == matext_2
+        end
+    end
+    return v,mat,t,sign*Float64(ncurves)
+end
+
+# `V(t) = t³·vec₁ + t²·vec₂ + t·vec₃ + vec₄`, differentiated in the local
+# span parameter and scaled by the span's parameter rate.
+function _ubs_d1(cps::Vector{NTuple{3,Float64}},closed::Bool,u::Float64)
+    v,mat,t,rate=_ubs_span(cps,closed,u)
+    t2=t*t
+    return ntuple(3) do axis
+        vec=ntuple(4) do i
+            fma(mat[i][4],v[4][axis],
+                fma(mat[i][3],v[3][axis],
+                    fma(mat[i][2],v[2][axis],
+                        fma(mat[i][1],v[1][axis],0.0))))
+        end
+        rate*(3t2*vec[1]+2t*vec[2]+vec[3])
+    end
+end
+
+function _ubs_d2(cps::Vector{NTuple{3,Float64}},closed::Bool,u::Float64)
+    v,mat,t,rate=_ubs_span(cps,closed,u)
+    return ntuple(3) do axis
+        vec=ntuple(4) do i
+            fma(mat[i][4],v[4][axis],
+                fma(mat[i][3],v[3][axis],
+                    fma(mat[i][2],v[2][axis],
+                        fma(mat[i][1],v[1][axis],0.0))))
+        end
+        rate*rate*(6t*vec[1]+2vec[2])
+    end
+end
+
+function _nurbs_eval(cps,knots,deg,u::Float64)
+    span0=_nurbs_findspan(u,deg,length(cps),knots)
+    N=_nurbs_basisfuns(u,span0,deg,knots)
+    x=y=z=0.0
+    for i in deg:-1:0
+        p=cps[span0-deg+i+1]
+        x=fma(N[i+1],p[1],x)
+        y=fma(N[i+1],p[2],y)
+        z=fma(N[i+1],p[3],z)
+    end
+    return (x,y,z)
+end
+
+# Non-rational B-spline derivative control points:
+# Qᵢ = deg·(Pᵢ₊₁ - Pᵢ)/(uᵢ₊deg+₁ - uᵢ₊₁) on U' = knots[2:end-1].
+function _nurbs_d1(g,u::Float64)
+    cps=g.cps;knots=g.knots;deg=g.deg
+    deg>=1 || return (0.0,0.0,0.0)
+    q=NTuple{3,Float64}[]
+    sizehint!(q,length(cps)-1)
+    for i in 1:length(cps)-1
+        ui=knots[i+1]; uip=knots[i+deg+1]
+        coef=uip==ui ? 0.0 : deg/(uip-ui)
+        push!(q,ntuple(axis->coef*(cps[i+1][axis]-cps[i][axis]),3))
+    end
+    isempty(q) && return (0.0,0.0,0.0)
+    return _nurbs_eval(q,knots[2:end-1],deg-1,u)
+end
+
+function _nurbs_d2(g,u::Float64)
+    cps=g.cps;knots=g.knots;deg=g.deg
+    deg>=2 || return (0.0,0.0,0.0)
+    U1=knots[2:end-1]
+    q=NTuple{3,Float64}[]
+    sizehint!(q,length(cps)-1)
+    for i in 1:length(cps)-1
+        ui=knots[i+1]; uip=knots[i+deg+1]
+        coef=uip==ui ? 0.0 : deg/(uip-ui)
+        push!(q,ntuple(axis->coef*(cps[i+1][axis]-cps[i][axis]),3))
+    end
+    length(q)>=2 || return (0.0,0.0,0.0)
+    r=NTuple{3,Float64}[]
+    sizehint!(r,length(q)-1)
+    for i in 1:length(q)-1
+        ui=U1[i+1]; uip=U1[i+deg]
+        coef=uip==ui ? 0.0 : (deg-1)/(uip-ui)
+        push!(r,ntuple(axis->coef*(q[i+1][axis]-q[i][axis]),3))
+    end
+    isempty(r) && return (0.0,0.0,0.0)
+    return _nurbs_eval(r,U1[2:end-1],deg-2,u)
+end
+
+function _spline_d1(g,u::Float64)
+    kind=g.kind
+    if kind===:spline
+        return _catmull_rom_d1(g.cps,g.closed,u)
+    elseif kind===:bezier
+        return _bezier_d1(g.cps,u)
+    elseif kind===:bspline
+        return _ubs_d1(g.cps,g.closed,u)
+    end
+    return _nurbs_d1(g,u)
+end
+
+function _spline_d2(g,u::Float64)
+    kind=g.kind
+    if kind===:spline
+        return _catmull_rom_d2(g.cps,g.closed,u)
+    elseif kind===:bezier
+        return _bezier_d2(g.cps,u)
+    elseif kind===:bspline
+        return _ubs_d2(g.cps,g.closed,u)
+    end
+    return _nurbs_d2(g,u)
+end
+
+# `|C' × C''| / |C'|³` on the analytic derivatives — the smooth curvature
+# the size field needs.
+function _spline_curvature_exact(g,u::Float64)
+    d1=_spline_d1(g,u)
+    d2=_spline_d2(g,u)
+    cr=_occ_cross(d1,d2)
+    return sqrt(_sqlen(cr))*_gm_pow(1.0/sqrt(_sqlen(d1)),3.0)
+end
+
 # `InterpolateCurve(der=1/2)` — finite differences with the hardcoded [0,1]
 # bound checks (`eps1 = u<eps ? 0 : eps`), which apply verbatim even when a
 # Nurbs parameter range is not [0,1].

@@ -3,6 +3,35 @@ using Tessella
 using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node,
                           mesh_crc
 
+@testset "embedded Point identity beside distinct recovery vertices" begin
+    model=GeoModel()
+    add_point!(model,0.2,0.2,0.5;tag=10)
+    coordinate=model.points[10]
+    nearby=(coordinate[1],coordinate[2],coordinate[3]+8e-13)
+    coords=hcat(collect(coordinate),collect(nearby),
+        [1.2,0.2,0.5],[0.2,1.2,0.5],[0.2,0.2,1.5],
+        [-0.8,0.2,nearby[3]],[0.2,-0.8,nearby[3]],[0.2,0.2,nearby[3]-1.0])
+    mesh=Mesh(coords;tets=Int32[1 2;3 7;4 6;5 8])
+    @test validate(mesh).ok
+    before=deepcopy(mesh)
+    resolve(input)=Tessella.Model._model_projection_embedded_point_node(
+        model,input,10,1e-12,"test")
+    @test resolve(mesh)==1
+    @test mesh_crc(mesh)==mesh_crc(before)
+    @test reinterpret(UInt64,vec(mesh.coords))==reinterpret(UInt64,vec(before.coords))
+    reversed=Mesh(mesh.coords[:,[2,1,3,4,5,6,7,8]];
+        tets=Int32[2 1;3 7;4 6;5 8])
+    @test resolve(reversed)==2
+    duplicate=deepcopy(mesh)
+    duplicate.coords[:,2].=coordinate
+    @test_throws ArgumentError resolve(duplicate)
+    ambiguous=deepcopy(mesh)
+    ambiguous.coords[3,1]+=4e-13
+    @test_throws ArgumentError resolve(ambiguous)
+    fallback=Mesh(mesh.coords[:,[2,3,4,5]];tets=reshape(Int32[1,2,3,4],4,1))
+    @test resolve(fallback)==1
+end
+
 @testset "surface projection retains exact nonzero areas" begin
     for axes in ((1,2),(1,3),(2,3)),scale in (1e-200,1.0,1e200)
         first=ntuple(_->0.0,3)
@@ -42,7 +71,7 @@ end
     @test validate(reversed_mesh).ok
     @test reversed_area≈1.0 atol=1e-12
     @test mesh_crc(reversed_mesh).sha==
-          "323796d9f1ea4ab45a39ac650c597d9b4d24912de4c94634c77750da7d5677e1"
+          "5983e9b7479265d116ed8e98865e513e0b7177aff9f53886ad8adf406e05e52b"
 
     loops_before=copy(oriented.loops)
     # Scrambled but chainable members sort into connectivity order like
@@ -308,7 +337,7 @@ end
     mesh=mesh_model_surface(model,1)
     @test validate(mesh).ok
     @test mesh_crc(mesh).sha==
-          "04d814f6154458859d6466b209bd28c8d29e2343d1d3586f3cd36e1538608b75"
+          "d9acb2f3e0e5441bfd67320ea0d3936509b2f169f073f040debf44e4dd6da2dc"
     mapping=model_periodic_nodes(model,mesh,1,2)
     @test mapping.master_entity==4
     @test length(mapping.slave_nodes)==length(mapping.master_nodes)==5
@@ -369,7 +398,7 @@ end
     @test !only(model_periodic_constraints(rotation_model)).reversed
     rotation_mesh=mesh_model_surface(rotation_model,1)
     @test mesh_crc(rotation_mesh).sha==
-          "11143057fa2470011462ab4b74708bfc296844cbc5e13d2d1595517a30392070"
+          "972c55de8191c3e71928bacae2d4b4dfc4855328591d7ee0f45ab010a3ba9784"
     rotation_mapping=model_periodic_nodes(rotation_model,rotation_mesh,1,3)
     @test length(rotation_mapping.master_nodes)==3
     for (slave,master) in zip(rotation_mapping.slave_nodes,
@@ -394,7 +423,7 @@ end
     double_mesh=mesh_model_surface(double_periodic,1)
     @test validate(double_mesh).ok
     @test mesh_crc(double_mesh).sha==
-          "0d92847581b777c321d30cbd1dacef4da0f0e2b9c58242c05a91b5cbac64fb49"
+          "82f2073c39cc221c7c744e230cccb8cacd8d493adbb200f3331af53d243d505e"
     @test length(model_periodic_constraints(double_periodic))==2
     for slave_entity in (2,3)
         double_mapping=model_periodic_nodes(
@@ -421,7 +450,7 @@ end
     branch_mesh=mesh_model_surface(branch,1)
     @test validate(branch_mesh).ok
     @test mesh_crc(branch_mesh).sha==
-          "9a5503ab32b8725f2c9e739a075f2e45c4b35763439b0ff59a3b2d661d4678ae"
+          "599aec5c04fc5ac44400437f25ff5b7d20f08dabb7b57ec879ce6e34a94b86db"
     for (slave_entity,offset) in ((10,0.6),(20,0.3))
         branch_mapping=model_periodic_nodes(
             branch,branch_mesh,1,slave_entity)

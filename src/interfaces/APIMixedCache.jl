@@ -31,7 +31,7 @@ function _canonical_mixed_copy(mesh::MixedMesh)
     end
     data=mesh.entity_data
     if data!==nothing
-        data=Elements.MixedEntityData(data.entities;
+        data=Elements._native_mixed_entity_data(data.entities;
             node_entities=data.node_entities,node_parametric=data.node_parametric,
             external_node_tags=data.external_node_tags,
             block_entities=block_owners,external_element_tags=external_tags)
@@ -83,13 +83,39 @@ function _mesh_element_offsets(mesh::MixedMesh)
     return 0,0,total
 end
 
+struct _CacheFamilyOffsets
+    dense_positions::Vector{Int}
+end
+Base.broadcastable(offsets::_CacheFamilyOffsets)=Ref(offsets)
+Base.:+(offsets::_CacheFamilyOffsets,column::Integer)=offsets.dense_positions[column]
+
 function _mesh_element_block(mesh::MixedMesh,msh::Int)
     offset=0
+    first_offset=0
+    first_cells=nothing
+    parts=nothing
+    positions=nothing
     for (kind,cells,_) in _cache_native_blocks(mesh)
-        kind==msh && return offset,cells
+        if kind==msh
+            if first_cells===nothing
+                first_offset=offset
+                first_cells=cells
+            else
+                if parts===nothing
+                    parts=Matrix{Int32}[first_cells]
+                    positions=collect(first_offset .+ axes(first_cells,2))
+                end
+                append!(positions,offset .+ axes(cells,2))
+                push!(parts,cells)
+            end
+        end
         offset=Base.checked_add(offset,size(cells,2))
     end
-    return nothing
+    first_cells===nothing && return nothing
+    parts===nothing && return first_offset,first_cells
+    # A public family spans every stored block of that type. Keep its original
+    # dense element positions even when other types occur between those blocks.
+    return _CacheFamilyOffsets(positions),hcat(parts...)
 end
 
 _high_order_overlay(::MixedMesh)=nothing
@@ -115,16 +141,20 @@ end
 function _mixed_classification(cache,entity,entities,node_entities,boundaries,owners;
         edge_entities=Dict{Tuple{Int32,Int32},Tuple{Int,Int32}}(),
         face_entities=Dict{NTuple{3,Int32},Tuple{Int,Int32}}(),
-        quad_entities=Dict{NTuple{4,Int32},Tuple{Int,Int32}}())
+        quad_entities=Dict{NTuple{4,Int32},Tuple{Int,Int32}}(),node_parametric=nothing)
+    parameters=node_parametric===nothing ?
+        (cache.entity_data===nothing ?
+            Union{Nothing,Vector{Float64}}[nothing for _ in 1:nnodes(cache)] :
+            deepcopy(cache.entity_data.node_parametric)) : node_parametric
     return _MeshClassification(cache,entity,entities,node_entities,boundaries,
         get(owners,1,Int32[]),get(owners,2,Int32[]),get(owners,4,Int32[]),owners,
-        nothing,edge_entities,face_entities,quad_entities)
+        nothing,edge_entities,face_entities,quad_entities,parameters)
 end
 
 function _classify_cached_mesh(m::GeoModel,mesh::MixedMesh,dim::Int,tag::Int,
-                               cache::MixedMesh;_extrude_scope=nothing)
+                               cache::MixedMesh;_extrude_scope=nothing,_mesh_input=nothing)
     projected=dim==2 ? model_to_mixed(m,mesh,tag;_extrude_scope=_extrude_scope) :
-                      model_to_mixed(m,mesh,dim,tag;_extrude_scope=_extrude_scope)
+                      model_to_mixed(m,mesh,dim,tag;_extrude_scope=_extrude_scope,_mesh_input)
     data=projected.entity_data
     data===nothing && throw(ErrorException(
         "API.mesh.generate: mixed entity projection has no classification"))
@@ -180,7 +210,8 @@ function _classification_skeleton(mesh::MixedMesh,reversed::Bool)
     return out
 end
 
-function _merge_mixed_entity_meshes(parts,caller;node_entities=nothing)
+function _merge_mixed_entity_meshes(parts,caller;node_entities=nothing,node_identities=nothing,
+                                    cell_identities=nothing)
     positions=Dict{Tuple{Int,Int32,NTuple{3,Float64}},Int32}()
     coordinates=NTuple{3,Float64}[]
     node_capacity=0
@@ -192,12 +223,19 @@ function _merge_mixed_entity_meshes(parts,caller;node_entities=nothing)
     remaps=Vector{Vector{Int32}}(undef,length(parts))
     counts=Dict{Int,Int}()
     for (i,(_,mesh)) in enumerate(parts)
+        node_identities===nothing || length(node_identities[i])==nnodes(mesh) ||
+            throw(ArgumentError("$caller: produced vertex identities do not align with geometry rows"))
         remap=Vector{Int32}(undef,nnodes(mesh))
         for column in axes(mesh.coords,2)
             p=(mesh.coords[1,column],mesh.coords[2,column],mesh.coords[3,column])
             owner=node_entities===nothing || node_entities[i]===nothing ?
                 (-1,Int32(0)) : node_entities[i][column]
-            key=(owner[1],owner[2],(p[1]+0.0,p[2]+0.0,p[3]+0.0))
+            point=(p[1]+0.0,p[2]+0.0,p[3]+0.0)
+            identity=node_identities===nothing ? nothing : node_identities[i][column]
+            identity===nothing || identity>0 || throw(ArgumentError(
+                "$caller: produced vertex identity must be positive"))
+            key=identity===nothing ? (owner[1],owner[2],point) :
+                (typemin(Int),Int32(identity),point)
             remap[column]=get!(positions,key) do
                 length(coordinates)<typemax(Int32) || throw(ArgumentError(
                     "$caller: merged mesh exceeds the Int32 node limit"))
@@ -214,10 +252,18 @@ function _merge_mixed_entity_meshes(parts,caller;node_entities=nothing)
                                 for (msh,n) in counts)
     physical=Dict(msh=>Vector{Int32}(undef,n) for (msh,n) in counts)
     cursors=Dict(msh=>0 for msh in keys(counts))
+    binding_type=Model._model_mesh_cell_binding_type(cell_identities)
+    bindings=cell_identities===nothing ? nothing :
+        Dict(msh=>Vector{binding_type}(undef,n) for (msh,n) in counts)
+    segment_slots=cell_identities===nothing ? nothing : Dict{NTuple{2,Int32},Int}()
     keeps=Vector{Vector{BitVector}}(undef,length(parts))
     seen_segments=Set{NTuple{2,Int32}}()
     for (i,(_,mesh)) in enumerate(parts)
         blocks=_cache_native_blocks(mesh)
+        cell_identities===nothing || length(cell_identities[i])==length(blocks) &&
+            all(length(tags)==size(cells,2) for (tags,(_,cells,_)) in
+                zip(cell_identities[i],blocks)) || throw(ArgumentError(
+                "$caller: produced cell identities do not align with geometry"))
         keeps[i]=[trues(size(cells,2)) for (_,cells,_) in blocks]
         for (bi,(msh,cells,tags)) in enumerate(blocks)
             target=nodes[msh]
@@ -226,16 +272,26 @@ function _merge_mixed_entity_meshes(parts,caller;node_entities=nothing)
                     a=remaps[i][cells[1,column]];b=remaps[i][cells[2,column]]
                     key=minmax(a,b)
                     if key in seen_segments
+                        if bindings!==nothing
+                            slot=segment_slots[key];tag=cell_identities[i][bi][column]
+                            old=bindings[msh][slot]
+                            Model._model_mesh_missing_cell_binding(old,binding_type) ||
+                                Model._model_mesh_missing_cell_binding(tag,binding_type) || old==tag || throw(ArgumentError(
+                                "$caller: merged segment has conflicting actual cell identities"))
+                            Model._model_mesh_missing_cell_binding(old,binding_type) && (bindings[msh][slot]=tag)
+                        end
                         keeps[i][bi][column]=false
                         continue
                     end
                     push!(seen_segments,key)
+                    segment_slots===nothing || (segment_slots[key]=cursors[msh]+1)
                 end
                 slot=cursors[msh]+1
                 for row in axes(cells,1)
                     target[row,slot]=remaps[i][cells[row,column]]
                 end
                 physical[msh][slot]=tags[column]
+                bindings===nothing || (bindings[msh][slot]=cell_identities[i][bi][column])
                 cursors[msh]=slot
             end
         end
@@ -245,16 +301,18 @@ function _merge_mixed_entity_meshes(parts,caller;node_entities=nothing)
         coords[axis,i]=p[axis]
     end
     blocks=ElementBlock[]
+    output_bindings=Vector{binding_type}[]
     for msh in sort!(collect(keys(nodes)))
         n=cursors[msh]
         n==0 && continue
         push!(blocks,ElementBlock(msh,nodes[msh][:,1:n],physical[msh][1:n]))
+        bindings===nothing || push!(output_bindings,bindings[msh][1:n])
     end
     merged=MixedMesh(coords,blocks)
     diagnostic=validate(merged)
     diagnostic.ok || throw(ErrorException(
         "$caller: merged mixed mesh is invalid — "*join(diagnostic.messages,"; ")))
-    return merged,remaps,keeps
+    return bindings===nothing ? (merged,remaps,keeps) : (merged,remaps,keeps,output_bindings)
 end
 
 function _merge_classified_parts(parts,remaps,keeps,merged::MixedMesh,caller)
@@ -320,7 +378,8 @@ function _apply_mesh_order(m::GeoModel,cached::MixedMesh,class,caller)
     order=m.meshing.order
     order in (1,2) || throw(ArgumentError(
         "$caller: mesh order $order is not supported (supported: 1, 2)"))
-    order==2 && any(block->msh_spec(block.msh).order==1,cached.blocks) &&
+    order==2 && iszero(OPTIONS["Mesh.SecondOrderLinear"]) &&
+        any(block->msh_spec(block.msh).order==1,cached.blocks) &&
         _mixed_require_linear_cad(m,class,caller)
     if all(block->msh_spec(block.msh).family===:pnt ||
                   msh_spec(block.msh).order==order,cached.blocks)
@@ -335,7 +394,8 @@ function _apply_mesh_order(m::GeoModel,cached::MixedMesh,class,caller)
         "$caller: changing mixed element order requires mesh classification"))
     linear,linear_class=_mixed_linear_cache(cached,class)
     replacement,new_class=order==1 ? (linear,linear_class) :
-        _mixed_quadratic_cache(linear,linear_class,caller)
+        _mixed_quadratic_cache(linear,linear_class,caller;model=m,
+            linear=!iszero(OPTIONS["Mesh.SecondOrderLinear"]))
     _validate_record_cache_labels(m,replacement,new_class,nnodes(replacement),caller)
     _replace_mesh_cache_locked!(replacement,new_class)
     return nothing
@@ -378,13 +438,15 @@ function _mixed_require_linear_cad(m,class,caller)
         tag=Int(entity)
         if dim==1 && haskey(m.curves,tag)
             kind=get(m.curve_types,tag,:line)
-            kind in (:line,:degenerate) && continue
+            Model._model_high_order_curve_geometry(m,tag,caller)!==nothing && continue
             throw(ArgumentError("$caller: native mixed quadratic CAD placement is not " *
                 "implemented for Curve[$tag] ($kind); curved edge nodes and " *
                 "face/volume interior placement require geometry stencils"))
         elseif dim==2 && haskey(m.surfaces,tag)
             kind=get(m.surface_types,tag,:plane)
             kind===:plane && continue
+            Model._model_nurbs_surface(get(m.surface_geometry,tag,nothing)) && continue
+            Model._model_high_order_ruled_surface(m,tag,caller) && continue
             if kind in (:ruled,:tric) && all(loop->
                     all(curve->get(m.curve_types,abs(curve),:line) in
                         (:line,:degenerate),m.loops[loop]),m.surfaces[tag])
@@ -434,18 +496,112 @@ function _mixed_linear_cache(mesh,class)
         node_entities=class.node_entities[used],owners=owners,primary_map=mapping)
 end
 
-function _mixed_quadratic_cache(input_mesh,input_class,caller)
+function _mixed_quadratic_node_parameters(model,mesh,class,coords,owners,caller;linear=false)
+    stored=class.node_parametric
+    length(stored)==nnodes(mesh) || throw(ArgumentError(
+        "$caller: source node parameters do not align with coordinates"))
+    parameters=deepcopy(stored)
+    for row in nnodes(mesh)+1:size(coords,2)
+        dimension,tag=owners[row]
+        parameter=if !linear && model!==nothing && dimension in (1,2) &&
+                _relocation_native_entity(model,dimension,Int(tag))
+            Model.model_parametrization(model,dimension,Int(tag),collect(@view coords[:,row]))
+        else
+            nothing
+        end
+        push!(parameters,parameter)
+    end
+    return parameters
+end
+
+# The captured discrete CAD provider may deliberately differ from edited
+# mesh vertices and their original parameters. Admit its literal Line3 supports
+# with the same identity/ownership checks used by the detached assembler.
+function _mixed_captured_curve_p2(mesh,model,block,column,owner,node_entities,parameters,caller)
+    owner[1]==1 || return false
+    entity=(1,Int(owner[2]));record=get(model.discrete,entity,nothing)
+    record!==nothing && record.geometry_parametrized &&
+        Model._model_discrete_curve_geometry(model,entity[2])!==nothing || return false
+    for position in @view block.nodes[:,column]
+        node_owner=node_entities[position]
+        (node_owner==owner || node_owner[1]==0 &&
+            (0,Int(node_owner[2])) in record.boundary) || throw(ArgumentError(
+            "$caller: captured Curve[$(entity[2])] references an unrelated node owner"))
+        all(isfinite,@view mesh.coords[:,position]) || throw(ArgumentError(
+            "$caller: captured Curve[$(entity[2])] has non-finite coordinates"))
+    end
+    support=block.nodes[end,column];parameter=parameters[support]
+    node_entities[support]==owner && parameter!==nothing && length(parameter)==1 &&
+        all(isfinite,parameter) || throw(ArgumentError(
+            "$caller: captured Curve[$(entity[2])] has an invalid support parameter"))
+    return true
+end
+
+function _mixed_quadratic_geometry_certify(mesh,model,node_entities,parameters,owners,caller;linear)
+    for block in mesh.blocks
+        if block.msh==8 && model!==nothing && !linear
+            for column in axes(block.nodes,2)
+                owner=(1,owners[8][column])
+                _mixed_captured_curve_p2(mesh,model,block,column,owner,node_entities,parameters,caller) && continue
+                vertices=ntuple(node->ntuple(axis->mesh.coords[axis,block.nodes[node,column]],3),3)
+                _api_p2_cell_certify(vertices,Val(8),caller;coords=mesh.coords,cells=block.nodes,column)
+            end
+        else
+            _api_p2_block_certify(mesh.coords,block.nodes,Int(block.msh),caller)
+        end
+    end
+    return nothing
+end
+
+# Uncertified interpolation supports need the complete closure catalog.
+# Build it on the first fallback; certified support identities bypass it.
+function _mixed_quadratic_entity_nodes!(storage,class)
+    catalog=storage[]
+    catalog===nothing || return catalog
+    catalog=Tuple{Tuple{Int,Int32},Set{Int}}[]
+    for (entity,_) in class.boundaries
+        push!(catalog,(entity,Set(Int.(
+            _mesh_entity_nodes_with_boundary(class,entity[1],entity[2])))))
+    end
+    sort!(catalog;by=first)
+    storage[]=catalog
+    return catalog
+end
+
+# Native Plane FACE interiors use the complete boundary's Surface parameters.
+# Reuse the high-order reparametrization rules, including edited native Points.
+function _mixed_quadratic_plane_quad_center(model,points,owners,parameters,nodes,column,owner)
+    boundary=ntuple(8) do slot
+        row=nodes[slot,column]
+        (point=points[row],owner=owners[row],parameter=parameters[row])
+    end
+    assembly=(nodes=boundary,)
+    uv=ntuple(slot->_native_order_surface_face_uv(model,assembly,slot,owner[2]),8)
+    any(value->value===nothing,uv) && return nothing
+    parameter=zeros(Float64,2)
+    for slot in 1:8
+        coefficient=slot<=4 ? -0.25 : 0.5
+        parameter[1]+=coefficient*uv[slot][1]
+        parameter[2]+=coefficient*uv[slot][2]
+    end
+    values=model_value(model,2,Int(owner[2]),parameter)
+    return ((values[1],values[2],values[3]),parameter)
+end
+
+function _mixed_quadratic_cache(input_mesh,input_class,caller;
+        node_max=NODE_TAG_MAX[],model=nothing,linear=false,cell_order=false)
     mesh,class=_mixed_prune_unused(input_mesh,input_class)
     points=NTuple{3,Float64}[(mesh.coords[1,i],mesh.coords[2,i],mesh.coords[3,i])
                              for i in axes(mesh.coords,2)]
     node_entities=copy(class.node_entities)
     keys=Dict{Tuple,Int32}()
-    entity_nodes=Tuple{Tuple{Int,Int32},Set{Int}}[]
-    for (entity,_) in class.boundaries
-        push!(entity_nodes,(entity,Set(Int.(
-            _mesh_entity_nodes_with_boundary(class,entity[1],entity[2])))))
+    parameters=deepcopy(class.node_parametric)
+    curve_geometry=Dict{Int,Any}()
+    point_positions=Dict{Tuple{Int,Int32},Int32}()
+    for (position,owner) in enumerate(class.node_entities)
+        owner[1]==0 && get!(point_positions,owner,Int32(position))
     end
-    sort!(entity_nodes;by=first)
+    entity_nodes=Ref{Union{Nothing,Vector{Tuple{Tuple{Int,Int32},Set{Int}}}}}(nothing)
     blocks=ElementBlock[];owners=Dict{Int,Vector{Int32}}()
     for (bi,(msh,dim,_,cells,cell_owners)) in enumerate(_cache_catalog(mesh,class))
         family=msh_spec(msh).family
@@ -454,20 +610,49 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller)
         nprimary=size(cells,1)
         nodes=Matrix{Int32}(undef,size(reference,2),size(cells,2))
         nodes[1:nprimary,:]=cells
-        for slot in nprimary+1:size(reference,2)
+        slots=nprimary+1:size(reference,2)
+        interpolants=map(slots) do slot
             weights=MeshFunctionSpaces._first_order_values(Val(family),
                 reference[1,slot],reference[2,slot],reference[3,slot],caller,slot)
             support=findall(!iszero,collect(weights))
-            for column in axes(cells,2)
+            (weights,support)
+        end
+        # SetOrderN walks each cell edge in its own direction: a two-term
+        # support is anchored at the edge's first endpoint and advanced by the
+        # second endpoint's weight, exactly like MEdgeVertex(v0,v1,t). The
+        # undirected support pair only identifies which cell edge produced it.
+        edge_directions=Dict{NTuple{2,Int},NTuple{2,Int}}()
+        if any(slot->length(interpolants[slot][2])==2,eachindex(interpolants))
+            for (a,b) in _native_order_edges(family)
+                edge_directions[minmax(a+1,b+1)]=(a+1,b+1)
+            end
+        end
+        major,minor=cell_order ? (axes(cells,2),slots) : (slots,axes(cells,2))
+        for outer in major,inner in minor
+                slot,column=cell_order ? (inner,outer) : (outer,inner)
+                weights,support=interpolants[slot-nprimary]
                 terms=sort!([(cells[j,column],Float64(weights[j])) for j in support])
                 key=Tuple(terms)
                 node=get!(keys,key) do
                     length(points)<typemax(Int32) || throw(ArgumentError(
                         "$caller: elevated mesh exceeds the Int32 node limit"))
-                    p=ntuple(axis->sum(weight*mesh.coords[axis,n] for (n,weight) in terms),3)
+                    # Gmsh SetOrderN places edge supports through the anchored
+                    # midpoint p_first+w_last*(p_last-p_first) in the cell's own
+                    # edge direction, matching MEdgeVertex(v0,v1,t); a plain
+                    # sum(weight*coordinate) loses the literal producer bits.
+                    directed=length(terms)==2 ?
+                        get(edge_directions,(support[1],support[2]),nothing) : nothing
+                    p=ntuple(3) do axis
+                        if directed!==nothing
+                            a=mesh.coords[axis,cells[directed[1],column]]
+                            b=mesh.coords[axis,cells[directed[2],column]]
+                            a+(b-a)*weights[directed[2]]
+                        else
+                            sum(weight*mesh.coords[axis,n] for (n,weight) in terms)
+                        end
+                    end
                     all(isfinite,p) || throw(ArgumentError(
                         "$caller: elevated node coordinates are non-finite"))
-                    push!(points,p)
                     owner=(dim,cell_owners[column])
                     certified=length(terms)==2 ? get(class.edge_entities,
                         minmax(terms[1][1],terms[2][1]),nothing) :
@@ -478,19 +663,78 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller)
                         nothing
                     if certified!==nothing
                         owner=certified
-                    else
-                        for (candidate,allnodes) in entity_nodes
+                    elseif !(dim==2 && model!==nothing &&
+                            Model._model_high_order_ruled_surface(model,Int(owner[2]),caller))
+                        for (candidate,allnodes) in _mixed_quadratic_entity_nodes!(entity_nodes,class)
                             candidate[1]>dim && break
                             all(term->Int(term[1]) in allnodes,terms) || continue
                             owner=candidate
                             break
                         end
                     end
-                    push!(node_entities,owner)
+                    parameter=nothing
+                    if !linear && model!==nothing && owner[1]==1
+                        curve=Int(owner[2])
+                        geometry=get!(curve_geometry,curve) do
+                            Model._model_high_order_curve_geometry(model,curve,caller)
+                        end
+                        if geometry!==nothing
+                            first,last=family===:lin && owner==(dim,cell_owners[column]) ?
+                                (cells[1,column],cells[2,column]) : (terms[1][1],terms[2][1])
+                            u0=_api_p2_curve_parameter(model,curve,geometry,first,
+                                ntuple(axis->mesh.coords[axis,first],3),class.node_parametric[first],point_positions)
+                            u1=_api_p2_curve_parameter(model,curve,geometry,last,
+                                ntuple(axis->mesh.coords[axis,last],3),class.node_parametric[last],point_positions;periodic_end=true)
+                            u=Model._model_high_order_curve_p2_parameter(geometry,u0,u1,caller)
+                            p=Model._model_high_order_curve_point(geometry,u,caller)
+                            parameter=Float64[u]
+                        end
+                    elseif !linear && model!==nothing && owner[1]==2 &&
+                            _relocation_native_entity(model,2,Int(owner[2]))
+                        surface_geometry=get(model.surface_geometry,Int(owner[2]),nothing)
+                        ruled=if Model._model_high_order_ruled_surface(model,Int(owner[2]),caller) &&
+                                owner==(dim,cell_owners[column])
+                            boundary=Int32[nodes[row,column] for row in 1:slot-1]
+                            context=(nodes=Dict(node=>(point=points[node],
+                                owner=node_entities[node],parameter=parameters[node])
+                                for node in boundary),caller=caller)
+                            cell=(msh=Int(msh),owner=owner,nodes=boundary)
+                            _dim01_native_ruled_support!(model,context,cell,
+                                @view(cells[:,column]),slot,owner)
+                        else
+                            nothing
+                        end
+                        if ruled!==nothing
+                            p,parameter,_,_=ruled
+                        elseif Model._model_nurbs_surface(surface_geometry)
+                            if family===:qua && slot==9
+                                p=ntuple(3) do axis
+                                    weighted_coordinate=0.0
+                                    for boundary_slot in 1:8
+                                        coefficient=boundary_slot<=4 ? -0.25 : 0.5
+                                        weighted_coordinate+=coefficient*points[nodes[boundary_slot,column]][axis]
+                                    end
+                                    weighted_coordinate
+                                end
+                            end
+                            u,v,p=Model._model_nurbs_surface_project(surface_geometry,p)
+                            parameter=Float64[u,v]
+                        else
+                            center=family===:qua && slot==9 &&
+                                Model.model_entity_type(model,2,Int(owner[2]))=="Plane" ?
+                                _mixed_quadratic_plane_quad_center(model,points,node_entities,
+                                    parameters,nodes,column,owner) : nothing
+                            if center===nothing
+                                parameter=Model.model_parametrization(model,2,Int(owner[2]),collect(p))
+                            else
+                                p,parameter=center
+                            end
+                        end
+                    end
+                    push!(points,p);push!(node_entities,owner);push!(parameters,parameter)
                     Int32(length(points))
                 end
                 nodes[slot,column]=node
-            end
         end
         push!(blocks,ElementBlock(target,nodes,mesh.blocks[bi].tags))
         append!(get!(()->Int32[],owners,target),cell_owners)
@@ -504,26 +748,40 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller)
     else
         data=mesh.entity_data
         first_new=maximum(data.external_node_tags;init=UInt64(0))
-        class.public_tags===nothing || (first_new=max(NODE_TAG_MAX[],first_new))
+        class.public_tags===nothing || (first_new=max(node_max,first_new))
         count=length(points)-nnodes(mesh)
         first_new<=typemax(Int32)-count || throw(ArgumentError(
             "$caller: elevated public node tags exceed Int32"))
         external=vcat(data.external_node_tags,first_new .+ UInt64.(1:count))
-        parameters=vcat(data.node_parametric,
-            Union{Nothing,Vector{Float64}}[nothing for _ in 1:count])
+        projected=Union{Nothing,Vector{Float64}}[
+            Model._model_mesh_projected_parameter(owner,value)
+            for (owner,value) in zip(node_entities,parameters)]
         result=_mixed_rebuild_metadata(mesh,blocks;coords,node_entities,
-            node_parametric=parameters,external_node_tags=external)
+            node_parametric=projected,external_node_tags=external)
     end
-    _api_p2_constructed_mesh_certify(result,caller)
+    _mixed_quadratic_geometry_certify(result,model,node_entities,parameters,owners,caller;linear)
     public_nodes=nothing
     if class.public_tags!==nothing && mesh.entity_data===nothing
         count=nnodes(result)-nnodes(mesh)
-        NODE_TAG_MAX[]<=typemax(Int32)-count || throw(ArgumentError(
+        node_max<=typemax(Int32)-count || throw(ArgumentError(
             "$caller: elevated public node tags exceed Int32"))
-        public_nodes=vcat(class.public_tags.node_tags,NODE_TAG_MAX[] .+ UInt64.(1:count))
+        public_nodes=vcat(class.public_tags.node_tags,node_max .+ UInt64.(1:count))
     end
-    return result,_mixed_rebind_class(class,result;
-        node_entities=node_entities,owners=owners,public_node_tags=public_nodes)
+    new_class=_mixed_rebind_class(class,result;
+        node_entities=node_entities,owners=owners,public_node_tags=public_nodes,
+        node_parametric=parameters)
+    if any(link->link.dim==2,result.periodic_links)
+        # Quadratic elevation lifts the recorded Surface vertex bijection
+        # through the actual interpolation stencils — the same certification
+        # the generation path applies through _periodic_surface_order_links.
+        # Without it the order-two parent keeps primary-only links.
+        links=_periodic_surface_order_links(mesh,result,new_class,caller)
+        if links!==result.periodic_links
+            result=_mixed_rebuild_metadata(result,result.blocks;periodic_links=links)
+            new_class=_mixed_rebind_class(new_class,result)
+        end
+    end
+    return result,new_class
 end
 
 # Gmsh SetOrderN rebuilds mesh-vertex associations from element connectivity.
@@ -545,7 +803,24 @@ function _mixed_reverse_permutation(msh)
     spec.family===:pnt && return [1]
     primary=Elements.msh_num_nodes(msh_type(spec.family,1))
     corner_order=Int32.(1:primary)
-    _record_reverse_connectivity!(Int32(msh_type(spec.family,1)),corner_order)
+    if (spec.family===:tet || spec.family===:pri) && spec.order>2
+        # The generic high-order classes reflect u/v. Linear and quadratic
+        # tetrahedra and prisms use a different first-two-corner reflection.
+        corner_order[2],corner_order[3]=corner_order[3],corner_order[2]
+        if spec.family===:pri
+            corner_order[5],corner_order[6]=corner_order[6],corner_order[5]
+        end
+    elseif (spec.family===:hex && spec.order>2) ||
+           (spec.family===:pyr && spec.order>1)
+        # MHexahedronN and MPyramidN reflect u/v; the fixed hex classes
+        # and the linear pyramid instead swap corners one and three.
+        corner_order[2],corner_order[4]=corner_order[4],corner_order[2]
+        if spec.family===:hex
+            corner_order[6],corner_order[8]=corner_order[8],corner_order[6]
+        end
+    else
+        _record_reverse_connectivity!(Int32(msh_type(spec.family,1)),corner_order)
+    end
     result=Vector{Int}(undef,spec.nnodes)
     for node in 1:spec.nnodes
         weights=MeshFunctionSpaces._first_order_values(Val(spec.family),
@@ -616,7 +891,7 @@ function _mixed_rebuild_metadata(mesh,blocks;node_order=nothing,selections=nothi
             [stored_data.block_entities[i][selected[i]] for i in eachindex(selected)] : block_entities
         cells=external_element_tags===nothing ?
             [stored_data.external_element_tags[i][selected[i]] for i in eachindex(selected)] : external_element_tags
-        data=Elements.MixedEntityData(data.entities;node_entities=entities,
+        data=Elements._native_mixed_entity_data(data.entities;node_entities=entities,
             node_parametric=parameters,external_node_tags=nodes,
             block_entities=owners[kept_blocks],external_element_tags=cells[kept_blocks])
     end
@@ -685,19 +960,40 @@ end
 
 function _mixed_reorder(mesh,class,msh,entity,ordering,caller)
     catalog=_cache_catalog(mesh,class)
-    selections=[collect(axes(cells,2)) for (_,_,_,cells,_) in catalog]
-    block=findfirst(entry->entry[1]==msh,catalog)
-    positions=block===nothing ? Int[] : findall(==(Int32(entity)),catalog[block][5])
+    positions=Tuple{Int,Int}[(bi,column) for (bi,(kind,_,_,cells,owners)) in enumerate(catalog)
+        for column in axes(cells,2) if kind==msh && owners[column]==Int32(entity)]
     isempty(positions) && throw(ArgumentError("$caller: no elements of type $msh on entity $entity"))
     (ordering isa AbstractVector || ordering isa Tuple) || throw(ArgumentError(
         "$caller: ordering must be a vector or tuple"))
     permutation=Int[_mesh_query_integer(value,caller,"ordering entry") for value in ordering]
     sort(permutation)==collect(0:length(positions)-1) || throw(ArgumentError(
         "$caller: ordering must be a permutation of 0:$(length(positions)-1)"))
-    selections[block][positions]=positions[permutation.+1]
-    replacement,new_class=_mixed_select_columns(mesh,class,selections)
+    nodes=[copy(block.nodes) for block in mesh.blocks]
+    weights=[copy(block.tags) for block in mesh.blocks]
+    public=class.public_tags
+    labels=[_cache_element_tags(public,offset .+ axes(cells,2)) for (_,_,offset,cells,_) in catalog]
+    for (destination,source) in zip(positions,positions[permutation.+1])
+        target_block,target_column=destination
+        source_block,source_column=source
+        nodes[target_block][:,target_column]=mesh.blocks[source_block].nodes[:,source_column]
+        weights[target_block][target_column]=mesh.blocks[source_block].tags[source_column]
+        labels[target_block][target_column]=_cache_element_tag(public,catalog[source_block][3]+source_column)
+    end
+    blocks=ElementBlock[ElementBlock(block.msh,nodes[bi],weights[bi]) for (bi,block) in enumerate(mesh.blocks)]
+    replacement=_mixed_rebuild_metadata(mesh,blocks;external_element_tags=labels)
+    new_class=_mixed_rebind_class(class,replacement)
+    if replacement.entity_data===nothing && public!==nothing
+        new_class=_classification_with_public_tags(new_class,_cache_public_tags(replacement;
+            authority=public.authority,node_tags=public.node_tags,element_tags=vcat(labels...)))
+    end
+    edges=LAST_MESH_EDGES[]
+    faces=LAST_MESH_FACES[]
     _replace_mesh_cache_locked!(replacement,new_class;
                                preserve_visibility=class.public_tags!==nothing)
+    # Reordering existing cells leaves the edge and face graph intact. Native
+    # topology identifiers already allocated by key queries keep their values.
+    LAST_MESH_EDGES[]=edges
+    LAST_MESH_FACES[]=faces
     return nothing
 end
 
@@ -728,10 +1024,13 @@ end
 
 function _mixed_rebind_class(class,mesh;node_entities=class.node_entities,
                              owners=class.cell_entities,primary_map=nothing,selections=nothing,
-                             public_node_tags=nothing)
+                             public_node_tags=nothing,node_parametric=nothing)
     edges,faces,quads=_api_remap_support_entities(class,mesh,primary_map)
+    parameters=node_parametric===nothing ?
+        _relocation_rebind_parameters(class,mesh,primary_map) : node_parametric
     result=_mixed_classification(mesh,class.entity,class.entities,node_entities,
-        class.boundaries,owners;edge_entities=edges,face_entities=faces,quad_entities=quads)
+        class.boundaries,owners;edge_entities=edges,face_entities=faces,quad_entities=quads,
+        node_parametric=parameters)
     class.public_tags===nothing && return result
     if mesh.entity_data===nothing
         public=class.public_tags
@@ -776,7 +1075,10 @@ function _dim01_actual_cache(cached,class;physical_names=Dict{Tuple{Int,Int},Str
     actual_class=_mixed_classification(actual,class.entity,class.entities,
         vcat(class.node_entities,LAST_MESH_HIGH_ORDER_MIDS[]),class.boundaries,owners;
         edge_entities=class.edge_entities,face_entities=class.face_entities,
-        quad_entities=class.quad_entities)
+        quad_entities=class.quad_entities,
+        node_parametric=vcat(class.node_parametric,Union{Nothing,Vector{Float64}}[
+            get(class.mid_parametric,_relocation_mid_key(class,node),nothing)
+            for node in nnodes(cached)+1:nnodes(overlay)]))
     if class.public_tags!==nothing
         public=class.public_tags
         actual_class=_classification_with_public_tags(actual_class,

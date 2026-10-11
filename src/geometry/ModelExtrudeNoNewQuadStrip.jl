@@ -191,7 +191,8 @@ function _extrude_nonew_quad_strip_counts(picks,recombined::Bool,intervals::Int,
 end
 
 function _extrude_nonew_quad_strip_catalog(m::GeoModel,source::Int,source_mesh,
-        spec,levels::Vector{Float64},refs::Vector{NTuple{2,Int32}},recombined::Bool,caller)
+        spec,levels::Vector{Float64},refs::Vector{NTuple{2,Int32}},recombined::Bool,caller;
+        top_states=nothing)
     source_mesh isa MixedMesh && nnodes(source_mesh)==6 && length(source_mesh.blocks)==1 ||
         _extrude_nonew_quad_strip_error(caller,"requires exactly six nodes and two linear quadrangles")
     block=only(source_mesh.blocks)
@@ -330,13 +331,15 @@ function _extrude_nonew_quad_strip_catalog(m::GeoModel,source::Int,source_mesh,
             index==7 ? UInt8(0) : signed[Int(curve_indices[index])]>0 ? UInt8(1) : UInt8(2)
         end
     end
-    top_states=ntuple(number->_extrude_nonew_top_diagonal(cells[number]) ? UInt8(1) : UInt8(2),2)
+    supplied=_model_mesh_top_states(top_states,2,caller)
+    cap_states=ntuple(number->supplied===nothing ?
+        (_extrude_nonew_top_diagonal(cells[number]) ? UInt8(1) : UInt8(2)) : UInt8(supplied[number]),2)
     intervals=length(refs)
     picks=recombined ? Matrix{UInt16}(undef,2,0) :
-        _extrude_nonew_quad_strip_chain(intervals,shared_sides,preferred,top_states,caller)
+        _extrude_nonew_quad_strip_chain(intervals,shared_sides,preferred,cap_states,caller)
     cell_counts,face_capacity,diagonals=_extrude_nonew_quad_strip_counts(picks,recombined,intervals,shared_sides,caller)
     return _ExtrudeNoNewQuadStripCatalog(cells,coordinates,Tuple(boundary),curves,chains,widths,
-        edges,indices,shared_sides,preferred,top_states,picks,cell_counts,face_capacity,diagonals,
+        edges,indices,shared_sides,preferred,cap_states,picks,cell_counts,face_capacity,diagonals,
         Int8(axis),Int8(direction),Int8(orientation),recombined,levels,refs)
 end
 

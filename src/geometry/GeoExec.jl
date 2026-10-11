@@ -37,6 +37,9 @@ BREP remain explicit blockers.
 """
 module GeoExec
 
+import ..Model
+import ..Elements
+
 using ..Model: GeoModel, add_point!, set_point_mesh_size!
 using ..Model: add_line!, add_curve_loop!, add_plane_surface!
 using ..Model: add_circle_arc!, add_ellipse_arc!, add_ruled_surface!
@@ -61,6 +64,7 @@ using ..Model: model_entity, model_entities, model_entities_in_bounding_box
 using ..Model: model_physical_groups, _physical_live_members
 using ..Model: model_entity_color, model_parametrization_bounds, model_normal
 using ..Model: model_reparametrize_on_surface
+using ..Model: model_parametrization, model_value
 using ..Model: _model_entity_bounding_box, _model_bounds_union, _occ_geometry
 using ..Model: _surface_type, _model_volume_boundary_surfaces
 using ..Model: _geo_delete_entities!, _geo_reset_model_geometry!
@@ -73,7 +77,8 @@ using ..Model: create_topology!, classify_surfaces!, create_geometry!,
     _curve_type, _periodic_curve_point, _transfinite_parameters,
     model_dimension
 using ..MeshTypes: Mesh
-using ..IO: read_geo_params, _GeoNumericContext, _geo_eval_numeric
+using ..IO: read_geo_params, _GeoNumericContext, _GeoGeometryParts, _geo_eval_numeric
+using ..IO: _geo_exchange_onelab_number!, _geo_exchange_onelab_string!
 using ..IO: _geo_split_list, _geo_split_range, _geo_range_count
 using ..IO: _geo_numeric_list_terms, _geo_numeric_list_values
 using ..IO: _geo_signed_gmsh_int_value
@@ -123,9 +128,10 @@ using ..Model: _ModelMesh1DOptions, _model_mesh_lc, _model_mesh_bbox,
                _extrude_nonew_scope
 using ..MeshTypes: nnodes, nsegs, ntris, ntets
 using ..Refine: refine_uniform
+import ..Refine
 using ..Recombine: recombine_triangles
 using ..IO: write_msh
-using ..Elements: read_mixed_msh, write_mixed_msh, MixedMesh, ElementBlock,
+using ..Elements: read_mixed_msh, write_mixed_msh, MixedMesh, ElementBlock, msh_spec,
                   SpecialElementBlock, MixedElementBlock,
                   msh_dimension, msh_family, msh_num_nodes
 using ..Model: add_discrete_entity!, DiscreteEntity, _record_append_node!,
@@ -135,6 +141,237 @@ using ..Optimize: smooth_optimize, _laplacian_smooth_tri_cache
 using ..IO: _geo_gmsh_number
 using ..Transform: _affine_coordinate, _periodic_affine_3x4
 using LinearAlgebra: norm, svd
+
+# Separate emitted geometry entity parts from actual native products. Dense
+# carrier rows and native identities are explicit; coordinates never pick IDs.
+function _geo_geometry_blocks(mesh::Mesh)
+    return ((1,mesh.segs,mesh.seg_tag),(2,mesh.tris,mesh.tri_tag),(4,mesh.tets,mesh.tet_tag))
+end
+function _geo_geometry_blocks(mesh::MixedMesh)
+    return [(Int(block.msh),block.nodes,block.tags) for block in mesh.blocks]
+end
+
+function _geo_geometry_part_coordinates(part::Mesh,coordinates)
+    return Mesh(coordinates;segs=part.segs,tris=part.tris,tets=part.tets,
+        seg_tag=part.seg_tag,tri_tag=part.tri_tag,tet_tag=part.tet_tag)
+end
+function _geo_geometry_part_coordinates(part::MixedMesh,coordinates)
+    part.entity_data===nothing || throw(ArgumentError(
+        "execute_geo: geometry entity parts must not claim actual native metadata"))
+    return MixedMesh(coordinates,part.blocks;physical_names=part.physical_names,
+        elementary_entities=part.elementary_entities,periodic_links=part.periodic_links,
+        ancillary_sections=part.ancillary_sections,data_sections=part.data_sections,
+        partition_data=part.partition_data)
+end
+
+function _geo_geometry_receipt(carrier,parts,rows,node_tags,caller)
+    length(parts)==length(rows) || throw(ArgumentError("$caller: geometry part rows do not align"))
+    length(node_tags)==nnodes(carrier) && allunique(node_tags) || throw(ArgumentError(
+        "$caller: geometry carrier identities do not align"))
+    keys=Set{Tuple{Int,Int}}()
+    emitted=Dict{Tuple,Int}()
+    for ((dim,tag,part),mapping) in zip(parts,rows)
+        owner=(dim,tag)
+        owner in keys && throw(ArgumentError("$caller: repeated geometry entity part $owner"))
+        push!(keys,owner)
+        length(mapping)==nnodes(part) && allunique(mapping) &&
+            all(row->0<row<=nnodes(carrier),mapping) || throw(ArgumentError(
+                "$caller: geometry entity $owner has invalid carrier rows"))
+        isequal(part.coords,carrier.coords[:,mapping]) || throw(ArgumentError(
+            "$caller: geometry entity $owner disagrees with its carrier coordinates"))
+        part isa MixedMesh && part.entity_data!==nothing && throw(ArgumentError(
+            "$caller: geometry entity $owner claims actual native metadata"))
+        for (msh,cells,_) in _geo_geometry_blocks(part),cell in eachcol(cells)
+            msh_dimension(msh)==dim || throw(ArgumentError(
+                "$caller: geometry entity $owner contains a foreign dimension"))
+            key=(msh,Tuple(mapping[cell]))
+            emitted[key]=get(emitted,key,0)+1
+        end
+    end
+    merged=Dict{Tuple,Int}()
+    for (msh,cells,_) in _geo_geometry_blocks(carrier),cell in eachcol(cells)
+        key=(msh,Tuple(cell));merged[key]=get(merged,key,0)+1
+    end
+    emitted==merged || throw(ArgumentError(
+        "$caller: geometry entity cells do not partition the returned carrier"))
+    return _GeoGeometryParts(carrier,parts,rows,copy(node_tags))
+end
+
+function _geo_geometry_carrier_tags(authority,carrier,caller)
+    carrier===authority.carrier && length(authority.carrier_rows)==nnodes(carrier) ||
+        throw(ArgumentError("$caller: geometry carrier lacks its actual identity rows"))
+    return authority.mesh.entity_data.external_node_tags[authority.carrier_rows]
+end
+
+function _geo_geometry_coordinate_receipt(receipt,carrier,caller)
+    receipt===nothing && return nothing
+    nnodes(carrier)==nnodes(receipt.carrier) || throw(ArgumentError(
+        "$caller: coordinate edit changes geometry carrier row count"))
+    parts=Tuple{Int,Int,Union{Mesh,MixedMesh}}[
+        (dim,tag,_geo_geometry_part_coordinates(part,carrier.coords[:,rows]))
+        for ((dim,tag,part),rows) in zip(receipt.parts,receipt.rows)]
+    return _geo_geometry_receipt(carrier,parts,receipt.rows,receipt.node_tags,caller)
+end
+
+# Reclassification, renumbering and changed cell orientations use real native
+# cell tags. An unlabelled proxy cell can retain its old explicitly bound owner;
+# ambiguity is rejected before any model/context publication.
+function _geo_geometry_rebind_receipt(authority,carrier,previous,plan,caller)
+    carrier===authority.mesh && return nothing
+    tags=_geo_geometry_carrier_tags(authority,carrier,caller)
+    native=authority.mesh.entity_data
+    cell_owners=Dict{UInt64,Tuple{Int,Int}}()
+    for (block,owners,ids) in zip(authority.mesh.blocks,native.block_entities,native.external_element_tags)
+        for (owner,id) in zip(owners,ids)
+            cell_owners[id]=(msh_dimension(block.msh),Int(owner))
+        end
+    end
+    node_map=hasproperty(plan,:node_tag_map) ? plan.node_tag_map : nothing
+    mapped(tag)=node_map===nothing ? tag : get(node_map,tag,nothing)
+    proxy=Dict{Tuple,Union{Nothing,Tuple{Int,Int}}}()
+    preferred=Dict{Tuple{Int,Int},Vector{UInt64}}()
+    previous_kind=Dict{Tuple{Int,Int},Bool}()
+    if previous!==nothing
+        for ((dim,tag,part),rows) in zip(previous.parts,previous.rows)
+            owner=(dim,tag);previous_kind[owner]=part isa Mesh
+            old=mapped.(previous.node_tags[rows])
+            preferred[owner]=UInt64[value for value in old if value!==nothing]
+            for (msh,cells,_) in _geo_geometry_blocks(part),cell in eachcol(cells)
+                values=old[cell];any(isnothing,values) && continue
+                key=(msh,Tuple(sort!(UInt64[value for value in values])))
+                existing=get(proxy,key,owner)
+                proxy[key]=existing==owner ? owner : nothing
+            end
+        end
+    end
+    geometry_blocks=collect(_geo_geometry_blocks(carrier))
+    length(authority.carrier_cells)==length(geometry_blocks) || throw(ArgumentError(
+        "$caller: geometry carrier lacks its explicit cell identity blocks"))
+    selected=Dict{Tuple{Int,Int},Vector{Vector{Int}}}()
+    needed=Dict{Tuple{Int,Int},Set{Int32}}()
+    for (bi,(msh,cells,_)) in enumerate(geometry_blocks)
+        ids=authority.carrier_cells[bi]
+        length(ids)==size(cells,2) || throw(ArgumentError(
+            "$caller: geometry carrier cell identities do not align"))
+        for column in axes(cells,2)
+            id=ids[column]
+            owner=if id===nothing
+                key=(msh,Tuple(sort!(copy(tags[cells[:,column]]))))
+                get(proxy,key,nothing)
+            else
+                get(cell_owners,id,nothing)
+            end
+            owner!==nothing && owner[1]==msh_dimension(msh) || throw(ArgumentError(
+                "$caller: geometry cell lacks its explicitly bound entity owner"))
+            blocks=get!(()->[Int[] for _ in geometry_blocks],selected,owner)
+            push!(blocks[bi],column)
+            union!(get!(()->Set{Int32}(),needed,owner),cells[:,column])
+        end
+    end
+    for (row,actual) in enumerate(authority.carrier_rows)
+        dim,tag=native.node_entities[actual];owner=(dim,Int(tag))
+        push!(get!(()->Set{Int32}(),needed,owner),Int32(row))
+    end
+    positions=Dict(tag=>Int32(row) for (row,tag) in enumerate(tags))
+    parts=Tuple{Int,Int,Union{Mesh,MixedMesh}}[];remaps=Vector{Int32}[]
+    for owner in sort!(collect(keys(needed)))
+        keep=needed[owner];rows=Int32[];seen=Set{Int32}()
+        for tag in get(preferred,owner,UInt64[])
+            row=get(positions,tag,nothing)
+            row===nothing || !(row in keep) || row in seen || (push!(rows,row);push!(seen,row))
+        end
+        for row in sort!(collect(keep))
+            row in seen || (push!(rows,row);push!(seen,row))
+        end
+        inverse=Dict(row=>Int32(local_row) for (local_row,row) in enumerate(rows))
+        indices=get(selected,owner,[Int[] for _ in geometry_blocks])
+        coords=carrier.coords[:,rows]
+        part=if carrier isa Mesh && get(previous_kind,owner,true)
+            cells=ntuple(bi->begin
+                nodes=geometry_blocks[bi][2][:,indices[bi]]
+                map(row->inverse[row],nodes)
+            end,3)
+            labels=ntuple(bi->geometry_blocks[bi][3][indices[bi]],3)
+            Mesh(coords;segs=cells[1],tris=cells[2],tets=cells[3],
+                seg_tag=labels[1],tri_tag=labels[2],tet_tag=labels[3])
+        else
+            blocks=ElementBlock[]
+            for (bi,(msh,cells,labels)) in enumerate(geometry_blocks)
+                isempty(indices[bi]) && continue
+                local_nodes=map(row->inverse[row],cells[:,indices[bi]])
+                push!(blocks,ElementBlock(msh,local_nodes,labels[indices[bi]]))
+            end
+            MixedMesh(coords,blocks)
+        end
+        push!(parts,(owner[1],owner[2],part));push!(remaps,rows)
+    end
+    return _geo_geometry_receipt(carrier,parts,remaps,tags,caller)
+end
+
+function _geo_geometry_plan_receipt(authority,carrier,previous,plan,caller)
+    carrier===authority.mesh && return nothing
+    if hasproperty(plan,:geometry_parts) && plan.geometry_parts!==nothing
+        return _geo_geometry_receipt(carrier,plan.geometry_parts,plan.geometry_part_rows,
+            _geo_geometry_carrier_tags(authority,carrier,caller),caller)
+    end
+    return _geo_geometry_rebind_receipt(authority,carrier,previous,plan,caller)
+end
+
+function _geo_execution_geometry_parts(m,context)
+    receipt=context.mesh_geometry_parts
+    if receipt!==nothing
+        receipt.carrier===context.mesh || throw(ArgumentError(
+            "execute_geo: geometry entity parts belong to a stale carrier"))
+        return receipt.parts
+    end
+    authority=m.meshing.mesh_authority
+    authority===nothing || context.mesh===nothing || context.mesh===authority.mesh ||
+        throw(ArgumentError("execute_geo: independent geometry carrier lacks its entity parts"))
+    return context.mesh_parts
+end
+
+# The global and local refinement traces name primary rows and each actual
+# inserted midpoint. A part never guesses a support vertex from its position.
+function _geo_geometry_refined_parts(previous,trace,carrier,caller)
+    previous===nothing && return nothing,nothing
+    parts=Tuple{Int,Int,Union{Mesh,MixedMesh}}[];remaps=Vector{Int32}[]
+    for ((dim,tag,part),old_rows) in zip(previous.parts,previous.rows)
+        part isa Mesh || throw(ArgumentError("$caller: simplex refinement has a non-simplex geometry part"))
+        if dim==0
+            nsegs(part)==ntris(part)==ntets(part)==0 || throw(ArgumentError(
+                "$caller: Point geometry part contains non-Point cells"))
+            # Point parts have no local incident cells. Their liveness comes
+            # from the global carrier trace, including incident Curve cells.
+            rows=Int32[trace.primary_map[old] for old in old_rows
+                if trace.primary_map[old]>0]
+            allunique(rows) || throw(ArgumentError("$caller: refined Point rows repeat"))
+            push!(parts,(dim,tag,Mesh(carrier.coords[:,rows])));push!(remaps,rows)
+            continue
+        end
+        local_trace=Refine._refine_uniform_traced(part)
+        rows=zeros(Int32,nnodes(local_trace.mesh))
+        compact_old=zeros(Int32,count(!iszero,local_trace.primary_map))
+        for (old,local_row) in enumerate(local_trace.primary_map)
+            local_row==0 && continue
+            compact_old[local_row]=Int32(old)
+            global_row=trace.primary_map[old_rows[old]]
+            global_row>0 || throw(ArgumentError("$caller: refined geometry part loses a primary row"))
+            rows[local_row]=global_row
+        end
+        for ((a,b),local_row) in local_trace.midpoint_ids
+            ca=trace.primary_map[old_rows[compact_old[a]]]
+            cb=trace.primary_map[old_rows[compact_old[b]]]
+            global_row=get(trace.midpoint_ids,minmax(ca,cb),nothing)
+            global_row===nothing && throw(ArgumentError("$caller: refined geometry part loses a midpoint event"))
+            rows[local_row]=global_row
+        end
+        all(>(0),rows) && allunique(rows) || throw(ArgumentError(
+            "$caller: refined geometry part rows do not form an injection"))
+        refined=_geo_geometry_part_coordinates(local_trace.mesh,carrier.coords[:,rows])
+        push!(parts,(dim,tag,refined));push!(remaps,rows)
+    end
+    return parts,remaps
+end
 
 export execute_geo, GeoExecution, geo_entity_mesh
 
@@ -171,22 +408,47 @@ struct GeoExecution
     # per-entity view instead of the all-dimension product. Empty when no
     # mesh was generated through `_geo_mesh_model`.
     mesh_parts::Vector{Tuple{Int,Int,Union{Mesh,MixedMesh}}}
+    # Actual native products retain their own UID/owner/UV metadata.
+    actual_mesh_parts::Vector{Tuple{Int,Int,Union{Mesh,MixedMesh}}}
+    # Factory maxima can exceed every live tag after renumbering or deletion.
+    mesh_node_max::UInt64
+    mesh_element_max::UInt64
+    native_context_lc::Float64
+    native_context_forced_bbox::Bool
+    native_element_lookup_receipt::Any
 end
 
-"""
-    geo_entity_mesh(execution, dim, tag) -> Union{Mesh,MixedMesh}
+GeoExecution(model,mesh,params,transfinite_tri,values,lists,strings,warnings,
+             msg_error_count,exit_code,mesh_parts)=GeoExecution(model,mesh,params,
+    transfinite_tri,values,lists,strings,warnings,msg_error_count,exit_code,
+    mesh_parts,mesh_parts,UInt64(0),UInt64(0),1.0,false,nothing)
 
-Return the `(dim, tag)` entity's own mesh from `execution.mesh_parts` — the
-per-entity view of the merged product [`execute_geo`](@ref) builds (a
-`MixedMesh` when the entity meshed recombined quadrangles/polyhedra).
-Entity-level consumers such as the classified [`model_to_mixed`](@ref)
-projection need the entity's mesh alone; the merged mesh additionally carries
-every other entity's point, segment, and triangle cells. Throws
+GeoExecution(model,mesh,params,transfinite_tri,values,lists,strings,warnings,
+    msg_error_count,exit_code,mesh_parts,node_max,element_max,lc,forced_bbox)=
+    GeoExecution(model,mesh,params,transfinite_tri,values,lists,strings,warnings,
+        msg_error_count,exit_code,mesh_parts,mesh_parts,node_max,element_max,lc,forced_bbox,nothing)
+
+GeoExecution(model,mesh,params,transfinite_tri,values,lists,strings,warnings,
+    msg_error_count,exit_code,mesh_parts,actual_mesh_parts,node_max,element_max,lc,forced_bbox)=
+    GeoExecution(model,mesh,params,transfinite_tri,values,lists,strings,warnings,
+        msg_error_count,exit_code,mesh_parts,actual_mesh_parts,node_max,element_max,lc,forced_bbox,nothing)
+
+"""
+    geo_entity_mesh(execution, dim, tag; geometry=false) -> Union{Mesh,MixedMesh}
+
+Return the `(dim, tag)` entity's actual native mesh from
+`execution.actual_mesh_parts`, retaining its public identities, owners and
+parameters. Set `geometry=true` to obtain the entity's emitted geometry view
+from `execution.mesh_parts`; those parts partition `execution.mesh` and can
+have separate coordinate arithmetic without claiming actual native metadata.
+Entity-level consumers select the view required by their projection or
+certificate instead of mixing the two row spaces. Throws
 `ArgumentError` when no matching part exists (for example when the file
 produced no `Mesh n`/`mesh_dim` product).
 """
-function geo_entity_mesh(execution::GeoExecution,dim::Integer,tag::Integer)
-    for (d,t,mesh) in execution.mesh_parts
+function geo_entity_mesh(execution::GeoExecution,dim::Integer,tag::Integer;geometry::Bool=false)
+    parts=geometry ? execution.mesh_parts : execution.actual_mesh_parts
+    for (d,t,mesh) in parts
         (d==dim && t==tag) && return mesh
     end
     throw(ArgumentError(
@@ -441,7 +703,17 @@ explicit blockers.
 An allocator read after an untracked topology-changing declaration is rejected;
 tracked `Boolean` operand `Delete` and `SetMaxTag` counters stay live.
 """
-function execute_geo(path::AbstractString; mesh_dim::Integer=0)
+function execute_geo(path::AbstractString; mesh_dim::Integer=0,
+                     _initial_mesh_algorithms=(algorithm_2d=6,algorithm_3d=1),
+                     _initial_context_lc::Float64=1.0,
+                     _initial_context_forced_bbox::Bool=false,
+                     _initial_abort_on_error=nothing,
+                     _initial_mesh_error_callback=nothing,
+                     _initial_mesh_begin_callback=nothing,
+                     _initial_abort_option_callback=nothing,
+                     _initial_numeric_options=nothing,
+                     _initial_numeric_option_callback=nothing,
+                     _initial_recombine_partial_callback=nothing)
     isfile(path) || throw(ArgumentError("execute_geo: missing file $path"))
     mesh_dim isa Bool && throw(ArgumentError("execute_geo: mesh_dim must not be Bool"))
     dim=try
@@ -454,6 +726,33 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     params=read_geo_params(path)
     model=GeoModel()
     context=_GeoNumericContext()
+    context.native_context_lc=_initial_context_lc
+    context.native_context_forced_bbox=_initial_context_forced_bbox
+    context.native_mesh_error_callback=_initial_mesh_error_callback
+    context.native_mesh_begin_callback=_initial_mesh_begin_callback
+    context.native_abort_option_callback=_initial_abort_option_callback
+    context.native_numeric_option_callback=_initial_numeric_option_callback
+    context.native_recombine_partial_callback=_initial_recombine_partial_callback
+    _initial_abort_on_error===nothing ||
+        (context.option_numbers[("General",0,"AbortOnError")]=Float64(_initial_abort_on_error))
+    context.option_numbers[("Mesh",0,"Algorithm")]=
+        Float64(_initial_mesh_algorithms.algorithm_2d)
+    context.option_numbers[("Mesh",0,"Algorithm3D")]=
+        Float64(_initial_mesh_algorithms.algorithm_3d)
+    for (name,field,default) in (("RecombineOptimizeTopology",:recombine_topology_passes,5.0),
+            ("RecombineNodeRepositioning",:recombine_node_repositioning,1.0),
+            ("RecombineMinimumQuality",:recombine_minimum_quality,0.01),
+            ("Smoothing",:native_smoothing,1.0),
+            ("SecondOrderLinear",:second_order_linear,0.0))
+        context.option_numbers[("Mesh",0,name)]=hasproperty(_initial_mesh_algorithms,field) ?
+            Float64(getproperty(_initial_mesh_algorithms,field)) : default
+    end
+    if _initial_numeric_options!==nothing
+        for (name,value) in _initial_numeric_options
+            family,member=split(String(name),'.';limit=2)
+            context.option_numbers[(family,0,member)]=Float64(value)
+        end
+    end
     context.file_name=String(path)
     # Field declarations/options/delete replay into `context.fields` — the
     # statement-time live map, shared with `params.fields` so the returned
@@ -520,11 +819,16 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
         mesh,context.mesh_node_owner=_geo_mesh_model(model,3,context)
         context.mesh=mesh
     end
+    _geo_sync_mesh_algorithms!(model,context)
+    _geo_sync_native_surface_controls!(model,context)
     return GeoExecution(model,mesh,params,transfinite_tri,context.values,
                         context.lists,context.strings,
                         copy(context.exec_warnings),context.msg_error_count,
                         context.stop===:exit ? context.exit_code : nothing,
-                        context.mesh_parts)
+                        _geo_execution_geometry_parts(model,context),context.mesh_parts,
+                        context.mesh_node_max,context.mesh_element_max,
+                        context.native_context_lc,context.native_context_forced_bbox,
+                        context.native_element_lookup_receipt)
 end
 
 # Upstream control flow is a token stream, not a block tree (Gmsh.y
@@ -1441,17 +1745,27 @@ function _geo_exec_temp_bbox_add!(context::_GeoNumericContext,
     context.temp_bbox=box===nothing ?
         ((x,y,z),(x,y,z)) :
         (min.(box[1],(x,y,z)),max.(box[2],(x,y,z)))
+    context.native_context_lc=_geo_temp_bbox_lc(context)
     return nothing
 end
 
 # `CTX::instance()->lc` during `.geo` execution — the raw diagonal of the
 # `Point`-statement cloud (`lc == 0` maps to 1 upstream).
-function _geo_exec_lc(context::_GeoNumericContext)
+function _geo_temp_bbox_lc(context::_GeoNumericContext)
     box=context.temp_bbox
     box===nothing && return 1.0
     range=box[2].-box[1]
     lc=sqrt(range[1]*range[1]+range[2]*range[2]+range[3]*range[3])
     return lc==0.0 ? 1.0 : lc
+end
+
+_geo_exec_lc(context::_GeoNumericContext)=context.native_context_lc
+
+function _geo_sync_native_context!(m::GeoModel,context::_GeoNumericContext)
+    context.native_context_forced_bbox && return nothing
+    tolerance=something(_geo_option_number(context,"Geometry",0,"Tolerance"),1e-8)
+    context.native_context_lc=_model_mesh_lc(m,tolerance,"execute_geo: synchronize")
+    return nothing
 end
 
 # `Parametric BoundingBox X{t}` (dims 1-2) and
@@ -1677,7 +1991,7 @@ function _geo_exec_transform_term(m::GeoModel,raw::AbstractString,
         isempty(rest) || _geo_selector_abort(rest)
         entities=_geo_shape_list_entities!(m,shape_list,context,caller;
                                            allocator_state=allocator_state)
-        transform_entities!(m,t,entities;caller=caller)
+        transform_entities!(m,t,entities;caller=caller,auto_coherence=_geo_auto_coherence(context))
         context.geo_changed=true
         return Float64[Float64(tag) for (_,tag) in entities]
     end
@@ -1780,19 +2094,20 @@ function _geo_exec_selector_term(m::GeoModel,raw::AbstractString,
     s=String(strip(raw))
     isempty(s) && return nothing
     caller="execute_geo"
-    # Every upstream selector synchronizes the internals before reading —
-    # `if(getGEOInternals()->getChanged()) synchronize` — which here
-    # materializes the derived physical-group view when declarations or
-    # geometry changed since the last sync.
-    _geo_sync_physical_view_if_changed!(m,context)
     transform=_geo_exec_transform_term(m,s,context,allocator_state)
     transform!==nothing && return transform
     kw=match(r"^(Physical|Parent|BoundingBox|Mass|CenterOfMass|MatrixOfInertia|Normal|Parametric|Color)\b(.*)$",s)
-    kw!==nothing && return _geo_selector_keyword_term(
-        m,String(kw.captures[1]),String(strip(kw.captures[2])),context,caller,
-        allocator_state)
+    if kw!==nothing
+        _geo_sync_physical_view_if_changed!(m,context)
+        return _geo_selector_keyword_term(
+            m,String(kw.captures[1]),String(strip(kw.captures[2])),context,caller,
+            allocator_state)
+    end
     head=_geo_selector_entity_head(s,context,caller)
     head===nothing && return nothing
+    # The hook also sees ordinary numeric terms and option reads. Only an
+    # admitted model selector triggers the native synchronization event.
+    _geo_sync_physical_view_if_changed!(m,context)
     return _geo_selector_entity_term(
         m,head[1],head[2],head[3],context,caller)
 end
@@ -1918,13 +2233,80 @@ end
 # zero-resolution list still occupies the tag.
 function _geo_store_curve!(m::GeoModel,tag,found::Vector{Int};
                            kind=nothing,control_points::Bool=false,
-                           geometry=nothing)
+                           geometry=nothing,native_geo::Bool=true)
     itag=trunc(Int,tag)
     m.curves[itag]=isempty(found) ? (0,0) : (first(found),last(found))
     control_points && (m.curve_control_points[itag]=copy(found))
     kind!==nothing && (m.curve_types[itag]=kind)
     geometry!==nothing && (m.curve_geometry[itag]=geometry)
+    native_geo && Model._native_geo_kernel_admit_curve!(m,itag)
     return nothing
+end
+
+function _geo_occ_line_geometry(m,found)
+    length(found)==2 || return nothing
+    origin=m.points[first(found)];endpoint=m.points[last(found)]
+    delta=ntuple(axis->endpoint[axis]-origin[axis],3)
+    edge_length=sqrt(delta[1]*delta[1]+delta[2]*delta[2]+delta[3]*delta[3])
+    isfinite(edge_length) && edge_length>0 || return nothing
+    direction=ntuple(axis->delta[axis]/edge_length,3)
+    return (occ=:line,origin=origin,dir=direction,t0=0.0,t1=edge_length)
+end
+
+# BRepLib_FindSurface samples both endpoints of each straight edge, weighted
+# by that edge's length. An axis-aligned wire has an exact covariance null
+# axis; preserve that constructor instead of fitting a built-in mean Plane.
+function _geo_occ_axis_plane_geometry(m,loops)
+    curves=get(m.loops,first(loops),Int[])
+    isempty(curves) && return nothing
+    samples=NTuple{3,Float64}[];weights=Float64[]
+    for signed in curves
+        curve=abs(signed);geometry=get(m.curve_geometry,curve,nothing)
+        geometry!==nothing && hasproperty(geometry,:occ) && geometry.occ===:line ||
+            return nothing
+        first_point=Model._occ_line_point(geometry,geometry.t0)
+        last_point=Model._occ_line_point(geometry,geometry.t1)
+        delta=ntuple(axis->last_point[axis]-first_point[axis],3)
+        weight=sqrt(delta[1]*delta[1]+delta[2]*delta[2]+delta[3]*delta[3])
+        isfinite(weight) && weight>0 || return nothing
+        push!(samples,first_point);push!(samples,last_point)
+        push!(weights,weight);push!(weights,weight)
+    end
+    axis=findfirst(axis->all(point->point[axis]==samples[1][axis],samples),1:3)
+    axis===nothing && return nothing
+    weighted=zeros(3);total=0.0
+    for (point,weight) in zip(samples,weights)
+        for component in 1:3
+            weighted[component]+=weight*point[component]
+        end
+        total+=weight
+    end
+    center=(weighted[1]/total,weighted[2]/total,weighted[3]/total)
+    first_axis=mod1(axis+1,3);second_axis=mod1(axis+2,3)
+    area=0.0
+    for signed in curves
+        begin_tag,end_tag=m.curves[abs(signed)]
+        signed<0 && ((begin_tag,end_tag)=(end_tag,begin_tag))
+        begin_point=m.points[begin_tag];end_point=m.points[end_tag]
+        area+=(begin_point[first_axis]-center[first_axis])*(end_point[second_axis]-center[second_axis])-
+              (begin_point[second_axis]-center[second_axis])*(end_point[first_axis]-center[first_axis])
+    end
+    isfinite(area) && !iszero(area) || return nothing
+    normal=ntuple(component->component==axis ? 1.0 : 0.0,3)
+    area<0 && (normal=(-normal[1],-normal[2],-normal[3]))
+    first_direction,second_direction=Model._occ_ax2_frame(normal)
+    pcurves=Dict{Int,NamedTuple}()
+    base_geometry=(occ=:plane,center=center,axis=normal,X=first_direction,Y=second_direction,
+        reversed=false,pcurves=pcurves)
+    parameters=[Model._occ_plane_uv(base_geometry,point) for point in samples]
+    lower=Float64[minimum(point[component] for point in parameters) for component in 1:2]
+    upper=Float64[maximum(point[component] for point in parameters) for component in 1:2]
+    geometry=merge(base_geometry,(uvb=(lower,upper),))
+    for loop in loops,signed in m.loops[loop]
+        curve=abs(signed);edge,low,high=Model._brep_edge_curve(m,curve)
+        pcurves[curve]=(fwd=Model._brep_synth_pcurve(geometry,edge,low,high),rev=nothing)
+    end
+    return geometry
 end
 
 # The `MSH_SEGM_LINE && Control_Points <= 2` position check at the end of
@@ -2483,6 +2865,7 @@ function _geo_model_has_mesh_elements(m::GeoModel,context::_GeoNumericContext)
 end
 
 function _geo_sync_physical_view!(m::GeoModel,context::_GeoNumericContext)
+    _geo_restore_orientation_constraints!(m)
     raw=context.raw_physicals
     # `synchronize` clears the entity-level memberships only when the model
     # carries no mesh elements and raw physical groups exist — otherwise
@@ -2527,6 +2910,7 @@ function _geo_sync_physical_view!(m::GeoModel,context::_GeoNumericContext)
     for members in values(m.physical)
         sort!(members)
     end
+    _geo_sync_native_context!(m,context)
     context.geo_changed=false
     return nothing
 end
@@ -2849,7 +3233,7 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
         (inner_list,s)=_geo_balanced_group(s,nested)
         inner=_geo_shape_list_entities!(m,inner_list,context,caller;
                                         allocator_state=allocator_state)
-        transform_entities!(m,t,inner;caller=nested)
+        transform_entities!(m,t,inner;caller=nested,auto_coherence=_geo_auto_coherence(context))
         # Gmsh returns the input shape list (`$$ = $MultipleShape`).
         return (inner,s,true)
     end
@@ -3148,6 +3532,11 @@ function _geo_extrude_revolve(values::Vector{Vector{Float64}},
             origin=(x[1],x[2],x[3]),angle=α[1])
 end
 
+# Automatic built-in geometry coherence follows the live option; explicit
+# Coherence commands call the unconditional model merge.
+_geo_auto_coherence(context::_GeoNumericContext) =
+    trunc(Int,something(_geo_option_number(context,"Geometry",0,"AutoCoherence"),1.0))
+
 # `Geometry.ExtrudeSplinePoints` (default 5) — the generatrix subdivision
 # count for twist extrusions, `(int)`-cast like the option callback.
 _geo_extrude_spline_points(context::_GeoNumericContext) = trunc(Int,
@@ -3434,16 +3823,19 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
     end
     tags=revolve===nothing ?
         extrude_entities!(m,entities,delta;params=params,
-            return_lateral=context.extrude_return_lateral,caller=caller) :
+            return_lateral=context.extrude_return_lateral,caller=caller,
+            auto_coherence=_geo_auto_coherence(context)) :
         revolve.kind===:twist ?
         twist_entities!(m,entities,revolve.axis,revolve.origin,
             revolve.delta,revolve.angle;
             spline_points=_geo_extrude_spline_points(context),
             params=params,
-            return_lateral=context.extrude_return_lateral,caller=caller) :
+            return_lateral=context.extrude_return_lateral,caller=caller,
+            auto_coherence=_geo_auto_coherence(context)) :
         revolve_entities!(m,entities,revolve.axis,revolve.origin,
             revolve.angle;params=params,
-            return_lateral=context.extrude_return_lateral,caller=caller)
+            return_lateral=context.extrude_return_lateral,caller=caller,
+            auto_coherence=_geo_auto_coherence(context))
     context.geo_changed=true
     return Float64.(tags)
 end
@@ -3502,7 +3894,7 @@ function _geo_exec_transform_statement!(m::GeoModel,line::AbstractString,
         "$caller: unexpected text after the shape list"))
     entities=_geo_shape_list_entities!(m,shape_list,context,caller;
                                        allocator_state=allocator_state)
-    transform_entities!(m,t,entities;caller=caller)
+    transform_entities!(m,t,entities;caller=caller,auto_coherence=_geo_auto_coherence(context))
     context.geo_changed=true
     return nothing
 end
@@ -4531,6 +4923,8 @@ function _geo_exec_transfinite_curve!(m::GeoModel,list_raw::AbstractString,
         for curve in targets
             m.meshing.transfinite_curves[curve]=(
                 num_nodes=ncount,kind=kind,coef=coef,reversed=false)
+            Model._native_geo_kernel_declare_transfinite!(
+                m,curve,m.meshing.transfinite_curves[curve])
         end
         return nothing
     end
@@ -4547,12 +4941,16 @@ function _geo_exec_transfinite_curve!(m::GeoModel,list_raw::AbstractString,
                 m.meshing.transfinite_curves[curve]=(
                     num_nodes=ncount,kind=effective,coef=coef,
                     reversed=value<0)
+                Model._native_geo_kernel_declare_transfinite!(
+                    m,curve,m.meshing.transfinite_curves[curve])
             end
             continue
         end
         haskey(m.curves,j) || continue
         m.meshing.transfinite_curves[j]=(
             num_nodes=ncount,kind=kind,coef=coef,reversed=sd<0)
+        Model._native_geo_kernel_declare_transfinite!(
+            m,j,m.meshing.transfinite_curves[j])
     end
     return nothing
 end
@@ -5049,6 +5447,8 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         context.mesh=nothing
         context.mesh_node_owner=empty(context.mesh_node_owner)
         context.mesh_parts=empty(context.mesh_parts)
+        context.mesh_geometry_parts=nothing
+        _geo_forget_mesh_products!(m,context;reset_tags=true)
         context.geo_changed=true
         if allocator_state!==nothing
             _geo_allocator_reset_model!(allocator_state,context;fresh=true)
@@ -5063,6 +5463,8 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         context.mesh=nothing
         context.mesh_node_owner=empty(context.mesh_node_owner)
         context.mesh_parts=empty(context.mesh_parts)
+        context.mesh_geometry_parts=nothing
+        _geo_forget_mesh_products!(m,context;reset_tags=true)
         empty!(context.raw_physicals)
         empty!(context.parametric_surfaces)
         context.parametric_surface=nothing
@@ -5101,10 +5503,22 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         empty!(context.option_colors)
         return 0
     elseif name=="Meshes"
+        cleared_authority=Model._model_mesh_cleared_authority(m.meshing.mesh_authority)
         # `GModel::deleteMesh` — drops the mid-file mesh and its ownership.
         context.mesh=nothing
         context.mesh_node_owner=empty(context.mesh_node_owner)
         context.mesh_parts=empty(context.mesh_parts)
+        context.mesh_geometry_parts=nothing
+        _geo_forget_mesh_products!(m,context)
+        m.meshing.mesh_authority=cleared_authority
+        context.native_element_lookup_receipt=nothing
+        empty!(m.curve_params);empty!(m.meshing.attached)
+        for record in values(m.discrete)
+            empty!(record.node_tags);record.node_coords=zeros(3,0)
+            record.node_params=zeros(0,0)
+            empty!(record.element_types);empty!(record.element_tags);empty!(record.element_nodes)
+            empty!(record.aux_params)
+        end
         return nothing
     elseif name=="Struct"
         # `gmsh_yynamespaces.clear()` — every struct definition across all
@@ -5202,6 +5616,9 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         # `gmshVertex` keeps the `lc` component verbatim — `lc <= 0` is the
         # unset default (`point_size` reads fall back to 0).
         lc<=0 && (m.point_size[t]=lc)
+        if allocator_state===nothing || allocator_state.factory!==:opencascade
+            Model._native_geo_kernel_admit_point!(m,t)
+        end
         return
     elseif (mm=match(
             r"^Line\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
@@ -5223,7 +5640,9 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         t=_geo_entity_tag(m,1,tag,caller,zero_literal)
         (found,ok)=_geo_curve_found_points!(m,context,points,t)
         _geo_line_tolerance_warn!(m,context,found,t)
-        _geo_store_curve!(m,t,found;control_points=length(found)>2)
+        occ=allocator_state!==nothing && allocator_state.factory===:opencascade
+        _geo_store_curve!(m,t,found;control_points=length(found)>2,
+            geometry=occ ? _geo_occ_line_geometry(m,found) : nothing,native_geo=!occ)
         ok || _geo_yyerror!(context,"Could not add line")
         return
     elseif (mm=match(
@@ -5244,6 +5663,24 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                          :curve,"circle",tag,zero_literal,allocator_state) &&
             return
         t=_geo_entity_tag(m,1,tag,caller,zero_literal)
+        if allocator_state!==nothing && allocator_state.factory===:opencascade
+            for point in points
+                if !haskey(m.points,point)
+                    _geo_msg_error!(context,"Unknown OpenCASCADE point with tag $point")
+                    _geo_yyerror!(context,"Could not add circle")
+                    return
+                end
+            end
+            geometry,error=Model._model_occ_circle_arc_geometry(
+                m.points[points[1]],m.points[points[2]],m.points[points[3]])
+            if error!==nothing
+                _geo_msg_error!(context,error)
+                _geo_yyerror!(context,"Could not add circle")
+                return
+            end
+            _geo_store_curve!(m,t,points;kind=:circle,control_points=true,geometry)
+            return
+        end
         (found,ok)=_geo_curve_found_points!(m,context,points,t)
         n=_arc_stored_normal(normal,caller)
         ok=_geo_arc_endcurve_ok!(m,context,found,n,t;
@@ -5453,6 +5890,10 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         t=_geo_entity_tag(m,2,tag,caller,zero_literal)
         ok=_geo_check_surface_wires!(m,context,loops,t)
         m.surfaces[t]=loops
+        if ok && allocator_state!==nothing && allocator_state.factory===:opencascade
+            geometry=_geo_occ_axis_plane_geometry(m,loops)
+            geometry===nothing || (m.surface_geometry[t]=geometry)
+        end
         ok || _geo_yyerror!(context,"Could not add plane surface")
         return
     elseif (mm=match(
@@ -5721,7 +6162,8 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         t=_geo_entity_tag(m,1,tag,caller,zero_literal)
         (found,ok)=_geo_curve_found_points!(m,context,points,t)
         _geo_line_tolerance_warn!(m,context,found,t)
-        _geo_store_curve!(m,t,found;control_points=length(found)>2)
+        _geo_store_curve!(m,t,found;control_points=length(found)>2,
+            native_geo=allocator_state===nothing || allocator_state.factory!==:opencascade)
         ok || _geo_yyerror!(context,"Could not add line")
         return
     elseif (mm=match(
@@ -6133,24 +6575,22 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         list=_geo_constraint_list(mm.captures[2],context,caller;allow_all=true)
         let dim=dim
             _geo_constraint_apply(m,dim,list,caller,
-                tag->(m.meshing.reverse[(dim,tag)]=true;nothing))
+                tag->begin
+                    m.meshing.reverse[(dim,tag)]=true
+                    dim==2 && haskey(m.meshing.orientation_geo_reverse,tag) &&
+                        (m.meshing.orientation_geo_reverse[tag]=true)
+                    nothing
+                end)
         end
         return
     elseif (mm=match(
             r"^RelocateMesh\s+(Point|Curve|Line|Surface)\s*(.*?)\s*;$",
             line)) !== nothing
-        # `RelocateMesh` retargets existing mesh vertices onto other entities;
-        # no mesh exists during .geo execution, so only the list is validated.
-        _geo_constraint_list(mm.captures[2],context,
-                             "execute_geo: RelocateMesh";allow_all=true)
+        _geo_exec_relocate_mesh!(m,mm.captures[1],mm.captures[2],context)
         return
     elseif (mm=match(
             r"^ReorientMesh\s+Volume\s*(.*?)\s*;$",line)) !== nothing
-        # `ReorientMesh` flips boundary-face mesh orientations on an existing
-        # volume mesh via a solid-angle parity walk; with no mesh during .geo
-        # execution it changes nothing and stores no state.
-        _geo_constraint_list(mm.captures[1],context,
-                             "execute_geo: ReorientMesh Volume";allow_all=false)
+        _geo_exec_reorient_mesh!(m,mm.captures[1],context)
         return
     elseif (mm=match(
             r"^Degenerated\s+(?:Curve|Line)\s*(.*?)\s*;$",line)) !== nothing
@@ -6169,9 +6609,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         _geo_exec_compound!(m,dim,mm.captures[2],context)
         return
     elseif match(r"^RecombineMesh\s*;$",line) !== nothing
-        # `RecombineMesh;` recombines an existing mesh — a no-op while no mesh
-        # exists during .geo execution.
-        return
+        return _geo_exec_mesh_statement!(m,line,context,allocator_state)
     elseif (mm=match(r"^(Recursive\s+)?Delete\b(.*)$",line)) !== nothing
         return _geo_exec_delete!(m,mm.captures[1]!==nothing,
                                  String(mm.captures[2]),context,
@@ -6220,9 +6658,10 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             merge_vertices!(m,_geo_exec_entity_tags(
                 mm.captures[2],context,"execute_geo: Coherence Point";
                 abs_refs=true);
-                caller="execute_geo: Coherence Point")
+                caller="execute_geo: Coherence Point",
+                remove_degenerated=_geo_auto_coherence(context)>1)
         elseif mm.captures[1] != "Mesh"
-            coherence!(m)
+            coherence!(m;remove_degenerated=_geo_auto_coherence(context)>1)
         end
         # `Coherence Mesh` deduplicates mesh vertices; no mesh exists during
         # .geo execution, so there is nothing to merge.
@@ -6357,17 +6796,19 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         # GUI-only commands — no windows exist in batch execution.
         return
     elseif match(r"^BoundingBox\s*;?\s*$",line)!==nothing
-        # `BoundingBox` syncs the internals when changed, then recomputes the
-        # model bounding box — always current here (geometry is stored
-        # directly, never cached stale).
+        context.native_context_forced_bbox=false
         _geo_sync_physical_view_if_changed!(m,context)
+        _geo_sync_native_context!(m,context)
         return
     elseif (mm=match(r"^BoundingBox\s*\{(.*?)\}\s*;?\s*$",line)) !== nothing
-        values=_geo_numeric_list_values(mm.captures[1],context,
+        values=_geo_numeric_list_values("{"*mm.captures[1]*"}",context,
             "execute_geo: BoundingBox")
         length(values)==6 || throw(ArgumentError(
             "execute_geo: BoundingBox takes six coordinates"))
-        # `forcedBBox` is display state — nothing to store on the model.
+        context.native_context_forced_bbox=true
+        tolerance=something(_geo_option_number(context,"Geometry",0,"Tolerance"),1e-8)
+        context.native_context_lc=Model._gmsh_bbox_characteristic_length(
+            Tuple(values),tolerance)
         return
     elseif match(r"^NewModel\s*;?\s*$",line)!==nothing
         # `new GModel()` — a fresh empty model (empty name, no physical or
@@ -6382,6 +6823,8 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         context.parametric_surface=nothing
         context.mesh_node_owner=empty(context.mesh_node_owner)
         context.mesh_parts=empty(context.mesh_parts)
+        context.mesh_geometry_parts=nothing
+        _geo_forget_mesh_products!(m,context;reset_tags=true)
         m.name=""
         context.geo_changed=true
         if allocator_state!==nothing
@@ -6410,10 +6853,16 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             "execute_geo: Mesh dimension must be 0, 1, 2 or 3 (got $d)"))
         # Gmsh synchronizes GEO internals before meshing (when changed) — the
         # physical view and any pending unknown-member warnings materialize.
-        # `Mesh 0` synchronizes but meshes nothing upstream (`GModel::mesh`'s
-        # `ask==0` matches no generation branch).
+        # Dimension zero skips element births, but GModel::mesh still runs
+        # generation setup, renumbering and queued homology on living cells.
         _geo_sync_physical_view_if_changed!(m,context)
-        d==0 && return
+        if d==0
+            context.native_element_lookup_receipt=nothing
+            context.native_mesh_begin_callback===nothing || context.native_mesh_begin_callback()
+            context.mesh,context.mesh_node_owner=
+                _geo_mesh_actual_higher(m,0,context,"execute_geo: Mesh")
+            return
+        end
         context.mesh,context.mesh_node_owner=
             _geo_mesh_model(m,Int(d),context)
         return
@@ -6938,7 +7387,19 @@ end
 # `MeshSizeFactor`/`CharacteristicLengthFactor` alias mirror in
 # `_geo_store_option_number!` keeps a single `lcFactor` visible under both
 # names, so reading either here picks up writes to the other.
+function _geo_sync_mesh_algorithms!(m::GeoModel,context::_GeoNumericContext)
+    m.meshing.algorithm_2d=_geo_signed_gmsh_int_value(something(
+        _geo_option_number(context,"Mesh",0,"Algorithm"),6.0),
+        "execute_geo: Mesh.Algorithm")
+    algorithm_3d=_geo_signed_gmsh_int_value(something(
+        _geo_option_number(context,"Mesh",0,"Algorithm3D"),1.0),
+        "execute_geo: Mesh.Algorithm3D")
+    m.meshing.algorithm_3d=algorithm_3d==2 ? 1 : algorithm_3d
+    return nothing
+end
+
 function _geo_sync_meshing_options!(m::GeoModel,context::_GeoNumericContext)
+    _geo_sync_mesh_algorithms!(m,context)
     m.meshing.flexible_transfinite=!iszero(something(
         _geo_option_number(context,"Mesh",0,"FlexibleTransfinite"),0.0))
     m.meshing.lc_factor=something(
@@ -6948,9 +7409,27 @@ function _geo_sync_meshing_options!(m::GeoModel,context::_GeoNumericContext)
     m.meshing.recombine_algo=_geo_signed_gmsh_int_value(something(
         _geo_option_number(context,"Mesh",0,"RecombinationAlgorithm"),1.0),
         "execute_geo: Mesh.RecombinationAlgorithm")
+    _geo_sync_native_surface_controls!(m,context)
     m.meshing.lc_extend_from_boundary=_geo_signed_gmsh_int_value(something(
         _geo_option_number(context,"Mesh",0,"MeshSizeExtendFromBoundary"),1.0),
         "execute_geo: Mesh.MeshSizeExtendFromBoundary")
+    return nothing
+end
+
+function _geo_sync_native_surface_controls!(m::GeoModel,context::_GeoNumericContext)
+    m.meshing.recombine_topology_passes=_geo_signed_gmsh_int_value(something(
+        _geo_option_number(context,"Mesh",0,"RecombineOptimizeTopology"),5.0),
+        "execute_geo: Mesh.RecombineOptimizeTopology")
+    m.meshing.recombine_node_repositioning=_geo_signed_gmsh_int_value(something(
+        _geo_option_number(context,"Mesh",0,"RecombineNodeRepositioning"),1.0),
+        "execute_geo: Mesh.RecombineNodeRepositioning")
+    m.meshing.recombine_minimum_quality=something(
+        _geo_option_number(context,"Mesh",0,"RecombineMinimumQuality"),0.01)
+    m.meshing.native_smoothing=_geo_signed_gmsh_int_value(something(
+        _geo_option_number(context,"Mesh",0,"Smoothing"),1.0),
+        "execute_geo: Mesh.Smoothing")
+    m.meshing.second_order_linear=!iszero(something(
+        _geo_option_number(context,"Mesh",0,"SecondOrderLinear"),0.0))
     return nothing
 end
 
@@ -7059,7 +7538,7 @@ function _geo_mesh_1d_options(m::GeoModel,context::_GeoNumericContext,
     geometry_tolerance=something(
         _geo_option_number(context,"Geometry",0,"Tolerance"),1e-8)
     return _ModelMesh1DOptions(
-        _model_mesh_lc(m,geometry_tolerance,caller),
+        context.native_context_lc,
         something(opt("MeshSizeMin"),0.0),
         something(opt("MeshSizeMax"),1e22),
         m.meshing.lc_factor,
@@ -7076,7 +7555,12 @@ function _geo_mesh_1d_options(m::GeoModel,context::_GeoNumericContext,
         _geo_mesh_background_field(m,context,caller),
         m.meshing.size_callback,
         msg->_geo_yywarn!(context,msg),
-        msg->_geo_msg_error!(context,msg))
+        msg->_geo_msg_error!(context,msg),
+        Ref(Model._model_native_random_seed(Int(something(opt("RandomSeed"),1.0)))),
+        something(opt("RandomFactor3D"),1e-12),
+        Int(something(opt("Optimize"),1.0)),
+        something(opt("OptimizeThreshold"),0.3),
+        Int(something(opt("OptimizeNetgen"),0.0)))
 end
 
 # `Mesh n;` — mesh every live entity up to `dim`, merging entity parts into a
@@ -7085,9 +7569,43 @@ end
 # (`deMeshGEdge` upstream); `Mesh 2`/`Mesh 3` reuse the stored
 # `curve_params` discretizations, re-running the 1-D pass only when a curve
 # is missing parameters (upstream's `old < 1` arm).
+include("GeoDim01Completion.jl")
+
 function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
+    context.native_element_lookup_receipt=nothing
+    context.native_mesh_begin_callback===nothing || context.native_mesh_begin_callback()
     caller="execute_geo: Mesh"
+    only_empty=!iszero(something(_geo_option_number(context,"Mesh",0,"MeshOnlyEmpty"),0.0))
+    actual=(context.mesh isa MixedMesh && context.mesh.entity_data!==nothing) ||
+        (m.meshing.mesh_authority!==nothing && m.meshing.mesh_authority.mesh!==nothing &&
+         m.meshing.mesh_authority.carrier===context.mesh)
+    high_order=dim>=1 && _geo_signed_gmsh_int_value(something(
+        _geo_option_number(context,"Mesh",0,"ElementOrder"),1.0),caller)>1
+    records=any(!isempty(record.node_tags) || !isempty(record.element_tags) for
+        (_,record) in Model._discrete_mesh_records_model(m))
+    if dim>=2 || actual || high_order || records || (dim>=1 && only_empty) || Model._model_mesh_has_native_sources(m) || (dim>=2 &&
+            context.mesh!==nothing && m.meshing.mesh_authority!==nothing)
+        return _geo_mesh_actual_higher(m,dim,context,caller)
+    end
     original=m
+    # First-order Curve emission and its identity completion are one detached
+    # operation. Geometry rows retain their existing emitter/merge order.
+    dim==1 && (m=Model._model_mesh_transaction_copy(m))
+    # For an ordinary native transfinite first-order producer, record its
+    # actual Point/Curve/Surface scheduling before the merged carrier exists.
+    # Extruded and unstructured factory traces have their separate planner.
+    bind_completed=dim==1 || (dim==2 && context.mesh===nothing && !isempty(m.surfaces) &&
+        something(_geo_option_number(context,"Mesh",0,"ElementOrder"),1.0)==1)
+    if bind_completed && dim==2
+        for tag in keys(m.surfaces)
+            if !haskey(m.meshing.transfinite_surfaces,tag) || _extrude_gate(m,2,tag)!==nothing
+                bind_completed=false
+                break
+            end
+        end
+    end
+    producer_order=Tuple{Int,Int}[]
+    bind_completed && append!(producer_order,((0,tag) for tag in sort!(collect(keys(m.points)))))
     # QuadTri certificates can reject after source grading. Stage the complete
     # operation, including 1-D grading and homology, so a failed request does
     # not publish model discretizations or mesh parts.
@@ -7116,6 +7634,7 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
             # line elements.
             _model_mesh_dim01_grade!(m,options,caller)
         end
+        bind_completed && append!(producer_order,((1,tag) for tag in sort!(collect(keys(m.curve_params)))))
     end
     # NoNew finalizes its region and boundary together. Keep this completed
     # plan within the current Mesh operation, including Mesh 2 queries of its
@@ -7143,7 +7662,8 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
                 continue
             end
             push!(parts,(2,tag,mesh_model_surface(
-                m,tag;_extrude_scope=extrude_scope)))
+                m,tag;_extrude_scope=extrude_scope,_mesh1d_options=options)))
+            bind_completed && push!(producer_order,(2,tag))
         end
     end
     if dim==3
@@ -7157,14 +7677,15 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
                 push!(parts,(3,tag,pass.parts[tag]))
             else
                 push!(parts,(3,tag,mesh_model_volume(
-                    m,tag;_extrude_scope=extrude_scope)))
+                    m,tag;_extrude_scope=extrude_scope,_mesh1d_options=options)))
             end
         end
         if pass!==nothing && !isempty(pass.remesh)
             for (i,(pdim,ptag,_)) in enumerate(parts)
                 pdim==2 && ptag in pass.remesh || continue
                 parts[i]=(2,ptag,mesh_model_surface(
-                    m,ptag;_extrude_edges=pass.edges,_extrude_scope=extrude_scope))
+                    m,ptag;_extrude_edges=pass.edges,_extrude_scope=extrude_scope,
+                    _mesh1d_options=options))
             end
         end
     end
@@ -7179,19 +7700,352 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
     isempty(parts) && throw(ArgumentError(
         "$caller $dim: no entities to mesh"))
     node_entities=_geo_mesh_part_node_entities(m,parts,caller)
-    merged,owner=_geo_merge_entity_meshes(parts;node_entities)
+    merged,owner,rows=_geo_merge_entity_meshes(parts;node_entities,return_remaps=true)
+    if dim==1 && bind_completed
+        produced=_geo_dim01_producer_trace(m,merged,parts,rows,caller)
+        births=_geo_dim01_native_curve_births!(m,merged,parts,rows,produced,options,caller)
+        plan=Model._model_mesh_generate_higher(m,merged,parts,rows,produced.owners,
+            dim,nothing,caller;operation=:bind_completed,
+            producer_order=produced.order,producer_parameters=births.parameters,
+            producer_coordinates=births.coordinates,
+            producer_geometry_parameters=births.geometry_parameters,
+            renumber=!iszero(something(_geo_option_number(context,"Mesh",0,"Renumber"),1.0)),
+            save_all=!iszero(something(_geo_option_number(context,"Mesh",0,"SaveAll"),0.0)),
+            initial_max_node_tag=context.mesh_node_max,
+            initial_max_element_tag=context.mesh_element_max)
+        plan=merge(plan,(geometry_parts=parts,geometry_part_rows=rows))
+        return _geo_publish_actual_plan!(original,context,plan,caller;
+            homology=true,carrier=merged)
+    end
+    parameters=_geo_mesh_stored_parameters(m,merged,owner,context)
     # Retain the per-entity decomposition so classified projections
     # (`model_to_mixed`) can recover each entity's own mesh from the merged
     # product — upstream serializes vertex/edge/face/region cells to their
     # owning entity, and the part mesh is that view.
-    _geo_run_homology!(m,merged,parts,caller;node_owner=owner,part_node_entities=node_entities)
+    _geo_run_homology!(m,merged,parts,caller;node_owner=owner,
+        part_node_entities=node_entities,error_callback=_geo_homology_error_callback(context))
+    completed_plan=bind_completed ? Model._model_mesh_generate_higher(m,merged,parts,rows,
+        owner,dim,nothing,caller;operation=:bind_completed,producer_order,
+        initial_max_node_tag=context.mesh_node_max,
+        initial_max_element_tag=context.mesh_element_max) : nothing
+    if completed_plan!==nothing
+        parts,rows=_geo_actual_product_parts(completed_plan.model.meshing.mesh_authority,caller)
+        owner=_geo_actual_carrier_owners(completed_plan.model.meshing.mesh_authority,merged)
+        for name in fieldnames(GeoModel)
+            setfield!(m,name,getfield(completed_plan.model,name))
+        end
+    end
     if staged
         for name in fieldnames(GeoModel)
             setfield!(original,name,getfield(m,name))
         end
     end
     context.mesh_parts=parts
+    context.mesh_part_rows=rows
+    context.mesh_geometry_parts=nothing
+    if completed_plan===nothing
+        context.mesh_node_max=max(context.mesh_node_max,UInt64(nnodes(merged)))
+        context.mesh_element_max=max(context.mesh_element_max,UInt64(sum(
+            _geo_mesh_dim_cells(merged,dimension) for dimension in 1:3)))
+        original.meshing.mesh_authority=Model._model_mesh_completed(original,dim)
+    else
+        context.mesh_node_max=completed_plan.max_node_tag
+        context.mesh_element_max=completed_plan.max_element_tag
+    end
+    context.mesh_node_parametric=parameters
     return merged,owner
+end
+
+function _geo_mesh_working_model(m,context)
+    working=Model._model_mesh_transaction_copy(m)
+    previous=m.meshing.mesh_authority
+    if previous!==nothing && previous.mesh!==nothing && previous.carrier===context.mesh
+        detached=working.meshing.mesh_authority
+        # The geometry carrier is an input owned by this context. Retain its
+        # identity while copying the actual products that the plan can mutate.
+        working.meshing.mesh_authority=Model._ModelMeshAuthority(detached.mesh,
+            detached.products,detached.done,detached.private_rank,detached.native_inputs,
+            context.mesh,detached.carrier_rows,detached.producer_rows,detached.carrier_cells)
+    end
+    _geo_sync_meshing_options!(working,context)
+    return working
+end
+
+function _geo_mesh_actual_higher(m,dim,context,caller)
+    working=_geo_mesh_working_model(m,context)
+    order=_geo_signed_gmsh_int_value(something(
+        _geo_option_number(context,"Mesh",0,"ElementOrder"),1.0),caller)
+    settings=(;algorithm_2d=working.meshing.algorithm_2d,
+        algorithm_3d=working.meshing.algorithm_3d,
+        flexible_transfinite=working.meshing.flexible_transfinite,
+        lc_factor=working.meshing.lc_factor,recombine_all=working.meshing.recombine_all,
+        recombine_algo=working.meshing.recombine_algo,
+        recombine_topology_passes=working.meshing.recombine_topology_passes,
+        recombine_node_repositioning=working.meshing.recombine_node_repositioning,
+        recombine_minimum_quality=working.meshing.recombine_minimum_quality,
+        native_smoothing=working.meshing.native_smoothing,
+        second_order_linear=working.meshing.second_order_linear,
+        transfinite_tri=working.meshing.transfinite_tri,
+        lc_extend_from_boundary=working.meshing.lc_extend_from_boundary,order)
+    only_empty=!iszero(something(_geo_option_number(context,"Mesh",0,"MeshOnlyEmpty"),0.0))
+    previous=m.meshing.mesh_authority
+    preserve_geometry=dim>=2 && !only_empty &&
+        (context.mesh===nothing || context.mesh isa Mesh ||
+         (previous!==nothing && previous.carrier isa Mesh))
+    plan=Model._model_mesh_generate_higher(working,context.mesh,context.mesh_parts,
+        context.mesh_part_rows,context.mesh_node_owner,dim,
+        _geo_mesh_1d_options(working,context,caller),caller;
+        generation_meshing=settings,element_order=order,
+        linear=!iszero(something(_geo_option_number(context,"Mesh",0,"SecondOrderLinear"),0.0)),
+        incomplete=!iszero(something(_geo_option_number(context,"Mesh",0,"SecondOrderIncomplete"),0.0)),
+        renumber=!iszero(something(_geo_option_number(context,"Mesh",0,"Renumber"),1.0)),
+        save_all=!iszero(something(_geo_option_number(context,"Mesh",0,"SaveAll"),0.0)),
+        size_field=_geo_mesh_background_field(working,context,caller),
+        initial_max_node_tag=context.mesh_node_max,
+        initial_max_element_tag=context.mesh_element_max,preserve_geometry,geometry_layout=:all,
+        geometry_merge=_geo_geometry_carrier_merge)
+    if dim==1 && order==1
+        plan=_geo_dim01_generation_carrier!(plan,previous,caller)
+    end
+    return _geo_publish_actual_plan!(m,context,plan,caller;
+        homology=true,carrier=plan.model.meshing.mesh_authority.carrier)
+end
+
+function _geo_actual_product_parts(authority,caller)
+    parts=Tuple{Int,Int,Union{Mesh,MixedMesh}}[];rows=Vector{Int32}[]
+    for ((dimension,tag),product) in sort!(collect(authority.products);by=first)
+        push!(parts,(dimension,Int(tag),Model._model_mesh_product(authority,dimension,Int(tag);caller)))
+        push!(rows,copy(product.rows))
+    end
+    return parts,rows
+end
+
+function _geo_actual_carrier_owners(authority,carrier)
+    rows=carrier===authority.mesh ? collect(Int32,1:nnodes(carrier)) : authority.carrier_rows
+    length(rows)==nnodes(carrier) || throw(ArgumentError(
+        "execute_geo: actual carrier rows do not align with its nodes"))
+    data=authority.mesh.entity_data
+    return Dict(row=>(data.node_entities[actual][1],Int(data.node_entities[actual][2]))
+        for (row,actual) in enumerate(rows))
+end
+
+function _geo_publish_actual_plan!(m,context,plan,caller;homology=false,carrier=plan.mesh)
+    if homology && !isempty(plan.model.meshing.homology_requests)
+        plan=_geo_actual_homology_plan(plan,caller;
+            error_callback=_geo_homology_error_callback(context))
+        carrier=plan.model.meshing.mesh_authority.carrier
+    end
+    authority=plan.model.meshing.mesh_authority
+    parts,rows=_geo_actual_product_parts(authority,caller)
+    owner=_geo_actual_carrier_owners(authority,carrier)
+    actual_rows=carrier===authority.mesh ? collect(Int32,1:nnodes(carrier)) : authority.carrier_rows
+    parameters=Model._model_mesh_runtime_parameters(plan.model,authority.mesh)
+    carrier_parameters=hasproperty(plan,:geometry_node_parametric) ?
+        plan.geometry_node_parametric[actual_rows] : parameters[actual_rows]
+    geometry_receipt=_geo_geometry_plan_receipt(authority,carrier,
+        context.mesh_geometry_parts,plan,caller)
+    for name in fieldnames(GeoModel)
+        setfield!(m,name,getfield(plan.model,name))
+    end
+    context.mesh_parts=parts;context.mesh_part_rows=rows
+    context.mesh_geometry_parts=geometry_receipt
+    context.mesh_node_max=plan.max_node_tag;context.mesh_element_max=plan.max_element_tag
+    context.mesh=carrier;context.mesh_node_owner=owner
+    context.mesh_node_parametric=carrier_parameters
+    return carrier,owner
+end
+
+function _geo_refined_simplex_carrier!(plan,previous,caller;source_authority=nothing,geometry_receipt=nothing)
+    trace=Refine._refine_uniform_traced(previous)
+    tags=plan.refine_carrier_tags
+    length(tags)==nnodes(previous) || throw(ArgumentError(
+        "$caller: original carrier identities do not align with refinement input"))
+    rows=Vector{Int32}(undef,nnodes(trace.mesh))
+    old_rows=zeros(Int32,count(!iszero,trace.primary_map))
+    for (old,compact) in enumerate(trace.primary_map)
+        compact==0 && continue
+        old_rows[compact]=Int32(old)
+        rows[compact]=plan.refine_primary_rows[tags[old]]
+    end
+    for ((a,b),midpoint) in trace.midpoint_ids
+        key=minmax(tags[old_rows[a]],tags[old_rows[b]])
+        rows[midpoint]=plan.refine_edge_rows[key]
+    end
+    allunique(rows) && all(row->0<row<=nnodes(plan.mesh),rows) || throw(ArgumentError(
+        "$caller: refined carrier identities do not form a valid injection"))
+    refined=trace.mesh
+    carrier=Mesh(plan.mesh.coords[:,rows];segs=refined.segs,tris=refined.tris,tets=refined.tets,
+        seg_tag=refined.seg_tag,tri_tag=refined.tri_tag,tet_tag=refined.tet_tag)
+    previous_authority=plan.model.meshing.mesh_authority
+    cells=source_authority===nothing ? Vector{UInt64}[] :
+        Model._model_mesh_refined_cell_tags(plan,source_authority;caller)
+    authority=Model._model_mesh_authority(plan.mesh,previous_authority.done;
+        caller,private_rank=previous_authority.private_rank,carrier,carrier_rows=rows,carrier_cells=cells)
+    plan.model.meshing.mesh_authority=Model._ModelMeshAuthority(authority.mesh,
+        authority.products,authority.done,authority.private_rank,previous_authority.native_inputs,
+        carrier,rows,previous_authority.producer_rows,authority.carrier_cells)
+    parts,part_rows=_geo_geometry_refined_parts(geometry_receipt,trace,carrier,caller)
+    return carrier,parts,part_rows
+end
+
+function _geo_operate_actual_mesh!(m,context,operation,caller;element_order=1)
+    working=_geo_mesh_working_model(m,context)
+    plan=Model._model_mesh_generate_higher(working,context.mesh,context.mesh_parts,
+        context.mesh_part_rows,context.mesh_node_owner,0,nothing,caller;
+        operation,element_order,
+        linear=!iszero(something(_geo_option_number(context,"Mesh",0,"SecondOrderLinear"),0.0)),
+        incomplete=!iszero(something(_geo_option_number(context,"Mesh",0,"SecondOrderIncomplete"),0.0)),
+        renumber=!iszero(something(_geo_option_number(context,"Mesh",0,"Renumber"),1.0)),
+        save_all=!iszero(something(_geo_option_number(context,"Mesh",0,"SaveAll"),0.0)),
+        initial_max_node_tag=context.mesh_node_max,
+        initial_max_element_tag=context.mesh_element_max)
+    carrier=if operation===:refine && context.mesh isa Mesh
+        refined,parts,part_rows=_geo_refined_simplex_carrier!(plan,context.mesh,caller;
+            source_authority=working.meshing.mesh_authority,
+            geometry_receipt=context.mesh_geometry_parts)
+        parts===nothing || (plan=merge(plan,(geometry_parts=parts,geometry_part_rows=part_rows)))
+        refined
+    elseif operation in (:geo_renumber_nodes,:geo_renumber_elements)
+        plan.model.meshing.mesh_authority.carrier
+    else
+        plan.mesh
+    end
+    _geo_publish_actual_plan!(m,context,plan,caller;carrier)
+    # RefineMesh and SetOrder destroy both native tag caches before their
+    # conversion. A read-time import catalogue cannot survive the operation.
+    operation in (:refine,:order) && (context.native_element_lookup_receipt=nothing)
+    return nothing
+end
+
+include("GeoRecombineBipartite.jl")
+
+function _geo_recombine_actual_plan!(m,context,caller)
+    previous=m.meshing.mesh_authority
+    original=context.mesh
+    working=_geo_mesh_working_model(m,context)
+    algorithm=working.meshing.recombine_algo in (1,3) ? :blossom : :greedy
+    plan=Model._model_mesh_generate_higher(working,context.mesh,context.mesh_parts,
+        context.mesh_part_rows,context.mesh_node_owner,0,nothing,caller;
+        operation=:recombine,algorithm,
+        initial_max_node_tag=context.mesh_node_max,
+        initial_max_element_tag=context.mesh_element_max)
+    if original isa MixedMesh && original.entity_data===nothing &&
+            previous!==nothing && previous.carrier===original
+        carrier=_geo_recombined_mixed_carrier!(plan,previous,original,caller)
+        _geo_publish_actual_plan!(m,context,plan,caller;carrier)
+    elseif plan.recombined || context.mesh isa MixedMesh && context.mesh.entity_data!==nothing
+        _geo_publish_actual_plan!(m,context,plan,caller)
+    else
+        # A strict angle rejection keeps its original geometry carrier. The
+        # first-pair temporary factories still advance the historical maximum.
+        _geo_publish_actual_plan!(m,context,plan,caller;carrier=context.mesh)
+    end
+    return nothing
+end
+
+function _geo_recombined_mixed_carrier!(plan,previous,original,caller)
+    actual=plan.mesh;data=actual.entity_data
+    old_tags=previous.mesh.entity_data.external_node_tags[previous.carrier_rows]
+    positions=Dict(tag=>Int32(row) for (row,tag) in enumerate(data.external_node_tags))
+    rows=Int32[get(positions,tag,Int32(0)) for tag in old_tags]
+    length(rows)==nnodes(original) && all(>(0),rows) && allunique(rows) ||
+        throw(ArgumentError("$caller: recombined geometry loses its bound vertex identities"))
+    actual.coords[:,rows]==original.coords || throw(ArgumentError(
+        "$caller: fixed-node recombination changes bound geometry coordinates"))
+    carrier=original
+    carrier_cells=Model._model_mesh_rebound_cell_tags(previous,plan.element_tag_map)
+    if plan.recombined
+        original.elementary_entities===nothing && throw(ArgumentError(
+            "$caller: native Mixed geometry lacks its producer cell owners"))
+        order=Tuple{Int,Int32}[]
+        physical=Dict{Tuple{Int,Int32},Int32}()
+        for (block,owners) in zip(original.blocks,original.elementary_entities)
+            block isa ElementBlock || throw(ArgumentError(
+                "$caller: native Mixed geometry contains an unsupported special cell"))
+            for column in axes(block.nodes,2)
+                owner=(msh_dimension(block.msh),owners[column])
+                if !haskey(physical,owner)
+                    push!(order,owner);physical[owner]=block.tags[column]
+                elseif physical[owner]!=block.tags[column]
+                    throw(ArgumentError(
+                        "$caller: native geometry needs explicit parent binding for varying cell tags"))
+                end
+            end
+        end
+        inverse=zeros(Int32,nnodes(actual));inverse[rows]=Int32.(1:length(rows))
+        blocks=ElementBlock[];elementary=Vector{Int32}[];carrier_cells=Vector{UInt64}[]
+        for owner in order,(bi,(block,owners)) in enumerate(zip(actual.blocks,data.block_entities))
+            msh_dimension(block.msh)==owner[1] || continue
+            columns=Int[column for column in axes(block.nodes,2) if owners[column]==owner[2]]
+            isempty(columns) && continue
+            nodes=inverse[block.nodes[:,columns]]
+            all(>(0),nodes) || throw(ArgumentError(
+                "$caller: recombined cell references a vertex outside its geometry carrier"))
+            push!(blocks,ElementBlock(block.msh,nodes,fill(physical[owner],length(columns))))
+            push!(elementary,fill(owner[2],length(columns)))
+            push!(carrier_cells,copy(data.external_element_tags[bi][columns]))
+        end
+        carrier=MixedMesh(copy(original.coords),blocks;
+            physical_names=original.physical_names,elementary_entities=elementary,
+            periodic_links=original.periodic_links,ancillary_sections=original.ancillary_sections,
+            data_sections=original.data_sections,partition_data=original.partition_data)
+    end
+    authority=plan.model.meshing.mesh_authority
+    plan.model.meshing.mesh_authority=Model._ModelMeshAuthority(authority.mesh,
+        authority.products,authority.done,authority.private_rank,authority.native_inputs,
+        carrier,rows,authority.producer_rows,carrier_cells)
+    return carrier
+end
+
+function _geo_rebind_product_coordinates!(m,context)
+    mesh=context.mesh
+    previous=m.meshing.mesh_authority
+    if (mesh isa Mesh || mesh isa MixedMesh && mesh.entity_data===nothing) &&
+            previous!==nothing && previous.mesh!==nothing && previous.carrier===mesh
+        source=previous.mesh;coords=copy(source.coords)
+        coords[:,previous.carrier_rows]=mesh.coords
+        mesh=MixedMesh(coords,source.blocks;physical_names=source.physical_names,
+            entity_data=source.entity_data,elementary_entities=source.elementary_entities,
+            periodic_links=source.periodic_links,ancillary_sections=source.ancillary_sections,
+            data_sections=source.data_sections,partition_data=source.partition_data)
+    end
+    for ((_,_,part),rows) in zip(context.mesh_parts,context.mesh_part_rows)
+        length(rows)==nnodes(part) || throw(ArgumentError(
+            "execute_geo: stored entity rows do not align with their actual product"))
+        part.coords[:,:]=mesh.coords[:,rows]
+    end
+    if mesh isa MixedMesh && mesh.entity_data!==nothing
+        data=mesh.entity_data
+        positions=Dict(tag=>row for (row,tag) in enumerate(data.external_node_tags))
+        for (_,record) in Model._discrete_mesh_records_model(m),column in eachindex(record.node_tags)
+            row=get(positions,UInt64(record.node_tags[column]),0)
+            row==0 || (record.node_coords[:,column]=mesh.coords[:,row])
+        end
+        ranks=previous!==nothing && length(previous.private_rank)==nnodes(mesh) ?
+              previous.private_rank : collect(UInt64,1:nnodes(mesh))
+        done=previous===nothing ? Set{Tuple{Int,Int32}}() : previous.done
+        authority=Model._model_mesh_authority(mesh,done;private_rank=ranks,
+            carrier=context.mesh,carrier_rows=previous!==nothing && previous.carrier===context.mesh ?
+                previous.carrier_rows : collect(Int32,1:nnodes(mesh)),
+            carrier_cells=previous!==nothing && previous.carrier===context.mesh ?
+                previous.carrier_cells : nothing)
+        if previous!==nothing && previous.mesh!==nothing
+            authority=Model._model_mesh_with_producer_rows(authority,previous.producer_rows)
+        end
+        m.meshing.mesh_authority=authority
+    end
+    return nothing
+end
+
+function _geo_forget_mesh_products!(m,context;reset_tags=false)
+    empty!(context.mesh_parts);empty!(context.mesh_part_rows)
+    context.mesh_geometry_parts=nothing
+    empty!(context.mesh_node_parametric)
+    m.meshing.mesh_authority=nothing
+    if reset_tags
+        context.mesh_node_max=UInt64(0);context.mesh_element_max=UInt64(0)
+    end
+    return nothing
 end
 
 # Run the queued `Homology`/`Cohomology`/`Betti` requests — upstream calls
@@ -7202,10 +8056,13 @@ end
 # chains, which Tessella deliberately does not mirror.
 function _geo_run_homology!(m::GeoModel,mesh,
                           parts::Vector{Tuple{Int,Int,Union{Mesh,MixedMesh}}},
-                          caller::AbstractString;node_owner=nothing,part_node_entities=nothing)
+                          caller::AbstractString;node_owner=nothing,part_node_entities=nothing,
+                          error_callback=nothing)
     isempty(m.meshing.homology_requests) && return nothing
-    cells=_geo_homology_cells(m,mesh,parts,caller;node_owner,part_node_entities)
-    compute_homology!(m,cells;requests=m.meshing.homology_requests)
+    coordinates=Dict{Int32,NTuple{3,Float64}}()
+    cells=_geo_homology_cells(m,mesh,parts,caller;node_owner,part_node_entities,
+                              homology_coordinates=coordinates)
+    compute_homology!(m,cells;requests=m.meshing.homology_requests,coordinates,error_callback)
     return nothing
 end
 
@@ -7215,13 +8072,15 @@ end
 # cells — they need not exist in `mesh`).
 function _geo_homology_cells(m::GeoModel,mesh,
                              parts::Vector{Tuple{Int,Int,Union{Mesh,MixedMesh}}},
-                             caller::AbstractString;node_owner=nothing,part_node_entities=nothing)
+                             caller::AbstractString;node_owner=nothing,part_node_entities=nothing,
+                             homology_coordinates=nothing)
     lookup=Dict{Tuple{Int,Int,NTuple{3,Int}},Int32}()
     legacy_lookup=Dict{NTuple{3,Int},Int32}()
     mcoords=mesh.coords
     for n in 1:nnodes(mesh)
         entity=node_owner===nothing ? (-1,0) : get(node_owner,n,(3,0))
         x,y,z=mcoords[1,n],mcoords[2,n],mcoords[3,n]
+        homology_coordinates===nothing || (homology_coordinates[Int32(n)]=(x,y,z))
         coordinate=_geo_mesh_coordinate_key(x,y,z)
         lookup[(entity...,coordinate)]=Int32(n)
         legacy_lookup[coordinate]=Int32(n)
@@ -7235,6 +8094,7 @@ function _geo_homology_cells(m::GeoModel,mesh,
         i=entity==(-1,0) ? get(legacy_lookup,coordinate,Int32(0)) : get(lookup,key,Int32(0))
         i!=0 && return i
         i=next[1];lookup[key]=i;legacy_lookup[coordinate]=i;next[1]=i+Int32(1)
+        homology_coordinates===nothing || (homology_coordinates[i]=(Float64(x),Float64(y),Float64(z)))
         return i
     end
     cells=Dict{Tuple{Int,Int},Vector{Tuple{Int32,Vector{Int32}}}}()
@@ -7508,10 +8368,69 @@ end
 # with their generating entity in `owner` for node-level classification. A
 # `MixedMesh` part (recombined surfaces/volumes) switches the product to the
 # mixed merge — quadrangles and polyhedra have no simplex container.
-function _geo_merge_entity_meshes(parts;node_entities=nothing)
+# Geometry keeps its established simplex carrier even when an actual producer
+# stores those constructors in MixedMesh blocks. Public native products remain
+# in the authority; only this detached geometry merge changes representation.
+function _geo_simplex_geometry_part(part::MixedMesh,bindings)
+    all(block->block isa ElementBlock && (isempty(block.nodes) || block.msh in (1,2,4)),part.blocks) ||
+        throw(ArgumentError("execute_geo: geometry part contains non-simplex constructors"))
+    bindings===nothing || length(bindings)==length(part.blocks) || throw(ArgumentError(
+        "execute_geo: geometry constructor blocks do not align"))
+    matrices=Matrix{Int32}[];tags=Vector{Int32}[]
+    groups=bindings===nothing ? nothing : [Model._model_mesh_cell_binding_type([bindings])[] for _ in 1:3]
+    for (kind,width) in ((1,2),(2,3),(4,4))
+        count=sum(size(block.nodes,2) for block in part.blocks if block.msh==kind;init=0)
+        cells=Matrix{Int32}(undef,width,count);physical=Vector{Int32}(undef,count)
+        cursor=0
+        for (index,block) in enumerate(part.blocks)
+            block.msh==kind || continue
+            columns=size(block.nodes,2)
+            cells[:,cursor+1:cursor+columns]=block.nodes
+            physical[cursor+1:cursor+columns]=block.tags
+            if groups!==nothing
+                length(bindings[index])==columns || throw(ArgumentError(
+                    "execute_geo: simplex geometry constructor identities do not align"))
+                append!(groups[length(matrices)+1],bindings[index])
+            end
+            cursor+=columns
+        end
+        push!(matrices,cells);push!(tags,physical)
+    end
+    mesh=Mesh(part.coords;segs=matrices[1],tris=matrices[2],tets=matrices[3],
+              seg_tag=tags[1],tri_tag=tags[2],tet_tag=tags[3])
+    return mesh,groups
+end
+
+
+function _geo_geometry_carrier_merge(parts,node_entities,node_identities,cell_identities,caller)
+    simplex=all(part->part[3] isa Mesh ||
+        all(block->block isa ElementBlock && (isempty(block.nodes) || block.msh in (1,2,4)),
+            part[3].blocks),parts)
+    if simplex && any(part->part[3] isa MixedMesh,parts)
+        converted=Tuple{Int,Int,Mesh}[]
+        binding_type=Model._model_mesh_cell_binding_type(cell_identities)
+        converted_bindings=cell_identities===nothing ? nothing : Vector{Vector{binding_type}}[]
+        for (index,(dimension,tag,part)) in enumerate(parts)
+            bindings=cell_identities===nothing ? nothing : cell_identities[index]
+            geometry,groups=part isa Mesh ? (part,bindings) : _geo_simplex_geometry_part(part,bindings)
+            push!(converted,(dimension,tag,geometry))
+            converted_bindings===nothing ||
+                push!(converted_bindings,[Vector{binding_type}(group) for group in groups])
+        end
+        parts=converted;cell_identities=converted_bindings
+    end
+    merged,_,rows,cells=_geo_merge_entity_meshes(parts;
+        node_entities,node_identities,cell_identities,return_remaps=true)
+    return merged,rows,cells
+end
+
+function _geo_merge_entity_meshes(parts;node_entities=nothing,node_identities=nothing,
+                                  cell_identities=nothing,return_remaps=false)
     caller="execute_geo: Mesh"
     all(part->part[3] isa Mesh,parts) ||
-        return _geo_merge_entity_meshes_mixed(parts,caller;node_entities)
+        return _geo_merge_entity_meshes_mixed(parts,caller;
+            node_entities,node_identities,cell_identities,return_remaps)
+    remaps=Vector{Int32}[]
     coord_list=NTuple{3,Float64}[]
     lookup=Dict{Tuple{Int,Int,NTuple{3,Int}},Int}()
     owner=Dict{Int,Tuple{Int,Int}}()
@@ -7522,6 +8441,8 @@ function _geo_merge_entity_meshes(parts;node_entities=nothing)
     tris=Matrix{Int32}(undef,3,ntri);tri_tag=Vector{Int32}(undef,ntri)
     tets=Matrix{Int32}(undef,4,ntet);tet_tag=Vector{Int32}(undef,ntet)
     seg_at=tri_at=tet_at=0
+    binding_type=Model._model_mesh_cell_binding_type(cell_identities)
+    bindings=cell_identities===nothing ? nothing : [binding_type[],binding_type[],binding_type[]]
     function node_index(x,y,z,entity)
         key=(entity...,_geo_mesh_coordinate_key(x,y,z))
         i=get(lookup,key,0)
@@ -7532,16 +8453,31 @@ function _geo_merge_entity_meshes(parts;node_entities=nothing)
         return i
     end
     for (index,(dim,tag,mesh)) in enumerate(parts)
+        if cell_identities!==nothing
+            length(cell_identities[index])==3 && all(length(tags)==size(cells,2) for
+                (tags,cells) in zip(cell_identities[index],(mesh.segs,mesh.tris,mesh.tets))) ||
+                throw(ArgumentError("$caller: produced cell identities do not align with geometry"))
+            for bi in 1:3
+                append!(bindings[bi],cell_identities[index][bi])
+            end
+        end
+        node_identities===nothing || length(node_identities[index])==nnodes(mesh) ||
+            throw(ArgumentError("$caller: produced vertex identities do not align with geometry rows"))
         remap=Vector{Int}(undef,nnodes(mesh))
         pcoords=mesh.coords
         for n in 1:nnodes(mesh)
             entity=node_entities===nothing ? (-1,0) : node_entities[index][n]
-            remap[n]=node_index(pcoords[1,n],pcoords[2,n],pcoords[3,n],entity)
+            identity=node_identities===nothing ? nothing : node_identities[index][n]
+            identity===nothing || identity>0 || throw(ArgumentError(
+                "$caller: produced vertex identity must be positive"))
+            key=identity===nothing ? entity : (typemin(Int),Int(identity))
+            remap[n]=node_index(pcoords[1,n],pcoords[2,n],pcoords[3,n],key)
             if node_entities!==nothing
                 own=node_entities[index][n]
                 owner[remap[n]]=min(get(owner,remap[n],(4,0)),own)
             end
         end
+        return_remaps && push!(remaps,Int32.(remap))
         if dim==0
             # Vertex nodes classify on the vertex even when the part carries
             # no elements — upstream `Mesh0D` stores each vertex's mesh
@@ -7586,7 +8522,8 @@ function _geo_merge_entity_meshes(parts;node_entities=nothing)
     end
     merged=Mesh(coords;segs=segs,tris=tris,tets=tets,
                 seg_tag=seg_tag,tri_tag=tri_tag,tet_tag=tet_tag)
-    return merged,owner
+    return bindings===nothing ? (return_remaps ? (merged,owner,remaps) : (merged,owner)) :
+        return_remaps ? (merged,owner,remaps,bindings) : (merged,owner,bindings)
 end
 
 # Mixed counterpart: parts carrying quadrangle/hexahedron/prism blocks merge
@@ -7597,7 +8534,9 @@ end
 # cells; `tags` keep each cell's physical tag and `owner` keeps the same
 # lowest-dimension node classification the simplex merge computes.
 function _geo_merge_entity_meshes_mixed(parts,caller::AbstractString;
-                                       node_entities=nothing)
+                                       node_entities=nothing,node_identities=nothing,
+                                       cell_identities=nothing,return_remaps=false)
+    remaps=Vector{Int32}[]
     coord_list=NTuple{3,Float64}[]
     lookup=Dict{Tuple{Int,Int,NTuple{3,Int}},Int}()
     owner=Dict{Int,Tuple{Int,Int}}()
@@ -7609,6 +8548,8 @@ function _geo_merge_entity_meshes_mixed(parts,caller::AbstractString;
     sizehint!(coord_list,capacity)
     order=Tuple{Int,Int,Int}[]
     buckets=Dict{Tuple{Int,Int,Int},Tuple{Vector{Int32},Vector{Int32},Int}}()
+    binding_type=Model._model_mesh_cell_binding_type(cell_identities)
+    bindings=cell_identities===nothing ? nothing : Dict{Tuple{Int,Int,Int},Vector{binding_type}}()
     function node_index(x,y,z,entity)
         key=(entity...,_geo_mesh_coordinate_key(x,y,z))
         i=get(lookup,key,0)
@@ -7631,16 +8572,29 @@ function _geo_merge_entity_meshes_mixed(parts,caller::AbstractString;
         return entry
     end
     for (index,(dim,tag,mesh)) in enumerate(parts)
+        if cell_identities!==nothing
+            input=Model._model_mesh_carrier_blocks(mesh)
+            length(cell_identities[index])==length(input) && all(length(tags)==size(cells,2)
+                for (tags,(_,cells)) in zip(cell_identities[index],input)) ||
+                throw(ArgumentError("$caller: produced cell identities do not align with geometry"))
+        end
+        node_identities===nothing || length(node_identities[index])==nnodes(mesh) ||
+            throw(ArgumentError("$caller: produced vertex identities do not align with geometry rows"))
         remap=Vector{Int}(undef,nnodes(mesh))
         pcoords=mesh.coords
         for n in 1:nnodes(mesh)
             entity=node_entities===nothing ? (-1,0) : node_entities[index][n]
-            remap[n]=node_index(pcoords[1,n],pcoords[2,n],pcoords[3,n],entity)
+            identity=node_identities===nothing ? nothing : node_identities[index][n]
+            identity===nothing || identity>0 || throw(ArgumentError(
+                "$caller: produced vertex identity must be positive"))
+            key=identity===nothing ? entity : (typemin(Int),Int(identity))
+            remap[n]=node_index(pcoords[1,n],pcoords[2,n],pcoords[3,n],key)
             if node_entities!==nothing
                 own=node_entities[index][n]
                 owner[remap[n]]=min(get(owner,remap[n],(4,0)),own)
             end
         end
+        return_remaps && push!(remaps,Int32.(remap))
         if dim==0
             for n in remap
                 old=get(owner,n,(3,0))
@@ -7648,9 +8602,9 @@ function _geo_merge_entity_meshes_mixed(parts,caller::AbstractString;
             end
         end
         if mesh isa Mesh
-            for (msh,nodes,tags) in ((1,mesh.segs,mesh.seg_tag),
+            for (bi,(msh,nodes,tags)) in enumerate(((1,mesh.segs,mesh.seg_tag),
                                      (2,mesh.tris,mesh.tri_tag),
-                                     (4,mesh.tets,mesh.tet_tag))
+                                     (4,mesh.tets,mesh.tet_tag)))
                 size(nodes,2)==0 && continue
                 flat,cell_tags,width=bucket(msh,dim,tag)
                 size(nodes,1)==width || throw(ErrorException(
@@ -7663,6 +8617,8 @@ function _geo_merge_entity_meshes_mixed(parts,caller::AbstractString;
                     flat[base+(cell-1)*width+row]=Int32(remap[nodes[row,cell]])
                 end
                 append!(cell_tags,tags)
+                bindings===nothing || append!(get!(()->binding_type[],bindings,(msh,dim,tag)),
+                    cell_identities[index][bi])
                 @inbounds for cell in 1:ncells,row in 1:width
                     n=remap[nodes[row,cell]]
                     old=get(owner,n,(3,0))
@@ -7670,7 +8626,7 @@ function _geo_merge_entity_meshes_mixed(parts,caller::AbstractString;
                 end
             end
         else
-            for block in mesh.blocks
+            for (bi,block) in enumerate(mesh.blocks)
                 block isa ElementBlock || throw(ArgumentError(
                     "$caller: cannot merge a special-element block " *
                     "(MSH type $(block.msh)) into the model mesh"))
@@ -7687,6 +8643,8 @@ function _geo_merge_entity_meshes_mixed(parts,caller::AbstractString;
                     flat[base+(cell-1)*width+row]=Int32(remap[cells[row,cell]])
                 end
                 append!(cell_tags,block.tags)
+                bindings===nothing || append!(get!(()->binding_type[],bindings,(block.msh,dim,tag)),
+                    cell_identities[index][bi])
                 @inbounds for cell in 1:ncells,row in 1:width
                     n=remap[cells[row,cell]]
                     old=get(owner,n,(3,0))
@@ -7708,7 +8666,9 @@ function _geo_merge_entity_meshes_mixed(parts,caller::AbstractString;
         coords[1,i]=x;coords[2,i]=y;coords[3,i]=z
     end
     merged=MixedMesh(coords,blocks;elementary_entities=elementary)
-    return merged,owner
+    output=bindings===nothing ? nothing : [bindings[key] for key in order]
+    return bindings===nothing ? (return_remaps ? (merged,owner,remaps) : (merged,owner)) :
+        return_remaps ? (merged,owner,remaps,output) : (merged,owner,output)
 end
 
 # Cell count of a given dimension on either mesh representation — the
@@ -7726,29 +8686,73 @@ function _geo_mesh_dim_cells(mesh::MixedMesh,dim::Int)
     return total
 end
 
-# `RecombineMesh` on a mixed product: each triangle block recombines in place
-# (blocks are already per-entity buckets, so cells never pair across entity
-# boundaries) and the resulting triangle/quadrangle blocks splice back at the
-# same position, preserving the elementary-entity rows.
-function _geo_recombine_mixed_blocks(mesh::MixedMesh;algorithm::Symbol)
+# Group triangle rows by actual Surface identity before pairing. Actual
+# boundary and embedded Curve cells protect only their owning Surface.
+function _geo_recombine_mixed_blocks(mesh::MixedMesh;algorithm::Symbol,
+                                     recombine_angles=nothing,model=nothing)
     out=MixedElementBlock[]
     elementary=mesh.elementary_entities
     elementary_out=elementary===nothing ? nothing : Vector{Int32}[]
+    did_recombine=false
     for (bi,block) in enumerate(mesh.blocks)
         if block isa ElementBlock && Int(block.msh)==2
-            sub=Mesh(mesh.coords;tris=block.nodes,tri_tag=block.tags)
-            rec=recombine_triangles(sub;algorithm=algorithm)
-            for rblock in rec.blocks
-                rblock isa ElementBlock && rblock.msh in (2,3) || continue
-                push!(out,rblock)
-                elementary_out!==nothing && push!(elementary_out,
-                    fill(elementary[bi][1],size(rblock.nodes,2)))
+            # Generated mixed products carry actual elementary entity rows;
+            # physical block tags do not identify the generating Surface.
+            ncells=size(block.nodes,2)
+            ncells==0 && begin
+                push!(out,block)
+                elementary_out!==nothing && push!(elementary_out,elementary[bi])
+                continue
+            end
+            owners=elementary!==nothing ? elementary[bi] : mesh.entity_data!==nothing ?
+                mesh.entity_data.block_entities[bi] : fill(Int32(0),ncells)
+            order=Int32[];groups=Dict{Int32,Vector{Int}}()
+            for cell in 1:ncells
+                owner=owners[cell]
+                if !haskey(groups,owner)
+                    push!(order,owner);groups[owner]=Int[]
+                end
+                push!(groups[owner],cell)
+            end
+            for owner in order
+                positions=groups[owner]
+                angle=_geo_recombine_entity_angle(recombine_angles,Int(owner))
+                sub=Mesh(mesh.coords;tris=block.nodes[:,positions],tri_tag=block.tags[positions])
+                protected=_geo_recombine_mixed_edges(mesh,model,Int(owner))
+                rec=recombine_triangles(sub;algorithm=algorithm,recombine_angle=angle,
+                                        protected_edges=protected)
+                for rblock in rec.blocks
+                    rblock isa ElementBlock && rblock.msh==3 &&
+                        size(rblock.nodes,2)>0 && (did_recombine=true)
+                    rblock isa ElementBlock && rblock.msh in (2,3) || continue
+                    push!(out,rblock)
+                    elementary_out!==nothing && push!(elementary_out,
+                        fill(owner,size(rblock.nodes,2)))
+                end
             end
         else
             push!(out,block)
             elementary_out!==nothing &&
                 push!(elementary_out,elementary[bi])
         end
+    end
+    did_recombine || return mesh
+    changed=length(out)!=length(mesh.blocks)
+    if !changed
+        for index in eachindex(out)
+            old=mesh.blocks[index];new=out[index]
+            old===new && continue
+            if typeof(old)!==typeof(new) || old.msh!=new.msh ||
+                    old.nodes!=new.nodes || old.tags!=new.tags
+                changed=true;break
+            end
+        end
+    end
+    if changed && (mesh.entity_data!==nothing ||
+            any(section->!isempty(section.elements),mesh.data_sections) ||
+            (mesh.partition_data!==nothing && !isempty(mesh.partition_data.ghost_elements)))
+        throw(ArgumentError("execute_geo: RecombineMesh cannot preserve " *
+            "cell-attached MSH metadata while changing triangle blocks"))
     end
     return MixedMesh(mesh.coords,out;
                      physical_names=mesh.physical_names,
@@ -7758,6 +8762,135 @@ function _geo_recombine_mixed_blocks(mesh::MixedMesh;algorithm::Symbol)
                      ancillary_sections=mesh.ancillary_sections,
                      data_sections=mesh.data_sections,
                      partition_data=mesh.partition_data)
+end
+
+function _geo_recombine_curve_tags(m,owner::Int)
+    owner>0 || throw(ArgumentError(
+        "execute_geo: RecombineMesh lacks elementary Surface identity " *
+        "for actual Curve exclusions"))
+    curves=Set{Int32}()
+    for (dim,tag) in _geo_mesh_children(m,2,owner,"execute_geo: RecombineMesh")
+        dim==1 && push!(curves,Int32(abs(tag)))
+    end
+    record=get(m.discrete,(2,owner),nothing)
+    if record!==nothing
+        for (dim,tag) in record.boundary
+            dim==1 && push!(curves,Int32(abs(tag)))
+        end
+    end
+    return curves
+end
+
+function _geo_recombine_mixed_edges(mesh::MixedMesh,m,owner::Int)
+    m===nothing && return nothing
+    curves=_geo_recombine_curve_tags(m,owner)
+    protected=Set{NTuple{2,Int32}}()
+    isempty(curves) && return protected
+    elementary=mesh.elementary_entities;data=mesh.entity_data
+    for (bi,block) in enumerate(mesh.blocks)
+        block isa ElementBlock && msh_family(block.msh)===:lin || continue
+        owners=elementary!==nothing ? elementary[bi] : data!==nothing ?
+            data.block_entities[bi] : nothing
+        owners===nothing && !isempty(block.nodes) && throw(ArgumentError(
+            "execute_geo: RecombineMesh lacks actual Curve element identities"))
+        for cell in axes(block.nodes,2)
+            owners[cell] in curves || continue
+            push!(protected,minmax(block.nodes[1,cell],block.nodes[2,cell]))
+        end
+    end
+    return protected
+end
+
+function _geo_recombine_angles(m::GeoModel)
+    angles=Dict{Tuple{Int,Int},Float64}()
+    for ((dim,tag),angle) in m.meshing.recombine
+        dim==2 && (angles[(2,tag)]=angle)
+    end
+    for tag in keys(m.surfaces);get!(angles,(2,tag),45.0);end
+    for ((dim,tag),_) in m.discrete
+        dim==2 && get!(angles,(2,tag),45.0)
+    end
+    return angles
+end
+
+# Unknown imported triangle owners can use a common angle; an actual
+# per-Surface difference requires explicit elementary entity provenance.
+function _geo_recombine_entity_angle(angles,owner::Int)
+    angles===nothing && return nothing
+    owner>0 && return get(angles,(2,owner),45.0)
+    angle_values=Float64[value for ((dim,_),value) in angles if dim==2]
+    isempty(angle_values) && return 45.0
+    all(value->value==first(angle_values),angle_values) || throw(ArgumentError(
+        "execute_geo: RecombineMesh requires elementary Surface identities " *
+        "to apply different recombination angles"))
+    return first(angle_values)
+end
+
+function _geo_recombine_simplex_blocks(mesh::Mesh,m::GeoModel,context;
+                                       algorithm::Symbol)
+    angles=_geo_recombine_angles(m)
+    # Preserve the existing native rejection of volumetric simplex inputs.
+    ntets(mesh)>0 && return recombine_triangles(mesh;algorithm=algorithm)
+    parts=context.mesh_parts
+    isempty(parts) && throw(ArgumentError(
+        "execute_geo: RecombineMesh lacks generating Surface identities"))
+    all(part->part[3] isa Mesh,parts) || throw(ArgumentError(
+        "execute_geo: inconsistent simplex generating products"))
+    node_entities=_geo_mesh_part_node_entities(m,parts,"execute_geo: RecombineMesh")
+    source,_=_geo_merge_entity_meshes(parts;node_entities=node_entities)
+    owners=Int32[];segment_owners=Int32[]
+    for (dim,tag,part) in parts
+        append!(owners,fill(Int32(dim==2 ? tag : 0),ntris(part)))
+        append!(segment_owners,fill(Int32(dim==1 ? tag : 0),nsegs(part)))
+    end
+    # RefineMesh has deterministic parent-contiguous children. Reproduce only
+    # its topology and verify every dense slot before accepting the inheritance.
+    while ntris(source)>0 && ntris(source)<ntris(mesh) &&
+          ntris(source)<=div(ntris(mesh),4)
+        source=refine_uniform(source)
+        owners=repeat(owners;inner=4)
+        segment_owners=repeat(segment_owners;inner=2)
+    end
+    source.tris==mesh.tris && source.segs==mesh.segs &&
+        length(owners)==ntris(mesh) && all(>(0),owners) || throw(ArgumentError(
+            "execute_geo: RecombineMesh cannot resolve current triangle " *
+            "Surface identities from generating products"))
+    blocks=MixedElementBlock[];elementary=Vector{Int32}[]
+    did_recombine=false
+    if nsegs(mesh)>0
+        push!(blocks,ElementBlock(1,mesh.segs,mesh.seg_tag))
+        push!(elementary,segment_owners)
+    end
+    order=Int32[];groups=Dict{Int32,Vector{Int}}()
+    for cell in eachindex(owners)
+        owner=owners[cell]
+        if !haskey(groups,owner)
+            push!(order,owner);groups[owner]=Int[]
+        end
+        push!(groups[owner],cell)
+    end
+    for owner in order
+        positions=groups[owner]
+        curves=_geo_recombine_curve_tags(m,Int(owner))
+        protected=Set{NTuple{2,Int32}}()
+        for cell in axes(mesh.segs,2)
+            segment_owners[cell] in curves || continue
+            push!(protected,minmax(mesh.segs[1,cell],mesh.segs[2,cell]))
+        end
+        sub=Mesh(mesh.coords;segs=mesh.segs,seg_tag=mesh.seg_tag,
+                 tris=mesh.tris[:,positions],tri_tag=mesh.tri_tag[positions])
+        rec=recombine_triangles(sub;algorithm=algorithm,
+            recombine_angle=get(angles,(2,Int(owner)),45.0),
+            protected_edges=protected)
+        for block in rec.blocks
+            block isa ElementBlock && block.msh==3 &&
+                size(block.nodes,2)>0 && (did_recombine=true)
+            block isa ElementBlock && block.msh in (2,3) || continue
+            push!(blocks,block);push!(elementary,fill(owner,size(block.nodes,2)))
+        end
+    end
+    did_recombine || return mesh
+    return MixedMesh(mesh.coords,blocks;elementary_entities=elementary)
 end
 
 # The mesh-operation statements act on `context.mesh` — the product of a
@@ -7771,6 +8904,11 @@ function _geo_exec_mesh_statement!(m::GeoModel,line::AbstractString,
         # `RefineMesh` syncs the internals first when changed.
         _geo_sync_physical_view_if_changed!(m,context)
         context.mesh===nothing && return nothing
+        if !isempty(context.mesh_parts) ||
+                (context.mesh isa MixedMesh && context.mesh.entity_data!==nothing)
+            _geo_operate_actual_mesh!(m,context,:refine,"$caller: RefineMesh")
+            return nothing
+        end
         context.mesh isa Mesh || throw(ArgumentError(
             "$caller: RefineMesh requires a simplex mesh — the current " *
             "mesh carries non-simplex elements"))
@@ -7778,16 +8916,28 @@ function _geo_exec_mesh_statement!(m::GeoModel,line::AbstractString,
         _geo_remesh_owner!(context)
         return
     elseif (mm=match(r"^RecombineMesh\s*;?\s*$",s))!==nothing
+        _geo_sync_meshing_options!(m,context)
+        if m.meshing.recombine_algo==4
+            _geo_recombine_bipartite_plan!(m,context,"$caller: RecombineMesh")
+            return nothing
+        end
         context.mesh===nothing && return nothing
+        if !isempty(context.mesh_parts) ||
+                (context.mesh isa MixedMesh && context.mesh.entity_data!==nothing)
+            _geo_recombine_actual_plan!(m,context,"$caller: RecombineMesh")
+            return nothing
+        end
         _geo_sync_meshing_options!(m,context)
         # Upstream `RecombineMesh` (Generator.cpp) reads `algoRecombine`
         # live: blossom matching for 1/3, simple pairing otherwise — the
         # statement has no full-quad arm.
         algorithm=m.meshing.recombine_algo in (1,3) ? :blossom : :greedy
         context.mesh=if context.mesh isa Mesh
-            recombine_triangles(context.mesh;algorithm=algorithm)
+            _geo_recombine_simplex_blocks(context.mesh,m,context;algorithm=algorithm)
         else
-            _geo_recombine_mixed_blocks(context.mesh;algorithm=algorithm)
+            angles=_geo_recombine_angles(m)
+            _geo_recombine_mixed_blocks(context.mesh;algorithm=algorithm,
+                                        recombine_angles=angles,model=m)
         end
         _geo_remesh_owner!(context)
         return
@@ -7795,39 +8945,29 @@ function _geo_exec_mesh_statement!(m::GeoModel,line::AbstractString,
            (mm=match(r"^RenumberMeshElements\s*;?\s*$",s))!==nothing ||
            (mm=match(r"^CreateMeshEdges\s*;?\s*$",s))!==nothing ||
            (mm=match(r"^CreateMeshFaces\s*;?\s*$",s))!==nothing
+        authority=m.meshing.mesh_authority
+        if context.mesh isa MixedMesh && context.mesh.entity_data!==nothing ||
+                authority!==nothing && authority.mesh!==nothing && authority.carrier===context.mesh
+            if startswith(s,"RenumberMeshNodes")
+                _geo_operate_actual_mesh!(m,context,:geo_renumber_nodes,"$caller: RenumberMeshNodes")
+                context.native_element_lookup_receipt=nothing
+            elseif startswith(s,"RenumberMeshElements")
+                _geo_operate_actual_mesh!(m,context,:geo_renumber_elements,"$caller: RenumberMeshElements")
+                context.native_element_lookup_receipt=nothing
+            end
+        end
         # Node/element order and topology catalogs are derived information in
         # the compact Mesh — already canonical, nothing to mutate.
         return
     elseif (mm=match(r"^ReorientMesh\s+Volume\s*\{(.*?)\}\s*;?\s*$",s))!==nothing
-        # `ReorientMesh` syncs the internals first when changed.
-        _geo_sync_physical_view_if_changed!(m,context)
-        tags=_geo_numeric_list_values(mm.captures[1],context,caller)
-        for value in tags
-            tag=_geo_int_value(value,"$caller ReorientMesh tag")
-            # `setOutwardOrientationMeshConstraint` — a flag consumed at the
-            # NEXT volume meshing, like `Reverse`.
-            m.meshing.reverse[(3,tag)]=true
-        end
+        _geo_exec_reorient_mesh!(m,"{"*mm.captures[1]*"}",context)
         return
-    elseif (mm=match(r"^RelocateMesh\s+(Point|Curve|Surface)\s*\{(.*?)\}\s*;?\s*$",s))!==nothing
-        # `RelocateMesh` syncs the internals first when changed.
-        _geo_sync_physical_view_if_changed!(m,context)
-        context.mesh===nothing && return nothing
-        dim=_GEO_STRING_ENTITY_DIM[mm.captures[1]]
-        tags=_geo_numeric_list_values(mm.captures[2],context,caller)
-        wanted=Set(_geo_int_value(t,"$caller RelocateMesh tag") for t in tags)
-        mesh=context.mesh
-        for n in 1:nnodes(mesh)
-            own=get(context.mesh_node_owner,n,nothing)
-            own===nothing && continue
-            own[1]==dim && own[2] in wanted || continue
-            point=_geo_relocate_node(m,dim,own[2],mesh.coords[:,n])
-            point===nothing || (mesh.coords[:,n]=point)
-        end
+    elseif (mm=match(r"^RelocateMesh\s+(Point|Curve|Line|Surface)\s*(.*?)\s*;?\s*$",s))!==nothing
+        _geo_exec_relocate_mesh!(m,mm.captures[1],mm.captures[2],context)
         return
     elseif (mm=match(r"^TransformMesh\s*\{(.*?)\}\s*(?:\{(.*?)\})?\s*;?\s*$",s))!==nothing
         context.mesh===nothing && return nothing
-        matrix=_geo_numeric_list_values(mm.captures[1],context,caller)
+        matrix=_geo_numeric_list_values("{"*mm.captures[1]*"}",context,caller)
         length(matrix)>=12 || throw(ArgumentError(
             "$caller: affine transform matrix requires at least 12 entries"))
         wanted=nothing
@@ -7837,13 +8977,21 @@ function _geo_exec_mesh_statement!(m::GeoModel,line::AbstractString,
                 signed_tags=true,allocator_state=allocator_state)
             wanted=Set(Tuple{Int,Int}(abs.(Int.(collect(e)))) for e in entities)
         end
-        _geo_transform_mesh_nodes!(context.mesh,context.mesh_node_owner,
-            matrix,wanted)
+        source,owner,_=_geo_mesh_coordinate_source(m,context)
+        _geo_check_part_rows(context,source)
+        edited=deepcopy(source)
+        _geo_transform_mesh_nodes!(edited,owner,matrix,wanted)
+        _geo_publish_mesh_coordinates!(m,context,edited.coords,"$caller: TransformMesh")
         return
     elseif (mm=match(r"^SetOrder\s+(.*?)\s*;?\s*$",s))!==nothing
         order=_geo_int_value(
             _geo_eval_numeric(mm.captures[1],context,caller),caller)
         order<1 && throw(ArgumentError("$caller: SetOrder requires order >= 1"))
+        if !isempty(context.mesh_parts) ||
+                context.mesh isa MixedMesh && context.mesh.entity_data!==nothing
+            _geo_operate_actual_mesh!(m,context,:order,"$caller: SetOrder";element_order=order)
+            return nothing
+        end
         order>1 && throw(ArgumentError(
             "$caller: SetOrder $order — high-order .geo meshes are not " *
             "supported"))
@@ -8080,26 +9228,140 @@ function _geo_remesh_owner!(context::_GeoNumericContext)
     return nothing
 end
 
-# `RelocateMesh` — move the node onto its owning entity's geometry. Curves and
-# surfaces project through the same `model_to_mixed`-free path used by
-# embeddings: for straight curves the segment, for surfaces the owning
-# surface's geometry.
-function _geo_relocate_node(m::GeoModel,dim::Int,tag::Int,
-                            xyz::AbstractVector)
-    if dim==0
-        haskey(m.points,tag) || return nothing
-        return copy(m.points[tag])
-    elseif dim==1
-        haskey(m.curves,tag) || return nothing
-        # Straight/arc curves: project onto the chord — a bounded
-        # approximation; exact curve inversion lives in the mesher.
-        a,b=m.curves[tag]
-        pa,pb=m.points[a],m.points[b]
-        d=pb.-pa;t=sum((xyz.-pa).*d)/max(sum(d.*d),eps())
-        return pa.+clamp(t,0.0,1.0).*d
+function _geo_mesh_stored_parameters(m,mesh,owners,context)
+    parameters=Union{Nothing,Vector{Float64}}[nothing for _ in 1:nnodes(mesh)]
+    if mesh isa MixedMesh && mesh.entity_data!==nothing
+        return Model._model_mesh_runtime_parameters(m,mesh)
     end
-    # Surface/volume nodes keep their positions — a full parametric inverse is
-    # not available mid-file.
+    old_ruled_surface=_geo_exec_old_ruled(context)
+    for (node,(dimension,tag)) in owners
+        dimension in (1,2) || continue
+        haskey(_model_entity_dictionary(m,dimension),tag) || continue
+        parameters[node]=model_parametrization(m,dimension,tag,
+            collect(@view mesh.coords[:,node]);old_ruled_surface)
+    end
+    return parameters
+end
+
+function _geo_check_part_rows(context,mesh=context.mesh)
+    length(context.mesh_parts)==length(context.mesh_part_rows) || throw(ArgumentError(
+        "execute_geo: entity products do not align with their stored node rows"))
+    for ((_,_,part),rows) in zip(context.mesh_parts,context.mesh_part_rows)
+        length(rows)==nnodes(part) && all(row->1<=row<=nnodes(mesh),rows) ||
+            throw(ArgumentError("execute_geo: invalid stored entity node rows"))
+    end
+    return nothing
+end
+
+function _geo_publish_part_coordinates!(context,mesh=context.mesh)
+    _geo_check_part_rows(context,mesh)
+    for ((_,_,part),rows) in zip(context.mesh_parts,context.mesh_part_rows)
+        for (column,row) in enumerate(rows),axis in 1:3
+            part.coords[axis,column]=mesh.coords[axis,row]
+        end
+    end
+    return nothing
+end
+
+function _geo_mesh_coordinate_source(m,context)
+    previous=m.meshing.mesh_authority
+    if previous!==nothing && previous.mesh!==nothing && previous.carrier===context.mesh
+        source=previous.mesh
+        owner=Dict(row=>(dimension,Int(tag)) for (row,(dimension,tag)) in
+            enumerate(source.entity_data.node_entities))
+        return source,owner,Model._model_mesh_runtime_parameters(m,source)
+    end
+    return context.mesh,context.mesh_node_owner,context.mesh_node_parametric
+end
+
+function _geo_coordinate_mesh(mesh,coordinates)
+    if mesh isa Mesh
+        return Mesh(coordinates;segs=mesh.segs,tris=mesh.tris,tets=mesh.tets,
+            seg_tag=mesh.seg_tag,tri_tag=mesh.tri_tag,tet_tag=mesh.tet_tag)
+    end
+    return MixedMesh(coordinates,mesh.blocks;physical_names=mesh.physical_names,
+        entity_data=mesh.entity_data,elementary_entities=mesh.elementary_entities,
+        periodic_links=mesh.periodic_links,ancillary_sections=mesh.ancillary_sections,
+        data_sections=mesh.data_sections,partition_data=mesh.partition_data)
+end
+
+function _geo_publish_mesh_coordinates!(m,context,coordinates,caller)
+    source,_,parameters=_geo_mesh_coordinate_source(m,context)
+    size(coordinates)==size(source.coords) && all(isfinite,coordinates) ||
+        throw(ArgumentError("$caller: coordinates must be finite and align with actual nodes"))
+    _geo_check_part_rows(context,source)
+    mesh=_geo_coordinate_mesh(source,coordinates)
+    previous=m.meshing.mesh_authority
+    bound=previous!==nothing && previous.mesh!==nothing && previous.carrier===context.mesh
+    carrier=bound && context.mesh!==source ?
+        _geo_coordinate_mesh(context.mesh,coordinates[:,previous.carrier_rows]) : mesh
+    parts=Matrix{Float64}[coordinates[:,rows] for rows in context.mesh_part_rows]
+    record_updates=Tuple{DiscreteEntity,Matrix{Float64}}[]
+    authority=nothing
+    if bound
+        authority=Model._model_mesh_authority(mesh,previous.done;caller,
+            private_rank=previous.private_rank,carrier,carrier_rows=previous.carrier_rows)
+        inputs=Dict{Tuple{Int,Int32},Union{Mesh,MixedMesh}}()
+        for (owner,input) in previous.native_inputs
+            product=Model._model_mesh_product(authority,owner[1],Int(owner[2]);caller)
+            inputs[owner]=product===nothing ? input : product
+        end
+        authority=Model._ModelMeshAuthority(authority.mesh,authority.products,
+            authority.done,authority.private_rank,inputs,carrier,authority.carrier_rows,
+            previous.producer_rows,previous.carrier_cells)
+        positions=Dict(tag=>row for (row,tag) in enumerate(mesh.entity_data.external_node_tags))
+        for (_,record) in Model._discrete_mesh_records_model(m)
+            updated=copy(record.node_coords);changed=false
+            for (column,tag) in enumerate(record.node_tags)
+                row=get(positions,UInt64(tag),0)
+                row==0 && continue
+                updated[:,column]=coordinates[:,row];changed=true
+            end
+            changed && push!(record_updates,(record,updated))
+        end
+    end
+    carrier_parameters=bound ? deepcopy(parameters[authority.carrier_rows]) : deepcopy(parameters)
+    geometry_receipt=_geo_geometry_coordinate_receipt(context.mesh_geometry_parts,carrier,caller)
+    # Evaluation, metadata validation and all coordinate allocations precede
+    # publication to the context and the model's actual entity products.
+    for ((_,_,part),updated) in zip(context.mesh_parts,parts)
+        part.coords[:,:]=updated
+    end
+    for (record,updated) in record_updates
+        record.node_coords=updated
+    end
+    bound && (m.meshing.mesh_authority=authority)
+    context.mesh=carrier
+    context.mesh_geometry_parts=geometry_receipt
+    context.mesh_node_parametric=carrier_parameters
+    return nothing
+end
+
+function _geo_exec_relocate_mesh!(m,kind,list_source,context)
+    caller="execute_geo: RelocateMesh $kind"
+    list=_geo_constraint_list(list_source,context,caller;allow_all=true)
+    _geo_sync_physical_view_if_changed!(m,context)
+    dimension=kind=="Point" ? 0 : kind in ("Curve","Line") ? 1 : 2
+    wanted=list===nothing ? nothing :
+        Set(_geo_constraint_int(value,caller,"entity tag") for value in list)
+    mesh,owners,stored_parameters=_geo_mesh_coordinate_source(m,context)
+    mesh===nothing && return nothing
+    length(stored_parameters)==nnodes(mesh) || throw(ArgumentError(
+        "$caller: stored node parameters do not align with the current mesh"))
+    _geo_check_part_rows(context,mesh)
+    coordinates=copy(mesh.coords)
+    for (node,(owner_dimension,tag)) in owners
+        owner_dimension==dimension && (wanted===nothing || tag in wanted) || continue
+        haskey(_model_entity_dictionary(m,dimension),tag) || continue
+        parameters=stored_parameters[node]
+        dimension>0 && parameters===nothing && continue
+        point=model_value(m,dimension,tag,dimension==0 ? Float64[] : parameters;
+            old_ruled_surface=_geo_exec_old_ruled(context))
+        length(point)==3 && all(isfinite,point) || throw(ArgumentError(
+            "$caller: entity evaluation must produce three finite coordinates"))
+        coordinates[:,node]=point
+    end
+    _geo_publish_mesh_coordinates!(m,context,coordinates,caller)
     return nothing
 end
 
@@ -8182,14 +9444,17 @@ function _geo_exec_command!(m::GeoModel,word::AbstractString,
             mesh isa Mesh || throw(ArgumentError(
                 "$caller: OptimizeMesh \"$arg\" requires a simplex mesh — " *
                 "the current mesh carries non-simplex elements"))
-            context.mesh=smooth_optimize(mesh;iters=1,
-                require_positive_tets=false)
+            replacement=smooth_optimize(mesh;iters=1,require_positive_tets=false)
+            receipt=_geo_geometry_coordinate_receipt(context.mesh_geometry_parts,replacement,caller)
+            context.mesh=replacement;context.mesh_geometry_parts=receipt
         else
             _geo_mesh_dim_cells(mesh,2)>0 || return nothing
             mesh isa Mesh || throw(ArgumentError(
                 "$caller: OptimizeMesh \"$arg\" requires a simplex mesh — " *
                 "the current mesh carries non-simplex elements"))
-            context.mesh=_laplacian_smooth_tri_cache(mesh,1,nothing)
+            replacement=_laplacian_smooth_tri_cache(mesh,1,nothing)
+            receipt=_geo_geometry_coordinate_receipt(context.mesh_geometry_parts,replacement,caller)
+            context.mesh=replacement;context.mesh_geometry_parts=receipt
         end
         return nothing
     elseif word=="SetBoundingBox"
@@ -8206,6 +9471,8 @@ function _geo_exec_command!(m::GeoModel,word::AbstractString,
     return nothing
 end
 
+include("GeoMeshImport.jl")
+
 # `Include`/`Merge` of a `.geo` file runs its statements in the same context
 # and model (Gmsh's `ParseFile` shares the parser globals). `.msh` files merge
 # their mesh into the current mid-file mesh.
@@ -8221,13 +9488,7 @@ function _geo_exec_include!(m::GeoModel,path::AbstractString,
         # mesh as well. `read_mixed_msh` keeps every element family plus the
         # MSH2 elementary / MSH4 entity classification the simplex `read_msh`
         # folds away.
-        mixed=read_mixed_msh(file)
-        merged=_geo_mixed_simplex_mesh(mixed,caller)
-        context.mesh===nothing ? (context.mesh=merged) :
-            (context.mesh=_geo_concat_meshes(context.mesh,merged))
-        empty!(context.mesh_node_owner)
-        empty!(context.mesh_parts)
-        _geo_merge_discrete!(m,mixed,caller)
+        _geo_import_mesh_file!(m,context,file,caller)
         return nothing
     end
     ext==".geo" || throw(ArgumentError(
@@ -8312,6 +9573,8 @@ function _geo_mixed_simplex_mesh(mixed::MixedMesh,caller::AbstractString)
     for block in mixed.blocks
         block isa SpecialElementBlock && continue
         family=msh_family(block.msh)
+        # Constant/order-zero cells have one node and no simplex corners.
+        msh_spec(block.msh).order==0 && continue
         if family===:lin
             ns=Base.checked_add(ns,size(block.nodes,2))
         elseif family===:tri
@@ -8326,15 +9589,17 @@ function _geo_mixed_simplex_mesh(mixed::MixedMesh,caller::AbstractString)
     js=0;jf=0;jt=0
     @inbounds for block in mixed.blocks
         block isa SpecialElementBlock && continue
-        family=msh_family(block.msh);n=size(block.nodes,2);n==0 && continue
+        family=msh_family(block.msh)
+        # Constant/order-zero cells have one node and no simplex corners.
+        msh_spec(block.msh).order==0 && continue;n=size(block.nodes,2);n==0 && continue
         if family===:lin
-            copyto!(segs,2js+1,block.nodes,1,2n)
+            segs[:,js+1:js+n].=view(block.nodes,1:2,:)
             copyto!(st,js+1,block.tags,1,n);js+=n
         elseif family===:tri
-            copyto!(tris,3jf+1,block.nodes,1,3n)
+            tris[:,jf+1:jf+n].=view(block.nodes,1:3,:)
             copyto!(tt,jf+1,block.tags,1,n);jf+=n
         elseif family===:tet
-            copyto!(tets,4jt+1,block.nodes,1,4n)
+            tets[:,jt+1:jt+n].=view(block.nodes,1:4,:)
             copyto!(qt,jt+1,block.tags,1,n);jt+=n
         end
     end
@@ -8354,10 +9619,40 @@ end
 # 1:N tags and each vertex lands on the first entity whose cells reference it
 # (upstream's first-claim vertex map); MSH4 keeps the file's node/element tags,
 # per-node entity classification, and parametric coordinates.
+# Batch the import's node append so large UID maps do not copy the entire
+# coordinate/parameter prefix once per vertex. Actual row order, IEEE bits and
+# the existing duplicate-label append policy are retained.
+function _geo_append_discrete_import_nodes!(record,mixed,positions,data)
+    old_count=length(record.node_tags)
+    count=length(positions)
+    width=size(record.node_params,1)
+    for position in positions
+        params=data===nothing ? nothing : data.node_parametric[position]
+        params===nothing || (width=max(width,length(params)))
+    end
+    coordinates=Matrix{Float64}(undef,3,old_count+count)
+    coordinates[:,1:old_count].=record.node_coords
+    parameters=width==0 ? record.node_params : zeros(Float64,width,old_count+count)
+    width==0 || (parameters[1:size(record.node_params,1),1:old_count].=record.node_params)
+    sizehint!(record.node_tags,old_count+count)
+    for (offset,position) in enumerate(positions)
+        tag=data===nothing ? UInt64(position) : data.external_node_tags[position]
+        params=data===nothing ? nothing : data.node_parametric[position]
+        push!(record.node_tags,tag)
+        coordinates[:,old_count+offset].=view(mixed.coords,:,position)
+        values=params===nothing ? Float64[] : copy(params)
+        record.node_native_params[tag]=values
+        width==0 || isempty(values) ||
+            (parameters[1:length(values),old_count+offset].=values)
+    end
+    record.node_coords=coordinates
+    record.node_params=parameters
+    return nothing
+end
+
 function _geo_merge_discrete!(m::GeoModel,mixed::MixedMesh,
                               caller::AbstractString)
     blocks=mixed.blocks
-    isempty(blocks) && return nothing
     data=mixed.entity_data
     elementary=mixed.elementary_entities
     nnode=size(mixed.coords,2)
@@ -8379,18 +9674,23 @@ function _geo_merge_discrete!(m::GeoModel,mixed::MixedMesh,
             push!(cells[key],(bi,j))
         end
     end
-    data===nothing || for key in keys(data.entities)
+    entity_records=data===nothing ? Dict{Tuple{Int,Int},Elements.MixedEntity}() :
+        mixed.partition_data===nothing ? data.entities : merge(data.entities,mixed.partition_data.entities)
+    data===nothing || for key in keys(entity_records)
         haskey(cells,key) && continue
         cells[key]=NTuple{2,Int}[]
         push!(order,key)
     end
-    isempty(order) && return nothing
     # Node ownership: the MSH4 node-block classification is authoritative;
     # remaining vertices are claimed by the first entity whose cells use them.
     owner=fill((-1,Int32(0)),nnode)
     data===nothing ||
         for i in 1:nnode
             owner[i]=data.node_entities[i]
+            key=(owner[i][1],Int(owner[i][2]))
+            if !haskey(cells,key)
+                cells[key]=NTuple{2,Int}[];push!(order,key)
+            end
         end
     for (bi,block) in enumerate(blocks)
         block isa SpecialElementBlock && continue
@@ -8403,6 +9703,7 @@ function _geo_merge_discrete!(m::GeoModel,mixed::MixedMesh,
             end
         end
     end
+    isempty(order) && return nothing
     # Records: existing discrete entities append; a collision with a real
     # model entity leaves its cells mesh-level only (the entity itself is not
     # reclassified); a zero tag is stored literally like upstream.
@@ -8419,16 +9720,14 @@ function _geo_merge_discrete!(m::GeoModel,mixed::MixedMesh,
             m.discrete[(dim,add_discrete_entity!(m,dim,tag))]
         end
     end
-    node_tag=i->data!==nothing ? Int32(data.external_node_tags[i]) : Int32(i)
+    node_tag=i->data!==nothing ? data.external_node_tags[i] : UInt64(i)
     materialized=Dict{Int,Tuple{Int,Int}}()
+    planned_nodes=Dict{Tuple{Int,Int},Vector{Int32}}()
     function materialize(i::Int,key::Tuple{Int,Int})
         haskey(materialized,i) && return nothing
         record=get(records,key,nothing)
         record===nothing && return nothing
-        params=data!==nothing ? data.node_parametric[i] : nothing
-        _record_append_node!(record,node_tag(i),
-            Float64[mixed.coords[1,i],mixed.coords[2,i],mixed.coords[3,i]],
-            params===nothing ? Float64[] : params)
+        push!(get!(Vector{Int32},planned_nodes,key),Int32(i))
         materialized[i]=key
         return nothing
     end
@@ -8437,8 +9736,8 @@ function _geo_merge_discrete!(m::GeoModel,mixed::MixedMesh,
         owner[i][1]<0 && continue
         materialize(i,(owner[i][1],Int(owner[i][2])))
     end
-    next_elem=_model_fresh_element_tag(m)
-    used=Set{Int32}()
+    next_elem=nothing
+    used=Set{UInt64}()
     for (_,record) in _discrete_mesh_records_model(m)
         union!(used,record.element_tags)
     end
@@ -8453,18 +9752,23 @@ function _geo_merge_discrete!(m::GeoModel,mixed::MixedMesh,
             end
             # MSH4 element tags are file tags; MSH2 and colliding tags fall
             # back to fresh allocations.
-            element_tag=data!==nothing ?
-                Int32(data.external_element_tags[bi][j]) : Int32(0)
-            if element_tag<=0 || element_tag in used
-                while Int32(next_elem) in used
-                    next_elem+=1
+            element_tag=data!==nothing ? data.external_element_tags[bi][j] : nothing
+            if element_tag===nothing || element_tag in used
+                next_elem===nothing && (next_elem=_model_fresh_element_tag(m))
+                while next_elem in used
+                    next_elem+=UInt64(1)
                 end
-                element_tag=Int32(next_elem);next_elem+=1
+                element_tag=next_elem;next_elem+=UInt64(1)
             end
             push!(used,element_tag)
             _record_append_element!(record,block.msh,element_tag,
-                Int32[node_tag(Int(ni)) for ni in nodes])
+                UInt64[node_tag(Int(ni)) for ni in nodes])
         end
+    end
+    for key in order
+        positions=get(planned_nodes,key,nothing)
+        positions===nothing && continue
+        _geo_append_discrete_import_nodes!(records[key],mixed,positions,data)
     end
     # Physical memberships live on the entity (upstream `GEntity::physicals`):
     # MSH4 declares them per entity, MSH2 derives them from the cell tags.
@@ -8472,7 +9776,7 @@ function _geo_merge_discrete!(m::GeoModel,mixed::MixedMesh,
         dim,tag=key
         physicals=Set{Int32}()
         if data!==nothing
-            entity=get(data.entities,key,nothing)
+            entity=get(entity_records,key,nothing)
             entity===nothing || union!(physicals,entity.physical_tags)
         else
             for (bi,j) in cells[key]
@@ -8494,7 +9798,7 @@ function _geo_merge_discrete!(m::GeoModel,mixed::MixedMesh,
     data===nothing || for key in order
         record=records[key]
         record===nothing && continue
-        entity=get(data.entities,key,nothing)
+        entity=get(entity_records,key,nothing)
         entity===nothing && continue
         dim=key[1];dim==0 && continue
         record.boundary=NTuple{2,Int}[(dim-1,abs(Int(b)))
@@ -8518,10 +9822,21 @@ function _geo_exec_save!(m::GeoModel,path::AbstractString,
     # view (and pending unknown-member warnings) first, when internals changed.
     _geo_sync_physical_view_if_changed!(m,context)
     mesh=context.mesh
+    authority=m.meshing.mesh_authority
+    if authority!==nothing && authority.mesh!==nothing && authority.carrier===mesh
+        mesh=authority.mesh
+    end
     if mesh===nothing
         isempty(m.points) || throw(ArgumentError(
             "$caller: no mesh exists — run `Mesh n;` first"))
         mesh=Mesh(zeros(3,0))
+    end
+    if mesh isa MixedMesh && mesh.entity_data!==nothing
+        # The actual product already owns its Point cells and public labels.
+        # Serialize it directly instead of appending a second Point block or
+        # replacing its node/element identity tables with dense proxy labels.
+        write_mixed_msh(file,mesh;version=2.2)
+        return nothing
     end
     # Upstream serializes an `MPoint` element per model vertex — the dim-0
     # owners the merge recorded carry them, emitted in vertex-tag order.
@@ -8572,5 +9887,8 @@ function _geo_system_call(command::AbstractString,caller::AbstractString;
     wait ? run(cmd) : run(cmd;wait=false)
     return nothing
 end
+
+include("GeoMeshOrientation.jl")
+include("GeoHomologyNative.jl")
 
 end # module

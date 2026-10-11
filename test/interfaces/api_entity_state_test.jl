@@ -47,8 +47,12 @@ const _ENTITY_STATE_API=Tessella.API
         @test_throws ArgumentError _ENTITY_STATE_API.model.set_coordinates(
             99,0,0,0)
         @test _ENTITY_STATE_API.LAST_MESH[]===cached
+        point_uid=first(_ENTITY_STATE_API.mesh.get_nodes(0,1)[1])
+        point_cells=_ENTITY_STATE_API.mesh.get_elements()
         @test _ENTITY_STATE_API.model.set_coordinates(1,-0.25,0,0)===nothing
-        @test _ENTITY_STATE_API.LAST_MESH[]===nothing
+        @test _ENTITY_STATE_API.LAST_MESH[]===cached
+        @test _ENTITY_STATE_API.mesh.get_node(point_uid)[1]==[-0.25,0.0,0.0]
+        @test _ENTITY_STATE_API.mesh.get_elements()==point_cells
         @test _ENTITY_STATE_API.model.get_value(0,1,[])==[-0.25,0.0,0.0]
         _ENTITY_STATE_API.mesh.generate(2)
         cached=_ENTITY_STATE_API.LAST_MESH[]

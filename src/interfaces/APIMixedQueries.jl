@@ -23,9 +23,8 @@ function _mesh_query_edge_patterns(msh::Int,primary::Bool,caller::AbstractString
     first_order=spec.family===:pnt ? 15 : msh_type(spec.family,1)
     patterns=MeshEntityTopology._simplex_edge_patterns(first_order)
     (primary || spec.order<=1 || isempty(patterns)) && return patterns
-    spec.order==2 || throw(ArgumentError(
-        "$caller: full edge-node queries currently support linear and quadratic elements; " *
-        "use primary=true for type-$msh order-$(spec.order) vertices"))
+    spec.family===:lin && 1<=spec.order<=10 && return (Tuple(1:spec.nnodes),)
+    spec.order>2 && return _native_cell_edge_patterns(spec)
     reference=Elements.lagrange_nodes(msh)
     return Tuple((edge...,_mixed_reference_node_index(reference,
         ntuple(axis->(reference[axis,edge[1]]+reference[axis,edge[2]])/2,3),caller))
@@ -37,9 +36,7 @@ function _mesh_query_face_patterns(msh::Int,face_type::Int,primary::Bool,caller:
     first_order=spec.family===:pnt ? 15 : msh_type(spec.family,1)
     patterns=MeshEntityTopology._simplex_face_patterns(first_order,face_type)
     (primary || spec.order<=1 || isempty(patterns)) && return patterns
-    spec.order==2 || throw(ArgumentError(
-        "$caller: full face-node queries currently support linear and quadratic elements; " *
-        "use primary=true for type-$msh order-$(spec.order) vertices"))
+    spec.order>2 && return _native_cell_face_patterns(spec,face_type,caller)
     reference=Elements.lagrange_nodes(msh)
     return Tuple(begin
         midpoints=ntuple(face_type) do edge
@@ -64,9 +61,6 @@ function _mixed_query_reference(mesh::MixedMesh,tag::Int,caller::AbstractString)
         msh=block.msh;cells=block.nodes
         if offset<tag<=offset+size(cells,2)
             spec=msh_spec(msh)
-            (spec.order in (1,2) || spec.family===:pnt) || throw(ArgumentError(
-                "$caller: mixed reference queries require linear or quadratic elements; " *
-                "type $msh has order $(spec.order)"))
             spec.family===:trih && throw(ArgumentError(
                 "$caller: Trihedron has no reference mapping in Gmsh 4.15.2"))
             return Int(msh),spec.dim,cells,tag-offset,spec.family
@@ -201,6 +195,9 @@ end
 function _mixed_local_coordinates(mesh,cells,cell,msh,dimension,family,tag,
                                    p::NTuple{3,Float64},caller::AbstractString;
                                    location::Bool=false)
+    if msh!=0 && msh_spec(msh).order>2 && family in (:tri,:qua,:tet,:hex,:pri,:pyr)
+        return _native_cell_local_coordinates(mesh,cells,cell,msh,p,caller,tag;location)
+    end
     linear=msh_spec(msh).order<2
     a=_mixed_node(mesh,cells,cell,1)
     if family===:pnt
@@ -404,17 +401,112 @@ function _mixed_frame(mesh::Union{MixedMesh,P2TriMesh,P2Mesh},cells,cell,family:
     return (du...,dv...,dw...),determinant,mapped
 end
 
+@inline function _mixed_line3_public_unit(vector)
+    magnitude=sqrt(vector[1]*vector[1]+vector[2]*vector[2]+vector[3]*vector[3])
+    magnitude==0.0 && return vector
+    inverse=1.0/magnitude
+    return (vector[1]*inverse,vector[2]*inverse,vector[3]*inverse)
+end
+
+function _mixed_line3_public_frame(mesh,cells,cell,u,caller,tag)
+    # MElement's public Jacobian query sums the polynomial gradients against
+    # each original vertex, in vertex order. At a folded tangent, subtracting
+    # an origin or using fused operations can change the regularizing axes.
+    # Keep this adapter separate from the stable maps used by inverse/FEM work.
+    square=u*u
+    values=(-0.5*u+0.5*square,0.5*u+0.5*square,1.0-square)
+    gradients=(-0.5+(0.5*u)*2,0.5+(0.5*u)*2,(-1.0*u)*2)
+    mapped=(0.0,0.0,0.0)
+    derivative=(0.0,0.0,0.0)
+    @inbounds for node in 1:3
+        vertex=_mixed_node(mesh,cells,cell,node)
+        value=values[node];gradient=gradients[node]
+        mapped=(mapped[1]+vertex[1]*value,mapped[2]+vertex[2]*value,
+                mapped[3]+vertex[3]*value)
+        derivative=(derivative[1]+vertex[1]*gradient,
+                    derivative[2]+vertex[2]*gradient,
+                    derivative[3]+vertex[3]*gradient)
+    end
+    x,y,z=derivative
+    determinant=sqrt(x*x+y*y+z*z)
+    transverse=((abs(x)>=abs(y) && abs(x)>=abs(z)) ||
+                (abs(y)>=abs(x) && abs(y)>=abs(z))) ? (y,-x,0.0) : (0.0,z,-y)
+    unit_transverse=_mixed_line3_public_unit(transverse)
+    bx,by,bz=unit_transverse
+    normal=(y*bz-z*by,-x*bz+z*bx,x*by-y*bx)
+    unit_normal=_mixed_line3_public_unit(normal)
+    frame=(derivative...,unit_transverse...,unit_normal...)
+    all(isfinite,(frame...,determinant,mapped...)) || throw(ArgumentError(
+        "$caller: reference mapping for element $tag is not Float64-representable"))
+    return frame,determinant,mapped
+end
+
+# The regularized Jacobian is the native MElement tangent followed by its
+# deterministic transverse and cross-product directions. Degenerate tangents
+# retain the same finite zero directions as the existing Line3 public path.
+function _mixed_lineN_public_frame(mesh,cells,cell,values,gradients,caller,tag)
+    mapped=(0.0,0.0,0.0)
+    derivative=(0.0,0.0,0.0)
+    for node in eachindex(values)
+        vertex=_mixed_node(mesh,cells,cell,node)
+        value=values[node];gradient=gradients[node]
+        mapped=(mapped[1]+vertex[1]*value,mapped[2]+vertex[2]*value,
+                mapped[3]+vertex[3]*value)
+        derivative=(derivative[1]+vertex[1]*gradient,
+                    derivative[2]+vertex[2]*gradient,
+                    derivative[3]+vertex[3]*gradient)
+    end
+    x,y,z=derivative
+    determinant=sqrt(x*x+y*y+z*z)
+    transverse=((abs(x)>=abs(y) && abs(x)>=abs(z)) ||
+                (abs(y)>=abs(x) && abs(y)>=abs(z))) ? (y,-x,0.0) : (0.0,z,-y)
+    unit_transverse=_mixed_line3_public_unit(transverse)
+    bx,by,bz=unit_transverse
+    normal=(y*bz-z*by,-x*bz+z*bx,x*by-y*bx)
+    unit_normal=_mixed_line3_public_unit(normal)
+    frame=(derivative...,unit_transverse...,unit_normal...)
+    all(isfinite,(frame...,determinant,mapped...)) || throw(ArgumentError(
+        "$caller: reference mapping for element $tag is not Float64-representable"))
+    return frame,determinant,mapped
+end
+
+# MElement::pnt visits the original vertices in local interpolation order.
+# Actual classified Mixed products retain this literal sum; legacy Mesh/P2
+# providers keep their existing translated reference arithmetic.
+function _mixed_tri3_native_mapped_point(mesh::MixedMesh,cells,cell,uvw,caller,tag)
+    weights=(1.0-uvw[1]-uvw[2],uvw[1],uvw[2])
+    x=0.0;y=0.0;z=0.0
+    for local_node in 1:3
+        row=cells[local_node,cell];weight=weights[local_node]
+        x+=weight*mesh.coords[1,row]
+        y+=weight*mesh.coords[2,row]
+        z+=weight*mesh.coords[3,row]
+    end
+    mapped=(x,y,z)
+    all(isfinite,mapped) || throw(ArgumentError(
+        "$caller: reference mapping for element $tag is not Float64-representable"))
+    return mapped
+end
+
 function _mixed_write_jacobians!(jacobians,determinants,coordinates,mesh,cells,
                                  selected,offset,msh,local_coordinates,point_count,
                                  caller)
     spec=msh_spec(msh)
-    (spec.order in (1,2) || spec.family===:pnt) || throw(ArgumentError(
-        "$caller: mixed reference queries require linear or quadratic elements"))
+    _native_cell_numeric_contract(spec,caller)
     spec.family===:trih && throw(ArgumentError(
         "$caller: Trihedron has no reference mapping in Gmsh 4.15.2"))
     # Reference shape data depends on type and local point, not the physical
     # cell. Evaluate the nodal engine once for a bulk query and reuse it.
-    shapes=if spec.order==2
+    shapes=if spec.family===:lin && spec.order>=3
+        coefficient=_dim01_native_line_coefficients(spec.order)
+        [(_dim01_native_line_weights(spec.order,local_coordinates[3point-2],coefficient),
+          _dim01_native_line_gradients(spec.order,local_coordinates[3point-2],coefficient))
+         for point in 1:point_count]
+    elseif spec.order>2 && spec.family in (:tri,:qua,:tet,:hex)
+        data=_native_cell_polynomial(msh,caller)
+        [_native_cell_shape(data,(local_coordinates[3point-2],
+            local_coordinates[3point-1],local_coordinates[3point])) for point in 1:point_count]
+    elseif spec.order>=2 && msh!=8
         _,values,_=mesh_basis_functions(msh,local_coordinates,"Lagrange";caller=caller)
         _,gradients,_=mesh_basis_functions(msh,local_coordinates,"GradLagrange";caller=caller)
         count=spec.nnodes
@@ -429,9 +521,25 @@ function _mixed_write_jacobians!(jacobians,determinants,coordinates,mesh,cells,
     for (slot,cell) in enumerate(selected),point in 1:point_count
         base=3(point-1)
         uvw=(local_coordinates[base+1],local_coordinates[base+2],local_coordinates[base+3])
-        frame,determinant,mapped=_mixed_frame(mesh,cells,cell,spec.family,
-            spec.dim,uvw,caller,offset+cell,msh;
-            shape=shapes===nothing ? nothing : shapes[point])
+        frame,determinant,mapped=if spec.family===:lin && spec.order>=3
+            _mixed_lineN_public_frame(mesh,cells,cell,shapes[point]...,caller,offset+cell)
+        elseif msh==8
+            _mixed_line3_public_frame(mesh,cells,cell,uvw[1],caller,offset+cell)
+        elseif msh==1
+            # MElement::pnt sums both original vertices against its polynomial
+            # basis. An origin-shifted affine map rounds differently at large
+            # offsets, so public Line2 queries use the same ordered sum.
+            _mixed_lineN_public_frame(mesh,cells,cell,
+                (0.5-0.5*uvw[1],0.5+0.5*uvw[1]),(-0.5,0.5),caller,offset+cell)
+        elseif spec.order>2
+            _native_cell_public_frame(mesh,cells,cell,spec.dim,shapes[point],caller,offset+cell)
+        else
+            _mixed_frame(mesh,cells,cell,spec.family,spec.dim,uvw,caller,offset+cell,msh;
+                shape=shapes===nothing ? nothing : shapes[point])
+        end
+        if msh==2 && mesh isa MixedMesh && mesh.entity_data!==nothing
+            mapped=_mixed_tri3_native_mapped_point(mesh,cells,cell,uvw,caller,offset+cell)
+        end
         evaluation=(slot-1)*point_count+point
         @inbounds for component in 1:9
             jacobians[9(evaluation-1)+component]=frame[component]
@@ -498,7 +606,7 @@ function mesh_basis_orientations(mesh::MixedMesh,element_type,function_space_typ
     return Int32[_mixed_cell_orientation(mesh,cells,cell,space,family) for cell in selected]
 end
 
-@inline function _mixed_cell_orientation(mesh,cells,cell,space,family)
+@inline function _mixed_cell_orientation(mesh,cells,cell,space,family,public=nothing)
     space.hierarchical || return Int32(0)
     vertex_count=family===:pnt ? 1 : family===:lin ? 2 : family===:tri ? 3 :
         (family===:tet || family===:qua) ? 4 : family===:hex ? 8 :
@@ -507,10 +615,10 @@ end
     # tags can reverse a corner comparison even when dense indices increase.
     rank=0
     @inbounds for first in 1:vertex_count-1
-        first_tag=_cache_node_tag(mesh,cells[first,cell])
+        first_tag=_cache_node_tag(public===nothing ? mesh : public,cells[first,cell])
         smaller=0
         for second in first+1:vertex_count
-            smaller+=_cache_node_tag(mesh,cells[second,cell])<first_tag
+            smaller+=_cache_node_tag(public===nothing ? mesh : public,cells[second,cell])<first_tag
         end
         rank+=smaller*factorial(vertex_count-first)
     end
@@ -689,6 +797,7 @@ function _mixed_mesh_keys(mesh::MixedMesh,element_type,function_space_type,
                           positions,topology,face_topology,return_coord,caller)
     space=MeshFunctionSpaces._function_space(function_space_type,caller)
     msh,_,nodal_count,_=MeshFunctionSpaces._basis_element_contract(element_type,space,caller)
+    space.hierarchical || _native_cell_numeric_contract(msh_spec(msh),caller)
     coordinate_requested=MeshFunctionSpaces._checked_bool(return_coord,caller,"return_coord")
     block=_mesh_element_block(mesh,msh)
     block===nothing && return Int32[],UInt64[],Float64[]
@@ -716,16 +825,28 @@ end
 
 function mesh_element_qualities(mesh::MixedMesh,element_tags,quality_name="minSICN")
     caller="mesh_element_qualities"
-    name=MeshElementQuality._quality_name(quality_name,caller)
+    name=MeshElementQuality._quality_name(quality_name,caller;allow_quad_eta=true)
     (element_tags isa AbstractVector || element_tags isa Tuple) || throw(ArgumentError(
         "$caller: element_tags must be a vector or tuple of integers"))
     element_tags isa AbstractArray && Base.require_one_based_indexing(element_tags)
     result=Vector{Float64}(undef,length(element_tags))
+    rules=Dict{Int,_NativeCellMeasureRule}()
     for (index,value) in enumerate(element_tags)
         tag=_mesh_query_element_tag(mesh,value,caller)
         msh,_,cells,cell,family=_mixed_query_reference(mesh,tag,caller)
+        name=="eta" && msh!=3 && throw(ArgumentError(
+            "$caller: eta is unsupported for native type-$msh $family elements"))
         a=_mixed_node(mesh,cells,cell,1)
-        if name=="minEdge" || name=="maxEdge"
+        if msh==15 && name in ("volume","minEdge","maxEdge")
+            # MPoint inherits MElement's unit 0-D integration measure and
+            # empty-edge extrema (initial min 1e25, initial max zero).
+            result[index]=name=="volume" ? 1.0 : name=="minEdge" ? 1e25 : 0.0
+        elseif msh==8 && name=="volume"
+            # MLine3 inherits MLine::getVolume: endpoint distance, including
+            # when the quadratic support is away from the straight chord.
+            length,_=MeshElementQuality._segment_geometry(a,_mixed_node(mesh,cells,cell,2))
+            result[index]=length
+        elseif name=="minEdge" || name=="maxEdge"
             primary=msh_type(family,1)
             edges=MeshEntityTopology._simplex_edge_patterns(primary)
             isempty(edges) && throw(ArgumentError("$caller: $name is unsupported for $family elements"))
@@ -736,6 +857,26 @@ function mesh_element_qualities(mesh::MixedMesh,element_tags,quality_name="minSI
                 quality=name=="minEdge" ? min(quality,length) : max(quality,length)
             end
             result[index]=quality
+        elseif msh in (9,11)
+            result[index]=_legacy_p2_quality(mesh,cell,name,caller;cells,triangle=msh==9)
+        elseif msh_spec(msh).order>2 && name in ("minDetJac","maxDetJac","minSJ") &&
+               family in (:tri,:qua,:tet,:hex,:pri,:pyr)
+            result[index]=_native_cell_quality_bezier(mesh,cells,cell,msh,name,caller)
+        elseif msh_spec(msh).order>2 && name in ("minSICN","minSIGE") &&
+               family in (:tri,:qua,:tet,:hex,:pri,:pyr)
+            result[index]=_native_cell_quality_sampled(mesh,cells,cell,msh,name,caller)
+        elseif msh_spec(msh).order>2 && name=="minIsotropy" && family in (:tri,:qua,:tet,:hex,:pri,:pyr)
+            result[index]=_native_cell_quality_isotropy(mesh,cells,cell,msh,caller)
+        elseif msh_spec(msh).order>2 && name=="gamma" && family in (:tri,:qua,:tet,:hex,:pri,:pyr)
+            result[index]=_native_cell_quality_gamma(mesh,cells,cell,family,caller)
+        elseif msh_spec(msh).order>2 && name=="volume" && family===:tet
+            result[index]=_native_cell_tetrahedron_volume(a,_mixed_node(mesh,cells,cell,2),
+                _mixed_node(mesh,cells,cell,3),_mixed_node(mesh,cells,cell,4))
+        elseif msh_spec(msh).order>2 && name=="volume" && family in (:tri,:qua,:tet,:hex,:pri,:pyr)
+            if !haskey(rules,msh)
+                rules[msh]=_native_cell_measure_rule(msh,caller)
+            end
+            result[index]=_native_cell_quality_volume(mesh,cells,cell,rules[msh],caller,tag)
         elseif msh_spec(msh).order==1 && family===:lin
             name in MeshElementQuality._UNDEFINED_SEGMENT_QUALITIES && throw(ArgumentError(
                 "$caller: Gmsh 4.15.2 does not define $name reliably for segment elements"))
@@ -747,6 +888,15 @@ function mesh_element_qualities(mesh::MixedMesh,element_tags,quality_name="minSI
         elseif msh_spec(msh).order==1 && family===:tet
             result[index]=MeshElementQuality._tetrahedron_quality(name,a,
                 _mixed_node(mesh,cells,cell,2),_mixed_node(mesh,cells,cell,3),_mixed_node(mesh,cells,cell,4))
+        elseif msh==3
+            points=ntuple(i->_mixed_node(mesh,cells,cell,i),4)
+            result[index]=name=="volume" ? MeshElementQuality._quadrangle_native_volume(points...) :
+                name in ("gamma","eta") ? MeshElementQuality._quadrangle_native_eta(points) :
+                name=="angleShape" ? MeshElementQuality._quadrangle_native_angle_shape(points) :
+                name=="innerRadius" ? MeshElementQuality._quadrangle_native_inner_radius(points) :
+                name=="outerRadius" ? 1.0 : name=="minIsotropy" ?
+                MeshElementQuality._quadrangle_native_isotropy(points) :
+                MeshElementQuality._quadrangle_native_jacobian_quality(name,points)
         else
             throw(ArgumentError("$caller: quality $(repr(name)) is unsupported for native " *
                 "type-$msh $family elements; supported native measures are minEdge and maxEdge"))

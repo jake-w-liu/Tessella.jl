@@ -150,10 +150,10 @@ function _rgsc_quadratic_reference()
 end
 
 function _rgsc_product(f;entry=false)
-    geometry=_RGSC.execute(f.source;dim=entry ? 3 : 0)
+    geometry=_RGSC.execute(f.source;dim=0)
     out=Int.(geometry.lists["sweep"]);m=geometry.model
     source=mesh_model_surface(m,f.surface)
-    volume=entry ? geo_entity_mesh(geometry,3,out[2]) : mesh_model_volume(m,out[2])
+    volume=mesh_model_volume(m,out[2])
     cert=_RGSC.certify(volume,f,source)
     @test validate(volume).ok
     @test nnodes(volume)==prod(f.grid.+1)*(f.intervals+1)
@@ -165,8 +165,21 @@ function _rgsc_product(f;entry=false)
     @test [count(owner->owner[1]==dim,projected.entity_data.node_entities) for dim in 0:3]==expected
     parts=[(2,tag,mesh_model_surface(m,tag)) for tag in (f.surface,out[1],out[3:end]...)]
     @test _RGSC.Quad.surface_faces(parts,volume)==Set(keys(cert.boundary))
-    @test _RGSC.Quad.surface_faces(_RGSC.execute(f.source;dim=2).mesh_parts,volume)==Set(keys(cert.boundary))
-    return (;geometry,source,volume,cert,projected)
+    # Keep the original Model certificate/projection in its private row space.
+    # Independently certify all actual GEO products and their complete shell;
+    # copied native heap-pointer minima do not equal public dense-row minima.
+    actual=_RGSC.execute(f.source;dim=3)
+    @test Int.(actual.lists["sweep"])==out
+    actual_source=geo_entity_mesh(actual,2,f.surface)
+    actual_volume=geo_entity_mesh(actual,3,out[2])
+    actual_cert=_RGSC.certify(actual_volume,f,actual_source;native_top=false)
+    @test validate(actual_volume).ok
+    @test _RGSC.Quad.surface_faces(actual.actual_mesh_parts,actual_volume)==Set(keys(actual_cert.boundary))
+    @test Set(actual_source.entity_data.external_node_tags)<=Set(actual_volume.entity_data.external_node_tags)
+    @test nnodes(actual_volume)==nnodes(volume)
+    entry && @test actual.mesh!==nothing
+    return_geometry=entry ? actual : geometry
+    return (;geometry=return_geometry,source,volume,cert,projected)
 end
 
 function _rgsc_match_primary_variant(record)

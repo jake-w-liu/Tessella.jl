@@ -62,8 +62,8 @@ end
 # Simplex P2 derivatives are affine. Keep their values at the reference corners
 # in tuples so repeated quality samples need neither nodal-basis arrays nor a
 # temporary mesh. Translate and scale before forming products.
-function _legacy_p2_quality_vertices(mesh,cell::Int,caller::AbstractString)
-    cells=_legacy_p2_cells(mesh)
+function _legacy_p2_quality_vertices(mesh,cell::Int,caller::AbstractString;
+                                    cells=_legacy_p2_cells(mesh),triangle=mesh isa P2TriMesh)
     1<=cell<=size(cells,2) || throw(ArgumentError("$caller: unknown quadratic cell $cell"))
     origin=_mixed_node(mesh,cells,cell,1)
     scale=0.0
@@ -74,12 +74,12 @@ function _legacy_p2_quality_vertices(mesh,cell::Int,caller::AbstractString)
     end
     scale>0 || return nothing,0.0
     element_scale=scale
-    count=mesh isa P2TriMesh ? 3 : 4
+    count=triangle ? 3 : 4
     vertices=ntuple(count) do vertex
         q=vertex==1 ? (0.0,0.0,0.0) :
             vertex==2 ? (1.0,0.0,0.0) :
             vertex==3 ? (0.0,1.0,0.0) : (0.0,0.0,1.0)
-        gradients=if mesh isa P2TriMesh
+        gradients=if triangle
             dr,ds=HighOrder._p2tri_grads(q[1],q[2])
             ntuple(i->(dr[i],ds[i],0.0),6)
         else
@@ -99,13 +99,51 @@ function _legacy_p2_quality_vertices(mesh,cell::Int,caller::AbstractString)
     return vertices,scale
 end
 
+# Native determinant bounds multiply the nodal gradients by the original
+# coordinates in node order. Translating, scaling or fusing these additions
+# changes the last bits of the derivative field used by the upstream query.
+function _legacy_p2_native_quality_vertices(mesh,cell::Int,cells)
+    return ntuple(4) do vertex
+        q=vertex==1 ? (0.0,0.0,0.0) : vertex==2 ? (1.0,0.0,0.0) :
+            vertex==3 ? (0.0,1.0,0.0) : (0.0,0.0,1.0)
+        gradients=HighOrder._p2_grads(q...)
+        ntuple(3) do column
+            ntuple(3) do axis
+                total=0.0
+                for local_node in eachindex(gradients)
+                    total+=gradients[local_node][column]*mesh.coords[axis,cells[local_node,cell]]
+                end
+                total
+            end
+        end
+    end
+end
+
+@inline function _legacy_p2_native_det(a,b,c)
+    return a[1]*(b[2]*c[3]-c[2]*b[3])-
+        b[1]*(a[2]*c[3]-c[2]*a[3])+c[1]*(a[2]*b[3]-b[2]*a[3])
+end
+
+function _legacy_p2_quality_provider(mesh,cell,caller,cells,triangle,native_determinant)
+    vertices,scale=_legacy_p2_quality_vertices(mesh,cell,caller;cells,triangle)
+    if vertices!==nothing && native_determinant
+        candidate=_legacy_p2_native_quality_vertices(mesh,cell,cells)
+        coefficients=_legacy_p2_det_coefficients(candidate;native_determinant=true)
+        # Retain the scaled provider when native products overflow or underflow.
+        # This preserves the existing representable extreme-scale extensions.
+        if all(isfinite,coefficients) && any(!iszero,coefficients)
+            return candidate,1.0,true
+        end
+    end
+    return vertices,scale,false
+end
+
 @inline function _legacy_p2_quality_frame(vertices,lambda)
     return ntuple(column->ntuple(axis->sum(
         lambda[vertex]*vertices[vertex][column][axis] for vertex in eachindex(vertices)),3),3)
 end
 
-function _legacy_p2_primary_normal(mesh::P2TriMesh,cell,scale)
-    cells=mesh.tri6
+function _legacy_p2_primary_normal(mesh,cell,scale;cells=_legacy_p2_cells(mesh))
     origin=_mixed_node(mesh,cells,cell,1)
     edges=ntuple(vertex->ntuple(axis->
         (mesh.coords[axis,cells[vertex+1,cell]]-origin[axis])/scale,3),2)
@@ -118,7 +156,7 @@ const _LEGACY_P2_TRI_DET_GROUP=ntuple(i->ntuple(j->
     findfirst(==((count(==(1),(i,j)),count(==(2),(i,j)),count(==(3),(i,j)))),
               HighOrder._B2TRI_MULTI),3),3)
 
-function _legacy_p2_det_coefficients(vertices::NTuple{3},normal)
+function _legacy_p2_det_coefficients(vertices::NTuple{3},normal;native_determinant=false)
     coefficients=zeros(Float64,6)
     for first in 1:3,second in 1:3
         group=_LEGACY_P2_TRI_DET_GROUP[first][second]
@@ -131,12 +169,13 @@ function _legacy_p2_det_coefficients(vertices::NTuple{3},normal)
     return coefficients
 end
 
-function _legacy_p2_det_coefficients(vertices::NTuple{4},normal=nothing)
+function _legacy_p2_det_coefficients(vertices::NTuple{4},normal=nothing;native_determinant=false)
     coefficients=zeros(Float64,20)
     for first in 1:4,second in 1:4,third in 1:4
         group=HighOrder._B3_GROUP[first,second,third]
-        coefficients[group]+=MeshElementQuality._det3(
-            vertices[first][1],vertices[second][2],vertices[third][3])
+        a,b,c=vertices[first][1],vertices[second][2],vertices[third][3]
+        coefficients[group]+=native_determinant ? _legacy_p2_native_det(a,b,c) :
+            MeshElementQuality._det3(a,b,c)
     end
     for index in eachindex(coefficients)
         coefficients[index]/=HighOrder._B3_NPERM[index]
@@ -155,8 +194,8 @@ function _legacy_p2_scaled_quantity(value,scale,power)
     end
 end
 
-function _legacy_p2_sampled_shape(mesh,vertices,normal,name)
-    points=mesh isa P2TriMesh ?
+function _legacy_p2_sampled_shape(mesh,vertices,normal,name;triangle=mesh isa P2TriMesh)
+    points=triangle ?
         ((1.0,0.0,0.0),(0.0,1.0,0.0),(0.0,0.0,1.0),
          (0.5,0.5,0.0),(0.0,0.5,0.5),(0.5,0.0,0.5)) :
         ((1.0,0.0,0.0,0.0),(0.0,1.0,0.0,0.0),(0.0,0.0,1.0,0.0),(0.0,0.0,0.0,1.0),
@@ -165,7 +204,7 @@ function _legacy_p2_sampled_shape(mesh,vertices,normal,name)
     minimum_value=Inf
     for lambda in points
         du,dv,dw=_legacy_p2_quality_frame(vertices,lambda)
-        value=if mesh isa P2TriMesh
+        value=if triangle
             shape=MeshElementQuality._triangle_quality(name,(0.0,0.0,0.0),du,dv)
             cross=MeshElementQuality._cross3(du,dv)
             signed=MeshElementQuality._dot3(normal,cross)
@@ -201,23 +240,24 @@ function _legacy_p2_triangle_area(vertices,scale)
     return _legacy_p2_scaled_quantity(area,scale,2)
 end
 
-function _legacy_p2_quality(mesh,cell::Int,quality_name,caller::AbstractString)
+function _legacy_p2_quality(mesh,cell::Int,quality_name,caller::AbstractString;
+                            cells=_legacy_p2_cells(mesh),triangle=mesh isa P2TriMesh)
     name=MeshElementQuality._quality_name(quality_name,caller)
-    cells=_legacy_p2_cells(mesh)
     1<=cell<=size(cells,2) || throw(ArgumentError("$caller: unknown quadratic cell $cell"))
-    primary=ntuple(vertex->_mixed_node(mesh,cells,cell,vertex),mesh isa P2TriMesh ? 3 : 4)
+    primary=ntuple(vertex->_mixed_node(mesh,cells,cell,vertex),triangle ? 3 : 4)
     if !(name in ("minSICN","minSIGE","minSJ","minDetJac","maxDetJac","minIsotropy") ||
-         (name=="volume" && mesh isa P2TriMesh))
-        return mesh isa P2TriMesh ? MeshElementQuality._triangle_quality(name,primary...) :
+         (name=="volume" && triangle))
+        return triangle ? MeshElementQuality._triangle_quality(name,primary...) :
             MeshElementQuality._tetrahedron_quality(name,primary...)
     end
-    vertices,scale=_legacy_p2_quality_vertices(mesh,cell,caller)
+    vertices,scale,native_determinant=_legacy_p2_quality_provider(mesh,cell,caller,cells,
+        triangle,!triangle && name in ("minDetJac","maxDetJac"))
     if vertices===nothing
-        return mesh isa P2TriMesh ? MeshElementQuality._triangle_quality(name,primary...) :
+        return triangle ? MeshElementQuality._triangle_quality(name,primary...) :
             MeshElementQuality._tetrahedron_quality(name,primary...)
     end
-    if mesh isa P2TriMesh
-        normal,primary_determinant=_legacy_p2_primary_normal(mesh,cell,scale)
+    if triangle
+        normal,primary_determinant=_legacy_p2_primary_normal(mesh,cell,scale;cells)
     else
         normal=nothing
         origin=primary[1]
@@ -225,16 +265,16 @@ function _legacy_p2_quality(mesh,cell::Int,quality_name,caller::AbstractString)
         primary_determinant=abs(MeshElementQuality._det3(edges...))
     end
     name in ("minSICN","minSIGE") &&
-        return _legacy_p2_sampled_shape(mesh,vertices,normal,name)
-    name=="volume" && mesh isa P2TriMesh &&
+        return _legacy_p2_sampled_shape(mesh,vertices,normal,name;triangle)
+    name=="volume" && triangle &&
         return _legacy_p2_triangle_area(vertices,scale)
     if name=="minSJ"
         coefficients=_legacy_p2_det_coefficients(vertices,normal)
         return primary_determinant>0 ? minimum(coefficients)/primary_determinant : 0.0
     end
     if name in ("minDetJac","maxDetJac","minIsotropy")
-        return _legacy_p2_bounded_quality(mesh,vertices,normal,scale,name,caller)
+        return _legacy_p2_bounded_quality(mesh,vertices,normal,scale,name,caller;native_determinant)
     end
-    return mesh isa P2TriMesh ? MeshElementQuality._triangle_quality(name,primary...) :
+    return triangle ? MeshElementQuality._triangle_quality(name,primary...) :
         MeshElementQuality._tetrahedron_quality(name,primary...)
 end

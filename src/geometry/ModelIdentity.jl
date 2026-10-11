@@ -5,6 +5,13 @@
     return tag
 end
 
+@inline function _model_identity_source_tag(m::GeoModel,value,dimension::Int,
+                                            caller::AbstractString)
+    tag=_tag(value,caller,dimension)
+    tag==0 && _model_entity_known(m,dimension,tag) && return tag
+    return _model_identity_tag(tag,dimension,caller,"source entity tag")
+end
+
 """
     set_entity_name!(model, dim, tag, name) -> String
 
@@ -206,6 +213,16 @@ function _model_identity_point_state(
     # The `In Sphere`/`Using Point` surface constraint references a Point.
     surface_geometry=copy(m.surface_geometry)
     for (surf,geom) in m.surface_geometry
+        if _model_nurbs_surface(geom)
+            haskey(geom.vertex_uv,new_tag) && throw(ArgumentError(
+                "$caller: Surface[$surf] already references missing target Point[$new_tag]"))
+            if haskey(geom.vertex_uv,old_tag)
+                vertex_uv=copy(geom.vertex_uv)
+                vertex_uv[new_tag]=pop!(vertex_uv,old_tag)
+                surface_geometry[surf]=merge(geom,(vertex_uv=vertex_uv,))
+            end
+            continue
+        end
         hasproperty(geom,:sphere_center) || continue
         geom.sphere_center==new_tag && throw(ArgumentError(
             "$caller: Surface[$surf] already references missing target " *
@@ -303,7 +320,7 @@ end
 """
     model_set_tag!(model, dim, tag, new_tag) -> Int
 
-Atomically move an existing positive entity tag to an unused positive tag in the
+Atomically move an existing entity tag to an unused positive tag in the
 same dimension. Topology, Physical memberships, embeddings, periodic relations,
 entity names, visibility, colors, native solid encodings, and owned Boolean-result
 snapshots follow the entity. Automatic tag allocation remains monotonic. Boolean
@@ -312,7 +329,7 @@ operand provenance retains the tags recorded when the operation was created.
 function model_set_tag!(m::GeoModel,dim,tag,new_tag)
     caller="model_set_tag!"
     dimension=_dimension(dim,caller)
-    old_entity_tag=_model_identity_tag(tag,dimension,caller,"source entity tag")
+    old_entity_tag=_model_identity_source_tag(m,tag,dimension,caller)
     new_entity_tag=_model_identity_tag(
         new_tag,dimension,caller,"target entity tag")
     entities=_model_entity_dictionary(m,dimension)
@@ -348,6 +365,8 @@ function model_set_tag!(m::GeoModel,dim,tag,new_tag)
     next_tag[dimension+1]=max(next_tag[dimension+1],new_entity_tag)
 
     if old_is_discrete
+        curve_geometry=dimension==1 ? _model_identity_rekey(
+            m.curve_geometry,old_entity_tag,new_entity_tag,caller,"Curve geometry") : m.curve_geometry
         m.entity_names=entity_names
         m.entity_visibility=entity_visibility
         m.entity_colors=entity_colors
@@ -357,6 +376,7 @@ function model_set_tag!(m::GeoModel,dim,tag,new_tag)
         m.periodic=periodic
         m.meshing=meshing
         m.discrete=discrete
+        m.curve_geometry=curve_geometry
         m.next_tag=next_tag
         return new_entity_tag
     end
@@ -414,6 +434,110 @@ function model_set_tag!(m::GeoModel,dim,tag,new_tag)
     m.discrete=discrete
     m.next_tag=next_tag
     return new_entity_tag
+end
+
+# Entity metadata changes preserve every actual birth binding. Retagging
+# changes explicit owners and references, never vertex/cell IDs or coordinates.
+function _model_identity_mesh_record(record,dimension,old_tag,new_tag;
+                                     retag_record=true,public_curve_endpoints=nothing)
+    tag=retag_record && record.dim==dimension && record.tag==old_tag ?
+        new_tag : Int(record.tag)
+    # Only a separately bound geometry carrier supplies public endpoint roles.
+    # Native actual records and direct MSH descriptors retain their signed roles.
+    public_endpoints=retag_record && dimension==0 && record.dim==1 &&
+        public_curve_endpoints!==nothing ?
+        get(public_curve_endpoints,Int(record.tag),nothing) : nothing
+    boundaries=if public_endpoints!==nothing &&
+            record.boundaries==Int32[public_endpoints...]
+        Int32[value==old_tag ? new_tag : value for value in public_endpoints]
+    elseif retag_record && record.dim==dimension+1
+        if dimension==0 && old_tag==0 && length(record.boundaries)==2
+            Int32[value==0 ? (ordinal==1 ? new_tag : -new_tag) : value
+                  for (ordinal,value) in enumerate(record.boundaries)]
+        else
+            Int32[_model_identity_signed_tag(Int(value),old_tag,new_tag)
+                  for value in record.boundaries]
+        end
+    else
+        record.boundaries
+    end
+    embedded=retag_record && dimension==1 ?
+        Int32[value==old_tag ? new_tag : value for value in record.embedded_curves] :
+        record.embedded_curves
+    parent=record.parent==(dimension,old_tag) ? (dimension,Int32(new_tag)) : record.parent
+    return _native_mixed_entity(record.dim,tag,record.bbox;
+        physical_tags=record.physical_tags,boundaries,embedded_curves=embedded,
+        partitions=record.partitions,parent)
+end
+
+_model_identity_mesh_metadata(mesh::Union{Nothing,Mesh},dimension,old_tag,new_tag;
+    public_curve_endpoints=nothing)=mesh
+function _model_identity_mesh_metadata(mesh::MixedMesh,dimension,old_tag,new_tag;
+                                       public_curve_endpoints=nothing)
+    data=mesh.entity_data
+    data===nothing && return mesh
+    entities=Dict{Tuple{Int,Int},MixedEntity}()
+    for record in values(data.entities)
+        migrated=_model_identity_mesh_record(record,dimension,old_tag,new_tag;
+                                             public_curve_endpoints)
+        entities[(migrated.dim,Int(migrated.tag))]=migrated
+    end
+    node_entities=Tuple{Int,Int32}[(dim,dim==dimension && tag==old_tag ?
+        Int32(new_tag) : tag) for (dim,tag) in data.node_entities]
+    block_entities=[msh_dimension(block.msh)==dimension ?
+        Int32[value==old_tag ? new_tag : value for value in owners] : owners
+        for (block,owners) in zip(mesh.blocks,data.block_entities)]
+    metadata=Elements._native_mixed_entity_data(entities;node_entities,node_parametric=data.node_parametric,
+        external_node_tags=data.external_node_tags,block_entities,
+        external_element_tags=data.external_element_tags)
+    elementary=mesh.elementary_entities===nothing ? nothing :
+        [msh_dimension(block.msh)==dimension ?
+            Int32[value==old_tag ? new_tag : value for value in owners] : owners
+            for (block,owners) in zip(mesh.blocks,mesh.elementary_entities)]
+    periodic=MixedPeriodicLink[MixedPeriodicLink(link.dim,
+        link.dim==dimension && link.slave_entity==old_tag ? new_tag : link.slave_entity,
+        link.dim==dimension && link.master_entity==old_tag ? new_tag : link.master_entity,
+        link.slave_nodes,link.master_nodes;affine=link.affine) for link in mesh.periodic_links]
+    original_partition=mesh.partition_data
+    partition=if original_partition===nothing
+        nothing
+    else
+        MixedPartitionData(original_partition.num_partitions;
+            entities=Dict(key=>_model_identity_mesh_record(record,dimension,old_tag,new_tag;
+                retag_record=false) for (key,record) in original_partition.entities),
+            ghost_entities=original_partition.ghost_entities,
+            ghost_elements=original_partition.ghost_elements)
+    end
+    return MixedMesh(mesh.coords,mesh.blocks;physical_names=mesh.physical_names,
+        entity_data=metadata,elementary_entities=elementary,periodic_links=periodic,
+        ancillary_sections=mesh.ancillary_sections,data_sections=mesh.data_sections,
+        partition_data=partition)
+end
+
+_model_identity_mesh_authority(::Nothing,dimension,old_tag,new_tag;
+    carrier_curve_endpoints=nothing)=nothing
+function _model_identity_mesh_authority(previous::_ModelMeshAuthority,dimension,old_tag,new_tag;
+                                       carrier_curve_endpoints=nothing)
+    old_owner=(dimension,Int32(old_tag));new_owner=(dimension,Int32(new_tag))
+    rekey(owner)=owner==old_owner ? new_owner : owner
+    products=Dict{Tuple{Int,Int32},_ModelMeshProduct}()
+    for (owner,product) in previous.products
+        moved=rekey(owner)
+        products[moved]=_ModelMeshProduct(moved,product.rows,product.blocks,product.element_tags)
+    end
+    native_inputs=Dict{Tuple{Int,Int32},Union{Mesh,MixedMesh}}(
+        rekey(owner)=>_model_identity_mesh_metadata(mesh,dimension,old_tag,new_tag)
+        for (owner,mesh) in previous.native_inputs)
+    produced=Dict{Tuple{Int,Int32},Vector{Int32}}(
+        rekey(owner)=>rows for (owner,rows) in previous.producer_rows)
+    actual=_model_identity_mesh_metadata(previous.mesh,dimension,old_tag,new_tag)
+    carrier=previous.carrier===previous.mesh ? actual :
+        _model_identity_mesh_metadata(previous.carrier,dimension,old_tag,new_tag;
+                                      public_curve_endpoints=carrier_curve_endpoints)
+    return _ModelMeshAuthority(actual,products,
+        Set{Tuple{Int,Int32}}(rekey(owner) for owner in previous.done),
+        previous.private_rank,native_inputs,carrier,previous.carrier_rows,
+        produced,previous.carrier_cells)
 end
 
 # Rekey every per-entity meshing attribute owned by `(dimension, old_tag)` —
@@ -506,6 +630,12 @@ function _model_identity_meshing(
     migrated.size_callback=attributes.size_callback
     migrated.compounds=compounds
     migrated.outward_orientation=outward
+    migrated.orientation_stl=Dict(
+        (dimension==2 && tag==old_tag ? new_tag : tag)=>copy(triangles)
+        for (tag,triangles) in attributes.orientation_stl)
+    migrated.orientation_geo_reverse=Dict(
+        (dimension==2 && tag==old_tag ? new_tag : tag)=>flag
+        for (tag,flag) in attributes.orientation_geo_reverse)
     migrated.degenerated=degenerated
     migrated.quad_tri=quad_tri
     migrated.order=attributes.order
@@ -514,10 +644,43 @@ function _model_identity_meshing(
     migrated.lc_factor=attributes.lc_factor
     migrated.recombine_all=attributes.recombine_all
     migrated.recombine_algo=attributes.recombine_algo
+    migrated.recombine_topology_passes=attributes.recombine_topology_passes
+    migrated.recombine_node_repositioning=attributes.recombine_node_repositioning
+    migrated.recombine_minimum_quality=attributes.recombine_minimum_quality
+    migrated.native_smoothing=attributes.native_smoothing
+    migrated.second_order_linear=attributes.second_order_linear
     migrated.lc_extend_from_boundary=attributes.lc_extend_from_boundary
+    migrated.algorithm_2d=attributes.algorithm_2d
+    migrated.algorithm_3d=attributes.algorithm_3d
     migrated.attached=_model_identity_discrete_map(
         attributes.attached,m,dimension,old_tag,new_tag)
+    migrated.native_geo_kernel=deepcopy(attributes.native_geo_kernel)
+    _native_geo_kernel_retag!(migrated.native_geo_kernel,dimension,old_tag,new_tag)
+    migrated.mesh_authority=_model_identity_mesh_authority(
+        attributes.mesh_authority,dimension,old_tag,new_tag;carrier_curve_endpoints=m.curves)
     migrated.homology_requests=copy(attributes.homology_requests)
+    migrated.imported_num_partitions=attributes.imported_num_partitions
+    for (key,members) in attributes.imported_ghost_elements
+        moved=key==(dimension,old_tag) ? (dimension,new_tag) : key
+        migrated.imported_ghost_elements[moved]=copy(members)
+    end
+    for (key,receipt) in attributes.imported_entities
+        moved=key==(dimension,old_tag) ? (dimension,new_tag) : key
+        parent=receipt.parent==(dimension,old_tag) ? (dimension,new_tag) : receipt.parent
+        migrated.imported_entities[moved]=(kind=receipt.kind,parent=parent,
+            partitions=copy(receipt.partitions))
+    end
+    migrated.periodic_uid_history=_model_periodic_uid_retag(
+        attributes.periodic_uid_history,dimension,old_tag,new_tag)
+    migrated.chain_entities=Set{Tuple{Int,Int}}(
+        key==(dimension,old_tag) ? (dimension,new_tag) : key
+        for key in attributes.chain_entities)
+    for (point,birth) in attributes.native_curve_endpoints
+        new_point=dimension==0 && point==old_tag ? new_tag : point
+        curve=dimension==1 && birth.curve==old_tag ? new_tag : birth.curve
+        migrated.native_curve_endpoints[new_point]=
+            _ModelNativeCurveEndpoint(curve,birth.node,birth.point)
+    end
     return migrated
 end
 
@@ -537,9 +700,11 @@ function _model_identity_discrete_map(
             copy(entity.node_tags),copy(entity.node_coords),
             copy(entity.node_params),copy(entity.element_types),
             copy(entity.element_tags),
-            Vector{Int32}[copy(nodes) for nodes in entity.element_nodes],
-            Dict{Int32,Vector{Float64}}(k=>copy(v) for (k,v) in
-                                        entity.aux_params))
+            Vector{UInt64}[copy(nodes) for nodes in entity.element_nodes],
+            Dict{UInt64,Vector{Float64}}(k=>copy(v) for (k,v) in
+                                        entity.aux_params),
+            Dict(k=>copy(v) for (k,v) in entity.node_native_params),
+            entity.geometry_parametrized)
         result[new_key]=migrated
     end
     return result

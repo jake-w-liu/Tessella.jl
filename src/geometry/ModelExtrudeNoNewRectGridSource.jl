@@ -286,12 +286,42 @@ function _extrude_nonew_rect_grid_boundary_certify(planar,boundary,caller)
     return nothing
 end
 
+# An emitted-coordinate view of an already-certified source reuses the bound
+# row/chain incidence instead of rematching identities by coordinate proximity.
+# The emitted coordinate at each bound chain endpoint must still equal the
+# canonical CAD Point; every later geometric certificate then runs on the
+# emitted coordinates unchanged.
+function _extrude_nonew_rect_grid_emitted_chains(m::GeoModel,
+        bound::_ExtrudeNoNewRectGridSource,curves,widths,coordinates,vertices,caller)
+    bound.boundary_curves==curves && bound.boundary_widths==widths ||
+        _extrude_nonew_rect_grid_source_error(caller,
+            "emitted Source binding differs from its certified boundary")
+    return ntuple(4) do number
+        chain=bound.boundary_chains[number];curve=curves[number]
+        first_point,last_point=m.curves[curve]
+        first_point!=last_point || _extrude_nonew_rect_grid_source_error(caller,"has a closed boundary Curve")
+        length(chain)==widths[number] || _extrude_nonew_rect_grid_source_error(caller,
+            "emitted boundary Curve chain loses its certified width")
+        all(node->1<=node<=vertices,chain) || _extrude_nonew_rect_grid_source_error(caller,
+            "emitted boundary Curve chain references foreign rows")
+        _extrude_nonew_rect_grid_key(coordinates[chain[1]])==_extrude_nonew_rect_grid_key(m.points[first_point]) &&
+            _extrude_nonew_rect_grid_key(coordinates[chain[end]])==_extrude_nonew_rect_grid_key(m.points[last_point]) ||
+            _extrude_nonew_rect_grid_source_error(caller,
+                "emitted boundary Curve chain endpoints differ from their canonical Points")
+        allunique(chain) || _extrude_nonew_rect_grid_source_error(caller,"emitted boundary Curve chain repeats a row")
+        chain
+    end
+end
+
 function _extrude_nonew_rect_grid_source(m::GeoModel,source::Int,source_mesh,spec,caller;
-                                       mode::Symbol=:rectangular)
+                                       mode::Symbol=:rectangular,_mesh_input=nothing,
+                                       bound::Union{Nothing,_ExtrudeNoNewRectGridSource}=nothing)
     shape=_extrude_nonew_rect_grid_shape(m,source,4,caller;mode=mode)
     shape!==nothing || _extrude_nonew_rect_grid_source_error(caller,
         mode===:b4_strip ? "requires four native straight Curve chains defining a one-by-at-least-five actual Quad strip" :
         "requires four native straight Curve chains with equal opposite effective counts >=3")
+    bound===nothing || bound.grid_shape==shape ||
+        _extrude_nonew_rect_grid_source_error(caller,"emitted Source changes its certified grid shape")
     a,b=shape
     vertices,cell_count,edge_count,boundary_count=_extrude_nonew_rect_grid_sizes(a,b,caller;mode=mode)
     source_mesh isa MixedMesh && nnodes(source_mesh)==vertices && length(source_mesh.blocks)==1 ||
@@ -302,6 +332,8 @@ function _extrude_nonew_rect_grid_source(m::GeoModel,source::Int,source_mesh,spe
     _surface_type(m,source) in (:plane,:ruled) && !haskey(m.surface_geometry,source) ||
         _extrude_nonew_rect_grid_source_error(caller,"requires native planar filling without auxiliary surface geometry")
     axis,direction=_extrude_nonew_rect_grid_axis(spec,caller)
+    bound===nothing || (Int(bound.normal_axis)==axis && Int(bound.normal_direction)==direction) ||
+        _extrude_nonew_rect_grid_source_error(caller,"emitted Source changes its certified normal frame")
     coordinates=Vector{NTuple{3,Float64}}(undef,vertices)
     lookup=Dict{NTuple{3,Float64},Int32}();sizehint!(lookup,vertices)
     for node in 1:vertices
@@ -318,10 +350,11 @@ function _extrude_nonew_rect_grid_source(m::GeoModel,source::Int,source_mesh,spe
     signed=m.loops[only(m.surfaces[source])]
     curves=ntuple(position->abs(signed[position]),4)
     widths=(a+1,b+1,a+1,b+1)
-    chains=ntuple(4) do number
+    chains=bound===nothing ? ntuple(4) do number
         curve=curves[number];first_point,last_point=m.curves[curve]
         first_point!=last_point || _extrude_nonew_rect_grid_source_error(caller,"has a closed boundary Curve")
-        actual=_extrude_curve_nodes(m,curve,caller)
+        actual=_model_mesh_curve_input(_mesh_input,m,curve,caller)
+        actual===nothing && (actual=_extrude_curve_nodes(m,curve,caller))
         length(actual)==widths[number] &&
             _extrude_nonew_rect_grid_key(actual[1])==_extrude_nonew_rect_grid_key(m.points[first_point]) &&
             _extrude_nonew_rect_grid_key(actual[end])==_extrude_nonew_rect_grid_key(m.points[last_point]) ||
@@ -335,7 +368,7 @@ function _extrude_nonew_rect_grid_source(m::GeoModel,source::Int,source_mesh,spe
         end
         allunique(chain) || _extrude_nonew_rect_grid_source_error(caller,"has repeated native boundary samples")
         chain
-    end
+    end : _extrude_nonew_rect_grid_emitted_chains(m,bound,curves,widths,coordinates,vertices,caller)
     boundary=Vector{Int32}(undef,boundary_count)
     curve_edges=Dict{NTuple{2,Int32},Tuple{UInt8,Int8}}();sizehint!(curve_edges,boundary_count)
     position=0

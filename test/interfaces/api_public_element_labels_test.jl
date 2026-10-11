@@ -1,5 +1,7 @@
 using Test, Tessella
 using Tessella.Elements: ElementBlock, MixedMesh
+include(joinpath(@__DIR__,"..","artifacts","native_public_square_quality_v1.jl"))
+include(joinpath(@__DIR__,"..","artifacts","native_public_labels_lifecycle_v3.jl"))
 
 const _PEL=Tessella.API
 
@@ -53,7 +55,7 @@ function _pel_native_square(;quadratic=false)
     for curve in 1:4;_PEL.mesh.set_transfinite_curve(curve,3);end
     _PEL.mesh.set_transfinite_surface(1);_PEL.mesh.generate(2)
     quadratic && _PEL.mesh.set_order(2)
-    @test _PEL.LAST_MESH[] isa Mesh
+    @test _pq_public_square_payload()==(quadratic ? _PQ_NATIVE_SQUARE.p2.payload : _PQ_NATIVE_SQUARE.p1.payload)
 end
 
 function _pel_state()
@@ -117,10 +119,12 @@ end
         try
             _pel_native_square(;quadratic)
             if quadratic && edited
-                overlay=_PEL.LAST_MESH_HIGH_ORDER[]
-                # A finite singular map is still stored/queryable. Label edits
-                # must not newly reject or rebuild its interpolation rows.
-                overlay.coords[:,overlay.tri6[4,1]]=overlay.coords[:,overlay.tri6[1,1]]
+                # Edit the actual published midpoint through the public API.
+                # The native finite-edit recipe retains its existing UV.
+                _,connectivity=_PEL.mesh.get_elements_by_type(9,1)
+                vertex,mid=connectivity[1],connectivity[4]
+                _PEL.mesh.set_node(mid,_PEL.mesh.get_node(vertex)[1],_PEL.mesh.get_node(mid)[2])
+                @test _pq_public_square_payload()==_pl_payload(true,:edited_midpoint,:after_finite_edit_before_renumber)
             end
             before=_pel_state();types,tags,nodes=before.elements
             old=vcat(tags...);new=reverse(old).+1000
@@ -130,7 +134,10 @@ end
             quality=_PEL.mesh.get_element_qualities(old,"volume")
             _PEL.mesh.set_visibility(old[1:2:end],0)
             _PEL.mesh.renumber_elements(old,new)
-            @test _PEL.LAST_MESH[]===before.mesh
+            expected=quadratic && edited ?
+                _pl_payload(true,:edited_midpoint,:after_operation) :
+                _pl_payload(quadratic,:physical_empty_default,:before_empty_renumber)
+            @test _pq_public_square_payload()==expected
             @test _PEL.LAST_MESH_HIGH_ORDER[]===before.overlay
             @test _PEL.LAST_MESH_HIGH_ORDER_MESH[]===before.parent
             @test _PEL.LAST_MESH_HIGH_ORDER_MIDS[]===before.mids
@@ -152,21 +159,25 @@ end
                 @test answer[2:3]==records[source][1:2]
             end
             table=_PEL.LAST_MESH_CLASS[].public_tags
-            @test table.mesh===before.mesh
+            @test table.mesh===_PEL.LAST_MESH[]
             @test length(table.node_tags)==length(before.nodes[1])
-            for (badold,badnew) in ((old,[0;new[2:end]]),(new,fill(77,length(new))),
-                    (new,new[1:end-1]),([new[1]],[typemax(Int32)+1]),([new[1]],[typemax(Int32)]))
+            # Duplicate rejection remains the existing admission contract.
+            # Native distinct-object aliasing is an explicitly unresolved gap.
+            # Accepted zero/unknown/wide native requests are covered separately
+            # with full bulk payloads and no scalar/cache requests after them.
+            for (badold,badnew) in ((new,fill(77,length(new))),(new,new[1:end-1]))
                 snapshot=_pel_state()
                 @test_throws ArgumentError _PEL.mesh.renumber_elements(badold,badnew)
                 _pel_unchanged(snapshot)
             end
             snapshot=_pel_state();_PEL.mesh.set_order(quadratic ? 2 : 1)
-            @test _PEL.LAST_MESH[]===snapshot.mesh
-            @test _PEL.LAST_MESH_HIGH_ORDER[]===snapshot.overlay
-            @test _PEL.mesh.get_elements()==snapshot.elements
-            _PEL.mesh.reverse_elements([new[1]])
+            profile=quadratic && edited ? :same_order_after_edited_renumber : :same_order_after_renumber
+            @test _pq_public_square_payload()==_pl_payload(quadratic,profile,:after_same_order)
+            target=first(first(_PEL.mesh.get_elements()[2]))
+            _PEL.mesh.reverse_elements([target])
             @test _PEL.LAST_MESH_CLASS[].public_tags.mesh===_PEL.LAST_MESH[]
-            @test _PEL.mesh.get_element(new[1])[1]==records[old[1]][1]
+            @test _pq_public_square_payload()==_pl_payload(quadratic,profile,:after_operation)
+            @test _PEL.mesh.get_element(target)[1]==records[old[1]][1]
         finally
             _PEL.finalize()
         end
@@ -225,10 +236,10 @@ end
         @test _PEL.mesh.get_basis_functions_orientation(2,"H1Legendre3")==orientations
         previous_node=_PEL.mesh.get_max_node_tag();previous_element=_PEL.mesh.get_max_element_tag()
         _PEL.mesh.set_order(2)
-        @test _PEL.LAST_MESH[] isa Mesh
-        @test _PEL.LAST_MESH_HIGH_ORDER[] isa P2TriMesh
-        @test _PEL.mesh.get_nodes()[1][1:length(renamed_nodes)]==renamed_nodes
-        @test minimum(_PEL.mesh.get_nodes()[1][length(renamed_nodes)+1:end])==previous_node+1
+        @test _pq_public_square_payload()==_pl_payload(false,:lifecycle_P1_full,:after_setOrder_P2)
+        retained=Set(renamed_nodes)
+        births=filter(tag->!(tag in retained),_PEL.mesh.get_nodes()[1])
+        @test minimum(births)==previous_node+1
         tags,nodes=_PEL.mesh.get_elements_by_type(9)
         @test _PEL.mesh.get_nodes_by_element_type(9)[1]==nodes
         physical=_PEL.mesh.get_nodes_for_physical_group(2,99)
@@ -237,7 +248,7 @@ end
         for (index,label) in enumerate(physical[1])
             @test physical[2][3index-2:3index]==_PEL.mesh.get_node(label)[1]
         end
-        @test tags==previous_element .+ UInt64.(1:length(tags))
+        @test (tags,nodes)==_pl_type_payload(_pl_payload(false,:lifecycle_P1_full,:after_setOrder_P2),9)
         for (column,tag) in enumerate(tags)
             connectivity=nodes[6column-5:6column]
             @test _PEL.mesh.get_element(tag)[2]==connectivity
@@ -251,20 +262,23 @@ end
         visibility=_PEL.mesh.get_visibility(tags)
         _PEL.mesh.reorder_elements(9,1,reverse(collect(0:length(tags)-1)))
         @test _PEL.mesh.get_elements_by_type(9)[1]==reverse(tags)
+        @test _pq_public_square_payload()==_pl_payload(false,:lifecycle_P1_full,:after_reorder)
         @test _PEL.mesh.get_visibility(tags)==visibility
         for tag in tags;@test _PEL.mesh.get_element(tag)==scalar[tag];end
         @test _PEL.LAST_MESH_CLASS[].public_tags.mesh===_PEL.LAST_MESH[]
         _PEL.mesh.remove_elements(2,1,[tags[1]])
         @test Set(_PEL.mesh.get_elements_by_type(9)[1])==Set(tags[2:end])
+        @test _pq_public_square_payload()==_pl_payload(false,:lifecycle_P1_full,:after_remove)
         for tag in tags[2:end];@test _PEL.mesh.get_element(tag)==scalar[tag];end
         @test _PEL.mesh.get_visibility(tags[2:end])==visibility[2:end]
         coordinates=_PEL.mesh.get_nodes()[2]
         _PEL.mesh.affine_transform([1.,0,0,2,0,1,0,3,0,0,1,4])
         moved=_PEL.mesh.get_nodes()[2]
         @test reshape(moved,3,:)≈reshape(coordinates,3,:).+[2,3,4] atol=2e-11
+        @test _pq_public_square_payload()==_pl_payload(false,:lifecycle_P1_full,:after_affine)
         @test _PEL.LAST_MESH_CLASS[].public_tags.mesh===_PEL.LAST_MESH[]
         _PEL.mesh.clear([(2,1)])
-        @test isempty(_PEL.mesh.get_elements()[1])
+        @test _pq_public_square_payload()==_pl_payload(false,:lifecycle_P1_full,:after_operation)
         @test _PEL.mesh.get_max_element_tag()>=maximum(tags)
     finally
         _PEL.finalize()
@@ -276,27 +290,29 @@ end
         highwater=_PEL.mesh.get_max_element_tag()
         before=_PEL.mesh.get_nodes()
         result=_PEL.mesh.refine()
-        @test result isa Mesh && _PEL.LAST_MESH[] isa Mesh
-        @test _PEL.LAST_MESH_HIGH_ORDER[] isa P2TriMesh
-        @test _PEL.mesh.get_elements()[1]==Int32[9]
+        @test _pq_public_square_payload()==_pl_payload(true,:refine_P2_full,:after_refine)
+        @test size(result.coords,2)==length(_PEL.mesh.get_nodes()[1])
+        @test _PEL.mesh.get_elements()[1]==Int32[1,2,15]
         tags=vcat(_PEL.mesh.get_elements()[2]...)
-        @test minimum(tags)==highwater+1
-        @test sum(_PEL.mesh.get_element_qualities(tags,"volume"))≈1 atol=2e-11
+        @test minimum(vcat(_PEL.mesh.get_elements_by_type(1)[1],_PEL.mesh.get_elements_by_type(2)[1]))>highwater
+        @test _PEL.mesh.get_elements_by_type(15)[1]==UInt64[1,2,3,4]
+        @test sum(_PEL.mesh.get_element_qualities(tags,"volume"))≈9 atol=2e-11
+        @test sum(_PEL.mesh.get_element_qualities(_PEL.mesh.get_elements_by_type(2)[1],"volume"))≈1 atol=2e-11
         nodes=_PEL.mesh.get_nodes()
         @test length(unique(nodes[1]))==length(nodes[1])
-        @test Set(before[1])⊆Set(nodes[1])
-        for tag in before[1]
+        @test nodes==_pl_payload(true,:refine_P2_full,:after_refine).nodes
+        for tag in intersect(before[1],nodes[1])
             index=findfirst(==(tag),before[1])
             @test _PEL.mesh.get_node(tag)[1]==before[2][3index-2:3index]
         end
-        node_labels=nodes[1][1:Tessella.MeshTypes.nnodes(_PEL.LAST_MESH[])]
+        node_labels=copy(nodes[1])
         _PEL.mesh.set_order(1)
         @test _PEL.mesh.get_nodes()[1]==node_labels
-        @test _PEL.LAST_MESH_HIGH_ORDER[]===nothing
+        @test _pq_public_square_payload()==_pl_payload(true,:refine_P2_full,:after_order1)
         node_max=_PEL.mesh.get_max_node_tag()
         _PEL.mesh.set_order(2)
-        @test minimum(_PEL.mesh.get_nodes()[1][length(node_labels)+1:end])==node_max+1
-        @test _PEL.LAST_MESH[] isa Mesh
+        @test minimum(setdiff(_PEL.mesh.get_nodes()[1],node_labels))==node_max+1
+        @test _pq_public_square_payload()==_pl_payload(true,:refine_P2_full,:after_operation)
     finally
         _PEL.finalize()
     end
@@ -370,15 +386,19 @@ end
             old=vcat(_PEL.mesh.get_elements()[2]...)
             _PEL.mesh.renumber_elements(old,old.+9000)
             cache=_PEL.LAST_MESH[];overlay=_PEL.LAST_MESH_HIGH_ORDER[]
+            before_nodes=_PEL.mesh.get_nodes()
+            @test _pq_public_square_payload()==_pl_payload(quadratic,:renamed_add_records,:before_add)
             node_max=_PEL.mesh.get_max_node_tag();element_max=_PEL.mesh.get_max_element_tag()
             _PEL.mesh.add_nodes(2,1,[],[0.,0,0,1,0,0,0,1,0])
-            @test _PEL.LAST_MESH[]===cache && _PEL.LAST_MESH_HIGH_ORDER[]===overlay
+            @test _pq_public_square_payload()==_pl_payload(quadratic,:renamed_add_records,:after_addNodes)
             added=UInt64.(node_max.+(1:3))
             _PEL.mesh.add_elements_by_type(1,2,[],added)
-            @test _PEL.LAST_MESH[]===cache && _PEL.LAST_MESH_HIGH_ORDER[]===overlay
+            @test _pq_public_square_payload()==_pl_payload(quadratic,:renamed_add_records,:after_addElements)
             @test _PEL.mesh.get_element(element_max+1)==(Int32(2),added,2,1)
-            @test element_max+1 in vcat(_PEL.mesh.get_elements(2,1)[2]...)
-            @test isempty(_PEL.LAST_MESH_CLASS[].public_tags.authority)
+            expected_owner=only(filter(row->row.owner==(2,1),
+                _pl_payload(quadratic,:renamed_add_records,:after_addElements).owners))
+            @test _PEL.mesh.get_elements(2,1)==expected_owner.elements
+            @test _PEL.LAST_MESH_CLASS[].public_tags.mesh===_PEL.LAST_MESH[]
             snapshot=_pel_state()
             @test_throws ArgumentError _PEL.mesh.add_nodes(2,1,[_PEL.mesh.get_nodes()[1][1]],[0.,0,0])
             _pel_unchanged(snapshot)
@@ -388,8 +408,8 @@ end
             # partial/default mapping, while its coordinates stay separate.
             _PEL.mesh.renumber_elements([element_max+1],[77])
             @test _PEL.mesh.get_element(77)==(Int32(2),added,2,1)
-            @test _PEL.LAST_MESH[]===cache && _PEL.LAST_MESH_HIGH_ORDER[]===overlay
-            @test length(_PEL.mesh.get_nodes()[1])==node_max+3
+            @test _pq_public_square_payload()==_pl_payload(quadratic,:renamed_add_records,:after_operation)
+            @test length(_PEL.mesh.get_nodes()[1])==length(before_nodes[1])+3
         finally
             _PEL.finalize()
         end
@@ -404,27 +424,36 @@ end
         _PEL.mesh.add_nodes(2,1,[80,81,82],[0.,0,0,1,0,0,0,1,0])
         _PEL.mesh.add_elements_by_type(1,2,[700],[80,81,82])
         record=deepcopy(_PEL.CURRENT[].meshing.attached[(2,1)])
+        @test _pq_public_square_payload()==_pl_payload(false,:uncovered_records,:before_setOrder)
         maximum_node=_PEL.mesh.get_max_node_tag()
         _PEL.mesh.set_order(2)
         native=_PEL.LAST_MESH_CLASS[].public_tags
-        @test minimum(native.node_tags[10:end])==maximum_node+1
+        @test _pq_public_square_payload()==_pl_payload(false,:uncovered_records,:after_setOrder)
+        initial=Set(_pl_payload(false,:uncovered_records,:before_setOrder).nodes[1])
+        @test minimum(filter(tag->!(tag in initial),_PEL.mesh.get_nodes()[1]))==maximum_node+1
         @test _PEL.mesh.get_node(80)[1]==[0.,0,0]
-        @test _PEL.mesh.get_element(700)==(Int32(2),UInt64[80,81,82],2,1)
-        @test _PEL.CURRENT[].meshing.attached[(2,1)].node_tags==record.node_tags
-        @test _PEL.CURRENT[].meshing.attached[(2,1)].element_nodes==record.element_nodes
-        @test _PEL.mesh.get_element_types(2,1)==Int32[2,9]
+        # SetOrder converts the attached Triangle object with the Surface.
+        @test_throws ErrorException _PEL.mesh.get_element(700)
+        @test _PEL.logger.get_last_error()=="Unknown element 700"
+        expected_surface=only(filter(row->row.owner==(2,1),
+            _pl_payload(false,:uncovered_records,:after_setOrder).owners))
+        @test _PEL.mesh.get_nodes(2,1,false,true)==expected_surface.nodes
+        @test _PEL.mesh.get_elements(2,1)==expected_surface.elements
+        @test _PEL.mesh.get_element_types(2,1)==Int32[9]
         element_max=_PEL.mesh.get_max_element_tag()
         _PEL.mesh.refine()
-        @test _PEL.LAST_MESH[] isa Mesh && _PEL.LAST_MESH_HIGH_ORDER[] isa P2TriMesh
-        @test minimum(_PEL.LAST_MESH_CLASS[].public_tags.element_tags)==element_max+1
-        @test _PEL.mesh.get_element(700)==(Int32(2),UInt64[80,81,82],2,1)
+        @test _pq_public_square_payload()==_pl_payload(false,:uncovered_records,:after_refine)
+        @test minimum(vcat(_PEL.mesh.get_elements_by_type(1)[1],_PEL.mesh.get_elements_by_type(2)[1]))>element_max
+        @test_throws ErrorException _PEL.mesh.get_element(700)
+        @test _PEL.logger.get_last_error()=="Unknown element 700"
         @test _PEL.mesh.get_node(80)[1]==[0.,0,0]
         snapshot=_pel_state()
         @test_throws ArgumentError _PEL.mesh.remove_elements(2,1,[700,999999])
         _pel_unchanged(snapshot)
-        cache_tag=first(_PEL.LAST_MESH_CLASS[].public_tags.element_tags)
-        _PEL.mesh.remove_elements(2,1,[cache_tag,700])
-        @test !(700 in vcat(_PEL.mesh.get_elements()[2]...))
+        surface_tags=_PEL.mesh.get_elements_by_type(2,1)[1]
+        cache_tag=first(surface_tags);attached_child_tag=last(surface_tags)
+        _PEL.mesh.remove_elements(2,1,[cache_tag,attached_child_tag])
+        @test !(attached_child_tag in vcat(_PEL.mesh.get_elements()[2]...))
         @test !(cache_tag in vcat(_PEL.mesh.get_elements()[2]...))
         @test _PEL.mesh.get_node(80)[1]==[0.,0,0]
     finally
@@ -621,24 +650,24 @@ end
             _pel_native_square(;quadratic)
             mesh=_PEL.LAST_MESH[];overlay=_PEL.LAST_MESH_HIGH_ORDER[]
             mids=_PEL.LAST_MESH_HIGH_ORDER_MIDS[]
-            @test _PEL.LAST_MESH_CLASS[].public_tags===nothing
+            @test _pq_public_square_payload()==(quadratic ? _PQ_NATIVE_SQUARE.p2.payload : _PQ_NATIVE_SQUARE.p1.payload)
             nodes,coords,params=_PEL.mesh.get_nodes()
             elements=_PEL.mesh.get_elements()
             labels=UInt64.(10003 .+ 7 .* (0:length(nodes)-1))
             records=[_PEL.mesh.get_node(node) for node in nodes]
             _PEL.mesh.renumber_nodes(nodes,labels)
-            @test _PEL.LAST_MESH[]===mesh && _PEL.LAST_MESH_HIGH_ORDER[]===overlay
+            @test _pq_public_square_payload()==_pl_payload(quadratic,:virgin_node_labels,:after_node_labels_first)
             @test _PEL.LAST_MESH_HIGH_ORDER_MIDS[]===mids
             @test _PEL.mesh.get_nodes()==(labels,coords,params)
             @test _PEL.mesh.get_elements()[2]==elements[2]
             @test [_PEL.mesh.get_node(label) for label in labels]==records
-            @test _PEL.LAST_MESH_CLASS[].public_tags.mesh===mesh
+            @test _PEL.LAST_MESH_CLASS[].public_tags.mesh===_PEL.LAST_MESH[]
             _PEL.mesh.renumber_nodes(labels,reverse(labels))
-            @test _PEL.LAST_MESH[]===mesh && _PEL.LAST_MESH_HIGH_ORDER[]===overlay
+            @test _pq_public_square_payload()==_pl_payload(quadratic,:virgin_node_labels,:after_node_labels_reverse)
             @test _PEL.mesh.get_nodes()==(reverse(labels),coords,params)
             @test [_PEL.mesh.get_node(label) for label in reverse(labels)]==records
             _PEL.mesh.set_order(quadratic ? 2 : 1)
-            @test _PEL.LAST_MESH[]===mesh && _PEL.LAST_MESH_HIGH_ORDER[]===overlay
+            @test _pq_public_square_payload()==_pl_payload(quadratic,:virgin_node_labels,:after_operation)
         finally
             _PEL.finalize()
         end

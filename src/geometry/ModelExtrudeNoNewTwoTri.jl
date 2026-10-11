@@ -98,8 +98,11 @@ end
 function _extrude_nonew_two_tri_catalog(m::GeoModel,source::Int,source_mesh,
         spec,levels::Vector{Float64},refs::Vector{NTuple{2,Int32}},
         recombined::Bool,caller)
-    source_mesh isa Mesh && nnodes(source_mesh)==4 && ntris(source_mesh)==2 &&
-        nsegs(source_mesh)==0 && ntets(source_mesh)==0 ||
+    triangles=source_mesh isa Mesh && nsegs(source_mesh)==0 && ntets(source_mesh)==0 ?
+        source_mesh.tris : source_mesh isa MixedMesh && length(source_mesh.blocks)==1 &&
+        only(source_mesh.blocks) isa ElementBlock && only(source_mesh.blocks).msh==2 ?
+        only(source_mesh.blocks).nodes : nothing
+    triangles!==nothing && nnodes(source_mesh)==4 && size(triangles)==(3,2) ||
         _extrude_nonew_two_tri_error(caller,
             "requires exactly four nodes and two linear triangles")
     haskey(m.meshing.transfinite_surfaces,source) ||
@@ -177,7 +180,7 @@ function _extrude_nonew_two_tri_catalog(m::GeoModel,source::Int,source_mesh,
             _extrude_nonew_two_tri_error(caller,
                 "boundary must be a strictly convex four-corner polygon")
     end
-    cells=ntuple(cell->ntuple(k->source_mesh.tris[k,cell],3),2)
+    cells=ntuple(cell->ntuple(k->triangles[k,cell],3),2)
     all(cell->all(id->1<=id<=4,cell) && allunique(cell),cells) ||
         _extrude_nonew_two_tri_error(caller,"contains repeated or foreign triangle nodes")
     for cell in cells

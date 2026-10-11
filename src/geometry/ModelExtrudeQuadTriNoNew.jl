@@ -102,8 +102,136 @@ function _extrude_nonew_source_cell(source::MixedMesh,caller)
     return cell
 end
 
+# An axis-normal B4 operation owns two distinct sets of copied CAD Curves
+# when automatic coherence is disabled. Their literal tags need not close a
+# CAD shell. Admission here binds the recorded operation without welding any
+# entities; the completed plan must still certify its actual typed cell shell.
+function _extrude_nonew_unmerged_b4_incidence(m::GeoModel,t::Int,caller)
+    params=_extrude_gate(m,3,t)
+    link=get(m.meshing.extrude_sources,(3,t),nothing)
+    spec=get(m.meshing.extrude_specs,(3,t),nothing)
+    source=link!==nothing && link[1]==2 ? abs(link[2]) : 0
+    source_loops=get(m.surfaces,source,nothing)
+    source_loops!==nothing && length(source_loops)==1 || return false
+    original=get(m.loops,only(source_loops),nothing)
+    original!==nothing && length(original)==4 && allunique(abs.(original)) &&
+        all(curve->haskey(m.curves,abs(curve)),original) || return false
+    b4=_extrude_is_nonew(params) && spec!==nothing && spec.type===:translate &&
+        haskey(m.surfaces,source) &&
+        _extrude_nonew_rect_grid_shape(m,source,4,caller;mode=:b4_strip)!==nothing
+    b4 || return false
+    # Unknown entities, repeated members and other incidence defects retain
+    # the original CAD diagnostic. Only actual one-owner copied Curve records
+    # supply the alternative operation witness.
+    length(m.volumes[t])==1 && only(m.volumes[t])>0 || return false
+    shell=get(m.surface_loops,only(m.volumes[t]),nothing)
+    shell!==nothing && length(shell)==6 && allunique(abs.(shell)) || return false
+    source_curves=Set(abs.(original))
+    owners=Dict{Int,Set{Int}}();counts=Dict{Int,Int}()
+    for signed_surface in shell
+        surface=abs(signed_surface)
+        haskey(m.surfaces,surface) && length(m.surfaces[surface])==1 || return false
+        curves=get(m.loops,only(m.surfaces[surface]),nothing)
+        curves!==nothing && length(curves)==4 && allunique(abs.(curves)) || return false
+        for signed_curve in curves
+            curve=abs(signed_curve)
+            haskey(m.curves,curve) || return false
+            counts[curve]=get(counts,curve,0)+1
+            push!(get!(Set{Int},owners,curve),surface)
+        end
+    end
+    unmerged=false
+    for (curve,count) in counts
+        count==2 && length(owners[curve])==2 && continue
+        curve_link=get(m.meshing.extrude_sources,(1,curve),nothing)
+        count==1 && !(curve in source_curves) && curve_link!==nothing &&
+            curve_link[1] in (0,1) || return false
+        unmerged=true
+    end
+    return unmerged
+end
+
+function _extrude_nonew_boundary_surfaces(m::GeoModel,t::Int,caller)
+    try
+        return _model_volume_boundary_surfaces(m,t,caller)
+    catch error
+        error isa ArgumentError || rethrow()
+        _extrude_nonew_unmerged_b4_incidence(m,t,caller) || rethrow()
+    end
+    params=_extrude_gate(m,3,t)
+    link=m.meshing.extrude_sources[(3,t)]
+    spec=m.meshing.extrude_specs[(3,t)]
+    source=abs(link[2])
+    _extrude_nonew_rect_grid_axis(spec,caller)
+    boundary=_model_volume_boundary_surfaces(m,t,caller;certify_shells=false)
+    length(m.volumes[t])==1 && only(m.volumes[t])>0 &&
+        length(boundary)==6 && allunique(abs.(boundary)) && -source in boundary ||
+        throw(ArgumentError("$caller: B4 operation requires one recorded six-face shell"))
+    original=m.loops[only(m.surfaces[source])]
+    top=0;laterals=Set{Int}()
+    for signed_surface in boundary
+        surface=abs(signed_surface)
+        surface==source && continue
+        isequal(get(m.meshing.extrude,(2,surface),nothing),params) &&
+            isequal(get(m.meshing.extrude_specs,(2,surface),nothing),spec) ||
+            throw(ArgumentError("$caller: B4 boundary changes its recorded sweep parameters"))
+        surface_link=get(m.meshing.extrude_sources,(2,surface),nothing)
+        surface_link===nothing && throw(ArgumentError(
+            "$caller: B4 boundary lacks recorded Source provenance"))
+        length(m.surfaces[surface])==1 || throw(ArgumentError(
+            "$caller: B4 boundary has incompatible recorded Curve loops"))
+        loop=only(m.surfaces[surface])
+        haskey(m.loops,loop) || throw(ArgumentError(
+            "$caller: B4 boundary references an unknown Curve loop"))
+        curves=m.loops[loop]
+        length(curves)==4 && allunique(abs.(curves)) &&
+            all(curve->haskey(m.curves,abs(curve)),curves) ||
+            throw(ArgumentError("$caller: B4 boundary requires four recorded Curves"))
+        if surface_link==link
+            top==0 && signed_surface>0 || throw(ArgumentError(
+                "$caller: B4 operation requires one positively oriented copied cap"))
+            for (curve,parent) in zip(curves,original)
+                get(m.meshing.extrude_sources,(1,abs(curve)),nothing)==(1,parent) &&
+                    isequal(get(m.meshing.extrude_specs,(1,abs(curve)),nothing),spec) &&
+                    isequal(get(m.meshing.extrude,(1,abs(curve)),nothing),params) ||
+                    throw(ArgumentError("$caller: B4 copied cap loses its recorded Source Curve binding"))
+            end
+            top=surface
+        elseif surface_link[1]==1
+            parent=surface_link[2]
+            parent in original && !(parent in laterals) &&
+                sign(signed_surface)==sign(parent) && parent in curves ||
+                throw(ArgumentError("$caller: B4 laterals do not bijectively bind the Source Curves"))
+            copied=0;connecting=Int[]
+            for signed_curve in curves
+                signed_curve==parent && continue
+                curve=abs(signed_curve)
+                curve_link=get(m.meshing.extrude_sources,(1,curve),nothing)
+                isequal(get(m.meshing.extrude_specs,(1,curve),nothing),spec) &&
+                    isequal(get(m.meshing.extrude,(1,curve),nothing),params) ||
+                    throw(ArgumentError("$caller: B4 lateral Curve changes its recorded sweep parameters"))
+                if curve_link==(1,parent)
+                    copied+=1
+                elseif curve_link!==nothing && curve_link[1]==0
+                    push!(connecting,abs(curve_link[2]))
+                else
+                    throw(ArgumentError("$caller: B4 lateral Curve has incompatible Source provenance"))
+                end
+            end
+            copied==1 && sort!(connecting)==sort!(collect(m.curves[abs(parent)])) ||
+                throw(ArgumentError("$caller: B4 lateral loses its copied Curve or endpoint bindings"))
+            push!(laterals,parent)
+        else
+            throw(ArgumentError("$caller: B4 boundary has incompatible Source provenance"))
+        end
+    end
+    top!=0 && laterals==Set(original) || throw(ArgumentError(
+        "$caller: B4 operation requires its copied cap and all Source laterals"))
+    return boundary
+end
+
 function _extrude_nonew_region_boundary(m,t,source,caller;sides::Int=4)
-    boundary=abs.(_model_volume_boundary_surfaces(m,t,caller))
+    boundary=abs.(_extrude_nonew_boundary_surfaces(m,t,caller))
     length(boundary)==sides+2 && allunique(boundary) && source in boundary ||
         throw(ArgumentError(
             "$caller: QuadTriNoNewVerts requires an isolated $(sides+2)-face sweep"))
@@ -406,7 +534,7 @@ end
 
 function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
         min_angle_deg::Real=25.0,max_periodic_passes=8,
-        size_field::Union{Nothing,AbstractSizeField}=nothing)
+        size_field::Union{Nothing,AbstractSizeField}=nothing,_mesh_input=nothing)
     params=_extrude_gate(m,3,t)
     _extrude_is_nonew(params) || throw(ArgumentError(
         "$caller: Volume[$t] is not a layered QuadTriNoNewVerts region"))
@@ -459,8 +587,16 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
             three_quad_strip ? (params.recomb_laterals ? 21 : 18) :
             quad_patch ? 24 : quad_strip ? (params.recomb_laterals ? 14 : 12) :
             two_tri && params.recomb_laterals ? 2 : sides==4 ? 6 : 3)
-    source_mesh=mesh_model_surface(m,source;min_angle_deg=min_angle_deg,
-        max_periodic_passes=max_periodic_passes,size_field=size_field)
+    # The copied cap was constructed from the Source emitter vector. Preserve
+    # that explicit birth binding when the later Volume phase consumes the
+    # completed Source; global Point/Curve allocation rank is a separate order.
+    produced_source=_mesh_input isa _ModelMeshAuthority &&
+        haskey(_mesh_input.producer_rows,(2,Int32(source))) ?
+        _model_mesh_product(_mesh_input,2,source;caller,producer_order=true) : nothing
+    source_mesh=produced_source===nothing ?
+        mesh_model_surface(m,source;min_angle_deg=min_angle_deg,
+            max_periodic_passes=max_periodic_passes,size_field=size_field,
+            _mesh_input=_mesh_input) : produced_source
     if quad_patch
         catalog=_extrude_nonew_quad_patch_catalog(m,source,source_mesh,spec,
             levels,refs,params.recomb_laterals,caller)
@@ -469,28 +605,43 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
         return _extrude_nonew_quad_patch_finish(m,t,params,source,source_mesh,
             catalog,cols,top,laterals,caller)
     elseif quad_strip
+        cols=_mesh_input===nothing ? nothing :
+            _extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller)
+        actual_cap=_mesh_input===nothing ? nothing :
+            _model_mesh_cap_input(_mesh_input,source_mesh,top,cols,caller)
         catalog=_extrude_nonew_quad_strip_catalog(m,source,source_mesh,spec,
-            levels,refs,params.recomb_laterals,caller)
-        cols=_extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller)
+            levels,refs,params.recomb_laterals,caller;
+            top_states=actual_cap===nothing ? nothing : actual_cap.top_states)
+        cols===nothing && (cols=_extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller))
         _extrude_nonew_quad_strip_product_certify(cols,catalog,spec,caller)
         return _extrude_nonew_quad_strip_finish(m,t,params,source,source_mesh,
             catalog,cols,top,laterals,caller)
     elseif three_quad_strip
+        cols=_mesh_input===nothing ? nothing :
+            _extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller)
+        actual_cap=_mesh_input===nothing ? nothing :
+            _model_mesh_cap_input(_mesh_input,source_mesh,top,cols,caller)
         catalog=_extrude_nonew_three_quad_strip_catalog(m,source,source_mesh,spec,
-            levels,refs,params.recomb_laterals,caller)
-        cols=_extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller)
+            levels,refs,params.recomb_laterals,caller;
+            top_states=actual_cap===nothing ? nothing : actual_cap.top_states)
+        cols===nothing && (cols=_extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller))
         _extrude_nonew_three_quad_strip_product_certify(cols,catalog,spec,caller)
         return _extrude_nonew_three_quad_strip_finish(m,t,params,source,source_mesh,
             catalog,cols,top,laterals,caller)
     elseif four_quad_strip
+        cols=_mesh_input===nothing ? nothing :
+            _extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller)
+        actual_cap=_mesh_input===nothing ? nothing :
+            _model_mesh_cap_input(_mesh_input,source_mesh,top,cols,caller)
         catalog=_extrude_nonew_four_quad_strip_catalog(m,source,source_mesh,spec,
-            levels,refs,params.recomb_laterals,caller)
-        cols=_extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller)
+            levels,refs,params.recomb_laterals,caller;
+            top_states=actual_cap===nothing ? nothing : actual_cap.top_states)
+        cols===nothing && (cols=_extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller))
         _extrude_nonew_four_quad_strip_product_certify(cols,catalog,spec,caller)
         return _extrude_nonew_four_quad_strip_finish(m,t,params,source,source_mesh,
             catalog,cols,top,laterals,caller)
     elseif rect_grid
-        source_data=_extrude_nonew_rect_grid_source(m,source,source_mesh,spec,caller)
+        source_data=_extrude_nonew_rect_grid_source(m,source,source_mesh,spec,caller;_mesh_input)
         source_data.grid_shape==grid_shape || _extrude_nonew_rect_grid_error(caller,
             "actual source dimensions differ from their preflight")
         catalog=_extrude_nonew_rect_grid_plan(source_data,levels,refs,
@@ -501,15 +652,23 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
             catalog,cols,top,laterals,caller)
     elseif b4_strip
         source_data=_extrude_nonew_rect_grid_source(m,source,source_mesh,spec,caller;
-            mode=:b4_strip)
+            mode=:b4_strip,_mesh_input)
         source_data.grid_shape==strip_shape || _extrude_nonew_b4_strip_error(caller,
             "actual source dimensions differ from their preflight")
-        catalog=params.recomb_laterals ?
-            _extrude_nonew_b4_strip_plan(source_data,levels,refs,true,caller) :
-            _ExtrudeNoNewB4Free.plan(source_data,levels,refs,caller)
         cols=_extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller)
+        actual_cap=_model_mesh_cap_input(_mesh_input,source_mesh,top,cols,caller)
+        top_states=actual_cap===nothing ? nothing : actual_cap.top_states
+        retained=params.recomb_laterals && _extrude_nonew_unmerged_b4_incidence(m,t,caller)
+        catalog=retained ?
+            _extrude_nonew_retained_b4_plan(source_data,levels,refs,caller;top_states) :
+            params.recomb_laterals ?
+                _extrude_nonew_b4_strip_plan(source_data,levels,refs,true,caller;top_states) :
+                _ExtrudeNoNewB4Free.plan(source_data,levels,refs,caller;top_states)
         _extrude_nonew_rect_grid_product_certify(cols,catalog,spec,caller)
-        if params.recomb_laterals
+        if retained
+            return _extrude_nonew_retained_b4_finish(m,t,params,source,source_mesh,
+                catalog,cols,top,laterals,caller)
+        elseif params.recomb_laterals
             return _extrude_nonew_b4_strip_finish(m,t,params,source,source_mesh,
                 catalog,cols,top,laterals,caller)
         end

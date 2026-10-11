@@ -9,7 +9,8 @@ module Recombine
 using ..Predicates: orient2
 import ..MeshTypes
 import ..Elements
-using ..GmshLibm: _gm87_atan2
+using ..GmshLibm: _gm87_atan2, _gm87_exp
+using ..OrderedMatching: ordered_perfect_matching
 
 export recombine_triangles
 
@@ -315,6 +316,11 @@ function _gmsh_sort_candidates!(candidates,coords,triangles)
     return candidates
 end
 
+include("NativeRecombineMatching.jl")
+include("NativeRecombineOptimize.jl")
+include("NativeRecombineMixed.jl")
+include("NativeRecombineBipartite.jl")
+
 function _recombine_angle(value)
     value===nothing && return nothing
     value isa Real && !(value isa Bool) || throw(ArgumentError(
@@ -326,6 +332,29 @@ function _recombine_angle(value)
     isfinite(angle) && 0<=angle<=90 || throw(ArgumentError(
         "recombine_triangles: recombine_angle must lie in 0:90"))
     return angle
+end
+
+function _recombine_admission_coords(value,mesh,name=:recombine_angle_coords)
+    value===nothing && return mesh.coords
+    value isa AbstractMatrix{<:Real} || throw(ArgumentError(
+        "recombine_triangles: $name must be a real matrix"))
+    size(value)==size(mesh.coords) || throw(ArgumentError(
+        "recombine_triangles: $name must match the 3 by N node coordinates"))
+    coords=Matrix{Float64}(undef,size(value)...)
+    for index in eachindex(value)
+        coordinate=value[index]
+        coordinate isa Bool && throw(ArgumentError(
+            "recombine_triangles: $name must contain real coordinates"))
+        converted=try Float64(coordinate) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("recombine_triangles: $name " *
+                "must be Float64-representable"))
+        end
+        isfinite(converted) || throw(ArgumentError(
+            "recombine_triangles: $name must be finite"))
+        coords[index]=converted
+    end
+    return coords
 end
 
 function _candidate(coords,triangles,first_triangle::Int32,second_triangle::Int32,
@@ -384,6 +413,10 @@ Gmsh. Even-count Blossom matching ignores the angle when its native boundary
 closure graph admits a perfect matching; otherwise it retries greedy pairing.
 Without an angle, `:blossom`
 retains the standalone maximum-cardinality matching contract.
+`recombine_angle_coords` optionally supplies physical 3-D coordinates for only
+this admission test while projected candidate ranking and output stay unchanged.
+`recombine_priority_coords` optionally supplies the coordinates used by the
+pinned native candidate priority when `recombine_angle` is present.
 
 The input must be a validated surface/curve mesh without tetrahedra. This is a
 surface recombination operation; it does not generate a structured grid or modify
@@ -394,9 +427,12 @@ function recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
                              physical_names=Dict{Tuple{Int,Int},String}(),
                              algorithm=:greedy,
                              full_quad=false,
-                             protected_edges=nothing,recombine_angle=nothing)
+                             protected_edges=nothing,recombine_angle=nothing,
+                             recombine_angle_coords=nothing,
+                             recombine_priority_coords=nothing)
     return _recombine_triangles(mesh;min_quality,preserve_segments,physical_names,
-        algorithm,full_quad,protected_edges,recombine_angle).mesh
+        algorithm,full_quad,protected_edges,recombine_angle,recombine_angle_coords,
+        recombine_priority_coords).mesh
 end
 
 # Keep primary pair-pass history available to the API label allocator while
@@ -406,11 +442,17 @@ function _recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
                               physical_names=Dict{Tuple{Int,Int},String}(),
                               algorithm=:greedy,full_quad=false,
                               protected_edges=nothing,recombine_angle=nothing,
-                              embedded_edges=nothing)
+                              embedded_edges=nothing,recombine_angle_coords=nothing,
+                              recombine_priority_coords=nothing,
+                              primary_native=false,node_owner_dims=nothing,
+                              primary_minimum_quality=0.0,primary_quadrangles=nothing,
+                              primary_quadrangle_tags=nothing,primary_surface_context=nothing)
     preserve_segments isa Bool || throw(ArgumentError(
         "recombine_triangles: preserve_segments must be Bool"))
     full_quad isa Bool || throw(ArgumentError(
         "recombine_triangles: full_quad must be Bool"))
+    primary_native isa Bool || throw(ArgumentError(
+        "recombine_triangles: primary_native must be Bool"))
     algorithm isa Symbol || throw(ArgumentError(
         "recombine_triangles: algorithm must be :greedy or :blossom"))
     algorithm in (:greedy,:blossom) || throw(ArgumentError(
@@ -426,12 +468,45 @@ function _recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
         end
     threshold=_recombine_quality(min_quality)
     angle=_recombine_angle(recombine_angle)
+    admission_coords=_recombine_admission_coords(recombine_angle_coords,mesh)
+    priority_coords=recombine_priority_coords===recombine_angle_coords ?
+        admission_coords : _recombine_admission_coords(
+            recombine_priority_coords,mesh,:recombine_priority_coords)
     size(mesh.tets,2)==0 || throw(ArgumentError(
         "recombine_triangles: input must not contain tetrahedra"))
     diagnostic=MeshTypes.validate(mesh)
     diagnostic.ok || throw(ArgumentError(
         "recombine_triangles: input mesh is invalid — "*
         join(diagnostic.messages,"; ")))
+
+    if primary_native
+        angle===nothing && throw(ArgumentError(
+            "recombine_triangles: primary-native admission requires an explicit angle"))
+        primary_minimum_quality isa Real && !(primary_minimum_quality isa Bool) || throw(ArgumentError(
+            "recombine_triangles: primary minimum quality must be real"))
+        minimum_quality=Float64(primary_minimum_quality)
+        coordinates=primary_surface_context===nothing ? mesh.coords : copy(mesh.coords)
+        emission=_primary_weighted_emission(coordinates,mesh.tris,mesh.tri_tag;
+            protected,embedded=embedded_edges,node_owner_dims,minimum_quality,
+            algorithm,recombine_angle=angle,
+            existing_quadrangles=primary_quadrangles,
+            existing_quadrangle_tags=primary_quadrangle_tags,
+            defer_postquality=primary_surface_context!==nothing)
+        if primary_surface_context===nothing
+            return _primary_emission_product(mesh,emission;preserve_segments,
+                physical_names,full_quad)
+        end
+        primary_surface_context isa _PrimarySurfaceContext || throw(ArgumentError(
+            "recombine_triangles: invalid native Surface context"))
+        optimized=_primary_optimized_emission(coordinates,mesh.tris,mesh.tri_tag,
+            emission,primary_surface_context,minimum_quality)
+        actual=MeshTypes.Mesh(coordinates;segs=mesh.segs,seg_tag=mesh.seg_tag)
+        result=_primary_emission_product(actual,optimized.emission;preserve_segments,
+            physical_names,full_quad)
+        return merge(result,(removed_nodes=optimized.removed_nodes,
+            node_parameters=optimized.node_parameters))
+    end
+
 
     owners=Dict{NTuple{2,Int32},NTuple{3,Int32}}()
     completed=Set{NTuple{2,Int32}}()
@@ -462,7 +537,7 @@ function _recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
     if angle===nothing
         sort!(candidates;by=c->(-c.quality,c.edge,c.first_triangle,c.second_triangle),alg=MergeSort)
     else
-        _gmsh_sort_candidates!(candidates,mesh.coords,triangles)
+        _gmsh_sort_candidates!(candidates,priority_coords,triangles)
     end
 
     used=falses(size(triangles,2));accepted=_QuadCandidate[]
@@ -518,7 +593,7 @@ function _recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
             if !used[first] && !used[second] &&
                mesh.tri_tag[first]==mesh.tri_tag[second] &&
                candidate.quality>=threshold &&
-               (angle===nothing || _gmsh_recombine_pair_measure(mesh.coords,candidate.nodes)<angle)
+               (angle===nothing || _gmsh_recombine_pair_measure(admission_coords,candidate.nodes)<angle)
                 used[first]=true;used[second]=true;push!(accepted,candidate)
             end
         end

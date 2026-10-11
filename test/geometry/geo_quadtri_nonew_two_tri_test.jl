@@ -1,4 +1,4 @@
-using Test,Tessella
+using Test,Tessella,TOML
 using Tessella.Elements: MixedMesh, ElementBlock, msh_dimension
 using Tessella.Model: mesh_model_surface,mesh_model_volume,model_to_mixed
 using Tessella.MeshTypes: Mesh,nnodes
@@ -6,6 +6,22 @@ using Tessella.MeshTypes: Mesh,nnodes
 include("quadtri_nonew_two_tri_certificates.jl")
 const _QTT=QuadTriNoNewTwoTriCertificates
 const _QTTQ=_QTT.Quad
+
+function _qtt_public_surface_signature(api)
+    tags,xyz,_=api.mesh.get_nodes()
+    coordinates=Dict(tag=>Tuple(point) for (tag,point) in zip(tags,eachcol(reshape(xyz,3,:))))
+    types,labels,connectivity=api.mesh.get_elements(2)
+    faces=Tuple[]
+    for (msh,ids,nodes) in zip(types,labels,connectivity)
+        @test msh in (2,3)
+        width=msh==2 ? 3 : 4
+        @test length(nodes)==width*length(ids)
+        for cell in eachcol(reshape(nodes,width,:))
+            push!(faces,(Int(msh),_QTTQ.key(coordinates[node] for node in cell)))
+        end
+    end
+    return sort!(faces)
+end
 
 function _qtt_api(source,action)
     api=Tessella.API;api.initialize()
@@ -40,7 +56,7 @@ function _qtt_unchanged(api,before)
     @test (api.NODE_TAG_MAX[],api.ELEMENT_TAG_MAX[])==before.counters
 end
 
-function _qtt_model_failure(source,diagnostic;mutate=identity)
+function _qtt_model_failure(source,diagnostic;mutate=identity,geo_diagnostic=diagnostic)
     geometry=_QTT.execute(source;dim=0)
     mutate(geometry.model)
     parameters=deepcopy(geometry.model.curve_params);value=repr(geometry.model)
@@ -49,7 +65,7 @@ function _qtt_model_failure(source,diagnostic;mutate=identity)
     context=Tessella.IO._GeoNumericContext()
     sentinel=Mesh(zeros(3,1));push!(context.mesh_parts,(0,777,sentinel))
     parts=context.mesh_parts;options=deepcopy(context.option_numbers)
-    @test_throws diagnostic Tessella.GeoExec._geo_mesh_model(geometry.model,3,context)
+    @test_throws geo_diagnostic Tessella.GeoExec._geo_mesh_model(geometry.model,3,context)
     @test repr(geometry.model)==value && geometry.model.curve_params==parameters
     @test context.mesh_parts===parts && only(parts)[3]===sentinel
     @test context.option_numbers==options
@@ -178,13 +194,33 @@ end
             "79082312c91d6de90190e7888769ff6f9a1ddf0335d5782e76b2650545d97556"
     end
 
+    @testset "saved native complete surface products remain visible" begin
+        # The twelve retained 4.15.2 full P1 captures contain both source/cap
+        # Tri3 products and every lateral sheet after generate(3). The old
+        # empty aggregate expectation described the former volume-only cache.
+        oracle=TOML.parsefile(joinpath(@__DIR__,"..","artifacts","quadtri_nonew_two_tri_oracle.toml"))
+        @test oracle["gmsh_version"]=="4.15.2" && length(oracle["fixtures"])==12
+        for fixture in oracle["fixtures"]
+            actual=Dict{Int,Int}()
+            for entity in fixture["p1"]["entities"]
+                entity["dim"]==2 || continue
+                for cell in entity["cells"]
+                    actual[cell["type"]]=get(actual,cell["type"],0)+1
+                end
+            end
+            intervals=fixture["intervals"]
+            expected=fixture["recombine_laterals"] ? Dict(2=>4,3=>4intervals) : Dict(2=>8intervals+4)
+            @test actual==expected
+        end
+    end
+
     @testset "signed actual products on XY/YZ/ZX and grouped layers" begin
         fixtures=_QTT.fixtures()
         @test length(fixtures)==72
         for fixture in fixtures
             @testset "$(fixture.name)" begin
                 execution=_QTT.execute(fixture.source)
-                volume=geo_entity_mesh(execution,3,1)
+                volume=geo_entity_mesh(execution,3,1;geometry=true)
                 source=only(part for (dim,tag,part) in execution.mesh_parts if dim==2 && tag==1)
                 certificate=_QTT.certify(volume,fixture,source)
                 n=length(fixture.levels)-1
@@ -241,7 +277,7 @@ end
                 winding=-1,laterals,offset=(1.5,-2.25,.125),pins=:opposite)
             execution=_QTT.execute(fixture.source)
             source=only(part for (dim,tag,part) in execution.mesh_parts if dim==2 && tag==1)
-            @test _QTT.certify(geo_entity_mesh(execution,3,1),fixture,source).total==15//4
+            @test _QTT.certify(geo_entity_mesh(execution,3,1;geometry=true),fixture,source).total==15//4
         end
     end
 
@@ -253,7 +289,7 @@ end
             execution=_QTT.execute(source)
             surface=only(part for (dim,tag,part) in execution.mesh_parts if dim==2 && tag==1)
             @test nnodes(surface)==4 && size(surface.tris,2)==2
-            @test _QTT.certify(geo_entity_mesh(execution,3,1),fixture,surface).ncell==(laterals ? 2 : 6)
+            @test _QTT.certify(geo_entity_mesh(execution,3,1;geometry=true),fixture,surface).ncell==(laterals ? 2 : 6)
         end
     end
 
@@ -272,14 +308,17 @@ end
             surface_geo=_QTT.execute(fixture.source;dim=2)
             @test _QTTQ.surface_faces(surface_geo.mesh_parts,volume)==Set(keys(certificate.boundary))
             complete=_QTT.execute(fixture.source)
-            @test _QTTQ.typed_signature(geo_entity_mesh(complete,3,1))==_QTTQ.typed_signature(volume)
+            @test _QTTQ.typed_signature(geo_entity_mesh(complete,3,1;geometry=true))==_QTTQ.typed_signature(volume)
             _qtt_api(fixture.source,(api,_)->begin
                 generated=api.mesh.generate(3)
                 actual=_QTT.public_volume(api)
                 @test _QTT.certify(actual,fixture,source).total==certificate.total
                 @test _QTTQ.typed_signature(actual)==_QTTQ.typed_signature(volume)
                 @test validate(generated).ok
-                @test api.mesh.get_elements(2)[1]==Int32[]
+                expected_surfaces=sort!([(length(face)==3 ? 2 : 3,
+                    _QTTQ.key(_QTT.point(volume,node) for node in face))
+                    for face in values(certificate.boundary)])
+                @test _qtt_public_surface_signature(api)==expected_surfaces
                 @test length(api.mesh.get_nodes(3,1,true)[1])==16
                 @test api.mesh.get_elements(3,1)[1]==[laterals ? 6 : 4]
                 old=_qtt_snapshot(api)
@@ -298,7 +337,7 @@ end
             Physical Surface("top",102)={sweep[0]};
             Physical Volume("body",103)={sweep[1]};
             """
-            execution=_QTT.execute(source);volume=geo_entity_mesh(execution,3,1)
+            execution=_QTT.execute(source);volume=geo_entity_mesh(execution,3,1;geometry=true)
             projected=model_to_mixed(execution.model,volume,3,1)
             @test projected.physical_names==Dict((2,101)=>"source",(2,102)=>"top",(3,103)=>"body")
             @test all(all(==(103),block.tags) for block in projected.blocks if msh_dimension(block.msh)==3)
@@ -653,13 +692,20 @@ end
         # sub-ULP translation rounds all subsequent planes onto that source.
         # Edit the existing shell to preserve its distinct CAD identities.
         rounded=_QTT.fixture("rounded_guard";laterals=true,offset=(0.,0.,1.))
-        _qtt_model_failure(rounded.source,r"actual normal planes collapse or reverse after rounding";mutate=model->begin
+        _qtt_model_failure(rounded.source,r"actual normal planes collapse or reverse after rounding";
+            geo_diagnostic=r"Line\[16\] has coincident endpoints",mutate=model->begin
             for (tag,p) in collect(model.points)
                 p[3]>1. && (model.points[tag]=(p[1],p[2],1.0 + 2.0^-54))
             end
             for (key,spec) in collect(model.meshing.extrude_specs)
                 spec.type===:translate && (model.meshing.extrude_specs[key]=(type=:translate,T=(0.,0.,2.0^-54)))
             end
+            # The GEO frontend generates the actual lower Curve products
+            # first. This edited vertical Curve has two distinct CAD tags
+            # with identical Float64 endpoints and is rejected at that stage.
+            endpoints=model.curves[16]
+            @test endpoints[1]!=endpoints[2]
+            @test model.points[endpoints[1]]==model.points[endpoints[2]]
         end)
         # A real stacked extrusion has a copied source and a shared cap.
         # These are different unsupported contracts, and each entrypoint

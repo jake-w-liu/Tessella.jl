@@ -238,6 +238,29 @@ function orient3(a, b, c, d)::Int
     return _orient3_exact(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz)
 end
 
+# Native circumcenters consume the adaptive determinant magnitude.
+function _orient3_value(a,b,c,d)
+    a=(_x(a),_y(a),_z(a));b=(_x(b),_y(b),_z(b))
+    c=(_x(c),_y(c),_z(c));d=(_x(d),_y(d),_z(d))
+    adx=a[1]-d[1];ady=a[2]-d[2];adz=a[3]-d[3]
+    bdx=b[1]-d[1];bdy=b[2]-d[2];bdz=b[3]-d[3]
+    cdx=c[1]-d[1];cdy=c[2]-d[2];cdz=c[3]-d[3]
+    p1=bdx*cdy;p2=cdx*bdy;p3=cdx*ady;p4=adx*cdy;p5=adx*bdy;p6=bdx*ady
+    value=adz*(p1-p2)+bdz*(p3-p4)+cdz*(p5-p6)
+    permanent=(abs(p1)+abs(p2))*abs(adz)+(abs(p3)+abs(p4))*abs(bdz)+
+              (abs(p5)+abs(p6))*abs(cdz)
+    error=O3DERRBOUND_A*permanent
+    (isfinite(error)&&error>=floatmin(Float64)&&(value>error||-value>error)) && return value
+    adaptive=_orient3_adaptive(a...,b...,c...,d...,permanent,Val(true))
+    adaptive===nothing || return adaptive
+    R=Rational{BigInt}
+    u=ntuple(axis->R(a[axis])-R(d[axis]),3)
+    v=ntuple(axis->R(b[axis])-R(d[axis]),3)
+    w=ntuple(axis->R(c[axis])-R(d[axis]),3)
+    return Float64(u[3]*(v[1]*w[2]-w[1]*v[2])+
+        v[3]*(w[1]*u[2]-u[1]*w[2])+w[3]*(u[1]*v[2]-v[1]*u[2]))
+end
+
 function _orient3_exact(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz)::Int
     Ax,Ay,Az,Bx,By,Bz,Cx,Cy,Cz,Dx,Dy,Dz = _common_ints((ax,ay,az,bx,by,bz,cx,cy,cz,dx,dy,dz))
     adx = Ax-Dx; ady = Ay-Dy; adz = Az-Dz

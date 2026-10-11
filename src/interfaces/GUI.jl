@@ -159,7 +159,8 @@ end
 
 Apply one bounded command: `new`, `box x y z dx dy dz tag`, `mesh 2|3`,
 `select tag...`, `camera x y z`, or `reset`. A command validates all of its
-arguments before changing GUI state; geometry and meshing delegate to [`API`](@ref).
+arguments before changing GUI state. The GUI `box` command requires strictly positive
+`dx`, `dy`, and `dz`; geometry and meshing delegate to [`API`](@ref).
 """
 function gui_command!(s::GuiState, cmd::AbstractString)
     ncodeunits(cmd)<=_MAX_COMMAND_BYTES || throw(ArgumentError(
@@ -179,6 +180,8 @@ function gui_command!(s::GuiState, cmd::AbstractString)
         _arity(parts,8,head);_reserve_log(s)
         nums=[_parse_float(parts[i],"box value") for i in 2:7]
         tag=_parse_int(parts[8],"box tag")
+        (nums[4]>0.0 && nums[5]>0.0 && nums[6]>0.0) || throw(ArgumentError(
+            "gui_command!: box dimensions must be positive"))
         actual=API.model.add_box(nums[1],nums[2],nums[3],nums[4],nums[5],nums[6];tag=tag)
         _log!(s,"box $actual")
     elseif head=="mesh"

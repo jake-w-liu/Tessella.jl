@@ -104,26 +104,104 @@ function model_entity_color(m::GeoModel,dim,tag)
                _MODEL_DEFAULT_ENTITY_COLOR)
 end
 
-"""
-    set_point_coordinates!(model, tag, x, y, z)
+function _model_point_position_update!(updates,coords::Matrix{Float64},row::Int,caller)
+    size(coords,1)==3 && 1<=row<=size(coords,2) || throw(ArgumentError(
+        "$caller: attached Point vertex does not align with its coordinates"))
+    any(binding->binding[1]===coords && binding[2]==row,updates) ||
+        push!(updates,(coords,row))
+    return nothing
+end
 
-Replace one existing Point's finite coordinates. A discrete Point must own a
-mesh node, whose coordinates define its position. Topology, mesh size, names,
-and other entity metadata remain attached to the Point tag.
-"""
-function set_point_coordinates!(m::GeoModel,tag,x,y,z)
+# Point mesh vertices retain their entity vector order. Element slots can name
+# another vertex, and SetOrderN can move an old endpoint onto its Curve owner.
+function _model_point_position_plan(m::GeoModel,tag,x,y,z;first_node=nothing)
     caller="set_point_coordinates!"
     _,point_tag=_model_metadata_entity(m,0,tag,caller)
     coordinate=_finite3(x,y,z,caller)
     record=get(m.discrete,(0,point_tag),nothing)
-    if record!==nothing
-        isempty(record.node_coords) && throw(ArgumentError(
-            "$caller: discrete point has no node"))
-        record.node_coords[:,1].=coordinate
-        return nothing
+    record!==nothing && isempty(record.node_tags) && throw(ArgumentError(
+        "$caller: discrete point has no node"))
+    authority=m.meshing.mesh_authority
+    actual=authority===nothing ? nothing : authority.mesh
+    owner=(0,Int32(point_tag))
+    node=first_node===nothing ? nothing : UInt64(first_node)
+    actual_row=0
+    if actual!==nothing
+        data=actual.entity_data
+        if first_node===nothing
+            product=get(authority.products,owner,nothing)
+            if product!==nothing
+                position=findfirst(row->data.node_entities[row]==owner,product.rows)
+                if position!==nothing
+                    actual_row=Int(product.rows[position])
+                    node=data.external_node_tags[actual_row]
+                end
+            end
+        else
+            position=findfirst(==(node),data.external_node_tags)
+            if position!==nothing
+                data.node_entities[position]==owner || throw(ArgumentError(
+                    "$caller: attached Point vertex has a different current owner"))
+                actual_row=position
+            end
+        end
     end
-    m.points[point_tag]=coordinate
+    native_record=record===nothing ? get(m.meshing.attached,(0,point_tag),nothing) : record
+    if node===nothing && native_record!==nothing && !isempty(native_record.node_tags)
+        node=UInt64(first(native_record.node_tags))
+    end
+    updates=Tuple{Matrix{Float64},Int}[]
+    if node!==nothing && native_record!==nothing
+        position=findfirst(==(UInt64(node)),native_record.node_tags)
+        position===nothing || _model_point_position_update!(updates,native_record.node_coords,
+            position,caller)
+    end
+    if actual_row>0
+        _model_point_position_update!(updates,actual.coords,actual_row,caller)
+        if authority.carrier!==nothing
+            position=findfirst(==(Int32(actual_row)),authority.carrier_rows)
+            position===nothing || _model_point_position_update!(updates,
+                authority.carrier.coords,position,caller)
+        end
+        for input in values(authority.native_inputs)
+            input isa MixedMesh && input.entity_data!==nothing || continue
+            position=findfirst(==(node),input.entity_data.external_node_tags)
+            position===nothing || _model_point_position_update!(updates,input.coords,position,caller)
+        end
+        for input in values(authority.surface_constructor_inputs)
+            input isa MixedMesh && input.entity_data!==nothing || continue
+            position=findfirst(==(node),input.entity_data.external_node_tags)
+            position===nothing || _model_point_position_update!(updates,input.coords,position,caller)
+        end
+    end
+    return (;point_tag,coordinate,node,updates,discrete=record!==nothing)
+end
+
+function _model_commit_point_position!(m,plan)
+    for (coordinates,row) in plan.updates,axis in 1:3
+        coordinates[axis,row]=plan.coordinate[axis]
+    end
+    if !plan.discrete
+        m.points[plan.point_tag]=plan.coordinate
+        _native_geo_kernel_update_point!(m,plan.point_tag)
+    end
+    # A producer relocation receipt describes a particular previous CAD state.
+    # A legitimate Point setter supersedes that fact; regeneration can create
+    # a new receipt using the current Curve and attached vertex identities.
+    hasproperty(m.meshing,:native_curve_endpoints) &&
+        delete!(m.meshing.native_curve_endpoints,plan.point_tag)
     return nothing
+end
+
+"""
+    set_point_coordinates!(model, tag, x, y, z)
+
+Replace one existing Point's finite coordinates and the position of its first
+current mesh vertex, when present. A discrete Point must own a mesh node.
+Topology, mesh size, names, and other entity metadata retain their identities.
+"""
+function set_point_coordinates!(m::GeoModel,tag,x,y,z)
+    return _model_commit_point_position!(m,_model_point_position_plan(m,tag,x,y,z))
 end
 
 function _model_attribute_name(name,caller::AbstractString)

@@ -70,6 +70,24 @@ function _lp2q_unchanged(before)
            _LP2Q.NODE_TAG_MAX[],_LP2Q.ELEMENT_TAG_MAX[])==before[3:6]
 end
 
+# These analytic maps require exact corner-average supports. Native Curve
+# factories retain slightly shifted supports; their captured payloads are
+# checked independently in higher_legacy_p2_native_payload_probe_v1.jl.
+function _lp2q_analytic_supports!(cells,dimension)
+    primary=dimension==2 ? 3 : 4
+    edges=dimension==2 ? ((1,2),(2,3),(3,1)) :
+        ((1,2),(2,3),(3,1),(1,4),(3,4),(2,4))
+    for column in axes(cells,2)
+        corners=[first(_LP2Q.mesh.get_node(cells[slot,column])) for slot in 1:primary]
+        for (index,(a,b)) in enumerate(edges)
+            point=(corners[a]+corners[b])/2
+            node=cells[primary+index,column]
+            _LP2Q.mesh.set_node(node,point)
+            @test first(_LP2Q.mesh.get_node(node))==point
+        end
+    end
+end
+
 @testset "Legacy simplex P2 queries use actual public cells" begin
     for dimension in (2,3),reverse in (false,true)
         try
@@ -85,6 +103,7 @@ end
                 reverse && _LP2Q.mesh.reverse_elements(tags)
                 tags,flat=_LP2Q.mesh.get_elements_by_type(msh,1)
                 cells=reshape(flat,nn,:)
+                _lp2q_analytic_supports!(cells,dimension)
                 @test !isempty(tags)
                 first_cell=copy(cells[:,1])
                 primary=_lp2q_points(first_cell[1:nprimary])

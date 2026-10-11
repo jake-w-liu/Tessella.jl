@@ -85,7 +85,7 @@ end
         QuadTriAddVerts$(laterals ? " RecombLaterals" : "");}
         """
         execution=_qt_extrude_execute(source)
-        volume=geo_entity_mesh(execution,3,1)
+        volume=geo_entity_mesh(execution,3,1;geometry=true)
         @test nnodes(execution.mesh)==nnode
         @test _qt_extrude_counts(volume)==volume_counts
         if n==2 && layers==2 && laterals
@@ -112,7 +112,7 @@ end
         QuadTriAddVerts$(laterals ? " RecombLaterals" : "");}
         """
         execution=_qt_extrude_execute(source)
-        volume=geo_entity_mesh(execution,3,1)
+        volume=geo_entity_mesh(execution,3,1;geometry=true)
         @test nnodes(execution.mesh)==nnode
         @test _qt_extrude_counts(volume)==counts
         @test _qt_extrude_boundary(volume)==_qt_extrude_surface_faces(execution)
@@ -150,8 +150,8 @@ end
             $(neighbor===:quadtri ? "QuadTriAddVerts;" : "")}
             """
             execution=_qt_extrude_execute(source)
-            left=geo_entity_mesh(execution,3,1)
-            right=geo_entity_mesh(execution,3,2)
+            left=geo_entity_mesh(execution,3,1;geometry=true)
+            right=geo_entity_mesh(execution,3,2;geometry=true)
             expected=neighbor===:tetrahedral ? Dict(4=>10,7=>1) : Dict(4=>8,7=>2)
             @test _qt_extrude_counts(left)==expected
             @test validate(execution.mesh).ok
@@ -176,7 +176,7 @@ end
             QuadTriAddVerts$(laterals ? " RecombLaterals" : "");}
             """
             execution=_qt_extrude_execute(source)
-            volume=geo_entity_mesh(execution,3,1)
+            volume=geo_entity_mesh(execution,3,1;geometry=true)
             if occursin("Extrude{{0,0,2}",transform)
                 # Gmsh keeps each orphan spline control-point entity as a
                 # separate mesh node, even at identical connector positions.
@@ -230,7 +230,7 @@ end
             QuadTriAddVerts$(laterals ? " RecombLaterals" : "");}
             """
             execution=_qt_extrude_execute(source)
-            volume=geo_entity_mesh(execution,3,1)
+            volume=geo_entity_mesh(execution,3,1;geometry=true)
             @test validate(execution.mesh).ok
             @test validate(volume).ok
             @test _qt_extrude_boundary(volume)==_qt_extrude_surface_faces(execution)
@@ -255,10 +255,10 @@ end
             @test nnodes(execution.mesh)==nnode
             @test validate(execution.mesh).ok
             for tag in (1,26,48,70)
-                @test _qt_extrude_counts(geo_entity_mesh(execution,2,tag))==Dict(3=>n*n)
+                @test _qt_extrude_counts(geo_entity_mesh(execution,2,tag;geometry=true))==Dict(3=>n*n)
             end
             for region in 1:4
-                volume=geo_entity_mesh(execution,3,region)
+                volume=geo_entity_mesh(execution,3,region;geometry=true)
                 counts=region in stages && !laterals ?
                     (n==1 ? Dict(4=>8,7=>2) : Dict(4=>32,7=>32)) : Dict(5=>n*n*layers)
                 @test _qt_extrude_counts(volume)==counts
@@ -269,8 +269,8 @@ end
                 direct=mesh_model_volume(execution.model,region)
                 @test direct.coords==volume.coords
             end
-            first=geo_entity_mesh(execution,3,1)
-            last=geo_entity_mesh(execution,3,4)
+            first=geo_entity_mesh(execution,3,1;geometry=true)
+            last=geo_entity_mesh(execution,3,4;geometry=true)
             root=_qt_extrude_surface_faces(execution;tags=Set([1]))
             @test intersect(_qt_extrude_boundary(first),_qt_extrude_boundary(last))==root
         end

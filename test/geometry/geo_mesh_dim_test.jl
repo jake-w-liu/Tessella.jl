@@ -195,9 +195,16 @@ end
         Curve Loop(4)={7,8}; Plane Surface(3)={4};
         """;mesh_dim=2)
     @test validate(curved.mesh).ok
-    curved_parts=[Tessella.mesh_model_surface(curved.model,tag)
+    curved_parts=[Tessella.geo_entity_mesh(curved,2,tag;geometry=true)
                   for tag in sort!(collect(keys(curved.model.surfaces)))]
     @test ntris(curved.mesh)==sum(ntris,curved_parts;init=0)
+    # Standalone Model meshing retains its deterministic CDT contract. It is
+    # a separate generator from the completed native GEO entity products.
+    private_parts=[Tessella.mesh_model_surface(curved.model,tag)
+                   for tag in sort!(collect(keys(curved.model.surfaces)))]
+    @test ntris.(private_parts)==[108,11]
+    @test [Tessella.MeshTypes.mesh_crc(part).sha for part in private_parts]==["f876707ce7135d2956f099d67a90c1379ed4fee9c6d32edadd30d7dbc54c01c2", "66fe31ba23f77568860ddeed1a98d9d6a9c902bff984504318d8d6e6126ee315"]
+
 
     # A periodic curved pair meshes through the merged path; the slave's node
     # coordinates stay a bitwise affine copy of the master surface nodes.

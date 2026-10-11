@@ -10,6 +10,8 @@ module MeshElementQuality
 
 using ..MeshTypes: Mesh, node, triangle_area, tet_signed_volume
 using ..MeshPointLocation: mesh_element_offsets
+using ..GmshLibm: _gm_atan, _gm_acos, _gm_atan2
+using LinearAlgebra: svd
 
 export mesh_element_quality, mesh_element_qualities
 
@@ -38,13 +40,278 @@ end
 @inline _maxabs3(a)=max(abs(a[1]),abs(a[2]),abs(a[3]))
 @inline _finite3(a)=isfinite(a[1])&&isfinite(a[2])&&isfinite(a[3])
 
-function _quality_name(value,caller::AbstractString)
+# MQuadrangle::getVolume uses the physical six-distance formula. For a
+# warped quadrangle this differs from a bilinear reference-map integral.
+@inline function _quadrangle_native_distance(a,b)
+    x=a[1]-b[1];y=a[2]-b[2];z=a[3]-b[3]
+    return sqrt(x*x+y*y+z*z)
+end
+function _quadrangle_native_volume(a,b,c,d)
+    ab=_quadrangle_native_distance(a,b);bc=_quadrangle_native_distance(b,c)
+    cd=_quadrangle_native_distance(c,d);da=_quadrangle_native_distance(d,a)
+    ac=_quadrangle_native_distance(a,c);bd=_quadrangle_native_distance(b,d)
+    mn=2.0*ac*bd
+    abcd=ab*ab-bc*bc+cd*cd-da*da
+    squared=mn*mn-abcd*abcd
+    return squared<0 ? NaN : sqrt(squared)/4.0
+end
+
+@inline _quadrangle_native_dot(a,b)=a[1]*b[1]+a[2]*b[2]+a[3]*b[3]
+@inline _quadrangle_native_norm(a)=sqrt(_quadrangle_native_dot(a,a))
+@inline function _quadrangle_native_unit(a)
+    magnitude=_quadrangle_native_norm(a)
+    magnitude==0.0 && return a
+    inverse=1.0/magnitude
+    return (a[1]*inverse,a[2]*inverse,a[3]*inverse)
+end
+@inline function _quadrangle_native_angle(a,b,c)
+    first=_sub3(a,b);second=_sub3(c,b)
+    return _gm_atan2(_quadrangle_native_norm(_cross3(first,second)),
+        _quadrangle_native_dot(first,second))
+end
+function _quadrangle_native_eta(points)
+    edges=ntuple(i->_sub3(points[mod1(i+1,4)],points[i]),4)
+    normals=ntuple(i->_cross3(edges[i],edges[mod1(i+1,4)]),4)
+    sign=1.0
+    for i in 2:4
+        _quadrangle_native_dot(normals[1],normals[i])<0 && (sign=-1.0)
+    end
+    deviation=0.0
+    for i in 1:4
+        angle=min(180.0,180.0*_quadrangle_native_angle(
+            points[i],points[mod1(i+1,4)],points[mod1(i+2,4)])/pi)
+        deviation=i==1 ? abs(90.0-angle) : max(abs(90.0-angle),deviation)
+    end
+    return sign*(1.0-deviation*(1.0/90.0))
+end
+function _quadrangle_native_gradients(points,u,v)
+    du=(-0.25+0.25*v,0.25-0.25*v,0.25+0.25*v,-0.25-0.25*v)
+    dv=(-0.25+0.25*u,-0.25-0.25*u,0.25+0.25*u,0.25-0.25*u)
+    first=ntuple(axis->begin
+        total=0.0
+        for i in 1:4
+            total+=points[i][axis]*du[i]
+        end
+        total
+    end,3)
+    second=ntuple(axis->begin
+        total=0.0
+        for i in 1:4
+            total+=points[i][axis]*dv[i]
+        end
+        total
+    end,3)
+    return first,second
+end
+function _quadrangle_native_angle_shape(points)
+    coefficient=100.0
+    denominator=_gm_atan(coefficient*(pi/4.0))+
+        _gm_atan(coefficient*(2.0*pi/4.0-(pi/4.0)))
+    quality=floatmax(Float64)
+    for (u,v) in ((-1.,-1.),(-1.,1.),(1.,1.),(1.,-1.),
+            (0.,-1.),(0.,1.),(1.,0.),(-1.,0.),(0.,0.))
+        first,second=_quadrangle_native_gradients(points,u,v)
+        cosine=_quadrangle_native_dot(_quadrangle_native_unit(first),
+            _quadrangle_native_unit(second))
+        angle=abs(_gm_acos(cosine))-pi/2.0
+        value=(_gm_atan(coefficient*(angle+pi/4.0))+
+            _gm_atan(coefficient*(2.0*pi/4.0-(angle+pi/4.0))))/denominator
+        # std::min retains its first argument when the second is NaN.
+        value<quality && (quality=value)
+    end
+    return quality
+end
+function _quadrangle_native_tangent_radius(x,y,i)
+    a=ntuple(j->y[mod1(i+j-1,4)]-y[mod1(i+j,4)],3)
+    b=ntuple(j->x[mod1(i+j,4)]-x[mod1(i+j-1,4)],3)
+    c=ntuple(j->y[mod1(i+j,4)]*x[mod1(i+j-1,4)]-
+        y[mod1(i+j-1,4)]*x[mod1(i+j,4)],3)
+    lengths=ntuple(j->sqrt(a[j]*a[j]+b[j]*b[j]),3)
+    a12=a[1]/lengths[1]-a[2]/lengths[2]
+    a23=a[2]/lengths[2]-a[3]/lengths[3]
+    b12=b[1]/lengths[1]-b[2]/lengths[2]
+    b23=b[2]/lengths[2]-b[3]/lengths[3]
+    c12=c[1]/lengths[1]-c[2]/lengths[2]
+    c23=c[2]/lengths[2]-c[3]/lengths[3]
+    center_x=(c12*b23-c23*b12)/(a23*b12-a12*b23)
+    center_y=b12!=0.0 ? -a12/b12*center_x-c12/b12 :
+        -a23/b23*center_x-c23/b23
+    return (a[1]*center_x+b[1]*center_y+c[1])/lengths[1]
+end
+function _quadrangle_native_inner_radius(points)
+    center=ntuple(axis->(points[1][axis]+points[2][axis]+
+        points[3][axis]+points[4][axis])/4.0,3)
+    matrix=Matrix{Float64}(undef,4,3)
+    for i in 1:4,axis in 1:3
+        matrix[i,axis]=points[i][axis]-center[axis]
+    end
+    decomposition=svd(matrix)
+    sigma=decomposition.S
+    column=abs(sigma[1])<abs(sigma[2]) && abs(sigma[1])<abs(sigma[3]) ? 1 :
+        abs(sigma[2])<abs(sigma[1]) && abs(sigma[2])<abs(sigma[3]) ? 2 : 3
+    a,b,c=decomposition.V[:,column]
+    d=-(center[1]*a+center[2]*b+center[3]*c)
+    magnitude=sqrt(a*a+b*b+c*c)
+    projected=ntuple(i->begin
+        px,py,pz=points[i]
+        (((b*b+c*c)*px-a*b*py-a*c*pz-d*a)/magnitude,
+         (-a*b*px+(a*a+c*c)*py-b*c*pz-d*b)/magnitude,
+         (-a*c*px-b*c*py+(a*a+b*b)*pz-d*c)/magnitude)
+    end,4)
+    edge_first=_sub3(projected[2],projected[1])
+    edge_second=_sub3(projected[3],projected[1])
+    normal=_cross3(edge_first,edge_second)
+    axis_first=_quadrangle_native_unit(edge_first)
+    axis_second=_quadrangle_native_unit(_cross3(normal,edge_first))
+    x=ntuple(i->_quadrangle_native_dot(_sub3(projected[i],projected[1]),axis_first),4)
+    y=ntuple(i->_quadrangle_native_dot(_sub3(projected[i],projected[1]),axis_second),4)
+    radius=1e22
+    for i in 1:4
+        value=_quadrangle_native_tangent_radius(x,y,i)
+        value<radius && (radius=value)
+    end
+    return radius
+end
+
+@inline function _quadrangle_native_determinant(first,second,normal)
+    return first[1]*(second[2]*normal[3]-second[3]*normal[2])-
+        second[1]*(first[2]*normal[3]-first[3]*normal[2])+
+        normal[1]*(first[2]*second[3]-first[3]*second[2])
+end
+function _quadrangle_native_normal(points)
+    first,second=_quadrangle_native_gradients(points,0.,0.)
+    normal=_cross3(first,second)
+    magnitude=_quadrangle_native_norm(normal)
+    inverse=1.0/magnitude
+    return ntuple(i->normal[i]*inverse,3),magnitude
+end
+function _quadrangle_native_sicn(first,second,normal)
+    x,y,z=first;u,v,w=second
+    xs=x*x;ys=y*y;zs=z*z;us=u*u;vs=v*v;ws=w*w
+    dx=xs-us;dy=ys-vs;cx=x*u;cy=y*v
+    s1=ws*ws;s2=(zs-dy-dx)*ws;s3=(cy+cx)*z*w
+    s4=zs*zs;s5=(dy+dx)*zs;s6=cx*cy;s7=ys*ys
+    s8=dy*ys;s9=xs*xs;s10=dx*xs;s11=dy*dy;s12=dx*dy;s13=dx*dx
+    discriminant=2.0*(s2+s5+s12)+4.0*(s7-s8+s9-s10)+
+        8.0*(s3+s6)+s1+s4+s11+s13
+    total=xs+us+ys+vs+zs+ws
+    root=discriminant>0 ? sqrt(discriminant) : 0.0
+    largest=0.5*(total+root);smallest=0.5*(total-root)
+    squared=largest*smallest
+    value=2.0*(squared<0 ? NaN : sqrt(squared))/(largest+smallest)
+    local_normal=_cross3(first,second)
+    return _quadrangle_native_dot(local_normal,normal)>=0 ? value : -value
+end
+function _quadrangle_native_jacobian_quality(name,points)
+    normal,scale=_quadrangle_native_normal(points)
+    if name=="minSJ" && scale==0.0
+        return 0.0
+    end
+    # MFace::normal supplies the validity sign for CondNumBasis. It uses the
+    # first three slots; JacobianBasis instead uses the barycenter normal.
+    sicn_normal=_quadrangle_native_unit(_cross3(_sub3(points[2],points[1]),
+        _sub3(points[3],points[1])))
+    minimum=floatmax(Float64);maximum=-minimum
+    for (u,v) in ((-1.,-1.),(1.,-1.),(1.,1.),(-1.,1.))
+        first,second=_quadrangle_native_gradients(points,u,v)
+        determinant=_quadrangle_native_determinant(first,second,normal)
+        value=name=="minSICN" ? _quadrangle_native_sicn(first,second,sicn_normal) :
+            name=="minSIGE" ? determinant/_quadrangle_native_norm(first)/
+                _quadrangle_native_norm(second) :
+            name=="minSJ" ? determinant/scale : determinant
+        # The native range scans use std::min/max, which retain the existing
+        # extrema when a subsequent sample is NaN. CondNumBasis uses the first
+        # sampling value as its min_element seed, retaining a first NaN.
+        if name=="minSICN" && u==-1.0 && v==-1.0
+            minimum=value
+        else
+            value<minimum && (minimum=value)
+        end
+        value>maximum && (maximum=value)
+    end
+    return name=="maxDetJac" ? maximum : minimum
+end
+
+function _quadrangle_native_icn_domain(points,normal,bounds)
+    u0,u1,v0,v1=bounds
+    gradients=Array{Float64}(undef,2,2,6)
+    minimum=floatmax(Float64)
+    for j in 1:2,i in 1:2
+        first,second=_quadrangle_native_gradients(points,i==1 ? u0 : u1,j==1 ? v0 : v1)
+        determinant=_quadrangle_native_determinant(first,second,normal)
+        total=0.0
+        for (k,value) in enumerate((first...,second...))
+            gradients[i,j,k]=value
+            total+=value*value
+        end
+        value=2.0*determinant/total
+        value<minimum && (minimum=value)
+    end
+    lower=0.0
+    if !(minimum-lower<1e-3)
+        lower=floatmax(Float64)
+        for j in 0:2,i in 0:2
+            u=u0+(u1-u0)*(i/2.0);v=v0+(v1-v0)*(j/2.0)
+            first,second=_quadrangle_native_gradients(points,u,v)
+            numerator=_quadrangle_native_determinant(first,second,normal)
+            if numerator<0
+                lower=0.0;break
+            end
+            denominator=0.0
+            for k in 1:6,b in 0:1,a in 0:1
+                c=i-a;d=j-b
+                0<=c<=1 && 0<=d<=1 || continue
+                weight=1.0/((i==1 ? 2 : 1)*(j==1 ? 2 : 1))
+                denominator+=gradients[a+1,b+1,k]*gradients[c+1,d+1,k]*weight
+            end
+            denominator<=0.0 && continue
+            ratio=2.0*numerator/denominator
+            ratio<lower && (lower=ratio)
+        end
+    end
+    return (bounds=bounds,minimum=minimum,lower=lower)
+end
+function _quadrangle_native_isotropy(points)
+    normal,_=_quadrangle_native_normal(points)
+    minimum_jac=_quadrangle_native_jacobian_quality("minDetJac",points)
+    maximum_jac=_quadrangle_native_jacobian_quality("maxDetJac",points)
+    (minimum_jac<=0 && maximum_jac>=0) && return 0.0
+    # Unknown validity with an undefined primary normal yields no positive
+    # bound in the pinned ICN subdivision routine.
+    all(isfinite,normal) || return 0.0
+    domains=[_quadrangle_native_icn_domain(points,normal,(-1.,1.,-1.,1.))]
+    minimum=domains[1].minimum
+    for _ in 1:999
+        index=1
+        for i in 2:length(domains)
+            domains[i].lower<domains[index].lower && (index=i)
+        end
+        current=domains[index]
+        minimum-current.lower<1e-3+(1e-2-1e-3)*max(current.lower,0.0) && break
+        deleteat!(domains,index)
+        u0,u1,v0,v1=current.bounds
+        um=0.5*(u0+u1);vm=0.5*(v0+v1)
+        for bounds in ((u0,um,v0,vm),(um,u1,v0,vm),(u0,um,vm,v1),(um,u1,vm,v1))
+            next=_quadrangle_native_icn_domain(points,normal,bounds)
+            next.minimum<minimum && (minimum=next.minimum)
+            push!(domains,next)
+        end
+    end
+    lower=minimum
+    for domain in domains
+        domain.lower<lower && (lower=domain.lower)
+    end
+    factor=0.5*(lower+minimum)
+    return factor*minimum+(1.0-factor)*lower
+end
+
+function _quality_name(value,caller::AbstractString;allow_quad_eta=false)
     value isa AbstractString || throw(ArgumentError(
         "$caller: quality_name must be a string"))
     name=String(value)
     occursin('\0',name) && throw(ArgumentError(
         "$caller: quality_name must not contain NUL"))
-    name in ELEMENT_QUALITY_NAMES || throw(ArgumentError(
+    (name in ELEMENT_QUALITY_NAMES || (allow_quad_eta && name=="eta")) || throw(ArgumentError(
         "$caller: unknown quality_name $(repr(name)); expected one of " *
         join(repr.(ELEMENT_QUALITY_NAMES),", ")))
     return name

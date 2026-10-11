@@ -71,10 +71,17 @@ function _p2bo_mixed_catalog_fixture(api,coincident_edges)
         end
         for i in eachindex(points)
             api.model.add_line(offset+i,offset+mod1(i+1,length(points));tag=offset+i)
-            api.mesh.set_transfinite_curve(offset+i,2)
         end
         api.model.add_curve_loop(collect(offset+1:offset+length(points));tag=surface)
         api.model.add_plane_surface([surface];tag=surface)
+    end
+
+    # The built-in CAD synchronization of later entity creation resets earlier
+    # mesh attributes. Bind all transfinite constraints after CAD completion.
+    for (_,curve) in api.model.get_entities(1)
+        api.mesh.set_transfinite_curve(curve,2)
+    end
+    for (_,surface) in api.model.get_entities(2)
         api.mesh.set_transfinite_surface(surface)
     end
     api.option("Mesh.TransfiniteTri",1)
@@ -85,13 +92,30 @@ function _p2bo_mixed_catalog_fixture(api,coincident_edges)
     end
     api.mesh.generate(2)
     @test api.LAST_MESH[] isa Tessella.Elements.MixedMesh
-    @test length(api.LAST_MESH_CLASS[].edge_entities)==10
+    @test sum(length,api.mesh.get_elements(1)[2])==10
+end
+
+function _p2bo_edge_owners(api)
+    mesh=api.LAST_MESH[];class=api.LAST_MESH_CLASS[]
+    result=Dict{Tuple{Int32,Int32},Tuple{Int,Int32}}()
+    offset=0
+    for block in mesh.blocks
+        first_offset=offset;offset+=size(block.nodes,2)
+        block.msh in (1,8) || continue
+        for column in axes(block.nodes,2)
+            key=minmax(block.nodes[1,column],block.nodes[2,column])
+            uid=class.public_tags.element_tags[first_offset+column]
+            _,_,dim,entity=api.mesh.get_element(uid)
+            result[key]=(Int(dim),Int32(entity))
+        end
+    end
+    return result
 end
 
 function _p2bo_support_coordinates(api)
     mesh=api.LAST_MESH[]
     result=Dict{Tuple{Int,Int32},Set{NTuple{3,Float64}}}()
-    for (edge,owner) in api.LAST_MESH_CLASS[].edge_entities
+    for (edge,owner) in _p2bo_edge_owners(api)
         @test owner[1]==1
         points=Set(Tuple(mesh.coords[:,node]) for node in edge)
         xyz=reshape(api.model.get_value(1,Int(owner[2]),[0.,1.]),3,:)
@@ -112,16 +136,17 @@ end
             api.mesh.remove_duplicate_nodes()
             @test length(api.mesh.get_nodes()[1])==count-1
             @test _p2bo_support_coordinates(api)==before
-            @test length(api.LAST_MESH_CLASS[].face_entities)==2
+            @test sum(length(api.mesh.get_elements(2,surface)[2][1]) for surface in 1:2)==2
             api.mesh.set_order(2)
             @test _p2bo_support_coordinates(api)==before
             class=api.LAST_MESH_CLASS[]
+            edge_owners=_p2bo_edge_owners(api)
             for block in api.LAST_MESH[].blocks
                 block.msh==9 || continue
                 for column in axes(block.nodes,2),
                     (slot,i,j) in ((4,1,2),(5,2,3),(6,3,1))
                     support=minmax(block.nodes[i,column],block.nodes[j,column])
-                    @test class.node_entities[block.nodes[slot,column]]==class.edge_entities[support]
+                    @test class.node_entities[block.nodes[slot,column]]==edge_owners[support]
                 end
             end
         finally
@@ -130,10 +155,12 @@ end
         try
             api.initialize()
             _p2bo_mixed_catalog_fixture(api,true)
+            api.mesh.remove_duplicate_nodes()
+            @test length(api.mesh.get_nodes()[1])==7
             before=_p2bo_snapshot(api)
-            err=try api.mesh.remove_duplicate_nodes();nothing catch e;e end
+            err=try api.mesh.set_order(2);nothing catch e;e end
             @test err isa ArgumentError
-            @test occursin("ambiguous entity ownership",sprint(showerror,err))
+            @test occursin("Mesh edges from different curves share nodes",sprint(showerror,err))
             _p2bo_atomic(api,before)
         finally
             api.finalize()
@@ -157,7 +184,7 @@ end
             end
             api.mesh.generate(3)
             @test length(api.mesh.get_nodes()[1])==16
-            @test length(api.LAST_MESH_CLASS[].quad_entities)==12
+            @test length(api.mesh.get_elements_by_type(3)[1])==12
             api.mesh.remove_duplicate_nodes()
             @test length(api.mesh.get_nodes()[1])==15
             api.mesh.set_order(2)
@@ -190,9 +217,10 @@ end
         """
         _p2bo_with_model(source,(api,_)->begin
             api.mesh.generate(2);api.mesh.set_order(2)
-            @test api.LAST_MESH_HIGH_ORDER[] isa Tessella.HighOrder.P2TriMesh
+            @test length(api.mesh.get_elements_by_type(9,1)[1])==2
             @test length(api.mesh.get_nodes()[1])==9
-            mids=((.5,0.,0.),(1.,.5,0.),(.5,1.,0.),(0.,.5,0.))
+            # Literal native Curve supports captured independently in primary_v3.
+            mids=((0.49999999999867184, 0.0, 0.0),(1.0, 0.49999999999867184, 0.0),(0.5000000000013304, 1.0, 0.0),(0.0, 0.5000000000013304, 0.0))
             for (curve,expected) in enumerate(mids)
                 own,xyz,uv=api.mesh.get_nodes(1,curve,false,true)
                 @test length(own)==1 && Tuple(xyz)==expected && length(uv)==1
@@ -220,8 +248,8 @@ end
     end
 
     @testset "Coincident Tet10 regions retain separate carriers through mutations" begin
-        # Both regions are fully simplex, so this exercises the legacy overlay
-        # rather than the native MixedMesh high-order representation.
+        # Public cells include the complete actual boundary source. The
+        # geometry carrier remains the separately bound legacy Mesh view.
         source=replace(_P2BOQ.paired_source(),
             "QuadTriNoNewVerts RecombLaterals"=>"QuadTriNoNewVerts")
         _p2bo_with_model(source,(api,geometry)->begin
@@ -232,7 +260,8 @@ end
             cache=api.mesh.generate(3)
             @test cache isa Tessella.MeshTypes.Mesh && nnodes(cache)==24
             api.mesh.set_order(2)
-            @test api.LAST_MESH_HIGH_ORDER[] isa Tessella.HighOrder.P2Mesh
+            @test sum(length,api.mesh.get_elements(3)[2])==18 && api.mesh.get_element(
+                first(api.mesh.get_elements_by_type(11)[1]))[1]==11
             left=Int(geometry.lists["left"][2]);right=Int(geometry.lists["right"][2])
             surfaces=(Int.(geometry.lists["left"][3:end]),Int.(geometry.lists["right"][3:end]))
             function inspect_regions()
@@ -281,6 +310,9 @@ end
             "QuadTriNoNewVerts RecombLaterals"=>"QuadTriNoNewVerts")
         _p2bo_with_model(source,(api,geometry)->begin
             api.mesh.generate(3);api.mesh.set_order(2);api.mesh.refine()
+            # Native RefineMesh publishes linear children. Explicit re-elevation
+            # requests the quadratic child-face supports measured below.
+            api.mesh.set_order(2)
             @test sum(length,api.mesh.get_elements(3)[2])==144
             for name in ("left","right"),surface in Int.(geometry.lists[name][3:end])
                 own,xyz,uv=api.mesh.get_nodes(2,surface,false,true)

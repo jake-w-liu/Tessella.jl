@@ -308,6 +308,13 @@ function refine_uniform(mesh::Mesh;
                         max_nodes=typemax(Int32),
                         max_cells=typemax(Int32),
                         require_positive_tets::Bool=true)::Mesh
+    return _refine_uniform_traced(mesh;max_nodes,max_cells,require_positive_tets).mesh
+end
+
+function _refine_uniform_traced(mesh::Mesh;
+                        max_nodes=typemax(Int32),
+                        max_cells=typemax(Int32),
+                        require_positive_tets::Bool=true)
     node_limit = _limit(max_nodes, "max_nodes")
     cell_limit = _limit(max_cells, "max_cells")
 
@@ -396,7 +403,7 @@ function refine_uniform(mesh::Mesh;
     output_diagnostic.ok || throw(ArgumentError(
         "refine_uniform: refinement produced an invalid mesh — " *
         join(output_diagnostic.messages, "; ")))
-    return result
+    return (;mesh=result,primary_map=remap,midpoint_ids)
 end
 
 end # module Refine

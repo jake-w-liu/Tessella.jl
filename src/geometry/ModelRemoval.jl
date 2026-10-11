@@ -323,19 +323,29 @@ function _model_removal_state(
             copy(entity.node_tags),copy(entity.node_coords),
             copy(entity.node_params),copy(entity.element_types),
             copy(entity.element_tags),
-            Vector{Int32}[copy(nodes) for nodes in entity.element_nodes],
-            Dict{Int32,Vector{Float64}}(k=>copy(v) for (k,v) in
-                                        entity.aux_params))
+            Vector{UInt64}[copy(nodes) for nodes in entity.element_nodes],
+            Dict{UInt64,Vector{Float64}}(k=>copy(v) for (k,v) in
+                                        entity.aux_params),
+            Dict(k=>copy(v) for (k,v) in entity.node_native_params),
+            entity.geometry_parametrized)
         discrete[key]=retained
     end
 
     meshing=m.meshing
+    removed_uids=Set{UInt64}(uid for (owner,record) in
+        _discrete_mesh_records_model(m) if owner in removed for uid in record.node_tags)
+    meshing.periodic_uid_history=_model_periodic_uid_retire(
+        meshing.periodic_uid_history,removed_uids,removed)
+    meshing.mesh_authority=nothing
     for tag in removed_tags[2]
+        delete!(meshing.native_geo_kernel.retired_point_curves,tag)
         delete!(meshing.transfinite_curves,tag)
         delete!(meshing.degenerated,tag)
     end
     for tag in removed_tags[3]
         delete!(meshing.transfinite_surfaces,tag)
+        delete!(meshing.orientation_stl,tag)
+        delete!(meshing.orientation_geo_reverse,tag)
     end
     for tag in removed_tags[4]
         delete!(meshing.transfinite_volumes,tag)
@@ -343,11 +353,14 @@ function _model_removal_state(
         delete!(meshing.quad_tri,tag)
     end
     for entity in removed
+        entity[1]==0 && delete!(meshing.native_curve_endpoints,entity[2])
+        delete!(meshing.chain_entities,entity)
         for store in (meshing.recombine,meshing.smoothing,meshing.reverse,
                       meshing.algorithm,meshing.size_at_params,
                       meshing.size_from_boundary,meshing.attached,
                       meshing.extrude,meshing.extrude_sources,
-                      meshing.extrude_specs)
+                      meshing.extrude_specs,meshing.imported_entities,
+                      meshing.imported_ghost_elements)
             delete!(store,entity)
         end
     end
@@ -631,6 +644,7 @@ function _geo_delete_entities!(m::GeoModel,dim_tags;recursive::Bool=false)
     m.periodic=state.periodic
     m.embeds=state.embeds
     m.discrete=state.discrete
+    _native_geo_kernel_forget!(m,removed)
     # loops/surface_loops intentionally untouched — records survive dangling.
     # Counter decrement happens per removal, in order (`if(tag==max) max--`).
     for (dimension,tag) in removed
@@ -668,10 +682,14 @@ function _geo_reset_model_geometry!(m::GeoModel)
     empty!(m.booleans);empty!(m.boolean_operands);empty!(m.boolean_components)
     empty!(m.periodic);empty!(m.embeds);empty!(m.discrete)
     meshing=m.meshing
+    empty!(meshing.periodic_uid_history)
+    meshing.mesh_authority=nothing
     for store in (meshing.transfinite_curves,meshing.degenerated)
         empty!(store)
     end
     empty!(meshing.transfinite_surfaces)
+    empty!(meshing.orientation_stl)
+    empty!(meshing.orientation_geo_reverse)
     for store in (meshing.transfinite_volumes,meshing.outward_orientation,
                   meshing.quad_tri)
         empty!(store)
@@ -683,6 +701,10 @@ function _geo_reset_model_geometry!(m::GeoModel)
         empty!(store)
     end
     empty!(meshing.homology_requests)
+    empty!(meshing.chain_entities)
+    empty!(meshing.native_curve_endpoints)
+    meshing.native_geo_kernel=_ModelNativeGeoKernel()
+    m.occ_kernel=_ModelNativeOCCKernel()
     m.next_tag .= 0
     m.physical_tag_max=0
     return nothing

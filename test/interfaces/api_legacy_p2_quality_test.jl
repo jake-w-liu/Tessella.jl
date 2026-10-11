@@ -16,6 +16,24 @@ function _lp2qual_source(dimension)
     return source
 end
 
+# These analytic maps require exact corner-average supports. Native Curve
+# factories retain slightly shifted supports; their captured payloads are
+# checked independently in higher_legacy_p2_native_payload_probe_v1.jl.
+function _lp2qual_analytic_supports!(cells,dimension)
+    primary=dimension==2 ? 3 : 4
+    edges=dimension==2 ? ((1,2),(2,3),(3,1)) :
+        ((1,2),(2,3),(3,1),(1,4),(3,4),(2,4))
+    for column in axes(cells,2)
+        corners=[first(_LP2QUAL.mesh.get_node(cells[slot,column])) for slot in 1:primary]
+        for (index,(a,b)) in enumerate(edges)
+            point=(corners[a]+corners[b])/2
+            node=cells[primary+index,column]
+            _LP2QUAL.mesh.set_node(node,point)
+            @test first(_LP2QUAL.mesh.get_node(node))==point
+        end
+    end
+end
+
 @testset "Warped Tri6 quality uses each upstream Jacobian convention" begin
     try
         _LP2QUAL.initialize()
@@ -27,6 +45,7 @@ end
             _LP2QUAL.mesh.set_order(2)
             tags,nodes=_LP2QUAL.mesh.get_elements_by_type(9,1)
             @test length(tags)==1
+            _lp2qual_analytic_supports!(reshape(nodes,6,:),2)
             midpoint=first(_LP2QUAL.mesh.get_node(nodes[4]))
             _LP2QUAL.mesh.set_node(nodes[4],midpoint+[0.,0.,.05])
             quality(name)=only(_LP2QUAL.mesh.get_element_qualities(tags,name))
@@ -100,6 +119,7 @@ end
                 reverse && _LP2QUAL.mesh.reverse_elements(tags)
                 tags,nodes=_LP2QUAL.mesh.get_elements_by_type(kind,1)
                 cells=reshape(nodes,node_count,:)
+                _lp2qual_analytic_supports!(cells,dimension)
                 cell=cells[:,1];tag=tags[1]
                 points=reduce(hcat,(first(_LP2QUAL.mesh.get_node(node)) for node in cell))
                 edges=points[:,2:primary_count].-points[:,1]

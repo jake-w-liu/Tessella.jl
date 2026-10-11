@@ -384,7 +384,7 @@ function _metric_point(γ, derivative, field::AbstractSizeField, t::Float64,
     return _IntegrationPoint(t, lc, 0.0, speed, h)
 end
 
-function _push_point!(points::Vector{_IntegrationPoint}, point::_IntegrationPoint,
+function _push_point!(points::AbstractVector{_IntegrationPoint}, point::_IntegrationPoint,
                       maxpoints::Int, caller::AbstractString)
     length(points) < maxpoints || throw(ArgumentError(
         "$caller: adaptive integration exceeded max_integration_points=$maxpoints"))
@@ -392,7 +392,7 @@ function _push_point!(points::Vector{_IntegrationPoint}, point::_IntegrationPoin
     return nothing
 end
 
-function _recursive_integration!(points::Vector{_IntegrationPoint}, from,
+function _recursive_integration!(points::AbstractVector{_IntegrationPoint}, from,
                                  to, evaluate, precision::Float64,
                                  mindepth::Int, maxdepth::Int, maxpoints::Int,
                                  depth::Int, caller::AbstractString)
@@ -432,13 +432,15 @@ end
 function _adaptive_points(evaluate, t0::Float64, t1::Float64,
                           precision::Float64, maxpoints::Int,
                           mindepth::Int, maxdepth::Int,
-                          caller::AbstractString)
+                          caller::AbstractString;_point_store=nothing)
     maxpoints >= 3 || throw(ArgumentError(
         "$caller: max_integration_points must be at least 3"))
     from = evaluate(t0, true, false)
     to = evaluate(t1, false, true)
-    points = _IntegrationPoint[]
-    sizehint!(points, min(maxpoints, 257))
+    points = _point_store===nothing ? _IntegrationPoint[] : _point_store
+    points isa AbstractVector{_IntegrationPoint} && isempty(points) || throw(ArgumentError(
+        "$caller: adaptive point storage must be an empty IntegrationPoint vector"))
+    _point_store===nothing && sizehint!(points, min(maxpoints, 257))
     push!(points, from)
     _recursive_integration!(points, from, to, evaluate, precision, mindepth,
                             maxdepth, maxpoints, 1, caller)
@@ -466,10 +468,10 @@ end
 function _integration_points(evaluate, t0::Float64, t1::Float64, nsample,
                              precision::Float64, maxpoints::Int,
                              mindepth::Int, maxdepth::Int,
-                             caller::AbstractString)
+                             caller::AbstractString;_point_store=nothing)
     _check_integration_capacity(nsample, maxpoints, caller)
     nsample === nothing && return _adaptive_points(
-        evaluate, t0, t1, precision, maxpoints, mindepth, maxdepth, caller)
+        evaluate, t0, t1, precision, maxpoints, mindepth, maxdepth, caller;_point_store)
     return _uniform_points(evaluate, t0, t1, nsample, caller)
 end
 
@@ -495,7 +497,7 @@ end
     return value
 end
 
-function _recompute_primitive!(points::Vector{_IntegrationPoint},
+function _recompute_primitive!(points::AbstractVector{_IntegrationPoint},
                                caller::AbstractString)
     points[1] = _with_primitive(points[1], 0.0)
     @inbounds for i in 2:length(points)
@@ -508,7 +510,7 @@ function _recompute_primitive!(points::Vector{_IntegrationPoint},
     return points[end].p
 end
 
-function _smooth_primitive!(points::Vector{_IntegrationPoint}, ratio::Float64,
+function _smooth_primitive!(points::AbstractVector{_IntegrationPoint}, ratio::Float64,
                             iterations::Int, caller::AbstractString)
     alpha_minus_one = sqrt(ratio) - 1
 
@@ -574,13 +576,13 @@ function _metric_points(γ, field::AbstractSizeField, derivative,
                         size_function, precision::Float64, maxpoints::Int,
                         mindepth::Int, maxdepth::Int,
                         smooth_ratio, smoothing_iterations,
-                        caller::AbstractString)
+                        caller::AbstractString;_point_store=nothing)
     evaluate(t, at_begin, at_end) = _metric_point(
         γ, derivative, field, t, t0, t1, curve_entity, begin_entity,
         end_entity, at_begin, at_end, anisotropic_metric, size_function,
         caller)
     points = _integration_points(evaluate, t0, t1, nsample, precision,
-                                 maxpoints, mindepth, maxdepth, caller)
+                                 maxpoints, mindepth, maxdepth, caller;_point_store)
     if smooth_ratio !== nothing
         _smooth_primitive!(points, smooth_ratio, smoothing_iterations, caller)
     end
@@ -704,7 +706,7 @@ function _gmsh_edge_count(metric_total::Float64, minimum::Int,
     return nedge
 end
 
-@inline function _invert_primitive(points::Vector{_IntegrationPoint},
+@inline function _invert_primitive(points::AbstractVector{_IntegrationPoint},
                                    target::Float64)
     target <= points[1].p && return points[1].t
     target >= points[end].p && return points[end].t
@@ -748,7 +750,9 @@ function _filter_close_points!(points::Vector{NTuple{3,Float64}},
                                field::AbstractSizeField, curve_entity,
                                minimum_segments::Int, closed::Bool,
                                force_odd::Bool, size_function,
-                               caller::AbstractString)
+                               caller::AbstractString;row_map=nothing)
+    row_map===nothing || length(row_map)==length(parameters) ||
+        throw(ArgumentError("$caller: internal producer-row length mismatch"))
     length(points) == length(parameters) || throw(ArgumentError(
         "$caller: internal point/parameter length mismatch"))
     last_interior = closed ? length(points) : length(points) - 1
@@ -793,9 +797,11 @@ function _filter_close_points!(points::Vector{NTuple{3,Float64}},
         write_position += 1
         points[write_position] = points[read_position]
         parameters[write_position] = parameters[read_position]
+        row_map===nothing || (row_map[write_position]=row_map[read_position])
     end
     resize!(points, write_position)
     resize!(parameters, write_position)
+    row_map===nothing || resize!(row_map,write_position)
     return nothing
 end
 
@@ -844,6 +850,7 @@ function mesh_curve(γ, field::AbstractSizeField; t0::Real=0.0,
                     force_odd::Bool=false,
                     _recombine_odd_nodes::Bool=false,
                     _recombination_primitive=nothing,
+                    _point_store=nothing,
                     max_edges=_DEFAULT_MAX_EDGES)
     t0, t1, nsample = _curve_args(t0, t1, nsample, "mesh_curve")
     curve_entity = _curve_entity(entity, "mesh_curve")
@@ -865,7 +872,7 @@ function mesh_curve(γ, field::AbstractSizeField; t0::Real=0.0,
         γ, field, derivative, t0, t1, nsample, curve_entity, begin_entity,
         end_entity, anisotropic_metric, size_function, precision, maxpoints,
         mindepth, maxdepth, ratio, smoothing_iterations,
-        "mesh_curve")
+        "mesh_curve";_point_store)
     total = integration[end].p
     total > 0 || throw(ArgumentError(
         "mesh_curve: curve has zero sampled metric length"))

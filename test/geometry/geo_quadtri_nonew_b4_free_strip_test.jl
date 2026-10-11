@@ -92,19 +92,48 @@ function product(f;entry=false)
     geometry=B4.execute(f.source;dim=entry ? 3 : 0);model=geometry.model;out=Int.(geometry.lists["sweep"])
     source=mesh_model_surface(model,f.surface)
     surfaces=[(2,tag,mesh_model_surface(model,tag)) for tag in (f.surface,out[1],out[3:end]...)]
-    volume=entry ? Tessella.geo_entity_mesh(geometry,3,out[2]) : mesh_model_volume(model,out[2])
-    cert=B4.certify(volume,f,source)
+    standalone=mesh_model_volume(model,out[2])
+    volume=entry ? Tessella.geo_entity_mesh(geometry,3,out[2];geometry=true) : standalone
+    # The emitted view binds the same identities in its own coordinate space;
+    # certify it against the emitted Source and boundary parts. The actual
+    # native product and fresh standalone constructor each keep independent
+    # projection and coordinate signature audits.
+    emitted_source=entry ? Tessella.geo_entity_mesh(geometry,2,f.surface;geometry=true) : source
+    emitted_surfaces=entry ? [(2,tag,Tessella.geo_entity_mesh(geometry,2,tag;geometry=true))
+        for tag in (f.surface,out[1],out[3:end]...)] : surfaces
+    cert=B4.certify(volume,f,emitted_source)
     @test Tessella.validate(volume).ok
     @test length(cert.domains)==f.strip_length*f.intervals
     @test cert.total==cert.source.area*abs(B4.Q(last(cert.heights))-B4.Q(first(cert.heights)))
-    @test B4.Quad.surface_faces(surfaces,volume)==Set(keys(cert.boundary))
-    projected=model_to_mixed(model,volume,3,out[2])
+    @test B4.Quad.surface_faces(emitted_surfaces,volume)==Set(keys(cert.boundary))
+    if entry
+        # Cap choices use the explicit Source producer ordinal, independently
+        # of the generic entity query's private node storage rank.
+        native_source=Tessella.Model._model_mesh_product(model.meshing.mesh_authority,2,f.surface;
+            caller="actual free B4 Source certificate",producer_order=true)
+        native_volume=Tessella.geo_entity_mesh(geometry,3,out[2])
+        native_surfaces=[(2,tag,Tessella.geo_entity_mesh(geometry,2,tag))
+            for tag in (f.surface,out[1],out[3:end]...)]
+        native_cert=B4.certify(native_volume,f,native_source)
+        @test length(native_cert.domains)==f.strip_length*f.intervals
+        @test native_cert.total==native_cert.source.area*abs(B4.Q(last(native_cert.heights))-B4.Q(first(native_cert.heights)))
+        @test B4.Quad.surface_faces(native_surfaces,native_volume)==Set(keys(native_cert.boundary))
+        native_projected=model_to_mixed(model,native_volume,3,out[2])
+        @test B4.Quad.typed_signature(native_projected)==B4.Quad.typed_signature(native_volume)
+    end
+    projected=model_to_mixed(model,standalone,3,out[2])
     @test Tessella.validate(projected).ok
-    @test B4.Quad.typed_signature(projected)==B4.Quad.typed_signature(volume)
+    @test B4.Quad.typed_signature(projected)==B4.Quad.typed_signature(standalone)
+    if entry
+        changed=deepcopy(standalone)
+        coordinate=findfirst(!iszero,changed.coords)
+        changed.coords[coordinate]=nextfloat(changed.coords[coordinate])
+        @test_throws r"input coordinates do not match the completed sweep" model_to_mixed(model,changed,3,out[2])
+    end
     for (_,tag,part) in surfaces
         @test B4.Quad.typed_signature(mesh_model_surface(model,tag))==B4.Quad.typed_signature(part)
     end
-    return (;geometry,source,volume,cert,projected)
+    return (;geometry,source=emitted_source,volume,cert,projected)
 end
 
 const artifact=TOML.parsefile(joinpath(@__DIR__,"..","artifacts","quadtri_nonew_b4_free_strip_oracle.toml"))

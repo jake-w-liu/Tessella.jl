@@ -1,5 +1,115 @@
 # Handoff — Tessella.jl work state
 
+## Takeover (2026-10-11)
+
+The user resumed the implementation work after Devin stopped. Normal pushes of
+verified implementations to `main` remain required. Full P1–P6 parity remains
+open; do not mark it complete from a small test suite.
+
+The user's current testing instruction supersedes the exhaustive closure
+requirements in older dated handoffs. Routine tests must check functionality on
+small real fixtures. Full native-oracle sweeps, source/AST audits, memory stress,
+benchmarks, the 22 HFSS cases, aggregate validation, and external ASCENT solves
+are opt-in campaigns. See [test/README.md](test/README.md).
+
+Current integration starts from Devin's `C:/tmp/tessella_suite_slim_v1` Source
+and preserves Main's accepted cylinder, libm and recombination fixes. It adds
+curved owner-preserving refinement, periodic order/refinement UID history,
+seeded matching, compact-cap atomic coverage, model/list view writers and
+caller-owned record preservation. No frozen `.git` pointer was copied into Main.
+
+Writer review fixes preserve raw mutation bindings, combined reorder, parsed
+list POS output, PostView fields and blocked cross-field coordinate layout.
+The numeric PostView selector now accepts integral values stored as `"2.0"`
+and rejects nonfinite, fractional and overflowing selectors. Cross fields
+sample the actual public Tri3 union and use node UID adjacency, including
+mixed caches with lower/volume blocks and caller-owned cells.
+
+Current bounded verification:
+
+- Normal Julia 1.12.7 functional suite: 157/157, exit 0, 301.75 seconds,
+  including 36.14 seconds of precompilation. Most time was first API compilation.
+- Matching leaf, Julia 1.13.1: independent finite-objective checks and directed
+  ring cases, exit 0 in 3.707 seconds. This does not close all native ties.
+- Compact atomic coverage leaf: 15/15 in 2.407 seconds. Genuine public prism
+  lifecycle: 27/27 on Julia 1.13.1 in 9.41 seconds; 46 allocated nodes, correct
+  cap coverage/volume and retained orphan UIDs through MSH4.
+- Writer public regression, Julia 1.12.7: 43/43, exit 0 in 36.38 seconds,
+  including 31.03 seconds of loading/precompilation; test body 5.04 seconds.
+- Cross-field public regression, Julia 1.13.1: 30/30, exit 0 in 1.13 seconds.
+- Periodic order/refinement/UID-zero lifecycle, Julia 1.12.7: 57/57, exit 0
+  in 34.49 seconds including 31 seconds of precompilation; body 1.8 seconds.
+
+The last four public checks used `--compile=min -O0` with bounds checking and
+one thread. They verify behavior without claiming production JIT performance.
+The final Julia 1.12.7 package check after the hybrid fixes passed 157/157,
+actual exit 0 in 37.03 seconds, with a 1.6-second functional body and about
+31 seconds of precompilation. It used minimal compilation. The normal Julia
+1.13.1 package check passed 157/157 in 217.47 seconds before the small final
+hybrid fixes; its body took 188.4 seconds. The final actual hybrid regression
+passed 35/35 on Julia 1.13.1 in 71.94 seconds including loading/precompilation.
+It checks one cube and two-region batching, positive volume, exterior UID
+conformity, public model-view MSH export and failure atomicity.
+
+Raw diagnostic/failed receipts remain in `test/tmp/` and the C:/tmp packets;
+only actual drained exit-0 runs are green. Source is frozen for these checks.
+
+The former Auto reader recorded in the 2026-10-10 handoff has finished. Root
+stopped only the positively identified, superseded 80-file test profiler
+(PID 24976, parent 29848); its source/log artifacts remain preserved. Unrelated
+Julia jobs and the older native probe were left alone. The old >30 GiB/global
+sole-reader workflow is historical; use proportionate resources and coordinate
+package checks without blocking small independent leaves.
+
+This Main revision integrates the prepared implementation and replaces the
+previous unmerged-candidate state. Normally push this verified revision, then
+continue the actual implementation backlog below. All owned test processes
+have drained; no live test process needs adoption. Routine package testing is
+now concise, with the previous multi-hour suites retained only as opt-in.
+
+The public hybrid regression fixed missing OptimizePyramids registration,
+omitted TF Surface constructor transport, and narrow batch snapshot dictionary
+types. Capture uses actual append events and keeps strict ownership/geometry
+validation. The pinned 4.15.2 SDK independently confirms option default 0.
+Two optional wrapped-UID probes remain unqualified: both fail on a duplicate
+retained element UID before constructor capture. They do not establish a new
+helper defect or full wrapped-counter support. Preserve their receipts rather
+than promoting them or delaying unrelated verified code for a broad wrap audit.
+
+`AGENTS.md` and `startup.md` direct a fresh session to this handoff and the
+current testing policy. Preserve prior archives and unrelated untracked files.
+Historical snapshots and failed receipts below qualify only their own dates.
+
+### Remaining implementations after this increment
+
+Continue actual features, ordered by ASCENT value. This is a concrete Source
+backlog rather than the older expensive verification queue:
+
+1. Extend hybrid/ordinary region composition to embedded, periodic, reverse and
+   per-region smoothing contexts. Multi-region batching itself is implemented.
+2. Support multi-solid CAD assembly import and trimmed/periodic NURBS topology.
+3. Complete curved analytic Surface high-order placement and generated Surface/
+   Volume orders above two. Curve orders 1–10 are already implemented.
+4. Implement directional metric-driven meshing and the native automatic-sizing
+   octree path; scalar field evaluation alone does not close P1.
+5. Extend mixed-surface relocation and hybrid/high-order optimization, including
+   nonzero pyramid optimization and Netgen-equivalent behavior.
+6. Complete remaining ordinary meshing algorithms and curved/boundary-layer
+   recombination contexts; retain the current working planar paths.
+7. Complete boundary-layer Extrude and pipe frontends beyond ordinary Layers.
+8. Implement partition interface/ghost topology and parallel production paths;
+   partition assignment and metadata preservation are already implemented.
+9. Complete mixed model/list view export, remaining formats and post/CLI actions.
+10. Close native matching chronology and requirement-level differential parity.
+    Large P6/HFSS/ASCENT campaigns remain opt-in verification, not routine tests.
+
+Use the corresponding P1–P6 scope in `PLAN.md` and actual public APIs to choose
+small independently verifiable increments. Do not treat a missing historical
+receipt as proof that its feature is absent. Keep the overall goal active while
+required implementations remain.
+
+
+
 Continuation instructions for resuming this work on another machine.
 Branch: `main`. Active user goal: complete the full Julia-native Tessella
 mesher, correctly implementing ALL remaining parity requirements and unfinished

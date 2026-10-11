@@ -12,12 +12,21 @@ is not OpenCASCADE; unsupported CAD statements remain explicit blockers.
 """
 module Model
 
+import Mmap
+import ..Elements
+import ..NURBS
+import ..Transfinite
+import ..TransfiniteTriangle
+import ..OrderedMatching
+import ..WeightedMatching
+
 using ..MeshTypes: Mesh, validate, nnodes, nsegs, ntris, ntets, boundary_faces,
                    triangle_area, tet_signed_volume, tet_volume
 using ..Elements: ElementBlock, MixedElementBlock, MixedEntity,
-                  MixedEntityData, MixedPeriodicLink, MixedMesh,
+                  MixedEntityData, MixedPeriodicLink, MixedPartitionData, MixedMesh,
                   msh_num_nodes, msh_family, msh_dimension,
-                  _VOLUME_CELL_EDGES, _VOLUME_CELL_FACES
+                  _VOLUME_CELL_EDGES, _VOLUME_CELL_FACES, _native_mixed_entity
+using ..Refine: Refine
 using ..Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh,
                 _vert, _is_ghost_tri, _is_ghost_v
 using ..SizeField: AbstractSizeField, ConstantSize, FunctionSize, MinSize,
@@ -26,16 +35,19 @@ using ..SizeField: AbstractSizeField, ConstantSize, FunctionSize, MinSize,
                    GMSH_MAX_SIZE, _gmsh_bbox_characteristic_length
 using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
 using ..Mesh3D: tetrahedralize, mesh_boolean, recover_segment3, recover_triangle3,
-                refine_to_size
+                refine_to_size, _refine_gmsh_delaunay3, _gmsh_optimize_tetrahedra,
+                _gopt_gamma, _gopt_area, _gmsh3_native_center
 using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3,
                 _tet_edge_set, _volume_edge_set, _volume_cell_boundary_faces,
                 _mesh_covering_faces3, _certify_surface_fill,
                 _protected_cells!, _sorted_face3,
-                _on_segment3, _pt3, _segment_chain3
+                _on_segment3, _pt3, _segment_chain3,
+                delaunay3d, to_mesh3, _classify_by_centroid, _rb_drop_flats,
+                _finish_interior, _recover_boundary_exact, recover_boundary
 using ..Periodic: periodic_identify_affine
 using ..TransfiniteVolume: mesh_transfinite_volume
 using ..TransfinitePrism: mesh_transfinite_prism
-using ..StructuredQuadTri: _transfinite_quadtri
+using ..StructuredQuadTri: _transfinite_quadtri, _write_pyramid!
 using ..TransfiniteCurve: transfinite_curve_parameters, transfinite_curve_hwall
 using ..TransfiniteTriangle: mesh_transfinite_triangle,
                              mesh_transfinite_triangle_patch,
@@ -44,23 +56,27 @@ using ..TransfiniteTriangle: mesh_transfinite_triangle,
                              _collapsed_node, _node
 using ..Transfinite: mesh_transfinite_patch
 using ..TransfiniteQuad: mesh_transfinite_quad_patch
-using ..Recombine: recombine_triangles, _edge_key
+using ..Recombine: recombine_triangles, _edge_key, _primary_bipartite_face_events
 using ..Mesh1D: mesh_curve, curve_length, _adaptive_points, _length_point,
     _invert_primitive, _IntegrationPoint, _GMSH_INTEGRATION_PRECISION,
     _GMSH_MIN_INTEGRATION_DEPTH, _GMSH_MAX_INTEGRATION_DEPTH,
-    _DEFAULT_MAX_INTEGRATION_POINTS, _convex_coordinate
+    _DEFAULT_MAX_INTEGRATION_POINTS, _convex_coordinate, _gmsh_edge_count,
+    _filter_close_points!
 using ..Transform: _affine_coordinate, _transform_homogeneous,
     _periodic_affine_3x4, _periodic_affine_input
 using ..Predicates: orient2, orient3
 using ..GmshLibm: _gm_sin, _gm_cos, _gm_tan, _gm_asin, _gm_acos, _gm_atan,
-                  _gm_atan2, _gm_pow, _gm_sincos
+                  _gm_atan2, _gm_pow, _gm_sincos, _gm_exp, _gm87_sincos
 import LinearAlgebra
 using LinearAlgebra: Symmetric, eigen
 using Printf: @sprintf
 
+include("ModelMeshOrientation.jl")
+
 export GeoModel, add_point!, set_point_mesh_size!, add_line!, add_curve_loop!, add_plane_surface!
 export add_circle_arc!, add_ellipse_arc!, add_ruled_surface!
 export add_spline!, add_bspline!, add_bezier!, add_nurbs!
+export add_bezier_surface!, add_bspline_surface!
 export add_surface_loop!, add_volume!
 export add_box!, add_cylinder!, add_sphere!, add_cone!, add_torus!, boolean_volumes!, boolean_volumes_multi!
 export embed!, translate_volume!, dilate_volume!, rotate_volume!
@@ -123,22 +139,43 @@ place on a native entity.
 """
 mutable struct DiscreteEntity
     boundary::Vector{NTuple{2,Int}}
-    node_tags::Vector{Int32}
+    node_tags::Vector{UInt64}
     node_coords::Matrix{Float64}
     node_params::Matrix{Float64}
     element_types::Vector{Int32}
-    element_tags::Vector{Int32}
-    element_nodes::Vector{Vector{Int32}}
+    element_tags::Vector{UInt64}
+    element_nodes::Vector{Vector{UInt64}}
     # Parametric coordinates of nodes owned by *other* records with respect to
     # this entity's parametrization (e.g. a classified surface's boundary nodes
     # live on curve records but still carry surface (u,v) parameters after
     # `create_geometry!`).
-    aux_params::Dict{Int32,Vector{Float64}}
+    aux_params::Dict{UInt64,Vector{Float64}}
+    # Original mesh-vertex parameters survive element-based reclassification.
+    # Their length can differ from the dimension of the current owner.
+    node_native_params::Dict{UInt64,Vector{Float64}}
+    # Mesh-vertex parameters do not create a discrete CAD parametrization.
+    # create_geometry! establishes that separate entity state explicitly.
+    geometry_parametrized::Bool
 end
 
-DiscreteEntity() = DiscreteEntity(NTuple{2,Int}[], Int32[],
+DiscreteEntity(boundary,tags,coords,params,types,elements,nodes,aux,native)=
+    DiscreteEntity(boundary,tags,coords,params,types,elements,nodes,aux,native,false)
+
+DiscreteEntity(boundary,tags,coords,params,types,elements,nodes,aux)=
+    DiscreteEntity(boundary,tags,coords,params,types,elements,nodes,aux,
+        Dict{UInt64,Vector{Float64}}())
+
+DiscreteEntity() = DiscreteEntity(NTuple{2,Int}[], UInt64[],
     Matrix{Float64}(undef,3,0), Matrix{Float64}(undef,0,0),
-    Int32[], Int32[], Vector{Int32}[], Dict{Int32,Vector{Float64}}())
+    Int32[], UInt64[], Vector{UInt64}[], Dict{UInt64,Vector{Float64}}())
+
+function _model_mesh_node_parameters(record::DiscreteEntity,position::Int)
+    stored=get(record.node_native_params,record.node_tags[position],nothing)
+    stored!==nothing && return isempty(stored) ? nothing : stored
+    size(record.node_params,1)>0 && size(record.node_params,2)==length(record.node_tags) ||
+        return nothing
+    return collect(@view record.node_params[:,position])
+end
 
 Base.:(==)(a::DiscreteEntity,b::DiscreteEntity)=
     all(n->getfield(a,n)==getfield(b,n),fieldnames(DiscreteEntity))
@@ -160,6 +197,15 @@ const _GeoExtrudeParams=NamedTuple{
 # normalized-radius criterion always rejects.
 const _GMSH_TET_EDGE_OVER_RADIUS=2.0
 
+include("ModelMeshAuthority.jl")
+include("ModelMshFactory.jl")
+
+struct _ModelNativeCurveEndpoint
+    curve::Int
+    node::UInt64
+    point::NTuple{3,Float64}
+end
+
 """
 Owned per-entity meshing attributes on a [`GeoModel`](@ref), mirroring the
 Gmsh `model.mesh` generation-attribute surface. Empty containers mean the
@@ -168,6 +214,50 @@ categories (transfinite, recombine, smoothing, reverse, algorithm, compound,
 outward orientation) while periodic relations, embeddings, and Point sizes
 live elsewhere on the model.
 """
+struct _ModelNativeGeoCurve
+    endpoints::NTuple{2,Int}
+    controls::Union{Nothing,Vector{Int}}
+    kind::Symbol
+    geometry::Union{Nothing,NamedTuple}
+end
+Base.:(==)(a::_ModelNativeGeoCurve,b::_ModelNativeGeoCurve)=
+    all(name->getfield(a,name)==getfield(b,name),fieldnames(_ModelNativeGeoCurve))
+
+const _ModelNativePlaneFrameReceipt=NamedTuple{(:origin,:first,:second,:normal,:bounds),
+    Tuple{NTuple{3,Float64},NTuple{3,Float64},NTuple{3,Float64},NTuple{3,Float64},
+        Tuple{NTuple{2,Float64},NTuple{2,Float64}}}}
+mutable struct _ModelNativeGeoKernel
+    points::Dict{Int,NTuple{4,Float64}}
+    curves::Dict{Int,_ModelNativeGeoCurve}
+    transfinite_curves::Dict{Int,NamedTuple{(:num_nodes,:kind,:coef,:reversed),
+        Tuple{Int,Symbol,Float64,Bool}}}
+    point_aliases::Dict{Int,Int}
+    curve_aliases::Dict{Int,Int}
+    # Surviving GEdge cells can reference a Point MVertex retired by sync.
+    retired_point_curves::Dict{Int,Set{UInt64}}
+    point_max::Int
+    curve_max::Int
+    curve_loops::Dict{Int,Vector{Int}}
+    plane_surfaces::Dict{Int,Vector{Int}}
+    plane_frames::Dict{Int,_ModelNativePlaneFrameReceipt}
+    surface_aliases::Dict{Int,Int}
+    loop_max::Int
+    surface_max::Int
+end
+_ModelNativeGeoKernel()=_ModelNativeGeoKernel(
+    Dict{Int,NTuple{4,Float64}}(),Dict{Int,_ModelNativeGeoCurve}(),
+    Dict{Int,NamedTuple{(:num_nodes,:kind,:coef,:reversed),
+        Tuple{Int,Symbol,Float64,Bool}}}(),Dict{Int,Int}(),Dict{Int,Int}(),Dict{Int,Set{UInt64}}(),0,0,
+    Dict{Int,Vector{Int}}(),Dict{Int,Vector{Int}}(),Dict{Int,_ModelNativePlaneFrameReceipt}(),
+    Dict{Int,Int}(),0,0)
+Base.:(==)(a::_ModelNativeGeoKernel,b::_ModelNativeGeoKernel)=
+    all(name->getfield(a,name)==getfield(b,name),fieldnames(_ModelNativeGeoKernel))
+
+const _ModelImportedEntity=NamedTuple{(:kind,:parent,:partitions),
+    Tuple{String,Tuple{Int,Int},Vector{Int}}}
+
+include("ModelPeriodicUIDHistory.jl")
+
 mutable struct ModelMeshingAttributes
     transfinite_curves::Dict{Int,NamedTuple{(:num_nodes,:kind,:coef,:reversed),
                                            Tuple{Int,Symbol,Float64,Bool}}}
@@ -197,6 +287,10 @@ mutable struct ModelMeshingAttributes
     size_callback::Any
     compounds::Vector{Pair{Int,Vector{Int}}}
     outward_orientation::Set{Int}
+    # GFace's retained STL is independent of its current mesh and reverse flag.
+    orientation_stl::Dict{Int,Vector{_ModelMeshOrientationTriangle}}
+    # GEO's source ReverseMesh flag survives changes to the live GFace flag.
+    orientation_geo_reverse::Dict{Int,Bool}
     degenerated::Set{Int}
     quad_tri::Set{Int}
     order::Int
@@ -212,6 +306,11 @@ mutable struct ModelMeshingAttributes
     lc_factor::Float64
     recombine_all::Bool
     recombine_algo::Int
+    recombine_topology_passes::Int
+    recombine_node_repositioning::Int
+    recombine_minimum_quality::Float64
+    native_smoothing::Int
+    second_order_linear::Bool
     # `Mesh.MeshSizeExtendFromBoundary` (upstream `lcExtendFromBoundary`):
     # the global mode per-entity records fall back to. 1 (default) extends
     # the largest incident boundary edge into surfaces/volumes, 2 extends
@@ -219,9 +318,27 @@ mutable struct ModelMeshingAttributes
     # enables surfaces for `> 0` or `== -2`, `Extend2dMeshIn3dVolumes` for
     # `> 0` or `== -3`, and a resolved 0 disables.
     lc_extend_from_boundary::Int
+    # Global Gmsh algorithm selections; nonzero per-Surface `algorithm`
+    # attributes override `algorithm_2d`. Algorithm3D id2 aliases id1.
+    algorithm_2d::Int
+    algorithm_3d::Int
     attached::Dict{Tuple{Int,Int},DiscreteEntity}
+    mesh_authority::Union{Nothing,_ModelMeshAuthority}
     homology_requests::Vector{NamedTuple{(:kind,:domain,:subdomain,:dims),
         Tuple{String,Vector{Int},Vector{Int},Vector{Int}}}}
+    # GModel's chain entity collections persist independently of mesh data.
+    # Their element vertices take priority during vertex reassociation.
+    chain_entities::Set{Tuple{Int,Int}}
+    # A closed GEdge can move its singly incident Point's MVertex to point(t0).
+    # Keep the producer's identity receipt independent of the geometric Point.
+    native_curve_endpoints::Dict{Int,_ModelNativeCurveEndpoint}
+    native_geo_kernel::_ModelNativeGeoKernel
+    imported_entities::Dict{Tuple{Int,Int},_ModelImportedEntity}
+    imported_num_partitions::Int
+    # Ghost cells belong to the entity selected at each read-time event.
+    # A partition number alone cannot recover this membership after Merge.
+    imported_ghost_elements::Dict{Tuple{Int,Int},Vector{Tuple{UInt64,Int32}}}
+    periodic_uid_history::Dict{Tuple{Int,Int},_ModelPeriodicUIDHistory}
 end
 
 ModelMeshingAttributes() = ModelMeshingAttributes(
@@ -241,6 +358,8 @@ ModelMeshingAttributes() = ModelMeshingAttributes(
     nothing,
     Pair{Int,Vector{Int}}[],
     Set{Int}(),
+    Dict{Int,Vector{_ModelMeshOrientationTriangle}}(),
+    Dict{Int,Bool}(),
     Set{Int}(),
     Set{Int}(),
     1,
@@ -249,13 +368,29 @@ ModelMeshingAttributes() = ModelMeshingAttributes(
     1.0,
     false,
     1,
+    5,
+    true,
+    0.01,
+    1,
+    false,
+    1,
+    6,
     1,
     Dict{Tuple{Int,Int},DiscreteEntity}(),
+    nothing,
     NamedTuple{(:kind,:domain,:subdomain,:dims),
-               Tuple{String,Vector{Int},Vector{Int},Vector{Int}}}[])
+               Tuple{String,Vector{Int},Vector{Int},Vector{Int}}}[],
+    Set{Tuple{Int,Int}}(),
+    Dict{Int,_ModelNativeCurveEndpoint}(),
+    _ModelNativeGeoKernel(),Dict{Tuple{Int,Int},_ModelImportedEntity}(),0,
+    Dict{Tuple{Int,Int},Vector{Tuple{UInt64,Int32}}}(),
+    Dict{Tuple{Int,Int},_ModelPeriodicUIDHistory}())
 
 Base.:(==)(a::ModelMeshingAttributes,b::ModelMeshingAttributes)=
     all(n->getfield(a,n)==getfield(b,n),fieldnames(ModelMeshingAttributes))
+
+include("ModelOCCEntityMap.jl")
+include("ModelOCCShapeTypes.jl")
 
 mutable struct GeoModel
     points::Dict{Int,NTuple{3,Float64}}
@@ -333,6 +468,7 @@ mutable struct GeoModel
     # `GModel::getName`/`setName` — set by `.geo` `SetName`, reset by
     # `Delete All`/`NewModel`.
     name::String
+    occ_kernel::_ModelNativeOCCKernel
 end
 
 """
@@ -373,7 +509,10 @@ GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                       ModelMeshingAttributes(),
                       Dict{Tuple{Int,Int},DiscreteEntity}(),
                       Int[0,0,0,0],
-                      "")
+                      "",
+                      _ModelNativeOCCKernel())
+
+include("ModelMeshProjection.jl")
 
 function _tag(value, caller, dim::Int)
     value isa Integer || throw(ArgumentError("$caller: tag must be an integer"))
@@ -582,6 +721,7 @@ function set_point_mesh_size!(m::GeoModel,points,mesh_size)
     end
     for tag in tags
         m.point_size[tag]=size
+        _native_geo_kernel_update_point!(m,tag)
     end
     return nothing
 end
@@ -678,10 +818,30 @@ include("ModelEntityState.jl")
 include("ModelSpatialQueries.jl")
 include("ModelEntityMetadata.jl")
 include("ModelEntityEvaluation.jl")
+include("ModelDiscreteCurveGeometry.jl")
+include("ModelHighOrderArcGeometry.jl")
+include("ModelHighOrderCurveGeometry.jl")
+include("ModelHighOrderSplineGeometry.jl")
+include("ModelHomologyNativeGeometry.jl")
+include("ModelHomologyNativeCells.jl")
+include("ModelHomologyNativeReduction.jl")
+include("ModelHomologyNativeNormalForms.jl")
+include("ModelHomologyNativeChains.jl")
+include("ModelHomologyNative.jl")
 include("ModelMeshingAttributes.jl")
+include("ModelMeshOrientationFrontend.jl")
 include("ModelTransforms.jl")
 include("ModelCurved.jl")
+include("ModelOCCArcGeometry.jl")
 include("ModelSplines.jl")
+include("ModelNURBSSurfaces.jl")
+include("ModelOCCCurves.jl")
+include("ModelNURBSProjectionCache.jl")
+include("ModelNURBSProjectionLinear.jl")
+include("ModelNURBSProjectionRoot.jl")
+include("ModelNURBSProjectionSeeds.jl")
+include("ModelOCCShapeRegistry.jl")
+include("ModelOCCCurveShapes.jl")
 include("ModelBoolean.jl")
 
 @inline function _model_periodic_entity_label(dim::Int)
@@ -1215,9 +1375,16 @@ function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
     # runs, not at declaration.
     _model_periodic_dependency_parents(
         vcat(existing,pending,derived_curve_constraints),caller)
+    histories=copy(m.meshing.periodic_uid_history)
+    for constraint in pending
+        constraint.dim==2 || continue
+        histories[(2,Int(constraint.slave_entity))]=
+            _model_periodic_uid_declaration_history(m,constraint,caller)
+    end
     for constraint in pending
         m.periodic[(constraint.dim,Int(constraint.slave_entity))]=constraint
     end
+    m.meshing.periodic_uid_history=histories
     # Derived curve masters install last so the slave curve's stored
     # parameters mirror its master (upstream `GEdge::setMeshMaster` semantics
     # — later relations overwrite earlier ones for the same slave curve).
@@ -1458,8 +1625,10 @@ end
 """
     add_box!(model, x, y, z, dx, dy, dz; tag=0) -> tag
 
-Add an axis-aligned box volume with finite origin `(x,y,z)` and positive
-extents `(dx,dy,dz)`. Like Gmsh's `addBox`, the box is a real boundary
+Add an axis-aligned box volume from finite corner `(x,y,z)` and signed
+extents `(dx,dy,dz)`. Like Gmsh's OCC `addBox`, the two rounded Float64
+corners determine its minimum corner and positive spans; every span must
+exceed OpenCASCADE's geometric confusion tolerance `1e-7`. The box is a real boundary
 representation: it owns 8 corner Points, 12 edge Curves, 6 planar Surfaces and
 one Surface Loop, all allocated from the shared per-dimension tag namespaces
 and queryable through the entity, boundary, and adjacency APIs. Entity order
@@ -1478,13 +1647,27 @@ from incident edges. Assign explicit sizes with `set_point_mesh_size!` or
 function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0,
                   _zero_literal::Bool=false)
     caller="add_box!"
-    origin=_finite3(xmin,ymin,zmin,caller)
-    d=_finite3(dx,dy,dz,caller)
-    (d[1]>0 && d[2]>0 && d[3]>0) || throw(ArgumentError("$caller: extents must be positive"))
+    first_corner=_finite3(xmin,ymin,zmin,caller)
+    extent=_finite3(dx,dy,dz,caller)
+    second_corner=ntuple(index->first_corner[index]+extent[index],3)
+    all(isfinite,second_corner) || throw(ArgumentError(
+        "$caller: Box endpoints must remain finite in Float64"))
+    # Gmsh4.15.2 constructs OCC7.8.1 BRepPrimAPI_MakeBox(P1,P2).
+    # Its minimum corner and Abs(P2-P1) spans are authoritative; GWedge
+    # rejects spans <= Precision::Confusion(), independently of Geometry.Tolerance.
+    origin=ntuple(index->min(first_corner[index],second_corner[index]),3)
+    d=ntuple(index->abs(second_corner[index]-first_corner[index]),3)
+    all(value->isfinite(value) && value>_OCC_CONFUSION,d) || throw(ArgumentError(
+        "$caller: actual Box spans must be finite and exceed 1e-7"))
+    # OCC translates its minimum corner by each span to emit the other corners.
+    # Reconstructing this endpoint also retains its rounded two-corner arithmetic.
+    upper=ntuple(index->origin[index]+d[index],3)
+    all(isfinite,upper) || throw(ArgumentError(
+        "$caller: constructed Box endpoints must remain finite in Float64"))
     t=_alloc_tag!(m,3,_tag(tag,caller,3),caller;literal_zero=_zero_literal)
     (haskey(m.volumes,t) || haskey(m.discrete,(3,t))) && throw(ArgumentError("$caller: Volume[$t] already exists"))
     x0,y0,z0=origin
-    x1=x0+d[1]; y1=y0+d[2]; z1=z0+d[3]
+    x1,y1,z1=upper
     created_points=Int[];created_curves=Int[]
     created_loops=Int[];created_surfaces=Int[]
     shell=0
@@ -1510,6 +1693,7 @@ function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0,
                      (p[6],p[5]),(p[5],p[7]),(p[8],p[7]),(p[6],p[8]),
                      (p[2],p[6]),(p[1],p[5]),(p[4],p[8]),(p[3],p[7]))
             push!(created_curves,add_line!(m,edge...))
+            m.curve_geometry[last(created_curves)]=_model_box_edge_geometry(m,edge)
         end
         c=created_curves
         # Face loops, each oriented so its stored normal points along the
@@ -1521,10 +1705,12 @@ function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0,
                           [c[3],c[12],-c[7],-c[11]],
                           [c[9],c[8],-c[11],-c[4]],
                           [c[10],c[6],-c[12],-c[2]])
-        for signed_curves in loop_curve_signs
+        for (face,signed_curves) in enumerate(loop_curve_signs)
             push!(created_loops,add_curve_loop!(m,signed_curves))
             push!(created_surfaces,
                   add_plane_surface!(m,[last(created_loops)]))
+            m.surface_geometry[last(created_surfaces)]=
+                _model_box_plane_geometry(m,last(created_surfaces),origin,d,face)
         end
         shell=add_surface_loop!(m,[-created_surfaces[1],created_surfaces[2],
                                    -created_surfaces[3],created_surfaces[4],
@@ -1533,12 +1719,14 @@ function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0,
         shell!=0 && delete!(m.surface_loops,shell)
         for surface in created_surfaces
             delete!(m.surfaces,surface)
+            delete!(m.surface_geometry,surface)
         end
         for loop in created_loops
             delete!(m.loops,loop)
         end
         for curve in created_curves
             delete!(m.curves,curve)
+            delete!(m.curve_geometry,curve)
         end
         for point in created_points
             delete!(m.points,point);delete!(m.point_size,point)
@@ -2562,12 +2750,16 @@ end
 end
 
 function _periodic_curve_point(m::GeoModel,curve::Int,parameter::Float64,
-                               caller::AbstractString)
-    return _periodic_curve_point(m,curve,parameter,caller,Set{Int}())
+                               caller::AbstractString;_native_producer::Bool=false,
+                               _parameter_source=m.curve_params)
+    return _periodic_curve_point(m,curve,parameter,caller,Set{Int}();
+        _native_producer,_parameter_source)
 end
 
 function _periodic_curve_point(m::GeoModel,curve::Int,parameter::Float64,
-                               caller::AbstractString,seen::Set{Int})
+                               caller::AbstractString,seen::Set{Int};
+                               _native_producer::Bool=false,
+                               _parameter_source=m.curve_params)
     # A periodic slave curve emits its master's mesh coordinates verbatim:
     # upstream copies `mesh_vertices` through the relation transform instead
     # of re-evaluating the slave geometry, so every face sharing the slave
@@ -2601,8 +2793,8 @@ function _periodic_curve_point(m::GeoModel,curve::Int,parameter::Float64,
                 # mirror inside the evaluation is not involutive in floating
                 # point.
                 u=nothing
-                slave_params=get(m.curve_params,curve,nothing)
-                master_params=get(m.curve_params,master,nothing)
+                slave_params=get(_parameter_source,curve,nothing)
+                master_params=get(_parameter_source,master,nothing)
                 if slave_params!==nothing && master_params!==nothing &&
                         length(slave_params)==length(master_params)
                     index=argmin(abs.(slave_params .- parameter))
@@ -2615,7 +2807,8 @@ function _periodic_curve_point(m::GeoModel,curve::Int,parameter::Float64,
                 u===nothing && (u=constraint.reversed ?
                     m1-(parameter-t0) : parameter-t0+m0)
                 push!(seen,curve)
-                point=_periodic_curve_point(m,master,u,caller,seen)
+                point=_periodic_curve_point(m,master,u,caller,seen;
+                    _native_producer,_parameter_source)
                 coefficients,translation=_periodic_affine_3x4(constraint.affine)
                 return _model_affine_point(
                     coefficients,translation,point,caller,curve)
@@ -2630,10 +2823,14 @@ function _periodic_curve_point(m::GeoModel,curve::Int,parameter::Float64,
     # `_model_curve_point`'s dispatch orders OCC kinds ahead of `:line`.
     if _curve_type(m,curve)===:line && _occ_geometry(m,curve)===nothing
         a,b=m.curves[curve];p=m.points[a];q=m.points[b]
-        point=ntuple(3) do axis
-            _affine_coordinate(
-                p[axis],0.0,parameter,0.0,0.0,q[axis],0.0,0.0,
-                p[axis],0.0,0.0,caller,curve)
+        point=if _native_producer
+            _model_native_line_point(p,q,parameter)
+        else
+            ntuple(3) do axis
+                _affine_coordinate(
+                    p[axis],0.0,parameter,0.0,0.0,q[axis],0.0,0.0,
+                    p[axis],0.0,0.0,caller,curve)
+            end
         end
     else
         point=_model_curve_point(m,curve,parameter,caller)
@@ -2815,13 +3012,17 @@ end
 
 function _surface_vertex_sizes(T,xs::Vector{Float64},ys::Vector{Float64},
                                floor_segs,markers::Vector{Float64},
-                               embedded_vertices)
+                               embedded_vertices;interior=nothing)
+    interior===nothing || (interior isa AbstractVector{Bool} &&
+        length(interior)==length(T.alive)) || throw(ArgumentError(
+        "surface vertex sizes: interior flags must align with triangle storage"))
     vid_of=_pslg_vertex_map(T,xs,ys)
     vid(i::Int)=vid_of[_surface_size_key(xs[i],ys[i])]
     n=T.nreal
     sizes=fill(Inf,n)
     @inbounds for t in eachindex(T.alive)
         (T.alive[t] && !_is_ghost_tri(T,t)) || continue
+        interior===nothing || interior[t] || continue
         for (i,j) in ((1,2),(2,3),(3,1))
             a=_vert(T,t,i); b=_vert(T,t,j)
             (_is_ghost_v(a) || _is_ghost_v(b)) && continue
@@ -3569,6 +3770,18 @@ end
 @inline _model_projection_legacy_tag(tags::Vector{Int32})=
     isempty(tags) ? Int32(0) : first(tags)
 
+function _model_mesh_entity_metadata(m::GeoModel,dim::Int,tag::Int,bounds;
+                                      physical_tags=Int32[],boundaries=Int32[],
+                                      embedded_curves=Int32[])
+    native_zero=tag==0 || (dim==1 && any(iszero,boundaries) &&
+        _model_entity_known(m,0,0))
+    if native_zero && _model_entity_known(m,dim,tag)
+        return _native_mixed_entity(dim,tag,bounds;
+            physical_tags,boundaries,embedded_curves)
+    end
+    return MixedEntity(dim,tag,bounds;physical_tags,boundaries,embedded_curves)
+end
+
 function _model_projection_bbox(mesh,nodes,caller::AbstractString)
     isempty(nodes) && throw(ErrorException(
         "$caller: internal entity projection has no nodes"))
@@ -3765,12 +3978,19 @@ function _model_projection_embedded_point_node(
     scale=max(1.0,hypot(coordinate...))
     tolerance=max(atol,128eps(Float64)*scale)
     matches=Int[]
+    exact_matches=Int[]
     @inbounds for node in 1:nnodes(mesh)
         distance=hypot(mesh.coords[1,node]-coordinate[1],
                        mesh.coords[2,node]-coordinate[2],
                        mesh.coords[3,node]-coordinate[3])
         distance<=tolerance && push!(matches,node)
+        distance==0.0 && push!(exact_matches,node)
     end
+    # Recovery can insert a distinct live Steiner vertex within the fallback
+    # tolerance of a seeded CAD Point. Its nearby coordinate is not another
+    # identity for an exact seed; retain ambiguity checks within the exact
+    # class, and use tolerant matching only when no exact seed is present.
+    isempty(exact_matches) || (matches=exact_matches)
     isempty(matches) && throw(ArgumentError(
         "$caller: embedded Point[$point] is not a mesh node"))
     length(matches)==1 || throw(ArgumentError(
@@ -3934,6 +4154,8 @@ function model_to_mixed(m::GeoModel,mesh::Union{Mesh,MixedMesh},
     diagnostic=validate(mesh)
     diagnostic.ok || throw(ArgumentError(
         "$caller: input mesh is invalid — "*join(diagnostic.messages,"; ")))
+    actual=_model_mesh_actual_projection(m,mesh,2,surface,caller)
+    actual===nothing || return actual
     if mesh isa Mesh
         nsegs(mesh)==0 || throw(ArgumentError(
             "$caller: input must not contain explicit segment cells"))
@@ -4151,7 +4373,7 @@ function model_to_mixed(m::GeoModel,mesh::Union{Mesh,MixedMesh},
         union!(projected_groups,((0,Int(tag)) for tag in tags))
         node=point_nodes[point]
         coordinate=(mesh.coords[1,node],mesh.coords[2,node],mesh.coords[3,node])
-        entities[(0,point)]=MixedEntity(
+        entities[(0,point)]=_model_mesh_entity_metadata(m,
             0,point,coordinate;physical_tags=tags)
     end
 
@@ -4164,7 +4386,7 @@ function model_to_mixed(m::GeoModel,mesh::Union{Mesh,MixedMesh},
         union!(projected_groups,((1,Int(tag)) for tag in tags))
         nodes=Int32[entry[2] for entry in curve_entries[curve]]
         start_point,stop_point=m.curves[curve]
-        entities[(1,curve)]=MixedEntity(
+        entities[(1,curve)]=_model_mesh_entity_metadata(m,
             1,curve,_model_projection_bbox(mesh,nodes,caller);
             physical_tags=tags,
             boundaries=Int32[Int32(start_point),-Int32(stop_point)])
@@ -4178,7 +4400,7 @@ function model_to_mixed(m::GeoModel,mesh::Union{Mesh,MixedMesh},
     surface_physical=_model_projection_physical_tags(m,2,surface)
     union!(projected_groups,((2,Int(tag)) for tag in surface_physical))
     surface_boundaries=_model_projection_surface_boundaries(m,surface)
-    entities[(2,surface)]=MixedEntity(
+    entities[(2,surface)]=_model_mesh_entity_metadata(m,
         2,surface,_model_projection_bbox(mesh,axes(mesh.coords,2),caller);
         physical_tags=surface_physical,boundaries=surface_boundaries,
         embedded_curves=embedded_curves)
@@ -4205,7 +4427,7 @@ function model_to_mixed(m::GeoModel,mesh::Union{Mesh,MixedMesh},
     external_element_tags=_model_projection_external_elements(blocks)
     node_parametric=Union{Nothing,Vector{Float64}}[
         nothing for _ in 1:nnodes(mesh)]
-    data=MixedEntityData(
+    data=Elements._native_mixed_entity_data(
         entities;node_entities=node_entities,node_parametric=node_parametric,
         external_node_tags=external_node_tags,block_entities=block_entities,
         external_element_tags=external_element_tags)
@@ -4489,7 +4711,7 @@ function model_to_mixed(m::GeoModel,parts::AbstractVector)
             surface_tris=surface_tris))
     end
 
-    data=MixedEntityData(
+    data=Elements._native_mixed_entity_data(
         entities;node_entities=node_entities,node_parametric=node_parametric,
         external_node_tags=UInt64.(1:total_nodes),
         block_entities=block_entities,
@@ -5436,18 +5658,20 @@ end
 
 function _model_volume_boundary_surfaces(
     m::GeoModel,volume::Int,caller::AbstractString;
-    orient_cavities::Bool=true)
+    orient_cavities::Bool=true,certify_shells::Bool=true)
     boundaries=Int[]
     seen=Set{Int}()
     for (shell_index,shell) in pairs(m.volumes[volume])
         haskey(m.surface_loops,shell) || throw(ArgumentError(
             "$caller: Volume[$volume] references unknown Surface Loop[$shell]"))
         surfaces=m.surface_loops[shell]
-        _validate_surface_loop(m,surfaces,caller)
+        certify_shells && _validate_surface_loop(m,surfaces,caller)
         shell_sign=orient_cavities && shell_index>1 ? -1 : 1
         for signed_surface in surfaces
             surface=abs(signed_surface)
-            surface in seen && throw(ArgumentError(
+            haskey(m.surfaces,surface) || throw(ArgumentError(
+                "$caller: Surface Loop[$shell] references unknown Surface[$surface]"))
+            certify_shells && surface in seen && throw(ArgumentError(
                 "$caller: Surface[$surface] belongs to multiple Volume[$volume] shells"))
             push!(seen,surface)
             push!(boundaries,shell_sign*signed_surface)
@@ -5918,13 +6142,20 @@ function _volume_projection_contract(mesh::MixedMesh,caller::AbstractString)
     return cell_count
 end
 
-function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;_extrude_scope=nothing)
+function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;
+    _extrude_scope=nothing,_mesh_input=nothing)
     caller="model_to_mixed"
     haskey(m.volumes,volume) || throw(ArgumentError(
         "$caller: unknown Volume[$volume]"))
     diagnostic=validate(mesh)
     diagnostic.ok || throw(ArgumentError(
         "$caller: input mesh is invalid — "*join(diagnostic.messages,"; ")))
+    actual=_model_mesh_actual_projection(m,mesh,3,volume,caller)
+    actual===nothing || return actual
+    authority=m.meshing.mesh_authority
+    emitted=authority===nothing ? nothing : _model_mesh_emitted_projection(
+        m,mesh,3,volume,authority.emitted_geometry,caller)
+    emitted===nothing || return emitted
     volume_cell_count=_volume_projection_contract(mesh,caller)
     nonew=_extrude_is_nonew(_extrude_gate(m,3,volume)) ?
         _extrude_nonew_projection_context(m,mesh,volume,caller;scope=_extrude_scope) :
@@ -5932,7 +6163,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;_extrude_scope=noth
 
     explicit_geometry=(nonew!==nothing || isempty(m.volumes[volume]) ||
         _implicit_volume_surface(m,volume)) ? nothing :
-        _model_explicit_volume_geometry(m,volume,caller)
+        _model_explicit_volume_geometry(m,volume,caller;_mesh_input)
     if nonew===nothing
         domain_surface=explicit_geometry===nothing ?
             _volume_surface(m,volume,caller) : explicit_geometry.surface
@@ -6167,7 +6398,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;_extrude_scope=noth
         union!(projected_groups,((0,Int(tag)) for tag in tags))
         node=point_nodes[point]
         coordinate=(mesh.coords[1,node],mesh.coords[2,node],mesh.coords[3,node])
-        entities[(0,point)]=MixedEntity(
+        entities[(0,point)]=_model_mesh_entity_metadata(m,
             0,point,coordinate;physical_tags=tags)
     end
 
@@ -6180,7 +6411,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;_extrude_scope=noth
         union!(projected_groups,((1,Int(tag)) for tag in tags))
         nodes=Int32[entry[2] for entry in curve_entries[curve]]
         start_point,stop_point=m.curves[curve]
-        entities[(1,curve)]=MixedEntity(
+        entities[(1,curve)]=_model_mesh_entity_metadata(m,
             1,curve,_model_projection_bbox(mesh,nodes,caller);
             physical_tags=tags,
             boundaries=Int32[Int32(start_point),-Int32(stop_point)])
@@ -6212,7 +6443,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;_extrude_scope=noth
 
     volume_tags=_model_projection_physical_tags(m,3,volume)
     union!(projected_groups,((3,Int(tag)) for tag in volume_tags))
-    entities[(3,volume)]=MixedEntity(
+    entities[(3,volume)]=_model_mesh_entity_metadata(m,
         3,volume,_model_projection_bbox(mesh,axes(mesh.coords,2),caller);
         physical_tags=volume_tags,boundaries=Int32.(boundary_surfaces))
     volume_physical=_model_projection_legacy_tag(volume_tags)
@@ -6266,7 +6497,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;_extrude_scope=noth
     external_element_tags=_model_projection_external_elements(blocks)
     node_parametric=Union{Nothing,Vector{Float64}}[
         nothing for _ in 1:nnodes(mesh)]
-    data=MixedEntityData(
+    data=Elements._native_mixed_entity_data(
         entities;node_entities=node_entities,node_parametric=node_parametric,
         external_node_tags=external_node_tags,block_entities=block_entities,
         external_element_tags=external_element_tags)
@@ -6302,14 +6533,14 @@ its Curve-In-Surface relation, and MSH2 cell ownership remain available.
 """
 function model_to_mixed(
     m::GeoModel,mesh::Union{Mesh,MixedMesh},entity_dim::Integer,
-    entity_tag::Integer;_extrude_scope=nothing)
+    entity_tag::Integer;_extrude_scope=nothing,_mesh_input=nothing)
     caller="model_to_mixed"
     dim=_dimension(entity_dim,caller)
     dim in (2,3) || throw(ArgumentError(
         "$caller: classified projection supports only surface or volume entities"))
     tag=_tag(entity_tag,caller,dim)
     return dim==2 ? model_to_mixed(m,mesh,tag;_extrude_scope=_extrude_scope) :
-                    _model_volume_to_mixed(m,mesh,tag;_extrude_scope=_extrude_scope)
+                    _model_volume_to_mixed(m,mesh,tag;_extrude_scope=_extrude_scope,_mesh_input)
 end
 
 function _node_at(mesh, p; atol=1e-12)
@@ -6359,90 +6590,104 @@ function _mesh_covers_segment(mesh::Mesh, p, q; atol=1e-12)
     return false
 end
 
+include("ModelMesh1D.jl")
+include("ModelGmshCurvePointStorage.jl")
+include("ModelGmshCurveIntegration.jl")
+include("ModelNativeArcMesh.jl")
 include("SurfacePointSizing.jl")
+include("ModelSurfaceAlgorithms.jl")
+include("ModelGmshSurfaceProducer.jl")
+include("ModelGmshSurfaceRecombine.jl")
+include("ModelGmshFullQuad.jl")
+include("ModelGmshBipartite.jl")
+include("ModelTransfiniteSurfaceProducer.jl")
+include("ModelTransfiniteRuledSurface.jl")
+include("ModelNativeInitialTet.jl")
+include("ModelNativeHybridQuad.jl")
+include("ModelNativeTetgenArena.jl")
+include("ModelNativeHybridRecovery.jl")
+include("ModelNativeHybridLawson.jl")
+include("ModelNativeHybridCarve.jl")
+include("ModelNativeHybridUnflip.jl")
+include("ModelNativeHybridInterior.jl")
+include("ModelNativeHybridInsertion.jl")
+include("ModelNativeHybridRelocate.jl")
+include("ModelNativeHybridSizing.jl")
+include("ModelNativeHybridVolume.jl")
+include("ModelNativeHybridComponents.jl")
+include("ModelNativeHybridBatch.jl")
+include("ModelVolumeAlgorithms.jl")
+
+function _surface_recombine_physical_coords(mesh,frame,canonical)
+    coords=Matrix{Float64}(undef,3,size(mesh.coords,2))
+    for node in axes(mesh.coords,2)
+        u=mesh.coords[1,node];v=mesh.coords[2,node]
+        lifted=get(canonical,(u==0 ? 0.0 : u,v==0 ? 0.0 : v),nothing)
+        if lifted===nothing
+            point=_surface_metric_lift(frame,u,v)
+            coords[1,node]=point[1]
+            coords[2,node]=point[2]
+            coords[3,node]=point[3]
+        else
+            coords[1,node]=lifted[1]
+            coords[2,node]=lifted[2]
+            coords[3,node]=lifted[3]
+        end
+    end
+    return coords
+end
 
 function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
                                   caller::AbstractString;
                                   size_field::Union{Nothing,AbstractSizeField}=
                                       nothing,
+                                  _mesh1d_options=nothing,
+                                  _mesh_input=nothing,
+                                  _mesh_node_high_water=nothing,
+                                  _mesh_element_high_water=UInt64(0),
+                                  _return_surface_production=false,
+                                  _geometry_points=nothing,
                                   param_sizes::Dict{Tuple{Int,Float64},
                                                    Float64}=
                                       Dict{Tuple{Int,Float64},Float64}())
-    if haskey(m.meshing.transfinite_surfaces,t)
+    if haskey(m.meshing.transfinite_surfaces,t) &&
+       _model_transfinite_source_admitted(m,t,_mesh_input,caller)
         return _transfinite_surface_mesh(
-            m,t,param_sizes,caller;size_field=size_field),NTuple{2,Int}[]
+            m,t,param_sizes,caller;size_field,_mesh_input,_mesh_node_high_water,
+            _return_surface_production,_geometry_points),NTuple{2,Int}[]
+    end
+    algorithm=_normal_surface_mesh_algorithm(m,t,caller)
+    geometry=get(m.surface_geometry,t,nothing)
+    builtin_plane=_surface_type(m,t)===:plane &&
+        (geometry===nothing || !hasproperty(geometry,:occ))
+    native_plane=builtin_plane || (_surface_type(m,t)===:plane &&
+        geometry!==nothing && hasproperty(geometry,:occ) && geometry.occ===:plane)
+    fullquad=_model_surface_recombined(m,t) && m.meshing.recombine_algo in (2,3)
+    experimental=_model_surface_recombined(m,t) && m.meshing.recombine_algo==4
+    if algorithm==3 || (native_plane && (fullquad || experimental)) || (_return_surface_production && native_plane &&
+                        !_model_factory_surface_encoding(m,t))
+        options=_model_algorithm_size_options(m,_mesh1d_options,caller)
+        production=_gmsh_native_initial_surface(m,t,options,_mesh_input,
+            _mesh_node_high_water,caller;algorithm,size_field,
+            element_high_water=_mesh_element_high_water)
+        return production,get(m.embeds,(2,t),NTuple{2,Int}[])
     end
     plane=_model_surface_plane(m,t,caller;allow_ruled=true)
-    xs,ys,markers,segs,embedded,internal,index,canonical=
+    frame=_surface_metric_frame(plane)
+    raw_xs,raw_ys,markers,segs,embedded,internal,index,raw_canonical=
         _surface_pslg(m,t,forced,caller;param_sizes=param_sizes,plane=plane)
+    xs,ys,canonical=_surface_metric_pslg(
+        frame,raw_xs,raw_ys,raw_canonical,caller,t)
     T=constrained_delaunay(xs,ys,segs; internal_segments=internal)
-    callback=m.meshing.size_callback
-    ax=plane.axes;k=plane.k
-    # `BGM_MeshSize` for Steiner vertices: `CTX::lc` (the bbox diagonal) capped
-    # by any size field/callback. Point sizes and boundary-derived sizes enter
-    # through `vSizes` instead, exactly as upstream's `bidimMeshData` splits
-    # the propagated and background arrays.
-    bgm_size=if size_field===nothing && callback===nothing
-        nothing
+    options=_model_algorithm_size_options(m,_mesh1d_options,caller)
+    interior=if algorithm==6 && _model_factory_surface_encoding(m,t)
+        _model_factory_surface_refine!(m,T,xs,ys,segs,markers,embedded,index,
+                                       plane,size_field,t,caller)
     else
-        loose=_pslg_default_size(xs,ys,caller,t)
-        function bgm(x,y)
-            h=loose
-            point=ntuple(3) do axis
-                axis==k ? _plane_dropped_coordinate(plane,x,y) :
-                          axis==ax[1] ? x : y
-            end
-            size_field===nothing ||
-                (h=min(h,size_at(size_field,point[1],point[2],point[3],
-                                 (2,t))))
-            callback===nothing ||
-                (h=_apply_size_callback(callback,2,t,point[1],point[2],
-                                        point[3],h,caller))
-            return h
-        end
-    end
-    extend=_resolved_extend_from_boundary(m,2,t)
-    if extend>0 || extend==-2
-        embedded_ids=_surface_embedded_vertex_ids(embedded,index)
-        vSizes=_surface_vertex_sizes(T,xs,ys,segs,markers,embedded_ids)
-        # Upstream stores `vSizesBGM = vSizesMap` for every initial vertex
-        # except embedded ones, which carry `BGM_MeshSize` at their point —
-        # the field/callback value, or `CTX::lc` when no field is installed.
-        vbgm=nothing
-        embedded_vids=nothing
-        if !isempty(embedded_ids)
-            # `embedded_ids` are PSLG indices; the size arrays live on
-            # triangulation vertices. `vmap`/`loose_v` stay block-local so no
-            # captured binding survives a conditional assignment.
-            vmap=_pslg_vertex_map(T,xs,ys)
-            loose_v=_pslg_default_size(xs,ys,caller,t)
-            bg=copy(vSizes)
-            for pid in embedded_ids
-                vid=vmap[_surface_size_key(xs[pid],ys[pid])]
-                bg[vid]=bgm_size===nothing ? loose_v :
-                        bgm_size(xs[pid],ys[pid])
-            end
-            vbgm=bg
-            # Embedded points count as model vertices (`onWhat()->dim()==0`)
-            # for the perpendicular shell-edge check.
-            embedded_vids=[vmap[_surface_size_key(xs[pid],ys[pid])]
-                           for pid in embedded_ids]
-        end
-        # Gmsh's `meshGFace` insertion refines while R/lc ≥ sqrt(2)/2
-        # (`MTri3`, radiusNorm 2) with `lc = min(mean vSizes, mean vSizesBGM)`;
-        # `vertex_sizes` propagates `vSizes` through the mesh and
-        # `gmsh_insertion` carries the `insertVertexB` reject-instead-of-split
-        # rules. Upstream applies no angle bound in the insertion pass.
-        interior=refine!(T; min_angle_deg=0, gmsh_insertion=true,
-                         vertex_sizes=vSizes, vertex_bgm=vbgm,
-                         bgm_size=bgm_size, model_vertices=embedded_vids)
-    else
-        # Extension disabled: upstream LL = lcBGM alone — the field/callback-
-        # capped surface scale with no propagated boundary sizes.
-        radius=bgm_size===nothing ? (x,y)->_pslg_default_size(xs,ys,caller,t) :
-            bgm_size
-        interior=refine!(T; min_angle_deg=0, size_radius=radius,
-                         gmsh_insertion=true)
+        bgm_size=_ModelSurfaceBackgroundSize(frame,
+            _ModelAlgorithmBackgroundSize(m,2,t,options,size_field,caller))
+        _surface_algorithm_refine!(m,T,xs,ys,segs,markers,embedded,index,
+                                   bgm_size,algorithm,t,caller)
     end
     mesh=to_mesh(T; interior=interior)
     # Upstream `meshGFace` recombination ordering: recombine the freshly
@@ -6462,9 +6707,16 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
             "full-quad subdivision pipeline on Surface[$t], which is not " *
             "implemented — supported values are 0 (simple) and 1 " *
             "(blossom)"))
+        angle=get(m.meshing.recombine,(2,t),45.0)
+        # Native candidate priority and angle admission both use the world
+        # coordinates published by the final lift, including interior nodes.
+        physical_coords=_surface_recombine_physical_coords(mesh,frame,canonical)
         mesh=recombine_triangles(
             mesh;
             algorithm=algo==0 ? :greedy : :blossom,
+            recombine_angle=angle,
+            recombine_angle_coords=physical_coords,
+            recombine_priority_coords=physical_coords,
             protected_edges=_embedded_protected_edges(mesh,xs,ys,internal))
     end
     mesh=_consume_surface_attributes(m,t,mesh,caller)
@@ -6479,9 +6731,10 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
         # ~ulp mismatches that crack the shared boundary in a volume PLC.
         lifted=get(canonical,(u==0 ? 0.0 : u,v==0 ? 0.0 : v),nothing)
         if lifted===nothing
-            mesh.coords[ax[1],node]=u
-            mesh.coords[ax[2],node]=v
-            mesh.coords[k,node]=_plane_dropped_coordinate(plane,u,v)
+            point=_surface_metric_lift(frame,u,v)
+            mesh.coords[1,node]=point[1]
+            mesh.coords[2,node]=point[2]
+            mesh.coords[3,node]=point[3]
         else
             mesh.coords[1,node]=lifted[1]
             mesh.coords[2,node]=lifted[2]
@@ -6604,8 +6857,8 @@ function _pslg_default_size(xs,ys,caller::AbstractString,t::Int)
     return lc
 end
 
-# Gmsh's size callback contract: `(dim, tag, x, y, z, lc) -> size`; a
-# non-positive return means "no constraint" and keeps the incoming `lc`.
+# BGM_MeshSizeWithoutScaling assigns the callback's returned scalar directly.
+# Its caller then applies CTX::lc, Min/Max, the nonpositive fallback and factors.
 function _apply_size_callback(callback,dim::Int,tag::Int,x::Float64,
                               y::Float64,z::Float64,lc::Float64,
                               caller::AbstractString)
@@ -6622,10 +6875,7 @@ function _apply_size_callback(callback,dim::Int,tag::Int,x::Float64,
         "$(repr(h)) for ($dim,$tag)"))
     h isa Bool && throw(ErrorException(
         "$caller: mesh size callback returned Bool for ($dim,$tag)"))
-    value=Float64(h)
-    !isfinite(value) && return lc
-    value<=0 && return lc
-    return min(lc,value)
+    return Float64(h)
 end
 
 # Post-refinement attribute passes for a surface mesh: `smoothing` runs that
@@ -6635,6 +6885,7 @@ function _consume_surface_attributes(m::GeoModel,t::Int,mesh,
                                      caller::AbstractString)
     iterations=get(m.meshing.smoothing,(2,t),0)
     iterations>0 && (mesh=_laplacian_smooth_surface(mesh,iterations,caller,t))
+    mesh=_model_orientation_canonical_plane(m,t,mesh,caller)
     get(m.meshing.reverse,(2,t),false) &&
         (mesh=_reversed_surface_mesh(mesh,caller,t))
     return mesh
@@ -6966,13 +7217,16 @@ end
 # reindexed into the same numbering. Surfaces that are not transfinite, not
 # four-sided, or whose corners cannot occupy any volume slot throw the same
 # "Incompatible surface" blocker Gmsh reports.
+include("ModelTransfiniteVolumeProducer.jl")
+
 function _transfinite_volume_face_grid(m::GeoModel, volume::Int, surf::Int,
-                                       ordered, caller::AbstractString)
+                                       ordered, caller::AbstractString;
+                                       _mesh_input=nothing,_geometry_points=nothing)
     haskey(m.meshing.transfinite_surfaces, surf) || throw(ArgumentError(
         "$caller: Incompatible surface $surf in transfinite volume $volume"))
     spec,signed_curves,curve_points,nside,allow_warped,junctions,
         project_plane,sphere_center,_=
-            _transfinite_surface_sides(m,surf,caller)
+            _transfinite_surface_sides(m,surf,caller;_mesh_input)
     nside==4 || throw(ArgumentError(
         "$caller: Incompatible surface $surf in transfinite volume $volume"))
     # `_transfinite_surface_sides` already welds every chain end to the
@@ -7025,10 +7279,13 @@ function _transfinite_volume_face_grid(m::GeoModel, volume::Int, surf::Int,
         mcoord,ncoord=_volume_face_canonical_coords(found,i,j,L,H)
         tris[row,tri]=Int32(mcoord+1+ncoord*M)
     end
-    return slot,points,tris
+    ids=_model_transfinite_quad_face_source!(points,m,surf,ordered,spec,
+        signed_curves,curve_points,junctions,_mesh_input,_geometry_points,slot,caller)
+    return slot,points,tris,ids
 end
 
-function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
+function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString;
+    _mesh_input=nothing,_geometry_points=nothing,_return_bindings=false)
     get(m.embeds,(3,t),NTuple{2,Int}[]) |> isempty || throw(ArgumentError(
         "$caller: transfinite Volume[$t] cannot carry embedded entities"))
     quadtri=t in m.meshing.quad_tri
@@ -7036,7 +7293,8 @@ function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
     # Gmsh `MeshTransfiniteVolume` also accepts a five-face prism boundary —
     # a degenerate hexahedron with s3≡s0 and s7≡s4 — dispatched separately.
     if length(boundaries)==5
-        return _transfinite_prism_volume_mesh(m,t,boundaries,caller)
+        return _transfinite_prism_volume_mesh(m,t,boundaries,caller;
+            _mesh_input,_geometry_points,_return_bindings)
     end
     length(boundaries)==6 || throw(ArgumentError(
         "$caller: transfinite Volume[$t] requires exactly 5 (prism) or 6 " *
@@ -7124,7 +7382,7 @@ function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
     for (direction,family) in (("u",us),("v",vs),("w",ws))
         allequal(family) || throw(ArgumentError(
             "$caller: transfinite Volume[$t] $direction-direction edges " *
-            "have mismatched node counts $family"))
+            "have non-matching node counts $family"))
     end
     # Gmsh requires every boundary face to carry a transfinite surface mesh;
     # each face grid is reindexed into its canonical slot here so the volume
@@ -7134,16 +7392,18 @@ function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
     faces=Vector{Tuple{Matrix{Float64},Matrix{Int32},Vector{Int32}}}(undef,6)
     slot_tags=Vector{Int32}(undef,6)
     seen=falses(6)
+    face_ids=Vector{Union{Nothing,Vector{UInt64}}}(nothing,6)
     for signed_surface in boundaries
         surf=abs(signed_surface)
-        slot,points,tris=_transfinite_volume_face_grid(
-            m,t,surf,s,caller)
+        slot,points,tris,ids=_transfinite_volume_face_grid(
+            m,t,surf,s,caller;_mesh_input,_geometry_points)
         seen[slot] && throw(ArgumentError(
             "$caller: Incompatible surface $surf in transfinite volume $t " *
             "(duplicate face slot $slot)"))
         seen[slot]=true
         faces[slot]=(points,tris,fill(Int32(surf),size(tris,2)))
         slot_tags[slot]=Int32(surf)
+        face_ids[slot]=ids
     end
     all(seen) || throw(ErrorException(
         "$caller: transfinite Volume[$t] boundary faces do not cover the " *
@@ -7157,15 +7417,17 @@ function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
         face_tags=Tuple(slot_tags),
         recombine=quadtri ? true : Tuple(
             _model_surface_recombined(m,Int(slot_tags[i])) for i in 1:6))
-    return quadtri ? _model_transfinite_quadtri(m,t,mesh,boundaries,caller) : mesh
+    mesh=quadtri ? _model_transfinite_quadtri(m,t,mesh,boundaries,caller;_mesh_input) : mesh
+    return _return_bindings ? (mesh,_model_transfinite_volume_boundary(
+        mesh,face_ids,(us[1],vs[1],ws[1]),caller;input=_mesh_input,face_tags=slot_tags)) : mesh
 end
 
 # Resolve the actual boundary cells after their independent surface kernels
 # have applied each face's arrangement and recombination flags. QuadTri
 # preserves those faces exactly instead of selecting a volume-local diagonal.
 function _model_transfinite_quadtri(m::GeoModel,t::Int,mesh::MixedMesh,
-                                    boundaries,caller::AbstractString)
-    parts=[(abs(s),mesh_model_surface(m,abs(s))) for s in boundaries]
+                                    boundaries,caller::AbstractString;_mesh_input=nothing)
+    parts=[(abs(s),mesh_model_surface(m,abs(s);_mesh_input)) for s in boundaries]
     return _transfinite_quadtri(mesh,parts;caller="$caller: TransfQuadTri Volume[$t]")
 end
 
@@ -7231,7 +7493,8 @@ function _transfinite_prism_tri_face_grid(m::GeoModel,volume::Int,surf::Int,
                                           ordered,kernel,r::Int,junctions,
                                           curve_points,
                                           caller::AbstractString;
-                                          compact::Bool=false)
+                                          compact::Bool=false,_mesh_input=nothing,
+                                          _geometry_points=nothing)
     if compact
         apex=junctions[1]
         b=junctions[2]
@@ -7277,6 +7540,8 @@ function _transfinite_prism_tri_face_grid(m::GeoModel,volume::Int,surf::Int,
     end
     M=iseven(found) ? H+1 : L+1
     points=Matrix{Float64}(undef,3,(L+1)*(H+1))
+    actual=_model_transfinite_prism_face_source(_mesh_input,surf,kernel,caller)
+    ids=actual===nothing ? nothing : Vector{UInt64}(undef,(L+1)*(H+1))
     @inbounds for j in 0:H, i in 0:L
         source=compact ? Int(_node(i,min(j,i))) :
             Int(_collapsed_node(i,j,H))
@@ -7285,6 +7550,11 @@ function _transfinite_prism_tri_face_grid(m::GeoModel,volume::Int,surf::Int,
         points[1,target]=kernel.coords[1,source]
         points[2,target]=kernel.coords[2,source]
         points[3,target]=kernel.coords[3,source]
+        if actual!==nothing
+            point=_model_transfinite_source_point(actual,source,_geometry_points)
+            points[:,target].=point
+            ids[target]=actual.entity_data.external_node_tags[source]
+        end
     end
     # The face's own triangulation, reindexed onto the canonical grid —
     # deduplicated kernel vertices map to their first grid position (the apex
@@ -7303,7 +7573,7 @@ function _transfinite_prism_tri_face_grid(m::GeoModel,volume::Int,surf::Int,
                                                   L,H)
         tris[row,tri]=Int32(mcoord+1+ncoord*M)
     end
-    return slot,points,tris
+    return slot,points,tris,ids
 end
 
 # Transfinite volume fill for a five-face prism — Gmsh's second
@@ -7316,7 +7586,8 @@ end
 # and `mesh_transfinite_prism` interpolates the interior through
 # `transfiniteHex`.
 function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
-                                        caller::AbstractString)
+                                        caller::AbstractString;_mesh_input=nothing,
+                                        _geometry_points=nothing,_return_bindings=false)
     compact=m.meshing.transfinite_tri==1
     # Upstream's compact transfinite3 branch uses its ordinary prism
     # subdivision even with QuadTri set; centroid transitions belong to the
@@ -7358,7 +7629,7 @@ function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
         haskey(m.meshing.transfinite_surfaces,surf) || throw(ArgumentError(
             "$caller: Incompatible surface $surf in transfinite volume $t"))
         spec,signed_curves,curve_points,nside,_,junctions,_,_,ruled_tri=
-            _transfinite_surface_sides(m,surf,caller)
+            _transfinite_surface_sides(m,surf,caller;_mesh_input)
         nside==3 || nside==4 || throw(ArgumentError(
             "$caller: Incompatible surface $surf in transfinite volume $t"))
         faces_data[index]=(;surf,spec,signed_curves,curve_points,nside,
@@ -7471,21 +7742,22 @@ function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
     for (direction,family) in (("u",us),("v",vs),("w",ws))
         allequal(family) || throw(ArgumentError(
             "$caller: transfinite Volume[$t] $direction-direction edges " *
-            "have mismatched node counts $family"))
+            "have non-matching node counts $family"))
     end
     faces=Vector{Tuple{Matrix{Float64},Matrix{Int32},Vector{Int32}}}(undef,6)
     slot_tags=Vector{Int32}(undef,6)
     seen=falses(6)
+    face_ids=Vector{Union{Nothing,Vector{UInt64}}}(nothing,6)
     for face in faces_data
-        slot,points,tris=if face.nside==4
-            _transfinite_volume_face_grid(m,t,face.surf,s8,caller)
+        slot,points,tris,ids=if face.nside==4
+            _transfinite_volume_face_grid(m,t,face.surf,s8,caller;_mesh_input,_geometry_points)
         else
             kernel,r=tri_kernels[face.surf]
             face_junctions,face_sides=compact ? chained[face.surf] :
                 (face.junctions,face.curve_points)
             _transfinite_prism_tri_face_grid(
                 m,t,face.surf,s8,kernel,r,face_junctions,face_sides,
-                caller;compact)
+                caller;compact,_mesh_input,_geometry_points)
         end
         seen[slot] && throw(ArgumentError(
             "$caller: Incompatible surface $(face.surf) in transfinite " *
@@ -7493,6 +7765,7 @@ function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
         seen[slot]=true
         faces[slot]=(points,tris,fill(Int32(face.surf),size(tris,2)))
         slot_tags[slot]=Int32(face.surf)
+        face_ids[slot]=ids
     end
     count(seen)==5 || throw(ErrorException(
         "$caller: transfinite Volume[$t] boundary faces do not cover the " *
@@ -7518,7 +7791,12 @@ function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
             _model_surface_recombined(m,Int(slot_tags[6]))),
         arrangement=(face_spec[Int(slot_tags[5])].arrangement,
                      face_spec[Int(slot_tags[6])].arrangement))
-    return quadtri ? _model_transfinite_quadtri(m,t,mesh,boundaries,caller) : mesh
+    mesh=quadtri ? _model_transfinite_quadtri(m,t,mesh,boundaries,caller;_mesh_input) : mesh
+    return _return_bindings ? (mesh,_model_transfinite_volume_boundary(
+        mesh,face_ids,(us[1],vs[1],ws[1]),caller;prism=true,compact,input=_mesh_input,
+        face_tags=ntuple(slot->face_ids[slot]===nothing ? Int32(0) : slot_tags[slot],6),
+        compact_triangles=compact ? ntuple(slot->slot in (5,6) ? faces[slot][2] : nothing,6) :
+            nothing)) : mesh
 end
 # generated boundary mesh (meshGRegionDelaunayInsertion.cpp): every boundary
 # vertex carries an incident face-triangle edge length — the LARGEST when
@@ -7685,7 +7963,8 @@ end
 # Corners are audited for consistency, then welded to the shared vertex
 # coordinates so every consumer sees bitwise-identical chain endpoints.
 function _transfinite_surface_sides(m::GeoModel,t::Int,
-                                    caller::AbstractString)
+                                    caller::AbstractString;_mesh_input=nothing,
+                                    _geometry_points=nothing)
     spec=m.meshing.transfinite_surfaces[t]
     get(m.embeds,(2,t),NTuple{2,Int}[]) |> isempty || throw(ArgumentError(
         "$caller: transfinite Surface[$t] cannot carry embedded entities"))
@@ -7715,7 +7994,15 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
         t0,t1=_model_curve_param_bounds(m,curve,caller)
         params=_model_curve_transfinite_native_params(m,curve,t0,t1,cspec,
                                                       caller)
-        points=[_periodic_curve_point(m,curve,u,caller) for u in params]
+        source=_model_mesh_curve_births(_mesh_input,m,curve,caller)
+        points=if source===nothing
+            [_periodic_curve_point(m,curve,u,caller) for u in params]
+        elseif _geometry_points===nothing
+            NTuple{3,Float64}[ntuple(axis->source.mesh.coords[axis,row],3) for row in source.rows]
+        else
+            NTuple{3,Float64}[get(_geometry_points,source.mesh.entity_data.external_node_tags[row],
+                ntuple(axis->source.mesh.coords[axis,row],3)) for row in source.rows]
+        end
         signed<0 && reverse!(points)
         curve_points[position]=points
     end
@@ -7727,7 +8014,8 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
         junctions=collect(Int,spec.corners)
     end
     kind=_surface_type(m,t)
-    (nside!=4 || kind in (:plane,:ruled)) || throw(ArgumentError(
+    tensor_surface=_model_nurbs_surface(get(m.surface_geometry,t,nothing))
+    (nside!=4 || kind in (:plane,:ruled) || tensor_surface) || throw(ArgumentError(
         "$caller: transfinite Surface[$t] requires a planar or ruled " *
         "surface-filling kind"))
     # A three-sided `Surface` (Gmsh `MSH_SURF_TRIC` — geomType RuledSurface)
@@ -7764,8 +8052,8 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
     # warped transfinite patch (3-D Coons interpolation). Surfaces carrying
     # auxiliary filling geometry — `Surface … In Sphere` — keep their own
     # parameterization and cannot use the Coons analogue.
-    allow_warped=nside==4 && kind==:ruled && sphere_center===nothing &&
-                 !haskey(m.surface_geometry,t)
+    allow_warped=tensor_surface || (nside==4 && kind==:ruled && sphere_center===nothing &&
+                 !haskey(m.surface_geometry,t))
     project_plane=nothing
     if !allow_warped && sphere_center===nothing && !ruled_tri
         # `Plane Surface` treats a non-coplanar boundary as Gmsh's
@@ -7829,8 +8117,10 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
                 "$caller: transfinite Surface[$t] junction $vertex is not " *
                 "a model point"))
         end
-        curve_points[position][1]=m.points[junctions[position]]
-        curve_points[position][end]=m.points[junctions[mod1(position+1,nside)]]
+        if _mesh_input===nothing
+            curve_points[position][1]=m.points[junctions[position]]
+            curve_points[position][end]=m.points[junctions[mod1(position+1,nside)]]
+        end
     end
     return spec,signed_curves,curve_points,nside,allow_warped,junctions,
            project_plane,sphere_center,ruled_tri
@@ -7931,9 +8221,18 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
                                    caller::AbstractString;
                                    size_field::Union{Nothing,
                                                      AbstractSizeField}=
-                                       nothing)
+                                       nothing,_mesh_input=nothing,
+                                    _mesh_node_high_water=nothing,
+                                    _return_surface_production=false,
+                                    _geometry_points=nothing)
+    if _model_nurbs_surface(get(m.surface_geometry,t,nothing))
+        return _model_nurbs_transfinite_surface_mesh(m,t,param_sizes,caller;
+            size_field,_mesh_input,_mesh_node_high_water,_return_surface_production,
+            _geometry_points)
+    end
     spec,signed_curves,curve_points,nside,allow_warped,junctions,project_plane,
-        sphere_center,ruled_tri=_transfinite_surface_sides(m,t,caller)
+        sphere_center,ruled_tri=_transfinite_surface_sides(m,t,caller;_mesh_input,
+            _geometry_points=_return_surface_production ? nothing : _geometry_points)
     if nside==3
         s1,s2,s3=curve_points
         project=ruled_tri ? _transfinite_ruled_tri_project(m,t,caller) :
@@ -7960,21 +8259,25 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
             if recombined
                 mesh_transfinite_triangle_patch(
                     s1,s2,s3;arrangement=spec.arrangement,
+                    side_tags=_model_transfinite_side_tags(m,signed_curves,junctions,caller),
                     project=project)
             else
                 mesh_transfinite_triangle(
                     s1,s2,s3;arrangement=spec.arrangement,
+                    side_tags=_model_transfinite_side_tags(m,signed_curves,junctions,caller),
                     project=project)
             end
         else
             if recombined
                 mesh_transfinite_triangle_collapsed_patch(
                     s1,s2,s3;arrangement=spec.arrangement,
+                    side_tags=_model_transfinite_side_tags(m,signed_curves,junctions,caller),
                     allow_corner_rotation=isempty(spec.corners),
                     project=project)
             else
                 mesh_transfinite_triangle_collapsed(
                     s1,s2,s3;arrangement=spec.arrangement,
+                    side_tags=_model_transfinite_side_tags(m,signed_curves,junctions,caller),
                     allow_corner_rotation=isempty(spec.corners),
                     project=project)
             end
@@ -7986,7 +8289,12 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
             Mesh(kernel.coords;tris=kernel.tris)
         _transfinite_tri_frame_reversed(m,signed_curves,junctions,caller,t) &&
             (mesh=_reversed_surface_mesh(mesh,caller,t))
-        return _consume_surface_attributes(m,t,mesh,caller)
+        mesh=_consume_surface_attributes(m,t,mesh,caller)
+        return _return_surface_production && _mesh_input!==nothing ?
+            _model_transfinite_surface_production(m,t,kernel,mesh,_mesh_input,
+                _mesh_node_high_water,param_sizes,caller;size_field,_geometry_points,
+                side_keys=_model_transfinite_side_keys(m,signed_curves,junctions,caller),
+                producer_parameters=_model_transfinite_projection_parameters(project,mesh,caller)) : mesh
     end
     if isempty(spec.corners)
         # The chaining helper is generic in side count; only this public
@@ -7994,17 +8302,20 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
         junctions,curve_points=_transfinite_chained_tri(
             m,signed_curves,curve_points,t,caller)
     end
-    interpolate=sphere_center===nothing ? nothing : _transfinite_quad_sphere_eval(
-        m,t,signed_curves,junctions,sphere_center,caller)
+    interpolate=sphere_center===nothing ?
+        _model_transfinite_ruled_grid(m,t,signed_curves,junctions,curve_points,_mesh_input,caller) :
+        _transfinite_quad_sphere_eval(m,t,signed_curves,junctions,sphere_center,caller)
     bottom,right,top,left=curve_points
     kernel=if _model_surface_recombined(m,t)
         mesh_transfinite_quad_patch(bottom,right,top,left;
+                                     side_tags=_model_transfinite_side_tags(m,signed_curves,junctions,caller),
                                     arrangement=spec.arrangement,
                                     allow_warped=allow_warped,
                                     project_plane=project_plane,
                                     interpolate=interpolate)
     else
         mesh_transfinite_patch(bottom,right,top,left;
+                                     side_tags=_model_transfinite_side_tags(m,signed_curves,junctions,caller),
                                arrangement=spec.arrangement,
                                allow_warped=allow_warped,
                                project_plane=project_plane,
@@ -8015,7 +8326,15 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
         Mesh(kernel.coords;tris=kernel.tris)
     _transfinite_quad_frame_reversed(m,signed_curves,junctions,caller,t) &&
         (mesh=_reversed_surface_mesh(mesh,caller,t))
-    return _consume_surface_attributes(m,t,mesh,caller)
+    mesh=_consume_surface_attributes(m,t,mesh,caller)
+    L=length(bottom)-1;H=length(right)-1
+    birth_rows=Int32[i+1+j*(L+1) for i in 0:L for j in 0:H]
+    producer_parameters=_model_transfinite_ruled_parameters(interpolate,mesh,L,H,caller)
+    return _return_surface_production && _mesh_input!==nothing ?
+        _model_transfinite_surface_production(m,t,kernel,mesh,_mesh_input,
+            _mesh_node_high_water,param_sizes,caller;size_field,_geometry_points,
+            side_keys=_model_transfinite_side_keys(m,signed_curves,junctions,caller),
+            birth_rows,producer_parameters) : mesh
 end
 
 # Continuous `S(u,v)` interior evaluation for a transfinite `In Sphere`
@@ -8046,13 +8365,8 @@ end
 # in the kernel; this callback is the projection half.
 function _transfinite_ruled_tri_project(m::GeoModel,t::Int,
                                         caller::AbstractString)
-    lc=_model_lc(m)
-    silent=Returns(nothing)
-    return function(point)
-        u,v=_ruled_xyz_to_uv(m,t,point,1.0,lc,false,silent,silent,caller;
-                             on_surface=false)
-        return _ruled_surface_point(m,t,u,v,caller)
-    end
+    return _ModelTransfiniteRuledTriProjection(m,t,_model_lc(m),String(caller),
+        Dict{Int32,NTuple{2,Float64}}())
 end
 
 @inline function _points_close(p,q,tolerance)
@@ -8132,12 +8446,23 @@ recursing.
 function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
                             max_periodic_passes=8,
                             size_field::Union{Nothing,AbstractSizeField}=nothing,
-                            _extrude_edges=nothing,_extrude_scope=nothing)
+                            _extrude_edges=nothing,_extrude_scope=nothing,
+                            _mesh_input=nothing,
+                            _mesh_node_high_water=nothing,
+                            _mesh_element_high_water=UInt64(0),
+                            _return_surface_production=false,
+                            _geometry_points=nothing,
+                            _mesh1d_options::Union{Nothing,_ModelMesh1DOptions}=nothing)
     caller="mesh_model_surface"
+    options=_model_algorithm_size_options(m,_mesh1d_options,caller)
     t=_tag(tag,caller,2)
     haskey(m.surfaces,t) || throw(ArgumentError(
         "$caller: unknown Surface[$t]"))
-    _model_require_point_mesh_geometry(m,caller)
+    _mesh_input===nothing && _model_require_point_mesh_geometry(m,caller)
+    if _mesh_input!==nothing
+        retained=_model_mesh_product(_mesh_input,2,t;caller)
+        retained!==nothing && any(block->!isempty(block.nodes),retained.blocks) && return retained
+    end
     max_periodic_passes isa Bool && throw(ArgumentError(
         "$caller: max_periodic_passes must not be Bool"))
     max_periodic_passes isa Integer || throw(ArgumentError(
@@ -8175,7 +8500,8 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         swept=_extrude_surface_mesh(
             m,t,caller;min_angle_deg=min_angle_deg,
             max_periodic_passes=max_periodic_passes,size_field=size_field,
-            edges=_extrude_edges,scope=_extrude_scope)
+            edges=_extrude_edges,scope=_extrude_scope,_mesh_input,
+            _return_production=_return_surface_production)
         swept===nothing || return swept
     end
     # A slave surface takes its master's mesh verbatim, like upstream's
@@ -8189,7 +8515,8 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         surface_constraint=constraint
         break
     end
-    if surface_constraint!==nothing
+    if surface_constraint!==nothing && !(haskey(m.meshing.transfinite_surfaces,t) &&
+            _mesh_input!==nothing && _return_surface_production)
         chain=Int[t]
         current=Int(surface_constraint.master_entity)
         while haskey(m.periodic,(2,current))
@@ -8200,11 +8527,15 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             push!(chain,current)
             current=Int(m.periodic[(2,current)].master_entity)
         end
+        if _mesh_input!==nothing && _return_surface_production
+            return _model_periodic_surface_production(m,surface_constraint,
+                _mesh_input,_mesh_node_high_water,_mesh_element_high_water,caller)
+        end
         master_mesh=mesh_model_surface(
             m,Int(surface_constraint.master_entity);
             min_angle_deg=min_angle_deg,
             max_periodic_passes=max_periodic_passes,size_field=size_field,
-            _extrude_scope=_extrude_scope)
+            _extrude_scope=_extrude_scope,_mesh1d_options=options)
         output=_model_periodic_surface_mesh(
             m,master_mesh,surface_constraint,caller)
         return _model_surface_boundary_writeback!(m,t,output,caller)
@@ -8213,15 +8544,29 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     # evaluators — a curved or geometrically inconsistent surface must reject
     # through the planar-surface contract, not a downstream evaluator error.
     # Transfinite surfaces grade their boundary laws directly instead.
-    haskey(m.meshing.transfinite_surfaces,t) ||
+    if !haskey(m.meshing.transfinite_surfaces,t) && _surface_mesh_algorithm(m,t)!=3
         _model_surface_plane(m,t,caller;allow_ruled=true)
+    end
     forced=Dict{Int,Vector{Float64}}()
-    param_sizes=_attribute_forced_parameters(m,t,forced,caller)
-    mesh=nothing;embedded=NTuple{2,Int}[]
+    param_sizes=if !haskey(m.meshing.transfinite_surfaces,t) &&
+                   _surface_mesh_algorithm(m,t)==3
+        # The actual Point/Curve producer has already applied its grading
+        # policy, or the detached direct-Model adapter will run it once.
+        Dict{Tuple{Int,Float64},Float64}()
+    else
+        _attribute_forced_parameters(m,t,forced,caller;_mesh1d_options=options)
+    end
+    mesh=nothing;embedded=NTuple{2,Int}[];production=nothing
     for pass in 1:npasses
         mesh,embedded=_mesh_model_surface_once(
             m,t,forced,min_angle_deg,caller;size_field=size_field,
-            param_sizes=param_sizes)
+            param_sizes=param_sizes,_mesh1d_options=options,_mesh_input,
+            _mesh_node_high_water,_mesh_element_high_water,_return_surface_production,_geometry_points)
+        if mesh isa _ModelSurfaceGeometryProduction
+            production=mesh;mesh=production.production.mesh
+        elseif mesh isa _ModelSurfaceProduction
+            production=mesh;mesh=production.mesh
+        end
         isempty(constraints) && break
         changed=_synchronize_periodic_parameters!(
             forced,m,mesh,constraints,t)
@@ -8231,7 +8576,18 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
                 "within $npasses passes"))
             continue
         end
-        mesh=_snap_surface_periodic(m,mesh,constraints,caller)
+        if production===nothing
+            mesh=_snap_surface_periodic(m,mesh,constraints,caller)
+        else
+            # Actual lower-source Curve vertices keep their own CAD-evaluated
+            # coordinates. Native periodic copies reparametrize on the slave
+            # curve; their stored XYZ need not equal affine(master) bitwise.
+            # Validate the existing relation tolerance without moving them.
+            for constraint in _model_periodic_constraint_order(constraints,caller)
+                mapping=_model_periodic_snap_mapping(m,mesh,constraint)
+                _model_mapping_matches(mesh,constraint,mapping,caller;exact=false)
+            end
+        end
         break
     end
     (mesh isa Mesh || mesh isa MixedMesh) || throw(ErrorException(
@@ -8239,11 +8595,23 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     # Write the refined boundary subdivision back onto the curves — upstream
     # `meshGFace` updates each `GEdge`'s mesh with face-refinement splits, so
     # the emitted line elements share the face's vertices.
-    mesh=_model_surface_boundary_writeback!(m,t,mesh,caller)
+    # The native producer consumes actual lower-dimensional cells and never
+    # splits their constraints. Retained Curve points must remain those exact
+    # source objects rather than be projected and re-evaluated afterward.
+    production===nothing && (mesh=_model_surface_boundary_writeback!(m,t,mesh,caller))
     _validate_surface_embeddings(m,mesh,embedded,caller;surface=t)
     diagnostic=validate(mesh)
     diagnostic.ok || throw(ErrorException(
         "$caller: invalid final mesh — "*join(diagnostic.messages,"; ")))
+    production===nothing || !_return_surface_production || begin
+        actual=production isa _ModelSurfaceGeometryProduction ? production.production : production
+        result=_ModelSurfaceProduction(mesh,actual.node_tags,actual.node_owners,
+            actual.node_parameters,actual.retained_nodes,actual.node_high_water,
+            actual.element_tags,actual.element_high_water,actual.birth_rows,
+            actual.constructor_mesh,actual.source_node_updates,actual.native_recombine_events)
+        return production isa _ModelSurfaceGeometryProduction ?
+            _ModelSurfaceGeometryProduction(result,production.geometry) : result
+    end
     return mesh
 end
 
@@ -8506,7 +8874,8 @@ end
 
 function _model_explicit_volume_geometry(
     m::GeoModel,t::Int,caller::AbstractString;
-    size_field::Union{Nothing,AbstractSizeField}=nothing)
+    size_field::Union{Nothing,AbstractSizeField}=nothing,
+    _mesh_input=nothing,_mesh1d_options=nothing)
     boundaries=_model_volume_boundary_surfaces(m,t,caller)
     isempty(boundaries) && throw(ArgumentError(
         "$caller: Volume[$t] has no explicit boundary surfaces"))
@@ -8518,17 +8887,28 @@ function _model_explicit_volume_geometry(
         # triangles, so point sizes, curve grading and embedded constraints
         # already resolved on the faces reach the volume verbatim.
         get!(local_meshes,surface) do
-            mesh_model_surface(m,surface;size_field=size_field)
+            produced=_mesh_input isa _ModelMeshAuthority ?
+                _model_mesh_product(_mesh_input,2,surface;caller,producer_order=true) : nothing
+            produced===nothing ? mesh_model_surface(m,surface;size_field=size_field,
+                _mesh_input,_mesh1d_options) : produced
         end
     end
     for constraint in _model_volume_periodic_surface_constraints(m,t,caller)
         slave=Int(constraint.slave_entity)
         master=Int(constraint.master_entity)
+        # The actual slave producer already applied this periodic copy and
+        # retains its own born vertex identities.
+        local_meshes[slave] isa MixedMesh &&
+            local_meshes[slave].entity_data!==nothing && continue
         local_meshes[slave]=_model_periodic_surface_mesh(
             m,local_meshes[master],constraint,caller)
     end
     coordinates=NTuple{3,Float64}[]
     node_index=Dict{NTuple{3,Float64},Int32}()
+    native_identity=all(mesh->mesh isa MixedMesh && mesh.entity_data!==nothing,
+                        values(local_meshes))
+    native_nodes=UInt64[]
+    native_index=Dict{UInt64,Int32}()
     triangles=NTuple{3,Int32}[]
     seen_faces=Set{NTuple{3,Int32}}()
     shell_faces=Vector{NTuple{3,Int32}}[]
@@ -8550,7 +8930,23 @@ function _model_explicit_volume_geometry(
             for node in 1:nnodes(local_mesh)
                 coordinate=(local_mesh.coords[1,node],local_mesh.coords[2,node],
                             local_mesh.coords[3,node])
-                local_nodes[node]=global_node(coordinate)
+                if native_identity
+                    uid=local_mesh.entity_data.external_node_tags[node]
+                    row=get(native_index,uid,Int32(0))
+                    if row==0
+                        length(coordinates)<typemax(Int32) || throw(ArgumentError(
+                            "$caller: explicit Volume[$t] boundary exceeds the Int32 node limit"))
+                        push!(coordinates,coordinate)
+                        push!(native_nodes,uid)
+                        row=Int32(length(coordinates));native_index[uid]=row
+                    else
+                        coordinates[row]==coordinate || throw(ArgumentError(
+                            "$caller: actual boundary vertex $uid has conflicting coordinates"))
+                    end
+                    local_nodes[node]=row
+                else
+                    local_nodes[node]=global_node(coordinate)
+                end
             end
             for local_face in _volume_boundary_faces(local_mesh)
                 face=(local_nodes[local_face[1]],
@@ -8606,7 +9002,9 @@ function _model_explicit_volume_geometry(
         "larger than its total cavity volume " *
         "$cavity_volume"))
     return (surface=output,expected_volume=expected_volume,
-            comparison_scale=comparison_scale)
+            comparison_scale=comparison_scale,
+            native_node_tags=native_identity ? native_nodes : nothing,
+            native_order=native_identity ? sortperm(native_nodes) : nothing)
 end
 
 # A volume carrying a native curved-solid encoding meshes through the analytic
@@ -8618,6 +9016,20 @@ end
 _implicit_volume_surface(m::GeoModel,t::Int) =
     haskey(m.cylinders,t) || haskey(m.spheres,t) || haskey(m.cones,t) ||
     haskey(m.booleans,t)
+
+# Primitive factories retain their established deterministic geometry encoding.
+# This provenance is independent of ordinary explicitly assembled CAD PLCs;
+# native Gmsh 3-D parity for all primitive factories is still a separate task.
+function _model_factory_surface_encoding(m::GeoModel,t::Int)
+    geometry=get(m.surface_geometry,t,nothing)
+    return geometry!==nothing && hasproperty(geometry,:primitive) && geometry.primitive===:box
+end
+
+function _model_factory_volume_encoding(m::GeoModel,t::Int)
+    (haskey(m.box_extents,t) || _implicit_volume_surface(m,t)) && return true
+    boundaries=_model_volume_boundary_surfaces(m,t,"factory volume encoding")
+    return !isempty(boundaries) && all(surface->_model_factory_surface_encoding(m,abs(surface)),boundaries)
+end
 
 function _volume_surface(m::GeoModel,t::Int,caller::AbstractString="mesh_model_volume")
     if haskey(m.box_extents,t)
@@ -8661,7 +9073,12 @@ raise an explicit error.
 function mesh_model_volume(m::GeoModel, tag::Integer;
                            size_field::Union{Nothing,AbstractSizeField}=nothing,
                            _extrude_scope=nothing,
-                           _extrude_working_model::Bool=false)
+                           _extrude_working_model::Bool=false,_mesh_input=nothing,
+                           _mesh1d_options::Union{Nothing,_ModelMesh1DOptions}=nothing,
+                           _return_volume_production::Bool=false,
+                           _mesh_node_high_water::UInt64=UInt64(0),
+                           _mesh_element_high_water::UInt64=UInt64(0),
+                           _geometry_points=nothing)
     # The task-local protected-cell registry is a session record of cells
     # recovered so far, shared by the segment/sheet recovery calls below and
     # consulted by every cavity refill (including refinement-time Steiner
@@ -8670,10 +9087,18 @@ function mesh_model_volume(m::GeoModel, tag::Integer;
     # constraints into refinement and recovery, changing the emitted mesh.
     protected_faces,protected_edges=_protected_cells!()
     empty!(protected_faces); empty!(protected_edges)
+    births=_return_volume_production ?
+        _ModelNativeVolumeBirths(_mesh_node_high_water,_mesh_element_high_water) : nothing
     try
-        return _mesh_model_volume(m,tag;size_field=size_field,
+        mesh=_mesh_model_volume(m,tag;size_field=size_field,
                                   _extrude_scope=_extrude_scope,
-                                  _extrude_working_model=_extrude_working_model)
+                                  _extrude_working_model=_extrude_working_model,_mesh_input,
+                                  _native_initial_births=births,_geometry_points,
+                                  _mesh1d_options=_model_algorithm_size_options(
+                                      m,_mesh1d_options,"mesh_model_volume"))
+        return _return_volume_production ?
+            (mesh isa Union{_ModelTransfiniteVolumeProduction,_ModelNativeHybridVolumeProduction} ? mesh :
+             _model_volume_geometry_production(mesh,births,"mesh_model_volume")) : mesh
     finally
         empty!(protected_faces); empty!(protected_edges)
     end
@@ -8743,20 +9168,25 @@ end
 function _mesh_model_volume(m::GeoModel, tag::Integer;
                             size_field::Union{Nothing,AbstractSizeField}=nothing,
                             _extrude_scope=nothing,
-                            _extrude_working_model::Bool=false)
+                            _extrude_working_model::Bool=false,
+                            _mesh_input=nothing,_mesh1d_options=nothing,
+                            _native_initial_births=nothing,_geometry_points=nothing)
     caller="mesh_model_volume"
+    options=_model_algorithm_size_options(m,_mesh1d_options,caller)
     t=_tag(tag,caller,3)
     haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
-    _model_require_point_mesh_geometry(m,caller)
+    _mesh_input===nothing && _model_require_point_mesh_geometry(m,caller)
     # `GenerateMesh` runs `meshGRegionExtruded` for every `Layers`-marked
     # volume ahead of `meshGRegion` — the sweep wins over even an attached
     # transfinite attribute (`meshGRegion::operator()` returns early on
     # `ExtrudeMesh` before `MeshTransfiniteVolume`).
     swept=_extrude_volume_mesh(m,t,caller;scope=_extrude_scope,size_field=size_field,
-                               _working_model=_extrude_working_model)
+                               _working_model=_extrude_working_model,_mesh_input)
     swept===nothing || return swept
     if haskey(m.meshing.transfinite_volumes,t)
-        mesh=_transfinite_volume_mesh(m,t,caller)
+        fill=_transfinite_volume_mesh(m,t,caller;_mesh_input,
+            _return_bindings=_mesh_input!==nothing)
+        mesh,bindings=_mesh_input===nothing ? (fill,nothing) : fill
         mesh=_consume_volume_attributes(m,t,mesh,caller)
         # model_to_mixed expects an untagged pure volume complex — boundary
         # faces are re-derived from volume-cell faces downstream (or emitted
@@ -8772,11 +9202,27 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
             join(diagnostic.messages,"; ")))
         _volume_cell_count(mesh)>0 || throw(ErrorException(
             "$caller: Volume[$t] produced no volume cells"))
-        return mesh
+        return _native_initial_births!==nothing && bindings!==nothing ?
+            _model_transfinite_volume_production(m,t,mesh,bindings,_mesh_input,_geometry_points,
+                _native_initial_births.node_high_water,
+                _native_initial_births.element_high_water,caller) : mesh
+    end
+    m.meshing.algorithm_3d in (1,3) || throw(ArgumentError(
+        "$caller: Mesh.Algorithm3D=$(m.meshing.algorithm_3d) is not " *
+        "implemented for ordinary native Volume[$t]; supported: " *
+        "1 (Delaunay), 3 (initial only)"))
+    if !isempty(m.volumes[t]) && !_model_factory_volume_encoding(m,t)
+        hybrid=_model_native_hybrid_volume_input(m,t,_mesh_input,caller)
+        if hybrid!==nothing
+            production=_model_native_hybrid_volume_production(m,t,hybrid,options,
+                _native_initial_births,caller;size_field)
+            return _native_initial_births===nothing ? production.mesh : production
+        end
     end
     explicit_geometry=(isempty(m.volumes[t]) ||
         _implicit_volume_surface(m,t)) ? nothing :
-        _model_explicit_volume_geometry(m,t,caller;size_field=size_field)
+        _model_explicit_volume_geometry(m,t,caller;size_field=size_field,
+                                       _mesh_input,_mesh1d_options=options)
     periodic_surfaces=explicit_geometry===nothing ? ModelPeriodicConstraint[] :
         _model_volume_periodic_surface_constraints(m,t,caller)
     surface=explicit_geometry===nothing ? _volume_surface(m,t) :
@@ -8785,7 +9231,7 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
     line_tags=Int[]
     sheets=Tuple{Int,NTuple{3,Float64},NTuple{3,Float64},
                        NTuple{3,Float64}}[]
-    _,_,surface_tags,surface_embedded_points,surface_embedded_curves,
+    point_tags,_,surface_tags,surface_embedded_points,surface_embedded_curves,
     boundary_surfaces=
         _model_volume_embedding_inventory(m,t,caller)
     boundary_surface_set=Set(abs.(boundary_surfaces))
@@ -8829,7 +9275,8 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
             # The sheet's vertices are forced into the volume mesh through
             # `extra` so face recovery never has to invent them (upstream's
             # embedded-face vertices are real mesh vertices upfront).
-            sheet_mesh=mesh_model_surface(m,etag;size_field=size_field)
+            sheet_mesh=mesh_model_surface(m,etag;size_field=size_field,
+                                         _mesh_input,_mesh1d_options=options)
             for node in 1:nnodes(sheet_mesh)
                 push!(extra,(sheet_mesh.coords[1,node],
                              sheet_mesh.coords[2,node],
@@ -8847,71 +9294,162 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
             throw(ArgumentError("$caller: unsupported embedding dimension $edim"))
         end
     end
+    # A factory carrying actual Surface products must consume the same PLC
+    # as an ordinary explicit Volume. Its analytic fill/refinement would split
+    # the retained lower cells without replacing their published connectivity.
+    factory_encoding=_model_factory_volume_encoding(m,t)
+    # Preserve the established unembedded factory carrier. Its actual embedded
+    # products require the constrained native PLC route.
+    factory_constraints=!isempty(get(m.embeds,(3,t),NTuple{2,Int}[])) ||
+        any(surface->!isempty(surface_embedded_points[surface]) ||
+                     !isempty(surface_embedded_curves[surface]),surface_tags)
+    native_input=explicit_geometry!==nothing && _mesh_input isa _ModelMeshAuthority &&
+        explicit_geometry.native_node_tags!==nothing && (!factory_encoding || factory_constraints)
+    legacy_factory=factory_encoding && !native_input
+    initial_geometry=explicit_geometry
+    if explicit_geometry!==nothing && !legacy_factory
+        initial_geometry=_model_native_initial_embedded_input(m,t,explicit_geometry,
+                                                              _mesh_input,caller)
+        if _native_initial_births!==nothing && initial_geometry.native_node_tags!==nothing
+            _native_initial_births.source=initial_geometry.surface
+            _native_initial_births.node_tags=copy(initial_geometry.native_node_tags)
+            _native_initial_births.node_high_water=max(_native_initial_births.node_high_water,
+                maximum(_native_initial_births.node_tags;init=UInt64(0)))
+        end
+    end
+    native_constraints=native_input ? _model_native_volume_input_constraints(
+        m,t,initial_geometry,_mesh_input,caller) : nothing
+    native_point_bindings=native_input ? _model_native_volume_point_bindings(
+        _mesh_input,initial_geometry,point_tags,caller) : nothing
+    # Actual embedded Point/Curve/Surface products are already in the native
+    # input. CAD-derived extra seeds would create a second unrelated geometry.
+    native_input && empty!(extra)
     mesh=if explicit_geometry===nothing
         isempty(extra) ? tetrahedralize(surface) :
                          tetrahedralize(surface;interior_points=extra)
     else
-        _model_explicit_volume_fill(
-            surface,t,caller;
-            interior_points=isempty(extra) ? nothing : extra)
+        if legacy_factory
+            _model_explicit_volume_fill(surface,t,caller;
+                interior_points=isempty(extra) ? nothing : extra)
+        else
+            _model_native_initial_volume_fill(surface,t,caller;
+                interior_points=isempty(extra) ? nothing : extra,
+                node_order=initial_geometry.native_order,initial_surface=initial_geometry.surface,
+                options,births=_native_initial_births,
+                protected_facets=native_constraints===nothing ? nothing :
+                    [constraint[3] for constraint in native_constraints.embedded_faces])
+        end
     end
-    effective_field=_volume_size_field(m,t,surface,size_field,caller)
-    if effective_field!==nothing
-        # Upstream's 3-D criterion refines while a tet's circumradius exceeds
-        # the local lc (`MTet4::setup`); `refine_to_size` bounds tet edge
-        # length, so the lc field is expressed as the 2·lc edge bound —
-        # any edge past it forces R > lc (chord longer than the diameter).
-        edge_field=FunctionSize(function(x,y,z)
-            _GMSH_TET_EDGE_OVER_RADIUS*size_at(effective_field,x,y,z)
-        end)
-        mesh=refine_to_size(mesh,edge_field;entity=(3,t),best_effort=true)
+    if legacy_factory && m.meshing.algorithm_3d==1
+        effective_field=_volume_size_field(m,t,surface,size_field,caller)
+        if effective_field!==nothing
+            edge_field=FunctionSize(function(x,y,z)
+                _GMSH_TET_EDGE_OVER_RADIUS*size_at(effective_field,x,y,z)
+            end)
+            mesh=refine_to_size(mesh,edge_field;entity=(3,t),best_effort=true)
+        end
+    end
+    sort!(unique!(line_tags))
+    protected_faces,protected_edges=_protected_cells!()
+    empty!(protected_faces); empty!(protected_edges)
+    if native_constraints!==nothing
+        _model_certify_native_volume_constraints(mesh,native_constraints,t,caller)
+        # These are actual row/UID incidences, not a tolerance-derived chain or
+        # an arbitrary triangulation covering the same geometric sheet.
+        for (_,_,face) in native_constraints.embedded_faces
+            push!(protected_faces,_sorted_face3(face...))
+        end
+        for (_,_,edge) in native_constraints.edges
+            push!(protected_edges,minmax(edge...))
+        end
+    else
+        # Sheets recover first: a curve nested in an embedded surface already
+        # owns its chain links as sheet edges (bitwise-identical evaluator
+        # nodes), so face recovery realizes them without inventing chord-
+        # subdivision Steiner nodes that could land on sheet edges and split
+        # them into degenerate stubs.
+        for (sheet,a,b,c) in sheets
+            mesh=recover_triangle3(mesh,a,b,c)
+            mesh_covers_triangle3(mesh,a,b,c) || throw(ErrorException(
+                "$caller: embedded Surface[$sheet] is not a union of tetrahedron faces"))
+            covfaces,_,_=_mesh_covering_faces3(mesh,a,b,c)
+            for f in covfaces
+                push!(protected_faces,_sorted_face3(f...))
+            end
+        end
+        for curve in line_tags
+            # Each stored chain link recovers as a straight segment; a `Line`
+            # degrades to its single chord like before. A sheet-nested curve's
+            # links are already covered, so this is a coverage audit there.
+            chain=_volume_embedded_curve_chain(m,curve,caller)
+            for i in 1:(length(chain)-1)
+                p=chain[i];q=chain[i+1]
+                # A link already realized as a tet-edge chain (sheet-nested
+                # curves arrive that way) needs no recovery — `recover_segment3`
+                # would still insert endpoint Steiner vertices and perturb the
+                # protected sheet faces around them.
+                mesh_covers_segment3(mesh,p,q) ||
+                    (mesh=recover_segment3(mesh,p,q))
+                # Register the recovered chain so a later cavity fill cannot drop
+                # it: the fill carries protected edges/faces as keep constraints.
+                for (u,v) in _tet_edge_set(mesh)
+                    (_on_segment3(_pt3(mesh,u),p,q;atol=1e-9) &&
+                     _on_segment3(_pt3(mesh,v),p,q;atol=1e-9)) || continue
+                    push!(protected_edges,u<v ? (u,v) : (v,u))
+                end
+                if !mesh_covers_segment3(mesh,p,q)
+                    throw(ErrorException(
+                        "$caller: embedded Curve[$curve] is not a chain of tetrahedron edges"))
+                end
+            end
+        end
+    end
+    # Boundary/embedded recovery precedes insertion in meshGRegion. The
+    # Delaunay path now uses the actual normalized circumradius cavity
+    # criterion; Algorithm3 retains this recovered initial complex.
+    if m.meshing.algorithm_3d==1 && !legacy_factory
+        mode=_resolved_extend_from_boundary(m,3,t)
+        receipt=_native_initial_births!==nothing &&
+            _native_initial_births.cell_source===mesh ? _native_initial_births : nothing
+        refined=_refine_gmsh_delaunay3(mesh,
+            _ModelAlgorithmBackgroundSize(m,3,t,options,size_field,caller);
+            extend_boundary=mode>0 || mode==-3,minimize_boundary=mode==2,
+            embedded_sizes=_model_volume_embedded_sizes(
+                m,t,mesh,line_tags,options,caller),
+            protected_faces=protected_faces,protected_edges=protected_edges,
+            element_numbers=receipt===nothing ? nothing : receipt.element_tags,
+            element_high_water=receipt===nothing ? nothing : receipt.element_high_water,
+            node_numbers=receipt===nothing ? nothing : receipt.node_tags,
+            node_high_water=receipt===nothing ? nothing : receipt.node_high_water,
+            native_storage_order=receipt!==nothing,return_numbers=receipt!==nothing)
+        if receipt===nothing
+            mesh=refined
+        else
+            mesh=refined.mesh
+            receipt.cell_source=mesh
+            receipt.element_tags=refined.element_numbers
+            receipt.element_high_water=refined.element_high_water
+            receipt.node_tags=refined.node_numbers
+            receipt.node_high_water=refined.node_high_water
+        end
     end
     iterations=get(m.meshing.smoothing,(3,t),0)
     iterations>0 &&
         (mesh=_laplacian_smooth_volume(mesh,iterations,caller,t))
-    sort!(unique!(line_tags))
-    protected_faces,protected_edges=_protected_cells!()
-    empty!(protected_faces); empty!(protected_edges)
-    # Sheets recover first: a curve nested in an embedded surface already
-    # owns its chain links as sheet edges (bitwise-identical evaluator
-    # nodes), so face recovery realizes them without inventing chord-
-    # subdivision Steiner nodes that could land on sheet edges and split
-    # them into degenerate stubs.
-    for (sheet,a,b,c) in sheets
-        mesh=recover_triangle3(mesh,a,b,c)
-        mesh_covers_triangle3(mesh,a,b,c) || throw(ErrorException(
-            "$caller: embedded Surface[$sheet] is not a union of tetrahedron faces"))
-        covfaces,_,_=_mesh_covering_faces3(mesh,a,b,c)
-        for f in covfaces
-            push!(protected_faces,_sorted_face3(f...))
-        end
+    # Factory fills have no native node birth binding. Preserve their CAD
+    # point constraints explicitly before the volume optimizer moves vertices.
+    protected_nodes=Int[]
+    native_point_nodes=native_point_bindings===nothing ? nothing :
+        _model_native_volume_point_nodes(mesh,native_point_bindings,_native_initial_births,caller)
+    for point in point_tags
+        push!(protected_nodes,native_point_bindings===nothing ?
+            _model_projection_embedded_point_node(m,mesh,point,1e-12,caller) :
+            native_point_nodes[point])
     end
-    for curve in line_tags
-        # Each stored chain link recovers as a straight segment; a `Line`
-        # degrades to its single chord like before. A sheet-nested curve's
-        # links are already covered, so this is a coverage audit there.
-        chain=_volume_embedded_curve_chain(m,curve,caller)
-        for i in 1:(length(chain)-1)
-            p=chain[i];q=chain[i+1]
-            # A link already realized as a tet-edge chain (sheet-nested
-            # curves arrive that way) needs no recovery — `recover_segment3`
-            # would still insert endpoint Steiner vertices and perturb the
-            # protected sheet faces around them.
-            mesh_covers_segment3(mesh,p,q) ||
-                (mesh=recover_segment3(mesh,p,q))
-            # Register the recovered chain so a later cavity fill cannot drop
-            # it: the fill carries protected edges/faces as keep constraints.
-            for (u,v) in _tet_edge_set(mesh)
-                (_on_segment3(_pt3(mesh,u),p,q;atol=1e-9) &&
-                 _on_segment3(_pt3(mesh,v),p,q;atol=1e-9)) || continue
-                push!(protected_edges,u<v ? (u,v) : (v,u))
-            end
-            if !mesh_covers_segment3(mesh,p,q)
-                throw(ErrorException(
-                    "$caller: embedded Curve[$curve] is not a chain of tetrahedron edges"))
-            end
-        end
-    end
+    mesh=_model_native_optimize_volume(mesh,options,_native_initial_births,
+        _mesh_input,protected_faces,protected_edges,caller;protected_nodes)
+    native_point_bindings===nothing || (native_point_nodes=
+        _model_native_volume_point_nodes(mesh,native_point_bindings,_native_initial_births,caller))
     for curve in line_tags
         chain=_volume_embedded_curve_chain(m,curve,caller)
         for i in 1:(length(chain)-1)
@@ -8926,6 +9464,8 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
             "$caller: embedded Surface[$sheet] is absent from the final " *
             "tetrahedron face complex"))
     end
+    native_constraints===nothing ||
+        _model_certify_native_volume_constraints(mesh,native_constraints,t,caller)
     for constraint in periodic_surfaces
         mapping=_model_periodic_surface_nodes(m,mesh,constraint)
         _model_mapping_matches(mesh,constraint,mapping,caller;exact=false)
@@ -8954,8 +9494,9 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
         end
         nodes,edges=_model_projection_face_topology(faces)
         for point in nested_points
-            point_nodes[point]=_model_projection_embedded_point_node(
-                m,mesh,point,1e-12,caller)
+            point_nodes[point]=native_point_bindings===nothing ?
+                _model_projection_embedded_point_node(m,mesh,point,1e-12,caller) :
+                native_point_nodes[point]
         end
         # The sheet's own boundary curves can pinch against nested ones;
         # their owned vertices must not become nested-chain candidates.
@@ -9019,7 +9560,9 @@ end
 function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
                                   caller::AbstractString;
                                   size_field::Union{Nothing,AbstractSizeField}=
-                                      nothing)
+                                      nothing,
+                                  _mesh1d_options::Union{Nothing,_ModelMesh1DOptions}=nothing)
+    options=_model_algorithm_size_options(m,_mesh1d_options,caller)
     for tag in members
         haskey(m.meshing.transfinite_surfaces,tag) && throw(ArgumentError(
             "$caller: transfinite Surface[$tag] cannot join a compound"))
@@ -9050,7 +9593,7 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
     # member boundary curves reuse their stored `GEdge::mesh_vertices`
     # discretizations (shared member edges included — they are ordinary
     # compound edges upstream), grading any curve still missing them.
-    _model_surface_mesh_curves!(m,keys(counts),caller)
+    _model_surface_mesh_curves!(m,keys(counts),caller;_mesh1d_options=options)
     for curve in keys(counts)
         params=get(m.curve_params,curve,nothing)
         params===nothing && continue
@@ -9108,6 +9651,14 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
                     push!(loop_idx,vertex)
                     push!(loop_segment,vertex)
                 end
+                # Ordinary loop assembly emits the final endpoint as the
+                # next curve's first vertex. These per-curve segment lists
+                # need that endpoint themselves to close the constraint.
+                if !(curve in m.meshing.degenerated)
+                    endpoint=signed>0 ? b : a
+                    push!(loop_segment,_add_surface_point!(
+                        xs,ys,mesh_sizes,index,canonical,m,endpoint,caller,plane))
+                end
                 for k in 1:(length(loop_segment)-1)
                     pair=(loop_segment[k],loop_segment[k+1])
                     pair[1]==pair[2] && throw(ArgumentError(
@@ -9123,29 +9674,18 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
             push!(member_polygons[tag],loop_idx)
         end
     end
+    frame=_surface_metric_frame(plane)
+    metric_xs,metric_ys,metric_canonical=_surface_metric_pslg(
+        frame,xs,ys,canonical,caller,first(members))
     T=constrained_delaunay(
-        xs,ys,boundary_segs;internal_segments=internal_segs)
+        metric_xs,metric_ys,boundary_segs;internal_segments=internal_segs)
     # Shared member boundaries are compound edges upstream, so the seg/2
     # floor covers both the outer boundary and the internal chains.
     vSizes=_surface_vertex_sizes(
-        T,xs,ys,Iterators.flatten((boundary_segs,internal_segs)),
+        T,metric_xs,metric_ys,Iterators.flatten((boundary_segs,internal_segs)),
         mesh_sizes,Int[])
-    callback=m.meshing.size_callback
-    bgm_size=if size_field===nothing && callback===nothing
-        nothing
-    else
-        loose=_pslg_default_size(xs,ys,caller,first(members))
-        function bgm(x,y)
-            h=loose
-            size_field===nothing ||
-                (h=min(h,size_at(size_field,x,y,0.0,
-                                 (2,first(members)))))
-            callback===nothing ||
-                (h=_apply_size_callback(
-                    callback,2,first(members),x,y,0.0,h,caller))
-            return h
-        end
-    end
+    bgm_size=_ModelSurfaceBackgroundSize(frame,
+        _ModelAlgorithmBackgroundSize(m,2,first(members),options,size_field,caller))
     # Same propagated-vertex `vSizes`, R/lc < sqrt(2)/2 bound, and
     # `insertVertexB` rules as `_mesh_model_surface_once` (upstream
     # `meshGFace` insertion applies no angle bound). The compound entity
@@ -9157,9 +9697,7 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
         refine!(T;min_angle_deg=0,gmsh_insertion=true,
                 vertex_sizes=vSizes,bgm_size=bgm_size)
     else
-        radius=bgm_size===nothing ?
-            (x,y)->_pslg_default_size(xs,ys,caller,first(members)) : bgm_size
-        refine!(T;min_angle_deg=0,size_radius=radius,gmsh_insertion=true)
+        refine!(T;min_angle_deg=0,size_radius=bgm_size,gmsh_insertion=true)
     end
     mesh=to_mesh(T;interior=interior)
     diag=validate(mesh)
@@ -9179,7 +9717,7 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
         for tag in members
             inside=false
             for polygon in member_polygons[tag]
-                _point_in_polygon(cx,cy,xs,ys,polygon) && (inside=!inside)
+                _point_in_polygon(cx,cy,metric_xs,metric_ys,polygon) && (inside=!inside)
             end
             inside && (owner=tag;break)
         end
@@ -9189,6 +9727,16 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
         push!(member_tris[owner],cell)
     end
     parts=Tuple{Int,Mesh}[]
+    world_coordinates=Matrix{Float64}(undef,3,nnodes(mesh))
+    for node in 1:nnodes(mesh)
+        x=mesh.coords[1,node];y=mesh.coords[2,node]
+        key=_surface_size_key(x,y)
+        point=get(metric_canonical,key,nothing)
+        point===nothing && (point=_surface_metric_lift(frame,x,y))
+        world_coordinates[1,node]=point[1]
+        world_coordinates[2,node]=point[2]
+        world_coordinates[3,node]=point[3]
+    end
     for tag in members
         cells=member_tris[tag]
         isempty(cells) && throw(ErrorException(
@@ -9210,7 +9758,7 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
         coordinates=Matrix{Float64}(undef,3,Int(next))
         for node in 1:nnodes(mesh)
             referenced[node] || continue
-            coordinates[:,remap[node]].=@view mesh.coords[:,node]
+            coordinates[:,remap[node]].=@view world_coordinates[:,node]
         end
         part=Mesh(coordinates;tris=tris)
         # The member's boundary — including the shared compound seams — is
@@ -9244,7 +9792,7 @@ function _point_in_polygon(x,y,xs,ys,polygon)
     return inside
 end
 
-include("ModelMesh1D.jl")
 include("ModelExtrude.jl")
+include("ModelNativeGeoKernel.jl")
 
 end # module

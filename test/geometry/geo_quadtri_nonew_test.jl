@@ -46,7 +46,7 @@ end
             @testset "$(fixture.name)" begin
                 execution=_QTNN.execute(fixture.source)
                 @test _QTNN.crc_record(fixture.name,execution.mesh)==_QTNN_PINS[fixture.name]
-                volume=geo_entity_mesh(execution,3,1)
+                volume=geo_entity_mesh(execution,3,1;geometry=true)
                 certificate=_QTNN.certify_fixture(volume,fixture)
                 @test validate(volume).ok
                 @test validate(execution.mesh).ok
@@ -83,7 +83,7 @@ end
             @test _QTNN.surface_faces(before,direct)==_QTNN.surface_faces(after,direct)
             execution=_QTNN.execute(fixture.source)
             @test _QTNN.typed_signature(direct)==
-                _QTNN.typed_signature(geo_entity_mesh(execution,3,1))
+                _QTNN.typed_signature(geo_entity_mesh(execution,3,1;geometry=true))
             surface_only=_QTNN.execute(fixture.source;dim=2)
             @test _QTNN.surface_faces(surface_only.mesh_parts,direct)==
                 Set(keys(certificate.boundary))
@@ -112,7 +112,7 @@ end
             Physical Volume("body",103)={sweep[1]};
             """
             execution=_QTNN.execute(source)
-            volume=geo_entity_mesh(execution,3,1)
+            volume=geo_entity_mesh(execution,3,1;geometry=true)
             boundary=Set(keys(_QTNN.certify_fixture(volume,fixture).boundary))
             projected=model_to_mixed(execution.model,volume,3,1)
             @test projected.physical_names==Dict((2,101)=>"source",(2,102)=>"top",(3,103)=>"body")
@@ -194,10 +194,10 @@ end
             first=findmin(cell)[2];opposite=mod1(first+2,4)
             expected=Set(_QTNN.transformed(fixture,_QTNN.point(original,cell[i]),1.)
                          for i in (first,opposite))
-            top=geo_entity_mesh(execution,2,Int(execution.lists["sweep"][1]))
+            top=geo_entity_mesh(execution,2,Int(execution.lists["sweep"][1]);geometry=true)
             shared=intersect(collect(top.tris[:,1]),collect(top.tris[:,2]))
             @test Set(_QTNN.point(top,node) for node in shared)==expected
-            @test _QTNN.certify_fixture(geo_entity_mesh(execution,3,1),fixture).ncell==5
+            @test _QTNN.certify_fixture(geo_entity_mesh(execution,3,1;geometry=true),fixture).ncell==5
         end
     end
 
@@ -371,7 +371,7 @@ end
         for pitch in (-3.,3.),laterals in (false,true)
             fixture=_QTNN.helical_fixture("separated_helix",pitch,laterals)
             execution=_QTNN.execute(fixture.source)
-            volume=geo_entity_mesh(execution,3,1)
+            volume=geo_entity_mesh(execution,3,1;geometry=true)
             @test _QTNN.certify_fixture(volume,fixture).ncell>0
             @test nnodes(volume)==212+(laterals ? 1 : 0)
             @test validate(execution.mesh).ok
@@ -446,7 +446,7 @@ end
         source=_QTNN.paired_source()
         execution=_QTNN.execute(source)
         left=Int(execution.lists["left"][2]);right=Int(execution.lists["right"][2])
-        first=geo_entity_mesh(execution,3,left);second=geo_entity_mesh(execution,3,right)
+        first=geo_entity_mesh(execution,3,left;geometry=true);second=geo_entity_mesh(execution,3,right;geometry=true)
         free=_QTNN.fixture("uniform3_false","Layers{3}",[0.,1/3,2/3,1.],false)
         recombined=_QTNN.fixture("uniform3_true","Layers{3}",[0.,1/3,2/3,1.],true)
         @test _QTNN.certify_fixture(first,free).ncell>0
@@ -485,7 +485,7 @@ end
         source=replace(fixture.source,"Recombine Surface{1};"=>"",
                        "Layers{3};Recombine;"=>"Layers{3};")
         execution=_QTNN.execute(source)
-        @test size(geo_entity_mesh(execution,3,1).tets,2)==18
+        @test size(geo_entity_mesh(execution,3,1;geometry=true).tets,2)==18
         @test validate(execution.mesh).ok
     end
 

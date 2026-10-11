@@ -80,7 +80,8 @@ end
     return m.volumes
 end
 
-function _model_topology_dim_tags(dim_tags,caller::AbstractString)
+function _model_topology_dim_tags(dim_tags,caller::AbstractString,
+                                  m::Union{Nothing,GeoModel}=nothing)
     (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(ArgumentError(
         "$caller: dim_tags must be a vector or tuple of (dimension, tag) pairs"))
     normalized=Tuple{Int,Int}[]
@@ -100,7 +101,7 @@ function _model_topology_dim_tags(dim_tags,caller::AbstractString)
             "$caller: entity tag must be an integer"))
         value isa Bool && throw(ArgumentError(
             "$caller: entity tag must not be Bool"))
-        value!=0 || throw(ArgumentError(
+        (value!=0 || (m!==nothing && _model_entity_known(m,dimension,0))) || throw(ArgumentError(
             "$caller: entity tags must be nonzero"))
         (-typemax(Int32)<=value<=typemax(Int32)) || throw(ArgumentError(
             "$caller: entity tag magnitude exceeds Int32"))
@@ -176,8 +177,10 @@ function _model_direct_boundary(
     isempty(m.volumes[tag]) && throw(ArgumentError(
         "$caller: Volume[$tag] has no explicit surface-loop topology; " *
         "define it from Surface Loop entities before querying its boundary"))
+    # Boundary queries expose stored CAD incidence even when automatic
+    # coherence leaves coincident copies. Meshing retains shell certification.
     surfaces=_model_volume_boundary_surfaces(
-        m,tag,caller;orient_cavities=canonical_orientation)
+        m,tag,caller;orient_cavities=canonical_orientation,certify_shells=false)
     return Tuple{Int,Int}[(2,surface) for surface in surfaces]
 end
 
@@ -300,7 +303,7 @@ function model_boundary(
         "$caller: oriented must be Bool"))
     recursive isa Bool || throw(ArgumentError(
         "$caller: recursive must be Bool"))
-    normalized=_model_topology_dim_tags(dim_tags,caller)
+    normalized=_model_topology_dim_tags(dim_tags,caller,m)
     boundaries=Tuple{Int,Int}[]
     for (dimension,signed_tag) in normalized
         current=recursive ?

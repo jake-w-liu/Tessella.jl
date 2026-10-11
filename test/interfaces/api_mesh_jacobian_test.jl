@@ -19,6 +19,7 @@ function _install_mesh_jacobian_fixture!(mesh)
     lock(_MESH_JACOBIAN_API.STATE_LOCK) do
         _MESH_JACOBIAN_API._replace_mesh_cache_locked!(
             _MESH_JACOBIAN_API._copy_mesh(mesh))
+        _MESH_JACOBIAN_API._native_lookup_invalidate_locked!()
     end
     return nothing
 end

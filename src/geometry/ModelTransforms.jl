@@ -210,7 +210,7 @@ function _gmsh_rotation_matrix(axis::NTuple{3,Float64}, angle::Float64)
     t1=_gmsh_norme(_gmsh_prodve(t2,axe))
     t2=_gmsh_norme(_gmsh_prodve(axe,t1))
     plan=(axe,t1,t2)   # rows
-    s,c=_gm_sincos(angle)
+    s,c=_gm87_sincos(angle)
     rot=((1.0,0.0,0.0),(0.0,c,-s),(0.0,s,c))
     interm=ntuple(3) do i
         ntuple(3) do j
@@ -335,7 +335,8 @@ non-representable transforms and non-finite results leave the model unchanged.
 """
 function transform_entities!(m::GeoModel, t::_AffineTransform,
                              entities::AbstractVector{<:Tuple{Integer,Integer}};
-                             caller::AbstractString="transform_entities!")
+                             caller::AbstractString="transform_entities!",
+                             auto_coherence::Integer=true)
     normalized=NTuple{2,Int}[]
     for (dim,tag) in entities
         d=_dimension(dim,caller); tg=_tag(tag,caller,d)
@@ -383,8 +384,31 @@ function transform_entities!(m::GeoModel, t::_AffineTransform,
     _apply_occ_geometry_plans!(m,geometry_plans)
     _reconcile_box_encodings!(m,seen)
     _reconcile_curved_encodings!(m,seen)
-    coherence!(m)
+    # OCC_Internals::_transform rebinds transformed shapes without the
+    # built-in GEO global duplicate pass. Only a complete OCC volume
+    # selection takes that route; mixed selections keep their existing path.
+    occ_volumes_only=!isempty(normalized) && all(entity->
+        entity[1]==3 && _transform_complete_occ_volume(m,entity[2]),normalized)
+    occ_volumes_only || iszero(auto_coherence) ||
+        coherence!(m;remove_degenerated=auto_coherence>1)
     return normalized
+end
+
+# The duplication predicate `_occ_volume_entity` intentionally accepts any
+# OCC boundary record. Transform routing needs every face and boundary curve
+# to belong to the OCC representation; one OCC member of a built-in shell is
+# insufficient. Empty/encoding-only volumes keep their existing route.
+function _transform_complete_occ_volume(m::GeoModel,tag::Int)
+    isempty(m.volumes[tag]) && return false
+    for shell in m.volumes[tag], signed_surface in m.surface_loops[shell]
+        surface=abs(signed_surface)
+        geometry=get(m.surface_geometry,surface,nothing)
+        (geometry!==nothing && hasproperty(geometry,:occ)) || return false
+        for loop in m.surfaces[surface], curve in m.loops[loop]
+            _occ_geometry(m,abs(curve))!==nothing || return false
+        end
+    end
+    return true
 end
 
 # Curves and surfaces owned by one entity — the closure that carries OCC
@@ -418,6 +442,7 @@ function _plan_occ_geometry_transforms(m::GeoModel, normalized, t,
     curve_plans=Tuple{Int,NamedTuple}[]
     surface_plans=Tuple{Int,NamedTuple}[]
     seen_curves=Set{Int}(); seen_surfaces=Set{Int}()
+    tensor_cache=IdDict{_ModelNURBSSurface,_ModelNURBSSurface}()
     for (d,tag) in normalized
         curves,surfaces=_entity_closure_geometry(m,d,tag)
         for curve in curves
@@ -427,7 +452,7 @@ function _plan_occ_geometry_transforms(m::GeoModel, normalized, t,
             g===nothing && continue
             what="Curve[$curve]"
             push!(curve_plans,(curve,
-                _transform_occ_curve_record(m,curve,g,t,caller,what)))
+                _transform_occ_curve_record(m,curve,g,t,caller,what;tensor_cache)))
         end
         for surface in surfaces
             surface in seen_surfaces && continue
@@ -435,7 +460,7 @@ function _plan_occ_geometry_transforms(m::GeoModel, normalized, t,
             g=get(m.surface_geometry,surface,nothing)
             (g===nothing || !hasproperty(g,:occ)) && continue
             push!(surface_plans,(surface,
-                _transform_occ_surface_record(g,t,caller,"Surface[$surface]")))
+                _transform_occ_surface_record(g,t,caller,"Surface[$surface]";tensor_cache)))
         end
     end
     return (curve_plans,surface_plans)
@@ -445,7 +470,10 @@ end
 # record carries no coordinates (`:degenerate` stores only its parameter
 # range).
 function _transform_occ_curve_record(m::GeoModel, curve::Int, g,
-                                     t::_AffineTransform, caller, what)
+                                     t::_AffineTransform, caller, what;tensor_cache=nothing)
+    if g.occ===:surface_iso
+        return merge(g,(face=_transform_occ_surface_record(g.face,t,caller,what;tensor_cache),))
+    end
     if g.occ===:circle
         return _transform_occ_circle(g,t,caller,what)
     elseif g.occ===:line
@@ -454,13 +482,26 @@ function _transform_occ_curve_record(m::GeoModel, curve::Int, g,
         # direction is not renormalized, so arc-length parameters stay
         # consistent under the same stretch as the endpoints.
         dir=_finite_result(_occ_linear_apply(t,g.dir),caller)
-        return (occ=:line,origin=_occ_trsf_apply(t,g.origin),dir=dir,
+        record=(occ=:line,origin=_occ_trsf_apply(t,g.origin),dir=dir,
                 t0=g.t0,t1=g.t1)
+        return hasproperty(g,:primitive) ?
+            merge(record,(primitive=g.primitive,)) : record
     end
     return g
 end
 
-function _transform_occ_surface_record(g, t::_AffineTransform, caller, what)
+function _transform_occ_surface_record(g, t::_AffineTransform, caller, what;tensor_cache=nothing)
+    if _model_nurbs_surface(g)
+        transform_patch=function()
+            surface=g.patch.surface
+            controls=map(point->_finite_result(_occ_trsf_apply(t,point),caller),surface.controls)
+            updated=NURBS.NURBSSurface(surface.degree_u,surface.degree_v,
+                surface.knots_u,surface.knots_v,controls,surface.weights)
+            return _ModelNURBSSurface(g.patch.family,updated)
+        end
+        patch=tensor_cache===nothing ? transform_patch() : get!(transform_patch,tensor_cache,g.patch)
+        return merge(g,(patch=patch,))
+    end
     if g.occ===:sphere
         s2=_linear_isotropy(t.linear)
         s2===nothing && throw(ArgumentError(
@@ -522,14 +563,19 @@ function _transform_occ_surface_record(g, t::_AffineTransform, caller, what)
         # `gp_Ax3::Transformed` — every direction takes the raw vectorial
         # part (unrenormalized: a `gp_GTrsf` scale stretches the frame and
         # the parametrization absorbs it, so the pcurves — and therefore
-        # `uvb` — carry over verbatim).
-        return (occ=:plane,
+        # `uvb` — carry over verbatim). A `primitive` provenance marker
+        # (materialized OCC Box face) survives the same way: the transform
+        # keeps the record a parametrized plane, so the encoding that routed
+        # the source face still applies to the image.
+        record=(occ=:plane,
                 center=_finite_result(
                     _occ_trsf_apply(t,g.center),caller),
                 axis=_occ_linear_apply(t,g.axis),
                 X=_occ_linear_apply(t,g.X),
                 Y=_occ_linear_apply(t,g.Y),
                 reversed=g.reversed,pcurves=g.pcurves,uvb=g.uvb)
+        return hasproperty(g,:primitive) ?
+            merge(record,(primitive=g.primitive,)) : record
     end
     return g
 end
@@ -576,11 +622,18 @@ function _transform_occ_circle(g, t::_AffineTransform, caller, what)
             Y=.-Y
         end
     end
-    return (occ=:circle,center=center,
+    transformed=(occ=:circle,center=center,
             n=(n[1]/nl,n[2]/nl,n[3]/nl),
             X=(X[1]/sx,X[2]/sx,X[3]/sx),
             Y=(Y[1]/sy,Y[2]/sy,Y[3]/sy),r=g.r*sx,
             t0=t0,t1=t1)
+    if hasproperty(g,:native_geometry)
+        native=_transform_occ_circle(g.native_geometry,t,caller,what)
+        return merge(transformed,(native_geometry=native,))
+    elseif hasproperty(g,:native_arithmetic)
+        return merge(transformed,(native_arithmetic=true,))
+    end
+    return transformed
 end
 
 # After independent sub-entity moves, keep a materialized curved primitive's
@@ -785,10 +838,11 @@ physical groups, embeddings, periodic relations, discrete boundaries, compound
 members, and transfinite corner lists. Automatic tag counters reset to the
 largest surviving tag per merged dimension, matching `Geometry.OldNewReg`.
 """
-function coherence!(m::GeoModel; tol::Real=_COHERENCE_RTOL)
-    maps=_coherence_merge!(m,tol)
+function coherence!(m::GeoModel; tol::Real=_COHERENCE_RTOL,
+                    remove_degenerated::Bool=false)
+    maps=_coherence_merge!(m,tol;remove_degenerated=remove_degenerated)
     return !isempty(maps.points) || !isempty(maps.curves) ||
-           !isempty(maps.surfaces)
+           !isempty(maps.surfaces) || !isempty(maps.removed)
 end
 
 # GEO's in-operation characteristic length (`AddToTemporaryBoundingBox`) is
@@ -848,11 +902,63 @@ end
 
 # Run the three merge passes and return each dimension's dropped=>survivor
 # tag map so callers can resolve post-merge entity tags.
-function _coherence_merge!(m::GeoModel, tol::Real=_COHERENCE_RTOL)
+function _coherence_merge!(m::GeoModel, tol::Real=_COHERENCE_RTOL;
+                          enabled::Bool=true,remove_degenerated::Bool=false)
+    enabled || return (points=Dict{Int,Int}(),curves=Dict{Int,Int}(),
+                       surfaces=Dict{Int,Int}(),removed=Tuple{Int,Int}[])
     eps=_coherence_eps(m,tol)
-    return (points=_merge_points!(m,eps),
-            curves=_merge_curves!(m),
-            surfaces=_merge_surfaces!(m))
+    points=_merge_points!(m,eps)
+    curves=_merge_curves!(m)
+    surfaces=_merge_surfaces!(m)
+    removed=remove_degenerated ? _coherence_remove_degenerated!(m) :
+                                Tuple{Int,Int}[]
+    return (;points,curves,surfaces,removed)
+end
+
+# Mode 2 removes explicitly flagged built-in curves after duplicate merging.
+# Native controls distinguish this from geometric collapse: unflagged closed
+# or coincident-endpoint curves remain. Boundary entries disappear with each
+# curve; a surface needs at least two entries, and a volume needs one surface.
+# Points and unrelated native/imported mesh records retain their identities.
+function _coherence_remove_degenerated!(m::GeoModel)
+    curves=Set(tag for tag in m.meshing.degenerated
+               if haskey(m.curves,tag) && _occ_geometry(m,tag)===nothing)
+    for entries in values(m.loops)
+        filter!(curve->!(abs(curve) in curves),entries)
+    end
+    surfaces=Set(tag for (tag,loops) in m.surfaces
+                 if !(haskey(m.surface_geometry,tag) &&
+                      hasproperty(m.surface_geometry[tag],:occ)) &&
+                    all(_occ_geometry(m,abs(curve))===nothing
+                        for loop in loops for curve in m.loops[loop]) &&
+                    sum(length(m.loops[loop]) for loop in loops;init=0)<2)
+    for entries in values(m.surface_loops)
+        filter!(surface->!(abs(surface) in surfaces),entries)
+    end
+    volumes=Set(tag for (tag,shells) in m.volumes
+                if !isempty(shells) && !_occ_volume_entity(m,tag) &&
+                   all(shell->isempty(m.surface_loops[shell]),shells))
+    removed=Tuple{Int,Int}[]
+    for (dimension,tags) in ((1,curves),(2,surfaces),(3,volumes))
+        for tag in sort!(collect(tags))
+            push!(removed,(dimension,tag))
+            tag==m.next_tag[dimension+1] && (m.next_tag[dimension+1]-=1)
+        end
+    end
+    isempty(removed) && return removed
+    state=_model_removal_state(m,Set(removed);keep_stale_physical=true)
+    for name in propertynames(state)
+        setfield!(m,name,getproperty(state,name))
+    end
+    _native_geo_kernel_forget!(m,removed)
+    # Derived loops only carry a removed face's stored generatrices. Dropping
+    # its unused loop mirrors the existing surface-duplicate cleanup.
+    referenced=Set{Int}()
+    for loops in values(m.surfaces);union!(referenced,loops);end
+    for loop in collect(keys(m.loops))
+        isempty(m.loops[loop]) && !(loop in referenced) && delete!(m.loops,loop)
+    end
+    return removed
 end
 
 """
@@ -863,7 +969,8 @@ the first tag's coordinates, then run the global coherence merge. Unknown
 tags raise an error before any position is changed.
 """
 function merge_vertices!(m::GeoModel, tags;
-                         caller::AbstractString="merge_vertices!")
+                         caller::AbstractString="merge_vertices!",
+                         remove_degenerated::Bool=false)
     length(tags)<2 && return nothing
     haskey(m.points,tags[1]) || throw(ArgumentError(
         "$caller: unknown Point[$(tags[1])]"))
@@ -874,7 +981,7 @@ function merge_vertices!(m::GeoModel, tags;
     for t in tags[2:end]
         m.points[t]=target
     end
-    coherence!(m)
+    coherence!(m;remove_degenerated=remove_degenerated)
     return nothing
 end
 
@@ -1123,6 +1230,8 @@ function _drop_entity_state!(m::GeoModel, dim::Int, tag::Int)
         delete!(m.curve_params,tag)
     elseif dim==2
         delete!(m.meshing.transfinite_surfaces,tag)
+        delete!(m.meshing.orientation_stl,tag)
+        delete!(m.meshing.orientation_geo_reverse,tag)
         delete!(m.surface_types,tag)
         delete!(m.surface_geometry,tag)
     elseif dim==3
@@ -1265,6 +1374,7 @@ function _duplicate_curve!(m::GeoModel, src::Int, caller; reversed::Bool=false,
     # A closed OCC edge's endpoints are one shared vertex, not two copies.
     pb=a==b ? pa : _fresh_point_copy!(m,b,caller,pmemo)
     m.curves[t]=(pa,pb)
+    src in m.meshing.degenerated && push!(m.meshing.degenerated,t)
     haskey(m.curve_types,src) && (m.curve_types[t]=m.curve_types[src])
     geometry===nothing || (m.curve_geometry[t]=geometry)
     !reversed && occ!==nothing && memo!==nothing && (memo[2][src]=t)
@@ -1405,12 +1515,13 @@ function extrude_entities!(m::GeoModel,
                            delta::NTuple{3,Float64};
                            params::Union{Nothing,_GeoExtrudeParams}=nothing,
                            return_lateral::Bool=true,
-                           caller::AbstractString="extrude_entities!")
+                           caller::AbstractString="extrude_entities!",
+                           auto_coherence::Integer=true)
     all(isfinite,delta) || throw(ArgumentError(
         "$caller: extrusion delta must be finite"))
     return _extrude_entities!(m,entities,_extrude_spec_translate(delta);
                              params=params,return_lateral=return_lateral,
-                             caller=caller)
+                             caller=caller,auto_coherence=auto_coherence)
 end
 
 """
@@ -1429,11 +1540,12 @@ function revolve_entities!(m::GeoModel,
                            axis, origin, angle;
                            params::Union{Nothing,_GeoExtrudeParams}=nothing,
                            return_lateral::Bool=true,
-                           caller::AbstractString="revolve_entities!")
+                           caller::AbstractString="revolve_entities!",
+                           auto_coherence::Integer=true)
     spec=_extrude_spec_rotate(axis,origin,angle,caller)
     return _extrude_entities!(m,entities,spec;
                              params=params,return_lateral=return_lateral,
-                             caller=caller)
+                             caller=caller,auto_coherence=auto_coherence)
 end
 
 """
@@ -1453,12 +1565,13 @@ function twist_entities!(m::GeoModel,
                          spline_points::Integer=5,
                          params::Union{Nothing,_GeoExtrudeParams}=nothing,
                          return_lateral::Bool=true,
-                         caller::AbstractString="twist_entities!")
+                         caller::AbstractString="twist_entities!",
+                         auto_coherence::Integer=true)
     spec=_extrude_spec_translate_rotate(axis,origin,angle,delta,
                                         spline_points,caller)
     return _extrude_entities!(m,entities,spec;
                              params=params,return_lateral=return_lateral,
-                             caller=caller)
+                             caller=caller,auto_coherence=auto_coherence)
 end
 
 function _extrude_entities!(m::GeoModel,
@@ -1466,7 +1579,8 @@ function _extrude_entities!(m::GeoModel,
                             spec;
                             params::Union{Nothing,_GeoExtrudeParams}=nothing,
                             return_lateral::Bool=true,
-                            caller::AbstractString="extrude_entities!")
+                            caller::AbstractString="extrude_entities!",
+                            auto_coherence::Integer=true)
     normalized=NTuple{2,Int}[]
     for (dim,tag) in entities
         d=_dimension(dim,caller)
@@ -1489,11 +1603,11 @@ function _extrude_entities!(m::GeoModel,
     out=Int[]
     for (d,tg) in normalized
         if d==0
-            _extrude_point!(m,tg,spec,out,params,caller)
+            _extrude_point!(m,tg,spec,out,params,caller,auto_coherence)
         elseif d==1
-            _extrude_curve!(m,tg,spec,out,params,return_lateral,caller)
+            _extrude_curve!(m,tg,spec,out,params,return_lateral,caller,auto_coherence)
         else
-            _extrude_surface!(m,tg,spec,out,params,return_lateral,caller)
+            _extrude_surface!(m,tg,spec,out,params,return_lateral,caller,auto_coherence)
         end
     end
     return out
@@ -1543,13 +1657,14 @@ function _extrude_point_copy!(m::GeoModel, src::Int, spec,
 end
 
 function _extrude_point!(m::GeoModel, src::Int, spec,
-                         out::Vector{Int}, params, caller)
+                         out::Vector{Int}, params, caller,auto_coherence::Integer)
     (curve,chapeau)=_extrude_point_copy!(m,src,spec,params,caller)
     if curve===nothing
         push!(out,src)
         return nothing
     end
-    maps=_coherence_merge!(m)
+    maps=_coherence_merge!(m;enabled=!iszero(auto_coherence),
+                           remove_degenerated=auto_coherence>1)
     push!(out,get(maps.points,chapeau,chapeau))
     haskey(m.curves,curve) && push!(out,curve)
     return nothing
@@ -1631,7 +1746,7 @@ end
 
 function _extrude_curve!(m::GeoModel, c::Int, spec,
                          out::Vector{Int}, params, return_lateral::Bool,
-                         caller)
+                         caller,auto_coherence::Integer)
     result=_extrude_curve_lateral!(m,c,spec,params,caller)
     if result===nothing
         # `if(!CurveBeg && !CurveEnd) return ic` — Gmsh returns the signed
@@ -1640,9 +1755,10 @@ function _extrude_curve!(m::GeoModel, c::Int, spec,
         return nothing
     end
     (surf,chapeau)=result
-    maps=_coherence_merge!(m)
+    maps=_coherence_merge!(m;enabled=!iszero(auto_coherence),
+                           remove_degenerated=auto_coherence>1)
     top=get(maps.curves,chapeau,chapeau)
-    push!(out,top)
+    haskey(m.curves,abs(top)) && push!(out,top)
     if haskey(m.surfaces,surf)
         push!(out,surf)
         # `Geometry.ExtrudeReturnLateralEntities` (default on) appends the
@@ -1694,7 +1810,7 @@ end
 # re-tag it through a fresh `NEWSURFACE`, and wire the shell.
 function _extrude_surface!(m::GeoModel, is::Int, spec,
                            out::Vector{Int}, params, return_lateral::Bool,
-                           caller)
+                           caller,auto_coherence::Integer)
     tag=abs(is)   # `ps = FindSurface(std::abs(is))`; the sign is metadata-only
     _geo_newreg_alloc!(m,2,caller)   # transient chapeau tag — burned
     top_loops=[Int[_duplicate_curve!(m,abs(c),caller;reversed=c<0)
@@ -1755,10 +1871,11 @@ function _extrude_surface!(m::GeoModel, is::Int, spec,
     slt=haskey(m.surface_loops,vol) ? _geo_next_surface_loop_tag(m) : vol
     m.surface_loops[slt]=vcat(-tag,top,laterals)
     m.volumes[vol]=Int[slt]
-    maps=_coherence_merge!(m)
+    maps=_coherence_merge!(m;enabled=!iszero(auto_coherence),
+                           remove_degenerated=auto_coherence>1)
     top_out=get(maps.surfaces,top,top)
-    push!(out,top_out)
-    push!(out,vol)
+    haskey(m.surfaces,top_out) && push!(out,top_out)
+    haskey(m.volumes,vol) && push!(out,vol)
     # `Geometry.ExtrudeReturnLateralEntities` (default on) appends the
     # volume's boundary surfaces besides the source and top — the same
     # signed comparison Gmsh applies, so `is<0` keeps the `+tag` source

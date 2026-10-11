@@ -267,12 +267,14 @@ function verify_incidence(source::Source,m::Int,v::Int,e::Int)
     return nothing
 end
 
-function Phase(source::Source,intervals::Int)
+function Phase(source::Source,intervals::Int;top_states=nothing)
     m,v,e=checked_sizes(source,intervals)
     verify_incidence(source,m,v,e)
     top=Vector{UInt8}(undef,m)
+    Model._model_mesh_top_states(top_states,m,"QuadTriNoNewVerts B4 free strip")
     for cell in 1:m
-        top[cell]=Model._extrude_nonew_b4_strip_top_state(source.source_cells[cell])
+        top[cell]=top_states===nothing ?
+            Model._extrude_nonew_b4_strip_top_state(source.source_cells[cell]) : top_states[cell]
     end
     caps=zeros(UInt8,m,intervals+1)
     for cell in 1:m;caps[cell,end]=top[cell];end
@@ -610,7 +612,7 @@ function preflight(shape, caller)
 end
 
 function plan(source::Source, levels::Vector{Float64},
-        refs::Vector{NTuple{2,Int32}}, caller)
+        refs::Vector{NTuple{2,Int32}}, caller;top_states=nothing)
     intervals = length(refs)
     intervals > 0 && length(levels) == Base.checked_add(intervals, 1) ||
         _error(caller, "requires one more level than positive intervals")
@@ -622,7 +624,7 @@ function plan(source::Source, levels::Vector{Float64},
             _error(caller, "layer levels collapse in Float64")
     end
     try
-        phase = SourcePhase.Phase(source, intervals)
+        phase = SourcePhase.Phase(source, intervals;top_states)
         SourcePhase.run!(phase)
         # Factory dispatch is deferred until every physical column is complete.
         return catalog(phase, levels, refs)

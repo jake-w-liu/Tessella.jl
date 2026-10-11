@@ -148,7 +148,7 @@ Record a transfinite constraint on `Volume[tag]`, matching Gmsh's
 function set_transfinite_volume!(m::GeoModel,tag,corners=Int[])
     caller="set_transfinite_volume!"
     t=_tag(tag,caller,3)
-    _mesh_attr_entity!(m,3,t,caller)
+    _mesh_attr_entity!(m,3,t,caller;allow_discrete=true)
     (corners isa AbstractVector || corners isa Tuple) || throw(ArgumentError(
         "$caller: corners must be a vector or tuple of Point tags"))
     corner_tags=Int[_mesh_attr_positive_int(c,caller,"corners entry")
@@ -244,20 +244,24 @@ const _SUPPORTED_VOLUME_ALGORITHMS = (1,)
     set_algorithm!(model, dim, tag, val)
 
 Record the meshing algorithm for entity `(dim, tag)`, matching Gmsh's
-`setAlgorithm`. Only `dim == 2` and `dim == 3` are accepted; unsupported
-algorithm numbers are stored but fail explicitly at `generate` time, matching
-Gmsh's deferred-validation behavior.
+`setAlgorithm`. Only dimension 2 writes an attribute; other dimensions are
+no-ops. Zero restores the global `Mesh.Algorithm` selection. Integer algorithm
+values are stored, and meshing resolves them after its entity-specific paths.
 """
 function set_algorithm!(m::GeoModel,dim,tag,val)
     caller="set_algorithm!"
-    dimension=_dimension(dim,caller)
+    dimension=_mesh_attr_positive_int(dim,caller,"dim")
+    dimension==2 || return nothing
     t=_tag(tag,caller,dimension)
-    dimension in (2,3) || throw(ArgumentError(
-        "$caller: set_algorithm is only supported for dim 2 or 3"))
     _mesh_attr_entity!(m,dimension,t,caller)
     number=_mesh_attr_positive_int(val,caller,"val")
     m.meshing.algorithm[(dimension,t)]=number
     return nothing
+end
+
+@inline function _surface_mesh_algorithm(m::GeoModel,tag::Int)
+    stored=get(m.meshing.algorithm,(2,tag),0)
+    return stored==0 ? m.meshing.algorithm_2d : stored
 end
 
 """
@@ -372,15 +376,14 @@ end
 """
     set_outward_orientation!(model, tag)
 
-Record the constraint that all boundary surfaces of `Volume[tag]` are oriented
-with outward-pointing normals, matching Gmsh's `setOutwardOrientation`. An
-existing mesh is reoriented in place.
+Determine boundary Surface reverse flags from the retained STL, then reorient
+existing record cells relative to their native normals and those flags.
 """
 function set_outward_orientation!(m::GeoModel,tag)
     caller="set_outward_orientation!"
     t=_tag(tag,caller,3)
-    _mesh_attr_entity!(m,3,t,caller)
-    push!(m.meshing.outward_orientation,t)
+    _mesh_attr_entity!(m,3,t,caller;allow_discrete=true)
+    _model_orient_record_mesh!(m,t)
     return nothing
 end
 
@@ -766,10 +769,14 @@ function _discrete_data(m::GeoModel,dim::Int,tag::Int,caller::AbstractString)
 end
 
 function _discrete_mesh_tag(value,caller::AbstractString,name::AbstractString)
-    tag=_mesh_attr_positive_int(value,caller,name)
-    0<tag<=typemax(Int32) || throw(ArgumentError(
-        "$caller: $name must be a positive Int32 identifier"))
-    return Int32(tag)
+    value isa Integer && !(value isa Bool) && value>=0 || throw(ArgumentError(
+        "$caller: $name must be a non-negative mesh identifier"))
+    return try
+        UInt64(value)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: $name exceeds UInt64"))
+    end
 end
 
 # `(key, record)` pairs over both discrete entities and native-entity
@@ -805,7 +812,7 @@ function add_discrete_nodes!(m::GeoModel,dim,tag,node_tags,coords,
         "$caller: node_tags must be a vector or tuple"))
     (coords isa AbstractVector || coords isa Tuple) || throw(ArgumentError(
         "$caller: coords must be a flat vector or tuple of x,y,z triples"))
-    tags=Int32[_discrete_mesh_tag(t2,caller,"node_tags entry")
+    tags=UInt64[_discrete_mesh_tag(t2,caller,"node_tags entry")
              for t2 in node_tags]
     length(coords)==3*length(tags) || throw(ArgumentError(
         "$caller: coords length $(length(coords)) is not 3×" *
@@ -821,6 +828,10 @@ function add_discrete_nodes!(m::GeoModel,dim,tag,node_tags,coords,
         pflat=Float64[_mesh_attr_finite(c,caller,"params entry")
                       for c in params]
     end
+    # addNodes creates MEdgeVertex/MFaceVertex only for dimensions 1/2.
+    # A Volume node remains a plain vertex even when three parameters were
+    # supplied; retain the input validation before discarding those values.
+    dimension==3 && empty!(pflat)
     record=_discrete_data(m,dimension,t,caller)
     requested=Set(tags)
     for (key,other) in _discrete_mesh_records_model(m)
@@ -830,38 +841,40 @@ function add_discrete_nodes!(m::GeoModel,dim,tag,node_tags,coords,
                 "$caller: node tag $node_tag is already owned by entity $key"))
         end
     end
-    for (i,node_tag) in enumerate(tags)
-        position=findfirst(==(node_tag),record.node_tags)
-        if position===nothing
-            push!(record.node_tags,node_tag)
-            record.node_coords=hcat(record.node_coords,
-                                  reshape(flat[3i-2:3i],3,1))
-            if !isempty(pflat)
-                column=reshape(pflat[dimension*(i-1)+1:dimension*i],
-                               dimension,1)
-                if size(record.node_params,1)!=dimension
-                    # Earlier nodes carried no parameters — give them zero
-                    # columns so the matrix stays aligned with node_tags.
-                    record.node_params=zeros(dimension,
-                                             length(record.node_tags)-1)
-                end
-                record.node_params=hcat(record.node_params,column)
-            elseif size(record.node_params,2)>0
-                record.node_params=hcat(record.node_params,
-                                        zeros(size(record.node_params,1),1))
-            end
-        else
-            record.node_coords[:,position].=flat[3i-2:3i]
-            if !isempty(pflat)
-                if size(record.node_params,1)!=dimension
-                    record.node_params=zeros(dimension,
-                                             length(record.node_tags))
-                end
-                record.node_params[:,position].=
-                    pflat[dimension*(i-1)+1:dimension*i]
-            end
+    positions=Dict(node=>index for (index,node) in enumerate(record.node_tags))
+    old_count=length(record.node_tags)
+    total=old_count
+    for node in tags
+        haskey(positions,node) && continue
+        total+=1;positions[node]=total
+        push!(record.node_tags,node)
+    end
+    if total!=old_count
+        coordinates=Matrix{Float64}(undef,3,total)
+        coordinates[:,1:old_count]=record.node_coords
+        record.node_coords=coordinates
+    end
+    parameter_dim=isempty(pflat) ? size(record.node_params,1) : dimension
+    if total!=size(record.node_params,2) || parameter_dim!=size(record.node_params,1)
+        parameters=zeros(parameter_dim,total)
+        if parameter_dim==size(record.node_params,1)
+            retained=min(old_count,size(record.node_params,2))
+            parameters[:,1:retained]=record.node_params[:,1:retained]
+        end
+        record.node_params=parameters
+    end
+    for (index,node) in enumerate(tags)
+        position=positions[node]
+        record.node_coords[:,position]=@view flat[3index-2:3index]
+        if !isempty(pflat)
+            values=copy(@view pflat[dimension*(index-1)+1:dimension*index])
+            record.node_native_params[node]=values
+            record.node_params[:,position]=values
+        elseif position>old_count
+            record.node_native_params[node]=Float64[]
         end
     end
+
     haskey(m.discrete,(dimension,t)) ||
         (m.meshing.attached[(dimension,t)]=record)
     return nothing
@@ -896,9 +909,9 @@ function add_discrete_elements!(m::GeoModel,dim,tag,element_types,element_tags,
         "$caller: element_types, element_tags, and node_tags must have the " *
         "same block count"))
     record=_discrete_data(m,dimension,t,caller)
-    known=Set{Int32}()
-    staged=Tuple{Int32,Int32,Vector{Int32}}[]
-    seen=Set{Int32}()
+    known=Set{UInt64}()
+    staged=Tuple{Int32,UInt64,Vector{UInt64}}[]
+    seen=Set{UInt64}()
     for (_,other) in _discrete_mesh_records_model(m)
         union!(known,other.node_tags)
         union!(seen,other.element_tags)
@@ -930,7 +943,7 @@ function add_discrete_elements!(m::GeoModel,dim,tag,element_types,element_tags,
             ArgumentError(
                 "$caller: node_tags[$block] length $(length(block_nodes)) is " *
                 "not $spec_nodes×$(length(block_tags)) element tags"))
-        flat_nodes=Int32[_discrete_mesh_tag(v,caller,"node_tags entry")
+        flat_nodes=UInt64[_discrete_mesh_tag(v,caller,"node_tags entry")
                        for v in block_nodes]
         for (element_index,raw_tag) in enumerate(block_tags)
             element_tag=_discrete_mesh_tag(raw_tag,caller,"element tag")
@@ -1021,30 +1034,30 @@ const _RECORD_FACET_FAMILIES = Dict{Symbol,Vector{NTuple{4,Int}}}(
 )
 
 # Facets of one record cell: a vector of node-tag vectors, one per facet.
-function _record_cell_facets(msh_type::Int,nodes::Vector{Int32})
+function _record_cell_facets(msh_type::Int,nodes::Vector{UInt64})
     family=msh_family(msh_type)
     table=get(_RECORD_FACET_FAMILIES,family,nothing)
-    table===nothing && return Vector{Int32}[]
-    facets=Vector{Int32}[]
+    table===nothing && return Vector{UInt64}[]
+    facets=Vector{UInt64}[]
     for facet in table
         positions=Int[position for position in facet if position>0]
-        all(position->position<=length(nodes),positions) || return Vector{Int32}[]
-        push!(facets,Int32[nodes[position] for position in positions])
+        all(position->position<=length(nodes),positions) || return Vector{UInt64}[]
+        push!(facets,UInt64[nodes[position] for position in positions])
     end
     return facets
 end
 
 # Facet key invariant to node ordering within the facet.
-_facet_key(facet::Vector{Int32})=Tuple(sort(facet))
+_facet_key(facet::Vector{UInt64})=Tuple(sort(facet))
 
 # Edge key for facet-adjacency grouping (shared `dim-2` features).
-function _facet_subfacets(msh_type::Int,facet::Vector{Int32})
+function _facet_subfacets(msh_type::Int,facet::Vector{UInt64})
     # Facet adjacency uses shared corner pairs for surface cells and shared
     # endpoints for segments; higher dims use shared edges of the facet.
     if length(facet)<=2
         return [Tuple(sort(facet[i:i])) for i in eachindex(facet)]
     end
-    edges=NTuple{2,Int32}[]
+    edges=NTuple{2,UInt64}[]
     n=length(facet)
     for i in 1:n
         a=facet[i];b=facet[mod1(i+1,n)]
@@ -1055,7 +1068,7 @@ end
 
 # `(cells, cell_types)` pairs for every record element living on `dim`.
 function _record_dim_cells(record::DiscreteEntity,dim::Int)
-    cells=Vector{Int32}[]
+    cells=Vector{UInt64}[]
     for (i,msh_type) in enumerate(record.element_types)
         msh_dimension(msh_type)==dim || continue
         push!(cells,record.element_nodes[i])
@@ -1065,16 +1078,16 @@ end
 
 # Nodes exclusively used by `owned` cells are removed from the record's node
 # list and returned as a tag → coordinate/params table for migration.
-function _record_extract_nodes!(record::DiscreteEntity,keep::Set{Int32})
-    migrated=Dict{Int32,Tuple{Vector{Float64},Vector{Float64}}}()
+function _record_extract_nodes!(record::DiscreteEntity,keep::Set{UInt64})
+    migrated=Dict{UInt64,Tuple{Vector{Float64},Vector{Float64}}}()
     mask=trues(length(record.node_tags))
     for (i,tag) in enumerate(record.node_tags)
         tag in keep && continue
         mask[i]=false
+        parameter=_model_mesh_node_parameters(record,i)
         migrated[tag]=(Vector{Float64}(record.node_coords[:,i]),
-                       size(record.node_params,1)>0 ?
-                           Vector{Float64}(record.node_params[:,i]) :
-                           Float64[])
+                       parameter===nothing ? Float64[] : copy(parameter))
+        delete!(record.node_native_params,tag)
     end
     record.node_tags=record.node_tags[mask]
     record.node_coords=record.node_coords[:,mask]
@@ -1083,9 +1096,10 @@ function _record_extract_nodes!(record::DiscreteEntity,keep::Set{Int32})
     return migrated
 end
 
-function _record_append_node!(record::DiscreteEntity,tag::Int32,
+function _record_append_node!(record::DiscreteEntity,tag::UInt64,
                               coords::Vector{Float64},
                               params::Vector{Float64})
+    record.node_native_params[tag]=copy(params)
     push!(record.node_tags,tag)
     record.node_coords=hcat(record.node_coords,reshape(coords,3,1))
     if size(record.node_params,1)>0 || !isempty(params)
@@ -1103,7 +1117,7 @@ function _record_append_node!(record::DiscreteEntity,tag::Int32,
 end
 
 function _record_append_element!(record::DiscreteEntity,msh_type::Int,
-                                 element_tag::Int32,nodes::Vector{Int32})
+                                 element_tag::UInt64,nodes::Vector{UInt64})
     push!(record.element_types,Int32(msh_type))
     push!(record.element_tags,element_tag)
     push!(record.element_nodes,copy(nodes))
@@ -1112,28 +1126,29 @@ end
 
 # Fresh element tag above every record and dense-cache tag in the model.
 function _model_fresh_element_tag(m::GeoModel)
-    result=0
+    result=UInt64(0)
     for (_,record) in _discrete_mesh_records_model(m)
         isempty(record.element_tags) ||
-            (result=max(result,Int(maximum(record.element_tags))))
+            (result=max(result,maximum(record.element_tags)))
     end
-    return result+1
+    result<typemax(UInt64) || throw(ArgumentError("discrete topology: element tag counter would wrap UInt64"))
+    return result+UInt64(1)
 end
 
 # Chain boundary segments (node-tag pairs) into loops or open chains. Each
 # entry is `(node sequence, closed)`.
-function _chain_boundary_edges(edges::Vector{NTuple{2,Int32}})
-    incidence=Dict{Int32,Vector{Int}}()
+function _chain_boundary_edges(edges::Vector{NTuple{2,UInt64}})
+    incidence=Dict{UInt64,Vector{Int}}()
     for (i,(a,b)) in enumerate(edges)
         push!(get!(Vector{Int},incidence,a),i)
         push!(get!(Vector{Int},incidence,b),i)
     end
     used=falses(length(edges))
-    chains=Tuple{Vector{Int32},Bool}[]
+    chains=Tuple{Vector{UInt64},Bool}[]
     for start in eachindex(edges)
         used[start] && continue
         a,b=edges[start]
-        chain=Int32[a,b]
+        chain=UInt64[a,b]
         used[start]=true
         while true
             last_node=chain[end]
@@ -1168,10 +1183,10 @@ function _chain_boundary_edges(edges::Vector{NTuple{2,Int32}})
 end
 
 # Group boundary facets into components joined by shared facet edges.
-function _group_boundary_facets(facets::Vector{Vector{Int32}})
+function _group_boundary_facets(facets::Vector{Vector{UInt64}})
     n=length(facets)
     n==0 && return Vector{Int}[]
-    edge_owner=Dict{NTuple{2,Int32},Vector{Int}}()
+    edge_owner=Dict{NTuple{2,UInt64},Vector{Int}}()
     for (i,facet) in enumerate(facets)
         count=length(facet)
         for k in 1:count
@@ -1206,8 +1221,8 @@ end
 # coordinates and parameters. Element connectivity still references the tags —
 # record queries resolve node tags through the global record index.
 function _record_migrate_nodes!(record::DiscreteEntity,child::DiscreteEntity,
-                                tags::Set{Int32})
-    keep=setdiff(Set{Int32}(record.node_tags),tags)
+                                tags::Set{UInt64})
+    keep=setdiff(Set{UInt64}(record.node_tags),tags)
     migrated=_record_extract_nodes!(record,keep)
     for (tag,(coords,params)) in sort!(collect(migrated);by=first)
         tag in tags || continue
@@ -1224,7 +1239,7 @@ function _record_derive_boundary!(m::GeoModel,dim::Int,tag::Int,
     isempty(cells) && return nothing
     element_index=0
     incidence=Dict{Any,Vector{Tuple{Int,Int}}}()
-    typed_cells=Tuple{Int,Vector{Int32}}[]
+    typed_cells=Tuple{Int,Vector{UInt64}}[]
     for (i,msh_type) in enumerate(record.element_types)
         msh_dimension(msh_type)==dim || continue
         element_index+=1
@@ -1235,7 +1250,7 @@ function _record_derive_boundary!(m::GeoModel,dim::Int,tag::Int,
                        _facet_key(facet)),(element_index,f))
         end
     end
-    boundary_facets=Tuple{Int,Int,Vector{Int32}}[]
+    boundary_facets=Tuple{Int,Int,Vector{UInt64}}[]
     for (key2,hits) in incidence
         length(hits)==1 || continue
         cell_index,facet_index=hits[1]
@@ -1248,9 +1263,9 @@ function _record_derive_boundary!(m::GeoModel,dim::Int,tag::Int,
         node=cells[1][1]
         point_tag=add_discrete_entity!(m,0,0)
         point_record=m.discrete[(0,point_tag)]
-        _record_migrate_nodes!(record,point_record,Set{Int32}([node]))
+        _record_migrate_nodes!(record,point_record,Set{UInt64}([node]))
         _record_append_element!(point_record,15,
-            Int32(_model_fresh_element_tag(m)),Int32[node])
+            UInt64(_model_fresh_element_tag(m)),UInt64[node])
         record.boundary=NTuple{2,Int}[(0,point_tag)]
         return nothing
     end
@@ -1258,7 +1273,7 @@ function _record_derive_boundary!(m::GeoModel,dim::Int,tag::Int,
     if dim==1
         # Boundary facets of segments are endpoint nodes: each maximal
         # connected boundary-node cluster becomes a point entity.
-        seen_nodes=Set{Int32}()
+        seen_nodes=Set{UInt64}()
         for (_,_,facet) in boundary_facets
             push!(seen_nodes,facet[1])
         end
@@ -1266,9 +1281,9 @@ function _record_derive_boundary!(m::GeoModel,dim::Int,tag::Int,
         for node in sort!(collect(seen_nodes))
             point_tag=add_discrete_entity!(m,0,0)
             point_record=m.discrete[(0,point_tag)]
-            _record_migrate_nodes!(record,point_record,Set{Int32}([node]))
+            _record_migrate_nodes!(record,point_record,Set{UInt64}([node]))
             _record_append_element!(point_record,15,
-                Int32(_model_fresh_element_tag(m)),Int32[node])
+                UInt64(_model_fresh_element_tag(m)),UInt64[node])
             push!(point_tags,point_tag)
         end
         record.boundary=NTuple{2,Int}[(0,t) for t in point_tags]
@@ -1277,7 +1292,7 @@ function _record_derive_boundary!(m::GeoModel,dim::Int,tag::Int,
     if dim==2
         # Boundary edges chain into loops; each loop becomes one curve plus a
         # seam point (closed) or two endpoint points (open).
-        edges=NTuple{2,Int32}[]
+        edges=NTuple{2,UInt64}[]
         for (_,_,facet) in boundary_facets
             length(facet)==2 && push!(edges,(facet[1],facet[2]))
         end
@@ -1286,22 +1301,22 @@ function _record_derive_boundary!(m::GeoModel,dim::Int,tag::Int,
         for (chain,closed) in _chain_boundary_edges(edges)
             curve_tag=add_discrete_entity!(m,1,0)
             curve_record=m.discrete[(1,curve_tag)]
-            chain_nodes=Set{Int32}(chain[1:end- (closed ? 1 : 0)])
+            chain_nodes=Set{UInt64}(chain[1:end- (closed ? 1 : 0)])
             _record_migrate_nodes!(record,curve_record,chain_nodes)
             for k in 1:length(chain)-1
                 _record_append_element!(curve_record,1,
-                    Int32(_model_fresh_element_tag(m)),
-                    Int32[chain[k],chain[k+1]])
+                    UInt64(_model_fresh_element_tag(m)),
+                    UInt64[chain[k],chain[k+1]])
             end
             point_tags=Int[]
-            endpoints=closed ? Int32[chain[1]] : Int32[chain[1],chain[end]]
+            endpoints=closed ? UInt64[chain[1]] : UInt64[chain[1],chain[end]]
             for node in endpoints
                 point_tag=add_discrete_entity!(m,0,0)
                 point_record=m.discrete[(0,point_tag)]
                 _record_migrate_nodes!(curve_record,point_record,
-                                       Set{Int32}([node]))
+                                       Set{UInt64}([node]))
                 _record_append_element!(point_record,15,
-                    Int32(_model_fresh_element_tag(m)),Int32[node])
+                    UInt64(_model_fresh_element_tag(m)),UInt64[node])
                 push!(point_tags,point_tag)
             end
             curve_record.boundary=NTuple{2,Int}[(0,t) for t in point_tags]
@@ -1311,14 +1326,14 @@ function _record_derive_boundary!(m::GeoModel,dim::Int,tag::Int,
         return nothing
     end
     # dim==3: boundary faces group into components, each becoming a surface.
-    facets=Vector{Int32}[facet for (_,_,facet) in boundary_facets]
+    facets=Vector{UInt64}[facet for (_,_,facet) in boundary_facets]
     facet_types=Int[msh_type for (msh_type,_,_) in boundary_facets]
     components=_group_boundary_facets(facets)
     surface_tags=Int[]
     for component in components
         surface_tag=add_discrete_entity!(m,2,0)
         surface_record=m.discrete[(2,surface_tag)]
-        nodes=Set{Int32}()
+        nodes=Set{UInt64}()
         for index in component
             union!(nodes,facets[index])
         end
@@ -1327,7 +1342,7 @@ function _record_derive_boundary!(m::GeoModel,dim::Int,tag::Int,
             facet=facets[index]
             child_type=length(facet)==3 ? 2 : 3
             _record_append_element!(surface_record,child_type,
-                Int32(_model_fresh_element_tag(m)),facet)
+                UInt64(_model_fresh_element_tag(m)),facet)
         end
         push!(surface_tags,surface_tag)
     end
@@ -1369,24 +1384,24 @@ end
 # Deduplicated edge set of a patch-boundary graph chained into open chains
 # (starting and ending at multi-valent nodes, degree != 2) and closed loops.
 # Returns `(chains, multivalent)` where each chain is `(node sequence, closed)`.
-function _chain_boundary_graph(edges::Vector{NTuple{2,Int32}})
-    incidence=Dict{Int32,Vector{Int}}()
+function _chain_boundary_graph(edges::Vector{NTuple{2,UInt64}})
+    incidence=Dict{UInt64,Vector{Int}}()
     for (i,(a,b)) in enumerate(edges)
         push!(get!(Vector{Int},incidence,a),i)
         push!(get!(Vector{Int},incidence,b),i)
     end
     used=falses(length(edges))
-    multivalent=Set{Int32}()
+    multivalent=Set{UInt64}()
     for (node,indices) in incidence
         length(indices)==2 || push!(multivalent,node)
     end
-    chains=Tuple{Vector{Int32},Bool}[]
+    chains=Tuple{Vector{UInt64},Bool}[]
     for start_node in sort!(collect(multivalent))
         for edge_index in incidence[start_node]
             used[edge_index] && continue
             used[edge_index]=true
             u,v=edges[edge_index]
-            chain=Int32[start_node,u==start_node ? v : u]
+            chain=UInt64[start_node,u==start_node ? v : u]
             while true
                 last_node=chain[end]
                 last_node in multivalent && break
@@ -1409,7 +1424,7 @@ function _chain_boundary_graph(edges::Vector{NTuple{2,Int32}})
         used[start] && continue
         used[start]=true
         a,b=edges[start]
-        chain=Int32[a,b]
+        chain=UInt64[a,b]
         while chain[end]!=chain[1]
             last_node=chain[end]
             advanced=false
@@ -1429,8 +1444,8 @@ function _chain_boundary_graph(edges::Vector{NTuple{2,Int32}})
 end
 
 # Unit normal of a 2D element from its corner coordinates (Newell for quads).
-function _classify_normal(coords::Dict{Int32,NTuple{3,Float64}},
-                          corners::Vector{Int32})
+function _classify_normal(coords::Dict{UInt64,NTuple{3,Float64}},
+                          corners::Vector{UInt64})
     normal=zeros(3)
     count=length(corners)
     for k in 1:count
@@ -1445,14 +1460,14 @@ function _classify_normal(coords::Dict{Int32,NTuple{3,Float64}},
 end
 
 # Corner node tags (first-order vertices) of a 2D element record entry.
-_classify_corners(msh_type::Int,nodes::Vector{Int32})=
+_classify_corners(msh_type::Int,nodes::Vector{UInt64})=
     nodes[1:min(length(nodes),msh_family(msh_type)===:qua ? 4 : 3)]
 
 # Edges of a 2D element restricted to its corner polygon.
-function _classify_edges(msh_type::Int,nodes::Vector{Int32})
+function _classify_edges(msh_type::Int,nodes::Vector{UInt64})
     corners=_classify_corners(msh_type,nodes)
     count=length(corners)
-    edges=NTuple{2,Int32}[]
+    edges=NTuple{2,UInt64}[]
     for k in 1:count
         a=corners[k];b=corners[mod1(k+1,count)]
         push!(edges,a<b ? (a,b) : (b,a))
@@ -1462,11 +1477,11 @@ end
 
 # Split each chain at interior nodes where the angle between consecutive
 # boundary edges exceeds `curve_angle`; split nodes become open endpoints.
-function _split_chains_by_angle(chains::Vector{Tuple{Vector{Int32},Bool}},
-                                coords::Dict{Int32,NTuple{3,Float64}},
+function _split_chains_by_angle(chains::Vector{Tuple{Vector{UInt64},Bool}},
+                                coords::Dict{UInt64,NTuple{3,Float64}},
                                 curve_angle::Float64)
     curve_angle>=pi && return chains
-    result=Tuple{Vector{Int32},Bool}[]
+    result=Tuple{Vector{UInt64},Bool}[]
     for (chain,closed) in chains
         cuts=Int[]
         count=length(chain)-1
@@ -1532,7 +1547,7 @@ function classify_surfaces!(m::GeoModel;angle=40*pi/180,boundary=true,
     threshold=cos(Float64(angle))
     cut=Float64(curve_angle)
 
-    coords=Dict{Int32,NTuple{3,Float64}}()
+    coords=Dict{UInt64,NTuple{3,Float64}}()
     for (_,record) in _discrete_mesh_records_model(m)
         for column in eachindex(record.node_tags)
             coords[record.node_tags[column]]=
@@ -1541,7 +1556,7 @@ function classify_surfaces!(m::GeoModel;angle=40*pi/180,boundary=true,
         end
     end
 
-    elements=Tuple{Tuple{Int,Int},Int,Int,Vector{Int32}}[]
+    elements=Tuple{Tuple{Int,Int},Int,Int,Vector{UInt64}}[]
     records=Dict{Tuple{Int,Int},DiscreteEntity}()
     for (key,record) in _discrete_mesh_records_model(m)
         records[key]=record
@@ -1560,7 +1575,7 @@ function classify_surfaces!(m::GeoModel;angle=40*pi/180,boundary=true,
     isempty(elements) && return nothing
 
     normals=Vector{Vector{Float64}}(undef,length(elements))
-    edge_owner=Dict{NTuple{2,Int32},Vector{Int}}()
+    edge_owner=Dict{NTuple{2,UInt64},Vector{Int}}()
     for (i,(_,_,msh_type,nodes)) in enumerate(elements)
         corners=_classify_corners(msh_type,nodes)
         normals[i]=_classify_normal(coords,corners)
@@ -1597,7 +1612,7 @@ function classify_surfaces!(m::GeoModel;angle=40*pi/180,boundary=true,
 
     # Boundary edges of each patch: edges whose owner set differs from the
     # patch alone (outer boundary or patch interface).
-    edge_patches=Dict{NTuple{2,Int32},Set{Int}}()
+    edge_patches=Dict{NTuple{2,UInt64},Set{Int}}()
     for (edge,owners) in edge_owner
         adjacent=Set{Int}(patch_of[i] for i in owners)
         for i in owners
@@ -1608,9 +1623,9 @@ function classify_surfaces!(m::GeoModel;angle=40*pi/180,boundary=true,
     end
 
     curves=NTuple{2,Int}[]
-    curve_nodes=Dict{Int,Vector{Int32}}()
+    curve_nodes=Dict{Int,Vector{UInt64}}()
     curve_patches=Dict{Int,Set{Int}}()
-    point_of=Dict{Int32,Int}()
+    point_of=Dict{UInt64,Int}()
     if boundary
         graph_edges=collect(keys(edge_patches))
         chains,multivalent=_chain_boundary_graph(graph_edges)
@@ -1624,19 +1639,19 @@ function classify_surfaces!(m::GeoModel;angle=40*pi/180,boundary=true,
                 edge=a<b ? (a,b) : (b,a)
                 union!(involved,get(edge_patches,edge,Set{Int}()))
                 _record_append_element!(curve_record,1,
-                    Int32(_model_fresh_element_tag(m)),Int32[a,b])
+                    UInt64(_model_fresh_element_tag(m)),UInt64[a,b])
             end
             interior=closed ? chain[1:end-1] : chain[2:end-1]
-            curve_nodes[curve_tag]=Int32[interior...]
+            curve_nodes[curve_tag]=UInt64[interior...]
             curve_patches[curve_tag]=involved
-            endpoints=closed ? Int32[chain[1]] : Int32[chain[1],chain[end]]
+            endpoints=closed ? UInt64[chain[1]] : UInt64[chain[1],chain[end]]
             point_tags=Int[]
             for node in endpoints
                 tag=get!(point_of,node) do
                     point_tag=add_discrete_entity!(m,0,0)
                     point_record=m.discrete[(0,point_tag)]
                     _record_append_element!(point_record,15,
-                        Int32(_model_fresh_element_tag(m)),Int32[node])
+                        UInt64(_model_fresh_element_tag(m)),UInt64[node])
                     point_tag
                 end
                 push!(point_tags,tag)
@@ -1648,8 +1663,8 @@ function classify_surfaces!(m::GeoModel;angle=40*pi/180,boundary=true,
 
     # Node ownership: points > curves > patches. Interior nodes stay with
     # their patch; boundary chains own their interior nodes.
-    point_nodes=Set{Int32}(keys(point_of))
-    curve_owner=Dict{Int32,Int}()
+    point_nodes=Set{UInt64}(keys(point_of))
+    curve_owner=Dict{UInt64,Int}()
     for (tag,nodes) in curve_nodes
         for node in nodes
             node in point_nodes || (curve_owner[node]=tag)
@@ -1689,7 +1704,7 @@ function classify_surfaces!(m::GeoModel;angle=40*pi/180,boundary=true,
         record=new_surfaces[patch]
         record.boundary=NTuple{2,Int}[(1,t) for t in
                                       sort!(surface_boundary[patch])]
-        interior=Set{Int32}()
+        interior=Set{UInt64}()
         for i in patches[patch]
             union!(interior,_classify_corners(elements[i][3],elements[i][4]))
             union!(interior,elements[i][4])
@@ -1763,7 +1778,7 @@ end
 #
 # Gmsh's `mesh.createGeometry` computes a parametrization for discrete
 # entities so value/parametrization queries and remeshing work. Tessella
-# parametrizes discrete curves by normalized cumulative chord length and
+# captures discrete Curve geometry separately from original mesh-vertex parameters and
 # discrete surfaces by projection onto their least-squares (PCA) plane; the
 # resulting per-node parameters are stored on the entity record — on
 # `node_params` for nodes the record owns and on `aux_params` for nodes owned
@@ -1771,7 +1786,7 @@ end
 
 # Node-tag → coordinate lookup across every record of the model.
 function _model_record_node_coords(m::GeoModel)
-    coords=Dict{Int32,NTuple{3,Float64}}()
+    coords=Dict{UInt64,NTuple{3,Float64}}()
     for (_,record) in _discrete_mesh_records_model(m)
         for column in eachindex(record.node_tags)
             coords[record.node_tags[column]]=
@@ -1784,7 +1799,7 @@ end
 
 # Every node tag referenced by `record`'s elements of dimension `dim`.
 function _record_referenced_nodes(record::DiscreteEntity,dim::Int)
-    tags=Set{Int32}()
+    tags=Set{UInt64}()
     for (index,msh_type) in enumerate(record.element_types)
         msh_dimension(msh_type)==dim || continue
         union!(tags,record.element_nodes[index])
@@ -1795,7 +1810,7 @@ end
 # Store `params` for `node` on `target` — into `node_params` when the record
 # owns the node, into `aux_params` when a boundary entity owns it.
 function _record_store_param!(m::GeoModel,target::DiscreteEntity,dim::Int,
-                              node::Int32,params::Vector{Float64},
+                              node::UInt64,params::Vector{Float64},
                               caller::AbstractString)
     column=findfirst(==(node),target.node_tags)
     if column===nothing
@@ -1812,56 +1827,10 @@ function _record_store_param!(m::GeoModel,target::DiscreteEntity,dim::Int,
     return nothing
 end
 
-# Cumulative-chord parametrization of a discrete curve record's segments.
-function _parametrize_discrete_curve!(m::GeoModel,record::DiscreteEntity,
-                                      coords::Dict{Int32,NTuple{3,Float64}},
-                                      caller::AbstractString)
-    edges=NTuple{2,Int32}[]
-    for (index,msh_type) in enumerate(record.element_types)
-        msh_family(msh_type)===:lin || continue
-        nodes=record.element_nodes[index]
-        push!(edges,(nodes[1],nodes[2]))
-    end
-    isempty(edges) && return nothing
-    chains,_=_chain_boundary_graph(edges)
-    # Order chains deterministically by their smallest endpoint tag.
-    sort!(chains,by=entry->minimum(entry[1]))
-    lengths=Float64[]
-    for (chain,_) in chains
-        total=0.0
-        for k in 1:length(chain)-1
-            a=coords[chain[k]];b=coords[chain[k+1]]
-            total+=sqrt((a[1]-b[1])^2+(a[2]-b[2])^2+(a[3]-b[3])^2)
-        end
-        push!(lengths,total)
-    end
-    overall=0.0
-    for k in eachindex(lengths)
-        overall+=lengths[k]
-    end
-    overall>0 || throw(ArgumentError(
-        "$caller: discrete curve has zero total length"))
-    offset=0.0
-    for (chain_index,(chain,_)) in enumerate(chains)
-        scale=lengths[chain_index]/overall
-        position=0.0
-        local_total=lengths[chain_index]
-        for k in eachindex(chain)
-            if k>1
-                a=coords[chain[k-1]];b=coords[chain[k]]
-                position+=sqrt((a[1]-b[1])^2+(a[2]-b[2])^2+(a[3]-b[3])^2)
-            end
-            parameter=offset+(local_total>0 ? scale*position/local_total : 0.0)
-            _record_store_param!(m,record,1,chain[k],[parameter],caller)
-        end
-        offset+=scale
-    end
-    return nothing
-end
 
 # Least-squares-plane parametrization of a discrete surface record.
 function _parametrize_discrete_surface!(m::GeoModel,record::DiscreteEntity,
-                                        coords::Dict{Int32,NTuple{3,Float64}},
+                                        coords::Dict{UInt64,NTuple{3,Float64}},
                                         caller::AbstractString)
     tags=_record_referenced_nodes(record,2)
     isempty(tags) && return nothing
@@ -1895,6 +1864,7 @@ function _parametrize_discrete_surface!(m::GeoModel,record::DiscreteEntity,
           delta[3]*second_axis[3]
         _record_store_param!(m,record,2,node,[u,v],caller)
     end
+    record.geometry_parametrized=true
     return nothing
 end
 
@@ -1903,7 +1873,8 @@ end
 
 Compute a parametrization for discrete entities (all discrete entities when
 `dim_tags` is `nothing`), matching Gmsh's `mesh.createGeometry`. Discrete
-curves receive normalized cumulative-chord parameters; discrete surfaces
+curves retain a separate piecewise geometry snapshot with integer segment
+parameters; discrete surfaces
 receive least-squares-plane parameters covering every node their elements
 reference — including nodes owned by boundary entities, stored in the record's
 `aux_params` side table.
@@ -1932,15 +1903,25 @@ function create_geometry!(m::GeoModel,dim_tags=nothing)
         end
     end
     isempty(targets) && return nothing
-    coords=_model_record_node_coords(m)
+    coords,owners=_model_discrete_curve_sources(m,caller)
+    discrete=deepcopy(m.discrete)
+    geometry=copy(m.curve_geometry)
     for (dimension,tag) in targets
-        record=m.discrete[(dimension,tag)]
+        record=discrete[(dimension,tag)]
         if dimension==1
-            _parametrize_discrete_curve!(m,record,coords,caller)
+            snapshot,boundary=_model_discrete_curve_geometry_plan(
+                m,tag,record,coords,owners,caller)
+            if snapshot!==nothing
+                geometry[tag]=snapshot
+                record.boundary=boundary
+                record.geometry_parametrized=true
+            end
         else
             _parametrize_discrete_surface!(m,record,coords,caller)
         end
     end
+    m.discrete=discrete
+    m.curve_geometry=geometry
     return nothing
 end
 
@@ -1949,34 +1930,32 @@ end
 # Gmsh's `mesh.computeHomology` performs the (co)homology computations queued
 # through `addHomologyRequest`, representing each generator as a new discrete
 # entity holding its representative chain and wrapping it in a physical
-# group. Tessella computes simplicial (co)homology over GF(2) on the
-# closure of the domain's mesh cells, relative to the subdomain's cell
-# closure. Quadrangles are canonically subdivided along the minimal-corner
-# diagonal so every complex is simplicial.
+# group. The native integer backend retains oriented cellular boundaries and computes
+# integral representatives relative to the subdomain closure.
 
 # Canonical simplex cells (node-tag tuples, sorted) decomposing one element.
-function _homology_simplices(msh_type::Int,nodes::Vector{Int32},
+function _homology_simplices(msh_type::Int,nodes::Vector{UInt64},
                              caller::AbstractString)
     family=msh_family(msh_type)
-    family===:pnt && return NTuple{1,Int32}[(nodes[1],)]
-    family===:lin && return NTuple{2,Int32}[Tuple(sort!(Int32[nodes[1],
+    family===:pnt && return NTuple{1,UInt64}[(nodes[1],)]
+    family===:lin && return NTuple{2,UInt64}[Tuple(sort!(UInt64[nodes[1],
                                                         nodes[2]]))]
     if family===:tri
-        return NTuple{3,Int32}[Tuple(sort!(Int32[nodes[1],nodes[2],
+        return NTuple{3,UInt64}[Tuple(sort!(UInt64[nodes[1],nodes[2],
                                                 nodes[3]]))]
     end
     if family===:qua
         a,b,c,d=nodes[1],nodes[2],nodes[3],nodes[4]
-        corners=Int32[a,b,c,d]
+        corners=UInt64[a,b,c,d]
         position=argmin(corners)
         if position==1 || position==3
-            return NTuple{3,Int32}[Tuple(sort!(Int32[a,b,c])),
-                                   Tuple(sort!(Int32[a,c,d]))]
+            return NTuple{3,UInt64}[Tuple(sort!(UInt64[a,b,c])),
+                                   Tuple(sort!(UInt64[a,c,d]))]
         end
-        return NTuple{3,Int32}[Tuple(sort!(Int32[a,b,d])),
-                               Tuple(sort!(Int32[b,c,d]))]
+        return NTuple{3,UInt64}[Tuple(sort!(UInt64[a,b,d])),
+                               Tuple(sort!(UInt64[b,c,d]))]
     end
-    family===:tet && return NTuple{4,Int32}[Tuple(sort!(Int32[
+    family===:tet && return NTuple{4,UInt64}[Tuple(sort!(UInt64[
         nodes[1],nodes[2],nodes[3],nodes[4]]))]
     throw(ArgumentError(
         "$caller: elements of type $msh_type cannot be decomposed " *
@@ -2007,7 +1986,7 @@ end
 # to `(msh_type, node_tags)` element pairs. Returns per-dimension sorted cell
 # lists (0..3).
 function _homology_complex(cells::Dict{Tuple{Int,Int},
-                                     Vector{Tuple{Int32,Vector{Int32}}}},
+                                     Vector{Tuple{Int32,Vector{UInt64}}}},
                            domain::Set{Tuple{Int,Int}},
                            subdomain::Set{Tuple{Int,Int}},
                            caller::AbstractString)
@@ -2134,145 +2113,38 @@ _homology_cell_type(cell::Tuple)=(15,1,2,4)[length(cell)]
 
 Perform the queued homology requests (see `add_homology_request!`), matching
 Gmsh's `mesh.computeHomology`. `cells` maps `(dim, tag)` entity keys to that
-entity's `(msh_type, node_tags)` elements; the simplicial complex is the
+entity's `(msh_type, node_tags)` elements; the oriented cell complex is the
 closure of the domain entities' cells. Domain and subdomain tags refer to
 physical groups of any dimension. Each surviving generator becomes a new
 discrete entity of the generator's dimension holding the representative chain,
 wrapped in a fresh physical group whose `(dim, tag)` is returned. `"Homology"`
-computes relative homology H_k(dom, sub) over GF(2); `"Cohomology"` computes
+computes integral relative homology H_k(dom, sub); `"Cohomology"` computes
 the matching cocycle representatives on the primal complex. Returns the
 `(dim, tag)` pairs of all created physical groups.
 """
 function compute_homology!(m::GeoModel,cells::Dict{Tuple{Int,Int},
-        Vector{Tuple{Int32,Vector{Int32}}}};
-        requests=m.meshing.homology_requests)
-    caller="compute_homology!"
-    output=Tuple{Int,Int}[]
-    # Upstream builds one `Homology` object per unique (domain, subdomain)
-    # request pair (`GModel::computeHomology` groups the multimap by key);
-    # the object's `_homologyComputed`/`_cohomologyComputed` dim flags persist
-    # across the pair's requests. A request whose dims were all computed by
-    # an earlier request stores nothing, while a partially computed request
-    # re-runs and re-stores chains for every requested dim.
-    pairs=Tuple{Vector{Int},Vector{Int}}[]
-    for request in requests
-        key=(request.domain,request.subdomain)
-        key in pairs || push!(pairs,key)
+        Vector{Tuple{Int32,Vector{UInt64}}}};
+        requests=m.meshing.homology_requests,coordinates=nothing,
+        initial_max_element_tag=UInt64(0),initial_element_counter_wrapped=false,
+        element_counter_report=nothing,error_callback=nothing)
+    return _native_compute_homology!(m,cells,requests;coordinates,initial_max_element_tag,
+                                     initial_element_counter_wrapped,element_counter_report,error_callback)
+end
+
+# Preserve the established Model entry point for integer connectivity.
+# Native producers already use UInt64 and retain their zero-copy dispatch;
+# legacy Int32/Int64 callers normalize once at this public boundary.
+function compute_homology!(m::GeoModel,cells::Dict{Tuple{Int,Int},
+        Vector{Tuple{Int32,Vector{T}}}};kwargs...) where {T<:Integer}
+    native=Dict{Tuple{Int,Int},Vector{Tuple{Int32,Vector{UInt64}}}}()
+    for (owner,elements) in cells
+        normalized=Vector{Tuple{Int32,Vector{UInt64}}}(undef,length(elements))
+        for (index,(kind,nodes)) in enumerate(elements)
+            normalized[index]=(kind,UInt64.(nodes))
+        end
+        native[owner]=normalized
     end
-    for key in pairs
-        group=[r for r in requests if (r.domain,r.subdomain)==key]
-        # Domain/subdomain entity sets and the cell complex are per pair —
-        # upstream resolves them once in the `Homology` constructor.
-        first=group[1]
-        top=model_dimension(m)
-        if isempty(first.domain)
-            # Upstream defaults an empty domain to every entity of the
-            # model's top dimension and skips the subdomain lookup entirely
-            # in that branch (`Homology::Homology` in geo/Homology.cpp).
-            top<0 && throw(ArgumentError("$caller: domain is empty"))
-            domain=Set{Tuple{Int,Int}}(
-                (top,tag) for tag in keys(_model_entity_dictionary(m,top)))
-            for (d,tag) in keys(m.discrete)
-                d==top && push!(domain,(top,tag))
-            end
-            subdomain=Set{Tuple{Int,Int}}()
-        else
-            domain=Set{Tuple{Int,Int}}()
-            for (dim,tag) in keys(m.physical)
-                tag in first.domain || continue
-                for entity in m.physical[(dim,tag)]
-                    push!(domain,(dim,entity))
-                end
-            end
-            subdomain=Set{Tuple{Int,Int}}()
-            for (dim,tag) in keys(m.physical)
-                tag in first.subdomain || continue
-                for entity in m.physical[(dim,tag)]
-                    push!(subdomain,(dim,entity))
-                end
-            end
-        end
-        isempty(domain) && throw(ArgumentError("$caller: domain is empty"))
-        # The cell complex builds lazily at the first request that actually
-        # computes — upstream constructs it inside `findHomologyBasis`/
-        # `findBettiNumbers`, so per-request dimension validation errors
-        # precede the empty-complex error. `domain`/`subdomain` pass as
-        # arguments and `complex` lives in a `Ref` so the closure captures
-        # only once-assigned bindings (no boxed locals).
-        complex=Ref{Any}(nothing)
-        function complex_or_error(domain,subdomain)
-            complex[]===nothing || return complex[]
-            built=_homology_complex(cells,domain,subdomain,caller)
-            # Upstream: "Cell Complex is empty: check the domain and the
-            # mesh" — the domain entities carried no cells (e.g. nothing was
-            # meshed).
-            all(isempty,built) && throw(ArgumentError(
-                "$caller: cell complex is empty: check the domain and " *
-                "the mesh"))
-            complex[]=built
-            return built
-        end
-        computed_h=Set{Int}();computed_c=Set{Int}()
-        for request in group
-            kind=request.kind
-            kind in ("Homology","Cohomology","Betti") || throw(ArgumentError(
-                "$caller: unsupported computation type \"$kind\""))
-            # Upstream fills an empty dims list with 0:getDim()-1 and filters
-            # explicit dims to 0:getDim(), erroring when nothing survives.
-            dimensions=isempty(request.dims) ? collect(0:top-1) :
-                Int[k for k in request.dims
-                    if (k isa Integer && !(k isa Bool) && 0<=k<=top)]
-            isempty(dimensions) && throw(ArgumentError(
-                "$caller: invalid homology computation dimensions given"))
-            # `Betti` reports ranks without storing any chains.
-            kind=="Betti" && (complex_or_error(domain,subdomain);continue)
-            computed=kind=="Homology" ? computed_h : computed_c
-            all(d->d in computed,dimensions) && continue
-            union!(computed,dimensions)
-            current=complex_or_error(domain,subdomain)
-            name_domain=_homology_domain_string(request.domain,
-                                                request.subdomain)
-            for k in dimensions
-                cells_k=current[Int(k)+1]
-                isempty(cells_k) && continue
-                lower=Int(k)==0 ? Tuple[] : current[Int(k)]
-                if kind=="Cohomology"
-                    cycles=_homology_cocycles(cells_k,current[Int(k)+2])
-                    pivots=_homology_coboundary_pivots(lower,cells_k)
-                else
-                    cycles=_homology_cycles(lower,cells_k)
-                    pivots=_homology_boundary_pivots(cells_k,current[Int(k)+2])
-                end
-                generator_index=0
-                for generator in _homology_quotient(cycles,pivots)
-                    generator_index+=1
-                    entity_tag=add_discrete_entity!(m,Int(k),0)
-                    record=m.discrete[(Int(k),entity_tag)]
-                    for cell_index in sort!(collect(generator))
-                        cell=cells_k[cell_index]
-                        _record_append_element!(record,
-                            _homology_cell_type(cell),
-                            Int32(_model_fresh_element_tag(m)),
-                            Int32[cell...])
-                    end
-                    # Upstream wraps each stored generator in a physical
-                    # group named "H_k{domain}i" / "H^k{domain}i"
-                    # (`storeChain`). Re-requests duplicate the name —
-                    # `setPhysicalName` enforces no uniqueness — so the
-                    # name is bound directly rather than through the
-                    # uniqueness-filtering kwarg.
-                    prefix=kind=="Homology" ? "H_" : "H^"
-                    group_name=prefix*string(k)*name_domain*
-                               string(generator_index)
-                    physical=add_physical_group!(m,Int(k),[entity_tag];
-                        name=group_name)
-                    m.physical_names[(Int(k),physical)]=group_name
-                    push!(output,(Int(k),physical))
-                end
-            end
-        end
-    end
-    return output
+    return compute_homology!(m,native;kwargs...)
 end
 
 # `_getDomainString` — the `{d1,d2}` domain tag list (or `{0}` for the
@@ -2374,7 +2246,7 @@ function _flexible_transfinite_nodes(m::GeoModel,num_nodes::Int,curve::Int,
         # Gmsh's `N /= lcFactor` truncates a C int — clamp the quotient into
         # a safe range so Inf/NaN/overflow factors degrade to the degenerate
         # endpoint-only mesh rather than throwing InexactError; counts beyond
-        # Int32 still fail on the parameter laws' node limit.
+        # UInt64 still fail on the parameter laws' node limit.
         adjusted=isfinite(q) ?
             trunc(Int,clamp(q,-2.2e9,2.2e9)) :
             (q>0 ? Int64(2.2e9) : 0)
@@ -2434,7 +2306,7 @@ end
 # take precedence for curves already constrained.
 function _attribute_forced_parameters(m::GeoModel,t::Int,
                                       forced::Dict{Int,Vector{Float64}},
-                                      caller::AbstractString)
+                                      caller::AbstractString;_mesh1d_options=nothing)
     boundary_curves=Set{Int}()
     for loop_id in m.surfaces[t]
         for signed in m.loops[loop_id]
@@ -2448,7 +2320,8 @@ function _attribute_forced_parameters(m::GeoModel,t::Int,
     # `meshGFace` always finds `GEdge::mesh_vertices` populated. Grade any
     # boundary curve still missing stored parameters the same way — without
     # this, an unmeshed curve would contribute only its endpoints.
-    _model_surface_mesh_curves!(m,boundary_curves,caller)
+    _model_surface_mesh_curves!(m,boundary_curves,caller;
+                               _mesh1d_options=_mesh1d_options)
     param_sizes=Dict{Tuple{Int,Float64},Float64}()
     for (curve,spec) in m.meshing.transfinite_curves
         curve in boundary_curves || continue

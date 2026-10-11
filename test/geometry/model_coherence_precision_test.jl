@@ -122,7 +122,7 @@ end
         result=_mcp_execute(source)
         @test length(result.model.points)==8
         @test all(result.model.curves[c][1]!=result.model.curves[c][2] for c in 1:4)
-        volume=geo_entity_mesh(result,3,1)
+        volume=geo_entity_mesh(result,3,1;geometry=true)
         @test Tessella.MeshTypes.nnodes(volume)==20
         @test Tessella.MeshTypes.validate(volume).ok
         @test sort!(unique(volume.coords[3,:])).-2.0^50==[0.,0.25,0.5,0.75,1.]

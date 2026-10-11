@@ -36,7 +36,25 @@ struct _ModelMesh1DOptions
     callback::Any              # m.meshing.size_callback or nothing
     warn::Any                  # Msg::Warning sink or nothing
     report_error::Any          # Msg::Error sink or nothing
+    random_state::Base.RefValue{UInt32}
+    random_factor3d::Float64
+    optimize::Int
+    optimize_threshold::Float64
+    optimize_netgen::Int
 end
+
+# Older internal callers retain the native generation defaults. A single
+# operation owns this state and shares it among its volume producers.
+_ModelMesh1DOptions(args::Vararg{Any,19}) =
+    _ModelMesh1DOptions(args...,Ref(UInt32(1)),1e-12)
+_ModelMesh1DOptions(args::Vararg{Any,21}) =
+    _ModelMesh1DOptions(args...,1,0.3,0)
+
+_model_native_random_seed(seed::Integer) = UInt32(mod(seed,Int64(1)<<32))
+
+# Preserve the installed callback and caller-owned captures during a meshing
+# transaction. Other model data are detached normally; ordinary deepcopy
+# remains available for independent user snapshots.
 
 function _model_mesh_warn(options::_ModelMesh1DOptions, message::AbstractString)
     options.warn===nothing || options.warn(message)
@@ -72,6 +90,15 @@ function _model_mesh_bbox(m::GeoModel, caller::AbstractString)
     end
     for (curve,params) in m.curve_params
         haskey(m.curves,curve) || continue
+        if _curve_type(m,curve)===:line && _occ_geometry(m,curve)===nothing
+            begin_tag,end_tag=m.curves[curve]
+            if haskey(m.points,begin_tag) && haskey(m.points,end_tag) &&
+                    m.points[begin_tag]==m.points[end_tag]
+                # A native collapsed Line retains its self-loop cell. Its
+                # samples have no extent beyond the Point cloud above.
+                continue
+            end
+        end
         for u in params
             grow!(_model_curve_point(m,curve,u,caller))
         end
@@ -159,13 +186,15 @@ end
 # join the pending set (upstream's global pass reaches them too); curves
 # that stay PENDING past `Mesh.MaxRetries` keep no stored parameters, like
 # upstream's silently-starved status.
-function _model_surface_mesh_curves!(m::GeoModel,curves,caller::AbstractString)
+function _model_surface_mesh_curves!(m::GeoModel,curves,caller::AbstractString;
+        _mesh1d_options::Union{Nothing,_ModelMesh1DOptions}=nothing)
     pending=Set{Int}()
     for curve in curves
         haskey(m.curve_params,Int(curve)) || push!(pending,Int(curve))
     end
     isempty(pending) && return nothing
-    options=_model_default_mesh1d_options(m,caller)
+    options=_mesh1d_options===nothing ? _model_default_mesh1d_options(m,caller) :
+                                       _mesh1d_options
     for _ in 1:options.max_retries
         isempty(pending) && break
         progressed=false
@@ -197,18 +226,20 @@ end
 
 # `LC_MVertex_PNTS` for a vertex: its prescribed size, or `CTX::lc/10` when
 # unsized.
-function _model_vertex_l1(m::GeoModel,point::Int,ctx_lc::Float64)
+function _model_vertex_l1(m::GeoModel,point::Int,ctx_lc::Float64;
+                          _native_producer::Bool=false)
     lc=_model_vertex_lc(m,point)
-    return lc>=GMSH_MAX_SIZE ? ctx_lc/10 : lc
+    return lc>=GMSH_MAX_SIZE ? (_native_producer ? ctx_lc*0.1 : ctx_lc/10) : lc
 end
 
 # `LC_MVertex_PNTS` for an edge: `CTX::lc/10` when both endpoints are unsized,
 # else the linear interpolation `(1-a)lc1 + a*lc2` over the parameter range.
 function _model_curve_l1(m::GeoModel,curve::Integer,u::Float64,t0::Float64,
-                         t1::Float64,ctx_lc::Float64)
+                         t1::Float64,ctx_lc::Float64;_native_producer::Bool=false)
     a,b=m.curves[curve]
     lc1=_model_vertex_lc(m,a); lc2=_model_vertex_lc(m,b)
-    (lc1>=GMSH_MAX_SIZE && lc2>=GMSH_MAX_SIZE) && return ctx_lc/10
+    (lc1>=GMSH_MAX_SIZE && lc2>=GMSH_MAX_SIZE) &&
+        return _native_producer ? ctx_lc*0.1 : ctx_lc/10
     alpha=t1==t0 ? 0.0 : (u-t0)/(t1-t0)
     return (1-alpha)*lc1 + alpha*lc2
 end
@@ -217,16 +248,25 @@ end
 # The upstream `max_surf_curvature` term needs adjacent-face curvature, which
 # Tessella's built-in surface evaluation does not provide — plane faces
 # contribute zero, matching this truncation.
-function _model_curve_l2(m::GeoModel,curve::Integer,u::Float64,ne::Float64)
+function _model_curve_l2(m::GeoModel,curve::Integer,u::Float64,ne::Float64;
+                         _native_producer::Bool=false,_native_geometry=nothing)
     ne>0 || return GMSH_MAX_SIZE
     ne<1 && (ne=1.0)
-    curvature=only(model_curvature(m,1,curve,[u]))
+    curvature=if _native_producer
+        adapter=_native_geometry===nothing ?
+            _model_high_order_curve_geometry(m,Int(curve),"_model_curve_l2") : _native_geometry
+        adapter===nothing ? only(model_curvature(m,1,curve,[u])) :
+            _model_native_curve_curvature(m,adapter,u,"_model_curve_l2")
+    else
+        only(model_curvature(m,1,curve,[u]))
+    end
     return curvature>0 ? 2π/curvature/ne : GMSH_MAX_SIZE
 end
 
 # `LC_MVertex_CURV` for a vertex: max incident-edge curvature at the
 # endpoint touching the vertex (`max_edge_curvature`).
-function _model_vertex_l2(m::GeoModel,point::Int,ne::Float64)
+function _model_vertex_l2(m::GeoModel,point::Int,ne::Float64;
+                          _native_producer::Bool=false)
     ne>0 || return GMSH_MAX_SIZE
     ne<1 && (ne=1.0)
     curvature=0.0
@@ -240,12 +280,22 @@ function _model_vertex_l2(m::GeoModel,point::Int,ne::Float64)
                                         "_model_vertex_l2")
         # `max_edge_curvature` — a closed curve touches the vertex at both
         # ends, so both parameter extrema contribute.
-        a==point &&
-            (c=only(model_curvature(m,1,curve,[lo]));
-             c>curvature && (curvature=c))
-        b==point &&
-            (c=only(model_curvature(m,1,curve,[hi]));
-             c>curvature && (curvature=c))
+        if _native_producer
+            # Native max_edge_curvature selects the begin parameter when a
+            # closed edge touches the same vertex at both ends.
+            parameter=a==point ? lo : hi
+            adapter=_model_high_order_curve_geometry(m,curve,"_model_vertex_l2")
+            c=adapter===nothing ? only(model_curvature(m,1,curve,[parameter])) :
+                _model_native_curve_curvature(m,adapter,parameter,"_model_vertex_l2")
+            c>curvature && (curvature=c)
+        else
+            a==point &&
+                (c=only(model_curvature(m,1,curve,[lo]));
+                 c>curvature && (curvature=c))
+            b==point &&
+                (c=only(model_curvature(m,1,curve,[hi]));
+                 c>curvature && (curvature=c))
+        end
     end
     return curvature>0 ? 2π/curvature/ne : GMSH_MAX_SIZE
 end
@@ -290,10 +340,11 @@ end
 # size, l2 incident-edge curvature, l3 background field, callback, then the
 # CTX::lc cap, lcMin/lcMax clamp and lcFactor scaling.
 function _model_vertex_bgm(m::GeoModel,point::Int,xyz,
-                           options::_ModelMesh1DOptions,caller::AbstractString)
-    l1=options.from_points ? _model_vertex_l1(m,point,options.ctx_lc) :
+                           options::_ModelMesh1DOptions,caller::AbstractString;
+                           _native_producer::Bool=false)
+    l1=options.from_points ? _model_vertex_l1(m,point,options.ctx_lc;_native_producer) :
         GMSH_MAX_SIZE
-    l2=_model_vertex_l2(m,point,options.from_curvature)
+    l2=_model_vertex_l2(m,point,options.from_curvature;_native_producer=_native_producer)
     l3=options.inner_field===nothing ? GMSH_MAX_SIZE :
         field_value(options.inner_field,xyz[1],xyz[2],xyz[3],(0,point))
     lc=min(l1,l2,l3,GMSH_MAX_SIZE)
@@ -301,7 +352,7 @@ function _model_vertex_bgm(m::GeoModel,point::Int,xyz,
         lc=_apply_size_callback(options.callback,0,point,xyz[1],xyz[2],
                                 xyz[3],lc,caller)
     end
-    lc=min(options.ctx_lc,lc)
+    lc=lc<options.ctx_lc ? lc : options.ctx_lc
     lc=max(lc,options.lc_min)
     lc=min(lc,options.lc_max)
     if lc<=0
@@ -317,10 +368,12 @@ end
 # per-curve size — and the per-entity `meshSizeFactor` is likewise unset.
 function _model_curve_bgm(m::GeoModel,curve::Integer,u::Float64,xyz,t0::Float64,
                           t1::Float64,options::_ModelMesh1DOptions,
-                          caller::AbstractString)
+                          caller::AbstractString;_native_producer::Bool=false,
+                          _native_geometry=nothing)
     l1=options.from_points ?
-        _model_curve_l1(m,curve,u,t0,t1,options.ctx_lc) : GMSH_MAX_SIZE
-    l2=_model_curve_l2(m,curve,u,options.from_curvature)
+        _model_curve_l1(m,curve,u,t0,t1,options.ctx_lc;_native_producer) : GMSH_MAX_SIZE
+    l2=_model_curve_l2(m,curve,u,options.from_curvature;
+        _native_producer=_native_producer,_native_geometry=_native_geometry)
     l3=options.inner_field===nothing ? GMSH_MAX_SIZE :
         field_value(options.inner_field,xyz[1],xyz[2],xyz[3],(1,curve))
     l5=_model_curve_l5(m,curve,u,caller)
@@ -329,7 +382,7 @@ function _model_curve_bgm(m::GeoModel,curve::Integer,u::Float64,xyz,t0::Float64,
         lc=_apply_size_callback(options.callback,1,curve,xyz[1],xyz[2],
                                 xyz[3],lc,caller)
     end
-    lc=min(options.ctx_lc,lc)
+    lc=lc<options.ctx_lc ? lc : options.ctx_lc
     lc=max(lc,options.lc_min)
     lc=min(lc,options.lc_max)
     if lc<=0
@@ -426,10 +479,10 @@ function _model_minimum_curve_segments(m::GeoModel,curve::Integer,
 end
 
 # A parametrized discrete curve re-meshes like `discreteEdge::mesh` (frames
-# carry the stored parameters); records without parameters keep their
-# elements, like `_discretization.empty()` upstream.
+# carry the created geometry); merely supplying mesh-vertex parameters does
+# not populate discreteEdge's separate `_pars` geometry table.
 function _model_discrete_curve_parametrized(record::DiscreteEntity)
-    return size(record.node_params,1)>=1 && size(record.node_params,2)>0
+    return record.geometry_parametrized
 end
 
 function _model_discrete_curve_params(m::GeoModel,curve::Integer,
@@ -437,9 +490,9 @@ function _model_discrete_curve_params(m::GeoModel,curve::Integer,
                                       caller::AbstractString)
     _model_discrete_curve_parametrized(record) ||
         return nothing
-    us=sort!(unique(Float64.(vec(record.node_params[1,:]))))
+    us=size(record.node_params,1)>=1 ?
+        sort!(unique(Float64.(vec(record.node_params[1,:])))) : Float64[]
     lo,hi=_model_curve_param_bounds(m,curve,caller)
-    isempty(us) && return nothing
     return Float64[lo;filter(u->lo<u<hi,us);hi]
 end
 
@@ -541,7 +594,14 @@ end
 function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
                                    t1::Float64,
                                    options::_ModelMesh1DOptions,
-                                   caller::AbstractString)
+                                   caller::AbstractString;_native_producer::Bool=false,
+                                   _point_store=nothing)
+    if _native_producer && _curve_type(m,curve)===:line &&
+            get(m.curve_geometry,curve,nothing)===nothing &&
+            t0==0.0 && t1==1.0 && first(m.curves[curve])!=last(m.curves[curve])
+        return _model_native_line_grade_params(m,Int(curve),options,caller;
+                                               _native_producer,_birth_rows=_native_producer)
+    end
     γ=u->_model_curve_point(m,curve,u,caller)
     field=_ModelCurveEntityField(m,options,String(caller))
     a,b=m.curves[curve]
@@ -577,7 +637,10 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
         integration_precision=precision,
         minimum_segments=minimum,force_odd=force_odd,
         _recombine_odd_nodes=odd_nodes,
-        _recombination_primitive=count_primitive)
+        _recombination_primitive=count_primitive,
+        max_integration_points=_point_store===nothing ? _DEFAULT_MAX_INTEGRATION_POINTS :
+            _GMSH_CURVE_INTEGRATION_CAPACITY,
+        _point_store)
     return parameters
 end
 
@@ -869,19 +932,30 @@ end
     return _length_point(gamma,nothing,t,0.0,1.0,caller).xp
 end
 
-function _model_native_line_sampling_length(m::GeoModel,curve::Int,caller)
+function _model_native_line_sampling_length(m::GeoModel,curve::Int,caller,
+                                            options=nothing;_native_producer::Bool=false)
     a,b=m.curves[curve]
     first,last=m.points[a],m.points[b]
-    gamma=t->_model_curve_point(m,curve,t,caller)
+    gamma=t->_native_producer ? _model_native_line_point(first,last,t) :
+        _model_curve_point(m,curve,t,caller)
     evaluate=(t,_,_)->begin
         speed=_model_native_line_sampling_speed(first,last,t,gamma,caller)
         _IntegrationPoint(t,speed,0.0,speed,1.0)
     end
-    points=_adaptive_points(evaluate,0.0,1.0,_GMSH_INTEGRATION_PRECISION,
-                            _DEFAULT_MAX_INTEGRATION_POINTS,
-                            _GMSH_MIN_INTEGRATION_DEPTH,
-                            _GMSH_MAX_INTEGRATION_DEPTH,caller)
-    return points[end].p
+    points=if _native_producer
+        policy=options===nothing ? _model_default_mesh1d_options(m,caller) : options
+        _gmsh_curve_integration(evaluate,0.0,1.0,
+            policy.integration_precision*policy.ctx_lc,caller)
+    else
+        _adaptive_points(evaluate,0.0,1.0,_GMSH_INTEGRATION_PRECISION,
+            _DEFAULT_MAX_INTEGRATION_POINTS,
+            _GMSH_MIN_INTEGRATION_DEPTH,_GMSH_MAX_INTEGRATION_DEPTH,caller)
+    end
+    try
+        return points[end].p
+    finally
+        _native_producer && _gmsh_curve_close_points!(points)
+    end
 end
 
 function _model_native_line_recombination_mass(first::NTuple{3,Float64},
@@ -955,7 +1029,8 @@ end
 function _model_curve_transfinite_density_params(m::GeoModel,curve::Int,
                                                  t0::Float64,t1::Float64,
                                                  val,count::Int,
-                                                 caller::AbstractString)
+                                                 caller::AbstractString,
+                                                 options=nothing;_native_producer::Bool=false)
     γ=function(u)
         point=_model_curve_point(m,curve,u,caller)
         all(isfinite,point) || throw(ArgumentError(
@@ -973,6 +1048,15 @@ function _model_curve_transfinite_density_params(m::GeoModel,curve::Int,
             _length_point(γ,nothing,t,t0,t1,caller).xp
         tn=(t-t0)/(t1-t0)
         return _IntegrationPoint(t,val(tn,speed),0.0,speed,1.0)
+    end
+    if _native_producer && native_line
+        precision=options===nothing ? _GMSH_INTEGRATION_PRECISION : options.integration_precision
+        points=_gmsh_curve_integration(evaluate,t0,t1,precision,caller)
+        try
+            return _gmsh_curve_parameters(points,count,caller)
+        finally
+            _gmsh_curve_close_points!(points)
+        end
     end
     points=_adaptive_points(evaluate,t0,t1,_GMSH_INTEGRATION_PRECISION,
                             _DEFAULT_MAX_INTEGRATION_POINTS,
@@ -1005,27 +1089,32 @@ end
 # The standalone analytic grading helper remains a separate contract.
 function _model_curve_transfinite_native_params(m::GeoModel,curve::Int,
                                                 t0::Float64,t1::Float64,spec,
-                                                caller::AbstractString)
+                                                caller::AbstractString,
+                                                options=nothing;_native_producer::Bool=false)
     kind=_curve_type(m,curve)
     if kind===:line || (kind===:circle && m.meshing.flexible_transfinite)
         count=_flexible_transfinite_nodes(m,spec.num_nodes,curve,caller)
         count==2 && return Float64[t0,t1]
         raw_type=_transfinite_law_type(spec.kind)*(spec.reversed ? -1 : 1)
-        if _transfinite_val_arm(raw_type,spec.coef)===:density || raw_type in (5,6,7)
+        native_line=kind===:line &&
+            get(m.curve_geometry,curve,nothing)===nothing && t0==0.0 && t1==1.0
+        if _transfinite_val_arm(raw_type,spec.coef)===:density || raw_type in (5,6,7) ||
+                (_native_producer && native_line && spec.coef>0.0 && _transfinite_val_arm(raw_type,spec.coef)===:length)
             a,b=m.curves[curve]
             native_line=kind===:line &&
                 get(m.curve_geometry,curve,nothing)===nothing && t0==0.0 && t1==1.0
-            length=native_line ? _model_native_line_sampling_length(m,curve,caller) :
+            length=native_line ? _model_native_line_sampling_length(m,curve,caller,options;_native_producer) :
                 kind===:line ? _model_point_distance(m.points[a],m.points[b]) :
                               _model_curve_length(m,curve,caller)
             (isfinite(length) && length>0.0) || throw(ArgumentError(
                 "$caller: Curve[$curve] has nonpositive or nonfinite geometric length"))
             type,coef=_transfinite_effective_law(spec,length,spec.num_nodes)
-            if _transfinite_val_arm(type,coef)===:density
+            if _transfinite_val_arm(type,coef)===:density ||
+                    (_native_producer && native_line && coef>0.0 && _transfinite_val_arm(type,coef)===:length)
                 n_law=_transfinite_law_nodes(m,spec.num_nodes,caller)
                 val=_transfinite_val(type,coef,length,n_law)
                 return _model_curve_transfinite_density_params(
-                    m,curve,t0,t1,val,count,caller)
+                    m,curve,t0,t1,val,count,caller,options;_native_producer)
             elseif _transfinite_val_arm(type,coef)===:length
                 # HWall's original declared count can put its transform
                 # outside the solver bracket (ordinary coefficient 1).
@@ -1074,8 +1163,9 @@ end
 # side chains agree bitwise.
 function _model_curve_transfinite_params(m::GeoModel,curve::Integer,t0::Float64,
                                          t1::Float64,spec,
-                                         caller::AbstractString)
-    return _model_curve_transfinite_native_params(m,curve,t0,t1,spec,caller)
+                                         caller::AbstractString,
+                                         options=nothing;_native_producer::Bool=false)
+    return _model_curve_transfinite_native_params(m,curve,t0,t1,spec,caller,options;_native_producer)
 end
 
 # `BGM_MeshSize` for a dim-1 discrete entity — the same `meshGEdgeProcessing`
@@ -1109,7 +1199,7 @@ function _model_discrete_curve_bgm(m::GeoModel,curve::Integer,u::Float64,xyz,
         lc=_apply_size_callback(options.callback,1,curve,xyz[1],xyz[2],
                                 xyz[3],lc,caller)
     end
-    lc=min(options.ctx_lc,lc)
+    lc=lc<options.ctx_lc ? lc : options.ctx_lc
     lc=max(lc,options.lc_min)
     lc=min(lc,options.lc_max)
     if lc<=0
@@ -1134,7 +1224,7 @@ function _model_discrete_curve_grade_params(m::GeoModel,curve::Integer,
     boundary=record.boundary
     endpoints=length(boundary)>=2 ?
         (boundary[1],boundary[2]) : (nothing,nothing)
-    closed=length(boundary)==1
+    closed=!isempty(boundary) && first(boundary)==last(boundary)
     size_function=u->_model_discrete_curve_bgm(
         m,curve,u,γ(u),t0,t1,boundary,options,caller)
     _,parameters=mesh_curve(
@@ -1157,7 +1247,7 @@ end
 # has not been meshed yet (upstream leaves the curve PENDING and retries).
 function _model_mesh_curve!(m::GeoModel,curve::Integer,
                             options::_ModelMesh1DOptions,
-                            caller::AbstractString)
+                            caller::AbstractString;_native_producer::Bool=false)
     record=get(m.discrete,(1,curve),nothing)
     if record!==nothing && !_model_discrete_curve_parametrized(record)
         return :keep   # `_discretization.empty()` upstream — elements kept
@@ -1252,9 +1342,20 @@ function _model_mesh_curve!(m::GeoModel,curve::Integer,
         minimum=_model_minimum_curve_segments(m,curve,options,caller)
         return collect(range(t0,t1,length=minimum+1))
     end
-    spec!==nothing &&
-        return _model_curve_transfinite_params(m,curve,t0,t1,spec,caller)
-    return _model_curve_grade_params(m,curve,t0,t1,options,caller)
+    if spec!==nothing
+        if _native_producer && spec.coef!=0.0 &&
+                ((kind in (:circle,:ellipse,:tensor_bezier,:tensor_bspline) || kind in _SPLINE_CURVE_TYPES) ||
+                 (kind===:line && spec.coef<0.0 &&
+                  get(m.curve_geometry,curve,nothing)===nothing))
+            return _model_native_curve_transfinite_params(m,Int(curve),spec,options,caller)
+        end
+        return _model_curve_transfinite_params(m,curve,t0,t1,spec,caller,options;_native_producer)
+    end
+    if _native_producer &&
+            (kind in (:circle,:ellipse,:tensor_bezier,:tensor_bspline) || kind in _SPLINE_CURVE_TYPES)
+        return _model_native_curve_grade_params(m,Int(curve),options,caller;_birth_rows=true)
+    end
+    return _model_curve_grade_params(m,curve,t0,t1,options,caller;_native_producer)
 end
 
 # `Mesh1D` — every curve starts PENDING; periodic slaves and curve-extruded
@@ -1308,7 +1409,8 @@ function _model_require_point_mesh_geometry(m::GeoModel,caller::AbstractString)
     for ((dim,tag),record) in m.meshing.attached
         dim==0 && haskey(m.points,tag) && !isempty(record.node_tags) || continue
         point=ntuple(axis->record.node_coords[axis,1],3)
-        point==m.points[tag] || push!(displaced,tag)
+        point==m.points[tag] || _model_native_curve_endpoint_matches(m,tag,record) ||
+            push!(displaced,tag)
     end
     isempty(displaced) && return nothing
     for curve in sort!(collect(keys(m.curves)))
@@ -1464,7 +1566,8 @@ end
 # vertex sits off the eval path (a twist `{{T},{axis},{P},a}` connector)
 # keeps that vertex only as the curve's own endpoint, like upstream.
 function _model_curve_part_point(m::GeoModel,curve::Integer,u::Float64,
-                                 caller::AbstractString)
+                                 caller::AbstractString;_native_producer::Bool=false,
+                                 _parameter_source=m.curve_params)
     src=get(m.meshing.extrude_sources,(1,Int(curve)),nothing)
     if src!==nothing
         params=get(m.meshing.extrude,(1,Int(curve)),nothing)
@@ -1485,11 +1588,11 @@ function _model_curve_part_point(m::GeoModel,curve::Integer,u::Float64,
                 end
                 u_top=_extrude_level_us(params)[end]
                 return _extrude_at(spec,
-                    _periodic_curve_point(m,gen,usrc,caller),u_top,caller)
+                    _periodic_curve_point(m,gen,usrc,caller;_native_producer,_parameter_source),u_top,caller)
             end
         end
     end
-    return _periodic_curve_point(m,curve,u,caller)
+    return _periodic_curve_point(m,curve,u,caller;_native_producer,_parameter_source)
 end
 
 # Segment parts from the stored `curve_params` plus any discrete (1,*)
@@ -1564,7 +1667,7 @@ function _model_curve_mesh_parts(m::GeoModel,caller::AbstractString)
             _,frames=_discrete_eval_setup(m,1,tag,caller)
             γ=u->_discrete_curve_point(frames,u,caller)
             us=Float64.(params)
-            closed=length(record.boundary)==1
+            closed=!isempty(record.boundary) && first(record.boundary)==last(record.boundary)
             if closed && length(us)>1
                 _,hi=_model_curve_param_bounds(m,tag,caller)
                 us[end]>=hi && (us=us[1:end-1])
@@ -1871,4 +1974,17 @@ function _model_surface_curve_writeback!(m::GeoModel,curve::Int,mesh,
         mesh.coords[3,node]=point[3]
     end
     return nothing
+end
+
+function _model_mesh_transaction_copy(m::GeoModel,
+        memory::IdDict{Any,Any}=IdDict{Any,Any}())
+    original=m.meshing
+    detached=ModelMeshingAttributes()
+    memory[original]=detached
+    for name in fieldnames(ModelMeshingAttributes)
+        value=getfield(original,name)
+        setfield!(detached,name,name===:size_callback ? value :
+            Base.deepcopy_internal(value,memory))
+    end
+    return Base.deepcopy_internal(m,memory)
 end

@@ -170,7 +170,7 @@ Physical Volume("domain", 72) = {1};
         mesh=read_msh(output).mesh
         @test validate(mesh).ok && ntris(mesh)>0
         @test mesh_crc(mesh).sha==
-              "b3f60bd561ab9015ca6b9a98fde12af5fa37166382690e6aca68b9329837bb23"
+              "396cf0093729875dc14e06f600a97d07537b1d939d88a0d016005f7d8a60a5e6"
 
         explicit=joinpath(directory,"explicit.msh")
         wrapped="x"*input*"x"
@@ -485,4 +485,86 @@ Physical Volume("domain", 72) = {1};
     end
 
     @test isempty(Docs.undocumented_names(Tessella.CLI;private=false))
+end
+
+include(normpath(joinpath(@__DIR__,"..","..","validation","native_geometry",
+    "native_cli_square_exact_v1.jl")))
+
+@testset "CLI square native topology and explicit public carrier bindings" begin
+    expected=_CLI_SQUARE_NATIVE_EXACT_V1
+    word_bits(values)=collect(reinterpret(UInt64,Float64.(values)))
+    mktempdir() do directory
+        input=joinpath(directory,"square.geo")
+        output=joinpath(directory,"square.msh")
+        write(input,_SQUARE_GEO)
+        execution=Tessella.GeoExec.execute_geo(input;mesh_dim=2)
+        authority=execution.model.meshing.mesh_authority
+        @test authority!==nothing
+        actual=authority.mesh
+        @test actual isa Tessella.Elements.MixedMesh
+        data=actual.entity_data
+        @test data!==nothing
+        @test length(data.external_node_tags)==length(expected.nodes)
+        @test Set(data.external_node_tags)==Set(keys(expected.nodes))
+        parameters=Tessella.Model._model_mesh_runtime_parameters(execution.model,actual)
+        for (row,uid) in enumerate(data.external_node_tags)
+            node=expected.nodes[uid]
+            @test word_bits(actual.coords[:,row])==node.XYZ
+            @test data.node_entities[row]==node.owner
+            @test word_bits(parameters[row]===nothing ? Float64[] : parameters[row])==node.UV
+        end
+        actual_cells=Dict()
+        for (block,tags,owners) in zip(actual.blocks,data.external_element_tags,data.block_entities)
+            for (column,uid) in enumerate(tags)
+                @test !haskey(actual_cells,uid)
+                dimension=Tessella.Elements.msh_dimension(block.msh)
+                actual_cells[uid]=(family=Int(block.msh),
+                    nodes=data.external_node_tags[block.nodes[:,column]],
+                    owner=(dimension,owners[column]),physical=block.tags[column])
+            end
+        end
+        @test actual_cells==expected.cells
+        @test (UInt64(execution.mesh_node_max),UInt64(execution.mesh_element_max))==expected.maxima
+        @test Set(Tessella.Model.model_entities(execution.model))==Set(expected.entities)
+        @test isempty(execution.model.physical) && isempty(actual.physical_names)
+        for (owner,value) in expected.visibility
+            @test Tessella.Model.model_entity_visibility(execution.model,owner...)==value
+        end
+        @test execution.msg_error_count==0
+        @test isempty(execution.warnings)
+
+        geometry=execution.mesh
+        @test geometry isa Tessella.MeshTypes.Mesh
+        @test authority.carrier===geometry
+        rows=Int.(authority.carrier_rows)
+        @test length(rows)==size(geometry.coords,2) && allunique(rows)
+        @test all(row->1<=row<=size(actual.coords,2),rows)
+        @test Set(data.external_node_tags[rows])==Set(keys(expected.nodes))
+        for (row,actual_row) in enumerate(rows)
+            @test word_bits(geometry.coords[:,row])==word_bits(actual.coords[:,actual_row])
+        end
+        carrier_blocks=((1,geometry.segs),(2,geometry.tris),(4,geometry.tets))
+        @test length(authority.carrier_cells)==length(carrier_blocks)
+        bound=UInt64[]
+        for ((family,connectivity),tags) in zip(carrier_blocks,authority.carrier_cells)
+            @test length(tags)==size(connectivity,2)
+            for (column,uid) in enumerate(tags)
+                @test uid!==nothing
+                cell=expected.cells[uid]
+                @test family==cell.family
+                mapped=data.external_node_tags[rows[Int.(connectivity[:,column])]]
+                @test sort(mapped)==sort(cell.nodes)
+                push!(bound,uid)
+            end
+        end
+        @test allunique(bound)
+        @test Set(bound)==Set(uid for (uid,cell) in expected.cells if cell.family!=15)
+        @test mesh_crc(geometry).sha==expected.connectivity_sha
+        @test main([input,"-2","-o",output])==output
+        written=read_msh(output).mesh
+        @test word_bits(vec(written.coords))==word_bits(vec(geometry.coords))
+        @test written.segs==geometry.segs && written.tris==geometry.tris && written.tets==geometry.tets
+        @test mesh_crc(written).sha==expected.connectivity_sha
+        @test read(input,String)==_SQUARE_GEO
+    end
 end

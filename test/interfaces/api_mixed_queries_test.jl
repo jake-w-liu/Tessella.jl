@@ -80,6 +80,9 @@ end
             end
             if msh in (1,2,4)
                 @test all(isfinite,_MIXED_QUERY_API.mesh.get_element_qualities([1],"volume"))
+            elseif msh==3
+                # Shipping Gmsh4.15.2 exact affine fixture: primary SHA256 2bc51a8834b4faeb6a6d14528de9470ec0b731d9ac3f9e59b6ca21f8a5ba798b.
+                @test _MIXED_QUERY_API.mesh.get_element_qualities([1],"volume")≈[23.8812164681785] atol=2e-14 rtol=0
             elseif msh!=15
                 @test_throws ArgumentError _MIXED_QUERY_API.mesh.get_element_qualities([1],"volume")
             end

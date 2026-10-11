@@ -14,12 +14,19 @@ function _cache_tag_inverse(tags,caller,kind)
     indices=Dict{UInt64,Int}()
     sizehint!(indices,length(tags))
     for (index,tag) in enumerate(tags)
-        tag>0 || throw(ArgumentError("$caller: $kind tags must be positive"))
         haskey(indices,tag) && throw(ArgumentError(
             "$caller: duplicate public $kind tag $tag"))
         indices[tag]=index
     end
     return indices
+end
+
+_cache_declared_native_zero_entity(::Mesh,dimension::Integer)=false
+function _cache_declared_native_zero_entity(mesh::MixedMesh,dimension::Integer)
+    data=mesh.entity_data
+    data===nothing && return false
+    record=get(data.entities,(Int(dimension),0),nothing)
+    return record!==nothing && record.dim==dimension && record.tag==0
 end
 
 function _cache_public_tags(mesh::Union{Mesh,MixedMesh};authority=(),
@@ -63,7 +70,9 @@ function _cache_public_tags(mesh::Union{Mesh,MixedMesh};authority=(),
         entity isa Tuple && length(entity)==2 &&
             entity[1] isa Integer && !(entity[1] isa Bool) &&
             entity[2] isa Integer && !(entity[2] isa Bool) &&
-            0<=entity[1]<=3 && 0<entity[2]<=typemax(Int32) || throw(ArgumentError(
+            0<=entity[1]<=3 && (0<entity[2]<=typemax(Int32) ||
+                (entity[2]==0 && _cache_declared_native_zero_entity(mesh,entity[1]))) ||
+            throw(ArgumentError(
                 "$caller: authority must contain valid (dimension, entity tag) pairs"))
         push!(covered,(Int(entity[1]),Int32(entity[2])))
     end
@@ -99,8 +108,8 @@ _cache_node_tags(tags,indices)=UInt64[_cache_node_tag(tags,index) for index in i
 _cache_element_tags(tags,indices)=UInt64[_cache_element_tag(tags,index) for index in indices]
 
 function _cache_checked_public_tag(value,caller,kind)
-    value isa Integer && !(value isa Bool) && value>0 || throw(ArgumentError(
-        "$caller: $kind tag must be a positive integer"))
+    value isa Integer && !(value isa Bool) && value>=0 || throw(ArgumentError(
+        "$caller: $kind tag must be a non-negative integer"))
     return try
         UInt64(value)
     catch err
@@ -125,7 +134,7 @@ end
 
 function _cache_dense_index(value,count,caller,kind)
     tag=_cache_checked_public_tag(value,caller,kind)
-    tag<=count || throw(ArgumentError("$caller: unknown $kind tag $tag"))
+    1<=tag<=count || throw(ArgumentError("$caller: unknown $kind tag $tag"))
     return Int(tag)
 end
 _cache_node_index(::Nothing,value,count::Integer,caller)=
@@ -145,13 +154,35 @@ _cache_element_index(tags::_CachePublicTags,value,caller)=
 # stored block order so locator, quality, and Jacobian indices stay valid.
 _cache_numeric_family_order(types)=sortperm(types;by=Int,alg=Base.Sort.MergeSort)
 
+# A public entity query has one bucket per MSH type even when import or
+# mutation preserves several stored blocks of that family. Coalesce only
+# the detached query arrays; dense cache slots and public cell identities
+# keep their stored block order.
+function _cache_grouped_element_data(types,tags,nodes)
+    grouped_types=Int32[]
+    grouped_tags=Vector{UInt64}[]
+    grouped_nodes=Vector{UInt64}[]
+    for index in _cache_numeric_family_order(types)
+        msh=Int32(types[index])
+        if isempty(grouped_types) || last(grouped_types)!=msh
+            push!(grouped_types,msh)
+            push!(grouped_tags,tags[index])
+            push!(grouped_nodes,nodes[index])
+        else
+            append!(last(grouped_tags),tags[index])
+            append!(last(grouped_nodes),nodes[index])
+        end
+    end
+    return grouped_types,grouped_tags,grouped_nodes
+end
+
 function _classification_with_public_tags(class,tags::_CachePublicTags)
     tags.mesh===class.mesh || throw(ArgumentError(
         "API mesh classification: public tags describe a different mesh cache"))
     return _MeshClassification(class.mesh,class.entity,class.entities,
         class.node_entities,class.boundaries,class.seg_entities,class.tri_entities,
         class.tet_entities,class.cell_entities,tags,class.edge_entities,class.face_entities,
-        class.quad_entities)
+        class.quad_entities,class.node_parametric,class.mid_parametric,class.mid_keys)
 end
 
 function _classification_with_public_tags(class;authority=())
@@ -216,25 +247,25 @@ end
 function _native_public_node_remap(class,new_class,geometry;primary_map,source_mesh=nothing)
     public=class===nothing ? nothing : class.public_tags
     rebound=new_class===nothing ? nothing : new_class.public_tags
-    remap=Dict{Int32,Int32}()
+    remap=Dict{UInt64,UInt64}()
     for old in eachindex(primary_map)
         target=primary_map[old]
         target==0 && continue
-        remap[Int32(_cache_node_tag(public,old))]=Int32(_cache_node_tag(rebound,target))
+        remap[_cache_node_tag(public,old)]=_cache_node_tag(rebound,target)
     end
     source=_high_order_overlay(class===nothing ? source_mesh : class.mesh)
     source===nothing && return remap
-    support=Dict{Tuple{Int32,Int32},Int32}()
+    support=Dict{Tuple{Int32,Int32},UInt64}()
     for column in axes(_p2_cells(geometry),2),(slot,i,j) in _p2_edge_slots(geometry)
         cells=_p2_cells(geometry)
         support[minmax(cells[i,column],cells[j,column])]=
-            Int32(_cache_node_tag(rebound,cells[slot,column]))
+            _cache_node_tag(rebound,cells[slot,column])
     end
     for column in axes(_p2_cells(source),2),(slot,i,j) in _p2_edge_slots(source)
         cells=_p2_cells(source)
         a,b=primary_map[cells[i,column]],primary_map[cells[j,column]]
         (a==0 || b==0) && continue
-        remap[Int32(_cache_node_tag(public,cells[slot,column]))]=support[minmax(a,b)]
+        remap[_cache_node_tag(public,cells[slot,column])]=support[minmax(a,b)]
     end
     return remap
 end

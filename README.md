@@ -10,18 +10,15 @@ The original simplex-mesher roadmap is complete through Stage 6. The broader
 Gmsh 4.15.2 feature and behavioral parity goal remains **in progress across all
 P1–P6 tracks**, with ASCENT meshing capabilities prioritized.
 
-As of 2026-10-10, the published production-code baseline is `1e696f0`; later Main
-commits record documentation. The implemented scope below describes that baseline.
-The preserved Root V24 and release V6 integrations are uncommitted candidates
-without complete combined-release qualification. Their focused successes do not
-close the remaining parity work. Continue from the
-[2026-10-10 handoff](HANDOFF.md#continuation-handoff-2026-10-10) and its
-[handoff index](C:/tmp/tessella_session_handoff_20261010/INDEX.json), which record
-reader ownership, exact candidates, remaining implementations and verification
-order. [`STATUS.md`](STATUS.md) retains dated verification evidence.
-The separate external ASCENT solve campaign is recorded in [`ASCENT.md`](ASCENT.md).
-Tessella supports Julia 1.12.x and 1.13.x; [`Project.toml`](Project.toml) is the
-machine-readable runtime contract.
+The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
+and reviewed curved, periodic, matching and writer fixes. The concise default
+suite passes 157 assertions; its minimally compiled test body took 1.6 seconds
+on Julia 1.12.7, with a 37-second cold package run including precompilation.
+Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
+[current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
+and [test/README.md](test/README.md) describes routine and extended tests.
+[`STATUS.md`](STATUS.md) retains dated verification evidence. Supported runtimes
+remain Julia 1.12.x and 1.13.x.
 
 ```julia
 using Tessella
@@ -693,38 +690,33 @@ completeness. ASCENT remains Tessella's primary solver consumer.
 
 ## Verification
 
-Run the mandatory gates on both Julia 1.12.x and 1.13.x. Follow the
-[continuation handoff](HANDOFF.md#continuation-handoff-2026-10-10) reader-adoption
-and resource rules before starting another verification process:
+The default package suite checks functionality and correctness with small real
+fixtures and analytic invariants. Run it on Julia 1.12.x and 1.13.x:
 
 ```sh
-julia --project --check-bounds=yes -e 'using Pkg; Pkg.test()'
-julia --project --check-bounds=yes validation/run_all.jl
+julia --project=. --startup-file=no --compile=min -O0 -e 'using Pkg; Pkg.test(; julia_args=["--startup-file=no", "--check-bounds=yes", "--compile=min", "-O0"])'
 ```
 
-The first command runs the full package/CRC suite. The second compares analytic
-volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs the
-Gmsh 4.15.2 size-field, constant-range, geometry-expression, numeric-list,
-spatial Point-size, dynamic-tag/`SetMaxTag`, explicit model-topology,
-entity-identity, dependency-safe entity-removal, analytical spatial queries, and
-native entity metadata including plane properties and Point/Line/Plane evaluation,
-entity presentation, Point-coordinate, and model-attribute state,
-uniform-refinement and session-cache lifecycle, transfinite-patch,
-fixed element type/property lookup, fixed-family reference quadrature,
-automatic/manual global edge/face topology,
-straight and curved transfinite curve-law/HWall, unrecombined/recombined three-sided
-transfinite, recombined-quadrangle, affine
-transfinite-volume, five-face-prism, native `.geo` and projected single-/two-direction
-periodic surface differentials, embedded, reusable-master/chained, and
-expression/list-backed periodic curves, low-level translation/rotation-periodic curves,
-planar periodic boundaries of an explicit volume, and the MSH2/MSH4 lifecycle, classified
-Point/Line-In-Surface MSH4 round trips,
-and the classified Surface-In-Volume lifecycle with nested point/curve constraints
-and optional holes as mandatory bounds-checked children.
-Missing or wrong-version Gmsh and differential failures make the aggregate command
-fail. See
-[`DEVELOPMENT.md`](DEVELOPMENT.md) for the correctness, robustness, and completeness
-rules.
+This routine command reduces compilation of unused native planning paths. For
+the same assertions with normal optimized compilation, use `-O2` and omit
+`--compile=min` from both Julia and `julia_args`.
+
+It covers geometry, bounded meshing, refinement, high-order elements, I/O and
+API ownership, state and errors without external tools. Exhaustive native sweeps,
+stress tests, allocation/source audits, benchmarks and application/solver
+campaigns are opt-in and may take hours:
+
+```sh
+julia --project=. --startup-file=no --check-bounds=yes test/extended/runtests.jl
+julia --project=. --check-bounds=yes validation/run_all.jl
+```
+
+The extended runner retains the historical regression files. The validation
+driver compares Tessella against Gmsh 4.15.2 and needs its external dependencies.
+See [`test/README.md`](test/README.md) for commands and suite boundaries, and
+[`DEVELOPMENT.md`](DEVELOPMENT.md) for correctness requirements. Historical
+release and parity evidence remains in [`HANDOFF.md`](HANDOFF.md); it does not
+turn an ordinary package test into a production validation campaign.
 
 ## Repository map
 

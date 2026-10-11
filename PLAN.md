@@ -6,15 +6,15 @@ simplex-mesher roadmap is complete; the active goal is full Gmsh 4.15.2 feature
 and behavioral parity, prioritized by ASCENT meshing value. All P1–P6 parity tracks
 remain **in progress**.
 
-As of 2026-10-10, published production code remains `1e696f0`; later Main commits
-record documentation. The architecture and implemented-scope descriptions below
-refer to that baseline unless a dated candidate is named. Preserved Root V24 and
-release V6 are uncommitted integrations without complete combined-release
-qualification. Use the [2026-10-10 handoff](HANDOFF.md#continuation-handoff-2026-10-10)
-and [handoff index](C:/tmp/tessella_session_handoff_20261010/INDEX.json) for exact
-continuation state, reader ownership, candidate hashes and verification order.
-[`STATUS.md`](STATUS.md) retains dated verification evidence. Julia 1.12.x and
-1.13.x are both required runtime lines.
+The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
+and reviewed curved, periodic, matching and writer fixes. The concise default
+suite passes 157 assertions; its minimally compiled test body took 1.6 seconds
+on Julia 1.12.7, with a 37-second cold package run including precompilation.
+Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
+[current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
+and [test/README.md](test/README.md) describes routine and extended tests.
+[`STATUS.md`](STATUS.md) retains dated verification evidence. Supported runtimes
+remain Julia 1.12.x and 1.13.x.
 
 ## Target scope
 
@@ -1031,30 +1031,26 @@ explicitly, naming both stages, rather than producing a defective mesh.
 The external HFSS solve campaign remains tracked in [`ASCENT.md`](ASCENT.md); it is a
 consumer-side validation track, not a substitute for the parity work above.
 
-## Continuation priorities (2026-10-10)
+## Continuation priorities (2026-10-11)
 
-The complete P1–P6 target remains open. Adopt and naturally drain the existing
-Curved V7 reader, seal its post-run guards, and release the sole facade slot before
-starting another public gate. Follow the exact queue in the
-[continuation handoff](HANDOFF.md#implementation-and-public-verification-queue)
-and [handoff index](C:/tmp/tessella_session_handoff_20261010/INDEX.json).
+The complete P1–P6 target remains open. The previous session's prepared Source
+has been integrated into Main, with selected curved, periodic, matching,
+compact-cap coverage and writer fixes. Follow the
+[current handoff](HANDOFF.md#takeover-2026-10-11) for the actual integrated
+checks, publication status and remaining work.
 
-Remaining work includes the corrected Ordinary, Recombine, Curved V9 and composed
-Periodic dependency V7 whole public gates on both runtimes; NativeLookup and
-affected source-provenance guards; unresolved ordered matching and writer/P2
-behavior; and all broader algorithms, fields, CAD, formats, API, UI/postprocessing
-and differential-corpus requirements. Source-only and focused successes qualify
-only their exact frozen inputs. They do not qualify the combined release, close
-a broad parity track or replace aggregate and resource gates. Complete the
-remaining implementations and required verification before committing and normally
-pushing the combined changes to Main.
+Use small functional regressions for routine verification, then normally commit
+and push verified implementations to `main`. Native-oracle sweeps, resource and
+source audits, solver runs and the historical whole-public campaigns are opt-in.
+Do not infer broad parity from a bounded regression. Continue the [concrete remaining implementations](HANDOFF.md#remaining-implementations-after-this-increment)
+after publishing each verified increment. Algorithm, field, CAD, element order,
+partition, format and post-processing scope remains open.
 
 ## Historical implementation record (through 2026-10-09)
 
 The following records retain their original bounded scopes, counts and worktree
 provenance. Pending or in-progress candidate states describe those checkpoints;
-they are not the continuation queue. The 2026-10-10 handoff above supersedes their
-next-step statements.
+they are not the continuation queue. The 2026-10-11 handoff supersedes their next-step statements.
 
 Synchronized API generation in dimensions zero and one is implemented in
 `APIGenerate01.jl`, with detached preparation and atomic publication. Tagged

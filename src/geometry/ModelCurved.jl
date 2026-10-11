@@ -20,11 +20,12 @@ _surface_type(m::GeoModel, tag::Int) = get(m.surface_types, tag, :plane)
 const _CURVE_TYPE_NAMES = Dict{Symbol,String}(
     :line=>"Line", :circle=>"Circle", :ellipse=>"Ellipse",
     :spline=>"Nurb", :bspline=>"Nurb", :bezier=>"Nurb", :nurbs=>"Nurb",
-    :degenerate=>"Unknown")
+    :tensor_bezier=>"Bezier", :tensor_bspline=>"BSpline", :degenerate=>"Unknown")
 const _SURFACE_TYPE_NAMES = Dict{Symbol,String}(
     :plane=>"Plane", :ruled=>"Surface", :tric=>"Surface",
     :cylinder=>"Cylinder", :sphere=>"Sphere", :cone=>"Cone",
-    :torus=>"Torus", :disk=>"Disk")
+    :torus=>"Torus", :disk=>"Disk", :tensor_bezier=>"Bezier surface",
+    :tensor_bspline=>"BSpline surface")
 
 _curve_type_name(t::Symbol) = get(_CURVE_TYPE_NAMES, t, "Unknown")
 _surface_type_name(t::Symbol) = get(_SURFACE_TYPE_NAMES, t, "Unknown")
@@ -625,6 +626,8 @@ _occ_reference_direction(axis) = _occ_ax2_frame(axis)[1]
 # `CircleD1`/`CircleD2` use the same `SetLinearForm` association — the first
 # product of each component fused, the second rounded.
 function _occ_circle_point(g,t::Float64)
+    hasproperty(g,:native_geometry) && return _model_native_occ_circle_point(g.native_geometry,t)
+    hasproperty(g,:native_arithmetic) && return _model_native_occ_circle_point(g,t)
     Y=_occ_circle_y(g)
     s,c=_gm_sincos(t)
     A1,A2=g.r*c,g.r*s
@@ -635,6 +638,8 @@ function _occ_circle_point(g,t::Float64)
 end
 
 function _occ_circle_derivative(g,t::Float64)
+    hasproperty(g,:native_geometry) && return _model_native_occ_circle_derivative(g.native_geometry,t)
+    hasproperty(g,:native_arithmetic) && return _model_native_occ_circle_derivative(g,t)
     Y=_occ_circle_y(g)
     s,c=_gm_sincos(t)
     Xc,Yc=g.r*c,g.r*s
@@ -645,6 +650,8 @@ function _occ_circle_derivative(g,t::Float64)
 end
 
 function _occ_circle_second_derivative(g,t::Float64)
+    hasproperty(g,:native_geometry) && return _model_native_occ_circle_second_derivative(g.native_geometry,t)
+    hasproperty(g,:native_arithmetic) && return _model_native_occ_circle_second_derivative(g,t)
     Y=_occ_circle_y(g)
     s,c=_gm_sincos(t)
     Xc,Yc=g.r*c,g.r*s
@@ -797,6 +804,16 @@ end
 function _occ_edge_reparam_on_face(m::GeoModel, face_g, edge_tag::Int,
                                    epar::Float64, which::Int,
                                    lc::Float64, caller::AbstractString)
+    if _model_nurbs_surface(face_g)
+        edge=get(m.curve_geometry,edge_tag,nothing)
+        if edge!==nothing && hasproperty(edge,:occ) && edge.occ===:surface_iso &&
+                edge.face.patch===face_g.patch
+            return _model_surface_iso_uv(edge,epar)
+        end
+        project=_model_nurbs_surface_project(face_g,
+            _model_curve_point(m,edge_tag,epar,caller))
+        return project[1],project[2]
+    end
     pc=_occ_edge_pcurve_on_face(face_g,edge_tag,which)
     pc!==nothing && return _occ_pcurve_d0(pc,epar)
     pt=_model_curve_point(m,edge_tag,epar,caller,0)
@@ -813,6 +830,12 @@ end
 function _occ_vertex_reparam_on_face(m::GeoModel, surface_tag::Int,
                                      face_g, vtag::Int, which::Int,
                                      lc::Float64)
+    if _model_nurbs_surface(face_g)
+        bound=get(face_g.vertex_uv,vtag,nothing)
+        bound!==nothing && return bound
+        project=_model_nurbs_surface_project(face_g,m.points[vtag])
+        return project[1],project[2]
+    end
     incident=Int[]
     for (ct,(a,b)) in m.curves
         (a==vtag || b==vtag) && push!(incident,ct)
@@ -1571,6 +1594,7 @@ end
 # written order before the location add. `TorusValue` additionally zeroes
 # coefficients below `10·(r_minor+r_major)·eps` (the OCC620 clamp).
 function _occ_surface_point(g, u::Float64, v::Float64)
+    _model_nurbs_surface(g) && return first(_model_nurbs_surface_d2(g,u,v))
     Y=_occ_frame_y(g)
     C,X,Z=g.center,g.X,g.axis
     if g.occ===:plane
@@ -1613,6 +1637,7 @@ end
 
 # OCC-reported parametrization bounds per surface kind.
 function _occ_surface_bounds(g)
+    _model_nurbs_surface(g) && return _model_nurbs_surface_bounds(g)
     if g.occ===:cylinder
         return [0.0,0.0],[2π,g.height]
     elseif g.occ===:sphere
@@ -1633,6 +1658,10 @@ end
 # `OCCFace::firstDer`, with each function's own coefficient contractions and
 # the OCC620 torus clamp. Returns (point, ∂P/∂u, ∂P/∂v).
 function _occ_surface_d1(g,u::Float64,v::Float64)
+    if _model_nurbs_surface(g)
+        values=_model_nurbs_surface_d2(g,u,v)
+        return values[1],values[2],values[3]
+    end
     Y=_occ_frame_y(g)
     X,Z=g.X,g.axis
     p=_occ_surface_point(g,u,v)
@@ -1677,6 +1706,7 @@ end
 # `ElSLib::*D2` ports — returns (point, du, dv, duu, dvv, duv). `Som1` is the
 # shared `A1·X + A2·Y` term; `Vuu` is its negation.
 function _occ_surface_d2(g,u::Float64,v::Float64)
+    _model_nurbs_surface(g) && return _model_nurbs_surface_d2(g,u,v)
     Y=_occ_frame_y(g)
     X,Z=g.X,g.axis
     p,du,dv=_occ_surface_d1(g,u,v)
@@ -2092,6 +2122,7 @@ end
 # `OCCFace::_project` — padded face bounds, `Precision::Confusion`
 # tolerances, first-minimum selection. Returns (u, v, xyz) or `nothing`.
 function _occ_surface_project(g,P)
+    _model_nurbs_surface(g) && return _model_nurbs_surface_project(g,P)
     lo,hi=_occ_surface_bounds(g)
     umin,vmin=lo[1],lo[2]; umax,vmax=hi[1],hi[2]
     # `OCCFace`'s constructor pads each non-periodic direction of the
@@ -4004,6 +4035,12 @@ end
 # `BRepClass_FClassifier::State` — rejected → OUT, no wires → IN, else the
 # classifier state.
 function _occ_face_state(m::GeoModel,stag::Int,g,P,Tol)
+    if _model_nurbs_surface(g)
+        lower,upper=_model_nurbs_surface_bounds(g)
+        all(axis->lower[axis]-Tol<=P[axis]<=upper[axis]+Tol,1:2) || return :out
+        any(axis->abs(P[axis]-lower[axis])<=Tol || abs(P[axis]-upper[axis])<=Tol,1:2) && return :on
+        return :in
+    end
     rejected,nowires,st,_=_occ_face_classify(m,stag,g,P,Tol)
     rejected && return :out
     nowires && return :in
@@ -4027,6 +4064,11 @@ end
 # `OCCFace::containsPoint` — `state == IN || state == ON` with
 # `BRep_Tool::Tolerance` = `Precision::Confusion()` for materialized faces.
 function _occ_surface_contains(m::GeoModel,stag::Int,g,P)
+    if _model_nurbs_surface(g)
+        u,v,point=_model_nurbs_surface_project(g,P)
+        return _sqdist(point,P)<=_OCC_CONFUSION^2 &&
+               _occ_surface_contains_param(m,stag,g,(u,v))
+    end
     st=_occ_face_classify3d(m,stag,g,P,_OCC_CONFUSION)
     return st===:in || st===:on
 end
@@ -4091,6 +4133,37 @@ end
 # is closed), the ExtPElC candidates, first-minimum selection. Returns
 # (u, xyz) or `nothing` when no extremum is accepted (→ generic fallbacks).
 function _occ_curve_project(m::GeoModel,g,tag::Int,P,caller::AbstractString)
+    if g.occ===:copied_curve
+        lower,upper=g.t0,g.t1
+        first_point,last_point=m.curves[tag]
+        if first_point!=last_point
+            padding=max(abs(upper-lower)*1e-8,1e-12)
+            lower-=padding;upper+=padding
+        end
+        return _model_occ_curve_project(g.curve,P,lower,upper)
+    end
+    if g.occ===:surface_iso
+        best=(Inf,g.t0)
+        for seed in 0:20
+            u=g.t0+(g.t1-g.t0)*(seed/20)
+            for _ in 1:30
+                step_point=_model_surface_iso_point(g,u)
+                tangent=_model_surface_iso_d1(g,u)
+                acceleration=_model_surface_iso_d2(g,u)
+                residual=ntuple(axis->step_point[axis]-P[axis],3)
+                numerator=sum(residual[k]*tangent[k] for k in 1:3)
+                denominator=sum(tangent[k]*tangent[k]+residual[k]*acceleration[k] for k in 1:3)
+                denominator==0.0 && break
+                next=clamp(u-numerator/denominator,g.t0,g.t1)
+                change=abs(next-u);u=next
+                change<=8eps(Float64)*max(1.0,abs(u)) && break
+            end
+            candidate_point=_model_surface_iso_point(g,u)
+            error=sum((candidate_point[k]-P[k])^2 for k in 1:3)
+            error<best[1] && (best=(error,u))
+        end
+        return best[2],_model_surface_iso_point(g,best[2])
+    end
     if g.occ===:degenerate
         return nothing                    # null `_curve` → projector fails
     end
@@ -4122,7 +4195,11 @@ end
 # renormalization), or the pcurve-on-surface chain rule for degenerate edges.
 function _occ_curve_first_der(m::GeoModel,g,tag::Int,u::Float64,
                               caller::AbstractString)
-    if g.occ===:circle
+    if g.occ===:surface_iso
+        return _model_surface_iso_d1(g,u)
+    elseif g.occ===:copied_curve
+        return _model_occ_curve_d2(g.curve,u)[2]
+    elseif g.occ===:circle
         return _occ_circle_derivative(g,u)
     elseif g.occ===:line
         return g.dir
@@ -4161,10 +4238,16 @@ end
 # to eps on exit.
 function _occ_curve_curvature(m::GeoModel,g,tag::Int,u::Float64,
                               caller::AbstractString)
+    hasproperty(g,:native_geometry) && return _model_native_occ_circle_curvature(g.native_geometry,u)
+    hasproperty(g,:native_arithmetic) && return _model_native_occ_circle_curvature(g,u)
     eps=1e-15
     g.occ===:degenerate && return eps
     d1=_occ_curve_first_der(m,g,tag,u,caller)
-    d2=if g.occ===:circle
+    d2=if g.occ===:surface_iso
+        _model_surface_iso_d2(g,u)
+    elseif g.occ===:copied_curve
+        _model_occ_curve_d2(g.curve,u)[3]
+    elseif g.occ===:circle
         _occ_circle_second_derivative(g,u)
     elseif g.occ===:line
         (0.0,0.0,0.0)

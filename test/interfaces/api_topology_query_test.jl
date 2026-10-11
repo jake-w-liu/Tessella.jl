@@ -64,11 +64,14 @@ end
 
         generated=_TOPOLOGY_API.mesh.generate(3)
         @test validate(generated).ok
-        @test nnodes(generated)==8
-        @test ntets(generated)==10
+        # SDK4.15.2's API default meshSize1 fixture has7 nodes/4 Tets.
+        # The full native records and exact positive volume/shell are checked
+        # in api_topology_native_generation_test.jl.
+        @test nnodes(generated)==7
+        @test ntets(generated)==4
         generated_crc=mesh_crc(generated)
         @test generated_crc.sha==
-              "afbd900ddda5c89329ad94d6230283459934c17e3a32b4666e4135b59df21a72"
+              "357e66dce7c727fc08cba1f1d0e9e6970a18ffd0e9f78aee3326b227c250a094"
         cached=_TOPOLOGY_API.LAST_MESH[]
 
         detached_entities=_TOPOLOGY_API.model.get_entities()

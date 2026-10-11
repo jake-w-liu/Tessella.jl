@@ -88,7 +88,8 @@ end
     @test model_is_inside(
         model,2,1,[2,1,4,3,3.5,2.5,9,9],true)==3
     @test model_closest_point(model,2,1,[3,4,8,9,9,8])==
-          ([3.0,4.0,3.0,9.0,9.0,3.0],[4.0,3.0,9.0,9.0])
+          ([prevfloat(3.0),prevfloat(4.0),3.0,9.0,9.0,3.0],
+           [prevfloat(4.0),prevfloat(3.0),9.0,9.0])
     @test model_reparametrize_on_surface(model,0,1,[],1)==[2.0,1.0]
     @test model_reparametrize_on_surface(
         model,1,1,[-1.0,0.0,0.5,1.0,2.0],1,-2)==

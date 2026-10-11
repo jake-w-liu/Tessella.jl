@@ -19,6 +19,7 @@ function _install_mesh_quality_fixture!(mesh)
     lock(_MESH_QUALITY_API.STATE_LOCK) do
         _MESH_QUALITY_API._replace_mesh_cache_locked!(
             _MESH_QUALITY_API._copy_mesh(mesh))
+        _MESH_QUALITY_API._native_lookup_invalidate_locked!()
     end
     return nothing
 end
@@ -149,9 +150,9 @@ end
         # block is untouched, while one inside the block still fails.
         @test _MESH_QUALITY_API.mesh.get_element_qualities(
             UInt64[99,3],"volume",1,2)==[4.0]
-        @test_throws ArgumentError _MESH_QUALITY_API.mesh.get_element_qualities(
+        @test_throws ErrorException _MESH_QUALITY_API.mesh.get_element_qualities(
             UInt64[99,3],"volume",0,2)
-        @test_throws ArgumentError _MESH_QUALITY_API.mesh.get_element_qualities(
+        @test_throws ErrorException _MESH_QUALITY_API.mesh.get_element_qualities(
             UInt64[99,3],"volume")
         @test mesh_crc(_MESH_QUALITY_API.mesh.get())==fixture_crc
 

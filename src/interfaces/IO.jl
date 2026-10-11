@@ -97,7 +97,7 @@ mutable struct _Accum
     node_x::Vector{Float64}
     node_y::Vector{Float64}
     node_z::Vector{Float64}
-    tag2idx::Dict{Int,Int}          # gmsh node tag → compact 1-based index
+    tag2idx::Dict{UInt64,Int32}          # gmsh node tag → compact 1-based index
     segs::Vector{NTuple{2,Int32}}
     tris::Vector{NTuple{3,Int32}}
     tets::Vector{NTuple{4,Int32}}
@@ -106,16 +106,16 @@ mutable struct _Accum
     tet_tag::Vector{Int32}
     pnames::Dict{Tuple{Int,Int},String}
     ep::Dict{Tuple{Int,Int},Int}    # (entityDim, entityTag) → physical tag (v4)
-    element_tags::Set{Int}
+    element_tags::Set{UInt64}
     physical_name_records::Int
     element_blocks::Int
-    _Accum() = new(Float64[], Float64[], Float64[], Dict{Int,Int}(),
+    _Accum() = new(Float64[], Float64[], Float64[], Dict{UInt64,Int32}(),
                    NTuple{2,Int32}[], NTuple{3,Int32}[], NTuple{4,Int32}[],
                    Int32[], Int32[], Int32[], Dict{Tuple{Int,Int},String}(),
-                   Dict{Tuple{Int,Int},Int}(),Set{Int}(),0,0)
+                   Dict{Tuple{Int,Int},Int}(),Set{UInt64}(),0,0)
 end
 
-@inline function _nodeidx!(acc::_Accum, tag::Int)
+@inline function _nodeidx!(acc::_Accum, tag::UInt64)
     get(acc.tag2idx, tag, 0)
 end
 
@@ -307,6 +307,17 @@ function _unescape_name(s::AbstractString)
     return String(take!(io))
 end
 
+# Mesh labels use the MSH size_t domain; dense rows and CAD/physical tags
+# keep their existing bounded integer storage.
+@inline function _io_mesh_uid(token::AbstractString,context::AbstractString)
+    try
+        return parse(UInt64,token)
+    catch error
+        error isa InterruptException && rethrow()
+        throw(ArgumentError("IO: invalid unsigned 64-bit mesh tag in $context"))
+    end
+end
+
 # ── v2 ──────────────────────────────────────────────────────────────────────────
 function _read_nodes_v2!(acc, io, limits::_MshReadLimits)
     n = parse(Int, strip(readline(io)))
@@ -318,7 +329,7 @@ function _read_nodes_v2!(acc, io, limits::_MshReadLimits)
     for _ in 1:n
         p = split(strip(readline(io)))
         length(p) == 4 || throw(ArgumentError("IO: malformed v2 node record (expected 4 fields)"))
-        tag = parse(Int, p[1])
+        tag = _io_mesh_uid(p[1],"v2 node")
         tag > 0 || throw(ArgumentError("IO: node tag must be positive (got $tag)"))
         haskey(acc.tag2idx,tag) && throw(ArgumentError("IO: duplicate node tag $tag"))
         x=parse(Float64,p[2]); y=parse(Float64,p[3]); z=parse(Float64,p[4])
@@ -338,7 +349,7 @@ function _read_elements_v2!(acc, io, limits::_MshReadLimits)
     for _ in 1:n
         p = split(strip(readline(io)))
         length(p) >= 3 || throw(ArgumentError("IO: malformed v2 element record"))
-        _record_element_tag!(acc,parse(Int,p[1]))
+        _record_element_tag!(acc,_io_mesh_uid(p[1],"v2 element"))
         etype = parse(Int, p[2])
         haskey(_NN,etype) || throw(ArgumentError(
             "IO: unsupported gmsh element type $etype; refusing to silently discard cells"))
@@ -432,7 +443,7 @@ function _read_nodes_v4!(acc, io, limits::_MshReadLimits)
     hdr = split(strip(readline(io)))
     length(hdr) == 4 || throw(ArgumentError("IO: malformed v4 node header"))
     numBlocks = parse(Int, hdr[1]); numNodes = parse(Int, hdr[2])
-    declared_min=parse(Int,hdr[3]);declared_max=parse(Int,hdr[4])
+    declared_min=_io_mesh_uid(hdr[3],"v4 tag range");declared_max=_io_mesh_uid(hdr[4],"v4 tag range")
     (numBlocks >= 0 && numNodes >= 0) || throw(ArgumentError("IO: negative v4 node count"))
     numNodes<=typemax(Int32) || throw(ArgumentError("IO: $numNodes nodes exceed Int32 indexing"))
     numNodes<=limits.nodes-length(acc.node_x) || throw(ArgumentError(
@@ -446,7 +457,7 @@ function _read_nodes_v4!(acc, io, limits::_MshReadLimits)
         0<declared_min<=declared_max || throw(ArgumentError("IO: invalid v4 node-tag range"))
     end
     nread = 0
-    actual_min=typemax(Int);actual_max=typemin(Int)
+    actual_min=typemax(UInt64);actual_max=zero(UInt64)
     for _ in 1:numBlocks
         bh = split(strip(readline(io)))
         length(bh) == 4 || throw(ArgumentError("IO: malformed v4 node-block header"))
@@ -458,10 +469,10 @@ function _read_nodes_v4!(acc, io, limits::_MshReadLimits)
         nInBlock = parse(Int, bh[4])
         nInBlock >= 0 || throw(ArgumentError("IO: negative v4 node-block size"))
         nInBlock <= numNodes-nread || throw(ArgumentError("IO: v4 node blocks exceed declared node count $numNodes"))
-        tags = Int[]
-        blocktags=Set{Int}()
+        tags = UInt64[]
+        blocktags=Set{UInt64}()
         for _ in 1:nInBlock
-            tag=parse(Int, strip(readline(io)))
+            tag=_io_mesh_uid(strip(readline(io)),"v4 node")
             tag > 0 || throw(ArgumentError("IO: node tag must be positive (got $tag)"))
             (haskey(acc.tag2idx,tag) || tag in blocktags) &&
                 throw(ArgumentError("IO: duplicate node tag $tag"))
@@ -496,7 +507,7 @@ function _read_elements_v4!(acc, io, limits::_MshReadLimits)
     length(hdr) == 4 || throw(ArgumentError("IO: malformed v4 element header"))
     numBlocks = parse(Int, hdr[1])
     numElements = parse(Int,hdr[2])
-    declared_min=parse(Int,hdr[3]);declared_max=parse(Int,hdr[4])
+    declared_min=_io_mesh_uid(hdr[3],"v4 tag range");declared_max=_io_mesh_uid(hdr[4],"v4 tag range")
     (numBlocks >= 0 && numElements >= 0) || throw(ArgumentError("IO: negative v4 element count"))
     numElements<=typemax(Int32) || throw(ArgumentError("IO: v4 element count exceeds Int32"))
     numElements<=limits.elements-length(acc.element_tags) || throw(ArgumentError(
@@ -511,7 +522,7 @@ function _read_elements_v4!(acc, io, limits::_MshReadLimits)
         0<declared_min<=declared_max || throw(ArgumentError("IO: invalid v4 element-tag range"))
     end
     nread = 0
-    actual_min=typemax(Int);actual_max=typemin(Int)
+    actual_min=typemax(UInt64);actual_max=zero(UInt64)
     for _ in 1:numBlocks
         bh = split(strip(readline(io)))
         length(bh) == 4 || throw(ArgumentError("IO: malformed v4 element-block header"))
@@ -528,7 +539,7 @@ function _read_elements_v4!(acc, io, limits::_MshReadLimits)
         for _ in 1:nInBlock
             p = split(strip(readline(io)))
             isempty(p) && throw(ArgumentError("IO: empty v4 element record"))
-            elem_tag=parse(Int,p[1]);_record_element_tag!(acc,elem_tag)
+            elem_tag=_io_mesh_uid(p[1],"v4 element");_record_element_tag!(acc,elem_tag)
             actual_min=min(actual_min,elem_tag);actual_max=max(actual_max,elem_tag)
             needed=get(_NN,etype,0)
             needed==0 || length(p)==needed+1 ||
@@ -554,7 +565,7 @@ function _ensure_io_entity!(acc::_Accum,dim::Int,tag::Int,
     return nothing
 end
 
-@inline function _record_element_tag!(acc::_Accum,tag::Int)
+@inline function _record_element_tag!(acc::_Accum,tag::UInt64)
     tag>0 || throw(ArgumentError("IO: element tag must be positive (got $tag)"))
     tag in acc.element_tags && throw(ArgumentError("IO: duplicate element tag $tag"))
     push!(acc.element_tags,tag);return nothing
@@ -577,7 +588,7 @@ function _push_element!(acc, etype::Int, phys::Int, nodetoks)
         "IO: unsupported gmsh element type $etype; refusing to silently discard cells"))
     ptag=_physical_tag(phys)
     function idx(t)
-        tag=parse(Int,t); i=get(acc.tag2idx,tag,0)
+        tag=_io_mesh_uid(t,"element connectivity"); i=get(acc.tag2idx,tag,Int32(0))
         i != 0 || throw(ArgumentError("IO: element references unknown node tag $tag"))
         return i
     end
@@ -1461,6 +1472,15 @@ mutable struct _GeoWhileLevel
     iterations::Int
 end
 
+# Exported geometry entity parts use the carrier's row space, while the
+# existing context products continue to use actual native row space.
+struct _GeoGeometryParts
+    carrier::Union{Mesh,MixedMesh}
+    parts::Vector{Tuple{Int,Int,Union{Mesh,MixedMesh}}}
+    rows::Vector{Vector{Int32}}
+    node_tags::Vector{UInt64}
+end
+
 mutable struct _GeoNumericContext
     values::Dict{String,Float64}
     lists::Dict{String,Vector{Float64}}
@@ -1570,6 +1590,11 @@ mutable struct _GeoNumericContext
     # mesh — entity-level consumers (classified `model_to_mixed` projection,
     # field views) need each entity's own mesh, not the merged product.
     mesh_parts::Vector{Tuple{Int,Int,Union{Mesh,MixedMesh}}}
+    mesh_part_rows::Vector{Vector{Int32}}
+    mesh_geometry_parts::Union{Nothing,_GeoGeometryParts}
+    mesh_node_parametric::Vector{Union{Nothing,Vector{Float64}}}
+    mesh_node_max::UInt64
+    mesh_element_max::UInt64
     # `GEO_Internals::PhysicalGroups` — the raw physical-group records as the
     # `.geo` parser keeps them: `(dim, raw_signed_tag)` → the raw signed member
     # tags. `Physical X(n)` looks up `n` here verbatim, so groups `-4` and `4`
@@ -1608,6 +1633,17 @@ mutable struct _GeoNumericContext
     # reduces each FExpr once in the grammar production, so the observer's
     # re-reads must not duplicate the diagnostics the statement emitted.
     suppress_diagnostics::Bool
+    # CTX::lc and forcedBBox persist across meshes and change at native events.
+    native_context_lc::Float64
+    native_context_forced_bbox::Bool
+    native_mesh_error_callback::Any
+    native_mesh_begin_callback::Any
+    native_abort_option_callback::Any
+    # MSH4 reads install element lookup bindings before later mesh operations.
+    native_element_lookup_receipt::Any
+    native_numeric_option_callback::Any
+    # Selector4 can terminate after publishing an earlier Face prefix.
+    native_recombine_partial_callback::Any
 end
 _GeoNumericContext()=_GeoNumericContext(
     Dict{String,Float64}(),Dict{String,Vector{Float64}}(),Set{String}(),
@@ -1621,9 +1657,10 @@ _GeoNumericContext()=_GeoNumericContext(
     Dict{Tuple{String,Int,String},Float64}(),
     Dict{Tuple{String,Int,String},NTuple{4,Int}}(),0,nothing,0,Int[],nothing,
     String[],String[],0,false,:run,0,Dict{Int,Tuple{Int,Int}}(),
-    Tuple{Int,Int,Union{Mesh,MixedMesh}}[],
+    Tuple{Int,Int,Union{Mesh,MixedMesh}}[],Vector{Int32}[],nothing,
+    Union{Nothing,Vector{Float64}}[],UInt64(0),UInt64(0),
     Dict{Tuple{Int,Int},Vector{Int}}(),true,true,nothing,
-    Dict{Int,Any}(),nothing,false)
+    Dict{Int,Any}(),nothing,false,1.0,false,nothing,nothing,nothing,nothing,nothing,nothing)
 
 # Thrown where the upstream grammar fails to reduce — a bison syntax error.
 # `execute_geo` catches it per statement, records `syntax error (<token>)`
@@ -3117,23 +3154,30 @@ end
 _geo_memory_mb()=Float64(Sys.maxrss())/1048576.0
 _geo_total_memory_mb()=Float64(Sys.total_memory())/1048576.0
 
-# Process CPU seconds — Gmsh's `Cpu()` via `getrusage`. The rusage head is two
-# `timeval`s (user, sys): `{long sec; suseconds_t usec}` where suseconds_t is
-# 32-bit on Darwin and 64-bit on Linux. Wall time is the fallback for systems
-# without getrusage (finite, nondecreasing — the only portable contract).
+# Process USER CPU seconds, matching Gmsh OS.cpp GetResources/Cpu.
+# Windows FILETIME consists of two UInt32 words; native converts each word
+# separately in this order. POSIX timeval is read from getrusage(RUSAGE_SELF).
 function _geo_cpu_time()
-    buf=Vector{UInt8}(undef,256)
-    ret=ccall(:getrusage,Cint,(Cint,Ptr{UInt8}),0,buf)
-    ret==0 || return time()
-    @static if Sys.isbsd()
-        secs=reinterpret(Int64,buf)
-        usecs=reinterpret(Int32,buf)
-        return Float64(secs[1])+Float64(usecs[3])/1e6+
-               Float64(secs[3])+Float64(usecs[7])/1e6
+    @static if Sys.iswindows()
+        times=Vector{UInt32}(undef,8)
+        process=ccall((:GetCurrentProcess,"kernel32.dll"),Ptr{Cvoid},())
+        ok=GC.@preserve times ccall((:GetProcessTimes,"kernel32.dll"),Cint,
+            (Ptr{Cvoid},Ptr{UInt32},Ptr{UInt32},Ptr{UInt32},Ptr{UInt32}),
+            process,pointer(times,1),pointer(times,3),pointer(times,5),pointer(times,7))
+        ok!=0 || return 0.0
+        return 1.e-7*4294967296.0*Float64(times[8])+1.e-7*Float64(times[7])
     else
-        vals=reinterpret(Int64,buf)
-        return Float64(vals[1])+Float64(vals[2])/1e6+
-               Float64(vals[3])+Float64(vals[4])/1e6
+        buf=Vector{UInt8}(undef,256)
+        ret=ccall(:getrusage,Cint,(Cint,Ptr{UInt8}),0,buf)
+        ret==0 || return 0.0
+        @static if Sys.isbsd()
+            secs=reinterpret(Int64,buf)
+            usecs=reinterpret(Int32,buf)
+            return Float64(secs[1])+1.e-6*Float64(usecs[3])
+        else
+            vals=reinterpret(Int64,buf)
+            return Float64(vals[1])+1.e-6*Float64(vals[2])
+        end
     end
 end
 
@@ -7149,7 +7193,10 @@ function _geo_option_store_value(family::String,member::String,
         return Float64(reinterpret(UInt32,iv32))
     elseif kind isa Tuple
         tag=kind[1]
-        if tag===:int_floor
+        if tag===:int_alias
+            iv=_geo_signed_gmsh_int_value(value,caller)
+            return Float64(iv==Int(kind[2]) ? Int(kind[3]) : iv)
+        elseif tag===:int_floor
             return Float64(max(_geo_signed_gmsh_int_value(value,caller),
                                Int(kind[2])))
         elseif tag===:int_cap
@@ -7190,6 +7237,12 @@ function _geo_store_option_number!(context::_GeoNumericContext,
             member=="MeshSizeMin" ? "CharacteristicLengthMin" : "MeshSizeMin"
         elseif member=="MeshSizeMax" || member=="CharacteristicLengthMax"
             member=="MeshSizeMax" ? "CharacteristicLengthMax" : "MeshSizeMax"
+        elseif member=="MeshSizeFromPoints" || member=="CharacteristicLengthFromPoints"
+            member=="MeshSizeFromPoints" ? "CharacteristicLengthFromPoints" : "MeshSizeFromPoints"
+        elseif member=="MeshSizeFromCurvature" || member=="CharacteristicLengthFromCurvature"
+            member=="MeshSizeFromCurvature" ? "CharacteristicLengthFromCurvature" : "MeshSizeFromCurvature"
+        elseif member=="MeshSizeExtendFromBoundary" || member=="CharacteristicLengthExtendFromBoundary"
+            member=="MeshSizeExtendFromBoundary" ? "CharacteristicLengthExtendFromBoundary" : "MeshSizeExtendFromBoundary"
         else
             nothing
         end
@@ -7215,6 +7268,13 @@ function _geo_store_option_number!(context::_GeoNumericContext,
         end
     end
     context.option_numbers[(family,index,member)]=v
+    if family=="General" && index==0 && member=="AbortOnError" &&
+            context.native_abort_option_callback!==nothing
+        context.native_abort_option_callback(v)
+    end
+    if index==0 && context.native_numeric_option_callback!==nothing
+        context.native_numeric_option_callback(family,member,v)
+    end
     return nothing
 end
 
@@ -7262,6 +7322,7 @@ end
 # `NumberOption(GMSH_GET)` — `nothing` for unknown option names.
 function _geo_option_number(context::_GeoNumericContext,family::String,
                             index::Int,member::String;warn::Bool=false)
+    family=="General" && member=="BoundingBoxSize" && return context.native_context_lc
     haskey(context.option_numbers,(family,index,member)) &&
         return context.option_numbers[(family,index,member)]
     table=get(_GEO_NUMBER_OPTION_TABLE,family,nothing)

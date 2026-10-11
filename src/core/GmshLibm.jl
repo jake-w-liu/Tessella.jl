@@ -561,10 +561,10 @@ end
 # `Atan2` values use native x87 kernels on Windows x86_64, with BigFloat
 # emulation on other Windows architectures. On other operating systems,
 # upstream links the platform `libm` dynamically, so the family
-# aliases `_gm_*`. Everywhere else stays on `_gm_*`: transform matrices and
-# geometry-evaluation internals run in zero-allocation hot paths and their
-# captured upstream outputs were established under the system-libm
-# resolution.
+# aliases `_gm_*`. Built-in GEO rotation matrices also use the native
+# scalar87 pair, as literal rotation controls distinguish its residual
+# from system-libm. OCC rotation and other geometry-evaluation internals
+# retain their independently captured system-libm resolution.
 # ---------------------------------------------------------------------------
 @inline _gm87_sin(x::Float64) = Sys.iswindows() ?
     (_WIN_X87_NATIVE ? _win_x87_cli_call(_win_x87_sin,x) : _win_sincos(x)[1]) : _gm_sin(x)

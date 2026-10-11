@@ -404,7 +404,7 @@ end
     @test (nnodes(execution.mesh),nsegs(execution.mesh),
            ntris(execution.mesh),ntets(execution.mesh))==(52,27,84,135)
     # The volume-only part carries no boundary triangles.
-    part=geo_entity_mesh(execution,3,1)
+    part=geo_entity_mesh(execution,3,1;geometry=true)
     @test (nnodes(part),ntris(part),ntets(part))==(52,0,135)
     # Six corner points are the tetrahedral degree-6 vertices of the unit
     # prism and every tet is positively oriented.
@@ -444,7 +444,7 @@ end
     # The raw volume part carries all 46 slot columns — the two
     # behind-diagonal orphans hold distinct evaluated coordinates like
     # Gmsh's written node entries.
-    part=geo_entity_mesh(execution,3,1)
+    part=geo_entity_mesh(execution,3,1;geometry=true)
     @test (nnodes(part),ntris(part),ntets(part))==(46,0,81)
     @test all(t->tet_signed_volume(
                   execution.mesh.coords[:,execution.mesh.tets[1,t]],
@@ -454,7 +454,7 @@ end
               axes(execution.mesh.tets,2))
     # The triangular face mesh and the volume's canonical grid come from
     # the same canonicalized boundary chain — every node welds bitwise.
-    surface_part=geo_entity_mesh(execution,2,2)
+    surface_part=geo_entity_mesh(execution,2,2;geometry=true)
     volume_nodes=Set(Tuple(part.coords[:,c]) for c in axes(part.coords,2))
     @test all(Tuple(surface_part.coords[:,c]) in volume_nodes
               for c in axes(surface_part.coords,2))
@@ -1152,7 +1152,7 @@ end
             ((0.5,6),(prevfloat(0.75),6),(0.75,6),(nextfloat(0.75),6),(0.9,7)),
         algorithm in (0,1),all_faces in (false,true)
         execution=flexible_line("Beta",coefficient,12,2.0,algorithm,all_faces)
-        part=geo_entity_mesh(execution,1,1)
+        part=geo_entity_mesh(execution,1,1;geometry=true)
         count=algorithm==0 ? 6 : blossom_count
         @test nnodes(part)==count
         @test nsegs(part)==count-1
@@ -1174,7 +1174,7 @@ end
                     0.3743889670179139,1]))
     for (algorithm,expected) in progression_samples
         execution=flexible_line("Progression",4.0,3,0.5,algorithm,false)
-        part=geo_entity_mesh(execution,1,1)
+        part=geo_entity_mesh(execution,1,1;geometry=true)
         @test part.coords[1,:]≈expected atol=2e-11 rtol=0
         @test nsegs(part)==length(expected)-1
         @test execution.model.meshing.transfinite_curves[1].num_nodes==3
@@ -1184,7 +1184,7 @@ end
                              ("Progression_HWall",0.1),
                              ("Bump_HWall",0.01),("Beta_HWall",0.05))
         execution=flexible_line(law,coefficient,7,0.5,1,false)
-        part=geo_entity_mesh(execution,1,1)
+        part=geo_entity_mesh(execution,1,1;geometry=true)
         @test nnodes(part)==15
         @test nsegs(part)==14
         @test validate(part).ok
@@ -1197,7 +1197,7 @@ end
                              ("Beta_HWall",-0.05),("Progression_HWall",0.0),
                              ("Bump_HWall",0.0),("Beta_HWall",0.0))
         execution=flexible_line(law,coefficient,12,2.0,1,false)
-        part=geo_entity_mesh(execution,1,1)
+        part=geo_entity_mesh(execution,1,1;geometry=true)
         @test nnodes(part)==7
         @test nsegs(part)==6
         @test validate(part).ok
@@ -1205,7 +1205,7 @@ end
     end
     # The truncated law count of one needs no interior primitive marks.
     execution=flexible_line("Progression",4.0,3,2.0,1,false)
-    @test geo_entity_mesh(execution,1,1).coords[1,:]==[0.0,1.0]
+    @test geo_entity_mesh(execution,1,1;geometry=true).coords[1,:]==[0.0,1.0]
 
     # Flexible Circle controls retain the declared-count HWall transform
     # and the divided density-law count, independently of the final odd N.
@@ -1223,7 +1223,7 @@ end
             Mesh.RecombineAll=1;Mesh.RecombinationAlgorithm=1;
             Transfinite Curve{1}=12 Using $law $coefficient;Mesh 1;
             """)
-        part=geo_entity_mesh(execution,1,1)
+        part=geo_entity_mesh(execution,1,1;geometry=true)
         stored_params=execution.model.curve_params[1]
         params=stored_params[1:end-1]
         @test nnodes(part)==nsegs(part)==length(expected)==6
@@ -1249,7 +1249,7 @@ end
             Mesh.RecombineAll=1;Mesh.RecombinationAlgorithm=1;
             Transfinite Curve{1}=12 Using Beta $coefficient;Mesh 1;
             """)
-        part=geo_entity_mesh(execution,1,1)
+        part=geo_entity_mesh(execution,1,1;geometry=true)
         params=execution.model.curve_params[1]
         @test nnodes(part)==nsegs(part)==unique_count
         @test length(params)==unique_count+1
@@ -1301,7 +1301,7 @@ end
             Mesh.MeshSizeMin=$size;Mesh.MeshSizeMax=$size;Mesh.MeshSizeFromPoints=0;
             Point(1)={0,0,0};Point(2)={1,0,0};Line(1)={1,2};Mesh 1;
             """)
-        part=geo_entity_mesh(execution,1,1)
+        part=geo_entity_mesh(execution,1,1;geometry=true)
         digest,chain,owners=curve_digest(execution.model,part)
         expected_count=size==0.18 ? 7 : 2
         expected_digest=size==0.18 ?
@@ -1325,7 +1325,7 @@ end
             Mesh.MeshSizeMin=0.2;Mesh.MeshSizeMax=0.2;Mesh.MeshSizeFromPoints=0;
             Point(1)={0,0,0};Point(2)={1,0,0};Line(1)={1,2};Mesh 1;
             """)
-        part=geo_entity_mesh(execution,1,1)
+        part=geo_entity_mesh(execution,1,1;geometry=true)
         expected_count=algorithm==0 ? 6 : 7
         @test nnodes(part)==expected_count
         @test nsegs(part)==expected_count-1
@@ -1341,7 +1341,7 @@ end
             Mesh.MeshSizeMin=$size;Mesh.MeshSizeMax=$size;Mesh.MeshSizeFromPoints=0;
             Point(1)={0,0,0};Point(2)={1,0,0};Line(1)={1,2};Mesh 1;
             """)
-        part=geo_entity_mesh(execution,1,1)
+        part=geo_entity_mesh(execution,1,1;geometry=true)
         digest,chain,owners=curve_digest(execution.model,part)
         @test nnodes(part)==2 && nsegs(part)==1
         @test part.coords[:,chain]==Float64[0 1;0 0;0 0]
@@ -1392,7 +1392,7 @@ end
             """)
         expected_count=algorithm==0 ? 7 : 8
         for curve in (1,3)
-            part=geo_entity_mesh(execution,1,curve)
+            part=geo_entity_mesh(execution,1,curve;geometry=true)
             model=execution.model
             params=model.curve_params[curve]
             owners=Tessella.GeoExec._geo_mesh_part_node_entities(
@@ -1421,9 +1421,9 @@ end
         Recombine Surface{1};
         """;mesh_dim=2)
     @test execution.mesh isa MixedMesh
-    nquad=sum(size(b.nodes,2) for b in execution.mesh.blocks if b.msh==3)
-    ntri=sum(size(b.nodes,2) for b in execution.mesh.blocks if b.msh==2)
-    @test (nquad,ntri)==(47,4)
+    nquad=sum(size(b.nodes,2) for b in execution.mesh.blocks if b.msh==3;init=0)
+    ntri=sum(size(b.nodes,2) for b in execution.mesh.blocks if b.msh==2;init=0)
+    @test (nquad,ntri)==(45,0) # Native 4.15.2 default generation on this exact GEO source.
     @test sum(size(b.nodes,2) for b in execution.mesh.blocks if b.msh==1)==24
 
     # `Mesh.RecombinationAlgorithm = 0` keeps the unforced boundary grading,
@@ -1434,20 +1434,30 @@ end
         Mesh.RecombinationAlgorithm = 0;
         """;mesh_dim=2)
     @test execution.mesh isa MixedMesh
-    nquad=sum(size(b.nodes,2) for b in execution.mesh.blocks if b.msh==3)
-    ntri=sum(size(b.nodes,2) for b in execution.mesh.blocks if b.msh==2)
+    nquad=sum(size(b.nodes,2) for b in execution.mesh.blocks if b.msh==3;init=0)
+    ntri=sum(size(b.nodes,2) for b in execution.mesh.blocks if b.msh==2;init=0)
     @test nquad>0
     execution_simplex=_execute_constraint_source(_GEO_SQUARE;mesh_dim=2)
     @test 2*nquad+ntri==ntris(execution_simplex.mesh)
 
-    # The full-quad arms (2/3) run upstream's triangle-subdivision pipeline,
-    # which the pairing kernel does not implement — the rejection is explicit.
-    err=_constraint_error(_GEO_SQUARE * raw"""
-        Recombine Surface{1};
-        Mesh.RecombinationAlgorithm = 3;
-        """;mesh_dim=2)
-    @test err isa ArgumentError
-    @test occursin("RecombinationAlgorithm",err.msg)
+    # Native full-quad generation restores the actual Curve middles and
+    # subdivides the coarse product. Both selectors produce four square Quads.
+    for selector in (2,3)
+        execution=_execute_constraint_source(_GEO_SQUARE * """
+            Transfinite Curve{:}=3;
+            Recombine Surface{1};
+            Mesh.RecombinationAlgorithm=$selector;
+            Mesh.Algorithm=3;
+            Mesh.RecombineNodeRepositioning=0;
+            Mesh.RecombineOptimizeTopology=0;
+            Mesh.Smoothing=0;
+            """;mesh_dim=2)
+        @test execution.mesh isa MixedMesh
+        @test sum(size(b.nodes,2) for b in execution.mesh.blocks if b.msh==3)==4
+        @test !any(b.msh==2 for b in execution.mesh.blocks)
+        @test nnodes(execution.mesh)==9
+        @test validate(execution.mesh).ok
+    end
 
     # Transfinite + Recombine gives an all-quadrangle MixedMesh — Gmsh's
     # structured patch, not the simplex path.
@@ -1581,7 +1591,7 @@ end
         Transfinite Volume{1} = {1,2,3,4,5,6,7,8};
         Mesh 3;
         """;mesh_dim=3)
-    part=geo_entity_mesh(execution,3,1)
+    part=geo_entity_mesh(execution,3,1;geometry=true)
     @test part isa MixedMesh
     projected=model_to_mixed(execution.model,part,3,1)
     @test projected isa MixedMesh
@@ -1622,7 +1632,7 @@ end
         Mesh 3;
         """
     execution=_execute_constraint_source(prism_source;mesh_dim=3)
-    part=geo_entity_mesh(execution,3,1)
+    part=geo_entity_mesh(execution,3,1;geometry=true)
     @test part isa MixedMesh
     projected=model_to_mixed(execution.model,part,3,1)
     @test projected isa MixedMesh
@@ -1646,7 +1656,7 @@ end
         Transfinite Volume{1} = {1,2,3,4,5,6,7,8};
         Mesh 3;
         """;mesh_dim=3)
-    part=geo_entity_mesh(execution,3,1)
+    part=geo_entity_mesh(execution,3,1;geometry=true)
     projected=model_to_mixed(execution.model,part,3,1)
     @test validate(projected).ok
     surface_links=[l for l in projected.periodic_links if l.dim==2]
@@ -1665,7 +1675,7 @@ end
         Transfinite Volume{1} = {1,2,3,4,5,6,7,8};
         Mesh 3;
         """;mesh_dim=3)
-    part=geo_entity_mesh(execution,3,1)
+    part=geo_entity_mesh(execution,3,1;geometry=true)
     projected=model_to_mixed(execution.model,part,3,1)
     quad_tags=Int32[]
     hex_tags=Int32[]
@@ -1685,7 +1695,7 @@ end
 
     # Simplex volumes still project through the shared path.
     execution=_execute_constraint_source(_GEO_BOX * "Mesh 3;\n";mesh_dim=3)
-    part=geo_entity_mesh(execution,3,1)
+    part=geo_entity_mesh(execution,3,1;geometry=true)
     @test part isa Mesh
     projected=model_to_mixed(execution.model,part,3,1)
     @test validate(projected).ok
@@ -1731,7 +1741,7 @@ end
         @test counts[6]==21
         @test counts[1]==23
         @test nnodes(execution.mesh)==32
-        volume=geo_entity_mesh(execution,3,1)
+        volume=geo_entity_mesh(execution,3,1;geometry=true)
         @test volume isa MixedMesh
         @test only(size(b.nodes,2) for b in volume.blocks
                    if b isa ElementBlock && b.msh==6)==21
@@ -1771,7 +1781,7 @@ end
         # The swept hexahedra outnumber any recombination-leftover
         # prisms and the laterals are pure quadrangle strips.
         @test counts[5]>0
-        volume=geo_entity_mesh(execution,3,1)
+        volume=geo_entity_mesh(execution,3,1;geometry=true)
         @test volume isa MixedMesh
         btypes=sort!(collect(Set(b.msh for b in volume.blocks
                                  if b isa ElementBlock)))

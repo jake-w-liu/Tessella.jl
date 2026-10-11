@@ -112,6 +112,62 @@ function _extrude_curve_nodes(m::GeoModel,curve::Int,caller::AbstractString)
     return nodes
 end
 
+# The operation retains its own position registry and indexed source columns.
+# Coordinates verify these events; they do not rediscover producer identities.
+struct _ExtrudeMeshProduction{M}
+    mesh::M
+    position_rows::Dict{NTuple{3,Float64},Int32}
+    source_node_tags::Vector{UInt64}
+    column_rows::Matrix{Int32}
+    cell_events::Vector{Tuple{Int,Int}}
+end
+
+_ExtrudeMeshProduction(mesh,positions,source_tags,columns)=
+    _ExtrudeMeshProduction(mesh,positions,source_tags,columns,Tuple{Int,Int}[])
+
+function _extrude_curve_source(m,curve,input,caller)
+    input===nothing && return (_extrude_curve_nodes(m,curve,caller),UInt64[],
+        NTuple{3,Float64}[],UInt64[])
+    rows,mesh=if m.curves[curve][1]!=m.curves[curve][2]
+        source=_model_mesh_curve_births(input,m,curve,caller;used_only=true)
+        source!==nothing || throw(ArgumentError("$caller: extrusion lacks actual Curve[$curve] cells"))
+        source.rows,source.mesh
+    else
+        product_mesh=_model_mesh_product(input,1,curve;caller)
+        product_mesh!==nothing || throw(ArgumentError("$caller: extrusion lacks actual closed Curve[$curve] cells"))
+        # A closed producer starts at its actual Point vertex and lists each
+        # subsequent Line vertex once. Check its literal oriented cell cycle.
+        cycle_used=Set(row for block in product_mesh.blocks for row in block.nodes)
+        produced=get(input.producer_rows,(1,Int32(curve)),nothing)
+        cycle_rows=if produced===nothing
+            Int32[row for row in 1:nnodes(product_mesh) if row in cycle_used]
+        else
+            local_rows=Dict(uid=>Int32(row) for (row,uid) in enumerate(product_mesh.entity_data.external_node_tags))
+            unique(Int32[local_rows[input.mesh.entity_data.external_node_tags[row]] for row in produced
+                if get(local_rows,input.mesh.entity_data.external_node_tags[row],Int32(0)) in cycle_used])
+        end
+        length(cycle_rows)==length(cycle_used) || throw(ArgumentError(
+            "$caller: closed Curve[$curve] lost actual producer incidence"))
+        all(block->block.msh==1,product_mesh.blocks) || throw(ArgumentError(
+            "$caller: extrusion needs linear closed Curve[$curve] cells"))
+        edges=Set(minmax(block.nodes[1,c],block.nodes[2,c]) for block in product_mesh.blocks for c in axes(block.nodes,2))
+        expected=Set(minmax(cycle_rows[i],cycle_rows[mod1(i+1,length(cycle_rows))]) for i in eachindex(cycle_rows))
+        length(edges)==sum(size(block.nodes,2) for block in product_mesh.blocks)==length(cycle_rows) && edges==expected ||
+            throw(ArgumentError("$caller: closed Curve[$curve] lacks a complete actual producer cycle"))
+        product_mesh.entity_data.node_entities[first(cycle_rows)]==(0,Int32(m.curves[curve][1])) || throw(ArgumentError(
+            "$caller: closed Curve[$curve] producer does not start at its actual Point"))
+        cycle_rows,product_mesh
+    end
+    used=Set(rows)
+    orphans=Int32[row for row in 1:nnodes(mesh) if !(row in used)]
+    all(row->mesh.entity_data.node_entities[row]==(1,Int32(curve)),orphans) || throw(ArgumentError(
+        "$caller: Curve[$curve] has foreign unreferenced source rows"))
+    return (NTuple{3,Float64}[ntuple(a->mesh.coords[a,row],3) for row in rows],
+        mesh.entity_data.external_node_tags[rows],
+        NTuple{3,Float64}[ntuple(a->mesh.coords[a,row],3) for row in orphans],
+        mesh.entity_data.external_node_tags[orphans])
+end
+
 # `pos.find` — one entry per bitwise-unique swept coordinate, in
 # first-referenced order (upstream's rtree vertex identity).
 @inline function _extrude_node!(lookup::Dict{NTuple{3,Float64},Int32},
@@ -227,9 +283,10 @@ end
 # `SubdivideExtrudedMesh` remeshes the surface.
 function _extrude_lateral_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
                                spec,gen_signed::Int,caller::AbstractString;
-                               edges=nothing)
+                               edges=nothing,_mesh_input=nothing,_return_production=false,
+                               _register_orphans=true)
     gen=abs(gen_signed)
-    chain=_extrude_curve_nodes(m,gen,caller)
+    chain,source_tags,orphan_points,orphan_tags=_extrude_curve_source(m,gen,_mesh_input,caller)
     a,b=m.curves[gen]
     closed=a==b
     nnode=length(chain)
@@ -265,10 +322,20 @@ function _extrude_lateral_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
     # `pos` registration order: per generatrix node, per level.
     lookup=Dict{NTuple{3,Float64},Int32}()
     coords=NTuple{3,Float64}[]
+    columns=_return_production ? zeros(Int32,nlev,nnode+length(orphan_points)) : nothing
     for i in 1:nnode,l in 1:nlev
-        _extrude_node!(lookup,coords,grid[i,l])
+        row=_extrude_node!(lookup,coords,grid[i,l])
+        columns===nothing || (columns[l,i]=row)
     end
-    return _extrude_surface_part(tris,quads,coords,lookup)
+    # Native extrudeMesh registers owned Curve orphans only on interior
+    # levels. They create Surface orphans, never additional boundary Lines or
+    # a fabricated chapeau vertex. Literal Line cells still own the strip.
+    for (i,point) in enumerate(_register_orphans ? orphan_points : NTuple{3,Float64}[]),l in 2:nlev-1
+        row=_extrude_node!(lookup,coords,_extrude_level_at(spec,point,us[l],transforms,l))
+        columns===nothing || (columns[l,nnode+i]=row)
+    end
+    mesh=_extrude_surface_part(tris,quads,coords,lookup)
+    return _return_production ? _ExtrudeMeshProduction(mesh,lookup,vcat(source_tags,orphan_tags),columns) : mesh
 end
 
 # `copyMesh(GFace *from, GFace *to, ...)` — the top surface duplicates the
@@ -280,11 +347,11 @@ function _extrude_top_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
                            min_angle_deg::Real=25.0,
                            max_periodic_passes=8,
                            size_field::Union{Nothing,AbstractSizeField}=nothing,
-                           source_mesh=nothing)
+                           source_mesh=nothing,_mesh_input=nothing,_return_production=false)
     src=abs(src_signed)
     srcmesh=source_mesh===nothing ?
         mesh_model_surface(m,src;min_angle_deg=min_angle_deg,
-            max_periodic_passes=max_periodic_passes,size_field=size_field) :
+            max_periodic_passes=max_periodic_passes,size_field=size_field,_mesh_input) :
         source_mesh
     u_top=_extrude_level_us(params)[end]
     transforms=_extrude_level_transforms(spec,(u_top,),caller)
@@ -309,7 +376,10 @@ function _extrude_top_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
         for (i,(x,y,z)) in enumerate(coords)
             out[1,i]=x;out[2,i]=y;out[3,i]=z
         end
-        return Mesh(out;tris=nodes)
+        mesh=Mesh(out;tris=nodes)
+        source_tags=srcmesh isa MixedMesh && srcmesh.entity_data!==nothing ?
+            srcmesh.entity_data.external_node_tags : UInt64[]
+        return _return_production ? _ExtrudeMeshProduction(mesh,lookup,source_tags,reshape(remap,1,:)) : mesh
     end
     if _extrude_quadtri_top(m,t,params,caller)
         return _extrude_quadtri_top_part(m,src,srcmesh,coords,remap,caller;
@@ -330,7 +400,9 @@ function _extrude_top_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
     for (i,(x,y,z)) in enumerate(coords)
         out[1,i]=x;out[2,i]=y;out[3,i]=z
     end
-    return MixedMesh(out,blocks)
+    mesh=MixedMesh(out,blocks)
+    source_tags=srcmesh.entity_data===nothing ? UInt64[] : srcmesh.entity_data.external_node_tags
+    return _return_production ? _ExtrudeMeshProduction(mesh,lookup,source_tags,reshape(remap,1,:)) : mesh
 end
 
 # Per-source-node level columns for the volume sweep — upstream's
@@ -429,6 +501,8 @@ mutable struct _ExtrudeVolumeSweep
     tag::Int
     recombine::Bool
     cols::Matrix{NTuple{3,Float64}}
+    source_node_tags::Vector{UInt64}
+    source_used::BitVector
     prism6::Vector{NTuple{6,NTuple{3,Float64}}}
     tets::Vector{NTuple{4,NTuple{3,Float64}}}
     hexes::Vector{NTuple{8,NTuple{3,Float64}}}
@@ -436,7 +510,11 @@ mutable struct _ExtrudeVolumeSweep
     pyramids::Vector{NTuple{5,NTuple{3,Float64}}}
     interior::Vector{NTuple{3,Float64}}
     degenerate::Vector{Bool}
+    cell_events::Vector{Tuple{Int,Int}}
 end
+
+_ExtrudeVolumeSweep(tag,recombine,cols,prism6,tets,hexes,prisms,pyramids,interior,degenerate)=
+    _ExtrudeVolumeSweep(tag,recombine,cols,UInt64[],trues(size(cols,2)),prism6,tets,hexes,prisms,pyramids,interior,degenerate,Tuple{Int,Int}[])
 
 # `extrudeMesh(GFace *from, GRegion *to, ...)` — sweep the source surface's
 # cells into per-level records. Recombined volumes emit through
@@ -445,16 +523,28 @@ end
 # `SubdivideExtrudedMesh` (its initial `createPriPyrTet` output is deleted
 # before `phase3`, so nothing is emitted here).
 function _extrude_volume_sweep(m::GeoModel,t::Int,params::_GeoExtrudeParams,
-                               spec,src_signed::Int,caller::AbstractString)
+                               spec,src_signed::Int,caller::AbstractString;_mesh_input=nothing,
+                               _record_cell_events=false)
     src=abs(src_signed)
-    srcmesh=mesh_model_surface(m,src)
+    srcmesh=mesh_model_surface(m,src;_mesh_input)
     us=_extrude_level_us(params)
     nlev=length(us)
     cols=_extrude_volume_columns(m,t,src,srcmesh,params,spec,us,caller)
-    sweep=_ExtrudeVolumeSweep(t,params.recombine,cols,
+    source_tags=srcmesh isa MixedMesh && srcmesh.entity_data!==nothing ?
+        srcmesh.entity_data.external_node_tags : UInt64[]
+    source_used=falses(nnodes(srcmesh))
+    if srcmesh isa Mesh
+        source_used[srcmesh.tris].=true
+    else
+        for block in srcmesh.blocks
+            block isa ElementBlock && msh_dimension(block.msh)==2 || continue
+            source_used[block.nodes].=true
+        end
+    end
+    sweep=_ExtrudeVolumeSweep(t,params.recombine,cols,source_tags,source_used,
         NTuple{6,NTuple{3,Float64}}[],NTuple{4,NTuple{3,Float64}}[],
         NTuple{8,NTuple{3,Float64}}[],NTuple{6,NTuple{3,Float64}}[],
-        NTuple{5,NTuple{3,Float64}}[],NTuple{3,Float64}[],Bool[false])
+        NTuple{5,NTuple{3,Float64}}[],NTuple{3,Float64}[],Bool[false],Tuple{Int,Int}[])
     tricells=NTuple{3,Int}[]
     quadcells=NTuple{4,Int}[]
     if srcmesh isa Mesh
@@ -485,7 +575,12 @@ function _extrude_volume_sweep(m::GeoModel,t::Int,params::_GeoExtrudeParams,
         if recombine && params.quad_to_tri===:add_verts
             push!(sweep.prisms,v)
         elseif recombine
+            before=(length(sweep.tets),length(sweep.pyramids),length(sweep.prisms))
             _extrude_pripyrtet!(sweep.tets,sweep.pyramids,sweep.prisms,v)
+            for (msh,cells,count) in ((4,sweep.tets,before[1]),(7,sweep.pyramids,before[2]),
+                                      (6,sweep.prisms,before[3]))
+                !_record_cell_events || length(cells)==count || push!(sweep.cell_events,(msh,length(cells)))
+            end
         else
             push!(sweep.prism6,v)
         end
@@ -497,7 +592,10 @@ function _extrude_volume_sweep(m::GeoModel,t::Int,params::_GeoExtrudeParams,
         if recombine && params.quad_to_tri===:add_verts
             push!(sweep.hexes,v)
         elseif recombine
+            before=(length(sweep.hexes),length(sweep.prisms))
             _extrude_hexpri!(sweep.hexes,sweep.prisms,sweep.degenerate,v)
+            !_record_cell_events || length(sweep.hexes)==before[1] || push!(sweep.cell_events,(5,length(sweep.hexes)))
+            !_record_cell_events || length(sweep.prisms)==before[2] || push!(sweep.cell_events,(6,length(sweep.prisms)))
         else
             throw(ArgumentError(
                 "$caller: Cannot extrude quadrangles without Recombine"))
@@ -731,14 +829,19 @@ end
 # are the deduplicated column positions in source-node × level order, and
 # blocks follow ascending MSH type like the writer's serialization order.
 function _extrude_volume_part(m::GeoModel,sweep::_ExtrudeVolumeSweep,
-                              caller::AbstractString)
+                              caller::AbstractString;_return_column_rows::Bool=false,_return_production::Bool=false)
     sweep.degenerate[] && throw(ArgumentError(
         "$caller: Wrong hexahedron in extrusion"))
+    events=!_return_production ? Tuple{Int,Int}[] : sweep.recombine ? sweep.cell_events :
+        Tuple{Int,Int}[(4,column) for column in eachindex(sweep.tets)]
     lookup=Dict{NTuple{3,Float64},Int32}()
     coords=NTuple{3,Float64}[]
     cols=sweep.cols
+    column_rows=(_return_column_rows || _return_production) ? zeros(Int32,size(cols)) : nothing
     for i in axes(cols,2),l in axes(cols,1)
-        _extrude_node!(lookup,coords,cols[l,i])
+        !sweep.source_used[i] && l in (firstindex(cols,1),lastindex(cols,1)) && continue
+        row=_extrude_node!(lookup,coords,cols[l,i])
+        column_rows===nothing || (column_rows[l,i]=row)
     end
     for p in sweep.interior
         _extrude_node!(lookup,coords,p)
@@ -762,7 +865,9 @@ function _extrude_volume_part(m::GeoModel,sweep::_ExtrudeVolumeSweep,
             nodes[4,i]=lookup[cell[4]]
         end
         _extrude_make_positive!(out,nodes,4)
-        return Mesh(out;tets=nodes)
+        mesh=Mesh(out;tets=nodes)
+        return _return_production ? _ExtrudeMeshProduction(mesh,lookup,sweep.source_node_tags,column_rows,events) :
+            _return_column_rows ? (mesh=mesh,column_rows=column_rows) : mesh
     end
     blocks=ElementBlock[]
     if !isempty(sweep.tets)
@@ -797,7 +902,9 @@ function _extrude_volume_part(m::GeoModel,sweep::_ExtrudeVolumeSweep,
         _extrude_make_positive!(out,nodes,7)
         push!(blocks,ElementBlock(7,nodes))
     end
-    return MixedMesh(out,blocks)
+    mesh=MixedMesh(out,blocks)
+    return _return_production ? _ExtrudeMeshProduction(mesh,lookup,sweep.source_node_tags,column_rows,events) :
+        _return_column_rows ? (mesh=mesh,column_rows=column_rows) : mesh
 end
 
 # The `(dim,tag)` gate for a swept entity — `ep->mesh.ExtrudeMesh` is set
@@ -827,7 +934,7 @@ function _extrude_surface_mesh(m::GeoModel,t::Int,caller::AbstractString;
                                min_angle_deg::Real=25.0,
                                max_periodic_passes=8,
                                size_field::Union{Nothing,AbstractSizeField}=nothing,
-                               edges=nothing,scope=nothing)
+                               edges=nothing,scope=nothing,_mesh_input=nothing,_return_production=false)
     planned=_extrude_nonew_surface_mesh(m,t,caller;scope=scope,
         min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
         size_field=size_field)
@@ -837,11 +944,13 @@ function _extrude_surface_mesh(m::GeoModel,t::Int,caller::AbstractString;
     params,spec,link=entry
     if link[1]==1
         return _extrude_lateral_mesh(m,t,params,spec,link[2],caller;
-                                   edges=edges)
+                                   edges=edges,_mesh_input,
+                                   _return_production=_return_production && params.quad_to_tri===:none)
     end
     return _extrude_top_mesh(m,t,params,spec,link[2],caller;
         min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
-        size_field=size_field)
+        size_field=size_field,_mesh_input,
+        _return_production=_return_production && params.quad_to_tri===:none)
 end
 
 # `meshGRegionExtruded` + the region-local half of `SubdivideExtrudedMesh` —
@@ -860,7 +969,7 @@ end
 function _extrude_volume_mesh(m::GeoModel,t::Int,caller::AbstractString;
                               scope=nothing,
                               size_field::Union{Nothing,AbstractSizeField}=nothing,
-                              _working_model::Bool=false)
+                              _working_model::Bool=false,_mesh_input=nothing)
     planned=_extrude_nonew_volume_mesh(m,t,caller;scope=scope,size_field=size_field)
     planned===nothing || return planned
     entry=_extrude_entity_params(m,3,t,caller)
@@ -868,7 +977,7 @@ function _extrude_volume_mesh(m::GeoModel,t::Int,caller::AbstractString;
     params,spec,link=entry
     staged=params.recombine && params.quad_to_tri===:add_verts && !_working_model
     working=staged ? _extrude_curve_params_stage(m) : m
-    sweep=_extrude_volume_sweep(working,t,params,spec,link[2],caller)
+    sweep=_extrude_volume_sweep(working,t,params,spec,link[2],caller;_mesh_input)
     if params.recombine && params.quad_to_tri===:add_verts
         _extrude_quadtri_addverts!(working,sweep,caller)
     elseif !params.recombine
@@ -884,25 +993,34 @@ end
 # `SubdivideExtrudedMesh` diagonal selection, then lateral-surface remesh
 # against the global edge set. Returns the per-volume parts plus the
 # remesh bookkeeping `_geo_mesh_model` applies to the surface parts.
-function _extrude_volume_pass(m::GeoModel,caller::AbstractString;scope=nothing)
+function _extrude_volume_pass(m::GeoModel,caller::AbstractString;
+                             scope=nothing,_mesh_input=nothing,volume_tags=keys(m.volumes))
     tags=Int[]
-    for tag in keys(m.volumes)
+    for tag in volume_tags
         _extrude_gate(m,3,tag)===nothing || push!(tags,tag)
     end
     isempty(tags) && return nothing
     sort!(tags)
-    scope===nothing && (scope=_extrude_nonew_scope(m,caller;tags=tags))
+    scope===nothing && (scope=_extrude_nonew_scope(m,caller;tags=tags,_mesh_input))
     sweeps=_ExtrudeVolumeSweep[]
     parts=Dict{Int,Union{Mesh,MixedMesh}}()
+    productions=Dict{Int,_ExtrudeMeshProduction}()
+    temporary_elements=Dict{Int,Int}()
     for tag in tags
         params,spec,link=_extrude_entity_params(m,3,tag,caller)
         if _extrude_is_nonew(params)
             parts[tag]=_extrude_nonew_volume_mesh(m,tag,caller;scope=scope)
             continue
         end
-        push!(sweeps,_extrude_volume_sweep(m,tag,params,spec,link[2],caller))
+        push!(sweeps,_extrude_volume_sweep(m,tag,params,spec,link[2],caller;_mesh_input,
+            _record_cell_events=_mesh_input!==nothing && params.quad_to_tri===:none))
     end
     subdivided=[s for s in sweeps if !s.recombine]
+    for sweep in subdivided
+        # meshGRegionExtruded constructs these initial cells before the
+        # shared subdivision deletes them. Their labels remain consumed.
+        temporary_elements[sweep.tag]=length(sweep.prism6)
+    end
     edges=nothing
     isempty(subdivided) || (edges=_extrude_subdivide!(subdivided,caller))
     for sweep in sweeps
@@ -911,7 +1029,14 @@ function _extrude_volume_pass(m::GeoModel,caller::AbstractString;scope=nothing)
         _extrude_quadtri_addverts!(m,sweep,caller;edges=edges)
     end
     for sweep in sweeps
-        parts[sweep.tag]=_extrude_volume_part(m,sweep,caller)
+        params=_extrude_gate(m,3,sweep.tag)
+        production=_extrude_volume_part(m,sweep,caller;
+            _return_production=_mesh_input!==nothing && params.quad_to_tri===:none)
+        if production isa _ExtrudeMeshProduction
+            parts[sweep.tag]=production.mesh;productions[sweep.tag]=production
+        else
+            parts[sweep.tag]=production
+        end
     end
     remesh=Set{Int}()
     for sweep in sweeps
@@ -928,10 +1053,13 @@ function _extrude_volume_pass(m::GeoModel,caller::AbstractString;scope=nothing)
             link[1]==1 && push!(remesh,abs(s))
         end
     end
-    return (parts=parts,edges=edges,remesh=remesh,scope=scope)
+    return (parts=parts,productions=productions,temporary_elements=temporary_elements,
+            edges=edges,remesh=remesh,scope=scope)
 end
 
 include("ModelExtrudeQuadTri.jl")
 include("ModelExtrudeQuadTriNoNew.jl")
 include("ModelExtrudeNoNewScope.jl")
+include("ModelExtrudeNoNewRetainedPlan.jl")
+include("ModelExtrudeNoNewRetainedBoundary.jl")
 include("ModelExtrudeNoNewProjection.jl")

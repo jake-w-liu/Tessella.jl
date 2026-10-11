@@ -693,9 +693,12 @@ end
     delaunay3d(xs, ys, zs; rng_seed=1) -> Triangulation3
 
 3-D Delaunay tetrahedralization of the (deduplicated) points.
+With `preserve_input_rows=true`, retain the original input rows and distinct
+vertex identities instead of merging coincident coordinates.
 """
 function delaunay3d(xs::Vector{Float64}, ys::Vector{Float64}, zs::Vector{Float64};
-                    rng_seed::Integer=1, perturb::Bool=true)
+                    rng_seed::Integer=1, perturb::Bool=true,
+                    preserve_input_rows::Bool=false)
     seed = _seed3(rng_seed, "delaunay3d")
     (length(ys)==length(xs) && length(zs)==length(xs)) ||
         throw(ArgumentError("delaunay3d: coordinate lengths differ ($(length(xs)), $(length(ys)), $(length(zs)))"))
@@ -705,7 +708,14 @@ function delaunay3d(xs::Vector{Float64}, ys::Vector{Float64}, zs::Vector{Float64
         (isfinite(xs[i]) && isfinite(ys[i]) && isfinite(zs[i])) ||
             throw(ArgumentError("delaunay3d: point $i has a non-finite coordinate"))
     end
-    ux,uy,uz,_ = _dedup3(xs,ys,zs)
+    # Actual model vertices carry distinct born identities. This explicit path
+    # keeps their row indices even when coordinates happen to coincide.
+    ux,uy,uz = if preserve_input_rows
+        copy(xs),copy(ys),copy(zs)
+    else
+        unique_x,unique_y,unique_z,_ = _dedup3(xs,ys,zs)
+        unique_x,unique_y,unique_z
+    end
     perturb && _perturb3!(ux,uy,uz)
     T = Triangulation3(ux,uy,uz)
     placed = _init3!(T)
@@ -775,8 +785,12 @@ end
 Export live real tets (ghosts dropped), nodes compacted canonically by coordinate.
 If `keep` (a per-tet `Bool` mask indexed by tet id) is given, only kept tets are
 exported — used to drop exterior tets after domain classification.
+With `preserve_input_rows=true`, export every input vertex in its original row
+order, including vertices unused by the selected cells.
 """
-function to_mesh3(T::Triangulation3; keep::Union{Nothing,AbstractVector{Bool}}=nothing)
+function to_mesh3(T::Triangulation3;
+                  keep::Union{Nothing,AbstractVector{Bool}}=nothing,
+                  preserve_input_rows::Bool=false)
     keep === nothing || length(keep) == length(T.alive) ||
         throw(ArgumentError("to_mesh3: keep length $(length(keep)) does not match tet storage length $(length(T.alive))"))
     # internal orientation is orient3(v1,v2,v3,v4) > 0, which is tet_signed_volume
@@ -789,7 +803,10 @@ function to_mesh3(T::Triangulation3; keep::Union{Nothing,AbstractVector{Bool}}=n
         push!(tets, (_vert(T,t,1),_vert(T,t,2),_vert(T,t,4),_vert(T,t,3)))
     end
     used = Set{Int32}(); for te in tets, v in te; push!(used, v); end
-    order = sort(collect(used); by=v->(T.x[v],T.y[v],T.z[v]))
+    # The model authority path preserves input rows, including vertices not
+    # referenced by a selected cell. Connectivity is mapped by row index.
+    order = preserve_input_rows ? Int32.(1:T.nreal) :
+            sort(collect(used); by=v->(T.x[v],T.y[v],T.z[v]))
     nid = Dict{Int32,Int32}(); for (k,v) in enumerate(order); nid[v]=Int32(k); end
     coords = Matrix{Float64}(undef,3,length(order))
     @inbounds for (k,v) in enumerate(order); coords[1,k]=T.x[v]; coords[2,k]=T.y[v]; coords[3,k]=T.z[v]; end
@@ -1216,6 +1233,25 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
     queued = Set{Tuple{Int32,Int32}}()
     deferred = Set{Tuple{Int32,Int32}}()
     deferred_signature = Dict{Tuple{Int32,Int32},Tuple}()
+    # Edge-star retriangulation is deterministic for a fixed star: replaying it
+    # on the identical star can only reproduce the same connectivity, so the
+    # edge stays unsplittable and the queue spins forever. Remember every
+    # attempted (edge, star) — a repeat is guaranteed non-progress and falls
+    # through to the deferral path, which converges to `unresolvable` under
+    # `best_effort` or throws a precise diagnostic in strict mode.
+    retried_stars = Set{Tuple{Int32,Int32,Tuple{Vararg{NTuple{4,Int32}}}}}()
+    # Identical-star replays are caught by `retried_stars`, but a successful
+    # retriangulation manufactures a *new* star — and new long edges that re-enter
+    # the queue. Distinct stars alone therefore give no termination bound: each
+    # popped edge additionally has a finite retriangulation budget, after which it
+    # falls through to the deferral path like a never-tried edge. 32 attempts is
+    # far beyond what convergent refinement needs while bounding every edge's
+    # recovery work.
+    edge_star_retries = Dict{Tuple{Int32,Int32},Int}()
+    # A deferred edge is requeued once its star could have changed; an edge whose
+    # star is repeatedly changed by neighbours without ever becoming splittable
+    # must still terminate. Bound its deferral rounds as well.
+    edge_deferrals = Dict{Tuple{Int32,Int32},Int}()
     # Edges that cannot be split to Float64 resolution even after their star
     # stops changing (constrained representability limits). Only skipped when
     # `best_effort`; the strict default still throws.
@@ -1728,7 +1764,20 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
             constrained=constrained||edge_is_constrained(a,b,ts)
             fallback=fallback_split_point(a,b,ts,constrained)
             if fallback===nothing
-                retriangulate_edge!(a,b,ts)&&continue
+                star_signature=(a,b,Tuple(sort!(collect(
+                    Tuple(sort!(collect(tv[t]))) for t in ts))))
+                retries=get(edge_star_retries,e,0)
+                if star_signature in retried_stars || retries>=32
+                    retriangulation_reason[]="edge-star retriangulation " *
+                        (star_signature in retried_stars ?
+                            "already applied to this identical star" :
+                            "exhausted its $retries-attempt budget without " *
+                            "making the edge splittable")
+                else
+                    push!(retried_stars,star_signature)
+                    edge_star_retries[e]=retries+1
+                    retriangulate_edge!(a,b,ts)&&continue
+                end
                 reason=
                     "refine_to_size: no conforming representable split or valid local " *
                     "edge-star retriangulation exists for edge ($a,$b) from " *
@@ -1737,13 +1786,19 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
                     "with tags $(Tuple(ttag[t] for t in ts)); local retriangulation: " *
                     retriangulation_reason[]
                 signature=Tuple(sort(ts))
-                if get(deferred_signature,e,nothing)==signature
+                deferrals=get(edge_deferrals,e,0)
+                if get(deferred_signature,e,nothing)==signature || deferrals>=8
                     best_effort && (push!(unresolvable,e);continue)
                     throw(ErrorException(reason*(constrained ?
                         "; constrained edge geometry cannot be moved" :
-                        "; neighboring refinement did not change the edge star")))
+                        (deferrals>=8 ?
+                            "; edge star kept changing through $deferrals deferral " *
+                            "rounds without becoming splittable" :
+                            "; neighboring refinement did not change the edge star"))))
                 end
-                deferred_signature[e]=signature;push!(deferred,e)
+                deferred_signature[e]=signature
+                edge_deferrals[e]=deferrals+1
+                push!(deferred,e)
                 continue
             end
             splitpoint=fallback
@@ -7159,5 +7214,8 @@ function mesh_sized_conforming(surface::Mesh; hmax::Real, inset::Real=hmax,
         "($(lastnrec)/$(length(facets)) facets recovered — likely a cospherical-degenerate input; use " *
         "recover_boundary without interior size control, or mesh_box_regions for boxes). Blocker: $lastreason"))
 end
+
+include("Mesh3DGmshInsertion.jl")
+include("Mesh3DGmshOptimize.jl")
 
 end # module Mesh3D

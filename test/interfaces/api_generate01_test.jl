@@ -2,6 +2,10 @@ using Test
 using Tessella
 
 const _API01=Tessella.API
+include(joinpath(@__DIR__,"../../validation/native_geometry/native_api01_periodic_coordinates_v1.jl"))
+include(joinpath(@__DIR__,"../../validation/native_geometry/native_periodic_progression_coordinates_v1.jl"))
+include(joinpath(@__DIR__,"../../validation/native_geometry/native_api01_simplex_completion_v1.jl"))
+include(joinpath(@__DIR__,"../../validation/native_geometry/native_hidden_curve_refinement_v1.jl"))
 
 function _api01_begin(;renumber=true,order=1,only_empty=false)
     _API01.initialize()
@@ -104,6 +108,8 @@ end
         end
         for (curve,a,b) in ((1,1,2),(2,3,4))
             _API01.model.add_line(a,b;tag=curve)
+        end
+        for curve in 1:2
             _API01.mesh.set_transfinite_curve(curve,3)
         end
         _API01.model.add_physical_group(1,[1];tag=7)
@@ -446,8 +452,10 @@ end
         @test master==1
         @test length(slave_tags)==length(master_tags)==5
         @test collect(affine)==collect(transform)
-        for (slave,leader) in zip(slave_tags,master_tags)
-            @test _API01.mesh.get_node(slave)[1]==_API01.mesh.get_node(leader)[1]+[0.,2.,0]
+        @test Dict(zip(slave_tags,master_tags))==NATIVE_PERIODIC_PROGRESSION_PAIRS_V1
+        for slave in slave_tags
+            @test reinterpret(UInt64,_API01.mesh.get_node(slave)[1])==
+                reinterpret(UInt64,NATIVE_PERIODIC_PROGRESSION_SLAVE_COORDINATES_V1[slave])
         end
         _,master_xyz,_=_API01.mesh.get_nodes(1,1,true)
         # Saved Gmsh 4.15.2 master samples from this periodic native Line.
@@ -499,8 +507,8 @@ end
             @test source.curve_params==params
             @test _api01_snapshot()==before
         end
-        _API01.option("Mesh.ElementOrder",3)
-        @test_throws r"order 3" _API01.mesh.generate(1)
+        _API01.option("Mesh.ElementOrder",11)
+        @test_throws r"order 11" _API01.mesh.generate(1)
         @test _api01_snapshot()==before
         @test source.curve_params==params
         _API01.option("Mesh.ElementOrder",1)
@@ -715,7 +723,7 @@ end
             _API01.finalize()
         end
     end
-    for kind in (:node,:element),targets in ([0,10],[10,10])
+    for kind in (:node,:element),targets in ([10,10],)
         _api01_begin(;renumber=false)
         try
             _API01.model.add_discrete_entity(1,1)
@@ -724,8 +732,9 @@ end
             _API01.mesh.generate(1)
             before=_api01_snapshot()
             mutate=kind===:node ? _API01.mesh.renumber_nodes : _API01.mesh.renumber_elements
-            # Upstream accepts zero/duplicate final labels, which make its
-            # tag-indexed mesh ambiguous. The native cache rejects these atomically.
+            # Native duplicate final labels still need object-identity cache
+            # support. Retain the current atomic rejection until that is implemented.
+            # Zero labels are covered by complete native snapshots separately.
             @test_throws ArgumentError mutate([500,100],targets)
             @test _api01_snapshot()==before
         finally
@@ -835,7 +844,8 @@ end
         # Gmsh's getPeriodicKeys protocol returns master coordinates first.
         @test coords[2:3:end]==zeros(6)
         @test master_coords[2:3:end]==fill(2.,6)
-        @test sort(unique(coords[1:3:end]))==[0.,.25,.5,.75,1.]
+        @test reinterpret(UInt64,coords)==reinterpret(UInt64,NATIVE_API01_PERIODIC_COORDINATES_V1)
+        @test reinterpret(UInt64,master_coords)==reinterpret(UInt64,NATIVE_API01_PERIODIC_MASTER_COORDINATES_V1)
         primary=_API01.mesh.get_periodic_nodes(1,2)
         full=_API01.mesh.get_periodic_nodes(1,2,true)
         @test Dict(zip(primary.slave_nodes,primary.master_nodes))==Dict(3=>1,4=>2,8=>5)
@@ -1065,11 +1075,9 @@ function _api01_triangle_square(offset,surface)
     end
     for edge in 1:4
         _API01.model.add_line(offset+edge,offset+mod1(edge+1,4);tag=offset+edge)
-        _API01.mesh.set_transfinite_curve(offset+edge,2)
     end
     _API01.model.add_curve_loop(offset .+ collect(1:4);tag=surface)
     _API01.model.add_plane_surface([surface];tag=surface)
-    _API01.mesh.set_transfinite_surface(surface)
 end
 
 function _api01_tetra_geometry()
@@ -1077,11 +1085,10 @@ function _api01_tetra_geometry()
         _API01.model.add_point(p...;tag,meshSize=10)
     end
     for (tag,(a,b)) in enumerate(((1,2),(2,3),(3,1),(1,4),(2,4),(3,4)))
-        _API01.model.add_line(a,b;tag);_API01.mesh.set_transfinite_curve(tag,2)
+        _API01.model.add_line(a,b;tag)
     end
     for (tag,curves) in enumerate(([1,2,3],[1,5,-4],[2,6,-5],[3,4,-6]))
         _API01.model.add_curve_loop(curves;tag);_API01.model.add_plane_surface([tag];tag)
-        _API01.mesh.set_transfinite_surface(tag)
     end
     _API01.model.add_surface_loop([-1,2,3,4];tag=1)
     _API01.model.add_volume([1];tag=1)
@@ -1097,10 +1104,16 @@ end
                 _api01_triangle_square(0,1)
                 geometry===:coincident_squares && _api01_triangle_square(4,2)
             end
+            for curve in (geometry===:tetra ? (1:6) : geometry===:coincident_squares ? (1:8) : (1:4))
+                _API01.mesh.set_transfinite_curve(curve,2)
+            end
+            for surface in (geometry===:tetra ? (1:4) : geometry===:coincident_squares ? (1:2) : (1:1))
+                _API01.mesh.set_transfinite_surface(surface)
+            end
             _API01.model.add_physical_group(geometry===:tetra ? 3 : 2,[1];tag=7,name="source")
             _API01.mesh.generate(geometry===:tetra ? 3 : 2)
             original=_API01.LAST_MESH[];original_class=_API01.LAST_MESH_CLASS[]
-            @test original isa Tessella.Mesh
+            @test original isa Tessella.Elements.MixedMesh
             actual,class=_API01._dim01_actual_cache(original,original_class;
                 physical_names=_API01.CURRENT[].physical_names)
             source,source_class=_API01._dim01_complete_native_cache(
@@ -1110,12 +1123,11 @@ end
             @test source.physical_names[(geometry===:tetra ? 3 : 2,7)]=="source"
             counts=Dict(block.msh=>size(block.nodes,2) for block in source.blocks)
             factor=geometry===:coincident_squares ? 2 : 1
-            expected=geometry===:tetra ? Dict(15=>4,(order==1 ? 1 : 8)=>6,
-                (order==1 ? 2 : 9)=>4,(order==1 ? 4 : 11)=>4) :
-                Dict(15=>4factor,(order==1 ? 1 : 8)=>4factor,(order==1 ? 2 : 9)=>2factor)
+            native=only(row for row in NATIVE_API01_SIMPLEX_COMPLETION_V1
+                if row["geometry"]==String(geometry) && row["order"]==order)
+            expected=Dict(parse(Int,msh)=>count for (msh,count) in native["counts"])
             @test counts==expected
-            @test size(source.coords,2)==(geometry===:tetra ? (order==1 ? 5 : 15) :
-                                        factor*(order==1 ? 4 : 9))
+            @test size(source.coords,2)==length(native["node_tags"])
             if factor==2
                 cells=only(block for block in source.blocks if Tessella.Elements.msh_dimension(block.msh)==2)
                 block_index=findfirst(block->block===cells,source.blocks)
@@ -1185,7 +1197,7 @@ end
             path=joinpath(directory,"hidden_refine.geo")
             write(path,"Point(1)={0,0,0,1};Point(2)={1,0,0,1};Point(3)={2,0,0,1};" *
                 "Point(4)={2,1,0,1};Point(5)={3,1,0,1};Line(1)={1,2};" *
-                "Circle(2)={3,4,5};Transfinite Curve{1}=3;")
+                "Circle(2)={3,4,5};Transfinite Curve{1}=3;\n")
             _API01.open_geo!(path)
             _API01.model.set_visibility([(1,2)],0)
             _API01.option("Mesh.MeshOnlyVisible",1)
@@ -1195,7 +1207,15 @@ end
             _API01.mesh.refine()
             @test length(_API01.mesh.get_elements_by_type(1,1)[1])==4
             @test isempty(_API01.mesh.get_elements(1,2)[1])
-            @test sort(_API01.mesh.get_nodes(1,1)[2][1:3:end])==[.25,.5,.75]
+            native=NATIVE_HIDDEN_CURVE_REFINEMENT_V1
+            nodes=_API01.mesh.get_nodes(1,1)
+            @test reinterpret(UInt64,nodes[2])==reinterpret(UInt64,native["coordinates"])
+            @test nodes[1]==native["node_tags"]
+            @test reinterpret(UInt64,nodes[3])==reinterpret(UInt64,native["parameters"])
+            elements=_API01.mesh.get_elements(1,1)
+            @test elements[1]==native["element_types"]
+            @test elements[2]==native["element_tags"]
+            @test elements[3]==native["element_nodes"]
             _api01_check_references()
         end
     finally
