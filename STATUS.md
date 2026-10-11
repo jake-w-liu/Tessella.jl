@@ -24,7 +24,46 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
-### Current direct model export, embedded sheets/collections and open seams (2026-10-11)
+### Current model opening, mapped STEP, planar sheets and variable tensors (2026-10-11)
+
+The final combined ordinary suite passes **214/214 on both Julia1.12/1.13**,
+actual zero on the same frozen Source: Julia1.12.7 **49.28 s**, body**11.1 s**;
+Julia1.13.1 **38.93 s**, body**10.9 s**. Receipts:
+`test/tmp/ordinary_default_214_{112,113}_20261011.*`.
+
+[Atomic model opening](docs/model_import.md) stages real GEO/MSH imports before
+publishing slots/options/caches/lookup/views/diagnostics. Older models and held
+views remain alive; empty slots reuse correctly. Final88 checks pass onJulia1.13,
+actual zero/43.45 s including loading, with actual MSH2/4 ASCII/binary metadata
+and a tiny generated GEO continuity check. The midpoint fixture failure was
+rounding, not a proven orphan defect; exact UID/count/owner checks remain.
+
+[Mapped STEP occurrences](docs/step_mapped_occurrences.md) expand actual literal
+representation maps and nested rigid frame placements through one explicit
+shape-definition root. Final31+default2 pass onJulia1.12, actual zero/37.27 s,
+including30.65 s precompile. Native box/origin/nesting controls are bounded;
+more general assembly transforms remain guarded.
+
+[Embedded planar sheets](docs/hybrid_embedded_surfaces.md) retain one or two
+actual Tri3 cells and the complete lower Point/Line boundary. The preceding
+full two-Tri49 and original single-Tri40 pass on their gate Source. Independent
+review fixed a sign-versus-magnitude planarity error; current rotated actual
+lower authority/constructor and nonplanar atomic14 pass onJulia1.13, actual
+zero/41.41 s, body8.17 s. Older full-volume receipts retain their own Source
+scope. No volume fixture was added to routine tests or repeated for this gate.
+
+[Variable tensor planar construction](docs/metric_model_surfaces.md) consumes
+actual owned lower products, preserves every boundary edge and uses conforming
+interior bisection with a final sampled metric/area/identity certificate.
+Final33 pass onJulia1.12, actual zero/5.82 s warm. The coarse-boundary fixture
+was corrected after its exact interval dump; production bounds were unchanged.
+Native scalar/API paths remain separate; native7/BAMG is still unfinished.
+
+The [current handoff](HANDOFF.md#takeover-2026-10-11) binds Source packets,
+failed receipts and the next periodic/API-metric/session-merge implementations.
+This batch follows publishedMainf0bb385; the overall P1–P6 goal remains active.
+
+### Preceding direct model export, embedded sheets/collections and open seams (2026-10-11)
 
 Ordinary `Pkg.test()` passes **209/209 on both supported runtimes**, actual zero,
 on the same final Source: Julia1.12.7 **46.49 s**, body**11.1 s**; Julia1.13.1

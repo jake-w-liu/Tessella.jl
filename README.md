@@ -12,9 +12,9 @@ P1–P6 tracks**, with ASCENT meshing capabilities prioritized.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 209 assertions on Julia 1.12.7 and 1.13.1. Ordinary
+suite now passes 214 assertions on Julia 1.12.7 and 1.13.1. Ordinary
 `Pkg.test()` automatically selects minimal compilation; test bodies took
-11.1 and 10.7 seconds. Cold package runs took 46.49 and 39.23 seconds including
+11.1 and 10.9 seconds. Cold package runs took 49.28 and 38.93 seconds including
 precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
@@ -29,17 +29,20 @@ One-dimensional output keeps classified Point/Curve ownership,
 physical names, periodic node pairs and configured Curve orders.
 List-based views export POS, TXT, CSV and legacy VTK with all time steps;
 see [list export formats](docs/list_view_exports.md) for their data layout.
-[Direct model MSH export](docs/model_export.md) uses `API.write` with physical
+[Atomic model opening](docs/model_import.md) uses `API.open` for GEO/MSH files,
+preserving prior models and held views. [Direct model MSH export](docs/model_export.md) uses `API.write` with physical
 selection, ASCII/binary encodings and retained metadata. Model views also
 export [CSV and VTK](docs/model_view_exports.md), preserving
 UIDs, ownership, sparse time steps and full supported connectivity. Recognized
 independent STEP/IGES solids import as [classified mixed meshes](docs/cad_mesh_imports.md).
+[Mapped STEP occurrences](docs/step_mapped_occurrences.md) retain actual rigid
+placement and nested instance paths.
 One translated copied Surface pair is supported in an
 [ordinary hybrid Region](docs/periodic_hybrid_boundaries.md), and a strictly
 interior [embedded Point](docs/embedded_hybrid_points.md) or one connected
 [embedded Line2 Curve](docs/hybrid_embedded_curves.md), or one retained
 [Tri3 Surface](docs/hybrid_embedded_surfaces.md) can be recovered in a convex
-hybrid shell. [Multiple Point/Curve constraints](docs/hybrid_constraint_collections.md)
+hybrid shell, with one or two actual Tri3 cells per Surface. [Multiple Point/Curve constraints](docs/hybrid_constraint_collections.md)
 are supported within one convex Region. Supported planar STEP/IGES Faces retain outer/inner wires
 and triangulate holes. [Explicit IGES plane charts](docs/iges_plane_charts.md)
 map bounded UV wires and rigid surface transforms; general curved CAD trimming
@@ -48,7 +51,9 @@ have a [certified fast fill](docs/prismatic_fill.md), preserving every source
 coordinate and boundary triangle.
 
 Explicit [constant-tensor box grids](docs/constant_metric_boxes.md) retain
-directional edge bounds, shared material interfaces and voids. Single convex
+directional edge bounds, shared material interfaces and voids. An explicit
+[variable-tensor Surface constructor](docs/metric_model_surfaces.md) refines
+ordinary planar triangles while retaining lower boundary identities. Single convex
 hybrid Regions support [negative pyramid factors](docs/hybrid_normal_apices.md)
 and [nonnegative relocation settings](docs/hybrid_relocate_modes.md), including
 the separate [Winslow optimizer](docs/hybrid_winslow.md).

@@ -8,9 +8,9 @@ remain **in progress**.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 209 assertions on Julia 1.12.7 and 1.13.1. Ordinary
+suite now passes 214 assertions on Julia 1.12.7 and 1.13.1. Ordinary
 `Pkg.test()` automatically selects minimal compilation; test bodies took
-11.1 and 10.7 seconds. Cold package runs took 46.49 and 39.23 seconds including
+11.1 and 10.9 seconds. Cold package runs took 49.28 and 38.93 seconds including
 precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
@@ -197,6 +197,12 @@ adds complete Tri3 Surface children and closed interface seams.
 original Surface borders by literal incidence. General lower/mixed-family
 topology and parallel production remain open.
 
+An explicit [variable-tensor ordinary Surface constructor](docs/metric_model_surfaces.md)
+consumes actual lower Point/Line products and certifies the sampled world metric
+on every emitted edge. Its scalar/native API routes remain unchanged.
+[Atomic model opening](docs/model_import.md) imports true GEO/MSH files while
+retaining prior slots/views and stages all API option/cache/diagnostic publication.
+
 P1 does not yet claim octree-identical parity with Gmsh's HXT/p4est
 `AutomaticMeshSizeField` internals (the native field remains a documented
 closest-vertex discrete analogue, though curvature, `nPointsPerGap`
@@ -264,7 +270,9 @@ IGES NURBS export. Any other topology is
 an explicit failure listing the seen entity types. Multiple recognized explicit roots
 with strictly disjoint bounding boxes return classified independent mixed meshes;
 supported planar Faces can retain disjoint inner wires and triangulate their
-holes. This does not reconstruct CAD assembly occurrences or analytic Face maps. See
+holes. [Mapped STEP occurrences](docs/step_mapped_occurrences.md) additionally
+consume one explicit representation root and nested rigid axis-placement maps.
+Other CAD assembly transformations and analytic Face maps remain open. See
 [mesh import scope](docs/cad_mesh_imports.md). The entity kernel records native
 boxes, cylinders, spheres, cones, toruses, Boolean volumes (operation-time
 operand snapshots for meshing plus a materialized result boundary for
@@ -1096,8 +1104,10 @@ nonzero Pyramid Region batches, constant-tensor grids and bare/complete-Tri3
 partition topology. Direct model MSH export, multiple Point/Curve constraints,
 open partition seams and literal prismatic fill are implemented within their
 linked scopes. The handoff lists genuine remaining Source work. Current isolated
-implementations target atomic model-file opening, larger retained planar sheets
-and directional metrics in ordinary planar generation.
+implementations target translated periodic Region batches and direct session
+merging. One/two-Tri sheet admission and an explicit variable-metric planar
+constructor are implemented; broader sheet/metric/native algorithm contexts
+remain genuine Source work.
 
 Use small functional regressions for routine verification, then normally commit
 and push verified implementations to `main`. Native-oracle sweeps, resource and

@@ -31,6 +31,9 @@ module API
 function write end
 write(stream::Base.IO,values...)=Base.write(stream,values...)
 
+# The filename importer has its own binding; stream I/O remains Base.open.
+function open end
+
 using ..Predicates: orient3, O3DERRBOUND_A
 using ..Recombine: recombine_triangles, _recombine_triangles
 using ..Elements: ElementBlock, msh_family, msh_dimension, msh_spec
@@ -114,10 +117,11 @@ using ..Transform: affine_transform, _transform_gmsh_affine, _determinant_sign
 using ..Optimize: smooth_optimize, _laplacian_smooth_tri_cache
 using ..HighOrder: HighOrder, P2Mesh, P2TriMesh, p2_trimesh, p2_tetmesh
 using ..Model: _compound_surface_meshes
+import ..GeoExec
 using ..GeoExec: execute_geo
 using ..Post: Post
 
-export initialize, finalize, clear, option, model, mesh, open_geo!, write
+export initialize, finalize, clear, option, model, mesh, open_geo!, write, open
 
 # Entity classification snapshot for the session mesh cache, derived from the
 # canonical `model_to_mixed` projection at generation time. `mesh` is the exact
@@ -8596,6 +8600,7 @@ include("APINativeRecombineViews.jl")
 include("APINativeViewPartition.jl")
 include("APINativeViewWriter.jl")
 include("APIModelExport.jl")
+include("APIModelImport.jl")
 include("APINativeOptimize.jl")
 include("APINativeRelocate3D.jl")
 include("APIMeshHomologyNative.jl")
@@ -11065,8 +11070,8 @@ set_as_boundary_layer(tag)=_field_set_as_boundary_layer(tag)
 end # module field
 end
 
-# This callback is installed only for the selector4 GEO failure boundary.
-# Other parser failures keep the existing open_geo! publication behavior.
+# Legacy partial-publication callback for internal callers. The atomic API
+# file frontends stage complete results and do not invoke this callback.
 function _native_geo_recombine_partial_publish_locked(model,context)
     stored_model=deepcopy(model)
     imported_authority=stored_model.meshing.mesh_authority
@@ -11100,68 +11105,17 @@ end
 
 Execute a bounded `.geo` file into the initialized API session. Stored model and
 mesh state are detached from the returned execution result. Accepted syntax and
-blockers follow [`Tessella.GeoExec.execute_geo`](@ref).
+blockers follow [`Tessella.GeoExec.execute_geo`](@ref). Successful execution
+replaces the current model's contents; failed preparation leaves session state
+unchanged.
 """
 function open_geo!(path::AbstractString; mesh_dim::Integer=0)
+    filename=_model_import_filename(path,"API.open_geo!";geo_only=true)
     return lock(STATE_LOCK) do
         _model_locked()
-        result=execute_geo(path;mesh_dim=mesh_dim,
-            _initial_mesh_algorithms=(algorithm_2d=Int(OPTIONS["Mesh.Algorithm"]),
-                algorithm_3d=Int(OPTIONS["Mesh.Algorithm3D"]),
-                recombine_topology_passes=Int(OPTIONS["Mesh.RecombineOptimizeTopology"]),
-                recombine_node_repositioning=Int(OPTIONS["Mesh.RecombineNodeRepositioning"]),
-                recombine_minimum_quality=OPTIONS["Mesh.RecombineMinimumQuality"],
-                native_smoothing=Int(OPTIONS["Mesh.Smoothing"]),
-                second_order_linear=!iszero(OPTIONS["Mesh.SecondOrderLinear"])),
-            _initial_context_lc=NATIVE_CONTEXT_LC[],
-            _initial_context_forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[],
-            _initial_abort_on_error=OPTIONS["General.AbortOnError"],
-            _initial_mesh_error_callback=_native_mesh_input_error_locked,
-            _initial_mesh_begin_callback=_native_mesh_generation_begin_locked,
-            _initial_abort_option_callback=_native_geo_abort_option_locked,
-            _initial_numeric_options=OPTIONS,
-            _initial_numeric_option_callback=_native_geo_numeric_option_locked,
-            _initial_recombine_partial_callback=_native_geo_recombine_partial_publish_locked)
-        NATIVE_CONTEXT_LC[]=result.native_context_lc
-        NATIVE_CONTEXT_FORCED_BBOX[]=result.native_context_forced_bbox
-        stored_model=deepcopy(result.model)
-        imported_authority=stored_model.meshing.mesh_authority
-        stored_mesh=imported_authority!==nothing && imported_authority.mesh!==nothing ?
-            imported_authority.mesh : result.mesh===nothing ? nothing : _copy_mesh(result.mesh)
-        stored_class=if imported_authority!==nothing && imported_authority.mesh!==nothing
-            classified=_higher_classification_from_data(stored_mesh,"API.open_geo!")
-            _mixed_rebind_class(classified,stored_mesh;
-                node_parametric=Model._model_mesh_runtime_parameters(stored_model,stored_mesh))
-        else
-            nothing
-        end
-        index=_current_slot_index_locked()
-        # `Mesh.TransfiniteTri = v` in the file updates the process-global
-        # option as Gmsh does; otherwise the file inherits the current option.
-        if result.transfinite_tri===nothing
-            stored_model.meshing.transfinite_tri=Int(
-                OPTIONS["Mesh.TransfiniteTri"])
-        else
-            OPTIONS["Mesh.TransfiniteTri"]=Float64(result.transfinite_tri)
-        end
-        OPTIONS["Mesh.Algorithm"]=Float64(stored_model.meshing.algorithm_2d)
-        OPTIONS["Mesh.Algorithm3D"]=Float64(stored_model.meshing.algorithm_3d)
-        OPTIONS["Mesh.RecombineOptimizeTopology"]=Float64(stored_model.meshing.recombine_topology_passes)
-        OPTIONS["Mesh.RecombineNodeRepositioning"]=Float64(stored_model.meshing.recombine_node_repositioning)
-        OPTIONS["Mesh.RecombineMinimumQuality"]=stored_model.meshing.recombine_minimum_quality
-        OPTIONS["Mesh.Smoothing"]=Float64(stored_model.meshing.native_smoothing)
-        OPTIONS["Mesh.SecondOrderLinear"]=Float64(stored_model.meshing.second_order_linear)
-        CURRENT[]=stored_model
-        MODEL_FILE_NAME[]=String(path)
-        if index!=0
-            MODEL_SLOTS[index].model=stored_model
-            MODEL_SLOTS[index].file_name=String(path)
-        end
-        _replace_mesh_cache_locked!(stored_mesh,stored_class)
-        NODE_TAG_MAX[]=max(NODE_TAG_MAX[],result.mesh_node_max)
-        ELEMENT_TAG_MAX[]=max(ELEMENT_TAG_MAX[],result.mesh_element_max)
-        _native_lookup_import_receipt_locked!(result.native_element_lookup_receipt)
-        result
+        plan=_model_import_prepare(filename,mesh_dim;legacy=true)
+        _model_import_publish!(plan;legacy=true)
+        plan.result
     end
 end
 

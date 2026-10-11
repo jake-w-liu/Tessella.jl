@@ -1,4 +1,4 @@
-# One literal interior Tri3 sheet, with its actual Point/Line boundary products.
+# A literal one- or two-Tri3 planar sheet with actual Point/Line boundary products.
 struct _ModelNativeHybridEmbeddedSurfaceInput
     model::GeoModel
     region::Int
@@ -7,7 +7,7 @@ struct _ModelNativeHybridEmbeddedSurfaceInput
     constructor::MixedMesh
     loops::Dict{Int,Vector{Int}}
     endpoints::Dict{Int,NTuple{2,Int}}
-    triangle::NamedTuple
+    triangles::Vector{NamedTuple}
     records::Vector{NamedTuple}
     lower_cells::Vector{NamedTuple}
 end
@@ -19,32 +19,37 @@ function _model_native_hybrid_embedded_surface_input(m,region,input,caller)
     haskey(m.surfaces,surface) && length(m.surfaces[surface])==1 &&
         get(m.surface_types,surface,:plane)==:plane &&
         isempty(get(m.embeds,(2,surface),NTuple{2,Int}[])) || throw(ArgumentError(
-        "$caller: embedded Surface requires one declared triangle boundary without nested constraints"))
+        "$caller: embedded Surface requires one declared planar boundary without nested constraints"))
     loop=only(m.surfaces[surface]);curves=_model_projection_surface_curves(m,surface)
-    length(curves)==3 && length(m.loops[loop])==3 || throw(ArgumentError(
-        "$caller: embedded Surface requires three actual boundary Curves"))
+    length(curves) in (3,4) && length(m.loops[loop])==length(curves) || throw(ArgumentError(
+        "$caller: embedded Surface requires three or four actual boundary Curves"))
     all(curve->get(m.curve_types,curve,:line)==:line,curves) || throw(ArgumentError(
         "$caller: embedded Surface requires its declared straight Line boundary"))
     product=_model_mesh_product(input,2,surface;caller)
     product isa MixedMesh && product.entity_data!==nothing && length(product.blocks)==1 &&
-        only(product.blocks).msh==2 && size(only(product.blocks).nodes)==(3,1) || throw(ArgumentError(
-        "$caller: embedded Surface needs its one actual linear Tri3 cell"))
+        only(product.blocks).msh==2 && size(only(product.blocks).nodes)==(3,length(curves)-2) || throw(ArgumentError(
+        "$caller: embedded Surface needs its actual one- or two-cell linear Tri3 sheet"))
     constructor=get(input.surface_constructor_inputs,(2,Int32(surface)),nothing)
     constructor!==nothing || throw(ArgumentError(
         "$caller: embedded Surface lacks its owned actual Surface constructor"))
     _model_surface_constructor_binding(product,constructor,caller)
     data=product.entity_data;block=only(product.blocks)
     labels=only(data.external_element_tags);owners=only(data.block_entities)
-    length(labels)==length(owners)==1 && only(labels)>0 && only(owners)==surface ||
-        throw(ArgumentError("$caller: embedded Surface changes its actual Tri3 UID/owner"))
-    nodes=ntuple(slot->data.external_node_tags[block.nodes[slot,1]],3)
-    allunique(nodes) && all(!iszero,nodes) || throw(ArgumentError(
-        "$caller: embedded Surface has duplicate or missing actual vertex UIDs"))
-    triangle=(owner=(2,Int32(surface)),uid=only(labels),nodes=nodes)
+    length(labels)==length(owners)==size(block.nodes,2) && all(>(0),labels) &&
+        allunique(labels) && all(==(surface),owners) || throw(ArgumentError(
+        "$caller: embedded Surface changes its actual Tri3 UID/owner"))
+    triangles=NamedTuple[];used=Set{UInt64}()
+    for (column,uid) in enumerate(labels)
+        nodes=ntuple(slot->data.external_node_tags[block.nodes[slot,column]],3)
+        allunique(nodes) && all(!iszero,nodes) || throw(ArgumentError(
+            "$caller: embedded Surface has duplicate or missing actual vertex UIDs"))
+        union!(used,nodes)
+        push!(triangles,(owner=(2,Int32(surface)),uid=uid,nodes=nodes))
+    end
     endpoints=Dict(curve=>m.curves[curve] for curve in curves)
     points=sort!(unique!(Int[point for pair in values(endpoints) for point in pair]))
-    length(points)==3 || throw(ArgumentError(
-        "$caller: embedded Surface requires three distinct declared endpoint Points"))
+    length(points)==length(curves) || throw(ArgumentError(
+        "$caller: embedded Surface requires distinct declared boundary endpoint Points"))
     point_uids=Dict{Int,UInt64}();lower_cells=NamedTuple[]
     for point in points
         actual=_model_mesh_product(input,0,point;caller)
@@ -58,9 +63,8 @@ function _model_native_hybrid_embedded_surface_input(m,region,input,caller)
         uid=pdata.external_node_tags[row];point_uids[point]=uid
         push!(lower_cells,(owner=(0,Int32(point)),uid=only(labels),nodes=(uid,)))
     end
-    Set(values(point_uids))==Set(nodes) || throw(ArgumentError(
+    Set(values(point_uids))==used || throw(ArgumentError(
         "$caller: embedded Surface vertices omit or alias declared endpoint Point UIDs"))
-    expected_edges=Set(minmax(nodes[index],nodes[mod1(index+1,3)]) for index in 1:3)
     actual_edges=Set{NTuple{2,UInt64}}()
     for curve in curves
         actual=_model_mesh_product(input,1,curve;caller)
@@ -76,8 +80,6 @@ function _model_native_hybrid_embedded_surface_input(m,region,input,caller)
         push!(actual_edges,minmax(line...))
         push!(lower_cells,(owner=(1,Int32(curve)),uid=only(labels),nodes=line))
     end
-    actual_edges==expected_edges || throw(ArgumentError(
-        "$caller: embedded Surface triangle does not match its actual boundary Line2 cells"))
     positions=Dict(uid=>row for (row,uid) in enumerate(data.external_node_tags))
     records=NamedTuple[]
     for point in points
@@ -86,8 +88,62 @@ function _model_native_hybrid_embedded_surface_input(m,region,input,caller)
             "$caller: embedded Surface loses a current lower node owner"))
         push!(records,(uid=uid,coordinate=Tuple(product.coords[:,row]),node_owner=data.node_entities[row]))
     end
+    _model_native_hybrid_surface_disk_certificate(triangles,records,actual_edges,caller)
     return _ModelNativeHybridEmbeddedSurfaceInput(m,region,surface,input,constructor,
-        Dict(loop=>copy(m.loops[loop])),endpoints,triangle,records,lower_cells)
+        Dict(loop=>copy(m.loops[loop])),endpoints,triangles,records,lower_cells)
+end
+
+# The initial extension admits a single triangle or two coherently oriented
+# triangles meeting at one actual edge. Their literal outer edges must equal
+# the complete lower Line-cell boundary; no triangulation is reconstructed.
+function _model_native_hybrid_surface_disk_certificate(triangles,records,boundary,caller)
+    incidence=Dict{NTuple{2,UInt64},Vector{NTuple{2,UInt64}}}()
+    supports=Set{NTuple{3,UInt64}}()
+    for triangle in triangles
+        support=Tuple(sort!(collect(triangle.nodes)))
+        support in supports && throw(ArgumentError("$caller: embedded Surface repeats a literal Tri3 support"))
+        push!(supports,support)
+        for index in 1:3
+            edge=(triangle.nodes[index],triangle.nodes[mod1(index+1,3)])
+            push!(get!(incidence,minmax(edge...),NTuple{2,UInt64}[]),edge)
+        end
+    end
+    all(edges->length(edges) in (1,2),values(incidence)) &&
+        all(edges->length(edges)==1 || first(edges)==reverse(last(edges)),values(incidence)) ||
+        throw(ArgumentError("$caller: embedded Surface has incoherent or nonmanifold actual triangle edges"))
+    observed=Set(edge for (edge,entries) in incidence if length(entries)==1)
+    observed==boundary && count(entries->length(entries)==2,values(incidence))==length(triangles)-1 &&
+        length(records)-length(incidence)+length(triangles)==1 || throw(ArgumentError(
+        "$caller: embedded Surface triangles do not form their complete actual Line-boundary disk"))
+    coordinates=Dict(record.uid=>record.coordinate for record in records)
+    a,b,c=map(uid->coordinates[uid],first(triangles).nodes)
+    normal=LinearAlgebra.cross(collect(b).-collect(a),collect(c).-collect(a))
+    magnitude=LinearAlgebra.norm(normal)
+    isfinite(magnitude) && magnitude>0 || throw(ArgumentError(
+        "$caller: embedded Surface has a degenerate actual triangle"))
+    scale=max(1.0,maximum(LinearAlgebra.norm(collect(record.coordinate).-collect(a)) for record in records))
+    bound=128eps(Float64)*scale*magnitude
+    # orient3 is an exact sign predicate; plane distance needs the adaptive
+    # determinant magnitude on the same literal stored coordinates.
+    determinants=[parentmodule(@__MODULE__).Predicates._orient3_value(a,b,c,record.coordinate)
+                  for record in records]
+    isfinite(bound) && all(value->isfinite(value) && abs(value)<=bound,determinants) ||
+        throw(ArgumentError("$caller: embedded Surface is not a certified planar sheet"))
+    drop=argmax(abs.(normal));axes=filter(!=(drop),collect(1:3))
+    project(uid)=ntuple(index->coordinates[uid][axes[index]],2)
+    allunique(project(record.uid) for record in records) || throw(ArgumentError(
+        "$caller: embedded Surface repeats a projected vertex"))
+    areas=[orient2((project(uid) for uid in triangle.nodes)...) for triangle in triangles]
+    all(isfinite,areas) && all(!iszero,areas) && length(Set(sign.(areas)))==1 ||
+        throw(ArgumentError("$caller: embedded Surface has degenerate or opposing actual triangle winding"))
+    if length(triangles)==2
+        diagonal=only(edge for (edge,entries) in incidence if length(entries)==2)
+        opposite=[only(uid for uid in triangle.nodes if !(uid in diagonal)) for triangle in triangles]
+        sides=[orient2(project(diagonal[1]),project(diagonal[2]),project(uid)) for uid in opposite]
+        all(isfinite,sides) && Set(sign.(sides))==Set((-1.0,1.0)) || throw(ArgumentError(
+            "$caller: embedded Surface triangles overlap or fold across their actual shared edge"))
+    end
+    return nothing
 end
 
 function _model_native_hybrid_surface_source_certificate(witness,input,uids,coordinates,caller)
@@ -97,7 +153,7 @@ function _model_native_hybrid_surface_source_certificate(witness,input,uids,coor
         throw(ArgumentError("$caller: embedded Surface has a foreign or changed constructor"))
     fresh=_model_native_hybrid_embedded_surface_input(witness.model,witness.region,input,caller)
     fresh!==nothing && fresh.constructor===witness.constructor && fresh.loops==witness.loops &&
-        fresh.endpoints==witness.endpoints && fresh.triangle==witness.triangle &&
+        fresh.endpoints==witness.endpoints && fresh.triangles==witness.triangles &&
         fresh.records==witness.records && fresh.lower_cells==witness.lower_cells || throw(ArgumentError(
         "$caller: embedded Surface changes its actual current UID/owner/cell witness"))
     positions=Dict(uid=>row for (row,uid) in enumerate(uids))
@@ -144,10 +200,18 @@ function _model_native_hybrid_surface_constraints(constructor,uids,caller)
     positions=Dict(uid=>Int32(row) for (row,uid) in enumerate(uids))
     all(record->haskey(positions,record.uid),witness.records) || throw(ArgumentError(
         "$caller: embedded Surface constraint omits an actual node UID"))
-    face=ntuple(slot->positions[witness.triangle.nodes[slot]],3)
+    facets=NTuple{3,Int32}[ntuple(slot->positions[triangle.nodes[slot]],3)
+                          for triangle in witness.triangles]
+    # Every literal sheet edge, including the shared diagonal, stays protected.
     edges=NTuple{2,Int32}[ntuple(slot->positions[cell.nodes[slot]],2)
                          for cell in witness.lower_cells if cell.owner[1]==1]
-    return (facets=[face],edges=edges)
+    seen=Set(minmax(edge...) for edge in edges)
+    for face in facets,index in 1:3
+        edge=(face[index],face[mod1(index+1,3)]);support=minmax(edge...)
+        support in seen && continue
+        push!(seen,support);push!(edges,edge)
+    end
+    return (;facets,edges)
 end
 
 function _model_native_hybrid_embedded_surface_certificate(mesh,uids,constructor,caller)
@@ -155,18 +219,20 @@ function _model_native_hybrid_embedded_surface_certificate(mesh,uids,constructor
     _model_native_hybrid_surface_source_certificate(witness,constructor.input,uids,mesh.coords,caller)
     _model_native_hybrid_surface_containment_certificate(constructor,caller)
     constraints=_model_native_hybrid_surface_constraints(constructor,uids,caller)
-    face=only(constraints.facets);sides=Float64[]
-    for row in face
+    for row in unique!(Int32[row for face in constraints.facets for row in face])
         _model_native_hybrid_interior_node_star_certificate(mesh,row,caller,"embedded Surface vertex")
     end
-    for block in mesh.blocks,column in axes(block.nodes,2)
-        nodes=block.nodes[:,column];all(row->row in nodes,face) || continue
-        block.msh==4 || throw(ArgumentError("$caller: embedded Surface facet has a foreign typed cell role"))
-        opposite=only(row for row in nodes if !(row in face))
-        push!(sides,orient3((Tuple(mesh.coords[:,row]) for row in (face...,opposite))...))
+    for face in constraints.facets
+        sides=Float64[]
+        for block in mesh.blocks,column in axes(block.nodes,2)
+            nodes=block.nodes[:,column];all(row->row in nodes,face) || continue
+            block.msh==4 || throw(ArgumentError("$caller: embedded Surface facet has a foreign typed cell role"))
+            opposite=only(row for row in nodes if !(row in face))
+            push!(sides,orient3((Tuple(mesh.coords[:,row]) for row in (face...,opposite))...))
+        end
+        length(sides)==2 && all(isfinite,sides) && Set(sign.(sides))==Set((-1.0,1.0)) ||
+            throw(ArgumentError("$caller: embedded Surface facet lacks two-sided positive Tet incidence"))
     end
-    length(sides)==2 && all(isfinite,sides) && Set(sign.(sides))==Set((-1.0,1.0)) ||
-        throw(ArgumentError("$caller: embedded Surface facet lacks two-sided positive Tet incidence"))
     for edge in constraints.edges
         links=Set{NTuple{2,Int32}}();degrees=Dict{Int32,Int}()
         for block in mesh.blocks,column in axes(block.nodes,2)

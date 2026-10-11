@@ -659,7 +659,7 @@ function _view_write(tag,filename,append=false)
                     "Only ASCII list data can be exported in $extension format"
                 _native_diagnostic_emit_locked(:warning,message)
             end
-            open(filename,append_value ? "a" : "w") do stream;write(stream,bytes);end
+            Base.open(filename,append_value ? "a" : "w") do stream;write(stream,bytes);end
             _native_diagnostic_emit_locked(:info,"Done writing '$filename'")
             return nothing
         end
@@ -687,7 +687,7 @@ function _view_write(tag,filename,append=false)
             for publication in publications
                 bytes=!Sys.iswindows() ? publication.bytes :
                     Vector{UInt8}(codeunits(replace(String(publication.bytes),"\n"=>"\r\n")))
-                open(publication.path,"w") do stream;write(stream,bytes);end
+                Base.open(publication.path,"w") do stream;write(stream,bytes);end
             end
             _native_diagnostic_emit_locked(:info,"Done writing '$filename'")
             return nothing
@@ -711,7 +711,7 @@ function _view_write(tag,filename,append=false)
             end
             bytes=!Sys.iswindows() ? result.bytes :
                 Vector{UInt8}(codeunits(replace(String(result.bytes),"\n"=>"\r\n")))
-            open(filename,append_value && extension==".pos" ? "a" : "w") do io;write(io,bytes);end
+            Base.open(filename,append_value && extension==".pos" ? "a" : "w") do io;write(io,bytes);end
             _native_diagnostic_emit_locked(:info,"Done writing '$filename'")
             return nothing
         end
@@ -723,7 +723,7 @@ function _view_write(tag,filename,append=false)
                 version,binary,save_mesh,scheme,lookup)
             bytes=binary || !Sys.iswindows() ? result.bytes :
                 Vector{UInt8}(codeunits(replace(String(result.bytes),"\n"=>"\r\n")))
-            open(plan.group.path,append_value ? "a" : "w") do io;write(io,bytes);end
+            Base.open(plan.group.path,append_value ? "a" : "w") do io;write(io,bytes);end
             if result.error!==nothing
                 NATIVE_LOOKUP_QUERY_ERRORS[]+=1;NATIVE_MSG_LAST_ERROR[]=result.error
                 _native_diagnostic_emit_locked(:error,result.error)

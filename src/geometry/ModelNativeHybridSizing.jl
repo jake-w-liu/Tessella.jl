@@ -49,21 +49,22 @@ function _model_native_hybrid_global_size_seeds(m,input,caller;embedded_surface=
                 "$caller: hybrid embedded Face recovery requires a separate native constructor receipt"))
             _model_native_hybrid_surface_source_certificate(embedded_surface,input,
                 data.external_node_tags,actual.coords,caller)
-            triangle=embedded_surface.triangle
-            get(current_cells,triangle.uid,nothing)==(2,Int32(entity[2]),triangle.nodes) ||
-                throw(ArgumentError("$caller: hybrid sheet sizing changes its actual Tri3 UID/owner/corners"))
             positions=Dict(uid=>row for (row,uid) in enumerate(data.external_node_tags))
-            # The actual Face edges contribute incident lengths at its bound
-            # lower vertices. These are not invented direct Point embeddings.
-            for index in 1:3
-                first=positions[triangle.nodes[index]]
-                last=positions[triangle.nodes[mod1(index+1,3)]]
-                x=actual.coords[1,first]-actual.coords[1,last]
-                y=actual.coords[2,first]-actual.coords[2,last]
-                z=actual.coords[3,first]-actual.coords[3,last]
-                edge_length=sqrt(x*x+y*y+z*z)
-                push!(records,record(first,entity,triangle.uid,edge_length))
-                push!(records,record(last,entity,triangle.uid,edge_length))
+            # Every actual Face triangle contributes its literal incident
+            # lengths at bound lower vertices, including the shared diagonal.
+            for triangle in embedded_surface.triangles
+                get(current_cells,triangle.uid,nothing)==(2,Int32(entity[2]),triangle.nodes) ||
+                    throw(ArgumentError("$caller: hybrid sheet sizing changes its actual Tri3 UID/owner/corners"))
+                for index in 1:3
+                    first=positions[triangle.nodes[index]]
+                    last=positions[triangle.nodes[mod1(index+1,3)]]
+                    x=actual.coords[1,first]-actual.coords[1,last]
+                    y=actual.coords[2,first]-actual.coords[2,last]
+                    z=actual.coords[3,first]-actual.coords[3,last]
+                    edge_length=sqrt(x*x+y*y+z*z)
+                    push!(records,record(first,entity,triangle.uid,edge_length))
+                    push!(records,record(last,entity,triangle.uid,edge_length))
+                end
             end
             continue
         end

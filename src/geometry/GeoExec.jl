@@ -715,7 +715,9 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
                      _initial_numeric_options=nothing,
                      _forced_numeric_options=nothing,
                      _initial_numeric_option_callback=nothing,
-                     _initial_recombine_partial_callback=nothing)
+                     _initial_recombine_partial_callback=nothing,
+                     _initial_recombine_diagnostics=nothing,
+                     _initial_model_name=nothing)
     isfile(path) || throw(ArgumentError("execute_geo: missing file $path"))
     mesh_dim isa Bool && throw(ArgumentError("execute_geo: mesh_dim must not be Bool"))
     dim=try
@@ -727,6 +729,7 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
     dim in 0:3 || throw(ArgumentError("execute_geo: mesh_dim must be in 0:3"))
     params=read_geo_params(path)
     model=GeoModel()
+    _initial_model_name===nothing || (model.name=String(_initial_model_name))
     context=_GeoNumericContext()
     context.native_context_lc=_initial_context_lc
     context.native_context_forced_bbox=_initial_context_forced_bbox
@@ -735,6 +738,7 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
     context.native_abort_option_callback=_initial_abort_option_callback
     context.native_numeric_option_callback=_initial_numeric_option_callback
     context.native_recombine_partial_callback=_initial_recombine_partial_callback
+    context.native_recombine_diagnostics=_initial_recombine_diagnostics
     _initial_abort_on_error===nothing ||
         (context.option_numbers[("General",0,"AbortOnError")]=Float64(_initial_abort_on_error))
     context.option_numbers[("Mesh",0,"Algorithm")]=

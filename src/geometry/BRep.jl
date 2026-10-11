@@ -331,6 +331,8 @@ closed triangle surface. Multiple explicitly rooted independent solids return a
 classified `MixedMesh`, retaining one discrete closed-shell Surface and Region
 per source solid in source-ID order. Strictly disjoint bounding boxes certify
 separation; touching/overlapping boxes are an explicit unsupported context.
+Explicit rigid mapped occurrences through one shape-definition root are supported;
+see `docs/step_mapped_occurrences.md` for placement and assembly restrictions.
 This mesh import does not reconstruct analytic CAD Face/Curve parametrization.
 Nonplanar or nonlinear
 face geometry, open shells, mixed point-cloud topology, and files without a
@@ -343,6 +345,8 @@ function import_step(path::AbstractString; fill::Bool=true)
     occursin("ISO-10303-21",source) || throw(ArgumentError(
         "import_step: $path is not an ISO-10303-21 STEP file"))
     entities=parse_step_entities(source)
+    occurrences=_step_occurrence_import(entities,fill)
+    occurrences===nothing || return occurrences
     roots=_step_solid_roots(entities)
     length(roots)>1 && return _brep_assembly(_step_assembly_records(roots,entities),fill,"import_step")
     breps=[ent for ent in sort!(collect(values(entities)); by=e->e.id)
@@ -407,6 +411,7 @@ function _filled(surface::Mesh, caller)
 end
 
 include("BRepAssembly.jl")
+include("BRepStepOccurrences.jl")
 include("BRepPlanarFaces.jl")
 include("BRepPlanePcurves.jl")
 

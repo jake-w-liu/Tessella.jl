@@ -412,6 +412,22 @@ function _geo_import_cleared_native_factory!(m,context,file,caller)
     return true
 end
 
+# A real file frontend can stage this same importer without generating a GEO
+# wrapper or installing a temporary model in the live API session.
+function _geo_stage_mesh_file(file;context_lc=1.0,forced_bbox=false)
+    model=GeoModel();context=_GeoNumericContext()
+    model.name=splitext(basename(file))[1]
+    context.file_name=String(file)
+    context.native_context_lc=context_lc
+    context.native_context_forced_bbox=forced_bbox
+    _geo_import_mesh_file!(model,context,file,"API.open")
+    return (model=model,mesh=context.mesh,params=nothing,transfinite_tri=nothing,
+        mesh_node_max=context.mesh_node_max,mesh_element_max=context.mesh_element_max,
+        native_context_lc=context.native_context_lc,
+        native_context_forced_bbox=context.native_context_forced_bbox,
+        native_element_lookup_receipt=context.native_element_lookup_receipt)
+end
+
 function _geo_import_mesh_file!(m,context,file,caller)
     _geo_import_cleared_native_factory!(m,context,file,caller) && return nothing
     mixed,identities=Elements._read_mixed_msh_with_identities(file)

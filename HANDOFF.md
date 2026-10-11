@@ -12,7 +12,80 @@ small real fixtures. Full native-oracle sweeps, source/AST audits, memory stress
 benchmarks, the 22 HFSS cases, aggregate validation, and external ASCENT solves
 are opt-in campaigns. See [test/README.md](test/README.md).
 
-### Current model export, embedded Surface/collections, open seams and prismatic fill
+### Current atomic model opening, mapped STEP, planar sheets and variable metrics
+
+The merged Source adds atomic direct GEO/MSH opening, literal rigid mapped
+STEP occurrences, one/two-Tri embedded planar sheets and an explicit variable
+metric ordinary planar Surface constructor. Final ordinary214/214 passes on
+BOTH supported runtimes on the same frozen Source, actual zero: Julia1.12.7
+49.28 s/body11.1 s; Julia1.13.1 38.93 s/body10.9 s. Receipts are
+`test/tmp/ordinary_default_214_{112,113}_20261011.*`. Only2 mapped-boundary and3
+file-open checks enter the default; volume/native/solver campaigns stay opt-in.
+
+Selected reviewed packets and bounded qualification:
+
+- `C:/tmp/tessella_takeover_model_import_20261011/selected_model_import_generation_packet.json`:
+  final helper84edf14e plus six other Source files, public/generated-GEO tests,
+  default3 and scope doc. Final88 pass Julia1.13 actual zero/43.45 s including
+  loading. True `API.open` retains nonempty prior models/views, reuses empty
+  current slots and stages option/context/cache/lookup/data-view/diagnostic
+  publication. Existing `open_geo!` shares the atomic failure contract.
+  Actual2.2/4.1 ASCII/binary UIDs, ownership, all three data kinds/two steps,
+  periodic/partition/ghost records and held views pass. Earlier generated-GEO
+  failure was exact midpoint comparison (native.4999999999986921 versus carrier.5),
+  not a proven orphan bug. The final detached stage restores covered record
+  mirrors using actual cache UIDs/parameters. The genuine empty-slot tuple-return
+  bug was fixed. Earlier failed receipts and77-Source packet remain.
+  See [model opening](docs/model_import.md).
+- `C:/tmp/tessella_step_mapped_occurrences_20261011/selected_mapped_occurrences_packet.json`:
+  two Source files, retained public-OCC-derived fixture, opt-in31+default2 and
+  doc. Final33 pass Julia1.12 actual zero/37.27 s including30.65 s precompile;
+  bodies5.8 s. One explicit shape-definition root expands actual mapped-item
+  paths and nested rigid AXIS2 frames without emitting source definitions as
+  extra solids. Pinned native frame law is documented, with shifted-origin
+  and nested opaque controls. Optional-direction parser transport failure is
+  preserved; corrected default-X fallback is independently reviewed. Existing
+  positive-fill/shell/independence/owner/UID/MSH4 certificates remain.
+  Cartesian operators/general representation relationships stay guarded;
+  later read-only8-field operator observations are future work, not this gate.
+  See [mapped STEP](docs/step_mapped_occurrences.md).
+- `C:/tmp/tessella_hybrid_planar_sheet_20261011/selected_planar_sheet_packet.json`:
+  Surface488d7a94+Sizing412f30d7, opt-in49 and14, scope doc. Preceding axis-aligned
+  two-Tri49 pass Julia1.12 actual zero/66.50 s including loading; original
+  single-Tri40 pass on that preceding Source, actual zero/26.86 s warm.
+  Review found sign-only `orient3` incorrectly compared with a dimensional
+  planarity tolerance. Current gate uses the adaptive determinant magnitude
+  and finite bounds; actual public rotated lower Surface/constructor/containment
+  plus nonplanar atomic rejection pass14 on Julia1.13, actual zero/41.41 s,
+  body8.17 s, without volume generation. Older49+40 qualify their preceding
+  gate; the packet preserves that distinction. Both actual facets and all five
+  sheet edges remain protected by the unchanged recovery/final certificates.
+  See [planar sheets](docs/hybrid_embedded_surfaces.md).
+- `C:/tmp/tessella_takeover_metric_surface_20261011/ready.json`:
+  one Model include and new helper6d7475b5, opt-in33 and scope doc. Final33 pass
+  Julia1.12 actual zero/5.82 s warm on unchanged Source. Explicit tensor Model
+  construction uses actual lower authority, two-parent interior bisection,
+  checked UID births and final sampled full-world-metric/area/boundary checks.
+  Initial fixture target2.0 correctly rejected an actual TF interval norm
+  2.0000000000052314; target2.01 corrects the fixture without weakening Source.
+  Failed receipt/actual boundary dump remain. No default unstructured run.
+  See [variable tensor Surface](docs/metric_model_surfaces.md).
+
+Root's scoped integration manifests are
+`test/tmp/integrated_{model_import,mapped_occurrences,planar_sheet,metric_surface}_paths_20261011.json`.
+Only selected paths were copied; all saved Source bases matched (LF normalization
+for Git is accounted for). Source remained frozen during final package checks.
+Preserve the two unrelated untracked files and all failed receipts.
+
+Next isolated Source: translated periodic pairs in two separated hybrid Regions
+(`concise_tests`), an explicit API metric frontend (`implementation_audit`),
+and direct session `merge` staging (`devin_reconcile`). Native6 opaque tensor
+controls keep the same actual mesh when transverse tensor entries change;
+native7 changes interiors and is a real BAMG kernel gap. Keep native6 semantics
+and the native7 guard; do not relabel bisection as BAMG. Continue the full remaining
+backlog after normal publication; this bounded increment does not complete P1–P6.
+
+### Preceding model export, embedded Surface/collections, open seams and prismatic fill
 
 The final merged Source passes ordinary `Pkg.test()` **209/209 on BOTH**:
 Julia 1.12.7 actual zero/46.49 s, body11.1 s; Julia 1.13.1 actual zero/39.23 s,
@@ -66,11 +139,9 @@ Main is frozen for these receipts. Selected path manifests are retained under
 Root composes only the partition API docstring after the writer packet; no
 behavioral overlap was discarded. Preserve the two unrelated untracked files.
 
-Next isolated work: atomic direct GEO/MSH `API.open` with preserved prior models
-and views (`devin_reconcile`); a two-Tri retained planar sheet (`concise_tests`);
-ordinary planar directional metric consumption (`implementation_audit`). These
-are not qualified by the current receipt. Coordinate runtime/Source ownership,
-review exact selected deltas and continue the full goal after this push.
+That batch was normally pushed as `f0bb38505b089a6e4b988fc0990aca6fea2e63c6`,
+remote exact SHA verified. Its209-check receipts qualify that Source. The current
+ledger above supersedes its atomic-open/two-Tri/metric continuation queue.
 
 ### Preceding high-order VTK, embedded Curve and lower-BRep partitions
 
@@ -421,15 +492,18 @@ backlog rather than the older expensive verification queue:
    Multi-region batching and one translated copied pair in a single hybrid Region
    and one strictly interior Point in a convex hybrid Region are implemented;
    one actual connected Line2 Curve in a convex hybrid Region is also implemented.
-   One strictly interior retained Tri3 Surface with actual Point/Line boundaries
-   is implemented too. Multiple retained Point/Curve constraints are implemented
-   in one convex Region. Periodic multi-Region, larger/Quad sheets and general
+   One strictly interior planar Surface with one or two actual Tri3 cells and
+   actual Point/Line boundaries is implemented too. Multiple retained Point/Curve constraints are implemented
+   in one convex Region. Periodic multi-Region, sheets beyond two Tri cells,
+   Quad sheets and general
    hybrid recovery remain open.
    Public region reverse/smoothing are
    native no-ops, so they are not missing Gmsh Region features.
 2. Complete general CAD assembly and trimmed/periodic NURBS topology. Recognized
-   explicit independent STEP/IGES mesh roots are implemented; CAD occurrence
-   transforms, analytic Face reconstruction and general assembly are still open.
+   explicit independent STEP/IGES mesh roots are implemented. One explicit STEP
+   representation root with nested rigid mapped occurrences is implemented;
+   other occurrence transformations, analytic Face reconstruction and general
+   assembly remain open.
    Planar STEP/IGES Face holes, including143 boundaries, are implemented;
    explicit190 Form1 UV charts and proper rigid124 chains are implemented;
    curved trims and general NURBS topology remain unfinished.
@@ -442,7 +516,10 @@ backlog rather than the older expensive verification queue:
 4. Complete general metric-driven generation and the native automatic-sizing
    octree path. Existing Surface meshing and Volume refinement consume directional
    metrics; constant-tensor boxes/shared-Region grids now generate meshes too.
-   Variable-metric generation and automatic-sizing parity remain unfinished.
+   An explicit variable-tensor ordinary planar Surface constructor is implemented,
+   with unchanged lower boundaries and a sampled metric-edge certificate.
+   Native anisotropic algorithm/API behavior, variable-metric volumes and
+   automatic-sizing parity remain unfinished.
 5. Extend mixed-surface relocation and hybrid/high-order optimization and
    Netgen-equivalent behavior. Winslow1 and nonzero separate/shared-Tri Region
    batches are implemented. Shared-Quad two-Region components are explicitly
@@ -461,7 +538,8 @@ backlog rather than the older expensive verification queue:
    Model CSV/VTK, list TXT/CSV/VTK and Curve CLI generation/version/binary flags
    are implemented within the linked format scopes. CLI sizing/order and
    standalone help/version controls are implemented too. Direct current-model
-   MSH2.2/4.1 writing is implemented; atomic direct-file opening is next.
+   MSH2.2/4.1 writing and atomic direct GEO/MSH opening are implemented.
+   Session merging and additional formats remain open.
 10. Close native matching chronology and requirement-level differential parity.
     Large P6/HFSS/ASCENT campaigns remain opt-in verification, not routine tests.
 

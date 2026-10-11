@@ -1644,6 +1644,8 @@ mutable struct _GeoNumericContext
     native_numeric_option_callback::Any
     # Selector4 can terminate after publishing an earlier Face prefix.
     native_recombine_partial_callback::Any
+    # Optional detached diagnostics for atomic API file preparation.
+    native_recombine_diagnostics::Any
 end
 _GeoNumericContext()=_GeoNumericContext(
     Dict{String,Float64}(),Dict{String,Vector{Float64}}(),Set{String}(),
@@ -1660,7 +1662,7 @@ _GeoNumericContext()=_GeoNumericContext(
     Tuple{Int,Int,Union{Mesh,MixedMesh}}[],Vector{Int32}[],nothing,
     Union{Nothing,Vector{Float64}}[],UInt64(0),UInt64(0),
     Dict{Tuple{Int,Int},Vector{Int}}(),true,true,nothing,
-    Dict{Int,Any}(),nothing,false,1.0,false,nothing,nothing,nothing,nothing,nothing,nothing)
+    Dict{Int,Any}(),nothing,false,1.0,false,nothing,nothing,nothing,nothing,nothing,nothing,nothing)
 
 # Thrown where the upstream grammar fails to reduce — a bison syntax error.
 # `execute_geo` catches it per statement, records `syntax error (<token>)`

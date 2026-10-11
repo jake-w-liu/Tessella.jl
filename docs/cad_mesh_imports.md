@@ -21,8 +21,11 @@ the directory-entry type. Unsupported geometric entity types are rejected;
 supported type-406 property records can accompany the geometry.
 
 This operation returns a mesh. It does not populate the Model/OCC registry,
-reconstruct analytic CAD Face/Curve parameter maps or STEP occurrence
-transforms, or provide general assembly/Boolean topology. Trimmed and periodic
+reconstruct analytic CAD Face/Curve parameter maps or provide general
+assembly/Boolean topology. A [mapped STEP occurrence producer](step_mapped_occurrences.md)
+supports one explicit representation root, rigid axis-placement targets and
+nested maps of supported source solids; other assembly transformations remain
+guarded. Trimmed and periodic
 NURBS topology remains a separate implementation track.
 
 Supported planar STEP/IGES Faces can have one outer wire and disjoint inner

@@ -8,7 +8,8 @@ function _geo_recombine_bipartite_plan!(m,context,caller)
         options[string(family,'.',member)]=something(
             _geo_option_number(context,family,0,member),default)
     end
-    diagnostics=Model._MODEL_NATIVE_RECOMBINE_DIAGNOSTICS[]
+    diagnostics=context.native_recombine_diagnostics===nothing ?
+        Model._MODEL_NATIVE_RECOMBINE_DIAGNOSTICS[] : context.native_recombine_diagnostics
     diagnostics!==nothing || throw(ArgumentError(
         "$caller: native experimental diagnostic publication is unavailable"))
     skipped=!iszero(options["General.AbortOnError"]) && diagnostics.errors()>0
