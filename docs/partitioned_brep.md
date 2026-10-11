@@ -25,11 +25,13 @@ The supported input has positive manifold Tet4 cells, complete discrete Tri3
 Region boundaries, no pre-existing Curve boundaries/cells or Point/Curve
 vertex classifications, and no periodic, high-order or parametric storage.
 Each original Tri3's assigned partition must match an actual Tet facet carrier,
-and every partition must own a Tet4. Every new seam must be a closed polygon
-on one original Surface, with exactly two original lower triangle incidences
-at each seam edge. Open or branching seams, triple junctions and unsupported
-multi-Surface seams reject before publication. Orphan node classifications
-remain retained.
+and every partition must own a Tet4. The first qualified increment admitted closed seams on one original Surface.
+The later [open-seam producer](partitioned_open_seams.md) also admits
+nonbranching paths across original Surfaces, while recording and preserving
+every literal original border edge. New interfaces retain complete Curve-edge
+coverage and complete child Region coverage. Branches, triple junctions,
+missing lower carriers and pre-existing Curve/Point roles remain guarded.
+Orphan node classifications remain retained.
 
 When an interface coincides with an original Tri3 support, topology production
 rejects before publication: distinct overlapping geometric roles are not yet
@@ -49,7 +51,7 @@ Discrete entity creation validates the positive registry entity for a signed
 boundary tag while retaining its incidence sign, as independently observed
 through the public Gmsh4.15.2 API.
 
-Qualification uses two Tets, six exterior Tri3 cells on one closed Surface,
+The first increment's qualification uses two Tets, six exterior Tri3 cells on one closed Surface,
 one three-edge interface seam, analytic positive material volumes, retained
 ElementData, detached copies, ASCII/binary MSH4 round trips, true public Merge,
 unpartition, ghost-only mode and an atomic coincident-role rejection. A larger

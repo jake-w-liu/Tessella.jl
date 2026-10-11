@@ -78,7 +78,8 @@ function quality!(a,hulls)
     return flips
 end
 
-function recover(kernel,facets;seed=1,component=nothing,embedded_segments=NTuple{2,Int32}[])
+function recover(kernel,facets;seed=1,component=nothing,embedded_segments=NTuple{2,Int32}[],
+                 embedded_facets=NTuple{3,Int32}[])
     all(segment->length(segment)==2 && allunique(segment) &&
         all(row->0<row<=kernel.count,segment),embedded_segments) || throw(A.Unsupported(
         "hybrid embedded segments contain missing or duplicate current rows"))
@@ -103,11 +104,24 @@ function recover(kernel,facets;seed=1,component=nothing,embedded_segments=NTuple
     else
         parentmodule(@__MODULE__)._model_native_hybrid_recovery_multiplicities(component,kernel,faces)
     end
+    # Interior sheets are constraints with incidence two, not exterior
+    # facets and not part of the closed boundary-edge admission above.
+    interior_faces=NTuple{3,Int32}[Tuple(Int32.(face)) for face in embedded_facets]
+    for face in interior_faces
+        allunique(face) && all(row->0<row<=kernel.count,face) || throw(A.Unsupported(
+            "hybrid embedded facets contain missing or duplicate current rows"))
+        key=A.facekey(face)
+        haskey(multiplicities,key) && throw(A.Unsupported(
+            "hybrid embedded facet repeats a boundary or constraint panel"))
+        multiplicities[key]=2
+    end
+    exterior=Set(face for (face,count) in multiplicities if count==1)
     a=A.Arena(kernel;seed)
     initial_hulls=C.initial_hulls!(a)
-    protocol=R.recoverboundary!(a,faces;embedded_segments)
+    protocol=R.recoverboundary!(a,faces;embedded_segments,embedded_facets=interior_faces)
     A.consistency(a) || throw(A.Unsupported("hybrid recovered face bonds are not reciprocal"))
-    carving=C.carve!(a,initial_hulls)
+    carving=isempty(interior_faces) ? C.carve!(a,initial_hulls) :
+        C.carve!(a,initial_hulls;exterior_facets=exterior)
     hulls=Set(carving.hulls)
     lawson=L.lawson!(a,hulls)
     for record in lawson.unflippable
@@ -138,9 +152,10 @@ function recover(kernel,facets;seed=1,component=nothing,embedded_segments=NTuple
     all(count->count<=2,values(counts)) || throw(A.Unsupported(
         "hybrid final constructor cells are not a manifold"))
     observed=Set(face for (face,count) in counts if count==1)
-    exterior=Set(face for (face,count) in multiplicities if count==1)
     observed==exterior && all(get(counts,face,0)==count for (face,count) in multiplicities) || throw(A.Unsupported(
         "hybrid final cell exterior differs from the owned constructor facets"))
+    all(face->A.facekey(face) in a.protected_faces,interior_faces) || throw(A.Unsupported(
+        "hybrid recovery lost a protected embedded Surface facet"))
     for segment in embedded_segments
         A.edgekey(segment...) in a.protected_segments &&
             any(cell->all(row->row in cell,segment),cells) || throw(A.Unsupported(

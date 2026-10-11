@@ -41,12 +41,16 @@ full tests are in `test/geometry/brep_plane190_{uv,transform}_functional_test.jl
 Opaque Gmsh 4.15.2 CAD imports confirmed Face geometry and areas; they generated
 no meshes and establish no native meshing or element-order parity.
 
-The positive transformed-hole fill uses an exact quarter-turn. Arbitrary
-rotation is verified for Surface import. A diagnostic fill of an arbitrary
-rotated nonstar-shaped hole was stopped after 415.44 s in unchanged generic
-conforming-Delaunay recovery; its failed receipt and verified process identity
-remain in the isolated transform packet. Arbitrary-rotation hole fill and its
-performance remain unqualified.
+The first transformed-hole fill used an exact quarter-turn. Its arbitrary
+rotation diagnostic was stopped after415.44 s in the then-unchanged generic
+conforming-Delaunay recovery; the failed receipt and process identity remain
+in the isolated transform packet. The later [certified prismatic fill](prismatic_fill.md)
+now fills that exact retained arbitrary-rotation fixture with unchanged16
+vertices/32boundary triangles and24positive Tets, volume0.75 and an empty hole.
+Its final opt-in30-check run exits zero; the rotated direct/public group takes
+3.1 s. This qualifies that bounded identical-cap topology, not arbitrary
+rotated polyhedron performance. The unequal-cap quarter-turn keeps its
+existing fully certified fallback.
 
 The chain increment passed 26 assertions on Julia 1.12, actual exit zero in
 32.48 s including compilation; body 2.7 s. Two cheap Surface assertions join

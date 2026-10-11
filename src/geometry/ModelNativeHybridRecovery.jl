@@ -350,11 +350,12 @@ end
 
 
 
-function recoverboundary!(arena,facets;embedded_segments=NTuple{2,Int32}[])
+function recoverboundary!(arena,facets;embedded_segments=NTuple{2,Int32}[],
+                          embedded_facets=NTuple{3,Int32}[])
 
     segments=Tuple{Int32,Int32}[];seen=Set{Tuple{Int32,Int32}}()
 
-    for face in facets,index in 1:3
+    for face in vcat(facets,embedded_facets),index in 1:3
 
         edge=(Int32(face[index]),Int32(face[mod1(index+1,3)]))
 
@@ -396,7 +397,7 @@ function recoverboundary!(arena,facets;embedded_segments=NTuple{2,Int32}[])
 
     end
 
-    face_stack=A.native_stack!(arena,NTuple{3,Int32}[Tuple(Int32.(face)) for face in facets])
+    face_stack=A.native_stack!(arena,NTuple{3,Int32}[Tuple(Int32.(face)) for face in vcat(facets,embedded_facets)])
 
     face_order=NTuple{3,Int32}[]
 

@@ -24,7 +24,44 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
-### Current Lagrange VTK, embedded Curve and Tri3 BRep partitions (2026-10-11)
+### Current direct model export, embedded sheets/collections and open seams (2026-10-11)
+
+Ordinary `Pkg.test()` passes **209/209 on both supported runtimes**, actual zero,
+on the same final Source: Julia1.12.7 **46.49 s**, body**11.1 s**; Julia1.13.1
+**39.23 s**, body**10.7 s**. Exact receipts:
+`test/tmp/ordinary_default_209_{112,113}_20261011.*`. Only two small current-model
+export assertions enter the default; volume generation stays opt-in.
+
+[Direct model MSH writing](docs/model_export.md) consumes the current actual
+cache without a view, preserving configured 2.2/4.1 ASCII/binary, filtering,
+UIDs and retained metadata atomically. Final70: Julia1.13 actual zero/5.22 s warm.
+[Open partition seams](docs/partitioned_open_seams.md) use actual original
+Surface borders as endpoint witnesses and retain complete interface/facet
+coverage. Final28: Julia1.13 actual zero/35.98 s.
+
+One [retained Tri3 Surface](docs/hybrid_embedded_surfaces.md) is recovered and
+protected as an interior facet; the carving mask remains exterior-only. Final40:
+Julia1.12 actual zero/58.33 s including compilation, with existing Curve32
+actual zero/24.86 s on that Source. A later [Point/Curve collection](docs/hybrid_constraint_collections.md)
+extension passes53 on its Source, Julia1.12 actual zero/67.83 s including
+34.53 s compilation. Two Points/two Curves retain all actual lower records,
+66Tet4+6Pyr5 and unit volume; the original single-Curve32 passes once on that
+collection Source, actual zero/26.80 s warm. General sheets/Surface-containing
+collections and embedded multi-Region contexts remain open.
+
+[Literal prismatic fill](docs/prismatic_fill.md) resolves the bounded rotated
+holed-prism case with paired actual cap supports, source side diagonals and
+unchanged full boundary certification. Final30: Julia1.12 actual zero/22.09 s;
+rotated direct/public11 body3.1 s. Unequal supports use the existing fallback,
+qualified separately; no broad polyhedron performance claim follows.
+
+The [current handoff](HANDOFF.md#takeover-2026-10-11) binds exact packets,
+failed receipts and remaining implementations. This normal implementation
+publication follows Main26b; Git records its publication SHA. Full P1–P6 remains
+open. Atomic model-file opening, larger planar sheets and ordinary directional
+metric generation are the next isolated implementations.
+
+### Preceding Lagrange VTK, embedded Curve and Tri3 BRep partitions (2026-10-11)
 
 Complete [higher-order VTK](docs/model_view_exports.md) cells retain every
 catalogued Tri/Quad/TetP3–P10 and Hex/PrismP3–P9 node and value. VTK5.1 cell

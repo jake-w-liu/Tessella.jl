@@ -2,9 +2,12 @@ struct _ModelNativeHybridSizeSeeds
     model::GeoModel
     input::_ModelMeshAuthority
     records::Vector{NamedTuple}
+    embedded_surface::Any
 end
+_ModelNativeHybridSizeSeeds(model,input,records)=
+    _ModelNativeHybridSizeSeeds(model,input,records,nothing)
 
-function _model_native_hybrid_global_size_seeds(m,input,caller)
+function _model_native_hybrid_global_size_seeds(m,input,caller;embedded_surface=nothing)
     input isa _ModelMeshAuthority && input.mesh!==nothing && input.mesh.entity_data!==nothing ||
         throw(ArgumentError("$caller: hybrid embedded sizing lacks actual current lower authority"))
     all(owner->owner[1]!=3 || haskey(m.volumes,owner[2]),keys(m.embeds)) || throw(ArgumentError(
@@ -39,6 +42,31 @@ function _model_native_hybrid_global_size_seeds(m,input,caller)
     end
     entities=Set{Tuple{Int,Int}}()
     for region in sort!(collect(keys(m.volumes))),entity in get(m.embeds,(3,region),NTuple{2,Int}[])
+        if entity[1]==2
+            embedded_surface!==nothing && embedded_surface.model===m &&
+                embedded_surface.region==region && embedded_surface.surface==entity[2] ||
+                throw(ArgumentError(
+                "$caller: hybrid embedded Face recovery requires a separate native constructor receipt"))
+            _model_native_hybrid_surface_source_certificate(embedded_surface,input,
+                data.external_node_tags,actual.coords,caller)
+            triangle=embedded_surface.triangle
+            get(current_cells,triangle.uid,nothing)==(2,Int32(entity[2]),triangle.nodes) ||
+                throw(ArgumentError("$caller: hybrid sheet sizing changes its actual Tri3 UID/owner/corners"))
+            positions=Dict(uid=>row for (row,uid) in enumerate(data.external_node_tags))
+            # The actual Face edges contribute incident lengths at its bound
+            # lower vertices. These are not invented direct Point embeddings.
+            for index in 1:3
+                first=positions[triangle.nodes[index]]
+                last=positions[triangle.nodes[mod1(index+1,3)]]
+                x=actual.coords[1,first]-actual.coords[1,last]
+                y=actual.coords[2,first]-actual.coords[2,last]
+                z=actual.coords[3,first]-actual.coords[3,last]
+                edge_length=sqrt(x*x+y*y+z*z)
+                push!(records,record(first,entity,triangle.uid,edge_length))
+                push!(records,record(last,entity,triangle.uid,edge_length))
+            end
+            continue
+        end
         entity[1] in (0,1) || throw(ArgumentError(
             "$caller: hybrid embedded Face recovery requires a separate native constructor receipt"))
         entity in entities && continue
@@ -97,13 +125,14 @@ function _model_native_hybrid_global_size_seeds(m,input,caller)
             count>0 || throw(ArgumentError("$caller: hybrid embedded Curve has no current Line constructor"))
         end
     end
-    return _ModelNativeHybridSizeSeeds(m,input,records)
+    return _ModelNativeHybridSizeSeeds(m,input,records,embedded_surface)
 end
 
 function _model_native_hybrid_seed_records(receipt)
     receipt isa _ModelNativeHybridSizeSeeds || throw(ArgumentError(
         "hybrid embedded sizing: missing operation-owned lower seed receipt"))
-    current=_model_native_hybrid_global_size_seeds(receipt.model,receipt.input,"hybrid embedded sizing")
+    current=_model_native_hybrid_global_size_seeds(receipt.model,receipt.input,"hybrid embedded sizing";
+        embedded_surface=receipt.embedded_surface)
     isequal(current.records,receipt.records) || throw(ArgumentError(
         "hybrid embedded sizing: current lower UID/cell/XYZ/UV or prescribed size changed"))
     return receipt.records

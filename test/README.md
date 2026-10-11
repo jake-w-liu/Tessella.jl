@@ -42,8 +42,10 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
-| Julia 1.12.7 | Ordinary `Pkg.test()`, automatic minimal compilation | 207 | 45.23 s |
-| Julia 1.13.1 | Ordinary `Pkg.test()`, automatic minimal compilation | 207 | 37.67 s |
+| Julia 1.12.7 | Ordinary `Pkg.test()`, automatic minimal compilation | 209 | 46.49 s |
+| Julia 1.13.1 | Ordinary `Pkg.test()`, automatic minimal compilation | 209 | 39.23 s |
+| Julia 1.12.7 | Preceding ordinary package invocation | 207 | 45.23 s |
+| Julia 1.13.1 | Preceding ordinary package invocation | 207 | 37.67 s |
 | Julia 1.12.7 | Preceding ordinary package invocation | 203 | 46.00 s |
 | Julia 1.13.1 | Preceding ordinary package invocation | 203 | 39.12 s |
 | Julia 1.12.7 | Preceding ordinary package invocation | 201 | 44.88 s |
@@ -61,11 +63,12 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current207-assertion package bodies took10.1 s on both Julia1.12.7 and
-1.13.1. Cold elapsed times include about30/25 s of precompilation.
+The current 209-assertion package bodies took 11.1/10.7 s on Julia 1.12.7/1.13.1.
+Cold elapsed times include about 31/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. Logs and actual exit-zero receipts are
-`test/tmp/ordinary_default_207_{112,113}_20261011.*`. The preceding203-check
+`test/tmp/ordinary_default_209_{112,113}_20261011.*`. The preceding 207-check
+bodies took 10.1 s on both runtimes and qualify their own Source. The preceding203-check
 bodies took10.4 s on both; their receipts remain separate. The preceding 201-check
 bodies took 9.7/9.1 s; their receipts remain separate. The earlier 192-check
 bodies took 9.3/9.7 s and remain recorded separately.

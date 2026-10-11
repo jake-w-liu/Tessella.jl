@@ -12,7 +12,67 @@ small real fixtures. Full native-oracle sweeps, source/AST audits, memory stress
 benchmarks, the 22 HFSS cases, aggregate validation, and external ASCENT solves
 are opt-in campaigns. See [test/README.md](test/README.md).
 
-### Current high-order VTK, embedded Curve and lower-BRep partitions
+### Current model export, embedded Surface/collections, open seams and prismatic fill
+
+The final merged Source passes ordinary `Pkg.test()` **209/209 on BOTH**:
+Julia 1.12.7 actual zero/46.49 s, body11.1 s; Julia 1.13.1 actual zero/39.23 s,
+body10.7 s. Receipts: `test/tmp/ordinary_default_209_{112,113}_20261011.*`.
+The default adds two direct-model export assertions; actual volume generation,
+SDK observations and external readers remain opt-in. This batch follows Main26b;
+Git records its normal implementation publication SHA.
+
+Exact reviewed packets and their scoped qualification:
+
+- `C:/tmp/tessella_takeover_model_export_20261011/selected_model_export_packet.json`:
+  direct `API.write(filename)` on the real current model, no view required.
+  Configured MSH2.2/4.1 ASCII/binary, physical filtering/SaveAll, actual source
+  UIDs, periodic relations, partition/ghost metadata and retained model data
+  are transported atomically. Final68 opt-in+2default pass Julia1.13,
+  actual zero/5.22 s warm. Earlier failed physical-projection and payload-fixture
+  receipts remain. See [model export](docs/model_export.md).
+- `C:/tmp/tessella_takeover_partition_open_seams_20261011/ready.json`:
+  complete Tri3 BRep partition seams admit nonbranching open paths only where
+  their endpoints are witnessed by actual original Surface borders. All
+  interface Curve edges and Region facets remain fully certified. Final26
+  plus closed-default2 pass Julia1.13, actual zero/35.98 s.
+  See [open seams](docs/partitioned_open_seams.md).
+- `C:/tmp/tessella_hybrid_embedded_surface_20261011/selected_embedded_surface_packet.json`:
+  nine Source files retain one actual interior Tri3 Surface, its Point/Line
+  boundary and real cell identities. Interior faces have multiplicity2 and
+  are protected through recovery/insertion/optimization; only exterior faces
+  drive carving. Final40 pass Julia1.12 actual zero/58.33 s including loading;
+  original Curve32 passes on that nine-file Source, actual zero/24.86 s warm.
+  The initial sizing-guard failure remains preserved. These receipts precede
+  the collection extension below. See [embedded Surface](docs/hybrid_embedded_surfaces.md).
+- `C:/tmp/tessella_hybrid_multi_constraints_20261011/selected_multi_constraints_packet.json`:
+  six Source files bind every actual Point/Curve witness to the same full
+  current inventory and constructor, retain the union of actual UIDs and
+  protect every literal segment. Final53 pass Julia1.12 actual zero/67.83 s
+  including34.53 s compilation; two Points/two Curves retain four Line2 cells,
+  66Tet4+6Pyr5 and positive unit volume. Original single-Curve32 passes on the
+  collection Source, actual zero/26.80 s warm. Surface-containing collections
+  and embedded multi-Region contexts remain guarded. See [constraint collections](docs/hybrid_constraint_collections.md).
+- `C:/tmp/tessella_takeover_prismatic_fill_20261011/ready.json`:
+  bounded rigid prismatic recognition uses actual paired cap rows, identical
+  cap triangles and literal side diagonals to produce a staircase Tet fill.
+  Full existing boundary/positive-volume certification remains mandatory.
+  Final30 pass Julia1.12 actual zero/22.09 s; rotated direct/public11 body3.1 s,
+  fallback quarter-turn6 body17.1 s. The old rotated-hole timeout remains
+  historical. Unequal cap supports stay on the certified general fallback;
+  no coordinates are moved. See [prismatic fill](docs/prismatic_fill.md).
+
+Main is frozen for these receipts. Selected path manifests are retained under
+`test/tmp/integrated_{open_seams,surface,model_export,prismatic,multi_constraints}_paths_20261011.json`.
+Root composes only the partition API docstring after the writer packet; no
+behavioral overlap was discarded. Preserve the two unrelated untracked files.
+
+Next isolated work: atomic direct GEO/MSH `API.open` with preserved prior models
+and views (`devin_reconcile`); a two-Tri retained planar sheet (`concise_tests`);
+ordinary planar directional metric consumption (`implementation_audit`). These
+are not qualified by the current receipt. Coordinate runtime/Source ownership,
+review exact selected deltas and continue the full goal after this push.
+
+### Preceding high-order VTK, embedded Curve and lower-BRep partitions
 
 This reviewed Source integrates complete catalogued VTK Surface/Volume
 Lagrange layouts, one actual connected interior Line2 Curve in a convex hybrid
@@ -58,16 +118,11 @@ Generation3→set_order4→set_order1 retains primary UIDs/XYZ and leaves the
 ElementOrder option3 unchanged. Archived high-order receipts remain historical;
 the old curved V7 failures cannot support broad curved/native parity.
 
-Current scope documents are [VTK](docs/model_view_exports.md),
-[embedded Curve](docs/hybrid_embedded_curves.md) and
-[partition BRep](docs/partitioned_brep.md). Continue genuine remaining tasks
-below after the normal implementation push. Isolated next work is one retained
-interior Tri3 Surface (`concise_tests`), direct current-model `API.write`
-MSH export (`devin_reconcile`) and remaining partition lower-BRep composition
-(`implementation_audit`). None is qualified by this207-check receipt.
-Coordinate Source/runtime ownership,
-copy selected reviewed deltas only, and preserve unrelated files and failed
-receipts. Do not run the old multi-hour aggregate as a routine gate.
+That batch was normally published as `26b37e4d4e1f27dcd6df923928bf73bbe71ac0b0`,
+remote exact SHA verified. Its 207-check receipts qualify only that Source.
+The current ledger above supersedes its embedded-Surface/model-export/open-seam
+continuation queue. Preserve exact failed receipts and selected packets; no old
+multi-hour aggregate is a routine gate.
 
 ### Preceding shared-Region Pyramid modes and IGES matrix chains
 
@@ -366,7 +421,10 @@ backlog rather than the older expensive verification queue:
    Multi-region batching and one translated copied pair in a single hybrid Region
    and one strictly interior Point in a convex hybrid Region are implemented;
    one actual connected Line2 Curve in a convex hybrid Region is also implemented.
-   Periodic multi-Region and embedded Surface/general hybrid recovery remain open.
+   One strictly interior retained Tri3 Surface with actual Point/Line boundaries
+   is implemented too. Multiple retained Point/Curve constraints are implemented
+   in one convex Region. Periodic multi-Region, larger/Quad sheets and general
+   hybrid recovery remain open.
    Public region reverse/smoothing are
    native no-ops, so they are not missing Gmsh Region features.
 2. Complete general CAD assembly and trimmed/periodic NURBS topology. Recognized
@@ -395,14 +453,15 @@ backlog rather than the older expensive verification queue:
 7. Complete boundary-layer Extrude and pipe frontends beyond ordinary Layers.
 8. Extend partition interface/ghost production to remaining lower BRep, mixed
    families and parallel paths. Bare Tet4 and complete discrete Tri3 boundaries
-   with closed single-Surface seams, assignment labels and MSH4 metadata
-   transport are implemented.
+   with closed seams or open paths preserving actual original Surface borders,
+   assignment labels and MSH4 metadata transport are implemented.
 9. Complete remaining formats and post/CLI actions. Complete catalogued
    higher-order VTK Surface/Volume layouts are now implemented; Pyramid14 and
    incomplete higher-order layouts still reject to preserve every stored node.
    Model CSV/VTK, list TXT/CSV/VTK and Curve CLI generation/version/binary flags
    are implemented within the linked format scopes. CLI sizing/order and
-   standalone help/version controls are implemented too.
+   standalone help/version controls are implemented too. Direct current-model
+   MSH2.2/4.1 writing is implemented; atomic direct-file opening is next.
 10. Close native matching chronology and requirement-level differential parity.
     Large P6/HFSS/ASCENT campaigns remain opt-in verification, not routine tests.
 

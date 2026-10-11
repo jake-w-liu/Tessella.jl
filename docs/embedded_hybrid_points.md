@@ -21,8 +21,10 @@ cells with a closed connected interior Tet star. MSH4 export retains both the
 Point-owned node and its incidence in the volume mesh.
 
 Outside or boundary Points and missing Point15 provenance raise an error
-without publishing a replacement mesh. Multiple Points, embedded Curves or
-Surfaces, and embedded-Point multi-Region batches remain guarded. Existing
+without publishing a replacement mesh. [Multiple Point/Curve constraints](hybrid_constraint_collections.md)
+are supported in one convex Region; embedded multi-Region batches remain guarded. Separate receipt-bound
+producers also support one [Line2 Curve](hybrid_embedded_curves.md) or one
+[Tri3 Surface](hybrid_embedded_surfaces.md) in a convex hybrid Region. Existing
 exterior identity and signed-volume certificates also apply to this context.
 
 The opt-in regression is

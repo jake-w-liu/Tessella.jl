@@ -4990,6 +4990,8 @@ function tetrahedralize(surface::Mesh; rng_seed::Integer=1, optimize::Bool=false
             fanok && return _finish_interior(fan, extra)
         end
     end
+    prismatic=_try_prismatic_surface_fill(surface)
+    prismatic===nothing || return _finish_interior(prismatic,extra)
     exact_reason = ""
     if applicable(_recover_boundary_exact, surface)
         try
@@ -7218,5 +7220,6 @@ end
 include("Mesh3DGmshInsertion.jl")
 include("Mesh3DGmshOptimize.jl")
 include("Mesh3DMetricBox.jl")
+include("Mesh3DPrismaticFill.jl")
 
 end # module Mesh3D

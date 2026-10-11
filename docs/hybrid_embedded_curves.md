@@ -15,8 +15,11 @@ interior Tet star, and every segment must have one closed cyclic Tet edge link.
 The existing positive typed-cell, shell-incidence, Pyramid, ownership, and
 analytic-volume certificates remain required.
 
-This increment covers one Curve in one convex hybrid Region. Embedded Surface
-recovery, multiple embedded entities, multi-Region embedding, and recovery that
+This document covers one Curve in one convex hybrid Region. One separate
+[retained Tri3 Surface](hybrid_embedded_surfaces.md) is now supported by a
+receipt-bound producer. [Multiple Point/Curve constraints](hybrid_constraint_collections.md)
+are supported in one convex Region. Larger sheets, Surface-containing collections,
+multi-Region embedding, and recovery that
 needs the unavailable full-search or Steiner branches remain outside this
 admission. A Curve cannot succeed by leaving its nodes or segments unreferenced.
 

@@ -20,7 +20,8 @@ function _model_native_hybrid_registration_rows(constructor,plan,insertion,node_
         allunique(insertion.node_numbers) && allunique(node_uids) && all(!iszero,node_uids) ||
         throw(ArgumentError("$caller: hybrid registration lacks its actual insertion/Quad birth trace"))
     current=_model_native_hybrid_constructor_input(constructor.input,constructor.boundaries,
-        constructor.node_uids,constructor.coordinates,caller;embedded_point=constructor.embedded_point,embedded_curve=constructor.embedded_curve)
+        constructor.node_uids,constructor.coordinates,caller;embedded_point=constructor.embedded_point,embedded_curve=constructor.embedded_curve,
+        embedded_surface=constructor.embedded_surface,embedded_constraints=constructor.embedded_constraints)
     isequal(current,constructor) || throw(ArgumentError(
         "$caller: hybrid registration changes its restored Region constructor"))
     positions=Dict(uid=>Int32(row) for (row,uid) in enumerate(node_uids))
@@ -65,6 +66,10 @@ function _model_native_hybrid_volume_input(m,tag,input,caller)
     embedded_point===nothing || push!(used,embedded_point.record.uid)
     embedded_curve=_model_native_hybrid_embedded_curve_input(m,tag,input,caller)
     embedded_curve===nothing || union!(used,(record.uid for record in embedded_curve.records))
+    embedded_surface=_model_native_hybrid_embedded_surface_input(m,tag,input,caller)
+    embedded_surface===nothing || union!(used,(record.uid for record in embedded_surface.records))
+    embedded_constraints=_model_native_hybrid_embedded_constraints_input(m,tag,input,caller)
+    embedded_constraints===nothing || union!(used,(record.uid for record in embedded_constraints.records))
     # Only actual selected lower cell incidence enters the native Source.
     # Unreferenced lower rows remain global.
     ids=sort!(collect(used))
@@ -72,9 +77,11 @@ function _model_native_hybrid_volume_input(m,tag,input,caller)
     all(uid->haskey(rows,uid),ids) || throw(ArgumentError(
         "$caller: hybrid Source cell UID has no current authoritative vertex"))
     coords=actual.coords[:,Int32[rows[uid] for uid in ids]]
-    constructor=_model_native_hybrid_constructor_input(input,boundaries,ids,coords,caller;embedded_point,embedded_curve)
+    constructor=_model_native_hybrid_constructor_input(input,boundaries,ids,coords,caller;embedded_point,embedded_curve,embedded_surface,embedded_constraints)
     _model_native_hybrid_point_containment_certificate(constructor,caller)
     _model_native_hybrid_curve_containment_certificate(constructor,caller)
+    _model_native_hybrid_surface_containment_certificate(constructor,caller)
+    _model_native_hybrid_constraints_containment_certificate(constructor,caller)
     return constructor
 end
 
@@ -143,7 +150,8 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
         "$caller: native hybrid Pyramid optimization value must be finite"))
     m.meshing.algorithm_3d==1 &&
         (isempty(get(m.embeds,(3,tag),NTuple{2,Int}[])) ||
-         constructor.embedded_point!==nothing || constructor.embedded_curve!==nothing) &&
+         constructor.embedded_point!==nothing || constructor.embedded_curve!==nothing ||
+         constructor.embedded_surface!==nothing || constructor.embedded_constraints!==nothing) &&
         !get(m.meshing.reverse,(3,tag),false) && get(m.meshing.smoothing,(3,tag),0)==0 || throw(ArgumentError(
         "$caller: hybrid Volume requires its owned ordinary Delaunay constructor without additional planner attributes"))
     _model_native_hybrid_periodic_boundary_certificate(m,tag,constructor,periodic_surface_pairs,caller)
@@ -165,20 +173,28 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
     kernel=Ref{ModelNativeInitialTet.Kernel}()
     _model_native_initial_delaunay_fill(surface,order,options,caller;births=work,kernel_output=kernel)
     facets=_model_native_hybrid_recovery_facets(plan,constructor,order,caller)
-    curve_segments=_model_native_hybrid_curve_segments(constructor,plan.node_uids,caller)
+    curve_segments=vcat(_model_native_hybrid_curve_segments(constructor,plan.node_uids,caller),
+        _model_native_hybrid_constraints_segments(constructor,plan.node_uids,caller))
     kernel_segments=NTuple{2,Int32}[ntuple(slot->Int32(inverse[edge[slot]]),2) for edge in curve_segments]
-    interior=ModelNativeHybridInterior.recover(kernel[],facets;embedded_segments=kernel_segments)
+    sheet=_model_native_hybrid_surface_constraints(constructor,plan.node_uids,caller)
+    kernel_facets=NTuple{3,Int32}[ntuple(slot->Int32(inverse[face[slot]]),3) for face in sheet.facets]
+    protected_edges=Set(minmax(edge...) for edge in vcat(curve_segments,sheet.edges))
+    protected_faces=Set(Tuple(sort!(collect(face))) for face in sheet.facets)
+    interior=ModelNativeHybridInterior.recover(kernel[],facets;embedded_segments=kernel_segments,
+        embedded_facets=kernel_facets)
     tets=reduce(hcat,Int32[order[row] for row in cell] for cell in interior.cells)
     mesh=Mesh(plan.coordinates;tets=tets)
     _model_native_volume_cell_births!(work,mesh)
-    triangles=_model_native_hybrid_global_triangles(m,constructor.input,caller)
-    seeds=_model_native_hybrid_global_size_seeds(m,constructor.input,caller)
+    triangles=_model_native_hybrid_global_triangles(m,constructor.input,caller;
+        embedded_surface=constructor.embedded_surface)
+    seeds=_model_native_hybrid_global_size_seeds(m,constructor.input,caller;
+        embedded_surface=constructor.embedded_surface)
     insertion=ModelNativeHybridInsertion.refine(mesh,work.node_tags,work.element_tags,
         triangles,_ModelAlgorithmBackgroundSize(m,3,tag,options,size_field,caller),caller;
         minimize=_resolved_extend_from_boundary(m,3,tag)==2,
         extend=_resolved_extend_from_boundary(m,3,tag)>0,
         node_high_water=work.node_high_water,element_high_water=work.element_high_water,seeds,
-        protected_edges=Set(minmax(edge...) for edge in curve_segments))
+        protected_edges,protected_faces)
     smoothed=ModelNativeHybridInsertion.smooth(insertion,length(plan.node_uids),
         m.meshing.native_smoothing,caller)
     # Native negative factors select the normal-offset births and skip the
@@ -192,8 +208,11 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
     work.cell_source=relocated;work.element_tags=insertion.element_numbers
     work.node_tags=copy(insertion.node_numbers);work.node_high_water=insertion.node_high_water
     work.element_high_water=pyramids.element_high_water
+    final_sheet=_model_native_hybrid_surface_constraints(constructor,work.node_tags,caller)
+    final_edges=vcat(_model_native_hybrid_curve_segments(constructor,work.node_tags,caller),
+        _model_native_hybrid_constraints_segments(constructor,work.node_tags,caller),final_sheet.edges)
     mesh=_model_native_optimize_volume(relocated,options,work,constructor.input,
-        NTuple{3,Int32}[],_model_native_hybrid_curve_segments(constructor,work.node_tags,caller),caller)
+        final_sheet.facets,final_edges,caller)
     blocks=ElementBlock[ElementBlock(4,copy(mesh.tets)),ElementBlock(7,pyramids.nodes)]
     mixed=MixedMesh(mesh.coords,blocks)
     optimize_pyramids<0.0 && _model_native_hybrid_normal_apex_fixed_certificate(
@@ -202,6 +221,8 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
     _model_native_hybrid_volume_certificate(mixed,work.node_tags,constructor,caller)
     _model_native_hybrid_embedded_point_certificate(mixed,work.node_tags,constructor,caller)
     _model_native_hybrid_embedded_curve_certificate(mixed,work.node_tags,constructor,caller)
+    _model_native_hybrid_embedded_surface_certificate(mixed,work.node_tags,constructor,caller)
+    _model_native_hybrid_embedded_constraints_certificate(mixed,work.node_tags,constructor,caller)
     _model_native_hybrid_periodic_boundary_certificate(m,tag,constructor,periodic_surface_pairs,caller)
     geometry=_model_explicit_volume_geometry(m,tag,caller;_mesh_input=constructor.input,_mesh1d_options=options)
     _model_certify_explicit_volume_semantics(mixed,tag,geometry.expected_volume,
@@ -236,17 +257,18 @@ end
 function _model_native_hybrid_volume_scope(m,tag,constructor,caller)
     length(m.volumes)==1 && haskey(m.volumes,tag) || throw(ArgumentError(
         "$caller: native hybrid multi-Region constructor history is not implemented"))
-    _model_native_hybrid_global_triangles(m,constructor.input,caller)
+    _model_native_hybrid_global_triangles(m,constructor.input,caller;
+        embedded_surface=constructor.embedded_surface)
     return nothing
 end
 
 # Sizing sees every current GFace Tri constructor, including a declared
 # unrelated Face sharing one selected UID. Its foreign rows contribute edge
 # lengths without entering the Region's actual Source or boundary registry.
-function _model_native_hybrid_global_triangles(m,input,caller)
+function _model_native_hybrid_global_triangles(m,input,caller;embedded_surface=nothing)
     input isa _ModelMeshAuthority && input.mesh!==nothing && input.mesh.entity_data!==nothing ||
         throw(ArgumentError("$caller: global hybrid sizing lacks current actual lower authority"))
-    _model_native_hybrid_global_size_seeds(m,input,caller)
+    _model_native_hybrid_global_size_seeds(m,input,caller;embedded_surface)
     triangles=NamedTuple[];seen=Set{UInt64}()
     for owner in sort!(collect(keys(input.products)))
         owner[1]==2 || continue

@@ -52,11 +52,14 @@ function initial_hulls!(a)
     connect_hulls!(a,hulls)
     return hulls
 end
-function carve!(a,original_hulls)
+function carve!(a,original_hulls;exterior_facets=nothing)
+    frontier=exterior_facets===nothing ? a.protected_faces : exterior_facets
+    all(face->face in a.protected_faces,frontier) || throw(A.Unsupported(
+        "hybrid carving frontier contains an unrecovered exterior facet"))
     infected=Set{Int32}();queue=A.Handle[];oldhulls=Int32[]
     for slot in original_hulls
         h=A.Handle(slot,11)
-        A.facekey((A.org(a,h),A.dest(a,h),A.apex(a,h))) in a.protected_faces && continue
+        A.facekey((A.org(a,h),A.dest(a,h),A.apex(a,h))) in frontier && continue
         push!(infected,slot);push!(oldhulls,slot)
         other=rawneighbor(a,h)
         other.cell>0 || throw(A.Unsupported("hybrid initial hull has no real neighbor"))
@@ -72,7 +75,7 @@ function carve!(a,original_hulls)
             other.cell>0 || throw(A.Unsupported("hybrid exterior flood lost its native hull neighbor"))
             other.cell in infected && continue
             key=A.facekey((A.org(a,other),A.dest(a,other),A.apex(a,other)))
-            if !(key in a.protected_faces)
+            if !(key in frontier)
                 0 in a.cells[other.cell].vertices && throw(A.Unsupported("hybrid unprotected hull was not seeded"))
                 push!(infected,other.cell);push!(queue,other)
             elseif 0 in a.cells[other.cell].vertices
@@ -85,7 +88,7 @@ function carve!(a,original_hulls)
         interior=rawneighbor(a,exterior,version)
         interior.cell in infected && continue
         key=A.facekey((A.org(a,interior),A.dest(a,interior),A.apex(a,interior)))
-        key in a.protected_faces || throw(A.Unsupported("hybrid carved frontier lacks its literal subface"))
+        key in frontier || throw(A.Unsupported("hybrid carved frontier lacks its literal subface"))
         p,q,r=A.org(a,interior),A.dest(a,interior),A.apex(a,interior)
         new=allocate!(a,(q,p,r,Int32(0)));push!(hulls,new)
         A.bond!(a,interior,A.Handle(new,11))

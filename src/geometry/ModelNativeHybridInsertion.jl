@@ -229,13 +229,14 @@ end
 
 function refine(mesh,node_uids,element_uids,triangles,background_size,caller;
                 minimize=false,extend=true,node_high_water=nothing,element_high_water=nothing,
-                region_background=false,seeds=nothing,protected_edges=Set{NTuple{2,Int32}}())
+                region_background=false,seeds=nothing,protected_edges=Set{NTuple{2,Int32}}(),
+                protected_faces=Set{NTuple{3,Int32}}())
     owned=positive_constructor(mesh)
     sizes=native_sizes(owned,node_uids,triangles,caller;minimize,seeds)
     return refine_owned(owned,background_size,sizes,caller;
         extend_boundary=extend,minimize_boundary=minimize,
         node_numbers=node_uids,node_high_water,element_numbers=element_uids,element_high_water,
-        native_storage_order=true,return_numbers=true,region_background,protected_edges)
+        native_storage_order=true,return_numbers=true,region_background,protected_edges,protected_faces)
 end
 
 function smooth(product,initial_rows,passes,caller)

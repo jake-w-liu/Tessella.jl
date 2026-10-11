@@ -26,6 +26,11 @@ to Gmsh.
 """
 module API
 
+# Keep the session filename endpoint local; binary view writers still use
+# ordinary Base stream writes through this scoped forwarding method.
+function write end
+write(stream::Base.IO,values...)=Base.write(stream,values...)
+
 using ..Predicates: orient3, O3DERRBOUND_A
 using ..Recombine: recombine_triangles, _recombine_triangles
 using ..Elements: ElementBlock, msh_family, msh_dimension, msh_spec
@@ -112,7 +117,7 @@ using ..Model: _compound_surface_meshes
 using ..GeoExec: execute_geo
 using ..Post: Post
 
-export initialize, finalize, clear, option, model, mesh, open_geo!
+export initialize, finalize, clear, option, model, mesh, open_geo!, write
 
 # Entity classification snapshot for the session mesh cache, derived from the
 # canonical `model_to_mixed` projection at generation time. `mesh` is the exact
@@ -8590,6 +8595,7 @@ include("APINativeRecombine.jl")
 include("APINativeRecombineViews.jl")
 include("APINativeViewPartition.jl")
 include("APINativeViewWriter.jl")
+include("APIModelExport.jl")
 include("APINativeOptimize.jl")
 include("APINativeRelocate3D.jl")
 include("APIMeshHomologyNative.jl")
@@ -10708,9 +10714,13 @@ explicit element UID/partition list. The default preserves assignment labels.
 With `Mesh.PartitionCreateTopology` or `Mesh.PartitionCreateGhostCells` nonzero,
 bare positive first-order Tet4 discrete Regions produce actual partition child
 entities. Topology creates shared inter-partition Tri3 interfaces with opposite
-Region incidences. An existing closed Tri3 Surface BRep can also produce
-exterior Surface children and closed Line2 interface seams when each seam lies
-on one original Surface. Original cell UIDs and physical memberships survive.
+Region incidences. Existing Tri3 Surface BRep also produces exterior Surface
+children and actual Line2 interface seams, including nonbranching open paths
+across original Surfaces. New interface borders are fully covered; original
+Surface borders retain literal source incidence. Inputs without Point
+boundaries do not acquire fabricated Points. Original cell UIDs and physical
+memberships survive. Closed-source coverage remains complete; partial original
+BRep is not reconstructed.
 Ghost entities expose neighboring cell UID aliases while the mesh retains one
 authoritative copy of each material cell. Both options default to zero.
 Coincident original/interface Tri3 supports, unsupported lower BRep,

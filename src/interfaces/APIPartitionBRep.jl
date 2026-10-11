@@ -6,6 +6,28 @@ _partition_support(uids)=Tuple(sort!(collect(uids)))
 _partition_cycle_equal(a,b)=any(a==ntuple(i->b[mod1(i+shift,3)],3) for shift in 0:2)
 _partition_cycle_reverse(a,b)=_partition_cycle_equal(a,(b[1],b[3],b[2]))
 
+function _partition_brep_surface_borders(triangles,caller)
+    incidences=Dict{Int32,Dict{Tuple{UInt64,UInt64},Vector{Tuple{UInt64,UInt64}}}}()
+    for tri in triangles,(a,b) in _PARTITION_TRI_EDGES
+        edges=get!(()->Dict{Tuple{UInt64,UInt64},Vector{Tuple{UInt64,UInt64}}}(),incidences,tri.parent)
+        edge=(tri.uids[a],tri.uids[b]);push!(get!(()->Tuple{UInt64,UInt64}[],edges,minmax(edge...)),edge)
+    end
+    borders=Dict{Int32,Dict{Tuple{UInt64,UInt64},Tuple{UInt64,UInt64}}}()
+    for (parent,edges) in incidences
+        border=Dict{Tuple{UInt64,UInt64},Tuple{UInt64,UInt64}}()
+        for (key,hits) in edges
+            length(hits)<=2 || throw(ArgumentError("$caller: original Surface has a nonmanifold edge"))
+            if length(hits)==2
+                hits[1]==reverse(hits[2]) || throw(ArgumentError("$caller: original Surface edge winding disagrees"))
+            else
+                border[key]=only(hits)
+            end
+        end
+        borders[parent]=border
+    end
+    return borders
+end
+
 function _partition_brep_snapshot(model,cached,class,assignment,caller)
     class.public_tags!==nothing || throw(ArgumentError("$caller: lower BRep needs actual UID authority"))
     _high_order_overlay(cached)===nothing || throw(ArgumentError("$caller: lower BRep partitioning requires first-order cells"))
@@ -105,8 +127,9 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
         covered==expected || throw(ArgumentError("$caller: declared lower BRep omits Region facets"))
     end
     used==Set(surfaces) || throw(ArgumentError("$caller: unbound lower Surfaces are unsupported"))
+    surface_borders=_partition_brep_surface_borders(triangles,caller)
     return (;entities,blocks,owners,uids,public,triangles,tets,parents,surfaces,
-        facets,facet_order,triangle_support,lower_edges,declared)
+        facets,facet_order,triangle_support,lower_edges,declared,surface_borders)
 end
 
 function _partition_brep_boundary_certificate(source,children,part_entities,boundaries,
@@ -159,13 +182,16 @@ function _partition_brep_boundary_certificate(source,children,part_entities,boun
                 "$caller: Surface Curve incidence repeats or disagrees with its actual border"))
             push!(covered,key)
         end
-        covered==Set(keys(expected)) || throw(ArgumentError(
-            "$caller: complete Surface boundaries require one supported closed original-Surface seam"))
+        parent=part_entities[(2,Int(tag))].parent
+        inherited=parent[1]==2 ? source.surface_borders[parent[2]] :
+            Dict{Tuple{UInt64,UInt64},Tuple{UInt64,UInt64}}()
+        all(key->key in covered || get(inherited,key,nothing)==expected[key],keys(expected)) ||
+            throw(ArgumentError("$caller: child Surface omits a new seam or changes its original border"))
     end
     return nothing
 end
 
-function _partition_brep_cycle(edges,caller)
+function _partition_brep_chains(edges,caller)
     outgoing=Dict{UInt64,Int}();incoming=Dict{UInt64,Int}()
     for (index,edge) in enumerate(edges)
         haskey(outgoing,edge.uids[1]) && throw(ArgumentError("$caller: branching partition seam is unsupported"))
@@ -175,19 +201,24 @@ function _partition_brep_cycle(edges,caller)
         haskey(incoming,edge.uids[2]) && throw(ArgumentError("$caller: branching partition seam is unsupported"))
         incoming[edge.uids[2]]=index
     end
-    Set(keys(outgoing))==Set(keys(incoming)) || throw(ArgumentError("$caller: open partition seam is unsupported"))
-    seen=falses(length(edges));cycles=Vector{Int}[]
-    for seed in eachindex(edges)
+    # Open paths begin at literal source edges with no incoming incidence;
+    # remaining edges form closed cycles. No coordinate ordering is involved.
+    starts=[index for (index,edge) in enumerate(edges) if !haskey(incoming,edge.uids[1])]
+    seen=falses(length(edges));chains=NamedTuple[]
+    for seed in vcat(starts,collect(eachindex(edges)))
         seen[seed] && continue
-        cycle=Int[];index=seed
+        chain=Int[];index=seed
         while !seen[index]
-            seen[index]=true;push!(cycle,index);index=outgoing[edges[index].uids[2]]
+            seen[index]=true;push!(chain,index);next=get(outgoing,edges[index].uids[2],0)
+            next==0 && (index=0;break)
+            index=next
         end
-        index==seed || throw(ArgumentError("$caller: partition seam joins another cycle"))
-        length(cycle)>=3 || throw(ArgumentError("$caller: partition seam is not a closed polygon"))
-        push!(cycles,cycle)
+        closed=index==seed
+        (closed || index==0 && seed in starts) || throw(ArgumentError("$caller: partition seam joins another chain"))
+        closed && length(chain)<3 && throw(ArgumentError("$caller: partition seam is not a closed polygon"))
+        push!(chains,(indices=chain,closed=closed))
     end
-    return cycles
+    return chains
 end
 
 function _partition_brep_production_plan(model,cached,class,count,assignment,caller;
@@ -238,6 +269,7 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
     end
     interfaces=Dict{Int32,Vector{NamedTuple}}();curves=Dict{Int32,Vector{NamedTuple}}()
     seams=Dict{Tuple{Int32,Tuple{Int32,Int32}},Vector{NamedTuple}}()
+    seam_order=Tuple{Int32,Tuple{Int32,Int32}}[]
     if topology
         grouped=Dict{Tuple{Int32,Int32},Vector{NamedTuple}}()
         for key in source.facet_order
@@ -279,11 +311,12 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
                         continue
                     end
                     lower=get(source.lower_edges,key,NamedTuple[])
-                    length(lower)==2 && lower[1].tri.parent==lower[2].tri.parent &&
+                    length(lower)==2 &&
                         sort!(Int32[edge.tri.part for edge in lower])==members || throw(ArgumentError(
-                            "$caller: interface seam must meet one original Surface on both partition sides"))
+                            "$caller: interface seam must meet actual lower Tri3 carriers on both partition sides"))
                     reference=argmin([children[(2,edge.tri.parent,edge.tri.part)] for edge in lower])
                     edge=lower[reference];group=(edge.tri.parent,Tuple(members))
+                    haskey(seams,group) || push!(seam_order,group)
                     current=get!(()->NamedTuple[],seams,group)
                     any(existing->_partition_support(existing.uids)==_partition_support(edge.uids),current) ||
                         push!(current,(uids=edge.uids,rows=edge.rows))
@@ -291,9 +324,10 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
             end
         end
         seam_lookup=Dict{Tuple{UInt64,UInt64},NamedTuple}()
-        for group in sort!(collect(keys(seams)))
+        for group in seam_order
             edges=seams[group]
-            for cycle in _partition_brep_cycle(edges,caller)
+            for chain in _partition_brep_chains(edges,caller)
+                cycle=chain.indices
                 cell_count<=typemax(Int32)-length(cycle) || throw(ArgumentError("$caller: seam cell capacity exceeded"))
                 cell_count+=length(cycle)
                 tag=Int32(_partition_entity_birth!(staged,1,caller));nodes=Matrix{Int32}(undef,2,length(cycle));ids=UInt64[]

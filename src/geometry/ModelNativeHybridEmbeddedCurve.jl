@@ -6,12 +6,19 @@ struct _ModelNativeHybridEmbeddedCurveInput
     input::_ModelMeshAuthority
     records::Vector{NamedTuple}
     cells::Vector{NamedTuple}
+    inventory::Vector{NTuple{2,Int}}
 end
 
-function _model_native_hybrid_embedded_curve_input(m,region,input,caller)
-    embeds=get(m.embeds,(3,region),NTuple{2,Int}[])
-    length(m.volumes)==1 && length(embeds)==1 && only(embeds)[1]==1 || return nothing
-    curve=only(embeds)[2]
+function _model_native_hybrid_embedded_curve_input(m,region,input,caller;curve=nothing)
+    embeds=copy(get(m.embeds,(3,region),NTuple{2,Int}[]))
+    if curve===nothing
+        # The original single-entity route remains separate.
+        length(m.volumes)==1 && length(embeds)==1 && only(embeds)[1]==1 || return nothing
+        curve=only(embeds)[2]
+    else
+        length(m.volumes)==1 && (1,curve) in embeds && all(owner->owner[1] in (0,1),embeds) ||
+            throw(ArgumentError("$caller: selected embedded Curve lacks its actual Region declaration"))
+    end
     haskey(m.curves,curve) || throw(ArgumentError("$caller: embedded Curve has no declared geometry"))
     product=_model_mesh_product(input,1,curve;caller)
     product isa MixedMesh && product.entity_data!==nothing || throw(ArgumentError(
@@ -70,16 +77,17 @@ function _model_native_hybrid_embedded_curve_input(m,region,input,caller)
             throw(ArgumentError("$caller: embedded Curve node loses its actual lower owner"))
         push!(records,(uid=uid,coordinate=Tuple(product.coords[:,row]),node_owner=owner))
     end
-    return _ModelNativeHybridEmbeddedCurveInput(m,region,curve,endpoints,input,records,cells)
+    return _ModelNativeHybridEmbeddedCurveInput(m,region,curve,endpoints,input,records,cells,embeds)
 end
 
 function _model_native_hybrid_curve_source_certificate(witness,input,uids,coordinates,caller)
     witness===nothing && return nothing
     witness isa _ModelNativeHybridEmbeddedCurveInput && witness.input===input &&
-        get(witness.model.embeds,(3,witness.region),NTuple{2,Int}[])==[(1,witness.curve)] &&
+        get(witness.model.embeds,(3,witness.region),NTuple{2,Int}[])==witness.inventory &&
+        (1,witness.curve) in witness.inventory && all(owner->owner[1] in (0,1),witness.inventory) &&
         get(witness.model.curves,witness.curve,nothing)==witness.endpoints || throw(ArgumentError(
         "$caller: embedded Curve has a foreign or changed constructor"))
-    fresh=_model_native_hybrid_embedded_curve_input(witness.model,witness.region,input,caller)
+    fresh=_model_native_hybrid_embedded_curve_input(witness.model,witness.region,input,caller;curve=witness.curve)
     fresh!==nothing && fresh.records==witness.records && fresh.cells==witness.cells || throw(ArgumentError(
         "$caller: embedded Curve changes its actual current UID/owner/cell witness"))
     positions=Dict(uid=>row for (row,uid) in enumerate(uids))

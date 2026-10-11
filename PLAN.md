@@ -8,9 +8,9 @@ remain **in progress**.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 207 assertions on Julia 1.12.7 and 1.13.1. Ordinary
+suite now passes 209 assertions on Julia 1.12.7 and 1.13.1. Ordinary
 `Pkg.test()` automatically selects minimal compilation; test bodies took
-10.1 seconds on each runtime. Cold package runs took 45.23 and 37.67 seconds including
+11.1 and 10.7 seconds. Cold package runs took 46.49 and 39.23 seconds including
 precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
@@ -185,13 +185,17 @@ certificates. [Generation option snapshots](docs/geo_pyramid_option_scope.md)
 keep API and GEO/CLI contexts independent. [Region batches](docs/hybrid_batch_pyramids.md)
 transport nonzero Pyramid settings for separate and shared-Triangle components;
 shared-Quad two-Region components retain the pinned native unsupported error. Explicit [IGES plane charts](docs/iges_plane_charts.md)
-map bounded UV wires with proper rigid124 plane transform chains. General
-curved trims and CAD registry reconstruction remain open.
+map bounded UV wires with proper rigid124 plane transform chains. A
+[certified rigid-prism fill](docs/prismatic_fill.md) handles matching literal
+cap supports before exact recovery, retaining source XYZ and full PLC
+certificates. General curved trims and CAD registry reconstruction remain open.
 Bare positive Tet4 Regions now produce actual inter-partition Tri3 interfaces
 and ghost aliases with MSH4 transport; [partition scope](docs/partitioned_tets.md)
 records the retained assignment default. [Lower-BRep production](docs/partitioned_brep.md)
-adds complete Tri3 Surface children and closed interface seams; general
-lower/mixed-family topology and parallel production remain open.
+adds complete Tri3 Surface children and closed interface seams.
+[Open seams](docs/partitioned_open_seams.md) additionally preserve partial
+original Surface borders by literal incidence. General lower/mixed-family
+topology and parallel production remain open.
 
 P1 does not yet claim octree-identical parity with Gmsh's HXT/p4est
 `AutomaticMeshSizeField` internals (the native field remains a documented
@@ -510,8 +514,9 @@ and binary MSH 4.1 — verified end-to-end by the Gmsh 4.15.2 partition-metadata
 differential. The API now produces actual bare-Tet4 child/interface/ghost
 entities; [partition scope](docs/partitioned_tets.md) records supported behavior.
 [Complete Tri3 BRep](docs/partitioned_brep.md) additionally produces Surface
-children and closed seam Curves. Remaining lower-topology, mixed/high-order
-and parallel contexts retain their explicit guards.
+children and closed seam Curves; multi-Surface open seams retain actual
+original borders. Remaining lower-topology, mixed/high-order and parallel
+contexts retain their explicit guards.
 Native geometry evaluation covers Points, straight Lines, Circle and Ellipse
 arcs, explicit Planes, and the analytic OCC circle edges and
 Cylinder/Sphere/Cone/Torus and Plane faces of materialized primitives.
@@ -1086,12 +1091,13 @@ checks, publication status and remaining work.
 
 Published increments already add Curve CLI/version/binary/sizing controls,
 list/model CSV/VTK export, recognized independent CAD roots and planar holes,
-plane UV/rigid matrix chains, one periodic hybrid pair, embedded Point/Curve,
+plane UV/rigid matrix chains, one periodic hybrid pair, embedded Point/Curve/Surface,
 nonzero Pyramid Region batches, constant-tensor grids and bare/complete-Tri3
-partition topology. The linked feature documents define the exact supported
-contexts; the handoff lists genuine remaining Source work. Current isolated
-implementations target a retained interior Tri3 Surface, direct model MSH
-export and remaining lower partition topology.
+partition topology. Direct model MSH export, multiple Point/Curve constraints,
+open partition seams and literal prismatic fill are implemented within their
+linked scopes. The handoff lists genuine remaining Source work. Current isolated
+implementations target atomic model-file opening, larger retained planar sheets
+and directional metrics in ordinary planar generation.
 
 Use small functional regressions for routine verification, then normally commit
 and push verified implementations to `main`. Native-oracle sweeps, resource and
