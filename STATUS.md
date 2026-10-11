@@ -52,11 +52,29 @@ boundary; `rigid_periodic_smoke.jl` joins the default suite at **231/231 on
 both Julia1.12.7 and1.13.1**, actual exit0. See
 `test/interfaces/api_rigid_periodic_hybrid_functional_test.jl`.
 
+### Mixed STEP product/mapped assemblies (2026-10-11)
+
+Devin completed checklist CAD02. `BRepStepRelationships.jl` now expands a
+reachable acyclic `PRODUCT_DEFINITION` forest — independent roots in sorted
+order — where any definition (root, intermediate or leaf) may place literal
+closed solids and `MAPPED_ITEM` occurrences beside placement frames; a leaf
+must carry geometry. Mapped sources classify transitively, carry their own
+declared SI contexts and compose under the usage-edge `s·b − s·a` law with
+AXIS2 member-frame or certified Cartesian targets; complete map/item/
+representation/solid inventories and cycle/orphan/overlap checks reject
+atomically. Focused mixed checks pass48/48 on the new
+`brep_relationship_mixed_roots.step` fixture; the nested `mixed_parent` pin
+moved from rejection to a verified three-occurrence import (nested63/63);
+direct54, SI52, mapped31, cartesian43 and assembly96 regressions pass; the
+ordinary default suite is **234/234 on both Julia1.12.7 and1.13.1**, actual
+exit0. See `docs/step_relationship_assemblies.md` and
+`test/geometry/brep_step_relationship_mixed_functional_test.jl`.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The
-[Devin checklist](DEVIN_HANDOFF.md) records27 known work areas (CAD01 and
-PER01 done,25
+[Devin checklist](DEVIN_HANDOFF.md) records27 known work areas (CAD01, CAD02
+and PER01 done,24
 open), precise
 completion requirements, prepared nested STEP/rigid periodic designs and
 portable evidence. **Full P1–P6 parity remains unfinished.** New implementation

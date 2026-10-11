@@ -138,8 +138,8 @@ function _step_relationship_import(entities,fill_solids)
     kinds(entity)=entity.kind=="COMPLEX" ? [part.kind for part in entity.args] : [entity.kind]
     any(entity->any(kind->kind in _STEP_RELATIONSHIP_TRIGGERS,kinds(entity)),values(entities)) || return nothing
     for entity in values(entities)
-        any(kind->kind in ("MAPPED_ITEM","REPRESENTATION_MAP","ASSEMBLY_COMPONENT_USAGE",
-            "PRODUCT_DEFINITION_USAGE","PRODUCT_DEFINITION_RELATIONSHIP","SPECIFIED_HIGHER_USAGE_OCCURRENCE"),
+        any(kind->kind in ("ASSEMBLY_COMPONENT_USAGE","PRODUCT_DEFINITION_USAGE",
+            "PRODUCT_DEFINITION_RELATIONSHIP","SPECIFIED_HIGHER_USAGE_OCCURRENCE"),
             kinds(entity)) && throw(ArgumentError("import_step: unsupported mixed assembly relationship workflow"))
         endswith(entity.kind,"SOLID") && !(entity.kind in _STEP_BREP_SOLID_KINDS) &&
             throw(ArgumentError("import_step: unsupported assembly solid #$(entity.id) $(entity.kind)"))
@@ -159,15 +159,18 @@ function _step_relationship_import(entities,fill_solids)
         push!(parents,parent.id);push!(children,child.id)
         push!(get!(Vector{StepEntity},outgoing,parent.id),usage)
     end
-    roots=setdiff(parents,children)
-    length(roots)==1 || throw(ArgumentError(
-        "import_step: assembly usages need exactly one actual root product definition"))
-    root=only(roots);definitions=union(parents,children)
-    Set(entity.id for entity in selected("PRODUCT_DEFINITION"))==definitions ||
-        throw(ArgumentError("import_step: assembly has unreachable product definitions"))
-    # The literal usage graph must be rooted, reachable and acyclic before any
+    # A definition with no incoming usage is a root: multiple independent
+    # product trees (and standalone products holding their own geometry)
+    # expand side by side into the same occurrence assembly.
+    definitions=Set(entity.id for entity in selected("PRODUCT_DEFINITION"))
+    parents ⊆ definitions && children ⊆ definitions || throw(ArgumentError(
+        "import_step: assembly usage endpoints are not product definitions"))
+    roots=setdiff(definitions,children)
+    !isempty(roots) || throw(ArgumentError(
+        "import_step: assembly usages need an actual root product definition"))
+    # The literal usage graph must be reachable and acyclic before any
     # expansion, fill or factory use. A definition can be both child and parent.
-    reached=Set{Int}([root]);pending=[root]
+    reached=Set{Int}(roots);pending=collect(roots)
     while !isempty(pending)
         definition=pop!(pending)
         for usage in get(outgoing,definition,StepEntity[])
@@ -176,7 +179,7 @@ function _step_relationship_import(entities,fill_solids)
         end
     end
     reached==definitions || throw(ArgumentError(
-        "import_step: assembly has definitions unreachable from its root"))
+        "import_step: assembly has definitions unreachable from their roots"))
     indegree=Dict{Int,Int}(definition=>0 for definition in definitions)
     for usage in usages
         child=usage.args[5][2];indegree[child]+=1
@@ -230,26 +233,91 @@ function _step_relationship_import(entities,fill_solids)
     Set(keys(representations))==definitions &&
         allunique(info.representation.id for info in values(representations)) ||
         throw(ArgumentError("import_step: assembly product representations are incomplete or shared ambiguously"))
-    Set(entity.id for entity in values(entities) if entity.kind in _STEP_OCCURRENCE_REPRESENTATIONS)==
-        Set(info.representation.id for info in values(representations)) ||
-        throw(ArgumentError("import_step: assembly has unselected shape representations"))
-    # Definitions with outgoing usages carry placement frames only; leaf
-    # definitions bind exactly one supported closed solid plus frames.
-    for definition in parents
-        all(item->item.kind=="AXIS2_PLACEMENT_3D",representations[definition].items) ||
-            throw(ArgumentError("import_step: assembly definitions with usages must contain placement frames only"))
-    end
+    # Any definition — root, intermediate or leaf — may place literal closed
+    # solids and mapped items alongside its placement frames. A mapped item
+    # binds an actual REPRESENTATION_MAP whose source representation carries
+    # its own declared SI context; an AXIS2 target must be a literal member of
+    # the containing representation, while a Cartesian operator is validated
+    # like the standalone mapped producer.
     solid_roots=Dict(entity.id=>entity for entity in _step_solid_roots(entities))
-    solids=Dict{Int,StepEntity}()
-    for leaf in setdiff(children,parents)
-        info=representations[leaf]
-        source=[item for item in info.items if haskey(solid_roots,item.id)]
-        length(source)==1 && all(item->item.kind=="AXIS2_PLACEMENT_3D" || item.id==only(source).id,info.items) ||
-            throw(ArgumentError("import_step: each assembly leaf must bind one actual closed solid"))
-        solids[leaf]=only(source)
+    leaf_ids=setdiff(definitions,parents)
+    direct_solids=Dict{Int,Vector{StepEntity}}(definition=>StepEntity[] for definition in definitions)
+    mapped_items=Dict{Int,Vector{StepEntity}}(definition=>StepEntity[] for definition in definitions)
+    mapped_reps=Dict{Int,NamedTuple}();pending_sources=StepEntity[]
+    function classify_rep_items(items,solids,mapped)
+        member_ids=Set(item.id for item in items)
+        for item in items
+            if item.kind=="AXIS2_PLACEMENT_3D"
+                continue
+            elseif haskey(solid_roots,item.id)
+                push!(solids,item)
+            elseif item.kind=="MAPPED_ITEM"
+                length(item.args)==3 || throw(ArgumentError(
+                    "import_step: assembly mapped item is truncated"))
+                map=_step_relationship_entity(entities,item.args[2],"REPRESENTATION_MAP")
+                length(map.args)==2 || throw(ArgumentError(
+                    "import_step: assembly representation map is truncated"))
+                source=_deref_entity(entities,map.args[2])
+                source!==nothing && source.kind in _STEP_OCCURRENCE_REPRESENTATIONS &&
+                    length(source.args)==3 && source.args[2] isa AbstractVector &&
+                    !isempty(source.args[2]) && allunique(source.args[2]) || throw(ArgumentError(
+                    "import_step: assembly mapped source representation is truncated or unsupported"))
+                _step_occurrence_frame(entities,map.args[1])
+                target=_deref_entity(entities,item.args[3])
+                if target!==nothing && target.kind=="CARTESIAN_TRANSFORMATION_OPERATOR_3D"
+                    _step_occurrence_cartesian_transform(entities,target)
+                else
+                    frame=_step_relationship_entity(entities,item.args[3],"AXIS2_PLACEMENT_3D")
+                    frame.id in member_ids || throw(ArgumentError(
+                        "import_step: assembly mapped transform frame is not a literal representation member"))
+                end
+                push!(mapped,item);push!(pending_sources,source)
+            else
+                throw(ArgumentError(
+                    "import_step: unsupported assembly representation item $(item.kind) #$(item.id)"))
+            end
+        end
+        return nothing
     end
-    Set(keys(solid_roots))==Set(solid.id for solid in values(solids)) ||
-        throw(ArgumentError("import_step: assembly has unplaced closed-solid definitions"))
+    for definition in definitions
+        classify_rep_items(representations[definition].items,
+            direct_solids[definition],mapped_items[definition])
+        definition in leaf_ids && isempty(direct_solids[definition]) &&
+            isempty(mapped_items[definition]) && throw(ArgumentError(
+            "import_step: each assembly leaf must bind an actual closed solid"))
+    end
+    # Mapped sources expand transitively; each carries its own declared SI
+    # context and literal member-frame provenance like a product rep.
+    while !isempty(pending_sources)
+        source=pop!(pending_sources)
+        haskey(mapped_reps,source.id) && continue
+        context,units,unit_witnesses=_step_relationship_context(entities,source.args[3])
+        items=StepEntity[]
+        for reference in source.args[2]
+            item=_deref_entity(entities,reference)
+            item!==nothing || throw(ArgumentError(
+                "import_step: assembly mapped source item is missing"))
+            item.kind=="AXIS2_PLACEMENT_3D" && _step_occurrence_frame(entities,reference)
+            push!(items,item)
+        end
+        solids=StepEntity[];mapped=StepEntity[]
+        classify_rep_items(items,solids,mapped)
+        mapped_reps[source.id]=(;representation=source,context,units,
+            unit_witnesses,items,solids,mapped)
+    end
+    placed=Set{Int}()
+    for vector in values(direct_solids),solid in vector
+        push!(placed,solid.id)
+    end
+    for info in values(mapped_reps),solid in info.solids
+        push!(placed,solid.id)
+    end
+    Set(keys(solid_roots))==placed || throw(ArgumentError(
+        "import_step: assembly has unplaced closed-solid definitions"))
+    Set(entity.id for entity in values(entities) if entity.kind in _STEP_OCCURRENCE_REPRESENTATIONS)==
+        union(Set(info.representation.id for info in values(representations)),
+              Set(keys(mapped_reps))) ||
+        throw(ArgumentError("import_step: assembly has unselected shape representations"))
     placements=Dict{Int,NamedTuple}();relations=Set{Int}();transforms=Set{Int}()
     for placement in selected("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION")
         placement.kind=="CONTEXT_DEPENDENT_SHAPE_REPRESENTATION" && length(placement.args)==2 ||
@@ -302,10 +370,11 @@ function _step_relationship_import(entities,fill_solids)
         Set(entity.id for entity in selected("SHAPE_REPRESENTATION_RELATIONSHIP"))==relations ||
         throw(ArgumentError("import_step: assembly placement inventory is incomplete or orphaned"))
     records=NamedTuple[];surfaces=Dict{Int,Mesh}();counts=[0,0]
-    root_product=products[root]
-    active=Set{Int}([root]);consumed=Set{Int}()
+    root_product=Ref{StepEntity}()
+    active=Set{Int}();consumed=Set{Int}();mapped_active=Set{Int}()
+    visited_mapped=Set{Int}();visited_maps=Set{Int}()
     function path_label(with_names)
-        parts=String["STEP PRODUCT #$(root_product.id) $(root_product.args[2])"]
+        parts=String["STEP PRODUCT #$(root_product[].id) $(root_product[].args[2])"]
         for (usage,product) in edges
             push!(parts,"NAUO #$(usage.id)"*(with_names ? " $(usage.args[2])" : ""))
             push!(parts,"PRODUCT #$(product.id)"*(with_names ? " $(product.args[2])" : ""))
@@ -322,31 +391,32 @@ function _step_relationship_import(entities,fill_solids)
         end
         return text[1:stop]
     end
-    function occurrence_name(leaf)
+    function occurrence_name(suffix)
         # MSH physical names are bounded; deeper paths compact gracefully while
-        # retaining the literal root/usage/product/solid identifier chain.
+        # retaining the literal root/usage/product/item identifier chain.
         budget=MSH_PHYSICAL_NAME_MAX_BYTES-ncodeunits(" boundary")
-        leaf_text="$(solids[leaf].kind) #$(solids[leaf].id)"
-        name=path_label(true)*"/"*leaf_text
+        name=path_label(true)*"/"*suffix
         ncodeunits(name)<=budget && return name
-        parts=String["STEP PRODUCT #$(root_product.id) $(root_product.args[2])"]
+        parts=String["STEP PRODUCT #$(root_product[].id) $(root_product[].args[2])"]
         for (usage,product) in edges
             push!(parts,"NAUO #$(usage.id) $(usage.args[2])")
             push!(parts,"PRODUCT #$(product.id)")
         end
-        name=join(parts,"/")*"/"*leaf_text
+        name=join(parts,"/")*"/"*suffix
         ncodeunits(name)<=budget && return name
-        ids=split(path_label(false),"/")
-        head=fit_text(first(ids),budget-ncodeunits("/...")-ncodeunits(leaf_text))
-        tail=String[leaf_text];rest=budget-ncodeunits(head)-ncodeunits("/...")-ncodeunits(leaf_text)
-        for segment in Iterators.reverse(ids[2:end])
+        segments=split(path_label(false)*"/"*suffix,"/")
+        head=fit_text(first(segments),budget-ncodeunits("/...")-ncodeunits(last(segments)))
+        tail=String[last(segments)]
+        rest=budget-ncodeunits(head)-ncodeunits("/...")-ncodeunits(last(segments))
+        for segment in Iterators.reverse(segments[2:end-1])
             ncodeunits(segment)+1<=rest || break
             pushfirst!(tail,segment);rest-=ncodeunits(segment)+1
         end
         return head*"/..."*join(tail,"/")
     end
-    function emit(leaf,transform)
-        solid=solids[leaf]
+    function emit(solid,factor,transform,name)
+        length(records)<4096 || throw(ArgumentError(
+            "import_step: more than 4096 solid occurrences"))
         surface=get!(surfaces,solid.id) do
             _step_root_surface(solid,entities)
         end
@@ -355,16 +425,61 @@ function _step_relationship_import(entities,fill_solids)
         counts[1]<=_BREP_MAX_SURFACE_NODES && counts[2]<=_BREP_MAX_SURFACE_TRIS ||
             throw(ArgumentError("import_step: product usages exceed assembly surface storage limits"))
         rotation,translation=transform
-        source_factor=representations[leaf].unit_witnesses["LENGTH_UNIT"].factor
         coordinates=Matrix{Float64}(undef,size(surface.coords))
         for column in axes(coordinates,2),i in 1:3
-            coordinates[i,column]=translation[i]+sum(rotation[i][j]*(source_factor*surface.coords[j,column]) for j in 1:3)
+            coordinates[i,column]=translation[i]+sum(rotation[i][j]*(factor*surface.coords[j,column]) for j in 1:3)
         end
         all(isfinite,coordinates) || throw(ArgumentError("import_step: assembly occurrence coordinates are nonfinite"))
-        push!(records,(name=occurrence_name(leaf),surface=Mesh(coordinates;tris=surface.tris)))
+        push!(records,(name=name,surface=Mesh(coordinates;tris=surface.tris)))
+    end
+    function emit_mapped(item,transform,owner_units,path,depth)
+        depth<=128 || throw(ArgumentError("import_step: assembly mapped nesting exceeds 128"))
+        map=_step_relationship_entity(entities,item.args[2],"REPRESENTATION_MAP")
+        source=mapped_reps[_deref_entity(entities,map.args[2]).id]
+        source.representation.id in mapped_active && throw(ArgumentError(
+            "import_step: mapped representation cycle at #$(source.representation.id)"))
+        # The map origin lives in the source context and the target frame in
+        # the owner's — the same s·b − s·a law as the usage edges. A
+        # Cartesian target is already an operator in owner coordinates.
+        target=_deref_entity(entities,item.args[3])
+        local_transform=if target.kind=="CARTESIAN_TRANSFORMATION_OPERATOR_3D"
+            rotation,origin=_step_occurrence_cartesian_transform(entities,target)
+            factor=owner_units["LENGTH_UNIT"].factor
+            rotation,ntuple(i->factor*origin[i],3)
+        else
+            _step_relationship_transform(entities,map.args[1],item.args[3],
+                source.unit_witnesses,owner_units)
+        end
+        composed=_step_occurrence_compose(transform,local_transform)
+        push!(visited_mapped,item.id);push!(visited_maps,map.id)
+        push!(mapped_active,source.representation.id)
+        segment=isempty(path) ? "MAPPED_ITEM #$(item.id)" : path*"/MAPPED_ITEM #$(item.id)"
+        emitted=length(records)
+        for source_item in source.items
+            if haskey(solid_roots,source_item.id)
+                emit(source_item,source.unit_witnesses["LENGTH_UNIT"].factor,composed,
+                    occurrence_name(segment*"/$(source_item.kind) #$(source_item.id)"))
+            elseif source_item.kind=="MAPPED_ITEM"
+                emit_mapped(source_item,composed,source.unit_witnesses,segment,depth+1)
+            end
+        end
+        length(records)>emitted || throw(ArgumentError(
+            "import_step: mapped source representation emits no solid occurrence"))
+        delete!(mapped_active,source.representation.id)
+        return nothing
     end
     function expand(definition,transform,edges,depth)
         depth<=128 || throw(ArgumentError("import_step: assembly product-usage nesting exceeds 128"))
+        # Each node occurrence emits its own placed geometry once; per-edge
+        # occurrences then carry the composed path transform into children.
+        factor=representations[definition].unit_witnesses["LENGTH_UNIT"].factor
+        for solid in direct_solids[definition]
+            emit(solid,factor,transform,
+                occurrence_name("$(solid.kind) #$(solid.id)"))
+        end
+        for item in mapped_items[definition]
+            emit_mapped(item,transform,representations[definition].unit_witnesses,"",depth+1)
+        end
         for usage in get(outgoing,definition,StepEntity[])
             placement=placements[usage.id];child=placement.child
             child in active && throw(ArgumentError(
@@ -373,23 +488,24 @@ function _step_relationship_import(entities,fill_solids)
             composed=_step_occurrence_compose(transform,placement.rigid)
             product=products[child]
             push!(edges,(usage,product))
-            if haskey(solids,child)
-                length(records)<4096 || throw(ArgumentError(
-                    "import_step: more than 4096 solid occurrences"))
-                emit(child,composed)
-            else
-                push!(active,child)
-                expand(child,composed,edges,depth+1)
-                delete!(active,child)
-            end
+            push!(active,child)
+            expand(child,composed,edges,depth+1)
+            delete!(active,child)
             pop!(edges)
         end
         return nothing
     end
     edges=Tuple{StepEntity,StepEntity}[]
-    expand(root,_STEP_OCCURRENCE_IDENTITY,edges,0)
+    for root in sort!(collect(roots))
+        root_product[]=products[root]
+        expand(root,_STEP_OCCURRENCE_IDENTITY,edges,0)
+    end
     consumed==Set(usage.id for usage in usages) || throw(ArgumentError(
-        "import_step: assembly usages are unreachable from their root"))
+        "import_step: assembly usages are unreachable from their roots"))
+    visited_mapped==Set(entity.id for entity in selected("MAPPED_ITEM")) ||
+        throw(ArgumentError("import_step: assembly has unselected mapped items"))
+    visited_maps==Set(entity.id for entity in selected("REPRESENTATION_MAP")) ||
+        throw(ArgumentError("import_step: assembly has unselected representation maps"))
     length(records)>1 && return _brep_assembly(records,fill_solids,"import_step")
     surface=only(records).surface
     validate(surface).ok || throw(ArgumentError("import_step: invalid product-usage solid"))

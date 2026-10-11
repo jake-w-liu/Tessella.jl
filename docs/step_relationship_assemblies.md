@@ -18,24 +18,31 @@ millimetres. [SI length transport](step_relationship_si_units.md) documents
 declarations remain unprefixed radians/steradians. An optional uncertainty
 measure must retain the literal selected context length-unit reference.
 
-One root product may have direct or nested leaf usages, including repeated
+Every root product may have direct or nested leaf usages, including repeated
 uses of the same solid or intermediate definition. The usage graph must be a
-single-rooted reachable acyclic DAG over literal `PRODUCT_DEFINITION` nodes;
-unique root selection, reachability and cycle checks run before expansion.
-Definitions with outgoing usages carry placement frames only. Each leaf binds
-one supported closed solid. Each edge binds the actual child and parent
+reachable acyclic forest over literal `PRODUCT_DEFINITION` nodes; independent
+roots — assembly trees and standalone products alike — expand side by side in
+identifier order after the same reachability and cycle checks. Any definition,
+whether root, intermediate or leaf, may also place literal closed solids and
+`MAPPED_ITEM` occurrences next to its placement frames; a leaf must carry at
+least one solid-bearing item. Each edge binds the actual child and parent
 representations, context witnesses and member frames, and physical rigid
 transforms compose in parent-to-child order; the shared intermediate length
 factor converts only its literal frame origins, while the leaf's raw source
-rows scale once by its own declared factor. Every root-to-leaf usage path emits
-a separate occurrence, so a DAG can emit more occurrences than its usage count.
-The importer consumes the complete product, shape, usage, relationship,
-transform and solid inventories before emission. Missing, ambiguous or orphan
-bindings, cyclic usages, multiple roots, mixed mapped-item workflows, reversed
-relationships, nonmember transform frames, unsupported contexts/transforms and
-touching or overlapping occurrence boxes reject explicitly. Mixed
-geometry/children representations, multi-solid leaves, conversion-based units
-and ordinary/mapped root unit conversion remain open.
+rows scale once by its own declared factor. A `MAPPED_ITEM` inside a product
+representation binds an actual `REPRESENTATION_MAP` whose source representation
+carries its own declared SI context, expands transitively through nested maps,
+and composes under the same `R = AᵀB, t = Aᵀ(s_target*b − s_map*a)` law —
+including literal `CARTESIAN_TRANSFORMATION_OPERATOR_3D` targets. Every
+root-to-leaf usage path emits a separate occurrence, so a DAG can emit more
+occurrences than its usage count. The importer consumes the complete product,
+shape, usage, relationship, transform, map and solid inventories before
+emission. Missing, ambiguous or orphan bindings, cyclic usages or mapped
+representations, unreached definitions, unselected maps/items/representations,
+unplaced solids, geometry-free leaves, reversed relationships, nonmember
+transform frames, unsupported contexts/transforms and touching or overlapping
+occurrence boxes reject explicitly. Conversion-based units and ordinary/mapped
+root unit conversion remain open.
 
 Every occurrence receives separate mesh rows, UIDs and discrete Surface/Region
 owners. Names retain the root product and the literal usage/product/solid path
@@ -80,8 +87,18 @@ The nested-DAG module `test/geometry/brep_step_relationship_nested_functional_te
 imports the retained two-level millimetre and metre/centimetre/millimetre
 fixtures, checks the composed noncommuting bounds against the opaque public
 observations, a shared-intermediate diamond expansion, one actual fill with
-MSH4 ASCII/binary identity transport, and nine malformed graph/cycle/orphan
+MSH4 ASCII/binary identity transport, and eight malformed graph/cycle/orphan
 rejections. The direct and mapped producers remain unchanged controls.
+
+The mixed module `test/geometry/brep_step_relationship_mixed_functional_test.jl`
+imports the retained `brep_relationship_mixed_roots.step` fixture — a
+geometry-bearing root assembly with two product usages (a two-solid leaf and a
+mapped leaf), a transitive `REPRESENTATION_MAP` source rep and a standalone
+second root — and checks the five literal occurrence bounds and volumes, the
+path-qualified `MAPPED_ITEM` names, a shared-map second occurrence, a
+`CARTESIAN_TRANSFORMATION_OPERATOR_3D` mapped target, one actual fill with
+MSH4 ASCII/binary identity transport, and eleven orphan/malformed rejections
+including a mapped representation cycle and an unplaced solid.
 
 The [STEP relationship schema](https://downloads.steptools.com/docs/stp_aim/html/t_representation_relationship_with_transformation.html)
 declares the distinct-context and transform-item membership requirements.

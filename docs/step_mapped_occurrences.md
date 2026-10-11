@@ -28,10 +28,11 @@ closed boundaries. No source nodes are welded across occurrences.
 This first producer requires one explicit shape-definition root and identical
 representation-context references. Proper eight-field Cartesian transformation
 operator targets with unit/default scale have a separate
-[rigid target admission](step_cartesian_rigid_targets.md). Multiple product
-roots and mixed relationship/mapped workflows remain guarded here. A separate
-[direct product-usage producer](step_relationship_assemblies.md) supports complete
-rigid NAUO/CDSR/IDT assembly paths with their own context/unit certificate. Unreachable mapped
+[rigid target admission](step_cartesian_rigid_targets.md). The
+[direct product-usage producer](step_relationship_assemblies.md) owns
+NAUO/CDSR/IDT product graphs, including multiple roots, per-definition solids
+and `MAPPED_ITEM` occurrences inside product representations with per-context
+SI transport. Unreachable mapped
 items, cycles, missing references, invalid directions, empty representations,
 touching boxes and unsupported items reject explicitly. Limits are128 nesting
 levels,4096 solid occurrences and the existing total Surface storage caps.

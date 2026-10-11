@@ -6,7 +6,8 @@ topology, NURBS and fields, `.geo` parameter reading, bounded 1D/2D/3D meshing,
 structured patches, refinement and recombination, quadratic tetrahedra,
 MSH/STL I/O, API state, query ownership and failure atomicity, plus small matching
 and compact surface coverage regressions, list/model-view format checks and
-independent multi-root CAD boundaries, nested STEP product-usage DAG paths
+independent multi-root CAD boundaries, nested and mixed mapped/product STEP
+product-usage forest paths
 and planar Face holes, IGES143
 boundaries and explicit plane UV/rigid-transform chains, complete quadratic
 Hex, Pyramid13 and orders3–10 Curve VTK export, actual two-Tet partition
@@ -47,6 +48,8 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 15.7 s | 234 | ~50 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 15.2 s | 234 | ~40 s |
 | Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 15.4 s | 231 | ~50 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 14.8 s | 231 | ~40 s |
 | Julia 1.12.7 | Ordinary `Pkg.test()`, automatic minimal compilation | 224 | 45.21 s |
@@ -80,12 +83,14 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 231-assertion bodies took15.4/14.8 s onJulia1.12.7/1.13.1.
+The current 234-assertion bodies took15.7/15.2 s onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. Logs and actual exit-zero receipts are
 `test/tmp/ordinary_default_224_{112,113}_20261011.*`. The same252 Source files
-remained frozen throughout both calls. The latest increment adds four cheap
+remained frozen throughout both calls. The latest increment adds three cheap
+mixed STEP forest checks; `test/geometry/brep_step_relationship_mixed_functional_test.jl`
+is the opt-in mixed fixture. The preceding increment added four cheap
 quarter-turn periodic Surface-copy checks; `test/interfaces/api_rigid_periodic_hybrid_functional_test.jl`
 is the opt-in rigid/hybrid fixture. The preceding224-check increment added two cheap
 list/model representation checks. The preceding218-check increment added two

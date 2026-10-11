@@ -128,8 +128,6 @@ end
         "ITEM_DEFINED_TRANSFORMATION('','',#2007,#1010)")
     reversed=replace(source,"REPRESENTATION_RELATIONSHIP('','',#2005,#1005)"=>
         "REPRESENTATION_RELATIONSHIP('','',#1005,#2005)")
-    mixed_parent=replace(source,"SHAPE_REPRESENTATION('Subassembly',(#2007,#1010,#1013),#2045)"=>
-        "SHAPE_REPRESENTATION('Subassembly',(#2007,#1010,#1013,#15),#2045)")
     empty_leaf=replace(source,"ADVANCED_BREP_SHAPE_REPRESENTATION('',(#11,#15),#345)"=>
         "ADVANCED_BREP_SHAPE_REPRESENTATION('',(#11),#345)")
     dropped_cdsr=replace(source,"#1024 = CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#1023,#1021);\n"=>"")
@@ -137,7 +135,7 @@ end
         "#2040 = NEXT_ASSEMBLY_USAGE_OCCURRENCE('4','again','',#5,#5,\$);\n"),
         "NEXT_ASSEMBLY_USAGE_OCCURRENCE('3','nested','',#1002,#2002,\$)"=>
             "NEXT_ASSEMBLY_USAGE_OCCURRENCE('3','nested','',#1002,#5,\$)")
-    invalid=[cycle,self_root,orphan_pd,nonmember,reversed,mixed_parent,empty_leaf,
+    invalid=[cycle,self_root,orphan_pd,nonmember,reversed,empty_leaf,
         dropped_cdsr,unreachable_usage]
     mktempdir() do directory
         path=joinpath(directory,"invalid.step")
@@ -146,6 +144,19 @@ end
             @test_throws ArgumentError import_step(path;fill=false)
             @test read(path,String)==text
         end
+        intermediate=replace(source,
+            "SHAPE_REPRESENTATION('Subassembly',(#2007,#1010,#1013),#2045)"=>
+            "SHAPE_REPRESENTATION('Subassembly',(#2007,#1010,#1013,#15),#2045)")
+        write(path,intermediate)
+        mesh=import_step(path;fill=false)
+        @test mesh isa E.MixedMesh && validate(mesh).ok
+        @test [mesh.entity_data.entities[(3,owner)].bbox for owner in 1:3]==
+            [(10.,2.,0.,11.,3.,1.),(10.,5.,0.,11.,6.,1.),(10.,7.,0.,11.,8.,1.)]
+        @test mesh.physical_names[(3,1)]==
+            "STEP PRODUCT #1000 Assembly/NAUO #2020 nested/"*
+            "PRODUCT #2000 Subassembly/MANIFOLD_SOLID_BREP #15"
+        @test all(isapprox(value,1.;atol=2e-13)
+            for value in values(material_volumes(mesh,2)))
     end
 end
 

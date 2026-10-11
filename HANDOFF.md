@@ -69,11 +69,44 @@ suite passes47/47. The ordinary default suite is **231/231 on both**
 Julia1.12.7 and1.13.1, actual exit0. Multiple directions/pairs, general
 affine and cross-Region periodic ownership remain PER02.
 
+### Mixed STEP product/mapped assemblies verified (2026-10-11)
+
+Devin completed CAD02 inside `BRepStepRelationships.jl`. The product-usage
+importer now admits a reachable acyclic `PRODUCT_DEFINITION` forest instead of
+one root: every definition with no incoming usage — assembly trees and
+standalone geometry products alike — expands in identifier order. Any
+definition, whether root, intermediate or leaf, may place literal closed solids
+and `MAPPED_ITEM` occurrences beside its placement frames; a leaf must carry at
+least one solid-bearing item. A `MAPPED_ITEM` binds an actual
+`REPRESENTATION_MAP` whose source representation carries its own declared SI
+context; mapped sources classify and expand transitively under the same
+`R = AᵀB, t = Aᵀ(s_target*b − s_map*a)` law as usage edges, with literal
+member-frame provenance for AXIS2 targets and the standalone producer's
+eight-field validation for `CARTESIAN_TRANSFORMATION_OPERATOR_3D` targets.
+Complete map/item/representation/solid inventories run before emission;
+unplaced solids, unselected maps/items/representations, mapped representation
+cycles, geometry-free leaves and overlapping occurrences reject atomically.
+
+Focused `test/geometry/brep_step_relationship_mixed_functional_test.jl`
+passes48/48 on the new hand-written
+`test/fixtures/brep_relationship_mixed_roots.step` (a geometry-bearing root
+with a two-solid leaf, a mapped leaf over a transitive source rep, and a
+standalone second root): five literal occurrence bounds and volumes, path
+`MAPPED_ITEM` names, a shared-map second occurrence, a Cartesian mapped
+target, one actual fill with MSH4 ASCII/binary identity, and eleven
+orphan/malformed rejections. The nested suite's `mixed_parent` pin moved from
+rejection to a verified three-occurrence import now that intermediate
+definitions carry geometry (nested63/63); direct54, SI52, mapped31,
+cartesian43 and assembly96 regressions are unchanged. The ordinary default
+suite is **234/234 on both** Julia1.12.7 and1.13.1, actual exit0, with
+`brep_mixed_relationship_smoke.jl` added. Conversion-based units remain
+CAD03.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop
 new implementation. [DEVIN_HANDOFF.md](DEVIN_HANDOFF.md) is the current complete
-known checklist, with27 required work areas (CAD01 and PER01 now done,25 open), completion
+known checklist, with27 required work areas (CAD01, CAD02 and PER01 now done,24 open), completion
 criteria and portable
 evidence. Tessella's full P1–P6 goal is unfinished. Continue that checklist from
 current `origin/main`; older dated sections and temporary candidates below are

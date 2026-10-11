@@ -335,11 +335,13 @@ separation; touching/overlapping boxes are an explicit unsupported context.
 Explicit rigid mapped occurrences through one shape-definition root are supported;
 see `docs/step_mapped_occurrences.md` for placement and assembly restrictions.
 Nested `NEXT_ASSEMBLY_USAGE_OCCURRENCE` product graphs are expanded along every
-root-to-leaf path of a single-rooted acyclic DAG; each edge binds its actual
-parent/child representations, frames and SI unit contexts, physical rigid
+root-to-leaf path of an acyclic product-definition forest; each edge binds its
+actual parent/child representations, frames and SI unit contexts, physical rigid
 transforms compose in path order, leaf geometry scales once by its own declared
-factor, and separate occurrence identities are emitted per path. Definitions
-with outgoing usages carry placement frames only; leaves bind one closed solid.
+factor, and separate occurrence identities are emitted per path. Every
+definition — root, intermediate or leaf — may also place its own closed solids
+and `MAPPED_ITEM` occurrences; mapped sources carry their own declared SI
+context and expand transitively under the same coordinate-change law.
 This mesh import does not reconstruct analytic CAD Face/Curve parametrization.
 Nonplanar or nonlinear
 face geometry, open shells, mixed point-cloud topology, and files without a
