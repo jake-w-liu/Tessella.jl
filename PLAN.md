@@ -203,8 +203,13 @@ and ghost aliases with MSH4 transport; [partition scope](docs/partitioned_tets.m
 records the retained assignment default. [Lower-BRep production](docs/partitioned_brep.md)
 adds complete Tri3 Surface children and closed interface seams.
 [Open seams](docs/partitioned_open_seams.md) additionally preserve partial
-original Surface borders by literal incidence. General lower/mixed-family
-topology and parallel production remain open.
+original Surface borders by literal incidence. [Declared lower BRep](docs/partitioned_declared_brep.md)
+Line2 Curve and
+Point15 Point topology now partitions into signed Curve→Point and
+Surface→Curve child closures with literal shared `partitions` and unchanged
+original cell/node UIDs. General lower/mixed-family topology beyond linear
+declared BRep, coincident-support roles, triple junctions and parallel
+production remain open.
 
 An explicit [variable-tensor ordinary Surface constructor](docs/metric_model_surfaces.md)
 consumes actual lower Point/Line products and certifies the sampled world metric

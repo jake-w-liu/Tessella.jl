@@ -10788,14 +10788,17 @@ bare positive first-order Tet4 discrete Regions produce actual partition child
 entities. Topology creates shared inter-partition Tri3 interfaces with opposite
 Region incidences. Existing Tri3 Surface BRep also produces exterior Surface
 children and actual Line2 interface seams, including nonbranching open paths
-across original Surfaces. New interface borders are fully covered; original
+across original Surfaces. Declared Line2 Curve and Point15 Point BRep produce
+one partition child per original entity with signed Curve->Point and
+Surface->Curve child closures and literal shared partition memberships. New
+interface borders are fully covered; original
 Surface borders retain literal source incidence. Inputs without Point
 boundaries do not acquire fabricated Points. Original cell UIDs and physical
 memberships survive. Closed-source coverage remains complete; partial original
 BRep is not reconstructed.
 Ghost entities expose neighboring cell UID aliases while the mesh retains one
 authoritative copy of each material cell. Both options default to zero.
-Coincident original/interface Tri3 supports, unsupported lower BRep,
+Coincident original/interface Tri3 supports, malformed declared topology,
 mixed/high-order or periodic inputs reject before
 publication. Generated partition and ghost metadata can be exported as MSH4.
 """

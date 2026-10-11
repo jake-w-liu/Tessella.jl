@@ -170,6 +170,23 @@ suite is **249/249 on both Julia1.12.7 and1.13.1**, actual exit0, with
 `brep_torus_segment_smoke.jl` added. CAD04 remains open (curved trims,
 NURBS topology, nonlinear UV charts, analytic registry).
 
+### Declared Curve/Point lower-BRep partition topology (2026-10-12)
+
+Devin landed the PART01 slice: `APIPartitionBRep.jl` lower-Tri3 partition
+production retains pre-existing `Line2` Curve and `Point15` Point BRep
+topology — actual declared Curve chains with signed Point bounds carried on
+Point15 cells, complete Surface border coverage, one partition child per
+original entity with literal Tri3-carrier `partitions`, signed child
+Curve→Point and Surface→Curve closures, original cell/node UIDs, physical
+memberships, lowest-dimension node reclassification and ghost/interface
+preservation. Violations reject atomically before mutation. Focused checks
+pass100/100 on both Julia1.12.7 and1.13.1
+(`test/interfaces/api_partition_lower_brep_functional_test.jl`); the default
+smoke gained a declared-BRep testset and the ordinary default suite is
+**256/256 on both** runtimes, actual exit0. PART01 remains open (mixed/
+high-order cells, periodic/parametric topology, triple junctions, coincident
+support roles).
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

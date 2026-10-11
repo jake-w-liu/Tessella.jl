@@ -255,6 +255,46 @@ Julia1.12.7 and1.13.1, actual exit0, with `brep_torus_segment_smoke.jl`
 added. CAD04 remains open for curved trims, NURBS topology, nonlinear UV
 charts and the analytic registry.
 
+### Declared Curve/Point lower-BRep partition topology verified (2026-10-12)
+
+Devin landed the PART01 slice from `docs/handoff/meshing_remaining.md`:
+lower-Tri3 partition production in `APIPartitionBRep.jl` now retains genuine
+pre-existing `Line2` Curve and `Point15` Point BRep topology instead of
+rejecting lower-dimensional cells. The snapshot admits Point15/Line2 blocks,
+ingests actual declared topology and certifies it atomically — each declared
+Curve is one nonbranching directed Line2 chain whose signed Point bounds own
+the chain ends' Point15 cells, every declared border Curve lies on its
+Surface's literal border with matching orientation and complete coverage, and
+every cell-referenced node's classification is consistent at its actual
+lowest dimension. Production creates one partition child per original
+Curve/Point (`parent`, `partitions` from literal Tri3 carrier incidence,
+copied physical memberships, bounding box), keeps original cell UIDs and node
+UIDs, binds signed child Curve→Point and Surface→Curve boundaries, lists
+declared Curve children on interface borders that share them, and
+reclassifies shared nodes to the lowest actual incident dimension. Declared
+Curve edges on interface borders require real lower-Tri3 carriers on both
+partition sides. Unbound Curves/Points, missing or doubled carriers, branched
+chains, foreign border cells and inconsistent classification reject before
+any mutation.
+
+Focused `test/interfaces/api_partition_lower_brep_functional_test.jl`
+passes100/100 on both Julia1.12.7 and1.13.1: a two-Tet/six-Tri fixture with
+nine declared open Curves and five declared Points exercises shared/local
+children, signed closures, physical groups, ghosts, ASCII+binary MSH4
+round-trips, public `write`/`open` under `Mesh.SaveAll=1`, `unpartition`,
+and a closed declared Curve on an interface; ten violation shapes reject
+atomically including a post-generate missing Point15 carrier. The default
+smoke `test/functional/partition_brep.jl` gained a declared-BRep testset
+(7 assertions); the ordinary default suite is **256/256 on both**
+Julia1.12.7 and1.13.1, actual exit0. PART01 remains open for mixed/
+high-order cells, periodic/parametric topology, triple junctions and
+distinct coincident support roles. Note: `generate` always materializes a
+vertex node plus Point15 cell for every dim-0 entity, so a missing Point
+carrier is only reachable through non-generated models (imports or direct
+model edits), and `A.open` normalizes original non-partition boundary signs
+to `abs`, which currently blocks partition certificate reuse on imported
+declared Curve bounds — both documented pre-existing behaviors.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop
