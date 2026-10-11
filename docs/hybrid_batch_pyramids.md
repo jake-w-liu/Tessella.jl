@@ -17,8 +17,10 @@ support these settings. Their actual common Surface incidence partitions the
 Tet cells into declared Regions, and each optimizer sees only its Region's
 stars. For negative factors, every recorded global birth binds to the actual
 Region constructor by Quad UID, ordered corner UIDs and literal Source XYZ;
-the producer certifies each Region's containment before recovery. Shared Quad
-recovery still requires a two-sided Pyramid constructor.
+the producer certifies each Region's containment before recovery. A shared
+Quad between two Regions remains an explicit unsupported context in the
+pinned native generator, whose single-owner apex cannot supply both Regions.
+The retained Tessella guard matches that domain boundary.
 
 The opt-in regression
 `test/interfaces/api_hybrid_batch_pyramids_functional_test.jl` uses two separated

@@ -70,17 +70,22 @@ function _model_native_hybrid_embedded_point_certificate(mesh,uids,constructor,c
     _model_native_hybrid_point_source_certificate(witness,constructor.input,uids,mesh.coords,caller)
     _model_native_hybrid_point_containment_certificate(constructor,caller)
     point=Int32(findfirst(==(witness.record.uid),uids))
+    return _model_native_hybrid_interior_node_star_certificate(mesh,point,caller,"embedded Point")
+end
+
+# A referenced interior lower vertex must have one closed spherical Tet link.
+function _model_native_hybrid_interior_node_star_certificate(mesh,point,caller,label)
     links=Set{NTuple{3,Int32}}()
     for block in mesh.blocks,column in axes(block.nodes,2)
         nodes=block.nodes[:,column];point in nodes || continue
         block.msh==4 || throw(ArgumentError(
-            "$caller: embedded Point has a foreign hybrid cell role"))
+            "$caller: $label has a foreign hybrid cell role"))
         face=Tuple(sort!(Int32[node for node in nodes if node!=point]))
-        face in links && throw(ArgumentError("$caller: embedded Point repeats a Tet star face"))
+        face in links && throw(ArgumentError("$caller: $label repeats a Tet star face"))
         push!(links,face)
     end
     isempty(links) && throw(ArgumentError(
-        "$caller: embedded Point UID is unreferenced by the generated volume cells"))
+        "$caller: $label UID is unreferenced by the generated volume cells"))
     edges=Dict{Tuple{Int32,Int32},Vector{Int}}();vertices=Set{Int32}();faces=collect(links)
     for (index,face) in enumerate(faces)
         union!(vertices,face)
@@ -90,7 +95,7 @@ function _model_native_hybrid_embedded_point_certificate(mesh,uids,constructor,c
     end
     all(indices->length(indices)==2,values(edges)) &&
         length(vertices)-length(edges)+length(faces)==2 || throw(ArgumentError(
-        "$caller: embedded Point lacks a closed interior Tet star"))
+        "$caller: $label lacks a closed interior Tet star"))
     reached=Set([1]);queue=[1];cursor=1
     while cursor<=length(queue)
         current=queue[cursor];cursor+=1
@@ -102,6 +107,6 @@ function _model_native_hybrid_embedded_point_certificate(mesh,uids,constructor,c
         end
     end
     length(reached)==length(faces) || throw(ArgumentError(
-        "$caller: embedded Point has disconnected Tet star components"))
+        "$caller: $label has disconnected Tet star components"))
     return nothing
 end

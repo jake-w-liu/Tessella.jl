@@ -25,7 +25,10 @@ and [the partition API](https://gmsh.info/doc/texinfo/gmsh.html#index-gmsh_002fm
 Opaque observations are in C:/tmp/tessella_partition_design_20261011; no
 implementation Source from Gmsh or any matching library was read or ported.
 
-Lower cell families/BRep, referenced lower-classified Tet vertices, P2 or
+This document records the bare-Tet producer. The later
+[complete Tri3 BRep producer](partitioned_brep.md) also admits existing Surface
+children and a closed interface seam on one original Surface. Other lower
+cell/BRep contexts, referenced unsupported lower-classified Tet vertices, P2 or
 higher cells, periodic constraints, existing partition metadata, uncovered
 caller records and empty declared partitions reject before publication.
 Orphan nodes remain owned and retained. Standard MSH4 partition and ghost

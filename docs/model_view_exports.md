@@ -20,7 +20,10 @@ Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism and Pyramid cells, plus
 quadratic Line3, Triangle6, Tetrahedron10, Quad8/9, Hex20/27, Prism15/18 and
 Pyramid13, are supported.
 Complete Curve orders3–10 use VTK Lagrange Curve cells (type68), retaining every
-endpoint and interior node. Other higher-order layouts fail before opening the destination. Quadratic
+endpoint and interior node. Complete Triangle/Quadrangle/Tetrahedron orders3–10
+and Hexahedron/Prism orders3–9 use VTK Lagrange types69–73, preserving every
+node. Those are the existing catalog limits; no new element family is invented.
+Incomplete higher-order layouts fail before opening the destination. Quadratic
 layouts use the VTK reference-node ordering, with connectivity and data bound to
 the original UIDs. Pyramid14 still rejects: the standard quadratic VTK pyramid
 has 13 nodes, so dropping its additional node would lose stored data.
@@ -55,13 +58,29 @@ corner/edge lattice rather than VTK's collapsed parametric apex coordinates.
 The new opt-in test checks all four edge-only families against independently
 specified geometry and vector values; only two cheap Pyramid13 assertions join
 the default suite. Its [quadratic tetrahedron topology](https://github.com/Kitware/VTK/blob/master/Common/DataModel/vtkQuadraticTetra.cxx)
-defines the target mid-edge order. Reader compatibility was reviewed in the
-primary source; an external VTK reader was not run locally. Lagrange Curve
+defines the target mid-edge order. For the earlier quadratic/Curve increment, reader compatibility was reviewed
+in the primary source; no external reader was run for those fixtures. Lagrange Curve
 node ordering follows the two endpoints then increasing interior parameters,
 as defined by [vtkHigherOrderCurve](https://github.com/Kitware/VTK/blob/master/Common/DataModel/vtkHigherOrderCurve.cxx);
 its degree is inferred from the complete point count. The [cell catalog](https://github.com/Kitware/VTK/blob/master/Common/DataModel/vtkCellType.h)
 assigns type68. Focused cubic/tenth-order NodeData and ElementNodeData checks
 use independently specified curved geometry and vector values.
+
+Complete higher-order Surface/Volume output uses VTK5.1 `OFFSETS` and
+`CONNECTIVITY` cell arrays. Earlier VTK headers trigger a reader conversion
+that swaps two Hex edge blocks, even when the stored order is correct. The
+new writer enumerates the canonical integer reference lattice and certifies a
+bijection to every owned reference node. Prism interiors use flat triangular
+rows rather than recursive Triangle interior ordering. Existing linear,
+quadratic and Curve-only files keep their earlier2.0 encoding.
+
+Focused qualification checks40 public VTK reference lattices and NodeData/
+ElementNodeData on10 supported catalog models. Actual VTK9.7.1 reads all20
+exports with matching geometry, cell type, UInt64 node/cell identities and
+every component in two vector time steps. This bounded reader result does
+not establish all-family native byte parity. VTK is not a package or default
+test dependency. Only two tiny cubic-Triangle checks enter the default suite;
+the166 serialization/error assertions remain opt-in.
 
 Model-data row tags accept checked UInt64 identities, including values beyond
 signed Int64. Boolean, negative, nonintegral and overflowing tags are rejected

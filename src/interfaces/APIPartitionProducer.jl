@@ -87,6 +87,9 @@ end
 
 function _partition_tet_production_plan(model,cached,class,count,assignment,caller;
                                         topology::Bool,ghosts::Bool)
+    if class!==nothing && any(row->row[1]==2 && !isempty(row[4]),_cache_catalog(cached,class))
+        return _partition_brep_production_plan(model,cached,class,count,assignment,caller;topology,ghosts)
+    end
     source=_partition_tet_snapshot(model,cached,class,caller)
     total=size(source.cells,2)
     count<=total && length(unique(assignment))==count || throw(ArgumentError(

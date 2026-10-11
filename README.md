@@ -12,9 +12,9 @@ P1–P6 tracks**, with ASCENT meshing capabilities prioritized.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 203 assertions on Julia 1.12.7 and 1.13.1. Ordinary
+suite now passes 207 assertions on Julia 1.12.7 and 1.13.1. Ordinary
 `Pkg.test()` automatically selects minimal compilation; test bodies took
-10.4 seconds on each runtime. Cold package runs took 46.00 and 39.12 seconds including
+10.1 seconds on each runtime. Cold package runs took 45.23 and 37.67 seconds including
 precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
@@ -34,7 +34,8 @@ UIDs, ownership, sparse time steps and full supported connectivity. Recognized
 independent STEP/IGES solids import as [classified mixed meshes](docs/cad_mesh_imports.md).
 One translated copied Surface pair is supported in an
 [ordinary hybrid Region](docs/periodic_hybrid_boundaries.md), and a strictly
-interior [embedded Point](docs/embedded_hybrid_points.md) can be recovered in a
+interior [embedded Point](docs/embedded_hybrid_points.md) or one connected
+[embedded Line2 Curve](docs/hybrid_embedded_curves.md) can be recovered in a
 convex hybrid shell. Supported planar STEP/IGES Faces retain outer/inner wires
 and triangulate holes. [Explicit IGES plane charts](docs/iges_plane_charts.md)
 map bounded UV wires and rigid surface transforms; general curved CAD trimming
@@ -49,7 +50,9 @@ the separate [Winslow optimizer](docs/hybrid_winslow.md).
 interfaces, support these Pyramid settings with per-Region certificates. [GEO and CLI calls](docs/geo_pyramid_option_scope.md)
 use their own generation option context.
 Bare first-order Tet Regions can produce [partition interfaces and ghost
-queries](docs/partitioned_tets.md), preserving actual cell UIDs and MSH4 metadata.
+queries](docs/partitioned_tets.md). A complete discrete Tri3 boundary also
+supports [Surface children and closed interface seams](docs/partitioned_brep.md).
+Both preserve actual cell UIDs and MSH4 metadata.
 
 ```julia
 using Tessella
@@ -415,8 +418,9 @@ deterministic Gmsh-compatible orthonormal frame. Physical Plane containment test
 exact trimmed interior and excludes boundary loops, while parametric containment
 tests the inclusive rectangular bounds. Closest Line points are clamped to the
 segment; Plane projection is untrimmed. Malformed, nonfinite, implicit, degenerate,
-and unrepresentable inputs fail explicitly. Non-planar surface and general
-CAD parametrization remain unfinished.
+and unrepresentable inputs fail explicitly. Supported materialized Cylinder,
+Sphere, Cone, Torus and ruled Surfaces already provide native evaluation and
+projection; general CAD registry/trimmed parametrization remains unfinished.
 Point and straight-Line parameters can be reparametrized on any explicit Plane,
 including off-plane sources; the result is the orthogonal Plane parametrization.
 The `which` selector is accepted for API compatibility but has no effect because
@@ -473,8 +477,9 @@ see [`validation/api_generate01/README.md`](validation/api_generate01/README.md)
 mixed P1/P2 Point, Line, Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism,
 and Pyramid cells. Mixed refinement returns linear child cells; supported
 legacy straight-simplex refinement retains its re-elevated query overlay.
-Returned mesh storage is independent. Curved native CAD placement remains
-blocked before mutation.
+Returned mesh storage is independent. Unsupported curved native CAD
+refinement placement rejects before mutation; supported native order factories
+already use actual geometry evaluation and projection.
 `API.mesh.clear` discards the complete cache, or only the cells and
 owned nodes classified on the entities passed in `dim_tags`, without changing
 model geometry; entities owning no cache cells are no-ops, matching Gmsh's
@@ -531,8 +536,10 @@ records, `get_periodic_keys` pairs periodic nodes into function-space key
 sequences, `optimize` accepts Gmsh's method names with `dim_tags` entity
 scoping, and `generate` meshes multi-entity selections. Queries on a
 present-but-unmeshed model return empty data like Gmsh 4.15.2. Generation uses
-`Mesh.ElementOrder`; `set_order` converts the existing mesh to validated P1/P2
-products, with the supported legacy simplex overlay.
+`Mesh.ElementOrder`; native tagged `set_order` supports catalogued family
+orders1–10 independently of that option. The legacy compact overlay supports
+orders1/2. Native Plane Tri/Quad and transfinite Hex generation already admit
+orders above two; curved and hybrid contexts retain their specific guards.
 Public `set_smoothing` applies only to Surfaces, and `set_reverse` applies
 only to Curves and Surfaces. Other integer dimensions are no-ops, matching
 the pinned native API, including region-level calls.
@@ -707,9 +714,9 @@ edge-counterpart form that derives its transform from mapped boundary vertices.
 `Periodic Volume` is a `syntax error (Volume)` like Gmsh's grammar; volume
 relations can still be stored through `set_periodic!` as a Tessella extension
 (Gmsh's `setPeriodic` silently ignores dimension 3) and remain mesh-inert.
-Cyclic curve
-dependencies, curved periodic surfaces,
-and allocator reads after topology-changing or untracked declarations remain
+Cyclic Curve relations are retained and synchronized pairwise. Unsupported
+cyclic Surface generation contexts, general curved periodic Surfaces, and
+allocator reads after topology-changing or untracked declarations remain
 pending. Gmsh 4.15.2 has no
 serialized Point-In-Surface or Point/Line/Surface-In-Volume relation:
 the classified nodes and elements remain available instead. Its ASCII
@@ -766,7 +773,7 @@ turn an ordinary package test into a production validation campaign.
   fixtures, with shared harness code in `support`
 - [`PLAN.md`](PLAN.md) — architecture and scope boundary
 - [`STATUS.md`](STATUS.md) — dated verification evidence and continuation state
-- [`HANDOFF.md`](HANDOFF.md#continuation-handoff-2026-10-10) — remaining implementation, reader ownership and release requirements
+- [`HANDOFF.md`](HANDOFF.md#takeover-2026-10-11) — remaining implementation, reader ownership and release requirements
 - [`ASCENT.md`](ASCENT.md) — external solver integration and HFSS campaign
 
 ## License

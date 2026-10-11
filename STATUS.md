@@ -24,7 +24,43 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
-### Current shared-Region Pyramid modes and IGES matrix chains (2026-10-11)
+### Current Lagrange VTK, embedded Curve and Tri3 BRep partitions (2026-10-11)
+
+Complete [higher-order VTK](docs/model_view_exports.md) cells retain every
+catalogued Tri/Quad/TetP3–P10 and Hex/PrismP3–P9 node and value. VTK5.1 cell
+arrays prevent the confirmed reader conversion that swapped Hex edge blocks.
+Focused208: Julia1.12 actual zero/75.28 s; all40 reference lattices match and
+actual VTK9.7.1 reads all20 exported vector/time/UID files correctly. Only two
+cheap cubic-Triangle assertions enter the default; no VTK dependency is added.
+
+One real [embedded Curve](docs/hybrid_embedded_curves.md) retains its actual
+Line2 cells, endpoint Point records, UIDs/owners/coordinates and closed cyclic
+Tet edge links inside a convex hybrid shell. Final32: Julia1.12 actual
+zero/23.72 s warm; existing Point23+periodic47 pass once on that Source, actual
+zero/48.98 s warm. Actual volume generation remains opt-in.
+
+[Tri3 BRep partitions](docs/partitioned_brep.md) produce actual Surface/Region
+children, inter-partition Tri3 interfaces and closed Line2 seam Curves with
+signed incidence and unchanged original cell identities/physical groups.
+Canonical copies preserve dense ghost/data indices through block regrouping;
+MSH4 public import retains partition boundary signs. Signed discrete boundary
+registration uses the positive entity registry and keeps orientation. Final56:
+Julia1.13 actual zero/39.89 s, including default2. General lower topology,
+coincident roles and mixed/high-order/parallel contexts remain guarded.
+
+The public current cubic-Hex lifecycle confirms existing generation3 and
+order conversion4/1:10 checks, Julia1.13 actual zero/9.87 s on Main8ea.
+Generated native high orders are therefore not a blanket missing feature.
+Full curved/native mixed and hybrid qualification remains open. The selected
+packets and actual failed/green receipts are recorded in the
+[current handoff](HANDOFF.md#takeover-2026-10-11). Final ordinary `Pkg.test()`
+passes207/207 on BOTH, actual zero, same Source:Julia1.12.7 **45.23 s**,
+Julia1.13.1 **37.67 s**, both bodies**10.1 s**. Logs/receipts:
+`test/tmp/ordinary_default_207_{112,113}_20261011.*`. Automatic minimal
+compilation remains the ordinary policy. This increment follows published
+Main8ea; Git records its implementation publication SHA.
+
+### Preceding shared-Region Pyramid modes and IGES matrix chains (2026-10-11)
 
 The same final Source passes **203/203** ordinary package assertions on both
 supported runtimes, actual exit zero: Julia 1.12.7 **46.00 s**, Julia 1.13.1
@@ -43,7 +79,8 @@ certified after deferred Tet optimization. Final shared negative/Winslow checks:
 61, Julia 1.13, actual zero/85.56 s including 35.73 s cold loading. The changed
 legacy cube35 passes once on that final Source, actual zero/36.94 s warm,
 verifying the new certificates on default0. The earlier separated74 receipt
-belongs to its preceding Source, actual zero/59.37 s warm. Shared-Quad,
+belongs to its preceding Source, actual zero/59.37 s warm. Shared-Quad
+two-Region components retain the pinned native unsupported diagnostic;
 embedded/periodic batch and Netgen contexts remain open.
 
 [IGES plane charts](docs/iges_plane_charts.md) follow finite proper rigid124
@@ -57,9 +94,9 @@ import parity is therefore unclaimed.
 
 The preceding plane/VTK/Winslow/partition increment was normally pushed to Main
 as `8d0d650abd312174318b5208ae608f1cee9833e5`, remote SHA verified. The following
-receipts describe their earlier Source. P1–P6 remain in progress; current next
-implementation work is higher-order VTK, lower-BRep partitions and remaining
-hybrid composition.
+receipts describe their earlier Source. The current increment above implements
+higher-order VTK, complete Tri3 BRep partitions and an embedded Curve. P1–P6
+remain in progress; general hybrid/CAD/metric/algorithm/format contexts remain open.
 
 ### Preceding plane charts, quadratic exports, Winslow and Tet partitions (2026-10-11)
 

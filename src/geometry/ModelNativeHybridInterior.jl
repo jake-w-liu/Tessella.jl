@@ -78,7 +78,10 @@ function quality!(a,hulls)
     return flips
 end
 
-function recover(kernel,facets;seed=1,component=nothing)
+function recover(kernel,facets;seed=1,component=nothing,embedded_segments=NTuple{2,Int32}[])
+    all(segment->length(segment)==2 && allunique(segment) &&
+        all(row->0<row<=kernel.count,segment),embedded_segments) || throw(A.Unsupported(
+        "hybrid embedded segments contain missing or duplicate current rows"))
     faces=NTuple{3,Int32}[Tuple(Int32.(face)) for face in facets]
     isempty(faces) && throw(A.Unsupported("hybrid recovery requires explicit constructor facets"))
     wanted=Set{NTuple{3,Int32}}();edges=Dict{Tuple{Int32,Int32},Int}()
@@ -102,7 +105,7 @@ function recover(kernel,facets;seed=1,component=nothing)
     end
     a=A.Arena(kernel;seed)
     initial_hulls=C.initial_hulls!(a)
-    protocol=R.recoverboundary!(a,faces)
+    protocol=R.recoverboundary!(a,faces;embedded_segments)
     A.consistency(a) || throw(A.Unsupported("hybrid recovered face bonds are not reciprocal"))
     carving=C.carve!(a,initial_hulls)
     hulls=Set(carving.hulls)
@@ -138,6 +141,11 @@ function recover(kernel,facets;seed=1,component=nothing)
     exterior=Set(face for (face,count) in multiplicities if count==1)
     observed==exterior && all(get(counts,face,0)==count for (face,count) in multiplicities) || throw(A.Unsupported(
         "hybrid final cell exterior differs from the owned constructor facets"))
+    for segment in embedded_segments
+        A.edgekey(segment...) in a.protected_segments &&
+            any(cell->all(row->row in cell,segment),cells) || throw(A.Unsupported(
+            "hybrid recovery lost a protected embedded Curve segment"))
+    end
     return (cells=cells,pool_slots=slots,arena=a,protocol=protocol,carving=carving,
         lawson=lawson,quality_flips=quality)
 end

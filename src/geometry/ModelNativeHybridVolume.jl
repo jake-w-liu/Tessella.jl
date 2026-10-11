@@ -20,7 +20,7 @@ function _model_native_hybrid_registration_rows(constructor,plan,insertion,node_
         allunique(insertion.node_numbers) && allunique(node_uids) && all(!iszero,node_uids) ||
         throw(ArgumentError("$caller: hybrid registration lacks its actual insertion/Quad birth trace"))
     current=_model_native_hybrid_constructor_input(constructor.input,constructor.boundaries,
-        constructor.node_uids,constructor.coordinates,caller;embedded_point=constructor.embedded_point)
+        constructor.node_uids,constructor.coordinates,caller;embedded_point=constructor.embedded_point,embedded_curve=constructor.embedded_curve)
     isequal(current,constructor) || throw(ArgumentError(
         "$caller: hybrid registration changes its restored Region constructor"))
     positions=Dict(uid=>Int32(row) for (row,uid) in enumerate(node_uids))
@@ -63,15 +63,18 @@ function _model_native_hybrid_volume_input(m,tag,input,caller)
     quads || return nothing
     embedded_point=_model_native_hybrid_embedded_point_input(m,tag,input,caller)
     embedded_point===nothing || push!(used,embedded_point.record.uid)
-    # The initial MVertex set consumes actual Face incidence and the selected
-    # embedded Point constructor. Other unreferenced lower rows stay global.
+    embedded_curve=_model_native_hybrid_embedded_curve_input(m,tag,input,caller)
+    embedded_curve===nothing || union!(used,(record.uid for record in embedded_curve.records))
+    # Only actual selected lower cell incidence enters the native Source.
+    # Unreferenced lower rows remain global.
     ids=sort!(collect(used))
     rows=Dict(uid=>Int32(row) for (row,uid) in enumerate(data.external_node_tags))
     all(uid->haskey(rows,uid),ids) || throw(ArgumentError(
         "$caller: hybrid Source cell UID has no current authoritative vertex"))
     coords=actual.coords[:,Int32[rows[uid] for uid in ids]]
-    constructor=_model_native_hybrid_constructor_input(input,boundaries,ids,coords,caller;embedded_point)
+    constructor=_model_native_hybrid_constructor_input(input,boundaries,ids,coords,caller;embedded_point,embedded_curve)
     _model_native_hybrid_point_containment_certificate(constructor,caller)
+    _model_native_hybrid_curve_containment_certificate(constructor,caller)
     return constructor
 end
 
@@ -139,7 +142,8 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
     isfinite(optimize_pyramids) || throw(ArgumentError(
         "$caller: native hybrid Pyramid optimization value must be finite"))
     m.meshing.algorithm_3d==1 &&
-        (isempty(get(m.embeds,(3,tag),NTuple{2,Int}[])) || constructor.embedded_point!==nothing) &&
+        (isempty(get(m.embeds,(3,tag),NTuple{2,Int}[])) ||
+         constructor.embedded_point!==nothing || constructor.embedded_curve!==nothing) &&
         !get(m.meshing.reverse,(3,tag),false) && get(m.meshing.smoothing,(3,tag),0)==0 || throw(ArgumentError(
         "$caller: hybrid Volume requires its owned ordinary Delaunay constructor without additional planner attributes"))
     _model_native_hybrid_periodic_boundary_certificate(m,tag,constructor,periodic_surface_pairs,caller)
@@ -161,7 +165,9 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
     kernel=Ref{ModelNativeInitialTet.Kernel}()
     _model_native_initial_delaunay_fill(surface,order,options,caller;births=work,kernel_output=kernel)
     facets=_model_native_hybrid_recovery_facets(plan,constructor,order,caller)
-    interior=ModelNativeHybridInterior.recover(kernel[],facets)
+    curve_segments=_model_native_hybrid_curve_segments(constructor,plan.node_uids,caller)
+    kernel_segments=NTuple{2,Int32}[ntuple(slot->Int32(inverse[edge[slot]]),2) for edge in curve_segments]
+    interior=ModelNativeHybridInterior.recover(kernel[],facets;embedded_segments=kernel_segments)
     tets=reduce(hcat,Int32[order[row] for row in cell] for cell in interior.cells)
     mesh=Mesh(plan.coordinates;tets=tets)
     _model_native_volume_cell_births!(work,mesh)
@@ -171,7 +177,8 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
         triangles,_ModelAlgorithmBackgroundSize(m,3,tag,options,size_field,caller),caller;
         minimize=_resolved_extend_from_boundary(m,3,tag)==2,
         extend=_resolved_extend_from_boundary(m,3,tag)>0,
-        node_high_water=work.node_high_water,element_high_water=work.element_high_water,seeds)
+        node_high_water=work.node_high_water,element_high_water=work.element_high_water,seeds,
+        protected_edges=Set(minmax(edge...) for edge in curve_segments))
     smoothed=ModelNativeHybridInsertion.smooth(insertion,length(plan.node_uids),
         m.meshing.native_smoothing,caller)
     # Native negative factors select the normal-offset births and skip the
@@ -186,7 +193,7 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
     work.node_tags=copy(insertion.node_numbers);work.node_high_water=insertion.node_high_water
     work.element_high_water=pyramids.element_high_water
     mesh=_model_native_optimize_volume(relocated,options,work,constructor.input,
-        NTuple{3,Int32}[],NTuple{2,Int32}[],caller)
+        NTuple{3,Int32}[],_model_native_hybrid_curve_segments(constructor,work.node_tags,caller),caller)
     blocks=ElementBlock[ElementBlock(4,copy(mesh.tets)),ElementBlock(7,pyramids.nodes)]
     mixed=MixedMesh(mesh.coords,blocks)
     optimize_pyramids<0.0 && _model_native_hybrid_normal_apex_fixed_certificate(
@@ -194,6 +201,7 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
     validate(mixed).ok || throw(ArgumentError("$caller: hybrid Volume produces invalid typed cells"))
     _model_native_hybrid_volume_certificate(mixed,work.node_tags,constructor,caller)
     _model_native_hybrid_embedded_point_certificate(mixed,work.node_tags,constructor,caller)
+    _model_native_hybrid_embedded_curve_certificate(mixed,work.node_tags,constructor,caller)
     _model_native_hybrid_periodic_boundary_certificate(m,tag,constructor,periodic_surface_pairs,caller)
     geometry=_model_explicit_volume_geometry(m,tag,caller;_mesh_input=constructor.input,_mesh1d_options=options)
     _model_certify_explicit_volume_semantics(mixed,tag,geometry.expected_volume,

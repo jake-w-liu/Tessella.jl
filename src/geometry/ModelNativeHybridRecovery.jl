@@ -350,7 +350,7 @@ end
 
 
 
-function recoverboundary!(arena,facets)
+function recoverboundary!(arena,facets;embedded_segments=NTuple{2,Int32}[])
 
     segments=Tuple{Int32,Int32}[];seen=Set{Tuple{Int32,Int32}}()
 
@@ -366,6 +366,18 @@ function recoverboundary!(arena,facets)
 
         end
 
+    end
+
+    # Interior constraints use their actual lower cell endpoints. They
+    # share real segment recovery/protection with the boundary, but never
+    # become exterior facets.
+    for segment in embedded_segments
+        edge=Tuple(Int32.(segment))
+        allunique(edge) && all(row->0<row<=length(arena.points),edge) || throw(A.Unsupported(
+            "hybrid embedded segment has missing or duplicate current rows"))
+        key=A.edgekey(edge...)
+        key in seen && throw(A.Unsupported("hybrid embedded segment repeats a boundary or constraint edge"))
+        push!(seen,key);push!(segments,edge)
     end
 
     stack=A.native_stack!(arena,segments);order=Tuple{Int32,Int32}[]

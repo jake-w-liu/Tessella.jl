@@ -331,8 +331,10 @@ using Tessella
     include(joinpath(@__DIR__, "..", "interfaces/cli_options_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_vtk_p2_families_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_vtk_lagrange_curve_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "interfaces/api_vtk_lagrange_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_vtk_serendipity_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_hybrid_embedded_point_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "interfaces/api_hybrid_embedded_curve_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/brep_planar_faceholes_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "meshing/constant_metric_box_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "meshing/constant_metric_regions_functional_test.jl"))
@@ -346,5 +348,6 @@ using Tessella
     include(joinpath(@__DIR__, "..", "interfaces/api_hybrid_batch_pyramids_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_hybrid_shared_tri_pyramids_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_partition_producer_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "interfaces/api_partition_brep_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/geo_hybrid_pyramid_options_functional_test.jl"))
 end

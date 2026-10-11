@@ -12,7 +12,64 @@ small real fixtures. Full native-oracle sweeps, source/AST audits, memory stress
 benchmarks, the 22 HFSS cases, aggregate validation, and external ASCENT solves
 are opt-in campaigns. See [test/README.md](test/README.md).
 
-### Current integrated increment and continuation
+### Current high-order VTK, embedded Curve and lower-BRep partitions
+
+This reviewed Source integrates complete catalogued VTK Surface/Volume
+Lagrange layouts, one actual connected interior Line2 Curve in a convex hybrid
+Region, and existing Tri3 BRep partition children with closed seam Curves.
+Final ordinary `Pkg.test()` passes207/207 on BOTH supported Julia versions
+on the same Source:1.12.7 actual zero/45.23 s and1.13.1 actual zero/37.67 s,
+both bodies10.1 s. Receipts:
+`test/tmp/ordinary_default_207_{112,113}_20261011.*`. The default adds only two tiny
+cubic-Triangle and two two-Tet partition assertions; volume campaigns remain
+opt-in.
+
+Selected exact reviewed packets and focused qualification:
+
+- `C:/tmp/tessella_takeover_vtk_lagrange_cells_20261011/selected_vtk_lagrange_packet.json`:
+  two Source files, retained independent fixture and focused/default tests.
+  Final208 passes Julia1.12, actual zero/75.28 s including29.17 s precompile.
+  All40 public VTK reference lattices match; actual VTK9.7.1 reads all20
+  retained NodeData/ElementNodeData exports with exact geometry/type/UID/data.
+  VTK5.1 cell arrays fix the confirmed old-header Hex edge conversion.
+  Complete Tri/Quad/TetP3–P10 and Hex/PrismP3–P9 are the catalogued admission;
+  Pyramid14/incomplete layouts still reject. No default VTK dependency.
+- `C:/tmp/tessella_hybrid_embedded_curve_20261011/selected_embedded_curve_packet.json`:
+  eight Source files, opt-in32 and feature doc. Julia1.12 actual zero/23.72 s
+  warm; actual40Tet4+6Pyr5, positive volume1 and exact retained two-Line2 UIDs,
+  ordered nodes, ownership and cyclic Tet edge links. Nearby existing Point23
+  and periodic47 pass once on the same Curve Source, actual zero/48.98 s warm,
+  `curve_continuity_v1.*`. Boundary/outside/removed-cell controls reject
+  atomically. Multi-entity/Surface/general recovery remains open.
+- `C:/tmp/tessella_takeover_partition_brep_20261011/ready.json`:
+  six Source files, opt-in54 plus default2, and scope doc. Final56 passes
+  Julia1.13 actual zero/39.89 s including loading. Complete original Tri3/Tet4
+  UIDs, actual children/parents/physical memberships, signed closed seam
+  incidence, ghost aliases, retained ElementData, detached copies, true public
+  Merge, ASCII/binaryMSH4 and unpartition pass. Canonical block regrouping now
+  remaps dense ghost/data references by literal cell positions; partition
+  import retains boundary signs. Public signed discrete boundaries admit the
+  positive registry entity while preserving sign. Original failed receipts
+  remain; coincident original/interface roles still reject atomically.
+
+Root's public cubic-Hex lifecycle also confirms an existing generation route:
+10/10, Julia1.13 actual zero/9.87 s on preceding Main8ea, no Source edits.
+Generation3→set_order4→set_order1 retains primary UIDs/XYZ and leaves the
+ElementOrder option3 unchanged. Archived high-order receipts remain historical;
+the old curved V7 failures cannot support broad curved/native parity.
+
+Current scope documents are [VTK](docs/model_view_exports.md),
+[embedded Curve](docs/hybrid_embedded_curves.md) and
+[partition BRep](docs/partitioned_brep.md). Continue genuine remaining tasks
+below after the normal implementation push. Isolated next work is one retained
+interior Tri3 Surface (`concise_tests`), direct current-model `API.write`
+MSH export (`devin_reconcile`) and remaining partition lower-BRep composition
+(`implementation_audit`). None is qualified by this207-check receipt.
+Coordinate Source/runtime ownership,
+copy selected reviewed deltas only, and preserve unrelated files and failed
+receipts. Do not run the old multi-hour aggregate as a routine gate.
+
+### Preceding shared-Region Pyramid modes and IGES matrix chains
 
 The latest implementation increment adds genuine nonzero Pyramid modes for
 separate and shared-Triangle Region components and finite proper rigid124
@@ -40,23 +97,12 @@ Current qualified packets:
   only the child matrix to these chains; standard-compliant composition and
   native chain import behavior are explicitly distinguished.
 
-Immediate isolated continuation: `devin_reconcile` implements complete
-higher-order VTK lattices and actual external-reader qualification;
-`implementation_audit` implements existing-Tri3-BRep partition children and
-interface seam Curves; `concise_tests` inspects genuine remaining hybrid
-embedded/periodic or shared-Quad composition. All work stays isolated until
-review and qualification. Copy selected deltas only, preserve exact normalized
-bases, and coordinate runtime ownership. Routine tests remain small; additional
-volume/solver/native/resource campaigns stay opt-in.
-
-The previous reviewed increment was normally committed/pushed as
-`8d0d650abd312174318b5208ae608f1cee9833e5`, with exact remote SHA verified.
-This ledger accompanies the new implementation commit; use Git to determine
-its publication SHA. The current ledger supersedes older unsupported-feature
-and continuation claims. The overall P1–P6 goal remains active: shared Quad
-births, general hybrid constraints, CAD registry/curved trims, variable-metric
-generation, generated high orders, ordinary algorithms/layers/Netgen, remaining
-formats, parallel workflows and requirement-level parity remain unfinished.
+The shared-Region/matrix-chain implementation was normally pushed as
+`8ea1f00705ebcc7bb80dad0f26d205c17cc38403`, exact remote SHA verified. Its
+203-check receipts describe that Source. The current ledger above supersedes
+its higher-order VTK/lower-BRep/embedded continuation queue. The overall P1–P6
+goal remains active; the concrete remaining implementations below distinguish
+absent features from native unsupported contexts and existing scoped routes.
 
 ### Preceding plane/VTK/Winslow/partition increment
 
@@ -319,7 +365,8 @@ backlog rather than the older expensive verification queue:
 1. Extend hybrid/ordinary region composition to embedded and general periodic contexts.
    Multi-region batching and one translated copied pair in a single hybrid Region
    and one strictly interior Point in a convex hybrid Region are implemented;
-   periodic multi-Region and embedded Curve/Surface hybrid recovery remain open.
+   one actual connected Line2 Curve in a convex hybrid Region is also implemented.
+   Periodic multi-Region and embedded Surface/general hybrid recovery remain open.
    Public region reverse/smoothing are
    native no-ops, so they are not missing Gmsh Region features.
 2. Complete general CAD assembly and trimmed/periodic NURBS topology. Recognized
@@ -328,22 +375,31 @@ backlog rather than the older expensive verification queue:
    Planar STEP/IGES Face holes, including143 boundaries, are implemented;
    explicit190 Form1 UV charts and proper rigid124 chains are implemented;
    curved trims and general NURBS topology remain unfinished.
-3. Complete curved analytic Surface high-order placement and generated Surface/
-   Volume orders above two. Curve orders 1–10 are already implemented.
+3. Qualify and extend remaining curved/native mixed and hybrid high-order
+   contexts and unsupported refinement placement. Native Plane Tri/Quad and
+   transfinite Hex generation above order two, catalogued tagged order conversion
+   and Curve orders1–10 already have implementations and scoped witnesses.
+   Root's current cubic-Hex public lifecycle passes10 checks on Main8ea, actual
+   zero/9.87 s; old broad curved V7 failures preclude a blanket parity claim.
 4. Complete general metric-driven generation and the native automatic-sizing
    octree path. Existing Surface meshing and Volume refinement consume directional
    metrics; constant-tensor boxes/shared-Region grids now generate meshes too.
    Variable-metric generation and automatic-sizing parity remain unfinished.
-5. Extend mixed-surface relocation and hybrid/high-order optimization, including
-   shared-Quad Pyramid births and Netgen-equivalent behavior. Winslow1 and
-   nonzero separate/shared-Tri Region batches are implemented.
+5. Extend mixed-surface relocation and hybrid/high-order optimization and
+   Netgen-equivalent behavior. Winslow1 and nonzero separate/shared-Tri Region
+   batches are implemented. Shared-Quad two-Region components are explicitly
+   unsupported by the pinned native generator; retain that diagnostic rather
+   than treating it as an absent successful native feature.
 6. Complete remaining ordinary meshing algorithms and curved/boundary-layer
    recombination contexts; retain the current working planar paths.
 7. Complete boundary-layer Extrude and pipe frontends beyond ordinary Layers.
-8. Extend partition interface/ghost production to existing lower BRep, mixed
-   families and parallel paths. Bare Tet4 interfaces/ghosts, assignment labels
-   and MSH4 metadata transport are implemented.
-9. Complete remaining formats, high-order VTK cells and post/CLI actions.
+8. Extend partition interface/ghost production to remaining lower BRep, mixed
+   families and parallel paths. Bare Tet4 and complete discrete Tri3 boundaries
+   with closed single-Surface seams, assignment labels and MSH4 metadata
+   transport are implemented.
+9. Complete remaining formats and post/CLI actions. Complete catalogued
+   higher-order VTK Surface/Volume layouts are now implemented; Pyramid14 and
+   incomplete higher-order layouts still reject to preserve every stored node.
    Model CSV/VTK, list TXT/CSV/VTK and Curve CLI generation/version/binary flags
    are implemented within the linked format scopes. CLI sizing/order and
    standalone help/version controls are implemented too.

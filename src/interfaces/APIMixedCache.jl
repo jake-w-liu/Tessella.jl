@@ -17,8 +17,16 @@ function _canonical_mixed_copy(mesh::MixedMesh)
     blocks=ElementBlock[]
     elementary=mesh.elementary_entities===nothing ? nothing : Vector{Int32}[]
     block_owners=Vector{Int32}[];external_tags=Vector{UInt64}[]
+    offsets=Int[];total=0
+    for block in mesh.blocks
+        push!(offsets,total);total+=size(block.nodes,2)
+    end
+    cell_map=zeros(Int32,total);destination=0
     for msh in order
         indices=groups[msh]
+        for index in indices,column in axes(mesh.blocks[index].nodes,2)
+            destination+=1;cell_map[offsets[index]+column]=Int32(destination)
+        end
         nodes=hcat((mesh.blocks[i].nodes for i in indices)...)
         tags=vcat((mesh.blocks[i].tags for i in indices)...)
         push!(blocks,ElementBlock(msh,nodes,tags))
@@ -36,11 +44,26 @@ function _canonical_mixed_copy(mesh::MixedMesh)
             external_node_tags=data.external_node_tags,
             block_entities=block_owners,external_element_tags=external_tags)
     end
+    # Homogeneous grouping changes flattened positions when a family occurs
+    # in separated source blocks. Keep every dense cell reference attached to
+    # that literal source cell, independently of its public UID.
+    sections=Elements.MshDataSection[Elements.MshDataSection(section.name,
+        section.strings,section.reals,section.header,cell_map[section.elements],
+        section.nodes,section.row_nodes,section.implicit_nodes,section.values,
+        section.anchor) for section in mesh.data_sections]
+    partition=mesh.partition_data
+    if partition!==nothing
+        ghosts=Elements.MixedGhostElement[Elements.MixedGhostElement(
+            cell_map[record.element],record.partition,record.ghost_partitions)
+            for record in partition.ghost_elements]
+        partition=Elements.MixedPartitionData(partition.num_partitions;
+            entities=partition.entities,ghost_entities=partition.ghost_entities,ghost_elements=ghosts)
+    end
     return MixedMesh(mesh.coords,blocks;physical_names=mesh.physical_names,
         entity_data=data,elementary_entities=elementary,
         periodic_links=mesh.periodic_links,
-        ancillary_sections=mesh.ancillary_sections,data_sections=mesh.data_sections,
-        partition_data=mesh.partition_data)
+        ancillary_sections=mesh.ancillary_sections,data_sections=sections,
+        partition_data=partition)
 end
 
 function _cache_native_blocks(mesh::Mesh)

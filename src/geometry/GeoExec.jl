@@ -9831,7 +9831,8 @@ function _geo_merge_discrete!(m::GeoModel,mixed::MixedMesh,
         entity=get(entity_records,key,nothing)
         entity===nothing && continue
         dim=key[1];dim==0 && continue
-        record.boundary=NTuple{2,Int}[(dim-1,abs(Int(b)))
+        partition_child=mixed.partition_data!==nothing && haskey(mixed.partition_data.entities,key)
+        record.boundary=NTuple{2,Int}[(dim-1,partition_child ? Int(b) : abs(Int(b)))
                                       for b in entity.boundaries]
     end
     for (key,name) in mixed.physical_names

@@ -125,6 +125,7 @@ include("APITaggedCache.jl")
 include("APINativeMeshTags.jl")
 include("APIPartitionNative.jl")
 include("APIPartitionProducer.jl")
+include("APIPartitionBRep.jl")
 
 struct _MeshClassification
     mesh::Union{Mesh,MixedMesh}
@@ -1548,6 +1549,7 @@ set_visibility_per_window(value,window_index=0)=
 Create a parametrization-free entity of dimension `dim`, matching Gmsh's
 `model.addDiscreteEntity`. `tag=0` allocates the next tag in `dim`; `boundary`
 lists the declared `(dim, tag)` boundary entities used by topology queries.
+Signed Curve and Surface boundary tags retain their incidence orientation.
 Nodes and elements are attached with `mesh.add_nodes`, `mesh.add_elements`, or
 `mesh.add_elements_by_type`.
 """
@@ -10706,10 +10708,13 @@ explicit element UID/partition list. The default preserves assignment labels.
 With `Mesh.PartitionCreateTopology` or `Mesh.PartitionCreateGhostCells` nonzero,
 bare positive first-order Tet4 discrete Regions produce actual partition child
 entities. Topology creates shared inter-partition Tri3 interfaces with opposite
-Region incidences; it does not reconstruct exterior or lower-dimensional BRep.
+Region incidences. An existing closed Tri3 Surface BRep can also produce
+exterior Surface children and closed Line2 interface seams when each seam lies
+on one original Surface. Original cell UIDs and physical memberships survive.
 Ghost entities expose neighboring cell UID aliases while the mesh retains one
 authoritative copy of each material cell. Both options default to zero.
-Unsupported lower BRep, mixed/high-order or periodic inputs reject before
+Coincident original/interface Tri3 supports, unsupported lower BRep,
+mixed/high-order or periodic inputs reject before
 publication. Generated partition and ghost metadata can be exported as MSH4.
 """
 partition(num_part,element_tags=(),partitions=())=_partition(num_part,element_tags,partitions)
@@ -10961,7 +10966,9 @@ set_outward_orientation(tag)=_set_outward_orientation(tag)
 """
     set_order(order)
 
-Change the existing mesh to order 1 or 2, matching Gmsh's `setOrder`.
+Change the existing mesh order. Native tagged meshes support orders 1–10
+where the element family has an owned MSH factory; the legacy compact overlay
+supports orders 1 and 2.
 This operation is independent of the `Mesh.ElementOrder` generation option.
 With no existing mesh it leaves generation settings unchanged. Unsupported
 orders and unsupported native curved placement fail before changing the cache.

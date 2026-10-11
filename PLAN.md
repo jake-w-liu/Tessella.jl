@@ -8,9 +8,9 @@ remain **in progress**.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 203 assertions on Julia 1.12.7 and 1.13.1. Ordinary
+suite now passes 207 assertions on Julia 1.12.7 and 1.13.1. Ordinary
 `Pkg.test()` automatically selects minimal compilation; test bodies took
-10.4 seconds on each runtime. Cold package runs took 46.00 and 39.12 seconds including
+10.1 seconds on each runtime. Cold package runs took 45.23 and 37.67 seconds including
 precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
@@ -184,12 +184,14 @@ nonnegative values with actual relocation or the separate
 certificates. [Generation option snapshots](docs/geo_pyramid_option_scope.md)
 keep API and GEO/CLI contexts independent. [Region batches](docs/hybrid_batch_pyramids.md)
 transport nonzero Pyramid settings for separate and shared-Triangle components;
-shared Quads still require a two-sided constructor. Explicit [IGES plane charts](docs/iges_plane_charts.md)
+shared-Quad two-Region components retain the pinned native unsupported error. Explicit [IGES plane charts](docs/iges_plane_charts.md)
 map bounded UV wires with proper rigid124 plane transform chains. General
 curved trims and CAD registry reconstruction remain open.
 Bare positive Tet4 Regions now produce actual inter-partition Tri3 interfaces
 and ghost aliases with MSH4 transport; [partition scope](docs/partitioned_tets.md)
-records the retained assignment default and lower-BRep/parallel work still open.
+records the retained assignment default. [Lower-BRep production](docs/partitioned_brep.md)
+adds complete Tri3 Surface children and closed interface seams; general
+lower/mixed-family topology and parallel production remain open.
 
 P1 does not yet claim octree-identical parity with Gmsh's HXT/p4est
 `AutomaticMeshSizeField` internals (the native field remains a documented
@@ -506,8 +508,10 @@ embedded-curve relations) plus `$GhostElements` ownership lists resolved to flat
 internal element indices, and `write_mixed_msh` re-emits both sections in ASCII
 and binary MSH 4.1 — verified end-to-end by the Gmsh 4.15.2 partition-metadata
 differential. The API now produces actual bare-Tet4 child/interface/ghost
-entities; [partition scope](docs/partitioned_tets.md) records supported behavior
-and the remaining lower-BRep, mixed/high-order and parallel production work.
+entities; [partition scope](docs/partitioned_tets.md) records supported behavior.
+[Complete Tri3 BRep](docs/partitioned_brep.md) additionally produces Surface
+children and closed seam Curves. Remaining lower-topology, mixed/high-order
+and parallel contexts retain their explicit guards.
 Native geometry evaluation covers Points, straight Lines, Circle and Ellipse
 arcs, explicit Planes, and the analytic OCC circle edges and
 Cylinder/Sphere/Cone/Torus and Plane faces of materialized primitives.
@@ -643,8 +647,9 @@ algorithm by default, or the compact `1` patch —
 smoothing steps run after filling, `reverse`/`outward_orientation` flip
 entity meshes, compounds merge member entities into one classification,
 per-entity sizes and boundary point sizes propagate through composed size
-fields. `set_order` converts existing P1/P2 data independently of the generation
-option. Public API smoothing applies only to Surfaces and reverse applies to
+fields. Native tagged `set_order` converts catalogued family orders1–10
+independently of the generation option; the legacy compact overlay admits
+orders1/2. Public API smoothing applies only to Surfaces and reverse applies to
 Curves/Surfaces; region-level setters are native no-ops. Direct `GeoModel`
 volume attributes remain Tessella extensions. `set_order` retains the supported
 legacy simplex P2 overlay that survives supported
@@ -667,11 +672,14 @@ scoping through `dimTags`.
 Native mixed caches retain the actual standard linear/full quadratic block
 families and classification. They support order changes, affine transforms,
 duplicate removal, deterministic partitioning, and uniform refinement (pyramids
-yield four pyramids plus eight tetrahedra). Curved native CAD order elevation
-and refinement require geometry-placement stencils and reject before mutation;
-straight planar extruded faces and discrete geometry remain supported. Mixed
-optimization, quadrangle splitting, triangle recombination, cross fields, and
-remaining non-simplex quality metrics still require implementations.
+yield four pyramids plus eight tetrahedra). Native higher-order factories
+already use supported Surface geometry evaluation/projection. Unsupported
+curved refinement and legacy-overlay placement contexts reject before mutation;
+straight planar extruded faces and discrete geometry remain supported.
+Planar/native bounded optimization, record-based quadrangle splitting and
+recombination, Tri3 cross fields and selected non-simplex quality metrics
+already exist. Remaining curved/hybrid contexts and unsupported quality
+measures require their own implementations and qualification.
 Read-only bulk cache queries return detached flat coordinates, MSH type blocks,
 connectivity, and public node/element labels. Legacy caches use dense tags;
 tagged caches retain their stored labels, including sparse tags. Numeric MSH
@@ -1076,12 +1084,14 @@ compact-cap coverage and writer fixes. Follow the
 [current handoff](HANDOFF.md#takeover-2026-10-11) for the actual integrated
 checks, publication status and remaining work.
 
-The next verified increment adds Curve CLI generation (`-1`), MSH version and
-binary flags, complete list-view TXT/CSV/VTK export, and native dimension
-dispatch for reverse/smoothing. List exports retain all supported components
-and steps; [format semantics](docs/list_view_exports.md) explain their layout
-and deliberate CSV/VTK differences from the pinned SDK. General model-format
-exports, multi-solid CAD and periodic hybrid composition remain in progress.
+Published increments already add Curve CLI/version/binary/sizing controls,
+list/model CSV/VTK export, recognized independent CAD roots and planar holes,
+plane UV/rigid matrix chains, one periodic hybrid pair, embedded Point/Curve,
+nonzero Pyramid Region batches, constant-tensor grids and bare/complete-Tri3
+partition topology. The linked feature documents define the exact supported
+contexts; the handoff lists genuine remaining Source work. Current isolated
+implementations target a retained interior Tri3 Surface, direct model MSH
+export and remaining lower partition topology.
 
 Use small functional regressions for routine verification, then normally commit
 and push verified implementations to `main`. Native-oracle sweeps, resource and

@@ -145,6 +145,8 @@ function _native_model_vtk_quadratic_layout(msh,caller)
     return (type=type,order=[identities[node] for node in reference])
 end
 
+include("APINativeVTKLagrangeLayouts.jl")
+
 function _native_model_view_vtk_cell(msh,caller)
     linear=msh==15 ? 1 : msh==1 ? 3 : msh==2 ? 5 : msh==3 ? 9 :
         msh==4 ? 10 : msh==5 ? 12 : msh==6 ? 13 : msh==7 ? 14 : nothing
@@ -162,6 +164,9 @@ function _native_model_view_vtk_cell(msh,caller)
     spec=Elements.msh_spec(msh)
     if spec.family===:lin && 3<=spec.order<=10
         return (type=68,order=collect(1:spec.nnodes))
+    end
+    if spec.family in (:tri,:qua,:tet,:hex,:pri) && !spec.serendipity && 3<=spec.order<=10
+        return _native_model_vtk_lagrange_layout(msh,spec,caller)
     end
     throw(ArgumentError("$caller: VTK model export has no complete node ordering for Gmsh element type $msh"))
 end
@@ -196,11 +201,23 @@ function _native_model_view_vtk_payload(dataset,kind,caller)
         points=Int32.(axes(mesh.coords,2))
         connectivity=[[Int(cell.nodes[slot])-1 for slot in layout.order] for (cell,layout) in zip(cells,layouts)]
     end
-    io=IOBuffer();println(io,"# vtk DataFile Version 2.0\nTessella model view\nASCII\nDATASET UNSTRUCTURED_GRID")
+    # Older VTK file versions reinterpret Lagrange Hex edge ordering. Use the
+    # modern explicit cell arrays for these complete higher-order families.
+    modern=any(layout->69<=layout.type<=73,layouts)
+    version=modern ? "5.1" : "2.0"
+    io=IOBuffer();println(io,"# vtk DataFile Version ",version,"\nTessella model view\nASCII\nDATASET UNSTRUCTURED_GRID")
     println(io,"POINTS ",length(points)," double")
     for row in points;@printf(io,"%.17g %.17g %.17g\n",mesh.coords[1,row],mesh.coords[2,row],mesh.coords[3,row]);end
-    println(io,"CELLS ",length(cells),' ',sum(length(nodes)+1 for nodes in connectivity;init=0))
-    for nodes in connectivity;println(io,length(nodes),' ',join(nodes,' '));end
+    if modern
+        println(io,"CELLS ",length(cells)+1,' ',sum(length,connectivity;init=0))
+        println(io,"OFFSETS vtktypeint64");offset=0;print(io,offset)
+        for nodes in connectivity;offset+=length(nodes);print(io,' ',offset);end
+        println(io,"\nCONNECTIVITY vtktypeint64")
+        for nodes in connectivity;println(io,join(nodes,' '));end
+    else
+        println(io,"CELLS ",length(cells),' ',sum(length(nodes)+1 for nodes in connectivity;init=0))
+        for nodes in connectivity;println(io,length(nodes),' ',join(nodes,' '));end
+    end
     println(io,"CELL_TYPES ",length(cells));foreach(layout->println(io,layout.type),layouts)
     println(io,"FIELD FieldData 3")
     _native_model_vtk_array(io,"STEP",1,length(dataset.tables),"vtktypeint64",[table.step for table in dataset.tables])

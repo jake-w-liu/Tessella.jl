@@ -186,7 +186,7 @@ end
 # winding comes from the current authoritative cell with that exact UID.
 # Neither current public label order nor coincident coordinates select cells.
 function _model_native_hybrid_constructor_input(authority,boundaries,node_uids,
-                                                coordinates,caller;embedded_point=nothing)
+                                                coordinates,caller;embedded_point=nothing,embedded_curve=nothing)
     authority isa _ModelMeshAuthority && authority.mesh!==nothing &&
         authority.mesh.entity_data!==nothing || throw(ArgumentError(
         "$caller: hybrid recovery requires current actual mesh authority"))
@@ -205,6 +205,7 @@ function _model_native_hybrid_constructor_input(authority,boundaries,node_uids,
             throw(ArgumentError("$caller: hybrid input changes or omits actual node UID $uid"))
     end
     _model_native_hybrid_point_source_certificate(embedded_point,authority,node_uids,coordinates,caller)
+    _model_native_hybrid_curve_source_certificate(embedded_curve,authority,node_uids,coordinates,caller)
     quads=NamedTuple[];triangles=NamedTuple[];cell_uids=Set{UInt64}()
     for surface in sort!(abs.(collect(boundaries)))
         signed_surface=surface
@@ -271,5 +272,5 @@ function _model_native_hybrid_constructor_input(authority,boundaries,node_uids,
         "$caller: restored Region face vector loses an actual Quad birth"))
     return (input=authority,boundaries=copy(boundaries),node_uids=UInt64.(node_uids),
         coordinates=copy(coordinates),triangles=triangles,quads=quads,pyramid_order=pyramid_order,
-        embedded_point=embedded_point)
+        embedded_point=embedded_point,embedded_curve=embedded_curve)
 end

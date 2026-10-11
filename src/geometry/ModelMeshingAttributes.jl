@@ -495,7 +495,9 @@ function add_discrete_entity!(m::GeoModel,dim,tag=0,boundary=NTuple{2,Int}[])
         bdim<dimension || throw(ArgumentError(
             "$caller: boundary dimension $bdim must be below $dimension"))
         btag=_mesh_attr_positive_int(pair[2],caller,"boundary tag")
-        _model_entity_known(m,bdim,btag) || throw(ArgumentError(
+        -typemax(Int32)<=btag<=typemax(Int32) || throw(ArgumentError(
+            "$caller: boundary tag magnitude exceeds Int32"))
+        _model_entity_known(m,bdim,abs(btag)) || throw(ArgumentError(
             "$caller: unknown boundary entity ($bdim,$btag)"))
         push!(pairs,(bdim,btag))
     end
