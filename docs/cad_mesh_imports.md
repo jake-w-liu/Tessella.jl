@@ -28,7 +28,14 @@ full cylinder when the edge-curve inventory certifies it: lateral bounds hold
 only closed rim `CIRCLE`s centred on the axis with matching radius and axial
 normal plus optional axial seam segments, and each cap bounds closed circles
 sharing one rim inside its plane; partial arcs, off-axis or wrong-radius
-circles, unclosed rims and non-axial seams are genuine trims and reject. Every STEP
+circles, unclosed rims and non-axial seams are genuine trims and reject. A
+`CONICAL_SURFACE` lateral face plus `PLANE` caps imports as a full cone or
+frustum when the same inventory certifies it: rim `CIRCLE`s centred on the
+axis with axial normals and the radius the semi-angle predicts at that axial
+coordinate, a closed degenerate edge at the apex for a pointed cone, and
+seam segments whose carrier line passes through the apex; off-law radii,
+non-generator seams, missing caps and unclosed rim/apex sets reject as
+malformed or trimmed. Every STEP
 solid or primitive wrapped by a unit-bearing shape representation converts by
 its declared SI or conversion-based length factor into millimetres; a solid
 shared by incompatible factors rejects as ambiguous and representations

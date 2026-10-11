@@ -191,6 +191,37 @@ nested63 and mixed48 regressions pass; the ordinary default suite is
 `brep_cylinder_smoke.jl` added. CAD04 remains open for curved trims, NURBS
 topology, nonlinear UV charts and the analytic registry.
 
+### STEP rim/apex-certified CONICAL_SURFACE shells verified (2026-10-12)
+
+Devin landed the third CAD04 slice in `BRep.jl`. `_step_conical_shell`
+certifies closed shells over one `CONICAL_SURFACE` lateral face as full
+cones or frustums: rim `CIRCLE`s must be centred on the cone axis with
+axial normals and the radius `r(t)=R+t·tan(alpha)` the semi-angle predicts
+at that axial coordinate; a pointed cone's apex is a closed degenerate
+edge collapsing onto the apex point; optional seam segments must be cone
+generators (their carrier line passes through the apex); every lateral
+vertex satisfies the radius law and lies on a rim or the apex; and each
+`PLANE` cap binds only closed circles of a single rim with its plane
+containing the rim centre. Frustums certify two rims, pointed cones one
+rim plus the apex; partial arcs, off-axis or off-law circles,
+non-generator seams, vertices beyond the apex and cap/rim count
+mismatches reject as malformed or trimmed; other shapes fall through to
+the existing explicit blockers. Emission uses `cone_surface` (pointed:
+apex `r1=0`; frustum: rims sorted along the axis) plus the shared
+unit-factor scaling and validated fill.
+
+Focused `test/geometry/brep_step_cone_functional_test.jl` passes46/46 on
+the new hand-written `test/fixtures/brep_occ_frustum.step`
+(r2/r1 rims over three units with negative semi-angle) and
+`brep_occ_cone.step` (apex degenerate edge plus r2 rim): validated
+boundaries and bounding boxes, positive outward signed volumes against
+the analytic frustum and cone volumes, filled tets all positive with
+volume inside10%, metre-context scaling, ten rejection shapes, and the
+`RIGHT_CIRCULAR_CONE` primitive regression. The ordinary default suite is
+**246/246 on both** Julia1.12.7 and1.13.1, actual exit0, with
+`brep_cone_smoke.jl` added. CAD04 remains open for curved trims, NURBS
+topology, nonlinear UV charts and the analytic registry.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

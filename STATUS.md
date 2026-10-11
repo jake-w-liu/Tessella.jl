@@ -124,6 +124,27 @@ bound). Focused checks pass30/30
 regressions pass; the ordinary default suite is **243/243 on both
 Julia1.12.7 and1.13.1**, actual exit0, with `brep_cylinder_smoke.jl` added.
 
+### STEP rim/apex-certified CONICAL_SURFACE shells (2026-10-12)
+
+Devin landed the third CAD04 slice: `CONICAL_SURFACE` lateral faces plus
+`PLANE` caps import as full cones or frustums through the shared
+edge-curve inventory. `_step_conical_shell` certifies rim `CIRCLE`s
+centred on the cone axis with axial normals and the radius the semi-angle
+predicts at that axial coordinate `r(t)=R+t·tan(alpha)`, a closed
+degenerate edge at the apex for a pointed cone, optional seam segments
+whose carrier line passes through the apex (every cone generator does),
+and caps each binding closed circles of one rim with the `PLANE`
+containing its centre. Frustums need two rims; pointed cones need one rim
+plus the apex bound; partial arcs, off-axis or off-law circles,
+non-generator seams, vertices beyond the apex and missing caps reject as
+malformed/trimmed. Emission uses `cone_surface` (apex `r1=0` or sorted
+frustum rims) plus unit-factor scaling and validated fill. Focused checks
+pass46/46 (`test/geometry/brep_step_cone_functional_test.jl` on new
+`brep_occ_frustum.step` and `brep_occ_cone.step` fixtures); the ordinary
+default suite is **246/246 on both Julia1.12.7 and1.13.1**, actual exit0,
+with `brep_cone_smoke.jl` added. CAD04 remains open (curved trims, NURBS
+topology, nonlinear UV charts, analytic registry).
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

@@ -48,6 +48,8 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 34.2 s | 246 | ~70 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 38.7 s | 246 | ~75 s |
 | Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 31.9 s | 243 | ~65 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 35.6 s | 243 | ~70 s |
 | Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 24.4 s | 240 | ~60 s |
@@ -89,12 +91,14 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 243-assertion bodies took31.9/35.6 s onJulia1.12.7/1.13.1.
+The current 246-assertion bodies took34.2/38.7 s onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. Logs and actual exit-zero receipts are
 `test/tmp/ordinary_default_224_{112,113}_20261011.*`. The same252 Source files
 remained frozen throughout both calls. The latest increment adds three cheap
+rim/apex-certified `CONICAL_SURFACE` checks; `test/geometry/brep_step_cone_functional_test.jl`
+is the opt-in frustum/cone fixture set. The preceding increment adds three cheap
 rim-certified `CYLINDRICAL_SURFACE` checks; `test/geometry/brep_step_cylinder_functional_test.jl`
 is the opt-in cylinder fixture. The preceding increment adds three cheap
 closed-face `SPHERICAL_SURFACE` checks; `test/geometry/brep_step_sphere_functional_test.jl`

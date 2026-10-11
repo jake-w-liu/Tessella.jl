@@ -8,9 +8,12 @@ torus are converted to Tessella surfaces and filled. Closed-shell
 planar faces over straight edges imports as the exact polygonal boundary; a
 single unbounded `TOROIDAL_SURFACE` face imports as a parametric torus
 boundary, a single `SPHERICAL_SURFACE` face whose boundary loops collapse
-onto the two poles imports as a full sphere, and a three-face shell whose
+onto the two poles imports as a full sphere, a three-face shell whose
 `CYLINDRICAL_SURFACE` lateral face binds two certified rim circles with
-matching `PLANE` caps imports as a full cylinder. IGES solids bounded by
+matching `PLANE` caps imports as a full cylinder, and a `CONICAL_SURFACE`
+lateral face whose certified rim circles (and apex, for a full cone) are
+closed by `PLANE` caps imports as a full cone or frustum. IGES solids
+bounded by
 trimmed plane surfaces over line edges
 (144→142/141→102/110 or the 186/514/510/508/504/502 MSBO chain) and IGES
 160/198 tori take the same paths. NURBS curves and surfaces
@@ -332,8 +335,10 @@ block, `SPHERE`, `RIGHT_CIRCULAR_CYLINDER`, `RIGHT_CIRCULAR_CONE`,
 closed shell bounded by planar faces over straight edges (a single unbounded
 `TOROIDAL_SURFACE` face imports as a full torus, a single
 `SPHERICAL_SURFACE` face whose boundary vertices are only the two poles
-imports as a full sphere, and a three-face `CYLINDRICAL_SURFACE`-plus-caps
-shell whose rim circles are certified closed imports as a full cylinder).
+imports as a full sphere, a three-face `CYLINDRICAL_SURFACE`-plus-caps
+shell whose rim circles are certified closed imports as a full cylinder,
+and a `CONICAL_SURFACE`-plus-caps shell whose rims (and apex) are
+certified imports as a full cone or frustum).
 By default the
 classified boundary is tetrahedralized; `fill=false` returns its validated
 closed triangle surface. Multiple explicitly rooted independent solids return a
@@ -1071,6 +1076,205 @@ function _step_cylinder_shell(entities,faces,curvekinds,caller)
     return cylinder_surface(base_center,z,R,t_hi-t_lo)
 end
 
+function _step_cone_params(entities,surf,caller)
+    length(surf.args)>=4 || throw(ArgumentError(
+        "$caller: CONICAL_SURFACE #$(surf.id) is truncated"))
+    R=Float64(surf.args[end-1])
+    (isfinite(R) && R>0) || throw(ArgumentError(
+        "$caller: CONICAL_SURFACE #$(surf.id) radius must be positive"))
+    alpha=Float64(surf.args[end])
+    (isfinite(alpha) && abs(sin(alpha))>1e-12 && abs(cos(alpha))>1e-12) ||
+        throw(ArgumentError(
+            "$caller: CONICAL_SURFACE #$(surf.id) semi-angle is degenerate"))
+    center=(0.0,0.0,0.0); z=(0.0,0.0,1.0)
+    plcref=_first_ref(surf.args)
+    if plcref!==nothing
+        plc=_deref_entity(entities,plcref)
+        if plc!==nothing && plc.kind=="AXIS2_PLACEMENT_3D"
+            p=_deref_point(entities,_first_ref(plc.args))
+            p===nothing || (center=p)
+            refs=[a for a in plc.args if a isa Tuple && a[1]===:ref]
+            if length(refs)>=2
+                d=_deref_direction(entities,refs[2]); d===nothing || (z=d)
+            end
+        end
+    end
+    all(isfinite,center) || throw(ArgumentError(
+        "$caller: CONICAL_SURFACE #$(surf.id) has a non-finite center"))
+    return center,_brep_vunit(z,caller),R,alpha
+end
+
+# A closed shell over one CONICAL_SURFACE lateral face covers a full finite
+# cone or frustum only when the lateral bounds are rim circles plus an apex
+# degenerate edge or a second rim, joined by optional generator seam
+# segments, and each PLANE cap closes one rim. A rim's CIRCLE must be centred
+# on the cone axis with an axial normal and the radius the surface's
+# semi-angle predicts at that axial coordinate; a seam's carrier line must
+# pass through the apex (every cone generator does). Anything else is a
+# genuine trim and stays unsupported. Returns nothing when the face
+# inventory is not this shape; throws on certified mismatches.
+function _step_conical_shell(entities,faces,curvekinds,caller)
+    length(faces) in (2,3) || return nothing
+    cone_index=0; plane_indices=Int[]
+    for (i,face) in enumerate(faces)
+        face.surf===nothing && return nothing
+        if face.surf.kind=="CONICAL_SURFACE"
+            cone_index==0 || return nothing; cone_index=i
+        elseif face.surf.kind=="PLANE"
+            push!(plane_indices,i)
+        else
+            return nothing
+        end
+    end
+    (cone_index!=0 && length(plane_indices)==length(faces)-1) || return nothing
+    all(f->f.rings!==nothing,faces) || return nothing
+    cone_face=faces[cone_index]
+    c0,z,R,alpha=_step_cone_params(entities,cone_face.surf,caller)
+    tan_a=tan(alpha); tol=1e-9*max(R,1.0); atol=1e-9
+    t_apex=-R/tan_a
+    apex=(c0[1]+t_apex*z[1],c0[2]+t_apex*z[2],c0[3]+t_apex*z[3])
+
+    fe=_deref_entity(entities,(:ref,cone_face.id))
+    fe===nothing && throw(ArgumentError(
+        "$caller: conical face #$(cone_face.id) record is missing"))
+    edges=_step_face_edge_bounds(entities,fe,curvekinds,caller)
+
+    # Rim circles carry (centre, radius, axial coordinate); the apex is a
+    # closed degenerate edge collapsing onto the apex point; seams are open
+    # segments whose carrier line passes through the apex.
+    qc=Tuple{NTuple{3,Float64},Float64,Float64}[]
+    apex_seen=false
+    for (v1,v2,base) in edges
+        if v1==v2 && _brep_axis_dist(v1,apex,z)<=tol &&
+           abs(_brep_vdot(_brep_vsub(v1,apex),z))<=tol
+            apex_seen=true; continue
+        end
+        if base.kind=="CIRCLE"
+            v1==v2 || throw(ArgumentError(
+                "$caller: CIRCLE boundary edge of conical face #"*
+                "$(cone_face.id) is a partial arc — trimmed cones unsupported"))
+            center,cn,cr=_step_circle_frame(entities,base,caller)
+            _brep_axis_dist(center,c0,z)<=tol || throw(ArgumentError(
+                "$caller: rim CIRCLE #$(base.id) center is off the cone axis"))
+            abs(_brep_vdot(cn,z))>=1.0-atol || throw(ArgumentError(
+                "$caller: rim CIRCLE #$(base.id) is not perpendicular to the "*
+                "cone axis"))
+            t=_brep_vdot(_brep_vsub(center,c0),z)
+            expect=R+t*tan_a
+            expect>tol || throw(ArgumentError(
+                "$caller: rim CIRCLE #$(base.id) lies at or beyond the cone "*
+                "apex — trimmed cones unsupported"))
+            abs(cr-expect)<=tol || throw(ArgumentError(
+                "$caller: rim CIRCLE #$(base.id) radius does not match the "*
+                "conical surface"))
+            abs(sqrt(_brep_vdot(_brep_vsub(v1,center),_brep_vsub(v1,center)))-cr)<=tol ||
+                throw(ArgumentError(
+                    "$caller: rim CIRCLE #$(base.id) vertex is off the circle"))
+            all(q->_brep_axis_dist(q[1],center,z)>tol ||
+                 abs(_brep_vdot(_brep_vsub(q[1],center),z))>tol,qc) &&
+                push!(qc,(center,cr,t))
+        elseif base.kind=="LINE"
+            v1!=v2 || throw(ArgumentError(
+                "$caller: closed LINE edge of conical face #$(cone_face.id) "*
+                "is not a cone generator"))
+            d=_brep_vsub(v2,v1)
+            _brep_axis_dist(apex,v1,_brep_vunit(d,caller))<=tol ||
+                throw(ArgumentError(
+                    "$caller: seam edge of conical face #$(cone_face.id) is "*
+                    "not a cone generator"))
+        else
+            push!(curvekinds,base.kind)
+            return nothing
+        end
+    end
+    frustum=length(qc)==2 && !apex_seen
+    pointed=length(qc)==1 && apex_seen
+    (frustum || pointed) || throw(ArgumentError(
+        "$caller: conical face #$(cone_face.id) bounds do not identify a "*
+        "full cone or frustum — trimmed cones unsupported"))
+    length(plane_indices)==length(qc) || throw(ArgumentError(
+        "$caller: conical shell has $(length(qc)) rim(s) but "*
+        "$(length(plane_indices)) cap(s)"))
+
+    # Every lateral vertex satisfies the radius law r(t)=R+t·tan(alpha) and
+    # lies on a rim or is the apex.
+    vertices=NTuple{3,Float64}[]
+    for ring in cone_face.rings, p in ring
+        all(q->q!=p,vertices) && push!(vertices,p)
+    end
+    for p in vertices
+        t=_brep_vdot(_brep_vsub(p,c0),z)
+        expect=R+t*tan_a
+        expect<-tol && throw(ArgumentError(
+            "$caller: conical face #$(cone_face.id) boundary vertex lies "*
+            "beyond the cone apex"))
+        abs(_brep_axis_dist(p,c0,z)-expect)<=tol || throw(ArgumentError(
+            "$caller: conical face #$(cone_face.id) boundary vertex is off "*
+            "the conical surface"))
+        (any(q->abs(_brep_vdot(_brep_vsub(p,q[1]),z))<=tol,qc) ||
+         (apex_seen && _brep_axis_dist(p,apex,z)<=tol &&
+          abs(_brep_vdot(_brep_vsub(p,apex),z))<=tol)) ||
+            throw(ArgumentError(
+                "$caller: conical face #$(cone_face.id) boundary vertex is "*
+                "off the rim circles and apex"))
+    end
+
+    # Caps: each bounds only closed circles sharing one rim, and its PLANE
+    # contains that rim's centre with an axial normal.
+    covered=falses(length(qc))
+    for pi in plane_indices
+        cap=faces[pi]
+        pfe=_deref_entity(entities,(:ref,cap.id))
+        pfe===nothing && throw(ArgumentError(
+            "$caller: cap face #$(cap.id) record is missing"))
+        cedges=_step_face_edge_bounds(entities,pfe,curvekinds,caller)
+        rim=0
+        for (v1,v2,base) in cedges
+            base.kind=="CIRCLE" || (push!(curvekinds,base.kind); return nothing)
+            v1==v2 || throw(ArgumentError(
+                "$caller: cap boundary of conical shell face #$(cap.id) is a "*
+                "partial arc"))
+            center,cn,cr=_step_circle_frame(entities,base,caller)
+            j=findfirst(q->_brep_axis_dist(q[1],center,z)<=tol &&
+                        abs(_brep_vdot(_brep_vsub(q[1],center),z))<=tol &&
+                        abs(q[2]-cr)<=tol,qc)
+            j===nothing && throw(ArgumentError(
+                "$caller: cap CIRCLE #$(base.id) does not close a cone rim"))
+            rim==0 || rim==j || throw(ArgumentError(
+                "$caller: cap of conical shell face #$(cap.id) bounds "*
+                "both rim planes"))
+            rim=j
+            abs(_brep_vdot(cn,z))>=1.0-atol || throw(ArgumentError(
+                "$caller: cap CIRCLE #$(base.id) is not perpendicular to the "*
+                "cone axis"))
+            abs(sqrt(_brep_vdot(_brep_vsub(v1,center),_brep_vsub(v1,center)))-cr)<=tol ||
+                throw(ArgumentError(
+                    "$caller: cap CIRCLE #$(base.id) vertex is off the circle"))
+        end
+        rim!=0 || throw(ArgumentError(
+            "$caller: cap of conical shell face #$(cap.id) bounds no rim"))
+        p0,pn=_step_plane_frame(entities,cap.surf,caller)
+        qc_i=qc[rim]
+        abs(_brep_vdot(pn,z))>=1.0-atol || throw(ArgumentError(
+            "$caller: cap PLANE #$(cap.surf.id) is not perpendicular to the "*
+            "cone axis"))
+        abs(_brep_vdot(_brep_vsub(qc_i[1],p0),pn))<=tol || throw(ArgumentError(
+            "$caller: cap PLANE #$(cap.surf.id) does not contain its rim circle"))
+        covered[rim]=true
+    end
+    all(covered) || throw(ArgumentError(
+        "$caller: conical shell caps do not close every rim"))
+
+    if pointed
+        q=qc[1]
+        d=_brep_vsub(q[1],apex); h=sqrt(_brep_vdot(d,d))
+        return cone_surface(apex,_brep_vunit(d,caller),0.0,q[2],h)
+    end
+    sort!(qc,by=q->q[3])
+    lo,hi=qc[1],qc[2]
+    return cone_surface(lo[1],z,lo[2],hi[2],hi[3]-lo[3])
+end
+
 # Pole-free periodic torus boundary: u is the revolution angle, v the meridian
 # angle; the parametric rectangle wraps so seam vertices are shared by index.
 function _torus_surface(center,Z,X,R,r,caller)
@@ -1400,6 +1604,13 @@ function _step_brep_solid(brep::StepEntity,entities,fill;factor::Float64=1.0)
         if cylinder!==nothing
             cylinder=_step_unit_scaled(cylinder,factor)
             return fill ? _filled(cylinder,caller) : cylinder
+        end
+    end
+    if any(f->f.surf!==nothing && f.surf.kind=="CONICAL_SURFACE",faces)
+        cone=_step_conical_shell(entities,faces,curvekinds,caller)
+        if cone!==nothing
+            cone=_step_unit_scaled(cone,factor)
+            return fill ? _filled(cone,caller) : cone
         end
     end
     planar=!isempty(faces); ntorus=0; torus_face=nothing; nsphere=0; sphere_face=nothing
