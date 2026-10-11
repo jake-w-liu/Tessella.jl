@@ -7,8 +7,9 @@ golden-search passes. This matches the native branch used by `0`, `2` and
 fractional values such as `0.7`; the setting does not disable relocation.
 
 Exactly `1.0` selects the separate [Winslow untangler](hybrid_winslow.md).
-Negative values retain the certified normal-offset constructor. Nonzero
-multi-Region settings remain unsupported. All Source, ownership, exterior,
+Negative values retain the certified normal-offset constructor. Region
+batches with separate components or shared Triangles use the same kernels through the
+[hybrid batch producer](hybrid_batch_pyramids.md). All Source, ownership, exterior,
 typed-cell and volume certificates still apply.
 
 The opt-in regression `test/interfaces/api_hybrid_relocate_modes_functional_test.jl`

@@ -5,7 +5,7 @@ uses its option snapshot; `execute_geo` and CLI generation use the numeric
 option context of the current `.geo` program. A local negative factor stays
 floating-point and reaches the hybrid constructor and its certificates. The
 operation neither inherits nor changes an unrelated API option or cached mesh.
-The constructor, optimizer and multi-Region guards use the same scoped
+The constructor, optimizer and [batch producer](hybrid_batch_pyramids.md) use the same scoped
 value.
 
 The opt-in regression `test/interfaces/geo_hybrid_pyramid_options_functional_test.jl`

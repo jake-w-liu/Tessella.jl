@@ -37,7 +37,9 @@ function _model_native_hybrid_groups(m,regions,input,caller)
     return groups,receipts
 end
 
-function _model_native_hybrid_batch_production(m,regions,input,options,births,caller;size_field=nothing)
+function _model_native_hybrid_batch_production(m,regions,input,options,births,caller;
+                                                size_field=nothing,optimize_pyramids::Float64=0.0)
+    isfinite(optimize_pyramids) || throw(ArgumentError("$caller: hybrid batch Pyramid setting must be finite"))
     options.optimize_netgen==0 || throw(ArgumentError("$caller: hybrid batch Netgen optimization is not implemented"))
     groups,receipts=_model_native_hybrid_groups(m,regions,input,caller)
     _model_native_hybrid_global_triangles(m,input,caller)
@@ -52,12 +54,15 @@ function _model_native_hybrid_batch_production(m,regions,input,options,births,ca
         for name in fieldnames(_ModelMesh1DOptions))...)
     node_clock=births.node_high_water;element_clock=births.element_high_water
     products=Dict{Int,_ModelNativeHybridVolumeProduction}()
+    plans=Dict{Int,_ModelNativeHybridQuadPlan}()
     for receipt in receipts
         current=_ModelNativeVolumeBirths(node_clock,element_clock)
-        group=_model_native_hybrid_connected_production(m,receipt,deferred,current,caller;size_field)
+        group=_model_native_hybrid_connected_production(m,receipt,deferred,current,caller;
+            size_field,optimize_pyramids)
         for (tag,product) in group.products
             haskey(products,tag) && throw(ArgumentError("$caller: hybrid batch repeats a selected Region product"))
             products[tag]=product
+            plans[tag]=optimize_pyramids<0.0 ? group.normal_plans[tag] : group.plan
         end
         node_clock=group.node_high_water;element_clock=group.element_high_water
     end
@@ -79,7 +84,13 @@ function _model_native_hybrid_batch_production(m,regions,input,options,births,ca
         element_clock=work.element_high_water
         blocks=ElementBlock[ElementBlock(4,copy(optimized.tets)),ElementBlock(7,copy(pyramid.nodes))]
         mixed=MixedMesh(optimized.coords,blocks)
+        optimize_pyramids<0.0 && _model_native_hybrid_normal_apex_fixed_certificate(
+            plans[tag],mixed,product.boundary_node_tags,caller)
+        validate(mixed).ok || throw(ArgumentError("$caller: hybrid batch produces invalid typed cells"))
         _model_native_hybrid_volume_certificate(mixed,product.boundary_node_tags,product.constructor,caller)
+        geometry=_model_explicit_volume_geometry(m,tag,caller;_mesh_input=input,_mesh1d_options=options)
+        _model_certify_explicit_volume_semantics(mixed,tag,geometry.expected_volume,
+            geometry.comparison_scale,caller)
         products[tag]=_ModelNativeHybridVolumeProduction(mixed,copy(product.boundary_node_tags),node_clock,
             product.temporary_elements,vcat(work.element_tags,product.element_tags[size(tet.nodes,2)+1:end]),
             element_clock,input,product.constructor,copy(product.registration_rows))

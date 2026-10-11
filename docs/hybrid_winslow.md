@@ -11,8 +11,8 @@ interior apex. The optimizer visits actual allocated apex UIDs in ascending
 order and locks all other node positions. Its output must improve the patch
 objective and leave every decomposition positive. Existing typed-cell,
 ownership, exterior-incidence, volume, embedded-Point and periodic transport
-certificates still apply. Nonzero optimization for multi-Region batches
-remains unsupported.
+certificates still apply. [Region batches](hybrid_batch_pyramids.md)
+also support this optimizer with their continuing global UID factory.
 
 The opt-in regression
 `test/interfaces/api_hybrid_winslow_functional_test.jl` checks independent

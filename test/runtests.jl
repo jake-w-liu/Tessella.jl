@@ -50,5 +50,6 @@ include("functional/fixtures.jl")
     include("functional/brep_bounded143_smoke.jl")
     include("functional/brep_plane190_uv_smoke.jl")
     include("functional/brep_plane190_transform_smoke.jl")
+    include("functional/brep_plane190_chain_smoke.jl")
     include("functional/partition_producer.jl")
 end

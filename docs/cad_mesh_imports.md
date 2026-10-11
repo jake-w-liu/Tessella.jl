@@ -41,7 +41,7 @@ mesh-parser records; those two fixtures do not claim native CAD import parity.
 IGES141 admits representation types 0/1. IGES142 uses its 3-D model curve
 pointer, rather than interpreting its UV pointer as XYZ. UV-only bounded
 line/composite wires on explicit PlaneSurface190 Form1 use the declared
-parameter-to-model frame, including one proper rigid124 Form0 surface transform;
+parameter-to-model frame, including finite proper rigid124 Form0 surface transform chains;
 see [IGES plane charts](iges_plane_charts.md). Implicit108, nonlinear UV and
 general curved Face trimming remain unfinished. These field meanings follow the primary
 [Boundary schema](https://occt3d.com/dev/doc/refman/html/class_i_g_e_s_geom___boundary.html)

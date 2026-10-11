@@ -12,11 +12,15 @@ Form0 records. Literal endpoints must join and close with exactly zero UV Z.
 The wrapper must reference the Face's actual plane. Existing model-space
 CurveOnSurface records retain priority and their vertices stay in model space.
 
-One proper rigid TransformationMatrix124 Form0 may be referenced by the plane's
-directory entry. It maps the origin as `R*C + T` and the axes as `R*x` and `R*y`.
-Every matrix must be finite and orthonormal with positive determinant. Matrix
-chains, reflections, scaling and transforms on the Point/Direction/UV wire
-records currently reject. Implicit Plane108 charts and nonlinear UV/NURBS
+A finite chain of proper rigid TransformationMatrix124 Form0 records may be
+referenced by the plane's directory entry. Each matrix's directory field7
+references its later parent transform. Composition uses `Rparent*Rchild` and
+`Tparent + Rparent*Tchild`; the result maps the origin as `R*C + T` and the
+axes as `R*x` and `R*y`.
+Every matrix and composed rotation must be finite and orthonormal with
+positive determinant. Cycles, missing/invalid parents, accumulated rigidity
+loss, reflections, scaling and transforms on the Point/Direction/UV wire
+records reject. Implicit Plane108 charts and nonlinear UV/NURBS
 charts remain unsupported. This mesh importer does not create an analytic CAD
 registry or general trimmed/periodic NURBS topology.
 
@@ -43,3 +47,16 @@ rotated nonstar-shaped hole was stopped after 415.44 s in unchanged generic
 conforming-Delaunay recovery; its failed receipt and verified process identity
 remain in the isolated transform packet. Arbitrary-rotation hole fill and its
 performance remain unqualified.
+
+The chain increment passed 26 assertions on Julia 1.12, actual exit zero in
+32.48 s including compilation; body 2.7 s. Two cheap Surface assertions join
+the default suite. Two/three-matrix fixtures match independent sequential
+point mapping and a collapsed single-matrix control. A reproduced failure
+where individually tolerated matrices accumulated nonrigid scaling is fixed
+by certifying each composite as well.
+
+The opaque Gmsh 4.15.2 CAD import applies only the child matrix to these chain
+fixtures, while its collapsed single-matrix control agrees with the standard
+composition. Tessella follows IGES section4.21's declared parent/child rule;
+this chain support establishes standard transport rather than native chain
+import parity. No volume meshing occurs in the chain tests.

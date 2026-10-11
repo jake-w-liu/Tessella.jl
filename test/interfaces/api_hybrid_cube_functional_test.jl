@@ -177,7 +177,7 @@ end
     end
 end
 
-@testset "public hybrid batch rejects unsupported pyramid optimization atomically" begin
+@testset "public hybrid batch rejects exterior normal births atomically" begin
     A.initialize()
     try
         A.option("General.Terminal",0)
@@ -185,7 +185,7 @@ end
         cube(offset=100,region=2,x=3.0)
         A.mesh.generate(2)
         before=snapshot()
-        A.option("Mesh.OptimizePyramids",1)
+        A.option("Mesh.OptimizePyramids",-1)
         exception=try
             A.mesh.generate(3)
             nothing
@@ -193,9 +193,9 @@ end
             caught
         end
         @test exception isa ArgumentError
-        @test exception isa ArgumentError && occursin("Mesh.OptimizePyramids=0",sprint(showerror,exception))
+        @test exception isa ArgumentError && occursin("outside",sprint(showerror,exception))
         @test snapshot()==before
-        @test A.option("Mesh.OptimizePyramids")==1.0
+        @test A.option("Mesh.OptimizePyramids")==-1.0
         A.option("Mesh.OptimizePyramids",0)
         A.mesh.generate(3)
         @test A.model.get_entities(3)==[(3,1),(3,2)]

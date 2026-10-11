@@ -24,7 +24,44 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
-### Current plane charts, quadratic exports, Winslow and Tet partitions (2026-10-11)
+### Current shared-Region Pyramid modes and IGES matrix chains (2026-10-11)
+
+The same final Source passes **203/203** ordinary package assertions on both
+supported runtimes, actual exit zero: Julia 1.12.7 **46.00 s**, Julia 1.13.1
+**39.12 s**, with **10.4 s** functional bodies on both. Receipts are
+`test/tmp/ordinary_default_203_{112,113}_20261011.*`; automatic minimal
+compilation remains the default. No volume campaign or external tool was
+added to routine tests.
+
+[Region batches](docs/hybrid_batch_pyramids.md) transport real negative normal
+births and Winslow/nonnegative relocation settings across separate components
+and shared triangular Faces. Actual global Quad births bind to each Region's
+constructor by owner, cell UID, ordered corner UIDs and exact Source/birth
+coordinates. Containment is certified before recovery; final typed positivity,
+exterior, frozen negative-apex positions and analytic per-Region volume are
+certified after deferred Tet optimization. Final shared negative/Winslow checks:
+61, Julia 1.13, actual zero/85.56 s including 35.73 s cold loading. The changed
+legacy cube35 passes once on that final Source, actual zero/36.94 s warm,
+verifying the new certificates on default0. The earlier separated74 receipt
+belongs to its preceding Source, actual zero/59.37 s warm. Shared-Quad,
+embedded/periodic batch and Netgen contexts remain open.
+
+[IGES plane charts](docs/iges_plane_charts.md) follow finite proper rigid124
+matrix chains with explicit parent/child composition, identity/cycle checks,
+finite results and per-matrix/composite rigidity certificates. Focused checks:
+26, Julia 1.12, actual zero/32.48 s including compilation; body 2.7 s. Two
+inexpensive Surface checks join the default. A reproduced accumulated-rigidity
+failure is fixed. The opaque native importer applies only the child matrix to
+these fixtures; Tessella follows the IGES-standard chain rule. Native chain
+import parity is therefore unclaimed.
+
+The preceding plane/VTK/Winslow/partition increment was normally pushed to Main
+as `8d0d650abd312174318b5208ae608f1cee9833e5`, remote SHA verified. The following
+receipts describe their earlier Source. P1–P6 remain in progress; current next
+implementation work is higher-order VTK, lower-BRep partitions and remaining
+hybrid composition.
+
+### Preceding plane charts, quadratic exports, Winslow and Tet partitions (2026-10-11)
 
 The same final Source passes **201/201** ordinary package assertions on both
 supported runtimes: Julia 1.12.7 actual exit zero in **44.88 s**, body **9.7 s**;

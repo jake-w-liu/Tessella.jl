@@ -340,8 +340,11 @@ using Tessella
     include(joinpath(@__DIR__, "..", "geometry/brep_bounded143_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/brep_plane190_uv_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/brep_plane190_transform_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "geometry/brep_plane190_chain_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_hybrid_relocate_modes_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_hybrid_winslow_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "interfaces/api_hybrid_batch_pyramids_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "interfaces/api_hybrid_shared_tri_pyramids_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_partition_producer_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/geo_hybrid_pyramid_options_functional_test.jl"))
 end

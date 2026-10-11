@@ -12,9 +12,9 @@ P1–P6 tracks**, with ASCENT meshing capabilities prioritized.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 201 assertions on Julia 1.12.7 and 1.13.1. Ordinary
+suite now passes 203 assertions on Julia 1.12.7 and 1.13.1. Ordinary
 `Pkg.test()` automatically selects minimal compilation; test bodies took
-9.7 and 9.1 seconds. Cold package runs took 44.88 and 36.53 seconds including
+10.4 seconds on each runtime. Cold package runs took 46.00 and 39.12 seconds including
 precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
@@ -44,7 +44,9 @@ Explicit [constant-tensor box grids](docs/constant_metric_boxes.md) retain
 directional edge bounds, shared material interfaces and voids. Single convex
 hybrid Regions support [negative pyramid factors](docs/hybrid_normal_apices.md)
 and [nonnegative relocation settings](docs/hybrid_relocate_modes.md), including
-the separate [Winslow optimizer](docs/hybrid_winslow.md). [GEO and CLI calls](docs/geo_pyramid_option_scope.md)
+the separate [Winslow optimizer](docs/hybrid_winslow.md).
+[Region batches](docs/hybrid_batch_pyramids.md), including shared triangulated
+interfaces, support these Pyramid settings with per-Region certificates. [GEO and CLI calls](docs/geo_pyramid_option_scope.md)
 use their own generation option context.
 Bare first-order Tet Regions can produce [partition interfaces and ghost
 queries](docs/partitioned_tets.md), preserving actual cell UIDs and MSH4 metadata.

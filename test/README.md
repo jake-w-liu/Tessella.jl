@@ -7,7 +7,7 @@ structured patches, refinement and recombination, quadratic tetrahedra,
 MSH/STL I/O, API state, query ownership and failure atomicity, plus small matching
 and compact surface coverage regressions, list/model-view format checks and
 independent multi-root CAD boundaries and planar Face holes, IGES143
-boundaries and explicit plane UV/rigid-transform charts, complete quadratic
+boundaries and explicit plane UV/rigid-transform chains, complete quadratic
 Hex, Pyramid13 and orders3–10 Curve VTK export, actual two-Tet partition
 interfaces and ghost queries, directional constant-tensor
 box and shared-material grids, floating-point Pyramid options and CLI help/version. It needs
@@ -41,8 +41,10 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
-| Julia 1.12.7 | Ordinary `Pkg.test()`, automatic minimal compilation | 201 | 44.88 s |
-| Julia 1.13.1 | Ordinary `Pkg.test()`, automatic minimal compilation | 201 | 36.53 s |
+| Julia 1.12.7 | Ordinary `Pkg.test()`, automatic minimal compilation | 203 | 46.00 s |
+| Julia 1.13.1 | Ordinary `Pkg.test()`, automatic minimal compilation | 203 | 39.12 s |
+| Julia 1.12.7 | Preceding ordinary package invocation | 201 | 44.88 s |
+| Julia 1.13.1 | Preceding ordinary package invocation | 201 | 36.53 s |
 | Julia 1.12.7 | Preceding ordinary package invocation | 192 | 47.14 s |
 | Julia 1.13.1 | Preceding ordinary package invocation | 192 | 39.75 s |
 | Julia 1.12.7 | Preceding ordinary package invocation | 190 | 47.66 s |
@@ -56,11 +58,12 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 201-assertion package bodies took 9.7 s on Julia 1.12.7 and 9.1 s
-on Julia 1.13.1. Cold elapsed times include about 30/24 s of precompilation.
+The current 203-assertion package bodies took 10.4 s on both Julia 1.12.7 and
+1.13.1. Cold elapsed times include about 32/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. Logs and actual exit-zero receipts are
-`test/tmp/ordinary_default_201_{112,113}_20261011.*`. The preceding 192-check
+`test/tmp/ordinary_default_203_{112,113}_20261011.*`. The preceding 201-check
+bodies took 9.7/9.1 s; their receipts remain separate. The earlier 192-check
 bodies took 9.3/9.7 s and remain recorded separately.
 The earlier190-check
 bodies took10.3/8.8 s. The earlier 180-assertion

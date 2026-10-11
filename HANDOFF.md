@@ -14,6 +14,52 @@ are opt-in campaigns. See [test/README.md](test/README.md).
 
 ### Current integrated increment and continuation
 
+The latest implementation increment adds genuine nonzero Pyramid modes for
+separate and shared-Triangle Region components and finite proper rigid124
+IGES plane transform chains. Final ordinary `Pkg.test()` passes **203/203 on
+the same Source**: Julia 1.12.7 actual zero/46.00 s; Julia 1.13.1 actual
+zero/39.12 s; both functional bodies 10.4 s. Logs and receipts:
+`test/tmp/ordinary_default_203_{112,113}_20261011.*`.
+
+Current qualified packets:
+
+- `C:/tmp/tessella_hybrid_shared_tri_pyramids_20261011/selected_shared_tri_pyramids_packet.json`:
+  exact selected 3 Source files, 3 tests and 5 feature docs. Final shared61
+  passes Julia 1.13, actual zero/85.56 s including cold loading; legacy35
+  passes once on the same Source, actual zero/36.94 s warm. Both shared
+  Regions retain positive unit volumes, literal common Triangle incidence,
+  global UID/owner transport and frozen negative analytic apices.
+- `C:/tmp/tessella_hybrid_batch_pyramids_20261011/selected_batch_pyramids_packet.json`:
+  historical earlier separated74, actual zero/59.37 s warm. Its final copied
+  atomic control now uses the real unsupported shared-Quad context; no new
+  full74 rerun is claimed. The final shared61+legacy35 qualify current Source.
+- `C:/tmp/tessella_takeover_brep_plane190_chain_20261011/selected_plane190_chain_packet.json`:
+  one Source helper, four tiny Surface fixtures and two tests. Final26 passes
+  Julia 1.12, actual zero/32.48 s including compilation; body 2.7 s. Composite
+  rigidity regression red/fixed receipts are preserved. Opaque Gmsh applies
+  only the child matrix to these chains; standard-compliant composition and
+  native chain import behavior are explicitly distinguished.
+
+Immediate isolated continuation: `devin_reconcile` implements complete
+higher-order VTK lattices and actual external-reader qualification;
+`implementation_audit` implements existing-Tri3-BRep partition children and
+interface seam Curves; `concise_tests` inspects genuine remaining hybrid
+embedded/periodic or shared-Quad composition. All work stays isolated until
+review and qualification. Copy selected deltas only, preserve exact normalized
+bases, and coordinate runtime ownership. Routine tests remain small; additional
+volume/solver/native/resource campaigns stay opt-in.
+
+The previous reviewed increment was normally committed/pushed as
+`8d0d650abd312174318b5208ae608f1cee9833e5`, with exact remote SHA verified.
+This ledger accompanies the new implementation commit; use Git to determine
+its publication SHA. The current ledger supersedes older unsupported-feature
+and continuation claims. The overall P1–P6 goal remains active: shared Quad
+births, general hybrid constraints, CAD registry/curved trims, variable-metric
+generation, generated high orders, ordinary algorithms/layers/Netgen, remaining
+formats, parallel workflows and requirement-level parity remain unfinished.
+
+### Preceding plane/VTK/Winslow/partition increment
+
 This implementation increment includes explicit IGES190 plane UV charts,
 one proper rigid124 plane transform, remaining quadratic edge-only VTK cells,
 real single-Region Winslow Pyramid optimization and bare-Tet4 partition
@@ -44,10 +90,9 @@ Focused qualification packets, retained outside the default runner:
   ASCII and binary ghost metadata, binary flags 0/1/0, protected MSH2 rejection
   and unpartition pass. Earlier failed receipts remain.
 
-Continue the genuine backlog below. Immediate isolated tasks are nonzero
-multi-Region Pyramid modes (first separated-cube packet passed 74 checks but
-is not integrated here), shared-Tri Region transport, proper rigid124 matrix
-chains and existing-lower-BRep partition production. Coordinate Source/runtime
+At this preceding snapshot the isolated continuation tasks were nonzero
+Region Pyramid modes, shared-Tri transport, matrix chains and lower-BRep
+partition production. The current ledger above supersedes that queue. Coordinate Source/runtime
 ownership; copy only selected reviewed deltas with exact normalized bases.
 Full CAD registry/NURBS trims, general metric generation, higher-order placement,
 ordinary algorithms/layers/Netgen, remaining formats, parallel paths and P6
@@ -281,8 +326,8 @@ backlog rather than the older expensive verification queue:
    explicit independent STEP/IGES mesh roots are implemented; CAD occurrence
    transforms, analytic Face reconstruction and general assembly are still open.
    Planar STEP/IGES Face holes, including143 boundaries, are implemented;
-   explicit190 Form1 UV charts with one proper rigid124 transform are implemented;
-   matrix chains, curved trims and general NURBS topology remain unfinished.
+   explicit190 Form1 UV charts and proper rigid124 chains are implemented;
+   curved trims and general NURBS topology remain unfinished.
 3. Complete curved analytic Surface high-order placement and generated Surface/
    Volume orders above two. Curve orders 1–10 are already implemented.
 4. Complete general metric-driven generation and the native automatic-sizing
@@ -290,8 +335,8 @@ backlog rather than the older expensive verification queue:
    metrics; constant-tensor boxes/shared-Region grids now generate meshes too.
    Variable-metric generation and automatic-sizing parity remain unfinished.
 5. Extend mixed-surface relocation and hybrid/high-order optimization, including
-   nonzero multi-Region Pyramid modes and Netgen-equivalent behavior. Single-Region
-   Winslow1 is implemented.
+   shared-Quad Pyramid births and Netgen-equivalent behavior. Winslow1 and
+   nonzero separate/shared-Tri Region batches are implemented.
 6. Complete remaining ordinary meshing algorithms and curved/boundary-layer
    recombination contexts; retain the current working planar paths.
 7. Complete boundary-layer Extrude and pipe frontends beyond ordinary Layers.

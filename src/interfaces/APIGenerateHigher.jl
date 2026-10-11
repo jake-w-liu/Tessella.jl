@@ -1820,11 +1820,9 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
             !haskey(m.meshing.transfinite_volumes,tag) &&
             !isempty(m.volumes[tag]) && !Model._model_factory_volume_encoding(m,tag) &&
             Model._model_native_hybrid_volume_input(m,tag,input,assembly.caller)!==nothing,meshed)
-        iszero(optimize_pyramids) || throw(ArgumentError(
-            "$(assembly.caller): this native hybrid batch requires Mesh.OptimizePyramids=0"))
         births=Model._ModelNativeVolumeBirths(assembly.node_max,assembly.cell_max)
         hybrid_batch=Model._model_native_hybrid_batch_production(m,meshed,input,options,births,
-            assembly.caller;size_field)
+            assembly.caller;size_field,optimize_pyramids)
         hybrid_batch_receipt=_higher_native_hybrid_batch_receipt(assembly,m,hybrid_batch,input,
             meshed,assembly.caller)
     end

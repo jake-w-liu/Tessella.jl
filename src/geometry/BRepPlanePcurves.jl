@@ -15,20 +15,52 @@ function _iges_uv_dependency(types,params,bad,de,kind,form,caller,context;
     return rec
 end
 
+function _iges_plane_uv_rotation_certificate(rotation,caller,description)
+    columns=ntuple(axis->ntuple(row->rotation[row][axis],3),3)
+    for i in 1:3,j in i:3
+        want=i==j ? 1.0 : 0.0
+        abs(_brep_vdot(columns[i],columns[j])-want)<=1e-6 ||
+            throw(ArgumentError("$caller: UV chart $description is not rigid"))
+    end
+    determinant=_brep_vdot(columns[1],_brep_vcross(columns[2],columns[3]))
+    determinant>0 && abs(determinant-1)<=1e-6 || throw(ArgumentError(
+        "$caller: UV chart $description is not a proper rotation"))
+    return nothing
+end
+
 function _iges_plane_uv_transform(types,params,bad,surface,caller,context)
     matrix=get(context.transforms,surface,0)
     matrix==0 && return nothing
-    # IGES 5.3 section 4.21: Form0 is a proper rigid defining matrix.
-    # A matrix's own DE field7 defines a later transform in a chain; reject
-    # that unsupported chain explicitly instead of dropping its parent.
-    _iges_uv_dependency(types,params,bad,matrix,124,0,caller,context)
-    transform=_iges_de_transform(types,params,bad,context.transforms,surface,caller)
-    rotation,_=transform
-    columns=ntuple(axis->ntuple(row->rotation[row][axis],3),3)
-    determinant=_brep_vdot(columns[1],_brep_vcross(columns[2],columns[3]))
-    determinant>0 && abs(determinant-1)<=1e-6 || throw(ArgumentError(
-        "$caller: UV chart defining matrix #$matrix is not a proper rotation"))
-    return transform
+    # IGES 5.3 section4.21: a matrix's DE field7 points to the next,
+    # later transform. Compose parentR*childR and parentT+parentR*childT.
+    visited=Set{Int}();owner=surface;combined=nothing
+    while matrix!=0
+        matrix>0 && isodd(matrix) || throw(ArgumentError(
+            "$caller: UV chart defining matrix pointer $matrix is not a positive directory identity"))
+        matrix in visited && throw(ArgumentError(
+            "$caller: UV chart defining matrices contain a cycle at #$matrix"))
+        push!(visited,matrix)
+        _iges_uv_dependency(types,params,bad,matrix,124,0,caller,context;
+                            allow_transform=true)
+        transform=_iges_de_transform(types,params,bad,context.transforms,owner,caller)
+        rotation,_=transform
+        _iges_plane_uv_rotation_certificate(rotation,caller,"defining matrix #$matrix")
+        if combined===nothing
+            combined=transform
+        else
+            child_rotation,child_translation=combined
+            composed_rotation=ntuple(row->ntuple(column->sum(
+                rotation[row][axis]*child_rotation[axis][column] for axis in 1:3),3),3)
+            composed_translation=_iges_xf_apply(transform,child_translation,true)
+            all(isfinite,(composed_rotation[1]...,composed_rotation[2]...,
+                          composed_rotation[3]...,composed_translation...)) ||
+                throw(ArgumentError("$caller: UV chart defining matrix composition is non-finite"))
+            _iges_plane_uv_rotation_certificate(composed_rotation,caller,"matrix composition at #$matrix")
+            combined=(composed_rotation,composed_translation)
+        end
+        owner=matrix;matrix=get(context.transforms,matrix,0)
+    end
+    return combined
 end
 
 function _iges_uv_unit(vector,caller)

@@ -1,6 +1,5 @@
-# Draft for a separately qualified connected-Region producer. The current
-# single-Region production guard remains unchanged until batch emission and
-# global birth/optimization scheduling are qualified.
+# Connected Region recovery binds actual lower Face closures and keeps their
+# declared Region ownership through shared-panel partitioning and publication.
 struct _ModelNativeHybridComponentReceipt
     input::_ModelMeshAuthority
     regions::Vector{Int}
@@ -17,6 +16,45 @@ struct _ModelNativeHybridRecoveryReceipt
     points::Vector{NTuple{3,Float64}}
     facets::Vector{NTuple{3,Int32}}
     multiplicities::Dict{NTuple{3,Int32},Int}
+end
+
+# Project already allocated global births onto a Region's actual lower
+# constructor. No vertex, owner, normal or factory UID is inferred from XYZ.
+function _model_native_hybrid_region_normal_plan(m,component,plan,tag,caller)
+    tag in component.regions && plan.source_uids==component.constructor.node_uids &&
+        isequal(plan.source_coordinates,component.constructor.coordinates) || throw(ArgumentError(
+        "$caller: hybrid normal batch loses its actual connected Source"))
+    constructor=_model_native_hybrid_volume_input(m,tag,component.input,caller)
+    constructor!==nothing || throw(ArgumentError("$caller: normal batch Region lacks its actual constructor"))
+    global_rows=Dict(uid=>row for (row,uid) in enumerate(plan.source_uids))
+    all(uid->haskey(global_rows,uid),constructor.node_uids) &&
+        isequal(plan.source_coordinates[:,Int[global_rows[uid] for uid in constructor.node_uids]],
+                constructor.coordinates) || throw(ArgumentError(
+        "$caller: normal batch Region changes a witnessed Source UID/XYZ row"))
+    source=copy(constructor.node_uids)
+    local_rows=Dict(uid=>Int32(row) for (row,uid) in enumerate(source))
+    originals=Dict((birth.owner,birth.element_uid)=>birth for birth in plan.births)
+    length(originals)==length(plan.births) || throw(ArgumentError("$caller: normal batch repeats a global Quad birth"))
+    coordinates=Matrix{Float64}(undef,3,length(source)+length(constructor.quads))
+    coordinates[:,1:length(source)].=constructor.coordinates
+    node_uids=copy(source);births=_ModelNativeHybridQuadBirth[]
+    for (ordinal,quad) in enumerate(constructor.quads)
+        original=get(originals,(quad.owner,quad.uid),nothing)
+        original!==nothing && original.base_uids==quad.nodes &&
+            component.face_regions[Int(quad.owner[2])]==[tag] &&
+            plan.node_uids[original.apex_row]==original.apex_uid &&
+            isequal(Tuple(plan.coordinates[:,original.apex_row]),original.point) || throw(ArgumentError(
+            "$caller: normal batch Region has a missing or foreign actual Quad birth"))
+        base=ntuple(slot->local_rows[quad.nodes[slot]],4)
+        apex=Int32(length(source)+ordinal)
+        coordinates[:,apex].=original.point;push!(node_uids,original.apex_uid)
+        push!(births,_ModelNativeHybridQuadBirth(original.owner,original.element_uid,
+            original.base_uids,base,original.apex_uid,apex,original.point))
+    end
+    regional_plan=_ModelNativeHybridQuadPlan(source,copy(constructor.coordinates),node_uids,
+        coordinates,zeros(Int32,3,0),births,plan.initial_clock,plan.node_high_water)
+    _model_native_hybrid_normal_apex_certificate(regional_plan,constructor,caller)
+    return regional_plan
 end
 
 function _model_native_hybrid_component_receipt(m,region_tags,input,caller)
@@ -204,12 +242,14 @@ function (background::_ModelNativeHybridRegionBackground)(x,y,z,tag)
     return field(x,y,z)
 end
 
-function _model_native_hybrid_connected_production(m,component,options,births,caller;size_field=nothing)
-    # This is an owned batch primitive. Public per-Region generation retains
-    # its guard until aggregate constructor and optimization scheduling exist.
+function _model_native_hybrid_connected_production(m,component,options,births,caller;
+                                                   size_field=nothing,optimize_pyramids::Float64=0.0)
+    # Tet optimization is deferred until every selected component has
+    # completed construction with its continuing global factory clocks.
     component isa _ModelNativeHybridComponentReceipt && !isempty(component.regions) &&
         m.meshing.algorithm_3d==1 && options.optimize==0 && options.optimize_netgen==0 ||
         throw(ArgumentError("$caller: hybrid connected production requires its recorded batch and deferred default optimization"))
+    isfinite(optimize_pyramids) || throw(ArgumentError("$caller: hybrid Pyramid setting must be finite"))
     fresh=_model_native_hybrid_component_receipt(m,component.regions,component.input,caller)
     fresh.boundaries==component.boundaries && fresh.face_regions==component.face_regions &&
         isequal(fresh.constructor,component.constructor) || throw(ArgumentError(
@@ -225,7 +265,14 @@ function _model_native_hybrid_connected_production(m,component,options,births,ca
     constructor=component.constructor
     work=_ModelNativeVolumeBirths(births.node_high_water,births.element_high_water)
     plan=_model_native_hybrid_quad_plan(constructor.node_uids,constructor.coordinates,
-        constructor.quads,work.node_high_water,caller)
+        constructor.quads,work.node_high_water,caller;
+        normal_factor=optimize_pyramids<0.0 ? -optimize_pyramids : 0.0)
+    normal_plans=Dict{Int,_ModelNativeHybridQuadPlan}()
+    if optimize_pyramids<0.0
+        for tag in component.regions
+            normal_plans[tag]=_model_native_hybrid_region_normal_plan(m,component,plan,tag,caller)
+        end
+    end
     work.source=Mesh(plan.source_coordinates);work.node_tags=copy(plan.node_uids)
     work.node_high_water=plan.node_high_water
     order=sortperm(plan.node_uids);kernel=Ref{ModelNativeInitialTet.Kernel}()
@@ -253,7 +300,7 @@ function _model_native_hybrid_connected_production(m,component,options,births,ca
     # Its two-hop Tet neighborhood must not acquire the other Region's star
     # merely because both Regions share a fixed lower vertex.
     coordinates=copy(smoothed.mesh.coords)
-    for tag in component.regions
+    for tag in (optimize_pyramids<0.0 ? Int[] : component.regions)
         birth_indices=findall(birth->only(component.face_regions[Int(birth.owner[2])])==tag,plan.births)
         local_positions=Dict(index=>ordinal for (ordinal,index) in enumerate(birth_indices))
         local_order=Int[local_positions[index] for index in constructor.pyramid_order if haskey(local_positions,index)]
@@ -261,7 +308,8 @@ function _model_native_hybrid_connected_production(m,component,options,births,ca
             coordinates,zeros(Int32,3,0),plan.births[birth_indices],plan.initial_clock,plan.node_high_water)
         columns=findall(==(tag),smoothed.mesh.tet_tag)
         local_mesh=Mesh(coordinates;tets=smoothed.mesh.tets[:,columns])
-        relocated=ModelNativeHybridRelocate.relocate(local_plan,local_mesh,caller;
+        relocated=(optimize_pyramids==1.0 ? ModelNativeHybridWinslow : ModelNativeHybridRelocate).relocate(
+            local_plan,local_mesh,caller;
             birth_order=local_order,node_uids=insertion.node_numbers)
         coordinates=relocated.coords
     end
@@ -289,7 +337,7 @@ function _model_native_hybrid_connected_production(m,component,options,births,ca
             pyramids.element_high_water,component.input,region_constructor,
             _model_native_hybrid_registration_rows(region_constructor,plan,insertion,node_uids,caller))
     end
-    return (input=component.input,component=component,plan=plan,products=products,
+    return (input=component.input,component=component,plan=plan,normal_plans=normal_plans,products=products,
         node_high_water=insertion.node_high_water,element_high_water=pyramids.element_high_water,
         random_state=options.random_state[])
 end
