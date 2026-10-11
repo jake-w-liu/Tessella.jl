@@ -8,8 +8,9 @@ remain **in progress**.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 171 assertions; its minimally compiled test body took 5.3 seconds
-on Julia 1.13.1, with a 40.61-second cold package run including precompilation.
+suite now passes 173 assertions; its minimally compiled test body took 5.3 seconds
+on Julia 1.13.1 (5.71 seconds warm overall). The preceding 171-assertion cold
+package run took 40.61 seconds including precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
 and [test/README.md](test/README.md) describes routine and extended tests.
@@ -150,7 +151,8 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 | 5 | native primitives, analytical CAD/imprints, healing gates, mesh CSG | DONE |
 | 6 | globally certified P2 elements, solver I/O, 22 geometry regressions | DONE |
 
-Current bounded additions include [model CSV/VTK exports](docs/model_view_exports.md)
+Current bounded additions include [CLI sizing/order controls](docs/cli_controls.md),
+[model CSV/VTK exports](docs/model_view_exports.md)
 and [one translated copied Surface pair in a hybrid Region](docs/periodic_hybrid_boundaries.md).
 General high-order format coverage, periodic multi-Region composition, embedded
 hybrid recovery, and full CAD/NURBS assembly topology remain open.

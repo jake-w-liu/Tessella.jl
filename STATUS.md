@@ -24,7 +24,28 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### CLI sizing, order and information controls (2026-10-11)
+
+The CLI adds `-clscale`, `-clmin`, `-clmax` and `-order`, plus standalone
+`-help`/`--help` and `-version`/`--version`. Forced numeric values retain
+priority over script assignments and aliases, including in-script `Mesh 1`.
+Finite/range, duplicate and incompatible bound errors occur before execution
+or output replacement. Curve orders 1–10 are available; other generated orders
+retain their existing documented scope. See [CLI controls](docs/cli_controls.md).
+
+The focused line regression passes 27/27, plus two default information checks,
+on Julia 1.13.1 with minimal compilation and bounds checks: actual exit 0 in
+4.08 seconds warm, focused body 3.5 seconds. The current standalone default
+suite passes 173/173, actual exit 0 in 5.71 seconds warm; body 5.3 seconds.
+The preceding 171-assertion package receipt remains the cold package measurement.
+The first CLI run found a missing setter import, which was fixed; the second
+used an unsuitable epsilon tolerance for numerical curve grading. The final
+analytic spacing check uses a relative tolerance of 1e-10. Failed logs remain
+under `test/tmp/cli_options_20261011_v1.*` and `v2.*`; the final receipt is `v3.*`.
+
 ### Independent CAD solids, model exports and periodic hybrid composition (2026-10-11)
+
+Published and normally pushed as `b92e87b`; the remote SHA was verified.
 
 Recognized STEP/IGES imports now support multiple explicit independent roots,
 with separate Surface/Region owners and UIDs in a classified MixedMesh.

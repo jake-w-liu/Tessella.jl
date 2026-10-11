@@ -82,6 +82,7 @@ using ..IO: _geo_exchange_onelab_number!, _geo_exchange_onelab_string!
 using ..IO: _geo_split_list, _geo_split_range, _geo_range_count
 using ..IO: _geo_numeric_list_terms, _geo_numeric_list_values
 using ..IO: _geo_signed_gmsh_int_value
+using ..IO: _geo_store_option_number!
 using ..IO: _GEO_SIDE_EFFECT_SYMBOLS
 using ..IO: _MAX_GEO_LIST_ITEMS, _MAX_GEO_SCAN_NESTING
 using ..IO: _geo_context_set_scalar!, _geo_context_set_list!
@@ -712,6 +713,7 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
                      _initial_mesh_begin_callback=nothing,
                      _initial_abort_option_callback=nothing,
                      _initial_numeric_options=nothing,
+                     _forced_numeric_options=nothing,
                      _initial_numeric_option_callback=nothing,
                      _initial_recombine_partial_callback=nothing)
     isfile(path) || throw(ArgumentError("execute_geo: missing file $path"))
@@ -751,6 +753,30 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
         for (name,value) in _initial_numeric_options
             family,member=split(String(name),'.';limit=2)
             context.option_numbers[(family,0,member)]=Float64(value)
+        end
+    end
+    # CLI options retain priority over subsequent script writes, including
+    # aliases. Seed through the existing option setter to acquire all aliases;
+    # only explicitly forced values are restored after each option assignment.
+    if _forced_numeric_options!==nothing && !isempty(_forced_numeric_options)
+        forced=Dict{Tuple{String,Int,String},Float64}()
+        for (name,value) in _forced_numeric_options
+            family,member=split(String(name),'.';limit=2)
+            before=copy(context.option_numbers)
+            _geo_store_option_number!(context,String(family),0,String(member),
+                Float64(value),"execute_geo: command-line option")
+            for (key,stored) in context.option_numbers
+                if key==(family,0,member) || get(before,key,nothing)!=stored
+                    forced[key]=stored
+                end
+            end
+        end
+        callback=context.native_numeric_option_callback
+        context.native_numeric_option_callback=(family,member,value)->begin
+            merge!(context.option_numbers,forced)
+            callback===nothing || callback(family,member,
+                get(forced,(family,0,member),value))
+            nothing
         end
     end
     context.file_name=String(path)

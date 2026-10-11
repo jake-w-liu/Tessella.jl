@@ -88,7 +88,8 @@ one thread, bounds checks and minimal compilation. Root logs are under
 `test/tmp/cli_curve_functional_v3_20261011`; isolated list/API packets retain
 their first failed harness receipts and actual green reruns.
 
-The subsequent integrated increment implements recognized independent multi-root
+Published `b92e87bbab652a3fb03da9729527aa03ca348f48` (remote verified)
+implements recognized independent multi-root
 STEP/IGES mesh imports, model CSV/VTK exports and one translated copied Surface
 pair in a single explicit hybrid Region, including retained constructors.
 See [CAD scope](docs/cad_mesh_imports.md), [model format scope](docs/model_view_exports.md)
@@ -110,6 +111,13 @@ final DE/P-schema guard at `C:/tmp/tessella_takeover_brep_schema_20261011`;
 the periodic v2 wrapper failed only on a missing copied prism artifact despite
 47 passing periodic checks; the later integrated wrapper above actually exits 0.
 The final CAD schema guard supersedes only the earlier 95-check candidate.
+
+The subsequent CLI increment adds forced sizing/order flags and standalone
+help/version commands; see [controls](docs/cli_controls.md). Its focused public
+regression plus default checks pass 29 assertions, actual exit 0 in 4.08 s warm.
+The current standalone default passes 173/173, actual exit 0 in 5.71 s warm;
+body 5.3 s. No new cold package timing is claimed for this increment. Logs:
+`test/tmp/cli_options_20261011_v3.*` and `functional_default_cli_20261011.*`.
 
 Next isolated work is planar CAD Face holes at
 `C:/tmp/tessella_takeover_brep_faceholes_20261011`, quadratic non-simplex VTK
@@ -156,7 +164,8 @@ backlog rather than the older expensive verification queue:
    partition assignment and metadata preservation are already implemented.
 9. Complete remaining formats, high-order VTK cells and post/CLI actions.
    Model CSV/VTK, list TXT/CSV/VTK and Curve CLI generation/version/binary flags
-   are implemented within the linked format scopes.
+   are implemented within the linked format scopes. CLI sizing/order and
+   standalone help/version controls are implemented too.
 10. Close native matching chronology and requirement-level differential parity.
     Large P6/HFSS/ASCENT campaigns remain opt-in verification, not routine tests.
 
