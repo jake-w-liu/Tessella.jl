@@ -152,19 +152,14 @@ end
             A.option("General.Terminal",0)
             A.option("Mesh.OptimizePyramids",0.)
             two_cubes(;settings...)
-            if settings.cross_region
-                # Existing lower-entity admission rejects this cross-Region
-                # relation before any copied Surface product can be published.
-                before=snapshot()
-                @test_throws ArgumentError A.mesh.generate(2)
-                @test snapshot()==before
-            else
-                A.mesh.generate(2)
-                A.option("Mesh.MeshOnlyEmpty",1)
-                before=snapshot()
-                @test_throws ArgumentError A.mesh.generate(3)
-                @test snapshot()==before
-            end
+            # The cross-Region relation's derived Surface copies are valid
+            # dim-2 products like any other periodic slave; the Region
+            # certificate rejects the foreign pair at volume time.
+            A.mesh.generate(2)
+            A.option("Mesh.MeshOnlyEmpty",1)
+            before=snapshot()
+            @test_throws ArgumentError A.mesh.generate(3)
+            @test snapshot()==before
         finally
             A.finalize()
         end

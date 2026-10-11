@@ -1,13 +1,16 @@
-# Translated periodic boundaries in hybrid Regions
+# Rigid periodic boundaries in hybrid Regions
 
 The public mesh API supports one ordinary explicit Region whose current planar
-Tri3/Quad4 shell contains quadrangles and one translated periodic Surface pair.
-Mesh the master Surface first and let the slave copy it. An explicitly
+Tri3/Quad4 shell contains quadrangles and one periodic Surface pair whose map
+is a certified proper rigid transform. Mesh the master Surface first and let
+the slave copy it. An explicitly
 transfinite slave is meshed independently and does not supply the copy
 correspondence required by this hybrid constructor.
 
-Use `API.mesh.set_periodic(2, [slave], [master], affine)` with an identity linear
-part and a translation in the last column of the row-major 4×4 affine matrix.
+Use `API.mesh.set_periodic(2, [slave], [master], affine)` with a row-major 4×4
+affine whose linear part is orthonormal with determinant +1 — a pure
+translation (identity linear part) or a rigid rotation — and the translation
+in the last column.
 `API.mesh.generate(3)` preserves the copied boundary node identities and cyclic
 cell connectivity while producing positive Tet4 and Pyramid5 cells.
 `API.mesh.set_order(2)` retains the linear correspondence and publishes the
@@ -20,8 +23,12 @@ verify the recorded identities; they do not select periodic node pairs.
 
 The constructor checks exact lower ownership, complete copied UID coverage,
 affine coordinates, ordered Surface cells, exterior incidence, and total signed
-volume before publication. Multiple periodic pairs, nontranslation transforms,
-missing or incomplete copy history, and cross-Region boundary pairs remain
+volume before publication. A rotated pair also induces Surface-derived
+cross-side Curve relations; those ride the existing `derived` provenance
+through the owned lower producer while directly declared cross-surface Curve
+relations keep their explicit guard. Multiple periodic pairs, sheared,
+reflected, scaled or otherwise non-rigid transforms, missing or incomplete
+copy history, and cross-Region boundary pairs remain
 outside this admission and are rejected atomically.
 
 A multi-Region hybrid batch can also consume a single translated Surface pair
@@ -36,8 +43,13 @@ batch's final optimization. No periodic pairs are inferred from coordinates.
 Per-Region positive typed cells, exact exterior/UID ownership and analytic
 volume certificates remain required.
 
-The bounded regression is
-[`api_periodic_hybrid_functional_test.jl`](../test/interfaces/api_periodic_hybrid_functional_test.jl).
+The bounded regressions are
+[`api_periodic_hybrid_functional_test.jl`](../test/interfaces/api_periodic_hybrid_functional_test.jl)
+for the translated scope and
+[`api_rigid_periodic_hybrid_functional_test.jl`](../test/interfaces/api_rigid_periodic_hybrid_functional_test.jl)
+for the quarter-/half-turn rigid scope (24Tet4+6Pyramid5, volume1, actual
+primary/P2 pairs, MSH4 transport, atomic non-rigid and direct-relation
+rejections).
 
 The batch fixture is
 [`api_periodic_hybrid_batch_functional_test.jl`](../test/interfaces/api_periodic_hybrid_batch_functional_test.jl).
@@ -46,8 +58,8 @@ exterior certificates, preserves lower ownership/cells, checks primary and P2
 periodic query pairs, and verifies classified MSH4 transport. The default MSH4
 writer saves the primary pairs; the live P2 query includes the quadratic pairs.
 Missing copy events,
-nontranslation and cross-Region relations reject without publishing a mesh.
-Cross-Region relations are rejected by the existing lower Surface preflight.
+non-rigid and cross-Region relations reject without publishing a mesh.
+Cross-Region relations are rejected by the per-Region volume certificate.
 The complete actual event inventory is also checked against an intentionally
 incomplete snapshot. This full fixture is opt-in; default tests gain no volume
 generation.

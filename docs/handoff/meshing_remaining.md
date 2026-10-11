@@ -24,9 +24,9 @@ The new admission checks uniquely owned exterior periodic Faces, existing comple
 
 Scope remains Pyramid mode 0, translations, one pair per Region. The final two-check invalid fixture exercises an earlier generate2 lower periodic-Curve guard; it does **not** qualify the new joint-copy inconsistency gate. Attempt1 (actual exit1/70.1031068 s, positives59 + Pyramid guard2 green) is preserved. No private contradictory map was fabricated to make a test pass.
 
-## Next implementation design: proper rigid periodic hybrid pair
+## Implemented design: proper rigid periodic hybrid pair
 
-Status: **read-only design and valid SDK outputs only; no Tessella implementation or Julia qualification**. Original probe drivers and observations remain under `C:/tmp/tessella_hybrid_next_scope_20261011`; portable JSON observations are linked in the repository evidence section below:
+Status: **implemented and verified (2026-10-11)** per the design below. `_surface_periodic_constraints` now routes actual Surface-derived cross-side Curve relations (`ModelPeriodicConstraint.derived`) to the owned lower producer instead of rejecting them; directly declared cross-surface relations keep the explicit guard. The hybrid admission gate certifies the applied 3×4 map as proper rigid — finite coefficients, orthonormal linear part, determinant +1 within a scale-aware `1e-12` bound — while the unchanged remainder still requires the actual copy UID events, complete constructor rows, Point/Curve/Surface ownership, affine coordinates and ordered cell incidence. Focused coverage: `test/interfaces/api_rigid_periodic_hybrid_functional_test.jl` (61 assertions: quarter- and half-turn 24Tet+6Pyr cubes, P1/P2 maps, MSH4 round-trip, atomic shear/reflection and direct-relation rejections) plus the `rigid_periodic_smoke.jl` default check. Cross-Region and mixed-direction copies moved their atomic rejection to the volume certificate layer. Original probe drivers and observations remain under `C:/tmp/tessella_hybrid_next_scope_20261011`; portable JSON observations are linked in the repository evidence section below:
 
 - `native_rigid_periodic_probe.py` / `.json`: pinned public Gmsh 4.15.2 quarter-turn and half-turn unit-cube controls.
 - `native_shared_periodic_probe.py` / `.json`: valid shared translated two-Region control for the integrated feature.

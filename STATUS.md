@@ -37,10 +37,26 @@ ordinary default suite is **227/227 on both Julia1.12.7 and1.13.1**, actual
 exit0. See `docs/step_relationship_assemblies.md` and
 `test/geometry/brep_step_relationship_nested_functional_test.jl`.
 
+### Proper rigid periodic hybrid pairs (2026-10-11)
+
+Devin completed checklist PER01. Surface-derived cross-side Curve relations
+now route through the owned lower producer via existing
+`ModelPeriodicConstraint.derived` provenance, and the hybrid volume admission
+certifies the applied 3×4 map as proper rigid (finite coefficients,
+orthonormal linear part, determinant+1 within `1e-12`) while preserving every
+UID-event/ownership/coordinate/incidence certificate and the explicit direct
+cross-surface Curve guard. Focused rigid checks pass61/61 against the pinned
+quarter-/half-turn controls; translated periodic hybrid47/47, batch74/74 and
+shared-periodic regressions stay green at their updated atomic rejection
+boundary; `rigid_periodic_smoke.jl` joins the default suite at **231/231 on
+both Julia1.12.7 and1.13.1**, actual exit0. See
+`test/interfaces/api_rigid_periodic_hybrid_functional_test.jl`.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The
-[Devin checklist](DEVIN_HANDOFF.md) records27 known work areas (CAD01 done,26
+[Devin checklist](DEVIN_HANDOFF.md) records27 known work areas (CAD01 and
+PER01 done,25
 open), precise
 completion requirements, prepared nested STEP/rigid periodic designs and
 portable evidence. **Full P1–P6 parity remains unfinished.** New implementation

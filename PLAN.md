@@ -162,8 +162,11 @@ Pyramid13 VTK layouts, planar STEP/IGES Face holes, and
 [one embedded Point in a convex hybrid Region](docs/embedded_hybrid_points.md)
 are also implemented. Current additions include catalogued high-order VTK,
 retained Point/Curve collections and endpoint-only3–6-vertex Tri3 disks, and one
-translated copied Surface pair per separate hybrid Region. Incomplete
-high-order formats, shared/general-affine periodic Region composition, broader
+translated copied Surface pair per separate hybrid Region, and one
+proper-rigid copied Surface pair per hybrid Region (quarter-/half-turn
+certified affines with derived cross-side Curve transport). Incomplete
+high-order formats, shared/cross-Region and general-affine periodic Region
+composition, broader
 hybrid recovery and full CAD/NURBS assembly topology remain open.
 
 ## Gmsh parity tracks

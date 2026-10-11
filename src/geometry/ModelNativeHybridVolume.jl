@@ -85,17 +85,37 @@ function _model_native_hybrid_volume_input(m,tag,input,caller)
     return constructor
 end
 
-# Admit one translated boundary pair only from copyMesh's actual UID events.
+# Admit one proper-rigid boundary pair only from copyMesh's actual UID events.
 # Coordinates verify those events; neither geometry nor row order selects a pair.
 function _model_native_hybrid_periodic_boundary_certificate(m,tag,constructor,pairs,caller)
     constraints=_model_volume_periodic_surface_constraints(m,tag,caller)
     isempty(constraints) && return nothing
     length(constraints)==1 || throw(ArgumentError(
-        "$caller: hybrid periodic boundary requires one translated Surface pair"))
+        "$caller: hybrid periodic boundary requires one periodic Surface pair"))
     constraint=only(constraints);affine=constraint.affine
-    affine!==nothing && all(index->affine[index]==(index in (1,6,11,16) ? 1.0 : 0.0),
-        (1,2,3,5,6,7,9,10,11,13,14,15,16)) || throw(ArgumentError(
-        "$caller: hybrid periodic boundary supports translations only"))
+    # The copy map is a certified proper rigid transform: finite applied
+    # entries, an orthonormal linear part and determinant +1. The stored
+    # fourth row is verbatim record bytes like upstream's — the applied 3×4
+    # map is what this certifies. `bound` is a Float64 rounding allowance on
+    # the declared coefficients — distinct from the geometric `atol` that
+    # the node transport check below applies.
+    affine!==nothing && all(isfinite,affine[i] for i in 1:12) ||
+        throw(ArgumentError(
+            "$caller: hybrid periodic boundary requires a finite rigid Surface transform"))
+    linear=(affine[1],affine[2],affine[3],affine[5],affine[6],affine[7],
+            affine[9],affine[10],affine[11])
+    rigid_bound=1e-12*max(1.0,maximum(abs,linear))
+    for column_i in 1:3,column_j in column_i:3
+        gram=linear[column_i]*linear[column_j]+linear[3+column_i]*linear[3+column_j]+
+            linear[6+column_i]*linear[6+column_j]
+        abs(gram-(column_i==column_j ? 1.0 : 0.0))<=rigid_bound || throw(ArgumentError(
+            "$caller: hybrid periodic boundary requires an orthonormal rigid transform"))
+    end
+    determinant=linear[1]*(linear[5]*linear[9]-linear[6]*linear[8])-
+        linear[2]*(linear[4]*linear[9]-linear[6]*linear[7])+
+        linear[3]*(linear[4]*linear[8]-linear[5]*linear[7])
+    abs(determinant-1.0)<=rigid_bound || throw(ArgumentError(
+        "$caller: hybrid periodic boundary requires a determinant +1 rigid transform"))
     slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
     event=pairs===nothing ? nothing : get(pairs,slave,nothing)
     event!==nothing && event[1]==master && !isempty(event[2]) || throw(ArgumentError(

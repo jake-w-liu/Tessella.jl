@@ -37,11 +37,43 @@ actual exit0; the committed nested fixtures live under
 multiple roots and multiple solids per leaf remain CAD02; conversion-based
 units remain CAD03.
 
+### Proper rigid periodic hybrid pairs verified (2026-10-11)
+
+Devin completed PER01 from the prepared meshing design. Two changes carry the
+increment: `_surface_periodic_constraints` in `Model.jl` now uses the existing
+`ModelPeriodicConstraint.derived` provenance to route Surface-induced
+cross-side Curve relations to the owned lower producer (enforced through
+`_periodic_curve_point`) instead of rejecting them, while directly declared
+cross-surface relations keep the explicit one-entity guard; and the admission
+gate in `ModelNativeHybridVolume.jl` replaced its translation-only check with
+a certified proper-rigid test on the applied 3×4 map — finite coefficients,
+orthonormal linear part and determinant+1 within a scale-aware `1e-12` bound
+distinct from the geometric `atol` used by the node-transport check. The
+unchanged remainder still requires actual copyMesh UID events, complete
+constructor rows, bijective bindings, Point/Curve/Surface node ownership,
+affine coordinate transport and ordered cell incidence.
+
+Focused `test/interfaces/api_rigid_periodic_hybrid_functional_test.jl`
+passes61/61: quarter-turn and half-turn cubes reproduce the pinned public
+controls exactly (24Tet4+6Pyramid5, every cell positive, volume1, six-Quad
+exterior, facet multiplicities1/2, four primary and nine P2 actual pairs,
+MSH4 round-trip affine/UID identity), shear and reflection maps reject
+atomically at the volume certificate, and a directly declared cross-surface
+Curve relation keeps its explicit guard. A cheap
+`test/functional/rigid_periodic_smoke.jl` check enters the default suite.
+Cross-Region batch and mixed-direction shared copies now reject atomically at
+the volume certificate rather than the earlier dim2 guard — their existing
+testsets were updated to the moved boundary and still pass (batch74/74,
+shared positive/negative sets green); the translated-pair periodic hybrid
+suite passes47/47. The ordinary default suite is **231/231 on both**
+Julia1.12.7 and1.13.1, actual exit0. Multiple directions/pairs, general
+affine and cross-Region periodic ownership remain PER02.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop
 new implementation. [DEVIN_HANDOFF.md](DEVIN_HANDOFF.md) is the current complete
-known checklist, with27 required work areas (CAD01 now done,26 open), completion
+known checklist, with27 required work areas (CAD01 and PER01 now done,25 open), completion
 criteria and portable
 evidence. Tessella's full P1–P6 goal is unfinished. Continue that checklist from
 current `origin/main`; older dated sections and temporary candidates below are

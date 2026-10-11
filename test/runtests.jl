@@ -63,4 +63,5 @@ include("functional/fixtures.jl")
     include("functional/brep_plane190_chain_smoke.jl")
     include("functional/partition_producer.jl")
     include("functional/partition_brep.jl")
+    include("functional/rigid_periodic_smoke.jl")
 end

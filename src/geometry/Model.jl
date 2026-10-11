@@ -3371,6 +3371,16 @@ function _surface_periodic_constraints(m::GeoModel,t::Int,
             # projected is skipped here — the multi-surface path emits it.
             (external_curves!==nothing && foreign in external_curves) &&
                 continue
+            # A Surface-induced relation (upstream `GEdge::setMeshMaster`
+            # inside `GFace::setMeshMaster`) legitimately pairs this
+            # surface's boundary curve with a master on a different side
+            # surface — a proper rotation copies a slave face's edge onto a
+            # master edge that does not bound this face. The owned lower
+            # producer already enforces that copy through
+            # `_periodic_curve_point`, so no local parameter sync applies.
+            # Directly declared cross-surface curve relations keep the
+            # explicit failure below.
+            constraint.derived && continue
             throw(ArgumentError(
                 "$caller: periodic Curve[$slave]/Curve[$master] relation " *
                 "has only one entity on Surface[$t]"))

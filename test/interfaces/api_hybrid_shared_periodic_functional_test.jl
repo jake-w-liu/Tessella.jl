@@ -155,12 +155,17 @@ end
         @test snapshot()==before
     end
 end
-@testset "unsupported mixed-direction lower copy planner rejects atomically" begin
+@testset "unsupported mixed-direction joint copies reject atomically" begin
     session() do
         adjacent_cubes(;conflicting=true)
+        # The mixed-direction slave copies are themselves valid dim-2
+        # products; the shared interface slave UID is bound by both Regions
+        # under different masters/affines, so the joint periodic certificate
+        # rejects the conflicting copy at volume time.
+        A.mesh.generate(2)
         before=(A.mesh.get_nodes(),A.mesh.get_elements(),A.mesh.get_max_node_tag(),A.mesh.get_max_element_tag())
-        error=try;A.mesh.generate(2);nothing;catch failure;failure isa InterruptException && rethrow();failure;end
-        @test error isa ArgumentError && occursin("periodic Curve[11]/Curve[10] relation has only one entity on Surface[3]",sprint(showerror,error))
+        error=try;A.mesh.generate(3);nothing;catch failure;failure isa InterruptException && rethrow();failure;end
+        @test error isa ArgumentError && occursin("conflicting current master UID or affine",sprint(showerror,error))
         @test (A.mesh.get_nodes(),A.mesh.get_elements(),A.mesh.get_max_node_tag(),A.mesh.get_max_element_tag())==before
     end
 end
