@@ -12,9 +12,9 @@ P1–P6 tracks**, with ASCENT meshing capabilities prioritized.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 190 assertions on Julia 1.12.7 and 1.13.1. Ordinary
+suite now passes 192 assertions on Julia 1.12.7 and 1.13.1. Ordinary
 `Pkg.test()` automatically selects minimal compilation; test bodies took
-10.3 and 8.8 seconds. Cold package runs took 47.66 and 37.80 seconds including
+9.3 and 9.7 seconds. Cold package runs took 47.14 and 39.75 seconds including
 precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,

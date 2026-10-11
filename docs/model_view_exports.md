@@ -18,7 +18,8 @@ node UIDs. Data records retain every stored component row, time and UID;
 Model VTK writes ASCII legacy unstructured grids. Linear Point, Line,
 Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism and Pyramid cells, plus
 quadratic Line3, Triangle6, Tetrahedron10, Quad9, Hex27 and Prism18, are supported.
-Other higher-order layouts fail before opening the destination. Complete quadratic
+Complete Curve orders3–10 use VTK Lagrange Curve cells (type68), retaining every
+endpoint and interior node. Other higher-order layouts fail before opening the destination. Complete quadratic
 layouts use the VTK reference-node ordering, with connectivity and data bound to
 the original UIDs. Pyramid14 still rejects: the standard quadratic VTK pyramid
 has 13 nodes, so dropping its additional node would lose stored data.
@@ -43,7 +44,12 @@ The [VTK reader](https://github.com/Kitware/VTK/blob/master/IO/Legacy/vtkDataRea
 supports `vtktypeuint64` for exact identities and NaN for missing values.
 Its [quadratic tetrahedron topology](https://github.com/Kitware/VTK/blob/master/Common/DataModel/vtkQuadraticTetra.cxx)
 defines the target mid-edge order. Reader compatibility was reviewed in the
-primary source; an external VTK reader was not run locally.
+primary source; an external VTK reader was not run locally. Lagrange Curve
+node ordering follows the two endpoints then increasing interior parameters,
+as defined by [vtkHigherOrderCurve](https://github.com/Kitware/VTK/blob/master/Common/DataModel/vtkHigherOrderCurve.cxx);
+its degree is inferred from the complete point count. The [cell catalog](https://github.com/Kitware/VTK/blob/master/Common/DataModel/vtkCellType.h)
+assigns type68. Focused cubic/tenth-order NodeData and ElementNodeData checks
+use independently specified curved geometry and vector values.
 
 Model-data row tags accept checked UInt64 identities, including values beyond
 signed Int64. Boolean, negative, nonintegral and overflowing tags are rejected

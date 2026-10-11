@@ -24,6 +24,24 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Complete higher-order Curve VTK output (2026-10-11)
+
+Model VTK now exports complete Curve orders3–10 as Lagrange Curve cells,
+retaining every node, UID and stored value. Cubic and tenth-order fixtures
+check independently specified curved coordinates, two vector time steps,
+ElementNodeData and caller-state preservation:22/22 on Julia1.13.1,
+actual exit0 in36.94 s including precompilation (focused body4.2 s).
+See [format scope](docs/model_view_exports.md). Other higher-order families
+and complete Pyramid14 VTK remain open; this is serialization support.
+
+Final combined ordinary `Pkg.test()` passes192/192 on both runtimes, actual
+exit0: Julia1.12.7 47.14 s/body9.3 s; Julia1.13.1 39.75 s/body9.7 s.
+Logs/receipts: `test/tmp/ordinary_default_192_{112,113}_20261011.*`.
+The preceding metric/IGES/Pyramid increment was normally pushed as
+`37587962aca9dd478d5fff653c957c4b2bfc2b11`; the remote SHA was verified.
+P1–P6 parity remains open. Routine tests remain small and independent of
+external meshing and solver campaigns.
+
 ### Concise default, metric grids, IGES143 and Pyramid settings (2026-10-11)
 
 Ordinary `Pkg.test()` now relaunches the small functional suite with minimal

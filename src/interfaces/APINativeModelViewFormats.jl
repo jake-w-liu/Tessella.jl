@@ -147,6 +147,12 @@ function _native_model_view_vtk_cell(msh,caller)
     # VTK's are (2,4),(3,4). Geometry and nodal data stay bound to the same UID.
     msh==11 && return (type=24,order=[1,2,3,4,5,6,7,8,10,9])
     msh in (10,12,13) && return _native_model_vtk_quadratic_layout(msh,caller)
+    # VTK Lagrange curves infer their degree from the complete node count.
+    # Both formats place the two endpoints first, then increasing edge nodes.
+    spec=Elements.msh_spec(msh)
+    if spec.family===:lin && 3<=spec.order<=10
+        return (type=68,order=collect(1:spec.nnodes))
+    end
     throw(ArgumentError("$caller: VTK model export has no complete node ordering for Gmsh element type $msh"))
 end
 

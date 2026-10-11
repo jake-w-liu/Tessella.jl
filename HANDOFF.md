@@ -145,7 +145,9 @@ Root's earlier integrated Julia1.12 view regression passed 109/109 in 6.18 s.
 See [CAD](docs/cad_mesh_imports.md), [view](docs/model_view_exports.md) and
 [embedded Point](docs/embedded_hybrid_points.md) scopes.
 
-The current qualified increment adds IGES143 multiple planar boundaries,
+The metric/IGES/Pyramid increment was normally pushed to `main` as
+`37587962aca9dd478d5fff653c957c4b2bfc2b11`; remote SHA verified. It adds
+IGES143 multiple planar boundaries,
 explicit constant Metric3 box/shared-Region grids and actual nonzero Pyramid
 behavior. The ordinary default runner automatically uses minimal compilation;
 190/190 pass on both final-source runtimes, actual exit 0: Julia1.12.7
@@ -182,6 +184,18 @@ and [frontend context](docs/geo_pyramid_option_scope.md). Existing refinement
 and Surface meshing already consume directional metrics. Structured constant-
 tensor grids add genuine bounded generation, not full native metric parity.
 Never infer roadmap closure from a package check.
+
+The current additional writer increment exports complete Curve orders3–10
+as VTK Lagrange Curve cells, preserving every node and value. Root targeted
+checks20+default2 pass Julia1.13.1, actual0/36.94 s (body4.2 s), logs
+`test/tmp/vtk_lagrange_curves_113_20261011.*`. Source change is six lines in
+APINativeModelViewFormats.jl; primary VTK order matches the catalog's two
+endpoints then increasing interior parameters. Complete other high-order
+families/Pyramid14 remain open; no external VTK reader/native byte-parity claim.
+The same final Source passes ordinary package192/192 on BOTH: Julia1.12.7
+47.14 s/body9.3 s; Julia1.13.1 39.75 s/body9.7 s, actual exit0. Receipts:
+`test/tmp/ordinary_default_192_{112,113}_20261011.*`. Root is separately
+preparing remaining P2 serendipity VTK layouts; do not infer their support yet.
 
 Current isolated work after this increment: `devin_reconcile` prepares explicit
 IGES190 Form1 planar UV mapping; `concise_tests` designs the genuine Winslow1
