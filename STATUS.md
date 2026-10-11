@@ -24,7 +24,43 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Independent CAD solids, model exports and periodic hybrid composition (2026-10-11)
+
+Recognized STEP/IGES imports now support multiple explicit independent roots,
+with separate Surface/Region owners and UIDs in a classified MixedMesh.
+Strict disjoint bounding boxes certify separation; general CAD assembly
+occurrences, analytic Face maps and trimmed/periodic NURBS remain open. The
+focused schema/import regression passes 100/100 on Julia 1.13.1, actual exit 0
+in 48.05 seconds including precompilation. See [import scope](docs/cad_mesh_imports.md).
+
+Model CSV retains complete connectivity, UID/ownership, all stored components,
+time steps and distinct dataset ordinals even when model names/UIDs repeat.
+Legacy VTK retains sparse values with masks, full supported cell connectivity
+and exact 64-bit identities. Focused/default checks pass 143/143 on Julia
+1.12.7, actual exit 0 in 34.49 seconds including precompilation; body 5.4 seconds.
+Other high-order VTK cells still reject before opening output. See
+[format scope](docs/model_view_exports.md).
+
+One translated periodic Surface pair in one ordinary explicit hybrid Region
+now uses the actual copied UID/cell correspondence, including retained
+Surface constructors under MeshOnlyEmpty. Boundary ownership, ordered cell
+incidence and positive whole-volume certificates remain required. General
+affine/multiple-pair and periodic multi-Region contexts remain open. See
+[periodic scope](docs/periodic_hybrid_boundaries.md).
+
+The integrated current Source passes 171/171 default package assertions on
+Julia 1.13.1, actual exit 0; package phase 40.61 seconds including precompilation,
+functional body 5.3 seconds. The same wrapper then passes 47/47 focused periodic
+checks in 31.25 seconds; its complete actual-exit-0 time is 73.01 seconds.
+All used minimal compilation, bounds checks and one thread. The larger focused
+CAD/model/periodic regressions are opt-in. Logs and receipt:
+`test/tmp/cad_model_periodic_integration_20261011.*`.
+Full P1–P6 parity remains open. The next isolated implementations are planar
+CAD Face holes, quadratic non-simplex VTK layouts and embedded-Point hybrid fill.
+
 ### Curve CLI, list exports and API dimension dispatch (2026-10-11)
+
+Published and normally pushed as `587b571`; the remote SHA was verified.
 
 The CLI supports `-1`, `-format msh2|msh4` and `-bin`. Classified Curve
 output preserves physical names, Point/Curve ownership, periodic pairs and
@@ -50,8 +86,8 @@ An obsolete extended assertion expecting inverted volume elements was corrected.
 The integrated routine package check passes 163/163 on Julia 1.13.1,
 actual exit 0 in 36.41 seconds including precompilation, with a 1.4-second
 test body. These checks used one thread, bounds checking and minimal compilation.
-Full P1–P6 parity remains open. Multi-solid imports, model-format exports and
-periodic hybrid composition are the next isolated implementation tasks.
+Full P1–P6 parity remains open. The subsequent section above records the
+qualified bounded import, model-format and periodic hybrid implementations.
 
 ### Implementation takeover and concise tests (2026-10-11)
 

@@ -12,8 +12,8 @@ P1–P6 tracks**, with ASCENT meshing capabilities prioritized.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 163 assertions; its minimally compiled test body took 1.4 seconds
-on Julia 1.13.1, with a 36-second cold package run including precompilation.
+suite now passes 171 assertions; its minimally compiled test body took 5.3 seconds
+on Julia 1.13.1, with a 40.61-second cold package run including precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
 and [test/README.md](test/README.md) describes routine and extended tests.
@@ -25,6 +25,11 @@ and `-bin`. One-dimensional output keeps classified Point/Curve ownership,
 physical names, periodic node pairs and configured Curve orders.
 List-based views export POS, TXT, CSV and legacy VTK with all time steps;
 see [list export formats](docs/list_view_exports.md) for their data layout.
+Model views also export [CSV and VTK](docs/model_view_exports.md), preserving
+UIDs, ownership, sparse time steps and full supported connectivity. Recognized
+independent STEP/IGES solids import as [classified mixed meshes](docs/cad_mesh_imports.md).
+One translated copied Surface pair is supported in an
+[ordinary hybrid Region](docs/periodic_hybrid_boundaries.md).
 
 ```julia
 using Tessella

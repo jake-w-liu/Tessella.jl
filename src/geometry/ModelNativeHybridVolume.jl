@@ -71,13 +71,70 @@ function _model_native_hybrid_volume_input(m,tag,input,caller)
     return _model_native_hybrid_constructor_input(input,boundaries,ids,coords,caller)
 end
 
+# Admit one translated boundary pair only from copyMesh's actual UID events.
+# Coordinates verify those events; neither geometry nor row order selects a pair.
+function _model_native_hybrid_periodic_boundary_certificate(m,tag,constructor,pairs,caller)
+    constraints=_model_volume_periodic_surface_constraints(m,tag,caller)
+    isempty(constraints) && return nothing
+    length(constraints)==1 || throw(ArgumentError(
+        "$caller: hybrid periodic boundary requires one translated Surface pair"))
+    constraint=only(constraints);affine=constraint.affine
+    affine!==nothing && all(index->affine[index]==(index in (1,6,11,16) ? 1.0 : 0.0),
+        (1,2,3,5,6,7,9,10,11,13,14,15,16)) || throw(ArgumentError(
+        "$caller: hybrid periodic boundary supports translations only"))
+    slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
+    event=pairs===nothing ? nothing : get(pairs,slave,nothing)
+    event!==nothing && event[1]==master && !isempty(event[2]) || throw(ArgumentError(
+        "$caller: hybrid periodic boundary lacks actual Surface copy UID pairs"))
+    input=constructor.input
+    source=_model_periodic_surface_source(m,constraint,input,caller)
+    target=get(input.surface_constructor_inputs,(2,Int32(slave)),nothing)
+    source!==nothing && target!==nothing || throw(ArgumentError(
+        "$caller: hybrid periodic boundary lacks owned Surface constructors"))
+    _model_surface_constructor_binding(_model_mesh_product(input,2,slave;caller),target,caller)
+    bindings=event[2];sd=source.entity_data;td=target.entity_data
+    mapping=Dict{UInt64,UInt64}()
+    seen=Set{UInt64}()
+    for (slave_uid,master_uid) in bindings
+        !haskey(mapping,master_uid) && !(slave_uid in seen) || throw(ArgumentError(
+            "$caller: hybrid periodic copy repeats an actual UID pair"))
+        mapping[master_uid]=slave_uid;push!(seen,slave_uid)
+    end
+    Set(keys(mapping))==Set(sd.external_node_tags) && seen==Set(td.external_node_tags) ||
+        throw(ArgumentError("$caller: hybrid periodic copy omits actual constructor rows"))
+    target_rows=Dict(uid=>row for (row,uid) in enumerate(td.external_node_tags))
+    point_map,curve_pairs,_=_model_periodic_surface_edge_map(m,slave,master,
+        affine,constraint.atol,caller)
+    curve_map=Dict(master_curve=>slave_curve for (slave_curve,master_curve) in curve_pairs)
+    coefficients,translation=_periodic_affine_3x4(affine)
+    scale=max(1.0,maximum(abs,source.coords;init=0.0),maximum(abs,target.coords;init=0.0))
+    for (row,uid) in enumerate(sd.external_node_tags)
+        target_row=target_rows[mapping[uid]];owner=sd.node_entities[row]
+        expected=owner[1]==0 ? (0,Int32(get(point_map,Int(owner[2]),0))) :
+            owner[1]==1 ? (1,Int32(get(curve_map,Int(owner[2]),0))) : (2,Int32(slave))
+        (owner[1]<2 || owner==(2,Int32(master))) && td.node_entities[target_row]==expected ||
+            throw(ArgumentError("$caller: hybrid periodic copy changes bound node ownership"))
+        transformed=_model_affine_point(coefficients,translation,
+            Tuple(source.coords[:,row]),caller,row)
+        all(axis->abs(target.coords[axis,target_row]-transformed[axis])<=constraint.atol*scale,1:3) ||
+            throw(ArgumentError("$caller: hybrid periodic copy changes its bound affine coordinates"))
+    end
+    mapped_cells=[(Int(block.msh),Tuple(mapping[sd.external_node_tags[row]] for row in block.nodes[:,column]))
+        for block in source.blocks for column in axes(block.nodes,2)]
+    target_cells=[(Int(block.msh),Tuple(td.external_node_tags[block.nodes[:,column]]))
+        for block in target.blocks for column in axes(block.nodes,2)]
+    mapped_cells==target_cells || throw(ArgumentError(
+        "$caller: hybrid periodic copy changes ordered actual Surface cell incidence"))
+    return nothing
+end
+
 function _model_native_hybrid_volume_production(m,tag,constructor,options,births,caller;
-                                                size_field=nothing)
+                                                size_field=nothing,periodic_surface_pairs=nothing)
     _model_native_hybrid_volume_scope(m,tag,constructor,caller)
     m.meshing.algorithm_3d==1 && isempty(get(m.embeds,(3,tag),NTuple{2,Int}[])) &&
-        !get(m.meshing.reverse,(3,tag),false) && get(m.meshing.smoothing,(3,tag),0)==0 &&
-        isempty(_model_volume_periodic_surface_constraints(m,tag,caller)) || throw(ArgumentError(
+        !get(m.meshing.reverse,(3,tag),false) && get(m.meshing.smoothing,(3,tag),0)==0 || throw(ArgumentError(
         "$caller: hybrid Volume requires its owned ordinary Delaunay constructor without additional planner attributes"))
+    _model_native_hybrid_periodic_boundary_certificate(m,tag,constructor,periodic_surface_pairs,caller)
     options.optimize_netgen==0 || throw(ArgumentError(
         "$caller: native hybrid Netgen optimization is not implemented"))
     node_clock=births===nothing ? maximum(constructor.input.mesh.entity_data.external_node_tags;init=UInt64(0)) : births.node_high_water
@@ -120,6 +177,7 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
     mixed=MixedMesh(mesh.coords,blocks)
     validate(mixed).ok || throw(ArgumentError("$caller: hybrid Volume produces invalid typed cells"))
     _model_native_hybrid_volume_certificate(mixed,work.node_tags,constructor,caller)
+    _model_native_hybrid_periodic_boundary_certificate(m,tag,constructor,periodic_surface_pairs,caller)
     geometry=_model_explicit_volume_geometry(m,tag,caller;_mesh_input=constructor.input,_mesh1d_options=options)
     _model_certify_explicit_volume_semantics(mixed,tag,geometry.expected_volume,
         geometry.comparison_scale,caller)

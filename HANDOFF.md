@@ -67,7 +67,8 @@ The prepared implementation was committed and normally pushed to `main` as
 candidate state. All takeover test processes drained. Routine package testing
 is now concise, with the previous multi-hour suites retained only as opt-in.
 
-The next verified Main increment adds `mesh_dim=1`, CLI `-1`,
+Published commit `587b5713ab1ed17a123ba9322d3bd42acad2a638` (remote verified)
+adds `mesh_dim=1`, CLI `-1`,
 `-format msh2|msh4` and `-bin`; it writes the actual classified Curve product
 with physical names, periodic node maps and supported element order. List
 views export TXT/CSV/VTK with all supported components and time steps; see
@@ -87,11 +88,34 @@ one thread, bounds checks and minimal compilation. Root logs are under
 `test/tmp/cli_curve_functional_v3_20261011`; isolated list/API packets retain
 their first failed harness receipts and actual green reruns.
 
-Next isolated work: independent multi-solid STEP/IGES mesh imports at
-`C:/tmp/tessella_takeover_brep_assemblies_20261011`, model-format CSV/VTK
-exports, and translated periodic hybrid boundary composition. These next
-candidates are unqualified until their actual small public checks pass;
-never infer full roadmap closure from the current package check.
+The subsequent integrated increment implements recognized independent multi-root
+STEP/IGES mesh imports, model CSV/VTK exports and one translated copied Surface
+pair in a single explicit hybrid Region, including retained constructors.
+See [CAD scope](docs/cad_mesh_imports.md), [model format scope](docs/model_view_exports.md)
+and [periodic scope](docs/periodic_hybrid_boundaries.md) for remaining restrictions.
+
+Final isolated receipts: CAD 100/100 on Julia 1.13.1, actual exit 0 in 48.05 s;
+model formats 143/143 on Julia 1.12.7, actual exit 0 in 34.49 s. Root's integrated
+Julia 1.13.1 wrapper passes 171/171 default package assertions (body 5.3 s;
+package phase 40.61 s including precompilation), followed by 47/47 periodic
+checks in 31.25 s. Whole wrapper actual exit 0 in 73.01 s. Logs/receipt:
+`test/tmp/cad_model_periodic_integration_20261011.*`. These checks use one
+thread, bounds checks and minimal compilation. Full CAD/model/periodic tests
+remain opt-in; default gained only four CAD and four model-export assertions.
+
+Frozen packets: `C:/tmp/tessella_takeover_brep_assemblies_20261011`, with the
+final DE/P-schema guard at `C:/tmp/tessella_takeover_brep_schema_20261011`;
+`C:/tmp/tessella_takeover_model_formats_20261011`; and
+`C:/tmp/tessella_periodic_hybrid_20261011`. Preserve first failed harness logs:
+the periodic v2 wrapper failed only on a missing copied prism artifact despite
+47 passing periodic checks; the later integrated wrapper above actually exits 0.
+The final CAD schema guard supersedes only the earlier 95-check candidate.
+
+Next isolated work is planar CAD Face holes at
+`C:/tmp/tessella_takeover_brep_faceholes_20261011`, quadratic non-simplex VTK
+layouts at `C:/tmp/tessella_takeover_vtk_p2_families_20261011`, and genuinely
+embedded-Point hybrid fill. These next candidates still require actual small
+public checks. Never infer full roadmap closure from the current package check.
 
 The public hybrid regression fixed missing OptimizePyramids registration,
 omitted TF Surface constructor transport, and narrow batch snapshot dictionary
@@ -111,10 +135,14 @@ Historical snapshots and failed receipts below qualify only their own dates.
 Continue actual features, ordered by ASCENT value. This is a concrete Source
 backlog rather than the older expensive verification queue:
 
-1. Extend hybrid/ordinary region composition to embedded and periodic contexts.
-   Multi-region batching is implemented. Public region reverse/smoothing are
+1. Extend hybrid/ordinary region composition to embedded and general periodic contexts.
+   Multi-region batching and one translated copied pair in a single hybrid Region
+   are implemented; periodic multi-Region and embedded hybrid recovery remain open.
+   Public region reverse/smoothing are
    native no-ops, so they are not missing Gmsh Region features.
-2. Support multi-solid CAD assembly import and trimmed/periodic NURBS topology.
+2. Complete general CAD assembly and trimmed/periodic NURBS topology. Recognized
+   explicit independent STEP/IGES mesh roots are implemented; CAD occurrence
+   transforms, analytic Face reconstruction and general assembly are still open.
 3. Complete curved analytic Surface high-order placement and generated Surface/
    Volume orders above two. Curve orders 1–10 are already implemented.
 4. Implement directional metric-driven meshing and the native automatic-sizing
@@ -126,8 +154,9 @@ backlog rather than the older expensive verification queue:
 7. Complete boundary-layer Extrude and pipe frontends beyond ordinary Layers.
 8. Implement partition interface/ghost topology and parallel production paths;
    partition assignment and metadata preservation are already implemented.
-9. Complete mixed model-view export, remaining formats and post/CLI actions.
-   List TXT/CSV/VTK and Curve CLI generation/version/binary flags are implemented.
+9. Complete remaining formats, high-order VTK cells and post/CLI actions.
+   Model CSV/VTK, list TXT/CSV/VTK and Curve CLI generation/version/binary flags
+   are implemented within the linked format scopes.
 10. Close native matching chronology and requirement-level differential parity.
     Large P6/HFSS/ASCENT campaigns remain opt-in verification, not routine tests.
 

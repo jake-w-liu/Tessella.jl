@@ -1735,12 +1735,35 @@ function _higher_surface_constructor_publication(authority,constructors,cells,no
     return Model._model_mesh_with_surface_constructor_inputs(authority,rebound;caller)
 end
 
+function _higher_retained_periodic_surface_pairs!(pairs,m,retained,caller)
+    pairs===nothing && return nothing
+    for constraint in Model.model_periodic_constraints(m)
+        constraint.dim==2 || continue
+        slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
+        haskey(pairs,slave) && continue
+        (2,Int32(slave)) in retained && (2,Int32(master)) in retained || continue
+        history=get(m.meshing.periodic_uid_history,(2,slave),nothing)
+        history===nothing && continue
+        history.master==master && history.affine==constraint.affine || throw(ArgumentError(
+            "$caller: retained periodic Surface history changes its declared relation"))
+        all(pair->pair.slave_live && pair.master_live,history.primary) || throw(ArgumentError(
+            "$caller: retained periodic Surface copy history has retired constructor UIDs"))
+        # These are already published live copy events, not a new geometric
+        # correspondence. The hybrid admission certificate binds them to the
+        # current retained constructor cells and their exact UID incidence.
+        pairs[slave]=(master,[(pair.slave,pair.master) for pair in history.primary])
+    end
+    return nothing
+end
+
 function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
                                size_field=nothing,source_nodes=length(assembly.nodes),ranks=nothing,
                                old_supports=nothing,geometry_parts=nothing,geometry_cells=nothing,
                                geometry_birth=nothing,
                                surface_parts=Tuple{Int,Union{Mesh,MixedMesh},_MeshClassification,Vector{Int32}}[],
                                native_orphan_births=nothing,
+                               periodic_surface_pairs=nothing,
+                               retained_surfaces=Set{Tuple{Int,Int32}}(),
                                surface_constructor_inputs=Dict{Tuple{Int,Int32},MixedMesh}())
     have=Set(cell.owner for cell in assembly.cells)
     meshed=Int[]
@@ -1777,6 +1800,20 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
             discarded,done,emitted;source_nodes,geometry_parts,geometry_cells,native_orphan_births)
     end
     hybrid_batch=nothing;hybrid_batch_receipt=nothing
+    retained_periodic=periodic_surface_pairs!==nothing && any(constraint->
+        constraint.dim==2 && !haskey(periodic_surface_pairs,Int(constraint.slave_entity)) &&
+        (2,Int32(constraint.slave_entity)) in retained_surfaces &&
+        (2,Int32(constraint.master_entity)) in retained_surfaces,
+        Model.model_periodic_constraints(m))
+    if retained_periodic && m.meshing.algorithm_3d==1 && !staged && extruded===nothing &&
+            length(meshed)==length(m.volumes)==1
+        tag=only(meshed)
+        if !haskey(m.meshing.transfinite_volumes,tag) && !isempty(m.volumes[tag]) &&
+                !Model._model_factory_volume_encoding(m,tag) &&
+                Model._model_native_hybrid_volume_input(m,tag,input,assembly.caller)!==nothing
+            _higher_retained_periodic_surface_pairs!(periodic_surface_pairs,m,retained_surfaces,assembly.caller)
+        end
+    end
     if !staged && extruded===nothing && length(meshed)>1 && all(tag->
             !haskey(m.meshing.transfinite_volumes,tag) &&
             !isempty(m.volumes[tag]) && !Model._model_factory_volume_encoding(m,tag) &&
@@ -1804,6 +1841,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
             production=hybrid_batch===nothing ? mesh_model_volume(m,tag;size_field,
                 _extrude_scope=scope,_extrude_working_model=true,_mesh_input=input,
                 _mesh1d_options=options,_return_volume_production=true,
+                _periodic_surface_pairs=periodic_surface_pairs,
                 _mesh_node_high_water=assembly.node_max,_mesh_element_high_water=assembly.cell_max,
                 _geometry_points=_higher_geometry_source_points(assembly,geometry_birth)) : hybrid_batch.products[tag]
             production isa Union{Model._ModelVolumeGeometryProduction,Model._ModelNativeHybridVolumeProduction} &&
@@ -2347,13 +2385,14 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
     periodic_pairs=Dict{Int,Tuple{Int,Vector{Tuple{UInt64,UInt64}}}}()
     native_recombine_events=Tuple{Symbol,String}[]
     surface_constructor_inputs=first_order_constructor_inputs
+    retained_surfaces=Set(keys(first_order_constructor_inputs))
     if phases.two
         for entity in entities
             entity[1]==3 && !_dim01_fully_discrete(m,entity) &&
                 push!(discarded,(3,Int32(entity[2])))
         end
         filter!(cell->cell.source_tag===nothing || !(cell.owner in discarded),assembly.cells)
-        _higher_surface_phase!(assembly,m,options,entities,discarded,done;
+        _,_,retained_surfaces=_higher_surface_phase!(assembly,m,options,entities,discarded,done;
                                size_field,source_nodes=length(high_order),ranks,old_supports=high_order,
                                 geometry_parts=surface_parts,dimension,geometry_cells,
                                 geometry_birth,geometry_alternates,curve_births,periodic_pairs,native_orphan_births,native_recombine_events,
@@ -2363,6 +2402,8 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
         _higher_volume_phase!(assembly,m,options,entities,discarded,done;
                              size_field,source_nodes=length(high_order),ranks,old_supports=high_order,
                              geometry_parts,surface_parts,geometry_cells,geometry_birth,native_orphan_births,
+                             periodic_surface_pairs=periodic_pairs,
+                             retained_surfaces,
                              surface_constructor_inputs)
     end
     if preserve_geometry && geometry_layout===:all

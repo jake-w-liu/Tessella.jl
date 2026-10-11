@@ -347,7 +347,7 @@ function _native_view_text_table(view,key)
         time=section.reals[1],rows)
 end
 
-function _native_view_text_cells(mesh)
+function _native_view_text_cells(mesh;primary_only=true)
     data=mesh.entity_data
     data!==nothing || throw(ArgumentError("model view writer: actual mesh identity is absent"))
     owners=sort!(collect(keys(data.entities)))
@@ -370,8 +370,9 @@ function _native_view_text_cells(mesh)
         haskey(ordinals,owner) || throw(ArgumentError("model view writer: cell owner is absent"))
         ordinal=get(per_owner,owner,0);per_owner[owner]=ordinal+1
         primary=Elements._msh_primary_nodes(spec.family)
-        nodes=copy(@view block.nodes[1:primary,column])
+        nodes=copy(@view block.nodes[1:(primary_only ? primary : size(block.nodes,1)),column])
         push!(cells,(uid=data.external_element_tags[ref.block][column],family=spec.family,
+            msh=Int(block.msh),owner,physical=block.tags[column],
             nodes,node_uids=data.external_node_tags[nodes],entity=ordinals[owner],element=ordinal))
     end
     return cells
@@ -588,6 +589,8 @@ function _native_list_view_payload(parsed,extension,caller)
     return take!(io)
 end
 
+include("APINativeModelViewFormats.jl")
+
 function _view_write(tag,filename,append=false)
     caller="API.view.write"
     filename isa AbstractString || throw(ArgumentError("$caller: fileName must be a string"))
@@ -630,6 +633,22 @@ function _view_write(tag,filename,append=false)
         # Prevalidate all held rows, including mutable-vector revalidation,
         # before a target is opened. Live-object errors publish native prefixes.
         for plan in plans,key in plan.group.keys;_native_view_writer_section(view,key;scheme=model_msh && scheme);end
+        if extension in (".csv",".vtk")
+            append_value && throw(ArgumentError("$caller: appending model data in $extension format is not supported"))
+            publications=_native_model_view_publications(view,plans,filename,extension,caller)
+            _native_diagnostic_emit_locked(:info,"Writing '$filename'...")
+            length(publications)>1 && _native_diagnostic_emit_locked(:info,
+                "Exporting multi-mesh view in separate files")
+            binary && _native_diagnostic_emit_locked(:warning,
+                "Only ASCII model data can be exported in $extension format")
+            for publication in publications
+                bytes=!Sys.iswindows() ? publication.bytes :
+                    Vector{UInt8}(codeunits(replace(String(publication.bytes),"\n"=>"\r\n")))
+                open(publication.path,"w") do stream;write(stream,bytes);end
+            end
+            _native_diagnostic_emit_locked(:info,"Done writing '$filename'")
+            return nothing
+        end
         _native_diagnostic_emit_locked(:info,"Writing '$filename'...")
         if !model_msh
             result=_native_view_writer_text_payload(view,plans;extension)

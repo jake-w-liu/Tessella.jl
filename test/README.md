@@ -5,7 +5,8 @@ calls: geometric predicates, mesh validation and ownership, transforms, entity
 topology, NURBS and fields, `.geo` parameter reading, bounded 1D/2D/3D meshing,
 structured patches, refinement and recombination, quadratic tetrahedra,
 MSH/STL I/O, API state, query ownership and failure atomicity, plus small matching
-and compact surface coverage regressions and list-view format checks. It needs
+and compact surface coverage regressions, list/model-view format checks and
+independent multi-root CAD boundary imports. It needs
 no external mesher or solver.
 
 Run the default suite from the repository root. For routine functional checks,
@@ -33,13 +34,15 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
-| Julia 1.13.1 | `--compile=min -O0`, current increment `Pkg.test()` | 163 | 36.41 s |
+| Julia 1.13.1 | `--compile=min -O0`, current increment `Pkg.test()` | 171 | 40.61 s |
+| Julia 1.13.1 | `--compile=min -O0`, earlier CLI/list increment `Pkg.test()` | 163 | 36.41 s |
 | Julia 1.12.7 | `--compile=min -O0`, final `Pkg.test()` | 157 | 37.03 s |
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current routine package run includes package precompilation (about 31 s);
-its 163 assertions took 1.4 s. The earlier 157-assertion routine check took
+The current routine package run includes package precompilation; its 171
+assertions took 5.3 s. The preceding 163-assertion check took 1.4 s.
+The earlier 157-assertion routine check took
 1.6 s. The earlier optimized
 package receipt includes 24.3 s of precompilation and 188.4 s of tests. The
 earlier standalone diagnostic used the same assertions with extra API progress

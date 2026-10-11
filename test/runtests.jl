@@ -17,4 +17,6 @@ include("functional/fixtures.jl")
     include("meshing/ordered_matching_seeded_test.jl")
     include("geometry/model_compact_atomic_coverage_test.jl")
     include("functional/list_view_export.jl")
+    include("functional/brep_assembly_smoke.jl")
+    include("functional/model_view_export.jl")
 end

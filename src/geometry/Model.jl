@@ -9078,6 +9078,7 @@ function mesh_model_volume(m::GeoModel, tag::Integer;
                            _return_volume_production::Bool=false,
                            _mesh_node_high_water::UInt64=UInt64(0),
                            _mesh_element_high_water::UInt64=UInt64(0),
+                           _periodic_surface_pairs=nothing,
                            _geometry_points=nothing)
     # The task-local protected-cell registry is a session record of cells
     # recovered so far, shared by the segment/sheet recovery calls below and
@@ -9094,6 +9095,7 @@ function mesh_model_volume(m::GeoModel, tag::Integer;
                                   _extrude_scope=_extrude_scope,
                                   _extrude_working_model=_extrude_working_model,_mesh_input,
                                   _native_initial_births=births,_geometry_points,
+                                  _periodic_surface_pairs,
                                   _mesh1d_options=_model_algorithm_size_options(
                                       m,_mesh1d_options,"mesh_model_volume"))
         return _return_volume_production ?
@@ -9170,6 +9172,7 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
                             _extrude_scope=nothing,
                             _extrude_working_model::Bool=false,
                             _mesh_input=nothing,_mesh1d_options=nothing,
+                            _periodic_surface_pairs=nothing,
                             _native_initial_births=nothing,_geometry_points=nothing)
     caller="mesh_model_volume"
     options=_model_algorithm_size_options(m,_mesh1d_options,caller)
@@ -9215,7 +9218,7 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
         hybrid=_model_native_hybrid_volume_input(m,t,_mesh_input,caller)
         if hybrid!==nothing
             production=_model_native_hybrid_volume_production(m,t,hybrid,options,
-                _native_initial_births,caller;size_field)
+                _native_initial_births,caller;size_field,periodic_surface_pairs=_periodic_surface_pairs)
             return _native_initial_births===nothing ? production.mesh : production
         end
     end

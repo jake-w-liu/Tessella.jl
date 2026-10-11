@@ -28,6 +28,8 @@ emits comma-separated CSV and valid VTK. Those two extension aliases therefore
 do not have byte parity with the pinned SDK. Mixed list/model storage and
 high-order list records remain explicit unsupported export contexts.
 
+Model-based views use their own [CSV schema and VTK arrays](model_view_exports.md).
+
 Format references: [Gmsh list-data tutorial](https://gmsh.info/doc/texinfo/gmsh.html#x3),
 [VTK legacy format](https://docs.vtk.org/en/latest/vtk_file_formats/vtk_legacy_file_format.html),
 [VTK cell types](https://github.com/Kitware/VTK/blob/master/Common/DataModel/vtkCellType.h).

@@ -18,7 +18,8 @@ module BRep
 
 using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
 using ..Mesh3D: tetrahedralize
-using ..MeshTypes: Mesh, validate, ntets, tet_volume, node
+using ..MeshTypes: Mesh, validate, nnodes, ntets, tet_volume, node, bounding_box
+using ..Elements: MixedMesh, ElementBlock, MixedEntity, MixedEntityData
 using ..NURBS: NURBSCurve, NURBSSurface
 
 export import_step, import_iges, parse_step_entities
@@ -316,7 +317,7 @@ function _as_cone(entities)
 end
 
 """
-    import_step(path; fill=true) -> Mesh
+    import_step(path; fill=true) -> Mesh or MixedMesh
 
 Import one classified STEP solid: a synthetic axis-aligned eight-corner point
 block, `SPHERE`, `RIGHT_CIRCULAR_CYLINDER`, `RIGHT_CIRCULAR_CONE`,
@@ -324,7 +325,12 @@ block, `SPHERE`, `RIGHT_CIRCULAR_CYLINDER`, `RIGHT_CIRCULAR_CONE`,
 closed shell bounded by planar faces over straight edges (a single unbounded
 `TOROIDAL_SURFACE` face also imports as a full torus). By default the
 classified boundary is tetrahedralized; `fill=false` returns its validated
-closed triangle surface. Multiple recognized solids, nonplanar or nonlinear
+closed triangle surface. Multiple explicitly rooted independent solids return a
+classified `MixedMesh`, retaining one discrete closed-shell Surface and Region
+per source solid in source-ID order. Strictly disjoint bounding boxes certify
+separation; touching/overlapping boxes are an explicit unsupported context.
+This mesh import does not reconstruct analytic CAD Face/Curve parametrization.
+Nonplanar or nonlinear
 face geometry, open shells, mixed point-cloud topology, and files without a
 recognized solid are explicit blockers. Use [`import_nurbs_step`](@ref) for
 STEP B-splines.
@@ -335,6 +341,8 @@ function import_step(path::AbstractString; fill::Bool=true)
     occursin("ISO-10303-21",source) || throw(ArgumentError(
         "import_step: $path is not an ISO-10303-21 STEP file"))
     entities=parse_step_entities(source)
+    roots=_step_solid_roots(entities)
+    length(roots)>1 && return _brep_assembly(_step_assembly_records(roots,entities),fill,"import_step")
     breps=[ent for ent in sort!(collect(values(entities)); by=e->e.id)
            if ent.kind in _STEP_BREP_SOLID_KINDS]
     if !isempty(breps)
@@ -395,6 +403,8 @@ function _filled(surface::Mesh, caller)
     ntets(mesh)>0 || throw(ErrorException("$caller: fill produced no tetrahedra"))
     return mesh
 end
+
+include("BRepAssembly.jl")
 
 # ── closed-shell BRep solids (planar polyhedra and full tori) ─────────────────
 
@@ -1051,7 +1061,7 @@ end
 # ── IGES ──────────────────────────────────────────────────────────────────────
 
 """
-    import_iges(path; fill=true) -> Mesh
+    import_iges(path; fill=true) -> Mesh or MixedMesh
 
 Import one classified IGES solid: a type 150 Block, type 158 Sphere, the
 supported type 156 Cylinder/Cone layouts, a type 160/198 torus, a full-torus
@@ -1061,14 +1071,30 @@ closed-shell polyhedron bounded by trimmed planar faces over line edges —
 either through type 144 trimmed surfaces on type 108/190 planes with
 142/141→102/110 boundaries, or through the type 186/514/510/508/504/502
 manifold-solid chain. `fill=true` returns a validated tetrahedral mesh and
-`fill=false` returns the closed triangle boundary. Multiple recognized solids,
-nonplanar/nonlinear face topology, and files without a recognized solid are
+`fill=false` returns the closed triangle boundary. Multiple independent source
+solids with distinct positive directory-entry identities return a classified
+`MixedMesh`, with one discrete closed-shell Surface and Region per source solid.
+Strictly disjoint bounding boxes certify separation; touching/overlapping boxes
+are unsupported. This mesh import does not reconstruct analytic CAD wires.
+Nonplanar/nonlinear face topology, and files without a recognized solid are
 explicit blockers. Use [`import_nurbs_iges`](@ref) for IGES 126/128 entities.
 """
 function import_iges(path::AbstractString; fill::Bool=true)
     isfile(path) || throw(ArgumentError("import_iges: missing file $path"))
     lines=read(path,String)
     types,params,bad,transforms=_iges_entity_records(lines)
+    has_structured=any(type->type in (143,144,160,186,198),values(types))
+    primitive_entries=has_structured ? _iges_linked_primitive_entries(types,params,bad) :
+                                     _iges_records_with_ids(lines)
+    root_count=count(type->type in (186,160,198),values(types))+
+        (any(type->type in (143,144),values(types)) && !any(==(186),values(types)) ? 1 : 0)+
+        count(entry->_as_int(entry.record[1],"import_iges","entity type") in (150,156,158),
+              primitive_entries)
+    if root_count>1
+        _iges_assembly_directory_certificate(lines,types)
+        records=_iges_assembly_records(primitive_entries,types,params,bad,transforms)
+        length(records)>1 && return _brep_assembly(records,fill,"import_iges")
+    end
     surface=_iges_structured_solid(types,params,bad,transforms,"import_iges")
     if surface!==nothing
         nprim=count(rec->(!isempty(rec) && isinteger(rec[1]) &&
@@ -1114,9 +1140,11 @@ function import_iges(path::AbstractString; fill::Bool=true)
         "NURBS curves/surfaces use import_nurbs_iges"))
 end
 
-function _iges_records(source::AbstractString)
+_iges_records(source::AbstractString)=[entry.record for entry in _iges_records_with_ids(source)]
+
+function _iges_records_with_ids(source::AbstractString)
     isascii(source) || throw(ArgumentError("IGES import: input must be ASCII"))
-    records=Vector{Vector{Float64}}()
+    records=NamedTuple{(:id,:record),Tuple{Union{Nothing,Int},Vector{Float64}}}[]
     buf=IOBuffer()
     for raw in split(source, r"\r?\n")
         line=length(raw)>=80 ? raw[1:80] : rpad(raw,80)
@@ -1147,7 +1175,7 @@ function _iges_records(source::AbstractString)
                     "IGES import: non-finite numeric parameter $(repr(token))"))
                 push!(vals,v)
             end
-            isempty(vals) || push!(records,vals)
+            isempty(vals) || push!(records,(id=_iges_int_field(line[65:72]),record=vals))
         end
     end
     position(buf)==0 || throw(ArgumentError("IGES import: unterminated parameter record"))

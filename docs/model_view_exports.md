@@ -1,0 +1,44 @@
+# Model-based CSV and VTK exports
+
+Model CSV writes a rectangular table with these columns:
+
+`record,dataset,model,step,step_last,time,kind,components,uid,value_node,node_uid,entity_dim,entity_tag,x,y,z,msh,physical_tag,connectivity,value_1,...`
+
+Records describe ranges, nodes, cells or data. Empty fields are blank. Dataset
+ordinals start at zero in the first-occurrence order of the view's held model
+step ranges. Every record includes its dataset ordinal and escaped model name,
+so duplicate names and repeated per-model UIDs remain distinguishable.
+Range records retain allocated first/last steps. Node records include
+unreferenced nodes; cell records retain complete connectivity in Gmsh order,
+owner, physical tag and element type. Connectivity uses semicolon-separated
+node UIDs. Data records retain every stored component row, time and UID;
+`value_node` is its zero-based row index within that UID. Float64 values use
+17 significant digits; UIDs remain exact decimal integers.
+
+Model VTK writes ASCII legacy unstructured grids. Linear Point, Line,
+Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism and Pyramid cells, plus
+quadratic Line3, Triangle6 and Tetrahedron10, are supported. Other higher-order
+layouts fail before opening the destination. Cells retain their full supported
+connectivity; the Tet10 edge-node permutation preserves existing identities.
+
+NodeData uses point arrays, ElementData uses cell arrays, and ElementNodeData
+uses separate per-cell points to preserve discontinuous values. Unreferenced
+nodes remain in the grid. Absent values are NaN with a `present_STEP` mask of
+zero. Stored values retain all components. VTK requires complete ElementNodeData
+for each provided cell; CSV preserves any stored row width. `STEP`, `TIME`
+and `ALLOCATED_RANGES` retain populated step/time bindings and sparse allocation
+history. Value arrays are named `step_STEP`.
+
+Multiple held meshes write separate `_0.vtk`, `_1.vtk`, ... files; CSV combines
+them using dataset ordinals. All held payloads are validated before opening any
+destination. Unknown UIDs and unsupported topology raise errors. Model CSV/VTK
+append is rejected, and binary requests produce an ASCII-only warning.
+
+These formats provide documented serialization rather than native extension
+byte parity. Existing model POS/TXT behavior is retained. VTK follows the
+[legacy format](https://docs.vtk.org/en/latest/vtk_file_formats/vtk_legacy_file_format.html).
+The [VTK reader](https://github.com/Kitware/VTK/blob/master/IO/Legacy/vtkDataReader.cxx)
+supports `vtktypeuint64` for exact identities and NaN for missing values.
+Its [quadratic tetrahedron topology](https://github.com/Kitware/VTK/blob/master/Common/DataModel/vtkQuadraticTetra.cxx)
+defines the target mid-edge order. Reader compatibility was reviewed in the
+primary source; an external VTK reader was not run locally.
