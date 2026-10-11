@@ -12,13 +12,13 @@ and skips Pyramid relocation for this negative setting.
 The volume still must pass the existing typed-cell, exterior-incidence,
 ownership and analytic-volume certificates. A selected embedded Point keeps
 its actual lower UID, position, owner and conforming Tet star. Invalid winding,
-exterior apices and unsupported modes fail before publishing a replacement
+exterior apices and unsupported contexts fail before publishing a replacement
 mesh. Nonnegative settings other than exactly `1.0` use the existing Pyramid
-relocation path. Exactly `1.0` requests the unsupported Winslow untangler;
-nonzero settings for multi-Region batches remain unsupported.
+relocation path. Exactly `1.0` selects the [Winslow untangler](hybrid_winslow.md).
+Nonzero settings for multi-Region batches remain unsupported.
 
 The bounded opt-in regression is
 `test/interfaces/api_hybrid_normal_apex_functional_test.jl`. It uses one cube
 with an interior Point, analytic apex and cell-volume checks, an MSH4 round
-trip, and small atomic-rejection checks. This scope does not establish curved
-Quad support, Winslow optimization or public refinement behavior.
+trip, and small atomic-rejection checks. Curved Quad support and public
+refinement behavior require separate qualification.

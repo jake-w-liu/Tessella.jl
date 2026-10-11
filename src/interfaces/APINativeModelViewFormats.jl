@@ -93,38 +93,48 @@ function _native_model_view_csv_payload(exports,kind)
     return take!(io)
 end
 
-# Complete quadratic VTK cells use these parametric node identities. The
+# Quadratic VTK cells use these canonical node identities. The
 # reference lattice is independent of model coordinates, external UIDs and
 # discontinuous nodal values. See the corresponding Kitware VTK cell classes.
 function _native_model_vtk_quadratic_layout(msh,caller)
-    type,reference = if msh==10
-        (28,((0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.),
+    type,reference = if msh in (10,16)
+        (msh==10 ? 28 : 23,((0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.),
              (.5,0.,0.),(1.,.5,0.),(.5,1.,0.),(0.,.5,0.),(.5,.5,0.)))
-    elseif msh==12
-        (29,((0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.),
+    elseif msh in (12,17)
+        (msh==12 ? 29 : 25,((0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.),
              (0.,0.,1.),(1.,0.,1.),(1.,1.,1.),(0.,1.,1.),
              (.5,0.,0.),(1.,.5,0.),(.5,1.,0.),(0.,.5,0.),
              (.5,0.,1.),(1.,.5,1.),(.5,1.,1.),(0.,.5,1.),
              (0.,0.,.5),(1.,0.,.5),(1.,1.,.5),(0.,1.,.5),
              (0.,.5,.5),(1.,.5,.5),(.5,0.,.5),(.5,1.,.5),
              (.5,.5,0.),(.5,.5,1.),(.5,.5,.5)))
-    elseif msh==13
-        (32,((0.,0.,0.),(1.,0.,0.),(0.,1.,0.),
+    elseif msh in (13,18)
+        (msh==13 ? 32 : 26,((0.,0.,0.),(1.,0.,0.),(0.,1.,0.),
              (0.,0.,1.),(1.,0.,1.),(0.,1.,1.),
              (.5,0.,0.),(.5,.5,0.),(0.,.5,0.),
              (.5,0.,1.),(.5,.5,1.),(0.,.5,1.),
              (0.,0.,.5),(1.,0.,.5),(0.,1.,.5),
              (.5,0.,.5),(.5,.5,.5),(0.,.5,.5)))
+    elseif msh==19
+        # Compare corner/edge identities in the Euclidean pyramid lattice.
+        # VTK's collapsed parametric apex coordinates are not this lattice.
+        (27,((0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.),(.5,.5,1.),
+             (.5,0.,0.),(1.,.5,0.),(.5,1.,0.),(0.,.5,0.),
+             (.25,.25,.5),(.75,.25,.5),(.75,.75,.5),(.25,.75,.5)))
     else
         throw(ArgumentError("$caller: unsupported complete quadratic VTK cell type $msh"))
     end
+    msh==16 && (reference=reference[1:8])
+    msh==17 && (reference=reference[1:20])
+    msh==18 && (reference=reference[1:15])
+    family=Elements.msh_family(msh)
     local_nodes=Elements.lagrange_nodes(msh)
     identities=Dict{NTuple{3,Float64},Int}()
     for node in axes(local_nodes,2)
         identity=ntuple(3) do axis
             value=local_nodes[axis,node]
-            msh==10 ? (axis==3 ? value : (value+1)/2) :
-                (msh==12 || axis==3 ? (value+1)/2 : value)
+            family in (:qua,:pyr) ? (axis==3 ? value : (value+1)/2) :
+                (family==:hex || axis==3 ? (value+1)/2 : value)
         end
         haskey(identities,identity) && throw(ArgumentError(
             "$caller: duplicate canonical node identity for Gmsh element type $msh"))
@@ -146,7 +156,7 @@ function _native_model_view_vtk_cell(msh,caller)
     # Gmsh's last two tetrahedral mid-edge nodes are (3,4),(2,4);
     # VTK's are (2,4),(3,4). Geometry and nodal data stay bound to the same UID.
     msh==11 && return (type=24,order=[1,2,3,4,5,6,7,8,10,9])
-    msh in (10,12,13) && return _native_model_vtk_quadratic_layout(msh,caller)
+    msh in (10,12,13,16,17,18,19) && return _native_model_vtk_quadratic_layout(msh,caller)
     # VTK Lagrange curves infer their degree from the complete node count.
     # Both formats place the two endpoints first, then increasing edge nodes.
     spec=Elements.msh_spec(msh)

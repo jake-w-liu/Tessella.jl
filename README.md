@@ -12,9 +12,9 @@ P1–P6 tracks**, with ASCENT meshing capabilities prioritized.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 192 assertions on Julia 1.12.7 and 1.13.1. Ordinary
+suite now passes 201 assertions on Julia 1.12.7 and 1.13.1. Ordinary
 `Pkg.test()` automatically selects minimal compilation; test bodies took
-9.3 and 9.7 seconds. Cold package runs took 47.14 and 39.75 seconds including
+9.7 and 9.1 seconds. Cold package runs took 44.88 and 36.53 seconds including
 precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
@@ -36,14 +36,18 @@ One translated copied Surface pair is supported in an
 [ordinary hybrid Region](docs/periodic_hybrid_boundaries.md), and a strictly
 interior [embedded Point](docs/embedded_hybrid_points.md) can be recovered in a
 convex hybrid shell. Supported planar STEP/IGES Faces retain outer/inner wires
-and triangulate holes; general curved CAD trimming remains open.
+and triangulate holes. [Explicit IGES plane charts](docs/iges_plane_charts.md)
+map bounded UV wires and rigid surface transforms; general curved CAD trimming
+remains open.
 
 Explicit [constant-tensor box grids](docs/constant_metric_boxes.md) retain
 directional edge bounds, shared material interfaces and voids. Single convex
 hybrid Regions support [negative pyramid factors](docs/hybrid_normal_apices.md)
-and [nonnegative relocation settings](docs/hybrid_relocate_modes.md) other than
-the separate Winslow mode. [GEO and CLI calls](docs/geo_pyramid_option_scope.md)
+and [nonnegative relocation settings](docs/hybrid_relocate_modes.md), including
+the separate [Winslow optimizer](docs/hybrid_winslow.md). [GEO and CLI calls](docs/geo_pyramid_option_scope.md)
 use their own generation option context.
+Bare first-order Tet Regions can produce [partition interfaces and ghost
+queries](docs/partitioned_tets.md), preserving actual cell UIDs and MSH4 metadata.
 
 ```julia
 using Tessella
@@ -384,10 +388,12 @@ Point/Line/Plane/Circle/Cylinder/Sphere/Cone/Torus children, and
 Boolean result boundaries classify like any materialized topology. Native `GeoModel`
 plane properties are the detached unit-normal coefficients `[a,b,c,d]` for
 `a*x+b*y+c*z=d`; other visible native types have empty property vectors. Per-window
-visibility is stored display state. Native
-entities are not partition entities, so their parent is `(-1,-1)`, the model's
-partition count is zero, and per-entity partition membership is empty. These direct
-and session queries are read-only and preserve the mesh cache.
+visibility is stored display state. Ordinary unpartitioned geometry entities
+have parent `(-1,-1)` and no partition membership. Models without partition
+metadata or assignments have partition count zero. Generated or imported
+[partition entities](docs/partitioned_tets.md) expose their actual parents,
+memberships and ghost aliases. These direct and session queries are read-only
+and preserve the mesh cache.
 Native geometry evaluation covers Points, straight Lines, Circle and Ellipse
 arcs, the built-in Spline/BSpline/Bezier/Nurbs family (reported as `Nurb`),
 OCC circle/line/degenerate edges, and explicit Planes through

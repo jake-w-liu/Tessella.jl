@@ -124,6 +124,7 @@ export initialize, finalize, clear, option, model, mesh, open_geo!
 include("APITaggedCache.jl")
 include("APINativeMeshTags.jl")
 include("APIPartitionNative.jl")
+include("APIPartitionProducer.jl")
 
 struct _MeshClassification
     mesh::Union{Mesh,MixedMesh}
@@ -193,6 +194,10 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "Mesh.OptimizeThreshold"=>0.3,
     "Mesh.OptimizeNetgen"=>0.0,
     "Mesh.OptimizePyramids"=>0.0,
+    # Preserve the existing assignment-only default; nonzero values request
+    # actual, bounded Tet4 partition topology or ghost products.
+    "Mesh.PartitionCreateTopology"=>0.0,
+    "Mesh.PartitionCreateGhostCells"=>0.0,
     "Mesh.MeshSizeMin"=>0.0,
     "Mesh.MeshSizeMax"=>1.0e22,
     "Mesh.MeshSizeFactor"=>1.0,
@@ -799,6 +804,8 @@ function option(name::AbstractString, value::Real)
                         "Mesh.SecondOrderIncomplete","Mesh.RecombineOptimizeTopology",
                         "Mesh.RecombineNodeRepositioning","Mesh.Smoothing","General.AbortOnError",
                         "Mesh.Optimize","Mesh.OptimizeNetgen",
+                        "Mesh.PartitionCreateTopology","Mesh.PartitionCreateGhostCells",
+                        "Mesh.Binary","PostProcessing.Binary",
                         "General.Terminal","General.Verbosity")
             # Gmsh stores `(int)val` — truncation, not a 0/1 restriction.
             v=Float64(_geo_signed_gmsh_int_value(v,"API.option"))
@@ -8365,6 +8372,16 @@ function _partition(num_part,element_tags=(),partitions=())
                 "$caller: partition tags exceed num_part $effective"))
             count=effective
         end
+        topology=!iszero(OPTIONS["Mesh.PartitionCreateTopology"])
+        ghosts=!iszero(OPTIONS["Mesh.PartitionCreateGhostCells"])
+        if topology || ghosts
+            class=_cached_classification_locked(cached)
+            plan=_partition_tet_production_plan(_model_locked(),cached,class,count,
+                assignment,caller;topology,ghosts)
+            _commit_tagged_plan_locked!(plan;preserve_visibility=true,
+                element_tag_map=plan.visibility_tag_map)
+            return nothing
+        end
         LAST_MESH_PARTITION[]=_MeshPartition(
             cached,Int(count),assignment)
         return nothing
@@ -10683,7 +10700,18 @@ cached mesh unchanged; a successful removal invalidates the cached mesh like
 every model mutation.
 """
 remove_embedded(dim_tags,dim=-1)=_remove_embedded(dim_tags,dim)
-"Partition the current mesh into `num_part` parts (or an explicit element partition list)."
+"""
+Partition the current mesh into `num_part` parts, optionally using a complete
+explicit element UID/partition list. The default preserves assignment labels.
+With `Mesh.PartitionCreateTopology` or `Mesh.PartitionCreateGhostCells` nonzero,
+bare positive first-order Tet4 discrete Regions produce actual partition child
+entities. Topology creates shared inter-partition Tri3 interfaces with opposite
+Region incidences; it does not reconstruct exterior or lower-dimensional BRep.
+Ghost entities expose neighboring cell UID aliases while the mesh retains one
+authoritative copy of each material cell. Both options default to zero.
+Unsupported lower BRep, mixed/high-order or periodic inputs reject before
+publication. Generated partition and ghost metadata can be exported as MSH4.
+"""
 partition(num_part,element_tags=(),partitions=())=_partition(num_part,element_tags,partitions)
 "Import the model file's STL triangulation (when available) as discrete mesh data."
 import_stl()=_import_stl()
@@ -10726,20 +10754,19 @@ embed(dim,tags,in_dim,in_tag)=_embed(dim,tags,in_dim,in_tag)
 """
     get_ghost_elements(dim, tag) -> (Vector{UInt64}, Vector{Int32})
 
-Return the ghost element tags and partitions of entity `(dim, tag)`. The
-native model owns no mesh partitions, so both results are always empty for an
-existing entity, matching Gmsh 4.15.2 on an unpartitioned mesh. Requires the
-classified cache built by [`generate`](@ref); unknown entities fail
-explicitly.
+Return the actual ghost element UIDs and their owning partitions for entity
+`(dim, tag)`. Imported and generated ghost entities alias authoritative cells;
+ordinary entities return empty vectors. Unknown entities fail explicitly.
 """
 get_ghost_elements(dim,tag)=_get_ghost_elements(dim,tag)
 
 """
     unpartition()
 
-No-op parity with Gmsh 4.15.2's `unpartition` on an unpartitioned mesh: the
-native model owns no mesh partitions, so there is nothing to remove. Requires
-a cached mesh like the Gmsh call.
+Return partition child cells to their original parents and remove generated
+partition interfaces and ghost entities. Original cell UIDs are retained.
+Without partition entities this clears assignment labels and otherwise does
+nothing.
 """
 unpartition()=_unpartition()
 

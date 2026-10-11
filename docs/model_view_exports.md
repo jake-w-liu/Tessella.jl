@@ -17,9 +17,10 @@ node UIDs. Data records retain every stored component row, time and UID;
 
 Model VTK writes ASCII legacy unstructured grids. Linear Point, Line,
 Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism and Pyramid cells, plus
-quadratic Line3, Triangle6, Tetrahedron10, Quad9, Hex27 and Prism18, are supported.
+quadratic Line3, Triangle6, Tetrahedron10, Quad8/9, Hex20/27, Prism15/18 and
+Pyramid13, are supported.
 Complete Curve orders3–10 use VTK Lagrange Curve cells (type68), retaining every
-endpoint and interior node. Other higher-order layouts fail before opening the destination. Complete quadratic
+endpoint and interior node. Other higher-order layouts fail before opening the destination. Quadratic
 layouts use the VTK reference-node ordering, with connectivity and data bound to
 the original UIDs. Pyramid14 still rejects: the standard quadratic VTK pyramid
 has 13 nodes, so dropping its additional node would lose stored data.
@@ -42,7 +43,18 @@ byte parity. Existing model POS/TXT behavior is retained. VTK follows the
 [legacy format](https://docs.vtk.org/en/latest/vtk_file_formats/vtk_legacy_file_format.html).
 The [VTK reader](https://github.com/Kitware/VTK/blob/master/IO/Legacy/vtkDataReader.cxx)
 supports `vtktypeuint64` for exact identities and NaN for missing values.
-Its [quadratic tetrahedron topology](https://github.com/Kitware/VTK/blob/master/Common/DataModel/vtkQuadraticTetra.cxx)
+The quadratic layouts use a bijection between canonical corner/edge/face
+identities, preserving every stored node and value. Edge-only cells use
+VTK types 23/25/26/27; full Quad9/Hex27/Prism18 use 28/29/32. The
+[quadrangle](https://github.com/Kitware/VTK/blob/master/Common/DataModel/vtkQuadraticQuad.cxx),
+[hexahedron](https://github.com/Kitware/VTK/blob/master/Common/DataModel/vtkQuadraticHexahedron.cxx),
+[wedge](https://github.com/Kitware/VTK/blob/master/Common/DataModel/vtkQuadraticWedge.cxx)
+and [pyramid](https://github.com/Kitware/VTK/blob/master/Common/DataModel/vtkQuadraticPyramid.cxx)
+classes define the target edge order. Pyramid edge identities use the Euclidean
+corner/edge lattice rather than VTK's collapsed parametric apex coordinates.
+The new opt-in test checks all four edge-only families against independently
+specified geometry and vector values; only two cheap Pyramid13 assertions join
+the default suite. Its [quadratic tetrahedron topology](https://github.com/Kitware/VTK/blob/master/Common/DataModel/vtkQuadraticTetra.cxx)
 defines the target mid-edge order. Reader compatibility was reviewed in the
 primary source; an external VTK reader was not run locally. Lagrange Curve
 node ordering follows the two endpoints then increasing interior parameters,

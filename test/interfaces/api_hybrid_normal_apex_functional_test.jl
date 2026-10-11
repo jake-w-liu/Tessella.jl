@@ -134,7 +134,7 @@ end
     end
 end
 
-@testset "unsupported modes and exterior normal births reject atomically" begin
+@testset "exterior normal births reject atomically" begin
     A.initialize()
     try
         A.option("General.Terminal",0)
@@ -142,7 +142,7 @@ end
         A.mesh.generate(2)
         A.option("Mesh.MeshOnlyEmpty",1)
         before=snapshot()
-        for factor in (1.0,-1.0)
+        for factor in (-1.0,)
             A.option("Mesh.OptimizePyramids",factor)
             @test_throws ArgumentError A.mesh.generate(3)
             @test snapshot()==before

@@ -6,7 +6,7 @@ select the existing Pyramid relocation kernel, including its normal and
 golden-search passes. This matches the native branch used by `0`, `2` and
 fractional values such as `0.7`; the setting does not disable relocation.
 
-Exactly `1.0` requests the separate Winslow untangler and remains unsupported.
+Exactly `1.0` selects the separate [Winslow untangler](hybrid_winslow.md).
 Negative values retain the certified normal-offset constructor. Nonzero
 multi-Region settings remain unsupported. All Source, ownership, exterior,
 typed-cell and volume certificates still apply.

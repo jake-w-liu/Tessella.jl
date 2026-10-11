@@ -12,6 +12,54 @@ small real fixtures. Full native-oracle sweeps, source/AST audits, memory stress
 benchmarks, the 22 HFSS cases, aggregate validation, and external ASCENT solves
 are opt-in campaigns. See [test/README.md](test/README.md).
 
+### Current integrated increment and continuation
+
+This implementation increment includes explicit IGES190 plane UV charts,
+one proper rigid124 plane transform, remaining quadratic edge-only VTK cells,
+real single-Region Winslow Pyramid optimization and bare-Tet4 partition
+interfaces/ghost queries. The linked feature documents define their exact
+scopes. Final ordinary `Pkg.test()` passes **201/201 on the same Source**:
+Julia 1.12.7 actual exit zero, 44.88 s/body 9.7 s; Julia 1.13.1 actual exit
+zero, 36.53 s/body 9.1 s. Receipts:
+`test/tmp/ordinary_default_201_{112,113}_20261011.*`.
+
+Focused qualification packets, retained outside the default runner:
+
+- `C:/tmp/tessella_takeover_brep_plane190_uv_20261011/selected_plane190_uv_packet.json`:
+  49 checks, Julia 1.12, actual zero/22.43 s.
+- `C:/tmp/tessella_takeover_brep_plane190_transform_20261011/selected_plane190_transform_packet.json`:
+  38 checks, Julia 1.12, actual zero/23.11 s. The stopped arbitrary rotated
+  hole-fill diagnostic is preserved and unqualified; Surface import and exact
+  quarter-turn hole fill pass. Source was unchanged between those attempts.
+- `C:/tmp/tessella_vtk_remaining_p2_20261011`: reviewed writer delta; Root's
+  `test/tmp/vtk_serendipity_113_20261011.*` records 34 checks, Julia 1.13,
+  actual zero/37.26 s. NodeData and ElementNodeData retain all original UIDs.
+- `C:/tmp/tessella_hybrid_winslow_20261011/selected_winslow_packet.json`:
+  44 checks, Julia 1.13, actual zero/18.41 s, plus public GEO/CLI atomic six
+  actual zero/6.03 s. Prior unstable derivative and wrong test-UID assumptions
+  were corrected; failed receipts remain. No native pointer-order parity claim.
+- `C:/tmp/tessella_takeover_partition_20261011/ready.json`:
+  66 checks, Julia 1.13, actual zero/37.00 s. The real public import is via
+  `open_geo!` with `Merge`; earlier Base.open harness calls prove no import.
+  ASCII and binary ghost metadata, binary flags 0/1/0, protected MSH2 rejection
+  and unpartition pass. Earlier failed receipts remain.
+
+Continue the genuine backlog below. Immediate isolated tasks are nonzero
+multi-Region Pyramid modes (first separated-cube packet passed 74 checks but
+is not integrated here), shared-Tri Region transport, proper rigid124 matrix
+chains and existing-lower-BRep partition production. Coordinate Source/runtime
+ownership; copy only selected reviewed deltas with exact normalized bases.
+Full CAD registry/NURBS trims, general metric generation, higher-order placement,
+ordinary algorithms/layers/Netgen, remaining formats, parallel paths and P6
+requirement parity remain open. Keep the overall goal active.
+
+This current ledger supersedes continuation queues and unsupported-feature
+claims in the earlier dated evidence. The preceding published Main commit is
+`3dd724d36165bb92d5def3132811d1f5b0a067ca`, normal push and remote verified.
+This ledger accompanies the implementation commit and its final link/scoped
+diff checks. Use Git to determine this increment's SHA and remote publication
+state; subsequent implementations must also be normally pushed to Main.
+
 The initial takeover integration starts from Devin's `C:/tmp/tessella_suite_slim_v1` Source
 and preserves Main's accepted cylinder, libm and recombination fixes. It adds
 curved owner-preserving refinement, periodic order/refinement UID history,
@@ -165,13 +213,15 @@ Frozen selected packets and focused actual-exit-0 evidence:
  14 was an incorrect test expectation, corrected independently to28.
 - `C:/tmp/tessella_takeover_brep_bounded143_20261011/selected_bounded143_packet.json`:
  53 checks,Julia1.13.1,71.51 s. Type141 representations0/1 and142 UV/model curve
- decoding are corrected; UV-only inputs still reject until a real chart exists.
+ decoding are corrected. At this earlier snapshot UV-only input still rejected;
+ the later explicit190 chart increment supersedes that limitation.
 - `C:/tmp/tessella_hybrid_normal_apex_20261011/frozen_packet_sha256.json`,
  superseded for positive-mode support by
  `C:/tmp/tessella_hybrid_relocate_modes_20261011/frozen_packet_sha256.json`:
  72 checks,Julia1.13.1,77.52 s. Negative apices retain actual UID/XYZ/embedded
  Point provenance; other nonnegative values except1 run the old relocation
- kernel. Winslow1 and nonzero batches remain guarded. Root's corrected existing
+ kernel. Winslow1 was guarded at this earlier snapshot and is implemented
+ by the later increment; nonzero batches remain guarded. Root's corrected existing
  cube/batch35 passes Julia1.12.7,actual0/41.18 s (`hybrid_cube_112_current_20261011.*`).
 - `C:/tmp/tessella_geo_pyramid_options_20261011/frozen_packet_sha256.json`:
  35 checks,Julia1.13.1,54.62 s. Exact three-file snapshot/context transport
@@ -185,7 +235,7 @@ and Surface meshing already consume directional metrics. Structured constant-
 tensor grids add genuine bounded generation, not full native metric parity.
 Never infer roadmap closure from a package check.
 
-The current additional writer increment exports complete Curve orders3–10
+The published Curve writer increment exports complete Curve orders3–10
 as VTK Lagrange Curve cells, preserving every node and value. Root targeted
 checks20+default2 pass Julia1.13.1, actual0/36.94 s (body4.2 s), logs
 `test/tmp/vtk_lagrange_curves_113_20261011.*`. Source change is six lines in
@@ -194,12 +244,12 @@ endpoints then increasing interior parameters. Complete other high-order
 families/Pyramid14 remain open; no external VTK reader/native byte-parity claim.
 The same final Source passes ordinary package192/192 on BOTH: Julia1.12.7
 47.14 s/body9.3 s; Julia1.13.1 39.75 s/body9.7 s, actual exit0. Receipts:
-`test/tmp/ordinary_default_192_{112,113}_20261011.*`. Root is separately
-preparing remaining P2 serendipity VTK layouts; do not infer their support yet.
+`test/tmp/ordinary_default_192_{112,113}_20261011.*`. The later quadratic
+writer increment below implements the remaining edge-only P2 layouts.
 
-Current isolated work after this increment: `devin_reconcile` prepares explicit
-IGES190 Form1 planar UV mapping; `concise_tests` designs the genuine Winslow1
-kernel; `implementation_audit` inspects partition interface/ghost production.
+This preceding increment was published as
+`3dd724d36165bb92d5def3132811d1f5b0a067ca`, remote SHA verified.
+The later implementation increment supersedes its plane/Winslow/partition queue.
 All work is isolated, with Main Source/runtime ownership coordinated by Root.
 Do not copy an entire candidate tree or start an old historical native gate.
 
@@ -231,7 +281,8 @@ backlog rather than the older expensive verification queue:
    explicit independent STEP/IGES mesh roots are implemented; CAD occurrence
    transforms, analytic Face reconstruction and general assembly are still open.
    Planar STEP/IGES Face holes, including143 boundaries, are implemented;
-   explicit190 UV mapping, curved trims and general NURBS topology remain unfinished.
+   explicit190 Form1 UV charts with one proper rigid124 transform are implemented;
+   matrix chains, curved trims and general NURBS topology remain unfinished.
 3. Complete curved analytic Surface high-order placement and generated Surface/
    Volume orders above two. Curve orders 1–10 are already implemented.
 4. Complete general metric-driven generation and the native automatic-sizing
@@ -239,12 +290,14 @@ backlog rather than the older expensive verification queue:
    metrics; constant-tensor boxes/shared-Region grids now generate meshes too.
    Variable-metric generation and automatic-sizing parity remain unfinished.
 5. Extend mixed-surface relocation and hybrid/high-order optimization, including
-   Winslow1, nonzero multi-Region Pyramid modes and Netgen-equivalent behavior.
+   nonzero multi-Region Pyramid modes and Netgen-equivalent behavior. Single-Region
+   Winslow1 is implemented.
 6. Complete remaining ordinary meshing algorithms and curved/boundary-layer
    recombination contexts; retain the current working planar paths.
 7. Complete boundary-layer Extrude and pipe frontends beyond ordinary Layers.
-8. Implement partition interface/ghost topology and parallel production paths;
-   partition assignment and metadata preservation are already implemented.
+8. Extend partition interface/ghost production to existing lower BRep, mixed
+   families and parallel paths. Bare Tet4 interfaces/ghosts, assignment labels
+   and MSH4 metadata transport are implemented.
 9. Complete remaining formats, high-order VTK cells and post/CLI actions.
    Model CSV/VTK, list TXT/CSV/VTK and Curve CLI generation/version/binary flags
    are implemented within the linked format scopes. CLI sizing/order and

@@ -90,7 +90,7 @@ end
             @test recovered.entity_data.entities[(3,1)].boundaries==Int32[1,2,3,4,5,6]
             @test snapshot()==before && read(source,String)==original
             saved=read(output)
-            write(source,replace(original,"Mesh.OptimizePyramids=-0.1;"=>"Mesh.OptimizePyramids=1;"))
+            write(source,replace(original,"Mesh.OptimizePyramids=-0.1;"=>"Mesh.OptimizePyramids=-1;"))
             @test_throws ArgumentError Tessella.execute_geo(source;mesh_dim=3)
             @test snapshot()==before
             @test_throws ArgumentError Tessella.CLI.main([source,"-3","-o",output])

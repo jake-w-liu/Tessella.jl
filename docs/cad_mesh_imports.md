@@ -39,8 +39,10 @@ with fill=false. Full functional checks also cover filled analytic volume 0.75
 and IGES144/510 layouts. The own POLY_LOOP STEP and MSBO fixtures test supported
 mesh-parser records; those two fixtures do not claim native CAD import parity.
 IGES141 admits representation types 0/1. IGES142 uses its 3-D model curve
-pointer, rather than interpreting its UV pointer as XYZ; UV-only curves reject
-until a parameter-to-model mapping is implemented. General curved Face trimming
-remains unfinished. These field meanings follow the primary
+pointer, rather than interpreting its UV pointer as XYZ. UV-only bounded
+line/composite wires on explicit PlaneSurface190 Form1 use the declared
+parameter-to-model frame, including one proper rigid124 Form0 surface transform;
+see [IGES plane charts](iges_plane_charts.md). Implicit108, nonlinear UV and
+general curved Face trimming remain unfinished. These field meanings follow the primary
 [Boundary schema](https://occt3d.com/dev/doc/refman/html/class_i_g_e_s_geom___boundary.html)
 and [CurveOnSurface schema](https://occt3d.com/dev/doc/refman/html/class_i_g_e_s_geom___curve_on_surface.html).

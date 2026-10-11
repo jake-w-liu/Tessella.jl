@@ -39,11 +39,12 @@ Every nontrivial function ships with **all three**:
 
 ## Mesh-CRC checksum
 
-Each accepted mesh emits a deterministic checksum recorded in `STATUS.md` /
-`test/artifacts/`:
-`(n_nodes, n_edges, n_tris, n_tets, bbox, min/mean dihedral, min/mean radius-edge,
- boundary-facet count, SHA-256 of sorted connectivity)`.
-Regression = re-derive the checksum and diff. A change requires a justified note.
+Meshing changes verify the affected topology, ownership, analytic volume and
+quality with small independent functional fixtures. Record a connectivity
+checksum in a focused regression or dated receipt when it helps identify a
+material mesh change. Generated meshes do not automatically emit a repository
+CRC record. Exhaustive checksum/resource campaigns remain opt-in; use evidence
+proportionate to the change and explain intentional output changes.
 
 ## Anti-false-positive rules (hard-won)
 

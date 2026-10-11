@@ -44,11 +44,46 @@ function _native_view_writer_mesh(slot,caller)
         push!(element_tags,UInt64[assembly.cells[i].tag for i in selected])
     end
     entities,_=_dim01_entities(m,model_entities(m),assembly,rows)
+    partition=nothing
+    if cached isa MixedMesh && cached.partition_data!==nothing
+        source=cached.partition_data;actual=cached.entity_data
+        actual!==nothing || throw(ArgumentError("$caller: partition UID authority is absent"))
+        partition_entities=Dict{Tuple{Int,Int},Elements.MixedEntity}()
+        for (key,previous) in source.entities
+            current=get(entities,key,nothing)
+            current!==nothing || throw(ArgumentError("$caller: partition entity $key is no longer present"))
+            referenced=Set{Int32}()
+            for (bi,block) in enumerate(blocks),column in axes(block.nodes,2)
+                (Elements.msh_dimension(block.msh),Int(block_owners[bi][column]))==key || continue
+                union!(referenced,block.nodes[:,column])
+            end
+            for row in eachindex(owners);owners[row]==(key[1],Int32(key[2])) && push!(referenced,Int32(row));end
+            bounds=isempty(referenced) ? current.bbox : ntuple(axis->axis<=3 ?
+                minimum(coordinates[axis,row] for row in referenced) :
+                maximum(coordinates[axis-3,row] for row in referenced),6)
+            partition_entities[key]=Elements.MixedEntity(key[1],key[2],bounds;
+                physical_tags=current.physical_tags,boundaries=current.boundaries,
+                embedded_curves=current.embedded_curves,
+                partitions=previous.partitions,parent=previous.parent)
+            delete!(entities,key)
+        end
+        source_tags=reduce(vcat,actual.external_element_tags;init=UInt64[])
+        emitted_tags=reduce(vcat,element_tags;init=UInt64[])
+        positions=Dict(uid=>index for (index,uid) in enumerate(emitted_tags))
+        ghost_records=Elements.MixedGhostElement[]
+        for record in source.ghost_elements
+            uid=source_tags[record.element]
+            haskey(positions,uid) || throw(ArgumentError("$caller: ghost element UID $uid is no longer present"))
+            push!(ghost_records,Elements.MixedGhostElement(positions[uid],record.partition,record.ghost_partitions))
+        end
+        partition=Elements.MixedPartitionData(source.num_partitions;
+            entities=partition_entities,ghost_entities=source.ghost_entities,ghost_elements=ghost_records)
+    end
     metadata=Elements._native_mixed_entity_data(entities;node_entities=owners,
         node_parametric=parameters,external_node_tags=node_tags,block_entities=block_owners,
         external_element_tags=element_tags)
     return MixedMesh(coordinates,blocks;entity_data=metadata,elementary_entities=block_owners,
-        physical_names=m.physical_names)
+        physical_names=m.physical_names,partition_data=partition)
 end
 
 function _native_view_writer_section(view,key;scheme::Bool)
@@ -179,6 +214,8 @@ function _native_view_writer_scheme(mesh;types=nothing,kind=nothing)
 end
 
 function _native_view_writer_ascii_mesh(io,mesh,version,names)
+    mesh.partition_data===nothing || version==4.1 || throw(ArgumentError(
+        "model view writer: partition and ghost metadata require MSH 4.1"))
     println(io,"\$MeshFormat");println(io,version," 0 8");println(io,"\$EndMeshFormat")
     Elements._write_mixed_physical_names(io,names,true)
     data=mesh.entity_data
@@ -200,6 +237,8 @@ function _native_view_writer_ascii_mesh(io,mesh,version,names)
             println(io)
         end
         println(io,"\$EndEntities")
+        mesh.partition_data===nothing || Elements._write_mixed_partitioned_entities(
+            io,mesh.partition_data,false,true)
     end
     println(io,"\$Nodes")
     if version==2.2
@@ -253,6 +292,8 @@ function _native_view_writer_ascii_mesh(io,mesh,version,names)
         end
     end
     println(io,"\$EndElements")
+    (version==4.1 && mesh.partition_data!==nothing) && Elements._write_mixed_ghost_elements(io,
+        mesh.partition_data,reduce(vcat,data.external_element_tags;init=UInt64[]),false,true)
     return nothing
 end
 
@@ -289,6 +330,8 @@ function _native_view_writer_payload(view,group,mesh;version,binary::Bool,save_m
             Elements._write_mixed_v2_binary(io,mesh,names,true,nothing)
         else
             Elements._write_mixed_v4_binary(io,mesh,names,true,nothing,true)
+            mesh.partition_data===nothing || Elements._write_mixed_ghost_elements(io,
+                mesh.partition_data,source_cells,true,true)
         end
     else
         println(io,"\$MeshFormat");println(io,version,' ',Int(binary)," 8")

@@ -222,7 +222,7 @@ function _iges_assembly_directory_certificate(source,types)
     return nothing
 end
 
-function _iges_assembly_records(primitive_entries,types,params,bad,transforms)
+function _iges_assembly_records(primitive_entries,types,params,bad,transforms;frame_context=nothing)
     caller="import_iges";records=NamedTuple[]
     msbo=sort!([de for (de,type) in types if type==186])
     trimmed=sort!([de for (de,type) in types if type==144])
@@ -232,17 +232,17 @@ function _iges_assembly_records(primitive_entries,types,params,bad,transforms)
         isempty(trimmed) && isempty(bounded) || throw(ArgumentError(
             "$caller: mixed MSBO and ungrouped trimmed Face roots cannot be assigned independent solid identities"))
         for de in msbo
-            faces,_,_=_iges_brep_faces(types,params,bad,[de],Int[],Int[],caller)
+            faces,_,_=_iges_brep_faces(types,params,bad,[de],Int[],Int[],caller;frame_context)
             union!(referenced_tori,(face[3] for face in faces))
-            surface=_iges_brep_surface(types,params,bad,transforms,[de],Int[],Int[],caller)
+            surface=_iges_brep_surface(types,params,bad,transforms,[de],Int[],Int[],caller;frame_context)
             surface=_iges_assembly_transform(surface,types,params,bad,transforms,de,caller)
             push!(records,(id=de,name="IGES #$de type 186",surface=surface))
         end
     elseif !isempty(trimmed) || !isempty(bounded)
         # The legacy face collection declares one closed shell. Without an
         # MSBO root there is no source identity for splitting it into solids.
-        surface=_iges_brep_surface(types,params,bad,transforms,Int[],trimmed,bounded,caller)
-        faces,_,_=_iges_brep_faces(types,params,bad,Int[],trimmed,bounded,caller)
+        surface=_iges_brep_surface(types,params,bad,transforms,Int[],trimmed,bounded,caller;frame_context)
+        faces,_,_=_iges_brep_faces(types,params,bad,Int[],trimmed,bounded,caller;frame_context)
         union!(referenced_tori,(face[3] for face in faces))
         id=minimum(vcat(trimmed,bounded))
         push!(records,(id=id,name="IGES #$id closed shell",surface=surface))

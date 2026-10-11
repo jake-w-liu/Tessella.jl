@@ -187,7 +187,7 @@ end
     mktempdir() do directory
         path=joinpath(directory,"boundary.igs")
         write(path,replace_record(source,29,"142,0,7,27,0,1;"))
-        @test_throws ArgumentError import_iges(path;fill=false)
+        @test mesh_crc(import_iges(path;fill=false))==before
         write(path,replace_record(source,29,"142,0,7,27,999,2;"))
         @test_throws ArgumentError import_iges(path;fill=false)
         write(path,replace_record(source,29,"142,0,7,27,25,1;"))

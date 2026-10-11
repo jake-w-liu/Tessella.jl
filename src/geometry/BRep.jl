@@ -408,6 +408,7 @@ end
 
 include("BRepAssembly.jl")
 include("BRepPlanarFaces.jl")
+include("BRepPlanePcurves.jl")
 
 # ── closed-shell BRep solids (planar polyhedra and full tori) ─────────────────
 
@@ -1094,7 +1095,7 @@ explicit blockers. Use [`import_nurbs_iges`](@ref) for IGES 126/128 entities.
 function import_iges(path::AbstractString; fill::Bool=true)
     isfile(path) || throw(ArgumentError("import_iges: missing file $path"))
     lines=read(path,String)
-    types,params,bad,transforms=_iges_entity_records(lines)
+    types,params,bad,transforms,frame_context=_iges_entity_records(lines;with_frame_context=true)
     has_structured=any(type->type in (143,144,160,186,198),values(types))
     primitive_entries=has_structured ? _iges_linked_primitive_entries(types,params,bad) :
                                      _iges_records_with_ids(lines)
@@ -1104,10 +1105,10 @@ function import_iges(path::AbstractString; fill::Bool=true)
               primitive_entries)
     if root_count>1
         _iges_assembly_directory_certificate(lines,types)
-        records=_iges_assembly_records(primitive_entries,types,params,bad,transforms)
+        records=_iges_assembly_records(primitive_entries,types,params,bad,transforms;frame_context)
         length(records)>1 && return _brep_assembly(records,fill,"import_iges")
     end
-    surface=_iges_structured_solid(types,params,bad,transforms,"import_iges")
+    surface=_iges_structured_solid(types,params,bad,transforms,"import_iges";frame_context)
     if surface!==nothing
         nprim=count(rec->(!isempty(rec) && isinteger(rec[1]) &&
                           Int(rec[1]) in (150,156,158)),values(params))
@@ -1216,17 +1217,22 @@ end
 # referenced type 124 matrix can be applied when classifying analytic geometry.
 # Records with non-numeric parameters (e.g. Hollerith names) are tolerated and
 # marked in `bad`; structural malformation still throws.
-function _iges_entity_records(source::AbstractString)
+function _iges_entity_records(source::AbstractString;with_frame_context::Bool=false)
     isascii(source) || throw(ArgumentError("IGES import: input must be ASCII"))
     types=Dict{Int,Int}(); params=Dict{Int,Vector{Float64}}(); bad=Set{Int}()
     transforms=Dict{Int,Int}()
+    forms=Dict{Int,Int}()
     buf=IOBuffer()
     for raw in split(source, r"\r?\n")
         line=length(raw)>=80 ? raw[1:80] : rpad(raw,80)
         section=line[73]
         if section=='D'
             seq=_iges_int_field(line[74:80]); seq===nothing && continue
-            isodd(seq) || continue
+            if iseven(seq)
+                form=_iges_int_field(line[33:40])
+                with_frame_context && form!==nothing && (forms[seq-1]=form)
+                continue
+            end
             t=_iges_int_field(line[1:8]); t===nothing && continue
             types[seq]=t
             xf=_iges_int_field(line[49:56])
@@ -1256,7 +1262,8 @@ function _iges_entity_records(source::AbstractString)
     end
     position(buf)==0 || throw(ArgumentError(
         "IGES import: unterminated parameter record"))
-    return types,params,bad,transforms
+    return with_frame_context ? (types,params,bad,transforms,(;forms,transforms)) :
+                                (types,params,bad,transforms)
 end
 
 _iges_int_field(s)=tryparse(Int,strip(s))
@@ -1290,7 +1297,7 @@ end
 
 # ── IGES structured solids ───────────────────────────────────────────────────
 
-function _iges_structured_solid(types,params,bad,transforms,caller)
+function _iges_structured_solid(types,params,bad,transforms,caller;frame_context=nothing)
     msbo=sort!([de for (de,t) in types if t==186])
     trimmed=sort!([de for (de,t) in types if t==144])
     bounded=sort!([de for (de,t) in types if t==143])
@@ -1302,7 +1309,7 @@ function _iges_structured_solid(types,params,bad,transforms,caller)
         "$caller: multiple recognized solids are not supported in one import"))
     isempty(tori) || throw(ArgumentError(
         "$caller: multiple recognized solids are not supported in one import"))
-    return _iges_brep_surface(types,params,bad,transforms,msbo,trimmed,bounded,caller)
+    return _iges_brep_surface(types,params,bad,transforms,msbo,trimmed,bounded,caller;frame_context)
 end
 
 function _iges_torus_solid(types,params,bad,tori,caller)
@@ -1444,17 +1451,21 @@ end
 # Resolve a face boundary entity (142 curve-on-surface, 141 boundary, 102/110
 # model curves, or a 508 loop) to a vertex ring, or nothing for unsupported
 # curve kinds (recorded in curvekinds).
-function _iges_boundary(types,params,bad,de,curvekinds,caller)
+function _iges_boundary(types,params,bad,de,curvekinds,caller;
+                        frame_context=nothing,expected_surface=nothing)
     t=get(types,de,0)
     rec=_iges_rec(params,bad,de,caller)
     if t==142
         length(rec)>=5 || throw(ArgumentError(
             "$caller: curve-on-surface #$de is truncated"))
-        _iges_param_int(rec,4,caller,"curve-on-surface parameter curve")
+        parameter=_iges_param_int(rec,4,caller,"curve-on-surface parameter curve")
         model=_iges_param_int(rec,5,caller,"curve-on-surface model curve")
-        model!=0 || throw(ArgumentError(
-            "$caller: curve-on-surface #$de needs a model-space boundary; UV-only curves are unsupported"))
-        return _iges_boundary(types,params,bad,model,curvekinds,caller)
+        if model!=0
+            return _iges_boundary(types,params,bad,model,curvekinds,caller;
+                                  frame_context,expected_surface)
+        end
+        return _iges_plane_uv_wire(types,params,bad,de,parameter,rec,caller,
+                                   frame_context,expected_surface)
     elseif t==141
         length(rec)>=5 || throw(ArgumentError("$caller: boundary #$de is truncated"))
         btype=_iges_param_int(rec,2,caller,"boundary type")
@@ -1500,7 +1511,7 @@ end
 # Face over type 144 Trimmed Parametric Surface.
 # Returns (rings, surface_type, surface_de); rings is empty for an untrimmed
 # natural-boundary face (only meaningful on a torus) or unresolvable curves.
-function _iges_face144(types,params,bad,de,curvekinds,caller)
+function _iges_face144(types,params,bad,de,curvekinds,caller;frame_context=nothing)
     rec=_iges_rec(params,bad,de,caller)
     length(rec)>=5 || throw(ArgumentError(
         "$caller: trimmed surface #$de is truncated"))
@@ -1523,11 +1534,13 @@ function _iges_face144(types,params,bad,de,curvekinds,caller)
     ptro=_iges_param_int(rec,5,caller,"outer boundary")
     ptro!=0 || throw(ArgumentError(
         "$caller: trimmed surface #$de has no outer boundary"))
-    ring=_iges_boundary(types,params,bad,ptro,curvekinds,caller)
+    ring=_iges_boundary(types,params,bad,ptro,curvekinds,caller;
+                        frame_context,expected_surface=surf_de)
     ring===nothing && return Vector{NTuple{3,Float64}}[],stype,surf_de
     rings=Vector{NTuple{3,Float64}}[ring]
     for index in 1:n2
-        inner=_iges_boundary(types,params,bad,_iges_param_int(rec,5+index,caller,"inner boundary"),curvekinds,caller)
+        inner=_iges_boundary(types,params,bad,_iges_param_int(rec,5+index,caller,"inner boundary"),curvekinds,caller;
+                             frame_context,expected_surface=surf_de)
         inner===nothing && return Vector{NTuple{3,Float64}}[],stype,surf_de
         push!(rings,inner)
     end
@@ -1562,7 +1575,7 @@ function _iges_face510(types,params,bad,de,curvekinds,caller)
 end
 
 # Plane parameters for type 108 (implicit plane) and 190 (plane surface).
-function _iges_plane_params(types,params,bad,surf_de,caller)
+function _iges_plane_params(types,params,bad,surf_de,caller;frame_context=nothing)
     st=get(types,surf_de,0)
     rec=_iges_rec(params,bad,surf_de,caller)
     if st==108
@@ -1573,6 +1586,10 @@ function _iges_plane_params(types,params,bad,surf_de,caller)
             "$caller: plane #$surf_de has a non-finite offset"))
         return un,(un[1]*d,un[2]*d,un[3]*d)
     elseif st==190
+        if frame_context!==nothing && get(frame_context.transforms,surf_de,0)!=0
+            origin,x,y=_iges_plane_uv_frame(types,params,bad,surf_de,caller,frame_context)
+            return _brep_vunit(_brep_vcross(x,y),caller),origin
+        end
         length(rec)>=3 || throw(ArgumentError(
             "$caller: plane surface #$surf_de is truncated"))
         pde=_iges_param_int(rec,2,caller,"plane surface point")
@@ -1593,7 +1610,7 @@ function _iges_plane_params(types,params,bad,surf_de,caller)
 end
 
 # Return literal wire groups per Face, preserving outer/inner boundary roles.
-function _iges_brep_faces(types,params,bad,msbo,trimmed,bounded,caller)
+function _iges_brep_faces(types,params,bad,msbo,trimmed,bounded,caller;frame_context=nothing)
     facerecs=Tuple{Vector{Vector{NTuple{3,Float64}}},Int,Int}[]
     curvekinds=Set{Int}(); seen=Set{Int}()
     for de in msbo
@@ -1631,7 +1648,7 @@ function _iges_brep_faces(types,params,bad,msbo,trimmed,bounded,caller)
         end
     end
     for de in trimmed
-        rings,stype,surf_de=_iges_face144(types,params,bad,de,curvekinds,caller)
+        rings,stype,surf_de=_iges_face144(types,params,bad,de,curvekinds,caller;frame_context)
         push!(seen,stype)
         push!(facerecs,(rings,1,surf_de))
     end
@@ -1664,7 +1681,8 @@ function _iges_brep_faces(types,params,bad,msbo,trimmed,bounded,caller)
                 _iges_param_int(boundary_rec,surface_index,caller,"boundary surface")==surf_de ||
                     throw(ArgumentError("$caller: bounded surface #$de and boundary #$boundary reference different surfaces"))
             end
-            ring=_iges_boundary(types,params,bad,boundary,curvekinds,caller)
+            ring=_iges_boundary(types,params,bad,boundary,curvekinds,caller;
+                                frame_context,expected_surface=surf_de)
             if ring===nothing
                 empty!(rings);break
             end
@@ -1676,8 +1694,8 @@ function _iges_brep_faces(types,params,bad,msbo,trimmed,bounded,caller)
     return facerecs,curvekinds,seen
 end
 
-function _iges_brep_surface(types,params,bad,transforms,msbo,trimmed,bounded,caller)
-    facerecs,curvekinds,seen=_iges_brep_faces(types,params,bad,msbo,trimmed,bounded,caller)
+function _iges_brep_surface(types,params,bad,transforms,msbo,trimmed,bounded,caller;frame_context=nothing)
+    facerecs,curvekinds,seen=_iges_brep_faces(types,params,bad,msbo,trimmed,bounded,caller;frame_context)
     planar=!isempty(facerecs); ntorus=0; torus_de=0
     face_rings=Vector{Vector{NTuple{3,Float64}}}[]; roles=Int[]
     for (rings,role,surf_de) in facerecs
@@ -1687,7 +1705,7 @@ function _iges_brep_surface(types,params,bad,transforms,msbo,trimmed,bounded,cal
         end
         if stype==108 || stype==190
             isempty(rings) && (planar=false; continue)
-            plane=_iges_plane_params(types,params,bad,surf_de,caller)
+            plane=_iges_plane_params(types,params,bad,surf_de,caller;frame_context)
             nrm,p0=plane
             for ring in rings
                 scale=_ring_scale(ring)

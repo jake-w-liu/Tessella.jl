@@ -136,10 +136,8 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
                                                 size_field=nothing,periodic_surface_pairs=nothing,
                                                 optimize_pyramids::Float64=0.0)
     _model_native_hybrid_volume_scope(m,tag,constructor,caller)
-    # Native selects Winslow only for exactly 1. Other nonnegative doubles
-    # execute the same original relocation kernel as 0, rather than disabling it.
-    isfinite(optimize_pyramids) && optimize_pyramids!=1.0 || throw(ArgumentError(
-        "$caller: native hybrid Winslow Pyramid optimization (Mesh.OptimizePyramids=1) is not implemented"))
+    isfinite(optimize_pyramids) || throw(ArgumentError(
+        "$caller: native hybrid Pyramid optimization value must be finite"))
     m.meshing.algorithm_3d==1 &&
         (isempty(get(m.embeds,(3,tag),NTuple{2,Int}[])) || constructor.embedded_point!==nothing) &&
         !get(m.meshing.reverse,(3,tag),false) && get(m.meshing.smoothing,(3,tag),0)==0 || throw(ArgumentError(
@@ -179,8 +177,9 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
     # Native negative factors select the normal-offset births and skip the
     # Pyramid smoother; Tet insertion/optimization keep these shell rows fixed.
     relocated=optimize_pyramids<0.0 ? smoothed.mesh :
-        ModelNativeHybridRelocate.relocate(plan,smoothed.mesh,caller;
-            birth_order=constructor.pyramid_order,node_uids=insertion.node_numbers)
+        (optimize_pyramids==1.0 ? ModelNativeHybridWinslow : ModelNativeHybridRelocate).relocate(
+            plan,smoothed.mesh,caller;birth_order=constructor.pyramid_order,
+            node_uids=insertion.node_numbers)
     pyramids=_model_native_hybrid_pyramid_production(plan,relocated.coords,
         insertion.element_high_water,caller;birth_order=constructor.pyramid_order)
     work.cell_source=relocated;work.element_tags=insertion.element_numbers

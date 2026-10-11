@@ -24,6 +24,40 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Current plane charts, quadratic exports, Winslow and Tet partitions (2026-10-11)
+
+The same final Source passes **201/201** ordinary package assertions on both
+supported runtimes: Julia 1.12.7 actual exit zero in **44.88 s**, body **9.7 s**;
+Julia 1.13.1 actual exit zero in **36.53 s**, body **9.1 s**. The runner uses
+minimal compilation automatically. Logs and receipts are
+`test/tmp/ordinary_default_201_{112,113}_20261011.*`. No external mesher or
+solver runs in the default suite.
+
+- [IGES plane charts](docs/iges_plane_charts.md) map bounded UV-only142 wires
+  through explicit190 Form1 frames, including one proper rigid124 surface
+  transform and model-space boundary priority. Focused checks: 49 and 38,
+  Julia 1.12, actual exit zero in 22.43 and 23.11 s. Arbitrary-rotation hole
+  Surface import is checked; its general fill/performance remains unqualified.
+- [Model VTK](docs/model_view_exports.md) also preserves complete Quad8,
+  Hex20, Prism15 and Pyramid13 connectivity, UIDs and nodal values. Focused
+  checks: 34, Julia 1.13, actual exit zero in 37.26 s. Pyramid14 and other
+  high-order families remain open; no external VTK reader was run.
+- [Winslow Pyramid mode](docs/hybrid_winslow.md) is an actual regularized
+  shape/volume objective with analytic gradients, locked apex-star boundaries
+  and L-BFGS optimization. Focused checks: 44, Julia 1.13, actual exit zero
+  in 18.41 s warm. An additional six-check public GEO/CLI atomic control passed
+  in 6.03 s. Nonzero multi-Region modes are pending integration.
+- [Tet partitions](docs/partitioned_tets.md) create actual child Regions,
+  opposite shared Tri3 incidences and ghost query aliases. Owned cells retain
+  one authoritative UID copy. ASCII/binary MSH4 and true public re-import pass;
+  MSH2 rejects before opening its target. Focused checks: 66, Julia 1.13,
+  actual exit zero in 37.00 s. Both topology/ghost defaults remain zero;
+  lower BRep, mixed/high-order and parallel production remain open.
+
+These reviewed implementations build on the normally pushed, remote-verified
+Curve-export commit `3dd724d36165bb92d5def3132811d1f5b0a067ca`. Earlier sections
+retain evidence for their own dated Source. Full P1–P6 parity remains open.
+
 ### Complete higher-order Curve VTK output (2026-10-11)
 
 Model VTK now exports complete Curve orders3–10 as Lagrange Curve cells,
@@ -69,7 +103,9 @@ Curve142 correctly distinguishes UV and model-space curves, prioritizes a real
 model-space curve and rejects unmapped UV-only input. Existing closed-shell and
 positive-volume certificates remain. Focused/default53 pass on Julia1.13.1,
 actual exit 0 in71.51 s. See [CAD scope](docs/cad_mesh_imports.md). Explicit
-Type190 UV mapping and general curved trimming remain unfinished.
+At this earlier receipt, Type190 UV mapping was unfinished; the current plane
+chart increment supersedes that limitation. General curved trimming
+remains unfinished.
 
 `OptimizePyramids` retains finite floating-point settings. A negative factor
 places and freezes certified inward normal apices in one convex hybrid Region;
@@ -80,11 +116,12 @@ actual exit 0 in41.18 s. GEO/CLI generation now uses local settings without
 reading or changing unrelated API state: its focused35 pass on Julia1.13.1,
 actual exit 0 in54.62 s. See [negative factors](docs/hybrid_normal_apices.md),
 [relocation](docs/hybrid_relocate_modes.md) and [frontend scope](docs/geo_pyramid_option_scope.md).
-Winslow1, nonzero batch modes, general embedding and periodic composition remain open.
+At this earlier receipt Winslow1 was still guarded; the current Winslow
+increment supersedes that limitation. Nonzero batch modes, general embedding
+and periodic composition remain open.
 
-Full P1–P6 parity remains in progress. Next isolated tasks are explicit IGES190
-plane UV charts, genuine Winslow optimization and partition interface/ghost
-production. All larger native/solver/stress campaigns remain opt-in.
+Full P1–P6 parity remains in progress. The later plane-chart, Winslow and
+partition increment supersedes this earlier continuation queue. All larger native/solver/stress campaigns remain opt-in.
 
 ### Planar Face holes, quadratic VTK and embedded hybrid Point (2026-10-11)
 
