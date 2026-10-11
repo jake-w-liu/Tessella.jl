@@ -12,9 +12,9 @@ P1–P6 tracks**, with ASCENT meshing capabilities prioritized.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 218 assertions on Julia 1.12.7 and 1.13.1. Ordinary
+suite now passes 220 assertions on Julia 1.12.7 and 1.13.1. Ordinary
 `Pkg.test()` automatically selects minimal compilation; test bodies took
-11.1 and 10.8 seconds. Cold package runs took 45.41 and 38.66 seconds including
+11.7 and 11.1 seconds. Cold package runs took 47.05 and 40.34 seconds including
 precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
@@ -30,7 +30,7 @@ One-dimensional output keeps classified Point/Curve ownership,
 physical names, periodic node pairs and configured Curve orders.
 List-based views export POS, TXT, CSV and legacy VTK with all time steps;
 see [list export formats](docs/list_view_exports.md) for their data layout.
-[Atomic model opening](docs/model_import.md) uses `API.open` for GEO/MSH files,
+[Atomic model opening](docs/model_import.md) uses `API.open` for GEO/MSH/POS files,
 preserving prior models and held views. [Atomic session merging](docs/model_merge.md)
 executes against the current model and retains its slot and filename. [Direct model MSH export](docs/model_export.md) uses `API.write` with physical
 selection, ASCII/binary encodings and retained metadata. Model views also
@@ -38,13 +38,17 @@ export [CSV and VTK](docs/model_view_exports.md), preserving
 UIDs, ownership, sparse time steps and full supported connectivity. Recognized
 independent STEP/IGES solids import as [classified mixed meshes](docs/cad_mesh_imports.md).
 [Mapped STEP occurrences](docs/step_mapped_occurrences.md) retain actual rigid
-placement and nested instance paths.
+placement and nested instance paths, including proper unit-scale
+[Cartesian targets](docs/step_cartesian_rigid_targets.md).
+[POS list importing](docs/session_pos_import.md) retains all24 plain linear
+record families, names and physical times through atomic open/merge.
 One translated copied Surface pair is supported per Region in separate
 [ordinary hybrid components](docs/periodic_hybrid_boundaries.md), and a strictly
 interior [embedded Point](docs/embedded_hybrid_points.md) or one connected
 [embedded Line2 Curve](docs/hybrid_embedded_curves.md), or one retained
 [Tri3 Surface](docs/hybrid_embedded_surfaces.md) can be recovered in a convex
-hybrid shell, with one or two actual Tri3 cells per Surface. [Multiple Point/Curve constraints](docs/hybrid_constraint_collections.md)
+hybrid shell, with one endpoint-only3–6-vertex disk and `n-2` actual Tri3 cells
+per Surface; see the [polygonal scope](docs/hybrid_polygon_sheets.md). [Multiple Point/Curve constraints](docs/hybrid_constraint_collections.md)
 are supported within one convex Region. Supported planar STEP/IGES Faces retain outer/inner wires
 and triangulate holes. [Explicit IGES plane charts](docs/iges_plane_charts.md)
 map bounded UV wires and rigid surface transforms; general curved CAD trimming

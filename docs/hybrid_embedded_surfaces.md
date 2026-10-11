@@ -1,17 +1,19 @@
-# One retained planar Tri3 Surface
+# One retained planar Tri3 disk Surface
 
 An ordinary Delaunay hybrid Region can consume one retained planar Surface
-containing either one actual linear Tri3 cell with three boundary Lines, or
-two connected Tri3 cells with four boundary Lines. Each Line retains one
+containing `n-2` actual linear Tri3 cells with three to six boundary Lines.
+Each Line retains one
 actual Line2 cell, and every sheet vertex retains its declared endpoint Point
 cell. The sheet must lie strictly inside a certified convex shell. The
 producer consumes literal lower node and cell UIDs, ownership, ordered corners
 and coordinates.
 
-The two-triangle sheet must form one coherent planar disk: its triangles meet
-at one oppositely directed shared edge, lie on opposite sides of that diagonal,
-and have a complete exterior edge set equal to the four actual boundary Line
-cells. Degenerate, folded, disconnected or nonplanar sheets reject.
+The sheet must form one coherent planar disk: its actual boundary is one
+connected cycle, the triangle dual graph is connected, and shared edges have
+opposite directed incidences with triangles on opposite sides. Its complete
+exterior edge set equals the actual boundary Line cells. Exact projected
+checks reject crossing, overlap, unmatched edge vertices, folded or disconnected
+triangles; nonplanar sheets also reject. See the [polygonal scope](hybrid_polygon_sheets.md).
 
 Every actual sheet edge, including the shared diagonal, passes through segment
 recovery, and each literal triangle passes through facet recovery. Carving
@@ -23,9 +25,9 @@ sheet edge requires a closed cyclic Tet link. Existing positive typed-cell,
 exterior identity, Pyramid, ownership and analytic volume certificates remain
 required.
 
-The current admission covers one- or two-cell Tri3 sheets with only their
-three or four boundary Point vertices, in one convex hybrid Region. Larger
-triangulations, additional Surface or Curve vertices, Quad sheets, nested
+The current admission covers one endpoint-only Tri3 disk with three to six
+boundary Point vertices, in one convex hybrid Region. Larger polygons, holes,
+additional Surface or Curve vertices, Quad sheets, nested
 embedded entities, multi-Region embedding, and unavailable full-search or
 Steiner recovery branches remain outside this admission. An unreferenced
 sheet or lower row cannot count as successful embedding.
@@ -45,3 +47,12 @@ actual zero/41.41 s including compilation, body8.17 s. The preceding axis-aligne
 49 and original single-Tri40 receipts qualify their preceding gate Source;
 the packet retains that distinction. No volume campaign was repeated solely
 for this numerical guard repair.
+
+The subsequent polygonal regression passes48 checks, Julia1.12 actual zero/
+26.82 s, including two actual5/6-gon Volume fills. It exposed and fixed a real
+optimizer protection defect: literal cyclic facets/directed edges are now
+canonicalized only for internal lookup keys. Full final facet/star/link checks
+remain required. With `Mesh.Renumber=0`, literal lower node UIDs and XYZ remain;
+ordinary first-order cell factories can renew linear cell labels before binding
+Volume inputs. The test checks actual resulting cell identities and unchanged
+owner-bound cyclic incidence. No Volume fixture enters the default suite.

@@ -8,9 +8,9 @@ remain **in progress**.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 218 assertions on Julia 1.12.7 and 1.13.1. Ordinary
+suite now passes 220 assertions on Julia 1.12.7 and 1.13.1. Ordinary
 `Pkg.test()` automatically selects minimal compilation; test bodies took
-11.1 and 10.8 seconds. Cold package runs took 45.41 and 38.66 seconds including
+11.7 and 11.1 seconds. Cold package runs took 47.05 and 40.34 seconds including
 precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
@@ -159,7 +159,7 @@ Complete Quad9, Hex27 and Prism18 and edge-only Quad8, Hex20, Prism15 and
 Pyramid13 VTK layouts, planar STEP/IGES Face holes, and
 [one embedded Point in a convex hybrid Region](docs/embedded_hybrid_points.md)
 are also implemented. Current additions include catalogued high-order VTK,
-retained Point/Curve collections and one/two-Tri embedded sheets, and one
+retained Point/Curve collections and endpoint-only3–6-vertex Tri3 disks, and one
 translated copied Surface pair per separate hybrid Region. Incomplete
 high-order formats, shared/general-affine periodic Region composition, broader
 hybrid recovery and full CAD/NURBS assembly topology remain open.
@@ -206,10 +206,12 @@ consumes actual lower Point/Line products and certifies the sampled world metric
 on every emitted edge. The [explicit API endpoint](docs/api_metric_surfaces.md)
 uses the selected session tensor background and publishes classification and
 UIDs atomically. Ordinary native algorithm dispatch remains unchanged.
-[Atomic model opening](docs/model_import.md) imports true GEO/MSH files while
+[Atomic model opening](docs/model_import.md) imports true GEO/MSH/POS files while
 retaining prior slots/views and stages all API option/cache/diagnostic publication.
 [Atomic session merging](docs/model_merge.md) executes real GEO against existing
 entities/fields or merges literal MSH records while retaining current slot identity.
+[POS list imports](docs/session_pos_import.md) retain all24 plain linear families,
+names and physical times; POS merging publishes only prepared views.
 [CLI mesh checks](docs/cli_controls.md) validate MSH structure without generation.
 
 P1 does not yet claim octree-identical parity with Gmsh's HXT/p4est
@@ -280,7 +282,8 @@ an explicit failure listing the seen entity types. Multiple recognized explicit 
 with strictly disjoint bounding boxes return classified independent mixed meshes;
 supported planar Faces can retain disjoint inner wires and triangulate their
 holes. [Mapped STEP occurrences](docs/step_mapped_occurrences.md) additionally
-consume one explicit representation root and nested rigid axis-placement maps.
+consume one explicit representation root and nested rigid axis-placement maps,
+including proper [unit-scale Cartesian targets](docs/step_cartesian_rigid_targets.md).
 Other CAD assembly transformations and analytic Face maps remain open. See
 [mesh import scope](docs/cad_mesh_imports.md). The entity kernel records native
 boxes, cylinders, spheres, cones, toruses, Boolean volumes (operation-time
@@ -1114,9 +1117,11 @@ partition topology. Direct model MSH export, multiple Point/Curve constraints,
 open partition seams and literal prismatic fill are implemented within their
 linked scopes. Translated periodic pairs in separate Region components, the
 explicit tensor API, atomic session merging and read-only CLI mesh checks are
-also implemented. Current isolated work extends rigid STEP Cartesian targets,
-larger retained planar sheets and list-POS importing. Broader sheet/metric/native
-algorithm contexts remain genuine Source work.
+also implemented. Proper unit-scale Cartesian STEP targets, endpoint-only
+3–6-vertex retained planar sheets and atomic list-POS importing are implemented.
+Current isolated work covers direct product-usage STEP assemblies and actual
+view-time metadata/selection. Broader sheet/metric/native algorithm contexts
+remain genuine Source work.
 
 Use small functional regressions for routine verification, then normally commit
 and push verified implementations to `main`. Native-oracle sweeps, resource and

@@ -369,6 +369,16 @@ function _gmsh_optimize_tetrahedra(mesh::Mesh;
         "native optimizer element identities must bind every input cell uniquely"))
     maximum(numbers;init=UInt64(0))<=element_high_water || throw(ArgumentError(
         "native optimizer element high-water mark does not cover its inputs"))
+    all(face->length(face)==3 && allunique(face) &&
+        all(row->row isa Integer && !(row isa Bool) && 0<row<=size(mesh.coords,2),face),
+        embedded_faces) || throw(ArgumentError("native optimizer embedded faces have invalid current rows"))
+    all(edge->length(edge)==2 && allunique(edge) &&
+        all(row->row isa Integer && !(row isa Bool) && 0<row<=size(mesh.coords,2),edge),
+        embedded_edges) || throw(ArgumentError("native optimizer embedded edges have invalid current rows"))
+    # The owned constructor supplies cyclic faces and directed edges; only
+    # internal incidence/cut keys forget that presentation.
+    embedded_faces=Set{NTuple{3,Int32}}(_sorted_face3(face...) for face in embedded_faces)
+    embedded_edges=Set{Tuple{Int32,Int32}}(_gopt_edge(edge...) for edge in embedded_edges)
     movement=if movable===nothing
         fixed=falses(size(mesh.coords,2))
         for face in first(boundary_faces(mesh.tets)),node in face

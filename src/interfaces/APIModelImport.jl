@@ -150,6 +150,7 @@ function _model_import_prepare(path,dimension;legacy=false)
     caller=legacy ? "API.open_geo!" : "API.open"
     options=copy(OPTIONS);diagnostics=_model_import_diagnostics(options)
     extension=lowercase(splitext(path)[2])
+    extension==".pos" && return _list_model_open_prepare(path,caller)
     result=extension==".msh" ? GeoExec._geo_stage_mesh_file(path;
         context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[]) :
         _model_import_execute_geo(path,dimension,options,diagnostics;legacy)
@@ -269,8 +270,8 @@ function _model_import_filename(filename,caller;geo_only=false)
     filename isa AbstractString && !isempty(filename) && !occursin('\0',filename) ||
         throw(ArgumentError("$caller: filename must be a nonempty NUL-free string"))
     extension=lowercase(splitext(filename)[2])
-    extension in (geo_only ? (".geo",) : (".geo",".msh")) || throw(ArgumentError(
-        "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo and .msh")"))
+    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos")) || throw(ArgumentError(
+        "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh and .pos")"))
     isfile(filename) || throw(ArgumentError("$caller: missing file $filename"))
     return String(filename)
 end
@@ -278,13 +279,15 @@ end
 """
     open(filename)
 
-Import a `.geo` or `.msh` file into a new current model, reusing an empty
+Import a `.geo`, `.msh` or supported linear-list `.pos` file into a new current model, reusing an empty
 current model. Nonempty prior models and session views remain alive. MSH
 imports keep actual UIDs, entity ownership and retained metadata; ordinary
 model data sections create views bound to the imported model. The model name
 is the filename stem unless GEO `SetName` supplies one. Failed preparation
 leaves model slots, caches, options and views unchanged; this stricter failure
 contract differs from Gmsh's missing-file partial publication.
+POS imports preserve named list views and literal time values; text,
+interpolation schemes and higher-order list records reject before publication.
 """
 function open(filename)
     path=_model_import_filename(filename,"API.open")

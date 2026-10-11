@@ -527,7 +527,7 @@ function _native_list_view_pos(view,caller;name=view.name)
             push!(elements,Post.PosElement(kind,coords,values))
         end
     end
-    return Post.PosView(name;elements)
+    return Post.PosView(name;elements,time=view.list_time)
 end
 
 

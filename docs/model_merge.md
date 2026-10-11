@@ -1,10 +1,14 @@
 # Atomic merge into the current model
 
-`Tessella.API.merge(filename)` merges a `.geo` or `.msh` file into the current
+`Tessella.API.merge(filename)` merges a `.geo`, `.msh` or `.pos` file into the current
 model and returns `nothing`. Existing models and the current model's slot keep
 their identities, so held model views continue to follow that model. MSH merge
 retains its name; GEO `SetName` changes it when explicitly requested. The
 associated model filename remains unchanged.
+
+[POS list merging](session_pos_import.md) adds supported named list views and
+physical times while retaining current geometry, mesh and model identity.
+It prepares the complete file and tag allocation before publishing any view.
 
 The current actual cache and caller-owned records form one detached classified
 mesh, including classified unused nodes. Supported MSH2/4 ASCII/binary imports

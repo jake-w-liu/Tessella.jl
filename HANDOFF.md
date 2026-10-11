@@ -12,7 +12,65 @@ small real fixtures. Full native-oracle sweeps, source/AST audits, memory stress
 benchmarks, the 22 HFSS cases, aggregate validation, and external ASCENT solves
 are opt-in campaigns. See [test/README.md](test/README.md).
 
-### Current tensor API, periodic batches, session merge and CLI checking
+### Current Cartesian STEP, polygonal sheets and POS imports
+
+The final ordinary suite passes **220/220 on BOTH** supported runtimes, actual
+exit0 on the same frozen250 Source files: Julia1.12.7 **47.05 s/body11.7 s**;
+Julia1.13.1 **40.34 s/body11.1 s**. Receipts:
+`test/tmp/ordinary_default_220_{112,113}_20261011.*`; exact Source map:
+`test/tmp/ordinary_default_220_frozen_source_20261011.json`, aggregateSHA
+`50dff8840fda0d292e4e1fdf085a49fd61e05bb1701120abc883617ba6edb20c`.
+Only two file-only POS checks enter the default. No native, solver or new
+Volume-generation campaign enters routine tests.
+
+Reviewed selected packets and actual bounded qualifications:
+
+- `C:/tmp/tessella_step_cartesian_rigid_20261011/selected_cartesian_rigid_packet.json`:
+  one Source path, opt-in43 and two scope docs. The
+  [proper unit-scale Cartesian target](docs/step_cartesian_rigid_targets.md)
+  uses its actual direct basis/origin, retaining mapped-origin validation.
+  Five public import controls, one rigid two-box fill, exact MSH4 UID/owner/
+  ordered-node transport and six errors pass43/43, Julia1.12 actual0/5.43 s warm.
+  Nonunit scaling and general relationship assemblies remain outside this packet.
+  Three test-only failed receipts are preserved; Source remained frozen.
+- `C:/tmp/tessella_hybrid_polygon_sheet_20261011/ready.json`:
+  two Source paths, opt-in48 and [polygonal scope](docs/hybrid_polygon_sheets.md).
+  One actual endpoint-only planar3–6-vertex disk admits `n-2` Tri3 cells after
+  connected-cycle/dual-graph, exact nonoverlap and unchanged planarity checks.
+  Actual public pentagon/hexagon Volume fills pass full positive-volume,
+  exterior, two-sided facet, spherical-star and cyclic-edge certificates:
+  48/48, Julia1.12 actual0/26.82 s. A real optimizer defect removed cyclic
+  facet(2,5,1): validated internal face/edge lookup keys now canonicalize while
+  owned rows, UIDs and cyclic presentation remain actual. Renumber0 preserves
+  lower node labels; ordinary linear-cell factories may renew cell labels.
+  The public reversed-Tri control rejects at the existing constructor ownership
+  guard and preserves state. Four failed test receipts and actual stage-loss,
+  numbering and diagnostic traces remain separate from the final green receipt.
+- `C:/tmp/tessella_takeover_pos_import_20261011/selected_session_pos_import_packet.json`:
+  six Source paths, opt-in28+default2, one tiny fixture and
+  [POS session scope](docs/session_pos_import.md). All24 plain linear scalar/
+  vector/tensor families retain actual names, coordinates, values and physical
+  times. Open publishes a real empty model; merge adds views only. Held models,
+  binary model-view continuity and atomic errors pass30/30, Julia1.13 actual0/
+  3.97 s warm. The sole failed first receipt was an incorrect existing empty-slot
+  fixture expectation; Source stayed unchanged. Text/interpolation/high-order
+  admission and broader physical-time field behavior remain open.
+
+Root integration manifests are
+`test/tmp/integrated_cartesian_pos_paths_20261011.json` and
+`test/tmp/integrated_polygon_sheet_paths_20261011.json`. This increment follows
+publishedMain`274dbac`; normal Git publication and exact remote SHA checking
+record its release. Unrelated untracked files and failed receipts remain.
+
+Next isolated work is literal direct product-usage STEP assemblies
+(`concise_tests`) and actual view-time metadata/selection with the confirmed
+model-data kind-reset bounds fix (`devin_reconcile`). Assembly qualification
+now guards non-millimetre units after a tiny public CENTI control proved raw
+coordinates require conversion. The hybrid agent is designing the next genuine
+constraint context. None of these prepared packets is qualified by the220 suite.
+Continue the full backlog below; P1–P6 remain open and the goal stays active.
+
+### Preceding tensor API, periodic batches, session merge and CLI checking
 
 The combined Source passes ordinary **218/218 on BOTH** supported runtimes,
 actual exit0 on the same frozen249 Source files: Julia1.12.7 **45.41 s/body11.1 s**;
@@ -68,14 +126,10 @@ bindings against their saved bases, retaining the shared homology fix. Selected
 integration manifests are `test/tmp/integrated_periodic_api_metric_paths_20261011.json`
 and `test/tmp/integrated_model_merge_paths_20261011.json`. Only selected files
 were promoted; unrelated untracked files and failed receipts remain.
-This implementation increment follows publishedMain`d1d7088`; Git records its
-normal publication SHA and the remote is checked after pushing.
-
-Next isolated work is rigid Cartesian STEP mapped targets (`concise_tests`),
-actual n-gon planar sheets (`implementation_audit`), and lossless list-POS
-open/merge importing (`devin_reconcile`). Their candidate proofs are separate
-from this published Source. Continue the full genuine backlog below; P1–P6
-remain open and the active goal must not be marked complete.
+This preceding increment was normally published as Main`274dbac`, with its
+exact remote SHA verified. The Cartesian targets, polygonal sheets and POS
+imports prepared next are integrated in the current ledger above. Continue
+the genuine backlog below; P1–P6 remain open.
 
 ### Preceding atomic model opening, mapped STEP, planar sheets and variable metrics
 
@@ -556,18 +610,20 @@ backlog rather than the older expensive verification queue:
    Multi-region batching and one translated copied pair in a single hybrid Region
    and one strictly interior Point in a convex hybrid Region are implemented;
    one actual connected Line2 Curve in a convex hybrid Region is also implemented.
-   One strictly interior planar Surface with one or two actual Tri3 cells and
-   actual Point/Line boundaries is implemented too. Multiple retained Point/Curve constraints are implemented
+   One strictly interior endpoint-only planar3–6-vertex disk with `n-2` actual
+   Tri3 cells and actual Point/Line boundaries is implemented too. Multiple retained Point/Curve constraints are implemented
    in one convex Region. Separate periodic Region components now admit one
    translated pair each. Shared/cross-Region and general-affine periodic contexts,
-   sheets beyond two Tri cells, Quad sheets and general
+   larger polygons, holes or interior Surface vertices, Quad sheets and general
    hybrid recovery remain open.
    Public region reverse/smoothing are
    native no-ops, so they are not missing Gmsh Region features.
 2. Complete general CAD assembly and trimmed/periodic NURBS topology. Recognized
    explicit independent STEP/IGES mesh roots are implemented. One explicit STEP
-   representation root with nested rigid mapped occurrences is implemented;
-   other occurrence transformations, analytic Face reconstruction and general
+   representation root with nested rigid mapped occurrences and proper unit-scale
+   Cartesian targets is implemented; direct product-usage assemblies are in
+   isolated qualification. Other occurrence transformations, unit conversion,
+   analytic Face reconstruction and general
    assembly remain open.
    Planar STEP/IGES Face holes, including143 boundaries, are implemented;
    explicit190 Form1 UV charts and proper rigid124 chains are implemented;
@@ -604,9 +660,12 @@ backlog rather than the older expensive verification queue:
    Model CSV/VTK, list TXT/CSV/VTK and Curve CLI generation/version/binary flags
    are implemented within the linked format scopes. CLI sizing/order and
    standalone help/version controls are implemented too. Direct current-model
-   MSH2.2/4.1 writing and atomic direct GEO/MSH opening are implemented.
-   Atomic session GEO/MSH merging and read-only CLI MSH checking are implemented.
-   List-POS importing and additional formats remain open.
+   MSH2.2/4.1 writing and atomic direct GEO/MSH/POS opening are implemented.
+   Atomic session GEO/MSH merging, views-only POS merging and read-only CLI
+   MSH checking are implemented. All24 plain linear POS list families retain
+   names and physical times. Actual TimeStep/Time metadata and the confirmed
+   model-data kind-reset extent fix are in isolated implementation. Text,
+   interpolation/high-order POS admission and additional formats remain open.
 10. Close native matching chronology and requirement-level differential parity.
     Large P6/HFSS/ASCENT campaigns remain opt-in verification, not routine tests.
 

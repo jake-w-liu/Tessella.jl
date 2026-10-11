@@ -1,6 +1,6 @@
 # Atomic model file import
 
-`Tessella.API.open(filename)` is a session importer for `.geo` and `.msh` files.
+`Tessella.API.open(filename)` is a session importer for `.geo`, `.msh` and `.pos` files.
 It returns `nothing`. A successful open makes the imported model current while
 retaining nonempty prior models and their views. It reuses an empty current
 model, including the initial unnamed model. Repeated opens of a nonempty file
@@ -20,6 +20,10 @@ The model name defaults to the filename stem. GEO `SetName` overrides it,
 including an explicitly empty name. The associated model filename is the
 filename passed to `open`. Nonempty older models keep their filenames, public
 mesh records, and held model-view bindings when the current model changes.
+
+[POS list imports](session_pos_import.md) publish supported literal list views
+into a real empty current model. They retain names and physical times; malformed
+or unsupported files leave the session unchanged.
 
 MSH 2.2 and 4.1 imports accept ASCII and binary files through the existing
 literal mesh importer. They retain supported actual public UIDs, entity owners,

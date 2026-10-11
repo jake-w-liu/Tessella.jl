@@ -6,8 +6,8 @@ The mapped source can contain supported planar BRep solids or recognized
 primitives. Nested maps expand in literal representation-item order; source
 definitions are not emitted as extra solids at their original positions.
 
-Both mapping origin and target must be `AXIS2_PLACEMENT_3D`. Their actual
-Cartesian origins and normalized directions supply rigid frames; optional
+The mapping origin remains an actual `AXIS2_PLACEMENT_3D`. An AXIS2 target
+uses both actual Cartesian origins and normalized rigid frames; optional
 directions use the STEP [axis-placement schema](https://www.steptools.com/docs/stp_aim/html/t_axis2_placement_3d.html)
 and [first projected axis](https://www.steptools.com/docs/stp_aim/html/t_first_proj_axis.html).
 For axis-column matrices A/B and origins a/b, this importer uses the pinned
@@ -26,8 +26,10 @@ bounding-box certificates remain required. `fill=false` returns the retained
 closed boundaries. No source nodes are welded across occurrences.
 
 This first producer requires one explicit shape-definition root and identical
-representation-context references. Cartesian transformation operators,
-multiple product roots, representation-relationship transformations and
+representation-context references. Proper eight-field Cartesian transformation
+operator targets with unit/default scale have a separate
+[rigid target admission](step_cartesian_rigid_targets.md). Multiple product
+roots, representation-relationship transformations and
 context-dependent shape representations remain guarded. Unreachable mapped
 items, cycles, missing references, invalid directions, empty representations,
 touching boxes and unsupported items reject explicitly. Limits are128 nesting

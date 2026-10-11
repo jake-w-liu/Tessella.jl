@@ -1245,7 +1245,11 @@ function _pos_write_view(io::IO,view::PosView)
     nsteps=isempty(view.elements) ? length(view.time) :
         size(view.elements[1].values,3)
     print(io,"View \"",view.name,"\" {\n")
-    nsteps>1 && println(io,"TIME{",join((_pos_fmt(t) for t in view.time),','),
+    # A nondefault literal time also matters for one step or an empty view.
+    # Ordinary implicit single-step [0] output retains its existing layout.
+    explicit_time=!isempty(view.time) && (isempty(view.elements) ||
+        any(i->!isequal(view.time[i],Float64(i-1)),eachindex(view.time)))
+    (nsteps>1 || explicit_time) && println(io,"TIME{",join((_pos_fmt(t) for t in view.time),','),
                         "};")
     nschemes=length(view.interpolations)
     next_scheme=1
@@ -1286,7 +1290,7 @@ end
 
 Serialize `PosView` objects in Gmsh's parsed `.pos` text format — the exact
 record layout `PViewDataList::writePOS` emits (`%.16g` numbers, one element
-record per line, `TIME` only for multi-step views, records in stored order,
+record per line, `TIME` for multi-step or nondefault physical times, records in stored order,
 `INTERPOLATION_SCHEME` written back as read). Scalar [`View`](@ref) objects are
 converted to `SP` records via [`PosView`](@ref). `parse`/`write` round-trips
 are stable: `write_pos(read_pos(text))` is a fixed point of `write_pos ∘

@@ -8607,6 +8607,7 @@ include("APINativeViewWriter.jl")
 include("APIModelExport.jl")
 include("APIModelImport.jl")
 include("APIModelMerge.jl")
+include("APIListViewImport.jl")
 include("APINativeOptimize.jl")
 include("APINativeRelocate3D.jl")
 include("APIMeshHomologyNative.jl")
@@ -9068,7 +9069,13 @@ mutable struct _SessionView
     model_contexts::Dict{Tuple{Int,String},NamedTuple}
     model_kind::Union{Nothing,String}
     model_step_ranges::Vector{_NativeViewStepRange}
+    list_time::Vector{Float64}
 end
+
+_SessionView(name,numbers,strings,list_types,list_counts,list_data,model_data,model_contexts,
+        model_kind,model_step_ranges)=
+    _SessionView(name,numbers,strings,list_types,list_counts,list_data,model_data,
+        model_contexts,model_kind,model_step_ranges,Float64[])
 
 _SessionView(name,numbers,strings,list_types,list_counts,list_data,model_data,model_contexts)=
     _SessionView(name,numbers,strings,list_types,list_counts,list_data,model_data,
@@ -9303,7 +9310,12 @@ function _view_set_string(tag,name,value)
     value isa AbstractString || throw(ArgumentError(
         "$caller: value must be a string"))
     return lock(STATE_LOCK) do
-        _session_view(tag,caller).strings[String(name)]=String(value)
+        view=_session_view(tag,caller)
+        if name=="Name"
+            view.name=String(value)
+        else
+            view.strings[String(name)]=String(value)
+        end
         return nothing
     end
 end
@@ -9313,7 +9325,8 @@ function _view_get_string(tag,name)
     name isa AbstractString || throw(ArgumentError(
         "$caller: name must be a string"))
     return lock(STATE_LOCK) do
-        get(_session_view(tag,caller).strings,String(name),"")
+        view=_session_view(tag,caller)
+        name=="Name" ? view.name : get(view.strings,String(name),"")
     end
 end
 

@@ -24,7 +24,41 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
-### Current tensor API, periodic batches, session merge and CLI checks (2026-10-11)
+### Current Cartesian STEP, polygonal sheets and POS imports (2026-10-11)
+
+The final ordinary suite passes **220/220 on both Julia1.12/1.13**, actual exit0
+on the same frozen250 Source files: **47.05 s/body11.7 s** onJulia1.12.7 and
+**40.34 s/body11.1 s** onJulia1.13.1. Actual receipts and Source map:
+`test/tmp/ordinary_default_220_{112,113}_20261011.*` and
+`test/tmp/ordinary_default_220_frozen_source_20261011.json`.
+
+[Cartesian STEP targets](docs/step_cartesian_rigid_targets.md) pass43 bounded
+checks, Julia1.12 actual0/5.43 s warm: five real imports, one two-box positive
+fill and exact MSH4 UID/owner/ordered-node transport. Proper rigid unit-scale
+operators use their actual direct basis/origin. General scaling/assemblies
+remain outside this qualified packet.
+
+[Polygonal planar sheets](docs/hybrid_polygon_sheets.md) pass48 bounded checks,
+Julia1.12 actual0/26.82 s, including actual pentagon/hexagon hybrid Volume fills.
+The new3–6-vertex disk admission retains actual lower constructors and full
+facet/star/link/positive-volume/exterior certificates. It exposed a real
+optimizer key mismatch that removed one cyclic facet; canonical internal
+lookup keys now preserve that constraint. The default gains no Volume workload.
+
+[Atomic POS list imports](docs/session_pos_import.md) pass28 opt-in+2default
+checks, Julia1.13 actual0/3.97 s warm. All24 plain linear families retain
+names, literal values and physical times. Open publishes an empty current model;
+merge adds views only. Held model views and atomic errors remain valid.
+Text/interpolation/high-order POS and broader physical-time field parity remain open.
+
+Exact packets, historical failed receipts and qualification boundaries are in
+[the current handoff](HANDOFF.md#takeover-2026-10-11). This increment follows
+publishedMain`274dbac`. Full P1–P6 remains unfinished. Current isolated work
+covers direct product-usage STEP assemblies and actual view-time metadata,
+including a confirmed data-kind reset bounds defect. Expensive native/solver
+campaigns remain opt-in.
+
+### Preceding tensor API, periodic batches, session merge and CLI checks (2026-10-11)
 
 The final ordinary suite passes **218/218 on both Julia1.12/1.13**, actual exit0
 on the same frozen249 Source files: **45.41 s/body11.1 s** onJulia1.12.7 and
@@ -60,8 +94,8 @@ and direct API diagnostic expectations. Failed receipts remain archived.
 The [current handoff](HANDOFF.md#takeover-2026-10-11) records exact packets and
 qualification boundaries. This Source follows publishedMaind1d7088; normal Git
 publication records the increment. Full P1–P6 completion remains unfinished.
-Current isolated work covers rigid Cartesian mapped targets, larger planar
-sheets and list-POS importing. Expensive parity/solver campaigns stay opt-in.
+The subsequent Cartesian targets, polygonal sheets and list-POS imports are
+integrated in the current ledger above. Expensive parity/solver campaigns stay opt-in.
 
 ### Preceding model opening, mapped STEP, planar sheets and variable tensors (2026-10-11)
 

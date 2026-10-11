@@ -1,4 +1,4 @@
-# A literal one- or two-Tri3 planar sheet with actual Point/Line boundary products.
+# A literal endpoint-only planar Tri3 disk with actual Point/Line boundary products.
 struct _ModelNativeHybridEmbeddedSurfaceInput
     model::GeoModel
     region::Int
@@ -21,14 +21,14 @@ function _model_native_hybrid_embedded_surface_input(m,region,input,caller)
         isempty(get(m.embeds,(2,surface),NTuple{2,Int}[])) || throw(ArgumentError(
         "$caller: embedded Surface requires one declared planar boundary without nested constraints"))
     loop=only(m.surfaces[surface]);curves=_model_projection_surface_curves(m,surface)
-    length(curves) in (3,4) && length(m.loops[loop])==length(curves) || throw(ArgumentError(
-        "$caller: embedded Surface requires three or four actual boundary Curves"))
+    3<=length(curves)<=6 && length(m.loops[loop])==length(curves) || throw(ArgumentError(
+        "$caller: embedded Surface requires three to six actual boundary Curves"))
     all(curve->get(m.curve_types,curve,:line)==:line,curves) || throw(ArgumentError(
         "$caller: embedded Surface requires its declared straight Line boundary"))
     product=_model_mesh_product(input,2,surface;caller)
     product isa MixedMesh && product.entity_data!==nothing && length(product.blocks)==1 &&
         only(product.blocks).msh==2 && size(only(product.blocks).nodes)==(3,length(curves)-2) || throw(ArgumentError(
-        "$caller: embedded Surface needs its actual one- or two-cell linear Tri3 sheet"))
+        "$caller: embedded Surface needs its actual endpoint-only linear Tri3 disk"))
     constructor=get(input.surface_constructor_inputs,(2,Int32(surface)),nothing)
     constructor!==nothing || throw(ArgumentError(
         "$caller: embedded Surface lacks its owned actual Surface constructor"))
@@ -93,19 +93,21 @@ function _model_native_hybrid_embedded_surface_input(m,region,input,caller)
         Dict(loop=>copy(m.loops[loop])),endpoints,triangles,records,lower_cells)
 end
 
-# The initial extension admits a single triangle or two coherently oriented
-# triangles meeting at one actual edge. Their literal outer edges must equal
-# the complete lower Line-cell boundary; no triangulation is reconstructed.
+# The literal boundary must be one cycle and the triangle dual graph connected.
+# Exact projected incidence checks certify adjacent and nonadjacent triangles;
+# no triangulation, source coordinates or constructor order is reconstructed.
 function _model_native_hybrid_surface_disk_certificate(triangles,records,boundary,caller)
     incidence=Dict{NTuple{2,UInt64},Vector{NTuple{2,UInt64}}}()
+    adjacent=Dict{NTuple{2,UInt64},Vector{Int}}()
     supports=Set{NTuple{3,UInt64}}()
-    for triangle in triangles
+    for (column,triangle) in enumerate(triangles)
         support=Tuple(sort!(collect(triangle.nodes)))
         support in supports && throw(ArgumentError("$caller: embedded Surface repeats a literal Tri3 support"))
         push!(supports,support)
         for index in 1:3
             edge=(triangle.nodes[index],triangle.nodes[mod1(index+1,3)])
             push!(get!(incidence,minmax(edge...),NTuple{2,UInt64}[]),edge)
+            push!(get!(adjacent,minmax(edge...),Int[]),column)
         end
     end
     all(edges->length(edges) in (1,2),values(incidence)) &&
@@ -115,6 +117,34 @@ function _model_native_hybrid_surface_disk_certificate(triangles,records,boundar
     observed==boundary && count(entries->length(entries)==2,values(incidence))==length(triangles)-1 &&
         length(records)-length(incidence)+length(triangles)==1 || throw(ArgumentError(
         "$caller: embedded Surface triangles do not form their complete actual Line-boundary disk"))
+    boundary_graph=Dict{UInt64,Vector{UInt64}}()
+    for (vertex_a,vertex_b) in boundary
+        push!(get!(boundary_graph,vertex_a,UInt64[]),vertex_b)
+        push!(get!(boundary_graph,vertex_b,UInt64[]),vertex_a)
+    end
+    all(neighbors->length(neighbors)==2,values(boundary_graph)) &&
+        Set(keys(boundary_graph))==Set(record.uid for record in records) || throw(ArgumentError(
+        "$caller: embedded Surface lower boundary is not an endpoint cycle"))
+    pending=UInt64[first(keys(boundary_graph))];reached=Set{UInt64}()
+    while !isempty(pending)
+        vertex=pop!(pending);vertex in reached && continue
+        push!(reached,vertex);append!(pending,boundary_graph[vertex])
+    end
+    reached==Set(keys(boundary_graph)) || throw(ArgumentError(
+        "$caller: embedded Surface lower boundary has disconnected cycles"))
+    triangle_graph=[Int[] for _ in triangles]
+    for columns in values(adjacent)
+        length(columns)==2 || continue
+        triangle_a,triangle_b=columns
+        push!(triangle_graph[triangle_a],triangle_b);push!(triangle_graph[triangle_b],triangle_a)
+    end
+    pending_triangles=Int[1];reached_triangles=Set{Int}()
+    while !isempty(pending_triangles)
+        column=pop!(pending_triangles);column in reached_triangles && continue
+        push!(reached_triangles,column);append!(pending_triangles,triangle_graph[column])
+    end
+    length(reached_triangles)==length(triangles) || throw(ArgumentError(
+        "$caller: embedded Surface has disconnected actual triangles"))
     coordinates=Dict(record.uid=>record.coordinate for record in records)
     a,b,c=map(uid->coordinates[uid],first(triangles).nodes)
     normal=LinearAlgebra.cross(collect(b).-collect(a),collect(c).-collect(a))
@@ -136,12 +166,43 @@ function _model_native_hybrid_surface_disk_certificate(triangles,records,boundar
     areas=[orient2((project(uid) for uid in triangle.nodes)...) for triangle in triangles]
     all(isfinite,areas) && all(!iszero,areas) && length(Set(sign.(areas)))==1 ||
         throw(ArgumentError("$caller: embedded Surface has degenerate or opposing actual triangle winding"))
-    if length(triangles)==2
-        diagonal=only(edge for (edge,entries) in incidence if length(entries)==2)
-        opposite=[only(uid for uid in triangle.nodes if !(uid in diagonal)) for triangle in triangles]
+    for (diagonal,columns) in adjacent
+        length(columns)==2 || continue
+        opposite=[only(uid for uid in triangles[column].nodes if !(uid in diagonal)) for column in columns]
         sides=[orient2(project(diagonal[1]),project(diagonal[2]),project(uid)) for uid in opposite]
         all(isfinite,sides) && Set(sign.(sides))==Set((-1.0,1.0)) || throw(ArgumentError(
             "$caller: embedded Surface triangles overlap or fold across their actual shared edge"))
+    end
+    on_segment(point,first,last)=all(axis->min(first[axis],last[axis])<=point[axis]<=
+        max(first[axis],last[axis]),1:2)
+    for first_column in 1:length(triangles)-1,last_column in first_column+1:length(triangles)
+        first_triangle=triangles[first_column].nodes;last_triangle=triangles[last_column].nodes
+        for i in 1:3,j in 1:3
+            first_edge=(first_triangle[i],first_triangle[mod1(i+1,3)])
+            last_edge=(last_triangle[j],last_triangle[mod1(j+1,3)])
+            minmax(first_edge...)==minmax(last_edge...) && continue
+            a,b=map(project,first_edge);c,d=map(project,last_edge)
+            ab_c=orient2(a,b,c);ab_d=orient2(a,b,d)
+            cd_a=orient2(c,d,a);cd_b=orient2(c,d,b)
+            ab_c!=0 && ab_d!=0 && sign(ab_c)!=sign(ab_d) &&
+                cd_a!=0 && cd_b!=0 && sign(cd_a)!=sign(cd_b) && throw(ArgumentError(
+                "$caller: embedded Surface actual triangle edges cross"))
+            for (uid,point,side) in ((last_edge[1],c,ab_c),(last_edge[2],d,ab_d))
+                side==0 && on_segment(point,a,b) && !(uid in first_edge) && throw(ArgumentError(
+                    "$caller: embedded Surface has an overlapping edge or unbound edge vertex"))
+            end
+            for (uid,point,side) in ((first_edge[1],a,cd_a),(first_edge[2],b,cd_b))
+                side==0 && on_segment(point,c,d) && !(uid in last_edge) && throw(ArgumentError(
+                    "$caller: embedded Surface has an overlapping edge or unbound edge vertex"))
+            end
+        end
+        for (selected,other) in ((first_triangle,last_triangle),(last_triangle,first_triangle)),uid in selected
+            uid in other && continue
+            point=project(uid)
+            sides=ntuple(i->orient2(project(other[i]),project(other[mod1(i+1,3)]),point),3)
+            all(!iszero,sides) && length(Set(sign.(sides)))==1 && throw(ArgumentError(
+                "$caller: embedded Surface actual triangle interiors overlap"))
+        end
     end
     return nothing
 end

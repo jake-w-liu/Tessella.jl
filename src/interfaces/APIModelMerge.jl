@@ -207,16 +207,21 @@ end
 """
     merge(filename::AbstractString)
 
-Merge a `.geo` or `.msh` file into the current model atomically. Existing models,
+Merge a `.geo`, `.msh` or supported linear-list `.pos` file atomically. Existing models,
 the current model slot, associated filename and held views survive. GEO executes
 against current entities, fields and options; an explicit `SetName` is honored.
 Supported literal MSH identities/periodic/partition/data metadata are retained;
 duplicate UID occurrences or incompatible partition namespaces reject before
 publication. Explicit external GEO actions are outside the rollback contract.
+POS adds list views only, leaving the current model and associated filename unchanged.
 """
 function merge(filename::AbstractString)
     path=_model_import_filename(filename,"API.merge")
     return lock(STATE_LOCK) do
+        if lowercase(splitext(path)[2])==".pos"
+            _model_locked()
+            return _list_model_merge!(path,"API.merge")
+        end
         plan=_model_merge_prepare(path)
         _model_import_publish!(plan;legacy=true)
         return nothing

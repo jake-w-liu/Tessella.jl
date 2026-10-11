@@ -44,7 +44,43 @@ function _step_occurrence_frame(entities,reference)
     return origin,(x,y,z)
 end
 
+# A Cartesian target has a direct occurrence frame, unlike the coordinate
+# change between two AXIS2 placements. Only a rigid operator is admitted.
+function _step_occurrence_cartesian_transform(entities,operator)
+    length(operator.args)==8 && all(value->value isa AbstractString,operator.args[1:2]) &&
+        (operator.args[3]===nothing || operator.args[3] isa AbstractString) ||
+        throw(ArgumentError("import_step: Cartesian mapped target requires its eight actual fields"))
+    scale=operator.args[7]
+    (scale===nothing || scale isa Real && !(scale isa Bool) &&
+        isfinite(scale) && scale==1) || throw(ArgumentError(
+        "import_step: Cartesian mapped targets support unit or default scale only"))
+    origin=_step_occurrence_vector(_step_occurrence_entity(
+        entities,operator.args[6],"CARTESIAN_POINT"),"operator origin")
+    function direction(reference,fallback,label)
+        reference===nothing && return fallback
+        return _step_occurrence_unit(_step_occurrence_vector(
+            _step_occurrence_entity(entities,reference,"DIRECTION"),label))
+    end
+    first_axis=direction(operator.args[4],(1.,0.,0.),"operator axis1")
+    second_axis=direction(operator.args[5],(0.,1.,0.),"operator axis2")
+    third_axis=operator.args[8]===nothing ?
+        _step_occurrence_unit(_brep_vcross(first_axis,second_axis)) :
+        direction(operator.args[8],(0.,0.,1.),"operator axis3")
+    projection=_brep_vdot(first_axis,third_axis)
+    x=_step_occurrence_unit(ntuple(i->first_axis[i]-projection*third_axis[i],3))
+    y=_step_occurrence_unit(_brep_vcross(third_axis,x))
+    axes=(x,y,third_axis)
+    return ntuple(i->ntuple(j->axes[j][i],3),3),origin
+end
+
 function _step_occurrence_transform(entities,origin,target)
+    operator=_deref_entity(entities,target)
+    if operator!==nothing && operator.kind=="CARTESIAN_TRANSFORMATION_OPERATOR_3D"
+        # Keep the actual mapping-origin admission even though a Cartesian
+        # target does not consume its frame in the pinned native transform.
+        _step_occurrence_frame(entities,origin)
+        return _step_occurrence_cartesian_transform(entities,operator)
+    end
     a,A=_step_occurrence_frame(entities,origin)
     b,B=_step_occurrence_frame(entities,target)
     # The pinned native importer uses a coordinate change from the Target

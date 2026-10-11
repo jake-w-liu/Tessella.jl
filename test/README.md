@@ -12,7 +12,8 @@ Hex, Pyramid13 and orders3–10 Curve VTK export, actual two-Tet partition
 interfaces, closed Tri3-BRep seam transport and ghost queries, complete
 catalogued high-order Surface/Volume VTK, directional constant-tensor
 box and shared-material grids, floating-point Pyramid options, CLI help/version
-and read-only MSH checking, plus atomic current-model opening and merging. It needs
+and read-only MSH checking, plus atomic current-model opening and merging,
+including one POS point import and an empty-file merge. It needs
 no external mesher or solver.
 
 Run the default suite from the repository root. The runner automatically uses
@@ -43,8 +44,10 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
-| Julia 1.12.7 | Ordinary `Pkg.test()`, automatic minimal compilation | 218 | 45.41 s |
-| Julia 1.13.1 | Ordinary `Pkg.test()`, automatic minimal compilation | 218 | 38.66 s |
+| Julia 1.12.7 | Ordinary `Pkg.test()`, automatic minimal compilation | 220 | 47.05 s |
+| Julia 1.13.1 | Ordinary `Pkg.test()`, automatic minimal compilation | 220 | 40.34 s |
+| Julia 1.12.7 | Preceding ordinary package invocation | 218 | 45.41 s |
+| Julia 1.13.1 | Preceding ordinary package invocation | 218 | 38.66 s |
 | Julia 1.12.7 | Preceding ordinary package invocation | 214 | 49.28 s |
 | Julia 1.13.1 | Preceding ordinary package invocation | 214 | 38.93 s |
 | Julia 1.12.7 | Preceding ordinary package invocation | 209 | 46.49 s |
@@ -68,11 +71,11 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 218-assertion package bodies took11.1/10.8 s onJulia1.12.7/1.13.1.
-Cold elapsed times include about30/25 s of precompilation.
+The current 220-assertion package bodies took11.7/11.1 s onJulia1.12.7/1.13.1.
+Cold elapsed times include about32/26 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. Logs and actual exit-zero receipts are
-`test/tmp/ordinary_default_218_{112,113}_20261011.*`. The same249 Source files
+`test/tmp/ordinary_default_220_{112,113}_20261011.*`. The same250 Source files
 remained frozen throughout both calls. Only two file-merge and two read-only
 CLI assertions were added; periodic Volume, tensor production, native and solver
 campaigns remain opt-in. The preceding214-check bodies took11.1/10.9 s and

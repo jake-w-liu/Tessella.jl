@@ -23,8 +23,9 @@ supported type-406 property records can accompany the geometry.
 This operation returns a mesh. It does not populate the Model/OCC registry,
 reconstruct analytic CAD Face/Curve parameter maps or provide general
 assembly/Boolean topology. A [mapped STEP occurrence producer](step_mapped_occurrences.md)
-supports one explicit representation root, rigid axis-placement targets and
-nested maps of supported source solids; other assembly transformations remain
+supports one explicit representation root, rigid axis-placement targets,
+[unit-scale Cartesian targets](step_cartesian_rigid_targets.md) and nested maps
+of supported source solids; other assembly transformations remain
 guarded. Trimmed and periodic
 NURBS topology remains a separate implementation track.
 
