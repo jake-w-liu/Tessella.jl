@@ -33,3 +33,8 @@ Model-based views use their own [CSV schema and VTK arrays](model_view_exports.m
 Format references: [Gmsh list-data tutorial](https://gmsh.info/doc/texinfo/gmsh.html#x3),
 [VTK legacy format](https://docs.vtk.org/en/latest/vtk_file_formats/vtk_legacy_file_format.html),
 [VTK cell types](https://github.com/Kitware/VTK/blob/master/Common/DataModel/vtkCellType.h).
+
+[Session time metadata](view_time.md) derives ordinary list-step counts and
+selects displayed physical times while retaining the actual data arrays.
+Imported TIME history survives updates; the lossless writer rejects mismatched
+TIME/value counts.

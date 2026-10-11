@@ -24,7 +24,34 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
-### Current Cartesian STEP, polygonal sheets and POS imports (2026-10-11)
+### Current direct STEP assemblies and view-time metadata (2026-10-11)
+
+The final ordinary suite passes **222/222 on both Julia1.12/1.13**, actual exit0
+on the same frozen252 Source files: **45.18 s/body11.4 s** onJulia1.12.7 and
+**38.74 s/body11.1 s** onJulia1.13.1. Receipts and exact Source map:
+`test/tmp/ordinary_default_222_{112,113}_20261011.*` and
+`test/tmp/ordinary_default_222_frozen_source_20261011.json`.
+
+[Direct STEP product usages](docs/step_relationship_assemblies.md) bind complete
+literal product/shape/placement graphs, actual rigid frames and distinct3D
+millimetre contexts. Separate occurrences retain actual identity and existing
+shell/separation/fill certificates. Final54/54 passesJulia1.13, actual0/44.03 s
+including loading, body7.82 s; non-millimetre conversion and nested usages remain open.
+
+[View-time metadata](docs/view_time.md) derives actual counts, wraps explicit
+step indices and finds nearest physical times. Updates retain cached display
+state and literal time history. A confirmed model-data kind-change bounds defect
+now resets the actual step prefix. Final35 opt-in+2default passesJulia1.12,
+actual0/1.01 s warm without generation. Sparse gaps remain bounded range storage.
+
+The [current handoff](HANDOFF.md#takeover-2026-10-11) preserves exact packets,
+failed fixture receipts and scoped public observations. This increment follows
+publishedMain`9dc9273`. Full P1–P6 remains unfinished. Approved isolated Source
+covers relationship SI unit transport and shared-Tri periodic hybrid components;
+list/model representation transitions are in read-only design. Native and
+solver campaigns remain opt-in; routine test bodies stay around11 seconds.
+
+### Preceding Cartesian STEP, polygonal sheets and POS imports (2026-10-11)
 
 The final ordinary suite passes **220/220 on both Julia1.12/1.13**, actual exit0
 on the same frozen250 Source files: **47.05 s/body11.7 s** onJulia1.12.7 and
@@ -53,10 +80,9 @@ Text/interpolation/high-order POS and broader physical-time field parity remain 
 
 Exact packets, historical failed receipts and qualification boundaries are in
 [the current handoff](HANDOFF.md#takeover-2026-10-11). This increment follows
-publishedMain`274dbac`. Full P1–P6 remains unfinished. Current isolated work
-covers direct product-usage STEP assemblies and actual view-time metadata,
-including a confirmed data-kind reset bounds defect. Expensive native/solver
-campaigns remain opt-in.
+publishedMain`274dbac` and was normally published as Main`9dc9273`. Its next
+product-usage assemblies and view-time/bounds changes are integrated above.
+Full P1–P6 remains unfinished; expensive native/solver campaigns remain opt-in.
 
 ### Preceding tensor API, periodic batches, session merge and CLI checks (2026-10-11)
 

@@ -12,9 +12,9 @@ P1–P6 tracks**, with ASCENT meshing capabilities prioritized.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 220 assertions on Julia 1.12.7 and 1.13.1. Ordinary
+suite now passes 222 assertions on Julia 1.12.7 and 1.13.1. Ordinary
 `Pkg.test()` automatically selects minimal compilation; test bodies took
-11.7 and 11.1 seconds. Cold package runs took 47.05 and 40.34 seconds including
+11.4 and 11.1 seconds. Cold package runs took 45.18 and 38.74 seconds including
 precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
@@ -40,8 +40,13 @@ independent STEP/IGES solids import as [classified mixed meshes](docs/cad_mesh_i
 [Mapped STEP occurrences](docs/step_mapped_occurrences.md) retain actual rigid
 placement and nested instance paths, including proper unit-scale
 [Cartesian targets](docs/step_cartesian_rigid_targets.md).
+[Direct product-usage assemblies](docs/step_relationship_assemblies.md) retain
+actual NAUO/CDSR/IDT placement paths, separate occurrence identities and rigid
+frames in millimetre contexts.
 [POS list importing](docs/session_pos_import.md) retains all24 plain linear
 record families, names and physical times through atomic open/merge.
+[View time metadata](docs/view_time.md) derives actual counts, selects displayed
+physical times and correctly resets model step bounds after data-kind changes.
 One translated copied Surface pair is supported per Region in separate
 [ordinary hybrid components](docs/periodic_hybrid_boundaries.md), and a strictly
 interior [embedded Point](docs/embedded_hybrid_points.md) or one connected

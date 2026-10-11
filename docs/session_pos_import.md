@@ -27,8 +27,10 @@ APIs keep implicit default times. POS, CSV and VTK writing preserve imported
 times, including a single nondefault time and explicit times on empty views.
 The POS serializer retains its previous output for an ordinary implicit
 single-step time of zero. Existing PostView fields still select integer step
-indices; physical-time field selection and broader TimeStep/Time API parity
-remain separate work.
+indices. [Session time metadata](view_time.md) now derives actual step counts
+and resolves displayed TimeStep/Time selection. A tiny native Line2 field
+control keeps the same first-step output despite changing display selection;
+this observation does not establish broader field-context parity.
 
 Qualification is a bounded file-only reader with no mesh generation. It checks
 real session open/merge behavior, list values/detachment, names, time exports,

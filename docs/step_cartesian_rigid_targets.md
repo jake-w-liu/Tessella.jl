@@ -28,7 +28,9 @@ scale2 observation shows that the pinned importer leaves the box unit-sized;
 it supplies no general scaling result. Nonunit scales remain explicitly guarded
 in this bounded implementation. The earlier malformed six-field observation is
 not a successful transform witness. Multiple product roots, general assembly
-relationships and other previously guarded contexts are unchanged.
+relationships remain outside this mapped-target admission; a separate
+[direct product-usage producer](step_relationship_assemblies.md) now admits
+complete rigid NAUO/CDSR/IDT paths with actual millimetre contexts.
 
 Five opaque Gmsh4.15.2 import-only controls cover default axes, a quarter-turn,
 inferred axis3, a shifted mapping origin, and an arbitrary rigid frame. Each

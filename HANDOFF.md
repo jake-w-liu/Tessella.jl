@@ -12,7 +12,63 @@ small real fixtures. Full native-oracle sweeps, source/AST audits, memory stress
 benchmarks, the 22 HFSS cases, aggregate validation, and external ASCENT solves
 are opt-in campaigns. See [test/README.md](test/README.md).
 
-### Current Cartesian STEP, polygonal sheets and POS imports
+### Current direct STEP assemblies and view-time metadata
+
+The final ordinary suite passes **222/222 on BOTH** supported runtimes, actual
+exit0 on the same frozen252 Source files: Julia1.12.7 **45.18 s/body11.4 s**;
+Julia1.13.1 **38.74 s/body11.1 s**. Receipts:
+`test/tmp/ordinary_default_222_{112,113}_20261011.*`; exact Source map:
+`test/tmp/ordinary_default_222_frozen_source_20261011.json`, aggregateSHA
+`74a6357c3e4ac1bd1c68818a8aa73d4bd3a85ea7a37820a83b5a11ea26e03b10`.
+Only two cheap view metadata assertions enter the default; native and new
+Volume-generation workloads remain opt-in.
+
+Reviewed packets and actual qualifications:
+
+- `C:/tmp/tessella_step_relationship_assembly_20261011/selected_relationship_assembly_packet.json`:
+  two Source paths, opt-in54, two literal STEP fixtures and
+  [direct assembly scope](docs/step_relationship_assemblies.md). Complete
+  SDR/PDS/PD/NAUO/CDSR/RRWT/IDT reference inventories bind actual child/parent
+  frames and distinct3D contexts with the same actual millimetre/radian/
+  steradian declarations. Source definitions are not emitted as extra solids.
+  Two literal imports, one actual fill, exact MSH4 UID/owner/connectivity and
+  malformed graph/file guards pass54/54, Julia1.13 actual0/44.03 s including
+  loading, body7.82 s. Closed-shell, disjoint bounds and positive-volume
+  certificates remain. A tiny CENTI observation proved real scale conversion
+  is required; this first qualified Source guards unsupported units.
+- `C:/tmp/tessella_takeover_view_time_20261011/selected_view_time_packet.json`:
+  three Source paths, opt-in35+default2 and [time scope](docs/view_time.md).
+  NbTimeStep derives from actual list/model data; setters are ignored. Explicit
+  TimeStep truncates and wraps boundary indices; nonnegative Time finds the
+  nearest physical time with first-index ties. Data updates retain display
+  state. Imported TIME history survives shrink/growth, while the lossless
+  writer retains its mismatch certificate. Sparse model gaps stay ranges.
+  A confirmed model-data kind-change defect retained old legal step bounds;
+  resetting actual ranges now fixes it. Final37/37, Julia1.12 actual0/1.01 s
+  warm, without generation. The failed first fixture used the SDK return shape
+  instead of this API's existing public query tuple; corrected expectations
+  leave reviewed Source unchanged. Its actual1 receipt remains archived.
+
+Independent Source review found no confirmed defects in the declared scopes.
+The Root tiny PostView Line2 control produces identical2Line/3node backgrounds
+for displayed steps0/1; it supports retaining existing field dispatch in this
+context and supplies no broad field-parity claim. Integration manifests:
+`test/tmp/integrated_relationship_assembly_paths_20261011.json` and
+`test/tmp/integrated_view_time_paths_20261011.json`. This increment follows
+publishedMain`9dc9273`; normal Git publication and exact remote SHA checking
+record its release. Unrelated untracked files remain untouched.
+
+Next isolated Source is actual relationship SI length transport
+(`concise_tests`) and shared-Tri hybrid components with separate exterior
+translated periodic pairs (`implementation_audit`). Both have bounded public
+native-successful controls and approved ownership proposals; their candidate
+Source is outside this frozen252-file gate. `devin_reconcile` is investigating
+actual list/model view representation transitions without Source changes.
+The tiny native Quad-sheet return produced no Tet core or typed interior
+carrier, so it is not a successful Quad-production witness. Retain its guard.
+Continue the full genuine backlog below; P1–P6 and the active goal remain open.
+
+### Preceding Cartesian STEP, polygonal sheets and POS imports
 
 The final ordinary suite passes **220/220 on BOTH** supported runtimes, actual
 exit0 on the same frozen250 Source files: Julia1.12.7 **47.05 s/body11.7 s**;
@@ -58,17 +114,12 @@ Reviewed selected packets and actual bounded qualifications:
 
 Root integration manifests are
 `test/tmp/integrated_cartesian_pos_paths_20261011.json` and
-`test/tmp/integrated_polygon_sheet_paths_20261011.json`. This increment follows
-publishedMain`274dbac`; normal Git publication and exact remote SHA checking
-record its release. Unrelated untracked files and failed receipts remain.
-
-Next isolated work is literal direct product-usage STEP assemblies
-(`concise_tests`) and actual view-time metadata/selection with the confirmed
-model-data kind-reset bounds fix (`devin_reconcile`). Assembly qualification
-now guards non-millimetre units after a tiny public CENTI control proved raw
-coordinates require conversion. The hybrid agent is designing the next genuine
-constraint context. None of these prepared packets is qualified by the220 suite.
-Continue the full backlog below; P1–P6 remain open and the goal stays active.
+`test/tmp/integrated_polygon_sheet_paths_20261011.json`. This preceding increment
+was normally published as Main`9dc9273`, with its exact remote SHA verified.
+Unrelated untracked files and failed receipts remain. The next product-usage
+assemblies and view-time/bounds changes are integrated in the current ledger
+above; their qualifications are separate from the preceding220 Source.
+Continue the genuine backlog; P1–P6 remains open.
 
 ### Preceding tensor API, periodic batches, session merge and CLI checking
 
@@ -621,8 +672,9 @@ backlog rather than the older expensive verification queue:
 2. Complete general CAD assembly and trimmed/periodic NURBS topology. Recognized
    explicit independent STEP/IGES mesh roots are implemented. One explicit STEP
    representation root with nested rigid mapped occurrences and proper unit-scale
-   Cartesian targets is implemented; direct product-usage assemblies are in
-   isolated qualification. Other occurrence transformations, unit conversion,
+   Cartesian targets is implemented; complete direct single-root product-usage
+   assemblies now bind actual rigid frames in millimetre contexts. SI unit
+   transport is in isolated implementation. Other occurrence transformations,
    analytic Face reconstruction and general
    assembly remain open.
    Planar STEP/IGES Face holes, including143 boundaries, are implemented;
@@ -664,7 +716,8 @@ backlog rather than the older expensive verification queue:
    Atomic session GEO/MSH merging, views-only POS merging and read-only CLI
    MSH checking are implemented. All24 plain linear POS list families retain
    names and physical times. Actual TimeStep/Time metadata and the confirmed
-   model-data kind-reset extent fix are in isolated implementation. Text,
+   model-data kind-reset extent fix are implemented. Active list/model view
+   representation transitions are in read-only design. Text,
    interpolation/high-order POS admission and additional formats remain open.
 10. Close native matching chronology and requirement-level differential parity.
     Large P6/HFSS/ASCENT campaigns remain opt-in verification, not routine tests.

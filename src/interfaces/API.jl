@@ -9092,6 +9092,7 @@ _SessionView(name::AbstractString)=_SessionView(
 
 const SESSION_VIEWS = Dict{Int,_SessionView}()
 const VIEW_TAG_MAX = Ref(0)
+include("APIViewTime.jl")
 
 function _fresh_view_tag()
     while true
@@ -9162,11 +9163,14 @@ function _view_add_list_data(tag,data_type,num_ele,data)
             values[i]=_mesh_query_coordinate(value,caller,"data entry")
         end
         type_key=String(data_type)
+        time_plan=_view_list_time_plan(view,type_key,Int(count),values)
         if !(type_key in view.list_types)
             push!(view.list_types,type_key)
         end
         view.list_counts[type_key]=Int(count)
         view.list_data[type_key]=values
+        view.list_time=time_plan.time
+        time_plan.steps===nothing || (view.numbers["NbTimeStep"]=Float64(time_plan.steps))
         return nothing
     end
 end
@@ -9289,7 +9293,12 @@ function _view_set_number(tag,name,value)
         "$caller: name must be a string"))
     numeric=_mesh_query_coordinate(value,caller,"value")
     return lock(STATE_LOCK) do
-        _session_view(tag,caller).numbers[String(name)]=numeric
+        view=_session_view(tag,caller)
+        if name in ("TimeStep","Time","NbTimeStep")
+            _view_set_time_option!(view,String(name),numeric,caller)
+        else
+            view.numbers[String(name)]=numeric
+        end
         return nothing
     end
 end
@@ -9299,7 +9308,9 @@ function _view_get_number(tag,name)
     name isa AbstractString || throw(ArgumentError(
         "$caller: name must be a string"))
     return lock(STATE_LOCK) do
-        get(_session_view(tag,caller).numbers,String(name),0.0)
+        view=_session_view(tag,caller)
+        name=="NbTimeStep" ? Float64(_view_data_steps(view)) :
+            get(view.numbers,String(name),0.0)
     end
 end
 

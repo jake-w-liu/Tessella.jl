@@ -23,16 +23,17 @@ function _native_view_model_steps(view,slot)
     return count
 end
 
-# A type change rebuilds all allocated steps with the new model and default
-# times. The allocated length survives; populated tables are staged afresh.
+# A type change starts a new sequence with the new model and default gap times.
+# Same-kind updates retain the actual allocated ranges and populated tables.
 function _native_view_storage(view,kind::String,slot,step::Int,components::Int)
     step>=0 || throw(ArgumentError("model view: step must be non-negative"))
+    step<typemax(Int) || throw(ArgumentError("model view: step count exceeds the platform Int range"))
     reset=view.model_kind!==nothing && view.model_kind!=kind
     ranges=copy(view.model_step_ranges)
     data=reset ? empty(view.model_data) : copy(view.model_data)
     contexts=reset ? empty(view.model_contexts) : copy(view.model_contexts)
     if reset && !isempty(ranges)
-        ranges=[_NativeViewStepRange(0,last(ranges).last,slot,components)]
+        empty!(ranges)
     end
     extent=isempty(ranges) ? 0 : Base.checked_add(last(ranges).last,1)
     if step>=extent

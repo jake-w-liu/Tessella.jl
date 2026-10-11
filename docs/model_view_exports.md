@@ -87,3 +87,8 @@ signed Int64. Boolean, negative, nonintegral and overflowing tags are rejected
 before mutation. This follows Tessella's owned UID storage; huge model-view tags
 are not a pinned native-parity claim. Their public native observation faulted,
 while the bounded Tessella regression verifies data and exact export identities.
+
+[Session time metadata](view_time.md) reads actual sparse allocated steps and
+physical times without expanding gaps. A data-kind change starts a new step
+prefix; old-kind steps are no longer admitted. Display selection retains its
+previous cached value until explicitly changed.

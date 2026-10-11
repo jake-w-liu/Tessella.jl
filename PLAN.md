@@ -8,9 +8,9 @@ remain **in progress**.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 220 assertions on Julia 1.12.7 and 1.13.1. Ordinary
+suite now passes 222 assertions on Julia 1.12.7 and 1.13.1. Ordinary
 `Pkg.test()` automatically selects minimal compilation; test bodies took
-11.7 and 11.1 seconds. Cold package runs took 47.05 and 40.34 seconds including
+11.4 and 11.1 seconds. Cold package runs took 45.18 and 38.74 seconds including
 precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
@@ -284,7 +284,10 @@ supported planar Faces can retain disjoint inner wires and triangulate their
 holes. [Mapped STEP occurrences](docs/step_mapped_occurrences.md) additionally
 consume one explicit representation root and nested rigid axis-placement maps,
 including proper [unit-scale Cartesian targets](docs/step_cartesian_rigid_targets.md).
-Other CAD assembly transformations and analytic Face maps remain open. See
+[Direct product-usage assemblies](docs/step_relationship_assemblies.md) now bind
+complete single-root NAUO/CDSR/IDT graphs and actual rigid frames in millimetre
+contexts. Nested usages, unit conversion, other assembly transformations and
+analytic Face maps remain open. See
 [mesh import scope](docs/cad_mesh_imports.md). The entity kernel records native
 boxes, cylinders, spheres, cones, toruses, Boolean volumes (operation-time
 operand snapshots for meshing plus a materialized result boundary for
@@ -1119,9 +1122,11 @@ linked scopes. Translated periodic pairs in separate Region components, the
 explicit tensor API, atomic session merging and read-only CLI mesh checks are
 also implemented. Proper unit-scale Cartesian STEP targets, endpoint-only
 3–6-vertex retained planar sheets and atomic list-POS importing are implemented.
-Current isolated work covers direct product-usage STEP assemblies and actual
-view-time metadata/selection. Broader sheet/metric/native algorithm contexts
-remain genuine Source work.
+Direct product-usage STEP assemblies now retain actual rigid placement graphs
+in millimetre contexts. Actual view-time metadata/selection and model-data kind
+reset bounds are implemented. Current isolated work extends SI unit transport,
+shared-interface periodic components and list/model view transitions. Broader
+sheet/metric/native algorithm contexts remain genuine Source work.
 
 Use small functional regressions for routine verification, then normally commit
 and push verified implementations to `main`. Native-oracle sweeps, resource and

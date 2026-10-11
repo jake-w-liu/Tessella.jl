@@ -345,6 +345,8 @@ function import_step(path::AbstractString; fill::Bool=true)
     occursin("ISO-10303-21",source) || throw(ArgumentError(
         "import_step: $path is not an ISO-10303-21 STEP file"))
     entities=parse_step_entities(source)
+    relationships=_step_relationship_import(entities,fill)
+    relationships===nothing || return relationships
     occurrences=_step_occurrence_import(entities,fill)
     occurrences===nothing || return occurrences
     roots=_step_solid_roots(entities)
@@ -412,6 +414,7 @@ end
 
 include("BRepAssembly.jl")
 include("BRepStepOccurrences.jl")
+include("BRepStepRelationships.jl")
 include("BRepPlanarFaces.jl")
 include("BRepPlanePcurves.jl")
 
