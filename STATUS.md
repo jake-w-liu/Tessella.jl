@@ -70,11 +70,31 @@ ordinary default suite is **234/234 on both Julia1.12.7 and1.13.1**, actual
 exit0. See `docs/step_relationship_assemblies.md` and
 `test/geometry/brep_step_relationship_mixed_functional_test.jl`.
 
+### STEP unit conversion beyond relationship SI (2026-10-11)
+
+Devin completed checklist CAD03. `_step_unit_declaration` in
+`BRepStepRelationships.jl` now resolves every declared unit: SI prefixes
+(length `10^(e+3)` mm, angular `10^e` radians/steradians) and recursive
+`CONVERSION_BASED_UNIT` chains whose typed measure, enclosing category part
+and chained bases must agree. `_step_member_unit_factors` maps every
+unit-bearing shape representation to the solids it wraps — incompatible
+factors on one solid reject as ambiguous — so ordinary roots, multi-root
+assembly records and the mapped-occurrence producer convert declared contexts
+once to millimetres while representations without units keep raw rows.
+Uncertainty measures alias any equivalent unit entity by resolved factor.
+Focused checks pass43/43 on twelve real fixtures (metre/inch/yard ordinary,
+prefixed angular, uncertainty alias, mapped metre/inch, conversion/SI
+relationship equivalence and five malformed/conflicting rejections); the
+direct54, SI52, nested63, mixed48, mapped31, cartesian43 and assembly96
+regressions pass; the ordinary default suite is **237/237 on both Julia1.12.7
+and1.13.1**, actual exit0. See `docs/step_relationship_si_units.md` and
+`test/geometry/brep_step_units_functional_test.jl`.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The
-[Devin checklist](DEVIN_HANDOFF.md) records27 known work areas (CAD01, CAD02
-and PER01 done,24
+[Devin checklist](DEVIN_HANDOFF.md) records27 known work areas (CAD01, CAD02,
+CAD03 and PER01 done,23
 open), precise
 completion requirements, prepared nested STEP/rigid periodic designs and
 portable evidence. **Full P1–P6 parity remains unfinished.** New implementation

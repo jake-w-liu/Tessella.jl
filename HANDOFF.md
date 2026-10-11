@@ -102,11 +102,43 @@ suite is **234/234 on both** Julia1.12.7 and1.13.1, actual exit0, with
 `brep_mixed_relationship_smoke.jl` added. Conversion-based units remain
 CAD03.
 
+### STEP unit conversion beyond relationship SI verified (2026-10-11)
+
+Devin completed CAD03. `BRepStepRelationships.jl` gained
+`_step_unit_declaration`, a shared resolver turning each declared unit entity
+into its dimension category and absolute millimetre factor: SI prefixes
+(length `10^(e+3)`, angular `10^e` for RADIAN/STERADIAN) and recursive
+`CONVERSION_BASED_UNIT` chains whose typed `*_MEASURE_WITH_UNIT` value
+multiplies a category-agreeing base unit (depth-capped, cycle-safe, finite
+positive factors only). `_step_member_unit_factors` then attributes every
+unit-bearing shape representation's length factor to the member solids it
+wraps — a solid shared by incompatible factors rejects as ambiguous — so the
+ordinary single/multi-root and primitive paths plus the standalone
+mapped-occurrence producer (source rows and transform origins alike) convert
+declared contexts exactly once; representations without unit declarations keep
+raw coordinates. Uncertainty measures now alias any unit entity whose resolved
+length factor equals the context's instead of requiring entity identity, and
+angular context compatibility compares resolved factors rather than declared
+name/prefix pairs.
+
+Focused `test/geometry/brep_step_units_functional_test.jl` passes43/43 across
+twelve real fixtures: metre/inch/nested-yard ordinary roots, a prefixed
+angular context, a factor-equal uncertainty alias, mapped-metre/inch
+occurrences, the factor-preserving `brep_relationship_metres_conversion.step`
+reproducing the metres result bitwise (plus its 1e9-volume fill and MSH4
+round trip), and atomic rejections for an unsupported typed measure,
+category-mismatched base, negative factor, conversion cycle and a
+conflicting-member context. Direct54, SI52, nested63, mixed48, mapped31,
+cartesian43 and assembly96 regressions are unchanged; the ordinary default
+suite is **237/237 on both** Julia1.12.7 and1.13.1, actual exit0, with
+`brep_unit_conversion_smoke.jl` added. Derived/unsupported unit categories
+outside the three declared dimensions remain explicit blockers.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop
 new implementation. [DEVIN_HANDOFF.md](DEVIN_HANDOFF.md) is the current complete
-known checklist, with27 required work areas (CAD01, CAD02 and PER01 now done,24 open), completion
+known checklist, with27 required work areas (CAD01–CAD03 and PER01 now done,23 open), completion
 criteria and portable
 evidence. Tessella's full P1–P6 goal is unfinished. Continue that checklist from
 current `origin/main`; older dated sections and temporary candidates below are

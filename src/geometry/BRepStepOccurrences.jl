@@ -125,8 +125,15 @@ function _step_occurrence_import(entities,fill_solids)
         "import_step: mapped occurrences have an unsupported root representation"))
     length(root.args)==3 || throw(ArgumentError("import_step: root representation is truncated"))
     context=root.args[3]
-    _deref_entity(entities,context)!==nothing || throw(ArgumentError(
+    context_entity=_deref_entity(entities,context)
+    context_entity!==nothing || throw(ArgumentError(
         "import_step: mapped occurrence representation context is missing"))
+    # A unit-bearing shared representation context declares the actual file
+    # units; every source row and transform origin converts by the same
+    # length factor. Contexts without unit declarations keep raw rows.
+    unit_factor=haskey(_step_relationship_parts(context_entity),
+        "GLOBAL_UNIT_ASSIGNED_CONTEXT") ?
+        _step_relationship_context(entities,context)[3]["LENGTH_UNIT"].factor : 1.0
     records=NamedTuple[];source_surfaces=Dict{Int,Mesh}();active=Set{Int}();visited=Set{Int}()
     counts=[0,0]
     function expand(representation,transform,path,depth)
@@ -167,7 +174,8 @@ function _step_occurrence_import(entities,fill_solids)
                 rotation,translation=transform
                 coordinates=Matrix{Float64}(undef,size(surface.coords))
                 for column in axes(coordinates,2),i in 1:3
-                    coordinates[i,column]=translation[i]+sum(rotation[i][j]*surface.coords[j,column] for j in 1:3)
+                    coordinates[i,column]=unit_factor*(translation[i]+
+                        sum(rotation[i][j]*surface.coords[j,column] for j in 1:3))
                 end
                 all(isfinite,coordinates) || throw(ArgumentError("import_step: mapped occurrence coordinates are nonfinite"))
                 push!(records,(name=path*"/$(item.kind) #$(item.id)",surface=Mesh(coordinates;tris=surface.tris)))

@@ -30,6 +30,76 @@ function _step_relationship_entity(entities,reference,kind)
     return entity
 end
 
+# One unit entity resolves to its dimension category and absolute factor —
+# 10^(e+3) mm per SI length prefix, 10^e for angular SI prefixes, and a
+# CONVERSION_BASED_UNIT measure recursively times its base unit's factor.
+const _STEP_UNIT_CATEGORIES=("LENGTH_UNIT","PLANE_ANGLE_UNIT","SOLID_ANGLE_UNIT")
+const _STEP_UNIT_MEASURES=Dict(
+    "LENGTH_MEASURE"=>"LENGTH_UNIT","PLANE_ANGLE_MEASURE"=>"PLANE_ANGLE_UNIT",
+    "SOLID_ANGLE_MEASURE"=>"SOLID_ANGLE_UNIT")
+const _STEP_UNIT_MEASURE_WITH_UNITS=Dict(
+    "LENGTH_MEASURE_WITH_UNIT"=>"LENGTH_UNIT",
+    "PLANE_ANGLE_MEASURE_WITH_UNIT"=>"PLANE_ANGLE_UNIT",
+    "SOLID_ANGLE_MEASURE_WITH_UNIT"=>"SOLID_ANGLE_UNIT")
+
+function _step_unit_declaration(entities,unit;depth::Int=8)
+    depth>0 || throw(ArgumentError("import_step: assembly unit conversion is too deep"))
+    unit_parts=_step_relationship_parts(unit)
+    part_kinds=Set(keys(unit_parts))
+    if haskey(unit_parts,"CONVERSION_BASED_UNIT")
+        # A conversion-based unit complex still carries its dimensional
+        # category part; the measure's typed value must agree with it.
+        category=intersect(part_kinds,Set(_STEP_UNIT_CATEGORIES))
+        length(category)==1 &&
+            part_kinds==union(category,Set(("NAMED_UNIT","CONVERSION_BASED_UNIT"))) ||
+            throw(ArgumentError("import_step: assembly supports explicit SI or conversion-based unit contexts only"))
+        kind=only(category)
+        isempty(unit_parts[kind].args) && unit_parts["NAMED_UNIT"].args==Any[nothing] ||
+            throw(ArgumentError("import_step: assembly unit declaration is malformed"))
+        args=unit_parts["CONVERSION_BASED_UNIT"].args
+        length(args)==2 && args[1] isa AbstractString || throw(ArgumentError(
+            "import_step: assembly conversion unit is truncated"))
+        measure=_deref_entity(entities,args[2])
+        measure!==nothing || throw(ArgumentError("import_step: assembly unit measure is missing"))
+        (haskey(_STEP_UNIT_MEASURE_WITH_UNITS,measure.kind) ||
+            measure.kind=="MEASURE_WITH_UNIT") && length(measure.args)==2 ||
+            throw(ArgumentError("import_step: assembly conversion measure is truncated"))
+        value=measure.args[1]
+        value isa StepEntity && length(value.args)==1 && value.args[1] isa Real &&
+            !(value.args[1] isa Bool) && isfinite(value.args[1]) && value.args[1]>0 ||
+            throw(ArgumentError("import_step: assembly conversion factor is malformed"))
+        measure_kind=get(_STEP_UNIT_MEASURES,value.kind,nothing)
+        measure_kind==kind || throw(ArgumentError(
+            "import_step: assembly conversion measure and unit categories disagree"))
+        haskey(_STEP_UNIT_MEASURE_WITH_UNITS,measure.kind) &&
+            _STEP_UNIT_MEASURE_WITH_UNITS[measure.kind]!=kind && throw(ArgumentError(
+            "import_step: assembly conversion measure and unit categories disagree"))
+        base=_deref_entity(entities,measure.args[2])
+        base!==nothing || throw(ArgumentError("import_step: assembly conversion base unit is missing"))
+        declaration=_step_unit_declaration(entities,base;depth=depth-1)
+        declaration.kind==kind || throw(ArgumentError(
+            "import_step: assembly conversion measure and base unit categories disagree"))
+        factor=value.args[1]*declaration.factor
+        isfinite(factor) && factor>0 || throw(ArgumentError(
+            "import_step: invalid assembly conversion factor"))
+        return (kind=kind,factor=factor,name=args[1],prefix=nothing)
+    end
+    category=intersect(part_kinds,Set(_STEP_UNIT_CATEGORIES))
+    length(category)==1 && part_kinds==union(category,Set(("NAMED_UNIT","SI_UNIT"))) ||
+        throw(ArgumentError("import_step: assembly supports explicit SI or conversion-based unit contexts only"))
+    kind=only(category)
+    isempty(unit_parts[kind].args) && unit_parts["NAMED_UNIT"].args==Any[nothing] ||
+        throw(ArgumentError("import_step: assembly unit declaration is malformed"))
+    si=unit_parts["SI_UNIT"].args
+    expected=kind=="LENGTH_UNIT" ? ".METRE." : kind=="PLANE_ANGLE_UNIT" ? ".RADIAN." : ".STERADIAN."
+    length(si)==2 && si[2]==expected || throw(ArgumentError("import_step: invalid assembly SI unit"))
+    exponent=si[1]===nothing ? 0 : get(_STEP_RELATIONSHIP_SI_EXPONENTS,si[1],nothing)
+    exponent!==nothing || throw(ArgumentError("import_step: unsupported STEP SI prefix"))
+    factor=kind=="LENGTH_UNIT" ? 10.0^(exponent+3) : 10.0^exponent
+    isfinite(factor) && factor>0 || throw(ArgumentError("import_step: invalid assembly SI factor"))
+    return (kind=kind,factor=factor,name=si[2],prefix=si[1])
+end
+
 function _step_relationship_context(entities,reference)
     context=_deref_entity(entities,reference)
     context!==nothing || throw(ArgumentError("import_step: assembly context is missing"))
@@ -48,34 +118,18 @@ function _step_relationship_context(entities,reference)
     assigned=parts["GLOBAL_UNIT_ASSIGNED_CONTEXT"].args
     length(assigned)==1 && assigned[1] isa AbstractVector && length(assigned[1])==3 &&
         allunique(assigned[1]) || throw(ArgumentError("import_step: assembly unit context is truncated"))
-    kinds=Set{String}();units=Set{Int}();length_unit=0
+    kinds=Set{String}();units=Set{Int}();length_factor=0.0
     witnesses=Dict{String,NamedTuple}()
     for reference in assigned[1]
         unit=_deref_entity(entities,reference)
         unit!==nothing || throw(ArgumentError("import_step: assembly unit reference is missing"))
-        unit_parts=_step_relationship_parts(unit)
-        category=intersect(Set(keys(unit_parts)),Set(("LENGTH_UNIT","PLANE_ANGLE_UNIT","SOLID_ANGLE_UNIT")))
-        length(category)==1 && Set(keys(unit_parts))==union(category,Set(("NAMED_UNIT","SI_UNIT"))) ||
-            throw(ArgumentError("import_step: assembly supports explicit SI unit contexts only"))
-        kind=only(category)
-        isempty(unit_parts[kind].args) && unit_parts["NAMED_UNIT"].args==Any[nothing] ||
-            throw(ArgumentError("import_step: assembly unit declaration is malformed"))
-        si=unit_parts["SI_UNIT"].args
-        expected=kind=="LENGTH_UNIT" ? ".METRE." : kind=="PLANE_ANGLE_UNIT" ? ".RADIAN." : ".STERADIAN."
-        length(si)==2 && si[2]==expected || throw(ArgumentError("import_step: invalid assembly SI unit"))
-        factor=1.0
-        if kind=="LENGTH_UNIT"
-            exponent=si[1]===nothing ? 0 : get(_STEP_RELATIONSHIP_SI_EXPONENTS,si[1],nothing)
-            exponent!==nothing || throw(ArgumentError("import_step: unsupported STEP SI length prefix"))
-            factor=10.0^(exponent+3)
-        else
-            si[1]===nothing || throw(ArgumentError("import_step: prefixed angular units are unsupported"))
-        end
-        isfinite(factor) && factor>0 || throw(ArgumentError("import_step: invalid assembly SI length factor"))
+        declaration=_step_unit_declaration(entities,unit)
+        kind=declaration.kind
         kind in kinds && throw(ArgumentError("import_step: duplicate assembly unit category"))
         push!(kinds,kind);push!(units,unit.id)
-        witnesses[kind]=(id=unit.id,prefix=si[1],name=si[2],factor=factor)
-        kind=="LENGTH_UNIT" && (length_unit=unit.id)
+        witnesses[kind]=(id=unit.id,prefix=declaration.prefix,
+            name=declaration.name,factor=declaration.factor)
+        kind=="LENGTH_UNIT" && (length_factor=declaration.factor)
     end
     if haskey(parts,"GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT")
         uncertainty=parts["GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT"].args
@@ -86,13 +140,43 @@ function _step_relationship_context(entities,reference)
             length(measure.args)==4 && all(value->value isa AbstractString,measure.args[3:4]) ||
                 throw(ArgumentError("import_step: assembly uncertainty declaration is truncated"))
             value=measure.args[1];unit=_deref_entity(entities,measure.args[2])
+            # An uncertainty unit may alias any equivalent declaration; its
+            # resolved factor — not its entity identity — must match the
+            # context length unit. Malformed units fail with their own error.
+            alias=unit===nothing ? nothing : _step_unit_declaration(entities,unit)
             value isa StepEntity && value.kind=="LENGTH_MEASURE" && length(value.args)==1 &&
                 value.args[1] isa Real && !(value.args[1] isa Bool) && isfinite(value.args[1]) &&
-                value.args[1]>=0 && unit!==nothing && unit.id==length_unit ||
+                value.args[1]>=0 && alias!==nothing && alias.kind=="LENGTH_UNIT" &&
+                alias.factor==length_factor ||
                 throw(ArgumentError("import_step: invalid assembly uncertainty measure"))
         end
     end
     return context.id,units,witnesses
+end
+
+# Every unit-bearing shape representation contributes its length factor to the
+# member solids it wraps. A solid shared by incompatible unit contexts is
+# ambiguous; unrepresented solids keep raw coordinates.
+function _step_member_unit_factors(entities)
+    factors=Dict{Int,Float64}()
+    for entity in values(entities)
+        entity.kind in _STEP_OCCURRENCE_REPRESENTATIONS || continue
+        length(entity.args)>=3 && entity.args[2] isa AbstractVector || continue
+        context=_deref_entity(entities,entity.args[end])
+        context===nothing && continue
+        haskey(_step_relationship_parts(context),"GLOBAL_UNIT_ASSIGNED_CONTEXT") || continue
+        _,_,witnesses=_step_relationship_context(entities,entity.args[end])
+        factor=witnesses["LENGTH_UNIT"].factor
+        for reference in entity.args[2]
+            item=_deref_entity(entities,reference)
+            item===nothing && continue
+            previous=get(factors,item.id,nothing)
+            previous===nothing || previous==factor || throw(ArgumentError(
+                "import_step: solid #$(item.id) is declared in incompatible unit contexts"))
+            factors[item.id]=factor
+        end
+    end
+    return factors
 end
 
 function _step_relationship_transform(entities,source,target,child_units,parent_units)
@@ -345,10 +429,9 @@ function _step_relationship_import(entities,fill_solids)
             relationship[4]==(:ref,parent_info.representation.id) ||
             throw(ArgumentError("import_step: relationship direction disagrees with parent/child usage"))
         info.context!=parent_info.context && all(
-            info.unit_witnesses[kind].name==parent_info.unit_witnesses[kind].name &&
-            info.unit_witnesses[kind].prefix==parent_info.unit_witnesses[kind].prefix
+            info.unit_witnesses[kind].factor==parent_info.unit_witnesses[kind].factor
             for kind in ("PLANE_ANGLE_UNIT","SOLID_ANGLE_UNIT")) ||
-            throw(ArgumentError("import_step: assembly needs distinct compatible three-dimensional SI contexts"))
+            throw(ArgumentError("import_step: assembly needs distinct compatible three-dimensional unit contexts"))
         transform=_step_relationship_entity(entities,transformed[1],"ITEM_DEFINED_TRANSFORMATION")
         length(transform.args)==4 && transform.args[1] isa AbstractString &&
             (transform.args[2]===nothing || transform.args[2] isa AbstractString) ||

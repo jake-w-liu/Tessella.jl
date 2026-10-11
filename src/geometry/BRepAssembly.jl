@@ -157,9 +157,11 @@ function _step_assembly_records(roots,entities)
         endswith(ent.kind,"SOLID") && !(ent.kind in _STEP_BREP_SOLID_KINDS) &&
             throw(ArgumentError("import_step: unsupported solid root #$(ent.id) $(ent.kind)"))
     end
+    factors=_step_member_unit_factors(entities)
     return [(name="STEP #$(ent.id) $(ent.kind)"*
                  (!isempty(ent.args) && ent.args[1] isa String && !isempty(ent.args[1]) ? " "*ent.args[1] : ""),
-             surface=_step_root_surface(ent,entities)) for ent in roots]
+             surface=_step_unit_scaled(_step_root_surface(ent,entities),
+                 get(factors,ent.id,1.0))) for ent in roots]
 end
 
 function _iges_primitive_surface(rec)

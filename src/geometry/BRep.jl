@@ -336,12 +336,16 @@ Explicit rigid mapped occurrences through one shape-definition root are supporte
 see `docs/step_mapped_occurrences.md` for placement and assembly restrictions.
 Nested `NEXT_ASSEMBLY_USAGE_OCCURRENCE` product graphs are expanded along every
 root-to-leaf path of an acyclic product-definition forest; each edge binds its
-actual parent/child representations, frames and SI unit contexts, physical rigid
-transforms compose in path order, leaf geometry scales once by its own declared
-factor, and separate occurrence identities are emitted per path. Every
+actual parent/child representations, frames and declared unit contexts, physical
+rigid transforms compose in path order, leaf geometry scales once by its own
+declared factor, and separate occurrence identities are emitted per path. Every
 definition — root, intermediate or leaf — may also place its own closed solids
-and `MAPPED_ITEM` occurrences; mapped sources carry their own declared SI
+and `MAPPED_ITEM` occurrences; mapped sources carry their own declared unit
 context and expand transitively under the same coordinate-change law.
+Ordinary roots, assembly records and the mapped-occurrence producer convert
+declared SI and `CONVERSION_BASED_UNIT` length units to millimetres; supported
+SI prefixes also qualify angular units, and uncertainty measures alias any
+equivalent unit declaration by resolved factor.
 This mesh import does not reconstruct analytic CAD Face/Curve parametrization.
 Nonplanar or nonlinear
 face geometry, open shells, mixed point-cloud topology, and files without a
@@ -365,7 +369,9 @@ function import_step(path::AbstractString; fill::Bool=true)
     if !isempty(breps)
         length(breps)>1 && throw(ArgumentError(
             "import_step: multiple recognized solids are not supported in one import"))
-        return _step_brep_solid(only(breps),entities,fill)
+        factors=_step_member_unit_factors(entities)
+        return _step_brep_solid(only(breps),entities,fill;
+            factor=get(factors,only(breps).id,1.0))
     end
     points=_step_points(entities)
     primitive_count=count(ent->ent.kind in ("SPHERE","RIGHT_CIRCULAR_CYLINDER",
@@ -373,27 +379,36 @@ function import_step(path::AbstractString; fill::Bool=true)
                           values(entities))
     primitive_count<=1 || throw(ArgumentError(
         "import_step: multiple recognized solids are not supported in one import"))
+    factors=_step_member_unit_factors(entities);primitive_factor=1.0
+    for ent in values(entities)
+        if ent.kind in ("SPHERE","RIGHT_CIRCULAR_CYLINDER","RIGHT_CIRCULAR_CONE",
+                        "TOROIDAL_SURFACE")
+            primitive_factor=get(factors,ent.id,1.0);break
+        end
+    end
     sph=_as_sphere(entities)
     if sph!==nothing
-        surface=sphere_surface(sph[1],sph[2])
+        surface=_step_unit_scaled(sphere_surface(sph[1],sph[2]),primitive_factor)
         fill || return surface
         return _filled(surface,"import_step")
     end
     cyl=_as_cylinder(entities)
     if cyl!==nothing
-        surface=cylinder_surface(cyl[1],cyl[2],cyl[3],cyl[4])
+        surface=_step_unit_scaled(cylinder_surface(cyl[1],cyl[2],cyl[3],cyl[4]),primitive_factor)
         fill || return surface
         return _filled(surface,"import_step")
     end
     cone=_as_cone(entities)
     if cone!==nothing
-        surface=cone_surface(cone[1],cone[2],cone[3],cone[4],cone[5])
+        surface=_step_unit_scaled(cone_surface(cone[1],cone[2],cone[3],cone[4],cone[5]),
+            primitive_factor)
         fill || return surface
         return _filled(surface,"import_step")
     end
     tor=_as_torus(entities)
     if tor!==nothing
-        surface=_torus_surface(tor[1],tor[2],tor[3],tor[4],tor[5],"import_step")
+        surface=_step_unit_scaled(
+            _torus_surface(tor[1],tor[2],tor[3],tor[4],tor[5],"import_step"),primitive_factor)
         fill || return surface
         return _filled(surface,"import_step")
     end
@@ -410,6 +425,18 @@ function import_step(path::AbstractString; fill::Bool=true)
         "RIGHT_CIRCULAR_CYLINDER, RIGHT_CIRCULAR_CONE, TOROIDAL_SURFACE, or " *
         "closed-shell planar polyhedron); saw $(join(kinds, ", ")). " *
         "NURBS curves/surfaces use import_nurbs_step"))
+end
+
+# Uniform positive source-unit scaling keeps the emitted triangulation; the
+# scaled surface equals what the producers would emit for scaled inputs since
+# every source row contributes linearly.
+function _step_unit_scaled(surface::Mesh,factor::Float64)
+    factor==1.0 && return surface
+    coordinates=factor .* surface.coords
+    all(isfinite,coordinates) || throw(ArgumentError(
+        "import_step: unit conversion produced nonfinite coordinates"))
+    return Mesh(coordinates;segs=surface.segs,tris=surface.tris,tets=surface.tets,
+        seg_tag=surface.seg_tag,tri_tag=surface.tri_tag,tet_tag=surface.tet_tag)
 end
 
 function _filled(surface::Mesh, caller)
@@ -1010,7 +1037,7 @@ function _brep_assign_components!(comp,face_edges,edge_faces,nfaces)
     return nc
 end
 
-function _step_brep_solid(brep::StepEntity,entities,fill)
+function _step_brep_solid(brep::StepEntity,entities,fill;factor::Float64=1.0)
     caller="import_step"
     length(brep.args)>=2 || throw(ArgumentError(
         "$caller: $(brep.kind) #$(brep.id) has no shell"))
@@ -1074,11 +1101,14 @@ function _step_brep_solid(brep::StepEntity,entities,fill)
     end
     if planar
         surface=_polyhedral_surface_faces([f.rings for f in faces],[f.role for f in faces],caller)
+        surface=_step_unit_scaled(surface,factor)
         return fill ? _filled(surface,caller) : surface
     end
     if ntorus==1 && length(faces)==1 && torus_face.rings!==nothing &&
        _rings_all_degenerate(torus_face.rings)
-        return _step_torus_face(entities,torus_face.surf,fill,caller)
+        surface=_step_torus_face(entities,torus_face.surf,false,caller)
+        surface=_step_unit_scaled(surface,factor)
+        return fill ? _filled(surface,caller) : surface
     end
     ntorus==1 && length(faces)==1 && throw(ArgumentError(
         "$caller: trimmed TOROIDAL_SURFACE faces are not supported (full torus only)"))

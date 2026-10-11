@@ -4,10 +4,14 @@ Direct product-usage assemblies carry the actual selected representation
 context into each occurrence. The importer verifies the declared SI unit
 categories, literal references and supported STEP prefixes. Output coordinates
 use millimetres. A METRE declaration with decimal prefix exponent e has length
-factor `10^(e+3)`; an omitted prefix means metres. Angular units remain
-unprefixed RADIAN and STERADIAN. Conversion-based units and other angular
-conventions remain unsupported. Optional uncertainty declarations retain the
-literal selected context length-unit reference.
+factor `10^(e+3)`; an omitted prefix means metres. RADIAN and STERADIAN
+declarations may carry supported SI prefixes with factor `10^e`. A
+`CONVERSION_BASED_UNIT` declaration resolves recursively: its
+`*_MEASURE_WITH_UNIT` typed measure value times its base unit's resolved
+factor, where the measure's dimension, the enclosing category part and every
+chained base must agree. Optional uncertainty declarations alias any unit
+entity whose resolved length factor equals the selected context's — entity
+identity is no longer required.
 
 Each leaf's literal source geometry uses its own length factor. The actual
 child and parent placement-frame origins use their own respective factors.
@@ -16,8 +20,13 @@ With child origin/basis `(a,A)` and parent `(b,B)`, physical transport is
 `x_output=R*(s_child*x)+t`. No factor or ownership is inferred from output XYZ.
 Literal graph completeness, frame membership, proper rotation, finite
 coordinates, closed-shell, disjoint bounding-box, storage, positive-fill and
-UID/owner certificates remain mandatory after conversion. Ordinary roots and
-the separate mapped-item/Cartesian producer retain their existing behavior.
+UID/owner certificates remain mandatory after conversion. Ordinary roots,
+multi-root assembly records and the separate mapped-item/Cartesian producer
+convert the same declared contexts: every unit-bearing shape representation
+contributes its length factor to the member solids it wraps (a solid shared by
+incompatible factors rejects as ambiguous), mapped occurrences scale source
+rows and transform origins by the shared root context, and representations
+without unit declarations keep raw coordinates.
 
 Opaque Gmsh 4.15.2 import-only controls establish distinct source/frame
 behavior: both centimetre contexts produce side-10 solids at x30:40/x50:60;
@@ -43,5 +52,9 @@ follows from this bounded qualification.
 declares the actual optional prefix, unit name and derived dimensions;
 [STEP SI_PREFIX](https://downloads.steptools.com/docs/stp_aim/html/t_si_prefix.html)
 defines the schema's admitted prefix enumeration. [BIPM decimal factors](https://www.bipm.org/en/measurement-units/si-prefixes/)
-establish the conversion values. This closes only direct relationship-producer
-SI length transport, without claiming general CAD unit-conversion parity.
+establish the conversion values. The CAD03 increment qualifies this transport
+across ordinary, mapped and relationship producers — including nested
+conversion chains (YARD→FOOT→INCH→mm), factor-preserving conversion/SI
+equivalence, metre fills and MSH4 records — on Julia1.12.7 and1.13.1. It still
+does not claim general CAD unit-conversion parity (derived-unit measure
+contexts beyond the three categories remain explicit blockers).

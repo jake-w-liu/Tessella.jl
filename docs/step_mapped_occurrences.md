@@ -17,6 +17,9 @@ translated mapping origin followed by a rotated target; it does not infer a
 different placement law from the bounding boxes. The public nonmatching
 [OCCT mapped-item translator](https://raw.githubusercontent.com/Open-Cascade-SAS/OCCT/V7_8_0/src/StepToTopoDS/StepToTopoDS_MakeTransformed.cxx)
 specifies the target-to-origin coordinate change.
+When the shared root representation context declares units, every source row
+and transform origin converts by its resolved SI or conversion-based length
+factor to millimetres; contexts without unit declarations keep raw rows.
 
 One occurrence returns `Mesh`; multiple independent occurrences return a
 classified `MixedMesh` with separate node/cell identities, Surface/Region

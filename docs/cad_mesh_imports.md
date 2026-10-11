@@ -18,7 +18,11 @@ boxes overlap. Boxes are never used to discover, split or replace source
 roots. Point-cloud box imports retain their original single-solid behavior.
 Multi-root IGES identities must be positive, odd, unique and consistent with
 the directory-entry type. Unsupported geometric entity types are rejected;
-supported type-406 property records can accompany the geometry.
+supported type-406 property records can accompany the geometry. Every STEP
+solid or primitive wrapped by a unit-bearing shape representation converts by
+its declared SI or conversion-based length factor into millimetres; a solid
+shared by incompatible factors rejects as ambiguous and representations
+without unit declarations keep raw coordinates.
 
 This operation returns a mesh. It does not populate the Model/OCC registry,
 reconstruct analytic CAD Face/Curve parameter maps or provide general

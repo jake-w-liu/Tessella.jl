@@ -297,7 +297,10 @@ root-to-leaf path with per-edge contexts/frames, path-order rigid composition an
 single leaf scaling. Multiple independent roots, per-definition solids and
 `MAPPED_ITEM` occurrences inside product representations emit separate
 occurrences with transitive mapped sources carrying their own SI contexts.
-Conversion-based units, other assembly
+Ordinary/mapped roots and assembly records convert declared SI and
+`CONVERSION_BASED_UNIT` length contexts once to millimetres, with prefixed
+angular units, factor-resolved uncertainty aliases and ambiguous-member-context
+rejection. Other assembly
 transformations and analytic Face maps remain open. See
 [mesh import scope](docs/cad_mesh_imports.md). The entity kernel records native
 boxes, cylinders, spheres, cones, toruses, Boolean volumes (operation-time

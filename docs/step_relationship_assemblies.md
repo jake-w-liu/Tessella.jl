@@ -41,8 +41,9 @@ emission. Missing, ambiguous or orphan bindings, cyclic usages or mapped
 representations, unreached definitions, unselected maps/items/representations,
 unplaced solids, geometry-free leaves, reversed relationships, nonmember
 transform frames, unsupported contexts/transforms and touching or overlapping
-occurrence boxes reject explicitly. Conversion-based units and ordinary/mapped
-root unit conversion remain open.
+occurrence boxes reject explicitly. Conversion-based units, prefixed angular
+declarations, uncertainty aliases and ordinary/mapped root unit conversion are
+covered by the [SI unit doc](step_relationship_si_units.md).
 
 Every occurrence receives separate mesh rows, UIDs and discrete Surface/Region
 owners. Names retain the root product and the literal usage/product/solid path
