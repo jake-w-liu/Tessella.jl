@@ -25,10 +25,11 @@ missing or incomplete copy history, and cross-Region boundary pairs remain
 outside this admission and are rejected atomically.
 
 A multi-Region hybrid batch can also consume a single translated Surface pair
-per Region when each selected Region forms its own declared Face component.
-Both paired Surfaces must belong to that Region. This batch admission uses
-default `Mesh.OptimizePyramids=0`; shared-Surface periodic components and other
-Pyramid modes remain guarded. Each pair consumes actual fresh copy events or
+per Region for separate components or connected Regions with literal shared
+Tri interfaces. Both paired Surfaces must be uniquely owned exterior Faces of
+that Region. This batch admission uses default `Mesh.OptimizePyramids=0`;
+shared periodic Faces and other Pyramid modes remain guarded. The
+[connected component scope](shared_periodic_hybrids.md) binds joint copy events. Each pair consumes actual fresh copy events or
 retained live published copy history. Every Region is certified before any
 volume RNG or factory clock is consumed, after partitioning, and after the
 batch's final optimization. No periodic pairs are inferred from coordinates.
@@ -51,7 +52,9 @@ The complete actual event inventory is also checked against an intentionally
 incomplete snapshot. This full fixture is opt-in; default tests gain no volume
 generation.
 
-A strictly interior Point, retained Curve chains and one- or two-triangle
+A strictly interior Point, retained Curve chains and endpoint-only3–6-vertex
 [planar sheets](hybrid_embedded_surfaces.md) have separate bounded embedded
 contexts. Combining embeddings with multiple periodic Regions and general
-shared periodic components remains outside this admission.
+shared periodic Faces remains outside this admission. Connected components
+sharing Tri interfaces with uniquely owned exterior translated pairs are
+implemented in the linked batch scope.

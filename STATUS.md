@@ -24,7 +24,30 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
-### Current direct STEP assemblies and view-time metadata (2026-10-11)
+### Current verified batch and Devin transfer (2026-10-11)
+
+The user requested a complete unfinished-work handoff. The
+[Devin checklist](DEVIN_HANDOFF.md) records27 known open work areas, precise
+completion requirements, prepared nested STEP/rigid periodic designs and
+portable evidence. **Full P1–P6 parity remains unfinished.** New implementation
+has stopped for transfer; the next owner must complete every required work area.
+
+The final ordinary suite passes **224/224 on both Julia1.12/1.13**, actual exit0
+on the same frozen252 Source files: **45.21 s/body11.5 s** onJulia1.12.7 and
+**38.38 s/body10.6 s** onJulia1.13.1. Committed receipts and the exact Source map
+are under [the handoff artifacts](test/artifacts/handoff_20261011/verified_source.json).
+
+[STEP relationship SI scaling](docs/step_relationship_si_units.md) passes52/52,
+Julia1.13 actual0/40.37 s; [shared-Tri periodic hybrid components](docs/shared_periodic_hybrids.md)
+pass63/63, Julia1.12 actual0/36.98 s; [atomic view representation replacement](docs/view_representations.md)
+passes26/26, Julia1.13 actual0/37.08 s. Each retains existing ownership and
+geometry/serialization certificates. Two cheap assertions enter the default.
+The batch follows published parent`da92208`; routine tests remain concise and
+native/solver campaigns remain opt-in.
+The final documentation audit covers70 Markdown files and335 relative links,
+with no missing files or heading anchors. Dated prior results remain historical.
+
+### Preceding direct STEP assemblies and view-time metadata (2026-10-11)
 
 The final ordinary suite passes **222/222 on both Julia1.12/1.13**, actual exit0
 on the same frozen252 Source files: **45.18 s/body11.4 s** onJulia1.12.7 and
@@ -46,9 +69,9 @@ actual0/1.01 s warm without generation. Sparse gaps remain bounded range storage
 
 The [current handoff](HANDOFF.md#takeover-2026-10-11) preserves exact packets,
 failed fixture receipts and scoped public observations. This increment follows
-publishedMain`9dc9273`. Full P1–P6 remains unfinished. Approved isolated Source
-covers relationship SI unit transport and shared-Tri periodic hybrid components;
-list/model representation transitions are in read-only design. Native and
+publishedMain`9dc9273` and was published as`da92208`. The current successor above
+integrates SI unit transport, shared-Tri periodic hybrid components and atomic
+list/model representation replacement. Full P1–P6 remains unfinished. Native and
 solver campaigns remain opt-in; routine test bodies stay around11 seconds.
 
 ### Preceding Cartesian STEP, polygonal sheets and POS imports (2026-10-11)

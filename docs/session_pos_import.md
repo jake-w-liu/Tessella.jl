@@ -44,3 +44,7 @@ one thread, actual exit zero, warm wall 3.9672326 seconds. The failed first
 receipt remains preserved: its sole failed assertion incorrectly expected
 opening the named empty current model to remove the prior initial empty slot.
 The corrected fixture retains prior slots; implementation Source is unchanged.
+
+Valid [list/model representation changes](view_representations.md) replace
+inactive storage atomically. Switching through model data starts fresh implicit
+list times; updating a list within its existing representation keeps imported TIME.

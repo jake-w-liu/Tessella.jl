@@ -20,17 +20,25 @@ function _view_plain_list_steps(types,counts,data)
     return steps
 end
 
-function _view_list_time_plan(view,type,count,values)
-    types=copy(view.list_types);type in types || push!(types,type)
-    counts=copy(view.list_counts);counts[type]=count
-    data=copy(view.list_data);data[type]=values
+function _view_list_time_plan(view,type,count,values;reset_model=false)
+    reset_model && !haskey(Post._POS_RECORD_TYPES,type) && throw(ArgumentError(
+        "API.view.add_list_data: model-to-list conversion supports plain linear list records"))
+    types=reset_model ? String[] : copy(view.list_types)
+    type in types || push!(types,type)
+    counts=reset_model ? empty(view.list_counts) : copy(view.list_counts);counts[type]=count
+    data=reset_model ? empty(view.list_data) : copy(view.list_data);data[type]=values
     steps=_view_plain_list_steps(types,counts,data)
-    time=view.list_time
+    if reset_model && steps===nothing
+        count==0 && isempty(values) || throw(ArgumentError(
+            "API.view.add_list_data: model-to-list conversion requires complete linear list payloads"))
+        steps=0
+    end
+    time=reset_model ? Float64[] : view.list_time
     if steps!==nothing && !isempty(time) && steps>length(time)
         # Retain declared physical-time history; only new slots get index time.
         time=vcat(time,Float64[Float64(index) for index in length(time):steps-1])
     end
-    return (;steps,time)
+    return (;types,counts,data,steps,time)
 end
 
 function _view_data_steps(view)

@@ -1,4 +1,7 @@
 # Hash-bound primary replay artifacts retain exact bytes on every checkout.
+test/artifacts/handoff_20261011/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+# Captured Julia terminal output retains its literal trailing spaces.
+test/artifacts/handoff_20261011/*.log -text whitespace=-blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 validation/windows_power/* -text
 test/artifacts/model_native_recombine_cost_primary.tsv -text
 

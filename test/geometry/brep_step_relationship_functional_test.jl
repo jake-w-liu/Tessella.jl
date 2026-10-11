@@ -93,7 +93,7 @@ end
         replace(source,"SHAPE_REPRESENTATION('Assembly',(#1006,#1010,#1013),#1045)"=>
             "SHAPE_REPRESENTATION('Assembly',(#1006,#1010,#1013),#345)"),
         replace(source,root_context=>"#1045 = ( GEOMETRIC_REPRESENTATION_CONTEXT(2)"),
-        replace(source,"SI_UNIT(.MILLI.,.METRE.)"=>"SI_UNIT(.CENTI.,.METRE.)"),
+        replace(source,"SI_UNIT(.MILLI.,.METRE.)"=>"SI_UNIT(.QUETTA.,.METRE.)"),
         append_entities(replace(source,"((#346,#347,#348)) REPRESENTATION_CONTEXT('Assembly Context'"=>
             "((#1100,#347,#348)) REPRESENTATION_CONTEXT('Assembly Context'"),
             "#1100 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.CENTI.,.METRE.) );\n"),

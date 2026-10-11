@@ -12,7 +12,52 @@ small real fixtures. Full native-oracle sweeps, source/AST audits, memory stress
 benchmarks, the 22 HFSS cases, aggregate validation, and external ASCENT solves
 are opt-in campaigns. See [test/README.md](test/README.md).
 
-### Current direct STEP assemblies and view-time metadata
+### Current Devin transfer and final verified batch
+
+The latest user request is to document all unfinished work for Devin and stop
+new implementation. [DEVIN_HANDOFF.md](DEVIN_HANDOFF.md) is the current complete
+known checklist, with27 required work areas, completion criteria and portable
+evidence. Tessella's full P1–P6 goal is unfinished. Continue that checklist from
+current `origin/main`; older dated sections and temporary candidates below are
+historical evidence, not the current continuation queue.
+
+The final ordinary suite passes **224/224 on BOTH** supported runtimes, actual
+exit0 on the same frozen252 Source files: Julia1.12.7 **45.21 s/body11.5 s**;
+Julia1.13.1 **38.38 s/body10.6 s**. Source aggregate SHA256:
+`6174da34f24ab27c6c3c0afe214d249b78e0a2b564eadb5f7101e9d34d3b2bf7`.
+Committed [Source map](test/artifacts/handoff_20261011/verified_source.json),
+[Julia1.12 receipt](test/artifacts/handoff_20261011/ordinary_default_224_112_20261011.receipt.json)
+and [Julia1.13 receipt](test/artifacts/handoff_20261011/ordinary_default_224_113_20261011.receipt.json)
+allow the next owner to inspect actual outcomes on another machine.
+The final documentation audit covers70 Markdown files and335 relative links,
+with no missing files or heading anchors. Current instructions replace dated
+historical continuation queues; those records retain their original evidence.
+
+This batch integrates four reviewed Source deltas and bounded qualifications:
+
+- [STEP relationship SI units](docs/step_relationship_si_units.md):52/52,
+  Julia1.13 actual0/40.37 s including loading. Source geometry and both placement
+  origins use their actual context factors; full graph/shell/volume/UID guards
+  remain. Ordinary/mapped unit conversion and nested products remain open.
+- [Shared-Tri periodic hybrid components](docs/shared_periodic_hybrids.md):63/63,
+  Julia1.12 actual0/36.98 s. Two adjacent Regions retain uniquely owned exterior
+  translated pairs,21Tet4+5Pyramid5/volume1 each, actual4/9 primary/P2 maps and
+  exact MSH4 identity transport. General affine/shared periodic Faces remain open.
+- [Atomic view representation replacement](docs/view_representations.md):26/26,
+  Julia1.13 actual0/37.08 s. Valid list/model changes discard obsolete data after
+  prevalidation, preserving view identity/display state/held models. Two cheap
+  assertions enter the default; no new default Volume or SDK workload is added.
+
+This verified batch follows published parent `da92208`. Normal commit/push to
+`main` and an exact remote SHA check publish its successor. No implementation
+agent or owned runtime remains active. Unrelated untracked files are preserved.
+Next designs are [nested STEP assemblies](docs/handoff/nested_step_assemblies.md)
+and [proper-rigid periodic hybrids](docs/handoff/meshing_remaining.md); both are
+unimplemented design/evidence packets. Devin must complete the full checklist,
+including the other CAD/meshing/field/layer/high-order/partition/API/UI/format and
+conformance gaps, before declaring Tessella complete.
+
+### Preceding direct STEP assemblies and view-time metadata
 
 The final ordinary suite passes **222/222 on BOTH** supported runtimes, actual
 exit0 on the same frozen252 Source files: Julia1.12.7 **45.18 s/body11.4 s**;
@@ -58,12 +103,9 @@ context and supplies no broad field-parity claim. Integration manifests:
 publishedMain`9dc9273`; normal Git publication and exact remote SHA checking
 record its release. Unrelated untracked files remain untouched.
 
-Next isolated Source is actual relationship SI length transport
-(`concise_tests`) and shared-Tri hybrid components with separate exterior
-translated periodic pairs (`implementation_audit`). Both have bounded public
-native-successful controls and approved ownership proposals; their candidate
-Source is outside this frozen252-file gate. `devin_reconcile` is investigating
-actual list/model view representation transitions without Source changes.
+The subsequent224-check batch above integrates SI length transport, shared-Tri
+translated periodic components and atomic list/model representation changes.
+The222-check receipts qualify only this preceding Source, not those additions.
 The tiny native Quad-sheet return produced no Tet core or typed interior
 carrier, so it is not a successful Quad-production witness. Retain its guard.
 Continue the full genuine backlog below; P1–P6 and the active goal remain open.
@@ -664,7 +706,8 @@ backlog rather than the older expensive verification queue:
    One strictly interior endpoint-only planar3–6-vertex disk with `n-2` actual
    Tri3 cells and actual Point/Line boundaries is implemented too. Multiple retained Point/Curve constraints are implemented
    in one convex Region. Separate periodic Region components now admit one
-   translated pair each. Shared/cross-Region and general-affine periodic contexts,
+   translated pair each, including connected Regions sharing actual Tri interfaces.
+   Multiple directions, cross-Region/shared periodic Faces and general-affine contexts,
    larger polygons, holes or interior Surface vertices, Quad sheets and general
    hybrid recovery remain open.
    Public region reverse/smoothing are
@@ -673,8 +716,9 @@ backlog rather than the older expensive verification queue:
    explicit independent STEP/IGES mesh roots are implemented. One explicit STEP
    representation root with nested rigid mapped occurrences and proper unit-scale
    Cartesian targets is implemented; complete direct single-root product-usage
-   assemblies now bind actual rigid frames in millimetre contexts. SI unit
-   transport is in isolated implementation. Other occurrence transformations,
+   assemblies now bind actual rigid frames with SI source/placement unit transport
+   into millimetre output coordinates. Nested product usages, ordinary/mapped
+   unit conversion and other occurrence transformations,
    analytic Face reconstruction and general
    assembly remain open.
    Planar STEP/IGES Face holes, including143 boundaries, are implemented;
@@ -717,11 +761,13 @@ backlog rather than the older expensive verification queue:
    MSH checking are implemented. All24 plain linear POS list families retain
    names and physical times. Actual TimeStep/Time metadata and the confirmed
    model-data kind-reset extent fix are implemented. Active list/model view
-   representation transitions are in read-only design. Text,
+   representation transitions are implemented and qualified26/26. Text,
    interpolation/high-order POS admission and additional formats remain open.
 10. Close native matching chronology and requirement-level differential parity.
     Large P6/HFSS/ASCENT campaigns remain opt-in verification, not routine tests.
 
+The [Devin checklist](DEVIN_HANDOFF.md) expands this summary to all27 known
+required work areas, including remaining geometry/API/view/plugin/GUI services.
 Use the corresponding P1–P6 scope in `PLAN.md` and actual public APIs to choose
 small independently verifiable increments. Do not treat a missing historical
 receipt as proof that its feature is absent. Keep the overall goal active while

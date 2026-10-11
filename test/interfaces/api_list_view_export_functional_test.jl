@@ -155,13 +155,8 @@ end
         mixed=A.view.add("mixed component counts")
         A.view.add_list_data(mixed,"SP",1,[0.,0.,0.,1.])
         A.view.add_list_data(mixed,"VP",1,[1.,2.,3.,4.,5.,6.])
-        A.model.add("node model");A.model.add_discrete_entity(0,1)
-        A.mesh.add_nodes(0,1,[101],[0.,0.,0.])
-        mixed_storage=A.view.add("mixed storage")
-        A.view.add_list_data(mixed_storage,"SP",1,[0.,0.,0.,1.])
-        A.view.add_model_data(mixed_storage,0,"node model","NodeData",[101],[[2.]])
         mktempdir() do directory
-            for extension in (".txt",".csv",".vtk"),tag in (malformed,unsupported,mismatch,mixed_storage)
+            for extension in (".txt",".csv",".vtk"),tag in (malformed,unsupported,mismatch)
                 path=joinpath(directory,"preserved"*extension);write(path,"sentinel")
                 @test_throws ArgumentError A.view.write(tag,path)
                 @test read(path,String)=="sentinel"

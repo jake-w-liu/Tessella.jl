@@ -30,7 +30,8 @@ in this bounded implementation. The earlier malformed six-field observation is
 not a successful transform witness. Multiple product roots, general assembly
 relationships remain outside this mapped-target admission; a separate
 [direct product-usage producer](step_relationship_assemblies.md) now admits
-complete rigid NAUO/CDSR/IDT paths with actual millimetre contexts.
+complete rigid NAUO/CDSR/IDT paths with actual
+[SI source/placement length conversion](step_relationship_si_units.md).
 
 Five opaque Gmsh4.15.2 import-only controls cover default axes, a quarter-turn,
 inferred axis3, a shifted mapping origin, and an arbitrary rigid frame. Each

@@ -5,6 +5,14 @@ const _STEP_RELATIONSHIP_TRIGGERS=("NEXT_ASSEMBLY_USAGE_OCCURRENCE",
     "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION",
     "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION","ITEM_DEFINED_TRANSFORMATION")
 
+# These are the SI_PREFIX values in the STEP schema. Output coordinates use
+# millimetres, so a declared metre prefix with exponent e has factor 10^(e+3).
+const _STEP_RELATIONSHIP_SI_EXPONENTS=Dict(
+    ".EXA."=>18,".PETA."=>15,".TERA."=>12,".GIGA."=>9,".MEGA."=>6,
+    ".KILO."=>3,".HECTO."=>2,".DECA."=>1,".DECI."=>-1,".CENTI."=>-2,
+    ".MILLI."=>-3,".MICRO."=>-6,".NANO."=>-9,".PICO."=>-12,
+    ".FEMTO."=>-15,".ATTO."=>-18)
+
 function _step_relationship_parts(entity)
     parts=entity.kind=="COMPLEX" ? entity.args : [entity]
     all(part->part isa StepEntity,parts) &&
@@ -41,6 +49,7 @@ function _step_relationship_context(entities,reference)
     length(assigned)==1 && assigned[1] isa AbstractVector && length(assigned[1])==3 &&
         allunique(assigned[1]) || throw(ArgumentError("import_step: assembly unit context is truncated"))
     kinds=Set{String}();units=Set{Int}();length_unit=0
+    witnesses=Dict{String,NamedTuple}()
     for reference in assigned[1]
         unit=_deref_entity(entities,reference)
         unit!==nothing || throw(ArgumentError("import_step: assembly unit reference is missing"))
@@ -53,13 +62,19 @@ function _step_relationship_context(entities,reference)
             throw(ArgumentError("import_step: assembly unit declaration is malformed"))
         si=unit_parts["SI_UNIT"].args
         expected=kind=="LENGTH_UNIT" ? ".METRE." : kind=="PLANE_ANGLE_UNIT" ? ".RADIAN." : ".STERADIAN."
-        prefix=kind=="LENGTH_UNIT" ? ".MILLI." : nothing
-        # The existing solid producer retains literal source coordinates.
-        # Equal context references alone do not implement source-unit scaling.
-        length(si)==2 && si[2]==expected && si[1]==prefix || throw(ArgumentError(
-            "import_step: product usages currently require millimetre/radian/steradian units; conversion is unsupported"))
+        length(si)==2 && si[2]==expected || throw(ArgumentError("import_step: invalid assembly SI unit"))
+        factor=1.0
+        if kind=="LENGTH_UNIT"
+            exponent=si[1]===nothing ? 0 : get(_STEP_RELATIONSHIP_SI_EXPONENTS,si[1],nothing)
+            exponent!==nothing || throw(ArgumentError("import_step: unsupported STEP SI length prefix"))
+            factor=10.0^(exponent+3)
+        else
+            si[1]===nothing || throw(ArgumentError("import_step: prefixed angular units are unsupported"))
+        end
+        isfinite(factor) && factor>0 || throw(ArgumentError("import_step: invalid assembly SI length factor"))
         kind in kinds && throw(ArgumentError("import_step: duplicate assembly unit category"))
         push!(kinds,kind);push!(units,unit.id)
+        witnesses[kind]=(id=unit.id,prefix=si[1],name=si[2],factor=factor)
         kind=="LENGTH_UNIT" && (length_unit=unit.id)
     end
     if haskey(parts,"GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT")
@@ -77,7 +92,21 @@ function _step_relationship_context(entities,reference)
                 throw(ArgumentError("import_step: invalid assembly uncertainty measure"))
         end
     end
-    return context.id,units
+    return context.id,units,witnesses
+end
+
+function _step_relationship_transform(entities,source,target,child_units,parent_units)
+    a,A=_step_occurrence_frame(entities,source)
+    b,B=_step_occurrence_frame(entities,target)
+    child_factor=child_units["LENGTH_UNIT"].factor
+    parent_factor=parent_units["LENGTH_UNIT"].factor
+    child_origin=ntuple(i->child_factor*a[i],3)
+    parent_origin=ntuple(i->parent_factor*b[i],3)
+    all(isfinite,(child_origin...,parent_origin...)) ||
+        throw(ArgumentError("import_step: converted assembly frame origin is nonfinite"))
+    rotation=ntuple(i->ntuple(j->sum(A[i][k]*B[j][k] for k in 1:3),3),3)
+    translation=ntuple(i->sum(A[i][j]*(parent_origin[j]-child_origin[j]) for j in 1:3),3)
+    return _step_occurrence_compose(_STEP_OCCURRENCE_IDENTITY,(rotation,translation))
 end
 
 function _step_relationship_product(entities,definition)
@@ -158,7 +187,7 @@ function _step_relationship_import(entities,fill_solids)
             representation.args[2] isa AbstractVector && !isempty(representation.args[2]) &&
             allunique(representation.args[2]) ||
             throw(ArgumentError("import_step: assembly representation is truncated or unsupported"))
-        context,units=_step_relationship_context(entities,representation.args[3])
+        context,units,unit_witnesses=_step_relationship_context(entities,representation.args[3])
         items=StepEntity[]
         for reference in representation.args[2]
             item=_deref_entity(entities,reference)
@@ -166,7 +195,7 @@ function _step_relationship_import(entities,fill_solids)
             item.kind=="AXIS2_PLACEMENT_3D" && _step_occurrence_frame(entities,reference)
             push!(items,item)
         end
-        representations[definition.id]=(;representation,context,units,items)
+        representations[definition.id]=(;representation,context,units,unit_witnesses,items)
         push!(shape_definitions,shape.id)
     end
     Set(keys(representations))==definitions &&
@@ -214,8 +243,11 @@ function _step_relationship_import(entities,fill_solids)
         relationship[3]==(:ref,info.representation.id) &&
             relationship[4]==(:ref,root_info.representation.id) ||
             throw(ArgumentError("import_step: relationship direction disagrees with parent/child usage"))
-        info.context!=root_info.context && info.units==root_info.units ||
-            throw(ArgumentError("import_step: assembly needs distinct three-dimensional contexts with the same actual units"))
+        info.context!=root_info.context && all(
+            info.unit_witnesses[kind].name==root_info.unit_witnesses[kind].name &&
+            info.unit_witnesses[kind].prefix==root_info.unit_witnesses[kind].prefix
+            for kind in ("PLANE_ANGLE_UNIT","SOLID_ANGLE_UNIT")) ||
+            throw(ArgumentError("import_step: assembly needs distinct compatible three-dimensional SI contexts"))
         transform=_step_relationship_entity(entities,transformed[1],"ITEM_DEFINED_TRANSFORMATION")
         length(transform.args)==4 && transform.args[1] isa AbstractString &&
             (transform.args[2]===nothing || transform.args[2] isa AbstractString) ||
@@ -224,9 +256,10 @@ function _step_relationship_import(entities,fill_solids)
         target=_step_relationship_entity(entities,transform.args[4],"AXIS2_PLACEMENT_3D")
         source.id in (item.id for item in info.items) && target.id in (item.id for item in root_info.items) ||
             throw(ArgumentError("import_step: assembly transform frames are not literal representation members"))
-        local_transform=_step_occurrence_transform(entities,transform.args[3],transform.args[4])
-        rigid=_step_occurrence_compose(_STEP_OCCURRENCE_IDENTITY,local_transform)
-        placements[usage.id]=(;usage,child,rigid)
+        rigid=_step_relationship_transform(entities,transform.args[3],transform.args[4],
+            info.unit_witnesses,root_info.unit_witnesses)
+        source_factor=info.unit_witnesses["LENGTH_UNIT"].factor
+        placements[usage.id]=(;usage,child,rigid,source_factor)
         push!(shape_definitions,shape.id);push!(relations,relation.id);push!(transforms,transform.id)
     end
     Set(keys(placements))==Set(usage.id for usage in usages) &&
@@ -250,7 +283,7 @@ function _step_relationship_import(entities,fill_solids)
         rotation,translation=placement.rigid
         coordinates=Matrix{Float64}(undef,size(surface.coords))
         for column in axes(coordinates,2),i in 1:3
-            coordinates[i,column]=translation[i]+sum(rotation[i][j]*surface.coords[j,column] for j in 1:3)
+            coordinates[i,column]=translation[i]+sum(rotation[i][j]*(placement.source_factor*surface.coords[j,column]) for j in 1:3)
         end
         all(isfinite,coordinates) || throw(ArgumentError("import_step: assembly occurrence coordinates are nonfinite"))
         product=products[placement.child]

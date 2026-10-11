@@ -1,6 +1,7 @@
 # Tessella.jl continuation
 
-Read [HANDOFF.md](HANDOFF.md#takeover-2026-10-11), [STATUS.md](STATUS.md),
+Read [DEVIN_HANDOFF.md](DEVIN_HANDOFF.md) first, then
+[HANDOFF.md](HANDOFF.md#takeover-2026-10-11), [STATUS.md](STATUS.md),
 [PLAN.md](PLAN.md), and [test/README.md](test/README.md) before continuing.
 The 2026-10-11 user request replaces older exhaustive test requirements:
 default tests must be concise functional checks on small real fixtures.
@@ -20,6 +21,8 @@ work and coordinate file ownership. Normally push verified implementations to
 `main`; do not force-push. A documentation-only commit does not publish code.
 
 Full P1–P6 parity remains unfinished. The current handoff records integrated and
-pending packets and actual runtime outcomes. Do not claim completion from
+actual runtime outcomes. The Devin checklist records every known open work area
+and prepared next designs; complete and expand that ledger as requirements are
+verified. Do not claim completion from
 prepared code, scoped checks, historical receipts, or a fast default suite.
 When all authorized work is complete, stop.

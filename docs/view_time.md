@@ -51,3 +51,7 @@ exit zero, warm wall 1.0141333 seconds. Failed v1 is retained: the test used the
 SDK's five-item model-data return shape instead of Tessella's existing
 `(types,tags,flat_values)` query contract. Corrected expectations preserve all
 metadata/UID/geometry checks; implementation Source is unchanged.
+
+[List/model representation replacement](view_representations.md) now clears
+inactive data and starts the new representation's step/time history while
+retaining display state. Same-list updates preserve the qualified behavior above.

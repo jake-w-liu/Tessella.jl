@@ -27,7 +27,8 @@ supports one explicit representation root, rigid axis-placement targets,
 [unit-scale Cartesian targets](step_cartesian_rigid_targets.md) and nested maps
 of supported source solids. A separate [direct product-usage producer](step_relationship_assemblies.md)
 admits complete single-root NAUO/CDSR/IDT assembly paths with actual rigid
-frames and millimetre contexts. Other assembly transformations remain
+frames and [SI source/placement length conversion](step_relationship_si_units.md)
+into millimetre output coordinates. Nested product usages and other assembly transformations remain
 guarded. Trimmed and periodic
 NURBS topology remains a separate implementation track.
 

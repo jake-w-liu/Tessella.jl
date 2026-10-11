@@ -14,7 +14,7 @@ catalogued high-order Surface/Volume VTK, directional constant-tensor
 box and shared-material grids, floating-point Pyramid options, CLI help/version
 and read-only MSH checking, plus atomic current-model opening and merging,
 including one POS point import and an empty-file merge, plus derived two-step
-view metadata and display selection. It needs
+view metadata and display selection, and two list/model replacement checks. It needs
 no external mesher or solver.
 
 Run the default suite from the repository root. The runner automatically uses
@@ -45,8 +45,10 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
-| Julia 1.12.7 | Ordinary `Pkg.test()`, automatic minimal compilation | 222 | 45.18 s |
-| Julia 1.13.1 | Ordinary `Pkg.test()`, automatic minimal compilation | 222 | 38.74 s |
+| Julia 1.12.7 | Ordinary `Pkg.test()`, automatic minimal compilation | 224 | 45.21 s |
+| Julia 1.13.1 | Ordinary `Pkg.test()`, automatic minimal compilation | 224 | 38.38 s |
+| Julia 1.12.7 | Preceding ordinary package invocation | 222 | 45.18 s |
+| Julia 1.13.1 | Preceding ordinary package invocation | 222 | 38.74 s |
 | Julia 1.12.7 | Preceding ordinary package invocation | 220 | 47.05 s |
 | Julia 1.13.1 | Preceding ordinary package invocation | 220 | 40.34 s |
 | Julia 1.12.7 | Preceding ordinary package invocation | 218 | 45.41 s |
@@ -70,18 +72,21 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 | Julia 1.13.1 | `--compile=min -O0`, earlier CLI `test/runtests.jl`, warm | 173 | 5.71 s |
 | Julia 1.13.1 | `--compile=min -O0`, preceding CAD/model/periodic `Pkg.test()` | 171 | 40.61 s |
 | Julia 1.13.1 | `--compile=min -O0`, earlier CLI/list increment `Pkg.test()` | 163 | 36.41 s |
-| Julia 1.12.7 | `--compile=min -O0`, final `Pkg.test()` | 157 | 37.03 s |
+| Julia 1.12.7 | `--compile=min -O0`, earlier `Pkg.test()` | 157 | 37.03 s |
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 222-assertion package bodies took11.4/11.1 s onJulia1.12.7/1.13.1.
+The current 224-assertion package bodies took11.5/10.6 s onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. Logs and actual exit-zero receipts are
-`test/tmp/ordinary_default_222_{112,113}_20261011.*`. The same252 Source files
-remained frozen throughout both calls. Only two file-merge and two read-only
-CLI assertions were added; periodic Volume, tensor production, native and solver
-campaigns remain opt-in. The preceding214-check bodies took11.1/10.9 s and
+`test/tmp/ordinary_default_224_{112,113}_20261011.*`. The same252 Source files
+remained frozen throughout both calls. The latest increment adds only two cheap
+list/model representation checks. The preceding218-check increment added two
+file-merge and two read-only CLI assertions; periodic Volume, tensor production, native and solver
+campaigns remain opt-in. Portable final224 receipts and Source hashes are also
+committed under `test/artifacts/handoff_20261011`; see the
+[Devin continuation checklist](../DEVIN_HANDOFF.md). The preceding214-check bodies took11.1/10.9 s and
 qualify their own Source. The preceding 209-check
 bodies took 11.1/10.7 s and qualify their own Source. The preceding 207-check
 bodies took 10.1 s on both runtimes and qualify their own Source. The preceding203-check

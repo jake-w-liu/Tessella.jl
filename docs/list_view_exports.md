@@ -6,7 +6,8 @@ coordinates, followed by component/node values for every time step.
 
 TXT writes one numeric row per element/time pair. Each corner contributes
 `step time 0 element x y z value...`. Steps and element ordinals start at zero;
-list times are the step indices. CSV separates the same fields with commas.
+caller-owned implicit list times are the step indices, while imported POS
+records retain their declared physical TIME values. CSV separates the same fields with commas.
 Coordinates and values use 17 significant digits. Scalar, vector and tensor
 records retain 1, 3 and 9 components. TXT/CSV permit mixed component counts,
 so row widths follow each element's shape and component count.
@@ -25,8 +26,10 @@ Payload and format validation occur before opening the destination.
 Public Gmsh 4.15.2 observations write identical whitespace tables for `.txt`,
 `.csv` and `.vtk`. Tessella follows the TXT record layout and deliberately
 emits comma-separated CSV and valid VTK. Those two extension aliases therefore
-do not have byte parity with the pinned SDK. Mixed list/model storage and
-high-order list records remain explicit unsupported export contexts.
+do not have byte parity with the pinned SDK. Internally corrupted mixed
+list/model storage and high-order list records remain unsupported export
+contexts. Valid [representation transitions](view_representations.md) now
+replace inactive storage and export through their actual new representation.
 
 Model-based views use their own [CSV schema and VTK arrays](model_view_exports.md).
 

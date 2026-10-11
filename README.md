@@ -12,15 +12,17 @@ P1–P6 tracks**, with ASCENT meshing capabilities prioritized.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 222 assertions on Julia 1.12.7 and 1.13.1. Ordinary
+suite now passes 224 assertions on Julia 1.12.7 and 1.13.1. Ordinary
 `Pkg.test()` automatically selects minimal compilation; test bodies took
-11.4 and 11.1 seconds. Cold package runs took 45.18 and 38.74 seconds including
+11.5 and 10.6 seconds. Cold package runs took 45.21 and 38.38 seconds including
 precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
 and [test/README.md](test/README.md) describes routine and extended tests.
 [`STATUS.md`](STATUS.md) retains dated verification evidence. Supported runtimes
 remain Julia 1.12.x and 1.13.x.
+The user-requested [Devin handoff](DEVIN_HANDOFF.md) lists all known unfinished
+work, prepared designs, portable evidence and full completion criteria.
 
 The CLI accepts `file.geo -1|-2|-3`, `-o output.msh`, `-format msh2|msh4`
 and `-bin`, with `-clscale`, `-clmin`, `-clmax` and `-order` controls.
@@ -42,13 +44,16 @@ placement and nested instance paths, including proper unit-scale
 [Cartesian targets](docs/step_cartesian_rigid_targets.md).
 [Direct product-usage assemblies](docs/step_relationship_assemblies.md) retain
 actual NAUO/CDSR/IDT placement paths, separate occurrence identities and rigid
-frames in millimetre contexts.
+frames with actual [SI source/placement length conversion](docs/step_relationship_si_units.md).
 [POS list importing](docs/session_pos_import.md) retains all24 plain linear
 record families, names and physical times through atomic open/merge.
 [View time metadata](docs/view_time.md) derives actual counts, selects displayed
 physical times and correctly resets model step bounds after data-kind changes.
+[View representation changes](docs/view_representations.md) replace obsolete
+list/model storage atomically and preserve the view identity and display state.
 One translated copied Surface pair is supported per Region in separate
-[ordinary hybrid components](docs/periodic_hybrid_boundaries.md), and a strictly
+[ordinary hybrid components](docs/periodic_hybrid_boundaries.md), including connected
+Regions with [shared Tri interfaces](docs/shared_periodic_hybrids.md), and a strictly
 interior [embedded Point](docs/embedded_hybrid_points.md) or one connected
 [embedded Line2 Curve](docs/hybrid_embedded_curves.md), or one retained
 [Tri3 Surface](docs/hybrid_embedded_surfaces.md) can be recovered in a convex

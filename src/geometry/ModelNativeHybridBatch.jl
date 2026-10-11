@@ -37,19 +37,40 @@ function _model_native_hybrid_groups(m,regions,input,caller)
     return groups,receipts
 end
 
-# Disjoint periodic Regions consume the same actual Surface copy events as
-# the single-Region producer. The complete lower constructor binding precedes
-# RNG/factory use; coordinates only verify those explicit UID events.
+# Periodic Regions consume actual Surface copy events, including connected
+# Regions with uniquely owned exterior periodic Faces and literal shared Tri
+# interfaces. Complete lower constructor binding precedes RNG/factory use.
 function _model_native_hybrid_batch_periodic_certificate(m,receipt,pairs,optimize_pyramids,caller)
+    joint_bindings=Dict{UInt64,Tuple{UInt64,NTuple{16,Float64}}}()
     for tag in receipt.regions
         constraints=_model_volume_periodic_surface_constraints(m,tag,caller)
         isempty(constraints) && continue
-        length(receipt.regions)==1 && iszero(optimize_pyramids) || throw(ArgumentError(
-            "$caller: periodic hybrid batches require separated Regions and default Pyramid optimization"))
+        iszero(optimize_pyramids) || throw(ArgumentError(
+            "$caller: periodic hybrid batches require default Pyramid optimization"))
+        for constraint in constraints
+            slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
+            get(receipt.face_regions,slave,Int[])==[tag] &&
+                get(receipt.face_regions,master,Int[])==[tag] || throw(ArgumentError(
+                "$caller: periodic hybrid Faces must be uniquely owned exterior boundaries of their selected Region"))
+        end
         constructor=_model_native_hybrid_volume_input(m,tag,receipt.input,caller)
         constructor!==nothing || throw(ArgumentError(
             "$caller: periodic hybrid batch Region lacks its actual lower constructor"))
         _model_native_hybrid_periodic_boundary_certificate(m,tag,constructor,pairs,caller)
+        for constraint in constraints
+            slave=Int(constraint.slave_entity)
+            affine=ntuple(index->Float64(constraint.affine[index]),16)
+            # These events already passed the complete per-Face UID/owner/
+            # ordered-cell and affine constructor certificate above. Shared
+            # boundary vertices must retain a consistent actual copy relation.
+            for (slave_uid,master_uid) in pairs[slave][2]
+                binding=(master_uid,affine)
+                previous=get(joint_bindings,slave_uid,nothing)
+                previous===nothing || previous==binding || throw(ArgumentError(
+                    "$caller: connected periodic copy has conflicting current master UID or affine for a shared slave UID"))
+                joint_bindings[slave_uid]=binding
+            end
+        end
     end
     return nothing
 end

@@ -10,10 +10,13 @@ The transformed shape relationship must name child representation first and
 parent representation second. Its `ITEM_DEFINED_TRANSFORMATION` binds an
 actual `AXIS2_PLACEMENT_3D` item in each corresponding representation. The
 proper rigid transform uses the retained coordinate-frame law
-`R = AᵀB`, `t = Aᵀ(b − a)`. Both representation contexts must be distinct
-three-dimensional instances with the same actual millimetre/radian/steradian
-SI unit references. The solid producer retains source coordinates; other length
-units reject until actual source and placement rescaling is implemented.
+`R = AᵀB`. Both representation contexts must be distinct three-dimensional
+instances with verified actual SI declarations. Source geometry and each frame
+origin now use their own declared length factor; output coordinates use
+millimetres. [SI length transport](step_relationship_si_units.md) documents
+`t = Aᵀ(s_parent*b − s_child*a)` and the source-row conversion. Angular
+declarations remain unprefixed radians/steradians. An optional uncertainty
+measure must retain the literal selected context length-unit reference.
 
 One root product may have direct leaf usages, including repeated uses of the
 same solid definition. Each leaf binds one supported closed solid. The
@@ -21,7 +24,8 @@ importer consumes the complete product, shape, usage, relationship, transform
 and solid inventories before emission. Missing, ambiguous or orphan bindings,
 nested/cyclic usages, mixed mapped-item workflows, reversed relationships,
 unsupported contexts/transforms and touching or overlapping occurrence boxes
-reject explicitly. General STEP assemblies and unit conversion remain open.
+reject explicitly. Nested/general STEP assemblies, conversion-based units and
+ordinary/mapped root unit conversion remain open.
 
 Every occurrence receives separate mesh rows, UIDs and discrete Surface/Region
 owners. Names retain the root product, actual usage and leaf/solid path. Existing
@@ -44,19 +48,21 @@ A separate 0.01695-second opaque centimetre control imports the same stored
 geometry as side-10 solids, with volumes 1000 and x bounds `[30,40]` and
 `[50,60]`. This confirmed that identical context-unit IDs do not justify raw
 coordinate admission outside millimetres. Its receipt is
-`native_relationship_unit_control.json`; the functional suite checks the
-explicit conversion guard before surface emission.
+`native_relationship_unit_control.json`. The subsequent SI producer implements
+the real source/frame conversions; it no longer rejects valid centimetres.
 
 The opt-in functional module is
 `test/geometry/brep_step_relationship_functional_test.jl`. It checks both
 literal imports, analytic corners/volumes, distinct ownership/UIDs, one actual
-fill, MSH4 ASCII/binary transport and malformed graph rejection. All 54
-assertions passed on Julia 1.13.1 with actual exit 0 in 44.03 seconds including
+fill, MSH4 ASCII/binary transport and malformed graph rejection. The preceding
+mm-only Source passed all 54 assertions on Julia 1.13.1 with actual exit 0 in 44.03 seconds including
 loading; the test body took 7.82 seconds. The command used `--compile=min -O0`,
 bounds checks and one thread. The actual receipt is
 `C:/tmp/tessella_step_relationship_assembly_20261011/relationship_113_v1.receipt.json`.
-This bounded functional receipt does not establish optimized compiler or general
-assembly/unit-conversion parity. It adds no default volume run.
+The obsolete centimetre-rejection control now checks an undeclared STEP prefix,
+after the separate 52-assertion SI conversion qualification passed. This bounded
+history does not establish optimized compiler or general assembly/unit-conversion
+parity. It adds no default volume run.
 
 The [STEP relationship schema](https://downloads.steptools.com/docs/stp_aim/html/t_representation_relationship_with_transformation.html)
 declares the distinct-context and transform-item membership requirements.

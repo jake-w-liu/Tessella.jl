@@ -8,13 +8,15 @@ remain **in progress**.
 
 The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
 and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 222 assertions on Julia 1.12.7 and 1.13.1. Ordinary
+suite now passes 224 assertions on Julia 1.12.7 and 1.13.1. Ordinary
 `Pkg.test()` automatically selects minimal compilation; test bodies took
-11.4 and 11.1 seconds. Cold package runs took 45.18 and 38.74 seconds including
+11.5 and 10.6 seconds. Cold package runs took 45.21 and 38.38 seconds including
 precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
 and [test/README.md](test/README.md) describes routine and extended tests.
+The current [Devin checklist](DEVIN_HANDOFF.md) records all known remaining work
+and prepared next designs for the user-requested transfer.
 [`STATUS.md`](STATUS.md) retains dated verification evidence. Supported runtimes
 remain Julia 1.12.x and 1.13.x.
 
@@ -285,8 +287,10 @@ holes. [Mapped STEP occurrences](docs/step_mapped_occurrences.md) additionally
 consume one explicit representation root and nested rigid axis-placement maps,
 including proper [unit-scale Cartesian targets](docs/step_cartesian_rigid_targets.md).
 [Direct product-usage assemblies](docs/step_relationship_assemblies.md) now bind
-complete single-root NAUO/CDSR/IDT graphs and actual rigid frames in millimetre
-contexts. Nested usages, unit conversion, other assembly transformations and
+complete single-root NAUO/CDSR/IDT graphs and actual rigid frames, with
+[SI source/placement length transport](docs/step_relationship_si_units.md) into
+millimetre output coordinates.
+Nested usages, conversion-based units, other assembly transformations and
 analytic Face maps remain open. See
 [mesh import scope](docs/cad_mesh_imports.md). The entity kernel records native
 boxes, cylinders, spheres, cones, toruses, Boolean volumes (operation-time
@@ -1122,10 +1126,12 @@ linked scopes. Translated periodic pairs in separate Region components, the
 explicit tensor API, atomic session merging and read-only CLI mesh checks are
 also implemented. Proper unit-scale Cartesian STEP targets, endpoint-only
 3–6-vertex retained planar sheets and atomic list-POS importing are implemented.
-Direct product-usage STEP assemblies now retain actual rigid placement graphs
-in millimetre contexts. Actual view-time metadata/selection and model-data kind
-reset bounds are implemented. Current isolated work extends SI unit transport,
-shared-interface periodic components and list/model view transitions. Broader
+Direct product-usage STEP assemblies retain actual rigid placement graphs and
+SI source/placement length transport. Actual view-time metadata/selection,
+model-data kind reset bounds and atomic list/model representation replacement
+are implemented. Connected hybrid Regions can retain translated periodic
+copies while sharing literal Tri interfaces. The complete remaining checklist
+and next prepared designs are in [the Devin handoff](DEVIN_HANDOFF.md). Broader
 sheet/metric/native algorithm contexts remain genuine Source work.
 
 Use small functional regressions for routine verification, then normally commit

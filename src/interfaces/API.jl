@@ -9163,14 +9163,21 @@ function _view_add_list_data(tag,data_type,num_ele,data)
             values[i]=_mesh_query_coordinate(value,caller,"data entry")
         end
         type_key=String(data_type)
-        time_plan=_view_list_time_plan(view,type_key,Int(count),values)
-        if !(type_key in view.list_types)
-            push!(view.list_types,type_key)
-        end
-        view.list_counts[type_key]=Int(count)
-        view.list_data[type_key]=values
+        reset_model=view.model_kind!==nothing
+        time_plan=_view_list_time_plan(view,type_key,Int(count),values;reset_model)
+        model_data=reset_model ? empty(view.model_data) : view.model_data
+        model_contexts=reset_model ? empty(view.model_contexts) : view.model_contexts
+        model_ranges=reset_model ? _NativeViewStepRange[] : view.model_step_ranges
+        # Both the incoming payload and replacement storage are prepared before
+        # removing any actual held model binding.
+        view.list_types=time_plan.types
+        view.list_counts=time_plan.counts
+        view.list_data=time_plan.data
         view.list_time=time_plan.time
         time_plan.steps===nothing || (view.numbers["NbTimeStep"]=Float64(time_plan.steps))
+        view.model_data=model_data;view.model_contexts=model_contexts
+        view.model_step_ranges=model_ranges
+        reset_model && (view.model_kind=nothing)
         return nothing
     end
 end
@@ -9180,6 +9187,12 @@ function _view_get_list_data(tag,return_adaptive=false)
     _mesh_query_bool(return_adaptive,caller,"returnAdaptive")
     return lock(STATE_LOCK) do
         view=_session_view(tag,caller)
+        if view.model_kind!==nothing
+            message="View with tag $(Int(tag)) does not contain list data"
+            NATIVE_LOOKUP_QUERY_ERRORS[]+=1;NATIVE_MSG_LAST_ERROR[]=message
+            _native_diagnostic_emit_locked(:error,message)
+            throw(ArgumentError(message))
+        end
         types=copy(view.list_types)
         data=[copy(view.list_data[type_key])
               for type_key in view.list_types]
@@ -9246,10 +9259,14 @@ function _view_add_model_data(tag,step,model_name,data_type,tags,data,
         interpolation=_native_view_interpolation_history(storage.contexts)
         interpolation===nothing && (interpolation=_native_view_interpolation_types(range.model_slot))
         storage.contexts[key]=(model_slot=range.model_slot,time=Float64(time),counts=merged.counts,extent=extent,partitions=partitions,interpolation_msh=interpolation)
+        list_types=String[];list_counts=empty(view.list_counts)
+        list_data=empty(view.list_data);list_time=Float64[]
         view.model_data=storage.data
         view.model_contexts=storage.contexts
         view.model_step_ranges=storage.ranges
         view.model_kind=String(data_type)
+        view.list_types=list_types;view.list_counts=list_counts
+        view.list_data=list_data;view.list_time=list_time
         storage.reset && _native_diagnostic_emit_locked(:warning,"Changing type of view to '$(String(data_type))'")
         warning===nothing || _native_diagnostic_emit_locked(:warning,warning)
         return nothing
