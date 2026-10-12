@@ -85,6 +85,10 @@ add_torus(x,y,z,r1,r2;tag=-1,angle=2*pi,zAxis=Float64[])=_with_model() do m
     Model._model_occ_add_torus!(m,x,y,z,r1,r2;tag,angle,zAxis)
 end
 
+add_wedge(x,y,z,dx,dy,dz;tag=-1,ltx=0.,zAxis=Float64[])=_with_model() do m
+    Model._model_occ_add_wedge!(m,x,y,z,dx,dy,dz;tag,ltx,zAxis)
+end
+
 add_rectangle(x,y,z,dx,dy;tag=-1,roundedRadius=0.)=_with_model() do m
     Model._model_occ_add_rectangle!(m,x,y,z,dx,dy;tag,
                                     rounded_radius=roundedRadius)

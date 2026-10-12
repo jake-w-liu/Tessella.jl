@@ -898,6 +898,25 @@ torus, arc/ellipse/spline lengths, holed planes, quadric faces,
 transformed entities, degenerate/empty/non-1:3 dims and the
 rejection paths, plus an `occ_measures_smoke` default check.
 
+The ninth GEO01 slice followed: `add_wedge` in
+`src/geometry/ModelOCCVolumeShapes.jl` — `BRepPrimAPI_MakeWedge`
+through `BRepPrim_Wedge`'s trapezoid profile
+(0,0)→(dx,0)→(ltx,dz)→(0,dz) in the `gp_Ax2(p,zAxis)` local xz-plane,
+extruded `dy` along local +y. `ltx==0` collapses the top edge into the
+ridge vertex — the triangular 5-face layout — and `ltx≠0` gives the
+truncated 6-face layout, covering the `ltx==dx` box limit and `ltx>dx`
+overhangs; signed extents wind outward-consistent through a
+shoelace/`dy`-sign traversal rule that the per-face Newell assertion
+verifies like `add_box`. The all-plane graph publishes atomically, so
+`get_mass` reports `dy·dz·(dx+ltx)/2` exactly and `generate(3)`
+tetrahedralizes through the explicit-surface path; zero extents reject
+"Degenerate wedge" and `zAxis` keeps `add_torus`'s strict 3-vector
+contract. `test/interfaces/api_occ_wedge_test.jl` pins the graph
+layout, analytic volume/centroid, normals, signed extents, zAxis
+frames, validation/atomicity, recursive-removal loop cleanup,
+transform visibility and end-to-end meshing, plus an `occ_wedge_smoke`
+default check.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

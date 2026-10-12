@@ -61,6 +61,14 @@ Local receipts on 2026-10-13, with bounds checks; only the marked
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 85.5 s | 369 | ~88 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 85.0 s | 369 | ~120 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 88.7 s | 369 | ~92 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 90.8 s | 369 | ~124 s |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 83.1 s | 364 | ~86 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 83.8 s | 364 | ~119 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 87.2 s | 364 | ~90 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 89.1 s | 364 | ~122 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 80.8 s | 357 | ~84 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 82.6 s | 357 | ~117 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 82.8 s | 357 | ~86 s |
@@ -202,6 +210,19 @@ The current assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds a
+compact OCC wedge check (`occ_wedge_smoke`: a standard `add_wedge`
+synchronized into its trapezoid-prism volume and centroid, plus a
+truncated `ltx>0` wedge) — the
+`test/interfaces/api_occ_wedge_test.jl` file covers the
+`BRepPrim_Wedge` profile: the `ltx==0` triangular-ridge 5-face
+layout, the `ltx≠0` truncated 6-face layout, the `ltx==dx` box limit,
+`ltx>dx` overhangs, signed extents with outward-consistent winding,
+`zAxis` frames, analytic `get_mass`/`get_center_of_mass` values
+(`dy·dz·(dx+ltx)/2`), outward normal sets, manifold edge sharing,
+"Degenerate wedge"/finite/`zAxis`/tag validation with failure
+atomicity, recursive-removal surface-loop cleanup, kernel-side
+transform visibility before `synchronize` and end-to-end `generate(3)`
+tetrahedralization. The preceding increment adds a
 compact OCC measure check (`occ_measures_smoke`: an `add_box` and
 `add_cylinder` with analytic volumes and centroids plus a line's
 arclength midpoint) — the

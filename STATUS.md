@@ -898,6 +898,30 @@ sector, arc/ellipse/spline lengths, holed planes, quadric faces,
 transformed entities, degenerate/empty/non-1:3 dims, loud rejections)
 plus an `occ_measures_smoke` default check.
 
+### GEO01 slice 9 — `occ.add_wedge` (2026-10-14)
+
+The ninth GEO01 slice adds `model.occ.add_wedge(x,y,z,dx,dy,dz;
+tag=-1,ltx=0,zAxis=[])` — `BRepPrimAPI_MakeWedge` through
+`BRepPrim_Wedge`'s trapezoid profile (0,0)→(dx,0)→(ltx,dz)→(0,dz) in the
+`gp_Ax2(p,zAxis)` local xz-plane, extruded `dy` along local +y. `ltx==0`
+collapses the top profile edge into the ridge vertex — a triangular
+profile (6 vertices, 9 edges, 5 wires, 5 plane faces) — while `ltx≠0`
+gives the 8-vertex/12-edge/6-face truncated layout, including the
+`ltx==dx` box limit and `ltx>dx` overhangs. Winding is derived
+deterministically from the profile shoelace and `dy` signs so signed
+extents stay outward-consistent — the per-face Newell normal is checked
+against the geometric outward direction like `add_box`'s internal
+assertion, which caught a `sign(dy)`-vs-`sign(shoelace)` mix-up in the
+first draft. The all-plane graph publishes atomically through the same
+pending-`bind` machinery, so `get_mass` reports the trapezoid-prism
+volume `dy·dz·(dx+ltx)/2` exactly and `generate(3)` tetrahedralizes the
+volume through the explicit-surface path. Zero extents reject
+"Degenerate wedge" upstream-style; `zAxis` keeps the strict finite
+3-vector contract `add_torus` documented (upstream silently defaults a
+wrong-size vector — noted divergence). Verified by
+`test/interfaces/api_occ_wedge_test.jl` plus an `occ_wedge_smoke`
+default check.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

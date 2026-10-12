@@ -17,6 +17,14 @@
 # primitive, and the whole graph — 8 vertices, 12 edges, 6 wires, 6
 # plane faces with `lin2d` pcurves, shell, solid — publishes atomically
 # like `makeRectangle`/`makeDisk`.
+#
+# `gmsh.model.occ.addWedge(x,y,z,dx,dy,dz,tag=-1,ltx=0,zAxis)` —
+# `BRepPrimAPI_MakeWedge`: the xz trapezoid (0,0)→(dx,0)→(ltx,dz)→(0,dz)
+# in the `gp_Ax2(p,zAxis)` frame, extruded `dy` along +y. `ltx==0`
+# collapses the top edge into the ridge vertex — a triangular profile,
+# 5 faces rather than 6 — and `ltx==dx` reproduces the box layout. A
+# zero extent rejects as "Degenerate wedge"; `zAxis` follows the same
+# strict 3-vector contract as `add_torus`.
 
 function _model_occ_add_surface_loop!(m::GeoModel,face_tags;tag=-1,
                                       sewing=false)
@@ -161,6 +169,160 @@ function _model_occ_add_box!(m::GeoModel,x,y,z,dx,dy,dz;tag=-1)
     push!(pending,(-2,kernel.maxima[1]+1,shell_id,
         _ModelOCCShape(-2,(uses=uses,),face_ids)))
     solid_id=ids[34]
+    push!(pending,(3,allocated,solid_id,
+        _ModelOCCShape(3,(kind=:solid,),UInt64[shell_id])))
+    for (dimension,tag,id,shape) in pending
+        _model_occ_bind_shape!(kernel,dimension,tag,id,shape)
+    end
+    kernel.next_shape=solid_id+UInt64(1)
+    return allocated
+end
+
+function _model_occ_add_wedge!(m::GeoModel,x,y,z,dx,dy,dz;
+                               tag=-1,ltx=0.0,zAxis=Float64[])
+    caller="OCC.add_wedge"
+    kernel=m.occ_kernel
+    allocated=_model_occ_next_tag(kernel,3,
+        _model_occ_requested_tag(tag,caller),caller)
+    haskey(kernel.bindings,(3,allocated)) && throw(ArgumentError(
+        "$caller: OCC Volume[$allocated] already exists"))
+    corner=_finite3(x,y,z,caller)
+    ex=_finite_scalar(dx,caller,"dx")
+    ey=_finite_scalar(dy,caller,"dy")
+    ez=_finite_scalar(dz,caller,"dz")
+    lt=_finite_scalar(ltx,caller,"ltx")
+    (ex==0.0 || ey==0.0 || ez==0.0) && throw(ArgumentError(
+        "$caller: Degenerate wedge"))
+    axis_dir=if isempty(zAxis)
+        (0.0,0.0,1.0)
+    else
+        length(zAxis)==3 || throw(ArgumentError(
+            "$caller: zAxis must be a 3-vector"))
+        dir=_finite3(zAxis[1],zAxis[2],zAxis[3],caller)
+        _occ_modulus(dir)>0 || throw(ArgumentError(
+            "$caller: zAxis must have positive length"))
+        _occ_dir(dir)
+    end
+    Xf,Yf=_occ_ax2_frame(axis_dir)
+    world(lx,ly,lz)=_occ3_add(corner,_occ3_add(
+        _occ3_scale(Xf,lx),_occ3_add(_occ3_scale(Yf,ly),
+                                     _occ3_scale(axis_dir,lz))))
+    # BRepPrim_Wedge profile in the local xz plane, extruded along +y.
+    # ltx==0 merges the top vertices into the ridge — a triangle.
+    profile=lt==0.0 ? ((0.0,0.0),(ex,0.0),(0.0,ez)) :
+                      ((0.0,0.0),(ex,0.0),(lt,ez),(0.0,ez))
+    k=length(profile)
+    shoelace=sum(profile[i][1]*profile[mod1(i+1,k)][2]-
+                 profile[mod1(i+1,k)][1]*profile[i][2] for i in 1:k)
+    # Traversal sign: wound as (a0→b0→b1→a1) a side quad's Newell is
+    # left-normal·dy — outward exactly when sign(dy·shoelace)<0.
+    side_forward=sign(ey*shoelace)<0
+    cap0_forward=sign(shoelace)==sign(ey)
+    nverts,nedges,nfaces=2k,3k,k+2
+    kernel.maxima[3]<=typemax(Int32)-nverts || throw(ArgumentError(
+        "$caller: OCC vertex tag allocation exceeds Int32"))
+    kernel.maxima[4]<=typemax(Int32)-nedges || throw(ArgumentError(
+        "$caller: OCC curve tag allocation exceeds Int32"))
+    kernel.maxima[2]<=typemax(Int32)-nfaces || throw(ArgumentError(
+        "$caller: OCC wire tag allocation exceeds Int32"))
+    kernel.maxima[5]<=typemax(Int32)-nfaces || throw(ArgumentError(
+        "$caller: OCC surface tag allocation exceeds Int32"))
+    kernel.maxima[1]<=typemax(Int32)-1 || throw(ArgumentError(
+        "$caller: OCC surface loop tag allocation exceeds Int32"))
+    ids=_model_occ_reserve_shapes(kernel,nverts+nedges+2nfaces+2,caller)
+    vertex_ids=ids[1:nverts]
+    edge_ids=ids[nverts+1:nverts+nedges]
+    wire_ids=ids[nverts+nedges+1:nverts+nedges+nfaces]
+    face_ids=ids[nverts+nedges+nfaces+1:nverts+nedges+2nfaces]
+    shell_id=ids[end-1]
+    solid_id=ids[end]
+    pending=Tuple{Int,Int,UInt64,_ModelOCCShape}[]
+    for i in 1:k
+        for (ring,ly) in ((0,0.0),(k,ey))
+            px,pz=profile[i]
+            push!(pending,(0,kernel.maxima[3]+ring+i,vertex_ids[ring+i],
+                _ModelOCCShape(0,(point=world(px,ly,pz),mesh_size=0.0),
+                               UInt64[])))
+        end
+    end
+    for j in 1:k
+        a,b=j,mod1(j+1,k)
+        pa,pb=profile[a],profile[b]
+        for (ring,ly) in ((0,0.0),(k,ey))
+            w0=world(pa[1],ly,pa[2]); w1=world(pb[1],ly,pb[2])
+            diff=_arc_sub(w1,w0)
+            push!(pending,(1,kernel.maxima[4]+ring+j,edge_ids[ring+j],
+                _ModelOCCShape(1,(kind=:line,geometry=
+                    (occ=:line,origin=w0,dir=_occ_dir(diff),
+                     t0=0.0,t1=_occ_modulus(diff))),
+                    UInt64[vertex_ids[ring+a],vertex_ids[ring+b]])))
+        end
+        w0=world(pa[1],0.0,pa[2]); w1=world(pa[1],ey,pa[2])
+        diff=_arc_sub(w1,w0)
+        push!(pending,(1,kernel.maxima[4]+2k+j,edge_ids[2k+j],
+            _ModelOCCShape(1,(kind=:line,geometry=
+                (occ=:line,origin=w0,dir=_occ_dir(diff),
+                 t0=0.0,t1=_occ_modulus(diff))),
+                UInt64[vertex_ids[a],vertex_ids[k+a]])))
+    end
+    # Wire order lists, signed edge ids: k profile edges per ring, then k
+    # extrusion edges; -k walks edge k against its stored direction.
+    wires=Vector{Int}[]
+    for j in 1:k
+        a,b=j,mod1(j+1,k)
+        push!(wires,side_forward ?
+            [j,2k+b,-(k+j),-(2k+a)] : [2k+a,k+j,-(2k+b),-j])
+    end
+    order=collect(1:k)
+    cap0=cap0_forward ? order : [-e for e in Iterators.reverse(order)]
+    push!(wires,cap0)
+    ring=order.+k
+    cap1=!cap0_forward ? ring : [-e for e in Iterators.reverse(ring)]
+    push!(wires,cap1)
+    shape_index=Dict{UInt64,_ModelOCCShape}()
+    for (_,_,id,shape) in pending
+        shape_index[id]=shape
+    end
+    edge_tag_of=Dict{UInt64,Int}(edge_ids[i]=>kernel.maxima[4]+i
+                                 for i in 1:nedges)
+    for (index,loop) in enumerate(wires)
+        uses=Tuple{UInt64,Bool}[(edge_ids[abs(e)],e<0) for e in loop]
+        push!(pending,(-1,kernel.maxima[2]+index,wire_ids[index],
+            _ModelOCCShape(-1,(uses=uses,),UInt64[u[1] for u in uses])))
+    end
+    shape_of=id->get(shape_index,id) do
+        kernel.shapes[id]
+    end
+    tag_of=id->get(()->_model_occ_shape_tag(kernel,id,caller),
+                   edge_tag_of,id)
+    for (index,loop) in enumerate(wires)
+        uses=Tuple{UInt64,Bool}[(edge_ids[abs(e)],e<0) for e in loop]
+        geometry=_model_occ_plane_face_geometry(
+            shape_of,tag_of,[uses],caller)
+        # Outward check like add_box: side faces read the profile-edge
+        # left normal with the traversal sign; caps follow ∓sign(dy)·Y.
+        if index<=k
+            a,b=index,mod1(index+1,k)
+            p=profile[b][1]-profile[a][1]; q=profile[b][2]-profile[a][2]
+            s=sign(shoelace)
+            s==0.0 && continue
+            nlocal=(q*s,0.0,-p*s)
+            m=_occ_modulus(nlocal)
+            m==0.0 && continue
+            intended=_occ3_add(_occ3_scale(Xf,nlocal[1]/m),
+                _occ3_scale(axis_dir,nlocal[3]/m))
+        else
+            intended=_occ3_scale(Yf,index==k+1 ? -sign(ey) : sign(ey))
+        end
+        _dot3(geometry.axis,intended)>0.999 || throw(ArgumentError(
+            "$caller: internal wedge face winding is inconsistent"))
+        push!(pending,(2,kernel.maxima[5]+index,face_ids[index],
+            _ModelOCCShape(2,(kind=:plane,geometry=geometry),
+                           UInt64[wire_ids[index]])))
+    end
+    uses=Tuple{UInt64,Bool}[(fid,false) for fid in face_ids]
+    push!(pending,(-2,kernel.maxima[1]+1,shell_id,
+        _ModelOCCShape(-2,(uses=uses,),face_ids)))
     push!(pending,(3,allocated,solid_id,
         _ModelOCCShape(3,(kind=:solid,),UInt64[shell_id])))
     for (dimension,tag,id,shape) in pending
