@@ -579,6 +579,41 @@ assemblies emit all shared interfaces correctly; poke-through and
 face-touching mutants reject under both fills. The focused assembly file
 passes 202/202; the default smoke gained a compact nested check.
 
+Transversal-boundary fragments followed (the fifth CAD05 slice): two
+solid boundaries crossing transversally now fragment into certified
+Regions instead of rejecting. The certificate collects an exact rational
+intersection segment per straddling facet pair — edge-plane pierces,
+on-plane vertices and proper edge-edge crossings as candidates, both
+triangles required to straddle the other's plane, every candidate
+required collinear on the chosen segment — defers other non-legitimate
+contacts and admits them only when all their contact points lie on the
+collected polyline (curve pass-throughs at shared rims). `_brep_cut_surface`
+then retriangulates every affected or endpoint-grazed facet with the
+`Mesh2D` Delaunay kernel: intersection segments insert as internal
+constraints, segment endpoints propagate onto facet edges on both sides
+(exact 3-D rational on-segment tests) so shared rims split identically,
+and pieces whose rational vertices are exactly collinear drop as
+materialization slivers. Each surviving piece classifies against every
+other shell by a fixed set of interior ray-parity probes — disagreeing
+probes throw rather than misclassify — pieces regroup by containment
+signature, and the pseudo-region shells recurse through the ordinary
+assembly where their coincident interface facets weld like any
+conforming contact; `fill=true` runs the joint conforming fill once so
+interfaces triangulate identically by construction. Two predicate fixes
+ride along: a segment lying on a triangle edge line can never enter the
+strict interior (the midpoint test no longer trusts a Float64 landing
+one ulp inside), and a shell wrapped entirely in shared interfaces with
+no free vertex decides enclosure by probing non-coincident facet
+interiors instead of failing "coincide everywhere". Verified on the new
+`brep_crossing_boxes.step` fixture — three Regions, two shared Surfaces,
+22 nodes, exact volumes 0.875/0.875/0.125 under `fill=false` and
+`fill=true` — plus corner-inside, thin-pierce and poke-through mutants
+whose three-Region products tile exactly and MSH4 round-trip entity
+preservation; coplanar overlaps, T-junctions, and crossings mixed with
+coincident welds or enclosures still reject. Coplanar/general
+intersections, arbitrary CAD transforms, Booleans and imprints remain
+CAD05.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

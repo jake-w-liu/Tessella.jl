@@ -26,15 +26,22 @@ import verbatim, and with `fill=true` one joint conforming fill —
 surfaces ordered innermost first — tiles each Region exactly while the
 enclosed boundary welds into a shared Surface bound by both Regions.
 Direct containment only welds an interface; a transitively enclosed
-solid has no interface with the outermost container. Filled solids weld
+solid has no interface with the outermost container. Boundaries crossing
+transversally fragment: exact rational intersection segments between
+straddling facet pairs cut both shells (facet retriangulation with the
+2-D Delaunay kernel, segment constraints and mirrored rim endpoints),
+each cut piece classifies against the other solids by interior
+containment probes, and pieces regroup by containment signature into
+Regions — A only, B only, A∩B — that weld at their coincident cut
+interfaces under either fill mode. Filled solids weld
 only
 when both
 independent fills emit the identical interface triangulation; a facet
 shared by three solids, a fill crossing the interface rim, and
 non-coincident touching or intersecting boundary facets (partial overlap,
 T-junction or partial-edge contact, same-region duplication) all reject,
-as does partial interpenetration — some free vertices inside, some
-outside — and an enclosed solid sharing any boundary contact. Genuinely
+as does a crossing mixed with coincident welds or enclosure in one
+assembly — and an enclosed solid sharing any boundary contact. Genuinely
 disjoint solids are admitted. Boxes are never used to discover, split or
 replace source roots. Point-cloud box imports retain their original single-solid behavior.
 Multi-root IGES identities must be positive, odd, unique and consistent with

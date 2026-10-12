@@ -174,9 +174,22 @@ end
         # Tet vertex (1,0,0) lands inside the box's x=1 face: vertex contact.
         write(path,shifted_box(source,(1.,-0.4,-0.4),(2.,0.4,0.4)))
         @test_throws ArgumentError import_step(path;fill=false)
-        # Box corner enters the tet interior: shells interpenetrate.
+        # Box corner enters the tet interior: the shells cross transversally
+        # and fragment into tet-only, box-only and intersection Regions. The
+        # intersection is the 0.4-edge tetrahedron at the inner box corner.
         write(path,shifted_box(source,(0.2,0.2,0.2),(0.8,0.8,0.8)))
-        @test_throws ArgumentError import_step(path;fill=false)
+        for fill in (false,true)
+            m=import_step(path;fill)
+            @test m isa E.MixedMesh && MT.validate(m).ok
+            @test Set(keys(m.entity_data.entities))==Set(
+                [(2,t) for t in 1:5] ∪ [(3,t) for t in 1:3])
+            fill || continue
+            measured,positive=volumes(m)
+            @test positive
+            @test isapprox(measured[1],0.156;atol=1e-12) &&
+                  isapprox(measured[2],0.216-0.4^3/6;atol=1e-12) &&
+                  isapprox(measured[3],0.4^3/6;atol=1e-12)
+        end
         # Box sits entirely inside the tet: enclosure without facet contact
         # is a nested assembly — under fill the enclosed boundary welds into
         # a shared Surface and both Regions tile the volume exactly.
@@ -194,10 +207,22 @@ end
         # Box edge runs along a tet edge segment: edge-only contact.
         write(path,shifted_box(source,(0.3,-0.2,-0.2),(0.7,0.,0.)))
         @test_throws ArgumentError import_step(path;fill=false)
-        # A thin box piercing the slant face without covering a vertex:
-        # non-coincident penetration remains rejected.
+        # A thin box piercing the slant face without covering a vertex
+        # crosses it transversally: the fragments admit as a three-Region
+        # product whose pieces tile both source volumes exactly.
         write(path,shifted_box(source,(0.4,-0.1,0.4),(0.6,0.1,0.6)))
-        @test_throws ArgumentError import_step(path;fill=false)
+        for fill in (false,true)
+            m=import_step(path;fill)
+            @test m isa E.MixedMesh && MT.validate(m).ok
+            @test Set(keys(m.entity_data.entities))==Set(
+                [(2,t) for t in 1:5] ∪ [(3,t) for t in 1:3])
+            fill || continue
+            measured,positive=volumes(m)
+            @test positive
+            @test isapprox(measured[1],1/6-0.007/6;atol=1e-12) &&
+                  isapprox(measured[2],0.008-0.007/6;atol=1e-12) &&
+                  isapprox(measured[3],0.007/6;atol=1e-12)
+        end
         # A box corner coinciding with the tet vertex (1,0,0) is conforming
         # vertex-only contact: admitted unwelded — each solid keeps its own
         # coincident boundary node and no shared entity is created.
@@ -378,10 +403,11 @@ end
     @test all(e->e==(2,3),
         (data.node_entities[row] for row in axes(mesh.coords,2)
          if all(c->1.0<=c<=3.0,mesh.coords[:,row])))
-    # A solid poking through the container's face and one merely touching it
-    # are not enclosed: both reject, under either fill mode. Shifting the
-    # inner solid's x coordinates — largest first so a produced coordinate
-    # never collides with a pending replacement — rebuilds each mutant.
+    # A solid merely touching the container's face coplanarly is not enclosed
+    # and rejects; one poking through is a transversal crossing and admits as
+    # a fragment. Shifting the inner solid's x coordinates — largest first so
+    # a produced coordinate never collides with a pending replacement —
+    # rebuilds each mutant.
     source=read(joinpath(FIXTURES,"brep_nested.step"),String)
     inner=["(1.,1.,1.)","(3.,1.,1.)","(3.,3.,1.)","(1.,3.,1.)",
            "(1.,1.,3.)","(3.,1.,3.)","(3.,3.,3.)","(1.,3.,3.)"]
@@ -397,10 +423,78 @@ end
     end
     mktempdir() do directory
         path=joinpath(directory,"shift.step")
-        write(path,shift(1.0))   # inner face touches the container's face
+        write(path,shift(1.0))   # inner face coplanar with the container's face
         @test_throws ArgumentError import_step(path;fill=false)
         @test_throws ArgumentError import_step(path;fill=true)
-        write(path,shift(2.0))   # inner pokes through the container's face
+        # The inner solid pokes through the container's face: a transversal
+        # crossing fragments the pair into outside-only, inside-only and
+        # intersection Regions tiling both volumes.
+        write(path,shift(2.0))
+        for fill in (false,true)
+            m=import_step(path;fill)
+            @test m isa E.MixedMesh && MT.validate(m).ok
+            @test Set(keys(m.entity_data.entities))==Set(
+                [(2,t) for t in 1:5] ∪ [(3,t) for t in 1:3])
+            fill || continue
+            measured,positive=volumes(m)
+            @test positive
+            @test isapprox(measured[1],60.0;atol=1e-12) &&
+                  isapprox(measured[2],4.0;atol=1e-12) &&
+                  isapprox(measured[3],4.0;atol=1e-12)
+        end
+    end
+end
+
+@testset "transversal crossings fragment into region products" begin
+    # Unit box A and box B shifted by (0.5,0.5,0.5) interpenetrate: the two
+    # boundaries cross along a closed polyline and the assembly admits as
+    # three Regions — A only, B only, A∩B — welded at shared interface
+    # Surfaces. Volumes 7/8 + 7/8 + 1/8 tile the union exactly.
+    file="brep_crossing_boxes.step"
+    mesh=import_step(joinpath(FIXTURES,file);fill=false)
+    @test mesh isa E.MixedMesh
+    @test MT.validate(mesh).ok
+    data=mesh.entity_data
+    @test Set(keys(data.entities))==Set(
+        [(2,t) for t in 1:5] ∪ [(3,t) for t in 1:3])
+    @test sort(data.entities[(3,1)].boundaries)==Int32[1,4]
+    @test sort(data.entities[(3,2)].boundaries)==Int32[2,5]
+    @test sort(data.entities[(3,3)].boundaries)==Int32[3,4,5]
+    @test size(mesh.coords,2)==22
+    @test allunique(eachcol(mesh.coords))
+    @test occursin("∩",mesh.physical_names[(3,3)])
+    counts=Dict{Int32,Int}()
+    for (bi,block) in enumerate(mesh.blocks)
+        block.msh==2 || continue
+        for owner in data.block_entities[bi]
+            counts[owner]=get(counts,owner,0)+1
+        end
+    end
+    # Own-region surfaces carry the outside pieces; the two shared
+    # interface Surfaces carry the coincident cuts once each.
+    @test counts==Dict(Int32(1)=>18,Int32(2)=>18,Int32(4)=>6,Int32(5)=>6)
+    mesh=import_step(joinpath(FIXTURES,file);fill=true)
+    @test mesh isa E.MixedMesh
+    @test MT.validate(mesh).ok
+    data=mesh.entity_data
+    @test Set(keys(data.entities))==Set(
+        [(2,t) for t in 1:5] ∪ [(3,t) for t in 1:3])
+    measured,positive=volumes(mesh)
+    @test positive
+    @test isapprox(measured[1],0.875;atol=1e-12) &&
+          isapprox(measured[2],0.875;atol=1e-12) &&
+          isapprox(measured[3],0.125;atol=1e-12)
+    @test allunique(eachcol(mesh.coords))
+    # Non-transversal contacts are unchanged: B's y faces made coplanar
+    # with A's — a partial coplanar face overlap — still rejects, as does
+    # B touching A's x=1 face over a quad patch.
+    source=read(joinpath(FIXTURES,file),String)
+    mktempdir() do directory
+        path=joinpath(directory,"mutant.step")
+        write(path,replace(replace(source,",0.5,"=>",0.,"),",1.5,"=>",1.,"))
+        @test_throws ArgumentError import_step(path;fill=false)
+        @test_throws ArgumentError import_step(path;fill=true)
+        write(path,replace(replace(source,"(0.5,"=>"(1.,"),"(1.5,"=>"(2.,"))
         @test_throws ArgumentError import_step(path;fill=false)
         @test_throws ArgumentError import_step(path;fill=true)
     end

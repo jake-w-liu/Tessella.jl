@@ -58,6 +58,10 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 78.6 s | 296 | ~81 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 78.0 s | 296 | ~80 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 78.9 s | 296 | ~81 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 77.2 s | 296 | ~79 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 73.8 s | 294 | ~76 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 66.2 s | 294 | ~69 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 73.2 s | 294 | ~75 s |
@@ -147,10 +151,20 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 294-assertion bodies ran onJulia1.12.7/1.13.1.
+The current 296-assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds an
+assembly transversal-crossing check (compact: three Regions welded at two
+shared Surfaces, `valid`,
+`test/fixtures/brep_crossing_boxes.step`) to
+`test/functional/brep_assembly_smoke.jl` and extends the assembly
+functional file to 236 assertions on both runtimes — transversally
+crossing boundaries fragment into containment-signature Regions
+(A only, B only, A∩B) whose coincident cut interfaces weld under both
+fill modes, while coplanar overlaps, T-junctions and
+crossing-plus-weld/enclosure mixtures still reject. The preceding
+increment adds an
 assembly nested-enclosed check (compact: filled product is `valid`,
 enclosed boundary welds into one shared Surface bound by both Regions,
 `test/fixtures/brep_nested.step`) to

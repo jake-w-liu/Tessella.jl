@@ -98,9 +98,9 @@ function _brep_edge_plane_pierce(Ur,ra,rb)
     return ntuple(d->ra[d]+(rb[d]-ra[d])*λ,3)
 end
 
-# Do two closed 3-D segments cross at a point interior to both? Endpoint and
-# collinear touches are handled by the vertex checks and return false here.
-function _brep_segs_cross_3d(a,b,c,d)
+# Where two closed 3-D segments cross at a point interior to both, in exact
+# rationals. Endpoint and collinear touches return nothing here.
+function _brep_segs_cross_point_3d(a,b,c,d)
     ra,rb,rc,rd=_brep_rpoint(a),_brep_rpoint(b),_brep_rpoint(c),_brep_rpoint(d)
     e1=_brep_rsub(rb,ra);e2=_brep_rsub(rd,rc)
     rhs=_brep_rsub(rc,ra)
@@ -110,10 +110,22 @@ function _brep_segs_cross_3d(a,b,c,d)
         μ=(rhs[i]*(-e2[j])-rhs[j]*(-e2[i]))/det
         ν=(e1[i]*rhs[j]-e1[j]*rhs[i])/det
         k=6-i-j
-        ra[k]+μ*e1[k]==rc[k]+ν*e2[k] || return false
-        return 0<μ<1 && 0<ν<1
+        ra[k]+μ*e1[k]==rc[k]+ν*e2[k] || return nothing
+        return (0<μ<1 && 0<ν<1) ? ntuple(x->ra[x]+μ*e1[x],3) : nothing
     end
-    return false
+    return nothing
+end
+# Do two closed 3-D segments cross at a point interior to both? Endpoint and
+# collinear touches are handled by the vertex checks and return false here.
+_brep_segs_cross_3d(a,b,c,d)=_brep_segs_cross_point_3d(a,b,c,d)!==nothing
+
+# Is rational point p on the closed rational segment (a,b)?
+function _brep_rpoint_on_rseg(p,a,b)
+    ab=_brep_rsub(b,a);ap=_brep_rsub(p,a)
+    c=_brep_rcross(ab,ap)
+    (c[1]==0&&c[2]==0&&c[3]==0) || return false
+    t=_brep_rdot(ap,ab);d=_brep_rdot(ab,ab)
+    return 0<=t<=d
 end
 
 # The contact set of two closed triangles: (:none), (:point,[v]),
@@ -168,6 +180,74 @@ function _brep_tris_contact(T,U)
     length(pts)==2 && return (:segment,collect(pts))
     length(pts)==1 && return (:point,collect(pts))
     return (:none,nothing)
+end
+
+# Candidate intersection points of a triangle pair in exact rationals:
+# edge-plane pierces inside the other facet, on-plane vertices inside the
+# other facet, and proper edge-edge crossings. Coplanar arrangements return
+# nothing — they stay on the contact/rejection paths.
+function _brep_tri_candidates(T,U)
+    s=ntuple(i->orient3(U[1],U[2],U[3],T[i]),3)
+    all(==(0),s) && return nothing
+    t=ntuple(j->orient3(T[1],T[2],T[3],U[j]),3)
+    dropT=_brep_coplanar_drop_axis(T);dropU=_brep_coplanar_drop_axis(U)
+    Tr=ntuple(i->_brep_rpoint(T[i]),3)
+    Ur=ntuple(j->_brep_rpoint(U[j]),3)
+    U2r=ntuple(j->_brep_rdrop(Ur[j],dropU),3)
+    T2r=ntuple(i->_brep_rdrop(Tr[i],dropT),3)
+    pts=NTuple{3,Rational{BigInt}}[]
+    for i in 1:3
+        j=i==3 ? 1 : i+1
+        if s[i]*s[j]<0
+            p=_brep_edge_plane_pierce(Ur,Tr[i],Tr[j])
+            _brep_rpoint_in_tri_2d(_brep_rdrop(p,dropU),U2r) && push!(pts,p)
+        end
+        if t[i]*t[j]<0
+            p=_brep_edge_plane_pierce(Tr,Ur[i],Ur[j])
+            _brep_rpoint_in_tri_2d(_brep_rdrop(p,dropT),T2r) && push!(pts,p)
+        end
+        s[i]==0 && _brep_rpoint_in_tri_2d(_brep_rdrop(Tr[i],dropU),U2r) &&
+            push!(pts,Tr[i])
+        t[i]==0 && _brep_rpoint_in_tri_2d(_brep_rdrop(Ur[i],dropT),T2r) &&
+            push!(pts,Ur[i])
+    end
+    for i in 1:3,j in 1:3
+        p=_brep_segs_cross_point_3d(T[i],T[mod1(i+1,3)],U[j],U[mod1(j+1,3)])
+        p===nothing || push!(pts,p)
+    end
+    unique!(pts)
+    return pts
+end
+
+# Transversal tri-tri crossing: when the two planes differ, each triangle
+# straddles the other's plane, and the candidate set spans a segment, return
+# its endpoints as rational points. Every other arrangement (point touches,
+# edge-in-plane, tangent contact) returns nothing — those stay on the
+# contact/rejection paths.
+function _brep_tri_crossing(T,U)
+    s=ntuple(i->orient3(U[1],U[2],U[3],T[i]),3)
+    all(==(0),s)||all(>(0),s)||all(<(0),s) && return nothing
+    t=ntuple(j->orient3(T[1],T[2],T[3],U[j]),3)
+    all(>(0),t)||all(<(0),t) && return nothing
+    # A transversal segment needs each triangle to straddle the other's
+    # plane — one-sided sign patterns are tangent/edge-in-plane contact.
+    (any(>(0),s)&&any(<(0),s)&&any(>(0),t)&&any(<(0),t)) || return nothing
+    pts=_brep_tri_candidates(T,U)
+    (pts===nothing || length(pts)<2) && return nothing
+    # Every candidate lies on the plane-intersection line; the segment's
+    # endpoints are the extremes along its dominant axis.
+    Tr=ntuple(i->_brep_rpoint(T[i]),3)
+    Ur=ntuple(j->_brep_rpoint(U[j]),3)
+    na=_brep_rcross(_brep_rsub(Tr[2],Tr[1]),_brep_rsub(Tr[3],Tr[1]))
+    nb=_brep_rcross(_brep_rsub(Ur[2],Ur[1]),_brep_rsub(Ur[3],Ur[1]))
+    dir=_brep_rcross(na,nb)
+    axis=argmax(abs.((dir[1],dir[2],dir[3])))
+    lo=argmin(p->p[axis],pts);hi=argmax(p->p[axis],pts)
+    lo==hi && return nothing
+    # Every candidate must lie on the segment — a non-collinear contact set
+    # is not a single transversal crossing.
+    all(p->_brep_rpoint_on_rseg(p,lo,hi),pts) || return nothing
+    return lo,hi
 end
 
 # Non-axis-aligned probe directions; a ray that never runs parallel to a facet
@@ -238,9 +318,11 @@ function _brep_certify_disjoint(sa::Mesh,sb::Mesh,na,nb,caller)
     fa=_brep_shell_facets(sa);fb=_brep_shell_facets(sb)
     ba=[_brep_facet_box(F) for F in fa];bb=[_brep_facet_box(F) for F in fb]
     shared=Tuple{Int,Int}[]
+    crossings=Tuple{Int,Int,NTuple{3,Rational{BigInt}},NTuple{3,Rational{BigInt}}}[]
     shared_set=Set{Tuple{Int,Int}}()
     coincident_a=falses(length(fa));coincident_b=falses(length(fb))
     contact_positions=Set{NTuple{3,Float64}}()
+    extra=Tuple{Int,Int}[]
     for ai in eachindex(fa),bi in eachindex(fb)
         _brep_boxes_touch(ba[ai],bb[bi]) || continue
         _brep_coincident_facet(fa[ai],fb[bi]) || continue
@@ -267,11 +349,33 @@ function _brep_certify_disjoint(sa::Mesh,sb::Mesh,na,nb,caller)
             legit=v1 in fa[ai] && v1 in fb[bi] && v2 in fa[ai] && v2 in fb[bi]
             legit && (push!(contact_positions,v1);push!(contact_positions,v2))
         end
-        legit || throw(ArgumentError(
+        legit && continue
+        # A transversal crossing is a fragmentable intersection: record its
+        # segment instead of rejecting. Every other non-conforming contact is
+        # deferred — a corner or diagonal touch that lies on the collected
+        # intersection polyline is conforming by construction; anything else
+        # rejects below.
+        seg=_brep_tri_crossing(fa[ai],fb[bi])
+        seg===nothing || (push!(crossings,(ai,bi,seg[1],seg[2]));continue)
+        push!(extra,(ai,bi))
+    end
+    for (ai,bi) in extra
+        cps=_brep_tri_candidates(fa[ai],fb[bi])
+        oncurve=cps!==nothing && all(p->any(
+            s->_brep_rpoint_on_rseg(p,s[3],s[4]),crossings),cps)
+        oncurve || throw(ArgumentError(
             "$caller: cannot certify independent solids $na and $nb; " *
             "their boundaries touch or intersect"))
     end
-    (isempty(fa)||isempty(fb)) && return shared,nothing
+    (isempty(fa)||isempty(fb)) && return shared,nothing,crossings
+    if !isempty(crossings)
+        # Crossings mixed with coincident facets on the same pair need a
+        # shared-face classification that this slice does not support.
+        isempty(shared) || throw(ArgumentError(
+            "$caller: cannot certify independent solids $na and $nb; " *
+            "their boundaries intersect across coincident facets"))
+        return shared,nothing,crossings
+    end
     # Every referenced vertex off the shared patch is probed: after the pair
     # sweep no free vertex can lie on the other boundary (non-coincident
     # contact already threw), so each is strictly inside or outside. A shell
@@ -303,8 +407,29 @@ function _brep_certify_disjoint(sa::Mesh,sb::Mesh,na,nb,caller)
                 "their boundaries touch or intersect"))
             inside+=1
         end
-        probes==0 && throw(ArgumentError("$caller: cannot certify independent solids $na and $nb; " *
-            "their boundaries coincide everywhere"))
+        # A shell can have no free vertex yet carry non-coincident facets —
+        # a region wrapped in shared interfaces, whose facet interiors still
+        # decide enclosure. A non-coincident facet's interior cannot touch
+        # the other boundary (the pair sweep already classified that), so
+        # strict interior probes are decisive; only when every facet is
+        # coincident is the shell a duplicate or an embedded subshell.
+        if probes==0
+            for column in 1:ntris(surface)
+                coincident[column] && continue
+                probes+=1
+                probe=(node(surface,surface.tris[1,column]).+
+                    node(surface,surface.tris[2,column]).+
+                    node(surface,surface.tris[3,column]))./3
+                state=_brep_point_vs_shell(probe,facets,boxes,caller)
+                state===:outside && continue
+                state===:inside || throw(ArgumentError(
+                    "$caller: cannot certify independent solids $na and $nb; " *
+                    "their boundaries touch or intersect"))
+                inside+=1
+            end
+            probes==0 && throw(ArgumentError("$caller: cannot certify independent solids $na and $nb; " *
+                "their boundaries coincide everywhere"))
+        end
         # A shell wholly inside the other encloses a nested Region; a mix of
         # inside and outside free vertices is interpenetration.
         0<inside<probes && throw(ArgumentError(
@@ -320,12 +445,19 @@ function _brep_certify_disjoint(sa::Mesh,sb::Mesh,na,nb,caller)
     (enclosed===nothing || (isempty(shared) && isempty(contact_positions))) ||
         throw(ArgumentError("$caller: cannot certify independent solids $na and $nb; " *
             "an enclosed solid cannot share boundary contact"))
-    return shared,enclosed
+    return shared,enclosed,crossings
 end
 
 # Does segment (p,q) pass through the strict interior of triangle T2?
 # Boundary-only touches return false.
 function _brep_seg_in_tri_interior_2d(p,q,T2)
+    # A segment lying on an edge line stays on the boundary — it never
+    # enters the strict interior, and Float64 materialization makes its
+    # midpoint test unreliable (a boundary midpoint lands one ulp inside).
+    for i in 1:3
+        a,b=T2[i],T2[mod1(i+1,3)]
+        orient2(a,b,p)==0 && orient2(a,b,q)==0 && return false
+    end
     strict_in(x)=begin
         s1,s2,s3=orient2(T2[1],T2[2],x),orient2(T2[2],T2[3],x),orient2(T2[3],T2[1],x)
         (s1>0&&s2>0&&s3>0)||(s1<0&&s2<0&&s3<0)
@@ -379,22 +511,207 @@ function _brep_tris_overlap_area_2d(T2,U2)
     return false
 end
 
+# A rational intersection vertex materialized in Float64. The same geometric
+# point computed on either side of a crossing pair yields the same rational,
+# so this is also the global dedup key for shared cut vertices.
+@inline _brep_ftuple(p)=(Float64(p[1]),Float64(p[2]),Float64(p[3]))
+
+# Cut one closed boundary along its transversal intersection segments. Facets
+# the curve misses pass through verbatim; a cut facet is retriangulated in its
+# own plane by the 2-D constrained Delaunay kernel — a triangle is its own
+# convex hull, so no boundary constraints are needed, only the interior cut
+# segments. Emitted pieces keep the source facet's winding, and segment
+# endpoints lying on a facet edge are propagated so both incident facets
+# split the shared edge identically.
+function _brep_cut_surface(facets,segs,caller)
+    segends=[x for list in values(segs) for seg in list for x in seg]
+    pieces=NTuple{3,NTuple{3,Float64}}[]
+    for f in eachindex(facets)
+        T=facets[f]
+        list=get(segs,f,nothing)
+        # The curve can graze an edge without entering this facet: a segment
+        # endpoint on a facet edge must split the edge even when the facet
+        # carries no segment, so the shared edge is cut identically on both
+        # incident facets.
+        edgepts=NTuple{3,Rational{BigInt}}[]
+        for (a,b) in ((1,2),(2,3),(3,1))
+            ra=_brep_rpoint(T[a]);rb=_brep_rpoint(T[b])
+            for p in segends
+                _brep_rpoint_on_rseg(p,ra,rb) || continue
+                p in edgepts || push!(edgepts,p)
+            end
+        end
+        if list===nothing && isempty(edgepts)
+            push!(pieces,T);continue
+        end
+        drop=_brep_coplanar_drop_axis(T)
+        p2=function(p)
+            d=_brep_drop(p,drop)
+            (d[1]==0 ? 0.0 : d[1],d[2]==0 ? 0.0 : d[2])
+        end
+        pts=NTuple{3,Float64}[T[1],T[2],T[3]]
+        # Rational representatives for the same points: Float64 rounding can
+        # break exact collinearity, so degeneracy is decided rationally.
+        rkey=Dict{NTuple{2,Float64},NTuple{3,Rational{BigInt}}}(
+            p2(T[k])=>_brep_rpoint(T[k]) for k in 1:3)
+        for p in something(list,Tuple{NTuple{3,Rational{BigInt}},
+                NTuple{3,Rational{BigInt}}}[])
+            pf,qf=_brep_ftuple(p[1]),_brep_ftuple(p[2])
+            pf in pts || push!(pts,pf)
+            qf in pts || push!(pts,qf)
+            rkey[p2(pf)]=p[1];rkey[p2(qf)]=p[2]
+        end
+        for p in edgepts
+            pf=_brep_ftuple(p);pf in pts || push!(pts,pf)
+            rkey[p2(pf)]=p
+        end
+        xs=Float64[p2(p)[1] for p in pts]
+        ys=Float64[p2(p)[2] for p in pts]
+        T2=Mesh2D.delaunay2d(xs,ys)
+        locate=function(p)
+            d=p2(p)
+            findfirst(v->T2.x[v]==d[1]&&T2.y[v]==d[2],Int32(1):T2.nreal)
+        end
+        list===nothing || for (p,q) in list
+            vi=locate(_brep_ftuple(p));vj=locate(_brep_ftuple(q))
+            (vi===nothing || vj===nothing) && throw(ErrorException(
+                "$caller: internal error — cut endpoint missing from the " *
+                "facet triangulation"))
+            vi!=vj && Mesh2D.insert_segment!(T2,vi,vj;internal=true)
+        end
+        m=Mesh2D.to_mesh(T2)
+        keymap=Dict{NTuple{2,Float64},NTuple{3,Float64}}()
+        for p in pts
+            keymap[p2(p)]=p
+        end
+        flip=orient2(_brep_drop(T[1],drop),_brep_drop(T[2],drop),
+            _brep_drop(T[3],drop))<0
+        for t in 1:ntris(m)
+            tri=ntuple(r->keymap[(m.coords[1,m.tris[r,t]],
+                m.coords[2,m.tris[r,t]])],3)
+            # Cut endpoints collinear on a facet edge can make the kernel
+            # emit a sliver that is degenerate in exact arithmetic; it
+            # carries no surface and its edges are subsumed by the fine
+            # split, so it is dropped.
+            r1,r2,r3=ntuple(r->rkey[(m.coords[1,m.tris[r,t]],
+                m.coords[2,m.tris[r,t]])],3)
+            _brep_rcross(_brep_rsub(r2,r1),_brep_rsub(r3,r1))==(0,0,0) &&
+                continue
+            push!(pieces,flip ? (tri[1],tri[3],tri[2]) : tri)
+        end
+    end
+    return pieces
+end
+
+# Transversal crossings fragment the crossed boundaries: every affected facet
+# is cut along its exact rational intersection segments, each resulting piece
+# is classified against every other solid, and the pieces regroup into region
+# shells — a piece on surface i inside exactly the solids in C borders region
+# C∪{i} on its outward side and region C on its inward side. The region shells
+# share coincident interface facets, so they re-enter the ordinary assembly
+# pipeline where the certificate welds them like any conforming contact.
+function _brep_assembly_fragment(records,fill_solids,crossingmap,caller)
+    n=length(records)
+    facets=[_brep_shell_facets(r.surface) for r in records]
+    boxes=[[_brep_facet_box(F) for F in facets[i]] for i in 1:n]
+    segs=[Dict{Int,Vector{Tuple{NTuple{3,Rational{BigInt}},
+        NTuple{3,Rational{BigInt}}}}}() for _ in 1:n]
+    for ((i,j),list) in crossingmap,(ai,bi,p,q) in list
+        push!(get!(segs[i],ai,Tuple{NTuple{3,Rational{BigInt}},
+            NTuple{3,Rational{BigInt}}}[]),(p,q))
+        push!(get!(segs[j],bi,Tuple{NTuple{3,Rational{BigInt}},
+            NTuple{3,Rational{BigInt}}}[]),(p,q))
+    end
+    regions=Dict{Vector{Int},Vector{Tuple{NTuple{3,NTuple{3,Float64}},Bool}}}()
+    probes=((1,1,1),(3,1,1),(1,3,1),(1,1,3),(2,2,1),(2,1,2),(1,2,2))
+    for i in 1:n
+        pieces=_brep_cut_surface(facets[i],segs[i],caller)
+        for P in pieces
+            # The centroid can land on another surface's facet plane; probe
+            # several strict interior points and take the first decisive one.
+            # Every probe on the boundary means a coincident piece — the
+            # bounded slice rejects it.
+            interior=ntuple(k->(probes[k][1].*P[1].+probes[k][2].*P[2].+
+                probes[k][3].*P[3])./sum(probes[k]),length(probes))
+            C=Int[]
+            for j in 1:n
+                j==i && continue
+                state=:onboundary
+                for p in interior
+                    st=_brep_point_vs_shell(p,facets[j],boxes[j],caller)
+                    st===:onboundary && continue
+                    state===:onboundary && (state=st;continue)
+                    st===state || throw(ArgumentError(
+                        "$caller: inconsistent fragment classification — a " *
+                        "cut piece straddles another surface"))
+                end
+                state===:inside && push!(C,j)
+                # :onboundary can only remain if every probe landed on the
+                # other surface — a genuinely coincident piece.
+                state===:onboundary && throw(ArgumentError(
+                    "$caller: cannot assemble solids; a fragment boundary " *
+                    "piece lies on another solid's surface"))
+            end
+            push!(get!(regions,sort!([C;i]),
+                Tuple{NTuple{3,NTuple{3,Float64}},Bool}[]),(P,false))
+            isempty(C) || push!(get!(regions,C,
+                Tuple{NTuple{3,NTuple{3,Float64}},Bool}[]),(P,true))
+        end
+    end
+    pseudo=NamedTuple{(:name,:surface),Tuple{String,Mesh}}[]
+    for S in sort!(collect(keys(regions));by=s->(length(s),s))
+        tris=regions[S]
+        pos2row=Dict{NTuple{3,Float64},Int32}()
+        conn=Matrix{Int32}(undef,3,length(tris))
+        for (c,(P,rev)) in enumerate(tris)
+            for (k,v) in enumerate(rev ? (3,2,1) : (1,2,3))
+                pos=P[v]
+                row=get!(pos2row,pos) do
+                    Int32(length(pos2row)+1)
+                end
+                conn[k,c]=row
+            end
+        end
+        cm=Matrix{Float64}(undef,3,length(pos2row))
+        for (pos,row) in pos2row
+            cm[1,row]=pos[1];cm[2,row]=pos[2];cm[3,row]=pos[3]
+        end
+        name=join((records[k].name for k in S),"∩")
+        push!(pseudo,(name=name,surface=Mesh(cm;tris=conn)))
+    end
+    # Region fragments share coincident interface facets; the joint fill tags
+    # every region in one conforming tetrahedralization so the welded
+    # interfaces are identical by construction.
+    return _brep_assembly(pseudo,fill_solids,caller;joint_fill=fill_solids)
+end
+
 # Mesh import retains the source solid partition. These are discrete closed
 # boundary entities, not reconstructed analytic CAD Face/Curve parameter maps.
-function _brep_assembly(records,fill_solids,caller)
+function _brep_assembly(records,fill_solids,caller;joint_fill::Bool=false)
     length(records)>1 || throw(ArgumentError("$caller: assembly requires multiple source solids"))
     length(records)<=typemax(Int32) || throw(ArgumentError("$caller: too many source solids"))
     bounds=[bounding_box(record.surface) for record in records]
     weld_pairs=Dict{Tuple{Int,Int},Vector{Tuple{Int,Int}}}()
     nested=Set{Tuple{Int,Int}}()
+    fragment=Dict{Tuple{Int,Int},Vector{Tuple{Int,Int,NTuple{3,Rational{BigInt}},NTuple{3,Rational{BigInt}}}}}()
     for i in 1:length(records)-1,j in i+1:length(records)
         alo,ahi=bounds[i];blo,bhi=bounds[j]
         any(axis->ahi[axis]<blo[axis] || bhi[axis]<alo[axis],1:3) && continue
-        shared,enclosed=_brep_certify_disjoint(records[i].surface,records[j].surface,
+        shared,enclosed,crossings=_brep_certify_disjoint(records[i].surface,records[j].surface,
             records[i].name,records[j].name,caller)
         isempty(shared) || (weld_pairs[(i,j)]=shared)
         enclosed===:a && push!(nested,(i,j))
         enclosed===:b && push!(nested,(j,i))
+        isempty(crossings) || (fragment[(i,j)]=crossings)
+    end
+    if !isempty(fragment)
+        # A crossing pair mixed with a coincident weld or enclosure on ANY
+        # pair needs classifications this bounded slice does not support.
+        (isempty(weld_pairs) && isempty(nested)) || throw(ArgumentError(
+            "$caller: cannot assemble solids; transversal boundary " *
+            "intersections combined with coincident or enclosed solids are " *
+            "not supported"))
+        return _brep_assembly_fragment(records,fill_solids,fragment,caller)
     end
     # Region-tag ordering counts every container of each solid, so the
     # innermost shells tag first. Only direct containment welds an interface:
@@ -411,7 +728,7 @@ function _brep_assembly(records,fill_solids,caller)
     # assemblies take one joint conforming fill — surfaces ordered innermost
     # first so region tags pick the innermost container.
     parts=Mesh[];shells=Matrix{Int32}[]
-    if fill_solids && !isempty(nested)
+    if fill_solids && (!isempty(nested) || joint_fill)
         order=sortperm(depth;rev=true)
         joint=tetrahedralize_conforming_exact(
             [records[i].surface for i in order])
@@ -488,7 +805,9 @@ function _brep_assembly(records,fill_solids,caller)
         block_entities=block_owners,external_element_tags=labels)
     result=MixedMesh(coords,blocks;physical_names=names,entity_data=data,
                      elementary_entities=block_owners)
-    validate(result).ok || throw(ErrorException("$caller: invalid classified assembly product"))
+    report=validate(result)
+    report.ok || throw(ErrorException("$caller: invalid classified assembly product — " *
+        join(report.messages,"; ")))
     return result
 end
 
@@ -723,7 +1042,9 @@ function _brep_assembly_welded(records,parts,shells,bounds,fill_solids,weld_pair
         block_entities=block_owners,external_element_tags=labels)
     result=MixedMesh(coords,blocks;physical_names=names,entity_data=data,
                      elementary_entities=block_owners)
-    validate(result).ok || throw(ErrorException("$caller: invalid classified assembly product"))
+    report=validate(result)
+    report.ok || throw(ErrorException("$caller: invalid classified assembly product — " *
+        join(report.messages,"; ")))
     return result
 end
 

@@ -494,6 +494,38 @@ assemblies emit all interfaces, poke-through and face-touching mutants
 reject — the focused assembly file passes 202/202 and the default smoke
 gained a compact nested check.
 
+### Transversal-boundary fragments in multi-solid CAD assembly (2026-10-12)
+
+Devin landed the fifth CAD05 slice. Two solid boundaries crossing
+transversally now fragment instead of rejecting: the certificate collects
+exact rational intersection segments per facet pair (edge-plane pierces,
+on-plane vertices and proper edge-edge crossings, both triangles required
+to straddle the other's plane, every candidate required collinear on the
+segment), defers other contacts and admits them only when they lie on the
+collected intersection polyline, then `_brep_cut_surface` retriangulates
+each affected or grazed facet with the `Mesh2D` Delaunay kernel —
+segments as internal constraints, endpoints propagated onto facet edges
+on both sides so shared rims split identically, Float64-materialization
+slivers dropped by an exact-rational degeneracy test. Each cut piece
+classifies against every other shell by multi-point interior ray-parity
+probes (inconsistent probes throw rather than misclassify), pieces regroup
+by containment signature into region shells, and the pseudo-records
+re-enter the ordinary assembly recursively where coincident interface
+facets weld like any conforming contact — `fill=false` emits surface
+Regions, `fill=true` runs the joint conforming fill once so interfaces
+triangulate identically by construction. Two predicate fixes ride along:
+a boundary-line segment can never cut a triangle's strict interior
+(`_brep_seg_in_tri_interior_2d` no longer trusts a midpoint that Float64
+lands one ulp inside), and a shell wrapped entirely in shared interfaces
+with no free vertex decides enclosure by probing non-coincident facet
+interiors instead of rejecting as coincident-everywhere. Verified on the
+new `brep_crossing_boxes.step` fixture — three Regions and two shared
+Surfaces under both fills, volumes 0.875/0.875/0.125 exact — plus
+corner-inside, thin-pierce and poke-through mutants whose fragments tile
+exactly; coplanar overlaps, T-junctions, and crossings mixed with
+coincident welds or enclosures still reject. Coplanar/general
+intersections, Booleans and imprints remain CAD05.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

@@ -59,4 +59,13 @@ let mesh=import_step(joinpath(@__DIR__,"..","fixtures","brep_nested.step");fill=
           sort(data.entities[(3,2)].boundaries)==Int32[2,3] &&
           allunique(eachcol(mesh.coords))
 end
+# Transversally crossing boundaries fragment into three Regions welded at
+# two shared interface Surfaces — A only, B only and the intersection.
+let mesh=import_step(joinpath(@__DIR__,"..","fixtures","brep_crossing_boxes.step");fill=false)
+    @test mesh isa Tessella.MixedMesh && validate(mesh).ok
+    data=mesh.entity_data
+    @test Set(keys(data.entities))==Set([(2,t) for t in 1:5] ∪ [(3,t) for t in 1:3]) &&
+          sort(data.entities[(3,3)].boundaries)==Int32[3,4,5] &&
+          allunique(eachcol(mesh.coords))
+end
 end
