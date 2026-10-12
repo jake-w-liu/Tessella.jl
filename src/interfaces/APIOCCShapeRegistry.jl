@@ -56,6 +56,18 @@ add_plane_surface(wire_tags;tag=-1)=_with_model() do m
     Model._model_occ_add_plane_surface!(m,wire_tags;tag)
 end
 
+add_surface_loop(surface_tags;tag=-1,sewing=false)=_with_model() do m
+    Model._model_occ_add_surface_loop!(m,surface_tags;tag,sewing)
+end
+
+add_volume(shell_tags;tag=-1)=_with_model() do m
+    Model._model_occ_add_volume!(m,shell_tags;tag)
+end
+
+add_box(x,y,z,dx,dy,dz;tag=-1)=_with_model() do m
+    Model._model_occ_add_box!(m,x,y,z,dx,dy,dz;tag)
+end
+
 add_rectangle(x,y,z,dx,dy;tag=-1,roundedRadius=0.)=_with_model() do m
     Model._model_occ_add_rectangle!(m,x,y,z,dx,dy;tag,
                                     rounded_radius=roundedRadius)

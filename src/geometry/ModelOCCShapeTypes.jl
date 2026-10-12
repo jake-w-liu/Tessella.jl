@@ -20,12 +20,15 @@ mutable struct _ModelNativeOCCKernel
     next_shape::UInt64
     removed::Set{Tuple{Int,Int}}
     changed::Bool
+    # Synchronize is idempotent: a bound shell maps to one GModel surface
+    # loop for its whole lifetime, so repeated syncs reuse the slot.
+    shell_loops::Dict{UInt64,Int}
 end
 
 _ModelNativeOCCKernel()=_ModelNativeOCCKernel(
     Dict{Tuple{Int,Int},UInt64}(),Dict{UInt64,Tuple{Int,Int}}(),
     Dict{UInt64,_ModelOCCShape}(),ntuple(_->_ModelOCCEntityMap(),6),zeros(Int,6),UInt64(1),
-    Set{Tuple{Int,Int}}(),false)
+    Set{Tuple{Int,Int}}(),false,Dict{UInt64,Int}())
 
 Base.:(==)(a::_ModelNativeOCCKernel,b::_ModelNativeOCCKernel)=
     all(name->getfield(a,name)==getfield(b,name),fieldnames(_ModelNativeOCCKernel))

@@ -55,12 +55,16 @@ same assertions with normal compilation:
 julia --project=. --startup-file=no -O2 -e 'ENV["TESSELLA_TEST_COMPILER"]="optimized"; using Pkg; Pkg.test(; julia_args=["--startup-file=no", "--check-bounds=yes", "-O2"])'
 ```
 
-Local receipts on 2026-10-12, with bounds checks; only the marked
+Local receipts on 2026-10-13, with bounds checks; only the marked
 `test/runtests.jl` rows ran under `julia -t4` to exercise
 `General.NumThreads`, the `Pkg.test()` rows on one Julia thread:
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 95.6 s | 329 | ~128 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 105.3 s | 329 | ~140 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 95.5 s | 329 | ~128 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 94.9 s | 329 | ~127 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 78.6 s | 321 | ~112 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 79.8 s | 321 | ~115 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 88.4 s | 321 | ~92 s |
@@ -186,6 +190,14 @@ The current assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds a
+compact OCC shell/solid check (`occ_volume_smoke`: an `add_box`
+synchronized into one volume, one surface loop, six surfaces, twelve
+curves and eight points, plus a standalone `add_surface_loop`/`add_volume`
+pair) — the `test/interfaces/api_occ_volume_test.jl` file covers
+box topology with shared edges and outward normals, opposite-corner
+signed extents, `Degenerate box` and finite/tag guards, cavity shell
+ordering, idempotent loop synchronization, ownership-aware removal and
+end-to-end `generate(3)` tetrahedral meshing. The preceding increment adds a
 compact OCC ellipse check (`occ_ellipse_smoke`: an `add_ellipse_arc`
 quarter-arc, a full `add_ellipse` and an `add_disk` face synchronized
 into `:ellipse`/`:plane` records with parametrization bounds and

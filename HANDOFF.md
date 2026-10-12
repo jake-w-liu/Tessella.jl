@@ -792,6 +792,24 @@ solver guards, disk topology, pcurve round-trips, transforms, reversed
 holes, coherence merging, projection and end-to-end disk meshing, plus an
 `occ_ellipse_smoke` default check.
 
+The fourth GEO01 slice followed: the shell/solid family `add_surface_loop`,
+`add_volume` and `add_box`. `add_surface_loop` reproduces
+`OCC_Internals::addSurfaceLoop` — `MakeShell` plus FORWARD `AddShellFace`
+over verbatim face tags, with `sewing=true` rejected loudly rather than
+approximated (still genuine GEO01 backlog). `add_volume` reproduces
+`BRepBuilderAPI_MakeSolid` — first shell exterior, further shells cavities.
+`add_box` reproduces `BRepPrimAPI_MakeBox(P1,P2)` — signed extents are
+opposite corners, zero extents reject "Degenerate box" — and publishes the
+whole graph atomically: 8 vertices, 12 shared edges, 6 wires, 6 plane faces
+with asserted outward normals, shell, solid. `synchronize` imports shells
+as `m.surface_loops` through a kernel-side `shell_loops` map (idempotent
+across resyncs, pruned when shells unbind) and solids as `m.volumes` with
+ordered exterior/cavity loops; surface ownership now checks the shell
+parent too. The focused `test/interfaces/api_occ_volume_test.jl` pins
+topology, normals, edge sharing, cavity order, signed extents, guards,
+removal lifecycle and end-to-end `generate(3)` meshing, plus an
+`occ_volume_smoke` default check.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

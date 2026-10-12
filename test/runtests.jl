@@ -73,4 +73,5 @@ include("functional/fixtures.jl")
     include("functional/occ_circle_smoke.jl")
     include("functional/occ_plane_smoke.jl")
     include("functional/occ_ellipse_smoke.jl")
+    include("functional/occ_volume_smoke.jl")
 end

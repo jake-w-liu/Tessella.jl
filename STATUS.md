@@ -731,6 +731,32 @@ axis forms, arc solver guards, disk topology and pcurve round-trips,
 transform/reverse and coherence behavior, projection/bounding box,
 end-to-end disk meshing) plus an `occ_ellipse_smoke` default check.
 
+### GEO01 slice 4 — OCC shell/solid endpoints (2026-10-13)
+
+The fourth GEO01 slice adds `model.occ`'s shell/solid family:
+`add_surface_loop`, `add_volume` and `add_box`. `add_surface_loop` mirrors
+`OCC_Internals::addSurfaceLoop` — `BRepPrim_Builder::MakeShell` plus FORWARD
+`AddShellFace` over verbatim face tags (no `abs`, deferring manifold
+validity) — with `sewing=true` (`BRepBuilderAPI_Sewing`) rejected loudly
+rather than approximated; it remains genuine GEO01 backlog. `add_volume`
+mirrors `BRepBuilderAPI_MakeSolid` — the first shell is the exterior and
+further shells are cavities, with empty shell lists accepted like upstream.
+`add_box` mirrors `BRepPrimAPI_MakeBox(P1,P2)` — signed extents act as
+opposite corners and zero extents reject "Degenerate box" — publishing the
+complete sub-entity graph atomically: 8 vertices, 12 shared line edges, 6
+wires, 6 plane faces whose Newell normals are asserted outward against the
+intended axis, one shell, one solid. `synchronize` imports shells as
+`m.surface_loops` (a kernel-side `shell_loops` map keeps repeated syncs
+idempotent and prunes loops whose shells were unbound) and solids as
+`m.volumes[tag] = [exterior loop, cavity loops...]`. Face ownership now
+includes the shell parent (`_model_occ_shape_is_owned` maps surfaces to
+dimension -2), matching the existing wire/edge owned-shape convention.
+Verified by the focused `test/interfaces/api_occ_volume_test.jl`
+(topology, outward normals, shared-edge counting, cavity ordering, signed
+extents, tag collision/degenerate/finite guards, removal lifecycle,
+end-to-end `generate(3)` tetrahedral meshing) plus an `occ_volume_smoke`
+default check.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

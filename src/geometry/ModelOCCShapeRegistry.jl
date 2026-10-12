@@ -215,6 +215,36 @@ function _model_occ_synchronize!(m::GeoModel)
             imported=true
         end
     end
+    # OCC shells are dim -2 in the shape namespace; each becomes a GModel
+    # surface loop (signed member faces) consumed by the solid arm. The
+    # kernel-side map keeps the binding stable across repeated syncs. A
+    # shell unbound since the last import leaves with its GModel loop.
+    shell_loops=kernel.shell_loops
+    for (id,loop) in collect(shell_loops)
+        haskey(kernel.shapes,id) && continue
+        delete!(shell_loops,id)
+        delete!(m.surface_loops,loop)
+    end
+    for ((dimension,tag),id) in sort!(collect(kernel.bindings);by=first)
+        dimension==-2 || continue
+        haskey(shell_loops,id) && continue
+        shape=kernel.shapes[id]
+        signed=Int[(reverse ? -1 : 1)*_model_occ_shape_tag(kernel,fid,caller)
+                   for (fid,reverse) in shape.geometry.uses]
+        loop=_alloc_surface_loop_tag(m,0,caller)
+        m.surface_loops[loop]=signed
+        shell_loops[id]=loop
+        imported=true
+    end
+    for ((dimension,tag),id) in sort!(collect(kernel.bindings);by=first)
+        dimension==3 || continue
+        haskey(m.volumes,tag) || haskey(m.discrete,(3,tag)) || begin
+            shape=kernel.shapes[id]
+            m.volumes[tag]=Int[shell_loops[sid] for sid in shape.children]
+            m.next_tag[4]=max(m.next_tag[4],tag)
+            imported=true
+        end
+    end
     kernel.changed=false
     return imported || !isempty(removed)
 end
@@ -229,7 +259,8 @@ end
 
 function _model_occ_shape_is_owned(kernel,id)
     dimension=kernel.shapes[id].dimension
-    owner_dimension=dimension==0 ? 1 : dimension in (-1,1) ? 2 : 3
+    owner_dimension=dimension==0 ? 1 : dimension in (-1,1) ? 2 :
+                    dimension==2 ? -2 : 3
     for ((d,_),parent) in kernel.bindings
         d==owner_dimension || continue
         _model_occ_contains_shape(kernel,parent,id) && return true
