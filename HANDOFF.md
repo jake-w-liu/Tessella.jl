@@ -451,6 +451,22 @@ bare-Tet4 probe covers the generic producer. Focused checks pass 364/364
 on Julia 1.13.1 (28 new assertions); the default smoke gained a periodic
 testset. PART01 remains open for order ≥4 cells and parallel production.
 
+The parallel-production slice is also landed: `General.NumThreads` is now
+a live option (Gmsh 4.15.2 observed default 1) requesting workers for
+both partition producers' O(cells) extraction stages — volume-facet
+derivation, signed-volume positivity, surface-border and lower-edge
+extraction, bare-Tet4 interface incidence, per-block incident-entity
+reduction and ghost destination unions. Every stage writes disjoint
+per-index slots merged serially in traversal order (or by
+order-independent `isless` reduction), so the produced mesh is
+byte-identical under any worker count — verified by MSH4 byte comparison
+on both producers under `julia -t4` with real concurrency. Sequential
+certificate, chain, junction and entity-birth stages stay serial.
+Focused checks pass 373/373 on Julia 1.13.1 `-t4` (9 new assertions);
+the default smoke gained a parallel-partition testset. PART01 remains
+open for order ≥4 cells; parallel mesh *generation* (PAR01 producer
+workflows) remains.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

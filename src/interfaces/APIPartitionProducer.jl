@@ -18,6 +18,17 @@ function _partition_bounds(coordinates,rows)
         maximum(coordinates[axis-3,row] for row in rows),6)
 end
 
+# `General.NumThreads` requests the parallel worker count for the O(cells)
+# extraction stages below; `Threads.@threads` caps actual concurrency at the
+# runtime thread pool. Every parallel stage writes disjoint per-index slots
+# and merges serially in the original traversal order, so the produced mesh
+# is identical under any requested worker count.
+function _partition_workers()
+    requested=get(OPTIONS,"General.NumThreads",1.0)
+    (isfinite(requested) && requested>=2.0) || return 1
+    return Int(requested)
+end
+
 function _partition_tet_snapshot(model,cached,class,caller)
     class!==nothing && class.public_tags!==nothing || throw(ArgumentError(
         "$caller: topology and ghosts require actual classified UID authority"))
@@ -125,13 +136,36 @@ function _partition_tet_production_plan(model,cached,class,count,assignment,call
     end
     element_uids=copy(source.uids);maximum_uid=ELEMENT_TAG_MAX[]
     if topology
+        workers=_partition_workers()
+        cell_facets=Vector{Vector{Tuple{NTuple{3,UInt64},NamedTuple}}}(undef,total)
+        facet_keys=((1,3,2),(1,2,4),(2,3,4),(3,1,4))
+        if workers>1
+            Threads.@threads for index in 1:total
+                entries=Tuple{NTuple{3,UInt64},NamedTuple}[]
+                for face in facet_keys
+                    rows=ntuple(slot->source.cells[face[slot],index],3)
+                    uids=ntuple(slot->source.public.node_tags[rows[slot]],3)
+                    key=Tuple(sort!(collect(uids)))
+                    push!(entries,(key,(;rows,uids,index,child=cell_owners[index])))
+                end
+                cell_facets[index]=entries
+            end
+        else
+            for index in 1:total
+                entries=Tuple{NTuple{3,UInt64},NamedTuple}[]
+                for face in facet_keys
+                    rows=ntuple(slot->source.cells[face[slot],index],3)
+                    uids=ntuple(slot->source.public.node_tags[rows[slot]],3)
+                    key=Tuple(sort!(collect(uids)))
+                    push!(entries,(key,(;rows,uids,index,child=cell_owners[index])))
+                end
+                cell_facets[index]=entries
+            end
+        end
         incidence=Dict{NTuple{3,UInt64},Vector{NamedTuple}}();order=NTuple{3,UInt64}[]
-        for index in 1:total,face in ((1,3,2),(1,2,4),(2,3,4),(3,1,4))
-            rows=ntuple(slot->source.cells[face[slot],index],3)
-            uids=ntuple(slot->source.public.node_tags[rows[slot]],3)
-            key=Tuple(sort!(collect(uids)))
+        for index in 1:total,(key,hit) in cell_facets[index]
             haskey(incidence,key) || push!(order,key)
-            push!(get!(()->NamedTuple[],incidence,key),(;rows,uids,index,child=cell_owners[index]))
+            push!(get!(()->NamedTuple[],incidence,key),hit)
         end
         grouped=Dict{Tuple{Int32,Int32},Vector{NamedTuple}}()
         for key in order
@@ -185,8 +219,21 @@ function _partition_tet_production_plan(model,cached,class,count,assignment,call
     if ghosts
         node_parts=[Set{Int32}() for _ in 1:nnodes(cached)]
         for index in 1:total,row in source.cells[:,index];push!(node_parts[row],assignment[index]);end
-        destinations=[Set{Int32}() for _ in 1:total]
-        for index in 1:total,row in source.cells[:,index];union!(destinations[index],node_parts[row]);end
+        workers=_partition_workers()
+        destinations=Vector{Set{Int32}}(undef,total)
+        if workers>1
+            Threads.@threads for index in 1:total
+                parts=Set{Int32}()
+                for row in source.cells[:,index];union!(parts,node_parts[row]);end
+                destinations[index]=parts
+            end
+        else
+            for index in 1:total
+                parts=Set{Int32}()
+                for row in source.cells[:,index];union!(parts,node_parts[row]);end
+                destinations[index]=parts
+            end
+        end
         for index in 1:total
             delete!(destinations[index],assignment[index]);isempty(destinations[index]) && continue
             push!(ghost_elements,Elements.MixedGhostElement(index,assignment[index],sort!(collect(destinations[index]))))

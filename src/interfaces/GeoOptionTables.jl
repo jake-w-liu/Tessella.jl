@@ -928,6 +928,7 @@ const _GEO_NUMBER_OPTION_STORAGE=Dict{String,Any}(
     "General.MouseInvertZoom"=>:int,
     "General.MouseSelection"=>:int,
     "General.NoPopup"=>:int,
+    "General.NumThreads"=>:int,
     "General.Orthographic"=>:int,
     "General.PolygonOffsetAlwaysOn"=>:int,
     "General.ProgressMeterStep"=>:int,

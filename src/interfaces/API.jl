@@ -202,6 +202,7 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "General.AbortOnError"=>2.0,
     "General.Terminal"=>1.0,
     "General.Verbosity"=>5.0,
+    "General.NumThreads"=>1.0,
     "Mesh.Algorithm"=>6.0,
     "Mesh.Algorithm3D"=>1.0,
     "Mesh.Optimize"=>1.0,
@@ -820,7 +821,7 @@ function option(name::AbstractString, value::Real)
                         "Mesh.Optimize","Mesh.OptimizeNetgen",
                         "Mesh.PartitionCreateTopology","Mesh.PartitionCreateGhostCells",
                         "Mesh.Binary","PostProcessing.Binary",
-                        "General.Terminal","General.Verbosity")
+                        "General.Terminal","General.Verbosity","General.NumThreads")
             # Gmsh stores `(int)val` — truncation, not a 0/1 restriction.
             v=Float64(_geo_signed_gmsh_int_value(v,"API.option"))
             key=="Mesh.Algorithm3D" && v==2 && (v=1.0)

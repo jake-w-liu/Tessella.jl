@@ -1742,4 +1742,67 @@ end
         A.finalize()
     end
 end
+
+# `General.NumThreads` requests parallel workers for the O(cells) extraction
+# stages in both partition producers; `Threads.@threads` caps actual
+# concurrency at the runtime pool. Every parallel stage writes disjoint
+# per-index slots and merges serially in traversal order, so any worker count
+# must produce the identical partitioned mesh.
+function bare_tet_fixture!()
+    A.finalize();A.initialize();A.model.add("bare tets")
+    A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+    A.model.add_discrete_entity(3,11);A.model.add_discrete_entity(3,22)
+    A.mesh.add_nodes(3,11,[11,12,13,14,15],
+        [0.,0.,0., 1.,0.,0., 0.,1.,0., 0.,0.,1., 0.,0.,-1.])
+    A.mesh.add_elements_by_type(11,4,[501],[11,12,13,14])
+    A.mesh.add_elements_by_type(22,4,[502],[11,13,12,15])
+    A.mesh.generate(3)
+    A.option("Mesh.PartitionCreateTopology",1)
+    A.option("Mesh.PartitionCreateGhostCells",1)
+end
+
+@testset "parallel partition production stays deterministic" begin
+    try
+        last_line=fixture!()
+        A.option("Mesh.PartitionCreateGhostCells",1)
+        A.option("General.NumThreads",1)
+        partition!(last_line)
+        serial=A._cached_mesh_locked("test")
+        @test Tessella.validate(serial).ok
+        serial_records=partition_records(serial)
+        serial_path=joinpath(mktempdir(),"serial.msh");A.write(serial_path)
+        serial_bytes=read(serial_path);rm(serial_path)
+        last_line=fixture!()
+        A.option("Mesh.PartitionCreateGhostCells",1)
+        A.option("General.NumThreads",3)
+        partition!(last_line)
+        threaded=A._cached_mesh_locked("test")
+        @test Tessella.validate(threaded).ok
+        @test partition_records(threaded)==serial_records
+        threaded_path=joinpath(mktempdir(),"threaded.msh");A.write(threaded_path)
+        @test read(threaded_path)==serial_bytes;rm(threaded_path)
+        @test A.model.get_number_of_partitions()==2 &&
+            !isempty(threaded.partition_data.ghost_elements)
+        # The bare Tet4 producer follows the same determinism rule.
+        bare_tet_fixture!()
+        A.option("General.NumThreads",1)
+        A.mesh.partition(2,[501,502],Int32[1,2])
+        bare_one=joinpath(mktempdir(),"bare-serial.msh");A.write(bare_one)
+        one=A._cached_mesh_locked("test")
+        @test Tessella.validate(one).ok
+        bare_bytes=read(bare_one);rm(bare_one)
+        bare_tet_fixture!()
+        A.option("General.NumThreads",4)
+        A.mesh.partition(2,[501,502],Int32[1,2])
+        bare_two=joinpath(mktempdir(),"bare-threaded.msh");A.write(bare_two)
+        two=A._cached_mesh_locked("test")
+        @test Tessella.validate(two).ok
+        @test read(bare_two)==bare_bytes;rm(bare_two)
+        @test two.partition_data.num_partitions==2 &&
+            length(two.partition_data.ghost_elements)==2
+    finally
+        A.option("General.NumThreads",1)
+        A.finalize()
+    end
+end
 end

@@ -370,6 +370,26 @@ The focused partition file adds a 28-assertion periodic testset; the file
 is now **364/364** and the default smoke gained a 3-assertion periodic
 testset. PART01 remains open (order ≥4 cells, parallel production).
 
+### Parallel partition production under `General.NumThreads` (2026-10-12)
+
+Devin landed the next PART01 slice: `General.NumThreads` is now a live
+option (Gmsh 4.15.2 observed default 1) requesting parallel workers for
+both partition producers' O(cells) extraction stages — volume-facet
+derivation, signed-volume positivity, surface-border and lower-edge
+extraction, bare-Tet4 interface incidence, per-block incident-entity
+reduction and ghost destination unions. Every stage writes disjoint
+per-index slots merged serially in traversal order (or by
+order-independent `isless` reduction for incident entities), so the
+produced mesh is byte-identical under any requested worker count —
+verified by MSH4 byte comparison on both producers under `julia -t4`
+with real concurrency. Sequential certificate, chain, junction and
+entity-birth stages stay serial. The focused partition file adds a
+9-assertion parallel-determinism testset (identical `partition_records`
+and MSH4 bytes for `NumThreads=1` vs 3/4 on both producers); the file is
+now **373/373** and the default smoke gained a 3-assertion parallel
+testset. PART01 remains open (order ≥4 cells); parallel mesh *generation*
+(PAR01 producer workflows) remains separate work.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

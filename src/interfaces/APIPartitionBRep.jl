@@ -124,19 +124,41 @@ function _partition_volume_facets(msh)
     return facets
 end
 
-function _partition_brep_surface_borders(faces,caller)
+function _partition_brep_surface_borders(faces,caller;workers=1)
+    face_edges=Vector{Vector{Tuple{Tuple{UInt64,UInt64},Tuple{UInt64,UInt64},
+                                  Union{Nothing,Tuple{Vararg{UInt64}}}}}}(undef,length(faces))
+    if workers>1
+        Threads.@threads for index in eachindex(faces)
+            face=faces[index];corners,e=_partition_surface_shape(face.msh)
+            entries=Tuple{Tuple{UInt64,UInt64},Tuple{UInt64,UInt64},
+                          Union{Nothing,Tuple{Vararg{UInt64}}}}[]
+            for (order,(a,b)) in enumerate(_partition_edge_patterns(face.msh))
+                edge=(face.uids[a],face.uids[b]);key=minmax(edge...)
+                mid=e==0 ? nothing : ntuple(i->face.uids[corners+(order-1)*e+i],e)
+                push!(entries,(key,edge,mid))
+            end
+            face_edges[index]=entries
+        end
+    else
+        for index in eachindex(faces)
+            face=faces[index];corners,e=_partition_surface_shape(face.msh)
+            entries=Tuple{Tuple{UInt64,UInt64},Tuple{UInt64,UInt64},
+                          Union{Nothing,Tuple{Vararg{UInt64}}}}[]
+            for (order,(a,b)) in enumerate(_partition_edge_patterns(face.msh))
+                edge=(face.uids[a],face.uids[b]);key=minmax(edge...)
+                mid=e==0 ? nothing : ntuple(i->face.uids[corners+(order-1)*e+i],e)
+                push!(entries,(key,edge,mid))
+            end
+            face_edges[index]=entries
+        end
+    end
     incidences=Dict{Int32,Dict{Tuple{UInt64,UInt64},Vector{Tuple{UInt64,UInt64}}}}()
     mid_incidences=Dict{Int32,Dict{Tuple{UInt64,UInt64},Vector{Union{Nothing,Tuple{Vararg{UInt64}}}}}}()
-    for face in faces
-        corners,e=_partition_surface_shape(face.msh)
-        for (order,(a,b)) in enumerate(_partition_edge_patterns(face.msh))
-            edges=get!(()->Dict{Tuple{UInt64,UInt64},Vector{Tuple{UInt64,UInt64}}}(),incidences,face.parent)
-            edge=(face.uids[a],face.uids[b]);key=minmax(edge...)
-            push!(get!(()->Tuple{UInt64,UInt64}[],edges,key),edge)
-            mid=e==0 ? nothing : ntuple(i->face.uids[corners+(order-1)*e+i],e)
-            mids=get!(()->Dict{Tuple{UInt64,UInt64},Vector{Union{Nothing,Tuple{Vararg{UInt64}}}}}(),mid_incidences,face.parent)
-            push!(get!(()->Union{Nothing,Tuple{Vararg{UInt64}}}[],mids,key),mid)
-        end
+    for (face,entries) in zip(faces,face_edges),(key,edge,mid) in entries
+        edges=get!(()->Dict{Tuple{UInt64,UInt64},Vector{Tuple{UInt64,UInt64}}}(),incidences,face.parent)
+        push!(get!(()->Tuple{UInt64,UInt64}[],edges,key),edge)
+        mids=get!(()->Dict{Tuple{UInt64,UInt64},Vector{Union{Nothing,Tuple{Vararg{UInt64}}}}}(),mid_incidences,face.parent)
+        push!(get!(()->Union{Nothing,Tuple{Vararg{UInt64}}}[],mids,key),mid)
     end
     borders=Dict{Int32,Dict{Tuple{UInt64,UInt64},Tuple{UInt64,UInt64}}}()
     mid_borders=Dict{Int32,Dict{Tuple{UInt64,UInt64},Union{Nothing,Tuple{Vararg{UInt64}}}}}()
@@ -184,6 +206,7 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
     length(assembly.nodes)==nnodes(cached) && length(assembly.cells)==length(public.element_tags) ||
         throw(ArgumentError("$caller: cached and record BRep rows do not agree"))
     entities,_=_dim01_entities(model,model_entities(model),assembly,eachindex(assembly.nodes))
+    workers=_partition_workers()
     blocks=ElementBlock[];owners=Vector{Int32}[];uids=Vector{UInt64}[]
     faces=NamedTuple[];volumes=NamedTuple[];lines=NamedTuple[];points=NamedTuple[]
     for (msh,dim,offset,cells,classified) in catalog
@@ -199,8 +222,19 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
         end
         if msh in _PARTITION_VOLUME_TYPES
             linear=_partition_linear_base(msh)
-            all(column->Model._volume_cell_signed_volume(cached.coords,cells,column,linear)>0,
-                axes(cells,2)) || throw(ArgumentError(
+            positive=Vector{Bool}(undef,size(cells,2))
+            if workers>1
+                Threads.@threads for column in axes(cells,2)
+                    positive[column]=Model._volume_cell_signed_volume(
+                        cached.coords,cells,column,linear)>0
+                end
+            else
+                for column in axes(cells,2)
+                    positive[column]=Model._volume_cell_signed_volume(
+                        cached.coords,cells,column,linear)>0
+                end
+            end
+            all(positive) || throw(ArgumentError(
                 "$caller: lower BRep needs positive oriented volume cells"))
         end
     end
@@ -276,7 +310,7 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
                 "$caller: declared boundary Point $point does not lie on the actual Curve end"))
         end
     end
-    surface_borders=_partition_brep_surface_borders(faces,caller)
+    surface_borders=_partition_brep_surface_borders(faces,caller;workers)
     used_curves=Set{Int32}()
     for parent in surfaces
         boundary=model.discrete[(2,Int(parent))].boundary
@@ -326,24 +360,74 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
         unique(vcat([collect(cell.rows) for cell in vcat(faces,volumes,lines,points)]...))) ||
         throw(ArgumentError(
             "$caller: referenced lower BRep vertices have inconsistent entity classification"))
+    facet_tables=Dict{Int,Vector{Tuple{Int,Tuple{Vararg{Int}}}}}()
+    for msh in unique(volume.msh for volume in volumes)
+        facet_tables[msh]=_partition_volume_facets(msh)
+    end
+    volume_facets=Vector{Vector{Tuple{Tuple{Vararg{UInt64}},NamedTuple}}}(undef,length(volumes))
+    if workers>1
+        Threads.@threads for index in eachindex(volumes)
+            volume=volumes[index];entries=Tuple{Tuple{Vararg{UInt64}},NamedTuple}[]
+            for (face_msh,pattern) in facet_tables[volume.msh]
+                rows=ntuple(i->volume.rows[pattern[i]],length(pattern))
+                labels=ntuple(i->volume.uids[pattern[i]],length(pattern))
+                push!(entries,(_partition_support(labels),
+                    (;rows,uids=labels,msh=face_msh,volume)))
+            end
+            volume_facets[index]=entries
+        end
+    else
+        for index in eachindex(volumes)
+            volume=volumes[index];entries=Tuple{Tuple{Vararg{UInt64}},NamedTuple}[]
+            for (face_msh,pattern) in facet_tables[volume.msh]
+                rows=ntuple(i->volume.rows[pattern[i]],length(pattern))
+                labels=ntuple(i->volume.uids[pattern[i]],length(pattern))
+                push!(entries,(_partition_support(labels),
+                    (;rows,uids=labels,msh=face_msh,volume)))
+            end
+            volume_facets[index]=entries
+        end
+    end
     facets=Dict{Tuple{Vararg{UInt64}},Vector{NamedTuple}}()
     facet_order=Tuple{Vararg{UInt64}}[]
-    facet_tables=Dict{Int,Vector{Tuple{Int,Tuple{Vararg{Int}}}}}()
-    for volume in volumes,(face_msh,pattern) in
-            get!(()->_partition_volume_facets(volume.msh),facet_tables,volume.msh)
-        rows=ntuple(i->volume.rows[pattern[i]],length(pattern))
-        labels=ntuple(i->volume.uids[pattern[i]],length(pattern))
-        key=_partition_support(labels);haskey(facets,key) || push!(facet_order,key)
-        push!(get!(()->NamedTuple[],facets,key),(;rows,uids=labels,msh=face_msh,volume))
+    for index in eachindex(volumes),(key,hit) in volume_facets[index]
+        haskey(facets,key) || push!(facet_order,key)
+        push!(get!(()->NamedTuple[],facets,key),hit)
     end
     for hits in values(facets)
         length(hits)<=2 || throw(ArgumentError("$caller: lower BRep facet has too many volume carriers"))
         length(hits)==2 && !_partition_cycle_reverse(hits[1].uids,hits[2].uids) &&
             throw(ArgumentError("$caller: shared volume facet has inconsistent winding"))
     end
+    face_edges=Vector{Vector{Tuple{Tuple{UInt64,UInt64},NamedTuple}}}(undef,length(faces))
+    if workers>1
+        Threads.@threads for index in eachindex(faces)
+            face=faces[index];corners,e=_partition_surface_shape(face.msh)
+            entries=Tuple{Tuple{UInt64,UInt64},NamedTuple}[]
+            for (order,(a,b)) in enumerate(_partition_edge_patterns(face.msh))
+                mid=e==0 ? nothing : ntuple(i->(face.uids[corners+(order-1)*e+i],
+                    face.rows[corners+(order-1)*e+i]),e)
+                push!(entries,(minmax(face.uids[a],face.uids[b]),
+                    (uids=(face.uids[a],face.uids[b]),rows=(face.rows[a],face.rows[b]),face,mid)))
+            end
+            face_edges[index]=entries
+        end
+    else
+        for index in eachindex(faces)
+            face=faces[index];corners,e=_partition_surface_shape(face.msh)
+            entries=Tuple{Tuple{UInt64,UInt64},NamedTuple}[]
+            for (order,(a,b)) in enumerate(_partition_edge_patterns(face.msh))
+                mid=e==0 ? nothing : ntuple(i->(face.uids[corners+(order-1)*e+i],
+                    face.rows[corners+(order-1)*e+i]),e)
+                push!(entries,(minmax(face.uids[a],face.uids[b]),
+                    (uids=(face.uids[a],face.uids[b]),rows=(face.rows[a],face.rows[b]),face,mid)))
+            end
+            face_edges[index]=entries
+        end
+    end
     face_support=Dict{Tuple{Vararg{UInt64}},NamedTuple}()
     lower_edges=Dict{Tuple{UInt64,UInt64},Vector{NamedTuple}}()
-    for face in faces
+    for (face,entries) in zip(faces,face_edges)
         key=_partition_support(face.uids)
         haskey(face_support,key) && throw(ArgumentError(
             "$caller: original BRep repeats a Surface cell support"))
@@ -351,12 +435,8 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
         hits=get(facets,key,NamedTuple[])
         !isempty(hits) && any(hit->hit.volume.part==face.part,hits) || throw(ArgumentError(
             "$caller: each lower Surface cell partition must match an actual volume facet carrier"))
-        corners,e=_partition_surface_shape(face.msh)
-        for (order,(a,b)) in enumerate(_partition_edge_patterns(face.msh))
-            mid=e==0 ? nothing : ntuple(i->(face.uids[corners+(order-1)*e+i],
-                face.rows[corners+(order-1)*e+i]),e)
-            push!(get!(()->NamedTuple[],lower_edges,minmax(face.uids[a],face.uids[b])),
-                (uids=(face.uids[a],face.uids[b]),rows=(face.rows[a],face.rows[b]),face,mid))
+        for (edge_key,entry) in entries
+            push!(get!(()->NamedTuple[],lower_edges,edge_key),entry)
         end
     end
     declared=Dict{Int32,Vector{Int32}}();used=Set{Int32}()
@@ -837,18 +917,40 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
     end
     _partition_brep_boundary_certificate(source,children,part_entities,boundaries,interfaces,curves,caller;topology)
     node_owners=copy(class.node_entities)
-    incident=fill((4,Int32(typemax(Int32))),nnodes(cached))
-    incident_par=fill((4,Int32(typemax(Int32))),nnodes(cached))
-    for (block,classified) in zip(blocks,owners),column in axes(block.nodes,2),row in block.nodes[:,column]
-        candidate=(Elements.msh_dimension(block.msh),classified[column])
-        isless(candidate,incident[row]) && (incident[row]=candidate)
-        parameters=class.node_parametric[row]
-        if parameters!==nothing && candidate[1]==length(parameters) &&
-                isless(candidate,incident_par[row])
-            entry=get(part_entities,(candidate[1],Int(candidate[2])),nothing)
-            owner=(class.node_entities[row][1],Int(class.node_entities[row][2]))
-            entry!==nothing && entry.parent==owner && (incident_par[row]=candidate)
+    sentinel=(4,Int32(typemax(Int32)))
+    # Per-block best (lowest-dimension incident entity, parametric-eligible
+    # incident entity) merge by `isless`, so the result is order-independent.
+    partials=Vector{Dict{Int32,Tuple{Tuple{Int,Int32},Tuple{Int,Int32}}}}(undef,length(blocks))
+    incident_block=function (b)
+        block=blocks[b];classified=owners[b];dim=Elements.msh_dimension(block.msh)
+        d=Dict{Int32,Tuple{Tuple{Int,Int32},Tuple{Int,Int32}}}()
+        for column in axes(block.nodes,2),row in block.nodes[:,column]
+            candidate=(dim,classified[column])
+            old=get(d,row,(sentinel,sentinel))
+            best=isless(candidate,old[1]) ? candidate : old[1]
+            parbest=old[2]
+            parameters=class.node_parametric[row]
+            if parameters!==nothing && candidate[1]==length(parameters) &&
+                    isless(candidate,old[2])
+                entry=get(part_entities,(candidate[1],Int(candidate[2])),nothing)
+                owner=(class.node_entities[row][1],Int(class.node_entities[row][2]))
+                entry!==nothing && entry.parent==owner && (parbest=candidate)
+            end
+            d[row]=(best,parbest)
         end
+        return d
+    end
+    workers=_partition_workers()
+    if workers>1
+        Threads.@threads for b in eachindex(blocks);partials[b]=incident_block(b);end
+    else
+        for b in eachindex(blocks);partials[b]=incident_block(b);end
+    end
+    incident=fill(sentinel,nnodes(cached))
+    incident_par=fill(sentinel,nnodes(cached))
+    for d in partials,(row,(c,pc)) in pairs(d)
+        isless(c,incident[row]) && (incident[row]=c)
+        isless(pc,incident_par[row]) && (incident_par[row]=pc)
     end
     for row in eachindex(incident)
         pick=class.node_parametric[row]===nothing ? incident[row] : incident_par[row]
@@ -864,9 +966,19 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
     if ghosts
         node_parts=[Set{Int32}() for _ in 1:nnodes(cached)]
         for volume in source.volumes,row in volume.rows;push!(node_parts[row],volume.part);end
-        destinations=[Set{Int32}() for _ in source.volumes]
-        for (index,volume) in enumerate(source.volumes),row in volume.rows
-            union!(destinations[index],node_parts[row])
+        destinations=Vector{Set{Int32}}(undef,length(source.volumes))
+        if workers>1
+            Threads.@threads for index in eachindex(source.volumes)
+                parts=Set{Int32}()
+                for row in source.volumes[index].rows;union!(parts,node_parts[row]);end
+                destinations[index]=parts
+            end
+        else
+            for index in eachindex(source.volumes)
+                parts=Set{Int32}()
+                for row in source.volumes[index].rows;union!(parts,node_parts[row]);end
+                destinations[index]=parts
+            end
         end
         for (index,volume) in enumerate(source.volumes)
             delete!(destinations[index],volume.part);isempty(destinations[index]) && continue

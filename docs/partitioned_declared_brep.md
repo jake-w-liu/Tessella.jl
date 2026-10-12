@@ -161,12 +161,29 @@ seam Curve or junction Point) and falls back to the original entity when no
 eligible child exists. The `MixedEntityData` length invariant
 (`length(parameters) == entity dim`) therefore holds end to end.
 
+## Parallel production
+
+`General.NumThreads` requests parallel workers for the producers' per-cell
+extraction stages — volume-facet derivation, signed-volume positivity,
+surface-border and lower-edge extraction, interface incidence, per-block
+incident-entity reduction and ghost destinations. `Threads.@threads` caps
+actual concurrency at the runtime thread pool, so the option names a
+requested worker count rather than a guarantee. Every parallel stage
+writes disjoint per-index slots whose partial results merge serially in
+the original traversal order (or by order-independent `isless` reduction
+for incident entities), so the produced mesh — entities, bounds, signed
+boundaries, block and UID layout — is identical under any worker count.
+The default `General.NumThreads=1` keeps production serial, matching the
+observed Gmsh 4.15.2 default. Like Gmsh's int option, `option()` stores a
+truncated signed value (`2.7` stores `2`); non-positive or fractional
+requests below `2` select serial production, and values outside the signed
+32-bit range reject rather than wrapping.
+
 ## Guards and scope
 
 Order ≥4 and incomplete/serendipity high-order cells, already partitioned
-data, seam branches within one
-partition-membership group and actual parallel
-partition algorithms remain guarded or open. Bare meshes without lower
+data and seam branches within one
+partition-membership group remain guarded or open. Bare meshes without lower
 cells still route to the Tet4-only producer and bare non-Tet4 volume meshes
 remain unsupported. `generate` always
 materializes a vertex node plus Point15 cell for every dim-0 entity, so a
