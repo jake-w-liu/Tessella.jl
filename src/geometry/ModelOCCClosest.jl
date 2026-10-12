@@ -15,104 +15,108 @@
 # state.
 
 # Materialize one bound shape (transitively) into the scratch model.
-# `seen` keeps shared subshapes idempotent. Returns the projection units —
-# (dim, tag) pairs `_dist_entity_project` answers — for the input: itself
-# for dims 0:3, member edges for a wire, member faces for a shell.
+# `seen` keeps shared subshapes idempotent while the projection units —
+# (dim, tag) pairs `_dist_entity_project` answers — always enumerate:
+# itself for dims 0:3, member edges for a wire, member faces for a shell.
+# Re-enumerating a seen shape therefore reports units that pair queries
+# (e.g. a wire against one of its own edges) still need.
 function _model_occ_dist_materialize!(sm::GeoModel,kernel,dim,id,
                                       seen::Set{UInt64},caller)
     dim==0 && begin
-        id in seen && return Tuple{Int,Int}[]
-        push!(seen,id)
         tag=_model_occ_shape_tag(kernel,id,caller)
-        sm.points[tag]=kernel.shapes[id].geometry.point
+        id in seen || begin
+            push!(seen,id)
+            sm.points[tag]=kernel.shapes[id].geometry.point
+        end
         return [(0,tag)]
     end
     if dim==1
-        id in seen && return Tuple{Int,Int}[]
-        push!(seen,id)
-        shape=kernel.shapes[id]
         tag=_model_occ_shape_tag(kernel,id,caller)
-        a,b=shape.children
-        sm.curves[tag]=(_model_occ_shape_tag(kernel,a,caller),
-                        _model_occ_shape_tag(kernel,b,caller))
-        sm.curve_types[tag]=shape.geometry.kind
-        sm.curve_geometry[tag]=shape.geometry.geometry
-        _model_occ_dist_materialize!(sm,kernel,0,a,seen,caller)
-        _model_occ_dist_materialize!(sm,kernel,0,b,seen,caller)
+        if !(id in seen)
+            push!(seen,id)
+            shape=kernel.shapes[id]
+            a,b=shape.children
+            sm.curves[tag]=(_model_occ_shape_tag(kernel,a,caller),
+                            _model_occ_shape_tag(kernel,b,caller))
+            sm.curve_types[tag]=shape.geometry.kind
+            sm.curve_geometry[tag]=shape.geometry.geometry
+            _model_occ_dist_materialize!(sm,kernel,0,a,seen,caller)
+            _model_occ_dist_materialize!(sm,kernel,0,b,seen,caller)
+        end
         return [(1,tag)]
     end
     if dim==-1
-        id in seen && return Tuple{Int,Int}[]
-        push!(seen,id)
         units=Tuple{Int,Int}[]
         for (edge_id,_) in kernel.shapes[id].geometry.uses
             append!(units,_model_occ_dist_materialize!(
                 sm,kernel,1,edge_id,seen,caller))
         end
+        push!(seen,id)
         return units
     end
     if dim==2
-        id in seen && return Tuple{Int,Int}[]
-        push!(seen,id)
-        shape=kernel.shapes[id]
         tag=_model_occ_shape_tag(kernel,id,caller)
-        # Edges must be materialized before `_sort_curve_loop` reads
-        # `sm.curves` endpoint pairs.
-        for wire_id in shape.children, (edge_id,_) in
-            kernel.shapes[wire_id].geometry.uses
-            _model_occ_dist_materialize!(sm,kernel,1,edge_id,seen,caller)
+        if !(id in seen)
+            push!(seen,id)
+            shape=kernel.shapes[id]
+            # Edges must be materialized before `_sort_curve_loop` reads
+            # `sm.curves` endpoint pairs.
+            for wire_id in shape.children, (edge_id,_) in
+                kernel.shapes[wire_id].geometry.uses
+                _model_occ_dist_materialize!(sm,kernel,1,edge_id,seen,caller)
+            end
+            loops=Int[]
+            for (index,wire_id) in enumerate(shape.children)
+                wire=kernel.shapes[wire_id]
+                signed=Int[(reverse ? -1 : 1)*_model_occ_shape_tag(
+                               kernel,edge,caller)
+                           for (edge,reverse) in wire.geometry.uses]
+                index>1 && (signed=[-s for s in Iterators.reverse(signed)])
+                ordered=_sort_curve_loop(sm,signed,caller)
+                loop=_alloc_curve_loop_tag(sm,0,caller)
+                sm.loops[loop]=ordered
+                push!(loops,loop)
+            end
+            sm.surfaces[tag]=loops
+            sm.surface_types[tag]=shape.geometry.kind
+            sm.surface_geometry[tag]=shape.geometry.geometry
         end
-        loops=Int[]
-        for (index,wire_id) in enumerate(shape.children)
-            wire=kernel.shapes[wire_id]
-            signed=Int[(reverse ? -1 : 1)*_model_occ_shape_tag(
-                           kernel,edge,caller)
-                       for (edge,reverse) in wire.geometry.uses]
-            index>1 && (signed=[-s for s in Iterators.reverse(signed)])
-            ordered=_sort_curve_loop(sm,signed,caller)
-            loop=_alloc_curve_loop_tag(sm,0,caller)
-            sm.loops[loop]=ordered
-            push!(loops,loop)
-        end
-        sm.surfaces[tag]=loops
-        sm.surface_types[tag]=shape.geometry.kind
-        sm.surface_geometry[tag]=shape.geometry.geometry
         return [(2,tag)]
     end
     if dim==-2
-        id in seen && return Tuple{Int,Int}[]
-        push!(seen,id)
         units=Tuple{Int,Int}[]
         for (face_id,_) in kernel.shapes[id].geometry.uses
             append!(units,_model_occ_dist_materialize!(
                 sm,kernel,2,face_id,seen,caller))
         end
+        push!(seen,id)
         return units
     end
     dim==3 || throw(ArgumentError("$caller: unsupported OCC dimension $dim"))
-    id in seen && return Tuple{Int,Int}[]
-    push!(seen,id)
-    shape=kernel.shapes[id]
     tag=_model_occ_shape_tag(kernel,id,caller)
-    loops=Int[]
-    for shell_id in shape.children
-        signed=Int[(reverse ? -1 : 1)*_model_occ_shape_tag(
-                       kernel,fid,caller)
-                   for (fid,reverse) in
-                       kernel.shapes[shell_id].geometry.uses]
-        for (fid,_) in kernel.shapes[shell_id].geometry.uses
-            _model_occ_dist_materialize!(sm,kernel,2,fid,seen,caller)
+    if !(id in seen)
+        push!(seen,id)
+        shape=kernel.shapes[id]
+        loops=Int[]
+        for shell_id in shape.children
+            signed=Int[(reverse ? -1 : 1)*_model_occ_shape_tag(
+                           kernel,fid,caller)
+                       for (fid,reverse) in
+                           kernel.shapes[shell_id].geometry.uses]
+            for (fid,_) in kernel.shapes[shell_id].geometry.uses
+                _model_occ_dist_materialize!(sm,kernel,2,fid,seen,caller)
+            end
+            loop=_alloc_surface_loop_tag(sm,0,caller)
+            sm.surface_loops[loop]=signed
+            push!(loops,loop)
         end
-        loop=_alloc_surface_loop_tag(sm,0,caller)
-        sm.surface_loops[loop]=signed
-        push!(loops,loop)
-    end
-    sm.volumes[tag]=loops
-    primitive=get(shape.geometry,:primitive,nothing)
-    if primitive!==nothing
-        primitive.occ===:cylinder && (sm.cylinders[tag]=primitive.record)
-        primitive.occ===:sphere && (sm.spheres[tag]=primitive.record)
-        primitive.occ===:cone && (sm.cones[tag]=primitive.record)
+        sm.volumes[tag]=loops
+        primitive=get(shape.geometry,:primitive,nothing)
+        if primitive!==nothing
+            primitive.occ===:cylinder && (sm.cylinders[tag]=primitive.record)
+            primitive.occ===:sphere && (sm.spheres[tag]=primitive.record)
+            primitive.occ===:cone && (sm.cones[tag]=primitive.record)
+        end
     end
     return [(3,tag)]
 end
@@ -197,4 +201,74 @@ function _model_occ_get_closest_entities(m::GeoModel,x,y,z,dim_tags,n)
         append!(coord,(px,py,pz))
     end
     return out_dim_tags,distances,coord
+end
+
+# `gmsh.model.occ.get_distance` — `OCC_Internals::getDistance`: bound checks
+# on both inputs, then `BRepExtrema_DistShapeShape(shape1, shape2)` yields
+# the distance and one attaining point on each shape. Wire and shell inputs
+# expand to their member units and the pairwise minimum stands in for the
+# shape-level extrema. Volume queries follow the codebase's documented
+# convention (inside → 0, the point pair at the interior rep) with a
+# boundary-minimum fallback when ray containment is undecidable — matching
+# upstream's raw extrema answer in the same corner. An unconverged result
+# reports distance −1 like upstream's `!ret → distance = -1`.
+const _OCC_DIST_FAILURE=(-1.0,0.0,0.0,0.0,0.0,0.0,0.0)
+
+function _model_occ_dist_pair_units(sm::GeoModel,a,b,lc,caller)
+    swapped=a>b
+    da,ta,db,tb=swapped ? (b[1],b[2],a[1],a[2]) : (a[1],a[2],b[1],b[2])
+    got=nothing
+    if db==3
+        got=try
+            if da==3
+                _dist_pair(sm,3,ta,3,tb,lc,caller)
+            else
+                _dist_pair(sm,da,ta,3,tb,lc,caller)
+            end
+        catch error
+            error isa InterruptException && rethrow()
+            error isa ErrorException || rethrow()
+            occursin("degenerate",sprint(showerror,error)) || rethrow()
+            da==3 ? _dist_shells_min(sm,ta,tb,lc,caller) :
+                    _dist_volume_boundary_min(sm,tb,da,ta,lc,caller)
+        end
+    else
+        got=_dist_pair(sm,da,ta,db,tb,lc,caller)
+    end
+    sqd,pa,pb=got
+    return swapped ? (sqd,pb,pa) : (sqd,pa,pb)
+end
+
+function _model_occ_get_distance(m::GeoModel,dim1,tag1,dim2,tag2)
+    caller="OCC.get_distance"
+    kernel=m.occ_kernel
+    d1=_model_occ_dimension(dim1,caller)
+    t1=_model_occ_requested_tag(tag1,caller)
+    id1=get(kernel.bindings,(d1,t1),nothing)
+    id1===nothing && throw(ArgumentError(
+        "$caller: Unknown OpenCASCADE entity of dimension $d1 with tag $t1"))
+    d2=_model_occ_dimension(dim2,caller)
+    t2=_model_occ_requested_tag(tag2,caller)
+    id2=get(kernel.bindings,(d2,t2),nothing)
+    id2===nothing && throw(ArgumentError(
+        "$caller: Unknown OpenCASCADE entity of dimension $d2 with tag $t2"))
+    sm=GeoModel();seen=Set{UInt64}()
+    ua=_model_occ_dist_materialize!(sm,kernel,d1,id1,seen,caller)
+    ub=_model_occ_dist_materialize!(sm,kernel,d2,id2,seen,caller)
+    lc=_model_lc(sm)
+    best=Inf;pa=pb=(0.0,0.0,0.0)
+    for a in ua, b in ub
+        got=try
+            _model_occ_dist_pair_units(sm,a,b,lc,caller)
+        catch error
+            error isa InterruptException && rethrow()
+            error isa ErrorException ? nothing : rethrow()
+        end
+        got===nothing && continue
+        sqd,x,y=got
+        sqd<best && (best=sqd;pa=x;pb=y)
+    end
+    (isfinite(best) && all(isfinite,pa) && all(isfinite,pb)) ||
+        return _OCC_DIST_FAILURE
+    return sqrt(best),pa[1],pa[2],pa[3],pb[1],pb[2],pb[3]
 end

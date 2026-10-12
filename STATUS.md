@@ -1005,6 +1005,29 @@ transforms are visible without `synchronize`. Unbound entities report
 Verified by `test/interfaces/api_occ_closest_test.jl` (38 assertions)
 plus an `occ_closest_smoke` default check.
 
+### GEO01 slice 13 — `occ.get_distance` (2026-10-14)
+
+The thirteenth GEO01 slice adds
+`model.occ.get_distance(dim1,tag1,dim2,tag2)` — upstream
+`OCC_Internals::getDistance`. Both inputs validate as bound entities
+(dimension `−2..3`, tags strictly positive integers), each shape
+materializes into a private scratch `GeoModel` through the slice-12
+materializer, and the verified `_dist_pair` machinery evaluates the
+pairwise minimum over the returned query units — wires and shells expand
+to their member curves/faces, solids keep the documented inside→zero
+convention with the boundary-minimum fallback when ray containment is
+undecidable, and a shared subshape still answers against its own parent
+(the materializer re-enumerates units for already-seen bindings). The
+result follows the upstream out-scalar layout
+`(distance, x1,y1,z1, x2,y2,z2)` with ordered point pairs; a pair whose
+projection cannot converge is skipped like upstream's `IsDone` gate and
+a wholly unconverged query reports `distance = −1`. The query mutates
+nothing — bindings, shapes, model entities and tag maxima are
+byte-identical before and after successful and failing calls.
+Verified by `test/interfaces/api_occ_closest_test.jl` (57 assertions
+incl. argument-order, self-distance, shared-subshape, circle/line and
+error-path pins) plus the extended `occ_closest_smoke` default check.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

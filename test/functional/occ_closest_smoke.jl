@@ -20,6 +20,13 @@ let api=Tessella.API
         p=occ.add_point(2.0,0.0,0.0)
         tags,dist,_=occ.get_closest_entities(3.0,0.0,1.0,[(0,p),(3,b)],2)
         @test tags==[(3,b),(0,p)] && dist[1]≈1.0 && dist[2]≈sqrt(2)
+        # `occ.get_distance` — the upstream (distance, x1…z2) layout.
+        q=occ.add_point(6.0,0.0,0.0)
+        d=occ.get_distance(0,q,3,b)
+        @test d[1]≈4.0 && d[2:4]==(6.0,0.0,0.0) && d[5:7]==(2.0,0.0,0.0)
+        @test occ.get_distance(3,b,3,b)[1]==0.0
+        d=occ.get_distance(0,q,3,s)
+        @test d[1]≈2.5 && collect(d[5:7])≈[8.5,0.0,0.0]
     finally
         api.finalize()
     end

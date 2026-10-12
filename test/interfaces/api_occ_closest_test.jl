@@ -160,6 +160,78 @@ end
     @test m.occ_kernel.shapes==before[2]
 end
 
+@testset "occ.get_distance entity pairs" begin
+    occ=_occ_setup()
+    b=occ.add_box(0.0,0.0,0.0, 2.0,3.0,4.0)
+    s=occ.add_sphere(10.0,0.0,0.0, 1.5)
+    p=occ.add_point(6.0,0.0,0.0)
+    # Upstream out-param layout: (distance, x1,y1,z1, x2,y2,z2).
+    @test collect(occ.get_distance(0,p,3,b))≈[4.0,6.0,0.0,0.0,2.0,0.0,0.0]
+    @test collect(occ.get_distance(0,p,3,s))≈[2.5,6.0,0.0,0.0,8.5,0.0,0.0]
+    @test collect(occ.get_distance(3,b,3,s))≈[6.5,2.0,0.0,0.0,8.5,0.0,0.0]
+    # Argument order maps to shape1/shape2 points.
+    d=occ.get_distance(3,b,0,p)
+    @test d[1]≈4.0 && d[2:4]==(2.0,0.0,0.0) && d[5:7]==(6.0,0.0,0.0)
+    # Inside a volume reports zero.
+    pin=occ.add_point(1.0,1.0,1.0)
+    d=occ.get_distance(0,pin,3,b)
+    @test d[1]==0.0 && d[2:4]==(1.0,1.0,1.0)
+    # A point on a face's support plane still answers the boundary
+    # minimum (upstream's extrema never classifies).
+    p2=occ.add_point(3.0,0.0,1.0)
+    @test collect(occ.get_distance(0,p2,3,b))≈[1.0,3.0,0.0,1.0,2.0,0.0,1.0]
+    # Shared subshapes between the inputs: a wire against its own
+    # member edge, a shell against its own face.
+    loops,curves=occ.get_curve_loops(1)
+    @test occ.get_distance(-1,loops[1],1,curves[1][1])[1]==0.0
+    sl,faces=occ.get_surface_loops(b)
+    @test occ.get_distance(-2,sl[1],2,faces[1][1])[1]==0.0
+    # Segment-segment closed form and curved-record pairs.
+    l1p1=occ.add_point(0.0,0.0,10.0);l1p2=occ.add_point(2.0,0.0,10.0)
+    l2p1=occ.add_point(1.0,-1.0,10.0);l2p2=occ.add_point(1.0,1.0,12.0)
+    l1=occ.add_line(l1p1,l1p2);l2=occ.add_line(l2p1,l2p2)
+    d=occ.get_distance(1,l1,1,l2)
+    @test d[1]≈sqrt(0.5) && d[2:4]==(1.0,0.0,10.0) &&
+          d[5:7]==(1.0,-0.5,10.5)
+    c=occ.add_circle(0.0,0.0,15.0,1.0)
+    lp1=occ.add_point(0.0,0.0,20.0);lp2=occ.add_point(1.0,0.0,20.0)
+    d=occ.get_distance(1,c,1,occ.add_line(lp1,lp2))
+    @test d[1]≈5.0
+    # Self distance is zero; member units cover a bound wire.
+    @test occ.get_distance(3,b,3,b)[1]==0.0
+    wpts=[occ.add_point(x,y,20.0) for (x,y) in
+          [(0,0),(2,0),(2,2),(0,2)]]
+    wes=[occ.add_line(wpts[1],wpts[2]),occ.add_line(wpts[2],wpts[3]),
+         occ.add_line(wpts[3],wpts[4]),occ.add_line(wpts[4],wpts[1])]
+    w=occ.add_wire(wes)
+    d=occ.get_distance(-1,w,0,p)
+    # Wire rim at z=20 to (6,0,0): closest member point (2,0,20).
+    @test d[1]≈sqrt(416.0) && d[2:4]==(2.0,0.0,20.0) &&
+          d[5:7]==(6.0,0.0,0.0)
+end
+
+@testset "occ.get_distance errors and isolation" begin
+    occ=_occ_setup()
+    occ.add_box(0.0,0.0,0.0, 1.0,1.0,1.0)
+    @test occursin("Unknown OpenCASCADE entity of dimension 3 with tag 99",
+        _errtext(()->occ.get_distance(3,99,3,1)))
+    @test occursin("Unknown OpenCASCADE entity of dimension 2 with tag 99",
+        _errtext(()->occ.get_distance(3,1,2,99)))
+    @test occursin("OCC dimension must be in -2:3",
+        _errtext(()->occ.get_distance(4,1,3,1)))
+    @test occursin("tag must be an integer",
+        _errtext(()->occ.get_distance(3,1.5,3,1)))
+    # Queries leave registry and model state untouched, errors included.
+    m=A._with_model(identity)
+    before=(copy(m.occ_kernel.bindings),copy(m.occ_kernel.shapes),
+            copy(m.points),copy(m.occ_kernel.maxima))
+    occ.get_distance(3,1,3,1)
+    _errtext(()->occ.get_distance(3,1,0,99))
+    @test m.occ_kernel.bindings==before[1]
+    @test m.occ_kernel.shapes==before[2]
+    @test m.points==before[3] && m.occ_kernel.maxima==before[4]
+end
+
 @testset "occ.get_closest_entities errors" begin
     occ=_occ_setup()
     occ.add_box(0.0,0.0,0.0, 1.0,1.0,1.0)

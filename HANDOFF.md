@@ -1003,6 +1003,31 @@ boundary, wire/shell/surface-iso units), ordering/dedup/`n`
 semantics, errors and state isolation, plus an `occ_closest_smoke`
 default check.
 
+The thirteenth GEO01 slice followed: `get_distance` in the same
+`src/geometry/ModelOCCClosest.jl` — upstream
+`OCC_Internals::getDistance`. Both inputs validate as bound
+entities (`−2..3` dims, positive tags, upstream "Unknown
+OpenCASCADE entity" diagnostics), each shape materializes into a
+private scratch `GeoModel` through the same transitive
+materializer, and `_dist_pair` evaluates the pairwise minimum
+across the returned query units — wires and shells expand to
+member curves/faces, so a bound wire distances correctly against
+one of its own edges (the materializer re-enumerates units for
+already-seen bindings). Solids keep the documented inside→zero
+convention with the boundary-minimum fallback when ray
+containment is undecidable; per-pair projection failures skip
+like upstream's `IsDone` gate and a wholly unconverged query
+reports `distance = −1` with zeroed coordinate placeholders —
+upstream's `!ret → -1` contract. The result emits the
+`(distance, x1,y1,z1, x2,y2,z2)` out-scalar layout with ordered
+point pairs; the query mutates nothing before or after
+successful and failing calls. `api_occ_closest_test.jl` pins
+argument-order symmetry, point→solid/face-support-plane,
+solid↔solid, wire/shell shared-subshape, segment and
+circle↔line pairs, self-distance and error/isolation paths
+(57 assertions in the file), plus the extended
+`occ_closest_smoke` default check.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

@@ -61,6 +61,10 @@ Local receipts on 2026-10-13, with bounds checks; only the marked
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation | 390 | ~185 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation | 390 | ~197 s |
+| Julia 1.13.1 | `test/runtests.jl`, `-O2`, body 181.2 s | 390 | ~181 s |
+| Julia 1.12.7 | `test/runtests.jl`, `-O2`, body 169.2 s | 390 | ~202 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 84.0 s | 387 | ~86 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation | 387 | ~120 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 79.5 s | 387 | ~82 s |
@@ -222,14 +226,21 @@ These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds a
 compact OCC closest-entity check (`occ_closest_smoke`: an `add_box`/
 `add_sphere` pair's sorted distances and closest points, the
-inside-solid zero-distance answer and a vertex-vs-solid ordering) —
+inside-solid zero-distance answer and a vertex-vs-solid ordering —
+plus an `occ.get_distance` block pinning the upstream
+`(distance, x1,y1,z1, x2,y2,z2)` layout, argument ordering, a
+solid self-distance and a sphere radial pair) —
 the `test/interfaces/api_occ_closest_test.jl` file covers upstream
 `getClosestEntities` semantics: the `(distance,(dim,tag,x,y,z))`
 `std::set` ordering with duplicate-input collapse, `n<=0` emitting
 one entry, wire/shell member-minimum dims, plane-face trim
 classification with hole rejection, quadric/NURBS/degenerate/
 `surface_iso` records, kernel-side transform visibility, error paths
-and state isolation. The preceding increment adds a
+and state isolation — and the `getDistance` contract: bound-entity
+validation, the ordered-pair result layout, wire/shell member-unit
+expansion including a wire against its own edge, inside-solid zero
+distance, the face-support-plane fallback, self-distance, the `−1`
+failure convention and call isolation. The preceding increment adds a
 compact OCC spline check (`occ_spline_smoke`: a 4-point
 `add_spline` interpolant's length, a 2-point segment, a closed
 periodic spline, the arity/unknown-point errors and synchronization
