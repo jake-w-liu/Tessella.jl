@@ -85,4 +85,21 @@ let source=read(joinpath(@__DIR__,"..","fixtures","brep_two_boxes.step"),String)
               allunique(eachcol(mesh.coords))
     end
 end
+# An off-plane T-junction imprints: a tet vertex inside the box's top face
+# retessellates the facet around a Steiner vertex, keeping the solids
+# unwelded with their own coincident nodes.
+let source=read(joinpath(@__DIR__,"..","fixtures","brep_disjoint_overlap.step"),String)
+    junction=foldl(replace,[
+        "#1 = CARTESIAN_POINT('',(0.,0.,0.));"=>"#1 = CARTESIAN_POINT('',(0.9,0.9,1.9));",
+        "#2 = CARTESIAN_POINT('',(1.,0.,0.));"=>"#2 = CARTESIAN_POINT('',(1.4,0.9,1.6));",
+        "#3 = CARTESIAN_POINT('',(0.,1.,0.));"=>"#3 = CARTESIAN_POINT('',(0.9,1.4,1.5));",
+        "#4 = CARTESIAN_POINT('',(0.,0.,1.));"=>"#4 = CARTESIAN_POINT('',(0.9,0.9,1.2));"];init=source)
+    mktempdir() do directory
+        path=joinpath(directory,"junction.step");write(path,junction)
+        mesh=import_step(path;fill=false)
+        @test mesh isa Tessella.MixedMesh && validate(mesh).ok &&
+              Set(keys(mesh.entity_data.entities))==Set([(2,1),(3,1),(2,2),(3,2)]) &&
+              !allunique(eachcol(mesh.coords))
+    end
+end
 end

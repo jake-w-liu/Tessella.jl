@@ -44,17 +44,24 @@ sub-segment and edge-plane pierce point enters the 2-D constrained
 Delaunay triangulation, each cell classifies by exact centroid coverage,
 overlap regions emit as oppositely wound coincident pieces that weld like
 conforming contact, and arrangement rim vertices propagate to off-plane
-incident facets so the rebuilt shells stay watertight. Filled solids weld
+incident facets so the rebuilt shells stay watertight. Isolated
+non-coplanar contacts imprint too: a vertex on a foreign face or edge
+becomes a Steiner vertex and a blade edge resting on a face becomes a
+constrained chord sub-edge in every touched facet lacking it, so the
+contact turns conforming and stays unwelded — each solid keeps its own
+coincident node. Filled solids weld
 only
 when both
 independent fills emit the identical interface triangulation; a facet
 shared by three solids, a fill crossing the interface rim,
 coplanar facets overlapping with aligned winding (interpenetration),
-and non-planar non-conforming contacts (same-region duplication,
-off-plane point or skew-edge touches) all reject, as does a crossing
-mixed with a coplanar overlap, coincident weld or enclosure in one
+and contacts without an isolated feature description (same-region
+duplication, non-collinear candidate spreads) all reject, as does a
+crossing mixed with a coplanar overlap, coincident weld, imprint or
+enclosure in one
 assembly — and an enclosed solid sharing any boundary contact. Coplanar
-imprints compose freely with coincident welds and nesting on other
+and isolated imprints compose freely with coincident welds and nesting
+on other
 pairs. Genuinely
 disjoint solids are admitted. Boxes are never used to discover, split or
 replace source roots. Point-cloud box imports retain their original single-solid behavior.

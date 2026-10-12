@@ -58,6 +58,10 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 82.2 s | 301 | ~85 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 83.8 s | 301 | ~87 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 76.8 s | 301 | ~80 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 79.6 s | 301 | ~82 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 91.8 s | 300 | ~94 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 83.5 s | 300 | ~86 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 87.7 s | 300 | ~90 s |
@@ -159,10 +163,19 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 300-assertion bodies ran onJulia1.12.7/1.13.1.
+The current 301-assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
-environment on the same final Source. The latest increment adds a
+environment on the same final Source. The latest increment adds an
+off-plane T-junction check (compact: a tet vertex inside the box's top
+face retessellates the facet around a Steiner vertex, unwelded) to
+`test/functional/brep_assembly_smoke.jl` and extends the assembly
+functional file to 342 assertions on both runtimes — isolated
+non-coplanar contacts imprint points as Steiner vertices and chords as
+constrained sub-edges into every touched facet lacking them, staying
+unwelded with each solid's own coincident node, while same-pair
+crossing+imprint and enclosed-contact mixtures still reject. The
+preceding increment adds a
 coplanar-imprint check (compact: a partial-face overlap welds the exact
 patch into a shared Surface bound by both Regions) to
 `test/functional/brep_assembly_smoke.jl` and extends the assembly

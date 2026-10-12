@@ -659,6 +659,29 @@ focused assembly file passes 315/315. Aligned-winding overlaps
 inputs still reject. Arbitrary-volume Booleans and non-coplanar/curved
 contact classes remain CAD05.
 
+Off-plane T-junction imprints followed (the eighth CAD05 slice): isolated
+non-coplanar contacts — a vertex strictly inside a foreign face or on an
+edge, a blade edge resting on a face — now imprint into the touched
+facets instead of rejecting. `_brep_imprint_classify` reads the deferred
+candidate list: a single point is a vertex-on-boundary feature and a
+two-or-more point set spans the chord of its extremes (the triangle
+intersection is convex; a non-collinear spread still rejects). Each
+feature imprints wherever it is not already topology — points enter
+`_brep_cut_surface` through the new `intpts` channel as Steiner vertices
+and chords insert as constrained sub-edges — while every feature position
+rides `extra_edgepts` so a point on a shared rim splits all incident
+facets and a chord-crossing point discovered on another pair lands inside
+this facet's retessellation for `insert_segment!` to split through.
+`_brep_rpoint_on_facet` tests exact-rational plane and closure so
+off-plane projections never satisfy containment. The rebuilt shells
+recurse through the ordinary certificate; contacts become conforming yet
+stay unwelded (zero area) with each solid keeping its own coincident
+node. Verified on vertex-in-face spikes, an edge-chord blade and
+rim-edge touches under both fills through the STEP path — exact volumes
+preserved, entities separate — plus the mixed crossing+imprint atomic
+rejection on the same pair; the focused assembly file passes 342/342.
+Arbitrary-volume Booleans and curved-surface contacts remain CAD05.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

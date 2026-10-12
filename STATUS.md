@@ -578,6 +578,31 @@ crossing+coplanar and overlap+enclosure still reject atomically.
 Arbitrary-volume Booleans and non-coplanar/curved contact classes remain
 CAD05.
 
+### Off-plane T-junction imprints on CAD assembly imports (2026-10-12)
+
+Devin landed the eighth CAD05 slice — isolated non-coplanar contacts
+imprint into the touched facets. A deferred pair contact that is neither
+a transversal crossing nor coplanar-overlay material now classifies
+through `_brep_imprint_classify`: a single candidate point is a vertex on
+a foreign face or edge, and a two-or-more point candidate set spans the
+chord of its extremes (the triangle intersection is convex). Each feature
+is imprinted where it is not already topology — points become Steiner
+vertices via `_brep_cut_surface`'s new `intpts` channel and chords become
+constrained sub-edges — then every global feature position rides
+`extra_edgepts` so rim-edge carries split all incident facets and a
+chord-crossing point discovered on another pair lands inside this facet's
+retessellation for `insert_segment!` to split through. The rebuilt shells
+recurse through the ordinary certificate so the contacts become
+conforming and stay unwelded (zero area): each solid keeps its own
+coincident boundary node. Exact-rational plane and closure predicates
+(`_brep_rpoint_on_facet`) keep off-plane projections out of the
+containment test. Verified on vertex-in-face spikes, an edge-chord blade
+through both fill modes and STEP import paths, rim-edge touches, the
+mixed crossing+imprint atomic rejection, and the focused assembly file
+342/342; the same-pair crossing+imprint guard and the enclosure-contact
+guard now cover imprint features too. Arbitrary-volume Booleans and
+curved contacts remain CAD05.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

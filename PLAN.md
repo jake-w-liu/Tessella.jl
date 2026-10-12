@@ -324,7 +324,9 @@ certified geometrically independent, conforming-contact-welded, nested
 (enclosed Region with joint filled conforming interfaces), coplanar
 imprinted (non-conforming contacts on one support plane retessellated
 over a shared constrained-Delaunay arrangement into welded coincident
-pieces) or
+pieces), isolated-T-junction imprinted (off-plane vertex or edge contacts
+inserted as Steiner vertices and constrained chords, staying unwelded)
+or
 transversally interpenetrating (cut-facet fragments regrouped into
 containment-signature Regions welded at shared interfaces) return
 classified mixed meshes;

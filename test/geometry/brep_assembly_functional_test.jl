@@ -194,9 +194,22 @@ end
     source=read(fixture,String)
     mktempdir() do directory
         path=joinpath(directory,"mutant.step")
-        # Tet vertex (1,0,0) lands inside the box's x=1 face: vertex contact.
+        # Tet vertex (1,0,0) lands inside the box's x=1 face: an isolated
+        # vertex-in-face T-junction. The touched facet retessellates around
+        # the vertex so the contact becomes conforming; the solids keep
+        # separate Surfaces and Regions over the zero-area touch.
         write(path,shifted_box(source,(1.,-0.4,-0.4),(2.,0.4,0.4)))
-        @test_throws ArgumentError import_step(path;fill=false)
+        for fill in (false,true)
+            m=import_step(path;fill)
+            @test m isa E.MixedMesh && MT.validate(m).ok
+            @test Set(keys(m.entity_data.entities))==Set(
+                [(2,1),(3,1),(2,2),(3,2)])
+            fill || continue
+            measured,positive=volumes(m)
+            @test positive
+            @test isapprox(measured[1],1/6;atol=1e-12) &&
+                  isapprox(measured[2],0.64;atol=1e-12)
+        end
         # Box corner enters the tet interior: the shells cross transversally
         # and fragment into tet-only, box-only and intersection Regions. The
         # intersection is the 0.4-edge tetrahedron at the inner box corner.
@@ -626,6 +639,74 @@ end
                             "(4.,2.,0.)"=>"(1.5,1.,0.)","(3.,2.,0.)"=>"(0.5,1.,0.)",
                             "(3.,0.,1.)"=>"(0.5,0.,1.)","(4.,0.,1.)"=>"(1.5,0.,1.)",
                             "(4.,2.,1.)"=>"(1.5,1.,1.)","(3.,2.,1.)"=>"(0.5,1.,1.)"]))
+        @test_throws ArgumentError import_step(path;fill=false)
+        @test_throws ArgumentError import_step(path;fill=true)
+    end
+end
+
+@testset "off-plane T-junctions imprint isolated contact features" begin
+    # The tet of brep_disjoint_overlap is defined by four poly-loop vertices
+    # (#1-#4), so repositioning them builds arbitrary contact shapes against
+    # the fixed box [0.6,1.2]^3. An edge resting on a face interior is a
+    # chord contact: the touched face retessellates with the chord as a
+    # constrained sub-edge, the contact becomes conforming and stays
+    # unwelded (zero area), and both solids keep their own entities.
+    fixture=joinpath(FIXTURES,"brep_disjoint_overlap.step")
+    source=read(fixture,String)
+    function move_tet(p1,p2,p3,p4)
+        olds=("#1 = CARTESIAN_POINT('',(0.,0.,0.));",
+              "#2 = CARTESIAN_POINT('',(1.,0.,0.));",
+              "#3 = CARTESIAN_POINT('',(0.,1.,0.));",
+              "#4 = CARTESIAN_POINT('',(0.,0.,1.));")
+        out=source
+        for (i,(o,p)) in enumerate(zip(olds,(p1,p2,p3,p4)))
+            out=replace(out,o=>"#$i = CARTESIAN_POINT('',($(p[1]),$(p[2]),$(p[3])));")
+        end
+        return out
+    end
+    mktempdir() do directory
+        path=joinpath(directory,"junction.step")
+        # Edge (#3,#4) lies inside the box's z=1.2 top face; the blade body
+        # sits above the box. Volume det/6 = 0.007875.
+        write(path,move_tet((0.7,0.8,1.9),(1.0,0.95,1.5),
+            (0.7,0.8,1.2),(1.05,0.75,1.2)))
+        for fill in (false,true)
+            mesh=import_step(path;fill)
+            @test mesh isa E.MixedMesh
+            @test MT.validate(mesh).ok
+            data=mesh.entity_data
+            @test Set(keys(data.entities))==Set([(2,1),(3,1),(2,2),(3,2)])
+            # Unwelded contact: each solid keeps its own coincident node.
+            @test !allunique(eachcol(mesh.coords))
+            fill || continue
+            measured,positive=volumes(mesh)
+            @test positive
+            @test isapprox(measured[1],0.007875;atol=1e-12) &&
+                  isapprox(measured[2],0.216;atol=1e-12)
+        end
+        # Vertex #4 lands inside the box's z=1.2 face with the tet above: a
+        # vertex-in-face contact imprinted as a Steiner vertex.
+        write(path,move_tet((0.9,0.9,1.9),(1.4,0.9,1.6),
+            (0.9,1.4,1.5),(0.9,0.9,1.2)))
+        for fill in (false,true)
+            mesh=import_step(path;fill)
+            @test mesh isa E.MixedMesh
+            @test MT.validate(mesh).ok
+            @test Set(keys(mesh.entity_data.entities))==Set(
+                [(2,1),(3,1),(2,2),(3,2)])
+            @test !allunique(eachcol(mesh.coords))
+            fill || continue
+            measured,positive=volumes(mesh)
+            @test positive
+            @test isapprox(measured[1],0.029166666666666653;atol=1e-12) &&
+                  isapprox(measured[2],0.216;atol=1e-12)
+        end
+        # The same blade edge plus a tip (#2) poking through the face into
+        # the box mixes a transversal crossing with the chord imprint — a
+        # composition this bounded implementation cannot classify, so it
+        # rejects atomically.
+        write(path,move_tet((0.7,0.8,1.9),(0.9,0.9,1.0),
+            (0.7,0.8,1.2),(1.05,0.75,1.2)))
         @test_throws ArgumentError import_step(path;fill=false)
         @test_throws ArgumentError import_step(path;fill=true)
     end
