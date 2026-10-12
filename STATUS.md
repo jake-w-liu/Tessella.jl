@@ -286,6 +286,33 @@ gained a 3-assertion junction testset. PART01 remains open
 (periodic/parametric topology, coincident support roles, order ≥3 cells,
 parallel production).
 
+### Coincident interface support in lower-BRep partition production (2026-10-12)
+
+Devin landed the coincident-support slice of PART01: a declared Surface cell
+on a cross-partition volume facet no longer rejects. A public Gmsh 4.15.2
+observation resolves the configuration with two Surface entities carrying
+duplicate cells on one support, which collides with this model's structural
+duplicate-cell certificate; the producer instead lets the original Surface
+child carry the interface role itself — the cell keeps its actual UID and
+ownership, the child merges the complete incident partition membership and
+both Region children bind it through the declared boundary with opposite
+signs. No interface entity or second cell is emitted, both Regions must
+declare the shared Surface (one-sided declarations still reject atomically
+at coverage) and the declared-sign winding checks force opposite signs
+automatically. Declared Curve/Point children on the coincident rim keep
+their roles, and a junction seam carried by the coincident facet binds the
+child through the ordinary border certificate. Deep-debug also caught a
+regression in the earlier `_partition_brep_chains` normalization — closed
+cycles seeded in the reversed direction — fixed by preferring the recorded
+head vertex unless a degree-1 endpoint selects the tail; the legacy
+`api_partition_brep_functional_test.jl` pins the restored seam direction.
+The focused partition file adds a 22-assertion coincident testset (merged
+child, declared rim curves/points, MSH4 round-trips, unpartition, atomic
+one-sided rejection) plus the older tet-only file's positive layout; the
+file is now **296/296** and the default smoke gained a 3-assertion
+coincident testset. PART01 remains open
+(periodic/parametric topology, order ≥3 cells, parallel production).
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

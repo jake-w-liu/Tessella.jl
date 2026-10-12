@@ -219,9 +219,12 @@ junction fans now partition under a manifold rim certificate (each incident
 volume contributes exactly two facets on the edge): junction seams are
 shared by all incident interfaces with Surface-or-Region parents, and
 valence-≥3 seam vertices emit Point15 junction entities with signed
-junction-curve bounds. Order ≥3 and
+junction-curve bounds. A declared Surface cell coinciding with a
+cross-partition facet keeps its cell and UID, merges the incident partition
+membership and binds both Region children with opposite signs — no
+duplicate interface entity or cell is emitted. Order ≥3 and
 incomplete/serendipity high-order cells, periodic/parametric topology,
-coincident-support roles, bare non-Tet4 volumes and
+bare non-Tet4 volumes and
 parallel production remain open.
 
 An explicit [variable-tensor ordinary Surface constructor](docs/metric_model_surfaces.md)

@@ -114,12 +114,30 @@ bounds (+start, −stop); closed chains keep empty bounds. Seam edge
 directions are normalized at chain time so a junction arc mixing carrier and
 interface-derived orientations cannot falsely trip the branching guard.
 
+## Coincident interface support
+
+A declared Surface cell can share its node support with a cross-partition
+volume facet. Public Gmsh 4.15.2 resolves that configuration with two
+Surface entities carrying duplicate cells on the same support — the
+original child and a new interface entity — which collides with this
+model's structural duplicate-cell certificate. The producer instead lets
+the original Surface child carry the interface role itself: the cell keeps
+its actual ownership and UID, the child's partition membership extends to
+the complete incident set and both Region children bind it through the
+declared boundary with opposite signs. No interface entity or second cell
+is emitted for the coincident support. Both Regions must declare the
+shared Surface — each side's coverage certificate requires the facet —
+and the declared-sign winding checks force the two declarations to carry
+opposite signs automatically. Declared Curve and Point children on the
+coincident rim keep their roles, and a junction seam whose edge is carried
+by the coincident facet binds the Surface child through the ordinary
+border certificate.
+
 ## Guards and scope
 
 Order ≥3 and incomplete/serendipity high-order cells, periodic or
 parametric topology, already partitioned data, seam branches within one
-partition-membership group, coincident original/interface support roles
-and actual parallel
+partition-membership group and actual parallel
 partition algorithms remain guarded or open. Bare meshes without lower
 cells still route to the Tet4-only producer and bare non-Tet4 volume meshes
 remain unsupported. `generate` always

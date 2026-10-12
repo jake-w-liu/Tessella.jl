@@ -1223,4 +1223,120 @@ end
         A.finalize()
     end
 end
+
+# Two Regions sharing a facet carried by declared Surface 30: T1=(1,2,3,4) in
+# Region 11 and T2=(1,2,4,5) in Region 12 tile around node 5; surfaces 31-36
+# close the exterior. With rim=true, declared Curves 40-42 and Points 1,2,4
+# bound the shared surface.
+function coincident_fixture!(;rim=false,one_sided=false)
+    A.finalize();A.initialize();A.model.add("coincident")
+    A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+    if rim
+        for tag in (1,2,4);A.model.add_discrete_entity(0,tag);end
+        A.model.add_discrete_entity(1,40,[1,-2]);A.model.add_discrete_entity(1,41,[2,-4])
+        A.model.add_discrete_entity(1,42,[4,-1])
+        A.model.add_discrete_entity(2,30,[40,41,42])
+    else
+        A.model.add_discrete_entity(2,30)
+    end
+    for tag in 31:36;A.model.add_discrete_entity(2,tag);end
+    A.model.add_discrete_entity(3,11,[30,31,32,33])
+    A.model.add_discrete_entity(3,12,one_sided ? [34,35,36] : [-30,34,35,36])
+    coords=[0. 1. 0. 0. .5;0. 0. 1. 0. -.5;0. 0. 0. 1. .2]
+    A.mesh.add_nodes(3,11,1:5,vec(coords))
+    A.mesh.add_elements_by_type(30,2,[601],[1,2,4])
+    A.mesh.add_elements_by_type(31,2,[602],[1,3,2])
+    A.mesh.add_elements_by_type(32,2,[603],[1,4,3])
+    A.mesh.add_elements_by_type(33,2,[604],[4,2,3])
+    A.mesh.add_elements_by_type(34,2,[605],[1,2,5])
+    A.mesh.add_elements_by_type(35,2,[606],[1,5,4])
+    A.mesh.add_elements_by_type(36,2,[607],[5,2,4])
+    if rim
+        for (tag,uid,edge) in ((40,701,[1,2]),(41,702,[2,4]),(42,703,[4,1]))
+            A.mesh.add_elements_by_type(tag,1,[uid],edge)
+        end
+        for (tag,uid,node) in ((1,801,[1]),(2,802,[2]),(4,804,[4]))
+            A.mesh.add_elements_by_type(tag,15,[uid],node)
+        end
+    end
+    A.mesh.add_elements_by_type(11,4,[501],[1,2,3,4])
+    A.mesh.add_elements_by_type(12,4,[502],[1,2,4,5])
+    A.mesh.generate(3)
+    A.option("Mesh.PartitionCreateTopology",1)
+end
+coincident_tags(;rim=false)=rim ? UInt64[601:607...;701:703...;801;802;804;501;502] :
+    UInt64[601:607...;501;502]
+coincident_parts(;rim=false)=rim ?
+    Int32[1,1,1,1,2,2,2,1,1,1,1,1,1,1,2] : Int32[1,1,1,1,2,2,2,1,2]
+
+@testset "coincident Surface partition keeps one cell with merged membership" begin
+    try
+        # A declared Surface cell on a cross-part facet already carries the
+        # interface role: its partition child keeps the cell, merges the
+        # incident partition membership and binds both Region children with
+        # opposite signs. No duplicate interface entity or cell is emitted —
+        # validate's duplicate-cell certificate stays intact.
+        coincident_fixture!();original=A.mesh.get_elements()
+        A.mesh.partition(2,coincident_tags(),coincident_parts())
+        @test A.model.get_number_of_partitions()==2
+        shared=child(2,30)
+        @test A.model.get_partitions(2,shared)==[1,2]
+        @test family(2,shared,2)==(UInt64[601],reshape(UInt64[1,2,4],3,1))
+        region1=only(tag for (_,tag) in A.model.get_entities(3)
+            if A.model.get_parent(3,tag)==(3,11))
+        region2=only(tag for (_,tag) in A.model.get_entities(3)
+            if A.model.get_parent(3,tag)==(3,12))
+        bound1=Set(A.model.get_boundary([(3,region1)],false,true,false))
+        bound2=Set(A.model.get_boundary([(3,region2)],false,true,false))
+        @test (2,shared) in bound1 && (2,-shared) in bound2
+        @test closed_region(region1) && closed_region(region2)
+        # No generated interface entity: every dim-2 entity is an original
+        # surface child; no seam entities exist without real interfaces.
+        @test isempty(A.model.get_entities(1))
+        @test isempty([tag for (_,tag) in A.model.get_entities(2)
+            if A.model.get_parent(2,tag)[1]==3])
+        owned=A.mesh.get()
+        @test Tessella.validate(owned).ok
+        mktempdir() do directory
+            for binary in (false,true)
+                path=joinpath(directory,"coincident-$(binary).msh")
+                E.write_mixed_msh(path,owned;version=4.1,binary)
+                imported=E.read_mixed_msh(path)
+                @test records(imported)==records(owned)
+                @test partition_records(imported)==partition_records(owned)
+            end
+        end
+        A.mesh.unpartition()
+        @test A.mesh.get_elements()==original
+        @test Set(A.model.get_entities())==Set([(2,s) for s in 30:36] ∪ [(3,11),(3,12)])
+        # Declared Curves and Points on the coincident rim: the shared child
+        # binds the declared Curve children, which merge the same [1,2]
+        # membership their rim carriers imply.
+        coincident_fixture!(rim=true)
+        A.mesh.partition(2,coincident_tags(rim=true),coincident_parts(rim=true))
+        rshared=child(2,30)
+        @test A.model.get_partitions(2,rshared)==[1,2]
+        rcurves=[child(1,c) for c in 40:42]
+        @test Set(A.model.get_boundary([(2,rshared)],false,true,false))==
+            Set([(1,c) for c in rcurves])
+        @test all(A.model.get_partitions(1,c)==[1,2] for c in rcurves)
+        rpoints=[child(0,p) for p in (1,2,4)]
+        @test all(length(A.model.get_partitions(0,p))==2 for p in rpoints)
+        @test Tessella.validate(A.mesh.get()).ok
+        A.mesh.unpartition()
+        @test (1,40) in A.model.get_entities(1) && (0,1) in A.model.get_entities(0)
+        # One-sided declaration still rejects atomically at coverage: the
+        # shared facet must be covered by each Region's declared boundary.
+        coincident_fixture!(one_sided=true)
+        before=snapshot()
+        caught=try
+            A.mesh.partition(2,coincident_tags(),coincident_parts());nothing
+        catch error;error end
+        @test caught isa ArgumentError &&
+            occursin("omits Region facets",sprint(showerror,caught))
+        @test snapshot()==before
+    finally
+        A.finalize()
+    end
+end
 end

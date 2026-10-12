@@ -415,7 +415,8 @@ function _partition_brep_chains(edges,caller)
     for seed in vcat(starts,collect(eachindex(edges)))
         seen[seed] && continue
         edge=edges[seed]
-        entry=length(adjacent[edge.uids[1]])==1 ? edge.uids[1] : edge.uids[2]
+        entry=length(adjacent[edge.uids[2]])==1 &&
+            length(adjacent[edge.uids[1]])!=1 ? edge.uids[2] : edge.uids[1]
         indices=Int[];flips=Bool[];index=seed;vertex=entry
         while true
             seen[index]=true;current=edges[index];forward=current.uids[1]==vertex
@@ -445,10 +446,17 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
     volume_parts=Int32[volume.part for volume in source.volumes]
     length(unique(volume_parts))==count || throw(ArgumentError(
         "$caller: every partition must own a volume cell"))
-    topology && any(key->length(source.facets[key])==2 &&
-        source.facets[key][1].volume.part!=source.facets[key][2].volume.part &&
-        haskey(source.face_support,key),source.facet_order) && throw(ArgumentError(
-        "$caller: a partition interface coincides with an original Surface cell; its distinct geometric roles are not implemented"))
+    # A declared Surface cell on a cross-part facet already carries the
+    # interface role: its partition child keeps the cells, binds both Region
+    # children through the declared boundary with opposite signs and only
+    # extends its partition membership to the incident set. No duplicate
+    # interface entity or cell is emitted for that support.
+    coincident=Set{Tuple{Vararg{UInt64}}}()
+    for key in source.facet_order
+        hits=source.facets[key]
+        topology && length(hits)==2 && hits[1].volume.part!=hits[2].volume.part &&
+            haskey(source.face_support,key) && push!(coincident,key)
+    end
     staged=Model._model_mesh_transaction_copy(model)
     part_entities=Dict{Tuple{Int,Int},Elements.MixedEntity}()
     children=Dict{Tuple{Int,Int32,Int32},Int32}()
@@ -544,10 +552,19 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
         for key in source.facet_order
             hits=source.facets[key];length(hits)==2 || continue
             left,right=hits;left.volume.part==right.volume.part && continue
+            key in coincident && continue
             child=children[(3,left.volume.parent,left.volume.part)]
             other=children[(3,right.volume.parent,right.volume.part)]
             push!(get!(()->NamedTuple[],grouped,minmax(child,other)),
                 (rows=left.rows,uids=left.uids,msh=left.msh,child=child,other=other))
+        end
+        for key in coincident
+            face=source.face_support[key];hits=source.facets[key]
+            tag=children[(2,face.parent,face.part)];entity=part_entities[(2,Int(tag))]
+            merged=sort!(unique!(vcat(entity.partitions,Int32[hit.volume.part for hit in hits])))
+            merged!=entity.partitions &&
+                (part_entities[(2,Int(tag))]=Elements.MixedEntity(2,tag,entity.bbox;
+                    physical_tags=entity.physical_tags,partitions=merged,parent=entity.parent))
         end
         # Every interface cell edge is indexed globally, across components:
         # an edge internal to one component stays silent, while any other

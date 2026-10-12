@@ -15,7 +15,7 @@ interfaces, closed Tri3-BRep seam transport and ghost queries, declared
 Curve/Point lower-BRep partition topology, a mixed linear family
 (Tet4+Prism6 over Tri3+Quad4) BRep partition, a complete second-order
 (two-Tet10 over Tri6) BRep partition, a three-Tet4 junction BRep partition
-with junction seam and points, complete
+with junction seam and points, a coincident-Surface BRep partition, complete
 catalogued high-order Surface/Volume VTK, directional constant-tensor
 box and shared-material grids, floating-point Pyramid options, CLI help/version
 and read-only MSH checking, plus atomic current-model opening and merging,
@@ -52,6 +52,10 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 41.3 s | 272 | ~42 s |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 45.2 s | 272 | ~46 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 41.0 s | 272 | ~42 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 43.5 s | 272 | ~44 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 40.5 s | 269 | ~41 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 44.0 s | 269 | ~45 s |
 | Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 40.5 s | 269 | ~41 s |
@@ -109,12 +113,21 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 269-assertion bodies took40.5/44.0 s onJulia1.12.7/1.13.1.
+The current 272-assertion bodies took41.0/43.5 s onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. Logs and actual exit-zero receipts are
 `test/tmp/ordinary_default_224_{112,113}_20261011.*`. The same252 Source files
-remained frozen throughout both calls. The latest increment adds a junction
+remained frozen throughout both calls. The latest increment adds a
+coincident-support BRep partition testset (3 assertions: two Regions sharing
+a facet carried by one declared Surface — the partition child merges [1,2]
+membership, binds both Region children with opposite signs, no duplicate
+interface entity or cell, unpartition restore) to the declared-BRep default
+smoke plus a 22-assertion coincident set in
+`test/interfaces/api_partition_lower_brep_functional_test.jl`, now
+296 assertions on both runtimes (the merged child keeps cell and UID,
+declared Curve/Point rim roles persist, MSH4 round-trips and the atomic
+one-sided rejection are covered). The preceding increment adds a junction
 BRep partition testset (3 assertions: three Tet4 meeting at a junction rim
 edge, two dim-0 junction entities, one junction seam carrying all three
 partitions, unpartition restore) to the declared-BRep default smoke plus a

@@ -7,13 +7,13 @@ const EXTERIOR=UInt64[11 12 13 11 13 12;12 13 11 13 12 11;14 14 14 15 15 15]
 const TETS=UInt64[11 11;12 13;13 12;14 15]
 const FACES=((1,3,2),(1,2,4),(2,3,4),(3,1,4))
 
-function fixture(;shared_original=false,retained_data=false)
+function fixture(;shared_original=false,retained_data=false,one_sided=false)
     A.finalize();A.initialize();A.model.add("lower BRep")
     A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
     if shared_original
         for tag in 30:36;A.model.add_discrete_entity(2,tag);end
         A.model.add_discrete_entity(3,11,[-30,31,32,33])
-        A.model.add_discrete_entity(3,22,[30,34,35,36])
+        A.model.add_discrete_entity(3,22,one_sided ? [34,35,36] : [30,34,35,36])
         A.mesh.add_nodes(3,11,11:15,vec(CORNERS))
         A.mesh.add_elements_by_type(30,2,[601],[11,12,13])
         for column in 1:6
@@ -164,7 +164,7 @@ end
     end
 end
 
-@testset "lower BRep ghost-only and duplicate-role rejection are atomic" begin
+@testset "lower BRep ghost-only and coincident-support partition are atomic" begin
     try
         fixture();A.option("Mesh.PartitionCreateGhostCells",1);partition_fixture()
         @test isempty(A.model.get_entities(1)) && length(A.model.get_entities(2))==3
@@ -172,13 +172,37 @@ end
         @test A.mesh.get_ghost_elements(3,14)==(UInt64[502],Int32[2])
         fixture(;shared_original=true);A.option("Mesh.PartitionCreateTopology",1)
         @test A.model.get_boundary([(3,11)],false,true,false)==[(2,-30),(2,31),(2,32),(2,33)]
+        # Surface 30 sits on the shared facet: its partition child keeps the
+        # cell, takes the merged [1,2] membership and binds both Regions with
+        # opposite signs — no duplicate interface entity or cell is emitted.
+        A.mesh.partition(2,[601,602,603,604,605,606,607,501,502],[1,1,1,1,2,2,2,1,2])
+        shared=only(tag for (_,tag) in A.model.get_entities(2)
+            if A.model.get_parent(2,tag)==(2,30))
+        @test A.model.get_partitions(2,shared)==[1,2]
+        @test family(2,shared,2)==(UInt64[601],reshape(UInt64[11,12,13],3,1))
+        region1=only(tag for (_,tag) in A.model.get_entities(3)
+            if A.model.get_parent(3,tag)==(3,11))
+        region2=only(tag for (_,tag) in A.model.get_entities(3)
+            if A.model.get_parent(3,tag)==(3,22))
+        bound1=Set(A.model.get_boundary([(3,region1)],false,true,false))
+        bound2=Set(A.model.get_boundary([(3,region2)],false,true,false))
+        @test (2,-shared) in bound1 && (2,shared) in bound2
+        @test closed_region(region1) && closed_region(region2)
+        @test isempty(A.model.get_entities(1)) && length(A.model.get_entities(2))==14
+        @test Tessella.validate(A.mesh.get()).ok
+        A.mesh.unpartition()
+        @test A.model.get_entities()==[(2,30),(2,31),(2,32),(2,33),(2,34),(2,35),(2,36),(3,11),(3,22)]
+        # A coincident Surface must be declared by both Regions: dropping it
+        # from one side leaves a boundary facet uncovered and rejects atomically.
+        fixture(;shared_original=true,one_sided=true)
+        A.option("Mesh.PartitionCreateTopology",1)
         before=snapshot()
         caught=try
             A.mesh.partition(2,[601,602,603,604,605,606,607,501,502],[1,1,1,1,2,2,2,1,2]);nothing
         catch error
             error
         end
-        @test caught isa ArgumentError && occursin("distinct geometric roles",sprint(showerror,caught))
+        @test caught isa ArgumentError && occursin("omits Region facets",sprint(showerror,caught))
         @test snapshot()==before
     finally
         A.finalize()

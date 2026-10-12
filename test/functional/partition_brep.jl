@@ -191,3 +191,46 @@ end
         A.finalize()
     end
 end
+
+@testset "Coincident Surface partition" begin
+    A=Tessella.API
+    try
+        # Two Regions share facet {1,2,4} carried by declared Surface 30: the
+        # partition child keeps the single cell, merges [1,2] membership and
+        # binds both Region children — no duplicate interface entity or cell.
+        A.finalize();A.initialize();A.model.add("coincident partition")
+        A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+        for tag in 30:36;A.model.add_discrete_entity(2,tag);end
+        A.model.add_discrete_entity(3,11,[30,31,32,33])
+        A.model.add_discrete_entity(3,12,[-30,34,35,36])
+        coordinates=[0. 1. 0. 0. .5;0. 0. 1. 0. -.5;0. 0. 0. 1. .2]
+        A.mesh.add_nodes(3,11,1:5,vec(coordinates))
+        A.mesh.add_elements_by_type(30,2,[601],[1,2,4])
+        A.mesh.add_elements_by_type(31,2,[602],[1,3,2])
+        A.mesh.add_elements_by_type(32,2,[603],[1,4,3])
+        A.mesh.add_elements_by_type(33,2,[604],[4,2,3])
+        A.mesh.add_elements_by_type(34,2,[605],[1,2,5])
+        A.mesh.add_elements_by_type(35,2,[606],[1,5,4])
+        A.mesh.add_elements_by_type(36,2,[607],[5,2,4])
+        A.mesh.add_elements_by_type(11,4,[501],[1,2,3,4])
+        A.mesh.add_elements_by_type(12,4,[502],[1,2,4,5])
+        A.mesh.generate(3);A.option("Mesh.PartitionCreateTopology",1)
+        A.mesh.partition(2,[601:607...,501,502],[1,1,1,1,2,2,2,1,2])
+        shared=only(tag for (_,tag) in A.model.get_entities(2)
+            if A.model.get_parent(2,tag)==(2,30))
+        region1=only(tag for (_,tag) in A.model.get_entities(3)
+            if A.model.get_parent(3,tag)==(3,11))
+        region2=only(tag for (_,tag) in A.model.get_entities(3)
+            if A.model.get_parent(3,tag)==(3,12))
+        bounds1=Set(A.model.get_boundary([(3,region1)],false,true,false))
+        bounds2=Set(A.model.get_boundary([(3,region2)],false,true,false))
+        @test A.model.get_partitions(2,shared)==[1,2] &&
+            (2,shared) in bounds1 && (2,-shared) in bounds2 &&
+            isempty(A.model.get_entities(1))
+        @test Tessella.validate(A.mesh.get()).ok
+        A.mesh.unpartition()
+        @test A.model.get_entities()==[(2,s) for s in 30:36] ∪ [(3,11),(3,12)]
+    finally
+        A.finalize()
+    end
+end

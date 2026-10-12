@@ -380,6 +380,29 @@ MSH4 round-trips and atomicity); the default smoke gained a junction
 testset. PART01 remains open for periodic/parametric topology, distinct
 coincident support roles, order ≥3 cells and parallel production.
 
+The coincident-support slice is also landed. A declared Surface cell on a
+cross-partition volume facet previously rejected; a public Gmsh 4.15.2
+observation resolves it with two Surface entities carrying duplicate cells
+on one support, but that layout collides with this model's structural
+duplicate-cell certificate. The producer instead lets the original Surface
+child carry the interface role itself: the cell keeps its actual UID and
+ownership, the child merges the complete incident partition membership and
+both Region children bind it through the declared boundary with opposite
+signs — no interface entity or second cell is emitted. Both Regions must
+declare the shared Surface (one-sided declarations still reject atomically
+at coverage) and the winding checks force the opposite signs automatically;
+declared Curve/Point children on the coincident rim keep their roles and a
+junction seam carried by the coincident facet binds the child through the
+ordinary border certificate. The same deep-debug pass caught a regression
+in `_partition_brep_chains` from the junction slice — closed cycles seeded
+in the reversed direction — fixed by preferring the recorded head vertex
+unless a degree-1 endpoint selects the tail; the legacy tet-only partition
+file pins the restored seam direction. Focused checks pass 296/296 on
+Julia 1.13.1 (merged coincident child, declared rim curves/points, MSH4
+round-trips, unpartition, atomic one-sided rejection); the default smoke
+gained a coincident testset. PART01 remains open for periodic/parametric
+topology, order ≥3 cells and parallel production.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop
