@@ -682,6 +682,42 @@ preserved, entities separate — plus the mixed crossing+imprint atomic
 rejection on the same pair; the focused assembly file passes 342/342.
 Arbitrary-volume Booleans and curved-surface contacts remain CAD05.
 
+General mixed-contact decomposition followed (the ninth CAD05 slice):
+the fragment classifier is now n-ary and resolves every collected
+contact class spatially instead of rejecting mixtures. Coincident
+boundary pieces classify by outward-normal direction — opposed normals
+weld the interface cell (the twin's own copy supplies the outward
+region) while aligned normals merge both solids' material into the
+inward signature and dedupe in the shell. Coplanar overlap rims inject
+as cut segments so each coincident cell emerges as its own piece, and
+imprint points/chords ride the same transport. The certificate now
+reports interpenetration — aligned positive-area overlaps, free
+vertices on both sides of the other shell, enclosure mixed with
+boundary contact — so genuine volumetric Booleans (an IGES block slid
+halfway into another decomposes into {1},{2},{1,2} with exact volumes
+0.5/1.5/0.5) and same-pair crossing+imprint or crossing+overlay mixes
+route through the same decomposition. Wholly coincident subshells admit
+as embedded Regions. Region surfaces that self-touch at an isolated
+vertex emit one node row per edge-connected component — coincident rows
+stay unwelded — and `_pinch_link_chi` teaches the fill-side partition
+certificates the corresponding link defect (sphere minus K discs) so
+pinched regions certify instead of failing the manifold audit; a
+Delaunay-tagged region carrying no tet now falls through to the exact
+partition recovery. Designed vertex-on-edge incidences degraded by
+Float64 (~1 ULP off the decimal edge line) are admitted by a 32-ULP
+snap envelope end to end: feature endpoints snap to source vertices,
+edge incidence and the imprint classifier's closed-facet test use
+snap-tolerant predicates, on-edge feature points project onto the edge
+in the CDT's own 2-D coordinates, kernel-emitted zero-area slivers drop
+by a 2-D envelope degeneracy test, and fragment probes evaluate in
+exact rationals so coincident pieces classify on the boundary rather
+than a ULP inside. Verified on weld+crossing, crossing+enclosure,
+same-pair crossing+aligned-overlap, same-pair crossing+imprint, flush
+enclosed contact, one-point and two-point pinches under both fill modes
+with exact region volumes, the focused assembly file 397/397, and the
+default suite 302/302 on Julia 1.12.7 and 1.13.1 via `runtests.jl` and
+`Pkg.test()`. Curved-surface contacts remain CAD05.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

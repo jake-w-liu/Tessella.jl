@@ -52,17 +52,21 @@ contact turns conforming and stays unwelded — each solid keeps its own
 coincident node. Filled solids weld
 only
 when both
-independent fills emit the identical interface triangulation; a facet
+independent fills emit the identical interface triangulation. Mixed
+arrangements — crossings composed with welds, coplanar overlays,
+imprints or enclosures on any pair, aligned positive-area overlaps that
+merge material, wholly coincident embedded subshells, enclosed solids
+sharing boundary contact, genuinely interpenetrating volumes, and
+region boundaries self-touching at isolated vertices — decompose
+through the same fragment classifier: every cut piece classifies
+against every shell by containment signature, coincident pieces weld on
+opposed normals or merge inward on aligned normals, and region shells
+recurse through the ordinary pipeline. A facet
 shared by three solids, a fill crossing the interface rim,
-coplanar facets overlapping with aligned winding (interpenetration),
-and contacts without an isolated feature description (same-region
-duplication, non-collinear candidate spreads) all reject, as does a
-crossing mixed with a coplanar overlap, coincident weld, imprint or
-enclosure in one
-assembly — and an enclosed solid sharing any boundary contact. Coplanar
-and isolated imprints compose freely with coincident welds and nesting
-on other
-pairs. Genuinely
+a cut piece straddling another surface, contacts without an isolated
+feature description (same-region duplication, non-collinear candidate
+spreads) and duplicated solids
+all reject. Genuinely
 disjoint solids are admitted. Boxes are never used to discover, split or
 replace source roots. Point-cloud box imports retain their original single-solid behavior.
 Multi-root IGES identities must be positive, odd, unique and consistent with

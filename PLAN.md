@@ -327,8 +327,13 @@ over a shared constrained-Delaunay arrangement into welded coincident
 pieces), isolated-T-junction imprinted (off-plane vertex or edge contacts
 inserted as Steiner vertices and constrained chords, staying unwelded)
 or
-transversally interpenetrating (cut-facet fragments regrouped into
-containment-signature Regions welded at shared interfaces) return
+interpenetrating in any mixture (cut-facet pieces classified against
+every shell by containment signature regroup into region shells —
+covering crossings composed with welds, overlays, imprints or
+enclosures, aligned positive-area overlaps, wholly coincident embedded
+subshells, enclosure with contact, and region boundaries self-touching
+at isolated vertices — recursing through the ordinary pipeline where
+coincident interfaces weld at shared Surfaces) return
 classified mixed meshes;
 supported planar Faces can retain disjoint inner wires and triangulate their
 holes. [Mapped STEP occurrences](docs/step_mapped_occurrences.md) additionally

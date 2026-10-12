@@ -102,4 +102,21 @@ let source=read(joinpath(@__DIR__,"..","fixtures","brep_disjoint_overlap.step"),
               !allunique(eachcol(mesh.coords))
     end
 end
+# A same-pair crossing mixed with a chord imprint decomposes into
+# {tet}, {box} and {tet∩box} Regions — the fragment classifier resolves
+# every collected contact class spatially.
+let source=read(joinpath(@__DIR__,"..","fixtures","brep_disjoint_overlap.step"),String)
+    mixed=foldl(replace,[
+        "#1 = CARTESIAN_POINT('',(0.,0.,0.));"=>"#1 = CARTESIAN_POINT('',(0.7,0.8,1.9));",
+        "#2 = CARTESIAN_POINT('',(1.,0.,0.));"=>"#2 = CARTESIAN_POINT('',(0.9,0.9,1.0));",
+        "#3 = CARTESIAN_POINT('',(0.,1.,0.));"=>"#3 = CARTESIAN_POINT('',(0.7,0.8,1.2));",
+        "#4 = CARTESIAN_POINT('',(0.,0.,1.));"=>"#4 = CARTESIAN_POINT('',(1.05,0.75,1.2));"];init=source)
+    mktempdir() do directory
+        path=joinpath(directory,"mixed.step");write(path,mixed)
+        mesh=import_step(path;fill=false)
+        @test mesh isa Tessella.MixedMesh && validate(mesh).ok &&
+              Set(keys(mesh.entity_data.entities))==Set(
+                  [(2,t) for t in 1:5] ∪ [(3,t) for t in 1:3])
+    end
+end
 end

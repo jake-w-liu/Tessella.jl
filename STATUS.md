@@ -603,6 +603,38 @@ mixed crossing+imprint atomic rejection, and the focused assembly file
 guard now cover imprint features too. Arbitrary-volume Booleans and
 curved contacts remain CAD05.
 
+### General mixed-contact CAD decomposition (2026-10-12)
+
+Devin landed the ninth CAD05 slice — the fragment's region classifier
+is n-ary and resolves every collected contact class spatially, so
+mixed arrangements compose instead of rejecting. Coincident boundary
+pieces classify by outward-normal direction: opposed normals weld the
+interface cell while aligned normals merge both solids' material into
+the inward signature and dedupe the emitted shell. Coplanar overlap
+rims inject as cut segments, imprint points and chords ride the same
+transport, and the certificate now reports interpenetration — aligned
+positive-area overlaps, free vertices on both sides of the other
+shell, enclosure mixed with boundary contact — so genuine volumetric
+Booleans and same-pair crossing+imprint/overlay mixes decompose
+through the same path. Wholly coincident subshells admit as embedded
+Regions; a region surface self-touching at an isolated vertex emits
+one node row per edge-connected component, and `_pinch_link_chi`
+teaches the fill-side partition certificates the corresponding link
+defect so pinched regions certify; a Delaunay-tagged region with no
+tet falls through to exact partition recovery. Designed vertex-on-edge
+incidences degraded to ~1 ULP by Float64 admit through a 32-ULP snap
+envelope: feature endpoints snap to source vertices, edge incidence
+and imprint closed-facet tests are snap-tolerant, on-edge CDT images
+project onto the edge, kernel slivers drop by a 2-D envelope
+degeneracy test, and fragment probes evaluate in exact rationals.
+Verified on weld+crossing, crossing+enclosure, same-pair
+crossing+aligned-overlap, same-pair crossing+imprint, flush enclosed
+contact and one/two-point pinches under both fill modes with exact
+region volumes — e.g. an IGES block slid halfway into another yields
+{1},{2},{1,2} at 0.5/1.5/0.5 — plus the focused assembly file 397/397
+and the default suite 302/302 on Julia 1.12.7 and 1.13.1 via
+`runtests.jl` and `Pkg.test()`. Curved-surface contacts remain CAD05.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

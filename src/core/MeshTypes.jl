@@ -628,7 +628,14 @@ end
     return n
 end
 
-function _tet_topology(tets::AbstractMatrix{<:Integer})
+# `pinch_link_chi` maps a vertex row to an alternative expected link Euler
+# characteristic.  A boundary vertex whose incident tets meet it in K separate
+# cones — produced when the region's own surface self-touches at an isolated
+# point — has a connected link that is a sphere minus K discs (χ = 2-K)
+# rather than a single disc.  Callers compute K from coincident surface node
+# rows; the link must still be connected with a circular boundary.
+function _tet_topology(tets::AbstractMatrix{<:Integer};
+                       pinch_link_chi::AbstractDict{Int32,Int}=Dict{Int32,Int}())
     nt = size(tets, 2)
     nt == 0 && return (false, "tet complex is empty")
     nt <= typemax(Int32) ||
@@ -722,7 +729,7 @@ function _tet_topology(tets::AbstractMatrix{<:Integer})
             end
         end
         chi = nlinkverts - nedges + degree
-        expected = isempty(boundaryverts) ? 2 : 1
+        expected = isempty(boundaryverts) ? 2 : get(pinch_link_chi,v,1)
         chi == expected ||
             return (false, "vertex $v link has Euler characteristic $chi (expected $expected)")
         i = j
@@ -796,6 +803,35 @@ function _tri_topology(tris::AbstractMatrix{<:Integer})
     return (true,"ok")
 end
 
+# A region boundary that self-touches at an isolated point is emitted with one
+# node row per touching component, so the volume fill sees K coincident surface
+# rows at that position.  The region's tetrahedra meet at the deduplicated
+# vertex in K cones: the star stays a ball but its link is a sphere minus K
+# discs (Euler characteristic 2-K) rather than a single disc.  `_pinch_link_chi`
+# maps the fill vertex at each coincident surface position to that expected
+# link defect, so the `_tet_topology` audit accepts precisely the surface's
+# own pinch — and only where the complex vertex coincides with the surface's
+# coincident rows.
+function _pinch_link_chi(surface::Mesh,coords::AbstractMatrix)
+    counts=Dict{NTuple{3,Float64},Int}()
+    for i in unique(vec(surface.tris))
+        p=(surface.coords[1,i],surface.coords[2,i],surface.coords[3,i])
+        counts[p]=get(counts,p,0)+1
+    end
+    any(>(1),values(counts)) || return Dict{Int32,Int}()
+    rows=Dict{NTuple{3,Float64},Int32}()
+    for i in axes(coords,2)
+        rows[(coords[1,i],coords[2,i],coords[3,i])]=Int32(i)
+    end
+    chi=Dict{Int32,Int}()
+    for (p,k) in counts
+        k<2 && continue
+        v=get(rows,p,zero(Int32))
+        v==0 || (chi[v]=2-k)
+    end
+    chi
+end
+
 # ════════════════════════════════════════════════════════════════════════════════
 # Bounding box, validation, checksum
 # ════════════════════════════════════════════════════════════════════════════════
@@ -865,7 +901,8 @@ global tet count so "no empty volumes" can never be vacuously true.
 """
 function validate(m::Mesh; require_positive_tets::Bool=true,
                   require_manifold_tris::Bool=ntets(m)==0,
-                  allow_degenerate_segs::Bool=false)
+                  allow_degenerate_segs::Bool=false,
+                  pinch_link_chi::AbstractDict{Int32,Int}=Dict{Int32,Int}())
     msgs = String[]
     _mesh_structure_messages!(msgs,m) || return MeshDiagnostic(false,msgs)
     # Segments are cells too: repeated endpoints, geometrically coincident
@@ -931,7 +968,7 @@ function validate(m::Mesh; require_positive_tets::Bool=true,
         end
     end
     if ntets(m) > 0
-        topok, reason = _tet_topology(m.tets)
+        topok, reason = _tet_topology(m.tets; pinch_link_chi=pinch_link_chi)
         topok || push!(msgs, "non-manifold tet complex: $reason")
     end
     return MeshDiagnostic(isempty(msgs), msgs)

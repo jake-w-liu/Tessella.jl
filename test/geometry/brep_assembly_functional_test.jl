@@ -491,11 +491,14 @@ end
     @test all(e->e==(2,3),
         (data.node_entities[row] for row in axes(mesh.coords,2)
          if all(c->1.0<=c<=3.0,mesh.coords[:,row])))
-    # A solid merely touching the container's face coplanarly is not enclosed
-    # and rejects; one poking through is a transversal crossing and admits as
-    # a fragment. Shifting the inner solid's x coordinates — largest first so
-    # a produced coordinate never collides with a pending replacement —
-    # rebuilds each mutant.
+    # A solid merely touching the container's face coplanarly is still
+    # enclosed: its x=4 face is an aligned coincident wall of the merged
+    # material — the region classifier welds the flush contact the same way,
+    # so Regions tile the union exactly ({A}=64-8, {A,S}=8). One poking
+    # through is a transversal crossing and admits as a fragment. Shifting
+    # the inner solid's x coordinates — largest first so a produced
+    # coordinate never collides with a pending replacement — rebuilds each
+    # mutant.
     source=read(joinpath(FIXTURES,"brep_nested.step"),String)
     inner=["(1.,1.,1.)","(3.,1.,1.)","(3.,3.,1.)","(1.,3.,1.)",
            "(1.,1.,3.)","(3.,1.,3.)","(3.,3.,3.)","(1.,3.,3.)"]
@@ -511,9 +514,19 @@ end
     end
     mktempdir() do directory
         path=joinpath(directory,"shift.step")
-        write(path,shift(1.0))   # inner face coplanar with the container's face
-        @test_throws ArgumentError import_step(path;fill=false)
-        @test_throws ArgumentError import_step(path;fill=true)
+        write(path,shift(1.0))   # inner face flush with the container's face
+        for fill in (false,true)
+            mesh=import_step(path;fill)
+            @test mesh isa E.MixedMesh
+            @test MT.validate(mesh).ok
+            @test Set(keys(mesh.entity_data.entities))==Set(
+                [(2,1),(3,1),(2,2),(3,2),(2,3)])
+            fill || continue
+            measured,positive=volumes(mesh)
+            @test positive
+            @test isapprox(measured[1],56.0;atol=1e-12) &&
+                  isapprox(measured[2],8.0;atol=1e-12)
+        end
         # The inner solid pokes through the container's face: a transversal
         # crossing fragments the pair into outside-only, inside-only and
         # intersection Regions tiling both volumes.
@@ -573,15 +586,28 @@ end
           isapprox(measured[2],0.875;atol=1e-12) &&
           isapprox(measured[3],0.125;atol=1e-12)
     @test allunique(eachcol(mesh.coords))
-    # Mixed contact is still unsupported: B's y faces made coplanar with
-    # A's while its x=0.5 face keeps crossing A's — a coplanar overlap
-    # combined with a transversal crossing rejects atomically.
+    # Same-pair mixed contact: the replacement folds B's y faces onto A's
+    # (aligned coplanar overlap — an interior wall of the merged material
+    # the region classifier dedupes) while its z faces keep crossing A's
+    # transversally. The fragment resolves both into three Regions:
+    # {A},{B} and {A∩B}=[0.5,1]x[0,1]x[0.5,1]=0.25.
     source=read(joinpath(FIXTURES,file),String)
     mktempdir() do directory
         path=joinpath(directory,"mutant.step")
         write(path,replace(replace(source,",0.5,"=>",0.,"),",1.5,"=>",1.,"))
-        @test_throws ArgumentError import_step(path;fill=false)
-        @test_throws ArgumentError import_step(path;fill=true)
+        for fill in (false,true)
+            mesh=import_step(path;fill)
+            @test mesh isa E.MixedMesh
+            @test MT.validate(mesh).ok
+            @test sort(Int.(t for (d,t) in keys(mesh.entity_data.entities)
+                              if d==3))==Int32[1,2,3]
+            fill || continue
+            measured,positive=volumes(mesh)
+            @test positive
+            @test isapprox(measured[1],0.75;atol=1e-12) &&
+                  isapprox(measured[2],0.75;atol=1e-12) &&
+                  isapprox(measured[3],0.25;atol=1e-12)
+        end
         # B touching A's x=1 face over the y,z in [0.5,1] patch is a
         # partial coplanar face overlap: the imprint welds exactly the
         # overlap patch as a shared Surface bounded by both Regions.
@@ -633,14 +659,25 @@ end
                   isapprox(measured[2],1.0;atol=1e-12)
         end
         # The same overlap with same-side interiors — B straddles A's volume
-        # so the coplanar z faces share aligned outward normals — is
-        # interpenetration, not a surface contact, and rejects atomically.
+        # so the coincident y,z faces share aligned outward normals — is
+        # positive-volume interpenetration. The region classifier resolves
+        # it into {A}=[0,0.5]x[0,1]^2, {B}=[1,1.5]x[0,1]^2 and
+        # {A∩B}=[0.5,1]x[0,1]^2 — three halves tiling the union exactly.
         write(path,move_box(["(3.,0.,0.)"=>"(0.5,0.,0.)","(4.,0.,0.)"=>"(1.5,0.,0.)",
                             "(4.,2.,0.)"=>"(1.5,1.,0.)","(3.,2.,0.)"=>"(0.5,1.,0.)",
                             "(3.,0.,1.)"=>"(0.5,0.,1.)","(4.,0.,1.)"=>"(1.5,0.,1.)",
                             "(4.,2.,1.)"=>"(1.5,1.,1.)","(3.,2.,1.)"=>"(0.5,1.,1.)"]))
-        @test_throws ArgumentError import_step(path;fill=false)
-        @test_throws ArgumentError import_step(path;fill=true)
+        for fill in (false,true)
+            mesh=import_step(path;fill)
+            @test mesh isa E.MixedMesh
+            @test MT.validate(mesh).ok
+            fill || continue
+            measured,positive=volumes(mesh)
+            @test positive
+            @test isapprox(measured[1],0.5;atol=1e-12) &&
+                  isapprox(measured[2],0.5;atol=1e-12) &&
+                  isapprox(measured[3],0.5;atol=1e-12)
+        end
     end
 end
 
@@ -702,13 +739,138 @@ end
                   isapprox(measured[2],0.216;atol=1e-12)
         end
         # The same blade edge plus a tip (#2) poking through the face into
-        # the box mixes a transversal crossing with the chord imprint — a
-        # composition this bounded implementation cannot classify, so it
-        # rejects atomically.
+        # the box mixes a transversal crossing with the chord imprint on the
+        # same pair — and contact vertex #4 sits on the box face's diagonal
+        # edge in decimal coordinates (1.05+0.75=1.8), a designed incidence
+        # Float64 places ~1e-16 off the edge. The classifier resolves both
+        # spatially into {tet}, {box} and {tet∩box} Regions tiling the union.
         write(path,move_tet((0.7,0.8,1.9),(0.9,0.9,1.0),
             (0.7,0.8,1.2),(1.05,0.75,1.2)))
-        @test_throws ArgumentError import_step(path;fill=false)
-        @test_throws ArgumentError import_step(path;fill=true)
+        for fill in (false,true)
+            mesh=import_step(path;fill)
+            @test mesh isa E.MixedMesh
+            @test MT.validate(mesh).ok
+            @test Set(keys(mesh.entity_data.entities))==Set(
+                [(2,1),(2,2),(2,3),(2,4),(2,5),(3,1),(3,2),(3,3)])
+            fill || continue
+            measured,positive=volumes(mesh)
+            @test positive
+            @test isapprox(measured[1],0.004083333333333333;atol=1e-12) &&
+                  isapprox(measured[2],0.21483333333333332;atol=1e-12) &&
+                  isapprox(measured[3],0.0011666666666666663;atol=1e-12)
+        end
+    end
+end
+
+# Emit a minimal FACETED_BREP STEP document for polygon-soup solids: each
+# face is a closed polygon given by vertex coordinates with an outward
+# winding (matching the hand-written brep_*.step fixtures).
+function brep_step_document(solids)
+    lines=["ISO-10303-21;","HEADER;",
+        "FILE_NAME('generated','2026-10-27T00:00:00',('Tessella'),('Tessella')," *
+        "'Tessella','Tessella','');",
+        "FILE_DESCRIPTION(('Generated FACETED_BREPs'),'2;1');",
+        "FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));",
+        "ENDSEC;","DATA;"]
+    next=1
+    ids(name)=begin id=next;next+=1;"#$id" end
+    for (name,faces) in solids
+        faceids=String[]
+        for face in faces
+            pts=[ids("p") for p in face]
+            for (pid,p) in zip(pts,face)
+                push!(lines,"$pid = CARTESIAN_POINT('',($(p[1]),$(p[2]),$(p[3])));")
+            end
+            loop=ids("l");push!(lines,"$loop = POLY_LOOP('',($(join(pts,","))));")
+            bound=ids("b");push!(lines,"$bound = FACE_BOUND('',$loop,.T.);")
+            f=ids("f");push!(lines,"$f = FACE('',($bound));");push!(faceids,f)
+        end
+        shell=ids("s")
+        push!(lines,"$shell = CLOSED_SHELL('',($(join(faceids,","))));")
+        brep=ids("r");push!(lines,"$brep = FACETED_BREP('$name',$shell);")
+    end
+    push!(lines,"ENDSEC;","END-ISO-10303-21;")
+    join(lines,'\n')
+end
+
+# Outward-wound quad faces of box [lo,hi] (same winding as brep_nested.step).
+function brep_step_box(lo,hi)
+    x1,y1,z1=lo;x2,y2,z2=hi
+    [[(x1,y1,z1),(x1,y2,z1),(x2,y2,z1),(x2,y1,z1)],
+     [(x1,y1,z2),(x2,y1,z2),(x2,y2,z2),(x1,y2,z2)],
+     [(x1,y1,z1),(x2,y1,z1),(x2,y1,z2),(x1,y1,z2)],
+     [(x1,y2,z1),(x1,y2,z2),(x2,y2,z2),(x2,y2,z1)],
+     [(x1,y1,z1),(x1,y1,z2),(x1,y2,z2),(x1,y2,z1)],
+     [(x2,y1,z1),(x2,y2,z1),(x2,y2,z2),(x2,y1,z2)]]
+end
+
+# Outward-wound triangle faces of tet v1..v4 (same pattern as
+# brep_disjoint_overlap.step).
+brep_step_tet(v1,v2,v3,v4)=
+    [[v1,v3,v2],[v1,v2,v4],[v1,v4,v3],[v2,v3,v4]]
+
+@testset "mixed contacts decompose into arbitrary regions" begin
+    # A welded pair plus a second transversal crossing on a different pair:
+    # box A welded to B shares the x=4 face while C pokes through B's x=6
+    # wall. The region classifier resolves welds and crossings spatially —
+    # Regions {A},{B},{C},{B∩C} tile the union exactly.
+    cases=Tuple{String,Vector{Tuple{String,Vector{Vector{NTuple{3,Float64}}}}},Dict{Int,Float64}}[]
+    push!(cases,("weld plus crossing",[
+        ("A",brep_step_box((0.,0.,0.),(4.,4.,4.))),
+        ("B",brep_step_box((4.,0.,0.),(6.,4.,4.))),
+        ("C",brep_step_box((5.,1.,1.),(7.,3.,3.)))],
+        Dict(1=>64.0,2=>28.0,3=>4.0,4=>4.0)))
+    # An enclosed box inside A while D crosses A's wall: the fragment's
+    # enclosed pieces regroup into the nested Region {A,S}, the crossing
+    # cuts {A∩D} — welds, crossings and enclosure compose spatially.
+    push!(cases,("crossing plus enclosure",[
+        ("A",brep_step_box((0.,0.,0.),(4.,4.,4.))),
+        ("S",brep_step_box((1.,1.,1.),(2.,2.,2.))),
+        ("D",brep_step_box((3.5,0.5,0.5),(6.,3.5,3.5)))],
+        Dict(1=>58.5,2=>18.0,3=>1.0,4=>4.5)))
+    # A crossing pair plus a spike whose apex rests inside A's top face on
+    # another pair: imprint and crossing resolve in the same decomposition.
+    # Pyramid S: apex (1,1,4), base z=2.6 triangle with area 0.32 —
+    # volume 0.32*1.4/3.
+    push!(cases,("crossing plus imprint",[
+        ("A",brep_step_box((0.,0.,0.),(4.,4.,4.))),
+        ("S",brep_step_tet((1.,1.,4.),(0.6,0.6,2.6),(1.4,0.6,2.6),(1.,1.4,2.6))),
+        ("D",brep_step_box((3.5,0.5,0.5),(6.,3.5,3.5)))],
+        Dict(1=>59.35066666666666,2=>18.0,3=>0.14933333333333335,4=>4.5)))
+    # An enclosed pyramid touching A's top face at a single apex point: the
+    # {A} region boundary self-touches there, so the region surface carries
+    # two coincident apex rows and the fill certifies the pinched link.
+    push!(cases,("one-point pinch",[
+        ("A",brep_step_box((0.,0.,0.),(4.,4.,4.))),
+        ("S",brep_step_tet((1.,1.,4.),(0.6,0.6,2.6),(1.4,0.6,2.6),(1.,1.4,2.6)))],
+        Dict(1=>63.85066666666666,2=>0.14933333333333335)))
+    # A bipyramid enclosed in A touching the top and bottom faces at one
+    # apex each — two independent pinch vertices on the same region.
+    bipy_faces=let a=(1.,1.,4.),r=((0.5,0.8,2.),(1.5,0.8,2.),(1.,1.6,2.)),b=(1.,1.,0.)
+        [[a,r[1],r[2]],[a,r[2],r[3]],[a,r[3],r[1]],
+         [b,r[2],r[1]],[b,r[3],r[2]],[b,r[1],r[3]]]
+    end
+    push!(cases,("two-point pinch",[
+        ("A",brep_step_box((0.,0.,0.),(4.,4.,4.))),
+        ("B",bipy_faces)],
+        Dict(1=>63.46666666666666,2=>0.5333333333333333)))
+    mktempdir() do directory
+        path=joinpath(directory,"mixed.step")
+        for (name,solids,expected) in cases
+            println("mixed assembly: ",name);flush(stdout)
+            write(path,brep_step_document(solids))
+            for fill in (false,true)
+                mesh=import_step(path;fill)
+                @test mesh isa E.MixedMesh
+                @test MT.validate(mesh).ok
+                fill || continue
+                measured,positive=volumes(mesh)
+                @test positive
+                @test all(isapprox(measured[t],v;atol=1e-9)
+                          for (t,v) in expected) &&
+                      length(measured)==length(expected)
+            end
+        end
     end
 end
 
@@ -742,8 +904,20 @@ end
             @test sort(data.entities[(3,1)].boundaries)==Int32[1,3]
             @test sort(data.entities[(3,2)].boundaries)==Int32[2,3]
         end
+        # Sliding block 2 to x in [0.5,2.5] interpenetrates block 1 over
+        # [0.5,1]: a genuine volumetric Boolean the fragment decomposes into
+        # three Regions {1},{2},{1,2} with volumes 0.5,1.5,0.5.
         write(path,replace_parameter(iges,5,"124,1,0,0,0.5,0,1,0,0,0,0,1,0;"))
-        @test_throws ArgumentError import_iges(path;fill=false) # overlap
+        for fill in (false,true)
+            mesh=import_iges(path;fill)
+            @test mesh isa E.MixedMesh && MT.validate(mesh).ok
+            fill || continue
+            measured,positive=volumes(mesh)
+            @test positive
+            @test isapprox(measured[1],0.5;atol=1e-12) &&
+                  isapprox(measured[2],1.5;atol=1e-12) &&
+                  isapprox(measured[3],0.5;atol=1e-12)
+        end
         write(path,replace_parameter(iges,3,"150,-2.,1.,1.,0.,0.,0.;"))
         @test_throws ArgumentError import_iges(path)
         write(path,replace_parameter(msbo,59,"514,57,1,0;"))

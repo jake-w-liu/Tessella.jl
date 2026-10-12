@@ -40,6 +40,7 @@ using ..MeshTypes: Mesh, validate, is_closed_manifold, boundary_faces, triangle_
 using ..PipelineSupport: PIPELINE_DEFAULT_MAX_NODES
 import ..Mesh3D
 import ..Mesh2D
+import ..MeshTypes
 
 export recover_boundary_cdt, recover_partition_cdt, mesh_sized_cdt
 
@@ -461,7 +462,8 @@ function _certify_partition_exact(surfaces,m,preimage,regions,
         ids=Int[t for t in axes(m.tets,2) if m.tet_tag[t]==Int32(r)]
         isempty(ids)&&return (false,"effective region $r received no tet")
         tm=m.tets[:,ids];part=Mesh(m.coords;tets=tm)
-        d=validate(part);d.ok||return (false,"effective region $r is not a tetrahedral manifold — "*join(d.messages,"; "))
+        d=validate(part;pinch_link_chi=MeshTypes._pinch_link_chi(surfaces[r],m.coords))
+        d.ok||return (false,"effective region $r is not a tetrahedral manifold — "*join(d.messages,"; "))
         bf=first(boundary_faces(tm))
         for f in bf
             a=Int(f[1]);b=Int(f[2]);c=Int(f[3])

@@ -23,7 +23,7 @@ neighbours/tet, one opposite each vertex) plus a free list.
 module Mesh3D
 
 using ..Predicates: orient3, orient3_sos, insphere_sos, incircle3_sos, orient2
-using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold, boundary_edges, boundary_faces, tet_signed_volume
+using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold, boundary_edges, boundary_faces, tet_signed_volume, _pinch_link_chi
 using ..Elements: MixedMesh, ElementBlock,
                   _VOLUME_CELL_EDGES, _VOLUME_CELL_FACES
 using ..Mesh2D: constrained_delaunay, to_mesh
@@ -5439,10 +5439,9 @@ function tetrahedralize_conforming(surfaces::AbstractVector{Mesh}; rng_seed::Int
     tets = Matrix{Int32}(undef, 4, length(keep))
     @inbounds for (j, t) in enumerate(keep), i in 1:4; tets[i,j] = m0.tets[i,t]; end
     mm = Mesh(m0.coords; tets=tets, tet_tag=tags)
-    tpr = tets_per_region(mm)
-    for r in 1:length(surfaces)
-        get(tpr, Int32(r), 0) > 0 || error("tetrahedralize_conforming: region $r received no tet")
-    end
+    # A region missed by centroid tagging (a thin interior cell carrying no
+    # Delaunay tet) is caught inside the try by _certify_regions3, which then
+    # falls back to the exact partition recovery rather than blocking outright.
     # Always-valid-or-explicit-blocker (PLAN principle #4): the single perturb=false
     # Delaunay can leave exact zero-volume/non-manifold tets on cospherical inputs (e.g.
     # an axis-aligned box assembly with shared corners). Validate before returning —
@@ -5534,10 +5533,9 @@ function tetrahedralize_conforming_exact(surfaces::AbstractVector{Mesh}; rng_see
     tets = Matrix{Int32}(undef, 4, length(keep))
     @inbounds for (j,t) in enumerate(keep); tets[1,j]=t[1]; tets[2,j]=t[2]; tets[3,j]=t[3]; tets[4,j]=t[4]; end
     mm = Mesh(coords; tets=tets, tet_tag=tags)
-    tpr = tets_per_region(mm)
-    for r in 1:length(surfaces)
-        get(tpr, Int32(r), 0) > 0 || error("tetrahedralize_conforming_exact: region $r received no tet")
-    end
+    # A region missed by centroid tagging (a thin interior cell carrying no
+    # Delaunay tet) is caught inside the try by _certify_regions3, which then
+    # falls back to the exact partition recovery rather than blocking outright.
     diag = validate(mm)
     diag.ok || throw(ErrorException("tetrahedralize_conforming_exact: produced an invalid mesh (" *
         join(diag.messages, "; ") * ")"))
@@ -5571,7 +5569,7 @@ function _certify_regions3(surfaces::AbstractVector{Mesh},m::Mesh,caller::Abstra
             for k in 1:4;tm[k,j]=m.tets[k,t];end
         end
         part=Mesh(m.coords;tets=tm)
-        d=validate(part)
+        d=validate(part;pinch_link_chi=_pinch_link_chi(surfaces[r],m.coords))
         d.ok || throw(ErrorException("$caller: effective region $r is not a tetrahedral manifold — " *
                                      join(d.messages,"; ")))
         coord2pid=Dict{NTuple{3,Float64},Int32}()
