@@ -77,4 +77,5 @@ include("functional/fixtures.jl")
     include("functional/occ_primitives_smoke.jl")
     include("functional/occ_transform_smoke.jl")
     include("functional/occ_queries_smoke.jl")
+    include("functional/occ_measures_smoke.jl")
 end

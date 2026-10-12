@@ -202,6 +202,20 @@ The current assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds a
+compact OCC measure check (`occ_measures_smoke`: an `add_box` and
+`add_cylinder` with analytic volumes and centroids plus a line's
+arclength midpoint) — the
+`test/interfaces/api_occ_measures_test.jl` file covers kernel-side
+BRepGProp measures matching upstream `getMass`/`getCenterOfMass`
+semantics: line/circle closed forms, ellipse/spline/iso curve panel
+quadrature, plane shoelace with conic segment corrections and the
+`|outer|−|holes|` convention, quadric face patch integrals, NURBS
+knot-span tensor quadrature, primitive-record and torus-sector solid
+formulas, the all-plane divergence path (volume plus second-moment
+centroid), partial torus, degenerate/empty/non-1:3 entities,
+transformed-entity visibility before `synchronize`, the conic-faced
+get_mass/get_center_of_mass split and upstream error messages. The
+preceding increment adds a
 compact OCC query check (`occ_queries_smoke`: an `add_box` with
 per-dimension bounding boxes, entity containment filtering,
 surface/curve loop traversal order and a `mesh.set_size` point

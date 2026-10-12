@@ -117,6 +117,9 @@ get_entities_in_bounding_box(xmin,ymin,zmin,xmax,ymax,zmax;dim=-1)=
         m,xmin,ymin,zmin,xmax,ymax,zmax,dim))
 get_curve_loops(surface_tag)=_with_model(m->Model._model_occ_get_curve_loops(m,surface_tag))
 get_surface_loops(volume_tag)=_with_model(m->Model._model_occ_get_surface_loops(m,volume_tag))
+get_mass(dim,tag)=_with_model(m->Model._model_occ_get_mass(m,dim,tag))
+get_center_of_mass(dim,tag)=
+    _with_model(m->Model._model_occ_get_center_of_mass(m,dim,tag))
 
 module mesh
     import .....Model

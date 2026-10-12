@@ -872,6 +872,32 @@ curved-record boxes, pre-sync transform visibility, containment
 filters, loop traversal order, set_size lifecycle and upstream error
 messages, plus an `occ_queries_smoke` default check.
 
+The eighth GEO01 slice followed: the BRepGProp measure family —
+`get_mass` and `get_center_of_mass` in
+`src/geometry/ModelOCCMeasures.jl`, again reading the bound kernel
+graph without synchronizing like upstream. Curves measure per-record
+(line/circle closed forms; ellipse, `copied_curve` and `surface_iso`
+by panel-subdivided GL8 — per knot span for splines — so the
+oscillatory arc-length integrand sits at ~1e-9; `degenerate` collapses
+to its pole). Faces measure per-record: the plane's `pcurves`
+integrate through a shoelace with conic sector−chord segment
+corrections under the `|outer|−Σ|holes|` convention; quadric faces use
+closed-form `∫P·dA` over canonical domains (partial torus through its
+stored `angle`); NURBS tensor faces quadrature the full knot domain
+per span. Solids dispatch through the compact `primitive` record
+where present, the torus-sector Pappus integrals, or the divergence
+theorem over all-plane shells — volume by `Σ A(n̂·c)/3` and centroid
+through a signed-fan second-moment tensor exact for any line-bounded
+polygon, holes included. Non-1:3 dims and empty solids report the
+upstream empty-GProp `(0, origin)`; `get_mass` on a conic-faced solid
+still reports the divergence volume while `get_center_of_mass`
+rejects loudly on conic wires (the documented line-wire-only tensor
+boundary). The focused `test/interfaces/api_occ_measures_test.jl`
+pins analytic volumes/centroids for every primitive, the partial
+torus, arc/ellipse/spline lengths, holed planes, quadric faces,
+transformed entities, degenerate/empty/non-1:3 dims and the
+rejection paths, plus an `occ_measures_smoke` default check.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

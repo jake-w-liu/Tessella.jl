@@ -862,6 +862,42 @@ loop/volume reporting, silent and overwriting `set_size`, upstream
 error messages) plus an
 `occ_queries_smoke` default check.
 
+### GEO01 slice 8 — OCC measure endpoints (2026-10-14)
+
+The eighth GEO01 slice adds `model.occ`'s BRepGProp measures:
+`get_mass` (`LinearProperties`/`SurfaceProperties`/`VolumeProperties`
+per dim) and `get_center_of_mass`, implemented kernel-side in
+`src/geometry/ModelOCCMeasures.jl` so rebound transforms are visible
+before `synchronize` like upstream's registry queries. Curves measure
+per-record: line length/midpoint, circle arc length and bisector
+centroid `r·sinc(Δθ/2)`, ellipse/`copied_curve`/`surface_iso` by
+panel-subdivided Gauss-Legendre quadrature (GL8 per knot span for
+splines, eight uniform panels for conics — keeps the oscillatory
+speed integrand at ~1e-9), `degenerate` edges collapse to `(0, pole)`.
+Faces measure per-record: plane faces integrate their `pcurves` through
+a shoelace with conic sector−chord segment corrections and the
+`|outer|−Σ|holes|` convention; quadric faces use closed-form `∫P·dA`
+over canonical domains (cylinder/cone/sphere in full, torus up to its
+stored `angle` sweep); NURBS tensor faces quadrature the full knot
+domain per nonzero span. Solids dispatch through the compact
+`primitive` record (cylinder/cone/sphere analytic volume and axial
+centroid), the torus-sector Pappus integrals (`V=φ·πr2²·r1`, centroid
+on the sweep bisector at `(r1+r2²/4r1)·sinc(φ/2)`), or the divergence
+theorem over all-plane shells (`V=Σ A(n̂·c)/3` and
+`∭r dV=Σ n̂·∬_F r⊗r dA/4` through a signed fan second-moment tensor
+that is exact for any line-bounded polygon, holes included). Non-1:3
+dims follow upstream's empty-GProp `(0, origin)`; empty solids likewise.
+`get_mass` on a conic-faced solid still reports the divergence volume
+while `get_center_of_mass` rejects loudly on conic wires — the
+line-wire-only second-moment boundary is the one documented gap.
+Upstream's error strings, signed-volume reporting and unsynchronized
+visibility are preserved. Verified by
+`test/interfaces/api_occ_measures_test.jl` (analytic fixtures:
+box/cylinder/cone/sphere/torus volumes and centroids, partial-torus
+sector, arc/ellipse/spline lengths, holed planes, quadric faces,
+transformed entities, degenerate/empty/non-1:3 dims, loud rejections)
+plus an `occ_measures_smoke` default check.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The
