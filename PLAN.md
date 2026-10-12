@@ -235,9 +235,12 @@ own original owner so the parametric-length invariant holds.
 `General.NumThreads` now requests parallel workers for both producers'
 O(cells) extraction stages — disjoint `Threads.@threads` writes merged
 serially in traversal order, byte-identical output verified under real
-concurrency. Order ≥4 and
-incomplete/serendipity high-order cells and bare non-Tet4 volumes
-remain open.
+concurrency. Every catalogued complete family now partitions at any
+order — admitted types derive from `MSH_CATALOG` and facet orientation
+permutations derive from the monomial lattice rather than per-order
+tables — so Tri15/Quad25 interfaces and Line5+ seams emit through the
+same certificate; incomplete/serendipity high-order cells and bare
+non-Tet4 volumes remain open.
 
 An explicit [variable-tensor ordinary Surface constructor](docs/metric_model_surfaces.md)
 consumes actual lower Point/Line products and certifies the sampled world metric

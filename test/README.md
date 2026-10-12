@@ -18,7 +18,8 @@ Curve/Point lower-BRep partition topology, a mixed linear family
 with junction seam and points, a coincident-Surface BRep partition, a
 complete third-order (two-Tet20 over Tri10) BRep partition, a periodic
 link and parametric-node BRep partition transport, a parallel
-`General.NumThreads` BRep partition, complete
+`General.NumThreads` BRep partition, a complete fourth-order
+(two-Tet35 over Tri15) BRep partition, complete
 catalogued high-order Surface/Volume VTK, directional constant-tensor
 box and shared-material grids, floating-point Pyramid options, CLI help/version
 and read-only MSH checking, plus atomic current-model opening and merging,
@@ -51,10 +52,16 @@ same assertions with normal compilation:
 julia --project=. --startup-file=no -O2 -e 'ENV["TESSELLA_TEST_COMPILER"]="optimized"; using Pkg; Pkg.test(; julia_args=["--startup-file=no", "--check-bounds=yes", "-O2"])'
 ```
 
-Local receipts on 2026-10-11, with bounds checks and one Julia thread:
+Local receipts on 2026-10-12, with bounds checks; the `test/runtests.jl`
+rows ran under `julia -t4` to exercise `General.NumThreads`, the
+`Pkg.test()` rows on one Julia thread:
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 45.9 s | 286 | ~48 s |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 44.4 s | 286 | ~46 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation `-t4`, body 48.8 s | 286 | ~51 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation `-t4`, body 48.1 s | 286 | ~50 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 53.3 s | 282 | ~56 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 52.8 s | 282 | ~55 s |
 | Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 52.2 s | 282 | ~54 s |
@@ -124,12 +131,23 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 282-assertion bodies took52.2/50.8 s onJulia1.12.7/1.13.1.
+The current 286-assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
-environment on the same final Source. Logs and actual exit-zero receipts are
-`test/tmp/ordinary_default_224_{112,113}_20261011.*`. The same252 Source files
-remained frozen throughout both calls. The latest increment adds a
+environment on the same final Source. The latest increment adds an
+order ≥4 BRep partition testset (4 assertions: two Tet35 sharing a Tri15
+facet — Tri15 interface cell, three generated Line5 seam cells,
+`validate`, unpartition restore) to the declared-BRep default smoke
+plus a 39-assertion complete order ≥4 set in
+`test/interfaces/api_partition_lower_brep_functional_test.jl`, now
+412 assertions on both runtimes (admitted types derive from
+`MSH_CATALOG` so every catalogued complete family partitions at any
+order — Tet35/Hex125/Prism75/Pyr55 pairs with Tri15/Quad25 interfaces
+and Line5 seams plus an order-5 Tet56 pair with Tri21/Line6 output,
+canonical facet orientation via monomial-lattice permutations, ghosts,
+MSH4 round-trips, unpartition, byte-identical threaded output and
+atomic rejection of Quad12, Tri12 and Tet22 blocks). The preceding
+increment adds a
 parallel BRep partition testset (3 assertions: `General.NumThreads=3`
 lower-BRep partition validates, the Region-parented interface carries
 both partitions, unpartition restore) to the declared-BRep default smoke

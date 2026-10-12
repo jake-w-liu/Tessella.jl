@@ -1004,7 +1004,7 @@ end
                 Int32[1,2,1,1,2,2,2,1,1]);nothing
         catch error;error end
         @test caught isa ArgumentError &&
-            occursin("second- and third-order cells only",sprint(showerror,caught))
+            occursin("complete cell families only",sprint(showerror,caught))
         @test snapshot()==before
         # A reversed Tet10 fails the positive-volume certificate.
         flipped(p,c)=Int32[[_p2_row(p,t) for t in (c[1],c[3],c[2],c[4])]...;
@@ -1528,6 +1528,210 @@ function p3_pyrs_fixture!()
     return p
 end
 
+# Order >=4 fixtures share one coordinate-keyed builder: node positions come
+# from the monomial lattice — volume corners verbatim, edge nodes on the
+# canonical edge table, face-interior slots through each facet's own frame so
+# declared Surface cells share the exact node set, and remaining slots through
+# the volume family's own map.
+mutable struct _HONodes
+    map::Dict{NTuple{3,Int64},Int32}
+    coords::Vector{NTuple{3,Float64}}
+end
+_HONodes()=_HONodes(Dict{NTuple{3,Int64},Int32}(),NTuple{3,Float64}[])
+function _ho_at!(p,c)
+    key=ntuple(d->round(Int64,c[d]*1e9),3)
+    get!(p.map,key) do;push!(p.coords,c);Int32(length(p.coords));end
+end
+function _ho_pos(family,order,m,c)
+    if family==:tri
+        x,y=m;w=(order-x-y,x,y)./order
+        return ntuple(d->sum(w[k]*c[k][d] for k in 1:3),3)
+    elseif family==:qua
+        x,y=m;w=((order-x)*(order-y),x*(order-y),x*y,(order-x)*y)./(order*order)
+        return ntuple(d->sum(w[k]*c[k][d] for k in 1:4),3)
+    elseif family==:tet
+        x,y,z=m;w=(order-x-y-z,x,y,z)./order
+        return ntuple(d->sum(w[k]*c[k][d] for k in 1:4),3)
+    elseif family==:hex
+        x,y,z=m
+        w=((order-x)*(order-y)*(order-z),x*(order-y)*(order-z),
+           x*y*(order-z),(order-x)*y*(order-z),
+           (order-x)*(order-y)*z,x*(order-y)*z,x*y*z,(order-x)*y*z)./(order^3)
+        return ntuple(d->sum(w[k]*c[k][d] for k in 1:8),3)
+    elseif family==:pri
+        x,y,z=m;w=((order-x-y)*(order-z),x*(order-z),y*(order-z),
+                  (order-x-y)*z,x*z,y*z)./(order*order)
+        return ntuple(d->sum(w[k]*c[k][d] for k in 1:6),3)
+    elseif family==:pyr
+        x,y,z=m;t=z/order
+        base=ntuple(d->(((order-x)*(order-y)*c[1][d]+x*(order-y)*c[2][d]+
+                         x*y*c[3][d]+(order-x)*y*c[4][d])/(order*order)),3)
+        return ntuple(d->c[5][d]+t*(base[d]-c[5][d]),3)
+    end
+    error("unknown family $family")
+end
+_ho_mono(fam,p)=fam==:tri ? E._tri_monomials(p) : fam==:qua ? E._qua_monomials(p) :
+    fam==:tet ? E._tet_monomials(p) : fam==:hex ? E._hex_monomials(p) :
+    fam==:pri ? E._pri_monomials(p) : E._pyr_monomials(p)
+const _HO_TOP=Tessella.MeshEntityTopology
+function _ho_volume!(p,lin,fam,order,c)
+    monos=_ho_mono(fam,order);n=length(monos)
+    tags=Vector{Int32}(undef,n)
+    nc=length(c)
+    for i in 1:nc;tags[i]=_ho_at!(p,c[i]);end
+    edges=_HO_TOP._simplex_edge_patterns(lin);e=order-1
+    for (ord,(a,b)) in enumerate(edges),i in 1:e
+        pos=ntuple(d->(c[a][d]*(order-i)+c[b][d]*i)/order,3)
+        tags[nc+(ord-1)*e+i]=_ho_at!(p,pos)
+    end
+    offset=nc+e*length(edges)
+    for (ffam,patterns) in ((:tri,_HO_TOP._simplex_face_patterns(lin,3)),
+                          (:qua,_HO_TOP._simplex_face_patterns(lin,4)))
+        interior=ffam==:tri ? (order-1)*(order-2)÷2 : (order-1)^2
+        nfc=ffam==:tri ? 3 : 4
+        isempty(patterns) && continue
+        fmonos=_ho_mono(ffam,order)
+        for pat in patterns
+            fc=ntuple(i->c[pat[i]],nfc)
+            for i in 1:interior
+                tags[offset+i]=_ho_at!(p,_ho_pos(ffam,order,fmonos[nfc+nfc*e+i],fc))
+            end
+            offset+=interior
+        end
+    end
+    for i in offset+1:n
+        tags[i]=_ho_at!(p,_ho_pos(fam,order,monos[i],c))
+    end
+    return tags
+end
+_ho_facet!(p,fam,order,fc)=
+    Int32[_ho_at!(p,_ho_pos(fam,order,m,fc)) for m in _ho_mono(fam,order)]
+_ho_line!(p,order,ca,cb)=
+    Int32[_ho_at!(p,ntuple(d->(ca[d]*(order-m[1])+cb[d]*m[1])/order,3))
+          for m in E._line_monomials(order)]
+# UID in canonical facet order for a corner-position frame.
+_ho_uid(p,pos)=UInt64(p.map[ntuple(d->round(Int64,pos[d]*1e9),3)])
+_ho_facet_uids(p,fam,order,fc)=
+    UInt64[_ho_uid(p,_ho_pos(fam,order,m,fc)) for m in _ho_mono(fam,order)]
+function _ho_nodes!(p)
+    tags=Int32[];xyz=Float64[]
+    for (i,c) in enumerate(p.coords)
+        push!(tags,Int32(i));append!(xyz,collect(c))
+    end
+    A.mesh.add_nodes(3,11,tags,xyz)
+end
+# Node positions behind an emitted UID connectivity, via the fixture map.
+_ho_frame(p,uids)=ntuple(i->p.coords[Int(uids[i])],length(uids))
+
+# Two Tet35 share the {2,3,4} Tri15; a closed declared Line5 Curve rims it.
+function p4_tets_fixture!(order=4)
+    A.finalize();A.initialize();A.model.add("p$(order) tets")
+    A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+    p=_HONodes()
+    pos=Dict(1=>(0.,0.,0.),2=>(1.,0.,0.),3=>(0.,1.,0.),4=>(0.,0.,1.),7=>(1.,1.,1.))
+    c1=(pos[1],pos[2],pos[3],pos[4]);c2=(pos[2],pos[3],pos[4],pos[7])
+    t1=_ho_volume!(p,4,:tet,order,c1);t2=_ho_volume!(p,4,:tet,order,c2)
+    faces=_HO_TOP._TETRAHEDRON_FACES
+    s41=hcat([_ho_facet!(p,:tri,order,ntuple(i->c1[f[i]],3)) for f in faces[1:3]]...)
+    s42=hcat([_ho_facet!(p,:tri,order,ntuple(i->c2[f[i]],3)) for f in faces[2:4]]...)
+    l46=hcat(_ho_line!(p,order,pos[2],pos[3]),_ho_line!(p,order,pos[3],pos[4]),
+             _ho_line!(p,order,pos[4],pos[2]))
+    A.model.add_discrete_entity(1,46,Int[])
+    A.model.add_discrete_entity(2,41,[-46])
+    A.model.add_discrete_entity(2,42,[46])
+    A.model.add_discrete_entity(3,11,[41,42])
+    _ho_nodes!(p)
+    A.mesh.add_elements_by_type(46,E.msh_type(:lin,order),[801,802,803],vec(l46))
+    A.mesh.add_elements_by_type(41,E.msh_type(:tri,order),[701,702,703],vec(s41))
+    A.mesh.add_elements_by_type(42,E.msh_type(:tri,order),[704,705,706],vec(s42))
+    A.mesh.add_elements_by_type(11,E.msh_type(:tet,order),[501,502],vcat(t1,t2))
+    A.mesh.generate(3)
+    A.option("Mesh.PartitionCreateTopology",1)
+    return p
+end
+# Two Hex125 share the x=1 Quad25.
+function p4_hexes_fixture!()
+    A.finalize();A.initialize();A.model.add("p4 hexes")
+    A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+    p=_HONodes()
+    pos=Dict(1=>(0.,0.,0.),2=>(1.,0.,0.),3=>(1.,1.,0.),4=>(0.,1.,0.),
+             5=>(0.,0.,1.),6=>(1.,0.,1.),7=>(1.,1.,1.),8=>(0.,1.,1.),
+             21=>(2.,0.,0.),22=>(2.,1.,0.),23=>(2.,0.,1.),24=>(2.,1.,1.))
+    h1=(1,2,3,4,5,6,7,8);h2=(2,21,22,3,6,23,24,7)
+    c1=ntuple(i->pos[h1[i]],8);c2=ntuple(i->pos[h2[i]],8)
+    x1=_ho_volume!(p,5,:hex,4,c1);x2=_ho_volume!(p,5,:hex,4,c2)
+    faces=_HO_TOP._HEXAHEDRON_FACES
+    s41=hcat([_ho_facet!(p,:qua,4,ntuple(i->c1[f[i]],4)) for f in faces[[1,2,3,5,6]]]...)
+    s42=hcat([_ho_facet!(p,:qua,4,ntuple(i->c2[f[i]],4)) for f in faces[[1,2,4,5,6]]]...)
+    A.model.add_discrete_entity(2,41,Int[])
+    A.model.add_discrete_entity(2,42,Int[])
+    A.model.add_discrete_entity(3,11,[41,42])
+    _ho_nodes!(p)
+    A.mesh.add_elements_by_type(41,37,[701:705...],vec(s41))
+    A.mesh.add_elements_by_type(42,37,[706:710...],vec(s42))
+    A.mesh.add_elements_by_type(11,93,[501,502],vcat(x1,x2))
+    A.mesh.generate(3)
+    A.option("Mesh.PartitionCreateTopology",1)
+    return p
+end
+# Two Prism75 share {1,2,4,5} Quad25; exteriors mix Tri15/Quad25.
+function p4_prisms_fixture!()
+    A.finalize();A.initialize();A.model.add("p4 prisms")
+    A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+    p=_HONodes()
+    pos=Dict(1=>(0.,0.,0.),2=>(1.,0.,0.),3=>(0.,1.,0.),
+             4=>(0.,0.,1.),5=>(1.,0.,1.),6=>(0.,1.,1.),
+             7=>(0.,-1.,0.),10=>(0.,-1.,1.))
+    pr1=(1,2,3,4,5,6);pr2=(2,1,7,5,4,10)
+    c1=ntuple(i->pos[pr1[i]],6);c2=ntuple(i->pos[pr2[i]],6)
+    x1=_ho_volume!(p,6,:pri,4,c1);x2=_ho_volume!(p,6,:pri,4,c2)
+    tris=_HO_TOP._PRISM_TRIANGLE_FACES;quads=_HO_TOP._PRISM_QUADRANGLE_FACES
+    s41t=hcat(_ho_facet!(p,:tri,4,ntuple(i->c1[tris[1][i]],3)),
+              _ho_facet!(p,:tri,4,ntuple(i->c1[tris[2][i]],3)))
+    s41q=hcat(_ho_facet!(p,:qua,4,ntuple(i->c1[quads[2][i]],4)),
+              _ho_facet!(p,:qua,4,ntuple(i->c1[quads[3][i]],4)))
+    s42t=hcat(_ho_facet!(p,:tri,4,ntuple(i->c2[tris[1][i]],3)),
+              _ho_facet!(p,:tri,4,ntuple(i->c2[tris[2][i]],3)))
+    s42q=hcat(_ho_facet!(p,:qua,4,ntuple(i->c2[quads[2][i]],4)),
+              _ho_facet!(p,:qua,4,ntuple(i->c2[quads[3][i]],4)))
+    A.model.add_discrete_entity(2,41,Int[])
+    A.model.add_discrete_entity(2,42,Int[])
+    A.model.add_discrete_entity(3,11,[41,42])
+    _ho_nodes!(p)
+    A.mesh.add_elements_by_type(41,23,[701,702],vec(s41t))
+    A.mesh.add_elements_by_type(41,37,[703,704],vec(s41q))
+    A.mesh.add_elements_by_type(42,23,[705,706],vec(s42t))
+    A.mesh.add_elements_by_type(42,37,[707,708],vec(s42q))
+    A.mesh.add_elements_by_type(11,91,[501,502],vcat(x1,x2))
+    A.mesh.generate(3)
+    A.option("Mesh.PartitionCreateTopology",1)
+    return p
+end
+# Two Pyr55 share the Quad25 base; the four side facets are Tri15.
+function p4_pyrs_fixture!()
+    A.finalize();A.initialize();A.model.add("p4 pyrs")
+    A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+    p=_HONodes()
+    pos=Dict(1=>(0.,0.,0.),2=>(1.,0.,0.),3=>(1.,1.,0.),4=>(0.,1.,0.),
+             5=>(0.5,0.5,1.),6=>(0.5,0.5,-1.))
+    py1=(1,2,3,4,5);py2=(4,3,2,1,6)
+    c1=ntuple(i->pos[py1[i]],5);c2=ntuple(i->pos[py2[i]],5)
+    x1=_ho_volume!(p,7,:pyr,4,c1);x2=_ho_volume!(p,7,:pyr,4,c2)
+    tris=_HO_TOP._PYRAMID_TRIANGLE_FACES
+    s41=hcat([_ho_facet!(p,:tri,4,ntuple(i->c1[f[i]],3)) for f in tris]...)
+    s42=hcat([_ho_facet!(p,:tri,4,ntuple(i->c2[f[i]],3)) for f in tris]...)
+    A.model.add_discrete_entity(2,41,Int[])
+    A.model.add_discrete_entity(2,42,Int[])
+    A.model.add_discrete_entity(3,11,[41,42])
+    _ho_nodes!(p)
+    A.mesh.add_elements_by_type(41,23,[701:704...],vec(s41))
+    A.mesh.add_elements_by_type(42,23,[705:708...],vec(s42))
+    A.mesh.add_elements_by_type(11,119,[501,502],vcat(x1,x2))
+    A.mesh.generate(3)
+    A.option("Mesh.PartitionCreateTopology",1)
+    return p
+end
+
 @testset "third-order cells partition declared BRep" begin
     try
         # Tet20 pair: a Tri10 interface whose whole border is the declared
@@ -1631,9 +1835,9 @@ end
 
 @testset "third-order topology violations reject atomically" begin
     try
-        # Serendipity Quad12, order-4 Tri15 and order-4 Tet35 blocks reject at
-        # the admission gate even when they ride on a valid Tet20 mesh.
-        for (badmsh,dim) in ((39,2),(23,2),(30,3))
+        # Serendipity Quad12, Tri12 and Tet22 blocks reject at the admission
+        # gate even when they ride on a valid Tet20 mesh.
+        for (badmsh,dim) in ((39,2),(22,2),(32,3))
             ncell=Int(E.msh_num_nodes(badmsh))
             p=p3_tets_fixture!(extras=()->begin
                 base=Int32(A.mesh.get_max_node_tag())
@@ -1651,9 +1855,124 @@ end
                     Int32[1,2,1,1,1,2,2,2,1,1,1,1]);nothing
             catch error;error end
             @test caught isa ArgumentError &&
-                occursin("second- and third-order cells only",sprint(showerror,caught))
+                occursin("complete cell families only",sprint(showerror,caught))
             @test snapshot()==before
         end
+    finally
+        A.finalize()
+    end
+end
+
+@testset "order >=4 cells partition declared BRep" begin
+    try
+        # Tet35 pair: a Tri15 interface rimmed by the declared closed Line5
+        # Curve; the emitted interface connectivity is the facet's canonical
+        # lattice order under whichever carrier orientation was chosen.
+        p=p4_tets_fixture!();original=A.mesh.get_elements()
+        A.option("Mesh.PartitionCreateGhostCells",1)
+        A.mesh.partition(2,[501,502,701:706...,801:803...],
+            Int32[1,2,1,1,1,2,2,2,1,1,1])
+        @test A.model.get_number_of_partitions()==2
+        interface=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==2 && A.model.get_parent(2,tag)==(3,11))
+        @test A.model.get_partitions(2,interface)==[1,2]
+        ids,iface_nodes=family(2,interface,23)
+        @test length(ids)==1 && size(iface_nodes)==(15,1)
+        @test vec(iface_nodes[:,1])==
+            _ho_facet_uids(p,:tri,4,_ho_frame(p,vec(iface_nodes[1:3,1])))
+        curve_child=child(1,46)
+        @test Set(abs.(last.(A.model.get_boundary([(2,interface)],false,true,false))))==
+            Set([curve_child])
+        @test A.model.get_partitions(1,curve_child)==[1,2]
+        ids,nodes=family(1,curve_child,27)
+        @test length(ids)==3 && size(nodes)==(5,3)
+        rim=_ho_facet_uids(p,:tri,4,_ho_frame(p,vec(iface_nodes[1:3,1])))[1:12]
+        @test Set(vec(nodes))==Set(rim)
+        region1=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==3 && A.model.get_parent(3,tag)==(3,11) &&
+               A.model.get_partitions(3,tag)==[1])
+        region2=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==3 && A.model.get_parent(3,tag)==(3,11) &&
+               A.model.get_partitions(3,tag)==[2])
+        @test Set(abs.(last.(A.model.get_boundary([(3,region1)],false,true,false))))==
+            Set([child(2,41),interface])
+        @test Set(abs.(last.(A.model.get_boundary([(3,region2)],false,true,false))))==
+            Set([child(2,42),interface])
+        ids,nodes=family(3,region1,30);@test ids==UInt64[501] && size(nodes)==(35,1)
+        ids,nodes=family(3,region2,30);@test ids==UInt64[502] && size(nodes)==(35,1)
+        ghost1=only(tag for (tag,part) in A.mesh.get().partition_data.ghost_entities if part==1)
+        ghost2=only(tag for (tag,part) in A.mesh.get().partition_data.ghost_entities if part==2)
+        @test A.mesh.get_ghost_elements(3,ghost1)==(UInt64[502],Int32[2])
+        @test A.mesh.get_ghost_elements(3,ghost2)==(UInt64[501],Int32[1])
+        owned=A.mesh.get()
+        @test Tessella.validate(owned).ok
+        mktempdir() do directory
+            for binary in (false,true)
+                path=joinpath(directory,"p4-$(binary).msh")
+                E.write_mixed_msh(path,owned;version=4.1,binary)
+                imported=E.read_mixed_msh(path)
+                @test records(imported)==records(owned)
+                @test partition_records(imported)==partition_records(owned)
+            end
+            A.option("Mesh.MshFileVersion",4.1);A.option("Mesh.Binary",0)
+            A.option("Mesh.SaveAll",1)
+            path=joinpath(directory,"public.msh");A.write(path)
+            A.model.add("p4 roundtrip");A.open(path)
+            @test A.model.get_partitions(1,curve_child)==[1,2]
+            A.model.set_current("p4 tets")
+        end
+        A.mesh.unpartition()
+        @test A.mesh.get_elements()==original
+        @test Set(A.model.get_entities())==
+            Set([(1,46),(2,41),(2,42),(3,11)])
+        # Hex125 pair: one Quad25 interface and a closed four-cell Line5 seam.
+        p=p4_hexes_fixture!();original=A.mesh.get_elements()
+        A.mesh.partition(2,[501,502,701:710...],
+            Int32[1,2,1,1,1,1,1,2,2,2,2,2])
+        interface=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==2 && A.model.get_parent(2,tag)==(3,11))
+        ids,nodes=family(2,interface,37)
+        @test length(ids)==1 && size(nodes)==(25,1)
+        @test vec(nodes[:,1])==_ho_facet_uids(p,:qua,4,_ho_frame(p,vec(nodes[1:4,1])))
+        interface_curves=Set(abs.(last.(A.model.get_boundary([(2,interface)],false,true,false))))
+        seam=only(interface_curves)
+        @test A.model.get_partitions(1,seam)==[1,2]
+        ids,nodes=family(1,seam,27)
+        @test length(ids)==4 && size(nodes)==(5,4)
+        @test Tessella.validate(A.mesh.get()).ok
+        A.mesh.unpartition()
+        @test A.mesh.get_elements()==original
+        # Prism75 pair: mixed Tri15/Quad25 exteriors around a Quad25
+        # interface; Pyr55 pair: the Quad25 base interface plus Tri15 sides.
+        for (fixture,tags) in ((p4_prisms_fixture!,701:708),
+                               (p4_pyrs_fixture!,701:708))
+            fixture();original=A.mesh.get_elements()
+            A.mesh.partition(2,[501,502,collect(tags)...],
+                Int32[1,2,1,1,1,1,2,2,2,2])
+            interface=only(tag for (dim,tag) in A.model.get_entities()
+                if dim==2 && A.model.get_parent(2,tag)==(3,11))
+            ids,nodes=family(2,interface,37)
+            @test length(ids)==1 && size(nodes)==(25,1)
+            owned=A.mesh.get()
+            @test Tessella.validate(owned).ok
+            A.mesh.unpartition()
+            @test A.mesh.get_elements()==original
+        end
+        # Order 5 travels the same path: Tet56 pair, Tri21 interface, Line6 seam.
+        p=p4_tets_fixture!(5);original=A.mesh.get_elements()
+        A.mesh.partition(2,[501,502,701:706...,801:803...],
+            Int32[1,2,1,1,1,2,2,2,1,1,1])
+        interface=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==2 && A.model.get_parent(2,tag)==(3,11))
+        ids,nodes=family(2,interface,25)
+        @test length(ids)==1 && size(nodes)==(21,1)
+        @test vec(nodes[:,1])==_ho_facet_uids(p,:tri,5,_ho_frame(p,vec(nodes[1:3,1])))
+        curve_child=child(1,46)
+        ids,nodes=family(1,curve_child,28)
+        @test length(ids)==3 && size(nodes)==(6,3)
+        @test Tessella.validate(A.mesh.get()).ok
+        A.mesh.unpartition()
+        @test A.mesh.get_elements()==original
     finally
         A.finalize()
     end

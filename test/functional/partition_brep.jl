@@ -274,6 +274,56 @@ end
     end
 end
 
+@testset "Order-4 lower BRep partition" begin
+    A=Tessella.API
+    try
+        # Two Tet35 share {2,3,4}: node positions come from the Tet35/Tri15
+        # monomial lattice, so volume facets and Tri15 surface carriers share
+        # literal node rows.
+        A.finalize();A.initialize();A.model.add("p4 partition")
+        A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+        A.model.add_discrete_entity(2,30);A.model.add_discrete_entity(3,11,[30])
+        E=Tessella.Elements
+        corner=((0.,0.,0.),(1.,0.,0.),(0.,1.,0.),(0.,0.,1.),(1.,1.,1.))
+        pos=Dict{NTuple{3,Float64},Int}()
+        take! = c->get!(()->(length(pos)+1),pos,c)
+        tetpos=(c,m)->ntuple(d->sum(w*corner[c[k]][d]
+            for (k,w) in enumerate((4-sum(m),m[1],m[2],m[3])./4)),3)
+        tripos=(c,m)->ntuple(d->sum(w*corner[c[k]][d]
+            for (k,w) in enumerate((4-sum(m),m[1],m[2])./4)),3)
+        t1=Int32[take!(tetpos((1,2,3,4),m)) for m in E._tet_monomials(4)]
+        t2=Int32[take!(tetpos((2,3,4,5),m)) for m in E._tet_monomials(4)]
+        faces=Tessella.MeshEntityTopology._simplex_face_patterns(4,3)
+        s30=hcat([Int32[take!(tripos(ntuple(i->c[f[i]],3),m))
+                        for m in E._tri_monomials(4)]
+                 for (c,range) in (((1,2,3,4),1:3),((2,3,4,5),2:4))
+                 for f in faces[range]]...)
+        ordered=sort!(collect(pos);by=last)
+        tags=Int32[t.second for t in ordered]
+        xyz=reduce(vcat,(collect(t.first) for t in ordered))
+        A.mesh.add_nodes(3,11,tags,xyz)
+        A.mesh.add_elements_by_type(30,23,601:606,vec(s30))
+        A.mesh.add_elements_by_type(11,30,[501,502],vcat(t1,t2))
+        A.mesh.generate(3);A.option("Mesh.PartitionCreateTopology",1)
+        A.mesh.partition(2,[601:606...,501,502],[1,1,1,2,2,2,1,2])
+        interface=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==2 && A.model.get_parent(2,tag)==(3,11))
+        types,ids,nodes=A.mesh.get_elements(2,interface)
+        @test types==[23] && length(only(ids))==1 &&
+            length(unique(vec(only(nodes))))==15
+        seam=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==1 && A.model.get_parent(1,tag)==(2,30))
+        types,ids,nodes=A.mesh.get_elements(1,seam)
+        @test types==[27] && length(only(ids))==3 &&
+            A.model.get_partitions(1,seam)==[1,2]
+        @test Tessella.validate(A.mesh.get()).ok
+        A.mesh.unpartition()
+        @test A.model.get_entities()==[(2,30),(3,11)]
+    finally
+        A.finalize()
+    end
+end
+
 @testset "Coincident Surface partition" begin
     A=Tessella.API
     try

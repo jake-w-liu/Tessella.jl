@@ -390,6 +390,31 @@ now **373/373** and the default smoke gained a 3-assertion parallel
 testset. PART01 remains open (order ≥4 cells); parallel mesh *generation*
 (PAR01 producer workflows) remains separate work.
 
+### Complete order ≥4 partition families (2026-10-12)
+
+Devin landed the final PART01 partition-production item: admitted-type
+tuples are now derived from `MSH_CATALOG` (`!serendipity && order>=1`),
+so every catalogued complete Line/Tri/Quad surface and Tet/Hex/Prism/Pyr
+volume partitions through the unchanged certificate at any order. The
+last per-order block was facet orientation — hard-coded p≤3
+reversal/rotation tables are replaced by `_partition_facet_perm`, which
+derives the source-index permutation for any corner map σ from the
+monomial lattice (σ induces the unique affine map sending old vertex k's
+lattice point to new vertex σ(k)'s, in exact integer arithmetic), so edge
+and interior slots permute correctly at any order; verified against every
+retired p≤3 table. Interfaces emit Tri15/Quad25 blocks at order 4,
+generated seams emit Line(p+1) cells by rim arity, the bare-Tet4 dispatch
+routes any mesh carrying an admitted lower cell to the BRep path, and
+serendipity/incomplete families (Quad12, Tri12, Tet22) still reject
+atomically. Qualified on Tet35/Hex125/Prism75/Pyr55 pairs plus an
+order-5 Tet56 pair (Tri21 interface, Line6 seam): canonical interface
+connectivity, declared Line5 rim curve, ghosts, `validate`, ASCII/binary
+MSH4 round-trips, `unpartition` and byte-identical threaded output under
+`julia -t4`. The focused partition file adds a 39-assertion order ≥4
+testset (now **412/412**) and the default smoke gained a 4-assertion
+order-4 testset. PART01's partition checklist is complete; parallel mesh
+*generation* (PAR01 producer workflows) remains.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

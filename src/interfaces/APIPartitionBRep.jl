@@ -1,7 +1,6 @@
-# Actual lower BRep transport across every linear, complete second-order and
-# complete third-order cell family (Point15; Line2/Line3/Line4; Tri3/Tri6/Tri10
-# and Quad4/Quad9/Quad16 surfaces; Tet4/Hex8/Prism6/Pyr5, Tet10/Hex27/Prism18/
-# Pyr14 and Tet20/Hex64/Prism40/Pyr30 volumes). Interface seams are derived
+# Actual lower BRep transport across every complete cell family at any
+# catalogued order (Point15; Line surfaces; Tri/Quad surfaces;
+# Tet/Hex/Prism/Pyr volumes). Interface seams are derived
 # from literal node UID incidence, with one authoritative original cell per
 # UID. Facet and edge corner tables come from the canonical
 # `MeshEntityTopology` outward cycles, which share the MSH pointsGenerators
@@ -9,9 +8,19 @@
 # nodes along the table edge direction followed by per-face interior nodes in
 # `_FACES` order, and the face-interior offsets accumulate triangle interiors
 # before quadrangle interiors exactly as pointsGenerators appends them.
-const _PARTITION_SURFACE_TYPES=(2,3,9,10,21,36)
-const _PARTITION_VOLUME_TYPES=(4,5,6,7,11,12,13,14,29,90,92,118)
-const _PARTITION_CURVE_TYPES=(1,8,26)
+const _PARTITION_SURFACE_TYPES=Tuple(sort!(Int[msh for (msh,spec) in
+    MSH_CATALOG if spec.family in (:tri,:qua) &&
+    !spec.serendipity && spec.order>=1]))
+const _PARTITION_VOLUME_TYPES=Tuple(sort!(Int[msh for (msh,spec) in
+    MSH_CATALOG if spec.family in (:tet,:hex,:pri,:pyr) &&
+    !spec.serendipity && spec.order>=1]))
+const _PARTITION_CURVE_TYPES=Tuple(sort!(Int[msh for (msh,spec) in
+    MSH_CATALOG if spec.family==:lin && !spec.serendipity &&
+    spec.order>=1]))
+# Non-volume admitted types — the bare-Tet4 producer routes to the BRep path
+# whenever any declared lower cell exists at any complete order.
+const _PARTITION_LOWER_TYPES=(15,_PARTITION_CURVE_TYPES...,
+    _PARTITION_SURFACE_TYPES...)
 _partition_support(uids)=Tuple(sort!(collect(uids)))
 # Linear-family base type for any admitted cell type, resolved through the
 # MSH catalog family rather than a numeric offset so third-order types map
@@ -34,57 +43,67 @@ function _partition_surface_shape(msh)
 end
 # Reverse a linear corner cycle, preserving the first corner.
 _partition_reversed_corners(b)=ntuple(i->i==1 ? b[1] : b[length(b)+2-i],length(b))
-# Reverse an oriented cell ordering while preserving the family's node layout:
-# corners reverse as a cycle, each edge's interior nodes follow the reversed
-# corner pair in reversed sequence and the face-interior slots permute under
-# the corner reflection (a quadrangle's 2x2 interior ring swaps its second
-# and fourth slots). Length selects the family (3/4 linear, 6 Tri6, 9 Quad9,
-# 10 Tri10, 16 Quad16).
-function _partition_reversed(u)
-    n=length(u)
-    n==6 && return (u[1],u[3],u[2],u[6],u[5],u[4])
-    n==9 && return (u[1],u[4],u[3],u[2],u[8],u[7],u[6],u[5],u[9])
-    n==10 && return (u[1],u[3],u[2],u[9],u[8],u[7],u[6],u[5],u[4],u[10])
-    n==16 && return (u[1],u[4],u[3],u[2],u[12],u[11],u[10],u[9],
-                    u[8],u[7],u[6],u[5],u[13],u[16],u[15],u[14])
-    return _partition_reversed_corners(u)
-end
-# Cycle-equality on corner order; higher-order cells additionally require
-# their edge nodes to travel consistently with the rotated corner pairs and
-# their interior slots to rotate with the corner frame. A quadrangle face's
-# interior ring cyclically shifts with the corner shift while a triangle's
-# single interior slot stays fixed.
-function _partition_cycle_equal(a,b)
-    length(a)==length(b) || return false
-    n=length(a)
-    if n in (6,9,10,16)
-        nc=n in (6,10) ? 3 : 4
-        e=n in (6,9) ? 1 : 2
-        interior=n-nc-nc*e
-        for shift in 0:nc-1
-            all(i->a[i]==b[mod1(i+shift,nc)],1:nc) || continue
-            consistent=true
-            for i in 1:nc
-                j=mod1(i+shift,nc)
-                for t in 1:e
-                    a[nc+(i-1)*e+t]==b[nc+(j-1)*e+t] || (consistent=false;break)
-                end
-                consistent || break
-            end
-            consistent || continue
-            if interior>0 && nc==4
-                all(s->a[nc+nc*e+s]==b[nc+nc*e+mod1(s+shift,interior)],
-                    1:interior) || continue
-            else
-                all(i->a[i]==b[i],nc+nc*e+1:n) || continue
-            end
-            return true
-        end
-        return false
+# Source-index permutation `src` for a corner map σ (new slot σ(k) holds old
+# vertex k) on a Tri/Quad cell of order p, so `transformed[i]=u[src[i]]`.
+# Every admitted surface node sits on the integer monomial lattice that the
+# pointsGenerators translation enumerates — the first nc monomials are the
+# corner lattice points — and σ induces the unique affine map T sending
+# old vertex k's lattice point to new vertex σ(k)'s. Each old slot's image
+# coordinate resolves to exactly one new slot, so interior nodes of any
+# order permute correctly without per-order tables.
+function _partition_facet_perm(msh,σ)
+    spec=msh_spec(msh);p=spec.order
+    L=spec.family==:tri ? _tri_monomials(p) :
+      spec.family==:qua ? _qua_monomials(p) :
+      throw(ArgumentError("partition: facet permutations need Tri/Quad cells"))
+    nc=length(σ);verts=Tuple(L[i] for i in 1:nc)
+    c=verts[σ[1]]
+    e1=Tuple(verts[σ[2]][d]-c[d] for d in 1:2)
+    e2=Tuple(verts[σ[nc]][d]-c[d] for d in 1:2)
+    lut=Dict(m=>i for (i,m) in enumerate(L))
+    src=Vector{Int}(undef,length(L))
+    for (i,m) in enumerate(L)
+        t=(c[1]+(m[1]*e1[1]+m[2]*e2[1])÷p,
+           c[2]+(m[1]*e1[2]+m[2]*e2[2])÷p)
+        src[lut[t]]=i
     end
-    return any(a==ntuple(i->b[mod1(i+shift,n)],n) for shift in 0:n-1)
+    return Tuple(src)
 end
-_partition_cycle_reverse(a,b)=_partition_cycle_equal(a,_partition_reversed(b))
+# Perms depend only on the cell type; every caller runs serially, but the
+# cache is locked anyway so a future threaded caller stays safe.
+const _PARTITION_FACET_PERM_LOCK=ReentrantLock()
+const _PARTITION_FACET_PERM_CACHE=Dict{Tuple{Int,Tuple{Vararg{Int}}},
+                                       Tuple{Vararg{Int}}}()
+function _partition_facet_perm_cached(msh,σ)
+    return lock(_PARTITION_FACET_PERM_LOCK) do
+        get!(_PARTITION_FACET_PERM_CACHE,(msh,σ)) do
+            _partition_facet_perm(msh,σ)
+        end
+    end
+end
+# Reverse an oriented cell ordering while preserving the family's node layout:
+# the reversed corner cycle maps old vertex k to slot 1 or nc+2-k, and the
+# affine lattice map carries edge and interior nodes to their slots at any
+# order.
+function _partition_reversed(msh,u)
+    nc=Elements.msh_family(msh)==:tri ? 3 : 4
+    src=_partition_facet_perm_cached(msh,ntuple(k->k==1 ? 1 : nc+2-k,nc))
+    return ntuple(i->u[src[i]],length(u))
+end
+# Cycle-equality on oriented layouts: a equals some cyclic rotation of b,
+# with edge and interior nodes rotating consistently through the same
+# affine lattice map.
+function _partition_cycle_equal(amsh,a,b)
+    length(a)==length(b) || return false
+    nc=Elements.msh_family(amsh)==:tri ? 3 : 4
+    for shift in 0:nc-1
+        src=_partition_facet_perm_cached(amsh,ntuple(k->mod1(k-shift,nc),nc))
+        all(i->a[i]==b[src[i]],eachindex(a)) && return true
+    end
+    return false
+end
+_partition_cycle_reverse(amsh,a,bmsh,b)=
+    _partition_cycle_equal(amsh,a,_partition_reversed(bmsh,b))
 # `(facet surface msh type, cell node tuple)` for each outward facet of a
 # volume family at its canonical order. An order-p cell appends p-1 edge
 # nodes along every consecutive corner pair — taken in the facet's own
@@ -190,7 +209,7 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
     all(row->row[1] in (15,) || row[1] in _PARTITION_SURFACE_TYPES ||
         row[1] in _PARTITION_CURVE_TYPES || row[1] in _PARTITION_VOLUME_TYPES,catalog) &&
     any(row->row[1] in _PARTITION_VOLUME_TYPES,catalog) || throw(ArgumentError(
-        "$caller: lower BRep partitioning supports linear and complete second- and third-order cells only"))
+        "$caller: lower BRep partitioning supports complete cell families only"))
     cached isa MixedMesh && cached.partition_data!==nothing &&
         throw(ArgumentError("$caller: existing partition topology is unsupported"))
     public=class.public_tags
@@ -396,7 +415,8 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
     end
     for hits in values(facets)
         length(hits)<=2 || throw(ArgumentError("$caller: lower BRep facet has too many volume carriers"))
-        length(hits)==2 && !_partition_cycle_reverse(hits[1].uids,hits[2].uids) &&
+        length(hits)==2 && !_partition_cycle_reverse(hits[1].msh,hits[1].uids,
+            hits[2].msh,hits[2].uids) &&
             throw(ArgumentError("$caller: shared volume facet has inconsistent winding"))
     end
     face_edges=Vector{Vector{Tuple{Tuple{UInt64,UInt64},NamedTuple}}}(undef,length(faces))
@@ -455,8 +475,8 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
                 key=_partition_support(face.uids);key in expected && !(key in covered) ||
                     throw(ArgumentError("$caller: declared Surface does not uniquely cover its Region facets"))
                 hit=only(filter(hit->hit.volume.parent==parent,facets[key]))
-                oriented=signed>0 ? face.uids : _partition_reversed(face.uids)
-                _partition_cycle_equal(oriented,hit.uids) || throw(ArgumentError(
+                oriented=signed>0 ? face.uids : _partition_reversed(face.msh,face.uids)
+                _partition_cycle_equal(face.msh,oriented,hit.uids) || throw(ArgumentError(
                     "$caller: declared Surface sign disagrees with its actual volume facet winding"))
                 push!(covered,key)
             end
@@ -489,8 +509,8 @@ function _partition_brep_boundary_certificate(source,children,part_entities,boun
             key=_partition_support(face.uids)
             haskey(expected,key) && !(key in covered) || throw(ArgumentError(
                 "$caller: child Region boundary repeats or includes a foreign volume facet"))
-            oriented=signed>0 ? face.uids : _partition_reversed(face.uids)
-            _partition_cycle_equal(oriented,expected[key].uids) || throw(ArgumentError(
+            oriented=signed>0 ? face.uids : _partition_reversed(face.msh,face.uids)
+            _partition_cycle_equal(face.msh,oriented,expected[key].uids) || throw(ArgumentError(
                 "$caller: child Region boundary has inconsistent facet winding"))
             push!(covered,key)
         end
@@ -726,7 +746,7 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
                 ids=UInt64[]
                 for (slot,index) in enumerate(component)
                     face=faces[index]
-                    rows=face.child==primary ? face.rows : _partition_reversed(face.rows)
+                    rows=face.child==primary ? face.rows : _partition_reversed(face.msh,face.rows)
                     uids=Tuple(source.public.node_tags[collect(rows)])
                     oriented_rows[slot]=rows
                     maximum_uid<typemax(UInt64) || throw(ArgumentError("$caller: interface UID capacity exceeded"))

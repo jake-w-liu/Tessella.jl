@@ -11,17 +11,18 @@ topology instead of rejecting it. A follow-on slice generalizes the cell
 catalog to every linear family — Quad4 surfaces beside Tri3 and
 Hex8/Prism6/Pyr5 volumes beside Tet4 — and a later slice extends it to
 every complete second-order family — Line3 curves, Tri6/Quad9 surfaces and
-Tet10/Hex27/Prism18/Pyr14 volumes — and the latest slice completes the
+Tet10/Hex27/Prism18/Pyr14 volumes — and later slices complete the
 catalogue through complete third order — Line4 curves, Tri10/Quad16
-surfaces and Tet20/Hex64/Prism40/Pyr30 volumes.
+surfaces and Tet20/Hex64/Prism40/Pyr30 volumes — and then through every
+catalogued complete order, so fourth-order families (Line5, Tri15/Quad25,
+Tet35/Hex125/Prism75/Pyr55) and higher partition identically.
 
 ## Input certificate
 
-The snapshot admits linear and complete second- and third-order MSH blocks
-— Point15, Line2/Line3/Line4, Tri3/Tri6/Tri10, Quad4/Quad9/Quad16,
-Tet4/Tet10/Tet20, Hex8/Hex27/Hex64, Prism6/Prism18/Prism40 and
-Pyr5/Pyr14/Pyr30 — and requires every cell's classified parent to exist as
-a discrete entity. Surface and volume facet/edge cycles come from the
+The snapshot admits every complete MSH cell family the catalogue carries —
+Point15, Line(p+1), Tri and Quad surfaces and Tet/Hex/Prism/Pyr volumes at
+any catalogued order — and requires every cell's classified parent to exist
+as a discrete entity. Surface and volume facet/edge cycles come from the
 canonical `MeshEntityTopology` outward tables (`_simplex_edge_patterns`,
 `_simplex_face_patterns`); an order-p facet derives its full node tuple by
 appending `p-1` edge nodes per consecutive corner pair — taken along the
@@ -30,26 +31,28 @@ table picks the volume's edge nodes in reverse — then the facet's interior
 slots, whose offsets accumulate triangle interiors before quadrangle
 interiors in `_FACES` order exactly as the MSH pointsGenerators layout
 appends them. Every volume cell must carry positive signed volume under
-`_volume_cell_signed_volume` on its corner subset, and cycle equality,
-reversal and support keys are layout-aware (corner rotation plus consistent
-edge-node block travel, triangle interior slots pinned and quadrangle
-interior rings rotating with the corner frame). Serendipity/incomplete
-families and order ≥4 cells reject. Certification is atomic — the model
+`_volume_cell_signed_volume` on its corner subset. Cycle equality,
+reversal and support keys are layout-generic: each admits a source-index
+permutation derived from the monomial lattice — a corner map σ induces the
+unique affine map sending old vertex k's lattice point to new vertex σ(k)'s,
+which carries edge and interior nodes to their exact slots at any order —
+so no per-order tables exist. Serendipity/incomplete families (Quad8/Quad12,
+Tri12, Tet22 and peers) reject. Certification is atomic — the model
 and cache are untouched on failure:
 
 - Each declared Curve must be one nonbranching directed chain of its actual
-  Line2/Line3/Line4 cells. An open chain requires exactly two signed Point
-  boundaries; the declared bound Point must own the Point15 cell on the
-  corresponding literal chain end node. A closed chain must declare no
+  Line cells at a single order. An open chain requires exactly two signed
+  Point boundaries; the declared bound Point must own the Point15 cell on
+  the corresponding literal chain end node. A closed chain must declare no
   Point boundaries.
 - Every declared Point entity needs exactly one actual Point15 cell, and no
   two Points may share a vertex.
 - Each declared Surface boundary lists distinct Curves whose cells cover the
   Surface's literal oriented border completely; orientation must agree with
-  the declared sign. A declared Line3/Line4 Curve must additionally reuse
-  the surface border's actual edge nodes — adjacent surface cells must
-  agree on the edge's interior-node sequence up to traversal reversal, and
-  a foreign sequence rejects.
+  the declared sign. A declared higher-order Line Curve must additionally
+  reuse the surface border's actual edge nodes — adjacent surface cells
+  must agree on the edge's interior-node sequence up to traversal reversal,
+  and a foreign sequence rejects.
 - Every Curve must be declared on some Surface boundary and every Point on
   some Curve boundary; unbound lower entities reject.
 - Every node referenced by a cell must carry consistent lowest-dimension
@@ -87,13 +90,13 @@ unpartition restores the original entities, cells and declared signed
 boundaries.
 
 Each connected interface component produces one dim-2 entity carrying a
-Tri3/Tri6/Tri10 and/or Quad4/Quad9/Quad16 block per its facet types, wound
-to the primary partition side, so Hex↔Pyramid interfaces emit quads and
+Tri and/or Quad block at the volume facets' own order, wound to the
+primary partition side, so Hex↔Pyramid interfaces emit quads and
 Tet↔Prism interfaces emit triangles at whatever order the volume facets
 carry; the two sides must agree on shared edge-node sequences up to
 traversal reversal. Generated seams group by parent entity and the
 complete incident partition membership, then chain nonbranchingly per the
-open-seam rules and emit Line2, Line3 or Line4 cells by the border arity;
+open-seam rules and emit Line(p+1) cells by the border arity;
 a declared Curve carrier on an interface border binds the shared Curve
 child instead.
 
@@ -181,8 +184,8 @@ requests below `2` select serial production, and values outside the signed
 
 ## Guards and scope
 
-Order ≥4 and incomplete/serendipity high-order cells, already partitioned
-data and seam branches within one
+Incomplete/serendipity high-order cells (Quad8/Quad12, Tri12, Tet22 and
+peers), already partitioned data and seam branches within one
 partition-membership group remain guarded or open. Bare meshes without lower
 cells still route to the Tet4-only producer and bare non-Tet4 volume meshes
 remain unsupported. `generate` always
@@ -208,7 +211,12 @@ Region parent; a three-Tet10 junction emitting a Line3 junction seam; a
 Tet20 pair whose Tri10 interface border is a declared closed Line4 Curve;
 a Hex64 pair (Quad16 interface and a closed four-cell Line4 seam); a
 Prism40 pair mixing Tri10 and Quad16 exterior blocks around a Quad16
-interface; a Pyr30 pair sharing the Quad16 base; and a periodic prism
+interface; a Pyr30 pair sharing the Quad16 base; a Tet35 pair whose
+Tri15 interface border is a declared closed Line5 Curve; a Hex125 pair
+(Quad25 interface and a closed four-cell Line5 seam); a Prism75 pair
+mixing Tri15 and Quad25 exterior blocks around a Quad25 interface; a
+Pyr55 pair sharing the Quad25 base; a Tet56 order-5 pair (Tri21 interface
+and Line6 seam); and a periodic prism
 whose imported dim-2 `MixedPeriodicLink` and six UV-parametric boundary
 vertices survive partition, ghosts, MSH4 round-trip and `unpartition`.
 Checks cover child
@@ -218,6 +226,6 @@ original cell/node UIDs, physical groups, ghost records,
 ASCII/binary MSH4 and public `write`/`open` round-trips, `unpartition`, and
 atomic topology violations across three rejection testsets including a
 missing Point15 carrier, a Line3 Curve carrying a foreign edge node, a
-reversed Tet10, a serendipity Quad8 block and order-4/serendipity blocks
-(Tri15, Quad12, Tet35) riding on a valid Tet20 mesh. Actual test results
+reversed Tet10, a serendipity Quad8 block and serendipity/incomplete blocks
+(Quad12, Tri12, Tet22) riding on a valid Tet20 mesh. Actual test results
 are recorded in `test/README.md`.

@@ -467,6 +467,33 @@ the default smoke gained a parallel-partition testset. PART01 remains
 open for order ≥4 cells; parallel mesh *generation* (PAR01 producer
 workflows) remains.
 
+The complete order ≥4 family slice is also landed — the last PART01
+partition-production item. The admitted-type tuples are now derived from
+`MSH_CATALOG` (`!serendipity && order>=1`), so every catalogued complete
+Line/Tri/Quad surface and Tet/Hex/Prism/Pyr volume partitions through the
+unchanged certificate at any order; `API.jl` imports the three needed
+catalog/monomial names explicitly (bare `Elements` is not bound at
+include time). The last per-order block was facet orientation: hard-coded
+p≤3 reversal/rotation tables are replaced by `_partition_facet_perm`,
+which derives the source-index permutation for any corner map σ from the
+monomial lattice — σ induces the unique affine map sending old vertex k's
+lattice point to new vertex σ(k)'s, carried in exact integer arithmetic,
+so edge and interior slots permute correctly at any order (verified
+against every retired p≤3 table; Quad25 reversal transposes the 3×3
+interior and is self-inverse). The bare-Tet4 dispatch now routes any mesh
+carrying an admitted lower cell to the BRep path. Interfaces emit
+Tri15/Quad25 blocks at order 4, generated seams emit Line(p+1) cells by
+rim arity and serendipity/incomplete families (Quad12, Tri12, Tet22)
+still reject atomically at the catalog gate. Qualified on Tet35/
+Hex125/Prism75/Pyr55 pairs plus an order-5 Tet56 pair (Tri21 interface,
+Line6 seam): canonical interface connectivity, declared Line5 rim curve,
+ghosts, `validate`, ASCII/binary MSH4 round-trips, `unpartition` and
+byte-identical threaded output under `julia -t4`. Focused checks pass
+412/412 on both Julia1.12.7 and1.13.1 under `-t4` (39 new assertions);
+the default smoke gained an order-4 testset. PART01's partition checklist
+is complete; parallel mesh *generation* (PAR01 producer workflows)
+remains.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

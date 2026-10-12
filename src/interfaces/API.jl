@@ -115,7 +115,7 @@ using ..MeshFunctionSpaces: MeshFunctionSpaces, mesh_basis_functions,
                             mesh_number_of_orientations
 using ..Elements: msh_spec, msh_type, msh_properties, MixedMesh,
                   MixedElementBlock, ElementBlock, SpecialElementBlock,
-                  msh_dimension
+                  msh_dimension, MSH_CATALOG, _tri_monomials, _qua_monomials
 using ..Refine: Refine, refine_uniform
 using ..Transform: affine_transform, _transform_gmsh_affine, _determinant_sign
 using ..Optimize: smooth_optimize, _laplacian_smooth_tri_cache
