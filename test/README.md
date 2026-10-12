@@ -25,8 +25,10 @@ box and shared-material grids, floating-point Pyramid options, CLI help/version
 and read-only MSH checking, plus atomic current-model opening and merging,
 including one POS point import and an empty-file merge, plus derived two-step
 view metadata and display selection, two list/model replacement checks, a
-quarter-turn periodic Surface copy, and OCC circle
-`add_circle_arc`/`add_circle` creation, synchronization and evaluation. It needs
+quarter-turn periodic Surface copy, OCC circle
+`add_circle_arc`/`add_circle` creation, synchronization and evaluation,
+and OCC wire/planar-face `add_wire`/`add_plane_surface`/`add_rectangle`
+creation, synchronization, bounds and boundary checks. It needs
 no external mesher or solver.
 
 Run the default suite from the repository root. The runner automatically uses
@@ -59,6 +61,10 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 75.2 s | 313 | ~110 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 72.5 s | 313 | ~110 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 74.6 s | 313 | ~80 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 76.5 s | 313 | ~82 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 77.1 s | 306 | ~110 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 78.6 s | 306 | ~110 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 86.2 s | 306 | ~88 s |
@@ -172,10 +178,18 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 302-assertion bodies ran onJulia1.12.7/1.13.1.
+The current assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds a
+compact OCC wire/planar-face check (`occ_plane_smoke`: a lines-only
+square wire synchronized into a `:plane` face with UV bounds,
+evaluation and boundary queries, plus `add_rectangle`'s published
+sub-entities) — the 153-assertion
+`test/interfaces/api_occ_plane_test.jl` covers signed chaining,
+first-tag reversal, `checkClosed`, hole loops, annulus `circ2d`
+pcurves, rounded corners and failure atomicity. The
+preceding increment adds a
 same-pair mixed-fragment check (compact: a crossing plus chord imprint
 on one solid pair decomposes into {tet}, {box} and {tet∩box} Regions)
 to `test/functional/brep_assembly_smoke.jl` and extends the assembly

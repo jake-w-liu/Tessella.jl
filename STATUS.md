@@ -670,6 +670,34 @@ GEO01 slices; plugins/view ops, boundary-layer extrusion,
 partition/adaptation, Levelset and parametric surfaces belong to their
 own rows.
 
+### OCC wire and planar-face endpoints (2026-10-12)
+
+The second GEO01 slice adds `model.occ`'s wire and planar-face
+endpoints: `add_wire`, `add_curve_loop`, `add_plane_surface` and
+`add_rectangle`. `add_wire` chains signed curve tags head-to-tail like
+`BRepBuilderAPI_MakeWire` — the first edge always goes FORWARD, each
+later edge orients itself against the running tail within
+`Precision::Confusion`, `checkClosed` enforces `TopoDS_Wire::Closed`,
+and a negative first tag binds the `ShapeExtend`-reversed wire (order
+and orientation flipped together). `add_curve_loop` is the same call
+with `checkClosed=true`. `add_plane_surface` fits a `:plane` face to
+the outer wire's boundary (Newell normal on traversal-ordered samples,
+`Precision::Confusion` planarity), projects line/circle edges into
+`lin2d`/`circ2d` pcurves — the frame flips only when every boundary
+circle is oppositely wound — and stores further wires as holes, which
+synchronize emits REVERSED like `BRepBuilderAPI_MakeFace`
+(`[outer, hole1, …]` loops in `m.surfaces`). `add_rectangle` publishes
+the whole axis-parallel cell graph — four (or eight rounded) vertices,
+edges, wire and face — atomically, matching upstream's recursive
+`_bind` exposure; `roundedRadius>0` corners are quarter-circle arcs via
+the center-form geometry. Every validator and tag reservation precedes
+publication, so failures bind nothing and bump no maximum. Verified by
+the 153-assertion `test/interfaces/api_occ_plane_test.jl` (chaining,
+signed reversal, mixed signs, closure checks, holes, annulus
+`circ2d` pcurve round-trips, rounded corners, failure atomicity and an
+end-to-end hole-face mesh with zero interior-hole nodes) plus an
+7-assertion `occ_plane_smoke` default check.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

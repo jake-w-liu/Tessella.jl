@@ -186,22 +186,29 @@ function _model_occ_synchronize!(m::GeoModel)
         dimension==2 || continue
         haskey(m.surfaces,tag) || haskey(m.discrete,(2,tag)) || begin
             shape=kernel.shapes[id]
-            wire=kernel.shapes[only(shape.children)]
-            signed=Int[(reverse ? -1 : 1)*_model_occ_shape_tag(kernel,edge,caller)
-                       for (edge,reverse) in wire.geometry.uses]
-            ordered=try
-                _sort_curve_loop(m,signed,caller)
-            catch error
-                error isa ArgumentError || rethrow()
-                # OCCFace::_setup attempts to recompute the live GEdgeLoop,
-                # then reports this failure after lower entities were imported.
-                throw(ArgumentError("$caller: Could not fix wire in surface $tag"))
+            loops=Int[]
+            for (index,wire_id) in enumerate(shape.children)
+                wire=kernel.shapes[wire_id]
+                signed=Int[(reverse ? -1 : 1)*_model_occ_shape_tag(kernel,edge,caller)
+                           for (edge,reverse) in wire.geometry.uses]
+                # BRepBuilderAPI_MakeFace stores hole wires REVERSED: the loop
+                # traverses them in reversed order with each edge flipped.
+                index>1 && (signed=[-s for s in Iterators.reverse(signed)])
+                ordered=try
+                    _sort_curve_loop(m,signed,caller)
+                catch error
+                    error isa ArgumentError || rethrow()
+                    # OCCFace::_setup attempts to recompute the live GEdgeLoop,
+                    # then reports this failure after lower entities were imported.
+                    throw(ArgumentError("$caller: Could not fix wire in surface $tag"))
+                end
+                loop=_alloc_curve_loop_tag(m,0,caller)
+                # This loop is the typed GModel carrier of an explicit OCC wire
+                # shape. Its internal slot is not the OCC wire namespace tag.
+                m.loops[loop]=ordered
+                push!(loops,loop)
             end
-            loop=_alloc_curve_loop_tag(m,0,caller)
-            # This loop is the typed GModel carrier of an explicit OCC wire
-            # shape. Its internal slot is not the OCC wire namespace tag.
-            m.loops[loop]=ordered
-            m.surfaces[tag]=[loop]
+            m.surfaces[tag]=loops
             m.surface_types[tag]=shape.geometry.kind
             m.surface_geometry[tag]=shape.geometry.geometry
             m.next_tag[3]=max(m.next_tag[3],tag)

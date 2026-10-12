@@ -745,6 +745,27 @@ remaining `model.occ`/`model.geo` endpoints stay GEO01 slices;
 plugins/view ops, boundary-layer extrusion, partition/adaptation,
 Levelset and parametric surfaces belong to their own rows.
 
+The second GEO01 slice followed: the wire and planar-face endpoints
+`add_wire`, `add_curve_loop`, `add_plane_surface` and `add_rectangle`.
+`add_wire` chains signed curve tags head-to-tail exactly as
+`BRepBuilderAPI_MakeWire` does — first edge FORWARD, later edges
+oriented against the running tail, `checkClosed` enforcing
+`TopoDS_Wire::Closed`, negative first tag producing the fully reversed
+wire. `add_curve_loop` is `add_wire` with `checkClosed=true`.
+`add_plane_surface` fits a `:plane` record to the outer wire
+(traversal-ordered samples, Newell normal, `Precision::Confusion`
+planarity), projects line and circle edges into `lin2d`/`circ2d`
+pcurves whose parameterization round-trips to the 3-D edge points, and
+takes additional wires as holes — the multi-loop extension in
+`_model_occ_synchronize!` emits hole loops REVERSED, matching
+`BRepBuilderAPI_MakeFace`. `add_rectangle` publishes the complete
+vertex/edge/wire/face graph atomically including quarter-circle
+`roundedRadius` corners. The 153-assertion
+`test/interfaces/api_occ_plane_test.jl` covers chaining, sign
+semantics, holes, annulus pcurve round-trips, guards and failure
+atomicity, plus an 7-assertion `occ_plane_smoke` default check and an
+end-to-end holed-face mesh.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

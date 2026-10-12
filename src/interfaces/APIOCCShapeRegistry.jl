@@ -29,6 +29,23 @@ add_circle(x,y,z,r;tag=-1,angle1=0.0,angle2=2*pi,
                                  zaxis=zAxis,xaxis=xAxis)
 end
 
+add_wire(curve_tags;tag=-1,checkClosed=false)=_with_model() do m
+    Model._model_occ_add_wire!(m,curve_tags;tag,check_closed=checkClosed)
+end
+
+add_curve_loop(curve_tags;tag=-1)=_with_model() do m
+    Model._model_occ_add_curve_loop!(m,curve_tags;tag)
+end
+
+add_plane_surface(wire_tags;tag=-1)=_with_model() do m
+    Model._model_occ_add_plane_surface!(m,wire_tags;tag)
+end
+
+add_rectangle(x,y,z,dx,dy;tag=-1,roundedRadius=0.)=_with_model() do m
+    Model._model_occ_add_rectangle!(m,x,y,z,dx,dy;tag,
+                                    rounded_radius=roundedRadius)
+end
+
 add_bezier_surface(points,num_points_u;kwargs...)=_with_model() do m
     Model._model_occ_add_bezier_surface!(m,points,num_points_u;kwargs...)
 end

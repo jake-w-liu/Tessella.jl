@@ -71,4 +71,5 @@ include("functional/fixtures.jl")
     include("functional/partition_brep.jl")
     include("functional/rigid_periodic_smoke.jl")
     include("functional/occ_circle_smoke.jl")
+    include("functional/occ_plane_smoke.jl")
 end

@@ -842,6 +842,7 @@ include("ModelNURBSProjectionRoot.jl")
 include("ModelNURBSProjectionSeeds.jl")
 include("ModelOCCShapeRegistry.jl")
 include("ModelOCCCurveShapes.jl")
+include("ModelOCCPlaneShapes.jl")
 include("ModelBoolean.jl")
 
 @inline function _model_periodic_entity_label(dim::Int)
