@@ -241,6 +241,19 @@ function _model_occ_synchronize!(m::GeoModel)
         haskey(m.volumes,tag) || haskey(m.discrete,(3,tag)) || begin
             shape=kernel.shapes[id]
             m.volumes[tag]=Int[shell_loops[sid] for sid in shape.children]
+            # A primitive solid carries its compact analytic encoding, like
+            # the geo-pipeline `add_*!` producers: the boundary stays
+            # materialized for queries while volume meshing flows through the
+            # native analytic tessellation (`_implicit_volume_surface`).
+            primitive=get(shape.geometry,:primitive,nothing)
+            if primitive!==nothing
+                primitive.occ===:cylinder &&
+                    (m.cylinders[tag]=primitive.record)
+                primitive.occ===:sphere &&
+                    (m.spheres[tag]=primitive.record)
+                primitive.occ===:cone &&
+                    (m.cones[tag]=primitive.record)
+            end
             m.next_tag[4]=max(m.next_tag[4],tag)
             imported=true
         end

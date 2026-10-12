@@ -61,6 +61,10 @@ Local receipts on 2026-10-13, with bounds checks; only the marked
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 81.1 s | 342 | ~85 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 81.7 s | 342 | ~118 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 89.8 s | 342 | ~93 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 87.8 s | 342 | ~122 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 95.6 s | 329 | ~128 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 105.3 s | 329 | ~140 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 95.5 s | 329 | ~128 s |
@@ -190,6 +194,17 @@ The current assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds a
+compact OCC primitive-solid check (`occ_primitives_smoke`: a cylinder
+plus sphere synchronized into typed faces with retained compact
+encodings, and a standalone torus volume) — the
+`test/interfaces/api_occ_primitives_test.jl` file covers the
+`BRepPrim_OneAxis` topology (rim/pole vertices, rim circles, seam lines,
+degenerate apex/pole edges, signed wires and shells), analytic record
+contents, pcurve→3-D round-trips, outward normals, parametrization
+bounds, frustum and both apex variants, `zAxis`, tag/collision/finite
+guards, failure atomicity, ownership-aware removal with encoding
+cleanup, idempotent re-synchronization and end-to-end `generate(3)`
+containment on cylinder and sphere volumes. The preceding increment adds a
 compact OCC shell/solid check (`occ_volume_smoke`: an `add_box`
 synchronized into one volume, one surface loop, six surfaces, twelve
 curves and eight points, plus a standalone `add_surface_loop`/`add_volume`

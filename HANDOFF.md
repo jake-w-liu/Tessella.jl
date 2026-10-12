@@ -810,6 +810,27 @@ topology, normals, edge sharing, cavity order, signed extents, guards,
 removal lifecycle and end-to-end `generate(3)` meshing, plus an
 `occ_volume_smoke` default check.
 
+The fifth GEO01 slice followed: the `BRepPrimAPI_Make*` primitive family
+`add_cylinder`, `add_sphere`, `add_cone` and `add_torus` (with `zAxis`).
+Each producer mirrors the upstream `OCC_Internals::make*` validation order
+and publishes the complete `BRepPrim_OneAxis` graph atomically — rim or
+pole vertices, rim circles and the shared seam line, degenerate pole/apex
+edges, the trimmed sphere meridian, analytic faces plus Plane caps, signed
+wires and shells — through the same atomic-pending machinery as `add_box`,
+reusing the geo-pipeline materializers' OCC-exact records verbatim
+(`R(2π)` seam residues, slant-length cone profile, `gp_Ax2` reference
+frames). A partial torus emits the full `[-arc,-start,+arc,+end]` layout
+with meridian caps; other partial sweeps reject loudly pending a verified
+side-face reference. `synchronize` additionally stores each primitive
+solid's compact encoding (`m.cylinders`/`m.spheres`/`m.cones`) so volume
+meshing flows through the native analytic tessellation exactly like
+`add_cylinder!` — verified end-to-end — while the torus matches
+`add_torus!`'s explicit-only path (same curved-face diagnostic). The
+focused `test/interfaces/api_occ_primitives_test.jl` pins topology,
+records, pcurve round-trips, normals, bounds, apex/frustum variants,
+`zAxis`, guards, atomicity, removal pruning, idempotent re-sync and
+`generate(3)` containment, plus an `occ_primitives_smoke` default check.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

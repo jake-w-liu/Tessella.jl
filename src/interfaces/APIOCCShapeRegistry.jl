@@ -68,6 +68,23 @@ add_box(x,y,z,dx,dy,dz;tag=-1)=_with_model() do m
     Model._model_occ_add_box!(m,x,y,z,dx,dy,dz;tag)
 end
 
+add_cylinder(x,y,z,dx,dy,dz,r;tag=-1,angle=2*pi)=_with_model() do m
+    Model._model_occ_add_cylinder!(m,x,y,z,dx,dy,dz,r;tag,angle)
+end
+
+add_cone(x,y,z,dx,dy,dz,r1,r2;tag=-1,angle=2*pi)=_with_model() do m
+    Model._model_occ_add_cone!(m,x,y,z,dx,dy,dz,r1,r2;tag,angle)
+end
+
+add_sphere(xc,yc,zc,radius;tag=-1,angle1=-pi/2,angle2=pi/2,
+           angle3=2*pi)=_with_model() do m
+    Model._model_occ_add_sphere!(m,xc,yc,zc,radius;tag,angle1,angle2,angle3)
+end
+
+add_torus(x,y,z,r1,r2;tag=-1,angle=2*pi,zAxis=Float64[])=_with_model() do m
+    Model._model_occ_add_torus!(m,x,y,z,r1,r2;tag,angle,zAxis)
+end
+
 add_rectangle(x,y,z,dx,dy;tag=-1,roundedRadius=0.)=_with_model() do m
     Model._model_occ_add_rectangle!(m,x,y,z,dx,dy;tag,
                                     rounded_radius=roundedRadius)

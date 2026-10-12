@@ -757,6 +757,42 @@ extents, tag collision/degenerate/finite guards, removal lifecycle,
 end-to-end `generate(3)` tetrahedral meshing) plus an `occ_volume_smoke`
 default check.
 
+### GEO01 slice 5 — OCC primitive solids (2026-10-13)
+
+The fifth GEO01 slice adds `model.occ`'s `BRepPrimAPI_Make*` family:
+`add_cylinder`, `add_sphere`, `add_cone` and `add_torus` (including
+`zAxis`). Each producer mirrors the upstream `OCC_Internals::make*`
+validation order (zero height, non-positive angle/radius guards) and
+publishes the complete `BRepPrim_OneAxis` graph atomically through the
+same kernel machinery as `add_box`: two rim vertices, the top/bottom rim
+circles and the shared seam line for cylinder/cone; pole vertices with
+degenerate edges plus the trimmed meridian for sphere; rim vertex,
+equator and meridian circles for torus — full sweeps collapse to the
+single closed layout while a partial torus adds the start/end meridian
+Plane caps and the trimmed equator arc. Wire signs (`[-top,-seam,bottom,
+seam]`, `[-degN,-meridian,degS,meridian]`, `[-equator,+meridian,+equator,
+-meridian]`, `[-arc,-start,+arc,+end]`) and shell signs (`[lateral,+top,
+-bottom]`, `[face]`, `[torus,+start,-end]`) match the geo-pipeline
+materializers whose OCC-exact records are reused verbatim, including the
+`R(2π)` full-rotation seam residues, slant-length cone parametrization
+and `gp_Ax2` arbitrary reference frames. `synchronize` additionally
+stores the solid's compact encoding (`m.cylinders`/`m.spheres`/`m.cones`)
+so the materialized boundary stays queryable while `generate(3)` flows
+through the native analytic tessellation exactly like `add_cylinder!` —
+verified end-to-end on cylinder and sphere volumes (all generated nodes
+inside). The torus keeps no compact encoding, matching `add_torus!`;
+`generate(3)` on a torus volume rejects through the same
+explicit-boundary diagnostic as the geo pipeline. Partial sweeps
+(`angle`, `angle1..3` away from full-rotation defaults) reject loudly —
+the `BRepPrim_OneAxis` side-face layout has no verified reference and
+remains GEO01 backlog, as does `add_wedge` and the
+`ThruSections`/fillet/chamfer/sewing family. Verified by the focused
+`test/interfaces/api_occ_primitives_test.jl` (topology, record contents,
+pcurve→3-D round-trips, normals, bounds, apex/frustum variants, `zAxis`,
+tag/collision/finite guards, atomicity, removal pruning, idempotent
+re-sync, `generate(3)` containment) plus an `occ_primitives_smoke`
+default check.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The
