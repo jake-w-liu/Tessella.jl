@@ -79,4 +79,5 @@ include("functional/fixtures.jl")
     include("functional/occ_queries_smoke.jl")
     include("functional/occ_measures_smoke.jl")
     include("functional/occ_wedge_smoke.jl")
+    include("functional/occ_inertia_smoke.jl")
 end

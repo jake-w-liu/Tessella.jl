@@ -922,6 +922,35 @@ wrong-size vector — noted divergence). Verified by
 `test/interfaces/api_occ_wedge_test.jl` plus an `occ_wedge_smoke`
 default check.
 
+### GEO01 slice 10 — `occ.get_matrix_of_inertia` (2026-10-14)
+
+The tenth GEO01 slice adds `model.occ.get_matrix_of_inertia(dim,tag)`
+— upstream `OCC_Internals::getMatrixOfInertia`'s
+`Linear/Surface/VolumeProperties.MatrixOfInertia()` result: the inertia
+tensor about the world origin returned as nine row-major values. The
+implementation computes the second-moment tensor `Q = ∫r⊗r dμ` per
+record family and reports `tr(Q)I₃ − Q`: line and circle curves in
+closed form; ellipse, `copied_curve` (bezier/bspline) and
+`surface_iso` curves through the same knot-span GL8 panels as the
+measure quadrature; plane faces through the existing signed-fan
+second-moment tensor; quadric and NURBS faces through
+`_occ_surface_d1`/`_model_nurbs_surface_d2` canonical-domain and
+span-subdivided quadrature (lateral cylinder and sphere shells verified
+to ~1e-7 against closed forms); primitive solids (cylinder, sphere,
+cone) through the central second-moment forms `Q = Q_c + V·c⊗c`; and
+all-plane shells through the divergence theorem one degree above the
+centroid path — `∭x_i x_j dV = n_k∬x_i x_j x_k dA/5` evaluated with a
+degree-3 Stroud fan rule exact for line-bounded polygons (unit box,
+2×1×3 box and triangular wedge all land on closed-form values to 1e-12).
+Conic-boundary faces, quadric-bounded shells (torus) and other
+unsupported boundaries reject loudly rather than approximating, matching
+the measure slice's reject-before-wrong-answer boundary; points, wires,
+shells, empty volumes and degenerate edges report the empty-GProp zero
+matrix like upstream's unfired switch. Transforms remain visible
+kernel-side before synchronization. Verified by
+`test/interfaces/api_occ_inertia_test.jl` (33 assertions) plus an
+`occ_inertia_smoke` default check.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

@@ -192,6 +192,8 @@ Local receipts on 2026-10-13, with bounds checks; only the marked
 | Julia 1.12.7 | Preceding ordinary package invocation | 203 | 46.00 s |
 | Julia 1.13.1 | Preceding ordinary package invocation | 203 | 39.12 s |
 | Julia 1.12.7 | Preceding ordinary package invocation | 201 | 44.88 s |
+| Julia 1.12.7 | Preceding ordinary `Pkg.test()` | 375 | 85.30 s |
+| Julia 1.13.1 | Preceding ordinary `Pkg.test()` | 375 | 82.80 s |
 | Julia 1.13.1 | Preceding ordinary package invocation | 201 | 36.53 s |
 | Julia 1.12.7 | Preceding ordinary package invocation | 192 | 47.14 s |
 | Julia 1.13.1 | Preceding ordinary package invocation | 192 | 39.75 s |
@@ -210,6 +212,23 @@ The current assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds a
+compact OCC inertia check (`occ_inertia_smoke`: an `add_box` and
+`add_sphere` against closed-form inertia tensors, an `add_line`
+segment's off-axis moments, a dim-0 zero matrix and the unknown-entity
+error) — the `test/interfaces/api_occ_inertia_test.jl` file covers
+kernel-side `get_matrix_of_inertia` matching upstream
+`MatrixOfInertia` semantics: nine row-major origin-based tensor
+values through `tr(Q)I₃−Q` over `Q=∫r⊗r dμ`; line/circle closed
+forms, ellipse/spline panel quadrature against independent dense
+quadrature, the plane signed-fan tensor, quadric canonical-domain and
+NURBS second-moment quadrature (lateral-cylinder and sphere-shell
+faces at ~1e-7), primitive-solid central forms and the all-plane
+divergence path lifted to cubic boundary moments via a degree-3 Stroud
+fan (unit box, 2×1×3 box and triangular wedge at 1e-12); conic-wire
+faces and quadric-bounded shells reject loudly; points, wires,
+shells, empty volumes and degenerate edges report upstream's zero
+matrix; transforms stay visible before `synchronize`. The preceding
+increment adds a
 compact OCC wedge check (`occ_wedge_smoke`: a standard `add_wedge`
 synchronized into its trapezoid-prism volume and centroid, plus a
 truncated `ltx>0` wedge) — the

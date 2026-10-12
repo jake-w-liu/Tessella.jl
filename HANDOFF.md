@@ -917,6 +917,32 @@ frames, validation/atomicity, recursive-removal loop cleanup,
 transform visibility and end-to-end meshing, plus an `occ_wedge_smoke`
 default check.
 
+The tenth GEO01 slice followed: `get_matrix_of_inertia` in
+`src/geometry/ModelOCCMeasures.jl` — upstream
+`OCC_Internals::getMatrixOfInertia`'s per-dim
+`Linear/Surface/VolumeProperties.MatrixOfInertia()` result, the
+origin-based inertia tensor `tr(Q)I₃ − Q` over `Q = ∫r⊗r dμ` as nine
+row-major values, again read off the bound kernel graph without
+synchronizing. Curves integrate `r⊗r·ds` per record (line/circle
+closed forms; ellipse, `copied_curve` and `surface_iso` through the
+measure slice's panel-subdivided GL8); faces reuse the plane
+signed-fan tensor for line-bounded polygons and quadrature
+`r⊗r·dA` over the quadric canonical domains (8×8 panels) and NURBS
+knot spans; solids share the measure dispatch — compact `primitive`
+records through central second-moment forms `Q = Q_c + V·c⊗c`, and
+all-plane shells through the divergence theorem lifted one degree:
+`∭x_i x_j dV = n_k∬x_i x_j x_k dA/5` evaluated with a signed
+degree-3 Stroud fan exact for any line-bounded polygon. Unit box,
+a 2×1×3 box and the triangular wedge all land on closed-form values
+to 1e-12; the lateral cylinder and sphere shell faces match to ~1e-7.
+Conic-wire faces and quadric-bounded shells (torus) keep the
+reject-before-wrong-answer boundary; non-1:3 dims, empty volumes and
+degenerate edges report upstream's zero matrix, and transforms stay
+visible pre-sync. `test/interfaces/api_occ_inertia_test.jl` pins
+analytic curve/face/solid tensors, row-major ordering, the rejection
+paths, lifecycle dims and pre-sync transform reads, plus an
+`occ_inertia_smoke` default check.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

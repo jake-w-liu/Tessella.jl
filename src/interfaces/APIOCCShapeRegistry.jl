@@ -124,6 +124,8 @@ get_surface_loops(volume_tag)=_with_model(m->Model._model_occ_get_surface_loops(
 get_mass(dim,tag)=_with_model(m->Model._model_occ_get_mass(m,dim,tag))
 get_center_of_mass(dim,tag)=
     _with_model(m->Model._model_occ_get_center_of_mass(m,dim,tag))
+get_matrix_of_inertia(dim,tag)=
+    _with_model(m->Model._model_occ_get_matrix_of_inertia(m,dim,tag))
 
 module mesh
     import .....Model

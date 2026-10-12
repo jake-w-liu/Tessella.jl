@@ -180,7 +180,8 @@ end
 # shoelace centroid (exact for any line-bounded polygon, holes included;
 # the midpoint rule integrates quadratics exactly). Conic-edged solid
 # faces fall back to (area, centroid, nothing).
-function _model_occ_plane_stats(kernel,id;want_tensor=false)
+function _model_occ_plane_stats(kernel,id;want_tensor=false,
+                                caller="OCC.get_center_of_mass")
     shape=kernel.shapes[id]; rec=shape.geometry.geometry
     A=0.0
     raw_per_wire=NamedTuple[]
@@ -217,7 +218,7 @@ function _model_occ_plane_stats(kernel,id;want_tensor=false)
             eg=kernel.shapes[eid].geometry.geometry
             pc=rec.pcurves[etag].fwd
             haskey(pc,:lin2d) || throw(ErrorException(
-                "OCC.get_center_of_mass: solid faces with conic " *
+                "$caller: faces with conic " *
                 "boundaries are not supported"))
             t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
             p1=_occ_pcurve_d0(pc,t0); p2=_occ_pcurve_d0(pc,t1)
@@ -429,3 +430,284 @@ _model_occ_get_mass(m,dim,tag)=first(
     _model_occ_measure_entity(m,dim,tag,"OCC.get_mass";want_centroid=false))
 _model_occ_get_center_of_mass(m,dim,tag)=last(
     _model_occ_measure_entity(m,dim,tag,"OCC.get_center_of_mass"))
+
+# ---- second moments: get_matrix_of_inertia -----------------------------
+#
+# Upstream's `GProps::MatrixOfInertia` is the inertia tensor about the
+# origin, I = tr(Q)I₃ − Q with Q = ∫r⊗r dμ under the same per-dim
+# Linear/Surface/VolumeProperties switch. Curves and faces integrate
+# r⊗r per record — closed forms for line/circle and the plane tensor
+# path, GL8 panels for the quadrature families (the canonical quadric
+# domain, NURBS knot spans). Solids reuse the measure split: compact
+# `primitive` records in closed form (sphere 2mr²/5·I, cylinder/cone
+# axial forms through the ∭x²dV/∭z²dV layer integrals), and all-plane
+# shells through the divergence theorem — ∭x_i x_j dV = n_k∬x_i x_j x_k
+# dA/5 with a signed-fan cubic moment exact for line-bounded polygons
+# (the degree-3 Stroud rule on the same fan). Conic wires, quadric-
+# bounded shells and other unsupported boundaries reject like
+# `get_center_of_mass`; non-1:3 dims and empty shells report the
+# empty-GProp zero matrix.
+
+function _model_occ_curve_moment2(kernel,id)
+    rec=kernel.shapes[id].geometry.geometry
+    m=zeros(3,3)
+    if rec.occ===:line
+        o,d=rec.origin,rec.dir
+        md=_occ_modulus(d)
+        lo,hi=minmax(rec.t0,rec.t1)
+        a=md*(hi-lo); b=md*(hi*hi-lo*lo)/2; c=md*(hi*hi*hi-lo*lo*lo)/3
+        for i in 1:3,j in 1:3
+            m[i,j]=a*o[i]*o[j]+b*(o[i]*d[j]+d[i]*o[j])+c*d[i]*d[j]
+        end
+        return m
+    elseif rec.occ===:circle
+        lo,hi=minmax(rec.t0,rec.t1); Δ=hi-lo
+        s0,c0=_gm_sincos(lo); s1,c1=_gm_sincos(hi)
+        Su=s1-s0; Cv=c0-c1
+        C2=(Δ+s1*c1-s0*c0)/2; S2=(Δ-s1*c1+s0*c0)/2
+        CS=(s1*s1-s0*s0)/2
+        C,X,Y,r=rec.center,rec.X,rec.Y,rec.r
+        for i in 1:3,j in 1:3
+            m[i,j]=r*(C[i]*C[j]*Δ +
+                r*(C[i]*(X[j]*Su+Y[j]*Cv)+(X[i]*Su+Y[i]*Cv)*C[j]) +
+                r*r*(C2*X[i]*X[j]+CS*(X[i]*Y[j]+Y[i]*X[j])+S2*Y[i]*Y[j]))
+        end
+        return m
+    elseif rec.occ===:degenerate
+        return m
+    end
+    evaluator=rec.occ===:ellipse ?
+        t->(_occ_ellipse_point(rec,t),_occ_ellipse_derivative(rec,t)) :
+        rec.occ===:copied_curve ?
+        t->begin values=_model_occ_curve_d2(rec.curve,t)
+            (values[1],values[2]) end :
+        rec.occ===:surface_iso ?
+        t->(_model_surface_iso_point(rec,t),_model_surface_iso_d1(rec,t)) :
+        throw(ErrorException("OCC.get_matrix_of_inertia: unsupported " *
+            "OCC curve kind $(rec.occ)"))
+    cuts=rec.occ===:copied_curve ?
+        _model_occ_curve_panels(rec.curve,rec.t0,rec.t1) : Float64[]
+    bounds=Float64[rec.t0]
+    append!(bounds,cuts)
+    push!(bounds,rec.t1)
+    for k in 1:length(bounds)-1
+        a,bk=bounds[k],bounds[k+1]
+        panels=isempty(cuts) ? 8 : 1
+        span=(bk-a)/panels
+        for p in 0:panels-1
+            aa=a+p*span; h=span/2; mid=aa+h
+            for i in 1:4, sgn in (-1,1)
+                t=mid+sgn*h*_OCC_GL_T[i]; w=_OCC_GL_W[i]*h
+                pt,d=evaluator(t)
+                dw=w*_occ_modulus(d)
+                for i2 in 1:3,j2 in 1:3
+                    m[i2,j2]+=dw*pt[i2]*pt[j2]
+                end
+            end
+        end
+    end
+    return m
+end
+
+# Cubic boundary moment U_F[i,j,k] = ∬_F x_i x_j x_k dA for a plane
+# face — the divergence theorem needs ∭x_i x_j dV = n_k U_F[i,j,k]/5.
+# Same signed fan as `_model_occ_plane_stats`, evaluated with the
+# degree-3 Stroud rule (exact for cubics, hence also for the fan's
+# per-triangle integrand).
+function _model_occ_plane_moment3(kernel,id)
+    shape=kernel.shapes[id]; rec=shape.geometry.geometry
+    raw_per_wire=NamedTuple[]
+    for wire_id in shape.children
+        uses=kernel.shapes[wire_id].geometry.uses
+        push!(raw_per_wire,(uses=uses,
+            raw=_model_occ_wire_shoelace(kernel,rec,uses)))
+    end
+    A=0.0
+    for (index,wire) in enumerate(raw_per_wire)
+        A+=index==1 ? abs(wire.raw[1]) : -abs(wire.raw[1])
+    end
+    A>_OCC_CONFUSION || throw(ErrorException(
+        "OCC.get_matrix_of_inertia: plane face has zero area"))
+    cu=cv=0.0
+    for (index,wire) in enumerate(raw_per_wire)
+        area=abs(wire.raw[1])
+        area>_OCC_CONFUSION || continue
+        w=(index==1 ? area : -area)/A
+        cu+=w*wire.raw[2]/area; cv+=w*wire.raw[3]/area
+    end
+    c2=(cu,cv); a3=_model_occ_plane_eval(rec,cu,cv)
+    U=zeros(3,3,3)
+    for (index,wire) in enumerate(raw_per_wire)
+        sgn=wire.raw[1]>=0 ? 1.0 : -1.0
+        w=(index==1 ? 1.0 : -1.0)*sgn
+        for (eid,rev) in wire.uses
+            etag=kernel.shape_tags[eid][2]
+            eg=kernel.shapes[eid].geometry.geometry
+            pc=rec.pcurves[etag].fwd
+            haskey(pc,:lin2d) || throw(ErrorException(
+                "OCC.get_matrix_of_inertia: faces with conic " *
+                "boundaries are not supported"))
+            t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
+            p1=_occ_pcurve_d0(pc,t0); p2=_occ_pcurve_d0(pc,t1)
+            A2=_occ2_cross(_occ2_sub(p1,c2),_occ2_sub(p2,c2))/2
+            b3=_model_occ_plane_eval(rec,p1[1],p1[2])
+            e3=_model_occ_plane_eval(rec,p2[1],p2[2])
+            ctr=_occ3_scale(_occ3_add(a3,_occ3_add(b3,e3)),1/3)
+            f=w*A2
+            for i in 1:3,j in 1:3,k in 1:3
+                acc=9/20*ctr[i]*ctr[j]*ctr[k]+
+                    1/20*(a3[i]*a3[j]*a3[k]+b3[i]*b3[j]*b3[k]+
+                          e3[i]*e3[j]*e3[k])
+                mab=(a3[i]+b3[i])*(a3[j]+b3[j])*(a3[k]+b3[k])
+                mbc=(b3[i]+e3[i])*(b3[j]+e3[j])*(b3[k]+e3[k])
+                mca=(e3[i]+a3[i])*(e3[j]+a3[j])*(e3[k]+a3[k])
+                U[i,j,k]+=f*(acc+(mab+mbc+mca)/60)
+            end
+        end
+    end
+    return U
+end
+
+function _model_occ_face_moment2(kernel,id)
+    shape=kernel.shapes[id]; rec=shape.geometry.geometry
+    occ=get(rec,:occ,nothing)
+    m=zeros(3,3)
+    if occ===:plane
+        _,_,T=_model_occ_plane_stats(kernel,id;want_tensor=true,
+            caller="OCC.get_matrix_of_inertia")
+        return T
+    elseif haskey(rec,:patch)
+        surface=rec.patch.surface
+        (u0,v0),(u1,v1)=_model_nurbs_surface_bounds(rec)
+        uspans=_model_occ_span_cuts(surface.knots_u,u0,u1)
+        vspans=_model_occ_span_cuts(surface.knots_v,v0,v1)
+        for (ua,ub) in uspans, (va,vb) in vspans
+            hu=(ub-ua)/2; mu=(ua+ub)/2; hv=(vb-va)/2; mv=(va+vb)/2
+            for i in 1:4, si in (-1,1), j in 1:4, sj in (-1,1)
+                u=mu+si*hu*_OCC_GL_T[i]; v=mv+sj*hv*_OCC_GL_T[j]
+                w=_OCC_GL_W[i]*_OCC_GL_W[j]*hu*hv
+                p,du,dv,_,_,_=_model_nurbs_surface_d2(rec,u,v)
+                dA=_occ_modulus(_occ_cross(du,dv))
+                for i2 in 1:3,j2 in 1:3
+                    m[i2,j2]+=w*dA*p[i2]*p[j2]
+                end
+            end
+        end
+        return m
+    end
+    # Quadric patches over their canonical domains — 8×8 GL8 panels,
+    # matching the curve-panel resolution for these smooth integrands.
+    u0,u1,v0,v1=if occ===:cylinder
+        (0.0,_OCC_TWO_PI,0.0,rec.height)
+    elseif occ===:sphere
+        (0.0,_OCC_TWO_PI,-π/2,π/2)
+    elseif occ===:cone
+        (0.0,_OCC_TWO_PI,0.0,
+         sqrt(rec.height*rec.height+(rec.r1-rec.r2)*(rec.r1-rec.r2)))
+    elseif occ===:torus
+        (0.0,rec.angle,0.0,_OCC_TWO_PI)
+    else
+        throw(ErrorException("OCC.get_matrix_of_inertia: unsupported " *
+            "OCC surface kind $occ"))
+    end
+    for pu in 0:7, pv in 0:7
+        ua=u0+pu*(u1-u0)/8; ub=ua+(u1-u0)/8
+        va=v0+pv*(v1-v0)/8; vb=va+(v1-v0)/8
+        hu=(ub-ua)/2; mu=(ua+ub)/2; hv=(vb-va)/2; mv=(va+vb)/2
+        for i in 1:4, si in (-1,1), j in 1:4, sj in (-1,1)
+            u=mu+si*hu*_OCC_GL_T[i]; v=mv+sj*hv*_OCC_GL_T[j]
+            w=_OCC_GL_W[i]*_OCC_GL_W[j]*hu*hv
+            p,du,dv=_occ_surface_d1(rec,u,v)
+            dA=_occ_modulus(_occ_cross(du,dv))
+            for i2 in 1:3,j2 in 1:3
+                m[i2,j2]+=w*dA*p[i2]*p[j2]
+            end
+        end
+    end
+    return m
+end
+
+function _model_occ_solid_moment2(kernel,id)
+    shape=kernel.shapes[id]; g=shape.geometry
+    m=zeros(3,3)
+    if haskey(g,:primitive)
+        r=g.primitive.record
+        if g.primitive.occ===:cylinder
+            n=_occ_dir(r.axis)
+            V=π*r.radius*r.radius*r.height
+            cb=_occ3_add(r.center,_occ3_scale(n,r.height/2))
+            qp=V*r.radius*r.radius/4; qa=V*r.height*r.height/12
+            for i in 1:3,j in 1:3
+                m[i,j]=qp*(Float64(i==j)-n[i]*n[j])+qa*n[i]*n[j]+
+                    V*cb[i]*cb[j]
+            end
+            return m
+        elseif g.primitive.occ===:sphere
+            V=4π/3*r.radius^3; c=r.center
+            q=V*r.radius*r.radius/5
+            for i in 1:3,j in 1:3
+                m[i,j]=q*Float64(i==j)+V*c[i]*c[j]
+            end
+            return m
+        elseif g.primitive.occ===:cone
+            n=_occ_dir(r.axis)
+            q2=r.r1*r.r1+r.r1*r.r2+r.r2*r.r2
+            V=π*r.height*q2/3
+            zb=r.height*(r.r1*r.r1+2*r.r1*r.r2+3*r.r2*r.r2)/(4q2)
+            cb=_occ3_add(r.center,_occ3_scale(n,zb))
+            S4=r.r1^4+r.r1^3*r.r2+r.r1^2*r.r2^2+r.r1*r.r2^3+r.r2^4
+            qp=π*r.height*S4/20
+            qa=π*r.height^3*(r.r1^2+3*r.r1*r.r2+6*r.r2^2)/30-V*zb*zb
+            for i in 1:3,j in 1:3
+                m[i,j]=qp*(Float64(i==j)-n[i]*n[j])+qa*n[i]*n[j]+
+                    V*cb[i]*cb[j]
+            end
+            return m
+        end
+        throw(ErrorException("OCC.get_matrix_of_inertia: unsupported " *
+            "primitive kind $(g.primitive.occ)"))
+    end
+    uses=Tuple{UInt64,Bool}[]
+    for shell_id in shape.children
+        for (face_id,rev) in kernel.shapes[shell_id].geometry.uses
+            push!(uses,(face_id,rev))
+        end
+    end
+    isempty(uses) && return m
+    face_kind=u->get(kernel.shapes[u[1]].geometry.geometry,:occ,nothing)
+    all(u->face_kind(u)===:plane,uses) || throw(ErrorException(
+        "OCC.get_matrix_of_inertia: unsupported solid boundary"))
+    for (fid,rev) in uses
+        rec=kernel.shapes[fid].geometry.geometry
+        σ=rev ? -1.0 : 1.0
+        n=(σ*rec.axis[1],σ*rec.axis[2],σ*rec.axis[3])
+        U=_model_occ_plane_moment3(kernel,fid)
+        for i in 1:3,j in 1:3,k in 1:3
+            m[i,j]+=n[k]*U[i,j,k]/5
+        end
+    end
+    return m
+end
+
+function _model_occ_get_matrix_of_inertia(m,dim,tag)
+    d=_model_occ_dimension(dim,"OCC.get_matrix_of_inertia")
+    t=_model_occ_requested_tag(tag,"OCC.get_matrix_of_inertia")
+    kernel=m.occ_kernel
+    id=get(kernel.bindings,(d,t),nothing)
+    id===nothing && throw(ArgumentError(
+        "OCC.get_matrix_of_inertia: Unknown OpenCASCADE entity of " *
+        "dimension $d with tag $t"))
+    Q=if d==1
+        _model_occ_curve_moment2(kernel,id)
+    elseif d==2
+        _model_occ_face_moment2(kernel,id)
+    elseif d==3
+        _model_occ_solid_moment2(kernel,id)
+    else
+        zeros(3,3)
+    end
+    tr=Q[1,1]+Q[2,2]+Q[3,3]
+    return Float64[tr-Q[1,1],-Q[1,2],-Q[1,3],
+                   -Q[2,1],tr-Q[2,2],-Q[2,3],
+                   -Q[3,1],-Q[3,2],tr-Q[3,3]]
+end
