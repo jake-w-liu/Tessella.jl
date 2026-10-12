@@ -849,6 +849,7 @@ include("ModelOCCPrimitiveShapes.jl")
 include("ModelOCCTransforms.jl")
 include("ModelOCCQueries.jl")
 include("ModelOCCMeasures.jl")
+include("ModelOCCClosest.jl")
 include("ModelBoolean.jl")
 
 @inline function _model_periodic_entity_label(dim::Int)

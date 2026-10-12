@@ -978,6 +978,33 @@ singular systems report "could not interpolate spline" like upstream's
 `test/interfaces/api_occ_spline_test.jl` (52 assertions) plus an
 `occ_spline_smoke` default check.
 
+### GEO01 slice 12 — `occ.get_closest_entities` (2026-10-14)
+
+The twelfth GEO01 slice adds `model.occ.get_closest_entities(x,y,z,dim_tags,
+n=1)` — upstream `OCC_Internals::getClosestEntities` (new in Gmsh 4.15).
+Each bound dim-tag resolves its closest point and distance to the query
+vertex (solid inputs short-circuit to zero distance at the query point
+when inside/on, like `BRepClass3d_SolidClassifier`), results sort through
+the upstream `std::set` key `(distance,(dim,tag,x,y,z))` — duplicate
+inputs collapse, ties order lexicographically — and the first `n` entries
+emit (`n<=0` still emits one, matching upstream's `nn>=n` loop). Because
+the pending OCC registry is not the public model, each queried shape is
+materialized — with its transitive wire/edge/vertex closure, the same
+signed-hole reversal `synchronize` applies, and primitive encodings — into
+a private scratch `GeoModel`, so the verified `_dist_*` projection and
+`BRepClass`-ported classification machinery applies verbatim on all record
+kinds (points; line/circle/ellipse/copied/degenerate/surface-iso curves;
+plane/quadric/NURBS faces with true trim classification incl. holes;
+wires, shells and solids). Entities whose projection cannot converge are
+skipped like upstream's `IsDone` gate, and a solid whose ray containment
+is undecidable still returns its boundary minimum rather than being
+dropped. The query mutates nothing: bindings, shapes, model entities and
+tag maxima are byte-identical before and after, and kernel-side
+transforms are visible without `synchronize`. Unbound entities report
+"Unknown OpenCASCADE entity of dimension d with tag t" like upstream.
+Verified by `test/interfaces/api_occ_closest_test.jl` (38 assertions)
+plus an `occ_closest_smoke` default check.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

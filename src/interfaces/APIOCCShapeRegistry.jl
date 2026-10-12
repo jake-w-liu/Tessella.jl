@@ -130,6 +130,8 @@ get_center_of_mass(dim,tag)=
     _with_model(m->Model._model_occ_get_center_of_mass(m,dim,tag))
 get_matrix_of_inertia(dim,tag)=
     _with_model(m->Model._model_occ_get_matrix_of_inertia(m,dim,tag))
+get_closest_entities(x,y,z,dim_tags,n=1)=
+    _with_model(m->Model._model_occ_get_closest_entities(m,x,y,z,dim_tags,n))
 
 module mesh
     import .....Model

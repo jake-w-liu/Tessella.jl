@@ -974,6 +974,35 @@ the tridiagonal cross-check, C2 continuity, endpoint-child topology,
 errors and atomicity, queries/transforms and end-to-end wire meshing,
 plus an `occ_spline_smoke` default check.
 
+The twelfth GEO01 slice followed: `get_closest_entities` in
+`src/geometry/ModelOCCClosest.jl` — upstream
+`OCC_Internals::getClosestEntities` (new in Gmsh 4.15). Each bound
+dim-tag resolves its closest point and distance to the query vertex;
+solid inputs short-circuit to zero distance at the query point when
+inside/on (`BRepClass3d` IN/ON semantics); results sort through the
+upstream `std::set` key `(distance,(dim,tag,x,y,z))` — duplicate
+inputs collapse, ties order lexicographically — and the first `n`
+entries emit (`n<=0` still emits one). Since pending OCC shapes are
+not public model entities, each queried shape materializes — with
+its transitive wire/edge/vertex closure, `synchronize`'s signed-hole
+reversal, and primitive encodings — into a private scratch
+`GeoModel`, so the verified `_dist_*`/`BRepClass` machinery applies
+verbatim without mutating state: all curve families (line, circle,
+ellipse, copied/spline/bezier, degenerate, surface-iso), plane and
+quadric faces with true trim classification including hole
+rejection, NURBS faces, wires and shells as member minima, and
+solids through inside-or-boundary semantics. Unconverged projections
+skip like upstream's `IsDone` gate; a solid with undecidable ray
+containment returns its boundary minimum instead of dropping.
+Unbound entities report upstream's "Unknown OpenCASCADE entity of
+dimension d with tag t"; bindings, shapes, entities and tag maxima
+are untouched, and kernel-side transforms are visible pre-sync.
+`test/interfaces/api_occ_closest_test.jl` pins analytic distances
+(box face, sphere radial projection, torus √10−1, hole-face
+boundary, wire/shell/surface-iso units), ordering/dedup/`n`
+semantics, errors and state isolation, plus an `occ_closest_smoke`
+default check.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop
