@@ -538,6 +538,20 @@ quad-face fixture welds two cells across an internal diagonal, and a
 mismatched-diagonal or partial-quad contact rejects atomically; an MSH4
 round-trip preserves the shared entity bindings. The focused assembly
 file passes 164/164; the default smoke gained a compact weld testset.
+
+Vertex/edge-only conforming contact followed (the third CAD05 slice): a
+point contact is conforming exactly when the contact point is a vertex of
+both contacting facets, and a segment contact is conforming exactly when
+its endpoints are vertices of both facets (a full shared edge). These
+admit without welding — a public Gmsh 4.15.2 observation on two OCC boxes
+sharing a full face showed duplicated entities and 21 duplicated node
+positions, so coincident vertices/edges keep each solid's own boundary
+node — while T-junctions, partial-edge overlap and all non-coincident
+contact still reject, and shared-contact positions are exempt from the
+interpenetration probe. The focused assembly file passes 178/178 (two
+STEP admit cases under fill=false/fill=true plus the retained
+T-junction/partial-edge rejections); the default smoke gained a compact
+vertex-contact check on the new `brep_contact_vertex.step` fixture.
 Booleans/imprints and non-coincident intersections remain CAD05.
 
 ### Current Devin transfer and final verified batch

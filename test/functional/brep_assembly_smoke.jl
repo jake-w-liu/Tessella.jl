@@ -41,4 +41,11 @@ let mesh=import_step(joinpath(@__DIR__,"..","fixtures","brep_contact_twin.step")
     end
     @test counts==Dict(Int32(1)=>3,Int32(2)=>3,Int32(3)=>1)
 end
+# Coincident vertex-only contact is conforming: admitted unwelded — both
+# solids keep their own coincident boundary node (OCC import semantics).
+let mesh=import_step(joinpath(@__DIR__,"..","fixtures","brep_contact_vertex.step");fill=false)
+    @test mesh isa Tessella.MixedMesh && validate(mesh).ok &&
+          Set(keys(mesh.entity_data.entities))==Set([(2,1),(3,1),(2,2),(3,2)]) &&
+          !allunique(eachcol(mesh.coords))
+end
 end

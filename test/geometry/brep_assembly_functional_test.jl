@@ -190,6 +190,27 @@ end
         # non-coincident penetration remains rejected.
         write(path,shifted_box(source,(0.4,-0.1,0.4),(0.6,0.1,0.6)))
         @test_throws ArgumentError import_step(path;fill=false)
+        # A box corner coinciding with the tet vertex (1,0,0) is conforming
+        # vertex-only contact: admitted unwelded — each solid keeps its own
+        # coincident boundary node and no shared entity is created.
+        write(path,shifted_box(source,(1.,-1.,-1.),(2.,0.,0.)))
+        for fill in (false,true)
+            m=import_step(path;fill)
+            @test m isa E.MixedMesh && MT.validate(m).ok
+            @test Set(keys(m.entity_data.entities))==Set([(2,1),(3,1),(2,2),(3,2)])
+            fill || @test size(m.coords,2)==12
+            @test !allunique(eachcol(m.coords))
+        end
+        # A box edge coinciding with the tet edge (0,0,0)-(1,0,0) is
+        # conforming edge-only contact: admitted unwelded likewise.
+        write(path,shifted_box(source,(0.,-1.,-1.),(1.,0.,0.)))
+        for fill in (false,true)
+            m=import_step(path;fill)
+            @test m isa E.MixedMesh && MT.validate(m).ok
+            @test Set(keys(m.entity_data.entities))==Set([(2,1),(3,1),(2,2),(3,2)])
+            fill || @test size(m.coords,2)==12
+            @test !allunique(eachcol(m.coords))
+        end
     end
     # A second tet sharing the slant face verbatim is a conforming coincident
     # interface: the assembly welds it into one shared Surface entity bound by

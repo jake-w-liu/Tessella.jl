@@ -17,11 +17,15 @@ boxes overlap an exact geometric certificate decides: facet pairs sharing
 exactly the same vertex positions with opposed outward windings are
 conforming contact and weld — each coincident pair becomes one shared
 Surface entity bound by both Regions, emitted once, with rim nodes
-deduplicated by exact position. Filled solids weld only when both
+deduplicated by exact position. Vertex/edge-only coincident contacts are
+conforming too but weld nothing: each solid keeps its own coincident
+boundary node, matching OCC import semantics. Filled solids weld only
+when both
 independent fills emit the identical interface triangulation; a facet
 shared by three solids, a fill crossing the interface rim, and
 non-coincident touching or intersecting boundary facets (partial overlap,
-edge/vertex-only contact, same-region duplication) all reject, as does one
+T-junction or partial-edge contact, same-region duplication) all reject,
+as does one
 solid enclosing or dipping into the other. Genuinely disjoint solids are
 admitted. Boxes are never used to discover, split or
 replace source roots. Point-cloud box imports retain their original single-solid behavior.

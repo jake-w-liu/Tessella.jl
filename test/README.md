@@ -58,6 +58,10 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 52.3 s | 292 | ~55 s |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 51.3 s | 292 | ~53 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 51.1 s | 292 | ~53 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 50.0 s | 292 | ~52 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 55.8 s | 291 | ~58 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 53.8 s | 291 | ~56 s |
 | Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 51.6 s | 291 | ~53 s |
@@ -139,13 +143,21 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 291-assertion bodies ran onJulia1.12.7/1.13.1.
+The current 292-assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds an
+assembly conforming vertex/edge-contact check (compact: admitted
+unwelded, each solid keeps its coincident boundary node,
+`test/fixtures/brep_contact_vertex.step`) to
+`test/functional/brep_assembly_smoke.jl` and extends the assembly
+functional file to 178 assertions on both runtimes — point/segment
+contacts are conforming exactly at coincident discrete topology while
+T-junctions and partial-edge overlap still reject. The preceding
+increment adds an
 assembly conforming-weld testset (compact: one shared Surface entity bound
 by both Regions, one emitted interface cell, deduplicated coordinates,
-`valid`) to `test/functional/brep_assembly_smoke.jl` and extends the
+`valid`) to `test/functional/brep_assembly_smoke.jl` and extended the
 assembly functional file to 164 assertions on both runtimes — vertex-
 identical coincident facets with opposed winding weld into a shared
 Surface (`test/fixtures/brep_contact_twin.step` twin tetrahedra plus a

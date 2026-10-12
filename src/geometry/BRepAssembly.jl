@@ -1,9 +1,12 @@
 # ── Geometric independence certificate ─────────────────────────────────────
 # Strictly separated bounding boxes already prove independence. For pairs whose
-# boxes overlap, this certificate decides actual disjointness with exact
-# predicates: no boundary facet pair may intersect, and neither shell may
-# contain the other. Every contact — a coincident facet, an edge or a single
-# shared vertex — is still rejected until conforming contact interfaces exist.
+# boxes overlap, this certificate decides conforming contact with exact
+# predicates: coincident facet pairs with opposed winding weld into shared
+# interface Surfaces, coincident vertex/edge-only contacts are admitted
+# unwelded (each solid keeps its own coincident boundary node, matching OCC
+# import semantics), and every other contact — partial face overlap,
+# T-junctions, off-edge segments — is still rejected, as is interpenetration
+# or enclosure of one shell inside the other.
 
 const _BREP_R3=NTuple{3,Rational{BigInt}}
 @inline _brep_rpoint(p)::_BREP_R3=ntuple(d->Rational{BigInt}(p[d]),3)
@@ -45,7 +48,7 @@ function _brep_coplanar_drop_axis(T)
        (b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]))
     (n[1]==0.0&&n[2]==0.0&&n[3]==0.0) || return argmax(abs.(collect(n)))
     # Degenerate triangle: keep its widest 2-D projection.
-    spans=collect(k->max(T[1][k],T[2][k],T[3][k])-min(T[1][k],T[2][k],T[3][k]),1:3)
+    spans=[max(T[1][k],T[2][k],T[3][k])-min(T[1][k],T[2][k],T[3][k]) for k in 1:3]
     return argmin(spans)
 end
 
@@ -235,22 +238,18 @@ function _brep_certify_disjoint(sa::Mesh,sb::Mesh,na,nb,caller)
     shared=Tuple{Int,Int}[]
     shared_set=Set{Tuple{Int,Int}}()
     coincident_a=falses(length(fa));coincident_b=falses(length(fb))
-    shared_vertices=Set{NTuple{3,Float64}}()
-    shared_edges=Set{NTuple{2,NTuple{3,Float64}}}()
+    contact_positions=Set{NTuple{3,Float64}}()
     for ai in eachindex(fa),bi in eachindex(fb)
         _brep_boxes_touch(ba[ai],bb[bi]) || continue
         _brep_coincident_facet(fa[ai],fb[bi]) || continue
         push!(shared,(ai,bi));push!(shared_set,(ai,bi))
         coincident_a[ai]=true;coincident_b[bi]=true
-        T=fa[ai]
-        union!(shared_vertices,T)
-        for e in 1:3
-            push!(shared_edges,minmax(T[e],T[mod1(e+1,3)]))
-        end
     end
-    # Non-coincident facets may touch only on the shared interface rim — a
-    # point at a shared vertex belonging to both facets, or a segment that is
-    # a shared edge and a side of both.
+    # A non-coincident contact is conforming only at coincident discrete
+    # topology: a point common to both facets' vertices welds nothing but is
+    # admitted, and a segment must be a shared edge — its endpoints vertices
+    # of both facets. Anything else (interior pierces, coplanar area,
+    # T-junctions, partial edge overlap) is non-conforming contact.
     for ai in eachindex(fa),bi in eachindex(fb)
         _brep_boxes_touch(ba[ai],bb[bi]) || continue
         (ai,bi) in shared_set && continue
@@ -259,11 +258,12 @@ function _brep_certify_disjoint(sa::Mesh,sb::Mesh,na,nb,caller)
         legit=false
         if kind===:point
             v=only(pts)
-            legit=v in shared_vertices && v in fa[ai] && v in fb[bi]
+            legit=v in fa[ai] && v in fb[bi]
+            legit && push!(contact_positions,v)
         elseif kind===:segment
             v1,v2=pts
-            legit=minmax(v1,v2) in shared_edges &&
-                v1 in fa[ai] && v1 in fb[bi] && v2 in fa[ai] && v2 in fb[bi]
+            legit=v1 in fa[ai] && v1 in fb[bi] && v2 in fa[ai] && v2 in fb[bi]
+            legit && (push!(contact_positions,v1);push!(contact_positions,v2))
         end
         legit || throw(ArgumentError(
             "$caller: cannot certify independent solids $na and $nb; " *
@@ -283,7 +283,8 @@ function _brep_certify_disjoint(sa::Mesh,sb::Mesh,na,nb,caller)
             on_iface=coincident[column]
             for r in 1:3
                 row=surface.tris[r,column];referenced[row]=true
-                on_iface && (used[row]=true)
+                (on_iface || node(surface,row) in contact_positions) &&
+                    (used[row]=true)
             end
         end
         free=false

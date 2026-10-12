@@ -455,7 +455,22 @@ under the shared Surface, and both Regions bound it. Verified on the new
 same-diagonal quad-face weld, mismatched-diagonal and partial-quad
 rejections, and MSH4 round-trip; the focused assembly file passes
 164/164 and the default smoke gained a compact weld testset.
-Booleans/imprints and non-coincident intersections remain CAD05.
+
+### Conforming vertex/edge contact admission (2026-10-12)
+
+Devin landed the third CAD05 slice. Non-coincident facet contacts are now
+conforming exactly at coincident discrete topology: a point contact
+shared by both facets' vertices and a segment contact whose endpoints are
+vertices of both facets (a full shared edge) admit unwelded — a public
+Gmsh 4.15.2 observation showed OCC imports keep coincident boundary
+entities and nodes duplicated, so each solid retains its own coincident
+boundary node. Shared-contact positions are exempt from the
+interpenetration probe; T-junctions, partial-edge overlap and all
+non-coincident contact still reject. Verified on two STEP admit mutants
+under `fill=false`/`fill=true` plus retained rejections; the focused
+assembly file passes 178/178 and the default smoke gained a vertex-check
+on the new `brep_contact_vertex.step` fixture. Booleans/imprints and
+non-coincident intersections remain CAD05.
 
 ### Current verified batch and Devin transfer (2026-10-11)
 
