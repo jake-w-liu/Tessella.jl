@@ -103,6 +103,14 @@ get_max_tag(dim)=_with_model(m->Model._model_occ_max_tag(m,dim))
 set_max_tag(dim,tag)=_with_model(m->Model._model_occ_set_max_tag!(m,dim,tag))
 remove(dim_tags,recursive=false)=_with_model(m->Model._model_occ_remove!(m,dim_tags,recursive))
 
+translate(dim_tags,dx,dy,dz)=_with_model(m->Model._model_occ_translate!(m,dim_tags,dx,dy,dz))
+rotate(dim_tags,x,y,z,ax,ay,az,angle)=_with_model(m->Model._model_occ_rotate!(m,dim_tags,x,y,z,ax,ay,az,angle))
+dilate(dim_tags,x,y,z,a,b,c)=_with_model(m->Model._model_occ_dilate!(m,dim_tags,x,y,z,a,b,c))
+mirror(dim_tags,a,b,c,d)=_with_model(m->Model._model_occ_mirror!(m,dim_tags,a,b,c,d))
+symmetrize(dim_tags,a,b,c,d)=mirror(dim_tags,a,b,c,d)
+affine_transform(dim_tags,mat)=_with_model(m->Model._model_occ_affine_transform!(m,dim_tags,mat))
+copy(dim_tags)=_with_model(m->Model._model_occ_copy_entities!(m,dim_tags))
+
 function synchronize()
     _with_model(synchronize_geometry=true) do m
         Model._model_occ_synchronize!(m)

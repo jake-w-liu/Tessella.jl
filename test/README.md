@@ -61,6 +61,10 @@ Local receipts on 2026-10-13, with bounds checks; only the marked
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 82.0 s | 350 | ~86 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 83.3 s | 350 | ~118 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 86.6 s | 350 | ~90 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 90.3 s | 350 | ~124 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 81.1 s | 342 | ~85 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 81.7 s | 342 | ~118 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 89.8 s | 342 | ~93 s |
@@ -194,6 +198,21 @@ The current assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds a
+compact OCC transform check (`occ_transform_smoke`: an `add_box`
+translated with its sub-entities re-created under fresh tags while a
+holder curve keeps its tag, `copy` rebinding the solid under tag 2,
+`dilate` on the copy, and removal pruning its surface loop) — the
+`test/interfaces/api_occ_transform_test.jl` file covers
+`translate`/`rotate`/`dilate`/`mirror`/`symmetrize`/`affine_transform`/
+`copy` upstream `_transform`/`_multiBind` semantics: tag churn with a
+holder entity, ownership-protected shared-vertex detach, rigid motion
+and rotated compact records, isotropy gates and atomic rejection,
+reflected sphere poles through degenerate edges, shear absorption by
+plane records, copy explosion (wire→edges, point→fresh tag, duplicate
+input dedup, highest-dim-only output, compact-encoding duplication),
+guard paths, surface-loop lifecycle pruning, idempotent
+re-synchronization and end-to-end `generate(3)` containment on a
+translated cylinder. The preceding increment adds a
 compact OCC primitive-solid check (`occ_primitives_smoke`: a cylinder
 plus sphere synchronized into typed faces with retained compact
 encodings, and a standalone torus volume) — the

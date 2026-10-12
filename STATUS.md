@@ -793,6 +793,43 @@ tag/collision/finite guards, atomicity, removal pruning, idempotent
 re-sync, `generate(3)` containment) plus an `occ_primitives_smoke`
 default check.
 
+### GEO01 slice 6 — OCC transform family (2026-10-14)
+
+The sixth GEO01 slice adds `model.occ`'s shared transform machinery:
+`translate`, `rotate`, `dilate`, `mirror` (with the upstream
+`symmetrize` alias), `affine_transform` and `copy`. Each endpoint
+routes through the `_transform`/`_multiBind` staging upstream uses —
+`src/geometry/ModelOCCTransforms.jl` unions the input closures,
+reserves fresh shape identities, runs every fallible record transform
+through the verified `_transform_occ_*` layer before the first
+unbind, then replays upstream's interleaved `_unbind(shape, true)` +
+`_bind(out, dim, tag, true)`: the transformed top-level shape keeps
+its tag while every re-created sub-entity takes a fresh
+`getMaxTag+1` tag, ownership-protected recursive unbind detaches
+shared sub-shapes (a vertex shared with an untransformed curve stays
+bound; the transformed curve detaches onto fresh endpoints exactly
+like upstream's adjacency scan), and `kernel.removed` +
+`_model_occ_collect_shapes!` carry the churn through `synchronize`
+with stale `m.surface_loops` pruned. Face `pcurves` re-key from the
+pre-transform curve tags to the realized fresh tags, and
+cylinder/cone `lin2d` pcurve `v` coordinates rescale under
+non-unit axial stretch. `copy` mirrors `_multiBind` highest-dim-only
+semantics: bare wires contribute edges, bare shells faces, duplicate
+inputs deduplicate, already-bound shared sub-shapes are not reported
+twice, and compact encodings (`m.cylinders`/`m.spheres`/`m.cones`)
+duplicate with their solids. `affine_transform` pads matrices shorter
+than twelve entries with a warning exactly like upstream; mirrors
+preserve circle/ellipse handedness through the `det<0` reflection
+paths; unrepresentable transforms (anisotropic spheres, warped
+cylinder cross-sections) reject atomically before any bind.
+Verified by `test/interfaces/api_occ_transform_test.jl` (tag churn
+with a tag-holder entity, shared-vertex detach, rigid motion,
+isotropy gates, reflected sphere poles through degenerate edges,
+shear absorption by plane records, copy explosion and dedup,
+guard/atomicity paths, surface-loop lifecycle, idempotent
+re-synchronization and end-to-end `generate(3)` containment on a
+translated cylinder) plus an `occ_transform_smoke` default check.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

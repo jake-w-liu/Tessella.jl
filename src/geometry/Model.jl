@@ -845,6 +845,7 @@ include("ModelOCCCurveShapes.jl")
 include("ModelOCCPlaneShapes.jl")
 include("ModelOCCVolumeShapes.jl")
 include("ModelOCCPrimitiveShapes.jl")
+include("ModelOCCTransforms.jl")
 include("ModelBoolean.jl")
 
 @inline function _model_periodic_entity_label(dim::Int)

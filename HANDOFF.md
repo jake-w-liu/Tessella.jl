@@ -831,6 +831,29 @@ records, pcurve round-trips, normals, bounds, apex/frustum variants,
 `zAxis`, guards, atomicity, removal pruning, idempotent re-sync and
 `generate(3)` containment, plus an `occ_primitives_smoke` default check.
 
+The sixth GEO01 slice followed: the shared transform family —
+`translate`, `rotate`, `dilate`, `mirror` (with upstream's
+`symmetrize` alias), `affine_transform` and `copy` in
+`src/geometry/ModelOCCTransforms.jl`. Each endpoint stages the union
+input closure through the verified `_transform_occ_*` record layer
+before any unbind — so representability failures (anisotropic
+spheres, warped cylinder cross-sections) reject atomically — then
+replays upstream's interleaved ownership-protected `_unbind` +
+`_bind(out, dim, tag, true)`: the transformed top shape keeps its
+tag, re-created sub-entities take fresh `getMaxTag+1` tags, shared
+sub-shapes detach onto fresh copies, face `pcurves` re-key to the
+realized curve tags with cylinder/cone `v` rescaled under axial
+stretch, and `kernel.removed`/collection carry the churn through
+`synchronize` with stale `surface_loops` pruned. `copy` follows
+`_multiBind` highest-dim-only output (wires→edges, shells→faces,
+deduplicated shared sub-shapes, duplicated compact encodings) and
+`affine_transform` pads short matrices with the upstream warning.
+The focused `test/interfaces/api_occ_transform_test.jl` pins tag
+churn, detach semantics, rigid motion, isotropy gates, reflected
+poles, copy explosion, guards, lifecycle and end-to-end `generate(3)`
+on a translated cylinder, plus an `occ_transform_smoke` default
+check.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop
