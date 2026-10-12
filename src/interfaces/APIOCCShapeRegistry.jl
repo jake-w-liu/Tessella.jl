@@ -111,6 +111,20 @@ symmetrize(dim_tags,a,b,c,d)=mirror(dim_tags,a,b,c,d)
 affine_transform(dim_tags,mat)=_with_model(m->Model._model_occ_affine_transform!(m,dim_tags,mat))
 copy(dim_tags)=_with_model(m->Model._model_occ_copy_entities!(m,dim_tags))
 
+get_bounding_box(dim,tag)=_with_model(m->Model._model_occ_get_bounding_box(m,dim,tag))
+get_entities_in_bounding_box(xmin,ymin,zmin,xmax,ymax,zmax;dim=-1)=
+    _with_model(m->Model._model_occ_entities_in_bounding_box(
+        m,xmin,ymin,zmin,xmax,ymax,zmax,dim))
+get_curve_loops(surface_tag)=_with_model(m->Model._model_occ_get_curve_loops(m,surface_tag))
+get_surface_loops(volume_tag)=_with_model(m->Model._model_occ_get_surface_loops(m,volume_tag))
+
+module mesh
+    import .....Model
+    using ....API: _with_model
+    set_size(dim_tags,size)=_with_model(
+        m->Model._model_occ_set_size!(m,dim_tags,size))
+end
+
 function synchronize()
     _with_model(synchronize_geometry=true) do m
         Model._model_occ_synchronize!(m)

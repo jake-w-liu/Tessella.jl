@@ -854,6 +854,24 @@ poles, copy explosion, guards, lifecycle and end-to-end `generate(3)`
 on a translated cylinder, plus an `occ_transform_smoke` default
 check.
 
+The seventh GEO01 slice followed: the registry query family —
+`get_bounding_box`, `get_entities_in_bounding_box`,
+`get_curve_loops`, `get_surface_loops` and `occ.mesh.set_size` in
+`src/geometry/ModelOCCQueries.jl`. Upstream queries the bound OCC
+registry without synchronizing, so the implementations read
+`kernel.shapes`/`kernel.bindings` directly: transforms and fresh
+shapes are visible pre-sync, wire/shell dimTags are accepted, boxes
+stay exact (line endpoints, conic extrema, sphere ball box, NURBS
+hulls padded like `Bnd_Box`, boundary unions elsewhere),
+`get_entities_in_bounding_box` applies the upstream containment
+filter over public dims 0–3, the loop queries walk `uses` in
+`BRepTools_WireExplorer` order, and `set_size` rides the point
+record's `mesh_size` into `m.point_size`. The focused
+`test/interfaces/api_occ_queries_test.jl` pins per-dimension and
+curved-record boxes, pre-sync transform visibility, containment
+filters, loop traversal order, set_size lifecycle and upstream error
+messages, plus an `occ_queries_smoke` default check.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

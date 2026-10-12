@@ -61,6 +61,10 @@ Local receipts on 2026-10-13, with bounds checks; only the marked
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 80.8 s | 357 | ~84 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 82.6 s | 357 | ~117 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 82.8 s | 357 | ~86 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 84.6 s | 357 | ~119 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 82.0 s | 350 | ~86 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 83.3 s | 350 | ~118 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 86.6 s | 350 | ~90 s |
@@ -198,6 +202,18 @@ The current assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds a
+compact OCC query check (`occ_queries_smoke`: an `add_box` with
+per-dimension bounding boxes, entity containment filtering,
+surface/curve loop traversal order and a `mesh.set_size` point
+attribute transported on sync) — the
+`test/interfaces/api_occ_queries_test.jl` file covers kernel-side
+registry reads matching upstream `OCC_Internals` semantics:
+per-dimension and curved-record bounding boxes (sphere ball box,
+torus extrema, circle/ellipse boxes), transform visibility before
+`synchronize`, containment and dimension filters, multi-wire loop
+order, standalone loop/volume reporting, silent/overwriting
+`set_size` behavior and upstream error messages. The preceding
+increment adds a
 compact OCC transform check (`occ_transform_smoke`: an `add_box`
 translated with its sub-entities re-created under fresh tags while a
 holder curve keeps its tag, `copy` rebinding the solid under tag 2,

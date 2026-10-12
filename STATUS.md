@@ -830,6 +830,38 @@ guard/atomicity paths, surface-loop lifecycle, idempotent
 re-synchronization and end-to-end `generate(3)` containment on a
 translated cylinder) plus an `occ_transform_smoke` default check.
 
+### GEO01 slice 7 — OCC kernel queries (2026-10-14)
+
+The seventh GEO01 slice adds `model.occ`'s registry queries:
+`get_bounding_box`, `get_entities_in_bounding_box`,
+`get_curve_loops`, `get_surface_loops` and the `occ.mesh.set_size`
+point attribute. Upstream queries the bound TopoDS registry without
+synchronizing, so `src/geometry/ModelOCCQueries.jl` reads
+`kernel.shapes`/`kernel.bindings` directly — rebound transforms and
+fresh shapes are visible before `synchronize`, and wire/shell
+dimTags are accepted like upstream's `_find` dispatch. Boxes are
+exact where the synced `model_bounding_box` path is exact: line
+endpoints, circle/ellipse/torus extrema, the sphere's ball box
+(whose meridian wire cannot cover the poles), NURBS control hulls
+padded by `1e-7` like `Bnd_Box`, and boundary unions elsewhere —
+still exact for plane faces and ruled rim faces whose axis-aligned
+extrema lie on their boundary curves. `get_entities_in_bounding_box`
+keeps entities whose box is contained in the query box, iterates
+public dims 0–3 like the upstream loop and sorts tags inside each
+dim for determinism. `get_curve_loops`/`get_surface_loops` walk face
+children and shell `uses` in `BRepTools_WireExplorer` order, with
+every member already bound (upstream's on-demand `_bind` never
+triggers). `set_size` mirrors `OCC_Internals::setMeshSize`: only
+dimension-0 entities are handled, unbound tags are ignored silently,
+and the value rides the point record's `mesh_size` into
+`m.point_size` on the next synchronize. Verified by
+`test/interfaces/api_occ_queries_test.jl` (per-dimension and
+curved-record boxes, transform visibility pre-sync, containment and
+dimension filters, multi-wire loop order, standalone
+loop/volume reporting, silent and overwriting `set_size`, upstream
+error messages) plus an
+`occ_queries_smoke` default check.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The
