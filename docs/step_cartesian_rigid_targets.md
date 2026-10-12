@@ -20,13 +20,20 @@ perpendicular to the resulting Z, and Y is Z crossed with X. The
 [public OCCT transform conversion](https://raw.githubusercontent.com/Open-Cascade-SAS/OCCT/V7_8_0/src/StepToGeom/StepToGeom.cxx)
 establishes this rigid frame. Zero, parallel or nonfinite directions, missing
 references and malformed records reject. Every nested composition still passes
-the existing proper-rotation certificate; complete shell, disjoint occurrence,
+the scaled-rigid certificate — orthogonal columns of equal norm — so composed
+products of unit/rigid and scaled operators admit while shear and non-uniform
+scale reject; complete shell, disjoint occurrence,
 positive fill, ownership and unique identity checks remain required.
 
-This admission covers unit/default scale. A retained proper eight-field native
-scale2 observation shows that the pinned importer leaves the box unit-sized;
-it supplies no general scaling result. Nonunit scales remain explicitly guarded
-in this bounded implementation. The earlier malformed six-field observation is
+Nonzero scale is now applied: the operator becomes `scale × R_axes` about its
+local origin, matching the
+[public OCCT transform conversion](https://raw.githubusercontent.com/Open-Cascade-SAS/OCCT/V7_8_0/src/StepToGeom/StepToGeom.cxx)
+`SetScaleFactor` semantics — a retained scale2 Gmsh4.15.2 observation leaves
+the box unit-sized (the native importer ignores the field), so this admission
+deliberately exceeds the pinned result rather than silently dropping the
+declared scale. A negative scale mirrors the occurrence and flips the emitted
+winding; zero scale is singular and rejects. The earlier malformed six-field
+observation is
 not a successful transform witness. Multiple product roots, general assembly
 relationships remain outside this mapped-target admission; a separate
 [direct product-usage producer](step_relationship_assemblies.md) now admits
@@ -40,9 +47,10 @@ the direct Cartesian rule from the AXIS2 rule. Observations are retained in
 `C:/tmp/tessella_step_cartesian_rigid_20261011/native_cartesian_rigid_probe.json`.
 
 The focused [functional regression](../test/geometry/brep_cartesian_rigid_functional_test.jl)
-checks those five import-only cases, one actual quarter-turn fill, classified
-MSH4 ASCII/binary transport and error controls. Julia1.12.7 passed43/43,
-actual exit0, warm wall5.4328898s and body4.9577108s, with checked bounds,
+checks those five import-only cases plus doubled and mirrored scale targets,
+one actual quarter-turn fill, classified
+MSH4 ASCII/binary transport and error controls. Julia1.13.1 passed54/54,
+actual exit0, with checked bounds,
 minimal compilation and one thread. Exact UID-to-owner/family/ordered-corner
 records survive MSH4 family regrouping. Earlier test-only failures and their
 receipts remain archived; the selected Source stayed unchanged throughout

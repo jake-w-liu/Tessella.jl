@@ -10,7 +10,9 @@ node/element UIDs, and source identity in physical names. STEP entity IDs or
 IGES directory-entry IDs determine solid ordering. Filled boundary triangles
 come from actual tetrahedron incidence; boundary/interior node owners follow
 that incidence. IGES primitive and solid
-root rigid directory-entry transforms are applied.
+root directory-entry transforms are applied — any finite nonsingular
+affine (scale, shear, mirror) on the triangulated product; entity-level
+transforms inside a root stay rigid for the analytic classifiers.
 
 Strictly separated bounding boxes certify independent solids directly. When
 boxes overlap an exact geometric certificate decides: facet pairs sharing

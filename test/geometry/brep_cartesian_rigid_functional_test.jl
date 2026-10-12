@@ -40,6 +40,8 @@ function expected_corners(case)
     first_box=Set((x+(case==:shifted_origin ? 2. : 3.),y,z) for (x,y,z) in corners)
     second_box=case==:default ? Set((6.0 + x,y,z) for (x,y,z) in corners) :
         case==:arbitrary ? Set((6.0 + 0.8*x - 0.6*y,0.6*x + 0.8*y,z) for (x,y,z) in corners) :
+        case==:doubled ? Set((6.0 + 2.0*x,2.0*y,2.0*z) for (x,y,z) in corners) :
+        case==:mirrored ? Set((6.0 - x,-y,-z) for (x,y,z) in corners) :
         Set((6.0 - y,x,z) for (x,y,z) in corners)
     return first_box,second_box
 end
@@ -52,7 +54,9 @@ end
         (:inferred,occurrence_variant(source,replace(quarter,",1.,#13)"=>",1.,\$)");extra=axis2)),
         (:shifted_origin,occurrence_variant(source,quarter;extra=axis2,shift=true)),
         (:arbitrary,occurrence_variant(source,"#905 = CARTESIAN_TRANSFORMATION_OPERATOR_3D('','','',#910,#911,#902,1.,#13);";
-            extra="#910 = DIRECTION('',(0.8,0.6,0.));\n#911 = DIRECTION('',(-0.6,0.8,0.));\n"))]
+            extra="#910 = DIRECTION('',(0.8,0.6,0.));\n#911 = DIRECTION('',(-0.6,0.8,0.));\n")),
+        (:doubled,occurrence_variant(source,"#905 = CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',\$,\$,\$,#902,2.,\$);")),
+        (:mirrored,occurrence_variant(source,"#905 = CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',\$,\$,\$,#902,-1.,\$);"))]
     mktempdir() do directory
         path=joinpath(directory,"operators.step")
         for (case,text) in cases
@@ -66,7 +70,9 @@ end
                 @test length(actual)==8 && all(any(norm(point-collect(witness))<=2e-14 for point in actual)
                     for witness in expected[owner])
             end
-            @test all(isapprox(volume,1.;atol=2e-13) for volume in values(signed_volumes(mesh,2)))
+            measured=signed_volumes(mesh,2)
+            @test isapprox(measured[Int32(1)],1.;atol=2e-13) &&
+                isapprox(measured[Int32(2)],case==:doubled ? 8.0 : 1.0;atol=2e-13)
             @test allunique(mesh.entity_data.external_node_tags) &&
                 allunique(reduce(vcat,mesh.entity_data.external_element_tags))
             @test occursin("MAPPED_ITEM #907",mesh.physical_names[(3,2)]) &&
@@ -91,7 +97,6 @@ end
         end
         invalid=[
             occurrence_variant(source,"#905 = CARTESIAN_TRANSFORMATION_OPERATOR_3D('', \$,\$,#902,2.,\$);"),
-            occurrence_variant(source,replace(quarter,",1.,#13)"=>",2.,#13)");extra=axis2),
             occurrence_variant(source,replace(quarter,",1.,#13)"=>",0.,#13)");extra=axis2),
             occurrence_variant(source,replace(quarter,"#904,#910"=>"#13,#910");extra=axis2),
             occurrence_variant(source,replace(quarter,"#902,1."=>"#9999,1.");extra=axis2),

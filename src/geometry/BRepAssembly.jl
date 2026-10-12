@@ -1084,12 +1084,18 @@ function _brep_tet_shell(mesh,caller)
 end
 
 function _iges_assembly_transform(surface,types,params,bad,transforms,de,caller)
-    xf=_iges_de_transform(types,params,bad,transforms,de,caller)
+    # A solid-root transform applies to the already-triangulated product, so
+    # any finite nonsingular affine (scale, shear, mirror) is admitted;
+    # entity-level transforms inside the root stay rigid for the analytic
+    # classifiers. A negative determinant flips the emitted winding.
+    xf=_iges_de_transform(types,params,bad,transforms,de,caller;rigid=false)
     xf===nothing && return surface
     coordinates=Matrix{Float64}(undef,size(surface.coords))
     for row in axes(coordinates,2)
         coordinates[:,row]=collect(_iges_xf_apply(xf,node(surface,row),true))
     end
+    all(isfinite,coordinates) || throw(ArgumentError(
+        "$caller: transformed solid #$de coordinates are nonfinite"))
     R,_=xf
     determinant=R[1][1]*(R[2][2]*R[3][3]-R[2][3]*R[3][2])-
         R[1][2]*(R[2][1]*R[3][3]-R[2][3]*R[3][1])+R[1][3]*(R[2][1]*R[3][2]-R[2][2]*R[3][1])

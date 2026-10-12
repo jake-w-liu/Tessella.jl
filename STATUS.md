@@ -526,6 +526,28 @@ exactly; coplanar overlaps, T-junctions, and crossings mixed with
 coincident welds or enclosures still reject. Coplanar/general
 intersections, Booleans and imprints remain CAD05.
 
+### General affine solid transforms on CAD assembly imports (2026-10-12)
+
+Devin landed the sixth CAD05 slice — occurrence and solid-root transforms
+beyond proper rigid. STEP `CARTESIAN_TRANSFORMATION_OPERATOR_3D` mapped
+targets now admit any nonzero finite scale: the operator applies
+`scale × R_axes` about its local origin (OCCT `SetScaleFactor` semantics —
+Gmsh4.15.2's importer ignores the field, so this deliberately exceeds the
+retained unit-sized observation rather than dropping declared geometry);
+a negative scale mirrors and flips emitted winding, zero scale rejects.
+Nested compositions certify as scaled rigid — orthogonal columns of equal
+norm — so composed rigid×scaled maps admit while shear and non-uniform
+scale reject. IGES type-124 transforms relax at the solid-root level only:
+the root transform applies to the already-triangulated product where any
+finite nonsingular affine (scale, shear, mirror) is exact and a negative
+determinant flips winding, while entity-level transforms feeding the
+analytic classifiers stay rigid; transformed coordinates are checked
+finite and singular matrices reject. Verified on scaled/mirrored
+Cartesian targets (exact corner sets and 8x volume on the doubled box),
+uniform-scale/mirror/shear type-124 mutants of `brep_two_blocks.iges`
+(exact bboxes, 16x and volume-preserving products, singular rejection),
+the focused Cartesian file 54/54 and the assembly file 241/241.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

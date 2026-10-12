@@ -614,6 +614,28 @@ coincident welds or enclosures still reject. Coplanar/general
 intersections, arbitrary CAD transforms, Booleans and imprints remain
 CAD05.
 
+General affine solid transforms followed (the sixth CAD05 slice): STEP
+`CARTESIAN_TRANSFORMATION_OPERATOR_3D` mapped targets now apply any
+nonzero finite scale — `scale × R_axes` about the local origin, OCCT
+`SetScaleFactor` semantics; the retained scale2 Gmsh4.15.2 observation
+leaves the box unit-sized (native importer ignores the field), so this
+deliberately exceeds the pinned result instead of dropping declared
+geometry. Negative scale mirrors and flips emitted winding; zero scale
+rejects. Nested compositions certify scaled rigid — orthogonal columns of
+equal norm — admitting rigid×scaled products while shear and non-uniform
+scale reject. On the IGES side, type-124 transforms relax at the
+solid-root level only: any finite nonsingular affine applies to the
+triangulated product exactly (scale, shear, mirror — the existing
+det<0 winding flip covers mirrors) while entity-level transforms feeding
+analytic classification stay rigid; transformed coordinates are checked
+finite and singular matrices reject. Verified on scaled and mirrored
+Cartesian targets (exact corner sets, doubled box volume 8), scale-2,
+mirror and shear mutants of `brep_two_blocks.iges` (bbox (3,0,0,7,2,2)
+and volume 16 exact, shear preserving volume at det=1), singular
+rejection, the focused Cartesian file 54/54 and the assembly file
+241/241. Coplanar/general intersections, Booleans and imprints remain
+CAD05.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

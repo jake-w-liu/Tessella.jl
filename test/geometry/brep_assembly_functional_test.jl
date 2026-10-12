@@ -115,12 +115,40 @@ function verify_import(importer,file,expected,identities)
     return mesh
 end
 
+function replace_parameter(source,pointer,payload)
+    join((length(line)>=73 && line[73]=='P' && tryparse(Int,strip(line[65:72]))==pointer ?
+          rpad(payload,64)*line[65:end] : line for line in split(source,'\n')),'\n')
+end
+
 @testset "multiple explicit CAD solid roots" begin
     box_mesh=verify_import(import_step,"brep_two_boxes.step",Dict(1=>1.0,2=>2.0),["#41","#141"])
     block_mesh=verify_import(import_iges,"brep_two_blocks.iges",Dict(1=>1.0,2=>2.0),["#1","#3"])
     verify_import(import_iges,"brep_two_msbo_tets.igs",Dict(1=>1/6,2=>1/3),["#59","#119"])
     @test block_mesh.entity_data.entities[(3,2)].bbox==(3.,0.,0.,5.,1.,1.)
     @test box_mesh.entity_data.entities[(3,2)].bbox==(3.,0.,0.,4.,2.,1.)
+    # A solid-root type-124 applies to the triangulated product, so any
+    # finite nonsingular affine is admitted: uniform scale tiles volumes by
+    # s^3, shear preserves them, a mirror flips winding but keeps outward
+    # normals, and a singular matrix rejects atomically.
+    blocks=read(joinpath(FIXTURES,"brep_two_blocks.iges"),String)
+    mktempdir() do directory
+        path=joinpath(directory,"affine.iges")
+        write(path,replace_parameter(blocks,5,"124,2,0,0,3,0,2,0,0,0,0,2,0;"))
+        mesh=import_iges(path;fill=false)
+        @test mesh isa E.MixedMesh && MT.validate(mesh).ok &&
+            mesh.entity_data.entities[(3,2)].bbox==(3.,0.,0.,7.,2.,2.)
+        measured,positive=volumes(import_iges(path))
+        @test positive && isapprox(measured[2],16.0;atol=1e-12)
+        write(path,replace_parameter(blocks,5,"124,-1,0,0,3,0,1,0,0,0,0,1,0;"))
+        mesh=import_iges(path;fill=false)
+        @test mesh isa E.MixedMesh && MT.validate(mesh).ok
+        write(path,replace_parameter(blocks,5,"124,1,.5,0,3,0,1,0,0,0,0,1,0;"))
+        mesh=import_iges(path;fill=false)
+        @test mesh isa E.MixedMesh && MT.validate(mesh).ok &&
+            mesh.entity_data.entities[(3,2)].bbox==(3.,0.,0.,5.5,1.,1.)
+        write(path,replace_parameter(blocks,5,"124,0,0,0,3,0,0,0,0,0,0,0,0;"))
+        @test_throws ArgumentError import_iges(path;fill=false)
+    end
 end
 
 function simple_volume(mesh)
@@ -128,11 +156,6 @@ function simple_volume(mesh)
                  mesh.coords[:,cell[3]]-mesh.coords[:,cell[1]],
                  mesh.coords[:,cell[4]]-mesh.coords[:,cell[1]]))/6
         for cell in eachcol(mesh.tets);init=0.0)
-end
-
-function replace_parameter(source,pointer,payload)
-    join((length(line)>=73 && line[73]=='P' && tryparse(Int,strip(line[65:72]))==pointer ?
-          rpad(payload,64)*line[65:end] : line for line in split(source,'\n')),'\n')
 end
 
 @testset "single-solid compatibility" begin

@@ -30,8 +30,8 @@ closed boundaries. No source nodes are welded across occurrences.
 
 This first producer requires one explicit shape-definition root and identical
 representation-context references. Proper eight-field Cartesian transformation
-operator targets with unit/default scale have a separate
-[rigid target admission](step_cartesian_rigid_targets.md). The
+operator targets (rigid, uniformly scaled, or mirrored) have a separate
+[target admission](step_cartesian_rigid_targets.md). The
 [direct product-usage producer](step_relationship_assemblies.md) owns
 NAUO/CDSR/IDT product graphs, including multiple roots, per-definition solids
 and `MAPPED_ITEM` occurrences inside product representations with per-context

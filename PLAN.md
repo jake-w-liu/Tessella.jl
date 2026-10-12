@@ -328,7 +328,7 @@ classified mixed meshes;
 supported planar Faces can retain disjoint inner wires and triangulate their
 holes. [Mapped STEP occurrences](docs/step_mapped_occurrences.md) additionally
 consume one explicit representation root and nested rigid axis-placement maps,
-including proper [unit-scale Cartesian targets](docs/step_cartesian_rigid_targets.md).
+including proper rigid and uniform-scale [Cartesian targets](docs/step_cartesian_rigid_targets.md).
 [Direct product-usage assemblies](docs/step_relationship_assemblies.md) now bind
 complete NAUO/CDSR/IDT forests and actual rigid frames, with
 [SI source/placement length transport](docs/step_relationship_si_units.md) into

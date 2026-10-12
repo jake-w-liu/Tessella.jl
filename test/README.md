@@ -58,6 +58,10 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 74.0 s | 298 | ~77 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 76.7 s | 298 | ~79 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 78.7 s | 298 | ~81 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 77.4 s | 298 | ~79 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 78.6 s | 296 | ~81 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 78.0 s | 296 | ~80 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 78.9 s | 296 | ~81 s |
@@ -151,10 +155,19 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 296-assertion bodies ran onJulia1.12.7/1.13.1.
+The current 298-assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
-environment on the same final Source. The latest increment adds an
+environment on the same final Source. The latest increment adds a
+scaled-Cartesian-operator check (compact: scale-2 mapped target produces
+the 2-edge box at the operator origin, scale-0 rejects) to
+`test/functional/brep_mapped_occurrences_smoke.jl`, extends the assembly
+functional file to 241 assertions on both runtimes (IGES solid-root
+type-124 affines — scale, mirror, shear — admit exactly, singular
+rejects), and extends the Cartesian file to 54 assertions — nonzero
+Cartesian-operator scale applies `scale × R_axes` (mirrored scale flips
+winding), nested compositions certify scaled-rigid. The preceding
+increment adds an
 assembly transversal-crossing check (compact: three Regions welded at two
 shared Surfaces, `valid`,
 `test/fixtures/brep_crossing_boxes.step`) to

@@ -45,15 +45,18 @@ function _step_occurrence_frame(entities,reference)
 end
 
 # A Cartesian target has a direct occurrence frame, unlike the coordinate
-# change between two AXIS2 placements. Only a rigid operator is admitted.
+# change between two AXIS2 placements. The operator is a uniform scale
+# composed with an orthonormal frame — a nonzero scale (a negative one
+# mirrors and flips the emitted winding downstream) is admitted.
 function _step_occurrence_cartesian_transform(entities,operator)
     length(operator.args)==8 && all(value->value isa AbstractString,operator.args[1:2]) &&
         (operator.args[3]===nothing || operator.args[3] isa AbstractString) ||
         throw(ArgumentError("import_step: Cartesian mapped target requires its eight actual fields"))
     scale=operator.args[7]
     (scale===nothing || scale isa Real && !(scale isa Bool) &&
-        isfinite(scale) && scale==1) || throw(ArgumentError(
-        "import_step: Cartesian mapped targets support unit or default scale only"))
+        isfinite(scale) && scale!=0) || throw(ArgumentError(
+        "import_step: Cartesian mapped targets require a nonzero finite scale"))
+    s=scale===nothing ? 1.0 : Float64(scale)
     origin=_step_occurrence_vector(_step_occurrence_entity(
         entities,operator.args[6],"CARTESIAN_POINT"),"operator origin")
     function direction(reference,fallback,label)
@@ -70,7 +73,7 @@ function _step_occurrence_cartesian_transform(entities,operator)
     x=_step_occurrence_unit(ntuple(i->first_axis[i]-projection*third_axis[i],3))
     y=_step_occurrence_unit(_brep_vcross(third_axis,x))
     axes=(x,y,third_axis)
-    return ntuple(i->ntuple(j->axes[j][i],3),3),origin
+    return ntuple(i->ntuple(j->s*axes[j][i],3),3),origin
 end
 
 function _step_occurrence_transform(entities,origin,target)
@@ -97,11 +100,17 @@ function _step_occurrence_compose(parent,child)
     translation=ntuple(i->p[i]+sum(P[i][j]*c[j] for j in 1:3),3)
     all(isfinite,(rotation[1]...,rotation[2]...,rotation[3]...,translation...)) ||
         throw(ArgumentError("import_step: mapped occurrence transform is nonfinite"))
+    # Composed transforms are a uniform scale times an orthonormal frame:
+    # the Gram matrix must be a scalar multiple of the identity. A negative
+    # determinant is a mirror — the emitted occurrence flips its winding.
     columns=ntuple(j->ntuple(i->rotation[i][j],3),3)
-    all(abs(_brep_vdot(columns[i],columns[j])-(i==j ? 1.0 : 0.0))<=1e-10
-        for i in 1:3 for j in i:3) &&
-        abs(_brep_vdot(columns[1],_brep_vcross(columns[2],columns[3]))-1.0)<=1e-10 ||
-        throw(ArgumentError("import_step: mapped occurrence composition is not a proper rigid transform"))
+    norms=ntuple(j->sqrt(_brep_vdot(columns[j],columns[j])),3)
+    scale=maximum(norms)
+    (scale>0 && all(n->isfinite(n)&&n>0,norms) &&
+        all(abs(norms[j]-scale)<=1e-10*scale for j in 1:3) &&
+        all(abs(_brep_vdot(columns[i],columns[j]))<=1e-10*scale*scale
+            for i in 1:3 for j in i+1:3)) || throw(ArgumentError(
+        "import_step: mapped occurrence composition is not a scaled rigid transform"))
     return rotation,translation
 end
 
@@ -178,7 +187,13 @@ function _step_occurrence_import(entities,fill_solids)
                         sum(rotation[i][j]*surface.coords[j,column] for j in 1:3))
                 end
                 all(isfinite,coordinates) || throw(ArgumentError("import_step: mapped occurrence coordinates are nonfinite"))
-                push!(records,(name=path*"/$(item.kind) #$(item.id)",surface=Mesh(coordinates;tris=surface.tris)))
+                # A negative-determinant transform mirrors the solid; flip
+                # the winding so facet normals keep pointing outward.
+                det3=rotation[1][1]*(rotation[2][2]*rotation[3][3]-rotation[2][3]*rotation[3][2])-
+                    rotation[1][2]*(rotation[2][1]*rotation[3][3]-rotation[2][3]*rotation[3][1])+
+                    rotation[1][3]*(rotation[2][1]*rotation[3][2]-rotation[2][2]*rotation[3][1])
+                tris=det3<0 ? surface.tris[[1,3,2],:] : surface.tris
+                push!(records,(name=path*"/$(item.kind) #$(item.id)",surface=Mesh(coordinates;tris)))
             else
                 throw(ArgumentError("import_step: unsupported mapped representation item $(item.kind) #$(item.id)"))
             end

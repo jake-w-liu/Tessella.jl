@@ -2637,11 +2637,14 @@ function _iges_torus_surface(types,params,bad,de,caller)
     return _torus_surface(center,z,x,R,r,caller)
 end
 
-# Rigid-motion transform (type 124) referenced by an entity's DE transform
+# Transform (type 124) referenced by an entity's DE transform
 # field → ((row1,row2,row3), translation), or nothing for the identity.
-# Rotation columns must be orthonormal — anything else is not a rigid motion
-# and would distort the classified circle.
-function _iges_de_transform(types,params,bad,transforms,de,caller)
+# Under `rigid` rotation columns must be orthonormal — anything else is not
+# a rigid motion and would distort the classified circle. Entity-level
+# transforms feeding analytic classification stay rigid; a solid-root
+# transform applies to the already-triangulated product, where any finite
+# nonsingular affine is exact, so the root passes rigid=false.
+function _iges_de_transform(types,params,bad,transforms,de,caller;rigid::Bool=true)
     tde=get(transforms,de,0)
     tde==0 && return nothing
     get(types,tde,0)==124 || throw(ArgumentError(
@@ -2656,11 +2659,19 @@ function _iges_de_transform(types,params,bad,transforms,de,caller)
     vals=(R[1]...,R[2]...,R[3]...,t...)
     all(isfinite,vals) || throw(ArgumentError(
         "$caller: transformation matrix #$tde is non-finite"))
-    for i in 1:3, j in i:3
-        col_i=(R[1][i],R[2][i],R[3][i]); col_j=(R[1][j],R[2][j],R[3][j])
-        want=i==j ? 1.0 : 0.0
-        abs(_brep_vdot(col_i,col_j)-want)<=1e-6 || throw(ArgumentError(
-            "$caller: transformation matrix #$tde is not a rigid motion"))
+    if rigid
+        for i in 1:3, j in i:3
+            col_i=(R[1][i],R[2][i],R[3][i]); col_j=(R[1][j],R[2][j],R[3][j])
+            want=i==j ? 1.0 : 0.0
+            abs(_brep_vdot(col_i,col_j)-want)<=1e-6 || throw(ArgumentError(
+                "$caller: transformation matrix #$tde is not a rigid motion"))
+        end
+    else
+        determinant=R[1][1]*(R[2][2]*R[3][3]-R[2][3]*R[3][2])-
+            R[1][2]*(R[2][1]*R[3][3]-R[2][3]*R[3][1])+
+            R[1][3]*(R[2][1]*R[3][2]-R[2][2]*R[3][1])
+        determinant==0 && throw(ArgumentError(
+            "$caller: transformation matrix #$tde is singular"))
     end
     return R,t
 end
