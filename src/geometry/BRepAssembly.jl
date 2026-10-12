@@ -230,8 +230,10 @@ function _brep_coincident_facet(T,U)
     return _brep_rdot(na,nb)<0
 end
 
-# Certify one record pair. Returns the coincident (ai,bi) facet pairs that weld
-# into a shared interface; throws on any other contact or containment.
+# Certify one record pair. Returns (shared, enclosed): the coincident (ai,bi)
+# facet pairs that weld into a shared interface, plus :a/:b when one shell is
+# strictly enclosed by the other. Throws on any non-conforming contact or
+# partial interpenetration.
 function _brep_certify_disjoint(sa::Mesh,sb::Mesh,na,nb,caller)
     fa=_brep_shell_facets(sa);fb=_brep_shell_facets(sb)
     ba=[_brep_facet_box(F) for F in fa];bb=[_brep_facet_box(F) for F in fb]
@@ -269,15 +271,18 @@ function _brep_certify_disjoint(sa::Mesh,sb::Mesh,na,nb,caller)
             "$caller: cannot certify independent solids $na and $nb; " *
             "their boundaries touch or intersect"))
     end
-    (isempty(fa)||isempty(fb)) && return shared
+    (isempty(fa)||isempty(fb)) && return shared,nothing
     # Every referenced vertex off the shared patch is probed: after the pair
     # sweep no free vertex can lie on the other boundary (non-coincident
-    # contact already threw), so each is strictly inside or outside. A single
-    # inside vertex means interpenetration even when the rest stay outside —
-    # a facet hinged on the rim can dip into the other solid. A shell with no
-    # free vertex is a duplicate or an embedded subshell, never independent.
-    for (surface,facets,boxes,coincident,other) in
-            ((sa,fb,bb,coincident_a,nb),(sb,fa,ba,coincident_b,na))
+    # contact already threw), so each is strictly inside or outside. A shell
+    # whose free vertices are all inside encloses nothing — it IS enclosed,
+    # admitted as a nested Region; a mix of inside and outside free vertices
+    # is interpenetration (a facet hinged on the rim can dip into the other
+    # solid). A shell with no free vertex is a duplicate or an embedded
+    # subshell, never independent.
+    enclosed=nothing
+    for (surface,facets,boxes,coincident,direction) in
+            ((sa,fb,bb,coincident_a,:a),(sb,fa,ba,coincident_b,:b))
         used=falses(nnodes(surface));referenced=falses(nnodes(surface))
         for column in 1:ntris(surface)
             on_iface=coincident[column]
@@ -287,20 +292,35 @@ function _brep_certify_disjoint(sa::Mesh,sb::Mesh,na,nb,caller)
                     (used[row]=true)
             end
         end
-        free=false
+        probes=0;inside=0
         for row in 1:nnodes(surface)
             (referenced[row] && !used[row]) || continue
-            free=true
+            probes+=1
             state=_brep_point_vs_shell(node(surface,row),facets,boxes,caller)
             state===:outside && continue
-            throw(ArgumentError("$caller: cannot certify independent solids $na and $nb; " *
-                (state===:inside ? "one solid encloses the other" :
-                                   "their boundaries touch or intersect")))
+            state===:inside || throw(ArgumentError(
+                "$caller: cannot certify independent solids $na and $nb; " *
+                "their boundaries touch or intersect"))
+            inside+=1
         end
-        free || throw(ArgumentError("$caller: cannot certify independent solids $na and $nb; " *
+        probes==0 && throw(ArgumentError("$caller: cannot certify independent solids $na and $nb; " *
             "their boundaries coincide everywhere"))
+        # A shell wholly inside the other encloses a nested Region; a mix of
+        # inside and outside free vertices is interpenetration.
+        0<inside<probes && throw(ArgumentError(
+            "$caller: cannot certify independent solids $na and $nb; " *
+            "their boundaries interpenetrate"))
+        if inside>0
+            enclosed===nothing || throw(ArgumentError(
+                "$caller: cannot certify independent solids $na and $nb; " *
+                "their boundaries interpenetrate"))
+            enclosed=direction
+        end
     end
-    return shared
+    (enclosed===nothing || (isempty(shared) && isempty(contact_positions))) ||
+        throw(ArgumentError("$caller: cannot certify independent solids $na and $nb; " *
+            "an enclosed solid cannot share boundary contact"))
+    return shared,enclosed
 end
 
 # Does segment (p,q) pass through the strict interior of triangle T2?
@@ -366,26 +386,71 @@ function _brep_assembly(records,fill_solids,caller)
     length(records)<=typemax(Int32) || throw(ArgumentError("$caller: too many source solids"))
     bounds=[bounding_box(record.surface) for record in records]
     weld_pairs=Dict{Tuple{Int,Int},Vector{Tuple{Int,Int}}}()
+    nested=Set{Tuple{Int,Int}}()
     for i in 1:length(records)-1,j in i+1:length(records)
         alo,ahi=bounds[i];blo,bhi=bounds[j]
         any(axis->ahi[axis]<blo[axis] || bhi[axis]<alo[axis],1:3) && continue
-        shared=_brep_certify_disjoint(records[i].surface,records[j].surface,
+        shared,enclosed=_brep_certify_disjoint(records[i].surface,records[j].surface,
             records[i].name,records[j].name,caller)
         isempty(shared) || (weld_pairs[(i,j)]=shared)
+        enclosed===:a && push!(nested,(i,j))
+        enclosed===:b && push!(nested,(j,i))
     end
-    # Certify every source boundary before any fill, and fill each Region
-    # independently. No coordinate matching can select a Region or weld UIDs.
+    # Region-tag ordering counts every container of each solid, so the
+    # innermost shells tag first. Only direct containment welds an interface:
+    # a transitively enclosed solid has no emitted interface with the
+    # outermost container (the middle Region's boundary separates them).
+    depth=zeros(Int,length(records))
+    for (i,j) in nested;depth[i]+=1;end
+    for (i,j) in collect(nested)
+        any(k->k!=i && k!=j && (i,k) in nested && (k,j) in nested,
+            1:length(records)) && delete!(nested,(i,j))
+    end
+    # Certify every source boundary before any fill. Independent fills leave
+    # an enclosed Region overlapped by its container's fill, so nested
+    # assemblies take one joint conforming fill — surfaces ordered innermost
+    # first so region tags pick the innermost container.
     parts=Mesh[];shells=Matrix{Int32}[]
-    for record in records
-        validate(record.surface).ok || throw(ArgumentError("$caller: invalid source solid $(record.name)"))
-        _brep_assembly_shell_certificate(record.surface.coords,record.surface.tris,caller)
-        part=fill_solids ? _filled(record.surface,caller) : record.surface
-        shell=fill_solids ? _brep_tet_shell(part,caller) : copy(part.tris)
-        _brep_assembly_shell_certificate(part.coords,shell,caller)
-        push!(parts,part);push!(shells,shell)
+    if fill_solids && !isempty(nested)
+        order=sortperm(depth;rev=true)
+        joint=tetrahedralize_conforming_exact(
+            [records[i].surface for i in order])
+        for (r,record) in enumerate(records)
+            validate(record.surface).ok || throw(ArgumentError(
+                "$caller: invalid source solid $(record.name)"))
+            _brep_assembly_shell_certificate(record.surface.coords,
+                record.surface.tris,caller)
+            pos=findfirst(==(r),order)
+            tetcols=[c for c in axes(joint.tets,2) if joint.tet_tag[c]==Int32(pos)]
+            rows=sort!(unique!(vec(joint.tets[:,tetcols])))
+            localmap=Dict{Int32,Int32}(row=>Int32(i) for (i,row) in enumerate(rows))
+            tets=Matrix{Int32}(undef,4,length(tetcols))
+            for (c,col) in enumerate(tetcols),k in 1:4
+                tets[k,c]=localmap[joint.tets[k,col]]
+            end
+            part=Mesh(joint.coords[:,rows];tets=tets)
+            shell=_brep_tet_shell(part,caller)
+            _brep_assembly_shell_certificate(part.coords,shell,caller)
+            push!(parts,part);push!(shells,shell)
+        end
+    else
+        for record in records
+            validate(record.surface).ok || throw(ArgumentError("$caller: invalid source solid $(record.name)"))
+            _brep_assembly_shell_certificate(record.surface.coords,record.surface.tris,caller)
+            part=fill_solids ? _filled(record.surface,caller) : record.surface
+            shell=fill_solids ? _brep_tet_shell(part,caller) : copy(part.tris)
+            _brep_assembly_shell_certificate(part.coords,shell,caller)
+            push!(parts,part);push!(shells,shell)
+        end
     end
-    isempty(weld_pairs) || return _brep_assembly_welded(records,parts,shells,
-        bounds,fill_solids,weld_pairs,caller)
+    # Nested interfaces weld only under the joint fill — with fill=false the
+    # container's source has no cells on the inner shell, so nested Regions
+    # keep their own coincident boundary emission like other coincident
+    # contacts.
+    effective_nested=fill_solids ? nested : empty(nested)
+    (isempty(weld_pairs) && isempty(effective_nested)) ||
+        return _brep_assembly_welded(records,parts,shells,
+            bounds,fill_solids,weld_pairs,effective_nested,caller)
     node_count=0;cell_count=0
     for (part,shell) in zip(parts,shells)
         node_count=_checked_brep_add(node_count,nnodes(part),0,caller,"assembly node count")
@@ -431,7 +496,7 @@ end
 # Surface entity bound by both Regions. Nodes on shared supports deduplicate
 # by exact position; every emitted boundary cell inside a shared footprint
 # must appear identically on both records' emitted shells.
-function _brep_assembly_welded(records,parts,shells,bounds,fill_solids,weld_pairs,caller)
+function _brep_assembly_welded(records,parts,shells,bounds,fill_solids,weld_pairs,nested,caller)
     nrec=length(records)
     # Canonical shared-support key per coincident source facet: the sorted
     # vertex-position triple — identical on both records.
@@ -446,9 +511,10 @@ function _brep_assembly_welded(records,parts,shells,bounds,fill_solids,weld_pair
                 c->node(records[r].surface,records[r].surface.tris[c,f]),3))))
         end
     end
-    # One shared Surface entity per welded record pair.
+    # One shared Surface entity per welded record pair — coincident facet
+    # pairs and nested (enclosed Region) interfaces alike.
     pair_tags=Dict{Tuple{Int,Int},Int32}()
-    for key in sort!(collect(keys(weld_pairs)))
+    for key in sort!(collect(union!(collect(keys(weld_pairs)),collect(nested))))
         pair_tags[key]=Int32(nrec+length(pair_tags)+1)
     end
     # Each pair's supports group by coplanarity into plane patches; a fill
@@ -467,19 +533,42 @@ function _brep_assembly_welded(records,parts,shells,bounds,fill_solids,weld_pair
         end
         placed || push!(groups,[support])
     end
-    # Classify every emitted boundary cell against each pair's patches: full
-    # closed coverage by a patch union makes it an interface cell; positive-
-    # area overlap without coverage means the fill crosses the interface rim.
+    # A nested pair's shared interface is the enclosed Region's whole source
+    # boundary; emitted cells on either side are matched by their vertices —
+    # the joint fill never inserts new nodes, so every interface vertex is a
+    # source vertex of the enclosed solid. Cells on a deeper nested interface
+    # (a void inside the enclosed Region) carry different vertices and stay
+    # with their own pair.
+    nested_verts=Dict{Tuple{Int,Int},Set{NTuple{3,Float64}}}()
+    for (i,j) in nested
+        set=Set{NTuple{3,Float64}}()
+        for column in axes(records[i].surface.tris,2)
+            for k in 1:3
+                push!(set,node(records[i].surface,records[i].surface.tris[k,column]))
+            end
+        end
+        nested_verts[(i,j)]=set
+    end
+    # Classify every emitted boundary cell against each pair's interfaces:
+    # full closed coverage by a patch union makes it an interface cell;
+    # positive-area overlap without coverage means the fill crosses the
+    # interface rim. An inner Region's whole boundary is shared.
     emitted_shared=[Dict{Tuple{Int,Int},Vector{NTuple{3,Int}}}()
                     for _ in records]
     for (r,(part,shell)) in enumerate(zip(parts,shells))
-        relevant=sort!(Tuple{Int,Int}[key for key in keys(patches) if r in key])
+        relevant=sort!(Tuple{Int,Int}[key for key in union(keys(patches),
+            keys(nested_verts)) if r in key])
         isempty(relevant) && continue
         for column in axes(shell,2)
             cell=(Int(shell[1,column]),Int(shell[2,column]),Int(shell[3,column]))
             P=ntuple(k->node(part,cell[k]),3)
+            # Coincident-facet patches classify first — their coverage is
+            # exact. A cell on an enclosed Region's welded face carries the
+            # inner vertices but borders the weld partner, not the container,
+            # so nested pairs claim only the leftovers.
+            claimed=false
             for key in relevant
-                shared=false
+                haskey(nested_verts,key) && continue
                 for group in patches[key]
                     S=group[1]
                     all(k->orient3(S[1],S[2],S[3],P[k])==0,1:3) || continue
@@ -488,19 +577,25 @@ function _brep_assembly_welded(records,parts,shells,bounds,fill_solids,weld_pair
                     G2=[ntuple(k->_brep_drop(s[k],drop),3) for s in group]
                     if _brep_cell_in_union(P2,G2)
                         push!(get!(emitted_shared[r],key,NTuple{3,Int}[]),cell)
-                        shared=true;break
+                        claimed=true;break
                     end
                     any(T2->_brep_tris_overlap_area_2d(P2,T2),G2) && throw(
                         ArgumentError("$caller: conforming contact requires " *
                             "fills to respect the shared interface boundary"))
                 end
-                shared && break
+                claimed && break
+            end
+            claimed && continue
+            for key in relevant
+                haskey(nested_verts,key) || continue
+                all(k->P[k] in nested_verts[key],1:3) &&
+                    push!(get!(emitted_shared[r],key,NTuple{3,Int}[]),cell)
             end
         end
     end
     # Both records must emit the same cells on every shared interface —
     # otherwise their fills triangulate it differently.
-    for (key,list) in weld_pairs
+    for key in keys(pair_tags)
         i,j=key
         ca=get(emitted_shared[i],key,NTuple{3,Int}[])
         cb=get(emitted_shared[j],key,NTuple{3,Int}[])
@@ -517,10 +612,13 @@ function _brep_assembly_welded(records,parts,shells,bounds,fill_solids,weld_pair
     # Global node rows deduplicate by exact position; a position claimed on a
     # shared cell or support rim belongs to that pair's shared entity.
     pos_owner=Dict{NTuple{3,Float64},Tuple{Int,Int32}}()
-    for (key,list) in weld_pairs,(ai,bi) in list
-        i,j=key;support=support_key[(i,ai)];tag=pair_tags[key]
-        for p in support
-            pos_owner[p]=min(get(pos_owner,p,(2,tag)),(2,tag))
+    for key in keys(pair_tags)
+        i,j=key;tag=pair_tags[key]
+        for (ai,bi) in get(weld_pairs,key,Tuple{Int,Int}[])
+            support=support_key[(i,ai)]
+            for p in support
+                pos_owner[p]=min(get(pos_owner,p,(2,tag)),(2,tag))
+            end
         end
         for r in (i,j),cell in emitted_shared[r][key],k in 1:3
             p=node(parts[r],cell[k])
@@ -591,8 +689,9 @@ function _brep_assembly_welded(records,parts,shells,bounds,fill_solids,weld_pair
             cell_offset+=UInt64(cols)
         end
     end
-    # Shared interface cells emit once, from the lower-tag record's side.
-    for key in sort!(collect(keys(weld_pairs)))
+    # Shared interface cells emit once, from the first record's side — the
+    # enclosed Region's own boundary for a nested pair.
+    for key in sort!(collect(keys(pair_tags)))
         i,j=key;tag=pair_tags[key]
         emitted=Vector{Int32}[]
         for cell in emitted_shared[i][key]

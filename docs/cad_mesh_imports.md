@@ -19,15 +19,23 @@ conforming contact and weld — each coincident pair becomes one shared
 Surface entity bound by both Regions, emitted once, with rim nodes
 deduplicated by exact position. Vertex/edge-only coincident contacts are
 conforming too but weld nothing: each solid keeps its own coincident
-boundary node, matching OCC import semantics. Filled solids weld only
+boundary node, matching OCC import semantics. A solid strictly enclosed
+by another (every free boundary vertex inside the other shell, no
+boundary contact) is a nested Region: with `fill=false` both surfaces
+import verbatim, and with `fill=true` one joint conforming fill —
+surfaces ordered innermost first — tiles each Region exactly while the
+enclosed boundary welds into a shared Surface bound by both Regions.
+Direct containment only welds an interface; a transitively enclosed
+solid has no interface with the outermost container. Filled solids weld
+only
 when both
 independent fills emit the identical interface triangulation; a facet
 shared by three solids, a fill crossing the interface rim, and
 non-coincident touching or intersecting boundary facets (partial overlap,
 T-junction or partial-edge contact, same-region duplication) all reject,
-as does one
-solid enclosing or dipping into the other. Genuinely disjoint solids are
-admitted. Boxes are never used to discover, split or
+as does partial interpenetration — some free vertices inside, some
+outside — and an enclosed solid sharing any boundary contact. Genuinely
+disjoint solids are admitted. Boxes are never used to discover, split or
 replace source roots. Point-cloud box imports retain their original single-solid behavior.
 Multi-root IGES identities must be positive, odd, unique and consistent with
 the directory-entry type. Unsupported geometric entity types are rejected;

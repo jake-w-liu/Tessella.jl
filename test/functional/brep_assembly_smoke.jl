@@ -48,4 +48,15 @@ let mesh=import_step(joinpath(@__DIR__,"..","fixtures","brep_contact_vertex.step
           Set(keys(mesh.entity_data.entities))==Set([(2,1),(3,1),(2,2),(3,2)]) &&
           !allunique(eachcol(mesh.coords))
 end
+# A solid strictly enclosed by another is a nested Region: under fill the
+# enclosed boundary welds into a shared Surface bound by both Regions and
+# the joint fill tiles each region exactly.
+let mesh=import_step(joinpath(@__DIR__,"..","fixtures","brep_nested.step");fill=true)
+    @test mesh isa Tessella.MixedMesh && validate(mesh).ok
+    data=mesh.entity_data
+    @test Set(keys(data.entities))==Set([(2,1),(3,1),(2,2),(3,2),(2,3)]) &&
+          sort(data.entities[(3,1)].boundaries)==Int32[1,3] &&
+          sort(data.entities[(3,2)].boundaries)==Int32[2,3] &&
+          allunique(eachcol(mesh.coords))
+end
 end

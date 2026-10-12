@@ -58,6 +58,10 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 73.8 s | 294 | ~76 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 66.2 s | 294 | ~69 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 73.2 s | 294 | ~75 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 74.0 s | 294 | ~76 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 52.3 s | 292 | ~55 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 51.3 s | 292 | ~53 s |
 | Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 51.1 s | 292 | ~53 s |
@@ -143,10 +147,19 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 292-assertion bodies ran onJulia1.12.7/1.13.1.
+The current 294-assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds an
+assembly nested-enclosed check (compact: filled product is `valid`,
+enclosed boundary welds into one shared Surface bound by both Regions,
+`test/fixtures/brep_nested.step`) to
+`test/functional/brep_assembly_smoke.jl` and extends the assembly
+functional file to 202 assertions on both runtimes — strictly enclosed
+solids admit as nested Regions (verbatim under `fill=false`; one joint
+conforming fill under `fill=true` tiling each Region exactly), partial
+interpenetration and enclosed-contact still reject. The preceding
+increment adds an
 assembly conforming vertex/edge-contact check (compact: admitted
 unwelded, each solid keeps its coincident boundary node,
 `test/fixtures/brep_contact_vertex.step`) to

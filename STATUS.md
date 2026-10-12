@@ -472,6 +472,28 @@ assembly file passes 178/178 and the default smoke gained a vertex-check
 on the new `brep_contact_vertex.step` fixture. Booleans/imprints and
 non-coincident intersections remain CAD05.
 
+### Nested enclosed solids in multi-solid CAD assembly (2026-10-12)
+
+Devin landed the fourth CAD05 slice. A solid whose free boundary
+vertices all probe strictly inside another shell — with no boundary
+contact — now admits as a nested Region instead of rejecting as
+enclosure. With `fill=false` both surfaces import verbatim; with
+`fill=true` the assembly runs one joint `tetrahedralize_conforming_exact`
+over all source surfaces ordered innermost-first (region tags pick the
+innermost container), extracts each Region's part and shell, and welds
+the enclosed boundary into one shared Surface bound by both Regions —
+emitted once, interface nodes deduplicated by exact position, with only
+direct containment welding an interface. Partial interpenetration and
+any enclosed-solid boundary contact still reject; a vertex-pinched
+sibling partition that the joint fill's own manifold certification
+cannot tag rejects atomically rather than emitting an invalid product.
+Verified on the new `brep_nested.step` fixture — `valid` under both fill
+modes, filled regions tile exactly (outer 56 + inner 8 = 64), three-level
+and sibling nestings tile exactly, mixed nested+coincident-weld
+assemblies emit all interfaces, poke-through and face-touching mutants
+reject — the focused assembly file passes 202/202 and the default smoke
+gained a compact nested check.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

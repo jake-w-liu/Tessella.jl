@@ -554,6 +554,31 @@ T-junction/partial-edge rejections); the default smoke gained a compact
 vertex-contact check on the new `brep_contact_vertex.step` fixture.
 Booleans/imprints and non-coincident intersections remain CAD05.
 
+Nested enclosed solids followed (the fourth CAD05 slice): a solid whose
+free boundary vertices all probe strictly inside another shell — with no
+boundary contact — now admits as a nested Region instead of rejecting as
+enclosure. With `fill=false` both surfaces import verbatim like other
+unwelded coincident topology; with `fill=true` independent fills would
+overlap, so the assembly runs one joint `tetrahedralize_conforming_exact`
+over every source surface ordered innermost-first (region tags pick the
+innermost container), extracts each Region's part and shell, and welds
+the enclosed boundary into one shared Surface bound by both Regions —
+emitted once, interface nodes deduplicated by exact position. Region-tag
+ordering counts every container of each solid; only direct containment
+welds an interface (a transitively enclosed solid has no emitted
+interface with the outermost container). The certificate still rejects
+partial interpenetration — free vertices both inside and outside — and
+any boundary contact on an enclosed solid; a vertex-pinched sibling
+partition that the joint fill's own manifold certification cannot tag
+rejects atomically rather than emitting an invalid product. Verified on
+the new `brep_nested.step` fixture (inner box inside outer box): both
+fill modes are `valid`, the filled product tiles each Region exactly
+(outer 56 + inner 8 = 64), a three-level nesting tiles 56+7.875+0.125,
+sibling enclosed solids tile 62+1+1, and mixed nested+coincident-weld
+assemblies emit all shared interfaces correctly; poke-through and
+face-touching mutants reject under both fills. The focused assembly file
+passes 202/202; the default smoke gained a compact nested check.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

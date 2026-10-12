@@ -177,9 +177,17 @@ end
         # Box corner enters the tet interior: shells interpenetrate.
         write(path,shifted_box(source,(0.2,0.2,0.2),(0.8,0.8,0.8)))
         @test_throws ArgumentError import_step(path;fill=false)
-        # Box sits entirely inside the tet: enclosure without facet contact.
+        # Box sits entirely inside the tet: enclosure without facet contact
+        # is a nested assembly — under fill the enclosed boundary welds into
+        # a shared Surface and both Regions tile the volume exactly.
         write(path,shifted_box(source,(0.05,0.05,0.05),(0.15,0.15,0.15)))
-        @test_throws ArgumentError import_step(path;fill=false)
+        for fill in (false,true)
+            m=import_step(path;fill)
+            @test m isa E.MixedMesh && MT.validate(m).ok
+            @test Set(keys(m.entity_data.entities))==Set(
+                fill ? [(2,1),(3,1),(2,2),(3,2),(2,3)] : [(2,1),(3,1),(2,2),(3,2)])
+            @test allunique(eachcol(m.coords))
+        end
         # Box slides so one face overlaps part of the tet's z=0 face.
         write(path,shifted_box(source,(-0.5,-0.5,-0.5),(0.5,0.5,0.)))
         @test_throws ArgumentError import_step(path;fill=false)
@@ -331,6 +339,68 @@ end
         # Mismatched diagonal: the two sides' shared-face triangulations
         # cross — non-conforming contact, still rejected geometrically.
         write(path,replace(source,box_section=>side_box("#101,#105,#108,#104")))
+        @test_throws ArgumentError import_step(path;fill=false)
+        @test_throws ArgumentError import_step(path;fill=true)
+    end
+end
+
+@testset "nested enclosed solids weld the enclosed boundary" begin
+    # Outer box [0,4]^3 encloses inner box [1,3]^3. The inner Region is a
+    # separate material region inside the container's volume.
+    mesh=import_step(joinpath(FIXTURES,"brep_nested.step");fill=false)
+    @test mesh isa E.MixedMesh
+    @test MT.validate(mesh).ok
+    data=mesh.entity_data
+    @test Set(keys(data.entities))==Set([(2,1),(3,1),(2,2),(3,2)])
+    @test data.entities[(3,1)].boundaries==Int32[1]
+    @test data.entities[(3,2)].boundaries==Int32[2]
+    @test size(mesh.coords,2)==16
+    mesh=import_step(joinpath(FIXTURES,"brep_nested.step");fill=true)
+    @test mesh isa E.MixedMesh
+    @test MT.validate(mesh).ok
+    data=mesh.entity_data
+    @test Set(keys(data.entities))==Set([(2,1),(3,1),(2,2),(3,2),(2,3)])
+    @test sort(data.entities[(3,1)].boundaries)==Int32[1,3]
+    @test sort(data.entities[(3,2)].boundaries)==Int32[2,3]
+    counts=Dict{Int32,Int}();tets=Dict{Int32,Int}()
+    for (bi,block) in enumerate(mesh.blocks)
+        target=block.msh==2 ? counts : block.msh==4 ? tets : continue
+        for owner in data.block_entities[bi]
+            target[owner]=get(target,owner,0)+1
+        end
+    end
+    # The enclosed boundary emits once as shared Surface 3; the inner
+    # Region's own Surface 2 carries no cells.
+    @test counts==Dict(Int32(1)=>12,Int32(3)=>12)
+    @test sort!(collect(keys(tets)))==Int32[1,2]
+    @test allunique(eachcol(mesh.coords))
+    # Both Regions share the enclosed interface nodes.
+    @test all(e->e==(2,3),
+        (data.node_entities[row] for row in axes(mesh.coords,2)
+         if all(c->1.0<=c<=3.0,mesh.coords[:,row])))
+    # A solid poking through the container's face and one merely touching it
+    # are not enclosed: both reject, under either fill mode. Shifting the
+    # inner solid's x coordinates — largest first so a produced coordinate
+    # never collides with a pending replacement — rebuilds each mutant.
+    source=read(joinpath(FIXTURES,"brep_nested.step"),String)
+    inner=["(1.,1.,1.)","(3.,1.,1.)","(3.,3.,1.)","(1.,3.,1.)",
+           "(1.,1.,3.)","(3.,1.,3.)","(3.,3.,3.)","(1.,3.,3.)"]
+    coords(p)=parse.(Float64,split(chop(p;head=1,tail=1),','))
+    fmt(v)=string(Int(v))*"."
+    shift(dx)=begin
+        s=source
+        for p in sort(inner;by=p->-coords(p)[1])
+            v=coords(p);v[1]+=dx
+            s=replace(s,p=>"("*join(fmt.(v),",")*")")
+        end
+        s
+    end
+    mktempdir() do directory
+        path=joinpath(directory,"shift.step")
+        write(path,shift(1.0))   # inner face touches the container's face
+        @test_throws ArgumentError import_step(path;fill=false)
+        @test_throws ArgumentError import_step(path;fill=true)
+        write(path,shift(2.0))   # inner pokes through the container's face
         @test_throws ArgumentError import_step(path;fill=false)
         @test_throws ArgumentError import_step(path;fill=true)
     end

@@ -320,7 +320,8 @@ STEP `B_SPLINE_CURVE_WITH_KNOTS` / `B_SPLINE_SURFACE_WITH_KNOTS` (including
 complex rational instances) and IGES 126/128 import as native NURBS objects, with
 IGES NURBS export. Any other topology is
 an explicit failure listing the seen entity types. Multiple recognized explicit roots
-certified geometrically independent or conforming-contact-welded return
+certified geometrically independent, conforming-contact-welded or nested
+(enclosed Region with joint filled conforming interfaces) return
 classified mixed meshes;
 supported planar Faces can retain disjoint inner wires and triangulate their
 holes. [Mapped STEP occurrences](docs/step_mapped_occurrences.md) additionally

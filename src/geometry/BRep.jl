@@ -27,7 +27,7 @@ silent empty mesh.
 module BRep
 
 using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
-using ..Mesh3D: tetrahedralize
+using ..Mesh3D: tetrahedralize, tetrahedralize_conforming_exact
 using ..MeshTypes: Mesh, validate, nnodes, ntris, ntets, tet_volume, node, bounding_box
 using ..Elements: MixedMesh, ElementBlock, MixedEntity, MixedEntityData,
                   MSH_PHYSICAL_NAME_MAX_BYTES
