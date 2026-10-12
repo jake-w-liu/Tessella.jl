@@ -222,9 +222,12 @@ valence-≥3 seam vertices emit Point15 junction entities with signed
 junction-curve bounds. A declared Surface cell coinciding with a
 cross-partition facet keeps its cell and UID, merges the incident partition
 membership and binds both Region children with opposite signs — no
-duplicate interface entity or cell is emitted. Order ≥3 and
-incomplete/serendipity high-order cells, periodic/parametric topology,
-bare non-Tet4 volumes and
+duplicate interface entity or cell is emitted. Every complete third-order
+family — Line4 curves, Tri10/Quad16 surfaces and Tet20/Hex64/Prism40/Pyr30
+volumes — now partitions through generic order-p facet derivation with
+tuple-valued edge-node certification, Tri10/Quad16 interfaces and Line4
+seams. Order ≥4 and incomplete/serendipity high-order cells,
+periodic/parametric topology, bare non-Tet4 volumes and
 parallel production remain open.
 
 An explicit [variable-tensor ordinary Surface constructor](docs/metric_model_surfaces.md)

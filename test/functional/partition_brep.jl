@@ -192,6 +192,48 @@ end
     end
 end
 
+@testset "Third-order lower BRep partition" begin
+    A=Tessella.API
+    try
+        # Two Tet20 share the {1,2,3} Tri10; edge nodes sit at i/3 fractions
+        # and face nodes at centroids, so volume cells and surface carriers
+        # share literal node rows. Tags 6:17 are t1 edge nodes, 18:21 its face
+        # nodes; 22:27 are t2-only edge nodes and 28:30 its face nodes.
+        A.finalize();A.initialize();A.model.add("p3 partition")
+        A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+        A.model.add_discrete_entity(2,30);A.model.add_discrete_entity(3,11,[30])
+        t=1/3
+        coordinates=[0. 1 0 0 0  t 2t 2t t 0 0  0 0 0 0 t 2t  t t 0 t  0 0 t 2t 0 0  t 0 t;
+                     0. 0 1 0 0  0 0 t 2t 2t t  0 0 t 2t 0 0  t 0 t t  0 0 0 0 t 2t  0 t t;
+                     0. 0 0 1 -1 0 0 0 0 0 0  2t t 2t t 2t t  0 t t t  -2t -t -2t -t -2t -t  -t -t -t]
+        A.mesh.add_nodes(3,11,1:30,vec(coordinates))
+        A.mesh.add_elements_by_type(30,21,601:606,
+            [1,2,4,6,7,17,16,12,13,19, 1,4,3,13,12,14,15,10,11,20,
+             4,2,3,16,17,8,9,15,14,21, 1,3,5,11,10,27,26,22,23,29,
+             1,5,2,23,22,24,25,7,6,28, 5,3,2,26,27,9,8,25,24,30])
+        A.mesh.add_elements_by_type(11,29,[501,502],
+            [1,2,3,4,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,
+             1,3,2,5,11,10,9,8,7,6,22,23,24,25,26,27,18,29,28,30])
+        A.mesh.generate(3);A.option("Mesh.PartitionCreateTopology",1)
+        A.mesh.partition(2,[601:606...,501,502],[1,1,1,2,2,2,1,2])
+        interface=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==2 && A.model.get_parent(2,tag)==(3,11))
+        types,ids,nodes=A.mesh.get_elements(2,interface)
+        @test types==[21] && length(only(ids))==1 &&
+            sort(vec(only(nodes)))==[1,2,3,6,7,8,9,10,11,18]
+        seam=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==1 && A.model.get_parent(1,tag)==(2,30))
+        types,ids,nodes=A.mesh.get_elements(1,seam)
+        @test types==[26] && length(only(ids))==3 &&
+            A.model.get_partitions(1,seam)==[1,2]
+        @test Tessella.validate(A.mesh.get()).ok
+        A.mesh.unpartition()
+        @test A.model.get_entities()==[(2,30),(3,11)]
+    finally
+        A.finalize()
+    end
+end
+
 @testset "Coincident Surface partition" begin
     A=Tessella.API
     try

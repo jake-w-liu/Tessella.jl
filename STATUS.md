@@ -313,6 +313,37 @@ file is now **296/296** and the default smoke gained a 3-assertion
 coincident testset. PART01 remains open
 (periodic/parametric topology, order ≥3 cells, parallel production).
 
+### Complete third-order cell families in lower-BRep partition production (2026-10-12)
+
+Devin landed the next PART01 slice against a public Gmsh 4.15.2 SDK
+observation of the Tet20 layout (corners, two edge nodes per canonical
+edge, then per-face interiors): `APIPartitionBRep.jl` now certifies and
+transports every complete third-order family — Line4 curves, Tri10/Quad16
+surfaces and Tet20/Hex64/Prism40/Pyr30 volumes — beside every linear and
+second-order family. Linear bases resolve through `Elements.msh_family`
+rather than numeric offsets; `_partition_volume_facets` is generic in
+order (p−1 edge nodes per consecutive corner pair along the facet's
+traversal, reversing against-table edges, face-interior offsets
+accumulated in `_FACES` order with triangle interiors before quadrangle
+interiors); cycle equality/reversal cover Tri10/Quad16 layouts including
+the quadrangle interior-ring rotation/reflection; and edge-node
+certification is tuple-valued end to end — declared Curve borders,
+original Surface borders, interface rims and junction fans compare
+interior-node sequences up to traversal reversal. Interface components
+emit Tri10/Quad16 blocks, generated seams emit Line4 cells with arity
+inferred from the edge-node sequence, and ghosts, physical groups, signed
+child bounds, literal UIDs, MSH4/public round-trips and `unpartition()`
+keep the earlier contract. Serendipity/incomplete families and order ≥4
+cells reject atomically (Tri15, Quad12, Tet35 probed riding on a valid
+Tet20 mesh). The focused partition file adds a 34-assertion third-order
+testset (Tet20 pair with a declared closed Line4 Curve rim, Hex64 pair
+with a Quad16 interface and 4-cell Line4 seam, Prism40 pair with mixed
+Tri10/Quad16 exteriors, Pyr30 pair sharing the Quad16 base, ghosts,
+unpartition, MSH4 round-trips) plus a 6-assertion rejection set; the file
+is now **336/336** and the default smoke gained a 4-assertion third-order
+testset. PART01 remains open (periodic/parametric topology, order ≥4
+cells, parallel production).
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

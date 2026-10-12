@@ -15,7 +15,8 @@ interfaces, closed Tri3-BRep seam transport and ghost queries, declared
 Curve/Point lower-BRep partition topology, a mixed linear family
 (Tet4+Prism6 over Tri3+Quad4) BRep partition, a complete second-order
 (two-Tet10 over Tri6) BRep partition, a three-Tet4 junction BRep partition
-with junction seam and points, a coincident-Surface BRep partition, complete
+with junction seam and points, a coincident-Surface BRep partition, a
+complete third-order (two-Tet20 over Tri10) BRep partition, complete
 catalogued high-order Surface/Volume VTK, directional constant-tensor
 box and shared-material grids, floating-point Pyramid options, CLI help/version
 and read-only MSH checking, plus atomic current-model opening and merging,
@@ -52,6 +53,10 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 43.8 s | 276 | ~45 s |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 45.7 s | 276 | ~46 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 44.1 s | 276 | ~45 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 46.9 s | 276 | ~47 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 41.3 s | 272 | ~42 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 45.2 s | 272 | ~46 s |
 | Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 41.0 s | 272 | ~42 s |
@@ -119,6 +124,18 @@ These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. Logs and actual exit-zero receipts are
 `test/tmp/ordinary_default_224_{112,113}_20261011.*`. The same252 Source files
 remained frozen throughout both calls. The latest increment adds a
+third-order BRep partition testset (4 assertions: two Tet20 sharing a Tri10
+facet — Tri10 interface cell, three generated Line4 seam cells, `validate`,
+unpartition restore) to the declared-BRep default smoke plus a 40-assertion
+complete third-order set in
+`test/interfaces/api_partition_lower_brep_functional_test.jl`, now
+336 assertions on both runtimes (Line4 curves, Tri10/Quad16 surfaces and
+Tet20/Hex64/Prism40/Pyr30 volumes partition through the same declared-BRep
+certificate — a Tet20 pair rimmed by a declared closed Line4 Curve, a
+Hex64 pair with a closed four-cell Line4 seam, a Prism40 pair mixing
+Tri10/Quad16 exteriors and a Pyr30 pair sharing the Quad16 base, plus
+ghosts, MSH4 round-trips, unpartition and atomic rejection of Tri15,
+Quad12 and Tet35 blocks). The preceding increment adds a
 coincident-support BRep partition testset (3 assertions: two Regions sharing
 a facet carried by one declared Surface — the partition child merges [1,2]
 membership, binds both Region children with opposite signs, no duplicate

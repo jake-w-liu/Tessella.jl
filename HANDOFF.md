@@ -403,6 +403,31 @@ round-trips, unpartition, atomic one-sided rejection); the default smoke
 gained a coincident testset. PART01 remains open for periodic/parametric
 topology, order ≥3 cells and parallel production.
 
+The complete third-order family slice is also landed, verified against a
+public Gmsh 4.15.2 SDK observation of the Tet20 layout (corners, two edge
+nodes per canonical edge, then per-face interiors). Linear bases now
+resolve through `Elements.msh_family` rather than numeric offsets;
+`_partition_volume_facets` is generic in order — each facet appends p−1
+edge nodes per consecutive corner pair along the facet's own traversal
+(reversing against-table edges) then its interior slots accumulated in
+`_FACES` order with triangle interiors before quadrangle interiors, exactly
+as the MSH pointsGenerators layout appends them. Cycle equality and
+reversal cover Tri10/Quad16 layouts including the quadrangle interior-ring
+rotation/reflection; edge-node certification is tuple-valued end to end —
+declared Curve borders, original Surface borders, interface rims and
+junction fans all compare interior-node sequences up to traversal
+reversal. Interface components emit Tri10/Quad16 blocks and generated
+seams emit Line4 cells with arity inferred from the edge-node sequence.
+Serendipity/incomplete families and order ≥4 cells (Tri15, Quad12, Tet35
+probed riding on a valid Tet20 mesh) reject atomically. Focused checks
+pass 336/336 on Julia 1.13.1 (Tet20 pair with a declared closed Line4
+Curve rim, Hex64 pair with a Quad16 interface and 4-cell Line4 seam,
+Prism40 pair with mixed Tri10/Quad16 exteriors, Pyr30 pair sharing the
+Quad16 base; ghosts, `validate`, MSH4/public-write round-trips and
+`unpartition`, plus a 6-assertion rejection set); the default smoke
+gained a third-order testset. PART01 remains open for periodic/parametric
+topology, order ≥4 cells and parallel production.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

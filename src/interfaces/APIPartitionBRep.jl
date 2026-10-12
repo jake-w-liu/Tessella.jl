@@ -1,43 +1,84 @@
-# Actual lower BRep transport across every linear and complete second-order
-# cell family (Point15; Line2/Line3; Tri3/Tri6 and Quad4/Quad9 surfaces;
-# Tet4/Hex8/Prism6/Pyr5 and Tet10/Hex27/Prism18/Pyr14 volumes). Interface
-# seams are derived from literal node UID incidence, with one authoritative
-# original cell per UID. Facet and edge corner tables come from the canonical
+# Actual lower BRep transport across every linear, complete second-order and
+# complete third-order cell family (Point15; Line2/Line3/Line4; Tri3/Tri6/Tri10
+# and Quad4/Quad9/Quad16 surfaces; Tet4/Hex8/Prism6/Pyr5, Tet10/Hex27/Prism18/
+# Pyr14 and Tet20/Hex64/Prism40/Pyr30 volumes). Interface seams are derived
+# from literal node UID incidence, with one authoritative original cell per
+# UID. Facet and edge corner tables come from the canonical
 # `MeshEntityTopology` outward cycles, which share the MSH pointsGenerators
-# order, so second-order edge nodes sit at index n_corners+edge_ordinal and
-# quadrangle face nodes at n_corners+n_edges+quad_ordinal.
-const _PARTITION_SURFACE_TYPES=(2,3,9,10)
-const _PARTITION_VOLUME_TYPES=(4,5,6,7,11,12,13,14)
-const _PARTITION_CURVE_TYPES=(1,8)
-const _PARTITION_SECOND_ORDER_VOLUMES=(11,12,13,14)
+# order, so an order-p cell carries n_corners+(edge_ordinal-1)*(p-1)+i edge
+# nodes along the table edge direction followed by per-face interior nodes in
+# `_FACES` order, and the face-interior offsets accumulate triangle interiors
+# before quadrangle interiors exactly as pointsGenerators appends them.
+const _PARTITION_SURFACE_TYPES=(2,3,9,10,21,36)
+const _PARTITION_VOLUME_TYPES=(4,5,6,7,11,12,13,14,29,90,92,118)
+const _PARTITION_CURVE_TYPES=(1,8,26)
 _partition_support(uids)=Tuple(sort!(collect(uids)))
+# Linear-family base type for any admitted cell type, resolved through the
+# MSH catalog family rather than a numeric offset so third-order types map
+# the same way second-order types do.
+function _partition_linear_base(msh)
+    family=Elements.msh_family(msh)
+    family==:lin && return 1;family==:tri && return 2;family==:qua && return 3
+    family==:tet && return 4;family==:hex && return 5;family==:pri && return 6
+    family==:pyr && return 7
+    return Int(msh)
+end
+# Corner-edge index pairs for any admitted cell type: the canonical tables are
+# keyed on linear types, so higher-order cells resolve through their family.
+_partition_edge_patterns(msh)=_simplex_edge_patterns(_partition_linear_base(msh))
+# `(corners, edge node count per edge)` for an admitted surface facet type.
+function _partition_surface_shape(msh)
+    spec=Elements.msh_spec(msh)
+    corners=spec.family==:tri ? 3 : spec.family==:qua ? 4 : 0
+    return corners,spec.order-1
+end
 # Reverse a linear corner cycle, preserving the first corner.
 _partition_reversed_corners(b)=ntuple(i->i==1 ? b[1] : b[length(b)+2-i],length(b))
 # Reverse an oriented cell ordering while preserving the family's node layout:
-# corners reverse as a cycle and each edge node follows its corner pair.
-# Length selects the family (3/4 linear, 6 Tri6, 9 Quad9).
+# corners reverse as a cycle, each edge's interior nodes follow the reversed
+# corner pair in reversed sequence and the face-interior slots permute under
+# the corner reflection (a quadrangle's 2x2 interior ring swaps its second
+# and fourth slots). Length selects the family (3/4 linear, 6 Tri6, 9 Quad9,
+# 10 Tri10, 16 Quad16).
 function _partition_reversed(u)
     n=length(u)
     n==6 && return (u[1],u[3],u[2],u[6],u[5],u[4])
     n==9 && return (u[1],u[4],u[3],u[2],u[8],u[7],u[6],u[5],u[9])
+    n==10 && return (u[1],u[3],u[2],u[9],u[8],u[7],u[6],u[5],u[4],u[10])
+    n==16 && return (u[1],u[4],u[3],u[2],u[12],u[11],u[10],u[9],
+                    u[8],u[7],u[6],u[5],u[13],u[16],u[15],u[14])
     return _partition_reversed_corners(u)
 end
-# Cycle-equality on corner order; second-order cells additionally require
-# their edge nodes to travel consistently with the rotated corner pairs.
+# Cycle-equality on corner order; higher-order cells additionally require
+# their edge nodes to travel consistently with the rotated corner pairs and
+# their interior slots to rotate with the corner frame. A quadrangle face's
+# interior ring cyclically shifts with the corner shift while a triangle's
+# single interior slot stays fixed.
 function _partition_cycle_equal(a,b)
     length(a)==length(b) || return false
     n=length(a)
-    if n==6 || n==9
-        nc=n==6 ? 3 : 4
+    if n in (6,9,10,16)
+        nc=n in (6,10) ? 3 : 4
+        e=n in (6,9) ? 1 : 2
+        interior=n-nc-nc*e
         for shift in 0:nc-1
             all(i->a[i]==b[mod1(i+shift,nc)],1:nc) || continue
             consistent=true
             for i in 1:nc
-                pair=minmax(a[i],a[mod1(i+1,nc)])
-                j=findfirst(k->minmax(b[k],b[mod1(k+1,nc)])==pair,1:nc)
-                (j===nothing || a[nc+i]!=b[nc+j]) && (consistent=false;break)
+                j=mod1(i+shift,nc)
+                for t in 1:e
+                    a[nc+(i-1)*e+t]==b[nc+(j-1)*e+t] || (consistent=false;break)
+                end
+                consistent || break
             end
-            consistent && all(i->a[i]==b[i],2nc+1:n) && return true
+            consistent || continue
+            if interior>0 && nc==4
+                all(s->a[nc+nc*e+s]==b[nc+nc*e+mod1(s+shift,interior)],
+                    1:interior) || continue
+            else
+                all(i->a[i]==b[i],nc+nc*e+1:n) || continue
+            end
+            return true
         end
         return false
     end
@@ -45,30 +86,38 @@ function _partition_cycle_equal(a,b)
 end
 _partition_cycle_reverse(a,b)=_partition_cycle_equal(a,_partition_reversed(b))
 # `(facet surface msh type, cell node tuple)` for each outward facet of a
-# volume family. Second-order patterns append the edge nodes along each
-# consecutive corner pair and the face node of each quadrangle facet.
+# volume family at its canonical order. An order-p cell appends p-1 edge
+# nodes along every consecutive corner pair — taken in the facet's own
+# direction, so a facet edge running against the canonical edge table picks
+# the volume's edge nodes in reverse — followed by the facet's interior
+# slots, whose offsets accumulate in `_FACES` order.
 function _partition_volume_facets(msh)
-    linear=msh in _PARTITION_SECOND_ORDER_VOLUMES ? msh-7 : msh
-    second=msh!=linear
+    spec=Elements.msh_spec(msh);p=spec.order
+    linear=_partition_linear_base(msh)
     corners=Elements.msh_spec(linear).nnodes
     edges=_simplex_edge_patterns(linear)
     edge_index=Dict(minmax(a,b)=>i for (i,(a,b)) in enumerate(edges))
     facets=Tuple{Int,Tuple{Vararg{Int}}}[]
-    quads=0
-    for (base,patterns) in
-            ((2,_simplex_face_patterns(linear,3)),
-             (3,_simplex_face_patterns(linear,4)))
+    offset=corners+(p-1)*length(edges)
+    for (family,patterns) in
+            ((:tri,_simplex_face_patterns(linear,3)),
+             (:qua,_simplex_face_patterns(linear,4)))
+        interior=family==:tri ? (p-1)*(p-2)÷2 : (p-1)^2
+        isempty(patterns) && continue
+        surface_type=Elements._msh_type_exact(family,p,false,"partition")
         for pattern in patterns
-            full=Int[pattern...];surface_type=base
-            if second
-                for k in eachindex(pattern)
-                    push!(full,corners+edge_index[minmax(pattern[k],pattern[mod1(k+1,length(pattern))])])
-                end
-                surface_type=base==2 ? 9 : 10
-                if length(pattern)==4
-                    quads+=1;push!(full,corners+length(edges)+quads)
+            full=collect(Int,pattern)
+            for k in eachindex(pattern)
+                pair=(pattern[k],pattern[mod1(k+1,length(pattern))])
+                ordinal=edge_index[minmax(pair...)]
+                base=corners+(ordinal-1)*(p-1)
+                forward=edges[ordinal]==pair
+                for i in 1:p-1
+                    push!(full,forward ? base+i : base+p-i)
                 end
             end
+            for i in 1:interior;push!(full,offset+i);end
+            offset+=interior
             push!(facets,(surface_type,Tuple(full)))
         end
     end
@@ -77,29 +126,32 @@ end
 
 function _partition_brep_surface_borders(faces,caller)
     incidences=Dict{Int32,Dict{Tuple{UInt64,UInt64},Vector{Tuple{UInt64,UInt64}}}}()
-    mid_incidences=Dict{Int32,Dict{Tuple{UInt64,UInt64},Vector{Union{Nothing,UInt64}}}}()
+    mid_incidences=Dict{Int32,Dict{Tuple{UInt64,UInt64},Vector{Union{Nothing,Tuple{Vararg{UInt64}}}}}}()
     for face in faces
-        ncorner=face.msh==9 ? 3 : face.msh==10 ? 4 : 0
-        for (order,(a,b)) in enumerate(_simplex_edge_patterns(face.msh))
+        corners,e=_partition_surface_shape(face.msh)
+        for (order,(a,b)) in enumerate(_partition_edge_patterns(face.msh))
             edges=get!(()->Dict{Tuple{UInt64,UInt64},Vector{Tuple{UInt64,UInt64}}}(),incidences,face.parent)
             edge=(face.uids[a],face.uids[b]);key=minmax(edge...)
             push!(get!(()->Tuple{UInt64,UInt64}[],edges,key),edge)
-            mid=ncorner==0 ? nothing : face.uids[ncorner+order]
-            mids=get!(()->Dict{Tuple{UInt64,UInt64},Vector{Union{Nothing,UInt64}}}(),mid_incidences,face.parent)
-            push!(get!(()->Union{Nothing,UInt64}[],mids,key),mid)
+            mid=e==0 ? nothing : ntuple(i->face.uids[corners+(order-1)*e+i],e)
+            mids=get!(()->Dict{Tuple{UInt64,UInt64},Vector{Union{Nothing,Tuple{Vararg{UInt64}}}}}(),mid_incidences,face.parent)
+            push!(get!(()->Union{Nothing,Tuple{Vararg{UInt64}}}[],mids,key),mid)
         end
     end
     borders=Dict{Int32,Dict{Tuple{UInt64,UInt64},Tuple{UInt64,UInt64}}}()
-    mid_borders=Dict{Int32,Dict{Tuple{UInt64,UInt64},Union{Nothing,UInt64}}}()
+    mid_borders=Dict{Int32,Dict{Tuple{UInt64,UInt64},Union{Nothing,Tuple{Vararg{UInt64}}}}}()
     for (parent,edges) in incidences
         border=Dict{Tuple{UInt64,UInt64},Tuple{UInt64,UInt64}}()
-        mid_border=Dict{Tuple{UInt64,UInt64},Union{Nothing,UInt64}}()
+        mid_border=Dict{Tuple{UInt64,UInt64},Union{Nothing,Tuple{Vararg{UInt64}}}}()
         for (key,hits) in edges
             length(hits)<=2 || throw(ArgumentError("$caller: original Surface has a nonmanifold edge"))
             if length(hits)==2
                 hits[1]==reverse(hits[2]) || throw(ArgumentError("$caller: original Surface edge winding disagrees"))
-                mid_incidences[parent][key][1]==mid_incidences[parent][key][2] || throw(ArgumentError(
-                    "$caller: original Surface edge node disagrees"))
+                # Co-bordant cells traverse the shared edge oppositely, so
+                # their interior edge-node sequences must be mutual reversals.
+                first,second=mid_incidences[parent][key]
+                (first===nothing ? second===nothing : Tuple(first)==reverse(Tuple(second))) ||
+                    throw(ArgumentError("$caller: original Surface edge node disagrees"))
             else
                 border[key]=only(hits);mid_border[key]=only(mid_incidences[parent][key])
             end
@@ -113,10 +165,10 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
     class.public_tags!==nothing || throw(ArgumentError("$caller: lower BRep needs actual UID authority"))
     _high_order_overlay(cached)===nothing || throw(ArgumentError("$caller: lower BRep partitioning is unsupported for overlay-backed high-order caches"))
     catalog=[row for row in _cache_catalog(cached,class) if !isempty(row[4])]
-    all(row->row[1] in (1,2,3,8,9,10,15) ||
-        row[1] in _PARTITION_VOLUME_TYPES,catalog) &&
+    all(row->row[1] in (15,) || row[1] in _PARTITION_SURFACE_TYPES ||
+        row[1] in _PARTITION_CURVE_TYPES || row[1] in _PARTITION_VOLUME_TYPES,catalog) &&
     any(row->row[1] in _PARTITION_VOLUME_TYPES,catalog) || throw(ArgumentError(
-        "$caller: lower BRep partitioning supports linear and complete second-order cells (MSH types 1-15) only"))
+        "$caller: lower BRep partitioning supports linear and complete second- and third-order cells only"))
     cached isa MixedMesh && (cached.partition_data!==nothing || !isempty(cached.periodic_links)) &&
         throw(ArgumentError("$caller: existing partition or periodic topology is unsupported"))
     isempty(model.periodic) && isempty(model.meshing.periodic_uid_history) ||
@@ -150,7 +202,7 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
                   msh in _PARTITION_CURVE_TYPES ? lines : points,record)
         end
         if msh in _PARTITION_VOLUME_TYPES
-            linear=msh in _PARTITION_SECOND_ORDER_VOLUMES ? msh-7 : Int(msh)
+            linear=_partition_linear_base(msh)
             all(column->Model._volume_cell_signed_volume(cached.coords,cells,column,linear)>0,
                 axes(cells,2)) || throw(ArgumentError(
                 "$caller: lower BRep needs positive oriented volume cells"))
@@ -173,8 +225,10 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
             "$caller: original BRep repeats a Curve cell support"))
         line_support[key]=line
         ends=(line.uids[1],line.uids[2])
+        order=Elements.msh_order(line.msh)
         push!(get!(()->NamedTuple[],curve_edges,line.parent),
-            (uids=ends,rows=line.rows,mid=line.msh==8 ? line.uids[3] : nothing))
+            (uids=ends,rows=line.rows,mid=order==1 ? nothing :
+                ntuple(i->line.uids[2+i],order-1)))
         nodes=get!(()->Set{Int32}(),curve_nodes,line.parent)
         for row in line.rows;push!(nodes,row);end
     end
@@ -246,11 +300,15 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
                 expected=signed>0 ? edge.uids : (edge.uids[2],edge.uids[1])
                 oriented==expected || throw(ArgumentError(
                     "$caller: declared Curve $curve orientation disagrees with its Surface border"))
-                # A second-order Curve cell must share the Surface border's
-                # actual edge node; first-order cells carry none.
-                edge.mid===nothing ||
-                    surface_borders.mids[parent][key]==edge.mid || throw(ArgumentError(
-                    "$caller: declared Curve $curve edge node disagrees with its Surface border"))
+                # A higher-order Curve cell must share the Surface border's
+                # actual edge nodes; a negatively declared cell carries them
+                # along the border in reversed sequence. Linear cells carry
+                # none.
+                if edge.mid!==nothing
+                    aligned=signed>0 ? edge.mid : reverse(edge.mid)
+                    surface_borders.mids[parent][key]==aligned || throw(ArgumentError(
+                        "$caller: declared Curve $curve edge node disagrees with its Surface border"))
+                end
                 key in covered && throw(ArgumentError(
                     "$caller: declared Surface boundary repeats a border Curve cell"))
                 push!(covered,key)
@@ -297,9 +355,10 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
         hits=get(facets,key,NamedTuple[])
         !isempty(hits) && any(hit->hit.volume.part==face.part,hits) || throw(ArgumentError(
             "$caller: each lower Surface cell partition must match an actual volume facet carrier"))
-        ncorner=face.msh==9 ? 3 : face.msh==10 ? 4 : 0
-        for (order,(a,b)) in enumerate(_simplex_edge_patterns(face.msh))
-            mid=ncorner==0 ? nothing : (face.uids[ncorner+order],face.rows[ncorner+order])
+        corners,e=_partition_surface_shape(face.msh)
+        for (order,(a,b)) in enumerate(_partition_edge_patterns(face.msh))
+            mid=e==0 ? nothing : ntuple(i->(face.uids[corners+(order-1)*e+i],
+                face.rows[corners+(order-1)*e+i]),e)
             push!(get!(()->NamedTuple[],lower_edges,minmax(face.uids[a],face.uids[b])),
                 (uids=(face.uids[a],face.uids[b]),rows=(face.rows[a],face.rows[b]),face,mid))
         end
@@ -365,7 +424,7 @@ function _partition_brep_boundary_certificate(source,children,part_entities,boun
     topology || return nothing
     for (tag,faces) in surface_faces
         edges=Dict{Tuple{UInt64,UInt64},Vector{Tuple{UInt64,UInt64}}}()
-        for face in faces,(a,b) in _simplex_edge_patterns(face.msh)
+        for face in faces,(a,b) in _partition_edge_patterns(face.msh)
             pair=(face.uids[a],face.uids[b]);push!(get!(()->Tuple{UInt64,UInt64}[],edges,minmax(pair...)),pair)
         end
         expected=Dict{Tuple{UInt64,UInt64},Tuple{UInt64,UInt64}}()
@@ -575,7 +634,7 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
         global_order=Tuple{UInt64,UInt64}[]
         edge_volumes=Dict{Tuple{UInt64,UInt64},Vector{NamedTuple}}()
         for key in source.facet_order,hits in (source.facets[key],)
-            for (a,b) in _simplex_edge_patterns(hits[1].msh),hit in hits
+            for (a,b) in _partition_edge_patterns(hits[1].msh),hit in hits
                 push!(get!(()->NamedTuple[],edge_volumes,minmax(hit.uids[a],hit.uids[b])),hit.volume)
             end
         end
@@ -613,10 +672,11 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
                 end
                 for child in pair;push!(boundaries[(3,Int(child))],child==primary ? tag : -tag);end
                 edge_hits=Dict{Tuple{UInt64,UInt64},Vector{NamedTuple}}()
-                for face in interface_faces,(order,(a,b)) in enumerate(_simplex_edge_patterns(face.msh))
+                for face in interface_faces,(order,(a,b)) in enumerate(_partition_edge_patterns(face.msh))
                     key=minmax(face.uids[a],face.uids[b])
-                    ncorner=face.msh==9 ? 3 : face.msh==10 ? 4 : 0
-                    mid=ncorner==0 ? nothing : (face.uids[ncorner+order],face.rows[ncorner+order])
+                    corners,e=_partition_surface_shape(face.msh)
+                    mid=e==0 ? nothing : ntuple(i->(face.uids[corners+(order-1)*e+i],
+                        face.rows[corners+(order-1)*e+i]),e)
                     push!(get!(()->NamedTuple[],edge_hits,key),
                         (uids=(face.uids[a],face.uids[b]),rows=(face.rows[a],face.rows[b]),mid))
                     haskey(global_edges,key) || push!(global_order,key)
@@ -628,7 +688,11 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
                     length(hits)<=2 || throw(ArgumentError("$caller: nonmanifold interface edge"))
                     if length(hits)==2
                         hits[1].uids==reverse(hits[2].uids) || throw(ArgumentError("$caller: interface edge winding disagrees"))
-                        hits[1].mid==hits[2].mid || throw(ArgumentError("$caller: interface edge node disagrees"))
+                        # Opposite traversal directions carry the shared edge
+                        # nodes in mutually reversed sequences.
+                        (hits[1].mid===nothing ? hits[2].mid===nothing :
+                            Tuple(hits[1].mid)==reverse(Tuple(hits[2].mid))) ||
+                            throw(ArgumentError("$caller: interface edge node disagrees"))
                     end
                 end
             end
@@ -643,8 +707,15 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
             end
             all(==(2),values(volume_cells)) || throw(ArgumentError(
                 "$caller: interface seam must meet actual lower Surface carriers closing its junction fan"))
-            mids=Union{Nothing,Tuple{UInt64,Int32}}[hit.mid for hit in hits]
-            append!(mids,Union{Nothing,Tuple{UInt64,Int32}}[edge.mid for edge in lower])
+            # Edge-node sequences follow each incident cell's own traversal
+            # direction; align them to the canonical corner order so cells
+            # covering the edge in opposite directions compare consistently.
+            norm_mid=(uids,mid)->mid===nothing ? nothing :
+                (uids[1]<uids[2] ? Tuple(mid) : reverse(Tuple(mid)))
+            mids=Union{Nothing,Tuple{Vararg{Tuple{UInt64,Int32}}}}[
+                norm_mid(hit.uids,hit.mid) for hit in hits]
+            append!(mids,Union{Nothing,Tuple{Vararg{Tuple{UInt64,Int32}}}}[
+                norm_mid(edge.uids,edge.mid) for edge in lower])
             allequal(mids) || throw(ArgumentError(
                 "$caller: interface seam edge node disagrees across its incident cells"))
             parts=sort!(unique!(Int32[volume.part for volume in keys(volume_cells)]))
@@ -721,17 +792,20 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
                 oriented=map(zip(chain.indices,chain.flips)) do (index,flip)
                     edge=edges[index]
                     flip ? (uids=(edge.uids[2],edge.uids[1]),
-                            rows=(edge.rows[2],edge.rows[1]),mid=edge.mid) : edge
+                            rows=(edge.rows[2],edge.rows[1]),
+                            mid=edge.mid===nothing ? nothing : reverse(edge.mid)) : edge
                 end
                 cell_count<=typemax(Int32)-length(oriented) || throw(ArgumentError("$caller: seam cell capacity exceeded"))
                 cell_count+=length(oriented)
-                arity=all(edge->edge.mid===nothing,oriented) ? 2 : 3
-                all(edge->(edge.mid===nothing)==(arity==2),oriented) || throw(ArgumentError(
-                    "$caller: partition seam mixes cell orders"))
+                arity=all(edge->edge.mid===nothing,oriented) ? 2 :
+                    2+length(oriented[findfirst(edge->edge.mid!==nothing,oriented)].mid)
+                all(edge->(edge.mid===nothing)==(arity==2) &&
+                    (edge.mid===nothing || length(edge.mid)==arity-2),oriented) ||
+                    throw(ArgumentError("$caller: partition seam mixes cell orders"))
                 tag=Int32(_partition_entity_birth!(staged,1,caller));nodes=Matrix{Int32}(undef,arity,length(oriented));ids=UInt64[]
                 for (column,edge) in enumerate(oriented)
                     nodes[:,column]=arity==2 ? collect(edge.rows) :
-                        Int32[edge.rows[1],edge.rows[2],edge.mid[2]]
+                        Int32[edge.rows[1],edge.rows[2],(edge.mid[i][2] for i in 1:arity-2)...]
                     maximum_uid<typemax(UInt64) || throw(ArgumentError("$caller: seam UID capacity exceeded"))
                     maximum_uid+=UInt64(1);push!(ids,maximum_uid)
                     seam_lookup[minmax(edge.uids...)]=(uids=edge.uids,tag=tag)
@@ -747,7 +821,8 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
                 end
                 boundaries[(1,Int(tag))]=bounds
                 curves[tag]=oriented
-                push!(blocks,ElementBlock(arity==2 ? 1 : 8,nodes));push!(owners,fill(tag,length(ids)));push!(labels,ids)
+                line_type=Elements._msh_type_exact(:lin,arity-1,false,caller)
+                push!(blocks,ElementBlock(line_type,nodes));push!(owners,fill(tag,length(ids)));push!(labels,ids)
             end
         end
         for ((dim,tag),entity) in part_entities
@@ -755,7 +830,7 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
             faces=haskey(interfaces,Int32(tag)) ? interfaces[Int32(tag)] :
                 [face for face in source.faces if children[(2,face.parent,face.part)]==tag]
             signs=Dict{Int32,Int}()
-            for face in faces,(a,b) in _simplex_edge_patterns(face.msh)
+            for face in faces,(a,b) in _partition_edge_patterns(face.msh)
                 key=minmax(face.uids[a],face.uids[b]);seam=get(seam_lookup,key,nothing);seam===nothing && continue
                 orientation=(face.uids[a],face.uids[b])==seam.uids ? 1 : -1
                 haskey(signs,seam.tag) && signs[seam.tag]!=orientation && throw(ArgumentError("$caller: Surface seam has inconsistent orientation"))

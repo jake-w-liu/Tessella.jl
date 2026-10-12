@@ -65,7 +65,7 @@ function _partition_tet_snapshot(model,cached,class,caller)
 end
 
 function _partition_interface_components(faces)
-    edges(face)=_simplex_edge_patterns(get(face,:msh,2))
+    edges(face)=_partition_edge_patterns(get(face,:msh,2))
     incidence=Dict{Tuple{UInt64,UInt64},Vector{Int}}()
     for (index,face) in enumerate(faces),(a,b) in edges(face)
         push!(get!(()->Int[],incidence,minmax(face.uids[a],face.uids[b])),index)
@@ -88,7 +88,7 @@ end
 
 function _partition_tet_production_plan(model,cached,class,count,assignment,caller;
                                         topology::Bool,ghosts::Bool)
-    if class!==nothing && any(row->row[1] in (1,2,3,8,9,10,15) && !isempty(row[4]),
+    if class!==nothing && any(row->row[1] in (1,2,3,8,9,10,15,21,26,36) && !isempty(row[4]),
                               _cache_catalog(cached,class))
         return _partition_brep_production_plan(model,cached,class,count,assignment,caller;topology,ghosts)
     end
