@@ -698,6 +698,39 @@ signed reversal, mixed signs, closure checks, holes, annulus
 end-to-end hole-face mesh with zero interior-hole nodes) plus an
 7-assertion `occ_plane_smoke` default check.
 
+### OCC ellipse family endpoints (2026-10-12)
+
+The third GEO01 slice adds `model.occ`'s ellipse family: `add_ellipse_arc`,
+`add_ellipse` and `add_disk`, plus two `add_plane_surface` parity fixes.
+The new `(occ=:ellipse)` curve record — center, `gp_Ax2` frame (`n`,`X`,`Y`),
+radii `rx`/`ry` and trim `[t0,t1]` — carries complete evaluators: point,
+`EllipseD1`/`EllipseD2` derivatives, curvature, exact axis-aligned bounding
+box, `Extrema_ExtPElC`-style projection (stationary-root solving in the
+ellipse frame, with trimmed-domain boundary candidates — a fix that also
+corrects trimmed circles), endpoint checks, affine transforms with
+independent semi-axis stretching and reflection handling, reversed-frame
+geometry, high-order-curve adaptation, and coherence merging keyed on
+conic identity (major-axis direction plus trim span, so complementary or
+rotated same-boundary ellipses never merge). `add_ellipse_arc` solves the
+two-point conic through `start`/`stop` whose major direction is
+`center→major`, rejecting null/symmetric configurations like OCCT,
+swapping axes with a warning when the derived minor exceeds the supplied
+major direction, and picking the sub-π traversal through a mirrored frame.
+`add_disk` publishes vertex, closed ellipse edge, wire and plane face
+atomically with an `ellips2d` pcurve parameterizing identically in 2-D
+and 3-D. Plane faces now accept ellipse edges — `ellips2d` pcurves join
+`lin2d`/`circ2d` in fit sampling, conic-normal consistency, geometric
+intersection (`IntConicConic` line×ellipse), pcurve extrema
+(`ExtPElC2d`-style), bounding-box extrema and resolution — and
+`add_plane_surface` takes `abs` on wire tags and reports the upstream
+"Plane surface requires at least one curve loop" for empty input. Boolean
+BRep intersection paths remain line/circle-only and reject ellipse
+sections loudly — unchanged boundary, not silently approximated. Verified
+by the focused `test/interfaces/api_occ_ellipse_test.jl` (evaluation,
+axis forms, arc solver guards, disk topology and pcurve round-trips,
+transform/reverse and coherence behavior, projection/bounding box,
+end-to-end disk meshing) plus an `occ_ellipse_smoke` default check.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

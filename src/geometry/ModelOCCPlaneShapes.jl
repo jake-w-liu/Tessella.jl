@@ -66,16 +66,17 @@ _model_occ_add_curve_loop!(m,curve_tags;tag=-1)=
     _model_occ_add_wire!(m,curve_tags;tag=tag,check_closed=true)
 
 # Traversal-ordered boundary samples of a wire: vertex positions chained by
-# `uses` orientation, with quarter-arc interior points on circle edges so a
-# curved boundary contributes to the plane fit. Only `:line` and `:circle`
-# OCC edges have the analytic pcurves planar faces require.
+# `uses` orientation, with quarter-arc interior points on circle/ellipse
+# edges so a curved boundary contributes to the plane fit. Only `:line`,
+# `:circle`, and `:ellipse` OCC edges have the analytic pcurves planar
+# faces require.
 function _model_occ_wire_samples(shape_of,uses,caller)
     pts=NTuple{3,Float64}[]
     for (id,rev) in uses
         edge=shape_of(id); g=edge.geometry.geometry
-        g.occ in (:line,:circle) || throw(ArgumentError(
-            "$caller: only line and circle OCC curves are supported on " *
-            "plane surfaces"))
+        g.occ in (:line,:circle,:ellipse) || throw(ArgumentError(
+            "$caller: only line, circle, and ellipse OCC curves are " *
+            "supported on plane surfaces"))
         a,b=edge.children
         pa=shape_of(a).geometry.point; pb=shape_of(b).geometry.point
         start=rev ? pb : pa; stop=rev ? pa : pb
@@ -87,6 +88,11 @@ function _model_occ_wire_samples(shape_of,uses,caller)
             for k in 1:3
                 fraction=rev ? (4-k)/4 : k/4
                 push!(pts,_occ_circle_point(g,g.t0+(g.t1-g.t0)*fraction))
+            end
+        elseif g.occ===:ellipse
+            for k in 1:3
+                fraction=rev ? (4-k)/4 : k/4
+                push!(pts,_occ_ellipse_point(g,g.t0+(g.t1-g.t0)*fraction))
             end
         end
         _model_occ_vertices_coincide(last(pts),stop) || push!(pts,stop)
@@ -108,11 +114,12 @@ function _model_occ_newell_normal(pts)
     return (nx,ny,nz)
 end
 
-# The 2-D image of a line/circle OCC edge on the fitted plane: the `lin2d`/
-# `circ2d` records `_occ_pcurve_d0` evaluates. The 3-D circle's stored
-# `X`/`Y` may be transformed out of the Y=n×X orientation, so the 2-D frame
-# is projected (never re-crossed) and must stay counterclockwise — the face
-# axis is chosen so every boundary circle agrees.
+# The 2-D image of a line/circle/ellipse OCC edge on the fitted plane: the
+# `lin2d`/`circ2d`/`ellips2d` records `_occ_pcurve_d0` evaluates. The 3-D
+# curve's stored `X`/`Y` may be transformed out of the Y=n×X orientation,
+# so the 2-D frame is projected (never re-crossed) and must stay
+# counterclockwise — the face axis is chosen so every boundary conic
+# agrees.
 function _model_occ_plane_pcurve(g,center,X,Y)
     if g.occ===:line
         o=_arc_sub(g.origin,center)
@@ -120,6 +127,8 @@ function _model_occ_plane_pcurve(g,center,X,Y)
                        (_dot3(g.dir,X),_dot3(g.dir,Y))),)
     end
     o=_arc_sub(g.center,center)
+    g.occ===:ellipse && return (ellips2d=(
+        (_dot3(o,X),_dot3(o,Y)),(_dot3(g.X,X),_dot3(g.X,Y)),g.rx,g.ry),)
     return (circ2d=((_dot3(o,X),_dot3(o,Y)),
                     (_dot3(g.X,X),_dot3(g.X,Y)),g.r),)
 end
@@ -162,15 +171,16 @@ function _model_occ_plane_face_geometry(shape_of,tag_of,uses_per_wire,caller)
         abs(_dot3(_arc_sub(p,center),axis))<=tolerance || throw(ArgumentError(
             "$caller: Could not create surface"))
     end
-    # Circle normals must agree with the face axis; a unanimous disagreement
-    # flips the fit, a mixed set cannot be projected into a `circ2d`.
+    # Conic normals must agree with the face axis; a unanimous disagreement
+    # flips the fit, a mixed set cannot be projected into a `circ2d`/
+    # `ellips2d`.
     signs=Int[]
     for uses in uses_per_wire,(id,_) in uses
         g=shape_of(id).geometry.geometry
-        g.occ===:circle || continue
+        g.occ in (:circle,:ellipse) || continue
         s=_dot3(g.n,axis)
         abs(s)>_OCC_CONFUSION || throw(ArgumentError(
-            "$caller: boundary circle is not in the face plane"))
+            "$caller: boundary conic is not in the face plane"))
         push!(signs,s>0.0 ? 1 : -1)
     end
     if !isempty(signs)
@@ -178,7 +188,7 @@ function _model_occ_plane_face_geometry(shape_of,tag_of,uses_per_wire,caller)
             axis=(.-axis)
         elseif !all(==(1),signs)
             throw(ArgumentError(
-                "$caller: boundary circles have inconsistent orientations"))
+                "$caller: boundary conics have inconsistent orientations"))
         end
     end
     X,Y=_occ_ax2_frame(axis)
@@ -203,10 +213,13 @@ function _model_occ_add_plane_surface!(m::GeoModel,wire_tags;tag=-1)
         _model_occ_requested_tag(tag,caller),caller)
     haskey(kernel.bindings,(2,allocated)) && throw(ArgumentError(
         "$caller: OCC Surface[$allocated] already exists"))
-    isempty(wire_tags) && throw(ArgumentError("$caller: Could not create surface"))
+    isempty(wire_tags) && throw(ArgumentError(
+        "$caller: Plane surface requires at least one curve loop"))
     wire_ids=UInt64[]
     for raw in wire_tags
-        t=_model_occ_requested_tag(raw,caller)
+        # All wire tags are > 0 for OCC; upstream takes `abs` for
+        # compatibility with the GEO factory's signed loops.
+        t=abs(_model_occ_requested_tag(raw,caller))
         id=get(kernel.bindings,(-1,t),nothing)
         id===nothing && throw(ArgumentError("$caller: unknown OCC Wire[$t]"))
         push!(wire_ids,id)

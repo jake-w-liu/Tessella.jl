@@ -614,6 +614,15 @@ end
     return (fma(A1,x[1],-(A2*x[2]))+o[1],fma(A1,x[2],A2*x[1])+o[2])
 end
 
+# `ElCLib2d::EllipseValue` — o + a·cos·x + b·sin·ŷ with gp_Elips2d's
+# XDirection x (major radius a), minor radius b, derived YDirection
+# (−x.y, x.x).
+@inline function _occ_ellips2d_eval(o,x,a,b,t)
+    s,c=_gm_sincos(t)
+    A1,A2=a*c,b*s
+    return (fma(A1,x[1],-(A2*x[2]))+o[1],fma(A1,x[2],A2*x[1])+o[2])
+end
+
 # The reference direction OCC assigns to `gp_Ax2(origin, axis)` — the
 # XDirection of `_occ_ax2_frame`.
 _occ_reference_direction(axis) = _occ_ax2_frame(axis)[1]
@@ -661,6 +670,41 @@ function _occ_circle_second_derivative(g,t::Float64)
             fma(-Xc,X[3],(-Yc)*Y[3]))
 end
 
+# `ElCLib::EllipseValue`/`EllipseD1`/`EllipseD2` — the two-radius form of the
+# circle's `SetLinearForm` association: A1 = R1·cos scales the major
+# direction X, A2 = R2·sin the minor direction Y. The stored frame is not
+# re-derived (`gp_Ax2` frames need not satisfy Y = n×X after transforms).
+function _occ_ellipse_point(g,t::Float64)
+    Y=g.Y
+    s,c=_gm_sincos(t)
+    A1,A2=g.rx*c,g.ry*s
+    C,X=g.center,g.X
+    return (fma(A1,X[1],A2*Y[1])+C[1],
+            fma(A1,X[2],A2*Y[2])+C[2],
+            fma(A1,X[3],A2*Y[3])+C[3])
+end
+
+function _occ_ellipse_derivative(g,t::Float64)
+    Y=g.Y
+    s,c=_gm_sincos(t)
+    # `EllipseD1` — −R1·sin·X + R2·cos·Y.
+    Xs,Yd=g.rx*s,g.ry*c
+    X=g.X
+    return (fma(-Xs,X[1],Yd*Y[1]),
+            fma(-Xs,X[2],Yd*Y[2]),
+            fma(-Xs,X[3],Yd*Y[3]))
+end
+
+function _occ_ellipse_second_derivative(g,t::Float64)
+    Y=g.Y
+    s,c=_gm_sincos(t)
+    Xc,Yc=g.rx*c,g.ry*s
+    X=g.X
+    return (fma(-Xc,X[1],(-Yc)*Y[1]),
+            fma(-Xc,X[2],(-Yc)*Y[2]),
+            fma(-Xc,X[3],(-Yc)*Y[3]))
+end
+
 # `ElCLib::LineValue`/`LineD1` — `U·dir + loc` on the stored `gp_Lin`
 # parametrization (not the endpoint chord).
 @inline _occ_line_point(g,t::Float64) =
@@ -673,41 +717,61 @@ function _occ_pcurve_d0(pc,t::Float64)
     if hasproperty(pc,:lin2d)
         o,d=pc.lin2d
         return _occ_lin2d_eval(o,d,t)
-    else
+    elseif hasproperty(pc,:circ2d)
         o,x,r=pc.circ2d
         return _occ_circ2d_eval(o,x,r,t)
     end
+    o,x,a,b=pc.ellips2d
+    return _occ_ellips2d_eval(o,x,a,b,t)
 end
 function _occ_pcurve_d1(pc,t::Float64)
     if hasproperty(pc,:lin2d)
         o,d=pc.lin2d
         return _occ_lin2d_eval(o,d,t), d
     else
-        o,x,r=pc.circ2d
-        # `Geom2d_Circle::D1` — SetLinearForm(−Yc, X, Xc, Y) with the derived
-        # YDirection (−x.y, x.x).
-        s,c=_gm_sincos(t)
-        A1,A2=r*c,r*s
-        uv=_occ_circ2d_eval(o,x,r,t)
-        duv=(fma(-A2,x[1],-(A1*x[2])), fma(-A2,x[2],A1*x[1]))
+        # `Geom2d_Circle`/`Geom2d_Ellipse::D1` — the SetLinearForm pair
+        # (−R·sin on X, R·cos on the derived YDirection (−x.y, x.x)); the
+        # ellipse weights its own radius on each axis.
+        if hasproperty(pc,:circ2d)
+            o,x,r=pc.circ2d
+            s,c=_gm_sincos(t)
+            As,Bc=r*s,r*c
+            uv=_occ_circ2d_eval(o,x,r,t)
+        else
+            o,x,a,b=pc.ellips2d
+            s,c=_gm_sincos(t)
+            As,Bc=a*s,b*c
+            uv=_occ_ellips2d_eval(o,x,a,b,t)
+        end
+        duv=(fma(-As,x[1],-(Bc*x[2])), fma(-As,x[2],Bc*x[1]))
         return uv,duv
     end
 end
 
-# `ElCLib2d::CircleD2`/`LineD2` on the stored pcurve kinds — returns
-# (point, d1, d2). The circle's D2 negates the point's linear form before
-# the location add, exactly as `CircleD2` builds `V2` then `P`.
+# `ElCLib2d::CircleD2`/`EllipseD2`/`LineD2` on the stored pcurve kinds —
+# returns (point, d1, d2). The conic D2 negates the point's linear form
+# before the location add, exactly as `CircleD2`/`EllipseD2` build `V2`
+# then `P`.
 function _occ_pcurve_d2(pc,t::Float64)
     if hasproperty(pc,:lin2d)
         o,d=pc.lin2d
         return _occ_lin2d_eval(o,d,t), d, (0.0,0.0)
+    elseif hasproperty(pc,:circ2d)
+        o,x,r=pc.circ2d
+        s,c=_gm_sincos(t)
+        Xc,Yc=r*c,r*s
+        # YDirection is the derived (−x.y, x.x); `V2 = −(Xc·X + Yc·Y)`.
+        p=_occ_circ2d_eval(o,x,r,t)
+        d1=(fma(-Yc,x[1],-(Xc*x[2])), fma(-Yc,x[2],Xc*x[1]))
+        d2=(-fma(Xc,x[1],-(Yc*x[2])), -fma(Xc,x[2],Yc*x[1]))
+        return p,d1,d2
     end
-    o,x,r=pc.circ2d
+    o,x,a,b=pc.ellips2d
     s,c=_gm_sincos(t)
-    Xc,Yc=r*c,r*s
-    # YDirection is the derived (−x.y, x.x); `V2 = −(Xc·X + Yc·Y)`.
-    p=_occ_circ2d_eval(o,x,r,t)
-    d1=(fma(-Yc,x[1],-(Xc*x[2])), fma(-Yc,x[2],Xc*x[1]))
+    Xc,Yc=a*c,b*s
+    As,Bc=a*s,b*c
+    p=_occ_ellips2d_eval(o,x,a,b,t)
+    d1=(fma(-As,x[1],-(Bc*x[2])), fma(-As,x[2],Bc*x[1]))
     d2=(-fma(Xc,x[1],-(Yc*x[2])), -fma(Xc,x[2],Yc*x[1]))
     return p,d1,d2
 end
@@ -910,6 +974,34 @@ function _occ_circle_bounding_box(g)
     return (lo[1],lo[2],lo[3],hi[1],hi[2],hi[3])
 end
 
+# Exact OCC-ellipse bounding box. A full ellipse's extent along axis i is
+# sqrt((rx·Xᵢ)² + (ry·Yᵢ)²); a trimmed range adds its in-range axis extrema
+# at tan t = (ry·Yᵢ)/(rx·Xᵢ) to the endpoint box.
+function _occ_ellipse_bounding_box(g)
+    if g.t1-g.t0>=_OCC_TWO_PI-1e-12
+        C=g.center
+        return (ntuple(i->C[i]-sqrt((g.rx*g.X[i])^2+(g.ry*g.Y[i])^2),3)...,
+                ntuple(i->C[i]+sqrt((g.rx*g.X[i])^2+(g.ry*g.Y[i])^2),3)...)
+    end
+    p0=_occ_ellipse_point(g,g.t0); p1=_occ_ellipse_point(g,g.t1)
+    lo=[min(p0[i],p1[i]) for i in 1:3]
+    hi=[max(p0[i],p1[i]) for i in 1:3]
+    Y=g.Y
+    for axis in 1:3
+        (g.X[axis]==0.0 && Y[axis]==0.0) && continue
+        base=_gm_atan2(g.ry*Y[axis],g.rx*g.X[axis])
+        for k in -4:4
+            t=base+k*π
+            (g.t0-1e-12<=t<=g.t1+1e-12) || continue
+            p=_occ_ellipse_point(g,clamp(t,g.t0,g.t1))
+            for i in 1:3
+                lo[i]=min(lo[i],p[i]); hi[i]=max(hi[i],p[i])
+            end
+        end
+    end
+    return (lo[1],lo[2],lo[3],hi[1],hi[2],hi[3])
+end
+
 # The OCC record of a curve, or `nothing` for built-in entities.
 _occ_geometry(m::GeoModel,tag::Int) =
     _occ_geometry(get(m.curve_geometry,tag,nothing))
@@ -932,6 +1024,15 @@ function _occ_endpoints_satisfied(m::GeoModel, tag::Int, g)
         end
         return _points_close(_occ_circle_point(g,g.t0),pa,tol) &&
                _points_close(_occ_circle_point(g,g.t1),pb,tol)
+    elseif g.occ===:ellipse
+        a==b && begin
+            rel=_arc_sub(pa,g.center)
+            ux=_arc_dot(rel,g.X)/g.rx; uy=_arc_dot(rel,g.Y)/g.ry
+            return abs(ux*ux+uy*uy-1.0)*min(g.rx,g.ry)<=tol &&
+                   abs(_arc_dot(rel,g.n))<=tol
+        end
+        return _points_close(_occ_ellipse_point(g,g.t0),pa,tol) &&
+               _points_close(_occ_ellipse_point(g,g.t1),pb,tol)
     elseif g.occ===:line
         return _points_close(
                    _add3(g.origin,_occ_mul(g.dir,g.t0)),pa,tol) &&
@@ -962,11 +1063,12 @@ function _occ_surface_samples(m::GeoModel, surface::Int,
     for loop in m.surfaces[surface], signed in m.loops[loop]
         curve=abs(signed)
         occ=_occ_geometry_checked(m,curve,caller)
-        (occ===nothing || occ.occ!==:circle) && continue
+        (occ===nothing || !(occ.occ in (:circle,:ellipse))) && continue
         a,_=m.curves[curve]
         for k in 0:2
-            push!(samples,_occ_circle_point(
-                occ,occ.t0+(occ.t1-occ.t0)*(k/3)))
+            t=occ.t0+(occ.t1-occ.t0)*(k/3)
+            push!(samples,occ.occ===:circle ? _occ_circle_point(occ,t) :
+                                             _occ_ellipse_point(occ,t))
             push!(tags,a)
         end
     end
@@ -2151,9 +2253,9 @@ end
 # ── BRepClass 2-D face classifier ────────────────────────────────────────────
 #
 # Port of the OCCT 7.9.3 `BRepClass_FaceClassifier` chain restricted to the
-# pcurve kinds the OCC materializers emit (`lin2d`, `circ2d`) and to
-# `UseBndBox == false` (Gmsh's `OCCFace::containsPoint`/`containsParam`
-# invocation). The mirrored pieces:
+# pcurve kinds the OCC materializers emit (`lin2d`, `circ2d`, `ellips2d`)
+# and to `UseBndBox == false` (Gmsh's `OCCFace::containsPoint`/
+# `containsParam` invocation). The mirrored pieces:
 #   `BRepClass_FClassifier` / `TopClass_FaceClassifier` — the driver;
 #   `BRepClass_FaceExplorer` — probing-segment construction;
 #   `TopClass_Classifier2d` — closest-intersection state machine;
@@ -2259,6 +2361,18 @@ end
      (fma(-A2,x[1],A1*y[1]),fma(-A2,x[2],A1*y[2])),
      (-fma(A1,x[1],A2*y[1]),-fma(A1,x[2],A2*y[2])))
 end
+
+# gp_Elips2d — (loc, xdir, a, b): major radius a along xdir, minor b along
+# the derived ydir (−x.y, x.x), always direct.
+@inline _ellips2d_axis(pc)=let (o,x,a,b)=pc; ((o,x,(-x[2],x[1])),a,b) end
+@inline _ellips2d_value(ax,a,b,t)=_occ_ellips2d_eval(ax[1],ax[2],a,b,t)
+@inline _ellips2d_d2(ax,a,b,t)=let (A2_,A1_)=_gm_sincos(t),x=ax[2],y=ax[3],
+        A1=a*A1_,A2=b*A2_,B1=b*A1_,B2=a*A2_
+    # D0: a·cos·x + b·sin·y; D1: −a·sin·x + b·cos·y; D2: −a·cos·x − b·sin·y.
+    (_occ_ellips2d_eval(ax[1],x,a,b,t),
+     (fma(-B2,x[1],B1*y[1]),fma(-B2,x[2],B1*y[2])),
+     (-fma(A1,x[1],A2*y[1]),-fma(A1,x[2],A2*y[2])))
+end
 # ElCLib::CircleParameter — `XDirection.Angle(P−loc)` signed by `IsDirect`
 # (always true here), with the −1e-16/0 snap.
 function _circ2d_param(ax,P)
@@ -2299,13 +2413,19 @@ end
 # ── pcurve adaptor helpers ───────────────────────────────────────────────────
 _occ_pcurve_kind(pc)=hasproperty(pc,:lin2d) ? :lin2d :
     hasproperty(pc,:circ2d) ? :circ2d :
+    hasproperty(pc,:ellips2d) ? :ellips2d :
     throw(ArgumentError("_occ_pcurve_kind: unsupported pcurve record"))
-@inline _occ_pcurve_isperiodic(pc)=_occ_pcurve_kind(pc)===:circ2d
-# `Geom2dAdaptor_Curve::Resolution(Ruv)` — line: Ruv; circle: 2·asin(Ruv/2r)
-# or 2π when r ≤ Ruv/2.
+@inline _occ_pcurve_isperiodic(pc)=_occ_pcurve_kind(pc) in (:circ2d,:ellips2d)
+# `Geom2dAdaptor_Curve::Resolution(Ruv)` — line: Ruv; conic: 2·asin(Ruv/2r)
+# or 2π when r ≤ Ruv/2. The ellipse uses its tightest curvature radius
+# ρmin = b²/a (at the major-axis ends): the largest angular step a chord
+# Ruv can subtend, keeping the CheckOn acceptance permissive.
 function _occ_pcurve_resolution(pc,ruv)
     _occ_pcurve_kind(pc)===:lin2d && return ruv
-    r=pc.circ2d[3]
+    r=_occ_pcurve_kind(pc)===:circ2d ? pc.circ2d[3] :
+        let (a,b)=(pc.ellips2d[3],pc.ellips2d[4])
+            min(a,b)*min(a,b)/max(a,b)   # ρmin — radii may swap under transforms
+        end
     return r>ruv/2.0 ? 2.0*_gm_asin(ruv/(2.0*r)) : _OCC_TWO_PI
 end
 @inline _occ_pcurve_value(pc,t)=_occ_pcurve_d0(pc,t)
@@ -3281,6 +3401,58 @@ function _occ_int_lincirc(Line,LIG_Domain,Circle,CIRC_Domain,TolConf,Tol,rev)
     return true,lpnt,lseg
 end
 
+# `IntConicConic` line×ellipse restricted to point solutions — the
+# `Perform(L, E, ...)` geometric core: the quadratic in the line parameter
+# solved in the ellipse's local frame. Each accepted root emits the same
+# `_ipt` point record the circle path produces (position, transitions, and
+# the head/end re-evaluation at domain bounds).
+function _occ_int_linellips(Line,LIG_Domain,Ellips,CIRC_Domain,TolConf,Tol)
+    o,x,a,b=Ellips; y=(-x[2],x[1])
+    rel=_sub2(Line[1],o)
+    ox_,oy_=_dot2(rel,x),_dot2(rel,y)
+    dx_,dy_=_dot2(Line[2],x),_dot2(Line[2],y)
+    A=(dx_*dx_)/(a*a)+(dy_*dy_)/(b*b)
+    B=2.0*((ox_*dx_)/(a*a)+(oy_*dy_)/(b*b))
+    C=(ox_*ox_)/(a*a)+(oy_*oy_)/(b*b)-1.0
+    lpnt=Any[]; lseg=Any[]
+    disc=B*B-4.0*A*C
+    (A==0.0 || disc<0.0) && return true,lpnt,lseg
+    sq=sqrt(disc)
+    # A tangent collapses to a single solution like lincirc's nbsol==1.
+    roots= sq<=2.0*Tol*sqrt(max(A,eps(Float64))) ?
+        Float64[-B/(2.0*A)] : Float64[(-B-sq)/(2.0*A),(-B+sq)/(2.0*A)]
+    ax=(o,x,y)
+    for s in roots
+        pt=_lin2d_value(Line,s)
+        rel2=_sub2(pt,o)
+        u=_occ_normalize_on_circle_domain(
+            _gm_atan2(_dot2(rel2,y)/b,_dot2(rel2,x)/a),CIRC_Domain)
+        (u<CIRC_Domain.fpar-max(CIRC_Domain.ftol,_OCC_PCONFUSION) ||
+         u>CIRC_Domain.lpar+max(CIRC_Domain.ltol,_OCC_PCONFUSION)) && continue
+        (LIG_Domain.hasf && s<LIG_Domain.fpar-LIG_Domain.ftol) && continue
+        (LIG_Domain.hasl && s>LIG_Domain.lpar+LIG_Domain.ltol) && continue
+        P1a,Tan1,Norm1=_ellips2d_d2(ax,a,b,u)
+        P2a,Tan2=_lin2d_d1(Line,s)
+        Pos1a=_occ_determine_position(CIRC_Domain,P1a,u)
+        Pos2a=_occ_determine_position(LIG_Domain,P2a,s)
+        T1a,T2a=_occ_transition_lc(Pos1a,Tan1,Norm1,Pos2a,Tan2,(0.0,0.0))
+        if Pos1a===:end || Pos1a===:head
+            Cinf=Pos1a===:end ? CIRC_Domain.lpar : CIRC_Domain.fpar
+            P1a=Pos1a===:end ? CIRC_Domain.lpt : CIRC_Domain.fpt
+            s=_lin2d_param(Line,P1a)
+            P1a,Tan1,Norm1=_ellips2d_d2(ax,a,b,Cinf)
+            P2a,Tan2=_lin2d_d1(Line,s)
+            Pos1a=_occ_determine_position(CIRC_Domain,P1a,Cinf)
+            Pos2a=_occ_determine_position(LIG_Domain,P2a,s)
+            T1a,T2a=_occ_transition_lc(Pos1a,Tan1,Norm1,Pos2a,Tan2,(0.0,0.0))
+        else
+            Cinf=u
+        end
+        push!(lpnt,_ipt(P1a,s,Cinf,T2a,T1a,false))
+    end
+    return true,lpnt,lseg
+end
+
 # `Geom2dInt_GInter` — the two-curve intersector restricted to lin2d/circ2d
 # pcurves: lin×lin and lin×circ run through `IntConicConic`; circ×lin flips
 # the argument order and sets `ReversedParameters`. Returns (done, points,
@@ -3293,6 +3465,8 @@ function _occ_ginter(L,DL,pc,DE,TolConf,Tol)
     elseif kind===:circ2d
         o,x,r=pc.circ2d
         return _occ_int_lincirc((L[1],L[2]),DL,(o,x,r),DE,TolConf,Tol,false)
+    elseif kind===:ellips2d
+        return _occ_int_linellips((L[1],L[2]),DL,pc.ellips2d,DE,TolConf,Tol)
     end
     throw(ArgumentError("_occ_ginter: unsupported pcurve kind $kind"))
 end
@@ -3349,6 +3523,65 @@ function _occ_extpe2d_circ(P,C,Tol,Uinf,Usup)
     return true,res
 end
 
+# `Extrema_ExtPElC2d::Perform` for an ellipse — the stationary roots of
+# (p−P)·p′ = (b²−a²)·sin·cos + a·qx·sin − b·qy·cos with q = P − loc in the
+# ellipse frame. Sign-change brackets bisect to simple roots; grid-seeded
+# Newtons catch tangencies (roots without sign change). Returns
+# (true, [(param,point,sqdist)]) — unlike the circle, an off-axis query
+# always projects (a ≠ b keeps the foot map regular).
+function _occ_extpe2d_ellips(P,E,Tol,Uinf,Usup)
+    o,x,a,b=E; y=(-x[2],x[1])
+    rel=_sub2(P,o)
+    qx,qy=_dot2(rel,x),_dot2(rel,y)
+    scale=max(1.0,a,b,abs(qx),abs(qy))
+    f(t)=let (s,c)=_gm_sincos(t); (b*b-a*a)*s*c+a*qx*s-b*qy*c end
+    fp(t)=let (s,c)=_gm_sincos(t); (b*b-a*a)*(c*c-s*s)+a*qx*c+b*qy*s end
+    raw=Float64[]
+    n=64
+    tA=-π; fA=f(tA)
+    for i in 1:n
+        tB=-π+2π*i/n; fB=f(tB)
+        if fB==0.0
+            push!(raw,tB)
+        elseif signbit(fA)!=signbit(fB)
+            lo,hi,flo=tA,tB,fA
+            for _ in 1:60
+                mid=(lo+hi)*0.5; fm=f(mid)
+                fm==0.0 && (lo=hi=mid;break)
+                signbit(fm)==signbit(flo) ? (lo=mid;flo=fm) : (hi=mid)
+            end
+            push!(raw,(lo+hi)*0.5)
+        end
+        tA,fA=tB,fB
+    end
+    for i in 0:n-1
+        t=-π+(i+0.5)*(2π/n)
+        for _ in 1:40
+            d=fp(t); d==0.0 && break
+            step=f(t)/d; t-=step
+            t<=-π && (t+=2π); t>π && (t-=2π)
+            abs(step)<=1e-16 && break
+        end
+        abs(f(t))<=1e-9*scale*scale && push!(raw,t)
+    end
+    sort!(raw)
+    roots=Float64[]
+    for t in raw
+        (isempty(roots) || abs(t-last(roots))>1e-9) && push!(roots,t)
+    end
+    res=Tuple{Float64,NTuple{2,Float64},Float64}[]
+    adj=_occ_adjust_periodic(Uinf,Uinf+2π,_OCC_PCONFUSION)
+    for r in roots
+        _,U=adj(Uinf,r)
+        if U-2π-Uinf<Tol && U-2π-Uinf>-Tol; U=Uinf; end
+        if Uinf-U<Tol && U-Usup<Tol
+            pv=_occ_ellips2d_eval(o,x,a,b,U)
+            push!(res,(U,pv,_sqdist2(P,pv)))
+        end
+    end
+    return true,res
+end
+
 # `Extrema_ExtPC2d`/`GExtPC2d` over a trimmed lin2d/circ2d pcurve — the
 # elementary-curve path of `GExtPC::Perform`: `ExtPElC2d` candidates filtered
 # by `[uinf−tolu, usup+tolu]` after `InPeriod` mapping for periodic curves.
@@ -3359,6 +3592,8 @@ function _occ_extpc2d(P,pc,uinf,usup)
         done,res=_occ_extpe2d_line(P,pc.lin2d,_OCC_CONFUSION,uinf,usup)
     elseif kind===:circ2d
         done,res=_occ_extpe2d_circ(P,pc.circ2d,_OCC_CONFUSION,uinf,usup)
+    elseif kind===:ellips2d
+        done,res=_occ_extpe2d_ellips(P,pc.ellips2d,_OCC_CONFUSION,uinf,usup)
     else
         throw(ArgumentError("_occ_extpc2d: unsupported pcurve kind $kind"))
     end
@@ -3783,6 +4018,27 @@ function _occ_bndlib_pcurve_box(pc,t1,t2)
             aT=(aT<aT1z ? aT+_PIPI : aT)
             aT<=aT2z && push!(pts,_occ_pcurve_value(pc,aT))
         end
+    elseif kind===:ellips2d
+        # Axis extrema of o + a·cos·x + b·sin·ŷ: for coordinate i the
+        # coefficient pair (A = a·xᵢ, B = b·ŷᵢ) extremizes at
+        # t* = atan2(B, A) and t* + π.
+        o,x,a,b=pc.ellips2d
+        y=(-x[2],x[1])
+        pT=Float64[]
+        for i in 1:2
+            (x[i]==0.0 && y[i]==0.0) && continue
+            base=_gm_atan2(b*y[i],a*x[i])
+            push!(pT,base); push!(pT,base+π)
+        end
+        aEps=1e-14; dT=t2-t1
+        aT1z=_occ_adjust_to_period(t1,_PIPI)
+        abs(aT1z)<aEps && (aT1z=0.0)
+        aT2z=aT1z+dT
+        abs(aT2z-_PIPI)<aEps && (aT2z=_PIPI)
+        for aT in pT
+            aT=(aT<aT1z ? aT+_PIPI : aT)
+            aT<=aT2z && push!(pts,_occ_pcurve_value(pc,aT))
+        end
     elseif kind!==:lin2d
         throw(ArgumentError(
             "_occ_bndlib_pcurve_box: unsupported pcurve kind $kind"))
@@ -4128,6 +4384,68 @@ function _occ_extpe_circle(g,P,uinf,usup)
     return out
 end
 
+# `Extrema_ExtPElC::Perform(P, gp_Elips, Tol, Uinf, Usup)` — OCCT's ellipse
+# extrema iterate on (p−P)·p′ = (b²−a²)·sin·cos + a·qx·sin − b·qy·cos in
+# the ellipse frame (q = P − center projected into it). Sign-change
+# brackets bisect to the 2–4 simple roots; grid-seeded Newtons catch
+# tangencies. Candidates are period-adjusted into [uinf, uinf+2π) and
+# accepted like the circle path (TolU = Tol/a, the angular resolution).
+function _occ_extpe_ellipse(g,P,uinf,usup)
+    C,X,Y,a,b=g.center,g.X,g.Y,g.rx,g.ry
+    rel=_arc_sub(P,C)
+    qx,qy=_dot3(rel,X),_dot3(rel,Y)
+    scale=max(1.0,a,b,abs(qx),abs(qy))
+    f(t)=let (s,c)=_gm_sincos(t); (b*b-a*a)*s*c+a*qx*s-b*qy*c end
+    fp(t)=let (s,c)=_gm_sincos(t); (b*b-a*a)*(c*c-s*s)+a*qx*c+b*qy*s end
+    raw=Float64[]
+    n=64
+    tA=-π; fA=f(tA)
+    for i in 1:n
+        tB=-π+2π*i/n; fB=f(tB)
+        if fB==0.0
+            push!(raw,tB)
+        elseif signbit(fA)!=signbit(fB)
+            lo,hi,flo=tA,tB,fA
+            for _ in 1:60
+                mid=(lo+hi)*0.5; fm=f(mid)
+                fm==0.0 && (lo=hi=mid;break)
+                signbit(fm)==signbit(flo) ? (lo=mid;flo=fm) : (hi=mid)
+            end
+            push!(raw,(lo+hi)*0.5)
+        end
+        tA,fA=tB,fB
+    end
+    for i in 0:n-1
+        t=-π+(i+0.5)*(2π/n)
+        for _ in 1:40
+            d=fp(t); d==0.0 && break
+            step=f(t)/d; t-=step
+            t<=-π && (t+=2π); t>π && (t-=2π)
+            abs(step)<=1e-16 && break
+        end
+        abs(f(t))<=1e-9*scale*scale && push!(raw,t)
+    end
+    sort!(raw)
+    us=Float64[]
+    for t in raw
+        (isempty(us) || abs(t-last(us))>1e-9) && push!(us,t)
+    end
+    out=Tuple{Float64,NTuple{3,Float64},Float64}[]
+    tolU=a>floatmin(Float64) ? _OCC_CONFUSION/a : Inf
+    rmin=min(a,b); rmin_=rmin*rmin/max(a,b)   # ρmin — tightest curvature radius
+    mytolu=rmin_>_OCC_CONFUSION/2 ? 2.0*_gm_asin(_OCC_CONFUSION/(2.0*rmin_)) : 2π
+    for r in us
+        _,U=_occ_adjust_periodic(uinf,uinf+2π,tolU,uinf,r)
+        (U-2π-uinf)<tolU && (U-2π-uinf)>-tolU && (U=uinf)
+        (uinf-U)<tolU && (U-usup)<tolU || continue
+        U=_occ_in_period(U,uinf,uinf+2π)
+        U>=uinf-mytolu && U<=usup+mytolu || continue
+        xyz=_occ_ellipse_point(g,U)
+        push!(out,(U,xyz,_sqdist(xyz,P)))
+    end
+    return out
+end
+
 # `OCCEdge::_project` — the `GeomAPI_ProjectPointOnCurve` answer on the
 # materialized edge kinds: padded parameter bounds (skipped when the edge
 # is closed), the ExtPElC candidates, first-minimum selection. Returns
@@ -4178,9 +4496,21 @@ function _occ_curve_project(m::GeoModel,g,tag::Int,P,caller::AbstractString)
         acc=_occ_extpe_line(g,P,uinf,usup)
     elseif g.occ===:circle
         acc=_occ_extpe_circle(g,P,uinf,usup)
+    elseif g.occ===:ellipse
+        acc=_occ_extpe_ellipse(g,P,uinf,usup)
     else
         throw(ArgumentError(
             "_occ_curve_project: unsupported OCC curve kind $(g.occ)"))
+    end
+    # `Extrema_GExtPC` always scores the domain bounds as candidates: on a
+    # trimmed edge whose stationary roots all fall outside [t0,t1], the
+    # nearest endpoint is still the answer.
+    if acc!==nothing && first_point!=last_point && g.occ in (:circle,:ellipse)
+        eval=g.occ===:circle ? _occ_circle_point : _occ_ellipse_point
+        for t in (g.t0,g.t1)
+            xyz=eval(g,t)
+            push!(acc,(t,xyz,_sqdist(xyz,P)))
+        end
     end
     (acc===nothing || isempty(acc)) && return nothing
     best=acc[1]
@@ -4201,6 +4531,8 @@ function _occ_curve_first_der(m::GeoModel,g,tag::Int,u::Float64,
         return _model_occ_curve_d2(g.curve,u)[2]
     elseif g.occ===:circle
         return _occ_circle_derivative(g,u)
+    elseif g.occ===:ellipse
+        return _occ_ellipse_derivative(g,u)
     elseif g.occ===:line
         return g.dir
     elseif g.occ===:degenerate
@@ -4249,6 +4581,8 @@ function _occ_curve_curvature(m::GeoModel,g,tag::Int,u::Float64,
         _model_occ_curve_d2(g.curve,u)[3]
     elseif g.occ===:circle
         _occ_circle_second_derivative(g,u)
+    elseif g.occ===:ellipse
+        _occ_ellipse_second_derivative(g,u)
     elseif g.occ===:line
         (0.0,0.0,0.0)
     else

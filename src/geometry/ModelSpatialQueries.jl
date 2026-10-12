@@ -195,6 +195,7 @@ function _model_curve_bounding_box(
     end
     occ===nothing || return _model_bounds_checked(
         occ.occ===:circle ? _occ_circle_bounding_box(occ) :
+        occ.occ===:ellipse ? _occ_ellipse_bounding_box(occ) :
         occ.occ===:line ? _model_bounds_from_points(
             m,m.curves[curve],caller,"Curve[$curve]") :
         begin

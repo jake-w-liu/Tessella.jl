@@ -169,6 +169,172 @@ function _model_occ_add_circle!(m::GeoModel,x,y,z,radius;tag=-1,
     return allocated
 end
 
+# `gmsh.model.occ.addEllipseArc(startTag, centerTag, majorTag, endTag)` —
+# the OCCT arc through start/end on the ellipse whose major-axis direction
+# is center→major. Radii are solved from the four points; when the derived
+# minor exceeds the supplied major direction's radius the axes swap with a
+# `Msg::Warning`. The center and major points are not edge vertices.
+function _model_occ_add_ellipse_arc!(m::GeoModel,start,center,major,stop;
+                                     tag=-1)
+    caller="OCC.add_ellipse_arc"
+    kernel=m.occ_kernel
+    allocated=_model_occ_next_tag(kernel,1,_model_occ_requested_tag(tag,caller),caller)
+    haskey(kernel.bindings,(1,allocated)) && throw(ArgumentError(
+        "$caller: OCC Curve[$allocated] already exists"))
+    ids=UInt64[]; points=NTuple{3,Float64}[]
+    for raw in (start,center,major,stop)
+        current=_model_occ_requested_tag(raw,caller)
+        id=get(kernel.bindings,(0,current),nothing)
+        id===nothing && throw(ArgumentError("$caller: unknown OCC Point[$current]"))
+        push!(ids,id)
+        push!(points,kernel.shapes[id].geometry.point)
+    end
+    geometry,error,warning=_model_occ_ellipse_arc_geometry(
+        points[1],points[2],points[3],points[4])
+    error===nothing || throw(ArgumentError("$caller: $error"))
+    warning===nothing || @warn warning
+    id=only(_model_occ_reserve_shapes(kernel,1,caller))
+    _model_occ_bind_shape!(kernel,1,allocated,id,
+        _ModelOCCShape(1,(kind=:ellipse,geometry=geometry),UInt64[ids[1],ids[4]]))
+    kernel.next_shape=id+UInt64(1)
+    return allocated
+end
+
+# `gmsh.model.occ.addEllipse(x,y,z,rx,ry,angle1=0,angle2=2π,zAxis,xAxis)` —
+# center/radii/axis form. Upstream requires `0 < ry <= rx`; a full ellipse
+# collapses to one vertex, trimmed ranges emit one per endpoint.
+function _model_occ_add_ellipse!(m::GeoModel,x,y,z,rx,ry;tag=-1,
+                                 angle1=0.0,angle2=2π,
+                                 zaxis=nothing,xaxis=nothing)
+    caller="OCC.add_ellipse"
+    kernel=m.occ_kernel
+    allocated=_model_occ_next_tag(kernel,1,_model_occ_requested_tag(tag,caller),caller)
+    haskey(kernel.bindings,(1,allocated)) && throw(ArgumentError(
+        "$caller: OCC Curve[$allocated] already exists"))
+    center=(_finite_scalar(x,caller,"x"),_finite_scalar(y,caller,"y"),
+            _finite_scalar(z,caller,"z"))
+    a=_finite_scalar(rx,caller,"rx"); b=_finite_scalar(ry,caller,"ry")
+    (a>0.0 && b>0.0) || throw(ArgumentError(
+        "$caller: Ellipse rx and ry radii should be positive"))
+    b<=a || throw(ArgumentError(
+        "$caller: Ellipse ry radius should be smaller than rx radius"))
+    a1=_finite_scalar(angle1,caller,"angle1")
+    a2=_finite_scalar(angle2,caller,"angle2")
+    nv=_model_occ_axis_arg(zaxis,"zAxis",caller)
+    xv=_model_occ_axis_arg(xaxis,"xAxis",caller)
+    n,X,Y=if nv!==nothing
+        normal=_model_occ_gp_dir(nv,caller)
+        if xv!==nothing
+            _occ_modulus(_occ_cross(normal,_model_occ_gp_dir(xv,caller)))>
+                _OCC_CONFUSION || throw(ArgumentError(
+                "$caller: OpenCASCADE exception gp_Ax2() : x direction is parallel to axis"))
+            X,Y=_occ_ax2_setx(normal,_occ_dir(xv))
+        else
+            X,Y=_occ_ax2_frame(normal)
+        end
+        (normal,X,Y)
+    else
+        normal=(0.0,0.0,1.0)
+        (normal,_occ_ax2_setx(normal,(1.0,0.0,0.0))...)
+    end
+    full=a1==0.0 && a2==2π
+    full || a1!=a2 || throw(ArgumentError(
+        "$caller: OpenCASCADE exception Geom_TrimmedCurve::U1 == U2"))
+    t0,t1=full ? (0.0,2π) : minmax(a1,a2)
+    geometry=(occ=:ellipse,center=center,n=n,X=X,Y=Y,rx=a,ry=b,t0=t0,t1=t1)
+    shape_ids=_model_occ_reserve_shapes(kernel,full ? 2 : 3,caller)
+    pending=Tuple{Int,Int,UInt64,_ModelOCCShape}[]
+    kernel.maxima[3]<=typemax(Int32)-(full ? 1 : 2) || throw(ArgumentError(
+        "$caller: OCC endpoint tag allocation exceeds Int32"))
+    vertex_tags=[kernel.maxima[3]+i for i in 1:(full ? 1 : 2)]
+    for (ordinal,parameter) in enumerate(full ? (t0,) : (t0,t1))
+        push!(pending,(0,vertex_tags[ordinal],shape_ids[ordinal],
+            _ModelOCCShape(0,(point=_occ_ellipse_point(geometry,parameter),
+                              mesh_size=0.0),UInt64[])))
+    end
+    endpoints=full ? UInt64[shape_ids[1],shape_ids[1]] :
+                     UInt64[shape_ids[1],shape_ids[2]]
+    push!(pending,(1,allocated,shape_ids[end],
+        _ModelOCCShape(1,(kind=:ellipse,geometry=geometry),endpoints)))
+    for (dimension,current,id,shape) in pending
+        _model_occ_bind_shape!(kernel,dimension,current,id,shape)
+    end
+    kernel.next_shape=shape_ids[end]+UInt64(1)
+    return allocated
+end
+
+# `gmsh.model.occ.addDisk(x,y,z,rx,ry,zAxis,xAxis)` — `makeDisk`: the full
+# ellipse edge, its wire, and the plane face through it. All sub-entities
+# publish alongside the face like `makeRectangle`. The face frame is the
+# ellipse frame so the pcurve is `ellips2d` with the identity 2-D axes.
+function _model_occ_add_disk!(m::GeoModel,x,y,z,rx,ry;tag=-1,
+                              zaxis=nothing,xaxis=nothing)
+    caller="OCC.add_disk"
+    kernel=m.occ_kernel
+    allocated=_model_occ_next_tag(kernel,2,_model_occ_requested_tag(tag,caller),caller)
+    haskey(kernel.bindings,(2,allocated)) && throw(ArgumentError(
+        "$caller: OCC Surface[$allocated] already exists"))
+    center=(_finite_scalar(x,caller,"x"),_finite_scalar(y,caller,"y"),
+            _finite_scalar(z,caller,"z"))
+    a=_finite_scalar(rx,caller,"rx"); b=_finite_scalar(ry,caller,"ry")
+    (a>0.0 && b>0.0) || throw(ArgumentError(
+        "$caller: Disk rx and ry radii should be positive"))
+    b<=a || throw(ArgumentError(
+        "$caller: Disk ry radius should be smaller than rx radius"))
+    nv=_model_occ_axis_arg(zaxis,"zAxis",caller)
+    xv=_model_occ_axis_arg(xaxis,"xAxis",caller)
+    n,X,Y=if nv!==nothing
+        normal=_model_occ_gp_dir(nv,caller)
+        if xv!==nothing
+            _occ_modulus(_occ_cross(normal,_model_occ_gp_dir(xv,caller)))>
+                _OCC_CONFUSION || throw(ArgumentError(
+                "$caller: OpenCASCADE exception gp_Ax2() : x direction is parallel to axis"))
+            X,Y=_occ_ax2_setx(normal,_occ_dir(xv))
+        else
+            X,Y=_occ_ax2_frame(normal)
+        end
+        (normal,X,Y)
+    else
+        normal=(0.0,0.0,1.0)
+        (normal,_occ_ax2_setx(normal,(1.0,0.0,0.0))...)
+    end
+    kernel.maxima[3]<typemax(Int32) || throw(ArgumentError(
+        "$caller: OCC vertex tag allocation exceeds Int32"))
+    kernel.maxima[4]<typemax(Int32) || throw(ArgumentError(
+        "$caller: OCC curve tag allocation exceeds Int32"))
+    kernel.maxima[2]<typemax(Int32) || throw(ArgumentError(
+        "$caller: OCC wire tag allocation exceeds Int32"))
+    vertex_tag=kernel.maxima[3]+1
+    edge_tag=kernel.maxima[4]+1
+    wire_tag=kernel.maxima[2]+1
+    edge_geometry=(occ=:ellipse,center=center,n=n,X=X,Y=Y,rx=a,ry=b,
+                   t0=0.0,t1=2π)
+    point=_occ_ellipse_point(edge_geometry,0.0)
+    ids=_model_occ_reserve_shapes(kernel,4,caller)
+    vertex_id,edge_id,wire_id,face_id=ids
+    vertex=_ModelOCCShape(0,(point=point,mesh_size=0.0),UInt64[])
+    edge=_ModelOCCShape(1,(kind=:ellipse,geometry=edge_geometry),
+                        UInt64[vertex_id,vertex_id])
+    uses=Tuple{UInt64,Bool}[(edge_id,false)]
+    wire=_ModelOCCShape(-1,(uses=uses,),UInt64[edge_id])
+    # The face frame equals the ellipse frame, so the closed edge's pcurve
+    # parameterizes identically in 2-D and 3-D.
+    pcurves=Dict{Int,NamedTuple}(edge_tag=>
+        (fwd=(ellips2d=((0.0,0.0),(1.0,0.0),a,b),),rev=nothing))
+    geometry=(occ=:plane,center=center,axis=n,X=X,Y=Y,reversed=false,
+              pcurves=pcurves,uvb=([-a,-b],[a,b]))
+    face=_ModelOCCShape(2,(kind=:plane,geometry=geometry),UInt64[wire_id])
+    for (dimension,current,id,shape) in (
+            (0,vertex_tag,vertex_id,vertex),
+            (1,edge_tag,edge_id,edge),
+            (-1,wire_tag,wire_id,wire),
+            (2,allocated,face_id,face))
+        _model_occ_bind_shape!(kernel,dimension,current,id,shape)
+    end
+    kernel.next_shape=face_id+UInt64(1)
+    return allocated
+end
+
 function _model_occ_add_line!(m::GeoModel,start,stop;tag=-1)
     caller="OCC.add_line"
     kernel=m.occ_kernel

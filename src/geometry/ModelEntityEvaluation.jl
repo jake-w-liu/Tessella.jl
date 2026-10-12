@@ -804,6 +804,8 @@ function _model_curve_point(
         return first(_model_occ_curve_d2(occ.curve,parameter))
     elseif occ!==nothing && occ.occ===:circle
         return _occ_circle_point(occ,parameter)
+    elseif occ!==nothing && occ.occ===:ellipse
+        return _occ_ellipse_point(occ,parameter)
     elseif occ!==nothing && occ.occ===:degenerate
         # `_trimmed->point(_curve2d->Value(par))` — the pcurve-backed pole
         # eval, not the collapsed vertex.
@@ -953,6 +955,11 @@ function model_derivative(m::GeoModel,dim,tag,parametric_coordinates;
             sizehint!(output,3length(values))
             for parameter in values
                 append!(output,_occ_circle_derivative(occ,parameter))
+            end
+        elseif occ!==nothing && occ.occ===:ellipse
+            sizehint!(output,3length(values))
+            for parameter in values
+                append!(output,_occ_ellipse_derivative(occ,parameter))
             end
         elseif occ!==nothing && occ.occ===:degenerate
             sizehint!(output,3length(values))

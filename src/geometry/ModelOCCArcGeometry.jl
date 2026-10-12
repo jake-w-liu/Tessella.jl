@@ -177,3 +177,72 @@ function _model_native_occ_circle_curvature(g,u)
     curvature=numerator/dd1/dd2<=tolerance ? 0.0 : sqrt(numerator)/dd1/sqrt(dd1)
     return curvature<=epsilon ? epsilon : curvature
 end
+
+# `gp_Dir::IsParallel(other, AngularTolerance)` — |angle| ≤ tol or
+# |π − angle| ≤ tol; `u` is unit.
+function _model_occ_dir_parallel(u,v,tol)
+    ang=_gm_atan2(_occ_modulus(_occ_cross(u,v)),_dot3(u,v))
+    return ang<=tol || π-ang<=tol
+end
+
+# `OCC_Internals::addEllipseArc` — the ellipse through the start and end
+# points whose major axis direction is center→major. `u` is that direction;
+# `v` is the first endpoint's off-axis component direction (the other's
+# when the first is parallel). The conic's semi-axes solve the two-point
+# system, then the `gp_Ax2` frame and the `ElCLib::Parameter` trim pick the
+# sub-π traversal — forward when `mod2π(α2−α1) < π`, the reversed frame
+# (negated Y and n, mirrored parameter range) otherwise.
+function _model_occ_ellipse_arc_geometry(first::NTuple{3,Float64},
+                                         center::NTuple{3,Float64},
+                                         major::NTuple{3,Float64},
+                                         last::NTuple{3,Float64})
+    x1=_arc_sub(first,center); x2=_arc_sub(last,center)
+    udir=_arc_sub(major,center)
+    _occ_modulus(udir)<=floatmin(Float64) &&
+        return nothing,"OpenCASCADE exception gp_Dir() : input vector has null modulus",nothing
+    u=_occ_dir(udir)
+    vraw=if !_model_occ_dir_parallel(u,x1,1e-6)
+        _arc_sub(x1,_occ_mul(u,_dot3(x1,u)))
+    elseif !_model_occ_dir_parallel(u,x2,1e-6)
+        _arc_sub(x2,_occ_mul(u,_dot3(x2,u)))
+    else
+        return nothing,"Cannot create ellipse arc with start and end point " *
+                       "on the major axis",nothing
+    end
+    _occ_modulus(vraw)<=floatmin(Float64) &&
+        return nothing,"OpenCASCADE exception gp_Dir() : input vector has null modulus",nothing
+    v=_occ_dir(vraw)
+    x1u=_dot3(x1,u)^2; x1v=_dot3(x1,v)^2
+    x2u=_dot3(x2,u)^2; x2v=_dot3(x2,v)^2
+    (abs(x1u-x2u)<_OCC_CONFUSION || abs(x1v-x2v)<_OCC_CONFUSION) &&
+        return nothing,"Cannot create ellipse arc with start and end point " *
+                       "symmetric with respect to major or minor axis",nothing
+    a2=(x1v*x2u-x1u*x2v)/(x1v-x2v)
+    b2=(x1u*x2v-x1v*x2u)/(x1u-x2u)
+    (a2<=0.0 || b2<=0.0) &&
+        return nothing,"Invalid radii during creation of ellipse arc",nothing
+    warn=false
+    if a2>=b2
+        a,b=sqrt(a2),sqrt(b2)
+        n=_occ_crossed(u,v); X=u; Y=v
+    else
+        warn=true
+        a,b=sqrt(b2),sqrt(a2)
+        n=_occ_crossed(v,u); X=v; Y=u
+    end
+    alpha1=_gm_atan2(_dot3(x1,Y)/b,_dot3(x1,X)/a)
+    alpha2=_gm_atan2(_dot3(x2,Y)/b,_dot3(x2,X)/a)
+    span=_angle_02pi(alpha2-alpha1)
+    if span<π
+        t0,t1=alpha1,alpha1+span
+    else
+        # The ≤π traversal is clockwise: flip Y and n so the stored frame's
+        # parameter mirrors the ellipse's — p′(u) = p(−u) — then re-anchor
+        # the range so u(t0) = −α1 maps back to the start point.
+        span=_angle_02pi(alpha1-alpha2)
+        Y=ntuple(i->-Y[i],3); n=ntuple(i->-n[i],3)
+        t0,t1=-alpha1,-alpha1+span
+    end
+    return (occ=:ellipse,center=center,n=n,X=X,Y=Y,rx=a,ry=b,t0=t0,t1=t1),
+           nothing,(warn ? "Major radius smaller than minor radius" : nothing)
+end

@@ -766,6 +766,32 @@ semantics, holes, annulus pcurve round-trips, guards and failure
 atomicity, plus an 7-assertion `occ_plane_smoke` default check and an
 end-to-end holed-face mesh.
 
+The third GEO01 slice followed: the ellipse family `add_ellipse_arc`,
+`add_ellipse` and `add_disk`. A new `(occ=:ellipse)` record — center,
+`gp_Ax2` frame, `rx`/`ry`, trim — plugs into every evaluator a curve kind
+needs: point/`EllipseD1`/`EllipseD2`, curvature, exact bounding box,
+projection (stationary-root solving in the conic frame, with
+trimmed-domain boundary candidates that also fix trimmed circles),
+transforms with independent semi-axis stretching and reflection handling,
+reversed-frame geometry, high-order adaptation, and coherence signatures
+keyed on conic identity. The arc solver reproduces
+`OCC_Internals::addEllipseArc` — two-point radius solve on the
+center→major direction, null/symmetric rejections, axis swap with warning
+when the derived minor exceeds the supplied direction, sub-π traversal via
+a mirrored frame. `add_disk` emits the vertex/edge/wire/face graph
+atomically with an `ellips2d` pcurve that parameterizes identically in
+2-D and 3-D. Planar faces learned `ellips2d` pcurves alongside
+`lin2d`/`circ2d` — fit sampling, conic-normal consistency, line×ellipse
+geometric intersection, pcurve extrema, bounding-box extrema and
+resolution — and `add_plane_surface` picked up two upstream fixes
+(`abs` wire tags, the "at least one curve loop" empty message). Boolean
+BRep intersection paths remain line/circle-only and reject ellipse
+sections loudly; that boundary is unchanged. The focused
+`test/interfaces/api_occ_ellipse_test.jl` pins evaluation, axis forms,
+solver guards, disk topology, pcurve round-trips, transforms, reversed
+holes, coherence merging, projection and end-to-end disk meshing, plus an
+`occ_ellipse_smoke` default check.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

@@ -163,8 +163,10 @@ end
     occ=_occ_setup()
     p,e=_occ_square(occ)
     w=occ.add_wire(e)
-    @test occursin("Could not create surface",_errtext(()->occ.add_plane_surface(Int[])))
+    @test occursin("at least one curve loop",_errtext(()->occ.add_plane_surface(Int[])))
     @test occursin("unknown OCC Wire[99]",_errtext(()->occ.add_plane_surface([99])))
+    # Upstream takes `abs` on OCC wire tags for GEO-factory compatibility.
+    @test occ.add_plane_surface([-w])>0
     f=occ.add_plane_surface([w])
     @test occursin("already exists",_errtext(()->occ.add_plane_surface([w];tag=f)))
     # Non-planar wire: last edge leaves the z=0 plane.
@@ -178,13 +180,13 @@ end
     bz=occ.add_bezier(pb)
     bl=occ.add_line(pb[3],pb[1])
     wb=occ.add_wire([bz,bl])
-    @test occursin("only line and circle",_errtext(()->occ.add_plane_surface([wb])))
+    @test occursin("only line, circle, and ellipse",_errtext(()->occ.add_plane_surface([wb])))
     # An open wire is not a face boundary upstream either.
     wopen=occ.add_wire([e[1],e[2]])
     @test occursin("Could not create surface",_errtext(()->occ.add_plane_surface([wopen])))
     # Wire tag allocation is not consumed by the failures above.
     @test occ.get_max_tag(-1)==4
-    @test occ.get_max_tag(2)==1
+    @test occ.get_max_tag(2)==2
 end
 
 @testset "OCC add_plane_surface annulus" begin

@@ -476,6 +476,8 @@ function _transform_occ_curve_record(m::GeoModel, curve::Int, g,
     end
     if g.occ===:circle
         return _transform_occ_circle(g,t,caller,what)
+    elseif g.occ===:ellipse
+        return _transform_occ_ellipse(g,t,caller,what)
     elseif g.occ===:line
         # Geom_TrimmedCurve::Transformed keeps its [t0,t1] bounds; the basis
         # gp_Lin moves as Location' = M·P + loc, Direction' = M·D — the
@@ -634,6 +636,40 @@ function _transform_occ_circle(g, t::_AffineTransform, caller, what)
         return merge(transformed,(native_arithmetic=true,))
     end
     return transformed
+end
+
+# `Geom_Ellipse::Transformed` — the same conformal-perpendicularity
+# constraint as the circle, with independent semi-axis stretches
+# rx′ = rx·|T·X|, ry′ = ry·|T·Y|. Reflections follow the circle's
+# closed/trimmed split for the frame's handedness.
+function _transform_occ_ellipse(g, t::_AffineTransform, caller, what)
+    center=_finite_result(_occ_trsf_apply(t,g.center),caller)
+    X=_occ_linear_apply(t,g.X)
+    Y=_occ_linear_apply(t,g.Y)
+    sx=sqrt(_dot(X,X)); sy=sqrt(_dot(Y,Y))
+    (sx>0 && sy>0) || throw(ArgumentError(
+        "$caller: transform collapses $what"))
+    tol=1e-12*max(1.0,sx*sx,sy*sy)
+    abs(_dot(X,Y))<=tol || throw(ArgumentError(
+        "$caller: transform is not representable on $what — " *
+        "it would warp the ellipse off its axes"))
+    n=_occ_linear_apply(t,g.n)
+    nl=sqrt(_dot(n,n))
+    nl>0 || throw(ArgumentError("$caller: transform collapses $what"))
+    t0,t1=g.t0,g.t1
+    if _linear_det(t.linear)<0
+        if g.t1-g.t0<_OCC_TWO_PI
+            n=.-n
+        else
+            t0,t1=-g.t1,-g.t0
+            Y=.-Y
+        end
+    end
+    return (occ=:ellipse,center=center,
+            n=(n[1]/nl,n[2]/nl,n[3]/nl),
+            X=(X[1]/sx,X[2]/sx,X[3]/sx),
+            Y=(Y[1]/sy,Y[2]/sy,Y[3]/sy),
+            rx=g.rx*sx,ry=g.ry*sy,t0=t0,t1=t1)
 end
 
 # After independent sub-entity moves, keep a materialized curved primitive's
@@ -1068,8 +1104,17 @@ function _merge_curves!(m::GeoModel)
         # geometry in too: two coincident closed circles sharing a seam vertex
         # only describe the same edge when center, axis, and radius agree.
         occ=_occ_geometry(m,tag)
+        # An OCC ellipse's identity needs its major-axis direction as an
+        # unsigned axis (rx≥ry → X) plus, for trimmed arcs, the parameter
+        # span — complementary arcs on the same conic share both endpoints.
         signature=occ===nothing ? nothing :
                   occ.occ===:circle ? (occ.center,occ.n,occ.r) :
+                  occ.occ===:ellipse ?
+                      (occ.center,occ.n,occ.rx,occ.ry,
+                       occ.rx>occ.ry ? min(occ.X,ntuple(i->-occ.X[i],3)) :
+                       occ.ry>occ.rx ? min(occ.Y,ntuple(i->-occ.Y[i],3)) :
+                       nothing,
+                       occ.t1-occ.t0<_OCC_TWO_PI ? (occ.t0,occ.t1) : nothing) :
                   occ.occ===:line ? (occ.t0,occ.t1) : nothing
         ukey=(_curve_type(m,tag),length(dkey),min(dkey,reverse(dkey)),
               signature)
@@ -1361,6 +1406,13 @@ function _duplicate_curve!(m::GeoModel, src::Int, caller; reversed::Bool=false,
             (geometry=(occ=:circle,center=occ.center,
                        n=(-occ.n[1],-occ.n[2],-occ.n[3]),X=occ.X,
                        Y=(-occ.Y[1],-occ.Y[2],-occ.Y[3]),r=occ.r,
+                       t0=-occ.t1,t1=-occ.t0))
+        # A reversed OCC ellipse uses the same p_rev(t) = p_fwd(−t) frame
+        # flip: X stays, Y and n negate.
+        occ!==nothing && occ.occ===:ellipse &&
+            (geometry=(occ=:ellipse,center=occ.center,
+                       n=(-occ.n[1],-occ.n[2],-occ.n[3]),X=occ.X,
+                       Y=(-occ.Y[1],-occ.Y[2],-occ.Y[3]),rx=occ.rx,ry=occ.ry,
                        t0=-occ.t1,t1=-occ.t0))
         # `CreateReversedCurve` mirrors the Nurbs knot vector in place
         # (k'[deg+N-i] = k[i]) and stores `ubeg' = 1-uend`, `uend' = 1-ubeg`.

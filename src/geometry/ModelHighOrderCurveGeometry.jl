@@ -85,6 +85,7 @@ function _model_high_order_curve_point(adapter::_ModelHighOrderCurveGeometry,u,c
     end
     kind===:arc && return _model_high_order_arc_point(frame,u)
     kind===:occ_circle && return _occ_circle_point(frame,u)
+    kind===:occ_ellipse && return _occ_ellipse_point(frame,u)
     kind===:occ_surface_iso && return _model_surface_iso_point(frame,u)
     kind===:occ_copied_curve && return first(_model_occ_curve_d2(frame.curve,u))
     kind===:occ_line && return _occ_line_point(frame,u)
@@ -104,6 +105,7 @@ function _model_high_order_curve_derivative(adapter::_ModelHighOrderCurveGeometr
         return ntuple(axis->(curved_right[axis]-curved_left[axis])*curved_reciprocal,3)
     end
     kind===:occ_circle && return _occ_circle_derivative(frame,u)
+    kind===:occ_ellipse && return _occ_ellipse_derivative(frame,u)
     kind===:occ_surface_iso && return _model_surface_iso_d1(frame,u)
     kind===:occ_copied_curve && return _model_occ_curve_d2(frame.curve,u)[2]
     kind===:occ_line && return frame.dir
@@ -162,7 +164,7 @@ function _model_native_curve_curvature(m::GeoModel,adapter::_ModelHighOrderCurve
             abs(first(boundary)[2])==abs(last(boundary)[2])
         return _model_discrete_curve_curvature(adapter.geometry,u,closed,caller)
     end
-    if kind in (:occ_circle,:occ_line,:occ_degenerate)
+    if kind in (:occ_circle,:occ_line,:occ_degenerate,:occ_ellipse)
         return _occ_curve_curvature(m,adapter.geometry,adapter.tag,u,caller)
     end
     d1=_model_high_order_curve_derivative(adapter,u,caller)

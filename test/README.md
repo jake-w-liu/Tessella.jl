@@ -61,6 +61,10 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 78.6 s | 321 | ~112 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 79.8 s | 321 | ~115 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 88.4 s | 321 | ~92 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 87.4 s | 321 | ~90 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 75.2 s | 313 | ~110 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 72.5 s | 313 | ~110 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 74.6 s | 313 | ~80 s |
@@ -182,6 +186,17 @@ The current assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds a
+compact OCC ellipse check (`occ_ellipse_smoke`: an `add_ellipse_arc`
+quarter-arc, a full `add_ellipse` and an `add_disk` face synchronized
+into `:ellipse`/`:plane` records with parametrization bounds and
+point evaluation through the generic arithmetic paths) — the
+`test/interfaces/api_occ_ellipse_test.jl` file covers the
+`EllipseD1`/`EllipseD2` evaluators, axis forms, the two-point arc
+solver's null/symmetric/axis-swap behavior, disk topology with
+`ellips2d` pcurve round-trips, dilation and reversed-hole loops,
+coherence merging, trimmed-extrema projection and end-to-end disk
+meshing, plus the `add_plane_surface` `abs`-wire-tag and empty-input
+parity fixes. The preceding increment adds a
 compact OCC wire/planar-face check (`occ_plane_smoke`: a lines-only
 square wire synchronized into a `:plane` face with UV bounds,
 evaluation and boundary queries, plus `add_rectangle`'s published

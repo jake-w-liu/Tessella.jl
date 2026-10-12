@@ -29,6 +29,21 @@ add_circle(x,y,z,r;tag=-1,angle1=0.0,angle2=2*pi,
                                  zaxis=zAxis,xaxis=xAxis)
 end
 
+add_ellipse_arc(start,center,major,stop;tag=-1)=_with_model() do m
+    Model._model_occ_add_ellipse_arc!(m,start,center,major,stop;tag)
+end
+
+add_ellipse(x,y,z,rx,ry;tag=-1,angle1=0.0,angle2=2*pi,
+            zAxis=Float64[],xAxis=Float64[])=_with_model() do m
+    Model._model_occ_add_ellipse!(m,x,y,z,rx,ry;tag,angle1,angle2,
+                                  zaxis=zAxis,xaxis=xAxis)
+end
+
+add_disk(x,y,z,rx,ry;tag=-1,
+         zAxis=Float64[],xAxis=Float64[])=_with_model() do m
+    Model._model_occ_add_disk!(m,x,y,z,rx,ry;tag,zaxis=zAxis,xaxis=xAxis)
+end
+
 add_wire(curve_tags;tag=-1,checkClosed=false)=_with_model() do m
     Model._model_occ_add_wire!(m,curve_tags;tag,check_closed=checkClosed)
 end
