@@ -26,12 +26,8 @@ function _partition_tet_snapshot(model,cached,class,caller)
     catalog=[row for row in _cache_catalog(cached,class) if !isempty(row[4])]
     all(row->row[1]==4,catalog) || throw(ArgumentError(
         "$caller: partition topology and ghosts currently support bare Tet4 Regions only; lower and mixed cells are unsupported"))
-    cached isa MixedMesh && (cached.partition_data!==nothing || !isempty(cached.periodic_links)) &&
-        throw(ArgumentError("$caller: existing partition or periodic topology is unsupported"))
-    isempty(model.meshing.periodic_uid_history) && isempty(model.periodic) || throw(ArgumentError(
-        "$caller: partition topology and ghosts do not yet support periodic constraints"))
-    all(parameter->parameter===nothing || isempty(parameter),class.node_parametric) ||
-        throw(ArgumentError("$caller: parametric partition node ownership is not implemented"))
+    cached isa MixedMesh && cached.partition_data!==nothing &&
+        throw(ArgumentError("$caller: existing partition topology is unsupported"))
     parents=sort!(unique(Int(owner) for (_,_,_,_,owners) in catalog for owner in owners))
     all(tag->tag>0 && haskey(model.discrete,(3,tag)) &&
         isempty(model.discrete[(3,tag)].boundary),parents) || throw(ArgumentError(
@@ -208,6 +204,7 @@ function _partition_tet_production_plan(model,cached,class,count,assignment,call
     partition=Elements.MixedPartitionData(count;entities=part_entities,ghost_entities,ghost_elements)
     target=MixedMesh(cached.coords,blocks;entity_data=data,elementary_entities=owners,
         physical_names=staged.physical_names,partition_data=partition,
+        periodic_links=cached isa MixedMesh ? cached.periodic_links : Elements.MixedPeriodicLink[],
         ancillary_sections=cached isa MixedMesh ? cached.ancillary_sections : [],
         data_sections=cached isa MixedMesh ? cached.data_sections : Elements.MshDataSection[])
     _geo_import_entity_receipts!(staged,target)

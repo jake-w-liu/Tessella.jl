@@ -16,7 +16,8 @@ Curve/Point lower-BRep partition topology, a mixed linear family
 (Tet4+Prism6 over Tri3+Quad4) BRep partition, a complete second-order
 (two-Tet10 over Tri6) BRep partition, a three-Tet4 junction BRep partition
 with junction seam and points, a coincident-Surface BRep partition, a
-complete third-order (two-Tet20 over Tri10) BRep partition, complete
+complete third-order (two-Tet20 over Tri10) BRep partition, a periodic
+link and parametric-node BRep partition transport, complete
 catalogued high-order Surface/Volume VTK, directional constant-tensor
 box and shared-material grids, floating-point Pyramid options, CLI help/version
 and read-only MSH checking, plus atomic current-model opening and merging,
@@ -53,10 +54,10 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
-| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 43.8 s | 276 | ~45 s |
-| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 45.7 s | 276 | ~46 s |
-| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 44.1 s | 276 | ~45 s |
-| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 46.9 s | 276 | ~47 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 42.3 s | 279 | ~45 s |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 46.5 s | 279 | ~49 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 44.4 s | 279 | ~47 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 47.2 s | 279 | ~50 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 41.3 s | 272 | ~42 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 45.2 s | 272 | ~46 s |
 | Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 41.0 s | 272 | ~42 s |
@@ -118,12 +119,23 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 272-assertion bodies took41.0/43.5 s onJulia1.12.7/1.13.1.
+The current 279-assertion bodies took44.4/47.2 s onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. Logs and actual exit-zero receipts are
 `test/tmp/ordinary_default_224_{112,113}_20261011.*`. The same252 Source files
 remained frozen throughout both calls. The latest increment adds a
+periodic/parametric BRep partition testset (3 assertions: an imported
+`$Periodic` link and UV-parametric vertices survive partition on their
+original entity tags, `validate`, unpartition restore) to the
+declared-BRep default smoke plus a 28-assertion periodic set in
+`test/interfaces/api_partition_lower_brep_functional_test.jl`, now
+364 assertions on both runtimes (a discrete periodic prism fixture — an
+imported dim-2 `$Periodic` link with an affine transform, six
+UV-parametric boundary vertices, Tet4+Tri3 cells — verifies verbatim link
+transport through partition, ghosts, MSH4 round-trips and `unpartition`,
+same-dimension same-owner parametric reclassification, and the bare-Tet4
+producer path). The preceding increment adds a
 third-order BRep partition testset (4 assertions: two Tet20 sharing a Tri10
 facet — Tri10 interface cell, three generated Line4 seam cells, `validate`,
 unpartition restore) to the declared-BRep default smoke plus a 40-assertion

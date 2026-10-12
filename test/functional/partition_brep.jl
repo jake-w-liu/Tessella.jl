@@ -276,3 +276,47 @@ end
         A.finalize()
     end
 end
+
+@testset "Periodic and parametric partition transport" begin
+    A=Tessella.API
+    try
+        # Slave Surface 32 is the translated master Surface 31; every boundary
+        # vertex carries a Surface UV parameter. Partition children keep the
+        # link bound to the original entities (Gmsh convention) and parametric
+        # rows reclassify to same-parent children.
+        A.finalize();A.initialize();A.model.add("periodic prism")
+        A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+        for tag in 31:35;A.model.add_discrete_entity(2,tag);end
+        A.model.add_discrete_entity(3,11,[31,32,33,34,35])
+        A.mesh.add_nodes(2,31,[11,12,13],[0.,0.,0., 1.,0.,0., 0.,1.,0.],
+            [0.,0., 1.,0., 0.,1.])
+        A.mesh.add_nodes(2,32,[14,15,16],[0.,0.,1., 1.,0.,1., 0.,1.,1.],
+            [0.,0., 1.,0., 0.,1.])
+        A.mesh.add_elements_by_type(31,2,[631],[11,13,12])
+        A.mesh.add_elements_by_type(32,2,[632],[14,15,16])
+        A.mesh.add_elements_by_type(33,2,[633,634],[11,12,15, 11,15,14])
+        A.mesh.add_elements_by_type(34,2,[635,636],[13,11,16, 11,14,16])
+        A.mesh.add_elements_by_type(35,2,[637,638],[12,13,16, 12,16,15])
+        A.mesh.add_elements_by_type(11,4,[501,502,503],
+            [11,12,13,16, 11,12,16,15, 11,14,15,16])
+        A.mesh.generate(3);A.option("Mesh.PartitionCreateTopology",1)
+        path=joinpath(mktempdir(),"prism.msh");A.write(path)
+        lines=readlines(path)
+        append!(lines,["\$Periodic","1","2 32 31","16",
+            "1.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 0.0 1.0 -1.0 0.0 0.0 0.0 1.0",
+            "3","14 11","15 12","16 13","\$EndPeriodic"])
+        write(path,join(lines,"\n")*"\n")
+        A.model.add("imported periodic prism");A.open(path);rm(path)
+        A.mesh.partition(2,[631:638...,501,502,503],
+            Int32[1,1,2,1,1,1,1,2,1,2,1])
+        link=only(A._cached_mesh_locked("test").periodic_links)
+        @test (link.dim,link.slave_entity,link.master_entity)==(2,32,31) &&
+            length(link.slave_nodes)==3
+        @test Tessella.validate(A.mesh.get()).ok
+        A.mesh.unpartition()
+        @test length(A._cached_mesh_locked("test").periodic_links)==1 &&
+            count(!isnothing,A._cached_mesh_locked("test").entity_data.node_parametric)==6
+    finally
+        A.finalize()
+    end
+end

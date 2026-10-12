@@ -226,8 +226,13 @@ duplicate interface entity or cell is emitted. Every complete third-order
 family — Line4 curves, Tri10/Quad16 surfaces and Tet20/Hex64/Prism40/Pyr30
 volumes — now partitions through generic order-p facet derivation with
 tuple-valued edge-node certification, Tri10/Quad16 interfaces and Line4
-seams. Order ≥4 and incomplete/serendipity high-order cells,
-periodic/parametric topology, bare non-Tet4 volumes and
+seams. Periodic `MixedPeriodicLink` records and `model.periodic`
+constraints now transport through partition bound to the original entity
+tags (the Gmsh 4.15.2 convention), `unpartition()` rebuilds them against
+restored node rows, and parametric `node_parametric` rows travel with
+their vertices — reclassifying only to same-dimension children of their
+own original owner so the parametric-length invariant holds. Order ≥4 and
+incomplete/serendipity high-order cells, bare non-Tet4 volumes and
 parallel production remain open.
 
 An explicit [variable-tensor ordinary Surface constructor](docs/metric_model_surfaces.md)

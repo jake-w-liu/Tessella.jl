@@ -344,6 +344,32 @@ is now **336/336** and the default smoke gained a 4-assertion third-order
 testset. PART01 remains open (periodic/parametric topology, order ≥4
 cells, parallel production).
 
+### Periodic links and parametric nodes in lower-BRep partition production (2026-10-12)
+
+Devin landed the next PART01 slice against a public Gmsh 4.15.2 SDK
+observation of a partitioned periodic OCC box — `$Periodic` keeps its
+links bound to the *original* entity tags with global node tags, and both
+endpoints persist post-partition. `MixedPeriodicLink` records therefore
+pass through both partition producers unchanged (original slave/master
+tags, same node rows; the `MixedMesh` constructor deep-copies them),
+`model.periodic` constraints and `periodic_uid_history` persist on the
+staged model, and `unpartition()` rebuilds each surviving link against
+restored node rows through its existing remap path. Parametric
+`node_parametric` rows travel with their vertices: classification still
+retargets to the lowest-dimension incident partition entity, but a
+parametric row now only lands on a same-dimension child *of its own
+original owner* (falling back to the original entity otherwise). The
+earlier conservative guard hid a real classification defect — a UV vertex
+could reclassify to a lower-dim seam Curve or junction Point and break
+the `MixedEntityData` length invariant — which the same-parent rule now
+prevents. A discrete periodic prism fixture (imported `$Periodic` dim-2
+link, six UV-parametric boundary vertices, Tet4+Tri3) verifies link
+transport through partition, ghosts, MSH4 round-trip and `unpartition` on
+the lower-BRep path, and a bare-Tet4 probe covers the generic producer.
+The focused partition file adds a 28-assertion periodic testset; the file
+is now **364/364** and the default smoke gained a 3-assertion periodic
+testset. PART01 remains open (order ≥4 cells, parallel production).
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

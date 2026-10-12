@@ -169,12 +169,8 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
         row[1] in _PARTITION_CURVE_TYPES || row[1] in _PARTITION_VOLUME_TYPES,catalog) &&
     any(row->row[1] in _PARTITION_VOLUME_TYPES,catalog) || throw(ArgumentError(
         "$caller: lower BRep partitioning supports linear and complete second- and third-order cells only"))
-    cached isa MixedMesh && (cached.partition_data!==nothing || !isempty(cached.periodic_links)) &&
-        throw(ArgumentError("$caller: existing partition or periodic topology is unsupported"))
-    isempty(model.periodic) && isempty(model.meshing.periodic_uid_history) ||
-        throw(ArgumentError("$caller: periodic lower BRep partitioning is unsupported"))
-    all(value->value===nothing || isempty(value),class.node_parametric) ||
-        throw(ArgumentError("$caller: parametric lower BRep partitioning is unsupported"))
+    cached isa MixedMesh && cached.partition_data!==nothing &&
+        throw(ArgumentError("$caller: existing partition topology is unsupported"))
     public=class.public_tags
     length(public.element_tags)<=typemax(Int32) || throw(ArgumentError("$caller: lower BRep cell capacity exceeded"))
     for (_,record) in Model._discrete_mesh_records_model(model)
@@ -842,11 +838,22 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
     _partition_brep_boundary_certificate(source,children,part_entities,boundaries,interfaces,curves,caller;topology)
     node_owners=copy(class.node_entities)
     incident=fill((4,Int32(typemax(Int32))),nnodes(cached))
+    incident_par=fill((4,Int32(typemax(Int32))),nnodes(cached))
     for (block,classified) in zip(blocks,owners),column in axes(block.nodes,2),row in block.nodes[:,column]
         candidate=(Elements.msh_dimension(block.msh),classified[column])
         isless(candidate,incident[row]) && (incident[row]=candidate)
+        parameters=class.node_parametric[row]
+        if parameters!==nothing && candidate[1]==length(parameters) &&
+                isless(candidate,incident_par[row])
+            entry=get(part_entities,(candidate[1],Int(candidate[2])),nothing)
+            owner=(class.node_entities[row][1],Int(class.node_entities[row][2]))
+            entry!==nothing && entry.parent==owner && (incident_par[row]=candidate)
+        end
     end
-    for row in eachindex(incident);incident[row][1]<4 && (node_owners[row]=incident[row]);end
+    for row in eachindex(incident)
+        pick=class.node_parametric[row]===nothing ? incident[row] : incident_par[row]
+        pick[1]<4 && (node_owners[row]=pick)
+    end
     for ((dim,tag),entity) in collect(part_entities)
         boundary=boundaries[(dim,tag)]
         staged.discrete[(dim,tag)].boundary=Tuple{Int,Int}[(dim-1,Int(value)) for value in boundary]
@@ -880,6 +887,7 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
     partition=Elements.MixedPartitionData(count;entities=part_entities,ghost_entities,ghost_elements)
     target=MixedMesh(cached.coords,blocks;entity_data=data,elementary_entities=owners,
         physical_names=staged.physical_names,partition_data=partition,
+        periodic_links=cached isa MixedMesh ? cached.periodic_links : Elements.MixedPeriodicLink[],
         ancillary_sections=cached isa MixedMesh ? cached.ancillary_sections : [],
         data_sections=cached isa MixedMesh ? cached.data_sections : Elements.MshDataSection[])
     validate(target).ok || throw(ArgumentError("$caller: lower BRep partition produced invalid or duplicate cells"))

@@ -141,10 +141,30 @@ coincident rim keep their roles, and a junction seam whose edge is carried
 by the coincident facet binds the Surface child through the ordinary
 border certificate.
 
+## Periodic links and parametric nodes
+
+Periodic `MixedPeriodicLink` records transport through partition unchanged —
+bound to the original slave/master entity tags and the same node rows —
+matching the Gmsh 4.15.2 convention: a partitioned `$Periodic` section keeps
+its links on the original entities, which persist in the partition model
+alongside their children. `model.periodic` constraints and
+`meshing.periodic_uid_history` persist on the staged model for the same
+reason, and `unpartition()` rebuilds each surviving link against the
+restored node rows exactly as it already did for imported partitions.
+
+Parametric `node_parametric` rows travel with their node rows. Classification
+still retargets each vertex to its lowest-dimension incident partition
+entity, but a parametric row may only land on a same-dimension child *of its
+own original owner* — its parameters describe that entity's parametrization
+domain — so a Surface-classified UV vertex keeps a Surface child (never a
+seam Curve or junction Point) and falls back to the original entity when no
+eligible child exists. The `MixedEntityData` length invariant
+(`length(parameters) == entity dim`) therefore holds end to end.
+
 ## Guards and scope
 
-Order ≥4 and incomplete/serendipity high-order cells, periodic or
-parametric topology, already partitioned data, seam branches within one
+Order ≥4 and incomplete/serendipity high-order cells, already partitioned
+data, seam branches within one
 partition-membership group and actual parallel
 partition algorithms remain guarded or open. Bare meshes without lower
 cells still route to the Tet4-only producer and bare non-Tet4 volume meshes
@@ -171,7 +191,10 @@ Region parent; a three-Tet10 junction emitting a Line3 junction seam; a
 Tet20 pair whose Tri10 interface border is a declared closed Line4 Curve;
 a Hex64 pair (Quad16 interface and a closed four-cell Line4 seam); a
 Prism40 pair mixing Tri10 and Quad16 exterior blocks around a Quad16
-interface; and a Pyr30 pair sharing the Quad16 base. Checks cover child
+interface; a Pyr30 pair sharing the Quad16 base; and a periodic prism
+whose imported dim-2 `MixedPeriodicLink` and six UV-parametric boundary
+vertices survive partition, ghosts, MSH4 round-trip and `unpartition`.
+Checks cover child
 parents/partitions, signed Curve→Point and Surface→Curve closures, interface
 rim curves, junction seam sharing, junction point emission and reuse,
 original cell/node UIDs, physical groups, ghost records,

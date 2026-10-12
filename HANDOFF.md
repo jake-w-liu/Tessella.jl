@@ -428,6 +428,29 @@ Quad16 base; ghosts, `validate`, MSH4/public-write round-trips and
 gained a third-order testset. PART01 remains open for periodic/parametric
 topology, order ≥4 cells and parallel production.
 
+The periodic/parametric transport slice is also landed, verified against a
+public Gmsh 4.15.2 SDK observation of a partitioned periodic OCC box —
+`$Periodic` keeps its links bound to the *original* entity tags with
+global node tags, and both endpoints persist post-partition.
+`MixedPeriodicLink` records therefore pass through both partition
+producers unchanged (original slave/master tags, same node rows), the
+`MixedMesh` constructor deep-copies them, `model.periodic` constraints and
+`periodic_uid_history` persist on the staged model, and `unpartition()`
+rebuilds each surviving link against restored node rows through its
+existing remap path. Parametric `node_parametric` rows travel with their
+vertices: classification still retargets to the lowest-dimension incident
+partition entity, but a parametric row now only lands on a same-dimension
+child *of its own original owner* (falling back to the original entity) —
+the earlier conservative guard hid a real classification defect where a
+UV vertex could reclassify to a lower-dim seam Curve or junction Point
+and break the `MixedEntityData` length invariant. A discrete periodic
+prism fixture (imported `$Periodic` dim-2 link, six UV-parametric
+boundary vertices, Tet4+Tri3) verifies link transport through partition,
+ghosts, MSH4 round-trip and `unpartition` on the lower-BRep path, and a
+bare-Tet4 probe covers the generic producer. Focused checks pass 364/364
+on Julia 1.13.1 (28 new assertions); the default smoke gained a periodic
+testset. PART01 remains open for order ≥4 cells and parallel production.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

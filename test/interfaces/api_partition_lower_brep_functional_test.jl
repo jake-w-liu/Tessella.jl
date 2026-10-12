@@ -1658,4 +1658,88 @@ end
         A.finalize()
     end
 end
+
+# Discrete prism: slave Surface 32 is the translated master Surface 31. All six
+# boundary vertices carry Surface UV parameters so the fixture exercises both
+# periodic-link and parametric-node transport at once.
+function periodic_prism_fixture!()
+    A.finalize();A.initialize();A.model.add("periodic prism")
+    A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+    for tag in 31:35
+        A.model.add_discrete_entity(2,tag)
+    end
+    A.model.add_discrete_entity(3,11,[31,32,33,34,35])
+    A.mesh.add_nodes(2,31,[11,12,13],[0.,0.,0., 1.,0.,0., 0.,1.,0.],
+        [0.,0., 1.,0., 0.,1.])
+    A.mesh.add_nodes(2,32,[14,15,16],[0.,0.,1., 1.,0.,1., 0.,1.,1.],
+        [0.,0., 1.,0., 0.,1.])
+    A.mesh.add_elements_by_type(31,2,[631],[11,13,12])
+    A.mesh.add_elements_by_type(32,2,[632],[14,15,16])
+    A.mesh.add_elements_by_type(33,2,[633,634],[11,12,15, 11,15,14])
+    A.mesh.add_elements_by_type(34,2,[635,636],[13,11,16, 11,14,16])
+    A.mesh.add_elements_by_type(35,2,[637,638],[12,13,16, 12,16,15])
+    A.mesh.add_elements_by_type(11,4,[501,502,503],
+        [11,12,13,16, 11,12,16,15, 11,14,15,16])
+    A.mesh.generate(3)
+    A.option("Mesh.PartitionCreateTopology",1)
+end
+
+@testset "periodic links and parametric nodes survive lower BRep partition" begin
+    try
+        periodic_prism_fixture!()
+        # MSH round-trip imports an actual `$Periodic` link slave 32 -> master 31.
+        path=joinpath(mktempdir(),"prism.msh");A.write(path)
+        section=["\$Periodic","1","2 32 31","16",
+            "1.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 0.0 1.0 -1.0 0.0 0.0 0.0 1.0",
+            "3","14 11","15 12","16 13","\$EndPeriodic"]
+        lines=readlines(path);append!(lines,section);write(path,join(lines,"\n")*"\n")
+        A.model.add("imported periodic prism");A.open(path);rm(path)
+        cached=A._cached_mesh_locked("test")
+        @test length(cached.periodic_links)==1
+        link=only(cached.periodic_links)
+        @test (link.dim,link.slave_entity,link.master_entity)==(2,32,31)
+        slave_nodes=copy(link.slave_nodes);master_nodes=copy(link.master_nodes)
+        @test length(slave_nodes)==3 && link.affine!==nothing
+        @test count(!isnothing,cached.entity_data.node_parametric)==6
+        # Surface cells follow their carrier Tet4; Tet 502 gets part 2.
+        A.mesh.partition(2,[631:638...,501,502,503],
+            Int32[1,1,2,1,1,1,1,2,1,2,1])
+        cached=A._cached_mesh_locked("test")
+        # Periodic links stay bound to the original entities (Gmsh convention):
+        # the slave/master parents persist alongside their partition children.
+        @test length(cached.periodic_links)==1
+        link=only(cached.periodic_links)
+        @test (link.dim,link.slave_entity,link.master_entity)==(2,32,31)
+        @test link.slave_nodes==slave_nodes && link.master_nodes==master_nodes
+        @test link.affine!==nothing
+        @test cached.partition_data.num_partitions==2
+        @test Tessella.validate(cached).ok
+        # Parametric rows keep their UVs and reclassify to same-parent children.
+        data=cached.entity_data
+        @test count(!isnothing,data.node_parametric)==6
+        for row in 1:6
+            parameters=data.node_parametric[row]
+            @test parameters!==nothing && length(parameters)==data.node_entities[row][1]
+            entity=data.node_entities[row]
+            @test A.model.get_parent(entity[1],entity[2])==(2,row<=3 ? 31 : 32)
+        end
+        # `$Periodic` round-trips through the partitioned file.
+        part=joinpath(mktempdir(),"prism-partitioned.msh");A.write(part)
+        @test occursin("\$Periodic",read(part,String))
+        A.model.add("partitioned periodic reread");A.open(part);rm(part)
+        reread=A._cached_mesh_locked("test")
+        @test length(reread.periodic_links)==1 &&
+            reread.partition_data.num_partitions==2 &&
+            Tessella.validate(reread).ok
+        # Unpartition rebuilds the link against surviving node rows.
+        A.mesh.unpartition()
+        restored=A._cached_mesh_locked("test")
+        @test restored.partition_data===nothing
+        @test length(restored.periodic_links)==1 &&
+            length(only(restored.periodic_links).slave_nodes)==3
+        @test count(!isnothing,restored.entity_data.node_parametric)==6
+    finally
+        A.finalize()
+    end
+end
 end
