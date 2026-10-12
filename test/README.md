@@ -61,6 +61,10 @@ Local receipts on 2026-10-13, with bounds checks; only the marked
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 82.5 s | 382 | ~85 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 83.5 s | 382 | ~119 s |
+| Julia 1.13.1 | `test/runtests.jl`, `-O2`, body 84.2 s | 382 | ~86 s |
+| Julia 1.12.7 | `test/runtests.jl`, `-O2`, body 84.9 s | 382 | ~119 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 85.5 s | 369 | ~88 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 85.0 s | 369 | ~120 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 88.7 s | 369 | ~92 s |
@@ -212,6 +216,20 @@ The current assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds a
+compact OCC spline check (`occ_spline_smoke`: a 4-point
+`add_spline` interpolant's length, a 2-point segment, a closed
+periodic spline, the arity/unknown-point errors and synchronization
+into a "BSpline" curve) — the
+`test/interfaces/api_occ_spline_test.jl` file covers the
+`GeomAPI_Interpolate` mirror: chord-length parameters,
+`PLib::EvalLagrange` endpoint/periodic tangents, the degree-1/2/3
+fallbacks, the clamped `{t1×4, t2..t_{n-1}, tn×4}` and wrapped
+periodic `{t_np−per}²,0²,t2..t_np,per²,{t2+per}²` knot vectors,
+interpolation at every knot, the independent tridiagonal
+complete-spline cross-check at 1e-15, C2 continuity, closure and
+tangent periodicity, endpoint-child topology, error/atomicity
+behavior, queries/transforms and end-to-end wire meshing. The
+preceding increment adds a
 compact OCC inertia check (`occ_inertia_smoke`: an `add_box` and
 `add_sphere` against closed-form inertia tensors, an `add_line`
 segment's off-axis moments, a dim-0 zero matrix and the unknown-entity

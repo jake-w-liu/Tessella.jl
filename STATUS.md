@@ -951,6 +951,33 @@ kernel-side before synchronization. Verified by
 `test/interfaces/api_occ_inertia_test.jl` (33 assertions) plus an
 `occ_inertia_smoke` default check.
 
+### GEO01 slice 11 — `occ.add_spline` (2026-10-14)
+
+The eleventh GEO01 slice adds `model.occ.add_spline(points;tag=-1)` —
+upstream `OCC_Internals::addSpline`'s `GeomAPI_Interpolate` path (C2
+interpolating b-spline, periodic iff `pointTags.front()==pointTags.back()`).
+The implementation mirrors OCCT's scheme at source level: chord-length
+parameters, Lagrange endpoint tangents (`BuildTangents`/`BuildPeriodicTangent`
+through `PLib::EvalLagrange`), and the `BSplCLib::Interpolate` collocation
+system solved densely — identical knot vectors, identical constraint arrays,
+the same unique interpolant (verified to 1e-15 against an independent
+tridiagonal complete-spline solve). Degree fallbacks match: two points give
+the degree-1 segment, three the degree-2 interpolant, four-plus the
+clamped spline on knots `{t1×4, t2..t_{n-1}, tn×4}` with `n+2` poles;
+periodic input solves the wrapped knot vector
+`{t_np−per}²,0²,t2..t_np,per²,{t2+per}²` with `np+3` poles and stores it flat
+(the same function OCCT's periodic wrapper evaluates), while the 3-tag
+closed case falls back to the degree-1 out-and-back polyline. Results bind
+as `copied_curve`/`:tensor_bspline` records with the input vertices as
+endpoints (`[id,id]` for closed loops, like `add_circle`), so evaluation,
+queries, measures, transforms, synchronization ("BSpline" curves) and
+wire meshing all flow through existing machinery. `CheckPoints`-mirroring
+rejects consecutive points closer than `Geometry.Tolerance` (1e-8), and
+singular systems report "could not interpolate spline" like upstream's
+`IsDone` failure — all before any tag or shape allocation. Verified by
+`test/interfaces/api_occ_spline_test.jl` (52 assertions) plus an
+`occ_spline_smoke` default check.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

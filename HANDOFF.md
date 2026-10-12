@@ -943,6 +943,37 @@ analytic curve/face/solid tensors, row-major ordering, the rejection
 paths, lifecycle dims and pre-sync transform reads, plus an
 `occ_inertia_smoke` default check.
 
+The eleventh GEO01 slice followed: `add_spline` in
+`src/geometry/ModelOCCSpline.jl` — upstream
+`OCC_Internals::addSpline`'s `GeomAPI_Interpolate` mode-0 path
+mirrored at source level. Parameters are cumulative chord lengths;
+endpoint tangents come from `BuildTangents`/`BuildPeriodicTangent`'s
+`PLib::EvalLagrange` order-1 evaluation through the first/last
+degree+1 points; and the `BSplCLib::Interpolate` collocation system —
+the same knot vectors, parameter/contact-order/pole arrays OCCT
+builds — is solved densely, producing the unique interpolant (verified
+to 1e-15 against an independent tridiagonal complete-spline solve, a
+different linear system converging on the same curve). Degree
+fallbacks match upstream: two points give the degree-1 segment, three
+the degree-2 single-span interpolant, four-plus the clamped spline on
+`{t1×4, t2..t_{n-1}, tn×4}` with `n+2` poles. Tag-equality periodicity
+(`first==last` tag) solves OCCT's internally wrapped knot vector
+`{t_np−per}²,0²,t2..t_np,per²,{t2+per}²` with `np+3` poles and stores
+it flat — the identical function to OCCT's periodic-wrapped curve —
+while the 3-tag closed case falls back to the degree-1 out-and-back
+polyline. Results bind as `copied_curve`/`:tensor_bspline` records
+whose endpoints are the input vertices (`[id,id]` on closed loops,
+matching `add_circle`), so evaluation, queries, measures, transforms,
+synchronization ("BSpline") and wire meshing reuse existing paths.
+Consecutive points closer than `Geometry.Tolerance` reject like
+`CheckPoints`, and singular systems report "could not interpolate
+spline" like `IsDone` failure — all before tag or shape allocation.
+`test/interfaces/api_occ_spline_test.jl` pins all four degree
+branches, interpolation at every knot, closure/tangent periodicity,
+the tridiagonal cross-check, C2 continuity, endpoint-child topology,
+errors and atomicity, queries/transforms and end-to-end wire meshing,
+plus an `occ_spline_smoke` default check.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

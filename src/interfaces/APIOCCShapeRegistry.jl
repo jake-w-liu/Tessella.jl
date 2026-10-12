@@ -15,6 +15,10 @@ add_bspline(points;kwargs...)=_with_model() do m
     Model._model_occ_add_bspline!(m,points;tolerance=OPTIONS["Geometry.Tolerance"],kwargs...)
 end
 
+add_spline(points;kwargs...)=_with_model() do m
+    Model._model_occ_add_spline!(m,points;tolerance=OPTIONS["Geometry.Tolerance"],kwargs...)
+end
+
 add_line(start,stop;kwargs...)=_with_model() do m
     Model._model_occ_add_line!(m,start,stop;kwargs...)
 end
