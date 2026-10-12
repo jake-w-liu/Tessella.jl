@@ -88,7 +88,7 @@ end
 
 function _partition_tet_production_plan(model,cached,class,count,assignment,caller;
                                         topology::Bool,ghosts::Bool)
-    if class!==nothing && any(row->row[1] in (1,2,3,15) && !isempty(row[4]),
+    if class!==nothing && any(row->row[1] in (1,2,3,8,9,10,15) && !isempty(row[4]),
                               _cache_catalog(cached,class))
         return _partition_brep_production_plan(model,cached,class,count,assignment,caller;topology,ghosts)
     end

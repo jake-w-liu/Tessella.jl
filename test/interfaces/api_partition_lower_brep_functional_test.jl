@@ -332,7 +332,7 @@ end
         fixture!(curves=[CURVES[1],(50,[(11,12)],[1,-2]),CURVES[2:end]...])
         caught=try partition!(710);nothing catch error;error end
         @test caught isa ArgumentError &&
-            occursin("repeats a Line2 support",sprint(showerror,caught))
+            occursin("repeats a Curve cell support",sprint(showerror,caught))
         # A Point bound whose cell is not on the Curve end is inconsistent.
         fixture!(curves=[(41,[(11,12)],[3,-2]),CURVES[2:end]...])
         caught=try partition!();nothing catch error;error end
@@ -672,6 +672,348 @@ end
         before=snapshot()
         caught=try
             A.mesh.partition(2,[601:607...,501,502],Int32[1,1,1,2,2,2,2,1,2]);nothing
+        catch error;error end
+        @test caught isa ArgumentError &&
+            occursin("positive oriented volume cells",sprint(showerror,caught))
+        @test snapshot()==before
+    finally
+        A.finalize()
+    end
+end
+
+# Second-order fixtures build a conforming P2 mesh literally: edge nodes are
+# keyed by their corner pair and quadrangle face nodes by the corner set, so
+# volume facets, surface cells and curve cells share actual nodes.
+struct _P2Nodes
+    cv::Dict{Int,NTuple{3,Float64}}
+    map::Dict{Any,Int32}
+    coords::Vector{NTuple{3,Float64}}
+end
+_P2Nodes()=_P2Nodes(Dict{Int,NTuple{3,Float64}}(),Dict{Any,Int32}(),NTuple{3,Float64}[])
+function _p2_corner!(p,tag,pos)
+    p.cv[tag]=pos
+    get!(p.map,(:v,tag)) do;push!(p.coords,pos);Int32(length(p.coords));end
+end
+function _p2_mid(p,a,b)
+    key=minmax(a,b)
+    get!(p.map,(:e,key)) do
+        push!(p.coords,(p.cv[key[1]].+p.cv[key[2]])./2);Int32(length(p.coords))
+    end
+end
+function _p2_center(p,corners...)
+    key=Tuple(sort!(collect(corners)))
+    get!(p.map,(:f,key)) do
+        push!(p.coords,ntuple(d->sum(p.cv[c][d] for c in corners)/length(corners),3))
+        Int32(length(p.coords))
+    end
+end
+function _p2_body(p,id,corners)
+    get!(p.map,(:b,id)) do
+        push!(p.coords,ntuple(d->sum(p.cv[c][d] for c in corners)/length(corners),3))
+        Int32(length(p.coords))
+    end
+end
+_p2_row(p,tag)=p.map[(:v,tag)]
+const _P2_TET_EDGES=((1,2),(2,3),(3,1),(4,1),(4,3),(4,2))
+const _P2_HEX_EDGES=((1,2),(1,4),(1,5),(2,3),(2,6),(3,4),
+                     (3,7),(4,8),(5,6),(5,8),(6,7),(7,8))
+const _P2_HEX_FACETS=((1,4,3,2),(1,2,6,5),(1,5,8,4),(2,3,7,6),(3,4,8,7),(5,6,7,8))
+const _P2_PRI_EDGES=((1,2),(1,3),(1,4),(2,3),(2,5),(3,6),(4,5),(4,6),(5,6))
+_p2_tet(p,c)=Int32[[_p2_row(p,t) for t in c]...;
+    [_p2_mid(p,c[a],c[b]) for (a,b) in _P2_TET_EDGES]...]
+_p2_hex(p,c,id)=Int32[[_p2_row(p,t) for t in c]...;
+    [_p2_mid(p,c[a],c[b]) for (a,b) in _P2_HEX_EDGES]...;
+    [_p2_center(p,c[f[1]],c[f[2]],c[f[3]],c[f[4]]) for f in _P2_HEX_FACETS]...;
+    _p2_body(p,id,c)]
+_p2_pri(p,c)=Int32[[_p2_row(p,t) for t in c]...;
+    [_p2_mid(p,c[a],c[b]) for (a,b) in _P2_PRI_EDGES]...;
+    [_p2_center(p,c[1],c[2],c[5],c[4]),_p2_center(p,c[1],c[4],c[6],c[3]),
+     _p2_center(p,c[2],c[3],c[6],c[5])]...]
+_p2_tri(p,c)=Int32[_p2_row(p,c[1]),_p2_row(p,c[2]),_p2_row(p,c[3]),
+    _p2_mid(p,c[1],c[2]),_p2_mid(p,c[2],c[3]),_p2_mid(p,c[3],c[1])]
+_p2_quad(p,c)=Int32[_p2_row(p,c[1]),_p2_row(p,c[2]),_p2_row(p,c[3]),_p2_row(p,c[4]),
+    _p2_mid(p,c[1],c[2]),_p2_mid(p,c[2],c[3]),_p2_mid(p,c[3],c[4]),
+    _p2_mid(p,c[4],c[1]),_p2_center(p,c...)]
+_p2_line(p,a,b)=Int32[_p2_row(p,a),_p2_row(p,b),_p2_mid(p,a,b)]
+function _p2_nodes!(p)
+    tags=Int32[];xyz=Float64[]
+    for (i,c) in enumerate(p.coords)
+        push!(tags,Int32(i));append!(xyz,collect(c))
+    end
+    A.mesh.add_nodes(3,11,tags,xyz)
+end
+_p2_edge_uid(p,a,b)=UInt64(p.map[(:e,minmax(a,b))])
+
+# Two Tet10 over Tri6 surfaces; a closed declared Line3 Curve runs along the
+# inward-wound base Surface 45 so one interface border edge binds the declared
+# Curve and the other two become a generated Line3 seam.
+function p2_tets_fixture!(;curve_maker=_p2_line,tet_b=_p2_tet)
+    A.finalize();A.initialize();A.model.add("p2 tets")
+    A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+    p=_P2Nodes()
+    for (tag,pos) in ((1,(0.,0.,0.)),(2,(1.,0.,0.)),(3,(0.,1.,0.)),
+                      (4,(0.,0.,1.)),(7,(1.,1.,1.)))
+        _p2_corner!(p,tag,pos)
+    end
+    t1=_p2_tet(p,(1,2,3,4));t2=tet_b(p,(2,3,4,7))
+    base=_p2_tri(p,(1,3,2))
+    base=Int32[base[1],base[3],base[2],base[6],base[5],base[4]]
+    s41=hcat(_p2_tri(p,(1,2,4)),_p2_tri(p,(1,4,3)))
+    c2=(2,3,4,7)
+    s42=hcat([_p2_tri(p,(c2[f[1]],c2[f[2]],c2[f[3]]))
+              for f in ((1,2,4),(1,4,3),(4,2,3))]...)
+    l46=hcat(curve_maker(p,1,3),curve_maker(p,3,2),curve_maker(p,2,1))
+    A.model.add_discrete_entity(1,46,Int[])
+    A.model.add_discrete_entity(2,41,Int[])
+    A.model.add_discrete_entity(2,42,Int[])
+    A.model.add_discrete_entity(2,45,[-46])
+    A.model.add_discrete_entity(3,11,[41,-45,42])
+    A.model.add_physical_group(1,[46];tag=210,name="rim")
+    _p2_nodes!(p)
+    A.mesh.add_elements_by_type(41,9,[701,702],vec(s41))
+    A.mesh.add_elements_by_type(42,9,[703,704,705],vec(s42))
+    A.mesh.add_elements_by_type(45,9,[706],vec(base))
+    A.mesh.add_elements_by_type(46,8,[801,802,803],vec(l46))
+    A.mesh.add_elements_by_type(11,11,[501,502],vcat(t1,t2))
+    A.mesh.generate(3)
+    A.option("Mesh.PartitionCreateTopology",1)
+    return p
+end
+# Two Hex27 share the x=1 Quad9; every interface rim edge becomes a Line3 seam.
+function p2_hexes_fixture!()
+    A.finalize();A.initialize();A.model.add("p2 hexes")
+    A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+    p=_P2Nodes()
+    h1=(1,2,3,4,5,6,7,8)
+    for (i,pos) in enumerate(((0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.),
+                             (0.,0.,1.),(1.,0.,1.),(1.,1.,1.),(0.,1.,1.)))
+        _p2_corner!(p,i,pos)
+    end
+    for (i,pos) in ((21,(2.,0.,0.)),(22,(2.,1.,0.)),(23,(2.,0.,1.)),(24,(2.,1.,1.)))
+        _p2_corner!(p,i,pos)
+    end
+    h2=(2,21,22,3,6,23,24,7)
+    c1=_p2_hex(p,h1,1);c2=_p2_hex(p,h2,2)
+    s41=hcat([_p2_quad(p,(h1[f[1]],h1[f[2]],h1[f[3]],h1[f[4]]))
+              for f in _P2_HEX_FACETS[[1,2,3,5,6]]]...)
+    s42=hcat([_p2_quad(p,(h2[f[1]],h2[f[2]],h2[f[3]],h2[f[4]]))
+              for f in _P2_HEX_FACETS[[1,2,4,5,6]]]...)
+    A.model.add_discrete_entity(2,41,Int[])
+    A.model.add_discrete_entity(2,42,Int[])
+    A.model.add_discrete_entity(3,11,[41,42])
+    _p2_nodes!(p)
+    A.mesh.add_elements_by_type(41,10,[701:705...],vec(s41))
+    A.mesh.add_elements_by_type(42,10,[706:710...],vec(s42))
+    A.mesh.add_elements_by_type(11,12,[501,502],vcat(c1,c2))
+    A.mesh.generate(3)
+    A.option("Mesh.PartitionCreateTopology",1)
+    return p
+end
+# A Prism18 and a Tet10 share one Tri6; Surface 41 keeps a Tri6 and Quad9 block.
+function p2_tet_prism_fixture!()
+    A.finalize();A.initialize();A.model.add("p2 tet prism")
+    A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+    p=_P2Nodes()
+    for (tag,pos) in ((1,(0.,0.,0.)),(2,(1.,0.,0.)),(3,(0.,1.,0.)),
+                      (4,(0.,0.,1.)),(5,(1.,0.,1.)),(6,(0.,1.,1.)),
+                      (7,(1/3,1/3,-1.)))
+        _p2_corner!(p,tag,pos)
+    end
+    pr=_p2_pri(p,(1,2,3,4,5,6));tt=_p2_tet(p,(1,3,2,7))
+    s41_tri=_p2_tri(p,(4,5,6))
+    s41_quad=hcat(_p2_quad(p,(1,2,5,4)),_p2_quad(p,(1,4,6,3)),_p2_quad(p,(2,3,6,5)))
+    tc=(1,3,2,7)
+    s42=hcat([_p2_tri(p,(tc[f[1]],tc[f[2]],tc[f[3]]))
+              for f in ((1,2,4),(1,4,3),(4,2,3))]...)
+    A.model.add_discrete_entity(2,41,Int[])
+    A.model.add_discrete_entity(2,42,Int[])
+    A.model.add_discrete_entity(3,11,[41,42])
+    _p2_nodes!(p)
+    A.mesh.add_elements_by_type(41,9,[701],vec(s41_tri))
+    A.mesh.add_elements_by_type(41,10,[702,703,704],vec(s41_quad))
+    A.mesh.add_elements_by_type(42,9,[705,706,707],vec(s42))
+    A.mesh.add_elements_by_type(11,13,[501],vec(pr))
+    A.mesh.add_elements_by_type(11,11,[502],vec(tt))
+    A.mesh.generate(3)
+    A.option("Mesh.PartitionCreateTopology",1)
+    return p
+end
+
+@testset "second-order cells partition declared BRep" begin
+    try
+        # Tet10 pair: a Tri6 interface, a declared closed Line3 Curve on the
+        # interface border and one generated Line3 seam for the rest.
+        p=p2_tets_fixture!();original=A.mesh.get_elements()
+        A.option("Mesh.PartitionCreateGhostCells",1)
+        A.mesh.partition(2,[501,502,701:706...,801:803...],
+            Int32[1,2,1,1,2,2,2,1,1,1,1])
+        @test A.model.get_number_of_partitions()==2
+        interface=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==2 && A.model.get_parent(2,tag)==(3,11))
+        @test A.model.get_partitions(2,interface)==[1,2]
+        ids,nodes=family(2,interface,9)
+        @test length(ids)==1 && size(nodes)==(6,1)
+        @test sort(vec(nodes))==sort(UInt64[p.map[(:v,c)] for c in (2,3,4)] ∪
+            [_p2_edge_uid(p,2,3),_p2_edge_uid(p,3,4),_p2_edge_uid(p,4,2)])
+        curve_child=child(1,46)
+        interface_curves=Set(abs.(last.(A.model.get_boundary([(2,interface)],false,true,false))))
+        @test curve_child in interface_curves && length(interface_curves)==2
+        seam=only(setdiff(interface_curves,[curve_child]))
+        @test A.model.get_parent(1,seam)==(2,41) && A.model.get_partitions(1,seam)==[1,2]
+        ids,nodes=family(1,seam,8)
+        @test length(ids)==2 && size(nodes)==(3,2)
+        @test Set(Tuple(sort!(collect(UInt64.(column)))) for column in
+            eachcol(nodes[1:2,:]))==
+            Set([Tuple(sort!(UInt64[p.map[(:v,4)],p.map[(:v,2)]])),
+                 Tuple(sort!(UInt64[p.map[(:v,3)],p.map[(:v,4)]]))])
+        ids,nodes=family(1,curve_child,8)
+        @test ids==UInt64[801,802,803] && size(nodes)==(3,3)
+        @test all(nodes[3,column] in (_p2_edge_uid(p,1,3),_p2_edge_uid(p,2,3),
+                                      _p2_edge_uid(p,1,2)) for column in 1:3)
+        @test A.model.get_partitions(1,curve_child)==[1,2]
+        @test A.model.get_entities_for_physical_group(1,210)==[46,curve_child]
+        region1=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==3 && A.model.get_parent(3,tag)==(3,11) &&
+               A.model.get_partitions(3,tag)==[1])
+        region2=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==3 && A.model.get_parent(3,tag)==(3,11) &&
+               A.model.get_partitions(3,tag)==[2])
+        surface_children=Dict(s=>only(tag for (dim,tag) in A.model.get_entities()
+            if dim==2 && A.model.get_parent(2,tag)==(2,s)) for s in (41,42,45))
+        @test Set(A.model.get_boundary([(3,region1)],false,true,false))==
+            Set([(2,surface_children[41]),(2,-surface_children[45]),(2,interface)])
+        @test Set(A.model.get_boundary([(3,region2)],false,true,false))==
+            Set([(2,surface_children[42]),(2,-interface)])
+        ids,nodes=family(3,region1,11);@test ids==UInt64[501] && size(nodes)==(10,1)
+        ids,nodes=family(3,region2,11);@test ids==UInt64[502] && size(nodes)==(10,1)
+        ghost1=only(tag for (tag,part) in A.mesh.get().partition_data.ghost_entities if part==1)
+        ghost2=only(tag for (tag,part) in A.mesh.get().partition_data.ghost_entities if part==2)
+        @test A.mesh.get_ghost_elements(3,ghost1)==(UInt64[502],Int32[2])
+        @test A.mesh.get_ghost_elements(3,ghost2)==(UInt64[501],Int32[1])
+        owned=A.mesh.get()
+        @test Tessella.validate(owned).ok
+        mktempdir() do directory
+            for binary in (false,true)
+                path=joinpath(directory,"p2-$(binary).msh")
+                E.write_mixed_msh(path,owned;version=4.1,binary)
+                imported=E.read_mixed_msh(path)
+                @test records(imported)==records(owned)
+                @test partition_records(imported)==partition_records(owned)
+            end
+            A.option("Mesh.MshFileVersion",4.1);A.option("Mesh.Binary",0)
+            A.option("Mesh.SaveAll",1)
+            path=joinpath(directory,"public.msh");A.write(path)
+            A.model.add("p2 roundtrip");A.open(path)
+            @test family(1,curve_child,8)[1]==UInt64[801,802,803]
+            @test Set(A.model.get_boundary([(3,region2)],false,true,false))==
+                Set([(2,surface_children[42]),(2,-interface)])
+            A.model.set_current("p2 tets")
+        end
+        A.mesh.unpartition()
+        @test A.mesh.get_elements()==original
+        @test A.model.get_entities()==[(1,46),(2,41),(2,42),(2,45),(3,11)]
+        @test A.model.get_boundary([(2,45)],false,true,false)==[(1,-46)]
+        # Hex27 pair: one Quad9 interface and a closed four-cell Line3 seam.
+        p2_hexes_fixture!();original=A.mesh.get_elements()
+        A.option("Mesh.PartitionCreateGhostCells",1)
+        A.mesh.partition(2,[501,502,701:710...],Int32[1,2,1,1,1,1,1,2,2,2,2,2])
+        @test A.model.get_number_of_partitions()==2
+        interface=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==2 && A.model.get_parent(2,tag)==(3,11))
+        ids,nodes=family(2,interface,10)
+        @test length(ids)==1 && size(nodes)==(9,1)
+        interface_curves=Set(abs.(last.(A.model.get_boundary([(2,interface)],false,true,false))))
+        @test length(interface_curves)==1
+        seam=only(interface_curves)
+        ids,nodes=family(1,seam,8)
+        @test length(ids)==4 && size(nodes)==(3,4)
+        @test A.model.get_partitions(1,seam)==[1,2]
+        owned=A.mesh.get()
+        @test Tessella.validate(owned).ok
+        A.mesh.unpartition()
+        @test A.mesh.get_elements()==original
+        # Tet10 + Prism18 share a Tri6; the Prism Surface child keeps Tri6 and
+        # Quad9 blocks and the interface is a single Tri6 cell.
+        p2_tet_prism_fixture!();original=A.mesh.get_elements()
+        A.mesh.partition(2,[501,502,701:707...],Int32[1,2,1,1,1,1,2,2,2])
+        @test A.model.get_number_of_partitions()==2
+        interface=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==2 && A.model.get_parent(2,tag)==(3,11))
+        ids,nodes=family(2,interface,9)
+        @test length(ids)==1 && size(nodes)==(6,1)
+        prism_surface=child(2,41)
+        types,blocks,_=A.mesh.get_elements(2,prism_surface)
+        @test Set(types)==Set(Int32[9,10])
+        owned=A.mesh.get()
+        @test Tessella.validate(owned).ok
+        A.mesh.unpartition()
+        @test A.mesh.get_elements()==original
+    finally
+        A.finalize()
+    end
+end
+
+@testset "second-order topology violations reject atomically" begin
+    try
+        # A declared Line3 Curve carrying a foreign edge node is not conforming.
+        foreign(p,a,b)=Int32[_p2_row(p,a),_p2_row(p,b),
+            get!(p.map,(:x,a,b)) do
+                push!(p.coords,(9.,9.,9.));Int32(length(p.coords))
+            end]
+        p2_tets_fixture!(curve_maker=foreign)
+        before=snapshot()
+        caught=try
+            A.mesh.partition(2,[501,502,701:706...,801:803...],
+                Int32[1,2,1,1,2,2,2,1,1,1,1]);nothing
+        catch error;error end
+        @test caught isa ArgumentError &&
+            occursin("edge node disagrees",sprint(showerror,caught))
+        @test snapshot()==before
+        # An incomplete serendipity family is outside the supported catalog.
+        p=_P2Nodes()
+        A.finalize();A.initialize();A.model.add("serendipity")
+        A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+        for (tag,pos) in ((1,(0.,0.,0.)),(2,(1.,0.,0.)),(3,(0.,1.,0.)),
+                          (4,(0.,0.,1.)),(7,(1.,1.,1.)))
+            _p2_corner!(p,tag,pos)
+        end
+        t1=_p2_tet(p,(1,2,3,4));t2=_p2_tet(p,(2,3,4,7))
+        base=_p2_tri(p,(1,3,2))
+        s41=hcat(_p2_tri(p,(1,2,4)),_p2_tri(p,(1,4,3)))
+        c2=(2,3,4,7)
+        s42=hcat([_p2_tri(p,(c2[f[1]],c2[f[2]],c2[f[3]]))
+                  for f in ((1,2,4),(1,4,3),(4,2,3))]...)
+        q8=Int32[_p2_row(p,1),_p2_row(p,2),_p2_row(p,3),_p2_row(p,4),
+            _p2_mid(p,1,2),_p2_mid(p,2,3),_p2_mid(p,3,4),_p2_mid(p,4,1)]
+        A.model.add_discrete_entity(2,41,Int[])
+        A.model.add_discrete_entity(2,42,Int[])
+        A.model.add_discrete_entity(2,45,Int[])
+        A.model.add_discrete_entity(2,47,Int[])
+        A.model.add_discrete_entity(3,11,[41,45,42,47])
+        _p2_nodes!(p)
+        A.mesh.add_elements_by_type(41,9,[701,702],vec(s41))
+        A.mesh.add_elements_by_type(42,9,[703,704,705],vec(s42))
+        A.mesh.add_elements_by_type(45,9,[706],vec(base))
+        A.mesh.add_elements_by_type(47,16,[707],vec(q8))
+        A.mesh.add_elements_by_type(11,11,[501,502],vcat(t1,t2))
+        A.mesh.generate(3)
+        A.option("Mesh.PartitionCreateTopology",1)
+        before=snapshot()
+        caught=try
+            A.mesh.partition(2,[501,502,701:707...],
+                Int32[1,2,1,1,2,2,2,1,1]);nothing
+        catch error;error end
+        @test caught isa ArgumentError &&
+            occursin("second-order cells (MSH types 1-15)",sprint(showerror,caught))
+        @test snapshot()==before
+        # A reversed Tet10 fails the positive-volume certificate.
+        flipped(p,c)=Int32[[_p2_row(p,t) for t in (c[1],c[3],c[2],c[4])]...;
+            [_p2_mid(p,c[a],c[b]) for (a,b) in ((1,3),(3,2),(2,1),(4,1),(4,2),(4,3))]...]
+        p2_tets_fixture!(tet_b=flipped)
+        before=snapshot()
+        caught=try
+            A.mesh.partition(2,[501,502,701:706...,801:803...],
+                Int32[1,2,1,1,2,2,2,1,1,1,1]);nothing
         catch error;error end
         @test caught isa ArgumentError &&
             occursin("positive oriented volume cells",sprint(showerror,caught))

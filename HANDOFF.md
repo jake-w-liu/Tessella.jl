@@ -331,6 +331,31 @@ testset (4 assertions). PART01 remains open for high-order cells,
 periodic/parametric topology, triple junctions and distinct coincident
 support roles.
 
+The complete second-order family slice is also landed: the producer catalog
+now admits Line3 curves, Tri6/Quad9 surfaces and Tet10/Hex27/Prism18/Pyr14
+volumes beside every linear family. `_partition_volume_facets` derives each
+volume family's full facet node tuples from the canonical
+`MeshEntityTopology` cycles plus the MSH pointsGenerators layout — edge
+nodes sit at `n_corners + edge_ordinal` and quadrangle face nodes at
+`n_corners + n_edges + quad_ordinal`, both certified by the `Elements.jl`
+monomial generators — positivity keeps running on the corner subset via
+`_volume_cell_signed_volume`, and `_partition_cycle_equal`/`_partition_reversed`
+are layout-aware for 6/9-node carriers (corner rotation plus consistent
+edge-node travel, Quad9 centre pinned). Interface components emit per-type
+Tri6/Quad9 blocks under one entity; generated seams emit Line3 cells
+through the same chain machinery; declared Line3 Curve borders additionally
+certify their edge node against the actual surface border (foreign mids
+reject), as do shared surface edges and interface rim carriers.
+Serendipity/incomplete families (MSH 16-19) and order ≥3 cells reject at
+the catalog check with atomic state. Focused checks pass 234/234 on
+Julia 1.13.1 (Tet10 pair with declared closed Line3 Curve and one
+generated Line3 seam, Hex27 pair with a Quad9 interface and 4-cell Line3
+seam, Tet10+Prism18 with a Tri6 interface and mixed Tri6+Quad9 surface
+child; ghosts, physical groups, `validate`, MSH4/public-write round-trips
+and `unpartition`, plus a 6-assertion atomicity set). PART01 remains open
+for periodic/parametric topology, triple junctions, distinct coincident
+support roles, order ≥3 cells and parallel production.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

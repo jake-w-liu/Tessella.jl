@@ -233,6 +233,30 @@ interface) plus an 8-assertion atomicity set; the default smoke gained a
 mixed-family partition testset. PART01 remains open (high-order cells,
 periodic/parametric topology, triple junctions, coincident support roles).
 
+### Complete second-order cell families in lower-BRep partition production (2026-10-12)
+
+Devin landed the next PART01 slice: `APIPartitionBRep.jl` now certifies and
+transports every complete second-order family — Line3 curves, Tri6/Quad9
+surfaces and Tet10/Hex27/Prism18/Pyr14 volumes — beside every linear family.
+Volume-facet patterns derive full node tuples from the canonical
+`MeshEntityTopology` cycles plus the MSH pointsGenerators layout (edge nodes
+at n_corners+edge_ordinal, quadrangle face nodes at
+n_corners+n_edges+quad_ordinal, certified earlier by the `Elements.jl`
+monomial tables), positivity is certified on the corner subset, and
+orientation/reversal comparisons are layout-aware for 6/9-node carriers.
+Interface components emit Tri6/Quad9 blocks, generated seams emit Line3
+cells, declared Line3 Curve borders certify their edge nodes against actual
+surface borders (foreign mids, serendipity/incomplete families and order ≥3
+cells reject atomically), and ghosts, physical groups, signed child bounds,
+literal UIDs, MSH4/public round-trips and `unpartition()` keep the earlier
+contract. The focused partition file adds a 40-assertion second-order
+testset (Tet10/Hex27/Prism18/Pyr14 pairs with Tri6 and Quad9 interfaces,
+declared closed Line3 Curve, mixed Tri6+Quad9 surface child, ghosts,
+unpartition, MSH4 round-trips) plus a 6-assertion atomicity set; the file is
+now **234/234 on both** runtimes. PART01 remains open (periodic/parametric
+topology, triple junctions, coincident support roles, order ≥3 cells,
+parallel production).
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

@@ -125,3 +125,39 @@ end
         A.finalize()
     end
 end
+
+@testset "Second-order lower BRep partition" begin
+    A=Tessella.API
+    try
+        # Two Tet10 share the {1,2,3} Tri6; edge-node rows are shared between
+        # volume cells and their surface carriers. Tags 6:14 are edge nodes.
+        A.finalize();A.initialize();A.model.add("p2 partition")
+        A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+        A.model.add_discrete_entity(2,30);A.model.add_discrete_entity(3,11,[30])
+        coordinates=[0. 1. 0. 0. 0. .5 .5 0. 0. 0. .5 .5 0. 0.;
+                     0. 0. 1. 0. 0. 0. .5 .5 0. .5 0. 0. .5 0.;
+                     0. 0. 0. 1. -1. 0. 0. 0. .5 .5 .5 -.5 -.5 -.5]
+        A.mesh.add_nodes(3,11,1:14,vec(coordinates))
+        A.mesh.add_elements_by_type(30,9,601:606,
+            [1,2,4,6,11,9, 2,3,4,7,10,11, 3,1,4,8,9,10,
+             1,3,5,8,13,14, 3,2,5,7,12,13, 2,1,5,6,14,12])
+        A.mesh.add_elements_by_type(11,11,[501,502],
+            [1,2,3,4,6,7,8,9,10,11, 1,3,2,5,8,7,6,14,12,13])
+        A.mesh.generate(3);A.option("Mesh.PartitionCreateTopology",1)
+        A.mesh.partition(2,[601:606...,501,502],[1,1,1,2,2,2,1,2])
+        interface=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==2 && A.model.get_parent(2,tag)==(3,11))
+        types,ids,nodes=A.mesh.get_elements(2,interface)
+        @test types==[9] && length(only(ids))==1 &&
+            sort(vec(only(nodes)))==[1,2,3,6,7,8]
+        seam=only(tag for (dim,tag) in A.model.get_entities()
+            if dim==1 && A.model.get_parent(1,tag)==(2,30))
+        types,ids,nodes=A.mesh.get_elements(1,seam)
+        @test types==[8] && length(only(ids))==3 &&
+            A.model.get_partitions(1,seam)==[1,2]
+        A.mesh.unpartition()
+        @test A.model.get_entities()==[(2,30),(3,11)]
+    finally
+        A.finalize()
+    end
+end

@@ -9,27 +9,40 @@ Earlier increments ([closed seams](partitioned_brep.md),
 Surfaces had no declared Curve boundaries; this slice retains the declared
 topology instead of rejecting it. A follow-on slice generalizes the cell
 catalog to every linear family — Quad4 surfaces beside Tri3 and
-Hex8/Prism6/Pyr5 volumes beside Tet4.
+Hex8/Prism6/Pyr5 volumes beside Tet4 — and a later slice extends it to
+every complete second-order family — Line3 curves, Tri6/Quad9 surfaces and
+Tet10/Hex27/Prism18/Pyr14 volumes.
 
 ## Input certificate
 
-The snapshot admits linear MSH blocks only — Point15, Line2, Tri3, Quad4,
-Tet4, Hex8, Prism6 and Pyr5 — and requires every cell's classified parent
+The snapshot admits linear and complete second-order MSH blocks (types
+1-15) — Point15, Line2/Line3, Tri3/Tri6, Quad4/Quad9, Tet4/Tet10, Hex8/Hex27,
+Prism6/Prism18 and Pyr5/Pyr14 — and requires every cell's classified parent
 to exist as a discrete entity. Surface and volume facet/edge cycles come
 from the canonical `MeshEntityTopology` outward tables
-(`_simplex_edge_patterns`, `_simplex_face_patterns`), and every volume cell
-must carry positive signed volume under `_volume_cell_signed_volume`.
-Certification is atomic — the model and cache are untouched on failure:
+(`_simplex_edge_patterns`, `_simplex_face_patterns`); second-order facets
+derive their full node tuples by appending edge nodes at
+`n_corners + edge_ordinal` and quadrangle face nodes at
+`n_corners + n_edges + quad_ordinal`, matching the MSH pointsGenerators
+layout. Every volume cell must carry positive signed volume under
+`_volume_cell_signed_volume` on its corner subset, and cycle equality,
+reversal and support keys are layout-aware (corner rotation plus consistent
+edge-node travel, Quad9 centres pinned). Serendipity/incomplete families
+(MSH 16-19) and order ≥3 cells reject. Certification is atomic — the model
+and cache are untouched on failure:
 
 - Each declared Curve must be one nonbranching directed chain of its actual
-  Line2 cells. An open chain requires exactly two signed Point boundaries;
-  the declared bound Point must own the Point15 cell on the corresponding
-  literal chain end node. A closed chain must declare no Point boundaries.
+  Line2/Line3 cells. An open chain requires exactly two signed Point
+  boundaries; the declared bound Point must own the Point15 cell on the
+  corresponding literal chain end node. A closed chain must declare no
+  Point boundaries.
 - Every declared Point entity needs exactly one actual Point15 cell, and no
   two Points may share a vertex.
 - Each declared Surface boundary lists distinct Curves whose cells cover the
   Surface's literal oriented border completely; orientation must agree with
-  the declared sign.
+  the declared sign. A declared Line3 Curve must additionally reuse the
+  surface border's actual edge node — adjacent surface cells must agree on
+  the edge's mid UID, and a foreign mid rejects.
 - Every Curve must be declared on some Surface boundary and every Point on
   some Curve boundary; unbound lower entities reject.
 - Every node referenced by a cell must carry consistent lowest-dimension
@@ -67,20 +80,23 @@ unpartition restores the original entities, cells and declared signed
 boundaries.
 
 Each connected interface component produces one dim-2 entity carrying a
-Tri3 and/or Quad4 block per its facet types, wound to the primary partition
-side, so Hex↔Pyramid interfaces emit Quad4 cells and Tet↔Prism interfaces
-emit Tri3 cells. Generated seams group by the adjacent original Surface
-parent and partition membership, then chain nonbranchingly per the open-seam
-rules; a declared Curve carrier on an interface border binds the shared
-Curve child instead.
+Tri3/Tri6 and/or Quad4/Quad9 block per its facet types, wound to the
+primary partition side, so Hex↔Pyramid interfaces emit quads and
+Tet↔Prism interfaces emit triangles at whatever order the volume facets
+carry; the two sides must agree on shared edge-node UIDs. Generated seams
+group by the adjacent original Surface parent and partition membership,
+then chain nonbranchingly per the open-seam rules and emit Line2 or Line3
+cells by the border arity; a declared Curve carrier on an interface border
+binds the shared Curve child instead.
 
 ## Guards and scope
 
-High-order cells, periodic or parametric topology, already partitioned
-data, seam branches/triple junctions, coincident original/interface support
-roles and actual parallel partition algorithms remain guarded or open.
-Bare meshes without lower cells still route to the Tet4-only producer and
-bare non-Tet4 volume meshes remain unsupported. `generate` always
+Order ≥3 and incomplete/serendipity high-order cells, periodic or
+parametric topology, already partitioned data, seam branches/triple
+junctions, coincident original/interface support roles and actual parallel
+partition algorithms remain guarded or open. Bare meshes without lower
+cells still route to the Tet4-only producer and bare non-Tet4 volume meshes
+remain unsupported. `generate` always
 materializes a vertex node plus Point15 cell for every dim-0 entity, so a
 declared Point without a carrier is reachable only through non-generated
 models (imports or direct model edits); the certificate rejects it
@@ -90,10 +106,16 @@ The qualification uses two Tets, six exterior Tri3 on six Surfaces, nine
 declared open Curves and five declared Points (shared and local), plus a
 closed declared Curve bounding a partition interface; a Hex8+Pyr5 fixture
 over five Quad4 and four Tri3 surfaces with a declared Curve/Point border
-on one Quad4 side (Quad4 interface); and a Tet4+Prism6 fixture sharing a
-Tri3 face across the two volume families (Tri3 interface). Checks cover child
+on one Quad4 side (Quad4 interface); a Tet4+Prism6 fixture sharing a Tri3
+face across the two volume families (Tri3 interface); a Tet10 pair under a
+declared closed Line3 Curve (Tri6 interface plus a generated Line3 seam);
+a Hex27 pair (Quad9 interface and a closed four-cell Line3 seam); and a
+Tet10+Prism18 pair sharing a Tri6 across the two volume families (a Surface
+child keeping mixed Tri6+Quad9 blocks). Checks cover child
 parents/partitions, signed Curve→Point and Surface→Curve closures, interface
 rim curves, original cell/node UIDs, physical groups, ghost records,
 ASCII/binary MSH4 and public `write`/`open` round-trips, `unpartition`, and
-eleven atomic topology violations including a missing Point15 carrier. Actual
-test results are recorded in `test/README.md`.
+atomic topology violations across three rejection testsets including a
+missing Point15 carrier, a Line3 Curve carrying a foreign edge node, a
+reversed Tet10 and a serendipity Quad8 block. Actual test results are
+recorded in `test/README.md`.

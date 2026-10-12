@@ -13,7 +13,8 @@ boundaries and explicit plane UV/rigid-transform chains, complete quadratic
 Hex, Pyramid13 and orders3–10 Curve VTK export, actual two-Tet partition
 interfaces, closed Tri3-BRep seam transport and ghost queries, declared
 Curve/Point lower-BRep partition topology, a mixed linear family
-(Tet4+Prism6 over Tri3+Quad4) BRep partition, complete
+(Tet4+Prism6 over Tri3+Quad4) BRep partition, a complete second-order
+(two-Tet10 over Tri6) BRep partition, complete
 catalogued high-order Surface/Volume VTK, directional constant-tensor
 box and shared-material grids, floating-point Pyramid options, CLI help/version
 and read-only MSH checking, plus atomic current-model opening and merging,
@@ -50,6 +51,8 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 40.7 s | 266 | ~41 s |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 43.9 s | 266 | ~44 s |
 | Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 40.7 s | 263 | ~41 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 41.4 s | 263 | ~42 s |
 | Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 38.1 s | 259 | ~39 s |
@@ -101,12 +104,21 @@ Local receipts on 2026-10-11, with bounds checks and one Julia thread:
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 263-assertion bodies took40.7/41.4 s onJulia1.12.7/1.13.1.
+The current 266-assertion bodies took40.7/43.9 s onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. Logs and actual exit-zero receipts are
 `test/tmp/ordinary_default_224_{112,113}_20261011.*`. The same252 Source files
-remained frozen throughout both calls. The latest increment adds a mixed
+remained frozen throughout both calls. The latest increment adds a second-order
+lower-BRep partition testset (3 assertions: two Tet10 sharing a Tri6 facet,
+Tri6 interface cell, three generated Line3 seam cells, unpartition restore) to
+the declared-BRep default smoke plus a 46-assertion complete second-order set
+in `test/interfaces/api_partition_lower_brep_functional_test.jl`, now
+234 assertions on both runtimes (Line3 curves, Tri6/Quad9 surfaces and
+Tet10/Hex27/Prism18/Pyr14 volumes partition through the same declared-BRep
+certificate, including declared Line3 border edge-node checks, ghosts, MSH4
+round-trips, unpartition and atomic violations for foreign mids, serendipity
+families and reversed volumes). The preceding increment adds a mixed
 linear family BRep partition testset (4 assertions: Tet4+Prism6 sharing a
 Tri3 face, Tri3 interface, generated seams, unpartition restore) to the
 declared-BRep default smoke plus a 61-assertion mixed-family set in
