@@ -636,6 +636,29 @@ rejection, the focused Cartesian file 54/54 and the assembly file
 241/241. Coplanar/general intersections, Booleans and imprints remain
 CAD05.
 
+Coplanar planar imprints followed (the seventh CAD05 slice):
+non-conforming contacts between coplanar facets — partial-face overlaps,
+crossed or collinear rim edges, vertex/edge-on-face T-junctions and
+mismatched shared-quad diagonals — now imprint instead of rejecting.
+The pair certificate collects coplanar overlaps per canonical rational
+support plane, defers off-plane contacts whose candidate points all lie
+on a collected plane, and exempts free vertices and facet-interior
+probes found exactly on one. Each support plane builds one `Mesh2D`
+constrained Delaunay arrangement over both shells' on-plane edges and
+edge-plane pierces, every edge pre-split at all arrangement vertices so
+no constraint crosses; cells classify by exact rational centroid
+coverage — shared regions emit oppositely wound coincident pieces that
+weld in the recursion's ordinary pass, single-side cells stay own
+boundary, and rim arrangement vertices propagate to off-plane incident
+facets via `_brep_cut_surface`'s edge splits. Verified on partial-face
+and quad-patch imprints, a one-dimensional edge T-junction, the
+mismatched-diagonal shared quad (four welded cells), STEP/IGES mutants
+under both fills, multi-pair overlays and nested+overlay mixes; the
+focused assembly file passes 315/315. Aligned-winding overlaps
+(interpenetration), crossing/enclosure mixtures and merely near-coplanar
+inputs still reject. Arbitrary-volume Booleans and non-coplanar/curved
+contact classes remain CAD05.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

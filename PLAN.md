@@ -321,7 +321,10 @@ complex rational instances) and IGES 126/128 import as native NURBS objects, wit
 IGES NURBS export. Any other topology is
 an explicit failure listing the seen entity types. Multiple recognized explicit roots
 certified geometrically independent, conforming-contact-welded, nested
-(enclosed Region with joint filled conforming interfaces) or
+(enclosed Region with joint filled conforming interfaces), coplanar
+imprinted (non-conforming contacts on one support plane retessellated
+over a shared constrained-Delaunay arrangement into welded coincident
+pieces) or
 transversally interpenetrating (cut-facet fragments regrouped into
 containment-signature Regions welded at shared interfaces) return
 classified mixed meshes;

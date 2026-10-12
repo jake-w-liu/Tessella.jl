@@ -548,6 +548,36 @@ uniform-scale/mirror/shear type-124 mutants of `brep_two_blocks.iges`
 (exact bboxes, 16x and volume-preserving products, singular rejection),
 the focused Cartesian file 54/54 and the assembly file 241/241.
 
+### Coplanar planar imprints on CAD assembly imports (2026-10-12)
+
+Devin landed the seventh CAD05 slice — non-conforming contacts between
+coplanar facets imprint and weld. The pair certificate now collects
+coplanar overlaps (partial faces, crossed or collinear rim edges,
+vertex/edge-on-face T-junctions, mismatched shared-quad diagonals) by
+canonical rational support plane, defers off-plane contacts whose
+candidate points all lie on a collected plane, and exempts free boundary
+vertices and facet-interior probes found exactly on one. Each support
+plane builds one 2-D constrained Delaunay arrangement in `Mesh2D` from
+every on-plane edge of both shells plus the pierce points of straddling
+edges, splitting edges at every arrangement vertex so no inserted
+constraint crosses; generated cells classify by exact rational centroid
+coverage — covered-by-both cells emit on both rebuilt shells wound like
+each side's covering facet (opposed windings weld in the recursion's
+ordinary coincident-facet pass, aligned windings mean interpenetration
+and reject), covered-by-one cells stay that side's own boundary, and
+arrangement vertices on a group facet's rim propagate through
+`_brep_cut_surface`'s edge-split mechanism so off-plane incident facets
+split identically. Verified on partial-face and quad-patch imprints
+(exact shared-Surface bboxes, welded nodes unique, source volumes
+preserved), a one-dimensional edge T-junction (conforming after edge
+splits, no shared Surface), the mismatched shared-quad diagonal (both
+diagonals retessellate into four welded cells), STEP and IGES mutants
+under both fill modes, multi-pair overlays and nested+overlay mixes, and
+the focused assembly file 315/315; aligned-winding overlaps, mixed
+crossing+coplanar and overlap+enclosure still reject atomically.
+Arbitrary-volume Booleans and non-coplanar/curved contact classes remain
+CAD05.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

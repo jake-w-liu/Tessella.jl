@@ -58,6 +58,10 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 91.8 s | 300 | ~94 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 83.5 s | 300 | ~86 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 87.7 s | 300 | ~90 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 85.2 s | 300 | ~88 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 74.0 s | 298 | ~77 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 76.7 s | 298 | ~79 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 78.7 s | 298 | ~81 s |
@@ -155,10 +159,19 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 298-assertion bodies ran onJulia1.12.7/1.13.1.
+The current 300-assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds a
+coplanar-imprint check (compact: a partial-face overlap welds the exact
+patch into a shared Surface bound by both Regions) to
+`test/functional/brep_assembly_smoke.jl` and extends the assembly
+functional file to 315 assertions on both runtimes — non-conforming
+contacts on one coplanar support plane (partial faces, T-junctions,
+crossed rim edges, mismatched shared-quad diagonals) retessellate over a
+shared exact planar arrangement into welded coincident pieces, while
+aligned-winding overlap, crossing/enclosure mixtures and near-coplanar
+inputs still reject. The preceding increment adds a
 scaled-Cartesian-operator check (compact: scale-2 mapped target produces
 the 2-edge box at the operator origin, scale-0 rejects) to
 `test/functional/brep_mapped_occurrences_smoke.jl`, extends the assembly

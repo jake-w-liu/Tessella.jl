@@ -224,12 +224,44 @@ end
                 fill ? [(2,1),(3,1),(2,2),(3,2),(2,3)] : [(2,1),(3,1),(2,2),(3,2)])
             @test allunique(eachcol(m.coords))
         end
-        # Box slides so one face overlaps part of the tet's z=0 face.
+        # Box slides under the tet so its top face partially overlaps the
+        # tet's z=0 face. The faces' normals oppose, so the coplanar imprint
+        # welds the exact overlap square [0,0.5]x[0,0.5] into a shared
+        # Surface while the rest of the box face stays its own boundary.
         write(path,shifted_box(source,(-0.5,-0.5,-0.5),(0.5,0.5,0.)))
-        @test_throws ArgumentError import_step(path;fill=false)
-        # Box edge runs along a tet edge segment: edge-only contact.
+        for fill in (false,true)
+            m=import_step(path;fill)
+            @test m isa E.MixedMesh && MT.validate(m).ok
+            data=m.entity_data
+            @test Set(keys(data.entities))==Set([(2,1),(3,1),(2,2),(3,2),(2,3)])
+            @test data.entities[(2,3)].bbox==(0.0,0.0,0.0,0.5,0.5,0.0)
+            @test sort(data.entities[(3,1)].boundaries)==Int32[1,3]
+            @test sort(data.entities[(3,2)].boundaries)==Int32[2,3]
+            @test allunique(eachcol(m.coords))
+            fill || continue
+            measured,positive=volumes(m)
+            @test positive
+            @test isapprox(measured[1],1/6;atol=1e-12) &&
+                  isapprox(measured[2],0.5;atol=1e-12)
+        end
+        # Box edge runs along a segment of the tet edge (0,0,0)-(1,0,0):
+        # a one-dimensional T-junction. The overlay splits the tet edge at
+        # x=0.3 and x=0.7 so the contact becomes conforming; the zero-area
+        # overlap produces no shared Surface and both solids keep their own
+        # coincident boundary nodes.
         write(path,shifted_box(source,(0.3,-0.2,-0.2),(0.7,0.,0.)))
-        @test_throws ArgumentError import_step(path;fill=false)
+        for fill in (false,true)
+            m=import_step(path;fill)
+            @test m isa E.MixedMesh && MT.validate(m).ok
+            @test Set(keys(m.entity_data.entities))==Set([(2,1),(3,1),(2,2),(3,2)])
+            fill || @test size(m.coords,2)==14
+            @test !allunique(eachcol(m.coords))
+            fill || continue
+            measured,positive=volumes(m)
+            @test positive
+            @test isapprox(measured[1],1/6;atol=1e-12) &&
+                  isapprox(measured[2],0.4*0.2*0.2;atol=1e-12)
+        end
         # A thin box piercing the slant face without covering a vertex
         # crosses it transversally: the fragments admit as a three-Region
         # product whose pieces tile both source volumes exactly.
@@ -385,10 +417,30 @@ end
             @test allunique(eachcol(mesh.coords))
         end
         # Mismatched diagonal: the two sides' shared-face triangulations
-        # cross — non-conforming contact, still rejected geometrically.
+        # cross. The coplanar imprint retessellates both faces over the
+        # common arrangement — both diagonals split the quad into four
+        # triangles around its center — and welds them as one shared
+        # Surface bounded by both Regions.
         write(path,replace(source,box_section=>side_box("#101,#105,#108,#104")))
-        @test_throws ArgumentError import_step(path;fill=false)
-        @test_throws ArgumentError import_step(path;fill=true)
+        for fill in (false,true)
+            mesh=import_step(path;fill)
+            @test mesh isa E.MixedMesh
+            @test MT.validate(mesh).ok
+            data=mesh.entity_data
+            @test Set(keys(data.entities))==Set([(2,1),(3,1),(2,2),(3,2),(2,3)])
+            @test data.entities[(2,3)].bbox==(1.0,0.0,0.0,1.0,1.0,1.0)
+            @test sort(data.entities[(3,1)].boundaries)==Int32[1,3]
+            @test sort(data.entities[(3,2)].boundaries)==Int32[2,3]
+            counts=Dict{Int32,Int}()
+            for (bi,block) in enumerate(mesh.blocks)
+                block.msh==2 || continue
+                for owner in data.block_entities[bi]
+                    counts[owner]=get(counts,owner,0)+1
+                end
+            end
+            @test counts==Dict(Int32(1)=>10,Int32(2)=>10,Int32(3)=>4)
+            @test allunique(eachcol(mesh.coords))
+        end
     end
 end
 
@@ -508,16 +560,72 @@ end
           isapprox(measured[2],0.875;atol=1e-12) &&
           isapprox(measured[3],0.125;atol=1e-12)
     @test allunique(eachcol(mesh.coords))
-    # Non-transversal contacts are unchanged: B's y faces made coplanar
-    # with A's — a partial coplanar face overlap — still rejects, as does
-    # B touching A's x=1 face over a quad patch.
+    # Mixed contact is still unsupported: B's y faces made coplanar with
+    # A's while its x=0.5 face keeps crossing A's — a coplanar overlap
+    # combined with a transversal crossing rejects atomically.
     source=read(joinpath(FIXTURES,file),String)
     mktempdir() do directory
         path=joinpath(directory,"mutant.step")
         write(path,replace(replace(source,",0.5,"=>",0.,"),",1.5,"=>",1.,"))
         @test_throws ArgumentError import_step(path;fill=false)
         @test_throws ArgumentError import_step(path;fill=true)
+        # B touching A's x=1 face over the y,z in [0.5,1] patch is a
+        # partial coplanar face overlap: the imprint welds exactly the
+        # overlap patch as a shared Surface bounded by both Regions.
         write(path,replace(replace(source,"(0.5,"=>"(1.,"),"(1.5,"=>"(2.,"))
+        for fill in (false,true)
+            mesh=import_step(path;fill)
+            @test mesh isa E.MixedMesh
+            @test MT.validate(mesh).ok
+            data=mesh.entity_data
+            @test Set(keys(data.entities))==Set([(2,1),(3,1),(2,2),(3,2),(2,3)])
+            @test data.entities[(2,3)].bbox==(1.0,0.5,0.5,1.0,1.0,1.0)
+            @test sort(data.entities[(3,1)].boundaries)==Int32[1,3]
+            @test sort(data.entities[(3,2)].boundaries)==Int32[2,3]
+            @test allunique(eachcol(mesh.coords))
+        end
+    end
+end
+
+@testset "coplanar face overlaps imprint a shared surface" begin
+    # Box A is [0,1]^3; box B starts at [3,4]x[0,2]x[0,1] disjoint. Moving B
+    # to [1,2]x[0.5,1.5]x[0,1] puts its x=1 face coplanar with A's x=1 face
+    # over the y in [0.5,1] patch with opposed outward normals. The coplanar
+    # imprint retessellates both faces over one exact planar arrangement and
+    # welds the overlap patch into a shared Surface bounded by both Regions;
+    # the off-plane pieces stay each solid's own boundary.
+    source=read(joinpath(FIXTURES,"brep_two_boxes.step"),String)
+    move_box(reps)=foldl(replace,reps;init=source)
+    partial=move_box(["(3.,0.,0.)"=>"(1.,0.5,0.)","(4.,0.,0.)"=>"(2.,0.5,0.)",
+                      "(4.,2.,0.)"=>"(2.,1.5,0.)","(3.,2.,0.)"=>"(1.,1.5,0.)",
+                      "(3.,0.,1.)"=>"(1.,0.5,1.)","(4.,0.,1.)"=>"(2.,0.5,1.)",
+                      "(4.,2.,1.)"=>"(2.,1.5,1.)","(3.,2.,1.)"=>"(1.,1.5,1.)"])
+    mktempdir() do directory
+        path=joinpath(directory,"imprint.step")
+        write(path,partial)
+        for fill in (false,true)
+            mesh=import_step(path;fill)
+            @test mesh isa E.MixedMesh
+            @test MT.validate(mesh).ok
+            data=mesh.entity_data
+            @test Set(keys(data.entities))==Set([(2,1),(3,1),(2,2),(3,2),(2,3)])
+            @test data.entities[(2,3)].bbox==(1.0,0.5,0.0,1.0,1.0,1.0)
+            @test sort(data.entities[(3,1)].boundaries)==Int32[1,3]
+            @test sort(data.entities[(3,2)].boundaries)==Int32[2,3]
+            @test allunique(eachcol(mesh.coords))
+            fill || continue
+            measured,positive=volumes(mesh)
+            @test positive
+            @test isapprox(measured[1],1.0;atol=1e-12) &&
+                  isapprox(measured[2],1.0;atol=1e-12)
+        end
+        # The same overlap with same-side interiors — B straddles A's volume
+        # so the coplanar z faces share aligned outward normals — is
+        # interpenetration, not a surface contact, and rejects atomically.
+        write(path,move_box(["(3.,0.,0.)"=>"(0.5,0.,0.)","(4.,0.,0.)"=>"(1.5,0.,0.)",
+                            "(4.,2.,0.)"=>"(1.5,1.,0.)","(3.,2.,0.)"=>"(0.5,1.,0.)",
+                            "(3.,0.,1.)"=>"(0.5,0.,1.)","(4.,0.,1.)"=>"(1.5,0.,1.)",
+                            "(4.,2.,1.)"=>"(1.5,1.,1.)","(3.,2.,1.)"=>"(0.5,1.,1.)"]))
         @test_throws ArgumentError import_step(path;fill=false)
         @test_throws ArgumentError import_step(path;fill=true)
     end
@@ -539,8 +647,20 @@ end
         write(path,replace(source,"ENDSEC;\nEND-ISO-10303-21;"=>"#200 = CSG_SOLID('unsupported',#41);\nENDSEC;\nEND-ISO-10303-21;"))
         @test_throws ArgumentError import_step(path;fill=false)
         path=joinpath(directory,"bad.iges")
+        # Sliding block 2 to x in [1,3] puts its x=1 face coincident with
+        # block 1's x=1 face over the full quad; the differently triangulated
+        # sides are a coplanar overlap, imprinted and welded into shared
+        # Surface 3 bounded by both Regions.
         write(path,replace_parameter(iges,5,"124,1,0,0,1,0,1,0,0,0,0,1,0;"))
-        @test_throws ArgumentError import_iges(path;fill=false) # touching boxes
+        for fill in (false,true)
+            mesh=import_iges(path;fill)
+            @test mesh isa E.MixedMesh && MT.validate(mesh).ok
+            data=mesh.entity_data
+            @test Set(keys(data.entities))==Set([(2,1),(3,1),(2,2),(3,2),(2,3)])
+            @test data.entities[(2,3)].bbox==(1.0,0.0,0.0,1.0,1.0,1.0)
+            @test sort(data.entities[(3,1)].boundaries)==Int32[1,3]
+            @test sort(data.entities[(3,2)].boundaries)==Int32[2,3]
+        end
         write(path,replace_parameter(iges,5,"124,1,0,0,0.5,0,1,0,0,0,0,1,0;"))
         @test_throws ArgumentError import_iges(path;fill=false) # overlap
         write(path,replace_parameter(iges,3,"150,-2.,1.,1.,0.,0.,0.;"))

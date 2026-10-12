@@ -35,15 +35,27 @@ straddling facet pairs cut both shells (facet retriangulation with the
 each cut piece classifies against the other solids by interior
 containment probes, and pieces regroup by containment signature into
 Regions — A only, B only, A∩B — that weld at their coincident cut
-interfaces under either fill mode. Filled solids weld
+interfaces under either fill mode. Coplanar non-conforming contacts
+imprint: facet pairs sharing one rational support plane whose overlaps
+are partial faces, crossed or collinear rim edges, or vertex/edge-on-face
+T-junctions (including mismatched shared-quad diagonals) retessellate
+over one exact planar arrangement per support plane — every on-plane edge
+sub-segment and edge-plane pierce point enters the 2-D constrained
+Delaunay triangulation, each cell classifies by exact centroid coverage,
+overlap regions emit as oppositely wound coincident pieces that weld like
+conforming contact, and arrangement rim vertices propagate to off-plane
+incident facets so the rebuilt shells stay watertight. Filled solids weld
 only
 when both
 independent fills emit the identical interface triangulation; a facet
-shared by three solids, a fill crossing the interface rim, and
-non-coincident touching or intersecting boundary facets (partial overlap,
-T-junction or partial-edge contact, same-region duplication) all reject,
-as does a crossing mixed with coincident welds or enclosure in one
-assembly — and an enclosed solid sharing any boundary contact. Genuinely
+shared by three solids, a fill crossing the interface rim,
+coplanar facets overlapping with aligned winding (interpenetration),
+and non-planar non-conforming contacts (same-region duplication,
+off-plane point or skew-edge touches) all reject, as does a crossing
+mixed with a coplanar overlap, coincident weld or enclosure in one
+assembly — and an enclosed solid sharing any boundary contact. Coplanar
+imprints compose freely with coincident welds and nesting on other
+pairs. Genuinely
 disjoint solids are admitted. Boxes are never used to discover, split or
 replace source roots. Point-cloud box imports retain their original single-solid behavior.
 Multi-root IGES identities must be positive, odd, unique and consistent with

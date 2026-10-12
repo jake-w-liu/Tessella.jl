@@ -68,4 +68,21 @@ let mesh=import_step(joinpath(@__DIR__,"..","fixtures","brep_crossing_boxes.step
           sort(data.entities[(3,3)].boundaries)==Int32[3,4,5] &&
           allunique(eachcol(mesh.coords))
 end
+# Coplanar partial-face overlap imprints: box B moved onto A's x=1 face
+# welds the exact overlap patch into a shared Surface bound by both Regions.
+let source=read(joinpath(@__DIR__,"..","fixtures","brep_two_boxes.step"),String)
+    partial=foldl(replace,["(3.,0.,0.)"=>"(1.,0.5,0.)","(4.,0.,0.)"=>"(2.,0.5,0.)",
+                "(4.,2.,0.)"=>"(2.,1.5,0.)","(3.,2.,0.)"=>"(1.,1.5,0.)",
+                "(3.,0.,1.)"=>"(1.,0.5,1.)","(4.,0.,1.)"=>"(2.,0.5,1.)",
+                "(4.,2.,1.)"=>"(2.,1.5,1.)","(3.,2.,1.)"=>"(1.,1.5,1.)"];init=source)
+    mktempdir() do directory
+        path=joinpath(directory,"imprint.step");write(path,partial)
+        mesh=import_step(path;fill=false)
+        @test mesh isa Tessella.MixedMesh && validate(mesh).ok
+        data=mesh.entity_data
+        @test Set(keys(data.entities))==Set([(2,1),(3,1),(2,2),(3,2),(2,3)]) &&
+              data.entities[(2,3)].bbox==(1.0,0.5,0.0,1.0,1.0,1.0) &&
+              allunique(eachcol(mesh.coords))
+    end
+end
 end

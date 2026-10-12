@@ -82,6 +82,12 @@ end
 @inline function _brep_rorient2(a,b,c)
     return sign((b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]))
 end
+# A facet with an exact nonzero normal — degenerate (collinear or repeated
+# vertex) triangles have no support plane and cannot certify coplanarity.
+@inline _brep_rnondegen(T)=_brep_rcross(
+    _brep_rsub(_brep_rpoint(T[2]),_brep_rpoint(T[1])),
+    _brep_rsub(_brep_rpoint(T[3]),_brep_rpoint(T[1])))!=(0,0,0)
+
 # Closed-triangle containment on rational coordinates.
 function _brep_rpoint_in_tri_2d(p,T)
     _brep_rorient2(T[1],T[2],T[3])==0 && return false
@@ -310,19 +316,26 @@ function _brep_coincident_facet(T,U)
     return _brep_rdot(na,nb)<0
 end
 
-# Certify one record pair. Returns (shared, enclosed): the coincident (ai,bi)
-# facet pairs that weld into a shared interface, plus :a/:b when one shell is
-# strictly enclosed by the other. Throws on any non-conforming contact or
-# partial interpenetration.
+# Certify one record pair. Returns (shared, enclosed, crossings, overlaps):
+# the coincident (ai,bi) facet pairs that weld into a shared interface, :a/:b
+# when one shell is strictly enclosed by the other, transversal crossing
+# segments for the fragment path, and coplanar non-conforming contact pairs
+# for the planar imprint overlay. Throws on any other non-conforming contact
+# or partial interpenetration.
 function _brep_certify_disjoint(sa::Mesh,sb::Mesh,na,nb,caller)
     fa=_brep_shell_facets(sa);fb=_brep_shell_facets(sb)
     ba=[_brep_facet_box(F) for F in fa];bb=[_brep_facet_box(F) for F in fb]
     shared=Tuple{Int,Int}[]
     crossings=Tuple{Int,Int,NTuple{3,Rational{BigInt}},NTuple{3,Rational{BigInt}}}[]
+    overlaps=Tuple{Int,Int}[]
+    # One representative facet per coplanar overlap plane, for deferring the
+    # off-plane contacts (edge-on-face T-junctions and pierces) the imprint
+    # overlay resolves.
+    oplanes=Dict{Tuple{NTuple{3,BigInt},Rational{BigInt}},NTuple{3,NTuple{3,Float64}}}()
     shared_set=Set{Tuple{Int,Int}}()
     coincident_a=falses(length(fa));coincident_b=falses(length(fb))
     contact_positions=Set{NTuple{3,Float64}}()
-    extra=Tuple{Int,Int}[]
+    deferred=Tuple{Int,Int,Union{Nothing,Vector{NTuple{3,Rational{BigInt}}}}}[]
     for ai in eachindex(fa),bi in eachindex(fb)
         _brep_boxes_touch(ba[ai],bb[bi]) || continue
         _brep_coincident_facet(fa[ai],fb[bi]) || continue
@@ -350,31 +363,45 @@ function _brep_certify_disjoint(sa::Mesh,sb::Mesh,na,nb,caller)
             legit && (push!(contact_positions,v1);push!(contact_positions,v2))
         end
         legit && continue
+        # A coplanar non-conforming contact is imprintable: partial-face
+        # overlap, crossed or collinear-overlapping rim edges, or a vertex or
+        # edge landing on the other facet's interior. The planar overlay
+        # retessellates both sides so the contact becomes coincident topology.
+        # A degenerate facet's "plane" contains every point, so both sides
+        # must carry a real normal for this to mean anything.
+        _brep_rnondegen(fa[ai]) && _brep_rnondegen(fb[bi]) &&
+            all(k->orient3(fb[bi][1],fb[bi][2],fb[bi][3],fa[ai][k])==0,1:3) &&
+            (push!(overlaps,(ai,bi));
+            oplanes[_brep_plane_key(fa[ai])]=fa[ai];continue)
         # A transversal crossing is a fragmentable intersection: record its
         # segment instead of rejecting. Every other non-conforming contact is
         # deferred — a corner or diagonal touch that lies on the collected
-        # intersection polyline is conforming by construction; anything else
-        # rejects below.
+        # intersection polyline is conforming by construction; a contact whose
+        # points all lie on a coplanar overlap plane is resolved by the
+        # imprint overlay; anything else rejects below.
         seg=_brep_tri_crossing(fa[ai],fb[bi])
         seg===nothing || (push!(crossings,(ai,bi,seg[1],seg[2]));continue)
-        push!(extra,(ai,bi))
+        push!(deferred,(ai,bi,_brep_tri_candidates(fa[ai],fb[bi])))
     end
-    for (ai,bi) in extra
-        cps=_brep_tri_candidates(fa[ai],fb[bi])
+    for (ai,bi,cps) in deferred
+        onplane=cps!==nothing && !isempty(cps) && all(p->any(
+            F->_brep_rorient3(_brep_rpoint(F[1]),_brep_rpoint(F[2]),
+                _brep_rpoint(F[3]),p)==0,values(oplanes)),cps)
+        onplane && continue
         oncurve=cps!==nothing && all(p->any(
             s->_brep_rpoint_on_rseg(p,s[3],s[4]),crossings),cps)
         oncurve || throw(ArgumentError(
             "$caller: cannot certify independent solids $na and $nb; " *
             "their boundaries touch or intersect"))
     end
-    (isempty(fa)||isempty(fb)) && return shared,nothing,crossings
+    (isempty(fa)||isempty(fb)) && return shared,nothing,crossings,overlaps
     if !isempty(crossings)
-        # Crossings mixed with coincident facets on the same pair need a
-        # shared-face classification that this slice does not support.
-        isempty(shared) || throw(ArgumentError(
+        # Crossings mixed with coincident facets or coplanar overlaps on the
+        # same pair need classifications this slice does not support.
+        (isempty(shared) && isempty(overlaps)) || throw(ArgumentError(
             "$caller: cannot certify independent solids $na and $nb; " *
             "their boundaries intersect across coincident facets"))
-        return shared,nothing,crossings
+        return shared,nothing,crossings,overlaps
     end
     # Every referenced vertex off the shared patch is probed: after the pair
     # sweep no free vertex can lie on the other boundary (non-coincident
@@ -399,8 +426,19 @@ function _brep_certify_disjoint(sa::Mesh,sb::Mesh,na,nb,caller)
         probes=0;inside=0
         for row in 1:nnodes(surface)
             (referenced[row] && !used[row]) || continue
-            probes+=1
             state=_brep_point_vs_shell(node(surface,row),facets,boxes,caller)
+            if state===:onboundary
+                # A free vertex on the other boundary is admissible only on a
+                # coplanar overlap plane — the imprint overlay resolves it.
+                rv=_brep_rpoint(node(surface,row))
+                any(F->_brep_rorient3(_brep_rpoint(F[1]),_brep_rpoint(F[2]),
+                        _brep_rpoint(F[3]),rv)==0,values(oplanes)) ||
+                    throw(ArgumentError(
+                        "$caller: cannot certify independent solids $na and $nb; " *
+                        "their boundaries touch or intersect"))
+                continue
+            end
+            probes+=1
             state===:outside && continue
             state===:inside || throw(ArgumentError(
                 "$caller: cannot certify independent solids $na and $nb; " *
@@ -416,11 +454,20 @@ function _brep_certify_disjoint(sa::Mesh,sb::Mesh,na,nb,caller)
         if probes==0
             for column in 1:ntris(surface)
                 coincident[column] && continue
-                probes+=1
                 probe=(node(surface,surface.tris[1,column]).+
                     node(surface,surface.tris[2,column]).+
                     node(surface,surface.tris[3,column]))./3
                 state=_brep_point_vs_shell(probe,facets,boxes,caller)
+                if state===:onboundary
+                    rv=_brep_rpoint(probe)
+                    any(F->_brep_rorient3(_brep_rpoint(F[1]),_brep_rpoint(F[2]),
+                            _brep_rpoint(F[3]),rv)==0,values(oplanes)) ||
+                        throw(ArgumentError(
+                            "$caller: cannot certify independent solids $na and $nb; " *
+                            "their boundaries touch or intersect"))
+                    continue
+                end
+                probes+=1
                 state===:outside && continue
                 state===:inside || throw(ArgumentError(
                     "$caller: cannot certify independent solids $na and $nb; " *
@@ -442,10 +489,11 @@ function _brep_certify_disjoint(sa::Mesh,sb::Mesh,na,nb,caller)
             enclosed=direction
         end
     end
-    (enclosed===nothing || (isempty(shared) && isempty(contact_positions))) ||
+    (enclosed===nothing ||
+        (isempty(shared) && isempty(contact_positions) && isempty(overlaps))) ||
         throw(ArgumentError("$caller: cannot certify independent solids $na and $nb; " *
             "an enclosed solid cannot share boundary contact"))
-    return shared,enclosed,crossings
+    return shared,enclosed,crossings,overlaps
 end
 
 # Does segment (p,q) pass through the strict interior of triangle T2?
@@ -523,8 +571,10 @@ end
 # segments. Emitted pieces keep the source facet's winding, and segment
 # endpoints lying on a facet edge are propagated so both incident facets
 # split the shared edge identically.
-function _brep_cut_surface(facets,segs,caller)
+function _brep_cut_surface(facets,segs,caller;
+        extra_edgepts=NTuple{3,Rational{BigInt}}[])
     segends=[x for list in values(segs) for seg in list for x in seg]
+    append!(segends,extra_edgepts)
     pieces=NTuple{3,NTuple{3,Float64}}[]
     for f in eachindex(facets)
         T=facets[f]
@@ -601,6 +651,199 @@ function _brep_cut_surface(facets,segs,caller)
         end
     end
     return pieces
+end
+
+# Canonical rational plane of a facet: a primitive integer normal plus a
+# rational offset. Two facets are coplanar exactly when their keys agree.
+function _brep_plane_key(T)
+    Tr=ntuple(i->_brep_rpoint(T[i]),3)
+    n=_brep_rcross(_brep_rsub(Tr[2],Tr[1]),_brep_rsub(Tr[3],Tr[1]))
+    l=reduce(lcm,(denominator(n[k]) for k in 1:3))
+    v=ntuple(k->numerator(n[k]*l),3)
+    g=reduce(gcd,(abs(v[k]) for k in 1:3))
+    v=ntuple(k->v[k]÷g,3)
+    (v[1]<0 || (v[1]==0&&(v[2]<0||(v[2]==0&&v[3]<0)))) &&
+        (v=ntuple(k->-v[k],3))
+    return v,-(v[1]*Tr[1][1]+v[2]*Tr[1][2]+v[3]*Tr[1][3])
+end
+
+# Overlay two facet sets sharing one support plane. A single 2-D constrained
+# triangulation over every facet vertex and edge-split point — with every
+# edge sub-segment as a constraint — tessellates the union of both sides, so
+# shared cells are vertex-identical by construction. Each emitted cell is
+# classified by an exact rational centroid against each side's original
+# facets: covered-by-both cells emit on both lists wound like each side's
+# covering facet, covered-by-one cells only on that side's list. A shared
+# cell whose covering windings agree puts both interiors on the same side of
+# the plane — interpenetration — and is rejected. Returns the two piece
+# lists plus every arrangement vertex, for rim edge-split propagation to
+# off-plane facets.
+function _brep_overlay_plane(fa,fb,aidx,bidx,drop,caller)
+    A=[fa[f] for f in aidx];B=[fb[f] for f in bidx]
+    Ar=[ntuple(i->_brep_rpoint(T[i]),3) for T in A]
+    Br=[ntuple(i->_brep_rpoint(T[i]),3) for T in B]
+    pref=Ar[1]
+    onplane=p->_brep_rorient3(pref[1],pref[2],pref[3],p)==0
+    # The arrangement covers every feature the plane carries: on-plane facet
+    # edges and vertices, but also edges of off-plane facets lying on the
+    # plane (a perpendicular face's rim imprinted on this face) and pierce
+    # points of edges straddling it.
+    eset=Set{Tuple{NTuple{3,Rational{BigInt}},NTuple{3,Rational{BigInt}}}}()
+    pts=Set{NTuple{3,Rational{BigInt}}}()
+    for T in (fa...,fb...),e in 1:3
+        a,b=(_brep_rpoint(T[e]),_brep_rpoint(T[mod1(e+1,3)]))
+        oa,ob=onplane(a),onplane(b)
+        if oa&&ob
+            push!(eset,a<=b ? (a,b) : (b,a));push!(pts,a);push!(pts,b)
+        elseif oa!=ob
+            push!(pts,_brep_edge_plane_pierce(pref,a,b))
+            onplane(a) && push!(pts,a);onplane(b) && push!(pts,b)
+        end
+    end
+    edges=collect(eset)
+    # Every split point of every on-plane edge: proper crossings and
+    # endpoints of other edges landing on it (covers collinear overlaps).
+    for i in eachindex(edges),k in i+1:length(edges)
+        a,b=edges[i];c,d=edges[k]
+        p=_brep_segs_cross_point_3d(a,b,c,d)
+        p===nothing || push!(pts,p)
+        for q in (c,d)
+            (q==a||q==b||!_brep_rpoint_on_rseg(q,a,b)) || push!(pts,q)
+        end
+        for q in (a,b)
+            (q==c||q==d||!_brep_rpoint_on_rseg(q,c,d)) || push!(pts,q)
+        end
+    end
+    ptv=sort!(collect(pts))
+    # The constraint set: each edge split at every point on it, endpoints
+    # first along the edge's dominant axis.
+    subsegs=Set{Tuple{NTuple{3,Rational{BigInt}},NTuple{3,Rational{BigInt}}}}()
+    for (a,b) in edges
+        on=[a,b]
+        for p in ptv
+            (p==a||p==b||!_brep_rpoint_on_rseg(p,a,b)) || push!(on,p)
+        end
+        axis=argmax(abs.((b[1]-a[1],b[2]-a[2],b[3]-a[3])))
+        sort!(on;by=p->p[axis])
+        for k in 1:length(on)-1
+            on[k]!=on[k+1] && push!(subsegs,(on[k],on[k+1]))
+        end
+    end
+    p2=function(p)
+        d=_brep_rdrop(p,drop)
+        f1=Float64(d[1]);f2=Float64(d[2])
+        (f1==0 ? 0.0 : f1,f2==0 ? 0.0 : f2)
+    end
+    rkey=Dict{NTuple{2,Float64},NTuple{3,Rational{BigInt}}}()
+    for p in ptv;rkey[p2(p)]=p;end
+    xs=Float64[k[1] for k in keys(rkey)];ys=Float64[k[2] for k in keys(rkey)]
+    T2=Mesh2D.delaunay2d(xs,ys)
+    locate=function(p)
+        d=p2(p)
+        findfirst(v->T2.x[v]==d[1]&&T2.y[v]==d[2],Int32(1):T2.nreal)
+    end
+    for (p,q) in subsegs
+        vi=locate(p);vj=locate(q)
+        (vi===nothing||vj===nothing) && throw(ErrorException(
+            "$caller: internal error — overlay vertex missing from the " *
+            "planar triangulation"))
+        vi!=vj && Mesh2D.insert_segment!(T2,vi,vj;internal=true)
+    end
+    m=Mesh2D.to_mesh(T2)
+    A2=[ntuple(k->_brep_rdrop(T[k],drop),3) for T in Ar]
+    B2=[ntuple(k->_brep_rdrop(T[k],drop),3) for T in Br]
+    sA=[_brep_rorient2(T[1],T[2],T[3]) for T in A2]
+    sB=[_brep_rorient2(T[1],T[2],T[3]) for T in B2]
+    pieces_a=NTuple{3,NTuple{3,Float64}}[]
+    pieces_b=NTuple{3,NTuple{3,Float64}}[]
+    for t in 1:ntris(m)
+        tri=ntuple(r->rkey[(m.coords[1,m.tris[r,t]],
+            m.coords[2,m.tris[r,t]])],3)
+        _brep_rcross(_brep_rsub(tri[2],tri[1]),_brep_rsub(tri[3],tri[1]))==
+            (0,0,0) && continue
+        c2=_brep_rdrop(ntuple(d->(tri[1][d]+tri[2][d]+tri[3][d])/3,3),drop)
+        inA=findfirst(T->_brep_rpoint_in_tri_2d(c2,T),A2)
+        inB=findfirst(T->_brep_rpoint_in_tri_2d(c2,T),B2)
+        (inA===nothing && inB===nothing) && continue
+        o=_brep_rorient2(_brep_rdrop(tri[1],drop),
+            _brep_rdrop(tri[2],drop),_brep_rdrop(tri[3],drop))
+        cell=ntuple(i->_brep_ftuple(tri[i]),3)
+        if inA!==nothing
+            push!(pieces_a,o*sA[inA]>0 ? cell : (cell[1],cell[3],cell[2]))
+            inB===nothing || (sA[inA]*sB[inB]>0 && throw(ArgumentError(
+                "$caller: cannot assemble solids; coplanar facets overlap " *
+                "with aligned winding — their volumes interpenetrate")))
+        end
+        if inB!==nothing
+            push!(pieces_b,o*sB[inB]>0 ? cell : (cell[1],cell[3],cell[2]))
+        end
+    end
+    return pieces_a,pieces_b,ptv
+end
+
+# Coplanar imprints: facets of two solids sharing a support plane overlap in
+# partial faces, crossed rim edges or vertex/edge-on-face contacts that are
+# not coincident topology. One planar overlay per support plane retessellates
+# both sides into cells classified by coverage, so the recursion's
+# certificate welds shared cells like any conforming contact. Arrangement
+# vertices landing inside a group facet's rim edge propagate to the edge's
+# off-plane incident facet so the rebuilt surfaces stay watertight.
+function _brep_assembly_overlay(records,fill_solids,overlaymap,caller;
+        joint_fill::Bool=false)
+    (i,j)=minimum(collect(keys(overlaymap)))
+    fa=_brep_shell_facets(records[i].surface)
+    fb=_brep_shell_facets(records[j].surface)
+    groups=Dict{Tuple{NTuple{3,BigInt},Rational{BigInt}},Vector{Int}}()
+    for (ai,bi) in overlaymap[(i,j)]
+        key=_brep_plane_key(fa[ai])
+        _brep_plane_key(fb[bi])==key || throw(ErrorException(
+            "$caller: internal error — overlap pair is not coplanar"))
+        push!(get!(groups,key,Int[]),ai)
+    end
+    onP_a=falses(length(fa));onP_b=falses(length(fb))
+    new_a=NTuple{3,NTuple{3,Float64}}[]
+    new_b=NTuple{3,NTuple{3,Float64}}[]
+    edgepts=NTuple{3,Rational{BigInt}}[]
+    for key in sort!(collect(keys(groups)))
+        aidx=[f for f in eachindex(fa) if
+            _brep_rnondegen(fa[f]) && _brep_plane_key(fa[f])==key]
+        bidx=[f for f in eachindex(fb) if
+            _brep_rnondegen(fb[f]) && _brep_plane_key(fb[f])==key]
+        onP_a[aidx].=true;onP_b[bidx].=true
+        drop=_brep_coplanar_drop_axis(fa[aidx[1]])
+        pa,pb,ptv=_brep_overlay_plane(fa,fb,aidx,bidx,drop,caller)
+        append!(new_a,pa);append!(new_b,pb)
+        append!(edgepts,ptv)
+    end
+    # Off-plane facets pass through `_brep_cut_surface` so arrangement
+    # vertices on shared rim edges split both incident facets identically.
+    nosegs=Dict{Int,Vector{Tuple{NTuple{3,Rational{BigInt}},
+        NTuple{3,Rational{BigInt}}}}}()
+    pieces_off_a=_brep_cut_surface([fa[f] for f in eachindex(fa) if !onP_a[f]],
+        nosegs,caller;extra_edgepts=edgepts)
+    pieces_off_b=_brep_cut_surface([fb[f] for f in eachindex(fb) if !onP_b[f]],
+        nosegs,caller;extra_edgepts=edgepts)
+    new_a=[pieces_off_a;new_a]
+    new_b=[pieces_off_b;new_b]
+    rebuild=function(pieces)
+        pos2row=Dict{NTuple{3,Float64},Int32}()
+        conn=Matrix{Int32}(undef,3,length(pieces))
+        for (c,P) in enumerate(pieces),k in 1:3
+            row=get!(pos2row,P[k]) do
+                Int32(length(pos2row)+1)
+            end
+            conn[k,c]=row
+        end
+        cm=Matrix{Float64}(undef,3,length(pos2row))
+        for (pos,row) in pos2row
+            cm[1,row]=pos[1];cm[2,row]=pos[2];cm[3,row]=pos[3]
+        end
+        return Mesh(cm;tris=conn)
+    end
+    modified=collect(records)
+    modified[i]=(name=records[i].name,surface=rebuild(new_a))
+    modified[j]=(name=records[j].name,surface=rebuild(new_b))
+    return _brep_assembly(modified,fill_solids,caller;joint_fill=joint_fill)
 end
 
 # Transversal crossings fragment the crossed boundaries: every affected facet
@@ -694,25 +937,31 @@ function _brep_assembly(records,fill_solids,caller;joint_fill::Bool=false)
     weld_pairs=Dict{Tuple{Int,Int},Vector{Tuple{Int,Int}}}()
     nested=Set{Tuple{Int,Int}}()
     fragment=Dict{Tuple{Int,Int},Vector{Tuple{Int,Int,NTuple{3,Rational{BigInt}},NTuple{3,Rational{BigInt}}}}}()
+    overlaymap=Dict{Tuple{Int,Int},Vector{Tuple{Int,Int}}}()
     for i in 1:length(records)-1,j in i+1:length(records)
         alo,ahi=bounds[i];blo,bhi=bounds[j]
         any(axis->ahi[axis]<blo[axis] || bhi[axis]<alo[axis],1:3) && continue
-        shared,enclosed,crossings=_brep_certify_disjoint(records[i].surface,records[j].surface,
-            records[i].name,records[j].name,caller)
+        shared,enclosed,crossings,overlaps=_brep_certify_disjoint(records[i].surface,
+            records[j].surface,records[i].name,records[j].name,caller)
         isempty(shared) || (weld_pairs[(i,j)]=shared)
         enclosed===:a && push!(nested,(i,j))
         enclosed===:b && push!(nested,(j,i))
         isempty(crossings) || (fragment[(i,j)]=crossings)
+        isempty(overlaps) || (overlaymap[(i,j)]=overlaps)
     end
     if !isempty(fragment)
-        # A crossing pair mixed with a coincident weld or enclosure on ANY
-        # pair needs classifications this bounded slice does not support.
-        (isempty(weld_pairs) && isempty(nested)) || throw(ArgumentError(
+        # A crossing pair mixed with a coincident weld, coplanar imprint or
+        # enclosure on ANY pair needs classifications this slice does not
+        # support.
+        (isempty(weld_pairs) && isempty(nested) && isempty(overlaymap)) ||
+            throw(ArgumentError(
             "$caller: cannot assemble solids; transversal boundary " *
-            "intersections combined with coincident or enclosed solids are " *
-            "not supported"))
+            "intersections combined with coincident, coplanar or enclosed " *
+            "solids are not supported"))
         return _brep_assembly_fragment(records,fill_solids,fragment,caller)
     end
+    isempty(overlaymap) || return _brep_assembly_overlay(
+        records,fill_solids,overlaymap,caller;joint_fill=joint_fill)
     # Region-tag ordering counts every container of each solid, so the
     # innermost shells tag first. Only direct containment welds an interface:
     # a transitively enclosed solid has no emitted interface with the
