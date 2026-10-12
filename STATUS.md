@@ -433,8 +433,29 @@ solids with overlapping boxes are now admitted. The new
 proves the admit path; six shifted-box mutants plus a coincident-shell
 twin verify each rejection mode — the focused assembly file passes
 126/126 and the default smoke gained an admit-plus-reject testset.
-Conforming-contact interfaces, welding and Boolean/imprint work remain
-CAD05.
+
+### Conforming-contact welding for multi-solid CAD assembly (2026-10-12)
+
+Devin landed the second CAD05 slice. Facet pairs sharing exactly the same
+vertex positions (canonical sorted-position keys over `Rational{BigInt}`)
+with opposed outward winding certify as conforming contact and weld:
+the certificate collects coincident pairs per record pair first, then
+exempts rim contacts only — non-coincident facet contacts must lie
+exactly on shared-interface rims — while every referenced vertex off a
+shared support is ray-parity-probed against the other shell (hinged
+facets dipping inside reject), and three-solid coincident facets reject.
+Welded emission gives each record pair one shared Surface entity:
+coincident supports group by coplanarity into plane patches, emitted
+boundary cells classify against the patch union (`_brep_cell_in_union`
+closed coverage; partial positive-area overlap rejects), both records
+must emit the identical coordinate-sorted interface cell set, shared
+cells emit once, rim nodes deduplicate by exact position and classify
+under the shared Surface, and both Regions bound it. Verified on the new
+`brep_contact_twin.step` fixture under `fill=false`/`fill=true`, a
+same-diagonal quad-face weld, mismatched-diagonal and partial-quad
+rejections, and MSH4 round-trip; the focused assembly file passes
+164/164 and the default smoke gained a compact weld testset.
+Booleans/imprints and non-coincident intersections remain CAD05.
 
 ### Current verified batch and Devin transfer (2026-10-11)
 

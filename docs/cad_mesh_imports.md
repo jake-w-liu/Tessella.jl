@@ -9,14 +9,21 @@ Each imported solid retains one discrete boundary Surface and Region, separate
 node/element UIDs, and source identity in physical names. STEP entity IDs or
 IGES directory-entry IDs determine solid ordering. Filled boundary triangles
 come from actual tetrahedron incidence; boundary/interior node owners follow
-that incidence. Nodes are not welded across solids. IGES primitive and solid
+that incidence. IGES primitive and solid
 root rigid directory-entry transforms are applied.
 
 Strictly separated bounding boxes certify independent solids directly. When
-boxes overlap an exact geometric certificate decides: any intersecting or
-touching boundary facets (including coincident facets and edge/vertex-only
-contact) reject, one solid enclosing the other rejects, and genuinely
-disjoint solids are admitted. Boxes are never used to discover, split or
+boxes overlap an exact geometric certificate decides: facet pairs sharing
+exactly the same vertex positions with opposed outward windings are
+conforming contact and weld — each coincident pair becomes one shared
+Surface entity bound by both Regions, emitted once, with rim nodes
+deduplicated by exact position. Filled solids weld only when both
+independent fills emit the identical interface triangulation; a facet
+shared by three solids, a fill crossing the interface rim, and
+non-coincident touching or intersecting boundary facets (partial overlap,
+edge/vertex-only contact, same-region duplication) all reject, as does one
+solid enclosing or dipping into the other. Genuinely disjoint solids are
+admitted. Boxes are never used to discover, split or
 replace source roots. Point-cloud box imports retain their original single-solid behavior.
 Multi-root IGES identities must be positive, odd, unique and consistent with
 the directory-entry type. Unsupported geometric entity types are rejected;

@@ -69,58 +69,102 @@ function _brep_point_in_tri_2d(p,T)
     s1=orient2(T[1],T[2],p);s2=orient2(T[2],T[3],p);s3=orient2(T[3],T[1],p)
     return (s1>=0&&s2>=0&&s3>=0)||(s1<=0&&s2<=0&&s3<=0)
 end
-function _brep_tris_intersect_coplanar(T,U)
-    drop=_brep_coplanar_drop_axis(T)
-    T2=ntuple(i->_brep_drop(T[i],drop),3)
-    U2=ntuple(j->_brep_drop(U[j],drop),3)
-    for i in 1:3,j in 1:3
-        _brep_segs_intersect_2d(T2[i],T2[mod1(i+1,3)],U2[j],U2[mod1(j+1,3)]) &&
-            return true
-    end
-    return _brep_point_in_tri_2d(T2[1],U2)||_brep_point_in_tri_2d(U2[1],T2)
+# Is point p on the closed triangle T? (T2 is T's dominant-axis projection.)
+@inline function _brep_point_on_tri(p,T,T2,drop)
+    orient3(T[1],T[2],T[3],p)!=0 && return false
+    return _brep_point_in_tri_2d(_brep_drop(p,drop),T2)
 end
 
-# Exact scalars (dominant-axis coordinate) where triangle Tr meets the plane of
-# Ur: on-plane vertices plus edge pierce parameters from rational orient3
-# values. The collected points span Tr ∩ plane(Ur).
-function _brep_plane_scalars(Tr,Ur,s,k)
-    hits=Rational{BigInt}[]
-    for i in 1:3
-        j=i==3 ? 1 : i+1
-        si,sj=s[i],s[j]
-        si==0 && push!(hits,Tr[i][k])
-        si*sj<0 || continue
-        oi=_brep_rorient3(Ur[1],Ur[2],Ur[3],Tr[i])
-        oj=_brep_rorient3(Ur[1],Ur[2],Ur[3],Tr[j])
-        λ=oi/(oi-oj)
-        push!(hits,Tr[i][k]+(Tr[j][k]-Tr[i][k])*λ)
-    end
-    return hits
+@inline _brep_rdrop(p,k)=(p[mod1(k+1,3)],p[mod1(k+2,3)])
+@inline function _brep_rorient2(a,b,c)
+    return sign((b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]))
+end
+# Closed-triangle containment on rational coordinates.
+function _brep_rpoint_in_tri_2d(p,T)
+    _brep_rorient2(T[1],T[2],T[3])==0 && return false
+    s1=_brep_rorient2(T[1],T[2],p);s2=_brep_rorient2(T[2],T[3],p)
+    s3=_brep_rorient2(T[3],T[1],p)
+    return (s1>=0&&s2>=0&&s3>=0)||(s1<=0&&s2<=0&&s3<=0)
 end
 
-# Do the closed triangles T and U intersect at all? Exact predicates decide:
-# plane-separation filters first, then the interval overlap of each triangle's
-# intersection with the other's plane, then a 2-D test for coplanar pairs.
-function _brep_tris_intersect(T,U)
+# Where edge (a,b) pierces the plane of U, kept in exact rationals.
+function _brep_edge_plane_pierce(Ur,ra,rb)
+    oa=_brep_rorient3(Ur[1],Ur[2],Ur[3],ra)
+    ob=_brep_rorient3(Ur[1],Ur[2],Ur[3],rb)
+    λ=oa/(oa-ob)
+    return ntuple(d->ra[d]+(rb[d]-ra[d])*λ,3)
+end
+
+# Do two closed 3-D segments cross at a point interior to both? Endpoint and
+# collinear touches are handled by the vertex checks and return false here.
+function _brep_segs_cross_3d(a,b,c,d)
+    ra,rb,rc,rd=_brep_rpoint(a),_brep_rpoint(b),_brep_rpoint(c),_brep_rpoint(d)
+    e1=_brep_rsub(rb,ra);e2=_brep_rsub(rd,rc)
+    rhs=_brep_rsub(rc,ra)
+    for (i,j) in ((1,2),(1,3),(2,3))
+        det=e1[i]*(-e2[j])-e1[j]*(-e2[i])
+        det==0 && continue
+        μ=(rhs[i]*(-e2[j])-rhs[j]*(-e2[i]))/det
+        ν=(e1[i]*rhs[j]-e1[j]*rhs[i])/det
+        k=6-i-j
+        ra[k]+μ*e1[k]==rc[k]+ν*e2[k] || return false
+        return 0<μ<1 && 0<ν<1
+    end
+    return false
+end
+
+# The contact set of two closed triangles: (:none), (:point,[v]),
+# (:segment,[v1,v2]) or :bad for interior crossings, edge/pierce contacts and
+# positive-area overlap — anything that cannot be a rim touch.
+function _brep_tris_contact(T,U)
     s=ntuple(i->orient3(U[1],U[2],U[3],T[i]),3)
-    all(>(0),s)&&return false
-    all(<(0),s)&&return false
+    all(>(0),s)&&return (:none,nothing)
+    all(<(0),s)&&return (:none,nothing)
     t=ntuple(j->orient3(T[1],T[2],T[3],U[j]),3)
-    all(>(0),t)&&return false
-    all(<(0),t)&&return false
-    all(==(0),s)&&return _brep_tris_intersect_coplanar(T,U)
-    Tr=ntuple(i->_brep_rpoint(T[i]),3)
-    Ur=ntuple(j->_brep_rpoint(U[j]),3)
-    nT=_brep_rcross(_brep_rsub(Tr[2],Tr[1]),_brep_rsub(Tr[3],Tr[1]))
-    nU=_brep_rcross(_brep_rsub(Ur[2],Ur[1]),_brep_rsub(Ur[3],Ur[1]))
-    d=_brep_rcross(nT,nU)
-    all(==(0),d)&&return false
-    k=argmax(abs.([d[1],d[2],d[3]]))
-    a=_brep_plane_scalars(Tr,Ur,s,k)
-    isempty(a)&&return false
-    b=_brep_plane_scalars(Ur,Tr,t,k)
-    isempty(b)&&return false
-    return minimum(a)<=maximum(b) && minimum(b)<=maximum(a)
+    all(>(0),t)&&return (:none,nothing)
+    all(<(0),t)&&return (:none,nothing)
+    dropT=_brep_coplanar_drop_axis(T);dropU=_brep_coplanar_drop_axis(U)
+    T2=ntuple(i->_brep_drop(T[i],dropT),3)
+    U2=ntuple(j->_brep_drop(U[j],dropU),3)
+    pts=Set{NTuple{3,Float64}}()
+    for i in 1:3
+        s[i]==0 && _brep_point_on_tri(T[i],U,U2,dropU) && push!(pts,T[i])
+        t[i]==0 && _brep_point_on_tri(U[i],T,T2,dropT) && push!(pts,U[i])
+    end
+    if all(==(0),s)
+        _brep_tris_overlap_area_2d(T2,U2) && return (:bad,nothing)
+        for i in 1:3,j in 1:3
+            a,b=T2[i],T2[mod1(i+1,3)];c,d=U2[j],U2[mod1(j+1,3)]
+            orient2(a,b,c)*orient2(a,b,d)<0 && orient2(c,d,a)*orient2(c,d,b)<0 &&
+                return (:bad,nothing)
+        end
+    else
+        Tr=ntuple(i->_brep_rpoint(T[i]),3)
+        Ur=ntuple(j->_brep_rpoint(U[j]),3)
+        U2r=ntuple(j->_brep_rdrop(Ur[j],dropU),3)
+        T2r=ntuple(i->_brep_rdrop(Tr[i],dropT),3)
+        for i in 1:3
+            j=i==3 ? 1 : i+1
+            if s[i]*s[j]<0
+                p=_brep_edge_plane_pierce(Ur,Tr[i],Tr[j])
+                _brep_rpoint_in_tri_2d(_brep_rdrop(p,dropU),U2r) &&
+                    return (:bad,nothing)
+            end
+            if t[i]*t[j]<0
+                p=_brep_edge_plane_pierce(Tr,Ur[i],Ur[j])
+                _brep_rpoint_in_tri_2d(_brep_rdrop(p,dropT),T2r) &&
+                    return (:bad,nothing)
+            end
+        end
+        for i in 1:3,j in 1:3
+            _brep_segs_cross_3d(T[i],T[mod1(i+1,3)],U[j],U[mod1(j+1,3)]) &&
+                return (:bad,nothing)
+        end
+    end
+    length(pts)>2 && return (:bad,nothing)
+    length(pts)==2 && return (:segment,collect(pts))
+    length(pts)==1 && return (:point,collect(pts))
+    return (:none,nothing)
 end
 
 # Non-axis-aligned probe directions; a ray that never runs parallel to a facet
@@ -171,29 +215,147 @@ function _brep_point_vs_shell(p,facets,boxes,caller)
         "no nondegenerate containment probe exists"))
 end
 
+# Conforming contact: two facets are coincident when they share the exact same
+# vertex positions. Their outward windings must oppose — equal winding means the
+# interiors lie on the same side of the support, i.e. interpenetration.
+function _brep_coincident_facet(T,U)
+    Tr=ntuple(i->_brep_rpoint(T[i]),3)
+    Ur=ntuple(j->_brep_rpoint(U[j]),3)
+    Set(Tr)==Set(Ur) || return false
+    na=_brep_rcross(_brep_rsub(Tr[2],Tr[1]),_brep_rsub(Tr[3],Tr[1]))
+    nb=_brep_rcross(_brep_rsub(Ur[2],Ur[1]),_brep_rsub(Ur[3],Ur[1]))
+    return _brep_rdot(na,nb)<0
+end
+
+# Certify one record pair. Returns the coincident (ai,bi) facet pairs that weld
+# into a shared interface; throws on any other contact or containment.
 function _brep_certify_disjoint(sa::Mesh,sb::Mesh,na,nb,caller)
     fa=_brep_shell_facets(sa);fb=_brep_shell_facets(sb)
     ba=[_brep_facet_box(F) for F in fa];bb=[_brep_facet_box(F) for F in fb]
+    shared=Tuple{Int,Int}[]
+    shared_set=Set{Tuple{Int,Int}}()
+    coincident_a=falses(length(fa));coincident_b=falses(length(fb))
+    shared_vertices=Set{NTuple{3,Float64}}()
+    shared_edges=Set{NTuple{2,NTuple{3,Float64}}}()
     for ai in eachindex(fa),bi in eachindex(fb)
         _brep_boxes_touch(ba[ai],bb[bi]) || continue
-        _brep_tris_intersect(fa[ai],fb[bi]) && throw(ArgumentError(
+        _brep_coincident_facet(fa[ai],fb[bi]) || continue
+        push!(shared,(ai,bi));push!(shared_set,(ai,bi))
+        coincident_a[ai]=true;coincident_b[bi]=true
+        T=fa[ai]
+        union!(shared_vertices,T)
+        for e in 1:3
+            push!(shared_edges,minmax(T[e],T[mod1(e+1,3)]))
+        end
+    end
+    # Non-coincident facets may touch only on the shared interface rim — a
+    # point at a shared vertex belonging to both facets, or a segment that is
+    # a shared edge and a side of both.
+    for ai in eachindex(fa),bi in eachindex(fb)
+        _brep_boxes_touch(ba[ai],bb[bi]) || continue
+        (ai,bi) in shared_set && continue
+        kind,pts=_brep_tris_contact(fa[ai],fb[bi])
+        kind===:none && continue
+        legit=false
+        if kind===:point
+            v=only(pts)
+            legit=v in shared_vertices && v in fa[ai] && v in fb[bi]
+        elseif kind===:segment
+            v1,v2=pts
+            legit=minmax(v1,v2) in shared_edges &&
+                v1 in fa[ai] && v1 in fb[bi] && v2 in fa[ai] && v2 in fb[bi]
+        end
+        legit || throw(ArgumentError(
             "$caller: cannot certify independent solids $na and $nb; " *
             "their boundaries touch or intersect"))
     end
-    # With non-intersecting connected shells, one probe vertex per side decides
-    # between disjointness and strict enclosure. Probe a referenced vertex so
-    # unreferenced node rows cannot corrupt the enclosure decision; an empty
-    # surface cannot enclose anything and is rejected by validation later.
-    (isempty(fa)||isempty(fb)) && return nothing
-    for (probe,facets,boxes) in ((node(sa,sa.tris[1,1]),fb,bb),
-                                 (node(sb,sb.tris[1,1]),fa,ba))
-        state=_brep_point_vs_shell(probe,facets,boxes,caller)
-        state===:outside && continue
-        throw(ArgumentError("$caller: cannot certify independent solids $na and $nb; " *
-            (state===:inside ? "one solid encloses the other" :
-                               "their boundaries touch or intersect")))
+    (isempty(fa)||isempty(fb)) && return shared
+    # Every referenced vertex off the shared patch is probed: after the pair
+    # sweep no free vertex can lie on the other boundary (non-coincident
+    # contact already threw), so each is strictly inside or outside. A single
+    # inside vertex means interpenetration even when the rest stay outside —
+    # a facet hinged on the rim can dip into the other solid. A shell with no
+    # free vertex is a duplicate or an embedded subshell, never independent.
+    for (surface,facets,boxes,coincident,other) in
+            ((sa,fb,bb,coincident_a,nb),(sb,fa,ba,coincident_b,na))
+        used=falses(nnodes(surface));referenced=falses(nnodes(surface))
+        for column in 1:ntris(surface)
+            on_iface=coincident[column]
+            for r in 1:3
+                row=surface.tris[r,column];referenced[row]=true
+                on_iface && (used[row]=true)
+            end
+        end
+        free=false
+        for row in 1:nnodes(surface)
+            (referenced[row] && !used[row]) || continue
+            free=true
+            state=_brep_point_vs_shell(node(surface,row),facets,boxes,caller)
+            state===:outside && continue
+            throw(ArgumentError("$caller: cannot certify independent solids $na and $nb; " *
+                (state===:inside ? "one solid encloses the other" :
+                                   "their boundaries touch or intersect")))
+        end
+        free || throw(ArgumentError("$caller: cannot certify independent solids $na and $nb; " *
+            "their boundaries coincide everywhere"))
     end
-    return nothing
+    return shared
+end
+
+# Does segment (p,q) pass through the strict interior of triangle T2?
+# Boundary-only touches return false.
+function _brep_seg_in_tri_interior_2d(p,q,T2)
+    strict_in(x)=begin
+        s1,s2,s3=orient2(T2[1],T2[2],x),orient2(T2[2],T2[3],x),orient2(T2[3],T2[1],x)
+        (s1>0&&s2>0&&s3>0)||(s1<0&&s2<0&&s3<0)
+    end
+    strict_in(p) && return true
+    strict_in(q) && return true
+    # A chord whose endpoints sit on the cell boundary dips inside exactly
+    # when its midpoint does — the triangle is convex.
+    strict_in((p .+ q) ./ 2) && return true
+    for i in 1:3
+        a,b=T2[i],T2[mod1(i+1,3)]
+        orient2(a,b,p)*orient2(a,b,q)<0 && orient2(p,q,a)*orient2(p,q,b)<0 &&
+            return true
+    end
+    return false
+end
+
+# Is triangle P2 covered by the closed union of coplanar patch triangles G2?
+# Every vertex must lie in some patch triangle and no patch rim edge may cut
+# the cell's interior — the rim is the support-edge set of single incidence.
+function _brep_cell_in_union(P2,G2)
+    all(k->any(T2->_brep_point_in_tri_2d(P2[k],T2),G2),1:3) || return false
+    counts=Dict{NTuple{2,NTuple{2,Float64}},Int}()
+    for T2 in G2,e in 1:3
+        edge=minmax(T2[e],T2[mod1(e+1,3)])
+        counts[edge]=get(counts,edge,0)+1
+    end
+    for (edge,count) in counts
+        count==1 || continue
+        _brep_seg_in_tri_interior_2d(edge[1],edge[2],P2) && return false
+    end
+    return true
+end
+
+# Positive-area 2-D overlap between two projected triangles: strict edge
+# crossings or a strict vertex containment. Rim/point touches return false.
+function _brep_tris_overlap_area_2d(T2,U2)
+    for i in 1:3,j in 1:3
+        a,b,c,d=T2[i],T2[mod1(i+1,3)],U2[j],U2[mod1(j+1,3)]
+        orient2(a,b,c)*orient2(a,b,d)<0 && orient2(c,d,a)*orient2(c,d,b)<0 &&
+            return true
+    end
+    strict_in(p,T)=begin
+        s1,s2,s3=orient2(T[1],T[2],p),orient2(T[2],T[3],p),orient2(T[3],T[1],p)
+        (s1>0&&s2>0&&s3>0)||(s1<0&&s2<0&&s3<0)
+    end
+    orient2(U2[1],U2[2],U2[3])!=0 &&
+        any(p->strict_in(p,U2),T2) && return true
+    orient2(T2[1],T2[2],T2[3])!=0 &&
+        any(p->strict_in(p,T2),U2) && return true
+    return false
 end
 
 # Mesh import retains the source solid partition. These are discrete closed
@@ -202,11 +364,13 @@ function _brep_assembly(records,fill_solids,caller)
     length(records)>1 || throw(ArgumentError("$caller: assembly requires multiple source solids"))
     length(records)<=typemax(Int32) || throw(ArgumentError("$caller: too many source solids"))
     bounds=[bounding_box(record.surface) for record in records]
+    weld_pairs=Dict{Tuple{Int,Int},Vector{Tuple{Int,Int}}}()
     for i in 1:length(records)-1,j in i+1:length(records)
         alo,ahi=bounds[i];blo,bhi=bounds[j]
         any(axis->ahi[axis]<blo[axis] || bhi[axis]<alo[axis],1:3) && continue
-        _brep_certify_disjoint(records[i].surface,records[j].surface,
+        shared=_brep_certify_disjoint(records[i].surface,records[j].surface,
             records[i].name,records[j].name,caller)
+        isempty(shared) || (weld_pairs[(i,j)]=shared)
     end
     # Certify every source boundary before any fill, and fill each Region
     # independently. No coordinate matching can select a Region or weld UIDs.
@@ -219,6 +383,8 @@ function _brep_assembly(records,fill_solids,caller)
         _brep_assembly_shell_certificate(part.coords,shell,caller)
         push!(parts,part);push!(shells,shell)
     end
+    isempty(weld_pairs) || return _brep_assembly_welded(records,parts,shells,
+        bounds,fill_solids,weld_pairs,caller)
     node_count=0;cell_count=0
     for (part,shell) in zip(parts,shells)
         node_count=_checked_brep_add(node_count,nnodes(part),0,caller,"assembly node count")
@@ -251,6 +417,207 @@ function _brep_assembly(records,fill_solids,caller)
         end
         node_offset+=count
     end
+    data=MixedEntityData(entities;node_entities=owners,
+        node_parametric=fill(nothing,node_count),external_node_tags=UInt64.(1:node_count),
+        block_entities=block_owners,external_element_tags=labels)
+    result=MixedMesh(coords,blocks;physical_names=names,entity_data=data,
+                     elementary_entities=block_owners)
+    validate(result).ok || throw(ErrorException("$caller: invalid classified assembly product"))
+    return result
+end
+
+# Conforming-contact emission: coincident facet pairs weld into one shared
+# Surface entity bound by both Regions. Nodes on shared supports deduplicate
+# by exact position; every emitted boundary cell inside a shared footprint
+# must appear identically on both records' emitted shells.
+function _brep_assembly_welded(records,parts,shells,bounds,fill_solids,weld_pairs,caller)
+    nrec=length(records)
+    # Canonical shared-support key per coincident source facet: the sorted
+    # vertex-position triple — identical on both records.
+    support_key=Dict{Tuple{Int,Int},NTuple{3,NTuple{3,Float64}}}()
+    for (key,list) in weld_pairs,(ai,bi) in list
+        i,j=key
+        for (r,f) in ((i,ai),(j,bi))
+            haskey(support_key,(r,f)) && throw(ArgumentError(
+                "$caller: cannot certify conforming contact; " *
+                "a boundary facet is shared by three solids"))
+            support_key[(r,f)]=Tuple(sort!(collect(ntuple(
+                c->node(records[r].surface,records[r].surface.tris[c,f]),3))))
+        end
+    end
+    # One shared Surface entity per welded record pair.
+    pair_tags=Dict{Tuple{Int,Int},Int32}()
+    for key in sort!(collect(keys(weld_pairs)))
+        pair_tags[key]=Int32(nrec+length(pair_tags)+1)
+    end
+    # Each pair's supports group by coplanarity into plane patches; a fill
+    # cell is shared when covered by one patch's union, so fills may
+    # retriangulate freely across internal patch edges.
+    patches=Dict{Tuple{Int,Int},Vector{Vector{NTuple{3,NTuple{3,Float64}}}}}()
+    for (key,list) in weld_pairs,(ai,bi) in list
+        support=support_key[(key[1],ai)]
+        groups=get!(patches,key,Vector{NTuple{3,NTuple{3,Float64}}}[])
+        placed=false
+        for group in groups
+            S=group[1]
+            if all(p->orient3(S[1],S[2],S[3],p)==0,support)
+                push!(group,support);placed=true;break
+            end
+        end
+        placed || push!(groups,[support])
+    end
+    # Classify every emitted boundary cell against each pair's patches: full
+    # closed coverage by a patch union makes it an interface cell; positive-
+    # area overlap without coverage means the fill crosses the interface rim.
+    emitted_shared=[Dict{Tuple{Int,Int},Vector{NTuple{3,Int}}}()
+                    for _ in records]
+    for (r,(part,shell)) in enumerate(zip(parts,shells))
+        relevant=sort!(Tuple{Int,Int}[key for key in keys(patches) if r in key])
+        isempty(relevant) && continue
+        for column in axes(shell,2)
+            cell=(Int(shell[1,column]),Int(shell[2,column]),Int(shell[3,column]))
+            P=ntuple(k->node(part,cell[k]),3)
+            for key in relevant
+                shared=false
+                for group in patches[key]
+                    S=group[1]
+                    all(k->orient3(S[1],S[2],S[3],P[k])==0,1:3) || continue
+                    drop=_brep_coplanar_drop_axis(S)
+                    P2=ntuple(k->_brep_drop(P[k],drop),3)
+                    G2=[ntuple(k->_brep_drop(s[k],drop),3) for s in group]
+                    if _brep_cell_in_union(P2,G2)
+                        push!(get!(emitted_shared[r],key,NTuple{3,Int}[]),cell)
+                        shared=true;break
+                    end
+                    any(T2->_brep_tris_overlap_area_2d(P2,T2),G2) && throw(
+                        ArgumentError("$caller: conforming contact requires " *
+                            "fills to respect the shared interface boundary"))
+                end
+                shared && break
+            end
+        end
+    end
+    # Both records must emit the same cells on every shared interface —
+    # otherwise their fills triangulate it differently.
+    for (key,list) in weld_pairs
+        i,j=key
+        ca=get(emitted_shared[i],key,NTuple{3,Int}[])
+        cb=get(emitted_shared[j],key,NTuple{3,Int}[])
+        (isempty(ca)||isempty(cb)) && throw(ArgumentError(
+            "$caller: fill produced no cell on the shared interface"))
+        keys_a=Set(Tuple(sort!(collect(ntuple(k->node(parts[i],cell[k]),3))))
+                   for cell in ca)
+        keys_b=Set(Tuple(sort!(collect(ntuple(k->node(parts[j],cell[k]),3))))
+                   for cell in cb)
+        keys_a==keys_b || throw(ArgumentError(
+            "$caller: conforming contact requires identical triangulation " *
+            "of the shared interface"))
+    end
+    # Global node rows deduplicate by exact position; a position claimed on a
+    # shared cell or support rim belongs to that pair's shared entity.
+    pos_owner=Dict{NTuple{3,Float64},Tuple{Int,Int32}}()
+    for (key,list) in weld_pairs,(ai,bi) in list
+        i,j=key;support=support_key[(i,ai)];tag=pair_tags[key]
+        for p in support
+            pos_owner[p]=min(get(pos_owner,p,(2,tag)),(2,tag))
+        end
+        for r in (i,j),cell in emitted_shared[r][key],k in 1:3
+            p=node(parts[r],cell[k])
+            pos_owner[p]=min(get(pos_owner,p,(2,tag)),(2,tag))
+        end
+    end
+    pos2row=Dict{NTuple{3,Float64},Int}()
+    global_nodes=NTuple{3,Float64}[]
+    owners=Tuple{Int,Int32}[]
+    remap=[Vector{Int}(undef,nnodes(part)) for part in parts]
+    for (r,(part,shell)) in enumerate(zip(parts,shells))
+        tag=Int32(r);boundary=falses(nnodes(part))
+        for row in shell;boundary[row]=true;end
+        for row in 1:nnodes(part)
+            p=node(part,row)
+            grow=get!(pos2row,p) do
+                owner=get(pos_owner,p,boundary[row] ? (2,tag) : (3,tag))
+                push!(global_nodes,p);push!(owners,owner)
+                length(global_nodes)
+            end
+            if boundary[row] && !haskey(pos_owner,p) && owners[grow][1]==3
+                owners[grow]=(2,tag)
+            end
+            remap[r][row]=grow
+        end
+    end
+    node_count=length(global_nodes)
+    node_count<=typemax(Int32) ||
+        throw(ArgumentError("$caller: assembly exceeds Int32 topology limits"))
+    coords=Matrix{Float64}(undef,3,node_count)
+    for (row,p) in enumerate(global_nodes);coords[:,row]=collect(p);end
+    entities=Dict{Tuple{Int,Int},MixedEntity}()
+    names=Dict{Tuple{Int,Int},String}()
+    blocks=ElementBlock[];block_owners=Vector{Int32}[];labels=Vector{UInt64}[]
+    cell_offset=UInt64(0)
+    shared_cells=[Set{NTuple{3,Int}}(Iterators.flatten(values(cell_map)))
+                  for cell_map in emitted_shared]
+    for (region,(record,part,shell)) in enumerate(zip(records,parts,shells))
+        tag=Int32(region);lo,hi=bounds[region];bbox=(lo...,hi...)
+        shared_tags=Int32[pair_tags[key] for key in sort!(collect(keys(pair_tags)))
+                          if region in key]
+        entities[(2,region)]=MixedEntity(2,tag,bbox;physical_tags=[tag])
+        entities[(3,region)]=MixedEntity(3,tag,bbox;physical_tags=[tag],
+            boundaries=Int32[tag;shared_tags])
+        names[(2,region)]=record.name*" boundary"
+        names[(3,region)]=record.name
+        own=Vector{Int32}[]
+        for column in axes(shell,2)
+            cell=(Int(shell[1,column]),Int(shell[2,column]),Int(shell[3,column]))
+            cell in shared_cells[region] && continue
+            push!(own,Int32[remap[region][cell[1]],remap[region][cell[2]],
+                            remap[region][cell[3]]])
+        end
+        nt=ntets(part)
+        for (kind,cols,raw) in ((2,length(own),own),(4,nt,nothing))
+            cols>0 || continue
+            cells=Matrix{Int32}(undef,kind==2 ? 3 : 4,cols)
+            if kind==2
+                for (c,cell) in enumerate(own);cells[:,c]=cell;end
+            else
+                for c in 1:nt,k in 1:4
+                    cells[k,c]=Int32(remap[region][Int(part.tets[k,c])])
+                end
+            end
+            push!(blocks,ElementBlock(kind,cells,fill(tag,cols)))
+            push!(block_owners,fill(tag,cols))
+            push!(labels,UInt64[cell_offset+UInt64(c) for c in 1:cols])
+            cell_offset+=UInt64(cols)
+        end
+    end
+    # Shared interface cells emit once, from the lower-tag record's side.
+    for key in sort!(collect(keys(weld_pairs)))
+        i,j=key;tag=pair_tags[key]
+        emitted=Vector{Int32}[]
+        for cell in emitted_shared[i][key]
+            push!(emitted,Int32[remap[i][cell[1]],remap[i][cell[2]],
+                                remap[i][cell[3]]])
+        end
+        isempty(emitted) && continue
+        cells=Matrix{Int32}(undef,3,length(emitted))
+        for (c,cell) in enumerate(emitted);cells[:,c]=cell;end
+        push!(blocks,ElementBlock(2,cells,fill(tag,length(emitted))))
+        push!(block_owners,fill(tag,length(emitted)))
+        push!(labels,UInt64[cell_offset+UInt64(c) for c in 1:length(emitted)])
+        cell_offset+=UInt64(length(emitted))
+        lo=fill(Inf,3);hi=fill(-Inf,3)
+        for cell in emitted
+            p=global_nodes[Int(cell[1])]
+            lo=min.(lo,p);hi=max.(hi,p)
+            for k in 2:3
+                p=global_nodes[Int(cell[k])];lo=min.(lo,p);hi=max.(hi,p)
+            end
+        end
+        entities[(2,Int(tag))]=MixedEntity(2,tag,(lo...,hi...);physical_tags=[tag])
+        names[(2,Int(tag))]=records[i].name*"/"*records[j].name*" shared boundary"
+    end
+    cell_offset<=typemax(Int32) ||
+        throw(ArgumentError("$caller: assembly exceeds Int32 topology limits"))
     data=MixedEntityData(entities;node_entities=owners,
         node_parametric=fill(nothing,node_count),external_node_tags=UInt64.(1:node_count),
         block_entities=block_owners,external_element_tags=labels)

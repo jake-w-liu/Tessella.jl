@@ -510,8 +510,35 @@ admitted. The new `brep_disjoint_overlap.step` fixture (unit tet vs
 [0.6,1.2]³ box) proves the admit path; six shifted-box mutants plus a
 coincident-shell twin verify each rejection mode in the focused assembly
 file, and the default smoke gained an admit-plus-reject testset.
-Conforming-contact interfaces, welding and Boolean/imprint work remain
-CAD05.
+
+The conforming-contact slice of CAD05 is also landed. Facet pairs sharing
+exactly the same vertex positions (canonical sorted-position keys in
+`Rational{BigInt}`) with opposed outward winding are now certified as
+conforming contact instead of rejecting: the certificate collects
+coincident pairs per record pair first, then exempts rim contacts — a
+non-coincident contact may touch only at points or segments lying exactly
+on the shared interfaces' rims (common vertex/edge of both facets), while
+any interior pierce, coplanar positive-area overlap outside recorded
+pairs, or off-rim segment still rejects; every referenced vertex not on a
+shared support is ray-parity-probed so hinged facets dipping inside the
+other solid reject, and a facet coincident with three solids rejects.
+Welded emission gives each record pair one shared Surface entity
+(tags `nrec+1…`): coincident supports group by coplanarity into plane
+patches, each emitted boundary cell is classified against a patch union
+(closed-coverage `_brep_cell_in_union`, rejecting partial positive-area
+overlap with the patch), both records must emit the identical
+coordinate-sorted interface cell set — so independent fills may
+retriangulate inside a patch but not across its rim — shared cells emit
+once, rim nodes deduplicate by exact position and classify under the
+shared Surface, and both Regions bound it. Verified on the new
+`brep_contact_twin.step` fixture (mirror tetrahedra sharing the slant
+face): welded `MixedMesh` is `valid` under `fill=false` and `fill=true`
+with one shared Surface and one emitted interface cell, a same-diagonal
+quad-face fixture welds two cells across an internal diagonal, and a
+mismatched-diagonal or partial-quad contact rejects atomically; an MSH4
+round-trip preserves the shared entity bindings. The focused assembly
+file passes 164/164; the default smoke gained a compact weld testset.
+Booleans/imprints and non-coincident intersections remain CAD05.
 
 ### Current Devin transfer and final verified batch
 

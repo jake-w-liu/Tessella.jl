@@ -58,6 +58,10 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 55.8 s | 291 | ~58 s |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 53.8 s | 291 | ~56 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 51.6 s | 291 | ~53 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 50.6 s | 291 | ~52 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 58.1 s | 288 | ~60 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 55.3 s | 288 | ~57 s |
 | Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 54.8 s | 288 | ~56 s |
@@ -135,16 +139,26 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 288-assertion bodies ran onJulia1.12.7/1.13.1.
+The current 291-assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds an
+assembly conforming-weld testset (compact: one shared Surface entity bound
+by both Regions, one emitted interface cell, deduplicated coordinates,
+`valid`) to `test/functional/brep_assembly_smoke.jl` and extends the
+assembly functional file to 164 assertions on both runtimes — vertex-
+identical coincident facets with opposed winding weld into a shared
+Surface (`test/fixtures/brep_contact_twin.step` twin tetrahedra plus a
+same-diagonal quad-face weld over two coincident facet pairs),
+mismatched-diagonal/partial-quad fills, three-solid facets and
+rim-crossing cells still reject atomically, and an MSH4 round-trip
+preserves the shared entity bindings. The preceding increment adds an
 assembly admit-plus-reject testset (2 assertions: genuinely disjoint
 solids with overlapping bounding boxes import as classified independent
 mixed meshes, a coincident-shell twin rejects) to
 `test/functional/brep_assembly_smoke.jl` plus a 30-assertion geometric
-independence set in `test/geometry/brep_assembly_functional_test.jl`, now
-126 assertions on both runtimes (exact triangle-intersection and
+independence set in `test/geometry/brep_assembly_functional_test.jl`
+(exact triangle-intersection and
 ray-parity enclosure checks in `Rational{BigInt}` — vertex/edge/partial
 face/coincident-facet contact, interpenetration and enclosure all reject
 atomically, verified by shifted-box mutants of

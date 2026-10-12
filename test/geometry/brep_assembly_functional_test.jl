@@ -191,8 +191,10 @@ end
         write(path,shifted_box(source,(0.4,-0.1,0.4),(0.6,0.1,0.6)))
         @test_throws ArgumentError import_step(path;fill=false)
     end
-    # A second tet sharing the slant face verbatim is a coincident-facet
-    # contact and still rejects atomically.
+    # A second tet sharing the slant face verbatim is a conforming coincident
+    # interface: the assembly welds it into one shared Surface entity bound by
+    # both Regions, emits the interface cell once, and deduplicates the rim
+    # nodes by exact position.
     box_start=findfirst("#101 = CARTESIAN_POINT",source)[1]
     box_stop=findfirst("#141 = FACETED_BREP('box',#140);",source)[end]
     box_section=source[box_start:box_stop]
@@ -217,7 +219,99 @@ end
     mktempdir() do directory
         path=joinpath(directory,"twin.step")
         write(path,replace(source,box_section=>mirror))
+        for fill in (false,true)
+            mesh=import_step(path;fill)
+            @test mesh isa E.MixedMesh
+            @test MT.validate(mesh).ok
+            data=mesh.entity_data
+            @test Set(keys(data.entities))==Set([(2,1),(3,1),(2,2),(3,2),(2,3)])
+            @test sort(data.entities[(3,1)].boundaries)==Int32[1,3]
+            @test sort(data.entities[(3,2)].boundaries)==Int32[2,3]
+            # One shared-interface cell under tag 3; three rim nodes weld.
+            surface_cells=Dict{Int32,Vector{NTuple{3,Int}}}()
+            for (bi,block) in enumerate(mesh.blocks)
+                block.msh==2 || continue
+                for (column,cell) in enumerate(eachcol(block.nodes))
+                    owner=data.block_entities[bi][column]
+                    push!(get!(surface_cells,owner,NTuple{3,Int}[]),
+                          Tuple(sort(Int.(cell))))
+                end
+            end
+            @test length(surface_cells[3])==1
+            @test length(surface_cells[1])==3 && length(surface_cells[2])==3
+            @test length(surface_cells[1])+length(surface_cells[2])+
+                  length(surface_cells[3])==7
+            @test allunique(eachcol(mesh.coords))
+            shared_rows=Set(surface_cells[3][1])
+            @test all(data.node_entities[row]==(2,Int32(3)) for row in shared_rows)
+            measured,positive=volumes(mesh)
+            @test positive
+            fill && @test isapprox(measured[1],1/6;atol=1e-12) &&
+                          isapprox(measured[2],1/3;atol=1e-12)
+        end
+    end
+    # Two boxes sharing a quad face weld only when both sides triangulate the
+    # face along the same diagonal; a mismatched diagonal is non-conforming
+    # contact and rejects. The shared face carries two coincident facet
+    # pairs inside one plane patch.
+    source=read(joinpath(FIXTURES,"brep_two_boxes.step"),String)
+    box_section=source[findfirst("#101 = CARTESIAN_POINT",source)[1]:findfirst(
+        "#141 = FACETED_BREP('wide',#140);",source)[end]]
+    side_box=x1loop->join(("#101 = CARTESIAN_POINT('',(1.,0.,0.));",
+          "#102 = CARTESIAN_POINT('',(2.,0.,0.));",
+          "#103 = CARTESIAN_POINT('',(2.,1.,0.));",
+          "#104 = CARTESIAN_POINT('',(1.,1.,0.));",
+          "#105 = CARTESIAN_POINT('',(1.,0.,1.));",
+          "#106 = CARTESIAN_POINT('',(2.,0.,1.));",
+          "#107 = CARTESIAN_POINT('',(2.,1.,1.));",
+          "#108 = CARTESIAN_POINT('',(1.,1.,1.));",
+          "#110 = POLY_LOOP('',(#101,#104,#103,#102));",
+          "#111 = POLY_LOOP('',(#105,#106,#107,#108));",
+          "#112 = POLY_LOOP('',(#101,#102,#106,#105));",
+          "#113 = POLY_LOOP('',(#104,#108,#107,#103));",
+          "#114 = POLY_LOOP('',($x1loop));",
+          "#115 = POLY_LOOP('',(#102,#103,#107,#106));",
+          "#120 = FACE_BOUND('',#110,.T.);",
+          "#121 = FACE_BOUND('',#111,.T.);",
+          "#122 = FACE_BOUND('',#112,.T.);",
+          "#123 = FACE_BOUND('',#113,.T.);",
+          "#124 = FACE_BOUND('',#114,.T.);",
+          "#125 = FACE_BOUND('',#115,.T.);",
+          "#130 = FACE('',(#120));",
+          "#131 = FACE('',(#121));",
+          "#132 = FACE('',(#122));",
+          "#133 = FACE('',(#123));",
+          "#134 = FACE('',(#124));",
+          "#135 = FACE('',(#125));",
+          "#140 = CLOSED_SHELL('',(#130,#131,#132,#133,#134,#135));",
+          "#141 = FACETED_BREP('side',#140);"),'\n')
+    mktempdir() do directory
+        path=joinpath(directory,"quad.step")
+        # Same-diagonal shared quad: admitted with a two-cell interface.
+        write(path,replace(source,box_section=>side_box("#105,#108,#104,#101")))
+        for fill in (false,true)
+            mesh=import_step(path;fill)
+            @test mesh isa E.MixedMesh
+            @test MT.validate(mesh).ok
+            data=mesh.entity_data
+            @test Set(keys(data.entities))==Set([(2,1),(3,1),(2,2),(3,2),(2,3)])
+            @test sort(data.entities[(3,1)].boundaries)==Int32[1,3]
+            @test sort(data.entities[(3,2)].boundaries)==Int32[2,3]
+            counts=Dict{Int32,Int}()
+            for (bi,block) in enumerate(mesh.blocks)
+                block.msh==2 || continue
+                for owner in data.block_entities[bi]
+                    counts[owner]=get(counts,owner,0)+1
+                end
+            end
+            @test counts==Dict(Int32(1)=>10,Int32(2)=>10,Int32(3)=>2)
+            @test allunique(eachcol(mesh.coords))
+        end
+        # Mismatched diagonal: the two sides' shared-face triangulations
+        # cross — non-conforming contact, still rejected geometrically.
+        write(path,replace(source,box_section=>side_box("#101,#105,#108,#104")))
         @test_throws ArgumentError import_step(path;fill=false)
+        @test_throws ArgumentError import_step(path;fill=true)
     end
 end
 
