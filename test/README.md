@@ -52,12 +52,16 @@ same assertions with normal compilation:
 julia --project=. --startup-file=no -O2 -e 'ENV["TESSELLA_TEST_COMPILER"]="optimized"; using Pkg; Pkg.test(; julia_args=["--startup-file=no", "--check-bounds=yes", "-O2"])'
 ```
 
-Local receipts on 2026-10-12, with bounds checks; the `test/runtests.jl`
-rows ran under `julia -t4` to exercise `General.NumThreads`, the
-`Pkg.test()` rows on one Julia thread:
+Local receipts on 2026-10-12, with bounds checks; only the marked
+`test/runtests.jl` rows ran under `julia -t4` to exercise
+`General.NumThreads`, the `Pkg.test()` rows on one Julia thread:
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 58.1 s | 288 | ~60 s |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 55.3 s | 288 | ~57 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 54.8 s | 288 | ~56 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 51.8 s | 288 | ~53 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 45.9 s | 286 | ~48 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 44.4 s | 286 | ~46 s |
 | Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation `-t4`, body 48.8 s | 286 | ~51 s |
@@ -131,10 +135,20 @@ rows ran under `julia -t4` to exercise `General.NumThreads`, the
 | Julia 1.13.1 | Normal `-O2`, earlier `Pkg.test()` | 157 | 217.47 s |
 | Julia 1.12.7 | Normal `-O2`, earlier standalone diagnostic | 157 | 301.75 s |
 
-The current 286-assertion bodies ran onJulia1.12.7/1.13.1.
+The current 288-assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds an
+assembly admit-plus-reject testset (2 assertions: genuinely disjoint
+solids with overlapping bounding boxes import as classified independent
+mixed meshes, a coincident-shell twin rejects) to
+`test/functional/brep_assembly_smoke.jl` plus a 30-assertion geometric
+independence set in `test/geometry/brep_assembly_functional_test.jl`, now
+126 assertions on both runtimes (exact triangle-intersection and
+ray-parity enclosure checks in `Rational{BigInt}` — vertex/edge/partial
+face/coincident-facet contact, interpenetration and enclosure all reject
+atomically, verified by shifted-box mutants of
+`test/fixtures/brep_disjoint_overlap.step`). The preceding increment adds an
 order ≥4 BRep partition testset (4 assertions: two Tet35 sharing a Tri15
 facet — Tri15 interface cell, three generated Line5 seam cells,
 `validate`, unpartition restore) to the declared-BRep default smoke

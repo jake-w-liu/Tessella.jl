@@ -150,6 +150,77 @@ end
     end
 end
 
+function shifted_box(source,lo,hi)
+    lox,loy,loz=lo;hix,hiy,hiz=hi
+    corners=((lox,loy,loz),(hix,loy,loz),(hix,hiy,loz),(lox,hiy,loz),
+             (lox,loy,hiz),(hix,loy,hiz),(hix,hiy,hiz),(lox,hiy,hiz))
+    olds=((0.6,0.6,0.6),(1.2,0.6,0.6),(1.2,1.2,0.6),(0.6,1.2,0.6),
+          (0.6,0.6,1.2),(1.2,0.6,1.2),(1.2,1.2,1.2),(0.6,1.2,1.2))
+    for (i,(p,o)) in enumerate(zip(corners,olds))
+        source=replace(source,"#$(100+i) = CARTESIAN_POINT('',($(o[1]),$(o[2]),$(o[3])));"=>
+                               "#$(100+i) = CARTESIAN_POINT('',($(p[1]),$(p[2]),$(p[3])));")
+    end
+    return source
+end
+
+@testset "overlapping boxes admit only genuinely disjoint solids" begin
+    fixture=joinpath(FIXTURES,"brep_disjoint_overlap.step")
+    expected=Dict(1=>1/6,2=>0.216)
+    mesh=verify_import(import_step,"brep_disjoint_overlap.step",expected,["#41","#141"])
+    @test mesh.entity_data.entities[(3,2)].bbox==(0.6,0.6,0.6,1.2,1.2,1.2)
+    source=read(fixture,String)
+    mktempdir() do directory
+        path=joinpath(directory,"mutant.step")
+        # Tet vertex (1,0,0) lands inside the box's x=1 face: vertex contact.
+        write(path,shifted_box(source,(1.,-0.4,-0.4),(2.,0.4,0.4)))
+        @test_throws ArgumentError import_step(path;fill=false)
+        # Box corner enters the tet interior: shells interpenetrate.
+        write(path,shifted_box(source,(0.2,0.2,0.2),(0.8,0.8,0.8)))
+        @test_throws ArgumentError import_step(path;fill=false)
+        # Box sits entirely inside the tet: enclosure without facet contact.
+        write(path,shifted_box(source,(0.05,0.05,0.05),(0.15,0.15,0.15)))
+        @test_throws ArgumentError import_step(path;fill=false)
+        # Box slides so one face overlaps part of the tet's z=0 face.
+        write(path,shifted_box(source,(-0.5,-0.5,-0.5),(0.5,0.5,0.)))
+        @test_throws ArgumentError import_step(path;fill=false)
+        # Box edge runs along a tet edge segment: edge-only contact.
+        write(path,shifted_box(source,(0.3,-0.2,-0.2),(0.7,0.,0.)))
+        @test_throws ArgumentError import_step(path;fill=false)
+        # A thin box piercing the slant face without covering a vertex:
+        # non-coincident penetration remains rejected.
+        write(path,shifted_box(source,(0.4,-0.1,0.4),(0.6,0.1,0.6)))
+        @test_throws ArgumentError import_step(path;fill=false)
+    end
+    # A second tet sharing the slant face verbatim is a coincident-facet
+    # contact and still rejects atomically.
+    box_start=findfirst("#101 = CARTESIAN_POINT",source)[1]
+    box_stop=findfirst("#141 = FACETED_BREP('box',#140);",source)[end]
+    box_section=source[box_start:box_stop]
+    mirror=join(("#201 = CARTESIAN_POINT('',(1.,0.,0.));",
+                "#202 = CARTESIAN_POINT('',(0.,1.,0.));",
+                "#203 = CARTESIAN_POINT('',(0.,0.,1.));",
+                "#204 = CARTESIAN_POINT('',(1.,1.,1.));",
+                "#210 = POLY_LOOP('',(#201,#203,#202));",
+                "#211 = POLY_LOOP('',(#201,#202,#204));",
+                "#212 = POLY_LOOP('',(#202,#203,#204));",
+                "#213 = POLY_LOOP('',(#203,#201,#204));",
+                "#220 = FACE_BOUND('',#210,.T.);",
+                "#221 = FACE_BOUND('',#211,.T.);",
+                "#222 = FACE_BOUND('',#212,.T.);",
+                "#223 = FACE_BOUND('',#213,.T.);",
+                "#230 = FACE('',(#220));",
+                "#231 = FACE('',(#221));",
+                "#232 = FACE('',(#222));",
+                "#233 = FACE('',(#223));",
+                "#240 = CLOSED_SHELL('',(#230,#231,#232,#233));",
+                "#241 = FACETED_BREP('mirror',#240);"),'\n')
+    mktempdir() do directory
+        path=joinpath(directory,"twin.step")
+        write(path,replace(source,box_section=>mirror))
+        @test_throws ArgumentError import_step(path;fill=false)
+    end
+end
+
 @testset "assembly errors leave existing import products intact" begin
     good=import_step(joinpath(FIXTURES,"brep_two_boxes.step");fill=false)
     before=E.mixed_crc(good)

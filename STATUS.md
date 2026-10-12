@@ -415,6 +415,27 @@ testset (now **412/412**) and the default smoke gained a 4-assertion
 order-4 testset. PART01's partition checklist is complete; parallel mesh
 *generation* (PAR01 producer workflows) remains.
 
+### Exact geometric independence for multi-solid CAD assembly (2026-10-12)
+
+Devin landed the first CAD05 slice in `BRepAssembly.jl`. The multi-solid
+assembly admission guard is no longer bounding-box-only: strictly separated
+boxes still prove independence directly, but box-overlapping pairs now go
+through an exact geometric certificate — per-facet boxes prune an exact
+triangle-intersection test (orient3 sign filters, rational interval overlap
+on the plane-intersection line, coplanar 2D segment tests, all in
+`Rational{BigInt}` over `orient2`/`orient3`), and with no boundary contact a
+referenced-vertex ray-parity probe against the other shell decides
+enclosure across 25 candidate directions. Coincident facets, partial face
+overlap, edge-only and vertex-only contact, interpenetration and enclosure
+all reject atomically before any mesh construction; genuinely disjoint
+solids with overlapping boxes are now admitted. The new
+`test/fixtures/brep_disjoint_overlap.step` (unit tet vs [0.6,1.2]³ box)
+proves the admit path; six shifted-box mutants plus a coincident-shell
+twin verify each rejection mode — the focused assembly file passes
+126/126 and the default smoke gained an admit-plus-reject testset.
+Conforming-contact interfaces, welding and Boolean/imprint work remain
+CAD05.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

@@ -24,8 +24,8 @@ factor to millimetres; contexts without unit declarations keep raw rows.
 One occurrence returns `Mesh`; multiple independent occurrences return a
 classified `MixedMesh` with separate node/cell identities, Surface/Region
 owners and physical names containing the actual mapped-item path and source
-solid ID. The existing complete shell, positive-fill and strictly disjoint
-bounding-box certificates remain required. `fill=false` returns the retained
+solid ID. The existing complete shell, positive-fill and exact geometric
+independence certificates remain required. `fill=false` returns the retained
 closed boundaries. No source nodes are welded across occurrences.
 
 This first producer requires one explicit shape-definition root and identical
@@ -37,7 +37,7 @@ NAUO/CDSR/IDT product graphs, including multiple roots, per-definition solids
 and `MAPPED_ITEM` occurrences inside product representations with per-context
 SI transport. Unreachable mapped
 items, cycles, missing references, invalid directions, empty representations,
-touching boxes and unsupported items reject explicitly. Limits are128 nesting
+touching or intersecting occurrences and unsupported items reject explicitly. Limits are128 nesting
 levels,4096 solid occurrences and the existing total Surface storage caps.
 The operation returns an owned mesh; it does not populate analytic Model/OCC
 Face maps or implement general CAD assemblies.

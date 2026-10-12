@@ -11,4 +11,17 @@ let mesh=import_iges(joinpath(@__DIR__,"..","fixtures","brep_two_blocks.iges");f
     @test allunique(mesh.entity_data.external_node_tags) && isempty(intersect(first_nodes,second_nodes)) &&
           length(first_nodes)==8 && length(second_nodes)==8 && all(owner->owner[1]==2,classified)
 end
+# Overlapping bounding boxes admit genuinely disjoint solids; actual contact
+# still rejects. Full geometric-certificate coverage lives in
+# test/geometry/brep_assembly_functional_test.jl.
+let source=read(joinpath(@__DIR__,"..","fixtures","brep_disjoint_overlap.step"),String)
+    mesh=import_step(joinpath(@__DIR__,"..","fixtures","brep_disjoint_overlap.step");fill=false)
+    @test mesh isa Tessella.MixedMesh && validate(mesh).ok &&
+          Set(keys(mesh.entity_data.entities))==Set([(2,1),(3,1),(2,2),(3,2)])
+    mktempdir() do directory
+        path=joinpath(directory,"coincident.step")
+        write(path,replace(source,"FACETED_BREP('box',#140)"=>"FACETED_BREP('box',#40)"))
+        @test_throws ArgumentError import_step(path;fill=false)
+    end
+end
 end

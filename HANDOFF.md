@@ -494,6 +494,25 @@ the default smoke gained an order-4 testset. PART01's partition checklist
 is complete; parallel mesh *generation* (PAR01 producer workflows)
 remains.
 
+The first CAD05 slice landed: the STEP/IGES multi-solid assembly admission
+guard is no longer bounding-box-only. Strictly separated boxes still prove
+independence directly, but box-overlapping pairs now go through an exact
+geometric certificate in `BRepAssembly.jl`: per-facet boxes prune an exact
+triangle-intersection test (orient3 sign filters, rational interval overlap
+on the plane-intersection line, coplanar 2D segment tests — all in
+`Rational{BigInt}` with exact `orient2`/`orient3` predicates), and when no
+boundary contact exists a referenced-vertex ray-parity probe against the
+other shell decides enclosure from 25 candidate directions (boundary hits
+retry). Coincident facets, partial face overlap, edge-only and vertex-only
+contact, interpenetration and enclosure all reject atomically before any
+mesh construction; genuinely disjoint solids with overlapping boxes are
+admitted. The new `brep_disjoint_overlap.step` fixture (unit tet vs
+[0.6,1.2]³ box) proves the admit path; six shifted-box mutants plus a
+coincident-shell twin verify each rejection mode in the focused assembly
+file, and the default smoke gained an admit-plus-reject testset.
+Conforming-contact interfaces, welding and Boolean/imprint work remain
+CAD05.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

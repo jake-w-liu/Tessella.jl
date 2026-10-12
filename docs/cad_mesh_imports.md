@@ -12,10 +12,12 @@ come from actual tetrahedron incidence; boundary/interior node owners follow
 that incidence. Nodes are not welded across solids. IGES primitive and solid
 root rigid directory-entry transforms are applied.
 
-Strictly disjoint bounding boxes certify independent solids. Touching or
-overlapping boxes are rejected, including physically disjoint solids whose
-boxes overlap. Boxes are never used to discover, split or replace source
-roots. Point-cloud box imports retain their original single-solid behavior.
+Strictly separated bounding boxes certify independent solids directly. When
+boxes overlap an exact geometric certificate decides: any intersecting or
+touching boundary facets (including coincident facets and edge/vertex-only
+contact) reject, one solid enclosing the other rejects, and genuinely
+disjoint solids are admitted. Boxes are never used to discover, split or
+replace source roots. Point-cloud box imports retain their original single-solid behavior.
 Multi-root IGES identities must be positive, odd, unique and consistent with
 the directory-entry type. Unsupported geometric entity types are rejected;
 supported type-406 property records can accompany the geometry. A single-face

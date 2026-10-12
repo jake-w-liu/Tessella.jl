@@ -28,10 +28,10 @@ module BRep
 
 using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
 using ..Mesh3D: tetrahedralize
-using ..MeshTypes: Mesh, validate, nnodes, ntets, tet_volume, node, bounding_box
+using ..MeshTypes: Mesh, validate, nnodes, ntris, ntets, tet_volume, node, bounding_box
 using ..Elements: MixedMesh, ElementBlock, MixedEntity, MixedEntityData,
                   MSH_PHYSICAL_NAME_MAX_BYTES
-using ..Predicates: orient2
+using ..Predicates: orient2, orient3
 import ..Mesh2D
 using ..NURBS: NURBSCurve, NURBSSurface
 

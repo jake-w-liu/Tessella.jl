@@ -1,3 +1,201 @@
+# ── Geometric independence certificate ─────────────────────────────────────
+# Strictly separated bounding boxes already prove independence. For pairs whose
+# boxes overlap, this certificate decides actual disjointness with exact
+# predicates: no boundary facet pair may intersect, and neither shell may
+# contain the other. Every contact — a coincident facet, an edge or a single
+# shared vertex — is still rejected until conforming contact interfaces exist.
+
+const _BREP_R3=NTuple{3,Rational{BigInt}}
+@inline _brep_rpoint(p)::_BREP_R3=ntuple(d->Rational{BigInt}(p[d]),3)
+@inline _brep_rsub(a::_BREP_R3,b::_BREP_R3)::_BREP_R3=(a[1]-b[1],a[2]-b[2],a[3]-b[3])
+@inline _brep_rdot(a::_BREP_R3,b::_BREP_R3)=a[1]*b[1]+a[2]*b[2]+a[3]*b[3]
+@inline function _brep_rcross(a::_BREP_R3,b::_BREP_R3)::_BREP_R3
+    return (a[2]*b[3]-a[3]*b[2],a[3]*b[1]-a[1]*b[3],a[1]*b[2]-a[2]*b[1])
+end
+# Exact orient3 determinant det[a-d,b-d,c-d] over rationalized coordinates.
+@inline function _brep_rorient3(a::_BREP_R3,b::_BREP_R3,c::_BREP_R3,d::_BREP_R3)
+    return _brep_rdot(_brep_rsub(a,d),_brep_rcross(_brep_rsub(b,d),_brep_rsub(c,d)))
+end
+
+@inline function _brep_facet_box(T)
+    return ((min(T[1][1],T[2][1],T[3][1]),min(T[1][2],T[2][2],T[3][2]),min(T[1][3],T[2][3],T[3][3])),
+            (max(T[1][1],T[2][1],T[3][1]),max(T[1][2],T[2][2],T[3][2]),max(T[1][3],T[2][3],T[3][3])))
+end
+@inline function _brep_boxes_touch(a,b)
+    return !(a[2][1]<b[1][1] || b[2][1]<a[1][1] ||
+             a[2][2]<b[1][2] || b[2][2]<a[1][2] ||
+             a[2][3]<b[1][3] || b[2][3]<a[1][3])
+end
+@inline function _brep_box_has(box,p)
+    return box[1][1]<=p[1]<=box[2][1] && box[1][2]<=p[2]<=box[2][2] &&
+           box[1][3]<=p[3]<=box[2][3]
+end
+
+function _brep_shell_facets(surface::Mesh)
+    return [ntuple(r->node(surface,surface.tris[r,column]),3)
+            for column in 1:ntris(surface)]
+end
+
+# 2-D projection helper for coplanar decisions: drop coordinate axis k.
+@inline _brep_drop(p,k)=(p[mod1(k+1,3)],p[mod1(k+2,3)])
+function _brep_coplanar_drop_axis(T)
+    a,b,c=T
+    n=((b[2]-a[2])*(c[3]-a[3])-(b[3]-a[3])*(c[2]-a[2]),
+       (b[3]-a[3])*(c[1]-a[1])-(b[1]-a[1])*(c[3]-a[3]),
+       (b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]))
+    (n[1]==0.0&&n[2]==0.0&&n[3]==0.0) || return argmax(abs.(collect(n)))
+    # Degenerate triangle: keep its widest 2-D projection.
+    spans=collect(k->max(T[1][k],T[2][k],T[3][k])-min(T[1][k],T[2][k],T[3][k]),1:3)
+    return argmin(spans)
+end
+
+@inline function _brep_on_seg_2d(a,b,p)
+    return min(a[1],b[1])<=p[1]<=max(a[1],b[1]) && min(a[2],b[2])<=p[2]<=max(a[2],b[2])
+end
+function _brep_segs_intersect_2d(a,b,c,d)
+    s1=orient2(a,b,c);s2=orient2(a,b,d)
+    s3=orient2(c,d,a);s4=orient2(c,d,b)
+    s1*s2<0 && s3*s4<0 && return true
+    s1==0 && _brep_on_seg_2d(a,b,c) && return true
+    s2==0 && _brep_on_seg_2d(a,b,d) && return true
+    s3==0 && _brep_on_seg_2d(c,d,a) && return true
+    s4==0 && _brep_on_seg_2d(c,d,b) && return true
+    return false
+end
+# Closed-triangle containment in the plane; false for degenerate triangles
+# (their edges carry every real contact through the segment tests).
+function _brep_point_in_tri_2d(p,T)
+    orient2(T[1],T[2],T[3])==0 && return false
+    s1=orient2(T[1],T[2],p);s2=orient2(T[2],T[3],p);s3=orient2(T[3],T[1],p)
+    return (s1>=0&&s2>=0&&s3>=0)||(s1<=0&&s2<=0&&s3<=0)
+end
+function _brep_tris_intersect_coplanar(T,U)
+    drop=_brep_coplanar_drop_axis(T)
+    T2=ntuple(i->_brep_drop(T[i],drop),3)
+    U2=ntuple(j->_brep_drop(U[j],drop),3)
+    for i in 1:3,j in 1:3
+        _brep_segs_intersect_2d(T2[i],T2[mod1(i+1,3)],U2[j],U2[mod1(j+1,3)]) &&
+            return true
+    end
+    return _brep_point_in_tri_2d(T2[1],U2)||_brep_point_in_tri_2d(U2[1],T2)
+end
+
+# Exact scalars (dominant-axis coordinate) where triangle Tr meets the plane of
+# Ur: on-plane vertices plus edge pierce parameters from rational orient3
+# values. The collected points span Tr ∩ plane(Ur).
+function _brep_plane_scalars(Tr,Ur,s,k)
+    hits=Rational{BigInt}[]
+    for i in 1:3
+        j=i==3 ? 1 : i+1
+        si,sj=s[i],s[j]
+        si==0 && push!(hits,Tr[i][k])
+        si*sj<0 || continue
+        oi=_brep_rorient3(Ur[1],Ur[2],Ur[3],Tr[i])
+        oj=_brep_rorient3(Ur[1],Ur[2],Ur[3],Tr[j])
+        λ=oi/(oi-oj)
+        push!(hits,Tr[i][k]+(Tr[j][k]-Tr[i][k])*λ)
+    end
+    return hits
+end
+
+# Do the closed triangles T and U intersect at all? Exact predicates decide:
+# plane-separation filters first, then the interval overlap of each triangle's
+# intersection with the other's plane, then a 2-D test for coplanar pairs.
+function _brep_tris_intersect(T,U)
+    s=ntuple(i->orient3(U[1],U[2],U[3],T[i]),3)
+    all(>(0),s)&&return false
+    all(<(0),s)&&return false
+    t=ntuple(j->orient3(T[1],T[2],T[3],U[j]),3)
+    all(>(0),t)&&return false
+    all(<(0),t)&&return false
+    all(==(0),s)&&return _brep_tris_intersect_coplanar(T,U)
+    Tr=ntuple(i->_brep_rpoint(T[i]),3)
+    Ur=ntuple(j->_brep_rpoint(U[j]),3)
+    nT=_brep_rcross(_brep_rsub(Tr[2],Tr[1]),_brep_rsub(Tr[3],Tr[1]))
+    nU=_brep_rcross(_brep_rsub(Ur[2],Ur[1]),_brep_rsub(Ur[3],Ur[1]))
+    d=_brep_rcross(nT,nU)
+    all(==(0),d)&&return false
+    k=argmax(abs.([d[1],d[2],d[3]]))
+    a=_brep_plane_scalars(Tr,Ur,s,k)
+    isempty(a)&&return false
+    b=_brep_plane_scalars(Ur,Tr,t,k)
+    isempty(b)&&return false
+    return minimum(a)<=maximum(b) && minimum(b)<=maximum(a)
+end
+
+# Non-axis-aligned probe directions; a ray that never runs parallel to a facet
+# plane and pierces only facet interiors gives an unambiguous crossing count.
+const _BREP_RAY_DIRS=((1,1,1),(1,2,3),(2,1,3),(1,3,2),(3,1,2),(2,3,1),(3,2,1),
+                     (1,1,4),(1,4,1),(4,1,1),(2,3,5),(3,5,2),(5,2,3),(1,4,7),
+                     (4,7,1),(7,1,4),(2,5,7),(5,7,2),(7,2,5),(3,4,9),(4,9,3),
+                     (9,3,4),(5,6,7),(6,7,5),(7,5,6))
+# Möller–Trumbore ray-facet test in exact rationals. :inside/:outside when every
+# hit pierces a facet interior; :degenerate when a hit lands on a facet boundary
+# (vertex/edge/tangent) so the direction is retried.
+function _brep_ray_parity(pr,fr,normals,dr)
+    all(n->_brep_rdot(n,dr)!=0,normals) || return :degenerate
+    count=0
+    for F in fr
+        e1=_brep_rsub(F[2],F[1]);e2=_brep_rsub(F[3],F[1])
+        pv=_brep_rcross(dr,e2)
+        det=_brep_rdot(e1,pv)
+        tv=_brep_rsub(pr,F[1])
+        u=_brep_rdot(tv,pv)/det
+        q=_brep_rcross(tv,e1)
+        v=_brep_rdot(dr,q)/det
+        t=_brep_rdot(e2,q)/det
+        (u>=0&&v>=0&&u+v<=1&&t>0) || continue
+        (u>0&&v>0&&u+v<1) || return :degenerate
+        count+=1
+    end
+    return isodd(count) ? :inside : :outside
+end
+# Classify a point against a closed shell: :onboundary, :inside or :outside.
+function _brep_point_vs_shell(p,facets,boxes,caller)
+    for (F,box) in zip(facets,boxes)
+        _brep_box_has(box,p) || continue
+        orient3(F[1],F[2],F[3],p)==0 || continue
+        drop=_brep_coplanar_drop_axis(F)
+        _brep_point_in_tri_2d(_brep_drop(p,drop),
+            ntuple(i->_brep_drop(F[i],drop),3)) && return :onboundary
+    end
+    pr=_brep_rpoint(p)
+    fr=[ntuple(i->_brep_rpoint(F[i]),3) for F in facets]
+    normals=[_brep_rcross(_brep_rsub(F[2],F[1]),_brep_rsub(F[3],F[1])) for F in fr]
+    for dir in _BREP_RAY_DIRS
+        dr=ntuple(d->Rational{BigInt}(dir[d]),3)
+        result=_brep_ray_parity(pr,fr,normals,dr)
+        result!==:degenerate && return result
+    end
+    throw(ArgumentError("$caller: cannot certify solid independence; " *
+        "no nondegenerate containment probe exists"))
+end
+
+function _brep_certify_disjoint(sa::Mesh,sb::Mesh,na,nb,caller)
+    fa=_brep_shell_facets(sa);fb=_brep_shell_facets(sb)
+    ba=[_brep_facet_box(F) for F in fa];bb=[_brep_facet_box(F) for F in fb]
+    for ai in eachindex(fa),bi in eachindex(fb)
+        _brep_boxes_touch(ba[ai],bb[bi]) || continue
+        _brep_tris_intersect(fa[ai],fb[bi]) && throw(ArgumentError(
+            "$caller: cannot certify independent solids $na and $nb; " *
+            "their boundaries touch or intersect"))
+    end
+    # With non-intersecting connected shells, one probe vertex per side decides
+    # between disjointness and strict enclosure. Probe a referenced vertex so
+    # unreferenced node rows cannot corrupt the enclosure decision; an empty
+    # surface cannot enclose anything and is rejected by validation later.
+    (isempty(fa)||isempty(fb)) && return nothing
+    for (probe,facets,boxes) in ((node(sa,sa.tris[1,1]),fb,bb),
+                                 (node(sb,sb.tris[1,1]),fa,ba))
+        state=_brep_point_vs_shell(probe,facets,boxes,caller)
+        state===:outside && continue
+        throw(ArgumentError("$caller: cannot certify independent solids $na and $nb; " *
+            (state===:inside ? "one solid encloses the other" :
+                               "their boundaries touch or intersect")))
+    end
+    return nothing
+end
+
 # Mesh import retains the source solid partition. These are discrete closed
 # boundary entities, not reconstructed analytic CAD Face/Curve parameter maps.
 function _brep_assembly(records,fill_solids,caller)
@@ -6,9 +204,9 @@ function _brep_assembly(records,fill_solids,caller)
     bounds=[bounding_box(record.surface) for record in records]
     for i in 1:length(records)-1,j in i+1:length(records)
         alo,ahi=bounds[i];blo,bhi=bounds[j]
-        any(axis->ahi[axis]<blo[axis] || bhi[axis]<alo[axis],1:3) ||
-            throw(ArgumentError("$caller: cannot certify independent solids $(records[i].name) and " *
-                "$(records[j].name); touching or overlapping bounding boxes are unsupported"))
+        any(axis->ahi[axis]<blo[axis] || bhi[axis]<alo[axis],1:3) && continue
+        _brep_certify_disjoint(records[i].surface,records[j].surface,
+            records[i].name,records[j].name,caller)
     end
     # Certify every source boundary before any fill, and fill each Region
     # independently. No coordinate matching can select a Region or weld UIDs.

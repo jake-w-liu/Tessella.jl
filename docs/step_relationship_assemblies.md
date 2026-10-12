@@ -40,8 +40,8 @@ shape, usage, relationship, transform, map and solid inventories before
 emission. Missing, ambiguous or orphan bindings, cyclic usages or mapped
 representations, unreached definitions, unselected maps/items/representations,
 unplaced solids, geometry-free leaves, reversed relationships, nonmember
-transform frames, unsupported contexts/transforms and touching or overlapping
-occurrence boxes reject explicitly. Conversion-based units, prefixed angular
+transform frames, unsupported contexts/transforms and touching or
+intersecting occurrence shells reject explicitly. Conversion-based units, prefixed angular
 declarations, uncertainty aliases and ordinary/mapped root unit conversion are
 covered by the [SI unit doc](step_relationship_si_units.md).
 

@@ -19,7 +19,7 @@ With child origin/basis `(a,A)` and parent `(b,B)`, physical transport is
 `R=AᵀB`, `t=Aᵀ(s_parent*b−s_child*a)`, and
 `x_output=R*(s_child*x)+t`. No factor or ownership is inferred from output XYZ.
 Literal graph completeness, frame membership, proper rotation, finite
-coordinates, closed-shell, disjoint bounding-box, storage, positive-fill and
+coordinates, closed-shell, geometric independence, storage, positive-fill and
 UID/owner certificates remain mandatory after conversion. Ordinary roots,
 multi-root assembly records and the separate mapped-item/Cartesian producer
 convert the same declared contexts: every unit-bearing shape representation
