@@ -635,6 +635,41 @@ region volumes — e.g. an IGES block slid halfway into another yields
 and the default suite 302/302 on Julia 1.12.7 and 1.13.1 via
 `runtests.jl` and `Pkg.test()`. Curved-surface contacts remain CAD05.
 
+### OCC circle frontend endpoints (2026-10-12)
+
+Devin landed the first GEO01 slice — the `model.occ` circle endpoints.
+The `.geo` executor audit found the language surface already covered
+(control flow, functions/macros, fields, transforms, Booleans, meshing
+constraints, deletes and entity forms), so the genuine frontend gap is
+the `model.occ` namespace's endpoint coverage. `add_circle_arc`
+binds an OCC circle through three bound points: `center=true` reuses
+the OCCT-replicated center-form geometry (Geom_TrimmedCurve + Reverse
+arithmetic, `native_geometry` evaluator records) while `center=false`
+adds `_model_occ_circle_arc_through_geometry` — `gce_MakeCirc`
+semantics with the circumcenter from the triangle's perpendicular
+bisector and the plane axis `(middle-start)×(end-start)` orienting the
+trim so the middle point always lands interior. `add_circle` binds
+the center/radius/axis form: default `zAxis`/`xAxis` frame, gp_Ax2-style
+x-axis projection with OCCT's null-modulus and parallel-axis exception
+strings, full circles (`0`,`2π` exactly, matching upstream's
+`MakeEdge(circ)` branch) collapsing to one bound vertex and trimmed
+ranges emitting two endpoint vertices after the parameter swap. The
+middle/control points never become edge vertices; every validation
+(unknown points, duplicate curve tags, non-boolean `center`, nonfinite
+scalars, nonpositive radius, equal angles, malformed axes, endpoint tag
+overflow) throws before the shape graph mutates, so failures bind
+nothing. Synchronized circles import as `:circle` curves — the generic
+records evaluate and certificate-check through `_gm_sincos` — and 1-D
+meshing runs end to end. Verified by the 68-assertion
+`test/interfaces/api_occ_circle_test.jl` on Julia 1.12.7 and 1.13.1, a
+4-assertion `occ_circle_smoke` default check, and the default suite
+306/306 on both runtimes via `runtests.jl` and `Pkg.test()`. The
+remaining `model.occ`/`model.geo` endpoints (Rectangle, Disk, Wedge,
+ThruSections, Wire, Fillet, Chamfer, surface forms, ShapeFromFile) stay
+GEO01 slices; plugins/view ops, boundary-layer extrusion,
+partition/adaptation, Levelset and parametric surfaces belong to their
+own rows.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

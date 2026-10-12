@@ -24,8 +24,9 @@ catalogued high-order Surface/Volume VTK, directional constant-tensor
 box and shared-material grids, floating-point Pyramid options, CLI help/version
 and read-only MSH checking, plus atomic current-model opening and merging,
 including one POS point import and an empty-file merge, plus derived two-step
-view metadata and display selection, two list/model replacement checks, and a
-quarter-turn periodic Surface copy. It needs
+view metadata and display selection, two list/model replacement checks, a
+quarter-turn periodic Surface copy, and OCC circle
+`add_circle_arc`/`add_circle` creation, synchronization and evaluation. It needs
 no external mesher or solver.
 
 Run the default suite from the repository root. The runner automatically uses
@@ -58,6 +59,10 @@ Local receipts on 2026-10-12, with bounds checks; only the marked
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 77.1 s | 306 | ~110 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 78.6 s | 306 | ~110 s |
+| Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 86.2 s | 306 | ~88 s |
+| Julia 1.12.7 | `test/runtests.jl`, automatic minimal compilation, body 88.2 s | 306 | ~90 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 78.9 s | 302 | ~110 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 76.4 s | 302 | ~110 s |
 | Julia 1.13.1 | `test/runtests.jl`, automatic minimal compilation, body 79.7 s | 302 | ~82 s |

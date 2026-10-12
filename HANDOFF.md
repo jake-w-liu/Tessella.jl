@@ -718,6 +718,33 @@ with exact region volumes, the focused assembly file 397/397, and the
 default suite 302/302 on Julia 1.12.7 and 1.13.1 via `runtests.jl` and
 `Pkg.test()`. Curved-surface contacts remain CAD05.
 
+The first GEO01 slice followed (2026-10-12): the `model.occ` circle
+endpoints `add_circle_arc` and `add_circle`. The `.geo` executor audit
+found the language surface already covered — control flow,
+functions/macros, fields, transforms, Booleans, meshing constraints,
+deletes and entity forms — so the genuine frontend gap is `model.occ`'s
+endpoint coverage. `add_circle_arc` binds an OCC circle through three
+bound points: `center=true` reuses the OCCT-replicated center-form
+geometry (Geom_TrimmedCurve + Reverse arithmetic with `native_geometry`
+evaluator records), and `center=false` adds
+`_model_occ_circle_arc_through_geometry` — `gce_MakeCirc` semantics,
+circumcenter from the triangle's perpendicular bisector, the plane axis
+`(middle-start)×(end-start)` orienting the trim so the middle point
+always lands interior. `add_circle` binds the center/radius/axis form:
+default `zAxis`/`xAxis` frame, gp_Ax2-style x-axis projection with
+OCCT's null-modulus and parallel-axis exception strings, full circles
+collapsing to one bound vertex and trimmed ranges emitting two endpoint
+vertices after the parameter swap. Every validation throws before the
+shape graph mutates, so failures bind nothing; synchronized circles
+import as `:circle` curves evaluating through `_gm_sincos`, and 1-D
+meshing runs end to end. Verified by the 68-assertion
+`test/interfaces/api_occ_circle_test.jl` on Julia 1.12.7 and 1.13.1, a
+4-assertion `occ_circle_smoke` default check, and the default suite
+306/306 on both runtimes via `runtests.jl` and `Pkg.test()`. The
+remaining `model.occ`/`model.geo` endpoints stay GEO01 slices;
+plugins/view ops, boundary-layer extrusion, partition/adaptation,
+Levelset and parametric surfaces belong to their own rows.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

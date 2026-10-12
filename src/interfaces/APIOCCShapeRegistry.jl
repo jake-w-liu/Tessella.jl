@@ -19,6 +19,16 @@ add_line(start,stop;kwargs...)=_with_model() do m
     Model._model_occ_add_line!(m,start,stop;kwargs...)
 end
 
+add_circle_arc(start,middle,stop;tag=-1,center=true)=_with_model() do m
+    Model._model_occ_add_circle_arc!(m,start,middle,stop;tag,center)
+end
+
+add_circle(x,y,z,r;tag=-1,angle1=0.0,angle2=2*pi,
+           zAxis=Float64[],xAxis=Float64[])=_with_model() do m
+    Model._model_occ_add_circle!(m,x,y,z,r;tag,angle1,angle2,
+                                 zaxis=zAxis,xaxis=xAxis)
+end
+
 add_bezier_surface(points,num_points_u;kwargs...)=_with_model() do m
     Model._model_occ_add_bezier_surface!(m,points,num_points_u;kwargs...)
 end

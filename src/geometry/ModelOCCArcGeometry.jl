@@ -34,6 +34,39 @@ function _model_occ_circle_arc_geometry(first::NTuple{3,Float64},
             native_geometry=native),nothing
 end
 
+# `gce_MakeCirc(P1,P2,P3)` + `ElCLib::Parameter` trim for the
+# `addCircleArc(..., center=false)` form: the circle through all three
+# points, trimmed start→end through the middle. The plane axis
+# (middle-start)×(end-start) orients the parameterization so the middle
+# point's parameter always lies in (0, parameter(end)) — upstream's
+# `Sense` computation on `Geom_TrimmedCurve` is therefore always the
+# forward trim.
+function _model_occ_circle_arc_through_geometry(first::NTuple{3,Float64},
+                                                middle::NTuple{3,Float64},
+                                                last::NTuple{3,Float64})
+    v12=_arc_sub(middle,first); v13=_arc_sub(last,first)
+    w=_occ_cross(v12,v13)
+    wmod2=_dot3(w,w)
+    wmod2<=_OCC_CONFUSION*_OCC_CONFUSION &&
+        return nothing,"Could not build circle through three points"
+    n=_occ_dir(w)
+    # Circumcenter of the triangle in its plane:
+    # C = first + (|v12|²·(v13×w) − |v13|²·(v12×w)) / (2·|w|²)
+    o=_occ_mul(_arc_sub(_occ_mul(_occ_cross(v13,w),_dot3(v12,v12)),
+                        _occ_mul(_occ_cross(v12,w),_dot3(v13,v13))),
+               0.5/wmod2)
+    center=_add3(first,o)
+    r=_occ_modulus(_arc_sub(center,first))
+    r>_OCC_CONFUSION ||
+        return nothing,"Could not build circle through three points"
+    X=_occ_dir(_arc_sub(first,center))
+    Y=_occ_crossed(n,X)
+    upper=_model_occ_circle_arc_parameter(center,X,n,last)
+    upper<=0.0 &&
+        return nothing,"OpenCASCADE exception Geom_TrimmedCurve::U1 == U2"
+    return (occ=:circle,center=center,n=n,X=X,Y=Y,r=r,t0=0.0,t1=upper),nothing
+end
+
 # OCCT 7.8.1's center-form circle construction and Geom_Conic::Reverse.
 # The latter calls gp_Ax2::SetDirection, projecting X a second time. Keep
 # this arithmetic with the actual constructor; older primitive records retain
