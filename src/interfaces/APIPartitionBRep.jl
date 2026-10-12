@@ -398,31 +398,43 @@ function _partition_brep_boundary_certificate(source,children,part_entities,boun
 end
 
 function _partition_brep_chains(edges,caller)
-    outgoing=Dict{UInt64,Int}();incoming=Dict{UInt64,Int}()
-    for (index,edge) in enumerate(edges)
-        haskey(outgoing,edge.uids[1]) && throw(ArgumentError("$caller: branching partition seam is unsupported"))
-        outgoing[edge.uids[1]]=index
+    adjacent=Dict{UInt64,Vector{Int}}()
+    for (index,edge) in enumerate(edges),uid in edge.uids
+        push!(get!(()->Int[],adjacent,uid),index)
     end
-    for (index,edge) in enumerate(edges)
-        haskey(incoming,edge.uids[2]) && throw(ArgumentError("$caller: branching partition seam is unsupported"))
-        incoming[edge.uids[2]]=index
+    for indices in values(adjacent)
+        length(indices)<=2 || throw(ArgumentError("$caller: branching partition seam is unsupported"))
     end
-    # Open paths begin at literal source edges with no incoming incidence;
-    # remaining edges form closed cycles. No coordinate ordering is involved.
-    starts=[index for (index,edge) in enumerate(edges) if !haskey(incoming,edge.uids[1])]
+    # Open paths begin at degree-1 vertices; remaining edges form closed
+    # cycles. Edge directions are arbitrary — a junction arc can mix carrier
+    # and interface-derived orientations — so each chain also records whether
+    # an edge is traversed against its literal direction.
+    starts=[index for (index,edge) in enumerate(edges)
+        if length(adjacent[edge.uids[1]])==1 || length(adjacent[edge.uids[2]])==1]
     seen=falses(length(edges));chains=NamedTuple[]
     for seed in vcat(starts,collect(eachindex(edges)))
         seen[seed] && continue
-        chain=Int[];index=seed
-        while !seen[index]
-            seen[index]=true;push!(chain,index);next=get(outgoing,edges[index].uids[2],0)
-            next==0 && (index=0;break)
-            index=next
+        edge=edges[seed]
+        entry=length(adjacent[edge.uids[1]])==1 ? edge.uids[1] : edge.uids[2]
+        indices=Int[];flips=Bool[];index=seed;vertex=entry
+        while true
+            seen[index]=true;current=edges[index];forward=current.uids[1]==vertex
+            push!(indices,index);push!(flips,!forward)
+            vertex=forward ? current.uids[2] : current.uids[1]
+            nexts=filter(!=(index),get(adjacent,vertex,Int[]))
+            if !isempty(nexts)
+                next=only(nexts)
+                seen[next] && next!=seed && throw(ArgumentError(
+                    "$caller: partition seam joins another chain"))
+                if !seen[next]
+                    index=next;continue
+                end
+            end
+            break
         end
-        closed=index==seed
-        (closed || index==0 && seed in starts) || throw(ArgumentError("$caller: partition seam joins another chain"))
-        closed && length(chain)<3 && throw(ArgumentError("$caller: partition seam is not a closed polygon"))
-        push!(chains,(indices=chain,closed=closed))
+        closed=vertex==entry
+        closed && length(indices)<3 && throw(ArgumentError("$caller: partition seam is not a closed polygon"))
+        push!(chains,(indices=indices,flips=flips,closed=closed))
     end
     return chains
 end
@@ -517,8 +529,8 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
             sign(signed)*point_children[Int32(abs(signed))]
             for (_,signed) in model.discrete[(1,Int(parent))].boundary]
     end
-    seams=Dict{Tuple{Int32,Tuple{Int32,Int32}},Vector{NamedTuple}}()
-    seam_order=Tuple{Int32,Tuple{Int32,Int32}}[]
+    seams=Dict{Tuple{Tuple{Int,Int32},Tuple{Vararg{Int32}}},Vector{NamedTuple}}()
+    seam_order=Tuple{Tuple{Int,Int32},Tuple{Vararg{Int32}}}[]
     if topology
         edge_curve=Dict{Tuple{UInt64,UInt64},NamedTuple}()
         for parent in source.curve_parents,edge in source.curve_edges[parent]
@@ -536,6 +548,19 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
             other=children[(3,right.volume.parent,right.volume.part)]
             push!(get!(()->NamedTuple[],grouped,minmax(child,other)),
                 (rows=left.rows,uids=left.uids,msh=left.msh,child=child,other=other))
+        end
+        # Every interface cell edge is indexed globally, across components:
+        # an edge internal to one component stays silent, while any other
+        # edge must close a junction fan — every volume incident on the edge
+        # contributes exactly two of its own facets (interfaces, same-part
+        # interior facets, or lower Surface carriers).
+        global_edges=Dict{Tuple{UInt64,UInt64},Vector{NamedTuple}}()
+        global_order=Tuple{UInt64,UInt64}[]
+        edge_volumes=Dict{Tuple{UInt64,UInt64},Vector{NamedTuple}}()
+        for key in source.facet_order,hits in (source.facets[key],)
+            for (a,b) in _simplex_edge_patterns(hits[1].msh),hit in hits
+                push!(get!(()->NamedTuple[],edge_volumes,minmax(hit.uids[a],hit.uids[b])),hit.volume)
+            end
         end
         for pair in sort!(collect(keys(grouped)))
             faces=grouped[pair]
@@ -570,58 +595,124 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
                     push!(owners,fill(tag,length(slots)));push!(labels,ids[slots])
                 end
                 for child in pair;push!(boundaries[(3,Int(child))],child==primary ? tag : -tag);end
-                edge_hits=Dict{Tuple{UInt64,UInt64},Vector{NamedTuple}}();edge_order=Tuple{UInt64,UInt64}[]
+                edge_hits=Dict{Tuple{UInt64,UInt64},Vector{NamedTuple}}()
                 for face in interface_faces,(order,(a,b)) in enumerate(_simplex_edge_patterns(face.msh))
-                    key=minmax(face.uids[a],face.uids[b]);haskey(edge_hits,key) || push!(edge_order,key)
+                    key=minmax(face.uids[a],face.uids[b])
                     ncorner=face.msh==9 ? 3 : face.msh==10 ? 4 : 0
                     mid=ncorner==0 ? nothing : (face.uids[ncorner+order],face.rows[ncorner+order])
                     push!(get!(()->NamedTuple[],edge_hits,key),
                         (uids=(face.uids[a],face.uids[b]),rows=(face.rows[a],face.rows[b]),mid))
+                    haskey(global_edges,key) || push!(global_order,key)
+                    push!(get!(()->NamedTuple[],global_edges,key),
+                        (uids=(face.uids[a],face.uids[b]),rows=(face.rows[a],face.rows[b]),mid,
+                         interface=tag))
                 end
-                for key in edge_order
-                    hits=edge_hits[key]
+                for (key,hits) in edge_hits
                     length(hits)<=2 || throw(ArgumentError("$caller: nonmanifold interface edge"))
                     if length(hits)==2
                         hits[1].uids==reverse(hits[2].uids) || throw(ArgumentError("$caller: interface edge winding disagrees"))
                         hits[1].mid==hits[2].mid || throw(ArgumentError("$caller: interface edge node disagrees"))
-                        continue
                     end
-                    curve_edge=get(edge_curve,key,nothing)
-                    if curve_edge!==nothing
-                        lower=get(source.lower_edges,key,NamedTuple[])
-                        length(lower)==2 &&
-                            sort!(unique!(Int32[edge.face.part for edge in lower]))==members || throw(ArgumentError(
-                                "$caller: an interface border on a declared Curve must meet actual lower Surface carriers on both partition sides"))
-                        seam_lookup[key]=(uids=curve_edge.uids,tag=curve_edge.tag)
-                        continue
-                    end
-                    lower=get(source.lower_edges,key,NamedTuple[])
-                    length(lower)==2 &&
-                        sort!(Int32[edge.face.part for edge in lower])==members || throw(ArgumentError(
-                            "$caller: interface seam must meet actual lower Surface carriers on both partition sides"))
-                    all(entry->entry.mid==lower[1].mid,lower) || throw(ArgumentError(
-                        "$caller: interface seam edge node disagrees across Surface carriers"))
-                    reference=argmin([children[(2,edge.face.parent,edge.face.part)] for edge in lower])
-                    edge=lower[reference];group=(edge.face.parent,Tuple(members))
-                    haskey(seams,group) || push!(seam_order,group)
-                    current=get!(()->NamedTuple[],seams,group)
-                    any(existing->_partition_support(existing.uids)==_partition_support(edge.uids),current) ||
-                        push!(current,(uids=edge.uids,rows=edge.rows,mid=edge.mid))
                 end
             end
+        end
+        for key in global_order
+            hits=global_edges[key]
+            length(hits)==2 && allequal(hit.interface for hit in hits) && continue
+            lower=get(source.lower_edges,key,NamedTuple[])
+            volume_cells=Dict{NamedTuple,Int}()
+            for volume in get(edge_volumes,key,NamedTuple[])
+                volume_cells[volume]=get(volume_cells,volume,0)+1
+            end
+            all(==(2),values(volume_cells)) || throw(ArgumentError(
+                "$caller: interface seam must meet actual lower Surface carriers closing its junction fan"))
+            mids=Union{Nothing,Tuple{UInt64,Int32}}[hit.mid for hit in hits]
+            append!(mids,Union{Nothing,Tuple{UInt64,Int32}}[edge.mid for edge in lower])
+            allequal(mids) || throw(ArgumentError(
+                "$caller: interface seam edge node disagrees across its incident cells"))
+            parts=sort!(unique!(Int32[volume.part for volume in keys(volume_cells)]))
+            curve_edge=get(edge_curve,key,nothing)
+            if curve_edge!==nothing
+                entity=part_entities[(1,Int(curve_edge.tag))]
+                merged=sort!(unique!(vcat(entity.partitions,parts)))
+                merged!=entity.partitions &&
+                    (part_entities[(1,Int(curve_edge.tag))]=Elements.MixedEntity(1,curve_edge.tag,entity.bbox;
+                        physical_tags=entity.physical_tags,partitions=merged,parent=entity.parent))
+                seam_lookup[key]=(uids=curve_edge.uids,tag=curve_edge.tag)
+                continue
+            end
+            if isempty(lower)
+                parent=(3,Int32(minimum(Int(volume.parent) for volume in keys(volume_cells))))
+                edge=(;uids=hits[1].uids,rows=hits[1].rows,mid=hits[1].mid)
+            else
+                reference=argmin([children[(2,edge.face.parent,edge.face.part)] for edge in lower])
+                edge=lower[reference];parent=(2,edge.face.parent)
+            end
+            group=(parent,Tuple(parts))
+            haskey(seams,group) || push!(seam_order,group)
+            current=get!(()->NamedTuple[],seams,group)
+            any(existing->_partition_support(existing.uids)==_partition_support(edge.uids),current) ||
+                push!(current,(uids=edge.uids,rows=edge.rows,mid=edge.mid))
+        end
+        # Junction vertices — nodes where three or more seam edges meet —
+        # materialize as dim-0 entities carrying Point15 cells; their parent is
+        # the lowest-dimension parent among incident seam groups. A vertex
+        # already bound by a declared Point child reuses that child instead.
+        vertex_degree=Dict{UInt64,Int}()
+        vertex_groups=Dict{UInt64,Set{Tuple{Tuple{Int,Int32},Tuple{Vararg{Int32}}}}}()
+        for group in seam_order,edge in seams[group],uid in edge.uids
+            vertex_degree[uid]=get(vertex_degree,uid,0)+1
+            push!(get!(()->Set{Tuple{Tuple{Int,Int32},Tuple{Vararg{Int32}}}}(),vertex_groups,uid),group)
+        end
+        for (_,edge) in edge_curve,uid in edge.uids
+            vertex_degree[uid]=get(vertex_degree,uid,0)+1
+        end
+        point_nodes=Dict{UInt64,Int32}()
+        for (parent,child) in point_children
+            cell=source.point_cells[parent];uid=source.public.node_tags[cell.rows[1]]
+            point_nodes[uid]=min(get(point_nodes,uid,Int32(typemax(Int32))),child)
+        end
+        junctions=Dict{UInt64,Int32}()
+        for uid in sort!(collect(uid for (uid,degree) in vertex_degree if degree>=3))
+            groups=get(vertex_groups,uid,nothing)
+            groups===nothing && continue
+            parts=sort!(unique!(Int32[part for group in collect(groups) for part in group[2]]))
+            existing=get(point_nodes,uid,nothing)
+            if existing!==nothing
+                entity=part_entities[(0,Int(existing))]
+                merged=sort!(unique!(vcat(entity.partitions,parts)))
+                part_entities[(0,Int(existing))]=Elements.MixedEntity(0,existing,entity.bbox;
+                    physical_tags=entity.physical_tags,partitions=merged,parent=entity.parent)
+                junctions[uid]=existing;continue
+            end
+            parent=minimum(group[1] for group in groups)
+            tag=Int32(_partition_entity_birth!(staged,0,caller))
+            cell_count<=typemax(Int32) || throw(ArgumentError("$caller: junction cell capacity exceeded"))
+            cell_count+=1
+            maximum_uid<typemax(UInt64) || throw(ArgumentError("$caller: junction UID capacity exceeded"))
+            maximum_uid+=UInt64(1)
+            row=source.public.node_indices[uid]
+            part_entities[(0,Int(tag))]=Elements.MixedEntity(0,tag,_partition_bounds(cached.coords,Int32[row]);
+                partitions=parts,parent=parent)
+            boundaries[(0,Int(tag))]=Int32[]
+            junctions[uid]=tag
+            push!(blocks,ElementBlock(15,reshape(Int32[row],1,1)));push!(owners,[tag]);push!(labels,[maximum_uid])
         end
         for group in seam_order
             edges=seams[group]
             for chain in _partition_brep_chains(edges,caller)
-                cycle=chain.indices
-                cell_count<=typemax(Int32)-length(cycle) || throw(ArgumentError("$caller: seam cell capacity exceeded"))
-                cell_count+=length(cycle)
-                arity=all(index->edges[index].mid===nothing,cycle) ? 2 : 3
-                all(index->(edges[index].mid===nothing)==(arity==2),cycle) || throw(ArgumentError(
-                    "$caller: partition seam mixes cell orders"))
-                tag=Int32(_partition_entity_birth!(staged,1,caller));nodes=Matrix{Int32}(undef,arity,length(cycle));ids=UInt64[]
-                for (column,index) in enumerate(cycle)
+                oriented=map(zip(chain.indices,chain.flips)) do (index,flip)
                     edge=edges[index]
+                    flip ? (uids=(edge.uids[2],edge.uids[1]),
+                            rows=(edge.rows[2],edge.rows[1]),mid=edge.mid) : edge
+                end
+                cell_count<=typemax(Int32)-length(oriented) || throw(ArgumentError("$caller: seam cell capacity exceeded"))
+                cell_count+=length(oriented)
+                arity=all(edge->edge.mid===nothing,oriented) ? 2 : 3
+                all(edge->(edge.mid===nothing)==(arity==2),oriented) || throw(ArgumentError(
+                    "$caller: partition seam mixes cell orders"))
+                tag=Int32(_partition_entity_birth!(staged,1,caller));nodes=Matrix{Int32}(undef,arity,length(oriented));ids=UInt64[]
+                for (column,edge) in enumerate(oriented)
                     nodes[:,column]=arity==2 ? collect(edge.rows) :
                         Int32[edge.rows[1],edge.rows[2],edge.mid[2]]
                     maximum_uid<typemax(UInt64) || throw(ArgumentError("$caller: seam UID capacity exceeded"))
@@ -629,9 +720,16 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
                     seam_lookup[minmax(edge.uids...)]=(uids=edge.uids,tag=tag)
                 end
                 part_entities[(1,Int(tag))]=Elements.MixedEntity(1,tag,_partition_bounds(cached.coords,unique(vec(nodes)));
-                    partitions=collect(group[2]),parent=(2,group[1]))
-                boundaries[(1,Int(tag))]=Int32[]
-                curves[tag]=edges[cycle]
+                    partitions=collect(group[2]),parent=group[1])
+                bounds=Int32[]
+                if !chain.closed
+                    start=get(junctions,oriented[1].uids[1],Int32(0))
+                    stop=get(junctions,oriented[end].uids[2],Int32(0))
+                    start!=0 && push!(bounds,start)
+                    stop!=0 && push!(bounds,-stop)
+                end
+                boundaries[(1,Int(tag))]=bounds
+                curves[tag]=oriented
                 push!(blocks,ElementBlock(arity==2 ? 1 : 8,nodes));push!(owners,fill(tag,length(ids)));push!(labels,ids)
             end
         end

@@ -356,6 +356,30 @@ and `unpartition`, plus a 6-assertion atomicity set). PART01 remains open
 for periodic/parametric topology, triple junctions, distinct coincident
 support roles, order ≥3 cells and parallel production.
 
+The junction slice is also landed, verified against a public Gmsh 4.15.2 SDK
+observation (junction entities carry all incident partitions; a carrier-free
+fan seam takes the Region parent). The pairwise "exactly two lower carriers"
+rim rule is replaced by the actual manifold fan certificate — every volume
+incident on a rim edge contributes exactly two facets (interfaces, same-part
+interior facets or exterior carriers) — so multi-volume junction fans
+partition: one seam entity shared by all incident interfaces, grouped by
+parent entity and complete partition set, parented by the carrier Surface or
+the incident Region. Seam-graph vertices with valence ≥3 — declared Curve
+ends included — emit dim-0 Point15 junction entities partitioned by the
+union of incident memberships under the lowest-dimension incident parent,
+reusing an existing declared Point child and merging partitions when
+present; open junction chains bind junction endpoints with signed bounds,
+and a declared Curve on a junction edge is shared by every incident
+interface while its child's partition list extends to the full set.
+`_partition_brep_chains` is now direction-agnostic with per-edge flip
+records, fixing a latent false "branching" rejection on arcs mixing
+carrier- and interface-derived edge directions. Focused checks pass 274/274
+on Julia 1.13.1 (three-Tet4 junction, declared Curve/Point junction reuse,
+carrier-free four-volume fan, Tet10 junction with a Line3 junction seam,
+MSH4 round-trips and atomicity); the default smoke gained a junction
+testset. PART01 remains open for periodic/parametric topology, distinct
+coincident support roles, order ≥3 cells and parallel production.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

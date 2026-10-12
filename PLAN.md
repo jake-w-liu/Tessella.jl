@@ -214,9 +214,14 @@ cell family — Quad4 surfaces and Hex8/Prism6/Pyr5 volumes — through the
 canonical `MeshEntityTopology` facet cycles and per-type interface blocks,
 and every complete second-order family — Line3 curves, Tri6/Quad9 surfaces
 and Tet10/Hex27/Prism18/Pyr14 volumes — through derived MSH pointsGenerators
-facet layouts, edge-node border certification and Line3 seams. Order ≥3 and
+facet layouts, edge-node border certification and Line3 seams. Multi-volume
+junction fans now partition under a manifold rim certificate (each incident
+volume contributes exactly two facets on the edge): junction seams are
+shared by all incident interfaces with Surface-or-Region parents, and
+valence-≥3 seam vertices emit Point15 junction entities with signed
+junction-curve bounds. Order ≥3 and
 incomplete/serendipity high-order cells, periodic/parametric topology,
-coincident-support roles, triple junctions, bare non-Tet4 volumes and
+coincident-support roles, bare non-Tet4 volumes and
 parallel production remain open.
 
 An explicit [variable-tensor ordinary Surface constructor](docs/metric_model_surfaces.md)

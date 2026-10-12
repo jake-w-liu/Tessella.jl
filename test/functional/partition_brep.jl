@@ -161,3 +161,33 @@ end
         A.finalize()
     end
 end
+
+@testset "Junction BRep partition" begin
+    A=Tessella.API
+    try
+        # Three volumes meet at rim edge {1,2}: two pairwise interfaces plus
+        # exterior carriers close the junction fan; the shared seam and the
+        # dim-0 junction entities carry all three partitions.
+        A.finalize();A.initialize();A.model.add("junction partition")
+        A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+        A.model.add_discrete_entity(2,30);A.model.add_discrete_entity(3,11,[30])
+        coordinates=[0. 0. 1. 0. -1. -0.5;0. 0. 0. 1. -1. -1.;0. 1. 0. 0. 0.2 0.2]
+        A.mesh.add_nodes(3,11,1:6,vec(coordinates))
+        A.mesh.add_elements_by_type(30,2,601:608,
+            [1,4,3, 4,2,3, 1,5,2, 1,3,5, 5,3,2, 1,6,4, 1,2,6, 6,2,4])
+        A.mesh.add_elements_by_type(11,4,[501,502,503],
+            [1,2,3,4, 1,3,2,5, 1,2,4,6])
+        A.mesh.generate(3);A.option("Mesh.PartitionCreateTopology",1)
+        A.mesh.partition(3,[601:608...,501,502,503],[1,1,2,2,2,3,3,3,1,2,3])
+        jpoints=[tag for (_,tag) in A.model.get_entities(0)]
+        jseam=only(tag for (_,tag) in A.model.get_entities(1)
+            if A.model.get_partitions(1,tag)==[1,2,3])
+        @test length(jpoints)==2 && A.model.get_parent(1,jseam)==(2,30) &&
+            all(A.model.get_partitions(0,tag)==[1,2,3] for tag in jpoints)
+        @test Tessella.validate(A.mesh.get()).ok
+        A.mesh.unpartition()
+        @test A.model.get_entities()==[(2,30),(3,11)]
+    finally
+        A.finalize()
+    end
+end

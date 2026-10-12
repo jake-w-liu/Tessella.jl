@@ -84,16 +84,42 @@ Tri3/Tri6 and/or Quad4/Quad9 block per its facet types, wound to the
 primary partition side, so Hex↔Pyramid interfaces emit quads and
 Tet↔Prism interfaces emit triangles at whatever order the volume facets
 carry; the two sides must agree on shared edge-node UIDs. Generated seams
-group by the adjacent original Surface parent and partition membership,
+group by parent entity and the complete incident partition membership,
 then chain nonbranchingly per the open-seam rules and emit Line2 or Line3
 cells by the border arity; a declared Curve carrier on an interface border
 binds the shared Curve child instead.
 
+## Junction seams and junction points
+
+Interface-border edges are indexed globally across every generated
+component, so a rim edge is no longer required to sit between exactly two
+lower Surface carriers: the certificate only requires every volume incident
+on the edge to contribute exactly two of its own facets (interfaces,
+same-part interior facets, or exterior Surface carriers). Three or more
+partitions meeting along the same edge therefore share one junction seam —
+grouped by its parent entity and the complete incident partition set — whose
+parent is the carrier Surface when carriers exist and otherwise the incident
+Region, matching a public Gmsh 4.15.2 observation of a four-volume fan
+parented by the Region. A declared Curve on a junction edge is shared by
+every incident interface and its child's partition list is extended to the
+full incident set.
+
+Nodes where three or more seam edges meet — including declared Curve edge
+ends in the valence count — materialize as dim-0 entities carrying Point15
+cells partitioned by the union of incident seam memberships and parented by
+the lowest-dimension incident seam parent. A vertex already carried by a
+declared Point child reuses that child and merges the partition union into
+it. Open junction seam chains bind their junction endpoints with signed
+bounds (+start, −stop); closed chains keep empty bounds. Seam edge
+directions are normalized at chain time so a junction arc mixing carrier and
+interface-derived orientations cannot falsely trip the branching guard.
+
 ## Guards and scope
 
 Order ≥3 and incomplete/serendipity high-order cells, periodic or
-parametric topology, already partitioned data, seam branches/triple
-junctions, coincident original/interface support roles and actual parallel
+parametric topology, already partitioned data, seam branches within one
+partition-membership group, coincident original/interface support roles
+and actual parallel
 partition algorithms remain guarded or open. Bare meshes without lower
 cells still route to the Tet4-only producer and bare non-Tet4 volume meshes
 remain unsupported. `generate` always
@@ -109,11 +135,17 @@ over five Quad4 and four Tri3 surfaces with a declared Curve/Point border
 on one Quad4 side (Quad4 interface); a Tet4+Prism6 fixture sharing a Tri3
 face across the two volume families (Tri3 interface); a Tet10 pair under a
 declared closed Line3 Curve (Tri6 interface plus a generated Line3 seam);
-a Hex27 pair (Quad9 interface and a closed four-cell Line3 seam); and a
+a Hex27 pair (Quad9 interface and a closed four-cell Line3 seam); a
 Tet10+Prism18 pair sharing a Tri6 across the two volume families (a Surface
-child keeping mixed Tri6+Quad9 blocks). Checks cover child
+child keeping mixed Tri6+Quad9 blocks); a three-Tet4 junction whose rim
+edge closes two pairwise interfaces; the same junction with the shared
+triangle split onto two declared Surfaces and its edges declared as
+Curves/Points; a four-Tet4 fan whose carrier-free junction edge takes the
+Region parent; and a three-Tet10 junction emitting a Line3 junction seam.
+Checks cover child
 parents/partitions, signed Curve→Point and Surface→Curve closures, interface
-rim curves, original cell/node UIDs, physical groups, ghost records,
+rim curves, junction seam sharing, junction point emission and reuse,
+original cell/node UIDs, physical groups, ghost records,
 ASCII/binary MSH4 and public `write`/`open` round-trips, `unpartition`, and
 atomic topology violations across three rejection testsets including a
 missing Point15 carrier, a Line3 Curve carrying a foreign edge node, a

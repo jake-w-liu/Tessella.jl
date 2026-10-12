@@ -1022,4 +1022,205 @@ end
         A.finalize()
     end
 end
+
+# Junction fixtures: tet1 shares face {1,2,3} with tet2 and {1,2,4} with tet3 —
+# rim edge {1,2} closes a three-volume junction fan. The declared form splits
+# the shared triangle {1,2,4} onto surfaces 30/31 and declares its edges as
+# Curves 40-42 with Points 7-9 at its vertices.
+const JCORNERS=Float64[0 0 1 0 -1 -0.5;0 0 0 1 -1 -1;0 1 0 0 0.2 0.2]
+function junction_fixture!(;declared=false,fan=false)
+    A.finalize();A.initialize();A.model.add("junction")
+    A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+    if fan
+        A.model.add_discrete_entity(2,30)
+        A.model.add_discrete_entity(3,11,[30])
+        fc=Float64[0 0 1 0 -1 0;0 0 0 1 0 -1;0 1 0 0 0 0]
+        A.mesh.add_nodes(3,11,collect(1:6),vec(fc))
+        A.mesh.add_elements_by_type(30,2,UInt64[601:608...],
+            UInt64[1,4,3, 4,2,3, 1,5,4, 5,2,4, 1,6,5, 6,2,5, 1,3,6, 3,2,6])
+        A.mesh.add_elements_by_type(11,4,UInt64[501:504...],
+            UInt64[1,2,3,4, 1,2,4,5, 1,2,5,6, 1,2,6,3])
+    else
+        if declared
+            for tag in (7,8,9);A.model.add_discrete_entity(0,tag);end
+            A.model.add_discrete_entity(1,40,[7,-8])
+            A.model.add_discrete_entity(1,41,[8,-9])
+            A.model.add_discrete_entity(1,42,[9,-7])
+            A.model.add_discrete_entity(2,30,[-40,-41,-42])
+            A.model.add_discrete_entity(2,31,[40,41,42])
+            A.model.add_discrete_entity(3,11,[30,31])
+            A.mesh.add_nodes(3,11,collect(1:6),vec(JCORNERS))
+            A.mesh.add_elements_by_type(30,2,UInt64[601:605...],
+                UInt64[1,4,3, 4,2,3, 1,5,2, 1,3,5, 5,3,2])
+            A.mesh.add_elements_by_type(31,2,UInt64[606:608...],
+                UInt64[1,6,4, 1,2,6, 6,2,4])
+            A.mesh.add_elements_by_type(40,1,UInt64[701],UInt64[1,2])
+            A.mesh.add_elements_by_type(41,1,UInt64[702],UInt64[2,4])
+            A.mesh.add_elements_by_type(42,1,UInt64[703],UInt64[4,1])
+            A.mesh.add_elements_by_type(7,15,UInt64[801],UInt64[1])
+            A.mesh.add_elements_by_type(8,15,UInt64[802],UInt64[2])
+            A.mesh.add_elements_by_type(9,15,UInt64[803],UInt64[4])
+        else
+            A.model.add_discrete_entity(2,30)
+            A.model.add_discrete_entity(3,11,[30])
+            A.mesh.add_nodes(3,11,collect(1:6),vec(JCORNERS))
+            A.mesh.add_elements_by_type(30,2,UInt64[601:608...],
+                UInt64[1,4,3, 4,2,3, 1,5,2, 1,3,5, 5,3,2, 1,6,4, 1,2,6, 6,2,4])
+        end
+        A.mesh.add_elements_by_type(11,4,UInt64[501:503...],
+            UInt64[1,2,3,4, 1,3,2,5, 1,2,4,6])
+    end
+    A.mesh.generate(3);A.option("Mesh.PartitionCreateTopology",1)
+end
+junction_tags(;declared=false)=declared ?
+    UInt64[601:608...;701:703...;801:803...;501:503...] :
+    UInt64[601:608...;501:503...]
+junction_parts(;declared=false)=declared ?
+    Int32[1,1,2,2,2,3,3,3, 1,1,1, 1,1,1, 1,2,3] :
+    Int32[1,1,2,2,2,3,3,3, 1,2,3]
+bound_abs(dim,tag)=[abs(v) for (_,v) in A.model.get_boundary([(dim,tag)],false,true,false)]
+# Same junction in complete second order: Tet10 volumes over Tri6 carriers —
+# the emitted junction seam is a Line3 carrying the junction edge's mid node.
+function p2_junction_fixture!()
+    A.finalize();A.initialize();A.model.add("p2 junction")
+    A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
+    p=_P2Nodes()
+    for (tag,pos) in ((1,(0.,0.,0.)),(2,(0.,0.,1.)),(3,(1.,0.,0.)),
+                      (4,(0.,1.,0.)),(5,(-1.,-1.,0.2)),(6,(-0.5,-1.,0.2)))
+        _p2_corner!(p,tag,pos)
+    end
+    t1=_p2_tet(p,(1,2,3,4));t2=_p2_tet(p,(1,3,2,5));t3=_p2_tet(p,(1,2,4,6))
+    s30=hcat(_p2_tri(p,(1,4,3)),_p2_tri(p,(4,2,3)),
+             _p2_tri(p,(1,5,2)),_p2_tri(p,(1,3,5)),_p2_tri(p,(5,3,2)),
+             _p2_tri(p,(1,6,4)),_p2_tri(p,(1,2,6)),_p2_tri(p,(6,2,4)))
+    A.model.add_discrete_entity(2,30)
+    A.model.add_discrete_entity(3,11,[30])
+    _p2_nodes!(p)
+    A.mesh.add_elements_by_type(30,9,[601:608...],vec(s30))
+    A.mesh.add_elements_by_type(11,11,[501,502,503],vcat(t1,t2,t3))
+    A.mesh.generate(3)
+    A.option("Mesh.PartitionCreateTopology",1)
+    return p
+end
+
+@testset "partition junctions emit shared seams and junction points" begin
+    try
+        # Public Gmsh 4.15.2 emits one seam entity shared by every incident
+        # interface on a junction edge plus dim-0 entities at seam-graph
+        # junction vertices; the rim certificate only requires every incident
+        # volume to contribute exactly two facets on the edge.
+        junction_fixture!()
+        A.mesh.partition(3,junction_tags(),junction_parts())
+        jpoints=sort!(collect(tag for (_,tag) in A.model.get_entities(0)
+            if A.model.get_parent(0,tag)==(2,30)))
+        @test length(jpoints)==2
+        @test all(A.model.get_partitions(0,tag)==[1,2,3] for tag in jpoints)
+        point_nodes=Set{UInt64}()
+        for tag in jpoints
+            _,nodes=family(0,tag,15);union!(point_nodes,vec(nodes))
+        end
+        @test point_nodes==Set(UInt64[1,2])
+        jseam=only(tag for (_,tag) in A.model.get_entities(1)
+            if length(A.model.get_partitions(1,tag))==3)
+        @test A.model.get_parent(1,jseam)==(2,30)
+        _,lines=family(1,jseam,1)
+        @test Set(support(lines[:,column]) for column in axes(lines,2))==
+            Set([Tuple(UInt64[1,2])])
+        bounds=A.model.get_boundary([(1,jseam)],false,true,false)
+        @test sort([abs(v) for (_,v) in bounds])==sort(jpoints)
+        @test count(v->v>0,(v for (_,v) in bounds))==1
+        rims=sort!(collect(tag for (_,tag) in A.model.get_entities(1)
+            if length(A.model.get_partitions(1,tag))==2))
+        @test [A.model.get_partitions(1,tag) for tag in rims]==[[1,2],[1,3]]
+        @test all(sort(bound_abs(1,tag))==sort(jpoints) for tag in rims)
+        interfaces=sort!(collect(tag for (_,tag) in A.model.get_entities(2)
+            if A.model.get_parent(2,tag)==(3,11)))
+        @test length(interfaces)==2
+        @test [A.model.get_partitions(2,tag) for tag in interfaces]==[[1,2],[1,3]]
+        @test all(jseam in bound_abs(2,tag) for tag in interfaces)
+        @test all(closed_region(tag) for (_,tag) in A.model.get_entities(3)
+            if A.model.get_parent(3,tag)==(3,11))
+        owned=A.mesh.get()
+        @test Tessella.validate(owned).ok
+        mktempdir() do directory
+            for binary in (false,true)
+                path=joinpath(directory,"junction-$(binary).msh")
+                E.write_mixed_msh(path,owned;version=4.1,binary)
+                imported=E.read_mixed_msh(path)
+                @test records(imported)==records(owned)
+                @test partition_records(imported)==partition_records(owned)
+            end
+        end
+        A.mesh.unpartition()
+        @test Set(A.model.get_entities())==Set([(2,30),(3,11)])
+        # The four-volume fan has no exterior carriers on its junction edge —
+        # the seam adopts the Region parent and the full partition membership.
+        junction_fixture!(fan=true)
+        A.mesh.partition(4,UInt64[601:608...;501:504...],
+            Int32[1,1,2,2,3,3,4,4,1,2,3,4])
+        fseam=only(tag for (_,tag) in A.model.get_entities(1)
+            if length(A.model.get_partitions(1,tag))==4)
+        @test A.model.get_parent(1,fseam)==(3,11)
+        fpoints=[tag for (_,tag) in A.model.get_entities(0)]
+        @test length(fpoints)==2
+        @test all(A.model.get_partitions(0,tag)==[1,2,3,4] for tag in fpoints)
+        finterfaces=[tag for (_,tag) in A.model.get_entities(2)
+            if A.model.get_parent(2,tag)==(3,11)]
+        @test length(finterfaces)==4
+        @test all(fseam in bound_abs(2,tag) for tag in finterfaces)
+        @test Tessella.validate(A.mesh.get()).ok
+        # A declared Curve can itself be the junction edge: every incident
+        # interface binds it and its declared Point children serve as junctions.
+        junction_fixture!(declared=true)
+        A.mesh.partition(3,junction_tags(declared=true),junction_parts(declared=true))
+        @test Set(tag for (_,tag) in A.model.get_entities(0)
+            if A.model.get_parent(0,tag)[1]==0)==Set([child(0,7),child(0,8),child(0,9)])
+        @test A.model.get_partitions(0,child(0,7))==[1,2,3]
+        @test A.model.get_partitions(0,child(0,9))==[1,3]
+        jcurve=child(1,40)
+        @test A.model.get_partitions(1,jcurve)==[1,2,3]
+        dinterfaces=[tag for (_,tag) in A.model.get_entities(2)
+            if A.model.get_parent(2,tag)==(3,11)]
+        @test length(dinterfaces)==2
+        @test all(jcurve in bound_abs(2,tag) for tag in dinterfaces)
+        @test Tessella.validate(A.mesh.get()).ok
+        A.mesh.unpartition()
+        @test (0,7) in A.model.get_entities(0) && (1,40) in A.model.get_entities(1)
+        # A second-order junction emits a Line3 junction seam carrying the
+        # junction edge's actual mid node; junction points stay corner-only.
+        p=p2_junction_fixture!()
+        A.mesh.partition(3,UInt64[501:503...;601:608...],
+            Int32[1,2,3,1,1,2,2,2,3,3,3])
+        pseam=only(tag for (_,tag) in A.model.get_entities(1)
+            if length(A.model.get_partitions(1,tag))==3)
+        types,_,pnodes=A.mesh.get_elements(1,pseam)
+        @test types==Int32[8]
+        seam_nodes=reshape(only(pnodes),3,1)
+        @test support(seam_nodes[1:2])==Tuple(UInt64[1,2])
+        @test seam_nodes[3]==_p2_edge_uid(p,1,2)
+        @test length([tag for (_,tag) in A.model.get_entities(0)])==2
+        @test Tessella.validate(A.mesh.get()).ok
+        # Junction fixtures still reject atomically: an empty partition and a
+        # Surface cell coinciding with a junction interface both hold.
+        junction_fixture!()
+        before=snapshot()
+        caught=try
+            A.mesh.partition(4,junction_tags(),junction_parts());nothing
+        catch error;error end
+        @test caught isa ArgumentError && snapshot()==before
+        junction_fixture!(declared=true)
+        A.mesh.add_elements_by_type(31,2,UInt64[609],UInt64[1,2,4])
+        A.mesh.generate(3)
+        before=snapshot()
+        coincident_parts=vcat(junction_parts(declared=true)[1:8],Int32(3),
+                              junction_parts(declared=true)[9:end])
+        caught=try
+            A.mesh.partition(3,UInt64[601:609...;701:703...;801:803...;501:503...],
+                coincident_parts);nothing
+        catch error;error end
+        @test caught isa ArgumentError && snapshot()==before
+    finally
+        A.finalize()
+    end
+end
 end

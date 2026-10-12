@@ -257,6 +257,35 @@ now **234/234 on both** runtimes. PART01 remains open (periodic/parametric
 topology, triple junctions, coincident support roles, order ≥3 cells,
 parallel production).
 
+### Junction seams and junction points in lower-BRep partition production (2026-10-12)
+
+Devin landed the next PART01 slice against a public Gmsh 4.15.2 SDK
+observation: `APIPartitionBRep.jl` replaces the pairwise "exactly two lower
+Surface carriers" rim rule with the actual manifold fan certificate — every
+volume incident on a rim edge contributes exactly two of its own facets
+(interface facets, same-part interior facets or exterior carriers) — so
+junction fans with three or more partitions now partition. One seam entity
+is shared by all incident interfaces, grouped by parent entity and the
+complete partition set; the parent is the carrier Surface when carriers
+exist and otherwise the incident Region (a carrier-free four-volume fan's
+seam is parented `(3,region)` exactly as Gmsh emits). Seam-graph vertices
+with valence ≥3 — declared Curve ends included — emit dim-0 entities with
+Point15 cells partitioned by the union of incident memberships under the
+lowest-dimension incident parent; a declared Point child on the vertex is
+reused and merges the partition union. Open junction chains bind junction
+endpoints with signed `+start`/`−stop` bounds, a declared Curve on a
+junction edge is shared by every incident interface and gains the full
+incident partition list, and `_partition_brep_chains` is now
+direction-agnostic with per-edge flip records so a junction arc mixing
+carrier- and interface-derived edge directions cannot falsely reject as
+branching. The focused partition file adds a 40-assertion junction testset
+(three-Tet4 junction, declared Curve/Point junction reuse, carrier-free
+four-volume fan, second-order Tet10 junction with Line3 seam, MSH4
+round-trips, atomicity); the file is now **274/274** and the default smoke
+gained a 3-assertion junction testset. PART01 remains open
+(periodic/parametric topology, coincident support roles, order ≥3 cells,
+parallel production).
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The
