@@ -61,6 +61,10 @@ Local receipts on 2026-10-13, with bounds checks; only the marked
 
 | Runtime | Mode and entry point | Passing assertions | Elapsed |
 | --- | --- | ---: | ---: |
+| Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation, body 189 s | 400 | ~192 s |
+| Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation, body 160.6 s | 400 | ~193 s |
+| Julia 1.13.1 | `test/runtests.jl`, `-O2`, body 192.0 s | 400 | ~195 s |
+| Julia 1.12.7 | `test/runtests.jl`, `-O2`, body 165.0 s | 400 | ~197 s |
 | Julia 1.13.1 | `Pkg.test()`, automatic minimal compilation | 390 | ~185 s |
 | Julia 1.12.7 | `Pkg.test()`, automatic minimal compilation | 390 | ~197 s |
 | Julia 1.13.1 | `test/runtests.jl`, `-O2`, body 181.2 s | 390 | ~181 s |
@@ -224,6 +228,20 @@ The current assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds a
+compact OCC sweep check (`occ_sweep_smoke`: a point's swept edge, a
+line's ruled face, a rectangle's `[cap, solid, laterals]` ordering
+with mass/centroid, a disk's cylinder and two loud rejections) —
+the `test/interfaces/api_occ_extrude_test.jl` file covers upstream
+`extrude` semantics: per-input `[top (dim−1), body (dim), laterals]`
+ordering grouped by ascending dimension, dim-0's edge-only output,
+kernel-side translated geometry, prism mass/centroid/bbox, the
+hole-prism's subtracted cavity mass in both sweep directions, the
+disk→cylinder cap identification, shared-generatrix deduplication
+across inputs, 14-way phase-1 rejection atomicity snapshots and an
+end-to-end `generate(3)` tet mesh — while curved profiles, partial
+circles, true ellipses, off-normal disk directions, solid/wire
+inputs, in-plane directions and the extrusion-meshing kwargs reject
+loudly. The preceding increment adds a
 compact OCC closest-entity check (`occ_closest_smoke`: an `add_box`/
 `add_sphere` pair's sorted distances and closest points, the
 inside-solid zero-distance answer and a vertex-vs-solid ordering —

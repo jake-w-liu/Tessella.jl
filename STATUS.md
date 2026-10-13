@@ -1028,6 +1028,51 @@ Verified by `test/interfaces/api_occ_closest_test.jl` (57 assertions
 incl. argument-order, self-distance, shared-subshape, circle/line and
 error-path pins) plus the extended `occ_closest_smoke` default check.
 
+### GEO01 slice 14 — `occ.extrude` (2026-10-14)
+
+The fourteenth GEO01 slice adds
+`model.occ.extrude(dimTags,dx,dy,dz; numElements=[], heights=[],
+recombine=false)` — upstream `OCC_Internals::extrude`'s
+`BRepPrimAPI_MakePrism` translation sweep on the pending-shape kernel,
+implemented in `src/geometry/ModelOCCSweep.jl`. The bounded coverage
+handles every all-linear profile exactly: points sweep to line edges,
+line edges to ruled parallelogram plane faces, line-bounded plane
+faces — holes included — to prism solids, and a full-circle disk (the
+`:circle`/circle-equivalent-`:ellipse` rim) swept along its own normal
+reuses the compact `add_cylinder` publication (upstream shares the
+source face as the bottom cap; the producer builds a geometrically
+identical cap instead so the source stays independently bound).
+Curved profiles, partial circles, true ellipses, off-normal disk
+directions, solid/wire inputs, in-plane directions and the
+extrusion-meshing options reject loudly — there is no OCC
+mesh-attribute store to transport `numElements`/`heights`/`recombine`
+yet. Phase 1 classifies and validates every input before any bind so
+a rejection leaves the registry byte-identical; phase 2 builds one
+compound like upstream's per-dim pass, deduplicating swept vertices,
+lateral generatrix edges and translated top edges across inputs and
+shared wires through `vmap`/`lmap`/`emap`. Output ordering follows
+upstream's `getReturnedShapes` reorder — per input `[top (dim−1),
+body (dim), laterals …]` grouped by ascending dimension, dim-0
+emitting just the swept edge. Orientation is the deep-debug story:
+solid consumers read `σ·axis` (the shell use flag times the stored
+Newell axis), so each generated face bakes its intended outward
+normal into `axis` — hole laterals traverse opposite so their Newell
+lands on the cavity side, and both the translated cap and each
+lateral quad rebuild through the mirror traversal when the first fit
+lands anti-normal (which the `d<0` sweep needs since a traversal's
+Newell is `û×d̂`). A first draft flipped `reversed` metadata instead
+and measured `49` instead of `45` on the hole fixture — the
+divergence path ignores `reversed`; the axis fix is what the
+verification pins. `get_mass`/`get_center_of_mass`/`get_bounding_box`
+verify exactly (prism `30`, hole prism `45`, cylinder `πr²h`,
+anti-normal sweeps keep positive outward volume), synchronized swept
+solids tetrahedralize through `generate(3)`, and nested/rotated-face
+sweeps compose. Verified by
+`test/interfaces/api_occ_extrude_test.jl` (81 assertions incl.
+ordering, kernel-side geometry pins, hole mass, disk cylinder,
+shared-generatrix dedup, 14-way atomicity snapshots and a mesh
+testset) plus an `occ_sweep_smoke` default check.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

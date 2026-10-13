@@ -1028,6 +1028,36 @@ circle↔line pairs, self-distance and error/isolation paths
 (57 assertions in the file), plus the extended
 `occ_closest_smoke` default check.
 
+The fourteenth GEO01 slice followed: `occ.extrude` in
+`src/geometry/ModelOCCSweep.jl` — upstream
+`OCC_Internals::extrude`'s `BRepPrimAPI_MakePrism` sweep on the
+pending-shape kernel. Bounded coverage: points sweep to line edges,
+line edges to ruled parallelogram faces, line-bounded plane faces
+(holes included) to prism solids, and a full-circle disk along its
+normal reuses the compact `add_cylinder` publication (the producer
+builds an identical cap rather than sharing the source face, so the
+input stays independently bound). Phase 1 classifies and validates
+every input before any bind — a rejection leaves the registry
+byte-identical; phase 2 builds one compound, deduplicating swept
+vertices/lateral generatrices/top edges across inputs through
+`vmap`/`lmap`/`emap`. Ordering follows upstream's
+`getReturnedShapes` reorder — `[top (dim−1), body (dim), laterals …]`
+per input grouped by ascending dimension, dim-0 emitting just the
+swept edge. The deep-debug find: solid consumers read `σ·axis` (shell
+flag times the stored Newell axis), so each generated face bakes its
+intended outward normal into `axis` — hole laterals traverse
+opposite, and the cap/each lateral quad rebuilds through the mirror
+traversal when the first fit lands anti-normal (required for `d<0`
+sweeps since a traversal's Newell is `û×d̂`). An earlier draft flipped
+`reversed` metadata and measured `49` for the `45`-volume hole prism;
+the axis convention is what the tests pin. Curved/partial/ellipse
+profiles, off-normal disk directions, solid/wire inputs, in-plane
+directions and the extrusion-meshing kwargs reject loudly.
+`api_occ_extrude_test.jl` pins output ordering, kernel geometry,
+hole-prism mass, the disk→cylinder path, dedup, 14-way atomicity
+snapshots and an end-to-end `generate(3)` tet mesh (81 assertions),
+plus an `occ_sweep_smoke` default check.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

@@ -134,6 +134,10 @@ get_closest_entities(x,y,z,dim_tags,n=1)=
     _with_model(m->Model._model_occ_get_closest_entities(m,x,y,z,dim_tags,n))
 get_distance(dim1,tag1,dim2,tag2)=
     _with_model(m->Model._model_occ_get_distance(m,dim1,tag1,dim2,tag2))
+extrude(dim_tags,dx,dy,dz;numElements=Int[],heights=Float64[],
+        recombine=false)=_with_model(
+    m->Model._model_occ_extrude(m,dim_tags,dx,dy,dz;
+        num_elements=numElements,heights=heights,recombine=recombine))
 
 module mesh
     import .....Model
