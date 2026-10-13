@@ -142,6 +142,22 @@ revolve(dim_tags,x,y,z,ax,ay,az,angle;numElements=Int[],
         heights=Float64[],recombine=false)=_with_model(
     m->Model._model_occ_revolve(m,dim_tags,x,y,z,ax,ay,az,angle;
         num_elements=numElements,heights=heights,recombine=recombine))
+fuse(objectDimTags,toolDimTags;tag=-1,removeObject=true,removeTool=true)=
+    _with_model(m->Model._model_occ_boolean(
+        m,:union,objectDimTags,toolDimTags,tag,removeObject,removeTool,
+        "OCC.fuse"))
+cut(objectDimTags,toolDimTags;tag=-1,removeObject=true,removeTool=true)=
+    _with_model(m->Model._model_occ_boolean(
+        m,:difference,objectDimTags,toolDimTags,tag,removeObject,removeTool,
+        "OCC.cut"))
+intersect(objectDimTags,toolDimTags;tag=-1,removeObject=true,removeTool=true)=
+    _with_model(m->Model._model_occ_boolean(
+        m,:intersection,objectDimTags,toolDimTags,tag,removeObject,
+        removeTool,"OCC.intersect"))
+fragment(objectDimTags,toolDimTags;tag=-1,removeObject=true,removeTool=true)=
+    _with_model(m->Model._model_occ_boolean(
+        m,:fragments,objectDimTags,toolDimTags,tag,removeObject,removeTool,
+        "OCC.fragment"))
 
 module mesh
     import .....Model

@@ -228,6 +228,26 @@ The current assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds a
+compact OCC Boolean check (`occ_boolean_smoke`: an overlap fuse
+with `outDimTags`/`outDimTagsMap` images, exact mass and
+centroid, a cut and a corner intersect, plus a loud unknown-
+entity rejection) — the
+`test/interfaces/api_occ_boolean_test.jl` file covers upstream
+`booleanOperator` semantics at volume-operand scope:
+`occBooleanPreserveNumbering` disposition (preserved operands
+keep tags, 1:1 replacements rebind, deleted operands unbind,
+fresh pieces allocate past the surviving maximum), per-input
+`outDimTagsMap` images (`[]` deleted / self unmodified / piece
+lists modified), `removeObject`/`removeTool` independence, fused
+mass `1.875` + centroid `(0.75)^3`, cut `0.875`/split `0.4+0.4`,
+intersect `0.125`, fragment cell images with a disjoint operand
+keeping its tag, objects-only and three-way fuses, explicit-tag
+single-piece binds and multi-piece rejection, empty results,
+`get_entities` sub-shape counts (9/21/14 on the notched box),
+registry-byte-identical atomicity under publication failure,
+post-sync queries and `generate(3)` on the all-plane union —
+while unknown/duplicate/non-volume operands and unsupported
+analytic sections reject loudly. The preceding increment adds a
 compact OCC revolve check (`occ_revolve_smoke`: a point's rim
 circle, a line's cylinder lateral with `[top, face, rim, rim]`
 ordering, an on-axis rectangle's cylinder-solid mass/centroid, a

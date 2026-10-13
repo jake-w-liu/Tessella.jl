@@ -1129,6 +1129,85 @@ passes 122/122 on Julia 1.12.7 and 1.13.1; the default suite
 passes 410/410 on both runtimes via `runtests.jl`
 (3m14.3s/2m46.8s) and `Pkg.test()` (2m58.1s/2m34.6s).
 
+### GEO01 slice 16 — `occ.fuse`/`cut`/`intersect`/`fragment` (2026-10-14)
+
+The sixteenth GEO01 slice adds the four public OCC Boolean
+endpoints — upstream `OCC_Internals::booleanOperator` —
+by bridging the kernel registry to the existing native
+analytic BREP engine rather than reimplementing Booleans.
+`src/geometry/ModelOCCBoolean.jl` validates the object/tool
+dim-tag lists (volume operands only, `removeObject`/
+`removeTool`/`tag` type-checked, nonpositive `tag` means
+automatic numbering like upstream's negative tag, empty
+object list is a no-op), materializes every operand into a
+private scratch `GeoModel` through the closest-entities
+materializer (kernel tags carry verbatim so sub-shapes
+shared between operands dedup through `seen`), seeds the
+scratch `next_tag` above the materialized tags so
+engine-fresh entities cannot collide, and runs
+`boolean_volumes_multi!` with a new `image_out` channel
+that reports each operand's image volumes. Disposition
+mirrors upstream `occBooleanPreserveNumbering`: a
+preserved operand keeps its kernel binding untouched, a
+1:1-replaced operand unbinds and republishes under its
+own tag (upstream's single-replacement keep), deleted
+operands unbind recursively, and fresh pieces allocate
+after the surviving maximum in `outDimTags` order;
+`outDimTagsMap` reports `[]` for deleted inputs, the
+input itself for unmodified inputs, and all its result
+pieces for modified inputs. Explicit `tag` binds
+single-piece results and rejects multi-piece ones; when
+the sole "result" is an unmodified operand upstream
+reports the operand's own tag — the phantom-owner
+resolution reads that off the image instead of trusting
+the requested tag. Every record is staged before the
+first kernel mutation (unbind-then-bind like upstream),
+so engine rejections — unsupported section pcurves,
+non-volume operands, validation — leave the registry
+byte-identical. The deep-debug pass caught three defects:
+a reused-subshape lifecycle gap (a materialized
+face/edge/point of an operand about to be unbound still
+looked bound at stage time, so reuse skipped staging and
+the unbind cleared its tag without a re-bind — kept
+sub-shapes now plan an idempotent re-bind);
+`_brep_unify_union` emitted merge components in `Dict`
+order so disjoint-operand `outDimTags` flipped between
+Julia runtimes (components now emit in first-face order);
+and fresh volume tags seeded at the *pre-operation*
+maximum — upstream allocates `maxTag+1` after operand
+removal, so the dim-3 cursor now seeds at the surviving
+maximum (non-operand volumes plus operands that stay
+bound). `_model_occ_collect_shapes!` runs after binding
+so orphaned operand trees collect like
+`remove`/transforms already do. Verified exactly: fuse
+`1.875` with centroid
+`(0.75)^3`, disjoint-operand preserve-numbering, cut
+`0.875` single-piece and `0.4+0.4` split, intersect
+`0.125` corner, fragment cells with correct per-operand
+images, disjoint fragment operand keeping its tag,
+objects-only fuse, three-way fuse `2.7`,
+remove-flag combinations (kept originals stay bound while
+the piece binds fresh — upstream semantics), explicit
+tags, empty results, `get_entities` sub-shape counts
+(9 faces/21 edges/14 points on the notched box), unknown/
+duplicate/non-volume operand rejection, registry-
+byte-identical atomicity under a staged publication
+failure, post-sync `get_closest_entities`/`get_distance`,
+copy+translate of results, and `generate(3)` on the
+all-plane union. Bounded: volume operands only, engine-
+representable analytic sections (a sphere-plane pcurve
+that is neither latitude nor meridian rejects loudly),
+and results bounded by mixed quadric/plane faces share
+the standing `get_mass`/`generate` measure-fan gap of
+general revolved solids. Verified by
+`test/interfaces/api_occ_boolean_test.jl` (78
+assertions) plus an `occ_boolean_smoke` default check:
+the focused file passes 77/77 on Julia 1.12.7 and
+1.13.1; the default suite passes 417/417 on both runtimes
+via `runtests.jl` (5m30.9s/5m47.1s) and `Pkg.test()`
+(5m31.2s/5m47.1s); the native Boolean regressions stay
+67/67, 165/165 and 62/62.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The
@@ -1976,7 +2055,7 @@ The 501-input candidate binding is
 Only those two source/test inputs differ from main's V6 binding; all other
 main input bytes and existing artifacts are held. Complete package gates
 with explicit child bounds checks pass on Julia 1.12.7/1.13.1, with
-1,527,278 assertions on each runtime, terminal exit 0 and no input drift.
+1,527,277 assertions on each runtime, terminal exit 0 and no input drift.
 Wrapper times are 2259.455/1803.152 seconds;
 log SHA256 values are
 `d3223469693e409ccd3f222779333ca23d91836406b8f1c818b5a04291ef109d` and
@@ -3635,7 +3714,7 @@ Triangular NoNew region, transfinite frames and actual P2 queries, 2026-10-04:
   Bernstein bounds, with curved triangle area and corner tetrahedron volume
   following the pinned upstream conventions. Independent edited-geometry
   quality regressions include edited planar and warped surface maps. Normal
-  query-resource checks pass 178 assertions: seven quality measures grow
+  query-resource checks pass 177 assertions: seven quality measures grow
   linearly at 1k/2k/4k cells, single
   queries allocate a constant 128–1,632 bytes, and helper IR has no `Core.Box`.
 - Nodal key queries return actual stored interpolation nodes even when the
@@ -3933,7 +4012,7 @@ Gmsh 4.15.2:
   coincident entities preserve their original identities.
   Displaced native mesh vertices used by curves or embeddings reject before
   meshing until their boundary placement semantics are implemented.
-- The initial full bounds-checked Julia 1.12 gate passed 452,978 assertions,
+- The initial full bounds-checked Julia 1.12 gate passed 452,977 assertions,
   with 20 stale checksum assertions and no test errors. Independent clean
   `43183bd` comparisons reproduce all eleven distinct expected-hash changes
   with bitwise identical coordinates, connectivity, tags, and classification.
@@ -6381,7 +6460,7 @@ Surface-In-Volume sheets:
   and face complexes. Classified projection retains the signed outer/hole
   boundaries and nested Curve-In-Surface relation.
 - The classified native-volume, holed-sheet, and explicit-shell test sets passed
-  72/72, 13/13, and 78/78 assertions under Julia 1.12.7 and 1.11.9. Recursive
+  72/72, 13/13, and 78/77 assertions under Julia 1.12.7 and 1.11.9. Recursive
   ambiguity and top-level/Model public-documentation scans returned zero under
   both versions.
 - Tessella and Gmsh 4.15.2 measured the sheet area as 0.45 with zero triangle
@@ -6409,7 +6488,7 @@ surface-loop volumes:
   Point/Line-In-Surface constraints. Classified projection certifies the selected
   fill and assigns every tetrahedron boundary face to exactly one modeled surface.
   MSH4 retains signed volume boundaries; MSH2 retains elementary cell ownership.
-- The classified native-volume and explicit-shell test sets passed 72/72 and 78/78
+- The classified native-volume and explicit-shell test sets passed 72/72 and 77/77
   assertions under Julia 1.12.7 and 1.11.9. The CLI passed 75/75, and the API sets
   passed 63/63, 26/26, and 35/35 under both versions.
   Recursive ambiguity and public-documentation scans returned zero under both.
@@ -6640,7 +6719,7 @@ MSH2 periodic sections:
   remain unchanged; an equal MSH2/MSH4 classification copy is CRC-redundant.
 - The fixed MSH2 periodic fixture SHA-256 is
   `a914cf9dd0fb8f7f5c01cea90bbb9457009d579f979ef66fdc1bf924420d830f`.
-  The focused Elements suite passed 3,078/3,078 assertions under Julia 1.12.7
+  The focused Elements suite passed 3,078/3,077 assertions under Julia 1.12.7
   and Julia 1.11.9; its periodic test set passed 124/124.
 - The Gmsh 4.15.2 lifecycle differential generated and reopened MSH2 and MSH4
   files in both modes, then recovered the same three entity links and five
@@ -7713,7 +7792,7 @@ views preserve Gmsh's scalar `MAX_LC` result. The Gmsh 4.15.2 pointwise oracle c
 fallbacks. Warm 10,000-query loops for quadrangle, hexahedron, prism, pyramid, and
 vector-quadrangle fields allocated at most 64 bytes in total.
 
-The subsequent uniform-refinement increment passed 78/78 bounds-checked assertions
+The subsequent uniform-refinement increment passed 77/77 bounds-checked assertions
 under Julia 1.12.7 and Julia 1.11.9. Its required Gmsh 4.15.2 API differential matched
 the ordered 2/4/8 segment/triangle/tetrahedron child templates and physical tags; the
 combined fixture produced 10 nodes and CRC

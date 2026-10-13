@@ -852,6 +852,7 @@ include("ModelOCCMeasures.jl")
 include("ModelOCCClosest.jl")
 include("ModelOCCSweep.jl")
 include("ModelBoolean.jl")
+include("ModelOCCBoolean.jl")
 
 @inline function _model_periodic_entity_label(dim::Int)
     dim==1 && return "Curve"
@@ -2086,12 +2087,15 @@ the operand is removed; all other pieces get fresh tags after the surviving
 maximum. `remove_object`/`remove_tool` are the `Delete;` markers of each
 operand group. With an explicit `tag`, a multi-piece result is an error (one
 tag cannot bind several volumes — OCC reports the same). Returns the output
-volume tags in piece order, matching Gmsh's `outDimTags`.
+volume tags in piece order, matching Gmsh's `outDimTags`. When `image_out`
+is a `Vector{Vector{Int}}` it is resized to the operand count and filled with
+each operand's result-tag image — the `outDimTagsMap` equivalent.
 """
 function boolean_volumes_multi!(m::GeoModel,op::Symbol,
         objects::AbstractVector{<:Integer},tools::AbstractVector{<:Integer};
         tag::Integer=0,remove_object::Bool=true,remove_tool::Bool=true,
-        caller::AbstractString="boolean_volumes_multi!")
+        caller::AbstractString="boolean_volumes_multi!",
+        image_out::Union{Nothing,Vector{Vector{Int}}}=nothing)
     op in (:union,:intersection,:difference,:fragments) || throw(ArgumentError(
         "$caller: op must be :union, :intersection, :difference, or :fragments"))
     remove_object isa Bool && remove_tool isa Bool || throw(ArgumentError(
@@ -2120,6 +2124,12 @@ function boolean_volumes_multi!(m::GeoModel,op::Symbol,
         for i in 1:N
             rem=i<=nobj ? remove_object : remove_tool
             rem && _remove_volume_entity!(m,tags[i])
+        end
+        if image_out!==nothing
+            resize!(image_out,N)
+            for i in 1:N
+                image_out[i]=Int[]
+            end
         end
         return Int[]
     end
@@ -2185,6 +2195,20 @@ function boolean_volumes_multi!(m::GeoModel,op::Symbol,
             else
                 _bind_boolean_piece!(m,requested,op,tags,meshes,p,caller)
             end
+            if image_out!==nothing
+                resize!(image_out,N)
+                for i in 1:N
+                    imgs=image[i]
+                    if length(imgs)==1 && pieces[imgs[1]].pseudo==i &&
+                            !unbind[i]
+                        image_out[i]=Int[tags[i]]
+                    elseif isempty(imgs)
+                        image_out[i]=Int[]
+                    else
+                        image_out[i]=Int[requested]
+                    end
+                end
+            end
             return [requested]
         end
         for i in 1:N
@@ -2244,6 +2268,12 @@ function boolean_volumes_multi!(m::GeoModel,op::Symbol,
                 for t in shared[2:end]
                     m.boolean_components[t]=primary
                 end
+            end
+        end
+        if image_out!==nothing
+            resize!(image_out,N)
+            for i in 1:N
+                image_out[i]=Int[out[pi] for pi in image[i]]
             end
         end
         return out

@@ -2078,7 +2078,9 @@ function _brep_unify_union(kept,tol,caller;same_uses::Bool=false)
         for mi in mem
             push!(get!(Vector{Int},comps,findr(mi)),mi)
         end
-        for comp in values(comps)
+        # components emit in first-face order — `Dict` iteration order
+        # would make result order depend on the runtime's hashing
+        for comp in sort!(collect(values(comps));by=minimum)
             if length(comp)==1
                 push!(out,kept[comp[1]])
             else

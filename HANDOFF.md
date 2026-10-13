@@ -1106,6 +1106,54 @@ plus an `occ_revolve_smoke` default check. Verified: focused
 runtimes via `runtests.jl` (3m14.3s/2m46.8s) and `Pkg.test()`
 (2m58.1s/2m34.6s).
 
+The sixteenth GEO01 slice followed: `occ.fuse`, `occ.cut`,
+`occ.intersect` and `occ.fragment` — upstream
+`OCC_Internals::booleanOperator` — in the new
+`src/geometry/ModelOCCBoolean.jl`. Rather than reimplementing
+Booleans the bridge materializes kernel volume operands into a
+private scratch `GeoModel` through the slice-12 closest-entities
+materializer (kernel tags carry verbatim so operands sharing
+sub-shapes dedup through `seen`), runs the existing
+`boolean_volumes_multi!` engine there — which gained an
+`image_out` channel reporting each operand's image volumes — and
+publishes the resulting boundary trees back into the pending
+registry. Disposition mirrors upstream
+`occBooleanPreserveNumbering`: preserved operands keep their
+bindings, 1:1-replaced operands unbind and republish under their
+own tag, deleted operands unbind recursively, fresh pieces
+allocate after the surviving maximum in `outDimTags` order, and
+`outDimTagsMap` reports `[]`/self/pieces per input. Explicit
+`tag` binds single-piece results (rejects multi-piece) and the
+"unmodified sole result" phantom resolves its owning operand
+through the image. Everything stages before the first kernel
+mutation, so engine rejections leave the registry byte-identical;
+`_model_occ_collect_shapes!` runs after binding like
+`remove`/transforms. The deep-debug pass caught three defects:
+a reused sub-shape of an operand about to be unbound still
+looked bound at stage time, so the unbind cleared its tag
+without a re-bind — kept sub-shapes now plan an idempotent
+re-bind of their existing record; `_brep_unify_union` emitted
+merge components in `Dict` order so disjoint-operand
+`outDimTags` flipped between runtimes (now first-face order);
+and fresh volume tags seeded at the pre-operation maximum —
+upstream allocates `maxTag+1` after operand removal, so the
+dim-3 cursor now seeds at the surviving maximum. Exact
+oracles: fuse `1.875`
+with centroid `(0.75)^3`, cut `0.875`/`0.4+0.4` split, intersect
+`0.125`, fragment cell images, disjoint preserve-numbering,
+remove-flag combinations, `get_entities` sub-shape counts
+(9/21/14), transforms and post-sync queries on results, and
+`generate(3)` on the all-plane union. Bounded to volume operands
+and engine-representable analytic sections (non-latitude/
+meridian sphere pcurves reject loudly); quadric-boundary results
+share the standing `get_mass`/`generate` measure-fan gap.
+`api_occ_boolean_test.jl` (77 assertions) plus an
+`occ_boolean_smoke` default check. Verified: focused 77/77 on
+Julia 1.12.7 and 1.13.1; default suite 417/417 on both runtimes
+via `runtests.jl` (5m30.9s/5m47.1s) and `Pkg.test()`
+(5m31.2s/5m47.1s); native Boolean regressions 67/67,
+165/165 and 62/62.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop
