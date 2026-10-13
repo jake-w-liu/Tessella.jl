@@ -228,19 +228,41 @@ The current assertion bodies ran onJulia1.12.7/1.13.1.
 Cold elapsed times include about30/25 s of precompilation.
 These ordinary invocations verify the automatic runner in each package test
 environment on the same final Source. The latest increment adds a
-compact OCC sweep check (`occ_sweep_smoke`: a point's swept edge, a
-line's ruled face, a rectangle's `[cap, solid, laterals]` ordering
-with mass/centroid, a disk's cylinder and two loud rejections) —
-the `test/interfaces/api_occ_extrude_test.jl` file covers upstream
-`extrude` semantics: per-input `[top (dim−1), body (dim), laterals]`
-ordering grouped by ascending dimension, dim-0's edge-only output,
-kernel-side translated geometry, prism mass/centroid/bbox, the
-hole-prism's subtracted cavity mass in both sweep directions, the
-disk→cylinder cap identification, shared-generatrix deduplication
-across inputs, 14-way phase-1 rejection atomicity snapshots and an
-end-to-end `generate(3)` tet mesh — while curved profiles, partial
-circles, true ellipses, off-normal disk directions, solid/wire
-inputs, in-plane directions and the extrusion-meshing kwargs reject
+compact OCC revolve check (`occ_revolve_smoke`: a point's rim
+circle, a line's cylinder lateral with `[top, face, rim, rim]`
+ordering, an on-axis rectangle's cylinder-solid mass/centroid, a
+disk's torus and two loud rejections) — the
+`test/interfaces/api_occ_revolve_test.jl` file covers upstream
+`revolve` semantics at the closed `2·Pi` angle: rim-circle records
+bound to source vertices, cylinder/cone lateral records with the
+source edge as seam and canonical `[rim_hi, seam, rim_lo, seam]`
+wires, annulus/disk plane faces for radial profiles, the
+`[top, body, laterals]` ordering grouped by ascending dimension,
+compact `cylinder`/`cone` solid encodings plus the `:revolved`
+Pappus record (mass `2π·ρ̄·A`, axial centroid), rim-circle and
+meridian-face deduplication counts, shell `σ·axis` outward checks,
+negative-angle/translated/tilted axes, disk→torus output shape,
+descending-child-order seam `lin2d` pcurve endpoint values,
+18-way phase-1 rejection atomicity snapshots (incl. a mixed
+valid+invalid call) and an end-to-end `generate(3)` mesh of a
+revolved cylinder solid — while partial angles, non-axial or
+axis-crossing profiles, on-axis inputs, holed faces, non-line
+boundaries, spindle/axis-parallel disks, solid inputs and the
+revolve-meshing kwargs reject loudly. The preceding increment adds
+a compact OCC sweep check (`occ_sweep_smoke`: a point's swept edge,
+a line's ruled face, a rectangle's `[cap, solid, laterals]`
+ordering with mass/centroid, a disk's cylinder and two loud
+rejections) — the `test/interfaces/api_occ_extrude_test.jl` file
+covers upstream `extrude` semantics: per-input
+`[top (dim−1), body (dim), laterals]` ordering grouped by ascending
+dimension, dim-0's edge-only output, kernel-side translated
+geometry, prism mass/centroid/bbox, the hole-prism's subtracted
+cavity mass in both sweep directions, the disk→cylinder cap
+identification, shared-generatrix deduplication across inputs,
+14-way phase-1 rejection atomicity snapshots and an end-to-end
+`generate(3)` tet mesh — while curved profiles, partial circles,
+true ellipses, off-normal disk directions, solid/wire inputs,
+in-plane directions and the extrusion-meshing kwargs reject
 loudly. The preceding increment adds a
 compact OCC closest-entity check (`occ_closest_smoke`: an `add_box`/
 `add_sphere` pair's sorted distances and closest points, the

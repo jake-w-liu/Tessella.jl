@@ -1073,6 +1073,62 @@ ordering, kernel-side geometry pins, hole mass, disk cylinder,
 shared-generatrix dedup, 14-way atomicity snapshots and a mesh
 testset) plus an `occ_sweep_smoke` default check.
 
+### GEO01 slice 15 — `occ.revolve` (2026-10-14)
+
+The fifteenth GEO01 slice adds
+`model.occ.revolve(dimTags,x,y,z,ax,ay,az,angle;
+numElements=[],heights=[],recombine=false)` — upstream
+`OCC_Internals::revolve`'s `BRepPrimAPI_MakeRevol` rotational sweep,
+in the same `src/geometry/ModelOCCSweep.jl` sweep engine as
+`extrude`. The bounded coverage handles full-turn (`angle==2·Pi`)
+axial-plane profiles exactly: points sweep rim circles, line edges
+sweep cylinder or cone lateral records (radial lines sweep
+annulus/disk plane faces), single-wire all-line plane faces in an
+axial plane sweep revolved solids, and a full-circle disk pierced by
+an in-plane axis reuses the compact `add_torus` publication. At the
+closed angle the rotated "top" coincides with the profile, so the
+source entity answers as `top` like upstream's `Copy=false` sweep;
+laterals are the sweeps of the profile's own sub-entities — a line's
+laterals are its endpoint rim circles, a face's are its boundary
+edges' swept surfaces — emitted `[top, body, laterals…]` grouped by
+ascending input dimension. Rim circles (bound to the source
+vertices, since the 2·Pi return coincides) and meridian faces
+deduplicate through `rmap`/`fmap`, so a rectangle profile produces
+exactly four rim edges shared by its four swept faces. Revolved
+solids carry compact `cylinder`/`cone` encodings when the boundary
+matches a primitive layout — those register `m.cylinders`/`m.cones`
+and mesh through the analytic tessellation — and otherwise a new
+`:revolved` primitive record holding the profile's Pappus integrals
+(`V=2π∫∫ρdA`, centroid on-axis at the ρ-weighted axial mean) so
+`get_mass`/`get_center_of_mass` stay closed-form on any profile.
+Phase 1 classifies every input before any bind: partial angles,
+non-axial-plane profiles (per-endpoint radial directions checked),
+axis-crossing profiles, on-axis points/lines, hole-bounded faces,
+non-line boundaries other than the disk rim, spindle- and
+axis-parallel disks, solid inputs, non-finite/zero axes and the
+meshing options all reject with the registry byte-identical
+(18-way atomicity pins, including a mixed valid+invalid call).
+Negative angles fold into the flipped axis (revolve by −a about n̂ is
+a about −n̂). Measured exactly: cylinder face `2πρh`, annulus
+`π(r²−r²)`, cone face `π(r1+r2)·slant`, cylinder solid `πr²h`,
+cone solid `πr²h/3`, annular solid `2π·ρ̄·A`, torus `2π²r1r2²`;
+translated and tilted axes verified. The deep-debug pass caught a
+descending-profile seam-pcurve defect: the `lin2d` v-origin carried
+the slant length in the unused u-slot, so a `hi->lo` child-ordered
+source edge's pcurve ran `v:0->-len` instead of `len->0` — fixed to
+`(0.0,len)` and pinned by evaluating the seam pcurve's endpoints on
+a descending cone fixture. General `:revolved` solids and
+torus solids do not volume-mesh — same standing gap as
+`add_torus` (quadric surfaces have no CDT path yet). Verified by
+`test/interfaces/api_occ_revolve_test.jl` (122 assertions incl.
+ordering, kernel record pins, dedup counts, seam-pcurve endpoint
+values, Pappus mass/centroid, 18-way atomicity and a cylinder-solid
+mesh testset) plus an
+`occ_revolve_smoke` default check. Verified: the focused file
+passes 122/122 on Julia 1.12.7 and 1.13.1; the default suite
+passes 410/410 on both runtimes via `runtests.jl`
+(3m14.3s/2m46.8s) and `Pkg.test()` (2m58.1s/2m34.6s).
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

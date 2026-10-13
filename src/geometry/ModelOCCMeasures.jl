@@ -346,6 +346,8 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
             n=_occ_dir(r.axis)
             return π*r.height*q/3,
                 _occ3_add(r.center,_occ3_scale(n,r.height*frac))
+        elseif g.primitive.occ===:revolved
+            return r.V,_occ3_add(r.point,_occ3_scale(r.axis,r.h_c))
         end
         throw(ErrorException(
             "OCC.get_mass: unsupported primitive kind $(g.primitive.occ)"))

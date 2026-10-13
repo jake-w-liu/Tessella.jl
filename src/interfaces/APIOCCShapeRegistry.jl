@@ -138,6 +138,10 @@ extrude(dim_tags,dx,dy,dz;numElements=Int[],heights=Float64[],
         recombine=false)=_with_model(
     m->Model._model_occ_extrude(m,dim_tags,dx,dy,dz;
         num_elements=numElements,heights=heights,recombine=recombine))
+revolve(dim_tags,x,y,z,ax,ay,az,angle;numElements=Int[],
+        heights=Float64[],recombine=false)=_with_model(
+    m->Model._model_occ_revolve(m,dim_tags,x,y,z,ax,ay,az,angle;
+        num_elements=numElements,heights=heights,recombine=recombine))
 
 module mesh
     import .....Model
