@@ -26,7 +26,7 @@ function _model_box_plane_geometry(m,tag,origin,extents,face::Int)
     for loop in m.surfaces[tag],signed_curve in m.loops[loop]
         curve=abs(signed_curve)
         edge,t0,t1=_brep_edge_curve(m,curve)
-        pc=_brep_synth_pcurve(geometry,edge,t0,t1)
+        pc=_brep_synth_pcurve(geometry,edge,t0,t1,"add_box!")
         geometry.pcurves[curve]=(fwd=pc,rev=nothing)
     end
     return geometry

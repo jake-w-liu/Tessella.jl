@@ -713,7 +713,14 @@ end
 
 # `ElCLib2d` pcurve eval — the `Geom2d_Line`/`Geom2d_Circle` `D0`/`D1`
 # bodies used by `Adaptor2d_Curve2d` on a stored face pcurve.
+# `neg2d` pcurve wrapper — a left-handed uv trace (e.g. a boundary circle
+# whose axis opposes the synthesized face's) stored as its right-handed
+# record evaluated at −t. Every parametric result mirrors back.
+_occ_pcurve_unneg(pc)=
+    hasproperty(pc,:neg2d) ? (pc.neg2d[1],true) : (pc,false)
+
 function _occ_pcurve_d0(pc,t::Float64)
+    hasproperty(pc,:neg2d) && return _occ_pcurve_d0(pc.neg2d[1],-t)
     if hasproperty(pc,:lin2d)
         o,d=pc.lin2d
         return _occ_lin2d_eval(o,d,t)
@@ -725,6 +732,10 @@ function _occ_pcurve_d0(pc,t::Float64)
     return _occ_ellips2d_eval(o,x,a,b,t)
 end
 function _occ_pcurve_d1(pc,t::Float64)
+    if hasproperty(pc,:neg2d)
+        uv,d=_occ_pcurve_d1(pc.neg2d[1],-t)
+        return uv,(-d[1],-d[2])
+    end
     if hasproperty(pc,:lin2d)
         o,d=pc.lin2d
         return _occ_lin2d_eval(o,d,t), d
@@ -753,6 +764,10 @@ end
 # before the location add, exactly as `CircleD2`/`EllipseD2` build `V2`
 # then `P`.
 function _occ_pcurve_d2(pc,t::Float64)
+    if hasproperty(pc,:neg2d)
+        p,d1,d2=_occ_pcurve_d2(pc.neg2d[1],-t)
+        return p,(-d1[1],-d1[2]),d2
+    end
     if hasproperty(pc,:lin2d)
         o,d=pc.lin2d
         return _occ_lin2d_eval(o,d,t), d, (0.0,0.0)
@@ -2411,7 +2426,9 @@ end
     v<0.0 ? prevfloat(v)-v : nextfloat(0.0)
 
 # ── pcurve adaptor helpers ───────────────────────────────────────────────────
-_occ_pcurve_kind(pc)=hasproperty(pc,:lin2d) ? :lin2d :
+_occ_pcurve_kind(pc)=hasproperty(pc,:neg2d) ?
+    _occ_pcurve_kind(pc.neg2d[1]) :
+    hasproperty(pc,:lin2d) ? :lin2d :
     hasproperty(pc,:circ2d) ? :circ2d :
     hasproperty(pc,:ellips2d) ? :ellips2d :
     throw(ArgumentError("_occ_pcurve_kind: unsupported pcurve record"))
@@ -2421,6 +2438,8 @@ _occ_pcurve_kind(pc)=hasproperty(pc,:lin2d) ? :lin2d :
 # ρmin = b²/a (at the major-axis ends): the largest angular step a chord
 # Ruv can subtend, keeping the CheckOn acceptance permissive.
 function _occ_pcurve_resolution(pc,ruv)
+    hasproperty(pc,:neg2d) &&
+        return _occ_pcurve_resolution(pc.neg2d[1],ruv)
     _occ_pcurve_kind(pc)===:lin2d && return ruv
     r=_occ_pcurve_kind(pc)===:circ2d ? pc.circ2d[3] :
         let (a,b)=(pc.ellips2d[3],pc.ellips2d[4])
@@ -3457,7 +3476,35 @@ end
 # pcurves: lin×lin and lin×circ run through `IntConicConic`; circ×lin flips
 # the argument order and sets `ReversedParameters`. Returns (done, points,
 # segments); `nothing`-pcurve kinds fail loudly.
+# Mirror helpers for `neg2d` pcurves inside the 2-D intersector: the
+# wrapped record runs over the reflected domain [−lpar,−fpar]; reported
+# curve params reflect back and every transition flips with the reversed
+# traversal (:in↔:out, :head↔:end, tangency situation/opposition).
+_occ_neg2d_pos(pos)=pos===:head ? :end : pos===:end ? :head : pos
+_occ_neg2d_tr(tr)=tr===:in ? :out : tr===:out ? :in : tr
+_occ_neg2d_situ(s)=s===:inside ? :outside : s===:outside ? :inside : s
+_occ_neg2d_itr(t)=(tan=t.tan,pos=_occ_neg2d_pos(t.pos),
+                   tr=_occ_neg2d_tr(t.tr),situ=_occ_neg2d_situ(t.situ),
+                   oppos=!t.oppos)
+_occ_neg2d_ipt(p)=(pt=p.pt,p1=p.p1,p2=-p.p2,
+                   t1=_occ_neg2d_itr(p.t1),t2=_occ_neg2d_itr(p.t2))
+# A coincident segment mirrors each endpoint in place — `first`/`last`
+# swap with the reflected parameterisation, keeping a real point in `p1`
+# for the classifier's representative sample.
+_occ_neg2d_iseg(s)=(p1=_occ_neg2d_ipt(s.p1),p2=_occ_neg2d_ipt(s.p2),
+                    first=s.last,last=s.first,oppos=!s.oppos)
+_occ_neg2d_idom(D)=(fpt=D.lpt,fpar=-D.lpar,ftol=D.ltol,hasf=D.hasl,
+                    lpt=D.fpt,lpar=-D.fpar,ltol=D.ftol,hasl=D.hasf,
+                    e0=-D.ep,ep=-D.e0,hasper=D.hasper)
+
 function _occ_ginter(L,DL,pc,DE,TolConf,Tol)
+    if hasproperty(pc,:neg2d)
+        done,lpnt,lseg=_occ_ginter(L,DL,pc.neg2d[1],
+                                 _occ_neg2d_idom(DE),TolConf,Tol)
+        lpnt=Any[_occ_neg2d_ipt(p) for p in lpnt]
+        lseg=Any[_occ_neg2d_iseg(s) for s in lseg]
+        return done,lpnt,lseg
+    end
     kind=_occ_pcurve_kind(pc)
     if kind===:lin2d
         o,d=pc.lin2d
@@ -3586,6 +3633,11 @@ end
 # elementary-curve path of `GExtPC::Perform`: `ExtPElC2d` candidates filtered
 # by `[uinf−tolu, usup+tolu]` after `InPeriod` mapping for periodic curves.
 function _occ_extpc2d(P,pc,uinf,usup)
+    if hasproperty(pc,:neg2d)
+        done,res=_occ_extpc2d(P,pc.neg2d[1],-usup,-uinf)
+        return done,Tuple{Float64,NTuple{2,Float64},Float64}[
+            (-U,pv,sd) for (U,pv,sd) in res]
+    end
     kind=_occ_pcurve_kind(pc)
     tolu=_occ_pcurve_resolution(pc,_OCC_CONFUSION)
     if kind===:lin2d
@@ -3990,6 +4042,8 @@ end
 # circle box = endpoints plus the four coordinate extrema that fall inside
 # `[t1z, t1z + (t2−t1)]` with `t1z` the period-adjusted first parameter.
 function _occ_bndlib_pcurve_box(pc,t1,t2)
+    hasproperty(pc,:neg2d) &&
+        return _occ_bndlib_pcurve_box(pc.neg2d[1],-t2,-t1)
     pts=NTuple{2,Float64}[]
     push!(pts,_occ_pcurve_value(pc,t1),_occ_pcurve_value(pc,t2))
     kind=_occ_pcurve_kind(pc)

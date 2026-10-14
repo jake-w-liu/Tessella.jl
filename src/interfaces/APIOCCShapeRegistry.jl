@@ -158,6 +158,8 @@ fragment(objectDimTags,toolDimTags;tag=-1,removeObject=true,removeTool=true)=
     _with_model(m->Model._model_occ_boolean(
         m,:fragments,objectDimTags,toolDimTags,tag,removeObject,removeTool,
         "OCC.fragment"))
+remove_all_duplicates()=_with_model(
+    m->Model._model_occ_remove_all_duplicates(m,"OCC.removeAllDuplicates"))
 
 module mesh
     import .....Model

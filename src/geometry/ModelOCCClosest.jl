@@ -20,13 +20,46 @@
 # itself for dims 0:3, member edges for a wire, member faces for a shell.
 # Re-enumerating a seen shape therefore reports units that pair queries
 # (e.g. a wire against one of its own edges) still need.
+# `snap` (when given) is a per-materialization list of canonical point
+# coordinates: every materialized vertex stores the first coords seen in
+# its near-coincidence cluster, so kernel vertices that differ only by
+# evaluation dust (~ulp, e.g. engine split points recomputed through a
+# different arithmetic path) become bitwise-equal in the scratch model.
+# The engine's exact `orient3` coplanarity checks then hold; the kernel
+# records themselves keep their own coords. Coordinates closer than the
+# dust bound are treated as coincident — distinct points within that
+# distance are not representable faithfully anyway.
+# Canonicalize the last mantissa bit: section arithmetic can leave a
+# corner a few ulps off the grid value its siblings store exactly, and a
+# singleton dust vertex has no coincident partner to canonicalize it.
+# Fifteen-significant-digit rounding collapses that dust while moving
+# any coordinate by well under the geometric coincidence tolerance.
+_model_occ_snap_coord(c::Float64)=round(c,sigdigits=15)
+
+function _model_occ_snap_point(canon::Vector{NTuple{3,Float64}},
+                               p::NTuple{3,Float64})
+    p=_model_occ_snap_coord.(p)
+    atol=1e-11*max(1.0,abs(p[1]),abs(p[2]),abs(p[3]))
+    for c in canon
+        (abs(p[1]-c[1])<=atol && abs(p[2]-c[2])<=atol &&
+         abs(p[3]-c[3])<=atol) && return c
+    end
+    push!(canon,p)
+    return p
+end
+
 function _model_occ_dist_materialize!(sm::GeoModel,kernel,dim,id,
-                                      seen::Set{UInt64},caller)
+                                      seen::Set{UInt64},caller;
+                                      snap::Union{Nothing,
+                                          Vector{NTuple{3,Float64}}}=nothing,
+                                      untyped_defaults::Bool=false)
     dim==0 && begin
         tag=_model_occ_shape_tag(kernel,id,caller)
         id in seen || begin
             push!(seen,id)
-            sm.points[tag]=kernel.shapes[id].geometry.point
+            p=kernel.shapes[id].geometry.point
+            snap===nothing || (p=_model_occ_snap_point(snap,p))
+            sm.points[tag]=p
         end
         return [(0,tag)]
     end
@@ -38,10 +71,18 @@ function _model_occ_dist_materialize!(sm::GeoModel,kernel,dim,id,
             a,b=shape.children
             sm.curves[tag]=(_model_occ_shape_tag(kernel,a,caller),
                             _model_occ_shape_tag(kernel,b,caller))
-            sm.curve_types[tag]=shape.geometry.kind
-            sm.curve_geometry[tag]=shape.geometry.geometry
-            _model_occ_dist_materialize!(sm,kernel,0,a,seen,caller)
-            _model_occ_dist_materialize!(sm,kernel,0,b,seen,caller)
+            # `untyped_defaults` leaves :line curves on the implicit
+            # default kind like native entities (callers that evaluate
+            # sections through the untyped path take it); other kinds
+            # always carry their records.
+            (untyped_defaults && shape.geometry.kind===:line) || begin
+                sm.curve_types[tag]=shape.geometry.kind
+                sm.curve_geometry[tag]=shape.geometry.geometry
+            end
+            _model_occ_dist_materialize!(sm,kernel,0,a,seen,caller;
+                snap=snap,untyped_defaults=untyped_defaults)
+            _model_occ_dist_materialize!(sm,kernel,0,b,seen,caller;
+                snap=snap,untyped_defaults=untyped_defaults)
         end
         return [(1,tag)]
     end
@@ -49,7 +90,8 @@ function _model_occ_dist_materialize!(sm::GeoModel,kernel,dim,id,
         units=Tuple{Int,Int}[]
         for (edge_id,_) in kernel.shapes[id].geometry.uses
             append!(units,_model_occ_dist_materialize!(
-                sm,kernel,1,edge_id,seen,caller))
+                sm,kernel,1,edge_id,seen,caller;
+                snap=snap,untyped_defaults=untyped_defaults))
         end
         push!(seen,id)
         return units
@@ -63,7 +105,8 @@ function _model_occ_dist_materialize!(sm::GeoModel,kernel,dim,id,
             # `sm.curves` endpoint pairs.
             for wire_id in shape.children, (edge_id,_) in
                 kernel.shapes[wire_id].geometry.uses
-                _model_occ_dist_materialize!(sm,kernel,1,edge_id,seen,caller)
+                _model_occ_dist_materialize!(sm,kernel,1,edge_id,seen,
+                    caller;snap=snap,untyped_defaults=untyped_defaults)
             end
             loops=Int[]
             for (index,wire_id) in enumerate(shape.children)
@@ -78,8 +121,10 @@ function _model_occ_dist_materialize!(sm::GeoModel,kernel,dim,id,
                 push!(loops,loop)
             end
             sm.surfaces[tag]=loops
-            sm.surface_types[tag]=shape.geometry.kind
-            sm.surface_geometry[tag]=shape.geometry.geometry
+            (untyped_defaults && shape.geometry.kind===:plane) || begin
+                sm.surface_types[tag]=shape.geometry.kind
+                sm.surface_geometry[tag]=shape.geometry.geometry
+            end
         end
         return [(2,tag)]
     end
@@ -87,7 +132,8 @@ function _model_occ_dist_materialize!(sm::GeoModel,kernel,dim,id,
         units=Tuple{Int,Int}[]
         for (face_id,_) in kernel.shapes[id].geometry.uses
             append!(units,_model_occ_dist_materialize!(
-                sm,kernel,2,face_id,seen,caller))
+                sm,kernel,2,face_id,seen,caller;
+                snap=snap,untyped_defaults=untyped_defaults))
         end
         push!(seen,id)
         return units
@@ -104,7 +150,8 @@ function _model_occ_dist_materialize!(sm::GeoModel,kernel,dim,id,
                        for (fid,reverse) in
                            kernel.shapes[shell_id].geometry.uses]
             for (fid,_) in kernel.shapes[shell_id].geometry.uses
-                _model_occ_dist_materialize!(sm,kernel,2,fid,seen,caller)
+                _model_occ_dist_materialize!(sm,kernel,2,fid,seen,caller;
+                    snap=snap,untyped_defaults=untyped_defaults)
             end
             loop=_alloc_surface_loop_tag(sm,0,caller)
             sm.surface_loops[loop]=signed

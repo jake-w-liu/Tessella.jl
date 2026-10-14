@@ -2901,6 +2901,18 @@ function _surface_curve_parameters(m::GeoModel,forced,curve::Int,signed::Int,
         t1-u<=tolerance && return t1
         return u
     end
+    # A closed edge (same vertex at both ends) has no neighbor edge to emit a
+    # dropped endpoint inside its own wire, but on periodic surfaces the two
+    # endpoint parameters carry DIFFERENT pcurve representatives (u=0 vs
+    # u=2π). Keep the drop-end convention against the stored list and supply
+    # the traversal-entry representative explicitly: fwd enters at t0, rev at
+    # t1. Stored lists that already carry t1 reuse it as the entry.
+    if m.curves[curve][1]==m.curves[curve][2]
+        signed>0 && return [emit(u) for u in parameters]
+        rev_list=!isempty(parameters) && t1-parameters[end]<=tolerance ?
+            @view(parameters[2:end]) : vcat(@view(parameters[2:end]),t1)
+        return [emit(u) for u in Iterators.reverse(rev_list)]
+    end
     return signed>0 ? [emit(u) for u in @view(parameters[1:end-1])] :
                       [emit(u) for u in Iterators.reverse(@view(parameters[2:end]))]
 end
@@ -8927,6 +8939,23 @@ function _volume_boundary_faces(mesh::MixedMesh)
     return faces
 end
 
+# Per-face meshing inside a volume PLC: planar (and ruled/tric) faces go
+# through `mesh_model_surface`; OCC curved faces (typed Cylinder/Sphere/Cone/
+# Torus records carrying pcurves) tessellate their (u,v) domain instead —
+# `_model_occ_curved_surface_mesh` shares the planar path's boundary curve
+# discretization, so adjacent faces still weld shared-edge nodes bitwise.
+_model_occ_curved_surface(m::GeoModel,surface::Int) =
+    (sg=get(m.surface_geometry,surface,nothing);
+     sg!==nothing && get(sg,:occ,nothing) in
+                    (:cylinder,:sphere,:cone,:torus))
+
+function _model_volume_surface_mesh(m::GeoModel,surface::Int,
+                                    caller::AbstractString;kwargs...)
+    _model_occ_curved_surface(m,surface) &&
+        return _model_occ_curved_surface_mesh(m,surface,caller)
+    return mesh_model_surface(m,surface;kwargs...)
+end
+
 function _model_explicit_volume_geometry(
     m::GeoModel,t::Int,caller::AbstractString;
     size_field::Union{Nothing,AbstractSizeField}=nothing,
@@ -8944,8 +8973,9 @@ function _model_explicit_volume_geometry(
         get!(local_meshes,surface) do
             produced=_mesh_input isa _ModelMeshAuthority ?
                 _model_mesh_product(_mesh_input,2,surface;caller,producer_order=true) : nothing
-            produced===nothing ? mesh_model_surface(m,surface;size_field=size_field,
-                _mesh_input,_mesh1d_options) : produced
+            produced===nothing ?
+                _model_volume_surface_mesh(m,surface,caller;size_field=size_field,
+                    _mesh_input,_mesh1d_options) : produced
         end
     end
     for constraint in _model_volume_periodic_surface_constraints(m,t,caller)

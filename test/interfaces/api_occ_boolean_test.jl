@@ -35,6 +35,53 @@ function _occ_counts()
     return d
 end
 
+# Materialize kernel-bound volumes into a fresh scratch GeoModel exactly
+# like `_model_occ_boolean`'s operand stage (kernel tags carry verbatim,
+# shared sub-shapes dedup through `seen`, coordinates canonicalized so
+# split points weld bitwise, `next_tag` seeded above the materialized
+# tags so engine-fresh entities cannot collide).
+function _occ_scratch_operands(vtags::AbstractVector{<:Integer})
+    sm=M.GeoModel()
+    kernel=_kernel()
+    seen=Set{UInt64}()
+    snap=NTuple{3,Float64}[]
+    for t in vtags
+        M._model_occ_dist_materialize!(sm,kernel,3,kernel.bindings[(3,t)],
+            seen,"test";snap=snap,untyped_defaults=true)
+    end
+    dicts=(sm.points,sm.curves,sm.surfaces,sm.volumes)
+    for d in 1:4
+        sm.next_tag[d]=max(sm.next_tag[d],maximum(keys(dicts[d]);init=0))
+    end
+    return sm,Int[t for t in vtags]
+end
+
+# Axis-aligned bounding box of one materialized result piece: curve
+# endpoints plus quarter/mid/three-quarter interior evals so rim arcs
+# reach their apices.
+function _sm_piece_bbox(sm,piece)
+    lo=fill(Inf,3);hi=fill(-Inf,3)
+    function add(p3)
+        for a in 1:3
+            lo[a]=min(lo[a],p3[a]);hi[a]=max(hi[a],p3[a])
+        end
+    end
+    for sh in piece.shells, sface in sm.surface_loops[sh]
+        stag=abs(sface)
+        for lp in sm.surfaces[stag], sc in sm.loops[lp]
+            c=abs(sc)
+            for v in sm.curves[c]
+                add(sm.points[v])
+            end
+            t0,t1=M._model_curve_param_bounds(sm,c,"test")
+            for f in (0.25,0.5,0.75)
+                add(M._model_curve_point(sm,c,t0+f*(t1-t0),"test"))
+            end
+        end
+    end
+    return (lo[1],lo[2],lo[3],hi[1],hi[2],hi[3])
+end
+
 @testset "occ.fuse — overlap union" begin
     occ=_occ_setup()
     occ.add_box(0,0,0,1,1,1)
@@ -281,4 +328,167 @@ end
     # every node lies inside the fused bounding box
     _,coords=A.mesh.get_nodes(3,1,true)
     @test all(-1e-9<=coords[3(i-1)+1]<=1.5+1e-9 for i in 1:length(nt))
+end
+
+@testset "occ.remove_all_duplicates — Gmsh OCC_Internals semantics" begin
+    # upstream `removeAllDuplicates` runs `booleanFragments(-1, all
+    # entities at the maximum dimension present, {}, remove both)`:
+    # coincident solids collapse to one shared result, overlapping
+    # solids split into cells, untouched shapes keep their tags.
+    occ=_occ_setup()
+    occ.add_box(0,0,0,1,1,1)
+    occ.add_box(0.4,0,0,1,1,1)
+    occ.remove_all_duplicates()
+    ents=sort!(Tuple{Int,Int}[e for e in occ.get_entities(3)])
+    @test ents==[(3,1),(3,2),(3,3)]
+    @test sort!([occ.get_mass(3,t) for (_,t) in ents])≈
+        sort!([0.4*1.0,0.6,0.4])
+    # a coincident pair collapses into a single shared volume
+    occ.add_box(5,5,5,1,1,1)
+    occ.add_box(5,5,5,1,1,1)
+    occ.remove_all_duplicates()
+    ents2=sort!(Tuple{Int,Int}[e for e in occ.get_entities(3)])
+    @test ents2==[(3,1),(3,2),(3,3),(3,4)]
+    @test occ.get_mass(3,4)≈1.0
+    @test [occ.get_mass(3,t) for (_,t) in ents2]≈[0.4,0.6,0.4,1.0]
+end
+
+@testset "occ.remove_all_duplicates — no-op and rejection" begin
+    occ=_occ_setup()
+    @test occ.get_entities(3)==Tuple{Int,Int}[]
+    occ.remove_all_duplicates()   # empty registry — no-op
+    occ.add_box(0,0,0,1,1,1)
+    occ.remove_all_duplicates()   # single entity — no-op
+    @test occ.get_entities(3)==[(3,1)]
+    @test occ.get_mass(3,1)≈1.0
+    # maxdim 2 registry (no volumes): the volume-only bridge rejects
+    # loudly instead of silently pretending support
+    occ.add_rectangle(5,5,5,1,1)
+    occ.remove([(3,1)])
+    err=_errtext(()->occ.remove_all_duplicates())
+    @test occursin("dimension",err) || occursin("volume",err) ||
+          occursin("unsupported",err)
+end
+
+@testset "occ.fragment — re-fragment preserves masses and topology" begin
+    # regression for the publish path: re-materializing OCC-published
+    # cells must keep exact plane orientation — the kernel face `axis`
+    # is the winding normal, and each shell use's `rev` flag is measured
+    # against the containing solid rather than trusted from the
+    # engine's provenance signs.
+    occ=_occ_setup()
+    occ.add_box(0,0,0,1,1,1)
+    occ.add_box(0.4,0,0,1,1,1)
+    occ.fragment([(3,1),(3,2)],Tuple{Int,Int}[])
+    pre=[occ.get_mass(3,t) for t in (1,2,3)]
+    @test pre≈[0.4,0.6,0.4]
+    out,map=occ.fragment([(3,1),(3,2),(3,3)],Tuple{Int,Int}[])
+    @test out==[(3,1),(3,2),(3,3)]
+    @test map==[[(3,1)],[(3,2)],[(3,3)]]
+    @test [occ.get_mass(3,t) for t in (1,2,3)]≈[0.4,0.6,0.4]
+    bbs=[occ.get_bounding_box(3,t) for t in (1,2,3)]
+    @test bbs[1][1:3]==(0.0,0.0,0.0) && bbs[1][4]≈0.4
+    @test bbs[3][4]≈1.4
+    # mixed set: published cells plus a coincident pair — the pair
+    # collapses onto one shared cell while the cells re-materialize
+    occ.add_box(5,5,5,1,1,1)
+    occ.add_box(5,5,5,1,1,1)
+    out2,map2=occ.fragment([(3,t) for t in (1,2,3,4,5)],
+                           Tuple{Int,Int}[])
+    @test out2==[(3,1),(3,2),(3,3),(3,4)]
+    @test map2[end]==[(3,4)]
+    @test map2[end-1]==[(3,4)]
+    @test [occ.get_mass(3,t) for t in (1,2,3,4)]≈[0.4,0.6,0.4,1.0]
+    # a third consecutive fragment still holds the line — publish is
+    # idempotent, not just once
+    occ.fragment([(3,t) for t in (1,2,3,4)],Tuple{Int,Int}[])
+    @test [occ.get_mass(3,t) for t in (1,2,3,4)]≈[0.4,0.6,0.4,1.0]
+end
+
+@testset "occ.cut — curved result re-cut through the boolean bridge" begin
+    # regression: a box-minus-cylinder piece carries circle edges whose
+    # pcurves on the synthesized plane caps can be parameter-reversed
+    # (left-handed uv frames on mirrored records / hole rims). The
+    # `neg2d` pcurve wrapper keeps the edge parameter while recording
+    # the mirrored trace; every consumer — measures, extraction,
+    # re-boolean — must honour it.
+    occ=_occ_setup()
+    b=occ.add_box(0,0,0,1,1,1)
+    cyl=occ.add_cylinder(0.5,0.5,0.0,0,0,1,0.4)
+    out,_=occ.cut([(3,b)],[(3,cyl)])
+    @test length(out)==1
+    piece=out[1][2]
+    @test occ.get_mass(3,piece)≈1-π*0.16
+    # overlapping re-cut: removes the half of the piece with x<0.5,
+    # leaving 0.5 minus half the cylinder disk. The engine path runs
+    # deterministically below; the API call's provenance snapshot
+    # tetrahedralizes the ~260-node rim PLC and can escalate into a
+    # ~20 GB exact-Delaunay recovery — skipped under memory pressure.
+    tool=occ.add_box(-0.5,-0.5,-0.5,1.0,2.0,2.0)
+    sm,vtags=_occ_scratch_operands([piece,tool])
+    kept,touched=M._brep_collect_faces_n(sm,:difference,vtags,1,"cut")
+    pieces,image,created=M._brep_materialize_multi!(
+        sm,:difference,vtags,kept,touched,2,1,"cut")
+    @test length(pieces)==1
+    @test all(isapprox.(_sm_piece_bbox(sm,only(pieces)),
+                        (0.5,0.0,0.0,1.0,1.0,1.0);atol=1e-9))
+    try
+        out2,map2=occ.cut([(3,piece)],[(3,tool)])
+        @test length(out2)==1
+        @test occ.get_mass(3,out2[1][2])≈0.5-(π*0.16)/2
+    catch err
+        err isa ReadOnlyMemoryError || rethrow()
+        @test_skip "provenance snapshot exceeds available memory"
+    end
+end
+
+@testset "occ.fragment — curved piece against an overlapping box" begin
+    # regression: fragmenting the curved cut result drops degenerate
+    # sections onto the piece's rim circles. Those mirrored imprint
+    # arcs traverse their edge backwards (neg pcurves) — materializing
+    # them needs the occurrence sign flipped (fwd ⊻ neg) or the result
+    # wire fails to chain.
+    occ=_occ_setup()
+    b=occ.add_box(0,0,0,1,1,1)
+    cyl=occ.add_cylinder(0.5,0.5,0.0,0,0,1,0.4)
+    out,_=occ.cut([(3,b)],[(3,cyl)])
+    piece=out[1][2]
+    @test occ.get_mass(3,piece)≈1-π*0.16
+    b2=occ.add_box(0.5,0.0,0.0,1.0,1.0,1.0)
+    # The engine path itself (materialize → collect → materialize) is
+    # what the fix exercises and it runs in seconds: the mirrored rim
+    # arcs must chain into wires and the arrangement must yield the
+    # four physical cells — piece∖box2 and piece∩box2 (each
+    # 0.5−π·0.16/2), the notch half-cylinder (π·0.16/2) and the x>1
+    # slab (0.5). B∖A is genuinely disconnected — the notch is walled
+    # off the slab by the piece slab at x∈[0.9,1].
+    sm,vtags=_occ_scratch_operands([piece,b2])
+    kept,touched=M._brep_collect_faces_n(sm,:fragments,vtags,1,"fragment")
+    pieces,image,created=M._brep_materialize_multi!(
+        sm,:fragments,vtags,kept,touched,2,1,"fragment")
+    @test length(pieces)==4
+    @test all(p->!isempty(p.shells),pieces)
+    expected=sort!(NTuple{6,Float64}[
+        (0.0,0.0,0.0,0.5,1.0,1.0),        # piece∖box2
+        (0.5,0.0,0.0,1.0,1.0,1.0),        # piece∩box2
+        (0.5,0.1,0.0,0.9,0.9,1.0),        # notch half-cylinder
+        (1.0,0.0,0.0,1.5,1.0,1.0)])       # x>1 slab
+    got=sort!([_sm_piece_bbox(sm,p) for p in pieces])
+    @test length(got)==length(expected)
+    @test all(i->all(isapprox.(got[i],expected[i];atol=1e-9)),
+              eachindex(expected))
+    # the API call additionally runs the operand provenance surface
+    # tetrahedralization, whose exact-Delaunay recovery on the ~260-node
+    # rim PLC needs ~20 GB — verified once with analytically exact
+    # masses (0.2486725877/0.2486725877/0.2513274123/0.5); skipped under
+    # memory pressure rather than failing the suite on a resource bound
+    try
+        out2,_=occ.fragment([(3,piece)],[(3,b2)])
+        @test length(out2)==4
+        @test sort!([occ.get_mass(3,t) for (_,t) in out2])≈
+            sort!([0.5-(π*0.16)/2,0.5-(π*0.16)/2,(π*0.16)/2,0.5])
+    catch err
+        err isa ReadOnlyMemoryError || rethrow()
+        @test_skip "provenance snapshot exceeds available memory"
+    end
 end

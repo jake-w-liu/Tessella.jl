@@ -108,14 +108,30 @@ _brep_uperiod(sg::NamedTuple) =
 
 # ── pcurve evaluation ────────────────────────────────────────────────────────
 
-@inline _brep_pc_eval(pc,t) =
-    hasproperty(pc,:lin2d) ?
+# `neg2d` pcurve wrapper: evaluated at the edge parameter t as `inner(−t)` —
+# the form a left-handed uv trace takes, e.g. a circle rim whose axis is
+# anti-parallel to the face's synthesized plane frame (the trace is the same
+# circle run backwards, which no right-handed `circ2d` can write down).
+_brep_pc_unneg(pc) =
+    hasproperty(pc,:neg2d) ? (pc.neg2d[1],true) : (pc,false)
+
+_brep_pc_iscirc(pc) = hasproperty(pc,:circ2d) ||
+    (hasproperty(pc,:neg2d) && hasproperty(pc.neg2d[1],:circ2d))
+
+@inline function _brep_pc_eval(pc,t)
+    hasproperty(pc,:neg2d) && return _brep_pc_eval(pc.neg2d[1],-t)
+    return hasproperty(pc,:lin2d) ?
         (fma(t,pc.lin2d[2][1],pc.lin2d[1][1]),
          fma(t,pc.lin2d[2][2],pc.lin2d[1][2])) :
         _occ_circ2d_eval(pc.circ2d[1],pc.circ2d[2],pc.circ2d[3],t)
+end
 
 # Tangent vector of a pcurve at t (not normalized).
 @inline function _brep_pc_tangent(pc,t)
+    if hasproperty(pc,:neg2d)
+        d=_brep_pc_tangent(pc.neg2d[1],-t)
+        return (.-d)
+    end
     if hasproperty(pc,:lin2d)
         return pc.lin2d[2]
     end
@@ -146,18 +162,71 @@ function _brep_edge_curve(m::GeoModel,ctag::Int)
     throw(ArgumentError("_brep_edge_curve: unsupported curve record"))
 end
 
+# 3-D sample points of a stored curve loop's traversal: edge start points
+# plus arc midpoints (an arc's winding contribution needs a sample inside
+# the span).
+function _brep_wire_pts(m::GeoModel,loop_tag::Int)
+    pts=NTuple{3,Float64}[]
+    for ce in m.loops[loop_tag]
+        a,b=m.curves[abs(ce)]
+        push!(pts,m.points[ce>0 ? a : b])
+        curve,t0,t1=_brep_edge_curve(m,abs(ce))
+        curve.kind===:circle || continue
+        push!(pts,_brep_curve_eval(curve,(t0+t1)/2))
+    end
+    return pts
+end
+
+# Newell normal of a stored curve loop's traversal. The surface-loop sign
+# convention ties a face's reversal flag to its outer wire's winding
+# normal, so synthesized face records take their axis from the winding —
+# `_model_plane_frame`'s certified normal is a canonical fit whose sign is
+# unrelated to traversal.
+function _brep_wire_newell(m::GeoModel,loop_tag::Int)
+    pts=_brep_wire_pts(m,loop_tag)
+    n=(0.0,0.0,0.0)
+    for i in eachindex(pts)
+        p=pts[i];q=pts[mod1(i+1,length(pts))]
+        n=(n[1]+(p[2]-q[2])*(p[3]+q[3]),
+           n[2]+(p[3]-q[3])*(p[1]+q[1]),
+           n[3]+(p[1]-q[1])*(p[2]+q[2]))
+    end
+    L=sqrt(_b3dot(n,n))
+    return L==0.0 ? (0.0,0.0,1.0) : (n[1]/L,n[2]/L,n[3]/L)
+end
+
 # Synthesize a :plane record for a native plane surface so every operand face
-# carries an occ-style record.
+# carries an occ-style record. The record's `axis` must match the outer
+# wire's winding normal — the surface-loop sign then reads the use reversal
+# uniformly across operands (`orev·axis` = outward); the frame's exact
+# fitted normal supplies the magnitude, the winding supplies the sign.
 function _brep_plane_record(m::GeoModel,stag::Int,caller::AbstractString)
     frame=_model_plane_frame(m,stag,caller)
+    n=_brep_wire_newell(m,m.surfaces[stag][1])
+    if _b3dot(n,frame.normal)<0
+        return (occ=:plane,center=frame.origin,axis=.-frame.normal,
+                X=frame.first_direction,Y=.-frame.second_direction,
+                reversed=false,pcurves=Dict{Int,NamedTuple}())
+    end
     return (occ=:plane,center=frame.origin,axis=frame.normal,
             X=frame.first_direction,Y=frame.second_direction,
             reversed=false,pcurves=Dict{Int,NamedTuple}())
 end
 
-# The pcurve of an edge on a synthesized plane record: project the curve's
-# endpoints over its own parameter range.
-function _brep_synth_pcurve(sg,curve::NamedTuple,t0,t1)
+# The pcurve of an edge on a synthesized plane record. A line projects its
+# endpoints over its own parameter range; a circle projects its center and
+# X direction into the face frame. An anti-aligned circle (e.g. a hole rim
+# wound against the face normal) traces a left-handed uv circle, which a
+# right-handed `circ2d` cannot represent — the `neg2d` wrapper evaluates
+# the same record at −t, exactly the mirrored trace.
+function _brep_synth_pcurve(sg,curve::NamedTuple,t0,t1,caller::AbstractString)
+    if curve.kind===:circle
+        xu=(_b3dot(curve.x,sg.X),_b3dot(curve.x,sg.Y))
+        pc=(circ2d=(_brep_plane_uv(sg,curve.c),xu,curve.r),)
+        return _b3dot(curve.n,_b3cross(sg.X,sg.Y))>=0 ? pc : (neg2d=(pc,),)
+    end
+    curve.kind in (:line,:degenerate) || throw(ArgumentError(
+        "$caller: unsupported $(curve.kind) edge on an untyped plane"))
     o=_brep_plane_uv(sg,_brep_curve_eval(curve,t0))
     e=_brep_plane_uv(sg,_brep_curve_eval(curve,t1))
     dt=t1-t0
@@ -204,7 +273,7 @@ function _brep_extract(m::GeoModel,tag::Int,caller::AbstractString)
                             "Curve[$ctag]"))
                     else
                         e=edges[eidx]
-                        pc=_brep_synth_pcurve(sg,e.curve,e.t0,e.t1)
+                        pc=_brep_synth_pcurve(sg,e.curve,e.t0,e.t1,caller)
                     end
                     push!(wire,(eidx,sgn,pc))
                 end
@@ -226,6 +295,9 @@ end
 # the edge's parameter range. Half-open convention: a vertex-level crossing
 # counts only when the edge enters the half-plane from below.
 function _brep_pc_ray_crossings(pc,t0,t1,pu,pv,tol)
+    if hasproperty(pc,:neg2d)
+        return _brep_pc_ray_crossings(pc.neg2d[1],-t1,-t0,pu,pv,tol)
+    end
     lo,hi=minmax(t0,t1)
     if hasproperty(pc,:lin2d)
         o,d=pc.lin2d
@@ -291,8 +363,16 @@ end
 _brep_pc_line_on_plane(sg,o,d) =
     (lin2d=(_brep_plane_uv(sg,o),(_b3dot(d,sg.X),_b3dot(d,sg.Y))),)
 
-_brep_pc_circ_on_plane(sg,c,x,r) =
-    (circ2d=(_brep_plane_uv(sg,c),(_b3dot(x,sg.X),_b3dot(x,sg.Y)),r),)
+# A section circle's uv trace is a right-handed circ2d only when the
+# circle's normal agrees with the uv frame's handedness; an anti-aligned
+# trace mirrors the parameter — the neg2d wrapper evals the same record at
+# −t so pcurve params keep tracking the edge parameter. Synthesized plane
+# records may carry a left-handed frame (axis mirrored out of X×Y), so the
+# test runs against X×Y rather than axis.
+function _brep_pc_circ_on_plane(sg,c,n,x,r)
+    pc=(circ2d=(_brep_plane_uv(sg,c),(_b3dot(x,sg.X),_b3dot(x,sg.Y)),r),)
+    return _b3dot(n,_b3cross(sg.X,sg.Y))>=0 ? pc : (neg2d=(pc,),)
+end
 
 # circle at constant height on a cylinder/cone-like uv domain (u=angle,v=z).
 function _brep_pc_circ_on_cylinder(sg,center,n,x,r)
@@ -415,7 +495,7 @@ function _brep_sec_plane_cylinder(pl,cy,plane_is_a,caller)
         n=dot>0 ? pl.axis : (.-pl.axis)
         x,y=_occ_ax2_setx(n,cy.X)
         curve=(kind=:circle,c=c,n=n,x=x,y=y,r=cy.radius)
-        pc_pl=_brep_pc_circ_on_plane(pl,c,x,cy.radius)
+        pc_pl=_brep_pc_circ_on_plane(pl,c,n,x,cy.radius)
         pc_cy=_brep_pc_circ_on_cylinder(cy,c,n,x,cy.radius)
         return [(curve=curve,closed=true,
                  pcA=plane_is_a ? pc_pl : pc_cy,
@@ -468,7 +548,7 @@ function _brep_sec_plane_sphere(pl,sp,plane_is_a,caller)
     n=pl.axis
     x,y=_occ_ax2_frame(n)
     curve=(kind=:circle,c=c,n=n,x=x,y=y,r=r)
-    pc_pl=NamedTuple[_brep_pc_circ_on_plane(pl,c,x,r)]
+    pc_pl=NamedTuple[_brep_pc_circ_on_plane(pl,c,n,x,r)]
     pc_sp=_brep_sphere_section_pcs(sp,c,n,x,y,r,caller)
     return _brep_sec_entries(curve,true,pc_pl,pc_sp,plane_is_a)
 end
@@ -486,7 +566,7 @@ function _brep_sec_plane_cone(pl,cn,plane_is_a,caller)
         n=dot>0 ? pl.axis : (.-pl.axis)
         x,y=_occ_ax2_setx(n,cn.X)
         curve=(kind=:circle,c=c,n=n,x=x,y=y,r=rv)
-        pc_pl=_brep_pc_circ_on_plane(pl,c,x,rv)
+        pc_pl=_brep_pc_circ_on_plane(pl,c,n,x,rv)
         pc_cn=_brep_pc_circ_on_cylinder(cn,c,n,x,rv)
         return [(curve=curve,closed=true,
                  pcA=plane_is_a ? pc_pl : pc_cn,
@@ -569,15 +649,22 @@ end
 # section-parameter values.
 
 function _brep_pc_intersect(sec_pc,edge_pc,et0,et1,tol)
-    if hasproperty(sec_pc,:lin2d) && hasproperty(edge_pc,:lin2d)
-        return _brep_ix_lin_lin(sec_pc.lin2d,edge_pc.lin2d,et0,et1,tol)
+    # Unwrap neg2d pcurves: the edge parameter mirrors the inner parameter,
+    # so the reported span reflects to (−et1,−et0) before dispatch. A negated
+    # section pcurve reports mirrored section parameters back to the caller.
+    sec_pc,nsec=_brep_pc_unneg(sec_pc)
+    edge_pc,nedge=_brep_pc_unneg(edge_pc)
+    nedge && ((et0,et1)=(-et1,-et0))
+    out=if hasproperty(sec_pc,:lin2d) && hasproperty(edge_pc,:lin2d)
+        _brep_ix_lin_lin(sec_pc.lin2d,edge_pc.lin2d,et0,et1,tol)
     elseif hasproperty(sec_pc,:lin2d) && hasproperty(edge_pc,:circ2d)
-        return _brep_ix_lin_circ(sec_pc.lin2d,edge_pc.circ2d,et0,et1,tol)
+        _brep_ix_lin_circ(sec_pc.lin2d,edge_pc.circ2d,et0,et1,tol)
     elseif hasproperty(sec_pc,:circ2d) && hasproperty(edge_pc,:lin2d)
-        return _brep_ix_circ_lin(sec_pc.circ2d,edge_pc.lin2d,et0,et1,tol)
+        _brep_ix_circ_lin(sec_pc.circ2d,edge_pc.lin2d,et0,et1,tol)
     else
-        return _brep_ix_circ_circ(sec_pc.circ2d,edge_pc.circ2d,et0,et1,tol)
+        _brep_ix_circ_circ(sec_pc.circ2d,edge_pc.circ2d,et0,et1,tol)
     end
+    return nsec ? .-out : out
 end
 
 # snap a circle parameter into [lo,hi] modulo 2π; nothing when out of range.
@@ -747,7 +834,7 @@ function _brep_trim_section(solid,face,pc,closed,tol)
     # a section whose uv trace closes on itself (circ2d) wraps its parameter;
     # a lin2d trace (even a latitude circle, closed only by periodicity) is
     # handled as an open curve — the seam cut normalizes the wrap
-    if hasproperty(pc,:circ2d)
+    if _brep_pc_iscirc(pc)
         isempty(uniq) && begin
             uv0=_brep_wrap_u(_brep_pc_eval(pc,0.0),ulo,uper)
             (_brep_uv_in_face(solid.edges,face,uv0,tol) ||
@@ -909,6 +996,8 @@ end
 
 # u-extent of a pcurve arc over [t0,t1].
 function _brep_pc_urange(pc,t0,t1)
+    hasproperty(pc,:neg2d) &&
+        return _brep_pc_urange(pc.neg2d[1],-t1,-t0)
     lo,hi=minmax(t0,t1)
     if hasproperty(pc,:lin2d)
         o,d=pc.lin2d
@@ -934,6 +1023,11 @@ end
 # Split a pcurve segment at u=u_seam0+k·period crossings (periodic cut-domain
 # seam). Returns (t_ranges) covering [t0,t1] with no interior seam crossing.
 function _brep_pc_split_at_useam(pc,t0,t1,u_seam0,period,tol)
+    if hasproperty(pc,:neg2d)
+        inner=_brep_pc_split_at_useam(
+            pc.neg2d[1],-t1,-t0,u_seam0,period,tol)
+        return Tuple{Float64,Float64}[(-b,-a) for (a,b) in reverse(inner)]
+    end
     cuts=Float64[]
     if hasproperty(pc,:lin2d)
         o,d=pc.lin2d
@@ -1049,22 +1143,24 @@ end
 # Green's theorem contribution of one pcurve arc over [ta,tb] (signed by
 # direction of evaluation): ∫(u·v' − v·u')/2 dt.
 function _brep_pc_arc_area(pc,ta,tb)
+    # ∫(u v'−v u')dt with u(t)=inner(−t): substituting s=−t yields
+    # −∫[−tb,−ta] G(s)ds — the mirrored traversal flips the sign.
+    hasproperty(pc,:neg2d) &&
+        return -_brep_pc_arc_area(pc.neg2d[1],-tb,-ta)
     if hasproperty(pc,:lin2d)
         u0,v0=_brep_pc_eval(pc,ta)
         u1,v1=_brep_pc_eval(pc,tb)
         return (u0*v1-u1*v0)/2
     end
     c,x,r=pc.circ2d
-    # u·v'−v·u' = r² + r·(c1·y'(t) − c2·x'(t))·(in x,y coords):
-    # rel(t)=r(cos t·x + sin t·y); rel' = r(−sin·x + cos·y)
-    # u v'−v u' = r² + c·rel' − rel·c' where c'=0 → r² + c1·rv' − c2·ru'
-    # integrate: r²·Δt + c1·r·(sin x·(−cos t) + cos x·(sin t))... computed:
+    # u = c1 + r(cos t·x1 − sin t·x2), v = c2 + r(cos t·x2 + sin t·x1)
+    # (Y = rot90(X)). u v'−v u' = r² + r·[cos t·(c1x1+c2x2) + sin t·(c2x1−c1x2)]
+    # — the concentric term is constant; the off-centre term integrates the
+    # frame components against ds = sin tb−sin ta, dc = cos tb−cos ta.
     s0,co0=_gm_sincos(ta);s1,co1=_gm_sincos(tb)
-    # ∫(u v' − v u')dt = r²·(tb−ta) + r·[c1·(x2(cos tb−cos ta)+y2(sin tb−sin ta))
-    #                      − c2·(x1(cos tb−cos ta)+y1(sin tb−sin ta))]
     dc=co1-co0;ds=s1-s0
     return (r*r*(tb-ta) +
-            r*(c[1]*(x[2]*dc - x[1]*ds) - c[2]*(x[1]*dc + x[2]*ds)))/2
+            r*(c[1]*(x[1]*ds + x[2]*dc) + c[2]*(x[2]*ds - x[1]*dc)))/2
 end
 
 # Point-in-cycle test (even-odd) for arc lists.
@@ -1096,7 +1192,8 @@ function _brep_cycle_sample(arcs,cycle,area,tol,caller)
         left=(s*-d[2]/l,s*d[1]/l)
         for scale in (1e-3,1e-4,1e-5,1e-6,1e-7)
             cand=(uv[1]+left[1]*scale,uv[2]+left[2]*scale)
-            _brep_cycle_inside(arcs,cycle,cand,tol) && return cand
+            ins=_brep_cycle_inside(arcs,cycle,cand,tol)
+            ins && return cand
         end
     end
     throw(ErrorException(
@@ -1183,6 +1280,8 @@ end
 
 # Cheap uv proximity of a point to a pcurve arc (endpoint + line distance).
 function _brep_pc_near(pc,t0,t1,uv,tol)
+    hasproperty(pc,:neg2d) &&
+        return _brep_pc_near(pc.neg2d[1],-t1,-t0,uv,tol)
     if hasproperty(pc,:lin2d)
         o,d=pc.lin2d
         n2=d[1]*d[1]+d[2]*d[2]
@@ -1225,6 +1324,8 @@ end
 
 # shift a pcurve record's u-coordinate by -shift
 function _brep_shift_pc(pc,shift)
+    hasproperty(pc,:neg2d) &&
+        return (neg2d=(_brep_shift_pc(pc.neg2d[1],shift),),)
     if hasproperty(pc,:lin2d)
         o,d=pc.lin2d
         return (lin2d=((o[1]-shift,o[2]),d),)
@@ -1236,6 +1337,11 @@ end
 # every parameter in (t0,t1) where the pcurve's u crosses a cut-domain seam
 # (u = ulo + k·period) for U-periodic surfaces
 function _brep_pc_split_all_useams(pc,t0,t1,period,ulo,tol)
+    if hasproperty(pc,:neg2d)
+        inner=_brep_pc_split_all_useams(
+            pc.neg2d[1],-t1,-t0,period,ulo,tol)
+        return Tuple{Float64,Float64}[(-b,-a) for (a,b) in reverse(inner)]
+    end
     cuts=Float64[]
     if hasproperty(pc,:lin2d)
         o,d=pc.lin2d
@@ -1294,6 +1400,10 @@ end
 
 # invert a pcurve: parameter t∈[t0,t1] with eval(pc,t)≈uv, or nothing
 function _brep_pc_param(pc,uv,t0,t1,tol)
+    if hasproperty(pc,:neg2d)
+        s=_brep_pc_param(pc.neg2d[1],uv,-t1,-t0,tol)
+        return s===nothing ? nothing : -s
+    end
     if hasproperty(pc,:lin2d)
         o,d=pc.lin2d
         n2=d[1]*d[1]+d[2]*d[2]
@@ -1348,7 +1458,13 @@ function _brep_face_regions(solid,f,side,edge_splits,secs,extras,tol,caller)
                         nothing, extras)
             end
             dup && continue
-            push!(raw,(pc=pc,t0=ta,t1=tb,key=(:e,side,eidx,k),crv=e.curve))
+            # the canonical edge identity is the model curve tag plus the
+            # edge-parameter span — two operand solids sharing the same
+            # Curve (e.g. republished cells on a common wall) resolve to
+            # one result edge; pieces split differently per operand keep
+            # distinct keys rather than union into a broken loop
+            push!(raw,(pc=pc,t0=ta,t1=tb,
+                       key=(:e,solid.ctags[eidx],ta,tb),crv=e.curve))
         end
     end
     for sf in kept_secs
@@ -1551,28 +1667,35 @@ end
 # -t gives the mapped point and `neg` reports the reversal (lines are
 # unaffected by orientation).
 function _brep_map_pc(pc,mp)
-    if hasproperty(pc,:lin2d)
-        o,d=pc.lin2d
+    inner,wrapped=_brep_pc_unneg(pc)
+    if hasproperty(inner,:lin2d)
+        o,d=inner.lin2d
         return (lin2d=(_brep_map_uv(mp,o),_brep_map_dir(mp,d)),),false
     end
-    c,x,r=pc.circ2d
+    c,x,r=inner.circ2d
     neg=(mp.c1[1]*mp.c2[2]-mp.c1[2]*mp.c2[1])<0
-    return (circ2d=(_brep_map_uv(mp,c),_brep_map_dir(mp,x),r),),neg
+    mapped=(circ2d=(_brep_map_uv(mp,c),_brep_map_dir(mp,x),r),)
+    # a reflection inside the map composes with an existing neg2d wrapper:
+    # mapped(inner(−t)) needs −t evaluated on the mapped circle.
+    return (wrapped ? (neg2d=(mapped,),) : mapped),neg
 end
 
 # pcurve with its parameter reversed (t → −t): used to store an imprinted
-# arc's pcurve under the operand edge's own parametrization. Reversible for
-# lines; a reversed circle is not a `circ2d` and cannot be represented.
+# arc's pcurve under the operand edge's own parametrization. A reversed
+# line negates its direction; a reversed circle's left-handed trace carries
+# the `neg2d` wrapper.
 function _brep_flip_pc(pc,caller)
+    hasproperty(pc,:neg2d) && return pc.neg2d[1]
     hasproperty(pc,:lin2d) &&
         return (lin2d=(pc.lin2d[1],(-pc.lin2d[2][1],-pc.lin2d[2][2])),)
+    hasproperty(pc,:circ2d) && return (neg2d=(pc,),)
     throw(ArgumentError(
-        "$caller: coincident-face imprint of a circle under a mirrored " *
-        "frame has no representable pcurve"))
+        "$caller: unrepresentable parameter-reversed pcurve"))
 end
 
 # same carrier test: collinear lines or coincident circles
 function _brep_pc_same_carrier(a,b,tol)
+    a,_=_brep_pc_unneg(a);b,_=_brep_pc_unneg(b)
     if hasproperty(a,:lin2d) && hasproperty(b,:lin2d)
         (o1,d1),(o2,d2)=a.lin2d,b.lin2d
         n1=d1[1]*d1[1]+d1[2]*d1[2];n2=d2[1]*d2[1]+d2[2]*d2[2]
@@ -1625,6 +1748,10 @@ end
 # reparametrization reverses orientation the returned pcurve is evaluated at
 # s = −t_new (neg=true) since a left-handed 2-D frame is not a `circ2d`.
 function _brep_pc_reparam(pc,α,β,tol,caller)
+    # a negated pcurve mirrors the affine map: t_old = −α·t_new − β — the
+    # recursive neg flag composes into the returned (pcurve,neg) contract.
+    hasproperty(pc,:neg2d) &&
+        return _brep_pc_reparam(pc.neg2d[1],-α,-β,tol,caller)
     if hasproperty(pc,:lin2d)
         o,d=pc.lin2d
         return (lin2d=((fma(β,d[1],o[1]),fma(β,d[2],o[2])),
@@ -1634,7 +1761,7 @@ function _brep_pc_reparam(pc,α,β,tol,caller)
         "$caller: coincident circle section with a non-angular parameter " *
         "map has no representable pcurve"))
     c,x,r=pc.circ2d
-    cb,sb=_gm_sincos(β)
+    sb,cb=_gm_sincos(β)
     # frame rotated by β: eval(t) = pc(t+β); for α<0 evaluated at s=−t it
     # yields pc(−t+β) — exactly the reversed-parameter map
     xr=(fma(cb,x[1],-sb*x[2]),fma(cb,x[2],sb*x[1]))
@@ -1696,7 +1823,7 @@ function _brep_pc_on_surface(sg,crv,t0,t1,tol,caller)
         sgn=neg ? -1.0 : 1.0
         # frame mapping param s=sgn·t onto the trace: x = cos(s·t0)·w0 −
         # sin(s·t0)·rot90(w0) with rot90(u,v)=(−v,u)
-        c0,s0=_gm_sincos(sgn*t0s)
+        s0,c0=_gm_sincos(sgn*t0s)
         x=(fma(c0,w0[1],s0*w0[2]),fma(c0,w0[2],-s0*w0[1]))
         pc=(circ2d=(ctr,x,rr),)
         all(2:length(ws)) do i
@@ -1723,7 +1850,7 @@ function _brep_imprint_contacts!(S,O,fidx,eOidx,mpc,neg,slo,shi,es_S,es_O,
     # snap a first-arg pcurve param into [slo,shi] (circ2d intersections
     # report mod-2π; lin2d report unbounded)
     function inrange(s)
-        if hasproperty(mpc,:circ2d)
+        if _brep_pc_iscirc(mpc)
             return _brep_snap_theta(s,slo,shi,tol)
         end
         return (s>=slo-tol && s<=shi+tol) ? s : nothing
@@ -1762,7 +1889,7 @@ function _brep_imprint_contacts!(S,O,fidx,eOidx,mpc,neg,slo,shi,es_S,es_O,
         spc=S_is_A ? sec.pcA : sec.pcB
         # circ2d intersections report mod-2π — push every lift so spans at
         # other lifts are still cut
-        nlifts=hasproperty(spc,:circ2d) ? (-1,0,1) : (0,)
+        nlifts=_brep_pc_iscirc(spc) ? (-1,0,1) : (0,)
         for t in _brep_pc_intersect(spc,mpc,slo,shi,tol), k in nlifts
             push!(get!(Vector{Float64},sec_cuts,si),t+k*_OCC_TWO_PI)
         end
@@ -1813,6 +1940,57 @@ function _brep_coinc_imprints!(S,O,fidx,oidx,es_S,es_O,sec_cuts,imps,
     return nothing
 end
 
+# Winner-edge parameter sub-spans for a degenerate-section span (lo,hi),
+# returned as (σa,σb,ta,tb) tuples pairing each directed section-parameter
+# bound with the matching winner-edge parameter in canonical edge
+# coordinates. On a closed (full-period) edge a span can cross the
+# parametric seam: endpoint projections alone are then ambiguous (antipodal
+# endpoints bound two complementary arcs), so the section midpoint
+# disambiguates and the wrapped span splits into canonical pieces. nothing
+# when an endpoint does not project onto the edge.
+function _brep_esec_tspans(we,scrv,lo,hi,tol)
+    p1=_brep_curve_eval(scrv,lo)
+    p2=_brep_curve_eval(scrv,hi)
+    wmid=(we.t0+we.t1)/2
+    t1=_brep_curve_param(we.curve,p1,wmid)
+    t2=_brep_curve_param(we.curve,p2,wmid)
+    (t1===nothing || t2===nothing) && return nothing
+    per=(we.curve.kind===:circle &&
+         abs(we.t1-we.t0-_OCC_TWO_PI)<1e-6) ? _OCC_TWO_PI : 0.0
+    a,b=minmax(t1,t2)
+    if per>0
+        pm=_brep_curve_eval(scrv,0.5(lo+hi))
+        tm=_brep_curve_param(we.curve,pm,wmid)
+        if tm!==nothing && !any(k->a-tol<tm+k*per<b+tol,-1:1)
+            # the midpoint projects onto the complementary arc: the true
+            # directed span t1→t2 crosses the seam. Unwrap t2 onto the
+            # branch containing the midpoint, then cut the span at every
+            # domain boundary it crosses into canonical pieces.
+            T2=t1>t2 ? t2+per : t2-per
+            Tlo,Thi=minmax(t1,T2)
+            if !any(k->Tlo-tol<tm+k*per<Thi+tol,-1:1)
+                T2=t1>t2 ? t2-per : t2+per
+                abs(T2-t1)<per-tol || return [(lo,hi,t1,t2)]
+                Tlo,Thi=minmax(t1,T2)
+                any(k->Tlo-tol<tm+k*per<Thi+tol,-1:1) ||
+                    return [(lo,hi,t1,t2)]
+            end
+            σof=T->lo+(hi-lo)*(T-t1)/(T2-t1)
+            subs=NTuple{4,Float64}[]
+            klo=floor(Int,(Tlo-we.t0)/per)-1
+            khi=ceil(Int,(Thi-we.t1)/per)+1
+            for k in klo:khi
+                plo=max(Tlo,we.t0+k*per)
+                phi=min(Thi,we.t1+k*per)
+                phi-plo>tol || continue
+                push!(subs,(σof(plo),σof(phi),plo-k*per,phi-k*per))
+            end
+            return subs
+        end
+    end
+    return [(lo,hi,t1,t2)]
+end
+
 # Imprint arcs for sections degenerating onto operand edges: the winner
 # edge's pieces covering each recorded span, keyed like the winner's own
 # wire pieces so every face's references resolve to one result edge. Each
@@ -1834,7 +2012,7 @@ function _brep_esec_arcs(W,L,f,esecs,es_W,wside,tol)
             (es.weidx,k) in emitted && continue
             push!(emitted,(es.weidx,k))
             push!(arcs,(pc=es.pc,t0=sa,t1=sb,
-                        key=(:e,wside,es.weidx,k),crv=es.crv,
+                        key=(:e,W.ctags[es.weidx],ta,tb),crv=es.crv,
                         neg=es.neg,esec=true))
         end
     end
@@ -1844,8 +2022,8 @@ end
 # Build the imprint arcs on face f: O's boundary-edge pieces (split by the
 # finalized global edge splits) mapped into f's domain, kept where they lie
 # strictly inside it and are not already carried by f's own wires or by a
-# section arc. `oside` is O's operand index so the arc keys match O's own
-# wire pieces for the same edge piece.
+# section arc. Arc keys carry O's canonical curve tag plus the edge span,
+# so they match O's own wire pieces for the same edge piece.
 function _brep_imprint_arcs(S,O,f,imps,es_O,secs_f,oside,also,tol)
     arcs=NamedTuple[]
     for im in imps
@@ -1886,7 +2064,7 @@ function _brep_imprint_arcs(S,O,f,imps,es_O,secs_f,oside,also,tol)
             covered && continue
             _brep_uv_in_face(S.edges,f,uvm,tol) || continue
             push!(arcs,(pc=im.pc,t0=sa,t1=sb,
-                        key=(:e,oside,im.eidx,k),crv=im.crv,neg=im.neg))
+                        key=(:e,O.ctags[im.eidx],ta,tb),crv=im.crv,neg=im.neg))
         end
     end
     return arcs
@@ -2375,63 +2553,68 @@ function _brep_collect_faces(m::GeoModel,op::Symbol,ta::Int,tb::Int,caller)
             end
         end
         for (lo,hi) in sec.spans
-            p1=_brep_curve_eval(sec.curve,lo)
-            p2=_brep_curve_eval(sec.curve,hi)
-            wmid=(we.t0+we.t1)/2
-            t1=_brep_curve_param(we.curve,p1,wmid)
-            t2=_brep_curve_param(we.curve,p2,wmid)
-            (t1===nothing || t2===nothing) && throw(ArgumentError(
+            subs=_brep_esec_tspans(we,sec.curve,lo,hi,tol)
+            subs===nothing && throw(ArgumentError(
                 "$caller: a coincident section endpoint does not project " *
                 "onto its operand edge"))
-            wlo,whi=minmax(t1,t2)
-            push!(get!(Vector{Float64},esplits[wside],weidx),wlo,whi)
-            if leidx!=0
-                le=L.edges[leidx]
-                lmid=(le.t0+le.t1)/2
-                l1=_brep_curve_param(le.curve,p1,lmid)
-                l2=_brep_curve_param(le.curve,p2,lmid)
-                l1===nothing || l2===nothing ||
-                    push!(get!(Vector{Float64},esplits[lside],leidx),
-                          min(l1,l2),max(l1,l2))
-            end
-            for (ts,tf,spc) in targets
-                tface=L.faces[tf]
-                pc,neg = if spc!==nothing
-                    α=(hi-lo)/(t2-t1);β=lo-α*t1
-                    _brep_pc_reparam(spc,α,β,tol,caller)
-                else
-                    _brep_pc_on_surface(tface.sg,we.curve,wlo,whi,tol,caller)
+            for (sa,sb,ta,tb) in subs
+                p1=_brep_curve_eval(sec.curve,sa)
+                p2=_brep_curve_eval(sec.curve,sb)
+                wlo,whi=minmax(ta,tb)
+                push!(get!(Vector{Float64},esplits[wside],weidx),wlo,whi)
+                if leidx!=0
+                    le=L.edges[leidx]
+                    lmid=(le.t0+le.t1)/2
+                    l1=_brep_curve_param(le.curve,p1,lmid)
+                    l2=_brep_curve_param(le.curve,p2,lmid)
+                    l1===nothing || l2===nothing ||
+                        push!(get!(Vector{Float64},esplits[lside],leidx),
+                              min(l1,l2),max(l1,l2))
                 end
-                sslo,sshi=neg ? (-whi,-wlo) : (wlo,whi)
-                _brep_imprint_contacts!(L,W,tf,weidx,pc,neg,sslo,sshi,
-                                        esplits[ts],esplits[wside],sec_cuts,
-                                        sections,ts==1,tol,si)
-                # span endpoints landing on the target face's wires split
-                # those edges too
-                for te in (sslo,sshi)
-                    uv=_brep_pc_eval(pc,te)
-                    for wire in tface.wires,(e2,_,epc2) in wire
-                        e2r=L.edges[e2]
-                        lo2,hi2=minmax(e2r.t0,e2r.t1)
-                        tp=_brep_pc_param(epc2,uv,lo2,hi2,10tol)
-                        (tp===nothing || tp<=lo2+tol || tp>=hi2-tol) &&
-                            continue
-                        push!(get!(Vector{Float64},esplits[ts],e2),tp)
+                for (ts,tf,spc) in targets
+                    tface=L.faces[tf]
+                    pc,neg = if spc!==nothing
+                        α=(sb-sa)/(tb-ta);β=sa-α*ta
+                        _brep_pc_reparam(spc,α,β,tol,caller)
+                    else
+                        _brep_pc_on_surface(tface.sg,we.curve,wlo,whi,
+                                            tol,caller)
                     end
-                end
-                # the same 3-D edge can be reached through several section
-                # records (each face pair of the 4-way coincidence emits
-                # one) — collect the spans under one spec rather than
-                # duplicating the carrier
-                ex_i=findfirst(es->es.weidx==weidx,esec_imps[ts][tf])
-                if ex_i===nothing
-                    push!(esec_imps[ts][tf],
-                          (pc=pc,spans=[(wlo,whi)],neg=neg,
-                           wside=wside,weidx=weidx,crv=we.curve))
-                else
-                    es=esec_imps[ts][tf][ex_i]
-                    any(sp->abs(sp[1]-wlo)<tol && abs(sp[2]-whi)<tol,
-                        es.spans) || push!(es.spans,(wlo,whi))
+                    sslo,sshi=neg ? (-whi,-wlo) : (wlo,whi)
+                    _brep_imprint_contacts!(L,W,tf,weidx,pc,neg,sslo,sshi,
+                                            esplits[ts],esplits[wside],
+                                            sec_cuts,sections,ts==1,tol,si)
+                    # span endpoints landing on the target face's wires
+                    # split those edges too
+                    for te in (sslo,sshi)
+                        uv=_brep_pc_eval(pc,te)
+                        for wire in tface.wires,(e2,_,epc2) in wire
+                            e2r=L.edges[e2]
+                            lo2,hi2=minmax(e2r.t0,e2r.t1)
+                            tp=_brep_pc_param(epc2,uv,lo2,hi2,10tol)
+                            (tp===nothing || tp<=lo2+tol || tp>=hi2-tol) &&
+                                continue
+                            push!(get!(Vector{Float64},esplits[ts],e2),tp)
+                        end
+                    end
+                    # the same 3-D edge can be reached through several
+                    # section records (each face pair of the 4-way
+                    # coincidence emits one) — collect the spans under one
+                    # spec rather than duplicating the carrier. A seam-
+                    # wrapped span produces one spec per canonical piece:
+                    # their pcurves differ by a period shift and must not
+                    # share a record.
+                    ex_i=findfirst(es->es.weidx==weidx && es.neg==neg &&
+                                       es.pc==pc,esec_imps[ts][tf])
+                    if ex_i===nothing
+                        push!(esec_imps[ts][tf],
+                              (pc=pc,spans=[(wlo,whi)],neg=neg,
+                               wside=wside,weidx=weidx,crv=we.curve))
+                    else
+                        es=esec_imps[ts][tf][ex_i]
+                        any(sp->abs(sp[1]-wlo)<tol && abs(sp[2]-whi)<tol,
+                            es.spans) || push!(es.spans,(wlo,whi))
+                    end
                 end
             end
         end
@@ -2600,7 +2783,7 @@ function _brep_imprint_contacts_n!(solids,si,fidx,oi,eOidx,mpc,neg,slo,shi,
     f=S.faces[fidx]
     s2t(s)=neg ? -s : s
     function inrange(s)
-        if hasproperty(mpc,:circ2d)
+        if _brep_pc_iscirc(mpc)
             return _brep_snap_theta(s,slo,shi,tol)
         end
         return (s>=slo-tol && s<=shi+tol) ? s : nothing
@@ -2641,7 +2824,7 @@ function _brep_imprint_contacts_n!(solids,si,fidx,oi,eOidx,mpc,neg,slo,shi,
         else
             continue
         end
-        nlifts=hasproperty(spc,:circ2d) ? (-1,0,1) : (0,)
+        nlifts=_brep_pc_iscirc(spc) ? (-1,0,1) : (0,)
         for t in _brep_pc_intersect(spc,mpc,slo,shi,tol), k in nlifts
             push!(get!(Vector{Float64},sec_cuts,nsi),t+k*_OCC_TWO_PI)
         end
@@ -2825,61 +3008,63 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
             end
         end
         for (lo,hi) in sec.spans
-            p1=_brep_curve_eval(sec.curve,lo)
-            p2=_brep_curve_eval(sec.curve,hi)
-            wmid=(we.t0+we.t1)/2
-            t1=_brep_curve_param(we.curve,p1,wmid)
-            t2=_brep_curve_param(we.curve,p2,wmid)
-            (t1===nothing || t2===nothing) && throw(ArgumentError(
+            subs=_brep_esec_tspans(we,sec.curve,lo,hi,tol)
+            subs===nothing && throw(ArgumentError(
                 "$caller: a coincident section endpoint does not project " *
                 "onto its operand edge"))
-            wlo,whi=minmax(t1,t2)
-            push!(get!(Vector{Float64},esplits[w],weidx),wlo,whi)
-            touched[w]=true
-            for (k2,oe) in zip(owners,owned)
-                k2==w && continue
-                oer=solids[k2].edges[oe]
-                omid=(oer.t0+oer.t1)/2
-                l1=_brep_curve_param(oer.curve,p1,omid)
-                l2=_brep_curve_param(oer.curve,p2,omid)
-                l1===nothing || l2===nothing || (push!(get!(
-                    Vector{Float64},esplits[k2],oe),min(l1,l2),max(l1,l2));
-                    touched[k2]=true)
-            end
-            for (tk,tf,spc) in targets
-                tface=solids[tk].faces[tf]
-                pc,neg = if spc!==nothing
-                    α=(hi-lo)/(t2-t1);β=lo-α*t1
-                    _brep_pc_reparam(spc,α,β,tol,caller)
-                else
-                    _brep_pc_on_surface(tface.sg,we.curve,wlo,whi,tol,caller)
+            for (sa,sb,ta,tb) in subs
+                p1=_brep_curve_eval(sec.curve,sa)
+                p2=_brep_curve_eval(sec.curve,sb)
+                wlo,whi=minmax(ta,tb)
+                push!(get!(Vector{Float64},esplits[w],weidx),wlo,whi)
+                touched[w]=true
+                for (k2,oe) in zip(owners,owned)
+                    k2==w && continue
+                    oer=solids[k2].edges[oe]
+                    omid=(oer.t0+oer.t1)/2
+                    l1=_brep_curve_param(oer.curve,p1,omid)
+                    l2=_brep_curve_param(oer.curve,p2,omid)
+                    l1===nothing || l2===nothing || (push!(get!(
+                        Vector{Float64},esplits[k2],oe),min(l1,l2),
+                        max(l1,l2));touched[k2]=true)
                 end
-                sslo,sshi=neg ? (-whi,-wlo) : (wlo,whi)
-                _brep_imprint_contacts_n!(solids,tk,tf,w,weidx,pc,neg,
-                                          sslo,sshi,esplits,sec_cuts,
-                                          sections,tol,si)
-                for te in (sslo,sshi)
-                    uv=_brep_pc_eval(pc,te)
-                    for wire in tface.wires,(e2,_,epc2) in wire
-                        e2r=solids[tk].edges[e2]
-                        lo2,hi2=minmax(e2r.t0,e2r.t1)
-                        tp=_brep_pc_param(epc2,uv,lo2,hi2,10tol)
-                        (tp===nothing || tp<=lo2+tol || tp>=hi2-tol) &&
-                            continue
-                        push!(get!(Vector{Float64},esplits[tk],e2),tp)
-                        touched[tk]=true
+                for (tk,tf,spc) in targets
+                    tface=solids[tk].faces[tf]
+                    pc,neg = if spc!==nothing
+                        α=(sb-sa)/(tb-ta);β=sa-α*ta
+                        _brep_pc_reparam(spc,α,β,tol,caller)
+                    else
+                        _brep_pc_on_surface(tface.sg,we.curve,wlo,whi,
+                                            tol,caller)
                     end
-                end
-                ex_i=findfirst(es->es.wside==w && es.weidx==weidx,
-                               esec_imps[tk][tf])
-                if ex_i===nothing
-                    push!(esec_imps[tk][tf],
-                          (pc=pc,spans=[(wlo,whi)],neg=neg,
-                           wside=w,weidx=weidx,crv=we.curve))
-                else
-                    es=esec_imps[tk][tf][ex_i]
-                    any(sp->abs(sp[1]-wlo)<tol && abs(sp[2]-whi)<tol,
-                        es.spans) || push!(es.spans,(wlo,whi))
+                    sslo,sshi=neg ? (-whi,-wlo) : (wlo,whi)
+                    _brep_imprint_contacts_n!(solids,tk,tf,w,weidx,pc,neg,
+                                              sslo,sshi,esplits,sec_cuts,
+                                              sections,tol,si)
+                    for te in (sslo,sshi)
+                        uv=_brep_pc_eval(pc,te)
+                        for wire in tface.wires,(e2,_,epc2) in wire
+                            e2r=solids[tk].edges[e2]
+                            lo2,hi2=minmax(e2r.t0,e2r.t1)
+                            tp=_brep_pc_param(epc2,uv,lo2,hi2,10tol)
+                            (tp===nothing || tp<=lo2+tol || tp>=hi2-tol) &&
+                                continue
+                            push!(get!(Vector{Float64},esplits[tk],e2),tp)
+                            touched[tk]=true
+                        end
+                    end
+                    ex_i=findfirst(es->es.wside==w && es.weidx==weidx &&
+                                       es.neg==neg && es.pc==pc,
+                                   esec_imps[tk][tf])
+                    if ex_i===nothing
+                        push!(esec_imps[tk][tf],
+                              (pc=pc,spans=[(wlo,whi)],neg=neg,
+                               wside=w,weidx=weidx,crv=we.curve))
+                    else
+                        es=esec_imps[tk][tf][ex_i]
+                        any(sp->abs(sp[1]-wlo)<tol && abs(sp[2]-whi)<tol,
+                            es.spans) || push!(es.spans,(wlo,whi))
+                    end
                 end
             end
         end
@@ -3250,12 +3435,17 @@ function _brep_materialize_boolean!(m::GeoModel,t::Int,op::Symbol,
                         ids=Int[]
                         for ar in wire
                             c=ctag[emap[ar.key]]
-                            push!(ids,ar.fwd ? c : -c)
+                            # a neg arc's pcurve params run opposite the edge
+                            # parameter — uv-forward traversal is then
+                            # edge-backward, so the OCC occurrence
+                            # orientation (signed tag + pcurve slot) flips
+                            efwd=ar.fwd ⊻ ar.neg
+                            push!(ids,efwd ? c : -c)
                             # stored pcurves are edge-parametrized — mirrored
                             # imprints negate their pcurve's parameter
                             pcst=ar.neg ? _brep_flip_pc(ar.pc,caller) : ar.pc
                             ent=get(pcdict,c,nothing)
-                            if ar.fwd
+                            if efwd
                                 ent===nothing || ent.fwd===nothing ||
                                     throw(ErrorException(
                                         "$caller: duplicate forward pcurve " *
@@ -3476,14 +3666,16 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
         i==0 && continue
         spec.stag in pseudo_surf[i] || continue
         ok=true
+        pset=Set(pseudo_ctag[i])
         for w in spec.wires, ar in w
-            (ar.key isa Tuple && length(ar.key)>=3 &&
-             ar.key[1]===:e && ar.key[2]==i) || (ok=false;break)
+            (ar.key isa Tuple && length(ar.key)>=2 &&
+             ar.key[1]===:e && ar.key[2] in pset) || (ok=false;break)
         end
         ok || continue
         reuse[fi]=true;emit[fi]=false
         for w in spec.wires, ar in w
-            reuse_ctag[ar.key]=pseudo_ctag[i][ar.key[3]]
+            # canonical keys already carry the operand's own curve tag
+            reuse_ctag[ar.key]=ar.key[2]
         end
     end
     # global result edge table + 3-D vertex dedupe, first-appearance order
@@ -3563,10 +3755,14 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
                 for ar in wire
                     c=haskey(reuse_ctag,ar.key) ? reuse_ctag[ar.key] :
                         ctag[emap[ar.key]]
-                    push!(ids,ar.fwd ? c : -c)
+                    # a neg arc's pcurve params run opposite the edge
+                    # parameter — uv-forward traversal is then edge-backward,
+                    # so the OCC occurrence orientation flips
+                    efwd=ar.fwd ⊻ ar.neg
+                    push!(ids,efwd ? c : -c)
                     pcst=ar.neg ? _brep_flip_pc(ar.pc,caller) : ar.pc
                     ent=get(pcdict,c,nothing)
-                    if ar.fwd
+                    if efwd
                         ent===nothing || ent.fwd===nothing ||
                             throw(ErrorException(
                                 "$caller: duplicate forward pcurve " *
@@ -3750,6 +3946,116 @@ function _boolean_component_surface(m::GeoModel,t::Int,full::Mesh,
     trilist=Int[ti for (ci,tris) in enumerate(comps) if keep[ci]
                 for ti in tris]
     return _mesh_tris_subset(full,trilist)
+end
+
+# ── parametric surface tessellation ─────────────────────────────────────────
+#
+# `mesh_model_surface` meshes planar (and ruled/tric) faces; OCC curved faces
+# mesh through their (u,v) domain instead. The boundary reuses the planar
+# path's curve discretization — the same `_surface_curve_parameters` grading
+# and canonical 3-D coordinates — so neighbouring faces weld shared-edge
+# nodes bitwise. The wire's pcurves bound the face's uv domain; on periodic
+# surfaces `u` unwraps along the traversal so the domain is an ordinary PSLG
+# for `constrained_delaunay`. Interior vertices evaluate through
+# `_occ_surface_point`; boundary vertices keep their canonical coordinates.
+function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
+                                        caller::AbstractString)
+    sg=get(m.surface_geometry,t,nothing)
+    occ=sg===nothing ? nothing : get(sg,:occ,nothing)
+    occ in (:cylinder,:sphere,:cone,:torus) || throw(ArgumentError(
+        "$caller: Surface[$t] has no parametric OCC record"))
+    pcurves=get(sg,:pcurves,nothing)
+    pcurves===nothing && throw(ArgumentError(
+        "$caller: Surface[$t] carries no pcurves"))
+    period=_brep_uperiod(sg)
+    forced=Dict{Int,Vector{Float64}}()
+    _attribute_forced_parameters(m,t,forced,caller)
+    xs=Float64[];ys=Float64[]
+    lift=NTuple{3,Float64}[]          # canonical 3-D per PSLG vertex
+    segs=Tuple{Int,Int}[]
+    index=Dict{NTuple{2,Float64},Int}()
+    function emit(uv,p3)
+        return get!(index,uv) do
+            push!(xs,uv[1]);push!(ys,uv[2]);push!(lift,p3)
+            return length(xs)
+        end
+    end
+    for loop_id in m.surfaces[t]
+        _verify_loop_closed(m,loop_id,caller,"Surface[$t]")
+        loop_idx=Int[]
+        u_prev=nothing
+        for signed in m.loops[loop_id]
+            curve=abs(signed)
+            a,b=m.curves[curve]
+            t0,t1=_model_curve_param_bounds(m,curve,caller)
+            ent=get(pcurves,curve,nothing)
+            ent===nothing && throw(ArgumentError(
+                "$caller: Surface[$t] has no pcurve for Curve[$curve]"))
+            pc=signed<0 && ent.rev!==nothing ? ent.rev : ent.fwd
+            for parameter in _surface_curve_parameters(
+                    m,forced,curve,signed,caller)
+                p3=if parameter==t0
+                    m.points[a]
+                elseif parameter==t1
+                    m.points[b]
+                else
+                    _periodic_curve_point(m,curve,parameter,caller)
+                end
+                u,v=_occ_pcurve_d0(pc,parameter)
+                if period>0.0 && u_prev!==nothing
+                    u+=period*round((u_prev-u)/period)
+                end
+                u_prev=u
+                push!(loop_idx,emit((u,v),p3))
+            end
+        end
+        nloop=length(loop_idx)
+        nloop>=3 || throw(ArgumentError(
+            "$caller: Loop[$loop_id] needs at least three points"))
+        for k in 1:nloop
+            i,j=loop_idx[k],loop_idx[mod1(k+1,nloop)]
+            i==j || (xs[i]==xs[j] && ys[i]==ys[j]) || push!(segs,(i,j))
+        end
+    end
+    isempty(segs) && throw(ArgumentError(
+        "$caller: Surface[$t] has an empty parametric boundary"))
+    T=constrained_delaunay(xs,ys,segs)
+    interior=classify_interior(T)
+    mesh=to_mesh(T;interior)
+    # Lift: boundary vertices keep the canonical 3-D they share with the
+    # neighbouring faces' curve nodes; interior vertices evaluate the
+    # analytic patch.
+    canonical=Dict{NTuple{2,Float64},NTuple{3,Float64}}()
+    for k in eachindex(lift)
+        canonical[(xs[k],ys[k])]=lift[k]
+    end
+    coords=Matrix{Float64}(undef,3,nnodes(mesh))
+    for k in 1:nnodes(mesh)
+        u=mesh.coords[1,k];v=mesh.coords[2,k]
+        p3=get(canonical,(u,v),nothing)
+        p3===nothing && (p3=_occ_surface_point(sg,u,v))
+        coords[1,k]=p3[1];coords[2,k]=p3[2];coords[3,k]=p3[3]
+    end
+    mesh=Mesh(coords;tris=mesh.tris)
+    # The uv-CCW winding lifts to either side of the face depending on the
+    # parametrization's handedness; align the patch with the face's
+    # geometric normal like a planar patch follows its `axis`.
+    cell=mesh.tris[:,1]
+    um=(mesh.coords[1,cell[1]]+mesh.coords[1,cell[2]]+
+        mesh.coords[1,cell[3]])/3
+    vm=(mesh.coords[2,cell[1]]+mesh.coords[2,cell[2]]+
+        mesh.coords[2,cell[3]])/3
+    nn=_brep_surface_normal(sg,um,vm)
+    pa=coords[:,cell[1]];pb=coords[:,cell[2]];pc_=coords[:,cell[3]]
+    n3=_b3cross(_b3(pb,pa),_b3(pc_,pa))
+    if _b3dot(n3,nn)<0
+        flipped=Matrix{Int32}(undef,3,size(mesh.tris,2))
+        flipped[1,:].=mesh.tris[1,:]
+        flipped[2,:].=mesh.tris[3,:]
+        flipped[3,:].=mesh.tris[2,:]
+        mesh=Mesh(coords;tris=flipped)
+    end
+    return mesh
 end
 
 # ── result surfaces (any Boolean record) ────────────────────────────────────

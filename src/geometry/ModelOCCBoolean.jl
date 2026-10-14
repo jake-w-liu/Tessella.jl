@@ -74,6 +74,43 @@ function _model_occ_boolean_keep!(pub::_ModelOCCBooleanPub,dim::Int,s::Int,
     return nothing
 end
 
+# The engine can emit a split corner a few ulps off the position its
+# siblings store exactly (typed-input section arithmetic differs from
+# the untyped path). A face holding both readings is a few-ulps
+# non-planar and the exact `orient3` checks then refuse it on the next
+# materialization. Snap a fresh vertex's stored coordinates to a
+# deterministic canonical — the lexicographically smallest coincident
+# bound vertex, else the smallest coincident staged one — so every
+# member of a dust cluster lands on the same bitwise value. Bound
+# vertices are canonical candidates too, which keeps dirty engine
+# output from ever entering the registry: no dusty bound vertex means
+# all later snaps agree.
+function _model_occ_boolean_snap_vertex(pub::_ModelOCCBooleanPub,
+                                        p::NTuple{3,Float64})
+    p=_model_occ_snap_coord.(p)
+    atol=1e-11*max(1.0,abs(p[1]),abs(p[2]),abs(p[3]))
+    # bound vertices are already committed registry geometry — a dusty
+    # staged candidate must never win over them, or both coordinates end
+    # up referenced by one face and exact coplanarity checks fail
+    best=nothing
+    for ((d,_),bid) in pub.kernel.bindings
+        d==0 || continue
+        c=pub.kernel.shapes[bid].geometry.point
+        (abs(p[1]-c[1])<=atol && abs(p[2]-c[2])<=atol &&
+         abs(p[3]-c[3])<=atol) || continue
+        (best===nothing || c<best) && (best=c)
+    end
+    best===nothing || return best
+    for sh in values(pub.staged)
+        sh.dimension==0 || continue
+        c=sh.geometry.point
+        (abs(p[1]-c[1])<=atol && abs(p[2]-c[2])<=atol &&
+         abs(p[3]-c[3])<=atol) || continue
+        (best===nothing || c<best) && (best=c)
+    end
+    return best===nothing ? p : best
+end
+
 function _model_occ_boolean_vertex!(pub::_ModelOCCBooleanPub,s::Int,caller)
     skey=(0,s)
     haskey(pub.ids,skey) && return pub.ids[skey]
@@ -88,7 +125,8 @@ function _model_occ_boolean_vertex!(pub::_ModelOCCBooleanPub,s::Int,caller)
     kid=get(pub.matmap,skey,UInt64(0))
     mesh_size=kid==0 ? get(pub.sm.point_size,s,0.0) :
         pub.kernel.shapes[kid].geometry.mesh_size
-    pub.staged[id]=_ModelOCCShape(0,(point=pub.sm.points[s],
+    pub.staged[id]=_ModelOCCShape(0,
+        (point=_model_occ_boolean_snap_vertex(pub,pub.sm.points[s]),
         mesh_size=mesh_size),UInt64[])
     push!(pub.planned,(0,tag,id))
     pub.ids[skey]=id
@@ -128,7 +166,21 @@ function _model_occ_boolean_edge!(pub::_ModelOCCBooleanPub,s::Int,caller)
     a,b=pub.sm.curves[s]
     aid=_model_occ_boolean_vertex!(pub,a,caller)
     bid=_model_occ_boolean_vertex!(pub,b,caller)
-    g=pub.sm.curve_geometry[s]
+    # Untyped-default materialization leaves :line records empty; the
+    # kernel edge they came from carries the verbatim record to publish.
+    g=get(pub.sm.curve_geometry,s,nothing)
+    if g===nothing
+        kid=get(pub.matmap,(1,s),UInt64(0))
+        if kid==0
+            pa=pub.sm.points[a];pb=pub.sm.points[b]
+            dl=sqrt((pb[1]-pa[1])^2+(pb[2]-pa[2])^2+(pb[3]-pa[3])^2)
+            g=(occ=:line,origin=pa,
+               dir=((pb[1]-pa[1])/dl,(pb[2]-pa[2])/dl,
+                    (pb[3]-pa[3])/dl),t0=0.0,t1=dl)
+        else
+            g=pub.kernel.shapes[kid].geometry.geometry
+        end
+    end
     haskey(g,:face) && (g=merge(g,(face=_model_occ_boolean_remap_face(
         pub,g.face,caller),)))
     id=_model_occ_boolean_id!(pub)
@@ -161,6 +213,71 @@ function _model_occ_boolean_wire!(pub::_ModelOCCBooleanPub,loop_tag::Int,
     return id
 end
 
+# Newell normal (unnormalized) + sample centroid of a scratch wire's 3D
+# traversal. The face's natural normal is the wire's winding normal —
+# `_brep_wire_pts`/`_brep_wire_newell` share the traversal sampling; the
+# engine's fitted `axis` can disagree with it.
+function _model_occ_boolean_wire_normal(sm::GeoModel,loop_tag::Int)
+    pts=_brep_wire_pts(sm,loop_tag)
+    n=(0.0,0.0,0.0);c=(0.0,0.0,0.0)
+    for i in eachindex(pts)
+        p=pts[i];q=pts[mod1(i+1,length(pts))]
+        c=c.+p
+        n=(n[1]+(p[2]-q[2])*(p[3]+q[3]),
+           n[2]+(p[3]-q[3])*(p[1]+q[1]),
+           n[3]+(p[1]-q[1])*(p[2]+q[2]))
+    end
+    return n,c./length(pts)
+end
+
+# 3-D sample points of a scratch wire's traversal (alias kept for the
+# probe helpers' call sites).
+_model_occ_boolean_wire_pts(sm::GeoModel,loop_tag::Int) =
+    _brep_wire_pts(sm,loop_tag)
+
+# A 3-D point strictly inside a scratch face's outer wire (and outside
+# its hole wires) plus the face's unit winding normal. Concave faces put
+# the polygon centroid outside the polygon, so candidates are edge
+# midpoints nudged along the in-plane perpendicular until the projected
+# point-in-polygon test accepts one.
+function _model_occ_boolean_face_probe(sm::GeoModel,stag::Int,caller)
+    loops=sm.surfaces[stag]
+    nw,_=_model_occ_boolean_wire_normal(sm,loops[1])
+    L=sqrt(_dot3(nw,nw))
+    L==0.0 && throw(ErrorException("$caller: degenerate wire"))
+    n=(nw[1]/L,nw[2]/L,nw[3]/L)
+    k=argmax(abs.(collect(n)))
+    pr=k==3 ? (1,2) : k==2 ? (1,3) : (2,3)
+    outer=_model_occ_boolean_wire_pts(sm,loops[1])
+    ox=[p[pr[1]] for p in outer];oy=[p[pr[2]] for p in outer]
+    oidx=collect(1:length(outer))
+    function inside(q)
+        _point_in_polygon(q[pr[1]],q[pr[2]],ox,oy,oidx) || return false
+        for lp in loops[2:end]
+            h=_model_occ_boolean_wire_pts(sm,lp)
+            _point_in_polygon(q[pr[1]],q[pr[2]],
+                [p[pr[1]] for p in h],[p[pr[2]] for p in h],
+                collect(1:length(h))) && return false
+        end
+        return true
+    end
+    for (i,p) in enumerate(outer)
+        q=outer[mod1(i+1,length(outer))]
+        e=(q[1]-p[1],q[2]-p[2],q[3]-p[3])
+        el=sqrt(_dot3(e,e));el==0.0 && continue
+        perp=_b3cross(n,(e[1]/el,e[2]/el,e[3]/el))
+        mid=((p[1]+q[1])/2,(p[2]+q[2])/2,(p[3]+q[3])/2)
+        for sgn in (1.0,-1.0),sc in (1e-3,1e-4,1e-5)
+            cand=mid.+sgn*sc*el.*perp
+            inside(cand) && return cand,n
+        end
+    end
+    _,cw=_model_occ_boolean_wire_normal(sm,loops[1])
+    inside(cw) && return cw,n
+    throw(ErrorException(
+        "$caller: no interior probe on boolean result face"))
+end
+
 function _model_occ_boolean_face!(pub::_ModelOCCBooleanPub,s::Int,caller)
     skey=(2,s)
     haskey(pub.ids,skey) && return pub.ids[skey]
@@ -175,7 +292,15 @@ function _model_occ_boolean_face!(pub::_ModelOCCBooleanPub,s::Int,caller)
     for (index,loop_tag) in enumerate(pub.sm.surfaces[s])
         push!(children,_model_occ_boolean_wire!(pub,loop_tag,index>1,caller))
     end
-    g=pub.sm.surface_geometry[s]
+    # Untyped-default materialization leaves :plane records empty; the
+    # kernel face they came from carries the verbatim record to publish.
+    g=get(pub.sm.surface_geometry,s,nothing)
+    if g===nothing
+        kid=get(pub.matmap,(2,s),UInt64(0))
+        kid==0 && throw(ErrorException(
+            "$caller: boolean result face lacks a geometry record"))
+        g=pub.kernel.shapes[kid].geometry.geometry
+    end
     if haskey(g,:pcurves)
         pcs=Dict{Int,NamedTuple}()
         for (ct,pc) in g.pcurves
@@ -183,6 +308,17 @@ function _model_occ_boolean_face!(pub::_ModelOCCBooleanPub,s::Int,caller)
             pcs[pub.ktags[(1,ct)]]=_model_occ_boolean_pc_entry(pc)
         end
         g=merge(g,(pcurves=pcs,))
+    end
+    # The kernel face's `axis` is its natural normal — the wire's winding
+    # direction — but the engine's record carries only a plane fit that
+    # can disagree with the wire. When it does, flip `axis` to the
+    # winding normal and toggle `reversed` so the surface parameter
+    # normal (X×Y, unchanged) still round-trips the face normal.
+    kind=get(pub.sm.surface_types,s,:plane)
+    if kind===:plane && haskey(g,:axis)
+        nw,_=_model_occ_boolean_wire_normal(pub.sm,pub.sm.surfaces[s][1])
+        _dot3(nw,g.axis)<0 &&
+            (g=merge(g,(axis=(.-g.axis),reversed=!get(g,:reversed,false))))
     end
     id=_model_occ_boolean_id!(pub)
     tag=_model_occ_boolean_tag!(pub,2)
@@ -193,11 +329,41 @@ function _model_occ_boolean_face!(pub::_ModelOCCBooleanPub,s::Int,caller)
     return id
 end
 
-function _model_occ_boolean_shell!(pub::_ModelOCCBooleanPub,sl::Int,caller)
+# Whether the scratch face `stag` is used reversed in the result solid
+# `sv`. The engine's surface-loop signs track provenance (which operand
+# use a piece came from), not a consistent outward orientation — under
+# untyped-default materialization the record axes don't reflect it
+# either — so the use direction is measured directly: a probe offset
+# along the outer wire's winding normal lands inside the solid exactly
+# when that normal points into it.
+function _model_occ_boolean_face_rev(pub::_ModelOCCBooleanPub,stag::Int,
+                                     sv::NamedTuple,diag::Float64,
+                                     sm_rev::Bool,caller)
+    get(pub.sm.surface_types,stag,:plane)===:plane || return sm_rev
+    c,n=_model_occ_boolean_face_probe(pub.sm,stag,caller)
+    for scale in (1e-6,1e-7,1e-8)
+        ε=scale*diag
+        pin=pout=nothing
+        try pin=_brep_point_in_solid(sv,c.+ε.*n,_BREP_TOL,caller)
+        catch
+        end
+        try pout=_brep_point_in_solid(sv,c.-ε.*n,_BREP_TOL,caller)
+        catch
+        end
+        pin===true && pout===false && return true
+        pin===false && pout===true && return false
+    end
+    throw(ErrorException("$caller: cannot orient boolean result face"))
+end
+
+function _model_occ_boolean_shell!(pub::_ModelOCCBooleanPub,sl::Int,
+                                   sv::NamedTuple,diag::Float64,caller)
     uses=Tuple{UInt64,Bool}[]
     for sf in pub.sm.surface_loops[sl]
-        fid=_model_occ_boolean_face!(pub,abs(sf),caller)
-        push!(uses,(fid,sf<0))
+        stag=abs(sf)
+        fid=_model_occ_boolean_face!(pub,stag,caller)
+        rev=_model_occ_boolean_face_rev(pub,stag,sv,diag,sf<0,caller)
+        push!(uses,(fid,rev))
     end
     id=_model_occ_boolean_id!(pub)
     tag=_model_occ_boolean_tag!(pub,-2)
@@ -211,8 +377,13 @@ end
 function _model_occ_boolean_solid!(pub::_ModelOCCBooleanPub,v::Int,
                                    ktag::Int,caller)
     children=UInt64[]
+    sv=_brep_extract(pub.sm,v,caller)
+    lo=ntuple(i->minimum(p[i] for p in sv.pts),3)
+    hi=ntuple(i->maximum(p[i] for p in sv.pts),3)
+    diag=sqrt((hi[1]-lo[1])^2+(hi[2]-lo[2])^2+(hi[3]-lo[3])^2)
+    diag==0.0 && (diag=1.0)
     for sl in pub.sm.volumes[v]
-        push!(children,_model_occ_boolean_shell!(pub,sl,caller))
+        push!(children,_model_occ_boolean_shell!(pub,sl,sv,diag,caller))
     end
     prim=nothing
     rec=get(pub.sm.cylinders,v,nothing)
@@ -291,14 +462,27 @@ function _model_occ_boolean(m::GeoModel,op::Symbol,objects,tools,
     in_tags=vcat(obj_tags,tool_tags)
     in_set=Set(in_tags)
     n=length(in_tags)
+    # a lone operand under union/fragments/difference maps to itself
+    # upstream (A∪∅, fragments of one arg, A−∅ all return A); skipping
+    # materialization keeps operands the engine cannot yet
+    # re-materialize — e.g. curved boolean results — valid in that
+    # degenerate call. Intersection's empty-tool result is not the
+    # operand, and explicit tags run through the engine's phantom-tag
+    # path, so both stay off this shortcut.
+    if n==1 && explicit==0 && op!==:intersection
+        dt=Tuple{Int,Int}[(3,only(in_tags))]
+        return dt,Vector{Tuple{Int,Int}}[dt]
+    end
     # materialize operands into the scratch model — kernel tags carry over
     # verbatim and shared sub-shapes dedup through `seen`
     sm=GeoModel()
     seen=Set{UInt64}()
     matmap=Dict{Tuple{Int,Int},UInt64}()
+    snap=NTuple{3,Float64}[]
     for t in in_tags
         id=kernel.bindings[(3,t)]
-        _model_occ_dist_materialize!(sm,kernel,3,id,seen,caller)
+        _model_occ_dist_materialize!(sm,kernel,3,id,seen,caller;snap=snap,
+            untyped_defaults=true)
         _model_occ_boolean_matmap!(matmap,kernel,id,caller)
     end
     # the engine's `_alloc_tag!` draws on `next_tag`; seed it above the
@@ -378,4 +562,29 @@ function _model_occ_boolean(m::GeoModel,op::Symbol,objects,tools,
         Tuple{Int,Int}[(3,get(ktagmap,rvmap[v],rvmap[v])) for v in im]
         for im in image]
     return out_dt,out_map
+end
+
+# `gmsh.model.occ.remove_all_duplicates` — upstream
+# `OCC_Internals::removeAllDuplicates`, literally
+# `booleanFragments(-1, allMaxDimEntities, {}, remove both)`: every
+# bound entity at the maximum dimension fragments against its peers
+# (`_getAllDimTags(dimTags, _getMaxDim())`), so overlapping solids split
+# into shared cells and exact duplicates collapse into one. Non-volume
+# maximum dimensions stay outside the bridge's volume-operand bound and
+# reject loudly like a direct `fragment` call would.
+function _model_occ_remove_all_duplicates(m::GeoModel,caller)
+    kernel=m.occ_kernel
+    maxdim=-1
+    for (d,t) in keys(kernel.bindings)
+        d>=0 && (maxdim=max(maxdim,d))
+    end
+    maxdim<0 && return nothing      # nothing bound — upstream no-ops
+    ents=Tuple{Int,Int}[]
+    for (d,t) in keys(kernel.bindings)
+        d==maxdim && push!(ents,(d,t))
+    end
+    sort!(ents)
+    length(ents)<2 && return nothing
+    _model_occ_boolean(m,:fragments,ents,Int[],-1,true,true,caller)
+    return nothing
 end

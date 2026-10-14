@@ -1208,6 +1208,135 @@ via `runtests.jl` (5m30.9s/5m47.1s) and `Pkg.test()`
 (5m31.2s/5m47.1s); the native Boolean regressions stay
 67/67, 165/165 and 62/62.
 
+### GEO01 slice 17 — `occ.remove_all_duplicates` + curved-Boolean hardening (2026-10-14)
+
+The seventeenth GEO01 slice adds
+`model.occ.remove_all_duplicates()` /
+`remove_all_duplicates`, upstream
+`OCC_Internals::removeAllDuplicates`: it fragments every
+entity at the maximum dimension currently present
+against its peer entities with `removeObject=true` and
+`removeTool=true`, routed through the same
+`_model_occ_boolean` native bridge — coincident solids
+collapse onto one shared cell, overlapping solids split,
+empty and single-entity registries are no-ops, and a
+registry whose maximum dimension is below 3 rejects
+loudly rather than pretending volume-only support.
+
+The deep-debug pass grew into a curved-Boolean
+hardening increment: eight confirmed defects fixed,
+each found by tracing a real failure to its root
+cause rather than papering over symptoms.
+
+1.  `_brep_pc_arc_area` integrated a `circ2d` arc's
+    cross term with a wrong sign and swapped frame
+    components (the `c·x₁`/`c·x₂` coefficients), so a
+    seam-wrapped region's signed area mis-signed and
+    `_brep_cycle_sample` nudged probes onto the wrong
+    side — the "could not sample a Boolean wiring
+    region" failure on curved re-cuts. The formula is
+    now derived per `u=c₁+r(c·x₁−s·x₂)`,
+    `v=c₂+r(c·x₂+s·x₁)`.
+2.  `_brep_pc_circ_on_plane` always emitted a bare
+    right-handed `circ2d`, but an anti-aligned section
+    circle (`n = −pl.axis`, e.g. a hole rim on a
+    mirrored cap) projects to a left-handed uv trace —
+    the record silently tracked `−t` while every
+    consumer assumed `+t`. It now wraps the record in
+    the `neg2d` pcurve wrapper like
+    `_brep_synth_pcurve` already did.
+3.  `_brep_plane_record`'s mirror branch flipped only
+    `Y`, leaving a left-handed uv frame
+    (`X×Y = −axis`), so the alignment test
+    `dot(n, axis)` missed records that still needed
+    `neg2d`. Both plane pcurve constructors now test
+    handedness against `dot(n, X×Y)`.
+4.  `neg2d` records reaching `_brep_flip_pc` (the
+    parameter-reversed stored record for `neg` arcs)
+    hit the "unrepresentable" throw; flipping a
+    mirrored record is exactly the unwrapped inner.
+5.  `_gm_sincos` returns `(sin, cos)` but two
+    `_brep_pc_reparam` call sites destructured
+    `(cos, sin)`, rotating reparametrized circle
+    frames by `π/2−β` instead of `β` — seam-wrapped
+    spans emitted the correct canonical pieces with a
+    phase-shifted pcurve that disagreed with the
+    bookkeeping.
+6.  The materializers signed result wires by `ar.fwd`
+    (uv-traversal direction), but for `neg` arcs
+    pcurve parameters run opposite to the edge
+    parameter — uv-forward traversal is edge-backward.
+    Both `_brep_materialize!` paths now sign by
+    `efwd = fwd ⊻ neg` and slot the stored pcurve
+    (`fwd`/`rev`) by `efwd`, with
+    `_brep_flip_pc` applied when `neg`.
+7.  Degenerate-section spans on a closed winner edge
+    were ambiguous at the periodic seam: endpoint
+    projections `minmax`'d onto the complementary
+    half-arc. New `_brep_esec_tspans` unwraps the
+    directed span using the section midpoint as
+    disambiguator (verified, with a fallback that
+    preserves prior behavior), then cuts the unwrapped
+    span into canonical pieces at every domain
+    boundary it crosses; both the 2-operand and
+    N-operand imprint loops consume it.
+8.  Consumers that destructured pcurve records
+    directly — `_model_occ_wire_shoelace`, the
+    plane-stats and moment accumulators, the pcurve
+    intersector/extrema/bounds/kind/resolution
+    adaptors — now unwrap `neg2d`, mirroring
+    parameter domains and flipping reported
+    transitions (`:in↔:out`, `:head↔:end`,
+    inside/outside situations, opposition).
+
+The increment also closes adjacent curved-geometry
+gaps the same fixtures exposed: `get_mass` gains a
+divergence-theorem path for cylinder faces (Green's
+theorem reduces `∬dudv`, `∬cos u dudv`,
+`∬sin u dudv` to wire-boundary line integrals with
+u-unwrap across the periodic seam);
+`_surface_curve_parameters` now keeps the
+drop-end convention for closed edges while supplying
+the traversal-entry representative explicitly;
+`_model_explicit_volume_geometry` routes OCC curved
+faces through `_model_occ_curved_surface_mesh` so
+per-face tessellations weld shared-edge nodes; and
+the OCC materializer canonicalizes vertex
+coordinates (`_model_occ_snap_point`,
+15-significant-digit rounding plus near-coincidence
+clustering) so engine split points recomputed through
+different arithmetic paths weld bitwise and the
+exact `orient3` coplanarity checks hold.
+
+Verified exactly: the box-minus-cylinder piece
+re-cuts through the bridge at `0.5−π·0.16/2`, and the
+overlapping curved fragment produces all four cells
+with analytic masses `0.2486725877`, `0.2486725877`,
+`0.2513274123`, `0.5` (piece∖box2, piece∩box2, the
+notch half-cylinder, and the x>1 slab) —
+`B∖A` is genuinely disconnected there, so four cells
+is correct, not a topology defect.
+`remove_all_duplicates` collapses a coincident pair
+onto one shared cell and splits overlaps into
+`0.4/0.6/0.4`, re-fragmentation is idempotent across
+three consecutive publishes, and upstream
+no-op/rejection semantics hold.
+
+Known residual (resource, not logic): the engine's
+provenance tetrahedralization of the degenerate
+cocircular-rim PLC escalates to exact-arithmetic
+Delaunay nondeterministically; under accumulated
+memory pressure (≈700M allocations in one process)
+the exact path can exhaust memory, and the runtime
+has also crashed once inside `run_finalizer` during
+lock release — identical engine calls without the
+lock wrapper run cleanly to completion, so the
+crash is environmental to Julia's finalizer/GMP
+machinery under churn, not a geometry defect.
+Isolated runs pass deterministically (~7 min for the
+fragment testset). Hardening the exact-Delaunay
+escalation remains open performance work.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

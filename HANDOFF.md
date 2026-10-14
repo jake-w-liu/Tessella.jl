@@ -1154,6 +1154,48 @@ via `runtests.jl` (5m30.9s/5m47.1s) and `Pkg.test()`
 (5m31.2s/5m47.1s); native Boolean regressions 67/67,
 165/165 and 62/62.
 
+The seventeenth GEO01 slice followed:
+`occ.remove_all_duplicates()` / `remove_all_duplicates` —
+upstream `OCC_Internals::removeAllDuplicates` — fragmenting
+every entity at the maximum present dimension against its
+peers with `removeObject=removeTool=true` through the same
+`_model_occ_boolean` bridge. Its deep-debug grew into a
+curved-Boolean hardening pass with eight confirmed fixes:
+a mirrored-pcurve `neg2d` wrapper now carries left-handed
+uv traces (anti-aligned section circles, left-handed plane
+uv frames detected by `dot(n, X×Y)`) end-to-end through
+extraction, intersection, reparametrization, storage and
+measures; both materializers sign result wires by
+`fwd ⊻ neg` since a `neg` arc's uv-forward traversal is
+edge-backward; `_brep_esec_tspans` unwraps
+degenerate-section spans across a closed winner edge's
+periodic seam (midpoint-disambiguated with a verified
+fallback, then split into canonical pieces);
+`_brep_pc_arc_area`'s circ2d cross-term sign and two
+`_brep_pc_reparam` call sites' `(sin,cos)` destructure
+order were corrected; and every pcurve consumer that
+destructured records directly now unwraps `neg2d`,
+mirroring domains and flipping reported transitions.
+Adjacent gaps closed along the way: `get_mass` integrates
+cylinder faces by the divergence theorem (Green's-theorem
+wire integrals with periodic-u unwrap), closed-edge
+`_surface_curve_parameters` supplies the traversal-entry
+representative, OCC curved faces mesh via
+`_model_occ_curved_surface_mesh` inside volume PLCs, and
+the materializer canonicalizes vertex coordinates so
+split points weld bitwise for the exact `orient3` checks.
+Exact oracles: coincident-pair collapse to one shared
+cell, `0.4/0.6/0.4` overlap split, three consecutive
+idempotent re-fragments, curved re-cut `0.5−π·0.16/2`,
+and the overlapping curved fragment's four cells at
+`0.2486725877`/`0.2486725877`/`0.2513274123`/`0.5` —
+`B∖A` is genuinely disconnected there. Residual resource
+concern: the provenance tet-snapshot on cocircular-rim
+PLCs escalates to exact-arithmetic Delaunay
+nondeterministically; under ~700M-alloc accumulated
+pressure it can exhaust memory (isolated runs pass in
+~7 min). Hardening that escalation stays open.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

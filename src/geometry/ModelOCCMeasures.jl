@@ -130,6 +130,9 @@ function _model_occ_wire_shoelace(kernel,face_rec,uses)
         eg=kernel.shapes[eid].geometry.geometry
         pc=face_rec.pcurves[etag].fwd
         t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
+        if haskey(pc,:neg2d)
+            pc=pc.neg2d[1];t0,t1=-t0,-t1
+        end
         if haskey(pc,:lin2d)
             a=_occ_pcurve_d0(pc,t0); b=_occ_pcurve_d0(pc,t1)
             cr=_occ2_cross(a,b)
@@ -217,10 +220,13 @@ function _model_occ_plane_stats(kernel,id;want_tensor=false,
             etag=kernel.shape_tags[eid][2]
             eg=kernel.shapes[eid].geometry.geometry
             pc=rec.pcurves[etag].fwd
+            t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
+            if haskey(pc,:neg2d)
+                pc=pc.neg2d[1];t0,t1=-t0,-t1
+            end
             haskey(pc,:lin2d) || throw(ErrorException(
                 "$caller: faces with conic " *
                 "boundaries are not supported"))
-            t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
             p1=_occ_pcurve_d0(pc,t0); p2=_occ_pcurve_d0(pc,t1)
             d1=_occ2_sub(p1,c2); d2=_occ2_sub(p2,c2)
             A2=_occ2_cross(d1,d2)/2
@@ -238,6 +244,57 @@ function _model_occ_plane_stats(kernel,id;want_tensor=false,
         end
     end
     return A,c3,T
+end
+
+# ---- cylinder patches ------------------------------------------------
+#
+# A trimmed cylinder face p(u,v)=C+R·u_r+v·Z has surface element
+# dA=R·du·dv and unit normal ±u_r (the frame handedness h=X·(Y×Z)
+# picks the sign). The divergence needs ∬_D(p·u_r)dA with
+# p·u_r=Cx·cos u+Cy·sin u+R, Cx=C·X, Cy=C·Y — every domain moment
+# reduces by Green's theorem to a boundary line integral over the
+# face's pcurves:
+#   ∬_D dudv=∮u dv,  ∬_D cos u dudv=∮sin u dv,  ∬_D sin u dudv=∮−cos u dv.
+# Each wire's signed integral is normalized by its raw shoelace sign so
+# the outer wire counts positive and holes negative, matching the
+# plane-face convention.
+function _model_occ_cyl_face_div(kernel,fid)
+    shape=kernel.shapes[fid]; rec=shape.geometry.geometry
+    I1=Ic=Is=0.0
+    for (wi,wire_id) in enumerate(shape.children)
+        uses=kernel.shapes[wire_id].geometry.uses
+        raw=_model_occ_wire_shoelace(kernel,rec,uses)[1]
+        j1=jc=js=0.0
+        u_prev=nothing
+        for (eid,rev) in uses
+            etag=kernel.shape_tags[eid][2]
+            eg=kernel.shapes[eid].geometry.geometry
+            pc=rec.pcurves[etag].fwd
+            t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
+            # u is periodic: a stored pcurve picks an arbitrary
+            # representative mod 2π — unwrap the wire so each edge
+            # continues the previous one's u, or ∮u dv telescopes to
+            # zero instead of the domain area
+            us=_occ_pcurve_d0(pc,t0)[1]
+            shift=u_prev===nothing ? 0.0 :
+                _OCC_TWO_PI*round((u_prev-us)/_OCC_TWO_PI)
+            panels=max(1,ceil(Int,abs(t1-t0)/(π/2)))
+            span=(t1-t0)/panels
+            for k in 0:panels-1
+                a=t0+k*span; h=span/2; mid=a+h
+                for i in 1:4, s in (-1,1)
+                    t=mid+s*h*_OCC_GL_T[i]; w=_OCC_GL_W[i]*h
+                    (u,v),(du,dv)=_occ_pcurve_d1(pc,t)
+                    u+=shift
+                    j1+=w*u*dv; jc+=w*sin(u)*dv; js+=w*(-cos(u)*dv)
+                end
+            end
+            u_prev=_occ_pcurve_d0(pc,t1)[1]+shift
+        end
+        w=(wi==1 ? 1.0 : -1.0)*(raw>=0 ? 1.0 : -1.0)
+        I1+=w*j1; Ic+=w*jc; Is+=w*js
+    end
+    return I1,Ic,Is
 end
 
 # ---- faces -----------------------------------------------------------
@@ -385,14 +442,27 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
              arm*c*rec.X[2]+arm*s*rec.Y[2],
              arm*c*rec.X[3]+arm*s*rec.Y[3]))
     end
-    all(u->face_kind(u)===:plane,uses) ||
+    all(u->face_kind(u)===:plane || face_kind(u)===:cylinder,uses) ||
         throw(ErrorException("OCC.get_mass: unsupported solid boundary"))
-    # Divergence theorem over outward-oriented plane faces:
-    #   V = (1/3)Σ A·(n̂·c_F),  ∭r dV = (1/4)Σ n̂·∬_F r⊗r dA.
+    # Divergence theorem over outward-oriented faces:
+    #   V = (1/3)Σ ∬_F r·n̂ dA,  ∭r dV = (1/4)Σ ∬_F r(r·n̂) dA.
+    # Plane faces integrate exactly through `_model_occ_plane_stats`;
+    # cylinder patches reduce to wire-boundary line integrals.
     V=0.0; M=(0.0,0.0,0.0)
     for (fid,rev) in uses
         rec=kernel.shapes[fid].geometry.geometry
         σ=rev ? -1.0 : 1.0
+        if get(rec,:occ,nothing)===:cylinder
+            want_centroid && throw(ErrorException(
+                "OCC.get_center_of_mass: cylinder-bounded solids are " *
+                "not supported"))
+            I1,Ic,Is=_model_occ_cyl_face_div(kernel,fid)
+            h=_dot3(_occ_cross(rec.X,_occ_frame_y(rec)),rec.axis)>=0 ?
+                1.0 : -1.0
+            Cx=_dot3(rec.center,rec.X); Cy=_dot3(rec.center,rec.Y)
+            V+=σ*h*rec.radius*(Cx*Ic+Cy*Is+rec.radius*I1)/3
+            continue
+        end
         n=(σ*rec.axis[1],σ*rec.axis[2],σ*rec.axis[3])
         # The tensor pass (conic-free wires only) runs only for the
         # centroid — get_mass on a conic-faced solid still reports V.
@@ -546,10 +616,13 @@ function _model_occ_plane_moment3(kernel,id)
             etag=kernel.shape_tags[eid][2]
             eg=kernel.shapes[eid].geometry.geometry
             pc=rec.pcurves[etag].fwd
+            t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
+            if haskey(pc,:neg2d)
+                pc=pc.neg2d[1];t0,t1=-t0,-t1
+            end
             haskey(pc,:lin2d) || throw(ErrorException(
                 "OCC.get_matrix_of_inertia: faces with conic " *
                 "boundaries are not supported"))
-            t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
             p1=_occ_pcurve_d0(pc,t0); p2=_occ_pcurve_d0(pc,t1)
             A2=_occ2_cross(_occ2_sub(p1,c2),_occ2_sub(p2,c2))/2
             b3=_model_occ_plane_eval(rec,p1[1],p1[2])
