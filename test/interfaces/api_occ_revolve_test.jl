@@ -12,9 +12,13 @@
 # coincides with the profile so the source entity answers as top.
 # Rim circles/meridian faces deduplicate across shared profile
 # sub-entities; swept rim circles bind to the source vertices.
-# Partial angles, non-axial profiles, axis-crossing or multi-wire
-# faces, curved boundaries, solid inputs and the meshing options
-# reject loudly in phase 1 before any bind.
+# `numElements`/`heights`/`recombine` transport onto the Julia-native
+# Layers machinery (the upstream `ExtrudeMesh` attachment). Partial
+# angles, non-axial profiles, axis-crossing or multi-wire faces,
+# curved boundaries and solid inputs reject loudly in phase 1 before
+# any bind; under Layers an axis-touching profile and a sub-three-
+# subdivision full turn reject too — the former collapses the column
+# machinery, the latter welds coincident cells onto the source row.
 
 using Test
 using Tessella
@@ -299,11 +303,9 @@ end
     check(()->occ.revolve([(0,999)],0.0,0.0,0.0,0.0,0.0,1.0,2pi))
     check(()->occ.revolve([(4,1)],0.0,0.0,0.0,0.0,0.0,1.0,2pi))
     check(()->occ.revolve([(0,p_off)],0.0,0.0,0.0,0.0,0.0,1.0,2pi;
-        numElements=[2]))
+        numElements=[1]))
     check(()->occ.revolve([(0,p_off)],0.0,0.0,0.0,0.0,0.0,1.0,2pi;
         heights=[0.5]))
-    check(()->occ.revolve([(0,p_off)],0.0,0.0,0.0,0.0,0.0,1.0,2pi;
-        recombine=true))
     c=occ.add_circle(2.0,0.0,0.0,0.5;zAxis=[0.0,1.0,0.0])
     check(()->occ.revolve([(1,c)],0.0,0.0,0.0,0.0,0.0,1.0,2pi))
     _,_,f=_meridian_rect(occ,1.0,2.0,0.0,1.0)
@@ -325,6 +327,14 @@ end
         occ.add_line(pi_[3],pi_[4]),occ.add_line(pi_[4],pi_[1])]
     fh2=occ.add_plane_surface([occ.add_wire(eo),occ.add_wire(ei)])
     check(()->occ.revolve([(2,fh2)],0.0,0.0,0.0,0.0,0.0,1.0,2pi))
+    # Under Layers a two-subdivision full turn welds coincident cells
+    # onto the source row, and an axis-touching profile collapses the
+    # column machinery — both reject before any bind.
+    check(()->occ.revolve([(2,f)],0.0,0.0,0.0,0.0,0.0,1.0,2pi;
+        numElements=[2]))
+    _,_,fax=_meridian_rect(occ,0.0,2.0,0.0,1.0)
+    check(()->occ.revolve([(2,fax)],0.0,0.0,0.0,0.0,0.0,1.0,2pi;
+        numElements=[4]))
     # Spindle disk and axis-parallel disk reject.
     dbad=occ.add_disk(0.5,0.0,0.0,1.0,1.0;zAxis=[0.0,1.0,0.0])
     check(()->occ.revolve([(2,dbad)],0.0,0.0,0.0,0.0,0.0,1.0,2pi))
@@ -360,4 +370,67 @@ end
     @test ok
     element_types,element_tags,_=A.mesh.get_elements(3,solid_tag)
     @test element_types==Int32[4]
+end
+
+@testset "occ.revolve Layers transport" begin
+    # A point generatrix under Layers sweeps a graded rim circle; two
+    # subdivisions tile it as a two-arc ring.
+    occ=_occ_setup()
+    p=occ.add_point(3.0,0.0,1.0)
+    out=occ.revolve([(0,p)],0.0,0.0,0.0,0.0,0.0,1.0,2pi;
+                    numElements=[2])
+    rim_tag=out[2][2]
+    occ.synchronize()
+    A.mesh.generate(1)
+    _,coords=A.mesh.get_nodes(1,rim_tag,true)
+    @test length(coords)>=2*3
+    element_types,_,_=A.mesh.get_elements(1,rim_tag)
+    @test element_types==Int32[1]
+
+    # Annular profile -> revolved solid: the swept volume grades at the
+    # normalized heights; recombination emits prisms (type 6).
+    occ=_occ_setup()
+    _,_,f=_meridian_rect(occ,1.0,2.0,0.0,1.0)
+    out=occ.revolve([(2,f)],0.0,0.0,0.0,0.0,0.0,1.0,2pi;
+                    numElements=[4])
+    solid_tag=out[2][2]
+    occ.synchronize()
+    A.mesh.generate(3)
+    _,coords=A.mesh.get_nodes(3,solid_tag,true)
+    phis=sort!(unique!(round.(
+        [let a=mod(atan(coords[i+1],coords[i]),2pi)
+             a>2pi-1e-6 ? 0.0 : a
+         end for i in 1:3:length(coords)],digits=9)))
+    @test phis≈collect(range(0.0,2pi,length=5)[1:4]) atol=1e-9
+
+    occ=_occ_setup()
+    _,_,f=_meridian_rect(occ,1.0,2.0,0.0,1.0)
+    out=occ.revolve([(2,f)],0.0,0.0,0.0,0.0,0.0,1.0,2pi;
+                    numElements=[4],recombine=true)
+    solid_tag=out[2][2]
+    occ.synchronize()
+    A.mesh.generate(3)
+    element_types,_,_=A.mesh.get_elements(3,solid_tag)
+    @test 6 in element_types
+    @test !(4 in element_types)
+
+    # Disk -> torus with graded heights: layers [2,2] at cumulative
+    # boundaries 0.4/1.0 grade the turn at 0, 0.2, 0.4, 0.7 of a turn —
+    # azimuths 0, 0.4pi, 0.8pi, 1.4pi (the 2pi level welds onto 0).
+    occ=_occ_setup()
+    d=occ.add_disk(5.0,0.0,0.0,1.0,1.0;zAxis=[0.0,1.0,0.0])
+    out=occ.revolve([(2,d)],0.0,0.0,0.0,0.0,0.0,1.0,2pi;
+                    numElements=[2,2],heights=[0.4,1.0],
+                    recombine=true)
+    solid_tag=out[2][2]
+    occ.synchronize()
+    A.mesh.generate(3)
+    _,coords=A.mesh.get_nodes(3,solid_tag,true)
+    phis=sort!(unique!(round.(
+        [let a=mod(atan(coords[i+1],coords[i]),2pi)
+             a>2pi-1e-6 ? 0.0 : a
+         end for i in 1:3:length(coords)],digits=9)))
+    @test phis≈[0.0,0.4pi,0.8pi,1.4pi] atol=1e-9
+    element_types,_,_=A.mesh.get_elements(3,solid_tag)
+    @test 6 in element_types
 end

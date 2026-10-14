@@ -3868,6 +3868,20 @@ function _model_projection_surface_curves(m::GeoModel,surface::Int)
     return sort!(unique!(curves))
 end
 
+# Wire curves that appear with both orientations are the seam of a closed
+# (periodic-direction) face — a full-turn revolve lateral lists its
+# generatrix edge twice. Their cells close the emitted strip, so for the
+# extrusion coverage check they are interior support, not emitted
+# boundary. `signs[k]` stays nonzero only when every occurrence agreed.
+function _model_emitted_boundary_curves(m::GeoModel,surface::Int)
+    signs=Dict{Int,Int}()
+    for loop in m.surfaces[surface],c in m.loops[loop]
+        k=abs(c);s=sign(c)
+        signs[k]=get(signs,k,0)==-s ? 0 : s
+    end
+    return sort!(Int[k for (k,v) in signs if v!=0])
+end
+
 function _model_projection_surface_boundaries(m::GeoModel,surface::Int)
     return Int32.(_model_surface_boundary_curves(
         m,surface,"model_to_mixed";orient_holes=true))
@@ -5752,7 +5766,10 @@ function _model_volume_embedding_inventory(
     # but meshes through the analytic encoding: the boundary's curves and
     # surfaces are not classified into the tetrahedron mesh. Embedded entities
     # on those surfaces need curved-surface meshing — fail rather than drop.
-    boundary_surfaces=if _implicit_volume_surface(m,volume)
+    # A Layers-extruded volume sweeps through its boundary products instead —
+    # the ordinary classification needs them registered like an explicit shell.
+    boundary_surfaces=if _implicit_volume_surface(m,volume) &&
+                         _extrude_gate(m,3,volume)===nothing
         for surface in boundary_set
             nested_points,nested_curves=
                 _model_surface_embedding_tags(m,surface,caller)

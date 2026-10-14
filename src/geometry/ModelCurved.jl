@@ -1177,7 +1177,8 @@ function _materialized_boundary_records(m::GeoModel, tag::Int)
         push!(seen,curve)
         occ=_occ_geometry(m,curve)
         occ===nothing && continue
-        if occ.occ===:circle
+        if occ.occ===:circle || (occ.occ===:ellipse &&
+                abs(occ.rx-occ.ry)<=_OCC_CONFUSION*occ.rx)
             push!(circles,(curve,occ))
         elseif occ.occ===:line
             push!(seams,curve)
@@ -1190,12 +1191,15 @@ function _materialized_boundary_records(m::GeoModel, tag::Int)
 end
 
 # A circle edge satisfies its expected (center, n, r) when the stored record
-# matches and its rim vertex still lies on the circle.
+# matches and its rim vertex still lies on the circle. Circle-degenerate
+# ellipses qualify (`rx==ry`); the rim's plane normal may oppose the
+# cylinder axis when the rim is a shared sweep-source entity.
 function _occ_circle_consistent(m::GeoModel, curve::Int, g, center, n,
                                 r::Float64, tol::Float64)
     _points_close(g.center,center,tol) || return false
-    _points_close(g.n,n,tol) || return false
-    abs(g.r-r)>tol && return false
+    _points_close(g.n,n,tol) ||
+        _points_close(g.n,_occ3_scale(n,-1.0),tol) || return false
+    abs((hasproperty(g,:r) ? g.r : g.rx)-r)>tol && return false
     a,_=m.curves[curve]
     rim=_arc_sub(m.points[a],g.center)
     radial=sqrt(_arc_dot(rim,rim))

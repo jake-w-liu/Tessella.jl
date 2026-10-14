@@ -6,12 +6,14 @@
 # disk swept along its own normal reuses the compact cylinder
 # publication (upstream shares the source face as the bottom cap — the
 # producer builds a geometrically identical cap instead, so the source
-# stays bound as an independent entity). Curved profiles, solid inputs,
-# in-plane directions and the extrusion-meshing options
-# (`numElements`/`heights`/`recombine`) reject loudly. Output order
-# follows upstream's `getReturnedShapes` reorder — per input
-# `[top (dim-1), body (dim), laterals …]` — with dim-0 inputs emitting
-# just the swept edge, all grouped by ascending dimension like
+# stays bound as an independent entity). `numElements`/`heights`/
+# `recombine` engage the native Layers machinery through
+# `_model_occ_sweep_transport!`, which mirrors upstream's
+# `ExtrudeParams` attachment onto every created entity. Curved profiles
+# other than disks, solid inputs and in-plane directions reject loudly.
+# Output order follows upstream's `getReturnedShapes` reorder — per
+# input `[top (dim-1), body (dim), laterals …]` — with dim-0 inputs
+# emitting just the swept edge, all grouped by ascending dimension like
 # `_extrude`'s per-dim compound pass.
 
 function _model_occ_extrude_direction(dx,dy,dz,caller)
@@ -38,6 +40,14 @@ mutable struct _ModelOCCSweep
     lmap::Dict{UInt64,UInt64}
     rmap::Dict{UInt64,UInt64}
     fmap::Dict{UInt64,UInt64}
+    # `smap` carries the extrusion's swept faces (face id -> generatrix edge
+    # id; `fmap` plays the same role for the revolve); `links` holds the
+    # cap/solid/compact-publication source records that the maps cannot
+    # express — `(dim, entity_tag) => (source_dim, source_tag)` mesh links
+    # consumed by `_model_occ_sweep_transport!` when `numElements` engages
+    # the Layers machinery.
+    smap::Dict{UInt64,UInt64}
+    links::Vector{Tuple{Int,Int,Tuple{Int,Int}}}
 end
 
 function _model_occ_sweep_setup(d,caller,kernel)
@@ -47,13 +57,14 @@ function _model_occ_sweep_setup(d,caller,kernel)
         collect(kernel.maxima),kernel.next_shape,
         Dict{UInt64,UInt64}(),Dict{UInt64,UInt64}(),
         Dict{UInt64,UInt64}(),Dict{UInt64,UInt64}(),
-        Dict{UInt64,UInt64}())
+        Dict{UInt64,UInt64}(),Dict{UInt64,UInt64}(),
+        Tuple{Int,Int,Tuple{Int,Int}}[])
 end
 
 # `next_shape` only advances at the flush, so identity allocation is
-# sweep-scoped; it still resyncs when an eager producer (the cylinder
-# path) bumped `kernel.next_shape` mid-call, and the flush takes `max`
-# against those eagerly-bound shapes.
+# sweep-scoped; it still resyncs defensively if an eager producer bumped
+# `kernel.next_shape` mid-call, and the flush takes `max` against those
+# eagerly-bound shapes.
 function _model_occ_sweep_id!(sw::_ModelOCCSweep,kernel)
     sw.next_id=max(sw.next_id,kernel.next_shape)
     sw.next_id<=typemax(UInt64)-1 || throw(ArgumentError(
@@ -171,38 +182,110 @@ function _model_occ_extrude_line!(sw::_ModelOCCSweep,kernel,src_id,caller)
     _model_occ_sweep_bind!(sw,2,face_tag,face_id,
         _ModelOCCShape(2,(kind=:plane,geometry=geometry),
                        UInt64[wire_id]))
+    sw.smap[face_id]=src_id
     return sw.tags[top],face_tag,[sw.tags[la],sw.tags[lb]]
 end
 
 # Single-circle disk swept along its normal → the compact cylinder
-# publication. The producer's +d̂ cap answers as "top", its lateral as
-# the single lateral face.
-function _model_occ_extrude_disk!(m::GeoModel,kernel,face_id,d,caller)
+# publication. Upstream shares the source face as the bottom cap; here
+# the shell reuses it directly and the lateral wire reuses the source
+# circle — the native Layers machinery's bitwise row welding then makes
+# the swept strip close on the source entities' own cells (the seam
+# runs through the profile's vertex, the rims grade at the source's
+# phase). `sw` records carry the mesh-transport links.
+function _model_occ_extrude_disk!(m::GeoModel,kernel,sw,face_id,d,caller)
     face=kernel.shapes[face_id]
     wire=kernel.shapes[only(face.children)]
     edge_id=only(wire.geometry.uses)[1]
     g=kernel.shapes[edge_id].geometry.geometry
     # Phase 1 already certified the full-circle, axis-aligned profile.
     radius=g.occ===:circle ? g.r : g.rx
-    solid_tag=_model_occ_add_cylinder!(m,g.center[1],g.center[2],
-        g.center[3],d[1],d[2],d[3],radius)
-    solid_id=kernel.bindings[3,solid_tag]
+    h=_occ_modulus(d);nd=_occ_dir(d)
+    src_vid=kernel.shapes[edge_id].children[1]
+    src_vtx=kernel.shapes[src_vid].geometry.point
+    tag_of=id->_model_occ_sweep_tag_of(sw,kernel,id,caller)
+    src_tag=tag_of(face_id);circle_tag=tag_of(edge_id)
+    vtx_tag=tag_of(src_vid)
+    # `flips` marks an anti-normal sweep: the profile circle's parameter
+    # runs backward around +d̂, so wire flags and pcurve legs mirror.
+    flips=_dot3(nd,g.n)<0
+    Xf,Yf=_occ_ax2_setx(nd,g.X)
+    top_vtx=_occ3_add(src_vtx,d)
+    top_vid=_model_occ_sweep_id!(sw,kernel)
+    tv_tag=_model_occ_sweep_tag!(sw,kernel,0)
+    _model_occ_sweep_bind!(sw,0,tv_tag,top_vid,
+        _ModelOCCShape(0,(point=top_vtx,mesh_size=
+            kernel.shapes[src_vid].geometry.mesh_size),UInt64[]))
+    rim_id=_model_occ_sweep_id!(sw,kernel)
+    rim_tag=_model_occ_sweep_tag!(sw,kernel,1)
+    _model_occ_sweep_bind!(sw,1,rim_tag,rim_id,
+        _ModelOCCShape(1,(kind=:circle,
+            geometry=(occ=:circle,center=_occ3_add(g.center,d),n=nd,
+                      X=Xf,Y=Yf,r=radius,t0=0.0,t1=_OCC_TWO_PI)),
+            UInt64[top_vid,top_vid]))
+    seam_id=_model_occ_sweep_id!(sw,kernel)
+    seam_tag=_model_occ_sweep_tag!(sw,kernel,1)
+    _model_occ_sweep_bind!(sw,1,seam_tag,seam_id,
+        _ModelOCCShape(1,(kind=:line,
+            geometry=(occ=:line,origin=src_vtx,dir=nd,t0=0.0,t1=h)),
+            UInt64[src_vid,top_vid]))
+    lat_pc=Dict{Int,NamedTuple}(
+        rim_tag=>(fwd=(lin2d=((0.0,h),(1.0,0.0)),),rev=nothing),
+        seam_tag=>(fwd=(lin2d=((_OCC_TWO_PI,0.0),(0.0,1.0)),),
+                   rev=(lin2d=((0.0,0.0),(0.0,1.0)),)))
+    lat_pc[circle_tag]=flips ?
+        (fwd=(lin2d=((_OCC_TWO_PI,0.0),(-1.0,0.0)),),rev=nothing) :
+        (fwd=(lin2d=((0.0,0.0),(1.0,0.0)),),rev=nothing)
+    lwire_id=_model_occ_sweep_id!(sw,kernel)
+    lwire_tag=_model_occ_sweep_tag!(sw,kernel,-1)
+    _model_occ_sweep_bind!(sw,-1,lwire_tag,lwire_id,
+        _ModelOCCShape(-1,(uses=Tuple{UInt64,Bool}[(rim_id,true),
+            (seam_id,true),(edge_id,flips),(seam_id,false)],),
+            UInt64[rim_id,seam_id,edge_id,seam_id]))
+    lat_id=_model_occ_sweep_id!(sw,kernel)
+    lat_tag=_model_occ_sweep_tag!(sw,kernel,2)
+    _model_occ_sweep_bind!(sw,2,lat_tag,lat_id,
+        _ModelOCCShape(2,(kind=:cylinder,
+            geometry=(occ=:cylinder,center=g.center,axis=nd,X=Xf,Y=Yf,
+                      radius=radius,height=h,pcurves=lat_pc)),
+            UInt64[lwire_id]))
     top_center=_occ3_add(g.center,d)
-    top_tag=0;lateral_tag=0
-    for (fid,_) in kernel.shapes[only(
-            kernel.shapes[solid_id].children)].geometry.uses
-        fg=kernel.shapes[fid].geometry
-        if fg.kind===:cylinder
-            lateral_tag=_model_occ_shape_tag(kernel,fid,caller)
-        elseif fg.kind===:plane &&
-                _occ_modulus(_arc_sub(fg.geometry.center,top_center))<
-                _OCC_CONFUSION*_occ_modulus(d)
-            top_tag=_model_occ_shape_tag(kernel,fid,caller)
-        end
-    end
-    (top_tag>0 && lateral_tag>0) || throw(ArgumentError(
-        "$caller: internal cylinder sweep publication is inconsistent"))
-    return top_tag,solid_tag,[lateral_tag]
+    twire_id=_model_occ_sweep_id!(sw,kernel)
+    twire_tag=_model_occ_sweep_tag!(sw,kernel,-1)
+    _model_occ_sweep_bind!(sw,-1,twire_tag,twire_id,
+        _ModelOCCShape(-1,(uses=Tuple{UInt64,Bool}[(rim_id,false)],),
+                       UInt64[rim_id]))
+    top_pc=Dict{Int,NamedTuple}(
+        rim_tag=>(fwd=(circ2d=((0.0,0.0),(1.0,0.0),radius),),rev=nothing))
+    cap_id=_model_occ_sweep_id!(sw,kernel)
+    cap_tag=_model_occ_sweep_tag!(sw,kernel,2)
+    _model_occ_sweep_bind!(sw,2,cap_tag,cap_id,
+        _ModelOCCShape(2,(kind=:plane,
+            geometry=(occ=:plane,center=top_center,axis=nd,X=Xf,Y=Yf,
+                      reversed=false,pcurves=top_pc,
+                      uvb=_model_occ_prim_uvb(top_pc,
+                          Dict(rim_tag=>(0.0,_OCC_TWO_PI))))),
+            UInt64[twire_id]))
+    shell_id=_model_occ_sweep_id!(sw,kernel)
+    shell_tag=_model_occ_sweep_tag!(sw,kernel,-2)
+    src_axis=face.geometry.geometry.axis
+    _model_occ_sweep_bind!(sw,-2,shell_tag,shell_id,
+        _ModelOCCShape(-2,(uses=Tuple{UInt64,Bool}[(lat_id,false),
+            (cap_id,false),(face_id,_dot3(src_axis,d)>0)],),
+            UInt64[lat_id,cap_id,face_id]))
+    solid_id=_model_occ_sweep_id!(sw,kernel)
+    solid_tag=_model_occ_sweep_tag!(sw,kernel,3)
+    _model_occ_sweep_bind!(sw,3,solid_tag,solid_id,
+        _ModelOCCShape(3,(kind=:solid,
+            primitive=(occ=:cylinder,
+                record=(center=g.center,axis=d,radius=radius,height=h))),
+            UInt64[shell_id]))
+    push!(sw.links,(1,rim_tag,(1,flips ? -circle_tag : circle_tag)))
+    push!(sw.links,(1,seam_tag,(0,vtx_tag)))
+    push!(sw.links,(2,lat_tag,(1,circle_tag)))
+    push!(sw.links,(2,cap_tag,(2,src_tag)))
+    push!(sw.links,(3,solid_tag,(2,src_tag)))
+    return cap_tag,solid_tag,[lat_tag]
 end
 
 # dim-2 input: all-line plane faces sweep to a prism — translated caps,
@@ -274,6 +357,7 @@ function _model_occ_extrude_planar!(sw::_ModelOCCSweep,kernel,src_id,caller)
             _model_occ_sweep_bind!(sw,2,lface_tag,lface_id,
                 _ModelOCCShape(2,(kind=:plane,geometry=lgeo),
                               UInt64[lwire_id]))
+            sw.smap[lface_id]=edge_id
             push!(laterals,(lface_id,lface_tag))
         end
         push!(cap_uses,cap_wire)
@@ -315,17 +399,96 @@ function _model_occ_extrude_planar!(sw::_ModelOCCSweep,kernel,src_id,caller)
     solid_tag=_model_occ_sweep_tag!(sw,kernel,3)
     _model_occ_sweep_bind!(sw,3,solid_tag,solid_id,
         _ModelOCCShape(3,(kind=:solid,),UInt64[shell_id]))
+    src_tag=tag_of(src_id)
+    push!(sw.links,(2,cap_tag,(2,src_tag)))
+    push!(sw.links,(3,solid_tag,(2,src_tag)))
     return cap_tag,solid_tag,[tag for (_,tag) in laterals]
+end
+
+# `numElements`/`heights`/`recombine` — the OCC sweep meshing options.
+# Upstream attaches `ExtrudeParams` (`mesh.ExtrudeMesh`) to every entity the
+# sweep creates; here the equivalent `_GeoExtrudeParams` record plus the
+# `(dim,tag)`-keyed source/spec links feed the existing Julia-native Layers
+# machinery once the shapes materialize. `heights` are the upstream
+# normalized cumulative layer boundaries — verbatim into `params.heights`,
+# defaulting to uniform spacing when omitted. Without `numElements` the
+# options are inert (upstream's `ExtrudeMesh` gate stays closed) except a
+# bare `heights` list, which is a clear argument error.
+function _model_occ_sweep_mesh_params(num_elements,heights,recombine,caller)
+    isempty(num_elements) && !isempty(heights) && throw(ArgumentError(
+        "$caller: heights requires numElements"))
+    isempty(num_elements) && return nothing
+    layers=Int[]
+    for e in num_elements
+        (e isa Integer || (e isa Real && isinteger(e))) && e>0 ||
+            throw(ArgumentError(
+                "$caller: numElements entries must be positive integers"))
+        push!(layers,Int(e))
+    end
+    hs=isempty(heights) ?
+        Float64[j/length(layers) for j in 1:length(layers)] :
+        Float64[_finite_scalar(h,caller,"heights entry") for h in heights]
+    length(hs)==length(layers) || throw(ArgumentError(
+        "$caller: heights must have one cumulative entry per numElements " *
+        "layer ($(length(hs)) heights for $(length(layers)) layers)"))
+    for j in eachindex(hs)
+        hs[j]>(j==1 ? 0.0 : hs[j-1]) || throw(ArgumentError(
+            "$caller: heights must be strictly increasing positive " *
+            "fractions normalized to 1"))
+    end
+    hs[end]==1.0 || throw(ArgumentError(
+        "$caller: heights must be normalized to 1 — the last cumulative " *
+        "layer boundary is the swept cap"))
+    return (layers=layers,heights=hs,scale_last=false,
+            recombine=Bool(recombine),quad_to_tri=:none,
+            recomb_laterals=false)::_GeoExtrudeParams
+end
+
+# Attach the `ExtrudeParams` records to every created entity. The maps carry
+# shape ids resolved through `sw.tags`; `sw.links` holds tag-level records
+# for caps, solids and the compact cylinder/torus publications.
+function _model_occ_sweep_transport!(m::GeoModel,kernel,
+                                     sw::_ModelOCCSweep,
+                                     params::_GeoExtrudeParams,spec)
+    tag_of=id->_model_occ_sweep_tag_of(sw,kernel,id,sw.caller)
+    function attach(dim::Int,tag::Int,src::NTuple{2,Int})
+        m.meshing.extrude[(dim,tag)]=params
+        m.meshing.extrude_sources[(dim,tag)]=src
+        m.meshing.extrude_specs[(dim,tag)]=spec
+    end
+    # Vertex-swept edges: extrusion connectors, revolve rim circles, and
+    # apex degenerate edges all take the point-generatrix link.
+    for (vid,eid) in sw.lmap
+        eid==0 && continue
+        attach(1,sw.tags[eid],(0,tag_of(vid)))
+    end
+    for (vid,cid) in sw.rmap
+        cid==0 && continue
+        attach(1,sw.tags[cid],(0,tag_of(vid)))
+    end
+    # Translated top-edge copies take the copyMesh link on the source edge.
+    for (eid,teid) in sw.emap
+        attach(1,sw.tags[teid],(1,tag_of(eid)))
+    end
+    # Swept surfaces take the EXTRUDED_ENTITY link on their generatrix
+    # edge — `smap` keys the face id to its generatrix edge id.
+    for (fid,eid) in sw.smap
+        attach(2,sw.tags[fid],(1,tag_of(eid)))
+    end
+    for (eid,fid) in sw.fmap
+        attach(2,sw.tags[fid],(1,tag_of(eid)))
+    end
+    for (dim,tag,src) in sw.links
+        attach(dim,tag,src)
+    end
+    return nothing
 end
 
 function _model_occ_extrude(m::GeoModel,dim_tags,dx,dy,dz;
                             num_elements=Int[],heights=Float64[],
                             recombine=false)
     caller="OCC.extrude"
-    isempty(num_elements) && isempty(heights) && !recombine ||
-        throw(ArgumentError(
-            "$caller: extrusion meshing (numElements, heights, " *
-            "recombine) is not yet supported"))
+    params=_model_occ_sweep_mesh_params(num_elements,heights,recombine,caller)
     d=_model_occ_extrude_direction(dx,dy,dz,caller)
     kernel=m.occ_kernel
     # Phase 1: validate and classify every input before any bind so a
@@ -442,7 +605,7 @@ function _model_occ_extrude(m::GeoModel,dim_tags,dx,dy,dz;
                 end
             else
                 top,body,laterals=kind===:disk ?
-                    _model_occ_extrude_disk!(m,kernel,id,d,caller) :
+                    _model_occ_extrude_disk!(m,kernel,sw,id,d,caller) :
                     _model_occ_extrude_planar!(sw,kernel,id,caller)
                 push!(out,(2,top));push!(out,(3,body))
                 for tag in laterals
@@ -456,6 +619,8 @@ function _model_occ_extrude(m::GeoModel,dim_tags,dx,dy,dz;
     end
     isempty(sw.pending) ||
         (kernel.next_shape=max(kernel.next_shape,sw.next_id))
+    params===nothing || _model_occ_sweep_transport!(
+        m,kernel,sw,params,_extrude_spec_translate(d))
     return out
 end
 
@@ -469,8 +634,9 @@ end
 # encodings when the profile produces a primitive), and a full-circle
 # disk pierced by the axis to the compact torus publication. Partial
 # angles, non-axial-plane profiles, axis-crossing profiles, curved
-# profiles other than disks, solid inputs, multi-wire faces and the
-# extrusion-meshing options reject loudly. At 2·Pi the rotated "top"
+# profiles other than disks, solid inputs and multi-wire faces reject
+# loudly. `numElements`/`heights`/`recombine` engage the same native
+# Layers transport as the extrusion. At 2·Pi the rotated "top"
 # coincides with the profile — the source entity answers as `top` —
 # and each boundary edge's swept surface answers as a lateral, matching
 # upstream's `getReturnedShapes` reorder. Rim circles, meridian faces
@@ -519,6 +685,10 @@ function _model_occ_revol_apex!(sw,kernel,vid,face_geometry,caller)
         _ModelOCCShape(1,(kind=:degenerate,
             geometry=(occ=:degenerate,t0=0.0,t1=_OCC_TWO_PI,
                       face=face_geometry)),UInt64[vid,vid]))
+    # The degenerate collapsed rim is the on-axis vertex's swept edge — the
+    # point-generatrix link applies like the rim circles' (`lmap` carries
+    # vertex->edge for the revolve; the extrusion never sees it).
+    sw.lmap[vid]=id
     return id
 end
 
@@ -700,8 +870,14 @@ end
 
 # dim-2 disk input: a full-circle profile in an axial plane at radius
 # rho>r_disk sweeps the compact torus publication. The producer's solid
-# answers as body, its single torus face as the one lateral.
-function _model_occ_revol_disk!(m::GeoModel,kernel,face_id,p,n,caller)
+# answers as body, its single torus face as the one lateral. The rim
+# vertex and the seam meridian reuse the profile's own vertex and circle
+# — the native Layers strip then welds bitwise onto the source entities'
+# cells, the same convention as the compact disk prism. `sw` records
+# carry the mesh-transport links: the rim parallel through the seam
+# takes the point-generatrix link (via `rmap`), the torus face links the
+# profile circle and the solid links the source face.
+function _model_occ_revol_disk!(m::GeoModel,kernel,sw,face_id,p,n,caller)
     face=kernel.shapes[face_id]
     wire=kernel.shapes[only(face.children)]
     edge_id=only(wire.geometry.uses)[1]
@@ -710,18 +886,58 @@ function _model_occ_revol_disk!(m::GeoModel,kernel,face_id,p,n,caller)
     _,h_c,rd=_model_occ_revol_rh(g.center,p,n)
     r1=_occ_modulus(rd)
     cen=_occ3_add(p,_occ3_scale(n,h_c))
-    solid_tag=_model_occ_add_torus!(
-        m,cen[1],cen[2],cen[3],r1,radius;zAxis=collect(n))
-    solid_id=kernel.bindings[3,solid_tag]
-    face_tag=0
-    for (fid,_) in kernel.shapes[only(
-            kernel.shapes[solid_id].children)].geometry.uses
-        kernel.shapes[fid].geometry.kind===:torus &&
-            (face_tag=_model_occ_shape_tag(kernel,fid,caller))
-    end
-    face_tag>0 || throw(ArgumentError(
-        "$caller: internal torus sweep publication is inconsistent"))
-    src_tag=_model_occ_shape_tag(kernel,face_id,caller)
+    src_vid=kernel.shapes[edge_id].children[1]
+    src_vtx=kernel.shapes[src_vid].geometry.point
+    # Seam radial direction and parallel: the torus frame X points at the
+    # seam azimuth so the wire legs sit at u=0/u=2π like the producer's.
+    rs,hs,rd_s=_model_occ_revol_rh(src_vtx,p,n)
+    Xs=_occ_dir(rd_s)
+    Ys=_occ_crossed(n,Xs)
+    # Poloidal angle of the seam vertex on the profile circle, measured
+    # from the outer radial toward +n (the producer's meridian winds
+    # about Dm=-Y at the seam azimuth).
+    v_s=atan(hs-h_c,rs-r1)
+    flips=_dot3(g.n,Ys)>0.0
+    eq_id=_model_occ_revol_rim!(sw,kernel,src_vid,p,n,caller)
+    eq_id==zero(UInt64) && throw(ArgumentError(
+        "$caller: cannot revolve a disk seam vertex on the revolution axis"))
+    tag_of=id->_model_occ_sweep_tag_of(sw,kernel,id,caller)
+    src_tag=tag_of(face_id);circle_tag=tag_of(edge_id)
+    eq_tag=tag_of(eq_id)
+    mer_pc=flips ?
+        (fwd=(lin2d=((0.0,v_s),(0.0,-1.0)),),
+         rev=(lin2d=((_OCC_TWO_PI,v_s),(0.0,-1.0)),)) :
+        (fwd=(lin2d=((_OCC_TWO_PI,v_s),(0.0,1.0)),),
+         rev=(lin2d=((0.0,v_s),(0.0,1.0)),))
+    v2=flips ? v_s-_OCC_TWO_PI : v_s+_OCC_TWO_PI
+    tpc=Dict{Int,NamedTuple}(
+        eq_tag=>(fwd=(lin2d=((0.0,v_s),(1.0,0.0)),),
+                 rev=(lin2d=((0.0,v2),(1.0,0.0)),)),
+        circle_tag=>mer_pc)
+    lwire_id=_model_occ_sweep_id!(sw,kernel)
+    lwire_tag=_model_occ_sweep_tag!(sw,kernel,-1)
+    _model_occ_sweep_bind!(sw,-1,lwire_tag,lwire_id,
+        _ModelOCCShape(-1,(uses=Tuple{UInt64,Bool}[(eq_id,true),
+            (edge_id,flips),(eq_id,false),(edge_id,!flips)],),
+            UInt64[eq_id,edge_id,eq_id,edge_id]))
+    face_id2=_model_occ_sweep_id!(sw,kernel)
+    face_tag=_model_occ_sweep_tag!(sw,kernel,2)
+    _model_occ_sweep_bind!(sw,2,face_tag,face_id2,
+        _ModelOCCShape(2,(kind=:torus,
+            geometry=(occ=:torus,center=cen,axis=n,X=Xs,Y=Ys,
+                      r1=r1,r2=radius,angle=_OCC_TWO_PI,pcurves=tpc)),
+            UInt64[lwire_id]))
+    shell_id=_model_occ_sweep_id!(sw,kernel)
+    shell_tag=_model_occ_sweep_tag!(sw,kernel,-2)
+    _model_occ_sweep_bind!(sw,-2,shell_tag,shell_id,
+        _ModelOCCShape(-2,(uses=Tuple{UInt64,Bool}[(face_id2,false)],),
+            UInt64[face_id2]))
+    solid_id=_model_occ_sweep_id!(sw,kernel)
+    solid_tag=_model_occ_sweep_tag!(sw,kernel,3)
+    _model_occ_sweep_bind!(sw,3,solid_tag,solid_id,
+        _ModelOCCShape(3,(kind=:solid,),UInt64[shell_id]))
+    push!(sw.links,(2,face_tag,(1,circle_tag)))
+    push!(sw.links,(3,solid_tag,(2,src_tag)))
     return src_tag,solid_tag,[face_tag]
 end
 
@@ -834,6 +1050,7 @@ function _model_occ_revol_planar!(sw,kernel,src_id,p,n,caller)
     _model_occ_sweep_bind!(sw,3,solid_tag,solid_id,
         _ModelOCCShape(3,solid_geometry,UInt64[shell_id]))
     src_tag=_model_occ_sweep_tag_of(sw,kernel,src_id,caller)
+    push!(sw.links,(3,solid_tag,(2,src_tag)))
     lat_tags=Int[_model_occ_sweep_tag_of(sw,kernel,fid,caller)
                  for fid in laterals]
     return src_tag,solid_tag,lat_tags
@@ -940,14 +1157,25 @@ function _model_occ_revol_check_face(kernel,face_id,p,n,caller)
     return :planar
 end
 
+# Descendant vertex ids of a sweep input (dim 0..2) — used by the Layers
+# transport gate: an on-axis profile vertex collapses its swept column,
+# which the shared prism-collapse emission does not yet support.
+function _model_occ_sweep_vertex_ids(kernel,id,dim)
+    dim==0 && return UInt64[id]
+    dim==1 && return collect(kernel.shapes[id].children)
+    out=UInt64[]
+    for wire_id in kernel.shapes[id].children,
+        (edge_id,_) in kernel.shapes[wire_id].geometry.uses
+        append!(out,kernel.shapes[edge_id].children)
+    end
+    return unique!(out)
+end
+
 function _model_occ_revolve(m::GeoModel,dim_tags,x,y,z,ax,ay,az,angle;
                             num_elements=Int[],heights=Float64[],
                             recombine=false)
     caller="OCC.revolve"
-    isempty(num_elements) && isempty(heights) && !recombine ||
-        throw(ArgumentError(
-            "$caller: revolve meshing (numElements, heights, " *
-            "recombine) is not yet supported"))
+    params=_model_occ_sweep_mesh_params(num_elements,heights,recombine,caller)
     p=_finite3(x,y,z,caller)
     d=_finite3(ax,ay,az,caller)
     _occ_modulus(d)>0 || throw(ArgumentError(
@@ -988,7 +1216,27 @@ function _model_occ_revolve(m::GeoModel,dim_tags,x,y,z,ax,ay,az,angle;
             throw(ArgumentError(
                 "$caller: revolution of OCC volumes is not yet supported"))
         end
+        if params!==nothing && dim>0
+            for vid in _model_occ_sweep_vertex_ids(kernel,id,dim)
+                rho,_,_=_model_occ_revol_rh(
+                    kernel.shapes[vid].geometry.point,p,n)
+                rho>_OCC_CONFUSION || throw(ArgumentError(
+                    "$caller: extrusion meshing of axis-touching " *
+                    "profiles is not yet supported"))
+            end
+        end
         push!(classified,(dim,id,kind))
+    end
+    # A full-turn strip whose last level welds onto the source row needs
+    # at least three subdivisions: with two, each arc's second gap lands
+    # on the same four rows as the first — coincident cells that no mesh
+    # can represent. A pure point generatrix only sweeps a ring curve —
+    # two arcs still tile it, but one is a degenerate self-loop.
+    if params!==nothing
+        need=any(dim>0 for (dim,_,_) in classified) ? 3 : 2
+        sum(params.layers)<need && throw(ArgumentError(
+            "$caller: a full-turn revolve needs at least $need total " *
+            "numElements subdivisions"))
     end
     sw=_model_occ_sweep_setup(n,caller,kernel)
     out=Tuple{Int,Int}[]
@@ -1007,7 +1255,7 @@ function _model_occ_revolve(m::GeoModel,dim_tags,x,y,z,ax,ay,az,angle;
                 end
             else
                 top,body,laterals=kind===:disk ?
-                    _model_occ_revol_disk!(m,kernel,id,p,n,caller) :
+                    _model_occ_revol_disk!(m,kernel,sw,id,p,n,caller) :
                     _model_occ_revol_planar!(sw,kernel,id,p,n,caller)
                 push!(out,(2,top));push!(out,(3,body))
                 for tag in laterals
@@ -1021,5 +1269,7 @@ function _model_occ_revolve(m::GeoModel,dim_tags,x,y,z,ax,ay,az,angle;
     end
     isempty(sw.pending) ||
         (kernel.next_shape=max(kernel.next_shape,sw.next_id))
+    params===nothing || _model_occ_sweep_transport!(
+        m,kernel,sw,params,_extrude_spec_rotate(n,p,a,caller))
     return out
 end

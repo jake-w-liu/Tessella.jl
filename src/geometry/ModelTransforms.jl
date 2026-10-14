@@ -249,6 +249,9 @@ end
 @inline function _extrude_rotate_point(axis::NTuple{3,Float64},
                                        origin::NTuple{3,Float64},
                                        angle::Float64,p::NTuple{3,Float64})
+    # An exact multiple of 2π is the identity — snapping keeps a full-turn
+    # sweep's closing row bitwise on its source row so the seam welds.
+    mod(angle,2π)==0.0 && return p
     for step in _extrude_rotation_steps(axis,origin,angle)
         p=_gmsh_matvec4x4(step,p)
     end

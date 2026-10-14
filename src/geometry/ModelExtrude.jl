@@ -77,6 +77,9 @@ end
     if transforms===nothing
         return (p[1]+u*spec.T[1],p[2]+u*spec.T[2],p[3]+u*spec.T[3])
     end
+    # Exact full turns are the identity — the closing layer row lands
+    # bitwise on the source row so the swept seam welds.
+    spec.type===:rotate && mod(spec.angle*u,2π)==0.0 && return p
     for step in transforms[l]
         p=_gmsh_matvec4x4(step,p)
     end

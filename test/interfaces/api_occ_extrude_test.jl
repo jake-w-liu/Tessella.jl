@@ -7,9 +7,10 @@
 # reorder — per input `[top (dim-1), body (dim), laterals …]` —
 # grouped by ascending dimension; dim-0 inputs emit just the swept
 # edge. Swept vertices/lateral edges/top edges deduplicate across
-# inputs like upstream's single compound. Curved profiles, solid or
-# wire inputs, in-plane directions and the extrusion-meshing options
-# reject loudly; phase 1 classifies every input before any bind so
+# inputs like upstream's single compound. `numElements`/`heights`/
+# `recombine` transport onto the Julia-native Layers machinery (the
+# upstream `ExtrudeMesh` attachment); curved profiles, solid or wire
+# inputs and in-plane directions reject loudly in phase 1 so
 # rejections leave the registry untouched. Face records bake their
 # intended outward normal into the stored `axis` (the solid measure
 # path reads `σ·axis`), so `get_mass` verifies orientation end-to-end.
@@ -217,10 +218,19 @@ end
          "extrusion of a disk must follow its surface normal"),
         (()->occ.extrude([(2,ell)],0.0,0.0,1.0),
          "extrusion of elliptical profiles is not yet supported"),
-        (()->occ.extrude([(2,f)],0.0,0.0,1.0;numElements=[4]),
-         "extrusion meshing"),
-        (()->occ.extrude([(2,f)],0.0,0.0,1.0;recombine=true),
-         "extrusion meshing"),
+        (()->occ.extrude([(2,f)],0.0,0.0,1.0;heights=[0.5,1.0]),
+         "heights requires numElements"),
+        (()->occ.extrude([(2,f)],0.0,0.0,1.0;numElements=[0]),
+         "numElements entries must be positive integers"),
+        (()->occ.extrude([(2,f)],0.0,0.0,1.0;
+            numElements=[2,2],heights=[0.5]),
+         "one cumulative entry per numElements layer"),
+        (()->occ.extrude([(2,f)],0.0,0.0,1.0;
+            numElements=[2,2],heights=[0.7,0.5]),
+         "strictly increasing"),
+        (()->occ.extrude([(2,f)],0.0,0.0,1.0;
+            numElements=[2],heights=[0.5]),
+         "normalized to 1"),
         # A trailing invalid input rejects the whole call — nothing binds.
         (()->occ.extrude([(2,f),(2,999)],0.0,0.0,1.0),
          "Unknown OpenCASCADE entity of dimension 2 with tag 999"),
@@ -257,4 +267,79 @@ end
     element_types,element_tags,_=A.mesh.get_elements(3,solid_tag)
     @test element_types==Int32[4]
     @test length(element_tags[1])>0
+end
+
+@testset "occ.extrude Layers transport" begin
+    # numElements/heights/recombine flow into the native Layers records
+    # on every swept entity. A rect face swept 4 units with layers
+    # [2,3] at cumulative boundaries 0.4/1.0 grades the volume at
+    # z = 0.2k*4 within each layer: {0,.8,1.6} + {2.4,3.2,4.0}.
+    occ=_occ_setup()
+    _,_,f=_rect_face(occ,0.0,0.0,3.0,2.0)
+    out=occ.extrude([(2,f)],0.0,0.0,4.0;numElements=[2,3],
+                    heights=[0.4,1.0])
+    solid_tag=out[2][2]
+    occ.synchronize()
+    A.mesh.generate(3)
+    _,coords=A.mesh.get_nodes(3,solid_tag,true)
+    zs=sort!(unique!(round.([coords[i] for i in 3:3:length(coords)],
+                            digits=9)))
+    @test zs≈[0.0,0.8,1.6,2.4,3.2,4.0] atol=1e-9
+    element_types,_,_=A.mesh.get_elements(3,solid_tag)
+    @test element_types==Int32[4]
+
+    # Recombined: the lateral strips recombine to quads, so each
+    # triangulated-source column becomes a prism (type 6).
+    occ=_occ_setup()
+    _,_,f=_rect_face(occ,0.0,0.0,3.0,2.0)
+    out=occ.extrude([(2,f)],0.0,0.0,4.0;numElements=[4],
+                    recombine=true)
+    solid_tag=out[2][2]
+    occ.synchronize()
+    A.mesh.generate(3)
+    element_types,_,_=A.mesh.get_elements(3,solid_tag)
+    @test 6 in element_types
+    @test !(4 in element_types)
+
+    # A line sweep with recombine emits quads (type 3) on the lateral.
+    occ=_occ_setup()
+    q1=occ.add_point(0.0,0.0,0.0)
+    q2=occ.add_point(2.0,0.0,0.0)
+    e=occ.add_line(q1,q2)
+    out=occ.extrude([(1,e)],0.0,0.0,4.0;numElements=[3],
+                    recombine=true)
+    face_tag=out[2][2]
+    occ.synchronize()
+    A.mesh.generate(2)
+    element_types,_,_=A.mesh.get_elements(2,face_tag)
+    @test element_types==Int32[3]
+
+    # The compact disk -> cylinder path transports the same records:
+    # layers [2,2] at boundaries 0.4/1.0 grade the sweep at
+    # z = {0,1,2} + {3.5,5}.
+    occ=_occ_setup()
+    d=occ.add_disk(0.0,0.0,0.0,2.0,2.0)
+    out=occ.extrude([(2,d)],0.0,0.0,5.0;numElements=[2,2],
+                    heights=[0.4,1.0])
+    solid_tag=out[2][2]
+    occ.synchronize()
+    A.mesh.generate(3)
+    _,coords=A.mesh.get_nodes(3,solid_tag,true)
+    zs=sort!(unique!(round.([coords[i] for i in 3:3:length(coords)],
+                            digits=9)))
+    @test zs≈[0.0,1.0,2.0,3.5,5.0] atol=1e-9
+    element_types,_,_=A.mesh.get_elements(3,solid_tag)
+    @test element_types==Int32[4]
+
+    # Recombined disk -> prisms (a triangulated source face sweeps
+    # tri-column cells; type 6).
+    occ=_occ_setup()
+    d=occ.add_disk(0.0,0.0,0.0,2.0,2.0)
+    out=occ.extrude([(2,d)],0.0,0.0,5.0;numElements=[3],
+                    recombine=true)
+    solid_tag=out[2][2]
+    occ.synchronize()
+    A.mesh.generate(3)
+    element_types,_,_=A.mesh.get_elements(3,solid_tag)
+    @test 6 in element_types
 end

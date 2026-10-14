@@ -581,7 +581,10 @@ function _higher_analytic_boundary_surfaces(m,dimension,caller)
     skipped=Set{Int}()
     dimension==3 || return skipped
     for volume in keys(m.volumes)
-        Model._implicit_volume_surface(m,volume) || continue
+        # A Layers-extruded primitive sweeps through its boundary products —
+        # the surfaces classify like an explicit shell's and must mesh.
+        (Model._implicit_volume_surface(m,volume) &&
+         Model._extrude_gate(m,3,volume)===nothing) || continue
         for signed in Model._model_volume_boundary_surfaces(m,volume,caller)
             surface=abs(signed)
             push!(skipped,surface)
@@ -722,7 +725,10 @@ function _higher_ordinary_sweep_classification(assembly,m,production,input,dimen
     lower_lines=Set{Tuple{Tuple{Int,Int32},NTuple{2,Int32}}}()
     expected_faces=Set{Tuple}()
     embedded_edges=Set{NTuple{2,Int32}}();embedded_faces=Set{Tuple}()
-    boundary_curves=dimension==2 ? Set(Model._model_projection_surface_curves(m,tag)) : Set{Int}()
+    # Closed-strip wires list their seam curve with both orientations;
+    # its cells are interior support, not emitted boundary.
+    boundary_curves=dimension==2 ?
+        Set(Model._model_emitted_boundary_curves(m,tag)) : Set{Int}()
     boundary_surfaces=dimension==3 ? Set(abs.(Model._model_volume_boundary_surfaces(m,tag,caller))) : Set{Int}()
     lower=sort!(Tuple{Int,Int32}[owner for owner in closure if 0<owner[1]<dimension])
     for owner in lower
@@ -763,9 +769,14 @@ function _higher_ordinary_sweep_classification(assembly,m,production,input,dimen
             if owner[1]==1
                 block.msh==1 || throw(ArgumentError(
                     "$caller: ordinary Layers requires actual linear Curve cells"))
+                # A two-arc closed ring — a vertex generatrix swept
+                # through two levels — legitimately lists its only node
+                # pair once per arc; any other repeat is an overlap.
+                ring2=m.curves[Int(owner[2])][1]==m.curves[Int(owner[2])][2] &&
+                      sum(b->size(b.nodes,2),blocks)==2
                 for column in axes(mapped,2)
                     edge=minmax(mapped[1,column],mapped[2,column])
-                    edge[1]!=edge[2] && !((owner,edge) in lower_lines) || throw(ArgumentError(
+                    edge[1]!=edge[2] && (ring2 || !((owner,edge) in lower_lines)) || throw(ArgumentError(
                         "$caller: ordinary Layers lower Curve cells repeat a Line incidence"))
                     push!(lower_lines,(owner,edge))
                     push!(dimension==2 && !(Int(owner[2]) in boundary_curves) ? embedded_edges : expected_edges,edge)
@@ -1343,9 +1354,13 @@ function _higher_transfinite_volume_classification(assembly,m,mesh,input,tag,
             if owner[1]==1
                 block.msh==1 || throw(ArgumentError(
                     "$caller: transfinite Volume[$tag] requires actual linear Curve cells"))
+                # Two-arc closed rings list their single node pair once
+                # per arc; any other repeat is an overlap.
+                ring2=m.curves[Int(owner[2])][1]==m.curves[Int(owner[2])][2] &&
+                      sum(b->size(b.nodes,2),product.blocks)==2
                 for column in axes(mapped,2)
                     edge=minmax(mapped[1,column],mapped[2,column])
-                    edge[1]!=edge[2] && !((owner,edge) in lower_lines) || throw(ArgumentError(
+                    edge[1]!=edge[2] && (ring2 || !((owner,edge) in lower_lines)) || throw(ArgumentError(
                         "$caller: transfinite lower Curve cells repeat a Line incidence"))
                     push!(lower_lines,(owner,edge));push!(expected_edges,edge)
                 end

@@ -1196,6 +1196,45 @@ nondeterministically; under ~700M-alloc accumulated
 pressure it can exhaust memory (isolated runs pass in
 ~7 min). Hardening that escalation stays open.
 
+The eighteenth GEO01 slice followed: the OCC sweep
+meshing options `numElements`/`heights`/`recombine` on
+`occ.extrude`/`occ.revolve` — upstream's `ExtrudeParams`
+attachment — transported onto the existing Julia-native
+Layers machinery instead of duplicating meshing logic.
+`_model_occ_sweep_mesh_params` validates the triple
+(positive counts; `heights` requires counts; one
+strictly-increasing cumulative entry per layer,
+normalized to `1`) into the shared `_GeoExtrudeParams`,
+and `_model_occ_sweep_transport!` attaches params +
+generatrix links + sweep specs to every created entity
+through `smap`/`fmap`/`lmap`/`rmap`/`emap` plus explicit
+`sw.links` records for caps, solids and the compact
+cylinder/torus publications. Root causes fixed: exact
+full-turn rotations snap bitwise to the identity in
+`_extrude_level_at`/`_extrude_rotate_point` so the
+closing layer welds onto the source row; the compact
+disk→cylinder and disk→torus paths were rebuilt to
+share the source circle/vertex entities like upstream;
+Layers-gated implicit volumes now classify their
+boundary surfaces (the embedding inventory and the
+dim-2 analytic-boundary skip both gate on
+`_extrude_gate`); merged entity carriers audit triangle
+links per part (seam-sharing unions are legitimately
+non-manifold only between parts); two-arc closed rings
+exempt the duplicate-incidence check in ordinary and
+transfinite classifications; and circle-degenerate
+ellipses count as circles for the cylinder-consistency
+check. Two clean rejections: a full-turn revolve needs
+three subdivisions when surfaces/volumes sweep (two
+weld coincident quads) or two for point generatrices
+(degenerate self-loop at one), and Layers on
+axis-touching revolve profiles rejects (a shared
+`.geo`/OCC collapsed-column gap). `api_occ_extrude_test.jl`/
+`api_occ_revolve_test.jl` carry 15 transport
+assertions — graded z-levels, prism/quad element
+types, torus azimuth layers, the point ring — plus the
+new rejection gates under atomicity snapshots.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

@@ -738,15 +738,57 @@ function _tet_topology(tets::AbstractMatrix{<:Integer};
     return (true, "ok")
 end
 
+# Per-vertex star audit shared by `_tri_topology`: `trilist` are the triangle
+# indices incident to `v` in one link component scope.  A 2-manifold link is a
+# connected cycle (interior vertex) or a connected path (boundary vertex).
+function _tri_link_audit(tris::AbstractMatrix{<:Integer},v::Int32,
+                         trilist,endpoints,parent)
+    degree=length(trilist)
+    empty!(endpoints);resize!(parent,degree)
+    @inbounds for k in 1:degree;parent[k]=Int32(k);end
+    @inbounds for k in 1:degree
+        t=Int(trilist[k]);eid=Int32(k)
+        a=Int32(tris[1,t]);b=Int32(tris[2,t]);c=Int32(tris[3,t])
+        x,y=v==a ? (b,c) : (v==b ? (a,c) : (a,b))
+        push!(endpoints,(x,eid),(y,eid))
+    end
+    sort!(endpoints;alg=QuickSort)
+    ndegree1=0;k=1
+    @inbounds while k<=length(endpoints)
+        l=k+1
+        while l<=length(endpoints)&&endpoints[l][1]==endpoints[k][1];l+=1;end
+        inc=l-k
+        inc<=2||return (false,"vertex $v has a non-manifold triangle-link vertex")
+        if inc==1
+            ndegree1+=1
+        else
+            _uf_union!(parent,endpoints[k][2],endpoints[k+1][2])
+        end
+        k=l
+    end
+    root=_uf_find!(parent,Int32(1))
+    @inbounds for k in 2:degree
+        _uf_find!(parent,Int32(k))==root||return (false,"vertex $v has a disconnected triangle link")
+    end
+    (ndegree1==0||ndegree1==2)||return (false,
+        "vertex $v triangle link has $ndegree1 endpoints (expected 0 or 2)")
+    return (true,"ok")
+end
+
 # Triangle analogue of the tetrahedral vertex-link audit.  At each original vertex,
 # every incident triangle contributes one edge to its link.  A 2-manifold link is a
 # connected cycle (interior vertex) or a connected path (boundary vertex).  This
 # catches edge incidence >2 and triangles that meet only at a pinched vertex, neither
-# of which an area check can detect.
-function _tri_topology(tris::AbstractMatrix{<:Integer})
+# of which an area check can detect.  With `owners` — a per-triangle part index from
+# an entity merge — the audit runs per owner at every vertex: a union of manifold
+# entity meshes sharing a curve or point is legitimately non-manifold only between
+# parts (e.g. a closed swept strip welded to a bounded face along its seam).
+function _tri_topology(tris::AbstractMatrix{<:Integer},
+                       owners::Union{Nothing,AbstractVector{<:Integer}}=nothing)
     nt=size(tris,2)
     nt==0&&return (true,"ok")
     nt<=typemax(Int32)||return (false,"triangle count $nt exceeds the Int32 topology-audit limit")
+    owners===nothing||length(owners)==nt||return (false,"triangle owner record count mismatch")
     n3=try Base.checked_mul(3,nt) catch err
         err isa InterruptException && rethrow()
         return (false,"triangle topology record count overflow")
@@ -766,38 +808,33 @@ function _tri_topology(tris::AbstractMatrix{<:Integer})
     sort!(vertex_tris;alg=QuickSort)
     endpoints=NTuple{2,Int32}[] # (link vertex, local link-edge id)
     parent=Int32[];i=1
+    trilist=Int32[]
     while i<=n3
         j=i+1
         @inbounds while j<=n3&&vertex_tris[j][1]==vertex_tris[i][1];j+=1;end
-        v=@inbounds vertex_tris[i][1];degree=j-i
-        empty!(endpoints);resize!(parent,degree)
-        @inbounds for k in 1:degree;parent[k]=Int32(k);end
-        @inbounds for k in i:j-1
-            t=Int(vertex_tris[k][2]);eid=Int32(k-i+1)
-            a=Int32(tris[1,t]);b=Int32(tris[2,t]);c=Int32(tris[3,t])
-            x,y=v==a ? (b,c) : (v==b ? (a,c) : (a,b))
-            push!(endpoints,(x,eid),(y,eid))
-        end
-        sort!(endpoints;alg=QuickSort)
-        ndegree1=0;k=1
-        @inbounds while k<=length(endpoints)
-            l=k+1
-            while l<=length(endpoints)&&endpoints[l][1]==endpoints[k][1];l+=1;end
-            inc=l-k
-            inc<=2||return (false,"vertex $v has a non-manifold triangle-link vertex")
-            if inc==1
-                ndegree1+=1
-            else
-                _uf_union!(parent,endpoints[k][2],endpoints[k+1][2])
+        v=@inbounds vertex_tris[i][1]
+        if owners===nothing
+            resize!(trilist,j-i)
+            @inbounds for k in i:j-1;trilist[k-i+1]=vertex_tris[k][2];end
+            ok,reason=_tri_link_audit(tris,v,trilist,endpoints,parent)
+            ok||return (false,reason)
+        else
+            # Partition the star by part: each owner must form an
+            # independent manifold link (path or cycle).
+            seen=Int32[]
+            @inbounds for k in i:j-1
+                o=Int32(owners[vertex_tris[k][2]])
+                o in seen||push!(seen,o)
             end
-            k=l
+            for o in seen
+                empty!(trilist)
+                @inbounds for k in i:j-1
+                    Int32(owners[vertex_tris[k][2]])==o&&push!(trilist,vertex_tris[k][2])
+                end
+                ok,reason=_tri_link_audit(tris,v,trilist,endpoints,parent)
+                ok||return (false,reason)
+            end
         end
-        root=_uf_find!(parent,Int32(1))
-        @inbounds for k in 2:degree
-            _uf_find!(parent,Int32(k))==root||return (false,"vertex $v has a disconnected triangle link")
-        end
-        (ndegree1==0||ndegree1==2)||return (false,
-            "vertex $v triangle link has $ndegree1 endpoints (expected 0 or 2)")
         i=j
     end
     return (true,"ok")
@@ -902,6 +939,7 @@ global tet count so "no empty volumes" can never be vacuously true.
 function validate(m::Mesh; require_positive_tets::Bool=true,
                   require_manifold_tris::Bool=ntets(m)==0,
                   allow_degenerate_segs::Bool=false,
+                  tri_owners::Union{Nothing,AbstractVector{<:Integer}}=nothing,
                   pinch_link_chi::AbstractDict{Int32,Int}=Dict{Int32,Int}())
     msgs = String[]
     _mesh_structure_messages!(msgs,m) || return MeshDiagnostic(false,msgs)
@@ -963,7 +1001,7 @@ function validate(m::Mesh; require_positive_tets::Bool=true,
         if duplicate
             push!(msgs,"non-manifold triangle complex: duplicate triangle")
         elseif require_manifold_tris
-            topok,reason=_tri_topology(m.tris)
+            topok,reason=_tri_topology(m.tris,tri_owners)
             topok || push!(msgs,"non-manifold triangle complex: $reason")
         end
     end

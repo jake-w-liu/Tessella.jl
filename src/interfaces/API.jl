@@ -2222,11 +2222,14 @@ function _merge_entity_meshes(parts,caller::AbstractString;
         end
     end
     tri_count=0;tet_count=0
+    total_tris=sum(ntris(mesh) for (_,mesh) in parts)
+    tri_owners=Vector{Int32}(undef,total_tris)
     for (part,(_,mesh)) in enumerate(parts)
         remap=remaps[part]
         for cell in axes(mesh.tris,2),slot in 1:3
             tris[slot,tri_count+cell]=remap[mesh.tris[slot,cell]]
         end
+        fill!(@view(tri_owners[tri_count+1:tri_count+ntris(mesh)]),Int32(part))
         for cell in axes(mesh.tets,2),slot in 1:4
             tets[slot,tet_count+cell]=remap[mesh.tets[slot,cell]]
         end
@@ -2245,7 +2248,8 @@ function _merge_entity_meshes(parts,caller::AbstractString;
     end
     merged=Mesh(coordinate_matrix;segs=segs,tris=tris,tets=tets,
                 seg_tag=seg_tag,tri_tag=tri_tag,tet_tag=tet_tag)
-    diag=validate(merged;require_positive_tets=require_positive_tets)
+    diag=validate(merged;require_positive_tets=require_positive_tets,
+                  tri_owners=tri_owners)
     diag.ok || throw(ErrorException(
         "$caller: merged mesh is invalid — "*join(diag.messages,"; ")))
     return bindings===nothing ? (merged,remaps,seg_keeps) : (merged,remaps,seg_keeps,bindings)

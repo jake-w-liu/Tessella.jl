@@ -1337,6 +1337,93 @@ Isolated runs pass deterministically (~7 min for the
 fragment testset). Hardening the exact-Delaunay
 escalation remains open performance work.
 
+### GEO01 slice 18 — OCC sweep meshing transport (2026-10-15)
+
+The eighteenth GEO01 slice wires `numElements`/`heights`/
+`recombine` through `model.occ.extrude` and
+`model.occ.revolve` — the upstream `ExtrudeParams`
+(`mesh.ExtrudeMesh`) attachment — onto the existing
+Julia-native Layers machinery rather than duplicating
+meshing logic. `_model_occ_sweep_mesh_params` validates
+the option triple (positive integer counts; `heights`
+requires counts; one strictly-increasing cumulative
+entry per layer, normalized to `1` so the last
+boundary is the swept cap) into the shared
+`_GeoExtrudeParams` record, and
+`_model_occ_sweep_transport!` attaches params,
+generatrix-source links and sweep specs to every
+created entity — vertex-swept edges (connectors, rim
+circles, apex degenerate edges), translated top-edge
+copies, swept surfaces via `smap`/`fmap`, and explicit
+tag-level links for caps, solids and the compact
+cylinder/torus publications (`sw.links`).
+
+Two deep-debug root causes landed with the transport.
+First, bitwise seam welding: a full-turn revolve's
+closing layer evaluated `rotate(p,2π)` ≈ `p` only to
+1e-16, so the strip's last row could not weld onto the
+source row — `_extrude_level_at` and
+`_extrude_rotate_point` now snap exact multiples of
+2π to the identity, and both compact-publication paths
+(`_model_occ_extrude_disk!`, `_model_occ_revol_disk!`)
+were rebuilt to share the source circle/vertex
+entities the way upstream's sweep does, so graded
+nodes weld bitwise rather than re-evaluating
+coincident geometry. Second, classification routing:
+the materialized cylinder/torus solids carry primitive
+records that made them "implicit volumes", which skips
+boundary-surface meshing and classification entirely —
+under Layers the volume sweeps explicitly, so both the
+embedding inventory and the analytic-boundary skip now
+gate on `_extrude_gate`. Supporting fixes: merged
+entity carriers audit triangle links per part (a union
+of independently manifold entity meshes sharing a seam
+is legitimate), a two-arc closed ring — a vertex
+generatrix through two levels — is exempt from the
+duplicate-incidence check in both ordinary and
+transfinite paths, seam curves listed with both
+orientations count as interior support rather than
+emitted boundary
+(`_model_emitted_boundary_curves`), and
+circle-degenerate ellipses classify as circles for the
+materialized-cylinder consistency check with either
+rim orientation.
+
+Two configurations reject loudly instead of producing
+unrepresentable output: a full-turn revolve needs
+three subdivisions when surfaces/volumes are swept
+(two weld coincident quads — the second gap's cells
+land on the same four rows as the first) or two for a
+point generatrix (one is a degenerate self-loop), and
+Layers on an axis-touching revolve profile rejects
+(the collapsed-column emission is a shared `.geo`/
+OCC machinery gap, verified identical upstream-style
+failure on the `.geo` path). Verified by
+`test/interfaces/api_occ_extrude_test.jl` and
+`api_occ_revolve_test.jl` — 15 new transport
+assertions covering graded z-levels
+(`{0,.8,1.6,2.4,3.2,4}` on layers `[2,3]` at
+`[0.4,1.0]`), prism/hex/quad element types under
+recombine, torus azimuth layers at `0/.4π/.8π/1.4π`,
+a two-arc point ring, and the new rejection gates
+with atomicity snapshots.
+
+Regression sweep: `test/geometry/geo_extrude_test.jl`
+(54+54+10+29+16+5) and the Layers certificate files
+`api_ordinary_layers_actual_source` (174) /
+`api_ordinary_layers_emitted_projection` (35) pass
+cleanly. Two pre-existing `main` failures reproduced
+identically on the parent commit and are unrelated:
+`geo_quadtri_extrude_test.jl` reports a
+`direct.coords != volume.coords` node-ordering
+difference plus one `model_to_mixed` crease-segment
+conformance error (18/2/1 both before and after this
+slice), and `api_ordinary_layers_orphan_history` /
+`api_ordinary_layers_subdivision_history` die inside
+`open_geo!` because `mktemp` returns extensionless
+paths and the atomic-open check requires `.geo`
+(introduced by `d1d7088`).
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The
