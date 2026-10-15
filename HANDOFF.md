@@ -4835,7 +4835,7 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
-## Latest landed increment (pending push)
+## Latest landed increment (`11c5c5c`, pushed to `origin/main`)
 
 **`occ.offsetCurve` (GEO01 slice 21c)** — `occ.offset_curve(loop,offset)`
 implements `BRepOffsetAPI_MakeOffset` with `GeomAbs_Arc` joins in
