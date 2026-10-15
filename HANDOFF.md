@@ -4835,6 +4835,34 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
+## Latest landed increment (`167e858`, pushed to `origin/main`)
+
+**OCC partial sweeps + periodic Boolean seam hardening (GEO01 slice 19)** —
+`add_cylinder`/`add_cone` `angle` and `add_sphere`
+`angle1`/`angle2`/`angle3` now materialize real sector solids (meridian
+side planes, polar band caps, degenerate pole/apex edges in wire order),
+with exact analytic masses, transforms that carry the domain fields, and
+closest/ray queries that classify every sector layout correctly.
+`ModelBoolean.jl` fixes: mirrored plane-cylinder section foot sign,
+uv-co-location requirement on the merge's internal-edge drop (periodic
+seam copies are distinct boundaries — dropping them produced an
+unrepresentable wrap region and dropped the whole lateral face),
+mod-2π canonical unwrapping in `_brep_merge_edge_pieces`, `fwd ⊻ (α<0)
+⊻ neg ⊻ neg'` traversal composition after reparametrization, the
+`[0,1]`-vs-`[t0,t1]` pcurve convention bridge
+(`_occ_pcurve_reparam` at materialize + restretch at `_brep_extract`),
+pole-collapsed cell welding in the curved-face mesher, and direct
+analytic hit-uv for ray/face parity. Verified: all 16
+intersect/cut/fuse/fragment combinations on box × {full cylinder, π/2
+sector} pass with analytically exact masses; new regression coverage in
+`api_occ_boolean_test.jl` ("periodic seam and partial sectors") and the
+updated `api_occ_primitives_test.jl`; boolean/primitives/measures/
+queries/closest/transform suites all green. Known pre-existing gaps
+unchanged: tangent-contact sections still reject
+("degenerate zero-area wire" reproduces at `786e4ca`), and the
+exact-Delaunay provenance snapshot can still escalate to ~20 GB on
+rim-heavy curved fragments (memory-bound, tracked open item).
+
 ## Verified gates
 
 - `validation/transfinite/differential.jl` Gmsh 4.15.2:
