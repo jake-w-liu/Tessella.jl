@@ -86,5 +86,6 @@ include("functional/fixtures.jl")
     include("functional/occ_revolve_smoke.jl")
     include("functional/occ_corner_smoke.jl")
     include("functional/occ_offset_smoke.jl")
+    include("functional/occ_nurbs_smoke.jl")
     include("functional/occ_boolean_smoke.jl")
 end

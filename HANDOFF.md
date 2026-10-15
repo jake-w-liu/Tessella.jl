@@ -4835,7 +4835,28 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
-## Latest landed increment (`11c5c5c`, pushed to `origin/main`)
+## Latest landed increment (GEO01 slice 21d, `occ.convertToNURBS` curves)
+
+`occ.convert_to_nurbs(dimTags)` implements
+`OCC_Internals::convertToNURBS` in
+`src/geometry/ModelOCCNurbsConvert.jl` —
+`BRepBuilderAPI_NurbsConvert` per bound entity
+keeping tags/topology. Lines become degree-1
+B-splines on the identical parametrization;
+conics become quadratic-rational B-splines
+carrying `_ModelOCCReparamCurve`
+(`ModelOCCCurves.jl`) — the
+`_ModelOCCConicReparam` half-angle map keeps
+the public parametrization exact, so stored
+pcurves stay bitwise valid. All fallible work
+stages before the first mutation; rebound
+edges drop stale sync entries for re-import.
+Dims −2/2/3 reject loudly pending the surface
+half. Verified: `api_occ_nurbs_test.jl` 170
+green + `occ_nurbs_smoke.jl`; offset/corner/
+spline suites re-verified.
+
+## Previous landed increment (`11c5c5c`, pushed to `origin/main`)
 
 **`occ.offsetCurve` (GEO01 slice 21c)** — `occ.offset_curve(loop,offset)`
 implements `BRepOffsetAPI_MakeOffset` with `GeomAbs_Arc` joins in

@@ -854,6 +854,7 @@ include("ModelOCCClosest.jl")
 include("ModelOCCSweep.jl")
 include("ModelBoolean.jl")
 include("ModelOCCBoolean.jl")
+include("ModelOCCNurbsConvert.jl")
 
 @inline function _model_periodic_entity_label(dim::Int)
     dim==1 && return "Curve"

@@ -1693,6 +1693,54 @@ swallowed-circle/unknown-tag rejections with
 registry counts unchanged); compact
 `occ_offset_smoke.jl` added to `runtests.jl`.
 
+### GEO01 slice 21d — `occ.convertToNURBS` curves (2026-10-15)
+
+`model.occ.convert_to_nurbs(dimTags)`
+implements `OCC_Internals::convertToNURBS` —
+`BRepBuilderAPI_NurbsConvert` per bound entity,
+keeping tags and topology — in
+`src/geometry/ModelOCCNurbsConvert.jl`. Line
+edges become degree-1 B-splines on the
+identical arc-length parametrization; circle
+and ellipse edges become quadratic-rational
+B-splines (equal ≤π/2 spans, tangent-
+intersection mid poles `C+sec(Δ/2)·(p(m)−C)`,
+weights `cos(Δ/2)`) carrying the new
+`_ModelOCCReparamCurve` wrapper — same field
+layout as `_ModelOCCNURBSCurve` plus a
+`_ModelOCCConicReparam` tangent half-angle map
+`t→s` — so the public parameter map is
+preserved exactly and every stored pcurve stays
+bitwise valid (upstream refits 2-D curves
+approximately). B-spline records pass through;
+Bezier families renormalize to B-spline like
+`GeomConvert`; vertices, wires, degenerate and
+`surface_iso` records are unaffected. The whole
+call validates + stages before the first kernel
+mutation (atomicity is a superset of upstream's
+greedy per-entity order); rebounded edges drop
+their stale `m.curves`/`m.curve_types`/
+`m.curve_geometry` entries like the corner ops
+so `synchronize` re-imports them. Transforms
+commute with the parameter-space reparam.
+Surfaces/shells/solids (dims −2, 2, 3) reject
+loudly — patch-surface conversion is the next
+half of the slice.
+
+Verified: `test/interfaces/api_occ_nurbs_test.jl`
+— 170 green (line exact to 0 ulp, circle/ellipse
+points + D1/D2 fp-exact through the reparam
+chain rule, trimmed native-backed arcs,
+face-bounded pcurve lift consistency ~1e-15,
+`get_mass`/`translate`/`get_closest_entities`
+on converted edges, bezier→bspline
+renormalization, wire input, unknown-tag/
+unimplemented-dim rejections with unchanged
+registry counts, idempotent reconversion);
+compact `occ_nurbs_smoke.jl` added to
+`runtests.jl`; offset (60), corner (65) and
+spline (52) suites re-verified.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

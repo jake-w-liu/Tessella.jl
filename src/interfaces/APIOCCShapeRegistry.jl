@@ -169,6 +169,8 @@ chamfer_2d(edge_tag1,edge_tag2,distance1,distance2;tag=-1)=
 offset_curve(curveLoopTag,offset)=_with_model(
     m->Model._model_occ_offset_wire!(m,curveLoopTag,offset;
         caller="OCC.offsetCurve"))
+convert_to_nurbs(dimTags)=_with_model(
+    m->Model._model_occ_convert_to_nurbs!(m,dimTags,"OCC.convertToNURBS"))
 
 module mesh
     import .....Model

@@ -332,7 +332,8 @@ function _model_occ_geometry_equal(a,b)
     a===b && return true
     typeof(a)===typeof(b) || return false
     if a isa NamedTuple || a isa _ModelNURBSSurface || a isa NURBS.NURBSSurface ||
-       a isa _ModelOCCNURBSCurve || a isa NURBS.NURBSCurve
+       a isa _ModelOCCNURBSCurve || a isa _ModelOCCReparamCurve ||
+       a isa _ModelOCCConicReparam || a isa NURBS.NURBSCurve
         return all(name->_model_occ_geometry_equal(getfield(a,name),getfield(b,name)),
                    fieldnames(typeof(a)))
     elseif a isa Tuple

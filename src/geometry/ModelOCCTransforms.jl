@@ -66,6 +66,14 @@ function _model_occ_transform_nurbs_curve(g::_ModelOCCNURBSCurve,t,caller)
     return _ModelOCCNURBSCurve(g.family,curve)
 end
 
+# The reparametrization is a parameter-space map — affine pole transforms
+# commute with it, so only the homogeneous net needs rebuilding.
+function _model_occ_transform_nurbs_curve(g::_ModelOCCReparamCurve,t,caller)
+    inner=_model_occ_transform_nurbs_curve(
+        _ModelOCCNURBSCurve(g.family,g.curve,g.nets),t,caller)
+    return _ModelOCCReparamCurve(inner.family,inner.curve,inner.nets,g.reparam)
+end
+
 # Compact `primitive` record on a solid — the same family-limited update the
 # public `_plan_volume_transform` applies to `m.cylinders`/`m.spheres`/`m.cones`.
 function _model_occ_transform_primitive(record,t,caller,what)

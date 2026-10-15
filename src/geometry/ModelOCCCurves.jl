@@ -277,3 +277,77 @@ function _model_occ_curve_project(geometry::_ModelOCCNURBSCurve,target,lower,upp
     end
     return best===nothing ? nothing : (best[1],best[2])
 end
+
+# ── converted-curve reparametrization ────────────────────────────────────────
+# `convertToNURBS` replaces a conic record by a quadratic-rational NURBS
+# whose public parameter map is preserved exactly: internal knots sit at the
+# angular breakpoints and the tangent half-angle map
+#   s = a + Δ/2·(1 + tan((t−m)/2)/tan(Δ/4)),   m = (a+b)/2
+# carries the external angle t onto the internal B-spline parameter s.
+# Because the external parametrization is unchanged, every stored pcurve and
+# upstream/downstream parameter reference stays bitwise valid — stricter than
+# the upstream behaviour, which refits 2-D curves approximately.
+struct _ModelOCCConicReparam
+    knots::Vector{Float64}              # span breakpoints (knot values)
+    tanq::Vector{Float64}               # tan(Δ_i/4) per span
+end
+
+# Same field layout as `_ModelOCCNURBSCurve` plus the reparametrization data,
+# so generic field access (`curve.curve.knots`, `curve.nets`, `curve.family`)
+# keeps working for every consumer that does not evaluate.
+struct _ModelOCCReparamCurve
+    family::Symbol
+    curve::NURBS.NURBSCurve
+    nets::NTuple{3,Union{Nothing,Vector{NTuple{4,Float64}}}}
+    reparam::_ModelOCCConicReparam
+end
+
+function _occ_conic_reparam_lookup(r::_ModelOCCConicReparam,t)
+    index=clamp(searchsortedlast(r.knots,t),1,length(r.tanq))
+    a=r.knots[index]
+    span=r.knots[index+1]-a
+    return a,span,a+span/2,r.tanq[index]
+end
+
+# t → (s, ds/dt, d²s/dt²) on the interior of each span; at a shared knot
+# either adjacent span yields the same s and the composed curve stays C¹.
+function _occ_conic_reparam(r::_ModelOCCConicReparam,t)
+    a,span,mid,factor=_occ_conic_reparam_lookup(r,Float64(t))
+    sx,cx=_gm_sincos((t-mid)/2)
+    tangent=sx/cx
+    ds=span/(4*factor*cx*cx)
+    return a+span/2*(1+tangent/factor),ds,ds*tangent
+end
+
+# s → t: the angle the internal parameter reaches, θ = m + 2·atan(u·tan(Δ/4)).
+function _occ_conic_reparam_inv(r::_ModelOCCConicReparam,s)
+    a,span,mid,factor=_occ_conic_reparam_lookup(r,Float64(s))
+    return mid+2.0*_gm_atan((2*(s-a)/span-1)*factor)
+end
+
+function _model_occ_curve_d2(geometry::_ModelOCCReparamCurve,parameter)
+    s,ds,dds=_occ_conic_reparam(geometry.reparam,Float64(parameter))
+    point,first,second=_model_occ_curve_d2(
+        _ModelOCCNURBSCurve(geometry.family,geometry.curve,geometry.nets),s)
+    return (point,
+            ntuple(axis->first[axis]*ds,3),
+            ntuple(axis->first[axis]*dds+second[axis]*ds*ds,3))
+end
+
+# The internal knot range equals the external parameter range numerically.
+_model_occ_curve_bounds(geometry::_ModelOCCReparamCurve)=
+    _model_occ_curve_bounds(
+        _ModelOCCNURBSCurve(geometry.family,geometry.curve,geometry.nets))
+_model_occ_curve_resolution(geometry::_ModelOCCReparamCurve)=
+    _model_occ_curve_resolution(
+        _ModelOCCNURBSCurve(geometry.family,geometry.curve,geometry.nets))
+
+function _model_occ_curve_project(geometry::_ModelOCCReparamCurve,target,
+                                  lower,upper)
+    inner=_ModelOCCNURBSCurve(geometry.family,geometry.curve,geometry.nets)
+    result=_model_occ_curve_project(inner,target,
+        _occ_conic_reparam(geometry.reparam,lower)[1],
+        _occ_conic_reparam(geometry.reparam,upper)[1])
+    result===nothing && return nothing
+    return _occ_conic_reparam_inv(geometry.reparam,result[1]),result[2]
+end
