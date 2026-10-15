@@ -1551,6 +1551,61 @@ azimuths [0,π/6,π/3,π/2] into recombined prisms.
 `api_occ_queries`, `api_occ_transform`,
 `api_occ_inertia` — all green on Julia 1.13.1.
 
+### GEO01 slice 21a — `occ.add_surface_loop` sewing (2026-10-15)
+
+`model.occ.add_surface_loop(tags; sewing=true)` now
+implements upstream's `BRepBuilderAPI_Sewing` +
+recursive-bind path: coincident boundary vertices
+weld at `Precision::Confusion` (union-find),
+coincident edges merge into shared welded edges
+(same endpoint vertex groups + same curve locus —
+lines by endpoints, circle arcs by frame/radius/
+span/antipode, `degenerate` by position, anything
+else only by identical records), and every member
+face republishes as a copy whose wires reference
+the welded graph under fresh tags in upstream's
+face→wires→edges→vertices order. Member edges
+stored opposite the weld flip their wire flags and
+reparametrize `lin2d`/`circ2d`/`neg2d` pcurves onto
+the shared edge's parameter map — a FORWARD use of
+the weld is the member's reversed occurrence, so
+the `fwd`/`rev` columns swap. Direction detection
+probes endpoints for open edges and the quarter
+point for closed ones (endpoints coincide either
+way). Records that cannot carry the mapped trace
+keep an unwelded copy instead of corrupting the
+face. Degenerate/surface-iso edges rebind their
+embedded `face` record to a sewn owner so their
+pcurve lookups resolve under welded tags.
+Originals stay bound; empty input falls back to the
+ordinary shell path; all reservations precede
+publication so failures leave the kernel untouched
+and consume no tags.
+
+A pre-existing `occ.mirror` defect surfaced by the
+flipped-weld probes also landed: reflected closed
+conics store `p'(t) = T·p(−t)` (`t0,t1 → −t1,−t0`),
+but face pcurves were carried verbatim — every
+reflection of a face bounded by a closed circle or
+ellipse left its uv trace off the edge.
+`_model_occ_transform!` now collects the
+range-negated edges and `_model_occ_rekey_pcurves!`
+folds `s = −t` into both pcurve columns during the
+rekey.
+
+Verified: `api_occ_volume_test.jl` — all green
+including the new sewing sets (independently
+built outward-wound cube → welded +8v/+12e/+6f
+graph, exact mass/COM, every sewn edge shared by
+two faces, `generate(3)` tetrahedralizes;
+sphere → sewn degenerate pole edges evaluate on
+the sphere through rebound face records; mirrored
+cylinder → closed rim weld detects the reversed
+direction and every sewn pcurve column lifts onto
+its edge's 3-D points; atomic rejections; empty
+input). Independent probes re-verified after the
+reparam-gate generalization.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

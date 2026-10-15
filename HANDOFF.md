@@ -4837,6 +4837,32 @@ rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
 ## Latest landed increment (`c5138ef`, pushed to `origin/main`)
 
+**Sewing-enabled `occ.add_surface_loop` (GEO01 slice 21a)** — `sewing=true`
+now runs the upstream `BRepBuilderAPI_Sewing` + recursive-bind contract:
+coincident boundary vertices weld at `Precision::Confusion`, coincident edges
+(same welded endpoint pair + same locus — lines by endpoints, circle arcs by
+frame/radius/span/antipode, `degenerate` by position, everything else only by
+identical records) merge into shared welded edges, and every member face
+republishes as a copy on the welded graph under fresh tags in upstream's
+face→wires→edges→vertices order. Flipped members toggle their wire flags and
+reparametrize `lin2d`/`circ2d`/`neg2d` pcurves onto the welded edge's
+parameter map with the `fwd`/`rev` columns swapped (a forward weld use is the
+member's reversed occurrence); closed edges detect direction by a
+quarter-point probe since their endpoints coincide either way; records that
+cannot carry the mapped trace keep an unwelded copy rather than corrupting
+the face; and degenerate/surface-iso edges rebind their embedded `face`
+record to a sewn owner. Empty input falls back to the ordinary shell path,
+originals stay bound, and failures consume no tags. A latent `occ.mirror`
+defect surfaced and landed with it: reflected closed conics store
+`p'(t) = T·p(−t)` but face pcurves were carried verbatim —
+`_model_occ_transform!` now collects range-negated closed conics and the
+pcurve rekey folds `s = −t` into both columns. Verified:
+`api_occ_volume_test.jl` all green including new sewing sets (independent
+six-face cube welds to +8v/+12e/+6f with exact mass/COM and native
+`generate(3)`; sewn sphere pole edges evaluate through rebound face records;
+mirrored cylinder exercises the reversed closed-rim weld with zero
+pcurve-lift mismatches; atomic rejections; empty input).
+
 **Partial-angle `occ.revolve` (GEO01 slice 20)** — `model.occ.revolve` now
 accepts any nonzero angle of magnitude ≤ 2·Pi (negative angles still flip the
 axis). Partial turns build sector topology on the slice-19 conventions:

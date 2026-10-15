@@ -198,9 +198,18 @@ function _model_occ_bind_tree!(kernel:: _ModelNativeOCCKernel,shapes,id,dim,
     return nothing
 end
 
-@inline function _model_occ_rekey_dict(pcurves,tagmap)
+@inline function _model_occ_rekey_dict(pcurves,tagmap,flipped,tol,caller)
     rekeyed=Dict{Int,NamedTuple}()
     for (oldtag,e) in pcurves
+        if oldtag in flipped
+            # A reflected closed conic stores `p'(t) = T·p(-t)` — its face
+            # pcurve columns reparametrize by `s = -t` to stay on the edge's
+            # new parameter map (both columns; no use-flag swap).
+            e=(fwd=_model_occ_sew_shift_pc(get(e,:fwd,nothing),
+                                           -1.0,0.0,tol,caller),
+               rev=_model_occ_sew_shift_pc(get(e,:rev,nothing),
+                                           -1.0,0.0,tol,caller))
+        end
         rekeyed[get(tagmap,oldtag,oldtag)]=e
     end
     return rekeyed
@@ -209,9 +218,12 @@ end
 # Re-key every transformed shape's pcurve dictionaries — bound faces carry
 # `rec.pcurves`, embedded faces inside degenerate/surface_iso curve records
 # carry `rec.face.pcurves` — from the pre-transform curve tags to the
-# realized fresh tags.
+# realized fresh tags. `flipped` holds the pre-transform tags of closed
+# conic edges whose records a reflection range-negated
+# (`_transform_occ_circle`: closed circles keep +T·n with `t0,t1 -> -t1,-t0`).
 function _model_occ_rekey_pcurves!(kernel:: _ModelNativeOCCKernel,newshapes,
-                                   tagmap)
+                                   tagmap;flipped=Set{Int}(),
+                                   tol=_OCC_CONFUSION,caller="OCC.transform")
     for (id,shape) in newshapes
         if shape.dimension==2
             rec=shape.geometry.geometry
@@ -219,7 +231,7 @@ function _model_occ_rekey_pcurves!(kernel:: _ModelNativeOCCKernel,newshapes,
             kernel.shapes[id]=_ModelOCCShape(2,
                 (kind=shape.geometry.kind,
                  geometry=merge(rec,(pcurves=_model_occ_rekey_dict(
-                     rec.pcurves,tagmap),))),
+                     rec.pcurves,tagmap,flipped,tol,caller),))),
                 shape.children)
         elseif shape.dimension==1
             rec=shape.geometry.geometry
@@ -228,7 +240,7 @@ function _model_occ_rekey_pcurves!(kernel:: _ModelNativeOCCKernel,newshapes,
                 (kind=shape.geometry.kind,
                  geometry=merge(rec,(face=merge(rec.face,
                      (pcurves=_model_occ_rekey_dict(
-                         rec.face.pcurves,tagmap),)),))),
+                         rec.face.pcurves,tagmap,flipped,tol,caller),)),))),
                 shape.children)
         end
     end
@@ -268,6 +280,20 @@ function _model_occ_transform!(m::GeoModel,dim_tags,t::_AffineTransform,
         kernel.maxima[dim+3]<=typemax(Int32)-count || throw(ArgumentError(
             "$caller: OCC entity tag allocation exceeds Int32"))
     end
+    # Reflections range-negate closed conic edge records — collect their
+    # pre-transform tags so `rekey` can fold `s = -t` into their pcurves.
+    flipped=Set{Int}()
+    if _linear_det(t.linear)<0
+        for id in union
+            shape=kernel.shapes[id]
+            shape.dimension==1 || continue
+            rec=shape.geometry.geometry
+            hasproperty(rec,:occ) || continue
+            rec.occ in (:circle,:ellipse) || continue
+            rec.t1-rec.t0 < _OCC_TWO_PI && continue
+            haskey(oldtags,id) && push!(flipped,oldtags[id])
+        end
+    end
     # Every fallible record transform runs before the first bind/unbind —
     # representability failures leave the kernel untouched.
     newshapes=Dict{UInt64,_ModelOCCShape}()
@@ -288,7 +314,8 @@ function _model_occ_transform!(m::GeoModel,dim_tags,t::_AffineTransform,
         _model_occ_unbind!(kernel,id,true)
         _model_occ_bind_tree!(kernel,newshapes,remap[id],d,tg,ctx)
     end
-    _model_occ_rekey_pcurves!(kernel,newshapes,ctx.tagmap)
+    _model_occ_rekey_pcurves!(kernel,newshapes,ctx.tagmap;
+        flipped=flipped,caller=caller)
     kernel.next_shape=max(kernel.next_shape,
                           maximum(collect(values(remap)))+UInt64(1))
     _model_occ_collect_shapes!(kernel)

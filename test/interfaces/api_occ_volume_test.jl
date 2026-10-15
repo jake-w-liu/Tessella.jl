@@ -136,9 +136,8 @@ end
     occ.synchronize()
     m=_current_model()
     @test m.surface_loops[le]==Int[]
-    # sewing=true rejects loudly rather than approximating.
-    @test occursin("sewing is not supported",
-        _errtext(()->occ.add_surface_loop([fa];sewing=true)))
+    # `sewing` must be a Bool; the welding semantics live in their own
+    # testset below.
     @test occursin("sewing must be Bool",
         _errtext(()->occ.add_surface_loop([fa];sewing=1)))
     # Unknown surfaces reject without consuming a loop tag.
@@ -149,6 +148,121 @@ end
     @test occ.add_surface_loop([fa];tag=5)==5
     @test occursin("OCC Surface Loop[5] already exists",
         _errtext(()->occ.add_surface_loop([fa];tag=5)))
+end
+
+@testset "occ.add_surface_loop sewing" begin
+    occ=_occ_setup()
+    quad(pts)=begin
+        ps=[occ.add_point(p...) for p in pts]
+        es=[occ.add_line(ps[i],ps[mod1(i+1,4)]) for i in 1:4]
+        occ.add_plane_surface([occ.add_wire(es)])
+    end
+    # A unit cube assembled from six fully-independent quad faces — the
+    # canonical sewing case: geometrically coincident but topologically
+    # distinct boundary edges weld into a shared graph, wound outward.
+    faces=[quad([(0,0,0),(0,1,0),(1,1,0),(1,0,0)]),      # -z
+           quad([(0,0,1),(1,0,1),(1,1,1),(0,1,1)]),      # +z
+           quad([(0,0,0),(1,0,0),(1,0,1),(0,0,1)]),      # -y
+           quad([(0,1,0),(0,1,1),(1,1,1),(1,1,0)]),      # +y
+           quad([(0,0,0),(0,0,1),(0,1,1),(0,1,0)]),      # -x
+           quad([(1,0,0),(1,1,0),(1,1,1),(1,0,1)])]      # +x
+    before=Dict(d=>length(occ.get_entities(d)) for d in (0,1,2))
+    shell=occ.add_surface_loop(faces;sewing=true)
+    after=Dict(d=>length(occ.get_entities(d)) for d in (0,1,2))
+    # Welded box graph: 8 vertices, 12 edges, 6 fresh face copies.
+    @test after[0]-before[0]==8
+    @test after[1]-before[1]==12
+    @test after[2]-before[2]==6
+    vol=occ.add_volume([shell])
+    occ.synchronize()
+    m=_current_model()
+    @test length(m.surface_loops[shell])==6
+    @test m.volumes[vol]==[shell]
+    @test occ.get_mass(3,vol)≈1.0 atol=1e-12
+    @test collect(occ.get_center_of_mass(3,vol))≈[0.5,0.5,0.5] atol=1e-12
+    # Every boundary curve of the sewn graph is shared by exactly two faces.
+    counts=Dict{Int,Int}()
+    for ft in m.surface_loops[shell], loop in m.surfaces[ft],
+            signed in m.loops[loop]
+        counts[abs(signed)]=get(counts,abs(signed),0)+1
+    end
+    @test length(counts)==12
+    @test all(==(2),values(counts))
+    # Re-synchronize is idempotent.
+    occ.synchronize()
+    @test length(m.surface_loops)==1
+    # A failed sew is atomic — no partial welded graph leaks.
+    b=Dict(d=>length(occ.get_entities(d)) for d in (0,1,2))
+    @test occursin("unknown OCC Surface[999]",
+        _errtext(()->occ.add_surface_loop([faces[1],999];sewing=true)))
+    a=Dict(d=>length(occ.get_entities(d)) for d in (0,1,2))
+    @test a==b
+    # Empty lists sew to an ordinary empty shell.
+    le=occ.add_surface_loop(Int[];sewing=true)
+    occ.synchronize()
+    @test m.surface_loops[le]==Int[]
+    # The welded volume tetrahedralizes through the native pipeline.
+    A.mesh.generate(3)
+    element_types,element_tags,_=A.mesh.get_elements(3,vol)
+    @test element_types==Int32[4]
+    @test length(element_tags[1])>0
+end
+
+@testset "occ.add_surface_loop sewing — curved/closed edges" begin
+    occ=_occ_setup()
+    # A sphere lateral carries degenerate pole edges embedding the face
+    # record — the sewn copy must rebind `face` onto the fresh geometry so
+    # the pole pcurve lookup still resolves under the welded tags.
+    occ.add_sphere(0.0,0.0,0.0,1.0)
+    sphere_face=only(t for (_,t) in occ.get_entities(2))
+    shell=occ.add_surface_loop([sphere_face];sewing=true)
+    occ.synchronize()
+    m=_current_model()
+    kernel=m.occ_kernel
+    sewn_ct=[t for (_,t) in occ.get_entities(1)]
+    # sewn graph: 2 pole vertices, 3 curves (2 degenerate + meridian),
+    # 1 face copy.
+    @test length(sewn_ct)==6
+    for (_,ct) in occ.get_entities(1)
+        id=kernel.bindings[(1,ct)]
+        g=kernel.shapes[id].geometry.geometry
+        hasproperty(g,:face) || continue
+        @test haskey(g.face.pcurves,ct) && g.face.pcurves[ct].fwd!==nothing
+        # the embedded-face eval still lands on the (unit) sphere surface
+        @test abs(M._occ_modulus(M._occ_degenerate_point(g,ct,1.0))-1)<1e-9
+    end
+    # A mirrored cylinder's lateral sews to its source: the z=0 rim circle
+    # is a *closed* coincident edge stored direction-reversed — the weld
+    # must flip the member's pcurve column onto the shared param map.
+    A.initialize(); occ=_occ_setup()
+    occ.add_cylinder(0.0,0.0,0.0, 0.0,0.0,1.0, 0.5)
+    m=_current_model(); kernel=m.occ_kernel
+    lat=only(t for (_,t) in occ.get_entities(2)
+        if kernel.shapes[kernel.bindings[(2,t)]].geometry.geometry.occ===
+           :cylinder)
+    cp=occ.copy([(2,lat)]); occ.mirror(cp,0,0,1,0)
+    shell=occ.add_surface_loop([lat,cp[1][2]];sewing=true)
+    occ.synchronize()
+    m=_current_model()
+    # Lift invariant: every wire use's pcurve column maps edge params onto
+    # the edge's own 3-D points. The mirrored member face is included — its
+    # closed rim circles range-negate under reflection, so their pcurve
+    # columns fold `s = -t` to stay consistent.
+    for ft in vcat(m.surface_loops[shell],cp[1][2])
+        fg=m.surface_geometry[ft]
+        hasproperty(fg,:pcurves) || continue
+        for loop in m.surfaces[ft], signed in m.loops[loop]
+            ct=abs(signed); rec=m.curve_geometry[ct]
+            pc=M._occ_edge_pcurve_on_face(fg,ct,signed<0 ? 0 : 1)
+            for τ in (0.0,0.37,1.0)
+                t=rec.t0+τ*(rec.t1-rec.t0)
+                uv=M._occ_pcurve_d0(pc,t)
+                ps=M._occ_surface_point(fg,uv[1],uv[2])
+                pe=M._model_curve_point(m,ct,t,"occ.add_surface_loop")
+                @test M._occ_modulus(M._arc_sub(ps,pe))<1e-6
+            end
+        end
+    end
 end
 
 @testset "occ.add_volume" begin
