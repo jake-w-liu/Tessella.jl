@@ -4835,9 +4835,9 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
-## Latest landed increment (GEO01 slice 21d, `occ.convertToNURBS` curves)
+## Latest landed increment (`46ed4e0`, pushed to `origin/main`)
 
-`occ.convert_to_nurbs(dimTags)` implements
+**`occ.convertToNURBS` curves (GEO01 slice 21d)** — `occ.convert_to_nurbs(dimTags)` implements
 `OCC_Internals::convertToNURBS` in
 `src/geometry/ModelOCCNurbsConvert.jl` —
 `BRepBuilderAPI_NurbsConvert` per bound entity
