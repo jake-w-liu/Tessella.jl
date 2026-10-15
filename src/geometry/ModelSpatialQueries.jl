@@ -1185,11 +1185,17 @@ function _dist_ray_face(m::GeoModel,stag::Int,P::NTuple{3,Float64},
         count=0
         for t in params
             if abs(t)<=tol
-                ambiguous=true;continue
+                # The ray starts on the supporting surface: only ambiguous
+                # when the start point is inside the trimmed face.
+                u,v=_occ_surface_hit_uv(geometry,P,lc)
+                state=_occ_face_state(m,stag,geometry,(u,v),
+                                      _OCC_CONFUSION)
+                state===:out || (ambiguous=true)
+                continue
             end
             t>tol || continue
             point=_add3(P,_occ_mul(D,t))
-            u,v,_=_occ_surface_closest(geometry,point,lc)
+            u,v=_occ_surface_hit_uv(geometry,point,lc)
             state=_occ_face_state(m,stag,geometry,(u,v),_OCC_CONFUSION)
             (state===:on || state===:unknown) && (ambiguous=true)
             state===:in && (count+=1)
@@ -1206,7 +1212,8 @@ function _dist_ray_face(m::GeoModel,stag::Int,P::NTuple{3,Float64},
         end
         t=(rhs-_dot3(plane.normal,P))/den
         if abs(t)<=tol
-            return 0,true
+            state=_dist_plane_state(m,stag,plane,P,caller)
+            return 0,state!==:out
         end
         t>tol || return 0,false
         point=_add3(P,_occ_mul(D,t))

@@ -719,6 +719,23 @@ end
 _occ_pcurve_unneg(pc)=
     hasproperty(pc,:neg2d) ? (pc.neg2d[1],true) : (pc,false)
 
+# Affine reparametrization of a stored pcurve: the returned trace satisfies
+# `pc'(s) = pc(α+β·s)` — used to move a `lin2d` trace between an edge's
+# record parameter range and the untyped `[0,1]` segment parametrization.
+# `neg2d` wrappers are preserved with their inner trace reparametrized to
+# `inner'(x) = inner(−α+β·x)`. Non-`lin2d` kinds pass through untouched:
+# they only ever appear on edges whose records survive materialization, so
+# their parameter convention never changes.
+function _occ_pcurve_reparam(pc,α::Float64,β::Float64)
+    neg=hasproperty(pc,:neg2d)
+    base=neg ? pc.neg2d[1] : pc
+    hasproperty(base,:lin2d) || return pc
+    o,d=base.lin2d
+    o′=neg ? (o[1]-α*d[1],o[2]-α*d[2]) : (o[1]+α*d[1],o[2]+α*d[2])
+    inner=(lin2d=(o′,(β*d[1],β*d[2])),)
+    return neg ? (neg2d=(inner,)) : inner
+end
+
 function _occ_pcurve_d0(pc,t::Float64)
     hasproperty(pc,:neg2d) && return _occ_pcurve_d0(pc.neg2d[1],-t)
     if hasproperty(pc,:lin2d)
@@ -1760,12 +1777,12 @@ end
 function _occ_surface_bounds(g)
     _model_nurbs_surface(g) && return _model_nurbs_surface_bounds(g)
     if g.occ===:cylinder
-        return [0.0,0.0],[2π,g.height]
+        return [0.0,0.0],[get(g,:angle,2π),g.height]
     elseif g.occ===:sphere
-        return [0.0,-π/2],[2π,π/2]
+        return [0.0,get(g,:lat1,-π/2)],[get(g,:angle,2π),get(g,:lat2,π/2)]
     elseif g.occ===:cone
         return [0.0,0.0],
-               [2π,sqrt(g.height*g.height+(g.r1-g.r2)*(g.r1-g.r2))]
+               [get(g,:angle,2π),sqrt(g.height*g.height+(g.r1-g.r2)*(g.r1-g.r2))]
     elseif g.occ===:torus
         return [0.0,0.0],[g.angle,2π]
     elseif g.occ===:plane
@@ -4837,6 +4854,36 @@ function _occ_surface_closest(g,P,lc::Float64)
     end
     _,u,v=_occ_xyz_to_uv(g,P,lc,false,false)
     return (u,v,_occ_surface_point(g,u,v))
+end
+
+# Inverse parameter of a point known to sit on the surface: the nearest
+# `ExtPElS` candidate period-mapped into the face-domain window, with no
+# bounds rejection. The bounds-clamped `_occ_surface_closest` would alias a
+# hit outside the trimmed domain onto the in-bounds antipodal extremum;
+# ray/face classification needs the hit's true uv so `_occ_face_state`
+# decides against the wire polygon itself. Degenerate queries (surface
+# axis/apex/center) fall back to the projector.
+function _occ_surface_hit_uv(g,P,lc::Float64)
+    lo,hi=_occ_surface_bounds(g)
+    cands=g.occ===:cylinder ? _occ_extpe_cylinder(g,P) :
+          g.occ===:sphere   ? _occ_extpe_sphere(g,P) :
+          g.occ===:cone     ? _occ_extpe_cone(g,P) :
+          g.occ===:torus    ? _occ_extpe_torus(g,P) :
+          g.occ===:plane    ? _occ_extpe_plane(g,P) :
+          throw(ArgumentError(
+              "_occ_surface_hit_uv: unsupported OCC surface kind $(g.occ)"))
+    if cands===nothing || isempty(cands)
+        u,v,_=_occ_surface_closest(g,P,lc)
+        return u,v
+    end
+    best=cands[1]
+    for cand in Iterators.drop(cands,1)
+        cand[4]<best[4] && (best=cand)
+    end
+    u,v=best[1],best[2]
+    g.occ!==:plane && (u=_occ_in_period(u,lo[1],lo[1]+2π))
+    g.occ===:torus && (v=_occ_in_period(v,lo[2],lo[2]+2π))
+    return u,v
 end
 
 # `OCCFace::parFromPoint` — `_project` first; on failure

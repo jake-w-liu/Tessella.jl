@@ -492,3 +492,48 @@ end
         @test_skip "provenance snapshot exceeds available memory"
     end
 end
+
+@testset "occ booleans — periodic seam and partial sectors" begin
+    # Regression for the curved-face merge path: a box cut through a full
+    # cylinder keeps two seam-adjacent lateral strips whose union wraps the
+    # u-period. Their seam-edge usages are the same edge at two
+    # period-shifted uv positions — distinct domain boundaries, not an
+    # internal shared edge — so the merge must keep both copies or the
+    # lateral region loses its planar cycle and never materializes. The
+    # π/2 sector exercises the same machinery plus meridian side planes.
+    for (angle,mi) in ((2π,1.3907963267948966),(π/2,0.9799219123544154))
+        total=angle                       # r=1, h=2 → vol = angle·r²·h/2
+        occ=_occ_setup()
+        b=occ.add_box(0.3,-0.3,-0.3, 2,2,3)
+        k=occ.add_cylinder(0,0,0,0,0,2,1;angle)
+        out,map=occ.intersect([(3,b)],[(3,k)])
+        @test out==[(3,1)] && map==[[(3,1)],[(3,1)]]
+        @test occ.get_mass(3,1)≈mi
+        # cyl∖box is the complement cell: intersect + cut == operand
+        occ=_occ_setup()
+        b=occ.add_box(0.3,-0.3,-0.3, 2,2,3)
+        k=occ.add_cylinder(0,0,0,0,0,2,1;angle)
+        out,_=occ.cut([(3,k)],[(3,b)])
+        @test sum(occ.get_mass(3,t) for (_,t) in out)≈total-mi
+        # fuse = box ∪ cyl = box + (cyl∖box)
+        occ=_occ_setup()
+        b=occ.add_box(0.3,-0.3,-0.3, 2,2,3)
+        k=occ.add_cylinder(0,0,0,0,0,2,1;angle)
+        out,_=occ.fuse([(3,b)],[(3,k)])
+        @test length(out)==1
+        @test occ.get_mass(3,out[1][2])≈12.0+total-mi
+        # fragment's three cells (box∖cyl, cyl∖box, box∩cyl) tile the union
+        occ=_occ_setup()
+        b=occ.add_box(0.3,-0.3,-0.3, 2,2,3)
+        k=occ.add_cylinder(0,0,0,0,0,2,1;angle)
+        out,_=occ.fragment([(3,b)],[(3,k)])
+        @test length(out)==3
+        @test sum(occ.get_mass(3,t) for (_,t) in out)≈12.0+total-mi
+        # reversed operand order produces the same intersection
+        occ=_occ_setup()
+        b=occ.add_box(0.3,-0.3,-0.3, 2,2,3)
+        k=occ.add_cylinder(0,0,0,0,0,2,1;angle)
+        out,_=occ.intersect([(3,k)],[(3,b)])
+        @test occ.get_mass(3,out[1][2])≈mi
+    end
+end

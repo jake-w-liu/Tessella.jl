@@ -330,12 +330,15 @@ function _model_occ_face_measure(kernel,id)
     end
     # Quadric patches over their canonical domains — the closed-form
     # ∫P·dA integrals (u-mean cos/sin cover the partial torus sweep).
+    # Partial sweeps carry `angle` (azimuth span) and `lat1`/`lat2`
+    # (sphere latitude range) in the record.
     u0,u1,v0,v1=if occ===:cylinder
-        (0.0,_OCC_TWO_PI,0.0,rec.height)
+        (0.0,get(rec,:angle,_OCC_TWO_PI),0.0,rec.height)
     elseif occ===:sphere
-        (0.0,_OCC_TWO_PI,-π/2,π/2)
+        (0.0,get(rec,:angle,_OCC_TWO_PI),
+         get(rec,:lat1,-π/2),get(rec,:lat2,π/2))
     elseif occ===:cone
-        (0.0,_OCC_TWO_PI,0.0,
+        (0.0,get(rec,:angle,_OCC_TWO_PI),0.0,
          sqrt(rec.height*rec.height+(rec.r1-rec.r2)*(rec.r1-rec.r2)))
     elseif occ===:torus
         (0.0,rec.angle,0.0,_OCC_TWO_PI)
@@ -387,8 +390,115 @@ end
 # the tensor pass is what the divergence centroid needs.
 _occ_tensor_apply(T,n)=ntuple(i->T[i,1]*n[1]+T[i,2]*n[2]+T[i,3]*n[3],3)
 
+# ---- sector solids ----------------------------------------------------
+#
+# Partial primitive sweeps carry a `sector` record instead of a compact
+# `primitive` — the solid is the wedge
+#   cylinder/cone: {c + ρ·E(u) + z·n : u∈[0,a], ρ∈[0,R(z)], z∈[0,h]}
+#   sphere:        {c + ρ·d(u,v) : u∈[0,a], v∈[v1,v2], ρ∈[0,R]}
+# with E(u)=cos u·X+sin u·Y and d=cos v·E+sin v·n. V, M=∭p dV and
+# Q=∭p⊗p dV come from closed-form azimuth integrals; the cone's axial
+# moments ∫z^m R(z)^k dz are polynomial in z (degree ≤ 4), so a 4-point
+# Gauss rule is exact.
+#
+# Azimuth moments over [0,a]: U0=∫du, Uc=∫cos u, Us=∫sin u and the
+# second-order Uc2/Us2/Ucs. `Uv` collects Uc·X+Us·Y as a 3-vector, `UE`
+# the symmetric tensor ∫E⊗E du.
+function _occ_sector_u(a,X,Y)
+    s,c=_gm_sincos(a)
+    U0=a; Uc=s; Us=1.0-c
+    s2,c2=_gm_sincos(2a)
+    Uc2=a/2+s2/4; Us2=a/2-s2/4; Ucs=s*s/2
+    Uv=(Uc*X[1]+Us*Y[1],Uc*X[2]+Us*Y[2],Uc*X[3]+Us*Y[3])
+    UE=zeros(3,3)
+    for i in 1:3,j in 1:3
+        UE[i,j]=Uc2*X[i]*X[j]+Ucs*(X[i]*Y[j]+Y[i]*X[j])+Us2*Y[i]*Y[j]
+    end
+    return U0,Uv,UE
+end
+
+# Axisymmetric wedge (cylinder/cone sector): R(z)=r1+dr·z/h. Returns
+# V, first-moment vector M=∭p dV and second-moment tensor Q=∭p⊗p dV
+# in the local frame anchored at the world center `c` (p measured from
+# the origin; `c` folds in through the caller's shift).
+function _occ_sector_stats_axis(rec,U0,Uv,UE)
+    n=_occ_dir(rec.axis)
+    r1,r2,h=rec.occ===:cylinder ?
+        (rec.radius,rec.radius,rec.height) : (rec.r1,rec.r2,rec.height)
+    dr=r2-r1
+    V=0.0
+    M=(0.0,0.0,0.0)
+    Q=zeros(3,3)
+    for i in 1:4,s in (-1,1)
+        z=h*(0.5+0.5*s*_OCC_GL_T[i]); w=_OCC_GL_W[i]*h/2
+        R=r1+dr*(z/h)
+        R2=R*R; R3=R2*R; R4=R3*R
+        V+=w*U0*R2/2
+        mz=w*z*U0*R2/2
+        mr=w*R3/3
+        M=(M[1]+mr*Uv[1]+mz*n[1],M[2]+mr*Uv[2]+mz*n[2],
+           M[3]+mr*Uv[3]+mz*n[3])
+        qE=w*R4/4; qx=w*z*R3/3; qn=w*z*z*U0*R2/2
+        for i2 in 1:3,j2 in 1:3
+            Q[i2,j2]+=qE*UE[i2,j2]+qx*(Uv[i2]*n[j2]+n[i2]*Uv[j2])+
+                qn*n[i2]*n[j2]
+        end
+    end
+    return V,M,Q
+end
+
+# Spherical sector solid — a *cylindrical* wedge: the flat latitude-cap
+# planes bound {z1≤z≤z2, ρ≤√(R²−z²), u∈[0,a]}, not a spherical-coordinate
+# ρ-wedge. All needed integrals ∫z^m·ρ(z)^k dz are closed-form:
+#   ρ²=R²−z² and ρ⁴ are polynomial; ρ³ uses the √(a²−x²)^{3/2}
+#   antiderivative; z·ρ³ is the exact power form −(R²−z²)^{5/2}/5.
+function _occ_sector_stats_sph(rec,U0,Uv,UE)
+    n=_occ_dir(rec.axis)
+    R=rec.radius
+    z1=R*_gm_sincos(rec.lat1)[1]; z2=R*_gm_sincos(rec.lat2)[1]
+    R2=R*R; R4=R2*R2
+    rho(z)=sqrt(max(R2-z*z,0.0))
+    I02=(R2*z2-z2*z2*z2/3)-(R2*z1-z1*z1*z1/3)
+    I12=(R2*z2*z2/2-z2^4/4)-(R2*z1*z1/2-z1^4/4)
+    I03=(z2/8*(5*R2-2*z2*z2)*rho(z2)+3*R4/8*asin(clamp(z2/R,-1,1)))-
+        (z1/8*(5*R2-2*z1*z1)*rho(z1)+3*R4/8*asin(clamp(z1/R,-1,1)))
+    I13=(rho(z1)^5-rho(z2)^5)/5
+    I22=(R2*z2*z2*z2/3-z2^5/5)-(R2*z1*z1*z1/3-z1^5/5)
+    I04=(R4*z2-2*R2*z2*z2*z2/3+z2^5/5)-
+        (R4*z1-2*R2*z1*z1*z1/3+z1^5/5)
+    V=U0*I02/2
+    M=(Uv[1]*I03/3+U0*n[1]*I12/2,
+       Uv[2]*I03/3+U0*n[2]*I12/2,
+       Uv[3]*I03/3+U0*n[3]*I12/2)
+    Q=zeros(3,3)
+    for i in 1:3,j in 1:3
+        Q[i,j]=UE[i,j]*I04/4+(Uv[i]*n[j]+n[i]*Uv[j])*I13/3+
+               U0*n[i]*n[j]*I22/2
+    end
+    return V,M,Q
+end
+
+# Sector solid (V, centroid, Q) — centroid measured in world coords.
+function _occ_sector_stats(rec)
+    U0,Uv,UE=_occ_sector_u(rec.angle,rec.X,rec.Y)
+    V,M,Q=rec.occ===:sphere ? _occ_sector_stats_sph(rec,U0,Uv,UE) :
+        _occ_sector_stats_axis(rec,U0,Uv,UE)
+    c=rec.center
+    # Shift p→c+p: M→M+V·c, Q→Q+c⊗M+M⊗cᵀ+V·c⊗cᵀ.
+    M=(M[1]+V*c[1],M[2]+V*c[2],M[3]+V*c[3])
+    for i in 1:3,j in 1:3
+        Q[i,j]+=c[i]*M[j]+M[i]*c[j]-V*c[i]*c[j]
+    end
+    abs(V)>_OCC_CONFUSION || return V,(0.0,0.0,0.0),Q
+    return V,_occ3_scale(M,1.0/V),Q
+end
+
 function _model_occ_solid_measure(kernel,id;want_centroid=true)
     shape=kernel.shapes[id]; g=shape.geometry
+    if haskey(g,:sector)
+        V,c,_=_occ_sector_stats(g.sector)
+        return V,want_centroid ? c : (0.0,0.0,0.0)
+    end
     if haskey(g,:primitive)
         r=g.primitive.record
         if g.primitive.occ===:cylinder
@@ -673,11 +783,12 @@ function _model_occ_face_moment2(kernel,id)
     # Quadric patches over their canonical domains — 8×8 GL8 panels,
     # matching the curve-panel resolution for these smooth integrands.
     u0,u1,v0,v1=if occ===:cylinder
-        (0.0,_OCC_TWO_PI,0.0,rec.height)
+        (0.0,get(rec,:angle,_OCC_TWO_PI),0.0,rec.height)
     elseif occ===:sphere
-        (0.0,_OCC_TWO_PI,-π/2,π/2)
+        (0.0,get(rec,:angle,_OCC_TWO_PI),
+         get(rec,:lat1,-π/2),get(rec,:lat2,π/2))
     elseif occ===:cone
-        (0.0,_OCC_TWO_PI,0.0,
+        (0.0,get(rec,:angle,_OCC_TWO_PI),0.0,
          sqrt(rec.height*rec.height+(rec.r1-rec.r2)*(rec.r1-rec.r2)))
     elseif occ===:torus
         (0.0,rec.angle,0.0,_OCC_TWO_PI)
@@ -705,6 +816,10 @@ end
 function _model_occ_solid_moment2(kernel,id)
     shape=kernel.shapes[id]; g=shape.geometry
     m=zeros(3,3)
+    if haskey(g,:sector)
+        _,_,Q=_occ_sector_stats(g.sector)
+        return Q
+    end
     if haskey(g,:primitive)
         r=g.primitive.record
         if g.primitive.occ===:cylinder

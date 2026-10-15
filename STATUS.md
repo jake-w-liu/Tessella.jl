@@ -1424,6 +1424,86 @@ slice), and `api_ordinary_layers_orphan_history` /
 paths and the atomic-open check requires `.geo`
 (introduced by `d1d7088`).
 
+### GEO01 slice 19 — OCC partial sweeps + periodic Boolean hardening (2026-10-15)
+
+The nineteenth GEO01 slice completes public
+partial-sweep construction for
+`model.occ.add_cylinder`/`add_cone` (`angle`) and
+`add_sphere` (`angle1`/`angle2`/`angle3`) —
+`add_torus(angle)` was already live. Every sector
+layout materializes Julia-native: meridian side
+planes for azimuthal cuts, disk caps for polar
+bands, and degenerate pole/apex edges whose uv
+boundary representatives are emitted in wire order
+so `_sort_curve_loop`'s greedy chaining keeps them
+uv-coherent. Outer wires are canonicalized CCW in
+stored uv — a requirement of the winding-based
+`:in`/`:out` face classifiers.
+
+Deep-debug fixes landed with the producers:
+`_occ_sector_stats_sph` now integrates the true
+cylindrical-wedge geometry (flat disk caps, not
+conical boundaries) — verified against the
+spherical-segment closed form; the sphere pole
+vertices are emitted by exact axis translation so
+the meridian planes pass the exact-`orient3`
+coplanarity check; and the curved-face mesher welds
+bitwise-identical lifted nodes, dropping
+pole-collapsed cells in
+`_model_occ_curved_surface_mesh`.
+
+Two convention splits between the materializer and
+the Boolean engine are bridged explicitly:
+materialized untyped lines carry `[0,1]` segment
+parameters while the engine's `_brep_edge_curve`
+and authored pcurves use arc-length `[t0,t1]`, so
+`_occ_pcurve_reparam` rescales `lin2d` traces at
+materialization time and `_brep_extract` restretches
+record-free edges back to the engine range. Ray/face
+hit queries gained a direct analytic inverse (nearest
+extrema candidate) instead of the bounds-clamped
+projector, fixing point-in-volume parity on
+`angle>π` sectors.
+
+Curved-Boolean hardening that fell out of the sector
+probes, all in `ModelBoolean.jl`:
+`_brep_sec_plane_cylinder`'s axis-parallel branch
+computed the section foot on the mirrored side of the
+cylinder axis (`−` instead of `+`), dropping a phantom
+generator chord into the section set; the merge's
+internal-edge drop now requires same-key arcs to be
+uv-co-located — period-shifted copies of a periodic
+seam edge are distinct domain boundaries, not an
+internal edge, and dropping them produced a
+seam-wrapping region with no planar cycle
+representation (the lateral face vanished, failing
+shell incidence); `_brep_merge_edge_pieces` unwraps
+closed-circle canonical maps mod 2π so seam-adjacent
+rim pieces become contiguous canonical spans; and the
+reparametrized traversal flag composes the affine sign
+with both `neg` flags (`fwd ⊻ (α<0) ⊻ neg_old ⊻
+neg_new`), fixing the "curve loop is wrong" chaining
+on canonicalized rim arcs.
+
+Verified: `occ.intersect`/`cut`/`fuse`/`fragment` on
+box × {full cylinder, π/2 sector} — all four ops in
+both operand orders — with masses matching analytic
+values and the exact identities `intersect + cut ==
+operand` and `fuse == fragment-total == box + cut`.
+New permanent coverage: `api_occ_boolean_test.jl`
+"periodic seam and partial sectors" (16 assertions)
+and the updated `api_occ_primitives_test.jl` sector
+assertions (44→49 cylinder checks). Full regression:
+`api_occ_boolean_test` (all pass; the curved-fragment
+API call still skips under the known ~20 GB
+exact-Delaunay provenance bound), `api_occ_primitives`,
+`api_occ_measures`, `api_occ_queries`,
+`api_occ_closest`, `api_occ_transform` — all green on
+Julia 1.13.1. A tangent-contact zero-area section on a
+box face kissing a full cylinder reproduces
+identically at the parent commit — pre-existing
+limitation, not introduced here.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

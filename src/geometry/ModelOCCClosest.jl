@@ -48,6 +48,12 @@ function _model_occ_snap_point(canon::Vector{NTuple{3,Float64}},
     return p
 end
 
+# Rescale a stored pcurve from a dropped `:line` record's `[t0,t1]` range
+# onto the untyped `[0,1]` segment parametrization: evaluating at `s` must
+# reproduce the original trace at `t0+s·(t1−t0)`.
+_occ_pcurve_unit_range(pc,t0::Float64,t1::Float64)=
+    _occ_pcurve_reparam(pc,t0,t1-t0)
+
 function _model_occ_dist_materialize!(sm::GeoModel,kernel,dim,id,
                                       seen::Set{UInt64},caller;
                                       snap::Union{Nothing,
@@ -123,7 +129,41 @@ function _model_occ_dist_materialize!(sm::GeoModel,kernel,dim,id,
             sm.surfaces[tag]=loops
             (untyped_defaults && shape.geometry.kind===:plane) || begin
                 sm.surface_types[tag]=shape.geometry.kind
-                sm.surface_geometry[tag]=shape.geometry.geometry
+                geometry=shape.geometry.geometry
+                if untyped_defaults && hasproperty(geometry,:pcurves)
+                    # `:line` edges lose their `[t0,t1]` record and adopt
+                    # the untyped `[0,1]` segment parametrization; the
+                    # face's stored `lin2d` pcurves are rescaled onto it
+                    # so the uv wire still traces the same polyline.
+                    lines=Dict{Int,NTuple{2,Float64}}()
+                    for wire_id in shape.children, (edge_id,_) in
+                        kernel.shapes[wire_id].geometry.uses
+                        edge=kernel.shapes[edge_id].geometry
+                        edge.kind===:line || continue
+                        g=edge.geometry
+                        lines[_model_occ_shape_tag(kernel,edge_id,caller)]=
+                            (Float64(g.t0),Float64(g.t1))
+                    end
+                    if !isempty(lines)
+                        pcurves=Dict{Int,NamedTuple}()
+                        for (ctag,entry) in geometry.pcurves
+                            range=get(lines,ctag,nothing)
+                            if range===nothing
+                                pcurves[ctag]=entry
+                            else
+                                t0,t1=range
+                                pcurves[ctag]=(fwd=_occ_pcurve_unit_range(
+                                                   entry.fwd,t0,t1),
+                                    rev=(hasproperty(entry,:rev) &&
+                                        entry.rev!==nothing) ?
+                                        _occ_pcurve_unit_range(
+                                            entry.rev,t0,t1) : nothing)
+                            end
+                        end
+                        geometry=merge(geometry,(pcurves=pcurves,))
+                    end
+                end
+                sm.surface_geometry[tag]=geometry
             end
         end
         return [(2,tag)]

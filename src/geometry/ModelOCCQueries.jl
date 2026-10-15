@@ -32,6 +32,32 @@ function _model_occ_controls_box(controls)
             bounds[4]+1e-7,bounds[5]+1e-7,bounds[6]+1e-7)
 end
 
+# A partial sphere patch (records carrying `lat1`/`lat2`/`angle`) can
+# reach an axis-aligned extremum in the patch interior — the point whose
+# radial direction is exactly ±ê — which no boundary edge contains. The
+# box is the boundary-edge union plus those interior candidates.
+function _occ_sphere_face_bbox(kernel,shape,rec)
+    bounds=_MODEL_EMPTY_BOUNDS
+    for wire in shape.children
+        for edge in kernel.shapes[wire].children
+            bounds=_model_bounds_union(bounds,
+                _model_occ_shape_bbox(kernel,edge))
+        end
+    end
+    a=get(rec,:angle,_OCC_TWO_PI)
+    v1=get(rec,:lat1,-π/2); v2=get(rec,:lat2,π/2)
+    for axis in 1:3, s in (-1.0,1.0)
+        vc=_myasin(clamp(s*rec.axis[axis],-1.0,1.0))
+        (v1-1e-12<=vc<=v2+1e-12) || continue
+        uc=mod(_gm_atan2(s*rec.Y[axis],s*rec.X[axis]),_OCC_TWO_PI)
+        uc>a+1e-12 && uc<_OCC_TWO_PI-1e-12 && continue
+        d=ntuple(k->k==axis ? s : 0.0,3)
+        bounds=_model_bounds_union(bounds,_model_occ_box_point(
+            ntuple(k->rec.center[k]+rec.radius*d[k],3)))
+    end
+    return bounds
+end
+
 function _model_occ_shape_bbox(kernel,id)
     shape=kernel.shapes[id]
     d=shape.dimension; g=shape.geometry
@@ -66,6 +92,8 @@ function _model_occ_shape_bbox(kernel,id)
         return _model_occ_controls_box(rec.curve.curve.controls)
     elseif d==2
         rec=g.geometry
+        rec.occ===:sphere && (haskey(rec,:lat1) || haskey(rec,:lat2) ||
+            haskey(rec,:angle)) && return _occ_sphere_face_bbox(kernel,shape,rec)
         rec.occ===:sphere && return (
             rec.center[1]-rec.radius,rec.center[2]-rec.radius,
             rec.center[3]-rec.radius,

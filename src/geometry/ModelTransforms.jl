@@ -495,6 +495,18 @@ function _transform_occ_curve_record(m::GeoModel, curve::Int, g,
     return g
 end
 
+# Partial-sweep domain fields (`angle` on cylinders/cones/spheres,
+# `lat1`/`lat2` on spheres) measure against the record's own axis/X/Y
+# frame — since that frame transforms with the record, the domain
+# intervals carry over verbatim.
+function _occ_partial_face_fields(g)
+    out=(;)
+    haskey(g,:angle) && (out=merge(out,(angle=g.angle,)))
+    haskey(g,:lat1) && (out=merge(out,(lat1=g.lat1,)))
+    haskey(g,:lat2) && (out=merge(out,(lat2=g.lat2,)))
+    return out
+end
+
 function _transform_occ_surface_record(g, t::_AffineTransform, caller, what;tensor_cache=nothing)
     if _model_nurbs_surface(g)
         transform_patch=function()
@@ -515,14 +527,14 @@ function _transform_occ_surface_record(g, t::_AffineTransform, caller, what;tens
         axis=_occ_linear_apply(t,g.axis)
         X=_occ_linear_apply(t,g.X)
         Y=_occ_linear_apply(t,g.Y)
-        return (occ=:sphere,
+        return merge((occ=:sphere,
                 center=_finite_result(
                     _occ_trsf_apply(t,g.center),caller),
                 radius=g.radius*sqrt(s2),
                 axis=_finite_result(axis./sqrt(_dot(axis,axis)),caller),
                 X=_finite_result(X./sqrt(_dot(X,X)),caller),
                 Y=_finite_result(Y./sqrt(_dot(Y,Y)),caller),
-                pcurves=g.pcurves)
+                pcurves=g.pcurves),_occ_partial_face_fields(g))
     elseif g.occ in (:cylinder,:cone)
         axis_vector=g.axis .* g.height
         tr=_transform_axis_encoding(
@@ -533,13 +545,13 @@ function _transform_occ_surface_record(g, t::_AffineTransform, caller, what;tens
         X=_finite_result(X./sqrt(_dot(X,X)),caller)
         Y=_occ_linear_apply(t,g.Y)
         Y=_finite_result(Y./sqrt(_dot(Y,Y)),caller)
-        return g.occ===:cylinder ?
+        return merge(g.occ===:cylinder ?
             (occ=:cylinder,center=tr.center,axis=n,X=X,Y=Y,
              radius=g.radius*tr.perp,height=tr.height,
              pcurves=g.pcurves) :
             (occ=:cone,center=tr.center,axis=n,X=X,Y=Y,
              r1=g.r1*tr.perp,r2=g.r2*tr.perp,height=tr.height,
-             pcurves=g.pcurves)
+             pcurves=g.pcurves),_occ_partial_face_fields(g))
     elseif g.occ===:torus
         # A torus only survives a similarity: the equator and the tube
         # must stay circular, which needs an isotropic linear part.

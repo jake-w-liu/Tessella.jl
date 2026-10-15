@@ -87,6 +87,37 @@ function _model_occ_transform_primitive(record,t,caller,what)
     return record
 end
 
+# Sector record on a partial-sweep solid — the axis-encoded fields
+# transform like the matching `primitive` encoding plus the azimuth
+# frame (`X`,`Y`) the measure code reads for sector moments; `angle`,
+# `lat1`, `lat2` measure against that frame and carry over verbatim.
+function _model_occ_transform_sector(rec,t::_AffineTransform,caller,what)
+    if rec.occ===:sphere
+        s2=_linear_isotropy(t.linear)
+        s2===nothing && throw(ArgumentError(
+            "$caller: transform is not representable on $what — " *
+            "it requires an isotropic linear part"))
+        axis=_occ_linear_apply(t,rec.axis)
+        X=_occ_linear_apply(t,rec.X); Y=_occ_linear_apply(t,rec.Y)
+        return merge(rec,
+            (center=_finite_result(_occ_trsf_apply(t,rec.center),caller),
+             radius=rec.radius*sqrt(s2),
+             axis=_finite_result(axis./sqrt(_dot(axis,axis)),caller),
+             X=_finite_result(X./sqrt(_dot(X,X)),caller),
+             Y=_finite_result(Y./sqrt(_dot(Y,Y)),caller)))
+    end
+    tr=_transform_axis_encoding(t,rec.center,rec.axis,caller,what)
+    X=_occ_linear_apply(t,rec.X)
+    X=_finite_result(X./sqrt(_dot(X,X)),caller)
+    Y=_occ_linear_apply(t,rec.Y)
+    Y=_finite_result(Y./sqrt(_dot(Y,Y)),caller)
+    return rec.occ===:cylinder ?
+        merge(rec,(center=tr.center,axis=tr.axis,X=X,Y=Y,
+                   radius=rec.radius*tr.perp,height=tr.height)) :
+        merge(rec,(center=tr.center,axis=tr.axis,X=X,Y=Y,
+                   r1=rec.r1*tr.perp,r2=rec.r2*tr.perp,height=tr.height))
+end
+
 # New geometry tuple for one shape under transform `t`. Wire/shell `uses`
 # children are remapped separately by the caller; face `pcurves` stay keyed
 # by the pre-transform curve tags until the realized tag map exists.
@@ -126,6 +157,9 @@ function _model_occ_transform_geometry(m::GeoModel,shape,t,caller,what)
         end
         return merge(g,(geometry=new,))
     elseif d==3
+        sector=get(g,:sector,nothing)
+        sector!==nothing && return merge(g,
+            (sector=_model_occ_transform_sector(sector,t,caller,what),))
         primitive=get(g,:primitive,nothing)
         primitive===nothing && return g
         return merge(g,(primitive=(occ=primitive.occ,

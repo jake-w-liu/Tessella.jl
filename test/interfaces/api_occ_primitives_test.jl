@@ -120,14 +120,21 @@ end
         _errtext(()->occ3.add_cylinder(0.0,0.0,0.0,0.0,0.0,1.0,1.0;angle=0.0)))
     @test occursin("Cannot build cylinder with angle <= 0 or angle > 2*Pi",
         _errtext(()->occ3.add_cylinder(0.0,0.0,0.0,0.0,0.0,1.0,1.0;angle=3π)))
-    @test occursin("partial cylinder angles are not implemented",
-        _errtext(()->occ3.add_cylinder(0.0,0.0,0.0,0.0,0.0,1.0,1.0;angle=π)))
+    # A half-sector cylinder materializes: lateral wall, two meridian
+    # planes, two cap planes; mass is the half-cylinder volume.
+    pc=occ3.add_cylinder(0.0,0.0,0.0,0.0,0.0,1.0,1.0;angle=π)
+    @test pc==1
+    occ3.synchronize()
+    m3=_current_model()
+    @test occ3.get_mass(3,pc)≈π/2
+    @test count(==(:plane),values(m3.surface_types))==4
+    @test count(==(:cylinder),values(m3.surface_types))==1
     @test occursin("coordinates must be finite",
         _errtext(()->occ3.add_cylinder(NaN,0.0,0.0,0.0,0.0,1.0,1.0)))
     @test occursin("coordinates must be finite",
         _errtext(()->occ3.add_cylinder(0.0,0.0,0.0,0.0,0.0,Inf,1.0)))
-    # Failed calls consume no volume tag: the next valid call still gets 1.
-    @test occ3.add_cylinder(0.0,0.0,0.0,0.0,0.0,1.0,1.0)==1
+    # Failed calls consume no volume tag: the next valid call gets 2.
+    @test occ3.add_cylinder(0.0,0.0,0.0,0.0,0.0,1.0,1.0)==2
 end
 
 @testset "occ.add_sphere" begin
@@ -180,13 +187,18 @@ end
         _errtext(()->occ2.add_sphere(0.0,0.0,0.0,1.0;angle3=0.0)))
     @test occursin("Cannot build sphere with angle <= 0 or angle > 2*Pi",
         _errtext(()->occ2.add_sphere(0.0,0.0,0.0,1.0;angle3=3π)))
-    @test occursin("partial sphere angles are not implemented",
-        _errtext(()->occ2.add_sphere(0.0,0.0,0.0,1.0;angle1=0.0)))
-    @test occursin("partial sphere angles are not implemented",
-        _errtext(()->occ2.add_sphere(0.0,0.0,0.0,1.0;angle3=π)))
+    # Partial sweeps materialize: a polar band (hemisphere cap) and an
+    # azimuthal wedge each measure half the unit sphere's volume.
+    ps1=occ2.add_sphere(0.0,0.0,0.0,1.0;angle1=0.0)
+    @test ps1==1
+    ps2=occ2.add_sphere(0.0,0.0,0.0,1.0;angle3=π)
+    @test ps2==2
+    occ2.synchronize()
+    @test occ2.get_mass(3,ps1)≈2π/3
+    @test occ2.get_mass(3,ps2)≈2π/3
     @test occursin("coordinates must be finite",
         _errtext(()->occ2.add_sphere(NaN,0.0,0.0,1.0)))
-    @test occ2.add_sphere(0.0,0.0,0.0,1.0)==1
+    @test occ2.add_sphere(0.0,0.0,0.0,1.0)==3
 end
 
 @testset "occ.add_cone" begin
@@ -236,11 +248,13 @@ end
         _errtext(()->occ2.add_cone(0.0,0.0,0.0,0.0,0.0,1.0,-1.0,0.5)))
     @test occursin("radii must be non-negative with at least one positive",
         _errtext(()->occ2.add_cone(0.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0)))
-    @test occursin("partial cone angles are not implemented",
-        _errtext(()->occ2.add_cone(0.0,0.0,0.0,0.0,0.0,1.0,1.0,0.5;angle=π)))
+    # A half-sector cone materializes and measures the half-frustum volume.
+    pcn=occ2.add_cone(0.0,0.0,0.0,0.0,0.0,1.0,1.0,0.5;angle=π)
+    @test pcn==1
+    @test occ2.get_mass(3,pcn)≈(π/3)*(1.0+0.5+0.25)/2
     @test occursin("coordinates must be finite",
         _errtext(()->occ2.add_cone(0.0,0.0,0.0,0.0,NaN,1.0,1.0,0.5)))
-    @test occ2.add_cone(0.0,0.0,0.0,0.0,0.0,1.0,1.0,0.5)==1
+    @test occ2.add_cone(0.0,0.0,0.0,0.0,0.0,1.0,1.0,0.5)==2
 end
 
 @testset "occ.add_torus" begin

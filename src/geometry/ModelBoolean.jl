@@ -271,6 +271,17 @@ function _brep_extract(m::GeoModel,tag::Int,caller::AbstractString)
                         pc===nothing && throw(ArgumentError(
                             "$caller: Surface[$stag] lacks a pcurve for " *
                             "Curve[$ctag]"))
+                        erec=get(m.curve_geometry,ctag,nothing)
+                        if erec===nothing || !hasproperty(erec,:occ)
+                            # A record-free edge (an untyped materialized
+                            # line) stores its pcurve on the `[0,1]`
+                            # segment parameter; the engine runs it on the
+                            # arc-length `[t0,t1]` convention — restretch
+                            # the trace to this edge's range.
+                            e=edges[eidx]
+                            Δ=e.t1-e.t0
+                            pc=_occ_pcurve_reparam(pc,-e.t0/Δ,1.0/Δ)
+                        end
                     else
                         e=edges[eidx]
                         pc=_brep_synth_pcurve(sg,e.curve,e.t0,e.t1,caller)
@@ -507,7 +518,7 @@ function _brep_sec_plane_cylinder(pl,cy,plane_is_a,caller)
         ad>cy.radius+_BREP_TOL && return NamedTuple[]
         axpt=_b3add(cy.center,
             _b3mul(cy.axis,_b3dot(_b3(pl.center,cy.center),cy.axis)))
-        foot=_b3(axpt,_b3mul(pl.axis,dist))
+        foot=_b3add(axpt,_b3mul(pl.axis,dist))
         out=NamedTuple[]
         off=_b3unit(_b3cross(pl.axis,cy.axis))
         w=sqrt(max(0.0,cy.radius*cy.radius-dist*dist))
@@ -1211,8 +1222,10 @@ function _brep_group_cycles(arcs,cycles,edges,f,tol,caller)
     samples=Tuple{Float64,Float64}[]
     in_domain=Bool[]
     for (i,a) in enumerate(areas)
-        abs(a)<tol && throw(ErrorException(
-            "$caller: degenerate zero-area wire in Boolean face split"))
+        if abs(a)<tol
+            throw(ErrorException(
+                "$caller: degenerate zero-area wire in Boolean face split"))
+        end
         s=_brep_cycle_sample(arcs,cycles[i],a,tol,caller)
         push!(samples,s)
         push!(in_domain,_brep_uv_in_face(edges,f,s,tol))
@@ -2113,13 +2126,10 @@ function _brep_merge_union_faces(kept,comp,tol,caller)
     ref=kept[comp[1]]
     maps=Dict{Int,Any}(mi => (kept[mi].sg.occ===:plane ?
         _brep_plane_map(ref.sg,kept[mi].sg) : nothing) for mi in comp)
-    keymem=Dict{Any,Set{Int}}()
-    for mi in comp,w in kept[mi].wires,ar in w
-        push!(get!(Set{Int},keymem,ar.key),mi)
-    end
     marcs=NamedTuple[]
     test_arcs=NamedTuple[]
     member_cycles=Vector{Vector{Vector{Tuple{Int,Bool}}}}()
+    keylocs=Dict{Any,Vector{Tuple{Int,Int}}}()   # key -> [(member, marcs idx)]
     for mi in comp
         mp=maps[mi]
         cycs=Vector{Tuple{Int,Bool}}[]
@@ -2140,15 +2150,35 @@ function _brep_merge_union_faces(kept,comp,tol,caller)
                 end
                 push!(test_arcs,rec)
                 push!(cy,(length(test_arcs),ar.fwd))
-                if length(keymem[ar.key])>1
-                    continue   # internal to the merged domain
-                end
                 push!(marcs,merge(rec,(a=0,b=0)))
+                push!(get!(Vector{Tuple{Int,Int}},keylocs,ar.key),
+                      (mi,length(marcs)))
             end
             push!(cycs,cy)
         end
         push!(member_cycles,cycs)
     end
+    isempty(marcs) && return [kept[mi] for mi in comp]
+    # An arc is internal to the merged domain only when another member uses
+    # the same edge over the same uv segment. Period-shifted copies of a
+    # periodic seam edge share the key at different uv positions; they are
+    # distinct domain boundaries and must be kept, or the merged region would
+    # wrap the seam and lose its planar cycle representation.
+    keeparc=trues(length(marcs))
+    for lst in values(keylocs)
+        length(lst)>1 || continue
+        for x in 1:length(lst), y in x+1:length(lst)
+            mi,ix=lst[x];mj,iy=lst[y]
+            mi==mj && continue
+            ax=marcs[ix];ay=marcs[iy]
+            abs((ax.t1-ax.t0)-(ay.t1-ay.t0))<tol || continue
+            mx=_brep_pc_eval(ax.pc,(ax.t0+ax.t1)/2)
+            my=_brep_pc_eval(ay.pc,(ay.t0+ay.t1)/2)
+            hypot(mx[1]-my[1],mx[2]-my[2])<tol || continue
+            keeparc[ix]=keeparc[iy]=false
+        end
+    end
+    marcs=marcs[keeparc]
     isempty(marcs) && return [kept[mi] for mi in comp]
     pts=Tuple{Float64,Float64}[]
     for ar in marcs
@@ -2173,7 +2203,7 @@ function _brep_merge_union_faces(kept,comp,tol,caller)
     pos=[i for i in eachindex(cycles) if areas[i]>tol]
     neg=[i for i in eachindex(cycles) if areas[i]<-tol]
     for i in eachindex(cycles)
-        tol<abs(areas[i]) || throw(ErrorException(
+        abs(areas[i])<=tol && throw(ErrorException(
             "$caller: degenerate zero-area wire in Boolean face merge"))
     end
     samples=[_brep_cycle_sample(narcs,cycles[i],areas[i],tol,caller)
@@ -2372,8 +2402,37 @@ function _brep_merge_edge_pieces(kept,tol,caller)
             push!(maps,(k=k,α=ab[1],β=ab[2]))
         end
         ok || continue
+        # a closed circle's canonical map is unique only mod 2π — members
+        # meeting the root through the parametrization seam must unwrap onto
+        # the covered span or their canonical intervals stay disjoint
+        per=cc.kind===:circle ? _OCC_TWO_PI : 0.0
+        covered=Tuple{Float64,Float64}[]
+        iroot=findfirst(mp->mp.k==root,maps)
+        if iroot===nothing
+            mp=maps[1];r=keyrep[mp.k]
+            push!(covered,minmax(mp.α*r.vt0+mp.β,mp.α*r.vt1+mp.β))
+        else
+            mp=maps[iroot];r=keyrep[root]
+            push!(covered,minmax(mp.α*r.vt0+mp.β,mp.α*r.vt1+mp.β))
+        end
         for mp in maps
-            canon[mp.k]=(root,mp.α,mp.β)
+            α,β=mp.α,mp.β
+            if per>0 && mp.k!=root
+                r=keyrep[mp.k]
+                lo,hi=minmax(α*r.vt0+β,α*r.vt1+β)
+                bg=Inf;bk=0
+                for ks in (-2,-1,0,1,2)
+                    l2=lo+ks*per;h2=hi+ks*per
+                    g=Inf
+                    for (cl,ch) in covered
+                        g=min(g,l2>ch ? l2-ch : (h2<cl ? cl-h2 : 0.0))
+                    end
+                    g<bg-tol && (bg=g;bk=ks)
+                end
+                β+=bk*per
+                push!(covered,(lo+bk*per,hi+bk*per))
+            end
+            canon[mp.k]=(root,α,β)
         end
     end
     isempty(canon) && return kept
@@ -2385,8 +2444,11 @@ function _brep_merge_edge_pieces(kept,tol,caller)
         exitp(ar)=ar.fwd ? ar.t1 : ar.t0
         entryp(ar)=ar.fwd ? ar.t0 : ar.t1
         joinable(last,rec)=last.key==rec.key && last.neg==rec.neg &&
-            last.fwd==rec.fwd && abs(exitp(last)-entryp(rec))<tol &&
-            _brep_pc_same_carrier(last.pc,rec.pc,tol)
+            last.fwd==rec.fwd && _brep_pc_same_carrier(last.pc,rec.pc,tol) &&
+            (abs(exitp(last)-entryp(rec))<tol ||
+             # seam-unwrapped canonical pieces meet end-to-start in stored
+             # parameters independent of the traversal flag convention
+             abs(last.t1-rec.t0)<tol || abs(rec.t1-last.t0)<tol)
         join(last,rec)=(key=last.key,fwd=last.fwd,pc=last.pc,
                         t0=min(last.t0,rec.t0),t1=max(last.t1,rec.t1),
                         crv=last.crv,vt0=min(last.vt0,rec.vt0),
@@ -2406,9 +2468,14 @@ function _brep_merge_edge_pieces(kept,tol,caller)
                     γ,δ=ar.neg ? (-1/α,β/α) : (1/α,-β/α)
                     vlo,vhi=minmax(α*ar.vt0+β,α*ar.vt1+β)
                     pc2,f=_brep_pc_reparam(ar.pc,γ,δ,tol,caller)
-                    rec= f ? (key=root,fwd=ar.fwd,pc=pc2,t0=-vhi,t1=-vlo,
+                    # `fwd` is a traversal flag in the arc's stored
+                    # parameters — the affine map from member to canonical
+                    # stored params changes sign whenever the neg flags or
+                    # α differ, so the traversal flag composes with it
+                    fwd2=xor(ar.fwd,α<0,ar.neg,f)
+                    rec= f ? (key=root,fwd=fwd2,pc=pc2,t0=-vhi,t1=-vlo,
                               crv=keyrep[root].crv,vt0=vlo,vt1=vhi,neg=true) :
-                             (key=root,fwd=ar.fwd,pc=pc2,t0=vlo,t1=vhi,
+                             (key=root,fwd=fwd2,pc=pc2,t0=vlo,t1=vhi,
                               crv=keyrep[root].crv,vt0=vlo,vt1=vhi,neg=false)
                 end
                 if !isempty(nw) && joinable(nw[end],rec)
@@ -3446,10 +3513,11 @@ function _brep_materialize_boolean!(m::GeoModel,t::Int,op::Symbol,
                             pcst=ar.neg ? _brep_flip_pc(ar.pc,caller) : ar.pc
                             ent=get(pcdict,c,nothing)
                             if efwd
-                                ent===nothing || ent.fwd===nothing ||
+                                if !(ent===nothing || ent.fwd===nothing)
                                     throw(ErrorException(
                                         "$caller: duplicate forward pcurve " *
                                         "on Curve[$c]"))
+                                end
                                 pcdict[c]=(fwd=pcst,
                                            rev=ent===nothing ? nothing :
                                                                   ent.rev)
@@ -3763,10 +3831,11 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
                     pcst=ar.neg ? _brep_flip_pc(ar.pc,caller) : ar.pc
                     ent=get(pcdict,c,nothing)
                     if efwd
-                        ent===nothing || ent.fwd===nothing ||
+                        if !(ent===nothing || ent.fwd===nothing)
                             throw(ErrorException(
                                 "$caller: duplicate forward pcurve " *
                                 "on Curve[$c]"))
+                        end
                         pcdict[c]=(fwd=pcst,
                                    rev=ent===nothing ? nothing : ent.rev)
                     else
@@ -4029,22 +4098,62 @@ function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
     for k in eachindex(lift)
         canonical[(xs[k],ys[k])]=lift[k]
     end
+    uvcoords=mesh.coords
     coords=Matrix{Float64}(undef,3,nnodes(mesh))
     for k in 1:nnodes(mesh)
-        u=mesh.coords[1,k];v=mesh.coords[2,k]
+        u=uvcoords[1,k];v=uvcoords[2,k]
         p3=get(canonical,(u,v),nothing)
         p3===nothing && (p3=_occ_surface_point(sg,u,v))
         coords[1,k]=p3[1];coords[2,k]=p3[2];coords[3,k]=p3[3]
     end
-    mesh=Mesh(coords;tris=mesh.tris)
+    # Degenerate-face collapse: the two uv boundary representatives of a pole
+    # or apex (the degenerate edge's endpoints at u=0 and u=a) lift to the same
+    # 3-D vertex, so a uv triangle touching both collapses to an edge. Weld
+    # bitwise-identical lifted nodes and drop collapsed cells — each surviving
+    # edge still pairs the same two neighbours, so incidence is preserved.
+    welded=Dict{NTuple{3,Float64},Int32}()
+    remap=Vector{Int32}(undef,nnodes(mesh))
+    kept=NTuple{3,Float64}[]
+    kept_uv=NTuple{2,Float64}[]
+    for k in 1:nnodes(mesh)
+        p3=(coords[1,k],coords[2,k],coords[3,k])
+        remap[k]=get!(welded,p3) do
+            push!(kept,p3)
+            push!(kept_uv,(uvcoords[1,k],uvcoords[2,k]))
+            return Int32(length(kept))
+        end
+    end
+    cells=NTuple{3,Int32}[]
+    seen=Set{NTuple{3,Int32}}()
+    for cell in axes(mesh.tris,2)
+        tri=(remap[mesh.tris[1,cell]],remap[mesh.tris[2,cell]],
+             remap[mesh.tris[3,cell]])
+        (tri[1]==tri[2] || tri[2]==tri[3] || tri[3]==tri[1]) && continue
+        key=tri[1]<tri[2] ?
+            (tri[2]<tri[3] ? tri :
+             tri[1]<tri[3] ? (tri[1],tri[3],tri[2]) : (tri[3],tri[1],tri[2])) :
+            (tri[1]<tri[3] ? (tri[2],tri[1],tri[3]) :
+             tri[2]<tri[3] ? (tri[2],tri[3],tri[1]) : (tri[3],tri[2],tri[1]))
+        key in seen && continue
+        push!(seen,key);push!(cells,tri)
+    end
+    coords=Matrix{Float64}(undef,3,length(kept))
+    for k in eachindex(kept)
+        coords[1,k]=kept[k][1];coords[2,k]=kept[k][2];coords[3,k]=kept[k][3]
+    end
+    tris=Matrix{Int32}(undef,3,length(cells))
+    for k in eachindex(cells)
+        tris[1,k]=cells[k][1];tris[2,k]=cells[k][2];tris[3,k]=cells[k][3]
+    end
+    mesh=Mesh(coords;tris=tris)
+    isempty(cells) && throw(ArgumentError(
+        "$caller: Surface[$t] parametric triangulation collapsed entirely"))
     # The uv-CCW winding lifts to either side of the face depending on the
     # parametrization's handedness; align the patch with the face's
     # geometric normal like a planar patch follows its `axis`.
     cell=mesh.tris[:,1]
-    um=(mesh.coords[1,cell[1]]+mesh.coords[1,cell[2]]+
-        mesh.coords[1,cell[3]])/3
-    vm=(mesh.coords[2,cell[1]]+mesh.coords[2,cell[2]]+
-        mesh.coords[2,cell[3]])/3
+    um=(kept_uv[cell[1]][1]+kept_uv[cell[2]][1]+kept_uv[cell[3]][1])/3
+    vm=(kept_uv[cell[1]][2]+kept_uv[cell[2]][2]+kept_uv[cell[3]][2])/3
     nn=_brep_surface_normal(sg,um,vm)
     pa=coords[:,cell[1]];pb=coords[:,cell[2]];pc_=coords[:,cell[3]]
     n3=_b3cross(_b3(pb,pa),_b3(pc_,pa))
