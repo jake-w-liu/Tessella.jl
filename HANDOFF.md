@@ -4835,7 +4835,28 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
-## Latest landed increment (`46ed4e0`, pushed to `origin/main`)
+## Latest landed increment (`197cf9d`, pushed to `origin/main`)
+
+**`occ.convertToNURBS` surfaces + solids (GEO01 slice 21e)** — `occ.convert_to_nurbs(dimTags)`
+now covers dims −2/2/3. Converted faces keep their `occ` record as analytic
+metadata and gain a `patch` (`_ModelNURBSSurface`) plus a separable per-axis
+`reparam`; planes become bilinear degree-1 patches, cylinders/cones
+rational-quadratic angle × linear axis, spheres/tori rational quadratic in
+both axes. `_model_nurbs_surface_d2` composes the reparam chain rule and
+`_model_nurbs_surface_project` inverts it — external uv, pcurves, periods,
+measures and materializers stay bitwise consistent. Dim-3 traverses the
+transitive closure once and rebinds member degenerate/`surface_iso` edges;
+det>0 transforms update both channels while reflections reject loudly;
+inert analytic fields keep primitive encodings, Boolean materialization
+and surface sampling working. Verified: `api_occ_nurbs_test.jl` 363 green
+(eval/d1/d2 ≤3.6e-15 vs analytic shadow incl. at conic knots, pcurve lift,
+recursive dim-3 + exact `get_mass`, projection inverse, transforms, mirror
+rejection, 96-tet `generate(3)` and 1.875 box fuse on converted solids);
+transform/boolean/offset/corner/spline regressions re-verified. Known
+pre-existing limits unchanged: single-closed-wire curved booleans and
+curved/PLC tetrahedralization fail identically unconverted.
+
+## Previous landed increment (`46ed4e0`, pushed to `origin/main`)
 
 **`occ.convertToNURBS` curves (GEO01 slice 21d)** — `occ.convert_to_nurbs(dimTags)` implements
 `OCC_Internals::convertToNURBS` in
