@@ -4835,7 +4835,28 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
-## Latest landed increment (`167e858`, pushed to `origin/main`)
+## Latest landed increment (`c5138ef`, pushed to `origin/main`)
+
+**Partial-angle `occ.revolve` (GEO01 slice 20)** — `model.occ.revolve` now
+accepts any nonzero angle of magnitude ≤ 2·Pi (negative angles still flip the
+axis). Partial turns build sector topology on the slice-19 conventions:
+vertex-generatrix rim arcs `[0,a]` ending at rotated copies, `angle`-trimmed
+cylinder/cone laterals, annular-sector end planes for radial lines, meridian
+start/end walls on swept planar solids (the rotated cap answers as `top`), and
+torus segments with meridian disk caps for axial-plane disks. Measures: compact
+profiles carry the `sector` wedge record; general profiles extend `:revolved`
+with `angle`/`bisector`/`arm` fed by the new exact edge-midpoint ∫∫ρ² dA moment
+in `_model_occ_revol_profile_moments`, so `get_center_of_mass` lands on the
+u=a/2 meridian. Deep-debug fixes: rotated vertex positions must take the Layers
+spec's step-chain rotation (`_extrude_rotate_point`) rather than the gp_Trsf
+compact form — they differ in the last ulp through the 1−cos assembly and only
+the former welds onto the emitter's closing row under `numElements`/`heights`;
+partial sweeps under Layers need only one subdivision (the strip closes on the
+rotated copy, not the source row); the ordinary-sweep missing-cell diagnostic
+now reports the node position and owner. Verified:
+`api_occ_revolve_test.jl` 175/175 including the new partial-angles testset and
+a partial Layers case grading [0,π/6,π/3,π/2] into recombined prisms;
+extrude/measures/queries/transform/inertia suites all green.
 
 **OCC partial sweeps + periodic Boolean seam hardening (GEO01 slice 19)** —
 `add_cylinder`/`add_cone` `angle` and `add_sphere`

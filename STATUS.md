@@ -1504,6 +1504,53 @@ box face kissing a full cylinder reproduces
 identically at the parent commit — pre-existing
 limitation, not introduced here.
 
+### GEO01 slice 20 — partial-angle `occ.revolve` (2026-10-15)
+
+`model.occ.revolve` now accepts any nonzero angle of
+magnitude ≤ 2·Pi (negative angles still normalize by
+flipping the axis). Partial turns build sector
+topology through the slice-19 conventions: profile
+vertices sweep rim arcs `[0,a]` ending at rotated
+copies, profile edges sweep `angle`-trimmed
+cylinder/cone laterals or open annulus-sector planes,
+single-wire axial-plane faces sweep solids bounded by
+the two meridian walls (the source face at u=0 and its
+rotated copy at u=a — which answers as `top`), and the
+axial-plane disk sweeps a torus segment with two
+meridian disk caps. Compact partial profiles carry the
+`sector` wedge record; general profiles extend the
+`:revolved` Pappus record with `angle`, the sector
+`bisector` and its radial `arm`, which
+`_model_occ_solid_measure` consumes so
+`get_center_of_mass` lands on the u=a/2 meridian.
+`_model_occ_revol_profile_moments` gained the exact
+edge-midpoint ∫∫ρ² dA moment driving that arm.
+
+Two deep-debug fixes landed with it: rotated *vertex*
+positions take the Layers spec's step-chain rotation
+(`_extrude_rotate_point`) rather than the gp_Trsf
+compact form — the two differ in the last ulp through
+the 1−cos assembly, and only the former welds bitwise
+onto the emitter's closing row under
+`numElements`/`heights`; and the partial Layers gate
+needs just one subdivision since the strip ends on the
+rotated copy instead of welding onto the source row.
+The missing-cell diagnostic in
+`_higher_ordinary_sweep_classification` now reports
+the node position and owner.
+
+Verified: `api_occ_revolve_test.jl` — 175 checks all
+green including the new "partial angles" set (point→
+arc, line→cylinder/annular-sector/cone laterals,
+rectangle→`revolved` and axis-touching→`sector`
+solids with exact masses/COM/bbox, disk→torus
+segment, negative and near-2π angles, atomic
+rejections) plus a partial Layers case grading
+azimuths [0,π/6,π/3,π/2] into recombined prisms.
+`api_occ_extrude`, `api_occ_measures`,
+`api_occ_queries`, `api_occ_transform`,
+`api_occ_inertia` — all green on Julia 1.13.1.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

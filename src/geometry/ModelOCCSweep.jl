@@ -627,21 +627,24 @@ end
 # ---------------------------------------------------------------------------
 # `gmsh.model.occ.revolve` — `OCC_Internals::revolve`: a
 # `BRepPrimAPI_MakeRevol`-style rotational sweep per input dimension.
-# The bounded implementation covers full-turn (angle == 2·Pi) sweeps of
-# axial-plane profiles exactly: points sweep to rim circles, line edges
-# to cylinder/cone laterals or annulus/disk plane faces, single-wire
-# all-line plane faces to revolved solids (cylinder/cone compact
-# encodings when the profile produces a primitive), and a full-circle
-# disk pierced by the axis to the compact torus publication. Partial
-# angles, non-axial-plane profiles, axis-crossing profiles, curved
-# profiles other than disks, solid inputs and multi-wire faces reject
-# loudly. `numElements`/`heights`/`recombine` engage the same native
-# Layers transport as the extrusion. At 2·Pi the rotated "top"
-# coincides with the profile — the source entity answers as `top` —
-# and each boundary edge's swept surface answers as a lateral, matching
-# upstream's `getReturnedShapes` reorder. Rim circles, meridian faces
-# and degenerate apex edges deduplicate across shared profile entities
-# through `rmap`/`fmap` like the prism sweep's maps.
+# The bounded implementation covers sweeps of axial-plane profiles
+# exactly: points sweep to rim circles (arcs on partial turns), line
+# edges to cylinder/cone laterals or annulus/disk plane faces,
+# single-wire all-line plane faces to revolved solids (cylinder/cone
+# compact encodings when the profile produces a primitive, `sector`
+# records on partial turns), and a full-circle disk pierced by the
+# axis to the compact torus publication (a torus segment with two
+# meridian disk caps on partial turns). At 2·Pi the rotated "top"
+# coincides with the profile — the source entity answers as `top` and
+# both meridian legs reuse the source edge; at partial angles the top
+# is the rotated copy and the two walls are the source face and its
+# rotated image. Non-axial-plane profiles, axis-crossing profiles,
+# curved profiles other than disks, solid inputs and multi-wire faces
+# reject loudly. `numElements`/`heights`/`recombine` engage the same
+# native Layers transport as the extrusion. Rim curves, meridian
+# faces, rotated copies and degenerate apex edges deduplicate across
+# shared profile entities through `rmap`/`fmap`/`vmap`/`emap` like the
+# prism sweep's maps.
 
 # (rho,h,radial vector) of a point in the revolve frame: h is the axial
 # coordinate along unit axis n, rho the distance to the axis line.
@@ -651,10 +654,63 @@ function _model_occ_revol_rh(pt,p,n)
     return _occ_modulus(r),h,r
 end
 
-# Rim circle swept by a profile vertex, deduplicated through `rmap`;
-# an on-axis vertex maps to the zero sentinel and is skipped by the
-# callers (it sweeps to itself, not a curve).
-function _model_occ_revol_rim!(sw,kernel,vid,p,n,caller)
+# Rotated copy of a profile vertex at the sweep end `a` (partial turns
+# only — at 2·Pi the source vertex answers). An on-axis vertex rotates
+# to itself, so the source id answers directly and stays shared with the
+# profile edges that reference it. Deduplicated through `vmap` like the
+# prism sweep's translated copies. The position takes the spec's step
+# chain — not the gp_Trsf compact form — so the vertex welds bitwise
+# onto the Layers emitter's closing row (the two formulas differ in the
+# last ulp through the 1-cos assembly).
+function _model_occ_revol_vertex!(sw,kernel,src_id,p,n,Ma,loca,spec)
+    haskey(sw.vmap,src_id) && return sw.vmap[src_id]
+    source=kernel.shapes[src_id]
+    pt=source.geometry.point
+    rho,_,_=_model_occ_revol_rh(pt,p,n)
+    if rho<=_OCC_CONFUSION
+        sw.vmap[src_id]=src_id
+        return src_id
+    end
+    id=_model_occ_sweep_id!(sw,kernel)
+    tag=_model_occ_sweep_tag!(sw,kernel,0)
+    _model_occ_sweep_bind!(sw,0,tag,id,
+        _ModelOCCShape(0,(point=_extrude_rotate_point(
+                              spec.axis,spec.origin,spec.angle,pt),
+                          mesh_size=source.geometry.mesh_size),UInt64[]))
+    sw.vmap[src_id]=id
+    return id
+end
+
+# Rotated copy of a profile line edge — the revolve "top" edge at the
+# sweep end (partial turns), deduplicated through `emap` like the prism
+# sweep's translated tops.
+function _model_occ_revol_top_edge!(sw,kernel,src_id,p,n,Ma,loca,spec,
+                                    caller)
+    haskey(sw.emap,src_id) && return sw.emap[src_id]
+    source=kernel.shapes[src_id]
+    g=source.geometry.geometry
+    g.occ===:line || throw(ArgumentError(
+        "$caller: revolve of OCC curve kind $(g.occ) is not yet " *
+        "supported"))
+    a_id,b_id=source.children
+    a=_model_occ_revol_vertex!(sw,kernel,a_id,p,n,Ma,loca,spec)
+    b=_model_occ_revol_vertex!(sw,kernel,b_id,p,n,Ma,loca,spec)
+    id=_model_occ_sweep_id!(sw,kernel)
+    tag=_model_occ_sweep_tag!(sw,kernel,1)
+    _model_occ_sweep_bind!(sw,1,tag,id,
+        _ModelOCCShape(1,(kind=:line,geometry=
+            (occ=:line,origin=_occ_xform_pnt(Ma,loca,g.origin),
+             dir=_occ_xform_dir(Ma,g.dir),t0=g.t0,t1=g.t1)),
+            UInt64[a,b]))
+    sw.emap[src_id]=id
+    return id
+end
+
+# Rim circle (full turn) or rim arc (partial turn over `[0,a]`) swept by
+# a profile vertex, deduplicated through `rmap`; an on-axis vertex maps
+# to the zero sentinel and is skipped by the callers (it sweeps to
+# itself, not a curve). Partial arcs end at the rotated copy vertex.
+function _model_occ_revol_rim!(sw,kernel,vid,p,n,a,Ma,loca,spec,caller)
     haskey(sw.rmap,vid) && return sw.rmap[vid]
     v=kernel.shapes[vid].geometry.point
     rho,h,r=_model_occ_revol_rh(v,p,n)
@@ -663,6 +719,8 @@ function _model_occ_revol_rim!(sw,kernel,vid,p,n,caller)
         return zero(UInt64)
     end
     Xc,Yc=_occ_ax2_setx(n,_occ_dir(r))
+    end_vid=a<_OCC_TWO_PI ?
+        _model_occ_revol_vertex!(sw,kernel,vid,p,n,Ma,loca,spec) : vid
     id=_model_occ_sweep_id!(sw,kernel)
     tag=_model_occ_sweep_tag!(sw,kernel,1)
     _model_occ_sweep_bind!(sw,1,tag,id,
@@ -670,20 +728,20 @@ function _model_occ_revol_rim!(sw,kernel,vid,p,n,caller)
             geometry=(occ=:circle,
                       center=_occ3_add(p,_occ3_scale(n,h)),
                       n=_occ_crossed(Xc,Yc),X=Xc,Y=Yc,r=rho,
-                      t0=0.0,t1=_OCC_TWO_PI)),UInt64[vid,vid]))
+                      t0=0.0,t1=a)),UInt64[vid,end_vid]))
     sw.rmap[vid]=id
     return id
 end
 
 # Degenerate rim edge for an apex vertex (rho==0) on a cone lateral —
 # the producer convention binds the collapsed meridian limit to the
-# (shared) profile vertex.
-function _model_occ_revol_apex!(sw,kernel,vid,face_geometry,caller)
+# (shared) profile vertex. Partial sweeps collapse over `[0,a]`.
+function _model_occ_revol_apex!(sw,kernel,vid,face_geometry,a,caller)
     id=_model_occ_sweep_id!(sw,kernel)
     tag=_model_occ_sweep_tag!(sw,kernel,1)
     _model_occ_sweep_bind!(sw,1,tag,id,
         _ModelOCCShape(1,(kind=:degenerate,
-            geometry=(occ=:degenerate,t0=0.0,t1=_OCC_TWO_PI,
+            geometry=(occ=:degenerate,t0=0.0,t1=a,
                       face=face_geometry)),UInt64[vid,vid]))
     # The degenerate collapsed rim is the on-axis vertex's swept edge — the
     # point-generatrix link applies like the rim circles' (`lmap` carries
@@ -697,30 +755,41 @@ end
 _occ_pcurve_shift(o,d,t0)=(o[1]-d[1]*t0,o[2]-d[2]*t0)
 
 # Pappus moments of the revolved profile polygon: over fan triangles
-# from the first vertex, ∫∫ρ dA drives the volume (2π·∫∫ρ dA) and
-# the ρ-weighted axial moment ∫∫h·ρ dA drives the centroid's axial
-# coordinate — for a linear function the triangle mean is the vertex
-# average, and for the bilinear h·ρ the mean is
-# [(Σh)(Σρ)+Σhᵢρᵢ]/12. Signed terms cancel in the ratio; V takes |J0|.
-function _model_occ_revol_profile_moments(verts)
+# from the first vertex, ∫∫ρ dA drives the volume (a·∫∫ρ dA over the
+# sweep angle `a`) and the ρ-weighted axial moment ∫∫h·ρ dA drives the
+# centroid's axial coordinate — for a linear function the triangle mean
+# is the vertex average, and for the bilinear h·ρ the mean is
+# [(Σh)(Σρ)+Σhᵢρᵢ]/12. For partial turns the centroid also rides the
+# sector bisector at radius 2·sin(a/2)·∫∫ρ² dA/(a·J0) — the quadratic
+# ρ² integrates exactly through the edge-midpoint rule
+# A/3·Σ ρ(mᵢⱼ)² with ρ(mᵢⱼ)=(ρᵢ+ρⱼ)/2 for linear ρ. Signed terms
+# cancel in the ratios; V takes |a·J0|.
+function _model_occ_revol_profile_moments(verts,a)
     r0,h0=verts[1]
-    J0=J1=0.0
+    J0=J1=J2=0.0
     for i in 2:length(verts)-1
         r1,h1=verts[i];r2,h2=verts[i+1]
         A2=(r1-r0)*(h2-h0)-(r2-r0)*(h1-h0)
         sr=r0+r1+r2;sh=h0+h1+h2
         J0+=A2*sr/6
         J1+=A2*(sh*sr+r0*h0+r1*h1+r2*h2)/24
+        J2+=A2*((r0+r1)^2+(r1+r2)^2+(r2+r0)^2)/24
     end
-    return abs(2π*J0),J0==0.0 ? 0.0 : J1/J0
+    s2,c2=_gm_sincos(a/2)
+    arm=J0==0.0 ? 0.0 : 2*s2*J2/(a*J0)
+    return abs(a*J0),J0==0.0 ? 0.0 : J1/J0,arm
 end
 
 # Meridian face swept by a profile line edge: the canonical
 # cylinder/cone lateral record (ascending meridian, X at the seam's
 # radial direction) with the source edge reused as seam and rim
-# circles (or a degenerate apex edge) per endpoint. `fmap` deduplicates
-# per profile edge. Returns the swept face's shape id.
-function _model_occ_revol_meridian!(sw,kernel,src_id,p,n,caller)
+# circles (or a degenerate apex edge) per endpoint. Partial turns carry
+# `angle=a` on the lateral record, trim the rim circles to arcs, and
+# split the seam into the source edge at u=0 plus its rotated copy at
+# u=a. `fmap` deduplicates per profile edge. Returns the swept face's
+# shape id.
+function _model_occ_revol_meridian!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
+                                    caller)
     haskey(sw.fmap,src_id) && return sw.fmap[src_id]
     source=kernel.shapes[src_id]
     g=source.geometry.geometry
@@ -737,44 +806,69 @@ function _model_occ_revol_meridian!(sw,kernel,src_id,p,n,caller)
     Xc,Yc=_occ_ax2_setx(n,rhat)
     cen=_occ3_add(p,_occ3_scale(n,h_lo))
     cylinder=abs(rho_hi-rho_lo)<=_OCC_CONFUSION*max(rho_hi,1.0)
+    full=a==_OCC_TWO_PI
     seam_tag=_model_occ_sweep_tag_of(sw,kernel,src_id,caller)
-    # The seam pcurve maps the source edge's own parameter to the
-    # meridian v: ascending profiles run 0->len, descending len->0.
+    rot_id=full ? zero(UInt64) :
+        _model_occ_revol_top_edge!(sw,kernel,src_id,p,n,Ma,loca,spec,
+                                   caller)
+    rot_tag=full ? 0 :
+        _model_occ_sweep_tag_of(sw,kernel,rot_id,caller)
+    # The meridian-leg pcurves map the edge's own parameter to the
+    # meridian v: ascending profiles run 0->len, descending len->0. A
+    # full turn reuses the source edge on both seam columns (u=0 rev,
+    # u=2*Pi fwd); a partial turn puts the source edge at u=0 and its
+    # rotated copy at u=a — each column map serves both directions
+    # since each edge is used once.
     gspan=g.t1-g.t0
     sc=(a_id==lo_vid ? 1.0 : -1.0)*len/gspan
     o_seam=_occ_pcurve_shift(a_id==lo_vid ? (0.0,0.0) : (0.0,len),
                            (0.0,sc),g.t0)
+    lat_pcurves=Dict{Int,NamedTuple}()
+    if full
+        lat_pcurves[seam_tag]=
+            (fwd=(lin2d=((_OCC_TWO_PI,o_seam[2]),(0.0,sc)),),
+             rev=(lin2d=((0.0,o_seam[2]),(0.0,sc)),))
+    else
+        lat_pcurves[seam_tag]=
+            (fwd=(lin2d=((0.0,o_seam[2]),(0.0,sc)),),
+             rev=(lin2d=((0.0,o_seam[2]),(0.0,sc)),))
+        lat_pcurves[rot_tag]=
+            (fwd=(lin2d=((a,o_seam[2]),(0.0,sc)),),
+             rev=(lin2d=((a,o_seam[2]),(0.0,sc)),))
+    end
     c_lo=c_hi=zero(UInt64)
-    lat_pcurves=Dict{Int,NamedTuple}(
-        seam_tag=>(fwd=(lin2d=((_OCC_TWO_PI,o_seam[2]),(0.0,sc)),),
-                   rev=(lin2d=((0.0,o_seam[2]),(0.0,sc)),)))
     lat_geometry=nothing
     if cylinder
         lat_geometry=(occ=:cylinder,center=cen,axis=n,X=Xc,Y=Yc,
-                      radius=rho_lo,height=span,pcurves=lat_pcurves)
+                      radius=rho_lo,height=span,angle=a,
+                      pcurves=lat_pcurves)
     else
         lat_geometry=(occ=:cone,center=cen,axis=n,X=Xc,Y=Yc,
-                      r1=rho_lo,r2=rho_hi,height=span,pcurves=lat_pcurves)
+                      r1=rho_lo,r2=rho_hi,height=span,angle=a,
+                      pcurves=lat_pcurves)
     end
     for (vid,vpos,is_hi) in ((lo_vid,0.0,false),(hi_vid,len,true))
         rho=vid==lo_vid ? rho_lo : rho_hi
         if rho<=_OCC_CONFUSION
-            eid=_model_occ_revol_apex!(sw,kernel,vid,lat_geometry,caller)
+            eid=_model_occ_revol_apex!(sw,kernel,vid,lat_geometry,a,caller)
         else
-            eid=_model_occ_revol_rim!(sw,kernel,vid,p,n,caller)
+            eid=_model_occ_revol_rim!(sw,kernel,vid,p,n,a,Ma,loca,spec,
+                                      caller)
         end
         etag=_model_occ_sweep_tag_of(sw,kernel,eid,caller)
         lat_pcurves[etag]=(fwd=(lin2d=((0.0,vpos),(1.0,0.0)),),
                            rev=nothing)
         is_hi ? (c_hi=eid) : (c_lo=eid)
     end
-    # Producer lateral wire: [rim_hi rev, seam leg, rim_lo fwd, seam
-    # leg]. The seam legs' flags adapt to the source edge's own child
-    # order (children run lo->hi like the producers, or hi->lo).
+    # Producer lateral wire: [rim_hi rev, u=0 leg down, rim_lo fwd,
+    # u=u_max leg up]. Full turns reuse the source edge on both legs;
+    # partial turns give the u=a leg the rotated copy. Leg flags adapt
+    # to the source edge's own child order (children run lo->hi like
+    # the producers, or hi->lo).
     wire=Tuple{UInt64,Bool}[(c_hi,true)]
     push!(wire,(src_id,a_id==lo_vid))
     push!(wire,(c_lo,false))
-    push!(wire,(src_id,!(a_id==lo_vid)))
+    push!(wire,(full ? src_id : rot_id,!(a_id==lo_vid)))
     wire_id=_model_occ_sweep_id!(sw,kernel)
     wire_tag=_model_occ_sweep_tag!(sw,kernel,-1)
     _model_occ_sweep_bind!(sw,-1,wire_tag,wire_id,
@@ -789,10 +883,14 @@ function _model_occ_revol_meridian!(sw,kernel,src_id,p,n,caller)
 end
 
 # Annulus (or disk) plane face swept by a radial profile edge at axial
-# coordinate h. `axis_sign` chooses the stored plane axis = ±n — the
-# caller derives it from the profile direction (standalone faces) or
-# the required outward normal (solid caps). Returns the face id.
-function _model_occ_revol_annulus!(sw,kernel,src_id,p,n,axis_sign,caller)
+# coordinate h — two concentric circles for a full turn, one open
+# sector wire (outer arc, rotated radial leg, inner arc, source radial
+# leg) for a partial turn. `axis_sign` chooses the stored plane axis =
+# ±n — the caller derives it from the profile direction (standalone
+# faces) or the required outward normal (solid caps). Returns the face
+# id.
+function _model_occ_revol_annulus!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
+                                   axis_sign,caller)
     haskey(sw.fmap,src_id) && return sw.fmap[src_id]
     source=kernel.shapes[src_id]
     a_id,b_id=source.children
@@ -803,18 +901,34 @@ function _model_occ_revol_annulus!(sw,kernel,src_id,p,n,axis_sign,caller)
     c_in=c_out=zero(UInt64)
     r_lo=min(ra,rb);r_hi=max(ra,rb)
     c_out=_model_occ_revol_rim!(
-        sw,kernel,ra>=rb ? a_id : b_id,p,n,caller)
+        sw,kernel,ra>=rb ? a_id : b_id,p,n,a,Ma,loca,spec,caller)
     r_lo>_OCC_CONFUSION &&
         (c_in=_model_occ_revol_rim!(
-            sw,kernel,ra>=rb ? b_id : a_id,p,n,caller))
+            sw,kernel,ra>=rb ? b_id : a_id,p,n,a,Ma,loca,spec,caller))
     shape_of=id->_model_occ_sweep_shape_of(sw,kernel,id)
     tag_of=id->_model_occ_sweep_tag_of(sw,kernel,id,caller)
-    # Wind the outer circle so the face's Newell axis lands on
-    # axis_sign·n; hole wires keep the same stored orientation (the
-    # children index marks them, like `add_plane_surface` users).
-    flag=axis_sign<0
-    uses=[Tuple{UInt64,Bool}[(c_out,flag)]]
-    c_in!=0 && push!(uses,Tuple{UInt64,Bool}[(c_in,flag)])
+    full=a==_OCC_TWO_PI
+    uses=Vector{Tuple{UInt64,Bool}}[]
+    if full
+        # Wind the outer circle so the face's Newell axis lands on
+        # axis_sign·n; hole wires keep the same stored orientation (the
+        # children index marks them, like `add_plane_surface` users).
+        flag=axis_sign<0
+        push!(uses,Tuple{UInt64,Bool}[(c_out,flag)])
+        c_in!=0 && push!(uses,Tuple{UInt64,Bool}[(c_in,flag)])
+    else
+        # Sector wire traversed CCW about +n (the plane fit normalizes
+        # conic orientations onto its axis): the outer rim arc spans
+        # u=0->a, the rotated radial leg descends to the inner arc
+        # (which spans u=a->0 reversed), and the source radial leg
+        # closes back out. Child order decides each leg's flag.
+        rot_id=_model_occ_revol_top_edge!(
+            sw,kernel,src_id,p,n,Ma,loca,spec,caller)
+        wire=Tuple{UInt64,Bool}[(c_out,false),(rot_id,ra<rb)]
+        c_in!=0 && push!(wire,(c_in,true))
+        push!(wire,(src_id,ra>=rb))
+        push!(uses,wire)
+    end
     geometry=_model_occ_plane_face_geometry(shape_of,tag_of,uses,caller)
     wire_ids=UInt64[]
     for use in uses
@@ -832,40 +946,52 @@ function _model_occ_revol_annulus!(sw,kernel,src_id,p,n,axis_sign,caller)
     return face_id
 end
 
-# dim-0 input: the vertex sweeps a rim circle. Upstream emits
-# [top vertex, swept edge]; at 2·Pi the top is the source vertex.
-function _model_occ_revol_point!(sw,kernel,src_id,p,n,caller)
-    eid=_model_occ_revol_rim!(sw,kernel,src_id,p,n,caller)
-    src_tag=_model_occ_sweep_tag_of(sw,kernel,src_id,caller)
-    return src_tag,_model_occ_sweep_tag_of(sw,kernel,eid,caller)
+# dim-0 input: the vertex sweeps a rim circle (full turn) or rim arc
+# (partial turn). Upstream emits [top vertex, swept edge]; at 2·Pi the
+# top is the source vertex, at partial angles the rotated copy.
+function _model_occ_revol_point!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
+                                 caller)
+    eid=_model_occ_revol_rim!(sw,kernel,src_id,p,n,a,Ma,loca,spec,caller)
+    top_vid=a<_OCC_TWO_PI ?
+        _model_occ_revol_vertex!(sw,kernel,src_id,p,n,Ma,loca,spec) :
+        src_id
+    top_tag=_model_occ_sweep_tag_of(sw,kernel,top_vid,caller)
+    return top_tag,_model_occ_sweep_tag_of(sw,kernel,eid,caller)
 end
 
 # dim-1 input: the line sweeps a meridian lateral or an annulus/disk
-# plane face; laterals are the rim circles swept by its vertices.
-function _model_occ_revol_line!(sw,kernel,src_id,p,n,kind,caller)
+# plane face; laterals are the rim curves swept by its vertices. The
+# reported top edge is the source at 2·Pi, its rotated copy otherwise.
+function _model_occ_revol_line!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
+                                kind,caller)
     a_id,b_id=kernel.shapes[src_id].children
     pa=kernel.shapes[a_id].geometry.point
     pb=kernel.shapes[b_id].geometry.point
     ra,_,_=_model_occ_revol_rh(pa,p,n)
     rb,_,_=_model_occ_revol_rh(pb,p,n)
+    full=a==_OCC_TWO_PI
     if kind===:annulus
         # Standalone swept-face normal follows the profile's radial
         # direction (upstream's sweep convention): outward radial
         # profile -> +n, inward -> -n.
         face_id=_model_occ_revol_annulus!(
-            sw,kernel,src_id,p,n,sign(rb-ra),caller)
+            sw,kernel,src_id,p,n,a,Ma,loca,spec,sign(rb-ra),caller)
     else
-        face_id=_model_occ_revol_meridian!(sw,kernel,src_id,p,n,caller)
+        face_id=_model_occ_revol_meridian!(
+            sw,kernel,src_id,p,n,a,Ma,loca,spec,caller)
     end
-    src_tag=_model_occ_sweep_tag_of(sw,kernel,src_id,caller)
+    top_eid=full ? src_id :
+        _model_occ_revol_top_edge!(sw,kernel,src_id,p,n,Ma,loca,spec,
+                                   caller)
+    top_tag=_model_occ_sweep_tag_of(sw,kernel,top_eid,caller)
     face_tag=_model_occ_sweep_tag_of(sw,kernel,face_id,caller)
     laterals=Int[]
     for vid in (a_id,b_id)
-        eid=_model_occ_revol_rim!(sw,kernel,vid,p,n,caller)
+        eid=_model_occ_revol_rim!(sw,kernel,vid,p,n,a,Ma,loca,spec,caller)
         eid!=0 && push!(laterals,
             _model_occ_sweep_tag_of(sw,kernel,eid,caller))
     end
-    return src_tag,face_tag,laterals
+    return top_tag,face_tag,laterals
 end
 
 # dim-2 disk input: a full-circle profile in an axial plane at radius
@@ -877,7 +1003,8 @@ end
 # carry the mesh-transport links: the rim parallel through the seam
 # takes the point-generatrix link (via `rmap`), the torus face links the
 # profile circle and the solid links the source face.
-function _model_occ_revol_disk!(m::GeoModel,kernel,sw,face_id,p,n,caller)
+function _model_occ_revol_disk!(m::GeoModel,kernel,sw,face_id,p,n,a,
+                                Ma,loca,spec,caller)
     face=kernel.shapes[face_id]
     wire=kernel.shapes[only(face.children)]
     edge_id=only(wire.geometry.uses)[1]
@@ -889,7 +1016,8 @@ function _model_occ_revol_disk!(m::GeoModel,kernel,sw,face_id,p,n,caller)
     src_vid=kernel.shapes[edge_id].children[1]
     src_vtx=kernel.shapes[src_vid].geometry.point
     # Seam radial direction and parallel: the torus frame X points at the
-    # seam azimuth so the wire legs sit at u=0/u=2π like the producer's.
+    # seam azimuth so the wire legs sit at u=0/u=u_max like the
+    # producer's.
     rs,hs,rd_s=_model_occ_revol_rh(src_vtx,p,n)
     Xs=_occ_dir(rd_s)
     Ys=_occ_crossed(n,Xs)
@@ -898,47 +1026,107 @@ function _model_occ_revol_disk!(m::GeoModel,kernel,sw,face_id,p,n,caller)
     # about Dm=-Y at the seam azimuth).
     v_s=atan(hs-h_c,rs-r1)
     flips=_dot3(g.n,Ys)>0.0
-    eq_id=_model_occ_revol_rim!(sw,kernel,src_vid,p,n,caller)
+    full=a==_OCC_TWO_PI
+    eq_id=_model_occ_revol_rim!(sw,kernel,src_vid,p,n,a,Ma,loca,spec,
+                                caller)
     eq_id==zero(UInt64) && throw(ArgumentError(
         "$caller: cannot revolve a disk seam vertex on the revolution axis"))
     tag_of=id->_model_occ_sweep_tag_of(sw,kernel,id,caller)
     src_tag=tag_of(face_id);circle_tag=tag_of(edge_id)
     eq_tag=tag_of(eq_id)
-    mer_pc=flips ?
-        (fwd=(lin2d=((0.0,v_s),(0.0,-1.0)),),
-         rev=(lin2d=((_OCC_TWO_PI,v_s),(0.0,-1.0)),)) :
-        (fwd=(lin2d=((_OCC_TWO_PI,v_s),(0.0,1.0)),),
-         rev=(lin2d=((0.0,v_s),(0.0,1.0)),))
+    σ=flips ? -1.0 : 1.0
     v2=flips ? v_s-_OCC_TWO_PI : v_s+_OCC_TWO_PI
+    shell_uses=Tuple{UInt64,Bool}[]
     tpc=Dict{Int,NamedTuple}(
         eq_tag=>(fwd=(lin2d=((0.0,v_s),(1.0,0.0)),),
-                 rev=(lin2d=((0.0,v2),(1.0,0.0)),)),
-        circle_tag=>mer_pc)
+                 rev=(lin2d=((0.0,v2),(1.0,0.0)),)))
+    if full
+        # The source circle answers both meridian legs — u=0 under one
+        # traversal flag, u=2*Pi under the other.
+        tpc[circle_tag]=flips ?
+            (fwd=(lin2d=((0.0,v_s),(0.0,-1.0)),),
+             rev=(lin2d=((_OCC_TWO_PI,v_s),(0.0,-1.0)),)) :
+            (fwd=(lin2d=((_OCC_TWO_PI,v_s),(0.0,1.0)),),
+             rev=(lin2d=((0.0,v_s),(0.0,1.0)),))
+        torus_uses=Tuple{UInt64,Bool}[(eq_id,true),
+            (edge_id,flips),(eq_id,false),(edge_id,!flips)]
+        end_cap_id=zero(UInt64);end_cap_tag=0
+    else
+        # Partial turn: the profile circle bounds the u=0 cut alone and
+        # a rotated copy bounds the u=a cut (the producer's
+        # start/end-meridian pair); both columns map through the same
+        # poloidal direction σ.
+        rot_vid=_model_occ_revol_vertex!(sw,kernel,src_vid,p,n,Ma,loca,
+                                         spec)
+        rot_id=_model_occ_sweep_id!(sw,kernel)
+        rot_tag=_model_occ_sweep_tag!(sw,kernel,1)
+        _model_occ_sweep_bind!(sw,1,rot_tag,rot_id,
+            _ModelOCCShape(1,(kind=g.occ,
+                geometry=(occ=g.occ,
+                    center=_occ_xform_pnt(Ma,loca,g.center),
+                    n=_occ_xform_dir(Ma,g.n),
+                    X=_occ_xform_dir(Ma,g.X),Y=_occ_xform_dir(Ma,g.Y),
+                    (g.occ===:circle ? (;r=g.r) : (;rx=g.rx,ry=g.ry))...,
+                    t0=g.t0,t1=g.t1)),UInt64[rot_vid,rot_vid]))
+        tpc[circle_tag]=
+            (fwd=(lin2d=((0.0,v_s),(0.0,σ)),),
+             rev=(lin2d=((0.0,v_s),(0.0,σ)),))
+        tpc[rot_tag]=
+            (fwd=(lin2d=((a,v_s),(0.0,σ)),),
+             rev=(lin2d=((a,v_s),(0.0,σ)),))
+        torus_uses=Tuple{UInt64,Bool}[(eq_id,true),
+            (edge_id,true),(eq_id,false),(rot_id,false)]
+        # Meridian caps: the source disk bounds the u=0 cut and its
+        # rotated copy the u=a cut. Cap outward normals are −(n×Xs) and
+        # +rot(n×Xs) — the shell flags key on the record axes.
+        M=_occ_crossed(n,Xs)
+        cap_wire_id=_model_occ_sweep_id!(sw,kernel)
+        cap_wire_tag=_model_occ_sweep_tag!(sw,kernel,-1)
+        _model_occ_sweep_bind!(sw,-1,cap_wire_tag,cap_wire_id,
+            _ModelOCCShape(-1,(uses=Tuple{UInt64,Bool}[(rot_id,false)],),
+                UInt64[rot_id]))
+        shape_of=id->_model_occ_sweep_shape_of(sw,kernel,id)
+        cap_geometry=_model_occ_plane_face_geometry(
+            shape_of,tag_of,
+            Vector{Tuple{UInt64,Bool}}[[(rot_id,false)]],caller)
+        end_cap_id=_model_occ_sweep_id!(sw,kernel)
+        end_cap_tag=_model_occ_sweep_tag!(sw,kernel,2)
+        _model_occ_sweep_bind!(sw,2,end_cap_tag,end_cap_id,
+            _ModelOCCShape(2,(kind=:plane,geometry=cap_geometry),
+                UInt64[cap_wire_id]))
+        src_axis=face.geometry.geometry.axis
+        rot_M=_occ_xform_dir(Ma,M)
+        push!(shell_uses,(face_id,_dot3(src_axis,M)>0.0))
+        push!(shell_uses,(end_cap_id,_dot3(cap_geometry.axis,rot_M)<0.0))
+        push!(sw.links,(2,end_cap_tag,(2,src_tag)))
+        push!(sw.links,(1,rot_tag,(1,circle_tag)))
+    end
     lwire_id=_model_occ_sweep_id!(sw,kernel)
     lwire_tag=_model_occ_sweep_tag!(sw,kernel,-1)
     _model_occ_sweep_bind!(sw,-1,lwire_tag,lwire_id,
-        _ModelOCCShape(-1,(uses=Tuple{UInt64,Bool}[(eq_id,true),
-            (edge_id,flips),(eq_id,false),(edge_id,!flips)],),
-            UInt64[eq_id,edge_id,eq_id,edge_id]))
+        _ModelOCCShape(-1,(uses=torus_uses,),
+            UInt64[u[1] for u in torus_uses]))
     face_id2=_model_occ_sweep_id!(sw,kernel)
     face_tag=_model_occ_sweep_tag!(sw,kernel,2)
     _model_occ_sweep_bind!(sw,2,face_tag,face_id2,
         _ModelOCCShape(2,(kind=:torus,
             geometry=(occ=:torus,center=cen,axis=n,X=Xs,Y=Ys,
-                      r1=r1,r2=radius,angle=_OCC_TWO_PI,pcurves=tpc)),
+                      r1=r1,r2=radius,angle=a,pcurves=tpc)),
             UInt64[lwire_id]))
     shell_id=_model_occ_sweep_id!(sw,kernel)
     shell_tag=_model_occ_sweep_tag!(sw,kernel,-2)
     _model_occ_sweep_bind!(sw,-2,shell_tag,shell_id,
-        _ModelOCCShape(-2,(uses=Tuple{UInt64,Bool}[(face_id2,false)],),
-            UInt64[face_id2]))
+        _ModelOCCShape(-2,(uses=Tuple{UInt64,Bool}[
+            (face_id2,false),shell_uses...],),
+            UInt64[face_id2,first.(shell_uses)...]))
     solid_id=_model_occ_sweep_id!(sw,kernel)
     solid_tag=_model_occ_sweep_tag!(sw,kernel,3)
     _model_occ_sweep_bind!(sw,3,solid_tag,solid_id,
         _ModelOCCShape(3,(kind=:solid,),UInt64[shell_id]))
     push!(sw.links,(2,face_tag,(1,circle_tag)))
     push!(sw.links,(3,solid_tag,(2,src_tag)))
-    return src_tag,solid_tag,[face_tag]
+    top_tag=full ? src_tag : end_cap_tag
+    return top_tag,solid_tag,[face_tag]
 end
 
 # dim-2 input: a single-wire all-line plane face lying in an axial
@@ -947,23 +1135,31 @@ end
 # the outward convention measured by `σ·axis`/`_occ_surface_normal`,
 # and profiles that land exactly on a primitive layout carry the
 # compact encoding for the measure/sync consumers.
-function _model_occ_revol_planar!(sw,kernel,src_id,p,n,caller)
+function _model_occ_revol_planar!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
+                                  caller)
     source=kernel.shapes[src_id]
     g=source.geometry.geometry
     face_axis=g.axis
     wire=kernel.shapes[only(source.children)]
+    full=a==_OCC_TWO_PI
     laterals=UInt64[]
     shell_uses=Tuple{UInt64,Bool}[]
     cyl_faces=cone_faces=0
     caps=Tuple{Float64,Float64}[]
     verts=Tuple{Float64,Float64}[]
+    rot_wire=Tuple{UInt64,Bool}[]
+    rhat=nothing
     for (edge_id,rev) in wire.geometry.uses
         a_id,b_id=kernel.shapes[edge_id].children
         pa=kernel.shapes[a_id].geometry.point
         pb=kernel.shapes[b_id].geometry.point
-        ra,ha,_=_model_occ_revol_rh(pa,p,n)
-        rb,hb,_=_model_occ_revol_rh(pb,p,n)
+        ra,ha,rd_a=_model_occ_revol_rh(pa,p,n)
+        rb,hb,rd_b=_model_occ_revol_rh(pb,p,n)
         push!(verts,rev ? (rb,hb) : (ra,ha))
+        rhat===nothing && ra>_OCC_CONFUSION &&
+            (rhat=_occ_dir(rd_a))
+        rhat===nothing && rb>_OCC_CONFUSION &&
+            (rhat=_occ_dir(rd_b))
         len=_occ_modulus(_arc_sub(pb,pa))
         # Profile-edge outward in the meridian plane: the wire's CCW
         # traversal (material left, like the extrusion caps) puts the
@@ -972,17 +1168,21 @@ function _model_occ_revol_planar!(sw,kernel,src_id,p,n,caller)
         udir=_occ_dir(rev ? _occ3_scale(tangent,-1.0) : tangent)
         o3=_occ_crossed(udir,face_axis)
         dh=abs(hb-ha)
+        full || push!(rot_wire,(_model_occ_revol_top_edge!(
+            sw,kernel,edge_id,p,n,Ma,loca,spec,caller),rev))
         if ra<=_OCC_CONFUSION && rb<=_OCC_CONFUSION
             continue  # on-axis profile edge sweeps nothing
         elseif dh<=_OCC_CONFUSION*len
             fid=_model_occ_revol_annulus!(
-                sw,kernel,edge_id,p,n,sign(_dot3(o3,n)),caller)
+                sw,kernel,edge_id,p,n,a,Ma,loca,spec,
+                sign(_dot3(o3,n)),caller)
             rec=_model_occ_sweep_shape_of(sw,kernel,fid).geometry
             rev_flag=_dot3(rec.geometry.axis,o3)<0
             push!(shell_uses,(fid,rev_flag))
             push!(caps,((ha+hb)/2,min(ra,rb)))
         else
-            fid=_model_occ_revol_meridian!(sw,kernel,edge_id,p,n,caller)
+            fid=_model_occ_revol_meridian!(
+                sw,kernel,edge_id,p,n,a,Ma,loca,spec,caller)
             rec=_model_occ_sweep_shape_of(sw,kernel,fid).geometry
             nv=_occ_surface_normal(rec.geometry,0.0,
                                    _occ_modulus(_arc_sub(pb,pa))/2)
@@ -990,6 +1190,36 @@ function _model_occ_revol_planar!(sw,kernel,src_id,p,n,caller)
             rec.kind===:cylinder ? (cyl_faces+=1) : (cone_faces+=1)
         end
         push!(laterals,fid)
+    end
+    rhat===nothing && throw(ArgumentError(
+        "$caller: revolve profile lies on the revolution axis"))
+    top_tag=src_tag=
+        _model_occ_sweep_tag_of(sw,kernel,src_id,caller)
+    if !full
+        # Meridian walls: the source face bounds the u=0 cut, its
+        # rotated copy bounds u=a. The wall outward normals are
+        # ∓(n×rhat) — flag keys on the record axes like the other
+        # shell uses.
+        shape_of=id->_model_occ_sweep_shape_of(sw,kernel,id)
+        tag_of=id->_model_occ_sweep_tag_of(sw,kernel,id,caller)
+        rot_geometry=_model_occ_plane_face_geometry(
+            shape_of,tag_of,[rot_wire],caller)
+        rot_wire_id=_model_occ_sweep_id!(sw,kernel)
+        rot_wire_tag=_model_occ_sweep_tag!(sw,kernel,-1)
+        _model_occ_sweep_bind!(sw,-1,rot_wire_tag,rot_wire_id,
+            _ModelOCCShape(-1,(uses=rot_wire,),
+                UInt64[u[1] for u in rot_wire]))
+        rot_face_id=_model_occ_sweep_id!(sw,kernel)
+        rot_face_tag=_model_occ_sweep_tag!(sw,kernel,2)
+        _model_occ_sweep_bind!(sw,2,rot_face_tag,rot_face_id,
+            _ModelOCCShape(2,(kind=:plane,geometry=rot_geometry),
+                UInt64[rot_wire_id]))
+        M=_occ_crossed(n,rhat)
+        push!(shell_uses,(src_id,_dot3(face_axis,M)>0.0))
+        push!(shell_uses,(rot_face_id,
+            _dot3(rot_geometry.axis,_occ_xform_dir(Ma,M))<0.0))
+        push!(sw.links,(2,rot_face_tag,(2,src_tag)))
+        top_tag=rot_face_tag
     end
     shell_id=_model_occ_sweep_id!(sw,kernel)
     shell_tag=_model_occ_sweep_tag!(sw,kernel,-2)
@@ -999,7 +1229,9 @@ function _model_occ_revol_planar!(sw,kernel,src_id,p,n,caller)
     solid_geometry=(kind=:solid,)
     # Compact encodings when the swept boundary is exactly a primitive:
     # one cylinder + two axis-centered disk caps, or one cone + its
-    # disk cap(s).
+    # disk cap(s). Full turns carry the `primitive` record; partial
+    # turns carry the `sector` wedge record the partial-sweep
+    # primitives already measure through.
     # Each entry in `caps` is (axial h, inner radius); a disk cap's
     # inner radius is ~0 and its h must sit at a quadric end.
     cap_is_disk(c)=c[2]<=_OCC_CONFUSION
@@ -1016,44 +1248,63 @@ function _model_occ_revol_planar!(sw,kernel,src_id,p,n,caller)
             fid for (fid,_) in shell_uses
             if shape_kind(fid)===:cylinder)).geometry.geometry
         all(c->cap_at(rec,c),caps) &&
-            (solid_geometry=(kind=:solid,
-                primitive=(occ=:cylinder,
-                    record=(center=rec.center,
-                            axis=_occ3_scale(rec.axis,rec.height),
-                            radius=rec.radius,height=rec.height))))
+            (solid_geometry=full ?
+                (kind=:solid,
+                 primitive=(occ=:cylinder,
+                     record=(center=rec.center,
+                             axis=_occ3_scale(rec.axis,rec.height),
+                             radius=rec.radius,height=rec.height))) :
+                (kind=:solid,
+                 sector=(occ=:cylinder,center=rec.center,
+                         axis=_occ3_scale(rec.axis,rec.height),
+                         X=rec.X,Y=rec.Y,radius=rec.radius,
+                         height=rec.height,angle=a)))
     elseif cone_faces==1 && cyl_faces==0 &&
             1<=length(caps)<=2 && all(cap_is_disk,caps)
         rec=_model_occ_sweep_shape_of(sw,kernel,only(
             fid for (fid,_) in shell_uses
             if shape_kind(fid)===:cone)).geometry.geometry
         all(c->cap_at(rec,c),caps) &&
-            (solid_geometry=(kind=:solid,
-                primitive=(occ=:cone,
-                    record=(center=rec.center,
-                            axis=_occ3_scale(rec.axis,rec.height),
-                            r1=rec.r1,r2=rec.r2,height=rec.height))))
+            (solid_geometry=full ?
+                (kind=:solid,
+                 primitive=(occ=:cone,
+                     record=(center=rec.center,
+                             axis=_occ3_scale(rec.axis,rec.height),
+                             r1=rec.r1,r2=rec.r2,height=rec.height))) :
+                (kind=:solid,
+                 sector=(occ=:cone,center=rec.center,
+                         axis=_occ3_scale(rec.axis,rec.height),
+                         X=rec.X,Y=rec.Y,r1=rec.r1,r2=rec.r2,
+                         height=rec.height,angle=a)))
     end
     # Every revolved solid carries Pappus integrals as a fallback
     # encoding: the profile moments give the closed-form volume and
     # the centroid's axial coordinate for the measure path even when
-    # the boundary isn't a compact primitive.
-    if !haskey(solid_geometry,:primitive)
-        V,h_c=_model_occ_revol_profile_moments(verts)
+    # the boundary isn't a compact primitive. Partial turns add the
+    # sector bisector and its radial arm — the centroid rides the
+    # u=a/2 meridian off axis.
+    if !haskey(solid_geometry,:primitive) &&
+            !haskey(solid_geometry,:sector)
+        V,h_c,arm=_model_occ_revol_profile_moments(verts,a)
         V>_OCC_CONFUSION || throw(ArgumentError(
             "$caller: revolved profile has zero swept volume"))
         solid_geometry=(kind=:solid,
             primitive=(occ=:revolved,
-                record=(point=p,axis=n,V=V,h_c=h_c)))
+                record=full ? (point=p,axis=n,V=V,h_c=h_c) :
+                    (point=p,axis=n,V=V,h_c=h_c,angle=a,
+                     bisector=_occ_dir(_occ3_add(
+                         _occ3_scale(rhat,cos(a/2)),
+                         _occ3_scale(_occ_crossed(n,rhat),sin(a/2)))),
+                     arm=arm)))
     end
     solid_id=_model_occ_sweep_id!(sw,kernel)
     solid_tag=_model_occ_sweep_tag!(sw,kernel,3)
     _model_occ_sweep_bind!(sw,3,solid_tag,solid_id,
         _ModelOCCShape(3,solid_geometry,UInt64[shell_id]))
-    src_tag=_model_occ_sweep_tag_of(sw,kernel,src_id,caller)
     push!(sw.links,(3,solid_tag,(2,src_tag)))
     lat_tags=Int[_model_occ_sweep_tag_of(sw,kernel,fid,caller)
                  for fid in laterals]
-    return src_tag,solid_tag,lat_tags
+    return top_tag,solid_tag,lat_tags
 end
 
 # Phase-1 classifier for a line input: rejects non-:line records,
@@ -1187,8 +1438,15 @@ function _model_occ_revolve(m::GeoModel,dim_tags,x,y,z,ax,ay,az,angle;
     a<0.0 && (a=-a; n=_occ3_scale(n,-1.0))
     a<=_OCC_TWO_PI || throw(ArgumentError(
         "$caller: angle magnitude must not exceed 2*Pi"))
-    a==_OCC_TWO_PI || throw(ArgumentError(
-        "$caller: partial revolve angles are not yet supported"))
+    full=a==_OCC_TWO_PI
+    # The sweep-end rotation — partial turns place a rotated copy of
+    # every profile entity at u=a (rim arcs, rotated edges and faces);
+    # at 2*Pi the copies coincide with the sources and are skipped.
+    # `Ma/loca` is the gp_Trsf for records; `spec` is the Layers
+    # transport's step-chain transform — vertex positions take the
+    # latter so they weld bitwise onto the emitted mesh rows.
+    Ma,loca=_occ_trsf_rot(p,n,a)
+    spec=_extrude_spec_rotate(n,p,a,caller)
     kernel=m.occ_kernel
     # Phase 1: validate and classify every input before any bind, like
     # the prism sweep — a rejection leaves the registry untouched.
@@ -1231,12 +1489,14 @@ function _model_occ_revolve(m::GeoModel,dim_tags,x,y,z,ax,ay,az,angle;
     # at least three subdivisions: with two, each arc's second gap lands
     # on the same four rows as the first — coincident cells that no mesh
     # can represent. A pure point generatrix only sweeps a ring curve —
-    # two arcs still tile it, but one is a degenerate self-loop.
+    # two arcs still tile it, but one is a degenerate self-loop. Partial
+    # turns end on the rotated copy instead of welding — one layer
+    # already tiles the strip.
     if params!==nothing
-        need=any(dim>0 for (dim,_,_) in classified) ? 3 : 2
+        need=full ? (any(dim>0 for (dim,_,_) in classified) ? 3 : 2) : 1
         sum(params.layers)<need && throw(ArgumentError(
-            "$caller: a full-turn revolve needs at least $need total " *
-            "numElements subdivisions"))
+            "$caller: a $(full ? "full-turn" : "partial") revolve " *
+            "needs at least $need total numElements subdivisions"))
     end
     sw=_model_occ_sweep_setup(n,caller,kernel)
     out=Tuple{Int,Int}[]
@@ -1244,19 +1504,22 @@ function _model_occ_revolve(m::GeoModel,dim_tags,x,y,z,ax,ay,az,angle;
         for (edim,id,kind) in classified
             edim==dim || continue
             if dim==0
-                top,body=_model_occ_revol_point!(sw,kernel,id,p,n,caller)
+                top,body=_model_occ_revol_point!(
+                    sw,kernel,id,p,n,a,Ma,loca,spec,caller)
                 push!(out,(0,top));push!(out,(1,body))
             elseif dim==1
                 top,body,laterals=_model_occ_revol_line!(
-                    sw,kernel,id,p,n,kind,caller)
+                    sw,kernel,id,p,n,a,Ma,loca,spec,kind,caller)
                 push!(out,(1,top));push!(out,(2,body))
                 for tag in laterals
                     push!(out,(1,tag))
                 end
             else
                 top,body,laterals=kind===:disk ?
-                    _model_occ_revol_disk!(m,kernel,sw,id,p,n,caller) :
-                    _model_occ_revol_planar!(sw,kernel,id,p,n,caller)
+                    _model_occ_revol_disk!(m,kernel,sw,id,p,n,a,Ma,loca,
+                        spec,caller) :
+                    _model_occ_revol_planar!(sw,kernel,id,p,n,a,Ma,loca,
+                        spec,caller)
                 push!(out,(2,top));push!(out,(3,body))
                 for tag in laterals
                     push!(out,(2,tag))
@@ -1270,6 +1533,6 @@ function _model_occ_revolve(m::GeoModel,dim_tags,x,y,z,ax,ay,az,angle;
     isempty(sw.pending) ||
         (kernel.next_shape=max(kernel.next_shape,sw.next_id))
     params===nothing || _model_occ_sweep_transport!(
-        m,kernel,sw,params,_extrude_spec_rotate(n,p,a,caller))
+        m,kernel,sw,params,spec)
     return out
 end

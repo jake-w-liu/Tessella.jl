@@ -14,11 +14,13 @@
 # sub-entities; swept rim circles bind to the source vertices.
 # `numElements`/`heights`/`recombine` transport onto the Julia-native
 # Layers machinery (the upstream `ExtrudeMesh` attachment). Partial
-# angles, non-axial profiles, axis-crossing or multi-wire faces,
-# curved boundaries and solid inputs reject loudly in phase 1 before
-# any bind; under Layers an axis-touching profile and a sub-three-
-# subdivision full turn reject too — the former collapses the column
-# machinery, the latter welds coincident cells onto the source row.
+# angles sweep sector topology: rim arcs, rotated "top" copies and the
+# two meridian caps bound the wedge. Non-axial profiles, axis-crossing
+# or multi-wire faces, curved boundaries and solid inputs reject
+# loudly in phase 1 before any bind; under Layers an axis-touching
+# profile and a sub-three-subdivision full turn reject too — the
+# former collapses the column machinery, the latter welds coincident
+# cells onto the source row.
 
 using Test
 using Tessella
@@ -235,6 +237,121 @@ end
     @test collect(occ.get_center_of_mass(out[2]...))≈[0.0,0.0,0.0] atol=1e-12
 end
 
+@testset "occ.revolve partial angles" begin
+    occ=_occ_setup()
+    kernel=_kernel()
+    a=pi/2
+
+    # Point -> rim arc over [0,a]; the rotated copy is the top.
+    p=occ.add_point(2.0,0.0,0.0)
+    out=occ.revolve([(0,p)],0.0,0.0,0.0,0.0,0.0,1.0,a)
+    @test length(out)==2
+    @test out[1][1]==0 && out[1][2]!=p
+    @test out[2][1]==1
+    eid=kernel.bindings[1,out[2][2]]
+    eg=kernel.shapes[eid].geometry.geometry
+    @test eg.occ===:circle
+    @test eg.r≈2.0
+    @test eg.t0==0.0 && eg.t1==a
+    a_id,b_id=kernel.shapes[eid].children
+    @test a_id==kernel.bindings[0,p]
+    @test b_id==kernel.bindings[0,out[1][2]]
+    @test collect(kernel.shapes[b_id].geometry.point)≈[0.0,2.0,0.0] atol=1e-14
+
+    # Axial line -> cylinder-sector lateral; rim arcs are the laterals.
+    pa=occ.add_point(2.0,0.0,0.0)
+    pb=occ.add_point(2.0,0.0,3.0)
+    l=occ.add_line(pa,pb)
+    out=occ.revolve([(1,l)],0.0,0.0,0.0,0.0,0.0,1.0,a)
+    @test length(out)==4
+    @test out[1][1]==1 && out[1][2]!=l   # rotated copy
+    @test out[2][1]==2
+    fid=kernel.bindings[2,out[2][2]]
+    fg=kernel.shapes[fid].geometry
+    @test fg.kind===:cylinder
+    @test fg.geometry.angle≈a
+    @test fg.geometry.radius≈2.0
+    @test fg.geometry.height≈3.0
+    occ.synchronize()
+    @test occ.get_mass(out[2]...)≈a*2*3
+    for lat in out[3:4]
+        rg=kernel.shapes[kernel.bindings[1,lat[2]]].geometry.geometry
+        @test rg.occ===:circle && rg.t1≈a
+    end
+
+    # Radial line -> annular-sector plane face.
+    pa=occ.add_point(1.0,0.0,0.0)
+    pb=occ.add_point(4.0,0.0,0.0)
+    l=occ.add_line(pa,pb)
+    out=occ.revolve([(1,l)],0.0,0.0,0.0,0.0,0.0,1.0,a)
+    fid=kernel.bindings[2,out[2][2]]
+    @test kernel.shapes[fid].geometry.kind===:plane
+    @test occ.get_mass(out[2]...)≈(a/2)*(4*4-1*1)
+
+    # Meridian rectangle -> solid sector: walls + two meridian caps;
+    # the rotated copy answers as top.
+    _,_,f=_meridian_rect(occ,1.0,2.0,0.0,1.0)
+    out=occ.revolve([(2,f)],0.0,0.0,0.0,0.0,0.0,1.0,a)
+    @test out[1][1]==2 && out[1][2]!=f
+    @test out[2][1]==3
+    @test length(out)==6
+    sid=kernel.bindings[3,out[2][2]]
+    prim=kernel.shapes[sid].geometry.primitive
+    @test prim.occ===:revolved
+    @test prim.record.V≈a*1.5*1
+    @test prim.record.angle≈a
+    @test occ.get_mass(out[2]...)≈a*1.5*1
+    com=occ.get_center_of_mass(out[2]...)
+    # Bisector direction at a/2; arm = J2-based radial offset.
+    arm=prim.record.arm
+    @test collect(com)≈[arm*sqrt(0.5),arm*sqrt(0.5),0.5] atol=1e-12
+    shell=kernel.shapes[only(kernel.shapes[sid].children)]
+    @test length(shell.geometry.uses)==6  # 4 walls + 2 caps
+
+    # Axis-touching rectangle -> compact cylinder sector record.
+    _,_,f=_meridian_rect(occ,0.0,2.0,0.0,5.0)
+    out=occ.revolve([(2,f)],0.0,0.0,0.0,0.0,0.0,1.0,a)
+    sid=kernel.bindings[3,out[2][2]]
+    sec=kernel.shapes[sid].geometry.sector
+    @test sec.occ===:cylinder
+    @test sec.radius≈2.0 && sec.height≈5.0 && sec.angle≈a
+    @test occ.get_mass(out[2]...)≈a*2*2*5/2
+    @test collect(occ.get_bounding_box(3,out[2][2]))≈
+        [0.0,0.0,0.0,2.0,2.0,5.0]
+
+    # Triangle on the axis -> cone sector.
+    p0=occ.add_point(0.0,0.0,0.0)
+    pa=occ.add_point(3.0,0.0,0.0)
+    pb=occ.add_point(0.0,0.0,4.0)
+    es=[occ.add_line(p0,pa),occ.add_line(pa,pb),occ.add_line(pb,p0)]
+    f2=occ.add_plane_surface([occ.add_wire(es)])
+    out=occ.revolve([(2,f2)],0.0,0.0,0.0,0.0,0.0,1.0,a)
+    sid=kernel.bindings[3,out[2][2]]
+    sec=kernel.shapes[sid].geometry.sector
+    @test sec.occ===:cone
+    @test occ.get_mass(out[2]...)≈a*3*4/2*1.0  # a·A·rho_bar
+        atol=1e-12
+
+    # Disk -> torus segment; the rotated disk copy is the top.
+    d=occ.add_disk(5.0,0.0,0.0,1.0,1.0;zAxis=[0.0,1.0,0.0])
+    out=occ.revolve([(2,d)],0.0,0.0,0.0,0.0,0.0,1.0,a)
+    @test out[1][1]==2 && out[1][2]!=d
+    @test out[2][1]==3 && out[3][1]==2
+    @test occ.get_mass(out[2]...)≈(a/(2pi))*2*pi*pi*5
+    bb=occ.get_bounding_box(3,out[2][2])
+    @test bb[1]>=-1e-12 && bb[2]>=-1e-12 && bb[4]≈6.0
+
+    # Negative partial angle is the flipped-axis positive turn.
+    p=occ.add_point(2.0,0.0,0.0)
+    o1=occ.revolve([(0,p)],0.0,0.0,0.0,0.0,0.0,-1.0,-a)
+    e1=kernel.shapes[kernel.bindings[1,o1[2][2]]].geometry.geometry
+    @test collect(e1.n)≈[0.0,0.0,1.0]
+    @test e1.t1≈a
+    # The endpoint lands as a +z/+a rotation would place it.
+    b_id=kernel.shapes[kernel.bindings[1,o1[2][2]]].children[2]
+    @test collect(kernel.shapes[b_id].geometry.point)≈[0.0,2.0,0.0] atol=1e-14
+end
+
 @testset "occ.revolve axes, angles and ordering" begin
     occ=_occ_setup()
     # Negative angle is the flipped-axis full turn.
@@ -295,7 +412,6 @@ end
     p_on=occ.add_point(0.0,0.0,1.0)
     p_off=occ.add_point(1.0,0.0,0.0)
     check(()->occ.revolve([(0,p_on)],0.0,0.0,0.0,0.0,0.0,1.0,2pi))
-    check(()->occ.revolve([(0,p_off)],0.0,0.0,0.0,0.0,0.0,1.0,pi))
     check(()->occ.revolve([(0,p_off)],0.0,0.0,0.0,0.0,0.0,0.0,2pi))
     check(()->occ.revolve([(0,p_off)],0.0,0.0,0.0,0.0,0.0,1.0,0.0))
     check(()->occ.revolve([(0,p_off)],0.0,0.0,0.0,0.0,0.0,1.0,3pi))
@@ -433,4 +549,23 @@ end
     @test phis≈[0.0,0.4pi,0.8pi,1.4pi] atol=1e-9
     element_types,_,_=A.mesh.get_elements(3,solid_tag)
     @test 6 in element_types
+
+    # Partial turn: the same transport grades the open sector — the
+    # closing column lands on the rotated copy, not the source row, so
+    # a single subdivision already tiles the strip.
+    occ=_occ_setup()
+    _,_,f=_meridian_rect(occ,1.0,2.0,0.0,1.0)
+    out=occ.revolve([(2,f)],0.0,0.0,0.0,0.0,0.0,1.0,pi/2;
+                    numElements=[3],recombine=true)
+    solid_tag=out[2][2]
+    occ.synchronize()
+    A.mesh.generate(3)
+    _,coords=A.mesh.get_nodes(3,solid_tag,true)
+    phis=sort!(unique!(round.(
+        [mod(atan(coords[i+1],coords[i]),2pi)
+         for i in 1:3:length(coords)],digits=9)))
+    @test phis≈collect(range(0.0,pi/2,length=4)) atol=1e-9
+    element_types,_,_=A.mesh.get_elements(3,solid_tag)
+    @test 6 in element_types
+    @test !(4 in element_types)
 end

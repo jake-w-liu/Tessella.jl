@@ -678,7 +678,8 @@ function _higher_ordinary_sweep_classification(assembly,m,production,input,dimen
         point=ntuple(axis->actual.coords[axis,row],3)
         target=get(emitted,point,Int32(0))
         target>0 || throw(ArgumentError(
-            "$caller: ordinary Layers entity ($dimension,$tag) omits lower cell UID $uid"))
+            "$caller: ordinary Layers entity ($dimension,$tag) omits lower " *
+            "cell UID $uid at $point owner $(data.node_entities[row])"))
         if retained[target]
             node_tags[target]==uid || throw(ArgumentError(
                 "$caller: ordinary Layers emitter welds distinct lower cell UIDs"))

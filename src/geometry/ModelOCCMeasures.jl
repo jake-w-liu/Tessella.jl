@@ -514,7 +514,13 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
             return π*r.height*q/3,
                 _occ3_add(r.center,_occ3_scale(n,r.height*frac))
         elseif g.primitive.occ===:revolved
-            return r.V,_occ3_add(r.point,_occ3_scale(r.axis,r.h_c))
+            haskey(r,:angle) || return r.V,
+                _occ3_add(r.point,_occ3_scale(r.axis,r.h_c))
+            # Partial turn — the centroid rides the sector bisector at
+            # `arm` off the axis in addition to h_c along it.
+            return r.V,_occ3_add(r.point,_occ3_add(
+                _occ3_scale(r.axis,r.h_c),
+                _occ3_scale(r.bisector,r.arm)))
         end
         throw(ErrorException(
             "OCC.get_mass: unsupported primitive kind $(g.primitive.occ)"))
