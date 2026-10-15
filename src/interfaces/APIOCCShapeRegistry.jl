@@ -160,6 +160,12 @@ fragment(objectDimTags,toolDimTags;tag=-1,removeObject=true,removeTool=true)=
         "OCC.fragment"))
 remove_all_duplicates()=_with_model(
     m->Model._model_occ_remove_all_duplicates(m,"OCC.removeAllDuplicates"))
+fillet_2d(edge_tag1,edge_tag2,radius;tag=-1,pointTag=-1,reverse=false)=
+    _with_model(m->Model._model_occ_fillet_2d!(
+        m,edge_tag1,edge_tag2,radius;tag,point_tag=pointTag,reverse))
+chamfer_2d(edge_tag1,edge_tag2,distance1,distance2;tag=-1)=
+    _with_model(m->Model._model_occ_chamfer_2d!(
+        m,edge_tag1,edge_tag2,distance1,distance2;tag))
 
 module mesh
     import .....Model

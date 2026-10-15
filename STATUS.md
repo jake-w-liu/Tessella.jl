@@ -1606,6 +1606,50 @@ its edge's 3-D points; atomic rejections; empty
 input). Independent probes re-verified after the
 reparam-gate generalization.
 
+### GEO01 slice 21b — `occ.fillet2D`/`chamfer2D` (2026-10-15)
+
+`model.occ.fillet_2d(e1,e2,r; tag=-1, pointTag=-1,
+reverse=false)` and `occ.chamfer_2d(e1,e2,d1,d2;
+tag=-1)` implement `ChFi2d_FilletAPI`/`ChFi2d_
+ChamferAPI` corner trims in the new
+`ModelOCCCornerOps.jl`: coincident endpoint pairs
+form corner candidates (upstream's temporary-wire
+gate), each candidate fits a corner plane
+(`u1×u2`, both edges planarity-checked as the
+temporary-face gate), then the fillet center is
+solved analytically from the tangent loci —
+offset lines ∩ offset lines, offset line ∩ circle
+ring `|X−c| = R±r`, or ring ∩ ring. A candidate
+counts when its tangency points land strictly
+inside both edges on the corner side and the
+center sits in the corner wedge (same side of
+each inward tangent as the other edge's inward
+direction); `reverse` flips to the reflex sector
+like upstream's plane-normal reversal, and
+`pointTag` picks among multiple shared vertices
+by distance like `Result(point,…,-1)`. Chamfers
+cut at arc-length distances (angle·R on circles).
+The two tangency vertices bind fresh tags, the
+edges are trimmed in place keeping their tags
+(upstream's `unbind`+`bind` collapse — including
+the nested `native_geometry` frame bounds), the
+joining edge binds under `tag`, and previously
+synchronized `m.curves`/`curve_types`/
+`curve_geometry` entries for the trimmed tags are
+dropped so the next `synchronize` re-imports the
+cut records; orphaned corner vertices stay bound.
+Every fallible step precedes publication.
+
+Verified: `test/interfaces/api_occ_corner_test.jl`
+— 65 green (analytic line-line/line-circle/
+circle-circle centers and tangency residuals,
+tangent-continuity, concave and end-end corners,
+closed-circle seam multi-corner, `pointTag`
+selection, `reverse` rejection, `tag`/`return`
+contract, full failure battery with registry
+counts unchanged); compact
+`occ_corner_smoke.jl` added to `runtests.jl`.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

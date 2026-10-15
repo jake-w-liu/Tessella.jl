@@ -4837,6 +4837,34 @@ rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
 ## Latest landed increment (`c5138ef`, pushed to `origin/main`)
 
+**`occ.fillet2D`/`occ.chamfer2D` (GEO01 slice 21b)** — the `ChFi2d` corner
+operations land in `ModelOCCCornerOps.jl` behind
+`occ.fillet_2d(e1,e2,r; tag=-1, pointTag=-1, reverse=false)` and
+`occ.chamfer_2d(e1,e2,d1,d2; tag=-1)`, both returning the joining edge's tag.
+Coincident endpoint pairs are corner candidates (upstream's temporary-wire
+gate); each gets the corner plane `u1×u2` plus a planarity check on both edges
+(temporary-face gate), then the fillet solves the tangent-center loci
+analytically — offset lines ∩ offset lines for two lines, offset line ∩ ring
+`|X−c| = R±r` for a line–circle pair, ring ∩ ring otherwise. A candidate
+counts only when tangencies land strictly inside both edges on the corner side
+and the center sits in the corner wedge (the side of each inward tangent
+holding the other edge's interior ray); `reverse` selects the reflex sector
+like upstream's plane-normal flip and `pointTag` orders coincident corners by
+distance like `Result(point,…,-1)` — covering closed-circle seams where each
+edge end is a distinct corner variant. Chamfer cuts sit at arc-length
+distances (angle·R for circles). Publication binds two fresh tangency
+vertices, replaces the two edge records in place under their tags (nested
+`native_geometry` bounds trimmed in step), binds the joining edge under
+`tag`, and drops previously synchronized `m.curves`/`curve_types`/
+`curve_geometry` entries for the trimmed tags so the next `synchronize`
+re-imports them — the stale-record gap found by deep-debug. Orphaned corner
+vertices stay bound and failures consume no tags. Verified:
+`api_occ_corner_test.jl` — 65 green across analytic line-line/line-circle/
+circle-circle centers, tangency residuals and tangent continuity, concave and
+end-end corners, the closed-circle seam corner, `pointTag` selection,
+`reverse` rejection, requested tags/returns and a 13-case atomic failure
+battery; compact `occ_corner_smoke.jl` wired into `runtests.jl`.
+
 **Sewing-enabled `occ.add_surface_loop` (GEO01 slice 21a)** — `sewing=true`
 now runs the upstream `BRepBuilderAPI_Sewing` + recursive-bind contract:
 coincident boundary vertices weld at `Precision::Confusion`, coincident edges
