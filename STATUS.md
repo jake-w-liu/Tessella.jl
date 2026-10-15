@@ -1650,6 +1650,49 @@ contract, full failure battery with registry
 counts unchanged); compact
 `occ_corner_smoke.jl` added to `runtests.jl`.
 
+### GEO01 slice 21c — `occ.offsetCurve` (2026-10-15)
+
+`model.occ.offset_curve(loop,offset)`
+implements `BRepOffsetAPI_MakeOffset` with
+`GeomAbs_Arc` joins in `ModelOCCCornerOps.jl`.
+Each member of a planar wire (open or closed,
+reversed uses supported) is directed into
+traversal orientation — a folded record for
+reversed circles keeps the eval-consistent
+native frame — then shifted by `offset` along
+its left-of-travel normal `n̂×t̂`, where `n̂`
+comes from a Newell accumulation over member
+sample points so the sign is winding-consistent
+at convex and reflex corners alike (positive
+offset shrinks a simply-bounded loop, CCW or
+CW). Adjacent offsets re-join by trimming to
+their nearest interior intersection, or — when
+they diverge — by a `|offset|`-radius arc
+centered on the shared vertex (each member's
+offset image of the vertex is `|o|` away, so
+the arc is tangent to both), matching OCCT's
+arc-join behavior at outward convex corners
+and inward reflex corners. Extension-side
+crossings are ignored; a crossing that engulfs
+a member, or a non-adjacent result crossing,
+rejects loudly rather than silently producing
+the loop-clipped result upstream computes.
+Upstream `_multiBind` semantics: only the
+offset edges (dim-1 tags) are returned and the
+edges/vertices bind recursively — no wire tag.
+Every fallible step precedes publication.
+
+Verified: `test/interfaces/api_occ_offset_test.jl`
+— 60 green (exact inner-square trims, four
+quarter-arc joins at original corners with
+tangent continuity, closed-circle shrink,
+open-L trim, D-shape line+semicircle inward
+trim/outward caps, reflex-notch arc, CW-wire
+consistency, ellipse/non-planar/disconnected/
+swallowed-circle/unknown-tag rejections with
+registry counts unchanged); compact
+`occ_offset_smoke.jl` added to `runtests.jl`.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

@@ -351,3 +351,276 @@ function _model_occ_chamfer_2d!(m::GeoModel,e1t,e2t,d1,d2;
     _model_occ_corner_op!(m,e1t,e2t;tag,point_tag=-1,reverse=false,
         radius=nothing,dist1=d1,dist2=d2,caller="OCC.chamfer_2d")
 end
+
+# --- occ.offsetCurve (upstream OCC_Internals::offsetCurve) -------------------
+# BRepOffsetAPI_MakeOffset(wire, GeomAbs_Arc): every member edge of a planar
+# wire is offset by `offset` along its left-of-travel normal n̂×t̂ and
+# consecutive offsets are re-joined — trimmed to a mutual intersection when
+# the offset curves meet inside their spans, otherwise bridged by a
+# vertex-centered arc of radius |offset| (the offset image of each original
+# endpoint is at distance |o| from its vertex, so that arc is tangent to both
+# neighbors). Upstream `_multiBind` publishes the result's edges and vertices
+# recursively — the wire itself stays unbound — and returns the (1,tag) pairs.
+
+# Map a member edge to its traversal-directed record — reversal folds the
+# original end-to-start evaluation into a same-span record running forward.
+# Reversed circles flip n and carry X̂=radial(t0+t1), Ŷ=X sin(t0+t1)−Y cos(t0+t1)
+# so eval'(s)=eval(t0+t1−s); the offset then uses the directed frame directly.
+function _occ_off_directed(g,rev)
+    rev || return g
+    g.occ===:line && return (occ=:line,origin=_occ_2df_eval(g,g.t1),
+        dir=_occ3_scale(_occ_dir(g.dir),-1.0),t0=0.0,t1=g.t1-g.t0)
+    # Native-backed circles evaluate through the nested frame — reverse that.
+    f=_occ_2df_frame(g)
+    a=g.t0+g.t1; ca=cos(a); sa=sin(a)
+    Xp=_occ3_add(_occ3_scale(f.X,ca),_occ3_scale(f.Y,sa))
+    Yp=_occ3_add(_occ3_scale(f.X,sa),_occ3_scale(f.Y,-ca))
+    np=_occ3_scale(f.n,-1.0)
+    ng=(occ=:circle,center=f.center,n=np,X=Xp,Y=Yp,r=f.r,t0=g.t0,t1=g.t1)
+    hasproperty(g,:native_geometry) && (
+        ng=merge(ng,(native_geometry=merge(g.native_geometry,
+            (n=np,X=Xp,Y=Yp)),)))
+    return ng
+end
+
+# Shift a directed record by o·(n̂×t̂): translate a line along its left normal;
+# shrink a circle traveling CCW about n̂ (interior on the left), grow CW ones.
+function _occ_off_shift(g,o,n,caller)
+    if g.occ===:line
+        d=_occ_dir(g.dir)
+        L=_occ_2df_norm(_occ_cross(n,d))
+        return (occ=:line,origin=_occ3_add(g.origin,_occ3_scale(L,o)),dir=d,
+            t0=g.t0,t1=g.t1)
+    end
+    # Emit through the frame evaluators actually use — a native-backed record
+    # can carry an outer frame that differs from its nested `native_geometry`.
+    f=_occ_2df_frame(g)
+    s=_dot3(f.n,n)>=0.0 ? 1.0 : -1.0
+    r=f.r-o*s
+    r>_OCC_CONFUSION || throw(ArgumentError(
+        "$caller: Could not compute offset curve (offset swallows a circle)"))
+    return (occ=:circle,center=f.center,n=f.n,X=f.X,Y=f.Y,r=r,
+        t0=g.t0,t1=g.t1)
+end
+
+# All intersections of two directed offset records, as (point,paramA,paramB).
+function _occ_off_intersections(gA,gB,n)
+    out=Tuple{NTuple{3,Float64},Float64,Float64}[]
+    if gA.occ===:line && gB.occ===:line
+        dA=_occ_dir(gA.dir); dB=_occ_dir(gB.dir)
+        cr=_occ_cross(dA,dB); m2=_dot3(cr,cr)
+        m2<=1e-14 && return Tuple{NTuple{3,Float64},Float64,Float64}[]
+        w=_arc_sub(gB.origin,gA.origin)
+        tA=_dot3(_occ_cross(w,dB),cr)/m2
+        p=_occ3_add(gA.origin,_occ3_scale(dA,tA))
+        return [(p,_occ_2df_param(gA,p),_occ_2df_param(gB,p))]
+    elseif gA.occ===:line && gB.occ===:circle
+        for C in _occ_2df_line_circle(gA.origin,_occ_dir(gA.dir),1.0,gB.center,gB.r)
+            push!(out,(C,_occ_2df_param(gA,C),_occ_2df_param(gB,C)))
+        end
+    elseif gA.occ===:circle && gB.occ===:line
+        for C in _occ_2df_line_circle(gB.origin,_occ_dir(gB.dir),1.0,gA.center,gA.r)
+            push!(out,(C,_occ_2df_param(gA,C),_occ_2df_param(gB,C)))
+        end
+    else
+        for C in _occ_2df_circle_circle(gA.center,gA.r,gB.center,gB.r,n)
+            push!(out,(C,_occ_2df_param(gA,C),_occ_2df_param(gB,C)))
+        end
+    end
+    return out
+end
+
+# Pick the join between directed offset records gA (ending near V) and gB
+# (starting near V): contiguous pass-through, interior-intersection trim, or
+# a vertex-centered arc of radius |o| (each offset image of V is |o| away, so
+# that arc is tangent to both neighbors — GeomAbs_Arc).
+function _occ_off_join(gA,gB,V,n,o,tol,caller)
+    Aprev=_occ_2df_eval(gA,gA.t1); Bnext=_occ_2df_eval(gB,gB.t0)
+    cands=Tuple{NTuple{3,Float64},Float64,Float64}[]
+    for (p,tA,tB) in _occ_off_intersections(gA,gB,n)
+        # A valid cut trims each span on the corner side: inside A before its
+        # end, inside B after its start. Crossings on the far side of both
+        # spans (past A's start AND past B's end, or into either extension)
+        # belong to the infinite curves, not the offset wire.
+        tA>gA.t1-tol && continue          # past A's end — extension
+        tB<gB.t0+tol && continue          # before B's start — extension
+        if tA<=gA.t0+tol || tB>=gB.t1-tol
+            # Past the far ends of both — an irrelevant crossing.
+            tA<=gA.t0+tol && tB>=gB.t1-tol && continue
+            # …but a crossing inside one span and past the other eats a
+            # member: upstream's MakeOffset absorbs it; report loudly.
+            throw(ArgumentError(
+                "$caller: offset consumes an edge (self-intersecting " *
+                "result not supported)"))
+        end
+        push!(cands,(p,tA,tB))
+    end
+    if !isempty(cands)
+        # The cut nearest the vertex wins.
+        i=argmin(_sqdist(c[1],V)+abs(gA.t1-c[2])+abs(c[3]-gB.t0)
+            for c in cands)
+        p,tA,tB=cands[i]
+        return (tA=tA,tB=tB,arc=nothing,pa=Aprev,pb=Bnext)
+    end
+    # Tangent-continuous members: the offsets already meet — shared vertex.
+    _sqdist(Aprev,Bnext)<=(10tol)^2 && return
+        (tA=gA.t1,tB=gB.t0,arc=nothing,pa=Aprev,pb=Bnext)
+    # Arc join centered at the corner vertex.
+    r=abs(o)
+    r<=tol && throw(ArgumentError("$caller: degenerate offset join"))
+    ρ1=_occ3_scale(_arc_sub(Aprev,V),1.0/r); ρ2=_occ3_scale(_arc_sub(Bnext,V),1.0/r)
+    uA=_occ_2df_inward(gA,true,caller); uB=_occ_2df_inward(gB,false,caller)
+    nc=_occ_2df_norm(_occ_cross(uA,ρ1))
+    tend=_occ_cross(nc,ρ2)
+    _dot3(tend,uB)>0 || throw(ArgumentError(
+        "$caller: Could not compute offset curve"))
+    span=atan(_dot3(_occ_cross(ρ1,ρ2),nc),_dot3(ρ1,ρ2))
+    span<=0 && (span+=_OCC_TWO_PI)
+    return (tA=gA.t1,tB=gB.t0,
+        arc=(occ=:circle,center=V,n=nc,X=ρ1,Y=_occ_cross(nc,ρ1),r=r,
+            t0=0.0,t1=span),pa=Aprev,pb=Bnext)
+end
+
+# Offset a planar wire (upstream OCC_Internals::offsetCurve). Every fallible
+# step precedes the first mutation; the result keeps the wire's traversal
+# order and publishes each offset edge (+vertices) under fresh tags.
+function _model_occ_offset_wire!(m::GeoModel,loop_tag,offset;caller)
+    kernel=m.occ_kernel; shapes=kernel.shapes; tol=_OCC_CONFUSION
+    offset isa Real && isfinite(offset) || throw(ArgumentError(
+        "$caller: offset must be a finite number"))
+    o=Float64(offset)
+    lt=_model_occ_requested_tag(loop_tag,caller)
+    wid=get(kernel.bindings,(-1,lt),nothing)
+    wid===nothing && throw(ArgumentError(
+        "$caller: Unknown OpenCASCADE curve loop with tag $lt"))
+    uses=shapes[wid].geometry.uses
+    isempty(uses) && throw(ArgumentError("$caller: empty curve loop"))
+    gs=[_occ_off_directed(shapes[id].geometry.geometry,rev) for (id,rev) in uses]
+    for g in gs
+        g.occ in (:line,:circle) || throw(ArgumentError(
+            "$caller: only line and circle edges are supported — got $(g.occ)"))
+    end
+    N=length(gs)
+    V0=shapes[shapes[uses[1][1]].children[uses[1][2] ? 2 : 1]].geometry.point
+    # Wire plane normal via Newell accumulation over member sample points —
+    # consistent for CCW order at convex AND reflex corners (a corner-tangent
+    # cross flips sign at reflex corners).
+    nacc=(0.0,0.0,0.0)
+    for g in gs
+        ts=g.occ===:line ? (g.t0,g.t1) : (g.t0,(g.t0+g.t1)/2,g.t1)
+        P=[_occ_2df_eval(g,t) for t in ts]
+        for k in 1:length(P)-1
+            nacc=_occ3_add(nacc,_occ_cross(P[k],P[k+1]))
+        end
+    end
+    if _occ_modulus(nacc)<=1e3*eps(Float64)
+        # Degenerate accumulation — smooth wire (closed circle, tangent chain).
+        i=findfirst(g->g.occ===:circle,gs)
+        i===nothing && throw(ArgumentError(
+            "$caller: Could not compute offset curve " *
+            "(wire plane is degenerate)"))
+        n=_occ_dir(gs[i].n)
+    else
+        n=_occ_2df_norm(nacc)
+    end
+    for g in gs
+        _occ_2df_planar(g,V0,n,tol) || throw(ArgumentError(
+            "$caller: Could not compute offset curve (wire is not planar)"))
+    end
+    h1=shapes[uses[1][1]].children[uses[1][2] ? 2 : 1]
+    tN=shapes[uses[N][1]].children[uses[N][2] ? 1 : 2]
+    closed=_model_occ_vertices_coincide(
+        shapes[h1].geometry.point,shapes[tN].geometry.point)
+    offs=[_occ_off_shift(g,o,n,caller) for g in gs]
+    joins=Vector{Any}(undef,N)
+    npairs=closed ? N : N-1
+    for i in 1:npairs
+        j=mod1(i+1,N)
+        ai=uses[i][1]; aj=uses[j][1]
+        Vi=shapes[ai].children[uses[i][2] ? 1 : 2]
+        Vj=shapes[aj].children[uses[j][2] ? 2 : 1]
+        Vi==Vj || _model_occ_vertices_coincide(
+            shapes[Vi].geometry.point,shapes[Vj].geometry.point) ||
+            throw(ArgumentError("$caller: curve loop edges are not connected"))
+        joins[i]=_occ_off_join(offs[i],offs[j],
+            shapes[Vi].geometry.point,n,o,tol,caller)
+    end
+    # Trimmed member spans — join i−1 trims the start, join i the end.
+    t0s=Vector{Float64}(undef,N); t1s=Vector{Float64}(undef,N)
+    emitted=falses(N)
+    for i in 1:N
+        jp=closed ? joins[mod1(i-1,N)] : (i>1 ? joins[i-1] : nothing)
+        jn=i<=npairs ? joins[i] : nothing
+        t0s[i]=jp===nothing ? offs[i].t0 : jp.tB
+        t1s[i]=jn===nothing ? offs[i].t1 : jn.tA
+        t1s[i]-t0s[i]<=tol && throw(ArgumentError(
+            "$caller: offset consumes an edge (self-intersecting result " *
+            "not supported)"))
+        emitted[i]=true
+    end
+    # Items in traversal order: member i's trimmed edge, then join i's arc.
+    items=Tuple{Any,Symbol,NTuple{3,Float64},NTuple{3,Float64}}[]
+    for i in 1:N
+        emitted[i] || continue
+        rec=merge(offs[i],(t0=t0s[i],t1=t1s[i]))
+        push!(items,(rec,offs[i].occ,_occ_2df_eval(offs[i],t0s[i]),
+            _occ_2df_eval(offs[i],t1s[i])))
+        jn=i<=npairs ? joins[i] : nothing
+        if jn!==nothing && jn.arc!==nothing && emitted[mod1(i+1,N)]
+            push!(items,(jn.arc,:circle,jn.pa,jn.pb))
+        end
+    end
+    isempty(items) && throw(ArgumentError(
+        "$caller: Could not compute offset curve"))
+    # Non-adjacent result pieces must not cross — upstream resolves the
+    # arising loops; report loudly.
+    for a in 1:length(items), b in a+1:length(items)
+        b==a+1 && continue
+        closed && a==1 && b==length(items) && continue
+        for (_,tA,tB) in _occ_off_intersections(items[a][1],items[b][1],n)
+            gA=items[a][1]; gB=items[b][1]
+            gA.t0+tol<tA<gA.t1-tol && gB.t0+tol<tB<gB.t1-tol &&
+                throw(ArgumentError("$caller: offset result self-intersects"))
+        end
+    end
+    # Merge coincident consecutive endpoints into shared vertices.
+    verts=NTuple{3,Float64}[]; spans=Tuple{Int,Int}[]
+    for (_,_,ps,pe) in items
+        a=if isempty(verts) || _sqdist(verts[end],ps)>(10tol)^2
+            push!(verts,ps); length(verts)
+        else
+            length(verts)
+        end
+        push!(verts,pe); push!(spans,(a,length(verts)))
+    end
+    if closed
+        _sqdist(verts[end],verts[1])<=(10tol)^2 || throw(ArgumentError(
+            "$caller: offset result is not closed"))
+        pop!(verts); spans[end]=(spans[end][1],1)
+    end
+    nv=length(verts); ne=length(items)
+    kernel.maxima[3]+nv<=typemax(Int32) || throw(ArgumentError(
+        "$caller: OCC vertex tag allocation exceeds Int32"))
+    kernel.maxima[4]+ne<=typemax(Int32) || throw(ArgumentError(
+        "$caller: OCC curve tag allocation exceeds Int32"))
+    # One contiguous reservation — `reserve_shapes` does not advance
+    # `next_shape`, so separate calls would hand back overlapping ids.
+    ids=_model_occ_reserve_shapes(kernel,nv+ne,caller)
+    vids=ids[1:nv]; eids=ids[nv+1:nv+ne]
+    vtag0=kernel.maxima[3]
+    for (i,p) in enumerate(verts)
+        _model_occ_bind_shape!(kernel,0,vtag0+i,vids[i],
+            _ModelOCCShape(0,(point=p,mesh_size=0.0),UInt64[]))
+    end
+    etag0=kernel.maxima[4]
+    out=Tuple{Int,Int}[]
+    for (i,(rec,kind,ps,pe)) in enumerate(items)
+        a,b=spans[i]
+        _model_occ_bind_shape!(kernel,1,etag0+i,eids[i],
+            _ModelOCCShape(1,(kind=kind,geometry=rec),
+                UInt64[vids[a],vids[b]]))
+        push!(out,(1,etag0+i))
+    end
+    kernel.next_shape=eids[ne]+UInt64(1)
+    return out
+end

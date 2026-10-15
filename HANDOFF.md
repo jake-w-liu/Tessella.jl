@@ -4835,7 +4835,32 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
-## Latest landed increment (`82d5ad6`, pushed to `origin/main`)
+## Latest landed increment (pending push)
+
+**`occ.offsetCurve` (GEO01 slice 21c)** — `occ.offset_curve(loop,offset)`
+implements `BRepOffsetAPI_MakeOffset` with `GeomAbs_Arc` joins in
+`ModelOCCCornerOps.jl`. Each member of a planar wire (open or closed,
+reversed uses and native-backed circles handled by frame-consistent
+directed records) is shifted `offset` along its left-of-travel normal
+`n̂×t̂`, where `n̂` is a Newell accumulation over member sample points so
+the sign stays winding-consistent at convex and reflex corners (positive
+offsets shrink a simply-bounded loop either way). Adjacent offsets trim
+to their nearest interior intersection or — when they diverge — bridge
+through a `|offset|`-radius arc centered on the shared vertex, which is
+tangent to both because each member's offset image of the vertex is
+`|o|` away. Extension-side crossings are ignored; engulfing or
+non-adjacent crossings reject loudly rather than silently producing the
+loop-clipped result upstream computes. Upstream `_multiBind` semantics:
+only dim-1 offset edges are returned (fresh tags), edges/vertices bind
+recursively, no wire tag; every fallible step precedes publication.
+Verified: `api_occ_offset_test.jl` — 60 green (exact inner-square trims,
+quarter-arc joins centered at original corners with tangent continuity,
+closed-circle shrink, open-L trim, D-shape inward trim/outward caps,
+reflex-notch arc, CW-wire consistency, full rejection battery with
+unchanged registry counts); compact `occ_offset_smoke.jl` wired into
+`runtests.jl`.
+
+## Previous landed increment (`82d5ad6`, pushed to `origin/main`)
 
 **`occ.fillet2D`/`occ.chamfer2D` (GEO01 slice 21b)** — the `ChFi2d` corner
 operations land in `ModelOCCCornerOps.jl` behind

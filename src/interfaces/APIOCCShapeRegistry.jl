@@ -166,6 +166,9 @@ fillet_2d(edge_tag1,edge_tag2,radius;tag=-1,pointTag=-1,reverse=false)=
 chamfer_2d(edge_tag1,edge_tag2,distance1,distance2;tag=-1)=
     _with_model(m->Model._model_occ_chamfer_2d!(
         m,edge_tag1,edge_tag2,distance1,distance2;tag))
+offset_curve(curveLoopTag,offset)=_with_model(
+    m->Model._model_occ_offset_wire!(m,curveLoopTag,offset;
+        caller="OCC.offsetCurve"))
 
 module mesh
     import .....Model
