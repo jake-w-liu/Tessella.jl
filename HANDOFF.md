@@ -4835,7 +4835,7 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
-## Latest landed increment (`c5138ef`, pushed to `origin/main`)
+## Latest landed increment (`82d5ad6`, pushed to `origin/main`)
 
 **`occ.fillet2D`/`occ.chamfer2D` (GEO01 slice 21b)** — the `ChFi2d` corner
 operations land in `ModelOCCCornerOps.jl` behind
