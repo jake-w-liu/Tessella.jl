@@ -1095,12 +1095,17 @@ function _occ_surface_samples(m::GeoModel, surface::Int,
     for loop in m.surfaces[surface], signed in m.loops[loop]
         curve=abs(signed)
         occ=_occ_geometry_checked(m,curve,caller)
-        (occ===nothing || !(occ.occ in (:circle,:ellipse))) && continue
+        occ===nothing && continue
+        source=occ.occ===:copied_curve ? get(occ,:converted_from,nothing) :
+            occ.occ
+        source in (:circle,:ellipse) || continue
         a,_=m.curves[curve]
         for k in 0:2
             t=occ.t0+(occ.t1-occ.t0)*(k/3)
-            push!(samples,occ.occ===:circle ? _occ_circle_point(occ,t) :
-                                             _occ_ellipse_point(occ,t))
+            push!(samples,occ.occ===:copied_curve ?
+                _model_occ_curve_d2(occ.curve,t)[1] :
+                occ.occ===:circle ? _occ_circle_point(occ,t) :
+                                   _occ_ellipse_point(occ,t))
             push!(tags,a)
         end
     end
@@ -1194,10 +1199,15 @@ function _materialized_boundary_records(m::GeoModel, tag::Int)
         push!(seen,curve)
         occ=_occ_geometry(m,curve)
         occ===nothing && continue
-        if occ.occ===:circle || (occ.occ===:ellipse &&
+        # `convertToNURBS` keeps the analytic record as inert metadata under
+        # `converted_from` — a converted circle/line still satisfies the
+        # primitive encoding it materialized from.
+        source=occ.occ===:copied_curve ? get(occ,:converted_from,nothing) :
+            occ.occ
+        if source===:circle || (source===:ellipse &&
                 abs(occ.rx-occ.ry)<=_OCC_CONFUSION*occ.rx)
             push!(circles,(curve,occ))
-        elseif occ.occ===:line
+        elseif source===:line
             push!(seams,curve)
         else
             a,_=m.curves[curve]

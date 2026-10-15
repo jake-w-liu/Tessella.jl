@@ -517,6 +517,19 @@ function _transform_occ_surface_record(g, t::_AffineTransform, caller, what;tens
             return _ModelNURBSSurface(g.patch.family,updated)
         end
         patch=tensor_cache===nothing ? transform_patch() : get!(transform_patch,tensor_cache,g.patch)
+        if hasproperty(g,:reparam)
+            # NURBS-converted analytic record: reflections negate a conic
+            # parameter on spheres/tori, which the separable axis reparam
+            # cannot represent — keep det>0 transforms exact on both
+            # channels and reject mirrors loudly.
+            _linear_det(t.linear)<0 && throw(ArgumentError(
+                "$caller: reflection of a NURBS-converted $what is " *
+                "not implemented"))
+            analytic=_transform_occ_surface_record(Base.structdiff(
+                g,(patch=nothing,reparam=nothing)),t,caller,what;
+                tensor_cache=tensor_cache)
+            return merge(analytic,(patch=patch,reparam=g.reparam))
+        end
         return merge(g,(patch=patch,))
     end
     if g.occ===:sphere

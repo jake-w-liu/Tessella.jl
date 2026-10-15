@@ -316,7 +316,12 @@ function _occ_conic_reparam(r::_ModelOCCConicReparam,t)
     sx,cx=_gm_sincos((t-mid)/2)
     tangent=sx/cx
     ds=span/(4*factor*cx*cx)
-    return a+span/2*(1+tangent/factor),ds,ds*tangent
+    # At a span endpoint the `1+tangent/factor` cancellation is not exact in
+    # floating point; pinning s inside its own span keeps de Boor's
+    # span selection (`searchsortedlast` → the span STARTING at the knot)
+    # consistent with the ds/dds factors computed here.
+    s=clamp(a+span/2*(1+tangent/factor),a,a+span)
+    return s,ds,ds*tangent
 end
 
 # s → t: the angle the internal parameter reaches, θ = m + 2·atan(u·tan(Δ/4)).

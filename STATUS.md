@@ -1693,6 +1693,68 @@ swallowed-circle/unknown-tag rejections with
 registry counts unchanged); compact
 `occ_offset_smoke.jl` added to `runtests.jl`.
 
+### GEO01 slice 21e — `occ.convertToNURBS` surfaces + solids (2026-10-15)
+
+`model.occ.convert_to_nurbs(dimTags)` now
+covers dims −2, 2 and 3. A converted face
+keeps its `occ` kind as analytic metadata and
+gains a `patch` (`_ModelNURBSSurface`) plus a
+separable per-axis `reparam`
+(`(u=...,v=...)` of
+`_ModelOCCConicReparam`/`nothing`); every
+surface evaluator checks
+`_model_nurbs_surface` first, so the patch is
+authoritative while the preserved external
+(u,v) keep pcurves, u-periods, measures and
+materializers bitwise consistent.
+`_model_nurbs_surface_d2` composes the chain
+rule through the reparam (d² terms included);
+`_model_nurbs_surface_project` inverts it.
+Planes become bilinear degree-1 patches;
+cylinders/cones use a rational-quadratic
+angle axis over a linear axial axis;
+spheres/tori are rational quadratic in both
+axes with the mid-pole secant factor applied
+exactly per component. Dimension 3 converts
+the transitive shape closure once per record
+and member degenerate/`surface_iso` edges are
+rebound to the converted face record.
+Positive-determinant transforms update both
+the patch and the analytic shadow; converted
+curves do the same via `converted_from`.
+Reflections reject loudly — a mirrored closed
+conic flips its parameter direction, which
+the separable reparam cannot represent.
+Converted records keep inert analytic fields
+so primitive encodings (`m.cylinders` etc.),
+Boolean materialization and surface sampling
+still classify them. Exact-knot second
+derivatives needed one fix: the de Boor span
+and the reparam lookup disagreed on which
+side of a shared knot to use, so
+`_occ_conic_reparam` clamps the internal
+parameter into its own span.
+
+Verified: `test/interfaces/api_occ_nurbs_test.jl`
+— 363 green (plane/cylinder/cone/sphere/torus
+eval + d1/d2 fp-exact vs the analytic shadow
+at ≤3.6e-15 incl. at conic knots, latitude-
+band sphere and partial cylinder, pcurve lift
+on sphere seams, recursive dim-3 conversion
+of a solid with exact `get_mass`, projection
+inverse recovering external uv, rotate+
+translate on a converted cylinder, mirror
+rejection, 96-tet `mesh.generate(3)` through
+a converted cylinder's encoding, box-box fuse
+on a converted solid at 1.875 exact,
+idempotent reconversion); smoke extended;
+transform (209), boolean (full suite),
+offset (60), corner (65) and spline (52)
+regressions re-verified. Known pre-existing
+limits unchanged: single-closed-wire curved
+booleans and curved/PLC tetrahedralization
+fail identically on unconverted geometry.
+
 ### GEO01 slice 21d — `occ.convertToNURBS` curves (2026-10-15)
 
 `model.occ.convert_to_nurbs(dimTags)`

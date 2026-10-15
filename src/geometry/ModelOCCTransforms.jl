@@ -141,8 +141,27 @@ function _model_occ_transform_geometry(m::GeoModel,shape,t,caller,what)
             merge(rec,(face=_transform_occ_surface_record(
                 rec.face,t,caller,what),))
         elseif rec.occ===:copied_curve
-            merge(rec,(curve=_model_occ_transform_nurbs_curve(
-                rec.curve,t,caller),))
+            new_curve=_model_occ_transform_nurbs_curve(rec.curve,t,caller)
+            source_kind=get(rec,:converted_from,nothing)
+            if source_kind===nothing
+                new=merge(rec,(curve=new_curve,))
+            else
+                # NURBS-converted analytic record: keep the inert analytic
+                # metadata consistent with the transformed poles. Under
+                # reflection a closed conic flips its parameter range, which
+                # the preserved reparam cannot represent.
+                _linear_det(t.linear)<0 && throw(ArgumentError(
+                    "$caller: reflection of a NURBS-converted $what is " *
+                    "not implemented"))
+                source=merge(
+                    Base.structdiff(rec,(occ=nothing,curve=nothing,
+                        converted_from=nothing)),
+                    (occ=source_kind,))
+                shadow=_transform_occ_curve_record(m,0,source,t,caller,what)
+                new=merge(shadow,(occ=:copied_curve,
+                    converted_from=source_kind,curve=new_curve))
+            end
+            new
         else
             _transform_occ_curve_record(m,0,rec,t,caller,what)
         end

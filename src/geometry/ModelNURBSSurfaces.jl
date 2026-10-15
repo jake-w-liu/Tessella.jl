@@ -67,6 +67,22 @@ function _model_nurbs_homogeneous(patch,slot,u,v)
 end
 
 function _model_nurbs_surface_d2(g,u,v)
+    if hasproperty(g,:reparam) && g.reparam!==nothing
+        ru,rv=g.reparam.u,g.reparam.v
+        su,dsu,ddsu=ru===nothing ? (u,1.0,0.0) :
+            _occ_conic_reparam(ru,u)
+        sv,dsv,ddsv=rv===nothing ? (v,1.0,0.0) :
+            _occ_conic_reparam(rv,v)
+        # Bare patch record carries no `reparam` — recursion ends here.
+        point,du,dv,duu,dvv,duv=_model_nurbs_surface_d2(
+            (patch=g.patch,),su,sv)
+        return (point,
+            ntuple(axis->du[axis]*dsu,3),
+            ntuple(axis->dv[axis]*dsv,3),
+            ntuple(axis->duu[axis]*dsu*dsu+du[axis]*ddsu,3),
+            ntuple(axis->dvv[axis]*dsv*dsv+dv[axis]*ddsv,3),
+            ntuple(axis->duv[axis]*dsu*dsv,3))
+    end
     patch=g.patch
     h=_model_nurbs_homogeneous(patch,1,u,v)
     hu=_model_nurbs_homogeneous(patch,2,u,v)
@@ -244,7 +260,13 @@ end
 
 function _model_nurbs_surface_project(g,point)
     result=_model_nurbs_projection_cached(g.patch,point)
-    return result.uv[1],result.uv[2],result.xyz
+    u,v=result.uv[1],result.uv[2]
+    if hasproperty(g,:reparam) && g.reparam!==nothing
+        ru,rv=g.reparam.u,g.reparam.v
+        u=ru===nothing ? u : _occ_conic_reparam_inv(ru,u)
+        v=rv===nothing ? v : _occ_conic_reparam_inv(rv,v)
+    end
+    return u,v,result.xyz
 end
 
 function _model_nurbs_surface_support(m,surface,nodes,key,caller;

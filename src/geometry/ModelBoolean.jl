@@ -151,9 +151,14 @@ function _brep_edge_curve(m::GeoModel,ctag::Int)
         pa=m.points[a];pb=m.points[b]
         d=_b3(pb,pa);len=_b3norm(d)
         return (kind=:line,o=pa,d=(d[1]/len,d[2]/len,d[3]/len)),0.0,len
-    elseif rec.occ===:line
+    elseif rec.occ===:line ||
+            (rec.occ===:copied_curve && get(rec,:converted_from,nothing)===:line)
+        # NURBS-converted records keep the analytic parametrization as inert
+        # metadata — the materializer consumes the preserved shadow, whose
+        # locus is bitwise identical.
         return (kind=:line,o=rec.origin,d=rec.dir),rec.t0,rec.t1
-    elseif rec.occ===:circle
+    elseif rec.occ===:circle ||
+            (rec.occ===:copied_curve && get(rec,:converted_from,nothing)===:circle)
         return (kind=:circle,c=rec.center,n=rec.n,x=rec.X,y=rec.Y,r=rec.r),
                rec.t0,rec.t1
     elseif rec.occ===:degenerate
