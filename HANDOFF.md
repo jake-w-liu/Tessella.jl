@@ -4835,7 +4835,45 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
-## Latest landed increment (`197cf9d`, pushed to `origin/main`)
+## Latest landed increment (`e551b37`, pushed to `origin/main`)
+
+**`occ.addThruSections` (GEO01 slice 22)** — `occ.add_thru_sections(wires;
+tag=-1, makeSolid=true, makeRuled=false, maxDegree=-1, continuity="",
+parametrization="", smoothing=false)` implements `BRepOffsetAPI_ThruSections`
+in `src/geometry/ModelOCCLoft.jl`. Consecutive wire sections loft pairwise;
+`makeRuled` emits degree-1 interpolation, smooth mode interpolates section
+centroids along a spine and distributes `maxDegree`/`continuity` over the
+cross-section parameter. Lateral faces carry `:tensor_bspline`/
+`:tensor_bezier` records with per-edge pcurves (new `tan2d` trace for
+conic-parametrised edges) and vertex uv maps; `makeSolid` adds planar caps
+and binds shell+solid under upstream dim/tag semantics with atomic
+rejection. Solid mass/centroid integrate `r·(∂u×∂v)` per knot span in
+`_model_occ_patch_face_div` — the two-section frustum measures
+3.6651914291588725 vs analytic 3.665191429188092. Three latent defects
+surfaced and landed with it: (a) `_brep_surface_normal` now honors
+`reversed` so winding alignment works for all face kinds (loft faces bake
+outward orientation since explicit-volume assembly drops shell use-signs);
+(b) `_model_occ_curved_surface_mesh` seeds an interior uv lattice scaled
+to 3-D boundary spacing, so sparse mismatched rim rows can no longer lift
+to interior-crossing chords that left the PLC enclosing only ~40% of the
+analytic volume; (c) the volume fill ladder runs float Steiner
+`recover_boundary` before `_recover_boundary_exact`, whose
+`Rational{BigInt}` Bowyer-Watson exhausted the process heap on
+near-cospherical loft boundaries — plus crease-survival now verifies the
+*classified kept* tet complex (`_partition_classify` shared between loop
+and `_finalize_partition`, kept-edge checks in `_recover`,
+`recover_partition_cdt` and `_certify_partition_exact`), and
+`_partition_tets_float(exact_first=false)` tries bounded Float64 trials
+before the dyadic-exact last resort. Verified: frustum (178 tets, volume
+3.4903 faceted), ruled frustum (174 tets), three-section loft (224 tets),
+square-pyramid loft (204 tets, exact 7/3) all fill natively; `makeSolid=false`
+returns 1 surface + shell; mass/centroid exact. Regressions green:
+`api_occ_volume_test` 1126, extrude incl. Layers transport 8/8 (curved-face
+skip now respects `_extrude_gate`), full boolean suite, revolve interface
+39+29+43+13+36+5+10, `occ_revolve_smoke` updated to the current
+partial-angle point-revolve contract.
+
+## Previous landed increment (`197cf9d`, pushed to `origin/main`)
 
 **`occ.convertToNURBS` surfaces + solids (GEO01 slice 21e)** — `occ.convert_to_nurbs(dimTags)`
 now covers dims −2/2/3. Converted faces keep their `occ` record as analytic
