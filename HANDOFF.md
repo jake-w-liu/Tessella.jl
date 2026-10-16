@@ -4869,8 +4869,11 @@ rejection. Solid mass/centroid integrate `r·(∂u×∂v)` per knot span in
 `_model_occ_patch_face_div` — the two-section frustum measures
 3.6651914291588725 vs analytic 3.665191429188092. Three latent defects
 surfaced and landed with it: (a) `_brep_surface_normal` now honors
-`reversed` so winding alignment works for all face kinds (loft faces bake
-outward orientation since explicit-volume assembly drops shell use-signs);
+`reversed` so winding alignment works for all face kinds, and the loft's
+shell uses carry each face's outward flip (cap `axis·outward<0`, lateral
+`du×dv·outward<0` — the `occ.extrude` convention the divergence measure
+reads; record `reversed` covers winding since explicit-volume assembly
+drops use-signs);
 (b) `_model_occ_curved_surface_mesh` seeds an interior uv lattice scaled
 to 3-D boundary spacing, so sparse mismatched rim rows can no longer lift
 to interior-crossing chords that left the PLC enclosing only ~40% of the
@@ -4889,7 +4892,12 @@ returns 1 surface + shell; mass/centroid exact. Regressions green:
 `api_occ_volume_test` 1126, extrude incl. Layers transport 8/8 (curved-face
 skip now respects `_extrude_gate`), full boolean suite, revolve interface
 39+29+43+13+36+5+10, `occ_revolve_smoke` updated to the current
-partial-angle point-revolve contract.
+partial-angle point-revolve contract. Follow-up `640b8e0`: solid centroid
+now works on conic-bounded plane faces — the plane-face centroid moment
+simplified to the closed form `(n̂·c̄)·A·c̄` (r·n̂ is constant on a plane
+face), removing the lin2d-only tensor restriction; `api_occ_loft_test.jl`
+(26 green) and the updated conic-shell pin in `api_occ_measures_test.jl`
+land with it.
 
 ## Previous landed increment (`197cf9d`, pushed to `origin/main`)
 
