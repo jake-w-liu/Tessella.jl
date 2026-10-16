@@ -31,8 +31,9 @@ let api=Tessella.API
         out=occ.revolve([(2,d)],0.0,0.0,0.0,0.0,0.0,1.0,2pi)
         @test [x for (x,_) in out]==[2,3,2]
         @test occ.get_mass(3,out[2][2])≈2*pi*pi*5 rtol=1e-10
-        @test_throws ArgumentError occ.revolve(
-            [(0,p)],0.0,0.0,0.0,0.0,0.0,1.0,pi)
+        # Partial-angle point revolve yields the rotated copy plus the rim arc.
+        out=occ.revolve([(0,p)],0.0,0.0,0.0,0.0,0.0,1.0,pi)
+        @test [d for (d,_) in out]==[0,1]
         @test_throws ArgumentError occ.revolve(
             [(2,999)],0.0,0.0,0.0,0.0,0.0,1.0,2pi)
     finally

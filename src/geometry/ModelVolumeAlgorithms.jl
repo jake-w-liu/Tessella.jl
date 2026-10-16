@@ -294,6 +294,20 @@ function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
         (error isa ArgumentError || error isa ErrorException) || rethrow()
         push!(failures,sprint(showerror,error))
     end
+    try
+        # Float Steiner recovery is the cheaper general path and must run
+        # before the exact-CDT fallback: the Rational{BigInt} kernel can burn
+        # through its predicate budget (or the process heap) on benign
+        # near-cospherical boundaries the float kernel certifies quickly.
+        mesh=recover_boundary(surface;max_seeds=8,steiner=true)
+        valid,reason=certify(mesh)
+        valid && return _finish_interior(mesh,extra)
+        push!(failures,reason)
+    catch error
+        error isa InterruptException && rethrow()
+        (error isa ArgumentError || error isa ErrorException) || rethrow()
+        push!(failures,sprint(showerror,error))
+    end
     if applicable(_recover_boundary_exact,surface)
         try
             mesh=_recover_boundary_exact(surface)
@@ -305,16 +319,6 @@ function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
             (error isa ArgumentError || error isa ErrorException) || rethrow()
             push!(failures,sprint(showerror,error))
         end
-    end
-    try
-        mesh=recover_boundary(surface;max_seeds=8,steiner=true)
-        valid,reason=certify(mesh)
-        valid && return _finish_interior(mesh,extra)
-        push!(failures,reason)
-    catch error
-        error isa InterruptException && rethrow()
-        (error isa ArgumentError || error isa ErrorException) || rethrow()
-        push!(failures,sprint(showerror,error))
     end
     throw(ArgumentError("$caller: native Volume[$volume] boundary recovery failed — "*
                         join(failures,"; ")))

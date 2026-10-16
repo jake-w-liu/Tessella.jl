@@ -386,6 +386,32 @@ end
 
 # ---- solids ----------------------------------------------------------
 
+# NURBS patch face divergence integrals: `∬ r·(∂u×∂v) dudv` over the knot
+# spans (GL8 per span like `_model_occ_face_measure`); returns the face's
+# V-contribution `I/3` and the raw first moment `∬ p·(p·n)dudv` — the
+# caller folds in the use sign and the global 1/4.
+function _model_occ_patch_face_div(kernel,id;want_centroid=true)
+    rec=kernel.shapes[id].geometry.geometry
+    surface=rec.patch.surface
+    (u0,v0),(u1,v1)=_model_nurbs_surface_bounds(rec)
+    uspans=_model_occ_span_cuts(surface.knots_u,u0,u1)
+    vspans=_model_occ_span_cuts(surface.knots_v,v0,v1)
+    V=0.0; M=(0.0,0.0,0.0)
+    for (ua,ub) in uspans, (va,vb) in vspans
+        hu=(ub-ua)/2; mu=(ua+ub)/2; hv=(vb-va)/2; mv=(va+vb)/2
+        for i in 1:4, si in (-1,1), j in 1:4, sj in (-1,1)
+            u=mu+si*hu*_OCC_GL_T[i]; v=mv+sj*hv*_OCC_GL_T[j]
+            w=_OCC_GL_W[i]*_OCC_GL_W[j]*hu*hv
+            p,du,dv,_,_,_=_model_nurbs_surface_d2(rec,u,v)
+            rn=_dot3(p,_occ_cross(du,dv))
+            V+=w*rn/3
+            want_centroid &&
+                (M=_occ3_add(M,_occ3_scale(p,w*rn)))
+        end
+    end
+    return V,M
+end
+
 # ∬_F r⊗r dA · n contraction for one plane face: T·n̂ accumulated during
 # the tensor pass is what the divergence centroid needs.
 _occ_tensor_apply(T,n)=ntuple(i->T[i,1]*n[1]+T[i,2]*n[2]+T[i,3]*n[3],3)
@@ -558,16 +584,25 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
              arm*c*rec.X[2]+arm*s*rec.Y[2],
              arm*c*rec.X[3]+arm*s*rec.Y[3]))
     end
-    all(u->face_kind(u)===:plane || face_kind(u)===:cylinder,uses) ||
+    all(u->face_kind(u)===:plane || face_kind(u)===:cylinder ||
+           haskey(kernel.shapes[u[1]].geometry.geometry,:patch),uses) ||
         throw(ErrorException("OCC.get_mass: unsupported solid boundary"))
     # Divergence theorem over outward-oriented faces:
     #   V = (1/3)Σ ∬_F r·n̂ dA,  ∭r dV = (1/4)Σ ∬_F r(r·n̂) dA.
     # Plane faces integrate exactly through `_model_occ_plane_stats`;
-    # cylinder patches reduce to wire-boundary line integrals.
+    # cylinder patches reduce to wire-boundary line integrals; NURBS
+    # patches (lofted/tensor faces) integrate `r·(∂u×∂v)` per knot span.
     V=0.0; M=(0.0,0.0,0.0)
     for (fid,rev) in uses
         rec=kernel.shapes[fid].geometry.geometry
         σ=rev ? -1.0 : 1.0
+        if haskey(rec,:patch)
+            Vp,Mp=_model_occ_patch_face_div(kernel,fid;
+                                          want_centroid=want_centroid)
+            V+=σ*Vp
+            want_centroid && (M=_occ3_add(M,_occ3_scale(Mp,σ)))
+            continue
+        end
         if get(rec,:occ,nothing)===:cylinder
             want_centroid && throw(ErrorException(
                 "OCC.get_center_of_mass: cylinder-bounded solids are " *

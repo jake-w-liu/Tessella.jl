@@ -57,30 +57,36 @@ end
 _brep_surface_eval(sg::NamedTuple,u::Float64,v::Float64) =
     _occ_surface_point(sg,u,v)
 
-# Geometric (unoriented) unit normal at (u,v).
+# Geometric unit normal at (u,v), oriented by the record's `reversed` flag
+# like `_occ_surface_normal` — mesh winding aligns to the face normal.
 function _brep_surface_normal(sg::NamedTuple,u::Float64,v::Float64)
-    if sg.occ===:plane
-        return sg.axis
+    n=if sg.occ===:plane
+        sg.axis
     elseif sg.occ===:cylinder
         s,c=_gm_sincos(u)
-        return _b3unit((fma(c,sg.X[1],s*sg.Y[1]),fma(c,sg.X[2],s*sg.Y[2]),
-                        fma(c,sg.X[3],s*sg.Y[3])))
+        _b3unit((fma(c,sg.X[1],s*sg.Y[1]),fma(c,sg.X[2],s*sg.Y[2]),
+                 fma(c,sg.X[3],s*sg.Y[3])))
     elseif sg.occ===:sphere
         su,cu=_gm_sincos(u); sv,cv=_gm_sincos(v)
-        return _b3unit((fma(cv*cu,sg.X[1],fma(cv*su,sg.Y[1],sv*sg.axis[1])),
-                        fma(cv*cu,sg.X[2],fma(cv*su,sg.Y[2],sv*sg.axis[2])),
-                        fma(cv*cu,sg.X[3],fma(cv*su,sg.Y[3],sv*sg.axis[3]))))
+        _b3unit((fma(cv*cu,sg.X[1],fma(cv*su,sg.Y[1],sv*sg.axis[1])),
+                 fma(cv*cu,sg.X[2],fma(cv*su,sg.Y[2],sv*sg.axis[2])),
+                 fma(cv*cu,sg.X[3],fma(cv*su,sg.Y[3],sv*sg.axis[3]))))
     elseif sg.occ===:cone
         s,c=_gm_sincos(u)
         slope=(sg.r2-sg.r1)/sg.height
         l=sqrt(1.0+slope*slope)
         radial=(fma(c,sg.X[1],s*sg.Y[1]),fma(c,sg.X[2],s*sg.Y[2]),
                 fma(c,sg.X[3],s*sg.Y[3]))
-        return ((radial[1]-slope*sg.axis[1])/l,
-                (radial[2]-slope*sg.axis[2])/l,
-                (radial[3]-slope*sg.axis[3])/l)
+        ((radial[1]-slope*sg.axis[1])/l,
+         (radial[2]-slope*sg.axis[2])/l,
+         (radial[3]-slope*sg.axis[3])/l)
+    elseif sg.occ in (:tensor_bspline,:tensor_bezier)
+        _,du,dv=_occ_surface_d1(sg,u,v)
+        _b3unit(_b3cross(du,dv))
+    else
+        throw(ArgumentError("_brep_surface_normal: unsupported surface $(sg.occ)"))
     end
-    throw(ArgumentError("_brep_surface_normal: unsupported surface $(sg.occ)"))
+    return get(sg,:reversed,false) ? (-n[1],-n[2],-n[3]) : n
 end
 
 # Analytic inversion — (u,v) of a point known to lie on the surface.
@@ -4036,8 +4042,9 @@ function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
                                         caller::AbstractString)
     sg=get(m.surface_geometry,t,nothing)
     occ=sg===nothing ? nothing : get(sg,:occ,nothing)
-    occ in (:cylinder,:sphere,:cone,:torus) || throw(ArgumentError(
-        "$caller: Surface[$t] has no parametric OCC record"))
+    occ in (:cylinder,:sphere,:cone,:torus,:tensor_bspline,:tensor_bezier) ||
+        throw(ArgumentError(
+            "$caller: Surface[$t] has no parametric OCC record"))
     pcurves=get(sg,:pcurves,nothing)
     pcurves===nothing && throw(ArgumentError(
         "$caller: Surface[$t] carries no pcurves"))
@@ -4093,6 +4100,43 @@ function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
     end
     isempty(segs) && throw(ArgumentError(
         "$caller: Surface[$t] has an empty parametric boundary"))
+    # Interior sampling: a boundary-only CDT of a sparse uv domain produces
+    # chords between distant angles that dive deep into the solid (most
+    # visible when the two rims of a lofted/cylindrical band carry different
+    # node counts).  Seed a uv lattice at the boundary's 3-D target spacing
+    # mapped through the local patch metric so lifted triangles stay local.
+    umin=minimum(xs);umax=maximum(xs);vmin=minimum(ys);vmax=maximum(ys)
+    uspan=umax-umin;vspan=vmax-vmin
+    if uspan>0.0 && vspan>0.0
+        h3=0.0;nedge=0
+        for (i,j) in segs
+            a=lift[i];b=lift[j]
+            h3+=sqrt((b[1]-a[1])^2+(b[2]-a[2])^2+(b[3]-a[3])^2);nedge+=1
+        end
+        h3/=max(nedge,1)
+        uc=0.5*(umin+umax);vc=0.5*(vmin+vmax)
+        _,du_c,dv_c=_occ_surface_d1(sg,uc,vc)
+        su=sqrt(_b3dot(du_c,du_c));sv=sqrt(_b3dot(dv_c,dv_c))
+        du_t=h3/max(su,1e-12);dv_t=h3/max(sv,1e-12)
+        nu=clamp(floor(Int,uspan/du_t)-1,0,64)
+        nv=clamp(floor(Int,vspan/dv_t)-1,0,64)
+        if nu>0 && nv>0 && nu*nv<=4096
+            du=uspan/(nu+1);dv=vspan/(nv+1)
+            tol2=(0.35*min(du,dv))^2
+            for i in 1:nu,j in 1:nv
+                u=umin+i*du;v=vmin+j*dv
+                # skip lattice points that would create slivers against the
+                # boundary discretization
+                near=false
+                for k in eachindex(xs)
+                    (xs[k]-u)^2+(ys[k]-v)^2<tol2 && (near=true;break)
+                end
+                near && continue
+                p3=_occ_surface_point(sg,u,v)
+                emit((u,v),p3)
+            end
+        end
+    end
     T=constrained_delaunay(xs,ys,segs)
     interior=classify_interior(T)
     mesh=to_mesh(T;interior)
@@ -4128,19 +4172,90 @@ function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
             return Int32(length(kept))
         end
     end
+    # Periodic-seam repair: on a closed-section face the seam appears as two uv
+    # boundary columns whose nodes weld pairwise in 3-D. An interior uv edge
+    # (seamL_i, X) and its twin (seamR_i, X) then weld to the same 3-D edge and
+    # would carry four incident triangles. Whenever a welded edge collects more
+    # than two incident uv triangles, subdivide surplus interior preimage edges
+    # at their uv midpoint; the split halves weld uniquely, so every repair
+    # strictly reduces the over-use count and cannot create a new collision.
+    uxs=[uvcoords[1,k] for k in 1:nnodes(mesh)]
+    uys=[uvcoords[2,k] for k in 1:nnodes(mesh)]
+    tris_uv=NTuple{3,Int32}[(mesh.tris[1,c],mesh.tris[2,c],mesh.tris[3,c])
+                            for c in axes(mesh.tris,2)]
     cells=NTuple{3,Int32}[]
-    seen=Set{NTuple{3,Int32}}()
-    for cell in axes(mesh.tris,2)
-        tri=(remap[mesh.tris[1,cell]],remap[mesh.tris[2,cell]],
-             remap[mesh.tris[3,cell]])
-        (tri[1]==tri[2] || tri[2]==tri[3] || tri[3]==tri[1]) && continue
-        key=tri[1]<tri[2] ?
-            (tri[2]<tri[3] ? tri :
-             tri[1]<tri[3] ? (tri[1],tri[3],tri[2]) : (tri[3],tri[1],tri[2])) :
-            (tri[1]<tri[3] ? (tri[2],tri[1],tri[3]) :
-             tri[2]<tri[3] ? (tri[2],tri[3],tri[1]) : (tri[3],tri[2],tri[1]))
-        key in seen && continue
-        push!(seen,key);push!(cells,tri)
+    seen_cells=Set{NTuple{3,Int32}}()
+    for _ in 1:(8*length(tris_uv)+8)
+        # uv edge incidence (true triangulation degrees) and welded-edge
+        # incidence over surviving, deduplicated cells.
+        uvcnt=Dict{NTuple{2,Int32},Int}()
+        for (a,b,c) in tris_uv, (x,y) in ((a,b),(b,c),(c,a))
+            uvk=x<y ? (x,y) : (y,x)
+            uvcnt[uvk]=get(uvcnt,uvk,0)+1
+        end
+        einc=Dict{NTuple{2,Int32},Int}()
+        preim=Dict{NTuple{2,Int32},Vector{NTuple{2,Int32}}}()
+        empty!(cells);empty!(seen_cells)
+        for (a,b,c) in tris_uv
+            wa,wb,wc=remap[a],remap[b],remap[c]
+            (wa==wb || wb==wc || wc==wa) && continue
+            tri=(wa,wb,wc)
+            key=tuple(sort!(Int[tri[1],tri[2],tri[3]])...)
+            key in seen_cells && continue
+            push!(seen_cells,key);push!(cells,tri)
+            for (x,y) in ((a,b),(b,c),(c,a))
+                wx,wy=remap[x],remap[y]
+                wx==wy && continue
+                we=wx<wy ? (wx,wy) : (wy,wx)
+                einc[we]=get(einc,we,0)+1
+                uvk=x<y ? (x,y) : (y,x)
+                lst=get!(preim,we,NTuple{2,Int32}[])
+                uvk in lst || push!(lst,uvk)
+            end
+        end
+        bad_e=nothing
+        for (e,c) in einc
+            c>2 && (bad_e===nothing || e<bad_e) && (bad_e=e)
+        end
+        bad_e===nothing && break
+        cands=[e for e in preim[bad_e] if get(uvcnt,e,0)==2]
+        isempty(cands) && throw(ArgumentError(
+            "$caller: Surface[$t] weld repair found no interior edge to split"))
+        (a,b)=minimum(cands)
+        mu=(uxs[a]+uxs[b])/2; mv=(uys[a]+uys[b])/2
+        p3=_occ_surface_point(sg,mu,mv)
+        push!(uxs,mu);push!(uys,mv)
+        push!(remap,get!(welded,p3) do
+            push!(kept,p3);push!(kept_uv,(mu,mv))
+            return Int32(length(kept))
+        end)
+        mn=Int32(length(uxs))
+        split=NTuple{3,Int32}[]
+        for (x,y,z) in tris_uv
+            if x==a && y==b
+                push!(split,(a,mn,z),(mn,b,z))
+            elseif x==b && y==a
+                push!(split,(b,mn,z),(mn,a,z))
+            elseif y==a && z==b
+                push!(split,(a,mn,x),(mn,b,x))
+            elseif y==b && z==a
+                push!(split,(b,mn,x),(mn,a,x))
+            elseif z==a && x==b
+                push!(split,(a,mn,y),(mn,b,y))
+            elseif z==b && x==a
+                push!(split,(b,mn,y),(mn,a,y))
+            else
+                push!(split,(x,y,z))
+            end
+        end
+        tris_uv=split
+    end
+    post=Dict{NTuple{2,Int32},Int}()
+    for tri in cells, (x,y) in ((tri[1],tri[2]),(tri[2],tri[3]),(tri[3],tri[1]))
+        we=x<y ? (x,y) : (y,x)
+        post[we]=get(post,we,0)+1
+        post[we]<=2 || throw(ArgumentError(
+            "$caller: Surface[$t] seam weld did not converge to a manifold mesh"))
     end
     coords=Matrix{Float64}(undef,3,length(kept))
     for k in eachindex(kept)

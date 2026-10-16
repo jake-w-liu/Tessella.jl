@@ -378,43 +378,61 @@ function _float_coords(pts,caller::AbstractString)
     coords
 end
 
-function _partition_tets_float(pts,limits::_RecoveryLimits;seed::Int=1)
+function _partition_tets_float(pts,limits::_RecoveryLimits;seed::Int=1,
+                               exact_first::Bool=true)
     caller="recover_partition_cdt"
     coords=_float_coords(pts,caller)
     lastreason="no triangulation attempted"
     # First use the exact kernel on the bounded-size dyadic Float64 images.  Unlike
     # repeatedly feeding it arbitrary intersection rationals, operand sizes cannot
     # grow from one recovery iteration to the next; its completeness gate also avoids
-    # the physically flat cells possible in the ghost-based Float kernel.
-    try
-        dyadic=RBv[(RB(coords[1,i]),RB(coords[2,i]),RB(coords[3,i])) for i in axes(coords,2)]
-        candidate=delaunay3d_exact(
-            dyadic;max_points=limits.points,max_tets=limits.work_tets,
-            max_work_tets=limits.work_tets,
-            max_predicate_tests=limits.predicate_tests)
-        etets=NTuple{4,Int}[];used=falses(length(pts));flat=false
-        for q0 in candidate
-            q=q0;s=det3(rsub(pts[q[2]],pts[q[1]]),rsub(pts[q[3]],pts[q[1]]),rsub(pts[q[4]],pts[q[1]]))
-            if s==0;flat=true;break;end
-            s<0&&(q=(q[1],q[2],q[4],q[3]))
-            push!(etets,q);for v in q;used[v]=true;end
+    # the physically flat cells possible in the ghost-based Float kernel.  On highly
+    # cospherical inputs the exact insphere degeneracies can still exhaust memory,
+    # so recovery loops whose own certificates stay exact may pass exact_first=false
+    # and let the Float trials below (all verified on the exact preimage) choose the
+    # topology directly.
+    function dyadic_attempt()
+        try
+            dyadic=RBv[(RB(coords[1,i]),RB(coords[2,i]),RB(coords[3,i])) for i in axes(coords,2)]
+            candidate=delaunay3d_exact(
+                dyadic;max_points=limits.points,max_tets=limits.work_tets,
+                max_work_tets=limits.work_tets,
+                max_predicate_tests=limits.predicate_tests)
+            etets=NTuple{4,Int}[];used=falses(length(pts));flat=false
+            for q0 in candidate
+                q=q0;s=det3(rsub(pts[q[2]],pts[q[1]]),rsub(pts[q[3]],pts[q[1]]),rsub(pts[q[4]],pts[q[1]]))
+                if s==0;flat=true;break;end
+                s<0&&(q=(q[1],q[2],q[4],q[3]))
+                push!(etets,q);for v in q;used[v]=true;end
+            end
+            if !flat&&!isempty(etets)&&all(used)
+                tm=Matrix{Int32}(undef,4,length(etets))
+                for (j,t) in enumerate(etets),i in 1:4;tm[i,j]=Int32(t[i]);end
+                diag=validate(Mesh(coords;tets=tm))
+                diag.ok&&return etets
+                lastreason="dyadic-exact topology was invalid — "*join(diag.messages,"; ")
+            elseif flat
+                lastreason="dyadic-exact topology contained a tetrahedron flat in the exact preimage"
+            else
+                lastreason="dyadic-exact topology was empty or incomplete"
+            end
+        catch err
+            err isa InterruptException&&rethrow()
+            err isa ArgumentError&&rethrow()
+            # A GMP/bignum allocation failure inside the exact kernel must not
+            # kill the run — degrade to the bounded Float insertion trials.
+            (err isa ErrorException || err isa ReadOnlyMemoryError ||
+             err isa OutOfMemoryError)||rethrow()
+            try
+                lastreason="dyadic-exact topology failed — "*sprint(showerror,err)
+            catch
+                lastreason="dyadic-exact topology failed"
+            end
         end
-        if !flat&&!isempty(etets)&&all(used)
-            tm=Matrix{Int32}(undef,4,length(etets))
-            for (j,t) in enumerate(etets),i in 1:4;tm[i,j]=Int32(t[i]);end
-            diag=validate(Mesh(coords;tets=tm))
-            diag.ok&&return etets
-            lastreason="dyadic-exact topology was invalid — "*join(diag.messages,"; ")
-        elseif flat
-            lastreason="dyadic-exact topology contained a tetrahedron flat in the exact preimage"
-        else
-            lastreason="dyadic-exact topology was empty or incomplete"
-        end
-    catch err
-        err isa InterruptException&&rethrow()
-        err isa ArgumentError&&rethrow()
-        err isa ErrorException||rethrow()
-        lastreason="dyadic-exact topology failed — "*sprint(showerror,err)
+        return nothing
+    end
+    if exact_first
+        r=dyadic_attempt();r!==nothing&&return r
     end
     # The unperturbed topology is preferred.  Cospherical/coplanar Float inputs can
     # make its SoS connectivity physically flat, so bounded deterministic insertion-
@@ -452,12 +470,29 @@ function _partition_tets_float(pts,limits::_RecoveryLimits;seed::Int=1)
             lastreason="attempt $attempt failed — "*sprint(showerror,err)
         end
     end
+    if !exact_first
+        r=dyadic_attempt();r!==nothing&&return r
+    end
     throw(ErrorException("$caller: no valid Float-assisted topology in 17 deterministic attempts; $lastreason"))
 end
 
 function _certify_partition_exact(surfaces,m,preimage,regions,
                                   budget::_RecoveryBudget,regionpts=preimage)
     caller="recover_partition_cdt"
+    # Every current crease subsegment must survive interior classification —
+    # a segment carried only by exterior-classified tets drops out of the kept
+    # boundary even though it was a Delaunay edge of the working complex.
+    keptE=Set{NTuple{2,Int}}()
+    for c in axes(m.tets,2)
+        vs=m.tets[:,c]
+        for i in 1:4,j in i+1:4
+            push!(keptE,ekey(Int(vs[i]),Int(vs[j])))
+        end
+    end
+    for (ri,reg) in enumerate(regions), e in reg.bnd
+        (e in keptE) || return (false,
+            "region $ri boundary segment $e is not a tet edge of the kept complex")
+    end
     for r in eachindex(surfaces)
         ids=Int[t for t in axes(m.tets,2) if m.tet_tag[t]==Int32(r)]
         isempty(ids)&&return (false,"effective region $r received no tet")
@@ -480,22 +515,13 @@ function _certify_partition_exact(surfaces,m,preimage,regions,
     (true,"conforming partition (exact preimage certificate)")
 end
 
-function _finalize_partition(surfaces,pts,etets,regions,tet_limit::Int,
-                             budget::_RecoveryBudget)
-    caller="recover_partition_cdt"
-    coords=_float_coords(pts,caller)
-    grids=[Mesh3D._raygrid(s) for s in surfaces]
-    bboxes=[begin
-        lo=(Inf,Inf,Inf);hi=(-Inf,-Inf,-Inf)
-        for i in axes(s.coords,2)
-            lo=(min(lo[1],s.coords[1,i]),min(lo[2],s.coords[2,i]),min(lo[3],s.coords[3,i]))
-            hi=(max(hi[1],s.coords[1,i]),max(hi[2],s.coords[2,i]),max(hi[3],s.coords[3,i]))
-        end
-        (lo,hi)
-    end for s in surfaces]
+# Interior/exterior classification of the working triangulation: the same
+# centroid ray-cast `_finalize_partition` applies, factored so the recovery loop
+# can also test which tets — hence which crease subsegments — would survive.
+function _partition_classify(surfaces,grids,bboxes,pts,etets,caller)
     keep=NTuple{4,Int}[];tags=Int32[]
-    hint=min(length(etets),tet_limit)
-    sizehint!(keep,hint);sizehint!(tags,hint)
+    sizehint!(keep,min(length(etets),1<<20))
+    sizehint!(tags,min(length(etets),1<<20))
     for t in etets
         c=((pts[t[1]][1]+pts[t[2]][1]+pts[t[3]][1]+pts[t[4]][1])/4,
            (pts[t[1]][2]+pts[t[2]][2]+pts[t[3]][2]+pts[t[4]][2])/4,
@@ -507,13 +533,37 @@ function _finalize_partition(surfaces,pts,etets,regions,tet_limit::Int,
             lo,hi=bboxes[r]
             (lo[1]<=cf[1]<=hi[1]&&lo[2]<=cf[2]<=hi[2]&&lo[3]<=cf[3]<=hi[3]) || continue
             if Mesh3D._inside_grid(cf,grids[r])
-                length(keep)<tet_limit || throw(ArgumentError(
-                    "$caller: output tetrahedra exceed max_tets=$tet_limit; " *
-                    "increase max_tets or simplify the PLC collection"))
                 push!(keep,t);push!(tags,Int32(r));break
             end
         end
     end
+    return keep,tags
+end
+
+function _partition_grids_bboxes(surfaces)
+    grids=[Mesh3D._raygrid(s) for s in surfaces]
+    bboxes=[begin
+        lo=(Inf,Inf,Inf);hi=(-Inf,-Inf,-Inf)
+        for i in axes(s.coords,2)
+            lo=(min(lo[1],s.coords[1,i]),min(lo[2],s.coords[2,i]),min(lo[3],s.coords[3,i]))
+            hi=(max(hi[1],s.coords[1,i]),max(hi[2],s.coords[2,i]),max(hi[3],s.coords[3,i]))
+        end
+        (lo,hi)
+    end for s in surfaces]
+    return grids,bboxes
+end
+
+function _finalize_partition(surfaces,pts,etets,regions,tet_limit::Int,
+                             budget::_RecoveryBudget;
+                             grids_bboxes=nothing)
+    caller="recover_partition_cdt"
+    coords=_float_coords(pts,caller)
+    grids,bboxes=grids_bboxes===nothing ? _partition_grids_bboxes(surfaces) :
+                                        grids_bboxes
+    keep,tags=_partition_classify(surfaces,grids,bboxes,pts,etets,caller)
+    length(keep)<=tet_limit || throw(ArgumentError(
+        "$caller: output tetrahedra exceed max_tets=$tet_limit; " *
+        "increase max_tets or simplify the PLC collection"))
     isempty(keep) && throw(ErrorException("$caller: the classified partition is empty"))
     tets=Matrix{Int32}(undef,4,length(keep))
     for (j,t) in enumerate(keep),i in 1:4;tets[i,j]=Int32(t[i]);end
@@ -809,6 +859,7 @@ function recover_partition_cdt(surfaces;
     for (ri,reg) in enumerate(regions),e in reg.bnd
         push!(get!(seg2regs,e,Int[]),ri)
     end
+    grids,bboxes=_partition_grids_bboxes(surfaces)
 
     function split_seg!(e)
         a,b=e;mid=rscale(radd(pts[a],pts[b]),1//2);m=get(pointmap,mid,0)
@@ -835,13 +886,32 @@ function recover_partition_cdt(surfaces;
         # memory, while every recovery and acceptance decision below uses the exact
         # Rational preimages.  The conversion gate rejects point collisions, and the
         # exact certificate—not the approximate Delaunay property—is authoritative.
-        etets=_partition_tets_float(pts,limits)
+        # Float trials run first: the dyadic-exact attempt is retained only as a
+        # last resort inside `_partition_tets_float` because highly cospherical
+        # inputs can exhaust memory in the exact insphere predicate.
+        etets=_partition_tets_float(pts,limits;exact_first=false)
         E=Set{NTuple{2,Int}}()
         for t in etets,i in 1:4,j in i+1:4;push!(E,ekey(t[i],t[j]));end
 
         missing=sort!(NTuple{2,Int}[e for e in keys(seg2regs) if !(e in E)])
         if !isempty(missing)
             for e in missing;haskey(seg2regs,e)&&split_seg!(e);end
+            continue
+        end
+
+        # `_finalize_partition` keeps only interior-classified tets, so a
+        # crease subsegment present in `etets` but carried solely by
+        # exterior tets would drop out of the assembled boundary — the
+        # certificate `_certify_partition_exact` (and `_rb_gate` downstream)
+        # reject that as non-conforming.  Split until interior tets carry it.
+        kept,_=_partition_classify(surfaces,grids,bboxes,pts,etets,
+                                   "recover_partition_cdt")
+        keptE=Set{NTuple{2,Int}}()
+        for t in kept,i in 1:4,j in i+1:4;push!(keptE,ekey(t[i],t[j]));end
+        dropped=sort!(NTuple{2,Int}[e for e in keys(seg2regs)
+                                    if !(e in keptE)])
+        if !isempty(dropped)
+            for e in dropped;haskey(seg2regs,e)&&split_seg!(e);end
             continue
         end
 
@@ -865,7 +935,8 @@ function recover_partition_cdt(surfaces;
         end
 
         return _finalize_partition(
-            surfaces,pts,etets,regions,limits.tets,budget)
+            surfaces,pts,etets,regions,limits.tets,budget;
+            grids_bboxes=(grids,bboxes))
     end
     throw(ArgumentError(
         "recover_partition_cdt: maxiter=$nit reached before convergence " *
@@ -889,6 +960,7 @@ function _recover(surface::Mesh,limits::_RecoveryLimits,caller::AbstractString)
     regions=build_regions(pts,facets)
     seg2regs=Dict{NTuple{2,Int},Vector{Int}}()
     for (ri,reg) in enumerate(regions), e in reg.bnd; push!(get!(seg2regs,e,Int[]),ri); end
+    raygrid=Mesh3D._raygrid(surface)
 
     function split_seg!(e)
         a,b=e;mid=rscale(radd(pts[a],pts[b]),1//2);m=get(pointmap,mid,0)
@@ -912,10 +984,13 @@ function _recover(surface::Mesh,limits::_RecoveryLimits,caller::AbstractString)
         length(pts) <= nmax || throw(ArgumentError(
             "$caller: maxpts=$nmax exceeded during refinement; " *
             "increase maxpts or simplify the PLC"))
-        etets = delaunay3d_exact(
-            pts;max_points=nmax,max_tets=limits.work_tets,
-            max_work_tets=limits.work_tets,
-            max_predicate_tests=limits.predicate_tests)
+        # Working complex: float-assisted topology (`_partition_tets_float`)
+        # instead of `delaunay3d_exact` on the raw rationals — crease/Steiner
+        # midpoint operands grow in bit size each round and unbounded exact
+        # Bowyer-Watson can exhaust memory on cospherical inputs.  Every
+        # acceptance predicate and the certificate remain exact on `pts`, so
+        # the advisory connectivity does not change correctness.
+        etets = _partition_tets_float(pts,limits;seed=it,exact_first=false)
         E=Set{NTuple{2,Int}}()
         for t in etets; for i in 1:4,j in i+1:4; push!(E,ekey(t[i],t[j])); end; end
         # 1) missing crease subsegments -> midpoint split
@@ -924,6 +999,25 @@ function _recover(surface::Mesh,limits::_RecoveryLimits,caller::AbstractString)
         sort!(missing)
         if !isempty(missing)
             for e in missing; haskey(seg2regs,e) && split_seg!(e); end
+            continue
+        end
+        # 1b) `_finalize` keeps only interior-classified tets — a crease
+        # subsegment carried solely by exterior tets drops out of the kept
+        # boundary and fails `certify_exact`.  Split until interior tets carry
+        # it instead of reaching the certificate late.
+        keptE=Set{NTuple{2,Int}}()
+        for t in etets
+            cf=(Float64((pts[t[1]][1]+pts[t[2]][1]+pts[t[3]][1]+pts[t[4]][1])/4),
+                Float64((pts[t[1]][2]+pts[t[2]][2]+pts[t[3]][2]+pts[t[4]][2])/4),
+                Float64((pts[t[1]][3]+pts[t[2]][3]+pts[t[3]][3]+pts[t[4]][3])/4))
+            Mesh3D._inside_grid(cf,raygrid) || continue
+            for i in 1:4,j in i+1:4; push!(keptE,ekey(t[i],t[j])); end
+        end
+        dropped=NTuple{2,Int}[]
+        for e in keys(seg2regs); (e in keptE) || push!(dropped,e); end
+        sort!(dropped)
+        if !isempty(dropped)
+            for e in dropped; haskey(seg2regs,e) && split_seg!(e); end
             continue
         end
         # 2) facet piercing -> insert exact piercing point (one per region per iter)

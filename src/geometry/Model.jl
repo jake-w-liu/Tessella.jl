@@ -855,6 +855,7 @@ include("ModelOCCSweep.jl")
 include("ModelBoolean.jl")
 include("ModelOCCBoolean.jl")
 include("ModelOCCNurbsConvert.jl")
+include("ModelOCCLoft.jl")
 
 @inline function _model_periodic_entity_label(dim::Int)
     dim==1 && return "Curve"
@@ -8965,8 +8966,12 @@ end
 # discretization, so adjacent faces still weld shared-edge nodes bitwise.
 _model_occ_curved_surface(m::GeoModel,surface::Int) =
     (sg=get(m.surface_geometry,surface,nothing);
-     sg!==nothing && get(sg,:occ,nothing) in
-                    (:cylinder,:sphere,:cone,:torus))
+     sg!==nothing &&
+     (get(sg,:occ,nothing) in (:cylinder,:sphere,:cone,:torus) ||
+      # Lofted (`addThruSections`) tensor faces carry edge pcurves, so they
+      # tessellate their (u,v) domain exactly like the analytic kinds.
+      (get(sg,:occ,nothing) in (:tensor_bspline,:tensor_bezier) &&
+       hasproperty(sg,:pcurves))))
 
 function _model_volume_surface_mesh(m::GeoModel,surface::Int,
                                     caller::AbstractString;kwargs...)

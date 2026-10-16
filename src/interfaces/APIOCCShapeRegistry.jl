@@ -171,6 +171,12 @@ offset_curve(curveLoopTag,offset)=_with_model(
         caller="OCC.offsetCurve"))
 convert_to_nurbs(dimTags)=_with_model(
     m->Model._model_occ_convert_to_nurbs!(m,dimTags,"OCC.convertToNURBS"))
+add_thru_sections(wireTags;tag=-1,makeSolid=true,makeRuled=false,
+    maxDegree=-1,continuity="",parametrization="",smoothing=false)=
+    _with_model(m->Model._model_occ_thru_sections!(m,tag,wireTags;
+        make_solid=makeSolid,make_ruled=makeRuled,max_degree=maxDegree,
+        continuity=continuity,parametrization=parametrization,
+        smoothing=smoothing))
 
 module mesh
     import .....Model

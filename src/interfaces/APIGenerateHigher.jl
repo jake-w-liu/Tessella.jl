@@ -583,11 +583,19 @@ function _higher_analytic_boundary_surfaces(m,dimension,caller)
     for volume in keys(m.volumes)
         # A Layers-extruded primitive sweeps through its boundary products —
         # the surfaces classify like an explicit shell's and must mesh.
-        (Model._implicit_volume_surface(m,volume) &&
-         Model._extrude_gate(m,3,volume)===nothing) || continue
+        implicit=(Model._implicit_volume_surface(m,volume) &&
+                  Model._extrude_gate(m,3,volume)===nothing)
         for signed in Model._model_volume_boundary_surfaces(m,volume,caller)
             surface=abs(signed)
-            push!(skipped,surface)
+            # An explicit shell's OCC-curved faces likewise mesh inside the
+            # Volume producer (`_model_volume_surface_mesh`) — the standalone
+            # Surface path only admits plane/ruled/tric geometry.  Faces that
+            # carry Layers/extrusion parameters are the exception: their
+            # remesh production supplies the retained vertex storage and
+            # must stay in the ordinary surface flow.
+            (implicit || (Model._model_occ_curved_surface(m,surface) &&
+                          Model._extrude_gate(m,2,surface)===nothing)) &&
+                push!(skipped,surface)
         end
     end
     return skipped
