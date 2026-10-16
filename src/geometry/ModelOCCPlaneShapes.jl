@@ -65,6 +65,75 @@ end
 _model_occ_add_curve_loop!(m,curve_tags;tag=-1)=
     _model_occ_add_wire!(m,curve_tags;tag=tag,check_closed=true)
 
+# `OCC_Internals::addCurveLoops`: closed wires are searched among the given
+# curves — endpoints connect on `Precision::Confusion` coincidence
+# (`ShapeAnalysis_FreeBounds` sewing semantics), not only shared vertex
+# entities. Each closed walk publishes one curve loop under a fresh tag;
+# curves that no closed walk consumes come back unused. Returns
+# `(loop_tags, leftover_tags)`.
+function _model_occ_curve_loops(m::GeoModel,curve_tags)
+    caller="OCC.add_curve_loops"
+    kernel=m.occ_kernel
+    edges=UInt64[]; labels=Int[]; seen=Set{Int}()
+    for raw in curve_tags
+        t=abs(_model_occ_requested_tag(raw,caller))
+        id=get(kernel.bindings,(1,t),nothing)
+        id===nothing && throw(ArgumentError("$caller: unknown OCC Curve[$t]"))
+        t in seen && continue
+        push!(seen,t); push!(edges,id); push!(labels,t)
+    end
+    isempty(edges) && return Int[],Int[]
+    n=length(edges)
+    # Cluster coincident endpoints: port 2(e-1)+s of edge e → cluster index.
+    coords=NTuple{3,Float64}[]; port=fill(0,2n)
+    for e in 1:n, s in 1:2
+        vid=kernel.shapes[edges[e]].children[s]
+        p=kernel.shapes[vid].geometry.point
+        c=findfirst(q->_model_occ_vertices_coincide(p,q),coords)
+        c===nothing && (push!(coords,p); c=length(coords))
+        port[2(e-1)+s]=c
+    end
+    incident=[Int[] for _ in coords]
+    for e in 1:n, s in 1:2
+        push!(incident[port[2(e-1)+s]],e)
+    end
+    used=falses(n); loops=Vector{Int}[]
+    for e0 in 1:n
+        used[e0] && continue
+        pa,pb=port[2*e0-1],port[2*e0]
+        if pa==pb
+            used[e0]=true; push!(loops,[labels[e0]]); continue
+        end
+        # Greedy walk: `pos_of` maps each entered cluster to the chain index
+        # just before it, so re-entering any cluster closes the sub-chain
+        # (handles lollipop stems and figure-8 shared vertices, not only
+        # plain cycles that close at the start).
+        chain=[e0]; cur=pb; used[e0]=true
+        pos_of=Dict(pa=>0); closed=false
+        while true
+            if haskey(pos_of,cur)
+                k=pos_of[cur]
+                used[chain[1:k]].=false
+                push!(loops,[labels[e] for e in chain[k+1:end]])
+                closed=true; break
+            end
+            pos_of[cur]=length(chain)
+            nxt=0
+            for f in incident[cur]
+                used[f] || (nxt=f; break)
+            end
+            nxt==0 && break
+            used[nxt]=true; push!(chain,nxt)
+            cur= port[2nxt-1]==cur ? port[2nxt] : port[2nxt-1]
+        end
+        closed || (used[chain].=false)   # open chain — edges stay reusable
+    end
+    loop_tags=[_model_occ_add_wire!(m,chain;tag=-1,check_closed=true)
+               for chain in loops]
+    consumed=Set{Int}(Iterators.flatten(loops))
+    return loop_tags,[t for t in labels if !(t in consumed)]
+end
+
 # Traversal-ordered boundary samples of a wire: vertex positions chained by
 # `uses` orientation, with quarter-arc interior points on circle/ellipse
 # edges so a curved boundary contributes to the plane fit. Only `:line`,

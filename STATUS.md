@@ -1693,6 +1693,24 @@ swallowed-circle/unknown-tag rejections with
 registry counts unchanged); compact
 `occ_offset_smoke.jl` added to `runtests.jl`.
 
+### GEO01 slice 23 — `occ.addCurveLoops` (2026-10-15)
+
+`model.occ.add_curve_loops(curveTags)` implements upstream's automatic
+closed-loop discovery (`ShapeAnalysis_FreeBounds` semantics) in
+`ModelOCCPlaneShapes.jl`. All 2n edge endpoints cluster by
+`Precision::Confusion` positional coincidence — shared vertex entities are
+not required — then greedy walks over the port graph publish one curve
+loop per closed sub-chain through the existing atomic
+`_model_occ_add_wire!(check_closed=true)` path. Re-entering any visited
+cluster closes the sub-chain (lollipop stems and figure-8 shared vertices
+split correctly); dead-end walks unmark their edges which return as
+leftovers alongside the loop tags. Verified:
+`test/interfaces/api_occ_curve_loops_test.jl` — 20 green (square,
+two-triangle and single-circle loops, dangling/open-chain leftovers,
+figure-8 splitting into two valid planar faces of mass 1.0,
+distinct-but-coincident vertices sewing into a loop, atomic unknown-tag
+rejection, empty input).
+
 ### GEO01 slice 22 — `occ.addThruSections` (2026-10-15)
 
 `model.occ.add_thru_sections(wires; tag=-1, makeSolid=true,

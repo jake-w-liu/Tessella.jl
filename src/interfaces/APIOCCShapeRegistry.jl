@@ -56,6 +56,10 @@ add_curve_loop(curve_tags;tag=-1)=_with_model() do m
     Model._model_occ_add_curve_loop!(m,curve_tags;tag)
 end
 
+add_curve_loops(curve_tags)=_with_model() do m
+    Model._model_occ_curve_loops(m,curve_tags)
+end
+
 add_plane_surface(wire_tags;tag=-1)=_with_model() do m
     Model._model_occ_add_plane_surface!(m,wire_tags;tag)
 end

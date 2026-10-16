@@ -4835,7 +4835,25 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
-## Latest landed increment (`e551b37`, pushed to `origin/main`)
+## Latest landed increment (pushed to `origin/main`)
+
+**`occ.addCurveLoops` (GEO01 slice 23)** — `occ.add_curve_loops(curveTags)`
+in `ModelOCCPlaneShapes.jl` implements upstream's automatic loop discovery
+(`ShapeAnalysis_FreeBounds` semantics): edge endpoints connect on
+`Precision::Confusion` positional coincidence — not just shared vertex
+entities — by clustering all 2n edge ports, then greedy closed walks over
+the port graph. Re-entering any already-visited cluster closes the
+sub-chain (lollipop stems and figure-8 shared vertices split correctly
+rather than fusing into self-touching wires); dead-end walks unmark their
+edges so they return as leftovers. Every closed walk publishes through the
+existing atomic `_model_occ_add_wire!(check_closed=true)` path under fresh
+tags; unknown tags reject; returns `(loop_tags, leftover_tags)`. Verified:
+`api_occ_curve_loops_test.jl` 20 green — square/2-triangle/circle loops,
+dangling-edge and open-chain leftovers, figure-8 splitting into two valid
+planar faces (mass 1.0 each), distinct-but-coincident vertices sewing into
+a loop, atomic unknown-tag rejection, empty input.
+
+## Previous landed increment (`e551b37`, pushed to `origin/main`)
 
 **`occ.addThruSections` (GEO01 slice 22)** — `occ.add_thru_sections(wires;
 tag=-1, makeSolid=true, makeRuled=false, maxDegree=-1, continuity="",
