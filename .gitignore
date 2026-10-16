@@ -12,14 +12,13 @@ __pycache__/
 
 # Test / build artifacts
 /test/tmp/
-/test/artifacts/*.tmp
 *.msh.tmp
-# Generated handshake meshes (regenerate via validation/*/reconstruct|generate*.jl)
-/validation/ascent_handshake/ascent_coax.msh
-/validation/ascent_handshake/enc_coax_bc.msh
-/validation/enclosure_literal/enclosure_literal.msh
-/validation/ascent_solve_regression/*.msh
-/validation/ascent_cavity_eigenmode/cavity.msh
+
+# Large oracle/fixture datasets — kept local, not distributed.
+# (Regenerate via validation/*/reconstruct|generate*.jl scripts.)
+/test/artifacts/
+/test/data/
+/validation/
 
 # Editor
 .vscode/
@@ -27,6 +26,11 @@ __pycache__/
 
 # Local reference material (gmsh source study, not distributed)
 reference/
+_gmsh_occ.cpp
+
+# Local debug/probe scratch (never committed)
+_probe_*.jl
+_probe_*.py
 
 # Local Claude Code config + workflow worktrees (not distributed)
 .claude/
