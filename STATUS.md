@@ -1693,6 +1693,21 @@ swallowed-circle/unknown-tag rejections with
 registry counts unchanged); compact
 `occ_offset_smoke.jl` added to `runtests.jl`.
 
+### GEO01 slice 24 — `occ.addSurfaceFilling`/`addBSplineFilling` (2026-10-15)
+
+`model.occ.add_surface_filling(wireTag; tag=-1)` and `add_bspline_filling`
+implement `BRepOffsetAPI_MakeFilling` in `src/geometry/ModelOCCLoft.jl`
+(`2b8bcba`). Planar wires publish the exact `:plane` record; non-planar
+4-edge wires build a Coons/Gordon tensor patch sampled in homogeneous
+space on the unified-boundary Greville grid and re-interpolated in the
+same knot spaces — rational boundaries (conic arcs) reproduce exactly.
+Member edges carry `lin2d`/`tan2d` pcurves on u-sides plus the new
+mirrored `tan2dv` trace on v-sides. Atomic binding: unknown wires,
+<3-edge wires and non-4-edge non-planar wires reject. Verified:
+`test/interfaces/api_occ_surface_filling_test.jl` — 19 green (planar
+square mass 4, tilted parallelogram 4√2, half-cylinder Coons patch mass
+π to 1e-8, alias + explicit tag, atomic rejections).
+
 ### GEO01 slice 23 — `occ.addCurveLoops` (2026-10-15)
 
 `model.occ.add_curve_loops(curveTags)` implements upstream's automatic

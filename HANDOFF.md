@@ -4835,7 +4835,29 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
-## Latest landed increment (pushed to `origin/main`)
+## Latest landed increment (`2b8bcba`, pushed to `origin/main`)
+
+**`occ.addSurfaceFilling`/`addBSplineFilling` (GEO01 slice 24)** —
+`ModelOCCLoft.jl` implements `BRepOffsetAPI_MakeFilling` bounded
+surfaces. Planar wires resolve through the exact `:plane` face path;
+non-planar 4-edge wires build a Coons/Gordon tensor patch — the two
+ruled families minus the corner bilinear interpolant — evaluated in
+**homogeneous** (xw,yw,zw,w) space on the unified-boundary Greville
+grid and re-interpolated in the same knot spaces, so rational
+boundaries (conic arcs) are reproduced exactly. Member edges carry
+`lin2d`/`tan2d` pcurves on u-sides and a new mirrored `tan2dv` trace
+(constant-u conic reparam) on v-sides; vertex uv maps bind all four
+corners. Binding is atomic: unknown wires, <3-edge wires and
+non-4-edge non-planar wires reject without registry mutation.
+Verified: `api_occ_surface_filling_test.jl` 19 green — planar square
+(plane record, mass 4), tilted parallelogram (mass 4√2), half-cylinder
+Coons patch of two semicircle arcs + two lines (mass π to 1e-8, exact
+rational boundary), `add_bspline_filling` alias + explicit tag,
+atomic rejection paths. Deep-debug found and fixed a knot-span clamp
+(`[p+1, len−p−1]`) and switched the blend to homogeneous space after
+the polynomial variant under-measured the cylinder (2.21 vs π).
+
+## Previous landed increment (`c675fe8`, pushed to `origin/main`)
 
 **`occ.addCurveLoops` (GEO01 slice 23)** — `occ.add_curve_loops(curveTags)`
 in `ModelOCCPlaneShapes.jl` implements upstream's automatic loop discovery
@@ -4853,7 +4875,7 @@ dangling-edge and open-chain leftovers, figure-8 splitting into two valid
 planar faces (mass 1.0 each), distinct-but-coincident vertices sewing into
 a loop, atomic unknown-tag rejection, empty input.
 
-## Previous landed increment (`e551b37`, pushed to `origin/main`)
+## Earlier landed increments
 
 **`occ.addThruSections` (GEO01 slice 22)** — `occ.add_thru_sections(wires;
 tag=-1, makeSolid=true, makeRuled=false, maxDegree=-1, continuity="",

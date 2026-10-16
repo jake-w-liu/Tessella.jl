@@ -942,3 +942,170 @@ function _model_occ_surface_filling(m::GeoModel,tag,wire_tag;
     kernel.next_shape=id+UInt64(1)
     return allocated
 end
+
+# ── `addPipe` ─────────────────────────────────────────────────────────────────
+#
+# `BRepOffsetAPI_MakePipe` semantics: a wire or face profile swept along a
+# spine wire. Upstream sweeps the profile exactly; here the profile is
+# transported rigidly along discrete parallel-transport frames — stations
+# densify with spine curvature (π/16 on conics, 16 spans on free-form) —
+# and the transported section wires loft through `addThruSections`. The
+# approximation converges to the true pipe under station refinement and is
+# exact for straight spines (two-circle stations yield an exact ruled
+# rational cylinder).
+
+function _pipe_edge_point(m,g,etag,u)
+    g.occ===:line && return g.origin .+ u .* g.dir
+    g.occ===:circle && return _occ_circle_point(g,u)
+    g.occ===:ellipse && return _occ_ellipse_point(g,u)
+    g.occ===:copied_curve && return _model_occ_curve_d2(g.curve,u)[1]
+    g.occ===:surface_iso && return _model_surface_iso_point(g,u)
+    throw(ArgumentError(
+        "OCC.addPipe: unsupported spine edge kind $(g.occ)"))
+end
+
+# Station parameter cuts on one spine edge, ends included.
+function _pipe_edge_stations(g)
+    if g.occ===:line
+        return Float64[g.t0,g.t1]
+    elseif g.occ in (:circle,:ellipse)
+        k=max(4,ceil(Int,abs(g.t1-g.t0)/(π/16)))
+        return Float64[g.t0+(g.t1-g.t0)*i/k for i in 0:k]
+    end
+    return Float64[g.t0+(g.t1-g.t0)*i/16 for i in 0:16]
+end
+
+# Row-major 3×3 product A·B over NTuple{9} layouts.
+_pipe_matmul(A,B)=ntuple(k->begin
+    r=(k-1)÷3; c=(k-1)%3
+    A[3r+1]*B[c+1]+A[3r+2]*B[c+4]+A[3r+3]*B[c+7]
+end,9)
+
+# Minimal rotation taking unit a → unit b (axis = a×b, 180° fallback to any
+# perpendicular). Row-major NTuple{9}.
+function _pipe_min_rotation(a,b)
+    ax=_occ_cross(a,b); c=_dot3(a,b)
+    s=_occ_modulus(ax)
+    if s<1e-12
+        c>0.0 && return (1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0)
+        # anti-parallel: rotate π about any perpendicular
+        p=abs(a[1])<0.9 ? (1.0,0.0,0.0) : (0.0,1.0,0.0)
+        ax=_occ_dir(_occ_cross(a,p))
+        x,y,z=ax
+        return (1-2*(y*y+z*z), 2*x*y, 2*x*z,
+                2*x*y, 1-2*(x*x+z*z), 2*y*z,
+                2*x*z, 2*y*z, 1-2*(x*x+y*y))
+    end
+    x,y,z=ax./s
+    return _occ_rotation_matrix((x,y,z),atan(s,c))
+end
+
+function _model_occ_add_pipe!(m::GeoModel,tag,profile,wire_tag)
+    caller="OCC.addPipe"
+    kernel=m.occ_kernel
+    make_solid=false
+    profile_uses=Vector{Tuple{UInt64,Bool}}()
+    if profile isa Tuple && profile[1]==2
+        fid=get(kernel.bindings,(2,profile[2]),nothing)
+        fid===nothing && throw(ArgumentError(
+            "$caller: unknown OCC Surface[$(profile[2])]"))
+        wires=kernel.shapes[fid].children
+        isempty(wires) && throw(ArgumentError(
+            "$caller: profile face has no boundary"))
+        profile_uses=kernel.shapes[wires[1]].geometry.uses
+        make_solid=true
+    else
+        wt=profile isa Tuple ? abs(Int(profile[2])) : abs(Int(profile))
+        wid=get(kernel.bindings,(-1,wt),nothing)
+        wid===nothing && throw(ArgumentError(
+            "$caller: unknown OCC Wire[$wt]"))
+        profile_uses=kernel.shapes[wid].geometry.uses
+    end
+    isempty(profile_uses) && throw(ArgumentError(
+        "$caller: profile has no edges"))
+    wt=abs(_model_occ_requested_tag(wire_tag,caller))
+    swid=get(kernel.bindings,(-1,wt),nothing)
+    swid===nothing && throw(ArgumentError("$caller: unknown OCC Wire[$wt]"))
+    suses=kernel.shapes[swid].geometry.uses
+    isempty(suses) && throw(ArgumentError("$caller: spine wire has no edges"))
+    # ── spine stations (position + unit tangent), traversal order ──
+    P=NTuple{3,Float64}[]; T=NTuple{3,Float64}[]
+    for (eid,rev) in suses
+        g=kernel.shapes[eid].geometry.geometry
+        etag=_model_occ_shape_tag(kernel,eid,caller)
+        params=_pipe_edge_stations(g)
+        rev && reverse!(params)
+        for u in params
+            p=_pipe_edge_point(m,g,etag,u)
+            d=_occ_curve_first_der(m,g,etag,u,caller)
+            tn=_occ_modulus(d)
+            tn>_OCC_CONFUSION || continue
+            dir=_occ_dir(rev ? (.-d) : d)
+            # A station coincident with the previous (shared edge end)
+            # only refreshes the outgoing tangent for frame transport.
+            if !isempty(P) && _model_occ_vertices_coincide(p,last(P))
+                T[end]=dir
+                continue
+            end
+            push!(P,p); push!(T,dir)
+        end
+    end
+    nsec=length(P)
+    nsec>=2 || throw(ArgumentError(
+        "$caller: spine yields fewer than 2 sections"))
+    # ── cumulative parallel-transport frames ──
+    R=Vector{NTuple{9,Float64}}(undef,nsec)
+    R[1]=(1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0)
+    for i in 2:nsec
+        Ri=_pipe_min_rotation(T[i-1],T[i])
+        R[i]=_pipe_matmul(Ri,R[i-1])
+    end
+    P0=P[1]
+    # ── transported section wires ──
+    ne=length(profile_uses)
+    ids=_model_occ_reserve_shapes(kernel,nsec*(2ne+1),caller)
+    next=1
+    section_tags=Int[]
+    ecache=Dict{UInt64,UInt64}()   # profile vertex id → station vertex id
+    for i in 1:nsec
+        off=(P[i][1]-_occ_matvec(R[i],P0)[1],
+             P[i][2]-_occ_matvec(R[i],P0)[2],
+             P[i][3]-_occ_matvec(R[i],P0)[3])
+        t=_AffineTransform(R[i],off,NTuple{16,Float64}[],
+                           (linear=R[i],loc=off))
+        empty!(ecache)
+        uses=Vector{Tuple{UInt64,Bool}}(undef,ne)
+        for (k,(peid,prev)) in enumerate(profile_uses)
+            pshape=kernel.shapes[peid]
+            newg=_model_occ_transform_geometry(m,pshape,t,caller,
+                                               "profile edge")
+            kids=UInt64[]
+            for vid in pshape.children
+                nv_id=get!(ecache,vid) do
+                    vshape=kernel.shapes[vid]
+                    vg=_model_occ_transform_geometry(m,vshape,t,caller,
+                                                     "profile vertex")
+                    t0=_model_occ_next_tag(kernel,0,-1,caller)
+                    _model_occ_bind_shape!(kernel,0,t0,ids[next],
+                        _ModelOCCShape(0,vg,UInt64[]))
+                    next+=1
+                    ids[next-1]
+                end
+                push!(kids,nv_id)
+            end
+            etag=_model_occ_next_tag(kernel,1,-1,caller)
+            _model_occ_bind_shape!(kernel,1,etag,ids[next],
+                _ModelOCCShape(1,newg,kids))
+            next+=1
+            uses[k]=(ids[next-1],prev)
+        end
+        wtag=_model_occ_next_tag(kernel,-1,-1,caller)
+        _model_occ_bind_shape!(kernel,-1,wtag,ids[next],
+            _ModelOCCShape(-1,(uses=uses,),UInt64[u[1] for u in uses]))
+        next+=1
+        push!(section_tags,wtag)
+    end
+    kernel.next_shape=ids[next-1]+UInt64(1)
+    return _model_occ_thru_sections!(m,tag,section_tags;
+        make_solid=make_solid,make_ruled=false)
+end
