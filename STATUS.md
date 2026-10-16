@@ -1693,6 +1693,20 @@ swallowed-circle/unknown-tag rejections with
 registry counts unchanged); compact
 `occ_offset_smoke.jl` added to `runtests.jl`.
 
+### GEO01 slice 25 — `occ.addPipe` (2026-10-15)
+
+`model.occ.add_pipe(profile, wireTag; tag=-1)` implements
+`BRepOffsetAPI_MakePipe` semantics in `src/geometry/ModelOCCLoft.jl`
+(`2d09360`). The wire or `(2, faceTag)` profile transports rigidly along
+spine stations under cumulative parallel-transport frames; stations
+densify with curvature (π/16 on conics, 16 spans on free-form edges)
+and loft through `addThruSections` — surface pipe for wire profiles,
+solid pipe for `(2,tag)` face profiles. Exact for straight spines
+(cylinder lateral area π, volume πr²h, centroid on-axis to 1e-9);
+a documented approximation for curved spines (quarter-torus tube
+within 3%). Verified: `test/interfaces/api_occ_pipe_test.jl` —
+15 green.
+
 ### GEO01 slice 24 — `occ.addSurfaceFilling`/`addBSplineFilling` (2026-10-15)
 
 `model.occ.add_surface_filling(wireTag; tag=-1)` and `add_bspline_filling`

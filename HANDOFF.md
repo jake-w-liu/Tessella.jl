@@ -4835,7 +4835,22 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
-## Latest landed increment (`2b8bcba`, pushed to `origin/main`)
+## Latest landed increment (`2d09360`, pushed to `origin/main`)
+
+**`occ.addPipe` (GEO01 slice 25)** — `occ.add_pipe(profile, wireTag)`
+implements `BRepOffsetAPI_MakePipe` semantics: wire or `(2,faceTag)`
+profiles transport rigidly along spine stations under cumulative
+parallel-transport (minimal-rotation) frames — conic stations densify
+at π/16, free-form at 16 spans — and the transported section wires
+loft through `addThruSections`. Wire profiles produce surface pipes,
+face profiles solid pipes (planar caps via the loft path). Exact for
+straight spines — circle profile → exact rational cylinder (lateral
+area π, volume πr²h, centroid on-axis to 1e-9) — documented
+approximation for curved spines (quarter-torus tube measured within
+3% of analytic 0.3π²). Station wires publish as owned sub-entities.
+Verified: `api_occ_pipe_test.jl` 15 green; loft regression 26 green.
+
+## Previous landed increment (`2b8bcba`, pushed to `origin/main`)
 
 **`occ.addSurfaceFilling`/`addBSplineFilling` (GEO01 slice 24)** —
 `ModelOCCLoft.jl` implements `BRepOffsetAPI_MakeFilling` bounded
