@@ -595,6 +595,7 @@ function _model_occ_thru_sections!(m::GeoModel,tag,wire_tags;
     tag_of=id->_model_occ_sweep_tag_of(sw,kernel,id,caller)
     centroid=loft_centroid
     face_of=Dict{Tuple{Int,Int},Int}()   # (gap_or_0, col) -> face_ids index
+    lat_rev=Dict{Int,Bool}()             # face_ids index -> outward flip
     fi=0
     lat_order=Tuple{Int,Int}[]
     for k in 1:ne
@@ -628,6 +629,7 @@ function _model_occ_thru_sections!(m::GeoModel,tag,wire_tags;
                 err isa ArgumentError ? nothing : rethrow()
             end : nothing
             if plangeo!==nothing
+                planar_rev=false
                 if make_solid
                     mid=_occ_surface_point(
                         (patch=_ModelNURBSSurface(:bspline,patch),),
@@ -635,8 +637,8 @@ function _model_occ_thru_sections!(m::GeoModel,tag,wire_tags;
                     # Same mechanism as the caps: `reversed` flips the stored
                     # normal; reversing the wire uses would be cancelled by
                     # conic axis normalization.
-                    _dot3(plangeo.axis,_arc_sub(mid,centroid))<0 &&
-                        (plangeo=(;plangeo...,reversed=true))
+                    planar_rev=_dot3(plangeo.axis,_arc_sub(mid,centroid))<0
+                    planar_rev && (plangeo=(;plangeo...,reversed=true))
                 end
                 _model_occ_sweep_bind!(sw,-1,wire_tags[fi],wire_ids[fi],
                     _ModelOCCShape(-1,(uses=uses,),UInt64[u[1] for u in uses]))
@@ -644,6 +646,7 @@ function _model_occ_thru_sections!(m::GeoModel,tag,wire_tags;
                     _ModelOCCShape(2,(kind=:plane,geometry=plangeo),
                                    UInt64[wire_ids[fi]]))
                 face_of[(ruled ? j : 0,k)]=fi
+                lat_rev[fi]=planar_rev
                 push!(lat_order,(ruled ? j : 0,k))
                 continue
             end
@@ -699,6 +702,7 @@ function _model_occ_thru_sections!(m::GeoModel,tag,wire_tags;
                 _ModelOCCShape(2,(kind=:tensor_bspline,geometry=geometry),
                                UInt64[wire_ids[fi]]))
             face_of[(ruled ? j : 0,k)]=fi
+            lat_rev[fi]=face_reversed
             push!(lat_order,(ruled ? j : 0,k))
         end
     end
@@ -708,7 +712,7 @@ function _model_occ_thru_sections!(m::GeoModel,tag,wire_tags;
     if make_solid
         # Cap faces bind the section wires verbatim; each must be planar.
         cap_uses=[uses_per_wire[1],uses_per_wire[nsec]]
-        caps=Tuple{Int,UInt64}[]
+        caps=Tuple{Int,UInt64,Bool}[]
         for (which,uses) in enumerate(cap_uses)
             geo=_model_occ_plane_face_geometry(shape_of,tag_of,[uses],caller)
             outward=which==1 ?
@@ -719,26 +723,27 @@ function _model_occ_thru_sections!(m::GeoModel,tag,wire_tags;
             # cannot bake an outward normal — the `reversed` record flag is
             # the mechanism (`_occ_surface_normal` and the winding alignment
             # honor it), matching `_model_box_plane_geometry`'s convention.
-            if _dot3(geo.axis,outward)<0
-                geo=(;geo...,reversed=true)
-            end
+            cap_rev=_dot3(geo.axis,outward)<0
+            cap_rev && (geo=(;geo...,reversed=true))
             fi+=1
             _model_occ_sweep_bind!(sw,-1,wire_tags[fi],wire_ids[fi],
                 _ModelOCCShape(-1,(uses=uses,),UInt64[u[1] for u in uses]))
             _model_occ_sweep_bind!(sw,2,face_tags[fi],face_ids[fi],
                 _ModelOCCShape(2,(kind=:plane,geometry=geo),
                                UInt64[wire_ids[fi]]))
-            push!(caps,(fi,face_ids[fi]))
+            push!(caps,(fi,face_ids[fi],cap_rev))
         end
-        # Every face record the loft creates is outward-baked (`reversed`
-        # flags above), so all shell uses are forward — the volume assembly
-        # reads `abs(signed_surface)` and trusts each face's stored normal.
+        # The measure path orients each face's canonical normal by the shell
+        # use-sign alone (σ·axis / σ·(du×dv)), so every use carries that
+        # face's outward flip — `rev` equals the record's `reversed` flag
+        # here, the same pairing `occ.extrude` emits on its source cap.
         shell_uses=Tuple{UInt64,Bool}[]
-        for (fi_,fid) in caps
-            push!(shell_uses,(fid,false))
+        for (fi_,fid,cap_rev) in caps
+            push!(shell_uses,(fid,cap_rev))
         end
         for (j,k) in lat_order
-            push!(shell_uses,(face_ids[face_of[(j,k)]],false))
+            fid=face_ids[face_of[(j,k)]]
+            push!(shell_uses,(fid,lat_rev[face_of[(j,k)]]))
         end
         _model_occ_sweep_bind!(sw,-2,shell_tag,shell_id,
             _ModelOCCShape(-2,(uses=shell_uses,),

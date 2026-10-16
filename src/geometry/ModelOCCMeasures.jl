@@ -615,12 +615,13 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
             continue
         end
         n=(σ*rec.axis[1],σ*rec.axis[2],σ*rec.axis[3])
-        # The tensor pass (conic-free wires only) runs only for the
-        # centroid — get_mass on a conic-faced solid still reports V.
-        A,c3,T=_model_occ_plane_stats(kernel,fid;
-                                      want_tensor=want_centroid)
-        V+=A*_dot3(n,c3)/3
-        want_centroid && (M=_occ3_add(M,_occ_tensor_apply(T,n)))
+        # On a plane face r·n̂ is the constant face offset, so the centroid
+        # moment ∬_F r(r·n̂)dA = (n̂·c̄)·A·c̄ — no per-edge tensor pass, and
+        # conic-bounded plane faces stay supported.
+        A,c3,_=_model_occ_plane_stats(kernel,fid)
+        d=A*_dot3(n,c3)
+        V+=d/3
+        want_centroid && (M=_occ3_add(M,_occ3_scale(c3,d)))
     end
     # Upstream reports the signed divergence sum (inward-wound shells go
     # negative); a degenerate one leaves the empty-GProp centroid.

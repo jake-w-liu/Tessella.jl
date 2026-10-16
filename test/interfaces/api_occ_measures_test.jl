@@ -187,12 +187,15 @@ end
 @testset "occ.get_mass — conic-faced solid split" begin
     occ=_occ_setup()
     # Circular-boundary faces reach the divergence path for get_mass
-    # (their shoelace handles conics); the second-moment tensor needed
-    # for the centroid is line-wire-only and rejects loudly.
+    # (their shoelace handles conics); the centroid uses the closed-form
+    # plane-face moment (n̂·c̄)·A·c̄ so conic wires compute too.
     d1=occ.add_disk(0.0,0.0,0.0,1.0,1.0)
     d2=occ.add_disk(0.0,0.0,3.0,1.0,1.0)
     sh=occ.add_surface_loop([d1,d2])
     v=occ.add_volume([sh])
     @test occ.get_mass(3,v)≈π atol=1e-9
-    @test occursin("conic",_errtext(()->occ.get_center_of_mass(3,v)))
+    cx,cy,cz=occ.get_center_of_mass(3,v)
+    @test cx≈0.0 atol=1e-12
+    @test cy≈0.0 atol=1e-12
+    @test cz≈2.25 atol=1e-12   # M=π·3·(0,0,3); V=π → z̄=9/4
 end
