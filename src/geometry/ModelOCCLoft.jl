@@ -774,3 +774,171 @@ function _loft_line_record(a,b,caller)
         "$caller: loft collapsed on coincident section vertices"))
     return (occ=:line,origin=a,dir=_occ_dir(d),t0=0.0,t1=len)
 end
+
+# ── `addSurfaceFilling` / `addBSplineFilling` ─────────────────────────────────
+#
+# `BRepOffsetAPI_MakeFilling` contract: a bounded surface whose border is the
+# given wire. Planar wires publish the exact `:plane` record — upstream's
+# filling degenerates to the containing plane likewise. Non-planar 4-edge
+# wires become a Coons/Gordon-blended tensor B-spline patch: the two ruled
+# families plus the corner bilinear interpolant, sampled on the unified
+# boundary Greville grid and re-interpolated in the same knot spaces so the
+# boundary is reproduced exactly. Member edges keep `lin2d`/`tan2d`/`tan2dv`
+# pcurves on the patch rectangle.
+
+# Homogeneous evaluation of a rescaled NURBSCurve at u ∈ [0,1] via
+# `_loft_basis_row` — returns (xw,yw,zw,w) so the Coons blend below stays
+# exact for rational boundaries (conic arcs).
+function _fill_nc_eval(nc,u)
+    knots=nc.knots; p=nc.degree; n=length(nc.controls)
+    u=clamp(u,knots[1],knots[end])
+    s=clamp(searchsortedlast(knots,u),p+1,length(knots)-p-1)
+    row=_loft_basis_row(knots,p,s,u,n)
+    X=Y=Z=W=0.0
+    @inbounds for i in 1:n
+        b=row[i]
+        b==0.0 && continue
+        w=nc.weights[i]; c=nc.controls[i]
+        X+=b*w*c[1]; Y+=b*w*c[2]; Z+=b*w*c[3]; W+=b*w
+    end
+    W!=0.0 || throw(ArgumentError(
+        "OCC.addSurfaceFilling: degenerate filling boundary"))
+    return (X,Y,Z,W)
+end
+
+# u/v edge umap flip: t ↦ 1−ū(t) — `(:lin,off,sc)` → `(:lin,1−off,−sc)` and
+# the conic `(:tan,inner,off,sc)` flips identically in the outer map.
+_fill_flip_umap(um)=um[1]===:lin ? (:lin,1.0-um[2],-um[3]) :
+                                    (:tan,um[2],1.0-um[3],-um[4])
+
+# v-side pcurve for edge with umap `um` on column `uu`: t ↦ (uu, v0+vs·t)
+# for linear edges, (uu, v0+vs·inner(t)) for conic edges.
+function _fill_vmap_pcurve(um,uu)
+    if um[1]===:lin
+        return _loft_lin2d((uu,um[2]),(0.0,um[3]))
+    end
+    return (tan2dv=(um[2],uu,um[3],um[4]),)
+end
+
+# Unify helper: Greville abscissae of a clamped knot vector.
+function _fill_greville(knots,p,n)
+    out=Vector{Float64}(undef,n)
+    for i in 1:n
+        s=0.0
+        for k in 1:p
+            s+=knots[i+k]
+        end
+        out[i]=s/p
+    end
+    return out
+end
+
+# Coons tensor patch for a 4-edge closed wire. Edges in traversal order:
+# e1 bottom (u fwd), e2 right (v fwd), e3 top (u bwd), e4 left (v bwd).
+function _fill_coons_geometry(kernel,uses,tag_of,caller)
+    ncs=Vector{NURBS.NURBSCurve}(undef,4); ums=Vector{Any}(undef,4)
+    for k in 1:4
+        eid,rev=uses[k]
+        g=kernel.shapes[eid].geometry.geometry
+        ncs[k],ums[k]=_loft_edge_nc(g,rev,caller)
+    end
+    nc_bot,nc_top=ncs[1],_loft_nc_reverse(ncs[3])
+    nc_rgt,nc_lft=ncs[2],_loft_nc_reverse(ncs[4])
+    uc=_loft_nc_unify([nc_bot,nc_top]); vc=_loft_nc_unify([nc_lft,nc_rgt])
+    pu=uc[1].degree; knotsU=uc[1].knots; nu=length(uc[1].controls)
+    qv=vc[1].degree; knotsV=vc[1].knots; nv=length(vc[1].controls)
+    û=_fill_greville(knotsU,pu,nu); v̂=_fill_greville(knotsV,qv,nv)
+    cb=u->_fill_nc_eval(nc_bot,u); ct=u->_fill_nc_eval(nc_top,u)
+    cl=v->_fill_nc_eval(nc_lft,v); cr=v->_fill_nc_eval(nc_rgt,v)
+    P00=cb(0.0); P10=cb(1.0); P01=ct(0.0); P11=ct(1.0)
+    # Coons blend in homogeneous space — the corner bilinear term subtracts
+    # the doubly-counted corner patch in (xw,yw,zw,w) too, keeping the
+    # boundary curves' rational parametrization exactly representable.
+    G=Matrix{NTuple{4,Float64}}(undef,nu,nv)
+    for i in 1:nu, j in 1:nv
+        u=û[i]; v=v̂[j]
+        pb=cb(u); pt=ct(u); pl=cl(v); pr=cr(v)
+        w00=(1-u)*(1-v); w10=u*(1-v); w01=(1-u)*v; w11=u*v
+        G[i,j]=ntuple(d->(1-v)*pb[d]+v*pt[d]+(1-u)*pl[d]+u*pr[d]-
+                (w00*P00[d]+w10*P10[d]+w01*P01[d]+w11*P11[d]),4)
+    end
+    # Tensor interpolation: C = A_u⁻¹·G·A_v⁻ᵀ with basis rows at Greville pts.
+    Au=Matrix{Float64}(undef,nu,nu); Av=Matrix{Float64}(undef,nv,nv)
+    for i in 1:nu
+        s=clamp(searchsortedlast(knotsU,û[i]),pu+1,length(knotsU)-pu-1)
+        Au[i,:].=_loft_basis_row(knotsU,pu,s,û[i],nu)
+    end
+    for j in 1:nv
+        s=clamp(searchsortedlast(knotsV,v̂[j]),qv+1,length(knotsV)-qv-1)
+        Av[j,:].=_loft_basis_row(knotsV,qv,s,v̂[j],nv)
+    end
+    # Interpolate the homogeneous grid; dehomogenize into poles+weights.
+    ctrl=Matrix{NTuple{3,Float64}}(undef,nu,nv)
+    wts=Matrix{Float64}(undef,nu,nv)
+    H=[(Au\Float64[G[i,j][d] for i in 1:nu, j in 1:nv])/transpose(Av)
+        for d in 1:4]                     # per-dim A_u⁻¹·G·A_v⁻ᵀ
+    for i in 1:nu, j in 1:nv
+        w=H[4][i,j]
+        w>0.0 || throw(ArgumentError(
+            "OCC.addSurfaceFilling: degenerate filling patch"))
+        ctrl[i,j]=(H[1][i,j]/w,H[2][i,j]/w,H[3][i,j]/w)
+        wts[i,j]=w
+    end
+    patch=NURBS.NURBSSurface(pu,qv,knotsU,knotsV,ctrl,wts)
+    # pcurves — bottom e1 u-trace at v=0, right e2 v-trace at u=1, top e3
+    # u-trace at v=1 with flipped direction, left e4 v-trace at u=0 flipped.
+    pc=Dict{Int,NamedTuple}()
+    eids=[uses[k][1] for k in 1:4]
+    pc[tag_of(eids[1])]=(fwd=_loft_umap_pcurve(ums[1],0.0),rev=nothing)
+    pc[tag_of(eids[2])]=(fwd=_fill_vmap_pcurve(ums[2],1.0),rev=nothing)
+    pc[tag_of(eids[3])]=(fwd=_loft_umap_pcurve(
+        _fill_flip_umap(ums[3]),1.0),rev=nothing)
+    pc[tag_of(eids[4])]=(fwd=_fill_vmap_pcurve(
+        _fill_flip_umap(ums[4]),0.0),rev=nothing)
+    # vertex_uv: traversal corners.
+    vuv=Dict{Int,NTuple{2,Float64}}()
+    for (k,uv) in ((1,(0.0,0.0)),(2,(1.0,0.0)),(3,(1.0,1.0)),(4,(0.0,1.0)))
+        eid,rev=uses[k]
+        a,b=kernel.shapes[eid].children
+        vid=rev ? b : a
+        vuv[_model_occ_shape_tag(kernel,vid,caller)]=uv
+    end
+    return (occ=:tensor_bspline,
+            patch=_ModelNURBSSurface(:bspline,patch),
+            pcurves=pc,vertex_uv=vuv,reversed=false)
+end
+
+# `OCC_Internals::addSurfaceFilling` — the filling surface's tag binds dim 2;
+# sub-entities stay owned by the input wire (no recursive rebind).
+function _model_occ_surface_filling(m::GeoModel,tag,wire_tag;
+                                    caller="OCC.addSurfaceFilling")
+    kernel=m.occ_kernel
+    requested=_model_occ_requested_tag(tag,caller)
+    allocated=_model_occ_next_tag(kernel,2,requested,caller)
+    haskey(kernel.bindings,(2,allocated)) && throw(ArgumentError(
+        "$caller: OCC Surface[$allocated] already exists"))
+    wt=abs(_model_occ_requested_tag(wire_tag,caller))
+    wid=get(kernel.bindings,(-1,wt),nothing)
+    wid===nothing && throw(ArgumentError("$caller: unknown OCC Wire[$wt]"))
+    uses=kernel.shapes[wid].geometry.uses
+    length(uses)>=3 || throw(ArgumentError(
+        "$caller: filling wire must have at least 3 edges"))
+    shape_of=id->kernel.shapes[id]
+    tag_of=id->_model_occ_shape_tag(kernel,id,caller)
+    geometry=try
+        _model_occ_plane_face_geometry(shape_of,tag_of,[uses],caller)
+    catch err
+        err isa ArgumentError ? nothing : rethrow()
+    end
+    if geometry===nothing
+        length(uses)==4 || throw(ArgumentError(
+            "$caller: non-planar filling requires a 4-edge wire"))
+        geometry=_fill_coons_geometry(kernel,uses,tag_of,caller)
+    end
+    kind=haskey(geometry,:patch) ? :tensor_bspline : :plane
+    shape=_ModelOCCShape(2,(kind=kind,geometry=geometry),UInt64[wid])
+    id=only(_model_occ_reserve_shapes(kernel,1,caller))
+    _model_occ_bind_shape!(kernel,2,allocated,id,shape)
+    kernel.next_shape=id+UInt64(1)
+    return allocated
+end

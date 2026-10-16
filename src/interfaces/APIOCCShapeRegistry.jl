@@ -64,6 +64,15 @@ add_plane_surface(wire_tags;tag=-1)=_with_model() do m
     Model._model_occ_add_plane_surface!(m,wire_tags;tag)
 end
 
+add_surface_filling(wire_tag;tag=-1)=_with_model() do m
+    Model._model_occ_surface_filling(m,tag,wire_tag)
+end
+
+add_bspline_filling(wire_tag;tag=-1)=_with_model() do m
+    Model._model_occ_surface_filling(m,tag,wire_tag;
+                                   caller="OCC.addBSplineFilling")
+end
+
 add_surface_loop(surface_tags;tag=-1,sewing=false)=_with_model() do m
     Model._model_occ_add_surface_loop!(m,surface_tags;tag,sewing)
 end

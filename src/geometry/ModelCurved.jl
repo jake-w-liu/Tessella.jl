@@ -750,6 +750,11 @@ function _occ_pcurve_d0(pc,t::Float64)
         inner,u0,us,vv=pc.tan2d
         s,_,_=_occ_conic_reparam(inner,t)
         return fma(us,s,u0),vv
+    elseif hasproperty(pc,:tan2dv)
+        # Fill v-edge trace: v(t) = v0 + vs·inner(t); u constant `uu`.
+        inner,uu,v0,vs=pc.tan2dv
+        s,_,_=_occ_conic_reparam(inner,t)
+        return uu,fma(vs,s,v0)
     end
     o,x,a,b=pc.ellips2d
     return _occ_ellips2d_eval(o,x,a,b,t)
@@ -766,6 +771,10 @@ function _occ_pcurve_d1(pc,t::Float64)
         inner,u0,us,vv=pc.tan2d
         s,ds,_=_occ_conic_reparam(inner,t)
         return (fma(us,s,u0),vv),(us*ds,0.0)
+    elseif hasproperty(pc,:tan2dv)
+        inner,uu,v0,vs=pc.tan2dv
+        s,ds,_=_occ_conic_reparam(inner,t)
+        return (uu,fma(vs,s,v0)),(0.0,vs*ds)
     else
         # `Geom2d_Circle`/`Geom2d_Ellipse::D1` — the SetLinearForm pair
         # (−R·sin on X, R·cos on the derived YDirection (−x.y, x.x)); the
@@ -811,6 +820,10 @@ function _occ_pcurve_d2(pc,t::Float64)
         inner,u0,us,vv=pc.tan2d
         s,ds,dds=_occ_conic_reparam(inner,t)
         return (fma(us,s,u0),vv),(us*ds,0.0),(us*dds,0.0)
+    elseif hasproperty(pc,:tan2dv)
+        inner,uu,v0,vs=pc.tan2dv
+        s,ds,dds=_occ_conic_reparam(inner,t)
+        return (uu,fma(vs,s,v0)),(0.0,vs*ds),(0.0,vs*dds)
     end
     o,x,a,b=pc.ellips2d
     s,c=_gm_sincos(t)
@@ -2477,6 +2490,7 @@ _occ_pcurve_kind(pc)=hasproperty(pc,:neg2d) ?
     hasproperty(pc,:circ2d) ? :circ2d :
     hasproperty(pc,:ellips2d) ? :ellips2d :
     hasproperty(pc,:tan2d) ? :tan2d :
+    hasproperty(pc,:tan2dv) ? :tan2dv :
     throw(ArgumentError("_occ_pcurve_kind: unsupported pcurve record"))
 @inline _occ_pcurve_isperiodic(pc)=_occ_pcurve_kind(pc) in (:circ2d,:ellips2d)
 # `Geom2dAdaptor_Curve::Resolution(Ruv)` — line: Ruv; conic: 2·asin(Ruv/2r)
@@ -2487,9 +2501,10 @@ function _occ_pcurve_resolution(pc,ruv)
     hasproperty(pc,:neg2d) &&
         return _occ_pcurve_resolution(pc.neg2d[1],ruv)
     kind=_occ_pcurve_kind(pc)
-    # `tan2d` traces run at constant v — the uv trace is a straight segment
-    # regardless of the t-spacing, so endpoints bound it exactly.
-    (kind===:lin2d || kind===:tan2d) && return ruv
+    # `tan2d`/`tan2dv` traces run at constant v/u — the uv trace is a
+    # straight segment regardless of the t-spacing, so endpoints bound it
+    # exactly.
+    (kind===:lin2d || kind===:tan2d || kind===:tan2dv) && return ruv
     r=_occ_pcurve_kind(pc)===:circ2d ? pc.circ2d[3] :
         let (a,b)=(pc.ellips2d[3],pc.ellips2d[4])
             min(a,b)*min(a,b)/max(a,b)   # ρmin — radii may swap under transforms
