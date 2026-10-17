@@ -1,5 +1,7 @@
 # File merge consumes the literal cache/record union on an operation-owned
 # model. Publication retains the current slot object held by existing views.
+import ..IO
+
 function _model_merge_complete(model,source,class,caller)
     source,class=_dim01_actual_cache(source,class;physical_names=model.physical_names)
     if source isa MixedMesh && !isempty(model.meshing.periodic_uid_history)
@@ -174,8 +176,12 @@ function _model_merge_prepare(path)
     seed=_model_merge_seed(model,source,caller)
     options=copy(OPTIONS);diagnostics=_model_import_diagnostics(options)
     fields=_model_merge_fields()
-    result=if lowercase(splitext(path)[2])==".msh"
+    extension=lowercase(splitext(path)[2])
+    result=if extension==".msh"
         GeoExec._geo_stage_mesh_merge(path,model,seed;
+            context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
+    elseif extension in (".unv",".mesh")
+        IO._stage_foreign_mesh_merge(path,model,seed;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
     else
         _model_import_execute_geo(path,0,options,diagnostics;legacy=true,

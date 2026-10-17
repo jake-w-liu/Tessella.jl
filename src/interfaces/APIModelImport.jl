@@ -1,5 +1,7 @@
 # File execution/import prepares detached state before touching model slots,
 # options, lookup catalogues, or session views.
+import ..IO
+
 function _model_import_option!(options,family,member,value)
     name=string(family,'.',member)
     key=name=="Mesh.MinimumCirclePoints" ? "Mesh.MinCircleNodes" :
@@ -151,9 +153,15 @@ function _model_import_prepare(path,dimension;legacy=false)
     options=copy(OPTIONS);diagnostics=_model_import_diagnostics(options)
     extension=lowercase(splitext(path)[2])
     extension==".pos" && return _list_model_open_prepare(path,caller)
-    result=extension==".msh" ? GeoExec._geo_stage_mesh_file(path;
-        context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[]) :
+    result=if extension==".msh"
+        GeoExec._geo_stage_mesh_file(path;
+            context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
+    elseif extension in (".unv",".mesh")
+        IO._stage_foreign_mesh_file(path;
+            context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
+    else
         _model_import_execute_geo(path,dimension,options,diagnostics;legacy)
+    end
     return _model_import_prepare_result(result,path,options,diagnostics;legacy,caller)
 end
 
@@ -270,8 +278,8 @@ function _model_import_filename(filename,caller;geo_only=false)
     filename isa AbstractString && !isempty(filename) && !occursin('\0',filename) ||
         throw(ArgumentError("$caller: filename must be a nonempty NUL-free string"))
     extension=lowercase(splitext(filename)[2])
-    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos")) || throw(ArgumentError(
-        "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh and .pos")"))
+    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos",".unv",".mesh")) || throw(ArgumentError(
+        "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh, .pos, .unv and .mesh")"))
     isfile(filename) || throw(ArgumentError("$caller: missing file $filename"))
     return String(filename)
 end
@@ -279,9 +287,12 @@ end
 """
     open(filename)
 
-Import a `.geo`, `.msh` or supported linear-list `.pos` file into a new current model, reusing an empty
+Import a `.geo`, `.msh`, `.unv`, `.mesh` or supported linear-list `.pos` file
+into a new current model, reusing an empty
 current model. Nonempty prior models and session views remain alive. MSH
-imports keep actual UIDs, entity ownership and retained metadata; ordinary
+imports keep actual UIDs, entity ownership and retained metadata; UNV and
+Medit/MESH imports publish through the same channel with their elementary and
+physical tags mapped to entity ownership; ordinary
 model data sections create views bound to the imported model. The model name
 is the filename stem unless GEO `SetName` supplies one. Failed preparation
 leaves model slots, caches, options and views unchanged; this stricter failure

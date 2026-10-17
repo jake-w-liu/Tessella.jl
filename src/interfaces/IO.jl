@@ -19,7 +19,9 @@ background-field graph.
 module IO
 
 using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets, node, validate
-using ..Elements: MSH_PHYSICAL_NAME_MAX_BYTES, _copy_physical_names, MixedMesh
+using ..Elements: MSH_PHYSICAL_NAME_MAX_BYTES, _copy_physical_names, MixedMesh,
+                  ElementBlock, SpecialElementBlock, msh_spec, msh_dimension,
+                  msh_family, msh_num_nodes, simplex_to_mixed
 using ..Predicates: _two_diff_tail
 using ..GmshLibm: _gm87_sin, _gm87_cos, _gm_tan, _gm_asin, _gm_acos, _gm_atan,
                   _gm87_atan2, _gm_sinh, _gm_cosh, _gm_tanh, _gm87_exp, _gm87_log,
@@ -28,6 +30,7 @@ using Printf: @printf, @sprintf, Format, format
 
 export read_msh, write_msh, MshFile
 export read_stl, read_geo_params, GeoParams, GeoFieldSpec
+export read_unv, write_unv, read_mesh, write_mesh, UnvFile, MeshFile
 
 include("GeoColorNames.jl")
 include("GeoOptionTables.jl")
@@ -10924,6 +10927,837 @@ function _gmsh_int_option(value::Float64,key::AbstractString)
         (err isa InexactError || err isa OverflowError) || rethrow()
         throw(ArgumentError("read_geo_params: $key is outside the platform Int range"))
     end
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# I-DEAS Universal (.unv) and INRIA/Medit (.mesh) text-mesh formats
+#
+# Field and descriptor semantics follow the pinned Gmsh 4.15.2
+# `GModel::readUNV`/`writeUNV` and `GModel::readMESH`/`writeMESH`:
+#
+# * UNV dataset 2411 holds nodes (label; export/displacement coordinate-system
+#   ids; color; `x y z` on the following line, with `D` exponents accepted) and
+#   dataset 2412 holds elements (label; FE descriptor; elementary tag;
+#   physical tag; color; node count; node labels, eight per line; beam
+#   descriptors carry an extra orientation-triplet line before the nodes).
+#   Dataset records are bracketed by `-1` separator lines; unknown datasets
+#   are skipped, unknown element descriptors are warned once and skipped after
+#   their node list is consumed (upstream behaviour), and descriptor `0` is
+#   guessed from the node count (2→line, 3→triangle, 4→tetrahedron).
+#   Malformed records and dangling node references are errors.
+# * MEDIT/MESH files carry `MeshVersionFormatted` (versions 1–4), `Dimension`
+#   (2 or 3, inline or on the following line), `Vertices` (`x y z ref`),
+#   `Edges[P2|P3|P4]`, `Triangles[P2|P3|P4]`, `Quadrilaterals`,
+#   `Tetrahedra[P2|P3|P4]` and `Hexahedra` sections; unrecognized sections are
+#   skipped like upstream. The trailing `ref` becomes the elementary entity
+#   tag and, when positive, also the physical tag (Tessella extension — the
+#   pinned reader groups entities by `ref` only).
+#
+# `read_unv`/`read_mesh` return file-level records: a compact MSH2-style
+# `MixedMesh` (per-cell `elementary_entities`, physical `tags`) plus the
+# original node/element labels. `API.open`/`API.merge` publish the identical
+# content through the same channel `.msh` imports use — the parsed records are
+# re-encoded as an MSH 2.2 byte stream handed to `GeoExec` staging — so entity
+# classification, identity transport and failure atomicity match exactly.
+# `API.write` exports the session mesh through `write_unv`/`write_mesh`.
+# ════════════════════════════════════════════════════════════════════════════════
+
+struct _TextMeshCell
+    label::Int64            # source element label (> 0; dense numbering for .mesh)
+    msh::Int                # Gmsh element type code
+    nodes::Vector{Int32}    # compact node rows in Gmsh vertex order
+    elementary::Int64       # elementary-entity tag (normalized non-negative)
+    physical::Int64         # physical tag (normalized non-negative)
+end
+
+function _unv_int(token::AbstractString,caller::AbstractString,context::AbstractString)
+    value=tryparse(Int,token)
+    value===nothing && throw(ArgumentError(
+        "$caller: invalid integer '$token' in $context"))
+    return Int64(value)
+end
+
+function _unv_float(token::AbstractString,caller::AbstractString,context::AbstractString)
+    # UNV writes scientific exponents with `D`; accept both `D`/`d`/`E`/`e`.
+    token=replace(token,'D'=>'E','d'=>'e')
+    value=tryparse(Float64,token)
+    value===nothing && throw(ArgumentError(
+        "$caller: invalid floating-point value '$token' in $context"))
+    isfinite(value) || throw(ArgumentError(
+        "$caller: non-finite floating-point value in $context"))
+    return value
+end
+
+@inline _unv_separator(line::AbstractString)=strip(line)=="-1"
+
+# Beam-family descriptors consume one orientation-triplet line before their
+# node labels (upstream `GModel::readUNV` first `switch(type)` block).
+const _UNV_BEAM_DESCRIPTORS=Set{Int}((11,21,22,31,23,24,32))
+
+# `type == 0` records guess the descriptor from the node count.
+const _UNV_GUESS_TYPES=Dict{Int,Int}(2=>11,3=>41,4=>111)
+
+# UNV descriptor → (Gmsh type, file→Gmsh vertex permutation or `nothing`).
+# Permutations are the upstream `readUNV` constructor orders, 1-based:
+# `gmsh_nodes[j] = file_nodes[perm[j]]`. Descriptor 117 (linear pyramid) is a
+# Tessella extension — the pinned release warns and skips pyramids.
+const _UNV_DESCRIPTOR_TABLE=Dict{Int,Tuple{Int,Union{Nothing,NTuple{N,Int} where N}}}(
+    11=>(1,nothing),21=>(1,nothing),22=>(1,nothing),31=>(1,nothing),
+    23=>(8,(1,3,2)),24=>(8,(1,3,2)),32=>(8,(1,3,2)),
+    41=>(2,nothing),51=>(2,nothing),61=>(2,nothing),74=>(2,nothing),
+    81=>(2,nothing),91=>(2,nothing),
+    42=>(9,(1,3,5,2,4,6)),52=>(9,(1,3,5,2,4,6)),62=>(9,(1,3,5,2,4,6)),
+    72=>(9,(1,3,5,2,4,6)),82=>(9,(1,3,5,2,4,6)),92=>(9,(1,3,5,2,4,6)),
+    44=>(3,nothing),54=>(3,nothing),64=>(3,nothing),71=>(3,nothing),
+    84=>(3,nothing),94=>(3,nothing),
+    45=>(16,(1,3,5,7,2,4,6,8)),55=>(16,(1,3,5,7,2,4,6,8)),
+    65=>(16,(1,3,5,7,2,4,6,8)),75=>(16,(1,3,5,7,2,4,6,8)),
+    85=>(16,(1,3,5,7,2,4,6,8)),95=>(16,(1,3,5,7,2,4,6,8)),
+    111=>(4,nothing),
+    118=>(11,(1,3,5,10,2,4,6,7,9,8)),
+    104=>(5,nothing),115=>(5,nothing),
+    105=>(17,(1,3,5,7,13,15,17,19,2,8,9,4,10,6,11,12,14,20,16,18)),
+    116=>(17,(1,3,5,7,13,15,17,19,2,8,9,4,10,6,11,12,14,20,16,18)),
+    101=>(6,nothing),112=>(6,nothing),
+    102=>(18,(1,3,5,10,12,14,2,6,7,4,8,9,11,15,13)),
+    113=>(18,(1,3,5,10,12,14,2,6,7,4,8,9,11,15,13)),
+    117=>(7,nothing))
+
+# Gmsh type → (UNV descriptor, Gmsh→file vertex permutation or `nothing`).
+# The permutations are the upstream `getVertexUNV` maps (+1), the exact
+# inverse of the read table. Type 7 (pyramid) uses the 117 extension.
+const _UNV_WRITE_TABLE=Dict{Int,Tuple{Int,Union{Nothing,NTuple{N,Int} where N}}}(
+    1=>(21,nothing),8=>(24,(1,3,2)),
+    2=>(91,nothing),9=>(92,(1,4,2,5,3,6)),
+    3=>(94,nothing),16=>(95,(1,5,2,6,3,7,4,8)),
+    4=>(111,nothing),11=>(118,(1,5,2,6,3,7,8,10,9,4)),
+    5=>(115,nothing),
+    17=>(116,(1,9,2,12,3,14,4,10,11,13,15,16,5,17,6,19,7,20,8,18)),
+    6=>(112,nothing),18=>(113,(1,7,2,10,3,8,9,11,12,4,13,5,15,6,14)),
+    7=>(117,nothing),
+    # Point cells have no UNV descriptor; upstream emits them as descriptor-0
+    # records which readers then guess/warn-and-skip (a 1-node record is
+    # unguessable, so the cell is skipped with a warning on reimport).
+    15=>(0,nothing))
+
+function _unv_read_nodes!(io::Base.IO,caller::AbstractString,
+        node_labels::Vector{Int64},node_rows::Dict{Int64,Int32},
+        coords::Vector{Float64},limit::Int)
+    while !eof(io)
+        stripped=strip(readline(io))
+        _unv_separator(stripped) && return nothing
+        isempty(stripped) && continue
+        fields=split(stripped)
+        length(fields)>=4 || throw(ArgumentError(
+            "$caller: malformed UNV 2411 node record '$stripped'"))
+        label=_unv_int(fields[1],caller,"UNV node label")
+        for i in 2:4
+            _unv_int(fields[i],caller,"UNV node field")
+        end
+        eof(io) && throw(ArgumentError(
+            "$caller: truncated UNV 2411 node record"))
+        xyz=split(strip(readline(io)))
+        length(xyz)>=3 || throw(ArgumentError(
+            "$caller: malformed UNV 2411 node coordinates"))
+        x=_unv_float(xyz[1],caller,"UNV node coordinate")
+        y=_unv_float(xyz[2],caller,"UNV node coordinate")
+        z=_unv_float(xyz[3],caller,"UNV node coordinate")
+        label>=1 || throw(ArgumentError(
+            "$caller: non-positive UNV node label $label"))
+        haskey(node_rows,label) && throw(ArgumentError(
+            "$caller: duplicate UNV node label $label"))
+        length(node_labels)>=limit && throw(ArgumentError(
+            "$caller: UNV node count exceeds max_nodes=$limit"))
+        push!(node_labels,label);node_rows[label]=Int32(length(node_labels))
+        push!(coords,x);push!(coords,y);push!(coords,z)
+    end
+    return nothing
+end
+
+function _unv_read_elements!(io::Base.IO,caller::AbstractString,
+        node_rows::Dict{Int64,Int32},records::Vector{_TextMeshCell},
+        warned::Set{Int},next_elementary::Base.RefValue{Int64},
+        element_labels::Set{Int64},limit::Int)
+    while !eof(io)
+        stripped=strip(readline(io))
+        _unv_separator(stripped) && return nothing
+        (isempty(stripped) || length(stripped)<3) && continue
+        fields=split(stripped)
+        length(fields)>=6 || throw(ArgumentError(
+            "$caller: malformed UNV 2412 element record '$stripped'"))
+        label=_unv_int(fields[1],caller,"UNV element label")
+        descriptor=_unv_int(fields[2],caller,"UNV element descriptor")
+        elementary=_unv_int(fields[3],caller,"UNV elementary tag")
+        physical=_unv_int(fields[4],caller,"UNV physical tag")
+        _unv_int(fields[5],caller,"UNV element color")
+        count=_unv_int(fields[6],caller,"UNV element node count")
+        label>=1 || throw(ArgumentError(
+            "$caller: non-positive UNV element label $label"))
+        label in element_labels && throw(ArgumentError(
+            "$caller: duplicate UNV element label $label"))
+        push!(element_labels,label)
+        count<0 && throw(ArgumentError(
+            "$caller: negative UNV element node count $count"))
+        length(records)>=limit && throw(ArgumentError(
+            "$caller: UNV element count exceeds max_elements=$limit"))
+        if descriptor==0
+            descriptor=get(_UNV_GUESS_TYPES,Int(count),0)
+            descriptor==0 || descriptor in warned || begin
+                push!(warned,descriptor)
+                @warn "$caller: UNV element $label has no type; " *
+                      "guessing descriptor $descriptor from $count nodes"
+            end
+        end
+        if descriptor in _UNV_BEAM_DESCRIPTORS
+            eof(io) && throw(ArgumentError(
+                "$caller: truncated UNV beam orientation line"))
+            readline(io)   # orientation triplet — parsed positionally, unused
+        end
+        nodelabels=Int64[]
+        count>0 && sizehint!(nodelabels,Int(count))
+        while length(nodelabels)<count
+            eof(io) && throw(ArgumentError(
+                "$caller: truncated UNV element $label node list"))
+            nl=strip(readline(io))
+            _unv_separator(nl) && throw(ArgumentError(
+                "$caller: truncated UNV element $label node list"))
+            isempty(nl) && continue
+            for tok in split(nl)
+                length(nodelabels)<count || throw(ArgumentError(
+                    "$caller: UNV element $label node list overruns $count labels"))
+                push!(nodelabels,_unv_int(tok,caller,"UNV element node label"))
+            end
+        end
+        entry=get(_UNV_DESCRIPTOR_TABLE,descriptor,nothing)
+        if entry===nothing
+            descriptor in warned || begin
+                push!(warned,descriptor)
+                @warn "$caller: skipping unsupported UNV element descriptor $descriptor"
+            end
+            continue
+        end
+        msh,perm=entry
+        arity=perm===nothing ? msh_num_nodes(msh) : length(perm)
+        count==arity || throw(ArgumentError(
+            "$caller: UNV descriptor $descriptor expects $arity nodes, got $count"))
+        rows=Vector{Int32}(undef,Int(count))
+        @inbounds for i in 1:count
+            row=get(node_rows,nodelabels[i],Int32(0))
+            row!=0 || throw(ArgumentError(
+                "$caller: UNV element $label references unknown node $(nodelabels[i])"))
+            rows[i]=row
+        end
+        if elementary<0
+            elementary=next_elementary[]+Int64(1)
+        end
+        next_elementary[]=max(next_elementary[],elementary)
+        physical<0 && (physical=0)
+        0<=elementary<=typemax(Int32) || throw(ArgumentError(
+            "$caller: UNV elementary tag $elementary on element $label exceeds Int32"))
+        0<=physical<=typemax(Int32) || throw(ArgumentError(
+            "$caller: UNV physical tag $physical on element $label exceeds Int32"))
+        push!(records,_TextMeshCell(label,msh,
+            perm===nothing ? rows : rows[collect(perm)],elementary,physical))
+    end
+    return nothing
+end
+
+function _read_unv(io::Base.IO,caller::AbstractString,node_limit::Int,
+                   element_limit::Int)
+    node_labels=Int64[]
+    node_rows=Dict{Int64,Int32}()
+    coords=Float64[]
+    records=_TextMeshCell[]
+    warned=Set{Int}()
+    next_elementary=Ref{Int64}(0)
+    element_labels=Set{Int64}()
+    while !eof(io)
+        line=readline(io)
+        _unv_separator(line) || continue
+        eof(io) && break
+        dataset=readline(io)
+        while _unv_separator(dataset)
+            eof(io) && (dataset="";break)
+            dataset=readline(io)
+        end
+        number=tryparse(Int,strip(dataset))
+        number===nothing && continue
+        if number==2411
+            _unv_read_nodes!(io,caller,node_labels,node_rows,coords,node_limit)
+        elseif number==2412
+            _unv_read_elements!(io,caller,node_rows,records,warned,
+                next_elementary,element_labels,element_limit)
+        end
+        # Unknown datasets are skipped line-by-line until the next `-1`
+        # separator, exactly like the pinned reader.
+    end
+    return node_labels,coords,records
+end
+
+function _foreign_mesh_result(caller::AbstractString,node_labels::Vector{Int64},
+        coords::Vector{Float64},records::Vector{_TextMeshCell})
+    nn=length(node_labels)
+    C=reshape(coords,3,nn)
+    per=Dict{Int,Vector{_TextMeshCell}}();order=Int[]
+    for record in records
+        bucket=get!(()->_TextMeshCell[],per,record.msh)
+        isempty(bucket) && push!(order,record.msh)
+        push!(bucket,record)
+    end
+    blocks=ElementBlock[];owners=Vector{Int32}[];element_tags=Vector{UInt64}[]
+    for msh in order
+        cells=per[msh];arity=msh_num_nodes(msh);n=length(cells)
+        nodes=Matrix{Int32}(undef,arity,n)
+        tags=Vector{Int32}(undef,n);ents=Vector{Int32}(undef,n)
+        uids=Vector{UInt64}(undef,n)
+        @inbounds for j in 1:n
+            cell=cells[j]
+            nodes[:,j]=cell.nodes
+            tags[j]=Int32(cell.physical)
+            ents[j]=Int32(cell.elementary)
+            uids[j]=UInt64(cell.label)
+        end
+        push!(blocks,ElementBlock(msh,nodes,tags))
+        push!(owners,ents);push!(element_tags,uids)
+    end
+    mesh=MixedMesh(C,blocks;elementary_entities=owners)
+    return mesh,UInt64.(node_labels),element_tags
+end
+
+"""
+    UnvFile
+
+Result of [`read_unv`](@ref): the compact `mesh` (an MSH2-style `MixedMesh`
+whose per-cell `elementary_entities` hold the UNV elementary tag and whose
+`tags` hold the physical tag), the original `node_tags` in row order and the
+per-block `element_tags`.
+"""
+struct UnvFile
+    mesh::MixedMesh
+    node_tags::Vector{UInt64}
+    element_tags::Vector{Vector{UInt64}}
+end
+
+"""
+    MeshFile
+
+Result of [`read_mesh`](@ref): the compact `mesh` (an MSH2-style `MixedMesh`
+whose per-cell `elementary_entities` hold the Medit `ref` and whose `tags`
+carry the same positive `ref` as a physical tag), sequential `node_tags` and
+per-block `element_tags`.
+"""
+struct MeshFile
+    mesh::MixedMesh
+    node_tags::Vector{UInt64}
+    element_tags::Vector{Vector{UInt64}}
+end
+
+"""
+    read_unv(path; max_nodes, max_elements, max_file_bytes) -> UnvFile
+
+Read an I-DEAS Universal `.unv` file (datasets 2411 nodes and 2412 elements).
+Element descriptors map to Gmsh types with the pinned upstream table; unknown
+descriptors warn once and are skipped, `D` exponents are accepted, and node
+references must resolve. Other datasets (including 2477 groups) are skipped.
+"""
+function read_unv(path;
+                  max_nodes=typemax(Int32),max_elements=typemax(Int32),
+                  max_file_bytes=typemax(Int))
+    caller="read_unv"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    node_limit=_io_limit(max_nodes,caller,"max_nodes";ceiling=Int(typemax(Int32)))
+    element_limit=_io_limit(
+        max_elements,caller,"max_elements";ceiling=Int(typemax(Int32)))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
+    node_labels,coords,records=open(path,"r") do io
+        try
+            return _read_unv(io,caller,node_limit,element_limit)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa EOFError && throw(ArgumentError(
+                "$caller: truncated .unv file"))
+            rethrow()
+        end
+    end
+    mesh,node_tags,element_tags=_foreign_mesh_result(
+        caller,node_labels,coords,records)
+    return UnvFile(mesh,node_tags,element_tags)
+end
+
+# ── INRIA/Medit (.mesh) ────────────────────────────────────────────────────────
+
+# keyword → (Gmsh type, record node count). TetrahedraP2 swaps the last two
+# connectivity slots in both directions (upstream `readMESH`/`writeMESH`).
+const _MEDIT_READ_SECTIONS=Dict{String,Tuple{Int,Int}}(
+    "Edges"=>(1,2),"EdgesP2"=>(8,3),"EdgesP3"=>(26,4),"EdgesP4"=>(27,5),
+    "Triangles"=>(2,3),"TrianglesP2"=>(9,6),"TrianglesP3"=>(21,10),
+    "TrianglesP4"=>(23,15),
+    "Quadrilaterals"=>(3,4),
+    "Tetrahedra"=>(4,4),"TetrahedraP2"=>(11,10),"TetrahedraP3"=>(29,20),
+    "TetrahedraP4"=>(30,35),
+    "Hexahedra"=>(5,8))
+const _MEDIT_TET10_SWAP=(1,2,3,4,5,6,7,8,10,9)
+
+function _medit_count(io,caller,section,fields)
+    # Upstream uses `fscanf`, so the count may follow the keyword on the same
+    # line or occupy the following line.
+    tokens=length(fields)>=2 ? view(fields,2:length(fields)) : begin
+        eof(io) && throw(ArgumentError(
+            "$caller: truncated .mesh $section count"))
+        split(strip(readline(io)))
+    end
+    length(tokens)>=1 || throw(ArgumentError(
+        "$caller: missing .mesh $section count"))
+    count=_unv_int(tokens[1],caller,"$section count")
+    count>=0 || throw(ArgumentError(
+        "$caller: negative .mesh $section count $count"))
+    return Int(count)
+end
+
+function _medit_float(token,caller,context)
+    value=tryparse(Float64,token)
+    value===nothing && throw(ArgumentError(
+        "$caller: invalid floating-point value '$token' in $context"))
+    isfinite(value) || throw(ArgumentError(
+        "$caller: non-finite floating-point value in $context"))
+    return value
+end
+
+function _read_medit(io::Base.IO,caller::AbstractString,node_limit::Int,
+                   element_limit::Int)
+    # The first meaningful line carries `MeshVersionFormatted` (pinned reader).
+    version=nothing
+    while !eof(io)
+        stripped=strip(readline(io))
+        (isempty(stripped) || startswith(stripped,'#')) && continue
+        fields=split(stripped)
+        fields[1]=="MeshVersionFormatted" || throw(ArgumentError(
+            "$caller: .mesh files must begin with MeshVersionFormatted"))
+        if length(fields)>=2
+            version=_unv_int(fields[2],caller,"MeshVersionFormatted value")
+        else
+            eof(io) && throw(ArgumentError(
+                "$caller: truncated MeshVersionFormatted"))
+            vf=split(strip(readline(io)))
+            length(vf)>=1 || throw(ArgumentError(
+                "$caller: missing MeshVersionFormatted value"))
+            version=_unv_int(vf[1],caller,"MeshVersionFormatted value")
+        end
+        break
+    end
+    version===nothing && throw(ArgumentError(
+        "$caller: missing MeshVersionFormatted header"))
+    # Upstream accepts ASCII versions 1, 2 and 4; version 3 marks the binary
+    # encoding, which this reader intentionally rejects.
+    version in (1,2,4) || throw(ArgumentError(
+        "$caller: unsupported Medit mesh version $version (binary marker)"))
+    dimension=3
+    coords=Float64[]
+    vertex_count=0
+    records=_TextMeshCell[]
+    element_counter=Ref{Int64}(0)
+    node_labels=Int64[]
+    while !eof(io)
+        stripped=strip(readline(io))
+        (isempty(stripped) || startswith(stripped,'#')) && continue
+        fields=split(stripped)
+        keyword=fields[1]
+        if keyword=="Dimension"
+            value=if length(fields)>=2
+                _unv_int(fields[2],caller,"Dimension")
+            else
+                eof(io) && throw(ArgumentError("$caller: truncated Dimension"))
+                df=split(strip(readline(io)))
+                length(df)>=1 || throw(ArgumentError(
+                    "$caller: missing Dimension value"))
+                _unv_int(df[1],caller,"Dimension")
+            end
+            value in (2,3) || throw(ArgumentError(
+                "$caller: unsupported .mesh dimension $value"))
+            dimension=Int(value)
+        elseif keyword=="Vertices"
+            count=_medit_count(io,caller,"Vertices",fields)
+            count<=node_limit || throw(ArgumentError(
+                "$caller: .mesh vertex count exceeds max_nodes=$node_limit"))
+            vertex_count==0 || isempty(records) || throw(ArgumentError(
+                "$caller: repeated Vertices after element sections"))
+            empty!(coords);resize!(node_labels,0);vertex_count=count
+            for _ in 1:count
+                eof(io) && throw(ArgumentError(
+                    "$caller: truncated Vertices section"))
+                vf=split(strip(readline(io)))
+                need=dimension+1
+                length(vf)>=need || throw(ArgumentError(
+                    "$caller: malformed .mesh vertex record"))
+                x=_medit_float(vf[1],caller,"vertex coordinate")
+                y=_medit_float(vf[2],caller,"vertex coordinate")
+                z=dimension==3 ? _medit_float(vf[3],caller,"vertex coordinate") : 0.0
+                _unv_int(vf[need],caller,"vertex ref")  # parsed, unused upstream
+                push!(coords,x);push!(coords,y);push!(coords,z)
+                push!(node_labels,Int64(length(node_labels)+1))
+            end
+        elseif haskey(_MEDIT_READ_SECTIONS,keyword)
+            msh,arity=_MEDIT_READ_SECTIONS[keyword]
+            count=_medit_count(io,caller,keyword,fields)
+            length(records)+count<=element_limit || throw(ArgumentError(
+                "$caller: .mesh element count exceeds max_elements=$element_limit"))
+            vertex_count>0 || count==0 || throw(ArgumentError(
+                "$caller: $keyword appeared before Vertices"))
+            for _ in 1:count
+                eof(io) && throw(ArgumentError(
+                    "$caller: truncated $keyword section"))
+                ef=split(strip(readline(io)))
+                length(ef)>=arity+1 || throw(ArgumentError(
+                    "$caller: malformed $keyword record"))
+                rows=Vector{Int32}(undef,arity)
+                @inbounds for i in 1:arity
+                    index=_unv_int(ef[i],caller,"$keyword vertex index")
+                    1<=index<=vertex_count || throw(ArgumentError(
+                        "$caller: $keyword record references vertex $index " *
+                        "outside 1:$vertex_count"))
+                    rows[i]=Int32(index)
+                end
+                ref=_unv_int(ef[arity+1],caller,"$keyword ref")
+                0<=ref<=typemax(Int32) || throw(ArgumentError(
+                    "$caller: .mesh ref $ref is outside 0:$(typemax(Int32))"))
+                msh==11 && (rows=rows[collect(_MEDIT_TET10_SWAP)])
+                element_counter[]+=Int64(1)
+                push!(records,_TextMeshCell(
+                    element_counter[],msh,rows,ref,ref))
+            end
+        end
+        # `End` and every unrecognized keyword/section are skipped line-wise,
+        # matching the pinned reader.
+    end
+    return node_labels,coords,records
+end
+
+"""
+    read_mesh(path; max_nodes, max_elements, max_file_bytes) -> MeshFile
+
+Read an INRIA/Medit `.mesh` file (versions 1–4, `Dimension` 2 or 3).
+`Vertices`, `Edges[P2|P3|P4]`, `Triangles[P2|P3|P4]`, `Quadrilaterals`,
+`Tetrahedra[P2|P3|P4]` and `Hexahedra` records map to their Gmsh types; the
+trailing `ref` becomes the elementary entity tag and, when positive, the
+physical tag. Unrecognized sections (`Corners`, `RequiredVertices`, ...) are
+skipped; dangling vertex references and malformed records are errors.
+"""
+function read_mesh(path;
+                   max_nodes=typemax(Int32),max_elements=typemax(Int32),
+                   max_file_bytes=typemax(Int))
+    caller="read_mesh"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    node_limit=_io_limit(max_nodes,caller,"max_nodes";ceiling=Int(typemax(Int32)))
+    element_limit=_io_limit(
+        max_elements,caller,"max_elements";ceiling=Int(typemax(Int32)))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
+    node_labels,coords,records=open(path,"r") do io
+        try
+            return _read_medit(io,caller,node_limit,element_limit)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa EOFError && throw(ArgumentError(
+                "$caller: truncated .mesh file"))
+            rethrow()
+        end
+    end
+    mesh,node_tags,element_tags=_foreign_mesh_result(
+        caller,node_labels,coords,records)
+    return MeshFile(mesh,node_tags,element_tags)
+end
+
+# ── Session-model staging through the native mesh-import channel ───────────────
+# `.unv`/`.mesh` records are re-encoded as a bounded MSH 2.2 stream (node and
+# element labels, `physical elementary` tag pair) so `GeoExec` publishes them
+# with exactly the same classification, identity and atomicity semantics as
+# `.msh` imports.
+
+function _write_foreign_bridge(path,node_labels::Vector{Int64},
+        coords::Vector{Float64},records::Vector{_TextMeshCell};
+        node_offset::Integer=0,element_offset::Integer=0)
+    open(path,"w") do io
+        println(io,"\$MeshFormat")
+        println(io,"2.2 0 8")
+        println(io,"\$EndMeshFormat")
+        println(io,"\$Nodes")
+        println(io,length(node_labels))
+        @inbounds for i in eachindex(node_labels)
+            println(io,node_labels[i]+node_offset," ",
+                repr(coords[3i-2])," ",repr(coords[3i-1])," ",repr(coords[3i]))
+        end
+        println(io,"\$EndNodes")
+        println(io,"\$Elements")
+        println(io,length(records))
+        for record in records
+            print(io,record.label+element_offset," ",record.msh," 2 ",
+                record.physical," ",record.elementary)
+            for row in record.nodes
+                print(io," ",node_labels[Int(row)]+node_offset)
+            end
+            println(io)
+        end
+        println(io,"\$EndElements")
+    end
+    return path
+end
+
+function _read_foreign_records(path,caller::AbstractString)
+    extension=lowercase(splitext(String(path))[2])
+    if extension==".unv"
+        open(path,"r") do io
+            try
+                return _read_unv(io,caller,
+                    Int(typemax(Int32)),Int(typemax(Int32)))
+            catch err
+                err isa InterruptException && rethrow()
+                err isa EOFError && throw(ArgumentError(
+                    "$caller: truncated .unv file"))
+                rethrow()
+            end
+        end
+    elseif extension==".mesh"
+        open(path,"r") do io
+            try
+                return _read_medit(io,caller,
+                    Int(typemax(Int32)),Int(typemax(Int32)))
+            catch err
+                err isa InterruptException && rethrow()
+                err isa EOFError && throw(ArgumentError(
+                    "$caller: truncated .mesh file"))
+                rethrow()
+            end
+        end
+    else
+        throw(ArgumentError("$caller: unsupported mesh extension '$extension'"))
+    end
+end
+
+function _foreign_bridge_temp(node_labels,coords,records;
+                              node_offset::Integer=0,element_offset::Integer=0)
+    temporary=string(tempname(),".msh")
+    try
+        _write_foreign_bridge(temporary,node_labels,coords,records;
+            node_offset=node_offset,element_offset=element_offset)
+    catch
+        rm(temporary;force=true)
+        rethrow()
+    end
+    return temporary
+end
+
+function _stage_foreign_mesh_file(path;context_lc=1.0,forced_bbox=false)
+    node_labels,coords,records=_read_foreign_records(path,"API.open")
+    temporary=_foreign_bridge_temp(node_labels,coords,records)
+    geo=getfield(parentmodule(@__MODULE__),:GeoExec)
+    try
+        result=geo._geo_stage_mesh_file(temporary;
+            context_lc=context_lc,forced_bbox=forced_bbox)
+        result.model.name=String(splitext(basename(String(path)))[1])
+        return result
+    finally
+        rm(temporary;force=true)
+    end
+end
+
+function _stage_foreign_mesh_merge(path,model,seed;context_lc=1.0,forced_bbox=false)
+    node_labels,coords,records=_read_foreign_records(path,"API.merge")
+    # File-local labels are not session UIDs; shift them past the live
+    # maxima so a merge never collides with existing nodes or elements.
+    temporary=_foreign_bridge_temp(node_labels,coords,records;
+        node_offset=Int64(seed.mesh_node_max),
+        element_offset=Int64(seed.mesh_element_max))
+    geo=getfield(parentmodule(@__MODULE__),:GeoExec)
+    try
+        return geo._geo_stage_mesh_merge(temporary,model,seed;
+            context_lc=context_lc,forced_bbox=forced_bbox)
+    finally
+        rm(temporary;force=true)
+    end
+end
+
+# ── Writers ────────────────────────────────────────────────────────────────────
+
+function _foreign_target(path,caller::AbstractString)
+    path isa AbstractString && !isempty(path) && !occursin('\0',path) ||
+        throw(ArgumentError("$caller: filename must be a nonempty NUL-free string"))
+    target=abspath(path);parent=dirname(target)
+    isdir(parent) || throw(ArgumentError(
+        "$caller: parent directory does not exist: $parent"))
+    isdir(target) && throw(ArgumentError(
+        "$caller: destination is a directory: $target"))
+    return target,parent
+end
+
+@inline function _foreign_cell_entity(m::MixedMesh,bi::Int,j::Int)
+    data=m.entity_data
+    data!==nothing && return Int64(data.block_entities[bi][j])
+    m.elementary_entities!==nothing && return Int64(m.elementary_entities[bi][j])
+    return Int64(0)
+end
+
+@inline function _foreign_cell_uid(m::MixedMesh,bi::Int,j::Int,counter::UInt64)
+    data=m.entity_data
+    data===nothing && return counter
+    return data.external_element_tags[bi][j]
+end
+
+"""
+    write_unv(path, mesh)
+
+Write a `Mesh` or `MixedMesh` as an I-DEAS Universal file: dataset 2411 nodes
+(`label`, coordinate-system ids 1/1, color 11, `%25.16E` coordinates) and
+dataset 2412 elements (`label`, upstream descriptor, elementary tag, physical
+tag, color 7, node count, labels eight per line; beam records 21/24 carry a
+`0 0 0` orientation line). Element types with no upstream descriptor —
+including 2477 group output, which the pinned release uses for physical
+groups — are rejected; physical tags are emitted in field 4, which the
+upstream reader interprets as the physical tag.
+"""
+function write_unv(path,m)
+    caller="write_unv"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    # Validate every block before touching the destination file.
+    for block in m.blocks
+        block isa ElementBlock || throw(ArgumentError(
+            "$caller: special MSH record type $(block.msh) is not " *
+            "representable in .unv"))
+        get(_UNV_WRITE_TABLE,block.msh,nothing)===nothing && throw(ArgumentError(
+            "$caller: element type $(block.msh) ($(msh_family(block.msh)) " *
+            "order $(msh_spec(block.msh).order)) is not representable in .unv"))
+    end
+    data=m.entity_data
+    nn=size(m.coords,2)
+    labels=data===nothing ? collect(UInt64(1):UInt64(nn)) : data.external_node_tags
+    target,parent=_foreign_target(path,caller)
+    mktemp(parent) do temporary,io
+        println(io,"    -1");println(io,"  2411")
+        @inbounds for i in 1:nn
+            print(io,@sprintf("%10d%10d%10d%10d\n",labels[i],1,1,11))
+            print(io,@sprintf("%25.16E%25.16E%25.16E\n",
+                m.coords[1,i],m.coords[2,i],m.coords[3,i]))
+        end
+        println(io,"    -1");println(io,"    -1");println(io,"  2412")
+        counter=UInt64(0)
+        for (bi,block) in enumerate(m.blocks)
+            descriptor,perm=_UNV_WRITE_TABLE[block.msh]
+            arity=size(block.nodes,1)
+            for j in 1:size(block.nodes,2)
+                counter+=UInt64(1)
+                elnum=_foreign_cell_uid(m,bi,j,counter)
+                elementary=_foreign_cell_entity(m,bi,j)
+                physical=Int64(block.tags[j])
+                print(io,@sprintf("%10d%10d%10d%10d%10d%10d\n",
+                    elnum,descriptor,elementary,physical,7,arity))
+                (descriptor==21 || descriptor==24) &&
+                    print(io,@sprintf("%10d%10d%10d\n",0,0,0))
+                for k in 1:arity
+                    row=perm===nothing ? k : perm[k]
+                    k>1 && mod(k-1,8)==0 && print(io,"\n")
+                    print(io,@sprintf("%10d",labels[block.nodes[row,j]]))
+                end
+                print(io,"\n")
+            end
+        end
+        println(io,"    -1")
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+# Medit section keyword per Gmsh type (linear and P2–P4 simplex sections plus
+# the linear quadrilateral and hexahedron, matching the pinned writer).
+const _MEDIT_WRITE_SECTIONS=Dict{Int,String}(
+    1=>"Edges",8=>"EdgesP2",26=>"EdgesP3",27=>"EdgesP4",
+    2=>"Triangles",9=>"TrianglesP2",21=>"TrianglesP3",23=>"TrianglesP4",
+    3=>"Quadrilaterals",
+    4=>"Tetrahedra",11=>"TetrahedraP2",29=>"TetrahedraP3",30=>"TetrahedraP4",
+    5=>"Hexahedra")
+const _MEDIT_SECTION_ORDER=("Edges","EdgesP2","EdgesP3","EdgesP4",
+    "Triangles","TrianglesP2","TrianglesP3","TrianglesP4","Quadrilaterals",
+    "Tetrahedra","TetrahedraP2","TetrahedraP3","TetrahedraP4","Hexahedra")
+
+"""
+    write_mesh(path, mesh)
+
+Write a `Mesh` or `MixedMesh` as an INRIA/Medit file (`MeshVersionFormatted 2`,
+`Dimension 3`, `Vertices`/`Edges`/`Triangles`/`Quadrilaterals`/`Tetrahedra`/
+`Hexahedra` and the P2–P4 variants, `End`). The per-element `ref` is the cell
+physical tag when positive, otherwise its elementary-entity tag; vertex `ref`
+is the owning entity tag. Element families Medit cannot express (quadratic
+quads/hexes, prisms, pyramids, point cells, special records) are rejected.
+"""
+function write_mesh(path,m)
+    caller="write_mesh"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    sections=Dict{Int,String}()
+    for block in m.blocks
+        block isa ElementBlock || throw(ArgumentError(
+            "$caller: special MSH record type $(block.msh) is not " *
+            "representable in .mesh"))
+        # Medit has no point-element section; upstream writeMESH emits vertex
+        # entities into `Vertices` only, so point cells are not records here.
+        section=block.msh==15 ? "" : get(_MEDIT_WRITE_SECTIONS,block.msh,nothing)
+        section===nothing && throw(ArgumentError(
+            "$caller: element type $(block.msh) ($(msh_family(block.msh)) " *
+            "order $(msh_spec(block.msh).order)) is not representable in .mesh"))
+        sections[block.msh]=section
+    end
+    data=m.entity_data
+    nn=size(m.coords,2)
+    target,parent=_foreign_target(path,caller)
+    mktemp(parent) do temporary,io
+        println(io," MeshVersionFormatted 2")
+        println(io," Dimension")
+        println(io," 3")
+        println(io," Vertices")
+        println(io," ",nn)
+        @inbounds for i in 1:nn
+            ref=data===nothing ? Int32(0) : data.node_entities[i][2]
+            println(io,@sprintf(" %20.14G %20.14G %20.14G %d",
+                m.coords[1,i],m.coords[2,i],m.coords[3,i],ref))
+        end
+        for section in _MEDIT_SECTION_ORDER
+            count=0
+            for (bi,block) in enumerate(m.blocks)
+                get(sections,block.msh,"")==section || continue
+                count+=size(block.nodes,2)
+            end
+            count==0 && continue
+            println(io," ",section)
+            println(io," ",count)
+            for (bi,block) in enumerate(m.blocks)
+                get(sections,block.msh,"")==section || continue
+                arity=size(block.nodes,1)
+                for j in 1:size(block.nodes,2)
+                    physical=Int64(block.tags[j])
+                    entity=_foreign_cell_entity(m,bi,j)
+                    ref=physical>0 ? physical : entity
+                    for k in 1:arity
+                        row=block.msh==11 ? _MEDIT_TET10_SWAP[k] : k
+                        print(io," ",block.nodes[row,j])
+                    end
+                    println(io," ",ref)
+                end
+            end
+        end
+        println(io," End")
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
 end
 
 end # module IO

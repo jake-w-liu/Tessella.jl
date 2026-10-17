@@ -1,5 +1,7 @@
 # Current-model export consumes the actual cache/record union. It never creates
 # a post-processing view or changes the live model, cache, tags, or filename.
+import ..IO
+
 function _model_export_source_tags(source,class,caller)
     source===nothing && return nothing
     if source isa MixedMesh && source.entity_data!==nothing
@@ -119,16 +121,30 @@ function _model_export_write(filename)
     caller="API.write"
     filename isa AbstractString && !isempty(filename) && !occursin('\0',filename) ||
         throw(ArgumentError("$caller: filename must be a nonempty NUL-free string"))
-    lowercase(splitext(filename)[2])==".msh" || throw(ArgumentError(
-        "$caller: current-model export supports .msh only"))
+    extension=lowercase(splitext(filename)[2])
+    extension in (".msh",".unv",".mesh") || throw(ArgumentError(
+        "$caller: current-model export supports .msh, .unv and .mesh"))
     return lock(STATE_LOCK) do
         model=_model_locked()
-        version=get(OPTIONS,"Mesh.MshFileVersion",4.1)
-        version in (2.2,4.1) || throw(ArgumentError("$caller: MSH version must be 2.2 or 4.1"))
-        target=_model_export_mesh(model,LAST_MESH[],LAST_MESH_CLASS[],version,
-            !iszero(get(OPTIONS,"Mesh.SaveAll",0.0)),caller)
-        Elements.write_mixed_msh(filename,target;version,
-            binary=!iszero(get(OPTIONS,"Mesh.Binary",0.0)))
+        save_all=!iszero(get(OPTIONS,"Mesh.SaveAll",0.0))
+        if extension==".msh"
+            version=get(OPTIONS,"Mesh.MshFileVersion",4.1)
+            version in (2.2,4.1) || throw(ArgumentError(
+                "$caller: MSH version must be 2.2 or 4.1"))
+            target=_model_export_mesh(model,LAST_MESH[],LAST_MESH_CLASS[],version,
+                save_all,caller)
+            Elements.write_mixed_msh(filename,target;version,
+                binary=!iszero(get(OPTIONS,"Mesh.Binary",0.0)))
+        else
+            # UNV/MEDIT writers use the complete MSH4-style projection: actual
+            # UIDs, per-cell physical tags, and block entity ownership. Neither
+            # format carries physical names or group metadata, so names are
+            # intentionally dropped on write (upstream behaviour).
+            target=_model_export_mesh(model,LAST_MESH[],LAST_MESH_CLASS[],4.1,
+                save_all,caller)
+            extension==".unv" ? IO.write_unv(filename,target) :
+                IO.write_mesh(filename,target)
+        end
         return nothing
     end
 end
@@ -136,10 +152,15 @@ end
 """
     write(filename)
 
-Write the current model's actual mesh to a `.msh` file. `Mesh.MshFileVersion`
+Write the current model's actual mesh to a `.msh`, `.unv` or `.mesh` file.
+`Mesh.MshFileVersion`
 selects 2.2 or 4.1, `Mesh.Binary` selects the encoding, and `Mesh.SaveAll`
 controls physical selection. MSH4 preserves actual UIDs and retained periodic,
 partition, ghost, and data metadata; MSH2 uses its native dense numbering.
+`.unv` emits I-DEAS datasets 2411/2412 with elementary and physical tags;
+`.mesh` emits INRIA/Medit sections with `ref` carrying the physical tag (or
+entity tag when no physical tag is set). Neither foreign format retains
+physical names, partitions, periodic links or data sections.
 Unsupported metadata/format combinations reject before replacing the target.
 The model, mesh cache, views, counters, and model filename remain unchanged.
 """
