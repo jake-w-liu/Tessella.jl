@@ -4835,7 +4835,21 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
-## Latest landed increment (slice 32, pushed to `origin/main`)
+## Latest landed increment (VIEW02 slice, pushed to `origin/main`)
+
+**`model.view` endpoint tail** — `addListDataString`/
+`getListDataStrings` (per-element label blocks with 3-D anchors,
+`numEle` selection), `copyOptions` (numbers+strings, name excluded),
+`setVisibilityPerWindow` (numbered `VisibilityPerWindow:i` option rows,
+headless-retained) and `addHomogeneousModelData`/
+`getHomogeneousModelData` (flat-row model data, model-slot filtered).
+`_SessionView` gained string-block storage. Still remaining:
+`addAlias` (shared-data views), `combine`, `probe`,
+`setInterpolationMatrices`. Verified:
+`api_view_endpoints_test.jl` 18 green; view-time/writer/list-export/
+post-IO regressions green.
+
+## Previous landed increment (slice 32, pushed to `origin/main`)
 
 **`occ.fillet` (GEO01 slice 32)** +
 **`occ.chamfer` (slice 31, `6f423ea`)** —

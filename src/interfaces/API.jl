@@ -9077,7 +9077,18 @@ mutable struct _SessionView
     model_kind::Union{Nothing,String}
     model_step_ranges::Vector{_NativeViewStepRange}
     list_time::Vector{Float64}
+    list_string_types::Vector{String}
+    list_strings::Dict{String,Vector{String}}
+    list_string_coords::Dict{String,Vector{Float64}}
+    list_string_counts::Dict{String,Int}
 end
+
+_SessionView(name,numbers,strings,list_types,list_counts,list_data,model_data,model_contexts,
+        model_kind,model_step_ranges,list_time)=
+    _SessionView(name,numbers,strings,list_types,list_counts,list_data,model_data,
+        model_contexts,model_kind,model_step_ranges,list_time,
+        String[],Dict{String,Vector{String}}(),
+        Dict{String,Vector{Float64}}(),Dict{String,Int}())
 
 _SessionView(name,numbers,strings,list_types,list_counts,list_data,model_data,model_contexts,
         model_kind,model_step_ranges)=
@@ -9362,6 +9373,126 @@ function _view_get_string(tag,name)
     return lock(STATE_LOCK) do
         view=_session_view(tag,caller)
         name=="Name" ? view.name : get(view.strings,String(name),"")
+    end
+end
+
+# `addListDataString` stores per-element label strings plus a 3-D
+# anchor coordinate each — the parser-side counterpart of
+# `ViewDataListString` blocks. Each `dataType` block keeps its element
+# count so `getListDataStrings` can select by `numEle`.
+function _view_add_list_data_string(tag,data_type,data,coord,num_ele=-1)
+    caller="API.view.add_list_data_string"
+    data_type isa AbstractString || throw(ArgumentError(
+        "$caller: dataType must be a string"))
+    (data isa AbstractVector || data isa Tuple) || throw(ArgumentError(
+        "$caller: data must be a vector"))
+    all(x->x isa AbstractString,data) || throw(ArgumentError(
+        "$caller: data must contain only strings"))
+    (coord isa AbstractVector || coord isa Tuple) || throw(ArgumentError(
+        "$caller: coord must be a vector"))
+    ne=_mesh_query_integer(num_ele,caller,"numEle")
+    ne<0 && (ne=length(data))
+    ne==length(data) || throw(ArgumentError(
+        "$caller: numEle must match the number of data strings"))
+    length(coord)==3*ne || throw(ArgumentError(
+        "$caller: coord must hold 3 coordinates per element"))
+    return lock(STATE_LOCK) do
+        view=_session_view(tag,caller)
+        coords=Vector{Float64}(undef,length(coord))
+        for (i,value) in enumerate(coord)
+            coords[i]=_mesh_query_coordinate(value,caller,"coord entry")
+        end
+        key=String(data_type)
+        key in view.list_string_types ||
+            push!(view.list_string_types,key)
+        view.list_strings[key]=String[x for x in data]
+        view.list_string_coords[key]=coords
+        view.list_string_counts[key]=Int(ne)
+        return nothing
+    end
+end
+
+function _view_get_list_data_strings(tag,num_ele,dim=-1,return_coord=false)
+    caller="API.view.get_list_data_strings"
+    ne=_mesh_query_integer(num_ele,caller,"numEle")
+    _mesh_query_integer(dim,caller,"dim")
+    _mesh_query_bool(return_coord,caller,"returnCoord")
+    return lock(STATE_LOCK) do
+        view=_session_view(tag,caller)
+        for key in view.list_string_types
+            view.list_string_counts[key]==ne || continue
+            strings=copy(view.list_strings[key])
+            return_coord || return [key],strings
+            return [key],strings,copy(view.list_string_coords[key])
+        end
+        message="$caller: no string list data with $ne elements"
+        NATIVE_LOOKUP_QUERY_ERRORS[]+=1;NATIVE_MSG_LAST_ERROR[]=message
+        _native_diagnostic_emit_locked(:error,message)
+        throw(ArgumentError(message))
+    end
+end
+
+# `copyOptions` replicates the numeric/string option tables (and the
+# view name is deliberately not copied — upstream options exclude the
+# display name binding).
+function _view_copy_options(ref_tag,tag)
+    caller="API.view.copy_options"
+    return lock(STATE_LOCK) do
+        source=_session_view(ref_tag,caller)
+        target=_session_view(tag,caller)
+        target.numbers=copy(source.numbers)
+        target.strings=copy(source.strings)
+        return nothing
+    end
+end
+
+# Per-window visibility is stored as a numbered option row; headless
+# sessions accept and retain it without a GUI.
+function _view_set_visibility_per_window(tag,value,window_index=0)
+    caller="API.view.set_visibility_per_window"
+    v=_mesh_query_coordinate(value,caller,"value")
+    w=_mesh_query_integer(window_index,caller,"windowIndex")
+    return lock(STATE_LOCK) do
+        view=_session_view(tag,caller)
+        view.numbers["VisibilityPerWindow:$w"]=v
+        return nothing
+    end
+end
+
+# Homogeneous model data is the flat-row variant of `addModelData` —
+# the storage is identical, only the argument contract differs.
+function _view_add_homogeneous_model_data(tag,step,model_name,data_type,
+                                        tags,data,time=0.0,
+                                        num_components=-1,partition=0)
+    _view_add_model_data(tag,step,model_name,data_type,tags,data,time,
+                         num_components,partition)
+end
+
+function _view_get_homogeneous_model_data(tag,step,model_name)
+    caller="API.view.get_homogeneous_model_data"
+    model_name isa AbstractString || throw(ArgumentError(
+        "$caller: modelName must be a string"))
+    step_value=_mesh_query_integer(step,caller,"step")
+    return lock(STATE_LOCK) do
+        view=_session_view(tag,caller)
+        slot=_native_view_model_slot(String(model_name))
+        slot===nothing && throw(ArgumentError(
+            "$caller: Unknown model '$(String(model_name))'"))
+        types=String[]; tags=UInt64[]; data=Float64[]
+        for ((s,data_type),(entity_tags,values,_)) in
+                sort!(collect(view.model_data);by=first)
+            s==step_value || continue
+            ctx=get(view.model_contexts,(s,data_type),nothing)
+            ctx===nothing || get(ctx,:model_slot,nothing)===slot ||
+                continue
+            push!(types,data_type)
+            append!(tags,entity_tags)
+            append!(data,values)
+        end
+        isempty(types) && throw(ArgumentError(
+            "$caller: view $tag holds no model data for step " *
+            "$step_value on model '$model_name'"))
+        return types,tags,data
     end
 end
 
@@ -11202,7 +11333,11 @@ module view
 using ..API: _view_add,_view_remove,_view_get_index,_view_get_tags,
              _view_add_list_data,_view_get_list_data,_view_add_model_data,
              _view_get_model_data,_view_set_number,_view_get_number,
-             _view_set_string,_view_get_string,_view_write
+             _view_set_string,_view_get_string,_view_write,
+             _view_add_list_data_string,_view_get_list_data_strings,
+             _view_copy_options,_view_set_visibility_per_window,
+             _view_add_homogeneous_model_data,
+             _view_get_homogeneous_model_data
 
 """Add a new empty view named `name`, returning its tag."""
 add(name,tag=-1)=_view_add(name,tag)
@@ -11235,6 +11370,29 @@ get_number(tag,name)=_view_get_number(tag,name)
 set_string(tag,name,value)=_view_set_string(tag,name,value)
 "Return string option `name` of view `tag` (empty if unset)."
 get_string(tag,name)=_view_get_string(tag,name)
+"""Attach per-element label `data` strings with 3-D `coord` anchors
+to view `tag` under `data_type` (`numEle` defaults to `length(data)`)."""
+add_list_data_string(tag,data_type,data,coord,num_ele=-1)=
+    _view_add_list_data_string(tag,data_type,data,coord,num_ele)
+"""Return the string list block holding `numEle` elements as
+`(dataType, data)` — plus `coord` when `return_coord` is set."""
+get_list_data_strings(tag,num_ele,dim=-1,return_coord=false)=
+    _view_get_list_data_strings(tag,num_ele,dim,return_coord)
+"Copy the numeric and string options of view `refTag` onto `tag`."
+copy_options(ref_tag,tag)=_view_copy_options(ref_tag,tag)
+"Record visibility flag `value` for `windowIndex` on view `tag`."
+set_visibility_per_window(tag,value,window_index=0)=
+    _view_set_visibility_per_window(tag,value,window_index)
+"""Add homogeneous (flat-row) model `data` for `tags` on `modelName`
+at `step` — the flat counterpart of `add_model_data`."""
+add_homogeneous_model_data(tag,step,model_name,data_type,tags,data,
+    time=0.0,num_components=-1,partition=0)=
+    _view_add_homogeneous_model_data(tag,step,model_name,data_type,
+        tags,data,time,num_components,partition)
+"""Return `(dataType, tags, data)` for view `tag` at `step`, restricted
+to rows owned by `modelName`."""
+get_homogeneous_model_data(tag,step,model_name)=
+    _view_get_homogeneous_model_data(tag,step,model_name)
 
 end # module view
 
