@@ -81,6 +81,12 @@ add_trimmed_surface(wire_tag,surface_tag=-1;tag=-1)=_with_model() do m
     Model._model_occ_trimmed_surface(m,tag,wire_tag,surface_tag)
 end
 
+add_thick_solid(volume_tag,exclude_surface_tags,offset;tag=-1)=
+    _with_model() do m
+        Model._model_occ_thick_solid(m,tag,volume_tag,exclude_surface_tags,
+                                     Float64(offset))
+    end
+
 add_surface_loop(surface_tags;tag=-1,sewing=false)=_with_model() do m
     Model._model_occ_add_surface_loop!(m,surface_tags;tag,sewing)
 end

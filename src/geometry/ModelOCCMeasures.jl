@@ -25,6 +25,7 @@ const _OCC_GL_W=(0.1012285362903763,0.2223810344533745,
 @inline _occ2_cross(a,b)=a[1]*b[2]-a[2]*b[1]
 @inline _occ2_sub(a,b)=(a[1]-b[1],a[2]-b[2])
 @inline _occ3_add(a,b)=(a[1]+b[1],a[2]+b[2],a[3]+b[3])
+@inline _occ3_sub(a,b)=(a[1]-b[1],a[2]-b[2],a[3]-b[3])
 @inline _occ3_scale(a,s)=(a[1]*s,a[2]*s,a[3]*s)
 
 # GL8 on each panel of [t0,t1] — `f` maps a parameter to (value, weight)
