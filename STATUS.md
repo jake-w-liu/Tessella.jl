@@ -1693,6 +1693,34 @@ swallowed-circle/unknown-tag rejections with
 registry counts unchanged); compact
 `occ_offset_smoke.jl` added to `runtests.jl`.
 
+### GEO01 slice 27 — `occ.addThickSolid` (2026-10-15)
+
+`model.occ.add_thick_solid(volumeTag, excludeSurfaceTags, offset;
+tag=-1)` implements `BRepOffsetAPI_MakeThickSolid` for convex
+planar-faced solids in `src/geometry/ModelOCCLoft.jl` (`3dd4682`).
+Kept faces shift outward by `offset` as half-spaces; triple-plane
+intersections enumerate the parallel body's vertices; per-plane
+polygons publish shared points/lines once and bind as wires/faces with
+per-use `rev` flags (`_occ_wire_from_uses!`/`_occ_shell_from_uses!`,
+since `_model_occ_wire_uses` forces edge 1 forward and
+`add_surface_loop` bakes `rev=false`). The thick wall assembles
+without a boolean — the mesh-level difference does not detect strict
+containment: `offset<0` keeps original outer faces + offset faces
+wound CW about n̂ as cavity walls (two shells when closed);
+`offset>0` flips the roles (offset faces outward, original faces
+`rev=true` in the cavity wall); excluded faces become rim faces —
+outer wire + opposite-wound offset polygon as the hole (offset>0
+reverses the original wire for the hole instead). Guards: non-planar
+faces, mis-oriented shells (claimed-original halfspace body empty or
+un-nested), nonconvex inputs (phantom halfspace corner not matching a
+real wire vertex), zero offset, and excluded faces that miss the
+offset body all reject before publication — failures leave the
+registry untouched. Verified:
+`test/interfaces/api_occ_thick_solid_test.jl` — 17 green (closed
+hollow box 8−1.6³, open-top box 8−1.6·1.6·1.8, outward shell
+2.4³−8, triangular-prism cavity sanity, curved-solid rejection,
+atomic errors); loft/trimmed-surface/boolean suites green.
+
 ### GEO01 slice 26 — `occ.addTrimmedSurface` (2026-10-15)
 
 `model.occ.add_trimmed_surface(wireTag, surfaceTag=-1; tag=-1)`

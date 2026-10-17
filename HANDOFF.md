@@ -4835,7 +4835,31 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
-## Latest landed increment (`548216d`, pushed to `origin/main`)
+## Latest landed increment (`3dd4682`, pushed to `origin/main`)
+
+**`occ.addThickSolid` (GEO01 slice 27)** —
+`occ.add_thick_solid(volumeTag, excludeSurfaceTags, offset)`
+implements `BRepOffsetAPI_MakeThickSolid` for convex planar-faced
+solids. Kept faces shift outward by `offset` as half-spaces;
+triple-plane intersections enumerate the parallel body; per-plane
+polygons publish shared points/lines once and bind with per-use `rev`
+flags via new `_occ_wire_from_uses!`/`_occ_shell_from_uses!` helpers
+(`_model_occ_wire_uses` forces edge 1 forward so it cannot chain
+reused edges stored the other way; `add_surface_loop` bakes
+`rev=false`). The wall assembles without a boolean — the mesh-level
+difference does not detect strict containment (verified: a fully
+internal tool cut returns the object unchanged). `offset<0`: original
+outer faces + offset faces wound CW about n̂ (cavity shell for a
+closed body); `offset>0`: offset faces outward + original faces
+flipped in the cavity wall; excluded faces become rim faces (original
+wire + oppositely-wound offset polygon as hole — or the mirror for
+`offset>0`). Guards reject non-planar faces, non-convex or
+mis-oriented inputs, zero offset, and excluded faces missing the
+offset body — atomically before publication. Verified:
+`api_occ_thick_solid_test.jl` 17 green; loft/trimmed/boolean suites
+green.
+
+## Previous landed increment (`548216d`, pushed to `origin/main`)
 
 **`occ.addTrimmedSurface` (GEO01 slice 26)** —
 `occ.add_trimmed_surface(wireTag, surfaceTag=-1)` implements
