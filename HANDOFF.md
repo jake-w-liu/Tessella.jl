@@ -4835,7 +4835,44 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
-## Latest landed increment (VIEW02 slice, pushed to `origin/main`)
+## Latest landed increments (`ec3f39a`, `24c5779`, pushed to `origin/main`)
+
+**VIEW02 tail (completed)** — `view.add_alias` implements real shared-
+data views (`alias_of` holds the resolved data-owner object, so an
+alias's payload survives source removal; all list/model/string/interp
+accesses route through `_view_data_owner` while name/numbers/strings
+stay per-view); `view.combine` covers `what∈{elements,steps}` ×
+`how∈{all,visible,name}` with sorted-tag determinism and per-group
+failure diagnostics; `view.set_interpolation_matrices` stores/validates
+per-element-type matrices (upstream spelling + delete-then-validate
+ordering); `gmsh.get_time` added. Semantics verified against bundled
+upstream gmsh-4.15.2 `PView.cpp`/`PViewDataList.cpp`. Verified:
+`api_view_alias_test.jl` 85 green; view endpoints 30, view-time 35,
+post-view IO 113, list/model export 4+4 — all green.
+
+**CLI01 (dual-path frontend)** — `CLI.jl` routes `.msh`/`.pos` inputs
+and post-mesh actions through an API session (`API.open/merge/option/
+mesh.generate/refine/classify_surfaces/create_geometry/partition/
+write`) while the `.geo` path stays byte-for-byte identical. ~50 flags
+implemented (dims, `-o/-format/-bin/-save`, `-order`, mesh-size knobs,
+`-algo`, `-optimize*`, `-refine`, `-part*`, `-merge/-open/-new`,
+`-setnumber/-setstring/-setlist`, `-convert`, `-check`, `-info`,
+`-help_options`, `-pid`); ~80 GUI/obsolete/unsupported flags reject
+loudly. Verified: `cli_frontends_test.jl` 73 green; cli_options 27,
+cli_curve 42, cli_precision 137 green.
+
+**CONFIRMED REGRESSION (needs bisect next):**
+`test/interfaces/cli_test.jl` periodic tests fail on `main` —
+`execute_geo` on `periodic_surface_volume.geo` yields
+`length(periodic_links)==1` where 3 expected (CRC `f364…` vs `2877…`),
+and the OCC-embedded periodic case errors inside
+`APIGenerateHigher._higher_surface_phase!` (`APIGenerateHigher.jl:1060`).
+Reproduced on committed `main` bypassing CLI entirely — geometry-core
+regression introduced somewhere in the recent OCC/view work; bisect
+`8c146b1`-era commits touching `ModelCurved`/`ModelOCCLoft`/
+`_occ_unbind_orphans!`. 36/41 of cli_test remain green.
+
+## Previous landed increment (VIEW02 slice, pushed to `origin/main`)
 
 **`model.view` endpoint tail** — `addListDataString`/
 `getListDataStrings` (per-element label blocks with 3-D anchors,
