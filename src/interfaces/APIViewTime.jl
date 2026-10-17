@@ -21,6 +21,7 @@ function _view_plain_list_steps(types,counts,data)
 end
 
 function _view_list_time_plan(view,type,count,values;reset_model=false)
+    view=_view_data_owner(view)
     reset_model && !haskey(Post._POS_RECORD_TYPES,type) && throw(ArgumentError(
         "API.view.add_list_data: model-to-list conversion supports plain linear list records"))
     types=reset_model ? String[] : copy(view.list_types)
@@ -42,6 +43,7 @@ function _view_list_time_plan(view,type,count,values;reset_model=false)
 end
 
 function _view_data_steps(view)
+    view=_view_data_owner(view)
     if !isempty(view.model_step_ranges)
         return Base.checked_add(last(view.model_step_ranges).last,1)
     end
@@ -52,6 +54,7 @@ function _view_data_steps(view)
 end
 
 function _view_time_at(view,step)
+    view=_view_data_owner(view)
     step<0 && return 0.0
     if !isempty(view.model_step_ranges)
         context=get(view.model_contexts,(step,view.model_kind),nothing)
@@ -70,6 +73,7 @@ function _view_select_step!(view,requested)
 end
 
 function _view_closest_step(view,time,steps)
+    view=_view_data_owner(view)
     steps==0 && return 0
     candidates=Int[]
     if !isempty(view.model_step_ranges)

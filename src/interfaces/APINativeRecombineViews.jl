@@ -180,8 +180,13 @@ function _native_recombine_views_plan(plan;renumber::Bool,kind=nothing)
     index==0 && return (updates=NamedTuple[],events=Tuple{Symbol,String}[])
     slot=MODEL_SLOTS[index]
     updates=NamedTuple[];events=Tuple{Symbol,String}[]
+    # Aliased views reach the same shared data through different tags;
+    # renumber each data owner once.
+    seen=Set{_SessionView}()
     for view_tag in sort!(collect(keys(SESSION_VIEWS)))
-        view=SESSION_VIEWS[view_tag]
+        view=_view_data_owner(SESSION_VIEWS[view_tag])
+        view in seen && continue
+        push!(seen,view)
         data_kind=view.model_kind
         data_kind in ("NodeData","ElementData","ElementNodeData") || continue
         kind===nothing || (data_kind=="NodeData")===(kind===:node) || continue

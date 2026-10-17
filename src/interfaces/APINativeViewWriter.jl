@@ -86,7 +86,7 @@ function _native_view_writer_mesh(slot,caller)
         physical_names=m.physical_names,partition_data=partition)
 end
 
-function _native_view_writer_section(view,key;scheme::Bool)
+function _native_view_writer_section(view,key;scheme::Bool,name=view.name)
     tags,values,components=view.model_data[key];context=view.model_contexts[key]
     counts=context.counts
     components>0 && length(tags)==length(counts) || throw(ArgumentError(
@@ -97,7 +97,7 @@ function _native_view_writer_section(view,key;scheme::Bool)
     row_nodes=nodal ? Int32.(counts.÷components) : fill(Int32(1),length(tags))
     nodal || all(==(components),counts) || throw(ArgumentError(
         "model view writer: non-nodal row widths differ from the component count"))
-    strings=String["\""*view.name*"\""]
+    strings=String["\""*name*"\""]
     scheme && kind!="NodeData" && push!(strings,"\"INTERPOLATION_SCHEME\"")
     header=_native_view_partition_header(key[1],components,length(tags),
         get(context,:partitions,Set{Int}()))
@@ -298,10 +298,11 @@ function _native_view_writer_ascii_mesh(io,mesh,version,names)
 end
 
 function _native_view_writer_payload(view,group,mesh;version,binary::Bool,save_mesh::Bool,scheme::Bool,
-        lookup=nothing)
+        lookup=nothing,name=view.name)
     interpolation=scheme ? _native_view_writer_scheme(mesh;
         types=_native_view_interpolation_history(view.model_contexts),kind=view.model_kind) : UInt8[]
-    sections=[_native_view_writer_section(view,key;scheme=!isempty(interpolation)) for key in group.keys]
+    sections=[_native_view_writer_section(view,key;scheme=!isempty(interpolation),name)
+              for key in group.keys]
     data=mesh.entity_data
     data!==nothing || throw(ArgumentError("model view writer: actual mesh identity is absent"))
     source_nodes=data.external_node_tags
@@ -378,8 +379,8 @@ end
 
 # Independent primary-corner serialization from owned current mesh identities
 # and populated model-view rows. Allocated empty steps do not emit records.
-function _native_view_text_table(view,key)
-    section=_native_view_writer_section(view,key;scheme=false)
+function _native_view_text_table(view,key;name=view.name)
+    section=_native_view_writer_section(view,key;scheme=false,name)
     Elements._msh_uid_validate(section)
     rows=Dict{UInt64,Vector{Float64}}();offset=1
     for (uid,count) in zip(section.tags,view.model_contexts[key].counts)
@@ -437,7 +438,8 @@ function _native_view_text_values(table,cell)
 end
 
 
-function _native_view_writer_text_payload(view,plans;extension::AbstractString)
+function _native_view_writer_text_payload(view,plans;extension::AbstractString,
+        name=view.name)
     extension in (".pos",".txt",".csv",".vtk") || throw(ArgumentError(
         "model view writer: this text format is not implemented"))
     meshes=IdDict{Any,Any}(plan.group.slot=>plan.mesh for plan in plans)
@@ -446,7 +448,7 @@ function _native_view_writer_text_payload(view,plans;extension::AbstractString)
         context=view.model_contexts[key]
         mesh=get(meshes,context.model_slot,nothing)
         mesh===nothing && throw(ArgumentError("model view writer: owned model is absent"))
-        push!(tables,merge(_native_view_text_table(view,key),
+        push!(tables,merge(_native_view_text_table(view,key;name),
             (mesh=mesh,cells=_native_view_text_cells(mesh),slot=context.model_slot)))
     end
     io=IOBuffer()
@@ -454,7 +456,7 @@ function _native_view_writer_text_payload(view,plans;extension::AbstractString)
         if !isempty(tables) && any(table->table.slot!==first(tables).slot,tables)
             return (bytes=UInt8[],error="Cannot export multi-mesh datasets in .pos format")
         end
-        println(io,"View \"",view.name,"\" {")
+        println(io,"View \"",name,"\" {")
         if !isempty(tables)
             mesh=first(tables).mesh
             for cell in first(tables).cells
@@ -495,13 +497,16 @@ function _native_view_writer_text_payload(view,plans;extension::AbstractString)
     return (bytes=take!(io),error=nothing)
 end
 
-function _native_view_writer_text_payload(view,group,mesh;extension::AbstractString)
-    return _native_view_writer_text_payload(view,[(group=group,mesh=mesh)];extension)
+function _native_view_writer_text_payload(view,group,mesh;extension::AbstractString,
+        name=view.name)
+    return _native_view_writer_text_payload(view,[(group=group,mesh=mesh)];
+        extension,name)
 end
 
 # addListData stores one element at a time: all x coordinates, then all y,
 # all z, and component/node values for every time step (Gmsh tutorial x3).
 function _native_list_view_pos(view,caller;name=view.name)
+    view=_view_data_owner(view)
     elements=Post.PosElement[]
     for type_key in view.list_types
         layout=get(Post._POS_RECORD_TYPES,type_key,nothing)
@@ -639,7 +644,10 @@ function _view_write(tag,filename,append=false)
     filename isa AbstractString || throw(ArgumentError("$caller: fileName must be a string"))
     append_value=_mesh_query_bool(append,caller,"append")
     return lock(STATE_LOCK) do
-        _slot_capture_locked!();view=_session_view(tag,caller)
+        _slot_capture_locked!()
+        # Aliases export the shared data under their own per-view name.
+        name=_session_view(tag,caller).name
+        view=_view_data_owner(_session_view(tag,caller))
         extension=lowercase(splitext(filename)[2])
         extension in (".msh",".pos",".txt",".csv",".vtk") || throw(ArgumentError(
             "$caller: this view export format is not implemented"))
@@ -650,7 +658,7 @@ function _view_write(tag,filename,append=false)
                 "$caller: appending list data to a VTK file is not supported"))
             # Text/VTK need the checked geometry/value decoder but do not use
             # POS's quoted view name grammar.
-            parsed=_native_list_view_pos(view,caller;name=extension==".pos" ? view.name : "")
+            parsed=_native_list_view_pos(view,caller;name=extension==".pos" ? name : "")
             bytes=_native_list_view_payload(parsed,extension,caller)
             Sys.iswindows() && (bytes=Vector{UInt8}(codeunits(replace(String(bytes),"\n"=>"\r\n"))))
             _native_diagnostic_emit_locked(:info,"Writing '$filename'...")
@@ -675,7 +683,9 @@ function _view_write(tag,filename,append=false)
         plans=[(group=group,mesh=_native_view_writer_mesh(group.slot,caller)) for group in groups]
         # Prevalidate all held rows, including mutable-vector revalidation,
         # before a target is opened. Live-object errors publish native prefixes.
-        for plan in plans,key in plan.group.keys;_native_view_writer_section(view,key;scheme=model_msh && scheme);end
+        for plan in plans,key in plan.group.keys
+            _native_view_writer_section(view,key;scheme=model_msh && scheme,name)
+        end
         if extension in (".csv",".vtk")
             append_value && throw(ArgumentError("$caller: appending model data in $extension format is not supported"))
             publications=_native_model_view_publications(view,plans,filename,extension,caller)
@@ -694,7 +704,7 @@ function _view_write(tag,filename,append=false)
         end
         _native_diagnostic_emit_locked(:info,"Writing '$filename'...")
         if !model_msh
-            result=_native_view_writer_text_payload(view,plans;extension)
+            result=_native_view_writer_text_payload(view,plans;extension,name)
             if result.error!==nothing
                 NATIVE_LOOKUP_QUERY_ERRORS[]+=1;NATIVE_MSG_LAST_ERROR[]=result.error
                 _native_diagnostic_emit_locked(:error,result.error)
@@ -720,7 +730,7 @@ function _view_write(tag,filename,append=false)
         for plan in plans
             lookup=_native_view_writer_lookup!(plan.group.slot,plan.mesh,view.model_kind)
             result=_native_view_writer_payload(view,plan.group,plan.mesh;
-                version,binary,save_mesh,scheme,lookup)
+                version,binary,save_mesh,scheme,lookup,name)
             bytes=binary || !Sys.iswindows() ? result.bytes :
                 Vector{UInt8}(codeunits(replace(String(result.bytes),"\n"=>"\r\n")))
             Base.open(plan.group.path,append_value ? "a" : "w") do io;write(io,bytes);end

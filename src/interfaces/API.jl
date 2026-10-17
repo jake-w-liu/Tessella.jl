@@ -125,7 +125,15 @@ import ..GeoExec
 using ..GeoExec: execute_geo
 using ..Post: Post
 
-export initialize, finalize, clear, option, model, mesh, open_geo!, write, open, merge
+export initialize, finalize, clear, option, model, mesh, open_geo!, write, open, merge,
+    get_time
+
+const _SESSION_START_TIME = Ref{Float64}(time())
+
+"""Return the wall-clock seconds elapsed since `initialize()` (or session start)."""
+function get_time()
+    return time()-_SESSION_START_TIME[]
+end
 
 # Entity classification snapshot for the session mesh cache, derived from the
 # canonical `model_to_mixed` projection at generation time. `mesh` is the exact
@@ -690,6 +698,7 @@ function initialize()
         _slot_load_locked!(MODEL_SLOTS[1])
         FIELD_TAG_MAX[]=0
         empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=0
+        _SESSION_START_TIME[]=time()
     end
     return nothing
 end
@@ -9081,6 +9090,8 @@ mutable struct _SessionView
     list_strings::Dict{String,Vector{String}}
     list_string_coords::Dict{String,Vector{Float64}}
     list_string_counts::Dict{String,Int}
+    interp::Dict{Int32,Vector{Matrix{Float64}}}
+    alias_of::Union{Nothing,_SessionView}
 end
 
 _SessionView(name,numbers,strings,list_types,list_counts,list_data,model_data,model_contexts,
@@ -9088,7 +9099,8 @@ _SessionView(name,numbers,strings,list_types,list_counts,list_data,model_data,mo
     _SessionView(name,numbers,strings,list_types,list_counts,list_data,model_data,
         model_contexts,model_kind,model_step_ranges,list_time,
         String[],Dict{String,Vector{String}}(),
-        Dict{String,Vector{Float64}}(),Dict{String,Int}())
+        Dict{String,Vector{Float64}}(),Dict{String,Int}(),
+        Dict{Int32,Vector{Matrix{Float64}}}(),nothing)
 
 _SessionView(name,numbers,strings,list_types,list_counts,list_data,model_data,model_contexts,
         model_kind,model_step_ranges)=
@@ -9144,6 +9156,20 @@ function _session_view(tag,caller::AbstractString)
     return view
 end
 
+# An alias shares its reference view's data (list/model payloads, physical
+# time, string lists and interpolation matrices). `alias_of` holds the
+# canonical data owner directly, so removing the source view leaves the
+# shared data reachable through every remaining alias. Alias-of-alias
+# creation stores the resolved owner, keeping the chain one level deep.
+function _view_data_owner(view::_SessionView)
+    while view.alias_of!==nothing;view=view.alias_of;end
+    return view
+end
+
+function _session_view_data(tag,caller::AbstractString)
+    return _view_data_owner(_session_view(tag,caller))
+end
+
 function _view_remove(tag)
     lock(STATE_LOCK) do
         view=_session_view(tag,"API.view.remove")
@@ -9166,6 +9192,36 @@ _view_get_tags()=lock(STATE_LOCK) do
     Int32[tag for tag in sort!(collect(keys(SESSION_VIEWS)))]
 end
 
+# The alias shares the reference view's data; its own name and options start
+# from the reference view's (name) or defaults/copies (numbers and strings,
+# depending on `copyOptions`). An explicit positive tag replaces the view
+# already registered under it, matching upstream `view.addAlias`.
+function _view_add_alias(ref_tag,copy_options=false,tag=-1)
+    caller="API.view.add_alias"
+    copy_options_value=_mesh_query_bool(copy_options,caller,"copyOptions")
+    value=_mesh_query_integer(tag,caller,"tag")
+    return lock(STATE_LOCK) do
+        source=_session_view(ref_tag,caller)
+        allocated=value>=0 ? Int(value) : _fresh_view_tag()
+        allocated<=typemax(Int32) || throw(ArgumentError(
+            "$caller: tag is out of range"))
+        if haskey(SESSION_VIEWS,allocated)
+            delete!(SESSION_VIEWS,allocated)
+            _native_diagnostic_emit_locked(:info,
+                "Removing existing View (tag = $allocated)")
+        end
+        view=_SessionView(source.name)
+        view.alias_of=_view_data_owner(source)
+        if copy_options_value
+            view.numbers=copy(source.numbers)
+            view.strings=copy(source.strings)
+        end
+        SESSION_VIEWS[allocated]=view
+        VIEW_TAG_MAX[]=max(VIEW_TAG_MAX[],allocated)
+        return allocated
+    end
+end
+
 function _view_add_list_data(tag,data_type,num_ele,data)
     caller="API.view.add_list_data"
     data_type isa AbstractString || throw(ArgumentError(
@@ -9175,7 +9231,7 @@ function _view_add_list_data(tag,data_type,num_ele,data)
     (data isa AbstractVector || data isa Tuple) || throw(ArgumentError(
         "$caller: data must be a vector"))
     return lock(STATE_LOCK) do
-        view=_session_view(tag,caller)
+        view=_session_view_data(tag,caller)
         values=Vector{Float64}(undef,length(data))
         for (i,value) in enumerate(data)
             values[i]=_mesh_query_coordinate(value,caller,"data entry")
@@ -9204,7 +9260,7 @@ function _view_get_list_data(tag,return_adaptive=false)
     caller="API.view.get_list_data"
     _mesh_query_bool(return_adaptive,caller,"returnAdaptive")
     return lock(STATE_LOCK) do
-        view=_session_view(tag,caller)
+        view=_session_view_data(tag,caller)
         if view.model_kind!==nothing
             message="View with tag $(Int(tag)) does not contain list data"
             NATIVE_LOOKUP_QUERY_ERRORS[]+=1;NATIVE_MSG_LAST_ERROR[]=message
@@ -9237,7 +9293,7 @@ function _view_add_model_data(tag,step,model_name,data_type,tags,data,
     components=_mesh_query_integer(num_components,caller,"numComponents")
     partition_value=_mesh_query_integer(partition,caller,"partition")
     return lock(STATE_LOCK) do
-        view=_session_view(tag,caller)
+        view=_session_view_data(tag,caller)
         entity_tags=Vector{UInt64}(undef,length(tags))
         for (i,value) in enumerate(tags)
             entity_tags[i]=_mesh_query_uid(value,caller,"tags entry")
@@ -9295,7 +9351,7 @@ function _view_get_model_data(tag,step)
     caller="API.view.get_model_data"
     step_value=_mesh_query_integer(step,caller,"step")
     return lock(STATE_LOCK) do
-        view=_session_view(tag,caller)
+        view=_session_view_data(tag,caller)
         types=String[]
         tags=UInt64[]
         data=Float64[]
@@ -9397,7 +9453,7 @@ function _view_add_list_data_string(tag,data_type,data,coord,num_ele=-1)
     length(coord)==3*ne || throw(ArgumentError(
         "$caller: coord must hold 3 coordinates per element"))
     return lock(STATE_LOCK) do
-        view=_session_view(tag,caller)
+        view=_session_view_data(tag,caller)
         coords=Vector{Float64}(undef,length(coord))
         for (i,value) in enumerate(coord)
             coords[i]=_mesh_query_coordinate(value,caller,"coord entry")
@@ -9418,7 +9474,7 @@ function _view_get_list_data_strings(tag,num_ele,dim=-1,return_coord=false)
     _mesh_query_integer(dim,caller,"dim")
     _mesh_query_bool(return_coord,caller,"returnCoord")
     return lock(STATE_LOCK) do
-        view=_session_view(tag,caller)
+        view=_session_view_data(tag,caller)
         for key in view.list_string_types
             view.list_string_counts[key]==ne || continue
             strings=copy(view.list_strings[key])
@@ -9474,7 +9530,7 @@ function _view_get_homogeneous_model_data(tag,step,model_name)
         "$caller: modelName must be a string"))
     step_value=_mesh_query_integer(step,caller,"step")
     return lock(STATE_LOCK) do
-        view=_session_view(tag,caller)
+        view=_session_view_data(tag,caller)
         slot=_native_view_model_slot(String(model_name))
         slot===nothing && throw(ArgumentError(
             "$caller: Unknown model '$(String(model_name))'"))
@@ -9511,7 +9567,7 @@ function _view_probe(model_name,tag,x,y,z)
     pz=_mesh_query_coordinate(z,caller,"z")
     return lock(STATE_LOCK) do
         _slot_capture_locked!()
-        view=_session_view(tag,caller)
+        view=_session_view_data(tag,caller)
         slot=_native_view_model_slot(String(model_name))
         slot===nothing && throw(ArgumentError(
             "$caller: Unknown model '$(String(model_name))'"))
@@ -9578,6 +9634,326 @@ function _view_probe(model_name,tag,x,y,z)
         NATIVE_LOOKUP_QUERY_ERRORS[]+=1;NATIVE_MSG_LAST_ERROR[]=message
         _native_diagnostic_emit_locked(:error,message)
         throw(ArgumentError(message))
+    end
+end
+
+# ---- view combine / interpolation matrices --------------------------------
+#
+# `combine` groups session views (`all`, only `Visible` ones, or those sharing
+# a name), merges each group of two or more into one new view and optionally
+# removes the originals — matching upstream `view.combine`. Merging space
+# ("elements") concatenates the element lists of list-based views; merging
+# time ("steps") reuses the first view's element geometry and concatenates
+# every contributing view's value payload, so the combined view holds the sum
+# of the time steps. Model-based views only support the time merge: each
+# populated step is renumbered to the next contiguous index.
+#
+# Per-group failures are reported like the corresponding upstream
+# Msg::Error diagnostics: an error event is emitted and the group is skipped,
+# leaving the group's views untouched (in particular never removed).
+
+# True when the view owns no element payload and no string data (upstream
+# `PViewData::empty`).
+_view_list_is_empty(view::_SessionView)=
+    all(iszero,values(view.list_counts)) &&
+    all(isempty,values(view.list_strings))
+
+function _view_combine_error(message::AbstractString)
+    NATIVE_LOOKUP_QUERY_ERRORS[]+=1;NATIVE_MSG_LAST_ERROR[]=message
+    _native_diagnostic_emit_locked(:error,message)
+    return nothing
+end
+
+# Public type order for merged list payloads; types outside the canonical POS
+# record table follow in first-seen order.
+function _view_combined_types(owners;reference_only=false)
+    sources=reference_only ? owners[1:1] : owners
+    seen=Set{String}();types=String[]
+    for type_key in _LIST_IMPORT_TYPE_ORDER
+        any(owner->type_key in owner.list_types,sources) || continue
+        push!(seen,type_key);push!(types,type_key)
+    end
+    for owner in sources,type_key in owner.list_types
+        type_key in seen && continue
+        push!(seen,type_key);push!(types,type_key)
+    end
+    return types
+end
+
+# combineSpace: concatenate element blocks across views. All non-empty views
+# must declare the same number of time steps; the physical-time table of the
+# first view is kept.
+function _view_combine_list_space(owners,label)
+    reference=first(owners)
+    steps=_view_data_steps(reference)
+    for owner in owners[2:end]
+        _view_list_is_empty(owner) && continue
+        _view_data_steps(owner)==steps && continue
+        return _view_combine_error(
+            "Cannot combine views having different number of time steps")
+    end
+    view=_SessionView(label*"_Combine")
+    for type_key in _view_combined_types(owners)
+        count=0;data=Float64[]
+        for owner in owners
+            count+=get(owner.list_counts,type_key,0)
+            append!(data,get(owner.list_data,type_key,Float64[]))
+        end
+        push!(view.list_types,type_key)
+        view.list_counts[type_key]=count
+        view.list_data[type_key]=data
+    end
+    view.list_time=copy(reference.list_time)
+    for owner in owners,type_key in owner.list_string_types
+        if !(type_key in view.list_string_types)
+            push!(view.list_string_types,type_key)
+            view.list_strings[type_key]=String[]
+            view.list_string_coords[type_key]=Float64[]
+            view.list_string_counts[type_key]=0
+        end
+        append!(view.list_strings[type_key],owner.list_strings[type_key])
+        append!(view.list_string_coords[type_key],owner.list_string_coords[type_key])
+        view.list_string_counts[type_key]+=owner.list_string_counts[type_key]
+    end
+    for owner in owners,(code,matrices) in owner.interp
+        haskey(view.interp,code) ||
+            (view.interp[code]=[copy(matrix) for matrix in matrices])
+    end
+    return view
+end
+
+# combineTime: keep the first view's element geometry and append every
+# contributing view's per-element value payload — the combined view's step
+# count is the sum of the contributing steps. A view only contributes to a
+# type when its element count matches the reference's.
+function _view_combine_list_time(owners,label)
+    reference=first(owners)
+    view=_SessionView(label*"_Combine")
+    for type_key in _view_combined_types(owners;reference_only=true)
+        layout=get(Post._POS_RECORD_TYPES,type_key,nothing)
+        layout===nothing && return _view_combine_error(
+            "Cannot combine list data of unknown element type '$type_key'")
+        _,nodes,_=layout
+        count=get(reference.list_counts,type_key,0)
+        reference_data=reference.list_data[type_key]
+        count>0 && length(reference_data)%count!=0 && return _view_combine_error(
+            "Cannot combine views: list data do not align with numEle")
+        reference_width=count>0 ? div(length(reference_data),count) : 0
+        data=Float64[]
+        for element in 0:count-1
+            base=element*reference_width
+            append!(data,@view(reference_data[base+1:base+3nodes]))
+            for owner in owners
+                get(owner.list_counts,type_key,0)==count || continue
+                owner_data=owner.list_data[type_key]
+                length(owner_data)%count==0 || return _view_combine_error(
+                    "Cannot combine views: list data do not align with numEle")
+                owner_width=div(length(owner_data),count)
+                owner_base=element*owner_width
+                tail=owner_base+3nodes+1
+                append!(data,@view(owner_data[tail:owner_base+owner_width]))
+            end
+        end
+        push!(view.list_types,type_key)
+        view.list_counts[type_key]=count
+        view.list_data[type_key]=data
+    end
+    time=Float64[]
+    for owner in owners;append!(time,owner.list_time);end
+    (!isempty(time) && allequal(time)) && empty!(time)
+    total_steps=_view_plain_list_steps(view.list_types,view.list_counts,
+                                       view.list_data)
+    if total_steps!==nothing && length(time)<total_steps
+        append!(time,Float64(index) for index in length(time):total_steps-1)
+    end
+    view.list_time=time
+    for type_key in reference.list_string_types
+        count0=reference.list_string_counts[type_key]
+        push!(view.list_string_types,type_key)
+        view.list_string_coords[type_key]=copy(reference.list_string_coords[type_key])
+        view.list_string_counts[type_key]=count0
+        view.list_strings[type_key]=String[
+            join(String[owner.list_strings[type_key][index]
+                        for owner in owners
+                        if get(owner.list_string_counts,type_key,0)==count0])
+            for index in 1:count0]
+    end
+    for (code,matrices) in reference.interp
+        view.interp[code]=[copy(matrix) for matrix in matrices]
+    end
+    return view
+end
+
+# Model-data combineTime: deep-copy every populated (step, kind) payload into
+# contiguous steps. Each copied step keeps its own model slot in a dedicated
+# step range, so multi-mesh combinations remain addressable.
+function _view_combine_model_time(owners,label)
+    reference=first(owners)
+    view=_SessionView(label*"_Combine")
+    view.model_kind=reference.model_kind
+    step=0
+    for owner in owners
+        for key in sort!(collect(keys(owner.model_data));by=first)
+            tags,values,components=owner.model_data[key]
+            target=(step,key[2])
+            view.model_data[target]=(copy(tags),copy(values),components)
+            context=owner.model_contexts[key]
+            view.model_contexts[target]=context
+            push!(view.model_step_ranges,_NativeViewStepRange(step,step,
+                get(context,:model_slot,nothing),components))
+            step+=1
+        end
+    end
+    for (code,matrices) in reference.interp
+        view.interp[code]=[copy(matrix) for matrix in matrices]
+    end
+    return view
+end
+
+function _view_combine(what,how,remove=true,copy_options=true)
+    caller="API.view.combine"
+    what isa AbstractString || throw(ArgumentError(
+        "$caller: what must be a string"))
+    how isa AbstractString || throw(ArgumentError(
+        "$caller: how must be a string"))
+    what_value=String(what);how_value=String(how)
+    what_value in ("elements","steps") || throw(ArgumentError(
+        "$caller: what must be \"elements\" or \"steps\""))
+    how_value in ("all","visible","name") || throw(ArgumentError(
+        "$caller: how must be \"all\", \"visible\" or \"name\""))
+    remove_value=_mesh_query_bool(remove,caller,"remove")
+    copy_options_value=_mesh_query_bool(copy_options,caller,"copyOptions")
+    return lock(STATE_LOCK) do
+        labels=String[];groups=Dict{String,Vector{Int}}()
+        for tag in sort!(collect(keys(SESSION_VIEWS)))
+            view=SESSION_VIEWS[tag]
+            how_value=="visible" &&
+                iszero(get(view.numbers,"Visible",1.0)) && continue
+            label=how_value=="name" ? view.name :
+                  how_value=="all" ? "all" : "visible"
+            if haskey(groups,label)
+                push!(groups[label],tag)
+            else
+                groups[label]=[tag];push!(labels,label)
+            end
+        end
+        for label in labels
+            tags=groups[label]
+            length(tags)>=2 || continue
+            owners=[_view_data_owner(SESSION_VIEWS[tag]) for tag in tags]
+            model_based=[owner.model_kind!==nothing for owner in owners]
+            merged=nothing
+            if all(model_based)
+                if what_value=="steps"
+                    merged=_view_combine_model_time(owners,label)
+                else
+                    _view_combine_error("Combine space is not implemented " *
+                        "for this type of data")
+                    continue
+                end
+            elseif !any(model_based)
+                merged=what_value=="steps" ?
+                    _view_combine_list_time(owners,label) :
+                    _view_combine_list_space(owners,label)
+            else
+                _view_combine_error(
+                    "Cannot combine hybrid list/mesh-based datasets")
+                continue
+            end
+            merged===nothing && continue
+            merged_tag=_fresh_view_tag()
+            SESSION_VIEWS[merged_tag]=merged
+            VIEW_TAG_MAX[]=max(VIEW_TAG_MAX[],merged_tag)
+            if copy_options_value
+                first_options=SESSION_VIEWS[first(tags)]
+                merged.numbers=copy(first_options.numbers)
+                merged.strings=copy(first_options.strings)
+            end
+            if remove_value
+                for tag in tags;delete!(SESSION_VIEWS,tag);end
+            end
+        end
+        return nothing
+    end
+end
+
+# Per-family interpolation matrices stored on the view's data, matching
+# `view.setInterpolationMatrices`: `coef`/`exp` describe the `d` basis
+# functions of the field values, `coefGeo`/`expGeo` (when `dGeo` is positive)
+# the element geometry. A non-positive `d` removes the family's matrices.
+const _VIEW_INTERPOLATION_FAMILIES=Dict{String,Int32}(
+    "line"=>Int32(2),"triangle"=>Int32(3),"quadrangle"=>Int32(4),
+    "tetrahedron"=>Int32(5),"pyramid"=>Int32(6),"prism"=>Int32(7),
+    "hexahedron"=>Int32(8))
+
+function _view_set_interpolation_matrices(tag,type,d,coef,exp,
+                                          d_geo=0,coef_geo=[],exp_geo=[])
+    caller="API.view.set_interpolation_matrices"
+    type isa AbstractString || throw(ArgumentError(
+        "$caller: type must be a string"))
+    degree=_mesh_query_integer(d,caller,"d")
+    degree_geo=_mesh_query_integer(d_geo,caller,"dGeo")
+    (coef isa AbstractVector || coef isa Tuple) || throw(ArgumentError(
+        "$caller: coef must be a vector"))
+    (exp isa AbstractVector || exp isa Tuple) || throw(ArgumentError(
+        "$caller: exp must be a vector"))
+    (coef_geo isa AbstractVector || coef_geo isa Tuple) || throw(ArgumentError(
+        "$caller: coefGeo must be a vector"))
+    (exp_geo isa AbstractVector || exp_geo isa Tuple) || throw(ArgumentError(
+        "$caller: expGeo must be a vector"))
+    return lock(STATE_LOCK) do
+        view=_session_view_data(tag,caller)
+        # Upstream accepts each family in canonical or all-lowercase spelling.
+        family=lowercase(String(type))
+        code=get(_VIEW_INTERPOLATION_FAMILIES,family,nothing)
+        (code===nothing || (String(type)!=family &&
+            String(type)!=uppercasefirst(family))) && throw(ArgumentError(
+            "$caller: Unknown element family type '$(String(type))'"))
+        delete!(view.interp,code)
+        degree<=0 && return nothing
+        length(coef)==degree*degree || throw(ArgumentError(
+            "$caller: Wrong number of coefficients " *
+            "($(length(coef)) != $degree x $degree)"))
+        length(exp)==3*degree || throw(ArgumentError(
+            "$caller: Wrong number of exponents " *
+            "($(length(exp)) != $degree x 3)"))
+        coefficients=Matrix{Float64}(undef,degree,degree)
+        exponents=Matrix{Float64}(undef,degree,3)
+        for row in 1:degree
+            for column in 1:degree
+                coefficients[row,column]=_mesh_query_coordinate(
+                    coef[degree*(row-1)+column],caller,"coef entry")
+            end
+            for axis in 1:3
+                exponents[row,axis]=_mesh_query_coordinate(
+                    exp[3*(row-1)+axis],caller,"exp entry")
+            end
+        end
+        matrices=Matrix{Float64}[coefficients,exponents]
+        if degree_geo>0
+            length(coef_geo)==degree_geo*degree_geo || throw(ArgumentError(
+                "$caller: Wrong number of coefficients " *
+                "($(length(coef_geo)) != $degree_geo x $degree_geo)"))
+            length(exp_geo)==3*degree_geo || throw(ArgumentError(
+                "$caller: Wrong number of exponents " *
+                "($(length(exp_geo)) != $degree_geo x 3)"))
+            geo_coefficients=Matrix{Float64}(undef,degree_geo,degree_geo)
+            geo_exponents=Matrix{Float64}(undef,degree_geo,3)
+            for row in 1:degree_geo
+                for column in 1:degree_geo
+                    geo_coefficients[row,column]=_mesh_query_coordinate(
+                        coef_geo[degree_geo*(row-1)+column],caller,
+                        "coefGeo entry")
+                end
+                for axis in 1:3
+                    geo_exponents[row,axis]=_mesh_query_coordinate(
+                        exp_geo[3*(row-1)+axis],caller,"expGeo entry")
+                end
+            end
+            append!(matrices,(geo_coefficients,geo_exponents))
+        end
+        view.interp[code]=matrices
+        return nothing
     end
 end
 
@@ -11422,7 +11798,8 @@ using ..API: _view_add,_view_remove,_view_get_index,_view_get_tags,
              _view_add_list_data_string,_view_get_list_data_strings,
              _view_copy_options,_view_set_visibility_per_window,
              _view_add_homogeneous_model_data,
-             _view_get_homogeneous_model_data,_view_probe
+             _view_get_homogeneous_model_data,_view_probe,
+             _view_add_alias,_view_combine,_view_set_interpolation_matrices
 
 """Add a new empty view named `name`, returning its tag."""
 add(name,tag=-1)=_view_add(name,tag)
@@ -11481,6 +11858,22 @@ get_homogeneous_model_data(tag,step,model_name)=
 """Sample view `tag`'s step-0 data at point `(x,y,z)` on `modelName`:
 barycentric interpolation inside the containing simplex element."""
 probe(model_name,tag,x,y,z)=_view_probe(model_name,tag,x,y,z)
+"""Add a view as an alias of `refTag`: data is shared with the reference
+view while options stay per-view (copied when `copyOptions` is set). A
+positive `tag` replaces the view registered under it. Returns the tag."""
+add_alias(ref_tag,copy_options=false,tag=-1)=
+    _view_add_alias(ref_tag,copy_options,tag)
+"""Combine the `elements` or `steps` of all views (`how="all"`), visible
+views (`"visible"`) or same-named views (`"name"`) into new views; remove
+the originals when `remove` is set and copy the first member's options when
+`copy_options` is set."""
+combine(what,how,remove=true,copy_options=true)=
+    _view_combine(what,how,remove,copy_options)
+"""Store `d` field interpolation basis coefficients/exponents (and `dGeo`
+geometry interpolation when positive) for the element family `type` on view
+`tag`. `d <= 0` removes the family's matrices."""
+set_interpolation_matrices(tag,type,d,coef,exp,d_geo=0,coef_geo=[],exp_geo=[])=
+    _view_set_interpolation_matrices(tag,type,d,coef,exp,d_geo,coef_geo,exp_geo)
 
 end # module view
 
