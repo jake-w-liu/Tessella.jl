@@ -1109,3 +1109,179 @@ function _model_occ_add_pipe!(m::GeoModel,tag,profile,wire_tag)
     return _model_occ_thru_sections!(m,tag,section_tags;
         make_solid=make_solid,make_ruled=false)
 end
+
+# ── `addTrimmedSurface` ───────────────────────────────────────────────────────
+#
+# `BRepBuilderAPI_MakeFace(surface, wire)` semantics: the wire's edges are
+# projected onto the base surface's canonical domain, producing a bounded
+# face on that surface. Edges projecting linearly in uv collapse to exact
+# `lin2d` pcurves; the rest become `spl2d` — cubic B-spline interpolants
+# through unwrapped (period-corrected) projection samples. Without a
+# surfaceTag the wire resolves through the plane path.
+
+# Project edge `eid` onto base record `face_g`; returns a lin2d or spl2d
+# pcurve over the edge's own parameter range.
+function _trim_project_pcurve(m,kernel,face_g,eid,caller)
+    g=kernel.shapes[eid].geometry.geometry
+    etag=_model_occ_shape_tag(kernel,eid,caller)
+    t0,t1=g.t0,g.t1
+    ns=17
+    ts=Float64[t0+(t1-t0)*i/(ns-1) for i in 0:ns-1]
+    uvs=Vector{NTuple{2,Float64}}(undef,ns)
+    period=face_g.occ===:plane ? 0.0 : _brep_uperiod(face_g)
+    prev=nothing
+    for (i,u) in enumerate(ts)
+        P=_pipe_edge_point(m,g,etag,u)
+        pr=_occ_surface_closest(face_g,P,1.0)
+        pr===nothing && throw(ArgumentError(
+            "$caller: Curve[$etag] does not project onto the surface"))
+        uv=(pr[1],pr[2])
+        if prev!==nothing && period>0.0
+            uv=(uv[1]+period*round((prev[1]-uv[1])/period),uv[2])
+        end
+        prev=uv; uvs[i]=uv
+    end
+    # Exact linear reduction: every sample must sit on the t-interpolated
+    # chord — a straight uv trace needs d·t linear in the edge parameter.
+    u0,uN=uvs[1],uvs[end]
+    du=(uN[1]-u0[1])/(t1-t0),(uN[2]-u0[2])/(t1-t0)
+    scale=max(1.0,maximum(abs(u[1]-u0[1]) for u in uvs),
+              maximum(abs(u[2]-u0[2]) for u in uvs))
+    lin=true
+    for i in 2:ns-1
+        pu=u0[1]+du[1]*(ts[i]-t0); pv=u0[2]+du[2]*(ts[i]-t0)
+        (abs(uvs[i][1]-pu)>1e-9*scale || abs(uvs[i][2]-pv)>1e-9*scale) &&
+            (lin=false; break)
+    end
+    lin && return (lin2d=(u0,du),)
+    return (spl2d=_pchip_bspline_2d(ts,uvs),)
+end
+
+# Monotone (Fritsch–Carlson) piecewise-cubic Hermite interpolant through
+# (ts[i], uvs[i]) converted to a C1 cubic B-spline: interior knots carry
+# multiplicity 2, the three Bezier poles per segment collapse the shared
+# endpoint. Monotonicity keeps the trace inside the sampled uv range — a
+# global interpolant can overshoot past the surface's v-window.
+function _pchip_bspline_2d(ts,uvs)
+    n=length(ts)
+    us=[p[1] for p in uvs]; vs=[p[2] for p in uvs]
+    function slopes(ys)
+        m=Vector{Float64}(undef,n)
+        d=[(ys[i+1]-ys[i])/(ts[i+1]-ts[i]) for i in 1:n-1]
+        # PCHIP endpoints: one-sided extrapolation clamped to the first
+        # secant sign, capped at 3|d1| when the secants disagree.
+        function end_slope(h1,h2,d1,d2)
+            e=((2*h1+h2)*d1-h1*d2)/(h1+h2)
+            sign(e)!=sign(d1) && return 0.0
+            (sign(d1)!=sign(d2) && abs(e)>3*abs(d1)) && return 3*d1
+            return e
+        end
+        if n==2
+            m[1]=d[1]; m[2]=d[1]
+        else
+            m[1]=end_slope(ts[2]-ts[1],ts[3]-ts[2],d[1],d[2])
+            m[n]=end_slope(ts[n]-ts[n-1],ts[n-1]-ts[n-2],
+                           d[n-1],d[n-2])
+        end
+        for i in 2:n-1
+            if d[i-1]*d[i]<=0.0
+                m[i]=0.0
+            else
+                w1=2*(ts[i+1]-ts[i])+(ts[i]-ts[i-1])
+                w2=(ts[i+1]-ts[i])+2*(ts[i]-ts[i-1])
+                m[i]=(w1+w2)/(w1/d[i-1]+w2/d[i])
+            end
+        end
+        return m
+    end
+    mu=slopes(us); mv=slopes(vs)
+    knots=Float64[]; cps=NTuple{2,Float64}[]
+    for i in 1:n-1
+        h=ts[i+1]-ts[i]
+        p0=(us[i],vs[i]); p3=(us[i+1],vs[i+1])
+        p1=(us[i]+mu[i]*h/3,vs[i]+mv[i]*h/3)
+        p2=(us[i+1]-mu[i+1]*h/3,vs[i+1]-mv[i+1]*h/3)
+        # Piecewise-Bezier layout: interior knots at full multiplicity p=3
+        # (C0 in the B-spline parameterization, tangent-continuous in
+        # geometry), junction pole stored once per side.
+        i>1 && append!(knots,[ts[i],ts[i],ts[i]])
+        i==1 && append!(knots,[ts[1],ts[1],ts[1],ts[1]])
+        push!(cps,p0); push!(cps,p1); push!(cps,p2)
+        i==n-1 && (push!(cps,p3);
+                   append!(knots,[ts[end],ts[end],ts[end],ts[end]]))
+    end
+    return (knots,3,cps)
+end
+
+function _model_occ_trimmed_surface(m::GeoModel,tag,wire_tag,surface_tag;
+                                    caller="OCC.addTrimmedSurface")
+    kernel=m.occ_kernel
+    requested=_model_occ_requested_tag(tag,caller)
+    allocated=_model_occ_next_tag(kernel,2,requested,caller)
+    haskey(kernel.bindings,(2,allocated)) && throw(ArgumentError(
+        "$caller: OCC Surface[$allocated] already exists"))
+    wt=abs(_model_occ_requested_tag(wire_tag,caller))
+    wid=get(kernel.bindings,(-1,wt),nothing)
+    wid===nothing && throw(ArgumentError("$caller: unknown OCC Wire[$wt]"))
+    uses=kernel.shapes[wid].geometry.uses
+    isempty(uses) && throw(ArgumentError("$caller: wire has no edges"))
+    shape_of=id->kernel.shapes[id]
+    tag_of=id->_model_occ_shape_tag(kernel,id,caller)
+    shape=nothing
+    if surface_tag isa Integer && surface_tag>=0
+        st=Int(surface_tag)
+        fid=get(kernel.bindings,(2,st),nothing)
+        fid===nothing && throw(ArgumentError(
+            "$caller: unknown OCC Surface[$st]"))
+        base=kernel.shapes[fid].geometry
+        base_g=base.geometry
+        base_g.occ in (:cylinder,:sphere,:cone,:torus,:plane,
+                       :tensor_bspline,:tensor_bezier) ||
+            throw(ArgumentError(
+                "$caller: Surface[$st] has no parametric OCC record"))
+        # The base face's own member edges carry pcurves already — reuse
+        # them when the trim wire re-uses those edges; otherwise project.
+        pc=Dict{Int,NamedTuple}()
+        for (eid,_) in uses
+            etag=tag_of(eid)
+            own=get(base_g,:pcurves,nothing)
+            own_pc=own===nothing ? nothing : get(own,etag,nothing)
+            pc[etag]=own_pc===nothing ?
+                (fwd=_trim_project_pcurve(m,kernel,base_g,eid,caller),
+                 rev=nothing) : own_pc
+        end
+        vuv=Dict{Int,NTuple{2,Float64}}()
+        for (eid,_) in uses, vid in kernel.shapes[eid].children
+            vtag=tag_of(vid)
+            haskey(vuv,vtag) && continue
+            pt=kernel.shapes[vid].geometry.point
+            pr=_occ_surface_closest(base_g,pt,1.0)
+            pr===nothing && throw(ArgumentError(
+                "$caller: wire vertex does not project onto the surface"))
+            vuv[vtag]=(pr[1],pr[2])
+        end
+        geometry=merge(base_g,(pcurves=pc,vertex_uv=vuv,trimmed=true))
+        if base_g.occ===:plane
+            # `uvb` is the canonical sampling domain for plane records —
+            # rebox it on the new boundary so stale bounds cannot clip the
+            # trim.
+            umin=vmin=Inf; umax=vmax=-Inf
+            for (eid,_) in uses
+                eg=kernel.shapes[eid].geometry.geometry
+                lo,hi=_occ_pcurve_fillbndbox(pc[tag_of(eid)].fwd,
+                                             eg.t0,eg.t1)
+                umin=min(umin,lo[1]); vmin=min(vmin,lo[2])
+                umax=max(umax,hi[1]); vmax=max(vmax,hi[2])
+            end
+            geometry=merge(geometry,(uvb=([umin,vmin],[umax,vmax]),))
+        end
+        shape=_ModelOCCShape(2,merge(base,(geometry=geometry,)),UInt64[wid])
+    else
+        geometry=_model_occ_plane_face_geometry(shape_of,tag_of,[uses],caller)
+        shape=_ModelOCCShape(2,(kind=:plane,geometry=geometry),UInt64[wid])
+    end
+    id=only(_model_occ_reserve_shapes(kernel,1,caller))
+    _model_occ_bind_shape!(kernel,2,allocated,id,shape)
+    kernel.next_shape=id+UInt64(1)
+    return allocated
+end

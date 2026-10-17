@@ -125,6 +125,7 @@ end
 # conic edges add their signed sector-minus-chord segment.
 function _model_occ_wire_shoelace(kernel,face_rec,uses)
     area=0.0; Mx=0.0; My=0.0
+    first_pt=nothing; last_pt=nothing
     for (eid,rev) in uses
         etag=kernel.shape_tags[eid][2]
         eg=kernel.shapes[eid].geometry.geometry
@@ -133,12 +134,35 @@ function _model_occ_wire_shoelace(kernel,face_rec,uses)
         if haskey(pc,:neg2d)
             pc=pc.neg2d[1];t0,t1=-t0,-t1
         end
+        pt_a=_occ_pcurve_d0(pc,t0); pt_b=_occ_pcurve_d0(pc,t1)
+        first_pt===nothing && (first_pt=pt_a)
+        last_pt=pt_b
         if haskey(pc,:lin2d)
             a=_occ_pcurve_d0(pc,t0); b=_occ_pcurve_d0(pc,t1)
             cr=_occ2_cross(a,b)
             area+=cr/2
             Mx+=(a[1]+b[1])*cr/6
             My+=(a[2]+b[2])*cr/6
+            continue
+        end
+        if !(haskey(pc,:circ2d) || haskey(pc,:ellips2d))
+            # Non-elementary trace (spl2d): shoelace moments by Green's
+            # theorem — A=∮u dv, ∬u=∮u²/2 dv, ∬v=∮v²/2 du, GL8 per
+            # B-spline span.
+            knots=pc.spl2d[1]
+            cuts=Float64[t0]
+            for k in knots
+                (k>t0 && k<t1) && push!(cuts,k)
+            end
+            push!(cuts,t1)
+            for k in 1:length(cuts)-1
+                a0=cuts[k]; h=(cuts[k+1]-a0)/2; mid=a0+h
+                for i in 1:4,s in (-1,1)
+                    t=mid+s*h*_OCC_GL_T[i]; w=_OCC_GL_W[i]*h
+                    (u,v),(du,dv)=_occ_pcurve_d1(pc,t)
+                    area+=w*u*dv; Mx+=w*(u*u/2)*dv; My+=w*(-(v*v/2))*du
+                end
+            end
             continue
         end
         # Conic edge (circ2d/ellips2d). Region between chord and arc =
@@ -169,6 +193,16 @@ function _model_occ_wire_shoelace(kernel,face_rec,uses)
             Mx+=sec_area*sec_c[1]-tri_area*tri_c[1]
             My+=sec_area*sec_c[2]-tri_area*tri_c[2]
         end
+    end
+    # Periodic surfaces: a wire wrapping the period closes only modulo
+    # 2π, so the cut-uv boundary includes the chord last→first — add its
+    # shoelace term or seam-wrapping domains lose the closure wedge.
+    if first_pt!==nothing &&
+            (first_pt[1]!=last_pt[1] || first_pt[2]!=last_pt[2])
+        cr=_occ2_cross(last_pt,first_pt)
+        area+=cr/2
+        Mx+=(last_pt[1]+first_pt[1])*cr/6
+        My+=(last_pt[2]+first_pt[2])*cr/6
     end
     return area,Mx,My
 end
@@ -258,14 +292,14 @@ end
 # Each wire's signed integral is normalized by its raw shoelace sign so
 # the outer wire counts positive and holes negative, matching the
 # plane-face convention.
-function _model_occ_cyl_face_div(kernel,fid)
+function _model_occ_cyl_face_div(kernel,fid;want_vmoment=false)
     shape=kernel.shapes[fid]; rec=shape.geometry.geometry
-    I1=Ic=Is=0.0
+    I1=Ic=Is=Iv=0.0
     for (wi,wire_id) in enumerate(shape.children)
         uses=kernel.shapes[wire_id].geometry.uses
         raw=_model_occ_wire_shoelace(kernel,rec,uses)[1]
-        j1=jc=js=0.0
-        u_prev=nothing
+        j1=jc=js=jv=0.0
+        u_prev=nothing; uv_first=nothing; uv_last=nothing
         for (eid,rev) in uses
             etag=kernel.shape_tags[eid][2]
             eg=kernel.shapes[eid].geometry.geometry
@@ -275,9 +309,10 @@ function _model_occ_cyl_face_div(kernel,fid)
             # representative mod 2π — unwrap the wire so each edge
             # continues the previous one's u, or ∮u dv telescopes to
             # zero instead of the domain area
-            us=_occ_pcurve_d0(pc,t0)[1]
+            us,vs0=_occ_pcurve_d0(pc,t0)
             shift=u_prev===nothing ? 0.0 :
                 _OCC_TWO_PI*round((u_prev-us)/_OCC_TWO_PI)
+            uv_first===nothing && (uv_first=(us+shift,vs0))
             panels=max(1,ceil(Int,abs(t1-t0)/(π/2)))
             span=(t1-t0)/panels
             for k in 0:panels-1
@@ -287,15 +322,145 @@ function _model_occ_cyl_face_div(kernel,fid)
                     (u,v),(du,dv)=_occ_pcurve_d1(pc,t)
                     u+=shift
                     j1+=w*u*dv; jc+=w*sin(u)*dv; js+=w*(-cos(u)*dv)
+                    want_vmoment && (jv+=w*(-(v*v/2))*du)
                 end
             end
-            u_prev=_occ_pcurve_d0(pc,t1)[1]+shift
+            ue,ve=_occ_pcurve_d0(pc,t1)
+            uv_last=(ue+shift,ve)
+            u_prev=ue+shift
+        end
+        # Seam-wrapping wire: the uv loop closes through the periodic
+        # identification — append the last→first chord so Green's
+        # theorem sees the complete contour (degenerates to zero for
+        # wires closed exactly in uv).
+        if uv_first!==nothing &&
+                (uv_first[1]!=uv_last[1] || uv_first[2]!=uv_last[2])
+            du0=uv_first[1]-uv_last[1]; dv0=uv_first[2]-uv_last[2]
+            um=(uv_last[1]+uv_first[1])/2
+            j1+=um*dv0
+            mdu=du0==0.0 ? 0.0 : dv0/du0
+            jc+=mdu*(cos(uv_last[1])-cos(uv_first[1]))
+            js+=-mdu*(sin(uv_first[1])-sin(uv_last[1]))
+            va,vb=uv_last[2],uv_first[2]
+            jv+=-du0*(va*va+va*vb+vb*vb)/6
         end
         w=(wi==1 ? 1.0 : -1.0)*(raw>=0 ? 1.0 : -1.0)
-        I1+=w*j1; Ic+=w*jc; Is+=w*js
+        I1+=w*j1; Ic+=w*jc; Is+=w*js; want_vmoment && (Iv+=w*jv)
     end
-    return I1,Ic,Is
+    return I1,Ic,Is,Iv
 end
+
+# ---- trimmed faces ----------------------------------------------------
+#
+# `addTrimmedSurface` faces carry `trimmed=true` and a boundary that is
+# not the base's canonical domain, so measures integrate over the stored
+# pcurves instead. Planes reuse the shoelace; cylinders extend the
+# Green's-theorem divergence with the v-moment ∬v dudv = ∮(−v²/2)du —
+# giving the exact patch centroid
+#   ∬p dA = R·(C·I1 + R·(X·Ic+Y·Is) + Z·Iv),  A = R·I1.
+# Other bases fall back to a CDT of the sampled uv boundary with a
+# per-triangle Gauss rule on dA=|p_u×p_v| — the only approximation is the
+# pcurve's own resolution, which the `spl2d` knot spacing keeps tight.
+function _model_occ_trimmed_face_measure(kernel,id)
+    shape=kernel.shapes[id]; rec=shape.geometry.geometry
+    occ=get(rec,:occ,nothing)
+    if occ===:plane
+        A,c3,_=_model_occ_plane_stats(kernel,id)
+        return A,c3
+    elseif occ===:cylinder
+        I1,Ic,Is,Iv=_model_occ_cyl_face_div(kernel,id;want_vmoment=true)
+        # Trim wires wind either way — normalize the moment tuple to the
+        # counter-clockwise orientation before turning it into a measure.
+        s=I1>=0.0 ? 1.0 : -1.0
+        I1*=s; Ic*=s; Is*=s; Iv*=s
+        A=rec.radius*I1
+        A>_OCC_CONFUSION || throw(ErrorException(
+            "OCC.get_mass: trimmed cylinder face has zero area"))
+        X,Y,Z,C=rec.X,rec.Y,rec.axis,rec.center
+        M=_occ3_scale(
+            _occ3_add(_occ3_scale(C,I1),
+                      _occ3_add(_occ3_scale(X,rec.radius*Ic),
+                                _occ3_add(_occ3_scale(Y,rec.radius*Is),
+                                          _occ3_scale(Z,Iv)))),
+            rec.radius)
+        return A,_occ3_scale(M,1.0/A)
+    end
+    # Generic parametric base: sample the pcurve boundary at each edge's
+    # resolution, triangulate the uv domain, integrate |p_u×p_v| with a
+    # three-point rule over 4×-split subtriangles.
+    period=_brep_uperiod(rec)
+    xs=Float64[]; ys=Float64[]; segs=Tuple{Int,Int}[]
+    index=Dict{NTuple{2,Float64},Int}()
+    emit(uv)=get!(index,uv) do
+        push!(xs,uv[1]); push!(ys,uv[2]); return length(xs)
+    end
+    lo=[Inf,Inf]; hi=[-Inf,-Inf]
+    for wire_id in shape.children
+        uses=kernel.shapes[wire_id].geometry.uses
+        loop_idx=Int[]; u_prev=nothing
+        for (eid,rev) in uses
+            etag=kernel.shape_tags[eid][2]
+            eg=kernel.shapes[eid].geometry.geometry
+            pc=rec.pcurves[etag].fwd
+            t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
+            ruv=0.002*(isfinite(hi[1]-lo[1]) ? max(hi[1]-lo[1],1.0) : 1.0)
+            step=_occ_pcurve_resolution(pc,ruv)
+            ns=max(9,ceil(Int,abs(t1-t0)/max(step,eps())))
+            ns=min(ns,2048)
+            for i in 0:ns
+                t=t0+(t1-t0)*i/ns
+                u,v=_occ_pcurve_d0(pc,t)
+                if period>0.0 && u_prev!==nothing
+                    u+=period*round((u_prev-u)/period)
+                end
+                u_prev=u
+                lo[1]=min(lo[1],u); hi[1]=max(hi[1],u)
+                lo[2]=min(lo[2],v); hi[2]=max(hi[2],v)
+                push!(loop_idx,emit((u,v)))
+            end
+        end
+        n=length(loop_idx)
+        n>=3 || throw(ArgumentError(
+            "OCC.get_mass: trimmed face wire needs at least three points"))
+        for k in 1:n
+            i,j=loop_idx[k],loop_idx[mod1(k+1,n)]
+            i==j || (xs[i]==xs[j] && ys[i]==ys[j]) || push!(segs,(i,j))
+        end
+    end
+    isempty(segs) && throw(ErrorException(
+        "OCC.get_mass: trimmed face has an empty uv boundary"))
+    T=constrained_delaunay(xs,ys,segs)
+    interior=classify_interior(T)
+    A=0.0; M=(0.0,0.0,0.0)
+    # reference-triangle rule on (0,0),(1,0),(0,1): weights 1/3 at
+    # (1/6,1/6),(2/3,1/6),(1/6,2/3), applied on 4 uniform subtriangles.
+    nodes=((1/6,1/6),(2/3,1/6),(1/6,2/3))
+    for t in eachindex(interior)
+        interior[t] || continue
+        p1=(xs[T.tv[3t-2]],ys[T.tv[3t-2]])
+        p2=(xs[T.tv[3t-1]],ys[T.tv[3t-1]])
+        p3=(xs[T.tv[3t]],ys[T.tv[3t]])
+        m12=_occ2_mid(p1,p2); m23=_occ2_mid(p2,p3); m31=_occ2_mid(p3,p1)
+        for (q1,q2,q3) in ((p1,m12,m31),(m12,p2,m23),(m31,m23,p3),
+                          (m12,m23,m31))
+            jac=abs((q2[1]-q1[1])*(q3[2]-q1[2])-
+                    (q3[1]-q1[1])*(q2[2]-q1[2]))
+            for (s,tt) in nodes
+                u=q1[1]+s*(q2[1]-q1[1])+tt*(q3[1]-q1[1])
+                v=q1[2]+s*(q2[2]-q1[2])+tt*(q3[2]-q1[2])
+                p,du,dv=_occ_surface_d1(rec,u,v)
+                dA=_occ_modulus(_occ_cross(du,dv))
+                w=jac/2/3
+                A+=w*dA; M=_occ3_add(M,_occ3_scale(p,w*dA))
+            end
+        end
+    end
+    A>_OCC_CONFUSION || throw(ErrorException(
+        "OCC.get_mass: trimmed face has zero area"))
+    return A,_occ3_scale(M,1.0/A)
+end
+
+@inline _occ2_mid(a,b)=((a[1]+b[1])/2,(a[2]+b[2])/2)
 
 # ---- faces -----------------------------------------------------------
 
@@ -327,6 +492,9 @@ function _model_occ_face_measure(kernel,id)
         A>_OCC_CONFUSION || throw(ErrorException(
             "OCC.get_mass: NURBS face has zero area"))
         return A,_occ3_scale(M,1.0/A)
+    end
+    if get(rec,:trimmed,false)
+        return _model_occ_trimmed_face_measure(kernel,id)
     end
     # Quadric patches over their canonical domains — the closed-form
     # ∫P·dA integrals (u-mean cos/sin cover the partial torus sweep).
@@ -607,7 +775,7 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
             want_centroid && throw(ErrorException(
                 "OCC.get_center_of_mass: cylinder-bounded solids are " *
                 "not supported"))
-            I1,Ic,Is=_model_occ_cyl_face_div(kernel,fid)
+            I1,Ic,Is,=_model_occ_cyl_face_div(kernel,fid)
             h=_dot3(_occ_cross(rec.X,_occ_frame_y(rec)),rec.axis)>=0 ?
                 1.0 : -1.0
             Cx=_dot3(rec.center,rec.X); Cy=_dot3(rec.center,rec.Y)

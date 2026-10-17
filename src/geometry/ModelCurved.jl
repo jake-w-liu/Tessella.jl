@@ -755,9 +755,40 @@ function _occ_pcurve_d0(pc,t::Float64)
         inner,uu,v0,vs=pc.tan2dv
         s,_,_=_occ_conic_reparam(inner,t)
         return uu,fma(vs,s,v0)
+    elseif hasproperty(pc,:spl2d)
+        knots,p,cps=pc.spl2d
+        return _occ_spl2d_eval(knots,p,cps,t)
     end
     o,x,a,b=pc.ellips2d
     return _occ_ellips2d_eval(o,x,a,b,t)
+end
+
+# `Geom2d_BSplineCurve` on a trimmed surface — a clamped non-rational
+# B-spline sampled from the edge's surface projection. `cps` are uv poles.
+function _occ_spl2d_eval(knots,p,cps,t)
+    n=length(cps)
+    u=clamp(t,knots[1],knots[end])
+    s=clamp(searchsortedlast(knots,u),p+1,length(knots)-p-1)
+    row=_loft_basis_row(knots,p,s,u,n)
+    U=V=0.0
+    @inbounds for i in 1:n
+        b=row[i]
+        b==0.0 && continue
+        U+=b*cps[i][1]; V+=b*cps[i][2]
+    end
+    return (U,V)
+end
+
+# One derivative step: degree-p B-spline → degree-(p−1) with derived poles.
+_occ_spl2d_derive(knots,p,cps)=begin
+    n=length(cps)
+    cps2=NTuple{2,Float64}[]
+    for i in 1:n-1
+        den=knots[i+p+1]-knots[i+1]
+        f=den>0.0 ? p/den : 0.0
+        push!(cps2,(f*(cps[i+1][1]-cps[i][1]),f*(cps[i+1][2]-cps[i][2])))
+    end
+    return (knots[2:end-1],p-1,cps2)
 end
 function _occ_pcurve_d1(pc,t::Float64)
     if hasproperty(pc,:neg2d)
@@ -775,6 +806,11 @@ function _occ_pcurve_d1(pc,t::Float64)
         inner,uu,v0,vs=pc.tan2dv
         s,ds,_=_occ_conic_reparam(inner,t)
         return (uu,fma(vs,s,v0)),(0.0,vs*ds)
+    elseif hasproperty(pc,:spl2d)
+        knots,p,cps=pc.spl2d
+        uv=_occ_spl2d_eval(knots,p,cps,t)
+        k2,p2,cps2=_occ_spl2d_derive(knots,p,cps)
+        return uv,_occ_spl2d_eval(k2,p2,cps2,t)
     else
         # `Geom2d_Circle`/`Geom2d_Ellipse::D1` — the SetLinearForm pair
         # (−R·sin on X, R·cos on the derived YDirection (−x.y, x.x)); the
@@ -824,6 +860,18 @@ function _occ_pcurve_d2(pc,t::Float64)
         inner,uu,v0,vs=pc.tan2dv
         s,ds,dds=_occ_conic_reparam(inner,t)
         return (uu,fma(vs,s,v0)),(0.0,vs*ds),(0.0,vs*dds)
+    elseif hasproperty(pc,:spl2d)
+        knots,p,cps=pc.spl2d
+        uv=_occ_spl2d_eval(knots,p,cps,t)
+        k1,p1,cps1=_occ_spl2d_derive(knots,p,cps)
+        d1=_occ_spl2d_eval(k1,p1,cps1,t)
+        if p1>0 && length(cps1)>1
+            k2,p2,cps2=_occ_spl2d_derive(k1,p1,cps1)
+            d2=_occ_spl2d_eval(k2,p2,cps2,t)
+        else
+            d2=(0.0,0.0)
+        end
+        return uv,d1,d2
     end
     o,x,a,b=pc.ellips2d
     s,c=_gm_sincos(t)
@@ -2491,6 +2539,7 @@ _occ_pcurve_kind(pc)=hasproperty(pc,:neg2d) ?
     hasproperty(pc,:ellips2d) ? :ellips2d :
     hasproperty(pc,:tan2d) ? :tan2d :
     hasproperty(pc,:tan2dv) ? :tan2dv :
+    hasproperty(pc,:spl2d) ? :spl2d :
     throw(ArgumentError("_occ_pcurve_kind: unsupported pcurve record"))
 @inline _occ_pcurve_isperiodic(pc)=_occ_pcurve_kind(pc) in (:circ2d,:ellips2d)
 # `Geom2dAdaptor_Curve::Resolution(Ruv)` — line: Ruv; conic: 2·asin(Ruv/2r)
@@ -2505,6 +2554,10 @@ function _occ_pcurve_resolution(pc,ruv)
     # straight segment regardless of the t-spacing, so endpoints bound it
     # exactly.
     (kind===:lin2d || kind===:tan2d || kind===:tan2dv) && return ruv
+    # Sampled splines have no closed-form resolution — bound the step by
+    # the smaller of the requested uv tolerance and a 16-segment span
+    # fraction so curved projections stay well sampled.
+    kind===:spl2d && return min(ruv,(pc.spl2d[1][end]-pc.spl2d[1][1])/16)
     r=_occ_pcurve_kind(pc)===:circ2d ? pc.circ2d[3] :
         let (a,b)=(pc.ellips2d[3],pc.ellips2d[4])
             min(a,b)*min(a,b)/max(a,b)   # ρmin — radii may swap under transforms
