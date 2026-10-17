@@ -1628,10 +1628,57 @@ function _model_occ_defeature(m::GeoModel,volume_tag,remove_tags;
         isempty(verts) && throw(ArgumentError(
             "$caller: kept faces bound an empty body"))
     end
+    # Old sub-shape ids become orphans once the volume rebinds.
+    old_ids=UInt64[]
+    stack=copy(kernel.shapes[vid].children)
+    while !isempty(stack)
+        x=pop!(stack); x in old_ids && continue
+        push!(old_ids,x); append!(stack,kernel.shapes[x].children)
+        hasproperty(kernel.shapes[x].geometry,:uses) &&
+            append!(stack,(u for (u,_) in
+                           kernel.shapes[x].geometry.uses))
+    end
+    shell=_occ_solid_from_planes!(m,planes,bs,verts,caller)
+    # `OCC_Internals::defeature` mutates the volume in place — rebind the
+    # same tag to the healed shell rather than allocating a new volume.
+    sid=kernel.bindings[(-2,shell)]
+    kernel.shapes[vid]=_ModelOCCShape(3,(kind=:solid,),UInt64[sid])
+    _occ_unbind_orphans!(kernel,Set(old_ids))
+    return vt
+end
+
+# Unbind entities in `dead` that nothing outside `dead` references —
+# safe post-rebind cleanup for consumed sub-shapes.
+function _occ_unbind_orphans!(kernel,dead::Set{UInt64})
+    referenced=Set{UInt64}()
+    for (sid,sh) in kernel.shapes
+        sid in dead && continue
+        union!(referenced,sh.children)
+        hasproperty(sh.geometry,:uses) &&
+            union!(referenced,(u for (u,_) in sh.geometry.uses))
+    end
+    for id in dead
+        id in referenced && continue
+        entry=get(kernel.shape_tags,id,nothing)
+        entry===nothing && continue
+        _model_occ_entity_map_unbind!(
+            kernel.entity_maps[first(entry)+3],last(entry))
+        delete!(kernel.bindings,entry);delete!(kernel.shape_tags,id)
+        push!(kernel.removed,entry)
+    end
+    kernel.changed=true
+    return nothing
+end
+
+# Build a closed solid from an outward half-space set: per-plane
+# polygons of the enumerated body vertices, shared point/line
+# entities, one shell. Returns the surface-loop tag.
+function _occ_solid_from_planes!(m::GeoModel,planes,bs,verts,caller)
+    kernel=m.occ_kernel
     ptags=[_model_occ_add_point!(m,x[1],x[2],x[3]) for x in verts]
     edge_of=Dict{NTuple{2,Int},Tuple{UInt64,Int}}()
     face_tags=Int[]
-    for i in 1:P
+    for i in eachindex(planes)
         on=Int[]
         for (vi,x) in enumerate(verts)
             abs(_dot3(planes[i],x)-bs[i])<1e-7 && push!(on,vi)
@@ -1664,12 +1711,7 @@ function _model_occ_defeature(m::GeoModel,volume_tag,remove_tags;
     end
     length(face_tags)<4 && throw(ArgumentError(
         "$caller: kept faces do not close a solid"))
-    shell=_model_occ_add_surface_loop!(m,face_tags)
-    # `OCC_Internals::defeature` mutates the volume in place — rebind the
-    # same tag to the healed shell rather than allocating a new volume.
-    sid=kernel.bindings[(-2,shell)]
-    kernel.shapes[vid]=_ModelOCCShape(3,(kind=:solid,),UInt64[sid])
-    return vt
+    return _model_occ_add_surface_loop!(m,face_tags)
 end
 
 # Bind a surface loop from precomputed `(face id, rev)` uses — parallel to
@@ -1683,4 +1725,135 @@ function _occ_shell_from_uses!(m::GeoModel,uses,caller)
     _model_occ_bind_shape!(kernel,-2,allocated,id,shape)
     kernel.next_shape=id+UInt64(1)
     return allocated
+end
+
+# ── `chamfer` ─────────────────────────────────────────────────────────────────
+#
+# `BRepFilletAPI_MakeChamfer` on planar-faced solids: each chamfered
+# edge contributes one new half-space — the plane through the lines
+# parallel to the edge at distances d1/d2 inside its two adjacent
+# faces — so the chamfered body is exactly the original half-space
+# intersection plus those planes (same enumeration as `defeature`).
+# The plane must clip only the edge's corner region: its midpoint is
+# forced onto the removed side, and any *other* original vertex on the
+# removed side means the chamfer overruns a neighboring corner — a
+# loud rejection like upstream's "chamfer could not be computed".
+function _model_occ_chamfer(m::GeoModel,volume_tags,curve_tags,
+                            distance1,distance2;
+                            caller="OCC.chamfer")
+    kernel=m.occ_kernel
+    out=Tuple{Int,Int}[]
+    for volume_tag in volume_tags
+        vt=abs(_model_occ_requested_tag(volume_tag,caller))
+        vid=get(kernel.bindings,(3,vt),nothing)
+        vid===nothing && throw(ArgumentError(
+            "$caller: unknown OCC Volume[$vt]"))
+        # Outward planes + edge→adjacent-face map.
+        planes=NTuple{3,Float64}[]; bs=Float64[]
+        fnormals=Dict{UInt64,NTuple{3,Float64}}()
+        fcenters=Dict{UInt64,NTuple{3,Float64}}()
+        edge_faces=Dict{UInt64,Vector{UInt64}}()
+        for shell_id in kernel.shapes[vid].children
+            for (fid,rev) in kernel.shapes[shell_id].geometry.uses
+                fg=kernel.shapes[fid].geometry
+                get(fg.geometry,:occ,nothing)!==:plane &&
+                    throw(ArgumentError(
+                        "$caller: chamfer needs planar faces (got " *
+                        "occ=$(get(fg.geometry,:occ,nothing)))"))
+                σ=rev ? -1.0 : 1.0
+                n=_occ3_scale(fg.geometry.axis,σ)
+                get(fg.geometry,:reversed,false) && (n=(.-n))
+                n=_occ3_scale(n,1.0/_occ_modulus(n))
+                fnormals[fid]=n; fcenters[fid]=fg.geometry.center
+                push!(planes,n); push!(bs,_dot3(n,fg.geometry.center))
+                for wid in kernel.shapes[fid].children
+                    wsh=kernel.shapes[wid]
+                    hasproperty(wsh.geometry,:uses) || continue
+                    for (u,_) in wsh.geometry.uses
+                        push!(get!(edge_faces,u,UInt64[]),fid)
+                    end
+                end
+            end
+        end
+        overs=_occ_halfspace_verts(planes,bs)
+        if isempty(overs)
+            planes=[(.-n) for n in planes]; bs=(.-bs)
+            fnormals=Dict(k=>(.-v) for (k,v) in fnormals)
+            overs=_occ_halfspace_verts(planes,bs)
+            isempty(overs) && throw(ArgumentError(
+                "$caller: Volume[$vt] faces bound an empty body"))
+        end
+        # Chamfer half-space per requested edge.
+        nplanes=copy(planes); nbs=copy(bs)
+        for curve_tag in curve_tags
+            et=abs(_model_occ_requested_tag(curve_tag,caller))
+            eid=get(kernel.bindings,(1,et),nothing)
+            eid===nothing && throw(ArgumentError(
+                "$caller: unknown OCC Curve[$et]"))
+            fids=get(edge_faces,eid,nothing)
+            (fids===nothing || length(fids)!=2) && throw(ArgumentError(
+                "$caller: Curve[$et] is not an edge shared by two " *
+                "faces of Volume[$vt]"))
+            eg=kernel.shapes[eid].geometry.geometry
+            get(eg,:occ,nothing)==:line || throw(ArgumentError(
+                "$caller: chamfer edge must be a line " *
+                "(Curve[$et] is occ=$(get(eg,:occ,nothing)))"))
+            t=_occ3_scale(eg.dir,1.0/_occ_modulus(eg.dir))
+            em=_occ3_add(eg.origin,
+                         _occ3_scale(eg.dir,(eg.t0+eg.t1)/2))
+            fA,fB=fids
+            nA,nB=fnormals[fA],fnormals[fB]
+            # In-face inward directions perpendicular to the edge.
+            uA=_occ_cross(t,nA); uB=_occ_cross(t,nB)
+            uA=_occ3_scale(uA,1.0/_occ_modulus(uA))
+            uB=_occ3_scale(uB,1.0/_occ_modulus(uB))
+            _dot3(uA,_occ3_sub(fcenters[fA],em))<0 && (uA=(.-uA))
+            _dot3(uB,_occ3_sub(fcenters[fB],em))<0 && (uB=(.-uB))
+            qA=_occ3_add(em,_occ3_scale(uA,distance1))
+            qB=_occ3_add(em,_occ3_scale(uB,distance2))
+            w=_occ3_sub(qB,qA)
+            nc=_occ_cross(t,w)
+            nl=_occ_modulus(nc)
+            nl<1e-12 && throw(ArgumentError(
+                "$caller: degenerate chamfer on Curve[$et]"))
+            nc=_occ3_scale(nc,1.0/nl)
+            bc=_dot3(nc,qA)
+            # Corner side must violate the kept half-space.
+            _dot3(nc,em)>bc || (nc=(.-nc); bc=-bc)
+            # No original vertex other than the edge's own endpoints
+            # may cross the cut — else the chamfer overruns a corner.
+            ends=[kernel.shapes[c].geometry.point
+                  for c in kernel.shapes[eid].children]
+            for x in overs
+                _dot3(nc,x)>bc+1e-7 || continue
+                any(e->_occ_modulus(_occ3_sub(e,x))<=1e-7,ends) &&
+                    continue
+                throw(ArgumentError(
+                    "$caller: chamfer on Curve[$et] overruns a " *
+                    "neighboring corner of Volume[$vt]"))
+            end
+            push!(nplanes,nc); push!(nbs,bc)
+        end
+        verts=_occ_halfspace_verts(nplanes,nbs)
+        isempty(verts) && throw(ArgumentError(
+            "$caller: chamfer leaves an empty body"))
+        # Old sub-shape ids become orphans once the volume rebinds —
+        # collected here, unbound below if nothing else uses them.
+        old_ids=UInt64[]
+        stack=copy(kernel.shapes[vid].children)
+        while !isempty(stack)
+            x=pop!(stack); x in old_ids && continue
+            push!(old_ids,x); append!(stack,kernel.shapes[x].children)
+            hasproperty(kernel.shapes[x].geometry,:uses) &&
+                append!(stack,(u for (u,_) in
+                               kernel.shapes[x].geometry.uses))
+        end
+        shell=_occ_solid_from_planes!(m,nplanes,nbs,verts,caller)
+        sid=kernel.bindings[(-2,shell)]
+        kernel.shapes[vid]=_ModelOCCShape(3,(kind=:solid,),UInt64[sid])
+        _occ_unbind_orphans!(kernel,Set(old_ids))
+        kernel.changed=true
+        push!(out,(3,vt))
+    end
+    return out
 end

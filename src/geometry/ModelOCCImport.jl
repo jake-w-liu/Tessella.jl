@@ -303,17 +303,12 @@ function _model_occ_heal_shapes(m::GeoModel,dim_tags;tolerance=-1.0,
     end
     # Unbind welded-away entities: duplicates no longer exist as
     # distinct geometry once every reference points at a canonical.
-    for (id,rep) in canon
+    for (id,rep) in Iterators.flatten((pairs(canon),pairs(ecanon)))
         id==rep && continue
         entry=get(kernel.shape_tags,id,nothing)
         entry===nothing && continue
-        delete!(kernel.bindings,entry);delete!(kernel.shape_tags,id)
-        push!(kernel.removed,entry);kernel.changed=true
-    end
-    for (id,rep) in ecanon
-        id==rep && continue
-        entry=get(kernel.shape_tags,id,nothing)
-        entry===nothing && continue
+        _model_occ_entity_map_unbind!(
+            kernel.entity_maps[first(entry)+3],last(entry))
         delete!(kernel.bindings,entry);delete!(kernel.shape_tags,id)
         push!(kernel.removed,entry);kernel.changed=true
     end

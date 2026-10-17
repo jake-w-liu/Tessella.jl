@@ -107,6 +107,12 @@ defeature(dim_tags,tags;removeVolume=true)=_with_model() do m
     return nothing
 end
 
+chamfer(volume_tags,curve_tags,distance1,distance2)=_with_model() do m
+    Model._model_occ_chamfer(m,Int[abs(Int(t)) for t in volume_tags],
+        Int[abs(Int(t)) for t in curve_tags],
+        Float64(distance1),Float64(distance2))
+end
+
 add_surface_loop(surface_tags;tag=-1,sewing=false)=_with_model() do m
     Model._model_occ_add_surface_loop!(m,surface_tags;tag,sewing)
 end
