@@ -1657,6 +1657,22 @@ function _occ_unbind_orphans!(kernel,dead::Set{UInt64})
         hasproperty(sh.geometry,:uses) &&
             union!(referenced,(u for (u,_) in sh.geometry.uses))
     end
+    # A dead-listed shape still referenced by a survivor (e.g. a wire
+    # shared with a face that was not rebuilt) keeps protecting its
+    # own references — propagate to a fixpoint.
+    grown=true
+    while grown
+        grown=false
+        for sid in intersect(dead,referenced)
+            sh=kernel.shapes[sid]
+            for x in sh.children
+                x in referenced || (push!(referenced,x); grown=true)
+            end
+            hasproperty(sh.geometry,:uses) && for (u,_) in sh.geometry.uses
+                u in referenced || (push!(referenced,u); grown=true)
+            end
+        end
+    end
     for id in dead
         id in referenced && continue
         entry=get(kernel.shape_tags,id,nothing)
@@ -1849,6 +1865,346 @@ function _model_occ_chamfer(m::GeoModel,volume_tags,curve_tags,
                                kernel.shapes[x].geometry.uses))
         end
         shell=_occ_solid_from_planes!(m,nplanes,nbs,verts,caller)
+        sid=kernel.bindings[(-2,shell)]
+        kernel.shapes[vid]=_ModelOCCShape(3,(kind=:solid,),UInt64[sid])
+        _occ_unbind_orphans!(kernel,Set(old_ids))
+        kernel.changed=true
+        push!(out,(3,vt))
+    end
+    return out
+end
+
+
+# ── `fillet` ──────────────────────────────────────────────────────────────────
+#
+# `BRepFilletAPI_MakeFillet` restricted to the exact planar-solid case:
+# line edges, planar faces, end faces orthogonal to the filleted edge
+# (so the fillet/corner-face intersection is circular), and no two
+# filleted edges sharing a vertex (corner blends need spheres — loud
+# rejection). Each filleted edge becomes a cylindrical sector tangent
+# to both adjacent faces; sibling edges truncate at the tangent/arc
+# points; each end vertex becomes a circular arc on the corner face.
+function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
+                           caller="OCC.fillet")
+    kernel=m.occ_kernel
+    rs=radii isa AbstractVector ? Float64[Float64(r) for r in radii] :
+        fill(Float64(radii),length(curve_tags))
+    length(rs)==length(curve_tags) || throw(ArgumentError(
+        "$caller: radii and curveTags must have the same length"))
+    all(>(0.0),rs) || throw(ArgumentError(
+        "$caller: fillet radii must be positive"))
+    out=Tuple{Int,Int}[]
+    for volume_tag in volume_tags
+        vt=abs(_model_occ_requested_tag(volume_tag,caller))
+        vid=get(kernel.bindings,(3,vt),nothing)
+        vid===nothing && throw(ArgumentError(
+            "$caller: unknown OCC Volume[$vt]"))
+        fnormals=Dict{UInt64,NTuple{3,Float64}}()
+        fcenters=Dict{UInt64,NTuple{3,Float64}}()
+        edge_faces=Dict{UInt64,Vector{UInt64}}()
+        vert_edges=Dict{UInt64,Vector{UInt64}}()
+        vert_pos=Dict{UInt64,NTuple{3,Float64}}()
+        wire_of=Dict{UInt64,UInt64}()
+        planes=NTuple{3,Float64}[]; bs=Float64[]
+        shell_uses=copy(kernel.shapes[
+            kernel.shapes[vid].children[1]].geometry.uses)
+        for (fid,rev) in shell_uses
+            fg=kernel.shapes[fid].geometry
+            get(fg.geometry,:occ,nothing)!==:plane &&
+                throw(ArgumentError(
+                    "$caller: fillet needs planar faces (got " *
+                    "occ=$(get(fg.geometry,:occ,nothing)))"))
+            σ=rev ? -1.0 : 1.0
+            n=_occ3_scale(fg.geometry.axis,σ)
+            get(fg.geometry,:reversed,false) && (n=(.-n))
+            n=_occ3_scale(n,1.0/_occ_modulus(n))
+            fnormals[fid]=n; fcenters[fid]=fg.geometry.center
+            push!(planes,n); push!(bs,_dot3(n,fg.geometry.center))
+            wid=kernel.shapes[fid].children[1]
+            wire_of[fid]=wid
+            for (u,_) in kernel.shapes[wid].geometry.uses
+                push!(get!(edge_faces,u,UInt64[]),fid)
+                for c in kernel.shapes[u].children
+                    push!(get!(vert_edges,c,UInt64[]),u)
+                    vert_pos[c]=kernel.shapes[c].geometry.point
+                end
+            end
+        end
+        overs=_occ_halfspace_verts(planes,bs)
+        if isempty(overs)
+            planes=[(.-n) for n in planes]; bs=(.-bs)
+            fnormals=Dict(k=>(.-v) for (k,v) in fnormals)
+            overs=_occ_halfspace_verts(planes,bs)
+            isempty(overs) && throw(ArgumentError(
+                "$caller: Volume[$vt] faces bound an empty body"))
+        end
+        fil_verts=Set{UInt64}()
+        trunc=Dict{Tuple{UInt64,UInt64},NTuple{3,Float64}}()
+        tangent=Dict{Tuple{UInt64,UInt64},Dict{UInt64,NTuple{3,Float64}}}()
+        arc_at=Dict{Tuple{UInt64,UInt64},NTuple{3,Float64}}()
+        fillet_of=Dict{UInt64,NamedTuple}()
+        for (ct,r) in zip(curve_tags,rs)
+            et=abs(_model_occ_requested_tag(ct,caller))
+            eid=get(kernel.bindings,(1,et),nothing)
+            eid===nothing && throw(ArgumentError(
+                "$caller: unknown OCC Curve[$et]"))
+            fids=get(edge_faces,eid,nothing)
+            (fids===nothing || length(fids)!=2) && throw(ArgumentError(
+                "$caller: Curve[$et] is not an edge shared by two " *
+                "faces of Volume[$vt]"))
+            eg=kernel.shapes[eid].geometry.geometry
+            get(eg,:occ,nothing)==:line || throw(ArgumentError(
+                "$caller: fillet edge must be a line"))
+            t=_occ3_scale(eg.dir,1.0/_occ_modulus(eg.dir))
+            va,vb=kernel.shapes[eid].children
+            pa,pb=vert_pos[va],vert_pos[vb]
+            em=_occ3_scale(_occ3_add(pa,pb),0.5)
+            L=_occ_modulus(_occ3_sub(pb,pa))
+            fA,fB=fids
+            nA,nB=fnormals[fA],fnormals[fB]
+            φ=acos(clamp(_dot3(nA,nB),-1.0,1.0))
+            δ=π-φ
+            (δ>0.05 && δ<π-0.05) || throw(ArgumentError(
+                "$caller: degenerate dihedral on Curve[$et]"))
+            leg=r/tan(δ/2)
+            h=r/sin(δ/2)
+            nb=_occ3_add(nA,nB)
+            bdir=_occ3_scale(nb,-1.0/_occ_modulus(nb))
+            pin=_occ3_add(em,_occ3_scale(bdir,0.01))
+            (_dot3(nA,pin)<=_dot3(nA,fcenters[fA])+1e-9 &&
+             _dot3(nB,pin)<=_dot3(nB,fcenters[fB])+1e-9) ||
+                throw(ArgumentError(
+                    "$caller: Curve[$et] is a concave edge — " *
+                    "concave fillets are unsupported"))
+            uA=_occ_cross(t,nA); uB=_occ_cross(t,nB)
+            uA=_occ3_scale(uA,1.0/_occ_modulus(uA))
+            uB=_occ3_scale(uB,1.0/_occ_modulus(uB))
+            _dot3(uA,_occ3_sub(fcenters[fA],em))<0 && (uA=(.-uA))
+            _dot3(uB,_occ3_sub(fcenters[fB],em))<0 && (uB=(.-uB))
+            for vv in (va,vb)
+                vv in fil_verts && throw(ArgumentError(
+                    "$caller: filleted edges share a vertex — " *
+                    "corner blends are unsupported"))
+            end
+            push!(fil_verts,va); push!(fil_verts,vb)
+            ends=NamedTuple[]
+            for vv in (va,vb)
+                pv=vert_pos[vv]
+                sibs=unique(s for s in vert_edges[vv] if s!=eid)
+                length(sibs)==2 || throw(ArgumentError(
+                    "$caller: Curve[$et] endpoint is not a simple " *
+                    "corner ($(length(sibs)) sibling edges)"))
+                iA=findfirst(s->fA in edge_faces[s],sibs)
+                iA===nothing && throw(ArgumentError(
+                    "$caller: broken corner topology on Curve[$et]"))
+                sA=sibs[iA]; sB=sibs[3-iA]
+                fC=only(f for f in edge_faces[sA] if f!=fA)
+                nC=fnormals[fC]
+                abs(_dot3(t,nC))>1-1e-6 || throw(ArgumentError(
+                    "$caller: fillet end face must be orthogonal " *
+                    "to the edge"))
+                oA=only(c for c in kernel.shapes[sA].children
+                        if c!=vv)
+                oB=only(c for c in kernel.shapes[sB].children
+                        if c!=vv)
+                dA=_occ3_sub(vert_pos[oA],pv)
+                dB=_occ3_sub(vert_pos[oB],pv)
+                lA=_occ_modulus(dA); lB=_occ_modulus(dB)
+                dA=_occ3_scale(dA,1.0/lA); dB=_occ3_scale(dB,1.0/lB)
+                (leg<lA-1e-9 && leg<lB-1e-9) || throw(ArgumentError(
+                    "$caller: fillet on Curve[$et] overruns an " *
+                    "adjacent edge"))
+                tA=_occ3_add(pv,_occ3_scale(dA,leg))
+                tB=_occ3_add(pv,_occ3_scale(dB,leg))
+                s=_occ3_add(pv,_occ3_scale(bdir,h))
+                trunc[(sA,vv)]=tA; trunc[(sB,vv)]=tB
+                arc_at[(fC,vv)]=s
+                push!(ends,(v=vv,tA=tA,tB=tB,s=s,fC=fC,
+                            sA=sA,sB=sB))
+            end
+            tangent[(fA,eid)]=Dict(e.v=>e.tA for e in ends)
+            tangent[(fB,eid)]=Dict(e.v=>e.tB for e in ends)
+            fillet_of[eid]=(t=t,pa=pa,pb=pb,va=va,vb=vb,r=r,
+                            bdir=bdir,fA=fA,fB=fB,ends=ends)
+        end
+        isempty(fillet_of) && throw(ArgumentError(
+            "$caller: no valid edges to fillet"))
+        # ── rebuild geometry ─────────────────────────────────────────
+        ptag=Dict{NTuple{3,Float64},Int}()
+        function _pt(p)
+            get!(ptag,p) do
+                _model_occ_add_point!(m,p[1],p[2],p[3])
+            end
+        end
+        line_id=Dict{NTuple{2,UInt64},UInt64}()
+        function _line(p0,p1)
+            i0=kernel.bindings[(0,_pt(p0))]
+            i1=kernel.bindings[(0,_pt(p1))]
+            key=i0<i1 ? (i0,i1) : (i1,i0)
+            id=get!(line_id,key) do
+                lt=_model_occ_add_line!(m,_pt(p0),_pt(p1))
+                kernel.bindings[(1,lt)]
+            end
+            # rev: stored children order vs requested traversal
+            id, kernel.shapes[id].children[1]!=i0
+        end
+        arc_id=Dict{Tuple{UInt64,UInt64,UInt64},UInt64}()
+        function _arc(p0,p1,cen)
+            i0=kernel.bindings[(0,_pt(p0))]
+            i1=kernel.bindings[(0,_pt(p1))]
+            ic=kernel.bindings[(0,_pt(cen))]
+            key=i0<i1 ? (i0,i1,ic) : (i1,i0,ic)
+            id=get!(arc_id,key) do
+                at=_model_occ_add_circle_arc!(m,_pt(p0),_pt(cen),
+                                              _pt(p1))
+                kernel.bindings[(1,at)]
+            end
+            id, kernel.shapes[id].children[1]!=i0
+        end
+        new_face=Dict{UInt64,Int}()
+        for (fid,_) in shell_uses
+            wid=wire_of[fid]
+            uses=kernel.shapes[wid].geometry.uses
+            dirty=false
+            for (u,_) in uses
+                haskey(tangent,(fid,u)) && (dirty=true; break)
+                for c in kernel.shapes[u].children
+                    (haskey(trunc,(u,c)) || haskey(arc_at,(fid,c))) &&
+                        (dirty=true; break)
+                end
+                dirty && break
+            end
+            dirty || continue
+            segs=Any[]
+            prev_end=nothing
+            for (u,rev) in uses
+                ch=kernel.shapes[u].children
+                oa,ob=rev ? (ch[2],ch[1]) : (ch[1],ch[2])
+                if haskey(tangent,(fid,u))
+                    p0=tangent[(fid,u)][oa]
+                    p1=tangent[(fid,u)][ob]
+                else
+                    p0=get(trunc,(u,oa),vert_pos[oa])
+                    p1=get(trunc,(u,ob),vert_pos[ob])
+                end
+                if prev_end!==nothing &&
+                        _occ_modulus(_occ3_sub(p0,prev_end))>1e-9
+                    s=arc_at[(fid,oa)]
+                    push!(segs,(:arc,prev_end,p0,s))
+                end
+                push!(segs,(:line,p0,p1))
+                prev_end=p1
+            end
+            # Wrap-around gap: last segment end → first segment start.
+            # The junction vertex is the endpoint shared by the first
+            # and last wire edges.
+            if length(segs)>1 && segs[1][1]==:line
+                p0=segs[1][2]
+                if _occ_modulus(_occ3_sub(p0,prev_end))>1e-9
+                    c1=kernel.shapes[uses[1][1]].children
+                    cN=kernel.shapes[uses[end][1]].children
+                    vj=only(v for v in c1 if v in cN)
+                    s=arc_at[(fid,vj)]
+                    pushfirst!(segs,(:arc,prev_end,p0,s))
+                end
+            end
+            wuses=Tuple{UInt64,Bool}[]
+            for seg in segs
+                if seg[1]==:line
+                    lid,lr=_line(seg[2],seg[3])
+                    push!(wuses,(lid,lr))
+                else
+                    aid,ar=_arc(seg[2],seg[3],seg[4])
+                    push!(wuses,(aid,ar))
+                end
+            end
+            wt=_occ_wire_from_uses!(m,wuses,caller)
+            new_face[fid]=_model_occ_add_plane_surface!(m,[wt])
+        end
+        for (eid,spec) in fillet_of
+            e0,e1=spec.ends
+            lidA,dirA=_line(e0.tA,e1.tA)
+            lidB,dirB=_line(e0.tB,e1.tB)
+            a0,dir0=_arc(e0.tA,e0.tB,e0.s)
+            a1,dir1=_arc(e1.tA,e1.tB,e1.s)
+            s0=e0.s
+            X=_occ3_scale(_occ3_sub(e0.tA,s0),1.0/spec.r)
+            # The record frame must stay right-handed (X×Y=axis): when
+            # t_B lies on the -Y side, flip the axis rather than Y so
+            # the sweep reads positive.
+            axisc=spec.t
+            Y=_occ_crossed(axisc,X)
+            db=_occ3_sub(e0.tB,s0)
+            θB=atan(_dot3(db,Y),_dot3(db,X))
+            if θB<0
+                axisc=(.-axisc); Y=(.-Y)
+                θB=-θB
+            end
+            L=_occ_modulus(_occ3_sub(spec.pb,spec.pa))
+            pc=Dict{Int,NamedTuple}()
+            tagA=_model_occ_shape_tag(kernel,lidA,caller)
+            tagB=_model_occ_shape_tag(kernel,lidB,caller)
+            # v is the axial coordinate along `axisc`; the stored line
+            # direction may be either way (shared cached lines), so the
+            # pcurve v(t)=dot(origin−s0,axisc)+dot(dir,axisc)·t.
+            for (lid,u_c) in ((lidA,0.0),(lidB,θB))
+                lg=kernel.shapes[lid].geometry.geometry
+                v0=_dot3(_occ3_sub(lg.origin,s0),axisc)
+                dv=_dot3(lg.dir,axisc)
+                ltag=_model_occ_shape_tag(kernel,lid,caller)
+                pc[ltag]=(fwd=(lin2d=((u_c,v0),(0.0,dv)),),rev=nothing)
+            end
+            # Arc edge parameters are global circle angles — affine-remap
+            # u so the t_A endpoint sits at u=0 and t_B at u=θB.
+            for (aid,tA,tB) in ((a0,e0.tA,e0.tB),(a1,e1.tA,e1.tB))
+                ag=kernel.shapes[aid].geometry.geometry
+                p0c=_occ_circle_point(ag,ag.t0)
+                a_off=_occ_modulus(_occ3_sub(p0c,tA))<
+                      _occ_modulus(_occ3_sub(p0c,tB)) ? ag.t0 : ag.t1
+                a_op=ag.t0+ag.t1-a_off
+                du=a_op>a_off ? 1.0 : -1.0
+                vv=_dot3(_occ3_sub(tA,s0),axisc)
+                atag=_model_occ_shape_tag(kernel,aid,caller)
+                pc[atag]=(fwd=(lin2d=((-du*a_off,vv),(du,0.0)),),
+                          rev=nothing)
+            end
+            # uv loop (0,0)→(θB,0)→(θB,L)→(0,L): T_A up, arc1 across
+            # the top, T_B back down, arc0 back across the bottom.
+            wuses=Tuple{UInt64,Bool}[(lidA,dirA),(a1,dir1),
+                                     (lidB,!dirB),(a0,!dir0)]
+            wt=_occ_wire_from_uses!(m,wuses,caller)
+            wid2=kernel.bindings[(-1,wt)]
+            ftag=_model_occ_next_tag(kernel,2,-1,caller)
+            fid2=only(_model_occ_reserve_shapes(kernel,1,caller))
+            _model_occ_bind_shape!(kernel,2,ftag,fid2,
+                _ModelOCCShape(2,(kind=:cylinder,
+                    geometry=(occ=:cylinder,center=s0,axis=axisc,
+                              X=X,Y=Y,radius=spec.r,height=L,
+                              angle=θB,pcurves=pc)),
+                    UInt64[wid2]))
+            kernel.next_shape=fid2+UInt64(1)
+            push!(shell_uses,(fid2,false))
+        end
+        old_ids=UInt64[]
+        stack=copy(kernel.shapes[vid].children)
+        while !isempty(stack)
+            x=pop!(stack); x in old_ids && continue
+            push!(old_ids,x); append!(stack,kernel.shapes[x].children)
+            hasproperty(kernel.shapes[x].geometry,:uses) &&
+                append!(stack,(u for (u,_) in
+                               kernel.shapes[x].geometry.uses))
+        end
+        sus=Tuple{UInt64,Bool}[]
+        for (fid,rev) in shell_uses
+            if haskey(new_face,fid)
+                nf=kernel.bindings[(2,new_face[fid])]
+                na=kernel.shapes[nf].geometry.geometry.axis
+                push!(sus,(nf,_dot3(na,fnormals[fid])<0))
+            else
+                push!(sus,(fid,rev))
+            end
+        end
+        shell=_occ_shell_from_uses!(m,sus,caller)
         sid=kernel.bindings[(-2,shell)]
         kernel.shapes[vid]=_ModelOCCShape(3,(kind=:solid,),UInt64[sid])
         _occ_unbind_orphans!(kernel,Set(old_ids))

@@ -4835,7 +4835,32 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
-## Latest landed increment (slice 30, pushed to `origin/main`)
+## Latest landed increment (slice 32, pushed to `origin/main`)
+
+**`occ.fillet` (GEO01 slice 32)** +
+**`occ.chamfer` (slice 31, `6f423ea`)** —
+`occ.fillet(volumeTags, curveTags, radii)` implements
+`BRepFilletAPI_MakeFillet` for planar-faced solids with orthogonal
+line-edge corners: each filleted edge becomes an exact cylindrical
+sector (radius `r`, swept angle = face angle) tangent to both adjacent
+faces; corner faces gain quarter-circle arcs, adjacent faces lose the
+tangent strips, and all new edges are *shared* entities (direction-
+aware `_line`/`_arc` caches keyed by unordered endpoint ids). Verified:
+`api_occ_fillet_test.jl` 10 green — unit-cube fillet mass exact to
+1e-16 (`1−r²(1−π/4)`), 4 disjoint edge fillets, shared-vertex and
+overrun rejections. Deep-debug chain: wrap-around gap arcs on the
+corner faces, arc global-angle→local-u affine pcurve remap, stored-
+direction-aware v coordinates, right-handed cylinder frame (flip the
+axis, not Y, when θB<0), and `_occ_unbind_orphans!` gained a fixpoint
+so dead-listed wires still referenced by surviving faces keep
+protecting their edge uses.
+
+`occ.chamfer(volumeTags, curveTags, d1, d2)` adds one half-space plane
+per edge through the in-face offset lines and rebuilds the body via
+`_occ_solid_from_planes!` — exact prism-volume removal verified
+(12 green).
+
+## Previous landed increment (slice 30, pushed to `origin/main`)
 
 **`occ.healShapes` (GEO01 slice 30)** +
 **`occ.defeature` (slice 29, `9933773`)** —

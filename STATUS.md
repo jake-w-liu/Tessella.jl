@@ -1693,6 +1693,36 @@ swallowed-circle/unknown-tag rejections with
 registry counts unchanged); compact
 `occ_offset_smoke.jl` added to `runtests.jl`.
 
+### GEO01 slices 29–32 — `occ.defeature`, `occ.healShapes`, `occ.chamfer`, `occ.fillet` (2026-10-17)
+
+`occ.defeature(dimTags, surfaceTags)` removes planar faces and refills
+from the kept faces' half-space intersection, rebinding the volume tag
+in place; auto-detects the boolean bridge's inside-out convention by
+retrying with globally flipped normals (`9933773`, 8 green).
+
+`occ.heal_shapes(dimTags; tolerance, fixDegenerated, fixSmallEdges,
+fixSmallFaces, sewFaces, makeSolids)` welds coincident vertices within
+tolerance, rewires edge children, collapses duplicate line edges, and
+re-keys face pcurves (with `_occ_heal_pcurve_reverse` when a canonical
+edge is stored oppositely). Welded-away entities are unbound
+(`b7f0e36`, 6 green — cracked cube → valid shell, exact mass).
+
+`occ.chamfer(volumeTags, curveTags, d1, d2)` adds one half-space plane
+per edge through the in-face offset lines and rebuilds via
+`_occ_solid_from_planes!` (`6f423ea`, 12 green).
+
+`occ.fillet(volumeTags, curveTags, radii)` implements
+`BRepFilletAPI_MakeFillet` for planar-faced solids with orthogonal
+line-edge corners: each edge becomes an exact cylindrical sector
+tangent to both adjacent faces, corner faces gain quarter-circle arcs,
+and all new edges are shared entities via direction-aware
+`_line`/`_arc` caches. Deep-debugged: wrap-around gap arcs, global-
+angle→local-u pcurve remap on arc edges, stored-direction-aware v
+pcurves, right-handed cylinder frames, and a fixpoint in
+`_occ_unbind_orphans!` for dead wires still referenced by surviving
+faces. Unit-cube fillet mass exact to 1e-16. 10 green; chamfer/
+defeature/heal/thick_solid/import regression all green.
+
 ### GEO01 slice 28 — `occ.importShapes` (2026-10-15)
 
 `model.occ.import_shapes(fileName)` binds STEP solids into native OCC
