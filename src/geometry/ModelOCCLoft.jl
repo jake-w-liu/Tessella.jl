@@ -1358,56 +1358,27 @@ function _model_occ_thick_solid(m::GeoModel,tag,volume_tag,exclude_tags,
     bb=Float64[kept[i] ? bs[i]+offset : bs[i] for i in eachindex(bs)]
     P=length(planes)
     P<4 && throw(ArgumentError("$caller: offset body degenerates"))
-    # Vertex enumeration: triple intersections inside every half-space,
-    # deduplicated within Confusion (4+ planes can share a corner).
-    verts=NTuple{3,Float64}[]
-    for i in 1:P-2, j in i+1:P-1, k in j+1:P
-        n1,n2,n3=planes[i],planes[j],planes[k]
-        d=_dot3(n1,_occ_cross(n2,n3))
-        abs(d)<1e-14 && continue
-        x=_occ3_scale(
-            _occ3_add(_occ3_add(
-                _occ3_scale(_occ_cross(n2,n3),bb[i]),
-                _occ3_scale(_occ_cross(n3,n1),bb[j])),
-                _occ3_scale(_occ_cross(n1,n2),bb[k])),
-            1.0/d)
-        all(isfinite,x) || continue
-        inside=true
-        for q in 1:P
-            _dot3(planes[q],x)>bb[q]+1e-7 && (inside=false; break)
-        end
-        inside || continue
-        any(v->_occ_modulus(_occ3_sub(v,x))<=1e-7,verts) && continue
-        push!(verts,(x[1],x[2],x[3]))
-    end
-    isempty(verts) && throw(ArgumentError(
-        "$caller: offset produces an empty body"))
-    # Orientation sanity: the offset body must NEST against the original.
-    # For offset<0 every offset vertex lies inside the original
-    # halfspaces; for offset>0 the original vertices (re-enumerated on
-    # the unshifted planes) lie inside the offset halfspaces. A
-    # mis-oriented input fails here instead of producing garbage.
-    # The claimed-original halfspace body must be non-empty — a flipped
-    # face normal empties or inverts it.
-    orig_verts=NTuple{3,Float64}[]
-    for i in 1:P-2, j in i+1:P-1, k in j+1:P
-        n1,n2,n3=planes[i],planes[j],planes[k]
-        d=_dot3(n1,_occ_cross(n2,n3))
-        abs(d)<1e-14 && continue
-        x=_occ3_scale(
-            _occ3_add(_occ3_add(
-                _occ3_scale(_occ_cross(n2,n3),bs[i]),
-                _occ3_scale(_occ_cross(n3,n1),bs[j])),
-                _occ3_scale(_occ_cross(n1,n2),bs[k])),
-            1.0/d)
-        all(isfinite,x) || continue
-        all(_dot3(planes[q],x)<=bs[q]+1e-7 for q in 1:P) ||
-            continue
-        any(v->_occ_modulus(_occ3_sub(v,x))<=1e-7,orig_verts) && continue
-        push!(orig_verts,(x[1],x[2],x[3]))
+    # Orientation sanity: the claimed-original halfspace body must be
+    # non-empty — a flipped face normal empties or inverts it.
+    # Boolean-produced shells store faces inside-out wholesale
+    # (rev+reversed bookkeeping), so a fully empty body retries once
+    # with every plane flipped.
+    orig_verts=_occ_halfspace_verts(planes,bs)
+    flipped=false
+    if isempty(orig_verts)
+        planes=[(.-n) for n in planes]; bs=(.-bs)
+        bb=Float64[kept[i] ? bs[i]+offset : bs[i] for i in eachindex(bs)]
+        orig_verts=_occ_halfspace_verts(planes,bs)
+        flipped=true
     end
     isempty(orig_verts) && throw(ArgumentError(
         "$caller: Volume[$vt] is not oriented outward"))
+    # Offset-body vertices: triple intersections inside every shifted
+    # half-space, deduplicated within Confusion (4+ planes can share a
+    # corner).
+    verts=_occ_halfspace_verts(planes,bb)
+    isempty(verts) && throw(ArgumentError(
+        "$caller: offset produces an empty body"))
     # Halfspace-intersection offsets are exact only for convex bodies —
     # a nonconvex input leaves phantom corners in the halfspace body.
     # Reject any enumerated corner that is not a real vertex of the
@@ -1482,16 +1453,16 @@ function _model_occ_thick_solid(m::GeoModel,tag,volume_tag,exclude_tags,
         _occ_wire_from_uses!(m,uses,caller)
     end
     polys=[polygon(i) for i in 1:P]
-    # Faces of the offset body on kept planes; polygons on excluded planes
-    # become the rim face's inner wire instead.
+    # Winding rule: outer-wall/rim outer wires run CCW about n̂, cavity
+    # walls CW — all of it mirrored when the input read inside-out (the
+    # result then carries the same convention as its source).
+    sgn=flipped ? -1 : 1
+    cw(role)=role*sgn<0
     off_face=Dict{Int,Int}()        # plane index -> new face tag
     for i in 1:P
         length(polys[i])<3 && continue
-        # Winding: offset>0 outer wall (+n̂ → CCW), offset<0 cavity wall
-        # (−n̂ → CW). Excluded planes never produce a standalone face.
-        flip=offset<0
         kept[i] || continue
-        w=poly_wire(polys[i],flip)
+        w=poly_wire(polys[i],cw(offset<0 ? -1 : 1))
         off_face[i]=_model_occ_add_plane_surface!(m,[w])
     end
     # Rim faces on excluded planes: outer wire + hole wire on the same
@@ -1507,16 +1478,19 @@ function _model_occ_thick_solid(m::GeoModel,tag,volume_tag,exclude_tags,
             length(polys[i])>=3 || throw(ArgumentError(
                 "$caller: excluded Surface[$(ftags[i])] does not meet " *
                 "the offset body"))
-            w=poly_wire(polys[i],true)                 # hole: CW about n̂
+            # hole wound opposite the (reused) original outer wire —
+            # CW about n̂ normally, CCW when the source read inside-out
+            w=poly_wire(polys[i],!flipped)
             face=_model_occ_add_plane_surface!(m,
                 [_model_occ_shape_tag(kernel,outer0,caller),w])
         else
             length(polys[i])>=3 || throw(ArgumentError(
                 "$caller: excluded Surface[$(ftags[i])] does not meet " *
                 "the offset body"))
-            wo=poly_wire(polys[i],false)               # outer: CCW
+            wo=poly_wire(polys[i],cw(1))               # outer wire
             wh=_occ_wire_from_uses!(m,
-                [(id,!r) for (id,r) in reverse(outer0_uses)],caller)
+                flipped ? collect(outer0_uses) :
+                    [(id,!r) for (id,r) in reverse(outer0_uses)],caller)
             face=_model_occ_add_plane_surface!(m,[wo,wh])
         end
         push!(rim_face,face)
@@ -1575,6 +1549,127 @@ function _model_occ_thick_solid(m::GeoModel,tag,volume_tag,exclude_tags,
         push!(shell_tags,_occ_shell_from_uses!(m,shell_uses,caller))
     end
     _model_occ_add_volume!(m,shell_tags;tag)
+end
+
+# Vertices of a half-space intersection {x : n̂ᵢ·x ≤ bᵢ} — triple-plane
+# intersections kept inside every half-space, deduplicated within
+# Confusion.
+function _occ_halfspace_verts(planes,bs)
+    P=length(planes)
+    verts=NTuple{3,Float64}[]
+    for i in 1:P-2, j in i+1:P-1, k in j+1:P
+        n1,n2,n3=planes[i],planes[j],planes[k]
+        d=_dot3(n1,_occ_cross(n2,n3))
+        abs(d)<1e-14 && continue
+        x=_occ3_scale(
+            _occ3_add(_occ3_add(
+                _occ3_scale(_occ_cross(n2,n3),bs[i]),
+                _occ3_scale(_occ_cross(n3,n1),bs[j])),
+                _occ3_scale(_occ_cross(n1,n2),bs[k])),
+            1.0/d)
+        all(isfinite,x) || continue
+        all(_dot3(planes[q],x)<=bs[q]+1e-7 for q in 1:P) || continue
+        any(v->_occ_modulus(_occ3_sub(v,x))<=1e-7,verts) && continue
+        push!(verts,(x[1],x[2],x[3]))
+    end
+    return verts
+end
+
+# ── `defeature` ───────────────────────────────────────────────────────────────
+#
+# `BRepAlgoAPI_Defeature`: remove the listed faces of a planar-faced
+# solid and refill the gap — the classic use is dropping a boss or
+# pocket's faces so the surrounding face planes close over it. The
+# defeatured body is the half-space intersection of the *kept* faces'
+# outward planes: exact whenever that result is convex (boss-on-box →
+# the plain box; the pocket case likewise). Newly intersected corners
+# are published through the same shared-edge path `addThickSolid` uses;
+# kept faces are re-bound fresh from their polygons (half-space
+# membership can grow their extent past the original wire).
+function _model_occ_defeature(m::GeoModel,volume_tag,remove_tags;
+                              caller="OCC.defeature")
+    kernel=m.occ_kernel
+    vt=abs(_model_occ_requested_tag(volume_tag,caller))
+    vid=get(kernel.bindings,(3,vt),nothing)
+    vid===nothing && throw(ArgumentError("$caller: unknown OCC Volume[$vt]"))
+    rem=Set(abs(_model_occ_requested_tag(t,caller)) for t in remove_tags)
+    isempty(rem) && throw(ArgumentError(
+        "$caller: no faces given to remove"))
+    planes=NTuple{3,Float64}[]; bs=Float64[]; in_volume=Set{Int}()
+    for shell_id in kernel.shapes[vid].children
+        for (fid,rev) in kernel.shapes[shell_id].geometry.uses
+            fg=kernel.shapes[fid].geometry
+            get(fg.geometry,:occ,nothing)!==:plane && throw(ArgumentError(
+                "$caller: defeature needs planar faces (got occ=" *
+                "$(get(fg.geometry,:occ,nothing)))"))
+            ftag=_model_occ_shape_tag(kernel,fid,caller)
+            push!(in_volume,ftag)
+            ftag in rem && continue
+            σ=rev ? -1.0 : 1.0
+            n=_occ3_scale(fg.geometry.axis,σ)
+            get(fg.geometry,:reversed,false) && (n=(.-n))
+            n=_occ3_scale(n,1.0/_occ_modulus(n))
+            push!(planes,n); push!(bs,_dot3(n,fg.geometry.center))
+        end
+    end
+    for t in rem
+        t in in_volume || throw(ArgumentError(
+            "$caller: Surface[$t] is not a face of Volume[$vt]"))
+    end
+    P=length(planes)
+    P<4 && throw(ArgumentError(
+        "$caller: removing $(length(rem)) faces leaves no closed body"))
+    verts=_occ_halfspace_verts(planes,bs)
+    if isempty(verts)
+        # Boolean-produced shells store faces inside-out (rev+reversed
+        # bookkeeping): retry with every plane flipped.
+        planes=[(.-n) for n in planes]; bs=(.-bs)
+        verts=_occ_halfspace_verts(planes,bs)
+        isempty(verts) && throw(ArgumentError(
+            "$caller: kept faces bound an empty body"))
+    end
+    ptags=[_model_occ_add_point!(m,x[1],x[2],x[3]) for x in verts]
+    edge_of=Dict{NTuple{2,Int},Tuple{UInt64,Int}}()
+    face_tags=Int[]
+    for i in 1:P
+        on=Int[]
+        for (vi,x) in enumerate(verts)
+            abs(_dot3(planes[i],x)-bs[i])<1e-7 && push!(on,vi)
+        end
+        length(on)<3 && continue
+        n=planes[i]
+        ax=abs(n[1])<0.9 ? (1.0,0.0,0.0) : (0.0,1.0,0.0)
+        e1=_occ3_scale(_occ_cross(n,ax),1.0)
+        e1=_occ3_scale(e1,1.0/_occ_modulus(e1))
+        e2=_occ_cross(n,e1)
+        c=_occ3_scale(reduce(_occ3_add,(verts[v] for v in on)),
+                      1.0/length(on))
+        sort!(on,by=v->atan(
+            _dot3(_occ3_sub(verts[v],c),e2),
+            _dot3(_occ3_sub(verts[v],c),e1)))
+        uses=Tuple{UInt64,Bool}[]
+        for j in eachindex(on)
+            a,b=on[j],on[mod1(j+1,length(on))]
+            key=a<b ? (a,b) : (b,a)
+            eu=get(edge_of,key,nothing)
+            if eu===nothing
+                et=_model_occ_add_line!(m,ptags[a],ptags[b])
+                eu=(kernel.bindings[(1,et)],b)
+                edge_of[key]=eu
+            end
+            push!(uses,(eu[1],eu[2]!=b))
+        end
+        w=_occ_wire_from_uses!(m,uses,caller)
+        push!(face_tags,_model_occ_add_plane_surface!(m,[w]))
+    end
+    length(face_tags)<4 && throw(ArgumentError(
+        "$caller: kept faces do not close a solid"))
+    shell=_model_occ_add_surface_loop!(m,face_tags)
+    # `OCC_Internals::defeature` mutates the volume in place — rebind the
+    # same tag to the healed shell rather than allocating a new volume.
+    sid=kernel.bindings[(-2,shell)]
+    kernel.shapes[vid]=_ModelOCCShape(3,(kind=:solid,),UInt64[sid])
+    return vt
 end
 
 # Bind a surface loop from precomputed `(face id, rev)` uses — parallel to

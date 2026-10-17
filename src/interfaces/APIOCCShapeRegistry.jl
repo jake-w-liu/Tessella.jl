@@ -92,6 +92,14 @@ import_shapes(file_name;highestDimOnly=true,format="")=_with_model() do m
                                    highest_dim_only=highestDimOnly)
 end
 
+defeature(dim_tags,tags;removeVolume=true)=_with_model() do m
+    vols=[abs(Int(t)) for (d,t) in dim_tags if Int(d)==3]
+    for vt in vols
+        Model._model_occ_defeature(m,vt,Int[abs(Int(t)) for t in tags])
+    end
+    return nothing
+end
+
 add_surface_loop(surface_tags;tag=-1,sewing=false)=_with_model() do m
     Model._model_occ_add_surface_loop!(m,surface_tags;tag,sewing)
 end
