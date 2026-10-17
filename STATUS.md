@@ -1693,6 +1693,26 @@ swallowed-circle/unknown-tag rejections with
 registry counts unchanged); compact
 `occ_offset_smoke.jl` added to `runtests.jl`.
 
+### GEO01 slice 26 — `occ.addTrimmedSurface` (2026-10-15)
+
+`model.occ.add_trimmed_surface(wireTag, surfaceTag=-1; tag=-1)`
+implements `BRepBuilderAPI_MakeFace(S,W)` in
+`src/geometry/ModelOCCLoft.jl` (`548216d`). Wire edges project onto the
+base surface's canonical domain; the projection stores as `lin2d`
+pcurves when linear, else a new `spl2d` record — a monotone
+(Fritsch–Carlson) piecewise-cubic Hermite interpolant stored as a
+piecewise-Bezier B-spline. Trimmed records carry `trimmed=true`;
+measures integrate the pcurve boundary: plane shoelace extended to
+`spl2d` Green's-theorem integrals, cylinder divergence gains the
+v-moment ∬v = ∮(−v²/2)du for an exact patch centroid, other bases fall
+back to a uv-CDT + per-triangle Gauss rule. Seam-wrapping wires close
+only modulo 2π — shoelace and cylinder divergence now append the
+last→first closure chord. Verified:
+`test/interfaces/api_occ_trimmed_surface_test.jl` — 21 green (plane
+fallback, explicit plane base, half-barrel strip area π + centroid
+(0,−2r/π,mid-z) to 1e-6, seam-wrapping spl2d triangle, atomic
+rejections); measures/loft/pipe/filling/boolean suites green.
+
 ### GEO01 slice 25 — `occ.addPipe` (2026-10-15)
 
 `model.occ.add_pipe(profile, wireTag; tag=-1)` implements

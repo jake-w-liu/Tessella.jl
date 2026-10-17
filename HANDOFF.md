@@ -4835,7 +4835,29 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
-## Latest landed increment (`2d09360`, pushed to `origin/main`)
+## Latest landed increment (`548216d`, pushed to `origin/main`)
+
+**`occ.addTrimmedSurface` (GEO01 slice 26)** —
+`occ.add_trimmed_surface(wireTag, surfaceTag=-1)` implements
+`BRepBuilderAPI_MakeFace(S,W)`: each wire edge projects onto the base
+surface's canonical domain and stores as a pcurve — `lin2d` when the
+projection is linear in the edge parameter, otherwise a new `spl2d`
+record (monotone Fritsch–Carlson Hermite → piecewise-Bezier cubic
+B-spline at full-multiplicity interior knots). Trimmed records carry
+`trimmed=true`; `get_mass`/`get_center_of_mass` integrate the pcurve
+boundary rather than the canonical domain — plane shoelace extended
+with `spl2d` Green's-theorem integrals, cylinder divergence gains the
+v-moment for an exact patch centroid, other bases fall back to a
+uv-CDT + per-triangle Gauss rule. Deep-debug findings: the periodic
+closure chord (last→first uv) is a real domain boundary on
+seam-wrapping wires — both shoelace and cylinder divergence now append
+it; and `add_circle_arc` normalizes 180° arcs about n=−z (documented
+in the test). Verified: `api_occ_trimmed_surface_test.jl` 21 green —
+plane fallback, explicit plane base, half-barrel strip area π with
+exact centroid, seam-wrapping spl2d triangle, atomic rejections;
+measures/loft/pipe/filling/boolean suites all green.
+
+## Previous landed increment (`2d09360`, pushed to `origin/main`)
 
 **`occ.addPipe` (GEO01 slice 25)** — `occ.add_pipe(profile, wireTag)`
 implements `BRepOffsetAPI_MakePipe` semantics: wire or `(2,faceTag)`
