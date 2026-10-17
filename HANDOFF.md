@@ -4843,10 +4843,14 @@ rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 `setVisibilityPerWindow` (numbered `VisibilityPerWindow:i` option rows,
 headless-retained) and `addHomogeneousModelData`/
 `getHomogeneousModelData` (flat-row model data, model-slot filtered).
-`_SessionView` gained string-block storage. Still remaining:
-`addAlias` (shared-data views), `combine`, `probe`,
+`_SessionView` gained string-block storage. `probe(modelName, tag, x,
+y, z)` locates the containing simplex via `SimplexLocator`/
+`_MixedMeshLocator`, inverts to barycentric coordinates and
+interpolates step-0 `ElementNodeData`/`NodeData`/`ElementData` —
+linear fields reproduce to 1e-10 on a generated tri mesh. Still
+remaining: `addAlias` (shared-data views), `combine`,
 `setInterpolationMatrices`. Verified:
-`api_view_endpoints_test.jl` 18 green; view-time/writer/list-export/
+`api_view_endpoints_test.jl` 30 green; view-time/writer/list-export/
 post-IO regressions green.
 
 ## Previous landed increment (slice 32, pushed to `origin/main`)

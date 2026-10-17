@@ -83,4 +83,59 @@ end
         A.finalize()
     end
 end
+
+@testset "view.probe interpolates nodal data inside elements" begin
+    A.initialize()
+    try
+        A.option("General.Terminal",0)
+        A.option("Mesh.MeshSizeMax",0.5)
+        sq=A.model.occ.add_rectangle(0,0,0,1,1)
+        A.model.occ.synchronize()
+        A.mesh.generate(2)
+        mname=A.model.get_current()
+        ntags,ncoords,_=A.mesh.get_nodes(-1,-1,true,false)
+        coord_of=Dict(ntags[i]=>ncoords[3i-2:3i] for i in eachindex(ntags))
+
+        # ElementNodeData: f = x+2y at every corner — linear field is
+        # interpolated exactly by the barycentric basis.
+        etypes,etags,enodes=A.mesh.get_elements(2,-1)
+        @test etypes==Int32[2]
+        npe=3
+        rows=Vector{Float64}[]
+        flat_etags=reduce(vcat,etags)
+        for (btags,bnodes) in zip(etags,enodes)
+            for e in eachindex(btags)
+                push!(rows,[let xy=coord_of[bnodes[(e-1)*npe+j]]
+                                xy[1]+2.0*xy[2]
+                            end for j in 1:npe])
+            end
+        end
+        v=A.view.add("field")
+        A.view.add_model_data(v,0,mname,"ElementNodeData",
+                              flat_etags,rows,0.0,1,0)
+        for (x,y) in ((0.3,0.4),(0.5,0.5),(0.1,0.8))
+            got=A.view.probe(mname,v,x,y,0.0)
+            @test length(got)==1
+            @test got[1]≈x+2.0*y atol=1e-10
+        end
+        # NodeData path and ElementData path.
+        v2=A.view.add("nodal")
+        nvals=[coord_of[t][1]+2.0*coord_of[t][2] for t in ntags]
+        A.view.add_model_data(v2,0,mname,"NodeData",ntags,nvals)
+        @test A.view.probe(mname,v2,0.3,0.4,0.0)[1]≈0.3+0.8 atol=1e-10
+        v3=A.view.add("per-element")
+        A.view.add_model_data(v3,0,mname,"ElementData",
+                              flat_etags,fill(7.5,length(flat_etags)))
+        @test A.view.probe(mname,v3,0.3,0.4,0.0)==[7.5]
+        # Outside the mesh and unknown model reject.
+        @test occursin("no element contains",
+            _errtext(()->A.view.probe(mname,v,5.0,5.0,0.0)))
+        @test occursin("Unknown model",
+            _errtext(()->A.view.probe("nope",v,0.3,0.4,0.0)))
+        @test occursin("unknown view tag",
+            _errtext(()->A.view.probe(mname,99999,0.3,0.4,0.0)))
+    finally
+        A.finalize()
+    end
+end
 end
