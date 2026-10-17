@@ -1693,6 +1693,16 @@ swallowed-circle/unknown-tag rejections with
 registry counts unchanged); compact
 `occ_offset_smoke.jl` added to `runtests.jl`.
 
+### GEO01 slice 28 — `occ.importShapes` (2026-10-15)
+
+`model.occ.import_shapes(fileName)` binds STEP solids into native OCC
+records in `src/geometry/ModelOCCImport.jl` (`cf5f247`), reusing the
+BRep parser and face/bound/edge walk (`BRep._step_face_parts` etc.).
+Vertices/edges dedupe across the solid so the shell's two-surface rule
+holds; rings keep STEP bound orientation; `BREP_WITH_VOIDS` shells
+become cavity shells. Planar only — curved STEP surfaces reject.
+Verified: `api_occ_import_shapes_test.jl` — 10 green.
+
 ### GEO01 slice 27 — `occ.addThickSolid` (2026-10-15)
 
 `model.occ.add_thick_solid(volumeTag, excludeSurfaceTags, offset;

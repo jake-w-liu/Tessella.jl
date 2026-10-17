@@ -4835,7 +4835,19 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
-## Latest landed increment (`3dd4682`, pushed to `origin/main`)
+## Latest landed increment (`cf5f247`, pushed to `origin/main`)
+
+**`occ.importShapes` (GEO01 slice 28)** —
+`occ.import_shapes(fileName)` imports ISO-10303-21 STEP solids as
+native OCC records through the existing BRep parser: per-solid vertex/
+edge dedupe makes every curve land on exactly two faces, STEP bound
+orientation carries through the wires, `BREP_WITH_VOIDS` shells become
+cavity shells, and holed faces keep their inner wires. Planar faces
+only — curved STEP surfaces reject loudly. Verified:
+`api_occ_import_shapes_test.jl` 10 green (OCC-authored box and
+planar through-hole fixtures measure, bound, and boolean).
+
+## Previous landed increment (`3dd4682`, pushed to `origin/main`)
 
 **`occ.addThickSolid` (GEO01 slice 27)** —
 `occ.add_thick_solid(volumeTag, excludeSurfaceTags, offset)`
