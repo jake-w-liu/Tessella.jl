@@ -15,6 +15,7 @@ module Model
 import Mmap
 import ..Elements
 import ..NURBS
+import ..BRep
 import ..Transfinite
 import ..TransfiniteTriangle
 import ..OrderedMatching
@@ -856,6 +857,7 @@ include("ModelBoolean.jl")
 include("ModelOCCBoolean.jl")
 include("ModelOCCNurbsConvert.jl")
 include("ModelOCCLoft.jl")
+include("ModelOCCImport.jl")
 
 @inline function _model_periodic_entity_label(dim::Int)
     dim==1 && return "Curve"

@@ -87,6 +87,11 @@ add_thick_solid(volume_tag,exclude_surface_tags,offset;tag=-1)=
                                      Float64(offset))
     end
 
+import_shapes(file_name;highestDimOnly=true,format="")=_with_model() do m
+    Model._model_occ_import_shapes(m,String(file_name);
+                                   highest_dim_only=highestDimOnly)
+end
+
 add_surface_loop(surface_tags;tag=-1,sewing=false)=_with_model() do m
     Model._model_occ_add_surface_loop!(m,surface_tags;tag,sewing)
 end
