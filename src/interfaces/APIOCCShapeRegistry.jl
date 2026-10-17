@@ -92,6 +92,13 @@ import_shapes(file_name;highestDimOnly=true,format="")=_with_model() do m
                                    highest_dim_only=highestDimOnly)
 end
 
+heal_shapes(dim_tags=Tuple{Int,Int}[];tolerance=-1.0,fixDegenerated=true,
+            fixSmallEdges=true,fixSmallFaces=true,sewFaces=true,
+            makeSolids=true)=_with_model() do m
+        Model._model_occ_heal_shapes(m,dim_tags;tolerance,
+            fixDegenerated,fixSmallEdges,fixSmallFaces,sewFaces,makeSolids)
+    end
+
 defeature(dim_tags,tags;removeVolume=true)=_with_model() do m
     vols=[abs(Int(t)) for (d,t) in dim_tags if Int(d)==3]
     for vt in vols

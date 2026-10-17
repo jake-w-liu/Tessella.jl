@@ -130,3 +130,192 @@ function _model_occ_import_shapes(m::GeoModel,path;highest_dim_only=true,
     end
     return out
 end
+
+# ── `healShapes` ──────────────────────────────────────────────────────────────
+#
+# `OCC_Internals::healShapes`: weld coincident-but-distinct vertices and
+# edges in the target entities' topology within `tolerance`
+# (`Precision::Confusion` default), then — when `sewFaces` — regroup
+# healed faces into shells and bind solids. Healing works on the stored
+# graph: vertex entities cluster by position, edge children rewire to
+# the cluster's canonical vertex, and line edges sharing both endpoints
+# collapse to one curve entity. Faces/curves are not re-fit — tolerance
+# healing moves topology, not geometry.
+# Reverse a pcurve onto an oppositely-directed replacement edge:
+# `pc'(s)=pc(T−s)` with `T=t0+t1` over the shared `[0,L]` line range —
+# lin2d via affine reparam, spl2d by knot-mirror + pole reversal.
+function _occ_heal_pcurve_reverse(pc,T::Float64,kernel,caller)
+    if hasproperty(pc,:neg2d)
+        inner=pc.neg2d[1]
+        hasproperty(inner,:lin2d) || throw(ArgumentError(caller*
+            ": cannot weld edge — unsupported negated pcurve kind"))
+        o,d=inner.lin2d
+        return (neg2d=((lin2d=((o[1]-T*d[1],o[2]-T*d[2]),d),),))
+    end
+    if hasproperty(pc,:lin2d)
+        o,d=pc.lin2d
+        return (lin2d=((o[1]+T*d[1],o[2]+T*d[2]),(-d[1],-d[2])),)
+    elseif hasproperty(pc,:spl2d)
+        knots,p,cps=pc.spl2d
+        return (spl2d=(T .- reverse(knots),p,reverse(cps)),)
+    end
+    throw(ArgumentError(caller*
+        ": cannot weld edge — unsupported pcurve kind for reversal"))
+end
+
+function _model_occ_heal_shapes(m::GeoModel,dim_tags;tolerance=-1.0,
+                                fixDegenerated=true,fixSmallEdges=true,
+                                fixSmallFaces=true,sewFaces=true,
+                                makeSolids=true,
+                                caller="OCC.healShapes")
+    kernel=m.occ_kernel
+    tol=tolerance>0.0 ? tolerance : _OCC_CONFUSION
+    roots=Tuple{Int,Int}[]
+    if isempty(dim_tags)
+        for (d,t) in keys(kernel.bindings)
+            d>=0 && push!(roots,(d,t))
+        end
+    else
+        for (d,t) in dim_tags
+            d=Int(d); t=abs(Int(t))
+            haskey(kernel.bindings,(d,t)) || throw(ArgumentError(
+                "$caller: unknown OCC entity ($d,$t)"))
+            push!(roots,(d,t))
+        end
+    end
+    # Reachable-vertex weld: gather every vertex id under the roots
+    # (shapes' children), cluster positions within `tol`, rewire edges.
+    vids=UInt64[]
+    stack=UInt64[kernel.bindings[r] for r in roots]
+    seen=Set{UInt64}()
+    while !isempty(stack)
+        id=pop!(stack)
+        id in seen && continue; push!(seen,id)
+        sh=kernel.shapes[id]
+        if sh.dimension==0
+            push!(vids,id); continue
+        end
+        append!(stack,sh.children)
+        hasproperty(sh.geometry,:uses) || continue
+        for (uid,_) in sh.geometry.uses
+            uid in seen || push!(stack,uid)
+        end
+    end
+    # Cluster by position — canonical = first member.
+    canon=Dict{UInt64,UInt64}()
+    reps=UInt64[]
+    for id in vids
+        p=kernel.shapes[id].geometry.point
+        hit=0
+        for r in reps
+            _occ_modulus(_occ3_sub(kernel.shapes[r].geometry.point,p))<=tol &&
+                (hit=r; break)
+        end
+        if hit==0
+            push!(reps,id); canon[id]=id
+        else
+            canon[id]=hit
+        end
+    end
+    # Rewire edge children to canonical vertices.
+    for id in seen
+        sh=kernel.shapes[id]
+        sh.dimension==1 || continue
+        ch=sh.children
+        nc=UInt64[get(canon,c,c) for c in ch]
+        nc==ch && continue
+        kernel.shapes[id]=_ModelOCCShape(1,sh.geometry,nc)
+    end
+    # Edge dedupe: two lines sharing both endpoints collapse — faces
+    # then share the curve entity (needed for shell validation).
+    ecanon=Dict{UInt64,UInt64}()
+    if fixSmallEdges || sewFaces
+        sig=Dict{NTuple{2,UInt64},UInt64}()
+        for id in seen
+            sh=kernel.shapes[id]
+            sh.dimension==1 || continue
+            get(sh.geometry.geometry,:occ,nothing)==:line || continue
+            a,b=sh.children; key=a<b ? (a,b) : (b,a)
+            prev=get(sig,key,0)
+            if prev==0
+                sig[key]=id
+            else
+                ecanon[id]=prev
+            end
+        end
+        if !isempty(ecanon)
+            # Re-key face pcurves while wires still reference the
+            # face's own edges: each pcurve's key moves from the old
+            # edge tag to the canonical edge's tag. When the canonical
+            # edge runs opposite the dropped one, `fwd` — parametrized
+            # along the edge's own direction — must be reversed.
+            for id in seen
+                sh=kernel.shapes[id]
+                sh.dimension==2 || continue
+                fr=sh.geometry.geometry
+                hasproperty(fr,:pcurves) || continue
+                pc=Dict{Int,NamedTuple}()
+                for cid in sh.children
+                    wsh=kernel.shapes[cid]
+                    hasproperty(wsh.geometry,:uses) || continue
+                    for (u,_) in wsh.geometry.uses
+                        ot=kernel.shape_tags[u][2]
+                        nu=get(ecanon,u,u)
+                        nt=kernel.shape_tags[nu][2]
+                        ent=fr.pcurves[ot]
+                        if nu!=u && kernel.shapes[u].children[1]!=
+                                kernel.shapes[nu].children[1]
+                            eg=kernel.shapes[u].geometry.geometry
+                            ent=(fwd=_occ_heal_pcurve_reverse(ent.fwd,
+                                     eg.t0+eg.t1,kernel,caller),
+                                 rev=nothing)
+                        end
+                        pc[nt]=ent
+                    end
+                end
+                kernel.shapes[id]=_ModelOCCShape(2,
+                    merge(sh.geometry,(geometry=merge(fr,(pcurves=pc,)),)),
+                    sh.children)
+            end
+            # Rewire wire/shell `uses` to canonical edges — flipping
+            # `rev` when the dropped edge's stored direction opposes
+            # the canonical edge's.
+            for id in seen
+                sh=kernel.shapes[id]
+                hasproperty(sh.geometry,:uses) || continue
+                uses=Tuple{UInt64,Bool}[]
+                for (u,r) in sh.geometry.uses
+                    nu=get(ecanon,u,u)
+                    if nu==u
+                        push!(uses,(u,r))
+                    else
+                        och=kernel.shapes[u].children
+                        nch=kernel.shapes[nu].children
+                        push!(uses,(nu,och[1]==nch[1] ? r : !r))
+                    end
+                end
+                uses==sh.geometry.uses && continue
+                kernel.shapes[id]=_ModelOCCShape(sh.dimension,
+                    merge(sh.geometry,(uses=uses,)),
+                    UInt64[u for (u,_) in uses])
+            end
+        end
+    end
+    # Unbind welded-away entities: duplicates no longer exist as
+    # distinct geometry once every reference points at a canonical.
+    for (id,rep) in canon
+        id==rep && continue
+        entry=get(kernel.shape_tags,id,nothing)
+        entry===nothing && continue
+        delete!(kernel.bindings,entry);delete!(kernel.shape_tags,id)
+        push!(kernel.removed,entry);kernel.changed=true
+    end
+    for (id,rep) in ecanon
+        id==rep && continue
+        entry=get(kernel.shape_tags,id,nothing)
+        entry===nothing && continue
+        delete!(kernel.bindings,entry);delete!(kernel.shape_tags,id)
+        push!(kernel.removed,entry);kernel.changed=true
+    end
+    return nothing
+end

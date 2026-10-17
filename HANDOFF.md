@@ -4835,6 +4835,35 @@ documents the missing oracle rather than a missing feature. Files:
 `test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
 rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
+## Latest landed increment (slice 30, pushed to `origin/main`)
+
+**`occ.healShapes` (GEO01 slice 30)** +
+**`occ.defeature` (slice 29, `9933773`)** —
+`occ.heal_shapes(dimTags; tolerance, fixDegenerated, fixSmallEdges,
+fixSmallFaces, sewFaces, makeSolids)` welds coincident-but-distinct
+vertex entities within `tolerance` (default `Precision::Confusion`),
+rewires edge children to canonical vertices, then collapses line edges
+sharing an endpoint pair so two faces can share one curve entity
+(`fixSmallEdges || sewFaces`). Deep-debug fixes: face `uses` live on
+*wire* children (faces carry `(kind,geometry)` records), so pcurves
+are re-keyed old-tag→canonical-tag *before* wire `uses` rewrite; a
+dropped edge stored opposite its canonical flips both the use's `rev`
+flag and the stored `fwd` pcurve (`_occ_heal_pcurve_reverse`: lin2d
+by affine reparam, spl2d by knot-mirror + pole reversal, other kinds
+reject loudly); welded-away entities are unbound from the registry.
+Verified `api_occ_heal_shapes_test.jl` 6 green (cracked-cube weld →
+valid shell → exact mass/centroid, 24→12 edges / 24→8 vertices, sew-
+disabled control, unknown-entity rejection); `import_shapes` 10 and
+`defeature` 8 regression-green. `fixDegenerated`/`fixSmallFaces`/
+`makeSolids` are accepted for signature parity — healing moves
+topology only; size-based removal stays unimplemented.
+
+`occ.defeature` removes listed planar faces and refills from the
+kept faces' half-space intersection (convex scope); it rebinds the
+existing volume tag in place and auto-detects the boolean bridge's
+inside-out face convention by retrying with globally flipped plane
+normals when the first pass bounds an empty body.
+
 ## Latest landed increment (`cf5f247`, pushed to `origin/main`)
 
 **`occ.importShapes` (GEO01 slice 28)** —
