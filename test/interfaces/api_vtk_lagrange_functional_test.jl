@@ -134,7 +134,7 @@ end
     try
         A.option("General.Terminal",0)
         mktempdir() do directory
-            for msh in (20,14)
+            for msh in (20,)
                 model=fixture(msh,"unsupported-"*string(msh));view=A.view.add("unsupported")
                 A.view.add_model_data(view,0,model.name,"NodeData",model.tags,model.values,0.,3)
                 before=(A.mesh.get_nodes(),A.mesh.get_elements(),A.view.get_model_data(view,0))

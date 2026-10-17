@@ -168,6 +168,12 @@ function _native_model_view_vtk_cell(msh,caller)
     if spec.family in (:tri,:qua,:tet,:hex,:pri) && !spec.serendipity && 3<=spec.order<=10
         return _native_model_vtk_lagrange_layout(msh,spec,caller)
     end
+    # Complete pyramids of order >=2 map to VTK_LAGRANGE_PYRAMID (74); the
+    # serendipity Pyramid13 stays on the VTK_QUADRATIC_PYRAMID path above and
+    # incomplete pyramids (125-131) have no faithful VTK ordering.
+    if spec.family===:pyr && !spec.serendipity && 2<=spec.order<=10
+        return _native_model_vtk_lagrange_layout(msh,spec,caller)
+    end
     throw(ArgumentError("$caller: VTK model export has no complete node ordering for Gmsh element type $msh"))
 end
 
@@ -203,7 +209,7 @@ function _native_model_view_vtk_payload(dataset,kind,caller)
     end
     # Older VTK file versions reinterpret Lagrange Hex edge ordering. Use the
     # modern explicit cell arrays for these complete higher-order families.
-    modern=any(layout->69<=layout.type<=73,layouts)
+    modern=any(layout->69<=layout.type<=74,layouts)
     version=modern ? "5.1" : "2.0"
     io=IOBuffer();println(io,"# vtk DataFile Version ",version,"\nTessella model view\nASCII\nDATASET UNSTRUCTURED_GRID")
     println(io,"POINTS ",length(points)," double")

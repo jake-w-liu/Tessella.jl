@@ -2,7 +2,7 @@
 # GetParametricCoords lattices. Model coordinates, UIDs and values play no role.
 function _native_model_vtk_lagrange_lattice(family,p)
     nodes=NTuple{3,Int}[]
-    family in (:tri,:tet) && p==0 && return NTuple{3,Int}[(0,0,0)]
+    family in (:tri,:tet,:pyr) && p==0 && return NTuple{3,Int}[(0,0,0)]
     if family in (:tri,:tet)
         vertices=NTuple{3,Int}[(0,0,0),(p,0,0),(0,p,0)]
         family===:tet && push!(vertices,(0,0,p))
@@ -43,6 +43,33 @@ function _native_model_vtk_lagrange_lattice(family,p)
         for z in levels;append!(nodes,((x,y,z) for y in 1:p-1 for x in 1:p-1));end
         family===:hex && append!(nodes,((x,y,z) for z in 1:p-1 for y in 1:p-1 for x in 1:p-1))
         return nodes
+    elseif family===:pyr
+        # VTK has no vtkLagrangePyramid class, so type 74 has no authored
+        # ordering. The convention here follows the Lagrange template on the
+        # pyramid topology of vtkPyramid/vtkTriQuadraticPyramid (public VTK
+        # tables): five vertices (counterclockwise base, apex last), eight
+        # edges (four base edges counterclockwise, then four lateral edges),
+        # four lateral triangular faces in VTK face order, the quadrilateral
+        # base face, then the interior. The integer reference lattice is
+        # {(i,j,k) : 0<=i,j<=k<=p} with the apex at (0,0,0) and the base at
+        # k=p; node (i,j,k) sits at ((2i-k)/p,(2j-k)/p,1-k/p).
+        vertices=NTuple{3,Int}[(0,0,p),(p,0,p),(p,p,p),(0,p,p),(0,0,0)]
+        append!(nodes,vertices)
+        for (a,b) in ((1,2),(2,3),(3,4),(4,1),(1,5),(2,5),(3,5),(4,5)),i in 1:p-1
+            push!(nodes,ntuple(axis->((p-i)*vertices[a][axis]+i*vertices[b][axis])÷p,3))
+        end
+        if p>=3
+            for (a,b,c) in ((1,2,5),(2,3,5),(3,4,5),(4,1,5)),
+                (x,y,_) in _native_model_vtk_lagrange_lattice(:tri,p-3)
+                u=x+1;v=y+1
+                push!(nodes,ntuple(axis->((p-u-v)*vertices[a][axis]+u*vertices[b][axis]+
+                    v*vertices[c][axis])÷p,3))
+            end
+        end
+        p>=2 && append!(nodes,((x,y,p) for y in 1:p-1 for x in 1:p-1))
+        p>=3 && append!(nodes,((x+1,y+1,z+2)
+            for (x,y,z) in _native_model_vtk_lagrange_lattice(:pyr,p-3)))
+        return nodes
     elseif family===:pri
         vertices=((0,0),(p,0),(0,p));edges=((1,2),(2,3),(3,1))
         append!(nodes,((x,y,z) for z in (0,p) for (x,y) in vertices))
@@ -72,7 +99,11 @@ function _native_model_vtk_lagrange_layout(msh,spec,caller)
     for node in axes(local_nodes,2)
         identity=ntuple(3) do axis
             value=local_nodes[axis,node]
-            if family===:hex || (family===:qua && axis<=2) || (family===:pri && axis==3)
+            if family===:pyr
+                # Integer (i,j,k) on the {(i,j,k):0<=i,j<=k<=p} lattice:
+                # k=p(1-z) and x=(2i-k)/p, so i=p(x+1-z)/2.
+                value=axis==3 ? 1-value : (value+1-local_nodes[3,node])/2
+            elseif family===:hex || (family===:qua && axis<=2) || (family===:pri && axis==3)
                 value=(value+1)/2
             end
             scaled=p*value;tolerance=128 * eps(Float64) * p
@@ -90,6 +121,7 @@ function _native_model_vtk_lagrange_layout(msh,spec,caller)
     length(identities)==length(reference)==spec.nnodes && length(Set(reference))==spec.nnodes &&
         all(haskey(identities,node) for node in reference) || throw(ArgumentError(
             "$caller: incomplete canonical Lagrange mapping for Gmsh element type $msh"))
-    type=family===:tri ? 69 : family===:qua ? 70 : family===:tet ? 71 : family===:hex ? 72 : 73
+    type=family===:tri ? 69 : family===:qua ? 70 : family===:tet ? 71 :
+        family===:hex ? 72 : family===:pri ? 73 : 74
     return (type=type,order=[identities[node] for node in reference])
 end

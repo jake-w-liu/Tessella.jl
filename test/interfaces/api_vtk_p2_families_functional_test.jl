@@ -173,7 +173,7 @@ end
     end
 end
 
-@testset "complete Pyramid14 is rejected before opening and CSV retains all nodes" begin
+@testset "complete Pyramid14 exports as VTK type 74 and CSV retains all nodes" begin
     A.initialize()
     try
         A.option("General.Terminal",0)
@@ -184,10 +184,10 @@ end
         view=A.view.add("pyramid values")
         A.view.add_model_data(view,0,"pyramid","NodeData",tags,[[Float64(tag)] for tag in tags])
         mktempdir() do directory
-            path=joinpath(directory,"pyramid.vtk");write(path,"sentinel")
-            error=try A.view.write(view,path);nothing catch exception;exception;end
-            @test error isa ArgumentError && occursin("complete node ordering",sprint(showerror,error))
-            @test read(path,String)=="sentinel"
+            path=joinpath(directory,"pyramid.vtk");A.view.write(view,path)
+            lines=readlines(path)
+            @test occursin("CELL_TYPES",join(lines,' ')) && occursin(r"\b74\b",join(lines,' '))
+            @test any(line->occursin("5.1",line)||occursin("Lagrange",line),lines[1:4])
             path=joinpath(directory,"pyramid.csv");A.view.write(view,path)
             rows=split.(readlines(path),',');header=first(rows);column=Dict(name=>index for (index,name) in enumerate(header))
             cell=only(row for row in rows[2:end] if row[column["record"]]=="cell")

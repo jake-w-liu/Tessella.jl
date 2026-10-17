@@ -160,7 +160,7 @@ function _native_view_writer_basis(msh::Int)
             .25 -.25 .25 -.25 -.25;0. 1. 0. 0. 0.],
             exponents=[0 0 0;0 0 1;0 1 0;1 0 0;1 1 0])
     end
-    family===:pyr && p==2 && return _native_view_writer_pyramid_basis(msh)
+    family===:pyr && p>=2 && return _native_view_writer_pyramid_basis(msh)
     lattice===nothing && throw(ArgumentError(
         "model view writer: interpolation matrices for this family are not implemented"))
     length(lattice)==spec.nnodes || throw(ArgumentError(
@@ -773,7 +773,12 @@ end
 # The quadratic serendipity space omits the base interior bubble.
 function _native_view_writer_pyramid_basis(msh::Int)
     spec=msh_spec(msh)
-    spec.family===:pyr && spec.order==2 || throw(ArgumentError(
+    spec.family===:pyr && spec.order>=2 || throw(ArgumentError(
+        "model view writer: this rational pyramid order is not implemented"))
+    # The quadratic serendipity element only omits the (p,p,0) base bubble,
+    # which the lattice filter below removes; incomplete pyramids of order >=3
+    # omit more and fail the node-count certificate instead.
+    spec.serendipity && spec.order!=2 && throw(ArgumentError(
         "model view writer: this rational pyramid order is not implemented"))
     p=spec.order
     lattice=NTuple{3,Int}[(i,j,k) for i in 0:p for j in 0:p
