@@ -91,14 +91,15 @@ end
     results=[]
     for diagonal in ((16,1,1),(1,16,1))
         session() do
-            surface,_=rectangle();tensor((diagonal...,0,0,0))
+            # Algorithm 7 now routes generate(2) to the same conforming
+            # tensor-bisection producer with the unit metric target; the
+            # explicit generate_metric_surface endpoint remains available.
+            surface,_=rectangle(;counts=6);tensor((diagonal...,0,0,0))
             A.option("Mesh.Algorithm",7)
-            before=state()
-            @test_throws ArgumentError A.mesh.generate(2)
-            @test state()==before
-            A.mesh.generate_metric_surface(surface;max_metric_edge=2.01)
+            A.mesh.generate(2)
             _,cells=triangles(surface);xyz=coordinates()
-            @test bounded(cells,xyz,p->Diagonal(collect(Float64.(diagonal))),2.01)
+            @test !isempty(cells)
+            @test bounded(cells,xyz,p->Diagonal(collect(Float64.(diagonal))),1.0)
             push!(results,(xyz,deepcopy(cells)))
         end
     end

@@ -1,4 +1,6 @@
-using ..SizeField: AbstractAnisoField, metric_edge_length
+using ..SizeField: AbstractAnisoField, metric_edge_length,
+                   isotropic_metric, BoundedSize, GMSH_MAX_SIZE
+import ..SizeField: metric_at
 using ..PipelineSupport: pipeline_float, pipeline_limit, PIPELINE_DEFAULT_MAX_NODES
 using ..Mesh3D: _EHeap, _hpush!, _hpop!
 
@@ -206,4 +208,63 @@ function mesh_model_surface(m::GeoModel,tag::Integer,field::AbstractAnisoField;
     product=_metric_surface_refine(working,t,field,target,node_limit,triangle_limit,
         _mesh_input,options,_mesh_node_high_water,_mesh_element_high_water,caller)
     return _return_surface_production ? product : product.mesh
+end
+
+# ── `Mesh.Algorithm=7` (upstream BAMG selector) ──────────────────────────────
+#
+# The ordinary surface dispatcher resolves algorithm 7 to the conforming
+# tensor-bisection producer above — the native metric-driven construction for
+# planar Surfaces, not a renamed BAMG. Its metric is the selected tensor-valued
+# background field; when the selection is scalar — or no field is selected at
+# all — the ordinary size context is wrapped as the isotropic metric I/h²,
+# which is BAMG's own scalar fallback. The bisection target is the BAMG unit
+# metric length 1.0.
+
+# Scalar sizing context as the isotropic metric I/h²: `_ModelAlgorithmBackgroundSize`
+# already evaluates BGM_MeshSize (raw field or the `size_field` argument, the
+# curvature and callback terms, the CTX::lc cap, the lcMin/lcMax clamp and
+# lcFactor), so wrapping it keeps the fallback on the exact scalar contract.
+struct _MetricIsotropicSize{F} <: AbstractAnisoField
+    size::F
+end
+
+metric_at(field::_MetricIsotropicSize,x,y,z)=isotropic_metric(field.size(x,y,z))
+
+# Resolve the producer's metric field the way `_ModelAlgorithmBackgroundSize`
+# resolves its scalar: `options.inner_field` is the raw selected background
+# and shadows the `size_field` argument. A tensor selection gets the global
+# size policy applied per direction — the cap at CTX::lc, the [lcMin, lcMax]
+# clamp and lcFactor act on each directional size exactly as they act on the
+# scalar value — while a scalar or absent selection takes the isotropic
+# context metric. A `size_field` tensor arriving without `inner_field` (a
+# direct Model call) is wrapped by the same policy rather than used raw,
+# matching how a scalar `size_field` is treated.
+function _metric_surface_algorithm_field(m::GeoModel,tag::Int,options,
+        size_field,caller::AbstractString)
+    raw=options.inner_field===nothing ? size_field : options.inner_field
+    if raw isa AbstractAnisoField
+        lc_min=isnan(options.lc_min) ? 0.0 : options.lc_min
+        lc_max=isnan(options.lc_max) ? GMSH_MAX_SIZE : options.lc_max
+        lo=min(lc_min,lc_max)
+        hi=max(lo,min(lc_max,options.ctx_lc))
+        return BoundedSize(raw;size_min=lo,size_max=hi,factor=options.lc_factor)
+    end
+    return _MetricIsotropicSize(
+        _ModelAlgorithmBackgroundSize(m,2,tag,options,size_field,caller))
+end
+
+# The working model is meshed in place: the producer's lazy boundary grading
+# writes `curve_params` exactly like the scalar path, while the public
+# tensor endpoint keeps its own transaction copy for its no-mutation
+# contract. `forced`/`param_sizes` stay with the CDT refinement path — the
+# producer consumes the actual lower Curve products through its source.
+function _metric_surface_algorithm_mesh(m::GeoModel,tag::Int,caller::AbstractString;
+        size_field=nothing,_mesh_input=nothing,_mesh1d_options=nothing,
+        _mesh_node_high_water=nothing,_mesh_element_high_water=UInt64(0))
+    _metric_surface_admit(m,tag,caller)
+    options=_model_algorithm_size_options(m,_mesh1d_options,caller)
+    field=_metric_surface_algorithm_field(m,tag,options,size_field,caller)
+    return _metric_surface_refine(m,tag,field,1.0,
+        PIPELINE_DEFAULT_MAX_NODES,20_000_000,_mesh_input,options,
+        _mesh_node_high_water,_mesh_element_high_water,caller)
 end

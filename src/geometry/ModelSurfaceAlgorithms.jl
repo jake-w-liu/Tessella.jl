@@ -74,14 +74,20 @@ end
 
 # This admission runs only for the ordinary surface mesher. TF, extrusion
 # and periodic slave copies have already selected their own construction.
-function _normal_surface_mesh_algorithm(m::GeoModel,t::Int,caller)
+# `metric=true` admits upstream's algorithm 7 selector (BAMG), which the
+# ordinary dispatcher resolves to the native conforming tensor-bisection
+# construction in ModelMetricSurfaceProducer; the OCC-curved and primitive
+# factory kernels keep the unextended set because 7 names machinery they do
+# not have.
+function _normal_surface_mesh_algorithm(m::GeoModel,t::Int,caller;metric::Bool=false)
     algorithm=_surface_mesh_algorithm(m,t)
     algorithm==2 && (algorithm=_surface_type(m,t)==:plane ? 5 : 1)
-    algorithm in (3,5,6) || throw(ArgumentError(
+    algorithm in (metric ? (3,5,6,7) : (3,5,6)) || throw(ArgumentError(
         "$caller: mesh algorithm $algorithm on Surface[$t] is not " *
         "implemented by the ordinary native surface mesher; supported: " *
         "2 (Auto on Plane), 3 (initial only), 5 (Delaunay), " *
-        "6 (Frontal-Delaunay)"))
+        "6 (Frontal-Delaunay)" *
+        (metric ? ", 7 (metric-driven bisection)" : "")))
     return algorithm
 end
 
