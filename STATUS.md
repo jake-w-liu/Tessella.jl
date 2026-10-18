@@ -1981,6 +1981,51 @@ compact `occ_nurbs_smoke.jl` added to
 `runtests.jl`; offset (60), corner (65) and
 spline (52) suites re-verified.
 
+### P601 conformance-corpus audit (2026-10-18)
+
+State record only — no Source or test bytes changed. The
+requirement-by-requirement tutorial/API/option/format corpus and
+P1–P6 differential conformance harness exists and stays **opt-in**:
+
+- Harnesses: `validation/` holds 378 Julia drivers — 37 `differential.jl`
+  files plus the `gmsh_parity/` API/format cases — launched by
+  `validation/run_all.jl` (~70 child processes, each a nonzero-exit gate).
+  `test/extended/runtests.jl` chains 357 opt-in regression files including
+  the 22 native HFSS cases and the allocation/source audits.
+  `test/artifacts/` retains 227 native-oracle captures; `test/fixtures/`
+  holds 85 real inputs; `test/data/` holds 649 native-capture files. The
+  default suite (56 includes; most recent receipts 400 assertions,
+  2026-10-13) remains the only routine gate.
+- Tutorial corpus: 2 of the 21 official Gmsh 4.15.2 `.geo` tutorials —
+  `validation/gmsh_parity/t1_square.jl` and `t4_hole.jl`. t2, t3 and
+  t5–t21 have no tutorial-level rows (several underlying features are
+  covered piecemeal by other drivers).
+- Option corpus: per-feature drivers only (size_fields, geo_constraints,
+  transfinite_curve laws, CLI/API option checks) — no systematic
+  option-by-option catalog exists.
+- Format corpus: four MSH differentials (section preservation, partition
+  metadata, `size_t` width, width error). POS/VTK/legacy formats are
+  covered functionally, not as pinned differentials.
+- Verified on this machine today: Gmsh 4.15.2 CLI present
+  (`gmsh --version` = 4.15.2); `gmsh -2` produced t1 = 14 triangles
+  (area 1) and t4 = 12 triangles; Tessella `execute_geo` on current Source
+  produced t1 = 14 triangles area 1.0 and t4 = 12 triangles area 0.75
+  under `-O0` — both existing tutorial rows confirm. The Python `gmsh`
+  SDK 4.15.2 also initializes.
+- Deferred: 52 drivers call `find_gmsh_api()` and need the SDK's `gmsh.jl`
+  Julia binding (`GMSH_JULIA_API`), absent from this machine's CLI-only
+  Gmsh 4.15.2 install; a `gmsh_jll` artifact exists in the Julia depot but
+  supplying the binding is unverified. The aggregate `run_all.jl`
+  differential therefore cannot complete here, and the heavy sweeps
+  (22 HFSS cases, allocation audits, native-oracle campaigns) stay opt-in
+  per [test/README.md](test/README.md).
+- Last recorded aggregate: 2026-08-21 `run_all.jl` exit 0 vs Gmsh 4.15.2
+  with per-child P6 receipts (dated sections below);
+  `validation/REPORT.md` is a generated historical snapshot that does not
+  qualify current Source. Missing endpoints/guards remain classified
+  under the open rows of [DEVIN_HANDOFF.md](DEVIN_HANDOFF.md) (P601 row
+  updated with this audit).
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The
