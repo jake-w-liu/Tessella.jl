@@ -156,7 +156,7 @@ function _model_import_prepare(path,dimension;legacy=false)
     result=if extension==".msh"
         GeoExec._geo_stage_mesh_file(path;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
-    elseif extension in (".unv",".mesh",".su2",".bdf",".nas")
+    elseif extension in (".unv",".mesh",".su2",".bdf",".nas",".inp",".neu")
         IO._stage_foreign_mesh_file(path;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
     elseif extension==".stl"
@@ -281,8 +281,8 @@ function _model_import_filename(filename,caller;geo_only=false)
     filename isa AbstractString && !isempty(filename) && !occursin('\0',filename) ||
         throw(ArgumentError("$caller: filename must be a nonempty NUL-free string"))
     extension=lowercase(splitext(filename)[2])
-    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos",".unv",".mesh",".stl",".su2",".bdf",".nas")) || throw(ArgumentError(
-        "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh, .pos, .unv, .mesh, .stl, .su2, .bdf and .nas")"))
+    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos",".unv",".mesh",".stl",".su2",".bdf",".nas",".inp",".neu")) || throw(ArgumentError(
+        "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh, .pos, .unv, .mesh, .stl, .su2, .bdf, .nas, .inp and .neu")"))
     isfile(filename) || throw(ArgumentError("$caller: missing file $filename"))
     return String(filename)
 end
@@ -290,15 +290,17 @@ end
 """
     open(filename)
 
-Import a `.geo`, `.msh`, `.unv`, `.mesh`, `.stl`, `.su2`, `.bdf`, `.nas` or
-supported linear-list
+Import a `.geo`, `.msh`, `.unv`, `.mesh`, `.stl`, `.su2`, `.bdf`, `.nas`,
+`.inp`, `.neu` or supported linear-list
 `.pos` file into a new current model, reusing an empty
 current model. Nonempty prior models and session views remain alive. MSH
 imports keep actual UIDs, entity ownership and retained metadata; UNV and
 Medit/MESH imports publish through the same channel with their elementary and
 physical tags mapped to entity ownership, as do SU2 markers (mapped to
-physical groups and names) and Nastran property ids (mapped to elementary
-entity and physical tags); STL imports weld through
+physical groups and names), Nastran property ids (mapped to elementary
+entity and physical tags), Abaqus element sets (mapped to elementary and
+physical tags plus physical names) and Gambit element groups/boundary sets
+(mapped the same way); STL imports weld through
 `read_stl` and publish one discrete Surface; ordinary
 model data sections create views bound to the imported model. The model name
 is the filename stem unless GEO `SetName` supplies one. Failed preparation

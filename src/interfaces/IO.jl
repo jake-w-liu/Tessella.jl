@@ -32,6 +32,7 @@ export read_msh, write_msh, MshFile
 export read_stl, read_geo_params, GeoParams, GeoFieldSpec
 export read_unv, write_unv, read_mesh, write_mesh, UnvFile, MeshFile
 export read_su2, write_su2, read_bdf, write_bdf, Su2File, BdfFile
+export read_inp, write_inp, read_neu, write_neu, InpFile, NeuFile
 
 include("GeoColorNames.jl")
 include("GeoOptionTables.jl")
@@ -11580,6 +11581,30 @@ function _read_foreign_records(path,caller::AbstractString)
                 rethrow()
             end
         end
+    elseif extension==".inp"
+        return open(path,"r") do io
+            try
+                return _read_inp(io,caller,
+                    Int(typemax(Int32)),Int(typemax(Int32)))
+            catch err
+                err isa InterruptException && rethrow()
+                err isa EOFError && throw(ArgumentError(
+                    "$caller: truncated .inp file"))
+                rethrow()
+            end
+        end
+    elseif extension==".neu"
+        return open(path,"r") do io
+            try
+                return _read_neu(io,caller,
+                    Int(typemax(Int32)),Int(typemax(Int32)))
+            catch err
+                err isa InterruptException && rethrow()
+                err isa EOFError && throw(ArgumentError(
+                    "$caller: truncated .neu file"))
+                rethrow()
+            end
+        end
     else
         throw(ArgumentError("$caller: unsupported mesh extension '$extension'"))
     end
@@ -12849,6 +12874,1131 @@ function write_bdf(path,m)
             end
         end
         println(io,"ENDDATA")
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Abaqus input deck (.inp) and Gambit neutral (.neu) mesh I/O
+#
+# `.inp` files are keyword decks: `**` comment lines, `*KEYWORD, param=value`
+# headers and free-format comma-separated data lines (a record ending in `,`
+# continues on the next line). `*NODE` rows are `id, x, y [, z]`; `*ELEMENT`
+# blocks declare `TYPE=` plus an optional `ELSET=`; `*ELSET`/`*NSET` blocks
+# list member ids (or `first, last [, step]` triples under `GENERATE`).
+# Element names map through `_INP_ELEMENT_TYPES` with the pinned release's
+# writer permutations inverted for reading (Abaqus orders the tet10, hex20,
+# hex27, pri15, pyr13 and lin3 mid-nodes differently); alphabetic modifier
+# suffixes (`R`, `H`, `T`, ...) are stripped until a canonical name matches.
+# Set names matching the upstream `Volume|Surface|Line|Point<tag>` convention
+# become elementary entity tags (when the dimension agrees), names matching
+# `Physical<Dim><tag>` pin that physical tag, and every other element set
+# becomes a named physical group allocated the lowest free tag in its
+# dimension; overlapping sets keep the first assignment. `*INCLUDE` and
+# `INPUT=` external-deck references reject; all other keyword blocks are
+# skipped. `*NSET` memberships are parsed for validity but cannot be
+# transported — the staging bridge carries element-level groups only.
+#
+# `.neu` files are fixed-record sections terminated by `ENDOFSECTION`:
+# `CONTROL INFO` (the `NUMNP NELEM NGRPS NBSETS NDFCD NDFVL` counts line),
+# `NODAL COORDINATES` (`id x y [z]` rows), `ELEMENTS/CELLS` (`id type npts`
+# plus the node list, which may wrap across lines). The Gambit type codes are
+# 1=edge, 2=quadrilateral, 3=triangle, 4=hexahedron, 5=prism, 6=tetrahedron,
+# 7=pyramid — with the hexahedron and pyramid base corners swapped (3↔4)
+# relative to Gmsh order. `ELEMENT GROUP` blocks carry
+# `GROUP: <tag> ELEMENTS: <n> MATERIAL: <m> NFLAGS: <f>`, a name line, `f`
+# flag values and `n` member ids: group section `i` becomes elementary entity
+# `i` and the `GROUP:` number the physical tag. `BOUNDARY CONDITIONS` blocks
+# carry `name itype nentries nvalues code` plus `element type side` records
+# that resolve to boundary tri/quad (or edge, for 2-D inputs) cells through
+# the Gambit side tables; bc set `i` becomes elementary entity `i` and either
+# the `Physical<Dim><tag>` encoded in a fallback name or the ordinal `i` the
+# physical tag. Elements belonging to no group keep elementary tag 0 and stay
+# in the mesh (the pinned reader drops them); group and boundary references
+# resolve by element label rather than upstream's positional indexing, which
+# is equivalent for the dense `1..NELEM` numbering real files use.
+# `/`-prefixed lines are comments. The pinned format carries first-order
+# cells only, so `write_neu` emits the standard linear types.
+# ════════════════════════════════════════════════════════════════════════════════
+
+# ── Abaqus input deck (.inp) ───────────────────────────────────────────────────
+
+# Abaqus element name → (Gmsh type, file→Gmsh vertex permutation or `nothing`).
+# Permutations are the inverse of the pinned release's `getVertexINP` write
+# maps; alphabetic suffix modifiers (`R`, `H`, `T`, `I`, ...) are tolerated by
+# `_inp_type` prefix-stripping.
+const _INP_ELEMENT_TYPES=Dict{String,Tuple{Int,Union{Nothing,NTuple{N,Int} where N}}}(
+    "MASS"=>(15,nothing),
+    "T2D2"=>(1,nothing),"T3D2"=>(1,nothing),"C1D2"=>(1,nothing),
+    "B21"=>(1,nothing),"B31"=>(1,nothing),
+    "R2D2"=>(1,nothing),"R3D2"=>(1,nothing),"SAX1"=>(1,nothing),
+    "T2D3"=>(8,(1,3,2)),"T3D3"=>(8,(1,3,2)),"C1D3"=>(8,(1,3,2)),
+    "B22"=>(8,(1,3,2)),"B23"=>(8,(1,3,2)),"B32"=>(8,(1,3,2)),
+    "B33"=>(8,(1,3,2)),"SAX2"=>(8,(1,3,2)),
+    "CPS3"=>(2,nothing),"CPE3"=>(2,nothing),"CAX3"=>(2,nothing),
+    "C2D3"=>(2,nothing),"S3"=>(2,nothing),"STRI3"=>(2,nothing),
+    "M3D3"=>(2,nothing),"R3D3"=>(2,nothing),
+    "CPS6"=>(9,nothing),"CPE6"=>(9,nothing),"CAX6"=>(9,nothing),
+    "C2D6"=>(9,nothing),"S6"=>(9,nothing),"STRI65"=>(9,nothing),
+    "CPS4"=>(3,nothing),"CPE4"=>(3,nothing),"CAX4"=>(3,nothing),
+    "C2D4"=>(3,nothing),"S4"=>(3,nothing),"M3D4"=>(3,nothing),
+    "R3D4"=>(3,nothing),
+    "CPS8"=>(16,nothing),"CPE8"=>(16,nothing),"CAX8"=>(16,nothing),
+    "C2D8"=>(16,nothing),"S8"=>(16,nothing),
+    "M3D9"=>(10,nothing),
+    "C3D4"=>(4,nothing),"C3D10"=>(11,(1,2,3,4,5,6,7,9,10,8)),
+    "C3D6"=>(6,nothing),
+    "C3D15"=>(18,(1,2,3,4,5,6,7,9,13,8,14,15,10,12,11)),
+    "C3D8"=>(5,nothing),
+    "C3D20"=>(17,(1,2,3,4,5,6,7,8,9,12,17,10,18,11,19,20,13,16,14,15)),
+    "C3D27"=>(12,(1,2,3,4,5,6,7,8,9,12,17,10,18,11,19,20,13,16,14,15,
+                  22,24,27,25,26,23,21)),
+    "C3D5"=>(7,nothing),"C3D13"=>(19,(1,2,3,4,5,6,9,10,7,11,8,12,13)))
+
+# Gmsh type → (Abaqus name, Gmsh→file vertex permutation or `nothing`) — the
+# `getVertexINP` maps of the pinned release, so a written file reads back with
+# the permutations above.
+const _INP_WRITE_TABLE=Dict{Int,Tuple{String,Union{Nothing,NTuple{N,Int} where N}}}(
+    15=>("MASS",nothing),
+    1=>("T3D2",nothing),8=>("T3D3",(1,3,2)),
+    2=>("CPS3",nothing),9=>("CPS6",nothing),
+    3=>("CPS4",nothing),16=>("CPS8",nothing),10=>("M3D9",nothing),
+    4=>("C3D4",nothing),11=>("C3D10",(1,2,3,4,5,6,7,10,8,9)),
+    5=>("C3D8",nothing),
+    17=>("C3D20",(1,2,3,4,5,6,7,8,9,12,14,10,17,19,20,18,11,13,15,16)),
+    12=>("C3D27",(1,2,3,4,5,6,7,8,9,12,14,10,17,19,20,18,11,13,15,16,
+                  27,21,26,22,24,25,23)),
+    6=>("C3D6",nothing),
+    18=>("C3D15",(1,2,3,4,5,6,7,10,8,13,15,14,9,11,12)),
+    7=>("C3D5",nothing),19=>("C3D13",(1,2,3,4,5,6,9,11,7,8,10,12,13)))
+
+# `Volume|Surface|Line|Point<n>` names are the upstream *ELEMENT `ELSET=`
+# convention and map to elementary entities of the matching dimension.
+const _INP_ENTITY_PREFIXES=Dict{String,Int}(
+    "VOLUME"=>3,"SURFACE"=>2,"LINE"=>1,"POINT"=>0)
+const _INP_PHYSICAL_PREFIXES=("PhysicalPoint","PhysicalLine",
+    "PhysicalSurface","PhysicalVolume")   # indexed by dim+1
+
+# Hard ceiling on `GENERATE first,last[,step]` expansion: the io limits are
+# usually typemax, but a single range statement is never meant to expand to
+# more than a few million members (and must not allocate unboundedly).
+const _INP_GENERATE_LIMIT=Int64(8_388_608)
+
+function _inp_entity_name(name::AbstractString)
+    m=match(r"^(Volume|Surface|Line|Point)([0-9]+)$",name)
+    m===nothing && return nothing
+    dim=_INP_ENTITY_PREFIXES[uppercase(m.captures[1])]
+    tag=tryparse(Int,m.captures[2])
+    (tag===nothing || tag<0 || tag>typemax(Int32)) && return nothing
+    return dim,Int64(tag)
+end
+
+function _inp_physical_name(name::AbstractString)
+    m=match(r"^Physical(Volume|Surface|Line|Point)([0-9]+)$",name)
+    m===nothing && return nothing
+    dim=_INP_ENTITY_PREFIXES[uppercase(m.captures[1])]
+    tag=tryparse(Int,m.captures[2])
+    (tag===nothing || tag<0 || tag>typemax(Int32)) && return nothing
+    return dim,Int64(tag)
+end
+
+_inp_physical_fallback(dim::Int,tag::Integer)=string(_INP_PHYSICAL_PREFIXES[dim+1],tag)
+
+function _inp_type(name::AbstractString)
+    u=uppercase(strip(name))
+    entry=get(_INP_ELEMENT_TYPES,u,nothing)
+    entry!==nothing && return entry
+    # Modifier suffixes (`C3D8R`, `S4RT`, `C3D10MH`, ...) are alphabetic;
+    # strip them while a canonical prefix matches. Digit-terminated names
+    # never strip, so e.g. `CPS34` cannot alias `CPS3`.
+    while !isempty(u) && isletter(last(u))
+        u=chop(u)
+        entry=get(_INP_ELEMENT_TYPES,u,nothing)
+        entry!==nothing && return entry
+    end
+    return nothing
+end
+
+# `*KEYWORD, a, b=c` → (uppercase keyword, param dict, bare-flag set). Param
+# values keep their case (set names) but lose surrounding quotes.
+function _inp_header(line::AbstractString)
+    parts=split(strip(line),',')
+    first=strip(parts[1])
+    keyword=lastindex(first)>1 ?
+        uppercase(strip(SubString(first,2,lastindex(first)))) : ""
+    params=Dict{String,String}();flags=Set{String}()
+    for part in Iterators.drop(parts,1)
+        kv=split(part,'=';limit=2)
+        if length(kv)==2
+            params[uppercase(strip(kv[1]))]=
+                strip(strip(kv[2]),[' ','\t','\'','"'])
+        else
+            flag=strip(part)
+            isempty(flag) || push!(flags,uppercase(flag))
+        end
+    end
+    return keyword,params,flags
+end
+
+function _inp_next(io::Base.IO,pending)
+    line=pending[]
+    line!==nothing && (pending[]=nothing;return line)
+    eof(io) && return nothing
+    return readline(io)
+end
+
+# Consume a keyword's data section into `out`: non-empty non-comment lines
+# until the next `*` keyword line (pushed back). A line ending in `,` is a
+# continuation record joined with the following data line(s).
+function _inp_block_lines(io::Base.IO,pending,out::Vector{String})
+    empty!(out)
+    while true
+        line=_inp_next(io,pending)
+        line===nothing && break
+        s=strip(line)
+        if startswith(s,'*')
+            startswith(s,"**") && continue    # comment inside a data block
+            pending[]=line;break              # next keyword — push back
+        end
+        isempty(s) && continue
+        while endswith(s,',')
+            nxt=_inp_next(io,pending)
+            nxt===nothing && break
+            t=strip(nxt)
+            if startswith(t,'*')
+                startswith(t,"**") && continue
+                pending[]=nxt;break
+            end
+            isempty(t) || (s*=" "*t)
+        end
+        isempty(s) || push!(out,s)
+    end
+    return out
+end
+
+function _inp_fields(line::AbstractString)
+    return String[strip(field) for field in
+        Iterators.filter(!isempty,Iterators.map(strip,split(line,',')))]
+end
+
+# `first, last [, step]` triple under GENERATE, or a plain comma list.
+# Returns the member id list (empty allowed).
+function _inp_set_ids(line::AbstractString,generate::Bool,
+                      caller::AbstractString,what::AbstractString,cap::Int)
+    f=_inp_fields(line)
+    isempty(f) && return Int64[]
+    if generate
+        length(f) in 2:3 || throw(ArgumentError(
+            "$caller: .inp GENERATE $what expects first,last[,step] " *
+            "in '$line'"))
+        a=_unv_int(f[1],caller,".inp GENERATE first")
+        b=_unv_int(f[2],caller,".inp GENERATE last")
+        step=length(f)==3 ? _unv_int(f[3],caller,".inp GENERATE step") : Int64(1)
+        (step>0 && a<=b) || throw(ArgumentError(
+            "$caller: invalid .inp GENERATE range $a,$b,$step"))
+        count=(b-a)÷step+1
+        count<=cap || throw(ArgumentError(
+            "$caller: .inp GENERATE range $a,$b,$step expands to $count " *
+            "ids (cap $cap)"))
+        return Int64[i for i in a:step:b]
+    end
+    return Int64[_unv_int(field,caller,".inp $what id") for field in f]
+end
+
+function _read_inp(io::Base.IO,caller::AbstractString,node_limit::Int,
+                   element_limit::Int)
+    node_labels=Int64[];node_rows=Dict{Int64,Int32}();coords=Float64[]
+    records=_TextMeshCell[];record_rows=Dict{Int64,Int32}()
+    element_labels=Set{Int64}();warned=Set{String}()
+    # (set name, element label) memberships in file order — sets can be
+    # declared after the element blocks, so tags resolve after parsing.
+    assignments=Tuple{String,Int64}[]
+    pending=Ref{Union{Nothing,String}}(nothing)
+    lines=String[]
+    while true
+        line=_inp_next(io,pending)
+        line===nothing && break
+        s=strip(line)
+        (isempty(s) || startswith(s,"**")) && continue
+        startswith(s,'*') || continue              # stray text is skipped
+        keyword,params,flags=_inp_header(s)
+        if keyword=="INCLUDE" || haskey(params,"INPUT")
+            throw(ArgumentError(
+                "$caller: *INCLUDE/INPUT external decks are not supported — " *
+                "merge the referenced file into the deck first"))
+        elseif keyword=="NODE"
+            for l in _inp_block_lines(io,pending,lines)
+                f=_inp_fields(l)
+                length(f) in 2:4 || throw(ArgumentError(
+                    "$caller: malformed .inp node record '$l'"))
+                id=_unv_int(f[1],caller,".inp node label")
+                id>=1 || throw(ArgumentError(
+                    "$caller: non-positive .inp node label $id"))
+                haskey(node_rows,id) && throw(ArgumentError(
+                    "$caller: duplicate .inp node label $id"))
+                length(node_labels)>=node_limit && throw(ArgumentError(
+                    "$caller: .inp node count exceeds max_nodes=$node_limit"))
+                x=_unv_float(f[2],caller,".inp node coordinate")
+                y=length(f)>=3 ?
+                    _unv_float(f[3],caller,".inp node coordinate") : 0.0
+                z=length(f)>=4 ?
+                    _unv_float(f[4],caller,".inp node coordinate") : 0.0
+                push!(node_labels,id);node_rows[id]=Int32(length(node_labels))
+                push!(coords,x);push!(coords,y);push!(coords,z)
+            end
+        elseif keyword=="ELEMENT"
+            rawtype=get(params,"TYPE","")
+            isempty(rawtype) && throw(ArgumentError(
+                "$caller: *ELEMENT block without a TYPE= parameter"))
+            entry=_inp_type(rawtype)
+            elset=get(params,"ELSET","")
+            if entry===nothing
+                key="etype:"*uppercase(rawtype)
+                key in warned || (push!(warned,key);
+                    @warn("$caller: skipping unsupported .inp element type " *
+                          "'$(rawtype)'"))
+                _inp_block_lines(io,pending,lines)
+                continue
+            end
+            msh,perm=entry;arity=msh_num_nodes(msh)
+            for l in _inp_block_lines(io,pending,lines)
+                f=_inp_fields(l)
+                length(f)==arity+1 || throw(ArgumentError(
+                    "$caller: .inp element record '$l' does not carry the " *
+                    "$arity nodes type $(uppercase(rawtype)) requires"))
+                eid=_unv_int(f[1],caller,".inp element label")
+                eid>=1 || throw(ArgumentError(
+                    "$caller: non-positive .inp element label $eid"))
+                eid in element_labels && throw(ArgumentError(
+                    "$caller: duplicate .inp element label $eid"))
+                push!(element_labels,eid)
+                length(records)>=element_limit && throw(ArgumentError(
+                    "$caller: .inp element count exceeds " *
+                    "max_elements=$element_limit"))
+                nodes=Vector{Int32}(undef,arity)
+                @inbounds for k in 1:arity
+                    v=_unv_int(f[k+1],caller,".inp element node")
+                    row=get(node_rows,v,Int32(0))
+                    row!=0 || throw(ArgumentError(
+                        "$caller: .inp element $eid references unknown " *
+                        "node $v"))
+                    nodes[k]=row
+                end
+                perm===nothing || (nodes=nodes[collect(perm)])
+                push!(records,_TextMeshCell(eid,msh,nodes,Int64(0),Int64(0)))
+                record_rows[eid]=Int32(length(records))
+                isempty(elset) || push!(assignments,(elset,eid))
+            end
+        elseif keyword=="NSET" || keyword=="ELSET"
+            member=keyword=="ELSET"
+            name=get(params,member ? "ELSET" : "NSET","")
+            isempty(name) && throw(ArgumentError(
+                "$caller: *$keyword block without a $keyword= name"))
+            generate="GENERATE" in flags || haskey(params,"GENERATE")
+            cap=min(max(element_limit,node_limit),_INP_GENERATE_LIMIT)
+            for l in _inp_block_lines(io,pending,lines)
+                ids=_inp_set_ids(l,generate,caller,keyword,cap)
+                member || continue       # NSET ids are validated only
+                for id in ids
+                    push!(assignments,(name,id))
+                end
+            end
+        else
+            _inp_block_lines(io,pending,lines)   # unrecognized keyword data
+        end
+    end
+    isempty(node_labels) && throw(ArgumentError(
+        "$caller: not an Abaqus input deck (no *NODE records parsed)"))
+    # First pass: `Physical<Dim><tag>` names pin their tag so auto-allocated
+    # names can never collide with a tag pinned later in the file.
+    pinned=Dict{Tuple{Int,String},Int64}();used=Dict{Int,Set{Int64}}()
+    for (name,id) in assignments
+        row=get(record_rows,id,Int32(0));row==0 && continue
+        pn=_inp_physical_name(name);pn===nothing && continue
+        dim,tag=pn
+        dim==msh_dimension(records[row].msh) || continue
+        pinned[(dim,name)]=tag;push!(get!(Set{Int64},used,dim),tag)
+    end
+    pnames=Dict{Tuple{Int,Int},String}()
+    tag_of=Dict{Tuple{Int,String},Int64}()
+    elementary_of=Dict{Int64,Int64}();physical_of=Dict{Int64,Int64}()
+    for (name,id) in assignments
+        row=get(record_rows,id,Int32(0))
+        if row==0
+            key="set:"*name
+            key in warned || (push!(warned,key);
+                @warn("$caller: .inp set '$(name)' references unknown " *
+                      "element $id — membership skipped"))
+            continue
+        end
+        dim=msh_dimension(records[row].msh)
+        ent=_inp_entity_name(name)
+        if ent!==nothing && ent[1]==dim
+            haskey(elementary_of,id) || (elementary_of[id]=ent[2])
+            continue
+        end
+        haskey(physical_of,id) && continue     # first physical set wins
+        key2=(dim,name)
+        tag=get(tag_of,key2,Int64(0))
+        if tag==0
+            tag=get(pinned,key2,Int64(0))
+            if tag==0
+                avail=get(used,dim,nothing)
+                tag=Int64(1)
+                avail===nothing || (while tag in avail; tag+=1; end)
+            end
+            tag_of[key2]=tag
+            push!(get!(Set{Int64},used,dim),tag)
+            name==_inp_physical_fallback(dim,tag) ||
+                (pnames[(dim,Int(tag))]=name)
+        end
+        physical_of[id]=tag
+    end
+    for i in eachindex(records)
+        c=records[i]
+        elementary=get(elementary_of,c.label,Int64(0))
+        physical=get(physical_of,c.label,Int64(0))
+        0<=elementary<=typemax(Int32) || throw(ArgumentError(
+            "$caller: .inp elementary tag $elementary on element " *
+            "$(c.label) exceeds Int32"))
+        0<=physical<=typemax(Int32) || throw(ArgumentError(
+            "$caller: .inp physical tag $physical on element " *
+            "$(c.label) exceeds Int32"))
+        records[i]=_TextMeshCell(c.label,c.msh,c.nodes,elementary,physical)
+    end
+    return node_labels,coords,records,pnames
+end
+
+"""
+    InpFile
+
+Result of [`read_inp`](@ref): the compact `mesh` (an MSH2-style `MixedMesh`
+whose per-cell `elementary_entities` hold the `Volume`/`Surface`/`Line`/
+`Point`-convention entity tag and whose `tags` hold the resolved element-set
+physical tag; set names live in `mesh.physical_names`), the original
+`node_tags` in row order and the per-block `element_tags`.
+"""
+struct InpFile
+    mesh::MixedMesh
+    node_tags::Vector{UInt64}
+    element_tags::Vector{Vector{UInt64}}
+end
+
+"""
+    read_inp(path; max_nodes, max_elements, max_file_bytes) -> InpFile
+
+Read an Abaqus `.inp` input deck's mesh sections: `*NODE` records (`id, x, y
+[, z]`, `D`/`d` exponents accepted) and `*ELEMENT, TYPE=name` blocks mapping
+through `_INP_ELEMENT_TYPES` (suffix modifiers stripped; unrecognized types
+warn once and are skipped). `*ELSET`/`ELSET=` memberships become physical
+tags: `Physical<Dim><tag>` names pin the tag, `Volume|Surface|Line|Point<tag>`
+names become elementary entities and other names get the lowest free tag in
+their dimension plus a physical name. `*NSET` blocks are validated but not
+transported, `GENERATE` ranges are expanded, `*INCLUDE`/`INPUT=` decks reject
+and all other keywords are skipped. `**` lines are comments; dangling node
+references and malformed records are errors.
+"""
+function read_inp(path;
+                  max_nodes=typemax(Int32),max_elements=typemax(Int32),
+                  max_file_bytes=typemax(Int))
+    caller="read_inp"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    node_limit=_io_limit(max_nodes,caller,"max_nodes";ceiling=Int(typemax(Int32)))
+    element_limit=_io_limit(
+        max_elements,caller,"max_elements";ceiling=Int(typemax(Int32)))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
+    node_labels,coords,records,pnames=open(path,"r") do io
+        try
+            return _read_inp(io,caller,node_limit,element_limit)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa EOFError && throw(ArgumentError(
+                "$caller: truncated .inp file"))
+            rethrow()
+        end
+    end
+    mesh,node_tags,element_tags=_foreign_mesh_result(
+        caller,node_labels,coords,records;physical_names=pnames)
+    return InpFile(mesh,node_tags,element_tags)
+end
+
+function _inp_entity_label(dim::Int,tag::Integer)
+    return string(dim==3 ? "Volume" : dim==2 ? "Surface" :
+                  dim==1 ? "Line" : "Point",tag)
+end
+
+function _inp_group_name(m::MixedMesh,dim::Int,tag::Int32)
+    name=get(m.physical_names,(dim,Int(tag)),"")
+    isempty(name) || return replace(strip(name),r"\s+"=>"_")
+    return _inp_physical_fallback(dim,tag)
+end
+
+# One element record line: `eid, n1, n2, ...`, wrapped with a trailing comma
+# when the field list would run past 16 entries (the upstream writer's wrap).
+function _inp_write_element(io,eid,nodes::Vector{String})
+    fields=Vector{String}(undef,length(nodes)+1)
+    fields[1]=string(eid);fields[2:end]=nodes
+    if length(fields)<=16
+        println(io,join(fields,", "))
+    else
+        println(io,join(view(fields,1:16),", "),",")
+        println(io,join(view(fields,17:length(fields)),", "))
+    end
+    return nothing
+end
+
+function _inp_write_id_list(io,ids)
+    for (i,id) in enumerate(ids)
+        i>1 && print(io,mod(i-1,10)==0 ? "\n" : ", ")
+        print(io,id)
+    end
+    println(io)
+    return nothing
+end
+
+"""
+    write_inp(path, mesh)
+
+Write a `Mesh` or `MixedMesh` as an Abaqus input deck: `*Heading`, `*NODE`
+(`id, x, y, z` at full `repr` precision), one `*ELEMENT, type=<abaqus>,
+ELSET=<Volume|Surface|Line|Point><entity>` block per (entity, type) group —
+the upstream naming convention, so the entity tag is recovered on re-read —
+then `*ELSET` blocks listing the elements of each physical group and `*NSET`
+blocks listing their nodes (`Physical<Dim><tag>` names when a group has no
+name, matching upstream's fallbacks). Element types with no Abaqus name
+(order-3+ cells, the full-P2 prism/pyramid, special records) reject loudly;
+`MASS` carries point cells.
+"""
+function write_inp(path,m)
+    caller="write_inp"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    for block in m.blocks
+        block isa ElementBlock || throw(ArgumentError(
+            "$caller: special MSH record type $(block.msh) is not " *
+            "representable in .inp"))
+        get(_INP_WRITE_TABLE,block.msh,nothing)===nothing && throw(ArgumentError(
+            "$caller: element type $(block.msh) ($(msh_family(block.msh)) " *
+            "order $(msh_spec(block.msh).order)) is not representable in .inp"))
+    end
+    data=m.entity_data
+    nn=size(m.coords,2)
+    labels=data===nothing ? collect(UInt64(1):UInt64(nn)) : data.external_node_tags
+    for tag in labels
+        tag<=typemax(Int64) || throw(ArgumentError(
+            "$caller: node tag $tag is not representable in .inp"))
+    end
+    # Stable element ids for the whole mesh (external tags or 1..N in block
+    # order): *ELEMENT blocks and *ELSET member lists share them.
+    celluids=Vector{Vector{UInt64}}(undef,length(m.blocks))
+    counter=UInt64(0)
+    for (bi,block) in enumerate(m.blocks)
+        ids=Vector{UInt64}(undef,size(block.nodes,2))
+        for j in axes(block.nodes,2)
+            counter+=UInt64(1)
+            uid=_foreign_cell_uid(m,bi,j,counter)
+            uid<=typemax(Int64) || throw(ArgumentError(
+                "$caller: element tag $uid is not representable in .inp"))
+            ids[j]=uid
+        end
+        celluids[bi]=ids
+    end
+    # Group cells by (entity, type); each group becomes one *ELEMENT block.
+    groups=Dict{Tuple{Int64,Int},Vector{Tuple{Int,Int}}}()
+    order=Tuple{Int64,Int}[]
+    for (bi,block) in enumerate(m.blocks)
+        for j in axes(block.nodes,2)
+            key=(_foreign_cell_entity(m,bi,j),block.msh)
+            if !haskey(groups,key)
+                groups[key]=Tuple{Int,Int}[];push!(order,key)
+            end
+            push!(groups[key],(bi,j))
+        end
+    end
+    # Physical membership for *ELSET/*NSET: (dim,tag) → element ids.
+    groupset=Dict{Tuple{Int,Int32},Vector{Int64}}()
+    setnodes=Dict{Tuple{Int,Int32},Set{Int32}}()
+    for (bi,block) in enumerate(m.blocks)
+        for j in axes(block.nodes,2)
+            tag=block.tags[j];tag<=0 && continue
+            key=(msh_dimension(block.msh),tag)
+            push!(get!(()->Int64[],groupset,key),Int64(celluids[bi][j]))
+            nodes=get!(()->Set{Int32}(),setnodes,key)
+            for row in view(block.nodes,:,j)
+                push!(nodes,row)
+            end
+        end
+    end
+    target,parent=_foreign_target(path,caller)
+    mktemp(parent) do temporary,io
+        println(io,"*Heading")
+        println(io," ",basename(String(path)))
+        println(io,"*NODE")
+        @inbounds for i in 1:nn
+            println(io," ",labels[i],", ",repr(m.coords[1,i]),", ",
+                repr(m.coords[2,i]),", ",repr(m.coords[3,i]))
+        end
+        for key in sort!(order;
+            by=k->(msh_dimension(k[2]),k[1]==0 ? typemax(Int64) : k[1],k[2]))
+            entity,msh=key
+            inpname,perm=_INP_WRITE_TABLE[msh]
+            println(io,"*ELEMENT, type=",inpname,", ELSET=",
+                _inp_entity_label(msh_dimension(msh),entity))
+            arity=msh_num_nodes(msh)
+            for (bi,j) in groups[key]
+                block=m.blocks[bi]
+                nodes=[string(labels[block.nodes[perm===nothing ? k : perm[k],j]])
+                       for k in 1:arity]
+                _inp_write_element(io,Int64(celluids[bi][j]),nodes)
+            end
+        end
+        for (dim,tag) in sort!(collect(keys(groupset)))
+            name=_inp_group_name(m,dim,tag)
+            dim>=1 || continue   # upstream writes element sets for dim>=1 only
+            println(io,"*ELSET,ELSET=",name)
+            _inp_write_id_list(io,groupset[(dim,tag)])
+        end
+        for (dim,tag) in sort!(collect(keys(groupset)))
+            nodes=get(setnodes,(dim,tag),nothing)
+            nodes===nothing && continue
+            println(io,"*NSET,NSET=",_inp_group_name(m,dim,tag))
+            _inp_write_id_list(io,[Int64(labels[row]) for row in sort!(collect(nodes))])
+        end
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+# ── Gambit neutral (.neu) ──────────────────────────────────────────────────────
+
+# Gambit type code → (Gmsh type, file→Gmsh vertex permutation or `nothing`).
+# Hexahedra and pyramids swap base corners 3↔4 relative to Gmsh order.
+const _NEU_ELEMENT_TYPES=Dict{Int,Tuple{Int,Union{Nothing,NTuple{N,Int} where N}}}(
+    1=>(1,nothing),2=>(3,nothing),3=>(2,nothing),
+    4=>(5,(1,2,4,3,5,6,8,7)),5=>(6,nothing),6=>(4,nothing),
+    7=>(7,(1,2,4,3,5)))
+
+# Gmsh type → (Gambit code, Gmsh→file vertex permutation or `nothing`); the
+# permutations are involutions, so they match the read table.
+const _NEU_WRITE_TABLE=Dict{Int,Tuple{Int,Union{Nothing,NTuple{N,Int} where N}}}(
+    1=>(1,nothing),3=>(2,nothing),2=>(3,nothing),
+    5=>(4,(1,2,4,3,5,6,8,7)),6=>(5,nothing),4=>(6,nothing),
+    7=>(7,(1,2,4,3,5)))
+
+# Boundary-condition `side` tables per Gambit parent type, 0-based indices
+# into the element's Gmsh-order vertex list (the pinned reader's sub tables;
+# the edge sides of tri/quad parents are a Tessella extension for 2-D decks).
+const _NEU_SIDES=Dict{Int,Vector{Vector{Int}}}(
+    1=>Vector{Int}[],
+    2=>[[0,1],[1,2],[2,3],[3,0]],
+    3=>[[0,1],[1,2],[2,0]],
+    4=>[[0,1,5,4],[1,2,6,5],[3,2,6,7],[0,3,7,4],[0,1,2,3],[4,5,6,7]],
+    5=>[[0,1,4,3],[1,2,5,4],[0,2,5,3],[0,1,2],[3,4,5]],
+    6=>[[0,1,2],[0,1,3],[1,2,3],[0,2,3]],
+    7=>[[0,1,2,3],[0,1,4],[1,2,4],[3,2,4],[0,3,4]])
+
+# The Gambit boundary-condition name → code table used on write.
+const _NEU_BOUNDARY_CODES=Dict{String,Int}(
+    "UNSPECIFIED"=>0,"AXIS"=>1,"CONJUGATE"=>2,"CONVECTION"=>3,"CYCLIC"=>4,
+    "DEAD"=>5,"ELEMENT_SID"=>6,"ESPECIES"=>7,"EXHAUST_FAN"=>8,"FAN"=>9,
+    "FREE_SURFACE"=>10,"GAP"=>11,"INFLOW"=>12,"INLET"=>13,"INLET_VENT"=>14,
+    "INTAKE_FAN"=>15,"INTERFACE"=>16,"INTERIOR"=>17,"INTERNAL"=>18,
+    "LIVE"=>19,"MASS_FLOW_INLET"=>20,"MELT"=>21,"MELT_INTERFACE"=>22,
+    "MOVING_BOUNDARY"=>23,"NODE"=>24,"OUTFLOW"=>25,"OUTLET"=>26,
+    "OUTLET_VENT"=>27,"PERIODIC"=>28,"PLOT"=>29,"POROUS"=>30,
+    "POROUS_JUMP"=>31,"PRESSURE"=>32,"PRESSURE_FAR_FIELD"=>33,
+    "PRESSURE_INFLOW"=>34,"PRESSURE_INLET"=>35,"PRESSURE_OUTFLOW"=>36,
+    "PRESSURE_OUTLET"=>37,"RADIATION"=>38,"RADIATOR"=>39,
+    "RECIRCULATION_INLET"=>40,"RECIRCULATION_OUTLET"=>41,"SLIP"=>42,
+    "SREACTION"=>43,"SURFACE"=>44,"SYMMETRY"=>45,"TRACTION"=>46,
+    "TRAJECTORY"=>47,"VELOCITY"=>48,"VELOCITY_INLET"=>49,"VENT"=>50,
+    "WALL"=>51,"SPRING"=>52)
+
+const _NEU_SIZE_KEYS=("NUMNP","NELEM","NGRPS","NBSETS","NDFCD","NDFVL")
+
+# Next meaningful .neu line: blank lines and `/` comment records are skipped.
+function _neu_data_line(io::Base.IO)
+    while !eof(io)
+        s=strip(readline(io))
+        isempty(s) && continue
+        startswith(s,'/') && continue
+        return s
+    end
+    return nothing
+end
+
+function _neu_section_end!(io::Base.IO,caller::AbstractString,
+                           section::AbstractString)
+    while true
+        line=_neu_data_line(io)
+        line===nothing && throw(ArgumentError(
+            "$caller: truncated .neu $section section"))
+        line=="ENDOFSECTION" && return nothing
+    end
+end
+
+# `n` integer tokens drawn from `carry` first then from data lines —
+# `.neu` records wrap across lines and consecutive records may share a line,
+# so leftover tokens carry into the next call. `ENDOFSECTION` mid-record is
+# a truncation error.
+function _neu_ints(io::Base.IO,n::Int,caller::AbstractString,
+                   context::AbstractString,carry=String[])
+    out=Int64[]
+    while length(out)<n
+        if !isempty(carry)
+            push!(out,_unv_int(popfirst!(carry),caller,
+                ".neu $context"))
+            continue
+        end
+        line=_neu_data_line(io)
+        (line===nothing || line=="ENDOFSECTION") && throw(ArgumentError(
+            "$caller: truncated .neu $context"))
+        append!(carry,split(line))
+    end
+    return out
+end
+
+function _read_neu(io::Base.IO,caller::AbstractString,node_limit::Int,
+                   element_limit::Int)
+    node_labels=Int64[];node_rows=Dict{Int64,Int32}();coords=Float64[]
+    records=_TextMeshCell[];record_rows=Dict{Int64,Int32}()
+    gambit_of=Dict{Int64,Int}()      # element label → Gambit type
+    pnames=Dict{Tuple{Int,Int},String}()
+    numnp=numelem=-1;ndfcd=3
+    group_index=0;bc_index=0
+    next_label=Ref{Int64}(0)
+    while !eof(io)
+        s=strip(readline(io))
+        isempty(s) && continue
+        startswith(s,'/') && continue
+        tokens=split(s)
+        if all(tok->tok in _NEU_SIZE_KEYS,tokens) &&
+                "NUMNP" in tokens
+            # CONTROL INFO size line follows the column headings.
+            counts=_neu_data_line(io)
+            counts===nothing && throw(ArgumentError(
+                "$caller: truncated .neu CONTROL INFO section"))
+            f=split(counts)
+            length(f)>=4 || throw(ArgumentError(
+                "$caller: malformed .neu size record '$counts'"))
+            numnp=_unv_int(f[1],caller,".neu NUMNP")
+            numelem=_unv_int(f[2],caller,".neu NELEM")
+            _unv_int(f[3],caller,".neu NGRPS")
+            _unv_int(f[4],caller,".neu NBSETS")
+            length(f)>=5 && (ndfcd=_unv_int(f[5],caller,".neu NDFCD"))
+            numnp>=0 && numelem>=0 || throw(ArgumentError(
+                "$caller: negative .neu size record"))
+            ndfcd in (2,3) || throw(ArgumentError(
+                "$caller: unsupported .neu NDFCD=$ndfcd"))
+            numnp<=node_limit || throw(ArgumentError(
+                "$caller: .neu node count exceeds max_nodes=$node_limit"))
+            numelem<=element_limit || throw(ArgumentError(
+                "$caller: .neu element count exceeds max_elements=$element_limit"))
+        elseif occursin("NODAL COORDINATES",s)
+            numnp>=0 || throw(ArgumentError(
+                "$caller: .neu NODAL COORDINATES before the NUMNP counts"))
+            for _ in 1:numnp
+                line=_neu_data_line(io)
+                (line===nothing || line=="ENDOFSECTION") && throw(ArgumentError(
+                    "$caller: truncated .neu NODAL COORDINATES section"))
+                f=split(line)
+                length(f)==1+ndfcd || throw(ArgumentError(
+                    "$caller: malformed .neu node record '$line'"))
+                id=_unv_int(f[1],caller,".neu node label")
+                id>=1 || throw(ArgumentError(
+                    "$caller: non-positive .neu node label $id"))
+                haskey(node_rows,id) && throw(ArgumentError(
+                    "$caller: duplicate .neu node label $id"))
+                x=_unv_float(f[2],caller,".neu node coordinate")
+                y=_unv_float(f[3],caller,".neu node coordinate")
+                z=ndfcd==3 ? _unv_float(f[4],caller,".neu node coordinate") : 0.0
+                push!(node_labels,id);node_rows[id]=Int32(length(node_labels))
+                push!(coords,x);push!(coords,y);push!(coords,z)
+            end
+            _neu_section_end!(io,caller,"NODAL COORDINATES")
+        elseif occursin("ELEMENTS/CELLS",s)
+            numelem>=0 || throw(ArgumentError(
+                "$caller: .neu ELEMENTS/CELLS before the NUMNP counts"))
+            carry=String[]
+            for _ in 1:numelem
+                head=_neu_ints(io,3,caller,"ELEMENTS/CELLS record",carry)
+                id,ntype,ndp=head[1],head[2],head[3]
+                entry=get(_NEU_ELEMENT_TYPES,Int(ntype),nothing)
+                entry===nothing && throw(ArgumentError(
+                    "$caller: unsupported .neu element type $ntype"))
+                msh,perm=entry;arity=msh_num_nodes(msh)
+                ndp==arity || throw(ArgumentError(
+                    "$caller: .neu element $id declares $ndp nodes but " *
+                    "type $ntype requires $arity"))
+                id>=1 || throw(ArgumentError(
+                    "$caller: non-positive .neu element label $id"))
+                haskey(record_rows,id) && throw(ArgumentError(
+                    "$caller: duplicate .neu element label $id"))
+                length(records)>=element_limit && throw(ArgumentError(
+                    "$caller: .neu element count exceeds " *
+                    "max_elements=$element_limit"))
+                conn=_neu_ints(io,arity,caller,
+                    "element $id connectivity",carry)
+                nodes=Vector{Int32}(undef,arity)
+                @inbounds for k in 1:arity
+                    row=get(node_rows,conn[k],Int32(0))
+                    row!=0 || throw(ArgumentError(
+                        "$caller: .neu element $id references unknown " *
+                        "node $(conn[k])"))
+                    nodes[k]=row
+                end
+                perm===nothing || (nodes=nodes[collect(perm)])
+                push!(records,_TextMeshCell(id,msh,nodes,Int64(0),Int64(0)))
+                record_rows[id]=Int32(length(records))
+                gambit_of[id]=Int(ntype)
+                next_label[]=max(next_label[],id)
+            end
+            _neu_section_end!(io,caller,"ELEMENTS/CELLS")
+        elseif occursin("ELEMENT GROUP",s)
+            group_index+=1
+            head=_neu_data_line(io)
+            head===nothing && throw(ArgumentError(
+                "$caller: truncated .neu ELEMENT GROUP header"))
+            m=match(r"GROUP:\s*([+-]?\d+)\s+ELEMENTS:\s*([+-]?\d+)",head)
+            m===nothing && throw(ArgumentError(
+                "$caller: malformed .neu group header '$head'"))
+            gnum=_unv_int(m.captures[1],caller,".neu group number")
+            neg=_unv_int(m.captures[2],caller,".neu group size")
+            neg>=0 || throw(ArgumentError(
+                "$caller: negative .neu group size $neg"))
+            fn=match(r"NFLAGS:\s*([+-]?\d+)",head)
+            nflags=fn===nothing ? Int64(1) :
+                _unv_int(fn.captures[1],caller,".neu group NFLAGS")
+            0<=nflags<=8 || throw(ArgumentError(
+                "$caller: unsupported .neu group NFLAGS=$nflags"))
+            gname=_neu_data_line(io)
+            gname===nothing && throw(ArgumentError(
+                "$caller: truncated .neu ELEMENT GROUP name"))
+            gname=="ENDOFSECTION" && throw(ArgumentError(
+                "$caller: truncated .neu ELEMENT GROUP section"))
+            name=strip(gname)
+            carry=String[]
+            nflags>0 &&
+                _neu_ints(io,Int(nflags),caller,"group flag values",carry)
+            members=_neu_ints(io,Int(neg),caller,"group member list",carry)
+            gnum<0 && (gnum=Int64(0))
+            gnum<=typemax(Int32) || throw(ArgumentError(
+                "$caller: .neu group number $gnum exceeds Int32"))
+            for label in members
+                row=get(record_rows,label,Int32(0))
+                row!=0 || throw(ArgumentError(
+                    "$caller: .neu group $gnum references unknown " *
+                    "element $label"))
+                c=records[row]
+                c.elementary==0 && c.physical==0 || continue   # first group wins
+                dim=msh_dimension(c.msh)
+                records[row]=_TextMeshCell(c.label,c.msh,c.nodes,
+                    Int64(group_index),gnum)
+                isempty(name) ||
+                    (pnames[(dim,Int(gnum))]=name)
+            end
+            _neu_section_end!(io,caller,"ELEMENT GROUP")
+        elseif occursin("BOUNDARY CONDITIONS",s)
+            bc_index+=1
+            head=_neu_data_line(io)
+            head===nothing && throw(ArgumentError(
+                "$caller: truncated .neu BOUNDARY CONDITIONS header"))
+            f=split(head)
+            length(f)>=5 || throw(ArgumentError(
+                "$caller: malformed .neu boundary header '$head'"))
+            bname=join(f[1:end-4]," ")
+            nentry=_unv_int(f[end-2],caller,".neu boundary count")
+            _unv_int(f[end-1],caller,".neu boundary nvalues")
+            _unv_int(f[end],caller,".neu boundary code")
+            nentry>=0 || throw(ArgumentError(
+                "$caller: negative .neu boundary count $nentry"))
+            # A `Physical<Dim><tag>` fallback name recovers the physical tag
+            # the upstream writer encoded; other names map to the ordinal.
+            # recdim/bcphys are bound by the first valid record.
+            recdim=0;bcphys=nothing;carry=String[]
+            for _ in 1:nentry
+                e=_neu_ints(io,3,caller,"boundary condition record",carry)
+                label,btype,side=e[1],e[2],e[3]
+                row=get(record_rows,label,Int32(0))
+                row!=0 || throw(ArgumentError(
+                    "$caller: .neu boundary record references unknown " *
+                    "element $label"))
+                parent=records[row]
+                gtype=get(gambit_of,parent.label,0)
+                Int(btype)==gtype || throw(ArgumentError(
+                    "$caller: .neu boundary record for element $label " *
+                    "declares parent type $btype but the element is type " *
+                    "$gtype"))
+                sides=_NEU_SIDES[Int(btype)]
+                1<=side<=length(sides) || throw(ArgumentError(
+                    "$caller: .neu boundary side $side out of range for " *
+                    "element type $btype"))
+                length(records)>=element_limit && throw(ArgumentError(
+                    "$caller: .neu element count exceeds " *
+                    "max_elements=$element_limit"))
+                verts=[parent.nodes[i+1] for i in sides[Int(side)]]
+                fmsh=length(verts)==2 ? 1 : length(verts)==3 ? 2 : 3
+                dim=msh_dimension(fmsh)
+                bcphys===nothing || recdim==dim || continue
+                if bcphys===nothing
+                    recdim=dim
+                    pn=_inp_physical_name(bname)
+                    bcphys=pn!==nothing && pn[1]==dim ? pn[2] :
+                        Int64(bc_index)
+                end
+                next_label[]+=1
+                while haskey(record_rows,next_label[])
+                    next_label[]+=1
+                end
+                label2=next_label[]
+                push!(records,_TextMeshCell(label2,fmsh,verts,
+                    Int64(bc_index),bcphys))
+                record_rows[label2]=Int32(length(records))
+            end
+            if bcphys!==nothing && !isempty(bname)
+                bcphys<=typemax(Int32) || throw(ArgumentError(
+                    "$caller: .neu physical tag $bcphys exceeds Int32"))
+                bname==_inp_physical_fallback(recdim,bcphys) ||
+                    (pnames[(recdim,Int(bcphys))]=bname)
+            end
+            _neu_section_end!(io,caller,"BOUNDARY CONDITIONS")
+        else
+            continue   # unknown section text and ENDOFSECTION markers
+        end
+    end
+    numnp>=0 || throw(ArgumentError(
+        "$caller: not a Gambit neutral file (NUMNP counts missing)"))
+    length(node_labels)==numnp || throw(ArgumentError(
+        "$caller: .neu file declares NUMNP=$numnp but contains " *
+        "$(length(node_labels)) node records"))
+    length(gambit_of)==numelem || throw(ArgumentError(
+        "$caller: .neu file declares NELEM=$numelem but contains " *
+        "$(length(gambit_of)) element records"))
+    return node_labels,coords,records,pnames
+end
+
+"""
+    NeuFile
+
+Result of [`read_neu`](@ref): the compact `mesh` (an MSH2-style `MixedMesh`
+whose per-cell `elementary_entities` hold the group/boundary-set ordinal and
+whose `tags` hold the physical tag; group and boundary names live in
+`mesh.physical_names`), the original `node_tags` in row order and the
+per-block `element_tags`.
+"""
+struct NeuFile
+    mesh::MixedMesh
+    node_tags::Vector{UInt64}
+    element_tags::Vector{Vector{UInt64}}
+end
+
+"""
+    read_neu(path; max_nodes, max_elements, max_file_bytes) -> NeuFile
+
+Read a Gambit neutral `.neu` file: the `CONTROL INFO` size record, `NODAL
+COORDINATES` (`id x y [z]`, `NDFCD` 2 or 3), `ELEMENTS/CELLS` (`id type npts`
+connectivity, Gambit codes 1–7 with hex/pyramid corner swaps), `ELEMENT
+GROUP` blocks (ordinal → elementary entity, `GROUP:` number → physical tag,
+name → physical name) and `BOUNDARY CONDITIONS` blocks (`element type side`
+records resolved to faces/edges through the Gambit side tables; the set
+ordinal → elementary, the `Physical<Dim><tag>` fallback name or the ordinal
+→ physical tag). Elements in no group keep elementary tag 0; `NODAL DATA`
+and other sections are skipped. Dangling references, unknown element types
+and short sections are errors.
+"""
+function read_neu(path;
+                  max_nodes=typemax(Int32),max_elements=typemax(Int32),
+                  max_file_bytes=typemax(Int))
+    caller="read_neu"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    node_limit=_io_limit(max_nodes,caller,"max_nodes";ceiling=Int(typemax(Int32)))
+    element_limit=_io_limit(
+        max_elements,caller,"max_elements";ceiling=Int(typemax(Int32)))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
+    node_labels,coords,records,pnames=open(path,"r") do io
+        try
+            return _read_neu(io,caller,node_limit,element_limit)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa EOFError && throw(ArgumentError(
+                "$caller: truncated .neu file"))
+            rethrow()
+        end
+    end
+    mesh,node_tags,element_tags=_foreign_mesh_result(
+        caller,node_labels,coords,records;physical_names=pnames)
+    return NeuFile(mesh,node_tags,element_tags)
+end
+
+function _neu_bc_name(m::MixedMesh,dim::Int,tag::Int32)
+    name=get(m.physical_names,(dim,Int(tag)),"")
+    isempty(name) || return replace(strip(name),r"\s+"=>"_")
+    return _inp_physical_fallback(dim,tag)
+end
+
+"""
+    write_neu(path, mesh)
+
+Write a `Mesh` or `MixedMesh` as a Gambit neutral file: a `CONTROL INFO`
+header (`NUMNP/NELEM/NGRPS/NBSETS/NDFCD/NDFVL`, always NDFCD=NDFVL=3 so the
+upstream reader can parse it), `NODAL COORDINATES`, the top-dimension cells
+in `ELEMENTS/CELLS` (hexes and pyramids written in Gambit corner order), one
+`ELEMENT GROUP` section per distinct physical tag (including a `GROUP: 0`
+set for untagged cells, so foreign readers do not drop them) and one
+`BOUNDARY CONDITIONS` section per dimension-1 physical group whose cells
+resolve to parent-cell faces/edges through the Gambit side tables
+(unresolvable members warn once and are skipped; unphysical boundary cells
+are dropped like upstream). Boundary sections renumber physical tags to
+their ordinal on re-read unless the fallback name `Physical<Dim><tag>` pins
+the tag. Element types Gambit cannot express (second-order cells, special
+records) reject loudly; point cells are skipped and a mesh with no
+dimension-1+ elements is an error.
+"""
+function write_neu(path,m)
+    caller="write_neu"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    for block in m.blocks
+        block isa ElementBlock || throw(ArgumentError(
+            "$caller: special MSH record type $(block.msh) is not " *
+            "representable in .neu"))
+        block.msh==15 && continue   # no point elements in .neu
+        get(_NEU_WRITE_TABLE,block.msh,nothing)===nothing && throw(ArgumentError(
+            "$caller: element type $(block.msh) ($(msh_family(block.msh)) " *
+            "order $(msh_spec(block.msh).order)) is not representable in .neu"))
+    end
+    topdim=maximum(msh_dimension(block.msh)
+        for block in m.blocks if block.msh!=15;init=0)
+    topdim<1 && throw(ArgumentError(
+        "$caller: .neu export requires dimension 1–3 elements"))
+    data=m.entity_data
+    nn=size(m.coords,2)
+    labels=data===nothing ? collect(UInt64(1):UInt64(nn)) : data.external_node_tags
+    for tag in labels
+        tag<=typemax(Int64) || throw(ArgumentError(
+            "$caller: node tag $tag is not representable in .neu"))
+    end
+    # Emit top-dimension cells; index their boundary faces for BC resolution.
+    counter=UInt64(0)
+    emitted=Tuple{Int,Int}[]            # (block, column) of top-dim cells
+    emitted_label=Int64[]
+    facemap=Dict{Vector{Int32},Vector{Tuple{Int64,Int,Int}}}()
+    cellphys=Dict{Int32,Vector{Int64}}()
+    for (bi,block) in enumerate(m.blocks)
+        msh_dimension(block.msh)==topdim || continue
+        gambit,_=_NEU_WRITE_TABLE[block.msh]
+        sides=_NEU_SIDES[gambit]
+        for j in axes(block.nodes,2)
+            counter+=UInt64(1)
+            uid=_foreign_cell_uid(m,bi,j,counter)
+            uid<=typemax(Int64) || throw(ArgumentError(
+                "$caller: element tag $uid is not representable in .neu"))
+            label=Int64(uid)
+            push!(emitted,(bi,j));push!(emitted_label,label)
+            push!(get!(()->Int64[],cellphys,block.tags[j]),label)
+            for (side,rows) in enumerate(sides)
+                isempty(rows) && continue
+                key=sort!(Int32[block.nodes[r+1,j] for r in rows])
+                push!(get!(()->Vector{Tuple{Int64,Int,Int}}(),facemap,key),
+                      (label,gambit,side))
+            end
+        end
+    end
+    # dim-1 physical cells resolve to (parent label, gambit type, side).
+    bcrecs=Dict{Int32,Vector{Tuple{Int64,Int,Int}}}()
+    warnface=Ref(false)
+    for (bi,block) in enumerate(m.blocks)
+        block.msh==15 && continue
+        msh_dimension(block.msh)==topdim-1 || continue
+        for j in axes(block.nodes,2)
+            tag=block.tags[j]
+            tag<=0 && continue
+            key=sort!(Int32[block.nodes[r,j] for r in 1:size(block.nodes,1)])
+            hits=get(facemap,key,nothing)
+            if hits===nothing
+                warnface[] || @warn("$caller: boundary cells that are not " *
+                    "faces of written .neu cells are skipped")
+                warnface[]=true
+                continue
+            end
+            for (label,gtype,side) in hits
+                push!(get!(()->Vector{Tuple{Int64,Int,Int}}(),bcrecs,tag),
+                      (label,gtype,side))
+            end
+        end
+    end
+    gdim=topdim;bdim=topdim-1
+    target,parent=_foreign_target(path,caller)
+    mktemp(parent) do temporary,io
+        println(io,"        CONTROL INFO 2.0.0")
+        println(io,"** GAMBIT NEUTRAL FILE")
+        println(io,"Tessella mesh in GAMBIT neutral file format")
+        println(io,"PROGRAM:                Tessella     VERSION:  1.0")
+        println(io,"     NUMNP     NELEM     NGRPS    NBSETS     NDFCD     NDFVL")
+        println(io,@sprintf("%10d%10d%10d%10d%10d%10d",
+            nn,length(emitted),length(cellphys),length(bcrecs),3,3))
+        println(io,"ENDOFSECTION")
+        println(io,"   NODAL COORDINATES 2.0.0")
+        @inbounds for i in 1:nn
+            println(io,@sprintf("%10d%20.11e%20.11e%20.11e",labels[i],
+                m.coords[1,i],m.coords[2,i],m.coords[3,i]))
+        end
+        println(io,"ENDOFSECTION")
+        println(io,"      ELEMENTS/CELLS 2.0.0")
+        for (k,(bi,j)) in enumerate(emitted)
+            block=m.blocks[bi]
+            gambit,perm=_NEU_WRITE_TABLE[block.msh]
+            arity=size(block.nodes,1)
+            print(io,@sprintf("%8d %2d %2d ",emitted_label[k],gambit,arity))
+            for i in 1:arity
+                i==8 && print(io,"\n               ")
+                row=perm===nothing ? i : perm[i]
+                print(io,@sprintf("%8d",labels[block.nodes[row,j]]))
+            end
+            println(io)
+        end
+        println(io,"ENDOFSECTION")
+        for tag in sort!(collect(keys(cellphys)))
+            cells=cellphys[tag]
+            println(io,"       ELEMENT GROUP 2.0.0")
+            println(io,@sprintf(
+                "GROUP: %10d ELEMENTS: %10d MATERIAL: %10d NFLAGS: %10d",
+                tag,length(cells),0,1))
+            name=get(m.physical_names,(gdim,Int(tag)),"")
+            isempty(name) && (name="Material group $tag")
+            println(io,@sprintf("%32s",name))
+            println(io,"       0")
+            for (i,label) in enumerate(cells)
+                i>1 && mod(i-1,10)==0 && print(io,"\n")
+                print(io,@sprintf("%8d",label))
+            end
+            println(io)
+            println(io,"ENDOFSECTION")
+        end
+        for tag in sort!(collect(keys(bcrecs)))
+            list=sort!(bcrecs[tag])
+            name=_neu_bc_name(m,bdim,tag)
+            code=get(_NEU_BOUNDARY_CODES,uppercase(name),0)
+            println(io,"       BOUNDARY CONDITIONS 2.0.0")
+            println(io,@sprintf("%32s%8d%8d%8d%8d",name,1,length(list),0,code))
+            for (label,gtype,side) in list
+                println(io,@sprintf("%10d%5d%5d",label,gtype,side))
+            end
+            println(io,"ENDOFSECTION")
+        end
         flush(io);close(io)
         mv(temporary,target;force=true)
     end
