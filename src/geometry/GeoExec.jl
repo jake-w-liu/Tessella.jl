@@ -720,7 +720,9 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
                      _initial_model_name=nothing,
                      _initial_model=nothing,
                      _initial_mesh_context=nothing,
-                     _initial_fields=nothing)
+                     _initial_fields=nothing,
+                     _initial_onelab_numbers::Union{Nothing,Dict{String,Float64}}=nothing,
+                     _initial_onelab_strings::Union{Nothing,Dict{String,String}}=nothing)
     isfile(path) || throw(ArgumentError("execute_geo: missing file $path"))
     mesh_dim isa Bool && throw(ArgumentError("execute_geo: mesh_dim must not be Bool"))
     dim=try
@@ -738,6 +740,13 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
     _initial_model_name===nothing || (model.name=String(_initial_model_name))
     context=_GeoNumericContext()
     _initial_mesh_context===nothing || _geo_seed_mesh_context!(context,_initial_mesh_context)
+    # Session-bound runs (API `open`/`merge`/`open_geo!`) pass the session's
+    # detached ONELAB scalar mirrors so `SetNumber`/`GetNumber`/`DefineNumber`
+    # and their string forms exchange with the session parameter space.
+    _initial_onelab_numbers===nothing ||
+        (context.onelab_numbers=_initial_onelab_numbers)
+    _initial_onelab_strings===nothing ||
+        (context.onelab_strings=_initial_onelab_strings)
     context.native_context_lc=_initial_context_lc
     context.native_context_forced_bbox=_initial_context_forced_bbox
     context.native_mesh_error_callback=_initial_mesh_error_callback

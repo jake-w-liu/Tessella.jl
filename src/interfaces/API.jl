@@ -126,7 +126,7 @@ using ..GeoExec: execute_geo
 using ..Post: Post
 
 export initialize, finalize, clear, option, model, mesh, open_geo!, write, open, merge,
-    get_time, plugin
+    get_time, plugin, onelab
 
 const _SESSION_START_TIME = Ref{Float64}(time())
 
@@ -148,6 +148,7 @@ include("APIPartitionNative.jl")
 include("APIPartitionProducer.jl")
 include("APIPartitionBRep.jl")
 include("APIPlugins.jl")
+include("APIOnelab.jl")
 
 struct _MeshClassification
     mesh::Union{Mesh,MixedMesh}
@@ -711,6 +712,7 @@ function initialize()
         FIELD_TAG_MAX[]=0
         empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=0
         empty!(SESSION_PLUGINS)
+        empty!(SESSION_ONELAB);empty!(SESSION_ONELAB_CHANGED)
         _SESSION_START_TIME[]=time()
     end
     return nothing
@@ -726,11 +728,12 @@ function finalize()
         FIELD_TAG_MAX[]=0
         empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=0
         empty!(SESSION_PLUGINS)
+        empty!(SESSION_ONELAB);empty!(SESSION_ONELAB_CHANGED)
     end
     return nothing
 end
 
-"""Remove all models and views while retaining session options and native bounding-box context."""
+"""Remove all models and views while retaining session options, native bounding-box context and the ONELAB parameter space (upstream `gmsh.clear` is a model/view-only reset)."""
 function clear()
     return lock(STATE_LOCK) do
         _model_locked()
@@ -12047,5 +12050,57 @@ set_string(name,option,value)=_plugin_set_string(name,option,value)
 run(name)=_plugin_run(name)
 
 end # module plugin
+
+"""
+    onelab
+
+Session ONELAB parameter store (Gmsh 4.15.2 `onelab` module counterpart).
+`set`/`get` exchange the parameter space as a JSON array of records carrying
+`"type"` (`"number"`/`"string"`), `"name"`, `"values"` and the optional
+`"min"`/`"max"`/`"step"`/`"choices"`/`"valueLabels"`/`"attributes"`/
+`"label"`/`"shortHelp"`/`"longHelp"`/`"readOnly"`/`"visible"`/`"closed"`/
+`"kind"` members; `get_names` lists names matching a `*`/`?` glob.
+`set_number`/`set_string` and `get_number`/`get_string` are the typed value
+endpoints. `clear` removes matching parameters (all when empty);
+`set_changed`/`get_changed`/`clear_changed` expose the changed-name flags a
+solver client would poll, and `.geo` `DefineNumber`/`SetNumber`/`GetNumber`
+(and the string forms) exchange with this store through `open`/`merge`/
+`open_geo!`. `run` is the documented zero-client no-op for `run()` and a loud
+rejection for an actual client name or command — ONELAB solver clients are
+not implemented.
+"""
+module onelab
+
+using ..API: _onelab_set,_onelab_get,_onelab_get_names,_onelab_set_number,
+             _onelab_set_string,_onelab_get_number,_onelab_get_string,
+             _onelab_clear,_onelab_run,_onelab_set_changed,
+             _onelab_get_changed,_onelab_clear_changed
+
+"Set parameter(s) from the ONELAB JSON parameter array `data`."
+set(data,format="json")=_onelab_set(data,format)
+"Return the parameter `name` (all when empty) as an ONELAB JSON parameter array."
+get(name="",format="json")=_onelab_get(name,format)
+"Return the sorted names of all parameters matching the `*`/`?` glob `search`."
+get_names(search="")=_onelab_get_names(search)
+"Set the ONELAB number parameter `name` to `values` (scalar or vector)."
+set_number(name,values)=_onelab_set_number(name,values)
+"Set the ONELAB string parameter `name` to `values` (string or vector)."
+set_string(name,values)=_onelab_set_string(name,values)
+"Return the `Vector{Float64}` values of number parameter `name`."
+get_number(name)=_onelab_get_number(name)
+"Return the `Vector{String}` values of string parameter `name`."
+get_string(name)=_onelab_get_string(name)
+"Clear the whole store, or remove the parameters matching `name`."
+clear(name="")=_onelab_clear(name)
+"Run an ONELAB client: `run()` is a no-op (no clients are registered); any name or command throws — solver clients are not implemented."
+run(name="",command="")=_onelab_run(name,command)
+"Mark parameter `name` as changed."
+set_changed(name)=_onelab_set_changed(name)
+"Return whether parameter `name` is marked changed."
+get_changed(name)=_onelab_get_changed(name)
+"Clear all changed-name flags."
+clear_changed()=_onelab_clear_changed()
+
+end # module onelab
 
 end # module

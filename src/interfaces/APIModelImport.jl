@@ -44,7 +44,13 @@ end
 
 function _model_import_execute_geo(path,dimension,options,diagnostics;legacy=false,
         initial_model=nothing,initial_mesh_context=nothing,initial_fields=nothing)
-    return execute_geo(path;mesh_dim=dimension,
+    # Session ONELAB bridge: the script's ONELAB exchanges operate on detached
+    # scalar mirrors seeded from the parameter space (existing values win the
+    # script's DefineNumber defaults, like the upstream localGmsh client);
+    # only a successful run adopts the mirrors back into the session records,
+    # preserving the file frontends' failure atomicity.
+    onelab=_onelab_geo_seed()
+    result=execute_geo(path;mesh_dim=dimension,
         _initial_mesh_algorithms=(algorithm_2d=Int(options["Mesh.Algorithm"]),
             algorithm_3d=Int(options["Mesh.Algorithm3D"]),
             recombine_topology_passes=Int(options["Mesh.RecombineOptimizeTopology"]),
@@ -64,7 +70,10 @@ function _model_import_execute_geo(path,dimension,options,diagnostics;legacy=fal
         _initial_recombine_diagnostics=diagnostics.hooks,
         _initial_model_name=legacy ? nothing : splitext(basename(path))[1],
         _initial_model=initial_model,_initial_mesh_context=initial_mesh_context,
-        _initial_fields=initial_fields)
+        _initial_fields=initial_fields,
+        _initial_onelab_numbers=onelab[1],_initial_onelab_strings=onelab[2])
+    _onelab_geo_adopt!(onelab[1],onelab[2],onelab[3],onelab[4])
+    return result
 end
 
 function _model_import_lookup(receipt,model,caller)
