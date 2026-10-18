@@ -6841,7 +6841,18 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
             m,t,param_sizes,caller;size_field,_mesh_input,_mesh_node_high_water,
             _return_surface_production,_geometry_points),NTuple{2,Int}[]
     end
-    algorithm=_normal_surface_mesh_algorithm(m,t,caller)
+    algorithm=_normal_surface_mesh_algorithm(m,t,caller;metric=true)
+    # Upstream's algorithm 7 (BAMG) selects the native metric-driven surface
+    # construction: the conforming tensor-bisection producer, fed by the
+    # selected tensor background field or the isotropic scalar-context metric.
+    # Non-planar and other unsupported Surface contexts reject through its
+    # admission contract rather than being silently substituted.
+    algorithm==7 && return _metric_surface_algorithm_mesh(m,t,caller;
+        size_field=size_field,_mesh_input=_mesh_input,
+        _mesh1d_options=_mesh1d_options,
+        _mesh_node_high_water=_mesh_node_high_water,
+        _mesh_element_high_water=_mesh_element_high_water),
+        get(m.embeds,(2,t),NTuple{2,Int}[])
     geometry=get(m.surface_geometry,t,nothing)
     builtin_plane=_surface_type(m,t)===:plane &&
         (geometry===nothing || !hasproperty(geometry,:occ))
