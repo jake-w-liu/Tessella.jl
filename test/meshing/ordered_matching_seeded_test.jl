@@ -94,4 +94,42 @@ end
     @test_throws ArgumentError O.ordered_perfect_matching(2, [(0,1,0)])
     @test_throws ArgumentError O.ordered_perfect_matching(2, [(1,2,true)])
 end
+
+# The retained-cycle certificate publishes each ring anchored at its base and
+# traversing the closing edge against its stored direction — the orientation
+# the opaque native state records show. The weighted continuation consumes the
+# anchored reversal of the same ring. Both conventions plus the rounded mates,
+# certified duals, and deterministic selection are pinned on this literal
+# weighted_353 small graph.
+@testset "Retained odd-cycle rings publish observed orientation; seed consumes reversal" begin
+    edges=[(1,2,6),(1,6,3),(2,3,5),(2,4,7),(2,6,0),(3,4,2),(3,5,4),(4,5,8)]
+    graph=O._graph(6,edges)
+    state=O._fractional_singleton_state(graph)
+    @test state!==nothing
+    live=[(vertices,ring_edges) for (id,(vertices,ring_edges)) in
+        enumerate(state.cycles) if state.cycle_owner[first(vertices)]==id]
+    @test live==[([1,6,2],[2,5,1]),([5,4,3],[8,6,7])]
+    for (vertices,ring_edges) in live
+        for index in eachindex(vertices)
+            a,b,_=graph.edges[ring_edges[index]]
+            @test Set((a,b))==Set((vertices[index],
+                vertices[mod1(index+1,length(vertices))]))
+        end
+    end
+    seed=O._fractional_singleton_seed(graph,state)
+    @test seed.mate==[6,0,5,0,3,1]
+    @test seed.dual==[9,3,-2,6,10,-3]
+    @test seed.cycles==[[1,2,6],[5,3,4]]
+    @test seed.cycles==[vcat(vs[1],reverse(vs[2:end])) for (vs,_) in live]
+    result=O.ordered_perfect_matching(6,edges)
+    @test result!==nothing && result.selected==[4,7,2] && result.mate==[6,4,5,2,3,1]
+    @test matching_objective(result.mate,edges)==exact_matching(6,edges)
+    # The same literal graph through a fresh container and a rebuilt state
+    # reproduces the identical certificate and selection deterministically.
+    clone=O.ordered_perfect_matching(6,Tuple(edges))
+    @test clone!==nothing && clone.mate==result.mate && clone.selected==result.selected
+    state2=O._fractional_singleton_state(O._graph(6,edges))
+    @test [(vs,es) for (id,(vs,es)) in enumerate(state2.cycles) if
+        state2.cycle_owner[first(vs)]==id]==live
+end
 end

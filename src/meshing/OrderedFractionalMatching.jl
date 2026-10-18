@@ -65,9 +65,10 @@ function _fractional_singleton_close_cycle!(s,first,second,joining_edge)
     vertices=vcat(reverse(first_path),second_path[1:end-1])
     edges=vcat(reverse(s.incoming[first_path[1:end-1]]),[joining_edge],
         s.incoming[second_path[1:end-1]])
-    if s.graph.edges[joining_edge][1]!=first
-        # The stored directed form of the closing edge decides which tree
-        # side leads the ring: keep the base first, then that side.
+    if s.graph.edges[joining_edge][1]==first
+        # The observed construction publishes the ring against the stored
+        # direction of the closing edge: keep the base first, then the second
+        # tree side, and traverse the joining edge second-to-first.
         vertices=vcat([base],reverse(vertices[2:end]));reverse!(edges)
     end
     @assert length(vertices)==length(edges) && isodd(length(vertices)) && allunique(vertices)
@@ -217,21 +218,23 @@ function _fractional_singleton_perfect(g::_OrderedGraph)
 end
 
 # Round each retained half-cycle onto the alternating parity its directed
-# ring stores: the vertex just after the smallest member stays free and the
-# remaining positions pair through the stored ring edges. The kernel seed
-# carries the resulting vertex mates, the certified singleton duals, and the
-# retained directed rings.
+# ring stores: the vertex just before the smallest member in the published
+# orientation stays free and the remaining positions pair through the stored
+# ring edges. The weighted kernel consumes the same ring in the opposite
+# traversal order, so the seed hands it the anchored reversal. The kernel
+# seed carries the resulting vertex mates, the certified singleton duals,
+# and the consumption-direction rings.
 function _fractional_singleton_seed(g::_OrderedGraph,s)
     mate=Int[s.mate[v]==0 ? 0 : _other(g,s.mate[v],v) for v in eachindex(s.mate)]
     cycles=Vector{Int}[]
     for (id,(vertices,edges)) in enumerate(s.cycles)
         s.cycle_owner[first(vertices)]==id || continue
-        push!(cycles,vertices)
-        count=length(vertices);free=mod1(argmin(vertices)+1,count)
+        count=length(vertices);free=mod1(argmin(vertices)-1,count)
         for step in 1:2:count-2
             a,b,_=g.edges[edges[mod1(free+step,count)]]
             mate[a]=b;mate[b]=a
         end
+        push!(cycles,vcat(vertices[1],reverse(vertices[2:end])))
     end
     return _SeededInitial(mate,s.dual,cycles)
 end
