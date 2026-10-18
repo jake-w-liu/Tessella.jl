@@ -33,6 +33,7 @@ export read_stl, read_geo_params, GeoParams, GeoFieldSpec
 export read_unv, write_unv, read_mesh, write_mesh, UnvFile, MeshFile
 export read_su2, write_su2, read_bdf, write_bdf, Su2File, BdfFile
 export read_inp, write_inp, read_neu, write_neu, InpFile, NeuFile
+export read_p3d, write_p3d, write_mail, write_ir3, P3dFile
 
 include("GeoColorNames.jl")
 include("GeoOptionTables.jl")
@@ -11605,6 +11606,18 @@ function _read_foreign_records(path,caller::AbstractString)
                 rethrow()
             end
         end
+    elseif extension==".p3d"
+        return open(path,"r") do io
+            try
+                return _read_p3d(io,caller,
+                    Int(typemax(Int32)),Int(typemax(Int32)))
+            catch err
+                err isa InterruptException && rethrow()
+                err isa EOFError && throw(ArgumentError(
+                    "$caller: truncated .p3d file"))
+                rethrow()
+            end
+        end
     else
         throw(ArgumentError("$caller: unsupported mesh extension '$extension'"))
     end
@@ -13998,6 +14011,328 @@ function write_neu(path,m)
                 println(io,@sprintf("%10d%5d%5d",label,gtype,side))
             end
             println(io,"ENDOFSECTION")
+        end
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Plot3D structured grids (.p3d), CEA triangulation (.mail) and Iridium (.ir3)
+# mesh I/O — the format semantics below follow the pinned release's
+# `GModelIO_P3D.cpp`, `GModelIO_MAIL.cpp` and `GModelIO_IR3.cpp`.
+#
+# `.p3d` is the PLOT3D "whole" ASCII structured-grid format: an integer block
+# count, `ni nj nk` per block (the 2-D variant declares `nk == 1`), then —
+# for each block in order — three coordinate passes of `ni*nj*nk` doubles
+# with `i` running fastest, then `j`, then `k` (the z array is stored even
+# for `nk == 1`). The pinned reader maps `nk == 1` blocks to faces carrying
+# `quad(i,j),(i+1,j),(i+1,j+1),(i,j+1)` cells and `nk >= 2` blocks to
+# regions carrying hexes with the 1–4 cyclic / 5–8 cyclic vertex order;
+# each block is numbered on its own per-dimension entity counter and no
+# physical tags are carried. The pinned writer exports only entities that
+# carry structured transfinite grids and fails with "No structured grids
+# to save" otherwise — session meshes keep no structured-topology record,
+# so `write_p3d` fails the same way for every representable input rather
+# than inventing a grid regularity the model never declared.
+#
+# `.mail` is the CEA triangulation deck, a write-only format upstream:
+# ` numVertices numTriangles`, one ` %19.10E %19.10E %19.10E` coordinate
+# triple per vertex in file order, one dense 1-based index triple per
+# triangle and one edge record per triangle, which the pinned writer
+# emits as ` 0 0 0` (edge signs are a documented TODO). Only face
+# triangles are emitted upstream, so `write_mail` emits `msh_family ==
+# :tri` cells (first three corner vertices for higher orders) and skips
+# every other cell.
+#
+# `.ir3` is the Iridium deck, likewise write-only upstream: a `33` format
+# line, `numVertices num2D num3D` (or `numVertices numElements` when only
+# one element dimension is present), `index x y z` vertex rows at `%.16g`
+# precision, then `num tag numVert v1 ... vk` element records — dim-2
+# cells numbered `1..num2D` first, dim-3 cells renumbered `1..num3D`;
+# `numVert` makes records self-describing so every order is emitted
+# verbatim. `tag` is the elementary entity tag by default,
+# `abs(physical)` under `Mesh.SaveElementTagType == 2` (a negative
+# physical tag also reverses connectivity, like the pinned
+# `MElement::writeIR3`), or the partition under type `3`, which the
+# projection cannot express and rejects loudly. Curve and point cells
+# are skipped like upstream.
+# ════════════════════════════════════════════════════════════════════════════════
+
+# ── PLOT3D (.p3d) reader ─────────────────────────────────────────────────────
+
+# Upstream parses the whole file as a whitespace-separated `fscanf` stream;
+# this buffered line scanner reproduces the same token semantics without
+# materializing the file.
+function _read_p3d(io::Base.IO,caller::AbstractString,node_limit::Int,
+                   element_limit::Int)
+    tokens=Iterators.Stateful(Iterators.flatmap(eachsplit,eachline(io)))
+    next=function (what)
+        it=iterate(tokens)
+        it===nothing && throw(ArgumentError(
+            "$caller: truncated .p3d file (expected $what)"))
+        return it[1]
+    end
+    nblocks=_unv_int(next("block count"),caller,".p3d block count")
+    nblocks>0 || throw(ArgumentError(
+        "$caller: .p3d block count must be positive, got $nblocks"))
+    dims=NTuple{3,Int64}[]
+    total=Int64(0)
+    for b in 1:nblocks
+        ni=_unv_int(next("block $b dimensions"),caller,".p3d block dimension")
+        nj=_unv_int(next("block $b dimensions"),caller,".p3d block dimension")
+        nk=_unv_int(next("block $b dimensions"),caller,".p3d block dimension")
+        (ni>=1 && nj>=1 && nk>=1) || throw(ArgumentError(
+            "$caller: .p3d block $b dimensions must be positive, got " *
+            "($ni,$nj,$nk)"))
+        count=Base.checked_mul(Base.checked_mul(ni,nj),nk)
+        total=Base.checked_add(total,count)
+        total<=node_limit || throw(ArgumentError(
+            "$caller: .p3d node count exceeds max_nodes=$node_limit"))
+        push!(dims,(ni,nj,nk))
+    end
+    node_labels=collect(Int64(1):total)
+    coords=Vector{Float64}(undef,3*total)
+    records=_TextMeshCell[]
+    base=Int64(0);elabel=Int64(0);nfaces=nregions=0
+    for (b,(ni,nj,nk)) in enumerate(dims)
+        count=ni*nj*nk
+        for c in 1:3
+            @inbounds for r in 1:count
+                coords[3*(base+r)-3+c]=_unv_float(
+                    next("block $b coordinates"),caller,
+                    ".p3d node coordinate")
+            end
+        end
+        entity=0
+        if nk==1
+            nfaces+=1;entity=nfaces
+            ncell=(ni-1)*(nj-1)
+        else
+            nregions+=1;entity=nregions
+            ncell=(ni-1)*(nj-1)*(nk-1)
+        end
+        length(records)+ncell<=element_limit || throw(ArgumentError(
+            "$caller: .p3d element count exceeds max_elements=$element_limit"))
+        if nk==1
+            # Vertex row of grid point (i,j): base + i + (j-1)*ni.
+            for i in 1:ni-1, j in 1:nj-1
+                elabel+=1
+                push!(records,_TextMeshCell(elabel,3,
+                    Int32[base+i+(j-1)*ni,base+i+1+(j-1)*ni,
+                          base+i+1+j*ni,base+i+j*ni],
+                    entity,Int64(0)))
+            end
+        else
+            # Vertex row of grid point (i,j,k):
+            # base + i + (j-1)*ni + (k-1)*ni*nj.
+            nij=ni*nj
+            for i in 1:ni-1, j in 1:nj-1, k in 1:nk-1
+                lo=base+i+(j-1)*ni+(k-1)*nij;hi=lo+nij
+                elabel+=1
+                push!(records,_TextMeshCell(elabel,5,
+                    Int32[lo,lo+1,lo+ni+1,lo+ni,
+                          hi,hi+1,hi+ni+1,hi+ni],entity,Int64(0)))
+            end
+        end
+        base+=count
+    end
+    return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
+end
+
+"""
+    P3dFile
+
+Result of [`read_p3d`](@ref): the compact `mesh` (an MSH2-style `MixedMesh`
+whose per-cell `elementary_entities` hold the per-dimension block tag and
+whose `tags` are zero — `.p3d` carries no physical groups), the dense
+`node_tags` in file row order and the per-block `element_tags`.
+"""
+struct P3dFile
+    mesh::MixedMesh
+    node_tags::Vector{UInt64}
+    element_tags::Vector{Vector{UInt64}}
+end
+
+"""
+    read_p3d(path; max_nodes, max_elements, max_file_bytes) -> P3dFile
+
+Read a PLOT3D "whole" ASCII structured-grid `.p3d` file: an integer block
+count, `ni nj nk` dims per block (`nk == 1` selects the 2-D quad-sheet
+variant, whose z array is still stored) and, per block, three coordinate
+passes of `ni*nj*nk` doubles with `i` running fastest. Blocks map to quad
+or hex cells on their own per-dimension entity counter; physical tags are
+not carried. Non-positive counts/dims, non-numeric data and short files
+are errors.
+"""
+function read_p3d(path;
+                  max_nodes=typemax(Int32),max_elements=typemax(Int32),
+                  max_file_bytes=typemax(Int))
+    caller="read_p3d"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    node_limit=_io_limit(max_nodes,caller,"max_nodes";ceiling=Int(typemax(Int32)))
+    element_limit=_io_limit(
+        max_elements,caller,"max_elements";ceiling=Int(typemax(Int32)))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
+    node_labels,coords,records,pnames=open(path,"r") do io
+        try
+            return _read_p3d(io,caller,node_limit,element_limit)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa EOFError && throw(ArgumentError(
+                "$caller: truncated .p3d file"))
+            rethrow()
+        end
+    end
+    mesh,node_tags,element_tags=_foreign_mesh_result(
+        caller,node_labels,coords,records;physical_names=pnames)
+    return P3dFile(mesh,node_tags,element_tags)
+end
+
+"""
+    write_p3d(path, mesh)
+
+The pinned release writes `.p3d` only from entities that carry a
+structured `transfinite_vertices` grid and reports "No structured grids
+to save" otherwise. Session meshes keep no structured-topology record, so
+every representable `Mesh`/`MixedMesh` fails the same way — the
+structured-grid check is done before the target file is touched.
+"""
+function write_p3d(path,m)
+    caller="write_p3d"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    _foreign_target(path,caller)
+    throw(ArgumentError("$caller: no structured grids to save"))
+end
+
+"""
+    write_mail(path, mesh)
+
+Write a `Mesh` or `MixedMesh` as a CEA triangulation `.mail` file:
+` numVertices numTriangles`, one ` %19.10E %19.10E %19.10E` coordinate
+triple per node in file order, one dense 1-based index triple per
+triangle cell (`msh_family == :tri`; higher-order cells emit their three
+corner vertices) and one ` 0 0 0` edge placeholder per triangle — the
+pinned writer leaves the signed edge table unwritten. Every other cell
+is skipped like upstream.
+"""
+function write_mail(path,m)
+    caller="write_mail"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    for block in m.blocks
+        block isa ElementBlock || throw(ArgumentError(
+            "$caller: special MSH record type $(block.msh) is not " *
+            "representable in .mail"))
+    end
+    nn=size(m.coords,2)
+    ntri=0
+    for block in m.blocks
+        msh_family(block.msh)==:tri && (ntri+=size(block.nodes,2))
+    end
+    target,parent=_foreign_target(path,caller)
+    mktemp(parent) do temporary,io
+        println(io," ",nn," ",ntri)
+        @inbounds for i in 1:nn
+            println(io,@sprintf(" %19.10E %19.10E %19.10E",
+                m.coords[1,i],m.coords[2,i],m.coords[3,i]))
+        end
+        for block in m.blocks
+            msh_family(block.msh)==:tri || continue
+            @inbounds for j in axes(block.nodes,2)
+                println(io," ",block.nodes[1,j]," ",block.nodes[2,j],
+                    " ",block.nodes[3,j])
+            end
+        end
+        # Signed edge records are a documented TODO upstream: ` 0 0 0`.
+        for block in m.blocks
+            msh_family(block.msh)==:tri || continue
+            for _ in axes(block.nodes,2)
+                println(io," 0 0 0")
+            end
+        end
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+"""
+    write_ir3(path, mesh; element_tag_type=1)
+
+Write a `Mesh` or `MixedMesh` as an Iridium `.ir3` file: a `33` format
+line, `numVertices num2D num3D` (or `numVertices numElements` when only
+one element dimension is present), `index x y z` vertex rows at `%.16g`
+precision, then `num tag numVert v1 ... vk` element records — dim-2
+cells numbered `1..num2D`, then dim-3 cells renumbered `1..num3D` — in
+block order. `element_tag_type` follows the pinned
+`Mesh.SaveElementTagType` semantics: `1` (default) writes the elementary
+entity tag, `2` writes `abs(physical)` and any negative physical tag
+additionally reverses the connectivity, `3` would write the partition
+and rejects loudly (the export projection carries no per-cell
+partition); any other value falls back to the elementary tag like
+upstream. Curve and point cells are skipped.
+"""
+function write_ir3(path,m;element_tag_type::Integer=1)
+    caller="write_ir3"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    Int64(element_tag_type)==3 && throw(ArgumentError(
+        "$caller: partition element tags are not representable in .ir3 " *
+        "export (Mesh.SaveElementTagType=3)"))
+    for block in m.blocks
+        block isa ElementBlock || throw(ArgumentError(
+            "$caller: special MSH record type $(block.msh) is not " *
+            "representable in .ir3"))
+    end
+    nn=size(m.coords,2)
+    num2=num3=0
+    for block in m.blocks
+        d=msh_dimension(block.msh)
+        d==2 && (num2+=size(block.nodes,2))
+        d==3 && (num3+=size(block.nodes,2))
+    end
+    target,parent=_foreign_target(path,caller)
+    mktemp(parent) do temporary,io
+        println(io,"33")
+        if num2>0 && num3>0
+            println(io,nn," ",num2," ",num3)
+        else
+            println(io,nn," ",num2>0 ? num2 : num3)
+        end
+        @inbounds for i in 1:nn
+            println(io,i," ",@sprintf("%.16g",m.coords[1,i])," ",
+                @sprintf("%.16g",m.coords[2,i])," ",
+                @sprintf("%.16g",m.coords[3,i]))
+        end
+        for dim in (2,3)
+            num=0
+            for (bi,block) in enumerate(m.blocks)
+                msh_dimension(block.msh)==dim || continue
+                arity=size(block.nodes,1)
+                @inbounds for j in axes(block.nodes,2)
+                    phys=Int64(block.tags[j])
+                    tag=element_tag_type==2 ? abs(phys) :
+                        _foreign_cell_entity(m,bi,j)
+                    num+=1
+                    print(io,num," ",tag," ",arity)
+                    column=view(block.nodes,:,j)
+                    verts=phys<0 ? Iterators.reverse(column) : column
+                    for row in verts
+                        print(io," ",row)
+                    end
+                    println(io)
+                end
+            end
         end
         flush(io);close(io)
         mv(temporary,target;force=true)

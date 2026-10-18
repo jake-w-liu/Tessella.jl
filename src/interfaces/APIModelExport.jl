@@ -135,9 +135,11 @@ function _model_export_write(filename)
             "aliases: .msh, .msh2/.msh22 for MSH 2.2, .msh4/.msh41 for MSH 4.1)"))
     end
     (haskey(_MSH_EXTENSION_VERSIONS,extension) ||
-        extension in (".unv",".mesh",".stl",".su2",".bdf",".nas",".inp",".neu")) || throw(ArgumentError(
+        extension in (".unv",".mesh",".stl",".su2",".bdf",".nas",".inp",".neu",
+                      ".p3d",".mail",".ir3")) || throw(ArgumentError(
         "$caller: current-model export supports .msh, .msh2/.msh22, " *
-        ".msh4/.msh41, .unv, .mesh, .stl, .su2, .bdf, .nas, .inp and .neu"))
+        ".msh4/.msh41, .unv, .mesh, .stl, .su2, .bdf, .nas, .inp, .neu, " *
+        ".p3d, .mail and .ir3"))
     return lock(STATE_LOCK) do
         model=_model_locked()
         save_all=!iszero(get(OPTIONS,"Mesh.SaveAll",0.0))
@@ -163,14 +165,28 @@ function _model_export_write(filename)
             # behaviour); SU2 maps physical groups to MARKER sections with
             # names; BDF carries the physical tag in each card's PID field;
             # INP emits *ELSET/*NSET sections and NEU ELEMENT GROUP/BOUNDARY
-            # CONDITIONS sections carrying tags plus physical names.
+            # CONDITIONS sections carrying tags plus physical names. P3D
+            # exports only structured transfinite grids upstream, which the
+            # projection cannot represent, so it always rejects; MAIL emits
+            # the face triangles with trailing ` 0 0 0` edge placeholders;
+            # IR3 emits self-describing vertex-count element records whose
+            # tag field follows the Mesh.SaveElementTagType semantics.
             target=_model_export_mesh(model,LAST_MESH[],LAST_MESH_CLASS[],4.1,
                 save_all,caller)
+            # `Mesh.SaveElementTagType` is not a session-tracked option, so
+            # the upstream default (1: elementary tag) applies; read it
+            # anyway in case the table grows the key. `trunc` reproduces
+            # the `(int)` cast for a raw table write.
+            tag_type=trunc(Int,get(OPTIONS,"Mesh.SaveElementTagType",1.0))
             extension==".unv" ? IO.write_unv(filename,target) :
                 extension==".mesh" ? IO.write_mesh(filename,target) :
                 extension==".su2" ? IO.write_su2(filename,target) :
                 extension==".inp" ? IO.write_inp(filename,target) :
                 extension==".neu" ? IO.write_neu(filename,target) :
+                extension==".p3d" ? IO.write_p3d(filename,target) :
+                extension==".mail" ? IO.write_mail(filename,target) :
+                extension==".ir3" ? IO.write_ir3(filename,target;
+                    element_tag_type=tag_type) :
                     IO.write_bdf(filename,target)
         end
         return nothing
@@ -181,7 +197,8 @@ end
     write(filename)
 
 Write the current model's actual mesh to a `.msh`, `.msh2`, `.msh22`, `.msh4`,
-`.msh41`, `.stl`, `.unv`, `.mesh`, `.su2`, `.bdf`, `.nas`, `.inp` or `.neu` file. `.msh` uses `Mesh.MshFileVersion`
+`.msh41`, `.stl`, `.unv`, `.mesh`, `.su2`, `.bdf`, `.nas`, `.inp`, `.neu`,
+`.p3d`, `.mail` or `.ir3` file. `.msh` uses `Mesh.MshFileVersion`
 to select 2.2 or 4.1 while the versioned aliases force the corresponding
 dialect; `.msh1`, `.msh3` and `.msh40` reject. `Mesh.Binary` selects the
 encoding, and `Mesh.SaveAll`
@@ -198,7 +215,17 @@ emits Abaqus `*NODE`/`*ELEMENT` blocks plus `*ELSET`/`*NSET` physical
 sections (entity sets use the `Volume|Surface|Line|Point<tag>` convention);
 `.neu` emits a Gambit neutral deck with `ELEMENT GROUP` sections per top-dim
 physical tag and `BOUNDARY CONDITIONS` sections resolved from dim-1 physical
-cells. The foreign formats retain neither partitions, periodic links nor data
+cells; `.mail` emits the CEA triangulation deck (` nv nt` header,
+`%19.10E` vertex rows, dense index triples and ` 0 0 0` edge placeholders)
+keeping only triangle cells; `.ir3` emits the Iridium deck (`33` format
+line, `numVertices num2D num3D` header, `%.16g` vertex rows and
+self-describing `num tag numVert` records with per-dimension numbering)
+whose tag field carries the elementary entity tag (the upstream
+`Mesh.SaveElementTagType` default; `IO.write_ir3` also honors values 1–3);
+`.p3d` writes only
+entities with structured transfinite grids upstream, so every export
+rejects with "no structured grids to save". The foreign formats retain
+neither partitions, periodic links nor data
 sections; `.su2`, `.inp` and `.neu` retain physical names.
 Unsupported metadata/format combinations reject before replacing the target.
 The model, mesh cache, views, counters, and model filename remain unchanged.
