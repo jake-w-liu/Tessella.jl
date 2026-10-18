@@ -61,24 +61,56 @@ end
 function _extrude_nonew_surface_projection(m::GeoModel,mesh,surface::Int,
                                              caller::AbstractString;scope=nothing)
     _extrude_is_nonew(_extrude_gate(m,2,surface)) || return nothing
-    owner=0
+    regions=Int[]
     for region in _extrude_quadtri_regions(m,surface,caller)
         _extrude_is_nonew(_extrude_gate(m,3,region)) || continue
-        owner==0 || throw(ArgumentError(
-            "$caller: QuadTriNoNewVerts shared Surface[$surface] " *
-            "requires the shared-region planner"))
-        owner=region
+        push!(regions,region)
     end
-    owner==0 && return nothing
+    isempty(regions) && return nothing
+    if length(regions)>1
+        # Only the bounded literal-lateral pair binds one Surface to two
+        # Regions — the same admission `_extrude_nonew_surface_mesh` applies.
+        # The joint certificate stored in the operation scope already proved
+        # both partners emit this part bitwise-identically, so its classified
+        # projection is valid for both owning Regions.
+        length(regions)==2 ||
+            _extrude_nonew_shared_planner_error(caller,surface)
+        a,b=regions
+        get(_extrude_nonew_shared_for(m,a,caller),surface,0)==b &&
+            get(_extrude_nonew_shared_for(m,b,caller),surface,0)==a ||
+            _extrude_nonew_shared_planner_error(caller,surface)
+    end
     working=deepcopy(m)
+    owner=regions[1]
     completed=if scope===nothing
         # Tagged actual products have already taken the UID-bound projection
         # path. A naked standalone product was built from the geometric Source;
         # replay that same operation rather than substituting attached records.
-        _extrude_nonew_complete_plan(working,owner,caller;_working_model=true)
+        # A certified shared lateral replays the joint pair scope — the same
+        # operation scope its bound product was planned under — so the
+        # replayed part is the certified single emission, not an independent
+        # wall triangulation.
+        length(regions)==2 ?
+            _extrude_nonew_scope(working,caller;tags=regions,
+                _working_model=true).volumes[owner] :
+            _extrude_nonew_complete_plan(working,owner,caller;_working_model=true)
     else
         _extrude_nonew_require_scope(scope,m,caller)
-        scope.volumes[owner]
+        # The certified pair emits the shared part bitwise-identically for
+        # both Regions — either Region plan in this scope carries the bound
+        # wall. Refuse a scope that never planned this Surface's operation.
+        plan=nothing
+        for region in regions
+            plan=get(scope.volumes,region,nothing)
+            plan===nothing && continue
+            owner=region
+            break
+        end
+        (plan===nothing || !haskey(plan.surfaces,surface) ||
+         !haskey(scope.surfaces,surface)) && throw(ArgumentError(
+            "$caller: QuadTriNoNewVerts Surface[$surface] is absent from " *
+            "this mesh scope"))
+        plan
     end
     lookup=_extrude_nonew_projection_lookup(mesh,
         (volume=completed.surfaces[surface],),caller;dimension=2)

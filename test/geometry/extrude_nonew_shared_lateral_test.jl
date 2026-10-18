@@ -4,14 +4,15 @@
 # plans; the joint certificate checks opposite child orientation, matching
 # wall diagonals, positive typed volumes and the closed exterior boundary.
 # Everything outside the literal two-Region equal-translation pair keeps its
-# planner diagnostic. The UID-bound API projection replay for a two-owner
-# Surface remains on the shared-region planner path, so these checks run the
-# Model-level constructors (scope, mesh_model_surface, mesh_model_volume).
+# planner diagnostic. The certified pair also classifies through the API
+# projection: the bound Surface part's `model_to_mixed` metadata is valid for
+# both owning Regions, so `execute_geo`/`mesh.generate(3)` emit it once.
 using Test
 using Tessella
 using Tessella.Elements: MixedMesh, ElementBlock, _VOLUME_CELL_FACES, msh_dimension
 using Tessella.Model: mesh_model_volume, mesh_model_surface,
-    _extrude_cell_signed_volume, _extrude_quadtri_regions, _extrude_volume_pass
+    _extrude_cell_signed_volume, _extrude_quadtri_regions, _extrude_volume_pass,
+    model_to_mixed
 using Tessella.MeshTypes: Mesh, nnodes, validate
 
 const _SL_CALLER="extrude_nonew_shared_lateral_test"
@@ -35,11 +36,11 @@ function _sl_squares()
     """
 end
 
-function _sl_model(source)
+function _sl_model(source;mesh_dim=0)
     mktempdir() do directory
         path=joinpath(directory,"nonew_shared.geo")
         write(path,source)
-        return execute_geo(path;mesh_dim=0)
+        return execute_geo(path;mesh_dim)
     end
 end
 
@@ -145,6 +146,40 @@ function _sl_shared_tag(execution)
     return only(shared)
 end
 
+# All dim-2 cells of `mesh` lying entirely on the `axis == value` plane —
+# used on the merged product, whose blocks bucket cells by entity.
+function _sl_dim2_faces_on(mesh,axis::Int,value::Float64)
+    faces=Set{Tuple}()
+    blocks=mesh isa Mesh ? [ElementBlock(2,mesh.tris)] : mesh.blocks
+    for block in blocks
+        block isa ElementBlock && block.msh in (2,3) || continue
+        for cell in axes(block.nodes,2)
+            vertices=ntuple(k->Tuple(mesh.coords[:,block.nodes[k,cell]]),
+                            size(block.nodes,1))
+            all(v->v[axis]==value,vertices) &&
+                push!(faces,Tuple(sort!(collect(vertices))))
+        end
+    end
+    return faces
+end
+
+# A plain untagged view of a bound part's dim-2 cells — the input contract a
+# standalone `model_to_mixed` projection expects.
+function _sl_plain_surface(part)
+    cells=NTuple{3,Int32}[]
+    for block in (part isa Mesh ? [ElementBlock(2,part.tris)] : part.blocks)
+        block isa ElementBlock && block.msh==2 || continue
+        for cell in axes(block.nodes,2)
+            push!(cells,ntuple(k->block.nodes[k,cell],3))
+        end
+    end
+    nodes=Matrix{Int32}(undef,3,length(cells))
+    for (i,cell) in pairs(cells),k in 1:3
+        nodes[k,i]=cell[k]
+    end
+    return Mesh(part.coords;tris=nodes)
+end
+
 @testset "NoNew literal shared lateral" begin
     @testset "bound pair emits one certified wall" for laterals in (false,true)
         flag=laterals ? " RecombLaterals" : ""
@@ -241,5 +276,82 @@ end
         execution.model.meshing.transfinite_surfaces[s]=
             (arrangement=:left,corners=Int[])
         @test_throws r"constrained-boundary planner" mesh_model_volume(execution.model,1)
+    end
+
+    @testset "certified pair classifies through the API projection" begin
+        # execute_geo(mesh_dim=3) routes through the shared classify path the
+        # API generate uses — the bound lateral Surface must classify once
+        # and merge into one welded wall.
+        execution=_sl_model(_sl_squares()*"""
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        s=_sl_shared_tag(execution)
+        merged=execution.mesh
+        @test validate(merged).ok
+        # Each merged vertex has one coordinate — the wall nodes are shared
+        # bitwise between the Surface part and both Region boundaries.
+        @test allunique(Tuple(merged.coords[:,node]) for node in 1:nnodes(merged))
+        part=geo_entity_mesh(execution,2,s)
+        wall=_sl_surface_faces(part)
+        @test !isempty(wall)
+        # The shared wall's dim-2 cells are emitted exactly once, on x=1.
+        @test _sl_dim2_faces_on(merged,1,1.0)==wall
+        # Both Regions' lateral boundaries reference the identical wall
+        # incidences: each shared facet has joint incidence two.
+        volume_faces=_sl_face_counts(geo_entity_mesh(execution,3,1),
+                                     geo_entity_mesh(execution,3,2))
+        @test all(count->count in (1,2),values(volume_faces))
+        interior=Set(key for (key,count) in volume_faces if count==2)
+        @test wall ⊆ interior
+        @test Set(key for key in interior if all(v->v[1]==1.0,key))==wall
+        # The certified wall part classifies as Surface[s] plus its boundary
+        # closure — the same entity metadata the isolated planner produces.
+        fresh=_sl_model(_sl_squares()*"""
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """)
+        model=fresh.model
+        fs=_sl_shared_tag(fresh)
+        scope=_extrude_volume_pass(model,_SL_CALLER).scope
+        bound=scope.surfaces[fs]
+        closure=Set{Tuple{Int,Int}}(((2,fs),))
+        for loop in model.surfaces[fs],signed in model.loops[loop]
+            curve=abs(signed)
+            push!(closure,(1,curve))
+            for point in model.curves[curve]
+                push!(closure,(0,point))
+            end
+        end
+        for owner_scope in (nothing,scope)
+            projected=model_to_mixed(model,bound,fs;_extrude_scope=owner_scope)
+            @test validate(projected).ok
+            @test projected.coords==bound.coords
+            @test _sl_surface_faces(projected)==_sl_surface_faces(bound)
+            data=projected.entity_data
+            @test data!==nothing
+            @test all(owner->owner in closure,data.node_entities)
+            @test issubset(Set(keys(data.entities)),closure)
+        end
+        # A scope that never planned this operation stays a loud refusal.
+        empty_scope=Tessella.Model._ExtrudeNoNewScope(model,
+            Dict{Int,Tessella.Model._ExtrudeNoNewCompletePlan}(),
+            Dict{Int,Union{Mesh,MixedMesh}}())
+        @test_throws r"absent from this mesh scope" model_to_mixed(
+            model,bound,fs;_extrude_scope=empty_scope)
+        # Uncertified multi-owner incidence still rejects at API level — the
+        # planner diagnostic surfaces both from the projection and from a
+        # full execute_geo(mesh_dim=3) request.
+        bad=_sl_model(_sl_squares()*"""
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{3};Recombine;QuadTriNoNewVerts;};
+        """)
+        bs=_sl_shared_tag(bad)
+        @test_throws r"shared-region planner" model_to_mixed(
+            bad.model,_sl_plain_surface(bound),bs)
+        @test_throws r"shared-region planner" _sl_model(_sl_squares()*"""
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{3};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
     end
 end
