@@ -4381,9 +4381,10 @@ field_value(field::BoundaryLayerField,x,y,z,entity::Tuple{T,U}) where
 
 Native analogue of Gmsh `AutomaticMeshSizeField` over one or more
 triangulated surfaces: per-vertex sphere-fit curvature `κ` yields
-`h = clamp(2π /(n κ), hmin, hmax)`, evaluated by closest-vertex
-interpolation. Each input mesh keeps its own vertex set, so curvature rings
-never bleed across crease boundaries.
+`h = clamp(2π /(n κ), hmin, hmax)` — the upstream `2π/(nodePerTwoPi·kmax)`
+rule. Each input mesh keeps its own vertex set, so curvature rings never
+bleed across crease boundaries. `n_nodes_per_circle = 0` disables the
+curvature stage, matching upstream's `nodePerTwoPi > 0` gate.
 
 On a vector/tuple of surfaces the union additionally applies the remaining
 pipeline stages of Gmsh's HXT field as discrete analogues:
@@ -4395,19 +4396,47 @@ pipeline stages of Gmsh's HXT field as discrete analogues:
   vertex — including co-located duplicate vertices on neighbouring
   surfaces — are excluded so shared edges are not phantom gaps.
 - `hbulk` — fallback size where neither curvature nor a gap prescribes
-  one (default `hmax`, matching Gmsh's `-1` sentinel for an unset `hBulk`).
-- `smoothing && gradation > 0` — iterative edge relaxation so sizes grow
-  by at most `max(0, gradation−1)` per unit of edge distance, the
-  multiplicative-per-hop octree bound written as its equivalent slope.
+  one (default `1.3·span/20`, the size upstream assigns to octree cells
+  that never touched the surface).
+- `smoothing && gradation > 0` — relaxation so sizes grow by at most
+  `max(0, gradation−1)` per unit of distance. Upstream applies that
+  additive bound between every pair of face-adjacent octree cells
+  (`limitSize`); the analogue applies it along union edges first.
+
+Evaluation reproduces the volumetric part of the same model instead of
+nearest-vertex lookup: octree cells that do not touch the surface are
+initialised at `hbulk` and can only decrease through the slope-limited
+relaxation, so
+
+    h(p) = clamp( min( cap, min_v( h[v] + slope·|p−v| ) ), hmin, hmax )
+
+where `cap` is `hbulk` in the interior and releases to `hmax` within
+roughly one local cell (`min(h[v*], hbulk)`) of a sample — the band of
+octree cells that touch the surface and may legitimately keep sizes above
+`hbulk` when `hmax > hbulk`. With `smoothing=false` no relaxation runs
+upstream either, so the same cap is applied to the nearest sample's value
+instead of the slope extension.
+
+Default sizes follow upstream's resolution order: the model scale is the
+largest surface bounding-box span padded by 1.3 (the octree domain is
+built at `1.3·bbox`), `hmin` defaults to `L/1000`, `hbulk` to `L/20`, and
+an unset `hmax` follows `hbulk` — so an explicit `hBulk` above `span/20`
+is not silently clamped away.
 
 Gmsh's own implementation stores the result in a p4est octree; Tessella
-keeps the closest-vertex discrete analogue and does not claim
+keeps the point-sample discrete analogue and does not claim
 octree-identical output.
 """
 struct AutomaticMeshSizeField <: AbstractSizeField
     coords::Matrix{Float64}
     h::Vector{Float64}
     tree::DistanceField
+    node_hmin::Vector{Float64}   # per-BVH-node min of h — extension bound
+    slope::Float64               # max(0, gradation−1)
+    hbulk::Float64
+    hmin::Float64
+    hmax::Float64
+    extend::Bool                 # smoothing enabled → spatial extension
 end
 function AutomaticMeshSizeField(surface::Mesh;kwargs...)
     return AutomaticMeshSizeField((surface,);kwargs...)
@@ -4422,7 +4451,9 @@ function AutomaticMeshSizeField(surfaces::Tuple;
                                 gradation::Real=1.1,smoothing::Bool=true,
                                 features::Bool=true)
     caller="AutomaticMeshSizeField"
-    n=_positive_value(n_nodes_per_circle,caller,"n_nodes_per_circle")
+    n=_float_value(n_nodes_per_circle,caller,"n_nodes_per_circle")
+    n>=0 || throw(ArgumentError(
+        "$caller: n_nodes_per_circle must be non-negative"))
     ngap=_float_value(n_points_per_gap,caller,"n_points_per_gap")
     ngap>=0 || throw(ArgumentError(
         "$caller: n_points_per_gap must be non-negative"))
@@ -4463,16 +4494,22 @@ function AutomaticMeshSizeField(surfaces::Tuple;
         end
         offset+=nv;tpos+=nt
     end
-    # Gmsh's automatic-size backend defines its model scale as the largest
-    # bounding-box span (distinct from CTX::lc's diagonal convention).
+    # Gmsh's automatic-size backend builds the octree over the surface
+    # bounding box scaled by 1.3 and derives its model scale from that padded
+    # span (distinct from CTX::lc's diagonal convention).
     model_length=max(xmax-xmin,ymax-ymin,zmax-zmin)
     (isfinite(model_length) && model_length>0) || throw(ArgumentError(
         "$caller: maximum surface bounding-box span must be positive and finite"))
-    hn=hmin===nothing ? model_length/1000 :
+    # Upstream resolves the three bounds in a fixed order: an unset hBulk and
+    # hMin default to L/20 and L/1000 of the padded span, and an unset hMax
+    # then follows hBulk — an explicit hBulk larger than L/20 therefore lifts
+    # hMax instead of being clamped by it.
+    padded_length=1.3*model_length
+    hn=hmin===nothing ? padded_length/1000 :
        _positive_value(hmin,caller,"hmin")
-    hx=hmax===nothing ? model_length/20 :
-       _positive_value(hmax,caller,"hmax")
-    hb=hbulk===nothing ? hx : _positive_value(hbulk,caller,"hbulk")
+    hb=hbulk===nothing ? padded_length/20 :
+       _positive_value(hbulk,caller,"hbulk")
+    hx=hmax===nothing ? hb : _positive_value(hmax,caller,"hmax")
     (isfinite(hn) && hn>0 && isfinite(hx) && hx>0 && isfinite(hb) && hb>0) ||
         throw(ArgumentError(
             "$caller: default sizes are not representable"))
@@ -4488,7 +4525,8 @@ function AutomaticMeshSizeField(surfaces::Tuple;
     @inbounds for i in 1:nv_total
         nbr=unique(rings[i])
         κ=_sphere_fit_curvature(coords,i,nbr)
-        raw=κ>0 ? 2*π/(n*κ) : Inf
+        # Upstream's nodePerTwoPi>0 gate: n=0 disables the curvature stage.
+        raw=(κ>0 && n>0) ? 2*π/(n*κ) : Inf
         h[i]=raw
     end
     # Local feature size between non-incident, normal-facing triangles —
@@ -4507,7 +4545,13 @@ function AutomaticMeshSizeField(surfaces::Tuple;
     end
     smoothing && _auto_smooth_sizes!(h,coords,tris,max(0.0,g-1.0))
     points=[(coords[1,j],coords[2,j],coords[3,j]) for j in axes(coords,2)]
-    return AutomaticMeshSizeField(coords,h,DistanceField(;points=points))
+    tree=DistanceField(;points=points)
+    # Per-BVH-node min of the prescribed sizes — the lower bound used to prune
+    # the spatial extension search in `field_value`.
+    node_hmin=Vector{Float64}(undef,length(tree.bvh_lo))
+    _auto_node_hmin!(node_hmin,tree,1,h)
+    return AutomaticMeshSizeField(coords,h,tree,node_hmin,
+        max(0.0,g-1.0),hb,hn,hx,smoothing)
 end
 
 # Vertices that share an identical position — duplicates introduced when the
@@ -4644,6 +4688,73 @@ function _auto_lfs_search(tf::DistanceField,node::Int,p,
     else
         dr<best && (best=_auto_lfs_search(tf,right,p,incident,best))
         dl<best && (best=_auto_lfs_search(tf,left,p,incident,best))
+    end
+    return best
+end
+
+# Per-BVH-node minimum of the prescribed vertex sizes, computed once after the
+# edge relaxation — `field_value`'s branch-and-bound uses it as the lower
+# bound `min_v(h[v] + slope·dist(p,v)) ≥ node_hmin + slope·dist(p,node box)`.
+function _auto_node_hmin!(out::Vector{Float64},tf::DistanceField,node::Int,
+                        h::AbstractVector{Float64})
+    count=tf.bvh_count[node]
+    if count>0
+        m=Inf
+        first=tf.bvh_first[node]
+        np=size(tf.points,2)
+        @inbounds for pos in first:first+count-1
+            id=tf.bvh_order[pos]
+            id<=np && (m=min(m,h[id]))
+        end
+        out[node]=m
+        return m
+    end
+    out[node]=min(_auto_node_hmin!(out,tf,tf.bvh_left[node],h),
+                  _auto_node_hmin!(out,tf,tf.bvh_right[node],h))
+    return out[node]
+end
+
+# Spatial extension of the prescribed sizes — the continuous analogue of
+# upstream's `limitSize` relaxation over octree cell centers:
+# h(p) = min_v(h[v] + slope·|p−v|).  Only decreases `best`, which is seeded
+# with the interior cap so branches that cannot beat it are pruned on the
+# node bound `node_hmin + slope·dist(p,node box)` (rounded down once for
+# muladd rounding).
+function _auto_extend_search(tf::DistanceField,node::Int,p,
+                             h::AbstractVector{Float64},slope::Float64,
+                             node_hmin::AbstractVector{Float64},best::Float64)
+    prevfloat(muladd(slope,
+        _distance_box(p,tf.bvh_lo[node],tf.bvh_hi[node]),
+        node_hmin[node]))>=best && return best
+    count=tf.bvh_count[node]
+    if count>0
+        first=tf.bvh_first[node]
+        np=size(tf.points,2)
+        @inbounds for pos in first:first+count-1
+            id=tf.bvh_order[pos]
+            id>np && continue
+            dx=p[1]-tf.points[1,id];dy=p[2]-tf.points[2,id]
+            dz=p[3]-tf.points[3,id]
+            cand=muladd(slope,sqrt(dx*dx+dy*dy+dz*dz),h[id])
+            cand<best && (best=cand)
+        end
+        return best
+    end
+    left=tf.bvh_left[node];right=tf.bvh_right[node]
+    dl=prevfloat(muladd(slope,
+        _distance_box(p,tf.bvh_lo[left],tf.bvh_hi[left]),node_hmin[left]))
+    dr=prevfloat(muladd(slope,
+        _distance_box(p,tf.bvh_lo[right],tf.bvh_hi[right]),node_hmin[right]))
+    if dl<=dr
+        dl<best &&
+            (best=_auto_extend_search(tf,left,p,h,slope,node_hmin,best))
+        dr<best &&
+            (best=_auto_extend_search(tf,right,p,h,slope,node_hmin,best))
+    else
+        dr<best &&
+            (best=_auto_extend_search(tf,right,p,h,slope,node_hmin,best))
+        dl<best &&
+            (best=_auto_extend_search(tf,left,p,h,slope,node_hmin,best))
     end
     return best
 end
@@ -4808,8 +4919,18 @@ function field_value(field::AutomaticMeshSizeField,x,y,z)
     p=(_float_value(x,"AutomaticMeshSizeField","x"),
        _float_value(y,"AutomaticMeshSizeField","y"),
        _float_value(z,"AutomaticMeshSizeField","z"))
-    _,ibest=_nearest_point(field.tree,p)
-    return field.h[ibest]
+    d_near,inear=_nearest_point(field.tree,p)
+    # Upstream leaves the prescribed size on octree cells that touch the
+    # surface and only seeds the interior at hbulk, so the hbulk cap releases
+    # within roughly one local cell of a sample — the band that may carry a
+    # prescribed size above hbulk when hmax > hbulk.
+    cap=d_near<=min(field.h[inear],field.hbulk) ?
+        field.hmax : field.hbulk
+    raw=field.extend ?
+        _auto_extend_search(field.tree,1,p,field.h,field.slope,
+                            field.node_hmin,cap) :
+        field.h[inear]
+    return clamp(min(cap,raw),field.hmin,field.hmax)
 end
 
 # ── External process ──────────────────────────────────────────────────────────

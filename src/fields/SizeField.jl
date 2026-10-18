@@ -1455,7 +1455,9 @@ function _geo_automatic_config(spec::GeoFieldSpec)
             points_per_circle=_geo_int(spec,"nPointsPerCircle";
                 default=spec.creation_mesh_size_from_curvature==0 ? 20 :
                         spec.creation_mesh_size_from_curvature),
-            points_per_gap=_geo_int(spec,"nPointsPerGap";default=5),
+            # Gmsh 4.15.2 registers nPointsPerGap with default 0 — the gap
+            # (local feature size) stage is opt-in, not automatic.
+            points_per_gap=_geo_int(spec,"nPointsPerGap";default=0),
             hmin=_geo_float(spec,"hMin",-1.0),hmax=_geo_float(spec,"hMax",-1.0),
             hbulk=_geo_float(spec,"hBulk",-1.0),
             gradation=_geo_float(spec,"gradation",1.1),

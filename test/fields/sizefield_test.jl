@@ -1142,7 +1142,9 @@ end
         flat_auto_mesh=Mesh(Float64[0 1 1 0;0 0 1 1;0 0 0 0];
             tris=Int32[1 1;2 3;3 4])
         flat_auto=AutomaticMeshSizeField(flat_auto_mesh)
-        @test all(==(0.05),flat_auto.h)
+        # Unit span padded by 1.3 -> hbulk = hmax = 1.3/20 (Gmsh builds the
+        # octree domain over `1.3 ×` the surface bounding box).
+        @test all(==(0.065),flat_auto.h)
         corrupted_auto=Mesh(copy(C);tris=copy(F))
         corrupted_auto.tris[1,1]=Int32(size(C,2)+1)
         @test_throws ArgumentError AutomaticMeshSizeField(corrupted_auto)
@@ -1387,7 +1389,7 @@ end
         build_geo_size_field(automatic_defaults,Dict();context_fields=
             (spec,config,entities,params)->(automatic_config[]=config;auto),
             model_characteristic_length=Tessella.SizeField.GMSH_MAX_SIZE)
-        @test automatic_config[].points_per_gap==5
+        @test automatic_config[].points_per_gap==0
         @test automatic_config[].points_per_circle==20
         automatic_snapshot=GeoParams(NaN,NaN,1.0,0,
             Dict{Tuple{Int,Int},String}(),Dict(
@@ -1584,17 +1586,17 @@ end
         @test all(≈(0.02),slab.h)
         @test size_at(slab,0.25,0.25,0.05)==0.02
 
-        # A gap too large to matter stays at hmax.
+        # A gap too large to matter stays at hmax — padded span 1.3·50 → 3.25.
         far=AutomaticMeshSizeField([_quad(0.0),_quad(50.0)];
             n_points_per_gap=5,smoothing=false)
-        @test all(≈(2.5),far.h)
+        @test all(≈(3.25),far.h)
 
         # `features`/`n_points_per_gap` disable the probe independently.
         for off in (AutomaticMeshSizeField([_quad(0.0),_quad(0.1)];
                         n_points_per_gap=5,features=false,smoothing=false),
                     AutomaticMeshSizeField([_quad(0.0),_quad(0.1)];
                         n_points_per_gap=0,smoothing=false))
-            @test all(≈(0.05),off.h)
+            @test all(≈(0.065),off.h)
         end
 
         # `hbulk` supplies the fallback where nothing is prescribed (still
@@ -1635,6 +1637,55 @@ end
             @test smooth.h[a]<=smooth.h[b]+0.1*d+1e-12
         end
 
+        # Volumetric extension — the octree analogue of upstream's
+        # `limitSize` interior relaxation: h(p) = min(hbulk, min_v(h[v] +
+        # slope·|p−v|)), verified against a brute-force scan of the sample
+        # cloud.  The interior cap releases within one local cell of a
+        # sample (the octree cells that touch the surface).
+        ext=AutomaticMeshSizeField([_quad(0.0),tilt];
+            n_points_per_gap=5,gradation=1.3,smoothing=true,
+            hbulk=0.4,hmax=2.0,hmin=1e-6)
+        @test ext.slope≈0.3
+        for p in ((0.2,0.2,3.0),(5.0,5.0,5.0),(0.0,0.0,0.0),
+                  (-1.0,2.0,0.4),(0.5,0.5,0.05))
+            dists=[sqrt((ext.coords[1,j]-p[1])^2+
+                        (ext.coords[2,j]-p[2])^2+
+                        (ext.coords[3,j]-p[3])^2) for j in axes(ext.coords,2)]
+            inear=argmin(dists);dn=dists[inear]
+            brute=minimum(ext.h.+ext.slope.*dists)
+            cap=dn<=min(ext.h[inear],ext.hbulk) ? ext.hmax : ext.hbulk
+            @test size_at(ext,p)≈
+                clamp(min(cap,brute),ext.hmin,ext.hmax) atol=1e-12
+        end
+        # Deep interior relaxes to hbulk; a query right on a coarse vertex
+        # keeps its prescribed size even above hbulk when hmax > hbulk.
+        @test size_at(ext,50.0,50.0,50.0)≈0.4
+        oct=Mesh(Float64[1 -1 0 0 0 0; 0 0 1 -1 0 0; 0 0 0 0 1 -1];
+                 tris=Int32[1 1 1 1 2 2 2 2;3 5 4 6 3 6 4 5;
+                            5 4 6 3 6 4 5 3])
+        curved=AutomaticMeshSizeField(oct;n_nodes_per_circle=40,
+            hbulk=0.01,hmax=2.0,hmin=1e-9)
+        @test size_at(curved,1.0,0.0,0.0)>0.01
+        @test size_at(curved,0.0,0.0,0.0)≈0.01
+        # `smoothing=false` keeps nearest-vertex values under the same cap.
+        unext=AutomaticMeshSizeField([_quad(0.0),tilt];
+            n_points_per_gap=5,smoothing=false,hbulk=0.4,hmax=2.0,hmin=1e-6)
+        _,vnear=Tessella.SizeField._nearest_point(unext.tree,(5.0,5.0,5.0))
+        @test size_at(unext,5.0,5.0,5.0)==min(0.4,unext.h[vnear])
+
+        # Upstream resolves an unset hMax from hBulk — an explicit hBulk
+        # above the padded L/20 default lifts hMax rather than being
+        # silently clamped by the span default.
+        lifted=AutomaticMeshSizeField(_quad(0.0);hbulk=0.4,hmin=1e-6)
+        @test lifted.hmax≈0.4
+        @test all(≈(0.4),lifted.h)
+        @test size_at(lifted,0.25,0.25,9.0)≈0.4
+
+        # `n_nodes_per_circle=0` disables the curvature stage (upstream's
+        # nodePerTwoPi>0 gate); a curved surface then keeps the bulk size.
+        flat_curv=AutomaticMeshSizeField(oct;n_nodes_per_circle=0)
+        @test all(≈(flat_curv.hbulk),flat_curv.h)
+
         # Validation battery.
         @test_throws ArgumentError AutomaticMeshSizeField(Mesh[])
         @test_throws ArgumentError AutomaticMeshSizeField(
@@ -1647,7 +1698,7 @@ end
             [_quad(0.0),"not a mesh"])
 
         # .geo end-to-end: the automatic background field meshes a unit
-        # square at its hmax = 1/20 default density.
+        # square at its hmax = 1.3/20 default density.
         geo_path=joinpath(@__DIR__,"..","tmp","automatic_field.geo")
         mkpath(dirname(geo_path))
         write(geo_path,"""
