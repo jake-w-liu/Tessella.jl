@@ -183,6 +183,9 @@ function _model_merge_prepare(path)
     elseif extension in (".unv",".mesh")
         IO._stage_foreign_mesh_merge(path,model,seed;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
+    elseif extension==".stl"
+        IO._stage_stl_mesh_merge(path,model,seed;
+            context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
     else
         _model_import_execute_geo(path,0,options,diagnostics;legacy=true,
             initial_model=model,initial_mesh_context=seed,initial_fields=fields)
@@ -213,12 +216,15 @@ end
 """
     merge(filename::AbstractString)
 
-Merge a `.geo`, `.msh` or supported linear-list `.pos` file atomically. Existing models,
+Merge a `.geo`, `.msh`, `.unv`, `.mesh`, `.stl` or supported linear-list `.pos`
+file atomically. Existing models,
 the current model slot, associated filename and held views survive. GEO executes
 against current entities, fields and options; an explicit `SetName` is honored.
 Supported literal MSH identities/periodic/partition/data metadata are retained;
 duplicate UID occurrences or incompatible partition namespaces reject before
-publication. Explicit external GEO actions are outside the rollback contract.
+publication. STL welds through `read_stl` and lands on the lowest free discrete
+Surface tag.
+Explicit external GEO actions are outside the rollback contract.
 POS adds list views only, leaving the current model and associated filename unchanged.
 """
 function merge(filename::AbstractString)

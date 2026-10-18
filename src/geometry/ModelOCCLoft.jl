@@ -1063,7 +1063,13 @@ function _model_occ_add_pipe!(m::GeoModel,tag,profile,wire_tag)
     P0=P[1]
     # ── transported section wires ──
     ne=length(profile_uses)
-    ids=_model_occ_reserve_shapes(kernel,nsec*(2ne+1),caller)
+    # Per section the loft binds one shape per profile edge, one per DISTINCT
+    # profile vertex (a closed wire shares `ne`; an open chain carries `ne+1`)
+    # plus the section wire itself — the old `2ne+1` budget only covered the
+    # closed case.
+    nverts=length(Set{UInt64}(vid for (peid,_) in profile_uses
+                            for vid in kernel.shapes[peid].children))
+    ids=_model_occ_reserve_shapes(kernel,nsec*(nverts+ne+1),caller)
     next=1
     section_tags=Int[]
     ecache=Dict{UInt64,UInt64}()   # profile vertex id → station vertex id

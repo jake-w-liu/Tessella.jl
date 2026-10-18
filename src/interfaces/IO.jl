@@ -11760,4 +11760,187 @@ function write_mesh(path,m)
     return path
 end
 
+# ── STL session staging ──────────────────────────────────────────────────────
+# `.stl` open/merge routes through the same atomic MSH 2.2 bridge as the
+# `.unv`/`.mesh` foreign readers: `read_stl`'s welded surface is re-encoded
+# as one elementary entity of Tri3 records, which the native importer then
+# publishes as a discrete Surface — the same ownership `API.mesh.import_stl`
+# produces for a session file.
+
+function _stl_bridge_records(path,tag::Integer)
+    mesh=read_stl(path)
+    nn=nnodes(mesh)
+    node_labels=collect(Int64(1):Int64(nn))
+    coords=Vector{Float64}(undef,3*nn)
+    @inbounds for i in 1:nn
+        coords[3i-2]=mesh.coords[1,i]
+        coords[3i-1]=mesh.coords[2,i]
+        coords[3i]=mesh.coords[3,i]
+    end
+    records=_TextMeshCell[_TextMeshCell(Int64(i),2,
+        Int32[mesh.tris[1,i],mesh.tris[2,i],mesh.tris[3,i]],
+        Int64(tag),Int64(0)) for i in axes(mesh.tris,2)]
+    return node_labels,coords,records
+end
+
+# Lowest free Surface tag across the native entity dictionaries, discrete
+# entities, imported mesh entities, and the live mesh authority — the
+# `API.mesh.import_stl` allocation rule applied to a merge target.
+function _stl_free_surface_tag(model)
+    mod=getfield(parentmodule(@__MODULE__),:Model)
+    occupied=Set{Int}()
+    for (dim,tag) in mod.model_entities(model)
+        dim==2 && push!(occupied,Int(tag))
+    end
+    for (dim,tag) in keys(model.discrete)
+        dim==2 && push!(occupied,Int(tag))
+    end
+    for (dim,tag) in keys(model.meshing.imported_entities)
+        dim==2 && push!(occupied,Int(tag))
+    end
+    authority=model.meshing.mesh_authority
+    if authority!==nothing
+        for mesh in (authority.mesh,authority.carrier)
+            if mesh!==nothing && hasproperty(mesh,:entity_data) &&
+                    mesh.entity_data!==nothing
+                for (dim,tag) in keys(mesh.entity_data.entities)
+                    dim==2 && push!(occupied,Int(tag))
+                end
+            end
+        end
+    end
+    tag=1
+    while tag in occupied
+        tag+=1
+    end
+    return tag
+end
+
+# Temporary MSH 2.2 encoding of an STL file: every facet lands on the given
+# elementary tag so the importer creates that discrete Surface.
+function _stl_bridge_temp(path,tag::Integer)
+    node_labels,coords,records=_stl_bridge_records(path,tag)
+    return _foreign_bridge_temp(node_labels,coords,records)
+end
+
+function _stage_stl_mesh_file(path;context_lc=1.0,forced_bbox=false)
+    temporary=_stl_bridge_temp(path,1)
+    geo=getfield(parentmodule(@__MODULE__),:GeoExec)
+    try
+        result=geo._geo_stage_mesh_file(temporary;
+            context_lc=context_lc,forced_bbox=forced_bbox)
+        result.model.name=String(splitext(basename(String(path)))[1])
+        return result
+    finally
+        rm(temporary;force=true)
+    end
+end
+
+function _stage_stl_mesh_merge(path,model,seed;
+                               context_lc=1.0,forced_bbox=false)
+    # File-local labels are not session UIDs; the bridge offsets them past the
+    # live maxima while the STL surface lands on the lowest free entity tag.
+    node_labels,coords,records=_stl_bridge_records(
+        path,_stl_free_surface_tag(model))
+    temporary=_foreign_bridge_temp(node_labels,coords,records;
+        node_offset=Int64(seed.mesh_node_max),
+        element_offset=Int64(seed.mesh_element_max))
+    geo=getfield(parentmodule(@__MODULE__),:GeoExec)
+    try
+        return geo._geo_stage_mesh_merge(temporary,model,seed;
+            context_lc=context_lc,forced_bbox=forced_bbox)
+    finally
+        rm(temporary;force=true)
+    end
+end
+
+"""
+    write_stl(path, mesh)
+
+Write the surface facets of a `Mesh` or `MixedMesh` as an ASCII STL file
+(Gmsh's default STL encoding). `Tri3` blocks emit one facet each; `Quad4`
+blocks split on their first-third vertex diagonal — `(a,b,c)` then `(a,c,d)`
+— matching upstream's deterministic quad triangulation. Facet normals are
+recomputed from the wound vertices; degenerate facets emit a zero normal.
+
+STL is a surface-only format, so volume element blocks (any `msh_dimension`
+3 type) and surface types STL cannot carry (quadratic triangles, higher-order
+quads, special records) reject loudly instead of being silently dropped.
+Lower-dimension point and line records carry no surface data and are
+skipped, as upstream's face-only traversal does. A mesh with no surface
+elements at all is an error — an empty `solid` would look like a successful
+export of nothing.
+"""
+function write_stl(path,m)
+    caller="write_stl"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    # Validate every block before touching the destination file.
+    for block in m.blocks
+        block isa ElementBlock || throw(ArgumentError(
+            "$caller: special MSH record type $(block.msh) is not " *
+            "representable in .stl"))
+        dim=msh_dimension(block.msh)
+        dim>=3 && throw(ArgumentError(
+            "$caller: volume element type $(block.msh) " *
+            "($(msh_family(block.msh))) is not representable in .stl"))
+        if dim==2 && !(block.msh in (2,3))
+            throw(ArgumentError(
+                "$caller: element type $(block.msh) ($(msh_family(block.msh)) " *
+                "order $(msh_spec(block.msh).order)) is not representable " *
+                "in .stl"))
+        end
+    end
+    target,parent=_foreign_target(path,caller)
+    emitted=0
+    mktemp(parent) do temporary,io
+        println(io,"solid tessella")
+        for block in m.blocks
+            block isa ElementBlock || continue
+            block.msh in (2,3) || continue
+            for j in axes(block.nodes,2)
+                a,b=Int(block.nodes[1,j]),Int(block.nodes[2,j])
+                c=Int(block.nodes[3,j])
+                _stl_facet!(io,m.coords,a,b,c)
+                emitted+=1
+                if block.msh==3
+                    _stl_facet!(io,m.coords,a,c,Int(block.nodes[4,j]))
+                    emitted+=1
+                end
+            end
+        end
+        println(io,"endsolid tessella")
+        emitted==0 && throw(ArgumentError(
+            "$caller: mesh has no surface elements to write"))
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+function _stl_facet!(io,coords,a::Int,b::Int,c::Int)
+    ax,ay,az=coords[1,a],coords[2,a],coords[3,a]
+    ux,uy,uz=coords[1,b]-ax,coords[2,b]-ay,coords[3,b]-az
+    vx,vy,vz=coords[1,c]-ax,coords[2,c]-ay,coords[3,c]-az
+    nx,ny,nz=uy*vz-uz*vy,uz*vx-ux*vz,ux*vy-uy*vx
+    len=sqrt(nx*nx+ny*ny+nz*nz)
+    if isfinite(len) && len>0
+        nx/=len;ny/=len;nz/=len
+    else
+        nx=ny=nz=0.0
+    end
+    println(io," facet normal ",
+        @sprintf("%.16g %.16g %.16g",nx,ny,nz))
+    println(io,"  outer loop")
+    for i in (a,b,c)
+        println(io,"   vertex ",
+            @sprintf("%.16g %.16g %.16g",
+                coords[1,i],coords[2,i],coords[3,i]))
+    end
+    println(io,"  endloop")
+    println(io," endfacet")
+    return nothing
+end
+
 end # module IO

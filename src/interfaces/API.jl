@@ -10420,6 +10420,46 @@ function _session_size_field_locked(m::GeoModel;raw::Bool=false)
         elseif kind=="automaticmeshsizefield"
             return _automatic_context_field(
                 m,spec,config,entities,"gmsh API")
+        elseif kind=="boundarylayer"
+            # Scalar BoundaryLayer over the discretized wall targets — the
+            # same resolution `_geo_mesh_context_fields` performs for `.geo`
+            # executions: entity meshes supply the distance targets and the
+            # catalog scalar applies hwall/ratio/thickness/hfar growth.
+            fields_mod=getfield(parentmodule(@__MODULE__),:SizeField)
+            points=NTuple{3,Float64}[]
+            segments=Tuple{NTuple{3,Float64},NTuple{3,Float64}}[]
+            triangles=Tuple{NTuple{3,Float64},NTuple{3,Float64},NTuple{3,Float64}}[]
+            pt(em,i)=(em.coords[1,i],em.coords[2,i],em.coords[3,i])
+            for (dim,tags) in ((0,config.points),(1,config.curves))
+                for tag in tags
+                    mesh=entities(dim,string(tag))
+                    mesh===nothing && throw(ArgumentError(
+                        "build_geo_size_field: Field[$(spec.tag)] references " *
+                        "unknown entity ($dim,$tag)"))
+                    meshes=mesh isa AbstractVector ? mesh : (mesh,)
+                    for em in meshes
+                        for i in axes(em.coords,2)
+                            push!(points,pt(em,i))
+                        end
+                        for i in axes(em.segs,2)
+                            a,b=Int(em.segs[1,i]),Int(em.segs[2,i])
+                            push!(segments,(pt(em,a),pt(em,b)))
+                        end
+                        for i in axes(em.tris,2)
+                            a,b,c=Int.(em.tris[:,i])
+                            push!(triangles,(pt(em,a),pt(em,b),pt(em,c)))
+                        end
+                    end
+                end
+            end
+            isempty(points) && isempty(segments) && isempty(triangles) &&
+                throw(ArgumentError(
+                    "build_geo_size_field: Field[$(spec.tag)] resolves no " *
+                    "boundary-layer distance targets"))
+            distance=fields_mod.DistanceField(;points,segments,triangles)
+            return fields_mod.BoundaryLayerField(distance;
+                hwall=config.size,ratio=config.ratio,
+                thickness=config.thickness,hfar=config.size_far)
         end
         throw(ArgumentError(
             "build_geo_size_field: Field[$(spec.tag)] kind $(spec.kind) " *

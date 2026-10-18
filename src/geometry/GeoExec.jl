@@ -2368,7 +2368,8 @@ function _geo_occ_axis_plane_geometry(m,loops)
     geometry=merge(base_geometry,(uvb=(lower,upper),))
     for loop in loops,signed in m.loops[loop]
         curve=abs(signed);edge,low,high=Model._brep_edge_curve(m,curve)
-        pcurves[curve]=(fwd=Model._brep_synth_pcurve(geometry,edge,low,high),rev=nothing)
+        pcurves[curve]=(fwd=Model._brep_synth_pcurve(geometry,edge,low,high,
+            "Plane Surface"),rev=nothing)
     end
     return geometry
 end
@@ -3860,9 +3861,10 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
             break
         end
     end
-    match(r"^Using\b",rest)!==nothing && throw(ArgumentError(
-        "$caller: pipe extrusion `Extrude {..} Using Wire {..}` is " *
-        "OpenCASCADE-only and not implemented"))
+    if match(r"^Using\b",rest)!==nothing
+        return _geo_exec_extrude_pipe!(m,rest,shapes,nvec,context,caller,
+                                       allocator_state)
+    end
     isempty(rest) || throw(ArgumentError(
         "$caller: unexpected text after the shape list"))
     shapes===nothing && throw(ArgumentError(
@@ -3902,6 +3904,219 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
             auto_coherence=_geo_auto_coherence(context))
     context.geo_changed=true
     return Float64.(tags)
+end
+
+# ── `Extrude {shapes} Using Wire {expr}` — OCC pipe extrusion ────────────────
+# `.geo` OCC-factory statements keep entities as GEO records carrying OCC
+# geometry (the same world `ThruSections`/`Pipe` bind through their own
+# paths). The pipe itself runs in the OCC kernel, so the referenced profile
+# and spine entities bind into `m.occ_kernel` at their existing tags first —
+# vertices/edges/faces from `m.points`/`m.curves`/`m.surfaces`, wires from
+# `m.loops` — then `Model._model_occ_add_pipe!` executes the parallel-
+# transport loft and `_model_occ_synchronize!` publishes the generated shapes
+# back as GEO entities. Under the built-in factory the suffix still rejects
+# (the statement parses first, matching upstream's action-order gates).
+
+# Bind a `.geo` point into the OCC kernel as a vertex at its own tag.
+function _geo_occ_pipe_vertex!(m::GeoModel,ptag::Int,kernel,caller)
+    haskey(kernel.bindings,(0,ptag)) && return kernel.bindings[(0,ptag)]
+    haskey(m.points,ptag) || throw(ArgumentError(
+        "$caller: unknown Point[$ptag]"))
+    vid=only(Model._model_occ_reserve_shapes(kernel,1,caller))
+    Model._model_occ_bind_shape!(kernel,0,ptag,vid,
+        Model._ModelOCCShape(0,
+            (point=m.points[ptag],mesh_size=get(m.point_size,ptag,0.0)),
+            UInt64[]))
+    kernel.next_shape=vid+UInt64(1)
+    return vid
+end
+
+# Bind a `.geo` curve into the OCC kernel as an edge. Curves that already
+# carry an OCC geometry record (`Line`, `Circle` under the OCC factory)
+# bind verbatim; `Spline`/`BSpline`/`Bezier` materialize through the OCC
+# add functions (which interpolate poles the way `occ.addSpline` does);
+# a bare two-point curve falls back to the `:line` chord record. Kinds
+# with no OCC representation (`Ellipse`, `Nurbs`, built-in fillings)
+# reject rather than silently degrading the profile.
+function _geo_occ_pipe_edge!(m::GeoModel,tag::Int,kernel,caller)
+    haskey(kernel.bindings,(1,tag)) && return kernel.bindings[(1,tag)]
+    haskey(m.curves,tag) || throw(ArgumentError(
+        "$caller: unknown Curve[$tag]"))
+    kind=get(m.curve_types,tag,:line)
+    g=get(m.curve_geometry,tag,nothing)
+    if g===nothing || !hasproperty(g,:occ)
+        if kind===:spline || kind===:bspline || kind===:bezier
+            control=get(m.curve_control_points,tag,Int[])
+            length(control)>=2 || throw(ArgumentError(
+                "$caller: Curve[$tag] has too few control points to bind"))
+            for ptag in control
+                _geo_occ_pipe_vertex!(m,ptag,kernel,caller)
+            end
+            if kind===:spline
+                Model._model_occ_add_spline!(m,copy(control);tag=tag)
+            elseif kind===:bspline
+                Model._model_occ_add_bspline!(m,copy(control);tag=tag)
+            else
+                Model._model_occ_add_curve!(m,copy(control),:bezier;tag=tag)
+            end
+            return kernel.bindings[(1,tag)]
+        end
+        kind===:line || throw(ArgumentError(
+            "$caller: Curve[$tag] kind $(kind) has no OCC geometry " *
+            "record for pipe extrusion"))
+        g=_geo_occ_line_geometry(m,collect(m.curves[tag]))
+        g===nothing && throw(ArgumentError(
+            "$caller: Curve[$tag] endpoints do not yield a valid line"))
+    end
+    endpoints=m.curves[tag]
+    vertex_ids=UInt64[]
+    for ptag in endpoints
+        push!(vertex_ids,_geo_occ_pipe_vertex!(m,ptag,kernel,caller))
+    end
+    eid=only(Model._model_occ_reserve_shapes(kernel,1,caller))
+    Model._model_occ_bind_shape!(kernel,1,tag,eid,
+        Model._ModelOCCShape(1,(kind=kind,geometry=g),vertex_ids))
+    kernel.next_shape=eid+UInt64(1)
+    return eid
+end
+
+# Bind a `.geo` `Curve Loop` into the kernel as a wire. The stored loop is the
+# source of truth for traversal order and signs (the `Curve Loop` sorter
+# already ordered the chain); a negative curve tag walks the edge in reverse.
+# Outer wires bind at the loop's own tag so `Using Wire {n}` references them;
+# a hole use binds a fresh-tagged wire carrying the reversed traversal, the
+# same shape convention `_model_occ_synchronize!` round-trips.
+function _geo_occ_pipe_wire!(m::GeoModel,tag::Int,kernel,caller;
+                             reversed::Bool=false)
+    !reversed && haskey(kernel.bindings,(-1,tag)) &&
+        return kernel.bindings[(-1,tag)]
+    haskey(m.loops,tag) || throw(ArgumentError(
+        "$caller: unknown Wire/Curve Loop[$tag]"))
+    signed=Int.(m.loops[tag])
+    seq=reversed ? Int[-s for s in Iterators.reverse(signed)] : signed
+    uses=Tuple{UInt64,Bool}[]
+    for s in seq
+        eid=_geo_occ_pipe_edge!(m,abs(s),kernel,caller)
+        push!(uses,(eid,s<0))
+    end
+    wtag=reversed ? Model._model_occ_next_tag(kernel,-1,-1,caller) : tag
+    wid=only(Model._model_occ_reserve_shapes(kernel,1,caller))
+    Model._model_occ_bind_shape!(kernel,-1,wtag,wid,
+        Model._ModelOCCShape(-1,(uses=uses,),[u[1] for u in uses]))
+    kernel.next_shape=wid+UInt64(1)
+    return wid
+end
+
+# A single `Curve{t}` profile becomes a fresh (open) kernel wire — upstream
+# `OCCGeoInternals` wraps the lone edge the same way.
+function _geo_occ_pipe_profile_wire!(m::GeoModel,tag::Int,kernel,caller)
+    eid=_geo_occ_pipe_edge!(m,tag,kernel,caller)
+    wtag=Model._model_occ_next_tag(kernel,-1,-1,caller)
+    wid=only(Model._model_occ_reserve_shapes(kernel,1,caller))
+    Model._model_occ_bind_shape!(kernel,-1,wtag,wid,
+        Model._ModelOCCShape(-1,(uses=((eid,false),),),[eid]))
+    kernel.next_shape=wid+UInt64(1)
+    return wtag
+end
+
+# Bind a `.geo` `Surface` (plane surface with boundary loops) into the kernel
+# as a face. `Plane Surface` already records an OCC plane geometry under the
+# OCC factory; otherwise an axis-aligned loop can still produce one through
+# `_geo_occ_axis_plane_geometry`, and anything else rejects.
+function _geo_occ_pipe_face!(m::GeoModel,tag::Int,kernel,caller)
+    haskey(kernel.bindings,(2,tag)) && return kernel.bindings[(2,tag)]
+    haskey(m.surfaces,tag) || throw(ArgumentError(
+        "$caller: unknown Surface[$tag]"))
+    loops=m.surfaces[tag]
+    isempty(loops) && throw(ArgumentError(
+        "$caller: Surface[$tag] has no boundary loops"))
+    wire_ids=UInt64[]
+    for (i,lt) in enumerate(loops)
+        push!(wire_ids,_geo_occ_pipe_wire!(m,Int(lt),kernel,caller;
+            reversed=i>1))
+    end
+    kind=get(m.surface_types,tag,:plane)
+    g=get(m.surface_geometry,tag,nothing)
+    if g===nothing && kind===:plane
+        g=_geo_occ_axis_plane_geometry(m,loops)
+    end
+    (g===nothing || !hasproperty(g,:occ)) && throw(ArgumentError(
+        "$caller: Surface[$tag] has no OCC geometry record for pipe " *
+        "extrusion"))
+    fid=only(Model._model_occ_reserve_shapes(kernel,1,caller))
+    Model._model_occ_bind_shape!(kernel,2,tag,fid,
+        Model._ModelOCCShape(2,(kind=kind,geometry=g),wire_ids))
+    kernel.next_shape=fid+UInt64(1)
+    return fid
+end
+
+function _geo_exec_extrude_pipe!(m::GeoModel,rest::AbstractString,shapes,
+        nvec::Int,context::_GeoNumericContext,caller::AbstractString,
+        allocator_state)
+    nvec>0 && throw(ArgumentError(
+        "$caller: `Extrude .. Using Wire` does not take a motion or " *
+        "displacement group"))
+    urest=String(strip(rest[nextind(rest,firstindex(rest),5):end]))
+    match(r"^Wire\b",urest)===nothing && throw(ArgumentError(
+        "$caller: unsupported `Extrude .. Using` suffix (only " *
+        "`Using Wire {expr}` is supported)"))
+    wrest=String(strip(urest[nextind(urest,firstindex(urest),4):end]))
+    startswith(wrest,"{") || throw(ArgumentError(
+        "$caller: expected `Using Wire {expr}`"))
+    (wire_group,tail)=_geo_balanced_group(wrest,caller)
+    isempty(strip(tail)) || throw(ArgumentError(
+        "$caller: unexpected text after `Using Wire {..}`"))
+    shapes===nothing && throw(ArgumentError(
+        "$caller: expected a `{shape list}` group"))
+    # `ListOfShapes` resolves before the factory gate, matching the upstream
+    # parser action order (shape-list syntax and entity lookups surface first).
+    entities,params=_geo_extrude_shape_list!(m,shapes,context,caller,
+                                             allocator_state)
+    (allocator_state!==nothing &&
+        allocator_state.factory===:opencascade) || throw(ArgumentError(
+        "$caller: pipe extrusion `Extrude {..} Using Wire {..}` is " *
+        "OpenCASCADE-only"))
+    (isempty(params.layers) && isempty(params.heights) && !params.scale_last &&
+        !params.recombine && params.quad_to_tri===:none &&
+        !params.recomb_laterals) || throw(ArgumentError(
+        "$caller: `Extrude .. Using Wire` with mesh parameters " *
+        "(Layers/Recombine/QuadTri*/ScaleLast) is not implemented"))
+    wire_values=_geo_exec_numeric_values(wire_group,context,
+                                         "$caller Using Wire")
+    length(wire_values)==1 || throw(ArgumentError(
+        "$caller: `Using Wire {expr}` expects one wire tag, got " *
+        "$(length(wire_values))"))
+    wire_tag=_geo_signed_gmsh_int_value(wire_values[1],"$caller Using Wire")
+    wire_tag>0 || throw(ArgumentError(
+        "$caller: `Using Wire` tag must be positive (got $wire_tag)"))
+    kernel=m.occ_kernel
+    # Keep kernel tag allocation ahead of every `.geo` namespace it may emit:
+    # entity maxima per dimension, loop tags for wires, and surface-loop tags
+    # for the shells a solid pipe creates.
+    for d in 0:3
+        kernel.maxima[d+3]=max(kernel.maxima[d+3],m.next_tag[d+1])
+    end
+    isempty(m.loops) ||
+        (kernel.maxima[2]=max(kernel.maxima[2],maximum(keys(m.loops))))
+    isempty(m.surface_loops) ||
+        (kernel.maxima[1]=max(kernel.maxima[1],maximum(keys(m.surface_loops))))
+    _geo_occ_pipe_wire!(m,wire_tag,kernel,caller)
+    out=NTuple{2,Int}[]
+    for (dim,tag) in entities
+        if dim==2
+            _geo_occ_pipe_face!(m,tag,kernel,caller)
+            append!(out,Model._model_occ_add_pipe!(m,-1,(2,tag),wire_tag))
+        elseif dim==1
+            wtag=_geo_occ_pipe_profile_wire!(m,tag,kernel,caller)
+            append!(out,Model._model_occ_add_pipe!(m,-1,wtag,wire_tag))
+        else
+            throw(ArgumentError(
+                "$caller: cannot pipe-extrude $(_entity_label(dim))[$tag]"))
+        end
+    end
+    Model._model_occ_synchronize!(m)
+    context.geo_changed=true
+    return Float64[Float64(t) for (_,t) in out]
 end
 
 # Evaluate a transform's parameter portion and return `(transform, rest)` —
@@ -7548,6 +7763,47 @@ function _geo_mesh_context_fields(m::GeoModel,spec,config,entities,params)
     if lowercase(spec.kind)=="automaticmeshsizefield"
         return _automatic_context_field(
             m,spec,config,entities,"execute_geo")
+    elseif lowercase(spec.kind)=="boundarylayer"
+        # Scalar BoundaryLayer over the discretized wall targets: upstream
+        # feeds the boundary edges' mesh vertices (and endpoint chords) to
+        # `FieldManager::BoundaryLayer`, then `hwall`/`ratio`/`thickness`/
+        # `hfar` grow the prescribed size away from the wall. `_geo_field_
+        # entity_mesh` supplies that same discretization per (dim, tag).
+        fields_mod=getfield(parentmodule(@__MODULE__),:SizeField)
+        points=NTuple{3,Float64}[]
+        segments=Tuple{NTuple{3,Float64},NTuple{3,Float64}}[]
+        triangles=Tuple{NTuple{3,Float64},NTuple{3,Float64},NTuple{3,Float64}}[]
+        pt(em,i)=(em.coords[1,i],em.coords[2,i],em.coords[3,i])
+        for (dim,tags) in ((0,config.points),(1,config.curves))
+            for tag in tags
+                mesh=entities(dim,string(tag))
+                mesh===nothing && throw(ArgumentError(
+                    "build_geo_size_field: Field[$(spec.tag)] references " *
+                    "unknown entity ($dim,$tag)"))
+                meshes=mesh isa AbstractVector ? mesh : (mesh,)
+                for em in meshes
+                    for i in axes(em.coords,2)
+                        push!(points,pt(em,i))
+                    end
+                    for i in axes(em.segs,2)
+                        a,b=Int(em.segs[1,i]),Int(em.segs[2,i])
+                        push!(segments,(pt(em,a),pt(em,b)))
+                    end
+                    for i in axes(em.tris,2)
+                        a,b,c=Int.(em.tris[:,i])
+                        push!(triangles,(pt(em,a),pt(em,b),pt(em,c)))
+                    end
+                end
+            end
+        end
+        isempty(points) && isempty(segments) && isempty(triangles) &&
+            throw(ArgumentError(
+                "build_geo_size_field: Field[$(spec.tag)] resolves no " *
+                "boundary-layer distance targets"))
+        distance=fields_mod.DistanceField(;points,segments,triangles)
+        return fields_mod.BoundaryLayerField(distance;
+            hwall=config.size,ratio=config.ratio,
+            thickness=config.thickness,hfar=config.size_far)
     end
     throw(ArgumentError(
         "build_geo_size_field: Field[$(spec.tag)] kind $(spec.kind) " *
@@ -7639,6 +7895,24 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
     context.native_element_lookup_receipt=nothing
     context.native_mesh_begin_callback===nothing || context.native_mesh_begin_callback()
     caller="execute_geo: Mesh"
+    if dim>=2 && !isempty(context.boundary_layer_fields)
+        # `BoundaryLayer Field =` selections feed the wall-extrusion pass
+        # upstream runs inside `meshGFace`/`meshGRegion`; the Tessella
+        # surface/volume meshers have no boundary-layer consumer, so the
+        # selection must reject loudly instead of silently meshing on.
+        fields=context.fields
+        for tag in context.boundary_layer_fields
+            spec=fields===nothing ? nothing : get(fields,tag,nothing)
+            spec===nothing && throw(ArgumentError(
+                "$caller $dim: BoundaryLayer Field[$tag] is not declared"))
+            lowercase(spec.kind)=="boundarylayer" || throw(ArgumentError(
+                "$caller $dim: BoundaryLayer Field[$tag] has kind " *
+                "$(spec.kind), not BoundaryLayer"))
+        end
+        throw(ArgumentError(
+            "$caller $dim: `BoundaryLayer Field =` selects boundary-layer " *
+            "mesh generation, which is not implemented"))
+    end
     only_empty=!iszero(something(_geo_option_number(context,"Mesh",0,"MeshOnlyEmpty"),0.0))
     actual=(context.mesh isa MixedMesh && context.mesh.entity_data!==nothing) ||
         (m.meshing.mesh_authority!==nothing && m.meshing.mesh_authority.mesh!==nothing &&
@@ -9538,6 +9812,38 @@ end
 
 include("GeoMeshImport.jl")
 
+# Lowest free Surface tag for an imported STL discrete surface — the same
+# `API.mesh.import_stl` allocation rule, extended over imported mesh entities
+# and the live mesh authority so a merged STL can never shadow an entity a
+# previous `Include`/`Merge` created.
+function _geo_stl_surface_tag(m::GeoModel)
+    occupied=Set{Int}()
+    for (dim,tag) in Model.model_entities(m)
+        dim==2 && push!(occupied,Int(tag))
+    end
+    for (dim,tag) in keys(m.discrete)
+        dim==2 && push!(occupied,Int(tag))
+    end
+    for (dim,tag) in keys(m.meshing.imported_entities)
+        dim==2 && push!(occupied,Int(tag))
+    end
+    authority=m.meshing.mesh_authority
+    if authority!==nothing
+        for mesh in (authority.mesh,authority.carrier)
+            if mesh isa MixedMesh && mesh.entity_data!==nothing
+                for (dim,tag) in keys(mesh.entity_data.entities)
+                    dim==2 && push!(occupied,Int(tag))
+                end
+            end
+        end
+    end
+    tag=1
+    while tag in occupied
+        tag+=1
+    end
+    return tag
+end
+
 # `Include`/`Merge` of a `.geo` file runs its statements in the same context
 # and model (Gmsh's `ParseFile` shares the parser globals). `.msh` files merge
 # their mesh into the current mid-file mesh.
@@ -9547,17 +9853,31 @@ function _geo_exec_include!(m::GeoModel,path::AbstractString,
     file=_geo_fix_relative_path(context.file_name,path)
     isfile(file) || throw(ArgumentError("$caller: missing file '$file'"))
     ext=lowercase(splitext(file)[2])
-    if ext==".msh"
+    if ext==".msh" || ext==".stl"
         # `GModel::readMSH` imports the file's elementary entities as discrete
         # model entities carrying their cells, and the cells join the mid-file
         # mesh as well. `read_mixed_msh` keeps every element family plus the
         # MSH2 elementary / MSH4 entity classification the simplex `read_msh`
-        # folds away.
+        # folds away. `.stl` takes the same channel: `read_stl` welds the
+        # facet soup into a surface `Mesh`, a temporary MSH 2.2 bridge encodes
+        # it under the lowest free Surface tag, and the importer publishes it
+        # as a discrete Surface — matching `GModel::readSTL`'s discreteFace.
+        if ext==".stl"
+            io_mod=getfield(parentmodule(@__MODULE__),:IO)
+            temporary=io_mod._stl_bridge_temp(file,_geo_stl_surface_tag(m))
+            try
+                _geo_import_mesh_file!(m,context,temporary,caller)
+            finally
+                rm(temporary;force=true)
+            end
+            return nothing
+        end
         _geo_import_mesh_file!(m,context,file,caller)
         return nothing
     end
     ext==".geo" || throw(ArgumentError(
-        "$caller: merging '$ext' files is not supported (only .geo and .msh)"))
+        "$caller: merging '$ext' files is not supported " *
+        "(only .geo, .msh and .stl)"))
     statements=_geo_exec_statements(file)
     parent_file=context.file_name
     parent_base=context.file_error_base
@@ -9874,14 +10194,30 @@ function _geo_merge_discrete!(m::GeoModel,mixed::MixedMesh,
     return nothing
 end
 
-# `Save`/`Print` — `CreateOutputFile` writes the current mesh; the only
-# supported target format is `.msh` (v2.2, matching `write_msh`'s default).
+# `Save`/`Print` — `CreateOutputFile` writes the current mesh. `.msh` keeps
+# its historical MSH 2.2 output; the versioned aliases `.msh2`/`.msh22` and
+# `.msh4`/`.msh41` select that dialect explicitly, while `.msh1`/`.msh3`/
+# `.msh40` reject (MSH 1.x/3.x never shipped writable support and 4.0 is not
+# a stable public dialect). `.stl` writes ASCII surface facets through
+# `IO.write_stl`.
 function _geo_exec_save!(m::GeoModel,path::AbstractString,
                          context::_GeoNumericContext,caller::AbstractString;
                          kind::String="Save")
     file=_geo_fix_relative_path(context.file_name,path)
-    endswith(lowercase(file),".msh") || throw(ArgumentError(
-        "$caller: only .msh output is supported (got '$file')"))
+    extension=lowercase(splitext(file)[2])
+    extension in (".msh1",".msh3",".msh40") && throw(ArgumentError(
+        "$caller: unsupported MSH extension `$extension` (supported aliases: " *
+        ".msh, .msh2/.msh22 for MSH 2.2, .msh4/.msh41 for MSH 4.1)"))
+    version=if extension in (".msh",".msh2",".msh22")
+        2.2
+    elseif extension in (".msh4",".msh41")
+        4.1
+    else
+        -1.0
+    end
+    (version>0 || extension==".stl") || throw(ArgumentError(
+        "$caller: supported output extensions are .msh, .msh2/.msh22, " *
+        ".msh4/.msh41 and .stl (got '$file')"))
     # `CreateOutputFile` writes the synced model — materialize the physical
     # view (and pending unknown-member warnings) first, when internals changed.
     _geo_sync_physical_view_if_changed!(m,context)
@@ -9895,11 +10231,16 @@ function _geo_exec_save!(m::GeoModel,path::AbstractString,
             "$caller: no mesh exists — run `Mesh n;` first"))
         mesh=Mesh(zeros(3,0))
     end
+    if extension==".stl"
+        io_mod=getfield(parentmodule(@__MODULE__),:IO)
+        io_mod.write_stl(file,mesh)
+        return nothing
+    end
     if mesh isa MixedMesh && mesh.entity_data!==nothing
         # The actual product already owns its Point cells and public labels.
         # Serialize it directly instead of appending a second Point block or
         # replacing its node/element identity tables with dense proxy labels.
-        write_mixed_msh(file,mesh;version=2.2)
+        write_mixed_msh(file,mesh;version)
         return nothing
     end
     # Upstream serializes an `MPoint` element per model vertex — the dim-0
@@ -9936,9 +10277,9 @@ function _geo_exec_save!(m::GeoModel,path::AbstractString,
         out=MixedMesh(mesh.coords,blocks;
                       physical_names=m.physical_names,
                       elementary_entities=elementary)
-        write_mixed_msh(file,out;version=2.2)
+        write_mixed_msh(file,out;version)
     else
-        write_msh(file,mesh;physical_names=m.physical_names,
+        write_msh(file,mesh;version,physical_names=m.physical_names,
                   point_elements=point_elements)
     end
     return nothing

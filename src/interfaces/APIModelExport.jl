@@ -117,24 +117,45 @@ function _model_export_mesh(model,source,class,version,save_all,caller)
         data_sections=sections)
 end
 
+# Versioned MSH filename aliases. `.msh` stays `Mesh.MshFileVersion`-driven;
+# `.msh2`/`.msh22` force MSH 2.2 and `.msh4`/`.msh41` force MSH 4.1. MSH 1.x
+# and 3.x never shipped writable support and MSH 4.0 is not a stable public
+# dialect, so those aliases reject loudly rather than guessing a version.
+const _MSH_EXTENSION_VERSIONS=Dict{String,Union{Nothing,Float64}}(
+    ".msh"=>nothing,".msh2"=>2.2,".msh22"=>2.2,".msh4"=>4.1,".msh41"=>4.1)
+
 function _model_export_write(filename)
     caller="API.write"
     filename isa AbstractString && !isempty(filename) && !occursin('\0',filename) ||
         throw(ArgumentError("$caller: filename must be a nonempty NUL-free string"))
     extension=lowercase(splitext(filename)[2])
-    extension in (".msh",".unv",".mesh") || throw(ArgumentError(
-        "$caller: current-model export supports .msh, .unv and .mesh"))
+    if extension in (".msh1",".msh3",".msh40")
+        throw(ArgumentError(
+            "$caller: unsupported MSH extension `$extension` (supported " *
+            "aliases: .msh, .msh2/.msh22 for MSH 2.2, .msh4/.msh41 for MSH 4.1)"))
+    end
+    (haskey(_MSH_EXTENSION_VERSIONS,extension) ||
+        extension in (".unv",".mesh",".stl")) || throw(ArgumentError(
+        "$caller: current-model export supports .msh, .msh2/.msh22, " *
+        ".msh4/.msh41, .unv, .mesh and .stl"))
     return lock(STATE_LOCK) do
         model=_model_locked()
         save_all=!iszero(get(OPTIONS,"Mesh.SaveAll",0.0))
-        if extension==".msh"
-            version=get(OPTIONS,"Mesh.MshFileVersion",4.1)
+        if haskey(_MSH_EXTENSION_VERSIONS,extension)
+            version=something(_MSH_EXTENSION_VERSIONS[extension],
+                get(OPTIONS,"Mesh.MshFileVersion",4.1))
             version in (2.2,4.1) || throw(ArgumentError(
                 "$caller: MSH version must be 2.2 or 4.1"))
             target=_model_export_mesh(model,LAST_MESH[],LAST_MESH_CLASS[],version,
                 save_all,caller)
             Elements.write_mixed_msh(filename,target;version,
                 binary=!iszero(get(OPTIONS,"Mesh.Binary",0.0)))
+        elseif extension==".stl"
+            # STL carries only surface facets: no physical selection applies,
+            # so the export projection always uses SaveAll semantics.
+            target=_model_export_mesh(model,LAST_MESH[],LAST_MESH_CLASS[],4.1,
+                true,caller)
+            IO.write_stl(filename,target)
         else
             # UNV/MEDIT writers use the complete MSH4-style projection: actual
             # UIDs, per-cell physical tags, and block entity ownership. Neither
@@ -152,10 +173,14 @@ end
 """
     write(filename)
 
-Write the current model's actual mesh to a `.msh`, `.unv` or `.mesh` file.
-`Mesh.MshFileVersion`
-selects 2.2 or 4.1, `Mesh.Binary` selects the encoding, and `Mesh.SaveAll`
-controls physical selection. MSH4 preserves actual UIDs and retained periodic,
+Write the current model's actual mesh to a `.msh`, `.msh2`, `.msh22`, `.msh4`,
+`.msh41`, `.stl`, `.unv` or `.mesh` file. `.msh` uses `Mesh.MshFileVersion`
+to select 2.2 or 4.1 while the versioned aliases force the corresponding
+dialect; `.msh1`, `.msh3` and `.msh40` reject. `Mesh.Binary` selects the
+encoding, and `Mesh.SaveAll`
+controls physical selection for MSH and the foreign formats. `.stl` writes
+ASCII surface facets (quads split on the first-third vertex diagonal) and
+rejects volume elements; MSH4 preserves actual UIDs and retained periodic,
 partition, ghost, and data metadata; MSH2 uses its native dense numbering.
 `.unv` emits I-DEAS datasets 2411/2412 with elementary and physical tags;
 `.mesh` emits INRIA/Medit sections with `ref` carrying the physical tag (or

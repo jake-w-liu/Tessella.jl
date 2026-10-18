@@ -159,6 +159,9 @@ function _model_import_prepare(path,dimension;legacy=false)
     elseif extension in (".unv",".mesh")
         IO._stage_foreign_mesh_file(path;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
+    elseif extension==".stl"
+        IO._stage_stl_mesh_file(path;
+            context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
     else
         _model_import_execute_geo(path,dimension,options,diagnostics;legacy)
     end
@@ -278,8 +281,8 @@ function _model_import_filename(filename,caller;geo_only=false)
     filename isa AbstractString && !isempty(filename) && !occursin('\0',filename) ||
         throw(ArgumentError("$caller: filename must be a nonempty NUL-free string"))
     extension=lowercase(splitext(filename)[2])
-    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos",".unv",".mesh")) || throw(ArgumentError(
-        "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh, .pos, .unv and .mesh")"))
+    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos",".unv",".mesh",".stl")) || throw(ArgumentError(
+        "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh, .pos, .unv, .mesh and .stl")"))
     isfile(filename) || throw(ArgumentError("$caller: missing file $filename"))
     return String(filename)
 end
@@ -287,12 +290,13 @@ end
 """
     open(filename)
 
-Import a `.geo`, `.msh`, `.unv`, `.mesh` or supported linear-list `.pos` file
-into a new current model, reusing an empty
+Import a `.geo`, `.msh`, `.unv`, `.mesh`, `.stl` or supported linear-list
+`.pos` file into a new current model, reusing an empty
 current model. Nonempty prior models and session views remain alive. MSH
 imports keep actual UIDs, entity ownership and retained metadata; UNV and
 Medit/MESH imports publish through the same channel with their elementary and
-physical tags mapped to entity ownership; ordinary
+physical tags mapped to entity ownership; STL imports weld through
+`read_stl` and publish one discrete Surface; ordinary
 model data sections create views bound to the imported model. The model name
 is the filename stem unless GEO `SetName` supplies one. Failed preparation
 leaves model slots, caches, options and views unchanged; this stricter failure
