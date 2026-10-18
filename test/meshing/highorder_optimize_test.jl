@@ -339,4 +339,372 @@ end
             api.finalize()
         end
     end
+
+end
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Multi-family interior relocation (gmsh types 9, 10, 12, 13 + uncertified).
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Fixtures are built by position deduplication: each element's 27/18/9/6
+# reference-mapped node positions are interned, so shared facets share node
+# indices exactly (all positions are dyadic — interning by tuple equality is
+# exact).  The independent quality oracle below recomputes tensor/product
+# gradients in loop form (distinct from the module's ntuple implementations)
+# and samples on a denser lattice than the engine's interpolation points.
+
+const _OPT_QUA_NODES = ((1,1),(3,1),(3,3),(1,3),(2,1),(3,2),(2,3),(1,2),(2,2))
+const _OPT_HEX_CORNERS = ((0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.),
+                         (0.,0.,1.),(1.,0.,1.),(1.,1.,1.),(0.,1.,1.))
+const _OPT_HEX_EDGES = ((1,2),(1,4),(1,5),(2,3),(2,6),(3,4),
+                        (3,7),(4,8),(5,6),(5,8),(6,7),(7,8))
+const _OPT_HEX_FACES = ((1,4,3,2),(1,2,6,5),(1,5,8,4),
+                        (2,3,7,6),(3,4,8,7),(5,6,7,8))
+const _OPT_PRI_EDGES = ((1,2),(1,3),(1,4),(2,3),(2,5),(3,6),
+                        (4,5),(4,6),(5,6))
+const _OPT_PRI_QFACES = ((1,2,5,4),(1,4,6,3),(2,3,6,5))
+
+# Node positions of one unit reference element mapped by `mapfn` (identity
+# gives the unit reference shape itself).
+function _opt_block_nodes(family::Symbol, mapfn)
+    pts = NTuple{3,Float64}[]
+    if family === :quad9
+        for (a,b) in _OPT_QUA_NODES
+            push!(pts, mapfn((Float64(a-2), Float64(b-2), 0.0)))
+        end
+    elseif family === :hex27
+        for k in 1:8
+            push!(pts, mapfn(_OPT_HEX_CORNERS[k]))
+        end
+        for (i,j) in _OPT_HEX_EDGES
+            push!(pts, mapfn(0.5 .* (_OPT_HEX_CORNERS[i] .+ _OPT_HEX_CORNERS[j])))
+        end
+        for f in _OPT_HEX_FACES
+            push!(pts, mapfn(0.25 .* (_OPT_HEX_CORNERS[f[1]] .+
+                _OPT_HEX_CORNERS[f[2]] .+ _OPT_HEX_CORNERS[f[3]] .+
+                _OPT_HEX_CORNERS[f[4]])))
+        end
+        c = (0.0,0.0,0.0)
+        for k in 1:8
+            c = c .+ _OPT_HEX_CORNERS[k]
+        end
+        push!(pts, mapfn(0.125 .* c))
+    elseif family === :pri18
+        pc = ((0.,0.,0.),(1.,0.,0.),(0.,1.,0.),(0.,0.,1.),(1.,0.,1.),(0.,1.,1.))
+        for k in 1:6
+            push!(pts, mapfn(pc[k]))
+        end
+        for (i,j) in _OPT_PRI_EDGES
+            push!(pts, mapfn(0.5 .* (pc[i] .+ pc[j])))
+        end
+        for f in _OPT_PRI_QFACES
+            push!(pts, mapfn(0.25 .* (pc[f[1]] .+ pc[f[2]] .+
+                                      pc[f[3]] .+ pc[f[4]])))
+        end
+    elseif family === :tri6
+        for p in ((0.,0.),(1.,0.),(0.,1.),(0.5,0.),(0.5,0.5),(0.,0.5))
+            push!(pts, mapfn((p[1], p[2], 0.0)))
+        end
+    else
+        error("unknown family $family")
+    end
+    return pts
+end
+
+# Intern a list of per-element node-position vectors into shared coordinates
+# and an nnodes × nelements connectivity; returns (coords, conn, positions).
+function _opt_assemble(families::Vector{Symbol}, maps::Vector)
+    rows = Dict(:tri6=>6, :quad9=>9, :hex27=>27, :pri18=>18)
+    index = Dict{NTuple{3,Float64},Int32}()
+    nodes = NTuple{3,Float64}[]
+    per_elem = [ _opt_block_nodes(f, maps[i]) for (i,f) in enumerate(families)]
+    conn = Matrix{Int32}(undef, rows[first(families)], length(per_elem))
+    for (t, pts) in enumerate(per_elem)
+        for (k, p) in enumerate(pts)
+            # Canonicalize -0.0 → +0.0: Dict keys compare with isequal, and
+            # isequal(-0.0, 0.0) is false — without this, mirrored/rotated
+            # fixtures fail to share nodes.
+            key = (p[1]+0.0, p[2]+0.0, p[3]+0.0)
+            conn[k,t] = get!(index, key) do
+                push!(nodes, key); Int32(length(nodes))
+            end
+        end
+    end
+    coords = Matrix{Float64}(undef, 3, length(nodes))
+    for (i,p) in enumerate(nodes)
+        coords[:,i] = collect(p)
+    end
+    return coords, conn, index
+end
+
+# ── independent scaled-Jacobian oracles (loop form) ───────────────────────
+_opt_lag(x)  = (0.5x*(x-1.0), 1.0-x*x, 0.5x*(x+1.0))
+_opt_dlag(x) = (x-0.5, -2.0x, x+0.5)
+
+function _opt_oracle_grads(::Val{9}, u, v, w)
+    lu=_opt_lag(u); du=_opt_dlag(u); lv=_opt_lag(v); dv=_opt_dlag(v)
+    return [(du[a]*lv[b], lu[a]*dv[b], 0.0) for (a,b) in _OPT_QUA_NODES]
+end
+function _opt_oracle_grads(::Val{12}, u, v, w)
+    lu=_opt_lag(u); du=_opt_dlag(u); lv=_opt_lag(v); dv=_opt_dlag(v)
+    lw=_opt_lag(w); dw=_opt_dlag(w)
+    return [(du[a]*lv[b]*lw[c], lu[a]*dv[b]*lw[c], lu[a]*lv[b]*dw[c])
+            for (a,b,c) in HighOrder._P2HEX_NODES]
+end
+function _opt_oracle_grads(::Val{13}, r, s, w)
+    L1=1.0-r-s; L2=r; L3=s
+    tv=(L1*(2L1-1), L2*(2L2-1), L3*(2L3-1), 4L1*L2, 4L2*L3, 4L1*L3)
+    dr=(1-4L1, 4L2-1, 0.0, 4(L1-L2), 4L3, -4L3)
+    ds=(1-4L1, 0.0, 4L3-1, -4L2, 4L2, 4(L1-L3))
+    lw=_opt_lag(w); dw=_opt_dlag(w)
+    return [(dr[a]*lw[b], ds[a]*lw[b], tv[a]*dw[b])
+            for (a,b) in HighOrder._P2PRI_NODES]
+end
+function _opt_oracle_J(coords, conn, t, grads)
+    J = zeros(3,3)
+    for (k,g) in enumerate(grads)
+        v = conn[k,t]
+        for d in 1:3
+            J[d,1]+=g[1]*coords[d,v]; J[d,2]+=g[2]*coords[d,v]
+            J[d,3]+=g[3]*coords[d,v]
+        end
+    end
+    return J
+end
+_opt_oracle_det3(J) = J[1,1]*(J[2,2]*J[3,3]-J[2,3]*J[3,2]) -
+    J[1,2]*(J[2,1]*J[3,3]-J[2,3]*J[3,1]) +
+    J[1,3]*(J[2,1]*J[3,2]-J[2,2]*J[3,1])
+_opt_oracle_scaled(J) = _opt_oracle_det3(J) /
+    (norm(J[:,1])*norm(J[:,2])*norm(J[:,3]))
+_opt_oracle_scaled2d(J) = norm(cross(J[:,1],J[:,2])) /
+    (norm(J[:,1])*norm(J[:,2]))
+
+# Minimum scaled Jacobian measure over a denser lattice than the engine's
+# interpolation-point samples: [-1,1]² for the quad, the r+s≤1 triangle ×
+# [-1,1] for the prism, [-1,1]³ for the hex.
+function _opt_oracle_min_scaled(coords, conn, kind, ts=axes(conn,2))
+    mn = Inf
+    if kind == Val(9)
+        grid = range(-1., 1.; length=3)
+        for t in ts, u in grid, v in grid
+            J = _opt_oracle_J(coords, conn, t,
+                              _opt_oracle_grads(kind, u, v, 0.0))
+            w = _opt_oracle_scaled2d(J)
+            w < mn && (mn = w)
+        end
+    elseif kind == Val(13)
+        for t in ts, r in range(0., 1.; length=3),
+                     s in range(0., 1.; length=3),
+                     w in range(-1., 1.; length=3)
+            r + s > 1 && continue
+            J = _opt_oracle_J(coords, conn, t,
+                              _opt_oracle_grads(kind, r, s, w))
+            v = _opt_oracle_scaled(J)
+            v < mn && (mn = v)
+        end
+    else
+        for t in ts, u in range(-1., 1.; length=3),
+                     v in range(-1., 1.; length=3),
+                     w in range(-1., 1.; length=3)
+            J = _opt_oracle_J(coords, conn, t,
+                              _opt_oracle_grads(kind, u, v, w))
+            v = _opt_oracle_scaled(J)
+            v < mn && (mn = v)
+        end
+    end
+    return mn
+end
+
+@testset "HighOrderOptimize multi-family engine" begin
+    @testset "Quad9 center relocates; edge mids stay fixed" begin
+        coords, q9, index = _opt_assemble([:quad9], [identity])
+        center = Int(index[(0.0,0.0,0.0)])
+        target = copy(coords[:,center])
+        coords[:,center] .+= (-0.18, 0.06, 0.0)   # in-plane warp of the map
+        warped = copy(coords[:,center])
+        @test p2_quad_min_jacobian(coords, q9) > 0   # still certified
+        min0 = _opt_oracle_min_scaled(coords, q9, Val(9))
+        before = copy(coords)
+        moved = optimize_p2_interior!(coords, ((Int32(10), q9),),
+                                      trues(size(coords,2));
+                                      itermax=60, passes=10)
+        @test moved[1] >= 1
+        @test p2_quad_min_jacobian(coords, q9) > 0
+        @test _opt_oracle_min_scaled(coords, q9, Val(9)) > min0
+        # center moved toward the square centroid; all other nodes bitwise
+        @test norm(coords[:,center] .- target) < norm(warped .- target)
+        for v in axes(coords,2)
+            v == center && continue
+            @test coords[:,v] == before[:,v]
+        end
+    end
+
+    @testset "Tri6 interior wire mid is a fixed surface support" begin
+        # Two triangles sharing the diagonal edge: its mid is interior to the
+        # wire complex but is still a surface support — surface-family edge
+        # mids are never candidates.  Tri B is a 180° in-plane rotation about
+        # the shared edge (orientation preserving, certified).
+        rot = p -> (1.0 - p[1], 1.0 - p[2], 0.0)
+        coords, t6, index = _opt_assemble([:tri6,:tri6], [identity, rot])
+        shared = Int(index[(0.5,0.5,0.0)])
+        coords[:,shared] .+= (0.12, -0.12, 0.0)
+        @test p2_tri_min_jacobian(
+            P2TriMesh(coords, t6; _check_geometry=false)) > 0
+        before = copy(coords)
+        moved = optimize_p2_interior!(coords, ((Int32(9), t6),),
+                                      trues(size(coords,2));
+                                      itermax=60, passes=10)
+        @test moved[1] == 0
+        @test coords == before
+    end
+
+    @testset "Hex27 body center relocates on a single element" begin
+        coords, h27, index = _opt_assemble([:hex27], [identity])
+        body = Int(index[(0.5,0.5,0.5)])
+        target = copy(coords[:,body])
+        coords[:,body] .+= (-0.13, 0.05, -0.09)
+        warped = copy(coords[:,body])
+        @test p2_hex_min_jacobian(coords, h27) > 0
+        min0 = _opt_oracle_min_scaled(coords, h27, Val(12))
+        before = copy(coords)
+        moved = optimize_p2_interior!(coords, ((Int32(12), h27),),
+                                      trues(size(coords,2));
+                                      itermax=60, passes=10)
+        @test moved[1] >= 1
+        @test p2_hex_min_jacobian(coords, h27) > 0
+        @test _opt_oracle_min_scaled(coords, h27, Val(12)) > min0
+        @test norm(coords[:,body] .- target) < norm(warped .- target)
+        for v in axes(coords,2)
+            v == body && continue
+            @test coords[:,v] == before[:,v]
+        end
+    end
+
+    @testset "Hex27 interior-face center relocates; boundary supports fixed" begin
+        coords, h27, index = _opt_assemble([:hex27,:hex27],
+            [identity, p -> (p[1] .+ 1.0, p[2], p[3])])
+        face_mid = Int(index[(1.0,0.5,0.5)])   # shared-face center
+        target = copy(coords[:,face_mid])
+        before = copy(coords)
+        coords[:,face_mid] .+= (0.0, -0.14, 0.11)
+        warped = copy(coords[:,face_mid])
+        @test p2_hex_min_jacobian(coords, h27) > 0
+        min0 = _opt_oracle_min_scaled(coords, h27, Val(12))
+        moved = optimize_p2_interior!(coords, ((Int32(12), h27),),
+                                      trues(size(coords,2));
+                                      itermax=60, passes=10)
+        @test moved[1] >= 1
+        @test p2_hex_min_jacobian(coords, h27) > 0
+        @test _opt_oracle_min_scaled(coords, h27, Val(12)) > min0
+        @test norm(coords[:,face_mid] .- target) < norm(warped .- target)
+        # Corners, boundary mids, and the shared-face edge mids touching
+        # boundary facets stay bitwise unchanged; the only other candidates
+        # are the two element-interior body centers.
+        movers = Set((face_mid, Int(index[(0.5,0.5,0.5)]),
+                      Int(index[(1.5,0.5,0.5)])))
+        for (p,i) in index
+            Int(i) in movers && continue
+            @test coords[:,Int(i)] == before[:,Int(i)]
+        end
+    end
+
+    @testset "single Prism18 is a certified no-op" begin
+        # Every facet of a lone prism is complex boundary and type 13 has no
+        # element-interior slot → no candidates at all.
+        coords, p18, _ = _opt_assemble([:pri18], [identity])
+        @test p2_prism_min_jacobian(coords, p18) > 0
+        before = copy(coords)
+        moved = optimize_p2_interior!(coords, ((Int32(13), p18),),
+                                      trues(size(coords,2));
+                                      itermax=60, passes=10)
+        @test moved[1] == 0
+        @test coords == before
+    end
+
+    @testset "Prism18 interior quad-face center relocates" begin
+        # Two prisms sharing the x=0 quad face; prism B is a 90° rotation
+        # about z (orientation preserving — a mirror would be uncertified).
+        rot = p -> (-p[2], p[1], p[3])
+        coords, p18, index = _opt_assemble([:pri18,:pri18], [identity, rot])
+        face_mid = Int(index[(0.0,0.5,0.5)])
+        target = copy(coords[:,face_mid])
+        before = copy(coords)
+        coords[:,face_mid] .+= (0.0, -0.14, 0.10)
+        warped = copy(coords[:,face_mid])
+        @test p2_prism_min_jacobian(coords, p18) > 0
+        min0 = _opt_oracle_min_scaled(coords, p18, Val(13))
+        moved = optimize_p2_interior!(coords, ((Int32(13), p18),),
+                                      trues(size(coords,2));
+                                      itermax=60, passes=10)
+        @test moved[1] >= 1
+        @test p2_prism_min_jacobian(coords, p18) > 0
+        @test _opt_oracle_min_scaled(coords, p18, Val(13)) > min0
+        @test norm(coords[:,face_mid] .- target) < norm(warped .- target)
+        for (p,i) in index
+            Int(i) == face_mid && continue
+            @test coords[:,Int(i)] == before[:,Int(i)]
+        end
+    end
+
+    @testset "uncertified families no-op and exclude shared nodes" begin
+        # A pure Pyr14 block is skipped: it has no boolean Bernstein bound.
+        pyr = reshape(Int32.(collect(1:14)), 14, 1)
+        coords = repeat(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1], 1, 4)[:,1:14]
+        before = copy(coords)
+        moved = optimize_p2_interior!(coords, ((Int32(14), pyr),),
+                                      trues(size(coords,2)))
+        @test moved == (0, Inf, Inf, 0, 0)
+        @test coords == before
+        # A node shared between a certified Tet10 interior edge and a Tri6
+        # block is a cross-family support: it never moves even though the
+        # same edge is a Tet10-interior candidate.
+        coords2, tet10, _, interior_mids, _ =
+            _opt_fan10(moves=Dict((1,5)=>(_OPT_SHIFT,-_OPT_SHIFT,0.0)))
+        bad_mid = only(mid for (mid,e) in interior_mids
+                       if e == (Int32(1),Int32(5)))
+        tri = Matrix{Int32}(undef,6,1)
+        tri[:,1] = Int32[tet10[1,1], tet10[5,1], tet10[2,1],
+                         bad_mid, tet10[6,1], tet10[7,1]]
+        expected = copy(coords2[:,bad_mid])
+        optimize_p2_interior!(
+            coords2, ((Int32(11), tet10), (Int32(9), tri)),
+            trues(size(coords2,2)); itermax=60, passes=10)
+        @test coords2[:,bad_mid] == expected
+    end
+
+    @testset "set_order(2) on a Quad9 surface relocates the interior node" begin
+        # A discrete surface entity carries owner dimension 2: the mask
+        # admits the Quad9 element-interior node while every edge mid stays
+        # a surface support.  The center is warped in-plane; the pass pulls
+        # it back toward the square centroid under the exact Quad9 Gram
+        # certificate.
+        coords, q9, index = _opt_assemble([:quad9], [identity])
+        center = Int(index[(0.0,0.0,0.0)])
+        coords[:,center] .+= (-0.18, 0.06, 0.0)
+        target = Float64[0.0, 0.0, 0.0]
+        warped = copy(coords[:,center])
+        api = API
+        api.initialize()
+        try
+            api.option("Mesh.HighOrderOptimize", 1)
+            api.model.add_discrete_entity(2, 7)
+            api.mesh.add_nodes(2, 7,
+                UInt64.(collect(axes(coords,2))), vec(coords))
+            api.mesh.add_elements_by_type(7, 10,
+                UInt64.(collect(axes(q9,2))), UInt64.(vec(q9)))
+            api.mesh.generate(0)
+            api.mesh.set_order(2)
+            for v in axes(coords,2)
+                p,_,_,_ = api.mesh.get_node(UInt64(v))
+                if v == center
+                    @test norm(p .- target) < norm(warped .- target)
+                else
+                    @test p == coords[:,v]
+                end
+            end
+        finally
+            api.option("Mesh.HighOrderOptimize", 0)
+            api.finalize()
+        end
+    end
 end

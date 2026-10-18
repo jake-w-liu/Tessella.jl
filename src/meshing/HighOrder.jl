@@ -46,7 +46,7 @@ export P2Mesh, P2SegMesh, P2TriMesh, p2_segmesh, p2_tetmesh, p2_trimesh,
        write_msh_p2, curve_to_curve!, curve_to_cylinder!, curve_to_surface!,
        p2_min_jacobian, p2_seg_min_jacobian, p2_tri_min_jacobian,
        p2_quad_min_jacobian, p2_hex_min_jacobian, p2_prism_min_jacobian,
-       optimize_p2_tet_interior!
+       optimize_p2_tet_interior!, optimize_p2_interior!
 
 const _P2_EDGE_SLOTS = ((5, 1, 2), (6, 2, 3), (7, 3, 1),
                         (8, 1, 4), (9, 3, 4), (10, 2, 4))
@@ -2285,98 +2285,287 @@ function p2_prism_min_jacobian(coords, pri18)
 end
 
 # ════════════════════════════════════════════════════════════════════════════════
-# Mesh.HighOrderOptimize=1 — bounded interior mid-node relocation (OPT01 slice).
+# Mesh.HighOrderOptimize=1 — bounded interior high-order-node relocation (OPT01).
 # ════════════════════════════════════════════════════════════════════════════════
-# Only mid-edge nodes whose supporting primary edge is strictly interior to the
-# tetrahedral volume are candidates: mid nodes on boundary faces/edges carry
-# the CAD-projected geometry supports and are never moved.  A candidate
-# position is accepted only when (a) every incident element keeps its exact
-# global cubic-Bernstein positivity certificate — so no relocation can flip a
-# Jacobian sign — and (b) the minimum scaled Jacobian determinant sampled at
-# the ten type-11 interpolation points of the incident elements strictly
-# improves.  Elements that fail the certificate on entry are frozen: the pass
-# improves certified-valid meshes and never repairs (or further degrades)
-# folded ones.
+# Generic certificate-gated pass over the full-P2 families holding an exact
+# whole-domain Bernstein positivity bound in this module — gmsh type 9 (Tri6,
+# degree-4 Gram bound), type 10 (Quad9, degree-(6,6) Gram bound), type 11
+# (Tet10, degree-3 determinant bound), type 12 (Hex27, degree-(5,5,5)
+# determinant bound) and type 13 (Prism18, product triangle-degree-4 ×
+# line-degree-5 determinant bound).  Type 14 (Pyr14) carries only the
+# throw-based interval/Bernstein sign certificate of HighOrderPyramid.jl —
+# no boolean bound here, and its collapsed apex is a degenerate sample
+# point — so pyramid blocks stay unoptimized, and every node referenced
+# by an uncertified block is excluded as a candidate.
+#
+# A node moves only when it is strictly interior to ONE certified family:
+#   * a mid-edge node whose supporting primary edge touches no boundary
+#     facet of the combined family complex — mids on boundary faces/edges
+#     and on owner-group interfaces carry the CAD-projected geometry
+#     supports and never move, and surface-family edge mids (Tri6, Quad9)
+#     are never candidates at all since even interior wire edges support
+#     the CAD surface (parametric surface sliding is a separate stage);
+#   * a face-center node whose supporting primary face is an interior
+#     facet of the complex (Hex27, Prism18);
+#   * an element-interior node (Quad9 center, Hex27 body center);
+#   * and only when no other block family references it at all — a mid
+#     shared between a surface and a volume element, or between two
+#     different families, is a geometric support and stays fixed.
+# Every candidate position must keep the exact Bernstein positivity
+# certificate on all incident elements AND strictly improve the minimum
+# scaled Jacobian measure sampled at the family's interpolation points —
+# det(J)/(|c1|·|c2|·|c3|) for volume families, |c1×c2|/(|c1|·|c2|) for
+# surface families (the unsigned scaled-Jacobian analogue of the 2-D map,
+# since a Gram bound cannot rank element orientation).  Elements failing
+# the certificate on entry are frozen: the pass improves certified-valid
+# meshes and never repairs (or further degrades) folded ones.
 
-# The ten type-11 interpolation points of the reference tet (corners + edge
-# midpoints) — the sample set of the minimum scaled-Jacobian quality measure.
+# Interpolation-point sample sets per family.  The ten type-11 points are
+# the corners and edge midpoints of the reference tet; the surface
+# families use the node coordinates of their own reference elements, and
+# the volume families the same tensor/product layouts — the
+# `lagrange_nodes` coordinates of each type, listed in gmsh node order.
 const _P2_OPT_SAMPLES = (
     (0.,0.,0.), (1.,0.,0.), (0.,1.,0.), (0.,0.,1.),
     (0.5,0.,0.), (0.5,0.5,0.), (0.,0.5,0.),
     (0.,0.,0.5), (0.,0.5,0.5), (0.5,0.,0.5))
+const _P2OPT_TRI6_SAMPLES = (
+    (0.,0.,0.), (1.,0.,0.), (0.,1.,0.),
+    (0.5,0.,0.), (0.,0.5,0.), (0.5,0.5,0.))
+const _P2OPT_QUAD9_SAMPLES = Tuple(
+    (Float64(a-2), Float64(b-2), 0.0) for (a, b) in _P2QUAD_NODES)
+const _P2OPT_HEX27_SAMPLES = Tuple(
+    (Float64(a-2), Float64(b-2), Float64(c-2)) for (a, b, c) in _P2HEX_NODES)
+const _P2OPT_PRI18_SAMPLES = let rtri =
+        ((0.,0.), (1.,0.), (0.,1.), (0.5,0.), (0.5,0.5), (0.,0.5))
+    Tuple((rtri[a][1], rtri[a][2], Float64(bw-2)) for (a, bw) in _P2PRI_NODES)
+end
 
-# Scaled Jacobian determinant detJ/(|c1|·|c2|·|c3|) of the isoparametric map at
-# reference point (r,s,u); degenerate or non-finite Jacobian columns give -Inf.
-@inline function _p2_opt_scaled_jac(coords, conn, t, r, s, u)
-    grads=_p2_grads(r,s,u)
+# Per-family relocation descriptors.  `facets` are the primary-node cycles
+# whose incidence-1 subset bounds the family complex — element edges for
+# surface families, faces for volume families; `edge_slots` map mid-edge
+# slots to their endpoint corners; `face_slots` map face-center slots to
+# the primary facet they interpolate; `interior_slots` are element-interior
+# slots that can never touch a boundary facet.
+const _P2OPT_FAMILIES = (
+    (kind=Val(9), msh=Int32(9), rows=6, primary=3,
+     edge_slots=_P2TRI_EDGE_SLOTS, face_slots=(), interior_slots=(),
+     facets=((1,2),(2,3),(3,1)),
+     samples=_P2OPT_TRI6_SAMPLES, volume=false),
+    (kind=Val(10), msh=Int32(10), rows=9, primary=4,
+     edge_slots=((5,1,2),(6,2,3),(7,3,4),(8,4,1)),
+     face_slots=(), interior_slots=(9,),
+     facets=((1,2),(2,3),(3,4),(4,1)),
+     samples=_P2OPT_QUAD9_SAMPLES, volume=false),
+    (kind=Val(11), msh=Int32(11), rows=10, primary=4,
+     edge_slots=_P2_EDGE_SLOTS, face_slots=(), interior_slots=(),
+     facets=((1,3,2),(1,2,4),(1,4,3),(4,2,3)),
+     samples=_P2_OPT_SAMPLES, volume=true),
+    (kind=Val(12), msh=Int32(12), rows=27, primary=8,
+     edge_slots=((9,1,2),(10,1,4),(11,1,5),(12,2,3),(13,2,6),(14,3,4),
+                 (15,3,7),(16,4,8),(17,5,6),(18,5,8),(19,6,7),(20,7,8)),
+     face_slots=((21,(1,4,3,2)),(22,(1,2,6,5)),(23,(1,5,8,4)),
+                 (24,(2,3,7,6)),(25,(3,4,8,7)),(26,(5,6,7,8))),
+     interior_slots=(27,),
+     facets=((1,4,3,2),(1,2,6,5),(1,5,8,4),(2,3,7,6),(3,4,8,7),(5,6,7,8)),
+     samples=_P2OPT_HEX27_SAMPLES, volume=true),
+    (kind=Val(13), msh=Int32(13), rows=18, primary=6,
+     edge_slots=((7,1,2),(8,1,3),(9,1,4),(10,2,3),(11,2,5),(12,3,6),
+                 (13,4,5),(14,4,6),(15,5,6)),
+     face_slots=((16,(1,2,5,4)),(17,(1,4,6,3)),(18,(2,3,6,5))),
+     interior_slots=(),
+     facets=((1,3,2),(4,5,6),(1,2,5,4),(1,4,6,3),(2,3,6,5)),
+     samples=_P2OPT_PRI18_SAMPLES, volume=true))
+
+# The certified relocation families by gmsh type; `nothing` for every other
+# block type (Pyr14, linear cells, points), whose nodes are only tracked as
+# exclusions.
+function _p2opt_family(msh::Integer)
+    for fam in _P2OPT_FAMILIES
+        fam.msh == msh && return fam
+    end
+    return nothing
+end
+
+# Shape-function gradients of each certified family at a reference point —
+# the same tables the exact Bernstein certificates are built from, in Float64.
+# 1-D quadratic Lagrange values/derivatives on [-1,1] at nodes (-1,0,+1):
+@inline _p2opt_lagrange1(x) = (0.5x*(x-1.0), 1.0-x*x, 0.5x*(x+1.0))
+@inline _p2opt_dlagrange1(x) = (x-0.5, -2.0x, x+0.5)
+# Type-9 triangle values in node order (corners, then edge (1,2),(2,3),(3,1)):
+@inline function _p2opt_tri_values(r, s)
+    L1=1.0-r-s; L2=r; L3=s
+    return (L1*(2L1-1), L2*(2L2-1), L3*(2L3-1), 4L1*L2, 4L2*L3, 4L1*L3)
+end
+
+@inline function _p2opt_grads(::Val{9}, r, s, w)
+    dr, ds = _p2tri_grads(r, s)
+    return ((dr[1],ds[1],0.0),(dr[2],ds[2],0.0),(dr[3],ds[3],0.0),
+            (dr[4],ds[4],0.0),(dr[5],ds[5],0.0),(dr[6],ds[6],0.0))
+end
+@inline function _p2opt_grads(::Val{10}, u, v, w)
+    lu=_p2opt_lagrange1(u); du=_p2opt_dlagrange1(u)
+    lv=_p2opt_lagrange1(v); dv=_p2opt_dlagrange1(v)
+    return ntuple(Val(9)) do k
+        a, b = _P2QUAD_NODES[k]
+        (du[a]*lv[b], lu[a]*dv[b], 0.0)
+    end
+end
+@inline _p2opt_grads(::Val{11}, r, s, t) = _p2_grads(r, s, t)
+@inline function _p2opt_grads(::Val{12}, u, v, w)
+    lu=_p2opt_lagrange1(u); du=_p2opt_dlagrange1(u)
+    lv=_p2opt_lagrange1(v); dv=_p2opt_dlagrange1(v)
+    lw=_p2opt_lagrange1(w); dw=_p2opt_dlagrange1(w)
+    return ntuple(Val(27)) do n
+        a, b, c = _P2HEX_NODES[n]
+        (du[a]*lv[b]*lw[c], lu[a]*dv[b]*lw[c], lu[a]*lv[b]*dw[c])
+    end
+end
+@inline function _p2opt_grads(::Val{13}, r, s, w)
+    dr, ds = _p2tri_grads(r, s)
+    tv = _p2opt_tri_values(r, s)
+    lw=_p2opt_lagrange1(w); dw=_p2opt_dlagrange1(w)
+    return ntuple(Val(18)) do n
+        a, b = _P2PRI_NODES[n]
+        (dr[a]*lw[b], ds[a]*lw[b], tv[a]*dw[b])
+    end
+end
+
+# The family's exact Bernstein positivity certificate — the relocation gate.
+@inline _p2opt_certify(::Val{9},  coords, conn, t) =
+    _p2tri_bernstein_bound(coords, conn, t)[1]
+@inline _p2opt_certify(::Val{10}, coords, conn, t) =
+    _p2quad_bernstein_bound(coords, conn, t)[1]
+@inline _p2opt_certify(::Val{11}, coords, conn, t) =
+    _p2_bernstein_bound(coords, conn, t)[1]
+@inline _p2opt_certify(::Val{12}, coords, conn, t) =
+    _p2hex_bernstein_bound(coords, conn, t)[1]
+@inline _p2opt_certify(::Val{13}, coords, conn, t) =
+    _p2pri_bernstein_bound(coords, conn, t)[1]
+_p2opt_certify(::Val, coords, conn, t) = false
+
+# Scaled Jacobian measure of the isoparametric map at reference point
+# (r,s,u): detJ/(|c1|·|c2|·|c3|) for volume families, |c1×c2|/(|c1|·|c2|)
+# for surface families; degenerate or non-finite Jacobian columns give -Inf.
+@inline function _p2opt_scaled_jac(coords, fam, conn, t, r, s, u)
+    grads=_p2opt_grads(fam.kind, r, s, u)
     j11=0.0;j12=0.0;j13=0.0;j21=0.0;j22=0.0;j23=0.0;j31=0.0;j32=0.0;j33=0.0
-    @inbounds for k in 1:10
+    @inbounds for k in eachindex(grads)
         v=conn[k,t]; x=coords[1,v]; y=coords[2,v]; z=coords[3,v]; g=grads[k]
         j11+=x*g[1]; j12+=x*g[2]; j13+=x*g[3]
         j21+=y*g[1]; j22+=y*g[2]; j23+=y*g[3]
         j31+=z*g[1]; j32+=z*g[2]; j33+=z*g[3]
     end
-    den = hypot(j11,j21,j31)*hypot(j12,j22,j32)*hypot(j13,j23,j33)
-    (isfinite(den) && den > 0) || return -Inf
-    return (j11*(j22*j33-j23*j32) - j12*(j21*j33-j23*j31) +
-            j13*(j21*j32-j22*j31)) / den
+    if fam.volume
+        den = hypot(j11,j21,j31)*hypot(j12,j22,j32)*hypot(j13,j23,j33)
+        (isfinite(den) && den > 0) || return -Inf
+        return (j11*(j22*j33-j23*j32) - j12*(j21*j33-j23*j31) +
+                j13*(j21*j32-j22*j31)) / den
+    else
+        den = hypot(j11,j21,j31)*hypot(j12,j22,j32)
+        (isfinite(den) && den > 0) || return -Inf
+        return hypot(j21*j32-j31*j22, j31*j12-j11*j32,
+                     j11*j22-j21*j12) / den
+    end
 end
 
-# Minimum scaled Jacobian over the element's ten interpolation points.
-function _p2_opt_elem_jac(coords, conn, t::Integer)
+# Minimum scaled Jacobian measure over the element's interpolation points.
+function _p2opt_elem_jac(coords, fam, conn, t::Integer)
     mn = Inf
-    @inbounds for p in _P2_OPT_SAMPLES
-        v = _p2_opt_scaled_jac(coords, conn, t, p[1], p[2], p[3])
+    @inbounds for p in fam.samples
+        v = _p2opt_scaled_jac(coords, fam, conn, t, p[1], p[2], p[3])
         v < mn && (mn = v)
     end
     return mn
 end
 
-# Minimum scaled Jacobian over the incident element list of a node —
-# `inc` holds `(block_index, column)` pairs.
-function _p2_opt_node_jac(coords, conns, inc)
+# Minimum scaled Jacobian measure over the incident element list of a node —
+# `inc` holds `(block_index, column)` pairs into `(fams, conns)`.
+function _p2opt_node_jac(coords, fams, conns, inc)
     mn = Inf
     @inbounds for (b, t) in inc
-        v = _p2_opt_elem_jac(coords, conns[b], t)
+        v = _p2opt_elem_jac(coords, fams[b], conns[b], t)
         v < mn && (mn = v)
     end
     return mn
 end
 
-# Undirected primary edges lying on a boundary face of the combined tet
-# complex; mid nodes supported on these edges are geometric boundary supports.
-function _p2_tet10_boundary_edges(blocks)
-    ncols = 0
-    for conn in blocks
-        ncols += size(conn, 2)
+# Sorted global-vertex key of a primary facet cycle — the identity shared by
+# coincident facets across elements and across the API's owner-group split.
+function _p2opt_facet_key(conn, t::Integer, facet)
+    key = Vector{Int32}(undef, length(facet))
+    @inbounds for i in eachindex(facet)
+        key[i] = conn[facet[i], t]
     end
-    ncols == 0 && return Set{NTuple{2,Int32}}()
-    prims = Matrix{Int32}(undef, 4, ncols)
-    col = 1
-    @inbounds for conn in blocks, t in axes(conn, 2)
-        for k in 1:4
-            prims[k, col] = conn[k, t]
-        end
-        col += 1
-    end
-    bnd, _ = boundary_faces(prims)
-    edges = Set{NTuple{2,Int32}}()
-    for f in bnd
-        a, b, c = f[1], f[2], f[3]
-        push!(edges, (min(a,b),max(a,b)))
-        push!(edges, (min(b,c),max(b,c)))
-        push!(edges, (min(a,c),max(a,c)))
-    end
-    return edges
+    return Tuple(sort!(key))
 end
 
-# One bounded descent for mid node `v` supported on a primary edge of length
-# `h/fraction`.  Mutates `coords` in place; returns `(moved, evals)` where
+# Boundary supports of one family inside a block list: facets with combined
+# incidence exactly one (the complex boundary), reported as the set of
+# undirected primary edges they contain plus the sorted facet keys
+# themselves for the face-center test.  Facet edges come from the
+# connectivity's own cycle order — the sorted key is only the identity.
+function _p2opt_family_boundary(fam, conns)
+    inc = Dict{Tuple{Vararg{Int32}},Int}()
+    cycleof = Dict{Tuple{Vararg{Int32}},Tuple{Vararg{Int32}}}()
+    @inbounds for conn in conns, t in axes(conn, 2)
+        for facet in fam.facets
+            key = _p2opt_facet_key(conn, t, facet)
+            inc[key] = get(inc, key, 0) + 1
+            haskey(cycleof, key) ||
+                (cycleof[key] = Tuple(conn[facet[i], t] for i in eachindex(facet)))
+        end
+    end
+    edges = Set{NTuple{2,Int32}}()
+    facets = Set{Tuple{Vararg{Int32}}}()
+    for (f, c) in inc
+        c == 1 || continue
+        push!(facets, f)
+        cycle = cycleof[f]
+        n = length(cycle)
+        for i in 1:n
+            a, b = cycle[i], cycle[i==n ? 1 : i+1]
+            push!(edges, minmax(a, b))
+        end
+    end
+    return edges, facets
+end
+
+# Longest primary edge over the incident elements of a node — the step scale
+# for candidates whose support is not a primary edge (face/body centers).
+function _p2opt_incident_diameter(coords, fams, conns, inc)
+    d = 0.0
+    @inbounds for (b, t) in inc
+        conn = conns[b]
+        for facet in fams[b].facets
+            n = length(facet)
+            for i in 1:n
+                a=conn[facet[i],t]; c=conn[facet[i==n ? 1 : i+1],t]
+                l = hypot(coords[1,a]-coords[1,c],
+                          coords[2,a]-coords[2,c],
+                          coords[3,a]-coords[3,c])
+                l > d && (d = l)
+            end
+        end
+    end
+    return d
+end
+
+# Register `node` as a high-order node of family `msh`: references by two
+# different certified families mark it -1 — a cross-family support that can
+# never move.
+@inline function _p2opt_claim!(midfam, node::Int32, msh::Int32)
+    midfam[node] = get(midfam, node, msh) == msh ? msh : Int32(-1)
+    return nothing
+end
+
+# One bounded descent for node `v` with incident list `inc_v` and initial
+# step `h`.  Mutates `coords` in place; returns `(moved, evals)` where
 # `evals` counts incident-minimum scaled-Jacobian evaluations performed.
-function _p2_opt_relocate!(coords, conns, inc_v, v::Integer,
+function _p2_opt_relocate!(coords, fams, conns, inc_v, v::Integer,
                            h::Float64, hmin::Float64,
                            itermax::Int, tolerance::Float64)
-    f_old = _p2_opt_node_jac(coords, conns, inc_v)
+    f_old = _p2opt_node_jac(coords, fams, conns, inc_v)
     moved = false
     evals = 1
     iters = 0
@@ -2388,13 +2577,13 @@ function _p2_opt_relocate!(coords, conns, inc_v, v::Integer,
         @inbounds begin
             ox = coords[1,v]; oy = coords[2,v]; oz = coords[3,v]
             coords[1,v] = ox + h
-            gx = _p2_opt_node_jac(coords, conns, inc_v) - f_old
+            gx = _p2opt_node_jac(coords, fams, conns, inc_v) - f_old
             coords[1,v] = ox
             coords[2,v] = oy + h
-            gy = _p2_opt_node_jac(coords, conns, inc_v) - f_old
+            gy = _p2opt_node_jac(coords, fams, conns, inc_v) - f_old
             coords[2,v] = oy
             coords[3,v] = oz + h
-            gz = _p2_opt_node_jac(coords, conns, inc_v) - f_old
+            gz = _p2opt_node_jac(coords, fams, conns, inc_v) - f_old
             coords[3,v] = oz
         end
         evals += 3
@@ -2408,11 +2597,11 @@ function _p2_opt_relocate!(coords, conns, inc_v, v::Integer,
                 end
                 certified = true
                 @inbounds for (b, t) in inc_v
-                    _p2_bernstein_bound(coords, conns[b], t)[1] ||
+                    _p2opt_certify(fams[b].kind, coords, conns[b], t) ||
                         (certified = false; break)
                 end
                 f_new = certified ?
-                    _p2_opt_node_jac(coords, conns, inc_v) : -Inf
+                    _p2opt_node_jac(coords, fams, conns, inc_v) : -Inf
                 evals += 1
                 if f_new > f_old + tolerance
                     f_old = f_new
@@ -2430,58 +2619,65 @@ function _p2_opt_relocate!(coords, conns, inc_v, v::Integer,
 end
 
 """
-    optimize_p2_tet_interior!(coords, blocks, movable;
+    optimize_p2_interior!(coords, blocks, movable;
         itermax=100, passes=25, fraction=0.2, hmin_fraction=1e-3,
-        tolerance=1e-10, fixed_edges=nothing,
+        tolerance=1e-10, fixed_edges=nothing, fixed_facets=nothing,
         threshold_min=-Inf, threshold_max=Inf)
         -> (moved, min_before, min_after, sweeps, evals)
 
-Bounded relocation pass for the interior mid-edge nodes of quadratic tetrahedra
-(gmsh type 11) — the `Mesh.HighOrderOptimize=1` engine.  `coords` is the shared
-`3 × nnodes` Float64 matrix updated in place; `blocks` is one `10 × ne` integer
-connectivity matrix or an iterable of such matrices (several Tet10 blocks may
-share `coords`, e.g. a `MixedMesh` with multiple region blocks); `movable` is a
-length-`nnodes` boolean mask additionally restricting candidates — a node moves
-only when it is marked movable, referenced exclusively through mid slots
-(rows 5:10) of the Tet10 blocks, and its supporting primary edge is not part of
-the tet-complex boundary (mid nodes on boundary faces carry the
-geometry-projected supports and stay fixed).  `fixed_edges` may pass an extra
-set of undirected primary-edge pairs whose mid nodes must also stay fixed —
-the API layer uses it for volume-owner interfaces that are internal to the
-combined tet complex but still carry surface-projected supports.
+Bounded relocation pass for the interior high-order nodes of the certified
+quadratic families (gmsh types 9, 10, 11, 12, 13) — the
+`Mesh.HighOrderOptimize=1` engine.  `coords` is the shared `3 × nnodes`
+Float64 matrix updated in place; `blocks` is an iterable of
+`(msh_type, connectivity)` pairs covering the blocks that share `coords`
+(certified families are optimized; every other block only excludes the
+nodes it references); `movable` is a length-`nnodes` boolean mask
+additionally restricting candidates — a node moves only when it is marked
+movable, is referenced exclusively through high-order slots of a single
+certified family (never as a corner of any element, never by an
+uncertified block), and its support is interior to the family complex:
+mid-edge nodes need a primary edge touching no boundary facet (and only
+volume-family edge mids are eligible — surface edge mids support the CAD
+surface even on interior wire edges), face-center nodes an interior
+primary face, and element-interior nodes are always eligible.  `fixed_edges`/`fixed_facets` may pass extra undirected
+primary-edge pairs and sorted facet tuples whose mids must also stay fixed
+— the API layer uses them for owner-group interfaces that are internal to
+the combined complex but still carry surface-projected supports.
 
-Each node performs a bounded ascent on the minimum scaled Jacobian determinant
-sampled at the ten interpolation points of its incident elements.  A candidate
-position is kept only when the exact global cubic-Bernstein certificate stays
-positive on every touched element *and* the sampled minimum strictly improves;
-otherwise the node is restored bit-for-bit.  Elements entering the pass without
-a positive certificate can never accept a candidate, so the pass neither
-creates nor repairs inverted elements.  `itermax` bounds the per-node descent
-steps, `passes` bounds global sweeps (a sweep without any accepted move stops
-early), `fraction` sets the initial step as a fraction of the supporting edge
-length, `hmin_fraction` stops the descent once the step falls below that edge
-fraction, and `tolerance` is the strict improvement threshold on the scaled
-Jacobian.  `threshold_min`/`threshold_max` bound the optimization band: a node
-is only a candidate when its incident minimum lies inside
-`[threshold_min, threshold_max)` — mirroring upstream
-`Mesh.HighOrderThresholdMin/Max`, whose defaults (0.1, 2.0) leave the worst
-elements untouched and treat already-good nodes as done.  Returns the number
-of moved nodes, the global sampled minimum before/after, the number of sweeps
-performed, and the count of candidate evaluations.
+Each node performs a bounded ascent on the minimum scaled Jacobian measure
+of its incident elements — `det J/(|c1|·|c2|·|c3|)` for volume families,
+`|c1×c2|/(|c1|·|c2|)` for surface families — sampled at the family's
+interpolation points.  A candidate position is kept only when the exact
+Bernstein certificate stays positive on every touched element *and* the
+sampled minimum strictly improves; otherwise the node is restored
+bit-for-bit.  Elements entering the pass without a positive certificate
+can never accept a candidate, so the pass neither creates nor repairs
+inverted elements.  `itermax` bounds the per-node descent steps, `passes`
+bounds global sweeps (a sweep without any accepted move stops early),
+`fraction` sets the initial step as a fraction of the supporting length,
+`hmin_fraction` stops the descent below that fraction, and `tolerance` is
+the strict improvement threshold.  `threshold_min`/`threshold_max` bound
+the optimization band: a node is only a candidate when its incident
+minimum lies inside `[threshold_min, threshold_max)` — mirroring upstream
+`Mesh.HighOrderThresholdMin/Max`.  Returns the number of moved nodes, the
+global sampled minimum before/after over all certified blocks, the number
+of sweeps performed, and the count of candidate evaluations.
 """
-function optimize_p2_tet_interior!(coords::AbstractMatrix{Float64},
-                                   blocks,
-                                   movable::AbstractVector{Bool};
-                                   itermax::Integer=100,
-                                   passes::Integer=25,
-                                   fraction::Real=0.2,
-                                   hmin_fraction::Real=1e-3,
-                                   tolerance::Real=1e-10,
-                                   fixed_edges::Union{Nothing,Set{NTuple{2,Int32}}}=nothing,
-                                   threshold_min::Real=-Inf,
-                                   threshold_max::Real=Inf)
-    caller = "optimize_p2_tet_interior!"
-    blocks isa AbstractMatrix && (blocks = (blocks,))
+function optimize_p2_interior!(coords::AbstractMatrix{Float64},
+                               blocks,
+                               movable::AbstractVector{Bool};
+                               itermax::Integer=100,
+                               passes::Integer=25,
+                               fraction::Real=0.2,
+                               hmin_fraction::Real=1e-3,
+                               tolerance::Real=1e-10,
+                               fixed_edges::Union{Nothing,Set{NTuple{2,Int32}}}=nothing,
+                               fixed_facets::Union{Nothing,Set{Tuple{Vararg{Int32}}}}=nothing,
+                               threshold_min::Real=-Inf,
+                               threshold_max::Real=Inf)
+    caller = "optimize_p2_interior!"
+    blocks isa Tuple && length(blocks) == 2 &&
+        blocks[1] isa Integer && (blocks = (blocks,))
     size(coords, 1) == 3 || throw(ArgumentError(
         "$caller: coords must be 3 × nnodes"))
     nn = size(coords, 2)
@@ -2511,46 +2707,122 @@ function optimize_p2_tet_interior!(coords::AbstractMatrix{Float64},
             "$caller: require threshold_min < threshold_max " *
             "(got $threshold_min, $threshold_max)"))
 
-    conns = Tuple(_p2_element_conn(b, 10, "tet10", caller) for b in blocks)
+    # Certified blocks are converted and optimized; every other block only
+    # marks the nodes it references — shared nodes across a family boundary
+    # are geometric supports and never candidates.
+    fams = Any[]
+    conns = Matrix{Int32}[]
+    otherref = falses(nn)
+    for item in blocks
+        item isa Tuple && length(item) == 2 || throw(ArgumentError(
+            "$caller: blocks must hold (msh_type, connectivity) pairs"))
+        msh, conn = item
+        msh isa Integer || throw(ArgumentError(
+            "$caller: block type $msh must be an integer"))
+        conn isa AbstractVecOrMat{<:Integer} || throw(ArgumentError(
+            "$caller: MSH $msh connectivity must be an integer matrix or vector"))
+        fam = _p2opt_family(msh)
+        if fam === nothing
+            for v in conn
+                1 <= v <= nn && (otherref[v] = true)
+            end
+            continue
+        end
+        push!(fams, fam)
+        push!(conns, _p2_element_conn(conn, fam.rows, "msh $(fam.msh)", caller))
+    end
     isempty(conns) && return (0, Inf, Inf, 0, 0)
     total = sum(size(c, 2) for c in conns; init=0)
     total == 0 && return (0, Inf, Inf, 0, 0)
-    for conn in conns
-        _p2_element_check(coords, conn, "tet", caller)
+    for (fam, conn) in zip(fams, conns)
+        _p2_element_check(coords, conn, "msh $(fam.msh)", caller)
     end
 
-    # Node bookkeeping: mid-slot references, mid→primary-edge endpoints, and
-    # mid→incident elements.  Nodes referenced as corners anywhere, or in any
-    # slot of a non-Tet10 block reported by the caller, are never movable.
+    # Node bookkeeping: mid-slot references, mid→support identity, and
+    # mid→incident elements.  `midfam` records the single certified family
+    # claiming each high-order node (-1 on a cross-family conflict); nodes
+    # referenced as corners anywhere, or by an uncertified block, are never
+    # movable.
     endp = Dict{Int32,NTuple{2,Int32}}()
+    facetof = Dict{Int32,Tuple{Vararg{Int32}}}()
+    interiors = Set{Int32}()
     incident = Dict{Int32,Vector{Tuple{Int,Int32}}}()
+    midfam = Dict{Int32,Int32}()
     midref = falses(nn)
     cornerref = falses(nn)
     @inbounds for (b, conn) in pairs(conns), t in axes(conn, 2)
-        for k in 1:4
+        fam = fams[b]
+        for k in 1:fam.primary
             cornerref[conn[k, t]] = true
         end
-        for (slot, i, j) in _P2_EDGE_SLOTS
+        for (slot, i, j) in fam.edge_slots
             m = conn[slot, t]
             midref[m] = true
+            _p2opt_claim!(midfam, m, fam.msh)
+            # Edge mids of surface families are surface supports even on
+            # interior wire edges — moving them off the CAD surface needs
+            # the parametric-slide relocation stage, so only volume-family
+            # edge mids (and face/interior slots) become candidates.
+            fam.volume || continue
             endp[m] = (conn[i, t], conn[j, t])
             push!(get!(() -> Tuple{Int,Int32}[], incident, m), (b, Int32(t)))
         end
+        for (slot, facet) in fam.face_slots
+            m = conn[slot, t]
+            midref[m] = true
+            facetof[m] = _p2opt_facet_key(conn, t, facet)
+            _p2opt_claim!(midfam, m, fam.msh)
+            push!(get!(() -> Tuple{Int,Int32}[], incident, m), (b, Int32(t)))
+        end
+        for slot in fam.interior_slots
+            m = conn[slot, t]
+            midref[m] = true
+            push!(interiors, m)
+            _p2opt_claim!(midfam, m, fam.msh)
+            push!(get!(() -> Tuple{Int,Int32}[], incident, m), (b, Int32(t)))
+        end
     end
-    bedges = _p2_tet10_boundary_edges(conns)
-    fixed_edges===nothing || union!(bedges, fixed_edges)
+    # Combined-complex boundary supports per family — the same role
+    # `boundary_faces` plays for the legacy tet-only entry, generalized to
+    # edge facets for surfaces and to face facets for volume families.
+    bedges = Dict{Int32,Set{NTuple{2,Int32}}}()
+    bfacets = Dict{Int32,Set{Tuple{Vararg{Int32}}}}()
+    byfam = Dict{Int32,Vector{Matrix{Int32}}}()
+    for (fam, conn) in zip(fams, conns)
+        push!(get!(() -> Matrix{Int32}[], byfam, fam.msh), conn)
+    end
+    for (msh, cs) in byfam
+        bedges[msh], bfacets[msh] = _p2opt_family_boundary(
+            _p2opt_family(msh), cs)
+    end
 
     # Candidates, worst-incident-element first.
+    fedge = fixed_edges === nothing ? NTuple{2,Int32}[] : fixed_edges
+    ffacet = fixed_facets === nothing ? Tuple{Vararg{Int32}}[] : fixed_facets
     candidates = Tuple{Int32,Float64}[]
-    for (mid, edge) in endp
-        (midref[mid] && !cornerref[mid] && movable[Int(mid)] &&
-         !(minmax(edge[1], edge[2]) in bedges)) || continue
-        f = _p2_opt_node_jac(coords, conns, incident[mid])
-        (band_lo <= f < band_hi) || continue
-        push!(candidates, (mid, f))
+    for (mid, fmsh) in midfam
+        (fmsh > 0 && midref[mid] && !cornerref[mid] && !otherref[mid] &&
+         movable[Int(mid)]) || continue
+        # A node must hold exactly one interior role: an element whose own
+        # connectivity mixes a node across slot kinds is inconsistent and
+        # its node stays fixed.
+        roles = (haskey(endp, mid) ? 1 : 0) +
+                (haskey(facetof, mid) ? 1 : 0) + (mid in interiors ? 1 : 0)
+        roles == 1 || continue
+        if haskey(endp, mid)
+            e = endp[mid]
+            pair = minmax(e[1], e[2])
+            (pair in bedges[fmsh] || pair in fedge) && continue
+        elseif haskey(facetof, mid)
+            f = facetof[mid]
+            (f in bfacets[fmsh] || f in ffacet) && continue
+        end
+        value = _p2opt_node_jac(coords, fams, conns, incident[mid])
+        (band_lo <= value < band_hi) || continue
+        push!(candidates, (mid, value))
     end
-    min_before = minimum(_p2_opt_elem_jac(coords, c, t)
-                         for c in conns for t in axes(c, 2); init=Inf)
+    min_before = minimum(_p2opt_elem_jac(coords, fams[b], c, t)
+                         for (b, c) in pairs(conns) for t in axes(c, 2); init=Inf)
     isempty(candidates) &&
         return (0, min_before, min_before, 0, 0)
     sort!(candidates; by = last, alg = Base.Sort.MergeSort)
@@ -2561,16 +2833,20 @@ function optimize_p2_tet_interior!(coords::AbstractMatrix{Float64},
     for pass in 1:npass
         moved_pass = 0
         for (mid, _) in candidates
-            a, b = endp[mid]
             inc_v = incident[mid]
-            @inbounds begin
-                ax = coords[1,a]; ay = coords[2,a]; az = coords[3,a]
-                bx = coords[1,b]; by = coords[2,b]; bz = coords[3,b]
+            if haskey(endp, mid)
+                a, b = endp[mid]
+                @inbounds begin
+                    ax = coords[1,a]; ay = coords[2,a]; az = coords[3,a]
+                    bx = coords[1,b]; by = coords[2,b]; bz = coords[3,b]
+                end
+                elen = hypot(bx-ax, by-ay, bz-az)
+            else
+                elen = _p2opt_incident_diameter(coords, fams, conns, inc_v)
             end
-            elen = hypot(bx-ax, by-ay, bz-az)
             (isfinite(elen) && elen > 0) || continue
             node_moved, node_evals = _p2_opt_relocate!(
-                coords, conns, inc_v, mid,
+                coords, fams, conns, inc_v, mid,
                 frac*elen, hfrac*elen, iters, tol)
             evals += node_evals
             node_moved && (moved_pass += 1)
@@ -2579,9 +2855,29 @@ function optimize_p2_tet_interior!(coords::AbstractMatrix{Float64},
         moved += moved_pass
         moved_pass == 0 && break
     end
-    min_after = minimum(_p2_opt_elem_jac(coords, c, t)
-                        for c in conns for t in axes(c, 2); init=Inf)
+    min_after = minimum(_p2opt_elem_jac(coords, fams[b], c, t)
+                        for (b, c) in pairs(conns) for t in axes(c, 2); init=Inf)
     return (moved, min_before, min_after, sweeps, evals)
+end
+
+"""
+    optimize_p2_tet_interior!(coords, blocks, movable; kw...)
+        -> (moved, min_before, min_after, sweeps, evals)
+
+The Tet10-only entry of [`optimize_p2_interior!`](@ref): `blocks` is one
+`10 × ne` integer connectivity matrix or an iterable of such matrices,
+each handled as a gmsh type-11 block of the generic pass; all keyword
+arguments forward unchanged.  Interior face centers and other families'
+nodes are outside this entry's scope by construction — use the generic
+engine for mixed-family relocation.
+"""
+function optimize_p2_tet_interior!(coords::AbstractMatrix{Float64},
+                                   blocks,
+                                   movable::AbstractVector{Bool};
+                                   kwargs...)
+    blocks isa AbstractMatrix && (blocks = (blocks,))
+    return optimize_p2_interior!(
+        coords, ((Int32(11), b) for b in blocks), movable; kwargs...)
 end
 
 include("HighOrderPyramid.jl")

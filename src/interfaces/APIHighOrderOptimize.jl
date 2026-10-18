@@ -1,5 +1,6 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# Mesh.HighOrderOptimize — bounded interior mid-node relocation (OPT01 slice).
+# Mesh.HighOrderOptimize — bounded interior high-order-node relocation
+# (OPT01 slice).
 #
 # Upstream semantics (gmsh 4.15.2): 0 disables high-order optimization,
 # -1 applies elastic smoothing only, 1 optimizes (relocates interior
@@ -9,11 +10,14 @@
 # and 2); the dedicated elastic-smoothing stage (-1 and the second half of
 # 2) remains an OPT01 gap — mode -1 currently performs no relocation.
 #
-# The pass itself lives in HighOrder.optimize_p2_tet_interior!; this file only
-# translates option state, classification ownership, and geometric-support
-# structure into the engine's movable mask and fixed-edge set.  It mutates the
-# *unpublished* coordinate matrix of a freshly built plan/overlay, so a failure
-# still leaves the previously published cache untouched.
+# The pass itself lives in HighOrder.optimize_p2_interior! and covers every
+# full-P2 family with an exact Bernstein positivity bound — Tri6, Quad9,
+# Tet10, Hex27, Prism18 — while Pyr14 and every uncertified block family
+# keep their nodes fixed.  This file only translates option state,
+# classification ownership, and geometric-support structure into the
+# engine's movable mask and fixed edge/facet sets.  It mutates the
+# *unpublished* coordinate matrix of a freshly built plan/overlay, so a
+# failure still leaves the previously published cache untouched.
 # ══════════════════════════════════════════════════════════════════════════════
 
 _high_order_optimize_level() = begin
@@ -38,11 +42,13 @@ function _high_order_optimize_num_option(name::AbstractString, default::Real)
     return Float64(v)
 end
 
-# Candidate mask: a node may move only when it is owned by a volume entity and
-# carries no stored parametric coordinates (boundary and interface supports
-# keep their projected parameters).  When the classification does not cover
-# the mesh, ownership cannot be proven and the mask stays permissive — the
-# engine's own mid-slot/boundary-edge rules still keep corners and boundary
+# Candidate mask: a node may move only when it is owned by a surface or
+# volume entity and carries no stored parametric coordinates (curve, point
+# and parametric-surface supports keep their projected parameters — sliding
+# those mids along their actual geometry is the separate parametric-relocation
+# gap).  When the classification does not cover the mesh, ownership cannot be
+# proven and the mask stays permissive — the engine's own mid-slot,
+# single-family and boundary-support rules still keep corners and boundary
 # supports fixed.
 function _high_order_optimize_movable(mesh::MixedMesh, class)
     nn = size(mesh.coords, 2)
@@ -52,54 +58,75 @@ function _high_order_optimize_movable(mesh::MixedMesh, class)
         length(class.node_parametric) == nn
     for v in 1:nn
         movable[v] = !classified ||
-            (class.node_entities[v][1] == 3 && class.node_parametric[v] === nothing)
+            (class.node_entities[v][1] in (2, 3) &&
+             class.node_parametric[v] === nothing)
     end
     return movable
 end
 
-# Primary edges whose mid nodes are geometric supports. `boundary_faces` is
-# applied per element-owner group, so faces shared between two volume owners
-# (internal interfaces of a conformal multi-region mesh) count as each group's
-# boundary even though they are interior to the combined tet complex.
-function _high_order_optimize_fixed_edges(mesh::MixedMesh, class)
-    groups = Dict{Int32,Vector{NTuple{4,Int32}}}()
-    for (msh, dim, _, cells, owners) in _cache_catalog(mesh, class)
-        (dim == 3 && msh == Int32(11)) || continue
-        for t in axes(cells, 2)
-            owner = t <= length(owners) ? owners[t] : Int32(0)
-            push!(get!(() -> NTuple{4,Int32}[], groups, owner),
-                  (cells[1,t], cells[2,t], cells[3,t], cells[4,t]))
-        end
-    end
+# Per-owner-group boundary supports of every certified family: primary edges
+# on a group's boundary facet whose mid nodes stay fixed, plus the sorted
+# facet keys for the face-center test.  Grouping by element owner makes
+# faces shared between two owners (internal interfaces of a conformal
+# multi-entity mesh) count as each group's boundary even though they are
+# interior to the combined complex — those mids carry interface supports.
+# For surface families the facets are element edges, so the same loop marks
+# the owner-group boundary wires.  Returns `(edges, facet_keys)`.
+function _high_order_optimize_fixed_supports(mesh::MixedMesh, class)
     edges = Set{NTuple{2,Int32}}()
-    for tets in values(groups)
-        prim = Matrix{Int32}(undef, 4, length(tets))
-        @inbounds for (t, tet) in pairs(tets), k in 1:4
-            prim[k, t] = tet[k]
-        end
-        bnd, _ = boundary_faces(prim)
-        for f in bnd
-            a, b, c = f[1], f[2], f[3]
-            push!(edges, (min(a,b),max(a,b)))
-            push!(edges, (min(b,c),max(b,c)))
-            push!(edges, (min(a,c),max(a,c)))
+    facets = Set{Tuple{Vararg{Int32}}}()
+    # Facet incidence per (family, owner) group across all blocks — blocks of
+    # the same type and owner belong to the same entity group, so faces
+    # between them are interior while faces between two owners stay fixed.
+    # The sorted key is only the identity: facet edges come from the
+    # connectivity's own cycle order.
+    inc = Dict{Tuple{Int32,Int32,Tuple{Vararg{Int32}}},Int}()
+    cycleof = Dict{Tuple{Vararg{Int32}},Tuple{Vararg{Int32}}}()
+    for (msh, _, _, cells, owners) in _cache_catalog(mesh, class)
+        fam = HighOrder._p2opt_family(msh)
+        fam === nothing && continue
+        @inbounds for t in axes(cells, 2)
+            owner = t <= length(owners) ? owners[t] : Int32(0)
+            for facet in fam.facets
+                key = HighOrder._p2opt_facet_key(cells, t, facet)
+                group = (msh, owner, key)
+                inc[group] = get(inc, group, 0) + 1
+                haskey(cycleof, key) ||
+                    (cycleof[key] = Tuple(cells[facet[i], t]
+                                          for i in eachindex(facet)))
+            end
         end
     end
-    return edges
+    for ((_, _, f), c) in inc
+        c == 1 || continue
+        push!(facets, f)
+        cycle = cycleof[f]
+        n = length(cycle)
+        for i in 1:n
+            a, b = cycle[i], cycle[i==n ? 1 : i+1]
+            push!(edges, minmax(a, b))
+        end
+    end
+    return edges, facets
 end
 
-# Relocate interior Tet10 mid nodes of an unpublished MixedMesh in place.
-# Returns the engine statistics tuple, or nothing when the pass is disabled /
-# the mesh carries no quadratic tetrahedra.
+# Relocate interior high-order nodes of an unpublished MixedMesh in place —
+# every certified family present in the cache.  Returns the engine
+# statistics tuple, or nothing when the pass is disabled / the mesh carries
+# no certified P2 block.
 function _high_order_optimize_mixed!(mesh::MixedMesh, class, caller::AbstractString)
     _high_order_optimize_relocation() || return nothing
-    any(blk -> blk.msh == 11, mesh.blocks) || return nothing
-    blocks = [blk.nodes for blk in mesh.blocks if blk.msh == 11]
-    stats = HighOrder.optimize_p2_tet_interior!(mesh.coords, blocks,
+    catalog = _cache_catalog(mesh, class)
+    blocks = Tuple{Int32,Matrix{Int32}}[
+        (msh, cells) for (msh, _, _, cells, _) in catalog]
+    any(blk -> HighOrder._p2opt_family(blk[1]) !== nothing, blocks) ||
+        return nothing
+    fixed_edges, fixed_facets = _high_order_optimize_fixed_supports(mesh, class)
+    stats = HighOrder.optimize_p2_interior!(mesh.coords, blocks,
         _high_order_optimize_movable(mesh, class);
         itermax=_high_order_optimize_int_option("Mesh.HighOrderIterMax", 100),
         passes=_high_order_optimize_int_option("Mesh.HighOrderPassMax", 25),
-        fixed_edges=_high_order_optimize_fixed_edges(mesh, class),
+        fixed_edges=fixed_edges, fixed_facets=fixed_facets,
         threshold_min=_high_order_optimize_num_option(
             "Mesh.HighOrderThresholdMin", 0.1),
         threshold_max=_high_order_optimize_num_option(
@@ -112,20 +139,25 @@ function _high_order_optimize_mixed!(mesh::MixedMesh, class, caller::AbstractStr
     return stats
 end
 
-# Same pass for a legacy-cache P2Mesh overlay. `mids[i]` is the owning entity
-# of mid node `nnodes_linear + i`; only volume-owned mids can move. The mesh
-# has a single owner group, so the combined tet boundary already covers every
-# geometric support — no extra fixed edges are needed.
-function _high_order_optimize_overlay!(p2::P2Mesh,
+# Same pass for a legacy-cache P2 overlay. `mids[i]` is the owning entity of
+# mid node `nnodes_linear + i`; only same-dimension-owned mids can move
+# (volume mids for a Tet10 overlay, surface mids for a Tri6 overlay — the
+# engine's own wire/interior rules still fix the actual boundary supports).
+# The overlay has a single owner group, so the combined complex boundary
+# already covers every geometric support — no extra fixed edges are needed.
+function _high_order_optimize_overlay!(p2::Union{P2Mesh,P2TriMesh},
                                        mids::AbstractVector{<:Tuple{Int,Int32}})
     _high_order_optimize_relocation() || return nothing
-    ntets(p2) == 0 && return nothing
+    dim = p2 isa P2Mesh ? 3 : 2
+    cells = p2 isa P2Mesh ? p2.tet10 : p2.tri6
+    size(cells, 2) == 0 && return nothing
     nlin = nnodes(p2) - length(mids)
     movable = falses(nnodes(p2))
     for i in eachindex(mids)
-        mids[i][1] == 3 && (movable[nlin + i] = true)
+        mids[i][1] == dim && (movable[nlin + i] = true)
     end
-    stats = HighOrder.optimize_p2_tet_interior!(p2.coords, p2.tet10, movable;
+    msh = p2 isa P2Mesh ? Int32(11) : Int32(9)
+    stats = HighOrder.optimize_p2_interior!(p2.coords, ((msh, cells),), movable;
         itermax=_high_order_optimize_int_option("Mesh.HighOrderIterMax", 100),
         passes=_high_order_optimize_int_option("Mesh.HighOrderPassMax", 25),
         threshold_min=_high_order_optimize_num_option(
@@ -142,7 +174,7 @@ end
 
 # Retained overlays are live published state: relocate on a deep copy so a
 # failure cannot mutate the mesh the session still exposes.
-function _high_order_optimize_overlay(p2::P2Mesh,
+function _high_order_optimize_overlay(p2::Union{P2Mesh,P2TriMesh},
                                       mids::AbstractVector{<:Tuple{Int,Int32}};
                                       fresh::Bool)
     if fresh
@@ -150,8 +182,11 @@ function _high_order_optimize_overlay(p2::P2Mesh,
         return p2
     end
     _high_order_optimize_relocation() || return p2
-    copy_p2 = P2Mesh(copy(p2.coords), copy(p2.tet10); tet_tag=copy(p2.tet_tag),
-                     require_positive_tets=false)
+    copy_p2 = p2 isa P2Mesh ?
+        P2Mesh(copy(p2.coords), copy(p2.tet10); tet_tag=copy(p2.tet_tag),
+               require_positive_tets=false) :
+        P2TriMesh(copy(p2.coords), copy(p2.tri6); tri_tag=copy(p2.tri_tag),
+                  _check_geometry=false)
     _high_order_optimize_overlay!(copy_p2, mids)
     return copy_p2
 end
@@ -194,7 +229,7 @@ function _high_order_optimize_plan!(plan, caller::AbstractString)
         _high_order_optimize_mixed!(mesh, get(plan, :class, nothing), caller)
     end
     overlay = get(plan, :preserved_overlay, nothing)
-    if overlay isa P2Mesh
+    if overlay isa Union{P2Mesh,P2TriMesh}
         mids = get(plan, :preserved_mid_owners, Tuple{Int,Int32}[])
         optimized = _high_order_optimize_overlay(
             overlay, mids; fresh = overlay !== LAST_MESH_HIGH_ORDER[])
