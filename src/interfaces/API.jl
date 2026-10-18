@@ -126,7 +126,7 @@ using ..GeoExec: execute_geo
 using ..Post: Post
 
 export initialize, finalize, clear, option, model, mesh, open_geo!, write, open, merge,
-    get_time
+    get_time, plugin
 
 const _SESSION_START_TIME = Ref{Float64}(time())
 
@@ -147,6 +147,7 @@ include("APINativeMeshTags.jl")
 include("APIPartitionNative.jl")
 include("APIPartitionProducer.jl")
 include("APIPartitionBRep.jl")
+include("APIPlugins.jl")
 
 struct _MeshClassification
     mesh::Union{Mesh,MixedMesh}
@@ -698,6 +699,7 @@ function initialize()
         _slot_load_locked!(MODEL_SLOTS[1])
         FIELD_TAG_MAX[]=0
         empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=0
+        empty!(SESSION_PLUGINS)
         _SESSION_START_TIME[]=time()
     end
     return nothing
@@ -712,6 +714,7 @@ function finalize()
         empty!(OPTIONS);merge!(OPTIONS,DEFAULT_OPTIONS)
         FIELD_TAG_MAX[]=0
         empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=0
+        empty!(SESSION_PLUGINS)
     end
     return nothing
 end
@@ -726,6 +729,7 @@ function clear()
         empty!(MODEL_SLOTS);push!(MODEL_SLOTS,_new_slot(""))
         _slot_load_locked!(MODEL_SLOTS[1])
         empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=0
+        empty!(SESSION_PLUGINS)
         return nothing
     end
 end
@@ -11973,5 +11977,29 @@ set_interpolation_matrices(tag,type,d,coef,exp,d_geo=0,coef_geo=[],exp_geo=[])=
     _view_set_interpolation_matrices(tag,type,d,coef,exp,d_geo,coef_geo,exp_geo)
 
 end # module view
+
+"""
+    plugin
+
+Post-processing plugins operating on the session views (Gmsh `plugin` module
+counterpart). `set_number(name, option, value)` and `set_string(name, option,
+value)` configure a registered plugin's options; `run(name)` executes it.
+Supported plugins: `Integrate`, `MinMax`, `Probe`, `Skin`, `ExtractElements`,
+`Transform`, `Remove`, `Smooth`, `NewView`. Setting the numeric option `Run` to
+a nonzero value executes the plugin immediately.
+"""
+module plugin
+
+using ..API: _plugin_set_number,_plugin_set_string,_plugin_run
+
+"Set the numeric option `option` of plugin `name` to `value`; option `Run`
+with a nonzero value executes the plugin."
+set_number(name,option,value)=_plugin_set_number(name,option,value)
+"Set the string option `option` of plugin `name` to `value`."
+set_string(name,option,value)=_plugin_set_string(name,option,value)
+"Execute plugin `name` with its current option values."
+run(name)=_plugin_run(name)
+
+end # module plugin
 
 end # module
