@@ -31,6 +31,7 @@ using Printf: @printf, @sprintf, Format, format
 export read_msh, write_msh, MshFile
 export read_stl, read_geo_params, GeoParams, GeoFieldSpec
 export read_unv, write_unv, read_mesh, write_mesh, UnvFile, MeshFile
+export read_su2, write_su2, read_bdf, write_bdf, Su2File, BdfFile
 
 include("GeoColorNames.jl")
 include("GeoOptionTables.jl")
@@ -11195,7 +11196,8 @@ function _read_unv(io::Base.IO,caller::AbstractString,node_limit::Int,
 end
 
 function _foreign_mesh_result(caller::AbstractString,node_labels::Vector{Int64},
-        coords::Vector{Float64},records::Vector{_TextMeshCell})
+        coords::Vector{Float64},records::Vector{_TextMeshCell};
+        physical_names::Dict{Tuple{Int,Int},String}=Dict{Tuple{Int,Int},String}())
     nn=length(node_labels)
     C=reshape(coords,3,nn)
     per=Dict{Int,Vector{_TextMeshCell}}();order=Int[]
@@ -11220,7 +11222,7 @@ function _foreign_mesh_result(caller::AbstractString,node_labels::Vector{Int64},
         push!(blocks,ElementBlock(msh,nodes,tags))
         push!(owners,ents);push!(element_tags,uids)
     end
-    mesh=MixedMesh(C,blocks;elementary_entities=owners)
+    mesh=MixedMesh(C,blocks;elementary_entities=owners,physical_names=physical_names)
     return mesh,UInt64.(node_labels),element_tags
 end
 
@@ -11482,11 +11484,28 @@ end
 
 function _write_foreign_bridge(path,node_labels::Vector{Int64},
         coords::Vector{Float64},records::Vector{_TextMeshCell};
-        node_offset::Integer=0,element_offset::Integer=0)
+        node_offset::Integer=0,element_offset::Integer=0,
+        physical_names::Dict{Tuple{Int,Int},String}=Dict{Tuple{Int,Int},String}())
+    # `physical_names` is emitted as an MSH `$PhysicalNames` section so the
+    # staging reader publishes e.g. SU2 marker names exactly like a native
+    # `.msh` import does. Names containing a double quote cannot be encoded.
+    for ((dim,tag),name) in physical_names
+        dim in 0:3 && tag>0 && !occursin('"',name) || throw(ArgumentError(
+            "foreign mesh bridge: physical name for ($dim,$tag) is not " *
+            "representable in MSH 2.2"))
+    end
     open(path,"w") do io
         println(io,"\$MeshFormat")
         println(io,"2.2 0 8")
         println(io,"\$EndMeshFormat")
+        if !isempty(physical_names)
+            println(io,"\$PhysicalNames")
+            println(io,length(physical_names))
+            for ((dim,tag),name) in sort!(collect(physical_names))
+                println(io,dim," ",tag," \"",name,"\"")
+            end
+            println(io,"\$EndPhysicalNames")
+        end
         println(io,"\$Nodes")
         println(io,length(node_labels))
         @inbounds for i in eachindex(node_labels)
@@ -11512,7 +11531,7 @@ end
 function _read_foreign_records(path,caller::AbstractString)
     extension=lowercase(splitext(String(path))[2])
     if extension==".unv"
-        open(path,"r") do io
+        node_labels,coords,records=open(path,"r") do io
             try
                 return _read_unv(io,caller,
                     Int(typemax(Int32)),Int(typemax(Int32)))
@@ -11523,8 +11542,9 @@ function _read_foreign_records(path,caller::AbstractString)
                 rethrow()
             end
         end
+        return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
     elseif extension==".mesh"
-        open(path,"r") do io
+        node_labels,coords,records=open(path,"r") do io
             try
                 return _read_medit(io,caller,
                     Int(typemax(Int32)),Int(typemax(Int32)))
@@ -11535,17 +11555,45 @@ function _read_foreign_records(path,caller::AbstractString)
                 rethrow()
             end
         end
+        return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
+    elseif extension==".su2"
+        return open(path,"r") do io
+            try
+                return _read_su2(io,caller,
+                    Int(typemax(Int32)),Int(typemax(Int32)))
+            catch err
+                err isa InterruptException && rethrow()
+                err isa EOFError && throw(ArgumentError(
+                    "$caller: truncated .su2 file"))
+                rethrow()
+            end
+        end
+    elseif extension in (".bdf",".nas")
+        return open(path,"r") do io
+            try
+                return _read_bdf(io,caller,
+                    Int(typemax(Int32)),Int(typemax(Int32)))
+            catch err
+                err isa InterruptException && rethrow()
+                err isa EOFError && throw(ArgumentError(
+                    "$caller: truncated .bdf file"))
+                rethrow()
+            end
+        end
     else
         throw(ArgumentError("$caller: unsupported mesh extension '$extension'"))
     end
 end
 
 function _foreign_bridge_temp(node_labels,coords,records;
-                              node_offset::Integer=0,element_offset::Integer=0)
+                              node_offset::Integer=0,element_offset::Integer=0,
+                              physical_names::Dict{Tuple{Int,Int},String}=
+                                  Dict{Tuple{Int,Int},String}())
     temporary=string(tempname(),".msh")
     try
         _write_foreign_bridge(temporary,node_labels,coords,records;
-            node_offset=node_offset,element_offset=element_offset)
+            node_offset=node_offset,element_offset=element_offset,
+            physical_names=physical_names)
     catch
         rm(temporary;force=true)
         rethrow()
@@ -11554,8 +11602,9 @@ function _foreign_bridge_temp(node_labels,coords,records;
 end
 
 function _stage_foreign_mesh_file(path;context_lc=1.0,forced_bbox=false)
-    node_labels,coords,records=_read_foreign_records(path,"API.open")
-    temporary=_foreign_bridge_temp(node_labels,coords,records)
+    node_labels,coords,records,pnames=_read_foreign_records(path,"API.open")
+    temporary=_foreign_bridge_temp(node_labels,coords,records;
+        physical_names=pnames)
     geo=getfield(parentmodule(@__MODULE__),:GeoExec)
     try
         result=geo._geo_stage_mesh_file(temporary;
@@ -11568,12 +11617,13 @@ function _stage_foreign_mesh_file(path;context_lc=1.0,forced_bbox=false)
 end
 
 function _stage_foreign_mesh_merge(path,model,seed;context_lc=1.0,forced_bbox=false)
-    node_labels,coords,records=_read_foreign_records(path,"API.merge")
+    node_labels,coords,records,pnames=_read_foreign_records(path,"API.merge")
     # File-local labels are not session UIDs; shift them past the live
     # maxima so a merge never collides with existing nodes or elements.
     temporary=_foreign_bridge_temp(node_labels,coords,records;
         node_offset=Int64(seed.mesh_node_max),
-        element_offset=Int64(seed.mesh_element_max))
+        element_offset=Int64(seed.mesh_element_max),
+        physical_names=pnames)
     geo=getfield(parentmodule(@__MODULE__),:GeoExec)
     try
         return geo._geo_stage_mesh_merge(temporary,model,seed;
@@ -11941,6 +11991,868 @@ function _stl_facet!(io,coords,a::Int,b::Int,c::Int)
     println(io,"  endloop")
     println(io," endfacet")
     return nothing
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# SU2 native mesh (.su2) and Nastran bulk data (.bdf/.nas)
+#
+# Field semantics follow the public SU2 mesh specification and the MSC/Altair
+# Nastran bulk-data card layouts:
+#
+# * SU2 files are keyword sections. `NDIME= 2|3` declares the dimension,
+#   `NPOIN= n` is followed by `x y [z] index` point rows (0-based indices; the
+#   trailing index column is optional but must be uniform), `NELEM= n` by
+#   `type v1..vn [index]` element rows, and `NMARK= n` introduces that many
+#   `MARKER_TAG= name`/`MARKER_ELEMS= n` boundary-element lists. Element type
+#   identifiers are the VTK codes: 3=line, 5=triangle, 9=quadrilateral,
+#   10=tetrahedron, 12=hexahedron, 13=prism, 14=pyramid; connectivity is
+#   0-based and already in Gmsh vertex order. `%` starts a comment line.
+#   Marker *i* (1-based) becomes physical tag *i* and, on domain elements
+#   (NELEM), physical tag 0; elementary entity tags are 1 for NELEM records
+#   and *i* for marker records. Marker names are returned as
+#   `physical_names` and transported through the MSH 2.2 staging bridge.
+#   `NZONE`/`IZONE`/multi-zone decks reject loudly.
+# * BDF files carry `GRID` cards (id, cp, x, y, z — 8-column fixed and
+#   comma-delimited free formats, plus `GRID*` 16-column large fields), and
+#   element cards `CBAR`, `CBEAM`, `CROD`, `CTUBE`, `CTRIA3`, `CTRIA6`,
+#   `CQUAD4`, `CQUAD8`, `CTETRA[4|10]`, `CPENTA[6|15]`, `CHEXA[8|20]`,
+#   `CPYRA[5|13]` — the explicit second-order names plus the base-name forms
+#   that pad extra nodes onto the same card. The property-id field becomes
+#   both the elementary entity tag and the physical tag. `+`-prefixed
+#   continuation lines merge into the parent card (fixed, free and
+#   `*`-prefixed large-field forms); `$` comments and all non-element
+#   cards are skipped, `INCLUDE` rejects loudly, `ENDDATA` ends the deck.
+#
+# `read_su2`/`read_bdf` return the same file-level records as `read_unv`:
+# a compact MSH2-style `MixedMesh` plus the original node/element labels.
+# `API.open`/`API.merge` publish them through the identical MSH 2.2 bridge
+# the `.unv`/`.mesh` readers use, and `API.write` exports the session mesh
+# through `write_su2`/`write_bdf` on the same MSH4-projection path.
+# ════════════════════════════════════════════════════════════════════════════════
+
+# ── SU2 native mesh ────────────────────────────────────────────────────────────
+
+# SU2 element-type identifier → (Gmsh type, file node count). Connectivity
+# follows VTK ordering, which coincides with the Gmsh vertex order for every
+# supported family, so no permutation is needed.
+const _SU2_ELEMENT_TYPES=Dict{Int,Tuple{Int,Int}}(
+    3=>(1,2),5=>(2,3),9=>(3,4),10=>(4,4),12=>(5,8),13=>(6,6),14=>(7,5))
+const _SU2_WRITE_TABLE=Dict{Int,Int}(1=>3,2=>5,3=>9,4=>10,5=>12,6=>13,7=>14)
+
+function _su2_next(io)
+    # Next meaningful line: blank lines and `%` comments are skipped.
+    while !eof(io)
+        line=strip(readline(io))
+        (isempty(line) || startswith(line,'%')) && continue
+        return line
+    end
+    return nothing
+end
+
+function _su2_key(line::AbstractString)
+    m=match(r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*(.*?)\s*$",line)
+    m===nothing && return nothing
+    return uppercase(m.captures[1]),m.captures[2]
+end
+
+function _su2_count(value::AbstractString,caller::AbstractString,
+                    context::AbstractString)
+    count=_unv_int(value,caller,"$context count")
+    count>=0 || throw(ArgumentError("$caller: negative .su2 $context count $count"))
+    return Int(count)
+end
+
+function _su2_element_row(line::AbstractString,caller::AbstractString,
+        point_rows::Dict{Int64,Int32},context::AbstractString)
+    fields=split(line)
+    length(fields)>=2 || throw(ArgumentError(
+        "$caller: malformed .su2 $context record '$line'"))
+    su2type=_unv_int(fields[1],caller,".su2 element type")
+    entry=get(_SU2_ELEMENT_TYPES,Int(su2type),nothing)
+    entry===nothing && throw(ArgumentError(
+        "$caller: unsupported .su2 element type $su2type in $context record"))
+    msh,arity=entry
+    length(fields)==arity+1 || length(fields)==arity+2 || throw(ArgumentError(
+        "$caller: .su2 $context type $su2type expects $arity nodes, got " *
+        "$(length(fields)-1) trailing fields"))
+    nodes=Vector{Int32}(undef,arity)
+    @inbounds for k in 1:arity
+        v=_unv_int(fields[k+1],caller,".su2 node index")
+        v>=0 || throw(ArgumentError("$caller: negative .su2 node index $v"))
+        row=get(point_rows,v,Int32(0))
+        row!=0 || throw(ArgumentError(
+            "$caller: .su2 $context references unknown point index $v"))
+        nodes[k]=row
+    end
+    index=length(fields)==arity+2 ?
+        _unv_int(fields[end],caller,".su2 element index") : Int64(-1)
+    return msh,nodes,index
+end
+
+function _read_su2(io::Base.IO,caller::AbstractString,node_limit::Int,
+                   element_limit::Int)
+    ndime=0;npoin=0
+    node_labels=Int64[];point_rows=Dict{Int64,Int32}();coords=Float64[]
+    records=_TextMeshCell[];pnames=Dict{Tuple{Int,Int},String}()
+    element_labels=Set{Int64}();points_indexed=nothing
+    marker_count=0;marker_index=0;next_label=Ref{Int64}(0)
+    while true
+        line=_su2_next(io)
+        line===nothing && break
+        kv=_su2_key(line)
+        # Stray data lines and unknown keywords are skipped like upstream.
+        kv===nothing && continue
+        key,value=kv
+        if key in ("NZONE","IZONE","MULTIZONE","NPERIODIC")
+            throw(ArgumentError(
+                "$caller: multi-zone/periodic .su2 files are not supported ($key)"))
+        elseif key=="NDIME"
+            d=_unv_int(value,caller,"NDIME")
+            d in (2,3) || throw(ArgumentError(
+                "$caller: unsupported .su2 NDIME=$d"))
+            ndime=Int(d)
+        elseif key=="NPOIN"
+            ndime in (2,3) || throw(ArgumentError(
+                "$caller: NPOIN appeared before NDIME"))
+            npoin==0 || throw(ArgumentError("$caller: repeated NPOIN section"))
+            count=_su2_count(value,caller,"NPOIN")
+            count<=node_limit || throw(ArgumentError(
+                "$caller: .su2 point count exceeds max_nodes=$node_limit"))
+            for i in 1:count
+                row=_su2_next(io)
+                row===nothing && throw(ArgumentError(
+                    "$caller: truncated .su2 NPOIN section"))
+                fields=split(row)
+                (length(fields)==ndime || length(fields)==ndime+1) ||
+                    throw(ArgumentError(
+                        "$caller: malformed .su2 point record '$row'"))
+                indexed=length(fields)==ndime+1
+                if points_indexed===nothing
+                    points_indexed=indexed
+                elseif indexed!=points_indexed
+                    throw(ArgumentError(
+                        "$caller: mixed indexed/non-indexed .su2 point records"))
+                end
+                x=_unv_float(fields[1],caller,".su2 point coordinate")
+                y=_unv_float(fields[2],caller,".su2 point coordinate")
+                z=ndime==3 ?
+                    _unv_float(fields[3],caller,".su2 point coordinate") : 0.0
+                index=indexed ?
+                    _unv_int(fields[ndime+1],caller,".su2 point index") :
+                    Int64(i-1)
+                index>=0 || throw(ArgumentError(
+                    "$caller: negative .su2 point index $index"))
+                haskey(point_rows,index) && throw(ArgumentError(
+                    "$caller: duplicate .su2 point index $index"))
+                push!(node_labels,index+1)
+                point_rows[index]=Int32(length(node_labels))
+                push!(coords,x);push!(coords,y);push!(coords,z)
+            end
+            npoin=count
+        elseif key=="NELEM"
+            count=_su2_count(value,caller,"NELEM")
+            length(records)+count<=element_limit || throw(ArgumentError(
+                "$caller: .su2 element count exceeds max_elements=$element_limit"))
+            for i in 1:count
+                row=_su2_next(io)
+                row===nothing && throw(ArgumentError(
+                    "$caller: truncated .su2 NELEM section"))
+                msh,nodes,index=_su2_element_row(row,caller,point_rows,"element")
+                label=index>=0 ? index+1 : Int64(i)
+                label in element_labels && throw(ArgumentError(
+                    "$caller: duplicate .su2 element index $(label-1)"))
+                push!(element_labels,label)
+                next_label[]=max(next_label[],label)
+                # NELEM records carry no physical association; all share the
+                # single domain entity 1, matching upstream's one-region model.
+                push!(records,_TextMeshCell(label,msh,nodes,Int64(1),Int64(0)))
+            end
+        elseif key=="NMARK"
+            marker_index==0 || throw(ArgumentError(
+                "$caller: NMARK appeared after marker sections"))
+            marker_count=_su2_count(value,caller,"NMARK")
+        elseif key=="MARKER_TAG"
+            marker_count>0 || throw(ArgumentError(
+                "$caller: MARKER_TAG appeared before NMARK"))
+            marker_index+=1
+            marker_index<=marker_count || throw(ArgumentError(
+                "$caller: more markers than the declared NMARK=$marker_count"))
+            name=value
+            eline=_su2_next(io)
+            eline===nothing && throw(ArgumentError(
+                "$caller: truncated .su2 marker $marker_index"))
+            ekv=_su2_key(eline)
+            ekv!==nothing && ekv[1]=="MARKER_ELEMS" || throw(ArgumentError(
+                "$caller: expected MARKER_ELEMS after MARKER_TAG, got '$eline'"))
+            count=_su2_count(ekv[2],caller,"MARKER_ELEMS")
+            length(records)+count<=element_limit || throw(ArgumentError(
+                "$caller: .su2 element count exceeds max_elements=$element_limit"))
+            mdim=-1
+            for _ in 1:count
+                row=_su2_next(io)
+                row===nothing && throw(ArgumentError(
+                    "$caller: truncated .su2 marker $marker_index elements"))
+                msh,nodes,_=_su2_element_row(
+                    row,caller,point_rows,"marker element")
+                mdim<0 && (mdim=msh_dimension(msh))
+                next_label[]+=1;label=next_label[]
+                label in element_labels && throw(ArgumentError(
+                    "$caller: duplicate .su2 element index $(label-1)"))
+                push!(element_labels,label)
+                push!(records,_TextMeshCell(label,msh,nodes,
+                    Int64(marker_index),Int64(marker_index)))
+            end
+            isempty(name) || (pnames[(mdim<0 ? ndime-1 : mdim,marker_index)]=name)
+        else
+            continue
+        end
+    end
+    marker_index!=marker_count && throw(ArgumentError(
+        "$caller: .su2 file declares NMARK=$marker_count but contains " *
+        "$marker_index marker(s)"))
+    return node_labels,coords,records,pnames
+end
+
+"""
+    Su2File
+
+Result of [`read_su2`](@ref): the compact `mesh` (an MSH2-style `MixedMesh`
+whose per-cell `elementary_entities` hold the domain/marker entity tag and
+whose `tags` hold the marker-derived physical tag; marker names live in
+`mesh.physical_names`), the original `node_tags` in row order and the
+per-block `element_tags`.
+"""
+struct Su2File
+    mesh::MixedMesh
+    node_tags::Vector{UInt64}
+    element_tags::Vector{Vector{UInt64}}
+end
+
+"""
+    read_su2(path; max_nodes, max_elements, max_file_bytes) -> Su2File
+
+Read an SU2 native `.su2` mesh file (`NDIME`, `NPOIN`, `NELEM` and the
+`NMARK`/`MARKER_TAG`/`MARKER_ELEMS` boundary lists). Marker *i* becomes
+physical tag *i* and its `MARKER_TAG` becomes the physical name; `NELEM`
+records carry physical tag 0 on domain entity 1. Connectivity resolves the
+0-based point indices; unsupported element types, multi-zone decks and
+malformed records are errors. `%` comment lines are skipped.
+"""
+function read_su2(path;
+                  max_nodes=typemax(Int32),max_elements=typemax(Int32),
+                  max_file_bytes=typemax(Int))
+    caller="read_su2"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    node_limit=_io_limit(max_nodes,caller,"max_nodes";ceiling=Int(typemax(Int32)))
+    element_limit=_io_limit(
+        max_elements,caller,"max_elements";ceiling=Int(typemax(Int32)))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
+    node_labels,coords,records,pnames=open(path,"r") do io
+        try
+            return _read_su2(io,caller,node_limit,element_limit)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa EOFError && throw(ArgumentError(
+                "$caller: truncated .su2 file"))
+            rethrow()
+        end
+    end
+    mesh,node_tags,element_tags=_foreign_mesh_result(
+        caller,node_labels,coords,records;physical_names=pnames)
+    return Su2File(mesh,node_tags,element_tags)
+end
+
+function _su2_marker_name(m::MixedMesh,dim::Int,tag::Int32)
+    if tag>0
+        name=get(m.physical_names,(dim,Int(tag)),"")
+        isempty(name) || return replace(strip(name),r"\s+"=>"_")
+        return "physical_$tag"
+    end
+    return "unmarked"
+end
+
+"""
+    write_su2(path, mesh)
+
+Write a `Mesh` or `MixedMesh` as an SU2 native file: `NDIME` from the highest
+element dimension (2 or 3), `NPOIN` with 0-based trailing indices, `NELEM`
+with the top-dimension cells, and `NMARK` boundary lists grouping the
+dimension-1 cells by physical tag (`MARKER_TAG` is the physical name, or a
+`physical_<tag>`/`unmarked` fallback). Cell types SU2 cannot express
+(quadratic and higher-order cells, special records) reject loudly; cells
+more than one dimension below the domain — curve and point elements of a
+3-D mesh — are skipped like upstream because the format has no boundary-edge
+model. Physical tags on the top-dimension cells and physical names of
+un-named groups are not representable and are dropped.
+"""
+function write_su2(path,m)
+    caller="write_su2"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    for block in m.blocks
+        block isa ElementBlock || throw(ArgumentError(
+            "$caller: special MSH record type $(block.msh) is not " *
+            "representable in .su2"))
+        block.msh==15 && continue   # no point element in SU2
+        get(_SU2_WRITE_TABLE,block.msh,nothing)===nothing && throw(ArgumentError(
+            "$caller: element type $(block.msh) ($(msh_family(block.msh)) " *
+            "order $(msh_spec(block.msh).order)) is not representable in .su2"))
+    end
+    ndime=maximum(msh_dimension(block.msh) for block in m.blocks;init=0)
+    ndime in (2,3) || throw(ArgumentError(
+        "$caller: .su2 export requires 2-D or 3-D elements"))
+    nn=size(m.coords,2)
+    target,parent=_foreign_target(path,caller)
+    mktemp(parent) do temporary,io
+        println(io,"NDIME= $ndime")
+        println(io,"NPOIN= $nn")
+        @inbounds for i in 1:nn
+            print(io,repr(m.coords[1,i])," ",repr(m.coords[2,i]))
+            ndime==3 && print(io," ",repr(m.coords[3,i]))
+            println(io," ",i-1)
+        end
+        # Top-dimension cells form NELEM; boundary-dimension cells group into
+        # markers by physical tag; deeper sub-boundary cells are skipped.
+        nelem=0;nmarker=0
+        for block in m.blocks
+            d=msh_dimension(block.msh)
+            d==ndime && (nelem+=size(block.nodes,2))
+            d==ndime-1 && (nmarker+=size(block.nodes,2))
+        end
+        println(io,"NELEM= $nelem")
+        eidx=0
+        for block in m.blocks
+            msh_dimension(block.msh)==ndime || continue
+            su2type=_SU2_WRITE_TABLE[block.msh];arity=size(block.nodes,1)
+            for j in 1:size(block.nodes,2)
+                print(io,su2type)
+                for k in 1:arity
+                    print(io," ",block.nodes[k,j]-1)
+                end
+                println(io," ",eidx);eidx+=1
+            end
+        end
+        # Marker groups keyed by physical tag, emitted in tag order.
+        groups=Dict{Int32,Vector{Tuple{Int,Int}}}()
+        for (bi,block) in enumerate(m.blocks)
+            msh_dimension(block.msh)==ndime-1 || continue
+            for j in 1:size(block.nodes,2)
+                push!(get!(()->Tuple{Int,Int}[],groups,block.tags[j]),(bi,j))
+            end
+        end
+        println(io,"NMARK= $(length(groups))")
+        for tag in sort!(collect(keys(groups)))
+            cells=groups[tag]
+            println(io,"MARKER_TAG= $(_su2_marker_name(m,ndime-1,tag))")
+            println(io,"MARKER_ELEMS= $(length(cells))")
+            for (bi,j) in cells
+                block=m.blocks[bi];arity=size(block.nodes,1)
+                print(io,_SU2_WRITE_TABLE[block.msh])
+                for k in 1:arity
+                    print(io," ",block.nodes[k,j]-1)
+                end
+                println(io)
+            end
+        end
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+# ── Nastran bulk data (.bdf/.nas) ──────────────────────────────────────────────
+
+# Card mnemonic → candidate (Gmsh type, node count, flat-field positions)
+# triples, tried in order. Flat positions index the merged card field list:
+# 1=mnemonic, 2=EID, 3=PID, connectivity starts at 4; each continuation line
+# contributes its data fields after the first (continuation-id) field.
+# Alternative position sets cover the MSC layout (corner nodes on the first
+# line, midsides on continuations after THETA/ZOFFS/Ti), the Altair layout
+# (all nodes on the first line) and minimal continuations.
+const _BDF_ELEMENT_CARDS=Dict{String,Vector{Tuple{Int,Int,Vector{Int}}}}(
+    "CBAR"=>[(1,2,[4,5])],
+    "CBEAM"=>[(1,2,[4,5])],
+    "CROD"=>[(1,2,[4,5])],
+    "CTUBE"=>[(1,2,[4,5])],
+    "CTRIA3"=>[(2,3,[4,5,6])],
+    "CTRIA6"=>[(9,6,[4,5,6,13,14,15]),(9,6,[4,5,6,7,8,9]),
+               (9,6,[4,5,6,10,11,12])],
+    "CQUAD4"=>[(3,4,[4,5,6,7])],
+    "CQUAD8"=>[(16,8,collect(4:11)),(16,8,[4,5,6,7,10,11,12,13])],
+    "CTETRA"=>[(11,10,collect(4:13)),(11,10,[4,5,6,7,10,11,12,13,14,15]),
+               (4,4,[4,5,6,7])],
+    "CTETRA10"=>[(11,10,collect(4:13)),(11,10,[4,5,6,7,10,11,12,13,14,15])],
+    "CTETRA4"=>[(4,4,[4,5,6,7])],
+    "CPENTA"=>[(18,15,collect(4:18)),(6,6,collect(4:9))],
+    "CPENTA15"=>[(18,15,collect(4:18))],
+    "CPENTA6"=>[(6,6,collect(4:9))],
+    "CHEXA"=>[(17,20,collect(4:23)),(5,8,collect(4:11)),
+              (5,8,[4,5,6,7,10,11,12,13])],
+    "CHEXA20"=>[(17,20,collect(4:23))],
+    "CHEXA8"=>[(5,8,collect(4:11)),(5,8,[4,5,6,7,10,11,12,13])],
+    "CPYRA"=>[(19,13,collect(4:16)),
+              (19,13,[4,5,6,7,8,10,11,12,13,14,15,16,17]),
+              (7,5,collect(4:8))],
+    "CPYRA13"=>[(19,13,collect(4:16)),
+                (19,13,[4,5,6,7,8,10,11,12,13,14,15,16,17])],
+    "CPYRA5"=>[(7,5,collect(4:8))])
+
+# Non-element card prefixes skipped silently (properties, materials, loads,
+# constraints, coordinate systems, case control); other unmapped `C`-cards
+# warn once because they look like element connections.
+const _BDF_SILENT_PREFIXES=(
+    "MAT","PLOAD","PSHELL","PSOLID","PCOMP","PBAR","PBEAM","PROD","PELAS",
+    "PGAP","PVISC","PMASS","PSHEAR","PTUBE","PBEND","PDAMP","PBUSH","PSET",
+    "PCONEAX","PLPLANE","PRAC","SPC","MPC","FORCE","MOMENT","GRAV","PARAM",
+    "SET","CORD","TABLE","DAREA","DOPTPRM","EIG","METHOD","SUBCASE","LOAD",
+    "TEMP","SUPORT","ASET","OMIT","K2GG","M2GG","SPOINT","EPOINT","SEQGP",
+    "DMIG","GENEL","RBE","RSPLINE","ENDDATA","BEGIN","CEND","TITLE",
+    "SUBTITLE","LABEL","ECHO","OUTPUT","DISP","STRESS","STRAIN","SPCF",
+    "ELFORCE","GPFORCE","OLOAD","AERO","TRIM","DIVERG","FLUTTER","CASE",
+    "CONM","CELAS","CDAMP","CBUSH","CMASS","CGAP","CVISC","CHBDY",
+    "CAABSF","CDUM","CRAC","CFAST","CWELD","CSEAM","CJOIN")
+
+@inline _bdf_fld(fields::Vector{String},index::Int)=
+    index<=length(fields) ? fields[index] : ""
+
+function _bdf_int(token::AbstractString,caller::AbstractString,
+                  context::AbstractString;default=nothing)
+    isempty(token) && return default
+    value=tryparse(Int,token)
+    value===nothing && throw(ArgumentError(
+        "$caller: invalid integer '$token' in $context"))
+    return value
+end
+
+function _bdf_float(token::AbstractString,caller::AbstractString,
+                    context::AbstractString;default=nothing)
+    isempty(token) && return default
+    s=replace(token,'D'=>'e','d'=>'e')
+    value=tryparse(Float64,s)
+    if value===nothing
+        # Nastran implied-exponent real: `1.0+2`, `-2.0-3`, `1.+4`.
+        m=match(r"^([+-]?(?:\d+\.?\d*|\.\d+))([+-]\d+)$",s)
+        m!==nothing &&
+            (value=tryparse(Float64,m.captures[1]*"e"*m.captures[2]))
+    end
+    value===nothing && throw(ArgumentError(
+        "$caller: invalid real value '$token' in $context"))
+    isfinite(value) || throw(ArgumentError(
+        "$caller: non-finite real value in $context"))
+    return value
+end
+
+# Split a card's first line into (mnemonic, fields, continuation-id, large?).
+# `fields[1]` is the mnemonic; fixed lines contribute fields 2–9 (columns
+# 9–72) plus the column 73–80 continuation id, large-field lines contribute
+# fields 2–4 plus the column 65–80 continuation id, and free lines are
+# comma-split (an empty final field marks the continuation id).
+function _bdf_fields(line::AbstractString)
+    if occursin(',',line)
+        parts=String[strip(part) for part in split(line,',')]
+        name=uppercase(parts[1])
+        return name,parts,"",endswith(name,'*'),true
+    end
+    n=lastindex(line)
+    name=uppercase(strip(SubString(line,1,min(8,n))))
+    large=endswith(name,'*')
+    if large
+        fields=String[name]
+        for a in 17:16:64
+            a>n && break
+            push!(fields,strip(SubString(line,a,min(a+15,n))))
+        end
+        contid=n>=65 ? strip(SubString(line,65,min(80,n))) : ""
+        return name,fields,contid,true,false
+    end
+    fields=String[name]
+    for a in 9:8:72
+        a>n && break
+        push!(fields,strip(SubString(line,a,min(a+7,n))))
+    end
+    while length(fields)<9
+        push!(fields,"")
+    end
+    if occursin(r"\s",name) || any(field->occursin(r"\s",field),fields)
+        # A fixed field can never contain interior whitespace: the line was
+        # actually written whitespace-delimited, so re-read it as free form.
+        parts=String[part for part in split(line)]
+        name=uppercase(parts[1])
+        return name,parts,"",endswith(name,'*'),true
+    end
+    contid=n>=73 ? strip(SubString(line,73,min(80,n))) : ""
+    return name,fields,contid,false,false
+end
+
+# Continuation line → (id-tag, data fields, next continuation id).
+function _bdf_cont_fields(line::AbstractString,large::Bool)
+    if occursin(',',line)
+        parts=String[strip(part) for part in split(line,',')]
+        return parts[1],parts[2:end],""
+    end
+    n=lastindex(line)
+    w=large ? 16 : 8
+    tag=strip(SubString(line,1,min(w,n)))
+    fields=String[]
+    for a in (w+1):w:(large ? 64 : 72)
+        a>n && break
+        push!(fields,strip(SubString(line,a,min(a+w-1,n))))
+    end
+    if occursin(r"\s",tag) || any(field->occursin(r"\s",field),fields)
+        # Whitespace-delimited continuation (see _bdf_fields).
+        parts=String[part for part in split(line)]
+        return parts[1],parts[2:end],""
+    end
+    contid=n>(large ? 64 : 72) ? strip(SubString(line,(large ? 65 : 73),min(80,n))) : ""
+    return tag,fields,contid
+end
+
+function _bdf_process_card!(name::AbstractString,fields::Vector{String},
+        free::Bool,caller::AbstractString,node_labels::Vector{Int64},
+        node_rows::Dict{Int64,Int32},coords::Vector{Float64},
+        records::Vector{_TextMeshCell},element_labels::Set{Int64},
+        warned::Set{String},warned_cp::Base.RefValue{Bool},
+        node_limit::Int,element_limit::Int)
+    # Large-field mnemonics arrive with a trailing `*`; strip it for dispatch.
+    base=endswith(name,'*') ? chop(name) : name
+    base=="GRID" || return _bdf_process_element!(base,fields,caller,node_rows,
+        records,element_labels,warned,element_limit)
+    id=_bdf_int(_bdf_fld(fields,2),caller,"GRID id")
+    (id===nothing || id<=0) && throw(ArgumentError(
+        "$caller: GRID id must be a positive integer"))
+    cptok=_bdf_fld(fields,3);cp=tryparse(Int,cptok)
+    shifted=false
+    if cp===nothing && free && !isempty(cptok) &&
+            tryparse(Float64,replace(cptok,'D'=>'e','d'=>'e'))!==nothing
+        # Free-format GRID without the cp field: `GRID id x y z` — a real
+        # (not integer) token where cp belongs means the collapsed layout.
+        shifted=true;cp=0
+    elseif cp===nothing
+        isempty(cptok) && (cp=0)
+        cp===nothing && throw(ArgumentError(
+            "$caller: invalid integer '$cptok' in GRID cp"))
+    end
+    if cp!=0
+        # Alternate input coordinate frames are not implemented; the node is
+        # skipped rather than re-interpreted in the wrong frame.
+        warned_cp[] || @warn("$caller: GRID nodes on coordinate frame $cp " *
+            "are skipped (only the basic frame 0 is supported)")
+        warned_cp[]=true
+        return nothing
+    end
+    x=_bdf_float(_bdf_fld(fields,shifted ? 3 : 4),caller,"GRID x";default=0.0)
+    y=_bdf_float(_bdf_fld(fields,shifted ? 4 : 5),caller,"GRID y";default=0.0)
+    z=_bdf_float(_bdf_fld(fields,shifted ? 5 : 6),caller,"GRID z";default=0.0)
+    haskey(node_rows,id) && throw(ArgumentError(
+        "$caller: duplicate GRID id $id"))
+    length(node_labels)>=node_limit && throw(ArgumentError(
+        "$caller: GRID count exceeds max_nodes=$node_limit"))
+    push!(node_labels,id);node_rows[id]=Int32(length(node_labels))
+    push!(coords,x);push!(coords,y);push!(coords,z)
+    return nothing
+end
+
+function _bdf_process_element!(name::AbstractString,fields::Vector{String},
+        caller::AbstractString,node_rows::Dict{Int64,Int32},
+        records::Vector{_TextMeshCell},element_labels::Set{Int64},
+        warned::Set{String},element_limit::Int)
+    candidates=get(_BDF_ELEMENT_CARDS,name,nothing)
+    candidates===nothing || return _bdf_emit_element!(name,candidates,fields,
+        caller,node_rows,records,element_labels,element_limit)
+    if name=="INCLUDE"
+        throw(ArgumentError(
+            "$caller: INCLUDE cards are not supported — merge the referenced " *
+            "file into the bulk data first"))
+    end
+    # Recognized element-style mnemonics the table does not cover warn once;
+    # every other card (properties, case control, CORD frames, ...) skips
+    # silently like upstream.
+    if startswith(name,'C') &&
+            !any(prefix->startswith(name,prefix),_BDF_SILENT_PREFIXES)
+        name in warned || @warn("$caller: skipping unrecognized Nastran " *
+            "card '$name'")
+        push!(warned,name)
+    end
+    return nothing
+end
+
+function _bdf_emit_element!(name::AbstractString,candidates,fields,
+        caller::AbstractString,node_rows::Dict{Int64,Int32},
+        records::Vector{_TextMeshCell},element_labels::Set{Int64},
+        element_limit::Int)
+    eid=_bdf_int(_bdf_fld(fields,2),caller,"$name element id")
+    (eid===nothing || eid<=0) && throw(ArgumentError(
+        "$caller: $name element id must be a positive integer"))
+    pid=_bdf_int(_bdf_fld(fields,3),caller,"$name property id";default=0)
+    pid<0 && throw(ArgumentError("$caller: negative $name property id $pid"))
+    chosen=nothing
+    for (msh,arity,positions) in candidates
+        all(p->p<=length(fields),positions) || continue
+        nodes=Vector{Int32}(undef,arity);ok=true
+        for (k,p) in enumerate(positions)
+            v=tryparse(Int,fields[p])
+            if v===nothing || v<=0
+                ok=false;break
+            end
+            row=get(node_rows,Int64(v),Int32(0))
+            row==0 && (ok=false;break)
+            nodes[k]=row
+        end
+        ok || continue
+        chosen=(msh,nodes);break
+    end
+    chosen===nothing && throw(ArgumentError(
+        "$caller: malformed $name card — cannot resolve its connectivity"))
+    msh,nodes=chosen
+    eid in element_labels && throw(ArgumentError(
+        "$caller: duplicate element id $eid"))
+    push!(element_labels,eid)
+    length(records)>=element_limit && throw(ArgumentError(
+        "$caller: element count exceeds max_elements=$element_limit"))
+    push!(records,_TextMeshCell(eid,msh,nodes,Int64(pid),Int64(pid)))
+    return nothing
+end
+
+function _read_bdf(io::Base.IO,caller::AbstractString,node_limit::Int,
+                   element_limit::Int)
+    node_labels=Int64[];node_rows=Dict{Int64,Int32}();coords=Float64[]
+    records=_TextMeshCell[];element_labels=Set{Int64}()
+    warned=Set{String}();warned_cp=Ref(false)
+    pending=Ref{Tuple{String,Vector{String},Bool,Bool}}()
+    have_pending=Ref(false)
+    while !eof(io)
+        raw=readline(io)
+        isempty(raw) && continue
+        raw[1]=='$' && continue                     # full-line comment
+        ci=findfirst('$',raw)
+        ci===nothing || (raw=rstrip(raw[1:ci-1]))   # trailing $ comment
+        stripped=strip(raw)
+        isempty(stripped) && continue
+        lead=first(stripped)
+        continuation=lead=='+' || lead==',' ||
+            (lead=='*' && have_pending[] && pending[][3])
+        if continuation && have_pending[]
+            tag,cfields,=_bdf_cont_fields(raw,pending[][3])
+            name,fields,large,free=pending[]
+            if free && !isempty(fields)
+                # A free-format parent's last field is the continuation id;
+                # drop it when blank, when it is a bare `+`/`*` marker or when
+                # it matches the continuation tag, so flat positions stay
+                # uniform with the fixed layouts.
+                tail=strip(fields[end],['+','*',' '])
+                tagclean=strip(tag,['+','*',' '])
+                (isempty(fields[end]) || isempty(tail) || tail==tagclean) &&
+                    pop!(fields)
+            end
+            append!(fields,cfields)
+            continue
+        end
+        continuation && !have_pending[] && continue   # orphaned continuation
+        if have_pending[]
+            name,fields,large,free=pending[]
+            _bdf_process_card!(name,fields,free,caller,node_labels,node_rows,
+                coords,records,element_labels,warned,warned_cp,
+                node_limit,element_limit)
+            have_pending[]=false
+        end
+        name,fields,contid,large,free=_bdf_fields(raw)
+        name=="ENDDATA" && break
+        pending[]=(name,fields,large,free)
+        have_pending[]=true
+    end
+    if have_pending[]
+        name,fields,large,free=pending[]
+        _bdf_process_card!(name,fields,free,caller,node_labels,node_rows,
+            coords,records,element_labels,warned,warned_cp,
+            node_limit,element_limit)
+    end
+    return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
+end
+
+"""
+    BdfFile
+
+Result of [`read_bdf`](@ref): the compact `mesh` (an MSH2-style `MixedMesh`
+whose per-cell `elementary_entities` and `tags` both carry the card property
+id), the original `node_tags` (GRID ids) in row order and the per-block
+`element_tags` (element ids).
+"""
+struct BdfFile
+    mesh::MixedMesh
+    node_tags::Vector{UInt64}
+    element_tags::Vector{Vector{UInt64}}
+end
+
+"""
+    read_bdf(path; max_nodes, max_elements, max_file_bytes) -> BdfFile
+
+Read a Nastran bulk data file (`.bdf`/`.nas`). `GRID` cards supply nodes
+(blank or zero `cp` only — nodes on alternate frames are skipped with a
+warning) and `CBAR`, `CBEAM`, `CROD`, `CTUBE`, `CTRIA3`, `CTRIA6`, `CQUAD4`,
+`CQUAD8`, `CTETRA[4|10]`, `CPENTA[6|15]`, `CHEXA[8|20]` and `CPYRA[5|13]`
+cards supply elements, with the property-id field becoming the elementary
+and physical tag. Fixed 8-column and comma-delimited free formats are
+supported along with `*`-suffixed 16-column large fields, `+`/`*`
+continuation lines, `D`/`d` exponents and implied-exponent reals; `\$`
+comments are stripped. `INCLUDE` rejects loudly, `ENDDATA` ends the deck,
+and all other non-element cards are skipped.
+"""
+function read_bdf(path;
+                  max_nodes=typemax(Int32),max_elements=typemax(Int32),
+                  max_file_bytes=typemax(Int))
+    caller="read_bdf"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    node_limit=_io_limit(max_nodes,caller,"max_nodes";ceiling=Int(typemax(Int32)))
+    element_limit=_io_limit(
+        max_elements,caller,"max_elements";ceiling=Int(typemax(Int32)))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
+    node_labels,coords,records,pnames=open(path,"r") do io
+        try
+            return _read_bdf(io,caller,node_limit,element_limit)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa EOFError && throw(ArgumentError(
+                "$caller: truncated .bdf file"))
+            rethrow()
+        end
+    end
+    mesh,node_tags,element_tags=_foreign_mesh_result(
+        caller,node_labels,coords,records;physical_names=pnames)
+    return BdfFile(mesh,node_tags,element_tags)
+end
+
+# ── Nastran writer ─────────────────────────────────────────────────────────────
+
+const _BDF_WRITE_TABLE=Dict{Int,String}(
+    1=>"CBAR",2=>"CTRIA3",9=>"CTRIA6",3=>"CQUAD4",16=>"CQUAD8",
+    4=>"CTETRA",11=>"CTETRA10",6=>"CPENTA",18=>"CPENTA15",
+    5=>"CHEXA",17=>"CHEXA20",7=>"CPYRA",19=>"CPYRA13")
+
+function _bdf_i8(value::Integer,caller::AbstractString,context::AbstractString)
+    s=string(value)
+    length(s)<=8 || throw(ArgumentError(
+        "$caller: $context $value does not fit an 8-column BDF field"))
+    return s
+end
+
+function _bdf_f8(value::Real,caller::AbstractString,context::AbstractString)
+    for spec in (x->repr(x),x->@sprintf("%.7g",x),x->@sprintf("%.6g",x),
+                 x->@sprintf("%.5g",x),x->@sprintf("%.4g",x),x->@sprintf("%.3e",x),
+                 x->@sprintf("%.2e",x),x->@sprintf("%.1e",x),x->@sprintf("%.0e",x))
+        s=spec(value)
+        s=replace(s,"e+"=>"+","e-"=>"-","E+"=>"+","E-"=>"-")
+        length(s)<=8 && return s
+    end
+    throw(ArgumentError(
+        "$caller: $context $value does not fit an 8-column BDF field"))
+end
+
+function _bdf_card_line(io,name::AbstractString,fields;
+                        contid::AbstractString="")
+    print(io,rpad(name,8))
+    for field in fields
+        print(io,lpad(field,8))
+    end
+    isempty(contid) || print(io,lpad(contid,8))
+    println(io)
+    return nothing
+end
+
+# Emit one element card in small-field format: the mnemonic plus EID, PID and
+# the first six connectivity fields on the first line (except CTRIA6, whose
+# MSC layout carries only the three corner nodes before THETA/ZOFFS/TFLAG),
+# `+`-id continuation lines holding up to eight further fields each.
+function _bdf_write_card(io,card::AbstractString,eid::AbstractString,
+        pid::AbstractString,nids::Vector{String})
+    if card=="CTRIA6"
+        # MSC layout: G1–G3 on the first line, T1–T3 then G4–G6 on the
+        # continuation (reader candidates 13/14/15 in flat positions).
+        _bdf_card_line(io,card,[eid,pid,nids[1],nids[2],nids[3],"","",""];
+            contid="+")
+        _bdf_card_line(io,"+",["","","",nids[4],nids[5],nids[6]])
+        return nothing
+    end
+    first=nids[1:min(6,length(nids))]
+    _bdf_card_line(io,card,[eid;pid;first];
+        contid=length(nids)>6 ? "+" : "")
+    length(nids)<=6 && return nothing
+    for chunk in Iterators.partition(nids[7:end],8)
+        _bdf_card_line(io,"+",chunk)
+    end
+    return nothing
+end
+
+"""
+    write_bdf(path, mesh)
+
+Write a `Mesh` or `MixedMesh` as a Nastran bulk data file (small-field
+8-column format): a `BEGIN BULK`/`ENDDATA` deck of `GRID` cards followed by
+`CBAR`, `CTRIA3`, `CTRIA6`, `CQUAD4`, `CQUAD8`, `CTETRA`, `CTETRA10`,
+`CPENTA`, `CPENTA15`, `CHEXA`, `CHEXA20`, `CPYRA` and `CPYRA13` element
+cards whose PID field carries the physical tag (blank when zero). GRID ids
+and element ids keep the external node/element tags when present.
+Second-order cards split over `+`-id continuation lines in the MSC layout.
+Point cells are skipped (the format has no point element); every other
+unmapped type — 3-node lines, 9-node quads, tets beyond order 2 and special
+records — rejects loudly. Coordinates must fit the 8-column field.
+"""
+function write_bdf(path,m)
+    caller="write_bdf"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    for block in m.blocks
+        block isa ElementBlock || throw(ArgumentError(
+            "$caller: special MSH record type $(block.msh) is not " *
+            "representable in .bdf"))
+        block.msh==15 && continue   # no point element in Nastran
+        get(_BDF_WRITE_TABLE,block.msh,nothing)===nothing && throw(ArgumentError(
+            "$caller: element type $(block.msh) ($(msh_family(block.msh)) " *
+            "order $(msh_spec(block.msh).order)) is not representable in .bdf"))
+    end
+    data=m.entity_data
+    nn=size(m.coords,2)
+    labels=data===nothing ? collect(UInt64(1):UInt64(nn)) : data.external_node_tags
+    target,parent=_foreign_target(path,caller)
+    mktemp(parent) do temporary,io
+        println(io,"\$ Nastran bulk data written by Tessella")
+        println(io,"BEGIN BULK")
+        @inbounds for i in 1:nn
+            _bdf_card_line(io,"GRID",
+                [_bdf_i8(labels[i],caller,"GRID id"),"",
+                 _bdf_f8(m.coords[1,i],caller,"GRID coordinate"),
+                 _bdf_f8(m.coords[2,i],caller,"GRID coordinate"),
+                 _bdf_f8(m.coords[3,i],caller,"GRID coordinate")])
+        end
+        counter=UInt64(0)
+        for (bi,block) in enumerate(m.blocks)
+            block isa ElementBlock || continue
+            block.msh==15 && continue
+            card=_BDF_WRITE_TABLE[block.msh];arity=size(block.nodes,1)
+            for j in 1:size(block.nodes,2)
+                counter+=UInt64(1)
+                eid=_bdf_i8(_foreign_cell_uid(m,bi,j,counter),caller,"element id")
+                physical=Int64(block.tags[j])
+                pid=physical>0 ? _bdf_i8(physical,caller,"property id") : ""
+                _bdf_write_card(io,card,eid,pid,
+                    [_bdf_i8(labels[block.nodes[k,j]],caller,"grid id")
+                     for k in 1:arity])
+            end
+        end
+        println(io,"ENDDATA")
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
 end
 
 end # module IO

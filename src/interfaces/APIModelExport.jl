@@ -135,9 +135,9 @@ function _model_export_write(filename)
             "aliases: .msh, .msh2/.msh22 for MSH 2.2, .msh4/.msh41 for MSH 4.1)"))
     end
     (haskey(_MSH_EXTENSION_VERSIONS,extension) ||
-        extension in (".unv",".mesh",".stl")) || throw(ArgumentError(
+        extension in (".unv",".mesh",".stl",".su2",".bdf",".nas")) || throw(ArgumentError(
         "$caller: current-model export supports .msh, .msh2/.msh22, " *
-        ".msh4/.msh41, .unv, .mesh and .stl"))
+        ".msh4/.msh41, .unv, .mesh, .stl, .su2, .bdf and .nas"))
     return lock(STATE_LOCK) do
         model=_model_locked()
         save_all=!iszero(get(OPTIONS,"Mesh.SaveAll",0.0))
@@ -157,14 +157,17 @@ function _model_export_write(filename)
                 true,caller)
             IO.write_stl(filename,target)
         else
-            # UNV/MEDIT writers use the complete MSH4-style projection: actual
-            # UIDs, per-cell physical tags, and block entity ownership. Neither
-            # format carries physical names or group metadata, so names are
-            # intentionally dropped on write (upstream behaviour).
+            # The foreign writers use the complete MSH4-style projection:
+            # actual UIDs, per-cell physical tags, and block entity ownership.
+            # UNV/MEDIT carry no group metadata so names are dropped (upstream
+            # behaviour); SU2 maps physical groups to MARKER sections with
+            # names; BDF carries the physical tag in each card's PID field.
             target=_model_export_mesh(model,LAST_MESH[],LAST_MESH_CLASS[],4.1,
                 save_all,caller)
             extension==".unv" ? IO.write_unv(filename,target) :
-                IO.write_mesh(filename,target)
+                extension==".mesh" ? IO.write_mesh(filename,target) :
+                extension==".su2" ? IO.write_su2(filename,target) :
+                    IO.write_bdf(filename,target)
         end
         return nothing
     end
@@ -174,7 +177,7 @@ end
     write(filename)
 
 Write the current model's actual mesh to a `.msh`, `.msh2`, `.msh22`, `.msh4`,
-`.msh41`, `.stl`, `.unv` or `.mesh` file. `.msh` uses `Mesh.MshFileVersion`
+`.msh41`, `.stl`, `.unv`, `.mesh`, `.su2`, `.bdf` or `.nas` file. `.msh` uses `Mesh.MshFileVersion`
 to select 2.2 or 4.1 while the versioned aliases force the corresponding
 dialect; `.msh1`, `.msh3` and `.msh40` reject. `Mesh.Binary` selects the
 encoding, and `Mesh.SaveAll`
@@ -184,8 +187,11 @@ rejects volume elements; MSH4 preserves actual UIDs and retained periodic,
 partition, ghost, and data metadata; MSH2 uses its native dense numbering.
 `.unv` emits I-DEAS datasets 2411/2412 with elementary and physical tags;
 `.mesh` emits INRIA/Medit sections with `ref` carrying the physical tag (or
-entity tag when no physical tag is set). Neither foreign format retains
-physical names, partitions, periodic links or data sections.
+entity tag when no physical tag is set); `.su2` emits NDIME/NPOIN/NELEM with
+physical groups as named MARKER sections; `.bdf`/`.nas` emit Nastran
+GRID and element cards with the physical tag in the property-id field. The
+foreign formats retain neither partitions, periodic links nor data sections;
+only `.su2` retains physical names.
 Unsupported metadata/format combinations reject before replacing the target.
 The model, mesh cache, views, counters, and model filename remain unchanged.
 """
