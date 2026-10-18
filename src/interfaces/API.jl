@@ -11985,8 +11985,8 @@ Post-processing plugins operating on the session views (Gmsh `plugin` module
 counterpart). `set_number(name, option, value)` and `set_string(name, option,
 value)` configure a registered plugin's options; `run(name)` executes it.
 Supported plugins: `Integrate`, `MinMax`, `Probe`, `Skin`, `ExtractElements`,
-`Transform`, `Remove`, `Smooth`, `NewView`. Setting the numeric option `Run` to
-a nonzero value executes the plugin immediately.
+`Transform`, `Remove`, `Smooth`, `NewView`, `Gradient`, `CutPlane`. Setting the
+numeric option `Run` to a nonzero value executes the plugin immediately.
 """
 module plugin
 

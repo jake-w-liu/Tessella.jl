@@ -21,7 +21,24 @@
 #   Transform       in-place affine map of list node coordinates,
 #   Remove          in-place element-class/string removal,
 #   Smooth          in-place coincident-node value averaging,
-#   NewView         constant `NodeData` model view over the current mesh.
+#   NewView         constant `NodeData` model view over the current mesh,
+#   Gradient        per-node spatial gradient of scalar data into `*_Gradient`
+#                   vector records,
+#   CutPlane        `A x + B y + C z + D = 0` levelset sections into
+#                   `*_CutPlane` point/line/triangle records (ExtractVolume
+#                   keeps the whole elements on the selected side).
+#
+# Gradient and CutPlane read list views directly and model views through a
+# per-element multi-step merge (`_plugin_elements_all_steps`), so both emit
+# list views covering every populated step. Gradient differentiates only
+# linear nodal data — records whose value nodes outnumber the primary
+# geometric map (high-order `ElementNodeData`), non-scalar components and
+# point elements are skipped like the upstream scalar-record scan. CutPlane
+# interpolates section values from the primary corner values; elements fully
+# in the plane are re-emitted verbatim when they fit a list record type.
+# Upstream's `RecurLevel`/`TargetError` options exist for the generic
+# levelset subdivision of curved elements; linear sections are exact without
+# them, so they are not registered.
 #
 # Session views carry no per-element visibility flags, so the upstream `Visible`
 # options are accepted and stored but currently never hide an element.
@@ -1298,6 +1315,346 @@ function _plugin_exec_new_view(spec::_PluginSpec,caller::AbstractString)
     return nothing
 end
 
+# ---- multi-step element source ---------------------------------------------------
+
+# Element records covering every populated step at once: list views already
+# pack all steps into each record, while model views merge their per-(step,
+# data type) blocks by element tag — an element absent from a step contributes
+# zeros, matching the ExtractElements merge convention. Returns
+# `(elements, nsteps, times)` with the per-step physical times.
+function _plugin_elements_all_steps(view,caller::AbstractString)
+    if view.model_kind===nothing
+        elements,steps=_plugin_list_elements(view,caller)
+        return elements,steps,[_plugin_step_time(view,s) for s in 0:steps-1]
+    end
+    keys=_plugin_model_keys(view)
+    isempty(keys) && throw(ArgumentError(
+        "$caller: view holds no populated model data steps"))
+    per_step=Vector{Dict{UInt64,_PluginElement}}(undef,length(keys))
+    firsts=Dict{UInt64,_PluginElement}();ordered=UInt64[]
+    nc=nothing
+    for (i,key) in enumerate(keys)
+        elements,key_nc=_plugin_model_elements(view,key,caller)
+        if nc===nothing
+            nc=key_nc
+        else
+            key_nc==nc || throw(ArgumentError(
+                "$caller: model data component count changes across steps"))
+        end
+        table=Dict{UInt64,_PluginElement}()
+        for element in elements
+            table[element.etag]=element
+            haskey(firsts,element.etag) && continue
+            firsts[element.etag]=element
+            push!(ordered,element.etag)
+        end
+        per_step[i]=table
+    end
+    merged=_PluginElement[]
+    for etag in ordered
+        proto=firsts[etag]
+        arity=size(proto.vcoords,2)
+        vals=Vector{Float64}(undef,arity*nc*length(keys))
+        for i in 1:length(keys)
+            element=get(per_step[i],etag,nothing)
+            covered=element!==nothing && size(element.vcoords,2)==arity
+            for node in 1:arity,comp in 1:nc
+                vals[(i-1)*arity*nc+(node-1)*nc+comp]=
+                    covered ? element.vals[(node-1)*nc+comp] : 0.0
+            end
+        end
+        push!(merged,_PluginElement(proto.kind,proto.dim,proto.geo,
+                                    proto.vcoords,vals,nc,etag))
+    end
+    return merged,length(keys),[_plugin_step_time(view,key[1]) for key in keys]
+end
+
+# ---- Gradient ------------------------------------------------------------------
+
+# Reference coordinates of each linear family's primary nodes — the nodal
+# basis convention of `MeshFunctionSpaces._first_order_*` in MSH node order.
+# Points carry no reference frame (no definable gradient) and are skipped.
+const _PLUGIN_REFERENCE_NODES=(
+    line=((-1.0,0.0,0.0),(1.0,0.0,0.0)),
+    triangle=((0.0,0.0,0.0),(1.0,0.0,0.0),(0.0,1.0,0.0)),
+    quadrangle=((-1.0,-1.0,0.0),(1.0,-1.0,0.0),(1.0,1.0,0.0),(-1.0,1.0,0.0)),
+    tetrahedron=((0.0,0.0,0.0),(1.0,0.0,0.0),(0.0,1.0,0.0),(0.0,0.0,1.0)),
+    hexahedron=((-1.0,-1.0,-1.0),(1.0,-1.0,-1.0),(1.0,1.0,-1.0),
+                (-1.0,1.0,-1.0),(-1.0,-1.0,1.0),(1.0,-1.0,1.0),
+                (1.0,1.0,1.0),(-1.0,1.0,1.0)),
+    prism=((0.0,0.0,-1.0),(1.0,0.0,-1.0),(0.0,1.0,-1.0),
+           (0.0,0.0,1.0),(1.0,0.0,1.0),(0.0,1.0,1.0)),
+    pyramid=((-1.0,-1.0,0.0),(1.0,-1.0,0.0),(1.0,1.0,0.0),(-1.0,1.0,0.0),
+             (0.0,0.0,1.0)))
+
+# `_PluginElement.kind` → the `MeshFunctionSpaces` family symbol.
+const _PLUGIN_KIND_FAMILY=(point=:pnt,line=:lin,triangle=:tri,
+                           quadrangle=:qua,tetrahedron=:tet,hexahedron=:hex,
+                           prism=:pri,pyramid=:pyr)
+
+# Solve `(JᵀJ) h = r` for the assembled Jacobian columns `jcol` (`jcol[a][k]`
+# holds ∂x_a/∂ξ_k). Returns the dim-tuple `h`, or `nothing` when the linear
+# map is degenerate — the Gram determinant vanishes relative to its trace,
+# which is dimensionally consistent for every dim.
+function _plugin_metric_solve(jcol::NTuple{3,Vector{Float64}},
+                              r::Vector{Float64},dim::Int)
+    if dim==1
+        g11=0.0
+        for a in 1:3;g11=muladd(jcol[a][1],jcol[a][1],g11);end
+        g11>0 || return nothing
+        return (r[1]/g11,)
+    elseif dim==2
+        g11=g12=g22=0.0
+        for a in 1:3
+            g11=muladd(jcol[a][1],jcol[a][1],g11)
+            g12=muladd(jcol[a][1],jcol[a][2],g12)
+            g22=muladd(jcol[a][2],jcol[a][2],g22)
+        end
+        det=g11*g22-g12*g12;scale=g11+g22
+        det>eps(Float64)*scale*scale || return nothing
+        return (muladd(g22,r[1],-g12*r[2])/det,
+                muladd(g11,r[2],-g12*r[1])/det)
+    end
+    g11=g12=g13=g22=g23=g33=0.0
+    for a in 1:3
+        ja=jcol[a]
+        g11=muladd(ja[1],ja[1],g11);g12=muladd(ja[1],ja[2],g12)
+        g13=muladd(ja[1],ja[3],g13);g22=muladd(ja[2],ja[2],g22)
+        g23=muladd(ja[2],ja[3],g23);g33=muladd(ja[3],ja[3],g33)
+    end
+    c11=g22*g33-g23*g23;c12=g13*g23-g12*g33;c13=g12*g23-g13*g22
+    det=muladd(g11,c11,muladd(g12,c12,g13*c13))
+    tr=g11+g22+g33
+    det>eps(Float64)*tr*tr*tr || return nothing
+    c22=g11*g33-g13*g13;c23=g12*g13-g11*g23;c33=g11*g22-g12*g12
+    return (muladd(c11,r[1],muladd(c12,r[2],c13*r[3]))/det,
+            muladd(c12,r[1],muladd(c22,r[2],c23*r[3]))/det,
+            muladd(c13,r[1],muladd(c23,r[2],c33*r[3]))/det)
+end
+
+# Spatial gradient of one scalar step at every value node,
+# `∇u = J (JᵀJ)⁻¹ ∇ξu` evaluated at the node's reference location: the exact
+# tangential gradient for dim<3 elements and the full gradient for volume
+# elements. `nothing` when the element has no linear gradient — non-scalar
+# data, value nodes outnumbering the primary map (high-order data), or a
+# degenerate map.
+function _plugin_element_gradient(element::_PluginElement,step::Int)
+    nodes=get(_PLUGIN_REFERENCE_NODES,element.kind,nothing)
+    nodes===nothing && return nothing
+    element.ncomp==1 || return nothing
+    arity=size(element.geo,2)
+    size(element.vcoords,2)==arity || return nothing
+    family=_PLUGIN_KIND_FAMILY[element.kind];dim=element.dim
+    out=Vector{Float64}(undef,3arity)
+    for node in 1:arity
+        u,v,w=nodes[node]
+        dN=MeshFunctionSpaces._first_order_gradients(
+            Val(family),u,v,w,"API.plugin Gradient",node)
+        jcols=ntuple(_->zeros(dim),3)
+        r=zeros(dim)
+        for i in 1:arity
+            gi=dN[i];vi=element.vals[(step-1)*arity+i]
+            for k in 1:dim
+                r[k]=muladd(vi,gi[k],r[k])
+                for a in 1:3
+                    jcols[a][k]=muladd(element.geo[a,i],gi[k],jcols[a][k])
+                end
+            end
+        end
+        h=_plugin_metric_solve(jcols,r,dim)
+        h===nothing && return nothing
+        for a in 1:3
+            g=0.0
+            for k in 1:dim;g=muladd(jcols[a][k],h[k],g);end
+            out[(node-1)*3+a]=g
+        end
+    end
+    return out
+end
+
+function _plugin_exec_gradient(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    elements,steps,times=_plugin_elements_all_steps(view,caller)
+    out=_PluginElement[]
+    for element in elements
+        arity=size(element.geo,2)
+        values=Vector{Float64}(undef,3arity*steps)
+        ok=true
+        for step in 1:steps
+            part=_plugin_element_gradient(element,step)
+            part===nothing && (ok=false;break)
+            copyto!(values,(step-1)*3arity+1,part,1,3arity)
+        end
+        ok || continue
+        push!(out,_PluginElement(element.kind,element.dim,element.geo,
+                                 element.geo,values,3,element.etag))
+    end
+    _plugin_extract_emit(view.name*"_Gradient",out,-1,steps,times,caller)
+    return nothing
+end
+
+# ---- CutPlane ------------------------------------------------------------------
+
+# Primary-node edges per element kind in MSH vertex order (the linear pyramid
+# fans its apex edges to node 5) — the levelset section walks them for zero
+# crossings.
+const _PLUGIN_CUT_EDGES=(
+    point=NTuple{2,Int}[],
+    line=((1,2),),
+    triangle=((1,2),(2,3),(3,1)),
+    quadrangle=((1,2),(2,3),(3,4),(4,1)),
+    tetrahedron=((1,2),(1,3),(1,4),(2,3),(2,4),(3,4)),
+    hexahedron=((1,2),(2,3),(3,4),(4,1),(5,6),(6,7),(7,8),(8,5),
+                (1,5),(2,6),(3,7),(4,8)),
+    prism=((1,2),(2,3),(3,1),(4,5),(5,6),(6,4),(1,4),(2,5),(3,6)),
+    pyramid=((1,2),(2,3),(3,4),(4,1),(1,5),(2,5),(3,5),(4,5)))
+
+# Unique `ls = 0` crossing points over the element's primary edges in
+# first-seen edge order. Each point stores its interpolation weights as
+# `(primary node, weight)` pairs; a zero-levelset endpoint contributes its own
+# node, so vertex touches deduplicate across their incident edges.
+function _plugin_cut_crossings(element,ls)
+    geo=element.geo
+    points=NTuple{3,Float64}[]
+    weights=Vector{Tuple{Int,Float64}}[]
+    seen=Set{NTuple{3,Float64}}()
+    for (a,b) in _PLUGIN_CUT_EDGES[element.kind]
+        la=ls[a];lb=ls[b]
+        ((la<0&&lb>0)||(la>0&&lb<0)||(la==0.0&&lb!=0.0)||(la!=0.0&&lb==0.0)) ||
+            continue
+        t=la/(la-lb)
+        point=(muladd(t,geo[1,b]-geo[1,a],geo[1,a]),
+               muladd(t,geo[2,b]-geo[2,a],geo[2,a]),
+               muladd(t,geo[3,b]-geo[3,a],geo[3,a]))
+        point in seen && continue
+        push!(seen,point)
+        push!(points,point)
+        push!(weights,[(a,1.0-t),(b,t)])
+    end
+    return points,weights
+end
+
+# Angle-ordered polygon index around the section centroid: the plane normal's
+# cross-products give an in-plane frame, and linear elements are convex so the
+# angular order is the polygon order.
+function _plugin_cut_order(points,normal::NTuple{3,Float64})
+    n=length(points)
+    n<=2 && return collect(1:n)
+    cx=cy=cz=0.0
+    for p in points;cx+=p[1];cy+=p[2];cz+=p[3];end
+    cx/=n;cy/=n;cz/=n
+    ex=points[1][1]-cx;ey=points[1][2]-cy;ez=points[1][3]-cz
+    s=_plugin_norm3((ex,ey,ez))
+    s==0.0 && return collect(1:n)
+    ex/=s;ey/=s;ez/=s
+    fx,fy,fz=_plugin_cross3(normal,(ex,ey,ez))
+    angles=[atan(muladd(p[1]-cx,fx,muladd(p[2]-cy,fy,(p[3]-cz)*fz)),
+                 muladd(p[1]-cx,ex,muladd(p[2]-cy,ey,(p[3]-cz)*ez)))
+            for p in points]
+    return sortperm(angles)
+end
+
+# Zero-levelset section of one element as `(kind, points, point-weights)`
+# primitives: a single crossing emits a point, two a line, three or more a
+# triangle fan over the angle-ordered polygon — the simplex-only record set
+# upstream levelset plugins emit. A collinear polygon (an in-plane edge plus
+# a touching vertex) collapses to its farthest-pair segment.
+function _plugin_cut_sections(element,ls,normal::NTuple{3,Float64})
+    points,weights=_plugin_cut_crossings(element,ls)
+    n=length(points)
+    out=Tuple{Symbol,Vector{NTuple{3,Float64}},
+              Vector{Vector{Tuple{Int,Float64}}}}[]
+    n==0 && return out
+    n==1 && return push!(out,(:point,points,weights))
+    n==2 && return push!(out,(:line,points,weights))
+    order=_plugin_cut_order(points,normal)
+    cx=cy=cz=0.0
+    for p in points;cx+=p[1];cy+=p[2];cz+=p[3];end
+    cx/=n;cy/=n;cz/=n
+    sx=sy=sz=0.0;maxlen=0.0
+    for i in 1:n
+        pa=points[order[i]];pb=points[order[mod1(i+1,n)]]
+        u=(pa[1]-cx,pa[2]-cy,pa[3]-cz);v=(pb[1]-cx,pb[2]-cy,pb[3]-cz)
+        cr=_plugin_cross3(u,v)
+        sx+=cr[1];sy+=cr[2];sz+=cr[3]
+        maxlen=max(maxlen,_plugin_norm3(u),_plugin_norm3(v))
+    end
+    if hypot(sx,sy,sz)<=8eps(Float64)*maxlen*maxlen
+        bi=1;bj=n;best=-1.0
+        for i in 1:n,j in i+1:n
+            dist=_plugin_norm3(_plugin_sub3(points[i],points[j]))
+            dist>best && (best=dist;bi=i;bj=j)
+        end
+        return push!(out,(:line,[points[bi],points[bj]],
+                          [weights[bi],weights[bj]]))
+    end
+    for k in 2:n-1
+        index=(order[1],order[k],order[k+1])
+        push!(out,(:triangle,[points[i] for i in index],
+                   [weights[i] for i in index]))
+    end
+    return out
+end
+
+function _plugin_exec_cutplane(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    pa=_mesh_query_coordinate(numbers["A"],caller,"A")
+    pb=_mesh_query_coordinate(numbers["B"],caller,"B")
+    pc=_mesh_query_coordinate(numbers["C"],caller,"C")
+    pd=_mesh_query_coordinate(numbers["D"],caller,"D")
+    normal=(pa,pb,pc)
+    _plugin_norm3(normal)>0 || throw(ArgumentError(
+        "$caller: the plane normal (A,B,C) must be nonzero"))
+    volume=_mesh_query_integer(Int(numbers["ExtractVolume"]),
+                               caller,"ExtractVolume")
+    tag,view=_plugin_view(numbers,caller)
+    elements,steps,times=_plugin_elements_all_steps(view,caller)
+    out=_PluginElement[]
+    for element in elements
+        ga=size(element.geo,2);va=size(element.vcoords,2);nc=element.ncomp
+        ls=ntuple(i->muladd(pa,element.geo[1,i],
+                    muladd(pb,element.geo[2,i],
+                           muladd(pc,element.geo[3,i],pd))),ga)
+        if !iszero(volume)
+            # Whole-element extraction keeps elements whose corner levelset
+            # values all lie on the selected side, re-emitted verbatim — only
+            # linear records round-trip.
+            if (volume>0 ? all(l->l>=0.0,ls) : all(l->l<=0.0,ls)) &&
+                va==ga && _plugin_record_type(element.kind,nc)!==nothing
+                push!(out,element)
+            end
+            continue
+        end
+        if all(l->l==0.0,ls)
+            va==ga && _plugin_record_type(element.kind,nc)!==nothing &&
+                push!(out,element)
+            continue
+        end
+        for (kind,points,weights) in _plugin_cut_sections(element,ls,normal)
+            _plugin_record_type(kind,nc)===nothing && continue
+            arity=length(points)
+            geo=Matrix{Float64}(undef,3,arity)
+            for i in 1:arity,axis in 1:3
+                geo[axis,i]=points[i][axis]
+            end
+            vals=Vector{Float64}(undef,arity*nc*steps)
+            for step in 1:steps,i in 1:arity,comp in 1:nc
+                acc=0.0
+                for (node,factor) in weights[i]
+                    acc=muladd(factor,
+                        element.vals[(step-1)*va*nc+(node-1)*nc+comp],acc)
+                end
+                vals[(step-1)*arity*nc+(i-1)*nc+comp]=acc
+            end
+            push!(out,_PluginElement(kind,_PLUGIN_KIND_DIM[kind],geo,geo,
+                                     vals,nc,element.etag))
+        end
+    end
+    _plugin_extract_emit(view.name*"_CutPlane",out,-1,steps,times,caller)
+    return nothing
+end
+
 # ---- registry --------------------------------------------------------------------------------
 
 const _PLUGINS=Dict{String,NamedTuple}(
@@ -1335,4 +1692,11 @@ const _PLUGINS=Dict{String,NamedTuple}(
         "Run"=>0.0,"NumComp"=>1.0,"Value"=>0.0,"ViewTag"=>-1.0),
         string_options=Dict{String,String}("Type"=>"NodeData"),
         run_fn=_plugin_exec_new_view),
+    "Gradient"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_gradient),
+    "CutPlane"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"A"=>1.0,"B"=>0.0,"C"=>0.0,"D"=>0.0,
+        "ExtractVolume"=>0.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_cutplane),
 )
