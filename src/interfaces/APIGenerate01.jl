@@ -1387,18 +1387,52 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
             element_counter_wrapped=assembly.cell_counter_wrapped)
     end
     links=Elements.MixedPeriodicLink[]
-    for ((dim,slave),_) in sort!(collect(m.periodic);by=first)
+    endpoint_constraints=Model.ModelPeriodicConstraint[]
+    for ((dim,slave),constraint) in sort!(collect(m.periodic);by=first)
         dim==1 || continue
+        push!(endpoint_constraints,constraint)
         correspondence=_dim01_periodic_nodes(m,mesh,class,slave,assembly.caller;
                                              include_high_order=true,source_mesh,node_tag_map,curve_births)
         push!(links,Elements.MixedPeriodicLink(1,slave,correspondence.master_entity,
             correspondence.slave_nodes,correspondence.master_nodes;
             affine=correspondence.affine))
     end
+    emitted_endpoints=Set{Int}()
+    if !isempty(endpoint_constraints)
+        # The surface projection's periodic endpoint relations are part of the
+        # actual merged product — without them a relation's corner vertices
+        # serialize without their dim-0 master links.
+        point_nodes=Dict{Int,Int32}()
+        for (row,owner) in enumerate(node_entities)
+            owner[1]==0 || continue
+            point=Int(owner[2])
+            haskey(point_nodes,point) && throw(ErrorException(
+                "$(assembly.caller): periodic Point[$point] has multiple actual nodes"))
+            point_nodes[point]=Int32(row)
+        end
+        parents=Model._model_periodic_endpoint_forest(
+            m,endpoint_constraints,assembly.caller)
+        for slave_point in sort!(collect(keys(parents)))
+            master_point,affine=parents[slave_point]
+            # A point whose entity was not generated has no actual node — like
+            # a starved curve relation, its endpoint link is mesh-inert here.
+            haskey(point_nodes,slave_point) && haskey(point_nodes,master_point) ||
+                continue
+            push!(links,Elements.MixedPeriodicLink(0,slave_point,master_point,
+                Int32[point_nodes[slave_point]],Int32[point_nodes[master_point]];
+                affine=affine))
+            # MSH stores one master per slave vertex — like the dim-1 dedupe,
+            # the emitted forest link supersedes a stored link for the same
+            # slave endpoint even when the stored master differs.
+            push!(emitted_endpoints,slave_point)
+        end
+    end
     if source_mesh isa MixedMesh
         for link in source_mesh.periodic_links
             link.dim==1 && haskey(m.periodic,(1,Int(link.slave_entity))) && continue
             link.dim==2 && continue
+            link.dim==0 && Int(link.slave_entity) in emitted_endpoints &&
+                continue
             slaves=mapping[source_node_positions[link.slave_nodes]]
             masters=mapping[source_node_positions[link.master_nodes]]
             all(!iszero,slaves) && all(!iszero,masters) || throw(ArgumentError(

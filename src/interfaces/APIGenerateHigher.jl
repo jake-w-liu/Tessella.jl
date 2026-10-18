@@ -985,6 +985,65 @@ function _higher_transfinite_constructor_input(actual,events,assembly,tag)
     return actual
 end
 
+# meshGFace writes a recovered boundary chain back onto its GEdge when the
+# Face producer subdivides a consumed edge — forced periodic sync vertices
+# and vertices sitting exactly on a segment are the producers. The higher
+# plan emits a Curve's Line cells before its Surface phase ran, so the
+# native producer's ordered UID chains (`production.curve_chains`) reconcile
+# here: unchanged chains are left alone, and a grown chain replaces the
+# stale dim-1 cells with the actual recovered sub-edges. Fresh element
+# identities continue the generation's allocator; the stored parameter
+# samples follow so later consumers see the updated discretization.
+function _higher_surface_curve_remesh!(assembly,m,chains,curve_births)
+    for curve in sort!(collect(keys(chains)))
+        owner=(1,curve)
+        positions=Int[]
+        for (position,cell) in enumerate(assembly.cells)
+            cell.owner==owner && cell.msh==1 && push!(positions,position)
+        end
+        isempty(positions) && continue
+        current=UInt64[]
+        for (index,position) in enumerate(positions)
+            nodes=assembly.cells[position].nodes
+            index==1 && push!(current,assembly.nodes[nodes[1]].tag)
+            push!(current,assembly.nodes[nodes[2]].tag)
+        end
+        chain=chains[curve]
+        current==chain && continue
+        rows=Int32[]
+        for tag in chain
+            row=get(assembly.node_positions,tag,Int32(0))
+            row>0 || throw(ArgumentError(
+                "$(assembly.caller): recovered Curve[$curve] vertex $tag " *
+                "has no actual node in this generation"))
+            push!(rows,row)
+        end
+        deleteat!(assembly.cells,positions)
+        physical=_dim01_physical(m,(1,Int(curve)))
+        for index in 1:length(rows)-1
+            _dim01_add_cell!(assembly,1,owner,rows[index:index+1],
+                _dim01_next_tag!(assembly,false);source_tag=nothing,physical)
+        end
+        curve_births===nothing || (curve_births[owner]=copy(chain))
+        haskey(m.curves,Int(curve)) || continue
+        bounds=Model._model_curve_param_bounds(m,Int(curve),assembly.caller)
+        m.curve_params[Int(curve)]=Float64[
+            if index==1
+                bounds[1]
+            elseif index==length(rows)
+                bounds[2]
+            else
+                node=assembly.nodes[row]
+                node.owner==owner && node.parameter!==nothing &&
+                    !isempty(node.parameter) ? node.parameter[1] :
+                    Model.model_parametrization(m,1,Int(curve),
+                        collect(node.point))[1]
+            end
+            for (index,row) in enumerate(rows)]
+    end
+    return nothing
+end
+
 function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
                                 size_field=nothing,metric_surface=nothing,
                                 source_nodes=length(assembly.nodes),ranks=nothing,
@@ -1091,6 +1150,8 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
                 source_row_retained=swept===nothing ? nothing : swept.retained,
                 source_rows_existing_only=swept!==nothing,
                 native_orphan_births=ordinary===nothing ? nothing : native_orphan_births)
+            source_binding===nothing || _higher_surface_curve_remesh!(
+                assembly,m,source_binding.curve_chains,curve_births)
             constraint=get(m.periodic,(2,tag),nothing)
             if periodic_pairs!==nothing && constraint!==nothing && source_binding!==nothing
                 master=Int(constraint.master_entity)

@@ -126,12 +126,15 @@ struct _ModelSurfaceSource
     boundaries::Vector{Tuple{Int,Int}}
     internals::Vector{Tuple{Int,Int}}
     point_positions::Dict{Int,Int}
+    # Source rows minted by forced periodic subdivision — actual nodes the
+    # surface producer creates for a Curve, not retained lower products.
+    forced_rows::Set{Int}
 end
 
 _ModelSurfaceSource()=_ModelSurfaceSource(Float64[],Float64[],UInt64[],
     Tuple{Int,Int32}[],Union{Nothing,Vector{Float64}}[],NTuple{3,Float64}[],
     Dict{UInt64,Int}(),UInt64[],NTuple{3,Int}[],Tuple{Int,Int}[],
-    Tuple{Int,Int}[],Dict{Int,Int}())
+    Tuple{Int,Int}[],Dict{Int,Int}(),Set{Int}())
 
 function _gmsh_native_surface_add_source!(source,m,mesh,row,frame,caller;
                                          surface_tag,ctx_lc)
@@ -207,8 +210,131 @@ function _gmsh_native_surface_curve!(source,m,input,curve,frame,internal,caller;
     return nothing
 end
 
+# A periodic relation can synchronize an interior parameter onto a curve
+# whose actual lower product has no vertex there — a translated slave copy
+# of a master's embedded split is the common producer. `_surface_pslg`
+# evaluates such forced parameters into PSLG vertices; the native source
+# materializes the same vertices here so the recovered cells carry matching
+# slave/master chains. A forced parameter resolving onto a stored Point row
+# reuses that vertex — the same coordinate dedup `_add_surface_curve_point!`
+# performs against model points.
+function _gmsh_native_surface_forced_vertex!(source::_ModelSurfaceSource,m,
+        curve::Int,parameter::Float64,frame,next_tag,caller;
+        surface_tag,ctx_lc)
+    point=_periodic_curve_point(m,curve,parameter,caller)
+    scale=max(1.0,hypot(point...))
+    tolerance=128eps(Float64)*scale
+    matched=0;matched_tag=0
+    for (point_tag,position) in source.point_positions
+        haskey(m.points,point_tag) || continue
+        candidate=m.points[point_tag]
+        hypot(candidate[1]-point[1],candidate[2]-point[2],
+              candidate[3]-point[3])<=tolerance || continue
+        if matched!=0 && matched!=position
+            throw(ArgumentError(
+                "$caller: Curve[$curve] forced subdivision coincides with " *
+                "Points[$matched_tag] and [$point_tag]"))
+        end
+        matched=position;matched_tag=point_tag
+    end
+    matched!=0 && return matched
+    u,v=if frame.occ && haskey(m.curves,curve)
+        _occ_edge_reparam_on_face(m,m.surface_geometry[surface_tag],
+            curve,parameter,1,ctx_lc,caller)
+    else
+        _gmsh_native_surface_parameters(frame,point)
+    end
+    isfinite(u) && isfinite(v) || throw(ArgumentError(
+        "$caller: Curve[$curve] forced subdivision is not finite on the " *
+        "Surface"))
+    next_tag===nothing && throw(ArgumentError(
+        "$caller: forced Curve subdivision needs a node label allocator"))
+    next_tag[]==typemax(UInt64) && throw(ArgumentError(
+        "$caller: forced Curve subdivision exhausts UInt64 labels"))
+    label=next_tag[]+UInt64(1)
+    next_tag[]=label
+    push!(source.x,u);push!(source.y,v);push!(source.tags,label)
+    push!(source.owners,(1,Int32(curve)));push!(source.world,point)
+    push!(source.parameters,Float64[parameter])
+    position=length(source.tags);source.positions[label]=position
+    push!(source.occurrence,label)
+    push!(source.forced_rows,position)
+    return position
+end
+
+# Expand every constrained source segment whose owning Curve carries a
+# forced parameter strictly inside the segment's parameter span. The forced
+# lists live in the curve's native frame and already include both bounds, so
+# interior values land in exactly one cell; each fragment keeps the
+# segment's owner and its boundary/internal classification.
+function _gmsh_native_surface_forced_subdivide!(source::_ModelSurfaceSource,m,
+        forced,frame,next_tag,caller;surface_tag,ctx_lc)
+    (forced===nothing || isempty(forced)) && return nothing
+    function endpoint_parameter(position,curve,t0,t1,at_start)
+        owner=source.owners[position]
+        if owner[1]==1 && Int(owner[2])==curve
+            parameter=source.parameters[position]
+            parameter!==nothing && !isempty(parameter) && return parameter[1]
+        end
+        a,b=m.curves[curve]
+        # A closed curve's wrap vertex is both endpoints: it leaves at t0 as a
+        # segment's start and arrives at t1 as its end. Resolving both to t0
+        # would re-insert every earlier interior vertex in the closing cell.
+        position==get(source.point_positions,a,-1) &&
+            return (a==b && !at_start) ? t1 : t0
+        position==get(source.point_positions,b,-1) && return t1
+        return nothing
+    end
+    chains=Dict{Tuple{Int,Int},Vector{Int}}()
+    for (a,b,owner) in source.segments
+        haskey(chains,(a,b)) && continue
+        parameters=get(forced,owner,nothing)
+        degenerated=owner in m.meshing.degenerated
+        chain=Int[a]
+        if parameters!==nothing && !degenerated
+            t0,t1=_model_curve_param_bounds(m,owner,caller)
+            pa=endpoint_parameter(a,owner,t0,t1,true)
+            pb=endpoint_parameter(b,owner,t0,t1,false)
+            if pa!==nothing && pb!==nothing
+                tolerance=128eps(Float64)*max(1.0,abs(t1-t0))
+                lo,hi=minmax(pa,pb)
+                interior=sort!([u for u in parameters if
+                                lo+tolerance<u<hi-tolerance];rev=pa>pb)
+                for parameter in interior
+                    push!(chain,_gmsh_native_surface_forced_vertex!(
+                        source,m,owner,parameter,frame,next_tag,caller;
+                        surface_tag,ctx_lc))
+                end
+            end
+        end
+        push!(chain,b)
+        chains[(a,b)]=chain
+    end
+    segments=NTuple{3,Int}[]
+    for (a,b,owner) in source.segments
+        chain=chains[(a,b)]
+        for index in 1:(length(chain)-1)
+            push!(segments,(chain[index],chain[index+1],owner))
+        end
+    end
+    for records in (source.boundaries,source.internals)
+        expanded=Tuple{Int,Int}[]
+        for (a,b) in records
+            chain=get(chains,(a,b),nothing)
+            chain===nothing && (chain=Int[a,b])
+            for index in 1:(length(chain)-1)
+                push!(expanded,(chain[index],chain[index+1]))
+            end
+        end
+        empty!(records);append!(records,expanded)
+    end
+    copy!(resize!(source.segments,length(segments)),segments)
+    return nothing
+end
+
 function _gmsh_native_surface_source(m::GeoModel,tag::Int,input,frame,caller;
-                                     ctx_lc=0.0)
+                                     ctx_lc=0.0,forced=nothing,
+                                     next_tag=nothing)
     source=_ModelSurfaceSource()
     boundaries=_gmsh_native_surface_curves(m,tag)
     for curve in boundaries
@@ -235,11 +361,125 @@ function _gmsh_native_surface_source(m::GeoModel,tag::Int,input,frame,caller;
         source.point_positions[point]=position
         push!(source.occurrence,mesh.entity_data.external_node_tags[row])
     end
+    _gmsh_native_surface_forced_subdivide!(source,m,forced,frame,next_tag,
+        caller;surface_tag=tag,ctx_lc)
     return source
+end
+
+# A source vertex can sit exactly on a supplied segment — an embedded Point
+# on an embedded Curve chain is the common producer. Like
+# `Mesh2D._insert_segment!`, the constraint then becomes the ordered chain of
+# recovered sub-edges; every fragment keeps the segment's owner and its
+# boundary/internal classification.
+function _gmsh_native_surface_split_constraints!(source::_ModelSurfaceSource)
+    chains=Dict{Tuple{Int,Int},Vector{Int}}()
+    scratch=Mesh2D._GmshOrientScratch()
+    for (a,b,_) in source.segments
+        haskey(chains,(a,b)) && continue
+        ax,ay=source.x[a],source.y[a]
+        bx,by=source.x[b],source.y[b]
+        dx=bx-ax;dy=by-ay
+        hits=Tuple{Float64,Int}[]
+        if dx!=0.0 || dy!=0.0
+            lo_x,hi_x=minmax(ax,bx);lo_y,hi_y=minmax(ay,by)
+            denom=dx*dx+dy*dy
+            for v in eachindex(source.x)
+                (v==a || v==b) && continue
+                vx,vy=source.x[v],source.y[v]
+                (lo_x<=vx<=hi_x && lo_y<=vy<=hi_y) || continue
+                Mesh2D._gmsh_orient2_value((ax,ay),(bx,by),(vx,vy),scratch)==
+                    0.0 || continue
+                push!(hits,(((vx-ax)*dx+(vy-ay)*dy)/denom,v))
+            end
+            sort!(hits;by=first,alg=Base.Sort.MergeSort)
+        end
+        chain=Int[a]
+        last_x,last_y=ax,ay
+        for (_,v) in hits
+            # A distinct source row sharing an endpoint's or an earlier hit's
+            # coordinates splits nothing — a zero-length fragment is not a
+            # legal constraint, and `b` stays the chain's real endpoint.
+            (source.x[v]==bx && source.y[v]==by) && continue
+            (source.x[v]==last_x && source.y[v]==last_y) && continue
+            push!(chain,v)
+            last_x,last_y=source.x[v],source.y[v]
+        end
+        push!(chain,b)
+        chains[(a,b)]=chain
+    end
+    isempty(chains) && return nothing
+    segments=NTuple{3,Int}[]
+    for (a,b,owner) in source.segments
+        chain=chains[(a,b)]
+        for index in 1:(length(chain)-1)
+            push!(segments,(chain[index],chain[index+1],owner))
+        end
+    end
+    for (records,) in ((source.boundaries,),(source.internals,))
+        expanded=Tuple{Int,Int}[]
+        for (a,b) in records
+            chain=get(chains,(a,b),nothing)
+            if chain===nothing
+                push!(expanded,(a,b))
+            else
+                for index in 1:(length(chain)-1)
+                    push!(expanded,(chain[index],chain[index+1]))
+                end
+            end
+        end
+        empty!(records);append!(records,expanded)
+    end
+    copy!(resize!(source.segments,length(segments)),segments)
+    return nothing
+end
+
+# The constrained segments surviving `_gmsh_native_surface_initial` are the
+# recovered dim-1 chains: forced periodic subdivisions and on-segment vertex
+# splits insert vertices between the consumed cells' endpoints. Emit each
+# owning Curve's ordered actual UID chain so the merged dim-1 product can
+# receive the subdivision upstream's meshGFace writes back onto each GEdge.
+function _gmsh_native_surface_curve_chains(source::_ModelSurfaceSource)
+    edges=Dict{Int32,Vector{Tuple{Int,Int}}}()
+    order=Int32[]
+    for (a,b,owner) in source.segments
+        key=Int32(abs(owner))
+        if !haskey(edges,key)
+            edges[key]=Tuple{Int,Int}[]
+            push!(order,key)
+        end
+        push!(edges[key],(a,b))
+    end
+    chains=Dict{Int32,Vector{UInt64}}()
+    for key in order
+        adjacency=Dict{Int,Int}()
+        incoming=Set{Int}()
+        consistent=true
+        for (a,b) in edges[key]
+            haskey(adjacency,a) && (consistent=false)
+            adjacency[a]=b
+            push!(incoming,b)
+        end
+        consistent || continue
+        heads=Int[a for (a,b) in edges[key] if !(a in incoming)]
+        length(heads)>1 && continue
+        vertex=isempty(heads) ? first(edges[key])[1] : only(heads)
+        start=vertex
+        chain=UInt64[source.tags[vertex]]
+        for _ in eachindex(edges[key])
+            vertex=get(adjacency,vertex,0)
+            vertex==0 && break
+            push!(chain,source.tags[vertex])
+            vertex==start && break
+        end
+        length(chain)==length(edges[key])+1 || continue
+        chains[key]=chain
+    end
+    return chains
 end
 
 function _gmsh_native_surface_initial(source::_ModelSurfaceSource,tag::Int;
                                      cleanup_faces=false)
+    _gmsh_native_surface_split_constraints!(source)
     rows=Mesh2D._gmsh_initial_uid_order(source.occurrence)
     order=Int[source.positions[tag] for tag in source.occurrence[rows]]
     product=Mesh2D._gmsh_poly_initial(source.x,source.y,source.segments,order;
@@ -264,7 +504,17 @@ struct _ModelSurfaceProduction{M}
     constructor_mesh::Union{Nothing,Mesh,MixedMesh}
     source_node_updates::Dict{UInt64,NTuple{3,Float64}}
     native_recombine_events::Vector{Tuple{Symbol,String}}
+    # Ordered actual node UIDs of each consumed Curve chain after forced
+    # subdivisions and on-segment vertex splits — the meshGFace write-back
+    # payload the merged dim-1 product receives when the recovered chain
+    # grew past its consumed elements.
+    curve_chains::Dict{Int32,Vector{UInt64}}
 end
+_ModelSurfaceProduction(mesh,tags,owners,parameters,retained,high_water,
+    element_tags,element_high_water,birth_rows,constructor_mesh,source_node_updates,
+    native_recombine_events)=_ModelSurfaceProduction(mesh,tags,owners,parameters,
+        retained,high_water,element_tags,element_high_water,birth_rows,constructor_mesh,
+        source_node_updates,native_recombine_events,Dict{Int32,Vector{UInt64}}())
 _ModelSurfaceProduction(mesh,tags,owners,parameters,retained,high_water,
     element_tags,element_high_water,birth_rows,constructor_mesh,source_node_updates)=
     _ModelSurfaceProduction(mesh,tags,owners,parameters,retained,high_water,
@@ -316,7 +566,7 @@ function _gmsh_native_surface_export(T,inside,numbers,source::_ModelSurfaceSourc
             coords[:,position].=source.world[row]
             owners[position]=source.owners[row]
             parameters[position]=source.parameters[row]
-            retained[position]=true
+            retained[position]=!(row in source.forced_rows)
         else
             coords[:,position].=_surface_metric_lift(frame,T.x[row],T.y[row])
             owners[position]=(2,Int32(tag));parameters[position]=[T.x[row],T.y[row]]
@@ -448,7 +698,8 @@ end
 
 function _gmsh_native_initial_surface(m::GeoModel,tag::Int,options,input,
                                        high_water,caller;algorithm=3,size_field=nothing,
-                                       element_high_water=UInt64(0))
+                                       element_high_water=UInt64(0),
+                                       forced=nothing)
     _surface_type(m,tag)===:plane || throw(ArgumentError(
         "$caller: native initial Surface[$tag] requires its actual Plane parametrization"))
     authority,limit=_gmsh_native_surface_lower_input(m,options,input,high_water,caller)
@@ -461,8 +712,14 @@ function _gmsh_native_initial_surface(m::GeoModel,tag::Int,options,input,
         quad_input.admitted && (options=_gmsh_fullquad_size_options(options))
     end
     frame=_gmsh_native_surface_frame(m,tag,options,caller)
-    source=_gmsh_native_surface_source(m,tag,authority,frame,caller;ctx_lc=options.ctx_lc)
+    # Forced periodic subdivisions mint fresh node labels above the consumed
+    # lower-product high water; the raised limit feeds later refinements.
+    next_tag=Ref{UInt64}(limit)
+    source=_gmsh_native_surface_source(m,tag,authority,frame,caller;
+        ctx_lc=options.ctx_lc,forced,next_tag)
+    limit=next_tag[]
     T=_gmsh_native_surface_initial(source,tag;cleanup_faces=algorithm==3)
+    curve_chains=_gmsh_native_surface_curve_chains(source)
     inside=classify_interior(T)
     numbers=source.tags
     trace=nothing
@@ -595,7 +852,7 @@ function _gmsh_native_initial_surface(m::GeoModel,tag::Int,options,input,
     return _ModelSurfaceProduction(mesh,product.node_tags,product.node_owners,
         product.node_parameters,product.retained_nodes,product.node_high_water,
         product.element_tags,product.element_high_water,product.birth_rows,constructor_mesh,
-        product.source_node_updates,product.native_recombine_events)
+        product.source_node_updates,product.native_recombine_events,curve_chains)
 end
 
 # A pure geometric certificate, independent of the fitted normal's sign.

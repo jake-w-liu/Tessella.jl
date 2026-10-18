@@ -212,7 +212,7 @@ Physical Volume("domain", 72) = {1};
         @test periodic.entity_data!==nothing
         @test periodic.elementary_entities===nothing
         @test mixed_crc(periodic).sha==
-              "28773987187af5e28ea8900e21ddeac7d839867199f512d2081d5ff17242f884"
+              "8b33e3d2b5c2301da57347e684e5fcf31ba87ade9fc767db9623b2fb05e07650"
         @test length(periodic.periodic_links)==3
         @test sort([(Int(link.slave_entity),Int(link.master_entity))
                     for link in periodic.periodic_links if link.dim==0])==
@@ -247,7 +247,7 @@ Physical Volume("domain", 72) = {1};
         @test embedded_periodic_curve.master_entity==5
         @test length(embedded_periodic_curve.slave_nodes)==3
         @test mixed_crc(periodic_embedded).sha==
-              "9ebe487eca88d79bf0e28067dc8312b50e2e80196fd30ae7f4fd70fbcb377084"
+              "576af4ec0913c0bccec83f22ea3fe140f443b4b3c3a8fdaba0c34ed73647deef"
 
         periodic_graph_input=joinpath(directory,"periodic-graph.geo")
         periodic_graph_output=joinpath(directory,"periodic-graph.msh")

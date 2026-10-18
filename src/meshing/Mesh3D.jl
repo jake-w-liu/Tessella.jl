@@ -2717,6 +2717,72 @@ function _retriangulate_segment_cavity3(mesh::Mesh, p, q)
     return nothing
 end
 
+# Does the open segment (p,q) meet the interior of 2-D triangle (a,b,c)?
+# Positive-length overlap or a degenerate touch strictly inside (0,1) counts —
+# including a grazing vertex or collinear edge contact, since both obstruct a
+# later edge incidence — while contacts confined to the endpoints do not.
+function _seg_meets_tri_interior2(p,q,a,b,c)
+    lo,hi=0.0,1.0
+    for (u,v,w) in ((a,b,c),(b,c,a),(c,a,b))
+        sw=orient2(u,v,w)
+        si=sw>0 ? 1 : sw<0 ? -1 : 1
+        g0=si*orient2(u,v,p); g1=si*orient2(u,v,q)
+        (g0<0 && g1<0) && return false
+        if g0!=g1
+            r=g0/(g0-g1)
+            g0<0 && (lo=max(lo,r))
+            g1<0 && (hi=min(hi,r))
+        end
+    end
+    return lo<1-1e-9 && hi>1e-9 && hi>=lo-1e-12
+end
+
+# Bounded tube cavity for recovering one edge (a,b) known to lie on the face
+# plane (a,b,w): only cells incident to a face the open segment actually
+# crosses — coplanar faces whose interior it meets on (a,b,w), transversal
+# faces it pierces, and faces of any orientation that contain a piece of it —
+# versus `_retriangulate_segment_cavity3`'s much coarser pierce-and-star
+# region. The constrained refill joins (a,b) by flips alone, so no on-edge
+# vertex can ever appear to make a later face incidence unrealizable.
+function _recover_sheet_edge3(mesh::Mesh, a::Int32, b::Int32, w::Int32)
+    pa,pb,pw=_pt3(mesh,a),_pt3(mesh,b),_pt3(mesh,w)
+    n=_cross3(_sub3(pb,pa),_sub3(pw,pa))
+    drop=abs(n[1])>=abs(n[2]) && abs(n[1])>=abs(n[3]) ? 1 :
+         abs(n[2])>=abs(n[3]) ? 2 : 3
+    ax=drop==1 ? (2,3) : drop==2 ? (1,3) : (1,2)
+    p2=(pa[ax[1]],pa[ax[2]]); q2=(pb[ax[1]],pb[ax[2]])
+    ntet=size(mesh.tets,2)
+    cav=falses(ntet)
+    @inbounds for t in 1:ntet
+        q=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+        for k in 1:4
+            f=_tet_opp_face3(q,k)
+            x1,x2,x3=_pt3(mesh,f[1]),_pt3(mesh,f[2]),_pt3(mesh,f[3])
+            if orient3(pa,pb,pw,x1)==0 && orient3(pa,pb,pw,x2)==0 &&
+               orient3(pa,pb,pw,x3)==0
+                _seg_meets_tri_interior2(p2,q2,
+                    (x1[ax[1]],x1[ax[2]]),(x2[ax[1]],x2[ax[2]]),
+                    (x3[ax[1]],x3[ax[2]])) || continue
+                cav[t]=true; break
+            elseif _segment_triangle_hit(pa,pb,x1,x2,x3;atol=1e-9)!==nothing
+                cav[t]=true; break
+            elseif orient3(x1,x2,x3,pa)==0 && orient3(x1,x2,x3,pb)==0
+                nf=_cross3(_sub3(x2,x1),_sub3(x3,x1))
+                fdrop=abs(nf[1])>=abs(nf[2]) && abs(nf[1])>=abs(nf[3]) ? 1 :
+                       abs(nf[2])>=abs(nf[3]) ? 2 : 3
+                fax=fdrop==1 ? (2,3) : fdrop==2 ? (1,3) : (1,2)
+                _seg_meets_tri_interior2(
+                    (pa[fax[1]],pa[fax[2]]),(pb[fax[1]],pb[fax[2]]),
+                    (x1[fax[1]],x1[fax[2]]),(x2[fax[1]],x2[fax[2]]),
+                    (x3[fax[1]],x3[fax[2]])) || continue
+                cav[t]=true; break
+            end
+        end
+    end
+    count(cav)==0 && return nothing
+    return _refill_with_growth3(mesh,cav,a,b)
+end
+
 # Refill `in_cav` (after vertex-face closure) and, on failure, absorb
 # face-neighbours of the cavity boundary and retry — a nonconvex cavity can
 # admit no legal fill at all (a boundary face whose every candidate cell
@@ -2767,6 +2833,54 @@ function _graft_sheet_face3(mesh::Mesh, u::Int32, v::Int32, w::Int32)
     @inbounds for t in 1:ntet
         pipe[t]=_open_triangle_hits_tet3(mesh,t,pu,pv,pw)
     end
+    out=_refill_with_growth3(mesh,pipe,u,v;
+                             require_edge=false,
+                             extra_verts=Int32[w],
+                             seed_face=(u,v,w),
+                             soft_keepfaces=true)
+    out===nothing || return out
+    # A target triangle the complex already covers with a different coplanar
+    # triangulation pierces no open cell interior, so the pipe misses the
+    # covered patch (it is empty when coverage is complete). The cells
+    # incident to the covering faces are the cavity whose retriangulation
+    # can carry (u,v,w) as an interior face instead; its vertices supply the
+    # seed's above/below pair.
+    covers,covtarget,covarea=_mesh_covering_faces3(mesh,pu,pv,pw)
+    isempty(covers) && return nothing
+    covset=Set{NTuple{3,Int32}}(_sorted_face3(f...) for f in covers)
+    # The cells incident to the covering faces are themselves a closed cavity
+    # — the smallest one whose retriangulation can carry (u,v,w) as an
+    # interior face. Try it directly: when coverage exists the pierce pipe is
+    # often far beyond the fill's cell budget while this cavity is a handful
+    # of cells.
+    covcav=falses(ntet)
+    @inbounds for t in 1:ntet
+        q=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+        for k in 1:4
+            if _sorted_face3(_tet_opp_face3(q,k)...) in covset
+                covcav[t]=true; break
+            end
+        end
+    end
+    if count(covcav)>0
+        outcov=_refill_with_growth3(mesh,covcav,u,v;
+                                    require_edge=false,
+                                    extra_verts=Int32[w],
+                                    seed_face=(u,v,w),
+                                    soft_keepfaces=true)
+        outcov===nothing || return outcov
+    end
+    grown=false
+    @inbounds for t in 1:ntet
+        pipe[t] && continue
+        q=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+        for k in 1:4
+            if _sorted_face3(_tet_opp_face3(q,k)...) in covset
+                pipe[t]=true; grown=true; break
+            end
+        end
+    end
+    grown || return nothing
     return _refill_with_growth3(mesh,pipe,u,v;
                                 require_edge=false,
                                 extra_verts=Int32[w],

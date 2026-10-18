@@ -41,7 +41,8 @@ using ..Mesh3D: tetrahedralize, mesh_boolean, recover_segment3, recover_triangle
 using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3,
                 _tet_edge_set, _volume_edge_set, _volume_cell_boundary_faces,
                 _mesh_covering_faces3, _certify_surface_fill,
-                _protected_cells!, _sorted_face3,
+                _protected_cells!, _sorted_face3, _graft_sheet_face3,
+                _recover_sheet_edge3,
                 _on_segment3, _pt3, _segment_chain3,
                 delaunay3d, to_mesh3, _classify_by_centroid, _rb_drop_flats,
                 _finish_interior, _recover_boundary_exact, recover_boundary
@@ -4082,10 +4083,6 @@ end
 function _model_projection_periodic_links(m::GeoModel,mesh,point_nodes,
                                           constraints,caller::AbstractString)
     curve_links=MixedPeriodicLink[]
-    outgoing=Dict{Int,Vector{Tuple{Int,Union{Nothing,NTuple{16,Float64}}}}}()
-    indegree=Dict{Int,Int}()
-    periodic_points=Set{Int}()
-    candidates=Dict{Int,Vector{Tuple{Int,Union{Nothing,NTuple{16,Float64}}}}}()
     # A relation cycle's members can legitimately be absent from the mesh —
     # upstream's deferred copy starves them and still serializes the link with
     # an empty node list.
@@ -4123,6 +4120,36 @@ function _model_projection_periodic_links(m::GeoModel,mesh,point_nodes,
                 mapping.slave_nodes,mapping.master_nodes;
                 affine=constraint.affine))
         end
+    end
+
+    parents=_model_periodic_endpoint_forest(m,constraints,caller)
+    links=MixedPeriodicLink[]
+    for slave_point in sort!(collect(keys(parents)))
+        master_point,affine=parents[slave_point]
+        haskey(point_nodes,slave_point) && haskey(point_nodes,master_point) ||
+            throw(ErrorException(
+                "$caller: periodic endpoint is absent from the surface projection"))
+        push!(links,MixedPeriodicLink(
+            0,slave_point,master_point,
+            Int32[point_nodes[slave_point]],Int32[point_nodes[master_point]];
+            affine=affine))
+    end
+    append!(links,curve_links)
+    return links
+end
+
+# Deterministic directed spanning forest through shared periodic corners —
+# the endpoint half of `_model_projection_periodic_links`, shared with the
+# actual-product link assembly, which attaches the same dim-0 relations to
+# the merged generation output instead of a projected surface part.
+function _model_periodic_endpoint_forest(m::GeoModel,constraints,
+                                         caller::AbstractString)
+    outgoing=Dict{Int,Vector{Tuple{Int,Union{Nothing,NTuple{16,Float64}}}}}()
+    indegree=Dict{Int,Int}()
+    periodic_points=Set{Int}()
+    candidates=Dict{Int,Vector{Tuple{Int,Union{Nothing,NTuple{16,Float64}}}}}()
+    for constraint in constraints
+        constraint.dim==1 || continue
         slave_start,slave_stop=m.curves[Int(constraint.slave_entity)]
         master_start,master_stop=m.curves[Int(constraint.master_entity)]
         endpoint_pairs=constraint.reversed ?
@@ -4186,20 +4213,7 @@ function _model_projection_periodic_links(m::GeoModel,mesh,point_nodes,
         haskey(parents,slave_point) && continue
         parents[slave_point]=first(candidates[slave_point])
     end
-
-    links=MixedPeriodicLink[]
-    for slave_point in sort!(collect(keys(parents)))
-        master_point,affine=parents[slave_point]
-        haskey(point_nodes,slave_point) && haskey(point_nodes,master_point) ||
-            throw(ErrorException(
-                "$caller: periodic endpoint is absent from the surface projection"))
-        push!(links,MixedPeriodicLink(
-            0,slave_point,master_point,
-            Int32[point_nodes[slave_point]],Int32[point_nodes[master_point]];
-            affine=affine))
-    end
-    append!(links,curve_links)
-    return links
+    return parents
 end
 
 """
@@ -6758,7 +6772,7 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
         options=_model_algorithm_size_options(m,_mesh1d_options,caller)
         production=_gmsh_native_initial_surface(m,t,options,_mesh_input,
             _mesh_node_high_water,caller;algorithm,size_field,
-            element_high_water=_mesh_element_high_water)
+            element_high_water=_mesh_element_high_water,forced)
         return production,get(m.embeds,(2,t),NTuple{2,Int}[])
     end
     plane=_model_surface_plane(m,t,caller;allow_ruled=true)
@@ -8697,7 +8711,8 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         result=_ModelSurfaceProduction(mesh,actual.node_tags,actual.node_owners,
             actual.node_parameters,actual.retained_nodes,actual.node_high_water,
             actual.element_tags,actual.element_high_water,actual.birth_rows,
-            actual.constructor_mesh,actual.source_node_updates,actual.native_recombine_events)
+            actual.constructor_mesh,actual.source_node_updates,
+            actual.native_recombine_events,actual.curve_chains)
         return production isa _ModelSurfaceGeometryProduction ?
             _ModelSurfaceGeometryProduction(result,production.geometry) : result
     end
@@ -9279,6 +9294,60 @@ function _volume_embedded_curve_chain(m::GeoModel,curve::Int,
     return chain
 end
 
+# The bounded native arena recovers the boundary PLC only; an interior
+# embedded facet is realized here through mesh-level passes driven by the
+# actual constraint rows, since the downstream certification checks those
+# exact incidences rather than a tolerance-derived covering. Each missing
+# face edge is joined through the bounded sheet-plane tube refill — pure
+# flips, so no on-edge vertex can ever make the exact incidence unrealizable
+# afterwards — then `_graft_sheet_face3` retriangulates the covered patch
+# onto the actual cell's exact vertex triple, with `recover_triangle3` held
+# as the last-resort covering for a facet the patch cavity cannot carry.
+# One graft can disturb a neighbour's patch, so pass until every facet is
+# an interior face or a pass changes nothing.
+function _model_native_embedded_face_graft(mesh,native_constraints,
+                                           initial_geometry)
+    isempty(native_constraints.embedded_faces) && return mesh
+    for _pass in 1:6
+        counts=Dict{NTuple{3,Int32},Int}()
+        for tet in eachcol(mesh.tets),skip in 1:4
+            key=_sorted_face3((tet[i] for i in 1:4 if i!=skip)...)
+            counts[key]=get(counts,key,0)+1
+        end
+        changed=false; complete=true
+        edges=_tet_edge_set(mesh)
+        for (_,label,face) in native_constraints.embedded_faces
+            get(counts,_sorted_face3(face...),0)==2 && continue
+            complete=false
+            for (u,v,x) in ((face[1],face[2],face[3]),
+                            (face[2],face[3],face[1]),
+                            (face[3],face[1],face[2]))
+                minmax(u,v) in edges && continue
+                out=_recover_sheet_edge3(mesh,
+                    Int32(u),Int32(v),Int32(x))
+                out===nothing && continue
+                mesh=out; changed=true; edges=_tet_edge_set(mesh)
+            end
+            grafted=_graft_sheet_face3(mesh,
+                Int32(face[1]),Int32(face[2]),Int32(face[3]))
+            if grafted===nothing
+                a=_model_mesh_coordinate(initial_geometry.surface,face[1])
+                b=_model_mesh_coordinate(initial_geometry.surface,face[2])
+                c=_model_mesh_coordinate(initial_geometry.surface,face[3])
+                if !mesh_covers_triangle3(mesh,a,b,c)
+                    mesh=recover_triangle3(mesh,a,b,c); changed=true
+                    edges=_tet_edge_set(mesh)
+                    grafted=_graft_sheet_face3(mesh,
+                        Int32(face[1]),Int32(face[2]),Int32(face[3]))
+                end
+            end
+            grafted===nothing || (mesh=grafted; changed=true)
+        end
+        (complete || !changed) && break
+    end
+    return mesh
+end
+
 function _mesh_model_volume(m::GeoModel, tag::Integer;
                             size_field::Union{Nothing,AbstractSizeField}=nothing,
                             _extrude_scope=nothing,
@@ -9470,15 +9539,25 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
     protected_faces,protected_edges=_protected_cells!()
     empty!(protected_faces); empty!(protected_edges)
     if native_constraints!==nothing
-        _model_certify_native_volume_constraints(mesh,native_constraints,t,caller)
+        mesh=_model_native_embedded_face_graft(mesh,native_constraints,
+                                               initial_geometry)
         # These are actual row/UID incidences, not a tolerance-derived chain or
-        # an arbitrary triangulation covering the same geometric sheet.
+        # an arbitrary triangulation covering the same geometric sheet. The
+        # grafted sheet faces join the protected set before edge recovery so a
+        # later cavity fill cannot silently drop them.
         for (_,_,face) in native_constraints.embedded_faces
             push!(protected_faces,_sorted_face3(face...))
         end
-        for (_,_,edge) in native_constraints.edges
+        for (curve,_,edge) in native_constraints.edges
+            p=_model_mesh_coordinate(initial_geometry.surface,edge[1])
+            q=_model_mesh_coordinate(initial_geometry.surface,edge[2])
+            mesh_covers_segment3(mesh,p,q) ||
+                (mesh=recover_segment3(mesh,p,q))
+            # Register the recovered chain so a later cavity fill cannot drop
+            # it, mirroring the generic embedded-curve ordering below.
             push!(protected_edges,minmax(edge...))
         end
+        _model_certify_native_volume_constraints(mesh,native_constraints,t,caller)
     else
         # Sheets recover first: a curve nested in an embedded surface already
         # owns its chain links as sheet edges (bitwise-identical evaluator
@@ -9521,6 +9600,10 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
             end
         end
     end
+    # The graft/recovery passes above splice a new tetrahedron complex in
+    # place of the initial fill; re-bind the birth receipt so refinement and
+    # the volume production below still observe a complete row/cell binding.
+    _model_native_volume_rebind!(_native_initial_births,mesh)
     # Boundary/embedded recovery precedes insertion in meshGRegion. The
     # Delaunay path now uses the actual normalized circumradius cavity
     # criterion; Algorithm3 retains this recovered initial complex.

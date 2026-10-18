@@ -281,6 +281,27 @@ function _model_native_volume_cell_births!(births,mesh)
     return mesh
 end
 
+# A graft/recovery pass splices a new tetrahedron complex in place of the
+# initial fill — the same vertex rows stay bound but the recorded cell source
+# no longer names the mesh, which would silently deactivate the refinement
+# receipt and leave refinement-born nodes without UIDs. Re-bind the receipt:
+# fresh node UIDs for any appended Steiner rows and fresh cell numbers for
+# the rebuilt complex.
+function _model_native_volume_rebind!(births,mesh)
+    births===nothing && return mesh
+    births.source===nothing && return mesh
+    births.cell_source===mesh && return mesh
+    extra=nnodes(mesh)-length(births.node_tags)
+    if extra>0
+        first_uid=births.node_high_water+UInt64(1)
+        births.node_high_water=Base.checked_add(births.node_high_water,
+            UInt64(extra))
+        append!(births.node_tags,first_uid:births.node_high_water)
+    end
+    _model_native_volume_cell_births!(births,mesh)
+    return mesh
+end
+
 struct _ModelVolumeGeometryProduction
     mesh::Union{Mesh,MixedMesh}
     boundary_node_tags::Vector{UInt64}
