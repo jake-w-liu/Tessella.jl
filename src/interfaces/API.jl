@@ -88,7 +88,7 @@ using ..Model: _model_entity_known, _model_fresh_element_tag,
               classify_surfaces!, compute_homology!, create_geometry!,
               create_topology!
 using ..MeshTypes: Mesh, node, nnodes, nsegs, ntris, ntets, validate,
-                   boundary_edges
+                   boundary_edges, boundary_faces
 using ..IO: read_stl, GeoParams, GeoFieldSpec, _geo_split_list_or_argerr,
             _geo_signed_gmsh_int_value, _geo_option_store_value
 using ..SizeField: AbstractSizeField, build_geo_size_field, _build_geo_field, PostViewField
@@ -260,7 +260,18 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "PostProcessing.SaveInterpolationMatrices"=>1.0,
     "Mesh.ElementOrder"=>1.0,
     "Mesh.SecondOrderLinear"=>0.0,
-    "Mesh.SecondOrderIncomplete"=>0.0)
+    "Mesh.SecondOrderIncomplete"=>0.0,
+    # High-order mesh optimization controls (upstream gmsh option surface).
+    # `HighOrderOptimize`: -1 elastic smoothing, 0 none, 1 relocation
+    # optimization, 2 both — this slice implements the relocation pass;
+    # `HighOrderPoissonRatio` is consumed by the (not yet implemented)
+    # elastic-analogy stage only.
+    "Mesh.HighOrderOptimize"=>0.0,
+    "Mesh.HighOrderIterMax"=>100.0,
+    "Mesh.HighOrderPassMax"=>25.0,
+    "Mesh.HighOrderThresholdMin"=>0.1,
+    "Mesh.HighOrderThresholdMax"=>2.0,
+    "Mesh.HighOrderPoissonRatio"=>0.33)
 const _OPTION_ALIASES=Dict{String,String}(
     "Mesh.CharacteristicLengthMin"=>"Mesh.MeshSizeMin",
     "Mesh.CharacteristicLengthMax"=>"Mesh.MeshSizeMax",
@@ -841,6 +852,19 @@ function option(name::AbstractString, value::Real)
         elseif key in ("Mesh.MinLineNodes","Mesh.MinCircleNodes","Mesh.MinCurveNodes")
             minimum=key=="Mesh.MinCurveNodes" ? 1 : 2
             v=Float64(max(minimum,_geo_signed_gmsh_int_value(v,"API.option")))
+        elseif key=="Mesh.HighOrderOptimize"
+            # Upstream signed-int semantics: -1 elastic smoothing, 0 off,
+            # 1 relocation optimization, 2 both (truncation like other ints).
+            v=Float64(_geo_signed_gmsh_int_value(v,"API.option"))
+        elseif key in ("Mesh.HighOrderIterMax","Mesh.HighOrderPassMax")
+            v=Float64(max(0,_geo_signed_gmsh_int_value(v,"API.option")))
+        elseif key=="Mesh.HighOrderPoissonRatio"
+            # Geo table clamps to (-0.999, 0.499).
+            v=_geo_option_store_value("Mesh","HighOrderPoissonRatio",v,"API.option")
+        elseif key in ("Mesh.HighOrderThresholdMin","Mesh.HighOrderThresholdMax")
+            # Free finite doubles — the relocation band requires min < max,
+            # enforced where the pass runs.
+            v=_geo_option_store_value("Mesh",last(split(key,'.')),v,"API.option")
         elseif key=="Mesh.RandomSeed"
             v=_geo_option_store_value("Mesh","RandomSeed",v,"API.option")
         elseif key=="Mesh.RandomFactor3D"
@@ -2430,7 +2454,20 @@ function _apply_mesh_order(m::GeoModel,cached::Mesh,class,caller)
     end
     # A repeated order request retains the existing actual nodal map, including
     # finite user edits; it is not a request to interpolate from the corners.
-    _high_order_overlay(cached)===nothing || return nothing
+    # With Mesh.HighOrderOptimize>=1 the retained overlay still receives the
+    # bounded relocation pass — upstream optimizes the quadratic mesh the
+    # request leaves published. The live overlay is detached into a copy so a
+    # mid-pass failure can never corrupt published session state.
+    existing=_high_order_overlay(cached)
+    if existing!==nothing
+        if existing isa P2Mesh && _high_order_optimize_relocation()
+            mids=LAST_MESH_HIGH_ORDER_MIDS[]
+            optimized=_high_order_optimize_overlay(existing,mids;fresh=false)
+            optimized===existing ||
+                _set_high_order_overlay(optimized,cached,mids)
+        end
+        return nothing
+    end
     dimension=ntets(cached)>0 ? 3 : 2
     p2=try
         dimension==2 ? p2_trimesh(cached) :
@@ -2445,8 +2482,11 @@ function _apply_mesh_order(m::GeoModel,cached::Mesh,class,caller)
         (entities=Tuple{Int,Int32}[(dimension,Int32(0))])
     _api_p2_overlay_certify(p2,caller)
     _validate_record_cache_labels(m,cached,class,nnodes(p2),caller)
-    _set_high_order_overlay(p2,cached,_p2_mid_owners(
-        p2,cached,class,dimension,Int.(last.(entities))))
+    mids=_p2_mid_owners(p2,cached,class,dimension,Int.(last.(entities)))
+    # Mesh.HighOrderOptimize — the fresh overlay is unpublished, so the
+    # certificate-gated interior relocation may update it in place.
+    p2 isa P2Mesh && _high_order_optimize_overlay!(p2,mids)
+    _set_high_order_overlay(p2,cached,mids)
     return nothing
 end
 
@@ -2621,6 +2661,7 @@ function _generate_native_lookup_live(dim::Integer)
                 initial_element_counter_wrapped=ELEMENT_COUNTER_WRAPPED[],
                 generation_meshing=_generation_meshing_options(order))
             _higher_capture_dim01_authority!(plan)
+            plan=_high_order_optimize_plan!(plan,caller)
             _commit_tagged_plan_locked!(plan;preserve_visibility=true,
                                        element_tag_map=plan.visibility_tag_map)
             # Native renumber/completed generation clears lookup state before
@@ -2650,6 +2691,7 @@ function _generate_native_lookup_live(dim::Integer)
             size_field=_session_size_field_locked(source_model),
             initial_max_node_tag=NODE_TAG_MAX[],initial_max_element_tag=ELEMENT_TAG_MAX[],
             preserve_geometry)
+        plan=_high_order_optimize_plan!(plan,caller)
         _commit_tagged_plan_locked!(plan;preserve_visibility=true,
             element_tag_map=plan.visibility_tag_map)
         for (kind,message) in get(plan,:native_recombine_events,())
@@ -7914,12 +7956,14 @@ function _set_order_native_lookup_live(order)
         if order<=2 && cached isa Mesh && class!==nothing && class.public_tags!==nothing
             model.meshing.order=previous_order
             plan=_native_set_order_labels_plan(model,cached,class,Int(order),"API.mesh.set_order")
+            plan=_high_order_optimize_plan!(plan,"API.mesh.set_order")
             _commit_renumber_labels_locked!(plan)
             return nothing
         end
         if order<=2 && cached isa MixedMesh && cached.entity_data===nothing && class!==nothing && class.public_tags!==nothing
             model.meshing.order=previous_order
             plan=_native_mixed_set_order_labels_plan(model,cached,class,Int(order),"API.mesh.set_order")
+            plan=_high_order_optimize_plan!(plan,"API.mesh.set_order")
             _commit_renumber_labels_locked!(plan)
             return nothing
         end
@@ -7934,6 +7978,7 @@ function _set_order_native_lookup_live(order)
                 linear=!iszero(OPTIONS["Mesh.SecondOrderLinear"]),
                 incomplete=!iszero(OPTIONS["Mesh.SecondOrderIncomplete"]))
             plan.model.meshing.order=Int(order)
+            plan=_high_order_optimize_plan!(plan,"API.mesh.set_order")
             authority=class===nothing || class.public_tags===nothing ? plan.authority : class.public_tags.authority
             _commit_tagged_plan_locked!(plan;authority,
                                        preserve_visibility=true,
@@ -9177,6 +9222,7 @@ _SessionView(name::AbstractString)=_SessionView(
 const SESSION_VIEWS = Dict{Int,_SessionView}()
 const VIEW_TAG_MAX = Ref(0)
 include("APIViewTime.jl")
+include("APIHighOrderOptimize.jl")
 
 function _fresh_view_tag()
     while true

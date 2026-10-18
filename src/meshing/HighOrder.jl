@@ -45,7 +45,8 @@ export P2Mesh, P2SegMesh, P2TriMesh, p2_segmesh, p2_tetmesh, p2_trimesh,
        p2_seg_length, p2_volume, p2_tri_area,
        write_msh_p2, curve_to_curve!, curve_to_cylinder!, curve_to_surface!,
        p2_min_jacobian, p2_seg_min_jacobian, p2_tri_min_jacobian,
-       p2_quad_min_jacobian, p2_hex_min_jacobian, p2_prism_min_jacobian
+       p2_quad_min_jacobian, p2_hex_min_jacobian, p2_prism_min_jacobian,
+       optimize_p2_tet_interior!
 
 const _P2_EDGE_SLOTS = ((5, 1, 2), (6, 2, 3), (7, 3, 1),
                         (8, 1, 4), (9, 3, 4), (10, 2, 4))
@@ -2281,6 +2282,306 @@ function p2_prism_min_jacobian(coords, pri18)
         d < mn && (mn = d)
     end
     return mn
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Mesh.HighOrderOptimize=1 — bounded interior mid-node relocation (OPT01 slice).
+# ════════════════════════════════════════════════════════════════════════════════
+# Only mid-edge nodes whose supporting primary edge is strictly interior to the
+# tetrahedral volume are candidates: mid nodes on boundary faces/edges carry
+# the CAD-projected geometry supports and are never moved.  A candidate
+# position is accepted only when (a) every incident element keeps its exact
+# global cubic-Bernstein positivity certificate — so no relocation can flip a
+# Jacobian sign — and (b) the minimum scaled Jacobian determinant sampled at
+# the ten type-11 interpolation points of the incident elements strictly
+# improves.  Elements that fail the certificate on entry are frozen: the pass
+# improves certified-valid meshes and never repairs (or further degrades)
+# folded ones.
+
+# The ten type-11 interpolation points of the reference tet (corners + edge
+# midpoints) — the sample set of the minimum scaled-Jacobian quality measure.
+const _P2_OPT_SAMPLES = (
+    (0.,0.,0.), (1.,0.,0.), (0.,1.,0.), (0.,0.,1.),
+    (0.5,0.,0.), (0.5,0.5,0.), (0.,0.5,0.),
+    (0.,0.,0.5), (0.,0.5,0.5), (0.5,0.,0.5))
+
+# Scaled Jacobian determinant detJ/(|c1|·|c2|·|c3|) of the isoparametric map at
+# reference point (r,s,u); degenerate or non-finite Jacobian columns give -Inf.
+@inline function _p2_opt_scaled_jac(coords, conn, t, r, s, u)
+    grads=_p2_grads(r,s,u)
+    j11=0.0;j12=0.0;j13=0.0;j21=0.0;j22=0.0;j23=0.0;j31=0.0;j32=0.0;j33=0.0
+    @inbounds for k in 1:10
+        v=conn[k,t]; x=coords[1,v]; y=coords[2,v]; z=coords[3,v]; g=grads[k]
+        j11+=x*g[1]; j12+=x*g[2]; j13+=x*g[3]
+        j21+=y*g[1]; j22+=y*g[2]; j23+=y*g[3]
+        j31+=z*g[1]; j32+=z*g[2]; j33+=z*g[3]
+    end
+    den = hypot(j11,j21,j31)*hypot(j12,j22,j32)*hypot(j13,j23,j33)
+    (isfinite(den) && den > 0) || return -Inf
+    return (j11*(j22*j33-j23*j32) - j12*(j21*j33-j23*j31) +
+            j13*(j21*j32-j22*j31)) / den
+end
+
+# Minimum scaled Jacobian over the element's ten interpolation points.
+function _p2_opt_elem_jac(coords, conn, t::Integer)
+    mn = Inf
+    @inbounds for p in _P2_OPT_SAMPLES
+        v = _p2_opt_scaled_jac(coords, conn, t, p[1], p[2], p[3])
+        v < mn && (mn = v)
+    end
+    return mn
+end
+
+# Minimum scaled Jacobian over the incident element list of a node —
+# `inc` holds `(block_index, column)` pairs.
+function _p2_opt_node_jac(coords, conns, inc)
+    mn = Inf
+    @inbounds for (b, t) in inc
+        v = _p2_opt_elem_jac(coords, conns[b], t)
+        v < mn && (mn = v)
+    end
+    return mn
+end
+
+# Undirected primary edges lying on a boundary face of the combined tet
+# complex; mid nodes supported on these edges are geometric boundary supports.
+function _p2_tet10_boundary_edges(blocks)
+    ncols = 0
+    for conn in blocks
+        ncols += size(conn, 2)
+    end
+    ncols == 0 && return Set{NTuple{2,Int32}}()
+    prims = Matrix{Int32}(undef, 4, ncols)
+    col = 1
+    @inbounds for conn in blocks, t in axes(conn, 2)
+        for k in 1:4
+            prims[k, col] = conn[k, t]
+        end
+        col += 1
+    end
+    bnd, _ = boundary_faces(prims)
+    edges = Set{NTuple{2,Int32}}()
+    for f in bnd
+        a, b, c = f[1], f[2], f[3]
+        push!(edges, (min(a,b),max(a,b)))
+        push!(edges, (min(b,c),max(b,c)))
+        push!(edges, (min(a,c),max(a,c)))
+    end
+    return edges
+end
+
+# One bounded descent for mid node `v` supported on a primary edge of length
+# `h/fraction`.  Mutates `coords` in place; returns `(moved, evals)` where
+# `evals` counts incident-minimum scaled-Jacobian evaluations performed.
+function _p2_opt_relocate!(coords, conns, inc_v, v::Integer,
+                           h::Float64, hmin::Float64,
+                           itermax::Int, tolerance::Float64)
+    f_old = _p2_opt_node_jac(coords, conns, inc_v)
+    moved = false
+    evals = 1
+    iters = 0
+    while iters < itermax && h > hmin
+        iters += 1
+        # Forward-difference gradient of the incident minimum scaled Jacobian.
+        gx = gy = gz = 0.0
+        ox = oy = oz = 0.0
+        @inbounds begin
+            ox = coords[1,v]; oy = coords[2,v]; oz = coords[3,v]
+            coords[1,v] = ox + h
+            gx = _p2_opt_node_jac(coords, conns, inc_v) - f_old
+            coords[1,v] = ox
+            coords[2,v] = oy + h
+            gy = _p2_opt_node_jac(coords, conns, inc_v) - f_old
+            coords[2,v] = oy
+            coords[3,v] = oz + h
+            gz = _p2_opt_node_jac(coords, conns, inc_v) - f_old
+            coords[3,v] = oz
+        end
+        evals += 3
+        gn = hypot(gx, gy, gz)
+        if gn > 0 && isfinite(gn)
+            inv = h / gn
+            cx = ox + gx*inv; cy = oy + gy*inv; cz = oz + gz*inv
+            if all(isfinite, (cx, cy, cz))
+                @inbounds begin
+                    coords[1,v] = cx; coords[2,v] = cy; coords[3,v] = cz
+                end
+                certified = true
+                @inbounds for (b, t) in inc_v
+                    _p2_bernstein_bound(coords, conns[b], t)[1] ||
+                        (certified = false; break)
+                end
+                f_new = certified ?
+                    _p2_opt_node_jac(coords, conns, inc_v) : -Inf
+                evals += 1
+                if f_new > f_old + tolerance
+                    f_old = f_new
+                    moved = true
+                else
+                    @inbounds begin
+                        coords[1,v] = ox; coords[2,v] = oy; coords[3,v] = oz
+                    end
+                end
+            end
+        end
+        h *= 0.5
+    end
+    return moved, evals
+end
+
+"""
+    optimize_p2_tet_interior!(coords, blocks, movable;
+        itermax=100, passes=25, fraction=0.2, hmin_fraction=1e-3,
+        tolerance=1e-10, fixed_edges=nothing,
+        threshold_min=-Inf, threshold_max=Inf)
+        -> (moved, min_before, min_after, sweeps, evals)
+
+Bounded relocation pass for the interior mid-edge nodes of quadratic tetrahedra
+(gmsh type 11) — the `Mesh.HighOrderOptimize=1` engine.  `coords` is the shared
+`3 × nnodes` Float64 matrix updated in place; `blocks` is one `10 × ne` integer
+connectivity matrix or an iterable of such matrices (several Tet10 blocks may
+share `coords`, e.g. a `MixedMesh` with multiple region blocks); `movable` is a
+length-`nnodes` boolean mask additionally restricting candidates — a node moves
+only when it is marked movable, referenced exclusively through mid slots
+(rows 5:10) of the Tet10 blocks, and its supporting primary edge is not part of
+the tet-complex boundary (mid nodes on boundary faces carry the
+geometry-projected supports and stay fixed).  `fixed_edges` may pass an extra
+set of undirected primary-edge pairs whose mid nodes must also stay fixed —
+the API layer uses it for volume-owner interfaces that are internal to the
+combined tet complex but still carry surface-projected supports.
+
+Each node performs a bounded ascent on the minimum scaled Jacobian determinant
+sampled at the ten interpolation points of its incident elements.  A candidate
+position is kept only when the exact global cubic-Bernstein certificate stays
+positive on every touched element *and* the sampled minimum strictly improves;
+otherwise the node is restored bit-for-bit.  Elements entering the pass without
+a positive certificate can never accept a candidate, so the pass neither
+creates nor repairs inverted elements.  `itermax` bounds the per-node descent
+steps, `passes` bounds global sweeps (a sweep without any accepted move stops
+early), `fraction` sets the initial step as a fraction of the supporting edge
+length, `hmin_fraction` stops the descent once the step falls below that edge
+fraction, and `tolerance` is the strict improvement threshold on the scaled
+Jacobian.  `threshold_min`/`threshold_max` bound the optimization band: a node
+is only a candidate when its incident minimum lies inside
+`[threshold_min, threshold_max)` — mirroring upstream
+`Mesh.HighOrderThresholdMin/Max`, whose defaults (0.1, 2.0) leave the worst
+elements untouched and treat already-good nodes as done.  Returns the number
+of moved nodes, the global sampled minimum before/after, the number of sweeps
+performed, and the count of candidate evaluations.
+"""
+function optimize_p2_tet_interior!(coords::AbstractMatrix{Float64},
+                                   blocks,
+                                   movable::AbstractVector{Bool};
+                                   itermax::Integer=100,
+                                   passes::Integer=25,
+                                   fraction::Real=0.2,
+                                   hmin_fraction::Real=1e-3,
+                                   tolerance::Real=1e-10,
+                                   fixed_edges::Union{Nothing,Set{NTuple{2,Int32}}}=nothing,
+                                   threshold_min::Real=-Inf,
+                                   threshold_max::Real=Inf)
+    caller = "optimize_p2_tet_interior!"
+    blocks isa AbstractMatrix && (blocks = (blocks,))
+    size(coords, 1) == 3 || throw(ArgumentError(
+        "$caller: coords must be 3 × nnodes"))
+    nn = size(coords, 2)
+    nn <= typemax(Int32) || throw(ArgumentError(
+        "$caller: $nn nodes exceed the Int32 indexing limit"))
+    length(movable) == nn || throw(ArgumentError(
+        "$caller: movable must have one entry per node ($(length(movable)) != $nn)"))
+    @inbounds for i in axes(coords, 2), d in 1:3
+        isfinite(coords[d, i]) || throw(ArgumentError(
+            "$caller: node $i has a non-finite coordinate"))
+    end
+    iters = _p2_limit(itermax, "itermax", caller)
+    npass = _p2_limit(passes, "passes", caller)
+    frac = _input_float(fraction, "$caller: fraction")
+    (isfinite(frac) && frac > 0) ||
+        throw(ArgumentError("$caller: fraction must be finite and positive"))
+    hfrac = _input_float(hmin_fraction, "$caller: hmin_fraction")
+    (isfinite(hfrac) && hfrac >= 0) ||
+        throw(ArgumentError("$caller: hmin_fraction must be finite and nonnegative"))
+    tol = _input_float(tolerance, "$caller: tolerance")
+    (isfinite(tol) && tol >= 0) ||
+        throw(ArgumentError("$caller: tolerance must be finite and nonnegative"))
+    band_lo = _input_float(threshold_min, "$caller: threshold_min")
+    band_hi = _input_float(threshold_max, "$caller: threshold_max")
+    (!isnan(band_lo) && !isnan(band_hi) && band_lo < band_hi) ||
+        throw(ArgumentError(
+            "$caller: require threshold_min < threshold_max " *
+            "(got $threshold_min, $threshold_max)"))
+
+    conns = Tuple(_p2_element_conn(b, 10, "tet10", caller) for b in blocks)
+    isempty(conns) && return (0, Inf, Inf, 0, 0)
+    total = sum(size(c, 2) for c in conns; init=0)
+    total == 0 && return (0, Inf, Inf, 0, 0)
+    for conn in conns
+        _p2_element_check(coords, conn, "tet", caller)
+    end
+
+    # Node bookkeeping: mid-slot references, mid→primary-edge endpoints, and
+    # mid→incident elements.  Nodes referenced as corners anywhere, or in any
+    # slot of a non-Tet10 block reported by the caller, are never movable.
+    endp = Dict{Int32,NTuple{2,Int32}}()
+    incident = Dict{Int32,Vector{Tuple{Int,Int32}}}()
+    midref = falses(nn)
+    cornerref = falses(nn)
+    @inbounds for (b, conn) in pairs(conns), t in axes(conn, 2)
+        for k in 1:4
+            cornerref[conn[k, t]] = true
+        end
+        for (slot, i, j) in _P2_EDGE_SLOTS
+            m = conn[slot, t]
+            midref[m] = true
+            endp[m] = (conn[i, t], conn[j, t])
+            push!(get!(() -> Tuple{Int,Int32}[], incident, m), (b, Int32(t)))
+        end
+    end
+    bedges = _p2_tet10_boundary_edges(conns)
+    fixed_edges===nothing || union!(bedges, fixed_edges)
+
+    # Candidates, worst-incident-element first.
+    candidates = Tuple{Int32,Float64}[]
+    for (mid, edge) in endp
+        (midref[mid] && !cornerref[mid] && movable[Int(mid)] &&
+         !(minmax(edge[1], edge[2]) in bedges)) || continue
+        f = _p2_opt_node_jac(coords, conns, incident[mid])
+        (band_lo <= f < band_hi) || continue
+        push!(candidates, (mid, f))
+    end
+    min_before = minimum(_p2_opt_elem_jac(coords, c, t)
+                         for c in conns for t in axes(c, 2); init=Inf)
+    isempty(candidates) &&
+        return (0, min_before, min_before, 0, 0)
+    sort!(candidates; by = last, alg = Base.Sort.MergeSort)
+
+    moved = 0
+    evals = 0
+    sweeps = 0
+    for pass in 1:npass
+        moved_pass = 0
+        for (mid, _) in candidates
+            a, b = endp[mid]
+            inc_v = incident[mid]
+            @inbounds begin
+                ax = coords[1,a]; ay = coords[2,a]; az = coords[3,a]
+                bx = coords[1,b]; by = coords[2,b]; bz = coords[3,b]
+            end
+            elen = hypot(bx-ax, by-ay, bz-az)
+            (isfinite(elen) && elen > 0) || continue
+            node_moved, node_evals = _p2_opt_relocate!(
+                coords, conns, inc_v, mid,
+                frac*elen, hfrac*elen, iters, tol)
+            evals += node_evals
+            node_moved && (moved_pass += 1)
+        end
+        sweeps = pass
+        moved += moved_pass
+        moved_pass == 0 && break
+    end
+    min_after = minimum(_p2_opt_elem_jac(coords, c, t)
+                        for c in conns for t in axes(c, 2); init=Inf)
+    return (moved, min_before, min_after, sweeps, evals)
 end
 
 include("HighOrderPyramid.jl")
