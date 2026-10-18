@@ -900,6 +900,24 @@ function _bounding_box(m::Mesh)
     return lo, hi
 end
 
+# `General.NumThreads` (owned by the session's interfaces layer) requests
+# parallel workers for the O(cells) scans in the validation stage below and in
+# `MeshElementQuality`. The option lives outside this module, so the interfaces
+# layer registers a zero-argument source returning the live request; reading it
+# lazily keeps option updates and session resets effective without a second
+# store. `Threads.@threads` caps actual concurrency at the runtime pool. Every
+# parallel scan writes disjoint per-element slots and reduces serially in
+# traversal order, so diagnostics are identical under any requested worker
+# count — including one worker on a multithreaded runtime.
+const _PARALLEL_WORKER_SOURCE=Ref{Any}(nothing)
+_set_parallel_worker_source!(source)=(_PARALLEL_WORKER_SOURCE[]=source;nothing)
+function _parallel_workers()
+    source=_PARALLEL_WORKER_SOURCE[]
+    requested=source===nothing ? 1.0 : source()
+    (requested isa Real && isfinite(requested) && requested>=2.0) || return 1
+    return Int(requested)
+end
+
 """
     MeshDiagnostic(ok, messages)
 
@@ -936,6 +954,81 @@ are checked unless `require_manifold_tris=true` is requested explicitly. Empty-r
 detection is the caller's job (it must count tets *per region*); `validate` reports the
 global tet count so "no empty volumes" can never be vacuously true.
 """
+# Per-element validation classes. Each scan writes one disjoint slot per
+# element and reduces serially in traversal order, so `Threads.@threads`
+# scheduling cannot change the emitted diagnostics: non-finite measure → 1,
+# zero measure → 2, negative signed volume → 3, valid → 0.
+@inline function _validate_seg_entry(m::Mesh,allow_degenerate_segs::Bool,s::Int)
+    a = m.segs[1,s]; b = m.segs[2,s]
+    pa = node(m,a); pb = node(m,b)
+    len = hypot(pb[1]-pa[1], pb[2]-pa[2], pb[3]-pa[3])
+    return _sort2(a,b),(!isfinite(len) ? UInt8(1) :
+        (!allow_degenerate_segs && len == 0 ? UInt8(2) : UInt8(0)))
+end
+
+@inline function _validate_tet_entry(m::Mesh,t::Int)
+    a = node(m, m.tets[1,t]); b = node(m, m.tets[2,t])
+    c = node(m, m.tets[3,t]); d = node(m, m.tets[4,t])
+    v = tet_signed_volume(a, b, c, d)
+    return !isfinite(v) ? UInt8(1) : (v == 0 ? UInt8(2) : (v < 0 ? UInt8(3) : UInt8(0)))
+end
+
+@inline function _validate_tri_entry(m::Mesh,t::Int)
+    a = node(m, m.tris[1,t]); b = node(m, m.tris[2,t]); c = node(m, m.tris[3,t])
+    ar = triangle_area(a, b, c)
+    return _sort3(Int32(m.tris[1,t]),Int32(m.tris[2,t]),Int32(m.tris[3,t])),
+        (!isfinite(ar) ? UInt8(1) : (ar == 0 ? UInt8(2) : UInt8(0)))
+end
+
+# Each scan fills disjoint per-element slots in its own function so the
+# `Threads.@threads` closure captures only call arguments — never shared
+# boxed locals that an enclosing scope could rebind (see the structure-scan
+# note below).
+function _scan_seg_entries!(keys::Vector{NTuple{2,Int32}},flags::Vector{UInt8},
+                            m::Mesh,allow::Bool,workers::Int)
+    if workers>1
+        Threads.@threads for s in 1:nsegs(m)
+            key,flag=_validate_seg_entry(m,allow,s)
+            @inbounds keys[s]=key; flags[s]=flag
+        end
+    else
+        @inbounds for s in 1:nsegs(m)
+            key,flag=_validate_seg_entry(m,allow,s)
+            keys[s]=key; flags[s]=flag
+        end
+    end
+    return nothing
+end
+
+function _scan_tet_entries!(flags::Vector{UInt8},m::Mesh,workers::Int)
+    if workers>1
+        Threads.@threads for t in 1:ntets(m)
+            @inbounds flags[t]=_validate_tet_entry(m,t)
+        end
+    else
+        @inbounds for t in 1:ntets(m)
+            flags[t]=_validate_tet_entry(m,t)
+        end
+    end
+    return nothing
+end
+
+function _scan_tri_entries!(keys::Vector{NTuple{3,Int32}},flags::Vector{UInt8},
+                            m::Mesh,workers::Int)
+    if workers>1
+        Threads.@threads for t in 1:ntris(m)
+            key,flag=_validate_tri_entry(m,t)
+            @inbounds keys[t]=key; flags[t]=flag
+        end
+    else
+        @inbounds for t in 1:ntris(m)
+            key,flag=_validate_tri_entry(m,t)
+            keys[t]=key; flags[t]=flag
+        end
+    end
+    return nothing
+end
+
 function validate(m::Mesh; require_positive_tets::Bool=true,
                   require_manifold_tris::Bool=ntets(m)==0,
                   allow_degenerate_segs::Bool=false,
@@ -943,20 +1036,15 @@ function validate(m::Mesh; require_positive_tets::Bool=true,
                   pinch_link_chi::AbstractDict{Int32,Int}=Dict{Int32,Int}())
     msgs = String[]
     _mesh_structure_messages!(msgs,m) || return MeshDiagnostic(false,msgs)
+    workers=_parallel_workers()
     # Segments are cells too: repeated endpoints, geometrically coincident
     # endpoints, overflowed lengths, and duplicate undirected cells are invalid.
     # `allow_degenerate_segs` exists for serialization: MSH stores degenerate
     # elements (closed zero-length curves) that Gmsh itself writes.
-    ndegseg = 0; nbadseg = 0
     segkeys = Vector{NTuple{2,Int32}}(undef, nsegs(m))
-    @inbounds for s in 1:nsegs(m)
-        a = m.segs[1,s]; b = m.segs[2,s]
-        segkeys[s] = _sort2(a,b)
-        pa = node(m,a); pb = node(m,b)
-        len = hypot(pb[1]-pa[1], pb[2]-pa[2], pb[3]-pa[3])
-        !isfinite(len) ? (nbadseg += 1) :
-            (!allow_degenerate_segs && len == 0 && (ndegseg += 1))
-    end
+    segflags = Vector{UInt8}(undef, nsegs(m))
+    _scan_seg_entries!(segkeys,segflags,m,allow_degenerate_segs,workers)
+    nbadseg=count(==(UInt8(1)),segflags); ndegseg=count(==(UInt8(2)),segflags)
     nbadseg > 0 && push!(msgs, "$nbadseg segments have non-finite computed length")
     ndegseg > 0 && push!(msgs, "$ndegseg degenerate (zero-length) segments")
     sort!(segkeys; alg=QuickSort)
@@ -966,36 +1054,26 @@ function validate(m::Mesh; require_positive_tets::Bool=true,
     end
     ndupseg > 0 && push!(msgs, "$ndupseg duplicate undirected segments")
     # degenerate / inverted tets
-    nneg = 0; nflat = 0; nbadvol = 0
-    @inbounds for t in 1:ntets(m)
-        a = node(m, m.tets[1,t]); b = node(m, m.tets[2,t])
-        c = node(m, m.tets[3,t]); d = node(m, m.tets[4,t])
-        v = tet_signed_volume(a, b, c, d)
-        if !isfinite(v); nbadvol += 1
-        elseif v == 0; nflat += 1
-        elseif v < 0; nneg += 1
-        end
-    end
+    tetflags = Vector{UInt8}(undef, ntets(m))
+    _scan_tet_entries!(tetflags,m,workers)
+    nbadvol=count(==(UInt8(1)),tetflags); nflat=count(==(UInt8(2)),tetflags)
+    nneg=count(==(UInt8(3)),tetflags)
     nbadvol > 0 && push!(msgs, "$nbadvol tets have non-finite computed volume")
     nflat > 0 && push!(msgs, "$nflat degenerate (zero-volume) tets")
     if require_positive_tets && nneg > 0
         push!(msgs, "$nneg negatively-oriented tets")
     end
     # degenerate triangles
-    ndegtri = 0; nbadtri = 0
-    @inbounds for t in 1:ntris(m)
-        a = node(m, m.tris[1,t]); b = node(m, m.tris[2,t]); c = node(m, m.tris[3,t])
-        ar = triangle_area(a, b, c)
-        !isfinite(ar) ? (nbadtri += 1) : (ar == 0 && (ndegtri += 1))
-    end
+    triflags = Vector{UInt8}(undef, ntris(m))
+    trikeys = Vector{NTuple{3,Int32}}(undef, ntris(m))
+    _scan_tri_entries!(trikeys,triflags,m,workers)
+    nbadtri=count(==(UInt8(1)),triflags); ndegtri=count(==(UInt8(2)),triflags)
     nbadtri > 0 && push!(msgs, "$nbadtri triangles have non-finite computed area")
     ndegtri > 0 && push!(msgs, "$ndegtri degenerate (zero-area) triangles")
     # Full combinatorial-manifold audits (incidence alone misses vertex pinches).
     # Lower-dimensional cells in a volume mesh may be arbitrary physical or embedded
     # entity subsets. They still may not duplicate a canonical cell globally.
     if ntris(m) > 0
-        trikeys=NTuple{3,Int32}[_sort3(Int32(m.tris[1,t]),Int32(m.tris[2,t]),
-                                      Int32(m.tris[3,t])) for t in axes(m.tris,2)]
         sort!(trikeys;alg=QuickSort)
         duplicate=any(trikeys[i]==trikeys[i-1] for i in 2:length(trikeys))
         if duplicate
@@ -1028,16 +1106,84 @@ function _throw_simplex_validation(caller::AbstractString,
         "$caller: constructed mesh failed validation: " * join(messages, "; ")))
 end
 
+# Parallel per-index scans write one disjoint output slot each and reduce
+# serially in traversal order, so emitted diagnostics are identical under any
+# `General.NumThreads` request — including one worker on a multithreaded
+# runtime. Every scan lives in its own function so the `Threads.@threads`
+# closure captures only call arguments: workers were observed reading a torn
+# captured local (correct array object, stale contents) when the closure
+# shared boxed locals across an enclosing loop's iterations.
+function _scan_nonfinite_nodes!(flags::Vector{Bool},coords::Matrix{Float64},workers::Int)
+    nn=size(coords,2)
+    if workers>1
+        Threads.@threads for i in 1:nn
+            @inbounds flags[i]=!isfinite(coords[1,i]) ||
+                !isfinite(coords[2,i]) || !isfinite(coords[3,i])
+        end
+    else
+        @inbounds for i in 1:nn
+            flags[i]=!isfinite(coords[1,i]) ||
+                !isfinite(coords[2,i]) || !isfinite(coords[3,i])
+        end
+    end
+    return flags
+end
+
+function _scan_negative_tags!(flags::Vector{Bool},tags::Vector{Int32},workers::Int)
+    if workers>1
+        Threads.@threads for i in eachindex(tags)
+            @inbounds flags[i]=tags[i]<0
+        end
+    else
+        @inbounds for i in eachindex(tags)
+            flags[i]=tags[i]<0
+        end
+    end
+    return flags
+end
+
+function _scan_out_of_range!(out::Vector{Int8},cells::AbstractMatrix{<:Integer},
+                             nn::Integer,workers::Int)
+    ncols=size(cells,2);nrows=size(cells,1)
+    if workers>1
+        Threads.@threads for cell in 1:ncols
+            local_index=Int8(0)
+            for row in 1:nrows
+                value=cells[row,cell]
+                if value<1 || value>nn
+                    local_index=Int8(row);break
+                end
+            end
+            out[cell]=local_index
+        end
+    else
+        @inbounds for cell in 1:ncols
+            local_index=Int8(0)
+            for row in 1:nrows
+                value=cells[row,cell]
+                if value<1 || value>nn
+                    local_index=Int8(row);break
+                end
+            end
+            out[cell]=local_index
+        end
+    end
+    return out
+end
+
 function _mesh_structure_messages!(messages::Vector{String},m::Mesh;
                                    require_finite_coords::Bool=true)
     valid=true
+    workers=_parallel_workers()
     if require_finite_coords
-        @inbounds for i in 1:nnodes(m),dimension in 1:3
-            if !isfinite(m.coords[dimension,i])
-                push!(messages,"node $i has a non-finite coordinate")
-                valid=false
-                break
-            end
+        # One flag per node column; the serial walk emits every offending node
+        # in ascending order, identical to the fused scan.
+        bad_nodes=_scan_nonfinite_nodes!(
+            Vector{Bool}(undef,nnodes(m)),m.coords,workers)
+        for i in eachindex(bad_nodes)
+            bad_nodes[i] || continue
+            push!(messages,"node $i has a non-finite coordinate")
+            valid=false
         end
     end
     for (what,cells,tags) in (("segment",m.segs,m.seg_tag),
@@ -1047,24 +1193,22 @@ function _mesh_structure_messages!(messages::Vector{String},m::Mesh;
             push!(messages,"$what tag length $(length(tags)) does not match cell count $(size(cells,2))")
             valid=false
         end
-        @inbounds for (i,tag) in pairs(tags)
-            if tag<0
-                push!(messages,"$what tag $i is negative ($tag)")
-                valid=false
-                break
-            end
+        # First negative tag and first out-of-range cell keep their serial
+        # index: disjoint flags are reduced in traversal order.
+        negative=_scan_negative_tags!(Vector{Bool}(undef,length(tags)),tags,workers)
+        index=findfirst(identity,negative)
+        if index!==nothing
+            tag=tags[index]
+            push!(messages,"$what tag $index is negative ($tag)")
+            valid=false
         end
-        bad=false
-        @inbounds for cell in axes(cells,2)
-            for local_index in axes(cells,1)
-                value=cells[local_index,cell]
-                if !(1<=value<=nnodes(m))
-                    push!(messages,"$what $cell references node $value outside 1:$(nnodes(m))")
-                    valid=false;bad=true
-                    break
-                end
-            end
-            bad && break
+        out_of_range=_scan_out_of_range!(
+            Vector{Int8}(undef,size(cells,2)),cells,nnodes(m),workers)
+        index=findfirst(!iszero,out_of_range)
+        if index!==nothing
+            value=cells[Int(out_of_range[index]),index]
+            push!(messages,"$what $index references node $value outside 1:$(nnodes(m))")
+            valid=false
         end
     end
     return valid

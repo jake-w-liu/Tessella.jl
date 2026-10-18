@@ -8,7 +8,8 @@ four 1-D measures that Gmsh itself does not define reliably.
 """
 module MeshElementQuality
 
-using ..MeshTypes: Mesh, node, triangle_area, tet_signed_volume
+using ..MeshTypes: Mesh, node, triangle_area, tet_signed_volume,
+    _parallel_workers
 using ..MeshPointLocation: mesh_element_offsets
 using ..GmshLibm: _gm_atan, _gm_acos, _gm_atan2
 using LinearAlgebra: svd
@@ -856,11 +857,32 @@ function mesh_element_qualities(mesh::Mesh,element_tags,
     _validate_quality_kinds(
         tags,name,triangle_offset,tetrahedron_offset,caller)
     qualities=Vector{Float64}(undef,length(tags))
-    @inbounds for index in eachindex(tags)
-        qualities[index]=_element_quality(
-            mesh,tags[index],name,triangle_offset,tetrahedron_offset)
-    end
+    _scan_qualities!(qualities,mesh,tags,name,
+                     triangle_offset,tetrahedron_offset,_parallel_workers())
     return qualities
+end
+
+# Each requested element writes one disjoint slot; the value depends only on
+# that element, so `General.NumThreads`-requested workers cannot change the
+# returned vector. The scan lives in its own function so the
+# `Threads.@threads` closure captures only call arguments — never shared
+# boxed locals that an enclosing scope could rebind.
+function _scan_qualities!(qualities::Vector{Float64},mesh::Mesh,
+                          tags::AbstractVector{<:Integer},name::String,
+                          triangle_offset::Int,tetrahedron_offset::Int,
+                          workers::Int)
+    if workers>1
+        Threads.@threads for index in eachindex(tags)
+            @inbounds qualities[index]=_element_quality(
+                mesh,tags[index],name,triangle_offset,tetrahedron_offset)
+        end
+    else
+        @inbounds for index in eachindex(tags)
+            qualities[index]=_element_quality(
+                mesh,tags[index],name,triangle_offset,tetrahedron_offset)
+        end
+    end
+    return nothing
 end
 
 """Return one named quality for a dense linear-simplex element tag."""

@@ -1,6 +1,7 @@
 # Actual partition products for bare, first-order tetrahedral discrete Regions.
 # One authoritative cell owns each UID; ghost entities expose query aliases.
 using ..GeoExec: _geo_import_entity_receipts!
+import ..MeshTypes
 
 function _partition_entity_birth!(model,dimension,caller)
     maximum_tag=max(model.next_tag[dimension+1],maximum(
@@ -28,6 +29,12 @@ function _partition_workers()
     (isfinite(requested) && requested>=2.0) || return 1
     return Int(requested)
 end
+
+# The O(cells) validation and element-quality scans in `MeshTypes`/
+# `MeshElementQuality` honor the same `General.NumThreads` request through this
+# registered source. Reading the live option lazily keeps session updates and
+# `initialize`/`finalize` resets effective without a second store.
+MeshTypes._set_parallel_worker_source!(_partition_workers)
 
 function _partition_tet_snapshot(model,cached,class,caller)
     class!==nothing && class.public_tags!==nothing || throw(ArgumentError(
