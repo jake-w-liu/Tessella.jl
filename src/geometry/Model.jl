@@ -9390,6 +9390,13 @@ end
 function _model_native_embedded_face_graft(mesh,native_constraints,
                                            initial_geometry)
     isempty(native_constraints.embedded_faces) && return mesh
+    # The task-local protected registry is emptied by the driver before this
+    # pass runs; faces and edges recovered here are registered as they become
+    # real so a later cavity fill inside the same pass cannot silently erase
+    # them — unprotected multi-facet sheets (holed, subdivided, several
+    # sheets) otherwise trade pockets across iterations and exhaust the pass
+    # bound. `recover_triangle3` does the same for its coverage loop.
+    protected_faces,protected_edges=_protected_cells!()
     for _pass in 1:6
         counts=Dict{NTuple{3,Int32},Int}()
         for tet in eachcol(mesh.tets),skip in 1:4
@@ -9399,7 +9406,11 @@ function _model_native_embedded_face_graft(mesh,native_constraints,
         changed=false; complete=true
         edges=_tet_edge_set(mesh)
         for (_,label,face) in native_constraints.embedded_faces
-            get(counts,_sorted_face3(face...),0)==2 && continue
+            key=_sorted_face3(face...)
+            if get(counts,key,0)==2
+                push!(protected_faces,key)
+                continue
+            end
             complete=false
             for (u,v,x) in ((face[1],face[2],face[3]),
                             (face[2],face[3],face[1]),
@@ -9409,6 +9420,7 @@ function _model_native_embedded_face_graft(mesh,native_constraints,
                     Int32(u),Int32(v),Int32(x))
                 out===nothing && continue
                 mesh=out; changed=true; edges=_tet_edge_set(mesh)
+                push!(protected_edges,minmax(Int32(u),Int32(v)))
             end
             grafted=_graft_sheet_face3(mesh,
                 Int32(face[1]),Int32(face[2]),Int32(face[3]))
@@ -9424,6 +9436,14 @@ function _model_native_embedded_face_graft(mesh,native_constraints,
                 end
             end
             grafted===nothing || (mesh=grafted; changed=true)
+            # The pass-opening count is stale after any splice — recount this
+            # face and protect whatever interior realization now exists.
+            incidence=0
+            for tet in eachcol(mesh.tets),skip in 1:4
+                _sorted_face3((tet[i] for i in 1:4 if i!=skip)...)==key &&
+                    (incidence+=1)
+            end
+            incidence==2 && push!(protected_faces,key)
         end
         (complete || !changed) && break
     end
