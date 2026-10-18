@@ -136,10 +136,10 @@ function _model_export_write(filename)
     end
     (haskey(_MSH_EXTENSION_VERSIONS,extension) ||
         extension in (".unv",".mesh",".stl",".su2",".bdf",".nas",".inp",".neu",
-                      ".p3d",".mail",".ir3")) || throw(ArgumentError(
+                      ".p3d",".mail",".ir3",".vtk")) || throw(ArgumentError(
         "$caller: current-model export supports .msh, .msh2/.msh22, " *
         ".msh4/.msh41, .unv, .mesh, .stl, .su2, .bdf, .nas, .inp, .neu, " *
-        ".p3d, .mail and .ir3"))
+        ".p3d, .mail, .ir3 and .vtk"))
     return lock(STATE_LOCK) do
         model=_model_locked()
         save_all=!iszero(get(OPTIONS,"Mesh.SaveAll",0.0))
@@ -170,7 +170,9 @@ function _model_export_write(filename)
             # projection cannot represent, so it always rejects; MAIL emits
             # the face triangles with trailing ` 0 0 0` edge placeholders;
             # IR3 emits self-describing vertex-count element records whose
-            # tag field follows the Mesh.SaveElementTagType semantics.
+            # tag field follows the Mesh.SaveElementTagType semantics; VTK
+            # emits a legacy ASCII UNSTRUCTURED_GRID with a CELL_DATA
+            # CellEntityIds scalar section when physicals are present.
             target=_model_export_mesh(model,LAST_MESH[],LAST_MESH_CLASS[],4.1,
                 save_all,caller)
             # `Mesh.SaveElementTagType` is not a session-tracked option, so
@@ -187,6 +189,7 @@ function _model_export_write(filename)
                 extension==".mail" ? IO.write_mail(filename,target) :
                 extension==".ir3" ? IO.write_ir3(filename,target;
                     element_tag_type=tag_type) :
+                extension==".vtk" ? IO.write_vtk(filename,target) :
                     IO.write_bdf(filename,target)
         end
         return nothing
@@ -198,7 +201,7 @@ end
 
 Write the current model's actual mesh to a `.msh`, `.msh2`, `.msh22`, `.msh4`,
 `.msh41`, `.stl`, `.unv`, `.mesh`, `.su2`, `.bdf`, `.nas`, `.inp`, `.neu`,
-`.p3d`, `.mail` or `.ir3` file. `.msh` uses `Mesh.MshFileVersion`
+`.p3d`, `.mail`, `.ir3` or `.vtk` file. `.msh` uses `Mesh.MshFileVersion`
 to select 2.2 or 4.1 while the versioned aliases force the corresponding
 dialect; `.msh1`, `.msh3` and `.msh40` reject. `Mesh.Binary` selects the
 encoding, and `Mesh.SaveAll`
@@ -222,7 +225,10 @@ line, `numVertices num2D num3D` header, `%.16g` vertex rows and
 self-describing `num tag numVert` records with per-dimension numbering)
 whose tag field carries the elementary entity tag (the upstream
 `Mesh.SaveElementTagType` default; `IO.write_ir3` also honors values 1–3);
-`.p3d` writes only
+`.vtk` emits a legacy ASCII unstructured grid
+(`POINTS`/`CELLS`/`CELL_TYPES`, physical tags as a `CellEntityIds` scalar
+section when present) with the lattice-verified VTK node orderings the
+model-view writer uses; `.p3d` writes only
 entities with structured transfinite grids upstream, so every export
 rejects with "no structured grids to save". The foreign formats retain
 neither partitions, periodic links nor data

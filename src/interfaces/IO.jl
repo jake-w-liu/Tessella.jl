@@ -21,7 +21,7 @@ module IO
 using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets, node, validate
 using ..Elements: MSH_PHYSICAL_NAME_MAX_BYTES, _copy_physical_names, MixedMesh,
                   ElementBlock, SpecialElementBlock, msh_spec, msh_dimension,
-                  msh_family, msh_num_nodes, simplex_to_mixed
+                  msh_family, msh_num_nodes, msh_type, simplex_to_mixed
 using ..Predicates: _two_diff_tail
 using ..GmshLibm: _gm87_sin, _gm87_cos, _gm_tan, _gm_asin, _gm_acos, _gm_atan,
                   _gm87_atan2, _gm_sinh, _gm_cosh, _gm_tanh, _gm87_exp, _gm87_log,
@@ -34,6 +34,7 @@ export read_unv, write_unv, read_mesh, write_mesh, UnvFile, MeshFile
 export read_su2, write_su2, read_bdf, write_bdf, Su2File, BdfFile
 export read_inp, write_inp, read_neu, write_neu, InpFile, NeuFile
 export read_p3d, write_p3d, write_mail, write_ir3, P3dFile
+export read_vtk, write_vtk, VtkFile
 
 include("GeoColorNames.jl")
 include("GeoOptionTables.jl")
@@ -11618,6 +11619,18 @@ function _read_foreign_records(path,caller::AbstractString)
                 rethrow()
             end
         end
+    elseif extension==".vtk"
+        return open(path,"r") do io
+            try
+                return _read_vtk(io,caller,
+                    Int(typemax(Int32)),Int(typemax(Int32)))
+            catch err
+                err isa InterruptException && rethrow()
+                err isa EOFError && throw(ArgumentError(
+                    "$caller: truncated .vtk file"))
+                rethrow()
+            end
+        end
     else
         throw(ArgumentError("$caller: unsupported mesh extension '$extension'"))
     end
@@ -14331,6 +14344,410 @@ function write_ir3(path,m;element_tag_type::Integer=1)
                         print(io," ",row)
                     end
                     println(io)
+                end
+            end
+        end
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Legacy VTK (.vtk) unstructured-grid mesh I/O — the format semantics follow
+# the pinned release's `GModelIO_VTK.cpp`. Only the legacy ASCII dialect is
+# supported: `BINARY` payloads and the XML `.vtu`/`.vti` families reject
+# loudly. `DATASET UNSTRUCTURED_GRID` (POINTS/CELLS/CELL_TYPES) and
+# `DATASET POLYDATA` (POLYGONS by arity, LINES as polylines) are read; field
+# data sections (`CELL_DATA`, `POINT_DATA`, `SCALARS`, `LOOKUP_TABLE`,
+# `FIELD`, ...) are ignored exactly like upstream, which stops after
+# `CELL_TYPES`.
+#
+# Cell-type mapping and node permutations use the same source of truth as the
+# model-view `.vtk` writer: `API._native_model_view_vtk_cell` returns the VTK
+# type and the `order` list whose `k`-th entry is the Gmsh local node emitted
+# at VTK position `k` (the module sits later in the include order, so it is
+# resolved through `getfield` like the `GeoExec`/`Model` bridges). Reading
+# applies the inverse placement `msh_node[order[k]] = vtk_node[k]`, which is
+# also the permutation the lattice-verified writer uses — upstream's
+# `readVTK` constructor lists apply its *write* map a second time for the
+# 20/27-node hexahedra and the quadratic wedges, which is not the inverse for
+# non-involution families; the inverse used here is verified against the
+# public `vtkQuadratic*`/`vtkHigherOrder*` parametric lattices and the
+# existing view exports were read back by VTK 9.7.1. In particular this means
+# VTK wedges/prisms keep their parametric vertex order (upstream additionally
+# reverses the two triangular faces on write — a legacy convention this
+# format does not reproduce).
+# ════════════════════════════════════════════════════════════════════════════════
+
+# VTK cell type → Gmsh element type for the fixed-arity records the pinned
+# reader supports (plus 27/quadratic pyramid, which upstream lacks but whose
+# ordering is pinned down by the shared lattice). Arity is revalidated per
+# cell against the shared layout.
+const _VTK_READ_TYPES=Dict{Int,Int}(
+    1=>15,   # VTK_VERTEX              → point
+    3=>1,    # VTK_LINE                → lin2
+    5=>2,    # VTK_TRIANGLE            → tri3
+    9=>3,    # VTK_QUAD                → quad4
+    10=>4,   # VTK_TETRA               → tet4
+    12=>5,   # VTK_HEXAHEDRON          → hex8
+    13=>6,   # VTK_WEDGE               → pri6
+    14=>7,   # VTK_PYRAMID             → pyr5
+    21=>8,   # VTK_QUADRATIC_EDGE      → lin3
+    22=>9,   # VTK_QUADRATIC_TRIANGLE  → tri6
+    23=>16,  # VTK_QUADRATIC_QUAD      → quad8
+    28=>10,  # VTK_BIQUADRATIC_QUAD    → quad9
+    24=>11,  # VTK_QUADRATIC_TETRA     → tet10
+    25=>17,  # VTK_QUADRATIC_HEXAHEDRON → hex20
+    29=>12,  # VTK_TRIQUADRATIC_HEXAHEDRON → hex27
+    26=>18,  # VTK_QUADRATIC_WEDGE     → pri15
+    32=>13,  # VTK_BIQUADRATIC_QUADRATIC_WEDGE → pri18
+    27=>19)  # VTK_QUADRATIC_PYRAMID   → pyr13
+
+# VTK Lagrange cell types decode through the complete-order element family;
+# the node count selects the order. Types 70 (quadrilateral), 72
+# (hexahedron), 73 (wedge) and 74 (pyramid) have no upstream reader branch
+# but map cleanly through the shared lattice.
+const _VTK_LAGRANGE_FAMILIES=Dict{Int,Symbol}(
+    68=>:lin,69=>:tri,70=>:qua,71=>:tet,72=>:hex,73=>:pri,74=>:pyr)
+
+function _vtk_lagrange_msh(family::Symbol,n::Int,caller::AbstractString)
+    for order in 1:10
+        msh=try
+            msh_type(family,order)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            continue
+        end
+        msh_num_nodes(msh)==n && return msh
+    end
+    throw(ArgumentError("$caller: VTK Lagrange $family cell with $n nodes " *
+        "has no supported complete order"))
+end
+
+# Resolve a (VTK cell type, node count) pair to `(msh, order)` where `order`
+# lists the Gmsh local node index occupying each VTK connectivity slot —
+# i.e. `msh_nodes[order[k]] = vtk_nodes[k]` inverts the writer's placement.
+function _vtk_cell_layout(vtktype::Int64,nverts::Int,api,cache,info)
+    key=(vtktype,nverts)
+    cached=get(cache,key,nothing)
+    cached===nothing || return cached
+    msh=get(_VTK_READ_TYPES,vtktype,nothing)
+    if msh===nothing
+        family=get(_VTK_LAGRANGE_FAMILIES,vtktype,nothing)
+        family===nothing && throw(ArgumentError(
+            "$info: unsupported VTK cell type $vtktype"))
+        msh=_vtk_lagrange_msh(family,nverts,info)
+    end
+    layout=api._native_model_view_vtk_cell(msh,info)
+    order=layout.order
+    length(order)==nverts || throw(ArgumentError(
+        "$info: VTK cell type $vtktype lists $nverts nodes; " *
+        "expected $(length(order))"))
+    cache[key]=(msh,order)
+    return cache[key]
+end
+
+function _vtk_int(token,caller::AbstractString,context::AbstractString)
+    return _unv_int(token,caller,context)
+end
+
+function _read_vtk(io::Base.IO,caller::AbstractString,node_limit::Int,
+                   element_limit::Int)
+    # Two free-form header lines (version and title), then a token stream —
+    # the pinned reader's `fgets`/`fscanf` split.
+    eof(io) && throw(ArgumentError("$caller: truncated .vtk file"))
+    version_line=readline(io)
+    (startswith(version_line,"<?xml") || startswith(version_line,"<VTKFile")) &&
+        throw(ArgumentError(
+            "$caller: XML .vtu/.vtk files are not supported (legacy ASCII only)"))
+    eof(io) && throw(ArgumentError("$caller: truncated .vtk file"))
+    readline(io)  # title line, ignored
+    tokens=Iterators.Stateful(Iterators.flatmap(eachsplit,eachline(io)))
+    next=function (what)
+        it=iterate(tokens)
+        it===nothing && throw(ArgumentError(
+            "$caller: truncated .vtk file (expected $what)"))
+        return it[1]
+    end
+    mode=next("ASCII/BINARY keyword")
+    mode=="BINARY" && throw(ArgumentError(
+        "$caller: binary .vtk files are not supported (ASCII only)"))
+    mode=="ASCII" || throw(ArgumentError(
+        "$caller: expected ASCII or BINARY keyword, got '$mode'"))
+    next("DATASET keyword")=="DATASET" || throw(ArgumentError(
+        "$caller: expected DATASET keyword"))
+    dataset=next("dataset type")
+    unstructured=dataset=="UNSTRUCTURED_GRID"
+    polydata=dataset=="POLYDATA"
+    (unstructured || polydata) || throw(ArgumentError(
+        "$caller: VTK reader can only read unstructured or polydata " *
+        "datasets, got DATASET $dataset"))
+    next("POINTS keyword")=="POINTS" || throw(ArgumentError(
+        "$caller: expected POINTS section"))
+    npoints=_vtk_int(next("point count"),caller,".vtk point count")
+    npoints>0 || throw(ArgumentError("$caller: no points in dataset"))
+    npoints<=node_limit || throw(ArgumentError(
+        "$caller: .vtk point count exceeds max_nodes=$node_limit"))
+    point_type=next("POINTS data type")
+    point_type in ("float","double") || throw(ArgumentError(
+        "$caller: VTK reader only accepts float or double datasets, " *
+        "got '$point_type'"))
+    npoints<=typemax(Int32) || throw(ArgumentError(
+        "$caller: .vtk point count exceeds Int32 range"))
+    coords=Vector{Float64}(undef,3*npoints)
+    @inbounds for i in eachindex(coords)
+        coords[i]=_unv_float(next("point coordinate"),caller,
+            ".vtk point coordinate")
+    end
+    section=next("CELLS/POLYGONS/LINES keyword")
+    section in ("CELLS","POLYGONS","LINES") || throw(ArgumentError(
+        "$caller: no CELLS, POLYGONS or LINES section in dataset " *
+        "(got '$section')"))
+    ncells=_vtk_int(next("cell count"),caller,".vtk cell count")
+    ncells>0 || throw(ArgumentError("$caller: no cells in dataset"))
+    ncells<=element_limit || throw(ArgumentError(
+        "$caller: .vtk cell count exceeds max_elements=$element_limit"))
+    _vtk_int(next("cell connectivity size"),caller,
+        ".vtk cell connectivity size")  # declared total is advisory upstream
+    api=getfield(parentmodule(@__MODULE__),:API)
+    cache=Dict{Tuple{Int64,Int},Tuple{Int,Vector{Int}}}()
+    records=_TextMeshCell[]
+    pnames=Dict{Tuple{Int,Int},String}()
+    points=0
+    if section=="LINES"
+        # POLYDATA polylines: each record is a connected node chain split into
+        # segments, lands on its own curve entity and carries physical tag 1
+        # named "centerline" — the pinned reader's `physicals` assignment.
+        curve=0
+        for _ in 1:ncells
+            k=_vtk_int(next("polyline size"),caller,".vtk polyline size")
+            0<=k<=npoints || throw(ArgumentError(
+                "$caller: .vtk polyline lists $k nodes"))
+            nodes=Vector{Int32}(undef,k)
+            for i in 1:k
+                index=_vtk_int(next("polyline node"),caller,
+                    ".vtk polyline node")
+                (0<=index<npoints) || throw(ArgumentError(
+                    "$caller: .vtk polyline references node $index outside " *
+                    "0:$(npoints-1)"))
+                nodes[i]=Int32(index)+Int32(1)
+            end
+            curve+=1
+            length(records)+max(k-1,0)<=element_limit || throw(ArgumentError(
+                "$caller: .vtk cell count exceeds max_elements=$element_limit"))
+            for i in 1:k-1
+                push!(records,_TextMeshCell(length(records)+Int64(1),1,
+                    Int32[nodes[i],nodes[i+1]],Int64(curve),Int64(1)))
+            end
+            pnames[(1,1)]="centerline"
+        end
+    else
+        # CELLS / POLYGONS: fixed per-cell node count followed by 0-based
+        # indices; `CELLS` in an unstructured grid is typed via CELL_TYPES,
+        # every other section assigns the type from the node count.
+        conns=Vector{Int32}[]
+        for c in 1:ncells
+            k=_vtk_int(next("cell size"),caller,".vtk cell node count")
+            0<k<=npoints || throw(ArgumentError(
+                "$caller: .vtk cell $c lists $k nodes"))
+            length(records)+1<=element_limit || throw(ArgumentError(
+                "$caller: .vtk cell count exceeds max_elements=$element_limit"))
+            conn=Vector{Int32}(undef,k)
+            for i in 1:k
+                index=_vtk_int(next("cell $c connectivity"),caller,
+                    ".vtk connectivity index")
+                (0<=index<npoints) || throw(ArgumentError(
+                    "$caller: .vtk cell $c references node $index outside " *
+                    "0:$(npoints-1)"))
+                conn[i]=Int32(index)+Int32(1)
+            end
+            push!(conns,conn)
+        end
+        if unstructured
+            # The pinned reader keys the CELL_TYPES pass off the DATASET
+            # kind, so a POLYGONS section inside an unstructured grid still
+            # expects one type per record.
+            next("CELL_TYPES keyword")=="CELL_TYPES" || throw(ArgumentError(
+                "$caller: expected CELL_TYPES section"))
+            ntypes=_vtk_int(next("cell type count"),caller,
+                ".vtk cell type count")
+            ntypes==ncells || throw(ArgumentError(
+                "$caller: invalid number of cell types $ntypes for " *
+                "$ncells cells"))
+            for c in 1:ncells
+                vtktype=_vtk_int(next("cell type"),caller,
+                    ".vtk cell type")
+                msh,order=_vtk_cell_layout(vtktype,length(conns[c]),
+                    api,cache,caller)
+                nodes=Vector{Int32}(undef,length(order))
+                @inbounds for k in eachindex(order)
+                    nodes[order[k]]=conns[c][k]
+                end
+                dim=msh_dimension(msh)
+                entity=dim==0 ? Int64(points+=1) : Int64(1)
+                push!(records,_TextMeshCell(Int64(c),msh,nodes,entity,
+                    Int64(0)))
+            end
+        else
+            # POLYGONS (and CELLS under POLYDATA): type from node count —
+            # 1 point, 2 line, 3 triangle, 4 quadrangle like upstream.
+            for c in 1:ncells
+                conn=conns[c];k=length(conn)
+                msh=k==1 ? 15 : k==2 ? 1 : k==3 ? 2 : k==4 ? 3 :
+                    throw(ArgumentError(
+                        "$caller: unknown type of mesh element with " *
+                        "$k nodes"))
+                entity=k==1 ? Int64(points+=1) : Int64(1)
+                push!(records,_TextMeshCell(Int64(c),msh,conn,entity,
+                    Int64(0)))
+            end
+        end
+    end
+    # Everything past CELL_TYPES (CELL_DATA/POINT_DATA/SCALARS/FIELD/...) is
+    # ignored, matching the pinned reader.
+    return collect(Int64(1):npoints),coords,records,pnames
+end
+
+"""
+    VtkFile
+
+Result of [`read_vtk`](@ref): the compact `mesh` (an MSH2-style `MixedMesh`
+whose per-cell `elementary_entities` hold the per-dimension entity tag —
+point cells get one entity each, line/surface/volume cells share one entity
+per dimension — and whose `tags` are the physical tag, zero unless a
+POLYDATA `LINES` polyline emitted the upstream `centerline` group), the
+dense `node_tags` in file order and the per-block `element_tags`.
+"""
+struct VtkFile
+    mesh::MixedMesh
+    node_tags::Vector{UInt64}
+    element_tags::Vector{Vector{UInt64}}
+end
+
+"""
+    read_vtk(path; max_nodes, max_elements, max_file_bytes) -> VtkFile
+
+Read a legacy ASCII VTK file. `DATASET UNSTRUCTURED_GRID` files carry
+`POINTS n float|double`, `CELLS m size` (per-cell node count and 0-based
+indices) and `CELL_TYPES m`; `DATASET POLYDATA` files carry `POLYGONS`
+records whose type is inferred from the node count or `LINES` polylines
+(split into `lin2` segments, each record on its own curve entity under the
+upstream `centerline` physical group). VTK cell types map to Gmsh types for
+point, line, triangle, quadrangle, tetrahedron, hexahedron, wedge, pyramid,
+the quadratic edge-only and complete quadratic families (23/28, 25/29,
+26/32) and quadratic pyramid, plus the complete-order Lagrange families
+(68–74) whose order is inferred from the node count; any other cell type,
+node-count mismatch, `BINARY` payload or XML dialect rejects loudly. Field
+data sections are ignored like the pinned reader. Node ordering is the exact
+inverse of [`write_vtk`](@ref)/the model-view VTK export lattice.
+"""
+function read_vtk(path;
+                  max_nodes=typemax(Int32),max_elements=typemax(Int32),
+                  max_file_bytes=typemax(Int))
+    caller="read_vtk"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    node_limit=_io_limit(max_nodes,caller,"max_nodes";ceiling=Int(typemax(Int32)))
+    element_limit=_io_limit(
+        max_elements,caller,"max_elements";ceiling=Int(typemax(Int32)))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
+    node_labels,coords,records,pnames=open(path,"r") do io
+        try
+            return _read_vtk(io,caller,node_limit,element_limit)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa EOFError && throw(ArgumentError(
+                "$caller: truncated .vtk file"))
+            rethrow()
+        end
+    end
+    mesh,node_tags,element_tags=_foreign_mesh_result(
+        caller,node_labels,coords,records;physical_names=pnames)
+    return VtkFile(mesh,node_tags,element_tags)
+end
+
+"""
+    write_vtk(path, mesh; title="Tessella mesh")
+
+Write a `Mesh` or `MixedMesh` as a legacy ASCII VTK file: a `# vtk DataFile
+Version 2.0` header, a free-form `title` line, `ASCII`, `DATASET
+UNSTRUCTURED_GRID`, `POINTS n double` coordinates (`%.17g`, so a read-back
+is bit-exact), `CELLS m size` with the per-cell node count and 0-based
+connectivity in VTK order, and `CELL_TYPES m`. When any cell carries a
+positive physical tag a `CELL_DATA`/`SCALARS CellEntityIds`/`LOOKUP_TABLE
+default` section emits the physical tag per cell (`-1` for untagged cells),
+following the pinned `GModel::writeVTK`. The VTK type and node permutation
+come from the same verified `API._native_model_view_vtk_cell` lattice the
+model-view `.vtk` writer uses, covering linear, quadratic (including
+serendipity quad8/hex20/prism15/pyr13) and complete Lagrange families;
+`ElementBlock` types with no VTK layout (incomplete families, special
+records) reject before the destination file is touched. Unlike the
+model-view writer the legacy `CELLS` encoding is always used — the pinned
+model writer has no `OFFSETS`/`CONNECTIVITY` variant.
+"""
+function write_vtk(path,m;title::AbstractString="Tessella mesh")
+    caller="write_vtk"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    (occursin('\n',title) || occursin('\r',title)) && throw(ArgumentError(
+        "$caller: title must be a single line"))
+    api=getfield(parentmodule(@__MODULE__),:API)
+    layouts=Vector{NamedTuple}(undef,length(m.blocks))
+    ncells=0;size_ints=0
+    for (bi,block) in enumerate(m.blocks)
+        block isa ElementBlock || throw(ArgumentError(
+            "$caller: special MSH record type $(block.msh) is not " *
+            "representable in .vtk"))
+        layout=api._native_model_view_vtk_cell(block.msh,caller)
+        layouts[bi]=layout
+        count=size(block.nodes,2)
+        ncells+=count
+        size_ints+=count*(length(layout.order)+1)
+    end
+    any_physical=any(tag>0 for block in m.blocks for tag in block.tags)
+    nn=size(m.coords,2)
+    target,parent=_foreign_target(path,caller)
+    mktemp(parent) do temporary,io
+        println(io,"# vtk DataFile Version 2.0")
+        println(io,title)
+        println(io,"ASCII")
+        println(io,"DATASET UNSTRUCTURED_GRID")
+        println(io,"POINTS ",nn," double")
+        @inbounds for i in 1:nn
+            println(io,@sprintf("%.17g %.17g %.17g",
+                m.coords[1,i],m.coords[2,i],m.coords[3,i]))
+        end
+        println(io,"CELLS ",ncells," ",size_ints)
+        for (block,layout) in zip(m.blocks,layouts)
+            order=layout.order
+            @inbounds for j in axes(block.nodes,2)
+                print(io,length(order))
+                for k in order
+                    print(io," ",Int64(block.nodes[k,j])-1)
+                end
+                println(io)
+            end
+        end
+        println(io,"CELL_TYPES ",ncells)
+        for (block,layout) in zip(m.blocks,layouts)
+            for _ in axes(block.nodes,2)
+                println(io,layout.type)
+            end
+        end
+        if any_physical
+            println(io,"CELL_DATA ",ncells)
+            println(io,"SCALARS CellEntityIds int 1")
+            println(io,"LOOKUP_TABLE default")
+            for block in m.blocks
+                for j in axes(block.nodes,2)
+                    physical=Int64(block.tags[j])
+                    println(io,physical>0 ? physical : -1)
                 end
             end
         end
