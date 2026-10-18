@@ -4861,16 +4861,32 @@ implemented (dims, `-o/-format/-bin/-save`, `-order`, mesh-size knobs,
 loudly. Verified: `cli_frontends_test.jl` 73 green; cli_options 27,
 cli_curve 42, cli_precision 137 green.
 
-**CONFIRMED REGRESSION (needs bisect next):**
-`test/interfaces/cli_test.jl` periodic tests fail on `main` —
-`execute_geo` on `periodic_surface_volume.geo` yields
-`length(periodic_links)==1` where 3 expected (CRC `f364…` vs `2877…`),
-and the OCC-embedded periodic case errors inside
-`APIGenerateHigher._higher_surface_phase!` (`APIGenerateHigher.jl:1060`).
-Reproduced on committed `main` bypassing CLI entirely — geometry-core
-regression introduced somewhere in the recent OCC/view work; bisect
-`8c146b1`-era commits touching `ModelCurved`/`ModelOCCLoft`/
-`_occ_unbind_orphans!`. 36/41 of cli_test remain green.
+**REGRESSION FIXED (`7eb4998`):** the periodic failure was dim-0
+endpoint links never emitted into the merged product — `_dim01_finish!`
+now runs them through the extracted `_model_periodic_endpoint_forest`
+(slave-keyed dedupe); the embedded case needed `_graft_sheet_face3`/
+`_recover_sheet_edge3` bounded tube-cavity recovery plus `curve_chains`
+transport with `_higher_surface_curve_remesh!`. Deep review also caught
+and fixed a closed-curve wrap-parameter bug, coincident-row zero-length
+fragments, and protected-face registration ordering. Both periodic
+fixtures verified byte-identical to the re-pinned CRCs (3 links, correct
+slave↔master pairs and node counts); cli_test periodic/embedded cases
+green.
+
+**IO/LAY02 slice (`b05d4c5`):** `.stl` session open/merge/write via the
+MSH-2.2 bridge; `.msh2/.msh22/.msh4/.msh41` write aliases on API.write +
+GEO Save; `Extrude {shapes} Using Wire {spine}` under `OpenCASCADE`
+routes to `occ.add_pipe` (open-profile reservation bug fixed in
+`_model_occ_add_pipe!`); `.geo` BoundaryLayer `Background Field`
+resolution (dim-1 wall grading works; dim≥2 `Field=` selects reject
+loudly until the layer mesher lands — LAY02 tail).
+
+**IO01 formats (`52bbbad`, `aed3da1`):** `.unv`, `.mesh`, `.su2`,
+`.bdf`/`.nas` import+export through the MSH-2.2 foreign bridge with
+physical/marker transport. Still open: `.inp`/`.neu` (in flight),
+`.p3d`/`.mail`/`.celum`/`.ir3` text formats, `.vtk` model-level I/O,
+`.geo_unrolled` writer, `.cgns`/`.med`/`.brep`/`.xao` (need external
+libs — keep guarded).
 
 ## Previous landed increment (VIEW02 slice, pushed to `origin/main`)
 
