@@ -188,7 +188,12 @@ struct _ModelPeriodicUIDVertex
 end
 
 function _model_periodic_uid_inverse(affine::NTuple{16,Float64})
-    all(isfinite,affine) && affine[13:16]==(0.,0.,0.,1.) || throw(ArgumentError(
+    # The applied map is the 3x4 block (entries 1-12); the fourth row is
+    # retained verbatim like upstream's `$Periodic` bytes — a 12-entry `.geo`
+    # `Affine` zero-pads it to `(0,0,0,0)`, an explicit 16-entry row keeps the
+    # homogeneous `(0,0,0,1)`. Either witnesses the same applied transform.
+    all(isfinite,affine) && affine[13:16] in ((0.,0.,0.,0.),(0.,0.,0.,1.)) ||
+        throw(ArgumentError(
         "periodic correspondence requires a finite affine transform"))
     a,b,c,d,e,f,g,h,i=affine[1],affine[2],affine[3],affine[5],affine[6],
         affine[7],affine[9],affine[10],affine[11]

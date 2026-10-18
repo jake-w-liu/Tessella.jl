@@ -1,9 +1,12 @@
 # Rigid periodic boundaries in hybrid Regions
 
 The public mesh API supports one ordinary explicit Region whose current planar
-Tri3/Quad4 shell contains quadrangles and one periodic Surface pair whose map
-is a certified proper rigid transform. Mesh the master Surface first and let
-the slave copy it. An explicitly
+Tri3/Quad4 shell contains quadrangles and one or more independent periodic
+Surface pairs whose maps are certified proper rigid transforms. Each slave
+Surface carries exactly one master; independent directions (an x/y/z-periodic
+box) certify per pair, and a corner vertex where several relations meet binds
+a different master under each relation's own affine. Mesh the master Surface
+first and let each slave copy it. An explicitly
 transfinite slave is meshed independently and does not supply the copy
 correspondence required by this hybrid constructor.
 
@@ -26,14 +29,16 @@ affine coordinates, ordered Surface cells, exterior incidence, and total signed
 volume before publication. A rotated pair also induces Surface-derived
 cross-side Curve relations; those ride the existing `derived` provenance
 through the owned lower producer while directly declared cross-surface Curve
-relations keep their explicit guard. Multiple periodic pairs, sheared,
-reflected, scaled or otherwise non-rigid transforms, missing or incomplete
-copy history, and cross-Region boundary pairs remain
+relations keep their explicit guard. A second master for an already-bound
+slave Surface, sheared, reflected, scaled or otherwise non-rigid transforms,
+missing or incomplete copy history, and cross-Region boundary pairs remain
 outside this admission and are rejected atomically.
 
-A multi-Region hybrid batch can also consume a single translated Surface pair
+A multi-Region hybrid batch can also consume translated Surface pairs
 per Region for separate components or connected Regions with literal shared
-Tri interfaces. Both paired Surfaces must be uniquely owned exterior Faces of
+Tri interfaces. Independent directions on one Region certify per pair; joint
+copy events keep one binding per `(slave UID, transform)` so a shared corner
+vertex may reach distinct masters under distinct transforms. Both paired Surfaces must be uniquely owned exterior Faces of
 that Region. This batch admission uses default `Mesh.OptimizePyramids=0`;
 shared periodic Faces and other Pyramid modes remain guarded. The
 [connected component scope](shared_periodic_hybrids.md) binds joint copy events. Each pair consumes actual fresh copy events or

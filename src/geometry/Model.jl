@@ -3809,11 +3809,34 @@ relations require a synchronized boundary or embedded discretization produced by
 explicit planar-shell volume produced by [`mesh_model_volume`](@ref). Volume
 relations return empty node arrays with the stored master and affine: as in
 Gmsh 4.15.2, volume periodicity is mesh-inert and carries no node
-correspondence.
+correspondence. `dim=0` queries a periodic vertex relation derived from the
+stored curve constraints — upstream's `GVertex` master set inside
+`GEdge::setMeshMaster`. A corner shared by several curve directions resolves to
+the deterministic spanning-forest parent, the same dim-0 pair `model_to_mixed`
+serializes; its node is the unique mesh row on the point.
 """
 function model_periodic_nodes(m::GeoModel,mesh,dim,slave_entity)
     caller="model_periodic_nodes"
     d=_dimension(dim,caller);slave=_tag(slave_entity,caller,d)
+    if d==0
+        relation=_model_periodic_point_relation(m,slave,caller)
+        relation===nothing && throw(ArgumentError(
+            "$caller: no periodic relation for entity (0,$slave)"))
+        diagnostic=validate(mesh)
+        diagnostic.ok || throw(ArgumentError(
+            "$caller: input mesh is invalid — "*join(diagnostic.messages,"; ")))
+        constraint=ModelPeriodicConstraint(
+            0,Int32(slave),Int32(relation.master),relation.affine,false,
+            relation.atol)
+        mapping=(master_entity=relation.master,
+            slave_nodes=Int32[_model_periodic_point_node(
+                m,mesh,slave,relation.atol,caller)],
+            master_nodes=Int32[_model_periodic_point_node(
+                m,mesh,relation.master,relation.atol,caller)],
+            affine=relation.affine)
+        _model_mapping_matches(mesh,constraint,mapping,caller;exact=false)
+        return mapping
+    end
     constraint=get(m.periodic,(d,slave),nothing)
     constraint===nothing && throw(ArgumentError(
         "$caller: no periodic relation for entity ($d,$slave)"))
@@ -4214,6 +4237,65 @@ function _model_periodic_endpoint_forest(m::GeoModel,constraints,
         parents[slave_point]=first(candidates[slave_point])
     end
     return parents
+end
+
+# Vertex periodicity is never a stored constraint: upstream sets each
+# `GVertex`'s mesh master inside `GEdge::setMeshMaster` (declared curve
+# relations) and `GFace::setMeshMaster` (surface-derived boundary pairs), so
+# the dim-0 relation lives in the dim-1 endpoint graph. The deterministic
+# spanning forest picks the same parent the serialized dim-0 links carry.
+# `(master, affine, atol)` is returned, or `nothing` when no stored curve
+# relation binds the point; `atol` is the strictest declaring tolerance among
+# the constraints producing the chosen pair (the forest may select either of
+# several relations binding one shared corner).
+function _model_periodic_point_relation(m::GeoModel,point::Int,
+                                        caller::AbstractString)
+    constraints=ModelPeriodicConstraint[]
+    for constraint in _model_all_periodic_constraints(m)
+        constraint.dim==1 || continue
+        push!(constraints,constraint)
+    end
+    isempty(constraints) && return nothing
+    parents=_model_periodic_endpoint_forest(m,constraints,caller)
+    relation=get(parents,point,nothing)
+    relation===nothing && return nothing
+    master,affine=relation
+    atol=Inf
+    for constraint in constraints
+        constraint.affine==affine || continue
+        slave_start,slave_stop=m.curves[Int(constraint.slave_entity)]
+        master_start,master_stop=m.curves[Int(constraint.master_entity)]
+        endpoint_pairs=constraint.reversed ?
+            ((slave_stop,master_start),(slave_start,master_stop)) :
+            ((slave_start,master_start),(slave_stop,master_stop))
+        for (slave_point,master_point) in endpoint_pairs
+            slave_point==point && master_point==master || continue
+            atol=min(atol,constraint.atol)
+        end
+    end
+    # The forest pair is generated from exactly these endpoint maps, so a
+    # producing constraint always exists; keep a defensive default anyway.
+    isfinite(atol) || (atol=1e-12)
+    return (master=master,affine=affine,atol=atol)
+end
+
+# A vertex's mesh node is the unique row classified on `(0, point)` — or, on
+# an unclassified carrier, the unique row at the Point's coordinates (the
+# embedded-Point lookup already prefers exact matches over tolerant ones).
+function _model_periodic_point_node(m::GeoModel,mesh,point::Int,
+                                    atol::Float64,caller::AbstractString)
+    if mesh isa MixedMesh
+        data=mesh.entity_data
+        if data!==nothing
+            rows=Int[row for row in eachindex(data.node_entities)
+                     if data.node_entities[row]==(0,Int32(point))]
+            length(rows)>1 && throw(ArgumentError(
+                "$caller: Point[$point] owns $(length(rows)) mesh nodes"))
+            length(rows)==1 && return Int32(only(rows))
+        end
+    end
+    return Int32(_model_projection_embedded_point_node(
+        m,mesh,point,atol,caller))
 end
 
 """

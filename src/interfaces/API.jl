@@ -7631,7 +7631,11 @@ end
 
 # `getPeriodic` maps each queried entity to its periodic master tag, or to the
 # entity itself when no periodic relation was registered. Unknown entities fail
-# like Gmsh's "does not exist" error.
+# like Gmsh's "does not exist" error. Vertex (`dim=0`) masters are never stored
+# constraints — upstream fills them inside `GEdge::setMeshMaster`/
+# `GFace::setMeshMaster` — so they resolve through the dim-1 endpoint graph,
+# using the same deterministic spanning-forest parent that the serialized
+# dim-0 periodic links carry.
 function _get_periodic(dim,tags)
     caller="API.mesh.get_periodic"
     dimension=_mesh_query_integer(dim,caller,"dim")
@@ -7640,6 +7644,14 @@ function _get_periodic(dim,tags)
         "$caller: tags must be a vector or tuple of entity tags"))
     return _with_model() do current
         dictionary=_mesh_entity_dictionary(current,dimension)
+        point_parents=if dimension==0
+            Model._model_periodic_endpoint_forest(current,
+                [constraint for constraint in
+                 Model._model_all_periodic_constraints(current)
+                 if constraint.dim==1],caller)
+        else
+            nothing
+        end
         masters=Int32[]
         for tag in tags
             (tag isa Integer && !(tag isa Bool) &&
@@ -7647,9 +7659,15 @@ function _get_periodic(dim,tags)
              haskey(dictionary,Int(tag))) || throw(ArgumentError(
                 "$caller: unknown " *
                 "$(_MESH_ENTITY_LABELS[dimension+1])[$tag]"))
-            constraint=get(current.periodic,(dimension,Int(tag)),nothing)
-            push!(masters,constraint===nothing ? Int32(tag) :
-                  constraint.master_entity)
+            if point_parents!==nothing
+                relation=get(point_parents,Int(tag),nothing)
+                push!(masters,relation===nothing ? Int32(tag) :
+                      Int32(relation[1]))
+            else
+                constraint=get(current.periodic,(dimension,Int(tag)),nothing)
+                push!(masters,constraint===nothing ? Int32(tag) :
+                      constraint.master_entity)
+            end
         end
         return masters
     end
@@ -8535,6 +8553,18 @@ function _get_periodic_nodes(dim,slave_entity,include_high_order_nodes=false)
             slave=_mesh_query_integer(slave_entity,caller,"slave_entity")
             _model_entity_known(current,dimension,slave) || throw(ArgumentError(
                 "$caller: unknown entity ($dimension,$slave)"))
+            if dimension==0
+                # Vertex relations derive from the dim-1 endpoint graph —
+                # upstream reports the vertex's stored master and affine
+                # before meshing, with empty node lists.
+                relation=Model._model_periodic_point_relation(
+                    current,slave,caller)
+                return (master_entity=relation===nothing ? Int32(slave) :
+                            Int32(relation.master),
+                    slave_nodes=UInt64[],master_nodes=UInt64[],
+                    affine=relation===nothing || relation.affine===nothing ?
+                        Float64[] : collect(relation.affine))
+            end
             constraint=get(current.periodic,(dimension,slave),nothing)
             return (master_entity=constraint===nothing ? Int32(slave) : constraint.master_entity,
                 slave_nodes=UInt64[],master_nodes=UInt64[],
@@ -8577,6 +8607,26 @@ function _get_periodic_nodes(dim,slave_entity,include_high_order_nodes=false)
             return (master_entity=constraint===nothing ? Int32(slave) : constraint.master_entity,
                 slave_nodes=UInt64[],master_nodes=UInt64[],
                 affine=constraint===nothing || constraint.affine===nothing ? Float64[] : collect(constraint.affine))
+        end
+        if dim==0
+            caller="API.mesh.get_periodic_nodes"
+            slave=_mesh_query_integer(slave_entity,caller,"slave_entity")
+            _model_entity_known(current,0,slave) || throw(ArgumentError(
+                "$caller: unknown Point[$slave]"))
+            # Vertex relations derive from the dim-1 endpoint graph (upstream
+            # fills `GVertex::mesh_vertices[0]`'s `correspondingVertices` at
+            # `Mesh0D` time). A vertex with no periodic endpoint reports
+            # itself with empty correspondence; includeHighOrderNodes adds no
+            # rows on a vertex, like upstream.
+            Model._model_periodic_point_relation(current,slave,caller)===nothing &&
+                return (master_entity=Int32(slave),slave_nodes=UInt64[],
+                    master_nodes=UInt64[],affine=Float64[])
+            mapping=model_periodic_nodes(current,cached,0,slave)
+            public=_mesh_public_tags(cached)
+            return (master_entity=Int32(mapping.master_entity),
+                slave_nodes=_cache_node_tags(public,mapping.slave_nodes),
+                master_nodes=_cache_node_tags(public,mapping.master_nodes),
+                affine=mapping.affine===nothing ? Float64[] : collect(mapping.affine))
         end
         if include_high_order && (_high_order_overlay(cached)!==nothing ||
                 any(block->msh_spec(block[1]).order>1,_cache_native_blocks(cached)))
@@ -11271,6 +11321,10 @@ set_periodic(dim,slave_entities,master_entities,affine;atol=1e-12)=
 Return the master entity, detached slave/master node arrays, and affine transform
 for one curve or planar boundary-surface relation in the cached mesh. Stored
 volume relations return the master and affine with empty node arrays.
+`dim=0` answers the vertex relation derived from stored curve constraints —
+Gmsh fills `GVertex` masters inside `GEdge::setMeshMaster`/`GFace::setMeshMaster`
+and `Mesh0D` records the vertex node pair; a point with no periodic endpoint
+reports itself with empty node arrays.
 """
 get_periodic_nodes(dim,slave_entity,include_high_order_nodes=false)=
     _get_periodic_nodes(dim,slave_entity,include_high_order_nodes)
@@ -11281,6 +11335,9 @@ get_periodic_nodes(dim,slave_entity,include_high_order_nodes=false)=
 Return the periodic master tag for each entity tag in `tags`, or the entity's
 own tag when it has no periodic master — matching Gmsh 4.15.2's `getPeriodic`.
 `dim` must be in 0:3 and every tag must name an existing model entity.
+`dim=0` resolves a vertex's master through the periodic-curve endpoint graph:
+a corner shared by several curve directions reports the deterministic
+spanning-forest parent, the same pair the MSH `\$Periodic` section emits.
 """
 get_periodic(dim,tags)=_get_periodic(dim,tags)
 

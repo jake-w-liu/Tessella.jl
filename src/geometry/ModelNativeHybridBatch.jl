@@ -41,7 +41,14 @@ end
 # Regions with uniquely owned exterior periodic Faces and literal shared Tri
 # interfaces. Complete lower constructor binding precedes RNG/factory use.
 function _model_native_hybrid_batch_periodic_certificate(m,receipt,pairs,optimize_pyramids,caller)
-    joint_bindings=Dict{UInt64,Tuple{UInt64,NTuple{16,Float64}}}()
+    # Periodic copy relations are per-Face records (upstream keeps them on the
+    # slave `GFace`); a corner node where several independent periodic
+    # directions meet legitimately binds a different master under each
+    # relation's own affine. The joint check keys bindings by `(slave_uid,
+    # affine)`: the genuine ambiguity to reject is one slave UID reaching two
+    # different masters under the *same* transform — distinct transforms are
+    # distinct relations, not a conflict.
+    joint_bindings=Dict{Tuple{UInt64,NTuple{16,Float64}},UInt64}()
     for tag in receipt.regions
         constraints=_model_volume_periodic_surface_constraints(m,tag,caller)
         isempty(constraints) && continue
@@ -64,11 +71,11 @@ function _model_native_hybrid_batch_periodic_certificate(m,receipt,pairs,optimiz
             # ordered-cell and affine constructor certificate above. Shared
             # boundary vertices must retain a consistent actual copy relation.
             for (slave_uid,master_uid) in pairs[slave][2]
-                binding=(master_uid,affine)
-                previous=get(joint_bindings,slave_uid,nothing)
-                previous===nothing || previous==binding || throw(ArgumentError(
-                    "$caller: connected periodic copy has conflicting current master UID or affine for a shared slave UID"))
-                joint_bindings[slave_uid]=binding
+                key=(slave_uid,affine)
+                previous=get(joint_bindings,key,nothing)
+                previous===nothing || previous==master_uid || throw(ArgumentError(
+                    "$caller: connected periodic copy has conflicting current master UID for a shared slave UID and transform"))
+                joint_bindings[key]=master_uid
             end
         end
     end
