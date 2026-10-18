@@ -2026,6 +2026,56 @@ P1–P6 differential conformance harness exists and stays **opt-in**:
   under the open rows of [DEVIN_HANDOFF.md](DEVIN_HANDOFF.md) (P601 row
   updated with this audit).
 
+#### P601 tutorial-corpus expansion (2026-10-18, test corpus + docs only)
+
+No Source changed. The official Gmsh 4.15.2 `.geo` tutorial corpus under
+`reference/gmsh_quadtri/gmsh-4.15.2-source/tutorials/` was ported into
+`validation/gmsh_parity/` (gitignored validation tree, same convention as
+the existing corpus): **13 of 21 tutorials now have parity drivers**
+(t1,t2,t3,t4,t5,t6,t10,t11,t12,t14,t15,t16,t18; t1,t4 additionally retain
+the older `t1_square`/`t4_hole` rows). 8 remain unported with classified
+blockers. All 13 drivers are registered in `validation/run_all.jl` and were
+executed once each against a clean `HEAD` worktree (8faec22) under
+`-O0`, with live `gmsh` 4.15.2 CLI (`gmsh -0/-2/-3 -format msh2`) as the
+differential oracle — the `gmsh.jl` Julia binding remains absent, so the
+CLI path (`run_gmsh_dim`, `read_mixed_msh`, new `cell_metrics` covering
+Mesh + MixedMesh incl. prism/pyramid/hex tet-decomposition and a true
+3-D triangle-area cross product) carries every comparison. `validation/
+support/common.jl` gained `run_gmsh_dim`, `gmsh_mixed` and `cell_metrics`.
+
+| Tut | Form | Verified receipt (Tessella vs gmsh 4.15.2) |
+|-----|------|--------------------------------------------|
+| t1  | verbatim | 404 nodes/726 tris/area 0.03 = gmsh exactly |
+| t2  | verbatim | vol 0.00127882250993908x both; 1532/2346t vs 1139/2367t |
+| t3  | adapted (tail `Geometry.Color.*` option writes dropped) | vol 0.016179146692287xx both; mixed types seg428/tri4504/quad1360/tet21780/prism12342 |
+| t4  | adapted (`View` post block + option writes dropped) | 787/1449/0.0104135863657… = gmsh exactly |
+| t5  | adapted (`MeshAlgorithm Surface`=1→5), geometry-level row | entity counts 49p/81c/49s/6v/6loops, volume tags {69,99,129,159,186,189}, physical volumes {1–5,10}; gmsh parses |
+| t6  | adapted (>4-curve `Transfinite Surface{1}`+`Recombine` commented) | 391/646/area 0.04625 vs gmsh 388/640/0.04625; transfinite patch15 exactly (100 nodes,162 tris) |
+| t10 | adapted (`Field[5].F` Sprintf → literal) | 23170/45762/area 1.0 = gmsh exactly |
+| t11 | verbatim | 3484 quads vs gmsh 3485 (one residual tri pair); area 4.375 both |
+| t12 | verbatim, geometry-level row | 3 compound constraints recorded (2 curve,1 surface); gmsh parses; native meshing of non-planar ruled/compound surface unimplemented |
+| t14 | verbatim | vol 192.000000000000xx both; 2044/7716t vs 2051/7745t |
+| t15 | adapted (`newp/newc/newcl/news` after `Extrude` → literal 50–53) | vol 0.003 both; embedded point/curve/surface nodes verified in the tet mesh |
+| t16 | adapted/reduced (sphere `BooleanFragments` + `Closest` dropped) | vol 0.875 both; OCC `SetFactory`/`Box`/`BooleanDifference`/`CombinedBoundary`/`PointsOf`/`Point In BoundingBox` audited; node count diverges (236 vs 2737 — native MeshSize tracking coarser, recorded) |
+| t18 | adapted/reduced (sphere-fragment half dropped), surface row | all 6 faces at area 6.0 both; three `Periodic Surface` pairs verified node-for-node (incl. translated-set equality); dim-3 fill under periodic closure unverified (compile crash under memory pressure, unresolved not classified) |
+
+**Blocked tutorials — exact constructs (official files):**
+
+- t7: `Merge "t7_bgmesh.pos"` — `.pos` merge unsupported (only `.geo/.msh/.stl`).
+- t8: `Include "view*.pos"` post-processing views, image export, animation — `.pos` unsupported.
+- t9: `Plugin(...)` actions (`execute_geo` rejects them outright).
+- t13: `Merge "t13_data.stl"` discrete-geometry rebuild — `create_geometry!` aborts on conflicting per-node geometry sources (native STL reparametrization gap).
+- t17: OCC `Rectangle` + anisotropic background `.pos` mesh — OCC backend primitives unimplemented.
+- t19: OCC `ThruSections`, fillets, `Pipe` — all require an OCC backend.
+- t20: `Merge "t20_data.step"` (STEP import) + OCC `Rectangle` cutting planes + `PartitionMesh`.
+- t21: `PartitionMesh`/`Plugin(SimplePartition)` (mesh partitioning unsupported) + multiline `If` formatting the parser rejects.
+
+Also recorded: high-order `.geo` paths and `Recombine` of >4-curve
+transfinite surfaces remain outside the executor (t6 adaptation documents
+the exact boundary limitation); `View` blocks, `Printf/Sprintf` inside
+field options, and GUI colour options are stripped in the adapted files —
+each `.geo` header lists its deltas verbatim.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The
