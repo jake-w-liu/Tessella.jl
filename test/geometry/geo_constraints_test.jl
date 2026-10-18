@@ -1559,15 +1559,31 @@ end
     end
     @test count(used)==44
 
-    # Simplex-only mesh statements reject a mixed product explicitly.
-    err=_constraint_error(_GEO_SQUARE * raw"""
+    # `RefineMesh` on a recombined transfinite surface runs the actual mixed
+    # refinement: upstream `meshRefine.cpp` subdivides every quadrangle into
+    # four children, so the 4×4 quad grid (16 quads, 25 nodes) becomes a 64-
+    # quad product on the refined 9×9 lattice (81 nodes, 32 boundary
+    # segments). The earlier explicit-rejection expectation predates the
+    # native mixed refinement; the un-owned-mixed loud path in
+    # `_geo_exec_mesh_statement!` remains for products without entity data.
+    execution=_execute_constraint_source(_GEO_SQUARE * raw"""
         Transfinite Curve{:} = 5;
         Transfinite Surface{1};
         Recombine Surface{1};
         Mesh 2;
         RefineMesh;
         """)
-    @test err isa ArgumentError
+    @test execution.mesh isa MixedMesh
+    @test validate(execution.mesh).ok
+    @test nnodes(execution.mesh)==81
+    refined_counts=Dict{Int,Int}()
+    for block in execution.mesh.blocks
+        block isa ElementBlock || continue
+        refined_counts[Int(block.msh)]=get(refined_counts,Int(block.msh),0)+
+            size(block.nodes,2)
+    end
+    @test refined_counts[15]==4 && refined_counts[1]==32 &&
+          refined_counts[3]==64
 end
 
 @testset ".geo classified projection of recombined volumes" begin

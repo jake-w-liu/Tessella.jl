@@ -9074,8 +9074,20 @@ _model_occ_curved_surface(m::GeoModel,surface::Int) =
 
 function _model_volume_surface_mesh(m::GeoModel,surface::Int,
                                     caller::AbstractString;kwargs...)
-    _model_occ_curved_surface(m,surface) &&
-        return _model_occ_curved_surface_mesh(m,surface,caller)
+    if _model_occ_curved_surface(m,surface)
+        # `meshGFace` resolves `meshAttributes.algorithm`/`Mesh.Algorithm` on
+        # parametric OCC faces through the same admission as planar faces, so
+        # the selector may not be silently substituted for this kernel's own
+        # construction. The kernel is the supported native producer for the
+        # Delaunay-family policies 3/5/6 — initial-only suppresses its
+        # interior (u,v) lattice seeds below, matching upstream's
+        # boundary-vertices-only initial mesh — while AUTO resolves to
+        # MeshAdapt off-plane and 1/7/8/9/10/11 keep the loud
+        # not-implemented rejection.
+        algorithm=_normal_surface_mesh_algorithm(m,surface,caller)
+        return _model_occ_curved_surface_mesh(m,surface,caller;
+                                            initial_only=algorithm==3)
+    end
     return mesh_model_surface(m,surface;kwargs...)
 end
 
@@ -9240,6 +9252,21 @@ function _model_factory_volume_encoding(m::GeoModel,t::Int)
 end
 
 function _volume_surface(m::GeoModel,t::Int,caller::AbstractString="mesh_model_volume")
+    if haskey(m.box_extents,t) || _implicit_volume_surface(m,t)
+        # Primitive factory volumes tessellate their boundary analytically
+        # (box_surface/cylinder_surface/...), bypassing the per-face
+        # `_model_volume_surface_mesh` dispatch — but the materialized
+        # Surface records still carry `Mesh.Algorithm`/`set_algorithm!`
+        # requests that upstream `meshGFace` resolves on every GFace. The
+        # deterministic analytic boundary is the native product for the
+        # Delaunay-family admission set (3/5/6); selectors naming machinery
+        # without a native producer keep the ordinary surface mesher's loud
+        # rejection instead of silently substituting the canned mesh.
+        for signed_surface in _model_volume_boundary_surfaces(m,t,caller;
+                certify_shells=false)
+            _normal_surface_mesh_algorithm(m,abs(signed_surface),caller)
+        end
+    end
     if haskey(m.box_extents,t)
         x0,y0,z0,dx,dy,dz=m.box_extents[t]
         return box_surface(x0,x0+dx,y0,y0+dy,z0,z0+dz)

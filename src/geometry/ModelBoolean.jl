@@ -4039,7 +4039,8 @@ end
 # for `constrained_delaunay`. Interior vertices evaluate through
 # `_occ_surface_point`; boundary vertices keep their canonical coordinates.
 function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
-                                        caller::AbstractString)
+                                        caller::AbstractString;
+                                        initial_only::Bool=false)
     sg=get(m.surface_geometry,t,nothing)
     occ=sg===nothing ? nothing : get(sg,:occ,nothing)
     occ in (:cylinder,:sphere,:cone,:torus,:tensor_bspline,:tensor_bezier) ||
@@ -4107,7 +4108,9 @@ function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
     # mapped through the local patch metric so lifted triangles stay local.
     umin=minimum(xs);umax=maximum(xs);vmin=minimum(ys);vmax=maximum(ys)
     uspan=umax-umin;vspan=vmax-vmin
-    if uspan>0.0 && vspan>0.0
+    # Upstream `ALGO_2D_INITIAL_ONLY` stops at the recovered 1-D boundary
+    # mesh, so initial-only suppresses every interior (u,v) lattice seed.
+    if !initial_only && uspan>0.0 && vspan>0.0
         h3=0.0;nedge=0
         for (i,j) in segs
             a=lift[i];b=lift[j]
