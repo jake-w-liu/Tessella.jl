@@ -471,7 +471,8 @@ function _dim01_emit_curve!(assembly,m,curve,params,first_nodes;
 end
 
 function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
-                              done=nothing,geometry_birth=nothing,curve_births=nothing)
+                              done=nothing,geometry_birth=nothing,curve_births=nothing,
+                              reuse_curve_params::Bool=false)
     endpoint_counts=_dim01_curve_endpoint_counts(m)
     pending=Set{Int}(tag for (dim,tag) in entities if dim==1)
     # Generator::Mesh1D resets every Curve to PENDING before its skip gates.
@@ -490,10 +491,15 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
             # meshGEdge's skip gates preserve the stored lines. The grading
             # helper's raw-record lookup covers fully discrete entities, while
             # this gate also handles native attached records and cached lines.
+            # A consumer plan (a Surface producer's lower-dimensional input)
+            # reuses the stored `GEdge::mesh_vertices` discretization
+            # verbatim: `meshGFace` upstream never re-runs `meshGEdge`, so a
+            # retained `curve_params` entry is emitted, not regraded.
             keep=_dim01_fully_discrete(m,(1,curve)) ||
                  Model._model_curve_degenerate_kind(m,curve)==1 ||
                  (options.mesh_only_visible && model_entity_visibility(m,1,curve)==0) ||
-                 (options.mesh_only_empty && owner in have_cells)
+                 (options.mesh_only_empty && owner in have_cells) ||
+                 (reuse_curve_params && haskey(m.curve_params,curve))
             if keep
                 if done!==nothing && !_dim01_fully_discrete(m,(1,curve)) &&
                    Model._model_curve_degenerate_kind(m,curve)==1
@@ -975,6 +981,13 @@ function _dim01_native_quad2_center(assembly,m,cell,slot,linear,point,frames)
         @view(cell.nodes[1:4]),slot,cell.owner,point)
 end
 
+# OCC analytic revolution faces (Cylinder/Sphere/Cone/Torus records) project
+# through the same `model_closest_point`/`model_value` evaluators the order>=3
+# native face factories already consume. Plane records keep the Plane path and
+# NURBS-carrying records keep the NURBS arm below.
+_occ_p2_curved_surface(geometry)=geometry!==nothing && hasproperty(geometry,:occ) &&
+    geometry.occ in (:cylinder,:sphere,:cone,:torus)
+
 function _dim01_quadratic!(assembly,m,entities;only_visible=false,linear=false,geometry_birth=nothing)
     _dim01_p2_curve_edge_guard(assembly,m,only_visible)
     entity_orders=Dict{Tuple{Int,Int32},Int}()
@@ -1110,6 +1123,16 @@ function _dim01_quadratic!(assembly,m,entities;only_visible=false,linear=false,g
                         point,parameter=Model._model_nurbs_surface_support(
                             m,Int(owner[2]),assembly.nodes,key,assembly.caller;
                             quadrangle_boundary=spec.family===:qua && slot==9 ? cell.nodes : nothing)
+                    elseif _occ_p2_curved_surface(get(m.surface_geometry,Int(owner[2]),nothing))
+                        # Gmsh's high-order pass owns GFace supports by
+                        # evaluating the face at the support's parameter;
+                        # `closestPoint` projects the reference interpolation
+                        # onto the analytic face and reports its (u,v).
+                        closest,projected=Model.model_closest_point(
+                            m,2,Int(owner[2]),collect(point))
+                        point=(closest[1],closest[2],closest[3])
+                        parameter=projected
+                        native_placed=true
                     else
                         center=_dim01_native_quad2_center(
                             assembly,m,cell,slot,linear,point,surface_frames)
@@ -1567,7 +1590,8 @@ function _generate_dim01_plan(source_model,cached,cached_class,dimension::Int,
                               initial_max_element_tag=UInt64(0),
                               initial_node_counter_wrapped::Bool=false,
                               initial_element_counter_wrapped::Bool=false,
-                              generation_meshing=nothing)
+                              generation_meshing=nothing,
+                              reuse_curve_params::Bool=false)
     dimension in (0,1) || throw(ArgumentError("$caller: dim must be zero or one"))
     1<=element_order<=10 || throw(ArgumentError(
         "$caller: Curve mesh order $element_order is not supported (supported: 1 through 10)"))
@@ -1608,7 +1632,7 @@ function _generate_dim01_plan(source_model,cached,cached_class,dimension::Int,
         filter!(cell->!(cell.owner in discarded),assembly.cells)
         filter!(owner->!(owner in discarded),done)
         first_nodes=_dim01_point_phase!(assembly,m,entities)
-        union!(discarded,_dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;done,geometry_birth,curve_births))
+        union!(discarded,_dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;done,geometry_birth,curve_births,reuse_curve_params))
         for (dim,tag) in discarded
             dim==1 && delete!(m.meshing.native_geo_kernel.retired_point_curves,Int(tag))
         end

@@ -599,9 +599,15 @@ function _gmsh_native_surface_lower_input(m,options,input,high_water,caller)
     end
     # Direct Model callers also use the real detached Point/Curve producer.
     # The registered allocator does not read or publish a live API session.
+    # Like upstream `meshGFace`, the plan consumes each already-meshed Curve's
+    # stored `mesh_vertices` (`m.curve_params`) verbatim — only a Curve still
+    # missing its discretization is graded, and then stored once. Regrading
+    # stored parameters would re-derive them from an `options.ctx_lc` whose
+    # bounding box samples the stored nodes themselves, so every Surface call
+    # would ratchet the shared-edge subdivision and crack the exact weld.
     plan=_model_mesh_generate_higher(m,nothing,Tuple{Int,Int,Mesh}[],
         Vector{Int32}[],Tuple{Int,Int32}[],1,options,caller;
-        element_order=1,renumber=false)
+        element_order=1,renumber=false,reuse_curve_params=true)
     merge!(m.curve_params,plan.model.curve_params)
     return plan.model.meshing.mesh_authority,plan.max_node_tag
 end

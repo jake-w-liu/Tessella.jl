@@ -3193,7 +3193,8 @@ function _generate_higher_frontend_plan(m,cached,parts,remaps,node_owner,dimensi
                 initial_max_node_tag,initial_max_element_tag,element_order,renumber,save_all,linear,incomplete,
                 initial_node_counter_wrapped=get(kwargs,:initial_node_counter_wrapped,false),
                 initial_element_counter_wrapped=get(kwargs,:initial_element_counter_wrapped,false),
-                max_nodes,max_cells,generation_meshing=get(kwargs,:generation_meshing,nothing))
+                max_nodes,max_cells,generation_meshing=get(kwargs,:generation_meshing,nothing),
+                reuse_curve_params=get(kwargs,:reuse_curve_params,false))
             return _higher_capture_dim01_authority!(plan)
         end
         return _generate_higher_plan(source,actual,class,dimension,options,caller;

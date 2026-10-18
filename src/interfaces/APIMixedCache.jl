@@ -468,8 +468,12 @@ function _mixed_require_linear_cad(m,class,caller)
         elseif dim==2 && haskey(m.surfaces,tag)
             kind=get(m.surface_types,tag,:plane)
             kind===:plane && continue
-            Model._model_nurbs_surface(get(m.surface_geometry,tag,nothing)) && continue
+            surface_geometry=get(m.surface_geometry,tag,nothing)
+            Model._model_nurbs_surface(surface_geometry) && continue
             Model._model_high_order_ruled_surface(m,tag,caller) && continue
+            # OCC analytic faces admit the same closest-point projection the
+            # order>=3 surface factories and the quadratic placement below use.
+            _occ_p2_curved_surface(surface_geometry) && continue
             if kind in (:ruled,:tric) && all(loop->
                     all(curve->get(m.curve_types,abs(curve),:line) in
                         (:line,:degenerate),m.loops[loop]),m.surfaces[tag])
@@ -743,6 +747,15 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller;
                             end
                             u,v,p=Model._model_nurbs_surface_project(surface_geometry,p)
                             parameter=Float64[u,v]
+                        elseif _occ_p2_curved_surface(surface_geometry)
+                            # Gmsh's high-order pass owns GFace supports by
+                            # evaluating the face at the support's parameter;
+                            # `closestPoint` projects the reference
+                            # interpolation and reports its (u,v).
+                            closest,uv=Model.model_closest_point(
+                                model,2,Int(owner[2]),collect(p))
+                            p=(closest[1],closest[2],closest[3])
+                            parameter=uv
                         else
                             center=family===:qua && slot==9 &&
                                 Model.model_entity_type(model,2,Int(owner[2]))=="Plane" ?
