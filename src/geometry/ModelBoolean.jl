@@ -4040,7 +4040,8 @@ end
 # `_occ_surface_point`; boundary vertices keep their canonical coordinates.
 function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
                                         caller::AbstractString;
-                                        initial_only::Bool=false)
+                                        initial_only::Bool=false,
+                                        _mesh1d_options=nothing)
     sg=get(m.surface_geometry,t,nothing)
     occ=sg===nothing ? nothing : get(sg,:occ,nothing)
     occ in (:cylinder,:sphere,:cone,:torus,:tensor_bspline,:tensor_bezier) ||
@@ -4051,7 +4052,8 @@ function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
         "$caller: Surface[$t] carries no pcurves"))
     period=_brep_uperiod(sg)
     forced=Dict{Int,Vector{Float64}}()
-    _attribute_forced_parameters(m,t,forced,caller)
+    _attribute_forced_parameters(m,t,forced,caller;
+        _mesh1d_options=_mesh1d_options)
     xs=Float64[];ys=Float64[]
     lift=NTuple{3,Float64}[]          # canonical 3-D per PSLG vertex
     segs=Tuple{Int,Int}[]
@@ -4073,6 +4075,22 @@ function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
             ent=get(pcurves,curve,nothing)
             ent===nothing && throw(ArgumentError(
                 "$caller: Surface[$t] has no pcurve for Curve[$curve]"))
+            crec=get(m.curve_geometry,curve,nothing)
+            if (crec!==nothing && get(crec,:occ,nothing)===:degenerate) ||
+                    get(m.curve_types,curve,nothing)===:degenerate
+                # A degenerate edge is a single 3-D vertex; when its pcurve
+                # spans a nonzero uv extent it collapses an entire domain
+                # row, which needs an explicit pole fan this CDT front does
+                # not build yet. A point-like trace is harmless and may
+                # pass — it simply deduplicates into a neighbour vertex.
+                u0,v0=_occ_pcurve_d0(ent.fwd,t0)
+                u1,v1=_occ_pcurve_d0(ent.fwd,t1)
+                tol=1e-9*max(1.0,abs(u0),abs(u1),abs(v0),abs(v1))
+                (abs(u1-u0)>tol || abs(v1-v0)>tol) && throw(ArgumentError(
+                    "$caller: Surface[$t] is bounded by degenerate " *
+                    "Curve[$curve] (a collapsed pole/apex); parametric " *
+                    "meshing of pole faces is not implemented"))
+            end
             pc=signed<0 && ent.rev!==nothing ? ent.rev : ent.fwd
             for parameter in _surface_curve_parameters(
                     m,forced,curve,signed,caller)

@@ -30,10 +30,13 @@ using ..Elements: ElementBlock, MixedElementBlock, MixedEntity,
 using ..Refine: Refine
 using ..Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh,
                 _vert, _is_ghost_tri, _is_ghost_v
-using ..SizeField: AbstractSizeField, ConstantSize, FunctionSize, MinSize,
-                   PostViewField, field_value, size_at,
+using ..SizeField: AbstractField, AbstractSizeField, AbstractAnisoField,
+                   ConstantSize, FunctionSize, MinSize,
+                   MinAnisoField, Metric3, metric_size, PostViewField,
+                   field_value, size_at,
                    AutomaticMeshSizeField,
-                   GMSH_MAX_SIZE, _gmsh_bbox_characteristic_length
+                   GMSH_MAX_SIZE, _gmsh_bbox_characteristic_length, _metric_scale
+import ..SizeField: metric_at, field_value
 using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
 using ..Mesh3D: tetrahedralize, mesh_boolean, recover_segment3, recover_triangle3,
                 refine_to_size, _refine_gmsh_delaunay3, _gmsh_optimize_tetrahedra,
@@ -8077,6 +8080,65 @@ function _volume_size_field(m::GeoModel,t::Int,surface::Mesh,
     end)
 end
 
+# `refine_to_size`'s unit bound on `metric_edge_length` restates the scalar
+# arm's `edge ≤ _GMSH_TET_EDGE_OVER_RADIUS·lc` criterion in metric space:
+# scaling the resolved metric by 1/OVER_RADIUS² makes `√(dᵀ(M/c²)d) ≤ 1`
+# equivalent to `√(dᵀMd) ≤ c`. For an isotropic input `I/h²` this is
+# bit-identical to the scalar `FunctionSize` target `c·h`.
+const _VOLUME_METRIC_EDGE_SCALE=inv(_GMSH_TET_EDGE_OVER_RADIUS^2)
+
+# Applies the fixed edge-bound scale to a resolved volume metric. Scalar
+# consumers (`size_at`, the scalar certificate paths) observe
+# `metric_size` of the scaled metric — the same `OVER_RADIUS·h` target the
+# scalar edge field carries — while `metric_edge_length` receives the full
+# tensor contraction.
+struct _VolumeMetricEdgeField{F<:AbstractAnisoField} <: AbstractAnisoField
+    input::F
+end
+
+function _volume_edge_metric(field::_VolumeMetricEdgeField,x,y,z,entity)
+    m=metric_at(field.input,x,y,z,entity)
+    m isa Metric3 || throw(ArgumentError(
+        "mesh_model_volume metric edge field: metric_at returned " *
+        "$(typeof(m)), not Metric3"))
+    return _metric_scale(m,_VOLUME_METRIC_EDGE_SCALE)
+end
+metric_at(field::_VolumeMetricEdgeField,x,y,z)=
+    _volume_edge_metric(field,x,y,z,nothing)
+metric_at(field::_VolumeMetricEdgeField,x,y,z,entity::Tuple{T,U}) where
+        {T<:Integer,U<:Integer}=_volume_edge_metric(field,x,y,z,entity)
+field_value(field::_VolumeMetricEdgeField,x,y,z)=metric_size(metric_at(field,x,y,z))
+
+# Tensor sizing source for `mesh_model_volume`, the anisotropic counterpart
+# of `_volume_size_field` for the conforming edge-bisection fill. Engages
+# only when the selected field is tensor-valued: an `AbstractAnisoField`
+# `size_field`, or an anisotropic session background field in
+# `options.inner_field` when `size_field` is scalar or absent (the same
+# shadowing `_ModelAlgorithmBackgroundSize` and the surface metric producer
+# use). The boundary-derived extension field and a scalar `size_field`
+# shadowed by an anisotropic `inner_field` still bound the fill
+# isotropically through `MinAnisoField` — the Loewner minimum is the
+# anisotropic analogue of `MinSize`, so boundary-adapted sizes cap every
+# direction. An installed `size_callback` keeps the scalar path: its
+# contract is scalar `lc` in/out and cannot be transported as a tensor.
+# Returns `nothing` when no tensor is selected, leaving the established
+# scalar composition unchanged.
+function _volume_metric_edge_field(m::GeoModel,t::Int,surface::Mesh,
+                                   size_field,options,caller::AbstractString)
+    m.meshing.size_callback===nothing || return nothing
+    inner=options.inner_field
+    raw=size_field isa AbstractAnisoField ? size_field :
+        inner isa AbstractAnisoField ? inner : nothing
+    raw===nothing && return nothing
+    fields=AbstractField[]
+    boundary=_volume_boundary_size_field(m,t,surface,caller)
+    boundary===nothing || push!(fields,boundary)
+    (size_field===nothing || size_field===raw) || push!(fields,size_field)
+    push!(fields,raw)
+    return _VolumeMetricEdgeField(
+        length(fields)==1 ? raw : MinAnisoField(Tuple(fields)))
+end
+
 # Rotate/reverse a transfinite surface's discretized side chains so the first
 # pinned corner leads the boundary walk — the model-level half of Gmsh's
 # `findTransfiniteCorners` explicit-corner branch. `corners` must contain
@@ -8736,6 +8798,49 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             m,master_mesh,surface_constraint,caller)
         return _model_surface_boundary_writeback!(m,t,output,caller)
     end
+    # Parametric OCC faces — analytic Cylinder/Sphere/Cone/Torus records and
+    # tensor patches carrying edge pcurves (trimmed NURBS surfaces, lofts and
+    # materialized primitive shells) — tessellate their (u,v) domain through
+    # the same kernel `_model_volume_surface_mesh` applies inside a volume
+    # PLC. Upstream `meshGFace` takes this parametric path on OCC faces even
+    # outside a volume, so a standalone curved face must not fall through to
+    # the planar gate. uv-space embedding, recombination and Laplacian
+    # smoothing have no analogue in the lifted mesh and reject loudly; a
+    # declared transfinite or extruded construction keeps its own path.
+    if !haskey(m.meshing.transfinite_surfaces,t) &&
+            _model_occ_curved_surface(m,t)
+        embeds=get(m.embeds,(2,t),NTuple{2,Int}[])
+        isempty(embeds) || throw(ArgumentError(
+            "$caller: embedded entities on curved Surface[$t] are not " *
+            "implemented"))
+        _model_surface_recombined(m,t) && throw(ArgumentError(
+            "$caller: recombination on curved Surface[$t] is not implemented"))
+        get(m.meshing.smoothing,(2,t),0)>0 && throw(ArgumentError(
+            "$caller: surface smoothing on curved Surface[$t] is not " *
+            "implemented"))
+        size_field===nothing || throw(ArgumentError(
+            "$caller: a background size field on curved Surface[$t] is not " *
+            "implemented"))
+        # Same admission `_model_volume_surface_mesh` applies: the parametric
+        # kernel is the supported native producer for the Delaunay-family
+        # policies 3/5/6 only — AUTO resolves to MeshAdapt off-plane and the
+        # remaining selectors keep the loud not-implemented rejection.
+        algorithm=_normal_surface_mesh_algorithm(m,t,caller)
+        mesh=_model_occ_curved_surface_mesh(m,t,caller;
+            initial_only=algorithm==3,_mesh1d_options=options)
+        diag=validate(mesh)
+        diag.ok || throw(ErrorException(
+            "$caller: invalid mesh — "*join(diag.messages,"; ")))
+        _surface_cell_count(mesh)>0 || throw(ErrorException(
+            "$caller: Surface[$t] produced no cells"))
+        get(m.meshing.reverse,(2,t),false) &&
+            (mesh=_reversed_surface_mesh(mesh,caller,t))
+        # No boundary writeback here: the kernel's boundary vertices are the
+        # canonical `_periodic_curve_point` evaluations shared bitwise with
+        # every sibling face, and the welded 3-D mesh carries no dedicated
+        # boundary-edge chain for seam edges to recover against.
+        return mesh
+    end
     # Gate the CDT path before lazy boundary-curve grading touches curve
     # evaluators — a curved or geometrically inconsistent surface must reject
     # through the planar-surface contract, not a downstream evaluator error.
@@ -9315,6 +9420,16 @@ tetrahedral mesh is validated before it is returned. For an explicit volume, sto
 planar boundary-surface relations synchronize the slave facets from their masters and
 certify their affine tetrahedron-boundary node maps. Unsupported solid encodings
 raise an explicit error.
+
+A tensor-valued `size_field` (`AbstractAnisoField`, or an anisotropic session
+background field) drives the factory-volume edge-bisection fill through its
+metric: every tetrahedron edge's `metric_edge_length` is bounded by
+`_GMSH_TET_EDGE_OVER_RADIUS` metric units, the anisotropic form of the scalar
+`edge ≤ 2·lc` criterion, while boundary-derived sizes cap every direction
+through the Loewner minimum. Ordinary Delaunay insertion keeps the scalar
+`size_at` contract — it does not yet consume metric tensors, so anisotropy on
+explicit (non-factory) volumes still collapses to the smallest directional
+size. An installed `size_callback` likewise keeps the scalar path.
 """
 function mesh_model_volume(m::GeoModel, tag::Integer;
                            size_field::Union{Nothing,AbstractSizeField}=nothing,
@@ -9667,12 +9782,22 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
         end
     end
     if legacy_factory && m.meshing.algorithm_3d==1
-        effective_field=_volume_size_field(m,t,surface,size_field,caller)
-        if effective_field!==nothing
-            edge_field=FunctionSize(function(x,y,z)
-                _GMSH_TET_EDGE_OVER_RADIUS*size_at(effective_field,x,y,z)
-            end)
-            mesh=refine_to_size(mesh,edge_field;entity=(3,t),best_effort=true)
+        # A tensor-valued selected field drives the same edge-bisection fill
+        # through its metric: `refine_to_size` already scores every edge by
+        # the `metric_edge_length` contraction, so the scalar `size_at`
+        # collapse to the smallest directional size is bypassed only when a
+        # tensor is actually resolved. Scalar sizing is unchanged below.
+        metric_field=_volume_metric_edge_field(m,t,surface,size_field,options,caller)
+        if metric_field!==nothing
+            mesh=refine_to_size(mesh,metric_field;entity=(3,t),best_effort=true)
+        else
+            effective_field=_volume_size_field(m,t,surface,size_field,caller)
+            if effective_field!==nothing
+                edge_field=FunctionSize(function(x,y,z)
+                    _GMSH_TET_EDGE_OVER_RADIUS*size_at(effective_field,x,y,z)
+                end)
+                mesh=refine_to_size(mesh,edge_field;entity=(3,t),best_effort=true)
+            end
         end
     end
     sort!(unique!(line_tags))

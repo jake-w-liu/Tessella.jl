@@ -343,6 +343,7 @@ using Tessella
     include(joinpath(@__DIR__, "..", "interfaces/api_hybrid_planar_sheet_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_hybrid_planar_sheet_planarity_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/model_metric_surface_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "geometry/model_metric_volume_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_hybrid_multi_constraints_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/brep_planar_faceholes_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "meshing/constant_metric_box_functional_test.jl"))
