@@ -95,9 +95,9 @@ end
                 # in test/artifacts/quadtri_crc.txt after the pinned oracle.
                 @test mixed_crc(execution.mesh)==(n_nodes=64,n_blocks=18,n_cells=183,
                     bbox=((0.0,0.0,0.0),(1.0,1.0,1.0)),
-                    sha="17d4afbbf28ef179760aff9bce7e1c44feb722f623af05a14b8cab76dbe277c1")
+                    sha="5e4a03e3e8632386c5095e22a6322d150e27924bb44088cd0867b15b61d3c3cd")
                 @test mixed_crc(part).sha==
-                    "3188df0104d79397f470294da0fa7cd3898fd6a4b9ec141f4f19ceb021708efc"
+                    "03fb003f03696b04361fa1ddd2fb6d2e9db32f9051bbd3e65aaf7fff7cf3cb02"
             end
         end
         execution=_qt_execute(_qt_source(_QT_PRISM,collect(1:5);compact=true))
@@ -111,18 +111,23 @@ end
         @test mixed_crc(plain.mesh)==mixed_crc(again.mesh)
         @test mixed_crc(plain.mesh)==(n_nodes=85,n_blocks=21,n_cells=276,
             bbox=((0.0,0.0,0.0),(1.0,1.0,1.0)),
-            sha="2938c7188f2ccb1159c9df3db102fa7e1c3ca43d07ce4cb86b9729de93973d69")
+            sha="03e767be8ac29b9c509465de975cc0636fc58fa62252acfcd0894dfcdba76a57")
         # Every first-order volume family, including new pyramids, reverses.
+        # The published part and the standalone product carry their own
+        # node numbering, so reversal is checked inside the product's row
+        # space where the two meshes share a coordinate order.
         a=geo_entity_mesh(plain,3,1)
         @test mixed_crc(a).sha==
-            "5ade95ed527ba619ff150c536b27d2c863efc8bba4ed933fd5ea85986c2200e1"
+            "9283892e0ba79112a6f5e93be0f853dc5df7e4e6dbd588db0e407d4c9b4f4e89"
+        b0=mesh_model_volume(plain.model,1)
         Tessella.Model.set_reverse!(plain.model,3,1,true)
         b=mesh_model_volume(plain.model,1)
+        @test b0.coords==b.coords
         @test _qt_counts(a)==_qt_counts(b)
-        for (ab,bb) in zip(a.blocks,b.blocks)
-            ab isa ElementBlock && ab.msh==7 || continue
-            @test ab.nodes[1,:]==bb.nodes[3,:]
-            @test ab.nodes[3,:]==bb.nodes[1,:]
+        for (b0b,bb) in zip(b0.blocks,b.blocks)
+            b0b isa ElementBlock && b0b.msh==7 || continue
+            @test b0b.nodes[1,:]==bb.nodes[3,:]
+            @test b0b.nodes[3,:]==bb.nodes[1,:]
         end
     end
     @testset "resource limits and linear allocation growth" begin

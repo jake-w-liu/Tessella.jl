@@ -627,7 +627,20 @@ function _model_transfinite_volume_emission(mesh,layout,caller;reverse=false)
         seen[row] && continue
         seen[row]=true;push!(rows,row)
     end
-    all(seen) || throw(ArgumentError("$caller: native TF rows do not cover the geometric carrier"))
+    if !all(seen)
+        # TransfQuadTri divides cells around centroid births appended after
+        # the base lattice rows; emit them after the lattice in carrier
+        # (creation) order. A plain Mesh carrier is all-lattice, and an
+        # uncovered row at or before the last lattice row is an actual
+        # coverage defect, not a centroid.
+        lattice_end=findlast(seen)
+        (mesh isa MixedMesh && lattice_end!==nothing &&
+            all(row->row>lattice_end,findall(!,seen))) ||
+            throw(ArgumentError("$caller: native TF rows do not cover the geometric carrier"))
+        for row in eachindex(seen)
+            seen[row] || (seen[row]=true;push!(rows,row))
+        end
+    end
     # Recombined block connectivity already has a separate Higher receipt.
     # Forward node births here without claiming a new mixed-cell contract.
     mesh isa Mesh || return _ModelTransfiniteVolumeEmission(0,zeros(Int32,0,0),Int[],rows,layout.grid)
