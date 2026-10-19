@@ -13,11 +13,15 @@
 # The pass itself lives in HighOrder.optimize_p2_interior! and covers every
 # full-P2 family with an exact Bernstein positivity bound — Tri6, Quad9,
 # Tet10, Hex27, Prism18 — while Pyr14 and every uncertified block family
-# keep their nodes fixed.  This file only translates option state,
-# classification ownership, and geometric-support structure into the
-# engine's movable mask and fixed edge/facet sets.  It mutates the
-# *unpublished* coordinate matrix of a freshly built plan/overlay, so a
-# failure still leaves the previously published cache untouched.
+# keep their nodes fixed.  Curve-owned mids additionally slide along their
+# owning CAD curve in parameter space; face-owned (u,v) sliding remains a
+# gap.  This file translates option state, classification ownership, and
+# geometric-support structure into the engine's movable mask, fixed
+# edge/facet sets, and slider descriptors, then commits accepted parameter
+# states back into the plan-local entity_data/classification atomically.
+# It mutates the *unpublished* coordinate matrix of a freshly built
+# plan/overlay, so a failure still leaves the previously published cache
+# untouched.
 # ══════════════════════════════════════════════════════════════════════════════
 
 _high_order_optimize_level() = begin
@@ -42,14 +46,15 @@ function _high_order_optimize_num_option(name::AbstractString, default::Real)
     return Float64(v)
 end
 
-# Candidate mask: a node may move only when it is owned by a surface or
-# volume entity and carries no stored parametric coordinates (curve, point
-# and parametric-surface supports keep their projected parameters — sliding
-# those mids along their actual geometry is the separate parametric-relocation
-# gap).  When the classification does not cover the mesh, ownership cannot be
-# proven and the mask stays permissive — the engine's own mid-slot,
-# single-family and boundary-support rules still keep corners and boundary
-# supports fixed.
+# Candidate mask: a node may move freely only when it is owned by a surface
+# or volume entity and carries no stored parametric coordinates (curve, point
+# and parametric-surface supports keep their projected parameters).  Curve
+# and surface owners instead enter through the `sliders` map built by
+# `_high_order_optimize_sliders`, which relocates them in the owning entity's
+# parameter space.  When the classification does not cover the mesh,
+# ownership cannot be proven and the mask stays permissive — the engine's own
+# mid-slot, single-family and boundary-support rules still keep corners and
+# boundary supports fixed.
 function _high_order_optimize_movable(mesh::MixedMesh, class)
     nn = size(mesh.coords, 2)
     movable = falses(nn)
@@ -62,6 +67,93 @@ function _high_order_optimize_movable(mesh::MixedMesh, class)
              class.node_parametric[v] === nothing)
     end
     return movable
+end
+
+# Curve-owned parametric sliders for `optimize_p2_interior!`: every node with
+# owner dimension 1 and a stored finite `[u]` parameter gets a
+# `_P2ParametricSupport` whose lift is the same
+# `Model._model_high_order_curve_geometry`/`_model_high_order_curve_point`
+# evaluator that produced the node's coordinates, clamped to the curve's
+# native parameter bounds.  Face-owned `(dim 2, [u,v])` sliding is a separate
+# OPT01 stage and not wired yet — those nodes stay fixed.  Returns
+# `Dict{Int32,_P2ParametricSupport}` or nothing.
+function _high_order_optimize_sliders(mesh::MixedMesh, class, model, caller)
+    (class === nothing || model === nothing) && return nothing
+    nn = size(mesh.coords, 2)
+    entities = class.node_entities
+    parameters = class.node_parametric
+    (length(entities) == nn && length(parameters) == nn) || return nothing
+    sliders = Dict{Int32,HighOrder._P2ParametricSupport}()
+    for v in 1:nn
+        stored = parameters[v]
+        stored === nothing && continue
+        owner = entities[v]
+        owner[1] == 1 || continue
+        stored isa Vector{Float64} || continue
+        length(stored) == 1 || continue
+        isfinite(stored[1]) || continue
+        tag = Int(owner[2])
+        curve = try
+            Model._model_high_order_curve_geometry(model, tag, caller)
+        catch err
+            (err isa InterruptException || err isa OutOfMemoryError) &&
+                rethrow()
+            nothing
+        end
+        curve === nothing && continue
+        (isfinite(curve.lower) && isfinite(curve.upper) &&
+         curve.lower <= stored[1] <= curve.upper) || continue
+        support = HighOrder._P2ParametricSupport(
+            stored,                          # shared: replaced, never mutated
+            let geo = curve
+                u -> begin
+                    p = Model._model_high_order_curve_point(geo, u[1], caller)
+                    (p[1], p[2], p[3])
+                end
+            end,
+            Float64[curve.lower], Float64[curve.upper])
+        sliders[Int32(v)] = support
+    end
+    return isempty(sliders) ? nothing : sliders
+end
+
+# Write accepted slider parameters back into the plan-local stores: the mesh
+# `entity_data` (rebuilt — the MixedMesh constructor revalidates each stored
+# parameter vector against its owner dimension) and the classification's
+# `node_parametric` (a fresh vector so a shared rebind can never mutate the
+# published class).  `slid` maps node index to the accepted `Vector{Float64}`.
+function _high_order_optimize_commit_sliders(mesh, class, slid)
+    nn = size(mesh.coords, 2)
+    data = mesh.entity_data
+    if data !== nothing && length(data.node_parametric) == nn
+        updated = collect(data.node_parametric)
+        for (v, u) in slid
+            updated[v] = u
+        end
+        mesh = _mixed_rebuild_metadata(mesh, mesh.blocks;
+            node_parametric=updated, keep_empty_blocks=true)
+    end
+    if class !== nothing && length(class.node_parametric) == nn
+        updated = collect(class.node_parametric)
+        for (v, u) in slid
+            updated[v] = u
+        end
+        pclass = class
+        class = _mixed_rebind_class(class, mesh; node_parametric=updated)
+        if class !== nothing
+            # The rebind rebuilds classification vectors only; the
+            # edge-keyed mid-support tables survive the identical-index
+            # copy — carry them over and refresh the entries of the nodes
+            # whose parameter state was just accepted.
+            merge!(class.mid_parametric, pclass.mid_parametric)
+            merge!(class.mid_keys, pclass.mid_keys)
+            for (v, u) in slid
+                key = get(class.mid_keys, Int32(v), nothing)
+                key === nothing || (class.mid_parametric[key] = u)
+            end
+        end
+    end
+    return mesh, class
 end
 
 # Per-owner-group boundary supports of every certified family: primary edges
@@ -111,10 +203,12 @@ function _high_order_optimize_fixed_supports(mesh::MixedMesh, class)
 end
 
 # Relocate interior high-order nodes of an unpublished MixedMesh in place —
-# every certified family present in the cache.  Returns the engine
-# statistics tuple, or nothing when the pass is disabled / the mesh carries
-# no certified P2 block.
-function _high_order_optimize_mixed!(mesh::MixedMesh, class, caller::AbstractString)
+# every certified family present in the cache — and slide curve-owned
+# parametric mids along their owning curve.  Returns `(stats, slid)` where
+# `slid` maps node index to the accepted parameter vector, or nothing when
+# the pass is disabled / the mesh carries no certified P2 block.
+function _high_order_optimize_mixed!(mesh::MixedMesh, class, model,
+                                     caller::AbstractString)
     _high_order_optimize_relocation() || return nothing
     catalog = _cache_catalog(mesh, class)
     blocks = Tuple{Int32,Matrix{Int32}}[
@@ -122,11 +216,13 @@ function _high_order_optimize_mixed!(mesh::MixedMesh, class, caller::AbstractStr
     any(blk -> HighOrder._p2opt_family(blk[1]) !== nothing, blocks) ||
         return nothing
     fixed_edges, fixed_facets = _high_order_optimize_fixed_supports(mesh, class)
+    sliders = _high_order_optimize_sliders(mesh, class, model, caller)
     stats = HighOrder.optimize_p2_interior!(mesh.coords, blocks,
         _high_order_optimize_movable(mesh, class);
         itermax=_high_order_optimize_int_option("Mesh.HighOrderIterMax", 100),
         passes=_high_order_optimize_int_option("Mesh.HighOrderPassMax", 25),
         fixed_edges=fixed_edges, fixed_facets=fixed_facets,
+        sliders=sliders,
         threshold_min=_high_order_optimize_num_option(
             "Mesh.HighOrderThresholdMin", 0.1),
         threshold_max=_high_order_optimize_num_option(
@@ -136,7 +232,16 @@ function _high_order_optimize_mixed!(mesh::MixedMesh, class, caller::AbstractStr
             "High-order optimize moved $(stats[1]) interior node(s) " *
             "(min scaled Jacobian $(round(stats[2];sigdigits=4)) -> " *
             "$(round(stats[3];sigdigits=4)))")
-    return stats
+    # Accepted slider parameter states — the engine replaced `support.u` only
+    # where a move was committed, so a bitwise compare identifies them.
+    slid = Dict{Int,Vector{Float64}}()
+    if sliders !== nothing && stats[1] > 0 && class !== nothing
+        for (v, support) in sliders
+            isequal(support.u, class.node_parametric[Int(v)]) ||
+                (slid[Int(v)] = support.u)
+        end
+    end
+    return stats, slid
 end
 
 # Same pass for a legacy-cache P2 overlay. `mids[i]` is the owning entity of
@@ -226,7 +331,25 @@ function _high_order_optimize_plan!(plan, caller::AbstractString)
             end
             plan = merge(plan, (mesh=mesh, class=class))
         end
-        _high_order_optimize_mixed!(mesh, get(plan, :class, nothing), caller)
+        result = _high_order_optimize_mixed!(mesh, get(plan, :class, nothing),
+            get(plan, :model, nothing), caller)
+        if result !== nothing
+            slid = result[2]
+            if !isempty(slid)
+                # Commit the accepted curve parameters atomically with the
+                # relocated coordinates: entity_data and class each get a
+                # plan-local copy carrying the new values.
+                class = get(plan, :class, nothing)
+                mesh, class = _high_order_optimize_commit_sliders(
+                    mesh, class, slid)
+                updates = NamedTuple()
+                mesh === get(plan, :mesh, nothing) ||
+                    (updates = (mesh=mesh,))
+                class === get(plan, :class, nothing) ||
+                    (updates = merge(updates, (class=class,)))
+                isempty(keys(updates)) || (plan = merge(plan, updates))
+            end
+        end
     end
     overlay = get(plan, :preserved_overlay, nothing)
     if overlay isa Union{P2Mesh,P2TriMesh}

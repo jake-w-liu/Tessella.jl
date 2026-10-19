@@ -38,6 +38,7 @@ module HighOrder
 using ..MeshTypes: Mesh, MeshDiagnostic, node, boundary_faces
 using ..MeshQuadrature: mesh_integration_points
 using ..Refine: _midpoint_coordinate
+import ..Elements: msh_dimension
 import ..MeshTypes: nnodes, nsegs, ntris, ntets, validate  # extended for P2 types
 using Printf: @printf
 
@@ -2619,10 +2620,156 @@ function _p2_opt_relocate!(coords, fams, conns, inc_v, v::Integer,
 end
 
 """
+Parametric support of a certified-P2 node that must stay on its owning CAD
+entity instead of moving freely in space — the descriptor `sliders` maps
+carry in [`optimize_p2_interior!`](@ref).
+
+- `u`: current parameter values (`[u]` for curve-owned nodes, `[u,v]` for
+  surface-owned nodes). Replaced — never mutated in place — by an accepted
+  candidate so a rejected pass leaves the stored state untouched.
+- `lift`: `lift(u::Vector{Float64}) -> NTuple{3,Float64}` re-evaluates the
+  owning entity at candidate parameters; it must be the same evaluator that
+  produced the node's stored coordinates.
+- `lower`, `upper`: per-coordinate parameter bounds; probes and candidates
+  are clamped to this box so a node can never leave its entity's range.
+"""
+mutable struct _P2ParametricSupport
+    u::Vector{Float64}
+    lift::Any
+    lower::Vector{Float64}
+    upper::Vector{Float64}
+end
+
+# Consistent finite parameter state inside the bounds box — a descriptor that
+# fails this check can never slide and its node stays fixed.
+function _p2opt_support_usable(support::_P2ParametricSupport)
+    d = length(support.u)
+    (d == length(support.lower) && d == length(support.upper)) || return false
+    support.lift === nothing && return false
+    @inbounds for i in 1:d
+        (isfinite(support.u[i]) && isfinite(support.lower[i]) &&
+         isfinite(support.upper[i]) &&
+         support.lower[i] <= support.u[i] <= support.upper[i]) || return false
+    end
+    return true
+end
+
+# Lifted 3-coordinate candidate from a parametric evaluator, or nothing when
+# the evaluator cannot produce a finite point.
+@inline function _p2opt_lift(lift, u::Vector{Float64})
+    p = lift(u)
+    p isa Tuple && length(p) == 3 || return nothing
+    x = Float64(p[1]); y = Float64(p[2]); z = Float64(p[3])
+    (isfinite(x) && isfinite(y) && isfinite(z)) || return nothing
+    return (x, y, z)
+end
+
+# One bounded ascent for node `v` in the parameter space of `support`, with
+# incident list `inc_v` and initial step `h` (a fraction of the parameter
+# range).  Mirrors `_p2_opt_relocate!` step-for-step: forward-difference
+# gradient, one step of length `h` along it, certificate gate on every
+# incident element, strict improvement to accept, bit-for-bit coordinate
+# restore on rejection, `h` halved each iteration.  The difference is that
+# probes perturb the parameter state and the candidate position is the
+# entity's own evaluation — the node stays exactly on its CAD support.  On
+# success `support.u` is replaced by the accepted parameter vector; on
+# failure both the coordinates and `support.u` are left untouched.
+function _p2_opt_slide!(coords, fams, conns, inc_v, v::Integer,
+                        support::_P2ParametricSupport, h::Float64,
+                        hmin::Float64, itermax::Int, tolerance::Float64)
+    f_old = _p2opt_node_jac(coords, fams, conns, inc_v)
+    moved = false
+    evals = 1
+    iters = 0
+    d = length(support.u)
+    u = copy(support.u)
+    grad = Vector{Float64}(undef, d)
+    cand = similar(u)
+    @inbounds while iters < itermax && h > hmin
+        iters += 1
+        fill!(grad, 0.0)
+        for i in 1:d
+            ui = u[i]
+            # Forward probe clamped to the bounds box; fall back to a
+            # backward probe when the parameter sits on the upper bound.
+            du = min(h, support.upper[i] - ui)
+            if du > 0
+                copyto!(cand, u); cand[i] = ui + du
+                p = _p2opt_lift(support.lift, cand)
+                if p !== nothing
+                    ox = coords[1,v]; oy = coords[2,v]; oz = coords[3,v]
+                    coords[1,v] = p[1]; coords[2,v] = p[2]; coords[3,v] = p[3]
+                    grad[i] = _p2opt_node_jac(coords, fams, conns, inc_v) - f_old
+                    coords[1,v] = ox; coords[2,v] = oy; coords[3,v] = oz
+                    evals += 1
+                    continue
+                end
+            end
+            du = min(h, ui - support.lower[i])
+            if du > 0
+                copyto!(cand, u); cand[i] = ui - du
+                p = _p2opt_lift(support.lift, cand)
+                if p !== nothing
+                    ox = coords[1,v]; oy = coords[2,v]; oz = coords[3,v]
+                    coords[1,v] = p[1]; coords[2,v] = p[2]; coords[3,v] = p[3]
+                    # Backward difference: negate so positive grad still
+                    # means the +u direction improves.
+                    grad[i] = f_old -
+                        _p2opt_node_jac(coords, fams, conns, inc_v)
+                    coords[1,v] = ox; coords[2,v] = oy; coords[3,v] = oz
+                    evals += 1
+                end
+            end
+        end
+        gn = 0.0
+        for i in 1:d
+            gn += grad[i] * grad[i]
+        end
+        gn = sqrt(gn)
+        if gn > 0 && isfinite(gn)
+            inv = h / gn
+            moved_step = false
+            for i in 1:d
+                ui = u[i]
+                ci = ui + grad[i] * inv
+                ci = min(support.upper[i], max(support.lower[i], ci))
+                cand[i] = ci
+                ci != ui && (moved_step = true)
+            end
+            if moved_step
+                p = _p2opt_lift(support.lift, cand)
+                if p !== nothing
+                    ox = coords[1,v]; oy = coords[2,v]; oz = coords[3,v]
+                    coords[1,v] = p[1]; coords[2,v] = p[2]; coords[3,v] = p[3]
+                    certified = true
+                    for (b, t) in inc_v
+                        _p2opt_certify(fams[b].kind, coords, conns[b], t) ||
+                            (certified = false; break)
+                    end
+                    f_new = certified ?
+                        _p2opt_node_jac(coords, fams, conns, inc_v) : -Inf
+                    evals += 1
+                    if f_new > f_old + tolerance
+                        f_old = f_new
+                        copyto!(u, cand)
+                        moved = true
+                    else
+                        coords[1,v] = ox; coords[2,v] = oy; coords[3,v] = oz
+                    end
+                end
+            end
+        end
+        h *= 0.5
+    end
+    moved && (support.u = copy(u))
+    return moved, evals
+end
+
+"""
     optimize_p2_interior!(coords, blocks, movable;
         itermax=100, passes=25, fraction=0.2, hmin_fraction=1e-3,
         tolerance=1e-10, fixed_edges=nothing, fixed_facets=nothing,
-        threshold_min=-Inf, threshold_max=Inf)
+        sliders=nothing, threshold_min=-Inf, threshold_max=Inf)
         -> (moved, min_before, min_after, sweeps, evals)
 
 Bounded relocation pass for the interior high-order nodes of the certified
@@ -2643,6 +2790,20 @@ primary face, and element-interior nodes are always eligible.  `fixed_edges`/`fi
 primary-edge pairs and sorted facet tuples whose mids must also stay fixed
 — the API layer uses them for owner-group interfaces that are internal to
 the combined complex but still carry surface-projected supports.
+
+`sliders` optionally maps a node index (`Int32`) to a
+[`_P2ParametricSupport`](@ref) describing the node's owning-entity
+parametrization.  A slider node is a candidate even when `movable` marks it
+fixed: instead of free-space relocation it performs the same bounded ascent
+in parameter space (`_p2_opt_slide!`), generating candidate coordinates by
+re-evaluating `lift(u)` inside `[lower, upper]`, so the node stays exactly
+on its CAD entity.  Sliders bypass the boundary-edge/facet support checks —
+the caller's classification asserts the entity ownership — but stay blocked
+as corners, cross-family or multi-role nodes, and by references from
+uncertified blocks other than 1-D cell blocks (a Seg3 block discretizing the
+same owning curve shares the node's parameter state rather than conflicting
+with it).  An accepted move replaces `support.u`; a rejected one restores
+the stored coordinates bit-for-bit and leaves `support.u` untouched.
 
 Each node performs a bounded ascent on the minimum scaled Jacobian measure
 of its incident elements — `det J/(|c1|·|c2|·|c3|)` for volume families,
@@ -2673,6 +2834,8 @@ function optimize_p2_interior!(coords::AbstractMatrix{Float64},
                                tolerance::Real=1e-10,
                                fixed_edges::Union{Nothing,Set{NTuple{2,Int32}}}=nothing,
                                fixed_facets::Union{Nothing,Set{Tuple{Vararg{Int32}}}}=nothing,
+                               sliders::Union{Nothing,
+                                   AbstractDict{Int32,_P2ParametricSupport}}=nothing,
                                threshold_min::Real=-Inf,
                                threshold_max::Real=Inf)
     caller = "optimize_p2_interior!"
@@ -2706,13 +2869,26 @@ function optimize_p2_interior!(coords::AbstractMatrix{Float64},
         throw(ArgumentError(
             "$caller: require threshold_min < threshold_max " *
             "(got $threshold_min, $threshold_max)"))
+    if sliders !== nothing
+        for (v, support) in sliders
+            support isa _P2ParametricSupport || throw(ArgumentError(
+                "$caller: sliders values must be _P2ParametricSupport"))
+            1 <= v <= nn || throw(ArgumentError(
+                "$caller: sliders key $v outside node range 1:$nn"))
+        end
+    end
 
     # Certified blocks are converted and optimized; every other block only
     # marks the nodes it references — shared nodes across a family boundary
-    # are geometric supports and never candidates.
+    # are geometric supports and never candidates.  `crossref` tracks the
+    # stronger version used for sliders: a node referenced by an uncertified
+    # block is still allowed to slide when that block is a 1-D cell block —
+    # a Seg3 discretization of the node's owning curve shares its parameter
+    # state instead of conflicting with it.
     fams = Any[]
     conns = Matrix{Int32}[]
     otherref = falses(nn)
+    crossref = falses(nn)
     for item in blocks
         item isa Tuple && length(item) == 2 || throw(ArgumentError(
             "$caller: blocks must hold (msh_type, connectivity) pairs"))
@@ -2723,8 +2899,16 @@ function optimize_p2_interior!(coords::AbstractMatrix{Float64},
             "$caller: MSH $msh connectivity must be an integer matrix or vector"))
         fam = _p2opt_family(msh)
         if fam === nothing
+            onedim = try
+                msh_dimension(msh) == 1
+            catch
+                false
+            end
             for v in conn
-                1 <= v <= nn && (otherref[v] = true)
+                if 1 <= v <= nn
+                    otherref[v] = true
+                    onedim || (crossref[v] = true)
+                end
             end
             continue
         end
@@ -2762,8 +2946,11 @@ function optimize_p2_interior!(coords::AbstractMatrix{Float64},
             # Edge mids of surface families are surface supports even on
             # interior wire edges — moving them off the CAD surface needs
             # the parametric-slide relocation stage, so only volume-family
-            # edge mids (and face/interior slots) become candidates.
-            fam.volume || continue
+            # edge mids (and face/interior slots) become free candidates.
+            # Slider mids still need their primary edge and incident list —
+            # their candidates come from the owning entity's parametrization.
+            fam.volume ||
+                (sliders !== nothing && haskey(sliders, m)) || continue
             endp[m] = (conn[i, t], conn[j, t])
             push!(get!(() -> Tuple{Int,Int32}[], incident, m), (b, Int32(t)))
         end
@@ -2796,24 +2983,36 @@ function optimize_p2_interior!(coords::AbstractMatrix{Float64},
             _p2opt_family(msh), cs)
     end
 
-    # Candidates, worst-incident-element first.
+    # Candidates, worst-incident-element first.  A parametric slider is a
+    # candidate without the movable bit — its support is the entity asserted
+    # by the classification, so the boundary-edge/facet tests (which encode
+    # "free space cannot leave the geometry") do not apply.  Cross-family
+    # conflicts, corners, multi-role nodes and uncertified non-curve block
+    # references still keep a slider fixed.
     fedge = fixed_edges === nothing ? NTuple{2,Int32}[] : fixed_edges
     ffacet = fixed_facets === nothing ? Tuple{Vararg{Int32}}[] : fixed_facets
     candidates = Tuple{Int32,Float64}[]
     for (mid, fmsh) in midfam
-        (fmsh > 0 && midref[mid] && !cornerref[mid] && !otherref[mid] &&
-         movable[Int(mid)]) || continue
+        fmsh > 0 || continue
+        slide = sliders === nothing ? nothing : get(sliders, mid, nothing)
+        slide !== nothing && !_p2opt_support_usable(slide) && (slide = nothing)
+        (midref[mid] && !cornerref[mid]) || continue
+        if slide === nothing
+            (!otherref[mid] && movable[Int(mid)]) || continue
+        else
+            crossref[mid] && continue
+        end
         # A node must hold exactly one interior role: an element whose own
         # connectivity mixes a node across slot kinds is inconsistent and
         # its node stays fixed.
         roles = (haskey(endp, mid) ? 1 : 0) +
                 (haskey(facetof, mid) ? 1 : 0) + (mid in interiors ? 1 : 0)
         roles == 1 || continue
-        if haskey(endp, mid)
+        if slide === nothing && haskey(endp, mid)
             e = endp[mid]
             pair = minmax(e[1], e[2])
             (pair in bedges[fmsh] || pair in fedge) && continue
-        elseif haskey(facetof, mid)
+        elseif slide === nothing && haskey(facetof, mid)
             f = facetof[mid]
             (f in bfacets[fmsh] || f in ffacet) && continue
         end
@@ -2834,20 +3033,39 @@ function optimize_p2_interior!(coords::AbstractMatrix{Float64},
         moved_pass = 0
         for (mid, _) in candidates
             inc_v = incident[mid]
-            if haskey(endp, mid)
-                a, b = endp[mid]
-                @inbounds begin
-                    ax = coords[1,a]; ay = coords[2,a]; az = coords[3,a]
-                    bx = coords[1,b]; by = coords[2,b]; bz = coords[3,b]
-                end
-                elen = hypot(bx-ax, by-ay, bz-az)
-            else
-                elen = _p2opt_incident_diameter(coords, fams, conns, inc_v)
+            slide = sliders === nothing ? nothing : get(sliders, mid, nothing)
+            if slide !== nothing && !_p2opt_support_usable(slide)
+                slide = nothing
             end
-            (isfinite(elen) && elen > 0) || continue
-            node_moved, node_evals = _p2_opt_relocate!(
-                coords, fams, conns, inc_v, mid,
-                frac*elen, hfrac*elen, iters, tol)
+            if slide === nothing
+                if haskey(endp, mid)
+                    a, b = endp[mid]
+                    @inbounds begin
+                        ax = coords[1,a]; ay = coords[2,a]; az = coords[3,a]
+                        bx = coords[1,b]; by = coords[2,b]; bz = coords[3,b]
+                    end
+                    elen = hypot(bx-ax, by-ay, bz-az)
+                else
+                    elen = _p2opt_incident_diameter(coords, fams, conns, inc_v)
+                end
+                (isfinite(elen) && elen > 0) || continue
+                node_moved, node_evals = _p2_opt_relocate!(
+                    coords, fams, conns, inc_v, mid,
+                    frac*elen, hfrac*elen, iters, tol)
+            else
+                # Parameter-space step scale: the entity's parameter range
+                # (the widest coordinate bound) plays the role `elen` plays
+                # for free-space relocation.
+                pscale = 0.0
+                for i in eachindex(slide.u)
+                    span = slide.upper[i] - slide.lower[i]
+                    span > pscale && (pscale = span)
+                end
+                (isfinite(pscale) && pscale > 0) || continue
+                node_moved, node_evals = _p2_opt_slide!(
+                    coords, fams, conns, inc_v, mid, slide,
+                    frac*pscale, hfrac*pscale, iters, tol)
+            end
             evals += node_evals
             node_moved && (moved_pass += 1)
         end
