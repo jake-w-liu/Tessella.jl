@@ -10599,13 +10599,19 @@ function _session_mesh1d_options(m::GeoModel,caller::AbstractString)
 end
 
 # Decode the public blocked-coordinate layout through the same checked owned
-# list adapter used for POS export. The size-field API retains scalar admission.
+# list adapter used for POS export. `postview_field` applies Gmsh's
+# `PostViewField` dominant-component precedence — a tensor record kind selects
+# the metric evaluation, a vector kind the Euclidean norm, otherwise the
+# scalar value — so a tensor-valued session view resolves to a
+# `PostViewAnisoField` (an `AbstractAnisoField` the metric surface/volume
+# producers consume through `metric_at`) while scalar views are unchanged.
 function _post_view_field(view::_SessionView,tag::Int;
         crop_negative::Bool=true,use_closest::Bool=true)
     caller="build_geo_size_field"
-    all(type_key->startswith(type_key,"S"),view.list_types) || throw(ArgumentError(
-        "$caller: Field[$tag] requires scalar view data"))
-    return Post.postview_field(_native_list_view_pos(view,caller);crop_negative,use_closest)
+    parsed=_native_list_view_pos(view,caller)
+    isempty(parsed.elements) && throw(ArgumentError(
+        "$caller: Field[$tag] view has no element records"))
+    return Post.postview_field(parsed;crop_negative,use_closest)
 end
 
 """Gmsh-style mesh generation, mutation, bulk retrieval, and periodic operations."""
@@ -12036,7 +12042,8 @@ counterpart). `set_number(name, option, value)` and `set_string(name, option,
 value)` configure a registered plugin's options; `run(name)` executes it.
 Supported plugins: `Integrate`, `MinMax`, `Probe`, `Skin`, `ExtractElements`,
 `Transform`, `Remove`, `Smooth`, `NewView`, `Gradient`, `CutPlane`, `CutSphere`,
-`Warp`, `MathEval`, `Scal2Vec`. Setting the numeric option `Run` to a nonzero
+`Warp`, `MathEval`, `Scal2Vec`, `Divergence`, `Curl`, `Lambda2`,
+`SphericalRaise`, `Annotate`. Setting the numeric option `Run` to a nonzero
 value executes the plugin immediately.
 """
 module plugin
