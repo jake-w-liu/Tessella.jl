@@ -13,9 +13,9 @@
 # bitwise; no boundary writeback is needed (or possible — a seam-welded
 # patch has no conventional edge chain). uv-space embedding, recombination,
 # smoothing and background size fields have no analogue in the lifted
-# construction and reject loudly; so do faces bounded by degenerate
-# pole/apex edges, whose collapsed uv rows need a pole fan the kernel does
-# not build yet.
+# construction and reject loudly. Faces bounded by degenerate pole/apex
+# edges mesh through a collapsed-row pole fan — see
+# `model_occ_pole_fan_test.jl`.
 
 using Test
 using Tessella
@@ -89,18 +89,17 @@ _error(f)=try;f();nothing catch err;err end
     @test _on_cylinder(nmesh,1.0,0.0,2.0)
 
     # A materialized sphere face is bounded by degenerate pole edges whose
-    # pcurves span an entire collapsed uv row — an explicit pole fan is not
-    # built yet, so the kernel rejects loudly rather than feeding a
-    # self-duplicated PSLG to `constrained_delaunay` (the same rejection now
-    # covers a sewn sphere shell inside a volume PLC).
+    # pcurves span an entire collapsed uv row — the kernel fans the pole
+    # through the ordinary boundary chain + bitwise weld; the dedicated
+    # coverage lives in `model_occ_pole_fan_test.jl`. A quick reachability
+    # check stays here since this path used to reject outright.
     mp=GeoModel()
     M._model_occ_add_sphere!(mp,0.0,0.0,0.0,1.5;tag=1)
     M._model_occ_synchronize!(mp)
     sface=findfirst(==(:sphere),mp.surface_types)
-    err=_error(()->M.mesh_model_surface(mp,sface))
-    @test err isa ArgumentError
-    @test occursin("degenerate",sprint(showerror,err))
-    @test occursin("pole",sprint(showerror,err))
+    pmesh=M.mesh_model_surface(mp,sface)
+    @test MT.validate(pmesh).ok
+    @test MT.ntris(pmesh)>0
 end
 
 @testset "trimmed cylinder band meshes standalone" begin

@@ -4076,22 +4076,91 @@ function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
             ent===nothing && throw(ArgumentError(
                 "$caller: Surface[$t] has no pcurve for Curve[$curve]"))
             crec=get(m.curve_geometry,curve,nothing)
+            pc=signed<0 && ent.rev!==nothing ? ent.rev : ent.fwd
             if (crec!==nothing && get(crec,:occ,nothing)===:degenerate) ||
                     get(m.curve_types,curve,nothing)===:degenerate
-                # A degenerate edge is a single 3-D vertex; when its pcurve
-                # spans a nonzero uv extent it collapses an entire domain
-                # row, which needs an explicit pole fan this CDT front does
-                # not build yet. A point-like trace is harmless and may
-                # pass — it simply deduplicates into a neighbour vertex.
-                u0,v0=_occ_pcurve_d0(ent.fwd,t0)
-                u1,v1=_occ_pcurve_d0(ent.fwd,t1)
+                # A degenerate edge is a single 3-D vertex, but its pcurve
+                # still bounds the uv domain: a point-like trace simply
+                # deduplicates into a neighbour vertex, while a real span
+                # collapses an entire domain row onto the pole. Emit the
+                # collapsed row as an ordinary boundary chain — the pole fan.
+                # Every sample lifts to the canonical pole vertex, so the
+                # bitwise weld below folds the row into the fan apex and each
+                # CDT cell touching two row vertices collapses out of the
+                # lifted mesh. The row is deliberately NOT u-periodic
+                # unwrapped: its two endpoint representatives legitimately
+                # differ by the domain's full period, and anchoring the row to
+                # `u_prev` would fold the whole wire onto one seam column.
+                u0,v0=_occ_pcurve_d0(pc,t0)
+                u1,v1=_occ_pcurve_d0(pc,t1)
                 tol=1e-9*max(1.0,abs(u0),abs(u1),abs(v0),abs(v1))
-                (abs(u1-u0)>tol || abs(v1-v0)>tol) && throw(ArgumentError(
-                    "$caller: Surface[$t] is bounded by degenerate " *
-                    "Curve[$curve] (a collapsed pole/apex); parametric " *
-                    "meshing of pole faces is not implemented"))
+                if abs(u1-u0)>tol || abs(v1-v0)>tol
+                    # A genuine degenerate edge collapses onto ONE vertex;
+                    # distinct endpoints on a row-spanning pcurve is a
+                    # corrupt record, not a fan boundary.
+                    a==b || throw(ArgumentError(
+                        "$caller: Surface[$t] degenerate Curve[$curve] " *
+                        "has distinct endpoints — not a collapsed " *
+                        "pole/apex"))
+                    pole=m.points[a]
+                    pscale=max(1.0,abs(pole[1]),abs(pole[2]),abs(pole[3]))
+                    ptol=1e-8*pscale
+                    uvtol=1e-9*max(1.0,hypot(u1-u0,v1-v0))
+                    plist=get(forced,curve,nothing)
+                    ordered=plist===nothing ? Float64[t0,t1] :
+                                             collect(Float64,plist)
+                    isempty(ordered) && (ordered=Float64[t0,t1])
+                    # `_surface_curve_parameters` endpoint snapping, so a
+                    # stored parameter an ulp off a bound still emits the
+                    # exact corner representative.
+                    snap=128eps(Float64)*max(1.0,abs(t1-t0))
+                    for i in eachindex(ordered)
+                        ordered[i]-t0<=snap && (ordered[i]=t0)
+                        t1-ordered[i]<=snap && (ordered[i]=t1)
+                    end
+                    signed<0 && reverse!(ordered)
+                    tfirst=signed>0 ? t0 : t1
+                    tlast=signed>0 ? t1 : t0
+                    first(ordered)==tfirst || pushfirst!(ordered,tfirst)
+                    last(ordered)==tlast || push!(ordered,tlast)
+                    # Flatten the collapsed trace: a straight lin2d row keeps
+                    # just its endpoint representatives; a curved trace
+                    # subdivides until the polyline follows the pcurve.
+                    seq=Float64[]
+                    function _pole_row_flat(pa,pb,depth)
+                        pm=(pa+pb)/2
+                        if depth<10
+                            ua,va=_occ_pcurve_d0(pc,pa)
+                            ub,vb=_occ_pcurve_d0(pc,pb)
+                            um,vm=_occ_pcurve_d0(pc,pm)
+                            if hypot(um-(ua+ub)/2,vm-(va+vb)/2)>uvtol
+                                _pole_row_flat(pa,pm,depth+1)
+                                _pole_row_flat(pm,pb,depth+1)
+                                return nothing
+                            end
+                        end
+                        push!(seq,pa)
+                        return nothing
+                    end
+                    for k in 2:length(ordered)
+                        _pole_row_flat(ordered[k-1],ordered[k],0)
+                    end
+                    push!(seq,last(ordered))
+                    for parameter in seq
+                        u,v=_occ_pcurve_d0(pc,parameter)
+                        # The collapsed row must lift to the pole — a pcurve
+                        # that does not is a corrupt degenerate record, not a
+                        # meshable fan boundary.
+                        lifted=_occ_surface_point(sg,u,v)
+                        _b3dist(lifted,pole)<=ptol || throw(ArgumentError(
+                            "$caller: Surface[$t] degenerate Curve[$curve] " *
+                            "pcurve does not collapse onto its pole vertex"))
+                        u_prev=u
+                        push!(loop_idx,emit((u,v),pole))
+                    end
+                    continue
+                end
             end
-            pc=signed<0 && ent.rev!==nothing ? ent.rev : ent.fwd
             for parameter in _surface_curve_parameters(
                     m,forced,curve,signed,caller)
                 p3=if parameter==t0
