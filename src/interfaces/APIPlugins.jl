@@ -26,7 +26,22 @@
 #                   vector records,
 #   CutPlane        `A x + B y + C z + D = 0` levelset sections into
 #                   `*_CutPlane` point/line/triangle records (ExtractVolume
-#                   keeps the whole elements on the selected side).
+#                   keeps the whole elements on the selected side),
+#   CutSphere       `(X-Xc)^2 + (Y-Yc)^2 + (Z-Zc)^2 = R^2` levelset sections
+#                   into `*_CutSphere` records through the same linear-edge
+#                   levelset interpolation (sections ordered about the
+#                   outward radial direction),
+#   Warp            in-place coordinate displacement: `Factor` times the
+#                   `TimeStep` vector field of `OtherView`, or (when both
+#                   `View` and `OtherView` are < 0) smoothed element normals
+#                   times the node values, like upstream `Plugin(Warp)`,
+#   MathEval        per-node expression evaluation (`Expression0`..`Expression8`
+#                   over x, y, z, `v0`..`v8` view components and `w0`..`w8`
+#                   `OtherView` components) into a `*_MathEval` list view
+#                   (scalar/vector/tensor records by expression count),
+#   Scal2Vec        packs component 0 of `ViewX`/`ViewY`/`ViewZ` at the
+#                   reference view's (element, node, step) slots into a
+#                   `NameNewView` vector list view.
 #
 # Gradient and CutPlane read list views directly and model views through a
 # per-element multi-step merge (`_plugin_elements_all_steps`), so both emit
@@ -43,8 +58,13 @@
 # Session views carry no per-element visibility flags, so the upstream `Visible`
 # options are accepted and stored but currently never hide an element.
 # `Skin` only covers list-based views (`FromMesh = 1`, which would publish
-# discrete model boundary entities, rejects) and `Transform`/`Remove`/`Smooth`
-# reject model-based views — upstream in-place writers mutate `PViewDataList`.
+# discrete model boundary entities, rejects) and `Transform`/`Remove`/`Smooth`/
+# `Warp` reject model-based views — upstream in-place writers mutate
+# `PViewDataList`. CutSphere registers `RecurLevel`/`TargetError` like upstream;
+# they steer the adaptive subdivision of *curved* elements, which our linear
+# record catalog never produces, so they are stored without effect (the
+# upstream linear-element path is reproduced exactly: corner levelset values
+# interpolated along primary edges).
 
 mutable struct _PluginSpec
     numbers::Dict{String,Float64}
@@ -1655,6 +1675,669 @@ function _plugin_exec_cutplane(spec::_PluginSpec,caller::AbstractString)
     return nothing
 end
 
+# ---- shared view-tag option resolution ----------------------------------------------
+
+# A secondary view-valued numeric option (`OtherView`, `ViewX`, ...): a value
+# < 0 names the most recent session view like `View < 0`; a nonnegative value
+# must be an existing integer tag. (Upstream's `getView(i, v)` contract.)
+function _plugin_view_tag(numbers::Dict{String,Float64},opt::AbstractString,
+                          caller::AbstractString)
+    raw=numbers[opt]
+    if raw<0
+        isempty(SESSION_VIEWS) && throw(ArgumentError(
+            "$caller: no views exist to run the plugin on"))
+        tag=maximum(keys(SESSION_VIEWS))
+    else
+        raw==floor(raw) || throw(ArgumentError(
+            "$caller: $opt tag must be an integer"))
+        tag=Int(raw)
+        haskey(SESSION_VIEWS,tag) || throw(ArgumentError(
+            "$caller: unknown view tag $tag"))
+    end
+    return tag,_session_view_data(tag,caller)
+end
+
+# ---- CutSphere ---------------------------------------------------------------------------
+
+function _plugin_exec_cutsphere(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    xc=_mesh_query_coordinate(numbers["Xc"],caller,"Xc")
+    yc=_mesh_query_coordinate(numbers["Yc"],caller,"Yc")
+    zc=_mesh_query_coordinate(numbers["Zc"],caller,"Zc")
+    r=_mesh_query_coordinate(numbers["R"],caller,"R")
+    volume=_mesh_query_integer(Int(numbers["ExtractVolume"]),
+                               caller,"ExtractVolume")
+    tag,view=_plugin_view(numbers,caller)
+    elements,steps,times=_plugin_elements_all_steps(view,caller)
+    center=(xc,yc,zc)
+    out=_PluginElement[]
+    for element in elements
+        ga=size(element.geo,2);va=size(element.vcoords,2);nc=element.ncomp
+        ls=ntuple(ga) do i
+            dx=element.geo[1,i]-xc;dy=element.geo[2,i]-yc
+            dz=element.geo[3,i]-zc
+            return muladd(dx,dx,muladd(dy,dy,dz*dz))-r*r
+        end
+        if !iszero(volume)
+            # Whole-element extraction: `ExtractVolume < 0` keeps elements
+            # fully inside the sphere (all ls <= 0), `> 0` fully outside —
+            # same convention as CutPlane.
+            if (volume>0 ? all(l->l>=0.0,ls) : all(l->l<=0.0,ls)) &&
+                va==ga && _plugin_record_type(element.kind,nc)!==nothing
+                push!(out,element)
+            end
+            continue
+        end
+        if all(l->l==0.0,ls)
+            va==ga && _plugin_record_type(element.kind,nc)!==nothing &&
+                push!(out,element)
+            continue
+        end
+        # Order the section polygon about the outward radial direction at the
+        # crossing centroid, so emitted facets face away from the sphere
+        # centre (upstream's `SPHERE` orientation rule).
+        points,_=_plugin_cut_crossings(element,ls)
+        if !isempty(points)
+            cx=cy=cz=0.0
+            for p in points;cx+=p[1];cy+=p[2];cz+=p[3];end
+            nrm=(_plugin_sub3((cx/length(points),cy/length(points),
+                               cz/length(points)),center))
+            _plugin_norm3(nrm)==0.0 && (nrm=(0.0,0.0,1.0))
+        else
+            nrm=(0.0,0.0,1.0)
+        end
+        for (kind,spoints,weights) in _plugin_cut_sections(element,ls,nrm)
+            _plugin_record_type(kind,nc)===nothing && continue
+            arity=length(spoints)
+            geo=Matrix{Float64}(undef,3,arity)
+            for i in 1:arity,axis in 1:3
+                geo[axis,i]=spoints[i][axis]
+            end
+            vals=Vector{Float64}(undef,arity*nc*steps)
+            for step in 1:steps,i in 1:arity,comp in 1:nc
+                acc=0.0
+                for (node,factor) in weights[i]
+                    acc=muladd(factor,
+                        element.vals[(step-1)*va*nc+(node-1)*nc+comp],acc)
+                end
+                vals[(step-1)*arity*nc+(i-1)*nc+comp]=acc
+            end
+            push!(out,_PluginElement(kind,_PLUGIN_KIND_DIM[kind],geo,geo,
+                                     vals,nc,element.etag))
+        end
+    end
+    _plugin_extract_emit(view.name*"_CutSphere",out,-1,steps,times,caller)
+    return nothing
+end
+
+# ---- Warp --------------------------------------------------------------------------------
+
+# Smoothed facet normals keyed on node position — the upstream
+# `smooth_normals` container: `add` folds a unit normal into the first cluster
+# whose angle to it stays under the tolerance (running mean capped at 100
+# contributions, order-dependent like upstream); `get` returns the first
+# cluster within tolerance of the caller-supplied seed (the element's own
+# facet normal, so the "same side" cluster wins at sharp creases), or the seed
+# itself when nothing is close enough.
+struct _PluginNormalCluster
+    n::NTuple{3,Float64}
+    nb::Int
+end
+
+# Angle between two vectors in degrees, `atan2(|a×b|, a·b)` like upstream.
+function _plugin_angle_deg(a,b)
+    na=_plugin_norm3(a);nb=_plugin_norm3(b)
+    (na==0.0 || nb==0.0) && return 0.0
+    return atand(_plugin_norm3(_plugin_cross3(a,b))/(na*nb),
+                 _plugin_dot3(a,b)/(na*nb))
+end
+
+function _plugin_normals_add!(clusters,p,n,tol)
+    bucket=get!(clusters,p,_PluginNormalCluster[])
+    for (i,cluster) in enumerate(bucket)
+        if tol>=180.0 || abs(_plugin_angle_deg(cluster.n,n))<tol
+            cluster.nb<100 || return nothing
+            c1=cluster.nb/(cluster.nb+1);c2=1/(cluster.nb+1)
+            bucket[i]=_PluginNormalCluster(
+                (c1*cluster.n[1]+c2*n[1],
+                 c1*cluster.n[2]+c2*n[2],
+                 c1*cluster.n[3]+c2*n[3]),cluster.nb+1)
+            return nothing
+        end
+    end
+    push!(bucket,_PluginNormalCluster(n,0))
+    return nothing
+end
+
+function _plugin_normals_get(clusters,p,seed,tol)
+    bucket=get(clusters,p,nothing)
+    bucket===nothing && return seed
+    for cluster in bucket
+        abs(_plugin_angle_deg(cluster.n,seed))<tol && return cluster.n
+    end
+    return seed
+end
+
+# Unit facet normal `normal3points` of the element's first three nodes read at
+# position `base` in a list record; `nothing` on a degenerate element.
+function _plugin_facet_normal(data,base::Int,arity::Int)
+    a=(data[base+1],data[base+arity+1],data[base+2arity+1])
+    b=(data[base+2],data[base+arity+2],data[base+2arity+2])
+    c=(data[base+3],data[base+arity+3],data[base+2arity+3])
+    n=_plugin_cross3(_plugin_sub3(b,a),_plugin_sub3(c,a))
+    s=_plugin_norm3(n)
+    s>0 || return nothing
+    return (n[1]/s,n[2]/s,n[3]/s)
+end
+
+function _plugin_exec_warp(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    view.model_kind===nothing || throw(ArgumentError(
+        "$caller: Warp rewrites list data only; model views are unsupported"))
+    factor=_mesh_query_coordinate(numbers["Factor"],caller,"Factor")
+    timestep=_mesh_query_integer(Int(numbers["TimeStep"]),caller,"TimeStep")
+    tol=_mesh_query_coordinate(numbers["SmoothingAngle"],caller,"SmoothingAngle")
+    # Upstream (`Warp.cpp`): `otherView < 0` first takes the `View` value, so
+    # the smoothed-normal field is built only when the resolved tag is still
+    # negative — i.e. both `View` and `OtherView` were left < 0 (current view
+    # warped by its own surface normals times its scalar values).
+    raw_other=numbers["OtherView"]
+    raw_other<0 && (raw_other=numbers["View"])
+    if raw_other<0
+        normals_mode=true;otag=tag;oview=view
+    else
+        raw_other==floor(raw_other) || throw(ArgumentError(
+            "$caller: OtherView tag must be an integer"))
+        otag=Int(raw_other)
+        haskey(SESSION_VIEWS,otag) || throw(ArgumentError(
+            "$caller: unknown view tag $otag"))
+        oview=_session_view_data(otag,caller)
+        normals_mode=false
+        oview.model_kind===nothing || throw(ArgumentError(
+            "$caller: Warp requires a list-based OtherView"))
+    end
+    steps=_plugin_list_steps(view,caller)
+    osteps=_plugin_list_steps(oview,caller)
+    # Upstream sanity check: equal entity/element counts. List views carry no
+    # entity records, so the check is the flattened element count; a per-node
+    # arity or component mismatch below then just leaves `val` at zero like
+    # upstream's `getNumNodes`/`getNumComponents` guards.
+    positions=Tuple{String,Int}[]
+    for type in view.list_types
+        for element in 0:view.list_counts[type]-1
+            push!(positions,(type,element))
+        end
+    end
+    oelements=normals_mode ? _PluginElement[] :
+        _plugin_list_elements(oview,caller)[1]
+    normals_mode || length(oelements)==length(positions) || begin
+        _native_diagnostic_emit_locked(:error,"Incompatible views")
+        return nothing
+    end
+    0<=timestep<=osteps-1 || begin
+        _native_diagnostic_emit_locked(:error,
+            "Invalid TimeStep ($timestep) in View[$otag]")
+        return nothing
+    end
+    # Precompute the smoothed normal field over the triangle/quadrangle
+    # records (upstream `numEdges == 3 || 4`) before any coordinate moves.
+    clusters=Dict{NTuple{3,Float64},Vector{_PluginNormalCluster}}()
+    if normals_mode
+        for type in view.list_types
+            layout=get(Post._POS_RECORD_TYPES,type,nothing)
+            layout===nothing && throw(ArgumentError(
+                "$caller: unsupported list data type $type"))
+            kind,arity,ncomp=layout
+            kind in (:triangle,:quadrangle) || continue
+            count=view.list_counts[type];data=view.list_data[type]
+            width=3arity+arity*ncomp*steps
+            for element in 0:count-1
+                base=element*width
+                n=_plugin_facet_normal(data,base,arity)
+                n===nothing && continue
+                for node in 1:arity
+                    _plugin_normals_add!(clusters,
+                        (data[base+node],data[base+arity+node],
+                         data[base+2arity+node]),n,tol)
+                end
+            end
+        end
+    end
+    for (pos,(type,element)) in enumerate(positions)
+        layout=get(Post._POS_RECORD_TYPES,type,nothing)
+        layout===nothing && throw(ArgumentError(
+            "$caller: unsupported list data type $type"))
+        kind,arity,ncomp=layout
+        arity>=2 || continue # upstream skips 1-node records
+        data=view.list_data[type]
+        width=3arity+arity*ncomp*steps
+        base=element*width
+        oe=normals_mode ? nothing : oelements[pos]
+        for step in 1:steps
+            # The facet-normal seed reads possibly-already-warped coordinates
+            # like the upstream per-step element scan.
+            nseed=normals_mode ? _plugin_facet_normal(data,base,arity) :
+                nothing
+            for node in 1:arity
+                mult=1.0
+                if normals_mode
+                    kind in (:triangle,:quadrangle) || continue
+                    nseed===nothing && continue
+                    p=(data[base+node],data[base+arity+node],
+                       data[base+2arity+node])
+                    val=_plugin_normals_get(clusters,p,nseed,tol)
+                    mult=_plugin_scalar_rep(data,
+                        base+3arity+(step-1)*arity*ncomp+(node-1)*ncomp,
+                        ncomp)
+                else
+                    # The same flattened (element, node) slot of `OtherView`
+                    # at `TimeStep`; only matching-arity 3-component records
+                    # displace (upstream's `getNumComponents`/`getNumNodes`
+                    # guards leave `val` at zero otherwise).
+                    oa=size(oe.vcoords,2);onc=oe.ncomp
+                    (oa==arity && onc==3) || continue
+                    val=(oe.vals[timestep*oa*onc+(node-1)*onc+1],
+                         oe.vals[timestep*oa*onc+(node-1)*onc+2],
+                         oe.vals[timestep*oa*onc+(node-1)*onc+3])
+                end
+                for axis in 1:3
+                    data[base+(axis-1)*arity+node]+=factor*mult*val[axis]
+                end
+            end
+        end
+    end
+    return nothing
+end
+
+# ---- MathEval ------------------------------------------------------------------------------
+
+import ..SizeField
+
+# Per-node variable buffers for `v0`..`v8` (the view being processed) and
+# `w0`..`w8` (`OtherView` at `OtherTimeStep` or the same step); bound into the
+# `SizeField` MathEval evaluator through `F<tag>` references — `v<d>` parses
+# as tag `d`, `w<d>` as tag `d + 16`.
+mutable struct _PluginEvalVars
+    v::Vector{Float64}
+    w::Vector{Float64}
+end
+
+struct _PluginEvalField <: SizeField.AbstractField
+    comp::Int
+    other::Bool
+end
+
+@inline function SizeField.field_value(f::_PluginEvalField,x,y,z,
+                                       vars::_PluginEvalVars)
+    return f.other ? vars.w[f.comp] : vars.v[f.comp]
+end
+
+@inline _plugin_ident_char(c::Char)=
+    ('a'<=c<='z')||('A'<=c<='Z')||('0'<=c<='9')||c=='_'
+
+# Rewrite `v<d>`/`w<d>` variable names into the `F<tag>` references the
+# `SizeField` expression compiler resolves (`v<d>` → `F<d>`, `w<d>` →
+# `F<d + 16>`). `F<digits>` itself is not an upstream MathEval variable and is
+# rejected so users cannot shadow the mapped tags; every other identifier
+# falls through to the parser's own validation (function names, x, y, z,
+# Pi, e).
+function _plugin_matheval_rewrite(expr::AbstractString,caller::AbstractString)
+    out=IOBuffer();i=firstindex(expr);n=lastindex(expr)
+    while i<=n
+        c=expr[i]
+        if _plugin_ident_char(c) && !(c in ('+','-'))
+            j=i
+            while j<=n && _plugin_ident_char(expr[j]);j=nextind(expr,j);end
+            ident=expr[i:prevind(expr,j)]
+            if ident=="v" || ident=="w" || (length(ident)==2 && ident[1] in ('v','w') &&
+                                          _plugin_ident_char(ident[2]))
+                if length(ident)==2 && '0'<=ident[2]<='8'
+                    d=ident[2]-'0'
+                    write(out,'F');write(out,ident[1]=='v' ? string(d) : string(16+d))
+                    i=j;continue
+                elseif length(ident)>1 && all(ch->'0'<=ch<='9',ident[2:end])
+                    throw(ArgumentError("$caller: unknown identifier $ident"))
+                end
+            elseif length(ident)>=2 && ident[1]=='F' &&
+                all(ch->'0'<=ch<='9',ident[2:end])
+                throw(ArgumentError("$caller: unknown identifier $ident"))
+            end
+            write(out,ident);i=j;continue
+        end
+        write(out,c);i=nextind(expr,i)
+    end
+    return String(take!(out))
+end
+
+# Component values of `view` at `stepnum` (0-based step index) evaluated at
+# point `p` through the containing element's barycentric weights — the
+# `OctreePost::search*` interpolation upstream uses for off-grid `w` values.
+# `dimension > 0` restricts the searched element dimension like the upstream
+# `search*(..., dimension)` argument. `nothing` when `p` lies outside or the
+# step is unpopulated.
+function _plugin_probe_at(view,p,stepnum::Int,caller::AbstractString;
+                          dimension::Int=-1)
+    if view.model_kind===nothing
+        elements,osteps=_plugin_list_elements(view,caller)
+        0<=stepnum<osteps || return nothing
+        pos=stepnum+1
+        for element in elements
+            element.dim<1 && continue
+            dimension>0 && element.dim!=dimension && continue
+            N=_plugin_local_weights(element.geo,element.kind,p)
+            N===nothing && continue
+            oa=size(element.vcoords,2);onc=element.ncomp
+            acc=zeros(onc)
+            for node in 1:min(oa,length(N)),comp in 1:onc
+                acc[comp]+=N[node]*
+                    element.vals[(pos-1)*oa*onc+(node-1)*onc+comp]
+            end
+            return acc
+        end
+        return nothing
+    end
+    values,stepnums=_plugin_probe_model(view,p,caller)
+    pos=findfirst(==(stepnum),stepnums)
+    pos===nothing && return nothing
+    return values[pos]
+end
+
+# Owning entity `(dim, tag)` of dense element `index` from the mesh
+# classification, for `PhysicalGroup` filtering on model views — the
+# `ge->physicals` lookup of the upstream entity-bucket scan. `nothing` when
+# the classification is absent or has no owners for the family.
+function _plugin_element_entity(mesh,class,index::Int)
+    class===nothing && return nothing
+    if mesh isa Mesh
+        tri_off,tet_off,_=_mesh_element_offsets(mesh)
+        if index<=tri_off
+            index<=length(class.seg_entities) || return nothing
+            return (1,Int(class.seg_entities[index]))
+        elseif index<=tet_off
+            col=index-tri_off
+            col<=length(class.tri_entities) || return nothing
+            return (2,Int(class.tri_entities[col]))
+        end
+        col=index-tet_off
+        col<=length(class.tet_entities) || return nothing
+        return (3,Int(class.tet_entities[col]))
+    elseif mesh isa MixedMesh
+        offset=0;family=Dict{Int,Int}()
+        for (msh,cells,_) in _cache_native_blocks(mesh)
+            rank=get(family,msh,0)
+            if offset<index<=offset+size(cells,2)
+                owners=get(class.cell_entities,msh,Int32[])
+                pos=rank+(index-offset)
+                pos>length(owners) && return nothing
+                return (Int(msh_dimension(msh)),Int(owners[pos]))
+            end
+            offset+=size(cells,2);family[msh]=rank+size(cells,2)
+        end
+    end
+    return nothing
+end
+
+function _plugin_exec_matheval(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers;strings=spec.strings
+    tag,view=_plugin_view(numbers,caller)
+    # Upstream component rule: any of Expression3..8 → tensor view (9), else
+    # any of Expression1..2 → vector view (3), else scalar (1); empty slots
+    # inside the active range evaluate as "0".
+    raw_exprs=[strings["Expression$i"] for i in 0:8]
+    if any(!isempty,raw_exprs[4:9])
+        ncomp2=9
+        for i in 1:9;isempty(raw_exprs[i]) && (raw_exprs[i]="0");end
+    elseif any(!isempty,raw_exprs[2:3])
+        ncomp2=3
+        for i in 1:3;isempty(raw_exprs[i]) && (raw_exprs[i]="0");end
+    else
+        ncomp2=1
+    end
+    exprs=raw_exprs[1:ncomp2]
+    progs=[SizeField.parse_matheval(_plugin_matheval_rewrite(e,caller))
+           for e in exprs]
+    # `OtherView` defaults to the same view like upstream (`otherView = v1`).
+    otag,oview=numbers["OtherView"]<0 ? (tag,view) :
+        _plugin_view_tag(numbers,"OtherView",caller)
+    timestep=_mesh_query_integer(Int(numbers["TimeStep"]),caller,"TimeStep")
+    ots=_mesh_query_integer(Int(numbers["OtherTimeStep"]),
+                            caller,"OtherTimeStep")
+    forcerep=!iszero(numbers["ForceInterpolation"])
+    pgroup=_mesh_query_integer(Int(numbers["PhysicalGroup"]),
+                               caller,"PhysicalGroup")
+    dimension=_mesh_query_integer(Int(numbers["Dimension"]),caller,"Dimension")
+    -1<=dimension<=3 || throw(ArgumentError(
+        "$caller: Dimension must be -1 or in 0:3"))
+    elements,steps,times=_plugin_elements_all_steps(view,caller)
+    stepnums=view.model_kind===nothing ? collect(0:steps-1) :
+        [key[1] for key in _plugin_model_keys(view)]
+    # Upstream rejects multi-mesh views outright.
+    for (mview,mkeys,mname) in ((view,
+            view.model_kind===nothing ? Tuple{Int,String}[] :
+                _plugin_model_keys(view),"view"),
+        (oview===view ? nothing : oview,
+            (oview===view || oview.model_kind===nothing) ?
+                Tuple{Int,String}[] : _plugin_model_keys(oview),"other view"))
+        mview===nothing && continue
+        slots=Set{Any}()
+        for key in mkeys
+            push!(slots,get(mview.model_contexts[key],:model_slot,nothing))
+        end
+        length(slots)>1 && begin
+            _native_diagnostic_emit_locked(:error,
+                "MathEval plugin cannot be applied to multi-mesh views")
+            return nothing
+        end
+    end
+    ostepnums=if oview===view
+        stepnums
+    elseif oview.model_kind===nothing
+        collect(0:_plugin_list_steps(oview,caller)-1)
+    else
+        [key[1] for key in _plugin_model_keys(oview)]
+    end
+    if ots<0 && length(ostepnums)!=length(stepnums)
+        _native_diagnostic_emit_locked(:error,
+            "Number of time steps don't match: using step 0")
+        ots=0
+    elseif ots>0 && !(ots in ostepnums)
+        _native_diagnostic_emit_locked(:error,
+            "Invalid time step ($ots) in View[$otag]: using step 0 instead")
+        ots=0
+    end
+    # `TimeStep` selects a stored step index: only an index past the last
+    # populated step is "invalid" upstream (then all steps run); a legal but
+    # unpopulated slot emits nothing.
+    emit_positions=if timestep<0
+        collect(1:steps)
+    elseif !isempty(stepnums) && timestep>last(stepnums)
+        _native_diagnostic_emit_locked(:error,
+            "Invalid time step ($timestep) in View[$tag]: " *
+            "using all steps instead")
+        collect(1:steps)
+    else
+        pos=findfirst(==(timestep),stepnums)
+        pos===nothing ? Int[] : [pos]
+    end
+    isempty(emit_positions) && begin
+        _plugin_extract_emit(view.name*"_MathEval",_PluginElement[],-1,0,
+                             Float64[],caller)
+        return nothing
+    end
+    # The upstream check (`getNumEntities`/`getNumElements` equality) decides
+    # whether `OtherView` reads at the same (entity, element, node) slots or
+    # through the interpolation octree; `ForceInterpolation` always probes.
+    same_grid=false
+    oelements=_PluginElement[]
+    if oview===view
+        same_grid=true;oelements=elements
+    elseif view.model_kind===nothing && oview.model_kind===nothing
+        same_grid=view.list_types==oview.list_types &&
+                  view.list_counts==oview.list_counts
+        if same_grid
+            oelements,_,_=_plugin_elements_all_steps(oview,caller)
+        end
+    elseif view.model_kind!==nothing && oview.model_kind!==nothing
+        merged_o,_,_=_plugin_elements_all_steps(oview,caller)
+        same_grid=length(merged_o)==length(elements) &&
+            all(i->merged_o[i].etag==elements[i].etag,eachindex(elements))
+        same_grid && (oelements=merged_o)
+    end
+    interpolate=!same_grid || forcerep
+    interpolate && _native_diagnostic_emit_locked(:info,
+        "Other view based on different grid: interpolating...")
+    # `PhysicalGroup > 0` filters by the owning entity's physical tags like
+    # the upstream `ge->physicals` scan; list views carry no entity records
+    # (the upstream `ge == nullptr` branch), so the filter drops everything.
+    entity_lookup=nothing
+    if pgroup>0 && view.model_kind!==nothing
+        keys=_plugin_model_keys(view)
+        slot=view.model_contexts[first(keys)].model_slot
+        mesh=slot.mesh;class=slot.class
+        public=mesh===nothing ? nothing : _mesh_public_tags(mesh)
+        entity_lookup=(mesh,class,public,slot.model)
+    end
+    drop_all=pgroup>0 && entity_lookup===nothing
+    vars=_PluginEvalVars(zeros(9),zeros(9))
+    # Union of every referenced `F<tag>` across all component expressions;
+    # each tag binds the matching `v`/`w` component buffer.
+    tagset=sort!(collect(Set{Int}(
+        tag for prog in progs for tag in prog.field_tags)))
+    bindings=Tuple(SizeField._MEFieldBinding(
+        tag,_PluginEvalField(tag<16 ? tag+1 : tag-15,tag>=16))
+        for tag in tagset)
+    out=_PluginElement[]
+    for (eindex,element) in enumerate(elements)
+        va=size(element.vcoords,2);ga=size(element.geo,2);nc=element.ncomp
+        # The emitted record repeats the element's own shape; only primary
+        # node layouts fit our list record catalog.
+        va==ga || continue
+        type=_plugin_record_type(element.kind,ncomp2)
+        type===nothing && continue
+        drop_all && continue
+        if entity_lookup!==nothing
+            mesh,class,public,model=entity_lookup
+            index=_plugin_element_index(mesh,public,element.etag)
+            entity=index==0 ? nothing :
+                _plugin_element_entity(mesh,class,index)
+            phys=Int[]
+            entity!==nothing && (phys=try
+                model_physical_groups_for_entity(model,entity[1],entity[2])
+            catch err
+                err isa InterruptException && rethrow()
+                Int[]
+            end)
+            pgroup in phys || continue
+        end
+        vals=Vector{Float64}(undef,va*ncomp2*length(emit_positions))
+        for (ei,pos) in enumerate(emit_positions)
+            stepnum=stepnums[pos]
+            step2num=ots<0 ? stepnum : ots
+            step2pos=findfirst(==(step2num),ostepnums)
+            for node in 1:va
+                fill!(vars.v,0.0);fill!(vars.w,0.0)
+                for comp in 1:nc
+                    vars.v[comp]=element.vals[
+                        (pos-1)*va*nc+(node-1)*nc+comp]
+                end
+                x=element.vcoords[1,node];y=element.vcoords[2,node]
+                z=element.vcoords[3,node]
+                if interpolate
+                    acc=_plugin_probe_at(oview,(x,y,z),step2num,caller;
+                                         dimension=dimension)
+                    acc===nothing || copyto!(vars.w,1,acc,1,
+                                             min(9,length(acc)))
+                elseif step2pos!==nothing
+                    oe=oelements[eindex]
+                    oa=size(oe.vcoords,2);onc=oe.ncomp
+                    for comp in 1:onc
+                        vars.w[comp]=oe.vals[
+                            (step2pos-1)*oa*onc+(node-1)*onc+comp]
+                    end
+                end
+                for (c,prog) in enumerate(progs)
+                    vals[(ei-1)*va*ncomp2+(node-1)*ncomp2+c]=try
+                        SizeField._eval_matheval_entity(
+                            prog,x,y,z,bindings,vars)
+                    catch err
+                        err isa InterruptException && rethrow()
+                        throw(ArgumentError(
+                            "$caller: cannot evaluate $(exprs[c]) at " *
+                            "($x,$y,$z): $err"))
+                    end
+                end
+            end
+        end
+        push!(out,_PluginElement(element.kind,element.dim,element.vcoords,
+                                 element.vcoords,vals,ncomp2,element.etag))
+    end
+    emit_times=[times[pos] for pos in emit_positions]
+    _plugin_extract_emit(view.name*"_MathEval",out,-1,
+                         length(emit_positions),emit_times,caller)
+    return nothing
+end
+
+# ---- Scal2Vec -----------------------------------------------------------------------------
+
+function _plugin_exec_scal2vec(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers;strings=spec.strings
+    name=strings["NameNewView"]
+    cviews=Tuple{Int,Any}[]
+    ref=nothing
+    for (comp,opt) in enumerate(("ViewX","ViewY","ViewZ"))
+        raw=numbers[opt]
+        if raw<0
+            push!(cviews,(0,nothing))
+            continue
+        end
+        ctag,cview=_plugin_view_tag(numbers,opt,caller)
+        push!(cviews,(ctag,cview))
+        ref===nothing && (ref=(ctag,cview))
+    end
+    ref===nothing && throw(ArgumentError(
+        "$caller: Scal2Vec plugin could not find any view"))
+    _,rview=ref
+    elements,steps,times=_plugin_elements_all_steps(rview,caller)
+    merged=Vector{Vector{_PluginElement}}(undef,3)
+    for comp in 1:3
+        merged[comp]=cviews[comp][2]===nothing ? _PluginElement[] :
+            _plugin_elements_all_steps(cviews[comp][2],caller)[1]
+    end
+    out=_PluginElement[]
+    for (i,element) in enumerate(elements)
+        va=size(element.vcoords,2);ga=size(element.geo,2)
+        va==ga || continue
+        _plugin_record_type(element.kind,3)===nothing && continue
+        # Unset `ViewX/Y/Z` components stay zero like the upstream `val = 0.`
+        # default.
+        vals=zeros(va*3*steps)
+        for comp in 1:3
+            cviews[comp][2]===nothing && continue
+            oe=merged[comp]
+            i<=length(oe) || throw(ArgumentError(
+                "$caller: view tag $(cviews[comp][1]) has incompatible " *
+                "element structure (expected same-grid data)"))
+            oelement=oe[i];oa=size(oelement.vcoords,2);onc=oelement.ncomp
+            onc>=1 && va<=oa || throw(ArgumentError(
+                "$caller: view tag $(cviews[comp][1]) has incompatible " *
+                "element structure (expected same-grid data)"))
+            osteps=length(oelement.vals)÷(oa*onc)
+            for step in 1:steps,node in 1:va
+                step<=osteps || throw(ArgumentError(
+                    "$caller: view tag $(cviews[comp][1]) has no time step " *
+                    "$(step-1)"))
+                vals[(step-1)*va*3+(node-1)*3+comp]=
+                    oelement.vals[(step-1)*oa*onc+(node-1)*onc+1]
+            end
+        end
+        push!(out,_PluginElement(element.kind,element.dim,element.vcoords,
+                                 element.vcoords,vals,3,element.etag))
+    end
+    _plugin_extract_emit(name,out,-1,steps,times,caller)
+    return nothing
+end
+
 # ---- registry --------------------------------------------------------------------------------
 
 const _PLUGINS=Dict{String,NamedTuple}(
@@ -1699,4 +2382,27 @@ const _PLUGINS=Dict{String,NamedTuple}(
         "Run"=>0.0,"A"=>1.0,"B"=>0.0,"C"=>0.0,"D"=>0.0,
         "ExtractVolume"=>0.0,"View"=>-1.0),
         string_options=Dict{String,String}(),run_fn=_plugin_exec_cutplane),
+    "CutSphere"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"Xc"=>0.0,"Yc"=>0.0,"Zc"=>0.0,"R"=>0.25,
+        "ExtractVolume"=>0.0,"RecurLevel"=>3.0,"TargetError"=>1e-4,
+        "View"=>-1.0,"Visible"=>1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_cutsphere),
+    "Warp"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"Factor"=>1.0,"TimeStep"=>0.0,"SmoothingAngle"=>180.0,
+        "View"=>-1.0,"OtherView"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_warp),
+    "MathEval"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"TimeStep"=>-1.0,"View"=>-1.0,"OtherTimeStep"=>-1.0,
+        "OtherView"=>-1.0,"ForceInterpolation"=>0.0,"PhysicalGroup"=>-1.0,
+        "Dimension"=>-1.0),
+        string_options=Dict{String,String}(
+            "Expression0"=>"Sqrt(v0^2+v1^2+v2^2)",
+            "Expression1"=>"","Expression2"=>"","Expression3"=>"",
+            "Expression4"=>"","Expression5"=>"","Expression6"=>"",
+            "Expression7"=>"","Expression8"=>""),
+        run_fn=_plugin_exec_matheval),
+    "Scal2Vec"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"ViewX"=>-1.0,"ViewY"=>-1.0,"ViewZ"=>-1.0),
+        string_options=Dict{String,String}("NameNewView"=>"NewView"),
+        run_fn=_plugin_exec_scal2vec),
 )
