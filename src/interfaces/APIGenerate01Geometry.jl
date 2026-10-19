@@ -38,23 +38,6 @@ function _dim01_geometry_curve_parameters!(birth,m,curve,actual,options,caller)
             master_parameters=get(birth.parameters,master,nothing)
             master_parameters===nothing || (result=Model._model_curve_periodic_params(
                 m,curve,master,master_parameters,constraint.reversed,caller))
-        else
-            t0,t1=Model._model_curve_param_bounds(m,curve,caller)
-            spec=get(m.meshing.transfinite_curves,curve,nothing)
-            if spec===nothing
-                # The actual producer owns native placement; retain this
-                # carrier's legacy arithmetic with bounded mapped storage.
-                points=Model._gmsh_curve_point_store()
-                try
-                    result=Model._model_curve_grade_params(
-                        m,curve,t0,t1,options,caller;_native_producer=false,_point_store=points)
-                finally
-                    Model._gmsh_curve_close_points!(points)
-                end
-            else
-                result=Model._model_curve_transfinite_params(
-                    m,curve,t0,t1,spec,caller,options;_native_producer=false)
-            end
         end
     end
     # A differing birth count has no ordinal identity correspondence. Such a

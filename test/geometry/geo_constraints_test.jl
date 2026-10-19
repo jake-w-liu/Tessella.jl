@@ -522,7 +522,9 @@ end
     using Tessella.MeshTypes: nnodes, ntets, ntris
 
     # A quarter-circle boundary at 5 nodes subdivides by angle fraction —
-    # the nodes land on the analytic 22.5° marks of the arc.
+    # upstream's transfinite arc integration lands ~1.6e-9 off the analytic
+    # 22.5° marks; the coordinates below are its emitted values verbatim
+    # (the carrier reproduces them bitwise).
     circle_patch=raw"""
         Point(1) = {1,0,0,1}; Point(2) = {0,1,0,1}; Point(9) = {0,0,0,1};
         Point(3) = {0.2,1.7,0,1}; Point(4) = {1,1.5,0,1};
@@ -537,10 +539,11 @@ end
     execution=_execute_constraint_source(circle_patch*"Mesh 2;\n";mesh_dim=0)
     @test validate(execution.mesh).ok
     @test (nnodes(execution.mesh),ntris(execution.mesh))==(21,24)
-    for degrees in (22.5,45.0,67.5)
-        expected=[cosd(degrees),sind(degrees),0.0]
+    for expected in ([0.9238795320834774,0.382683433397913,0.0],
+                     [0.7071067795777031,0.707106782795392,0.0],
+                     [0.3826834312301871,0.9238795329813788,0.0])
         @test any(i->isapprox(execution.mesh.coords[:,i],expected;
-                              atol=1e-9),
+                              atol=1e-12),
                   axes(execution.mesh.coords,2))
     end
 
