@@ -2076,6 +2076,69 @@ the exact boundary limitation); `View` blocks, `Printf/Sprintf` inside
 field options, and GUI colour options are stripped in the adapted files —
 each `.geo` header lists its deltas verbatim.
 
+#### P601 blocked-tutorial re-evaluation (2026-10-19, validation + docs only)
+
+No Source changed. The eight previously blocked tutorials were re-run through
+`execute_geo` (blocker reproduction) and probed through the session API:
+several missing constructs exist at the API level even though the GEO frontend
+still rejects them. **17 of 21 tutorials now have parity drivers**
+(the prior 13 plus t7, t8, t9, t21); t13, t17, t19, t20 remain unported.
+All four new drivers are registered in `validation/run_all.jl` and were run
+against live gmsh 4.15.2 on this machine.
+
+| Tut | Form | Verified receipt (Tessella vs gmsh 4.15.2) |
+|-----|------|--------------------------------------------|
+| t7  | session-API (`API.merge` .pos + `PostView` field as BGM) | 1788 nodes/3315 tris/area 0.03 = gmsh exactly |
+| t8  | session-API reduced (view import + display options; no view4) | 4 views, per-view element counts 1274/1274/341/2504 and value ranges = gmsh exactly |
+| t9  | session-API reduced (`CutPlane` only) | section plane-conformant both; 718 vs 546 section elements; value ranges match |
+| t21 | adapted (`t21_builtin.geo` built-in-kernel squares + `API.mesh.partition(3)`) | 3 partitions, per-entity partition lists verified; 1006/1890 vs gmsh 1001/1880; area 2.0 both |
+
+**Remaining blockers — reproduced 2026-10-19 (exact constructs):**
+
+- t13 (`Merge "t13_data.stl"` discrete rebuild): `execute_geo` still fails —
+  `create_geometry!: node 677 has conflicting actual geometry sources`
+  (native STL reparametrization gap).
+- t17 (OCC `Rectangle` + anisotropic background `.pos`): `execute_geo` fails —
+  `Rectangle requires an OpenCASCADE backend`. Through the API,
+  `occ.add_rectangle` builds the square and `t17_bgmesh.pos` parses into a
+  `PostViewAnisoField`, but the session `PostView` field admission is
+  scalar-only — `build_geo_size_field: Field[1] requires scalar view data`
+  (`src/interfaces/API.jl:10606`) — so `API.mesh.generate_metric_surface`
+  cannot select the tensor background field. No session route to anisotropic
+  metric meshing exists.
+- t19 (OCC `ThruSections`/fillets/`Pipe`): `execute_geo` fails —
+  `ThruSections requires an OpenCASCADE backend`. Through the API the loft
+  geometry itself constructs: `occ.add_thru_sections` (plain + `makeRuled`),
+  `occ.copy`/`occ.translate`, `occ.add_wire`/`add_disk`/`rotate`/`add_pipe`
+  produce volumes 1, 11, 12, 13. Two capability blockers stop the tutorial:
+  `occ.fillet` rejects lofted faces —
+  `OCC.fillet: fillet needs planar faces (got occ=tensor_bspline)` — and the
+  surface mesher rejects the non-planar pipe wall —
+  `mesh_model_surface: Point[1037] is not coplanar with Surface[1003]`.
+- t20 (STEP import + OCC cut planes + `PartitionMesh`): `execute_geo` fails —
+  `syntax error (ShapeFromFile)` and `Rectangle requires an OpenCASCADE
+  backend`; the API route fails at import —
+  `OCC.importShapes: face boundary loop has fewer than three edges`.
+
+**Documented partial constructs on the new drivers:**
+
+- t8: `view1.pos` (×2), `view2.pos`, `view3.pos` merge and carry display
+  options (`API.view.set_number`/`set_string` round-trip verified), but
+  `view4.pos` remains rejected — its T2/T3 text records embed option
+  expressions (`General.GraphicsWidth`):
+  `read_pos: expected a number at byte 7444, got 'General'`.
+- t9: `Plugin(CutPlane)` runs through `API.plugin` (all five options +
+  produced view verified against gmsh's own CutPlane output), but the
+  tutorial's `Plugin(Isosurface)`/`Plugin(Annotate)` calls are unregistered
+  plugin names.
+- t21: `t21_builtin.geo` replaces the OCC `Rectangle` + `BooleanFragments`
+  pair with the equivalent shared-edge built-in geometry; `PartitionMesh`
+  and `Plugin(SimplePartition)` remain GEO-unsupported, so partitioning is
+  driven by `API.mesh.partition(3)`. `PartitionCreateTopology` stays off
+  (partition BRep upstream of the metadata path is tet-only). The tutorial's
+  block `If/EndIf` parses correctly — it is unreachable in the official file
+  only because the OCC/`PartitionMesh` statements it guards are not.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The
