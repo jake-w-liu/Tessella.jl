@@ -41,7 +41,36 @@
 #                   (scalar/vector/tensor records by expression count),
 #   Scal2Vec        packs component 0 of `ViewX`/`ViewY`/`ViewZ` at the
 #                   reference view's (element, node, step) slots into a
-#                   `NameNewView` vector list view.
+#                   `NameNewView` vector list view,
+#   Divergence      per-node divergence ∇·v of 3-component data into
+#                   `*_Divergence` scalar records,
+#   Curl            per-node curl ∇×v of 3-component data into `*_Curl`
+#                   vector records,
+#   Lambda2         per-node `Eigenvalue`-th (descending order) eigenvalue of
+#                   S·S + Ω·Ω built from the 3-component velocity gradient —
+#                   or read straight from 9-component tensor records — into
+#                   `*_Lambda2` scalar records,
+#   SphericalRaise  in-place radial raise: each list-record node moves along
+#                   the unit vector from (`Xc`,`Yc`,`Zc`) by `Offset + Raise`
+#                   times its `TimeStep` scalar representation,
+#   Annotate        appends the `Text` string as a `T2`/`T3` string record
+#                   (in-place on list views; a new `*_Annotate` list view
+#                   carrying the string and the source time table for model
+#                   views).
+#
+# Divergence, Curl and Lambda2 differentiate through the corner-node linear
+# map like upstream `getNumCornerNodes`/`element::interpolate*`, so
+# high-order layouts emit linear records on their corners; records without
+# the required component count (3, or 3/9 for Lambda2) are skipped, and
+# point records emit the upstream zero gradients (identity Jacobian with
+# vanishing shape gradients). Divergence and Curl reject multi-mesh model
+# views like upstream `hasMultipleMeshes`; Lambda2 shares the check because
+# the per-tag step merge cannot disambiguate same-numbered elements across
+# meshes. `SphericalRaise` rewrites list data only (upstream mutates the
+# owning mesh through model views, the same restriction the other in-place
+# plugins take). `Annotate` accepts the upstream `Font`/`FontSize`/`Align`
+# options but session string records carry no per-string style slot, so
+# they are stored without effect (the `Visible` convention below).
 #
 # Gradient and CutPlane read list views directly and model views through a
 # per-element multi-step merge (`_plugin_elements_all_steps`), so both emit
@@ -59,8 +88,8 @@
 # options are accepted and stored but currently never hide an element.
 # `Skin` only covers list-based views (`FromMesh = 1`, which would publish
 # discrete model boundary entities, rejects) and `Transform`/`Remove`/`Smooth`/
-# `Warp` reject model-based views — upstream in-place writers mutate
-# `PViewDataList`. CutSphere registers `RecurLevel`/`TargetError` like upstream;
+# `Warp`/`SphericalRaise` reject model-based views — upstream in-place writers
+# mutate `PViewDataList`. CutSphere registers `RecurLevel`/`TargetError` like upstream;
 # they steer the adaptive subdivision of *curved* elements, which our linear
 # record catalog never produces, so they are stored without effect (the
 # upstream linear-element path is reproduced exactly: corner levelset values
@@ -2338,6 +2367,365 @@ function _plugin_exec_scal2vec(spec::_PluginSpec,caller::AbstractString)
     return nothing
 end
 
+# ---- corner component gradients ------------------------------------------------
+
+# Spatial gradient of scalar component `comp` (1-based) at every *corner*
+# node of `element`, evaluated at that node's reference location — the
+# upstream `element::interpolateGrad` backing the Divergence/Curl/Lambda2
+# plugins. Like upstream `getNumCornerNodes`/`getValues`, only the first
+# `ga` value nodes (the MSH-order corners) are read, so high-order layouts
+# differentiate their corner map. Returns a node-major `3*ga` vector, or
+# `nothing` for a point element (no reference frame), a component out of
+# range, missing corner value coverage, or a degenerate geometric map.
+function _plugin_element_component_gradient(element::_PluginElement,step::Int,
+                                            comp::Int)
+    nodes=get(_PLUGIN_REFERENCE_NODES,element.kind,nothing)
+    nodes===nothing && return nothing
+    nc=element.ncomp
+    1<=comp<=nc || return nothing
+    ga=size(element.geo,2);va=size(element.vcoords,2)
+    va>=ga || return nothing
+    length(element.vals)>=step*va*nc || return nothing
+    family=_PLUGIN_KIND_FAMILY[element.kind];dim=element.dim
+    out=Vector{Float64}(undef,3ga)
+    for node in 1:ga
+        u,v,w=nodes[node]
+        dN=MeshFunctionSpaces._first_order_gradients(
+            Val(family),u,v,w,"API.plugin",node)
+        jcols=ntuple(_->zeros(dim),3)
+        r=zeros(dim)
+        for i in 1:ga
+            gi=dN[i];vi=element.vals[(step-1)*va*nc+(i-1)*nc+comp]
+            for k in 1:dim
+                r[k]=muladd(vi,gi[k],r[k])
+                for a in 1:3
+                    jcols[a][k]=muladd(element.geo[a,i],gi[k],jcols[a][k])
+                end
+            end
+        end
+        h=_plugin_metric_solve(jcols,r,dim)
+        h===nothing && return nothing
+        for a in 1:3
+            g=0.0
+            for k in 1:dim;g=muladd(jcols[a][k],h[k],g);end
+            out[(node-1)*3+a]=g
+        end
+    end
+    return out
+end
+
+# All three component gradients of a 3-component element field for one step:
+# `(∇v_x, ∇v_y, ∇v_z)` as node-major 3*ga vectors, `nothing` when the
+# element is not vector-valued or a corner gradient fails. Point records
+# yield the upstream zero gradient (a point's `getJacobian` is the identity
+# and its shape gradients vanish), matching `interpolateGrad` on `element`.
+function _plugin_vector_gradients(element::_PluginElement,step::Int)
+    element.ncomp==3 || return nothing
+    element.kind===:point && return (zeros(3),zeros(3),zeros(3))
+    gx=_plugin_element_component_gradient(element,step,1)
+    gx===nothing && return nothing
+    gy=_plugin_element_component_gradient(element,step,2)
+    gy===nothing && return nothing
+    gz=_plugin_element_component_gradient(element,step,3)
+    gz===nothing && return nothing
+    return (gx,gy,gz)
+end
+
+# Upstream `hasMultipleMeshes` for a model view: every populated step's
+# context must live in a single mesh slot. Returns false after emitting the
+# upstream-style error diagnostic when the steps span multiple meshes.
+function _plugin_check_single_mesh(view,name::AbstractString)
+    view.model_kind===nothing && return true
+    slots=Set{Any}()
+    for key in _plugin_model_keys(view)
+        push!(slots,get(view.model_contexts[key],:model_slot,nothing))
+    end
+    length(slots)>1 || return true
+    _native_diagnostic_emit_locked(:error,
+        "$name plugin cannot be run on multi-mesh views")
+    return false
+end
+
+# ---- Divergence ----------------------------------------------------------------
+
+function _plugin_exec_divergence(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    _plugin_check_single_mesh(view,"Divergence") || return nothing
+    elements,steps,times=_plugin_elements_all_steps(view,caller)
+    out=_PluginElement[]
+    for element in elements
+        # Upstream `numComp` gate: only 3-component elements are processed.
+        element.ncomp==3 || continue
+        _plugin_record_type(element.kind,1)===nothing && continue
+        ga=size(element.geo,2)
+        size(element.vcoords,2)>=ga || continue
+        vals=Vector{Float64}(undef,ga*steps)
+        ok=true
+        for step in 1:steps
+            grads=_plugin_vector_gradients(element,step)
+            if grads===nothing;ok=false;break;end
+            gx,gy,gz=grads
+            for node in 1:ga
+                vals[(step-1)*ga+node]=
+                    gx[(node-1)*3+1]+gy[(node-1)*3+2]+gz[(node-1)*3+3]
+            end
+        end
+        ok || continue
+        push!(out,_PluginElement(element.kind,element.dim,element.geo,
+                                 element.geo,vals,1,element.etag))
+    end
+    _plugin_extract_emit(view.name*"_Divergence",out,-1,steps,times,caller)
+    return nothing
+end
+
+# ---- Curl ----------------------------------------------------------------------
+
+function _plugin_exec_curl(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    _plugin_check_single_mesh(view,"Curl") || return nothing
+    elements,steps,times=_plugin_elements_all_steps(view,caller)
+    out=_PluginElement[]
+    for element in elements
+        element.ncomp==3 || continue
+        _plugin_record_type(element.kind,3)===nothing && continue
+        ga=size(element.geo,2)
+        size(element.vcoords,2)>=ga || continue
+        vals=Vector{Float64}(undef,ga*3*steps)
+        ok=true
+        for step in 1:steps
+            grads=_plugin_vector_gradients(element,step)
+            if grads===nothing;ok=false;break;end
+            gx,gy,gz=grads
+            for node in 1:ga
+                # curl = (∂v_z/∂y - ∂v_y/∂z, ∂v_x/∂z - ∂v_z/∂x,
+                #         ∂v_y/∂x - ∂v_x/∂y)
+                vals[(step-1)*ga*3+(node-1)*3+1]=
+                    gz[(node-1)*3+2]-gy[(node-1)*3+3]
+                vals[(step-1)*ga*3+(node-1)*3+2]=
+                    gx[(node-1)*3+3]-gz[(node-1)*3+1]
+                vals[(step-1)*ga*3+(node-1)*3+3]=
+                    gy[(node-1)*3+1]-gx[(node-1)*3+2]
+            end
+        end
+        ok || continue
+        push!(out,_PluginElement(element.kind,element.dim,element.geo,
+                                 element.geo,vals,3,element.etag))
+    end
+    _plugin_extract_emit(view.name*"_Curl",out,-1,steps,times,caller)
+    return nothing
+end
+
+# ---- Lambda2 --------------------------------------------------------------------
+
+# Eigenvalues of a 3×3 matrix through its characteristic cubic, mirroring
+# upstream `eigenvalue`: `FindCubicRoots` on `v³ - I₁ v² + I₂ v - I₃`
+# (I₂ = ½(tr² - tr(T²))) followed by the descending `eigsort` selection.
+# Only real parts are kept, so a nearly-symmetric matrix with a numerically
+# complex pair degrades exactly like upstream.
+function _plugin_eigenvalues3(g::Matrix{Float64})
+    tr=g[1,1]+g[2,2]+g[3,3]
+    tr2=0.0
+    for i in 1:3,j in 1:3
+        tr2=muladd(g[i,j],g[j,i],tr2)
+    end
+    det=g[1,1]*(g[2,2]*g[3,3]-g[2,3]*g[3,2])-
+        g[1,2]*(g[2,1]*g[3,3]-g[2,3]*g[3,1])+
+        g[1,3]*(g[2,1]*g[3,2]-g[2,2]*g[3,1])
+    # The monic cubic's coefficients after dividing by a = 1.
+    b=-tr;c=0.5*(tr*tr-tr2);d=-det
+    q=(3c-b*b)/9
+    r=(-27d+b*(9c-2*b*b))/54
+    discrim=q*q*q+r*r
+    term1=b/3
+    d1,d2,d3=0.0,0.0,0.0
+    if discrim>0
+        # One real root; the complex pair contributes its shared real part
+        # like upstream's real[] slots.
+        s=cbrt(r+sqrt(discrim));t=cbrt(r-sqrt(discrim))
+        d1=-term1+s+t;d2=d3=-(term1+(s+t)/2)
+    elseif discrim==0.0
+        r13=cbrt(r)
+        d1=-term1+2r13;d2=d3=-(r13+term1)
+    else
+        q=-q
+        dum1=acos(clamp(r/sqrt(q*q*q),-1.0,1.0))
+        r13=2*sqrt(q)
+        d1=-term1+r13*cos(dum1/3)
+        d2=-term1+r13*cos((dum1+2.0*pi)/3)
+        d3=-term1+r13*cos((dum1+4.0*pi)/3)
+    end
+    roots=[d1,d2,d3]
+    for i in 1:3
+        k=i;p=roots[i]
+        for j in i+1:3
+            if roots[j]>=p;p=roots[j];k=j;end
+        end
+        if k!=i;roots[k]=roots[i];roots[i]=p;end
+    end
+    return (roots[1],roots[2],roots[3])
+end
+
+function _plugin_exec_lambda2(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    ev=_mesh_query_integer(Int(numbers["Eigenvalue"]),caller,"Eigenvalue")
+    if !(1<=ev<=3)
+        _native_diagnostic_emit_locked(:error,
+            "Eigenvalue should be 1, 2 or 3")
+        return nothing
+    end
+    tag,view=_plugin_view(numbers,caller)
+    # Upstream has no explicit multi-mesh check, but our per-tag step merge
+    # cannot identify same-numbered elements across meshes.
+    _plugin_check_single_mesh(view,"Lambda2") || return nothing
+    elements,steps,times=_plugin_elements_all_steps(view,caller)
+    out=_PluginElement[]
+    for element in elements
+        nc=element.ncomp
+        nc in (3,9) || continue
+        _plugin_record_type(element.kind,1)===nothing && continue
+        ga=size(element.geo,2);va=size(element.vcoords,2)
+        va>=ga || continue
+        vals=Vector{Float64}(undef,ga*steps)
+        ok=true
+        for step in 1:steps
+            grads=nc==3 ? _plugin_vector_gradients(element,step) : nothing
+            nc==3 && grads===nothing && (ok=false;break)
+            for node in 1:ga
+                # The velocity gradient g[i][j] = ∂v_i/∂x_j, read straight
+                # from the stored tensor for 9-component records.
+                g=Matrix{Float64}(undef,3,3)
+                if nc==9
+                    for i in 1:3,j in 1:3
+                        g[i,j]=element.vals[
+                            (step-1)*va*nc+(node-1)*nc+3(i-1)+j]
+                    end
+                else
+                    for i in 1:3,j in 1:3
+                        g[i,j]=grads[i][(node-1)*3+j]
+                    end
+                end
+                # A[m][n] = Σ_l sym[m][l]·sym[l][n] + asym[m][l]·asym[l][n]
+                # over the symmetric/antisymmetric halves of g.
+                a=zeros(3,3)
+                for m in 1:3,n in 1:3
+                    acc=0.0
+                    for l in 1:3
+                        sml=0.5*(g[m,l]+g[l,m]);sln=0.5*(g[l,n]+g[n,l])
+                        oml=0.5*(g[m,l]-g[l,m]);oln=0.5*(g[l,n]-g[n,l])
+                        acc=muladd(sml,sln,muladd(oml,oln,acc))
+                    end
+                    a[m,n]=acc
+                end
+                vals[(step-1)*ga+node]=_plugin_eigenvalues3(a)[ev]
+            end
+        end
+        ok || continue
+        push!(out,_PluginElement(element.kind,element.dim,element.geo,
+                                 element.geo,vals,1,element.etag))
+    end
+    _plugin_extract_emit(view.name*"_Lambda2",out,-1,steps,times,caller)
+    return nothing
+end
+
+# ---- SphericalRaise --------------------------------------------------------------
+
+function _plugin_exec_spherical_raise(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    center=(_mesh_query_coordinate(numbers["Xc"],caller,"Xc"),
+            _mesh_query_coordinate(numbers["Yc"],caller,"Yc"),
+            _mesh_query_coordinate(numbers["Zc"],caller,"Zc"))
+    raise=_mesh_query_coordinate(numbers["Raise"],caller,"Raise")
+    offset=_mesh_query_coordinate(numbers["Offset"],caller,"Offset")
+    timestep=_mesh_query_integer(Int(numbers["TimeStep"]),caller,"TimeStep")
+    tag,view=_plugin_view(numbers,caller)
+    view.model_kind===nothing || throw(ArgumentError(
+        "$caller: SphericalRaise rewrites list data only; model views are unsupported"))
+    steps=_plugin_list_steps(view,caller)
+    if timestep<0 || timestep>steps-1
+        _native_diagnostic_emit_locked(:error,
+            "Invalid TimeStep ($timestep) in view")
+        return nothing
+    end
+    for type in view.list_types
+        layout=get(Post._POS_RECORD_TYPES,type,nothing)
+        layout===nothing && throw(ArgumentError(
+            "$caller: unsupported list data type $type"))
+        _,arity,ncomp=layout
+        count=view.list_counts[type];data=view.list_data[type]
+        width=3arity+Base.checked_mul(arity,Base.checked_mul(ncomp,steps))
+        length(data)==Base.checked_mul(count,width) || throw(ArgumentError(
+            "$caller: list data payload does not align with numEle"))
+        for element in 0:count-1
+            base=element*width
+            for node in 1:arity
+                x=data[base+node];y=data[base+arity+node]
+                z=data[base+2arity+node]
+                rx=x-center[1];ry=y-center[2];rz=z-center[3]
+                s=hypot(rx,ry,rz)
+                # Upstream `norme` would turn a centred node into NaNs;
+                # leaving it in place is the useful behaviour.
+                s>0 || continue
+                val=_plugin_scalar_rep(data,
+                    base+3arity+timestep*arity*ncomp+(node-1)*ncomp,ncomp)
+                coef=(offset+raise*val)/s
+                data[base+node]+=coef*rx
+                data[base+arity+node]+=coef*ry
+                data[base+2arity+node]+=coef*rz
+            end
+        end
+    end
+    return nothing
+end
+
+# ---- Annotate ----------------------------------------------------------------------
+
+function _plugin_exec_annotate(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers;strings=spec.strings
+    x=_mesh_query_coordinate(numbers["X"],caller,"X")
+    y=_mesh_query_coordinate(numbers["Y"],caller,"Y")
+    z=_mesh_query_coordinate(numbers["Z"],caller,"Z")
+    dim3=!iszero(numbers["ThreeD"])
+    tag,view=_plugin_view(numbers,caller)
+    text=strings["Text"]
+    # Session string records hold one entry per element: the upstream 2-D
+    # (`T2`, screen coordinates) or 3-D (`T3`, model coordinates) anchor
+    # plus the text. There is no per-string style slot, so the FontSize/
+    # Font/Align options are accepted but not retained.
+    key=dim3 ? "T3" : "T2"
+    coord=dim3 ? Float64[x,y,z] : Float64[x,y,0.0]
+    if view.model_kind===nothing
+        if !(key in view.list_string_types)
+            push!(view.list_string_types,key)
+            view.list_strings[key]=String[]
+            view.list_string_coords[key]=Float64[]
+            view.list_string_counts[key]=0
+        end
+        push!(view.list_strings[key],text)
+        append!(view.list_string_coords[key],coord)
+        view.list_string_counts[key]+=1
+        return nothing
+    end
+    # Model-based input: upstream creates a new list-based view carrying the
+    # string record plus a copy of the source time table.
+    out=_SessionView(view.name*"_Annotate")
+    push!(out.list_string_types,key)
+    out.list_strings[key]=String[text]
+    out.list_string_coords[key]=coord
+    out.list_string_counts[key]=1
+    # Upstream copies the whole `getNumTimeSteps` table — the step-range
+    # extent, including unpopulated gaps.
+    keys=_plugin_model_keys(view)
+    steps=max(_view_data_steps(view),isempty(keys) ? 0 : last(keys)[1]+1)
+    out.list_time=[_plugin_step_time(view,step) for step in 0:steps-1]
+    out.numbers["NbTimeStep"]=Float64(steps)
+    newtag=_fresh_view_tag()
+    SESSION_VIEWS[newtag]=out
+    VIEW_TAG_MAX[]=max(VIEW_TAG_MAX[],newtag)
+    return nothing
+end
+
 # ---- registry --------------------------------------------------------------------------------
 
 const _PLUGINS=Dict{String,NamedTuple}(
@@ -2405,4 +2793,23 @@ const _PLUGINS=Dict{String,NamedTuple}(
         "Run"=>0.0,"ViewX"=>-1.0,"ViewY"=>-1.0,"ViewZ"=>-1.0),
         string_options=Dict{String,String}("NameNewView"=>"NewView"),
         run_fn=_plugin_exec_scal2vec),
+    "Divergence"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_divergence),
+    "Curl"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_curl),
+    "Lambda2"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"Eigenvalue"=>2.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_lambda2),
+    "SphericalRaise"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"Xc"=>0.0,"Yc"=>0.0,"Zc"=>0.0,"Raise"=>1.0,"Offset"=>0.0,
+        "TimeStep"=>0.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_spherical_raise),
+    "Annotate"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"X"=>50.0,"Y"=>30.0,"Z"=>0.0,"ThreeD"=>0.0,
+        "FontSize"=>14.0,"View"=>-1.0),
+        string_options=Dict{String,String}("Text"=>"My Text",
+            "Font"=>"Helvetica","Align"=>"Left"),
+        run_fn=_plugin_exec_annotate),
 )
