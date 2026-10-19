@@ -1210,6 +1210,38 @@ function _model_periodic_starved(constraints)
     return Set(entity for (entity,meshable) in resolved if !meshable)
 end
 
+# One seed per dependency cycle among `candidates` (the dim-1 slave tags still
+# pending in a meshing pass): walking each candidate's master chain re-enters
+# the path exactly when a loop exists, and the loop's lowest tag becomes the
+# seed. A cycle has no resolvable member, so the copy-defer loop can never
+# start one — the seed meshes natively instead, after which the ordinary
+# periodic copy resolves every remaining member and downstream dependent.
+# Upstream's PENDING-defer starves the whole cycle; Tessella's pairwise
+# machinery converges it (a documented strict superset), and the native seed
+# anchors the converged discretization.
+function _model_periodic_cycle_seeds(m::GeoModel,candidates)
+    seeds=Int[]
+    chosen=Set{Int}()
+    for start in candidates
+        get(m.periodic,(1,start),nothing)===nothing && continue
+        path=Int[]
+        positions=Dict{Int,Int}()
+        current=Int(start)
+        while get(m.periodic,(1,current),nothing)!==nothing &&
+              !haskey(positions,current)
+            positions[current]=length(path)+1
+            push!(path,current)
+            current=Int(abs(m.periodic[(1,current)].master_entity))
+        end
+        haskey(positions,current) || continue
+        representative=minimum(view(path,positions[current]:length(path)))
+        representative in chosen && continue
+        push!(chosen,representative)
+        push!(seeds,representative)
+    end
+    return sort!(seeds)
+end
+
 # `GEdge::setMeshMaster(ge, tfo)`'s endpoint test: transform the master
 # endpoints by the affine and compare them with the slave endpoints both
 # forward and reversed. Returns `(reversed, mismatch)` — `reversed` is
@@ -2814,54 +2846,45 @@ function _periodic_curve_point(m::GeoModel,curve::Int,parameter::Float64,
     # of re-evaluating the slave geometry, so every face sharing the slave
     # sees bitwise-identical nodes to the periodic surface copy. Orientation-
     # only relations (no affine) cannot map coordinates, so those keep the
-    # slave's own evaluator. Cyclic relations fall back the same way — the
-    # meshing pass starves them like upstream.
+    # slave's own evaluator. Cyclic relations converge instead of starving
+    # like upstream: each cycle's lowest-tagged member is the native anchor
+    # (the seed `_model_periodic_cycle_seeds` meshes first), and every other
+    # member's routed chain terminates at the anchor's own evaluation, so the
+    # stored position satisfies `slave == affine(master)` bitwise on the
+    # shared node.
     constraint=get(m.periodic,(1,curve),nothing)
     if constraint!==nothing && constraint.affine!==nothing &&
             !(curve in seen)
         master=Int(abs(constraint.master_entity))
-        if haskey(m.curves,master)
-            # A chain that closes back on `curve` is cyclic — routed
-            # evaluation would re-enter this curve's own evaluator under a
-            # different affine composition (the `seen` fallback below), which
-            # pairwise snapping cannot reconcile bitwise. Cycle members keep
-            # their native evaluation; upstream starves their copies entirely.
-            closes=false;hops=0
-            ancestor=master
-            while haskey(m.periodic,(1,ancestor))
-                ancestor=Int(abs(m.periodic[(1,ancestor)].master_entity))
-                ancestor==curve && (closes=true; break)
-                (hops+=1)>length(m.periodic) && break
-            end
-            if !closes
-                t0,t1=_model_curve_param_bounds(m,curve,caller)
-                m0,m1=_model_curve_param_bounds(m,master,caller)
-                # The stored parameter lists carry the vertex pairing —
-                # resolving the slave's parameter to its paired MASTER entry
-                # reproduces `affine(master node)` bitwise; recomputing the
-                # mirror inside the evaluation is not involutive in floating
-                # point.
-                u=nothing
-                slave_params=get(_parameter_source,curve,nothing)
-                master_params=get(_parameter_source,master,nothing)
-                if slave_params!==nothing && master_params!==nothing &&
-                        length(slave_params)==length(master_params)
-                    index=argmin(abs.(slave_params .- parameter))
-                    if abs(slave_params[index]-parameter)<=
-                            1e-9*max(1.0,abs(t1-t0))
-                        u=constraint.reversed ? master_params[end+1-index] :
-                                                master_params[index]
-                    end
+        seeds=_model_periodic_cycle_seeds(m,(curve,))
+        if haskey(m.curves,master) && (isempty(seeds) || only(seeds)!=curve)
+            t0,t1=_model_curve_param_bounds(m,curve,caller)
+            m0,m1=_model_curve_param_bounds(m,master,caller)
+            # The stored parameter lists carry the vertex pairing —
+            # resolving the slave's parameter to its paired MASTER entry
+            # reproduces `affine(master node)` bitwise; recomputing the
+            # mirror inside the evaluation is not involutive in floating
+            # point.
+            u=nothing
+            slave_params=get(_parameter_source,curve,nothing)
+            master_params=get(_parameter_source,master,nothing)
+            if slave_params!==nothing && master_params!==nothing &&
+                    length(slave_params)==length(master_params)
+                index=argmin(abs.(slave_params .- parameter))
+                if abs(slave_params[index]-parameter)<=
+                        1e-9*max(1.0,abs(t1-t0))
+                    u=constraint.reversed ? master_params[end+1-index] :
+                                            master_params[index]
                 end
-                u===nothing && (u=constraint.reversed ?
-                    m1-(parameter-t0) : parameter-t0+m0)
-                push!(seen,curve)
-                point=_periodic_curve_point(m,master,u,caller,seen;
-                    _native_producer,_parameter_source)
-                coefficients,translation=_periodic_affine_3x4(constraint.affine)
-                return _model_affine_point(
-                    coefficients,translation,point,caller,curve)
             end
+            u===nothing && (u=constraint.reversed ?
+                m1-(parameter-t0) : parameter-t0+m0)
+            push!(seen,curve)
+            point=_periodic_curve_point(m,master,u,caller,seen;
+                _native_producer,_parameter_source)
+            coefficients,translation=_periodic_affine_3x4(constraint.affine)
+            return _model_affine_point(
+                coefficients,translation,point,caller,curve)
         end
     end
     # `parameter` is the stored/native parameter convention: the chord
@@ -2887,6 +2910,33 @@ function _periodic_curve_point(m::GeoModel,curve::Int,parameter::Float64,
     all(isfinite,point) || throw(ArgumentError(
         "$caller: Curve[$curve] periodic subdivision is not Float64-representable"))
     return point
+end
+
+# A periodic-sync transported position: parameters propagated across a
+# relation carry their paired node's stored coordinates through the affine
+# (`positions` is built by `_synchronize_periodic_parameters!`), so the
+# emitted vertex satisfies `slave == affine(master)` bitwise — upstream
+# copies `mesh_vertices` through the transform rather than re-evaluating,
+# and re-evaluating a projected parameter is not invertible to the stored
+# node anyway. Only exact-translation relations transport; everything else
+# falls back to the routed/native evaluation.
+function _periodic_forced_curve_point(m::GeoModel,curve::Int,
+                                      parameter::Float64,positions,caller)
+    if positions!==nothing
+        curve_positions=get(positions,curve,nothing)
+        if curve_positions!==nothing
+            t0,t1=_model_curve_param_bounds(m,curve,caller)
+            tolerance=1e-9*max(1.0,abs(t1-t0))
+            best=nothing;distance=Inf
+            for (stored,point) in curve_positions
+                delta=abs(stored-parameter)
+                delta<=tolerance && delta<distance &&
+                    (best=point;distance=delta)
+            end
+            best!==nothing && return best
+        end
+    end
+    return _periodic_curve_point(m,curve,parameter,caller)
 end
 
 function _surface_curve_parameters(m::GeoModel,forced,curve::Int,signed::Int,
@@ -2931,7 +2981,8 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
                        param_sizes::Dict{Tuple{Int,Float64},Float64}=
                            Dict{Tuple{Int,Float64},Float64}(),
                        plane=_model_surface_plane(m,t,caller;
-                                                  allow_ruled=true))
+                                                  allow_ruled=true),
+                       _periodic_positions=nothing)
     xs=Float64[];ys=Float64[];mesh_sizes=Float64[]
     segs=Tuple{Int,Int}[]
     index=Dict{Int,Int}()
@@ -2955,7 +3006,8 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
                     _add_surface_point!(xs,ys,mesh_sizes,index,canonical,
                                         m,b,caller,plane)
                 else
-                    point=_periodic_curve_point(m,curve,parameter,caller)
+                    point=_periodic_forced_curve_point(
+                        m,curve,parameter,_periodic_positions,caller)
                     scale=max(1.0,hypot(point...))
                     abs(_plane_offset(plane,point))<=1e-12*scale ||
                         throw(ArgumentError(
@@ -3020,7 +3072,8 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
                     _add_surface_point!(xs,ys,mesh_sizes,index,canonical,m,b,
                                         caller,plane)
                 else
-                    point=_periodic_curve_point(m,etag,parameter,caller)
+                    point=_periodic_forced_curve_point(
+                        m,etag,parameter,_periodic_positions,caller)
                     scale=max(1.0,hypot(point...))
                     abs(_plane_offset(plane,point))<=1e-12*scale ||
                         throw(ArgumentError(
@@ -3547,8 +3600,19 @@ function _periodic_curve_parameter_nodes(m::GeoModel,mesh,curve::Int,
     end
 end
 
+# `positions` accumulates the emitted-coordinate source for every synced
+# parameter: seeded from each real mesh node, then carried across relations
+# through their affines. Only exact-translation relations transport — a
+# general affine's inverse need not round-trip bitwise, and evaluated
+# positions already satisfy the pairing tolerance there. The next pass's
+# forced-parameter emission reads it through `_periodic_forced_curve_point`.
 function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh,
-                                           constraints,surface::Int)
+                                           constraints,surface::Int,
+                                           positions::Union{Nothing,
+                                               Dict{Int,Dict{Float64,
+                                                    NTuple{3,Float64}}}}=
+                                               nothing)
+    positions===nothing || empty!(positions)
     mesh_edges=_model_projection_triangle_edges(mesh)
     # Foreign-curve-owned vertices are not admissible sync candidates — a
     # periodic boundary pinching against an unconstrained curve would
@@ -3563,6 +3627,7 @@ function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh,
                                         NTuple{2,Int}[]) if edim==1))),
         "mesh_model_surface")
     raw_parameters=Dict{Int,Vector{Float64}}()
+    raw_nodes=Dict{Int,Dict{Float64,Int}}()
     curve_tolerances=Dict{Int,Float64}()
     relations=Tuple{ModelPeriodicConstraint,Float64}[]
     for constraint in constraints
@@ -3576,8 +3641,12 @@ function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh,
         tolerance=max(master_tolerance,slave_tolerance)
         for (curve,entries) in ((master,master_entries),(slave,slave_entries))
             values=get!(()->Float64[],raw_parameters,curve)
-            for (parameter,_) in entries
+            nodes=positions===nothing ? nothing :
+                get!(()->Dict{Float64,Int}(),raw_nodes,curve)
+            for (parameter,node) in entries
                 push!(values,parameter)
+                nodes===nothing || haskey(nodes,parameter) ||
+                    (nodes[parameter]=node)
             end
             curve_tolerances[curve]=min(
                 get(curve_tolerances,curve,Inf),tolerance)
@@ -3617,16 +3686,40 @@ function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh,
         values=Float64[]
         tolerance=component_tolerances[curve]
         bounds=_model_curve_param_bounds(m,curve,"mesh_model_surface")
+        curve_positions=positions===nothing ? nothing :
+            get!(()->Dict{Float64,NTuple{3,Float64}}(),positions,curve)
+        nodes=curve_positions===nothing ? nothing : raw_nodes[curve]
         for parameter in raw_parameters[curve]
-            _insert_periodic_parameter!(values,parameter,tolerance,bounds)
+            if _insert_periodic_parameter!(values,parameter,tolerance,bounds) &&
+                    curve_positions!==nothing
+                node=get(nodes,parameter,0)
+                node==0 || (curve_positions[
+                    clamp(parameter,bounds[1],bounds[2])]=
+                    (mesh.coords[1,node],mesh.coords[2,node],
+                     mesh.coords[3,node]))
+            end
         end
         parameters[curve]=values
     end
 
+    # Only exact-translation relations transport positions bitwise —
+    # componentwise ± round-trips in Float64 where a general affine inverse
+    # need not. Cyclic relations are excluded: transports around a cycle are
+    # path-dependent (0.8−0.3−0.3 ≠ 0.8−0.6 bitwise), and the routed
+    # slave-evaluation in `_periodic_curve_point` is the consistent
+    # convention there.
+    translations=positions===nothing ? nothing : map(relations) do (c,_)
+        c.affine===nothing && return nothing
+        isempty(_model_periodic_cycle_seeds(m,(Int(c.slave_entity),))) ||
+            return nothing
+        coefficients,translation=_periodic_affine_3x4(c.affine)
+        coefficients==(1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0) ?
+            translation : nothing
+    end
     converged=false
     for _ in 1:(length(relations)+1)
         propagated=false
-        for (constraint,_) in relations
+        for (relation_index,(constraint,_)) in enumerate(relations)
             slave=Int(constraint.slave_entity)
             master=Int(constraint.master_entity)
             slave_bounds=_model_curve_param_bounds(
@@ -3642,19 +3735,46 @@ function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh,
             # The cross-map is `_model_curve_periodic_params`'s upstream
             # `newu = u_max − u + to_u_min` shift, expressed per direction —
             # for `[0,1]` line ranges it is the `1 − u` mirror verbatim.
+            translation=translations===nothing ? nothing :
+                translations[relation_index]
+            slave_positions=translation===nothing ? nothing :
+                get!(()->Dict{Float64,NTuple{3,Float64}}(),positions,slave)
+            master_positions=translation===nothing ? nothing :
+                get!(()->Dict{Float64,NTuple{3,Float64}}(),positions,master)
             for parameter in master_values
                 mapped=constraint.reversed ?
                     master_bounds[2]-parameter+slave_bounds[1] :
                     parameter-master_bounds[1]+slave_bounds[1]
-                propagated|=_insert_periodic_parameter!(
-                    parameters[slave],mapped,slave_tolerance,slave_bounds)
+                if _insert_periodic_parameter!(
+                        parameters[slave],mapped,slave_tolerance,slave_bounds)
+                    propagated=true
+                    if slave_positions!==nothing
+                        source=get(positions[master],parameter,nothing)
+                        source===nothing || (slave_positions[
+                            clamp(mapped,slave_bounds[1],slave_bounds[2])]=
+                            (source[1]+translation[1],
+                             source[2]+translation[2],
+                             source[3]+translation[3]))
+                    end
+                end
             end
             for parameter in slave_values
                 mapped=constraint.reversed ?
                     slave_bounds[2]-parameter+master_bounds[1] :
                     parameter-slave_bounds[1]+master_bounds[1]
-                propagated|=_insert_periodic_parameter!(
-                    parameters[master],mapped,master_tolerance,master_bounds)
+                if _insert_periodic_parameter!(
+                        parameters[master],mapped,
+                        master_tolerance,master_bounds)
+                    propagated=true
+                    if master_positions!==nothing
+                        source=get(positions[slave],parameter,nothing)
+                        source===nothing || (master_positions[
+                            clamp(mapped,master_bounds[1],master_bounds[2])]=
+                            (source[1]-translation[1],
+                             source[2]-translation[2],
+                             source[3]-translation[3]))
+                    end
+                end
             end
         end
         if !propagated
@@ -6843,7 +6963,8 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
                                   _geometry_points=nothing,
                                   param_sizes::Dict{Tuple{Int,Float64},
                                                    Float64}=
-                                      Dict{Tuple{Int,Float64},Float64}())
+                                      Dict{Tuple{Int,Float64},Float64}(),
+                                  _periodic_positions=nothing)
     if haskey(m.meshing.transfinite_surfaces,t) &&
        _model_transfinite_source_admitted(m,t,_mesh_input,caller)
         return _transfinite_surface_mesh(
@@ -6874,13 +6995,15 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
         options=_model_algorithm_size_options(m,_mesh1d_options,caller)
         production=_gmsh_native_initial_surface(m,t,options,_mesh_input,
             _mesh_node_high_water,caller;algorithm,size_field,
-            element_high_water=_mesh_element_high_water,forced)
+            element_high_water=_mesh_element_high_water,forced,
+            _periodic_positions)
         return production,get(m.embeds,(2,t),NTuple{2,Int}[])
     end
     plane=_model_surface_plane(m,t,caller;allow_ruled=true)
     frame=_surface_metric_frame(plane)
     raw_xs,raw_ys,markers,segs,embedded,internal,index,raw_canonical=
-        _surface_pslg(m,t,forced,caller;param_sizes=param_sizes,plane=plane)
+        _surface_pslg(m,t,forced,caller;param_sizes=param_sizes,plane=plane,
+            _periodic_positions)
     xs,ys,canonical=_surface_metric_pslg(
         frame,raw_xs,raw_ys,raw_canonical,caller,t)
     T=constrained_delaunay(xs,ys,segs; internal_segments=internal)
@@ -8251,13 +8374,20 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
         cspec===nothing && throw(ArgumentError(
             "$caller: transfinite Surface[$t] requires boundary Curve[$curve] " *
             "to be transfinite"))
-        # The side chain evaluates the same native parameters the stored
-        # curve discretization carries — shared through
-        # `_model_curve_transfinite_native_params` so every part emits
-        # bitwise-identical boundary nodes.
-        t0,t1=_model_curve_param_bounds(m,curve,caller)
-        params=_model_curve_transfinite_native_params(m,curve,t0,t1,cspec,
-                                                      caller)
+        # The side chain evaluates the same parameters the stored curve
+        # discretization carries — `meshGFace` consumes `mesh_vertices`
+        # verbatim, so every part emits bitwise-identical boundary nodes.
+        # Recomputing can diverge bitwise when the dim-1 producer's law
+        # differs (native arcs integrate the derivative primitive), which
+        # cracks the shared boundary against the emitted curve rows.
+        stored_params=get(m.curve_params,curve,nothing)
+        params=if stored_params===nothing
+            t0,t1=_model_curve_param_bounds(m,curve,caller)
+            _model_curve_transfinite_native_params(m,curve,t0,t1,cspec,
+                                                   caller)
+        else
+            Float64.(stored_params)
+        end
         source=_model_mesh_curve_births(_mesh_input,m,curve,caller)
         points=if source===nothing
             [_periodic_curve_point(m,curve,u,caller) for u in params]
@@ -8864,11 +8994,17 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         _attribute_forced_parameters(m,t,forced,caller;_mesh1d_options=options)
     end
     mesh=nothing;embedded=NTuple{2,Int}[];production=nothing
+    # Synced periodic parameters propagated across a relation carry their
+    # paired node's coordinates through the transform — see
+    # `_synchronize_periodic_parameters!`/`_periodic_forced_curve_point`.
+    periodic_positions=Dict{Int,Dict{Float64,NTuple{3,Float64}}}()
     for pass in 1:npasses
         mesh,embedded=_mesh_model_surface_once(
             m,t,forced,min_angle_deg,caller;size_field=size_field,
             param_sizes=param_sizes,_mesh1d_options=options,_mesh_input,
-            _mesh_node_high_water,_mesh_element_high_water,_return_surface_production,_geometry_points)
+            _mesh_node_high_water,_mesh_element_high_water,
+            _return_surface_production,_geometry_points,
+            _periodic_positions=periodic_positions)
         if mesh isa _ModelSurfaceGeometryProduction
             production=mesh;mesh=production.production.mesh
         elseif mesh isa _ModelSurfaceProduction
@@ -8876,7 +9012,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         end
         isempty(constraints) && break
         changed=_synchronize_periodic_parameters!(
-            forced,m,mesh,constraints,t)
+            forced,m,mesh,constraints,t,periodic_positions)
         if changed
             pass<npasses || throw(ErrorException(
                 "$caller: periodic curve synchronization did not converge " *

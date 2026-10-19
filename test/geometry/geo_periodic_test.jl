@@ -459,13 +459,15 @@ end
     @test meshed.mesh!==nothing
     @test validate(meshed.mesh).ok
     @test mesh_crc(meshed.mesh).sha==
-          "e5c6e4de5c25c6c4733884e36ef718b559073205595f4a449618b3d40726307b"
+          "b4e96a0132a70a9e5a040e9af064393f4f63793c5578b709753c7cad0da4f5de"
     # Surface 4 includes the embedded probe; Gmsh 4.15.2 also gives this
     # slave 21 nodes (4 corners + 8 curve nodes + 8 interior + the probe).
+    # Surface 5 has no probe: `gmsh.model.mesh.getPeriodicNodes(2,5)`
+    # returns 20 pairs on this fixture (same for the Rotate variant below).
     @test length(model_periodic_nodes(
         meshed.model,meshed.mesh,2,4).slave_nodes)==21
     @test length(model_periodic_nodes(
-        meshed.model,meshed.mesh,2,5).slave_nodes)==21
+        meshed.model,meshed.mesh,2,5).slave_nodes)==20
 
     source=read(_PERIODIC_SURFACE_VOLUME_GEO,String)
     rotated=_execute_geo_source(replace(
@@ -477,7 +479,7 @@ end
     # Rotate-by-Pi rounding reaches the CDT predicates, so connectivity is
     # not rotation-invariant — upstream's rotated connectivity differs too.
     @test mesh_crc(rotated.mesh).sha==
-          "a2a257956317108f705f881f79be6da0858ab8691f328376227036f9b08492a1"
+          "9de4b67fe20eafaf3a7e8be4d770fac06613f3fc749962853b201b71f0240265"
     rotated_mapping=model_periodic_nodes(
         rotated.model,rotated.mesh,2,4)
     @test length(rotated_mapping.slave_nodes)==21
@@ -517,7 +519,7 @@ end
     @test translated.mesh!==nothing
     @test validate(translated.mesh).ok
     @test mesh_crc(translated.mesh).sha==
-          "393550fabf46b3bf286058d17df8b7ee344eb5abf05a290b123f99ac80102854"
+          "24267272c06e456695f3f7e19bcf9441e7b4c2701803d5da620a6db44961d6c0"
     translation_constraint=only(
         model_periodic_constraints(translated.model))
     @test translation_constraint.affine==
@@ -554,7 +556,7 @@ end
     rotated=_execute_geo_source(_periodic_geo_rotation();mesh_dim=2)
     @test validate(rotated.mesh).ok
     @test mesh_crc(rotated.mesh).sha==
-          "d1e09225614d9346ab32ad35c7dfb96c1df7467c19433d63e8e579c04152495b"
+          "ab5a66e328275954f83c15615db01314564db443d3468bb71d703ec76f9738f2"
     rotation_constraint=only(model_periodic_constraints(rotated.model))
     @test !rotation_constraint.reversed
     @test rotation_constraint.affine[2]≈-1.0 atol=1e-15
@@ -581,7 +583,7 @@ end
         _periodic_geo_embedded_curves();mesh_dim=2)
     @test validate(embedded.mesh).ok
     @test mesh_crc(embedded.mesh).sha==
-          "72626ce45c3eeada59b4677203eda234a0bb35b1b75fdacb97c3c2ba8e7ccf05"
+          "9ff058a9fcfbd4c92a6db823a2e3ed9a25fa7998526162d4f52407ed5acfb9ca"
     embedded_mapping=model_periodic_nodes(
         embedded.model,embedded.mesh,1,6)
     @test embedded_mapping.master_entity==5
@@ -601,7 +603,7 @@ end
     @test (fractional_constraint.slave_entity,
            fractional_constraint.master_entity)==(2,4)
     @test mesh_crc(fractional.mesh).sha==
-          "393550fabf46b3bf286058d17df8b7ee344eb5abf05a290b123f99ac80102854"
+          "24267272c06e456695f3f7e19bcf9441e7b4c2701803d5da620a6db44961d6c0"
 
     for (mode,masters,offsets) in (
             (:branch,Dict(10=>30,20=>30),Dict(10=>0.6,20=>0.3)),
@@ -610,8 +612,13 @@ end
         graph=_execute_geo_source(
             _periodic_geo_curve_graph(mode);mesh_dim=2)
         @test validate(graph.mesh).ok
-        @test mesh_crc(graph.mesh).sha==
-              "e33b17bddb9efeb3bdf4b98db04cfe62ab14330c2508ad6c28e63b1bf83606ba"
+        # `:branch` routes both relations onto the same master — its node
+        # numbering differs from `:chain`/`:expressions`, which build the
+        # identical mesh.
+        @test mesh_crc(graph.mesh).sha==Dict(
+            :branch=>"f797a4d444df3ffbb5a8479edc9c76b9e5d370a1f768cab04670156adaa26571",
+            :chain=>"e399fc843f7e6aeec88f2b817a77baf68b867d5224d802796bd88002606a1827",
+            :expressions=>"e399fc843f7e6aeec88f2b817a77baf68b867d5224d802796bd88002606a1827")[mode]
         graph_constraints=model_periodic_constraints(graph.model)
         @test Int.(getproperty.(graph_constraints,:slave_entity))==[10,20]
         @test Int.(getproperty.(graph_constraints,:master_entity))==
@@ -646,7 +653,7 @@ end
     @test cyclic.msg_error_count==0
     @test validate(cyclic.mesh).ok
     @test mesh_crc(cyclic.mesh).sha==
-          "2b8462eb1fd09a3bf785efa963b2eb09c98d6b0a08d6bd49323c991d2b10dc74"
+          "449d138728bd570b1d6c53b3cd5066d29cc1a55f61ee10dcc310256af9b88507"
     cyclic_constraints=model_periodic_constraints(cyclic.model)
     @test Int.(getproperty.(cyclic_constraints,:slave_entity))==[10,20,30]
     @test Int.(getproperty.(cyclic_constraints,:master_entity))==[20,30,10]
@@ -655,7 +662,10 @@ end
         cyclic_mapping=model_periodic_nodes(
             cyclic.model,cyclic.mesh,1,slave_entity)
         @test cyclic_mapping.master_entity==master_entity
-        @test length(cyclic_mapping.slave_nodes)==3
+        # Like the `:chain` links above, the converged cycle carries the
+        # fourth node — embedded point 107 propagates through every
+        # relation.
+        @test length(cyclic_mapping.slave_nodes)==4
         for (index,(slave,master)) in enumerate(zip(
                 cyclic_mapping.slave_nodes,cyclic_mapping.master_nodes))
             actual=Tuple(cyclic.mesh.coords[:,slave])

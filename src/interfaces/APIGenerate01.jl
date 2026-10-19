@@ -486,6 +486,7 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
     end
     iterations=0
     while !isempty(pending)
+        stalled=length(pending)
         for curve in sort!(collect(pending))
             owner=(1,Int32(curve))
             # meshGEdge's skip gates preserve the stored lines. The grading
@@ -541,6 +542,42 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
             delete!(pending,curve)
         end
         isempty(pending) && break
+        if length(pending)==stalled
+            # A stalled pass whose remainder contains a periodic dependency
+            # cycle can never resolve by copying — upstream's retry starves
+            # it. Mesh one seed member natively per cycle so the ordinary
+            # deferred copy converges the rest; the seed keeps its own
+            # grading rather than `_dim01_native_periodic_parameters`'s
+            # master-node projection (no master nodes exist yet).
+            for seed in Model._model_periodic_cycle_seeds(m,pending)
+                owner=(1,Int32(seed))
+                result=Model._model_mesh_curve!(m,seed,options,assembly.caller;
+                    _native_producer=true,_force_native=true)
+                result===:pending && continue
+                if result===:keep
+                    if !(owner in have_cells) && haskey(m.curve_params,seed)
+                        _dim01_emit_curve!(assembly,m,seed,m.curve_params[seed],first_nodes;
+                            reuse=true,high_order=high_order,owned_nodes=owned_nodes,curve_births)
+                        push!(have_cells,owner)
+                    end
+                    delete!(pending,seed)
+                    continue
+                end
+                birth=result isa Model._ModelNativeCurveGrade ? result : nothing
+                params=birth===nothing ? result : birth.parameters
+                m.curve_params[seed]=params
+                done===nothing || push!(done,owner)
+                push!(removed,owner)
+                geometry_parameters=geometry_birth===nothing ? params :
+                    _dim01_geometry_curve_parameters!(geometry_birth,m,seed,params,options,assembly.caller)
+                copied_points=_dim01_extruded_curve_points(assembly,m,seed,params,curve_births)
+                _dim01_emit_curve!(assembly,m,seed,params,first_nodes;
+                    geometry_birth,geometry_parameters,curve_births,endpoint_counts,birth,copied_points)
+                push!(have_cells,owner)
+                delete!(pending,seed)
+            end
+            length(pending)<stalled && continue
+        end
         iterations+=1
         iterations>options.max_retries && break
     end

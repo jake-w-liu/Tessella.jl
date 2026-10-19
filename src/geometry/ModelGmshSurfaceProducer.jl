@@ -220,8 +220,9 @@ end
 # performs against model points.
 function _gmsh_native_surface_forced_vertex!(source::_ModelSurfaceSource,m,
         curve::Int,parameter::Float64,frame,next_tag,caller;
-        surface_tag,ctx_lc)
-    point=_periodic_curve_point(m,curve,parameter,caller)
+        surface_tag,ctx_lc,_periodic_positions=nothing)
+    point=_periodic_forced_curve_point(m,curve,parameter,
+        _periodic_positions,caller)
     scale=max(1.0,hypot(point...))
     tolerance=128eps(Float64)*scale
     matched=0;matched_tag=0
@@ -268,7 +269,8 @@ end
 # interior values land in exactly one cell; each fragment keeps the
 # segment's owner and its boundary/internal classification.
 function _gmsh_native_surface_forced_subdivide!(source::_ModelSurfaceSource,m,
-        forced,frame,next_tag,caller;surface_tag,ctx_lc)
+        forced,frame,next_tag,caller;surface_tag,ctx_lc,
+        _periodic_positions=nothing)
     (forced===nothing || isempty(forced)) && return nothing
     function endpoint_parameter(position,curve,t0,t1,at_start)
         owner=source.owners[position]
@@ -303,7 +305,7 @@ function _gmsh_native_surface_forced_subdivide!(source::_ModelSurfaceSource,m,
                 for parameter in interior
                     push!(chain,_gmsh_native_surface_forced_vertex!(
                         source,m,owner,parameter,frame,next_tag,caller;
-                        surface_tag,ctx_lc))
+                        surface_tag,ctx_lc,_periodic_positions))
                 end
             end
         end
@@ -334,7 +336,8 @@ end
 
 function _gmsh_native_surface_source(m::GeoModel,tag::Int,input,frame,caller;
                                      ctx_lc=0.0,forced=nothing,
-                                     next_tag=nothing)
+                                     next_tag=nothing,
+                                     _periodic_positions=nothing)
     source=_ModelSurfaceSource()
     boundaries=_gmsh_native_surface_curves(m,tag)
     for curve in boundaries
@@ -362,7 +365,7 @@ function _gmsh_native_surface_source(m::GeoModel,tag::Int,input,frame,caller;
         push!(source.occurrence,mesh.entity_data.external_node_tags[row])
     end
     _gmsh_native_surface_forced_subdivide!(source,m,forced,frame,next_tag,
-        caller;surface_tag=tag,ctx_lc)
+        caller;surface_tag=tag,ctx_lc,_periodic_positions)
     return source
 end
 
@@ -705,7 +708,8 @@ end
 function _gmsh_native_initial_surface(m::GeoModel,tag::Int,options,input,
                                        high_water,caller;algorithm=3,size_field=nothing,
                                        element_high_water=UInt64(0),
-                                       forced=nothing)
+                                       forced=nothing,
+                                       _periodic_positions=nothing)
     _surface_type(m,tag)===:plane || throw(ArgumentError(
         "$caller: native initial Surface[$tag] requires its actual Plane parametrization"))
     authority,limit=_gmsh_native_surface_lower_input(m,options,input,high_water,caller)
@@ -722,7 +726,8 @@ function _gmsh_native_initial_surface(m::GeoModel,tag::Int,options,input,
     # lower-product high water; the raised limit feeds later refinements.
     next_tag=Ref{UInt64}(limit)
     source=_gmsh_native_surface_source(m,tag,authority,frame,caller;
-        ctx_lc=options.ctx_lc,forced,next_tag)
+        ctx_lc=options.ctx_lc,forced,next_tag,
+        _periodic_positions)
     limit=next_tag[]
     T=_gmsh_native_surface_initial(source,tag;cleanup_faces=algorithm==3)
     curve_chains=_gmsh_native_surface_curve_chains(source)

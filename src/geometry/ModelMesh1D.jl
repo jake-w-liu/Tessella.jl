@@ -1418,7 +1418,8 @@ end
 # has not been meshed yet (upstream leaves the curve PENDING and retries).
 function _model_mesh_curve!(m::GeoModel,curve::Integer,
                             options::_ModelMesh1DOptions,
-                            caller::AbstractString;_native_producer::Bool=false)
+                            caller::AbstractString;_native_producer::Bool=false,
+                            _force_native::Bool=false)
     record=get(m.discrete,(1,curve),nothing)
     if record!==nothing && !_model_discrete_curve_parametrized(record)
         return :keep   # `_discretization.empty()` upstream — elements kept
@@ -1444,7 +1445,10 @@ function _model_mesh_curve!(m::GeoModel,curve::Integer,
         return _model_curve_extrude_params(m,curve,extrude,options,caller)
     end
     # Periodic slave: copy the master's stored parameters once it is DONE.
-    constraint=get(m.periodic,(1,curve),nothing)
+    # `_force_native` skips the deferred copy — a dependency cycle has no
+    # resolvable member to wait on, so the cycle's seed meshes its own
+    # grading and the ordinary copy converges the remaining members.
+    constraint=_force_native ? nothing : get(m.periodic,(1,curve),nothing)
     if constraint!==nothing
         master=abs(constraint.master_entity)
         haskey(m.curves,master) || haskey(m.discrete,(1,master)) ||
@@ -1542,6 +1546,7 @@ function _model_mesh_curves!(m::GeoModel,options::_ModelMesh1DOptions,
     end
     iter=0
     while !isempty(pending)
+        before=length(pending)
         for curve in sort!(collect(pending))
             result=_model_mesh_curve!(m,curve,options,caller)
             result===:pending && continue
@@ -1549,6 +1554,22 @@ function _model_mesh_curves!(m::GeoModel,options::_ModelMesh1DOptions,
             delete!(pending,curve)
         end
         isempty(pending) && break
+        if length(pending)==before
+            # A stalled pass whose remainder contains a periodic dependency
+            # cycle can never resolve by copying — upstream's retry starves
+            # it. Mesh one seed member natively per cycle so the ordinary
+            # deferred copy converges the rest; Tessella publishes real
+            # node pairs for the converged cycle (documented superset).
+            seeds=_model_periodic_cycle_seeds(m,pending)
+            for seed in seeds
+                result=_model_mesh_curve!(m,seed,options,caller;
+                                          _force_native=true)
+                result===:pending && continue
+                result===:keep || (m.curve_params[seed]=result)
+                delete!(pending,seed)
+            end
+            length(pending)<before && continue
+        end
         iter+=1
         iter>options.max_retries && break
     end
