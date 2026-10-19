@@ -1979,7 +1979,32 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
         hybrid_batch_receipt=_higher_native_hybrid_batch_receipt(assembly,m,hybrid_batch,input,
             meshed,assembly.caller)
     end
-    for tag in (staged ? Int[] : sort!(meshed))
+    volume_tags=staged ? Int[] : sort!(meshed)
+    # PAR01 — `General.NumThreads` detaches runs of independent Regions: each
+    # eligible unit produces its receipt on a transaction copy under
+    # `Threads.@threads`, and the unchanged serial merge below replays or
+    # re-runs each slot in Region order.  `nothing` keeps the exact serial path.
+    parallel_units=_parallel_volume_prepare(m,volume_tags,input,assembly.caller;
+        size_field,scope,extruded,hybrid_batch,staged)
+    parallel_results=parallel_units===nothing ? nothing :
+        fill!(Vector{Any}(undef,length(volume_tags)),nothing)
+    parallel_dirty=Set{Tuple{Int,Int32}}()
+    parallel_last=parallel_units===nothing ? 0 :
+        something(findlast(!isnothing,parallel_units),0)
+    parallel_precise=parallel_units===nothing ? false :
+        GmshLibm._win_cli_precision()
+    for (vi,tag) in enumerate(volume_tags)
+        work=parallel_units===nothing ? nothing : parallel_units[vi]
+        if work!==nothing && parallel_results[vi]===nothing
+            vend=vi
+            while vend<length(volume_tags) && parallel_units[vend+1]!==nothing
+                vend+=1
+            end
+            _parallel_volume_fill!(parallel_results,vi:vend,m,parallel_units,
+                input,options,assembly,parallel_dirty,parallel_precise,
+                geometry_birth;periodic_surface_pairs,optimize_pyramids)
+        end
+        refs=vi<parallel_last ? _parallel_surface_param_refs(m) : nothing
         mesh=extruded===nothing ? nothing : get(extruded.parts,tag,nothing)
         source_rows=nothing;source_row_retained=nothing;source_rows_existing_only=false
         source_cells=nothing;source_cell_max=nothing;alternate=nothing;source_emission=nothing;hybrid_production=nothing
@@ -1991,13 +2016,20 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
                 completed,uid->_higher_geometry_source_point(assembly,geometry_birth,uid),assembly.caller))
         end
         if mesh===nothing
-            production=hybrid_batch===nothing ? mesh_model_volume(m,tag;size_field,
+            production=hybrid_batch===nothing ? (
+                work!==nothing && parallel_results[vi]!==nothing ?
+                _parallel_volume_product(m,work,parallel_results[vi],
+                    parallel_dirty,assembly,options;input,scope,size_field,
+                    periodic_surface_pairs,optimize_pyramids,geometry_birth,
+                    caller=assembly.caller) :
+                mesh_model_volume(m,tag;size_field,
                 _extrude_scope=scope,_extrude_working_model=true,_mesh_input=input,
                 _mesh1d_options=options,_return_volume_production=true,
                 _periodic_surface_pairs=periodic_surface_pairs,
                 _optimize_pyramids=optimize_pyramids,
                 _mesh_node_high_water=assembly.node_max,_mesh_element_high_water=assembly.cell_max,
-                _geometry_points=_higher_geometry_source_points(assembly,geometry_birth)) : hybrid_batch.products[tag]
+                _geometry_points=_higher_geometry_source_points(assembly,geometry_birth))) :
+                hybrid_batch.products[tag]
             production isa Union{Model._ModelVolumeGeometryProduction,Model._ModelNativeHybridVolumeProduction} &&
                 _higher_native_region_surface_order!(assembly,m,tag)
             mesh=production.mesh
@@ -2094,6 +2126,10 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
             push!(geometry_parts,(tag,geometry_mesh,geometry_class,geometry_mapping))
         end
         push!(done,(3,Int32(tag)))
+        # State this Region left behind that a later detached produce still
+        # reads: stored Curve discretizations (embedded-curve lazy grading and
+        # boundary writeback replayed or written during the merge).
+        refs===nothing || _parallel_volume_mark_dirty!(parallel_dirty,m,refs)
     end
     laterals=extruded===nothing ? Set{Int}() : copy(extruded.remesh)
     if scope!==nothing

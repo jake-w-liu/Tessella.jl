@@ -2175,6 +2175,42 @@ open: volume-phase parallelism, broader eligibility and the remaining
 rekey/merge constructor-input transports (`ModelIdentity`, `APIModelMerge`)
 are future slices.
 
+### Parallel detached Region mesh generation under `General.NumThreads` (in progress)
+
+The same detached-transaction pattern now extends to the volume phase:
+`_higher_volume_phase!` keeps the serial `sort!(meshed)` traversal, the
+`_higher_append_part!` merge and every authority/certificate update; with
+`General.NumThreads >= 2` it detaches runs of eligible singleton Regions onto
+per-unit `Model._model_mesh_transaction_copy` models under `Threads.@threads`
+(`src/interfaces/APIParallelVolumes.jl`, mirroring `APIParallelSurfaces.jl`).
+The Region-specific additions over the Surface machinery: each task runs under
+a private `_ModelMesh1DOptions` bundle whose `random_state` Ref starts at the
+run's serial seed position and records its exit value — the shared
+`Mesh.RandomSeed` ledger — so a produce that consumed the seed (the
+`ModelNativeInitialTet` kernel on native-initial/hybrid fills) is adopted only
+when its observed entry seed still equals the live serial position, then the
+exit state is written back; otherwise the slot is stale and re-runs
+serially. `_parallel_volume_rng_free` conservatively predicts RNG-free Regions
+at prepare time (implicit/analytic factory solids — `Box`/`Sphere`/`Cylinder`/
+`Cone`/Boolean — plus factory-encoded shells without embedded constraints);
+every other Region keeps the serial arm, as do transfinite, swept, extrusion-
+gated, dim-3 compound, dim-2/dim-3 periodic, staged-subdivision, hybrid-batch
+and no-new-scope volumes. Fresh receipts replay their detached
+`curve_params` diffs and remap fresh node/cell UIDs by the serial allocator's
+advance; a `node_high_water == base + fresh` invariant certifies the kernel's
+absolute `count+8` numbering never lifted the base (which would not commute
+with the remap). `Mesh.MaxNumThreads3D` caps the Region worker count.
+Byte-identical `mixed_crc`, MSH4 bytes and `validate` for `NumThreads=1` vs 4
+verified on eight Region fixtures in the new standalone
+`test/core/api_parallel_volume_generation_test.jl` — two/three disjoint OCC
+Boxes (genuine detached runs), two disjoint explicit PLC volumes, a
+shared-face volume pair, an explicit+factory split run, transfinite+factory,
+an existing-authority re-mesh and a Mesh 2-only case — **32/32** under
+`julia -t4`. PAR01 remains open: native-input (RNG-consuming) Region fills
+still serialize by eligibility, surface↔volume cross-phase detached
+scheduling, broader eligibility and the `ModelIdentity`/`APIModelMerge`
+constructor-input transports are future slices.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The
