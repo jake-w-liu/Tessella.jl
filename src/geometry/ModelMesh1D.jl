@@ -12,7 +12,9 @@
 # `endpoint_entities` channel.
 # ============================================================================
 
-import ..SizeField: field_value
+import ..SizeField: field_value, metric_at
+using ..SizeField: AbstractAnisoField, Metric3, isotropic_metric,
+                   size_at, _gmsh_metric_intersection, _metric_scale
 
 # Mesh-time option bundle — values mirrored from the `.geo`/API option store
 # each time a model mesh runs, mirroring upstream's global `CTX::mesh` reads.
@@ -49,6 +51,31 @@ _ModelMesh1DOptions(args::Vararg{Any,19}) =
     _ModelMesh1DOptions(args...,Ref(UInt32(1)),1e-12)
 _ModelMesh1DOptions(args::Vararg{Any,21}) =
     _ModelMesh1DOptions(args...,1,0.3,0)
+
+# A copy of the bundle with only the background-field slot replaced — the
+# metric surface producer binds its resolved certificate field so lazily
+# graded lower curves see the metric they must satisfy.
+function _mesh1d_options_with_inner_field(o::_ModelMesh1DOptions,field)
+    return _ModelMesh1DOptions(o.ctx_lc,o.lc_min,o.lc_max,o.lc_factor,
+        o.from_points,o.from_curvature,o.integration_precision,
+        o.min_line_nodes,o.min_circle_nodes,o.min_curve_nodes,
+        o.tolerance_edge_length,o.geometry_tolerance,o.mesh_only_empty,
+        o.mesh_only_visible,o.max_retries,field,o.callback,o.warn,
+        o.report_error,o.random_state,o.random_factor3d,o.optimize,
+        o.optimize_threshold,o.optimize_netgen)
+end
+
+# meshGEdge's `F_Lc_aniso` dispatch: upstream reads the global
+# `CTX::mesh.algo2d == ALGO_2D_BAMG`. Tessella's metric producer additionally
+# requires every retained boundary edge of an algorithm-7 Surface to satisfy
+# a strict metric certificate, so a Curve also grades anisotropically when an
+# incident Surface resolves to algorithm 7 — the producer's requirement is
+# transported into the grading instead of relaxing the certificate.
+function _model_curve_aniso_grading(m::GeoModel,curve::Integer)
+    m.meshing.algorithm_2d==7 && return true
+    return any(face->_surface_mesh_algorithm(m,face)==7,
+               _model_curve_faces(m,curve))
+end
 
 _model_native_random_seed(seed::Integer) = UInt32(mod(seed,Int64(1)<<32))
 
@@ -393,6 +420,103 @@ function _model_curve_bgm(m::GeoModel,curve::Integer,u::Float64,xyz,t0::Float64,
     return lc*options.lc_factor
 end
 
+# `BGM_MeshMetric` for a dim-0 entity — the `F_Lc_aniso` endpoint metric:
+# the scalar `lc` context (CTX::lc, `LC_MVertex_PNTS`, `getMeshSize` — a
+# vertex's prescribed size, already inside `_model_vertex_l1` — and the
+# lcMin/lcMax clamp) folded with the background field tensor by `intersection`,
+# intersected with the vertex curvature metric, then `1/lcFactor²`. Upstream
+# intersects `max_edge_curvature_metric` — a tangent metric per incident edge
+# against a `1e-12` no-constraint start — of which only the tangent component
+# is ever probed by the curve integrand, so the isotropic `l2` substitute is
+# exact for this use (vertices between straight lines carry no constraint).
+function _model_vertex_bgm_metric(m::GeoModel,point::Int,xyz,
+                                  options::_ModelMesh1DOptions,
+                                  caller::AbstractString;
+                                  _native_producer::Bool=false)
+    l1=options.from_points ?
+        _model_vertex_l1(m,point,options.ctx_lc;_native_producer) : GMSH_MAX_SIZE
+    lc=min(l1,GMSH_MAX_SIZE)
+    lc=lc<options.ctx_lc ? lc : options.ctx_lc
+    lc=max(lc,options.lc_min)
+    lc=min(lc,options.lc_max)
+    if lc<=0
+        _model_mesh_error(options,
+            "Wrong mesh element size lc = $lc on point $point")
+        lc=options.ctx_lc
+    end
+    metric=isotropic_metric(lc)
+    inner=options.inner_field
+    if inner!==nothing
+        l4=inner isa AbstractAnisoField ?
+            metric_at(inner,xyz[1],xyz[2],xyz[3],(0,point)) :
+            isotropic_metric(abs(field_value(inner,xyz[1],xyz[2],xyz[3],(0,point))))
+        l4 isa Metric3 || throw(ArgumentError(
+            "BGM_MeshMetric: metric_at returned $(typeof(l4)), not Metric3"))
+        metric=_gmsh_metric_intersection(l4,metric)
+    end
+    if options.from_curvature>0
+        l2=_model_vertex_l2(m,point,options.from_curvature;
+            _native_producer=_native_producer)
+        l2<GMSH_MAX_SIZE &&
+            (metric=_gmsh_metric_intersection(metric,isotropic_metric(l2)))
+    end
+    factor=options.lc_factor
+    (factor!=0 && factor!=1) &&
+        (metric=_metric_scale(metric,inv(factor*factor)))
+    return metric
+end
+
+# `BGM_MeshMetric` for a dim-1 entity at parameter `u` — the `F_Lc_aniso`
+# curve metric: isotropic base `I/lc²` from the scalar context (CTX::lc,
+# `LC_MVertex_PNTS`, `getMeshSize` — always `MAX_LC` for a model curve — and
+# the lcMin/lcMax clamp), `intersection` with the background field tensor (or
+# `I/l3²` for a scalar field) and with the edge curvature metric, then the
+# `1/lcFactor²` scale. Upstream samples the curvature term as the tangential
+# `buildMetricTangentToCurve` metric; only its tangent component is ever
+# probed along the curve, where it equals `I/l2²`, so the isotropic
+# substitute is exact for this use. `prescribedMeshSizeAtParam` and the size
+# callback are scalar `BGM_MeshSize` terms and do not enter the metric.
+function _model_curve_bgm_metric(m::GeoModel,curve::Integer,u::Float64,xyz,
+                                 t0::Float64,t1::Float64,
+                                 options::_ModelMesh1DOptions,
+                                 caller::AbstractString;
+                                 _native_producer::Bool=false,
+                                 _native_geometry=nothing)
+    l1=options.from_points ?
+        _model_curve_l1(m,curve,u,t0,t1,options.ctx_lc;_native_producer) :
+        GMSH_MAX_SIZE
+    lc=min(l1,GMSH_MAX_SIZE)
+    lc=lc<options.ctx_lc ? lc : options.ctx_lc
+    lc=max(lc,options.lc_min)
+    lc=min(lc,options.lc_max)
+    if lc<=0
+        _model_mesh_error(options,
+            "Wrong mesh element size lc = $lc on curve $curve")
+        lc=options.ctx_lc
+    end
+    metric=isotropic_metric(lc)
+    inner=options.inner_field
+    if inner!==nothing
+        l4=inner isa AbstractAnisoField ?
+            metric_at(inner,xyz[1],xyz[2],xyz[3],(1,curve)) :
+            isotropic_metric(abs(field_value(inner,xyz[1],xyz[2],xyz[3],(1,curve))))
+        l4 isa Metric3 || throw(ArgumentError(
+            "BGM_MeshMetric: metric_at returned $(typeof(l4)), not Metric3"))
+        metric=_gmsh_metric_intersection(l4,metric)
+    end
+    if options.from_curvature>0
+        l2=_model_curve_l2(m,curve,u,options.from_curvature;
+            _native_producer=_native_producer,
+            _native_geometry=_native_geometry)
+        l2<GMSH_MAX_SIZE &&
+            (metric=_gmsh_metric_intersection(metric,isotropic_metric(l2)))
+    end
+    factor=options.lc_factor
+    (factor!=0 && factor!=1) &&
+        (metric=_metric_scale(metric,inv(factor*factor)))
+    return metric
+end
+
 # Entity-aware size-field adapter passed to `mesh_curve` as the `field`
 # argument: dim-0 entities evaluate `BGM(vertex)` for the `F_Lc` endpoint
 # rule; curve/unknown contexts fall back to the background field (the
@@ -414,6 +538,30 @@ function field_value(f::_ModelCurveEntityField,x,y,z,
     dim=Int(entity[1]); tag=Int(entity[2])
     dim==0 && return _model_vertex_bgm(f.m,tag,(x,y,z),f.options,f.caller)
     return field_value(f,x,y,z)
+end
+
+# `metric_at` on the same adapter backs the `anisotropic_metric` path: dim-0
+# entities evaluate `BGM_MeshMetric(vertex)` for the upstream endpoint rule.
+# A curve-entity query carries no parameter — the `metric_function` channel
+# supplies the full `BGM_MeshMetric(curve,u,…)` — so it returns the
+# position-only part (the field tensor intersected with the scalar context
+# bound falls out of `intersection`'s own reduction for a missing field).
+function metric_at(f::_ModelCurveEntityField,x,y,z,
+                   entity::Tuple{T,U}) where {T<:Integer,U<:Integer}
+    dim=Int(entity[1]); tag=Int(entity[2])
+    dim==0 && return _model_vertex_bgm_metric(
+        f.m,tag,(x,y,z),f.options,f.caller)
+    inner=f.options.inner_field
+    inner===nothing && return isotropic_metric(GMSH_MAX_SIZE)
+    inner isa AbstractAnisoField && return metric_at(inner,x,y,z,entity)
+    return isotropic_metric(abs(field_value(inner,x,y,z,entity)))
+end
+metric_at(f::_ModelCurveEntityField,x,y,z)=metric_at(f,x,y,z,nothing)
+function metric_at(f::_ModelCurveEntityField,x,y,z,::Nothing)
+    inner=f.options.inner_field
+    inner===nothing && return isotropic_metric(GMSH_MAX_SIZE)
+    inner isa AbstractAnisoField && return metric_at(inner,x,y,z)
+    return isotropic_metric(abs(field_value(inner,x,y,z,nothing)))
 end
 
 # ── Per-curve meshing ────────────────────────────────────────────────────────
@@ -607,6 +755,25 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
     a,b=m.curves[curve]
     closed=a==b
     size_function=u->_model_curve_bgm(m,curve,u,γ(u),t0,t1,options,caller)
+    # Upstream `meshGEdge` switches its integrand to `F_Lc_aniso` when
+    # `CTX::mesh.algo2d == ALGO_2D_BAMG`: the directional curve metric
+    # `BGM_MeshMetric(ge,u,x,y,z)` replaces the scalar size. The curve metric
+    # carries the parameter `u` (vertex-size interpolation and curvature), so
+    # it reaches the kernel through `metric_function` rather than
+    # `metric_at` — and unlike the scalar `F_Lc`, no `size_function` applies.
+    aniso=_model_curve_aniso_grading(m,curve)
+    metric_function=if aniso
+        (u,xyz,entity)->begin
+            dim,tag=entity===nothing ? (1,curve) :
+                (Int(entity[1]),Int(entity[2]))
+            dim==0 ? _model_vertex_bgm_metric(
+                         m,tag,xyz,options,caller;_native_producer) :
+                     _model_curve_bgm_metric(
+                         m,tag,u,xyz,t0,t1,options,caller;_native_producer)
+        end
+    else
+        nothing
+    end
     minimum=_model_minimum_curve_segments(m,curve,options,caller)
     endpoints=((0,a),(0,b))
     # Recombination odd-N forcing (upstream counts N = elements + 1):
@@ -633,7 +800,9 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
     _,parameters=mesh_curve(
         γ,field;t0=t0,t1=t1,closed=closed,
         entity=(1,curve),endpoint_entities=endpoints,
-        size_function=size_function,
+        anisotropic_metric=aniso,
+        size_function=aniso ? nothing : size_function,
+        metric_function=metric_function,
         integration_precision=precision,
         minimum_segments=minimum,force_odd=force_odd,
         _recombine_odd_nodes=odd_nodes,

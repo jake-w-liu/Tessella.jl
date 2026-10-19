@@ -15,7 +15,8 @@ difference is used. `mesh_segment` always uses its exact constant tangent.
 module Mesh1D
 
 using ..SizeField: AbstractSizeField, Metric3, size_at, metric_at,
-                   _metric_displacement
+                   _metric_displacement, _metric_endpoint_displacement,
+                   _coordinate_midpoint
 
 export mesh_curve, mesh_segment, curve_length, metric_length
 
@@ -355,7 +356,7 @@ function _metric_point(γ, derivative, field::AbstractSizeField, t::Float64,
                        t0::Float64, t1::Float64, curve_entity, begin_entity,
                        end_entity, at_begin::Bool, at_end::Bool,
                        anisotropic_metric::Bool, size_function,
-                       caller::AbstractString)
+                       metric_function, caller::AbstractString)
     point = _pt3(γ(t), caller)
     tangent = _curve_tangent(γ, derivative, point, t, t0, t1, caller)
     speed = hypot(tangent[1], tangent[2], tangent[3])
@@ -364,7 +365,12 @@ function _metric_point(γ, derivative, field::AbstractSizeField, t::Float64,
     if anisotropic_metric
         context = at_begin && begin_entity !== nothing ? begin_entity :
                   at_end && end_entity !== nothing ? end_entity : curve_entity
-        metric = metric_at(field, point[1], point[2], point[3], context)
+        # `metric_function(t, point, context)` supplies a parameter-aware
+        # metric (the model's `BGM_MeshMetric(ge,U,...)` needs `U`); the plain
+        # `metric_at` channel covers fields whose metric is positional only.
+        metric = metric_function === nothing ?
+            metric_at(field, point[1], point[2], point[3], context) :
+            metric_function(t, point, context)
         metric isa Metric3 || throw(ArgumentError(
             "$caller: metric_at must return Metric3"))
         lc = _metric_displacement(metric, tangent[1], tangent[2], tangent[3], caller)
@@ -573,14 +579,14 @@ end
 function _metric_points(γ, field::AbstractSizeField, derivative,
                         t0::Float64, t1::Float64, nsample, curve_entity,
                         begin_entity, end_entity, anisotropic_metric::Bool,
-                        size_function, precision::Float64, maxpoints::Int,
-                        mindepth::Int, maxdepth::Int,
+                        size_function, metric_function, precision::Float64,
+                        maxpoints::Int, mindepth::Int, maxdepth::Int,
                         smooth_ratio, smoothing_iterations,
                         caller::AbstractString;_point_store=nothing)
     evaluate(t, at_begin, at_end) = _metric_point(
         γ, derivative, field, t, t0, t1, curve_entity, begin_entity,
         end_entity, at_begin, at_end, anisotropic_metric, size_function,
-        caller)
+        metric_function, caller)
     points = _integration_points(evaluate, t0, t1, nsample, precision,
                                  maxpoints, mindepth, maxdepth, caller;_point_store)
     if smooth_ratio !== nothing
@@ -673,8 +679,8 @@ function metric_length(γ, field::AbstractSizeField; t0::Real=0.0,
         "metric_length")
     points = _metric_points(
         γ, field, derivative, t0, t1, nsample, curve_entity, begin_entity,
-        end_entity, anisotropic_metric, nothing, precision, maxpoints,
-        mindepth, maxdepth, ratio, smoothing_iterations,
+        end_entity, anisotropic_metric, nothing, nothing, precision,
+        maxpoints, mindepth, maxdepth, ratio, smoothing_iterations,
         "metric_length")
     return points[end].p
 end
@@ -805,6 +811,149 @@ function _filter_close_points!(points::Vector{NTuple{3,Float64}},
     return nothing
 end
 
+# `anisotropic_metric` placement contract: every retained edge must satisfy
+# the same max-sampled `metric_edge_length` certificate the metric surface
+# producer applies to boundary cells. Equal marks of the trapezoidal
+# primitive invert to parameters a few ulps past their fair interval — a real
+# ~1e-13 overshoot, not a tolerance mismatch — so each violating interior
+# node is re-bisected to the largest parameter whose left-edge certificate
+# stays within
+#     max((1 - eps) * total / nedge, remaining_certificate / remaining_edges)
+# The average term keeps the bound feasible when the certificate total
+# exhausts the nominal interval count — uniform spacing is then the unique
+# solution — while the `(1 - eps)` cap still biases placement a fixed
+# fraction under the nominal interval whenever slack exists.
+const _METRIC_EDGE_UNDERSHOOT = 1.0e-9
+
+# `metric_edge_length(field, a, b)` with the metric supplied through
+# `metric_of(u, xyz, entity)`: endpoint metrics at `ua`/`ub`, and the chord
+# midpoint sampled at the edge's nominal parameter midpoint — the same three
+# samples the surface producer's boundary certificate takes.
+function _metric_edge_certificate(metric_of, ua, pa, ub, pb, entity,
+                                  caller::AbstractString)
+    midpoint = (_coordinate_midpoint(pa[1], pb[1]),
+                _coordinate_midpoint(pa[2], pb[2]),
+                _coordinate_midpoint(pa[3], pb[3]))
+    m0 = metric_of(ua, pa, entity)
+    m1 = metric_of(ub, pb, entity)
+    mm = metric_of(_convex_coordinate(ua, ub, 0.5), midpoint, entity)
+    (m0 isa Metric3 && m1 isa Metric3 && mm isa Metric3) ||
+        throw(ArgumentError("$caller: metric_at must return Metric3"))
+    return max(_metric_endpoint_displacement(m0, pa, pb, caller),
+               _metric_endpoint_displacement(m1, pa, pb, caller),
+               _metric_endpoint_displacement(mm, pa, pb, caller))
+end
+
+# Largest u ∈ (ua, u0] whose edge (ua → u) certificate meets `bound`;
+# requires cert(ua → u0) > bound.
+function _metric_edge_shrink(metric_of, ua, pa, u0, bound, entity, γ,
+                             caller::AbstractString)
+    lo = ua; hi = u0
+    for _ in 1:64
+        mid = _convex_coordinate(lo, hi, 0.5)
+        (mid == lo || mid == hi) && break
+        _metric_edge_certificate(metric_of, ua, pa, mid, _pt3(γ(mid), caller),
+                                 entity, caller) <= bound ? (lo = mid) : (hi = mid)
+    end
+    return lo
+end
+
+# Largest u ∈ [u0, uhi] whose edge (ua → u) certificate meets `bound`.
+function _metric_edge_grow(metric_of, ua, pa, u0, uhi, bound, entity, γ,
+                           caller::AbstractString)
+    _metric_edge_certificate(metric_of, ua, pa, u0, _pt3(γ(u0), caller),
+                             entity, caller) > bound && return u0
+    _metric_edge_certificate(metric_of, ua, pa, uhi, _pt3(γ(uhi), caller),
+                             entity, caller) <= bound && return uhi
+    lo = u0; hi = uhi
+    for _ in 1:64
+        mid = _convex_coordinate(lo, hi, 0.5)
+        (mid == lo || mid == hi) && break
+        _metric_edge_certificate(metric_of, ua, pa, mid, _pt3(γ(mid), caller),
+                                 entity, caller) <= bound ? (lo = mid) : (hi = mid)
+    end
+    return lo
+end
+
+# Smallest u ∈ [u0, uhi] whose edge (u → ub) certificate meets `bound`;
+# cert(u → ub) is locally decreasing and reaches zero at u == ub.
+function _metric_edge_relieve(metric_of, u0, uhi, ub, pb, bound, entity, γ,
+                              caller::AbstractString)
+    lo = u0; hi = uhi
+    for _ in 1:64
+        mid = _convex_coordinate(lo, hi, 0.5)
+        (mid == lo || mid == hi) && break
+        _metric_edge_certificate(metric_of, mid, _pt3(γ(mid), caller), ub, pb,
+                                 entity, caller) <= bound ? (hi = mid) : (lo = mid)
+    end
+    return hi
+end
+
+# Enforce the per-edge certificate bound on an `anisotropic_metric`
+# placement. `parameters`/`points` hold the inversion placement (open curves
+# already have the end node forced to `t1`); interior nodes are moved only.
+function _undershoot_metric_edges!(γ, metric_of, parameters::Vector{Float64},
+                                   points::Vector{NTuple{3,Float64}},
+                                   t1::Float64, curve_entity, delta::Float64,
+                                   closed::Bool, caller::AbstractString)
+    n = length(parameters)
+    nedge = closed ? n : n - 1
+    nedge >= 2 || return nothing
+    cap = (1 - _METRIC_EDGE_UNDERSHOOT) * delta
+    isfinite(cap) || return nothing
+    endpoint = _pt3(γ(t1), caller)
+    # The fair bound for edge (u_i → u_{i+1}): the conservative cap, raised to
+    # the remaining certificate average so the bound stays feasible when the
+    # certificate total exhausts the nominal interval count.
+    cert_end(i) = _metric_edge_certificate(metric_of, parameters[i], points[i],
+                                           t1, endpoint, curve_entity, caller)
+    bound(i) = max(cap, cert_end(i) / (nedge - i + 1))
+    interior = closed ? n : n - 1
+    for i in 1:interior - 1
+        b = bound(i)
+        _metric_edge_certificate(metric_of, parameters[i], points[i],
+            parameters[i + 1], points[i + 1], curve_entity, caller) <= b &&
+            continue
+        u = _metric_edge_shrink(metric_of, parameters[i], points[i],
+                                parameters[i + 1], b, curve_entity, γ, caller)
+        u > parameters[i] || continue
+        parameters[i + 1] = u
+        points[i + 1] = _pt3(γ(u), caller)
+    end
+    # The forced end node is immovable: when the last edge still exceeds the
+    # share the last interior node was placed under (e.g. the chord
+    # certificate underestimates a curved tail's true edge sum), relax
+    # interior nodes rightward within their own bounds. A residual excess is
+    # the curve's honest under-resolution state — left for the surface
+    # producer to report.
+    for _ in 1:4
+        cert_end(nedge) <= bound(nedge - 1) && return nothing
+        progressed = false
+        for j in nedge - 1:-1:1
+            bnext = j + 1 == nedge ? bound(j) : bound(j + 1)
+            uj1 = parameters[j + 1]
+            next_u, next_p = j + 1 == nedge ? (t1, endpoint) :
+                (parameters[j + 2], points[j + 2])
+            _metric_edge_certificate(metric_of, uj1, points[j + 1], next_u,
+                                     next_p, curve_entity, caller) <= bnext &&
+                continue
+            need = _metric_edge_relieve(metric_of, uj1, next_u, next_u,
+                                        next_p, bnext, curve_entity, γ, caller)
+            cap_u = _metric_edge_grow(metric_of, parameters[j], points[j],
+                                      uj1, next_u, bound(j), curve_entity, γ,
+                                      caller)
+            u = min(need, cap_u)
+            u >= next_u && (u = _convex_coordinate(uj1, next_u, 1 - 1e-6))
+            u > uj1 || continue
+            parameters[j + 1] = u
+            points[j + 1] = _pt3(γ(u), caller)
+            progressed = true
+        end
+        progressed || return nothing
+    end
+    return nothing
+end
+
 """
     mesh_curve(γ, field; t0=0, t1=1, closed=false, nsample=nothing,
                entity=nothing, endpoint_entities=nothing,
@@ -828,7 +977,10 @@ minimum. Closed curves omit the duplicate endpoint.
 `F_Lc`/`F_LcB` curve term — `BGM_MeshSize` evaluated on the curve), replacing
 the field's scalar curve evaluation; endpoint sizes still come from the field
 through `endpoint_entities`, matching Gmsh's `min(BGM(vertex), BGM(curve))`
-endpoint rule. `force_odd` enables filterPoints' even-count truncation used
+endpoint rule. `metric_function(u, xyz, entity)` is the anisotropic analogue —
+the parameter-aware `Metric3` evaluator Gmsh obtains from
+`BGM_MeshMetric(ge, U, …)` — and is only valid with `anisotropic_metric=true`.
+`force_odd` enables filterPoints' even-count truncation used
 when recombination requires an odd node count.
 
 Integration, smoothing, derivative and entity-context keywords have the same
@@ -846,7 +998,8 @@ function mesh_curve(γ, field::AbstractSizeField; t0::Real=0.0,
                     smooth_ratio=_GMSH_SMOOTH_RATIO,
                     max_smoothing_iterations=_GMSH_SMOOTH_ITERATIONS,
                     minimum_segments=nothing,
-                    size_function=nothing, exact_edges=nothing,
+                    size_function=nothing, metric_function=nothing,
+                    exact_edges=nothing,
                     force_odd::Bool=false,
                     _recombine_odd_nodes::Bool=false,
                     _recombination_primitive=nothing,
@@ -867,10 +1020,13 @@ function mesh_curve(γ, field::AbstractSizeField; t0::Real=0.0,
         minimum_segments, max_edges, closed, "mesh_curve")
     anisotropic_metric && size_function !== nothing && throw(ArgumentError(
         "mesh_curve: size_function is only supported with the scalar metric"))
+    !anisotropic_metric && metric_function !== nothing && throw(ArgumentError(
+        "mesh_curve: metric_function requires anisotropic_metric=true"))
     closed && _check_closed_curve(γ, t0, t1)
     integration = _metric_points(
         γ, field, derivative, t0, t1, nsample, curve_entity, begin_entity,
-        end_entity, anisotropic_metric, size_function, precision, maxpoints,
+        end_entity, anisotropic_metric, size_function, metric_function,
+        precision, maxpoints,
         mindepth, maxdepth, ratio, smoothing_iterations,
         "mesh_curve";_point_store)
     total = integration[end].p
@@ -919,6 +1075,14 @@ function mesh_curve(γ, field::AbstractSizeField; t0::Real=0.0,
         # the endpoint, cracking boundaries shared with adjacent entities.
         parameters[end] = t1
         points[end] = _pt3(γ(t1), "mesh_curve curve")
+    end
+    if anisotropic_metric
+        metric_of = metric_function === nothing ?
+            (u, xyz, ent) -> metric_at(field, xyz[1], xyz[2], xyz[3], ent) :
+            metric_function
+        _undershoot_metric_edges!(γ, metric_of, parameters, points, t1,
+                                  curve_entity, total / nedge, closed,
+                                  "mesh_curve")
     end
     if !anisotropic_metric
         _filter_close_points!(points, parameters, γ, field, curve_entity,

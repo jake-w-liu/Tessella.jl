@@ -35,7 +35,8 @@ using ..SizeField: AbstractField, AbstractSizeField, AbstractAnisoField,
                    MinAnisoField, Metric3, metric_size, PostViewField,
                    field_value, size_at,
                    AutomaticMeshSizeField,
-                   GMSH_MAX_SIZE, _gmsh_bbox_characteristic_length, _metric_scale
+                   GMSH_MAX_SIZE, _gmsh_bbox_characteristic_length, _metric_scale,
+                   _metric_displacement
 import ..SizeField: metric_at, field_value
 using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
 using ..Mesh3D: tetrahedralize, mesh_boolean, recover_segment3, recover_triangle3,
@@ -66,7 +67,7 @@ using ..Mesh1D: mesh_curve, curve_length, _adaptive_points, _length_point,
     _invert_primitive, _IntegrationPoint, _GMSH_INTEGRATION_PRECISION,
     _GMSH_MIN_INTEGRATION_DEPTH, _GMSH_MAX_INTEGRATION_DEPTH,
     _DEFAULT_MAX_INTEGRATION_POINTS, _convex_coordinate, _gmsh_edge_count,
-    _filter_close_points!
+    _filter_close_points!, _undershoot_metric_edges!
 using ..Transform: _affine_coordinate, _transform_homogeneous,
     _periodic_affine_3x4, _periodic_affine_input
 using ..Predicates: orient2, orient3

@@ -257,8 +257,15 @@ end
         @test endpoint6_params ≈
             [0.0,0.2314865831435398,0.5544886346204482,1.0] atol=2e-11 rtol=0
         @test length(endpoint7) == 3
+        # Gmsh's raw primitive inversion marks the interior node at
+        # 0.499999991616791; that mark leaves the closing edge ~1.2e-8 over
+        # the strict max-sampled metric certificate the anisotropic surface
+        # producer enforces on retained boundary cells. The conservative
+        # certificate post-pass therefore relaxes the node rightward to
+        # 0.49999999770603226 — a deliberate ~6e-9 divergence from the
+        # upstream placement, confined to `anisotropic_metric=true`.
         @test endpoint7_params ≈
-            [0.0,0.499999991616791,1.0] atol=2e-11 rtol=0
+            [0.0,0.49999999770603226,1.0] atol=2e-11 rtol=0
 
         # End-to-end .geo background fields exercise Gmsh's model-size wrapper
         # and post-placement filterPoints pass. FinishUpBoundingBox pads a unit

@@ -48,9 +48,65 @@ function _metric_surface_admit(m,tag,caller)
     return nothing
 end
 
+# A stored Curve discretization is stale for this producer when any edge it
+# would emit fails the same strict certificate the retained boundary is
+# checked against below: the world chord of every consecutive parameter pair,
+# measured under `field` in this Surface's entity context, must not exceed
+# `target`.
+function _metric_boundary_curve_stale(m,curve,params,tag,field,target,caller)
+    γ=u->_model_curve_point(m,curve,u,caller)
+    previous=γ(first(params))
+    for u in Iterators.drop(params,1)
+        point=γ(u)
+        metric_edge_length(field,previous,point;entity=(2,tag))<=target ||
+            return true
+        previous=point
+    end
+    return false
+end
+
 function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
                                 input,options,node_high_water,element_high_water,caller)
-    authority,limit=_gmsh_native_surface_lower_input(m,options,input,node_high_water,caller)
+    # Boundary cells that are lazily graded while building the lower input
+    # must satisfy this producer's strict `metric_edge_length` certificate
+    # against `field`. The curve graders only see `options.inner_field` and
+    # the `F_Lc_aniso` dispatch on `m.meshing.algorithm_2d`, so transport the
+    # certificate requirement into the grading context: bind the resolved
+    # field as the background field and select the BAMG integrand for the
+    # duration of the lower-dimensional pass. `m` is the working model; the
+    # stored flag is restored afterwards so unrelated surfaces keep their
+    # caller's resolution.
+    options=_mesh1d_options_with_inner_field(options,field)
+    saved_algorithm=m.meshing.algorithm_2d
+    m.meshing.algorithm_2d=7
+    local authority, limit
+    try
+        # A boundary Curve may already carry parameters graded under a
+        # different sizing context — e.g. `mesh_model_surface`'s
+        # `Mesh1D`-before-`Mesh2D` front pass (`_attribute_forced_parameters`)
+        # grades lazily under the model's scalar options before this
+        # producer's dispatch, and `reuse_curve_params` then keeps them
+        # verbatim. A retained boundary cell must already satisfy the strict
+        # certificate below, so re-grade any stored boundary discretization
+        # whose edges violate it; the lower pass then derives it under the
+        # transported metric. Periodic dependencies of a stale curve are
+        # dropped too — a slave's params are only a copy of its master's.
+        input===nothing && for loop_id in m.surfaces[tag],signed in m.loops[loop_id]
+            curve=abs(signed)
+            params=get(m.curve_params,curve,nothing)
+            params===nothing && continue
+            _metric_boundary_curve_stale(m,curve,params,tag,field,target,
+                                         caller) || continue
+            delete!(m.curve_params,curve)
+            for dep in _model_curve_mesh_dependencies(m,curve)
+                delete!(m.curve_params,dep)
+            end
+        end
+        authority,limit=_gmsh_native_surface_lower_input(m,options,input,
+            node_high_water,caller)
+    finally
+        m.meshing.algorithm_2d=saved_algorithm
+    end
     frame=_gmsh_native_surface_frame(m,tag,options,caller)
     source=_gmsh_native_surface_source(m,tag,authority,frame,caller;ctx_lc=options.ctx_lc)
     length(source.tags)<=node_limit || throw(ArgumentError(
