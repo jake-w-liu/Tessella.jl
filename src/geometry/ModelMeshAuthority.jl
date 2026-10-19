@@ -57,11 +57,12 @@ _model_mesh_missing_cell_binding(tag,::Type{UInt64})=iszero(tag)
 _model_mesh_missing_cell_binding(tag,::Type{Union{Nothing,UInt64}})=isnothing(tag)
 _model_mesh_live_cell_tags(tags)=[Union{Nothing,UInt64}[tag for tag in block] for block in tags]
 function _ModelMeshAuthority(mesh,products,done,private_rank,native_inputs,carrier,
-        carrier_rows,producer_rows,carrier_cells::Vector{Vector{UInt64}})
+        carrier_rows,producer_rows,carrier_cells::Vector{Vector{UInt64}},
+        surface_constructor_inputs=Dict{Tuple{Int,Int32},MixedMesh}())
     bindings=carrier===mesh ? _model_mesh_live_cell_tags(carrier_cells) :
         [Union{Nothing,UInt64}[tag==0 ? nothing : tag for tag in block] for block in carrier_cells]
     return _ModelMeshAuthority(mesh,products,done,private_rank,native_inputs,carrier,
-        carrier_rows,producer_rows,bindings)
+        carrier_rows,producer_rows,bindings,surface_constructor_inputs)
 end
 
 function _model_mesh_carrier_blocks(carrier)
@@ -458,9 +459,11 @@ function _model_mesh_with_producer_rows(authority::_ModelMeshAuthority,producer_
             throw(ArgumentError("$caller: producer rows for $owner do not bind unique actual vertices"))
         rows[owner]=Int32.(positions)
     end
+    # The mesh and its products are unchanged, so retained Surface constructor
+    # inputs stay bound to the same actual products.
     return _ModelMeshAuthority(authority.mesh,authority.products,authority.done,
         authority.private_rank,authority.native_inputs,authority.carrier,authority.carrier_rows,rows,
-        authority.carrier_cells)
+        authority.carrier_cells,authority.surface_constructor_inputs)
 end
 
 function _model_mesh_with_curve_births(authority::_ModelMeshAuthority,births;

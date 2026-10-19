@@ -995,6 +995,7 @@ end
 # identities continue the generation's allocator; the stored parameter
 # samples follow so later consumers see the updated discretization.
 function _higher_surface_curve_remesh!(assembly,m,chains,curve_births)
+    remeshed=Tuple{Int,Int32}[]
     for curve in sort!(collect(keys(chains)))
         owner=(1,curve)
         positions=Int[]
@@ -1025,6 +1026,7 @@ function _higher_surface_curve_remesh!(assembly,m,chains,curve_births)
                 _dim01_next_tag!(assembly,false);source_tag=nothing,physical)
         end
         curve_births===nothing || (curve_births[owner]=copy(chain))
+        push!(remeshed,owner)
         haskey(m.curves,Int(curve)) || continue
         bounds=Model._model_curve_param_bounds(m,Int(curve),assembly.caller)
         m.curve_params[Int(curve)]=Float64[
@@ -1041,7 +1043,7 @@ function _higher_surface_curve_remesh!(assembly,m,chains,curve_births)
             end
             for (index,row) in enumerate(rows)]
     end
-    return nothing
+    return remeshed
 end
 
 function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
@@ -1115,12 +1117,42 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
         delete!(constructor_inputs,(2,Int32(tag)))
     end
     units=_higher_surface_units(m,_generate_units(m,2,sort!(meshed)),assembly.caller)
-    for tags in units
+    # PAR01 — `General.NumThreads` detaches runs of independent singleton
+    # Surfaces: each eligible unit produces its receipt on a transaction copy
+    # under `Threads.@threads`, and the unchanged serial merge below replays or
+    # re-runs each slot in unit order.  `nothing` keeps the exact serial path.
+    parallel_units=_parallel_surface_prepare(m,units,assembly.caller;
+        metric_surface,scope,periodic_masters,ordinary_sources,
+        unmerged_nonew_sources,size_field,geometry_birth)
+    parallel_results=parallel_units===nothing ? nothing :
+        fill!(Vector{Any}(undef,length(units)),nothing)
+    parallel_dirty=Set{Tuple{Int,Int32}}()
+    parallel_last=parallel_units===nothing ? 0 :
+        something(findlast(!isnothing,parallel_units),0)
+    parallel_precise=parallel_units===nothing ? false :
+        GmshLibm._win_cli_precision()
+    for (ui,tags) in enumerate(units)
+        work=parallel_units===nothing ? nothing : parallel_units[ui]
+        if work!==nothing && parallel_results[ui]===nothing
+            vend=ui
+            while vend<length(units) && parallel_units[vend+1]!==nothing
+                vend+=1
+            end
+            _parallel_surface_fill!(parallel_results,ui:vend,m,parallel_units,
+                input,options,assembly,parallel_dirty,parallel_precise,
+                geometry_birth)
+        end
+        refs=ui<parallel_last ? _parallel_surface_param_refs(m) : nothing
         products=metric_surface!==nothing ? [(only(tags),mesh_model_surface(m,only(tags),size_field;
             max_metric_edge=metric_surface.max_metric_edge,max_nodes=metric_surface.max_nodes,
             max_triangles=metric_surface.max_triangles,_mesh_input=input,_mesh1d_options=options,
             _mesh_node_high_water=assembly.node_max,_mesh_element_high_water=assembly.cell_max,
-            _return_surface_production=true))] : length(tags)==1 ? [(tags[1],mesh_model_surface(m,tags[1];
+            _return_surface_production=true))] : work!==nothing &&
+            parallel_results[ui]!==nothing ?
+            _parallel_surface_products(m,work,parallel_results[ui],
+                parallel_dirty,assembly;input,scope,options,size_field,
+                geometry_birth,caller=assembly.caller) :
+            length(tags)==1 ? [(tags[1],mesh_model_surface(m,tags[1];
             size_field=size_field,_extrude_scope=scope,_mesh_input=input,_mesh1d_options=options,
             _mesh_node_high_water=assembly.node_max,_return_surface_production=true,
             _mesh_element_high_water=assembly.cell_max,
@@ -1150,8 +1182,14 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
                 source_row_retained=swept===nothing ? nothing : swept.retained,
                 source_rows_existing_only=swept!==nothing,
                 native_orphan_births=ordinary===nothing ? nothing : native_orphan_births)
-            source_binding===nothing || _higher_surface_curve_remesh!(
-                assembly,m,source_binding.curve_chains,curve_births)
+            if source_binding!==nothing
+                # A grown recovered chain invalidates every detached produce
+                # still waiting on the consumed Curve's stored discretization.
+                for owner in _higher_surface_curve_remesh!(
+                        assembly,m,source_binding.curve_chains,curve_births)
+                    push!(parallel_dirty,owner)
+                end
+            end
             constraint=get(m.periodic,(2,tag),nothing)
             if periodic_pairs!==nothing && constraint!==nothing && source_binding!==nothing
                 master=Int(constraint.master_entity)
@@ -1192,10 +1230,20 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
                     transfinite_events=source_binding.constructor_mesh===nothing &&
                         isempty(source_binding.element_tags) &&
                         haskey(m.meshing.transfinite_surfaces,tag)
+                    # A re-meshed Surface keeps its predecessor rows in the
+                    # merge-order product (owned vertices with no remaining
+                    # cell incidence), while `_model_mesh_with_surface_constructor_inputs`
+                    # re-validates every stored constructor against the
+                    # producer-order view. Bind the input against that same
+                    # view whenever the merge-order product can carry rows the
+                    # production did not emit.
+                    merged_product=get(input.products,(2,Int32(tag)),nothing)
                     actual_product=Model._model_mesh_product(input,2,tag;
                         caller=assembly.caller,
                         producer_order=source_binding.constructor_mesh!==nothing || transfinite_events ||
-                            metric_surface!==nothing)
+                            metric_surface!==nothing ||
+                            (merged_product!==nothing &&
+                             length(merged_product.rows)!=length(source_binding.node_tags)))
                     if transfinite_events
                         constructor=_higher_transfinite_constructor_input(actual_product,
                             assembly.cells[first_cell_event:end],assembly,tag)
@@ -1217,6 +1265,11 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
                 end
             end
         end
+        # State this unit left behind that a later detached produce still
+        # reads: stored discretizations (writeback, grading, remesh) and
+        # relocated source nodes — remesh owners already landed above.
+        refs===nothing || _parallel_surface_mark_dirty!(parallel_dirty,m,
+            assembly,products,refs)
     end
     return input,scope,retained
 end
@@ -2819,6 +2872,97 @@ function _higher_rebind_plan_authority!(plan,previous;
     plan.model.meshing.mesh_authority=Model._ModelMeshAuthority(authority.mesh,
         authority.products,authority.done,authority.private_rank,copy(native_inputs),
         authority.carrier,authority.carrier_rows,produced,authority.carrier_cells)
+    if previous!==nothing && !isempty(previous.surface_constructor_inputs) &&
+            hasproperty(plan,:node_tag_map)
+        # Retained Surface constructor receipts carry the previous mesh's node
+        # and cell UIDs; rebind them through this plan's tag maps and re-validate
+        # against the rebound products so a lost identity cannot slip through.
+        element_tag_map=hasproperty(plan,:element_tag_map) ? plan.element_tag_map : nothing
+        actual_data=authority.mesh.entity_data
+        actual_positions=Dict(uid=>Int32(row) for (row,uid) in
+            enumerate(actual_data.external_node_tags))
+        rebound_constructors=Dict{Tuple{Int,Int32},MixedMesh}()
+        for (owner,constructor) in previous.surface_constructor_inputs
+            product=get(authority.products,owner,nothing)
+            product===nothing && continue
+            # `_model_mesh_product(producer_order=true)` rejects a product whose
+            # cell-incident rows fell out of the rebound producer vector; such a
+            # reshaped owner drops its receipt like the pre-rebind behavior did.
+            produced=get(authority.producer_rows,owner,nothing)
+            produced===nothing || begin
+                covered=Set(produced)
+                all(block->all(node->product.rows[node] in covered,block.nodes),
+                    product.blocks)
+            end || continue
+            # Mirror `_model_surface_constructor_binding`'s per-cell signature
+            # (msh family, owner, physical tag, node-UID support) so a product
+            # that was reshaped by this plan — an order pass, a remesh, an
+            # import — drops its receipt like the pre-rebind behavior did
+            # instead of throwing during the strict bind below.
+            cells=Dict{UInt64,Tuple{Int,Int32,Int32,Vector{UInt64}}}()
+            for (block,labels) in zip(product.blocks,product.element_tags)
+                block.msh in (2,3) || (cells=nothing;break)
+                for (column,label) in enumerate(labels)
+                    cells[label]=(Int(block.msh),owner[2],block.tags[column],
+                        sort!(actual_data.external_node_tags[
+                            product.rows[block.nodes[:,column]]]))
+                end
+            end
+            cells===nothing && continue
+            copy_constructor=deepcopy(constructor)
+            data=copy_constructor.entity_data
+            data===nothing && continue
+            for (row,tag) in enumerate(data.external_node_tags)
+                data.external_node_tags[row]=get(plan.node_tag_map,tag,UInt64(0))
+            end
+            for labels in data.external_element_tags,(row,tag) in enumerate(labels)
+                labels[row]=element_tag_map===nothing ? tag :
+                    get(element_tag_map,tag,UInt64(0))
+            end
+            # The receipt's remapped node set must be exactly the producer-order
+            # product's node set — remesh/order passes change it, retained
+            # products keep it — and every bound vertex must keep its
+            # coordinates, owner and parametric row.
+            actual_rows=produced===nothing ? product.rows : produced
+            matches=length(data.external_node_tags)==
+                length(Set(data.external_node_tags)) &&
+                Set(data.external_node_tags)==
+                Set(actual_data.external_node_tags[actual_rows])
+            if matches
+                for (row,uid) in enumerate(data.external_node_tags)
+                    arow=get(actual_positions,uid,Int32(0))
+                    arow==0 && (matches=false;break)
+                    all(axis->isequal(copy_constructor.coords[axis,row],
+                            authority.mesh.coords[axis,arow]),1:3) &&
+                        data.node_entities[row]==actual_data.node_entities[arow] &&
+                        isequal(data.node_parametric[row],
+                            actual_data.node_parametric[arow]) ||
+                        (matches=false;break)
+                end
+            end
+            seen=Set{UInt64}()
+            for (block,labels,owners) in zip(constructor.blocks,
+                    data.external_element_tags,data.block_entities)
+                matches || break
+                block.msh in (2,3) &&
+                    length(labels)==length(owners)==size(block.nodes,2) || (matches=false;break)
+                for (column,label) in enumerate(labels)
+                    label in seen && (matches=false;break)
+                    push!(seen,label)
+                    support=sort!(data.external_node_tags[block.nodes[:,column]])
+                    get(cells,label,nothing)==
+                        (Int(block.msh),owners[column],block.tags[column],support) ||
+                        (matches=false;break)
+                end
+            end
+            (matches && length(seen)==length(cells)) || continue
+            rebound_constructors[owner]=copy_constructor
+        end
+        isempty(rebound_constructors) || (plan.model.meshing.mesh_authority=
+            Model._model_mesh_with_surface_constructor_inputs(
+                plan.model.meshing.mesh_authority,rebound_constructors;
+                caller="higher plan authority Surface constructor rebind"))
+    end
     return plan
 end
 
@@ -3083,9 +3227,12 @@ function _higher_bind_completed_dim01!(m,authority,parts,caller;
             dimension==1 || continue
             produced[(1,Int32(tag))]=Int32[rows[row] for row in part_rows]
         end
+        # `rebound` keeps its mesh and tag space, so any retained Surface
+        # constructor inputs stay bound to the same products.
         plan.model.meshing.mesh_authority=Model._ModelMeshAuthority(rebound.mesh,
             rebound.products,rebound.done,rebound.private_rank,rebound.native_inputs,
-            rebound.carrier,rebound.carrier_rows,produced,rebound.carrier_cells)
+            rebound.carrier,rebound.carrier_rows,produced,rebound.carrier_cells,
+            rebound.surface_constructor_inputs)
     end
     if producer_geometry_parameters!==nothing
         length(producer_geometry_parameters)==length(rows) || throw(ArgumentError(

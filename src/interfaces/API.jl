@@ -8717,6 +8717,7 @@ include("APIGenerate01Geometry.jl")
 include("APITaggedMutations.jl")
 include("APIGenerationLabels.jl")
 include("APIGenerateHigher.jl")
+include("APIParallelSurfaces.jl")
 include("APIMetricSurface.jl")
 include("APINativeRecombine.jl")
 include("APINativeRecombineViews.jl")
@@ -12034,8 +12035,9 @@ Post-processing plugins operating on the session views (Gmsh `plugin` module
 counterpart). `set_number(name, option, value)` and `set_string(name, option,
 value)` configure a registered plugin's options; `run(name)` executes it.
 Supported plugins: `Integrate`, `MinMax`, `Probe`, `Skin`, `ExtractElements`,
-`Transform`, `Remove`, `Smooth`, `NewView`, `Gradient`, `CutPlane`. Setting the
-numeric option `Run` to a nonzero value executes the plugin immediately.
+`Transform`, `Remove`, `Smooth`, `NewView`, `Gradient`, `CutPlane`, `CutSphere`,
+`Warp`, `MathEval`, `Scal2Vec`. Setting the numeric option `Run` to a nonzero
+value executes the plugin immediately.
 """
 module plugin
 

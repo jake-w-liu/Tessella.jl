@@ -171,8 +171,11 @@ function _geo_dim01_generation_carrier!(plan,previous,caller)
         "$caller: generated dim01 carrier loses explicit vertex bindings"))
     rebound=Model._model_mesh_authority(mesh,authority.done;caller,
         private_rank=authority.private_rank,carrier,carrier_rows=rows,carrier_cells=cells)
+    # `rebound` reuses `authority.mesh` unchanged, so any retained Surface
+    # constructor inputs stay bound to the same products.
     plan.model.meshing.mesh_authority=Model._ModelMeshAuthority(rebound.mesh,
         rebound.products,rebound.done,rebound.private_rank,authority.native_inputs,
-        carrier,rows,authority.producer_rows,rebound.carrier_cells)
+        carrier,rows,authority.producer_rows,rebound.carrier_cells,
+        authority.surface_constructor_inputs)
     return merge(plan,(geometry_parts=parts,geometry_part_rows=remaps))
 end

@@ -2139,6 +2139,42 @@ against live gmsh 4.15.2 on this machine.
   block `If/EndIf` parses correctly — it is unreachable in the official file
   only because the OCC/`PartitionMesh` statements it guards are not.
 
+### Parallel detached Surface mesh generation under `General.NumThreads` (2026-10-19)
+
+Devin landed the first PAR01 mesh-*generation* slice: with
+`General.NumThreads >= 2`, `_higher_surface_phase!` detaches runs of eligible
+singleton Surfaces onto per-unit `Model._model_mesh_transaction_copy` models
+under `Threads.@threads` (`src/interfaces/APIParallelSurfaces.jl`). Each
+prepared unit records its dependency footprint (boundary/embedded Curves and
+Points plus dim-1 periodic partners); a merged unit marks the footprint dirty
+only when it actually rewrote `m.curve_params` (boundary writeback, lazy
+grading, recovered-chain remesh) or relocated consumed source nodes. Stale or
+unsupported slots re-run the identical live serial call; fresh slots replay
+their detached `curve_params` diffs and remap fresh UIDs by the amount the
+serial allocator advanced since the batch ran. Compounds, periodic relations,
+extrusion sources/gates, no-new scopes, QuadTri hybrids, volume-embedded
+sheets, size fields, user size callbacks and geometry overlays stay serial by
+eligibility, so the merge-order `_higher_append_part!` publication, authority
+and certificate path is unchanged. The detached path also exposed and fixed a
+pre-existing authority lifecycle defect: several `_ModelMeshAuthority`
+reconstructions silently dropped `surface_constructor_inputs` (carrier swaps
+in `GeoExec`'s working model, geometry carrier and coordinate publish;
+producer-row rebinding in `ModelMeshAuthority`; the plan rebind in
+`_higher_rebind_plan_authority!`), which broke a second `Mesh 3` generation
+on recombined/hybrid volumes — the field is now carried wherever the mesh tag
+space is preserved, and genuinely remapped tags are rebound through
+`node_tag_map`/`element_tag_map` and re-validated. Byte-identical CRC and
+MSH4 output verified for `NumThreads=1` vs 4 on seven fixtures: independent
+disjoint surfaces, a shared-curve box (Mesh 2 and Mesh 3), a transfinite box,
+mixed native+transfinite+recombine, an existing-authority re-mesh and a
+recombined box — the last one previously failing serially. The new standalone
+`test/core/api_parallel_surface_generation_test.jl` passes **28/28** under
+`julia -t4`; the parallel validation/quality file stays 37/37, the hybrid
+cube functional 35/35 and the retained-surface carrier 68/68. PAR01 remains
+open: volume-phase parallelism, broader eligibility and the remaining
+rekey/merge constructor-input transports (`ModelIdentity`, `APIModelMerge`)
+are future slices.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

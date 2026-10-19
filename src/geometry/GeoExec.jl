@@ -8110,9 +8110,12 @@ function _geo_mesh_working_model(m,context)
         detached=working.meshing.mesh_authority
         # The geometry carrier is an input owned by this context. Retain its
         # identity while copying the actual products that the plan can mutate.
+        # The carrier swap keeps `detached.mesh` and its tag space, so the
+        # retained Surface constructor inputs stay bound to the same products.
         working.meshing.mesh_authority=Model._ModelMeshAuthority(detached.mesh,
             detached.products,detached.done,detached.private_rank,detached.native_inputs,
-            context.mesh,detached.carrier_rows,detached.producer_rows,detached.carrier_cells)
+            context.mesh,detached.carrier_rows,detached.producer_rows,detached.carrier_cells,
+            detached.surface_constructor_inputs)
     end
     _geo_sync_meshing_options!(working,context)
     return working
@@ -8339,9 +8342,12 @@ function _geo_recombined_mixed_carrier!(plan,previous,original,caller)
             data_sections=original.data_sections,partition_data=original.partition_data)
     end
     authority=plan.model.meshing.mesh_authority
+    # The geometry carrier swap keeps `authority.mesh` and its products, so the
+    # retained Surface constructor inputs stay bound to the same products.
     plan.model.meshing.mesh_authority=Model._ModelMeshAuthority(authority.mesh,
         authority.products,authority.done,authority.private_rank,authority.native_inputs,
-        carrier,rows,authority.producer_rows,carrier_cells)
+        carrier,rows,authority.producer_rows,carrier_cells,
+        authority.surface_constructor_inputs)
     return carrier
 end
 
@@ -9654,9 +9660,12 @@ function _geo_publish_mesh_coordinates!(m,context,coordinates,caller)
             product=Model._model_mesh_product(authority,owner[1],Int(owner[2]);caller)
             inputs[owner]=product===nothing ? input : product
         end
+        # The coordinate rebuild shares the previous entity data and tag space,
+        # so retained Surface constructor inputs stay bound to the same products.
         authority=Model._ModelMeshAuthority(authority.mesh,authority.products,
             authority.done,authority.private_rank,inputs,carrier,authority.carrier_rows,
-            previous.producer_rows,previous.carrier_cells)
+            previous.producer_rows,previous.carrier_cells,
+            previous.surface_constructor_inputs)
         positions=Dict(tag=>row for (row,tag) in enumerate(mesh.entity_data.external_node_tags))
         for (_,record) in Model._discrete_mesh_records_model(m)
             updated=copy(record.node_coords);changed=false

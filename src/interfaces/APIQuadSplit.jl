@@ -68,9 +68,12 @@ function _native_quad_split_carrier(plan,previous,splits,caller)
     end
     carrier=previous.carrier
     node_tags,bindings=_native_quad_split_carrier_bindings(previous,caller)
+    # `rebound_previous` keeps the previous mesh and products, so retained
+    # Surface constructor inputs stay bound to the same products.
     rebound_previous=Model._ModelMeshAuthority(previous.mesh,previous.products,
         previous.done,previous.private_rank,previous.native_inputs,carrier,
-        previous.carrier_rows,previous.producer_rows,bindings)
+        previous.carrier_rows,previous.producer_rows,bindings,
+        previous.surface_constructor_inputs)
     affected=any(tag->haskey(splits,tag),Iterators.flatten(bindings))
     if !affected
         rebound,rows=Model._model_mesh_rebound_carrier(rebound_previous,plan.mesh;
