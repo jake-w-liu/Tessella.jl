@@ -2303,7 +2303,10 @@ function _higher_surface_geometry_input(authority,owner,caller)
     product=get(authority.products,owner,nothing)
     product===nothing && return nothing
     any(block->!isempty(block.nodes),product.blocks) || return nothing
-    all(block->block isa ElementBlock && block.msh==2,product.blocks) || return nothing
+    # A recombined transfinite product carries quadrilateral blocks; the
+    # geometry view keeps them as a MixedMesh rather than folding the part.
+    all(block->block isa ElementBlock && block.msh in (2,3),
+        product.blocks) || return nothing
     source=authority.mesh
     data=source.entity_data
     produced=get(authority.producer_rows,owner,nothing)
@@ -2329,18 +2332,26 @@ function _higher_surface_geometry_input(authority,owner,caller)
     end
     all(row->haskey(inverse,row),product.rows) || throw(ArgumentError(
         "$caller: actual entity $owner changed without a complete producer row binding"))
-    count=sum(size(block.nodes,2) for block in product.blocks;init=0)
-    triangles=Matrix{Int32}(undef,3,count)
-    physical=Vector{Int32}(undef,count)
-    column=0
-    for block in product.blocks,index in axes(block.nodes,2)
-        column+=1
-        for slot in 1:3
-            triangles[slot,column]=inverse[product.rows[block.nodes[slot,index]]]
+    geometry=if all(block->block.msh==2,product.blocks)
+        count=sum(size(block.nodes,2) for block in product.blocks;init=0)
+        triangles=Matrix{Int32}(undef,3,count)
+        physical=Vector{Int32}(undef,count)
+        column=0
+        for block in product.blocks,index in axes(block.nodes,2)
+            column+=1
+            for slot in 1:3
+                triangles[slot,column]=inverse[product.rows[block.nodes[slot,index]]]
+            end
+            physical[column]=block.tags[index]
         end
-        physical[column]=block.tags[index]
+        Mesh(source.coords[:,rows];tris=triangles,tri_tag=physical)
+    else
+        blocks=ElementBlock[ElementBlock(block.msh,
+            Int32[inverse[product.rows[block.nodes[row,index]]]
+                  for row in axes(block.nodes,1), index in axes(block.nodes,2)],
+            copy(block.tags)) for block in product.blocks]
+        MixedMesh(source.coords[:,rows],blocks)
     end
-    geometry=Mesh(source.coords[:,rows];tris=triangles,tri_tag=physical)
     return (mesh=geometry,node_tags=copy(data.external_node_tags[rows]),
         node_entities=copy(data.node_entities[rows]),
         element_tags=[copy(tags) for tags in product.element_tags])
@@ -2624,12 +2635,26 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
             input===nothing && continue
             geometry=input.mesh
             mapping=Int32[assembly.node_positions[tag] for tag in input.node_tags]
-            class=_higher_geometry_part_class(geometry,2,Int(owner[2]),input.node_entities)
+            class=if geometry isa MixedMesh
+                _mixed_classification(geometry,(2,Int32(owner[2])),
+                    [(2,Int32(owner[2]))],input.node_entities,
+                    Dict{Tuple{Int,Int32},Vector{Int32}}(),
+                    Dict{Int,Vector{Int32}}(Int(block.msh)=>
+                        fill(Int32(owner[2]),size(block.nodes,2))
+                        for block in geometry.blocks))
+            else
+                _higher_geometry_part_class(geometry,2,Int(owner[2]),
+                    input.node_entities)
+            end
             surfaces[Int(owner[2])]=(Int(owner[2]),geometry,class,mapping)
-            geometry_cells[geometry]=[Union{Nothing,_Dim01Cell}[],
-                Union{Nothing,_Dim01Cell}[retained_cells[tag] for tags in
-                    input.element_tags for tag in tags],
-                Union{Nothing,_Dim01Cell}[]]
+            geometry_cells[geometry]=geometry isa MixedMesh ?
+                Vector{Union{Nothing,_Dim01Cell}}[
+                    Union{Nothing,_Dim01Cell}[retained_cells[tag] for tag in tags]
+                    for tags in input.element_tags] :
+                Vector{Union{Nothing,_Dim01Cell}}[Union{Nothing,_Dim01Cell}[],
+                    Union{Nothing,_Dim01Cell}[retained_cells[tag] for tags in
+                        input.element_tags for tag in tags],
+                    Union{Nothing,_Dim01Cell}[]]
         end
         volumes=dimension==3 ? geometry_parts :
             Tuple{Int,Union{Mesh,MixedMesh},_MeshClassification,Vector{Int32}}[]

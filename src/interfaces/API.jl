@@ -2681,7 +2681,13 @@ function _generate_native_lookup_live(dim::Integer)
         authority=source_model.meshing.mesh_authority
         preserve_geometry=iszero(OPTIONS["Mesh.MeshOnlyEmpty"]) &&
             (previous===nothing || previous isa Mesh ||
-             (authority!==nothing && authority.carrier isa Mesh))
+             (authority!==nothing && authority.carrier isa Mesh) ||
+             # A returned non-simplex geometry carrier copy is still the
+             # geometry view; its distinct authority carrier proves origin.
+             (authority!==nothing && authority.mesh!==nothing &&
+              authority.carrier isa MixedMesh && authority.carrier!==authority.mesh &&
+              previous isa MixedMesh && previous.entity_data===nothing &&
+              isequal(previous.coords,authority.carrier.coords)))
         # Lower-dimensional generation must not infer the unrelated volume
         # producer tree. Resolve the higher planner only on this executed route.
         plan=Base.inferencebarrier(_generate_higher_plan)(source_model,actual,actual_class,dimension,

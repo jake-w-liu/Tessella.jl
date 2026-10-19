@@ -8142,7 +8142,11 @@ function _geo_mesh_actual_higher(m,dim,context,caller)
     previous=m.meshing.mesh_authority
     preserve_geometry=dim>=2 && !only_empty &&
         (context.mesh===nothing || context.mesh isa Mesh ||
-         (previous!==nothing && previous.carrier isa Mesh))
+         (previous!==nothing && previous.carrier isa Mesh) ||
+         # A retained non-simplex geometry carrier is still the geometry view.
+         (previous!==nothing && previous.mesh!==nothing &&
+          previous.carrier!==nothing && previous.carrier!==previous.mesh &&
+          context.mesh===previous.carrier))
     plan=Model._model_mesh_generate_higher(working,context.mesh,context.mesh_parts,
         context.mesh_part_rows,context.mesh_node_owner,dim,
         _geo_mesh_1d_options(working,context,caller),caller;

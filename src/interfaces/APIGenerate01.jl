@@ -1469,6 +1469,19 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
             _periodic_surface_order_links(source_mesh,mesh,class,assembly.caller;
                 node_tag_map,element_tag_map,parent_receipt=periodic_parent_receipt)))
     end
+    # A periodic slave that meshes through its own Transfinite run stores only
+    # the relation marker — the node map materializes in the classified
+    # geometry projection. A rebuild over a link-free carrier must re-emit that
+    # marker the same way the dim-0/dim-1 relations above are re-derived.
+    emitted_surfaces=Set{Int}(Int(link.slave_entity) for link in links if link.dim==2)
+    for ((dim,slave),constraint) in sort!(collect(m.periodic);by=first)
+        dim==2 || continue
+        slave in emitted_surfaces && continue
+        haskey(m.meshing.transfinite_surfaces,slave) || continue
+        any(owner->owner==(2,Int32(slave)),node_entities) || continue
+        push!(links,Elements.MixedPeriodicLink(2,constraint.slave_entity,
+            constraint.master_entity,Int32[],Int32[];affine=constraint.affine))
+    end
     if !isempty(links)
         mesh=MixedMesh(coords,blocks;physical_names=m.physical_names,entity_data=data,
                        elementary_entities=block_owners,periodic_links=links)

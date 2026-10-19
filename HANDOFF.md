@@ -4136,7 +4136,24 @@ Files: `src/geometry/ModelExtrude.jl` (new), `src/geometry/Model.jl`,
   native Julia mesher with no external dependencies.
 
 Previous increment: **classified projection of recombined volume parts**
-(`d53490f`).
+(`d53490f`), followed by the **two-pass carrier rebuild repair**
+(2026-10-20): `preserve_geometry` recognizes retained bare-`MixedMesh`
+carriers (GeoExec + `API._generate_native_lookup_live`),
+`_dim01_geometry_birth` keeps emitter coordinates for bare carriers,
+`_higher_surface_geometry_input` retains recombined `msh==3` products as
+`MixedMesh` receipt parts, `_dim01_finish!` re-emits the dim-2 transfinite
+periodic marker on link-free rebuilds, and `_model_carrier_domain_surface`
+certifies carrier-bound inputs against the carrier's own boundary so the
+exact-coordinate fill certificate shares the input's evaluation convention
+(no tolerance added). `geo_constraints_test.jl` is fully green, including
+the periodic recombined box `(2,2,1,16)` link and the five-face recombined
+prism through `geometry=true` + `mesh_dim=3`; `geo_mesh_dim_test.jl` 44/44,
+carrier cells 219/219, emitted projection 14/14, compact prism 27/27. The
+remaining `geo_periodic_test.jl` (3), `geo_mesh_geometry_view_test.jl`
+(2f+1e) and `geo_quadtri_nonew_test.jl` (464/38f/1e) failures are
+byte-identical at baseline `0ebc00e` — pre-existing defects, tracked in
+STATUS; the `periodic_surface_volume` slave-5 20-vs-21 interior-node
+shortfall is a surface-production gap, not a periodic-copy loss.
 
 <details>
 <summary>Earlier increment detail (classified recombined projection)</summary>

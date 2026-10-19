@@ -1681,6 +1681,12 @@ end
     @test only(surface_links).master_entity==1
     @test length(only(surface_links).slave_nodes)==16
 
+    # The retained recombined surfaces keep their quad blocks in the
+    # geometry carrier across the two-pass rebuild.
+    slave_part=geo_entity_mesh(execution,2,2;geometry=true)
+    @test slave_part isa MixedMesh
+    @test _block_counts(slave_part)[3]==9
+
     # Physical groups ride through quad surface blocks and hex cells.
     execution=_execute_constraint_source(_GEO_BOX * raw"""
         Physical Surface(10) = {1,3,5};

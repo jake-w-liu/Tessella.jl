@@ -6350,6 +6350,11 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;
     if nonew===nothing
         domain_surface=explicit_geometry===nothing ?
             _volume_surface(m,volume,caller) : explicit_geometry.surface
+        # A geometry-receipt input carries the carrier's coordinate convention
+        # — emitter arithmetics can differ by an ulp from a fresh boundary
+        # re-mesh on slanted model edges — so certify against the carrier's
+        # own typed boundary when one exists.
+        domain_surface=_model_carrier_domain_surface(m,volume,domain_surface,caller)
         fills_volume,fill_reason=_certify_surface_fill(domain_surface,mesh)
         fills_volume || throw(ArgumentError(
             "$caller: input volume mesh does not fill Volume[$volume] — $fill_reason"))
@@ -9173,6 +9178,76 @@ function _volume_boundary_faces(mesh::MixedMesh)
         end
     end
     return faces
+end
+
+# The fill certificate compares exact coordinates, so its domain must share
+# the input's evaluation convention. When the authority retains a distinct
+# bare geometry carrier — the merged per-entity coordinate view receipt parts
+# are cut from — that carrier is the boundary realization the input claims to
+# fill. Rebuild the domain from the carrier's own typed surface cells;
+# anything the carrier cannot attest keeps the caller's domain.
+function _model_carrier_domain_surface(m::GeoModel,volume::Int,fallback,caller::AbstractString)
+    authority=m.meshing.mesh_authority
+    authority===nothing && return fallback
+    carrier=authority.carrier
+    carrier isa MixedMesh && carrier.entity_data===nothing &&
+        carrier!==authority.mesh || return fallback
+    actual=authority.mesh
+    actual isa MixedMesh && actual.entity_data!==nothing || return fallback
+    length(authority.carrier_cells)==length(carrier.blocks) || return fallback
+    data=actual.entity_data
+    cell_owner=Dict{UInt64,Tuple{Int,Int32}}()
+    for (block,owners,uids) in zip(actual.blocks,data.block_entities,
+                                   data.external_element_tags)
+        block isa ElementBlock || continue
+        for column in axes(block.nodes,2)
+            cell_owner[uids[column]]=(msh_dimension(Int(block.msh)),owners[column])
+        end
+    end
+    boundary=Set{Tuple{Int,Int32}}(
+        (2,Int32(abs(surface))) for surface in
+        _model_volume_boundary_surfaces(m,volume,caller))
+    remap=Dict{Int32,Int32}()
+    local_rows=Int32[]
+    function local_row(row)
+        return get!(remap,row) do
+            push!(local_rows,row);Int32(length(local_rows))
+        end
+    end
+    faces=NTuple{3,Int32}[]
+    for (block,cell_uids) in zip(carrier.blocks,authority.carrier_cells)
+        block isa ElementBlock || continue
+        msh_dimension(Int(block.msh))==2 || continue
+        width=size(block.nodes,1)
+        width in (3,4) || return fallback
+        for column in axes(block.nodes,2)
+            uid=cell_uids[column]
+            uid===nothing && return fallback
+            owner=get(cell_owner,uid,nothing)
+            owner===nothing && return fallback
+            owner in boundary || continue
+            a=local_row(block.nodes[1,column])
+            b=local_row(block.nodes[2,column])
+            c=local_row(block.nodes[3,column])
+            push!(faces,(a,b,c))
+            if width==4
+                # Same 1-3 fold `_volume_boundary_faces` uses — both triangles
+                # stay coplanar so the diagonal is a region-internal edge.
+                d=local_row(block.nodes[4,column])
+                push!(faces,(a,c,d))
+            end
+        end
+    end
+    isempty(faces) && return fallback
+    coords=Matrix{Float64}(undef,3,length(local_rows))
+    for (index,row) in enumerate(local_rows)
+        coords[:,index].=carrier.coords[:,row]
+    end
+    tris=Matrix{Int32}(undef,3,length(faces))
+    for (cell,face) in enumerate(faces)
+        tris[:,cell].=face
+    end
+    return Mesh(coords;tris=tris)
 end
 
 # Per-face meshing inside a volume PLC: planar (and ruled/tric) faces go

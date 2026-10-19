@@ -2211,6 +2211,60 @@ still serialize by eligibility, surface↔volume cross-phase detached
 scheduling, broader eligibility and the `ModelIdentity`/`APIModelMerge`
 constructor-input transports are future slices.
 
+### Two-pass carrier rebuild of recombined/transfinite periodic volumes (2026-10-20)
+
+Deep-debug repair of the `.geo` two-pass path (`Mesh` statement plus a
+`mesh_dim` post-step) over geometry receipts, exposed by the
+`geo_constraints` periodic/prism blocks. Four coupled defects, all in
+carrier/receipt transport — no certificate was weakened:
+
+1. `preserve_geometry` in `GeoExec._geo_mesh_actual_higher` and
+   `API._generate_native_lookup_live` required a `Mesh` carrier, so a retained
+   bare `MixedMesh` geometry carrier (recombined quads, embedded cells) was
+   treated as actual state: pass-2 produced no receipt, `model_to_mixed` took
+   the actual early-return, and stored periodic links were the only ones
+   visible. Both predicates now recognize a retained distinct carrier the way
+   the rest of the file does (`carrier===context.mesh` /
+   `carrier!==mesh` identity plus a bare-view coordinate check).
+2. `_dim01_geometry_birth` early-returned an empty ledger for a bare
+   `MixedMesh` carrier although its `data===nothing` fallbacks already
+   implement that case, so pass-2 receipts lost the emitter coordinate
+   convention and fill certification tripped on ~1-ulp curve evaluations.
+3. `_higher_surface_geometry_input` accepted only all-`msh==2` products,
+   silently dropping every recombined `msh==3` side surface from the rebuilt
+   carrier. It now emits a `MixedMesh` geometry part per retained
+   quad-carrying product (local node remap, per-block cell traces,
+   `_mixed_classification`).
+4. `_certify_surface_fill` compared a carrier-convention input against a
+   fresh `mesh_model_surface` boundary — a third evaluation convention that
+   differs by one ulp on slanted/reversed curve parameterizations. New
+   `_model_carrier_domain_surface` rebuilds the certification domain from the
+   carrier's own typed boundary cells (1-3 quad fold, same convention as the
+   input), with conservative fallbacks whenever the authority cannot attest
+   the boundary.
+5. `_dim01_finish!` now re-emits the dim-2 transfinite periodic *marker*
+   (empty node map materialized later by the classified projection) when a
+   rebuild regenerates over a link-free carrier — the same re-derivation the
+   block already does for dim-0/dim-1 relations.
+
+Verified: `geo_constraints_test.jl` fully green including the previously
+failing periodic recombined box (`(2,2,1,16)` link through
+`geometry=true`+`mesh_dim=3`) and the five-face recombined prism;
+`geo_mesh_dim_test.jl` 44/44; `geo_mesh_carrier_cells_test.jl` 219/219;
+`api_explicit_emitted_projection_test.jl` 14/14;
+`api_compact_prism_functional_test.jl` 27/27; a new assertion pins that the
+retained recombined surface receipt keeps its quad block. Baseline
+comparisons at `0ebc00e` confirm the remaining failures are pre-existing:
+`geo_periodic_test.jl` (3 failures incl. the `periodic_surface_volume`
+slave-5 = 20-vs-21 interior-node deficit — both master and slave carry 20,
+so it is a surface-production shortfall, not a periodic-copy drop),
+`geo_mesh_geometry_view_test.jl` (2 P2 pin mismatches + 1 `Curve[6]`
+surface-loop validation error, identical output), `geo_quadtri_nonew_test.jl`
+(identical 464/38f/1e incl. the `Curve[6]` family), and
+`geo_mesh_affine_carrier_projection_test.jl` errors at `open_geo!` on an
+extensionless `mktemp` path before any meshing. These stay open defects for
+the next increments.
+
 ### Current verified batch and Devin transfer (2026-10-11)
 
 The user requested a complete unfinished-work handoff. The

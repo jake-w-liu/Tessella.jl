@@ -11,7 +11,6 @@ function _dim01_geometry_birth(previous)
     previous===nothing && return birth
     previous.mesh!==nothing && previous.carrier isa Union{Mesh,MixedMesh} || return birth
     data=previous.carrier isa MixedMesh ? previous.carrier.entity_data : nothing
-    previous.carrier isa MixedMesh && data===nothing && return birth
     actual_data=previous.mesh.entity_data
     actual_data===nothing && return birth
     for (slot,row) in enumerate(previous.carrier_rows)
