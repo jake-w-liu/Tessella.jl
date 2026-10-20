@@ -60,9 +60,21 @@ occur once on each of two distinct surfaces`). Three coupled gaps hid this:
    catalog families). `retained_b4` certificates still use the B4 path.
 
 Verified: a 2×2 `AutoCoherence=0` `QuadTriNoNewVerts` sweep now meshes to a
-valid 97-node result where it previously threw `Curve[6`. Merged
-(`AutoCoherence=1`) sweeps are unaffected — the strict certificate succeeds
-first, so the unmerged fallback never engages.
+valid 97-node result where it previously threw `Curve[6`, and the
+`endpoint_identity` fixture certifies at a `2^50` offset with exact unit
+swept volume (`total=1//1`). Merged (`AutoCoherence=1`) sweeps are unaffected —
+the strict certificate succeeds first, so the unmerged fallback never engages
+(`_merged` repro: 36 nodes, valid). `geo_quadtri_nonew_test.jl` is unchanged at
+its documented `464/38f/1e` baseline.
+
+**Remaining Curve[6] sub-family (not this fix):** the unmerged admission
+requires `spec.type===:translate`. Deliberately-invalid *rotation* or
+self-intersecting sweeps (`folded_hex_source`, helical, full-revolution guards
+in `geo_quadtri_nonew_test.jl`) are still rejected by the surface-loop
+certificate before reaching their expected domain error (Jacobian positivity /
+disjointness / intersection). Extending unmerged admission to rotate-spec
+topology is a separate feature — those error-ordering assertions remain in the
+tracked backlog.
 
 ### Surface constructor receipts across `set_order` + pre-existing transfinite coordinate drift (2026-10-20)
 
