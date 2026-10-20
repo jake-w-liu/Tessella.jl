@@ -24,6 +24,56 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Surface constructor receipts across `set_order` + pre-existing transfinite coordinate drift (2026-10-20)
+
+**Fixed and pushed (`25f1a9f`).** `generate(2); set_order(2); generate(3)` on a
+recombined/hybrid PLC volume failed with `ArgumentError: mesh_model_volume:
+hybrid boundary lacks its owned Surface constructor vector`. Root cause:
+`_higher_rebind_plan_authority!` rebound `surface_constructor_inputs` only
+against *linear* Surface blocks (`block.msh in (2,3)`), so after `set_order(2)`
+elevated products to P2 (Tri6/Quad9, `msh 9/10`) every retained constructor
+receipt was silently dropped — leaving `generate(3)` unable to rebuild
+`first_order_constructor_inputs` for the hybrid-quad volume path. The fix
+introduces a first-order corner skeleton: `_model_mesh_first_order_layout` /
+`_model_mesh_first_order_skeleton` project elevated blocks to their linear
+family (Tri6→Tri3, Quad9→Quad4), keeping corner nodes and owned orphan rows
+while dropping midnodes; `_model_mesh_product(...; first_order=true)` exposes
+the skeleton before producer-order remapping; `_model_surface_constructor_binding`
+skeletonizes the actual product so receipts bind to the corner support; and the
+higher-plan rebind now remaps receipt node/element tags through the plan's tag
+maps and re-validates against the bound authority via the real binding (dropping
+receipts only when a product is genuinely remeshed or identity fails — the prior
+permissive semantics preserved). All six lifecycle sequences verified
+(`g2_g3`, `g2_so2_g3`, `g23_so2`, `g2_so2_g2_g3`, `g2_so2_so1_g3`, direct `g3`)
+with `ctor_inputs=6` retained. New regression
+`test/interfaces/api_setorder_hybrid_lifecycle_test.jl` 15/15; neighboring
+hybrid cube 35/35, mixed cache 130/130, periodic hybrid 47/47, higher-order
+default 5/5 — all green. Files: `src/geometry/ModelMeshAuthority.jl`,
+`src/interfaces/APIGenerateHigher.jl`, the new test.
+
+**Newly characterized pre-existing defect (open).** `api_p2_certification_test.jl`
+testset *"Real primary compaction preserves coincident component supports"* errors
+at the `only(...)` exact-match lookup (line ~435) because interior and boundary
+**first-order** transfinite node coordinates carry ~1e-12 placement error: a
+coincident two-surface `.geo` transfinite fixture (`Transfinite Curve{...}=3`)
+stores boundary node `(2,0)` as `1.9999999999947684` and the surface center as
+`2.0000000000015032` where exact affine placement (`2.0`) is available and
+upstream Gmsh divides straight `Line`s exactly. `set_order(2)`'s `p2_trimesh`
+midpoints then faithfully inherit the endpoint drift, so the shared-edge midnode
+lands at `0.9999999999973842` instead of `1.0` and the `==[1.0,1.0]` filter finds
+nothing. Verified **pre-existing** at baseline `74ee1e6` (independent worktree,
+no `25f1a9f` changes) — not a regression from the receipt fix. The elevation
+itself routes through `_apply_mesh_order`→`p2_trimesh` (exact `_midpoint_coordinate`);
+the `native_frame` plane parametrization (`_gmsh_native_surface_parameters`,
+`_surface_metric_lift`) is exact orthonormal. The residue enters upstream of
+`set_order`, in the first-order transfinite division/boundary-point placement
+(`_model_curve_transfinite_native_params` / `mesh_transfinite_patch` path), which
+applies a parametric/iterative step where a straight `:line` division should be
+exact. Scope of fix: make the `:line`/planar transfinite node placement exact
+(affine `t`-division), or relax the test's `==` to a tolerance if upstream Gmsh
+also emits the residue — needs a Gmsh 4.15.2 reference check to decide which is
+faithful.
+
 ### Nested STEP product-usage DAGs (2026-10-11)
 
 Devin completed checklist CAD01. `BRepStepRelationships.jl` expands a
