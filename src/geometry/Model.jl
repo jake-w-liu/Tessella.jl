@@ -5961,17 +5961,29 @@ function _model_volume_boundary_surfaces(
     orient_cavities::Bool=true,certify_shells::Bool=true)
     boundaries=Int[]
     seen=Set{Int}()
+    # Unmerged (Geometry.AutoCoherence=0) sweeps own their copied Curves once
+    # per surface, so a valid volume's literal shell cannot satisfy the merged
+    # incidence certificate. The unmerged-sweep admission certifies it instead.
+    unmerged=false
     for (shell_index,shell) in pairs(m.volumes[volume])
         haskey(m.surface_loops,shell) || throw(ArgumentError(
             "$caller: Volume[$volume] references unknown Surface Loop[$shell]"))
         surfaces=m.surface_loops[shell]
-        certify_shells && _validate_surface_loop(m,surfaces,caller)
+        if certify_shells && !unmerged
+            try
+                _validate_surface_loop(m,surfaces,caller)
+            catch error
+                error isa ArgumentError || rethrow()
+                _extrude_nonew_unmerged_b4_incidence(m,volume,caller) || rethrow()
+                unmerged=true
+            end
+        end
         shell_sign=orient_cavities && shell_index>1 ? -1 : 1
         for signed_surface in surfaces
             surface=abs(signed_surface)
             haskey(m.surfaces,surface) || throw(ArgumentError(
                 "$caller: Surface Loop[$shell] references unknown Surface[$surface]"))
-            certify_shells && surface in seen && throw(ArgumentError(
+            certify_shells && !unmerged && surface in seen && throw(ArgumentError(
                 "$caller: Surface[$surface] belongs to multiple Volume[$volume] shells"))
             push!(seen,surface)
             push!(boundaries,shell_sign*signed_surface)

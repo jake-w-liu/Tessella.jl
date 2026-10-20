@@ -269,6 +269,40 @@ function _extrude_nonew_certify_boundary(volume,surfaces,counts,
     return boundary
 end
 
+# The generic unmerged-NoNew identity binder certifies every catalog family.
+# Each family provides its own face-bucket capacity and whether its typed
+# shell carries oriented interior macrofaces; mirror the per-family dispatch
+# used by `_extrude_nonew_complete_plan`.
+function _extrude_nonew_catalog_face_capacity(catalog,volume)
+    catalog isa _ExtrudeNoNewQuadPatchCatalog &&
+        return _extrude_nonew_quad_patch_face_capacity(catalog)
+    catalog isa _ExtrudeNoNewQuadStripCatalog &&
+        return _extrude_nonew_quad_strip_face_capacity(catalog)
+    catalog isa _ExtrudeNoNewThreeQuadStripCatalog &&
+        return _extrude_nonew_three_quad_strip_face_capacity(catalog)
+    catalog isa _ExtrudeNoNewFourQuadStripCatalog &&
+        return _extrude_nonew_four_quad_strip_face_capacity(catalog)
+    catalog isa _ExtrudeNoNewDynamicGridCatalog &&
+        return _extrude_nonew_dynamic_grid_face_capacity(catalog)
+    catalog isa _ExtrudeNoNewTwoTriCatalog &&
+        return (volume isa Mesh ? 16 : 7)*length(catalog.layer_refs)+2
+    return 0
+end
+
+_extrude_nonew_catalog_oriented_internal(catalog)=
+    catalog isa Union{_ExtrudeNoNewTwoTriCatalog,_ExtrudeNoNewQuadPatchCatalog,
+        _ExtrudeNoNewQuadStripCatalog,_ExtrudeNoNewThreeQuadStripCatalog,
+        _ExtrudeNoNewFourQuadStripCatalog,_ExtrudeNoNewDynamicGridCatalog}
+
+# The admitted unmerged-NoNew families: every catalog the generic identity
+# binder can certify. The generic single-quad catalog carries no face capacity.
+const _EXTRUDE_NONEW_UNMERGED_CATALOG_TYPES=Union{
+    _ExtrudeNoNewCatalog,_ExtrudeNoNewTwoTriCatalog,
+    _ExtrudeNoNewQuadPatchCatalog,_ExtrudeNoNewQuadStripCatalog,
+    _ExtrudeNoNewThreeQuadStripCatalog,_ExtrudeNoNewFourQuadStripCatalog,
+    _ExtrudeNoNewRectGridCatalog,_ExtrudeNoNewB4StripCatalog,
+    _ExtrudeNoNewB4Free.Catalog}
+
 function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
                                       caller::AbstractString;
                                       min_angle_deg::Real=25.0,

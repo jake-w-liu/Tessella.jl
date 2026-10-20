@@ -24,6 +24,46 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Unmerged `Geometry.AutoCoherence=0` NoNew sweep admission (Curve[6] + non-B4 identity) (2026-10-21)
+
+**Root cause of the `Curve[6]` surface-loop error.** A `QuadTriNoNewVerts`
+extrusion under `Geometry.AutoCoherence=0` intentionally retains *unmerged*
+copied topology: each extruded lateral edge owns its copied Curve exactly once
+instead of being shared between two surfaces. The volume's literal shell then
+cannot satisfy the merged-incidence surface-loop certificate (`Curve[k] must
+occur once on each of two distinct surfaces`). Three coupled gaps hid this:
+
+1. `_model_volume_boundary_surfaces` — the single choke point every caller
+   (higher surface/volume phases, OCC-curved enumeration, the NoNew planner
+   itself) uses to enumerate + certify a volume's boundary — applied the strict
+   merged-incidence certificate unconditionally. Any valid unmerged sweep threw
+   `Curve[6]` before the dedicated unmerged admission could run.
+   **Fix:** when `_validate_surface_loop` rejects a shell, the function now
+   checks `_extrude_nonew_unmerged_b4_incidence`; if the operation is a
+   certified unmerged sweep it proceeds with `certify_shells=false` (the
+   unmerged admission *is* the certificate for this topology). Genuinely
+   malformed volumes rethrow the original diagnostic unchanged.
+
+2. `_extrude_nonew_unmerged_b4_incidence` hardcoded `mode=:b4_strip` (a 1×N
+   source strip). A 2×2 rectangular transfinite source — a valid unmerged
+   sweep — was rejected. **Fix:** the shape gate now accepts `:rectangular`
+   sources as well.
+
+3. `_higher_nonew_identity_classification` accepted only the indexed B4
+   catalogs (`B4Strip`/`B4Free`) and read `.face_capacity` off the catalog
+   struct. A 2×2 source builds a `_ExtrudeNoNewQuadPatchCatalog` (no
+   `face_capacity` field) → "requires its indexed B4 constructor".
+   **Fix:** added `Model._extrude_nonew_catalog_face_capacity` /
+   `_extrude_nonew_catalog_oriented_internal` helpers (mirroring the
+   per-family dispatch in `_extrude_nonew_complete_plan`) and broadened the
+   admitted-union to `_EXTRUDE_NONEW_UNMERGED_CATALOG_TYPES` (all NoNew
+   catalog families). `retained_b4` certificates still use the B4 path.
+
+Verified: a 2×2 `AutoCoherence=0` `QuadTriNoNewVerts` sweep now meshes to a
+valid 97-node result where it previously threw `Curve[6`. Merged
+(`AutoCoherence=1`) sweeps are unaffected — the strict certificate succeeds
+first, so the unmerged fallback never engages.
+
 ### Surface constructor receipts across `set_order` + pre-existing transfinite coordinate drift (2026-10-20)
 
 **Fixed and pushed (`25f1a9f`).** `generate(2); set_order(2); generate(3)` on a

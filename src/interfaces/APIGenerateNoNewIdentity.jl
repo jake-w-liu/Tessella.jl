@@ -15,8 +15,8 @@ function _higher_nonew_identity_classification(assembly,m,mesh,input,scope,dimen
     completed=get(scope.volumes,volume,nothing)
     completed isa Model._ExtrudeNoNewCompletePlan || throw(ArgumentError(
         "$caller: unmerged NoNew product lacks its typed complete scope"))
-    completed.catalog isa Union{Model._ExtrudeNoNewB4StripCatalog,Model._ExtrudeNoNewB4Free.Catalog} ||
-        throw(ArgumentError("$caller: unmerged NoNew identity requires its indexed B4 constructor"))
+    completed.catalog isa Model._EXTRUDE_NONEW_UNMERGED_CATALOG_TYPES ||
+        throw(ArgumentError("$caller: unmerged NoNew identity requires its catalog constructor"))
     Model._extrude_nonew_scope_contract(m,volume,caller)
     boundary=Model._extrude_nonew_boundary_surfaces(m,volume,caller)
     source=abs(m.meshing.extrude_sources[(3,volume)][2])
@@ -28,12 +28,15 @@ function _higher_nonew_identity_classification(assembly,m,mesh,input,scope,dimen
         "$caller: unmerged NoNew product is absent from its selected scope"))
     emitted=Model._extrude_nonew_projection_lookup(mesh,(volume=expected,),caller;dimension)
     retained_b4=Model._extrude_nonew_retained_b4_catalog(completed.catalog)
+    face_capacity=Model._extrude_nonew_catalog_face_capacity(
+        completed.catalog,completed.volume)
     proof=retained_b4 ? Model._extrude_nonew_retained_b4_certificate(
         m,volume,dimension==3 ? mesh : completed.volume,
         completed.surfaces,completed.catalog,caller;
-        face_capacity=completed.catalog.face_capacity) : nothing
+        face_capacity) : nothing
     retained_b4 || Model._extrude_nonew_certify_boundary(completed.volume,completed.surfaces,caller;
-        oriented_internal=true,face_capacity=completed.catalog.face_capacity)
+        oriented_internal=Model._extrude_nonew_catalog_oriented_internal(completed.catalog),
+        face_capacity)
     input isa Model._ModelMeshAuthority && input.mesh!==nothing ||
         throw(ArgumentError("$caller: unmerged NoNew operation lacks current lower authority"))
     actual=input.mesh;data=actual.entity_data

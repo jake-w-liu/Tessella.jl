@@ -118,7 +118,8 @@ function _extrude_nonew_unmerged_b4_incidence(m::GeoModel,t::Int,caller)
         all(curve->haskey(m.curves,abs(curve)),original) || return false
     b4=_extrude_is_nonew(params) && spec!==nothing && spec.type===:translate &&
         haskey(m.surfaces,source) &&
-        _extrude_nonew_rect_grid_shape(m,source,4,caller;mode=:b4_strip)!==nothing
+        (_extrude_nonew_rect_grid_shape(m,source,4,caller;mode=:b4_strip)!==nothing ||
+         _extrude_nonew_rect_grid_shape(m,source,4,caller;mode=:rectangular)!==nothing)
     b4 || return false
     # Unknown entities, repeated members and other incidence defects retain
     # the original CAD diagnostic. Only actual one-owner copied Curve records

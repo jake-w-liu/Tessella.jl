@@ -7998,7 +7998,11 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
         boundary_surfaces=Set{Int}()
         if dim==3
             for tag in keys(m.volumes)
-                for signed in _model_volume_boundary_surfaces(m,tag,caller)
+                # Only the declared boundary list is needed for the OCC-curved
+                # side-wall skip; the strict shell certification belongs to the
+                # volume-mesh path, which admits valid unmerged sweep topology.
+                for signed in _model_volume_boundary_surfaces(m,tag,caller;
+                        certify_shells=false)
                     push!(boundary_surfaces,abs(signed))
                 end
             end
