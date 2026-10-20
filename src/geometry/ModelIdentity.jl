@@ -534,10 +534,19 @@ function _model_identity_mesh_authority(previous::_ModelMeshAuthority,dimension,
     carrier=previous.carrier===previous.mesh ? actual :
         _model_identity_mesh_metadata(previous.carrier,dimension,old_tag,new_tag;
                                       public_curve_endpoints=carrier_curve_endpoints)
+    # Retagging preserves the mesh's node/element UID space, so a Surface
+    # constructor receipt stays bound to the same product it was emitted
+    # against; only its key and internal owner references move. Mirror
+    # `native_inputs` — dropping the field here broke a second generate(3)
+    # on retagged hybrid/recombined volumes (same signature as the
+    # `_higher_rebind_plan_authority!` order-elevation drop).
+    constructors=Dict{Tuple{Int,Int32},MixedMesh}(
+        rekey(owner)=>_model_identity_mesh_metadata(mesh,dimension,old_tag,new_tag)
+        for (owner,mesh) in previous.surface_constructor_inputs)
     return _ModelMeshAuthority(actual,products,
         Set{Tuple{Int,Int32}}(rekey(owner) for owner in previous.done),
         previous.private_rank,native_inputs,carrier,previous.carrier_rows,
-        produced,previous.carrier_cells)
+        produced,previous.carrier_cells,constructors)
 end
 
 # Rekey every per-entity meshing attribute owned by `(dimension, old_tag)` —

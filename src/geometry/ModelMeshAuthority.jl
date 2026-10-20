@@ -750,7 +750,19 @@ function _model_mesh_rebind_authority(previous::_ModelMeshAuthority,mesh::MixedM
         all(>(0),rebound) || continue
         produced[owner]=rebound
     end
-    return _model_mesh_with_producer_rows(authority,produced)
+    result=_model_mesh_with_producer_rows(authority,produced)
+    # Constructor receipts stay bound only while the rebound product keeps the
+    # same node/cell identities; retain each receipt that still validates and
+    # drop the ones the new mesh genuinely invalidated.
+    for (owner,mesh) in previous.surface_constructor_inputs
+        try
+            result=_model_mesh_with_surface_constructor_inputs(result,
+                Dict(owner=>mesh))
+        catch
+            continue
+        end
+    end
+    return result
 end
 
 function _model_mesh_status(m,authority::_ModelMeshAuthority;only_visible=false)

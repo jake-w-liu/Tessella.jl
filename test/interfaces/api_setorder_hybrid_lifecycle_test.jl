@@ -121,4 +121,32 @@ end
     end
 end
 
+@testset "identity retagging keeps retained Surface constructor receipts" begin
+    # `model.set_tag` rebuilds the mesh authority; retagging used to rebuild
+    # through the nine-argument constructor and silently drop every Surface
+    # constructor receipt, so the next `generate(3)` lost the hybrid boundary.
+    for retag in (:surface,:point)
+        A.initialize()
+        try
+            A.option("General.Terminal",0)
+            recombined_cube()
+            A.mesh.generate(2)
+            @test constructor_count()==6
+            if retag===:surface
+                A.model.set_tag(2,1,10)
+            else
+                A.model.set_tag(0,1,10)
+            end
+            @test constructor_count()==6
+            A.mesh.generate(3)
+            counts,volume=volume_signature()
+            @test counts[4]>0 && counts[7]==6
+            @test volume≈1.0 atol=2e-10
+            @test Tessella.validate(A.mesh.get()).ok
+        finally
+            A.finalize()
+        end
+    end
+end
+
 end

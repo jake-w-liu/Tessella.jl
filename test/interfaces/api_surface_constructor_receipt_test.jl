@@ -29,7 +29,7 @@ production=M._ModelSurfaceProduction(Mesh(copy(coords);tris=copy(cells)),
     bound=M._model_mesh_with_surface_constructor_inputs(authority,Dict((2,Int32(7))=>receipt))
     @test bound.mesh===authority.mesh
     @test only(values(bound.surface_constructor_inputs))===receipt
-    @test isempty(M._model_mesh_with_producer_rows(bound,bound.producer_rows).surface_constructor_inputs)
+    @test only(values(M._model_mesh_with_producer_rows(bound,bound.producer_rows).surface_constructor_inputs))===receipt
     @test_throws ArgumentError M._model_mesh_with_surface_constructor_inputs(authority,
         Dict((2,Int32(8))=>receipt))
     for mutation in (:xyz,:uv,:owner,:node_uid,:cell_uid,:cell_owner,:physical,:support)

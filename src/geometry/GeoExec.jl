@@ -9666,11 +9666,22 @@ function _geo_publish_mesh_coordinates!(m,context,coordinates,caller)
         end
         # The coordinate rebuild shares the previous entity data and tag space,
         # so retained Surface constructor inputs stay bound to the same products.
+        # Their coordinates ride the same transform — a receipt carrying stale
+        # coordinates would fail its next product binding and get dropped.
+        positions=Dict(tag=>row for (row,tag) in enumerate(mesh.entity_data.external_node_tags))
+        constructors=Dict{Tuple{Int,Int32},MixedMesh}()
+        for (owner,ctor) in previous.surface_constructor_inputs
+            updated=copy(ctor.coords);ok=true
+            for (column,tag) in enumerate(ctor.entity_data.external_node_tags)
+                row=get(positions,tag,0)
+                row==0 && (ok=false;break)
+                updated[:,column]=coordinates[:,row]
+            end
+            constructors[owner]= ok ? _geo_coordinate_mesh(ctor,updated) : ctor
+        end
         authority=Model._ModelMeshAuthority(authority.mesh,authority.products,
             authority.done,authority.private_rank,inputs,carrier,authority.carrier_rows,
-            previous.producer_rows,previous.carrier_cells,
-            previous.surface_constructor_inputs)
-        positions=Dict(tag=>row for (row,tag) in enumerate(mesh.entity_data.external_node_tags))
+            previous.producer_rows,previous.carrier_cells,constructors)
         for (_,record) in Model._discrete_mesh_records_model(m)
             updated=copy(record.node_coords);changed=false
             for (column,tag) in enumerate(record.node_tags)

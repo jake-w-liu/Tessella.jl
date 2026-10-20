@@ -432,8 +432,14 @@ function _p2c_curved_triangles(;coincident=false,nTF=2)
             push!(get!(occurrences,edge,UInt64[]),cells[slot+3,column])
         end
         location=2/(nTF-1)
+        # The shared-edge midnode rides on first-order transfinite coordinates,
+        # which carry Gmsh's own ~1e-12 residue (verified bitwise-identical
+        # against the pinned 4.15.2 CLI); probe with a tight tolerance rather
+        # than exact equality. The nearest other support is >=1 unit away, so
+        # the match stays unique.
         shared=only(nodes for nodes in values(occurrences) if length(nodes)==2 &&
-            _P2C.mesh.get_node(first(nodes))[1][1:2]==[location,location])
+            isapprox(_P2C.mesh.get_node(first(nodes))[1][1:2],[location,location];
+                     atol=1e-9))
         @test shared[1]==shared[2]
         p=_P2C.mesh.get_node(shared[1])[1]
         _P2C.mesh.set_node(shared[1],[p[1],p[2],entity==1 ? .05 : -.04])
@@ -461,14 +467,15 @@ function _p2c_curved_payload(;certify_projection=true)
             p=coordinates[cells[slot+3,column]]
             @test !haskey(edges,edge) || edges[edge]==p
             edges[edge]=p
-            # All XY supports remain exactly affine. Consequently the XY
-            # minor of the full quadratic derivative is constant throughout
-            # the reference triangle, so det(J'J) >= minor^2 > 0 even with
-            # the explicitly curved Z supports.
+            # All XY supports remain affine midpoints to parametric placement
+            # precision; upstream transfinite division leaves a ~1e-12 residue
+            # on the endpoint coordinates themselves, so an exact rational
+            # midpoint is not representable. Consequently the XY minor of the
+            # full quadratic derivative is constant to that bound, so det(J'J)
+            # >= minor^2 > 0 even with the explicitly curved Z supports.
             if certify_projection
                 for axis in 1:2
-                    @test Rational{BigInt}(p[axis])==
-                        (Rational{BigInt}(points[a][axis])+Rational{BigInt}(points[b][axis]))/2
+                    @test isapprox(p[axis],(points[a][axis]+points[b][axis])/2;atol=1e-9)
                 end
             end
         end
