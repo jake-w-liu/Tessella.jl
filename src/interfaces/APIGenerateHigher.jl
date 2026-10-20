@@ -2939,37 +2939,9 @@ function _higher_rebind_plan_authority!(plan,previous;
         # and cell UIDs; rebind them through this plan's tag maps and re-validate
         # against the rebound products so a lost identity cannot slip through.
         element_tag_map=hasproperty(plan,:element_tag_map) ? plan.element_tag_map : nothing
-        actual_data=authority.mesh.entity_data
-        actual_positions=Dict(uid=>Int32(row) for (row,uid) in
-            enumerate(actual_data.external_node_tags))
         rebound_constructors=Dict{Tuple{Int,Int32},MixedMesh}()
         for (owner,constructor) in previous.surface_constructor_inputs
-            product=get(authority.products,owner,nothing)
-            product===nothing && continue
-            # `_model_mesh_product(producer_order=true)` rejects a product whose
-            # cell-incident rows fell out of the rebound producer vector; such a
-            # reshaped owner drops its receipt like the pre-rebind behavior did.
-            produced=get(authority.producer_rows,owner,nothing)
-            produced===nothing || begin
-                covered=Set(produced)
-                all(block->all(node->product.rows[node] in covered,block.nodes),
-                    product.blocks)
-            end || continue
-            # Mirror `_model_surface_constructor_binding`'s per-cell signature
-            # (msh family, owner, physical tag, node-UID support) so a product
-            # that was reshaped by this plan — an order pass, a remesh, an
-            # import — drops its receipt like the pre-rebind behavior did
-            # instead of throwing during the strict bind below.
-            cells=Dict{UInt64,Tuple{Int,Int32,Int32,Vector{UInt64}}}()
-            for (block,labels) in zip(product.blocks,product.element_tags)
-                block.msh in (2,3) || (cells=nothing;break)
-                for (column,label) in enumerate(labels)
-                    cells[label]=(Int(block.msh),owner[2],block.tags[column],
-                        sort!(actual_data.external_node_tags[
-                            product.rows[block.nodes[:,column]]]))
-                end
-            end
-            cells===nothing && continue
+            haskey(authority.products,owner) || continue
             copy_constructor=deepcopy(constructor)
             data=copy_constructor.entity_data
             data===nothing && continue
@@ -2980,44 +2952,27 @@ function _higher_rebind_plan_authority!(plan,previous;
                 labels[row]=element_tag_map===nothing ? tag :
                     get(element_tag_map,tag,UInt64(0))
             end
-            # The receipt's remapped node set must be exactly the producer-order
-            # product's node set — remesh/order passes change it, retained
-            # products keep it — and every bound vertex must keep its
-            # coordinates, owner and parametric row.
-            actual_rows=produced===nothing ? product.rows : produced
-            matches=length(data.external_node_tags)==
-                length(Set(data.external_node_tags)) &&
-                Set(data.external_node_tags)==
-                Set(actual_data.external_node_tags[actual_rows])
-            if matches
-                for (row,uid) in enumerate(data.external_node_tags)
-                    arow=get(actual_positions,uid,Int32(0))
-                    arow==0 && (matches=false;break)
-                    all(axis->isequal(copy_constructor.coords[axis,row],
-                            authority.mesh.coords[axis,arow]),1:3) &&
-                        data.node_entities[row]==actual_data.node_entities[arow] &&
-                        isequal(data.node_parametric[row],
-                            actual_data.node_parametric[arow]) ||
-                        (matches=false;break)
+            # The receipt is a first-order record: it rebinds through an
+            # order pass onto the product's corner skeleton — an order
+            # elevated product keeps it, while a product that was genuinely
+            # reshaped (a remesh or import losing a bound row or cell
+            # signature) drops it like the pre-rebind behavior did instead of
+            # throwing during the strict bind.
+            bound=false
+            try
+                actual=Model._model_mesh_product(
+                    plan.model.meshing.mesh_authority,2,Int(owner[2]);
+                    caller="higher plan authority Surface constructor rebind",
+                    producer_order=true,first_order=true)
+                if actual!==nothing
+                    Model._model_surface_constructor_binding(actual,copy_constructor,
+                        "higher plan authority Surface constructor rebind")
+                    bound=true
                 end
+            catch err
+                err isa ArgumentError || rethrow()
             end
-            seen=Set{UInt64}()
-            for (block,labels,owners) in zip(constructor.blocks,
-                    data.external_element_tags,data.block_entities)
-                matches || break
-                block.msh in (2,3) &&
-                    length(labels)==length(owners)==size(block.nodes,2) || (matches=false;break)
-                for (column,label) in enumerate(labels)
-                    label in seen && (matches=false;break)
-                    push!(seen,label)
-                    support=sort!(data.external_node_tags[block.nodes[:,column]])
-                    get(cells,label,nothing)==
-                        (Int(block.msh),owners[column],block.tags[column],support) ||
-                        (matches=false;break)
-                end
-            end
-            (matches && length(seen)==length(cells)) || continue
-            rebound_constructors[owner]=copy_constructor
+            bound && (rebound_constructors[owner]=copy_constructor)
         end
         isempty(rebound_constructors) || (plan.model.meshing.mesh_authority=
             Model._model_mesh_with_surface_constructor_inputs(

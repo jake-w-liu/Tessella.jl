@@ -278,12 +278,81 @@ function _model_mesh_product_entities(source,owner,rows)
     return selected
 end
 
+# A retained Surface constructor receipt is a first-order record. An order
+# pass elevates the actual product in place, but the receipt still binds its
+# first-order skeleton — every elevated cell reduced to its family's corner
+# support. Rows an elevated cell references only through a non-corner slot
+# (midnodes) leave the skeleton; rows no cell references (owned orphan
+# vertices) stay bound. Returns `nothing` when an elevated block has no
+# first-order projection.
+function _model_mesh_first_order_layout(nrows::Integer,blocks)
+    any(block->msh_spec(block.msh).order>1,blocks) || return nothing,blocks
+    primary=falses(nrows);incident=falses(nrows);elevated=ElementBlock[]
+    for block in blocks
+        spec=msh_spec(block.msh)
+        for node in block.nodes
+            incident[node]=true
+        end
+        if spec.order>1
+            lin=try
+                Elements.msh_type(spec.family,1)
+            catch err
+                err isa ArgumentError || rethrow()
+                return nothing,nothing
+            end
+            width=msh_num_nodes(lin)
+            for node in @view block.nodes[1:width,:]
+                primary[node]=true
+            end
+            push!(elevated,ElementBlock(lin,block.nodes[1:width,:],block.tags))
+        else
+            for node in block.nodes
+                primary[node]=true
+            end
+            push!(elevated,block)
+        end
+    end
+    keep=findall(primary .| .!incident)
+    remap=zeros(Int32,nrows)
+    for (position,row) in enumerate(keep)
+        remap[row]=Int32(position)
+    end
+    return keep,ElementBlock[ElementBlock(block.msh,remap[block.nodes],block.tags)
+                             for block in elevated]
+end
+
+function _model_mesh_first_order_skeleton(actual::MixedMesh,caller)
+    data=actual.entity_data
+    data===nothing && return actual
+    keep,blocks=_model_mesh_first_order_layout(nnodes(actual),actual.blocks)
+    blocks===nothing && throw(ArgumentError(
+        "$caller: Surface constructor input requires actual linear Surface cells"))
+    keep===nothing && return actual
+    rows=keep
+    metadata=Elements._native_mixed_entity_data(data.entities;
+        node_entities=data.node_entities[rows],
+        node_parametric=data.node_parametric[rows],
+        external_node_tags=data.external_node_tags[rows],
+        block_entities=data.block_entities,
+        external_element_tags=data.external_element_tags)
+    return MixedMesh(actual.coords[:,rows],blocks;
+        physical_names=actual.physical_names,entity_data=metadata,
+        elementary_entities=actual.elementary_entities)
+end
+
 function _model_mesh_product(authority::_ModelMeshAuthority,dim::Int,tag::Int;
-                             caller="mesh authority",producer_order=false)
+                             caller="mesh authority",producer_order=false,
+                             first_order=false)
     product=get(authority.products,(dim,Int32(tag)),nothing)
     product===nothing && return nothing
     source=authority.mesh;data=source.entity_data;rows=product.rows
     blocks=product.blocks
+    if first_order
+        keep,blocks=_model_mesh_first_order_layout(length(rows),blocks)
+        blocks===nothing && throw(ArgumentError(
+            "$caller: actual entity $(product.owner) lacks a first-order projection"))
+        keep===nothing || (rows=rows[keep])
+    end
     produced=producer_order ? get(authority.producer_rows,product.owner,nothing) : nothing
     if produced!==nothing
         # Normal PLC input follows the actual face producer vector. NoNew
@@ -299,7 +368,7 @@ function _model_mesh_product(authority::_ModelMeshAuthority,dim::Int,tag::Int;
         end
         mapping=inverse[rows]
         blocks=ElementBlock[ElementBlock(block.msh,mapping[block.nodes],block.tags)
-                            for block in product.blocks]
+                            for block in blocks]
         rows=produced
     end
     owners=[fill(Int32(tag),size(block.nodes,2)) for block in blocks]
@@ -314,6 +383,7 @@ end
 
 function _model_surface_constructor_binding(actual::MixedMesh,constructor::MixedMesh,
                                              caller::AbstractString)
+    actual=_model_mesh_first_order_skeleton(actual,caller)
     actual.entity_data!==nothing && constructor.entity_data!==nothing ||
         throw(ArgumentError("$caller: Surface constructor input lacks actual identity metadata"))
     data=actual.entity_data;receipt=constructor.entity_data
@@ -422,8 +492,11 @@ function _model_mesh_with_surface_constructor_inputs(authority::_ModelMeshAuthor
             "$caller: Surface constructor input refers to absent actual entity $owner"))
         # Constructor inputs are bound against the producer-order product at
         # creation time; re-validate against the same producer view so unused
-        # owned rows cannot change the actual node set comparison.
-        actual=_model_mesh_product(authority,2,Int(owner[2]);caller,producer_order=true)
+        # owned rows cannot change the actual node set comparison. The
+        # first-order view keeps an order-elevated product boundable through
+        # its retained corner skeleton.
+        actual=_model_mesh_product(authority,2,Int(owner[2]);caller,
+            producer_order=true,first_order=true)
         _model_surface_constructor_binding(actual,constructor,caller)
         bound[owner]=constructor
     end
