@@ -182,6 +182,18 @@ end
 # bounding box (endpoints plus axis-aligned extrema) for curved kinds.
 function _model_curve_bounding_box(
     m::GeoModel,curve::Int,caller::AbstractString)
+    record=get(m.discrete,(1,curve),nothing)
+    if record!==nothing
+        # Discrete curves bound themselves: their node coordinates are the
+        # exact vertex extents of the polyline geometry.
+        isempty(record.node_tags) && throw(ArgumentError(
+            "$caller: Curve[$curve] has no boundary curve bounds"))
+        return _model_bounds_checked(ntuple(6) do i
+            axis=mod1(i,3)
+            values=view(record.node_coords,axis,:)
+            i<=3 ? minimum(values) : maximum(values)
+        end,caller,"Curve[$curve]")
+    end
     occ=_occ_geometry_checked(m,curve,caller)
     if occ!==nothing && occ.occ===:surface_iso
         surface=occ.face.patch.surface
@@ -232,10 +244,18 @@ function _model_boundary_curves(m::GeoModel,dimension::Int,tag::Int,
                 "$caller: $entity references unknown Surface Loop[$shell]"))
             for signed_surface in m.surface_loops[shell]
                 surface=abs(signed_surface)
-                haskey(m.surfaces,surface) || throw(ArgumentError(
-                    "$caller: $entity references unknown Surface[$surface]"))
-                for curve in _model_surface_curves(m,surface)
-                    push!(curves,curve)
+                if haskey(m.surfaces,surface)
+                    for curve in _model_surface_curves(m,surface)
+                        push!(curves,curve)
+                    end
+                else
+                    # Discrete surfaces declare boundary curves on the record.
+                    record=get(m.discrete,(2,surface),nothing)
+                    record===nothing && throw(ArgumentError(
+                        "$caller: $entity references unknown Surface[$surface]"))
+                    for (bdim,btag) in record.boundary
+                        bdim==1 && push!(curves,abs(btag))
+                    end
                 end
             end
         end

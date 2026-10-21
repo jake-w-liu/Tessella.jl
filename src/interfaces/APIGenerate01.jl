@@ -182,8 +182,25 @@ function _dim01_ingest!(assembly,m,cached,cached_class;preserve_source_order::Bo
         owner=cached_class.node_entities[column]
         parameter=cached_class.node_parametric[column]
         if authoritative
-            mapping[column]=_dim01_add_node!(assembly,cached_class.public_tags.node_tags[column],
-                point,owner,parameter)
+            tag_uid=cached_class.public_tags.node_tags[column]
+            existing=get(assembly.node_positions,tag_uid,Int32(0))
+            if existing!=0
+                # A classification (ClassifySurfaces) re-owns nodes on the
+                # live records without republishing this snapshot, so the
+                # record claim is current and the cached owner can lag.
+                # Only coordinate divergence is a genuine source conflict.
+                known=assembly.nodes[existing]
+                known.point==point || throw(ArgumentError(
+                    "$(assembly.caller): source node $tag_uid has conflicting " *
+                    "ownership or coordinates"))
+                if known.parameter===nothing && parameter!==nothing
+                    assembly.nodes[existing]=_Dim01Node(
+                        known.tag,known.point,known.owner,copy(parameter))
+                end
+                mapping[column]=existing
+            else
+                mapping[column]=_dim01_add_node!(assembly,tag_uid,point,owner,parameter)
+            end
         else
             matches=get(raw_positions,(owner,point),Int32[])
             length(matches)<=1 || throw(ArgumentError(
@@ -232,6 +249,10 @@ function _dim01_ingest!(assembly,m,cached,cached_class;preserve_source_order::Bo
                 if old.owner==owner && old.msh==msh && old.nodes==nodes
                     continue
                 end
+                # Classification re-owns source elements without republishing
+                # this snapshot: identical type/connectivity under a new
+                # record owner is the same logical element, not a conflict.
+                authoritative && old.msh==Int(msh) && old.nodes==nodes && continue
                 !authoritative || throw(ArgumentError(
                     "$(assembly.caller): cached element $external conflicts with its source record"))
                 external=_dim01_next_tag!(assembly,false)

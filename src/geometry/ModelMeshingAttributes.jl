@@ -1758,7 +1758,84 @@ function classify_surfaces!(m::GeoModel;angle=40*pi/180,boundary=true,
             _drop_unreferenced_discrete!(m,entity)
         end
     end
+    _classify_republish_mesh!(m)
     return nothing
+end
+
+# Upstream `classifySurfaces` re-parents mesh vertices and elements between
+# entities in place, so the retained mesh snapshot must observe the
+# redistribution here: records rebuilt from the published classification
+# otherwise resurrect emptied source records under their old ownership.
+function _classify_republish_mesh!(m::GeoModel)
+    authority=m.meshing.mesh_authority
+    (authority===nothing || authority.mesh===nothing) && return nothing
+    mesh=authority.mesh
+    mesh isa MixedMesh || return nothing
+    data=mesh.entity_data
+    data===nothing && return nothing
+    node_owner=Dict{UInt64,Tuple{Int,Int32}}()
+    element_owner=Dict{UInt64,Tuple{Int,Int32}}()
+    for (key,record) in _discrete_mesh_records_model(m)
+        owner=(key[1],Int32(key[2]))
+        for node_tag in record.node_tags
+            node_owner[node_tag]=owner
+        end
+        for element_tag in record.element_tags
+            element_owner[element_tag]=owner
+        end
+    end
+    for row in eachindex(data.external_node_tags)
+        owner=get(node_owner,data.external_node_tags[row],nothing)
+        owner===nothing || (data.node_entities[row]=owner)
+    end
+    for bi in eachindex(data.external_element_tags)
+        bi>length(mesh.blocks) && break
+        block=mesh.blocks[bi]
+        block isa Elements.SpecialElementBlock && continue
+        dim=msh_dimension(block.msh)
+        column=data.block_entities[bi]
+        for (j,element_tag) in enumerate(data.external_element_tags[bi])
+            owner=get(element_owner,element_tag,nothing)
+            (owner===nothing || owner[1]!=dim) && continue
+            column[j]=owner[2]
+        end
+        elementary=mesh.elementary_entities
+        if elementary!==nothing && bi<=length(elementary)
+            ecolumn=elementary[bi]
+            for (j,element_tag) in enumerate(data.external_element_tags[bi])
+                owner=get(element_owner,element_tag,nothing)
+                (owner===nothing || owner[1]!=dim) && continue
+                ecolumn[j]=owner[2]
+            end
+        end
+    end
+    live=Set{Tuple{Int,Int}}(key for (key,_) in _discrete_mesh_records_model(m))
+    for key in collect(keys(data.entities))
+        key in live || delete!(data.entities,key)
+    end
+    for (key,record) in _discrete_mesh_records_model(m)
+        haskey(data.entities,key) && continue
+        bounds=_record_entity_bbox(record,key[1])
+        data.entities[key]=Elements._native_mixed_entity(key[1],key[2],bounds;
+            physical_tags=Int32.(get(m.entity_physicals,key,Int[])),
+            boundaries=Int32[abs(t) for (_,t) in record.boundary])
+    end
+    return nothing
+end
+
+# Bounding box of a record's owned nodes; empty records keep a degenerate box.
+function _record_entity_bbox(record::DiscreteEntity,dim::Int)
+    if dim==0 || isempty(record.node_tags)
+        point=isempty(record.node_tags) ? (0.0,0.0,0.0) :
+            (record.node_coords[1,1],record.node_coords[2,1],
+             record.node_coords[3,1])
+        return ntuple(i->point[mod1(i,3)],6)
+    end
+    return ntuple(6) do i
+        axis=mod1(i,3)
+        values=view(record.node_coords,axis,:)
+        i<=3 ? minimum(values) : maximum(values)
+    end
 end
 
 # Delete a discrete entity when no remaining entity lists it as a boundary;

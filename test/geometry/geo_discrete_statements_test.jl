@@ -299,8 +299,9 @@ end
         """)
     ex=_execute_geo_source("Merge \"$path2\";\n")
     @test ex.model.physical_names[(2,9)]=="side wall"
-    # Discrete-only models have no meshable entities (upstream remeshes
-    # discrete entities — not yet implemented).
-    err=_execute_geo_error("Merge \"$path\";\nMesh 2;\n")
-    @test err isa ArgumentError
+    # Unparametrized discrete surfaces retain their mesh through generation —
+    # the upstream `discreteFace` passthrough — so `Mesh 2` returns the
+    # imported triangulation instead of rejecting the model.
+    ex2=_execute_geo_source("Merge \"$path\";\nMesh 2;\n";mesh_dim=2)
+    @test ex2.mesh!==nothing && size(ex2.mesh.coords,2)==4
 end

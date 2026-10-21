@@ -204,14 +204,27 @@ function _model_discrete_curve_sources(m::GeoModel,caller)
             owner=data.node_entities[row];owners[tag]=(owner[1],Int(owner[2]))
         end
     end
+    # `authority.mesh` is a published snapshot — `classify_surfaces!`
+    # redistributes nodes across new discrete entities without republishing
+    # it, so its owner rows can lag the records. The record claims are the
+    # current ownership and must win (the curve-parametrization plan reads
+    # them for endpoint Point entities); coordinates still must agree
+    # wherever the tag appears, and two records may not claim the same tag.
+    claimed=Dict{UInt64,Tuple{Int,Int}}()
     for (owner,record) in _discrete_mesh_records_model(m)
         for (column,tag) in enumerate(record.node_tags)
             point=(record.node_coords[1,column],record.node_coords[2,column],record.node_coords[3,column])
-            if haskey(coordinates,tag)
-                coordinates[tag]==point && owners[tag]==owner || throw(ArgumentError(
-                    "$caller: node $tag has conflicting actual geometry sources"))
+            if haskey(claimed,tag)
+                (coordinates[tag]==point && claimed[tag]==owner) ||
+                    throw(ArgumentError(
+                        "$caller: node $tag has conflicting actual geometry sources"))
             else
-                coordinates[tag]=point;owners[tag]=owner
+                haskey(coordinates,tag) && coordinates[tag]!=point &&
+                    throw(ArgumentError(
+                        "$caller: node $tag has conflicting actual geometry sources"))
+                coordinates[tag]=point
+                claimed[tag]=owner
+                owners[tag]=owner
             end
         end
     end

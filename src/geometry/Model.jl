@@ -1524,18 +1524,29 @@ function _validate_surface_loop(m::GeoModel,surfaces,caller::AbstractString)
     curve_owners=Dict{Int,Set{Int}}()
     curve_incidence=Dict{Int,Int}()
     for surface in unsigned
-        haskey(m.surfaces,surface) || throw(ArgumentError(
-            "$caller: unknown Surface[$surface]"))
-        for loop in m.surfaces[surface]
-            haskey(m.loops,loop) || throw(ArgumentError(
-                "$caller: Surface[$surface] references unknown Loop[$loop]"))
-            for signed_curve in m.loops[loop]
-                curve=abs(signed_curve)
-                haskey(m.curves,curve) || throw(ArgumentError(
-                    "$caller: Loop[$loop] references unknown Curve[$curve]"))
+        if haskey(m.surfaces,surface)
+            for loop in m.surfaces[surface]
+                haskey(m.loops,loop) || throw(ArgumentError(
+                    "$caller: Surface[$surface] references unknown Loop[$loop]"))
+                for signed_curve in m.loops[loop]
+                    curve=abs(signed_curve)
+                    haskey(m.curves,curve) || throw(ArgumentError(
+                        "$caller: Loop[$loop] references unknown Curve[$curve]"))
+                    curve_incidence[curve]=get(curve_incidence,curve,0)+1
+                    push!(get!(Set{Int},curve_owners,curve),surface)
+                end
+            end
+        elseif haskey(m.discrete,(2,surface))
+            # Discrete surfaces declare their boundary curves directly on the
+            # record (ClassifySurfaces/CreateTopology populate it).
+            for (bdim,btag) in m.discrete[(2,surface)].boundary
+                bdim==1 || continue
+                curve=abs(btag)
                 curve_incidence[curve]=get(curve_incidence,curve,0)+1
                 push!(get!(Set{Int},curve_owners,curve),surface)
             end
+        else
+            throw(ArgumentError("$caller: unknown Surface[$surface]"))
         end
     end
     isempty(curve_incidence) && throw(ArgumentError(
@@ -1548,9 +1559,11 @@ function _validate_surface_loop(m::GeoModel,surfaces,caller::AbstractString)
         count=curve_incidence[curve]
         owners=curve_owners[curve]
         count==2 && length(owners)==2 && continue
-        a,b=m.curves[curve]
-        _curve_type(m,curve)==:degenerate && a==b && continue
-        if count==2 && length(owners)==1 &&
+        if haskey(m.curves,curve)
+            a,b=m.curves[curve]
+            _curve_type(m,curve)==:degenerate && a==b && continue
+        end
+        if count==2 && length(owners)==1 && haskey(m.surfaces,only(owners)) &&
                 _surface_type(m,only(owners))!=:plane
             surface=only(owners)
             signs=Int[]
@@ -2891,6 +2904,10 @@ function _periodic_curve_point(m::GeoModel,curve::Int,parameter::Float64,
                 coefficients,translation,point,caller,curve)
         end
     end
+    # Discrete curves evaluate through their classified parametrization —
+    # `_model_curve_point`'s leading dispatch — never the `m.curves` table.
+    haskey(m.discrete,(1,curve)) &&
+        return _model_curve_point(m,curve,parameter,caller)
     # `parameter` is the stored/native parameter convention: the chord
     # fraction for `Line`, the sweep/native parameter for arcs and the
     # spline family, and the OCC range for materialized edges. An OCC line
@@ -5985,8 +6002,9 @@ function _model_volume_boundary_surfaces(
         shell_sign=orient_cavities && shell_index>1 ? -1 : 1
         for signed_surface in surfaces
             surface=abs(signed_surface)
-            haskey(m.surfaces,surface) || throw(ArgumentError(
-                "$caller: Surface Loop[$shell] references unknown Surface[$surface]"))
+            (haskey(m.surfaces,surface) || haskey(m.discrete,(2,surface))) ||
+                throw(ArgumentError(
+                    "$caller: Surface Loop[$shell] references unknown Surface[$surface]"))
             certify_shells && !unmerged && surface in seen && throw(ArgumentError(
                 "$caller: Surface[$surface] belongs to multiple Volume[$volume] shells"))
             push!(seen,surface)
@@ -6025,11 +6043,14 @@ function _model_volume_embedding_inventory(
         real_boundaries
     end
     function register_surface!(surface::Int)
-        haskey(m.surfaces,surface) || throw(ArgumentError(
+        native=haskey(m.surfaces,surface)
+        (native || haskey(m.discrete,(2,surface))) || throw(ArgumentError(
             "$caller: unknown Surface[$surface]"))
         nested_points,nested_curves=
             _model_surface_embedding_tags(m,surface,caller)
-        boundary_curves=_model_projection_surface_curves(m,surface)
+        # Discrete surfaces declare their boundary curves on the record.
+        boundary_curves=native ? _model_projection_surface_curves(m,surface) :
+            Int[abs(t) for (d,t) in m.discrete[(2,surface)].boundary if d==1]
         overlap=sort!(collect(intersect(Set(boundary_curves),Set(nested_curves))))
         isempty(overlap) || throw(ArgumentError(
             "$caller: Surface[$surface] Curve tags $overlap cannot be both " *
@@ -6071,8 +6092,17 @@ function _model_volume_embedding_inventory(
     end
     sort!(unique!(curve_tags));sort!(unique!(surface_tags))
     for curve in curve_tags
-        start_point,stop_point=m.curves[curve]
-        push!(point_tags,start_point);push!(point_tags,stop_point)
+        if haskey(m.curves,curve)
+            start_point,stop_point=m.curves[curve]
+            push!(point_tags,start_point);push!(point_tags,stop_point)
+        elseif haskey(m.discrete,(1,curve))
+            # Discrete curves declare their endpoint Points on the record.
+            for (bdim,btag) in m.discrete[(1,curve)].boundary
+                bdim==0 && push!(point_tags,abs(btag))
+            end
+        else
+            throw(ArgumentError("$caller: unknown Curve[$curve]"))
+        end
     end
     sort!(unique!(point_tags))
     return point_tags,curve_tags,surface_tags,
