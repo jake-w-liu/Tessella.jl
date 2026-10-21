@@ -876,7 +876,9 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
         mesh,context.mesh_node_owner=_geo_mesh_model(model,1,context)
         context.mesh=mesh
     elseif dim==2
-        isempty(model.surfaces) && throw(ArgumentError("execute_geo: Mesh 2 requested but no surfaces exist"))
+        (isempty(model.surfaces) && !any(key->key[1]==2,
+            Iterators.flatten((keys(model.discrete),keys(model.meshing.attached))))) &&
+            throw(ArgumentError("execute_geo: Mesh 2 requested but no surfaces exist"))
         # Upstream `Mesh n` meshes every entity of dimension <= n regardless
         # of entity count: vertex parts (including orphan `Point` entities),
         # graded curve parts, and the surface parts merge on bitwise
@@ -884,7 +886,9 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
         mesh,context.mesh_node_owner=_geo_mesh_model(model,2,context)
         context.mesh=mesh
     elseif dim==3
-        isempty(model.volumes) && throw(ArgumentError("execute_geo: Mesh 3 requested but no volumes exist"))
+        (isempty(model.volumes) && !any(key->key[1]==3,
+            Iterators.flatten((keys(model.discrete),keys(model.meshing.attached))))) &&
+            throw(ArgumentError("execute_geo: Mesh 3 requested but no volumes exist"))
         mesh,context.mesh_node_owner=_geo_mesh_model(model,3,context)
         context.mesh=mesh
     end
