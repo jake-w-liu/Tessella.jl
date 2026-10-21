@@ -14,7 +14,8 @@
 
 import ..SizeField: field_value, metric_at
 using ..SizeField: AbstractAnisoField, Metric3, isotropic_metric,
-                   size_at, _gmsh_metric_intersection, _metric_scale
+                   size_at, _gmsh_metric_intersection, _metric_scale,
+                   metric_aniso_cap
 
 # Mesh-time option bundle — values mirrored from the `.geo`/API option store
 # each time a model mesh runs, mirroring upstream's global `CTX::mesh` reads.
@@ -43,6 +44,7 @@ struct _ModelMesh1DOptions
     optimize::Int
     optimize_threshold::Float64
     optimize_netgen::Int
+    aniso_max::Float64            # Mesh.AnisoMax (1e33 = upstream unbounded)
 end
 
 # Older internal callers retain the native generation defaults. A single
@@ -51,6 +53,8 @@ _ModelMesh1DOptions(args::Vararg{Any,19}) =
     _ModelMesh1DOptions(args...,Ref(UInt32(1)),1e-12)
 _ModelMesh1DOptions(args::Vararg{Any,21}) =
     _ModelMesh1DOptions(args...,1,0.3,0)
+_ModelMesh1DOptions(args::Vararg{Any,24}) =
+    _ModelMesh1DOptions(args...,1e33)
 
 # A copy of the bundle with only the background-field slot replaced — the
 # metric surface producer binds its resolved certificate field so lazily
@@ -62,7 +66,7 @@ function _mesh1d_options_with_inner_field(o::_ModelMesh1DOptions,field)
         o.tolerance_edge_length,o.geometry_tolerance,o.mesh_only_empty,
         o.mesh_only_visible,o.max_retries,field,o.callback,o.warn,
         o.report_error,o.random_state,o.random_factor3d,o.optimize,
-        o.optimize_threshold,o.optimize_netgen)
+        o.optimize_threshold,o.optimize_netgen,o.aniso_max)
 end
 
 # meshGEdge's `F_Lc_aniso` dispatch: upstream reads the global
@@ -191,7 +195,8 @@ function _model_default_mesh1d_options(m::GeoModel,caller::AbstractString)
         2,7,3,0.0,geometry_tolerance,
         false,false,10,
         nothing,m.meshing.size_callback,
-        nothing,nothing)
+        nothing,nothing,
+        Ref(UInt32(1)),1e-12,1,0.3,0,m.meshing.aniso_max)
 end
 
 # Curves a `_model_mesh_curve!` `:pending` result may be waiting on — the
@@ -463,6 +468,7 @@ function _model_vertex_bgm_metric(m::GeoModel,point::Int,xyz,
     factor=options.lc_factor
     (factor!=0 && factor!=1) &&
         (metric=_metric_scale(metric,inv(factor*factor)))
+    metric=metric_aniso_cap(metric,options.aniso_max)
     return metric
 end
 
@@ -514,6 +520,7 @@ function _model_curve_bgm_metric(m::GeoModel,curve::Integer,u::Float64,xyz,
     factor=options.lc_factor
     (factor!=0 && factor!=1) &&
         (metric=_metric_scale(metric,inv(factor*factor)))
+    metric=metric_aniso_cap(metric,options.aniso_max)
     return metric
 end
 

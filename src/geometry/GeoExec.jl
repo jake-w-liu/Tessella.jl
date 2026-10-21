@@ -5783,6 +5783,7 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         m.meshing.transfinite_tri=0
         m.meshing.flexible_transfinite=false
         m.meshing.lc_factor=1.0
+        m.meshing.aniso_max=1e33
         m.meshing.recombine_all=false
         m.meshing.recombine_algo=1
         m.meshing.lc_extend_from_boundary=1
@@ -7692,6 +7693,8 @@ function _geo_sync_meshing_options!(m::GeoModel,context::_GeoNumericContext)
         _geo_option_number(context,"Mesh",0,"FlexibleTransfinite"),0.0))
     m.meshing.lc_factor=something(
         _geo_option_number(context,"Mesh",0,"CharacteristicLengthFactor"),1.0)
+    m.meshing.aniso_max=something(
+        _geo_option_number(context,"Mesh",0,"AnisoMax"),1e33)
     m.meshing.recombine_all=!iszero(something(
         _geo_option_number(context,"Mesh",0,"RecombineAll"),0.0))
     m.meshing.recombine_algo=_geo_signed_gmsh_int_value(something(
@@ -7889,7 +7892,8 @@ function _geo_mesh_1d_options(m::GeoModel,context::_GeoNumericContext,
         something(opt("RandomFactor3D"),1e-12),
         Int(something(opt("Optimize"),1.0)),
         something(opt("OptimizeThreshold"),0.3),
-        Int(something(opt("OptimizeNetgen"),0.0)))
+        Int(something(opt("OptimizeNetgen"),0.0)),
+        m.meshing.aniso_max)
 end
 
 # `Mesh n;` — mesh every live entity up to `dim`, merging entity parts into a

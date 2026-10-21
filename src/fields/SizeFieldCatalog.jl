@@ -240,6 +240,33 @@ function metric_from_axes(λ1,λ2,λ3,v1,v2,v3)
     return Metric3(m11,m22,m33,m12,m13,m23)
 end
 
+"""
+    metric_aniso_cap(m::Metric3, aniso_max) -> Metric3
+
+Bound `m`'s physical anisotropy `hmax/hmin = sqrt(λmax/λmin)` — `Mesh.AnisoMax`
+in the BGM metric — to `aniso_max` by coarsening the over-fine directions:
+eigenvalues larger than `λmin·aniso_max²` are clamped down to that cap while
+`λmin` is unchanged, so the capped metric never exceeds the coarsest
+requested size and never refines. Returns `m` unchanged when `aniso_max` is
+non-finite, `<= 0` or `>= 1e33` (the upstream unbounded default), when
+`λmin <= 0` (the positive-definiteness check stays with callers), or when `m`
+is already within the bound.
+"""
+function metric_aniso_cap(m::Metric3,aniso_max::Real)
+    amax=Float64(aniso_max)
+    (isfinite(amax) && amax>0 && amax<1e33) || return m
+    values,vectors=_sym3_eigh(m.m11,m.m22,m.m33,m.m12,m.m13,m.m23)
+    order=sortperm(collect(values))
+    λmin=values[order[1]]
+    λmin>0 || return m
+    cap=λmin*amax*amax
+    values[order[3]]<=cap && return m
+    return metric_from_axes(λmin,min(values[order[2]],cap),
+                            min(values[order[3]],cap),
+                            vectors[order[1]],vectors[order[2]],
+                            vectors[order[3]])
+end
+
 function _metric_from_raw_axes(λ1::Float64,λ2::Float64,λ3::Float64,
                                v1::NTuple{3,Float64},v2::NTuple{3,Float64},
                                v3::NTuple{3,Float64})::Metric3

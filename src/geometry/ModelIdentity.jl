@@ -651,6 +651,7 @@ function _model_identity_meshing(
     migrated.transfinite_tri=attributes.transfinite_tri
     migrated.flexible_transfinite=attributes.flexible_transfinite
     migrated.lc_factor=attributes.lc_factor
+    migrated.aniso_max=attributes.aniso_max
     migrated.recombine_all=attributes.recombine_all
     migrated.recombine_algo=attributes.recombine_algo
     migrated.recombine_topology_passes=attributes.recombine_topology_passes

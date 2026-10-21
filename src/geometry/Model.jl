@@ -345,6 +345,9 @@ mutable struct ModelMeshingAttributes
     # A partition number alone cannot recover this membership after Merge.
     imported_ghost_elements::Dict{Tuple{Int,Int},Vector{Tuple{UInt64,Int32}}}
     periodic_uid_history::Dict{Tuple{Int,Int},_ModelPeriodicUIDHistory}
+    # `Mesh.AnisoMax` — bounds the BGM metric aspect ratio hmax/hmin at mesh
+    # time (upstream `CTX::mesh.aniso_max`; 1e33 is the unbounded default).
+    aniso_max::Float64
 end
 
 ModelMeshingAttributes() = ModelMeshingAttributes(
@@ -390,7 +393,8 @@ ModelMeshingAttributes() = ModelMeshingAttributes(
     Dict{Int,_ModelNativeCurveEndpoint}(),
     _ModelNativeGeoKernel(),Dict{Tuple{Int,Int},_ModelImportedEntity}(),0,
     Dict{Tuple{Int,Int},Vector{Tuple{UInt64,Int32}}}(),
-    Dict{Tuple{Int,Int},_ModelPeriodicUIDHistory}())
+    Dict{Tuple{Int,Int},_ModelPeriodicUIDHistory}(),
+    1e33)
 
 Base.:(==)(a::ModelMeshingAttributes,b::ModelMeshingAttributes)=
     all(n->getfield(a,n)==getfield(b,n),fieldnames(ModelMeshingAttributes))
