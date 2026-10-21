@@ -229,6 +229,9 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     # `Mesh.CharacteristicLengthFactor` is the same upstream option as
     # `Mesh.MeshSizeFactor` (`opt_mesh_lc_factor`); both write one value.
     "Mesh.CharacteristicLengthFactor"=>1.0,
+    # `Mesh.AnisoMax` bounds the BGM metric aspect ratio at mesh time;
+    # 1e33 is the upstream unbounded default.
+    "Mesh.AnisoMax"=>1e33,
     "Mesh.FlexibleTransfinite"=>0.0,
     "Mesh.RecombineAll"=>0.0,
     "Mesh.RecombinationAlgorithm"=>1.0,
@@ -2539,6 +2542,7 @@ function _generation_meshing_options(order::Int)
         second_order_linear=!iszero(OPTIONS["Mesh.SecondOrderLinear"]),
         transfinite_tri=Int(OPTIONS["Mesh.TransfiniteTri"]),
         lc_extend_from_boundary=Int(OPTIONS["Mesh.MeshSizeExtendFromBoundary"]),
+        aniso_max=OPTIONS["Mesh.AnisoMax"],
         order=order)
 end
 
@@ -2556,6 +2560,7 @@ function _apply_generation_meshing_options!(m::GeoModel,settings)
     m.meshing.second_order_linear=settings.second_order_linear
     m.meshing.transfinite_tri=settings.transfinite_tri
     m.meshing.lc_extend_from_boundary=settings.lc_extend_from_boundary
+    m.meshing.aniso_max=settings.aniso_max
     m.meshing.order=settings.order
     return nothing
 end
@@ -10616,7 +10621,8 @@ function _session_mesh1d_options(m::GeoModel,caller::AbstractString)
         nothing,message->throw(ErrorException("$caller: $message")),
         Ref(Model._model_native_random_seed(Int(OPTIONS["Mesh.RandomSeed"]))),
         OPTIONS["Mesh.RandomFactor3D"],Int(OPTIONS["Mesh.Optimize"]),
-        OPTIONS["Mesh.OptimizeThreshold"],Int(OPTIONS["Mesh.OptimizeNetgen"]))
+        OPTIONS["Mesh.OptimizeThreshold"],Int(OPTIONS["Mesh.OptimizeNetgen"]),
+        OPTIONS["Mesh.AnisoMax"])
 end
 
 # Decode the public blocked-coordinate layout through the same checked owned
