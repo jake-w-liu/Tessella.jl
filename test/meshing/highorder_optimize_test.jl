@@ -340,6 +340,102 @@ end
         end
     end
 
+    @testset "set_order(2) with =-1 runs the elastic stage" begin
+        # Mode -1: elastic smoothing only — the same certificate-gated
+        # bounded ascent, without the Mesh.HighOrderThreshold* band.  The
+        # perturbed interior mid must relocate; boundary supports stay put.
+        coords, tet10, boundary_mids, interior_mids, _ =
+            _opt_fan10(moves=Dict((1,5)=>(_OPT_SHIFT,-_OPT_SHIFT,0.0)))
+        api = API
+        api.initialize()
+        try
+            api.option("Mesh.HighOrderOptimize", -1)
+            api.model.add_discrete_entity(3, 7)
+            api.mesh.add_nodes(3, 7,
+                UInt64.(collect(axes(coords,2))), vec(coords))
+            api.mesh.add_elements_by_type(7, 11,
+                UInt64.(collect(axes(tet10,2))), UInt64.(vec(tet10)))
+            api.mesh.generate(0)
+            api.mesh.set_order(2)
+            for mid in boundary_mids
+                p,_,_,_ = api.mesh.get_node(UInt64(mid))
+                @test p == coords[:,mid]
+            end
+            for (mid,(a,b)) in interior_mids
+                p,_,_,_ = api.mesh.get_node(UInt64(mid))
+                target = 0.5 .* (coords[:,Int(a)] .+ coords[:,Int(b)])
+                if (Int(a),Int(b)) == (1,5)
+                    @test norm(p .- target) < norm(coords[:,mid] .- target)
+                else
+                    @test p == coords[:,mid]
+                end
+            end
+        finally
+            api.option("Mesh.HighOrderOptimize", 0)
+            api.finalize()
+        end
+    end
+
+    @testset "elastic stage ignores the threshold band; =2 runs both" begin
+        # Raise the band floor above the perturbed element's post-smoothing
+        # minimum so the optimization stage is a guaranteed no-op: mode 1
+        # then performs no relocation while mode -1 still does (the elastic
+        # stage has no band).  Mode 2 must relocate too — its elastic half
+        # runs first and already improves the element.
+        coords, tet10, boundary_mids, interior_mids, _ =
+            _opt_fan10(moves=Dict((1,5)=>(_OPT_SHIFT,-_OPT_SHIFT,0.0)))
+        api = API
+        api.initialize()
+        try
+            api.model.add_discrete_entity(3, 7)
+            api.mesh.add_nodes(3, 7,
+                UInt64.(collect(axes(coords,2))), vec(coords))
+            api.mesh.add_elements_by_type(7, 11,
+                UInt64.(collect(axes(tet10,2))), UInt64.(vec(tet10)))
+            # Band [0.99, 2.0]: the perturbed element's incident minimum is
+            # well below 0.99, so no node is an optimization candidate.
+            api.option("Mesh.HighOrderThresholdMin", 0.99)
+            api.option("Mesh.HighOrderThresholdMax", 2.0)
+
+            api.option("Mesh.HighOrderOptimize", 1)
+            api.mesh.generate(0)
+            api.mesh.set_order(2)
+            for mid in keys(interior_mids)
+                p,_,_,_ = api.mesh.get_node(UInt64(mid))
+                @test p == coords[:,mid]     # banded stage: nothing in band
+            end
+
+            api.option("Mesh.HighOrderOptimize", -1)
+            api.mesh.generate(0)
+            api.mesh.set_order(2)
+            moved = false
+            for (mid,(a,b)) in interior_mids
+                p,_,_,_ = api.mesh.get_node(UInt64(mid))
+                (Int(a),Int(b)) == (1,5) || continue
+                target = 0.5 .* (coords[:,Int(a)] .+ coords[:,Int(b)])
+                moved = norm(p .- target) < norm(coords[:,mid] .- target)
+            end
+            @test moved                    # elastic stage: no band
+
+            api.option("Mesh.HighOrderOptimize", 2)
+            api.mesh.generate(0)
+            api.mesh.set_order(2)
+            moved = false
+            for (mid,(a,b)) in interior_mids
+                p,_,_,_ = api.mesh.get_node(UInt64(mid))
+                (Int(a),Int(b)) == (1,5) || continue
+                target = 0.5 .* (coords[:,Int(a)] .+ coords[:,Int(b)])
+                moved = norm(p .- target) < norm(coords[:,mid] .- target)
+            end
+            @test moved                    # mode 2: elastic half still runs
+        finally
+            api.option("Mesh.HighOrderOptimize", 0)
+            api.option("Mesh.HighOrderThresholdMin", 0.1)
+            api.option("Mesh.HighOrderThresholdMax", 2.0)
+            api.finalize()
+        end
+    end
+
 end
 
 # ══════════════════════════════════════════════════════════════════════════════

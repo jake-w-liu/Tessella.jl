@@ -5,10 +5,14 @@
 # Upstream semantics (gmsh 4.15.2): 0 disables high-order optimization,
 # -1 applies elastic smoothing only, 1 optimizes (relocates interior
 # high-order nodes to improve the minimum scaled Jacobian while keeping
-# boundary/geometry supports fixed), 2 applies both.  This slice implements
-# the certificate-gated relocation pass (the optimization stage of modes 1
-# and 2); the dedicated elastic-smoothing stage (-1 and the second half of
-# 2) remains an OPT01 gap — mode -1 currently performs no relocation.
+# boundary/geometry supports fixed), 2 applies both.  The optimization
+# stage honors `Mesh.HighOrderThresholdMin/Max` — only nodes whose
+# incident minimum lies inside the band are candidates.  The elastic
+# stage runs the same certificate-gated bounded ascent without the band
+# (`threshold_min=-Inf`, `threshold_max=Inf`), so elements below the
+# optimize floor are smoothed too — the native realization of upstream's
+# elasticity-analogy pass, restricted to the certified P2 families and
+# still never able to create or repair inverted elements.
 #
 # The pass itself lives in HighOrder.optimize_p2_interior! and covers every
 # full-P2 family with an exact Bernstein positivity bound — Tri6, Quad9,
@@ -30,9 +34,15 @@ _high_order_optimize_level() = begin
     return clamp(round(Int, v), typemin(Int32), typemax(Int32))
 end
 
-# The relocation pass runs for upstream modes 1 (optimize) and 2 (both);
-# mode -1 (elastic smoothing only) has no relocation stage.
-_high_order_optimize_relocation() = _high_order_optimize_level() >= 1
+# Stage gates: the unbounded elastic-smoothing stage runs for upstream
+# modes -1 (elastic only) and 2 (elastic then optimize); the banded
+# optimization stage runs for modes 1 and 2.
+_high_order_optimize_elastic() =
+    (l = _high_order_optimize_level(); l == -1 || l == 2)
+_high_order_optimize_optimize() =
+    (l = _high_order_optimize_level(); l == 1 || l == 2)
+_high_order_optimize_relocation() =
+    _high_order_optimize_elastic() || _high_order_optimize_optimize()
 
 function _high_order_optimize_int_option(name::AbstractString, default::Integer)
     v = get(OPTIONS, name, Float64(default))
@@ -217,21 +227,46 @@ function _high_order_optimize_mixed!(mesh::MixedMesh, class, model,
         return nothing
     fixed_edges, fixed_facets = _high_order_optimize_fixed_supports(mesh, class)
     sliders = _high_order_optimize_sliders(mesh, class, model, caller)
-    stats = HighOrder.optimize_p2_interior!(mesh.coords, blocks,
-        _high_order_optimize_movable(mesh, class);
-        itermax=_high_order_optimize_int_option("Mesh.HighOrderIterMax", 100),
-        passes=_high_order_optimize_int_option("Mesh.HighOrderPassMax", 25),
-        fixed_edges=fixed_edges, fixed_facets=fixed_facets,
-        sliders=sliders,
-        threshold_min=_high_order_optimize_num_option(
-            "Mesh.HighOrderThresholdMin", 0.1),
-        threshold_max=_high_order_optimize_num_option(
-            "Mesh.HighOrderThresholdMax", 2.0))
-    stats[1] > 0 &&
-        _native_diagnostic_emit_locked(:info,
-            "High-order optimize moved $(stats[1]) interior node(s) " *
-            "(min scaled Jacobian $(round(stats[2];sigdigits=4)) -> " *
-            "$(round(stats[3];sigdigits=4)))")
+    movable = _high_order_optimize_movable(mesh, class)
+    itermax = _high_order_optimize_int_option("Mesh.HighOrderIterMax", 100)
+    passes = _high_order_optimize_int_option("Mesh.HighOrderPassMax", 25)
+    # Stage order follows upstream: elastic smoothing first (mode -1 and the
+    # first half of mode 2, no threshold band), then the banded optimization
+    # stage (modes 1 and 2 honoring Mesh.HighOrderThresholdMin/Max).
+    moved = 0
+    stats = (0, NaN, NaN, 0, 0)
+    if _high_order_optimize_elastic()
+        s = HighOrder.optimize_p2_interior!(mesh.coords, blocks, movable;
+            itermax=itermax, passes=passes,
+            fixed_edges=fixed_edges, fixed_facets=fixed_facets,
+            sliders=sliders,
+            threshold_min=-Inf, threshold_max=Inf)
+        moved += s[1]
+        stats = (moved, s[2], s[3], stats[4] + s[4], stats[5] + s[5])
+        s[1] > 0 &&
+            _native_diagnostic_emit_locked(:info,
+                "High-order elastic smoothing moved $(s[1]) node(s) " *
+                "(min scaled Jacobian $(round(s[2];sigdigits=4)) -> " *
+                "$(round(s[3];sigdigits=4)))")
+    end
+    if _high_order_optimize_optimize()
+        s = HighOrder.optimize_p2_interior!(mesh.coords, blocks, movable;
+            itermax=itermax, passes=passes,
+            fixed_edges=fixed_edges, fixed_facets=fixed_facets,
+            sliders=sliders,
+            threshold_min=_high_order_optimize_num_option(
+                "Mesh.HighOrderThresholdMin", 0.1),
+            threshold_max=_high_order_optimize_num_option(
+                "Mesh.HighOrderThresholdMax", 2.0))
+        base = isnan(stats[2]) ? s[2] : stats[2]
+        moved += s[1]
+        stats = (moved, base, s[3], stats[4] + s[4], stats[5] + s[5])
+        s[1] > 0 &&
+            _native_diagnostic_emit_locked(:info,
+                "High-order optimize moved $(s[1]) interior node(s) " *
+                "(min scaled Jacobian $(round(s[2];sigdigits=4)) -> " *
+                "$(round(s[3];sigdigits=4)))")
+    end
     # Accepted slider parameter states — the engine replaced `support.u` only
     # where a move was committed, so a bitwise compare identifies them.
     slid = Dict{Int,Vector{Float64}}()
@@ -262,18 +297,38 @@ function _high_order_optimize_overlay!(p2::Union{P2Mesh,P2TriMesh},
         mids[i][1] == dim && (movable[nlin + i] = true)
     end
     msh = p2 isa P2Mesh ? Int32(11) : Int32(9)
-    stats = HighOrder.optimize_p2_interior!(p2.coords, ((msh, cells),), movable;
-        itermax=_high_order_optimize_int_option("Mesh.HighOrderIterMax", 100),
-        passes=_high_order_optimize_int_option("Mesh.HighOrderPassMax", 25),
-        threshold_min=_high_order_optimize_num_option(
-            "Mesh.HighOrderThresholdMin", 0.1),
-        threshold_max=_high_order_optimize_num_option(
-            "Mesh.HighOrderThresholdMax", 2.0))
-    stats[1] > 0 &&
-        _native_diagnostic_emit_locked(:info,
-            "High-order optimize moved $(stats[1]) interior node(s) " *
-            "(min scaled Jacobian $(round(stats[2];sigdigits=4)) -> " *
-            "$(round(stats[3];sigdigits=4)))")
+    itermax = _high_order_optimize_int_option("Mesh.HighOrderIterMax", 100)
+    passes = _high_order_optimize_int_option("Mesh.HighOrderPassMax", 25)
+    moved = 0
+    stats = (0, NaN, NaN, 0, 0)
+    if _high_order_optimize_elastic()
+        s = HighOrder.optimize_p2_interior!(p2.coords, ((msh, cells),),
+            movable; itermax=itermax, passes=passes,
+            threshold_min=-Inf, threshold_max=Inf)
+        moved += s[1]
+        stats = (moved, s[2], s[3], stats[4] + s[4], stats[5] + s[5])
+        s[1] > 0 &&
+            _native_diagnostic_emit_locked(:info,
+                "High-order elastic smoothing moved $(s[1]) node(s) " *
+                "(min scaled Jacobian $(round(s[2];sigdigits=4)) -> " *
+                "$(round(s[3];sigdigits=4)))")
+    end
+    if _high_order_optimize_optimize()
+        s = HighOrder.optimize_p2_interior!(p2.coords, ((msh, cells),),
+            movable; itermax=itermax, passes=passes,
+            threshold_min=_high_order_optimize_num_option(
+                "Mesh.HighOrderThresholdMin", 0.1),
+            threshold_max=_high_order_optimize_num_option(
+                "Mesh.HighOrderThresholdMax", 2.0))
+        base = isnan(stats[2]) ? s[2] : stats[2]
+        moved += s[1]
+        stats = (moved, base, s[3], stats[4] + s[4], stats[5] + s[5])
+        s[1] > 0 &&
+            _native_diagnostic_emit_locked(:info,
+                "High-order optimize moved $(s[1]) interior node(s) " *
+                "(min scaled Jacobian $(round(s[2];sigdigits=4)) -> " *
+                "$(round(s[3];sigdigits=4)))")
+    end
     return stats
 end
 

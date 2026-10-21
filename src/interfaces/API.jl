@@ -870,7 +870,7 @@ function option(name::AbstractString, value::Real)
         elseif key in ("Mesh.HighOrderThresholdMin","Mesh.HighOrderThresholdMax")
             # Free finite doubles — the relocation band requires min < max,
             # enforced where the pass runs.
-            v=_geo_option_store_value("Mesh",last(split(key,'.')),v,"API.option")
+            v=_geo_option_store_value("Mesh",String(last(split(key,'.'))),v,"API.option")
         elseif key=="Mesh.RandomSeed"
             v=_geo_option_store_value("Mesh","RandomSeed",v,"API.option")
         elseif key=="Mesh.RandomFactor3D"
