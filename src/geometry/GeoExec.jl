@@ -115,7 +115,8 @@ using ..IO: _geo_string_index_offender, _GEO_STRING_FUNCTIONS,
             _geo_control_statement, _GEO_CONTROL_BARE
 using ..IO: GeoFieldSpec, GeoParams, _GEO_FIELD_KINDS,
             _geo_expression_field_tags
-using ..SizeField: _build_geo_field
+using ..SizeField: _build_geo_field, AbstractField, AbstractSizeField
+import ..SizeField: field_value
 using ..Model: _ModelMesh1DOptions, _model_mesh_lc, _model_mesh_bbox,
                _model_mesh_dim01!, _model_mesh_dim01_grade!,
                _model_mesh_dim01_parts!, _model_point_mesh_parts,
@@ -1251,6 +1252,15 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
             # execute.
             syntax_aborted=false
             abort_ate_end=false
+            # OCC-routed statements bind and publish whole shape graphs —
+            # `Rectangle`'s boundary entities, loft faces, transform rebuilds
+            # — that the text observer cannot count. A kernel signature
+            # change under the OpenCASCADE factory marks the statement for
+            # the model-driven resync below.
+            occ_sig=allocator_state!==nothing &&
+                allocator_state.factory===:opencascade ?
+                (m.occ_kernel.next_shape,length(m.occ_kernel.bindings),
+                 copy(m.occ_kernel.maxima)) : nothing
             assigned=try
                 _exec_line!(m,line,context,allocator_state)
             catch err
@@ -1273,6 +1283,13 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
             # inside `_geo_exec_delete!`; the observer skips them.
             syntax_aborted || _geo_allocator_observe_statement!(
                 allocator_state,line,context,"execute_geo")
+            occ_sig!==nothing &&
+                (m.occ_kernel.next_shape,length(m.occ_kernel.bindings),
+                 m.occ_kernel.maxima)!=occ_sig &&
+                _geo_occ_allocator_resync!(allocator_state,m)
+            # `occ_sig` snapshots the kernel before the statement; a pure
+            # lazy-bind (e.g. `Closest` operand binding) also changes it —
+            # the resync rebuild is idempotent on those statements.
             occursin(r"\bBoolean[A-Za-z]*\b",
                      line) &&
                 _geo_allocator_resync_model!(allocator_state,m)
@@ -2058,6 +2075,13 @@ function _geo_exec_transform_term(m::GeoModel,raw::AbstractString,
     end
     rest=String(strip(s[nextind(s,firstindex(s),
                               ncodeunits(name)):end]))
+    ruled=false
+    if name=="Ruled" && match(r"^ThruSections\b",rest)!==nothing
+        # `tRuled tThruSections ListOfDouble` — the ruled-loft keyword pair.
+        ruled=true
+        name="ThruSections"
+        rest=String(strip(rest[nextind(rest,firstindex(rest),12):end]))
+    end
     if name in ("Translate","Rotate","Dilate","Symmetry")
         # `tTranslate VExpr '{' MultipleShape '}'` etc. — keyword transforms
         # commit at the name; a missing VExpr or shape group is a syntax
@@ -2070,38 +2094,110 @@ function _geo_exec_transform_term(m::GeoModel,raw::AbstractString,
         isempty(rest) || _geo_selector_abort(rest)
         entities=_geo_shape_list_entities!(m,shape_list,context,caller;
                                            allocator_state=allocator_state)
-        transform_entities!(m,t,entities;caller=caller,auto_coherence=_geo_auto_coherence(context))
-        context.geo_changed=true
+        if allocator_state!==nothing && allocator_state.factory===:opencascade
+            entities=_geo_occ_apply_transform!(
+                m,entities,t,context,caller,_GEO_OCC_TRANSFORM_WHAT[name])
+        else
+            transform_entities!(m,t,entities;caller=caller,
+                                auto_coherence=_geo_auto_coherence(context))
+            context.geo_changed=true
+        end
         return Float64[Float64(tag) for (_,tag) in entities]
     end
     if !startswith(rest,"{")
-        # `Affine`/`Closest` are keywords upstream — `Affine` without its
-        # `{...}` parameters is a syntax error. Any other name may still be a
-        # `tSTRING` action or a selector handled elsewhere.
-        name in ("Affine","Closest") || return nothing
+        # `Affine`/`Closest`/`Fillet`/`Chamfer`/`ThruSections` are keywords
+        # upstream — `Affine` without its `{...}` parameters is a syntax
+        # error. Any other name may still be a `tSTRING` action or a
+        # selector handled elsewhere.
+        ruled && _geo_selector_abort(rest)
+        name in ("Affine","Closest","Fillet","Chamfer","ThruSections") ||
+            return nothing
         _geo_selector_abort(rest)
     end
     (params,rest)=_geo_balanced_group(rest,caller)
+    if name=="Fillet" || name=="Chamfer" || name=="ThruSections"
+        # `tFillet RLD RLD RLD` / `tChamfer RLD RLD RLD RLD` /
+        # `tThruSections RLD` — every operand is a `ListOfDouble` group.
+        groups=[params]
+        ngroups=name=="Fillet" ? 3 : name=="Chamfer" ? 4 : 1
+        while length(groups)<ngroups
+            r2=String(strip(rest))
+            startswith(r2,"{") || _geo_selector_abort(r2)
+            (params,rest)=_geo_balanced_group(r2,caller)
+            push!(groups,params)
+        end
+        isempty(rest) || _geo_selector_abort(rest)
+        if allocator_state===nothing || allocator_state.factory!==:opencascade
+            for g in groups
+                _geo_numeric_list_values(
+                    "{"*g*"}",context,"$caller parameters";depth=1)
+            end
+            _geo_yyerror!(context,
+                "$name only available with OpenCASCADE geometry kernel")
+            return Float64[]
+        end
+        kernel=_geo_occ_prepare_kernel!(m)
+        if name=="ThruSections"
+            wires=_geo_exec_entity_rhs_tags(
+                "{"*groups[1]*"}",context,"$caller wires";abs_refs=true)
+            out=_geo_occ_thru_sections_run(m,wires,context,caller,ruled)
+            return Float64[Float64(tag) for (_,tag) in out]
+        end
+        out=_geo_occ_corner_run(m,name,groups,context,caller)
+        out===nothing && return Float64[]
+        return Float64[Float64(tag) for (_,tag) in out]
+    end
     if name=="Affine" || name=="Closest"
         r2=String(strip(rest))
         startswith(r2,"{") || _geo_selector_abort(r2)
         (shape_list,rest)=_geo_balanced_group(r2,caller)
         isempty(rest) || _geo_selector_abort(rest)
-        _geo_numeric_list_values(
+        vals=_geo_numeric_list_values(
             "{"*params*"}",context,"$caller parameters";depth=1)
-        if name=="Affine"
+        entities=_geo_shape_list_entities!(m,shape_list,context,caller;
+                                           allocator_state=allocator_state)
+        if allocator_state===nothing || allocator_state.factory!==:opencascade
+            # OCC-only transforms report a recoverable error upstream and
+            # leave the shapes untouched: `Affine` still yields its input
+            # list, while `Closest` contributes nothing.
+            if name=="Affine"
+                _geo_yyerror!(context,
+                    "Affine transform only available with OpenCASCADE " *
+                    "geometry kernel")
+                return Float64[Float64(tag) for (_,tag) in entities]
+            end
             _geo_yyerror!(context,
-                "Affine transform only available with OpenCASCADE " *
+                "Closest entity only available with OpenCASCADE " *
                 "geometry kernel")
-            entities=_geo_shape_list_entities!(m,shape_list,context,caller;
-                                               allocator_state=allocator_state)
+            return Float64[]
+        end
+        kernel=_geo_occ_prepare_kernel!(m)
+        if name=="Affine"
+            try
+                _geo_occ_bind_entities!(m,entities,kernel,caller)
+                Model._model_occ_affine_transform!(m,entities,vals)
+            catch err
+                err isa InterruptException && rethrow()
+                err isa ArgumentError || rethrow()
+                _geo_occ_fail!(context,err,"Could not apply affine transform")
+                return Float64[Float64(tag) for (_,tag) in entities]
+            end
+            _geo_occ_finish!(m,context)
             return Float64[Float64(tag) for (_,tag) in entities]
         end
-        _geo_yyerror!(context,
-            "Closest entity only available with OpenCASCADE geometry kernel")
-        _geo_shape_list_entities!(m,shape_list,context,caller;
-                                  allocator_state=allocator_state)
-        return Float64[]
+        length(vals)==3 || throw(ArgumentError(
+            "$caller: Closest requires `{x, y, z}` parameters"))
+        out=try
+            _geo_occ_bind_entities!(m,entities,kernel,caller)
+            first(Model._model_occ_get_closest_entities(
+                m,vals[1],vals[2],vals[3],entities,1))
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_occ_fail!(context,err,"Could not get closest entity")
+            Tuple{Int,Int}[]
+        end
+        return Float64[Float64(tag) for (_,tag) in out]
     end
     name in _GEO_SELECTOR_KEYWORDS && return nothing
     # `tSTRING '{' MultipleShape '}'` — Duplicata/boundary/PointsOf/unknown
@@ -2114,7 +2210,8 @@ function _geo_exec_transform_term(m::GeoModel,raw::AbstractString,
     else
         _geo_sync_physical_view_if_changed!(m,context)
     end
-    out=_geo_shape_action!(m,name,entities,context,caller)
+    out=_geo_shape_action!(m,name,entities,context,caller;
+                           allocator_state=allocator_state)
     return Float64[Float64(tag) for (_,tag) in out]
 end
 
@@ -3283,28 +3380,57 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
             # `tAffine '{' RLD '}' '{' MultipleShape '}'` — the parameters are
             # a brace-delimited numeric list, then the shape group.
             (params,s)=_geo_balanced_group(s,nested)
-            _geo_numeric_list_values(
+            vals=_geo_numeric_list_values(
                 "{"*params*"}",context,"$caller $name";depth=1)
             s=String(strip(s))
             startswith(s,"{") || _geo_selector_abort(s)
             (inner_list,s)=_geo_balanced_group(s,nested)
-            # OCC-only transforms report a recoverable error upstream and
-            # leave the shapes untouched: `Affine` still yields its input
-            # list, while `Closest` contributes nothing.
-            if name=="Affine"
+            inner=_geo_shape_list_entities!(m,inner_list,context,caller;
+                                            allocator_state=allocator_state)
+            if allocator_state===nothing ||
+                    allocator_state.factory!==:opencascade
+                # OCC-only transforms report a recoverable error upstream and
+                # leave the shapes untouched: `Affine` still yields its input
+                # list, while `Closest` contributes nothing.
+                if name=="Affine"
+                    _geo_yyerror!(context,
+                        "Affine transform only available with OpenCASCADE " *
+                        "geometry kernel")
+                    return (inner,s,true)
+                end
                 _geo_yyerror!(context,
-                    "Affine transform only available with OpenCASCADE " *
+                    "Closest entity only available with OpenCASCADE " *
                     "geometry kernel")
-                inner=_geo_shape_list_entities!(m,inner_list,context,caller;
-                                                allocator_state=allocator_state)
+                return (NTuple{2,Int}[],s,true)
+            end
+            kernel=_geo_occ_prepare_kernel!(m)
+            if name=="Affine"
+                try
+                    _geo_occ_bind_entities!(m,inner,kernel,nested)
+                    Model._model_occ_affine_transform!(m,inner,vals)
+                catch err
+                    err isa InterruptException && rethrow()
+                    err isa ArgumentError || rethrow()
+                    _geo_occ_fail!(context,err,
+                                   "Could not apply affine transform")
+                    return (inner,s,true)
+                end
+                _geo_occ_finish!(m,context)
                 return (inner,s,true)
             end
-            _geo_yyerror!(context,
-                "Closest entity only available with OpenCASCADE " *
-                "geometry kernel")
-            _geo_shape_list_entities!(m,inner_list,context,caller;
-                                      allocator_state=allocator_state)
-            return (NTuple{2,Int}[],s,true)
+            length(vals)==3 || throw(ArgumentError(
+                "$nested: Closest requires `{x, y, z}` parameters"))
+            out=try
+                _geo_occ_bind_entities!(m,inner,kernel,nested)
+                first(Model._model_occ_get_closest_entities(
+                    m,vals[1],vals[2],vals[3],inner,1))
+            catch err
+                err isa InterruptException && rethrow()
+                err isa ArgumentError || rethrow()
+                _geo_occ_fail!(context,err,"Could not get closest entity")
+                Tuple{Int,Int}[]
+            end
+            return (NTuple{2,Int}[e for e in out],s,true)
         end
         (t,s)=_geo_transform_params_rest(
             kind=name,source=s,context=context,caller=nested)
@@ -3313,9 +3439,53 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
         (inner_list,s)=_geo_balanced_group(s,nested)
         inner=_geo_shape_list_entities!(m,inner_list,context,caller;
                                         allocator_state=allocator_state)
-        transform_entities!(m,t,inner;caller=nested,auto_coherence=_geo_auto_coherence(context))
+        if allocator_state!==nothing && allocator_state.factory===:opencascade
+            _geo_occ_apply_transform!(
+                m,inner,t,context,nested,_GEO_OCC_TRANSFORM_WHAT[name])
+        else
+            transform_entities!(m,t,inner;caller=nested,
+                                auto_coherence=_geo_auto_coherence(context))
+        end
         # Gmsh returns the input shape list (`$$ = $MultipleShape`).
         return (inner,s,true)
+    end
+    if name=="Fillet" || name=="Chamfer" || name=="ThruSections" ||
+            (name=="Ruled" && match(r"^ThruSections\b",s)!==nothing)
+        # `tFillet`/`tChamfer`/`(tRuled) tThruSections` Transform productions
+        # — the output entity list, not the input shapes, is yielded.
+        ruled=false
+        if name=="Ruled"
+            ruled=true;name="ThruSections"
+            s=String(strip(s[nextind(s,firstindex(s),12):end]))
+        end
+        nested="$caller: $name"
+        ngroups=name=="Fillet" ? 3 : name=="Chamfer" ? 4 : 1
+        groups=String[]
+        for _ in 1:ngroups
+            startswith(s,"{") || _geo_selector_abort(s)
+            (params,s)=_geo_balanced_group(s,nested)
+            push!(groups,params)
+            s=String(strip(s))
+        end
+        s=_geo_require_list_semicolon(s,caller,name)
+        if allocator_state===nothing || allocator_state.factory!==:opencascade
+            for g in groups
+                _geo_numeric_list_values(
+                    "{"*g*"}",context,"$caller $name";depth=1)
+            end
+            _geo_yyerror!(context,
+                "$name only available with OpenCASCADE geometry kernel")
+            return (NTuple{2,Int}[],s,true)
+        end
+        out=if name=="ThruSections"
+            wires=_geo_exec_entity_rhs_tags(
+                "{"*groups[1]*"}",context,"$caller wires";abs_refs=true)
+            _geo_occ_thru_sections_run(m,wires,context,nested,ruled)
+        else
+            _geo_occ_corner_run(m,name,groups,context,nested)
+        end
+        out===nothing && return (NTuple{2,Int}[],s,true)
+        return (NTuple{2,Int}[e for e in out],s,true)
     end
     if name=="Split" || name=="Intersect"
         # `tSplit tCurve '{' FExpr '}' tPoint '{' RLD '}'` /
@@ -3424,7 +3594,8 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
         else
             _geo_sync_physical_view_if_changed!(m,context)
         end
-        return (_geo_shape_action!(m,name,inner,context,caller),s,true)
+        return (_geo_shape_action!(m,name,inner,context,caller;
+                                   allocator_state=allocator_state),s,true)
     end
     (startswith(s,"(") || match(r"^[A-Za-z_]",s)!==nothing) &&
         return _geo_shape_definition_element!(m,s0,context,caller)
@@ -3494,8 +3665,26 @@ end
 function _geo_shape_action!(m::GeoModel, name::AbstractString,
                             inner::Vector{NTuple{2,Int}},
                             context::_GeoNumericContext,
-                            caller::AbstractString)
+                            caller::AbstractString;
+                            allocator_state=nothing)
     if name=="Duplicata"
+        if allocator_state!==nothing && allocator_state.factory===:opencascade
+            # `OCC_Internals::copy` — `_multiBind` binds the inputs at their
+            # tags, duplicates, and reports the new highest-dimension tags.
+            kernel=_geo_occ_prepare_kernel!(m)
+            out=try
+                _geo_occ_bind_entities!(m,inner,kernel,"$caller: Duplicata")
+                Model._model_occ_copy_entities!(m,inner)
+            catch err
+                err isa InterruptException && rethrow()
+                err isa ArgumentError || rethrow()
+                _geo_occ_fail!(context,err,"Could not copy shapes")
+                nothing
+            end
+            out===nothing && return NTuple{2,Int}[]
+            _geo_occ_finish!(m,context)
+            return NTuple{2,Int}[(d,t) for (d,t) in out]
+        end
         return duplicate_entities!(m,inner;caller="$caller: Duplicata")
     elseif name in ("Boundary","CombinedBoundary","OrientedBoundary",
                     "OrientedCombinedBoundary")
@@ -4296,6 +4485,507 @@ function _geo_exec_extrude_pipe!(m::GeoModel,rest::AbstractString,shapes,
     return Float64[Float64(t) for (_,t) in out]
 end
 
+# ── OCC kernel routing for `.geo` OCC-only statements ────────────────────────
+# Gmsh executes `Rectangle`, `Disk`, `Wedge`, `Wire`, `ThickSolid`,
+# `ThruSections`/`Ruled ThruSections`, `BSpline|Bezier Surface`, `Closest`,
+# `Fillet`, `Chamfer` and the `Affine`/`Closest` transforms through the
+# OpenCASCADE internals when `SetFactory("OpenCASCADE")` is active; under the
+# built-in factory each reports the recoverable `<name> only available with
+# OpenCASCADE geometry kernel`. `.geo` entities stay GEO records carrying OCC
+# geometry records — the kernel endpoints below bind referenced entities into
+# `m.occ_kernel` at their existing tags first (`_geo_occ_pipe_*!` for
+# vertices/edges/wires/faces, `_geo_occ_bind_*!` for shells and volumes), run
+# the shared `Model._model_occ_*` endpoint, then `_model_occ_synchronize!`
+# publishes created shapes back as GEO entities.
+
+# Keep kernel tag allocation ahead of every `.geo` namespace it may emit:
+# entity maxima per dimension, loop tags for wires, and surface-loop tags
+# for the shells a solid binds or creates.
+function _geo_occ_prepare_kernel!(m::GeoModel,allocator_state=nothing)
+    kernel=m.occ_kernel
+    for d in 0:3
+        kernel.maxima[d+3]=max(kernel.maxima[d+3],m.next_tag[d+1])
+    end
+    isempty(m.loops) ||
+        (kernel.maxima[2]=max(kernel.maxima[2],maximum(keys(m.loops))))
+    isempty(m.surface_loops) ||
+        (kernel.maxima[1]=max(kernel.maxima[1],maximum(keys(m.surface_loops))))
+    return kernel
+end
+
+# Bind a `.geo` `Surface Loop` into the kernel as a shell at its own tag —
+# the `(-2, tag)` binding records the GModel loop mapping `synchronize`
+# round-trips through `kernel.shell_loops`.
+function _geo_occ_bind_shell!(m::GeoModel,tag::Int,kernel,caller)
+    haskey(kernel.bindings,(-2,tag)) && return kernel.bindings[(-2,tag)]
+    haskey(m.surface_loops,tag) || throw(ArgumentError(
+        "$caller: unknown Surface Loop[$tag]"))
+    uses=Tuple{UInt64,Bool}[]; face_ids=UInt64[]
+    for s in m.surface_loops[tag]
+        st=Int(s); st!=0 || throw(ArgumentError(
+            "$caller: Surface Loop[$tag] contains an invalid Surface[0]"))
+        fid=_geo_occ_pipe_face!(m,abs(st),kernel,caller)
+        push!(uses,(fid,st<0)); push!(face_ids,fid)
+    end
+    isempty(uses) && throw(ArgumentError(
+        "$caller: Surface Loop[$tag] is empty"))
+    sid=only(Model._model_occ_reserve_shapes(kernel,1,caller))
+    Model._model_occ_bind_shape!(kernel,-2,tag,sid,
+        Model._ModelOCCShape(-2,(uses=uses,),face_ids))
+    kernel.next_shape=sid+UInt64(1)
+    kernel.shell_loops[sid]=tag
+    return sid
+end
+
+# Bind a `.geo` `Volume` into the kernel as a solid at its own tag — each
+# member `Surface Loop` becomes a bound shell.
+function _geo_occ_bind_volume!(m::GeoModel,tag::Int,kernel,caller)
+    haskey(kernel.bindings,(3,tag)) && return kernel.bindings[(3,tag)]
+    haskey(m.volumes,tag) || throw(ArgumentError(
+        "$caller: unknown Volume[$tag]"))
+    shell_ids=UInt64[]
+    for st in m.volumes[tag]
+        s=Int(st); s!=0 || throw(ArgumentError(
+            "$caller: Volume[$tag] contains an invalid Surface Loop[0]"))
+        push!(shell_ids,_geo_occ_bind_shell!(m,abs(s),kernel,caller))
+    end
+    isempty(shell_ids) && throw(ArgumentError(
+        "$caller: Volume[$tag] is empty"))
+    vid=only(Model._model_occ_reserve_shapes(kernel,1,caller))
+    Model._model_occ_bind_shape!(kernel,3,tag,vid,
+        Model._ModelOCCShape(3,(kind=:solid,),shell_ids))
+    kernel.next_shape=vid+UInt64(1)
+    return vid
+end
+
+# Lazily bind one `(dim, tag)` entity into the kernel, dim -1 resolving a
+# `Wire`/`Curve Loop` record and dim -2 a `Surface Loop`.
+function _geo_occ_bind_dim_tag!(m::GeoModel,dim::Int,tag::Int,kernel,caller)
+    d=Int(dim); t=Int(tag)
+    d==0 && return _geo_occ_pipe_vertex!(m,t,kernel,caller)
+    d==1 && return _geo_occ_pipe_edge!(m,t,kernel,caller)
+    d==2 && return _geo_occ_pipe_face!(m,t,kernel,caller)
+    d==-1 && return _geo_occ_pipe_wire!(m,t,kernel,caller)
+    d==-2 && return _geo_occ_bind_shell!(m,t,kernel,caller)
+    d==3 && return _geo_occ_bind_volume!(m,t,kernel,caller)
+    throw(ArgumentError("$caller: cannot bind dimension $d into OpenCASCADE"))
+end
+
+function _geo_occ_bind_entities!(m::GeoModel,entities,kernel,caller)
+    for (dim,tag) in entities
+        _geo_occ_bind_dim_tag!(m,dim,tag,kernel,caller)
+    end
+    return entities
+end
+
+# A kernel wire referenced where `.geo` expects a `Curve Loop` gets a GEO
+# loop record carrying the wire's signed traversal, like the `Wire`
+# statement's own materialization.
+function _geo_occ_wire_geo_loop!(m::GeoModel,wire_tag::Int,kernel,caller)
+    haskey(m.loops,wire_tag) && return m.loops[wire_tag]
+    wid=get(kernel.bindings,(-1,wire_tag),nothing)
+    wid===nothing && throw(ArgumentError(
+        "$caller: unknown Wire/Curve Loop[$wire_tag]"))
+    m.loops[wire_tag]=Int[
+        (rev ? -1 : 1)*Model._model_occ_shape_tag(kernel,eid,caller)
+        for (eid,rev) in kernel.shapes[wid].geometry.uses]
+    return m.loops[wire_tag]
+end
+
+# Resolve a `.geo` wire operand (a `Curve Loop` record or an existing OCC
+# wire binding) to a kernel wire tag, binding GEO loops lazily.
+function _geo_occ_wire_tag!(m::GeoModel,tag,kernel,caller)
+    t=abs(Int(tag))
+    haskey(kernel.bindings,(-1,t)) && return t
+    _geo_occ_pipe_wire!(m,t,kernel,caller)
+    return t
+end
+
+# Statement tail after an OCC mutation: publish the kernel graph into the
+# GEO records and mark the internals changed (the enclosing statement loop
+# resynchronizes the allocator from the synced model).
+function _geo_occ_finish!(m::GeoModel,context::_GeoNumericContext)
+    Model._model_occ_synchronize!(m)
+    context.geo_changed=true
+    return nothing
+end
+
+# Kernel endpoint failures are recoverable `.geo` diagnostics upstream —
+# `OCC_Internals` returns `false` after its own error and the grammar emits
+# `Could not add <what>` (or the operation-specific wording). Surface the
+# endpoint's own message first so both diagnostics appear.
+function _geo_occ_fail!(context::_GeoNumericContext,err,what::AbstractString)
+    _geo_msg_error!(context,sprint(showerror,err))
+    _geo_yyerror!(context,what)
+    return nothing
+end
+
+# `.geo` definition tags feed `addX(int tag, ...)` — `(0)` and negatives are
+# automatic like every other `.geo` definition (the `addX` `tag=-1` path);
+# a positive tag binds verbatim.
+_geo_occ_requested_tag(tag::Int,zero_literal::Bool)=tag>0 ? tag : -1
+
+# After statements the text observer cannot model (OCC-only creates and the
+# topology rewrites below), rebuild live sets and counters from the synced
+# model and carry the kernel loop maxima across — upstream `newcl`/`newsl`
+# read the OCC loop namespaces.
+function _geo_occ_allocator_resync!(allocator_state,m::GeoModel)
+    _geo_allocator_resync_model!(allocator_state,m)
+    kernel=m.occ_kernel
+    allocator_state.occ_curveloop_max=max(
+        allocator_state.occ_curveloop_max,kernel.maxima[2])
+    allocator_state.occ_surfaceloop_max=max(
+        allocator_state.occ_surfaceloop_max,kernel.maxima[1])
+    return nothing
+end
+
+# Run a kernel transform endpoint (`translate`/`rotate`/`dilate`/`symmetry`)
+# on resolved `.geo` entities: bind lazily, transform, sync. Endpoint
+# failures report upstream's recoverable "Could not ..." wording.
+function _geo_occ_apply_transform!(m::GeoModel,entities,t::Model._AffineTransform,
+                                   context::_GeoNumericContext,
+                                   caller::AbstractString,what::AbstractString)
+    kernel=_geo_occ_prepare_kernel!(m)
+    try
+        _geo_occ_bind_entities!(m,entities,kernel,caller)
+        Model._model_occ_transform!(m,entities,t,caller)
+    catch err
+        err isa InterruptException && rethrow()
+        err isa ArgumentError || rethrow()
+        _geo_occ_fail!(context,err,"Could not $what shapes")
+        return entities
+    end
+    _geo_occ_finish!(m,context)
+    return entities
+end
+
+const _GEO_OCC_TRANSFORM_WHAT=Dict("Translate"=>"translate",
+    "Rotate"=>"rotate","Dilate"=>"dilate","Symmetry"=>"apply symmetry to")
+
+# ── `.geo` OCC-only entity definitions ───────────────────────────────────────
+# `Name(tag) = {params}` dispatch while the OpenCASCADE factory is active —
+# the `(FExpr) = ListOfDouble` actions upstream runs as `OCC_Internals::addX`
+# calls. Each definition evaluates its tag and parameters first (the grammar
+# actions resolve them before the factory gate fires upstream), reports the
+# OCC-namespace duplicate diagnostic, runs the `Model._model_occ_*` endpoint,
+# and publishes the new shapes through `_geo_occ_finish!`. Endpoint
+# `ArgumentError`s surface the recoverable `Could not add <name>` pair
+# upstream emits; any other exception propagates.
+function _geo_exec_occ_shape_def!(m::GeoModel,s::AbstractString,
+                                  context::_GeoNumericContext,
+                                  allocator_state)
+    kernel=_geo_occ_prepare_kernel!(m,allocator_state)
+    if (mm=match(
+            r"^Rectangle\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",s))!==nothing
+        caller="execute_geo: Rectangle"
+        (tag,zero_literal)=_geo_exec_def_tag(
+            mm.captures[1],context,"$caller tag")
+        v=_geo_exec_numeric_values(mm.captures[2],context,"$caller parameters")
+        if !(length(v) in (5,6))
+            _geo_yyerror!(context,"Rectangle requires 5 or 6 parameters")
+            return
+        end
+        _geo_dup_entity!(context,
+            haskey(m.surfaces,tag)||haskey(kernel.bindings,(2,tag)),
+            :surface,"rectangle",tag,zero_literal,allocator_state) && return
+        try
+            Model._model_occ_add_rectangle!(m,v[1],v[2],v[3],v[4],v[5];
+                tag=_geo_occ_requested_tag(tag,zero_literal),
+                rounded_radius=length(v)==6 ? v[6] : 0.0)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_occ_fail!(context,err,"Could not add rectangle")
+            return
+        end
+        _geo_occ_finish!(m,context)
+        return
+    end
+    if (mm=match(
+            r"^Disk\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",s))!==nothing
+        caller="execute_geo: Disk"
+        (tag,zero_literal)=_geo_exec_def_tag(
+            mm.captures[1],context,"$caller tag")
+        v=_geo_exec_numeric_values(mm.captures[2],context,"$caller parameters")
+        if !(length(v) in (4,5))
+            _geo_yyerror!(context,"Disk requires 4 or 5 parameters")
+            return
+        end
+        _geo_dup_entity!(context,
+            haskey(m.surfaces,tag)||haskey(kernel.bindings,(2,tag)),
+            :surface,"disk",tag,zero_literal,allocator_state) && return
+        try
+            Model._model_occ_add_disk!(m,v[1],v[2],v[3],v[4],
+                length(v)==5 ? v[5] : v[4];
+                tag=_geo_occ_requested_tag(tag,zero_literal))
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_occ_fail!(context,err,"Could not add disk")
+            return
+        end
+        _geo_occ_finish!(m,context)
+        return
+    end
+    if (mm=match(
+            r"^Wedge\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",s))!==nothing
+        caller="execute_geo: Wedge"
+        (tag,zero_literal)=_geo_exec_def_tag(
+            mm.captures[1],context,"$caller tag")
+        v=_geo_exec_numeric_values(mm.captures[2],context,"$caller parameters")
+        if !(length(v) in (6,7))
+            _geo_yyerror!(context,"Wedge requires 6 or 7 parameters")
+            return
+        end
+        _geo_dup_entity!(context,
+            haskey(m.volumes,tag)||haskey(kernel.bindings,(3,tag)),
+            :volume,"wedge",tag,zero_literal,allocator_state) && return
+        try
+            Model._model_occ_add_wedge!(m,v[1],v[2],v[3],v[4],v[5],v[6];
+                tag=_geo_occ_requested_tag(tag,zero_literal),
+                ltx=length(v)==7 ? v[7] : 0.0)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_occ_fail!(context,err,"Could not add wedge")
+            return
+        end
+        _geo_occ_finish!(m,context)
+        return
+    end
+    if (mm=match(
+            r"^Wire\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",s))!==nothing
+        caller="execute_geo: Wire"
+        (tag,zero_literal)=_geo_exec_def_tag(
+            mm.captures[1],context,"$caller tag")
+        curves=_geo_exec_entity_rhs_tags(
+            mm.captures[2],context,"$caller curves";
+            signed=true,allow_empty=true)
+        _geo_dup_entity!(context,
+            haskey(m.loops,tag)||haskey(kernel.bindings,(-1,tag)),
+            :curve_loop,"wire",tag,zero_literal,allocator_state) && return
+        allocated=try
+            for c in curves
+                _geo_occ_pipe_edge!(m,abs(c),kernel,caller)
+            end
+            Model._model_occ_add_wire!(m,curves;
+                tag=_geo_occ_requested_tag(tag,zero_literal))
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_occ_fail!(context,err,"Could not add wire")
+            return
+        end
+        _geo_occ_finish!(m,context)
+        # A kernel wire doubles as a `.geo` curve-loop record — the same
+        # signed-traversal list `_geo_occ_wire_geo_loop!` materializes — so
+        # `Plane Surface`/`Surface`/`Volume` references see it.
+        _geo_occ_wire_geo_loop!(m,allocated,kernel,caller)
+        return
+    end
+    if (mm=match(
+            r"^ThickSolid\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",s))!==nothing
+        caller="execute_geo: ThickSolid"
+        (tag,zero_literal)=_geo_exec_def_tag(
+            mm.captures[1],context,"$caller tag")
+        v=_geo_exec_numeric_values(mm.captures[2],context,"$caller parameters")
+        if length(v)<2
+            _geo_yyerror!(context,
+                "ThickSolid requires a volume tag and an offset")
+            return
+        end
+        _geo_dup_entity!(context,
+            haskey(m.volumes,tag)||haskey(kernel.bindings,(3,tag)),
+            :volume,"thick solid",tag,zero_literal,allocator_state) && return
+        volume_tag=_geo_signed_gmsh_int_value(v[1],"$caller volume")
+        excludes=Int[_geo_signed_gmsh_int_value(x,"$caller exclude surface")
+                     for x in v[3:end]]
+        try
+            _geo_occ_bind_volume!(m,abs(volume_tag),kernel,caller)
+            Model._model_occ_thick_solid(m,
+                _geo_occ_requested_tag(tag,zero_literal),abs(volume_tag),
+                excludes,v[2])
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_occ_fail!(context,err,"Could not add thick solid")
+            return
+        end
+        _geo_occ_finish!(m,context)
+        return
+    end
+    if (mm=match(
+            r"^(Ruled\s+)?ThruSections\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",s))!==nothing
+        ruled=mm.captures[1]!==nothing
+        caller="execute_geo: $(ruled ? "Ruled ThruSections" : "ThruSections")"
+        (tag,zero_literal)=_geo_exec_def_tag(
+            mm.captures[2],context,"$caller tag")
+        wires=_geo_exec_entity_rhs_tags(
+            mm.captures[3],context,"$caller wires";
+            abs_refs=true,allow_empty=true)
+        _geo_dup_entity!(context,
+            haskey(m.volumes,tag)||haskey(m.surfaces,tag)||
+            haskey(kernel.bindings,(3,tag))||haskey(kernel.bindings,(2,tag)),
+            :volume,"thru sections",tag,zero_literal,allocator_state) && return
+        try
+            wire_tags=Int[_geo_occ_wire_tag!(m,wt,kernel,caller) for wt in wires]
+            Model._model_occ_thru_sections!(m,
+                _geo_occ_requested_tag(tag,zero_literal),wire_tags;
+                make_ruled=ruled)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_occ_fail!(context,err,"Could not add thru sections")
+            return
+        end
+        _geo_occ_finish!(m,context)
+        return
+    end
+    if (mm=match(
+            r"^(BSpline|Bezier)\s+Surface\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",s))!==nothing
+        family=mm.captures[1]=="BSpline" ? :bspline : :bezier
+        caller="execute_geo: $(mm.captures[1]) Surface"
+        (tag,zero_literal)=_geo_exec_def_tag(
+            mm.captures[2],context,"$caller tag")
+        # `{{row},{row},...}` — upstream accepts a `ListOfLists` of control
+        # point rows (each row a `{tags}` group) as well as a flat list.
+        raw=String(strip(mm.captures[3]))
+        points=Int[]
+        if startswith(raw,"{") && startswith(strip(raw[2:end]),"{")
+            inner=String(strip(raw[2:prevind(raw,end)]))
+            while !isempty(inner)
+                startswith(inner,"{") || _geo_selector_abort(inner)
+                (row,inner)=_geo_balanced_group(inner,caller)
+                append!(points,_geo_exec_entity_rhs_tags(
+                    "{"*row*"}",context,"$caller control points";
+                    abs_refs=true,allow_empty=true))
+                inner=String(strip(inner))
+                startswith(inner,",") &&
+                    (inner=String(strip(inner[2:end])))
+            end
+        else
+            append!(points,_geo_exec_entity_rhs_tags(
+                raw,context,"$caller control points";
+                abs_refs=true,allow_empty=true))
+        end
+        _geo_dup_entity!(context,
+            haskey(m.surfaces,tag)||haskey(kernel.bindings,(2,tag)),
+            :surface,"$(family) surface",tag,zero_literal,allocator_state) && return
+        # `addBSplineSurface(tag, pointTags)` derives the u count as
+        # `sqrt(|points|)` — a non-square grid is an upstream addX failure.
+        nu=isqrt(length(points))
+        if nu*nu!=length(points)
+            _geo_msg_error!(context,
+                "Number of control points $(length(points)) is not a square")
+            _geo_yyerror!(context,"Could not add $(family) surface")
+            return
+        end
+        try
+            for p in points
+                _geo_occ_pipe_vertex!(m,p,kernel,caller)
+            end
+            family===:bspline ?
+                Model._model_occ_add_bspline_surface!(m,points,nu;
+                    tag=_geo_occ_requested_tag(tag,zero_literal)) :
+                Model._model_occ_add_bezier_surface!(m,points,nu;
+                    tag=_geo_occ_requested_tag(tag,zero_literal))
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_occ_fail!(context,err,"Could not add $(family) surface")
+            return
+        end
+        _geo_occ_finish!(m,context)
+        return
+    end
+    throw(ArgumentError(
+        "execute_geo: unsupported OpenCASCADE entity definition: $s"))
+end
+
+# `ThruSections {wires}` / `Ruled ThruSections {wires}` (term and statement
+# forms) — `tThruSections ListOfDouble` runs `addThruSections(-1, wires)`
+# upstream, returning the created `(dim, tag)` entities.
+function _geo_occ_thru_sections_run(m::GeoModel,wire_tags,
+                                    context::_GeoNumericContext,
+                                    caller::AbstractString,ruled::Bool)
+    kernel=_geo_occ_prepare_kernel!(m)
+    out=try
+        tags=Int[_geo_occ_wire_tag!(m,wt,kernel,caller) for wt in wire_tags]
+        Model._model_occ_thru_sections!(m,-1,tags;make_ruled=ruled)
+    catch err
+        err isa InterruptException && rethrow()
+        err isa ArgumentError || rethrow()
+        _geo_occ_fail!(context,err,"Could not add thru sections")
+        return Tuple{Int,Int}[]
+    end
+    _geo_occ_finish!(m,context)
+    return Tuple{Int,Int}[e for e in out]
+end
+
+# `Fillet{regions}{edges}{radii}` / `Chamfer{regions}{edges}{surfaces}
+# {distances}` shared by the term and shape-list-element paths — returns the
+# output `(dim, tag)` entities, or `nothing` after a recoverable failure.
+function _geo_occ_corner_run(m::GeoModel,name::AbstractString,groups,
+                             context::_GeoNumericContext,
+                             caller::AbstractString)
+    kernel=_geo_occ_prepare_kernel!(m)
+    vols=_geo_exec_entity_rhs_tags(
+        "{"*groups[1]*"}",context,"$caller volumes";abs_refs=true)
+    cs=_geo_exec_entity_rhs_tags(
+        "{"*groups[2]*"}",context,"$caller curves";abs_refs=true)
+    out=if name=="Fillet"
+        radii=_geo_numeric_list_values(
+            "{"*groups[3]*"}",context,"$caller radii";depth=1)
+        length(radii)==1 && (radii=fill(radii[1],length(cs)))
+        try
+            for v in vols
+                _geo_occ_bind_volume!(m,v,kernel,caller)
+            end
+            for c in cs
+                _geo_occ_pipe_edge!(m,c,kernel,caller)
+            end
+            Model._model_occ_fillet(m,vols,cs,radii)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_occ_fail!(context,err,"Could not fillet shapes")
+            return nothing
+        end
+    else
+        # `Chamfer{regions}{edges}{surfaces}{distances}` — the surface list
+        # is a hint upstream resolves against the solid; Tessella derives
+        # the adjacent faces from the edge map and only needs the group
+        # evaluated.
+        _geo_exec_entity_rhs_tags(
+            "{"*groups[3]*"}",context,"$caller surfaces";abs_refs=true)
+        dist=_geo_numeric_list_values(
+            "{"*groups[4]*"}",context,"$caller distances";depth=1)
+        if !(length(dist) in (1,2))
+            _geo_msg_error!(context,
+                "Chamfer distances must have 1 or 2 elements")
+            _geo_yyerror!(context,"Could not chamfer shapes")
+            return nothing
+        end
+        try
+            for v in vols
+                _geo_occ_bind_volume!(m,v,kernel,caller)
+            end
+            for c in cs
+                _geo_occ_pipe_edge!(m,c,kernel,caller)
+            end
+            Model._model_occ_chamfer(
+                m,vols,cs,dist[1],length(dist)==2 ? dist[2] : dist[1])
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_occ_fail!(context,err,"Could not chamfer shapes")
+            return nothing
+        end
+    end
+    _geo_occ_finish!(m,context)
+    return Tuple{Int,Int}[e for e in out]
+end
+
 # Evaluate a transform's parameter portion and return `(transform, rest)` —
 # `rest` continues at the `{shapes}` group. `Translate`/`Symmetry` take a bare
 # `VExpr` upstream (`{a,b,c}`, `(a,b,c)`, `±`-composed); `Rotate`/`Dilate`
@@ -4350,6 +5040,11 @@ function _geo_exec_transform_statement!(m::GeoModel,line::AbstractString,
         "$caller: unexpected text after the shape list"))
     entities=_geo_shape_list_entities!(m,shape_list,context,caller;
                                        allocator_state=allocator_state)
+    if allocator_state!==nothing && allocator_state.factory===:opencascade
+        _geo_occ_apply_transform!(
+            m,entities,t,context,caller,_GEO_OCC_TRANSFORM_WHAT[kind])
+        return nothing
+    end
     transform_entities!(m,t,entities;caller=caller,auto_coherence=_geo_auto_coherence(context))
     context.geo_changed=true
     return nothing
@@ -4490,6 +5185,27 @@ function _geo_circle_rhs(raw::AbstractString,context::_GeoNumericContext,
         String(strip(rest[nextind(rest,firstindex(rest),5):end])),
         context,"$caller Plane")
     return (points,normal)
+end
+
+# OCC `Circle`/`Ellipse` accept a center+parameters form whose `{...}` arity
+# differs from the point-tag grammar (`Circle`: 4, 6, 9 or 12 numbers for
+# `{x,y,z,r[,a1,a2[,zAxis...,xAxis...]]}`; `Ellipse`: 5, 7, 10 or 13 with the
+# `rx,ry` pair). Upstream disambiguates purely by parameter count, so scan
+# the raw RHS before the tag parser runs: returns `(values, rest)` with
+# `values===nothing` whenever `raw` is not a plain `{...}` list of one of the
+# `allowed` arities — the caller then falls back to `_geo_circle_rhs`.
+function _geo_occ_center_params(raw::AbstractString,
+                                context::_GeoNumericContext,
+                                caller::AbstractString,
+                                allowed)
+    s=String(strip(raw))
+    startswith(s,"{") || return (nothing,"")
+    (group,rest)=_geo_balanced_group(s,caller)
+    isempty(rest) || return (nothing,rest)
+    parts=_geo_split_top_commas(group,caller)
+    length(parts) in allowed || return (nothing,rest)
+    values=Float64[_geo_eval_numeric(p,context,caller) for p in parts]
+    return (values,rest)
 end
 
 # Parse the optional `Surface`/`Ruled Surface` trailing constraint
@@ -5797,6 +6513,29 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
             m,inner,context,caller;signed_tags=true,
             allocator_state=allocator_state)
         removed=_geo_delete_entities!(m,entities;recursive=recursive)
+        # `GModel::remove` unbinds every OCC-resident entity it deletes —
+        # leaving the binding would resurrect the tag at the next
+        # `_model_occ_synchronize!`. `_geo_delete_entities!` already
+        # cascaded boundary children, so each binding drops directly
+        # (the `_model_occ_shape_is_owned` guard does not apply to an
+        # explicit `.geo` delete); unreachable shapes are collected.
+        kernel=m.occ_kernel
+        bound=sort!(Tuple{Int,Int}[e for e in removed
+                                  if haskey(kernel.bindings,e)];
+                    by=e->-e[1])
+        for entry in bound
+            id=kernel.bindings[entry]
+            Model._model_occ_entity_map_unbind!(
+                kernel.entity_maps[first(entry)+3],last(entry))
+            delete!(kernel.bindings,entry)
+            delete!(kernel.shape_tags,id)
+            push!(kernel.removed,entry)
+            kernel.maxima[first(entry)+3]=maximum(
+                (t for (d,t) in keys(kernel.bindings) if d==first(entry));
+                init=0)
+            kernel.changed=true
+        end
+        isempty(bound) || Model._model_occ_collect_shapes!(kernel)
         allocator_state===nothing ||
             _geo_allocator_delete_entities!(allocator_state,removed)
         # `GEO_Internals::remove` marks the internals changed unconditionally,
@@ -6108,6 +6847,37 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         caller="execute_geo: Circle"
         (tag,zero_literal)=_geo_exec_def_tag(
             mm.captures[1],context,"$caller tag")
+        occ=allocator_state!==nothing && allocator_state.factory===:opencascade
+        if occ
+            # `Circle(tag) = {x,y,z,r[,a1,a2[,zAxis...,xAxis...]]}` — the OCC
+            # `addCircle` center+radius form (4, 6, 9 or 12 parameters);
+            # upstream selects it purely by parameter count.
+            (vals,)=_geo_occ_center_params(
+                mm.captures[2],context,caller,(4,6,9,12))
+            if vals!==nothing
+                kernel=_geo_occ_prepare_kernel!(m)
+                _geo_dup_entity!(context,
+                    haskey(m.curves,trunc(Int,tag)) ||
+                    haskey(kernel.bindings,(1,tag)),
+                    :curve,"circle",tag,zero_literal,allocator_state) && return
+                try
+                    Model._model_occ_add_circle!(m,
+                        vals[1],vals[2],vals[3],vals[4];
+                        tag=_geo_occ_requested_tag(tag,zero_literal),
+                        angle1=length(vals)>=6 ? vals[5] : 0.0,
+                        angle2=length(vals)>=6 ? vals[6] : 2pi,
+                        zaxis=length(vals)>=9 ? vals[7:9] : nothing,
+                        xaxis=length(vals)>=12 ? vals[10:12] : nothing)
+                catch err
+                    err isa InterruptException && rethrow()
+                    err isa ArgumentError || rethrow()
+                    _geo_occ_fail!(context,err,"Could not add circle")
+                    return
+                end
+                _geo_occ_finish!(m,context)
+                return
+            end
+        end
         (points,normal)=_geo_circle_rhs(mm.captures[2],context,caller)
         if length(points)!=3
             # Grammar-level check — `addCircleArc` is never reached (`r`
@@ -6120,7 +6890,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                          :curve,"circle",tag,zero_literal,allocator_state) &&
             return
         t=_geo_entity_tag(m,1,tag,caller,zero_literal)
-        if allocator_state!==nothing && allocator_state.factory===:opencascade
+        if occ
             for point in points
                 if !haskey(m.points,point)
                     _geo_msg_error!(context,"Unknown OpenCASCADE point with tag $point")
@@ -6153,6 +6923,38 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         caller="execute_geo: Ellipse"
         (tag,zero_literal)=_geo_exec_def_tag(
             mm.captures[1],context,"$caller tag")
+        occ=allocator_state!==nothing && allocator_state.factory===:opencascade
+        if occ
+            # `Ellipse(tag) = {x,y,z,rx,ry[,a1,a2[,zAxis...,xAxis...]]}` —
+            # the OCC `addEllipse` center form (5, 7, 10 or 13 parameters),
+            # again selected purely by parameter count upstream.
+            (vals,)=_geo_occ_center_params(
+                mm.captures[2],context,caller,(5,7,10,13))
+            if vals!==nothing
+                kernel=_geo_occ_prepare_kernel!(m)
+                _geo_dup_entity!(context,
+                    haskey(m.curves,trunc(Int,tag)) ||
+                    haskey(kernel.bindings,(1,tag)),
+                    :curve,"ellipse",tag,zero_literal,allocator_state) &&
+                    return
+                try
+                    Model._model_occ_add_ellipse!(m,
+                        vals[1],vals[2],vals[3],vals[4],vals[5];
+                        tag=_geo_occ_requested_tag(tag,zero_literal),
+                        angle1=length(vals)>=7 ? vals[6] : 0.0,
+                        angle2=length(vals)>=7 ? vals[7] : 2pi,
+                        zaxis=length(vals)>=10 ? vals[8:10] : nothing,
+                        xaxis=length(vals)>=13 ? vals[11:13] : nothing)
+                catch err
+                    err isa InterruptException && rethrow()
+                    err isa ArgumentError || rethrow()
+                    _geo_occ_fail!(context,err,"Could not add ellipse")
+                    return
+                end
+                _geo_occ_finish!(m,context)
+                return
+            end
+        end
         (points,normal)=_geo_circle_rhs(mm.captures[2],context,caller)
         if !(length(points) in (3,4))
             # Grammar-level check — `addEllipseArc` is never reached.
@@ -6483,13 +7285,30 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                 "Cylinder only available with OpenCASCADE geometry kernel")
             return
         end
-        if length(values)!=7
-            _geo_yyerror!(context,"Cylinder requires 7 parameters")
+        if !(length(values) in (7,8))
+            _geo_yyerror!(context,"Cylinder requires 7 or 8 parameters")
             return
         end
         _geo_dup_entity!(context,haskey(m.volumes,tag),:volume,"cylinder",
                          tag,zero_literal,allocator_state) &&
             return
+        if length(values)==8
+            # `{x,y,z,dx,dy,dz,r,angle}` — a partial sweep the native
+            # encoding cannot store; the OCC endpoint builds it.
+            kernel=_geo_occ_prepare_kernel!(m)
+            try
+                Model._model_occ_add_cylinder!(m,values[1:7]...;
+                    tag=_geo_occ_requested_tag(tag,zero_literal),
+                    angle=values[8])
+            catch err
+                err isa InterruptException && rethrow()
+                err isa ArgumentError || rethrow()
+                _geo_occ_fail!(context,err,"Could not add cylinder")
+                return
+            end
+            _geo_occ_finish!(m,context)
+            return
+        end
         add_cylinder!(m,values...;tag=tag,_zero_literal=zero_literal)
         return
     elseif (mm=match(
@@ -6523,10 +7342,29 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_dup_entity!(context,haskey(m.volumes,tag),:volume,"sphere",
                              tag,zero_literal,allocator_state) &&
                 return
-            length(values)==4 || throw(ArgumentError(
-                "$caller: Sphere angle bounds (a1,a2,a3) are not supported"))
-            add_sphere!(m,values[1],values[2],values[3],values[4];
-                        tag=tag,_zero_literal=zero_literal)
+            if length(values)==4
+                add_sphere!(m,values[1],values[2],values[3],values[4];
+                            tag=tag,_zero_literal=zero_literal)
+            else
+                # `{x,y,z,r,a1[,a2[,a3]]}` — the angle-bound forms bind a
+                # partial sphere through the OCC endpoint (`add_sphere!`
+                # only encodes the full sweep).
+                kernel=_geo_occ_prepare_kernel!(m)
+                try
+                    Model._model_occ_add_sphere!(m,values[1],values[2],
+                        values[3],values[4];
+                        tag=_geo_occ_requested_tag(tag,zero_literal),
+                        angle1=values[5],
+                        angle2=length(values)>=6 ? values[6] : pi/2,
+                        angle3=length(values)==7 ? values[7] : 2pi)
+                catch err
+                    err isa InterruptException && rethrow()
+                    err isa ArgumentError || rethrow()
+                    _geo_occ_fail!(context,err,"Could not add sphere")
+                    return
+                end
+                _geo_occ_finish!(m,context)
+            end
         else
             _geo_yyerror!(context,
                 "Sphere requires 2 points or from 4 to 7 parameters")
@@ -6565,13 +7403,30 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                 "Cone only available with OpenCASCADE geometry kernel")
             return
         end
-        if length(values)!=8
-            _geo_yyerror!(context,"Cone requires 8 parameters")
+        if !(length(values) in (8,9))
+            _geo_yyerror!(context,"Cone requires 8 or 9 parameters")
             return
         end
         _geo_dup_entity!(context,haskey(m.volumes,tag),:volume,"cone",
                          tag,zero_literal,allocator_state) &&
             return
+        if length(values)==9
+            # `{x,y,z,dx,dy,dz,r1,r2,angle}` — a partial cone sweep, built
+            # through the OCC endpoint like `Cylinder`'s angle form.
+            kernel=_geo_occ_prepare_kernel!(m)
+            try
+                Model._model_occ_add_cone!(m,values[1:8]...;
+                    tag=_geo_occ_requested_tag(tag,zero_literal),
+                    angle=values[9])
+            catch err
+                err isa InterruptException && rethrow()
+                err isa ArgumentError || rethrow()
+                _geo_occ_fail!(context,err,"Could not add cone")
+                return
+            end
+            _geo_occ_finish!(m,context)
+            return
+        end
         add_cone!(m,values...;tag=tag,_zero_literal=zero_literal)
         return
     elseif (mm=match(
@@ -6592,11 +7447,26 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_yyerror!(context,"Torus requires 5 or 6 parameters")
             return
         end
-        _geo_dup_entity!(context,haskey(m.volumes,tag),:volume,"torus",
-                         tag,zero_literal,allocator_state) &&
+        kernel=_geo_occ_prepare_kernel!(m)
+        _geo_dup_entity!(context,
+            haskey(m.volumes,tag) || haskey(kernel.bindings,(3,tag)),
+            :volume,"torus",tag,zero_literal,allocator_state) &&
             return
-        add_torus!(m,values[1:5]...;tag=tag,_zero_literal=zero_literal,
-                   angle=length(values)==6 ? values[6] : 2π)
+        # The `.geo` Torus is an OCC-only entity; the kernel endpoint owns the
+        # sweep topology so OCC ops (Boundary, Duplicata, Fillet, …) consume
+        # it. `angle` stays optional like upstream `addTorus`.
+        try
+            Model._model_occ_add_torus!(m,values[1],values[2],values[3],
+                values[4],values[5];
+                tag=_geo_occ_requested_tag(tag,zero_literal),
+                angle=length(values)==6 ? values[6] : 2pi)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_occ_fail!(context,err,"Could not add torus")
+            return
+        end
+        _geo_occ_finish!(m,context)
         return
     elseif (mm=match(
             r"^Curve\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
@@ -6625,20 +7495,18 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         return
     elseif (mm=match(
             Regex("^(Rectangle|Disk|Wedge|ThickSolid|ThruSections|Wire)\\s*\\(|" *
-                  "^Ruled\\s+ThruSections\\s*\\(|" *
+                  "^(Ruled\\s+)ThruSections\\s*\\(|" *
                   "^(BSpline|Bezier)\\s+Surface\\s*\\("),
             line)) !== nothing
         # OCC-only entity definitions: under the built-in factory Gmsh emits
         # `<name> only available with OpenCASCADE geometry kernel`; under
-        # OpenCASCADE the entity would be created, which Tessella's
-        # Julia-native kernel cannot honor.
-        name=mm.captures[1]===nothing ?
-            (mm.captures[2]===nothing ? "ThruSections" :
-             "$(mm.captures[2]) surface") : mm.captures[1]
+        # OpenCASCADE the statement runs its `OCC_Internals::addX` analog.
+        name=mm.captures[1]!==nothing ? mm.captures[1] :
+            (mm.captures[2]!==nothing ? "ThruSections" :
+             "$(mm.captures[3]) surface")
         if allocator_state!==nothing && allocator_state.factory==:opencascade
-            throw(ArgumentError(
-                "execute_geo: $name requires an OpenCASCADE backend, which " *
-                "Tessella does not implement"))
+            _geo_exec_occ_shape_def!(m,line,context,allocator_state)
+            return
         end
         _geo_yyerror!(context,
             "$name only available with OpenCASCADE geometry kernel")
@@ -6721,41 +7589,27 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             context,splitcaller,allocator_state)
         _geo_require_statement_end(rest,splitcaller)
         return
-    elseif match(r"^Closest\s*\{",line)!==nothing
-        if allocator_state!==nothing && allocator_state.factory==:opencascade
-            throw(ArgumentError(
-                "execute_geo: Closest requires an OpenCASCADE backend, " *
-                "which Tessella does not implement"))
-        end
-        _geo_yyerror!(context,
-            "Closest entity only available with OpenCASCADE geometry kernel")
-        return
-    elseif (mm=match(r"^(Fillet|Chamfer)\s*\{",line))!==nothing
-        # `tFillet {regions} {edges} {radii}` / `tChamfer {regions} {edges}
-        # {surfaces} {distances}` — OCC-only upstream; under OpenCASCADE the
-        # entity is created, which Tessella's native kernel cannot honor.
-        if allocator_state!==nothing && allocator_state.factory==:opencascade
-            throw(ArgumentError(
-                "execute_geo: $(mm.captures[1]) requires an OpenCASCADE " *
-                "backend, which Tessella does not implement"))
-        end
-        _geo_yyerror!(context,
-            "$(mm.captures[1]) only available with OpenCASCADE geometry kernel")
-        return
     elseif match(
-            r"^(?:Ruled\s+)?ThruSections\s*(?:\{|[\w(+-])",
+            r"^(Closest|Fillet|Chamfer|Ruled\s+ThruSections|ThruSections)\s*(?:\{|[\w(+-])",
             line)!==nothing
-        # `ThruSections {wires}` / `Ruled ThruSections {wires}` —
-        # `tThruSections ListOfDouble` (the `(tag) = {...}` assignments are
-        # handled above). Under OpenCASCADE upstream creates the entity;
-        # Tessella's native kernel does not implement it.
-        if allocator_state!==nothing && allocator_state.factory==:opencascade
-            throw(ArgumentError(
-                "execute_geo: ThruSections requires an OpenCASCADE backend, " *
-                "which Tessella does not implement"))
+        # `Closest{x,y,z}{shapes}`, `Fillet{regions}{edges}{radii}`,
+        # `Chamfer{regions}{edges}{surfaces}{distances}` and
+        # `(Ruled) ThruSections{wires}` are Transform productions upstream:
+        # the statement form discards the produced list. The term executor
+        # owns both the built-in OCC-gated diagnostic and the OpenCASCADE
+        # kernel routing. An unbraced `ThruSections` operand list (a bare
+        # `FExpr` upstream) is wrapped into the `{wires}` group the term
+        # handler parses.
+        s=String(strip(line))
+        endswith(s,";") &&
+            (s=String(strip(s[firstindex(s):prevind(s,end)])))
+        if (tm=match(r"^(Ruled\s+)?ThruSections\b",s))!==nothing &&
+                !startswith(strip(s[nextind(s,firstindex(s),
+                                          ncodeunits(tm.match)):end]),"{")
+            tail=strip(s[nextind(s,firstindex(s),ncodeunits(tm.match)):end])
+            s="$(tm.match){$(tail)}"
         end
-        _geo_yyerror!(context,
-            "ThruSections only available with OpenCASCADE geometry kernel")
+        _geo_exec_transform_term(m,s,context,allocator_state)
         return
     elseif match(r"^ShapeFromFile\s*\(",line)!==nothing
         _geo_yyerror!(context,
@@ -6812,9 +7666,13 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         _geo_exec_transform_statement!(m,line,context,allocator_state)
         return
     elseif match(r"^Affine\s*\{",line)!==nothing
-        throw(ArgumentError(
-            "execute_geo: Affine transforms require the OpenCASCADE geometry " *
-            "kernel, which Tessella does not implement"))
+        # `Affine{matrix}{shapes};` — a Transform production like the
+        # keyword transforms above: the statement discards the list.
+        s=String(strip(line))
+        endswith(s,";") &&
+            (s=String(strip(s[firstindex(s):prevind(s,end)])))
+        _geo_exec_transform_term(m,s,context,allocator_state)
+        return
     elseif match(r"^Extrude\b",line)!==nothing
         _geo_exec_extrude_term(m,line,context,allocator_state)
         return
@@ -7331,9 +8189,14 @@ function _exec_line!(m::GeoModel,line::AbstractString,
     elseif match(r"^Plugin\s*\(",line)!==nothing
         throw(ArgumentError(
             "execute_geo: Plugin(...) actions are not supported"))
+    elseif (mm=match(
+            r"^Background\s+Mesh\s+View\s*\[\s*([^\]]*)\s*\]\s*;$",
+            line))!==nothing
+        _geo_exec_background_mesh_view!(
+            mm.captures[1],context,allocator_state)
+        return
     elseif match(Regex("^(Combine|Alias|AliasWithOptions|Save\\s+View|" *
-        "CutMesh|SplitMesh|SendToServer|Background\\s+Mesh\\s+View)\\b"),
-        line)!==nothing
+        "CutMesh|SplitMesh|SendToServer)\\b"),line)!==nothing
         throw(ArgumentError(
             "execute_geo: post-processing view operations are not supported: $line"))
     elseif match(r"^Levelset\b",line)!==nothing
@@ -7445,6 +8308,35 @@ function _geo_exec_field_declare!(context::_GeoNumericContext,tag_src,kind::Stri
     curvature=_geo_option_number(context,"Mesh",0,"MeshSizeFromCurvature")
     fields[tag]=GeoFieldSpec(tag,kind,Dict{String,String}(),String[],
         curvature===nothing ? 0 : Int(curvature))
+    return nothing
+end
+
+# `Background Mesh View[i]` — `GModel::setBackgroundMesh(i)` creates a new
+# `PostView` field bound to view index `i` and selects it as the background
+# field. An out-of-range index reports `Msg::Error("Unknown view %d")` and
+# leaves the previous selection untouched.
+function _geo_exec_background_mesh_view!(index_src,
+                                         context::_GeoNumericContext,
+                                         allocator_state)
+    caller="execute_geo: Background Mesh View"
+    index=_geo_signed_gmsh_int_value(
+        _geo_eval_numeric(index_src,context,caller),caller)
+    store=get(_GEO_EXEC_VIEWS,context,nothing)
+    if store===nothing || !(0<=index<length(store))
+        _geo_msg_error!(context,"Unknown view $index")
+        return nothing
+    end
+    fields=context.fields
+    fields===nothing && return nothing
+    tag=isempty(fields) ? 1 : maximum(keys(fields))+1
+    curvature=_geo_option_number(context,"Mesh",0,"MeshSizeFromCurvature")
+    fields[tag]=GeoFieldSpec(tag,"PostView",
+        Dict{String,String}("ViewIndex"=>string(index)),String[],
+        curvature===nothing ? 0 : Int(curvature))
+    context.background_field=tag
+    if allocator_state!==nothing
+        push!(allocator_state.live_fields,tag)
+    end
     return nothing
 end
 
@@ -7937,10 +8829,26 @@ end
 
 # `context_fields` resolver for the five model/view-backed field kinds —
 # `AutomaticMeshSizeField` resolves against the model surfaces through the
-# provided entity callback; the `.geo` executor has no view store or
-# boundary-layer topology, so the other kinds keep the explicit diagnostic.
-function _geo_mesh_context_fields(m::GeoModel,spec,config,entities,params)
-    if lowercase(spec.kind)=="automaticmeshsizefield"
+# provided entity callback; `PostView` resolves against the `.pos` views the
+# execution merged (`Merge`/`Include`), mirroring `GModel`'s view list; the
+# other kinds keep the explicit diagnostic.
+function _geo_mesh_context_fields(m::GeoModel,
+                                  context::_GeoNumericContext,
+                                  spec,config,entities,params)
+    if lowercase(spec.kind)=="postview"
+        fields_mod=getfield(parentmodule(@__MODULE__),:SizeField)
+        store=get(_GEO_EXEC_VIEWS,context,nothing)
+        (store===nothing || isempty(store)) && throw(ArgumentError(
+            "build_geo_size_field: Field[$(spec.tag)] references view " *
+            "index $(config.view_index) but no views are loaded"))
+        result=fields_mod.geo_postview_context(store)(
+            spec,config,entities,params)
+        # Scalar/vector views resolve to the `AbstractField` sampler —
+        # rewrap as the size field upstream's PostView operator is.
+        result isa fields_mod.PostViewField &&
+            (result=_GeoPostViewSizeField(result))
+        return result
+    elseif lowercase(spec.kind)=="automaticmeshsizefield"
         return _automatic_context_field(
             m,spec,config,entities,"execute_geo")
     elseif lowercase(spec.kind)=="boundarylayer"
@@ -8022,7 +8930,7 @@ function _geo_mesh_background_field(m::GeoModel,
         params,(d,name)->_geo_field_entity_mesh(m,d,name,caller),tag;
         model_bbox=bbox,geometry_tolerance=geometry_tolerance,
         context_fields=(spec,config,entities,params)->
-            _geo_mesh_context_fields(m,spec,config,entities,params))
+            _geo_mesh_context_fields(m,context,spec,config,entities,params))
 end
 
 # Mesh-time `_ModelMesh1DOptions` — upstream reads global `CTX` state inside
@@ -10054,6 +10962,25 @@ function _geo_stl_surface_tag(m::GeoModel)
     return tag
 end
 
+# Parsed `.pos` views for the running execution, keyed on the numeric context.
+# `Merge`/`Include "x.pos"` appends in file order (upstream `GModel._views`);
+# `Background Mesh View[i]` and `Field[i] = "PostView"` resolve into it.
+# Weak keys drop the store with the context, so no per-run cleanup is needed.
+const _GEO_EXEC_VIEWS=WeakKeyDict()
+
+# Scalar `PostView` background adapter — upstream's `PostViewField` *is* the
+# size field (its scalar operator interpolates the view values). Tessella's
+# `PostViewField` is an `AbstractField` sampler, so the `.geo` background
+# slot — typed `AbstractSizeField` — needs this façade, the scalar
+# counterpart of `PostViewAnisoField`.
+struct _GeoPostViewSizeField{F<:AbstractField} <: AbstractSizeField
+    field::F
+end
+field_value(field::_GeoPostViewSizeField,x,y,z)=
+    field_value(field.field,x,y,z)
+field_value(field::_GeoPostViewSizeField,x,y,z,::Tuple{T,U}) where
+        {T<:Integer,U<:Integer}=field_value(field.field,x,y,z)
+
 # `Include`/`Merge` of a `.geo` file runs its statements in the same context
 # and model (Gmsh's `ParseFile` shares the parser globals). `.msh` files merge
 # their mesh into the current mid-file mesh.
@@ -10063,6 +10990,17 @@ function _geo_exec_include!(m::GeoModel,path::AbstractString,
     file=_geo_fix_relative_path(context.file_name,path)
     isfile(file) || throw(ArgumentError("$caller: missing file '$file'"))
     ext=lowercase(splitext(file)[2])
+    if ext==".pos"
+        # `Merge`/`Include` of a `.pos` file appends its views to the model's
+        # view list (upstream `PView` load order); `Background Mesh View[i]`
+        # and `Field[i] = "PostView"` index into the same ordering. The store
+        # keys on the execution context — a `WeakKeyDict` drops entries with
+        # the run.
+        post=getfield(parentmodule(@__MODULE__),:Post)
+        store=get!(_GEO_EXEC_VIEWS,context,Any[])
+        append!(store,post.read_pos(file))
+        return nothing
+    end
     if ext==".msh" || ext==".stl"
         # `GModel::readMSH` imports the file's elementary entities as discrete
         # model entities carrying their cells, and the cells join the mid-file
@@ -10087,7 +11025,7 @@ function _geo_exec_include!(m::GeoModel,path::AbstractString,
     end
     ext==".geo" || throw(ArgumentError(
         "$caller: merging '$ext' files is not supported " *
-        "(only .geo, .msh and .stl)"))
+        "(only .geo, .msh, .stl and .pos)"))
     statements=_geo_exec_statements(file)
     parent_file=context.file_name
     parent_base=context.file_error_base
