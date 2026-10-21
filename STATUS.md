@@ -2241,6 +2241,19 @@ against live gmsh 4.15.2 on this machine.
   block `If/EndIf` parses correctly — it is unreachable in the official file
   only because the OCC/`PartitionMesh` statements it guards are not.
 
+**2026-10-21 blocker updates (landed Source):** three of the four remaining
+blockers are resolved at the API level — view4.pos's T2/T3 text records with
+embedded `General.*` expressions now parse through the FExpr evaluator
+(`2bdd230`, t8 fully unblocked), `Plugin(Isosurface)`/`Plugin(Annotate)` are
+registered (`2cade75`; Isosurface is bit-exact vs gmsh 4.15.2 — 640 records,
+all 2116 scalars identical), and the `PostView` size-field admission now
+routes 9-component tensor views to `PostViewAnisoField`, closing t17's field
+gate (only its `.geo` `SetFactory`→OCC `Rectangle` routing remains — the
+`occ.add_rectangle` endpoint already builds the square). Remaining
+`t13`/`t19`/`t20` blockers are unchanged: STL discrete rebuild
+(`create_geometry!` conflicting sources), OCC fillet-on-loft + non-planar
+pipe-wall meshing, and STEP import + `PartitionMesh` GEO routing.
+
 ### Parallel detached Surface mesh generation under `General.NumThreads` (2026-10-19)
 
 Devin landed the first PAR01 mesh-*generation* slice: with
