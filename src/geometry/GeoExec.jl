@@ -127,6 +127,12 @@ using ..Model: _ModelMesh1DOptions, _model_mesh_lc, _model_mesh_bbox,
                _extrude_volume_pass, _extrude_gate, _extrude_is_nonew,
                _extrude_is_quadtri,
                _extrude_nonew_scope
+using ..Model: _extrude_level_us, _extrude_curve_nodes,
+               _extrude_curve_params_stage, _extrude_bl_plane_normal,
+               _extrude_bl_normal_field, _extrude_bl_kernel,
+               _extrude_bl_refresh!,
+               _duplicate_curve!, _fresh_point_copy!, _coherence_merge!,
+               _geo_derived_loop_tag
 using ..MeshTypes: nnodes, nsegs, ntris, ntets
 using ..Refine: refine_uniform
 import ..Refine
@@ -3766,8 +3772,8 @@ function _geo_extrude_element!(m::GeoModel, element::AbstractString,
         return (nothing,params)
     elseif name=="Hole"
         throw(ArgumentError(
-            "$caller: Hole extrusion parameters apply to boundary-layer " *
-            "extrusion, which is not implemented"))
+            "$caller: Hole extrusion parameters on boundary-layer " *
+            "extrusion are not implemented"))
     elseif name in ("Extrude","Translate","Rotate","Dilate","Symmetry","Affine",
                     "Duplicata","Boundary","CombinedBoundary",
                     "OrientedBoundary","OrientedCombinedBoundary",
@@ -3818,6 +3824,161 @@ function _geo_extrude_shape_list!(m::GeoModel, body::AbstractString,
             "$caller: shape list expands beyond $_MAX_GEO_LIST_ITEMS entities"))
     end
     return (entities,params)
+end
+
+# ── `Extrude {shapes; params}` — `BOUNDARY_LAYER` ────────────────────────────
+# Gmsh's no-displacement extrusion mode: each curve generatrix grows a
+# boundary-layer surface strip along the smoothed source-edge normal field,
+# with `ExtrudePoint` connector curves and a `DuplicateCurve` top copy wiring
+# the strip's boundary like an ordinary curve extrusion. The
+# `mesh_boundary_layer_2d` kernel emits the certified strip; helpers shared
+# with the mesh pass live in `ModelExtrude.jl` (`_extrude_bl_*`).
+
+# `ExtrudePoint` under `BOUNDARY_LAYER` — `DuplicateVertex` + connecting
+# `CreateCurve`. The copy's position and the connector's spec record are set
+# when the wall's kernel run writes them back (`_extrude_bl_refresh!`).
+function _geo_bl_point_copy!(m::GeoModel,src_pt::Int,params,caller)
+    dest=_fresh_point_copy!(m,src_pt,caller)
+    curve=_geo_newreg_alloc!(m,1,caller)
+    m.curves[curve]=(src_pt,dest)
+    m.curve_control_points[curve]=Int[src_pt]
+    m.meshing.extrude[(1,curve)]=params
+    m.meshing.extrude_sources[(1,curve)]=(0,src_pt)
+    return (curve,dest)
+end
+
+# `ExtrudeCurve` under `BOUNDARY_LAYER`: `DuplicateCurve` chapeau (the signed
+# generatrix's reversed record duplicates end-to-begin), `ExtrudePoint`
+# connectors off each signed endpoint, and the lateral surface wired
+# `pc, CurveEnd, -chapeau, -CurveBeg`. A closed wall still extrudes both
+# coincident connectors like upstream — the dest vertices merge in the
+# operation's coherence pass.
+function _geo_bl_curve_lateral!(m::GeoModel,c::Int,params,closed,kernel,
+                                working,caller)
+    src=abs(c)
+    a,b=m.curves[src]
+    sbeg,send=c>0 ? (a,b) : (b,a)
+    chapeau=_duplicate_curve!(m,src,caller;reversed=c<0)
+    m.meshing.extrude[(1,chapeau)]=params
+    # `geo.Source = ic` — the signed generatrix, like the ordinary path.
+    m.meshing.extrude_sources[(1,chapeau)]=(1,c)
+    (cbeg,_)=_geo_bl_point_copy!(m,sbeg,params,caller)
+    (cend,_)=_geo_bl_point_copy!(m,send,params,caller)
+    surf=_geo_newreg_alloc!(m,2,caller)
+    generatrices=Int[c,cend,-chapeau,-cbeg]
+    lt=_geo_derived_loop_tag(m,surf)
+    m.loops[lt]=generatrices
+    m.surfaces[surf]=Int[lt]
+    m.surface_types[surf]=:ruled
+    m.meshing.extrude[(2,surf)]=params
+    m.meshing.extrude_sources[(2,surf)]=(1,c)
+    spec=(type=:boundary_layer,connectors=(cbeg,cend),chapeau=chapeau)
+    m.meshing.extrude_specs[(2,surf)]=spec
+    _extrude_bl_refresh!(m,spec,src,c,closed,kernel,caller;
+                         _params_model=working)
+    return (chapeau,surf)
+end
+
+# The merge that welds sibling dest vertices also collapses coincident
+# connector/chapeau records; references inside `extrude_sources` values and
+# the boundary-layer `extrude_specs` still name the dropped tags. Rewrite
+# them through the coherence maps like `ReplaceAllDuplicates` implies
+# upstream, so every stored reference names a live entity.
+function _geo_bl_rebind!(m::GeoModel,maps)
+    for (key,src) in collect(m.meshing.extrude_sources)
+        sdim,stag=src
+        if sdim==0
+            keep=get(maps.points,stag,0)
+            keep!=0 && (m.meshing.extrude_sources[key]=(0,keep))
+        elseif sdim==1
+            keep=get(maps.curves,abs(stag),stag)
+            nk=sign(stag)*keep
+            nk!=stag && (m.meshing.extrude_sources[key]=(1,nk))
+        end
+    end
+    for (key,spec) in collect(m.meshing.extrude_specs)
+        # Only the dim-2 lateral specs carry `connectors`/`chapeau` — the
+        # dim-1 chapeau record shares `type=:boundary_layer` but stores
+        # `tops`, which has no tags to rebind.
+        (key[1]==2 && spec isa NamedTuple &&
+         get(spec,:type,nothing)===:boundary_layer) || continue
+        cb,cn=spec.connectors
+        cb2=abs(get(maps.curves,abs(cb),cb))
+        cn2=abs(get(maps.curves,abs(cn),cn))
+        ch2=abs(get(maps.curves,abs(spec.chapeau),spec.chapeau))
+        (cb2,cn2,ch2)==(cb,cn,spec.chapeau) && continue
+        m.meshing.extrude_specs[key]=(type=:boundary_layer,
+            connectors=(cb2,cn2),chapeau=ch2)
+    end
+    return nothing
+end
+
+function _geo_boundary_layer_extrude!(m::GeoModel,
+                                      entities::AbstractVector{<:NTuple{2,Int}},
+                                      params,context,caller)
+    for (dim,tag) in entities
+        dim==1 || throw(ArgumentError(
+            "$caller: boundary-layer extrusion of " *
+            "$(_entity_label(dim))[$tag] is not implemented"))
+    end
+    isempty(entities) && return Int[]
+    isempty(params.layers) && throw(ArgumentError(
+        "$caller: boundary-layer extrusion requires a Layers{...} parameter"))
+    params.scale_last && throw(ArgumentError(
+        "$caller: ScaleLastLayer on boundary-layer extrusion is not " *
+        "implemented"))
+    params.quad_to_tri!==:none && throw(ArgumentError(
+        "$caller: QuadTri parameters on boundary-layer extrusion are not " *
+        "implemented"))
+    # Snapshot every wall's discretization on a stage copy so `Extrude` keeps
+    # no mesh side effects; the mesh pass re-grades the live chains and
+    # refreshes the sibling specs the same way. The kernel runs eagerly here
+    # so malformed walls fail at the statement like upstream's `Extrude`.
+    working=_extrude_curve_params_stage(m)
+    walls=Tuple{Vector{NTuple{3,Float64}},Bool,NTuple{3,Float64}}[]
+    chains=Dict{Int,Vector{NTuple{3,Float64}}}()
+    for (_,c) in entities
+        src=abs(c)
+        haskey(m.curves,src) || throw(ArgumentError(
+            "$caller: unknown Curve[$src]"))
+        a,b=m.curves[src]
+        (haskey(m.points,a) && haskey(m.points,b)) || throw(ArgumentError(
+            "$caller: cannot extrude Curve[$src] with no begin or end point"))
+        closed=a==b
+        chain=_extrude_curve_nodes(working,src,caller)
+        chains[c]=chain
+        push!(walls,(chain,closed,
+            _extrude_bl_plane_normal(chain,closed,c>0,caller)))
+    end
+    field=_extrude_bl_normal_field(walls)
+    offsets=_extrude_level_us(params)[2:end]
+    made=NTuple{3,Int}[]
+    for (i,(_,c)) in enumerate(entities)
+        chain=chains[c]
+        closed=walls[i][2]
+        kernel=_extrude_bl_kernel(chain,closed,walls[i][3],field,offsets,caller)
+        (chapeau,surf)=_geo_bl_curve_lateral!(m,c,params,closed,kernel,
+            working,caller)
+        push!(made,(c,chapeau,surf))
+    end
+    maps=_coherence_merge!(m;enabled=!iszero(_geo_auto_coherence(context)),
+                           remove_degenerated=_geo_auto_coherence(context)>1)
+    _geo_bl_rebind!(m,maps)
+    out=Int[]
+    for (c,chapeau,surf) in made
+        top=get(maps.curves,chapeau,chapeau)
+        haskey(m.curves,abs(top)) && push!(out,top)
+        haskey(m.surfaces,surf) || continue
+        push!(out,surf)
+        # `Geometry.ExtrudeReturnLateralEntities` — the connector
+        # generatrices. Upstream compares `abs(record tag)` against the
+        # *signed* input, so a negative generatrix keeps its own `-tag`.
+        iszero(context.extrude_return_lateral) && continue
+        for g in m.loops[only(m.surfaces[surf])]
+            (abs(g)==c || abs(g)==abs(top)) || push!(out,g)
+        end
+    end
+    return out
 end
 
 # The `Extrude` value term: `nothing` when `raw` is not an extrusion (the
@@ -3878,17 +4039,24 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
         "$caller: unexpected text after the shape list"))
     shapes===nothing && throw(ArgumentError(
         "$caller: expected a `{shape list}` group"))
-    nvec==0 && throw(ArgumentError(
-        "$caller: boundary-layer extrusion `Extrude {shapes; params}` is " *
-        "not implemented"))
-    (revolve===nothing || delta==(0.0,0.0,0.0)) || throw(ArgumentError(
-        "$caller: malformed displacement expression"))
-    # Gmsh.y gates `TRANSLATE_ROTATE` on the built-in kernel in the parser
-    # action — after `ListOfShapes` parses but before `ExtrudeShapes` runs
-    # — so under `SetFactory("OpenCASCADE")` shape-list syntax errors still
-    # surface first, while entity lookup never happens.
+    (nvec==0 || revolve===nothing || delta==(0.0,0.0,0.0)) ||
+        throw(ArgumentError("$caller: malformed displacement expression"))
+    # Gmsh.y's `ListOfShapes` parses before the parser action runs — surface
+    # its errors ahead of the boundary-layer/`TRANSLATE_ROTATE` gates like
+    # upstream, whose OCC gate also sits between the two.
     entities,params=_geo_extrude_shape_list!(m,shapes,context,caller,
                                              allocator_state)
+    if nvec==0
+        # `BOUNDARY_LAYER` (`Extrude {shapes; params}`): upstream rejects it
+        # in the parser action under OCC before `ExtrudeShapes` runs.
+        allocator_state!==nothing &&
+            allocator_state.factory===:opencascade && throw(ArgumentError(
+                "$caller: Boundary layer extrusion not available with " *
+                "OpenCASCADE geometry kernel"))
+        tags=_geo_boundary_layer_extrude!(m,entities,params,context,caller)
+        context.geo_changed=true
+        return Float64.(tags)
+    end
     if revolve!==nothing && revolve.kind===:twist &&
         allocator_state!==nothing &&
         allocator_state.factory===:opencascade

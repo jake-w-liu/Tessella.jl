@@ -38,7 +38,32 @@ end
 # `x += t·T` for `:translate_rotate`.
 function _extrude_at(spec,p::NTuple{3,Float64},t::Float64,
                      caller::AbstractString)
-    if spec.type===:translate
+    if spec.type===:boundary_layer
+        # The chapeau of a `BOUNDARY_LAYER` curve extrusion has no rigid
+        # transform: each generatrix node follows its own field direction to
+        # the strip's top row. `spec.tops` maps the evaluated generatrix
+        # position to that exact emitted top node; mirror-evaluated keys can
+        # drift an ulp off the stored chain, so fall back to the nearest row
+        # within a scale-aware tolerance.
+        tops=spec.tops
+        top=get(tops,p,nothing)
+        top===nothing || return top
+        isempty(tops) && throw(ArgumentError(
+            "$caller: boundary-layer copy has no stored top positions"))
+        scale=1.0
+        for pos in keys(tops)
+            scale=max(scale,abs(pos[1]),abs(pos[2]),abs(pos[3]))
+        end
+        best=nothing;bd=Inf
+        for (pos,v) in tops
+            d=hypot(p[1]-pos[1],p[2]-pos[2],p[3]-pos[3])
+            d<bd && (bd=d;best=v)
+        end
+        bd<=1e-9*scale && return best
+        throw(ArgumentError(
+            "$caller: boundary-layer copy evaluated $(p) off the wall's " *
+            "stored nodes"))
+    elseif spec.type===:translate
         T=spec.T
         return (p[1]+t*T[1],p[2]+t*T[2],p[3]+t*T[3])
     elseif spec.type===:rotate
@@ -53,7 +78,7 @@ end
 # Rigid transforms depend on the layer level, so build O(levels) records
 # and reuse them at every node instead of allocating per point evaluation.
 function _extrude_level_transforms(spec,us,caller::AbstractString)
-    spec.type===:translate && return nothing
+    (spec.type===:translate || spec.type===:boundary_layer) && return nothing
     if spec.type===:rotate
         transforms=Vector{NTuple{3,NTuple{16,Float64}}}(undef,length(us))
         for l in eachindex(us)
@@ -274,6 +299,301 @@ function _extrude_surface_part(tris,quads,coords,lookup)
         tnodes[3,i]=lookup[cell[3]]
     end
     return Mesh(out;tris=tnodes)
+end
+
+# ── Boundary-layer curve extrusion (`Extrude {Curve{c}; Layers{...}}`) ────────
+# Gmsh's `BOUNDARY_LAYER` mode sweeps each generatrix node along the smoothed
+# normal field (`boundaryLayerField` / `smooth_data`) rather than a rigid
+# transform: source-edge element normals accumulate by position, so a vertex
+# shared between sibling walls grows one common column. Tessella delegates the
+# strip emission to `BoundaryLayer._bl_2d_offsets` — the same kernel that backs
+# `mesh_boundary_layer_2d` — and keeps the sibling entities welding bitwise by
+# feeding the kernel's exact per-node directions back into the connector and
+# chapeau `extrude_specs` records.
+
+# The wall polygon's plane normal via Newell's method, sign-aligned toward +z
+# so the positive-generatrix growth side reproduces upstream's `t × ẑ`
+# convention in either winding. Straight (degenerate-winding) walls fall back
+# to the tangent-perpendicular component of ẑ, then x̂/ŷ.
+function _extrude_bl_wall_normal(chain,closed::Bool,caller::AbstractString)
+    nnode=length(chain)
+    nseg=closed ? nnode : nnode-1
+    cx=cy=cz=0.0
+    for p in chain
+        cx+=p[1];cy+=p[2];cz+=p[3]
+    end
+    inv=1.0/nnode;cx*=inv;cy*=inv;cz*=inv
+    nx=ny=nz=0.0
+    for i in 1:nseg
+        j=i==nnode ? 1 : i+1
+        ux=chain[i][1]-cx;uy=chain[i][2]-cy;uz=chain[i][3]-cz
+        wx=chain[j][1]-cx;wy=chain[j][2]-cy;wz=chain[j][3]-cz
+        nx+=uy*wz-uz*wy;ny+=uz*wx-ux*wz;nz+=ux*wy-uy*wx
+    end
+    L=hypot(nx,ny,nz)
+    if L>0
+        nx/=L;ny/=L;nz/=L
+        nz<0 && return (-nx,-ny,-nz)
+        return (nx,ny,nz)
+    end
+    nseg>=1 || throw(ArgumentError(
+        "$caller: boundary-layer wall has no segments"))
+    t=(chain[2][1]-chain[1][1],chain[2][2]-chain[1][2],chain[2][3]-chain[1][3])
+    Lt=hypot(t...)
+    Lt>0 || throw(ArgumentError(
+        "$caller: boundary-layer wall has a zero-length first segment"))
+    t=(t[1]/Lt,t[2]/Lt,t[3]/Lt)
+    for ref in ((0.0,0.0,1.0),(1.0,0.0,0.0),(0.0,1.0,0.0))
+        d=t[1]*ref[1]+t[2]*ref[2]+t[3]*ref[3]
+        nx,ny,nz=ref[1]-d*t[1],ref[2]-d*t[2],ref[3]-d*t[3]
+        Ln=hypot(nx,ny,nz)
+        Ln>0.1 && return (nx/Ln,ny/Ln,nz/Ln)
+    end
+    throw(ArgumentError(
+        "$caller: boundary-layer wall has no stable plane normal"))
+end
+
+# The kernel's `plane_normal` for a signed generatrix: a reversed record
+# traverses the wall backwards, so its growth side flips.
+_extrude_bl_plane_normal(chain,closed::Bool,positive::Bool,
+                         caller::AbstractString) =
+    (pn=_extrude_bl_wall_normal(chain,closed,caller);
+     positive ? (-pn[1],-pn[2],-pn[3]) : pn)
+
+# Coherently directed polyline `Mesh` — the `_bl_2d_offsets` input.
+function _extrude_bl_polyline(chain,closed::Bool)
+    nnode=length(chain)
+    nseg=closed ? nnode : nnode-1
+    coords=Matrix{Float64}(undef,3,nnode)
+    for (i,p) in enumerate(chain)
+        coords[1,i]=p[1];coords[2,i]=p[2];coords[3,i]=p[3]
+    end
+    segs=Matrix{Int32}(undef,2,nseg)
+    for i in 1:nseg
+        segs[1,i]=Int32(i);segs[2,i]=Int32(i==nnode ? 1 : i+1)
+    end
+    return Mesh(coords;segs=segs)
+end
+
+# `smooth_data::add(x,y,z,3,nn)` — every wall segment's left normal
+# (`cross(peff, t)`: `t × ẑ` upstream, generalized to each wall's own plane)
+# accumulates on both endpoint positions; the merged per-position sum
+# normalizes into the growth direction. Positions whose incident segments
+# cancel (opposing walls) stay unset and keep the kernel's own average.
+function _extrude_bl_normal_field(walls)
+    sums=Dict{NTuple{3,Float64},NTuple{3,Float64}}()
+    for wall in walls
+        chain,closed,peff=wall
+        nnode=length(chain)
+        nseg=closed ? nnode : nnode-1
+        for i in 1:nseg
+            j=i==nnode ? 1 : i+1
+            p,q=chain[i],chain[j]
+            t=(q[1]-p[1],q[2]-p[2],q[3]-p[3])
+            Lt=hypot(t...)
+            Lt>0 || continue
+            t=(t[1]/Lt,t[2]/Lt,t[3]/Lt)
+            n=(peff[2]*t[3]-peff[3]*t[2],
+               peff[3]*t[1]-peff[1]*t[3],
+               peff[1]*t[2]-peff[2]*t[1])
+            for pos in (p,q)
+                s=get(sums,pos,(0.0,0.0,0.0))
+                sums[pos]=(s[1]+n[1],s[2]+n[2],s[3]+n[3])
+            end
+        end
+    end
+    field=Dict{NTuple{3,Float64},NTuple{3,Float64}}()
+    for (pos,s) in sums
+        L=hypot(s[1],s[2],s[3])
+        L>0 || continue
+        field[pos]=(s[1]/L,s[2]/L,s[3]/L)
+    end
+    return field
+end
+
+# `(chain, closed, peff)` for every boundary-layer surface's generatrix — the
+# mesh-time equivalent of the exec-time entity list, so the field merges
+# across `Extrude` statements just as upstream accumulates every
+# BoundaryLayerCurve's edges.
+function _extrude_bl_walls(m::GeoModel,caller::AbstractString;
+                           _mesh_input=nothing)
+    walls=Tuple{Vector{NTuple{3,Float64}},Bool,NTuple{3,Float64}}[]
+    for (d,tag) in sort!(collect(keys(m.meshing.extrude_specs)))
+        d==2 || continue
+        spec=m.meshing.extrude_specs[(d,tag)]
+        spec isa NamedTuple || continue
+        get(spec,:type,nothing)===:boundary_layer || continue
+        link=get(m.meshing.extrude_sources,(2,tag),nothing)
+        link===nothing && continue
+        chain,_,orphans,_=_extrude_curve_source(m,abs(link[2]),_mesh_input,caller)
+        isempty(orphans) || throw(ArgumentError(
+            "$caller: Surface[$tag] boundary-layer generatrix " *
+            "Curve[$(abs(link[2]))] has unreferenced mesh nodes"))
+        a,b=m.curves[abs(link[2])]
+        closed=a==b
+        peff=_extrude_bl_plane_normal(chain,closed,link[2]>0,caller)
+        push!(walls,(chain,closed,peff))
+    end
+    return walls
+end
+
+# One wall's strip emission: explicit cumulative offsets plus the merged-field
+# direction per shared wall vertex.
+function _extrude_bl_kernel(chain,closed::Bool,peff,field,offsets,caller)
+    poly=_extrude_bl_polyline(chain,closed)
+    vd=Dict{Int,NTuple{3,Float64}}()
+    for (i,pos) in enumerate(chain)
+        d=get(field,pos,nothing)
+        d===nothing || (vd[i]=d)
+    end
+    # `BoundaryLayer` is a sibling submodule included after `Model` — resolve
+    # it lazily like `.geo`'s `SizeField` lookup.
+    return getfield(parentmodule(@__MODULE__),:BoundaryLayer)._bl_2d_offsets(
+        poly,offsets;plane_normal=peff,vertex_dirs=vd,caller=caller)
+end
+
+# Exact-match lookup, else the nearest kernel row — mirrored chapeau evals can
+# land an ulp off the stored chain position. `unbounded` skips the tolerance
+# for off-wall lookups (the chapeau's interior control copies).
+function _extrude_bl_top_at(top_of::AbstractDict,p,caller;unbounded::Bool=false)
+    top=get(top_of,p,nothing)
+    top===nothing || return top
+    isempty(top_of) && throw(ArgumentError(
+        "$caller: boundary-layer wall produced no top positions"))
+    scale=1.0
+    for pos in keys(top_of)
+        scale=max(scale,abs(pos[1]),abs(pos[2]),abs(pos[3]))
+    end
+    best=nothing;bd=Inf
+    for (pos,v) in top_of
+        d=(p[1]-pos[1])^2+(p[2]-pos[2])^2+(p[3]-pos[3])^2
+        d<bd && (bd=d;best=v)
+    end
+    unbounded || bd<=(1e-9*scale)^2 || throw(ArgumentError(
+        "$caller: boundary-layer copy evaluated $(p) off the wall's " *
+        "stored nodes"))
+    return best
+end
+
+# `copyMesh`'s position→top map for the chapeau: every stored chapeau
+# parameter evals (`_model_curve_part_point`) to a generatrix position —
+# direct for a forward copy, `t1+u_min-v` mirrored for a reversed one — which
+# keys the kernel's exact top-row node.
+function _extrude_bl_tops_dict(m::GeoModel,gen::Int,chapeau::Int,
+                               signed_c::Int,top_of::AbstractDict,
+                               caller::AbstractString)
+    params=get(m.meshing.extrude,(1,chapeau),nothing)
+    params===nothing && return Dict{NTuple{3,Float64},NTuple{3,Float64}}()
+    vals=_model_curve_extrude_params(m,chapeau,params,
+        _model_default_mesh1d_options(m,caller),caller)
+    vals===:pending && throw(ArgumentError(
+        "$caller: Curve[$chapeau] boundary-layer source has no stored " *
+        "mesh parameters"))
+    _,t1=_model_curve_param_bounds(m,chapeau,caller)
+    u_min=_model_curve_param_bounds(m,gen,caller)[1]
+    tops=Dict{NTuple{3,Float64},NTuple{3,Float64}}()
+    for v in vals
+        usrc=signed_c<0 ? (t1+u_min)-v : v
+        p=_periodic_curve_point(m,gen,usrc,caller)
+        tops[p]=_extrude_bl_top_at(top_of,p,caller)
+    end
+    return tops
+end
+
+# Write the kernel's exact directions/positions back onto the sibling
+# records: connector curves keep `:translate` specs whose `T` is the unit
+# direction (the stored level params are absolute heights, so `p + h·T`
+# lands bitwise on the strip's rows), the chapeau keeps the position→top map
+# its `_extrude_at` branch reads, and every generated vertex takes the
+# kernel's top-row coordinate.
+function _extrude_bl_refresh!(m::GeoModel,spec,gen::Int,signed_c::Int,
+                              closed::Bool,kernel,
+                              caller::AbstractString;
+                              _params_model::GeoModel=m)
+    a,b=m.curves[gen]
+    sbeg,send=signed_c>0 ? (a,b) : (b,a)
+    beg_pos=m.points[sbeg];end_pos=m.points[send]
+    cbeg,cend=spec.connectors
+    # Sibling walls share coincident connectors — the operation's coherence
+    # pass keeps one tag; refresh only rewrites survivors.
+    if haskey(m.curves,cbeg)
+        m.points[m.curves[cbeg][2]]=kernel.tops[beg_pos]
+        m.meshing.extrude_specs[(1,cbeg)]=
+            (type=:translate,T=kernel.dirs[beg_pos])
+    end
+    if cend>0 && haskey(m.curves,cend)
+        m.points[m.curves[cend][2]]=kernel.tops[end_pos]
+        m.meshing.extrude_specs[(1,cend)]=
+            (type=:translate,T=kernel.dirs[end_pos])
+    end
+    chapeau=spec.chapeau
+    if haskey(m.curves,chapeau)
+        tops=_extrude_bl_tops_dict(_params_model,gen,chapeau,signed_c,
+                                   kernel.tops,caller)
+        m.meshing.extrude_specs[(1,chapeau)]=(type=:boundary_layer,tops=tops)
+        m.points[m.curves[chapeau][1]]=kernel.tops[beg_pos]
+        closed || (m.points[m.curves[chapeau][2]]=kernel.tops[end_pos])
+        # The chapeau's materialized control copies follow it to the top
+        # row — otherwise coincident-with-source copies merge into the
+        # source's endpoints and `Coherence` collapses the record back into
+        # its generatrix. Interior copies of non-line sources bind to the
+        # nearest wall row.
+        for cp in get(m.curve_control_points,chapeau,Int[])
+            haskey(m.points,cp) || continue
+            m.points[cp]=_extrude_bl_top_at(kernel.tops,m.points[cp],caller;
+                                            unbounded=true)
+        end
+    end
+    return nothing
+end
+
+# Non-recombined product: split each strip quadrangle on the `(b1,b2,t2)` /
+# `(b1,t2,t1)` diagonal — the same fan `_extrude_quatri!` emits.
+function _extrude_bl_unrecombined(mesh::MixedMesh)
+    ntri=0
+    for block in mesh.blocks
+        ntri+=block.msh==3 ? 2*size(block.nodes,2) :
+              block.msh==2 ? size(block.nodes,2) : 0
+    end
+    tris=Matrix{Int32}(undef,3,ntri)
+    c=0
+    for block in mesh.blocks
+        if block.msh==3
+            for i in axes(block.nodes,2)
+                b1,b2,t2,t1=block.nodes[:,i]
+                c+=1;tris[:,c].=(b1,b2,t2)
+                c+=1;tris[:,c].=(b1,t2,t1)
+            end
+        elseif block.msh==2
+            for i in axes(block.nodes,2)
+                c+=1;tris[:,c].=block.nodes[:,i]
+            end
+        end
+    end
+    return Mesh(mesh.coords;tris=tris)
+end
+
+# `extrudeMesh(GEdge *from, GFace *to)` under `BOUNDARY_LAYER`: the wall's
+# stored node chain grown along the merged normal field. The kernel returns
+# the certified strip; refreshing the sibling specs keeps the connector and
+# chapeau evals bitwise-aligned with the emitted columns.
+function _extrude_bl_lateral_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
+                                  spec,gen_signed::Int,caller::AbstractString;
+                                  _mesh_input=nothing)
+    gen=abs(gen_signed)
+    chain,_,orphans,_=_extrude_curve_source(m,gen,_mesh_input,caller)
+    isempty(orphans) || throw(ArgumentError(
+        "$caller: Surface[$t] boundary-layer generatrix Curve[$gen] has " *
+        "unreferenced mesh nodes"))
+    a,b=m.curves[gen]
+    closed=a==b
+    peff=_extrude_bl_plane_normal(chain,closed,gen_signed>0,caller)
+    walls=_extrude_bl_walls(m,caller;_mesh_input)
+    field=_extrude_bl_normal_field(walls)
+    kernel=_extrude_bl_kernel(chain,closed,peff,field,
+        _extrude_level_us(params)[2:end],caller)
+    _extrude_bl_refresh!(m,spec,gen,gen_signed,closed,kernel,caller)
+    return params.recombine ? kernel.mesh : _extrude_bl_unrecombined(kernel.mesh)
 end
 
 # `extrudeMesh(GEdge *from, GFace *to, ...)` — sweep the generatrix's stored
@@ -945,6 +1265,13 @@ function _extrude_surface_mesh(m::GeoModel,t::Int,caller::AbstractString;
     entry=_extrude_entity_params(m,2,t,caller)
     entry===nothing && return nothing
     params,spec,link=entry
+    if spec isa NamedTuple && get(spec,:type,nothing)===:boundary_layer
+        link[1]==1 || throw(ArgumentError(
+            "$caller: Surface[$t] boundary-layer extrusion needs a curve " *
+            "generatrix"))
+        return _extrude_bl_lateral_mesh(m,t,params,spec,link[2],caller;
+                                        _mesh_input)
+    end
     if link[1]==1
         return _extrude_lateral_mesh(m,t,params,spec,link[2],caller;
                                    edges=edges,_mesh_input,

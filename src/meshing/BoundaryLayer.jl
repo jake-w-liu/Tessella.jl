@@ -419,6 +419,49 @@ function mesh_boundary_layer_2d(curve::Mesh; hwall::Real, ratio::Real, nlayers::
     hw=_finite(hwall,caller,"hwall"); hw>0 || throw(ArgumentError("$caller: hwall must be positive"))
     ra=_finite(ratio,caller,"ratio"); ra>1 || throw(ArgumentError("$caller: ratio must be > 1"))
     nl=_bounded_int(nlayers,caller,"nlayers";minimum=1)
+    return _bl_2d_offsets(curve,_layer_offsets(hw,ra,nl,caller);
+        fans=fans,fan_elements=fan_elements,plane_normal=plane_normal,
+        max_cells=max_cells,caller=caller).mesh
+end
+
+# Offsets-driven core shared with the `.geo` `Extrude {Curve{c}; Layers{...}}`
+# boundary-layer dispatch: `offsets` carries the cumulative layer heights
+# (`ExtrudeParams::u(·,k)` — absolute distances, not fractions), so multi-block
+# `Layers{{c1,c2},{h1,h2}}` definitions sweep exactly as specified. `vertex_dirs`
+# optionally overrides a wall node's growth direction — the geo path injects the
+# smoothed normal field so a vertex shared between sibling walls grows one
+# common column. Directions are renormalized; the returned `dirs`/`tops` maps
+# (keyed by wall-node position) record the exact 3-D direction and last-offset
+# position used, so connector and top-copy evaluators weld bitwise onto the
+# emitted strip.
+function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
+                      fans=(), fan_elements::Integer=5,
+                      plane_normal=(0.0,0.0,1.0),
+                      max_cells::Integer=10_000_000,
+                      vertex_dirs=nothing,
+                      caller::AbstractString="mesh_boundary_layer_2d")
+    nsegs(curve)>0 || throw(ArgumentError("$caller: curve has no segments"))
+    (ntris(curve)==0 && ntets(curve)==0) || throw(ArgumentError(
+        "$caller: input curve must contain only segment cells"))
+    _validate_input(curve,caller,"curve")
+    nl=length(offsets)
+    nl>=1 || throw(ArgumentError("$caller: boundary layer has no offsets"))
+    for (k,off) in enumerate(offsets)
+        (isfinite(off) && off>0) || throw(ArgumentError(
+            "$caller: layer offset $k is not finite and positive"))
+    end
+    dirs_over=vertex_dirs===nothing ? nothing : Dict{Int,NTuple{3,Float64}}()
+    if vertex_dirs!==nothing
+        nv0=nnodes(curve)
+        for (v,d) in vertex_dirs
+            1<=v<=nv0 || throw(ArgumentError(
+                "$caller: vertex_dirs key $v is not a curve node index"))
+            L=hypot(d[1],d[2],d[3])
+            (isfinite(L) && L>0) || throw(ArgumentError(
+                "$caller: vertex_dirs[$v] is not finite and nonzero"))
+            dirs_over[Int(v)]=(d[1]/L,d[2]/L,d[3]/L)
+        end
+    end
     nfan=_bounded_int(fan_elements,caller,"fan_elements";minimum=2)
     normal=_plane_unit_normal(plane_normal,caller)
     cell_limit=_bounded_int(max_cells,caller,"max_cells")
@@ -502,7 +545,6 @@ function mesh_boundary_layer_2d(curve::Mesh; hwall::Real, ratio::Real, nlayers::
             "$caller: fan vertex $v does not have a positive CCW sector"))
     end
 
-    offsets=_layer_offsets(hw,ra,nl,caller)
     id_of=Dict{Tuple{Int,Int,Int},Int}()
     @inbounds for v in verts
         id_of[(v,0,0)]=v
@@ -529,9 +571,13 @@ function mesh_boundary_layer_2d(curve::Mesh; hwall::Real, ratio::Real, nlayers::
                 id_of[(v,k,ray)]=length(points)
             end
         else
-            nx,ny=n_avg[idx]
-            new_point=_offset_point(
-                points[v],basis_u,basis_v,nx,ny,offsets[k])
+            dir=dirs_over===nothing ? nothing : get(dirs_over,v,nothing)
+            new_point=dir===nothing ?
+                _offset_point(points[v],basis_u,basis_v,
+                              n_avg[idx][1],n_avg[idx][2],offsets[k]) :
+                (points[v][1]+offsets[k]*dir[1],
+                 points[v][2]+offsets[k]*dir[2],
+                 points[v][3]+offsets[k]*dir[3])
             all(isfinite,new_point) || throw(ArgumentError(
                 "$caller: extruded node is non-finite"))
             new_plane_point=_plane_point(
@@ -606,7 +652,24 @@ function mesh_boundary_layer_2d(curve::Mesh; hwall::Real, ratio::Real, nlayers::
     mesh=MixedMesh(coords,blocks)
     diag=validate(mesh)
     diag.ok || throw(ErrorException("$caller: invalid mesh — "*join(diag.messages,"; ")))
-    return mesh
+    # The exact 3-D growth direction and last-offset position per wall node —
+    # the dispatcher feeds these to the sibling connector/top-copy evaluators
+    # so every generated entity welds bitwise onto this strip.
+    dirs=Dict{NTuple{3,Float64},NTuple{3,Float64}}()
+    tops=Dict{NTuple{3,Float64},NTuple{3,Float64}}()
+    for (idx,v) in enumerate(verts)
+        pos=points[v]
+        dir=dirs_over===nothing ? nothing : get(dirs_over,v,nothing)
+        if dir===nothing
+            nx,ny=n_avg[idx]
+            dir=(nx*basis_u[1]+ny*basis_v[1],
+                 nx*basis_u[2]+ny*basis_v[2],
+                 nx*basis_u[3]+ny*basis_v[3])
+        end
+        dirs[pos]=dir
+        tops[pos]=points[id_of[(v,nl,0)]]
+    end
+    return (mesh=mesh,verts=verts,dirs=dirs,tops=tops)
 end
 
 # Closed-manifold wall decomposition: union-find over triangles joined by shared
