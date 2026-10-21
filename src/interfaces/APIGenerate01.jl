@@ -487,7 +487,24 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
     iterations=0
     while !isempty(pending)
         stalled=length(pending)
-        for curve in sort!(collect(pending))
+        ordered=sort!(collect(pending))
+        # PAR01 — `General.NumThreads` detaches runs of independent singleton
+        # Curves: each eligible produce runs the identical
+        # `_model_mesh_curve!` call on a transaction copy under
+        # `Threads.@threads`, and the unchanged serial merge below replays or
+        # re-runs each slot in tag order.  `nothing` keeps the exact serial
+        # path; emission stays serial, so public UIDs are minted in the same
+        # order under any worker count.
+        prepared=_parallel_curve_prepare(m,ordered,options;
+            have_cells,reuse_curve_params)
+        parallel_results=prepared===nothing ? nothing :
+            fill!(Vector{Any}(undef,length(ordered)),nothing)
+        parallel_dirty=Set{Tuple{Int,Int32}}()
+        parallel_last=prepared===nothing ? 0 :
+            something(findlast(!isnothing,prepared),0)
+        parallel_precise=prepared===nothing ? false :
+            GmshLibm._win_cli_precision()
+        for (index,curve) in enumerate(ordered)
             owner=(1,Int32(curve))
             # meshGEdge's skip gates preserve the stored lines. The grading
             # helper's raw-record lookup covers fully discrete entities, while
@@ -515,8 +532,26 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
                 delete!(pending,curve)
                 continue
             end
-            result=Model._model_mesh_curve!(m,curve,options,assembly.caller;_native_producer=true)
-            result===:pending && continue
+            work=prepared===nothing ? nothing : prepared[index]
+            if work!==nothing && parallel_results[index]===nothing
+                vend=index
+                while vend<length(ordered) && prepared[vend+1]!==nothing
+                    vend+=1
+                end
+                _parallel_curve_fill!(parallel_results,index:vend,m,prepared,
+                    options,parallel_dirty,parallel_precise,assembly.caller)
+            end
+            refs=index<parallel_last ? _parallel_surface_param_refs(m) : nothing
+            result=work!==nothing && parallel_results[index]!==nothing ?
+                _parallel_curve_result(m,work,parallel_results[index],
+                    parallel_dirty,options,assembly.caller) :
+                Model._model_mesh_curve!(m,curve,options,assembly.caller;
+                    _native_producer=true)
+            if result===:pending
+                refs===nothing ||
+                    _parallel_volume_mark_dirty!(parallel_dirty,m,refs)
+                continue
+            end
             if result===:keep
                 if !(owner in have_cells) &&
                    haskey(m.curve_params,curve)
@@ -525,6 +560,8 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
                     push!(have_cells,owner)
                 end
                 delete!(pending,curve)
+                refs===nothing ||
+                    _parallel_volume_mark_dirty!(parallel_dirty,m,refs)
                 continue
             end
             birth=result isa Model._ModelNativeCurveGrade ? result : nothing
@@ -540,6 +577,7 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
                 geometry_birth,geometry_parameters,curve_births,endpoint_counts,birth,copied_points)
             push!(have_cells,owner)
             delete!(pending,curve)
+            refs===nothing || _parallel_volume_mark_dirty!(parallel_dirty,m,refs)
         end
         isempty(pending) && break
         if length(pending)==stalled
