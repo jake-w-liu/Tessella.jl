@@ -31,6 +31,13 @@
 #                   into `*_CutSphere` records through the same linear-edge
 #                   levelset interpolation (sections ordered about the
 #                   outward radial direction),
+#   Isosurface      `scalar value == Value` level sets of the view's own
+#                   data into `*_Isosurface` point/line/triangle/quadrangle
+#                   records — one list view per populated step since the
+#                   section geometry is value-dependent; non-simplex
+#                   elements cut through upstream's simplex decomposition
+#                   (2 tris / 6 tets / 3 tets / 2 tets) and `ExtractVolume`
+#                   keeps the whole elements on the selected side,
 #   Warp            in-place coordinate displacement: `Factor` times the
 #                   `TimeStep` vector field of `OtherView`, or (when both
 #                   `View` and `OtherView` are < 0) smoothed element normals
@@ -106,7 +113,8 @@
 # `Skin` only covers list-based views (`FromMesh = 1`, which would publish
 # discrete model boundary entities, rejects) and `Transform`/`Remove`/`Smooth`/
 # `Warp`/`SphericalRaise` reject model-based views — upstream in-place writers
-# mutate `PViewDataList`. CutSphere registers `RecurLevel`/`TargetError` like upstream;
+# mutate `PViewDataList`. CutSphere and Isosurface register `RecurLevel`/
+# `TargetError` like upstream;
 # they steer the adaptive subdivision of *curved* elements, which our linear
 # record catalog never produces, so they are stored without effect (the
 # upstream linear-element path is reproduced exactly: corner levelset values
@@ -1816,6 +1824,187 @@ function _plugin_exec_cutsphere(spec::_PluginSpec,caller::AbstractString)
     return nothing
 end
 
+# ---- Isosurface -----------------------------------------------------------------
+
+# `Plugin(Isosurface)` extracts the `scalar value == Value` level set of the
+# input view's own data: the levelset at each primary node is the upstream
+# `ComputeScalarRep` of that node's components minus `Value` (scalars pass
+# through, vectors their norm, tensors the Von-Mises invariant). The section
+# geometry is value-dependent — upstream's "moving" levelset — so like
+# upstream the plugin emits one list-based view per populated step:
+# `<name>_Isosurface` for a single step, `<name>_Isosurface_<step>` per step
+# otherwise.
+#
+# Non-simplex elements pass through upstream's `getSimplexDec` decomposition
+# (quadrangle → two triangles, hexahedron → six tetrahedra, prism → three,
+# pyramid → two); every sub-simplex scans its edges for
+# `levels[a]*levels[b] <= 0` crossings interpolated linearly along the edge
+# and deduplicated on first-seen coordinates. The surviving crossings emit a
+# point/line/triangle/quadrangle record — four crossings are reordered into
+# a simple quad like upstream `reorderQuad` — with values linearly
+# interpolated from the corner values, and section normals oppose the
+# element's scalar gradient (upstream `MAP` orientation). `ExtractVolume`
+# keeps the whole elements on the selected side verbatim — the
+# CutPlane/CutSphere session convention — and elements lying entirely on the
+# level set re-emit verbatim when they fit a list record type.
+# `RecurLevel`/`TargetError` steer upstream's adaptive subdivision of curved
+# elements; linear sections are exact without them, so they are stored
+# without effect. Upstream's `OtherView`/`OtherTimeStep` second-source
+# options are not registered: session views do not align element-wise
+# across views.
+
+# Upstream `getSimplexDec` sub-simplex node lists (1-based indices into the
+# element's primary nodes): the point/line/triangle/tetrahedron kinds are
+# already simplices.
+const _PLUGIN_ISO_SIMPLICES=(
+    point=((1,),),
+    line=((1,2),),
+    triangle=((1,2,3),),
+    quadrangle=((1,2,3),(1,3,4)),
+    tetrahedron=((1,2,3,4),),
+    hexahedron=((1,2,4,8),(1,5,2,8),(2,5,6,8),
+                (2,3,4,8),(2,7,3,8),(2,6,7,8)),
+    prism=((1,2,3,5),(1,3,5,6),(1,4,5,6)),
+    pyramid=((1,2,4,5),(2,3,4,5)))
+
+# Upstream `exn` edge tables for the sub-simplex shapes, indexed by node
+# count: a point scans no edges, then the line, triangle and tetrahedron
+# edge orders.
+const _PLUGIN_ISO_SUBEDGES=(NTuple{2,Int}[],
+                          NTuple{2,Int}[(1,2)],
+                          NTuple{2,Int}[(1,2),(1,3),(2,3)],
+                          NTuple{2,Int}[(1,2),(1,3),(1,4),
+                                        (2,3),(2,4),(3,4)])
+
+# Upstream `gradSimplex`: the exact gradient of the linear field defined by
+# the first four element nodes (Cramer solve; the zero vector on a
+# degenerate configuration).
+function _plugin_grad_simplex(coords,vals)
+    j11=coords[1,2]-coords[1,1];j12=coords[2,2]-coords[2,1];j13=coords[3,2]-coords[3,1]
+    j21=coords[1,3]-coords[1,1];j22=coords[2,3]-coords[2,1];j23=coords[3,3]-coords[3,1]
+    j31=coords[1,4]-coords[1,1];j32=coords[2,4]-coords[2,1];j33=coords[3,4]-coords[3,1]
+    det=j11*(j22*j33-j23*j32)-j12*(j21*j33-j23*j31)+j13*(j21*j32-j22*j31)
+    det==0.0 && return (0.0,0.0,0.0)
+    b1=vals[2]-vals[1];b2=vals[3]-vals[1];b3=vals[4]-vals[1]
+    g1=(b1*(j22*j33-j23*j32)-j12*(b2*j33-j23*b3)+j13*(b2*j32-j22*b3))/det
+    g2=(j11*(b2*j33-j23*b3)-b1*(j21*j33-j23*j31)+j13*(j21*b3-b2*j31))/det
+    g3=(j11*(j22*b3-b2*j32)-j12*(j21*b3-b2*j31)+b1*(j21*j32-j22*j31))/det
+    return (g1,g2,g3)
+end
+
+# Append one element's single-step levelset section records to `out`: every
+# sub-simplex scans its edges for `levels[a]*levels[b] <= 0` crossings and
+# emits the record its deduplicated crossings form. `levels` holds the
+# element-node levelset values (scalar representation minus `Value`); the
+# constant `Value` shift leaves the orientation gradient unchanged.
+function _plugin_iso_sections!(out,element,levels,step,nsteps)
+    kind=element.kind;geo=element.geo;nc=element.ncomp
+    va=size(element.vcoords,2)
+    numedges=length(_PLUGIN_CUT_EDGES[kind])
+    for simplex in _PLUGIN_ISO_SIMPLICES[kind]
+        points=NTuple{3,Float64}[];weights=Vector{Tuple{Int,Float64}}[]
+        for (ea,eb) in _PLUGIN_ISO_SUBEDGES[length(simplex)]
+            a=simplex[ea];b=simplex[eb]
+            la=levels[a];lb=levels[b]
+            la*lb<=0.0 || continue
+            c=la==lb ? 0.0 : la/(la-lb)
+            # Upstream `InterpolateIso`: coef*(b-a)+a (no fused ops).
+            point=(c*(geo[1,b]-geo[1,a])+geo[1,a],
+                   c*(geo[2,b]-geo[2,a])+geo[2,a],
+                   c*(geo[3,b]-geo[3,a])+geo[3,a])
+            # Upstream `removeIdenticalNodes`: the first-seen crossing wins.
+            found=false
+            for seen in points
+                if abs(seen[1]-point[1])<1e-12 &&
+                    abs(seen[2]-point[2])<1e-12 &&
+                    abs(seen[3]-point[3])<1e-12
+                    found=true;break
+                end
+            end
+            found && continue
+            push!(points,point);push!(weights,[(a,1.0-c),(b,c)])
+        end
+        np=length(points)
+        # Upstream validity gates: 3-D elements emit only surface sections,
+        # 2-D only lines, and more than four crossings cannot order into a
+        # record (linear cases never exceed four after deduplication).
+        numedges>4 && np<3 && continue
+        numedges>1 && np<2 && continue
+        (np<1 || np>4) && continue
+        if np==4
+            # Upstream `reorderQuad`: the edge-scan order reads a
+            # butterfly; swapping the last two vertices orders the quad.
+            points[3],points[4]=points[4],points[3]
+            weights[3],weights[4]=weights[4],weights[3]
+        end
+        if np==3 || np==4
+            # MAP orientation: the emitted section's normal opposes the
+            # element's scalar gradient — upstream flips the polygon when
+            # the (p3-p1)x(p2-p1) normal already points along it.
+            normal=_plugin_cross3(_plugin_sub3(points[3],points[1]),
+                                  _plugin_sub3(points[2],points[1]))
+            grad=size(geo,2)>=4 ? _plugin_grad_simplex(geo,levels) :
+                (0.0,0.0,0.0)
+            _plugin_dot3(grad,normal)>0.0 &&
+                (reverse!(points);reverse!(weights))
+        end
+        outkind=np==1 ? :point : np==2 ? :line : np==3 ? :triangle : :quadrangle
+        _plugin_record_type(outkind,nc)===nothing && continue
+        section=Matrix{Float64}(undef,3,np)
+        for i in 1:np,axis in 1:3
+            section[axis,i]=points[i][axis]
+        end
+        vals=zeros(Float64,np*nc*nsteps)
+        for i in 1:np,comp in 1:nc
+            # Upstream value interpolation: v0 + c*(v1-v0) with the edge
+            # coefficient — weights[i] is [(a,1-c),(b,c)] by construction.
+            a=weights[i][1][1];b=weights[i][2][1];c=weights[i][2][2]
+            v0=element.vals[step*va*nc+(a-1)*nc+comp]
+            vals[step*np*nc+(i-1)*nc+comp]=
+                v0+c*(element.vals[step*va*nc+(b-1)*nc+comp]-v0)
+        end
+        push!(out,_PluginElement(outkind,_PLUGIN_KIND_DIM[outkind],section,
+                                 section,vals,nc,element.etag))
+    end
+    return out
+end
+
+function _plugin_exec_isosurface(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    value=_mesh_query_coordinate(numbers["Value"],caller,"Value")
+    volume=_mesh_query_integer(Int(numbers["ExtractVolume"]),
+                               caller,"ExtractVolume")
+    tag,view=_plugin_view(numbers,caller)
+    elements,steps,times=_plugin_elements_all_steps(view,caller)
+    for step in 0:steps-1
+        out=_PluginElement[]
+        for element in elements
+            ga=size(element.geo,2);va=size(element.vcoords,2);nc=element.ncomp
+            levels=ntuple(ga) do node
+                _plugin_scalar_rep(element.vals,step*va*nc+(node-1)*nc,nc)-
+                    value
+            end
+            verbatim=va==ga && _plugin_record_type(element.kind,nc)!==nothing
+            if !iszero(volume)
+                # Whole-element extraction like CutPlane: the element is
+                # kept verbatim when every corner levelset value lies on
+                # the selected side.
+                (volume>0 ? all(l->l>=0.0,levels) :
+                            all(l->l<=0.0,levels)) && verbatim &&
+                    push!(out,element)
+                continue
+            end
+            all(l->l==0.0,levels) &&
+                (verbatim && push!(out,element);continue)
+            _plugin_iso_sections!(out,element,levels,step,steps)
+        end
+        name=steps==1 ? view.name*"_Isosurface" :
+            view.name*"_Isosurface_"*string(step)
+        _plugin_extract_emit(name,out,step,steps,times,caller)
+    end
+    return nothing
+end
+
 # ---- Warp --------------------------------------------------------------------------------
 
 # Smoothed facet normals keyed on node position — the upstream
@@ -3019,6 +3208,10 @@ const _PLUGINS=Dict{String,NamedTuple}(
         "ExtractVolume"=>0.0,"RecurLevel"=>3.0,"TargetError"=>1e-4,
         "View"=>-1.0,"Visible"=>1.0),
         string_options=Dict{String,String}(),run_fn=_plugin_exec_cutsphere),
+    "Isosurface"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"Value"=>0.0,"ExtractVolume"=>0.0,"RecurLevel"=>3.0,
+        "TargetError"=>1e-4,"View"=>-1.0,"Visible"=>1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_isosurface),
     "Warp"=>(number_options=Dict{String,Float64}(
         "Run"=>0.0,"Factor"=>1.0,"TimeStep"=>0.0,"SmoothingAngle"=>180.0,
         "View"=>-1.0,"OtherView"=>-1.0),
