@@ -2371,6 +2371,59 @@ gate (only its `.geo` `SetFactory`→OCC `Rectangle` routing remains — the
 (`create_geometry!` conflicting sources), OCC fillet-on-loft + non-planar
 pipe-wall meshing, and STEP import + `PartitionMesh` GEO routing.
 
+#### P601 t8/t9/t17 driver expansion (2026-10-21, validation + docs only)
+
+No Source changed by this work; the previously landed unblockers above are
+now exercised end-to-end by the drivers, all run live against gmsh 4.15.2
+on this machine (`julia --project=. --compile=min -O0`, exit 0 each):
+
+- **t8 — full.** Merges `t1.geo` + all five view fixtures (view1.pos ×2,
+  view2.pos, view3.pos, view4.pos → six views; the extra two fixtures cover
+  the tutorial's `PostProcessing.NbViews-4` option window so the graph/text
+  styling lands on the view4.pos blocks as upstream). Every view is
+  re-saved and compared to live Gmsh merging/re-saving the same inputs:
+  record-kind counts, value ranges and the **T2/T3 text records
+  structurally** (dim, coordinates, packed style word, strings) — including
+  `General.GraphicsWidth/4` → 200 on both sides. Receipt:
+  `GMSH_PARITY_T8_TUTORIAL_OK tessella_views=6 v=1274/1274/341/2504/101/1
+  gmsh_views=6 counts_and_ranges=MATCH texts=4:MATCH`.
+- **t9 — full.** Runs the tutorial's complete plugin sequence on view3.pos:
+  `Plugin(Isosurface)` (Value=0.67, View=source tag), `Plugin(CutPlane)`
+  (plane 0.2y+z=0), and `Plugin(Annotate)` twice. View layout matches
+  upstream (source + iso + cut views; Annotate mutates View[0] in place).
+  Receipt: `GMSH_PARITY_T9_TUTORIAL_OK tessella_views=3
+  tessella_iso_elements=640 iso_scalars=2116:MATCH
+  tessella_cut_elements=718 gmsh_cut_elements=546 (quad-split slack;
+  range [-0.0179,2.032] equal) annotations=2:MATCH`. Known gap recorded:
+  upstream packs font/alignment/size into the T2 style word (66332/65548);
+  Tessella accepts those options but does not retain them in POS data.
+- **t17 — session-API driver, PARTIAL.** `occ.add_rectangle(-2,-2,0,4,4)` +
+  `synchronize` builds the square (4 points/4 curves/1 plane surface,
+  bbox-checked); `API.merge` imports `t17_bgmesh.pos` (1058 TT records);
+  `mesh.field.add("PostView")` + `ViewIndex=0` + `set_as_background_mesh`
+  resolves to `PostViewAnisoField` (asserted); `Mesh.AnisoMax=1000`,
+  `Mesh.Algorithm=7` set; `Mesh.SmoothRatio` is GEO-only and is documented
+  rather than set. Each square edge is transfinite-pinned to a fixture-
+  derived node count (computed per-edge from the tangential metric
+  eigenvalues touching it: pins=10,48,11,47) so the retained-boundary
+  certificate `metric_edge_length <= 1` is met. `generate(2)` then reaches
+  the interior conforming-bisection loop, which aborts on this dataset at a
+  producer-side certificate (`edge midpoint is not a distinct
+  representable Surface vertex`, ModelMetricSurfaceProducer.jl — the exact
+  certificate alternates with `midpoint creates a flat or inverted Surface
+  triangle` across boundary resolutions, field clamps and all entry points
+  including the explicit `generate_metric_surface` endpoint and the direct
+  `Model.mesh_model_surface` call). The literal `t17.geo` now also executes
+  end-to-end through `execute_geo` (`SetFactory`→OCC `Rectangle`, `.pos`
+  `Merge`, `Background Mesh View[0]` all parse; `mesh_dim=2` reaches the
+  retained-boundary certificate). Driver receipt:
+  `GMSH_PARITY_T17_PARTIAL ... geo_parse=OK geo_mesh=BLOCKED:...
+  gmsh_nodes≈1740 gmsh_tris≈3435 gmsh_lines=40 gmsh_area=16.0` (BAMG
+  counts vary a little between gmsh runs). The driver escalates to full
+  mesh verification automatically once the producer accepts the dataset.
+- Registrations: `validation/run_all.jl` tutorial tuple now includes
+  `t17`; the corpus comment was refreshed for the t8/t9 full coverage.
+
 ### Parallel detached Surface mesh generation under `General.NumThreads` (2026-10-19)
 
 Devin landed the first PAR01 mesh-*generation* slice: with
