@@ -7,18 +7,21 @@
 #                block cells/entities are checked literally. `.mail`/`.ir3`
 #                writers are checked against the pinned
 #                `GModelIO_MAIL.cpp`/`GModelIO_IR3.cpp` record layouts —
-#                `.mail` and `.ir3` are write-only formats upstream (no
-#                reader exists), and `.p3d` writes only structured
+#                `.mail` and `.ir3` are write-only formats upstream (the
+#                inverse readers are a Tessella extension covered by
+#                `io_mail_ir3_test.jl`), and `.p3d` writes only structured
 #                transfinite grids upstream, so `write_p3d` rejects like the
 #                "No structured grids to save" path for every representable
 #                mesh.
 # Robustness   : non-positive block counts/dims, truncated token streams,
 #                non-numeric data, count limits, special blocks, partition
 #                tag type and session-level dispatch guards.
-# Completeness : `API.open`/`API.merge` accept `.p3d`; `API.write` emits
-#                `.mail`/`.ir3` (elementary tag per the upstream default)
-#                and rejects `.p3d` loudly; `IO.write_ir3` honors the
-#                `element_tag_type` keyword directly.
+# Completeness : `API.open`/`API.merge` accept `.p3d` and route
+#                `.mail`/`.ir3` through the same foreign-mesh channel;
+#                `API.write` emits `.mail`/`.ir3` (elementary tag per the
+#                upstream default) and rejects `.p3d` loudly;
+#                `IO.write_ir3` honors the `element_tag_type` keyword
+#                directly.
 
 using Test
 import Tessella
@@ -269,9 +272,15 @@ const _P3D_MIXED = """
                 @test_throws ArgumentError _P3D_MAIL_API.write(
                     joinpath(dir, "out.p3d"))
                 @test !isfile(joinpath(dir, "out.p3d"))
-                # .mail/.ir3 are write-only formats upstream
-                @test_throws ArgumentError _P3D_MAIL_API.open(mail)
-                @test_throws ArgumentError _P3D_MAIL_API.merge(ir3)
+                # `.mail`/`.ir3` are write-only upstream, but the Tessella
+                # inverse readers route them like every other foreign deck
+                tris = MixedMesh(Float64[0 1 0; 0 0 1; 0 0 0],
+                    [ElementBlock(2, reshape(Int32[1, 2, 3], 3, 1), Int32[0])])
+                tri_mail = joinpath(dir, "tri.mail")
+                @test write_mail(tri_mail, tris) == tri_mail
+                @test _P3D_MAIL_API.open(tri_mail) === nothing
+                @test (2, 1) in _P3D_MAIL_API.model.get_entities()
+                @test _P3D_MAIL_API.merge(ir3) === nothing
             end
         finally
             _P3D_MAIL_API.finalize()

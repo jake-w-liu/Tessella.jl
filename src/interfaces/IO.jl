@@ -33,7 +33,8 @@ export read_stl, read_geo_params, GeoParams, GeoFieldSpec
 export read_unv, write_unv, read_mesh, write_mesh, UnvFile, MeshFile
 export read_su2, write_su2, read_bdf, write_bdf, Su2File, BdfFile
 export read_inp, write_inp, read_neu, write_neu, InpFile, NeuFile
-export read_p3d, write_p3d, write_mail, write_ir3, P3dFile
+export read_p3d, write_p3d, read_mail, write_mail, read_ir3, write_ir3,
+       P3dFile, MailFile, Ir3File
 export read_vtk, write_vtk, VtkFile
 
 include("GeoColorNames.jl")
@@ -11619,6 +11620,30 @@ function _read_foreign_records(path,caller::AbstractString)
                 rethrow()
             end
         end
+    elseif extension==".mail"
+        return open(path,"r") do io
+            try
+                return _read_mail(io,caller,
+                    Int(typemax(Int32)),Int(typemax(Int32)))
+            catch err
+                err isa InterruptException && rethrow()
+                err isa EOFError && throw(ArgumentError(
+                    "$caller: truncated .mail file"))
+                rethrow()
+            end
+        end
+    elseif extension==".ir3"
+        return open(path,"r") do io
+            try
+                return _read_ir3(io,caller,
+                    Int(typemax(Int32)),Int(typemax(Int32)))
+            catch err
+                err isa InterruptException && rethrow()
+                err isa EOFError && throw(ArgumentError(
+                    "$caller: truncated .ir3 file"))
+                rethrow()
+            end
+        end
     elseif extension==".vtk"
         return open(path,"r") do io
             try
@@ -14057,7 +14082,10 @@ end
 # emits as ` 0 0 0` (edge signs are a documented TODO). Only face
 # triangles are emitted upstream, so `write_mail` emits `msh_family ==
 # :tri` cells (first three corner vertices for higher orders) and skips
-# every other cell.
+# every other cell. Upstream ships no `.mail` reader; `read_mail` is the
+# literal inverse extension — triangles land on a single implicit dim-2
+# entity (tag 1) and the edge block is consumed but ignored, tolerating a
+# clean EOF after the triangle records.
 #
 # `.ir3` is the Iridium deck, likewise write-only upstream: a `33` format
 # line, `numVertices num2D num3D` (or `numVertices numElements` when only
@@ -14070,7 +14098,13 @@ end
 # physical tag also reverses connectivity, like the pinned
 # `MElement::writeIR3`), or the partition under type `3`, which the
 # projection cannot express and rejects loudly. Curve and point cells
-# are skipped like upstream.
+# are skipped like upstream. `read_ir3` is the inverse extension: the tag
+# column becomes the elementary entity tag (the writer's default —
+# tag-type-2 decks are indistinguishable), vertex indices become the file
+# labels and `numVert` resolves through the catalog within each section's
+# dimension; single-count decks pick the one dimension every record arity
+# can express, with a node-planarity tiebreak preferring the surface
+# reading on planar node sets.
 # ════════════════════════════════════════════════════════════════════════════════
 
 # ── PLOT3D (.p3d) reader ─────────────────────────────────────────────────────
@@ -14225,6 +14259,123 @@ function write_p3d(path,m)
     throw(ArgumentError("$caller: no structured grids to save"))
 end
 
+# ── CEA triangulation (.mail) reader ─────────────────────────────────────────
+
+# Token layout is the exact inverse of `write_mail`/the pinned
+# `GModelIO_MAIL.cpp` writer: `nv nt`, `nv` `x y z` triples, `nt` dense
+# 1-based index triples and `nt` edge records whose values are ignored (the
+# upstream writer emits ` 0 0 0` placeholders — the signed edge table is a
+# documented TODO). A deck ending cleanly after the triangle block is
+# accepted — the edge records carry no data — but a partial or non-integer
+# edge record is malformed. Triangles land on a single implicit dim-2 entity
+# (tag 1) because the deck carries no entity information.
+function _read_mail(io::Base.IO,caller::AbstractString,node_limit::Int,
+                   element_limit::Int)
+    tokens=Iterators.Stateful(Iterators.flatmap(eachsplit,eachline(io)))
+    next=function (what)
+        it=iterate(tokens)
+        it===nothing && throw(ArgumentError(
+            "$caller: truncated .mail file (expected $what)"))
+        return it[1]
+    end
+    nv=_unv_int(next("vertex count"),caller,".mail vertex count")
+    nt=_unv_int(next("triangle count"),caller,".mail triangle count")
+    nv>=0 || throw(ArgumentError(
+        "$caller: .mail vertex count must be non-negative, got $nv"))
+    nt>=0 || throw(ArgumentError(
+        "$caller: .mail triangle count must be non-negative, got $nt"))
+    nv<=node_limit || throw(ArgumentError(
+        "$caller: .mail node count exceeds max_nodes=$node_limit"))
+    nt<=element_limit || throw(ArgumentError(
+        "$caller: .mail element count exceeds max_elements=$element_limit"))
+    node_labels=collect(Int64(1):nv)
+    coords=Vector{Float64}(undef,3*nv)
+    @inbounds for i in 1:nv, c in 1:3
+        coords[3i-3+c]=_unv_float(
+            next("vertex $i coordinates"),caller,".mail node coordinate")
+    end
+    records=_TextMeshCell[]
+    sizehint!(records,nt)
+    for e in 1:nt
+        rows=Vector{Int32}(undef,3)
+        @inbounds for k in 1:3
+            label=_unv_int(next("triangle $e node $k"),caller,
+                ".mail triangle node")
+            1<=label<=nv || throw(ArgumentError(
+                "$caller: .mail triangle $e references unknown node $label"))
+            rows[k]=Int32(label)
+        end
+        push!(records,_TextMeshCell(Int64(e),2,rows,Int64(1),Int64(0)))
+    end
+    # Per-triangle edge records follow; values are ignored like the upstream
+    # placeholders. Clean EOF is tolerated, a partial record is not.
+    for _ in 1:nt
+        it=iterate(tokens)
+        it===nothing && break
+        _unv_int(it[1],caller,".mail edge record")
+        for _ in 1:2
+            it=iterate(tokens)
+            it===nothing && throw(ArgumentError(
+                "$caller: truncated .mail edge record"))
+            _unv_int(it[1],caller,".mail edge record")
+        end
+    end
+    return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
+end
+
+"""
+    MailFile
+
+Result of [`read_mail`](@ref): the compact `mesh` (an MSH2-style `MixedMesh`
+whose `msh == 2` cells carry the implicit surface tag 1 in
+`elementary_entities` and zero physical tags — `.mail` carries no entity or
+group data), the dense `node_tags` in file row order and the per-block
+`element_tags`.
+"""
+struct MailFile
+    mesh::MixedMesh
+    node_tags::Vector{UInt64}
+    element_tags::Vector{Vector{UInt64}}
+end
+
+"""
+    read_mail(path; max_nodes, max_elements, max_file_bytes) -> MailFile
+
+Read a CEA triangulation `.mail` file — the inverse of [`write_mail`](@ref):
+` nv nt`, `nv` coordinate triples, `nt` 1-based index triples and the
+(ignored) per-triangle edge records. Upstream ships only the writer; this
+reader is a Tessella extension. Non-positive/oversized counts, non-numeric
+data, dangling node references and truncated records are errors; a clean EOF
+after the triangle block is tolerated.
+"""
+function read_mail(path;
+                  max_nodes=typemax(Int32),max_elements=typemax(Int32),
+                  max_file_bytes=typemax(Int))
+    caller="read_mail"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    node_limit=_io_limit(max_nodes,caller,"max_nodes";ceiling=Int(typemax(Int32)))
+    element_limit=_io_limit(
+        max_elements,caller,"max_elements";ceiling=Int(typemax(Int32)))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
+    node_labels,coords,records,pnames=open(path,"r") do io
+        try
+            return _read_mail(io,caller,node_limit,element_limit)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa EOFError && throw(ArgumentError(
+                "$caller: truncated .mail file"))
+            rethrow()
+        end
+    end
+    mesh,node_tags,element_tags=_foreign_mesh_result(
+        caller,node_labels,coords,records;physical_names=pnames)
+    return MailFile(mesh,node_tags,element_tags)
+end
+
 """
     write_mail(path, mesh)
 
@@ -14276,6 +14427,257 @@ function write_mail(path,m)
         mv(temporary,target;force=true)
     end
     return path
+end
+
+# ── Iridium (.ir3) reader ────────────────────────────────────────────────────
+
+# `numVert` makes `.ir3` records self-describing, but an arity maps to a Gmsh
+# type only within a known dimension — the `numVertices num2D num3D` header
+# fixes each record's dimension by section position. Arity resolution scans
+# the catalog per dimension and prefers the lowest order, then complete over
+# serendipity cells, then earlier families (:tri/:qua; :tet/:hex/:pri/:pyr —
+# the order-0 placeholders and the trihedron are excluded). So within dim 2
+# arity 9 reads as quad9, 15 as tri15 and 36 as quad36; within dim 3 arity 15
+# reads as pri15 and 20 as hex20. Upstream ships no `.ir3` reader, so this is
+# a documented extension.
+function _ir3_arity_table(dim::Int)
+    families=dim==2 ? (:tri,:qua) : (:tet,:hex,:pri,:pyr)
+    table=Dict{Int,Int}();ranks=Dict{Int,NTuple{3,Int}}()
+    for (fi,family) in enumerate(families), order in 1:10,
+        serendipity in (false,true)
+        msh=try
+            msh_type(family,order;serendipity=serendipity)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            continue
+        end
+        spec=msh_spec(msh)
+        (spec.dim==dim && spec.order>=1) || continue
+        key=(spec.order,spec.serendipity ? 1 : 0,fi)
+        current=get(ranks,spec.nnodes,nothing)
+        (current===nothing || key<current) || continue
+        ranks[spec.nnodes]=key;table[spec.nnodes]=msh
+    end
+    return table
+end
+
+const _IR3_DIM2_TYPES=_ir3_arity_table(2)
+const _IR3_DIM3_TYPES=_ir3_arity_table(3)
+
+# Single-count-header dimension tiebreak: true when every node lies in one
+# plane within a relative tolerance — the first distinct pair of nodes
+# supplies the in-plane direction, the first non-collinear node the normal.
+function _ir3_planar(coords::Vector{Float64},n::Int)
+    n<=3 && return true
+    x1=coords[1];y1=coords[2];z1=coords[3]
+    ux=uy=uz=0.0
+    @inbounds for i in 2:n
+        dx=coords[3i-2]-x1;dy=coords[3i-1]-y1;dz=coords[3i]-z1
+        if dx!=0 || dy!=0 || dz!=0
+            ux,uy,uz=dx,dy,dz
+            break
+        end
+    end
+    ux==0 && uy==0 && uz==0 && return true      # all nodes coincide
+    nx=ny=nz=0.0
+    @inbounds for i in 2:n
+        dx=coords[3i-2]-x1;dy=coords[3i-1]-y1;dz=coords[3i]-z1
+        cx=uy*dz-uz*dy;cy=uz*dx-ux*dz;cz=ux*dy-uy*dx
+        if cx!=0 || cy!=0 || cz!=0
+            nx,ny,nz=cx,cy,cz
+            break
+        end
+    end
+    nx==0 && ny==0 && nz==0 && return true      # all nodes collinear
+    extent=0.0
+    @inbounds for i in 1:3*n
+        v=abs(coords[i]);v>extent && (extent=v)
+    end
+    tolerance=1e-12*max(extent,1.0)*sqrt(nx*nx+ny*ny+nz*nz)
+    @inbounds for i in 2:n
+        d=abs(nx*(coords[3i-2]-x1)+ny*(coords[3i-1]-y1)+nz*(coords[3i]-z1))
+        d>tolerance && return false
+    end
+    return true
+end
+
+function _read_ir3(io::Base.IO,caller::AbstractString,node_limit::Int,
+                   element_limit::Int)
+    eof(io) && throw(ArgumentError("$caller: truncated .ir3 file"))
+    format=strip(readline(io))
+    format=="33" || throw(ArgumentError(
+        "$caller: expected .ir3 format line '33', got '$format'"))
+    eof(io) && throw(ArgumentError("$caller: truncated .ir3 file"))
+    header=split(strip(readline(io)))
+    (length(header)==2 || length(header)==3) || throw(ArgumentError(
+        "$caller: .ir3 header must be 'numVertices numElements' or " *
+        "'numVertices num2D num3D', got '$(join(header," "))'"))
+    nv=_unv_int(header[1],caller,".ir3 vertex count")
+    nv>=0 || throw(ArgumentError(
+        "$caller: .ir3 vertex count must be non-negative, got $nv"))
+    nv<=node_limit || throw(ArgumentError(
+        "$caller: .ir3 node count exceeds max_nodes=$node_limit"))
+    num2=num3=Int64(0)
+    if length(header)==3
+        num2=_unv_int(header[2],caller,".ir3 dim-2 element count")
+        num3=_unv_int(header[3],caller,".ir3 dim-3 element count")
+        (num2>=0 && num3>=0) || throw(ArgumentError(
+            "$caller: .ir3 element counts must be non-negative, got " *
+            "($num2,$num3)"))
+    else
+        num2=_unv_int(header[2],caller,".ir3 element count")
+        num2>=0 || throw(ArgumentError(
+            "$caller: .ir3 element count must be non-negative, got $num2"))
+    end
+    ne=num2+num3
+    ne<=element_limit || throw(ArgumentError(
+        "$caller: .ir3 element count exceeds max_elements=$element_limit"))
+    tokens=Iterators.Stateful(Iterators.flatmap(eachsplit,eachline(io)))
+    next=function (what)
+        it=iterate(tokens)
+        it===nothing && throw(ArgumentError(
+            "$caller: truncated .ir3 file (expected $what)"))
+        return it[1]
+    end
+    node_labels=Vector{Int64}(undef,nv)
+    node_rows=Dict{Int64,Int32}()
+    coords=Vector{Float64}(undef,3*nv)
+    for i in 1:nv
+        index=_unv_int(next("vertex $i index"),caller,".ir3 vertex index")
+        index>=1 || throw(ArgumentError(
+            "$caller: non-positive .ir3 vertex index $index"))
+        haskey(node_rows,index) && throw(ArgumentError(
+            "$caller: duplicate .ir3 vertex index $index"))
+        x=_unv_float(next("vertex $i x"),caller,".ir3 vertex coordinate")
+        y=_unv_float(next("vertex $i y"),caller,".ir3 vertex coordinate")
+        z=_unv_float(next("vertex $i z"),caller,".ir3 vertex coordinate")
+        node_labels[i]=index;node_rows[index]=Int32(i)
+        @inbounds coords[3i-2]=x;@inbounds coords[3i-1]=y;@inbounds coords[3i]=z
+    end
+    raw=Vector{Tuple{Int64,Vector{Int32}}}(undef,ne)
+    for e in 1:ne
+        num=_unv_int(next("element $e number"),caller,".ir3 element number")
+        num>=1 || throw(ArgumentError(
+            "$caller: non-positive .ir3 element number $num"))
+        tag=_unv_int(next("element $e tag"),caller,".ir3 element tag")
+        tag>=0 || throw(ArgumentError(
+            "$caller: negative .ir3 element tag $tag"))
+        count=_unv_int(next("element $e vertex count"),caller,
+            ".ir3 element vertex count")
+        # The count selects the record width *and* the cell type, so it must
+        # land on a catalog arity before its vertex list is consumed.
+        (haskey(_IR3_DIM2_TYPES,count) || haskey(_IR3_DIM3_TYPES,count)) ||
+            throw(ArgumentError(
+                "$caller: .ir3 element $e has $count vertices; no supported " *
+                "element type"))
+        rows=Vector{Int32}(undef,count)
+        for k in 1:count
+            label=_unv_int(next("element $e vertex $k"),caller,
+                ".ir3 element vertex")
+            row=get(node_rows,label,Int32(0))
+            row!=0 || throw(ArgumentError(
+                "$caller: .ir3 element $e references unknown node $label"))
+            rows[k]=row
+        end
+        raw[e]=(tag,rows)
+    end
+    if length(header)==2
+        # Single-count decks hold one dimension only — resolved once: an
+        # arity set representable in exactly one dimension fixes it, and when
+        # both work a planar node set selects the surface reading (Iridium
+        # decks are usually surface triangulations).
+        fits2=all(entry->haskey(_IR3_DIM2_TYPES,length(entry[2])),raw)
+        fits3=all(entry->haskey(_IR3_DIM3_TYPES,length(entry[2])),raw)
+        dim=if fits2 && !fits3
+            2
+        elseif fits3 && !fits2
+            3
+        elseif fits2 && fits3
+            _ir3_planar(coords,nv) ? 2 : 3
+        else
+            throw(ArgumentError(
+                "$caller: .ir3 element vertex counts match no single " *
+                "element dimension"))
+        end
+        dims=fill(dim,ne)
+    else
+        dims=[e<=num2 ? 2 : 3 for e in 1:ne]
+    end
+    records=_TextMeshCell[]
+    sizehint!(records,ne)
+    for e in 1:ne
+        tag,rows=raw[e]
+        table=dims[e]==2 ? _IR3_DIM2_TYPES : _IR3_DIM3_TYPES
+        msh=get(table,length(rows),nothing)
+        msh===nothing && throw(ArgumentError(
+            "$caller: .ir3 element $e has $(length(rows)) vertices; no " *
+            "supported dim-$(dims[e]) element type"))
+        push!(records,_TextMeshCell(Int64(e),msh,rows,tag,Int64(0)))
+    end
+    return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
+end
+
+"""
+    Ir3File
+
+Result of [`read_ir3`](@ref): the compact `mesh` (an MSH2-style `MixedMesh`
+whose per-cell `elementary_entities` hold the record tag column — the
+writer's elementary-tag default — and whose `tags` are zero), the file
+`node_tags` in vertex row order and the per-block `element_tags` (dense
+file-order counters, since each dim section restarts numbering).
+"""
+struct Ir3File
+    mesh::MixedMesh
+    node_tags::Vector{UInt64}
+    element_tags::Vector{Vector{UInt64}}
+end
+
+"""
+    read_ir3(path; max_nodes, max_elements, max_file_bytes) -> Ir3File
+
+Read an Iridium `.ir3` file — the inverse of [`write_ir3`](@ref): a `33`
+format line, a `numVertices num2D num3D` or `numVertices numElements`
+header, `index x y z` vertex rows (the index column becomes `node_tags`)
+and self-describing `num tag numVert v1 ... vk` element records. The tag
+column is read as the elementary entity tag — the writer's
+`element_tag_type=1` default; tag-type-2 decks are indistinguishable.
+Three-count headers fix each record's dimension by section; the
+single-count form resolves one dimension for the whole deck — an arity set
+representable in exactly one dimension fixes it, while a set working in
+both falls back to a node-planarity tiebreak (planar → surface). `numVert`
+maps to the lowest-order catalog element of the resolved dimension,
+preferring complete over serendipity cells. Bad format lines, non-positive
+counts, duplicate/unknown vertices, negative tags and truncated records are
+errors. Upstream ships only the writer; this reader is a Tessella
+extension.
+"""
+function read_ir3(path;
+                  max_nodes=typemax(Int32),max_elements=typemax(Int32),
+                  max_file_bytes=typemax(Int))
+    caller="read_ir3"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    node_limit=_io_limit(max_nodes,caller,"max_nodes";ceiling=Int(typemax(Int32)))
+    element_limit=_io_limit(
+        max_elements,caller,"max_elements";ceiling=Int(typemax(Int32)))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
+    node_labels,coords,records,pnames=open(path,"r") do io
+        try
+            return _read_ir3(io,caller,node_limit,element_limit)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa EOFError && throw(ArgumentError(
+                "$caller: truncated .ir3 file"))
+            rethrow()
+        end
+    end
+    mesh,node_tags,element_tags=_foreign_mesh_result(
+        caller,node_labels,coords,records;physical_names=pnames)
+    return Ir3File(mesh,node_tags,element_tags)
 end
 
 """

@@ -165,7 +165,7 @@ function _model_import_prepare(path,dimension;legacy=false)
     result=if extension==".msh"
         GeoExec._geo_stage_mesh_file(path;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
-    elseif extension in (".unv",".mesh",".su2",".bdf",".nas",".inp",".neu",".p3d",".vtk")
+    elseif extension in (".unv",".mesh",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".vtk")
         IO._stage_foreign_mesh_file(path;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
     elseif extension==".stl"
@@ -290,8 +290,8 @@ function _model_import_filename(filename,caller;geo_only=false)
     filename isa AbstractString && !isempty(filename) && !occursin('\0',filename) ||
         throw(ArgumentError("$caller: filename must be a nonempty NUL-free string"))
     extension=lowercase(splitext(filename)[2])
-    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos",".unv",".mesh",".stl",".su2",".bdf",".nas",".inp",".neu",".p3d",".vtk")) || throw(ArgumentError(
-        "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh, .pos, .unv, .mesh, .stl, .su2, .bdf, .nas, .inp, .neu, .p3d and .vtk")"))
+    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos",".unv",".mesh",".stl",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".vtk")) || throw(ArgumentError(
+        "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh, .pos, .unv, .mesh, .stl, .su2, .bdf, .nas, .inp, .neu, .p3d, .mail, .ir3 and .vtk")"))
     isfile(filename) || throw(ArgumentError("$caller: missing file $filename"))
     return String(filename)
 end
@@ -300,7 +300,7 @@ end
     open(filename)
 
 Import a `.geo`, `.msh`, `.unv`, `.mesh`, `.stl`, `.su2`, `.bdf`, `.nas`,
-`.inp`, `.neu`, `.p3d`, `.vtk` or supported linear-list
+`.inp`, `.neu`, `.p3d`, `.mail`, `.ir3`, `.vtk` or supported linear-list
 `.pos` file into a new current model, reusing an empty
 current model. Nonempty prior models and session views remain alive. MSH
 imports keep actual UIDs, entity ownership and retained metadata; UNV and
@@ -310,8 +310,11 @@ physical groups and names), Nastran property ids (mapped to elementary
 entity and physical tags), Abaqus element sets (mapped to elementary and
 physical tags plus physical names), Gambit element groups/boundary sets
 (mapped the same way) and PLOT3D structured blocks (mapped to
-per-dimension entities carrying quads or hexes); VTK imports publish
-unstructured-grid/polydata cells on per-dimension entities like upstream;
+per-dimension entities carrying quads or hexes); MAIL imports publish their
+triangles on one implicit surface and IR3 imports publish their
+self-describing element records on the tag-column entities; VTK imports
+publish unstructured-grid/polydata cells on per-dimension entities like
+upstream;
 STL imports weld through
 `read_stl` and publish one discrete Surface; ordinary
 model data sections create views bound to the imported model. The model name
