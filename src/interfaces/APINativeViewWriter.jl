@@ -532,7 +532,36 @@ function _native_list_view_pos(view,caller;name=view.name)
             push!(elements,Post.PosElement(kind,coords,values))
         end
     end
-    return Post.PosView(name;elements,time=view.list_time)
+    # T2/T3 string blocks (POS text records and Annotate annotations) decode
+    # back to PosText records: one list entry per record, '\0'-joined
+    # per-step strings; 3 coords per record carry x/y/z with implicit style
+    # zero, 4 carry x/y/z/style. Other dataType keys stay unexported.
+    texts=Post.PosText[]
+    for key in view.list_string_types
+        key in ("T2","T3") || continue
+        count=view.list_string_counts[key]
+        coords=get(view.list_string_coords,key,Float64[])
+        strings=get(view.list_strings,key,String[])
+        length(strings)==count || throw(ArgumentError(
+            "$caller: $key string entries do not align with the record count"))
+        count==0 && (isempty(coords) || throw(ArgumentError(
+            "$caller: $key record count is zero but coords are nonempty")))
+        count==0 && continue
+        length(coords)%count==0 || throw(ArgumentError(
+            "$caller: $key coords do not align with the record count"))
+        width=div(length(coords),count)
+        width in (3,4) || throw(ArgumentError(
+            "$caller: $key coords must hold 3 or 4 entries per record " *
+            "(got $width)"))
+        for record in 1:count
+            base=width*(record-1)
+            xyz=(coords[base+1],coords[base+2],coords[base+3])
+            style=width==4 ? coords[base+4] : 0.0
+            push!(texts,Post.PosText(key=="T2" ? 2 : 3,xyz,style,
+                                     split(strings[record],'\0')))
+        end
+    end
+    return Post.PosView(name;elements,texts,time=view.list_time)
 end
 
 

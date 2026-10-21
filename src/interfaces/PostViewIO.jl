@@ -9,6 +9,7 @@
 
 using ..SizeField: PostViewField, PostViewAnisoField, AbstractField
 using ..Elements: lagrange_nodes
+using ..IO: _GEO_NUMBER_OPTION_TABLE
 using LinearAlgebra: inv
 using Printf: @sprintf
 
@@ -726,7 +727,9 @@ function _pos_skip_space!(lx::_PosLexer,caller::AbstractString)
                     "$caller: unterminated '/*' comment"))
                 continue
             end
-            throw(ArgumentError("$caller: unexpected '/' at byte $i"))
+            # A lone '/' is not a comment: leave it for `_pos_next!`, which
+            # emits the division operator token.
+            break
         else
             break
         end
@@ -776,6 +779,46 @@ function _pos_next!(lx::_PosLexer,caller::AbstractString)::_PosToken
     if c==0x7d;lx.pos=i+1;return _PosToken(:rbrace,"",0.0,i);end       # }
     if c==0x2c;lx.pos=i+1;return _PosToken(:comma,"",0.0,i);end        # ,
     if c==0x3b;lx.pos=i+1;return _PosToken(:semi,"",0.0,i);end         # ;
+    if c==0x2b;lx.pos=i+1;return _PosToken(:plus,"",0.0,i);end         # +
+    if c==0x2d;lx.pos=i+1;return _PosToken(:minus,"",0.0,i);end        # -
+    if c==0x2a;lx.pos=i+1;return _PosToken(:star,"",0.0,i);end         # *
+    if c==0x2f;lx.pos=i+1;return _PosToken(:slash,"",0.0,i);end        # /
+    if c==0x5e;lx.pos=i+1;return _PosToken(:caret,"",0.0,i);end        # ^
+    if c==0x3f;lx.pos=i+1;return _PosToken(:quest,"",0.0,i);end        # ?
+    if c==0x3a;lx.pos=i+1;return _PosToken(:colon,"",0.0,i);end        # :
+    if c==0x3c                                                        # '<' '<='
+        if i+1<=n && data[i+1]==0x3d
+            lx.pos=i+2;return _PosToken(:le,"",0.0,i)
+        end
+        lx.pos=i+1;return _PosToken(:lt,"",0.0,i)
+    end
+    if c==0x3e                                                        # '>' '>='
+        if i+1<=n && data[i+1]==0x3d
+            lx.pos=i+2;return _PosToken(:ge,"",0.0,i)
+        end
+        lx.pos=i+1;return _PosToken(:gt,"",0.0,i)
+    end
+    if c==0x3d                                                        # '==' only
+        i+1<=n && data[i+1]==0x3d || throw(ArgumentError(
+            "$caller: unexpected '=' at byte $i"))
+        lx.pos=i+2;return _PosToken(:eq,"",0.0,i)
+    end
+    if c==0x21                                                        # '!' '!='
+        if i+1<=n && data[i+1]==0x3d
+            lx.pos=i+2;return _PosToken(:ne,"",0.0,i)
+        end
+        lx.pos=i+1;return _PosToken(:not,"",0.0,i)
+    end
+    if c==0x26                                                        # '&&' only
+        i+1<=n && data[i+1]==0x26 || throw(ArgumentError(
+            "$caller: unexpected '&' at byte $i"))
+        lx.pos=i+2;return _PosToken(:and,"",0.0,i)
+    end
+    if c==0x7c                                                        # '||' only
+        i+1<=n && data[i+1]==0x7c || throw(ArgumentError(
+            "$caller: unexpected '|' at byte $i"))
+        lx.pos=i+2;return _PosToken(:or,"",0.0,i)
+    end
     if c==0x22 || c==0x27             # '"' '\''
         qchar=c;j=i+1
         while j<=n && data[j]!=qchar
@@ -794,10 +837,14 @@ function _pos_next!(lx::_PosLexer,caller::AbstractString)::_PosToken
         lx.pos=j
         return _PosToken(:ident,String(data[i:j-1]),0.0,i)
     end
-    if _pos_is_digit(c) || c==0x2b || c==0x2d || c==0x2e
+    if _pos_is_digit(c) || c==0x2e        # digit or '.'
         stop,text,isnumber=_pos_scan_number(data,n,i)
-        isnumber || throw(ArgumentError(
-            "$caller: unexpected byte 0x$(string(c,base=16,pad=2)) at byte $i"))
+        if !isnumber                    # '.' not starting a number
+            c==0x2e || throw(ArgumentError(
+                "$caller: unexpected byte 0x$(string(c,base=16,pad=2)) at byte $i"))
+            lx.pos=i+1
+            return _PosToken(:dot,"",0.0,i)
+        end
         lx.pos=stop
         value=parse(Float64,text)
         isfinite(value) || throw(ArgumentError(
@@ -812,6 +859,10 @@ mutable struct _PosReader
     lx::_PosLexer
     pending::Union{Nothing,_PosToken}
     caller::String
+    # Live `"Family.Option"` overrides consulted before the compiled-in
+    # `_GEO_NUMBER_OPTION_TABLE` defaults (session option state); `nothing`
+    # reads defaults only.
+    options::Union{Nothing,Dict{String,Float64}}
 end
 
 @inline function _pos_peek!(r::_PosReader)
@@ -834,23 +885,226 @@ _pos_token_desc(t::_PosToken)=
     t.kind==:num ? "number '$(t.text)'" :
     t.kind==:str ? "string" : "'$(t.kind)'"
 
+# ── Numeric expressions (Gmsh `FExpr`/`ListOfDouble` contexts) ────────────────
+#
+# Gmsh parses `.pos` record lists as full floating-point expressions: number
+# literals, `Family.Option` reads (`General.GraphicsWidth`), the `Pi`
+# constant, built-in calls and the `+ - * / ^`, comparison, logical and
+# `? :` operators. This evaluator resolves `Family.Option` names through the
+# caller's live `options` map first and the compiled-in Gmsh 4.15.2
+# `DefaultOptions` table afterwards — the same `NumberOption(GMSH_GET)`
+# lookup the upstream parser performs — and otherwise rejects unknown
+# identifiers: standalone `.pos` views bind no user variables.
+
+const _POS_FUNCTIONS=Dict{String,Tuple{Int,Function}}(
+    "Exp"=>(1,exp),"Log"=>(1,log),"Log10"=>(1,log10),"Sqrt"=>(1,sqrt),
+    "Sin"=>(1,sin),"Cos"=>(1,cos),"Tan"=>(1,tan),
+    "ASin"=>(1,asin),"ACos"=>(1,acos),"ATan"=>(1,atan),
+    "Asin"=>(1,asin),"Acos"=>(1,acos),"Atan"=>(1,atan),
+    "SinH"=>(1,sinh),"CosH"=>(1,cosh),"TanH"=>(1,tanh),
+    "Sinh"=>(1,sinh),"Cosh"=>(1,cosh),"Tanh"=>(1,tanh),
+    "ASinH"=>(1,asinh),"ACosH"=>(1,acosh),"ATanH"=>(1,atanh),
+    "Asinh"=>(1,asinh),"Acosh"=>(1,acosh),"Atanh"=>(1,atanh),
+    "Fabs"=>(1,abs),"Abs"=>(1,abs),
+    "Floor"=>(1,floor),"Ceil"=>(1,ceil),"Sign"=>(1,sign),
+    "Round"=>(1,round),"Sqrt2"=>(1,x->sqrt(2)*x),
+    "ATan2"=>(2,atan),"Atan2"=>(2,atan),"Hypot"=>(2,hypot),
+    "Fmod"=>(2,rem),"Modulo"=>(2,rem),
+    "Min"=>(0,minimum),"Max"=>(0,maximum),"Rand"=>(1,x->x*rand()))
+
+# `Family.Name[.Sub]` option read — `NumberOption(GMSH_GET)`: live session
+# overrides first, then the generated `DefaultOptions.h` table.
+function _pos_option_number(r::_PosReader,name::AbstractString,at::Int,
+                            caller::AbstractString)::Float64
+    if r.options!==nothing
+        value=get(r.options,name,nothing)
+        value===nothing || return value
+    end
+    dot=findfirst('.',name)
+    dot===nothing && throw(ArgumentError(
+        "$caller: unknown identifier '$name' at byte $at"))
+    family=name[1:dot-1];member=name[dot+1:end]
+    table=get(_GEO_NUMBER_OPTION_TABLE,family,nothing)
+    table===nothing && throw(ArgumentError(
+        "$caller: Unknown number option category '$family' at byte $at"))
+    value=get(table,member,nothing)
+    value===nothing && throw(ArgumentError(
+        "$caller: Unknown number option '$name' at byte $at"))
+    return Float64(value)
+end
+
+function _pos_atom!(r::_PosReader)::Float64
+    caller=r.caller
+    t=_pos_take!(r)
+    t.kind==:num && return t.value
+    if t.kind==:lparen
+        value=_pos_expr!(r)
+        close=_pos_take!(r)
+        close.kind==:rparen || throw(ArgumentError(
+            "$caller: expected ',' or ')' at byte $(close.at), got " *
+            _pos_token_desc(close)))
+        return value
+    end
+    if t.kind==:ident
+        next=_pos_peek!(r)
+        if next.kind==:dot          # `Family.Option[.Sub]` option read
+            parts=String[t.text]
+            while _pos_peek!(r).kind==:dot
+                _pos_take!(r)
+                member=_pos_take!(r)
+                member.kind==:ident || throw(ArgumentError(
+                    "$caller: expected an option name after '.' at byte " *
+                    "$(member.at), got $(_pos_token_desc(member))"))
+                push!(parts,member.text)
+            end
+            return _pos_option_number(r,join(parts,'.'),t.at,caller)
+        elseif next.kind==:lparen   # `name(args...)` built-in call
+            _pos_take!(r)
+            spec=get(_POS_FUNCTIONS,t.text,nothing)
+            spec===nothing && throw(ArgumentError(
+                "$caller: unknown function '$(t.text)' at byte $(t.at)"))
+            arity,f=spec
+            args=Float64[]
+            _pos_peek!(r).kind==:rparen || while true
+                push!(args,_pos_expr!(r))
+                sep=_pos_take!(r)
+                sep.kind==:comma && continue
+                sep.kind==:rparen || throw(ArgumentError(
+                    "$caller: expected ',' or ')' at byte $(sep.at), got " *
+                    _pos_token_desc(sep)))
+                break
+            end
+            _pos_peek!(r).kind==:rparen && _pos_take!(r)
+            (arity==0 ? !isempty(args) : length(args)==arity) ||
+                throw(ArgumentError(
+                    "$caller: function '$(t.text)' expects " *
+                    "$(arity==0 ? "at least 1" : string(arity)) " *
+                    "arguments (got $(length(args))) at byte $(t.at)"))
+            # Variadic entries (Min/Max) take the argument vector itself.
+            return Float64(arity==0 ? f(args) : f(args...))
+        end
+        t.text=="Pi" && return Float64(pi)
+        throw(ArgumentError(
+            "$caller: unknown identifier '$(t.text)' at byte $(t.at)"))
+    end
+    throw(ArgumentError(
+        "$caller: expected an expression at byte $(t.at), got " *
+        _pos_token_desc(t)))
+end
+
+function _pos_power!(r::_PosReader)::Float64
+    base=_pos_atom!(r)
+    _pos_peek!(r).kind==:caret || return base
+    _pos_take!(r)
+    return base^_pos_unary!(r)
+end
+
+function _pos_unary!(r::_PosReader)::Float64
+    t=_pos_peek!(r)
+    if t.kind==:minus
+        _pos_take!(r)
+        return -_pos_unary!(r)
+    elseif t.kind==:plus
+        _pos_take!(r)
+        return _pos_unary!(r)
+    elseif t.kind==:not
+        _pos_take!(r)
+        return _pos_unary!(r)!=0 ? 0.0 : 1.0
+    end
+    return _pos_power!(r)
+end
+
+function _pos_mul!(r::_PosReader)::Float64
+    value=_pos_unary!(r)
+    while true
+        kind=_pos_peek!(r).kind
+        kind==:star || kind==:slash || return value
+        _pos_take!(r)
+        rhs=_pos_unary!(r)
+        value=kind==:star ? value*rhs : value/rhs
+    end
+end
+
+function _pos_add!(r::_PosReader)::Float64
+    value=_pos_mul!(r)
+    while true
+        kind=_pos_peek!(r).kind
+        kind==:plus || kind==:minus || return value
+        _pos_take!(r)
+        rhs=_pos_mul!(r)
+        value=kind==:plus ? value+rhs : value-rhs
+    end
+end
+
+function _pos_rel!(r::_PosReader)::Float64
+    value=_pos_add!(r)
+    while true
+        kind=_pos_peek!(r).kind
+        kind in (:lt,:le,:gt,:ge) || return value
+        _pos_take!(r)
+        rhs=_pos_add!(r)
+        value=(kind==:lt ? value<rhs : kind==:le ? value<=rhs :
+               kind==:gt ? value>rhs : value>=rhs) ? 1.0 : 0.0
+    end
+end
+
+function _pos_eq!(r::_PosReader)::Float64
+    value=_pos_rel!(r)
+    while true
+        kind=_pos_peek!(r).kind
+        kind==:eq || kind==:ne || return value
+        _pos_take!(r)
+        rhs=_pos_rel!(r)
+        value=(kind==:eq ? value==rhs : value!=rhs) ? 1.0 : 0.0
+    end
+end
+
+function _pos_and!(r::_PosReader)::Float64
+    value=_pos_eq!(r)
+    while _pos_peek!(r).kind==:and
+        _pos_take!(r)
+        rhs=_pos_eq!(r)
+        value=(value!=0 && rhs!=0) ? 1.0 : 0.0
+    end
+    return value
+end
+
+function _pos_or!(r::_PosReader)::Float64
+    value=_pos_and!(r)
+    while _pos_peek!(r).kind==:or
+        _pos_take!(r)
+        rhs=_pos_and!(r)
+        value=(value!=0 || rhs!=0) ? 1.0 : 0.0
+    end
+    return value
+end
+
+# `FExpr` — ternary `?:` sits at the top of the chain (lowest precedence).
+function _pos_expr!(r::_PosReader)::Float64
+    value=_pos_or!(r)
+    _pos_peek!(r).kind==:quest || return value
+    _pos_take!(r)
+    when_true=_pos_expr!(r)
+    t=_pos_take!(r)
+    t.kind==:colon || throw(ArgumentError(
+        "$(r.caller): expected ':' in '?' expression at byte $(t.at), got " *
+        _pos_token_desc(t)))
+    when_false=_pos_expr!(r)
+    return value!=0 ? when_true : when_false
+end
+
 function _pos_number_tail!(r::_PosReader,close::Symbol,
                            caller::AbstractString)::Vector{Float64}
     values=Float64[]
-    t=_pos_take!(r)
-    t.kind==close && return values
+    _pos_peek!(r).kind==close && (_pos_take!(r);return values)
     while true
-        t.kind==:num || throw(ArgumentError(
-            "$caller: expected a number at byte $(t.at), got $(_pos_token_desc(t))"))
-        push!(values,t.value)
+        push!(values,_pos_expr!(r))
         t=_pos_take!(r)
-        t.kind==:comma || break
-        t=_pos_take!(r)
+        t.kind==close && return values
+        t.kind==:comma || throw(ArgumentError(
+            "$caller: expected ',' or a closing delimiter at byte $(t.at), " *
+            "got $(_pos_token_desc(t))"))
     end
-    t.kind==close || throw(ArgumentError(
-        "$caller: expected ',' or a closing delimiter at byte $(t.at), got " *
-        _pos_token_desc(t)))
-    return values
 end
 
 function _pos_number_list!(r::_PosReader,open::Symbol,close::Symbol,
@@ -1085,8 +1339,9 @@ function _pos_assemble_view(name::AbstractString,tag::Int,
 end
 
 function _pos_parse(data::Vector{UInt8},limits::_PosReadLimits,
-                    caller::AbstractString)::Vector{PosView}
-    r=_PosReader(_PosLexer(data,1),nothing,caller)
+                    caller::AbstractString,
+                    options::Union{Nothing,Dict{String,Float64}})::Vector{PosView}
+    r=_PosReader(_PosLexer(data,1),nothing,caller,options)
     views=PosView[]
     while true
         t=_pos_take!(r)
@@ -1116,10 +1371,37 @@ function _pos_read_bounded(io::IO,file_limit::Int,
     return data
 end
 
+# Validate an `options` map once per read: string `"Family.Name"` keys to
+# finite numbers — the live-override half of `NumberOption(GMSH_GET)` reads.
+function _pos_option_map(options,caller::AbstractString)
+    options===nothing && return nothing
+    options isa AbstractDict || throw(ArgumentError(
+        "$caller: options must be a dictionary mapping option names to numbers"))
+    map=Dict{String,Float64}()
+    for (key,value) in options
+        key isa AbstractString || throw(ArgumentError(
+            "$caller: options keys must be strings"))
+        value isa Bool && throw(ArgumentError(
+            "$caller: options entry '$key' must not be Bool"))
+        converted=try
+            Float64(value)
+        catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "$caller: options entry '$key' must be Float64-representable"))
+        end
+        isfinite(converted) || throw(ArgumentError(
+            "$caller: options entry '$key' must be finite"))
+        map[String(key)]=converted
+    end
+    return map
+end
+
 function _read_pos(io::IO,limits::_PosReadLimits,file_limit::Int,
-                   caller::AbstractString)
+                   caller::AbstractString,
+                   options::Union{Nothing,Dict{String,Float64}})
     data=_pos_read_bounded(io,file_limit,caller)
-    return _pos_parse(data,limits,caller)
+    return _pos_parse(data,limits,caller,options)
 end
 
 """
@@ -1131,6 +1413,18 @@ scalar/vector/tensor element records `SP..TP`, `SL..TL`, `ST..TT`, `SQ..TQ`,
 `SS..TS`, `SH..TH`, `SI..TI`, `SY..TY`, `TIME{...}`/`TIME(...)` step values,
 `T2`/`T3` text records, `INTERPOLATION_SCHEME` matrices, `//`, `/* */`, and
 `#` comments. Returns the views in file order with tags `1:length(views)`.
+
+Numeric record lists are Gmsh `FExpr` expressions, not just literals:
+`+ - * / ^` (unary `!`, comparisons, `&&`, `||` and `?:` produce 0/1),
+parentheses, the `Pi` constant, built-in calls (`Sqrt`, `Exp`, `Log`,
+`Log10`, `Sin`/`Cos`/`Tan`, `ASin`/`ACos`/`ATan`/`ATan2`, hyperbolics,
+`Fabs`/`Abs`, `Floor`, `Ceil`, `Sign`, `Round`, `Fmod`, `Modulo`, `Hypot`,
+`Min`, `Max`, `Rand`) and `Family.Option` reads. Option names resolve through
+`options` first — a string-keyed map of live overrides such as the session
+`OPTIONS` state — then the compiled-in Gmsh 4.15.2 `DefaultOptions` table
+(`NumberOption(GMSH_GET)` semantics). User variables and string expressions
+are not bound in standalone `.pos` reads; unknown identifiers, functions and
+option names raise `ArgumentError`.
 
 The reader is strict: malformed syntax, unknown or higher-order (`SL2`, …)
 record types, wrong node counts, value counts that are not a multiple of
@@ -1150,7 +1444,8 @@ function read_pos(io::IO;
                   max_name_bytes=_POS_MAX_NAME_BYTES,
                   max_string_bytes=_POS_MAX_STRING_BYTES,
                   max_interpolation_entries=typemax(Int32),
-                  max_file_bytes=typemax(Int))
+                  max_file_bytes=typemax(Int),
+                  options=nothing)
     caller="read_pos"
     limits=_PosReadLimits(
         _pos_limit(max_views,caller,"max_views";ceiling=Int(typemax(Int32))),
@@ -1163,7 +1458,8 @@ function read_pos(io::IO;
         _pos_limit(max_interpolation_entries,caller,
                    "max_interpolation_entries";ceiling=Int(typemax(Int32))))
     file_limit=_pos_limit(max_file_bytes,caller,"max_file_bytes")
-    return _read_pos(io,limits,file_limit,caller)
+    return _read_pos(io,limits,file_limit,caller,
+                     _pos_option_map(options,caller))
 end
 
 function read_pos(path::AbstractString;
@@ -1174,7 +1470,8 @@ function read_pos(path::AbstractString;
                   max_name_bytes=_POS_MAX_NAME_BYTES,
                   max_string_bytes=_POS_MAX_STRING_BYTES,
                   max_interpolation_entries=typemax(Int32),
-                  max_file_bytes=typemax(Int))
+                  max_file_bytes=typemax(Int),
+                  options=nothing)
     caller="read_pos"
     limits=_PosReadLimits(
         _pos_limit(max_views,caller,"max_views";ceiling=Int(typemax(Int32))),
@@ -1191,7 +1488,8 @@ function read_pos(path::AbstractString;
     filesize(path)<=file_limit || throw(ArgumentError(
         "$caller: file exceeds max_file_bytes=$file_limit"))
     return open(path,"r") do io
-        _read_pos(io,limits,file_limit,caller)
+        _read_pos(io,limits,file_limit,caller,
+                  _pos_option_map(options,caller))
     end
 end
 

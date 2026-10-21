@@ -239,6 +239,7 @@ using Tessella
     include(joinpath(@__DIR__, "..", "interfaces/gui_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/post_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/post_view_io_test.jl"))
+    include(joinpath(@__DIR__, "..", "interfaces/post_view_text_expr_test.jl"))
     include(joinpath(@__DIR__, "..", "meshing/mesh2d_test.jl"))
     include(joinpath(@__DIR__, "..", "fields/sizefield_test.jl"))
     include(joinpath(@__DIR__, "..", "fields/postview_field_test.jl"))

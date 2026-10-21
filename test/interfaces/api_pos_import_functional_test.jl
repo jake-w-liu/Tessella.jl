@@ -117,7 +117,7 @@ function exercise(directory)
             A.model.add("retained");A.model.add_discrete_entity(0,9)
             prior=A.view.add("prior");A.view.add_list_data(prior,"SP",1,[0.,0,0,7])
             bodies=("View \"bad\" {SL(0,0){1};};",
-                "View \"text\" {T2(1,2,10){\"a\"};};",
+                "View \"text\" {T2(1,2){\"a\"};};",
                 "View \"high\" {SL2(0,0,0,1,0,0,.5,0,0){1,2,3};};",
                 "View \"scheme\" {INTERPOLATION_SCHEME{{1}}{{0}};};")
             for (ordinal,body) in enumerate(bodies)

@@ -15,9 +15,18 @@ Comment-only POS files create no views. Parse, admission and tag allocation
 failures publish nothing; this is intentionally stronger than native POS
 parsing that can publish a valid prefix from a malformed file.
 
-Text records, interpolation schemes and higher-order list suffixes reject
-atomically. The richer standalone POS decoder still supports those structures;
-this increment does not silently discard them or claim the full POS language.
+T2/T3 text records import as list string entries keyed `"T2"`/`"T3"`: one
+list entry per record with the record's per-step strings `'\0'`-joined
+(upstream's `T2C`/`T3C` char buffers) and four coords per record — x, y, z
+(0 for T2), style (upstream `T2D`/`T3D` minus the char-buffer index). Their
+numeric arguments are `FExpr` expressions evaluated at parse time —
+`General.GraphicsWidth/4` and friends resolve through the session `OPTIONS`
+map first and the generated `DefaultOptions` table afterwards — so the t8
+`view4.pos` annotations import with evaluated positions. `view.write` on a
+merged view re-emits the records verbatim. Interpolation schemes and
+higher-order list suffixes still reject atomically. The richer standalone
+POS decoder supports those structures; this increment does not silently
+discard them or claim the full POS language.
 Names use the actual session view for both public Name options and writer
 headers. Imported `NbTimeStep` counts data steps, so empty views report zero
 even if they declare TIME, matching a tiny public SDK observation.
