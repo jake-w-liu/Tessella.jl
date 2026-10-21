@@ -782,10 +782,65 @@ end
 # Barycentric node weights at `p` for a linear element, or `nothing` when `p`
 # lies outside (relative tolerance) — the list-data counterpart of the
 # session-mesh `_local_coordinates` inversion.
+# `_PluginElement` kinds → the `_shape_functions` family used by the Newton
+# inversion below (`:point` elements match by distance instead).
+const _PLUGIN_WEIGHT_FAMILY=(quadrangle=:qua,hexahedron=:hex,prism=:pri,
+                             pyramid=:pyr)
+
+# Invert the bilinear/trilinear reference map through Newton iterations, the
+# same `insideElement` + nodal shape evaluation the upstream `OctreePost`
+# buckets perform for quadrangles, hexahedra, prisms and pyramids.
+function _plugin_newton_weights(coords,kind::Symbol,p)
+    family=_PLUGIN_WEIGHT_FAMILY[kind]
+    ndim=kind===:quadrangle ? 2 : 3
+    ξ=(0.0,0.0,0.0)
+    scale=max(1.0,maximum(abs,coords))
+    T=1e-9
+    N=nothing
+    for _ in 1:50
+        N=collect(Float64,MeshPointLocation._shape_functions(
+            family,ξ[1],ξ[2],ξ[3],"plugin"))
+        resid=Float64[p[a]-LinearAlgebra.dot(N,view(coords,a,:)) for a in 1:3]
+        LinearAlgebra.norm(resid,Inf)<=T*scale && break
+        J=Matrix{Float64}(undef,3,ndim)
+        for k in 1:ndim
+            ξh=collect(ξ);ξh[k]+=1e-7
+            Nh=collect(Float64,MeshPointLocation._shape_functions(
+                family,ξh[1],ξh[2],ξh[3],"plugin"))
+            for a in 1:3
+                J[a,k]=LinearAlgebra.dot(Nh.-N,view(coords,a,:))/1e-7
+            end
+        end
+        Δ=try
+            (J'*J)\(J'*resid)
+        catch
+            return nothing
+        end
+        ξ=ξ.+ntuple(k->k<=ndim ? Δ[k] : 0.0,3)
+        LinearAlgebra.norm(Δ,Inf)<=T && break
+    end
+    u,v,w=ξ
+    inside=kind===:quadrangle ? (abs(u)<=1+T && abs(v)<=1+T) :
+           kind===:hexahedron ? (abs(u)<=1+T && abs(v)<=1+T && abs(w)<=1+T) :
+           kind===:prism ? (u>=-T && v>=-T && u+v<=1+T && abs(w)<=1+T) :
+           (w>=-T && w<=1+T && abs(u)<=1-w+T && abs(v)<=1-w+T)
+    inside || return nothing
+    N=collect(Float64,MeshPointLocation._shape_functions(family,u,v,w,"plugin"))
+    resid=Float64[p[a]-LinearAlgebra.dot(N,view(coords,a,:)) for a in 1:3]
+    LinearAlgebra.norm(resid,Inf)<=T*scale || return nothing
+    return Tuple(N)
+end
+
 function _plugin_local_weights(coords,kind::Symbol,p)
     T=1e-9
     a=_plugin_col(coords,1)
-    if kind===:line
+    if kind===:point
+        scale=max(1.0,_plugin_norm3(a))
+        _plugin_norm3(_plugin_sub3(p,a))<=T*scale || return nothing
+        return (1.0,)
+    elseif haskey(_PLUGIN_WEIGHT_FAMILY,kind)
+        return _plugin_newton_weights(coords,kind,p)
+    elseif kind===:line
         e=_plugin_sub3(_plugin_col(coords,2),a)
         scale=_plugin_norm3(e)
         scale>0 || return nothing
@@ -2188,6 +2243,9 @@ end
 # ---- MathEval ------------------------------------------------------------------------------
 
 import ..SizeField
+import ..Mesh2D
+import ..Mesh3D
+import LinearAlgebra
 
 # Per-node variable buffers for `v0`..`v8` (the view being processed) and
 # `w0`..`w8` (`OtherView` at `OtherTimeStep` or the same step); bound into the
@@ -3733,6 +3791,1811 @@ function _plugin_exec_vorticity(spec::_PluginSpec,caller::AbstractString)
     return nothing
 end
 
+# ---- batch-3 shared machinery --------------------------------------------------
+#
+# The upstream `OctreePost` keeps one octree per record shape *and* per
+# component class (scalar/vector/tensor), searching tets, hexes, prisms,
+# pyramids, triangles, quadrangles, lines then points — the highest-dimension
+# match wins and only elements whose component count matches the probed class
+# can supply values. `_plugin_probe_class` reproduces that contract over the
+# session view element list: descending search rank with stable record order.
+
+# Upstream `OctreePost::search{Scalar,Vector,Tensor}` probes one octree per
+# record family in fixed order — tets, hexes, prisms, pyramids, triangles,
+# quadrangles, lines, then points — so the match rank is element TYPE, not
+# merely dimension.
+const _PLUGIN_SEARCH_RANK=(tetrahedron=8,hexahedron=7,prism=6,pyramid=5,
+                           triangle=4,quadrangle=3,line=2,point=1)
+
+function _plugin_sorted_elements(elements)
+    return sort(elements;by=e->_PLUGIN_SEARCH_RANK[e.kind],rev=true,
+                alg=Base.Sort.DEFAULT_STABLE)
+end
+
+# Sample `ncomp`-component data at `p` for `steps` steps. Missing coverage and
+# wrong-class hits contribute zeros like the upstream searchScalar/Vector/
+# Tensor zero-filled arrays.
+function _plugin_class_sample(view,elements,ncomp::Int,p,steps::Int,caller)
+    vals=zeros(ncomp*steps)
+    if view.model_kind===nothing
+        for element in elements
+            element.ncomp==ncomp || continue
+            N=_plugin_local_weights(element.geo,element.kind,p)
+            N===nothing && continue
+            va=size(element.vcoords,2)
+            for s in 1:steps,node in 1:min(va,length(N)),comp in 1:ncomp
+                vals[(s-1)*ncomp+comp]=muladd(N[node],
+                    element.vals[(s-1)*va*ncomp+(node-1)*ncomp+comp],
+                    vals[(s-1)*ncomp+comp])
+            end
+            return vals
+        end
+        return vals
+    end
+    # Model views carry one component width; only the matching class probes.
+    isempty(elements) && return vals
+    first(elements).ncomp==ncomp || return vals
+    accs,_=_plugin_probe_model(view,p,caller)
+    for (i,acc) in enumerate(accs)
+        i>steps && break
+        for comp in 1:min(ncomp,length(acc))
+            vals[(i-1)*ncomp+comp]=acc[comp]
+        end
+    end
+    return vals
+end
+
+# Component classes carried by the view (the upstream `getNumScalars`/
+# `getNumVectors`/`getNumTensors` gates): only 1/3/9-component records feed
+# the matching probe class.
+function _plugin_view_classes(elements)
+    classes=Set{Int}()
+    for element in elements
+        element.ncomp in (1,3,9) && push!(classes,element.ncomp)
+    end
+    return sort!(collect(classes))
+end
+
+# Push one `head`-class record: x-block/y-block/z-block then per-step per-node
+# values, the `_POS_RECORD_TYPES` payload convention.
+function _plugin_push_record!(flat,pnts,nodes,vals,ncomp::Int,steps::Int)
+    for axis in 1:3,idx in nodes
+        push!(flat,pnts[idx isa Tuple ? CartesianIndex(idx) : idx][axis])
+    end
+    for s in 1:steps,idx in nodes,comp in 1:ncomp
+        push!(flat,
+              vals[idx isa Tuple ? CartesianIndex(idx) : idx][(s-1)*ncomp+comp])
+    end
+    return flat
+end
+
+# `NamedTuple` of ordered output blocks shared by the grid plugins: `flat`
+# accumulates per record-type payloads keyed by `head*shape`.
+function _plugin_grid_blocks()
+    return (blocks=Dict{String,Vector{Float64}}(),
+            counts=Dict{String,Int}(),order=String[])
+end
+function _plugin_grid_push!(acc,kind::Symbol,ncomp::Int,pnts,nodes,vals,steps)
+    type=_plugin_record_type(kind,ncomp)
+    type===nothing && return acc
+    haskey(acc.blocks,type) ||
+        (acc.blocks[type]=Float64[];acc.counts[type]=0;push!(acc.order,type))
+    _plugin_push_record!(acc.blocks[type],pnts,nodes,vals,ncomp,steps)
+    acc.counts[type]+=1
+    return acc
+end
+
+# ---- CutBox ---------------------------------------------------------------------
+#
+# Upstream `Plugin(CutBox)` samples `View` on the Nu×Nv×Nw grid of the
+# parametric box through P0,P1,P2,P3 (`p = P0 + u(P1-P0) + v(P2-P0) +
+# w(P3-P0)`, `u=i/(Nu-1)` — 0 when Nu==1 — and likewise v,w). `ConnectPoints`
+# selects connected output: lines along the single active axis when two counts
+# equal 1, quads on the degenerate plane when one count equals 1, hexahedra for
+# a full 3-D grid, and plain points otherwise. `Boundary` keeps only the
+# boundary records (points → six faces, connected degenerate grids → their
+# boundary polylines/points, 3-D grids → six outward-facing quadrangle skins).
+# Component classes are probed independently like the upstream scalar/vector/
+# tensor octrees. Upstream `addInView` reads `vals[0][i][getNbW()]` past the
+# last slot for the i-lines of the NbU==1 boundary case — an out-of-bounds bug
+# reproduced here with the intended NbW-1 slot.
+
+function _plugin_cutbox_addinview!(acc,connect::Bool,boundary::Bool,nu,nv,nw,
+                                   pnts::Array{NTuple{3,Float64},3},
+                                   vals::Array{Vector{Float64},3},
+                                   ncomp::Int,steps::Int)
+    pushpnt(idx)=_plugin_grid_push!(acc,:point,ncomp,pnts,(idx,),vals,steps)
+    pushln(a,b)=_plugin_grid_push!(acc,:line,ncomp,pnts,(a,b),vals,steps)
+    pushqd(a,b,c,d)=_plugin_grid_push!(acc,:quadrangle,ncomp,pnts,(a,b,c,d),
+                                       vals,steps)
+    pushhex(a,b,c,d,e,f,g,h)=_plugin_grid_push!(acc,:hexahedron,ncomp,pnts,
+                                              (a,b,c,d,e,f,g,h),vals,steps)
+    if !connect || (nu==1 && nv==1 && nw==1)
+        if !boundary
+            for i in 1:nu,j in 1:nv,k in 1:nw
+                pushpnt((i,j,k))
+            end
+        else
+            for i in 1:nu,j in 1:nv
+                pushpnt((i,j,1));pushpnt((i,j,nw))
+            end
+            for i in 1:nu,j in 1:nw
+                pushpnt((i,1,j));pushpnt((i,nv,j))
+            end
+            for i in 1:nv,j in 1:nw
+                pushpnt((1,i,j));pushpnt((nu,i,j))
+            end
+        end
+        return acc
+    end
+    if nu==1 && nv==1
+        if !boundary
+            for k in 1:nw-1;pushln((1,1,k),(1,1,k+1));end
+        else
+            pushpnt((1,1,1));pushpnt((1,1,nw))
+        end
+    elseif nu==1 && nw==1
+        if !boundary
+            for j in 1:nv-1;pushln((1,j,1),(1,j+1,1));end
+        else
+            pushpnt((1,1,1));pushpnt((1,nv,1))
+        end
+    elseif nv==1 && nw==1
+        if !boundary
+            for i in 1:nu-1;pushln((i,1,1),(i+1,1,1));end
+        else
+            pushpnt((1,1,1));pushpnt((nu,1,1))
+        end
+    elseif nu==1
+        if !boundary
+            for j in 1:nv-1,k in 1:nw-1
+                pushqd((1,j,k),(1,j+1,k),(1,j+1,k+1),(1,j,k+1))
+            end
+        else
+            for j in 1:nv-1
+                pushln((1,j,1),(1,j+1,1));pushln((1,j,nw),(1,j+1,nw))
+            end
+            for k in 1:nw-1
+                pushln((1,1,k),(1,1,k+1));pushln((1,nv,k),(1,nv,k+1))
+            end
+        end
+    elseif nv==1
+        if !boundary
+            for i in 1:nu-1,k in 1:nw-1
+                pushqd((i,1,k),(i+1,1,k),(i+1,1,k+1),(i,1,k+1))
+            end
+        else
+            for i in 1:nu-1
+                pushln((i,1,1),(i+1,1,1));pushln((i,1,nw),(i+1,1,nw))
+            end
+            for k in 1:nw-1
+                pushln((1,1,k),(1,1,k+1));pushln((nu,1,k),(nu,1,k+1))
+            end
+        end
+    elseif nw==1
+        if !boundary
+            for i in 1:nu-1,j in 1:nv-1
+                pushqd((i,j,1),(i+1,j,1),(i+1,j+1,1),(i,j+1,1))
+            end
+        else
+            for i in 1:nu-1
+                pushln((i,1,1),(i+1,1,1));pushln((i,nv,1),(i+1,nv,1))
+            end
+            for j in 1:nv-1
+                pushln((1,j,1),(1,j+1,1));pushln((nu,j,1),(nu,j+1,1))
+            end
+        end
+    else
+        if !boundary
+            for i in 1:nu-1,j in 1:nv-1,k in 1:nw-1
+                pushhex((i,j,k),(i+1,j,k),(i+1,j+1,k),(i,j+1,k),
+                        (i,j,k+1),(i+1,j,k+1),(i+1,j+1,k+1),(i,j+1,k+1))
+            end
+        else
+            # Six faces with forced exterior normals, UV then UW then VW.
+            for i in 1:nu-1,j in 1:nv-1
+                pushqd((i,j,1),(i,j+1,1),(i+1,j+1,1),(i+1,j,1))
+                pushqd((i,j,nw),(i+1,j,nw),(i+1,j+1,nw),(i,j+1,nw))
+            end
+            for i in 1:nu-1,k in 1:nw-1
+                pushqd((i,1,k),(i+1,1,k),(i+1,1,k+1),(i,1,k+1))
+                pushqd((i,nv,k),(i,nv,k+1),(i+1,nv,k+1),(i+1,nv,k))
+            end
+            for j in 1:nv-1,k in 1:nw-1
+                pushqd((1,j,k),(1,j,k+1),(1,j+1,k+1),(1,j+1,k))
+                pushqd((nu,j,k),(nu,j+1,k),(nu,j+1,k+1),(nu,j,k+1))
+            end
+        end
+    end
+    return acc
+end
+
+function _plugin_exec_cutbox(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    nu=_mesh_query_integer(Int(numbers["NumPointsU"]),caller,"NumPointsU")
+    nv=_mesh_query_integer(Int(numbers["NumPointsV"]),caller,"NumPointsV")
+    nw=_mesh_query_integer(Int(numbers["NumPointsW"]),caller,"NumPointsW")
+    (nu<=0 || nv<=0 || nw<=0) && return nothing
+    connect=!iszero(numbers["ConnectPoints"])
+    boundary=!iszero(numbers["Boundary"])
+    p0=(numbers["X0"],numbers["Y0"],numbers["Z0"])
+    p1=(numbers["X1"],numbers["Y1"],numbers["Z1"])
+    p2=(numbers["X2"],numbers["Y2"],numbers["Z2"])
+    p3=(numbers["X3"],numbers["Y3"],numbers["Z3"])
+    pnts=Array{NTuple{3,Float64}}(undef,nu,nv,nw)
+    for i in 1:nu,j in 1:nv,k in 1:nw
+        u=nu>1 ? (i-1)/(nu-1) : 0.0
+        v=nv>1 ? (j-1)/(nv-1) : 0.0
+        w=nw>1 ? (k-1)/(nw-1) : 0.0
+        pnts[i,j,k]=ntuple(a->p0[a]+u*(p1[a]-p0[a])+v*(p2[a]-p0[a])+
+                               w*(p3[a]-p0[a]),3)
+    end
+    elements,nsteps,times=_plugin_elements_all_steps(view,caller)
+    sorted=_plugin_sorted_elements(elements)
+    acc=_plugin_grid_blocks()
+    for ncomp in _plugin_view_classes(elements)
+        vals=Array{Vector{Float64}}(undef,nu,nv,nw)
+        for idx in eachindex(vals)
+            vals[idx]=_plugin_class_sample(view,sorted,ncomp,pnts[idx],
+                                           nsteps,caller)
+        end
+        _plugin_cutbox_addinview!(acc,connect,boundary,nu,nv,nw,
+                                  pnts,vals,ncomp,nsteps)
+    end
+    _plugin_publish_list_view!(view.name*"_CutBox",acc.order,acc.counts,
+                               acc.blocks,times;caller)
+    return nothing
+end
+
+# ---- CutGrid ---------------------------------------------------------------------
+#
+# Upstream `Plugin(CutGrid)` samples `View` on the Nu×Nv grid of the
+# parametric quad through P0,P1,P2. `ConnectPoints` emits U-lines when Nv==1,
+# V-lines when Nu==1, quadrangles for a full grid, and plain points otherwise.
+
+function _plugin_exec_cutgrid(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    nu=_mesh_query_integer(Int(numbers["NumPointsU"]),caller,"NumPointsU")
+    nv=_mesh_query_integer(Int(numbers["NumPointsV"]),caller,"NumPointsV")
+    (nu<=0 || nv<=0) && return nothing
+    connect=!iszero(numbers["ConnectPoints"])
+    p0=(numbers["X0"],numbers["Y0"],numbers["Z0"])
+    p1=(numbers["X1"],numbers["Y1"],numbers["Z1"])
+    p2=(numbers["X2"],numbers["Y2"],numbers["Z2"])
+    pnts=Matrix{NTuple{3,Float64}}(undef,nu,nv)
+    for i in 1:nu,j in 1:nv
+        u=nu>1 ? (i-1)/(nu-1) : 0.0
+        v=nv>1 ? (j-1)/(nv-1) : 0.0
+        pnts[i,j]=ntuple(a->p0[a]+u*(p1[a]-p0[a])+v*(p2[a]-p0[a]),3)
+    end
+    elements,nsteps,times=_plugin_elements_all_steps(view,caller)
+    sorted=_plugin_sorted_elements(elements)
+    acc=_plugin_grid_blocks()
+    for ncomp in _plugin_view_classes(elements)
+        vals=Matrix{Vector{Float64}}(undef,nu,nv)
+        for idx in eachindex(vals)
+            vals[idx]=_plugin_class_sample(view,sorted,ncomp,pnts[idx],
+                                           nsteps,caller)
+        end
+        if !connect || (nu==1 && nv==1)
+            for i in 1:nu,j in 1:nv
+                _plugin_grid_push!(acc,:point,ncomp,pnts,((i,j),),vals,nsteps)
+            end
+        elseif nu==1
+            for j in 1:nv-1
+                _plugin_grid_push!(acc,:line,ncomp,pnts,((1,j),(1,j+1)),
+                                   vals,nsteps)
+            end
+        elseif nv==1
+            for i in 1:nu-1
+                _plugin_grid_push!(acc,:line,ncomp,pnts,((i,1),(i+1,1)),
+                                   vals,nsteps)
+            end
+        else
+            for i in 1:nu-1,j in 1:nv-1
+                _plugin_grid_push!(acc,:quadrangle,ncomp,pnts,
+                                   ((i,j),(i+1,j),(i+1,j+1),(i,j+1)),
+                                   vals,nsteps)
+            end
+        end
+    end
+    _plugin_publish_list_view!(view.name*"_CutGrid",acc.order,acc.counts,
+                               acc.blocks,times;caller)
+    return nothing
+end
+
+# ---- CutParametric ------------------------------------------------------------------
+#
+# Upstream `Plugin(CutParametric)` evaluates the X/Y/Z expressions over the
+# MinU..MaxU × MinV..MaxV grid (i*NbV+j row-major flattening), probes `View`
+# at each point and emits per-class points, consecutive lines when
+# `ConnectPoints` on a degenerate grid, or quadrangles on a full grid.
+# The Tessella evaluator binds `x`,`y`,`z`, so `u`,`v` rewrite to `x`,`y`.
+
+function _plugin_uv_rewrite(expr::AbstractString)
+    out=IOBuffer();i=firstindex(expr);n=lastindex(expr)
+    while i<=n
+        c=expr[i]
+        if _plugin_ident_char(c) && !(c in ('+','-'))
+            j=i
+            while j<=n && _plugin_ident_char(expr[j]);j=nextind(expr,j);end
+            ident=expr[i:prevind(expr,j)]
+            write(out,ident=="u" ? "x" : ident=="v" ? "y" : ident)
+            i=j;continue
+        end
+        write(out,c);i=nextind(expr,i)
+    end
+    return String(take!(out))
+end
+
+function _plugin_uv_eval(prog,u,v)
+    return try
+        SizeField._eval_matheval_entity(prog,u,v,0.0,(),nothing)
+    catch err
+        err isa InterruptException && rethrow()
+        return nothing
+    end
+end
+
+function _plugin_exec_cutparametric(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers;strings=spec.strings
+    tag,view=_plugin_view(numbers,caller)
+    nu=_mesh_query_integer(Int(numbers["NumPointsU"]),caller,"NumPointsU")
+    nv=_mesh_query_integer(Int(numbers["NumPointsV"]),caller,"NumPointsV")
+    connect=!iszero(numbers["ConnectPoints"])
+    (nu<2 && nv<2) && (connect=false)
+    progs=[try
+        SizeField.parse_matheval(_plugin_uv_rewrite(strings[name]))
+    catch err
+        err isa InterruptException && rethrow()
+        nothing
+    end for name in ("X","Y","Z")]
+    nu>=0 && nv>=0 || return nothing
+    minu=numbers["MinU"];maxu=numbers["MaxU"]
+    minv=numbers["MinV"];maxv=numbers["MaxV"]
+    pnts=Matrix{NTuple{3,Float64}}(undef,nu,nv)
+    # Upstream `mathEvaluator::eval` is all-or-nothing per grid point and keeps
+    # the previous `res` on failure (zero-initialized on first run).
+    res=(0.0,0.0,0.0)
+    for i in 1:nu
+        u=nu>1 ? minu+(maxu-minu)*(i-1)/(nu-1) : minu
+        for j in 1:nv
+            v=nv>1 ? minv+(maxv-minv)*(j-1)/(nv-1) : minv
+            x=progs[1]===nothing ? nothing : _plugin_uv_eval(progs[1],u,v)
+            y=progs[2]===nothing ? nothing : _plugin_uv_eval(progs[2],u,v)
+            z=progs[3]===nothing ? nothing : _plugin_uv_eval(progs[3],u,v)
+            if x!==nothing && y!==nothing && z!==nothing
+                res=(x,y,z)
+            end
+            pnts[i,j]=res
+        end
+    end
+    elements,nsteps,times=_plugin_elements_all_steps(view,caller)
+    sorted=_plugin_sorted_elements(elements)
+    acc=_plugin_grid_blocks()
+    for ncomp in _plugin_view_classes(elements)
+        vals=Matrix{Vector{Float64}}(undef,nu,nv)
+        for idx in eachindex(vals)
+            vals[idx]=_plugin_class_sample(view,sorted,ncomp,pnts[idx],
+                                           nsteps,caller)
+        end
+        if nu==1 || nv==1 || !connect
+            for i in 1:nu,j in 1:nv
+                idx=(i-1)*nv+j
+                if connect
+                    # Upstream emits no record for i==0; it only seeds res0.
+                    idx>1 || continue
+                    _plugin_grid_push!(acc,:line,ncomp,pnts,
+                                       (CartesianIndices(pnts)[idx-1],
+                                        CartesianIndices(pnts)[idx]),
+                                       vals,nsteps)
+                else
+                    _plugin_grid_push!(acc,:point,ncomp,pnts,
+                                       (CartesianIndices(pnts)[idx],),
+                                       vals,nsteps)
+                end
+            end
+        else
+            for i in 1:nu-1,j in 1:nv-1
+                _plugin_grid_push!(acc,:quadrangle,ncomp,pnts,
+                                   ((i,j),(i,j+1),(i+1,j+1),(i+1,j)),
+                                   vals,nsteps)
+            end
+        end
+    end
+    _plugin_publish_list_view!(view.name*"_CutParametric",acc.order,
+                               acc.counts,acc.blocks,times;caller)
+    return nothing
+end
+
+# ---- StreamLines / Particles ------------------------------------------------------
+#
+# Upstream `Plugin(StreamLines)` seeds `Nu×Nv` particles on the P0,P1,P2 grid
+# and integrates `dX/dt = V` with the 4-stage scheme
+#   X1 = X + a1·DT·V(X)    X2 = X + a2·DT·V(X1)    X3 = X + a3·DT·V(X2)
+#   X4 = X + a4·DT·V(X3)
+#   X += b1(X1-X) + b2(X2-X) + b3(X3-X) + b4(X4-X)
+# with a1=a2=0.5, a3=a4=1, b1=1/3, b2=2/3, b3=1/3, b4=1/6. Without `OtherView`
+# each seed emits one VP record whose `MaxIter` vector slots hold the running
+# displacement; with a scalar `OtherView` each step emits an SL segment valued
+# by the other view. `TimeStep < 0` tracks the current physical time through
+# the view's step table.
+#
+# `Plugin(Particles)` solves `A2 X'' + A1 X' + A0 X = V` with the constant-
+# acceleration Newmark scheme and emits the same displacement VP records.
+
+function _plugin_seed_point(numbers,i,j,nu,nv)
+    u=nu>1 ? (i-1)/(nu-1) : 0.0
+    v=nv>1 ? (j-1)/(nv-1) : 0.0
+    p0=(numbers["X0"],numbers["Y0"],numbers["Z0"])
+    p1=(numbers["X1"],numbers["Y1"],numbers["Z1"])
+    p2=(numbers["X2"],numbers["Y2"],numbers["Z2"])
+    return ntuple(a->p0[a]+u*(p1[a]-p0[a])+v*(p2[a]-p0[a]),3)
+end
+
+# Vector-field sample of `view` at `p` restricted to 3-component elements at
+# 0-based step index `stepnum` (the upstream `searchVector(..., step)` scan).
+function _plugin_vector_sample(view,elements,p,stepnum,caller)
+    if view.model_kind===nothing
+        for element in elements
+            element.ncomp==3 || continue
+            N=_plugin_local_weights(element.geo,element.kind,p)
+            N===nothing && continue
+            va=size(element.vcoords,2)
+            acc=(0.0,0.0,0.0)
+            for node in 1:min(va,length(N)),comp in 1:3
+                acc=Base.setindex(acc,
+                    muladd(N[node],
+                        element.vals[stepnum*va*3+(node-1)*3+comp],
+                        acc[comp]),comp)
+            end
+            return acc
+        end
+        return (0.0,0.0,0.0)
+    end
+    isempty(elements) && return (0.0,0.0,0.0)
+    first(elements).ncomp==3 || return (0.0,0.0,0.0)
+    accs,step_nums=_plugin_probe_model(view,p,caller)
+    i=findfirst(==(stepnum),step_nums)
+    i===nothing && return (0.0,0.0,0.0)
+    acc=accs[i]
+    return (acc[1],acc[2],acc[3])
+end
+
+function _plugin_exec_streamlines(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    nu=_mesh_query_integer(Int(numbers["NumPointsU"]),caller,"NumPointsU")
+    nv=_mesh_query_integer(Int(numbers["NumPointsV"]),caller,"NumPointsV")
+    (nu<=0 || nv<=0) && return nothing
+    dt=numbers["DT"]
+    maxiter=_mesh_query_integer(Int(numbers["MaxIter"]),caller,"MaxIter")
+    maxiter>=0 || throw(ArgumentError("$caller: MaxIter must be non-negative"))
+    timestep=_mesh_query_integer(Int(numbers["TimeStep"]),caller,"TimeStep")
+    elements,nsteps,times=_plugin_elements_all_steps(view,caller)
+    if timestep>=nsteps
+        throw(ArgumentError(
+            "$caller: Invalid time step ($timestep) in view $tag"))
+    end
+    sorted=_plugin_sorted_elements(elements)
+    # Optional scalar `OtherView` probes its own per-step time table.
+    oview=nothing;osteps=0
+    if numbers["OtherView"]>=0
+        _,oview=_plugin_view_tag(numbers,"OtherView",caller)
+        _,osteps,_=_plugin_elements_all_steps(oview,caller)
+    end
+    b1,b2,b3,b4=1/3,2/3,1/3,1/6
+    a1,a2,a3,a4=0.5,0.5,1.0,1.0
+    flat=Float64[]
+    if oview===nothing
+        records=Vector{NTuple{3,Float64}}(undef,0)
+        payload=Float64[]
+        for i in 1:nu,j in 1:nv
+            x=collect(_plugin_seed_point(numbers,i,j,nu,nv))
+            xinit=copy(x)
+            push!(records,Tuple(xinit))
+            for iter in 1:maxiter
+                cur=timestep<0 ? let
+                    t0=isempty(times) ? 0.0 : first(times)
+                    current=t0+dt*(iter-1)
+                    s=0
+                    while s<nsteps-1 && current>
+                        0.5*(_plugin_step_time(view,s)+
+                             _plugin_step_time(view,s+1))
+                        s+=1
+                    end
+                    s
+                end : timestep
+                v=_plugin_vector_sample(view,sorted,(x[1],x[2],x[3]),cur,caller)
+                x1=x.+dt.*a1.*collect(v)
+                v=_plugin_vector_sample(view,sorted,(x1[1],x1[2],x1[3]),cur,caller)
+                x2=x.+dt.*a2.*collect(v)
+                v=_plugin_vector_sample(view,sorted,(x2[1],x2[2],x2[3]),cur,caller)
+                x3=x.+dt.*a3.*collect(v)
+                v=_plugin_vector_sample(view,sorted,(x3[1],x3[2],x3[3]),cur,caller)
+                x4=x.+dt.*a4.*collect(v)
+                x.+=b1.*(x1.-x).+b2.*(x2.-x).+b3.*(x3.-x).+b4.*(x4.-x)
+                append!(payload,x.-xinit)
+            end
+        end
+        for (k,p) in enumerate(records)
+            push!(flat,p[1],p[2],p[3])
+            base=(k-1)*3*maxiter
+            append!(flat,@view(payload[base+1:base+3*maxiter]))
+        end
+        # Upstream pushes `currentT = T0 + DT*iter` into the view's Time table
+        # once per iteration per seed only when `TimeStep < 0`.
+        t0=isempty(times) ? 0.0 : _plugin_step_time(view,0)
+        outtimes=timestep<0 ?
+            Float64[t0+dt*(iter-1) for _ in 1:nu*nv for iter in 1:maxiter] :
+            Float64[]
+        _plugin_publish_list_view!(view.name*"_StreamLines",["VP"],
+            Dict("VP"=>length(records)),Dict("VP"=>flat),outtimes;caller)
+        return nothing
+    end
+    oelements=_plugin_sorted_elements(
+        _plugin_elements_all_steps(oview,caller)[1])
+    for i in 1:nu,j in 1:nv
+        x=collect(_plugin_seed_point(numbers,i,j,nu,nv))
+        val2=_plugin_class_sample(oview,oelements,1,
+                                  (x[1],x[2],x[3]),osteps,caller)
+        for iter in 1:maxiter
+            xprev=copy(x)
+            cur=timestep<0 ? let
+                t0=isempty(times) ? 0.0 : first(times)
+                current=t0+dt*(iter-1)
+                s=0
+                while s<nsteps-1 && current>
+                    0.5*(_plugin_step_time(view,s)+_plugin_step_time(view,s+1))
+                    s+=1
+                end
+                s
+            end : timestep
+            v=_plugin_vector_sample(view,sorted,(x[1],x[2],x[3]),cur,caller)
+            x1=x.+dt.*a1.*collect(v)
+            v=_plugin_vector_sample(view,sorted,(x1[1],x1[2],x1[3]),cur,caller)
+            x2=x.+dt.*a2.*collect(v)
+            v=_plugin_vector_sample(view,sorted,(x2[1],x2[2],x2[3]),cur,caller)
+            x3=x.+dt.*a3.*collect(v)
+            v=_plugin_vector_sample(view,sorted,(x3[1],x3[2],x3[3]),cur,caller)
+            x4=x.+dt.*a4.*collect(v)
+            x.+=b1.*(x1.-x).+b2.*(x2.-x).+b3.*(x3.-x).+b4.*(x4.-x)
+            # SL record: x-block y-block z-block, then ALL steps of the
+            # scalar at the previous point followed by ALL steps at the new
+            # point (the upstream `for k` / `for k` push order).
+            append!(flat,(xprev[1],x[1],xprev[2],x[2],xprev[3],x[3]))
+            valnew=_plugin_class_sample(oview,oelements,1,
+                                        (x[1],x[2],x[3]),osteps,caller)
+            append!(flat,val2)
+            append!(flat,valnew)
+            val2=valnew
+        end
+    end
+    nseg=nu*nv*maxiter
+    t0=isempty(times) ? 0.0 : _plugin_step_time(view,0)
+    outtimes=timestep<0 ?
+        Float64[t0+dt*(iter-1) for _ in 1:nu*nv for iter in 1:maxiter] :
+        Float64[]
+    _plugin_publish_list_view!(view.name*"_StreamLines",["SL"],
+        Dict("SL"=>nseg),Dict("SL"=>flat),outtimes;caller)
+    return nothing
+end
+
+function _plugin_exec_particles(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    nu=_mesh_query_integer(Int(numbers["NumPointsU"]),caller,"NumPointsU")
+    nv=_mesh_query_integer(Int(numbers["NumPointsV"]),caller,"NumPointsV")
+    (nu<=0 || nv<=0) && return nothing
+    a2=numbers["A2"];a1=numbers["A1"];a0=numbers["A0"]
+    dt=numbers["DT"]
+    maxiter=_mesh_query_integer(Int(numbers["MaxIter"]),caller,"MaxIter")
+    maxiter>=0 || throw(ArgumentError("$caller: MaxIter must be non-negative"))
+    timestep=_mesh_query_integer(Int(numbers["TimeStep"]),caller,"TimeStep")
+    elements,nsteps,times=_plugin_elements_all_steps(view,caller)
+    if timestep>=nsteps
+        _native_diagnostic_emit_locked(:error,
+            "Invalid time step ($timestep) in view[$tag]: using 0")
+        timestep=0
+    end
+    sorted=_plugin_sorted_elements(elements)
+    # Constant-acceleration Newmark coefficients (γ=1/2, β=1/4).
+    γ=0.5;β=0.25
+    c1=a2+γ*dt*a1+β*dt*dt*a0
+    c2=2a2-(1-2γ)*dt*a1-(0.5+γ-2β)*dt*dt*a0
+    c3=-a2-(γ-1)*dt*a1-(0.5-γ+β)*dt*dt*a0
+    c4=dt*dt*(β+(0.5+γ-2β)+(0.5-γ+β))
+    flat=Float64[]
+    nrec=0
+    for i in 1:nu,j in 1:nv
+        xinit=collect(_plugin_seed_point(numbers,i,j,nu,nv))
+        x0=copy(xinit)
+        x1=copy(xinit)
+        # Per-record layout like upstream `data2->VP`: the seed point then
+        # `MaxIter` displacement vectors (X - XINIT).
+        push!(flat,xinit[1],xinit[2],xinit[3]);nrec+=1
+        for iter in 1:maxiter
+            f=_plugin_vector_sample(view,sorted,(x1[1],x1[2],x1[3]),
+                                    timestep,caller)
+            x=(c2.*x1.+c3.*x0.+c4.*collect(f))./c1
+            append!(flat,(x[1]-xinit[1],x[2]-xinit[2],x[3]-xinit[3]))
+            x0,x1=x1,x
+        end
+    end
+    _plugin_publish_list_view!(view.name*"_Particles",["VP"],
+        Dict("VP"=>nrec),Dict("VP"=>flat),Float64[];caller)
+    return nothing
+end
+
+# ---- Triangulate / Tetrahedralize -------------------------------------------------
+#
+# Upstream `Plugin(Triangulate)` gathers the 1-node records, projects them on
+# the SVD mean plane (`computeMeanPlaneSimple`: the least-singular right
+# vector is the normal, the in-plane axes come from normal × e_i on the first
+# vanishing component), jitters by `1e-12*lc*rand()`, 2-D Delaunay, and emits
+# the triangles at the projected coordinates carrying all steps. Tessella
+# uses the deterministic `delaunay2d` kernel instead of `rand()`.
+#
+# `Plugin(Tetrahedralize)` gathers 1-node records (≥4), runs 3-D Delaunay and
+# emits real tets carrying all steps.
+
+function _plugin_point_records(view,caller)
+    elements,steps,_=_plugin_elements_all_steps(view,caller)
+    points=_PluginElement[]
+    for element in elements
+        element.kind===:point || continue
+        push!(points,element)
+    end
+    return points,steps
+end
+
+function _plugin_exec_triangulate(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    _plugin_check_single_mesh(view,"Triangulate") || return nothing
+    points,steps=_plugin_point_records(view,caller)
+    length(points)>=3 || throw(ArgumentError(
+        "$caller: Need at least 3 points to triangulate"))
+    n=length(points)
+    xm=ym=zm=0.0
+    for e in points
+        xm+=e.geo[1,1];ym+=e.geo[2,1];zm+=e.geo[3,1]
+    end
+    xm/=n;ym/=n;zm/=n
+    U=Matrix{Float64}(undef,n,3)
+    for (i,e) in enumerate(points)
+        U[i,1]=e.geo[1,1]-xm;U[i,2]=e.geo[2,1]-ym;U[i,3]=e.geo[3,1]-zm
+    end
+    svd=LinearAlgebra.svd(U)
+    Vt=svd.Vt
+    # Upstream `computeMeanPlaneSimple` takes `min = 0` iff σ0 is strictly
+    # smallest, `1` iff σ1 is strictly smallest, otherwise 2 — ties resolve to
+    # the last index.
+    s=svd.S
+    minidx=(abs(s[1])<abs(s[2]) && abs(s[1])<abs(s[3])) ? 1 :
+           (abs(s[2])<abs(s[1]) && abs(s[2])<abs(s[3])) ? 2 : 3
+    normal=collect(Vt[minidx,:])
+    nrm=_plugin_norm3(Tuple(normal))
+    nrm>0 && (normal./=nrm)
+    ex=normal[1]==0 ? (1.0,0.0,0.0) : normal[2]==0 ? (0.0,1.0,0.0) : (0.0,0.0,1.0)
+    t1=_plugin_cross3(Tuple(normal),ex)
+    t1n=_plugin_norm3(t1)
+    t1=t1n>0 ? t1./t1n : (1.0,0.0,0.0)
+    t2=_plugin_cross3(t1,Tuple(normal))
+    t2n=_plugin_norm3(t2)
+    t2=t2n>0 ? t2./t2n : (0.0,1.0,0.0)
+    # `fillMeanPlane` anchors the projected frame at the dominant-axis
+    # intercept of the plane `res·p = d` (d = res·centroid), not the centroid.
+    d=normal[1]*xm+normal[2]*ym+normal[3]*zm
+    anchor=if abs(normal[1])>=abs(normal[2]) && abs(normal[1])>=abs(normal[3])
+        (d/normal[1],0.0,0.0)
+    elseif abs(normal[2])>=abs(normal[3])
+        (0.0,d/normal[2],0.0)
+    else
+        (0.0,0.0,d/normal[3])
+    end
+    us=Float64[LinearAlgebra.dot(
+                   (e.geo[1,1]-anchor[1],e.geo[2,1]-anchor[2],
+                    e.geo[3,1]-anchor[3]),t1) for e in points]
+    vs=Float64[LinearAlgebra.dot(
+                   (e.geo[1,1]-anchor[1],e.geo[2,1]-anchor[2],
+                    e.geo[3,1]-anchor[3]),t2) for e in points]
+    # `delaunay2d` dedups vertices; keep the unique→first-original remap so the
+    # emitted triangles carry the original record payloads.
+    _,_,remap=Mesh2D.dedup_points(us,vs)
+    first_of=Dict{Int,Int}()
+    for i in 1:n
+        get!(first_of,Int(remap[i]),i)
+    end
+    T=Mesh2D.delaunay2d(us,vs)
+    tris=Tuple{Int,Int,Int}[]
+    for t in eachindex(T.alive)
+        T.alive[t] || continue
+        Mesh2D._is_ghost_tri(T,t) && continue
+        push!(tris,ntuple(k->first_of[Int(Mesh2D._vert(T,t,k))],3))
+    end
+    times=[_plugin_step_time(view,s) for s in 0:steps-1]
+    acc=_plugin_grid_blocks()
+    # Upstream picks the record class per triangle from the vertices' stored
+    # width (9→TT, 3→VT, else ST); mixed vertex widths fall back to scalar.
+    for (j,tri) in enumerate(tris)
+        widths=[points[tri[k]].ncomp for k in 1:3]
+        ncomp=allequal(widths) && widths[1] in (3,9) ? widths[1] : 1
+        pmat=Matrix{NTuple{3,Float64}}(undef,3,1)
+        vmat=Matrix{Vector{Float64}}(undef,3,1)
+        for k in 1:3
+            e=points[tri[k]]
+            # Upstream emits the original 3-D positions (the 2-D projection
+            # only drives the Delaunay connectivity).
+            pmat[k,1]=(e.geo[1,1],e.geo[2,1],e.geo[3,1])
+            if e.ncomp==ncomp
+                vmat[k,1]=e.vals
+            else
+                # Scalar fallback reads the flat `v[3 + step]` slots like
+                # upstream's `v[3 + numComp * step + comp]` (numComp=1).
+                vmat[k,1]=Float64[e.vals[min(s,length(e.vals))] for s in 1:steps]
+            end
+        end
+        _plugin_grid_push!(acc,:triangle,ncomp,pmat,
+                           ((1,1),(2,1),(3,1)),vmat,steps)
+    end
+    _plugin_publish_list_view!(view.name*"_Triangulate",acc.order,acc.counts,
+                               acc.blocks,times;caller)
+    return nothing
+end
+
+function _plugin_exec_tetrahedralize(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    _plugin_check_single_mesh(view,"Tetrahedralize") || return nothing
+    points,steps=_plugin_point_records(view,caller)
+    length(points)>=4 || throw(ArgumentError(
+        "$caller: Need at least 4 points to tetrahedralize"))
+    xs=Float64[e.geo[1,1] for e in points]
+    ys=Float64[e.geo[2,1] for e in points]
+    zs=Float64[e.geo[3,1] for e in points]
+    _,_,_,remap=Mesh3D._dedup3(xs,ys,zs)
+    first_of=Dict{Int,Int}()
+    for i in 1:length(points)
+        get!(first_of,Int(remap[i]),i)
+    end
+    T=Mesh3D.delaunay3d(xs,ys,zs)
+    tets=Tuple{Int,Int,Int,Int}[]
+    for t in eachindex(T.alive)
+        (T.alive[t] && !Mesh3D._is_ghost_tet(T,t)) || continue
+        # `to_mesh3` convention: swap v3,v4 so exported tets have positive
+        # signed volume.
+        push!(tets,(first_of[Int(Mesh3D._vert(T,t,1))],
+                    first_of[Int(Mesh3D._vert(T,t,2))],
+                    first_of[Int(Mesh3D._vert(T,t,4))],
+                    first_of[Int(Mesh3D._vert(T,t,3))]))
+    end
+    times=[_plugin_step_time(view,s) for s in 0:steps-1]
+    acc=_plugin_grid_blocks()
+    # Upstream decides the record class per tet: TS when all four vertices
+    # carry 9*steps values, VS for 3*steps, SS for steps — any other mix is
+    # skipped with `Msg::Warning("Skipping unknown type of data")`.
+    warned=false
+    for tet in tets
+        widths=[points[tet[k]].ncomp for k in 1:4]
+        ncomp=allequal(widths) && widths[1] in (1,3,9) ? widths[1] : 0
+        if ncomp==0
+            warned || (_native_diagnostic_emit_locked(:warning,
+                "Skipping unknown type of data");warned=true)
+            continue
+        end
+        pmat=Matrix{NTuple{3,Float64}}(undef,4,1)
+        vmat=Matrix{Vector{Float64}}(undef,4,1)
+        for k in 1:4
+            e=points[tet[k]]
+            pmat[k,1]=(e.geo[1,1],e.geo[2,1],e.geo[3,1])
+            vmat[k,1]=e.vals
+        end
+        _plugin_grid_push!(acc,:tetrahedron,ncomp,pmat,
+                           ((1,1),(2,1),(3,1),(4,1)),vmat,steps)
+    end
+    _plugin_publish_list_view!(view.name*"_Tetrahedralize",acc.order,
+                               acc.counts,acc.blocks,times;caller)
+    return nothing
+end
+
+# ---- NearestNeighbor ---------------------------------------------------------------
+#
+# Upstream `Plugin(NearestNeighbor)` rewrites each 1-node record's scalar
+# value in place with the distance to its nearest *other* point (ANN k=2
+# search, index 1). Tessella scans point records directly.
+
+function _plugin_exec_nearestneighbor(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    view.model_kind===nothing || throw(ArgumentError(
+        "$caller: NearestNeighbor requires a list-based view"))
+    steps=_plugin_list_steps(view,caller)
+    npts=0
+    for type in view.list_types
+        layout=get(Post._POS_RECORD_TYPES,type,nothing)
+        layout===nothing && continue
+        layout[2]==1 && (npts+=view.list_counts[type])
+    end
+    npts>0 || throw(ArgumentError(
+        "$caller: View[$tag] contains no points"))
+    for type in view.list_types
+        layout=get(Post._POS_RECORD_TYPES,type,nothing)
+        layout===nothing && continue
+        kind,arity,nc=layout
+        arity==1 || continue
+        data=view.list_data[type];count=view.list_counts[type]
+        width=3+nc*steps
+        for element in 0:count-1
+            base=element*width
+            x,y,z=data[base+1],data[base+2],data[base+3]
+            best=Inf
+            for type2 in view.list_types
+                layout2=get(Post._POS_RECORD_TYPES,type2,nothing)
+                layout2===nothing && continue
+                layout2[2]==1 || continue
+                data2=view.list_data[type2];count2=view.list_counts[type2]
+                width2=3+layout2[3]*steps
+                for element2 in 0:count2-1
+                    base2=element2*width2
+                    (type2==type && element2==element) && continue
+                    dx=data2[base2+1]-x;dy=data2[base2+2]-y
+                    dz=data2[base2+3]-z
+                    d=dx*dx+dy*dy+dz*dz
+                    d<best && (best=d)
+                end
+            end
+            # Upstream `setValue(step=0, nod=0, comp=0)`: only the first
+            # component of step 0 receives the distance.
+            data[base+3+1]=sqrt(best)
+        end
+    end
+    # Upstream renames the modified view in place.
+    view.name=view.name*"_NearestNeighbor"
+    return nothing
+end
+
+# ---- Scal2Tens ---------------------------------------------------------------------
+#
+# Upstream `Plugin(Scal2Tens)` packs component 0 of up to `NumberOfComponents`
+# scalar views into a `NameNewView` tensor list view at the first set view's
+# (element, node, step) slots — the `Scal2Vec` pattern with 9 slots.
+
+function _plugin_exec_scal2tens(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers;strings=spec.strings
+    name=strings["NameNewView"]
+    ncomp=_mesh_query_integer(Int(numbers["NumberOfComponents"]),
+                              caller,"NumberOfComponents")
+    1<=ncomp<=9 || throw(ArgumentError(
+        "$caller: NumberOfComponents must be in 1:9"))
+    cviews=Tuple{Int,Any}[]
+    ref=nothing
+    # Upstream reads `View comp` options only for comp < numComp.
+    for comp in 0:ncomp-1
+        raw=numbers["View$comp"]
+        if raw<0
+            push!(cviews,(0,nothing));continue
+        end
+        ctag,cview=_plugin_view_tag(numbers,"View$comp",caller)
+        push!(cviews,(ctag,cview))
+        ref===nothing && (ref=(ctag,cview))
+    end
+    ref===nothing && throw(ArgumentError(
+        "$caller: Scal2Tens plugin could not find any view."))
+    _,rview=ref
+    elements,steps,times=_plugin_elements_all_steps(rview,caller)
+    merged=Vector{Vector{_PluginElement}}(undef,ncomp)
+    for comp in 1:ncomp
+        merged[comp]=cviews[comp][2]===nothing ? _PluginElement[] :
+            _plugin_elements_all_steps(cviews[comp][2],caller)[1]
+    end
+    out=_PluginElement[]
+    for (i,element) in enumerate(elements)
+        va=size(element.vcoords,2);ga=size(element.geo,2)
+        va==ga || continue
+        _plugin_record_type(element.kind,ncomp)===nothing && continue
+        vals=zeros(va*ncomp*steps)
+        for comp in 1:ncomp
+            cviews[comp][2]===nothing && continue
+            oe=merged[comp]
+            i<=length(oe) || continue
+            oelement=oe[i];oa=size(oelement.vcoords,2);onc=oelement.ncomp
+            onc>=1 || continue
+            osteps=length(oelement.vals)÷(oa*onc)
+            # Upstream `getValue` failures contribute the zero-initialized
+            # `val` — out-of-range (step, node) reads stay zero.
+            for step in 1:min(steps,osteps),node in 1:min(va,oa)
+                vals[(step-1)*va*ncomp+(node-1)*ncomp+comp]=
+                    oelement.vals[(step-1)*oa*onc+(node-1)*onc+1]
+            end
+        end
+        push!(out,_PluginElement(element.kind,element.dim,element.vcoords,
+                                 element.vcoords,vals,ncomp,element.etag))
+    end
+    _plugin_extract_emit(name,out,-1,steps,times,caller)
+    return nothing
+end
+
+# ---- Eigenvectors --------------------------------------------------------------------
+#
+# Upstream `Plugin(Eigenvectors)` decomposes each 9-component record per node
+# (real `mat.eig`, ascending eigenvalue order) into the `*_MinEigenvectors`,
+# `*_MidEigenvectors` and `*_MaxEigenvectors` vector views, scaled by the
+# eigenvalue when `ScaleByEigenvalues` is set. Complex spectra are reported.
+
+function _plugin_exec_eigenvectors(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    _plugin_check_single_mesh(view,"Eigenvectors") || return nothing
+    scale=!iszero(numbers["ScaleByEigenvalues"])
+    elements,nsteps,times=_plugin_elements_all_steps(view,caller)
+    outmin=_PluginElement[];outmid=_PluginElement[];outmax=_PluginElement[]
+    nbcomplex=0
+    for element in elements
+        element.ncomp==9 || continue
+        va=size(element.vcoords,2);ga=size(element.geo,2)
+        va==ga || continue
+        _plugin_record_type(element.kind,3)===nothing && continue
+        vmin=Vector{Float64}(undef,va*3*nsteps)
+        vmid=Vector{Float64}(undef,va*3*nsteps)
+        vmax=Vector{Float64}(undef,va*3*nsteps)
+        ok=true
+        for s in 1:nsteps,node in 1:va
+            m=Matrix{Float64}(undef,3,3)
+            for i in 1:3,j in 1:3
+                m[i,j]=element.vals[(s-1)*va*9+(node-1)*9+3*(i-1)+j]
+            end
+            F=try
+                LinearAlgebra.eigen(m)
+            catch err
+                err isa InterruptException && rethrow()
+                ok=false;break
+            end
+            vals=F.values;vecs=F.vectors
+            if any(v->imag(v)!=0,vals)
+                nbcomplex+=1
+            end
+            order=sortperm(vals;by=real)
+            for (slot,pos) in enumerate(order)
+                ev=scale ? real(vals[pos]) : 1.0
+                vec=real.(vecs[:,pos])
+                n=_plugin_norm3(Tuple(vec))
+                # Upstream keeps the raw eigenvector; normalize for a stable
+                # direction like the upstream unit right-eigenvectors.
+                n>0 && (vec=vec./n)
+                target=slot==1 ? vmin : slot==2 ? vmid : vmax
+                for a in 1:3
+                    target[(s-1)*va*3+(node-1)*3+a]=ev*vec[a]
+                end
+            end
+        end
+        ok || continue
+        etag=element.etag
+        push!(outmin,_PluginElement(element.kind,element.dim,element.vcoords,
+                                    element.vcoords,vmin,3,etag))
+        push!(outmid,_PluginElement(element.kind,element.dim,element.vcoords,
+                                    element.vcoords,vmid,3,etag))
+        push!(outmax,_PluginElement(element.kind,element.dim,element.vcoords,
+                                    element.vcoords,vmax,3,etag))
+    end
+    nbcomplex>0 && _native_diagnostic_emit_locked(:error,
+        "$nbcomplex tensors have complex eigenvalues")
+    name=view.name
+    _plugin_extract_emit(name*"_MinEigenvectors",outmin,-1,nsteps,times,caller)
+    _plugin_extract_emit(name*"_MidEigenvectors",outmid,-1,nsteps,times,caller)
+    _plugin_extract_emit(name*"_MaxEigenvectors",outmax,-1,nsteps,times,caller)
+    return nothing
+end
+
+# ---- Summation ------------------------------------------------------------------------
+#
+# Upstream `Plugin(Summation)` sums component-wise values across up to 8 views
+# sharing the same grid (same entity/element structure); empty steps are
+# skipped and each populated step of the reference view sums all others at the
+# same step index.
+
+function _plugin_exec_summation(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers;strings=spec.strings
+    gathered=Tuple{Int,Any}[]
+    for i in 0:7
+        raw=numbers["View $i"]
+        if raw<0
+            i==0 && throw(ArgumentError(
+                "$caller: Summation plugin could not find view 0"))
+            continue
+        end
+        ctag,cview=_plugin_view_tag(numbers,"View $i",caller)
+        _plugin_check_single_mesh(cview,"Summation") || return nothing
+        push!(gathered,(ctag,cview))
+    end
+    _,rview=gathered[1]
+    elements,nsteps,times=_plugin_elements_all_steps(rview,caller)
+    others=[_plugin_elements_all_steps(v,caller)[1]
+            for (_,v) in gathered[2:end]]
+    # Upstream reports the grid mismatch once per offending view, then keeps
+    # summing whatever `getValue` can reach (failures leave zeros).
+    for oe in others
+        length(oe)==length(elements) || _native_diagnostic_emit_locked(:error,
+            "Summation plugin: views based on different grid.")
+    end
+    out=_PluginElement[]
+    for (i,element) in enumerate(elements)
+        va=size(element.vcoords,2);nc=element.ncomp
+        vals=copy(element.vals)
+        for oe in others
+            i<=length(oe) || continue
+            oelement=oe[i];oa=size(oelement.vcoords,2);onc=oelement.ncomp
+            osteps=length(oelement.vals)÷(oa*onc)
+            for s in 1:min(nsteps,osteps),node in 1:min(va,oa),
+                comp in 1:min(nc,onc)
+                vals[(s-1)*va*nc+(node-1)*nc+comp]+=
+                    oelement.vals[(s-1)*oa*onc+(node-1)*onc+comp]
+            end
+        end
+        push!(out,_PluginElement(element.kind,element.dim,element.geo,
+                                 element.vcoords,vals,nc,element.etag))
+    end
+    # The upstream default name is `<view0 name>_Summation`.
+    name=strings["Resuling View Name"]
+    name=="default" && (name=rview.name*"_Summation")
+    _plugin_extract_emit(name,out,-1,nsteps,times,caller)
+    return nothing
+end
+
+# ---- MeshVolume ----------------------------------------------------------------------
+#
+# Upstream `Plugin(MeshVolume)` prints the summed element measure over the
+# requested `Dimension`/`PhysicalGroup` and emits one `MeshVolume` SP view at
+# the model bounding-box centre carrying the volume.
+
+function _plugin_exec_meshvolume(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    dim=_mesh_query_integer(Int(numbers["Dimension"]),caller,"Dimension")
+    physical=_mesh_query_integer(Int(numbers["PhysicalGroup"]),
+                                 caller,"PhysicalGroup")
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    slot=MODEL_SLOTS[index]
+    mesh=slot.mesh
+    mesh===nothing && throw(ArgumentError(
+        "$caller: Plugin(MeshVolume) needs a mesh"))
+    class=slot.class===nothing ? _cached_classification_locked(mesh) :
+        slot.class
+    public=_mesh_public_tags(mesh)
+    _,_,total=_mesh_element_offsets(mesh)
+    total>0 || throw(ArgumentError("$caller: Plugin(MeshVolume) needs a mesh"))
+    vol=0.0;nelem=0
+    for index in 1:total
+        rec=mesh_element_record(mesh,index)
+        # Upstream `getEntities(entities, dim)` with dim=-1 returns entities
+        # of every dimension.
+        (dim<0 || rec.dimension==dim) || continue
+        # Upstream collects `groups[physical]` entities unless physical == -1.
+        if physical != -1
+            entity=_plugin_element_entity(mesh,class,index)
+            entity===nothing && continue
+            phys=get(class.physicals,entity,Int32[])
+            isempty(phys) && continue
+            Int32(physical) in phys || continue
+        end
+        spec_rec=msh_spec(Int(rec.element_type))
+        kind=get(_PLUGIN_FAMILY_KIND,spec_rec.family,nothing)
+        kind===nothing && continue
+        ga=length(rec.node_tags)
+        geo=Matrix{Float64}(undef,3,ga)
+        for axis in 1:3,node in 1:ga
+            geo[axis,node]=mesh.coords[axis,Int(rec.node_tags[node])]
+        end
+        vol+=_plugin_element_measure(geo,kind)
+        nelem+=1
+    end
+    # Upstream warns but still publishes the (zero-volume) view.
+    nelem==0 && _native_diagnostic_emit_locked(:warning,
+        "The specified domain is empty")
+    _native_diagnostic_emit_locked(:info,
+        "Mesh volume (physical $physical | dimension $dim): $vol")
+    # Upstream writes the point at `GModel::current()->bounds().center()`.
+    lo=fill(Inf,3);hi=fill(-Inf,3)
+    if slot.model!==nothing
+        try
+            bbox=model_bounding_box(slot.model,-1,-1)
+            for a in 1:3
+                lo[a]=bbox[a];hi[a]=bbox[3+a]
+            end
+        catch err
+            err isa InterruptException && rethrow()
+        end
+    end
+    if any(!isfinite,lo)
+        lo=fill(Inf,3);hi=fill(-Inf,3)
+        for i in axes(mesh.coords,2),a in 1:3
+            v=mesh.coords[a,i]
+            v<lo[a] && (lo[a]=v)
+            v>hi[a] && (hi[a]=v)
+        end
+    end
+    center=any(!isfinite,lo) ? (0.0,0.0,0.0) : Tuple((lo.+hi)./2)
+    _plugin_publish_list_view!("MeshVolume",["SP"],Dict("SP"=>1),
+        Dict("SP"=>[center...,vol]),Float64[];caller)
+    return nothing
+end
+
+# ---- LongitudeLatitude ---------------------------------------------------------------
+#
+# Upstream `Plugin(LongitudeLatitude)` rewrites node coordinates in place:
+# `x = atan2(y,x)`, `y = asin(z/r)`, `z = 0` in degrees — restricted to
+# list-based views like the other in-place writers.
+
+function _plugin_exec_longitude_latitude(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    view.model_kind===nothing || throw(ArgumentError(
+        "$caller: LongitudeLatitude requires a list-based view"))
+    steps=_plugin_list_steps(view,caller)
+    # Upstream iterates steps outermost and rewrites coordinates through the
+    # shared list slots once per step — for multi-step views the transform is
+    # applied repeatedly (upstream quirk preserved here).
+    for step in 1:steps
+        for type in view.list_types
+            layout=get(Post._POS_RECORD_TYPES,type,nothing)
+            layout===nothing && continue
+            kind,arity,nc=layout
+            data=view.list_data[type];count=view.list_counts[type]
+            width=3arity+arity*nc*steps
+            for element in 0:count-1
+                base=element*width
+                xmin=Inf;xmax=-Inf
+                for node in 1:arity
+                    x=data[base+node];y=data[base+arity+node]
+                    z=data[base+2arity+node]
+                    r=sqrt(x*x+y*y+z*z)
+                    x2=atan(y,x)
+                    y2=asin(z/r)
+                    xmin=min(xmin,x2);xmax=max(xmax,x2)
+                    if nc==3
+                        vbase=base+3arity+(step-1)*arity*nc+(node-1)*nc
+                        vin=(data[vbase+1],data[vbase+2],data[vbase+3])
+                        sxy,cxy=sin(x2),cos(x2)
+                        syy,cyy=sin(y2),cos(y2)
+                        vout=(-sxy*vin[1]+cxy*vin[2],
+                              -syy*(cxy*vin[1]+sxy*vin[2])+cyy*vin[3],
+                              cyy*(cxy*vin[1]+sxy*vin[2])+syy*vin[3])
+                        for a in 1:3
+                            data[vbase+a]=vout[a]
+                        end
+                    end
+                    data[base+node]=rad2deg(x2)
+                    data[base+arity+node]=rad2deg(y2)
+                    data[base+2arity+node]=0.0
+                end
+                # Antimeridian unwrap: when the element spans more than 180°
+                # push the wrapped nodes into [xmax-180°, xmax+180°).
+                if xmax-xmin>pi
+                    for node in 1:arity
+                        x=data[base+node]
+                        xmax*180/pi-x>180 && (data[base+node]=x+360)
+                    end
+                end
+            end
+        end
+    end
+    return nothing
+end
+
+# ---- ShowNeighborElements ---------------------------------------------------------------
+#
+# Upstream `Plugin(ShowNeighborElements)` keeps `Element1..5` (public element
+# tags) visible plus, for each dim-2/dim-3 entity, hidden elements sharing
+# more than `3 - NumLayers` vertices with the seed set. Everything else is
+# hidden. Tessella writes `ELEMENT_VISIBILITY` (public tag → flag) — the same
+# per-element visibility slot `API.mesh.set_visibility` manipulates.
+
+function _plugin_exec_showneighbor(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    nlayers=_mesh_query_integer(Int(numbers["NumLayers"]),caller,"NumLayers")
+    seeds=Set{UInt64}()
+    for i in 1:5
+        raw=numbers["Element$i"]
+        raw==0 && continue
+        isinteger(raw) || throw(ArgumentError(
+            "$caller: Element$i tag must be an integer"))
+        push!(seeds,UInt64(Int(raw)))
+    end
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    slot=MODEL_SLOTS[index]
+    mesh=slot.mesh
+    mesh===nothing && throw(ArgumentError("$caller: mesh is empty"))
+    class=slot.class===nothing ? _cached_classification_locked(mesh) :
+        slot.class
+    public=_mesh_public_tags(mesh)
+    _,_,total=_mesh_element_offsets(mesh)
+    # Per-entity vertex→element map for dim-2/3 elements plus the seed set,
+    # mirroring `_init`/`_showLayers`. `_vertices` is an upstream member: it
+    # accumulates seed vertices across every entity, so neighbor layers leak
+    # over entity boundaries exactly like upstream.
+    entitymap=Dict{Tuple{Int,Int},Vector{Int}}()
+    for index in 1:total
+        rec=mesh_element_record(mesh,index)
+        rec.dimension<2 && continue
+        entity=_plugin_element_entity(mesh,class,index)
+        entity===nothing && continue
+        push!(get!(entitymap,entity,Int[]),index)
+    end
+    entities=sort!(collect(keys(entitymap));by=ent->(ent[1],ent[2]))
+    vertices=Set{Int}()
+    for entity in entities
+        elements=entitymap[entity]
+        vert2elem=Dict{Int,Vector{Int}}()
+        for index in elements
+            rec=mesh_element_record(mesh,index)
+            etag=public===nothing ? UInt64(index) :
+                get(public.element_tags,index,UInt64(index))
+            if etag in seeds
+                ELEMENT_VISIBILITY[][etag]=Int32(1)
+                for t in rec.node_tags;push!(vertices,Int(t));end
+            else
+                ELEMENT_VISIBILITY[][etag]=Int32(0)
+                for t in rec.node_tags
+                    push!(get!(vert2elem,Int(t),Int[]),index)
+                end
+            end
+        end
+        (isempty(vertices) || nlayers<1) && continue
+        counts=Dict{Int,Int}()
+        for v in vertices
+            for index in get(vert2elem,v,Int[])
+                counts[index]=get(counts,index,0)+1
+            end
+        end
+        for (index,count) in counts
+            count>3-nlayers || continue
+            etag=public===nothing ? UInt64(index) :
+                get(public.element_tags,index,UInt64(index))
+            ELEMENT_VISIBILITY[][etag]=Int32(1)
+        end
+    end
+    return nothing
+end
+
+# ---- SimplePartition --------------------------------------------------------------------
+#
+# Upstream `Plugin(SimplePartition)` clears existing partitions, evaluates
+# `MappingX/Y/Z` (`t` over [0,1]) into per-axis slice abscissae over the model
+# bounding box and assigns each element — barycenter centre — partition
+# `kx*Ny*Nz + ky*Nz + kz + 1`. Slices are half-open `(pp[k], pp[k+1]]` except
+# the lowest slice which also takes exactly `pp[0]`; a degenerate axis
+# (`pp[0]==pp[N]`) accepts every coordinate. Tessella drives the same
+# assignment through the explicit `_partition` path so
+# `LAST_MESH_PARTITION`/ghost/topology state stays authoritative.
+
+function _plugin_simple_partition_exec(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers;strings=spec.strings
+    nsx=_mesh_query_integer(Int(numbers["NumSlicesX"]),caller,"NumSlicesX")
+    nsy=_mesh_query_integer(Int(numbers["NumSlicesY"]),caller,"NumSlicesY")
+    nsz=_mesh_query_integer(Int(numbers["NumSlicesZ"]),caller,"NumSlicesZ")
+    (nsx<1 || nsy<1 || nsz<1) && throw(ArgumentError(
+        "$caller: Number of slices should be strictly positive"))
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    slot=MODEL_SLOTS[index]
+    mesh=slot.mesh
+    mesh===nothing && throw(ArgumentError(
+        "$caller: Plugin(SimplePartition) requires a mesh"))
+    _,_,total=_mesh_element_offsets(mesh)
+    total>0 || throw(ArgumentError(
+        "$caller: Plugin(SimplePartition) requires a mesh"))
+    # Model bounds like upstream `m->bounds()`; pure meshes fall back to the
+    # mesh coordinate extents.
+    lo=fill(Inf,3);hi=fill(-Inf,3)
+    bounds=try
+        model_bounding_box(slot.model,-1,-1)
+    catch err
+        err isa InterruptException && rethrow()
+        nothing
+    end
+    if bounds!==nothing
+        # Flat (xmin,ymin,zmin,xmax,ymax,zmax) like upstream `m->bounds()`.
+        for a in 1:3
+            lo[a]=bounds[a];hi[a]=bounds[3+a]
+        end
+    else
+        for i in axes(mesh.coords,2),a in 1:3
+            v=mesh.coords[a,i]
+            v<lo[a] && (lo[a]=v);v>hi[a] && (hi[a]=v)
+        end
+    end
+    # Upstream `mathEvaluator` binds variable `t`; the Tessella evaluator
+    # binds `x`, so `t` rewrites to `x` (`u`/`v` stay illegal like upstream).
+    progs=NTuple{3,Any}(SizeField.parse_matheval(
+        _plugin_tvar_rewrite(strings[("MappingX","MappingY","MappingZ")[i]]))
+        for i in 1:3)
+    cuts=(Vector{Float64}(undef,nsx+1),Vector{Float64}(undef,nsy+1),
+          Vector{Float64}(undef,nsz+1))
+    counts=(nsx,nsy,nsz)
+    for axis in 1:3
+        pp=cuts[axis];n=counts[axis]
+        for p in 0:n
+            t=p/n
+            r=_plugin_uv_eval(progs[axis],t,0.0)
+            r!==nothing && (t=r)
+            pp[p+1]=lo[axis]+t*(hi[axis]-lo[axis])
+        end
+    end
+    emptyaxes=ntuple(a->cuts[a][1]==cuts[a][end],3)
+    tags=Int64[];parts=Int64[]
+    public=_mesh_public_tags(mesh)
+    for index in 1:total
+        rec=mesh_element_record(mesh,index)
+        center=(sum(mesh.coords[1,rec.node_tags])/length(rec.node_tags),
+                sum(mesh.coords[2,rec.node_tags])/length(rec.node_tags),
+                sum(mesh.coords[3,rec.node_tags])/length(rec.node_tags))
+        part=0
+        for kx in 0:nsx-1
+            part!=0 && break
+            for ky in 0:nsy-1
+                part!=0 && break
+                for kz in 0:nsz-1
+                    part!=0 && break
+                    inx=emptyaxes[1] || (kx==0 && cuts[1][1]==center[1]) ||
+                        (cuts[1][kx+1]<center[1]<=cuts[1][kx+2])
+                    iny=emptyaxes[2] || (ky==0 && cuts[2][1]==center[2]) ||
+                        (cuts[2][ky+1]<center[2]<=cuts[2][ky+2])
+                    inz=emptyaxes[3] || (kz==0 && cuts[3][1]==center[3]) ||
+                        (cuts[3][kz+1]<center[3]<=cuts[3][kz+2])
+                    if inx && iny && inz
+                        part=kx*nsy*nsz+ky*nsz+kz+1
+                    end
+                end
+            end
+        end
+        # Elements whose barycenter lands outside every slice stay
+        # unpartitioned upstream — the explicit `_partition` path reproduces
+        # that as the "All elements are not partitioned" failure, impossible
+        # in practice for monotone mappings over the model bounds.
+        part==0 && continue
+        etag=public===nothing ? Int64(index) :
+            Int64(get(public.element_tags,index,index))
+        push!(tags,etag);push!(parts,part)
+    end
+    _partition(nsx*nsy*nsz,tags,parts)
+    return nothing
+end
+
+# `MappingX/Y/Z` use `t` — the evaluator binds x; rewrite `t`→`x` only
+# (u/v stay illegal as upstream).
+function _plugin_tvar_rewrite(expr::AbstractString)
+    out=IOBuffer();i=firstindex(expr);n=lastindex(expr)
+    while i<=n
+        c=expr[i]
+        if _plugin_ident_char(c)
+            j=i
+            while j<=n && _plugin_ident_char(expr[j]);j=nextind(expr,j);end
+            ident=expr[i:prevind(expr,j)]
+            write(out,ident=="t" ? "x" : ident)
+            i=j;continue
+        end
+        write(out,c);i=nextind(expr,i)
+    end
+    return String(take!(out))
+end
+
+# ---- GaussPoints ---------------------------------------------------------------------
+#
+# Upstream `Plugin(GaussPoints)` walks all `Dimension` entities (optionally
+# restricted to `PhysicalGroup`) and emits one SP record per Gauss point of
+# `getIntegrationPoints(Order)` — the element's real coordinates, value set
+# to the public element number. Tessella uses the same Gauss tables through
+# `mesh_integration_points(element_type, "GaussN")`.
+
+function _plugin_exec_gausspoints(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    order=_mesh_query_integer(Int(numbers["Order"]),caller,"Order")
+    dim=_mesh_query_integer(Int(numbers["Dimension"]),caller,"Dimension")
+    physical=_mesh_query_integer(Int(numbers["PhysicalGroup"]),
+                                 caller,"PhysicalGroup")
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    slot=MODEL_SLOTS[index]
+    mesh=slot.mesh
+    mesh===nothing && throw(ArgumentError("$caller: No entities"))
+    class=slot.class===nothing ? _cached_classification_locked(mesh) :
+        slot.class
+    public=_mesh_public_tags(mesh)
+    _,_,total=_mesh_element_offsets(mesh)
+    total>0 || throw(ArgumentError("$caller: No entities"))
+    flat=Float64[]
+    for index in 1:total
+        rec=mesh_element_record(mesh,index)
+        rec.dimension==dim || continue
+        # Upstream filters to `groups[physical]` whenever `physical` is set.
+        if physical!=0
+            entity=_plugin_element_entity(mesh,class,index)
+            entity===nothing && continue
+            phys=get(class.physicals,entity,Int32[])
+            isempty(phys) && continue
+            Int32(physical) in phys || continue
+        end
+        etag=public===nothing ? UInt64(index) :
+            get(public.element_tags,index,UInt64(index))
+        spec_rec=msh_spec(Int(rec.element_type))
+        spec_rec.family===:trih && continue
+        gauss=try
+            mesh_integration_points(Int(rec.element_type),"Gauss$order")
+        catch err
+            err isa InterruptException && rethrow()
+            continue
+        end
+        # `pnt` points arrive flattened `[u1 v1 w1 u2 ...]`; evaluate the
+        # element's own nodal basis there (upstream `e->pnt(u,v,w,p)`).
+        pnt=gauss[1]
+        npts=length(pnt)÷3
+        nn=length(rec.node_tags)
+        for p in 1:npts
+            u=pnt[3p-2];v=pnt[3p-1];w=pnt[3p]
+            _,N,_=mesh_basis_functions(Int(rec.element_type),[u,v,w],
+                                       "Lagrange")
+            x=y=z=0.0
+            for node in 1:min(nn,length(N))
+                x+=N[node]*mesh.coords[1,Int(rec.node_tags[node])]
+                y+=N[node]*mesh.coords[2,Int(rec.node_tags[node])]
+                z+=N[node]*mesh.coords[3,Int(rec.node_tags[node])]
+            end
+            push!(flat,x,y,z,Float64(etag))
+        end
+    end
+    if isempty(flat)
+        _native_diagnostic_emit_locked(:error,"No entities")
+        return nothing
+    end
+    _plugin_publish_list_view!("GaussPoints",["SP"],Dict("SP"=>length(flat)÷4),
+                               Dict("SP"=>flat),Float64[];caller)
+    return nothing
+end
+
+# ---- AnalyseMeshQuality -----------------------------------------------------------------
+#
+# Upstream `Plugin(AnalyseMeshQuality)` always computes per-element min/max
+# Jacobian determinants over `DimensionOfElements` (-1 → model dimension, 4 →
+# dims 2 and 3, else that dimension), plus minIGE/minICN when flagged; prints
+# the (min, avg, max) statistics, creates `ElementData` views per dimension
+# when `CreateView`, and hides elements whose measure crosses
+# `HidingThreshold` (ICN preferred over IGE over J). Tessella delegates the
+# measures to `mesh_element_qualities` (`minDetJac`/`maxDetJac`/`minSIGE`/
+# `minSICN`) and emits the same views as ElementData on the owning model.
+
+function _plugin_publish_element_view!(name,tags,values,slot,mesh;caller)
+    view=_SessionView(name)
+    view.model_kind="ElementData"
+    view.model_step_ranges=[_NativeViewStepRange(0,0,slot,1)]
+    counts=fill(Int32(1),length(tags))
+    flat=Float64.(values)
+    extent=_native_model_view_extent(tags,
+        _native_view_model_count(slot,"ElementData"))
+    view.model_data[(0,"ElementData")]=(UInt64.(tags),flat,1)
+    view.model_contexts[(0,"ElementData")]=(
+        model_slot=slot,time=0.0,counts=counts,extent=extent,
+        partitions=Set{Int}([0]),
+        interpolation_msh=_plugin_mesh_msh_types(mesh))
+    view.numbers["NbTimeStep"]=1.0
+    tag=_fresh_view_tag()
+    SESSION_VIEWS[tag]=view
+    VIEW_TAG_MAX[]=max(VIEW_TAG_MAX[],tag)
+    return tag
+end
+
+function _plugin_exec_analyzemeshquality(spec::_PluginSpec,
+                                         caller::AbstractString)
+    numbers=spec.numbers
+    compute_jac=!iszero(numbers["JacobianDeterminant"])
+    compute_ige=!iszero(numbers["IGEMeasure"])
+    compute_icn=!iszero(numbers["ICNMeasure"])
+    threshold=numbers["HidingThreshold"]
+    threshold_greater=!iszero(numbers["ThresholdGreater"])
+    create_view=!iszero(numbers["CreateView"])
+    asked=_mesh_query_integer(Int(numbers["DimensionOfElements"]),
+                              caller,"DimensionOfElements")
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    slot=MODEL_SLOTS[index]
+    mesh=slot.mesh
+    mesh===nothing && throw(ArgumentError(
+        "$caller: Plugin(AnalyseMeshQuality) needs a mesh"))
+    _,_,total=_mesh_element_offsets(mesh)
+    total>0 || throw(ArgumentError(
+        "$caller: Plugin(AnalyseMeshQuality) needs a mesh"))
+    model_dim=Int(rec_dimension_max(mesh))
+    (asked<0 || asked>4) && (asked=model_dim)
+    dims=asked==4 ? [2,3] : [asked]
+    filter!(d->d<=model_dim,dims)
+    public=_mesh_public_tags(mesh)
+    # Per-dim tag vectors preserving mesh order.
+    per_dim=Dict{Int,Vector{UInt64}}(d=>UInt64[] for d in dims)
+    for index in 1:total
+        rec=mesh_element_record(mesh,index)
+        rec.dimension in dims || continue
+        etag=public===nothing ? UInt64(index) :
+            get(public.element_tags,index,UInt64(index))
+        push!(per_dim[rec.dimension],etag)
+    end
+    allmin=Float64[];allmax=Float64[];allige=Float64[];allicn=Float64[]
+    allelem=UInt64[]
+    for d in dims
+        tags=per_dim[d]
+        isempty(tags) && continue
+        # Upstream `jacobianBasedQuality::minMaxJacobianDeterminant` on a
+        # straight segment gives the constant det J = length/2 (reference
+        # length 2); a zero-length segment collapses to 0.
+        if d==1
+            lens=mesh_element_qualities(mesh,tags,"minEdge")
+            minj=lens./2;maxj=copy(minj)
+            ige=compute_ige ?
+                mesh_element_qualities(mesh,tags,"minSIGE") : Float64[]
+            icn=compute_icn ?
+                mesh_element_qualities(mesh,tags,"minSICN") : Float64[]
+        else
+            minj=mesh_element_qualities(mesh,tags,"minDetJac")
+            maxj=mesh_element_qualities(mesh,tags,"maxDetJac")
+            ige=compute_ige ?
+                mesh_element_qualities(mesh,tags,"minSIGE") : Float64[]
+            icn=compute_icn ?
+                mesh_element_qualities(mesh,tags,"minSICN") : Float64[]
+        end
+        if create_view
+            # The minJ/maxJ view exists only when `JacobianDeterminant` set;
+            # the J measures themselves are always computed upstream.
+            if compute_jac
+                ratio=[maxj[i]>0 ? minj[i]/maxj[i] :
+                       maxj[i]<0 ? maxj[i]/minj[i] : 0.0
+                       for i in eachindex(tags)]
+                _plugin_publish_element_view!("minJ/maxJ $(d)D",tags,ratio,
+                                              slot,mesh;caller)
+            end
+            compute_ige && _plugin_publish_element_view!("IGE $(d)D",tags,
+                                                         ige,slot,mesh;caller)
+            compute_icn && _plugin_publish_element_view!("ICN $(d)D",tags,
+                                                         icn,slot,mesh;caller)
+        end
+        append!(allelem,tags);append!(allmin,minj);append!(allmax,maxj)
+        compute_ige && append!(allige,ige)
+        compute_icn && append!(allicn,icn)
+    end
+    # Upstream `_printStat*` formats: `%8.3g` triples.
+    _fmt(x)=string(round(x,sigdigits=4))
+    function _print3(name,vec,tail)
+        isempty(vec) && return
+        _native_diagnostic_emit_locked(:info,
+            "$name = $(_fmt(minimum(vec))), $(_fmt(sum(vec)/length(vec))), " *
+            "$(_fmt(maximum(vec))) $tail")
+    end
+    if !isempty(allelem)
+        _print3("minJ     ",allmin,"(min, avg, max)")
+        ratio=[allmax[i]>0 ? allmin[i]/allmax[i] :
+               allmax[i]<0 ? allmax[i]/allmin[i] : 0.0
+               for i in eachindex(allmin)]
+        nconst=count(<(1-1e-5),ratio)
+        if 0<nconst<length(ratio)
+            avg=sum(ratio[i] for i in eachindex(ratio) if ratio[i]<1-1e-5)/
+                nconst
+            _native_diagnostic_emit_locked(:info,
+                "minJ/maxJ =           $(_fmt(avg))           (avg on the " *
+                "$nconst non-constant elements)")
+        end
+        _print3("minJ/maxJ",ratio,"(worst, avg, best)")
+        compute_ige && _print3("IGE      ",allige,"(worst, avg, best)")
+        compute_icn && _print3("ICN      ",allicn,"(worst, avg, best)")
+    else
+        _native_diagnostic_emit_locked(:info,"No stat to print")
+    end
+    # `whichMeasure = ICN ? 2 : IGE ? 1 : Jac ? 0 : -1` — hide (and re-show
+    # passing) elements of the scanned dims.
+    which=compute_icn ? 2 : compute_ige ? 1 : compute_jac ? 0 : -1
+    if threshold<99 && which>=0
+        measure=which==2 ? allicn : which==1 ? allige :
+            Float64[allmax[i]>0 ? allmin[i]/allmax[i] :
+                    allmax[i]<0 ? allmax[i]/allmin[i] : 0.0
+                    for i in eachindex(allmin)]
+        for (i,etag) in enumerate(allelem)
+            i>length(measure) && break
+            hide=threshold_greater ? measure[i]>threshold :
+                measure[i]<threshold
+            ELEMENT_VISIBILITY[][etag]=Int32(hide ? 0 : 1)
+        end
+    end
+    return nothing
+end
+
+# `rec_dimension_max(mesh)` — the model's highest scanned dimension.
+function rec_dimension_max(mesh)
+    total=last(_mesh_element_offsets(mesh))
+    dmax=0
+    for index in 1:total
+        dmax=max(dmax,Int(mesh_element_record(mesh,index).dimension))
+    end
+    return dmax
+end
+
+# ---- MeshSizeFieldView --------------------------------------------------------------------
+#
+# Upstream `Plugin(MeshSizeFieldView)` evaluates mesh-size field
+# `MeshSizeField` at every node of `View` and rewrites every component in
+# place (`Field::putOnView`), or publishes a fresh list view when `View < 0`
+# and no model view exists. Tessella resolves the field through the session
+# size-field machinery, restricted to evaluable contexts.
+
+# Build a session field spec into an evaluable `AbstractField`, mirroring
+# `_session_size_field_locked` but rooted at an arbitrary tag. Only the
+# natively-built catalog kinds plus `PostView` resolve here; the remaining
+# context-backed kinds (`BoundaryLayer`, `Extend`, `AttractorAnisoCurve`,
+# `AutomaticMeshSizeField`) fail like an unavailable context.
+function _plugin_session_field_build(slot,fieldnum::Int,
+                                     caller::AbstractString)
+    spec0=get(FIELD_SPECS[],fieldnum,nothing)
+    spec0===nothing && throw(ArgumentError(
+        "$caller: unknown field tag $fieldnum"))
+    specs=Dict{Int,GeoFieldSpec}(
+        t=>GeoFieldSpec(t,f.kind,Dict(f.options),copy(f.order))
+        for (t,f) in FIELD_SPECS[])
+    params=GeoParams(OPTIONS["Mesh.MeshSizeMin"],OPTIONS["Mesh.MeshSizeMax"],
+        OPTIONS["Mesh.MeshSizeFactor"],0,Dict{Tuple{Int,Int},String}(),
+        specs,BACKGROUND_FIELD[],copy(BOUNDARY_LAYER_FIELDS[]))
+    bounds=try
+        model_bounding_box(slot.model,-1,-1)
+    catch err
+        err isa InterruptException && rethrow()
+        nothing
+    end
+    bbox=bounds===nothing ? nothing :
+        (bounds[1],bounds[4],bounds[2],bounds[5],bounds[3],bounds[6])
+    entities=(d,name)->_field_entity_mesh(slot.model,d,name)
+    function context_fields(spec,config,entities_,_params)
+        if lowercase(spec.kind)=="postview"
+            function selector(name,default)
+                haskey(spec.options,name) || return default
+                numeric=tryparse(Float64,strip(spec.options[name]))
+                numeric!==nothing && isfinite(numeric) && isinteger(numeric) ||
+                    throw(ArgumentError(
+                        "$caller: Field[$(spec.tag)].$name must be a " *
+                        "finite integer"))
+                return Int(numeric)
+            end
+            view_tag=selector("ViewTag",-1)
+            selector("ViewIndex",0);selector("IView",0)
+            if view_tag<0
+                tags=sort!(collect(keys(SESSION_VIEWS)))
+                0<=config.view_index<length(tags) || throw(ArgumentError(
+                    "$caller: Field[$(spec.tag)] references unknown view " *
+                    "index $(config.view_index)"))
+                view_tag=tags[config.view_index+1]
+            end
+            ref=get(SESSION_VIEWS,view_tag,nothing)
+            ref===nothing && throw(ArgumentError(
+                "$caller: Field[$(spec.tag)] references unknown view " *
+                "$view_tag"))
+            return _post_view_field(ref,spec.tag;
+                crop_negative=config.crop_negative_values,
+                use_closest=config.use_closest)
+        end
+        throw(ArgumentError(
+            "$caller: Field[$(spec.tag)] kind $(spec.kind) requires model " *
+            "context unavailable to plugin(MeshSizeFieldView)"))
+    end
+    return SizeField._build_geo_field(params,entities,fieldnum;
+        model_bbox=bbox,context_fields=context_fields)
+end
+
+function _plugin_exec_meshsizefieldview(spec::_PluginSpec,
+                                        caller::AbstractString)
+    numbers=spec.numbers
+    fieldnum=_mesh_query_integer(Int(numbers["MeshSizeField"]),
+                                 caller,"MeshSizeField")
+    _mesh_query_integer(Int(numbers["Component"]),caller,"Component")
+    tag,view=_plugin_view(numbers,caller)
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    field=_plugin_session_field_build(MODEL_SLOTS[index],fieldnum,caller)
+    # `Field::putOnView` iterates step-0 elements only and its inner
+    # `for(comp...)` shadows the `Component` argument: every component of
+    # step 0 is rewritten, and the view name becomes "Field <id>".
+    if view.model_kind===nothing
+        steps=_plugin_list_steps(view,caller)
+        for type in view.list_types
+            layout=get(Post._POS_RECORD_TYPES,type,nothing)
+            layout===nothing && continue
+            kind,arity,nc=layout
+            data=view.list_data[type];count=view.list_counts[type]
+            width=3arity+arity*nc*steps
+            for element in 0:count-1
+                base=element*width
+                for node in 1:arity
+                    x=data[base+node];y=data[base+arity+node]
+                    z=data[base+2arity+node]
+                    v=Float64(SizeField.field_value(field,x,y,z))
+                    for c in 1:nc
+                        data[base+3arity+(node-1)*nc+c]=v
+                    end
+                end
+            end
+        end
+    else
+        # `Field::putOnView` iterates the model's mesh elements and writes
+        # `getNumNodes()` (primary-count) slots: NodeData rows get the field
+        # at each primary node, ElementData rows the value at the last
+        # written primary node, ElementNodeData rows one value per primary
+        # node slot — all components rewritten.
+        for key in _plugin_model_keys(view)
+            step,kind=key
+            step==0 || continue
+            ctx=view.model_contexts[key]
+            mesh=_plugin_model_mesh(ctx.model_slot,caller)
+            public=_mesh_public_tags(mesh)
+            entity_tags,values,nc=view.model_data[key]
+            counts=get(ctx,:counts,Int32[])
+            offsets=Vector{Int}(undef,length(entity_tags)+1);offsets[1]=1
+            for row in eachindex(entity_tags)
+                width=row<=length(counts) ? Int(counts[row]) :
+                    length(values)÷length(entity_tags)
+                offsets[row+1]=offsets[row]+width
+            end
+            row_of=Dict{UInt64,Int}(t=>r for (r,t) in enumerate(entity_tags))
+            _,_,etotal=_mesh_element_offsets(mesh)
+            for index in 1:etotal
+                rec=mesh_element_record(mesh,index)
+                spec_rec=msh_spec(Int(rec.element_type))
+                np=min(length(rec.node_tags),
+                       Elements._msh_primary_nodes(spec_rec.family))
+                if kind=="NodeData"
+                    for nod in 1:np
+                        ntag=_cache_node_tag(mesh,Int(rec.node_tags[nod]))
+                        row=get(row_of,ntag,0)
+                        row==0 && continue
+                        p=Tuple(mesh.coords[:,Int(rec.node_tags[nod])])
+                        v=Float64(SizeField.field_value(field,p...))
+                        for c in 1:nc
+                            values[offsets[row]+c-1]=v
+                        end
+                    end
+                    continue
+                end
+                etag=public===nothing ? UInt64(index) :
+                    get(public.element_tags,index,UInt64(index))
+                row=get(row_of,etag,0)
+                row==0 && continue
+                if kind=="ElementData"
+                    # `for comp` writes `data[comp]` per primary node — the
+                    # last write wins: field at the last primary node.
+                    p=Tuple(mesh.coords[:,Int(rec.node_tags[np])])
+                    v=Float64(SizeField.field_value(field,p...))
+                    for c in 1:nc
+                        values[offsets[row]+c-1]=v
+                    end
+                else
+                    # ElementNodeData: `nc*nod+comp` per primary node.
+                    width=offsets[row+1]-offsets[row]
+                    for nod in 1:np
+                        (nod-1)*nc+nc<=width || break
+                        p=Tuple(mesh.coords[:,Int(rec.node_tags[nod])])
+                        v=Float64(SizeField.field_value(field,p...))
+                        for c in 1:nc
+                            values[offsets[row]+(nod-1)*nc+c-1]=v
+                        end
+                    end
+                end
+            end
+        end
+    end
+    view.name="Field $fieldnum"
+    return nothing
+end
+
 # ---- registry --------------------------------------------------------------------------------
 
 const _PLUGINS=Dict{String,NamedTuple}(
@@ -3861,4 +5724,97 @@ const _PLUGINS=Dict{String,NamedTuple}(
     "Vorticity"=>(number_options=Dict{String,Float64}(
         "Run"=>0.0,"View"=>-1.0),
         string_options=Dict{String,String}(),run_fn=_plugin_exec_vorticity),
+    "CutBox"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"X0"=>0.0,"Y0"=>0.0,"Z0"=>0.0,
+        "X1"=>1.0,"Y1"=>0.0,"Z1"=>0.0,
+        "X2"=>0.0,"Y2"=>1.0,"Z2"=>0.0,
+        "X3"=>0.0,"Y3"=>0.0,"Z3"=>1.0,
+        "NumPointsU"=>20.0,"NumPointsV"=>20.0,"NumPointsW"=>20.0,
+        "ConnectPoints"=>1.0,"Boundary"=>1.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_cutbox),
+    "CutGrid"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"X0"=>0.0,"Y0"=>0.0,"Z0"=>0.0,
+        "X1"=>1.0,"Y1"=>0.0,"Z1"=>0.0,
+        "X2"=>0.0,"Y2"=>1.0,"Z2"=>0.0,
+        "NumPointsU"=>20.0,"NumPointsV"=>20.0,"ConnectPoints"=>1.0,
+        "View"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_cutgrid),
+    "CutParametric"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"MinU"=>0.0,"MaxU"=>2*3.1416,"NumPointsU"=>180.0,
+        "MinV"=>0.0,"MaxV"=>2*3.1416,"NumPointsV"=>180.0,
+        "ConnectPoints"=>0.0,"View"=>-1.0),
+        string_options=Dict{String,String}(
+            "X"=>"2 * Cos(u) * Sin(v)","Y"=>"4 * Sin(u) * Sin(v)",
+            "Z"=>"0.1 + 0.5 * Cos(v)"),
+        run_fn=_plugin_exec_cutparametric),
+    "StreamLines"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"X0"=>0.0,"Y0"=>0.0,"Z0"=>0.0,
+        "X1"=>1.0,"Y1"=>0.0,"Z1"=>0.0,
+        "X2"=>0.0,"Y2"=>1.0,"Z2"=>0.0,
+        "NumPointsU"=>10.0,"NumPointsV"=>1.0,"DT"=>0.1,"MaxIter"=>100.0,
+        "TimeStep"=>0.0,"View"=>-1.0,"OtherView"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_streamlines),
+    "Particles"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"X0"=>0.0,"Y0"=>0.0,"Z0"=>0.0,
+        "X1"=>1.0,"Y1"=>0.0,"Z1"=>0.0,
+        "X2"=>0.0,"Y2"=>1.0,"Z2"=>0.0,
+        "NumPointsU"=>10.0,"NumPointsV"=>1.0,"A2"=>1.0,"A1"=>0.0,"A0"=>0.0,
+        "DT"=>0.1,"MaxIter"=>100.0,"TimeStep"=>0.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_particles),
+    "Triangulate"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_triangulate),
+    "Tetrahedralize"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),
+        run_fn=_plugin_exec_tetrahedralize),
+    "NearestNeighbor"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),
+        run_fn=_plugin_exec_nearestneighbor),
+    "Scal2Tens"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"NumberOfComponents"=>9.0,
+        "View0"=>-1.0,"View1"=>-1.0,"View2"=>-1.0,"View3"=>-1.0,
+        "View4"=>-1.0,"View5"=>-1.0,"View6"=>-1.0,"View7"=>-1.0,
+        "View8"=>-1.0),
+        string_options=Dict{String,String}("NameNewView"=>"NewView"),
+        run_fn=_plugin_exec_scal2tens),
+    "Eigenvectors"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"ScaleByEigenvalues"=>1.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_eigenvectors),
+    "Summation"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"View 0"=>-1.0,"View 1"=>-1.0,"View 2"=>-1.0,
+        "View 3"=>-1.0,"View 4"=>-1.0,"View 5"=>-1.0,"View 6"=>-1.0,
+        "View 7"=>-1.0),
+        string_options=Dict{String,String}("Resuling View Name"=>"default"),
+        run_fn=_plugin_exec_summation),
+    "MeshVolume"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"PhysicalGroup"=>-1.0,"Dimension"=>3.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_meshvolume),
+    "LongitudeLatitude"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),
+        run_fn=_plugin_exec_longitude_latitude),
+    "ShowNeighborElements"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"NumLayers"=>1.0,"Element1"=>0.0,"Element2"=>0.0,
+        "Element3"=>0.0,"Element4"=>0.0,"Element5"=>0.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_showneighbor),
+    "GaussPoints"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"Order"=>0.0,"Dimension"=>2.0,"PhysicalGroup"=>0.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_gausspoints),
+    "AnalyseMeshQuality"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"JacobianDeterminant"=>0.0,"IGEMeasure"=>0.0,
+        "ICNMeasure"=>0.0,"HidingThreshold"=>99.0,"ThresholdGreater"=>1.0,
+        "CreateView"=>0.0,"Recompute"=>0.0,"DimensionOfElements"=>-1.0),
+        string_options=Dict{String,String}(),
+        run_fn=_plugin_exec_analyzemeshquality),
+    "MeshSizeFieldView"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"MeshSizeField"=>0.0,"View"=>-1.0,"Component"=>0.0),
+        string_options=Dict{String,String}(),
+        run_fn=_plugin_exec_meshsizefieldview),
+    "SimplePartition"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"NumSlicesX"=>4.0,"NumSlicesY"=>1.0,"NumSlicesZ"=>1.0),
+        string_options=Dict{String,String}(
+            "MappingX"=>"t","MappingY"=>"t","MappingZ"=>"t"),
+        run_fn=_plugin_simple_partition_exec),
 )

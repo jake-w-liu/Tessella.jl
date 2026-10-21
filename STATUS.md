@@ -67,6 +67,80 @@ FieldFromAmplitudePhase identical two-step values (−2.232051/−0.133975 on
 the constant-fixture box). 30 plugins registered; ~11 remain (the catalog
 claim is bounded, not exhaustive parity).
 
+### UI01 plugin batch 3: grid probes, integrators, remeshers, model plugins (2026-10-21, uncommitted in tree)
+
+Eighteen upstream plugin registrations plus shared-machinery fixes in
+`src/interfaces/APIPlugins.jl` — **48 plugins registered** (47 upstream +
+documented `Vorticity` extension):
+
+- `CutBox`/`CutGrid`/`CutParametric` share `_plugin_grid_*` machinery:
+  upstream P0..P3 trilinear grids, `ConnectPoints` line/quad/hex output,
+  CutBox `Boundary` six-face skins including the upstream NbU==1 boundary
+  slot quirk, CutParametric `X`/`Y`/`Z` MathEval expressions with
+  previous-value retention on eval failure and no seed point on degenerate
+  connected grids.
+- `StreamLines`/`Particles`: upstream RK44 coefficient set
+  (a = .5/.5/1/1, b = 1/3,2/3,1/3,1/6) and the three-term Newmark
+  recurrence (γ=½, β=¼: `X = (c2 X1 + c3 X0 + c4 F)/c1`), per-record VP
+  displacement payloads, `OtherView` SL scalar path, `TimeStep<0`
+  physical-time walk.
+- `Triangulate`/`Tetrahedralize`: 1-node records only (≥3/≥4), upstream
+  SVD mean-plane with dominant-axis intercept anchor, deterministic
+  `Mesh2D.delaunay2d`/`Mesh3D.delaunay3d`, ghost-tet exclusion, mixed-width
+  skip + warning, single-mesh check. Documented deviation: upstream jitters
+  input by 1e-12·lc so exact triangulations are non-deterministic on
+  degenerate sets; upstream's incremental kernel drops vertices on some
+  inputs (observed on the points5 fixture) while Tessella retains all
+  points — both emit valid complete tessellations.
+- `NearestNeighbor` in-place first-component rewrite + `*_NearestNeighbor`
+  rename; `Scal2Tens` reads only the first `NumberOfComponents` views and
+  emits ncomp-width records with zero-fill; `Eigenvectors` emits
+  `*_Min/Mid/MaxEigenvectors` sorted by real part (complex → error
+  diagnostic); `Summation` gathers `View 0`..`View 7` keeping the verbatim
+  upstream `"Resuling View Name"` option typo; `MeshVolume` supports
+  `PhysicalGroup=-1`/`Dimension=-1`, warns on empty domains but still
+  publishes a zero view at the model bbox center.
+- `LongitudeLatitude` in-place transform: `atan2`/`asin` degrees, z=0,
+  `xmax−xmin>π` antimeridian unwrap (+360), and the upstream `nc==3`
+  vector rotation into lon/lat directions (verified 6.1e-17-level match).
+- `ShowNeighborElements` (NumLayers vertex-sharing visibility layers on
+  dim≥2 entities), `GaussPoints` (per-entity Gauss points valued by element
+  tag), `AnalyseMeshQuality` (minJ/maxJ, IGE, ICN ElementData views +
+  upstream stat printing + HidingThreshold visibility), `MeshSizeFieldView`
+  (upstream `Field::putOnView` all-component rewrite; unknown field tag
+  rejected like upstream), `SimplePartition` (NumSlicesX/Y/Z + `Mapping`
+  `t`-expressions → `mesh.partition`).
+
+Shared fixes this batch: `_PLUGIN_SEARCH_RANK` encodes the upstream
+OctreePost search order (tet>hex>prism>pyramid>tri>quad>line>point) in
+`_plugin_sorted_elements`; `_plugin_vector_sample` honors the requested
+zero-based step on list and model views; `_plugin_local_weights` gained
+point/line/triangle paths plus Newton inversion via
+`MeshPointLocation._shape_functions` for quad/hex/prism/pyramid;
+`_plugin_push_record!` tuple-index bug fixed; `Particles` now interleaves
+VP records per-record like upstream (`seed | iter displacements`);
+`Triangulate` emits original 3-D coordinates (the projection only drives
+connectivity); `MeshSizeFieldView` `SizeField.field_value` qualification;
+`API.plugin` docstring updated to the full 48-name catalog.
+
+Verification: `Meta.parseall` on `APIPlugins.jl` OK; Tessella loads
+"48 plugins"; `test/interfaces/api_plugin_batch3_test.jl` **150/150**
+(exit 0); sibling regressions `api_plugin_test.jl` 55/55,
+`api_plugin_batch2_test.jl` 49/49 (exit 0). Live Gmsh 4.15.2 Python SDK
+differential on `test/interfaces/fixtures_plugin3/` fixtures
+(`oracle_gmsh.py` → `diff_tessella.jl` → `diff_compare.py`): **14/17 cases
+record-identical** — CutGrid connected+points+degenerate-line grids,
+CutBox hexes+boundary points+six-face quad skins, CutParametric quads,
+StreamLines VP trajectories + `OtherView` SL scalar path,
+Particles VP trajectories,
+NearestNeighbor in-place values, Scal2Tens VT records, Eigenvectors
+three-view set, LongitudeLatitude lon/lat+antimeridian+rotation, Summation
+node-wise sums. Triangulate (9 vs 6 tris) and Tetrahedralize (11 vs 5
+tets) produce valid complete tessellations differing only in triangulation
+— the documented jitter deviation above (Tessella's tets partition the
+hull exactly, verified by volume sum). Not committed or pushed at user
+request.
+
 ### Unmerged `Geometry.AutoCoherence=0` NoNew sweep admission (Curve[6] + non-B4 identity) (2026-10-21)
 
 **Root cause of the `Curve[6]` surface-loop error.** A `QuadTriNoNewVerts`
