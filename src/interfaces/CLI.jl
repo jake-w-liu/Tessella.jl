@@ -16,7 +16,12 @@ file into its `_new` counterpart (binary MSH 4.1 for meshes, parsed `.pos`
 text for views), matching the upstream conversion contract. `-part` assigns
 partition labels like `API.mesh.partition`; `-part_topo`/`-part_ghosts` opt
 into partition topology/ghost production where the discrete producer supports
-it and reject loudly elsewhere. `.geo` `-convert` rejects (no unrolled writer).
+it and reject loudly elsewhere. `-part_split` (aliases `-part_split_files`,
+`-oneFilePerPart`) writes one `<stem>_<p>.msh` file per partition instead of
+the combined output when `-part` is active, carrying each partition's own
+entities' cells plus its ghost cells as regular cells on its ghost entity —
+the upstream `Mesh.PartitionSplitMeshFiles` layout. `.geo` `-convert` rejects
+(no unrolled writer).
 `-reclassify`/`-reparam` route to the real classify/create-geometry pipeline —
 BRep-imported models can hit bounded export paths that reject rather than write
 wrong data.
@@ -26,7 +31,10 @@ module CLI
 using ..GeoExec: execute_geo, geo_entity_mesh
 using ..IO: write_msh
 using ..Model: model_periodic_constraints, model_to_mixed
-using ..Elements: write_mixed_msh, read_mixed_msh, MixedMesh, simplex_to_mixed, validate
+using ..Elements: write_mixed_msh, read_mixed_msh, MixedMesh, MixedEntity,
+    MixedEntityData, MixedPartitionData, MixedGhostElement, MixedPeriodicLink,
+    ElementBlock, SpecialElementBlock, MixedElementBlock, ElementRef,
+    msh_dimension, simplex_to_mixed, validate
 using ..GmshLibm: _with_win_cli_precision
 import ..IO
 import ..Post
@@ -47,6 +55,7 @@ Usage: tessella file.geo [-1|-2|-3] [-o output.msh] [-format msh2|msh4] [-bin]
        tessella file.(geo|msh|pos) [-refine] [-part n] [-save]
        [-reclassify deg] [-reparam deg] [-open] [-merge] [-new]
        [-part_topo|-part_no_topo] [-part_ghosts|-part_no_ghosts]
+       [-part_split|-part_split_files|-oneFilePerPart]
        tessella -convert file.(msh|pos) [file2 ...]
        tessella -help | -version | -info | -help_options
 
@@ -54,6 +63,9 @@ Mesh size bounds apply before the positive size factor. CLI numeric options
 have priority over .geo assignments. Curve orders 1-10 are supported;
 Surface/Volume generation supports the orders documented in README.md.
 -check validates MSH structure and duplicate cells without generation or output.
+-part_split (aliases -part_split_files and -oneFilePerPart) replaces combined
+output with one <stem>_<partition>.msh file per partition when -part is active;
+without -part it is inert, like upstream Mesh.PartitionSplitMeshFiles.
 -setnumber/-setstring/-setlist and -string/-option act as .geo parser input
 before the input file; on non-.geo inputs only `-setnumber` option names
 (Family.Member) apply, through the session option table.
@@ -114,9 +126,6 @@ const _REJECTED_FLAGS=Dict{String,String}(
     "-preserveNumberingMsh2"=>"MSH2 element-number preservation is not implemented",
     "-part_weight"=>"weighted graph partitioning is not implemented",
     "-partWeight"=>"weighted graph partitioning is not implemented",
-    "-part_split"=>"per-partition file output is not implemented",
-    "-part_split_files"=>"per-partition file output is not implemented",
-    "-oneFilePerPart"=>"per-partition file output is not implemented",
     "-part_topo_pro"=>"partition topology .pro output is not implemented",
     "-savePartTopology"=>"partition topology .pro output is not implemented",
     "-part_physicals"=>"partition physical-group toggling is not implemented",
@@ -353,7 +362,14 @@ algorithm (`del2d`, `front2d`, `del3d` and their upstream aliases).
 `-merge`, `-new`, and `.msh`/`.pos` inputs run on the `API` session; `-part n`
 partitions the current mesh after meshing (or the loaded mesh) exactly like
 `API.mesh.partition` — `-part_topo`/`-part_ghosts` request partition
-topology/ghost production and reject on unsupported inputs.
+topology/ghost production and reject on unsupported inputs. `-part_split`
+(aliases `-part_split_files`, `-oneFilePerPart`) swaps the combined output for
+one MSH file per partition named `<output stem>_<p>.msh`: each carries the
+partition's own cells (entities whose `partitions` list contains `p`) plus the
+ghost cells it receives, emitted as regular cells on its ghost entity — the
+upstream `Mesh.PartitionSplitMeshFiles` layout. Without `-part`, or when the
+partitioned result holds a single partition, the flag is inert and the normal
+output is written.
 `-convert files...` rewrites `.msh`/`.pos` files to `file_new` (binary MSH 4.1
 or parsed view text) and must come last.
 `file.msh -check` validates the mesh without writing. `-`, `-parse_and_exit`,
@@ -408,7 +424,7 @@ function _main(args::AbstractVector{<:AbstractString})
     format_seen=false;binary_seen=false;check_seen=false
     refine_seen=false;save_seen=false;parse_seen=false
     reclassify=nothing;reparam=nothing
-    part=nothing;part_topo=nothing;part_ghosts=nothing
+    part=nothing;part_topo=nothing;part_ghosts=nothing;part_split=nothing
     algo_seen=false;quad_seen=false
     i=1
     while i<=length(tokens)
@@ -535,6 +551,10 @@ function _main(args::AbstractVector{<:AbstractString})
             part_ghosts!==nothing && throw(ArgumentError(
                 "tessella: duplicate or conflicting partition ghost flag"))
             part_ghosts=false
+        elseif a in ("-part_split","-part_split_files","-oneFilePerPart")
+            part_split!==nothing && throw(ArgumentError(
+                "tessella: duplicate or conflicting partition-split flag"))
+            part_split=true
         elseif a in ("-new","-open","-merge")
             marker=Symbol(a[2:end]);markers_seen=true
         elseif a=="-setnumber"
@@ -735,7 +755,7 @@ function _main(args::AbstractVector{<:AbstractString})
     return _session_main(files,preludes,numeric_options;
         dim,outfile,version,binary,output_flags=format_seen || binary_seen,
         refine=refine_seen,save=save_seen,
-        reclassify,reparam,part,part_topo,part_ghosts)
+        reclassify,reparam,part,part_topo,part_ghosts,part_split)
 end
 
 # Session path: files route through `API.open`/`API.merge`/`API.model.add`,
@@ -744,7 +764,7 @@ end
 # `create_geometry`/`partition`, and output through `API.write`.
 function _session_main(files,preludes,numeric_options;
                        dim,outfile,version,binary,output_flags,refine,save,
-                       reclassify,reparam,part,part_topo,part_ghosts)
+                       reclassify,reparam,part,part_topo,part_ghosts,part_split)
     need_output=dim>0 || refine || save || reclassify!==nothing ||
         reparam!==nothing || part!==nothing
     !need_output && outfile!==nothing && throw(ArgumentError(
@@ -835,12 +855,392 @@ function _session_main(files,preludes,numeric_options;
             API.mesh.create_geometry()
         end
         part===nothing || API.mesh.partition(part)
-        need_output && API.write(destination)
+        if need_output
+            # `-part_split` only takes effect on an active partition request —
+            # upstream's Mesh.PartitionSplitMeshFiles is inert otherwise.
+            part_split===true && part!==nothing ?
+                _write_partition_files(destination;version,binary) :
+                API.write(destination)
+        end
     finally
         temporary===nothing || rm(temporary;force=true)
         API.finalize()
     end
     return need_output ? destination : files[1][1]
+end
+
+# ---------------------------------------------------------------------------
+# Per-partition output: -part_split / -part_split_files / -oneFilePerPart
+#
+# Upstream `Mesh.PartitionSplitMeshFiles` replaces the combined write with one
+# `<stem>_<p>.msh` file per partition — the stem derives from `-o` or the
+# input name and the extension is always `.msh`. Each file keeps the full
+# entity and partition declarations but only carries the cells owned by that
+# partition — entities whose `partitions` list contains it — plus the ghost
+# cells it receives, emitted as regular cells on its ghost entity. Its
+# `$GhostElements` section lists those copies with their owner partitions.
+# ---------------------------------------------------------------------------
+
+_partition_ncells(block::ElementBlock)=size(block.nodes,2)
+_partition_ncells(block::SpecialElementBlock)=length(block.tags)
+_partition_dim(block::ElementBlock)=msh_dimension(block.msh)
+_partition_dim(block::SpecialElementBlock)=
+    Elements.MSH_SPECIAL_TYPES[block.msh].dim
+_partition_nodes(block::ElementBlock,cell::Int)=block.nodes[:,cell]
+_partition_nodes(block::SpecialElementBlock,cell::Int)=
+    view(block.connectivity,
+         Int(block.offsets[cell]):Int(block.offsets[cell+1])-1)
+
+# Flat element index (1:N across blocks, the `$GhostElements` convention) to
+# its (block, cell) pair.
+function _partition_flat_cell(starts::Vector{Int},index::Int)
+    for block in 1:length(starts)-1
+        index<starts[block+1] && return (block,index-starts[block]+1)
+    end
+    return (length(starts)-1,index-starts[end-1]+1)
+end
+
+# Extract partition `partition` of a partitioned `MixedMesh` as a standalone
+# mesh view: the partition's own cells plus its received ghost cells placed as
+# regular cells on its ghost entity. Node data sections are dropped — their
+# dense element/node payloads cannot be re-indexed by a subset extraction —
+# while ancillary sections, periodic links and physical names carry over.
+function _partition_view(mesh::MixedMesh,partition::Int;
+                         partition_metadata::Bool=true)
+    data=mesh.entity_data;pdata=mesh.partition_data
+    caller="tessella: -part_split"
+    data===nothing && throw(ArgumentError(
+        "$caller: the partitioned mesh carries no entity classification"))
+    pdata===nothing && throw(ArgumentError(
+        "$caller: the mesh carries no partition entities"))
+    count=Int(pdata.num_partitions)
+    1<=partition<=count || throw(ArgumentError(
+        "$caller: partition $partition is outside 1:$count"))
+    # Ghost entities live at the mesh's top dimension; their declared entity
+    # rows carry the `(dim, tag)` placement upstream keeps in ghost records.
+    topdim=maximum((_partition_dim(block) for block in mesh.blocks);init=0)
+    ghost_owner=Dict{Tuple{Int,Int},Int}()    # (dim,tag) -> receiving partition
+    ghost_key=Dict{Int,Tuple{Int,Int}}()      # partition -> (dim,tag)
+    for (tag,part) in pdata.ghost_entities
+        dim=topdim
+        for d in 0:3
+            (haskey(data.entities,(d,Int(tag))) ||
+             haskey(pdata.entities,(d,Int(tag)))) && (dim=d;break)
+        end
+        ghost_owner[(dim,Int(tag))]=Int(part)
+        ghost_key[Int(part)]=(dim,Int(tag))
+    end
+    starts=Vector{Int}(undef,length(mesh.blocks)+1);starts[1]=1
+    for (bi,block) in pairs(mesh.blocks)
+        starts[bi+1]=starts[bi]+_partition_ncells(block)
+    end
+    nel=starts[end]-1
+    selected=[falses(_partition_ncells(block)) for block in mesh.blocks]
+    for (bi,block) in enumerate(mesh.blocks)
+        entities=data.block_entities[bi];dim=_partition_dim(block)
+        for j in 1:_partition_ncells(block)
+            key=(dim,Int(entities[j]))
+            record=get(pdata.entities,key,nothing)
+            if record===nothing
+                # Cells parked on this partition's ghost entity are already
+                # placed ghost copies — re-splitting a split file keeps them.
+                get(ghost_owner,key,0)==partition && (selected[bi][j]=true)
+            else
+                Int32(partition) in record.partitions && (selected[bi][j]=true)
+            end
+        end
+    end
+    ghost_cells=Tuple{Int,Int}[]
+    for record in pdata.ghost_elements
+        Int32(partition) in record.ghost_partitions || continue
+        source=Int(record.element)
+        1<=source<=nel || throw(ArgumentError(
+            "$caller: ghost element index $source is outside 1:$nel"))
+        (bi,j)=_partition_flat_cell(starts,source)
+        key=(_partition_dim(mesh.blocks[bi]),Int(data.block_entities[bi][j]))
+        if get(ghost_owner,key,0)==partition || selected[bi][j]
+            continue   # placed ghost copy or own cell — already counted
+        end
+        push!(ghost_cells,(bi,j))
+    end
+    # Retained nodes cover every selected and duplicated cell.
+    used=falses(size(mesh.coords,2))
+    for (bi,block) in enumerate(mesh.blocks),j in eachindex(selected[bi])
+        selected[bi][j] || continue
+        for node in _partition_nodes(block,j);used[Int(node)]=true;end
+    end
+    for (bi,j) in ghost_cells
+        for node in _partition_nodes(mesh.blocks[bi],j);used[Int(node)]=true;end
+    end
+    rows=findall(used)
+    inverse=zeros(Int32,size(mesh.coords,2))
+    inverse[rows].=Int32.(eachindex(rows))
+    # New block/cell positions for link remapping and ghost-record indices:
+    # `ghost_target` maps each source flat index to its flat index in the view.
+    block_index=Dict{Int,Int}();cell_index=Dict{Tuple{Int,Int},Int32}()
+    ghost_target=Dict{Int,Int}();flat=0
+    for (bi,block) in enumerate(mesh.blocks)
+        any(selected[bi]) || continue
+        block_index[bi]=length(block_index)+1;position=0
+        for j in eachindex(selected[bi])
+            selected[bi][j] || continue
+            position+=1;flat+=1
+            cell_index[(bi,j)]=Int32(position)
+            ghost_target[starts[bi]+j-1]=flat
+        end
+    end
+    blocks=MixedElementBlock[]
+    owners=Vector{Int32}[];element_tags=Vector{UInt64}[]
+    elementary=Vector{Int32}[]
+    function remap_ref(ref)
+        ref==ElementRef() && return ElementRef()
+        target=(Int(ref.block),Int(ref.cell))
+        haskey(cell_index,target) || return ElementRef()
+        return ElementRef(block_index[target[1]],cell_index[target])
+    end
+    for (bi,block) in enumerate(mesh.blocks)
+        columns=findall(selected[bi]);isempty(columns) && continue
+        if block isa ElementBlock
+            push!(blocks,ElementBlock(block.msh,
+                inverse[block.nodes[:,columns]],block.tags[columns]))
+        else
+            cells=[inverse[collect(_partition_nodes(block,j))] for j in columns]
+            parents=ElementRef[remap_ref(block.parent_refs[j]) for j in columns]
+            domains=Matrix{ElementRef}(undef,2,length(columns))
+            for side in 1:2,(cj,j) in enumerate(columns)
+                domains[side,cj]=remap_ref(block.domain_refs[side,j])
+            end
+            push!(blocks,SpecialElementBlock(block.msh,cells,block.tags[columns];
+                parent_refs=parents,domain_refs=domains))
+        end
+        push!(owners,data.block_entities[bi][columns])
+        push!(element_tags,data.external_element_tags[bi][columns])
+        mesh.elementary_entities===nothing ||
+            push!(elementary,mesh.elementary_entities[bi][columns])
+    end
+    # The view's entity table holds the source's global entities — upstream
+    # keeps the original `$Entities` section — plus the ghost entity the
+    # partition's ghost copies land on (Tessella declares ghost entities
+    # there; a Gmsh file that omitted it gets a synthesized record). MSH 2.x
+    # output carries no `$PartitionedEntities`, so partition entities must be
+    # merged in for cell-entity resolution.
+    entities=copy(data.entities)
+    partition_metadata || merge!(entities,pdata.entities)
+    if !isempty(ghost_cells)
+        key=get(ghost_key,partition,nothing)
+        key===nothing && throw(ArgumentError(
+            "$caller: partition $partition receives ghost cells but has no " *
+            "declared ghost entity"))
+        gdim,gtag=key
+        order=Int[];grouped=Dict{Int,Vector{Tuple{Int,Int}}}()
+        for (bi,j) in ghost_cells
+            msh=mesh.blocks[bi].msh
+            msh in order || push!(order,msh)
+            push!(get!(()->Tuple{Int,Int}[],grouped,msh),(bi,j))
+        end
+        for msh in order
+            cells=grouped[msh]
+            if mesh.blocks[cells[1][1]] isa ElementBlock
+                conn=hcat((inverse[_partition_nodes(mesh.blocks[bi],j)]
+                           for (bi,j) in cells)...)
+                push!(blocks,ElementBlock(msh,conn))
+            else
+                conn=[inverse[collect(_partition_nodes(mesh.blocks[bi],j))]
+                      for (bi,j) in cells]
+                push!(blocks,SpecialElementBlock(msh,conn))
+            end
+            push!(owners,fill(Int32(gtag),length(cells)))
+            push!(element_tags,
+                [data.external_element_tags[bi][j] for (bi,j) in cells])
+            mesh.elementary_entities===nothing ||
+                push!(elementary,fill(Int32(gtag),length(cells)))
+            for (bi,j) in cells
+                flat+=1;ghost_target[starts[bi]+j-1]=flat
+            end
+        end
+        # Declare the ghost entity when the entity table lacks it, computing
+        # its bounds from the placed ghost cells' coordinates.
+        haskey(entities,key) || begin
+            nodes=Int[]
+            for (bi,j) in ghost_cells
+                append!(nodes,Int.(_partition_nodes(mesh.blocks[bi],j)))
+            end
+            bounds=isempty(nodes) ? ntuple(_->0.0,6) : ntuple(
+                axis->axis<=3 ?
+                    minimum(mesh.coords[axis,row] for row in nodes) :
+                    maximum(mesh.coords[axis-3,row] for row in nodes),6)
+            entities[key]=MixedEntity(gdim,gtag,bounds)
+        end
+    end
+    metadata=MixedEntityData(entities;
+        node_entities=data.node_entities[rows],
+        node_parametric=data.node_parametric[rows],
+        external_node_tags=data.external_node_tags[rows],
+        block_entities=owners,external_element_tags=element_tags,
+        _native_mesh_tags=data.native_mesh_tags)
+    # Upstream writes one record per ghost copy in the file: the owner
+    # partition plus a single-destination list naming this file's partition.
+    records=MixedGhostElement[]
+    for record in pdata.ghost_elements
+        Int32(partition) in record.ghost_partitions || continue
+        push!(records,MixedGhostElement(
+            ghost_target[Int(record.element)],record.partition,
+            Int32[partition]))
+    end
+    partition2=partition_metadata ?
+        MixedPartitionData(pdata.num_partitions;entities=pdata.entities,
+            ghost_entities=pdata.ghost_entities,ghost_elements=records) :
+        nothing
+    links=MixedPeriodicLink[]
+    for link in mesh.periodic_links
+        all(node->used[Int(node)],link.slave_nodes) &&
+        all(node->used[Int(node)],link.master_nodes) || continue
+        push!(links,MixedPeriodicLink(
+            link.dim,link.slave_entity,link.master_entity,
+            inverse[link.slave_nodes],inverse[link.master_nodes];
+            affine=link.affine))
+    end
+    # MSH 2.x has no partition metadata; carry the entity tags as elementary
+    # tags so ghost cells still land on the ghost entity there.
+    elementary_out=mesh.elementary_entities===nothing ?
+        (partition_metadata ? nothing : copy.(owners)) : elementary
+    return MixedMesh(mesh.coords[:,rows],blocks;
+        entity_data=metadata,physical_names=mesh.physical_names,
+        elementary_entities=elementary_out,
+        periodic_links=links,ancillary_sections=mesh.ancillary_sections,
+        partition_data=partition2)
+end
+
+# Map each exported cell to its assigned partition label. `element_partitions`
+# indexes the cached mesh's flat element order; exported cells translate
+# through their public element tags so reordering and `Mesh.SaveAll` filtering
+# keep the mapping exact.
+function _partition_label_assignment(mesh::MixedMesh,partition,public)
+    data=mesh.entity_data
+    data===nothing && return copy(partition.element_partitions)
+    uid_index=Dict{UInt64,Int}()
+    for index in eachindex(partition.element_partitions)
+        uid_index[API._cache_element_tag(public,index)]=index
+    end
+    labels=Vector{Int32}(undef,
+        sum(_partition_ncells,mesh.blocks;init=0))
+    flat=0
+    for (bi,block) in enumerate(mesh.blocks)
+        for uid in data.external_element_tags[bi]
+            flat+=1
+            index=get(uid_index,uid,0)
+            index>0 || throw(ArgumentError(
+                "tessella: -part_split found no partition label for " *
+                "element $uid"))
+            labels[flat]=partition.element_partitions[index]
+        end
+    end
+    return labels
+end
+
+# Label-mode `-part` carries no partition entities: each split file simply
+# holds the elements assigned to the partition on their original entities.
+function _partition_label_view(mesh::MixedMesh,labels::Vector{Int32},
+                               partition::Int;v2::Bool=false)
+    data=mesh.entity_data
+    selected=[falses(_partition_ncells(block)) for block in mesh.blocks]
+    flat=0
+    for (bi,block) in enumerate(mesh.blocks),j in 1:_partition_ncells(block)
+        flat+=1;Int32(partition)==labels[flat] && (selected[bi][j]=true)
+    end
+    used=falses(size(mesh.coords,2))
+    for (bi,block) in enumerate(mesh.blocks),j in eachindex(selected[bi])
+        selected[bi][j] || continue
+        for node in _partition_nodes(block,j);used[Int(node)]=true;end
+    end
+    rows=findall(used)
+    inverse=zeros(Int32,size(mesh.coords,2))
+    inverse[rows].=Int32.(eachindex(rows))
+    blocks=MixedElementBlock[]
+    owners=Vector{Int32}[];element_tags=Vector{UInt64}[]
+    elementary=Vector{Int32}[]
+    for (bi,block) in enumerate(mesh.blocks)
+        columns=findall(selected[bi]);isempty(columns) && continue
+        if block isa ElementBlock
+            push!(blocks,ElementBlock(block.msh,
+                inverse[block.nodes[:,columns]],block.tags[columns]))
+        else
+            cells=[inverse[collect(_partition_nodes(block,j))] for j in columns]
+            push!(blocks,SpecialElementBlock(block.msh,cells,
+                block.tags[columns]))
+        end
+        data===nothing || begin
+            push!(owners,data.block_entities[bi][columns])
+            push!(element_tags,data.external_element_tags[bi][columns])
+        end
+        mesh.elementary_entities===nothing ||
+            push!(elementary,mesh.elementary_entities[bi][columns])
+    end
+    metadata=data===nothing ? nothing : MixedEntityData(data.entities;
+        node_entities=data.node_entities[rows],
+        node_parametric=data.node_parametric[rows],
+        external_node_tags=data.external_node_tags[rows],
+        block_entities=owners,external_element_tags=element_tags,
+        _native_mesh_tags=data.native_mesh_tags)
+    links=MixedPeriodicLink[]
+    for link in mesh.periodic_links
+        all(node->used[Int(node)],link.slave_nodes) &&
+        all(node->used[Int(node)],link.master_nodes) || continue
+        push!(links,MixedPeriodicLink(
+            link.dim,link.slave_entity,link.master_entity,
+            inverse[link.slave_nodes],inverse[link.master_nodes];
+            affine=link.affine))
+    end
+    elementary_out=mesh.elementary_entities===nothing ?
+        (v2 && data!==nothing ? copy.(owners) : nothing) : elementary
+    return MixedMesh(mesh.coords[:,rows],blocks;
+        entity_data=metadata,physical_names=mesh.physical_names,
+        elementary_entities=elementary_out,
+        periodic_links=links,ancillary_sections=mesh.ancillary_sections)
+end
+
+# `-part_split`: write `stem_1.msh`…`stem_N.msh` instead of `destination`. The
+# combined model write is staged into a throwaway file so the split works on
+# exactly what `API.write` would serialize — MSH 4.1 keeps partition and ghost
+# metadata through that read-back regardless of the requested output version.
+function _write_partition_files(destination::String;version,binary)
+    parent=dirname(abspath(destination))
+    isdir(parent) || throw(ArgumentError(
+        "tessella: -part_split output directory does not exist: $parent"))
+    temporary=tempname(parent)*".msh"
+    mesh=try
+        API.option("Mesh.MshFileVersion",4.1)
+        API.write(temporary)
+        read_mixed_msh(temporary)
+    finally
+        API.option("Mesh.MshFileVersion",version)
+        rm(temporary;force=true)
+    end
+    stem,_=splitext(destination)
+    pdata=mesh.partition_data
+    if pdata===nothing
+        partition,public=lock(API.STATE_LOCK) do
+            record=API.LAST_MESH_PARTITION[]
+            (record===nothing || record.mesh!==API.LAST_MESH[]) &&
+                return (nothing,nothing)
+            return (record,API._mesh_public_tags(record.mesh))
+        end
+        partition===nothing && throw(ArgumentError(
+            "tessella: -part_split found no serializable partition state"))
+        partition.num_partitions>1 || return API.write(destination)
+        labels=_partition_label_assignment(mesh,partition,public)
+        for part in 1:partition.num_partitions
+            view=_partition_label_view(mesh,labels,part;v2=version!=4.1)
+            write_mixed_msh(stem*"_$part.msh",view;version,binary)
+        end
+        return destination
+    end
+    pdata.num_partitions>1 || return API.write(destination)
+    for part in 1:Int(pdata.num_partitions)
+        view=_partition_view(mesh,part;partition_metadata=version==4.1)
+        write_mixed_msh(stem*"_$part.msh",view;version,binary)
+    end
+    return destination
 end
 
 end # module
