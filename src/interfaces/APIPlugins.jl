@@ -57,6 +57,16 @@
 #                   (in-place on list views; a new `*_Annotate` list view
 #                   carrying the string and the source time table for model
 #                   views).
+#   Eigenvalues     per-node real eigenvalue triple of each 9-component
+#                   tensor record into `*_MinEigenvalues`,
+#                   `*_MidEigenvalues` and `*_MaxEigenvalues` scalar views,
+#   ModulusPhase    in-place rewrite of the `RealPart`/`ImaginaryPart` time
+#                   steps into per-node modulus and phase values,
+#   HarmonicToTime  `RealPart`/`ImaginaryPart` steps resampled to `NumSteps`
+#                   harmonic samples in a `*_HarmonicToTime` list view,
+#   Density         per-node element-incidence count into a single-step
+#                   `*_Density` scalar view (the upstream plugin predates
+#                   Gmsh 4.15.2; `View` is its only surviving option).
 #
 # Divergence, Curl and Lambda2 differentiate through the corner-node linear
 # map like upstream `getNumCornerNodes`/`element::interpolate*`, so
@@ -66,16 +76,23 @@
 # vanishing shape gradients). Divergence and Curl reject multi-mesh model
 # views like upstream `hasMultipleMeshes`; Lambda2 shares the check because
 # the per-tag step merge cannot disambiguate same-numbered elements across
-# meshes. `SphericalRaise` rewrites list data only (upstream mutates the
+# meshes, and `Eigenvalues`, `ModulusPhase`, `HarmonicToTime` and `Density`
+# run the same guard (`Eigenvalues`/`ModulusPhase`/`HarmonicToTime` have the
+# identical upstream check). `Eigenvalues`, `HarmonicToTime` and `Density`
+# emit linear corner records like the other per-element plugins.
+# `SphericalRaise` rewrites list data only (upstream mutates the
 # owning mesh through model views, the same restriction the other in-place
 # plugins take). `Annotate` accepts the upstream `Font`/`FontSize`/`Align`
 # options but session string records carry no per-string style slot, so
 # they are stored without effect (the `Visible` convention below).
 #
 # Gradient and CutPlane read list views directly and model views through a
-# per-element multi-step merge (`_plugin_elements_all_steps`), so both emit
-# list views covering every populated step. Gradient differentiates only
-# linear nodal data — records whose value nodes outnumber the primary
+# per-element multi-step merge (`_plugin_elements_all_steps`, shared by
+# Eigenvalues, HarmonicToTime and Density), so both emit list views covering
+# every populated step. `ModulusPhase` is the only in-place plugin that also
+# rewrites model payloads — its stored rows are per tag, so the upstream
+# NodeData double-application guard is unnecessary. Gradient differentiates
+# only linear nodal data — records whose value nodes outnumber the primary
 # geometric map (high-order `ElementNodeData`), non-scalar components and
 # point elements are skipped like the upstream scalar-record scan. CutPlane
 # interpolates section values from the primary corner values; elements fully
@@ -2726,6 +2743,233 @@ function _plugin_exec_annotate(spec::_PluginSpec,caller::AbstractString)
     return nothing
 end
 
+# ---- Eigenvalues ------------------------------------------------------------------
+
+# Upstream `Plugin(Eigenvalues)`: each 9-component element's tensor (the nine
+# components filling `A[3][3]` row-major) is reduced to its three real
+# eigenvalues through the shared characteristic-cubic solver
+# (`_plugin_eigenvalues3` — the same FindCubicRoots + descending eigsort as
+# `Numeric.cpp::eigenvalue`, so `w[1]` is the largest and `w[3]` the smallest
+# root). Every populated step re-emits on the element's linear corner set
+# into the three scalar list views `*_MinEigenvalues`, `*_MidEigenvalues` and
+# `*_MaxEigenvalues`; the three views are created even when no element
+# qualifies, and elements without 9 components are skipped like upstream's
+# `numComp != 9` gate.
+function _plugin_exec_eigenvalues(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    _plugin_check_single_mesh(view,"Eigenvalues") || return nothing
+    elements,steps,times=_plugin_elements_all_steps(view,caller)
+    out=(_PluginElement[],_PluginElement[],_PluginElement[])
+    for element in elements
+        element.ncomp==9 || continue
+        _plugin_record_type(element.kind,1)===nothing && continue
+        ga=size(element.geo,2);va=size(element.vcoords,2)
+        va>=ga || continue
+        vals=(Vector{Float64}(undef,ga*steps),Vector{Float64}(undef,ga*steps),
+              Vector{Float64}(undef,ga*steps))
+        for step in 1:steps,node in 1:ga
+            a=Matrix{Float64}(undef,3,3)
+            base=(step-1)*va*9+(node-1)*9
+            for i in 1:3,j in 1:3
+                a[i,j]=element.vals[base+3(i-1)+j]
+            end
+            w=_plugin_eigenvalues3(a)
+            slot=(step-1)*ga+node
+            vals[1][slot]=w[3];vals[2][slot]=w[2];vals[3][slot]=w[1]
+        end
+        for k in 1:3
+            push!(out[k],_PluginElement(element.kind,element.dim,element.geo,
+                                        element.geo,vals[k],1,element.etag))
+        end
+    end
+    _plugin_extract_emit(view.name*"_MinEigenvalues",out[1],-1,steps,times,caller)
+    _plugin_extract_emit(view.name*"_MidEigenvalues",out[2],-1,steps,times,caller)
+    _plugin_extract_emit(view.name*"_MaxEigenvalues",out[3],-1,steps,times,caller)
+    return nothing
+end
+
+# ---- ModulusPhase -----------------------------------------------------------------
+
+# Row offsets of one populated model-data block — the same `counts`-aware
+# split `_plugin_model_elements` performs for ElementNodeData's variable row
+# widths.
+function _plugin_model_row_offsets(view,key,tags,values,caller::AbstractString)
+    ctx=view.model_contexts[key]
+    counts=get(ctx,:counts,Int32[])
+    offsets=Vector{Int}(undef,length(tags)+1);offsets[1]=1
+    for row in eachindex(tags)
+        width=row<=length(counts) ? Int(counts[row]) :
+            length(values)÷length(tags)
+        offsets[row+1]=Base.checked_add(offsets[row],width)
+    end
+    offsets[end]-1==length(values) || throw(ArgumentError(
+        "$caller: malformed model data row extents"))
+    return offsets
+end
+
+# Upstream `Plugin(ModulusPhase)` runs in place: steps `RealPart` and
+# `ImaginaryPart` of `View` hold a complex field; both steps are rewritten to
+# the per-node modulus `sqrt(re^2+im^2)` and phase `atan2(im,re)` of every
+# component. List payloads mutate step slots directly; model payloads rewrite
+# the two steps' stored rows, pairing each `RealPart` row with the
+# `ImaginaryPart` row of the same tag — upstream reaches each node once
+# through its element scan plus NodeData tagging, which per-tag row storage
+# already guarantees here. Out-of-range indices emit the upstream diagnostic
+# and leave the view unchanged.
+function _plugin_exec_modulus_phase(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    _plugin_check_single_mesh(view,"ModulusPhase") || return nothing
+    rindex=_mesh_query_integer(Int(numbers["RealPart"]),caller,"RealPart")
+    iindex=_mesh_query_integer(Int(numbers["ImaginaryPart"]),caller,"ImaginaryPart")
+    # Upstream bounds-checks the indices against `getNumTimeSteps`.
+    steps=_view_data_steps(view)
+    if !(0<=rindex<steps) || !(0<=iindex<steps)
+        _native_diagnostic_emit_locked(:error,
+            "Wrong real or imaginary part index")
+        return nothing
+    end
+    if view.model_kind===nothing
+        for type in view.list_types
+            layout=get(Post._POS_RECORD_TYPES,type,nothing)
+            layout===nothing && throw(ArgumentError(
+                "$caller: unsupported list data type $type"))
+            _,arity,ncomp=layout
+            count=view.list_counts[type]
+            count==0 && continue
+            data=view.list_data[type]
+            # Per-type step count (payload width); the global check above
+            # already guarantees rindex/iindex fit every populated type.
+            tsteps=(length(data)÷count-3arity)÷(arity*ncomp)
+            (rindex<tsteps && iindex<tsteps) || continue
+            width=3arity+arity*ncomp*tsteps
+            for element in 0:count-1
+                base=element*width+3arity
+                for node in 1:arity,comp in 1:ncomp
+                    ri=base+rindex*arity*ncomp+(node-1)*ncomp+comp
+                    ii=base+iindex*arity*ncomp+(node-1)*ncomp+comp
+                    vr=data[ri];vi=data[ii]
+                    data[ri]=sqrt(vr*vr+vi*vi)
+                    data[ii]=atan(vi,vr)
+                end
+            end
+        end
+    else
+        kind=view.model_kind
+        rblock=get(view.model_data,(rindex,kind),nothing)
+        iblock=get(view.model_data,(iindex,kind),nothing)
+        if rblock!==nothing && iblock!==nothing && rblock[3]==iblock[3]
+            rtags,rvalues,_=rblock;itags,ivalues,_=iblock
+            roff=_plugin_model_row_offsets(view,(rindex,kind),rtags,rvalues,caller)
+            ioff=_plugin_model_row_offsets(view,(iindex,kind),itags,ivalues,caller)
+            irow=Dict{UInt64,Int}(t=>i for (i,t) in enumerate(itags))
+            for (r,t) in enumerate(rtags)
+                i=get(irow,t,0);i==0 && continue
+                width=roff[r+1]-roff[r]
+                width==ioff[i+1]-ioff[i] || continue
+                for k in 0:width-1
+                    vr=rvalues[roff[r]+k];vi=ivalues[ioff[i]+k]
+                    rvalues[roff[r]+k]=sqrt(vr*vr+vi*vi)
+                    ivalues[ioff[i]+k]=atan(vi,vr)
+                end
+            end
+        end
+    end
+    view.name=view.name*"_ModulusPhase"
+    return nothing
+end
+
+# ---- HarmonicToTime -----------------------------------------------------------------
+
+# Upstream `Plugin(HarmonicToTime)`: the `RealPart`/`ImaginaryPart` steps of
+# `View` define a harmonic field; the new `*_HarmonicToTime` list view holds
+# `NumSteps` samples `re*cos(p) + tsign*im*sin(p)` per node and component,
+# with `p = 2*pi*NumPeriods*k/NumSteps` (`p = 0` when `Frequency` is 0) and
+# physical sample times `2*pi*NumPeriods*k/(Frequency*NumSteps)` (0 for zero
+# frequency). `tsign` is +1 for `TimeSign` > 0 and -1 otherwise.
+function _plugin_exec_harmonic_to_time(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    _plugin_check_single_mesh(view,"HarmonicToTime") || return nothing
+    rindex=_mesh_query_integer(Int(numbers["RealPart"]),caller,"RealPart")
+    iindex=_mesh_query_integer(Int(numbers["ImaginaryPart"]),caller,"ImaginaryPart")
+    nsteps=_mesh_query_integer(Int(numbers["NumSteps"]),caller,"NumSteps")
+    tsign=numbers["TimeSign"]>0 ? 1.0 : -1.0
+    frequency=numbers["Frequency"]
+    nperiods=_mesh_query_integer(Int(numbers["NumPeriods"]),caller,"NumPeriods")
+    elements,steps,_=_plugin_elements_all_steps(view,caller)
+    if !(0<=rindex<steps) || !(0<=iindex<steps)
+        _native_diagnostic_emit_locked(:error,"Wrong real or imaginary part index")
+        return nothing
+    end
+    if nsteps<=0
+        _native_diagnostic_emit_locked(:error,"nSteps should be > 0")
+        return nothing
+    end
+    out=_PluginElement[]
+    for element in elements
+        nc=element.ncomp
+        _plugin_record_type(element.kind,nc)===nothing && continue
+        ga=size(element.geo,2);va=size(element.vcoords,2)
+        va>=ga || continue
+        vals=Vector{Float64}(undef,ga*nc*nsteps)
+        for k in 0:nsteps-1
+            p=iszero(frequency) ? 0.0 : 2.0*pi*nperiods*k/nsteps
+            cp=cos(p);sp=tsign*sin(p)
+            for node in 1:ga,comp in 1:nc
+                slot=k*ga*nc+(node-1)*nc+comp
+                base=(node-1)*nc+comp
+                vals[slot]=muladd(element.vals[rindex*va*nc+base],cp,
+                                  element.vals[iindex*va*nc+base]*sp)
+            end
+        end
+        push!(out,_PluginElement(element.kind,element.dim,element.geo,
+                                 element.geo,vals,nc,element.etag))
+    end
+    times=Float64[iszero(frequency) ? 0.0 :
+                  2.0*pi*nperiods*k/(frequency*nsteps) for k in 0:nsteps-1]
+    _plugin_extract_emit(view.name*"_HarmonicToTime",out,-1,nsteps,times,caller)
+    return nothing
+end
+
+# ---- Density -----------------------------------------------------------------------
+
+# `Plugin(Density)` was dropped upstream long before Gmsh 4.15.2; the
+# documented transform — the per-node mesh density, the number of elements
+# incident on each node — is kept here as a single-step scalar `*_Density`
+# list view. Incident elements are counted once each (the multi-step merge
+# already deduplicates element tags) and nodes are identified by exact
+# coordinates, the list-record convention `Smooth` also uses. `View` is the
+# only surviving upstream option.
+function _plugin_exec_density(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    _plugin_check_single_mesh(view,"Density") || return nothing
+    elements,_,_=_plugin_elements_all_steps(view,caller)
+    incidence=Dict{NTuple{3,Float64},Int}()
+    for element in elements
+        for node in axes(element.geo,2)
+            key=(element.geo[1,node],element.geo[2,node],element.geo[3,node])
+            incidence[key]=get(incidence,key,0)+1
+        end
+    end
+    out=_PluginElement[]
+    for element in elements
+        _plugin_record_type(element.kind,1)===nothing && continue
+        ga=size(element.geo,2)
+        vals=Vector{Float64}(undef,ga)
+        for node in 1:ga
+            vals[node]=Float64(incidence[(element.geo[1,node],
+                element.geo[2,node],element.geo[3,node])])
+        end
+        push!(out,_PluginElement(element.kind,element.dim,element.geo,
+                                 element.geo,vals,1,element.etag))
+    end
+    _plugin_extract_emit(view.name*"_Density",out,-1,1,Float64[0.0],caller)
+    return nothing
+end
+
 # ---- registry --------------------------------------------------------------------------------
 
 const _PLUGINS=Dict{String,NamedTuple}(
@@ -2812,4 +3056,17 @@ const _PLUGINS=Dict{String,NamedTuple}(
         string_options=Dict{String,String}("Text"=>"My Text",
             "Font"=>"Helvetica","Align"=>"Left"),
         run_fn=_plugin_exec_annotate),
+    "Eigenvalues"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_eigenvalues),
+    "ModulusPhase"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"RealPart"=>0.0,"ImaginaryPart"=>1.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_modulus_phase),
+    "HarmonicToTime"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"RealPart"=>0.0,"ImaginaryPart"=>1.0,"NumSteps"=>20.0,
+        "TimeSign"=>-1.0,"Frequency"=>1.0,"NumPeriods"=>1.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_harmonic_to_time),
+    "Density"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_density),
 )

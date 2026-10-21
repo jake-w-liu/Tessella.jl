@@ -12050,7 +12050,8 @@ value)` configure a registered plugin's options; `run(name)` executes it.
 Supported plugins: `Integrate`, `MinMax`, `Probe`, `Skin`, `ExtractElements`,
 `Transform`, `Remove`, `Smooth`, `NewView`, `Gradient`, `CutPlane`, `CutSphere`,
 `Warp`, `MathEval`, `Scal2Vec`, `Divergence`, `Curl`, `Lambda2`,
-`SphericalRaise`, `Annotate`. Setting the numeric option `Run` to a nonzero
+`SphericalRaise`, `Annotate`, `Eigenvalues`, `ModulusPhase`, `HarmonicToTime`,
+`Density`. Setting the numeric option `Run` to a nonzero
 value executes the plugin immediately.
 """
 module plugin
