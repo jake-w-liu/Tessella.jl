@@ -165,7 +165,7 @@ function _model_import_prepare(path,dimension;legacy=false)
     result=if extension==".msh"
         GeoExec._geo_stage_mesh_file(path;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
-    elseif extension in (".unv",".mesh",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk")
+    elseif extension in (".unv",".mesh",".meshb",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk")
         IO._stage_foreign_mesh_file(path;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
     elseif extension==".stl"
@@ -290,8 +290,8 @@ function _model_import_filename(filename,caller;geo_only=false)
     filename isa AbstractString && !isempty(filename) && !occursin('\0',filename) ||
         throw(ArgumentError("$caller: filename must be a nonempty NUL-free string"))
     extension=lowercase(splitext(filename)[2])
-    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos",".unv",".mesh",".stl",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk")) || throw(ArgumentError(
-        "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh, .pos, .unv, .mesh, .stl, .su2, .bdf, .nas, .inp, .neu, .p3d, .mail, .ir3, .diff and .vtk")"))
+    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos",".unv",".mesh",".meshb",".stl",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk")) || throw(ArgumentError(
+        "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh, .pos, .unv, .mesh, .meshb, .stl, .su2, .bdf, .nas, .inp, .neu, .p3d, .mail, .ir3, .diff and .vtk")"))
     isfile(filename) || throw(ArgumentError("$caller: missing file $filename"))
     return String(filename)
 end
@@ -299,12 +299,13 @@ end
 """
     open(filename)
 
-Import a `.geo`, `.msh`, `.unv`, `.mesh`, `.stl`, `.su2`, `.bdf`, `.nas`,
-`.inp`, `.neu`, `.p3d`, `.mail`, `.ir3`, `.diff`, `.vtk` or supported linear-list
-`.pos` file into a new current model, reusing an empty
+Import a `.geo`, `.msh`, `.unv`, `.mesh`, `.meshb`, `.stl`, `.su2`, `.bdf`,
+`.nas`, `.inp`, `.neu`, `.p3d`, `.mail`, `.ir3`, `.diff`, `.vtk` or supported
+linear-list `.pos` file into a new current model, reusing an empty
 current model. Nonempty prior models and session views remain alive. MSH
 imports keep actual UIDs, entity ownership and retained metadata; UNV and
-Medit/MESH imports publish through the same channel with their elementary and
+Medit/MESH imports (ASCII `.mesh` and binary `.meshb` alike) publish through
+the same channel with their elementary and
 physical tags mapped to entity ownership, as do SU2 markers (mapped to
 physical groups and names), Nastran property ids (mapped to elementary
 entity and physical tags), Abaqus element sets (mapped to elementary and

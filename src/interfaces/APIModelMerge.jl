@@ -180,7 +180,7 @@ function _model_merge_prepare(path)
     result=if extension==".msh"
         GeoExec._geo_stage_mesh_merge(path,model,seed;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
-    elseif extension in (".unv",".mesh",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk")
+    elseif extension in (".unv",".mesh",".meshb",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk")
         IO._stage_foreign_mesh_merge(path,model,seed;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
     elseif extension==".stl"
@@ -216,9 +216,9 @@ end
 """
     merge(filename::AbstractString)
 
-Merge a `.geo`, `.msh`, `.unv`, `.mesh`, `.stl`, `.su2`, `.bdf`, `.nas`,
-`.inp`, `.neu`, `.p3d`, `.mail`, `.ir3`, `.diff`, `.vtk` or supported linear-list
-`.pos` file atomically. Existing models,
+Merge a `.geo`, `.msh`, `.unv`, `.mesh`, `.meshb`, `.stl`, `.su2`, `.bdf`,
+`.nas`, `.inp`, `.neu`, `.p3d`, `.mail`, `.ir3`, `.diff`, `.vtk` or supported
+linear-list `.pos` file atomically. Existing models,
 the current model slot, associated filename and held views survive. GEO executes
 against current entities, fields and options; an explicit `SetName` is honored.
 Supported literal MSH identities/periodic/partition/data metadata are retained;

@@ -31,6 +31,7 @@ using Printf: @printf, @sprintf, Format, format
 export read_msh, write_msh, MshFile
 export read_stl, read_geo_params, GeoParams, GeoFieldSpec
 export read_unv, write_unv, read_mesh, write_mesh, UnvFile, MeshFile
+export read_meshb, write_meshb
 export read_su2, write_su2, read_bdf, write_bdf, Su2File, BdfFile
 export read_inp, write_inp, read_neu, write_neu, InpFile, NeuFile
 export read_p3d, write_p3d, read_mail, write_mail, read_ir3, write_ir3,
@@ -11481,6 +11482,196 @@ function read_mesh(path;
     return MeshFile(mesh,node_tags,element_tags)
 end
 
+# ── INRIA/Medit binary (.meshb) ────────────────────────────────────────────────
+# Keyword codes come from the libMeshb `GmfKwdCod` table (the enum ordinal is
+# the on-disk code): each counted section is `code, next-keyword byte offset,
+# count, records`, where records are the same arity vertex indices plus a
+# trailing `ref` as the ASCII sections. The file version selects the storage
+# widths — version 1: 4-byte reals, 4-byte indices, 4-byte offsets; version 2:
+# 8-byte reals, 4-byte indices, 4-byte offsets; version 3: 8-byte reals,
+# 4-byte indices, 8-byte offsets; version 4: 8-byte reals, 8-byte indices,
+# 8-byte offsets. Keyword codes and the Dimension value are always 4-byte
+# words. The first word doubles as the endianness tag: reading it as a
+# little-endian Int32 gives 1, or 0x01000000 for a big-endian file.
+const _MEDITB_READ_SECTIONS=Dict{Int32,Tuple{Int,Int}}(
+    Int32(5)=>(1,2),Int32(25)=>(8,3),Int32(92)=>(26,4),Int32(93)=>(27,5),
+    Int32(6)=>(2,3),Int32(24)=>(9,6),Int32(90)=>(21,10),Int32(91)=>(23,15),
+    Int32(7)=>(3,4),
+    Int32(8)=>(4,4),Int32(30)=>(11,10),Int32(96)=>(29,20),Int32(97)=>(30,35),
+    Int32(10)=>(5,8))
+const _MEDITB_SECTION_CODE=Dict{String,Int32}(
+    "Edges"=>5,"EdgesP2"=>25,"EdgesP3"=>92,"EdgesP4"=>93,
+    "Triangles"=>6,"TrianglesP2"=>24,"TrianglesP3"=>90,"TrianglesP4"=>91,
+    "Quadrilaterals"=>7,
+    "Tetrahedra"=>8,"TetrahedraP2"=>30,"TetrahedraP3"=>96,"TetrahedraP4"=>97,
+    "Hexahedra"=>10)
+const _MEDITB_VERSION_FORMATTED=Int32(1)
+const _MEDITB_DIMENSION=Int32(3)
+const _MEDITB_VERTICES=Int32(4)
+const _MEDITB_END=Int32(54)
+const _MEDITB_SWAPPED_TAG=Int32(16777216)   # byte-swapped 1 → big-endian file
+
+@inline function _meditb_value(io,swapped::Bool,::Type{T}) where {T}
+    value=read(io,T)
+    swapped || return value
+    U=T===Float32 ? UInt32 : T===Float64 ? UInt64 : unsigned(T)
+    return reinterpret(T,bswap(reinterpret(U,value)))
+end
+
+function _meditb_file_end(io)
+    mark=position(io);seekend(io);last=position(io);seek(io,mark)
+    return last
+end
+
+function _meditb_check_pos(io,caller,offset)
+    offset>0 && offset!=position(io) && throw(ArgumentError(
+        "$caller: inconsistent .meshb next-keyword offset $offset"))
+    return nothing
+end
+
+function _read_meditb(io::Base.IO,caller::AbstractString,node_limit::Int,
+                      element_limit::Int)
+    # The mandatory header is `MeshVersionFormatted` (code 1) then the version
+    # word; the code read little-endian also yields the endianness tag.
+    eof(io) && throw(ArgumentError("$caller: empty .meshb file"))
+    magic=read(io,Int32)
+    magic==_MEDITB_VERSION_FORMATTED || magic==_MEDITB_SWAPPED_TAG ||
+        throw(ArgumentError(
+            "$caller: not a binary Medit mesh (unexpected " *
+            "MeshVersionFormatted code)"))
+    swapped=magic==_MEDITB_SWAPPED_TAG
+    version=_meditb_value(io,swapped,Int32)
+    version in Int32(1):Int32(4) || throw(ArgumentError(
+        "$caller: unsupported .meshb version $version"))
+    itype=version>=4 ? Int64 : Int32   # 'i' fields: indices, refs, counts
+    ptype=version>=3 ? Int64 : Int32   # next-keyword offsets
+    ftype=version==1 ? Float32 : Float64
+    read_int()=Int64(_meditb_value(io,swapped,itype))
+    read_pos()=Int64(_meditb_value(io,swapped,ptype))
+    read_real()=Float64(_meditb_value(io,swapped,ftype))
+    # The Dimension keyword is mandatory and must come first; its value stays
+    # a 4-byte word in every version.
+    code=_meditb_value(io,swapped,Int32)
+    code==_MEDITB_DIMENSION || throw(ArgumentError(
+        "$caller: .meshb keyword $code found where Dimension was expected"))
+    offset=read_pos()
+    dimension=Int(_meditb_value(io,swapped,Int32))
+    dimension in (2,3) || throw(ArgumentError(
+        "$caller: unsupported .meshb dimension $dimension"))
+    _meditb_check_pos(io,caller,offset)
+    file_end=_meditb_file_end(io)
+    coords=Float64[]
+    vertex_count=0
+    records=_TextMeshCell[]
+    element_counter=Ref{Int64}(0)
+    node_labels=Int64[]
+    while !eof(io)
+        code=_meditb_value(io,swapped,Int32)
+        code==_MEDITB_END && break
+        offset=read_pos()
+        if code==_MEDITB_VERTICES
+            count=read_int()
+            count>=0 || throw(ArgumentError(
+                "$caller: negative .meshb Vertices count $count"))
+            count<=node_limit || throw(ArgumentError(
+                "$caller: .meshb vertex count exceeds max_nodes=$node_limit"))
+            vertex_count==0 || isempty(records) || throw(ArgumentError(
+                "$caller: repeated Vertices after element sections"))
+            empty!(coords);resize!(node_labels,0);vertex_count=Int(count)
+            for _ in 1:count
+                x=read_real();y=read_real()
+                z=dimension==3 ? read_real() : 0.0
+                isfinite(x) && isfinite(y) && isfinite(z) || throw(ArgumentError(
+                    "$caller: non-finite floating-point value in vertex " *
+                    "coordinate"))
+                read_int()   # vertex ref: parsed, unused upstream
+                push!(coords,x);push!(coords,y);push!(coords,z)
+                push!(node_labels,Int64(length(node_labels)+1))
+            end
+        elseif haskey(_MEDITB_READ_SECTIONS,code)
+            msh,arity=_MEDITB_READ_SECTIONS[code]
+            count=read_int()
+            count>=0 || throw(ArgumentError(
+                "$caller: negative .meshb keyword $code count $count"))
+            length(records)+count<=element_limit || throw(ArgumentError(
+                "$caller: .meshb element count exceeds " *
+                "max_elements=$element_limit"))
+            vertex_count>0 || count==0 || throw(ArgumentError(
+                "$caller: keyword $code appeared before Vertices"))
+            for _ in 1:count
+                rows=Vector{Int32}(undef,arity)
+                @inbounds for i in 1:arity
+                    index=read_int()
+                    1<=index<=vertex_count || throw(ArgumentError(
+                        "$caller: .meshb keyword $code record references " *
+                        "vertex $index outside 1:$vertex_count"))
+                    rows[i]=Int32(index)
+                end
+                ref=read_int()
+                0<=ref<=typemax(Int32) || throw(ArgumentError(
+                    "$caller: .meshb ref $ref is outside 0:$(typemax(Int32))"))
+                msh==11 && (rows=rows[collect(_MEDIT_TET10_SWAP)])
+                element_counter[]+=Int64(1)
+                push!(records,_TextMeshCell(
+                    element_counter[],msh,rows,ref,ref))
+            end
+        else
+            # Unrecognized keyword (Corners, Required*, normals, solutions,
+            # prisms, ...): jump to the next-keyword offset — the binary
+            # counterpart of skipping an unrecognized ASCII section.
+            offset>position(io) && offset<=file_end || throw(ArgumentError(
+                "$caller: unrecognized .meshb keyword $code without a " *
+                "valid next-keyword offset"))
+            seek(io,offset)
+            continue
+        end
+        _meditb_check_pos(io,caller,offset)
+    end
+    return node_labels,coords,records
+end
+
+"""
+    read_meshb(path; max_nodes, max_elements, max_file_bytes) -> MeshFile
+
+Read an INRIA/Medit binary `.meshb` file (versions 1–4, `Dimension` 2 or 3,
+little- or big-endian). Keyword-coded sections carry the same records as the
+ASCII `.mesh` sections: `Vertices`, `Edges[P2|P3|P4]`, `Triangles[P2|P3|P4]`,
+`Quadrilaterals`, `Tetrahedra[P2|P3|P4]` and `Hexahedra` map to their Gmsh
+types; the trailing `ref` becomes the elementary entity tag and, when
+positive, the physical tag. Unrecognized keywords are skipped through their
+next-keyword offset; dangling vertex references, malformed records and
+inconsistent offsets are errors. Returns the same [`MeshFile`](@ref)
+contract as [`read_mesh`](@ref). Gmsh itself has no `.meshb` route; this is
+the libMeshb/GMF binary counterpart of the Medit reader.
+"""
+function read_meshb(path;
+                    max_nodes=typemax(Int32),max_elements=typemax(Int32),
+                    max_file_bytes=typemax(Int))
+    caller="read_meshb"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    node_limit=_io_limit(max_nodes,caller,"max_nodes";ceiling=Int(typemax(Int32)))
+    element_limit=_io_limit(
+        max_elements,caller,"max_elements";ceiling=Int(typemax(Int32)))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
+    node_labels,coords,records=open(path,"r") do io
+        try
+            return _read_meditb(io,caller,node_limit,element_limit)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa EOFError && throw(ArgumentError(
+                "$caller: truncated .meshb file"))
+            rethrow()
+        end
+    end
+    mesh,node_tags,element_tags=_foreign_mesh_result(
+        caller,node_labels,coords,records)
+    return MeshFile(mesh,node_tags,element_tags)
+end
+
 # ── Session-model staging through the native mesh-import channel ───────────────
 # `.unv`/`.mesh` records are re-encoded as a bounded MSH 2.2 stream (node and
 # element labels, `physical elementary` tag pair) so `GeoExec` publishes them
@@ -11557,6 +11748,19 @@ function _read_foreign_records(path,caller::AbstractString)
                 err isa InterruptException && rethrow()
                 err isa EOFError && throw(ArgumentError(
                     "$caller: truncated .mesh file"))
+                rethrow()
+            end
+        end
+        return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
+    elseif extension==".meshb"
+        node_labels,coords,records=open(path,"r") do io
+            try
+                return _read_meditb(io,caller,
+                    Int(typemax(Int32)),Int(typemax(Int32)))
+            catch err
+                err isa InterruptException && rethrow()
+                err isa EOFError && throw(ArgumentError(
+                    "$caller: truncated .meshb file"))
                 rethrow()
             end
         end
@@ -11893,6 +12097,124 @@ function write_mesh(path,m)
             end
         end
         println(io," End")
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+"""
+    write_meshb(path, mesh; version=0)
+
+Write a `Mesh` or `MixedMesh` as an INRIA/Medit binary `.meshb` file
+(keyword-coded `Vertices`, `Edges`/`Triangles`/`Quadrilaterals`/`Tetrahedra`/
+`Hexahedra` and the P2–P4 variants, `End`), the binary counterpart of
+[`write_mesh`](@ref). `version` selects the libMeshb encoding: 1 (32-bit
+reals/indices/offsets), 2 (64-bit reals, 32-bit indices/offsets), 3 (64-bit
+reals/offsets, 32-bit indices) or 4 (64-bit everywhere); the default `0`
+picks version 3, upgrading to 4 when a section count exceeds Int32 — the
+same upgrade rule libMeshb applies. The per-element `ref` and vertex `ref`
+follow the ASCII writer's semantics exactly, as do element-order and
+rejections of families Medit cannot express. Gmsh itself has no `.meshb`
+route; this writes the standard GMF layout readable by libMeshb-based
+tools.
+"""
+function write_meshb(path,m;version::Integer=0)
+    caller="write_meshb"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    sections=Dict{Int,String}()
+    for block in m.blocks
+        block isa ElementBlock || throw(ArgumentError(
+            "$caller: special MSH record type $(block.msh) is not " *
+            "representable in .meshb"))
+        # Medit has no point-element section; upstream writeMESH emits vertex
+        # entities into `Vertices` only, so point cells are not records here.
+        section=block.msh==15 ? "" : get(_MEDIT_WRITE_SECTIONS,block.msh,nothing)
+        section===nothing && throw(ArgumentError(
+            "$caller: element type $(block.msh) ($(msh_family(block.msh)) " *
+            "order $(msh_spec(block.msh).order)) is not representable " *
+            "in .meshb"))
+        sections[block.msh]=section
+    end
+    data=m.entity_data
+    nn=size(m.coords,2)
+    counts=Int64[nn]
+    for section in _MEDIT_SECTION_ORDER
+        c=Int64(0)
+        for block in m.blocks
+            get(sections,block.msh,"")==section || continue
+            c+=size(block.nodes,2)
+        end
+        push!(counts,c)
+    end
+    maxref=Int64(0)
+    for (bi,block) in enumerate(m.blocks)
+        for j in 1:size(block.nodes,2)
+            physical=Int64(block.tags[j])
+            entity=_foreign_cell_entity(m,bi,j)
+            maxref=max(maxref,physical>0 ? physical : entity)
+        end
+    end
+    version==0 && (version=any(>(typemax(Int32)),counts) ? 4 : 3)
+    version in 1:4 || throw(ArgumentError(
+        "$caller: .meshb version must be between 1 and 4"))
+    version<=3 && (any(>(typemax(Int32)),counts) ||
+        maxref>typemax(Int32)) && throw(ArgumentError(
+        "$caller: .meshb version $version cannot encode counts or refs " *
+        "above 2^31-1 (requires version 4)"))
+    itype=version>=4 ? Int64 : Int32
+    ptype=version>=3 ? Int64 : Int32
+    isize=Int64(sizeof(itype));psize=Int64(sizeof(ptype))
+    target,parent=_foreign_target(path,caller)
+    mktemp(parent) do temporary,io
+        write_i(v)=write(io,itype(v))
+        write_pos(v)=write(io,ptype(v))
+        write_real(x)=version==1 ? write(io,Float32(x)) :
+            write(io,Float64(x))
+        # Header: MeshVersionFormatted code+version, then the mandatory
+        # Dimension keyword; `cursor` tracks the next keyword's byte offset.
+        write(io,_MEDITB_VERSION_FORMATTED);write(io,Int32(version))
+        cursor=Int64(8+4+psize+4)
+        write(io,_MEDITB_DIMENSION);write_pos(cursor);write(io,Int32(3))
+        # Vertices is always emitted, like the ASCII writer.
+        vrec=Int64(3*(version==1 ? 4 : 8)+isize)
+        write(io,_MEDITB_VERTICES)
+        write_pos(cursor+4+psize+isize+nn*vrec);write_i(nn)
+        @inbounds for i in 1:nn
+            ref=data===nothing ? Int32(0) : data.node_entities[i][2]
+            write_real(m.coords[1,i]);write_real(m.coords[2,i])
+            write_real(m.coords[3,i]);write_i(ref)
+        end
+        cursor+=4+psize+isize+nn*vrec
+        for section in _MEDIT_SECTION_ORDER
+            count=0
+            for block in m.blocks
+                get(sections,block.msh,"")==section || continue
+                count+=size(block.nodes,2)
+            end
+            count==0 && continue
+            arity=_MEDIT_READ_SECTIONS[section][2]
+            reclen=Int64(arity*isize+isize)
+            write(io,_MEDITB_SECTION_CODE[section])
+            write_pos(cursor+4+psize+isize+count*reclen);write_i(count)
+            for (bi,block) in enumerate(m.blocks)
+                get(sections,block.msh,"")==section || continue
+                for j in 1:size(block.nodes,2)
+                    physical=Int64(block.tags[j])
+                    entity=_foreign_cell_entity(m,bi,j)
+                    ref=physical>0 ? physical : entity
+                    for k in 1:arity
+                        row=block.msh==11 ? _MEDIT_TET10_SWAP[k] : k
+                        write_i(block.nodes[row,j])
+                    end
+                    write_i(ref)
+                end
+            end
+            cursor+=4+psize+isize+count*reclen
+        end
+        write(io,_MEDITB_END);write_pos(0)
         flush(io);close(io)
         mv(temporary,target;force=true)
     end

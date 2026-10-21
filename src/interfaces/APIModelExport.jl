@@ -135,11 +135,11 @@ function _model_export_write(filename)
             "aliases: .msh, .msh2/.msh22 for MSH 2.2, .msh4/.msh41 for MSH 4.1)"))
     end
     (haskey(_MSH_EXTENSION_VERSIONS,extension) ||
-        extension in (".unv",".mesh",".stl",".su2",".bdf",".nas",".inp",".neu",
-                      ".p3d",".mail",".ir3",".diff",".vtk")) || throw(ArgumentError(
+        extension in (".unv",".mesh",".meshb",".stl",".su2",".bdf",".nas",
+                      ".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk")) || throw(ArgumentError(
         "$caller: current-model export supports .msh, .msh2/.msh22, " *
-        ".msh4/.msh41, .unv, .mesh, .stl, .su2, .bdf, .nas, .inp, .neu, " *
-        ".p3d, .mail, .ir3, .diff and .vtk"))
+        ".msh4/.msh41, .unv, .mesh, .meshb, .stl, .su2, .bdf, .nas, .inp, " *
+        ".neu, .p3d, .mail, .ir3, .diff and .vtk"))
     return lock(STATE_LOCK) do
         model=_model_locked()
         save_all=!iszero(get(OPTIONS,"Mesh.SaveAll",0.0))
@@ -169,8 +169,9 @@ function _model_export_write(filename)
             # exports only structured transfinite grids upstream, which the
             # projection cannot represent, so it always rejects; MAIL emits
             # the face triangles with trailing ` 0 0 0` edge placeholders;
-            # IR3 emits self-describing vertex-count element records whose
-            # tag field follows the Mesh.SaveElementTagType semantics; DIFF
+            # MESHB writes the same Medit records in binary keyword-coded
+            # form; IR3 emits self-describing vertex-count element records
+            # whose tag field follows the Mesh.SaveElementTagType semantics; DIFF
             # emits the GridFE deck (boundary-indicator node rows, top-dim
             # `Elm*` records on the physical-or-entity subdomain column); VTK
             # emits a legacy ASCII UNSTRUCTURED_GRID with a CELL_DATA
@@ -184,6 +185,7 @@ function _model_export_write(filename)
             tag_type=trunc(Int,get(OPTIONS,"Mesh.SaveElementTagType",1.0))
             extension==".unv" ? IO.write_unv(filename,target) :
                 extension==".mesh" ? IO.write_mesh(filename,target) :
+                extension==".meshb" ? IO.write_meshb(filename,target) :
                 extension==".su2" ? IO.write_su2(filename,target) :
                 extension==".inp" ? IO.write_inp(filename,target) :
                 extension==".neu" ? IO.write_neu(filename,target) :
@@ -203,8 +205,8 @@ end
     write(filename)
 
 Write the current model's actual mesh to a `.msh`, `.msh2`, `.msh22`, `.msh4`,
-`.msh41`, `.stl`, `.unv`, `.mesh`, `.su2`, `.bdf`, `.nas`, `.inp`, `.neu`,
-`.p3d`, `.mail`, `.ir3`, `.diff` or `.vtk` file. `.msh` uses `Mesh.MshFileVersion`
+`.msh41`, `.stl`, `.unv`, `.mesh`, `.meshb`, `.su2`, `.bdf`, `.nas`, `.inp`,
+`.neu`, `.p3d`, `.mail`, `.ir3`, `.diff` or `.vtk` file. `.msh` uses `Mesh.MshFileVersion`
 to select 2.2 or 4.1 while the versioned aliases force the corresponding
 dialect; `.msh1`, `.msh3` and `.msh40` reject. `Mesh.Binary` selects the
 encoding, and `Mesh.SaveAll`
@@ -214,7 +216,8 @@ rejects volume elements; MSH4 preserves actual UIDs and retained periodic,
 partition, ghost, and data metadata; MSH2 uses its native dense numbering.
 `.unv` emits I-DEAS datasets 2411/2412 with elementary and physical tags;
 `.mesh` emits INRIA/Medit sections with `ref` carrying the physical tag (or
-entity tag when no physical tag is set); `.su2` emits NDIME/NPOIN/NELEM with
+entity tag when no physical tag is set); `.meshb` emits the same sections in
+the libMeshb binary (GMF keyword) encoding; `.su2` emits NDIME/NPOIN/NELEM with
 physical groups as named MARKER sections; `.bdf`/`.nas` emit Nastran
 GRID and element cards with the physical tag in the property-id field; `.inp`
 emits Abaqus `*NODE`/`*ELEMENT` blocks plus `*ELSET`/`*NSET` physical
