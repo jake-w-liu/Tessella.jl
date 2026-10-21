@@ -35,6 +35,7 @@ export read_su2, write_su2, read_bdf, write_bdf, Su2File, BdfFile
 export read_inp, write_inp, read_neu, write_neu, InpFile, NeuFile
 export read_p3d, write_p3d, read_mail, write_mail, read_ir3, write_ir3,
        P3dFile, MailFile, Ir3File
+export read_diff, write_diff, DiffFile
 export read_vtk, write_vtk, VtkFile
 
 include("GeoColorNames.jl")
@@ -11644,6 +11645,18 @@ function _read_foreign_records(path,caller::AbstractString)
                 rethrow()
             end
         end
+    elseif extension==".diff"
+        return open(path,"r") do io
+            try
+                return _read_diff(io,caller,
+                    Int(typemax(Int32)),Int(typemax(Int32)))
+            catch err
+                err isa InterruptException && rethrow()
+                err isa EOFError && throw(ArgumentError(
+                    "$caller: truncated .diff file"))
+                rethrow()
+            end
+        end
     elseif extension==".vtk"
         return open(path,"r") do io
             try
@@ -14057,9 +14070,10 @@ function write_neu(path,m)
 end
 
 # ════════════════════════════════════════════════════════════════════════════════
-# Plot3D structured grids (.p3d), CEA triangulation (.mail) and Iridium (.ir3)
-# mesh I/O — the format semantics below follow the pinned release's
-# `GModelIO_P3D.cpp`, `GModelIO_MAIL.cpp` and `GModelIO_IR3.cpp`.
+# Plot3D structured grids (.p3d), CEA triangulation (.mail), Iridium (.ir3)
+# and Diffpack/GridFE (.diff) mesh I/O — the format semantics below follow
+# the pinned release's `GModelIO_P3D.cpp`, `GModelIO_MAIL.cpp`,
+# `GModelIO_IR3.cpp` and `GModelIO_DIFF.cpp`.
 #
 # `.p3d` is the PLOT3D "whole" ASCII structured-grid format: an integer block
 # count, `ni nj nk` per block (the 2-D variant declares `nk == 1`), then —
@@ -14105,6 +14119,25 @@ end
 # dimension; single-count decks pick the one dimension every record arity
 # can express, with a node-planarity tiebreak preferring the surface
 # reading on planar node sets.
+#
+# `.diff` is Diffpack's GridFE deck — bidirectional upstream. A free-form
+# banner ends on the counted `Number of space dim.`, `Number of elements`
+# and `Number of nodes` headers (substring anchors, fixed argument
+# positions), the `Max number of nodes in an element` width and the
+# `Boundary indicators:` summary whose per-node memberships prefix each
+# `num ( x , y , z ) [k] b1 .. bk` coordinate row. Element records are
+# `num type subdomain n1 .. nk` lines whose `type` is one of the ten
+# upstream `Elm*` names (tri/quad and tet/hex only — lines, prisms,
+# pyramids, points and every other family have no `getStringForDIFF`), the
+# `subdomain` column is the elementary entity tag on input and the
+# entity's physical tags on output, and each type's connectivity passes
+# through a fixed file-to-Gmsh node permutation. The reader's `mapping`
+# tables and the writer's `getVertexDIFF` orders are the pinned upstream
+# pairs — they are *not* mutual inverses for the non-involution layouts
+# (quad8/quad9, tet10, hex8/hex20/hex27), so an upstream write→read round
+# trip permutes those connectivities; mirroring both tables keeps both
+# directions byte- and cell-faithful to the oracle instead of correcting
+# only one side.
 # ════════════════════════════════════════════════════════════════════════════════
 
 # ── PLOT3D (.p3d) reader ─────────────────────────────────────────────────────
@@ -14749,6 +14782,476 @@ function write_ir3(path,m;element_tag_type::Integer=1)
                 end
             end
         end
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+# ── Diffpack/GridFE (.diff) reader ───────────────────────────────────────────
+
+# Gmsh type → (Diffpack `Elm*` type string, upstream `getVertexDIFF` write
+# placement): file slot k holds the element's local node `perm[k]`.
+const _DIFF_WRITE_TABLE=Dict{Int,Tuple{String,NTuple{N,Int} where N}}(
+    2=>("ElmT3n2D",(1,2,3)),          # MTriangle — identity
+    9=>("ElmT6n2D",(1,2,3,4,5,6)),    # MTriangle6 — identity
+    3=>("ElmB4n2D",(1,2,4,3)),        # MQuadrangle
+    16=>("ElmB8n2D",(1,2,4,3,5,8,6,7)),
+    10=>("ElmB9n2D",(1,3,9,7,2,6,8,4,5)),
+    4=>("ElmT4n3D",(1,2,3,4)),        # MTetrahedron — identity
+    11=>("ElmT10n3D",(1,2,3,4,5,6,7,8,10,9)),
+    5=>("ElmB8n3D",(3,4,8,7,1,2,6,5)),
+    17=>("ElmB20n3D",(3,4,8,7,1,2,6,5,10,19,13,20,15,12,16,14,9,17,18,11)),
+    12=>("ElmB27n3D",(7,9,27,25,1,3,21,19,8,16,4,18,6,26,24,22,2,10,12,
+        20,17,5,13,15,23,11,14)))
+
+# Diffpack `Elm*` type string → (Gmsh type, upstream `readDIFF` `mapping`):
+# the k-th node listed on the record fills Gmsh slot `rmap[k]`. The upstream
+# pair (`getVertexDIFF`, `mapping`) is not self-inverse for the brick and
+# second-order layouts, so this table intentionally differs from
+# `_DIFF_WRITE_TABLE` for those types — the pinned release behaves the same
+# way in both directions.
+const _DIFF_READ_TABLE=Dict{String,Tuple{Int,NTuple{N,Int} where N}}(
+    "ElmT3n2D"=>(2,(1,2,3)),
+    "ElmT6n2D"=>(9,(1,2,3,4,5,6)),
+    "ElmB4n2D"=>(3,(1,2,4,3)),
+    "ElmB8n2D"=>(16,(1,2,4,3,5,7,8,6)),
+    "ElmB9n2D"=>(10,(1,5,2,8,9,6,4,7,3)),
+    "ElmT4n3D"=>(4,(1,2,3,4)),
+    "ElmT10n3D"=>(11,(1,2,3,4,5,6,7,8,9,10)),
+    "ElmB8n3D"=>(5,(5,6,1,2,8,7,4,3)),
+    "ElmB20n3D"=>(17,(5,6,1,2,8,7,4,3,17,9,20,14,16,13,15,18,19,10,12)),
+    "ElmB27n3D"=>(12,(5,17,6,11,22,13,1,9,2,18,26,19,23,27,24,10,21,12,8,
+        20,7,16,25,15,4,14,3)))
+
+# Upstream scans each header marker with `strstr` (substring anywhere on the
+# line) and fails through a stale sscanf at end-of-file; this version reports
+# the missing section directly instead.
+function _diff_scan_marker(io::Base.IO,caller::AbstractString,
+                           what::AbstractString,markers)
+    while !eof(io)
+        line=readline(io)
+        any(marker->occursin(marker,line),markers) && return line
+    end
+    throw(ArgumentError("$caller: truncated .diff file (expected $what)"))
+end
+
+# The section separator is a literal `#' in column 0 (`str[0] != '#'`).
+function _diff_scan_hash(io::Base.IO,caller::AbstractString,
+                         what::AbstractString)
+    while !eof(io)
+        line=readline(io)
+        startswith(line,'#') && return line
+    end
+    throw(ArgumentError("$caller: truncated .diff file (expected $what)"))
+end
+
+# Header values sit at fixed token positions after the skipped marker words
+# (upstream's `sscanf` suppression list). The value itself is frequently
+# unused upstream; the parse still has to succeed.
+function _diff_header_int(line::AbstractString,caller::AbstractString,
+                          what::AbstractString,position::Int)
+    fields=split(line)
+    length(fields)>=position || throw(ArgumentError(
+        "$caller: malformed .diff $what line '$line'"))
+    return _unv_int(fields[position],caller,".diff $what")
+end
+
+# `num ( x , y , z ) [k] b1 .. bk` — literal parentheses/commas/brackets like
+# the pinned `sscanf` pattern, tolerant of missing interior whitespace.
+const _DIFF_NODE_PATTERN=Regex(
+    "^\\s*([+-]?\\d+)\\s*\\(\\s*([^\\s,]+)\\s*,\\s*([^\\s,]+)\\s*," *
+    "\\s*([^\\s,)]+)\\s*\\)\\s*\\[\\s*([+-]?\\d+)\\s*\\](.*)\$")
+
+function _read_diff(io::Base.IO,caller::AbstractString,node_limit::Int,
+                   element_limit::Int)
+    line=_diff_scan_marker(io,caller,"the 'Number of space dim.' header",
+        ("Number of space dim. =",))
+    _diff_header_int(line,caller,"space dimension",6)
+    line=_diff_scan_marker(io,caller,"the 'Number of elements' header",
+        ("Number of elements   =",))
+    ne=_diff_header_int(line,caller,"element count",5)
+    ne>=0 || throw(ArgumentError(
+        "$caller: .diff element count must be non-negative, got $ne"))
+    ne<=element_limit || throw(ArgumentError(
+        "$caller: .diff element count exceeds max_elements=$element_limit"))
+    line=_diff_scan_marker(io,caller,"the 'Number of nodes' header",
+        ("Number of nodes      =",))
+    nv=_diff_header_int(line,caller,"node count",5)
+    nv>=0 || throw(ArgumentError(
+        "$caller: .diff node count must be non-negative, got $nv"))
+    nv<=node_limit || throw(ArgumentError(
+        "$caller: .diff node count exceeds max_nodes=$node_limit"))
+    line=_diff_scan_marker(io,caller,
+        "the 'Max number of nodes in an element' header",
+        ("Max number of nodes in an element:",))
+    # The declared maximum is consumed only: each record carries its own type
+    # name and therefore its own arity, which is what upstream parses before
+    # feeding the connectivity check.
+    maxverts=_diff_header_int(line,caller,"maximum nodes per element",8)
+    maxverts>=0 || throw(ArgumentError(
+        "$caller: .diff maximum nodes per element must be non-negative, " *
+        "got $maxverts"))
+    # The "Only one material/subdomain" verdict is parsed but never used
+    # upstream (`severalSubdomains` is dead state); presence is required.
+    eof(io) && throw(ArgumentError(
+        "$caller: truncated .diff file (expected the subdomain header)"))
+    readline(io)
+    line=_diff_scan_marker(io,caller,"the 'Boundary indicators' header",
+        ("Boundary indicators:","boundary indicators:"))
+    fields=split(line)
+    nbi=_unv_int(fields[1],caller,".diff boundary-indicator count")
+    nbi>=0 || throw(ArgumentError(
+        "$caller: .diff boundary-indicator count must be non-negative, " *
+        "got $nbi"))
+    length(fields)>=3+nbi || throw(ArgumentError(
+        "$caller: .diff boundary-indicators line lists fewer than $nbi " *
+        "values"))
+    @inbounds for i in 1:nbi
+        _unv_int(fields[3+i],caller,".diff boundary indicator")
+    end
+    _diff_scan_hash(io,caller,"the nodal-coordinates '#' separator")
+    node_labels=Int64[];sizehint!(node_labels,nv)
+    node_rows=Dict{Int64,Int32}();sizehint!(node_rows,nv)
+    coords=Vector{Float64}(undef,3*nv);nstored=0
+    for i in 1:nv
+        eof(io) && throw(ArgumentError(
+            "$caller: truncated .diff file (expected node $i)"))
+        matched=match(_DIFF_NODE_PATTERN,readline(io))
+        matched===nothing && throw(ArgumentError(
+            "$caller: malformed .diff node record $i"))
+        captures=matched.captures
+        label=_unv_int(captures[1],caller,".diff node number")
+        label>=1 || throw(ArgumentError(
+            "$caller: non-positive .diff node number $label"))
+        x=_unv_float(captures[2],caller,".diff node coordinate")
+        y=_unv_float(captures[3],caller,".diff node coordinate")
+        z=_unv_float(captures[4],caller,".diff node coordinate")
+        k=_unv_int(captures[5],caller,".diff node boundary-indicator count")
+        k>=0 || throw(ArgumentError(
+            "$caller: .diff node $label has a negative boundary-indicator " *
+            "count $k"))
+        rest=split(captures[6])
+        length(rest)>=k || throw(ArgumentError(
+            "$caller: .diff node $label lists fewer than $k boundary " *
+            "indicators"))
+        @inbounds for t in 1:k
+            _unv_int(rest[t],caller,".diff node boundary indicator")
+        end
+        # Upstream warns and keeps the first coordinate row of a duplicate
+        # node number; the trailing indicator values are still consumed.
+        if haskey(node_rows,label)
+            @warn "$caller: skipping duplicate .diff node $label"
+        else
+            nstored+=1
+            node_rows[label]=Int32(nstored)
+            push!(node_labels,label)
+            @inbounds begin
+                coords[3nstored-2]=x
+                coords[3nstored-1]=y
+                coords[3nstored]=z
+            end
+        end
+    end
+    resize!(coords,3nstored)
+    _diff_scan_hash(io,caller,"the element-connectivity '#' separator")
+    records=_TextMeshCell[];sizehint!(records,ne)
+    for e in 1:ne
+        eof(io) && throw(ArgumentError(
+            "$caller: truncated .diff file (expected element $e)"))
+        fields=split(readline(io))
+        length(fields)>=3 || throw(ArgumentError(
+            "$caller: malformed .diff element record $e"))
+        # The element-number column is a required integer but carries no
+        # identity upstream — records are numbered by file order.
+        _unv_int(fields[1],caller,".diff element number")
+        entry=get(_DIFF_READ_TABLE,fields[2],nothing)
+        entry===nothing && throw(ArgumentError(
+            "$caller: unsupported .diff element type '$(fields[2])' on " *
+            "element $e"))
+        msh,rmap=entry
+        material=_unv_int(fields[3],caller,".diff element subdomain")
+        0<=material<=typemax(Int32) || throw(ArgumentError(
+            "$caller: .diff element $e subdomain tag $material is outside " *
+            "the non-negative Int32 range"))
+        arity=length(rmap)
+        length(fields)>=3+arity || throw(ArgumentError(
+            "$caller: .diff element $e ($(fields[2])) needs $arity nodes, " *
+            "got $(length(fields)-3)"))
+        nodes=Vector{Int32}(undef,arity)
+        @inbounds for k in 1:arity
+            label=_unv_int(fields[3+k],caller,".diff element node")
+            row=get(node_rows,label,Int32(0))
+            row!=0 || throw(ArgumentError(
+                "$caller: .diff element $e references unknown node $label"))
+            nodes[rmap[k]]=row
+        end
+        push!(records,_TextMeshCell(Int64(e),msh,nodes,Int64(material),
+            Int64(0)))
+    end
+    return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
+end
+
+"""
+    DiffFile
+
+Result of [`read_diff`](@ref): the compact `mesh` (an MSH2-style `MixedMesh`
+whose per-cell `elementary_entities` hold the record's subdomain/material
+column — the pinned reader stores it as the geometrical entity tag — and
+whose `tags` are zero, since `.diff` has no physical-groups concept on
+input), the file `node_tags` in row order and the per-block `element_tags`
+(dense file-order counters: the element-number column is consumed but not
+used as identity, like upstream).
+"""
+struct DiffFile
+    mesh::MixedMesh
+    node_tags::Vector{UInt64}
+    element_tags::Vector{Vector{UInt64}}
+end
+
+"""
+    read_diff(path; max_nodes, max_elements, max_file_bytes) -> DiffFile
+
+Read a Diffpack GridFE `.diff` file: a free-form banner scanned for the
+`Number of space dim.`/`Number of elements`/`Number of nodes`/
+`Max number of nodes in an element`/`Boundary indicators:` headers
+(substring anchors at fixed token positions, like the pinned `strstr` +
+`sscanf` sequence), a `#`-led node section of `num ( x , y , z ) [k] b1 ..`
+rows whose boundary-indicator lists are consumed but unused upstream, and a
+`#`-led element section of `num type subdomain n1 .. nk` records over the
+ten `Elm*` type names. Each type's arity comes from its own name (the
+declared maximum width is informational only) and node placement follows
+the pinned `readDIFF` `mapping` tables; the subdomain column becomes the
+elementary entity tag. Missing headers, malformed records, non-positive
+node numbers, duplicate or dangling node references, unknown element types,
+negative counts and short lines are errors; duplicate nodes warn and keep
+the first coordinates.
+"""
+function read_diff(path;
+                  max_nodes=typemax(Int32),max_elements=typemax(Int32),
+                  max_file_bytes=typemax(Int))
+    caller="read_diff"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    node_limit=_io_limit(max_nodes,caller,"max_nodes";ceiling=Int(typemax(Int32)))
+    element_limit=_io_limit(
+        max_elements,caller,"max_elements";ceiling=Int(typemax(Int32)))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
+    node_labels,coords,records,pnames=open(path,"r") do io
+        try
+            return _read_diff(io,caller,node_limit,element_limit)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa EOFError && throw(ArgumentError(
+                "$caller: truncated .diff file"))
+            rethrow()
+        end
+    end
+    mesh,node_tags,element_tags=_foreign_mesh_result(
+        caller,node_labels,coords,records;physical_names=pnames)
+    return DiffFile(mesh,node_tags,element_tags)
+end
+
+"""
+    write_diff(path, mesh; scaling_factor=1.0)
+
+Write a `Mesh` or `MixedMesh` as a Diffpack GridFE `.diff` file, matching the
+pinned `GModel::writeDIFF`/`MVertex::writeDIFF`/`MElement::writeDIFF`
+records: the `Number of space dim. =   3` banner, `Number of elements`/
+`Number of nodes` counts, the `All elements are of the same type`/
+`Max number of nodes in an element` summary, the `N Boundary indicators:`
+line, `num ( %25.16E , %25.16E , %25.16E ) [k] b1 .. bk` node rows and
+`num type subdomain n1 .. nk` element records for the ten `Elm*` types.
+`scaling_factor` multiplies coordinates like the upstream
+`Mesh.ScalingFactor`. Only cells of the highest meshed dimension with a
+Diffpack type string are emitted — lines, prisms, pyramids, points and every
+other family are skipped like upstream (nodes used by skipped cells are
+still written and carry boundary indicators). Nodes referenced by no cell
+are not written. When any entity declares physical tags the subdomain
+column repeats the element once per entity physical (and unphysical
+entities emit none — still counted in the header, like upstream); with no
+declared physicals the subdomain is the elementary entity tag. Boundary
+indicators are the sorted physical tags (or entity tags when no physicals
+exist) of the top-dimension-minus-one entities containing each node; the
+header lists their union. Upstream's read/write node permutations are not
+mutual inverses for the non-involution layouts, so a `.diff` round trip
+permutes quad8/quad9, tet10 and hex8/hex20/hex27 connectivity exactly like
+Gmsh itself.
+"""
+function write_diff(path,m;scaling_factor::Real=1.0)
+    caller="write_diff"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    factor=try
+        Float64(scaling_factor)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: scaling_factor is not a real number"))
+    end
+    isfinite(factor) || throw(ArgumentError(
+        "$caller: scaling_factor must be finite"))
+    for block in m.blocks
+        block isa ElementBlock || throw(ArgumentError(
+            "$caller: special MSH record type $(block.msh) is not " *
+            "representable in .diff"))
+    end
+    data=m.entity_data
+    nn=size(m.coords,2)
+    labels=data===nothing ? collect(UInt64(1):UInt64(nn)) :
+        data.external_node_tags
+    # `noPhysicalGroups()` upstream forces the elementary-tag mode; with any
+    # declared physical group the subdomain column and the boundary
+    # indicators follow each entity's `physical_tags` instead.
+    use_physical=data!==nothing &&
+        any(entity->!isempty(entity.physical_tags),values(data.entities))
+    physicals_of=function (dim,tag)
+        entity=get(data.entities,(dim,Int(tag)),nothing)
+        return entity===nothing ? Int32[] : entity.physical_tags
+    end
+    # Upstream `saveAll` is forced on when the model has no physical groups;
+    # with physicals, only entities declaring at least one contribute nodes,
+    # records and the top dimension.
+    saveable=function (dim,tag)
+        !use_physical && return true
+        entity=get(data.entities,(dim,Int(tag)),nothing)
+        return entity!==nothing && !isempty(entity.physical_tags)
+    end
+    # The projection contains exactly the entities upstream would save, so
+    # the top dimension is the maximum dimension among saveable entities with
+    # cells — including cells whose family never reaches the element section.
+    dim=0
+    for (bi,block) in enumerate(m.blocks)
+        isempty(block.nodes) && continue
+        cdim=msh_dimension(block.msh)
+        for j in axes(block.nodes,2)
+            if saveable(cdim,_foreign_cell_entity(m,bi,j))
+                dim=max(dim,cdim);break
+            end
+        end
+    end
+    # `indexMeshVertices`: only nodes used by elements of saveable entities
+    # are written (`v->getIndex() > 0`), regardless of the element's family.
+    used=falses(nn)
+    for (bi,block) in enumerate(m.blocks)
+        cdim=msh_dimension(block.msh)
+        for j in axes(block.nodes,2)
+            saveable(cdim,_foreign_cell_entity(m,bi,j)) || continue
+            @inbounds for index in view(block.nodes,:,j);used[index]=true;end
+        end
+    end
+    num_vertices=count(used)
+    # Boundary indicators: the sorted union of each dim-1 entity's physical
+    # tags (or its tag when no physicals exist) over every entity declared —
+    # unmeshed ones contribute to the header but mark no nodes, matching the
+    # upstream per-entity pass.
+    vertex_tags=[Set{Int64}() for _ in 1:nn]
+    indicators=Set{Int64}()
+    if data!==nothing && dim>=1
+        for ((edim,etag),entity) in data.entities
+            edim==dim-1 || continue
+            union!(indicators,use_physical ? Int64.(entity.physical_tags) :
+                Int64[Int64(etag)])
+        end
+    end
+    for (bi,block) in enumerate(m.blocks)
+        msh_dimension(block.msh)==dim-1 || continue
+        for j in axes(block.nodes,2)
+            etag=_foreign_cell_entity(m,bi,j)
+            membership=use_physical ? Int64.(physicals_of(dim-1,etag)) :
+                Int64[etag]
+            union!(indicators,membership)
+            isempty(membership) && continue
+            @inbounds for row in view(block.nodes,:,j)
+                used[row] && union!(vertex_tags[row],membership)
+            end
+        end
+    end
+    ordered_indicators=sort!(collect(indicators))
+    # The header counts each writable top-dimension cell once even when the
+    # physical-tag mode below emits the record once per entity physical;
+    # unsaveable cells (no physicals on their entity) are not counted.
+    num_elements=0;min_arity=typemax(Int);max_arity=0
+    for (bi,block) in enumerate(m.blocks)
+        haskey(_DIFF_WRITE_TABLE,block.msh) || continue
+        msh_dimension(block.msh)==dim || continue
+        arity=size(block.nodes,1)
+        @inbounds for j in axes(block.nodes,2)
+            saveable(dim,_foreign_cell_entity(m,bi,j)) || continue
+            num_elements+=1
+            min_arity=min(min_arity,arity);max_arity=max(max_arity,arity)
+        end
+    end
+    target,parent=_foreign_target(path,caller)
+    mktemp(parent) do temporary,io
+        print(io,"\n\n")
+        print(io," Finite element mesh (GridFE):\n\n")
+        print(io," Number of space dim. =   3\n")
+        print(io," Number of elements   =  ",num_elements,"\n")
+        print(io," Number of nodes      =  ",num_vertices,"\n\n")
+        print(io," All elements are of the same type: ",
+            max_arity==min_arity ? "dpTRUE" : "dpFALSE","\n")
+        print(io," Max number of nodes in an element: ",max_arity," \n")
+        print(io," Only one subdomain               : dpFALSE\n")
+        print(io," Lattice data                     ? 0\n\n\n\n")
+        print(io," ",length(ordered_indicators)," Boundary indicators:  ")
+        for value in ordered_indicators
+            print(io," ",value)
+        end
+        print(io,"\n\n\n")
+        print(io,"  Nodal coordinates and nodal boundary indicators,\n")
+        print(io,"  the columns contain:\n")
+        print(io,"   - node number\n")
+        print(io,"   - coordinates\n")
+        print(io,"   - no of boundary indicators that are set (ON)\n")
+        print(io,"   - the boundary indicators that are set (ON) if any.\n")
+        print(io,"#\n")
+        @inbounds for i in 1:nn
+            used[i] || continue
+            print(io," ",labels[i]," (",
+                @sprintf("%25.16E",m.coords[1,i]*factor)," ,",
+                @sprintf("%25.16E",m.coords[2,i]*factor)," ,",
+                @sprintf("%25.16E",m.coords[3,i]*factor)," )")
+            memberships=sort!(collect(vertex_tags[i]))
+            print(io," [",length(memberships),"] ")
+            for value in memberships
+                print(io," ",value," ")
+            end
+            print(io,"\n")
+        end
+        print(io,"\n\n")
+        print(io,"  Element types and connectivity\n")
+        print(io,"  the columns contain:\n")
+        print(io,"   - element number\n")
+        print(io,"   - element type\n")
+        print(io,"   - subdomain number \n")
+        print(io,"   - the global node numbers of the nodes in the element.\n")
+        print(io,"#\n")
+        num=0
+        for (bi,block) in enumerate(m.blocks)
+            entry=get(_DIFF_WRITE_TABLE,block.msh,nothing)
+            entry===nothing && continue
+            cdim=msh_dimension(block.msh)
+            cdim==dim || continue
+            name,perm=entry
+            for j in axes(block.nodes,2)
+                etag=_foreign_cell_entity(m,bi,j)
+                subdomains=use_physical ? Int64.(physicals_of(cdim,etag)) :
+                    Int64[etag]
+                for subdomain in subdomains
+                    num+=1
+                    print(io,num," ",name," ",subdomain," ")
+                    for slot in perm
+                        print(io," ",labels[block.nodes[slot,j]])
+                    end
+                    print(io,"\n")
+                end
+            end
+        end
+        print(io,"\n")
         flush(io);close(io)
         mv(temporary,target;force=true)
     end
