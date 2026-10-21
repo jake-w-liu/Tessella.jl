@@ -9664,11 +9664,13 @@ function _view_get_homogeneous_model_data(tag,step,model_name)
 end
 
 # `probe` samples the view's step-0 data at a physical point: the owning
-# element comes from the cached SimplexLocator and linear-simplex
+# element comes from the cached element locator. On the simplex cache,
 # barycentric coordinates serve as the nodal shape functions
-# (N = (1-u-v-w, u, v, w) in MSH node order). ElementNodeData rows are
-# node-major; NodeData rows are addressed by node tag; ElementData is
-# element-constant. Curved/high-order probes reduce to the linear hull.
+# (N = (1-u-v-w, u, v, w) in MSH node order); on a mixed cache the element
+# family's own first-order corner basis applies and rows are keyed by the
+# public element/node tags. ElementNodeData rows are node-major; NodeData
+# rows are addressed by node tag; ElementData is element-constant.
+# Curved/high-order probes reduce to the linear hull.
 function _view_probe(model_name,tag,x,y,z)
     caller="API.view.probe"
     model_name isa AbstractString || throw(ArgumentError(
@@ -9700,9 +9702,21 @@ function _view_probe(model_name,tag,x,y,z)
         rec=mesh_element_record(mesh,etag)
         uvw,=_local_coordinates(mesh,Int(etag),(px,py,pz),caller)
         u,v,w=uvw
-        N=rec.dimension==1 ? (1.0-u,u) :
-          rec.dimension==2 ? (1.0-u-v,u,v) :
-                           (1.0-u-v-w,u,v,w)
+        # A mixed cache interpolates with the element family's own corner
+        # basis and keys the view rows by public tags; the simplex cache
+        # keeps its barycentric weights and dense tags.
+        if mesh isa MixedMesh
+            N=MeshPointLocation._shape_functions(
+                msh_spec(Int(rec.element_type)).family,u,v,w,caller)
+            etag=_cache_element_tag(mesh,Int(etag))
+            node_tags=UInt64[_cache_node_tag(mesh,index)
+                             for index in rec.node_tags]
+        else
+            N=rec.dimension==1 ? (1.0-u,u) :
+              rec.dimension==2 ? (1.0-u-v,u,v) :
+                               (1.0-u-v-w,u,v,w)
+            node_tags=rec.node_tags
+        end
         for ((s,data_type),(entity_tags,values,components)) in
                 sort!(collect(view.model_data);by=first)
             s==0 || continue
@@ -9718,7 +9732,7 @@ function _view_probe(model_name,tag,x,y,z)
             elseif data_type=="ElementNodeData"
                 row=findfirst(==(etag),entity_tags)
                 row===nothing && continue
-                nn=length(rec.node_tags)
+                nn=length(node_tags)
                 width=nn*nc
                 base=values[(row-1)*width+1:row*width]
                 out=zeros(nc)
@@ -9730,8 +9744,8 @@ function _view_probe(model_name,tag,x,y,z)
                 return out
             elseif data_type=="NodeData"
                 out=zeros(nc)
-                for i in 1:min(length(rec.node_tags),length(N))
-                    j=findfirst(==(rec.node_tags[i]),entity_tags)
+                for i in 1:min(length(node_tags),length(N))
+                    j=findfirst(==(node_tags[i]),entity_tags)
                     j===nothing && continue
                     for c in 1:nc
                         out[c]+=N[i]*values[(j-1)*nc+c]

@@ -635,4 +635,60 @@ function locate_elements(locator::SimplexLocator,x,y,z;dim=-1,strict=false)
     return _locate_elements(locator,p,dimension,strict,caller)
 end
 
+# MSH corner-node reference positions for the nonsimplex families. `Mesh`-era
+# simplex barycentric coordinates share this table's triangle/tetrahedron
+# convention; the quadrangle and hexahedron corners are ordered bottom face
+# first. Probes of curved or high-order elements evaluate the same linear hull.
+const _QUADRANGLE_CORNER_SIGNS=((-1.0,-1.0),(1.0,-1.0),
+                               (1.0,1.0),(-1.0,1.0))
+const _HEXAHEDRON_CORNER_SIGNS=((-1.0,-1.0,-1.0),(1.0,-1.0,-1.0),
+                                (1.0,1.0,-1.0),(-1.0,1.0,-1.0),
+                                (-1.0,-1.0,1.0),(1.0,-1.0,1.0),
+                                (1.0,1.0,1.0),(-1.0,1.0,1.0))
+
+"""
+    _shape_functions(family, u, v, w, caller) -> NTuple
+
+Return the first-order Gmsh 4.15.2 nodal shape values of one catalog `family`
+at reference coordinates `(u, v, w)`, in MSH corner-node order. Segment nodes
+sit at `u = ±1`; triangle and tetrahedron coordinates are barycentric offsets
+from the first vertex; quadrangle and hexahedron nodes sit at the signed
+corners of `[-1, 1]^d`; prism nodes are a triangle-times-`[-1, 1]` product;
+pyramid nodes span the `[-1, 1]^2` base at `w = 0` to the apex at `w = 1`.
+High-order elements share their family's linear hull, and Trihedron has no
+reference mapping.
+"""
+function _shape_functions(family::Symbol,u,v,w,caller::AbstractString)
+    family===:pnt && return (1.0,)
+    family===:lin && return ((1.0-u)/2,(1.0+u)/2)
+    family===:tri && return (1.0-u-v,u,v)
+    family===:tet && return (1.0-u-v-w,u,v,w)
+    if family===:qua
+        return ntuple(4) do node
+            sign_u,sign_v=_QUADRANGLE_CORNER_SIGNS[node]
+            0.25*(1.0+sign_u*u)*(1.0+sign_v*v)
+        end
+    elseif family===:hex
+        return ntuple(8) do node
+            sign_u,sign_v,sign_w=_HEXAHEDRON_CORNER_SIGNS[node]
+            0.125*(1.0+sign_u*u)*(1.0+sign_v*v)*(1.0+sign_w*w)
+        end
+    elseif family===:pri
+        triangle=(1.0-u-v,u,v)
+        return ntuple(6) do node
+            0.5*triangle[mod1(node,3)]*(1.0+(node<=3 ? -w : w))
+        end
+    elseif family===:pyr
+        q=1.0-w
+        q==0.0 && return (0.0,0.0,0.0,0.0,1.0)
+        base=ntuple(4) do node
+            sign_u,sign_v=_QUADRANGLE_CORNER_SIGNS[node]
+            0.25*(q+sign_u*u)*(q+sign_v*v)/q
+        end
+        return (base...,w)
+    end
+    throw(ArgumentError(
+        "$caller: element family $family has no nodal shape functions"))
+end
+
 end # module
