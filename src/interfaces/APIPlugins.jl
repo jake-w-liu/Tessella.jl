@@ -2203,9 +2203,21 @@ struct _PluginEvalField <: SizeField.AbstractField
     other::Bool
 end
 
+# Mutable carrier for upstream `Time`/`TimeStep` expression variables in
+# ModifyComponents — bound to private field tags F30/F31 and refreshed once
+# per visited (step) so every bound expression sees the current values.
+mutable struct _PluginEvalScalar <: SizeField.AbstractField
+    value::Float64
+end
+
 @inline function SizeField.field_value(f::_PluginEvalField,x,y,z,
                                        vars::_PluginEvalVars)
     return f.other ? vars.w[f.comp] : vars.v[f.comp]
+end
+
+@inline function SizeField.field_value(f::_PluginEvalScalar,x,y,z,
+                                       vars::_PluginEvalVars)
+    return f.value
 end
 
 @inline _plugin_ident_char(c::Char)=
@@ -2216,8 +2228,11 @@ end
 # `F<d + 16>`). `F<digits>` itself is not an upstream MathEval variable and is
 # rejected so users cannot shadow the mapped tags; every other identifier
 # falls through to the parser's own validation (function names, x, y, z,
-# Pi, e).
-function _plugin_matheval_rewrite(expr::AbstractString,caller::AbstractString)
+# Pi, e). With `time_vars`, ModifyComponents' extra `Time`/`TimeStep`
+# variables map to the private tags F30/F31 bound to `_PluginEvalScalar`
+# carriers.
+function _plugin_matheval_rewrite(expr::AbstractString,caller::AbstractString;
+                                  time_vars::Bool=false)
     out=IOBuffer();i=firstindex(expr);n=lastindex(expr)
     while i<=n
         c=expr[i]
@@ -2225,6 +2240,11 @@ function _plugin_matheval_rewrite(expr::AbstractString,caller::AbstractString)
             j=i
             while j<=n && _plugin_ident_char(expr[j]);j=nextind(expr,j);end
             ident=expr[i:prevind(expr,j)]
+            if time_vars && ident=="Time"
+                write(out,"F30");i=j;continue
+            elseif time_vars && ident=="TimeStep"
+                write(out,"F31");i=j;continue
+            end
             if ident=="v" || ident=="w" || (length(ident)==2 && ident[1] in ('v','w') &&
                                           _plugin_ident_char(ident[2]))
                 if length(ident)==2 && '0'<=ident[2]<='8'
@@ -2687,10 +2707,11 @@ end
 
 # ---- Curl ----------------------------------------------------------------------
 
-function _plugin_exec_curl(spec::_PluginSpec,caller::AbstractString)
-    numbers=spec.numbers
-    tag,view=_plugin_view(numbers,caller)
-    _plugin_check_single_mesh(view,"Curl") || return nothing
+# Shared body of upstream `Plugin(Curl)` and the Tessella `Vorticity`
+# extension below: the elementwise corner-gradient curl of a 3-component
+# field, emitted under `name_suffix`.
+function _plugin_curl_scan(view,caller,plugin_name::AbstractString)
+    _plugin_check_single_mesh(view,plugin_name) || return nothing
     elements,steps,times=_plugin_elements_all_steps(view,caller)
     out=_PluginElement[]
     for element in elements
@@ -2719,6 +2740,15 @@ function _plugin_exec_curl(spec::_PluginSpec,caller::AbstractString)
         push!(out,_PluginElement(element.kind,element.dim,element.geo,
                                  element.geo,vals,3,element.etag))
     end
+    return out,steps,times
+end
+
+function _plugin_exec_curl(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    scanned=_plugin_curl_scan(view,caller,"Curl")
+    scanned===nothing && return nothing
+    out,steps,times=scanned
     _plugin_extract_emit(view.name*"_Curl",out,-1,steps,times,caller)
     return nothing
 end
@@ -3159,6 +3189,550 @@ function _plugin_exec_density(spec::_PluginSpec,caller::AbstractString)
     return nothing
 end
 
+# ---- MakeSimplex ----------------------------------------------------------------------
+
+# Source element kinds → the simplex kind they decompose into; the node maps
+# themselves live in `_PLUGIN_ISO_SIMPLICES` (the same 1-based tables as
+# upstream `MakeSimplex::decompose`: quadrangle → 2 triangles, hexahedron → 6
+# tetrahedra, prism → 3 tetrahedra, pyramid → 2 tetrahedra).
+const _PLUGIN_SIMPLEX_TARGET=(quadrangle=:triangle,hexahedron=:tetrahedron,
+                              prism=:tetrahedron,pyramid=:tetrahedron)
+
+# Upstream `Plugin(MakeSimplex)` rewrites a list view in place (`decomposeList`
+# clears the source record vectors and appends the simplex records onto the
+# target lists, after any records that already live there). Scalar, vector
+# and tensor records decompose identically and every populated step is
+# carried through under the reordered node indices; point/line/triangle/
+# tetrahedron records pass through. Model views are rejected like upstream's
+# `getDataList` null check.
+function _plugin_exec_makesimplex(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    view.model_kind===nothing || throw(ArgumentError(
+        "$caller: MakeSimplex rewrites list data only; model views are unsupported"))
+    steps=_plugin_list_steps(view,caller)
+    types=String[];counts=Dict{String,Int}();datas=Dict{String,Vector{Float64}}()
+    for type in view.list_types
+        layout=get(Post._POS_RECORD_TYPES,type,nothing)
+        layout===nothing && throw(ArgumentError(
+            "$caller: unsupported list data type $type"))
+        kind,arity,ncomp=layout
+        count=view.list_counts[type];data=view.list_data[type]
+        target=get(_PLUGIN_SIMPLEX_TARGET,kind,nothing)
+        if target===nothing
+            if haskey(datas,type)
+                # An earlier decomposed block already staged this list:
+                # upstream appends the new records after the pre-existing
+                # ones, so the stored payload precedes the staged output.
+                counts[type]+=count
+                datas[type]=vcat(data,datas[type])
+            else
+                push!(types,type);counts[type]=count;datas[type]=data
+            end
+            continue
+        end
+        ttype=_PLUGIN_COMP_HEAD[ncomp]*_PLUGIN_KIND_SHAPE[target]
+        nsub=length(first(_PLUGIN_ISO_SIMPLICES[kind]))
+        swidth=3arity+Base.checked_mul(arity,Base.checked_mul(ncomp,steps))
+        length(data)==Base.checked_mul(count,swidth) || throw(ArgumentError(
+            "$caller: list data payload does not align with numEle"))
+        if !haskey(datas,ttype)
+            push!(types,ttype);datas[ttype]=Float64[];counts[ttype]=0
+        end
+        out=datas[ttype]
+        for element in 0:count-1
+            base=element*swidth
+            for map in _PLUGIN_ISO_SIMPLICES[kind]
+                for axis in 1:3,node in 1:nsub
+                    push!(out,data[base+(axis-1)*arity+map[node]])
+                end
+                for step in 1:steps,node in 1:nsub,comp in 1:ncomp
+                    push!(out,data[base+3arity+(step-1)*arity*ncomp+
+                                   (map[node]-1)*ncomp+comp])
+                end
+                counts[ttype]+=1
+            end
+        end
+    end
+    view.list_types=types;view.list_counts=counts;view.list_data=datas
+    view.numbers["NbTimeStep"]=Float64(steps)
+    return nothing
+end
+
+# ---- ModifyComponents -----------------------------------------------------------------
+
+# Evaluate the nine ModifyComponents expressions at one node; upstream
+# `f.eval` runs the whole vector in one call and drops every write on
+# failure, so a single error cancels the node's update entirely.
+function _plugin_mc_eval(progs,bindings,vars,x,y,z)
+    res=Vector{Float64}(undef,9)
+    for i in 1:9
+        res[i]=try
+            SizeField._eval_matheval_entity(progs[i],x,y,z,bindings,vars)
+        catch err
+            err isa InterruptException && rethrow()
+            return nothing
+        end
+    end
+    return res
+end
+
+# Upstream `Plugin(ModifyComponents)` rewrites `View` in place: `Expression<i>`
+# replaces component i at every visited node while empty expressions leave
+# that component untouched (they evaluate as `0.`). Variables x, y, z, `Time`
+# (the step's physical time), `TimeStep` (its index), v0..v8 (the view's own
+# components at `TimeStep`) and w0..w8 (`OtherView` at `OtherTimeStep`, or
+# the same step when `OtherTimeStep < 0`) feed the shared math evaluator.
+# `w` reads the same (element, node) slots when both views share their grid,
+# otherwise `_plugin_probe_at` interpolates like the upstream OctreePost
+# search (`ForceInterpolation` forces that path). Model `NodeData` rows are
+# visited once per node — the upstream `tagNode` dedup — while ElementData
+# rows compose per scanned node like upstream's per-node read/write slot.
+# Invalid `TimeStep`/`OtherTimeStep`/unknown `OtherView` emit the upstream
+# diagnostics and fall back to step 0 / self instead of raising.
+function _plugin_exec_modifycomponents(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers;strings=spec.strings
+    tag,view=_plugin_view(numbers,caller)
+    raw_exprs=[strings["Expression$i"] for i in 0:8]
+    progs=[SizeField.parse_matheval(_plugin_matheval_rewrite(
+               isempty(e) ? "0." : e,caller;time_vars=true))
+           for e in raw_exprs]
+    active=[!isempty(e) for e in raw_exprs]
+    timestep=_mesh_query_integer(Int(numbers["TimeStep"]),caller,"TimeStep")
+    ots=_mesh_query_integer(Int(numbers["OtherTimeStep"]),caller,"OtherTimeStep")
+    forcerep=!iszero(numbers["ForceInterpolation"])
+    nsteps1=_view_data_steps(view)
+    if timestep>nsteps1-1
+        _native_diagnostic_emit_locked(:error,
+            "Invalid time step ($timestep) in View[$tag]: using step 0 instead")
+        timestep=0
+    end
+    raw_other=numbers["OtherView"]
+    otag,oview=tag,view
+    if raw_other>=0
+        raw_other==floor(raw_other) || throw(ArgumentError(
+            "$caller: OtherView tag must be an integer"))
+        oi=Int(raw_other)
+        if haskey(SESSION_VIEWS,oi)
+            otag,oview=oi,_session_view_data(oi,caller)
+        else
+            _native_diagnostic_emit_locked(:error,
+                "View[$oi] does not exist: using self")
+        end
+    end
+    nsteps2=oview===view ? nsteps1 : _view_data_steps(oview)
+    if ots<0 && nsteps2!=nsteps1
+        _native_diagnostic_emit_locked(:error,
+            "Number of time steps don't match: using step 0")
+        ots=0
+    elseif ots>nsteps2-1
+        _native_diagnostic_emit_locked(:error,
+            "Invalid time step ($ots) in View[$otag]: using step 0 instead")
+        ots=0
+    end
+    # Upstream builds the octree when `ForceInterpolation` is set or the
+    # entity/element counts differ; identical storage reads `OtherView` at the
+    # same (entity, element, node) slot — for tag-keyed model blocks that
+    # means an equal tag vector in the same mesh slot, and for list views the
+    # same record layout.
+    same_grid=false
+    if oview===view
+        same_grid=true
+    elseif view.model_kind===nothing && oview.model_kind===nothing
+        same_grid=view.list_types==oview.list_types &&
+                  view.list_counts==oview.list_counts
+    elseif view.model_kind!==nothing && oview.model_kind!==nothing &&
+           view.model_kind==oview.model_kind
+        same_grid=true
+        for key in _plugin_model_keys(view)
+            (timestep<0 || key[1]==timestep) || continue
+            step2=ots<0 ? key[1] : ots
+            ob=get(oview.model_data,(step2,view.model_kind),nothing)
+            octx=get(oview.model_contexts,(step2,view.model_kind),nothing)
+            if ob===nothing || ob[1]!=view.model_data[key][1] ||
+               octx===nothing ||
+               octx.model_slot!==view.model_contexts[key].model_slot
+                same_grid=false;break
+            end
+        end
+    end
+    interpolate=!same_grid || forcerep
+    interpolate && _native_diagnostic_emit_locked(:info,
+        "Other view based on different grid: interpolating...")
+    vars=_PluginEvalVars(zeros(9),zeros(9))
+    timefield=_PluginEvalScalar(0.0);stepfield=_PluginEvalScalar(0.0)
+    tagset=sort!(collect(Set{Int}(
+        tag for prog in progs for tag in prog.field_tags)))
+    bindings=Tuple(
+        tag==30 ? SizeField._MEFieldBinding(tag,timefield) :
+        tag==31 ? SizeField._MEFieldBinding(tag,stepfield) :
+        SizeField._MEFieldBinding(tag,_PluginEvalField(
+            tag<16 ? tag+1 : tag-15,tag>=16))
+        for tag in tagset)
+    if view.model_kind===nothing
+        steps=_plugin_list_steps(view,caller)
+        osteps=oview===view ? steps :
+            (oview.model_kind===nothing ? _plugin_list_steps(oview,caller) : 0)
+        for stepnum in 0:steps-1
+            (timestep<0 || stepnum==timestep) || continue
+            step2=ots<0 ? stepnum : ots
+            timefield.value=_plugin_step_time(view,stepnum)
+            stepfield.value=Float64(stepnum)
+            for type in view.list_types
+                layout=get(Post._POS_RECORD_TYPES,type,nothing)
+                layout===nothing && throw(ArgumentError(
+                    "$caller: unsupported list data type $type"))
+                _,arity,nc=layout
+                count=view.list_counts[type];data=view.list_data[type]
+                width=3arity+arity*nc*steps
+                length(data)==count*width || throw(ArgumentError(
+                    "$caller: list data payload does not align with numEle"))
+                odata=same_grid && oview.model_kind===nothing ?
+                    get(oview.list_data,type,nothing) : nothing
+                owidth=3arity+arity*nc*osteps
+                if odata!==nothing && length(odata)!=count*owidth
+                    odata=nothing
+                end
+                for element in 0:count-1
+                    base=element*width
+                    for node in 1:arity
+                        x=data[base+node];y=data[base+arity+node]
+                        z=data[base+2arity+node]
+                        vbase=base+3arity+stepnum*arity*nc
+                        fill!(vars.v,0.0);fill!(vars.w,0.0)
+                        for comp in 1:nc
+                            vars.v[comp]=data[vbase+(node-1)*nc+comp]
+                        end
+                        if interpolate
+                            acc=_plugin_probe_at(oview,(x,y,z),step2,caller)
+                            acc===nothing || copyto!(vars.w,1,acc,1,
+                                                     min(9,length(acc)))
+                        elseif odata!==nothing && 0<=step2<osteps
+                            for comp in 1:min(9,nc)
+                                vars.w[comp]=odata[
+                                    element*owidth+3arity+step2*arity*nc+
+                                    (node-1)*nc+comp]
+                            end
+                        end
+                        res=_plugin_mc_eval(progs,bindings,vars,x,y,z)
+                        res===nothing && continue
+                        for comp in 1:nc
+                            active[comp] &&
+                                (data[vbase+(node-1)*nc+comp]=res[comp])
+                        end
+                    end
+                end
+            end
+        end
+        return nothing
+    end
+    kind=view.model_kind
+    for key in _plugin_model_keys(view)
+        stepnum=key[1]
+        (timestep<0 || stepnum==timestep) || continue
+        step2=ots<0 ? stepnum : ots
+        timefield.value=_plugin_step_time(view,stepnum)
+        stepfield.value=Float64(stepnum)
+        ctx=view.model_contexts[key]
+        entity_tags,values,nc=view.model_data[key]
+        offsets=_plugin_model_row_offsets(view,key,entity_tags,values,caller)
+        mesh=_plugin_model_mesh(ctx.model_slot,caller)
+        public=_mesh_public_tags(mesh)
+        # Aligned `OtherView` block for this step, resolved by the shared tag
+        # vector (same storage ⇒ same row positions).
+        oblock=nothing;ooffsets=Int[];onc=0
+        if same_grid
+            ob=get(oview.model_data,(step2,kind),nothing)
+            octx=get(oview.model_contexts,(step2,kind),nothing)
+            if ob!==nothing && ob[1]==entity_tags && octx!==nothing
+                ooffsets=_plugin_model_row_offsets(oview,(step2,kind),
+                                                 ob[1],ob[2],caller)
+                oblock=ob;onc=ob[3]
+            end
+        end
+        if kind=="NodeData"
+            row_of=Dict{UInt64,Int}(tag=>row
+                                    for (row,tag) in enumerate(entity_tags))
+            seen=falses(length(entity_tags))
+            _,_,total=_mesh_element_offsets(mesh)
+            for index in 1:total
+                rec=mesh_element_record(mesh,index)
+                for nod in eachindex(rec.node_tags)
+                    idx=Int(rec.node_tags[nod])
+                    ntag=_cache_node_tag(mesh,idx)
+                    row=get(row_of,ntag,0)
+                    (row==0 || seen[row]) && continue
+                    seen[row]=true
+                    base=offsets[row]
+                    fill!(vars.v,0.0);fill!(vars.w,0.0)
+                    for comp in 1:nc
+                        vars.v[comp]=values[base+comp-1]
+                    end
+                    x=mesh.coords[1,idx];y=mesh.coords[2,idx]
+                    z=mesh.coords[3,idx]
+                    if interpolate
+                        acc=_plugin_probe_at(oview,(x,y,z),step2,caller)
+                        acc===nothing || copyto!(vars.w,1,acc,1,
+                                                 min(9,length(acc)))
+                    elseif oblock!==nothing
+                        for comp in 1:min(9,onc)
+                            vars.w[comp]=oblock[2][ooffsets[row]+comp-1]
+                        end
+                    end
+                    res=_plugin_mc_eval(progs,bindings,vars,x,y,z)
+                    res===nothing && continue
+                    for comp in 1:nc
+                        active[comp] && (values[base+comp-1]=res[comp])
+                    end
+                end
+            end
+        else
+            for (row,etag) in enumerate(entity_tags)
+                index=_plugin_element_index(mesh,public,etag)
+                index==0 && continue
+                rec=mesh_element_record(mesh,index)
+                base=offsets[row];rwidth=offsets[row+1]-base
+                for nod in eachindex(rec.node_tags)
+                    idx=Int(rec.node_tags[nod])
+                    x=mesh.coords[1,idx];y=mesh.coords[2,idx]
+                    z=mesh.coords[3,idx]
+                    vslot=kind=="ElementData" ? base+0 :
+                        base+(nod-1)*nc
+                    fill!(vars.v,0.0);fill!(vars.w,0.0)
+                    for comp in 1:nc
+                        pos=vslot+comp-1
+                        pos<base+rwidth || break
+                        vars.v[comp]=values[pos]
+                    end
+                    if interpolate
+                        acc=_plugin_probe_at(oview,(x,y,z),step2,caller)
+                        acc===nothing || copyto!(vars.w,1,acc,1,
+                                                 min(9,length(acc)))
+                    elseif oblock!==nothing
+                        obase=ooffsets[row];owidth=ooffsets[row+1]-obase
+                        for comp in 1:min(9,onc)
+                            pos=kind=="ElementData" ? obase+comp-1 :
+                                obase+(nod-1)*onc+comp-1
+                            pos<obase+owidth || break
+                            vars.w[comp]=oblock[2][pos]
+                        end
+                    end
+                    res=_plugin_mc_eval(progs,bindings,vars,x,y,z)
+                    res===nothing && continue
+                    for comp in 1:nc
+                        active[comp] || continue
+                        pos=vslot+comp-1
+                        pos<base+rwidth || break
+                        values[pos]=res[comp]
+                    end
+                end
+            end
+        end
+    end
+    return nothing
+end
+
+# ---- FieldFromAmplitudePhase ---------------------------------------------------------
+
+# Scalar-only octree probe: upstream `searchScalar` zero-fills the slot on a
+# miss and only reads scalar (1-component) element lists — non-scalar probes
+# therefore contribute 0 here as well.
+function _plugin_scalar_probe(view,p,stepnum::Int,caller::AbstractString)
+    acc=_plugin_probe_at(view,p,stepnum,caller)
+    (acc===nothing || length(acc)!=1) && return 0.0
+    return acc[1]
+end
+
+# Upstream `Plugin(FieldFromAmplitudePhase)` builds the complex field
+# `u = a * exp(j*k*phi)` from the real/imaginary amplitude steps of
+# `AmplitudeView` (exactly two time steps) and the scalar phase of
+# `PhaseView`, interpolated onto the nodes of the mesh read from `MeshFile`
+# (with `MeshFile == ""` falling back to `<current model name>.msh`). The
+# result is a two-step `NodeData` view named `FieldFromAPhi` (real then
+# imaginary) bound to a fresh model slot that owns the imported mesh; the
+# current model is hidden first like upstream `setVisibility(0)` and stays
+# current (upstream `GModel::current()` keeps its index). Source view options
+# resolve as session view tags like `View`/`OtherView`.
+function _plugin_exec_field_from_amplitude_phase(spec::_PluginSpec,
+                                                 caller::AbstractString)
+    numbers=spec.numbers;strings=spec.strings
+    k=numbers["Wavenumber"]
+    meshfile=strings["MeshFile"]
+    _slot_capture_locked!()
+    cindex=_current_slot_index_locked()
+    cindex==0 && throw(ArgumentError("$caller: no current model"))
+    cslot=MODEL_SLOTS[cindex]
+    name_model=""
+    if isempty(meshfile)
+        _native_diagnostic_emit_locked(:info,
+            "Could not find mesh file for interpolating U=A*exp(j*k*phi). " *
+            "Trying to use current model mesh, instead.")
+        name_model=cslot.name
+        meshfile=name_model*".msh"
+    end
+    atag,aview=_plugin_view_tag(numbers,"AmplitudeView",caller)
+    if _view_data_steps(aview)!=2
+        _native_diagnostic_emit_locked(:error,
+            "Invalid number of time steps for AView, it must be complex!")
+        return nothing
+    end
+    ptag,pview=_plugin_view_tag(numbers,"PhaseView",caller)
+    _plugin_check_single_mesh(aview,"FieldFromAmplitudePhase") || return nothing
+    _plugin_check_single_mesh(pview,"FieldFromAmplitudePhase") || return nothing
+    set_entity_visibility!(cslot.model,model_entities(cslot.model),0)
+    mixed=try
+        Elements.read_mixed_msh(meshfile)
+    catch err
+        err isa InterruptException && rethrow()
+        _native_diagnostic_emit_locked(:error,
+            "Unable to open file '$meshfile'")
+        return nothing
+    end
+    uslot=_new_slot(isempty(name_model) ? "fine" : name_model)
+    uslot.mesh=mixed
+    push!(MODEL_SLOTS,uslot)
+    # Unique mesh nodes reached through element connectivity, in first-seen
+    # order (upstream collects `MVertex*` through every entity's elements).
+    seen=falses(nnodes(mixed));order=Int[]
+    for (msh,cells,_) in _cache_native_blocks(mixed)
+        for cell in axes(cells,2),node in axes(cells,1)
+            idx=Int(cells[node,cell])
+            seen[idx] && continue
+            seen[idx]=true;push!(order,idx)
+        end
+    end
+    dataR=Vector{Float64}(undef,length(order))
+    dataI=Vector{Float64}(undef,length(order))
+    for (i,idx) in enumerate(order)
+        x=mixed.coords[1,idx];y=mixed.coords[2,idx];z=mixed.coords[3,idx]
+        phi=_plugin_scalar_probe(pview,(x,y,z),0,caller)
+        ar=_plugin_scalar_probe(aview,(x,y,z),0,caller)
+        ai=_plugin_scalar_probe(aview,(x,y,z),1,caller)
+        dataR[i]=ar*cos(k*phi)-ai*sin(k*phi)
+        dataI[i]=ar*sin(k*phi)+ai*cos(k*phi)
+    end
+    tags=UInt64[_cache_node_tag(mixed,idx) for idx in order]
+    extent=_native_model_view_extent(tags,
+        _native_view_model_count(uslot,"NodeData"))
+    counts=fill(Int32(1),length(tags))
+    vtag=_fresh_view_tag()
+    view=_SessionView("FieldFromAPhi")
+    view.model_kind="NodeData"
+    view.model_step_ranges=[_NativeViewStepRange(0,1,uslot,1)]
+    view.model_data[(0,"NodeData")]=(tags,dataR,1)
+    view.model_data[(1,"NodeData")]=(tags,dataI,1)
+    for (s,t) in ((0,0.0),(1,1.0))
+        view.model_contexts[(s,"NodeData")]=(
+            model_slot=uslot,time=t,counts=counts,extent=extent,
+            partitions=Set{Int}([0]),
+            interpolation_msh=_plugin_mesh_msh_types(mixed))
+    end
+    SESSION_VIEWS[vtag]=view
+    VIEW_TAG_MAX[]=max(VIEW_TAG_MAX[],vtag)
+    return nothing
+end
+
+# ---- ExtractEdges ----------------------------------------------------------------------
+
+# Upstream `Plugin(ExtractEdges)` scans the current model's surface-triangle
+# mesh (every face's `triangles`), builds edge→triangle adjacency
+# (`buildEdgeToTriangle` keeps the first and last element per edge) and emits
+# scalar `SL` records valued {1,1}: first the two-triangle edges whose normal
+# dihedral `atan2(|n1×n2|, n1·n2)` exceeds `Angle` degrees, sorted by
+# descending angle, then every one-triangle (boundary) edge when
+# `IncludeBoundary` is set. Degenerate normals contribute angle 0.
+function _plugin_exec_extractedges(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    slot=MODEL_SLOTS[index]
+    mesh=slot.mesh
+    tris=NTuple{3,Int}[]
+    if mesh!==nothing
+        for (msh,cells,_) in _cache_native_blocks(mesh)
+            msh_spec(msh).family===:tri || continue
+            size(cells,1)>=3 || continue
+            for cell in axes(cells,2)
+                push!(tris,(Int(cells[1,cell]),Int(cells[2,cell]),
+                            Int(cells[3,cell])))
+            end
+        end
+    end
+    isempty(tris) && throw(ArgumentError(
+        "$caller: No triangles in mesh to extract edges from"))
+    normals=Vector{NTuple{3,Float64}}(undef,length(tris))
+    for (i,t) in enumerate(tris)
+        ax=mesh.coords[1,t[2]]-mesh.coords[1,t[1]]
+        ay=mesh.coords[2,t[2]]-mesh.coords[2,t[1]]
+        az=mesh.coords[3,t[2]]-mesh.coords[3,t[1]]
+        bx=mesh.coords[1,t[3]]-mesh.coords[1,t[1]]
+        by=mesh.coords[2,t[3]]-mesh.coords[2,t[1]]
+        bz=mesh.coords[3,t[3]]-mesh.coords[3,t[1]]
+        nx=ay*bz-az*by;ny=az*bx-ax*bz;nz=ax*by-ay*bx
+        nrm=sqrt(nx*nx+ny*ny+nz*nz)
+        normals[i]=nrm>0 ? (nx/nrm,ny/nrm,nz/nrm) : (0.0,0.0,0.0)
+    end
+    adj=Dict{NTuple{2,Int},Tuple{Int,Int}}()
+    for (ti,t) in enumerate(tris)
+        for (a,b) in ((1,2),(2,3),(3,1))
+            key=t[a]<t[b] ? (t[a],t[b]) : (t[b],t[a])
+            hit=get(adj,key,nothing)
+            adj[key]=hit===nothing ? (ti,0) : (hit[1],ti)
+        end
+    end
+    detected=Tuple{Float64,NTuple{2,Int}}[];lonly=NTuple{2,Int}[]
+    for (key,(t1,t2)) in adj
+        if t2==0
+            push!(lonly,key);continue
+        end
+        n1=normals[t1];n2=normals[t2]
+        cx=n1[2]*n2[3]-n1[3]*n2[2]
+        cy=n1[3]*n2[1]-n1[1]*n2[3]
+        cz=n1[1]*n2[2]-n1[2]*n2[1]
+        angle=atan(sqrt(cx*cx+cy*cy+cz*cz),n1[1]*n2[1]+n1[2]*n2[2]+n1[3]*n2[3])
+        push!(detected,(angle,key))
+    end
+    sort!(detected;by=first,rev=true)
+    sort!(lonly)
+    threshold=numbers["Angle"]/180*pi
+    flat=Float64[];ne=0
+    for (angle,(v1,v2)) in detected
+        angle<=threshold && break
+        for axis in 1:3,v in (v1,v2)
+            push!(flat,mesh.coords[axis,v])
+        end
+        push!(flat,1.0);push!(flat,1.0);ne+=1
+    end
+    if !iszero(numbers["IncludeBoundary"])
+        for (v1,v2) in lonly
+            for axis in 1:3,v in (v1,v2)
+                push!(flat,mesh.coords[axis,v])
+            end
+            push!(flat,1.0);push!(flat,1.0);ne+=1
+        end
+    end
+    _plugin_publish_list_view!("ExtractEdges",["SL"],Dict("SL"=>ne),
+        Dict("SL"=>flat),[0.0];caller)
+    return nothing
+end
+
+# ---- Vorticity (Tessella extension) ----------------------------------------------------
+
+# Gmsh 4.15.2 registers `Curl`/`Divergence` but no `Vorticity` plugin; this
+# registered alias keeps the requested name as a documented Tessella
+# extension: the same corner-gradient curl as `Curl`, emitted under the
+# `*_Vorticity` name.
+function _plugin_exec_vorticity(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    tag,view=_plugin_view(numbers,caller)
+    scanned=_plugin_curl_scan(view,caller,"Vorticity")
+    scanned===nothing && return nothing
+    out,steps,times=scanned
+    _plugin_extract_emit(view.name*"_Vorticity",out,-1,steps,times,caller)
+    return nothing
+end
+
 # ---- registry --------------------------------------------------------------------------------
 
 const _PLUGINS=Dict{String,NamedTuple}(
@@ -3262,4 +3836,29 @@ const _PLUGINS=Dict{String,NamedTuple}(
     "Density"=>(number_options=Dict{String,Float64}(
         "Run"=>0.0,"View"=>-1.0),
         string_options=Dict{String,String}(),run_fn=_plugin_exec_density),
+    "MakeSimplex"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_makesimplex),
+    # Upstream registers `ModifyComponents` (plural); there is no singular
+    # `ModifyComponent` in Gmsh 4.15.2.
+    "ModifyComponents"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"TimeStep"=>-1.0,"View"=>-1.0,"OtherTimeStep"=>-1.0,
+        "OtherView"=>-1.0,"ForceInterpolation"=>0.0),
+        string_options=Dict{String,String}(
+            "Expression0"=>"v0 * Sin(x)",
+            "Expression1"=>"","Expression2"=>"","Expression3"=>"",
+            "Expression4"=>"","Expression5"=>"","Expression6"=>"",
+            "Expression7"=>"","Expression8"=>""),
+        run_fn=_plugin_exec_modifycomponents),
+    "FieldFromAmplitudePhase"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"Wavenumber"=>5.0,"AmplitudeView"=>0.0,"PhaseView"=>1.0),
+        string_options=Dict{String,String}("MeshFile"=>"fine.msh"),
+        run_fn=_plugin_exec_field_from_amplitude_phase),
+    "ExtractEdges"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"Angle"=>40.0,"IncludeBoundary"=>1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_extractedges),
+    # Tessella extension: Gmsh 4.15.2 registers no `Vorticity` plugin.
+    "Vorticity"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"View"=>-1.0),
+        string_options=Dict{String,String}(),run_fn=_plugin_exec_vorticity),
 )

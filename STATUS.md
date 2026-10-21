@@ -24,6 +24,49 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### UI01 plugin batch 2: MakeSimplex/ModifyComponents/FieldFromAmplitudePhase/ExtractEdges/Vorticity (2026-10-21, uncommitted in tree)
+
+Five `API.plugin` catalog entries landed in `src/interfaces/APIPlugins.jl`
+(+605 lines, all behind `SESSION_PLUGINS`/`_PLUGINS`):
+
+- `MakeSimplex` decomposes list records in place through
+  `_PLUGIN_ISO_SIMPLICES` (quad→2 tris, hex→6 tets, prism→3 tets, pyramid→2
+  tets; scalar/vector/tensor payloads and multi-step packing preserved;
+  model views rejected like upstream).
+- `ModifyComponents` (plural — the only upstream name; no singular
+  registration exists) rewrites `Expression0`..`Expression8` in place on list
+  and model NodeData/ElementData/ElementNodeData views with `v`/`w`,
+  `x`/`y`/`z`, `Time` and `TimeStep` bound through the MathEval rewriter
+  (`F30`/`F31` scalars); `OtherView`/`OtherTimeStep`/`ForceInterpolation`
+  route through same-slot reads or `_plugin_probe_at` interpolation, with
+  upstream invalid-step and unknown-view diagnostics; NodeData rows visit
+  each shared node once (the upstream `tagNode` dedup).
+- `FieldFromAmplitudePhase` builds `u = a·exp(j·k·phi)` from the two-step
+  `AmplitudeView` real/imaginary parts and scalar `PhaseView`, sampled onto
+  the mesh loaded from `MeshFile` into a fresh model slot; emits a two-step
+  `FieldFromAPhi` NodeData view and keeps the current-model index (upstream
+  `setVisibility(0)` hide + `GModel::current()` semantics).
+- `ExtractEdges` scans the current model's triangle blocks via
+  edge→triangle adjacency, emits `SL` records valued {1,1}: two-triangle
+  edges whose `atan2(|n1×n2|, n1·n2)` dihedral exceeds `Angle` (descending
+  order) plus every one-triangle boundary edge when `IncludeBoundary` — the
+  exact `buildEdgeToTriangle`/`buildListOfEdgeAngle` contract.
+- `Vorticity` is a documented Tessella extension (Gmsh 4.15.2 registers
+  `Curl`, not `Vorticity`) sharing `_plugin_curl_scan` and emitting
+  `*_Vorticity`.
+
+Verification: `test/interfaces/api_plugin_batch2_test.jl` 49/49 under
+`--compile=min -O0 --check-bounds=yes`; existing plugin regressions all pass
+(api_plugin_test, api_plugin_compute_test, api_plugin_diffops_test,
+api_plugin_fieldops_test, api_plugin_isosurface_test,
+api_plugin_section_test). Concise gmsh 4.15.2 Python SDK differential on
+shared fixtures: MakeSimplex `SQ`→`ST` payload byte-identical,
+ModifyComponents `v0*Sin(x)`/`w0*v1` outputs identical, ExtractEdges
+identical 3-detected+4-boundary edge set on a folded-sheet `.msh`,
+FieldFromAmplitudePhase identical two-step values (−2.232051/−0.133975 on
+the constant-fixture box). 30 plugins registered; ~11 remain (the catalog
+claim is bounded, not exhaustive parity).
+
 ### Unmerged `Geometry.AutoCoherence=0` NoNew sweep admission (Curve[6] + non-B4 identity) (2026-10-21)
 
 **Root cause of the `Curve[6]` surface-loop error.** A `QuadTriNoNewVerts`
