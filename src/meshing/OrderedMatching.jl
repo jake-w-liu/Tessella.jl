@@ -86,29 +86,41 @@ function _certificate(g::_OrderedGraph, mate_edge, dual)
     return nothing
 end
 
+# Initial singleton cover shared by the bipartite and fractional searches.
+# Each vertex starts at its minimum incident cost, then vertices are visited
+# in input order and incident edges in reverse insertion order: an unmatched
+# vertex takes the first tight edge with a free endpoint and raises its dual
+# by the minimum remaining slack. Tightening an unmatched singleton preserves
+# dual feasibility. The retained native `S init` records reproduce this exact
+# greedy state on every recorded corpus case.
+function _greedy_singleton_init!(g::_OrderedGraph, dual, mate)
+    count=length(g.incident)
+    for vertex in 1:count
+        dual[vertex]=minimum(g.edges[edge][3] for edge in g.incident[vertex])
+    end
+    for vertex in 1:count
+        mate[vertex]==0 || continue
+        delta=typemax(Int64)
+        for edge in Iterators.reverse(g.incident[vertex])
+            slack=_slack(g,dual,edge)
+            @assert slack>=0
+            delta=min(delta,slack)
+            other=_other(g,edge,vertex)
+            if slack==0 && mate[vertex]==0 && mate[other]==0
+                mate[vertex]=edge;mate[other]=edge
+            end
+        end
+        dual[vertex]=Base.checked_add(dual[vertex],delta)
+    end
+    return nothing
+end
+
 function _bipartite_perfect(g::_OrderedGraph; reject_odd_cycles::Bool=false)
     count=length(g.incident)
     any(isempty,g.incident) && return nothing
     dual=Vector{Int64}(undef,count)
     mate_edge=zeros(Int,count)
-    for vertex in 1:count
-        dual[vertex]=minimum(g.edges[edge][3] for edge in g.incident[vertex])
-    end
-    # Visit vertices in input order and incident edges in reverse insertion
-    # order. Tightening an unmatched singleton preserves dual feasibility.
-    for vertex in 1:count
-        mate_edge[vertex]==0 || continue
-        delta=typemax(Int64)
-        for edge in Iterators.reverse(g.incident[vertex])
-            slack=_slack(g,dual,edge)
-            delta=min(delta,slack)
-            other=_other(g,edge,vertex)
-            if slack==0 && mate_edge[vertex]==0 && mate_edge[other]==0
-                mate_edge[vertex]=edge;mate_edge[other]=edge
-            end
-        end
-        dual[vertex]=Base.checked_add(dual[vertex],delta)
-    end
+    _greedy_singleton_init!(g,dual,mate_edge)
     label=zeros(Int8,count);parent=zeros(Int,count);parent_edge=zeros(Int,count)
     children=[Int[] for _ in 1:count]
     stack=Int[];visited=Int[];sizehint!(stack,count);sizehint!(visited,count)

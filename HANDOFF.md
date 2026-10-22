@@ -5346,6 +5346,58 @@ rejection unchanged. Files: `src/fields/SizeFieldCatalog.jl`,
 `test/fields/sizefield_test.jl`, `STATUS.md`, `DEVIN_HANDOFF.md`,
 `HANDOFF.md`.
 
+## Working-tree increment (MATCH01 solver-state boundary, uncommitted)
+
+**Retained native `S` records fully decoded; the verified alignment boundary
+is now pinned corpus-wide; multi-cycle tie-context residual stays open.**
+The opaque `native_concorde_integral_literal_v1.txt` `S` lines publish one
+`(label, edge, dual, flag)` tuple per vertex for three solver phases:
+`S init` (greedy singleton cover; label 2 = matched with the 0-based matched
+input edge, 0 = free), `S fractional` (label 1 = vertex on a retained odd
+half-cycle whose `edge` field is that vertex's outgoing ring edge in the
+published ring direction), and `S rounded` (the integral seed handed to the
+Blossom continuation: rounded ring mates plus one released base vertex per
+ring). Decoding all three against production shows the pipeline is already
+native-exact through the seed on **every recorded case**: init 1550/1550,
+fractional state (duals + matched edge indices + directed ring edges)
+1550/1550, rounded seed 1550/1550 — plus the previously established
+0-cycle 2624/2624 and single-retained-cycle 1082/1082 directed outputs.
+The only remaining divergence is inside the post-seed Blossom continuation
+on graphs retaining ≥2 cycles: 2489/2554 seeded-case directed outputs match
+native exactly (65 misses, all certified-optimal ties; misses concentrate in
+`expansion_search`/`clustered_expansion` cases). Roughly two dozen policy
+variants of the seeded descent — queue discipline, root/cycle/normalize/
+leaf ordering, adjacency direction, pre-contraction, expansion gating,
+fast-augment, and seed-edge objective boosts — all traded matches downward
+or broke the singleton-dual certificate, and descent-level seed-edge
+preference is a no-op, so the residual is emergent contraction chronology
+rather than a recoverable single tie rule. `GENERAL_NATIVE_TIE_IDENTITY_
+REMAINS_OPEN` remains the correct classification.
+Production change: the verified greedy init convention (input vertex order,
+reverse-insertion incident scan, first-tight match, minimum-slack raise) is
+extracted into shared `_greedy_singleton_init!` used by both
+`_bipartite_perfect` and `_fractional_singleton_state` — a pure refactor
+that makes the `S init`-exact phase a first-class tested unit and hoists
+the `slack >= 0` certificate invariant into the bipartite path where it
+already held. `test/meshing/ordered_matching_native_state_test.jl` (new,
+782 assertions, standalone like the other corpus tests) pins the embedded
+`S` records per phase on eight literal fixtures — including two-retained-
+cycle cases whose rounded seeds release one base vertex per ring — and
+asserts the corpus-wide counts (recorded 1550, init/fractional/rounded each
+== recorded). Verified exits on this worktree: `ordered_matching_native_
+state_test.jl` 782/782 exit 0; `ordered_matching_test.jl` 327,415 exit 0;
+`ordered_matching_primary_test.jl` 407 exit 0; `ordered_matching_seeded_
+test.jl` 40 exit 0; `weighted_matching_test.jl` 251,920 exit 0;
+`api_native_concorde_test.jl` 74,622 exit 0 (corpus counts 5,178 cases /
+1,550 state / 533 expansion / 248 bipartite / 3,934 independent / 3,324
+unique-directed unchanged, `GENERAL_NATIVE_TIE_IDENTITY_REMAINS_OPEN`
+printed); `api_native_matching_adapter_test.jl` 101 exit 0. Pre-existing
+unrelated failures reproduce identically with the change stashed:
+`recombine_test.jl` "Pinned native directed-edge priority" 72 fails,
+`recombine_matching_test.jl` "Even retry" 3 fails,
+`api_native_recombine_adapter_test.jl` 36 fails (expects `ErrorException`,
+`APITaggedCache` throws `ArgumentError` — unrelated files).
+
 ## Verified gates
 
 - `validation/transfinite/differential.jl` Gmsh 4.15.2:

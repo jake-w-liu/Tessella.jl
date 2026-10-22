@@ -122,25 +122,12 @@ end
 function _fractional_singleton_state(g::_OrderedGraph)
     count=length(g.incident)
     any(isempty,g.incident) && return nothing
-    dual=Int64[minimum(g.edges[edge][3] for edge in g.incident[vertex]) for vertex in 1:count]
-    s=_FractionalSingletonState(g,dual,zeros(Int,count),zeros(Int,count),
+    s=_FractionalSingletonState(g,Vector{Int64}(undef,count),zeros(Int,count),zeros(Int,count),
         Tuple{Vector{Int},Vector{Int}}[],zeros(Int8,count),zeros(Int,count),zeros(Int,count),
         [Int[] for _ in 1:count],Int[],Int[])
     sizehint!(s.stack,count);sizehint!(s.visited,count)
-    for vertex in 1:count
-        s.mate[vertex]==0 || continue
-        delta=typemax(Int64)
-        for edge in Iterators.reverse(g.incident[vertex])
-            slack=_slack(g,dual,edge)
-            @assert slack>=0
-            delta=min(delta,slack)
-            other=_other(g,edge,vertex)
-            if slack==0 && s.mate[vertex]==0 && s.mate[other]==0
-                s.mate[vertex]=edge;s.mate[other]=edge
-            end
-        end
-        dual[vertex]=Base.checked_add(dual[vertex],delta)
-    end
+    _greedy_singleton_init!(g,s.dual,s.mate)
+    dual=s.dual
     for root in 1:count
         (s.mate[root]==0 && s.cycle_owner[root]==0) || continue
         for vertex in s.visited
