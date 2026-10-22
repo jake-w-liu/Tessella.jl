@@ -9009,6 +9009,25 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         # policies 3/5/6 only — AUTO resolves to MeshAdapt off-plane and the
         # remaining selectors keep the loud not-implemented rejection.
         algorithm=_normal_surface_mesh_algorithm(m,t,caller)
+        if _return_surface_production
+            # meshGFace consumes the actual lower-dimensional products, so
+            # the detached Point/Curve producer supplies the boundary
+            # vertices' real identities — retained bitwise, like the planar
+            # native path — while interior vertices mint fresh labels.
+            lower_input,lower_limit=_gmsh_native_surface_lower_input(
+                m,options,_mesh_input,_mesh_node_high_water,caller)
+            mesh,owners,params=_model_occ_curved_surface_mesh_tracked(
+                m,t,caller;initial_only=algorithm==3,_mesh1d_options=options)
+            diag=validate(mesh)
+            diag.ok || throw(ErrorException(
+                "$caller: invalid mesh — "*join(diag.messages,"; ")))
+            _surface_cell_count(mesh)>0 || throw(ErrorException(
+                "$caller: Surface[$t] produced no cells"))
+            get(m.meshing.reverse,(2,t),false) &&
+                (mesh=_reversed_surface_mesh(mesh,caller,t))
+            return _occ_curved_surface_production(m,t,mesh,owners,params,
+                lower_input,lower_limit,caller)
+        end
         mesh=_model_occ_curved_surface_mesh(m,t,caller;
             initial_only=algorithm==3,_mesh1d_options=options)
         diag=validate(mesh)

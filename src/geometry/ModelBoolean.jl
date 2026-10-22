@@ -4028,8 +4028,8 @@ function _boolean_component_surface(m::GeoModel,t::Int,full::Mesh,
     return _mesh_tris_subset(full,trilist)
 end
 
+
 # ── parametric surface tessellation ─────────────────────────────────────────
-#
 # `mesh_model_surface` meshes planar (and ruled/tric) faces; OCC curved faces
 # mesh through their (u,v) domain instead. The boundary reuses the planar
 # path's curve discretization — the same `_surface_curve_parameters` grading
@@ -4038,7 +4038,7 @@ end
 # surfaces `u` unwraps along the traversal so the domain is an ordinary PSLG
 # for `constrained_delaunay`. Interior vertices evaluate through
 # `_occ_surface_point`; boundary vertices keep their canonical coordinates.
-function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
+function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
                                         caller::AbstractString;
                                         initial_only::Bool=false,
                                         _mesh1d_options=nothing)
@@ -4058,9 +4058,16 @@ function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
     lift=NTuple{3,Float64}[]          # canonical 3-D per PSLG vertex
     segs=Tuple{Int,Int}[]
     index=Dict{NTuple{2,Float64},Int}()
-    function emit(uv,p3)
+    # (owner, parametric) provenance per emitted uv vertex — a boundary
+    # sample's Point/Curve identity and curve parameter, or the face itself
+    # plus its (u,v) for interior vertices. Same `emit` dedup rule as `lift`:
+    # the first writer of a uv position owns the metadata too.
+    vertex_meta=Dict{NTuple{2,Float64},
+        Tuple{Tuple{Int,Int32},Union{Nothing,Vector{Float64}}}}()
+    function emit(uv,p3,owner,param)
         return get!(index,uv) do
             push!(xs,uv[1]);push!(ys,uv[2]);push!(lift,p3)
+            vertex_meta[uv]=(owner,param)
             return length(xs)
         end
     end
@@ -4156,26 +4163,30 @@ function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
                             "$caller: Surface[$t] degenerate Curve[$curve] " *
                             "pcurve does not collapse onto its pole vertex"))
                         u_prev=u
-                        push!(loop_idx,emit((u,v),pole))
+                        # Every sample on the collapsed row is the same 3-D
+                        # vertex — the degenerate edge's own Point entity.
+                        push!(loop_idx,emit((u,v),pole,(0,Int32(a)),
+                            Float64[]))
                     end
                     continue
                 end
             end
             for parameter in _surface_curve_parameters(
                     m,forced,curve,signed,caller)
-                p3=if parameter==t0
-                    m.points[a]
+                if parameter==t0
+                    p3=m.points[a];owner=(0,Int32(a));param=Float64[]
                 elseif parameter==t1
-                    m.points[b]
+                    p3=m.points[b];owner=(0,Int32(b));param=Float64[]
                 else
-                    _periodic_curve_point(m,curve,parameter,caller)
+                    p3=_periodic_curve_point(m,curve,parameter,caller)
+                    owner=(1,Int32(curve));param=Float64[parameter]
                 end
                 u,v=_occ_pcurve_d0(pc,parameter)
                 if period>0.0 && u_prev!==nothing
                     u+=period*round((u_prev-u)/period)
                 end
                 u_prev=u
-                push!(loop_idx,emit((u,v),p3))
+                push!(loop_idx,emit((u,v),p3,owner,param))
             end
         end
         nloop=length(loop_idx)
@@ -4198,18 +4209,52 @@ function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
     # Upstream `ALGO_2D_INITIAL_ONLY` stops at the recovered 1-D boundary
     # mesh, so initial-only suppresses every interior (u,v) lattice seed.
     if !initial_only && uspan>0.0 && vspan>0.0
-        h3=0.0;nedge=0
+        # Direction-aware targets: a swept band's boundary mixes long
+        # v-direction seams with short u-direction rim chords, so a single
+        # mean spacing starves the short direction of lattice columns and
+        # the CDT bridges whole profile arcs — the lifted triangles then fold
+        # through the sweep (a self-intersecting patch).  Classify each
+        # boundary edge by its dominant uv direction and target each lattice
+        # direction at its own rim spacing.
+        h3u=0.0;nu_e=0;h3v=0.0;nv_e=0
         for (i,j) in segs
             a=lift[i];b=lift[j]
-            h3+=sqrt((b[1]-a[1])^2+(b[2]-a[2])^2+(b[3]-a[3])^2);nedge+=1
+            l3=sqrt((b[1]-a[1])^2+(b[2]-a[2])^2+(b[3]-a[3])^2)
+            if abs(xs[j]-xs[i])>=abs(ys[j]-ys[i])
+                h3u+=l3;nu_e+=1
+            else
+                h3v+=l3;nv_e+=1
+            end
         end
-        h3/=max(nedge,1)
-        uc=0.5*(umin+umax);vc=0.5*(vmin+vmax)
-        _,du_c,dv_c=_occ_surface_d1(sg,uc,vc)
-        su=sqrt(_b3dot(du_c,du_c));sv=sqrt(_b3dot(dv_c,dv_c))
-        du_t=h3/max(su,1e-12);dv_t=h3/max(sv,1e-12)
-        nu=clamp(floor(Int,uspan/du_t)-1,0,64)
-        nv=clamp(floor(Int,vspan/dv_t)-1,0,64)
+        h3=(h3u+h3v)/max(nu_e+nv_e,1)
+        # A direction whose ONLY boundary edges collapse to zero 3-D length —
+        # a sphere's pole rows lift to a single apex vertex — has no rim
+        # spacing of its own; fall back to the global mean rather than
+        # seeding at a zero (Inf uv) step.
+        h3u=nu_e>0 && h3u>0.0 ? h3u/nu_e : h3
+        h3v=nv_e>0 && h3v>0.0 ? h3v/nv_e : h3
+        # The metric of a swept/lofted patch varies across the domain
+        # (a pipe's inner bend, a cone's apex); take the densest of a few
+        # stations so no region is seeded coarser than its own curvature.
+        su=0.0;sv=0.0
+        for fu in (0.25,0.5,0.75), fv in (0.25,0.5,0.75)
+            _,du_c,dv_c=_occ_surface_d1(sg,umin+fu*uspan,vmin+fv*vspan)
+            su=max(su,sqrt(_b3dot(du_c,du_c)))
+            sv=max(sv,sqrt(_b3dot(dv_c,dv_c)))
+        end
+        du_t=h3u/max(su,1e-12);dv_t=h3v/max(sv,1e-12)
+        # Skip seeding in a direction whose uv step is not a positive finite
+        # length (a singular metric, or a fully collapsed boundary) — an
+        # empty lattice degrades to boundary-only CDT, never a hard error.
+        nu=du_t>0.0 && isfinite(uspan/du_t) ?
+            clamp(floor(Int,uspan/du_t)-1,0,64) : 0
+        nv=dv_t>0.0 && isfinite(vspan/dv_t) ?
+            clamp(floor(Int,vspan/dv_t)-1,0,64) : 0
+        # Degrade proportionally under the seed cap rather than dropping the
+        # lattice wholesale — an empty interior is exactly what seeds prevent.
+        while nu>1 && nv>1 && nu*nv>4096
+            nu>=nv ? (nu=(nu+1)÷2) : (nv=(nv+1)÷2)
+        end
         if nu>0 && nv>0 && nu*nv<=4096
             du=uspan/(nu+1);dv=vspan/(nv+1)
             tol2=(0.35*min(du,dv))^2
@@ -4223,7 +4268,7 @@ function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
                 end
                 near && continue
                 p3=_occ_surface_point(sg,u,v)
-                emit((u,v),p3)
+                emit((u,v),p3,(2,Int32(t)),[u,v])
             end
         end
     end
@@ -4271,6 +4316,19 @@ function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
     # strictly reduces the over-use count and cannot create a new collision.
     uxs=[uvcoords[1,k] for k in 1:nnodes(mesh)]
     uys=[uvcoords[2,k] for k in 1:nnodes(mesh)]
+    # Preimage provenance parallel to uxs/uys: emitted vertices carry their
+    # recorded owner/parameter; CDT Steiner vertices are face-owned with
+    # their uv as the parametrization.
+    pre_owner=Vector{Tuple{Int,Int32}}(undef,length(uxs))
+    pre_param=Vector{Union{Nothing,Vector{Float64}}}(undef,length(uxs))
+    for k in eachindex(uxs)
+        meta=get(vertex_meta,(uxs[k],uys[k]),nothing)
+        if meta===nothing
+            pre_owner[k]=(2,Int32(t));pre_param[k]=[uxs[k],uys[k]]
+        else
+            pre_owner[k]=meta[1];pre_param[k]=meta[2]
+        end
+    end
     tris_uv=NTuple{3,Int32}[(mesh.tris[1,c],mesh.tris[2,c],mesh.tris[3,c])
                             for c in axes(mesh.tris,2)]
     cells=NTuple{3,Int32}[]
@@ -4315,6 +4373,7 @@ function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
         mu=(uxs[a]+uxs[b])/2; mv=(uys[a]+uys[b])/2
         p3=_occ_surface_point(sg,mu,mv)
         push!(uxs,mu);push!(uys,mv)
+        push!(pre_owner,(2,Int32(t)));push!(pre_param,[mu,mv])
         push!(remap,get!(welded,p3) do
             push!(kept,p3);push!(kept_uv,(mu,mv))
             return Int32(length(kept))
@@ -4340,12 +4399,205 @@ function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
         end
         tris_uv=split
     end
+    # Vertex-link repair: on a closed-section face the two uv seam columns
+    # weld onto the same 3-D nodes, but CDT chords that reach both columns
+    # asymmetrically can leave a welded vertex with a disconnected triangle
+    # link (a pinch — two fans meeting only at the vertex).  Rebuild the
+    # vertex's whole star on one covering sheet — shifting each incident
+    # preimage's neighbourhood back by the domain's u period — so the star
+    # becomes a single polygon that a fresh CDT fans around the vertex.
+    umin_r=minimum(uxs);umax_r=maximum(uxs);P_r=umax_r-umin_r
+    if P_r>0.0
+        for _ in 1:16
+            empty!(cells);empty!(seen_cells)
+            for (a,b,c) in tris_uv
+                wa,wb,wc=remap[a],remap[b],remap[c]
+                (wa==wb || wb==wc || wc==wa) && continue
+                tri=(wa,wb,wc)
+                key=tuple(sort!(Int[tri[1],tri[2],tri[3]])...)
+                key in seen_cells && continue
+                push!(seen_cells,key);push!(cells,tri)
+            end
+            pre_of=Dict{Int32,Vector{Int32}}()
+            for (i,r) in enumerate(remap)
+                push!(get!(pre_of,r,Int32[]),Int32(i))
+            end
+            badw=Int32(0)
+            for (a,b,c) in cells, w in (a,b,c)
+                pre=get(pre_of,w,nothing)
+                (pre===nothing || length(pre)<2) && continue
+                lk=Dict{Int32,Vector{Int32}}()
+                for (x,y,z) in cells
+                    p1,p2=x==w ? (y,z) : y==w ? (z,x) :
+                          z==w ? (x,y) : continue
+                    push!(get!(lk,p1,Int32[]),p2)
+                    push!(get!(lk,p2,Int32[]),p1)
+                end
+                seen_v=Set{Int32}();ncomp=0
+                for s in keys(lk)
+                    s in seen_v && continue
+                    ncomp+=1;stack=Int32[s]
+                    while !isempty(stack)
+                        z=pop!(stack);z in seen_v && continue
+                        push!(seen_v,z)
+                        for q2 in lk[z]
+                            q2 in seen_v || push!(stack,q2)
+                        end
+                    end
+                end
+                ncomp>1 && (badw=w;break)
+            end
+            badw==0 && break
+            pre=pre_of[badw]
+            qmin=pre[argmin([uxs[q] for q in pre])]
+            up=uxs[qmin];wv=uys[qmin]
+            # Every incident cell contains the welded vertex, so its union on
+            # the covering sheet is star-shaped about w: shifting each cell so
+            # that its badw preimage lands at (up,wv) places every neighbour
+            # at a unique position — including the two seam preimages of a
+            # welded neighbour, which coincide there.  The star polygon is
+            # then the neighbours in angular order around w.
+            inc=Set{Int}()
+            npmap=Dict{NTuple{2,Float64},Int32}()
+            for (ci,(a,b,c)) in enumerate(tris_uv)
+                np=(remap[a]==badw)+(remap[b]==badw)+(remap[c]==badw)
+                np==1 || continue
+                q=remap[a]==badw ? a : remap[b]==badw ? b : c
+                d=up-uxs[q]
+                push!(inc,ci)
+                for v in (a,b,c)
+                    v==q && continue
+                    pu=uxs[v]+d
+                    pos=(pu==0.0 ? 0.0 : pu, uys[v]==0.0 ? 0.0 : uys[v])
+                    old=get(npmap,pos,Int32(0))
+                    if old==0
+                        npmap[pos]=v
+                    elseif pu>up
+                        # right of w: keep the umin-side preimage
+                        uxs[v]<uxs[old] && (npmap[pos]=v)
+                    elseif pu<up
+                        # left of w: keep the umax-side preimage
+                        uxs[v]>uxs[old] && (npmap[pos]=v)
+                    end
+                end
+            end
+            length(npmap)>=3 || break
+            order=sort!(collect(keys(npmap));
+                        by=p->atan(p[2]-wv,p[1]-up))
+            # A welded neighbour may occupy several covering positions (one
+            # per sheet): the cylinder link visits it once, so pick one
+            # representative position per welded vertex — the nearest to w —
+            # for the fan; the skipped copies form rim "ears" that are
+            # retriangulated separately without w.
+            chosen=Dict{Int32,NTuple{2,Float64}}()
+            for p in order
+                W=remap[npmap[p]]
+                old=get(chosen,W,nothing)
+                if old===nothing ||
+                        (p[1]-up)^2+(p[2]-wv)^2 <
+                        (old[1]-up)^2+(old[2]-wv)^2
+                    chosen[W]=p
+                end
+            end
+            repset=Set(values(chosen))
+            fan=NTuple{2,Float64}[p for p in order if p in repset]
+            length(fan)>=3 || break
+            newt=NTuple{3,Int32}[]
+            # fan triangles around w over the representative positions
+            fi=indexin(fan,order)
+            for k in eachindex(fan)
+                a=npmap[fan[k]]
+                b=npmap[fan[mod1(k+1,length(fan))]]
+                push!(newt,(qmin,a,b))
+            end
+            # ears: runs of skipped positions between consecutive fan verts
+            for (k,ia) in enumerate(fi)
+                ib=fi[mod1(k+1,length(fi))]
+                skips=Int[]
+                j=ia
+                while true
+                    j=mod1(j+1,length(order))
+                    j==ib && break
+                    push!(skips,j)
+                end
+                isempty(skips) && continue
+                epoly=NTuple{2,Float64}[fan[k]]
+                append!(epoly,(order[j] for j in skips))
+                push!(epoly,fan[mod1(k+1,length(fan))])
+                exs=Float64[p[1] for p in epoly]
+                eys=Float64[p[2] for p in epoly]
+                en=length(epoly)
+                esegs=Tuple{Int,Int}[(i,mod1(i+1,en)) for i in 1:en]
+                T3=constrained_delaunay(exs,eys,esegs)
+                interior3=classify_interior(T3)
+                em=to_mesh(T3;interior=interior3)
+                for c in axes(em.tris,2)
+                    vs=Int32[]
+                    ok=true
+                    for r in (em.tris[1,c],em.tris[2,c],em.tris[3,c])
+                        pos=(em.coords[1,r]==0.0 ? 0.0 : em.coords[1,r],
+                             em.coords[2,r]==0.0 ? 0.0 : em.coords[2,r])
+                        vi=get(npmap,pos,Int32(0))
+                        if vi==0
+                            # CDT Steiner point in the ear
+                            ub=umin_r+mod(pos[1]-umin_r,P_r)
+                            ub>=umax_r && (ub=umin_r)
+                            p3=_occ_surface_point(sg,ub,pos[2])
+                            push!(uxs,ub);push!(uys,pos[2])
+                            push!(pre_owner,(2,Int32(t)))
+                            push!(pre_param,[ub,pos[2]])
+                            push!(remap,get!(welded,p3) do
+                                push!(kept,p3);push!(kept_uv,(ub,pos[2]))
+                                return Int32(length(kept))
+                            end)
+                            vi=Int32(length(uxs))
+                            npmap[pos]=vi
+                        end
+                        push!(vs,vi)
+                    end
+                    ok && push!(newt,(vs[1],vs[2],vs[3]))
+                end
+            end
+            isempty(newt) && break
+            tris_uv=NTuple{3,Int32}[
+                t for (i,t) in enumerate(tris_uv) if !(i in inc)]
+            append!(tris_uv,newt)
+        end
+    end
     post=Dict{NTuple{2,Int32},Int}()
     for tri in cells, (x,y) in ((tri[1],tri[2]),(tri[2],tri[3]),(tri[3],tri[1]))
         we=x<y ? (x,y) : (y,x)
         post[we]=get(post,we,0)+1
-        post[we]<=2 || throw(ArgumentError(
+    end
+    for (we,c) in post
+        c<=2 || throw(ArgumentError(
             "$caller: Surface[$t] seam weld did not converge to a manifold mesh"))
+    end
+    # Resolve each welded node's ownership from its preimages: the
+    # lowest-dimensional owner wins (a Point beats a Curve beats the face),
+    # matching the precedence `model_to_mixed` applies on planar faces, and
+    # ties keep the first preimage — deterministic by emit order. The stored
+    # parameter follows the winning preimage, so a curve-owned boundary
+    # vertex keeps its curve parameter and a face-owned vertex keeps a uv.
+    kept_owner=Vector{Tuple{Int,Int32}}(undef,length(kept))
+    kept_param=Vector{Union{Nothing,Vector{Float64}}}(undef,length(kept))
+    resolved=falses(length(kept))
+    for (k,r) in enumerate(remap)
+        owner=pre_owner[k]
+        (!resolved[r] || owner[1]<kept_owner[r][1]) || continue
+        resolved[r]=true;kept_owner[r]=owner;kept_param[r]=pre_param[k]
+    end
+    # Periodic faces unwrap u across the domain seam while traversing the
+    # wire; fold stored surface parameters back into the analytic interval so
+    # `model_parametrization`/`model_value` round-trip on the native bounds.
+    if period>0.0
+        ulo=_occ_surface_bounds(sg)[1][1]
+        for r in eachindex(kept_param)
+            kept_owner[r][1]==2 || continue
+            p=kept_param[r]
+            p===nothing && continue
+            p[1]=ulo+mod(p[1]-ulo,period)
+        end
     end
     coords=Matrix{Float64}(undef,3,length(kept))
     for k in eachindex(kept)
@@ -4374,7 +4626,56 @@ function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
         flipped[3,:].=mesh.tris[2,:]
         mesh=Mesh(coords;tris=flipped)
     end
+    return mesh,kept_owner,kept_param
+end
+
+# The lifted tessellation alone — the volume-PLC consumer classifies boundary
+# vertices geometrically and does not need per-node provenance.
+function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
+                                        caller::AbstractString;kwargs...)
+    mesh,_,_=_model_occ_curved_surface_mesh_tracked(m,t,caller;kwargs...)
     return mesh
+end
+
+# Wrap the lifted (u,v) tessellation in the native producer's identity record,
+# the same contract `_gmsh_native_surface_export` emits so `generate(2)`
+# classifies the patch like any other surface product: boundary vertices that
+# coincide bitwise with an actual Point/Curve product node keep that node's
+# UID (retained), every other vertex allocates above the consumed high-water
+# mark, and each node carries its owner plus parametric coordinates — the
+# curve parameter on boundary edges and the face's own (u,v) inside.
+function _occ_curved_surface_production(m::GeoModel,t::Int,mesh::Mesh,
+                                        owners::Vector{Tuple{Int,Int32}},
+                                        params,input,limit,caller::AbstractString)
+    tags=Vector{UInt64}(undef,nnodes(mesh))
+    retained=falses(nnodes(mesh))
+    lookup=Dict{Tuple{Int,Int32,NTuple{3,Float64}},UInt64}()
+    source=input===nothing ? nothing : input.mesh
+    if source!==nothing && source.entity_data!==nothing
+        data=source.entity_data
+        for row in 1:nnodes(source)
+            entity=data.node_entities[row]
+            key=(entity[1],entity[2],
+                 (source.coords[1,row],source.coords[2,row],
+                  source.coords[3,row]))
+            haskey(lookup,key) || (lookup[key]=data.external_node_tags[row])
+        end
+    end
+    next=UInt64(limit)
+    for k in 1:nnodes(mesh)
+        owner=owners[k]
+        point=(mesh.coords[1,k],mesh.coords[2,k],mesh.coords[3,k])
+        tag=get(lookup,(owner[1],owner[2],point),UInt64(0))
+        if tag!=0
+            tags[k]=tag;retained[k]=true
+        else
+            next+=UInt64(1)
+            iszero(next) && throw(ArgumentError(
+                "$caller: Surface[$t] vertex births exhaust UInt64 labels"))
+            tags[k]=next
+        end
+    end
+    return _ModelSurfaceProduction(mesh,tags,owners,params,retained,next)
 end
 
 # ── result surfaces (any Boolean record) ────────────────────────────────────

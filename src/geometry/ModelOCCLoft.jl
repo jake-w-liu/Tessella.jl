@@ -724,13 +724,55 @@ function _model_occ_thru_sections!(m::GeoModel,tag,wire_tags;
             # the mechanism (`_occ_surface_normal` and the winding alignment
             # honor it), matching `_model_box_plane_geometry`'s convention.
             cap_rev=_dot3(geo.axis,outward)<0
-            cap_rev && (geo=(;geo...,reversed=true))
             fi+=1
             _model_occ_sweep_bind!(sw,-1,wire_tags[fi],wire_ids[fi],
                 _ModelOCCShape(-1,(uses=uses,),UInt64[u[1] for u in uses]))
-            _model_occ_sweep_bind!(sw,2,face_tags[fi],face_ids[fi],
-                _ModelOCCShape(2,(kind=:plane,geometry=geo),
-                               UInt64[wire_ids[fi]]))
+            # The planar mesher admits a cap only when its boundary is
+            # BITWISE coplanar (`orient3 == 0` on every sample — a rotated
+            # transport frame leaves ~ulp residuals the exact predicate
+            # rejects even though the cap is genuinely planar).  When the
+            # fit plane leaves any residual, publish the same disk as a
+            # trimmed degree-1 tensor patch over the identical (X,Y) frame
+            # so the curved mesher lifts its pcurve boundary instead — the
+            # geometry is truthful, just classified differently.
+            cap_samples=_model_occ_wire_samples(shape_of,uses,caller)
+            bitwise=all(
+                p->_dot3(_arc_sub(p,geo.center),geo.axis)==0.0,cap_samples)
+            if bitwise
+                cap_rev && (geo=(;geo...,reversed=true))
+                _model_occ_sweep_bind!(sw,2,face_tags[fi],face_ids[fi],
+                    _ModelOCCShape(2,(kind=:plane,geometry=geo),
+                                   UInt64[wire_ids[fi]]))
+            else
+                ulo,uhi=geo.uvb[1][1],geo.uvb[2][1]
+                vlo,vhi=geo.uvb[1][2],geo.uvb[2][2]
+                ctrl=Matrix{NTuple{3,Float64}}(undef,2,2)
+                wts=ones(Float64,2,2)
+                for (i,uu) in enumerate((ulo,uhi)),
+                        (j,vv) in enumerate((vlo,vhi))
+                    p=geo.center .+ uu.*geo.X .+ vv.*geo.Y
+                    ctrl[i,j]=(p[1],p[2],p[3])
+                end
+                patch=NURBS.NURBSSurface(1,1,Float64[ulo,ulo,uhi,uhi],
+                    Float64[vlo,vlo,vhi,vhi],ctrl,wts)
+                vuv=Dict{Int,NTuple{2,Float64}}()
+                for (eid,_) in uses, vid in shape_of(eid).children
+                    o=_arc_sub(shape_of(vid).geometry.point,geo.center)
+                    vuv[tag_of(vid)]=(_dot3(o,geo.X),_dot3(o,geo.Y))
+                end
+                # `plane_rec` keeps the exact fitted-plane record for the
+                # measures path — the trimmed-CDT quadrature cannot reach
+                # plane-shoelace precision on conic wires, and the
+                # reclassification is a meshing admission, not a geometry
+                # claim.
+                tgeo=(occ=:tensor_bspline,
+                      patch=_ModelNURBSSurface(:bspline,patch),
+                      pcurves=geo.pcurves,vertex_uv=vuv,reversed=cap_rev,
+                      trimmed=true,plane_rec=geo)
+                _model_occ_sweep_bind!(sw,2,face_tags[fi],face_ids[fi],
+                    _ModelOCCShape(2,(kind=:tensor_bspline,geometry=tgeo),
+                                   UInt64[wire_ids[fi]]))
+            end
             push!(caps,(fi,face_ids[fi],cap_rev))
         end
         # The measure path orients each face's canonical normal by the shell
@@ -1916,18 +1958,18 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
         planes=NTuple{3,Float64}[]; bs=Float64[]
         shell_uses=copy(kernel.shapes[
             kernel.shapes[vid].children[1]].geometry.uses)
+        isplane=Dict{UInt64,Bool}()
         for (fid,rev) in shell_uses
             fg=kernel.shapes[fid].geometry
-            get(fg.geometry,:occ,nothing)!==:plane &&
-                throw(ArgumentError(
-                    "$caller: fillet needs planar faces (got " *
-                    "occ=$(get(fg.geometry,:occ,nothing)))"))
-            σ=rev ? -1.0 : 1.0
-            n=_occ3_scale(fg.geometry.axis,σ)
-            get(fg.geometry,:reversed,false) && (n=(.-n))
-            n=_occ3_scale(n,1.0/_occ_modulus(n))
-            fnormals[fid]=n; fcenters[fid]=fg.geometry.center
-            push!(planes,n); push!(bs,_dot3(n,fg.geometry.center))
+            isplane[fid]=get(fg.geometry,:occ,nothing)===:plane
+            if isplane[fid]
+                σ=rev ? -1.0 : 1.0
+                n=_occ3_scale(fg.geometry.axis,σ)
+                get(fg.geometry,:reversed,false) && (n=(.-n))
+                n=_occ3_scale(n,1.0/_occ_modulus(n))
+                fnormals[fid]=n; fcenters[fid]=fg.geometry.center
+                push!(planes,n); push!(bs,_dot3(n,fg.geometry.center))
+            end
             wid=kernel.shapes[fid].children[1]
             wire_of[fid]=wid
             for (u,_) in kernel.shapes[wid].geometry.uses
@@ -1938,13 +1980,19 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
                 end
             end
         end
-        overs=_occ_halfspace_verts(planes,bs)
-        if isempty(overs)
-            planes=[(.-n) for n in planes]; bs=(.-bs)
-            fnormals=Dict(k=>(.-v) for (k,v) in fnormals)
+        # The half-space boundedness/orientation certificate needs every
+        # face planar — a curved shell's planar subset needn't bound a
+        # region, so the check (and the inward-flip retry) stays limited
+        # to the all-planar case it was designed for.
+        if all(values(isplane))
             overs=_occ_halfspace_verts(planes,bs)
-            isempty(overs) && throw(ArgumentError(
-                "$caller: Volume[$vt] faces bound an empty body"))
+            if isempty(overs)
+                planes=[(.-n) for n in planes]; bs=(.-bs)
+                fnormals=Dict(k=>(.-v) for (k,v) in fnormals)
+                overs=_occ_halfspace_verts(planes,bs)
+                isempty(overs) && throw(ArgumentError(
+                    "$caller: Volume[$vt] faces bound an empty body"))
+            end
         end
         fil_verts=Set{UInt64}()
         trunc=Dict{Tuple{UInt64,UInt64},NTuple{3,Float64}}()
@@ -1969,6 +2017,12 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
             em=_occ3_scale(_occ3_add(pa,pb),0.5)
             L=_occ_modulus(_occ3_sub(pb,pa))
             fA,fB=fids
+            for f in (fA,fB)
+                focc=get(kernel.shapes[f].geometry.geometry,:occ,nothing)
+                isplane[f] || throw(ArgumentError(
+                    "$caller: Curve[$et] touches a non-planar face " *
+                    "(occ=$focc) — surface blends (ChFi3d) are unsupported"))
+            end
             nA,nB=fnormals[fA],fnormals[fB]
             φ=acos(clamp(_dot3(nA,nB),-1.0,1.0))
             δ=π-φ
@@ -2007,6 +2061,9 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
                     "$caller: broken corner topology on Curve[$et]"))
                 sA=sibs[iA]; sB=sibs[3-iA]
                 fC=only(f for f in edge_faces[sA] if f!=fA)
+                isplane[fC] || throw(ArgumentError(
+                    "$caller: Curve[$et] corner touches a non-planar " *
+                    "face — surface blends (ChFi3d) are unsupported"))
                 nC=fnormals[fC]
                 abs(_dot3(t,nC))>1-1e-6 || throw(ArgumentError(
                     "$caller: fillet end face must be orthogonal " *
@@ -2083,6 +2140,10 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
                 dirty && break
             end
             dirty || continue
+            focc=get(kernel.shapes[fid].geometry.geometry,:occ,nothing)
+            isplane[fid] || throw(ArgumentError(
+                "$caller: fillet truncates an edge of a non-planar face " *
+                "(occ=$focc) — surface blends are unsupported"))
             segs=Any[]
             prev_end=nothing
             for (u,rev) in uses

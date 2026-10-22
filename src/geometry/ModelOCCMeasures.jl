@@ -219,8 +219,10 @@ end
 # the midpoint rule integrates quadratics exactly). Conic-edged solid
 # faces fall back to (area, centroid, nothing).
 function _model_occ_plane_stats(kernel,id;want_tensor=false,
-                                caller="OCC.get_center_of_mass")
-    shape=kernel.shapes[id]; rec=shape.geometry.geometry
+                                caller="OCC.get_center_of_mass",
+                                face_rec=nothing)
+    shape=kernel.shapes[id]
+    rec=face_rec===nothing ? shape.geometry.geometry : face_rec
     A=0.0
     raw_per_wire=NamedTuple[]
     for wire_id in shape.children
@@ -530,6 +532,12 @@ end
 function _model_occ_face_measure(kernel,id)
     shape=kernel.shapes[id]; rec=shape.geometry.geometry
     occ=get(rec,:occ,nothing)
+    # A tensor face reclassified from a genuine plane (bitwise-coplanarity
+    # admission for the parametric mesher) carries its exact plane record —
+    # integrate that rather than the trimmed-CDT approximation.
+    occ!==:plane && haskey(rec,:plane_rec) &&
+        return _model_occ_plane_stats(kernel,id;
+            face_rec=rec.plane_rec)[1:2]
     if occ===:plane
         A,c3,_=_model_occ_plane_stats(kernel,id)
         return A,c3
@@ -836,6 +844,17 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
     for (fid,rev) in uses
         rec=kernel.shapes[fid].geometry.geometry
         σ=rev ? -1.0 : 1.0
+        if haskey(rec,:plane_rec)
+            # Reclassified-from-plane tensor cap: the exact plane record
+            # keeps shoelace precision on conic wires.
+            prec=rec.plane_rec
+            n=(σ*prec.axis[1],σ*prec.axis[2],σ*prec.axis[3])
+            A,c3,_=_model_occ_plane_stats(kernel,fid;face_rec=prec)
+            d=A*_dot3(n,c3)
+            V+=d/3
+            want_centroid && (M=_occ3_add(M,_occ3_scale(c3,d)))
+            continue
+        end
         if haskey(rec,:patch)
             if haskey(rec,:pcurves) && get(rec,:trimmed,false)
                 Vp,Mp=_model_occ_trimmed_face_div(kernel,fid)
