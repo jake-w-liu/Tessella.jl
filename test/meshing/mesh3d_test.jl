@@ -1015,15 +1015,12 @@ Base.getindex(::_UnreadableExactPoints,::Int)=
             @test is_closed_manifold(m)
             @test bndarea(m) ≈ surfarea(twisted) rtol=1e-9
             @test mesh_vol(m) ≈ 4.418609603270241 rtol=1e-9
-            # Remaining pipeline-level blocker on this PLC class (t13 reports
-            # the same message): the native volume-constraint certificate
-            # requires literal boundary facet incidence — every published
-            # Surface cell exactly one tet face — which cannot hold once exact
-            # recovery places Steiner vertices on the boundary. The parity
-            # path is a volume-boundary subdivision write-back into the
-            # surface products (the dim-2 analog of
-            # `_model_surface_boundary_writeback!`); until that lands, pin the
-            # explicit blocker so the contract is visible.
+            # The declared-triple certificate correctly still rejects the
+            # recovered mesh — the write-back (the dim-2 analog of
+            # `_model_surface_boundary_writeback!`) first rewrites the Surface
+            # product's cell list into the realized children, and the same
+            # literal incidence certificate then certifies the subdivided
+            # product. Boundary Steiner vertices gain a Surface ownership.
             bf, _ = boundary_faces(mc.tets)
             @test length(bf) > ntris(twisted)   # boundary genuinely subdivided
             cons = (outer_faces=[(2, UInt64(t), Tuple(Int32.(twisted.tris[:,t])))
@@ -1032,6 +1029,17 @@ Base.getindex(::_UnreadableExactPoints,::Int)=
                     edges=Tuple{Int,UInt64,Tuple{Int32,Int32}}[])
             @test_throws ArgumentError Tessella.Model._model_certify_native_volume_constraints(
                 mc, cons, 1, "native-fill-exact-cert")
+            wb_cons, receipt = Tessella.Model._model_native_volume_boundary_writeback!(
+                nothing, 1, mc, cons,
+                (surface=twisted, native_node_tags=nothing),
+                nothing, nothing, "native-fill-exact-cert"; persist=false)
+            @test receipt !== nothing
+            @test length(wb_cons.outer_faces) == length(bf)
+            @test !isempty(receipt.nodes)
+            @test all(owner -> owner[1] in (1, 2), values(receipt.nodes))
+            @test all(row -> row > nnodes(twisted), keys(receipt.nodes))
+            Tessella.Model._model_certify_native_volume_constraints(
+                mc, wb_cons, 1, "native-fill-exact-cert")
         end
         @testset "recover_boundary_cdt is general (supported classes too)" begin
             # the same exact CDT recovery conforms the supported classes with the exact volume.

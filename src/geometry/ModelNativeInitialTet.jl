@@ -256,6 +256,25 @@ function run!(k)
 end
 end
 
+import ..RecoverCDT
+
+# Receipt of the volume-boundary subdivision write-back — see
+# `_model_native_volume_boundary_writeback!` below. `constraints` is the
+# literal-certificate-ready subdivided triple list; `nodes`/`node_params`
+# assign each recovery-born mesh row its owning entity and parameter;
+# `surfaces`/`curves` carry each product's complete post-write-back cell list
+# as `(msh, connectivity, label)`; `replaced` lists the dropped source cell
+# connectivity per owner so the dim-01 assembly can remove them atomically.
+struct _ModelVolumeBoundaryWriteback
+    constraints
+    nodes::Dict{Int32,Tuple{Int,Int32}}
+    node_params::Dict{Int32,Vector{Float64}}
+    surfaces::Dict{Int,Vector{Tuple{Int,Vector{Int32},UInt64}}}
+    curves::Dict{Int,Vector{Tuple{Int,Vector{Int32},UInt64}}}
+    replaced::Dict{Tuple{Int,Int32},Set{Tuple}}
+    added::Dict{Tuple{Int,Int32},Vector{Tuple{Int,Vector{Int32},UInt64,Int32}}}
+end
+
 # Input rows follow the actual MVertex number ordering. Perturbed working
 # coordinates stay inside the kernel; emitted vertices retain their births.
 mutable struct _ModelNativeVolumeBirths
@@ -266,9 +285,10 @@ mutable struct _ModelNativeVolumeBirths
     element_tags::Vector{UInt64}
     element_high_water::UInt64
     cell_source::Union{Nothing,Mesh}
+    boundary_writeback::Union{Nothing,_ModelVolumeBoundaryWriteback}
 end
 _ModelNativeVolumeBirths(node_max::UInt64=UInt64(0),element_max::UInt64=UInt64(0))=
-    _ModelNativeVolumeBirths(nothing,UInt64[],node_max,0,UInt64[],element_max,nothing)
+    _ModelNativeVolumeBirths(nothing,UInt64[],node_max,0,UInt64[],element_max,nothing,nothing)
 
 function _model_native_volume_cell_births!(births,mesh)
     births===nothing && return mesh
@@ -309,6 +329,7 @@ struct _ModelVolumeGeometryProduction
     temporary_elements::UInt64
     element_tags::Vector{UInt64}
     element_high_water::UInt64
+    boundary_writeback::Union{Nothing,_ModelVolumeBoundaryWriteback}
 end
 
 function _model_volume_geometry_production(mesh,births,caller)
@@ -331,7 +352,8 @@ function _model_volume_geometry_production(mesh,births,caller)
         UInt64[]
     end
     return _ModelVolumeGeometryProduction(mesh,labels,births.node_high_water,
-        births.temporary_elements,cells,births.element_high_water)
+        births.temporary_elements,cells,births.element_high_water,
+        births.boundary_writeback)
 end
 
 function _model_native_initial_delaunay_fill(surface::Mesh,order,options,caller;
@@ -533,6 +555,519 @@ function _model_certify_native_volume_constraints(mesh,constraints,volume,caller
         end
     end
     return nothing
+end
+
+
+# ---------------------------------------------------------------------------
+# Volume-boundary subdivision write-back
+#
+# Constrained recovery (the float Steiner fill, the exact conforming-Delaunay
+# backend, gmsh-delaunay refinement) may place Steiner vertices on the PLC: a
+# declared Surface cell (a,b,c) arrives on the tetrahedron boundary as the
+# children (a,b,s), (b,c,s), (c,a,s) — a conforming triangulation of the same
+# coplanar region, never a moved boundary. `_model_certify_native_volume_
+# constraints` keeps its literal incidence audit (the same check meshGRegion
+# runs against recovered MFace objects); what must change is the product the
+# audit sees. Upstream recovers the boundary and writes the recovered children
+# back onto each GFace/GEdge — new MVertex owners, fresh MFace/MEdge labels,
+# stored curve discretizations — which is the dimension-2 analogue of
+# `_model_surface_boundary_writeback!` (ModelMesh1D.jl). This routine derives
+# that write-back from the recovered mesh:
+#
+#   * every tetrahedron boundary face is attributed to exactly one declared
+#     Surface's exact coplanar regions (`RecoverCDT.build_regions` +
+#     `in_region_closed` on the rational centroid — plane membership uses a
+#     Float64 tolerance only where an exact-rational Steiner preimage was
+#     rounded ~1 ulp off its supporting plane);
+#   * every lost Curve cell is recovered as a chain of tet edges over the
+#     same segment;
+#   * each recovery-born boundary vertex is assigned its owning entity —
+#     (1, Curve) on a realized crease chain, else the single Surface whose
+#     region contains it (the smallest tag when coplanar siblings share an
+#     edge, mirroring the ambiguous-vertex convention);
+#   * children inherit fresh cell labels minted through the births element
+#     high-water so publication keeps UID uniqueness;
+#   * the receipt carries the complete subdivided cell lists, the dropped
+#     source connectivity, node owners and parameters so the dim-01 assembly
+#     can replace the written-back products atomically.
+#
+# It returns `(constraints, receipt)`; `constraints` is the literal-
+# certificate-ready triple list (kept cells plus children) that
+# `_model_certify_native_volume_constraints` audits unchanged. `receipt` is
+# `nothing` when the recovered boundary already matched the declared cells.
+# `persist=false` derives the subdivided constraints without consuming
+# allocator labels or stored curve discretizations (used by the mid-pipeline
+# audit before refinement can subdivide the boundary again).
+# ---------------------------------------------------------------------------
+
+# Exact plane membership first; the Float64 distance only admits the ~1 ulp
+# rounding between an exact-rational Steiner preimage and its output image.
+@inline function _model_volume_wb_on_plane(plane,pt,tol::Float64)
+    RecoverCDT.side(plane,pt)==0 && return true
+    n=plane.N;a0=plane.A0
+    nx=Float64(n[1]);ny=Float64(n[2]);nz=Float64(n[3])
+    norm=sqrt(nx*nx+ny*ny+nz*nz)
+    norm==0.0 && return false
+    dist=abs(nx*(Float64(pt[1])-Float64(a0[1]))+
+             ny*(Float64(pt[2])-Float64(a0[2]))+
+             nz*(Float64(pt[3])-Float64(a0[3])))/norm
+    return dist<=tol
+end
+
+# 2D barycentric weights of `p` on triangle (a,b,c) projected on the dominant
+# axis. `nothing` for a degenerate triangle; weights are Float64.
+function _model_volume_wb_barycentric(p,a,b,c)
+    ax,ay,az=a;bx,by,bz=b;cx,cy,cz=c
+    nx=(by-ay)*(cz-az)-(bz-az)*(cy-ay)
+    ny=(bz-az)*(cx-ax)-(bx-ax)*(cz-az)
+    nz=(bx-ax)*(cy-ay)-(by-ay)*(cx-ax)
+    drop=abs(nx)>=abs(ny) ? (abs(nx)>=abs(nz) ? 1 : 3) :
+                            (abs(ny)>=abs(nz) ? 2 : 3)
+    proj(q)=drop==1 ? (q[2],q[3]) : (drop==2 ? (q[1],q[3]) : (q[1],q[2]))
+    a2,b2,c2,p2=proj(a),proj(b),proj(c),proj(p)
+    d=(b2[1]-a2[1])*(c2[2]-a2[2])-(b2[2]-a2[2])*(c2[1]-a2[1])
+    isfinite(d) && d!=0.0 || return nothing
+    w1=((b2[1]-p2[1])*(c2[2]-p2[2])-(b2[2]-p2[2])*(c2[1]-p2[1]))/d
+    w2=((c2[1]-p2[1])*(a2[2]-p2[2])-(c2[2]-p2[2])*(a2[1]-p2[1]))/d
+    return (w1,w2,1.0-w1-w2)
+end
+
+# The declared Surface/Curve cell list the constraint triples came from.
+# With the mesh authority this replays the producer fold used by
+# `_model_native_volume_input_constraints`, carrying the product rows (for
+# parameter interpolation) and physical tags. Without it (bare-constraint
+# unit tests) every entry is treated as its own linear cell.
+function _model_volume_wb_constraint_cells(volume,constraints,geometry,authority,caller)
+    surfaces=Dict{Int,Vector{NamedTuple}}()
+    curves=Dict{Int,Vector{NamedTuple}}()
+    surface_order=Int[];curve_order=Int[]
+    if authority===nothing
+        for (surface,label,face) in constraints.outer_faces
+            haskey(surfaces,surface) || push!(surface_order,surface)
+            push!(get!(surfaces,surface,NamedTuple[]),
+                (label=label,msh=2,conn=Int32[face...],faces=[face],
+                 rows=Int32[],face_rows=NTuple{3,Int32}[],physical=Int32(0)))
+        end
+        for (curve,label,edge) in constraints.edges
+            haskey(curves,curve) || push!(curve_order,curve)
+            push!(get!(curves,curve,NamedTuple[]),
+                (label=label,msh=1,conn=Int32[edge[1],edge[2]],
+                 rows=Int32[],physical=Int32(0)))
+        end
+        return surfaces,curves,surface_order,curve_order
+    end
+    tags=geometry.native_node_tags
+    tags!==nothing && length(tags)==nnodes(geometry.surface) ||
+        throw(ArgumentError("$caller: actual Volume[$volume] lacks unique initial row bindings"))
+    rows=Dict(uid=>Int32(row) for (row,uid) in enumerate(tags))
+    slabels=Dict{Int,Set{UInt64}}();clabels=Dict{Int,Set{UInt64}}()
+    for (surface,label,_) in constraints.outer_faces
+        push!(get!(slabels,surface,Set{UInt64}()),label)
+    end
+    for (curve,label,_) in constraints.edges
+        push!(get!(clabels,curve,Set{UInt64}()),label)
+    end
+    function actual_row(product,prow)
+        uid=product.entity_data.external_node_tags[prow]
+        target=get(rows,uid,Int32(0))
+        target>0 || throw(ArgumentError(
+            "$caller: actual Volume[$volume] input omits lower vertex $uid"))
+        return target
+    end
+    for surface in sort!(collect(keys(slabels)))
+        product=_model_mesh_product(authority,2,surface;caller)
+        product isa MixedMesh && product.entity_data!==nothing || throw(ArgumentError(
+            "$caller: actual Surface[$surface] lacks its generated cell product"))
+        folded=_volume_boundary_faces(product)
+        cells=NamedTuple[];cursor=1
+        for (block,labels) in zip(product.blocks,product.entity_data.external_element_tags)
+            block.msh in (2,3) || isempty(block.nodes) || throw(ArgumentError(
+                "$caller: actual Surface[$surface] requires linear Triangle or Quad cells"))
+            for (column,label) in enumerate(labels)
+                count=block.msh==2 ? 1 : 2
+                conn=Int32[actual_row(product,block.nodes[i,column])
+                           for i in 1:size(block.nodes,1)]
+                prows=Int32[block.nodes[i,column] for i in 1:size(block.nodes,1)]
+                faces=NTuple{3,Int32}[];frows=NTuple{3,Int32}[]
+                for index in cursor:(cursor+count-1)
+                    face=folded[index]
+                    push!(faces,ntuple(i->Int32(actual_row(product,face[i])),3))
+                    push!(frows,ntuple(i->Int32(face[i]),3))
+                end
+                cursor+=count
+                push!(cells,(label=label,msh=Int(block.msh),conn=conn,faces=faces,
+                             rows=prows,face_rows=frows,
+                             physical=Int32(block.tags[column])))
+            end
+        end
+        surfaces[surface]=cells;push!(surface_order,surface)
+    end
+    for curve in sort!(collect(keys(clabels)))
+        product=_model_mesh_product(authority,1,curve;caller)
+        product===nothing && continue
+        cells=NamedTuple[]
+        for (block,labels) in zip(product.blocks,product.entity_data.external_element_tags)
+            block.msh==1 || continue
+            for (column,label) in enumerate(labels)
+                prows=Int32[block.nodes[1,column],block.nodes[2,column]]
+                conn=Int32[actual_row(product,prows[1]),actual_row(product,prows[2])]
+                push!(cells,(label=label,msh=1,conn=conn,rows=prows,
+                             physical=Int32(block.tags[column])))
+            end
+        end
+        curves[curve]=cells;push!(curve_order,curve)
+    end
+    return surfaces,curves,surface_order,curve_order
+end
+
+# A child face's emitted winding follows its parent region's declared
+# orientation: identical signed projected orient2 in exact arithmetic.
+function _model_volume_wb_orient(face,region,pts)
+    drop=region.plane.drop
+    sign=RecoverCDT.orient2(RecoverCDT.proj2(pts[Int(face[1])],drop),
+                            RecoverCDT.proj2(pts[Int(face[2])],drop),
+                            RecoverCDT.proj2(pts[Int(face[3])],drop))
+    sign==0 && return face
+    a,b,c=region.tris[1]
+    reference=RecoverCDT.orient2(RecoverCDT.proj2(pts[a],drop),
+                                 RecoverCDT.proj2(pts[b],drop),
+                                 RecoverCDT.proj2(pts[c],drop))
+    sign==reference && return face
+    return (face[1],face[3],face[2])
+end
+
+# Physical tag a child face inherits: the first dropped cell whose folded
+# face contains its centroid in 2D barycentric coordinates, else the first
+# dropped cell's tag (a straddling child keeps the region's physical).
+function _model_volume_wb_parent_physical(mesh,face,dropped_cells)
+    isempty(dropped_cells) && return Int32(0)
+    center=((mesh.coords[1,face[1]]+mesh.coords[1,face[2]]+mesh.coords[1,face[3]])/3,
+            (mesh.coords[2,face[1]]+mesh.coords[2,face[2]]+mesh.coords[2,face[3]])/3,
+            (mesh.coords[3,face[1]]+mesh.coords[3,face[2]]+mesh.coords[3,face[3]])/3)
+    for cell in dropped_cells
+        for folded in cell.faces
+            w=_model_volume_wb_barycentric(center,_pt3(mesh,folded[1]),
+                _pt3(mesh,folded[2]),_pt3(mesh,folded[3]))
+            w===nothing && continue
+            all(x->x>=-1e-9,w) && return cell.physical
+        end
+    end
+    return dropped_cells[1].physical
+end
+
+# Parameter for a recovery-born vertex: the declared parametrization first,
+# then barycentric interpolation inside a containing declared cell (Surface)
+# or along the lost cell's segment (Curve) when the authority supplies
+# product parameters.
+function _model_volume_wb_param(m,volume,owner,row,mesh,authority,
+                                surface_cells,curve_cells,caller)
+    owner[1] in (1,2) || return nothing
+    point=collect(_pt3(mesh,row))
+    value=try
+        model_parametrization(m,owner[1],Int(owner[2]),point)
+    catch err
+        err isa InterruptException && rethrow()
+        nothing
+    end
+    value!==nothing && all(isfinite,value) && return Float64.(value)
+    authority===nothing && return nothing
+    if owner[1]==2
+        surface=Int(owner[2])
+        product=_model_mesh_product(authority,2,surface;caller)
+        product isa MixedMesh && product.entity_data!==nothing || return nothing
+        params=product.entity_data.node_parametric
+        params===nothing && return nothing
+        for cell in get(surface_cells,surface,NamedTuple[])
+            isempty(cell.rows) && continue
+            for (fi,face) in enumerate(cell.faces)
+                w=_model_volume_wb_barycentric(
+                    _pt3(mesh,row),_pt3(mesh,face[1]),_pt3(mesh,face[2]),
+                    _pt3(mesh,face[3]))
+                w===nothing && continue
+                all(x->x>=-1e-9,w) || continue
+                prows=cell.face_rows[fi]
+                p1=params[prows[1]];p2=params[prows[2]];p3=params[prows[3]]
+                (p1===nothing || p2===nothing || p3===nothing) && continue
+                interpolated=[w[1]*p1[k]+w[2]*p2[k]+w[3]*p3[k]
+                              for k in eachindex(p1)]
+                all(isfinite,interpolated) || continue
+                return interpolated
+            end
+        end
+        return nothing
+    end
+    curve=Int(owner[2])
+    product=_model_mesh_product(authority,1,curve;caller)
+    product isa MixedMesh && product.entity_data!==nothing || return nothing
+    params=product.entity_data.node_parametric
+    params===nothing && return nothing
+    p=_pt3(mesh,row)
+    for cell in get(curve_cells,curve,NamedTuple[])
+        isempty(cell.rows) && continue
+        u,v=cell.conn
+        pu,pv=_pt3(mesh,u),_pt3(mesh,v)
+        seg=(pv[1]-pu[1],pv[2]-pu[2],pv[3]-pu[3])
+        len2=seg[1]*seg[1]+seg[2]*seg[2]+seg[3]*seg[3]
+        len2==0.0 && continue
+        alpha=((p[1]-pu[1])*seg[1]+(p[2]-pu[2])*seg[2]+(p[3]-pu[3])*seg[3])/len2
+        (alpha<-1e-9 || alpha>1+1e-9) && continue
+        tu=params[cell.rows[1]];tv=params[cell.rows[2]]
+        (tu===nothing || tv===nothing || isempty(tu) || isempty(tv)) && continue
+        interpolated=[tu[k]+alpha*(tv[k]-tu[k]) for k in eachindex(tu)]
+        all(isfinite,interpolated) || continue
+        return interpolated
+    end
+    return nothing
+end
+
+function _model_native_volume_boundary_writeback!(m,volume,mesh::Mesh,constraints,
+                                                 geometry,authority,births,
+                                                 caller;persist::Bool=true)
+    face_count=Dict{NTuple{3,Int32},Int}()
+    for tet in eachcol(mesh.tets),skip in 1:4
+        face=_sorted_face3((tet[i] for i in 1:4 if i!=skip)...)
+        face_count[face]=get(face_count,face,0)+1
+    end
+    boundary=Set(face for (face,count) in face_count if count==1)
+    declared=Set(_sorted_face3(face...) for (_,_,face) in constraints.outer_faces)
+    declared==boundary && return constraints,nothing
+    input_rows=nnodes(geometry.surface)
+    RB=Rational{BigInt}
+    pts=RecoverCDT.RBv[(RB(mesh.coords[1,row]),RB(mesh.coords[2,row]),
+                        RB(mesh.coords[3,row])) for row in 1:nnodes(mesh)]
+    scale=isempty(mesh.coords) ? 1.0 : max(1.0,maximum(abs,mesh.coords))
+    plane_tol=1e-9*scale
+    budget=RecoverCDT._RecoveryBudget(typemax(Int)÷4,typemax(Int)÷4,String(caller))
+    surface_cells,curve_cells,surface_order,curve_order=
+        _model_volume_wb_constraint_cells(volume,constraints,geometry,authority,caller)
+    # Kept cells contribute their folded faces literally; dropped cells leave
+    # their region to the recovered children.
+    kept_faces=Set{NTuple{3,Int32}}()
+    kept_cell=Dict{Tuple{Int,Int},Bool}()     # (surface, cell index) => kept
+    for (surface,cells) in surface_cells
+        for (index,cell) in enumerate(cells)
+            kept=all(face->_sorted_face3(face...) in boundary,cell.faces)
+            kept_cell[(surface,index)]=kept
+            kept && foreach(face->push!(kept_faces,_sorted_face3(face...)),cell.faces)
+        end
+    end
+    extra=setdiff(boundary,kept_faces)
+    isempty(extra) && return constraints,nothing
+    # Exact coplanar regions per declared surface (folded-facet input).
+    regions=Dict{Int,Vector{RecoverCDT.Region}}()
+    for surface in surface_order
+        facets=NTuple{3,Int}[Int.(face) for cell in surface_cells[surface]
+                             for face in cell.faces]
+        regions[surface]=RecoverCDT.build_regions(pts,facets)
+    end
+    face_owner=Dict{NTuple{3,Int32},Int}()
+    face_region=Dict{NTuple{3,Int32},RecoverCDT.Region}()
+    for face in sort!(collect(extra))
+        center=((pts[Int(face[1])][1]+pts[Int(face[2])][1]+pts[Int(face[3])][1])//3,
+                (pts[Int(face[1])][2]+pts[Int(face[2])][2]+pts[Int(face[3])][2])//3,
+                (pts[Int(face[1])][3]+pts[Int(face[2])][3]+pts[Int(face[3])][3])//3)
+        found=0
+        for surface in surface_order
+            for region in regions[surface]
+                all(v->_model_volume_wb_on_plane(region.plane,pts[Int(v)],plane_tol),
+                    face) || continue
+                RecoverCDT.in_region_closed(region,pts,center,budget) || continue
+                if found!=0 && found!=surface
+                    throw(ArgumentError("$caller: Volume[$volume] recovered " *
+                        "boundary face is claimed by both Surface[$found] and " *
+                        "Surface[$surface]"))
+                end
+                found=surface;face_region[face]=region
+            end
+        end
+        found==0 && throw(ArgumentError(
+            "$caller: Volume[$volume] tetrahedron boundary face $face is not " *
+            "covered by any actual Surface region"))
+        face_owner[face]=found
+    end
+    # Lost Curve cells recover as tet-edge chains over their declared segment.
+    tet_edges=_tet_edge_set(mesh)
+    chain_children=Dict{Tuple{Int,UInt64},Vector{Tuple{Int32,Int32}}}()
+    chain_nodes=Dict{Int32,Int}()
+    for curve in curve_order
+        for cell in curve_cells[curve]
+            u,v=cell.conn
+            minmax(u,v) in tet_edges && continue
+            p,q=_pt3(mesh,u),_pt3(mesh,v)
+            seg=(q[1]-p[1],q[2]-p[2],q[3]-p[3])
+            length2=seg[1]*seg[1]+seg[2]*seg[2]+seg[3]*seg[3]
+            chain=Int32[u]
+            for row in 1:nnodes(mesh)
+                (row==u || row==v) && continue
+                _on_segment3(_pt3(mesh,row),p,q;atol=1e-9) || continue
+                push!(chain,Int32(row))
+            end
+            push!(chain,v)
+            sort!(chain;by=row->(mesh.coords[1,row]-p[1])*seg[1]+
+                                (mesh.coords[2,row]-p[2])*seg[2]+
+                                (mesh.coords[3,row]-p[3])*seg[3])
+            for i in 1:(length(chain)-1)
+                minmax(chain[i],chain[i+1]) in tet_edges || throw(ArgumentError(
+                    "$caller: Volume[$volume] Curve[$curve] Line cell " *
+                    "$(cell.label) has no covering tetrahedron-edge chain"))
+            end
+            chain_children[(curve,cell.label)]=
+                [(chain[i],chain[i+1]) for i in 1:(length(chain)-1)]
+            for i in 2:(length(chain)-1)
+                row=chain[i]
+                owner=get(chain_nodes,row,0)
+                (owner==0 || owner==curve) || throw(ArgumentError(
+                    "$caller: Volume[$volume] chain vertex lies on both " *
+                    "Curve[$owner] and Curve[$curve]"))
+                chain_nodes[row]=curve
+            end
+        end
+    end
+    # Recovery-born boundary vertex ownership: crease chains first, then the
+    # unique containing Surface (smallest tag on a shared coplanar edge).
+    nodes=Dict{Int32,Tuple{Int,Int32}}()
+    for (row,curve) in chain_nodes
+        row>input_rows && (nodes[row]=(1,Int32(curve)))
+    end
+    for (face,surface) in face_owner
+        for row in face
+            (row>input_rows && !haskey(nodes,row)) || continue
+            candidates=Int[]
+            for other in surface_order
+                for region in regions[other]
+                    _model_volume_wb_on_plane(region.plane,pts[Int(row)],plane_tol) &&
+                    RecoverCDT.in_region_closed(region,pts,pts[Int(row)],budget) &&
+                        push!(candidates,other)
+                end
+            end
+            nodes[row]=(2,Int32(isempty(candidates) ? surface : minimum(candidates)))
+        end
+    end
+    node_params=Dict{Int32,Vector{Float64}}()
+    m===nothing || for (row,owner) in nodes
+        param=_model_volume_wb_param(m,volume,owner,row,mesh,authority,
+                                     surface_cells,curve_cells,caller)
+        param===nothing || (node_params[row]=param)
+    end
+    # Mint child labels through the births high-water (or a throwaway counter
+    # for the mid-pipeline audit), then build the new constraint triples.
+    next_label=Ref(births===nothing ? UInt64(0) : births.element_high_water)
+    mint!()=(next_label[]+=UInt64(1);next_label[])
+    children=Dict{Int,Vector{NTuple{3,Int32}}}()
+    for (face,surface) in face_owner
+        oriented=_model_volume_wb_orient(face,face_region[face],pts)
+        push!(get!(children,surface,NTuple{3,Int32}[]),oriented)
+    end
+    new_outer=Tuple{Int,UInt64,NTuple{3,Int32}}[]
+    surfaces_out=Dict{Int,Vector{Tuple{Int,Vector{Int32},UInt64}}}()
+    replaced=Dict{Tuple{Int,Int32},Set{Tuple}}()
+    added=Dict{Tuple{Int,Int32},Vector{Tuple{Int,Vector{Int32},UInt64,Int32}}}()
+    for surface in surface_order
+        cells=surface_cells[surface];out=Tuple{Int,Vector{Int32},UInt64}[]
+        dropped_cells=NamedTuple[]
+        for (index,cell) in enumerate(cells)
+            if kept_cell[(surface,index)]
+                push!(out,(cell.msh,cell.conn,cell.label))
+                for face in cell.faces
+                    push!(new_outer,(surface,cell.label,face))
+                end
+            else
+                push!(dropped_cells,cell)
+                push!(get!(replaced,(2,Int32(surface)),Set{Tuple}()),
+                      Tuple(sort!(copy(cell.conn))))
+            end
+        end
+        for face in sort!(collect(get(children,surface,NTuple{3,Int32}[])))
+            label=mint!()
+            physical=_model_volume_wb_parent_physical(mesh,face,dropped_cells)
+            push!(out,(2,Int32[face[1],face[2],face[3]],label))
+            push!(new_outer,(surface,label,face))
+            push!(get!(added,(2,Int32(surface)),
+                       Tuple{Int,Vector{Int32},UInt64,Int32}[]),
+                  (2,Int32[face[1],face[2],face[3]],label,physical))
+        end
+        surfaces_out[surface]=out
+    end
+    new_edges=Tuple{Int,UInt64,Tuple{Int32,Int32}}[]
+    curves_out=Dict{Int,Vector{Tuple{Int,Vector{Int32},UInt64}}}()
+    for curve in curve_order
+        out=Tuple{Int,Vector{Int32},UInt64}[]
+        for cell in curve_cells[curve]
+            u,v=cell.conn
+            if minmax(u,v) in tet_edges
+                push!(out,(1,Int32[u,v],cell.label))
+                push!(new_edges,(curve,cell.label,(u,v)))
+            else
+                push!(get!(replaced,(1,Int32(curve)),Set{Tuple}()),
+                      Tuple(sort!(Int32[u,v])))
+                for (a,b) in chain_children[(curve,cell.label)]
+                    label=mint!()
+                    push!(out,(1,Int32[a,b],label))
+                    push!(new_edges,(curve,label,(a,b)))
+                    push!(get!(added,(1,Int32(curve)),
+                           Tuple{Int,Vector{Int32},UInt64,Int32}[]),
+                          (1,Int32[a,b],label,cell.physical))
+                end
+            end
+        end
+        curves_out[curve]=out
+    end
+    # A curve without an actual product keeps its declared edges verbatim —
+    # the literal certificate then audits them honestly. Curves already
+    # emitted (kept or chain-subdivided) are not re-declared: a split cell's
+    # source label must not resurrect its unrecovered chord.
+    processed=Set(curve_order)
+    for (curve,label,edge) in constraints.edges
+        curve in processed || push!(new_edges,(curve,label,edge))
+    end
+    new_constraints=(outer_faces=new_outer,embedded_faces=constraints.embedded_faces,
+                     edges=new_edges)
+    receipt=_ModelVolumeBoundaryWriteback(new_constraints,nodes,node_params,
+                                          surfaces_out,curves_out,replaced,added)
+    persist || return new_constraints,receipt
+    births!==nothing && (births.element_high_water=next_label[])
+    births!==nothing && (births.boundary_writeback=receipt)
+    # Upstream `meshGRegion` stores the recovered chain discretization back on
+    # each GEdge (`GEdge::mesh_vertices`); mirror that on `m.curve_params` so a
+    # later Curve produce reuses the realized chain.
+    if m!==nothing
+        for curve in curve_order
+            stored=get(m.curve_params,curve,nothing)
+            stored===nothing && continue
+            additions=Float64[]
+            for cell in curve_cells[curve]
+                u,v=cell.conn
+                minmax(u,v) in tet_edges && continue
+                haskey(chain_children,(curve,cell.label)) || continue
+                for (a,b) in chain_children[(curve,cell.label)]
+                    for row in (a,b)
+                        row>input_rows || continue
+                        param=get(node_params,row,nothing)
+                        if param===nothing && m!==nothing
+                            param=_model_volume_wb_param(m,volume,(1,Int32(curve)),
+                                row,mesh,authority,surface_cells,curve_cells,caller)
+                        end
+                        param===nothing || isempty(param) || push!(additions,param[1])
+                    end
+                end
+            end
+            isempty(additions) && continue
+            tolerance=1e-12*max(1.0,maximum(abs,stored;init=0.0))
+            ordered=issorted(stored) && all(isfinite,stored)
+            for value in additions
+                isfinite(value) || continue
+                _model_surface_curve_parameter_match(stored,value,tolerance,
+                                                     ordered)>0 && continue
+                if ordered
+                    index=searchsortedfirst(stored,value)
+                    insert!(stored,index,value)
+                else
+                    push!(stored,value)
+                end
+            end
+        end
+    end
+    return new_constraints,receipt
 end
 
 

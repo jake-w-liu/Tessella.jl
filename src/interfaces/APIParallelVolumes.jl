@@ -318,8 +318,13 @@ end
 # production the serial arm would have returned: transfinite, hybrid, swept
 # and plain-mesh receipts revert to the live serial call rather than
 # smuggling an unmapped product past the allocator ledger.
+# A boundary write-back mutates shared Surface/Curve products and stored
+# curve discretizations on the detached copy — that state cannot be remapped
+# into the live merge, so such receipts revert to the serial arm like the
+# transfinite/hybrid/swept cases.
 _parallel_volume_remap_supported(produced)=
-    produced isa Model._ModelVolumeGeometryProduction
+    produced isa Model._ModelVolumeGeometryProduction &&
+    produced.boundary_writeback===nothing
 
 # Shift every UID the detached produce minted past the batch's allocator base
 # by the amount the serial allocator advanced to this merge position.
@@ -335,7 +340,7 @@ function _parallel_volume_remap_production(produced,dn::UInt64,dc::UInt64,
         UInt64[tag>hc ? tag+dc : tag for tag in produced.element_tags]
     return Model._ModelVolumeGeometryProduction(produced.mesh,boundary_tags,
         produced.node_high_water+dn,produced.temporary_elements,
-        element_tags,produced.element_high_water+dc)
+        element_tags,produced.element_high_water+dc,produced.boundary_writeback)
 end
 
 # Staleness is measured against dirt accumulated after the batch's snapshot —

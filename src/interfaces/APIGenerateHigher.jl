@@ -449,7 +449,13 @@ function _higher_append_part!(assembly,m,mesh,class,dimension,tag,discarded;
             source_row_order===nothing ? axes(mesh.coords,2) : source_row_order : native.rows)
             owner=class.node_entities[position]
             point=ntuple(axis->mesh.coords[axis,position],3)
-            parameter=data===nothing ? nothing : data.node_parametric[position]
+            parameter=if data!==nothing
+                data.node_parametric[position]
+            elseif position<=length(class.node_parametric)
+                class.node_parametric[position]
+            else
+                nothing
+            end
             if source_row_tags!==nothing && (source_row_retained===nothing ?
                 source_row_tags[position]!=0 : source_row_retained[position])
                 source_tag=source_row_tags[position]
@@ -2226,7 +2232,8 @@ function _higher_hybrid_volume_input_classification(assembly,m,production,input,
 end
 
 function _higher_volume_input_classification(assembly,m,mesh::Mesh,input,tag,
-                                            source_tags,caller)
+                                            source_tags,caller;
+                                            boundary_writeback=nothing)
     length(source_tags)==nnodes(mesh) && allunique(source_tags) || throw(ArgumentError(
         "$caller: native Volume[$tag] lacks a unique complete row UID binding"))
     actual=input.mesh;data=actual.entity_data
@@ -2251,9 +2258,20 @@ function _higher_volume_input_classification(assembly,m,mesh::Mesh,input,tag,
     end
     # Exact lower cell consumption is the admission certificate, independently
     # of coordinate proximity, CAD classification, and constructor row order.
+    # A boundary-subdivided mesh carries its write-back receipt: the
+    # certificate audits the subdivided product cells it will publish, and
+    # the recovered Steiner vertices take their written-back owners.
     geometry=(surface=mesh,native_node_tags=source_tags)
-    constraints=Model._model_native_volume_input_constraints(m,tag,geometry,input,caller)
+    constraints=boundary_writeback===nothing ?
+        Model._model_native_volume_input_constraints(m,tag,geometry,input,caller) :
+        boundary_writeback.constraints
     Model._model_certify_native_volume_constraints(mesh,constraints,tag,caller)
+    boundary_writeback===nothing || for (row,owner) in boundary_writeback.nodes
+        row in eachindex(node_entities) || throw(ArgumentError(
+            "$caller: Volume[$tag] write-back vertex $row is outside the mesh"))
+        node_entities[row]=owner
+        parameters[row]=get(boundary_writeback.node_params,row,nothing)
+    end
     edges=Dict{NTuple{2,Int32},Tuple{Int,Int32}}()
     faces=Dict{NTuple{3,Int32},Tuple{Int,Int32}}()
     quads=Dict{NTuple{4,Int32},Tuple{Int,Int32}}()
@@ -2262,6 +2280,17 @@ function _higher_volume_input_classification(assembly,m,mesh::Mesh,input,tag,
     _api_support_cells!(edges,edge_conflicts,faces,face_conflicts,quads,quad_conflicts,4,mesh.tets,tetrahedra)
     for owner in sort!(collect(closure))
         owner[1]<3 || continue
+        wb_cells=boundary_writeback===nothing ? nothing :
+            owner[1]==2 ? get(boundary_writeback.surfaces,Int(owner[2]),nothing) :
+            owner[1]==1 ? get(boundary_writeback.curves,Int(owner[2]),nothing) : nothing
+        if wb_cells!==nothing
+            for (msh,conn,_) in wb_cells
+                _api_support_cells!(edges,edge_conflicts,faces,face_conflicts,
+                    quads,quad_conflicts,msh,reshape(conn,length(conn),1),
+                    Int32[owner[2]])
+            end
+            continue
+        end
         product=get(input.products,owner,nothing)
         product===nothing && continue
         for block in product.blocks
@@ -2287,6 +2316,187 @@ function _higher_volume_input_classification(assembly,m,mesh::Mesh,input,tag,
     owners=Dict{Int,Vector{Int32}}(1=>Int32[],2=>Int32[],4=>tetrahedra)
     return _mixed_classification(mesh,primary,sort!(collect(closure)),node_entities,boundaries,owners;
         edge_entities=edges,face_entities=faces,quad_entities=quads,node_parametric=parameters)
+end
+
+# A written-back surface part keeps every kept column's coordinate, physical
+# and identity trace; the recovered children join as fresh columns so the
+# geometry carrier still certifies an explicit cell history. All cell keys
+# are sorted Volume-mesh row tuples — the write-back's cell space.
+function _higher_volume_wb_rebuild_part(assembly,m,wb,mapping,source_tags,
+                                        tag,mesh,class,part_mapping,added_cells,
+                                        caller;geometry_cells=nothing)
+    cells_wb=get(wb.surfaces,tag,nothing)
+    cells_wb===nothing && return nothing
+    vrow_of_uid=Dict(uid=>Int32(row) for (row,uid) in enumerate(source_tags))
+    pos_to_row=Dict(part_mapping[row]=>Int32(row) for row in eachindex(part_mapping))
+    extra=Int32[]
+    part_row=Dict{Int32,Int32}()
+    for (_,conn,_) in cells_wb,row in conn
+        haskey(part_row,row) && continue
+        part_row[row]=get(pos_to_row,mapping[Int(row)],Int32(0))
+        part_row[row]==0 && push!(extra,row)
+    end
+    new_rows=Dict{Int32,Int32}()
+    for (offset,row) in enumerate(extra)
+        part_row[row]=Int32(nnodes(mesh)+offset)
+        new_rows[Int32(nnodes(mesh)+offset)]=row
+    end
+    function part_conn(conn)
+        mapped=Int32[part_row[row] for row in conn]
+        all(row->row>0,mapped) || throw(ArgumentError(
+            "$caller: written-back Surface[$tag] cell loses a produced vertex"))
+        return mapped
+    end
+    node_entities=Vector{Tuple{Int,Int32}}(undef,nnodes(mesh)+length(extra))
+    for row in eachindex(part_mapping)
+        node_entities[row]=class.node_entities[row]
+    end
+    new_mapping=Vector{Int32}(undef,nnodes(mesh)+length(extra))
+    new_mapping[1:length(part_mapping)].=part_mapping
+    coords=Matrix{Float64}(undef,3,nnodes(mesh)+length(extra))
+    coords[:,1:nnodes(mesh)].=mesh.coords
+    for (part_index,vrow) in new_rows
+        position=mapping[Int(vrow)]
+        node=assembly.nodes[position]
+        new_mapping[part_index]=position
+        node_entities[part_index]=get(wb.nodes,vrow,(2,Int32(tag)))
+        for axis in 1:3
+            coords[axis,part_index]=node.point[axis]
+        end
+    end
+    blocks=_cache_native_blocks(mesh)
+    old_index=Dict{Tuple,Tuple{Int,Int32}}()
+    for (bi,(msh,cells,_)) in enumerate(blocks)
+        msh_dimension(msh)==2 || continue
+        for column in axes(cells,2)
+            key=Tuple(sort!(Int32[get(vrow_of_uid,assembly.nodes[
+                part_mapping[cells[slot,column]]].tag,Int32(0))
+                for slot in axes(cells,1)]))
+            any(iszero,key) || (old_index[key]=(bi,Int32(column)))
+        end
+    end
+    child_physical=Dict{Tuple,Int32}()
+    for (_,conn,_,physical) in get(wb.added,(2,Int32(tag)),
+                                   Tuple{Int,Vector{Int32},UInt64,Int32}[])
+        child_physical[Tuple(sort(conn))]=physical
+    end
+    emitted_keys=Set(Tuple(sort!(copy(conn))) for (_,conn,_) in cells_wb)
+    old_traces=geometry_cells===nothing ? nothing : get(geometry_cells,mesh,nothing)
+    if mesh isa Mesh
+        tris=Matrix{Int32}(undef,3,0)
+        tri_tag=Int32[]
+        tri_trace=Union{Nothing,_Dim01Cell}[]
+        for (msh,conn,_) in cells_wb
+            msh==2 || throw(ArgumentError(
+                "$caller: written-back Surface[$tag] cannot emit non-Triangle cells into its Triangle product"))
+            key=Tuple(sort!(copy(conn)))
+            previous=get(old_index,key,nothing)
+            tris=hcat(tris,reshape(part_conn(conn),3,1))
+            if previous===nothing
+                push!(tri_tag,get(child_physical,key,_dim01_physical(m,(2,tag))))
+                push!(tri_trace,get(added_cells,((2,Int32(tag)),key),nothing))
+            else
+                bi,column=previous
+                push!(tri_tag,blocks[bi][3][column])
+                push!(tri_trace,old_traces===nothing ? nothing :
+                      old_traces[bi][column])
+            end
+        end
+        new_mesh=Mesh(coords;segs=mesh.segs,tris=tris,
+            seg_tag=mesh.seg_tag,tri_tag=tri_tag)
+        new_class=_higher_geometry_part_class(new_mesh,2,tag,node_entities)
+        if geometry_cells!==nothing
+            delete!(geometry_cells,mesh)
+            geometry_cells[new_mesh]=[Union{Nothing,_Dim01Cell}[],tri_trace,
+                                      Union{Nothing,_Dim01Cell}[]]
+        end
+        return (tag,new_mesh,new_class,new_mapping)
+    end
+    # MixedMesh part: keep each block's emitted columns; children append to a
+    # trailing Triangle block.
+    new_blocks=ElementBlock[]
+    new_traces=Vector{Vector{Union{Nothing,_Dim01Cell}}}()
+    for (bi,(msh,cells,tags)) in enumerate(blocks)
+        msh_dimension(msh)==2 || continue
+        keep=Int32[]
+        for column in axes(cells,2)
+            key=Tuple(sort!(Int32[get(vrow_of_uid,assembly.nodes[
+                part_mapping[cells[slot,column]]].tag,Int32(0))
+                for slot in axes(cells,1)]))
+            any(iszero,key) && continue
+            key in emitted_keys && push!(keep,Int32(column))
+        end
+        isempty(keep) && continue
+        push!(new_blocks,ElementBlock(msh,cells[:,keep],tags[keep]))
+        push!(new_traces,Union{Nothing,_Dim01Cell}[
+            old_traces===nothing ? nothing : old_traces[bi][column]
+            for column in keep])
+    end
+    child_nodes=Matrix{Int32}(undef,3,0);child_tags=Int32[]
+    child_trace=Union{Nothing,_Dim01Cell}[]
+    for (msh,conn,_) in cells_wb
+        key=Tuple(sort!(copy(conn)))
+        haskey(old_index,key) && continue
+        msh==2 || throw(ArgumentError(
+            "$caller: written-back Surface[$tag] cannot emit non-Triangle children"))
+        child_nodes=hcat(child_nodes,reshape(part_conn(conn),3,1))
+        push!(child_tags,get(child_physical,key,_dim01_physical(m,(2,tag))))
+        push!(child_trace,get(added_cells,((2,Int32(tag)),key),nothing))
+    end
+    size(child_nodes,2)>0 &&
+        (push!(new_blocks,ElementBlock(2,child_nodes,child_tags));
+         push!(new_traces,child_trace))
+    new_mesh=MixedMesh(coords,new_blocks;physical_names=mesh.physical_names,
+        elementary_entities=mesh.elementary_entities)
+    new_class=_higher_geometry_part_class(new_mesh,2,tag,node_entities)
+    if geometry_cells!==nothing
+        delete!(geometry_cells,mesh)
+        geometry_cells[new_mesh]=new_traces
+    end
+    return (tag,new_mesh,new_class,new_mapping)
+end
+
+# Commit the volume-boundary subdivision write-back onto the emitted
+# Surface/Curve products: drop every consumed source cell, emit the realized
+# children under their owning entity, then re-bind the geometry-view parts so
+# the published products match the recovered boundary exactly.
+function _higher_volume_boundary_writeback!(assembly,m,wb,mapping,source_tags,caller;
+                                           geometry_parts=nothing,geometry_cells=nothing)
+    source_tags===nothing && throw(ArgumentError(
+        "$caller: native Volume boundary write-back lacks its row UID binding"))
+    if !isempty(wb.replaced)
+        lookup=Dict{Tuple{Tuple{Int,Int32},Tuple},Int32}()
+        for (index,cell) in enumerate(assembly.cells)
+            haskey(wb.replaced,cell.owner) || continue
+            lookup[(cell.owner,Tuple(sort(cell.nodes)))]=Int32(index)
+        end
+        drop=Int32[]
+        for (owner,conns) in wb.replaced,conn in conns
+            mapped=Tuple(sort!(Int32[mapping[Int32(row)] for row in conn]))
+            index=get(lookup,(owner,mapped),Int32(0))
+            index==0 && throw(ArgumentError(
+                "$caller: Volume boundary write-back lost an actual entity " *
+                "$owner source cell"))
+            push!(drop,index)
+        end
+        deleteat!(assembly.cells,sort!(drop))
+    end
+    added_cells=Dict{Tuple{Tuple{Int,Int32},Tuple},_Dim01Cell}()
+    for owner in sort!(collect(keys(wb.added)))
+        for (msh,conn,label,physical) in wb.added[owner]
+            nodes=Int32[mapping[Int32(row)] for row in conn]
+            _dim01_add_cell!(assembly,msh,owner,nodes,label;
+                source_tag=nothing,physical)
+            added_cells[(owner,Tuple(sort(conn)))]=last(assembly.cells)
+        end
+    end
+    geometry_parts===nothing && return nothing
+    for (index,(tag,mesh,class,part_mapping)) in enumerate(geometry_parts)
+        rebuilt=_higher_volume_wb_rebuild_part(assembly,m,wb,mapping,source_tags,
+            tag,mesh,class,part_mapping,added_cells,caller;geometry_cells)
+        rebuilt===nothing || (geometry_parts[index]=rebuilt)
+    end
+    return nothing
 end
 
 function _higher_ordinary_retained_surface_rows(production,input,tag,caller)
@@ -2627,6 +2837,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
         mesh=extruded===nothing ? nothing : get(extruded.parts,tag,nothing)
         source_rows=nothing;source_row_retained=nothing;source_rows_existing_only=false
         source_cells=nothing;source_cell_max=nothing;alternate=nothing;source_emission=nothing;hybrid_production=nothing
+        wb_receipt=nothing
         source_node_base=hybrid_batch_receipt===nothing ? assembly.node_max : hybrid_batch_receipt.node_base
         source_node_max=nothing
         if mesh!==nothing && geometry_parts!==nothing && scope!==nothing
@@ -2675,6 +2886,8 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
                 any(!iszero,production.boundary_node_tags) &&
                     (source_rows=production.boundary_node_tags)
             end
+            wb_receipt=production isa Model._ModelVolumeGeometryProduction ?
+                production.boundary_writeback : nothing
         end
         native_rows=mesh isa Mesh && source_rows!==nothing &&
             all(!iszero,source_rows) && allunique(source_rows)
@@ -2695,7 +2908,8 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
             _higher_transfinite_volume_classification(assembly,m,mesh,input,tag,
                 source_rows,source_row_retained,assembly.caller;grid_receipt=source_emission.grid)
         elseif native_rows
-            _higher_volume_input_classification(assembly,m,mesh,input,tag,source_rows,assembly.caller)
+            _higher_volume_input_classification(assembly,m,mesh,input,tag,source_rows,assembly.caller;
+                boundary_writeback=wb_receipt)
         else
             _classify_cached_mesh(m,_classification_skeleton(
                 mesh,get(m.meshing.reverse,(3,tag),false)),3,tag,mesh;_extrude_scope=scope,
@@ -2727,6 +2941,11 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
             # Keep their born identities through finish, like ordinary sweep events.
             native_orphan_births=ordinary===nothing && source_emission===nothing ?
                 nothing : native_orphan_births)
+        # The consumed Surface products live in `surface_parts` (the emitted
+        # geometry vector only collects Volume parts inside this phase).
+        wb_receipt===nothing || _higher_volume_boundary_writeback!(
+            assembly,m,wb_receipt,mapping,source_rows,assembly.caller;
+            geometry_parts=surface_parts,geometry_cells)
         if alternate!==nothing
             geometry_cells===nothing || (geometry_cells[alternate]=geometry_cells[mesh])
             if geometry_birth!==nothing

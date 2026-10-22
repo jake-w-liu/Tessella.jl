@@ -10100,7 +10100,15 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
             # it, mirroring the generic embedded-curve ordering below.
             push!(protected_edges,minmax(edge...))
         end
-        _model_certify_native_volume_constraints(mesh,native_constraints,t,caller)
+        # Constrained recovery may subdivide declared boundary cells with
+        # Steiner vertices. Derive the write-back constraints for the literal
+        # audit without consuming allocator labels — refinement can split the
+        # boundary again, and the final audit below mints the real receipt
+        # from the *declared* constraints.
+        writeback_constraints,_=_model_native_volume_boundary_writeback!(m,t,mesh,
+            native_constraints,initial_geometry,_mesh_input,
+            _native_initial_births,caller;persist=false)
+        _model_certify_native_volume_constraints(mesh,writeback_constraints,t,caller)
     else
         # Sheets recover first: a curve nested in an embedded surface already
         # owns its chain links as sheet edges (bitwise-identical evaluator
@@ -10207,8 +10215,16 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
             "$caller: embedded Surface[$sheet] is absent from the final " *
             "tetrahedron face complex"))
     end
-    native_constraints===nothing ||
-        _model_certify_native_volume_constraints(mesh,native_constraints,t,caller)
+    if native_constraints!==nothing
+        # The final boundary commits its subdivision write-back: fresh labels
+        # through the births high-water, node ownership/parameters, and the
+        # receipt `_higher_volume_phase!` uses to replace the written-back
+        # Surface/Curve products atomically.
+        writeback_constraints,_=_model_native_volume_boundary_writeback!(m,t,mesh,
+            native_constraints,initial_geometry,_mesh_input,
+            _native_initial_births,caller;persist=true)
+        _model_certify_native_volume_constraints(mesh,writeback_constraints,t,caller)
+    end
     for constraint in periodic_surfaces
         mapping=_model_periodic_surface_nodes(m,mesh,constraint)
         _model_mapping_matches(mesh,constraint,mapping,caller;exact=false)
