@@ -9331,6 +9331,51 @@ function _geo_publish_actual_plan!(m,context,plan,caller;homology=false,carrier=
     return carrier,owner
 end
 
+# `PartitionMesh n;` — partition the current mesh into `n` parts, the
+# session-API `mesh.partition(n)` equivalent (`GModel::partitionMesh`
+# upstream). The session API is reached lazily because `GeoExec` is loaded
+# before `API`: deterministic element assignment reuses
+# `API._partition_elements` plus the upstream lower-cell inheritance rule
+# (each lower-dimension cell follows an adjacent carrier at the nearest higher
+# dimension). `Mesh.PartitionCreateTopology`/`Mesh.PartitionCreateGhostCells`
+# route through the Tet4/lower-BRep production plan; when both are zero the
+# assignment-only producer still materializes the per-(entity, partition)
+# child entities, so the actual published mesh carries complete
+# `MixedPartitionData` — `Save` then emits `$PartitionedEntities` and the
+# partition element columns.
+function _geo_exec_partition_mesh!(m::GeoModel,args::AbstractString,
+                                   context::_GeoNumericContext,caller::AbstractString)
+    caller="$caller: PartitionMesh"
+    count=_geo_int_value(_geo_eval_numeric(String(strip(args)),context,caller),caller)
+    count>=1 || throw(ArgumentError(
+        "$caller: PartitionMesh requires a positive partition count"))
+    _geo_sync_physical_view_if_changed!(m,context)
+    context.mesh===nothing && throw(ArgumentError(
+        "$caller: PartitionMesh requires a current mesh — run `Mesh n;` first"))
+    _geo_check_part_rows(context)
+    topology=!iszero(something(
+        _geo_option_number(context,"Mesh",0,"PartitionCreateTopology"),1.0))
+    ghosts=!iszero(something(
+        _geo_option_number(context,"Mesh",0,"PartitionCreateGhostCells"),0.0))
+    api=getfield(parentmodule(@__MODULE__),:API)
+    source,actual,class=api._higher_frontend_input(m,context.mesh,
+        context.mesh_parts,context.mesh_part_rows,context.mesh_node_owner,caller;
+        initial_max_node_tag=context.mesh_node_max,
+        initial_max_element_tag=context.mesh_element_max)
+    actual===nothing && throw(ArgumentError(
+        "$caller: PartitionMesh requires a current mesh — run `Mesh n;` first"))
+    _,_,total=api._mesh_element_offsets(actual)
+    total>0 || throw(ArgumentError(
+        "$caller: PartitionMesh requires a mesh with elements"))
+    assignment=api._partition_lower_inherit(api._partition_elements(actual,count),actual)
+    plan=topology||ghosts ?
+        api._partition_tet_production_plan(source,actual,class,count,assignment,
+            caller;topology,ghosts) :
+        api._partition_assign_production_plan(source,actual,class,count,assignment,caller)
+    _geo_publish_actual_plan!(m,context,plan,caller)
+    return nothing
+end
+
 function _geo_refined_simplex_carrier!(plan,previous,caller;source_authority=nothing,geometry_receipt=nothing)
     trace=Refine._refine_uniform_traced(previous)
     tags=plan.refine_carrier_tags
@@ -10475,12 +10520,17 @@ function _geo_exec_mesh_statement!(m::GeoModel,line::AbstractString,
             "$caller: SetOrder $order — high-order .geo meshes are not " *
             "supported"))
         return
-    elseif (mm=match(r"^PartitionMesh\s+(.*?)\s*;?\s*$",s))!==nothing ||
-           (mm=match(r"^CreateOverlaps\s+(.*?)\s*;?\s*$",s))!==nothing
-        # Partitioning needs the partitioned-mesh data model — an explicit
-        # blocker rather than a silent partial implementation.
+    elseif (mm=match(r"^PartitionMesh\b\s*(.+?)\s*;?\s*$",s))!==nothing
+        _geo_exec_partition_mesh!(m,mm.captures[1],context,caller)
+        return
+    elseif match(r"^CreateOverlaps\b",s)!==nothing
+        # `CreateOverlaps` builds inter-partition overlap element layers — a
+        # separate data flow upstream (`GModel::createOverlap*` builds them
+        # through the parallel-mesh machinery, not the partition producers),
+        # so there is no existing Tessella producer to reuse. Keep the
+        # explicit blocker rather than a silent partial implementation.
         throw(ArgumentError(
-            "$caller: mesh partitioning is not supported"))
+            "$caller: CreateOverlaps is not supported"))
     elseif (mm=match(r"^AdaptMesh\b",s))!==nothing
         throw(ArgumentError(
             "$caller: AdaptMesh requires levelset fields, which are not " *
@@ -11430,6 +11480,14 @@ function _geo_exec_save!(m::GeoModel,path::AbstractString,
         io_mod.write_stl(file,mesh)
         return nothing
     end
+    # `.msh` keeps MSH 2.2 for backward compatibility, but an explicit
+    # `Mesh.MshFileVersion` wins; partition and ghost metadata cannot be
+    # encoded before MSH 4.1, so a partitioned mesh always upgrades rather
+    # than silently dropping or rejecting its own metadata.
+    version==2.2 && haskey(context.option_numbers,("Mesh",0,"MshFileVersion")) &&
+        (version=Float64(_geo_option_number(context,"Mesh",0,"MshFileVersion")))
+    version<4.1 && mesh isa MixedMesh && mesh.partition_data!==nothing &&
+        (version=4.1)
     if mesh isa MixedMesh && mesh.entity_data!==nothing
         # The actual product already owns its Point cells and public labels.
         # Serialize it directly instead of appending a second Point block or

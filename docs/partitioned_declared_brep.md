@@ -100,6 +100,20 @@ open-seam rules and emit Line(p+1) cells by the border arity;
 a declared Curve carrier on an interface border binds the shared Curve
 child instead.
 
+Interface components connect through explicit carrier-pair links rather
+than raw edge incidence: manifold edges link their two incident faces
+outright, while a junction edge shared by more faces links only the pairs
+bounding the same incident volume carrier — the unique pairing whose
+co-oriented normals traverse the edge oppositely once the interface
+orientation is unified. A partition interface may still legitimately
+self-cross at a junction edge its sheets join elsewhere (a valence-4 edge
+whose four faces form two carrier pairs): the child-Surface certificate
+therefore requires directed traversals to balance per direction — the
+local union-of-manifold-sheets condition — instead of capping incidence
+at two, and that edge's canceling incidences vote no boundary sign in the
+child's seam closure. Odd or lopsided incidence remains a nonmanifold
+defect.
+
 ## Junction seams and junction points
 
 Interface-border edges are indexed globally across every generated
@@ -120,7 +134,11 @@ ends in the valence count — materialize as dim-0 entities carrying Point15
 cells partitioned by the union of incident seam memberships and parented by
 the lowest-dimension incident seam parent. A vertex already carried by a
 declared Point child reuses that child and merges the partition union into
-it. Open junction seam chains bind their junction endpoints with signed
+it. Seam networks decompose at every non-manifold vertex: chains are the
+maximal degree-2 arcs between open endpoints and junction vertices, so a
+junction vertex where an internal interface edge lands on a rim arc splits
+the rim into the arcs its Point15 binds rather than rejecting the fan.
+Open junction seam chains bind their junction endpoints with signed
 bounds (+start, −stop); closed chains keep empty bounds. Seam edge
 directions are normalized at chain time so a junction arc mixing carrier and
 interface-derived orientations cannot falsely trip the branching guard.

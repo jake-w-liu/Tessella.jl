@@ -8459,7 +8459,9 @@ function _partition(num_part,element_tags=(),partitions=())
             count>0 || throw(ArgumentError(
                 "$caller: num_part must be positive without an explicit " *
                 "element partition list"))
-            assignment=_partition_elements(cached,count)
+            # Upstream assigns only the top-dimension dual; lower cells then
+            # inherit an adjacent higher-dimension carrier's partition.
+            assignment=_partition_lower_inherit(_partition_elements(cached,count),cached)
         else
             assignment=zeros(Int32,total)
             supplied=Dict{Int,Int}()

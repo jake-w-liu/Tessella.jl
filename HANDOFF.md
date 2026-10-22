@@ -5398,6 +5398,67 @@ unrelated failures reproduce identically with the change stashed:
 `api_native_recombine_adapter_test.jl` 36 fails (expects `ErrorException`,
 `APITaggedCache` throws `ArgumentError` — unrelated files).
 
+## Working-tree increment (`.geo` `PartitionMesh`, uncommitted)
+
+**`PartitionMesh n;` now executes in `.geo` scripts end to end** — the
+session-API `mesh.partition(n)` equivalent. `GeoExec` gains
+`_geo_exec_partition_mesh!` (~line 9334) dispatched from
+`_geo_exec_mesh_statement!` (~10523): it syncs the physical view, requires a
+generated mesh, builds the dense dual assignment via
+`API._partition_elements`, applies the upstream lower-cell carrier-inheritance
+correction (`API._partition_lower_inherit`, new in
+`APIPartitionProducer.jl` — each lower cell follows an adjacent carrier at
+the nearest higher dimension), then routes to
+`_partition_tet_production_plan` when `Mesh.PartitionCreateTopology` (default
+on) or `Mesh.PartitionCreateGhostCells` (default off) is nonzero, else
+`_partition_assign_production_plan`. `CreateOverlaps` keeps its explicit
+unsupported blocker.
+
+Fixes this exposed in the partition producers:
+- **Native OCC orientation normalization** (`APIPartitionBRep.jl`): native
+  Surface Loop / Curve endpoint declarations describe topology, not stored
+  mesh-cell direction (OCC shell `reversed` flags, parametric frames,
+  `Reverse`, volume orientation passes all decouple them). The snapshot now
+  re-reads every native sign against the actual carriers — Curve edges
+  against `surface_borders`+`curve_edges` traversal, Surface borders against
+  generated border direction, Region children against actual facet winding
+  (`_partition_region_surface_sign`) — before certificate validation, while
+  discrete records stay literal. This fixes the reported
+  `declared Curve 4 orientation disagrees with its Surface border` rejection
+  on the OCC box.
+- **Balanced non-manifold interface edges**: `_partition_edge_balanced`
+  admits valence>2 directed edge incidence only when traversals cancel
+  pairwise (a union of manifold sheets); lopsided incidence still rejects.
+  Seam votes cancel net-zero edges. `_partition_brep_chains` terminates
+  chains at non-degree-2 vertices so junction vertices materialize as
+  Point15 entities instead of rejecting as "branching partition seam".
+- **UID allocation**: `maximum_uid` now seeds from both `ELEMENT_TAG_MAX[]`
+  and `maximum(source.public.element_tags)` — `.geo` meshes carry public
+  element tags without updating the global counter, which previously
+  produced duplicate external tags.
+
+`Save` upgrades a partitioned `MixedMesh` to MSH 4.1 automatically
+(partition/ghost metadata cannot encode before 4.1) while keeping MSH 2.2
+for ordinary meshes and honoring an explicit `Mesh.MshFileVersion`.
+Verified artifacts contain `$MeshFormat` 4.1, `$PartitionedEntities`
+(2 Region children for `PartitionMesh(2)`; 3 for `n=3`, plus interface/
+seam/child lower entities) and per-element partition columns;
+`Mesh.PartitionCreateGhostCells=1` adds `$GhostElements`. UID-level
+partition assignment matches `api.mesh.partition` semantics exactly
+(independent `_partition_elements`+`_partition_lower_inherit` reference).
+Regression record on this worktree: `geo_partition_mesh_test.jl` (new)
+**33/33** exit 0 — OCC box end-to-end, all four
+topology∈{0,1}×ghosts∈{0,1} combos, option defaults,
+`PartitionMesh(0)`/no-mesh rejection; `api_partition_brep` **61/61**,
+`api_partition_lower_brep` **442/442**, `api_partition_producer` **64/64**,
+`api_partition_open_seams` **26/26**, `cli_part_split` **57/57**, all
+exit 0. `api_partition_ghost_collision_native` shows 2 failures that
+**reproduce identically with this change stashed** (pre-existing imported
+`$Entities` Curve boundary sign expectation, unrelated to partition code).
+Files: `src/geometry/GeoExec.jl`, `src/interfaces/APIPartitionBRep.jl`,
+`src/interfaces/APIPartitionProducer.jl`, `src/interfaces/API.jl`,
+`docs/partitioned_declared_brep.md`, `test/geometry/geo_partition_mesh_test.jl`.
+
 ## Verified gates
 
 - `validation/transfinite/differential.jl` Gmsh 4.15.2:

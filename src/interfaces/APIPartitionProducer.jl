@@ -36,6 +36,93 @@ end
 # `initialize`/`finalize` resets effective without a second store.
 MeshTypes._set_parallel_worker_source!(_partition_workers)
 
+# Declared boundary records for either entity representation: discrete
+# entities carry them literally, while native `.geo` entities expose the same
+# signed `(dim-1, tag)` pairs through their stored topology. `model_boundary`
+# reports native Curve endpoints unsigned, so they are re-signed here to the
+# discrete record convention (start positive, end negative); a closed curve
+# has no boundary like a discrete record does.
+#
+# These are the *topological* signs — the direction the stored Curve Loop /
+# Surface Loop / Curve endpoints declare. A produced mesh is not obliged to
+# store cells along them: OCC faces carry shell-side `reversed` use flags,
+# parametric frames can disagree with the wire traversal, `Reverse`/
+# `ReorientMesh` flip stored cells, and the volume orientation pass may flip
+# them again. Discrete records are user declarations and stay literal; the
+# snapshot re-reads every native sign against the actual carrier cells (edge
+# chain direction, surface border traversal, volume facet winding) so each
+# emitted boundary describes the mesh it certifies.
+function _partition_declared_boundary(model,dim,tag,caller)
+    record=get(model.discrete,(dim,Int(tag)),nothing)
+    record!==nothing && return record.boundary
+    _model_entity_known(model,dim,Int(tag)) || throw(ArgumentError(
+        "$caller: partition parent ($(dim),$(tag)) is not a model entity"))
+    dim==0 && return Tuple{Int,Int}[]
+    raw=Model._model_direct_boundary(model,dim,Int(tag),caller;canonical_orientation=true)
+    dim!=1 && return raw
+    if length(raw)==2 && all(entry->entry[1]==0,raw)
+        first,last=raw[1][2],raw[2][2]
+        first==last && return Tuple{Int,Int}[]
+        return Tuple{Int,Int}[(0,first),(0,-last)]
+    end
+    isempty(raw) || throw(ArgumentError(
+        "$caller: native Curve $tag boundary is malformed"))
+    return raw
+end
+
+# Upstream partitions only the top-dimension element dual; every lower cell
+# then inherits the partition of its first adjacent carrier at the nearest
+# higher dimension, so a boundary Surface follows an incident Region instead
+# of keeping an unrelated independent bucket. Apply the same correction to a
+# dense catalog-order assignment — required for the declared-BRep facet
+# matching in `_partition_brep_snapshot`, where each lower Surface cell's
+# partition must match an actual volume facet carrier.
+function _partition_lower_inherit(assignment::Vector{Int32},mesh)
+    catalog=_cache_catalog(mesh)
+    total=0;dims=Int[]
+    for (_,dim,_,cells,_) in catalog
+        n=size(cells,2)
+        append!(dims,Iterators.repeated(Int(dim),n))
+        total+=n
+    end
+    length(assignment)==total || return assignment
+    top=isempty(dims) ? -1 : maximum(dims)
+    top<1 && return assignment
+    incidence=[Int[] for _ in 1:nnodes(mesh)]
+    cell_nodes=Vector{Vector{Int32}}(undef,total)
+    for (_,_,offset,cells,_) in catalog
+        for column in axes(cells,2)
+            index=offset+column
+            rows=collect(Int32,Base.view(cells,:,column))
+            cell_nodes[index]=rows
+            for row in rows
+                push!(incidence[row],index)
+            end
+        end
+    end
+    fixed=copy(assignment)
+    for index in 1:total
+        dim=dims[index]
+        dim>=top && continue
+        cell=cell_nodes[index]
+        for step in 1:(top-dim)
+            wanted=dim+step;hit=0
+            for row in cell,other in incidence[row]
+                dims[other]==wanted || continue
+                # Only a cell actually carrying this lower cell (a Tet whose
+                # facet is a Surface Triangle, a Triangle whose edge is a
+                # Curve segment) may donate its partition — a neighbor that
+                # merely shares a vertex or an edge belongs to a different
+                # facet and can sit in another partition.
+                all(node->node in cell_nodes[other],cell) || continue
+                hit=Int(assignment[other]);break
+            end
+            hit!=0 && (fixed[index]=Int32(hit);break)
+        end
+    end
+    return fixed
+end
+
 function _partition_tet_snapshot(model,cached,class,caller)
     class!==nothing && class.public_tags!==nothing || throw(ArgumentError(
         "$caller: topology and ghosts require actual classified UID authority"))
@@ -47,9 +134,9 @@ function _partition_tet_snapshot(model,cached,class,caller)
     cached isa MixedMesh && cached.partition_data!==nothing &&
         throw(ArgumentError("$caller: existing partition topology is unsupported"))
     parents=sort!(unique(Int(owner) for (_,_,_,_,owners) in catalog for owner in owners))
-    all(tag->tag>0 && haskey(model.discrete,(3,tag)) &&
-        isempty(model.discrete[(3,tag)].boundary),parents) || throw(ArgumentError(
-        "$caller: partition topology and ghosts require discrete Regions without pre-existing lower BRep"))
+    all(tag->tag>0 && _model_entity_known(model,3,tag) &&
+        isempty(_partition_declared_boundary(model,3,tag,caller)),parents) || throw(ArgumentError(
+        "$caller: partition topology and ghosts require Regions without pre-existing lower BRep"))
     public=class.public_tags
     for (_,record) in Model._discrete_mesh_records_model(model)
         all(uid->haskey(public.node_indices,uid),record.node_tags) &&
@@ -78,22 +165,39 @@ function _partition_tet_snapshot(model,cached,class,caller)
     return (;entities,blocks,owners,uids,public,cells,parents)
 end
 
-function _partition_interface_components(faces)
+# Connected components of the interface faces. With no `links` the default
+# adjacency shares any edge — faces around a junction edge all land in one
+# component. The lower-BRep caller instead passes explicit `(i,j)` links so
+# each emitted component stays edge-manifold for the junction-fan
+# certificate: manifold edges link their two incident faces and a
+# nonmanifold edge only links the pairs its carriers share.
+function _partition_interface_components(faces,links=nothing)
     edges(face)=_partition_edge_patterns(get(face,:msh,2))
-    incidence=Dict{Tuple{UInt64,UInt64},Vector{Int}}()
-    for (index,face) in enumerate(faces),(a,b) in edges(face)
-        push!(get!(()->Int[],incidence,minmax(face.uids[a],face.uids[b])),index)
+    adjacency=[Int[] for _ in faces]
+    if links===nothing
+        incidence=Dict{Tuple{UInt64,UInt64},Vector{Int}}()
+        for (index,face) in enumerate(faces),(a,b) in edges(face)
+            push!(get!(()->Int[],incidence,minmax(face.uids[a],face.uids[b])),index)
+        end
+        for hits in values(incidence),i in hits,j in hits
+            i<j && (push!(adjacency[i],j);push!(adjacency[j],i))
+        end
+    else
+        for (i,j) in links
+            i==j && continue
+            push!(adjacency[i],j);push!(adjacency[j],i)
+        end
     end
     seen=falses(length(faces));components=Vector{Int}[]
     for seed in eachindex(faces)
         seen[seed] && continue
         component=Int[seed];seen[seed]=true;cursor=1
         while cursor<=length(component)
-            face=faces[component[cursor]];cursor+=1
-            for (a,b) in edges(face),neighbor in incidence[minmax(face.uids[a],face.uids[b])]
+            for neighbor in adjacency[component[cursor]]
                 seen[neighbor] && continue
                 seen[neighbor]=true;push!(component,neighbor)
             end
+            cursor+=1
         end
         sort!(component);push!(components,component)
     end
@@ -141,7 +245,8 @@ function _partition_tet_production_plan(model,cached,class,count,assignment,call
     for block in blocks
         n=size(block.nodes,2);push!(owners,cell_owners[offset+1:offset+n]);offset+=n
     end
-    element_uids=copy(source.uids);maximum_uid=ELEMENT_TAG_MAX[]
+    element_uids=copy(source.uids)
+    maximum_uid=max(ELEMENT_TAG_MAX[],maximum(source.public.element_tags;init=UInt64(0)))
     if topology
         workers=_partition_workers()
         cell_facets=Vector{Vector{Tuple{NTuple{3,UInt64},NamedTuple}}}(undef,total)
@@ -273,5 +378,144 @@ function _partition_tet_production_plan(model,cached,class,count,assignment,call
     cell_map=Dict(uid=>uid for uid in source.public.element_tags)
     return (;model=staged,mesh=target,class=rebound,authority,
         max_node_tag=NODE_TAG_MAX[],max_element_tag=maximum_uid,
+        node_tag_map=identities,element_tag_map=cell_map,visibility_tag_map=cell_map)
+end
+
+# Assignment-only partition production (`Mesh.PartitionCreateTopology` and
+# `Mesh.PartitionCreateGhostCells` both zero). Upstream still materializes the
+# partition entity layer — `createNewEntities` runs before the topology gate —
+# so one discrete child is born per (dimension, parent entity, partition)
+# triple that owns at least one cell, carries the parent's physical
+# memberships, and becomes the cell's new owner. No interface topology or
+# ghost layer is produced; `$PartitionedEntities` therefore describes exactly
+# the children below. This is the fallback `.geo` `PartitionMesh` uses for
+# generated meshes whose declared lower BRep does not satisfy the production
+# producers' prerequisites, and it accepts any classified first-order mesh —
+# surfaces without volumes included.
+function _partition_assign_production_plan(model,cached,class,count,assignment,caller)
+    class!==nothing && class.public_tags!==nothing || throw(ArgumentError(
+        "$caller: partitioning requires actual classified UID authority"))
+    _high_order_overlay(cached)===nothing || throw(ArgumentError(
+        "$caller: partitioning currently requires first-order cells"))
+    cached isa MixedMesh && cached.partition_data!==nothing &&
+        throw(ArgumentError("$caller: existing partition topology is unsupported"))
+    catalog=[row for row in _cache_catalog(cached,class) if !isempty(row[4])]
+    total=sum(size(row[4],2) for row in catalog;init=0)
+    total>0 || throw(ArgumentError("$caller: the mesh has no elements"))
+    length(assignment)==total || throw(ArgumentError(
+        "$caller: partition assignment rows do not align with the cell catalog"))
+    all(part->1<=part<=count,assignment) || throw(ArgumentError(
+        "$caller: partition tags exceed num_part $count"))
+    public=class.public_tags
+    for (_,record) in Model._discrete_mesh_records_model(model)
+        all(uid->haskey(public.node_indices,uid),record.node_tags) &&
+        all(uid->haskey(public.element_indices,uid),record.element_tags) || throw(ArgumentError(
+            "$caller: partitioning cannot omit caller-owned records outside the cache"))
+    end
+    assembly=_Dim01Assembly(_Dim01Node[],_Dim01Cell[],Dict{UInt64,Int32}(),
+        NODE_TAG_MAX[],ELEMENT_TAG_MAX[],typemax(Int32),typemax(Int32),caller)
+    _dim01_ingest!(assembly,model,cached,class;preserve_source_order=true)
+    length(assembly.nodes)==nnodes(cached) && length(assembly.cells)==length(public.element_tags) ||
+        throw(ArgumentError("$caller: actual cached and caller-owned partition rows do not agree"))
+    global_entities,_=_dim01_entities(model,model_entities(model),assembly,eachindex(assembly.nodes))
+    staged=Model._model_mesh_transaction_copy(model)
+    triples=Tuple{Int,Int32,Int32}[]
+    offset=0
+    for (_,dim,_,cells,classified) in catalog
+        for column in axes(cells,2)
+            push!(triples,(dim,classified[column],assignment[offset+column]))
+        end
+        offset+=size(cells,2)
+    end
+    children=Dict{Tuple{Int,Int32,Int32},Int32}()
+    child_info=Dict{Tuple{Int,Int},Tuple{Int,Int32,Int32}}()
+    # Deterministic birth order — sorted (dimension, parent, partition) — so
+    # child tags cannot depend on catalog storage order.
+    for (dim,parent,part) in sort!(unique(triples))
+        tag=Int32(_partition_entity_birth!(staged,dim,caller))
+        children[(dim,parent,part)]=tag
+        groups=Model._model_projection_physical_tags(staged,dim,Int(parent))
+        staged.entity_physicals[(dim,Int(tag))]=copy(groups)
+        for group in groups
+            members=staged.physical[(dim,Int(group))]
+            Int(tag) in members || push!(members,Int(tag))
+        end
+        child_info[(dim,Int(tag))]=(dim,parent,part)
+    end
+    rows_by_child=Dict{Tuple{Int,Int32},Vector{Int32}}()
+    blocks=ElementBlock[];owners=Vector{Int32}[];uids=Vector{UInt64}[]
+    offset=0
+    for (msh,dim,_,cells,classified) in catalog
+        n=size(cells,2)
+        block_owner=Vector{Int32}(undef,n)
+        for column in 1:n
+            child=children[(dim,classified[column],assignment[offset+column])]
+            block_owner[column]=child
+            for row in cells[:,column]
+                push!(get!(()->Int32[],rows_by_child,(dim,child)),row)
+            end
+        end
+        physical=Int32[_dim01_physical(model,(dim,Int(owner))) for owner in classified]
+        push!(blocks,ElementBlock(Int(msh),copy(cells),physical))
+        push!(owners,block_owner)
+        push!(uids,copy(public.element_tags[offset+1:offset+n]))
+        offset+=n
+    end
+    part_entities=Dict{Tuple{Int,Int},Elements.MixedEntity}()
+    for (key,(dim,parent,part)) in child_info
+        rows=unique!(sort!(get(rows_by_child,key,Int32[])))
+        bounds=_partition_bounds(cached.coords,rows)
+        part_entities[key]=Elements.MixedEntity(dim,Int32(key[2]),bounds;
+            physical_tags=Model._model_projection_physical_tags(staged,dim,Int(parent)),
+            partitions=Int32[part],parent=(dim,parent))
+    end
+    # Nodes keep their existing owner unless a partition child owns an
+    # incident cell at a lower-or-equal dimension. Parameter-carrying nodes
+    # prefer a child of their classified owner so the parameters remain valid
+    # — the same `isless` merge the BRep producer applies.
+    node_owners=copy(class.node_entities)
+    sentinel=(4,Int32(typemax(Int32)))
+    incident=fill(sentinel,nnodes(cached))
+    incident_par=fill(sentinel,nnodes(cached))
+    for (bi,(msh,dim,_,cells,_)) in enumerate(catalog)
+        for column in axes(cells,2),row in cells[:,column]
+            candidate=(dim,owners[bi][column])
+            isless(candidate,incident[row]) && (incident[row]=candidate)
+            parameters=class.node_parametric[row]
+            if parameters!==nothing && dim==length(parameters) &&
+                    isless(candidate,incident_par[row])
+                entry=part_entities[(dim,Int(candidate[2]))]
+                owner=(class.node_entities[row][1],Int(class.node_entities[row][2]))
+                entry.parent==owner && (incident_par[row]=candidate)
+            end
+        end
+    end
+    for row in eachindex(incident)
+        pick=class.node_parametric[row]===nothing ? incident[row] : incident_par[row]
+        pick[1]<4 && (node_owners[row]=pick)
+    end
+    data=Elements._native_mixed_entity_data(global_entities;node_entities=node_owners,
+        node_parametric=deepcopy(class.node_parametric),
+        external_node_tags=copy(public.node_tags),
+        block_entities=owners,external_element_tags=uids)
+    partition=Elements.MixedPartitionData(count;entities=part_entities)
+    target=MixedMesh(cached.coords,blocks;entity_data=data,elementary_entities=owners,
+        physical_names=staged.physical_names,partition_data=partition,
+        periodic_links=cached isa MixedMesh ? cached.periodic_links : Elements.MixedPeriodicLink[],
+        ancillary_sections=cached isa MixedMesh ? cached.ancillary_sections : [],
+        data_sections=cached isa MixedMesh ? cached.data_sections : Elements.MshDataSection[])
+    validate(target).ok || throw(ArgumentError(
+        "$caller: partition produced invalid or duplicate cells"))
+    _geo_import_entity_receipts!(staged,target)
+    identities=Dict(uid=>uid for uid in public.node_tags)
+    declarations=union(Set(keys(global_entities)),Set(keys(part_entities)))
+    _dim01_reconcile_records!(staged,declarations,target,identities;runtime_parameters=data.node_parametric)
+    previous=model.meshing.mesh_authority
+    ranks=previous!==nothing && previous.mesh===cached ? previous.private_rank : collect(UInt64,1:nnodes(target))
+    staged.meshing.mesh_authority=Model._model_mesh_authority(target;caller,private_rank=ranks)
+    cell_map=Dict(uid=>uid for uid in public.element_tags)
+    return (;model=staged,mesh=target,class=_higher_classification_from_data(target,caller),
+        authority=Set{Tuple{Int,Int32}}((dim,Int32(tag)) for (dim,tag) in declarations),
+        max_node_tag=NODE_TAG_MAX[],max_element_tag=ELEMENT_TAG_MAX[],
         node_tag_map=identities,element_tag_map=cell_map,visibility_tag_map=cell_map)
 end

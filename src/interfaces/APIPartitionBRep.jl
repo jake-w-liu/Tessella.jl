@@ -202,6 +202,21 @@ function _partition_brep_surface_borders(faces,caller;workers=1)
     return (;pairs=borders,mids=mid_borders)
 end
 
+# The native Region sign under which one declared Surface's stored cells
+# already match this volume's own facet carrier; a Surface with no carrier
+# keeps its stored sign (the caller's coverage check then reports the gap).
+function _partition_region_surface_sign(parent,surface,signed,faces,facets)
+    for face in faces
+        face.parent==surface || continue
+        hits=get(facets,_partition_support(face.uids),NamedTuple[])
+        index=findfirst(hit->hit.volume.parent==parent,hits)
+        index===nothing && continue
+        return _partition_cycle_equal(face.msh,face.uids,hits[index].uids) ?
+            Int(surface) : -Int(surface)
+    end
+    return Int(signed)
+end
+
 function _partition_brep_snapshot(model,cached,class,assignment,caller)
     class.public_tags!==nothing || throw(ArgumentError("$caller: lower BRep needs actual UID authority"))
     _high_order_overlay(cached)===nothing || throw(ArgumentError("$caller: lower BRep partitioning is unsupported for overlay-backed high-order caches"))
@@ -261,11 +276,11 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
     surfaces=sort!(unique(face.parent for face in faces))
     curve_parents=sort!(unique(line.parent for line in lines))
     point_parents=sort!(unique(point.parent for point in points))
-    all(parent->parent>0 && haskey(model.discrete,(3,Int(parent))),parents) &&
-    all(parent->parent>0 && haskey(model.discrete,(2,Int(parent))),surfaces) &&
-    all(parent->parent>0 && haskey(model.discrete,(1,Int(parent))),curve_parents) &&
-    all(parent->parent>0 && haskey(model.discrete,(0,Int(parent))),point_parents) || throw(ArgumentError(
-        "$caller: lower BRep requires discrete Region, Surface, Curve and Point parents"))
+    all(parent->parent>0 && _model_entity_known(model,3,Int(parent)),parents) &&
+    all(parent->parent>0 && _model_entity_known(model,2,Int(parent)),surfaces) &&
+    all(parent->parent>0 && _model_entity_known(model,1,Int(parent)),curve_parents) &&
+    all(parent->parent>0 && _model_entity_known(model,0,Int(parent)),point_parents) || throw(ArgumentError(
+        "$caller: lower BRep requires Region, Surface, Curve and Point parents"))
     line_support=Dict{Tuple{UInt64,UInt64},NamedTuple}();curve_edges=Dict{Int32,Vector{NamedTuple}}()
     curve_nodes=Dict{Int32,Set{Int32}}();point_cells=Dict{Int32,NamedTuple}();point_rows=Set{Int32}()
     for line in lines
@@ -289,6 +304,7 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
         push!(point_rows,point.rows[1])
     end
     curve_ends=Dict{Int32,NTuple{2,UInt64}}();used_points=Set{Int32}()
+    curve_declared=Dict{Int32,Vector{NTuple{2,Int}}}()
     for parent in curve_parents
         edges=curve_edges[parent];outgoing=Dict{UInt64,Int}();incoming=Dict{UInt64,Int}()
         for (index,edge) in enumerate(edges)
@@ -303,14 +319,27 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
         end
         all(seen) || throw(ArgumentError(
             "$caller: declared Curve $parent is not one nonbranching directed chain"))
-        boundary=model.discrete[(1,Int(parent))].boundary
+        boundary=_partition_declared_boundary(model,1,Int(parent),caller)
         if index==seed
             isempty(boundary) || throw(ArgumentError(
                 "$caller: a closed declared Curve $parent cannot have Point boundaries"))
             curve_ends[parent]=(UInt64(0),UInt64(0))
+            curve_declared[parent]=boundary
             continue
         end
         curve_ends[parent]=(edges[seed].uids[1],edges[last].uids[2])
+        if !haskey(model.discrete,(1,Int(parent))) && length(boundary)==2
+            # A native Curve's signed ends describe the actual stored chain:
+            # `Reverse` or an opposite OCC edge use can leave the segments
+            # running against the declared endpoint order.
+            firstp,lastp=Int32(abs(boundary[1][2])),Int32(abs(boundary[2][2]))
+            if haskey(point_cells,firstp) && haskey(point_cells,lastp)
+                firstp,lastp=point_cells[firstp].uids[1]==curve_ends[parent][1] ?
+                    (firstp,lastp) : (lastp,firstp)
+                boundary=Tuple{Int,Int}[(0,firstp),(0,-lastp)]
+            end
+        end
+        curve_declared[parent]=boundary
         length(boundary)==2 || throw(ArgumentError(
             "$caller: declared Curve $parent needs signed start and end Point boundaries"))
         covered_signs=Set{Int}()
@@ -332,15 +361,25 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
     surface_borders=_partition_brep_surface_borders(faces,caller;workers)
     used_curves=Set{Int32}()
     for parent in surfaces
-        boundary=model.discrete[(2,Int(parent))].boundary
+        boundary=_partition_declared_boundary(model,2,Int(parent),caller)
         isempty(boundary) && continue
         all(entry->entry[1]==1,boundary) && allunique(Int32(abs(entry[2])) for entry in boundary) ||
             throw(ArgumentError(
                 "$caller: each declared Surface boundary must list distinct Curve entities"))
         border=surface_borders.pairs[parent];covered=Set{Tuple{UInt64,UInt64}}()
+        native=!haskey(model.discrete,(2,Int(parent)))
         for (_,signed) in boundary
             curve=Int32(abs(signed));haskey(curve_edges,curve) || throw(ArgumentError(
                 "$caller: declared boundary Curve $curve has no actual Curve cells"))
+            if native
+                # A native Surface's Curve signs describe the actual border
+                # traversal: the OCC face's use flag, its parametric frame
+                # and Reverse/orientation flips can each leave the stored
+                # cells running against the stored loop text.
+                oriented=get(border,minmax(curve_edges[curve][1].uids...),nothing)
+                oriented===nothing ||
+                    (signed=oriented==curve_edges[curve][1].uids ? curve : -curve)
+            end
             push!(used_curves,curve)
             for edge in curve_edges[curve]
                 key=minmax(edge.uids...);oriented=get(border,key,nothing)
@@ -461,10 +500,14 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
     end
     declared=Dict{Int32,Vector{Int32}}();used=Set{Int32}()
     for parent in parents
-        boundary=model.discrete[(3,Int(parent))].boundary
+        boundary=_partition_declared_boundary(model,3,Int(parent),caller)
         !isempty(boundary) && all(entry->entry[1]==2 && Int32(abs(entry[2])) in surfaces,boundary) &&
             allunique(abs(entry[2]) for entry in boundary) || throw(ArgumentError(
                 "$caller: each Region needs a complete declared Surface boundary"))
+        haskey(model.discrete,(3,Int(parent))) ||
+            (boundary=NTuple{2,Int}[(d,_partition_region_surface_sign(
+                parent,Int32(abs(signed)),signed,faces,facets))
+                for (d,signed) in boundary])
         expected=Set(key for (key,hits) in facets if
             count(hit->hit.volume.parent==parent,hits)==1)
         covered=Set{Tuple{Vararg{UInt64}}}();declared[parent]=Int32[value for (_,value) in boundary]
@@ -486,7 +529,22 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
     used==Set(surfaces) || throw(ArgumentError("$caller: unbound lower Surfaces are unsupported"))
     return (;entities,blocks,owners,uids,public,faces,volumes,lines,points,
         parents,surfaces,curve_parents,point_parents,curve_edges,point_cells,
-        facets,facet_order,face_support,lower_edges,declared,surface_borders)
+        facets,facet_order,face_support,lower_edges,declared,surface_borders,
+        curve_declared)
+end
+
+# Directed-traversal balance on one shared edge: an even family partitions
+# into mutually reversed sheet pairs exactly when every direction count
+# equals its reverse's — the local condition for a union of manifold sheets.
+# A partition interface may therefore carry a junction edge several sheets
+# cross through (valence 4, 6, …) while odd or lopsided incidence stays a
+# genuine nonmanifold defect.
+function _partition_edge_balanced(directions)
+    counts=Dict{Tuple{UInt64,UInt64},Int}()
+    for d in directions
+        counts[d]=get(counts,d,0)+1
+    end
+    return all(d->counts[d]==get(counts,reverse(d),0),keys(counts))
 end
 
 function _partition_brep_boundary_certificate(source,children,part_entities,boundaries,
@@ -525,12 +583,12 @@ function _partition_brep_boundary_certificate(source,children,part_entities,boun
         end
         expected=Dict{Tuple{UInt64,UInt64},Tuple{UInt64,UInt64}}()
         for (key,hits) in edges
-            length(hits)<=2 || throw(ArgumentError("$caller: child Surface has a nonmanifold edge"))
-            if length(hits)==2
-                hits[1]==reverse(hits[2]) || throw(ArgumentError("$caller: child Surface internal edge winding disagrees"))
-            else
-                expected[key]=only(hits)
+            if length(hits)==1
+                expected[key]=only(hits);continue
             end
+            _partition_edge_balanced(hits) || throw(ArgumentError(length(hits)==2 ?
+                "$caller: child Surface internal edge winding disagrees" :
+                "$caller: child Surface has a nonmanifold edge"))
         end
         covered=Set{Tuple{UInt64,UInt64}}()
         for signed in boundaries[(2,Int(tag))],edge in curves[abs(signed)]
@@ -552,47 +610,107 @@ function _partition_brep_boundary_certificate(source,children,part_entities,boun
     return nothing
 end
 
+# Seam-edge decomposition into Curve chains. Vertices of degree two pass a
+# chain through; every other vertex — an open endpoint (degree 1) or a
+# junction where three or more seam edges meet — terminates one. A junction
+# vertex therefore splits the incident network into the maximal degree-2
+# arcs its Point15 entity then binds, instead of rejecting the fan, while a
+# pure cycle of degree-2 vertices still emits one closed chain.
 function _partition_brep_chains(edges,caller)
     adjacent=Dict{UInt64,Vector{Int}}()
     for (index,edge) in enumerate(edges),uid in edge.uids
         push!(get!(()->Int[],adjacent,uid),index)
     end
-    for indices in values(adjacent)
-        length(indices)<=2 || throw(ArgumentError("$caller: branching partition seam is unsupported"))
-    end
-    # Open paths begin at degree-1 vertices; remaining edges form closed
-    # cycles. Edge directions are arbitrary — a junction arc can mix carrier
-    # and interface-derived orientations — so each chain also records whether
-    # an edge is traversed against its literal direction.
+    manifold(uid)=length(get(adjacent,uid,Int[]))==2
+    # Edge directions are arbitrary — a junction arc can mix carrier and
+    # interface-derived orientations — so each chain also records whether an
+    # edge is traversed against its literal direction.
     starts=[index for (index,edge) in enumerate(edges)
-        if length(adjacent[edge.uids[1]])==1 || length(adjacent[edge.uids[2]])==1]
+        if !manifold(edge.uids[1]) || !manifold(edge.uids[2])]
     seen=falses(length(edges));chains=NamedTuple[]
     for seed in vcat(starts,collect(eachindex(edges)))
         seen[seed] && continue
         edge=edges[seed]
-        entry=length(adjacent[edge.uids[2]])==1 &&
-            length(adjacent[edge.uids[1]])!=1 ? edge.uids[2] : edge.uids[1]
+        entry=manifold(edge.uids[1]) && !manifold(edge.uids[2]) ?
+            edge.uids[2] : edge.uids[1]
         indices=Int[];flips=Bool[];index=seed;vertex=entry
         while true
             seen[index]=true;current=edges[index];forward=current.uids[1]==vertex
             push!(indices,index);push!(flips,!forward)
             vertex=forward ? current.uids[2] : current.uids[1]
-            nexts=filter(!=(index),get(adjacent,vertex,Int[]))
-            if !isempty(nexts)
-                next=only(nexts)
-                seen[next] && next!=seed && throw(ArgumentError(
+            manifold(vertex) || break
+            nexts=filter(!=(index),adjacent[vertex]);next=only(nexts)
+            if seen[next]
+                next==seed || throw(ArgumentError(
                     "$caller: partition seam joins another chain"))
-                if !seen[next]
-                    index=next;continue
-                end
+                break
             end
-            break
+            index=next
         end
         closed=vertex==entry
         closed && length(indices)<3 && throw(ArgumentError("$caller: partition seam is not a closed polygon"))
         push!(chains,(indices=indices,flips=flips,closed=closed))
     end
     return chains
+end
+
+# Face-adjacency links for one partition-interface pair. Manifold edges
+# (exactly two incident faces) link their pair outright; a junction edge
+# with three or more incident faces is split into sheets: two faces link
+# only when they are the two facets of the *same* incident volume carrier —
+# the unique pairing whose co-oriented normals traverse the shared edge
+# oppositely after the interface orientation is unified. Each face carries
+# at most one partner per edge (canonical side first, then the other), so
+# every emitted component stays edge-manifold for the junction-fan
+# certificate; faces left unmatched simply bound their sheet there.
+function _partition_interface_links(faces,pair,children,facets)
+    supports=Dict{Tuple{Vararg{UInt64}},Int}()
+    incidence=Dict{Tuple{UInt64,UInt64},Vector{Int}}()
+    for (index,face) in enumerate(faces)
+        supports[_partition_support(face.uids)]=index
+        for (a,b) in _partition_edge_patterns(face.msh)
+            push!(get!(()->Int[],incidence,minmax(face.uids[a],face.uids[b])),index)
+        end
+    end
+    links=Tuple{Int,Int}[]
+    for (key,hits) in incidence
+        if length(hits)==2
+            push!(links,(hits[1],hits[2]));continue
+        end
+        length(hits)>2 || continue
+        # Candidate partner per face: the face the same incident carrier
+        # pairs it with on this edge — searched on each side in `pair`
+        # order. Two faces only ever share one carrier's corner here, so
+        # the first found candidate already defines a mutual link; a face
+        # keeps at most one partner.
+        partners=Dict{Int,Int}()
+        for i in hits
+            haskey(partners,i) && continue
+            face=faces[i];fsup=_partition_support(face.uids)
+            fhits=get(facets,fsup,NamedTuple[])
+            for side in pair
+                carrier=findfirst(hit->children[(3,hit.volume.parent,hit.volume.part)]==side,
+                                  fhits)
+                carrier===nothing && continue
+                volume=fhits[carrier].volume;partner=0
+                for (_,pattern) in _partition_volume_facets(volume.msh)
+                    fu=ntuple(slot->volume.uids[pattern[slot]],length(pattern))
+                    (key[1] in fu && key[2] in fu) || continue
+                    candidate=get(supports,_partition_support(fu),nothing)
+                    candidate===nothing && continue
+                    (candidate==i || haskey(partners,candidate)) && continue
+                    partner=candidate;break
+                end
+                partner==0 && continue
+                partners[i]=partner;partners[partner]=i
+                break
+            end
+        end
+        for (i,j) in partners
+            i<j && push!(links,(i,j))
+        end
+    end
+    return links
 end
 
 function _partition_brep_production_plan(model,cached,class,count,assignment,caller;
@@ -650,7 +768,7 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
         curves[tag]=edges
     end
     point_declaring=Dict{Int32,Vector{Int32}}()
-    for parent in source.curve_parents,(_,signed) in model.discrete[(1,Int(parent))].boundary
+    for parent in source.curve_parents,(_,signed) in source.curve_declared[parent]
         push!(get!(()->Int32[],point_declaring,Int32(abs(signed))),parent)
     end
     for parent in source.point_parents
@@ -674,7 +792,8 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
     for block in blocks
         n=size(block.nodes,2);push!(owners,flat_owners[offset+1:offset+n]);offset+=n
     end
-    labels=copy(source.uids);maximum_uid=ELEMENT_TAG_MAX[];cell_count=length(source.public.element_tags)
+    labels=copy(source.uids);cell_count=length(source.public.element_tags)
+    maximum_uid=max(ELEMENT_TAG_MAX[],maximum(source.public.element_tags;init=UInt64(0)))
     boundaries=Dict(key=>Int32[] for key in keys(part_entities))
     for volume in source.volumes
         child=children[(3,volume.parent,volume.part)]
@@ -690,7 +809,7 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
     for parent in source.curve_parents
         boundaries[(1,Int(curve_children[parent]))]=Int32[
             sign(signed)*point_children[Int32(abs(signed))]
-            for (_,signed) in model.discrete[(1,Int(parent))].boundary]
+            for (_,signed) in source.curve_declared[parent]]
     end
     seams=Dict{Tuple{Tuple{Int,Int32},Tuple{Vararg{Int32}}},Vector{NamedTuple}}()
     seam_order=Tuple{Tuple{Int,Int32},Tuple{Vararg{Int32}}}[]
@@ -736,7 +855,8 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
         end
         for pair in sort!(collect(keys(grouped)))
             faces=grouped[pair]
-            for component in _partition_interface_components(faces)
+            links=_partition_interface_links(faces,pair,children,source.facets)
+            for component in _partition_interface_components(faces,links)
                 primary=faces[first(component)].child;tag=Int32(_partition_entity_birth!(staged,2,caller))
                 cell_count<=typemax(Int32)-length(component) || throw(ArgumentError("$caller: interface cell capacity exceeded"))
                 cell_count+=length(component)
@@ -781,15 +901,18 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
                          interface=tag))
                 end
                 for (key,hits) in edge_hits
-                    length(hits)<=2 || throw(ArgumentError("$caller: nonmanifold interface edge"))
-                    if length(hits)==2
-                        hits[1].uids==reverse(hits[2].uids) || throw(ArgumentError("$caller: interface edge winding disagrees"))
-                        # Opposite traversal directions carry the shared edge
-                        # nodes in mutually reversed sequences.
-                        (hits[1].mid===nothing ? hits[2].mid===nothing :
-                            Tuple(hits[1].mid)==reverse(Tuple(hits[2].mid))) ||
-                            throw(ArgumentError("$caller: interface edge node disagrees"))
-                    end
+                    length(hits)==1 && continue
+                    _partition_edge_balanced(Tuple{UInt64,UInt64}[hit.uids for hit in hits]) ||
+                        throw(ArgumentError(length(hits)==2 ?
+                            "$caller: interface edge winding disagrees" :
+                            "$caller: nonmanifold interface edge"))
+                    # Sheet pairs traverse the shared edge in mutually
+                    # reversed directions, so normalized to corner order
+                    # every sheet must carry the identical node sequence.
+                    norm(hit)=hit.mid===nothing ? nothing :
+                        (hit.uids[1]<hit.uids[2] ? Tuple(hit.mid) : reverse(Tuple(hit.mid)))
+                    allequal(norm(hit) for hit in hits) ||
+                        throw(ArgumentError("$caller: interface edge node disagrees"))
                 end
             end
         end
@@ -925,12 +1048,22 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
             dim==2 || continue
             faces=haskey(interfaces,Int32(tag)) ? interfaces[Int32(tag)] :
                 [face for face in source.faces if children[(2,face.parent,face.part)]==tag]
-            signs=Dict{Int32,Int}()
+            # A junction edge several sheets of one Surface cross through is
+            # traversed in both directions; those canceling incidences are
+            # internal to the child and vote no boundary sign, while every
+            # remaining border incidence must still agree on one sign.
+            tally=Dict{Tuple{Int32,Tuple{UInt64,UInt64}},Int}()
             for face in faces,(a,b) in _partition_edge_patterns(face.msh)
                 key=minmax(face.uids[a],face.uids[b]);seam=get(seam_lookup,key,nothing);seam===nothing && continue
-                orientation=(face.uids[a],face.uids[b])==seam.uids ? 1 : -1
-                haskey(signs,seam.tag) && signs[seam.tag]!=orientation && throw(ArgumentError("$caller: Surface seam has inconsistent orientation"))
-                signs[seam.tag]=orientation
+                vote=(face.uids[a],face.uids[b])==seam.uids ? 1 : -1
+                slot=(seam.tag,key);tally[slot]=get(tally,slot,0)+vote
+            end
+            signs=Dict{Int32,Int}()
+            for ((tag,key),net) in tally
+                net==0 && continue
+                sign=net>0 ? 1 : -1
+                haskey(signs,tag) && signs[tag]!=sign && throw(ArgumentError("$caller: Surface seam has inconsistent orientation"))
+                signs[tag]=sign
             end
             boundaries[(dim,tag)]=Int32[Int32(signs[curve])*curve for curve in sort!(collect(keys(signs)))]
         end
