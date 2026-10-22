@@ -795,21 +795,27 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
     labels=copy(source.uids);cell_count=length(source.public.element_tags)
     maximum_uid=max(ELEMENT_TAG_MAX[],maximum(source.public.element_tags;init=UInt64(0)))
     boundaries=Dict(key=>Int32[] for key in keys(part_entities))
-    for volume in source.volumes
-        child=children[(3,volume.parent,volume.part)]
-        for signed in source.declared[volume.parent],face in source.faces
-            face.parent==abs(signed) || continue
-            hits=source.facets[_partition_support(face.uids)]
-            any(hit->hit.volume.index==volume.index,hits) || continue
-            face_child=children[(2,face.parent,face.part)]*sign(signed)
-            face_child in boundaries[(3,Int(child))] ||
-                push!(boundaries[(3,Int(child))],face_child)
+    # `Mesh.PartitionCreateTopology=0` suppresses the whole child topology
+    # layer: partition entities stay bare ownership buckets like upstream,
+    # so declared Region/Curve boundaries only enter `boundaries` under the
+    # topology gate together with the interfaces, seams and junction points.
+    if topology
+        for volume in source.volumes
+            child=children[(3,volume.parent,volume.part)]
+            for signed in source.declared[volume.parent],face in source.faces
+                face.parent==abs(signed) || continue
+                hits=source.facets[_partition_support(face.uids)]
+                any(hit->hit.volume.index==volume.index,hits) || continue
+                face_child=children[(2,face.parent,face.part)]*sign(signed)
+                face_child in boundaries[(3,Int(child))] ||
+                    push!(boundaries[(3,Int(child))],face_child)
+            end
         end
-    end
-    for parent in source.curve_parents
-        boundaries[(1,Int(curve_children[parent]))]=Int32[
-            sign(signed)*point_children[Int32(abs(signed))]
-            for (_,signed) in source.curve_declared[parent]]
+        for parent in source.curve_parents
+            boundaries[(1,Int(curve_children[parent]))]=Int32[
+                sign(signed)*point_children[Int32(abs(signed))]
+                for (_,signed) in source.curve_declared[parent]]
+        end
     end
     seams=Dict{Tuple{Tuple{Int,Int32},Tuple{Vararg{Int32}}},Vector{NamedTuple}}()
     seam_order=Tuple{Tuple{Int,Int32},Tuple{Vararg{Int32}}}[]
