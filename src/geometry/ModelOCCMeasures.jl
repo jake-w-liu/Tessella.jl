@@ -389,49 +389,7 @@ function _model_occ_trimmed_face_measure(kernel,id)
     # Generic parametric base: sample the pcurve boundary at each edge's
     # resolution, triangulate the uv domain, integrate |p_u×p_v| with a
     # three-point rule over 4×-split subtriangles.
-    period=_brep_uperiod(rec)
-    xs=Float64[]; ys=Float64[]; segs=Tuple{Int,Int}[]
-    index=Dict{NTuple{2,Float64},Int}()
-    emit(uv)=get!(index,uv) do
-        push!(xs,uv[1]); push!(ys,uv[2]); return length(xs)
-    end
-    lo=[Inf,Inf]; hi=[-Inf,-Inf]
-    for wire_id in shape.children
-        uses=kernel.shapes[wire_id].geometry.uses
-        loop_idx=Int[]; u_prev=nothing
-        for (eid,rev) in uses
-            etag=kernel.shape_tags[eid][2]
-            eg=kernel.shapes[eid].geometry.geometry
-            pc=rec.pcurves[etag].fwd
-            t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
-            ruv=0.002*(isfinite(hi[1]-lo[1]) ? max(hi[1]-lo[1],1.0) : 1.0)
-            step=_occ_pcurve_resolution(pc,ruv)
-            ns=max(9,ceil(Int,abs(t1-t0)/max(step,eps())))
-            ns=min(ns,2048)
-            for i in 0:ns
-                t=t0+(t1-t0)*i/ns
-                u,v=_occ_pcurve_d0(pc,t)
-                if period>0.0 && u_prev!==nothing
-                    u+=period*round((u_prev-u)/period)
-                end
-                u_prev=u
-                lo[1]=min(lo[1],u); hi[1]=max(hi[1],u)
-                lo[2]=min(lo[2],v); hi[2]=max(hi[2],v)
-                push!(loop_idx,emit((u,v)))
-            end
-        end
-        n=length(loop_idx)
-        n>=3 || throw(ArgumentError(
-            "OCC.get_mass: trimmed face wire needs at least three points"))
-        for k in 1:n
-            i,j=loop_idx[k],loop_idx[mod1(k+1,n)]
-            i==j || (xs[i]==xs[j] && ys[i]==ys[j]) || push!(segs,(i,j))
-        end
-    end
-    isempty(segs) && throw(ErrorException(
-        "OCC.get_mass: trimmed face has an empty uv boundary"))
-    T=constrained_delaunay(xs,ys,segs)
-    interior=classify_interior(T)
+    xs,ys,T,interior=_model_occ_trimmed_face_cdt(kernel,id,shape,rec)
     A=0.0; M=(0.0,0.0,0.0)
     # reference-triangle rule on (0,0),(1,0),(0,1): weights 1/3 at
     # (1/6,1/6),(2/3,1/6),(1/6,2/3), applied on 4 uniform subtriangles.
@@ -461,6 +419,110 @@ function _model_occ_trimmed_face_measure(kernel,id)
     return A,_occ3_scale(M,1.0/A)
 end
 
+# CDT of the sampled pcurve boundary — shared scaffold for the trimmed-face
+# measure and the divergence integral below. Each wire's uses walk `pcurves
+# [etag].fwd` over their orientation's parameter range; consecutive samples
+# unwrap by whole periods so periodic faces triangulate a contiguous uv
+# polygon. Returns (xs, ys, T, interior) — CDT vertex coords, the
+# constrained triangulation, and `classify_interior`'s inside mask.
+function _model_occ_trimmed_face_cdt(kernel,id,shape,rec)
+    period=_brep_uperiod(rec)
+    xs=Float64[]; ys=Float64[]; segs=Tuple{Int,Int}[]
+    index=Dict{NTuple{2,Float64},Int}()
+    emit(uv)=get!(index,uv) do
+        push!(xs,uv[1]); push!(ys,uv[2]); return length(xs)
+    end
+    lo=[Inf,Inf]; hi=[-Inf,-Inf]
+    for wire_id in shape.children
+        uses=kernel.shapes[wire_id].geometry.uses
+        loop_idx=Int[]; u_prev=nothing
+        for (eid,rev) in uses
+            etag=kernel.shape_tags[eid][2]
+            eg=kernel.shapes[eid].geometry.geometry
+            ent=rec.pcurves[etag]
+            pc=(rev && ent.rev!==nothing) ? ent.rev : ent.fwd
+            t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
+            ruv=0.002*(isfinite(hi[1]-lo[1]) ? max(hi[1]-lo[1],1.0) : 1.0)
+            step=_occ_pcurve_resolution(pc,ruv)
+            ns=max(9,ceil(Int,abs(t1-t0)/max(step,eps())))
+            ns=min(ns,2048)
+            for i in 0:ns
+                t=t0+(t1-t0)*i/ns
+                u,v=_occ_pcurve_d0(pc,t)
+                if period>0.0 && u_prev!==nothing
+                    u+=period*round((u_prev-u)/period)
+                end
+                u_prev=u
+                lo[1]=min(lo[1],u); hi[1]=max(hi[1],u)
+                lo[2]=min(lo[2],v); hi[2]=max(hi[2],v)
+                # Consecutive uses meet at the wire's shared vertices —
+                # each edge's own pcurve evaluates that vertex ~1e-12
+                # apart, which the CDT reads as a constraint crossing.
+                # Weld the use's first sample onto the previous use's
+                # terminal index instead (the chain certificate already
+                # guarantees the two ends are one vertex).
+                i==0 && !isempty(loop_idx) &&
+                    (push!(loop_idx,loop_idx[end]);continue)
+                push!(loop_idx,emit((u,v)))
+            end
+        end
+        n=length(loop_idx)
+        n>=3 || throw(ArgumentError(
+            "OCC.get_mass: trimmed face wire needs at least three points"))
+        # The wire's closing vertex welds the same way: the last use's
+        # terminal sample and the first use's start are one vertex —
+        # reuse the first index so the polygon's final real edge ends
+        # there and the degenerate closing edge drops out below.
+        scale=max(1.0,hi[1]-lo[1],hi[2]-lo[2])
+        hypot(xs[loop_idx[end]]-xs[loop_idx[1]],
+              ys[loop_idx[end]]-ys[loop_idx[1]])<=1e-9*scale &&
+            (loop_idx[end]=loop_idx[1])
+        for k in 1:n
+            i,j=loop_idx[k],loop_idx[mod1(k+1,n)]
+            i==j || (xs[i]==xs[j] && ys[i]==ys[j]) || push!(segs,(i,j))
+        end
+    end
+    isempty(segs) && throw(ErrorException(
+        "OCC.get_mass: trimmed face has an empty uv boundary"))
+    T=constrained_delaunay(xs,ys,segs)
+    interior=classify_interior(T)
+    return xs,ys,T,interior
+end
+
+# Divergence integral ∬_F p·(p_u×p_v) over a trimmed parametric face —
+# the CDT-restricted counterpart of `_model_occ_patch_face_div` for
+# faces whose wire bounds a sub-region of the surface's parameter
+# domain (STEP-imported patches, quadrics with pcurve wires). Returns
+# (V, M) with V=∬rn/3, M=∬p·rn — the same signed contributions
+# `get_mass`/`get_center_of_mass` accumulate per shell use.
+function _model_occ_trimmed_face_div(kernel,id)
+    shape=kernel.shapes[id]; rec=shape.geometry.geometry
+    xs,ys,T,interior=_model_occ_trimmed_face_cdt(kernel,id,shape,rec)
+    nodes=((1/6,1/6),(2/3,1/6),(1/6,2/3))
+    V=0.0; M=(0.0,0.0,0.0)
+    for t in eachindex(interior)
+        interior[t] || continue
+        p1=(xs[T.tv[3t-2]],ys[T.tv[3t-2]])
+        p2=(xs[T.tv[3t-1]],ys[T.tv[3t-1]])
+        p3=(xs[T.tv[3t]],ys[T.tv[3t]])
+        m12=_occ2_mid(p1,p2); m23=_occ2_mid(p2,p3); m31=_occ2_mid(p3,p1)
+        for (q1,q2,q3) in ((p1,m12,m31),(m12,p2,m23),(m31,m23,p3),
+                          (m12,m23,m31))
+            jac=abs((q2[1]-q1[1])*(q3[2]-q1[2])-
+                    (q3[1]-q1[1])*(q2[2]-q1[2]))
+            for (s,tt) in nodes
+                u=q1[1]+s*(q2[1]-q1[1])+tt*(q3[1]-q1[1])
+                v=q1[2]+s*(q2[2]-q1[2])+tt*(q3[2]-q1[2])
+                p,du,dv=_occ_surface_d1(rec,u,v)
+                w=jac/2/3
+                rn=_dot3(p,_occ_cross(du,dv))
+                V+=w*rn/3; M=_occ3_add(M,_occ3_scale(p,w*rn))
+            end
+        end
+    end
+    return V,M
+end
+
 @inline _occ2_mid(a,b)=((a[1]+b[1])/2,(a[2]+b[2])/2)
 
 # ---- faces -----------------------------------------------------------
@@ -472,6 +534,11 @@ function _model_occ_face_measure(kernel,id)
         A,c3,_=_model_occ_plane_stats(kernel,id)
         return A,c3
     elseif haskey(rec,:patch)
+        # Trimmed patch — the wire bounds a sub-region of the knot
+        # domain (STEP-imported tensor faces); integrate the CDT of
+        # the sampled uv boundary like the other trimmed bases.
+        (get(rec,:trimmed,false) && haskey(rec,:pcurves)) &&
+            return _model_occ_trimmed_face_measure(kernel,id)
         # NURBS tensor face — OCC tensor faces cover the full knot
         # domain. GL8 per nonzero knot span in each direction keeps the
         # piecewise-smooth patch integrand at machine precision.
@@ -754,20 +821,36 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
              arm*c*rec.X[3]+arm*s*rec.Y[3]))
     end
     all(u->face_kind(u)===:plane || face_kind(u)===:cylinder ||
-           haskey(kernel.shapes[u[1]].geometry.geometry,:patch),uses) ||
+           haskey(kernel.shapes[u[1]].geometry.geometry,:patch) ||
+           haskey(kernel.shapes[u[1]].geometry.geometry,:pcurves),uses) ||
         throw(ErrorException("OCC.get_mass: unsupported solid boundary"))
     # Divergence theorem over outward-oriented faces:
     #   V = (1/3)Σ ∬_F r·n̂ dA,  ∭r dV = (1/4)Σ ∬_F r(r·n̂) dA.
     # Plane faces integrate exactly through `_model_occ_plane_stats`;
     # cylinder patches reduce to wire-boundary line integrals; NURBS
-    # patches (lofted/tensor faces) integrate `r·(∂u×∂v)` per knot span.
+    # patches over the full knot domain integrate `r·(∂u×∂v)` per span.
+    # Faces whose wire bounds only a sub-region — STEP-imported trimmed
+    # patches and quadrics carrying pcurves — integrate the same
+    # integrand over a CDT of the sampled uv boundary.
     V=0.0; M=(0.0,0.0,0.0)
     for (fid,rev) in uses
         rec=kernel.shapes[fid].geometry.geometry
         σ=rev ? -1.0 : 1.0
         if haskey(rec,:patch)
-            Vp,Mp=_model_occ_patch_face_div(kernel,fid;
-                                          want_centroid=want_centroid)
+            if haskey(rec,:pcurves) && get(rec,:trimmed,false)
+                Vp,Mp=_model_occ_trimmed_face_div(kernel,fid)
+            else
+                Vp,Mp=_model_occ_patch_face_div(kernel,fid;
+                                              want_centroid=want_centroid)
+            end
+            V+=σ*Vp
+            want_centroid && (M=_occ3_add(M,_occ3_scale(Mp,σ)))
+            continue
+        end
+        occ=get(rec,:occ,nothing)
+        if haskey(rec,:pcurves) &&
+            occ!==:cylinder && occ!==:plane
+            Vp,Mp=_model_occ_trimmed_face_div(kernel,fid)
             V+=σ*Vp
             want_centroid && (M=_occ3_add(M,_occ3_scale(Mp,σ)))
             continue

@@ -46,9 +46,14 @@ end
                        _errtext(()->occ.import_shapes("no_such_file_xyz.step")))
         @test occursin("ISO-10303-21",
                        _errtext(()->occ.import_shapes(joinpath(FIX,"..","..","Project.toml"))))
-        # a curved STEP (cylinder) rejects loudly, not silently
-        @test occursin("planar",
-                       _errtext(()->occ.import_shapes(joinpath(FIX,"brep_occ_cylinder.step"))))
+        # a curved STEP (cylinder) imports through the structural path —
+        # native cylinder face + rim circles + projected pcurves
+        out3=occ.import_shapes(joinpath(FIX,"brep_occ_cylinder.step"))
+        @test length(out3)==1
+        d3,t3=out3[1]
+        @test d3==3
+        @test occ.get_mass(3,t3)>0.0
+        @test all(isfinite,collect(occ.get_bounding_box(3,t3)))
     finally
         A.finalize()
     end

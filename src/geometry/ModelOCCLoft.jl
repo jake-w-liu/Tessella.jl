@@ -1159,7 +1159,9 @@ function _trim_project_pcurve(m,kernel,face_g,eid,caller)
         (abs(uvs[i][1]-pu)>1e-9*scale || abs(uvs[i][2]-pv)>1e-9*scale) &&
             (lin=false; break)
     end
-    lin && return (lin2d=(u0,du),)
+    # `lin2d` evaluates `o+d·t` at the ABSOLUTE edge parameter — store
+    # the uv at t=0, not at t0 (imported edges can start at t0<0).
+    lin && return (lin2d=((u0[1]-du[1]*t0,u0[2]-du[2]*t0),du),)
     return (spl2d=_pchip_bspline_2d(ts,uvs),)
 end
 

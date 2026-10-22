@@ -175,6 +175,23 @@ function _model_volume_bounds(
         bounds=_model_bounds_union(
             bounds,_model_curve_bounding_box(m,curve,caller))
     end
+    # NURBS faces bound by their control hull (BRepBndLib over the poles),
+    # which no boundary curve reaches — union the padded hull so a shelled
+    # volume with tensor surfaces reports the same box the OCC kernel does.
+    for shell in m.volumes[tag]
+        for signed_surface in m.surface_loops[shell]
+            g=get(m.surface_geometry,abs(signed_surface),nothing)
+            _model_nurbs_surface(g) || continue
+            controls=g.patch.surface.controls
+            hull=_MODEL_EMPTY_BOUNDS
+            for p in controls
+                hull=_model_bounds_include(hull,(p[1],p[2],p[3]))
+            end
+            bounds=_model_bounds_union(bounds,
+                (hull[1]-1e-7,hull[2]-1e-7,hull[3]-1e-7,
+                 hull[4]+1e-7,hull[5]+1e-7,hull[6]+1e-7))
+        end
+    end
     return _model_bounds_checked(bounds,caller,entity)
 end
 

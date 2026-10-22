@@ -1602,6 +1602,36 @@ function _geo_exec_boolean_term(m::GeoModel,raw::AbstractString,
     return Float64.(out)
 end
 
+# `v() = ShapeFromFile("x.step")` — `OCC_Internals::shapeFromFile`: the
+# same native STEP import `Merge` takes, returning the highest-dimensional
+# imported tags so `Volume{v()}` can select them. Gated on the OCC factory
+# like the boolean terms; the bare-statement form keeps its diagnostic.
+function _geo_exec_shape_from_file(m::GeoModel,raw::AbstractString,
+                                   context::_GeoNumericContext,
+                                   allocator_state=nothing)
+    source=String(strip(raw))
+    mm=match(r"^ShapeFromFile\s*\(\s*(.*?)\s*\)\s*$",source)
+    mm===nothing && return nothing
+    caller="execute_geo: ShapeFromFile"
+    if allocator_state===nothing || allocator_state.factory!==:opencascade
+        _geo_yyerror!(context,
+            "ShapeFromFile only available with OpenCASCADE geometry kernel")
+        return Float64[]
+    end
+    file=_geo_fix_relative_path(context.file_name,
+        _geo_eval_string(mm.captures[1],context,caller))
+    out=try
+        Model._model_occ_import_shapes(m,file;caller="OCC.importShapes")
+    catch err
+        err isa InterruptException && rethrow()
+        err isa ArgumentError || rethrow()
+        _geo_occ_fail!(context,err,"Could not import shapes")
+        return Float64[]
+    end
+    _geo_occ_finish!(m,context)
+    return Float64[tag for (_,tag) in out]
+end
+
 # ======== `FExpr_Multi` entity-selector and transform terms ========
 #
 # The `.geo` grammar puts model-reading and geometry-mutating terms inside
@@ -2299,6 +2329,8 @@ function _geo_exec_value_term(m::GeoModel,raw::AbstractString,
     extruded!==nothing && return extruded
     boolean=_geo_exec_boolean_term(m,raw,context,allocator_state)
     boolean!==nothing && return boolean
+    shapefile=_geo_exec_shape_from_file(m,raw,context,allocator_state)
+    shapefile!==nothing && return shapefile
     return _geo_exec_selector_term(m,raw,context,allocator_state)
 end
 
@@ -11027,9 +11059,19 @@ function _geo_exec_include!(m::GeoModel,path::AbstractString,
         _geo_import_mesh_file!(m,context,file,caller)
         return nothing
     end
+    if ext in (".step",".stp")
+        # `GModel::readOCCSTEP` — STEP always imports through the OCC
+        # kernel upstream, whatever the active factory. The native
+        # importer binds into the OCC kernel; synchronize publishes the
+        # merged solids immediately (same `geo_changed` receipt a GEO
+        # create carries).
+        Model._model_occ_import_shapes(m,file;caller="OCC.importShapes")
+        _geo_occ_finish!(m,context)
+        return nothing
+    end
     ext==".geo" || throw(ArgumentError(
         "$caller: merging '$ext' files is not supported " *
-        "(only .geo, .msh, .stl and .pos)"))
+        "(only .geo, .msh, .stl, .pos, .step and .stp)"))
     statements=_geo_exec_statements(file)
     parent_file=context.file_name
     parent_base=context.file_error_base
