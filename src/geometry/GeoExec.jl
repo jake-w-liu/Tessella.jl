@@ -11403,13 +11403,20 @@ function _geo_merge_discrete!(m::GeoModel,mixed::MixedMesh,
     # MSH4 declares them per entity, MSH2 derives them from the cell tags.
     for key in order
         dim,tag=key
-        physicals=Set{Int32}()
+        # `GEntity::physicals` keeps declaration order — MSH4's per-entity
+        # `physicalTags` list order or MSH2's first-seen cell-tag order —
+        # so collect into a deduplicating vector, not a Set whose hash
+        # order scrambles e.g. [5,6] into [6,5].
+        physicals=Int32[]
+        seen_physicals=Set{Int32}()
         if data!==nothing
             entity=get(entity_records,key,nothing)
-            entity===nothing || union!(physicals,entity.physical_tags)
+            entity===nothing || append!(physicals,entity.physical_tags)
         else
             for (bi,j) in cells[key]
-                blocks[bi].tags[j]>0 && push!(physicals,blocks[bi].tags[j])
+                cell_tag=blocks[bi].tags[j]
+                cell_tag>0 && !(cell_tag in seen_physicals) &&
+                    (push!(physicals,cell_tag);push!(seen_physicals,cell_tag))
             end
         end
         for ptag in physicals
