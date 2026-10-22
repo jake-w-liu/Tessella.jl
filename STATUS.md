@@ -2525,6 +2525,93 @@ on this machine (`julia --project=. --compile=min -O0`, exit 0 each):
 - Registrations: `validation/run_all.jl` tutorial tuple now includes
   `t17`; the corpus comment was refreshed for the t8/t9 full coverage.
 
+#### P601 t13/t20/t21 driver expansion (2026-10-23, validation + docs only)
+
+No Source changed by this work; the previously landed unblockers — STEP
+import + `.step` `Merge` (`62e8532`), `.geo` `PartitionMesh{n}`
+(`26a4eb2`), and OCC `.geo` factory primitives (`d99f1bf`) — are now
+exercised by three updated/new drivers, all run live against gmsh
+4.15.2 on this machine at `-O0` with normal compilation (each exit 0).
+`--compile=min` cannot drive these paths: `GmshLibm` uses
+`Base.llvmcall`, so minimal compilation fails with `` `llvmcall`
+requires the compiler `` — an environment limit, recorded distinctly,
+not a parity gap. **20 of 21 tutorials now have parity drivers**;
+t19 alone remains unported.
+
+- **t13 — verbatim-first driver, PARTIAL.** The driver runs the literal
+  tutorial through `execute_geo("t13.geo"; mesh_dim=3)`: `Merge
+  "t13_data.stl"` (913-vertex / 1830-facet aneurysm PLC) →
+  `ClassifySurfaces` (40°, `boundary=1`, `curveAngle=180°`,
+  `forReparametrization`) → `CreateGeometry` → `Surface Loop(1)` →
+  `Volume(1)` → `Field[1] = MathEval` (`F = "4"`) → `Background Field`
+  → `Mesh 3`. The pipeline now advances past the former
+  `create_geometry!: node 677 has conflicting actual geometry sources`
+  re-ownership conflict and reaches `Mesh 3` volume fill, where the
+  verbatim run's current edge is conforming-recovery capacity — with
+  the tutorial's uniform `Field[1].F = "4"` size the remeshed boundary
+  has ~2470 facets and `recover_boundary`/`recover_boundary_cdt`
+  fails: `recovery FAILED after 8 seeds (0/2470 facets recovered) …
+  adding piercing points would exceed maxpts=6000`. The same pipeline
+  without the size field (inlined, `nofield` probe) now completes
+  end-to-end — 2596 nodes / 7706 tets / volume 67815.8 versus gmsh's
+  4297 / 22185 / 68360.8 — the earlier `lost actual boundary
+  Surface[2] cell 2582` / `lost actual Curve[2] Line cell 2195`
+  write-back certificates are satisfied for this PLC by the current
+  build's transport. The certificate family is still pinned by the
+  driver's 16-vertex twisted-prism reproduction (non-star,
+  exact-CDT-conformable — boundary genuinely subdivides):
+  `lost actual boundary Surface[2] cell 1`, thrown by
+  `_model_certify_native_volume_constraints` in seconds. Receipt:
+  `GMSH_PARITY_T13_PARTIAL` (`geo=BLOCKED(recovery)… nofield=OK
+  nodes=2596 tets=7706 volume=67815.766`); gmsh oracle `gmsh t13.geo
+  -3`: 4297 nodes / 22185 elements (13256 tets, 8450 tris, 467 lines,
+  12 points; one `8 elements remain invalid in surface 3` warning).
+- **t20 — verbatim-first driver, PARTIAL.** `execute_geo("t20.geo")`
+  now completes `SetFactory("OpenCASCADE")`, `v() = ShapeFromFile(
+  "t20_data.step")` (STEP import succeeds — the session mirror
+  verifies 1 volume / 21 surfaces / 48 curves / 28 points and a bbox
+  matching gmsh to 1e-3), `BoundingBox Volume{v()}`, the OCC
+  `Rectangle` cutting plane, `Rotate`/`Translate`/`Duplicata` and the
+  `For` slice loop before stopping at the classified operand-grammar
+  gap `execute_geo: BooleanFragments: only Volume Boolean operands are
+  supported; got Surface{1}`. Behind it, the multi-entry
+  `DefineConstant[N=..\n dir=..\n surf=..]` newline-separated form
+  still emits a recoverable `syntax error (})` plus `Unknown
+  variable`/`Division by zero` diagnostics (comma-separated entries
+  parse) — recorded, not hidden. The session mirror
+  (`occ.import_shapes` → `synchronize` → `occ.add_rectangle` →
+  `occ.rotate`/`occ.translate`/`occ.copy`) verifies the four cutting
+  planes land at stations `xmin + i·dx/5` with exact Y/Z spans, then
+  `occ.fragment([(3,v)], surfaces)` stops at the OCC-side classified
+  gap `OCC Boolean operands of dimension 2 are not yet supported
+  (volumes only)` — fragmenting a volume BY surfaces is unsupported in
+  both the `.geo` grammar and the OCC boolean engine. Receipt:
+  `GMSH_PARITY_T20_PARTIAL`; gmsh oracle (`gmsh t20.geo -0` prints +
+  `-3` mesh): 4 cutting planes → 6 volumes on the link-rod solid
+  (66 surfaces / 128 curves / 68 points post-fragment), 1543 nodes /
+  9293 elements at `Mesh.MeshSizeMin=Mesh.MeshSizeMax=3`.
+- **t21 — adapted driver retained, verbatim probes added, OK.** The
+  adapted core is unchanged (`t21_builtin.geo` + `generate(2)` +
+  `mesh.partition(3)`: nparts=3, per-entity lists `left=[1,2,3]`
+  `right=[2,3]`, 1006 nodes/1890 tris vs gmsh 1001/1880, area 2.0).
+  Three verbatim/OCC probes now record the literal-tutorial state:
+  `execute_geo("t21.geo")` reaches `BooleanFragments{ Volume{1}; }{
+  Surface{2}; }` and stops at the same Volume-only operand grammar
+  (`got Surface{1}`); `occ.fragment` on two OCC `add_rectangle`
+  surfaces stops at `OCC Boolean operands of dimension 2 are not yet
+  supported`; and `.geo` `PartitionMesh 3;` now executes on the
+  supported built-in route (`geo_partitionmesh=OK nparts=3`).
+  `Plugin(SimplePartition)` runs through `API.plugin`
+  (`NumSlicesX=3` → `nparts=3`); `.geo` `Plugin(...)` actions remain
+  rejected — `execute_geo: Plugin(...) actions are not supported`
+  (GeoExec.jl throws before dispatch). Behind the boolean, the
+  newline-separated `DefineConstant` block in `t21.geo` still emits
+  `syntax error (})`/`Unknown variable` diagnostics. Receipt:
+  `GMSH_PARITY_T21_TUTORIAL_OK` with the four probe lines attached.
+- Registrations: `validation/run_all.jl` tutorial tuple now includes
+  `t13` and `t20`; the corpus comment records their verbatim-first
+  classified-edge structure and the ~10 min STEP/STL fixture cost.
+
 ### Parallel detached Surface mesh generation under `General.NumThreads` (2026-10-19)
 
 Devin landed the first PAR01 mesh-*generation* slice: with
