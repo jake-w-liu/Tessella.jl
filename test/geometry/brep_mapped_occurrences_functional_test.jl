@@ -96,7 +96,11 @@ end
         replace(source,"REPRESENTATION_MAP(#11,#10)"=>"REPRESENTATION_MAP(#11,#908)"),
         replace(source,"#906 = MAPPED_ITEM('translated',#900,#903)"=>"#906 = MAPPED_ITEM('translated',#9999,#903)"),
         replace(source,"AXIS2_PLACEMENT_3D('',#902,#13,#904)"=>"AXIS2_PLACEMENT_3D('',#902,#13,#13)"),
-        replace(source,"CARTESIAN_POINT('',(6.,0.,0.))"=>"CARTESIAN_POINT('',(3.,0.,0.))"),
+        # Moving the rotated occurrence's origin to (4,0,0) places its box
+        # exactly on the translated occurrence — duplicate solids reject.
+        # (Placing it at (3,0,0) is legal: the rotated box lands on x in
+        # [2,3] and shares the x=3 face as a conforming welded contact.)
+        replace(source,"CARTESIAN_POINT('',(6.,0.,0.))"=>"CARTESIAN_POINT('',(4.,0.,0.))"),
         replace(source,"SHAPE_REPRESENTATION('two occurrences',(#906,#907),#345)"=>"SHAPE_REPRESENTATION('two occurrences',(#906,#907),#9999)"),
         variant(source,"#910 = MAPPED_ITEM('unselected',#900,#903);\n"),
         variant(source,"#910 = SHAPE_DEFINITION_REPRESENTATION(#4,#10);\n"),
@@ -109,6 +113,31 @@ end
             @test_throws ArgumentError import_step(path;fill=false)
         end
         @test read(FIXTURE,String)==source
+    end
+end
+
+@testset "touching mapped occurrences weld a shared interface" begin
+    source=read(FIXTURE,String)
+    # The rotated occurrence's origin at (3,0,0) puts its box on x in [2,3]
+    # — a coincident quad-face contact with the translated box on x=3, not
+    # a volume overlap. The assembly certificate welds the shared footprint
+    # into one Surface bound by both Regions, like any other conforming
+    # contact.
+    touching=replace(source,"CARTESIAN_POINT('',(6.,0.,0.))"=>
+        "CARTESIAN_POINT('',(3.,0.,0.))")
+    mktempdir() do dir
+        path=joinpath(dir,"touching.step")
+        write(path,touching)
+        for fill in (false,true)
+            mesh=import_step(path;fill)
+            @test mesh isa E.MixedMesh && Tessella.MeshTypes.validate(mesh).ok
+            @test Set(keys(mesh.entity_data.entities))==
+                Set([(2,1),(3,1),(2,2),(3,2),(2,3)])
+            @test sort(mesh.entity_data.entities[(3,1)].boundaries)==Int32[1,3]
+            @test sort(mesh.entity_data.entities[(3,2)].boundaries)==Int32[2,3]
+            @test occursin("shared boundary",mesh.physical_names[(2,3)])
+            @test allunique(eachcol(mesh.coords))
+        end
     end
 end
 end
