@@ -18,8 +18,10 @@
 # full-P2 family with an exact Bernstein positivity bound — Tri6, Quad9,
 # Tet10, Hex27, Prism18 — while Pyr14 and every uncertified block family
 # keep their nodes fixed.  Curve-owned mids additionally slide along their
-# owning CAD curve in parameter space; face-owned (u,v) sliding remains a
-# gap.  This file translates option state, classification ownership, and
+# owning CAD curve in parameter space and face-owned mids slide in the
+# owning surface's (u,v) parameters — both re-evaluated through the same
+# model evaluators that produced the stored parameters.  This file
+# translates option state, classification ownership, and
 # geometric-support structure into the engine's movable mask, fixed
 # edge/facet sets, and slider descriptors, then commits accepted parameter
 # states back into the plan-local entity_data/classification atomically.
@@ -79,14 +81,16 @@ function _high_order_optimize_movable(mesh::MixedMesh, class)
     return movable
 end
 
-# Curve-owned parametric sliders for `optimize_p2_interior!`: every node with
-# owner dimension 1 and a stored finite `[u]` parameter gets a
+# Parametric sliders for `optimize_p2_interior!`: every node with owner
+# dimension 1 and a stored finite `[u]` parameter gets a
 # `_P2ParametricSupport` whose lift is the same
 # `Model._model_high_order_curve_geometry`/`_model_high_order_curve_point`
 # evaluator that produced the node's coordinates, clamped to the curve's
-# native parameter bounds.  Face-owned `(dim 2, [u,v])` sliding is a separate
-# OPT01 stage and not wired yet — those nodes stay fixed.  Returns
-# `Dict{Int32,_P2ParametricSupport}` or nothing.
+# native parameter bounds; every node with owner dimension 2 and a stored
+# finite `[u,v]` pair gets a support whose lift is `model_value` — the
+# same surface evaluation family `model_parametrization` inverted when the
+# parameter was stored — clamped to `model_parametrization_bounds`.
+# Returns `Dict{Int32,_P2ParametricSupport}` or nothing.
 function _high_order_optimize_sliders(mesh::MixedMesh, class, model, caller)
     (class === nothing || model === nothing) && return nothing
     nn = size(mesh.coords, 2)
@@ -98,33 +102,92 @@ function _high_order_optimize_sliders(mesh::MixedMesh, class, model, caller)
         stored = parameters[v]
         stored === nothing && continue
         owner = entities[v]
-        owner[1] == 1 || continue
-        stored isa Vector{Float64} || continue
-        length(stored) == 1 || continue
-        isfinite(stored[1]) || continue
-        tag = Int(owner[2])
-        curve = try
-            Model._model_high_order_curve_geometry(model, tag, caller)
-        catch err
-            (err isa InterruptException || err isa OutOfMemoryError) &&
-                rethrow()
-            nothing
+        if owner[1] == 1
+            stored isa Vector{Float64} || continue
+            length(stored) == 1 || continue
+            isfinite(stored[1]) || continue
+            tag = Int(owner[2])
+            curve = try
+                Model._model_high_order_curve_geometry(model, tag, caller)
+            catch err
+                (err isa InterruptException || err isa OutOfMemoryError) &&
+                    rethrow()
+                nothing
+            end
+            curve === nothing && continue
+            (isfinite(curve.lower) && isfinite(curve.upper) &&
+             curve.lower <= stored[1] <= curve.upper) || continue
+            support = HighOrder._P2ParametricSupport(
+                stored,                      # shared: replaced, never mutated
+                let geo = curve
+                    u -> begin
+                        p = Model._model_high_order_curve_point(
+                            geo, u[1], caller)
+                        (p[1], p[2], p[3])
+                    end
+                end,
+                Float64[curve.lower], Float64[curve.upper])
+            sliders[Int32(v)] = support
+        elseif owner[1] == 2
+            support = _high_order_optimize_surface_support(
+                model, Int(owner[2]), stored)
+            support === nothing || (sliders[Int32(v)] = support)
         end
-        curve === nothing && continue
-        (isfinite(curve.lower) && isfinite(curve.upper) &&
-         curve.lower <= stored[1] <= curve.upper) || continue
-        support = HighOrder._P2ParametricSupport(
-            stored,                          # shared: replaced, never mutated
-            let geo = curve
-                u -> begin
-                    p = Model._model_high_order_curve_point(geo, u[1], caller)
-                    (p[1], p[2], p[3])
-                end
-            end,
-            Float64[curve.lower], Float64[curve.upper])
-        sliders[Int32(v)] = support
     end
     return isempty(sliders) ? nothing : sliders
+end
+
+# Surface-owned parametric slider: a node classified on a dim-2 entity with
+# a stored finite `[u,v]` parameter inside the face's native parameter
+# bounds gets a `_P2ParametricSupport` whose lift re-evaluates the face
+# through `model_value` — the same evaluator family that produced the
+# stored parameter via `model_parametrization`/`model_closest_point`
+# (OCC analytic and NURBS patch records, built-in ruled surfaces honoring
+# the `Geometry.OldRuledSurface` runtime selector, native plane frames and
+# discrete surfaces).  A face that cannot supply finite bounds — or whose
+# evaluator cannot lift the stored parameter to a finite point — leaves
+# the node fixed; mid-evaluation failures degrade to rejected probes
+# rather than aborting the pass.
+function _high_order_optimize_surface_support(model, tag::Int, stored)
+    stored isa Vector{Float64} || return nothing
+    length(stored) == 2 || return nothing
+    (isfinite(stored[1]) && isfinite(stored[2])) || return nothing
+    bounds = try
+        Model.model_parametrization_bounds(model, 2, tag)
+    catch err
+        (err isa InterruptException || err isa OutOfMemoryError) && rethrow()
+        nothing
+    end
+    bounds === nothing && return nothing
+    lower, upper = bounds
+    (length(lower) == 2 && length(upper) == 2) || return nothing
+    for i in 1:2
+        (isfinite(lower[i]) && isfinite(upper[i]) &&
+         lower[i] <= stored[i] <= upper[i]) || return nothing
+    end
+    lift = let m = model, face = tag
+        function (u)
+            values = try
+                Model.model_value(m, 2, face, u;
+                    old_ruled_surface =
+                        !iszero(OPTIONS["Geometry.OldRuledSurface"]))
+            catch err
+                (err isa InterruptException || err isa OutOfMemoryError) &&
+                    rethrow()
+                return nothing
+            end
+            (length(values) == 3 && all(isfinite, values)) ||
+                return nothing
+            return (values[1], values[2], values[3])
+        end
+    end
+    # The stored parameter must already lift to a finite surface point —
+    # an evaluator that cannot produce one leaves the node fixed.
+    lift(stored) === nothing && return nothing
+    return HighOrder._P2ParametricSupport(
+        stored,                            # shared: replaced, never mutated
+        lift,
+        Float64[lower[1], lower[2]], Float64[upper[1], upper[2]])
 end
 
 # Write accepted slider parameters back into the plan-local stores: the mesh

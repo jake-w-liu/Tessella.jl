@@ -24,6 +24,54 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### OPT01 face-owned (u,v) parametric sliding for Mesh.HighOrderOptimize (2026-10-22, uncommitted in tree)
+
+The remaining OPT01 gap after the elastic stage — dim-2-owned high-order mids
+previously stayed fixed while curve-owned mids already slid along their CAD
+parameter — is now implemented in `src/interfaces/APIHighOrderOptimize.jl`:
+
+- `_high_order_optimize_sliders` gained an `owner[1] == 2` branch dispatching
+  to the new `_high_order_optimize_surface_support`.  A node classified on a
+  dim-2 entity with a stored finite `Vector{Float64}` `[u,v]` inside the
+  face's native bounds gets a `HighOrder._P2ParametricSupport` whose lift is
+  `Model.model_value(m, 2, tag, u; old_ruled_surface=...)` — the same
+  evaluator family that produced the stored parameter via
+  `model_parametrization`/`model_closest_point` (built-in ruled/tric
+  honoring the `Geometry.OldRuledSurface` runtime selector, OCC analytic
+  records, NURBS patches, plane frames, discrete surfaces).
+- Bounds come from `Model.model_parametrization_bounds` — the model's own
+  parameter box, never a hardcoded range.  Non-finite/mismatched parameters,
+  unusable bounds, or a lift that cannot evaluate the stored parameter all
+  leave the node fixed; mid-pass evaluator failures degrade to rejected
+  probes.
+- The stored vector is shared as `support.u` (replaced — never mutated — by
+  the engine on accept), so the existing `slid` detection and
+  `_high_order_optimize_commit_sliders` write accepted parameters back into
+  plan-local `entity_data`/`node_parametric` atomically with coordinates;
+  a rejected pass restores both bit-for-bit.
+- Quality gates unchanged: `_p2_opt_slide!` still requires the exact
+  Bernstein positivity certificate on every incident element plus a strict
+  minimum-scaled-Jacobian improvement before any commit.
+
+Parametrization convention confirmed: `class.node_parametric[v]` for a dim-2
+owner stores the model's *native* surface `(u,v)` — ruled/tric `(u,v)` for
+built-in `Surface`s, OCC face parameters for analytic/tensor records, the
+external NURBS parameterization for patches (the evaluator applies any
+reparameterization internally) — `model_parametrization` is the inverse of
+`model_value`, so `model_value` is the correct shared lift.
+
+Verification (Julia 1.13.1, `--project=.`): `test/meshing/
+highorder_optimize_parametric_test.jl` 87/87 — adds a two-parameter engine
+slider on a curved hyperbolic-paraboloid patch (measurable slide + strict
+quality gain + bitwise on-patch coords + untouched siblings, degenerate-box
+pin, uncertified-block pin, full rollback) and an API case on a non-planar
+transfinite ruled `Surface` (mis-parameterized face-owned interior edge mid
+re-slid by `set_order(2)`: `uv` changed, inside `get_parametrization_bounds`,
+`get_value(2,6,uv)` reproduces published coords, incident min scaled Jacobian
+strictly improved) plus a `=0` bitwise no-op.  `test/meshing/
+highorder_optimize_test.jl` 224/224 unchanged.  Not committed per the
+current request; OPT01 remainder: a truthful Pyr14 bound if one exists.
+
 ### UI01 plugin batch 2: MakeSimplex/ModifyComponents/FieldFromAmplitudePhase/ExtractEdges/Vorticity (2026-10-21, uncommitted in tree)
 
 Five `API.plugin` catalog entries landed in `src/interfaces/APIPlugins.jl`

@@ -1,20 +1,30 @@
-# Mesh.HighOrderOptimize — curve-owned parametric boundary sliding (OPT01).
+# Mesh.HighOrderOptimize — entity-owned parametric boundary sliding (OPT01).
 #
 # Correctness : a Tri6 edge mid owned by a curve entity slides along its
 #               stored [u] parametrization — candidates are re-evaluations of
 #               the owning curve (`_P2ParametricSupport.lift`), never
 #               free-space displacement, so a unit-circle mid keeps rho == 1
-#               bit-for-bit.
+#               bit-for-bit.  A dim-2-owned mid instead slides its stored
+#               [u,v] through the owning surface's own evaluator — a curved
+#               patch lift in the engine fixtures and the built-in ruled
+#               `Surface` `(u,v)` evaluation at the API level — so its
+#               committed coordinates are the surface evaluation at the
+#               committed parameter, bit-for-bit.
 # Acceptance  : a slide commits only when every incident element's exact
 #               Bernstein positivity certificate survives AND the sampled
 #               minimum scaled Jacobian strictly improves; the stored
 #               parameter and the coordinates commit/rollback atomically.
 #               Nodes also referenced by uncertified non-curve blocks, or
-#               owned by dim-2 surface entities, still stay fixed.
+#               whose parameter state or bounds are unusable, still stay
+#               fixed.
 # API         : HighOrderOptimize=1 slides a deliberately mis-parameterized
 #               OCC circle-arc mid back toward the quality optimum on
 #               set_order(2) and writes the accepted parameter back through
-#               get_node; =0 leaves the whole cache bitwise identical.
+#               get_node; a mis-parameterized face-owned mid of a curved
+#               transfinite ruled `Surface` slides in its (u,v) box,
+#               re-publishes through `model.get_value` and lifts the
+#               incident minimum scaled Jacobian; =0 leaves the whole cache
+#               bitwise identical.
 
 using Test
 using LinearAlgebra: norm, cross
@@ -305,6 +315,270 @@ end
         finally
             api.option("Mesh.MeshSizeMax", 1e22)
             api.finalize()
+        end
+    end
+end
+
+# ── curved-surface (u,v) fixture: a hyperbolic-paraboloid sheet ────────────
+# S(u,v) = (u, v, 0.4 u v) is non-planar, so a parameter-space move is a
+# genuinely curved re-evaluation, not a planar displacement.  Two Tri6s tile
+# the (u,v) unit square: corners A=S(0,0), B=S(1,0), C=S(1,1), D=S(0,1) —
+# and the shared interior edge A–C carries the slider mid at `uv0`.
+_slide_patch(uv) = (uv[1], uv[2], 0.4 * uv[1] * uv[2])
+function _slide_patch_tris(uv0)
+    S = _slide_patch
+    # A, B, C, D, mAB, mBC, mAC, mCD, mDA
+    pts = (S([0.0, 0.0]), S([1.0, 0.0]), S([1.0, 1.0]), S([0.0, 1.0]),
+           S([0.5, 0.0]), S([1.0, 0.5]), S(uv0), S([0.5, 1.0]), S([0.0, 0.5]))
+    coords = zeros(3, 9)
+    for (k, p) in enumerate(pts)
+        coords[:, k] .= p
+    end
+    tri6 = Int32[1 1;
+                 2 3;
+                 3 4;
+                 5 7;
+                 6 8;
+                 7 9]
+    return coords, tri6, Int32(7)
+end
+_slide_patch_support(uv0; lo = (0.0, 0.0), hi = (1.0, 1.0)) =
+    HighOrder._P2ParametricSupport(Float64[uv0[1], uv0[2]],
+                                   uv -> _slide_patch(uv),
+                                   Float64[lo[1], lo[2]],
+                                   Float64[hi[1], hi[2]])
+
+@testset "HighOrderOptimize surface (u,v) parametric sliding (engine)" begin
+    @testset "off-center patch mid slides in (u,v) and improves quality" begin
+        uv0 = Float64[0.62, 0.38]
+        coords, tri6, mid = _slide_patch_tris(uv0)
+        before = copy(coords)
+        jac0 = _slide_tri_min(coords, tri6)
+        @test jac0 > 0                              # certified start
+        support = _slide_patch_support(uv0)
+        sliders = Dict{Int32,HighOrder._P2ParametricSupport}(mid => support)
+        # Every node masked off — only the slider descriptor admits a move.
+        moved = optimize_p2_interior!(coords, ((Int32(9), tri6),),
+                                      falses(size(coords, 2));
+                                      sliders = sliders,
+                                      itermax = 60, passes = 10)
+        @test moved[1] >= 1
+        @test support.u != uv0                      # (u,v) state advanced
+        # The committed coordinates are the surface evaluation at the
+        # accepted parameter — the node stays exactly on the patch.
+        @test coords[:, mid] == collect(_slide_patch(support.u))
+        @test all(0.0 .<= support.u .<= 1.0)        # bounds box respected
+        @test _slide_tri_min(coords, tri6) > jac0   # strict improvement
+        for t in axes(tri6, 2)
+            @test HighOrder._p2opt_certify(Val(9), coords, tri6, t)
+        end
+        for v in axes(coords, 2)
+            v == Int(mid) && continue
+            @test coords[:, v] == before[:, v]      # untouched bitwise
+        end
+    end
+
+    @testset "degenerate (u,v) bounds pin the node bitwise" begin
+        uv0 = Float64[0.40, 0.60]
+        coords, tri6, mid = _slide_patch_tris(uv0)
+        before = copy(coords)
+        support = _slide_patch_support(uv0; lo = (uv0[1], uv0[2]),
+                                       hi = (uv0[1], uv0[2]))
+        sliders = Dict{Int32,HighOrder._P2ParametricSupport}(mid => support)
+        moved = optimize_p2_interior!(coords, ((Int32(9), tri6),),
+                                      falses(size(coords, 2));
+                                      sliders = sliders,
+                                      itermax = 60, passes = 10)
+        @test moved[1] == 0
+        @test coords == before
+        @test support.u == uv0
+    end
+
+    @testset "uncertified 2-D block sharing the node keeps it fixed" begin
+        # A plain Tri3 (no Bernstein certificate) referencing the mid turns
+        # it into a cross-support node — sliding it would be uncertifiable.
+        uv0 = Float64[0.62, 0.38]
+        coords, tri6, mid = _slide_patch_tris(uv0)
+        tri3 = reshape(Int32[1, 2, mid], 3, 1)
+        before = copy(coords)
+        support = _slide_patch_support(uv0)
+        sliders = Dict{Int32,HighOrder._P2ParametricSupport}(mid => support)
+        moved = optimize_p2_interior!(coords,
+                                      ((Int32(9), tri6), (Int32(2), tri3)),
+                                      falses(size(coords, 2));
+                                      sliders = sliders,
+                                      itermax = 60, passes = 10)
+        @test moved[1] == 0
+        @test coords == before
+        @test support.u == uv0
+    end
+
+    @testset "rejected candidates leave (u,v) and coordinates bit-for-bit" begin
+        # Bounds box clamped to the starting neighbourhood: every probe
+        # either leaves the box or produces no strict improvement — whatever
+        # the optimizer tries, a rejected pass restores both stores exactly.
+        uv0 = Float64[0.55, 0.45]
+        coords, tri6, mid = _slide_patch_tris(uv0)
+        before = copy(coords)
+        support = _slide_patch_support(uv0; lo = (uv0[1], uv0[2]),
+                                       hi = (uv0[1], uv0[2]))
+        moved = optimize_p2_interior!(coords, ((Int32(9), tri6),),
+                                      falses(size(coords, 2));
+                                      sliders = Dict(mid => support),
+                                      itermax = 60, passes = 10)
+        @test moved[1] == 0
+        @test coords == before
+        @test support.u == uv0
+    end
+end
+
+# The `.geo` source shared by the surface API fixtures: two quarter arcs of
+# different radius at z=0 and z=1 joined by straight rails — a non-planar
+# ruled `Surface` whose transfinite mesh carries native (u,v) parameters in
+# the unit box.
+const _SLIDE_RULER_GEO = """
+lc = 0.5;
+Point(1) = {1, 0, 0, lc};
+Point(2) = {0, 1, 0, lc};
+Point(3) = {0.5, 0, 1, lc};
+Point(4) = {0, 0.5, 1, lc};
+Point(5) = {0, 0, 0};
+Point(6) = {0, 0, 1};
+Circle(1) = {1, 5, 2};
+Line(2) = {2, 4};
+Circle(3) = {4, 6, 3};
+Line(4) = {3, 1};
+Curve Loop(5) = {1, 2, 3, 4};
+Surface(6) = {5};
+Transfinite Curve {:} = 3;
+Transfinite Surface {6};
+"""
+
+# (element tag, node tags) pairs of the Tri6 cells on `surface` that
+# reference `node` — used to compare the incident minimum scaled Jacobian
+# before and after the slide.
+function _slide_incident_tri6(api, surface, node)
+    types, etags, enodes = api.mesh.get_elements(2, surface)
+    out = Tuple{UInt64,Vector{UInt64}}[]
+    for (ti, ty) in enumerate(types)
+        ty == 9 || continue
+        flat = enodes[ti]
+        for j in 1:length(flat)÷6
+            cell = flat[6*(j-1)+1:6j]
+            node in cell && push!(out, (etags[ti][j], cell))
+        end
+    end
+    return out
+end
+function _slide_incident_min(api, cells)
+    tags, flat, _ = api.mesh.get_nodes()
+    coords = reshape(flat, 3, :)
+    idx = Dict{UInt64,Int}(t => i for (i, t) in enumerate(tags))
+    tri6 = zeros(Int, 6, length(cells))
+    for (k, (_, cell)) in enumerate(cells), s in 1:6
+        tri6[s, k] = idx[cell[s]]
+    end
+    return _slide_tri_min(coords, tri6)
+end
+
+@testset "HighOrderOptimize surface (u,v) sliding (API)" begin
+    @testset "ruled transfinite face mid slides in surface parameters" begin
+        api = API
+        mktempdir() do geodir
+            path = joinpath(geodir, "ruled.geo")
+            write(path, _SLIDE_RULER_GEO)
+            api.initialize()
+            try
+                api.option("Mesh.HighOrderOptimize", 1)
+                api.open_geo!(path)
+                api.mesh.generate(2)
+                api.mesh.set_order(2)
+
+                # Locate a face-owned interior edge mid: a Tri6 mid-slot
+                # node classified on Surface 6 with a stored (u,v) pair and
+                # two incident surface elements.
+                target = nothing
+                types, etags, enodes = api.mesh.get_elements(2, 6)
+                for (ti, ty) in enumerate(types)
+                    ty == 9 || continue
+                    flat = enodes[ti]
+                    for j in 1:length(flat)÷6, slot in 4:6
+                        t = flat[6*(j-1)+slot]
+                        _, uv, dim, owner = api.mesh.get_node(t)
+                        dim == 2 && owner == 6 && length(uv) == 2 &&
+                            length(_slide_incident_tri6(api, 6, t)) == 2 ||
+                            continue
+                        target = t
+                        break
+                    end
+                    target === nothing || break
+                end
+                @test target !== nothing
+                tag = target::UInt64
+                p0, uv0, dim0, own0 = api.mesh.get_node(tag)
+                @test dim0 == 2 && own0 == 6 && length(uv0) == 2
+                q0 = api.model.get_value(2, 6, uv0)
+                @test p0 == q0            # stored coords are the evaluation
+
+                cells = _slide_incident_tri6(api, 6, tag)
+                @test length(cells) == 2
+
+                lo, hi = api.model.get_parametrization_bounds(2, 6)
+                span = hi .- lo
+                @test all(span .> 0)
+                # Deliberately mis-parameterize 6% of the u-range toward the
+                # farther bound — coordinates re-evaluated through the same
+                # public surface evaluator so the point stays on the face.
+                uv_bad = copy(uv0)
+                uv_bad[1] += uv_bad[1] - lo[1] < hi[1] - uv_bad[1] ?
+                    0.06 * span[1] : -0.06 * span[1]
+                q_bad = api.model.get_value(2, 6, uv_bad)
+                api.mesh.set_node(tag, q_bad, uv_bad)
+                p1v, uv1, dim1, own1 = api.mesh.get_node(tag)
+                @test uv1 == uv_bad
+                @test p1v == q_bad
+                q_distorted = _slide_incident_min(api, cells)
+
+                # Re-running set_order(2) re-plans through the optimizer:
+                # the mid slides inside the (u,v) box and the incident
+                # minimum scaled Jacobian must recover strictly.
+                api.mesh.set_order(2)
+                p2v, uv2, dim2, own2 = api.mesh.get_node(tag)
+                @test dim2 == 2 && own2 == 6
+                @test length(uv2) == 2
+                @test uv2 != uv_bad                    # measurably relocated
+                @test all(lo .<= uv2 .<= hi)           # native (u,v) box
+                q_new = api.model.get_value(2, 6, uv2)
+                # Point-on-surface consistency: the committed coordinates
+                # are the face evaluation at the committed parameter.
+                @test p2v ≈ q_new atol = 1e-12
+                @test _slide_incident_min(api, cells) > q_distorted
+            finally
+                api.option("Mesh.HighOrderOptimize", 0)
+                api.finalize()
+            end
+        end
+    end
+
+    @testset "ruled transfinite face with =0 leaves nodes bitwise identical" begin
+        api = API
+        mktempdir() do geodir
+            path = joinpath(geodir, "ruled.geo")
+            write(path, _SLIDE_RULER_GEO)
+            api.initialize()
+            try
+                @test api.option("Mesh.HighOrderOptimize") == 0
+                api.open_geo!(path)
+                api.mesh.generate(2)
+                api.mesh.set_order(2)
+                tags, coords_f, _ = api.mesh.get_nodes()
+                snapshot = copy(coords_f)
+                api.mesh.set_order(2)
+                _, coords_f2, _ = api.mesh.get_nodes()
+                @test coords_f2 == snapshot
+            finally
+                api.finalize()
+            end
         end
     end
 end
