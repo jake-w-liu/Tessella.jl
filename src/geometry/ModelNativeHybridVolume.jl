@@ -201,18 +201,19 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
         _model_native_hybrid_constraints_segments(constructor,plan.node_uids,caller))
     kernel_segments=NTuple{2,Int32}[ntuple(slot->Int32(inverse[edge[slot]]),2) for edge in curve_segments]
     sheet=_model_native_hybrid_surface_constraints(constructor,plan.node_uids,caller)
-    kernel_facets=NTuple{3,Int32}[ntuple(slot->Int32(inverse[face[slot]]),3) for face in sheet.facets]
-    protected_edges=Set(minmax(edge...) for edge in vcat(curve_segments,sheet.edges))
-    protected_faces=Set(Tuple(sort!(collect(face))) for face in sheet.facets)
+    csheet=_model_native_hybrid_constraints_facets(constructor,plan.node_uids,caller)
+    all_facets=vcat(sheet.facets,csheet.facets)
+    kernel_facets=NTuple{3,Int32}[ntuple(slot->Int32(inverse[face[slot]]),3) for face in all_facets]
+    protected_edges=Set(minmax(edge...) for edge in vcat(curve_segments,sheet.edges,csheet.edges))
+    protected_faces=Set(Tuple(sort!(collect(face))) for face in all_facets)
     interior=ModelNativeHybridInterior.recover(kernel[],facets;embedded_segments=kernel_segments,
         embedded_facets=kernel_facets)
     tets=reduce(hcat,Int32[order[row] for row in cell] for cell in interior.cells)
     mesh=Mesh(plan.coordinates;tets=tets)
     _model_native_volume_cell_births!(work,mesh)
-    triangles=_model_native_hybrid_global_triangles(m,constructor.input,caller;
-        embedded_surface=constructor.embedded_surface)
-    seeds=_model_native_hybrid_global_size_seeds(m,constructor.input,caller;
-        embedded_surface=constructor.embedded_surface)
+    surface_witnesses=_model_native_hybrid_surface_witnesses(constructor)
+    triangles=_model_native_hybrid_global_triangles(m,constructor.input,caller;surface_witnesses)
+    seeds=_model_native_hybrid_global_size_seeds(m,constructor.input,caller;surface_witnesses)
     insertion=ModelNativeHybridInsertion.refine(mesh,work.node_tags,work.element_tags,
         triangles,_ModelAlgorithmBackgroundSize(m,3,tag,options,size_field,caller),caller;
         minimize=_resolved_extend_from_boundary(m,3,tag)==2,
@@ -233,10 +234,12 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
     work.node_tags=copy(insertion.node_numbers);work.node_high_water=insertion.node_high_water
     work.element_high_water=pyramids.element_high_water
     final_sheet=_model_native_hybrid_surface_constraints(constructor,work.node_tags,caller)
+    final_csheet=_model_native_hybrid_constraints_facets(constructor,work.node_tags,caller)
     final_edges=vcat(_model_native_hybrid_curve_segments(constructor,work.node_tags,caller),
-        _model_native_hybrid_constraints_segments(constructor,work.node_tags,caller),final_sheet.edges)
+        _model_native_hybrid_constraints_segments(constructor,work.node_tags,caller),
+        final_sheet.edges,final_csheet.edges)
     mesh=_model_native_optimize_volume(relocated,options,work,constructor.input,
-        final_sheet.facets,final_edges,caller)
+        vcat(final_sheet.facets,final_csheet.facets),final_edges,caller)
     blocks=ElementBlock[ElementBlock(4,copy(mesh.tets)),ElementBlock(7,pyramids.nodes)]
     mixed=MixedMesh(mesh.coords,blocks)
     optimize_pyramids<0.0 && _model_native_hybrid_normal_apex_fixed_certificate(
@@ -282,17 +285,17 @@ function _model_native_hybrid_volume_scope(m,tag,constructor,caller)
     length(m.volumes)==1 && haskey(m.volumes,tag) || throw(ArgumentError(
         "$caller: native hybrid multi-Region constructor history is not implemented"))
     _model_native_hybrid_global_triangles(m,constructor.input,caller;
-        embedded_surface=constructor.embedded_surface)
+        surface_witnesses=_model_native_hybrid_surface_witnesses(constructor))
     return nothing
 end
 
 # Sizing sees every current GFace Tri constructor, including a declared
 # unrelated Face sharing one selected UID. Its foreign rows contribute edge
 # lengths without entering the Region's actual Source or boundary registry.
-function _model_native_hybrid_global_triangles(m,input,caller;embedded_surface=nothing)
+function _model_native_hybrid_global_triangles(m,input,caller;surface_witnesses=())
     input isa _ModelMeshAuthority && input.mesh!==nothing && input.mesh.entity_data!==nothing ||
         throw(ArgumentError("$caller: global hybrid sizing lacks current actual lower authority"))
-    _model_native_hybrid_global_size_seeds(m,input,caller;embedded_surface)
+    _model_native_hybrid_global_size_seeds(m,input,caller;surface_witnesses)
     triangles=NamedTuple[];seen=Set{UInt64}()
     for owner in sort!(collect(keys(input.products)))
         owner[1]==2 || continue

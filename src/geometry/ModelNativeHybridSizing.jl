@@ -2,12 +2,12 @@ struct _ModelNativeHybridSizeSeeds
     model::GeoModel
     input::_ModelMeshAuthority
     records::Vector{NamedTuple}
-    embedded_surface::Any
+    surfaces::Tuple
 end
 _ModelNativeHybridSizeSeeds(model,input,records)=
-    _ModelNativeHybridSizeSeeds(model,input,records,nothing)
+    _ModelNativeHybridSizeSeeds(model,input,records,())
 
-function _model_native_hybrid_global_size_seeds(m,input,caller;embedded_surface=nothing)
+function _model_native_hybrid_global_size_seeds(m,input,caller;surface_witnesses=())
     input isa _ModelMeshAuthority && input.mesh!==nothing && input.mesh.entity_data!==nothing ||
         throw(ArgumentError("$caller: hybrid embedded sizing lacks actual current lower authority"))
     all(owner->owner[1]!=3 || haskey(m.volumes,owner[2]),keys(m.embeds)) || throw(ArgumentError(
@@ -43,10 +43,12 @@ function _model_native_hybrid_global_size_seeds(m,input,caller;embedded_surface=
     entities=Set{Tuple{Int,Int}}()
     for region in sort!(collect(keys(m.volumes))),entity in get(m.embeds,(3,region),NTuple{2,Int}[])
         if entity[1]==2
-            embedded_surface!==nothing && embedded_surface.model===m &&
-                embedded_surface.region==region && embedded_surface.surface==entity[2] ||
-                throw(ArgumentError(
+            witnesses=_ModelNativeHybridEmbeddedSurfaceInput[witness for witness in surface_witnesses
+                if witness isa _ModelNativeHybridEmbeddedSurfaceInput && witness.model===m &&
+                    witness.region==region && witness.surface==entity[2]]
+            length(witnesses)==1 || throw(ArgumentError(
                 "$caller: hybrid embedded Face recovery requires a separate native constructor receipt"))
+            embedded_surface=only(witnesses)
             _model_native_hybrid_surface_source_certificate(embedded_surface,input,
                 data.external_node_tags,actual.coords,caller)
             positions=Dict(uid=>row for (row,uid) in enumerate(data.external_node_tags))
@@ -126,14 +128,14 @@ function _model_native_hybrid_global_size_seeds(m,input,caller;embedded_surface=
             count>0 || throw(ArgumentError("$caller: hybrid embedded Curve has no current Line constructor"))
         end
     end
-    return _ModelNativeHybridSizeSeeds(m,input,records,embedded_surface)
+    return _ModelNativeHybridSizeSeeds(m,input,records,Tuple(collect(surface_witnesses)))
 end
 
 function _model_native_hybrid_seed_records(receipt)
     receipt isa _ModelNativeHybridSizeSeeds || throw(ArgumentError(
         "hybrid embedded sizing: missing operation-owned lower seed receipt"))
     current=_model_native_hybrid_global_size_seeds(receipt.model,receipt.input,"hybrid embedded sizing";
-        embedded_surface=receipt.embedded_surface)
+        surface_witnesses=receipt.surfaces)
     isequal(current.records,receipt.records) || throw(ArgumentError(
         "hybrid embedded sizing: current lower UID/cell/XYZ/UV or prescribed size changed"))
     return receipt.records

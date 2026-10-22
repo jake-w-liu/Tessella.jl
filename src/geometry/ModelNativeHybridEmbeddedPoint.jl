@@ -8,17 +8,18 @@ struct _ModelNativeHybridEmbeddedPointInput
     inventory::Vector{NTuple{2,Int}}
 end
 
-function _model_native_hybrid_embedded_point_input(m,region,input,caller;point=nothing)
+function _model_native_hybrid_embedded_point_input(m,region,input,caller;point=nothing,
+                                                    surface_witnesses=())
     embeds=copy(get(m.embeds,(3,region),NTuple{2,Int}[]))
     if point===nothing
         # The original single-entity route remains separate.
         length(m.volumes)==1 && length(embeds)==1 && only(embeds)[1]==0 || return nothing
         point=only(embeds)[2]
     else
-        length(m.volumes)==1 && (0,point) in embeds && all(owner->owner[1] in (0,1),embeds) ||
+        length(m.volumes)==1 && (0,point) in embeds && all(owner->owner[1] in (0,1,2),embeds) ||
             throw(ArgumentError("$caller: selected embedded Point lacks its actual Region declaration"))
     end
-    seeds=_model_native_hybrid_global_size_seeds(m,input,caller)
+    seeds=_model_native_hybrid_global_size_seeds(m,input,caller;surface_witnesses)
     records=[record for record in seeds.records if record.owner==(0,point)]
     length(records)==1 || throw(ArgumentError(
         "$caller: embedded Point lacks its unique actual Point-cell witness"))
@@ -29,7 +30,7 @@ function _model_native_hybrid_point_source_certificate(witness,input,uids,coordi
     witness===nothing && return nothing
     witness isa _ModelNativeHybridEmbeddedPointInput && witness.input===input &&
         get(witness.model.embeds,(3,witness.region),NTuple{2,Int}[])==witness.inventory &&
-        witness.record.owner in witness.inventory && all(owner->owner[1] in (0,1),witness.inventory) ||
+        witness.record.owner in witness.inventory && all(owner->owner[1] in (0,1,2),witness.inventory) ||
         throw(ArgumentError("$caller: embedded Point has a foreign or changed constructor"))
     record=witness.record
     record in _model_native_hybrid_seed_records(witness.seeds) &&

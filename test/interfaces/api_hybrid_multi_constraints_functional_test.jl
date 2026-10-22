@@ -155,6 +155,88 @@ end
     end
 end
 
+@testset "mixed Surface, Curve and Point constraints share one Region inventory" begin
+    A.initialize()
+    try
+        A.option("General.Terminal",0)
+        A.option("Mesh.OptimizePyramids",-0.1)
+        cube()
+        # A low triangle sheet clears the embedded curve/point geometry and the
+        # inward pyramid bumps: the constraint inventory mixes dims 0, 1 and 2.
+        for (tag,p) in zip(301:303,((0.15,0.15,0.2),(0.45,0.15,0.2),(0.3,0.45,0.2)))
+            A.model.add_point(p...;tag,meshSize=1.)
+        end
+        for (tag,pair) in zip(301:303,((301,302),(302,303),(303,301)))
+            A.model.add_line(pair...;tag)
+            A.mesh.set_transfinite_curve(tag,2)
+        end
+        A.model.add_curve_loop([301,302,303];tag=301)
+        A.model.add_plane_surface([301];tag=301)
+        A.mesh.set_transfinite_surface(301)
+        A.mesh.embed(2,[301],3,1)
+        @test Set(A.mesh.get_embedded(3,1))==Set(((0,105),(0,106),(1,101),(1,201),(2,301)))
+        A.mesh.generate(2)
+        owners=vcat([(0,tag) for tag in 101:106],[(1,101),(1,201)],
+                    [(0,tag) for tag in 301:303],[(1,tag) for tag in 301:303],[(2,301)])
+        lower=Dict(owner=>cell_records(owner...) for owner in owners)
+        source=Dict(owner=>A.mesh.get_nodes(owner...)[1:2] for owner in owners)
+        @test length(lower[(2,301)])==1 && first(only(values(lower[(2,301)])))==2
+        A.option("Mesh.MeshOnlyEmpty",1)
+        A.mesh.generate(3)
+        for (owner,records) in lower
+            after=cell_records(owner...)
+            @test Set(keys(after))==Set(keys(records))
+            @test sort(collect(values(after)))==sort(collect(values(records)))
+        end
+        @test all(A.mesh.get_nodes(owner...)[1:2]==records for (owner,records) in source)
+        kinds,labels,vertices=A.mesh.get_elements(3,1)
+        @test Set(kinds)==Set(Int32[4,7])
+        cells=Dict(Int(kind)=>reshape(nodes,E.msh_num_nodes(kind),length(ids))
+                   for (kind,ids,nodes) in zip(kinds,labels,vertices))
+        # The sheet's literal facet is a two-sided interior Tet face; its three
+        # edges and both embedded segments keep closed cyclic edge links.
+        face=last(only(values(lower[(2,301)])))
+        incidence=Dict{Tuple,Int}()
+        for (kind,nodes) in cells
+            faces=kind==4 ? ((1,2,3),(1,2,4),(1,3,4),(2,3,4)) :
+                ((1,2,3,4),(1,2,5),(2,3,5),(3,4,5),(4,1,5))
+            for cell in eachcol(nodes),roles in faces
+                key=Tuple(sort(cell[collect(roles)]))
+                incidence[key]=get(incidence,key,0)+1
+            end
+        end
+        @test incidence[Tuple(sort(collect(face)))]==2
+        @test all(count->count in (1,2),values(incidence))
+        sheet_edges=[minmax(face[i],face[mod1(i+1,3)]) for i in 1:3]
+        @test all(edge->closed_edge_link(cells[4],collect(edge)),sheet_edges)
+        @test all(closed_edge_link(cells[4],last(record))
+                  for tag in (101,201,301,302,303)
+                  for record in values(lower[(1,tag)]))
+        constraints=Set(vcat(first(A.mesh.get_nodes(0,105)),first(A.mesh.get_nodes(0,106)),
+                            [uid for owner in ((1,101),(1,201),(2,301))
+                             for (_,nodes) in values(lower[owner]) for uid in nodes]))
+        @test all(isdisjoint(constraints,f) for (f,count) in incidence if count==1)
+        ids,xyz,_=A.mesh.get_nodes()
+        positions=Dict(uid=>xyz[3row-2:3row] for (row,uid) in enumerate(ids))
+        tet_volume(nodes)=begin
+            a,b,c,d=(positions[uid] for uid in nodes)
+            det(hcat(b-a,c-a,d-a))/6
+        end
+        vols=[tet_volume(cell) for cell in eachcol(cells[4])]
+        append!(vols,[tet_volume(cell[[1,2,3,5]])+tet_volume(cell[[1,3,4,5]])
+                      for cell in eachcol(cells[7])])
+        @test all(>(0),vols)
+        @test sum(vols)≈1.0 atol=2e-10
+        quads=Set(Tuple(sort(only(last(A.mesh.get_elements(2,surface))))) for surface in 1:6)
+        @test Set(panel for (panel,count) in incidence if count==1)==quads
+        @test Tessella.validate(A.mesh.get()).ok
+        println("HYBRID_MIXED_SHEET_INVENTORY Point=2 Curve=2 Surface=1 Tet4=",
+                size(cells[4],2)," volume=",sum(vols));flush(stdout)
+    finally
+        A.finalize()
+    end
+end
+
 @testset "incomplete or outside multi-entity constraints reject atomically" begin
     for failure in (:outside_point,:boundary_curve,:missing_point,:missing_line)
         A.initialize()
