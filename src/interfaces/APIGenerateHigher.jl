@@ -593,15 +593,14 @@ function _higher_analytic_boundary_surfaces(m,dimension,caller)
                   Model._extrude_gate(m,3,volume)===nothing)
         for signed in Model._model_volume_boundary_surfaces(m,volume,caller)
             surface=abs(signed)
-            # An explicit shell's OCC-curved faces likewise mesh inside the
-            # Volume producer (`_model_volume_surface_mesh`) — the standalone
-            # Surface path only admits plane/ruled/tric geometry.  Faces that
-            # carry Layers/extrusion parameters are the exception: their
-            # remesh production supplies the retained vertex storage and
-            # must stay in the ordinary surface flow.
-            (implicit || (Model._model_occ_curved_surface(m,surface) &&
-                          Model._extrude_gate(m,2,surface)===nothing)) &&
-                push!(skipped,surface)
+            # Analytic primitive Volume producers retain their established
+            # boundary encoding. An explicit shell's faces — including
+            # OCC-curved tensor/lofted faces, whose standalone production
+            # now carries full provenance — mesh as ordinary Surface
+            # products upstream of the Region, matching upstream
+            # meshGFace-before-meshGRegion so the volume PLC consumes real
+            # boundary vertex bindings instead of a coordinate-only re-mesh.
+            implicit && push!(skipped,surface)
         end
     end
     return skipped
