@@ -4400,6 +4400,22 @@ field_value(field::BoundaryLayerField,x,y,z,entity::Tuple{T,U}) where
 
 # ── Automatic mesh size from discrete curvature ───────────────────────────────
 
+# The automatic-size octree: a dyadic cube tree over the padded surface
+# bounding box. Every leaf carries one size — the smallest size prescribed by
+# the surface triangles that touch it, or `hbulk` where no triangle reaches —
+# so evaluation is the containing leaf's stored value, mirroring upstream's
+# "size at the center of the cells" octree storage. Child slots are indexed
+# `1 + xbit + 2·ybit + 4·zbit` where each bit selects the upper half of the
+# parent's box along that axis.
+struct _AutoOctree
+    lo::NTuple{3,Float64}                # root box min corner
+    edge::Float64                        # root edge (the padded span)
+    child::Vector{NTuple{8,Int32}}       # zero slots ⇒ leaf
+    nodelo::Vector{NTuple{3,Float64}}    # node box min corner
+    level::Vector{Int32}                 # root = 0
+    size::Vector{Float64}                # leaf-local stored size
+end
+
 """
     AutomaticMeshSizeField(surface; n_nodes_per_circle=20, hmin, hmax)
     AutomaticMeshSizeField(surfaces; n_nodes_per_circle=20, n_points_per_gap=0,
@@ -4407,14 +4423,15 @@ field_value(field::BoundaryLayerField,x,y,z,entity::Tuple{T,U}) where
                            features=true)
 
 Native analogue of Gmsh `AutomaticMeshSizeField` over one or more
-triangulated surfaces: per-vertex sphere-fit curvature `κ` yields
-`h = clamp(2π /(n κ), hmin, hmax)` — the upstream `2π/(nodePerTwoPi·kmax)`
-rule. Each input mesh keeps its own vertex set, so curvature rings never
-bleed across crease boundaries. `n_nodes_per_circle = 0` disables the
-curvature stage, matching upstream's `nodePerTwoPi > 0` gate.
+triangulated surfaces. Surface vertices carry prescribed sizes: per-vertex
+sphere-fit curvature `κ` yields `h = clamp(2π /(n κ), hmin, hmax)` — the
+upstream `2π/(nodePerTwoPi·kmax)` rule — and `n_nodes_per_circle = 0`
+disables the curvature stage, matching upstream's `nodePerTwoPi > 0` gate.
+Each input mesh keeps its own vertex set, so curvature rings never bleed
+across crease boundaries.
 
 On a vector/tuple of surfaces the union additionally applies the remaining
-pipeline stages of Gmsh's HXT field as discrete analogues:
+prescription stages of Gmsh's HXT field as discrete analogues:
 
 - `features && n_points_per_gap > 0` — local feature size between
   non-incident triangles whose closest point lies within 60° of the
@@ -4426,44 +4443,41 @@ pipeline stages of Gmsh's HXT field as discrete analogues:
   one (default `1.3·span/20`, the size upstream assigns to octree cells
   that never touched the surface).
 - `smoothing && gradation > 0` — relaxation so sizes grow by at most
-  `max(0, gradation−1)` per unit of distance. Upstream applies that
-  additive bound between every pair of face-adjacent octree cells
-  (`limitSize`); the analogue applies it along union edges first.
+  `max(0, gradation−1)` per unit of distance, applied along union edges
+  before the sizes are stored (the surface-edge part of upstream's
+  gradation model).
 
-Evaluation reproduces the volumetric part of the same model instead of
-nearest-vertex lookup: octree cells that do not touch the surface are
-initialised at `hbulk` and can only decrease through the slope-limited
-relaxation, so
+The sizes are stored on an adaptive octree over the `1.3·span` cube centred
+on the surface bounding box — the analogue of upstream's p4est/HXT map,
+which keeps one size "at the center of the cells". A leaf intersected by
+surface triangles refines while its edge exceeds the smallest prescribed
+size of the triangles touching it, then stores that minimum; leaves the
+surface never reaches keep `hbulk`. The tree is 2:1 face-balanced, and
+`smoothing` applies the volumetric gradation — the upstream `limitSize`
+analogue, `h[q] = min(h[q], h[p] + (gradation−1)·|c_p − c_q|)` over
+face-adjacent leaf pairs, solved as a multi-source shortest path so the
+result is order-independent.
 
-    h(p) = clamp( min( cap, min_v( h[v] + slope·|p−v| ) ), hmin, hmax )
-
-where `cap` is `hbulk` in the interior and releases to `hmax` within
-roughly one local cell (`min(h[v*], hbulk)`) of a sample — the band of
-octree cells that touch the surface and may legitimately keep sizes above
-`hbulk` when `hmax > hbulk`. With `smoothing=false` no relaxation runs
-upstream either, so the same cap is applied to the nearest sample's value
-instead of the slope extension.
+Evaluation is cell-local, like upstream: `field_value` descends to the
+leaf containing the query (out-of-domain points clamp onto the boundary
+leaf) and returns its stored size clamped to `[hmin, hmax]` — piecewise
+constant across the domain, not a continuous extension of the vertex
+samples.
 
 Default sizes follow upstream's resolution order: the model scale is the
-largest surface bounding-box span padded by 1.3 (the octree domain is
-built at `1.3·bbox`), `hmin` defaults to `L/1000`, `hbulk` to `L/20`, and
-an unset `hmax` follows `hbulk` — so an explicit `hBulk` above `span/20`
-is not silently clamped away.
-
-Gmsh's own implementation stores the result in a p4est octree; Tessella
-keeps the point-sample discrete analogue and does not claim
-octree-identical output.
+largest surface bounding-box span padded by 1.3, `hmin` defaults to
+`L/1000`, `hbulk` to `L/20`, and an unset `hmax` follows `hbulk` — so an
+explicit `hBulk` above `span/20` is not silently clamped away.
 """
 struct AutomaticMeshSizeField <: AbstractSizeField
     coords::Matrix{Float64}
     h::Vector{Float64}
-    tree::DistanceField
-    node_hmin::Vector{Float64}   # per-BVH-node min of h — extension bound
+    octree::_AutoOctree          # cell-local stored sizes
     slope::Float64               # max(0, gradation−1)
     hbulk::Float64
     hmin::Float64
     hmax::Float64
-    extend::Bool                 # smoothing enabled → spatial extension
+    extend::Bool                 # smoothing enabled → cell-graph gradation
 end
 function AutomaticMeshSizeField(surface::Mesh;kwargs...)
     return AutomaticMeshSizeField((surface,);kwargs...)
@@ -4570,15 +4584,15 @@ function AutomaticMeshSizeField(surfaces::Tuple;
         isfinite(h[i]) && h[i]>0 || throw(ArgumentError(
             "$caller: non-positive size at vertex $i"))
     end
-    smoothing && _auto_smooth_sizes!(h,coords,tris,max(0.0,g-1.0))
-    points=[(coords[1,j],coords[2,j],coords[3,j]) for j in axes(coords,2)]
-    tree=DistanceField(;points=points)
-    # Per-BVH-node min of the prescribed sizes — the lower bound used to prune
-    # the spatial extension search in `field_value`.
-    node_hmin=Vector{Float64}(undef,length(tree.bvh_lo))
-    _auto_node_hmin!(node_hmin,tree,1,h)
-    return AutomaticMeshSizeField(coords,h,tree,node_hmin,
-        max(0.0,g-1.0),hb,hn,hx,smoothing)
+    slope=max(0.0,g-1.0)
+    smoothing && _auto_smooth_sizes!(h,coords,tris,slope)
+    # The octree domain is the `1.3·span` cube centred on the surface bounding
+    # box — upstream builds the tree over `1.3·bbox`.
+    half=padded_length/2
+    center=((xmin+xmax)/2,(ymin+ymax)/2,(zmin+zmax)/2)
+    octree=_auto_octree_build(coords,tris,h,hb,slope,smoothing,
+        (center[1]-half,center[2]-half,center[3]-half),padded_length)
+    return AutomaticMeshSizeField(coords,h,octree,slope,hb,hn,hx,smoothing)
 end
 
 # Vertices that share an identical position — duplicates introduced when the
@@ -4719,71 +4733,329 @@ function _auto_lfs_search(tf::DistanceField,node::Int,p,
     return best
 end
 
-# Per-BVH-node minimum of the prescribed vertex sizes, computed once after the
-# edge relaxation — `field_value`'s branch-and-bound uses it as the lower
-# bound `min_v(h[v] + slope·dist(p,v)) ≥ node_hmin + slope·dist(p,node box)`.
-function _auto_node_hmin!(out::Vector{Float64},tf::DistanceField,node::Int,
-                        h::AbstractVector{Float64})
-    count=tf.bvh_count[node]
-    if count>0
-        m=Inf
-        first=tf.bvh_first[node]
-        np=size(tf.points,2)
-        @inbounds for pos in first:first+count-1
-            id=tf.bvh_order[pos]
-            id<=np && (m=min(m,h[id]))
-        end
-        out[node]=m
-        return m
-    end
-    out[node]=min(_auto_node_hmin!(out,tf,tf.bvh_left[node],h),
-                  _auto_node_hmin!(out,tf,tf.bvh_right[node],h))
-    return out[node]
+# ── Adaptive octree storage ───────────────────────────────────────────────────
+
+@inline _auto_isleaf(t::_AutoOctree,n::Int)=t.child[n][1]==0
+
+@inline function _auto_octree_box(t::_AutoOctree,n::Int)
+    e=t.edge/2^Int(t.level[n]);lo=t.nodelo[n]
+    return lo,(lo[1]+e,lo[2]+e,lo[3]+e),e
 end
 
-# Spatial extension of the prescribed sizes — the continuous analogue of
-# upstream's `limitSize` relaxation over octree cell centers:
-# h(p) = min_v(h[v] + slope·|p−v|).  Only decreases `best`, which is seeded
-# with the interior cap so branches that cannot beat it are pruned on the
-# node bound `node_hmin + slope·dist(p,node box)` (rounded down once for
-# muladd rounding).
-function _auto_extend_search(tf::DistanceField,node::Int,p,
-                             h::AbstractVector{Float64},slope::Float64,
-                             node_hmin::AbstractVector{Float64},best::Float64)
-    prevfloat(muladd(slope,
-        _distance_box(p,tf.bvh_lo[node],tf.bvh_hi[node]),
-        node_hmin[node]))>=best && return best
-    count=tf.bvh_count[node]
-    if count>0
-        first=tf.bvh_first[node]
-        np=size(tf.points,2)
-        @inbounds for pos in first:first+count-1
-            id=tf.bvh_order[pos]
-            id>np && continue
-            dx=p[1]-tf.points[1,id];dy=p[2]-tf.points[2,id]
-            dz=p[3]-tf.points[3,id]
-            cand=muladd(slope,sqrt(dx*dx+dy*dy+dz*dz),h[id])
-            cand<best && (best=cand)
+function _auto_octree(lo::NTuple{3,Float64},edge::Float64)
+    return _AutoOctree(lo,edge,[ntuple(_->Int32(0),8)],[lo],
+                       Int32[0],Float64[Inf])
+end
+
+# Split leaf `n`. Touching triangles are re-tested against each child box, so
+# a child the surface does not reach goes back to interior (its running
+# minimum stays `Inf` and resolves to `hbulk` at finalisation).
+function _auto_octree_split!(t::_AutoOctree,n::Int,
+                             touchers::Vector{Vector{Int32}},
+                             coords::AbstractMatrix{Float64},
+                             tris::AbstractMatrix{Int32},
+                             tri_h::AbstractVector{Float64})
+    lo,_,e=_auto_octree_box(t,n);h2=e/2
+    kids=Vector{Int32}(undef,8)
+    for slot in 1:8
+        b0,b1,b2=(slot-1)&1,(slot-1)>>1&1,(slot-1)>>2&1
+        clo=(lo[1]+b0*h2,lo[2]+b1*h2,lo[3]+b2*h2)
+        push!(t.nodelo,clo);push!(t.level,t.level[n]+Int32(1))
+        push!(t.child,ntuple(_->Int32(0),8));push!(t.size,Inf)
+        push!(touchers,Int32[])
+        kids[slot]=Int32(length(t.child))
+    end
+    t.child[n]=Tuple(kids)
+    old=touchers[n]
+    touchers[n]=Int32[]          # `n` is internal now; `old` keeps the list
+    for j in old
+        a=(coords[1,Int(tris[1,j])],coords[2,Int(tris[1,j])],
+           coords[3,Int(tris[1,j])])
+        b=(coords[1,Int(tris[2,j])],coords[2,Int(tris[2,j])],
+           coords[3,Int(tris[2,j])])
+        c=(coords[1,Int(tris[3,j])],coords[2,Int(tris[3,j])],
+           coords[3,Int(tris[3,j])])
+        for k in kids
+            c_lo,c_hi,_=_auto_octree_box(t,Int(k))
+            _auto_tri_box_overlap(c_lo,c_hi,a,b,c) || continue
+            push!(touchers[Int(k)],j)
+            v=t.size[Int(k)];h2v=tri_h[j]
+            t.size[Int(k)]=v<h2v ? v : h2v
         end
-        return best
     end
-    left=tf.bvh_left[node];right=tf.bvh_right[node]
-    dl=prevfloat(muladd(slope,
-        _distance_box(p,tf.bvh_lo[left],tf.bvh_hi[left]),node_hmin[left]))
-    dr=prevfloat(muladd(slope,
-        _distance_box(p,tf.bvh_lo[right],tf.bvh_hi[right]),node_hmin[right]))
-    if dl<=dr
-        dl<best &&
-            (best=_auto_extend_search(tf,left,p,h,slope,node_hmin,best))
-        dr<best &&
-            (best=_auto_extend_search(tf,right,p,h,slope,node_hmin,best))
-    else
-        dr<best &&
-            (best=_auto_extend_search(tf,right,p,h,slope,node_hmin,best))
-        dl<best &&
-            (best=_auto_extend_search(tf,left,p,h,slope,node_hmin,best))
+    return t
+end
+
+# Triangle/AABB overlap — the thirteen separating axes of the standard test
+# (three box face normals, the triangle plane normal, and nine box-edge ×
+# triangle-edge cross products).
+@inline function _auto_sat_overlap(axis,v0,v1,v2,r)
+    p0=axis[1]*v0[1]+axis[2]*v0[2]+axis[3]*v0[3]
+    p1=axis[1]*v1[1]+axis[2]*v1[2]+axis[3]*v1[3]
+    p2=axis[1]*v2[1]+axis[2]*v2[2]+axis[3]*v2[3]
+    lo=min(p0,p1,p2);hi=max(p0,p1,p2)
+    return lo<=r && hi>=-r
+end
+function _auto_tri_box_overlap(lo::NTuple{3,Float64},hi::NTuple{3,Float64},
+                               a,b,c)
+    cx=(lo[1]+hi[1])/2;cy=(lo[2]+hi[2])/2;cz=(lo[3]+hi[3])/2
+    hx=(hi[1]-lo[1])/2;hy=(hi[2]-lo[2])/2;hz=(hi[3]-lo[3])/2
+    v0=(a[1]-cx,a[2]-cy,a[3]-cz)
+    v1=(b[1]-cx,b[2]-cy,b[3]-cz)
+    v2=(c[1]-cx,c[2]-cy,c[3]-cz)
+    # Box face axes.
+    (max(v0[1],v1[1],v2[1])<-hx || min(v0[1],v1[1],v2[1])>hx) && return false
+    (max(v0[2],v1[2],v2[2])<-hy || min(v0[2],v1[2],v2[2])>hy) && return false
+    (max(v0[3],v1[3],v2[3])<-hz || min(v0[3],v1[3],v2[3])>hz) && return false
+    e0=_sub3(v1,v0);e1=_sub3(v2,v1);e2=_sub3(v0,v2)
+    # Box-edge × triangle-edge cross axes.
+    for e in (e0,e1,e2)
+        _auto_sat_overlap((0.0,-e[3],e[2]),v0,v1,v2,
+                          hy*abs(e[3])+hz*abs(e[2])) || return false
+        _auto_sat_overlap((e[3],0.0,-e[1]),v0,v1,v2,
+                          hx*abs(e[3])+hz*abs(e[1])) || return false
+        _auto_sat_overlap((-e[2],e[1],0.0),v0,v1,v2,
+                          hx*abs(e[2])+hy*abs(e[1])) || return false
     end
-    return best
+    # Triangle plane normal.
+    nx=e0[2]*e1[3]-e0[3]*e1[2]
+    ny=e0[3]*e1[1]-e0[1]*e1[3]
+    nz=e0[1]*e1[2]-e0[2]*e1[1]
+    s=nx*v0[1]+ny*v0[2]+nz*v0[3]
+    r=hx*abs(nx)+hy*abs(ny)+hz*abs(nz)
+    return abs(s)<=r
+end
+
+# Depth-first insertion of triangle `j`: every leaf whose box overlaps the
+# triangle records it, and a touched leaf refines until its edge no longer
+# exceeds `tri_h[j]` — so leaf sizes track the prescribed surface size.
+function _auto_octree_insert_tri!(t::_AutoOctree,
+                                  touchers::Vector{Vector{Int32}},j::Int,
+                                  coords::AbstractMatrix{Float64},
+                                  tris::AbstractMatrix{Int32},
+                                  tri_h::AbstractVector{Float64})
+    a=(coords[1,Int(tris[1,j])],coords[2,Int(tris[1,j])],
+       coords[3,Int(tris[1,j])])
+    b=(coords[1,Int(tris[2,j])],coords[2,Int(tris[2,j])],
+       coords[3,Int(tris[2,j])])
+    c=(coords[1,Int(tris[3,j])],coords[2,Int(tris[3,j])],
+       coords[3,Int(tris[3,j])])
+    ht=tri_h[j]
+    stack=Int32[1]
+    while !isempty(stack)
+        n=Int(pop!(stack))
+        lo,hi,e=_auto_octree_box(t,n)
+        _auto_tri_box_overlap(lo,hi,a,b,c) || continue
+        if _auto_isleaf(t,n)
+            if e>ht && t.level[n]<64
+                _auto_octree_split!(t,n,touchers,coords,tris,tri_h)
+                append!(stack,t.child[n])
+            else
+                push!(touchers[n],Int32(j))
+                t.size[n]>ht && (t.size[n]=ht)
+            end
+        else
+            append!(stack,t.child[n])
+        end
+    end
+    return t
+end
+
+# Leaves sharing positive area with leaf `n`'s face in direction `dir`
+# (1…6 = −x,+x,−y,+y,−z,+z) are appended to `out` (which is emptied first);
+# `stack` is scratch space — both are caller-owned so the inner loops do not
+# allocate. The level-`n` node on the far side is located by descending to a
+# probe just across the face centre, then its subtree is pruned to the
+# boundary leaves overlapping the face square — coarser neighbours collapse
+# to the single early leaf.
+function _auto_face_neighbors!(out::Vector{Int32},stack::Vector{Int32},
+                               t::_AutoOctree,n::Int,dir::Int)
+    empty!(out)
+    axis=(dir+1)>>1;forward=iseven(dir)
+    lo,hi,e=_auto_octree_box(t,n)
+    faceplane=forward ? hi[axis] : lo[axis]
+    # Faces on the padded domain boundary have no neighbour.
+    forward && faceplane>=t.lo[axis]+t.edge-1e-9*e && return out
+    !forward && faceplane<=t.lo[axis]+1e-9*e && return out
+    probe=((lo[1]+hi[1])/2,(lo[2]+hi[2])/2,(lo[3]+hi[3])/2)
+    probe=Base.setindex(probe,faceplane+(forward ? 1e-6*e : -1e-6*e),axis)
+    m=1;target=Int(t.level[n])
+    while !_auto_isleaf(t,m) && Int(t.level[m])<target
+        lo_m,_,e_m=_auto_octree_box(t,m);h2=e_m/2
+        slot=1+(probe[1]>=lo_m[1]+h2 ? 1 : 0)+
+                (probe[2]>=lo_m[2]+h2 ? 2 : 0)+(probe[3]>=lo_m[3]+h2 ? 4 : 0)
+        m=Int(t.child[m][slot])
+    end
+    _auto_isleaf(t,m) && (push!(out,Int32(m));return out)
+    mask=Int32(1)<<(axis-1);bit=forward ? Int32(0) : mask
+    tol=1e-12*e
+    empty!(stack);push!(stack,Int32(m))
+    while !isempty(stack)
+        u=Int(pop!(stack));_,_,ue=_auto_octree_box(t,u)
+        for (ci,c) in enumerate(t.child[u])
+            c==0 && continue
+            (Int32(ci-1)&mask)!=bit && continue   # only the leaf-facing half
+            clo=t.nodelo[Int(c)];ce=ue/2
+            inside=true
+            for d in 1:3
+                d==axis && continue
+                if min(clo[d]+ce,hi[d])-max(clo[d],lo[d])<=-tol
+                    inside=false;break
+                end
+            end
+            inside || continue
+            _auto_isleaf(t,Int(c)) ? push!(out,c) : push!(stack,c)
+        end
+    end
+    return out
+end
+# 2:1 face balance: no leaf may sit next to a face-adjacent leaf more than
+# one level deeper. Splits redistribute touching triangles the same way the
+# refinement splits do.
+function _auto_octree_balance!(t::_AutoOctree,
+                               touchers::Vector{Vector{Int32}},
+                               coords::AbstractMatrix{Float64},
+                               tris::AbstractMatrix{Int32},
+                               tri_h::AbstractVector{Float64})
+    out=Int32[];stack=Int32[]
+    while true
+        marked=Int32[]
+        for n in eachindex(t.child)
+            _auto_isleaf(t,n) || continue
+            ln=Int(t.level[n]);splitn=false
+            for dir in 1:6
+                _auto_face_neighbors!(out,stack,t,n,dir)
+                for nb in out
+                    Int(t.level[nb])>ln+1 && (splitn=true;break)
+                end
+                splitn && break
+            end
+            splitn && push!(marked,Int32(n))
+        end
+        isempty(marked) && return t
+        for n in marked
+            _auto_isleaf(t,Int(n)) &&
+                _auto_octree_split!(t,Int(n),touchers,coords,tris,tri_h)
+        end
+    end
+end
+
+# Volumetric gradation (the upstream `limitSize` analogue): the multi-source
+# shortest-path fixpoint `h[q] = min(h[q], h[p] + slope·|c_p − c_q|)` over
+# face-adjacent leaf pairs. Deterministic (float-key, id tie-break) and
+# order-independent.
+function _auto_octree_gradation!(t::_AutoOctree,slope::Float64)
+    # Every face-adjacent pair is recorded exactly once: a deeper leaf's
+    # across-face probe lands in its coarser neighbour leaf directly (the
+    # deeper leaf records the pair), while equal-level pairs are recorded by
+    # the larger id only — a coarser or same-level leaf's subtree walk also
+    # reaches the deeper neighbour, so it is skipped there.
+    pairs=Tuple{Int32,Int32}[]
+    leaves=Int32[]
+    out=Int32[];stack=Int32[]
+    for n in eachindex(t.child)
+        _auto_isleaf(t,n) || continue
+        push!(leaves,Int32(n))
+        ln=Int32(t.level[n])
+        for dir in 1:6
+            _auto_face_neighbors!(out,stack,t,n,dir)
+            for nb in out
+                (t.level[nb]>ln || (t.level[nb]==ln && n<Int(nb))) &&
+                    continue
+                push!(pairs,(Int32(n),nb))
+            end
+        end
+    end
+    nn=length(t.child)
+    deg=zeros(Int,nn)
+    for (a,b) in pairs
+        deg[a]+=1;deg[b]+=1
+    end
+    firsts=Vector{Int}(undef,nn+1);firsts[1]=1
+    @inbounds for i in 1:nn
+        firsts[i+1]=firsts[i]+deg[i]
+    end
+    fill!(deg,0)
+    nbr=Vector{Int32}(undef,2*length(pairs))
+    wgt=Vector{Float64}(undef,2*length(pairs))
+    for (a,b) in pairs
+        la,_,ea=_auto_octree_box(t,Int(a))
+        lb,_,eb=_auto_octree_box(t,Int(b))
+        dx=(la[1]+ea/2)-(lb[1]+eb/2)
+        dy=(la[2]+ea/2)-(lb[2]+eb/2)
+        dz=(la[3]+ea/2)-(lb[3]+eb/2)
+        w=sqrt(dx*dx+dy*dy+dz*dz)*slope
+        ia=firsts[a]+deg[a];deg[a]+=1;nbr[ia]=b;wgt[ia]=w
+        ib=firsts[b]+deg[b];deg[b]+=1;nbr[ib]=a;wgt[ib]=w
+    end
+    heap=Tuple{Float64,Int32}[(t.size[n],n) for n in leaves]
+    _auto_heap_siftup!.(Ref(heap),eachindex(heap))
+    settled=falses(nn)
+    while !isempty(heap)
+        key,u=_auto_heap_pop!(heap)
+        settled[u] && continue
+        settled[u]=true
+        t.size[u]=key
+        @inbounds for k in firsts[u]:firsts[u+1]-1
+            v=Int(nbr[k])
+            settled[v] && continue
+            cand=key+wgt[k]
+            cand<t.size[v] || continue
+            t.size[v]=cand
+            _auto_heap_push!(heap,(cand,Int32(v)))
+        end
+    end
+    return t
+end
+
+function _auto_octree_build(coords::AbstractMatrix{Float64},
+                            tris::AbstractMatrix{Int32},
+                            h::AbstractVector{Float64},hbulk::Float64,
+                            slope::Float64,extend::Bool,
+                            lo::NTuple{3,Float64},edge::Float64)
+    t=_auto_octree(lo,edge)
+    touchers=Vector{Vector{Int32}}(undef,1);touchers[1]=Int32[]
+    tri_h=Vector{Float64}(undef,size(tris,2))
+    @inbounds for j in axes(tris,2)
+        tri_h[j]=min(h[Int(tris[1,j])],h[Int(tris[2,j])],h[Int(tris[3,j])])
+    end
+    for j in axes(tris,2)
+        _auto_octree_insert_tri!(t,touchers,j,coords,tris,tri_h)
+    end
+    _auto_octree_balance!(t,touchers,coords,tris,tri_h)
+    # Interior leaves — no touching triangle — take `hbulk`; internal nodes
+    # carry the children minimum for introspection only.
+    @inbounds for n in eachindex(t.child)
+        if _auto_isleaf(t,n)
+            isfinite(t.size[n]) || (t.size[n]=hbulk)
+        end
+    end
+    @inbounds for n in reverse(eachindex(t.child))
+        _auto_isleaf(t,n) && continue
+        m=Inf
+        for c in t.child[n]
+            m=min(m,t.size[Int(c)])
+        end
+        t.size[n]=m
+    end
+    extend && _auto_octree_gradation!(t,slope)
+    return t
+end
+
+# The leaf containing `p`; queries outside the padded domain clamp onto the
+# boundary leaf, mirroring upstream's bounded octree.
+function _auto_octree_locate(t::_AutoOctree,p::NTuple{3,Float64})
+    hi=(t.lo[1]+t.edge,t.lo[2]+t.edge,t.lo[3]+t.edge)
+    q=(clamp(p[1],t.lo[1],hi[1]),clamp(p[2],t.lo[2],hi[2]),
+       clamp(p[3],t.lo[3],hi[3]))
+    n=1
+    while !_auto_isleaf(t,n)
+        lo,_,e=_auto_octree_box(t,n);h2=e/2
+        slot=1+(q[1]>=lo[1]+h2 ? 1 : 0)+(q[2]>=lo[2]+h2 ? 2 : 0)+
+                (q[3]>=lo[3]+h2 ? 4 : 0)
+        n=Int(t.child[n][slot])
+    end
+    return n
 end
 
 # Edge-length gradation as a multi-source shortest-path problem on the union
@@ -4946,18 +5218,8 @@ function field_value(field::AutomaticMeshSizeField,x,y,z)
     p=(_float_value(x,"AutomaticMeshSizeField","x"),
        _float_value(y,"AutomaticMeshSizeField","y"),
        _float_value(z,"AutomaticMeshSizeField","z"))
-    d_near,inear=_nearest_point(field.tree,p)
-    # Upstream leaves the prescribed size on octree cells that touch the
-    # surface and only seeds the interior at hbulk, so the hbulk cap releases
-    # within roughly one local cell of a sample — the band that may carry a
-    # prescribed size above hbulk when hmax > hbulk.
-    cap=d_near<=min(field.h[inear],field.hbulk) ?
-        field.hmax : field.hbulk
-    raw=field.extend ?
-        _auto_extend_search(field.tree,1,p,field.h,field.slope,
-                            field.node_hmin,cap) :
-        field.h[inear]
-    return clamp(min(cap,raw),field.hmin,field.hmax)
+    leaf=_auto_octree_locate(field.octree,p)
+    return clamp(field.octree.size[leaf],field.hmin,field.hmax)
 end
 
 # ── External process ──────────────────────────────────────────────────────────

@@ -5306,6 +5306,46 @@ unchanged: tangent-contact sections still reject
 exact-Delaunay provenance snapshot can still escalate to ~20 GB on
 rim-heavy curved fragments (memory-bound, tracked open item).
 
+## Working-tree increment (MET03 octree rewrite, uncommitted)
+
+**`AutomaticMeshSizeField` storage/evaluation rewritten as a genuine adaptive
+octree** (`src/fields/SizeFieldCatalog.jl`, `_AutoOctree` at line ~4410). The
+true gap vs upstream was storage semantics, not the prescription stages: the
+old field kept point samples plus a BVH and evaluated a continuous
+slope-limited lower envelope `min_v(h[v]+(g−1)·|p−v|)` under an interior cap,
+while upstream stores one size per octree cell and evaluates cell-locally.
+The new representation is a flat-array octree over the 1.3·span padded cube:
+depth-first triangle insertion records every leaf whose box SAT-overlaps a
+surface triangle and refines it while `edge > min touching tri_h`; untouched
+leaves keep `hBulk`; an iterative pass enforces 2:1 face balance (coarser
+neighbors split when a face-adjacent leaf is more than one level deeper, via
+`_auto_face_neighbors!` probe-descend + boundary-subtree enumeration with
+caller-owned buffers); and `smoothing` runs the upstream `limitSize`
+analogue — `h[q]=min(h[q], h[p]+(gradation−1)·|c_p−c_q|)` over face-adjacent
+leaf pairs, solved as a deterministic multi-source shortest path on CSR
+adjacency (float-key/id-tie-break heap, each undirected pair recorded once
+by level+id rule — verified: all 960,933 adjacent pairs on the tilted-plate
+fixture appear exactly twice under enumeration, maxleveldiff=1, zero
+gradation violation). `field_value` descends `_auto_octree_locate` (out-of-
+domain queries clamp onto the boundary leaf) and returns the leaf's stored
+size clamped to `[hmin,hmax]` — piecewise constant per cell. `coords`/`h`
+remain for compatibility; all curvature/gap/edge-smoothing stages, default
+resolution (hmin=L/1000, hbulk=L/20, hmax→hbulk, nPointsPerGap=0 opt-in,
+nPointsPerCircle=0 gate) and `p4estFileToLoad` rejection are unchanged, and
+the construction is bitwise deterministic and scale-invariant. A latent
+toucher-drop bug found in review (a leaf split after recording triangles
+discarded its list) is fixed by re-testing saved touchers against the child
+boxes. Remaining honest gaps vs upstream HXT: the refinement grading rule is
+`cell_edge > min touching tri_h` rather than HXT's exact criterion, and
+non-surface size sources are absent. Verified: `test/fields/
+sizefield_test.jl` **46,503/46,503**, exit 0, ~13m16s (Julia `--project=.`);
+testset extended for cell-local constancy, interior `hBulk`, boundary-leaf
+clamping, 2:1-balance and gradation certificates, determinism at octree
+level; `.geo` `AutomaticMeshSizeField` end-to-end meshing and the p4est
+rejection unchanged. Files: `src/fields/SizeFieldCatalog.jl`,
+`test/fields/sizefield_test.jl`, `STATUS.md`, `DEVIN_HANDOFF.md`,
+`HANDOFF.md`.
+
 ## Verified gates
 
 - `validation/transfinite/differential.jl` Gmsh 4.15.2:
@@ -5438,14 +5478,16 @@ rim-heavy curved fragments (memory-bound, tracked open item).
 
 ## Remaining parity work (PLAN.md — all IN PROGRESS tracks)
 
-- **P1**: octree-identical parity with Gmsh's HXT/p4est automatic-sizing
-  internals (the native `AutomaticMeshSizeField` is a documented
-  closest-vertex discrete analogue — sphere-fit curvature, facing-triangle
+- **P1**: remaining HXT-exact parity inside the now-octree-backed
+  `AutomaticMeshSizeField` (sphere-fit curvature, facing-triangle
   `nPointsPerGap` local feature size, `hBulk` fallback, edge-gradation
-  smoothing — resolved from model surfaces in `.geo` and API-session
-  background-field contexts), materially warped quadrangles beyond
-  transfinite ruled-surface patches (e.g. unstructured `Surface` filling on
-  non-coplanar wires), direct tensor/metric-meshing parity.
+  smoothing, 2:1-balanced leaf storage with cell-graph `limitSize`
+  gradation and piecewise-constant cell-local evaluation — resolved from
+  model surfaces in `.geo` and API-session background-field contexts;
+  `p4estFileToLoad` still rejected, refinement grading and non-surface
+  size sources may differ from upstream), materially warped quadrangles
+  beyond transfinite ruled-surface patches (e.g. unstructured `Surface`
+  filling on non-coplanar wires), direct tensor/metric-meshing parity.
 - **P2**: general mixed-element generation/recombination beyond P4's
   first-order pairing, mixed blocks in the simplex kernels, high-order
   Jacobian certification beyond second-order segments/triangles/tetrahedra/

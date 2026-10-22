@@ -1133,11 +1133,17 @@ end
         auto=AutomaticMeshSizeField(octsurf; n_nodes_per_circle=40, hmin=0.01, hmax=2.0)
         h0=size_at(auto,1.0,0.0,0.0)
         @test 2π/40*0.5 < h0 < 2π/40*2.5   # sphere-fit radius near 1
+        # Octree-cell value at the vertex: the leaf stores the curvature
+        # prescription, relaxed toward the (here smaller) hBulk interior by
+        # the cell-graph gradation — so it is bounded by both, not equal to
+        # the raw vertex value. The construction is exactly scale-invariant:
+        # leaves, levels, and stored sizes all scale with the input.
+        @test 0.13 < h0 < 2π/40
         for radius in (1.0,1e-6,1e-9)
             scaled=Mesh(radius.*C;tris=F)
             autoscaled=AutomaticMeshSizeField(scaled;n_nodes_per_circle=40,
                                                hmin=1e-15,hmax=2.0)
-            @test size_at(autoscaled,radius,0.0,0.0)/radius≈2π/40 rtol=1e-12
+            @test size_at(autoscaled,radius,0.0,0.0)≈h0*radius rtol=1e-9
         end
         flat_auto_mesh=Mesh(Float64[0 1 1 0;0 0 1 1;0 0 0 0];
             tris=Int32[1 1;2 3;3 4])
@@ -1581,10 +1587,23 @@ end
 
         # Parallel unit squares 0.1 apart: the gap prescribes h = gap/5 for
         # every vertex (curvature is zero), below the hmax = 1/20 default.
+        # Octree semantics: a leaf intersected by a plate triangle keeps the
+        # prescribed 0.02 (the corner vertex lies inside one), while a leaf in
+        # the middle of the gap touches no triangle and — with smoothing off,
+        # so no cell gradation runs — keeps the interior hBulk = 1.3/20.
         slab=AutomaticMeshSizeField([_quad(0.0),_quad(0.1)];
             n_points_per_gap=5,features=true,smoothing=false)
         @test all(≈(0.02),slab.h)
-        @test size_at(slab,0.25,0.25,0.05)==0.02
+        @test size_at(slab,0.0,0.0,0.0)==0.02
+        @test size_at(slab,0.25,0.25,0.05)==0.065
+        # Evaluation is cell-local: two points inside one leaf return the
+        # stored size bitwise.
+        sleaf=Tessella.SizeField._auto_octree_locate(slab.octree,
+            (0.25,0.25,0.05))
+        slo,shi,se=Tessella.SizeField._auto_octree_box(slab.octree,sleaf)
+        @test size_at(slab,slo[1]+0.3se,slo[2]+0.3se,slo[3]+0.3se) ==
+              size_at(slab,slo[1]+0.7se,slo[2]+0.7se,slo[3]+0.7se) ==
+              slab.octree.size[sleaf]
 
         # A gap too large to matter stays at hmax — padded span 1.3·50 → 3.25.
         far=AutomaticMeshSizeField([_quad(0.0),_quad(50.0)];
@@ -1613,10 +1632,13 @@ end
             n_points_per_gap=5,smoothing=false)
         @test all(>(0.01),folded.h)
 
-        # Same geometry rebuilt must produce identical sizes.
+        # Same geometry rebuilt must produce identical sizes — including the
+        # octree structure and every stored leaf value.
         again=AutomaticMeshSizeField([_quad(0.0),wall];
             n_points_per_gap=5,smoothing=false)
         @test folded.h==again.h
+        @test folded.octree.size==again.octree.size
+        @test folded.octree.level==again.octree.level
 
         # Gradation smoothing bounds the size growth along every union edge
         # by (gradation−1)·|edge| — exercised on a tilted second plate whose
@@ -1637,29 +1659,52 @@ end
             @test smooth.h[a]<=smooth.h[b]+0.1*d+1e-12
         end
 
-        # Volumetric extension — the octree analogue of upstream's
-        # `limitSize` interior relaxation: h(p) = min(hbulk, min_v(h[v] +
-        # slope·|p−v|)), verified against a brute-force scan of the sample
-        # cloud.  The interior cap releases within one local cell of a
-        # sample (the octree cells that touch the surface).
+        # Volumetric storage is the adaptive octree — upstream's HXT/p4est
+        # analogue.  A leaf touched by a surface triangle keeps the smallest
+        # prescribed size touching it (the corner vertex), an untouched
+        # interior leaf keeps hBulk, and `limitSize`-style cell gradation
+        # relaxes interior leaves toward the surface sizes.
         ext=AutomaticMeshSizeField([_quad(0.0),tilt];
             n_points_per_gap=5,gradation=1.3,smoothing=true,
             hbulk=0.4,hmax=2.0,hmin=1e-6)
         @test ext.slope≈0.3
-        for p in ((0.2,0.2,3.0),(5.0,5.0,5.0),(0.0,0.0,0.0),
-                  (-1.0,2.0,0.4),(0.5,0.5,0.05))
-            dists=[sqrt((ext.coords[1,j]-p[1])^2+
-                        (ext.coords[2,j]-p[2])^2+
-                        (ext.coords[3,j]-p[3])^2) for j in axes(ext.coords,2)]
-            inear=argmin(dists);dn=dists[inear]
-            brute=minimum(ext.h.+ext.slope.*dists)
-            cap=dn<=min(ext.h[inear],ext.hbulk) ? ext.hmax : ext.hbulk
-            @test size_at(ext,p)≈
-                clamp(min(cap,brute),ext.hmin,ext.hmax) atol=1e-12
+        @test size_at(ext,0.0,0.0,0.0)==0.01     # touched leaf: corner vertex
+        gap_v=size_at(ext,0.5,0.5,0.05)
+        @test minimum(ext.h)<=gap_v<ext.hbulk    # gap interior relaxed below bulk
+        # Out-of-domain queries clamp onto the boundary leaf — same value as
+        # the nearest in-domain point, itself relaxed below hBulk toward the
+        # prescribed surface sizes.
+        @test size_at(ext,50.0,50.0,50.0)==size_at(ext,5.0,5.0,5.0)==
+              size_at(ext,ext.octree.lo[1]+ext.octree.edge,
+                     ext.octree.lo[2]+ext.octree.edge,
+                     ext.octree.lo[3]+ext.octree.edge)
+        @test ext.hmin<=size_at(ext,5.0,5.0,5.0)<ext.hbulk
+        # Structural certificates on a bounded leaf sample: 2:1 face balance
+        # and the gradation bound `h[q] <= h[p] + slope·|c_p − c_q|` hold
+        # over every face-adjacent pair (fixed point of the cell-graph
+        # shortest-path relaxation).
+        fo=Int32[];fs=Int32[];checked=0
+        for n in eachindex(ext.octree.child)
+            Tessella.SizeField._auto_isleaf(ext.octree,n) || continue
+            n%97==0 || continue
+            lo,hi,e=Tessella.SizeField._auto_octree_box(ext.octree,n)
+            for dir in 1:6
+                Tessella.SizeField._auto_face_neighbors!(fo,fs,ext.octree,n,dir)
+                for nb in fo
+                    checked+=1
+                    nlo,_,ne=Tessella.SizeField._auto_octree_box(
+                        ext.octree,Int(nb))
+                    @test abs(Int(ext.octree.level[nb])-
+                              Int(ext.octree.level[n]))<=1
+                    d=sqrt(((lo[1]+e/2)-(nlo[1]+ne/2))^2+
+                           ((lo[2]+e/2)-(nlo[2]+ne/2))^2+
+                           ((lo[3]+e/2)-(nlo[3]+ne/2))^2)
+                    @test ext.octree.size[Int(nb)] <=
+                          ext.octree.size[n]+ext.slope*d+1e-12
+                end
+            end
         end
-        # Deep interior relaxes to hbulk; a query right on a coarse vertex
-        # keeps its prescribed size even above hbulk when hmax > hbulk.
-        @test size_at(ext,50.0,50.0,50.0)≈0.4
+        @test checked>100
         oct=Mesh(Float64[1 -1 0 0 0 0; 0 0 1 -1 0 0; 0 0 0 0 1 -1];
                  tris=Int32[1 1 1 1 2 2 2 2;3 5 4 6 3 6 4 5;
                             5 4 6 3 6 4 5 3])
@@ -1667,11 +1712,14 @@ end
             hbulk=0.01,hmax=2.0,hmin=1e-9)
         @test size_at(curved,1.0,0.0,0.0)>0.01
         @test size_at(curved,0.0,0.0,0.0)≈0.01
-        # `smoothing=false` keeps nearest-vertex values under the same cap.
+        # `smoothing=false` skips the cell-graph gradation: leaves untouched
+        # by the surface keep hBulk even in the middle of a gap, and a leaf
+        # touching a plate triangle keeps its prescribed size.
         unext=AutomaticMeshSizeField([_quad(0.0),tilt];
             n_points_per_gap=5,smoothing=false,hbulk=0.4,hmax=2.0,hmin=1e-6)
-        _,vnear=Tessella.SizeField._nearest_point(unext.tree,(5.0,5.0,5.0))
-        @test size_at(unext,5.0,5.0,5.0)==min(0.4,unext.h[vnear])
+        @test size_at(unext,5.0,5.0,5.0)==0.4
+        @test size_at(unext,0.5,0.5,0.225)==0.4
+        @test size_at(unext,0.0,0.0,0.0)==0.01
 
         # Upstream resolves an unset hMax from hBulk — an explicit hBulk
         # above the padded L/20 default lifts hMax rather than being
