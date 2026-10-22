@@ -49,7 +49,8 @@ using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3,
                 _recover_sheet_edge3,
                 _on_segment3, _pt3, _segment_chain3,
                 delaunay3d, to_mesh3, _classify_by_centroid, _rb_drop_flats,
-                _finish_interior, _recover_boundary_exact, recover_boundary
+                _finish_interior, _recover_boundary_exact, recover_boundary,
+                _plc_self_intersection3
 using ..Periodic: periodic_identify_affine
 using ..TransfiniteVolume: mesh_transfinite_volume
 using ..TransfinitePrism: mesh_transfinite_prism

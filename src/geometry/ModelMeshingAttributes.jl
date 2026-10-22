@@ -2007,6 +2007,372 @@ function create_geometry!(m::GeoModel,dim_tags=nothing)
     return nothing
 end
 
+# ---- parametrized discrete-surface remesh ----------------------------------
+#
+# Upstream `discreteFace::mesh` forwards to the ordinary face mesher once
+# `createGeometry` populated `_param`, so a parametrized patch is remeshed
+# against the boundary products emitted in that generation. Tessella keeps
+# the retained element set for un-parametrized records; a parametrized
+# record is re-embedded on the same least-squares (u,v) frame
+# `create_geometry!` computed and triangulated with its boundary chains as
+# constrained loops — the only transport that places every actual
+# Curve/Point vertex inside the patch product, which a Region's PLC
+# assembly requires. Interior-owned vertices stay embedded; the retained
+# reference elements only fix winding (the frame's e1×e2 sign is data
+# dependent).
+#
+# `boundary`/`interior` are actual vertex coordinates; `loops` indexes
+# `boundary` as closed rings and `interior_edges` indexes
+# `vcat(boundary, interior)` with the retained triangulation's incidence.
+# Returns triangle triples indexing `vcat(boundary, interior)`, or `nothing`
+# when the patch cannot be embedded — the caller keeps the retained
+# elements so the strict Region certificate still reports the exact
+# missing identity.
+function _model_parametrized_discrete_surface_remesh(
+    frame_coords::AbstractVector{NTuple{3,Float64}},
+    boundary::AbstractVector{NTuple{3,Float64}},
+    loops::AbstractVector{<:AbstractVector{Int32}},
+    interior::AbstractVector{NTuple{3,Float64}},
+    interior_edges::AbstractVector{NTuple{2,Int32}},
+    reference::AbstractVector{NTuple{3,NTuple{3,Float64}}},
+    expected_components::Int)
+    length(frame_coords)>=3 || return nothing
+    isempty(boundary) && return nothing
+    center=(0.0,0.0,0.0)
+    for point in frame_coords
+        center=center.+point
+    end
+    center=center./length(frame_coords)
+    covariance=zeros(3,3)
+    for point in frame_coords
+        delta=(point[1]-center[1],point[2]-center[2],point[3]-center[3])
+        for i in 1:3,j in 1:3
+            covariance[i,j]+=delta[i]*delta[j]
+        end
+    end
+    factorization=eigen(Symmetric(covariance))
+    order=sortperm(factorization.values;rev=true)
+    first_axis=factorization.vectors[:,order[1]]
+    second_axis=factorization.vectors[:,order[2]]
+    project(point)=((point[1]-center[1])*first_axis[1]+
+                    (point[2]-center[2])*first_axis[2]+
+                    (point[3]-center[3])*first_axis[3],
+                    (point[1]-center[1])*second_axis[1]+
+                    (point[2]-center[2])*second_axis[2]+
+                    (point[3]-center[3])*second_axis[3])
+    # Planar patches embed on the least-squares frame directly. A produced
+    # set must also be 3-D clean: a folded projection can still yield a
+    # valid 2-D triangulation whose flat triangles pierce each other, which
+    # no downstream PLC admission can repair.
+    points=NTuple{3,Float64}[boundary...;interior...]
+    triangles=_model_plane_domain_remesh(boundary,loops,interior,project,reference)
+    if triangles!==nothing
+        comp=_model_remesh_component_count(triangles)
+        sx=_model_remesh_self_intersects(triangles,points)
+        comp==expected_components && !sx && return triangles
+    end
+    # Folded projections (cylindrical patches) fall back to a polygon-domain
+    # harmonic embedding over the retained triangulation's own incidence.
+    triangles=_model_polygon_domain_remesh(
+        boundary,loops,interior,interior_edges,project,reference)
+    if triangles!==nothing
+        comp=_model_remesh_component_count(triangles)
+        sx=_model_remesh_self_intersects(triangles,points)
+        comp==expected_components && !sx && return triangles
+    end
+    return nothing
+end
+
+# A produced patch must remain a locally flat, non-piercing triangulation
+# of the same vertex set — the same improper-intersection certificate the
+# Region PLC admission applies to the merged boundary.
+function _model_remesh_self_intersects(triangles,points)
+    isempty(triangles) && return false
+    coords=Matrix{Float64}(undef,3,length(points))
+    for (index,point) in enumerate(points),axis in 1:3
+        coords[axis,index]=point[axis]
+    end
+    tris=Matrix{Int32}(undef,3,length(triangles))
+    for (column,tri) in enumerate(triangles),slot in 1:3
+        tris[slot,column]=tri[slot]
+    end
+    pair=_plc_self_intersection3(Mesh(coords;tris=tris))
+    return pair!==nothing
+end
+
+# Connected components of a produced triangle list under shared-edge
+# adjacency. A correct remesh keeps the retained patch's component count;
+# a folded embedding that severs or invents regions is rejected so the
+# caller keeps the retained elements.
+function _model_remesh_component_count(triangles)
+    isempty(triangles) && return 0
+    edge_tris=Dict{NTuple{2,Int32},Vector{Int32}}()
+    for (cell,tri) in enumerate(triangles)
+        for (a,b) in ((tri[1],tri[2]),(tri[2],tri[3]),(tri[3],tri[1]))
+            key=a<b ? (a,b) : (b,a)
+            push!(get!(()->Int32[],edge_tris,key),Int32(cell))
+        end
+    end
+    seen=falses(length(triangles));count=0
+    for cell in eachindex(triangles)
+        seen[cell] && continue
+        count+=1
+        stack=Int32[cell];seen[cell]=true
+        while !isempty(stack)
+            tri=triangles[pop!(stack)]
+            for (a,b) in ((tri[1],tri[2]),(tri[2],tri[3]),(tri[3],tri[1]))
+                key=a<b ? (a,b) : (b,a)
+                for neighbor in edge_tris[key]
+                    seen[neighbor] || (seen[neighbor]=true;push!(stack,neighbor))
+                end
+            end
+        end
+    end
+    return count
+end
+
+# Triangulate `vcat(boundary, interior)` in a supplied (u,v) embedding with
+# the boundary loops as constrained segments. Returns the produced
+# triangles in the caller's index space, or `nothing` on any failure.
+function _model_embedded_domain_remesh(
+    xs::Vector{Float64},ys::Vector{Float64},
+    segments::Vector{NTuple{2,Int32}},boundary_count::Int)
+    embedded=try
+        triangulation=constrained_delaunay(xs,ys,segments)
+        interior_mask=classify_interior(triangulation)
+        to_mesh(triangulation;interior=interior_mask)
+    catch error
+        error isa InterruptException && rethrow()
+        return nothing
+    end
+    size(embedded.tris,2)>0 ||
+        (return nothing)
+    # `dedup_points` canonicalizes signed zeros; match that for the lookup.
+    canon(value)=value==0.0 ? 0.0 : value
+    index=Dict{NTuple{2,Float64},Int32}()
+    # Interior entries first so a projected coincidence resolves to the
+    # boundary vertex — the Curve/Point node is the one the PLC must carry.
+    for i in boundary_count+1:length(xs)
+        index[(canon(xs[i]),canon(ys[i]))]=Int32(i)
+    end
+    for i in 1:boundary_count
+        index[(canon(xs[i]),canon(ys[i]))]=Int32(i)
+    end
+    triangles=NTuple{3,Int32}[]
+    sizehint!(triangles,size(embedded.tris,2))
+    for column in axes(embedded.tris,2)
+        tri=ntuple(3) do slot
+            row=embedded.tris[slot,column]
+            get(index,(canon(embedded.coords[1,row]),
+                       canon(embedded.coords[2,row])),Int32(0))
+        end
+        all(!iszero,tri) || return nothing
+        push!(triangles,tri)
+    end
+    return triangles
+end
+
+function _model_loop_segments(loops)
+    segments=NTuple{2,Int32}[]
+    for loop in loops,index in eachindex(loop)
+        push!(segments,(loop[index],loop[mod1(index+1,length(loop))]))
+    end
+    return segments
+end
+
+function _model_plane_domain_remesh(boundary,loops,interior,project,reference)
+    points=NTuple{3,Float64}[boundary...;interior...]
+    xs=Vector{Float64}(undef,length(points))
+    ys=Vector{Float64}(undef,length(points))
+    for (index,point) in enumerate(points)
+        xs[index],ys[index]=project(point)
+    end
+    # A folded projection merges distinct vertices into one (u,v) — the
+    # `dedup_points` weld inside `constrained_delaunay` would silently
+    # triangulate the collapsed set and produce triangles that pierce the
+    # real patch. Detect the fold here so the caller falls back to the
+    # polygon-domain embedding instead.
+    seen=Dict{NTuple{2,Float64},Int}()
+    for index in eachindex(points)
+        key=(xs[index]==0.0 ? 0.0 : xs[index], ys[index]==0.0 ? 0.0 : ys[index])
+        previous=get(seen,key,0)
+        previous!=0 && points[previous]!=points[index] &&
+            (return nothing)
+        seen[key]=index
+    end
+    triangles=_model_embedded_domain_remesh(
+        xs,ys,_model_loop_segments(loops),length(boundary))
+    triangles===nothing && return nothing
+    _model_remesh_orientation(triangles,points,reference)<0 &&
+        (triangles=[(tri[1],tri[3],tri[2]) for tri in triangles])
+    return triangles
+end
+
+# Pick the produced winding by the reference triangulation's normals: every
+# produced triangle votes against the retained triangle nearest its
+# centroid. Valid for folded patches where a projected signed area has no
+# meaningful orientation.
+function _model_remesh_orientation(triangles,points,reference)
+    isempty(reference) && return 1
+    centers=NTuple{3,Float64}[]
+    normals=NTuple{3,Float64}[]
+    for (a,b,c) in reference
+        push!(centers,(a.+b.+c)./3)
+        push!(normals,_model_cross3(b.-a,c.-a))
+    end
+    score=0.0
+    for tri in triangles
+        p,q,r=points[tri[1]],points[tri[2]],points[tri[3]]
+        normal=_model_cross3(q.-p,r.-p)
+        center=(p.+q.+r)./3
+        best=1;distance=Inf
+        for (index,rc) in enumerate(centers)
+            d=(rc[1]-center[1])^2+(rc[2]-center[2])^2+(rc[3]-center[3])^2
+            d<distance && (distance=d;best=index)
+        end
+        score+=normal[1]*normals[best][1]+normal[2]*normals[best][2]+
+               normal[3]*normals[best][3]
+    end
+    return score<0.0 ? -1 : 1
+end
+
+# Tutte-style embedding for patches whose least-squares projection folds
+# the boundary loops: the outer loop maps to a circle, every inner loop to
+# a smaller concentric circle, and free vertices land on a harmonic map
+# over the retained triangulation's incidence. Concentric placement keeps
+# constrained segments simple for any loop nesting; interior parity then
+# reproduces the patch's hole structure.
+function _model_polygon_domain_remesh(
+    boundary,loops,interior,interior_edges,project,reference)
+    outer=argmax(loop->begin
+        length_total=0.0
+        for index in eachindex(loop)
+            a=boundary[loop[index]];b=boundary[loop[mod1(index+1,length(loop))]]
+            length_total+=sqrt(sum(k->(b[k]-a[k])^2,1:3))
+        end
+        length_total
+    end,eachindex(loops))
+    xs=Vector{Float64}(undef,length(boundary)+length(interior))
+    ys=Vector{Float64}(undef,length(boundary)+length(interior))
+    function place(loop,radius,offset)
+        perimeter=0.0
+        for index in eachindex(loop)
+            a=boundary[loop[index]];b=boundary[loop[mod1(index+1,length(loop))]]
+            perimeter+=sqrt(sum(k->(b[k]-a[k])^2,1:3))
+        end
+        perimeter>0 || return false
+        walked=0.0
+        for index in eachindex(loop)
+            angle=2*pi*walked/perimeter
+            xs[loop[index]]=offset[1]+radius*cos(angle)
+            ys[loop[index]]=offset[2]+radius*sin(angle)
+            a=boundary[loop[index]];b=boundary[loop[mod1(index+1,length(loop))]]
+            walked+=sqrt(sum(k->(b[k]-a[k])^2,1:3))
+        end
+        return true
+    end
+    place(loops[outer],1.0,(0.0,0.0)) ||
+        (return nothing)
+    # The vertex centroid of the convex outer polygon is interior to it;
+    # inner circles are placed there and scaled below the polygon's
+    # inradius so constrained segments can never cross the outer loop.
+    centroid=(0.0,0.0)
+    for index in loops[outer]
+        centroid=centroid.+(xs[index],ys[index])
+    end
+    centroid=centroid./length(loops[outer])
+    inradius=Inf
+    for index in eachindex(loops[outer])
+        p=(xs[loops[outer][index]],ys[loops[outer][index]])
+        q=(xs[loops[outer][mod1(index+1,length(loops[outer]))]],
+           ys[loops[outer][mod1(index+1,length(loops[outer]))]])
+        edge=(q[1]-p[1],q[2]-p[2])
+        span=edge[1]^2+edge[2]^2
+        span>0 || (return nothing)
+        t=clamp(((centroid[1]-p[1])*edge[1]+(centroid[2]-p[2])*edge[2])/span,0.0,1.0)
+        inradius=min(inradius,hypot(p[1]+t*edge[1]-centroid[1],
+                                    p[2]+t*edge[2]-centroid[2]))
+    end
+    isfinite(inradius) && inradius>0 ||
+        (return nothing)
+    # Inner loops are holes of the patch: siblings sit on a packed ring
+    # inside the outer polygon's incircle — disjoint and strictly interior,
+    # so parity reproduces the disk-with-holes region.
+    inner=[position for position in eachindex(loops) if position!=outer]
+    inner_count=length(inner)
+    for (ring,position) in enumerate(inner)
+        radius=inner_count==1 ? 0.45*inradius :
+            min(0.30*inradius,0.55*inradius*sin(pi/inner_count))
+        offset=inner_count==1 ? centroid :
+            centroid.+(0.55*inradius*cos(2*pi*(ring-1)/inner_count),
+                       0.55*inradius*sin(2*pi*(ring-1)/inner_count))
+        place(loops[position],radius,offset) ||
+            (return nothing)
+    end
+    # Free vertices land on the harmonic (Tutte) map of the retained
+    # incidence: each sits at the barycenter of its neighbors. Solve the
+    # sparse system directly — a Jacobi sweep count that converged for
+    # small patches leaves large patches crumpled, and a crumpled domain
+    # lifts to self-intersecting chords on the folded patch.
+    adjacency=Vector{Int32}[Int32[] for _ in eachindex(xs)]
+    for (a,b) in interior_edges
+        push!(adjacency[a],b);push!(adjacency[b],a)
+    end
+    free=Int32[]
+    for index in length(boundary)+1:length(xs)
+        push!(free,Int32(index))
+        xs[index],ys[index]=centroid
+    end
+    nfree=length(free)
+    if nfree>0
+        row_of=Dict{Int32,Int}(index=>row for (row,index) in enumerate(free))
+        system=zeros(Float64,nfree,nfree)
+        rhs_x=zeros(Float64,nfree);rhs_y=zeros(Float64,nfree)
+        disconnected=Int[]
+        for (row,index) in enumerate(free)
+            neighbors=adjacency[index]
+            system[row,row]=1.0
+            isempty(neighbors) && (push!(disconnected,row);continue)
+            weight=1.0/length(neighbors)
+            for neighbor in neighbors
+                neighbor_row=get(row_of,neighbor,0)
+                if neighbor_row==0
+                    rhs_x[row]+=weight*xs[neighbor]
+                    rhs_y[row]+=weight*ys[neighbor]
+                else
+                    system[row,neighbor_row]=-weight
+                end
+            end
+        end
+        # A free vertex with no retained-incidence neighbours cannot be
+        # placed by the map; pin it to the polygon centroid.
+        for row in disconnected
+            rhs_x[row]=centroid[1];rhs_y[row]=centroid[2]
+        end
+        solved_x=try system\rhs_x catch error
+            error isa InterruptException && rethrow()
+            return nothing
+        end
+        solved_y=try system\rhs_y catch error
+            error isa InterruptException && rethrow()
+            return nothing
+        end
+        for (row,index) in enumerate(free)
+            xs[index]=solved_x[row];ys[index]=solved_y[row]
+        end
+    end
+    all(isfinite,xs) && all(isfinite,ys) ||
+        (return nothing)
+    triangles=_model_embedded_domain_remesh(
+        xs,ys,_model_loop_segments(loops),length(boundary))
+    triangles===nothing &&
+        (return nothing)
+    _model_remesh_orientation(triangles,NTuple{3,Float64}[boundary...;interior...],
+        reference)<0 &&
+        (triangles=[(tri[1],tri[3],tri[2]) for tri in triangles])
+    return triangles
+end
+
 # ---- compute_homology ------------------------------------------------------
 #
 # Gmsh's `mesh.computeHomology` performs the (co)homology computations queued

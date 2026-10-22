@@ -1046,6 +1046,621 @@ function _higher_surface_curve_remesh!(assembly,m,chains,curve_births)
     return remeshed
 end
 
+# Ordered actual vertex positions of one emitted Curve product — the chain
+# its Line cells form. `nothing` marks missing, non-linear, branched or
+# multi-chain connectivity, which the transport leaves unreconciled.
+function _higher_curve_chain_positions(assembly,curve::Int)
+    adjacency=Dict{Int32,Vector{Int32}}()
+    for cell in assembly.cells
+        (cell.owner==(1,Int32(curve)) && cell.msh==1) || continue
+        a,b=cell.nodes
+        push!(get!(()->Int32[],adjacency,a),b)
+        push!(get!(()->Int32[],adjacency,b),a)
+    end
+    isempty(adjacency) && return nothing
+    endpoints=Int32[]
+    for (position,neighbors) in adjacency
+        length(neighbors)>2 && return nothing
+        length(neighbors)==1 && push!(endpoints,position)
+    end
+    length(endpoints) in (0,2) || return nothing
+    start=isempty(endpoints) ? first(keys(adjacency)) : first(endpoints)
+    order=Int32[start];previous=Int32(0);current=start
+    while true
+        next=Int32(0)
+        for neighbor in adjacency[current]
+            neighbor!=previous && (next=neighbor;break)
+        end
+        next==0 && break
+        push!(order,next);previous,current=current,next
+        current==start && break
+        length(order)>length(adjacency)+1 && return nothing
+    end
+    if isempty(endpoints)
+        (length(order)==length(adjacency)+1 && last(order)==start) ||
+            return nothing
+    else
+        (length(order)==length(adjacency) && last(order)!=start) ||
+            return nothing
+    end
+    return order
+end
+
+# Closed position rings assembled from a patch's boundary Curve chains.
+# Closed chains are loops already; open chains join at shared endpoint
+# vertices. `nothing` marks a boundary that cannot close into loops.
+function _higher_discrete_surface_loops(chains::Vector{Vector{Int32}})
+    loops=Vector{Int32}[]
+    used=falses(length(chains))
+    for (index,chain) in enumerate(chains)
+        first(chain)==last(chain) || continue
+        used[index]=true
+        push!(loops,chain[1:end-1])
+    end
+    remaining=findall(.!used)
+    while !isempty(remaining)
+        first_index=popfirst!(remaining);used[first_index]=true
+        loop=copy(chains[first_index])
+        while first(loop)!=last(loop)
+            endpoint=last(loop)
+            pick=findfirst(index->first(chains[index])==endpoint ||
+                                 last(chains[index])==endpoint,remaining)
+            pick===nothing && return nothing
+            index=remaining[pick];deleteat!(remaining,pick);used[index]=true
+            segment=chains[index]
+            first(segment)!=endpoint && (segment=reverse(segment))
+            append!(loop,segment[2:end])
+        end
+        push!(loops,loop[1:end-1])
+    end
+    return loops
+end
+
+# Point-on-segment test within roundoff: used to certify that a produced
+# Curve node lies on the retained polyline edge it claims to subdivide.
+function _higher_point_on_segment(point,a,b;tol=1e-9)
+    abx=b[1]-a[1];aby=b[2]-a[2];abz=b[3]-a[3]
+    apx=point[1]-a[1];apy=point[2]-a[2];apz=point[3]-a[3]
+    cx=aby*apz-abz*apy;cy=abz*apx-abx*apz;cz=abx*apy-aby*apx
+    span=sqrt(abx*abx+aby*aby+abz*abz)
+    span>0 || return false
+    sqrt(cx*cx+cy*cy+cz*cz)<=tol*span || return false
+    t=(apx*abx+apy*aby+apz*abz)/(span*span)
+    return -tol<=t<=1+tol
+end
+
+# Positions strictly between ring[ia] and ring[ib] walking one direction;
+# `forward=false` walks the cyclic ring backwards.
+function _higher_chain_arc(ring,ia,ib,forward)
+    n=length(ring);segment=Int32[];j=ia
+    while j!=ib
+        j=forward ? mod1(j+1,n) : mod1(j-1,n)
+        j==ib && break
+        push!(segment,ring[j])
+    end
+    return segment
+end
+
+# Boundary-edge subdivision transport: when every emitted Curve node lies
+# on the retained polyline edge its parameter claims (the discrete Curve
+# mesher keeps frame knots as stations), the produced chains are exactly
+# subdivisions of the retained boundary edges. Rebuild the patch by
+# fanning every retained triangle inside its own footprint — each new
+# triangle is a sub-triangle of the retained cell it replaces, so the
+# produced patch cannot self-intersect, keeps the retained winding and
+# component structure, and every neighbour emits the identical sub-chain
+# on the shared Curve. Returns `(triangles, boundary, interior)` in the
+# `vcat(boundary,interior)` index space, or `nothing` when a produced node
+# sits off the retained polyline (free resampling) or the topology does
+# not refine cleanly — the caller then falls back to embedded remeshing.
+function _higher_discrete_surface_subdivision(assembly,m,record,curves,chains,owner)
+    fail=reason->nothing
+    coordinates=Model._model_record_node_coords(m)
+    new_position=Dict{UInt64,Int32}()
+    subdivided=Dict{NTuple{2,UInt64},Tuple{UInt64,UInt64,Vector{Int32}}}()
+    for (curve,chain) in zip(curves,chains)
+        curve_record=get(m.discrete,(1,curve),nothing)
+        curve_record===nothing && (return fail("no discrete record for curve $curve"))
+        edges=NTuple{2,UInt64}[]
+        for (index,msh) in enumerate(curve_record.element_types)
+            msh_family(msh)===:lin || continue
+            nodes=curve_record.element_nodes[index]
+            length(nodes)==2 ||
+                (return fail("curve $curve non-2 node element"))
+            push!(edges,(nodes[1],nodes[2]))
+        end
+        isempty(edges) && (return fail("curve $curve no edges"))
+        old_chain=Model._model_discrete_curve_chain(edges,assembly.caller,curve)
+        old_closed=first(old_chain)==last(old_chain)
+        old_closed && (old_chain=old_chain[1:end-1])
+        length(old_chain)>=2 ||
+            (return fail("curve $curve old_chain<2"))
+        produced_closed=first(chain)==last(chain)
+        ring=produced_closed ? chain[1:end-1] : chain
+        length(ring)>=2 ||
+            (return fail("curve $curve ring<2"))
+        position_of=Dict(position=>index for (index,position) in enumerate(ring))
+        length(position_of)==length(ring) ||
+            (return fail("curve $curve duplicate ring positions"))
+        # The curve mesher places knots by parametric evaluation, so a
+        # produced station meant to reproduce a retained polyline vertex
+        # can land a few ulps off the stored coordinate. Match each old
+        # vertex to its nearest produced ring position within the same
+        # 1e-9 relative tolerance `_higher_point_on_segment` certifies
+        # stations with; a genuinely dropped vertex stays a hard failure.
+        scale=0.0
+        for position in ring
+            point=assembly.nodes[position].point
+            scale=max(scale,abs(point[1]),abs(point[2]),abs(point[3]))
+        end
+        tol=1e-9*max(scale,1.0)
+        for node in old_chain
+            haskey(coordinates,node) ||
+                (return fail("curve $curve old node $node no coords"))
+            target=coordinates[node]
+            best=Int32(0);distance=Inf
+            for position in ring
+                point=assembly.nodes[position].point
+                d=(point[1]-target[1])^2+(point[2]-target[2])^2+
+                   (point[3]-target[3])^2
+                d<distance && (distance=d;best=position)
+            end
+            distance<=tol*tol ||
+                (return fail("curve $curve old node $node at $target not on produced ring"))
+            new_position[node]=best
+        end
+        n=length(ring)
+        edge_count=old_closed ? length(old_chain) : length(old_chain)-1
+        for index in 1:edge_count
+            a=old_chain[index]
+            b=old_chain[mod1(index+1,length(old_chain))]
+            pa=coordinates[a];pb=coordinates[b]
+            ia=position_of[new_position[a]];ib=position_of[new_position[b]]
+            segment=nothing
+            for forward in (true,false)
+                produced_closed || forward==(ia<ib) || continue
+                arc=_higher_chain_arc(ring,ia,ib,forward)
+                all(position->_higher_point_on_segment(
+                        assembly.nodes[position].point,pa,pb),arc) || continue
+                segment=arc;break
+            end
+            segment===nothing &&
+                (return fail("curve $curve edge index=$index a=$a b=$b no on-segment arc"))
+            # Every produced station is a born Curve vertex the patch must
+            # keep referencing — dropping one orphans it against the curve
+            # product even when it merely sits close to an endpoint. The
+            # emitted polygon therefore keeps all stations; a truly
+            # coincident duplicate would surface through the degenerate
+            # guard rather than be silently elided here.
+            key=a<b ? (a,b) : (b,a)
+            haskey(subdivided,key) &&
+                (return fail("curve $curve edge $key claimed twice"))
+            subdivided[key]=(a,b,segment)
+        end
+    end
+    # Retained cells whose boundary edges are not claimed by any Curve
+    # chain cannot be rebuilt by subdivision.
+    edge_tris=Dict{NTuple{2,UInt64},Int}()
+    retained=NTuple{3,Int32}[]
+    for cell in assembly.cells
+        (cell.owner==owner && cell.msh==2) || continue
+        push!(retained,(cell.nodes[1],cell.nodes[2],cell.nodes[3]))
+        for (x,y) in ((cell.nodes[1],cell.nodes[2]),
+                      (cell.nodes[2],cell.nodes[3]),
+                      (cell.nodes[3],cell.nodes[1]))
+            ux=assembly.nodes[x].tag;uy=assembly.nodes[y].tag
+            key=ux<uy ? (ux,uy) : (uy,ux)
+            edge_tris[key]=get(edge_tris,key,0)+1
+        end
+    end
+    for (key,count) in edge_tris
+        count==1 && !haskey(subdivided,key) &&
+            (return fail("retained boundary edge $key unclaimed"))
+    end
+    produced=NTuple{3,Int32}[]
+    boundary=Int32[];in_boundary=Set{Int32}()
+    for chain in chains,position in chain
+        position in in_boundary && continue
+        push!(in_boundary,position);push!(boundary,position)
+    end
+    local_index=Dict{Int32,Int32}(position=>Int32(index)
+                                  for (index,position) in enumerate(boundary))
+    interior=Int32[]
+    for node in record.node_tags
+        position=get(assembly.node_positions,node,Int32(0))
+        (position==0 || haskey(local_index,position)) && continue
+        local_index[position]=Int32(length(boundary)+length(interior)+1)
+        push!(interior,position)
+    end
+    triangles=NTuple{3,Int32}[]
+    for cell_nodes in retained
+        corners=Int32[]
+        chains3=Vector{Int32}[]
+        for index in 1:3
+            x=cell_nodes[index];y=cell_nodes[mod1(index+1,3)]
+            ux=assembly.nodes[x].tag;uy=assembly.nodes[y].tag
+            push!(corners,get(new_position,ux,x))
+            key=ux<uy ? (ux,uy) : (uy,ux)
+            entry=get(subdivided,key,nothing)
+            chain=Int32[]
+            if entry!==nothing
+                a,b,segment=entry
+                append!(chain,a==ux ? segment : reverse(segment))
+            end
+            push!(chains3,chain)
+        end
+        for tri in _higher_subdivided_cell_triangles(corners,chains3)
+            push!(triangles,(local_index[tri[1]],local_index[tri[2]],
+                             local_index[tri[3]]))
+        end
+    end
+    # The peel keeps every emitted triangle on a different retained-edge
+    # line than its fan apex, so it is non-degenerate by construction;
+    # guard anyway so a pathological input falls back to the embedded
+    # remesh instead of handing the strict Region certificate a bad cell.
+    points=Vector{NTuple{3,Float64}}(undef,length(boundary)+length(interior))
+    for (index,position) in enumerate(boundary)
+        points[index]=assembly.nodes[position].point
+    end
+    for (index,position) in enumerate(interior)
+        points[length(boundary)+index]=assembly.nodes[position].point
+    end
+    for tri in triangles
+        a,b,c=points[tri[1]],points[tri[2]],points[tri[3]]
+        ux,uy,uz=b.-a;vx,vy,vz=c.-a
+        cx=uy*vz-uz*vy;cy=uz*vx-ux*vz;cz=ux*vy-uy*vx
+        cx*cx+cy*cy+cz*cz==0.0 &&
+            (return fail("produced degenerate triangle $tri"))
+    end
+    return triangles,boundary,interior
+end
+
+# Triangulate one retained cell's subdivided boundary polygon. `corners`
+# are the produced positions of the cell's three vertices in polygon order
+# and `chains[i]` the produced stations on the straight retained edge
+# corners[i] → corners[i+1]; every vertex sits on the retained cell's
+# convex footprint. A plain fan from the first corner emits a zero-area
+# triangle for every consecutive station pair on the apex's own two edges,
+# so chained sides are peeled against the next chained side's first
+# station instead: each peel covers the sub-polygon (run ++ apex) bounded
+# by ring edges plus one interior chord, preserves the retained winding,
+# and puts the fan apex on a different retained edge's line than the run —
+# no emitted triangle is degenerate. When a single chained side remains it
+# fans to the one corner off its line.
+function _higher_subdivided_cell_triangles(corners::Vector{Int32},
+                                           chains::Vector{Vector{Int32}})
+    cs=copy(corners)
+    ch=Vector{Int32}[copy(chains[1]),copy(chains[2]),copy(chains[3])]
+    triangles=NTuple{3,Int32}[]
+    while count(!isempty,ch)>=2
+        i=findfirst(k->!isempty(ch[k]) && !isempty(ch[mod1(k+1,3)]),1:3)
+        apex=ch[mod1(i+1,3)][1]
+        run=Int32[cs[i]];append!(run,ch[i]);push!(run,cs[mod1(i+1,3)])
+        for k in 1:length(run)-1
+            push!(triangles,(run[k],run[k+1],apex))
+        end
+        cs=Int32[cs[i],apex,cs[mod1(i+2,3)]]
+        ch=Vector{Int32}[Int32[],ch[mod1(i+1,3)][2:end],ch[mod1(i+2,3)]]
+    end
+    j=findfirst(!isempty,ch)
+    if j===nothing
+        push!(triangles,(cs[1],cs[2],cs[3]))
+    else
+        apex=cs[mod1(j+2,3)]
+        run=Int32[cs[j]];append!(run,ch[j]);push!(run,cs[mod1(j+1,3)])
+        for k in 1:length(run)-1
+            push!(triangles,(run[k],run[k+1],apex))
+        end
+    end
+    return triangles
+end
+
+# Re-triangulate one `CreateGeometry`-parametrized discrete surface against
+# its actual boundary products. The patch is re-embedded on its
+# least-squares (u,v) frame and triangulated with the emitted boundary
+# chains as constrained loops; every produced cell replaces the retained
+# element set under fresh born identities. Returns false when the patch
+# cannot be reconciled — the retained cells then carry the unchanged
+# product into the strict Region certificate.
+function _higher_discrete_surface_transport_one!(assembly,m,tag,record;caller,
+                                               geometry_cells=nothing)
+    owner=(2,Int32(tag))
+    curves=Int[]
+    for (dim,bound) in record.boundary
+        dim==1 || continue
+        push!(curves,abs(bound))
+    end
+    isempty(curves) && (return nothing,false)
+    all(entry->entry==2,record.element_types) || (return nothing,false)
+    chains=Vector{Int32}[]
+    for curve in curves
+        chain=_higher_curve_chain_positions(assembly,curve)
+        chain===nothing && (return nothing,false)
+        push!(chains,chain)
+    end
+    # Preferred transport: when the emitted chains refine the retained
+    # polyline edge-by-edge, rebuild the patch by boundary-edge
+    # subdivision — no retriangulation chords, no possible piercing, and
+    # every neighbouring patch emits the identical sub-chain.
+    subdivided=_higher_discrete_surface_subdivision(
+        assembly,m,record,curves,chains,owner)
+    if subdivided!==nothing
+        triangles,boundary,interior=subdivided
+        width=length(boundary)
+        filter!(cell->!(cell.owner==owner && msh_dimension(cell.msh)==2),
+                assembly.cells)
+        physical=_dim01_physical(m,(2,tag))
+        first_emitted=length(assembly.cells)+1
+        for tri in triangles
+            nodes=Int32[tri[slot]<=width ? boundary[tri[slot]] :
+                        interior[tri[slot]-width] for slot in 1:3]
+            _dim01_add_cell!(assembly,2,owner,nodes,
+                _dim01_next_tag!(assembly,false);source_tag=nothing,physical)
+        end
+        emitted_cells=assembly.cells[first_emitted:end]
+        used=falses(length(boundary)+length(interior))
+        for tri in triangles,index in tri
+            used[index]=true
+        end
+        positions=Int32[];remap=zeros(Int32,length(used))
+        for index in eachindex(used)
+            used[index] || continue
+            remap[index]=Int32(length(positions)+1)
+            push!(positions,index<=width ? boundary[index] : interior[index-width])
+        end
+        coords=Matrix{Float64}(undef,3,length(positions))
+        for (column,position) in enumerate(positions),axis in 1:3
+            coords[axis,column]=assembly.nodes[position].point[axis]
+        end
+        tri_columns=Matrix{Int32}(undef,3,length(triangles))
+        for (column,tri) in enumerate(triangles),slot in 1:3
+            tri_columns[slot,column]=remap[tri[slot]]
+        end
+        mesh=Mesh(coords;tris=tri_columns,
+                  tri_tag=fill(physical,length(triangles)))
+        geometry_cells===nothing || (geometry_cells[mesh]=
+            Vector{Union{Nothing,_Dim01Cell}}[Union{Nothing,_Dim01Cell}[],
+            Union{Nothing,_Dim01Cell}[emitted_cells...],
+            Union{Nothing,_Dim01Cell}[]])
+        class=_higher_geometry_part_class(mesh,2,tag,
+            [assembly.nodes[position].owner for position in positions])
+        return (tag,mesh,class,positions),true
+    end
+    position_loops=_higher_discrete_surface_loops(chains)
+    (position_loops===nothing || any(loop->length(loop)<3,position_loops)) &&
+        (return nothing,false)
+    # Retained patch cells: the reference triangulation (winding + shape)
+    # and its directed boundary. The produced traversal of a constrained
+    # loop follows the loop order on the patch's outer ring and its
+    # reverse on hole rings, so each ring is oriented to reproduce the
+    # retained boundary traversal — adjacent products then emit their
+    # shared Curve in opposite directions and the merged shell stays
+    # orientable. Vertices the Curve remesh replaced no longer neighbour
+    # each other on the new rings; the vote instead compares the retained
+    # boundary's cyclic order restricted to the ring's retained vertices.
+    reference=NTuple{3,NTuple{3,Float64}}[]
+    ref_dir=Dict{NTuple{2,Int32},NTuple{2,Int32}}();ref_inc=Dict{NTuple{2,Int32},Int}()
+    for cell in assembly.cells
+        (cell.owner==owner && cell.msh==2) || continue
+        push!(reference,ntuple(slot->assembly.nodes[cell.nodes[slot]].point,3))
+        for (x,y) in ((cell.nodes[1],cell.nodes[2]),
+                      (cell.nodes[2],cell.nodes[3]),
+                      (cell.nodes[3],cell.nodes[1]))
+            key=x<y ? (x,y) : (y,x)
+            ref_inc[key]=get(ref_inc,key,0)+1
+            ref_dir[key]=(x,y)
+        end
+    end
+    # The Curve remesh replaces every chain vertex, so the produced and
+    # retained rings share no vertices; instead each produced ring edge
+    # votes against the retained boundary edge nearest its midpoint —
+    # the retained direction along that Curve is the emitted traversal
+    # the neighbour's own retained boundary traverses oppositely.
+    ret_mid=NTuple{3,Float64}[];ret_dir=NTuple{3,Float64}[]
+    for (key,count) in ref_inc
+        count==1 || continue
+        x,y=ref_dir[key]
+        push!(ret_mid,(assembly.nodes[x].point.+assembly.nodes[y].point)./2)
+        push!(ret_dir,assembly.nodes[y].point.-assembly.nodes[x].point)
+    end
+    perimeters=Vector{Float64}(undef,length(position_loops))
+    for (index,loop) in enumerate(position_loops)
+        total=0.0
+        for i in eachindex(loop)
+            a=assembly.nodes[loop[i]].point
+            b=assembly.nodes[loop[mod1(i+1,length(loop))]].point
+            total+=sqrt((a[1]-b[1])^2+(a[2]-b[2])^2+(a[3]-b[3])^2)
+        end
+        perimeters[index]=total
+    end
+    outer_loop=argmax(perimeters)
+    for (index,loop) in enumerate(position_loops)
+        isempty(ret_mid) && break
+        vote=0.0
+        for i in eachindex(loop)
+            a=assembly.nodes[loop[i]].point
+            b=assembly.nodes[loop[mod1(i+1,length(loop))]].point
+            mid=(a.+b)./2;best=0;dist=Inf
+            for r in eachindex(ret_mid)
+                d=(ret_mid[r][1]-mid[1])^2+(ret_mid[r][2]-mid[2])^2+
+                   (ret_mid[r][3]-mid[3])^2
+                d<dist && (dist=d;best=r)
+            end
+            vote+=ret_dir[best][1]*(b[1]-a[1])+ret_dir[best][2]*(b[2]-a[2])+
+                  ret_dir[best][3]*(b[3]-a[3])
+        end
+        outer=index==outer_loop
+        vote==0.0 && continue
+        # Outer rings emit the loop order, hole rings its reverse; the
+        # loop order should therefore carry sign(retained)·emission.
+        outer==(vote>0) && continue
+        position_loops[index]=reverse(loop)
+    end
+    boundary=Int32[];seen=Set{Int32}()
+    for loop in position_loops,position in loop
+        position in seen || (push!(seen,position);push!(boundary,position))
+    end
+    local_index=Dict(position=>Int32(index) for (index,position) in enumerate(boundary))
+    loops=Vector{Int32}[Int32[local_index[position] for position in loop]
+                       for loop in position_loops]
+    # Retained vertices that sat on a remeshed Curve were replaced by a
+    # produced knot at the identical coordinate; their old position is off
+    # the ring yet still listed in node_tags. Passing it as an interior
+    # Steiner point makes the patch fold onto its own boundary — the
+    # neighbour emits the ring vertex, this patch emits the duplicate —
+    # so drop every candidate whose point a loop position already covers.
+    interior=Int32[]
+    claimed=Set{NTuple{3,Float64}}(ntuple(axis->
+            Model._model_projection_coordinate_key(
+                assembly.nodes[position].point[axis]),3)
+        for position in boundary)
+    for uid in record.node_tags
+        position=get(assembly.node_positions,uid,Int32(0))
+        (position==0 || position in seen) && continue
+        push!(seen,position)
+        point=ntuple(axis->Model._model_projection_coordinate_key(
+                     assembly.nodes[position].point[axis]),3)
+        point in claimed && continue
+        push!(claimed,point);push!(interior,position)
+    end
+    # Retained-incidence edges of the patch's own vertex set drive the
+    # harmonic embedding fallback for folded projections.
+    vertex_index=Dict{UInt64,Int32}()
+    for (index,position) in enumerate(boundary)
+        vertex_index[assembly.nodes[position].tag]=Int32(index)
+    end
+    for (index,position) in enumerate(interior)
+        vertex_index[assembly.nodes[position].tag]=Int32(length(boundary)+index)
+    end
+    interior_edges=NTuple{2,Int32}[]
+    for nodes in record.element_nodes
+        length(nodes)==3 || continue
+        for edge in ((1,2),(2,3),(3,1))
+            first=get(vertex_index,nodes[edge[1]],Int32(0))
+            second=get(vertex_index,nodes[edge[2]],Int32(0))
+            (first==0 || second==0) && continue
+            push!(interior_edges,(first,second))
+        end
+    end
+    frame=NTuple{3,Float64}[]
+    for uid in Model._record_referenced_nodes(record,2)
+        position=get(assembly.node_positions,uid,Int32(0))
+        position==0 && (return nothing,false)
+        push!(frame,assembly.nodes[position].point)
+    end
+    expected=_higher_record_component_count(record)
+    triangles=Model._model_parametrized_discrete_surface_remesh(
+        frame,[assembly.nodes[position].point for position in boundary],
+        loops,[assembly.nodes[position].point for position in interior],
+        interior_edges,reference,expected)
+    triangles===nothing && (return nothing,false)
+    width=length(boundary)
+    filter!(cell->!(cell.owner==owner && msh_dimension(cell.msh)==2),assembly.cells)
+    physical=_dim01_physical(m,(2,tag))
+    first_emitted=length(assembly.cells)+1
+    for tri in triangles
+        nodes=Int32[tri[slot]<=width ? boundary[tri[slot]] :
+                    interior[tri[slot]-width] for slot in 1:3]
+        _dim01_add_cell!(assembly,2,owner,nodes,
+            _dim01_next_tag!(assembly,false);source_tag=nothing,physical)
+    end
+    emitted_cells=assembly.cells[first_emitted:end]
+    # The produced product lists only the vertices the emitted cells
+    # actually reference, in remesh order (boundary then interior). Rows
+    # the triangulation left unused — merged projections, hole interiors —
+    # stay owned orphans that `_dim01_finish!` drops through `discarded`;
+    # binding this part as producer rows keeps them out of the product
+    # view a Region PLC merge reads, exactly like an ordinary remesh.
+    used=falses(length(boundary)+length(interior))
+    for tri in triangles,index in tri
+        used[index]=true
+    end
+    positions=Int32[];remap=zeros(Int32,length(used))
+    for index in eachindex(used)
+        used[index] || continue
+        remap[index]=Int32(length(positions)+1)
+        push!(positions,index<=width ? boundary[index] : interior[index-width])
+    end
+    coords=Matrix{Float64}(undef,3,length(positions))
+    for (column,position) in enumerate(positions),axis in 1:3
+        coords[axis,column]=assembly.nodes[position].point[axis]
+    end
+    tri_columns=Matrix{Int32}(undef,3,length(triangles))
+    for (column,tri) in enumerate(triangles),slot in 1:3
+        tri_columns[slot,column]=remap[tri[slot]]
+    end
+    mesh=Mesh(coords;tris=tri_columns,tri_tag=fill(physical,length(triangles)))
+    geometry_cells===nothing || (geometry_cells[mesh]=
+        Vector{Union{Nothing,_Dim01Cell}}[Union{Nothing,_Dim01Cell}[],
+        Union{Nothing,_Dim01Cell}[emitted_cells...],Union{Nothing,_Dim01Cell}[]])
+    class=_higher_geometry_part_class(mesh,2,tag,
+        [assembly.nodes[position].owner for position in positions])
+    return (tag,mesh,class,positions),true
+end
+
+# Component count of a record's stored triangle set under shared-edge
+# adjacency — the region structure a reconciled product must keep.
+function _higher_record_component_count(record)
+    edge_tris=Dict{NTuple{2,UInt64},Vector{Int}}()
+    for (cell,nodes) in enumerate(record.element_nodes)
+        length(nodes)==3 || continue
+        for (a,b) in ((nodes[1],nodes[2]),(nodes[2],nodes[3]),(nodes[3],nodes[1]))
+            key=a<b ? (a,b) : (b,a)
+            push!(get!(()->Int[],edge_tris,key),cell)
+        end
+    end
+    seen=falses(length(record.element_nodes));count=0
+    for cell in eachindex(record.element_nodes)
+        length(record.element_nodes[cell])==3 || continue
+        seen[cell] && continue
+        count+=1
+        stack=Int[cell];seen[cell]=true
+        while !isempty(stack)
+            nodes=record.element_nodes[pop!(stack)]
+            for (a,b) in ((nodes[1],nodes[2]),(nodes[2],nodes[3]),(nodes[3],nodes[1]))
+                key=a<b ? (a,b) : (b,a)
+                for neighbor in edge_tris[key]
+                    seen[neighbor] || (seen[neighbor]=true;push!(stack,neighbor))
+                end
+            end
+        end
+    end
+    return count
+end
+
+# `discreteFace::mesh` forwards to the ordinary face mesher once the record
+# carries a `CreateGeometry` parametrization — the retained element set
+# cannot carry the remeshed boundary vertices a Region PLC assembly reads
+# through the surface products. Reconcile each such patch against its
+# actual boundary chains before the phase builds its input authority;
+# visibility/`MeshOnlyEmpty` keeps the upstream skip gates, and an
+# unresolvable patch keeps its retained cells so the strict Region
+# certificate reports the unchanged missing identity. A reconciled patch
+# counts as remeshed: its owner joins `discarded` so `_dim01_finish!`
+# drops the unreferenced owned orphans, and its produced part joins
+# `parts` so `_higher_bind_producer_rows` binds the used-row product view.
+function _higher_discrete_surface_transport!(assembly,m,entities;options,
+                                             discarded=nothing,parts=nothing,
+                                             geometry_cells=nothing)
+    for (dim,tag) in entities
+        dim==2 || continue
+        record=get(m.discrete,(2,tag),nothing)
+        (record===nothing || !record.geometry_parametrized) &&
+            (continue)
+        options.mesh_only_visible &&
+            model_entity_visibility(m,2,tag)==0 && continue
+        owner=(2,Int32(tag))
+        options.mesh_only_empty &&
+            any(cell->cell.owner==owner,assembly.cells) && continue
+        part,ok=_higher_discrete_surface_transport_one!(
+            assembly,m,tag,record;caller=assembly.caller,geometry_cells)
+        ok || continue
+        discarded===nothing || push!(discarded,owner)
+        parts===nothing || push!(parts,part)
+    end
+    return nothing
+end
+
 function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
                                 size_field=nothing,metric_surface=nothing,
                                 source_nodes=length(assembly.nodes),ranks=nothing,
@@ -1083,11 +1698,15 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
         end
     end
     filter!(cell->cell.source_tag===nothing || !(cell.owner in discarded),assembly.cells)
+    _higher_discrete_surface_transport!(assembly,m,entities;options,
+        discarded,parts=geometry_parts,geometry_cells)
     # The actual products are supplied to extrusion source/cap consumers. A
     # retained surface's cell order is its stored order, including cap pairs.
     ranks===nothing || _higher_complete_ranks!(ranks,assembly)
     input=_higher_assembly_authority(assembly,m,done;ranks,old_supports)
-    input=_higher_bind_producer_rows(input,assembly,Tuple[],m.meshing.mesh_authority;curve_births)
+    input=_higher_bind_producer_rows(input,assembly,
+        geometry_parts===nothing ? Tuple[] : geometry_parts,
+        m.meshing.mesh_authority;curve_births)
     input=Model._model_mesh_with_curve_births(input,curve_births;caller=assembly.caller)
     emitted=Set{Tuple{Int,Int32}}()
     scope=isempty(meshed) ? nothing : Model._extrude_nonew_scope(
@@ -2366,10 +2985,27 @@ function _higher_primal_surface_geometry(mesh)
 end
 
 function _higher_lower_geometry_parts(assembly,m;sort_points=false,geometry_cells=nothing,
-                                       geometry_birth=nothing)
+                                       geometry_birth=nothing,discarded=nothing,
+                                       high_order=nothing,native_orphan_births=nothing)
     parts=Tuple{Int,Union{Mesh,MixedMesh},_MeshClassification,Vector{Int32}}[]
     points=Dict{Int,Vector{Int32}}()
     curves=Dict{Int,Vector{_Dim01Cell}}()
+    # A produced part can only list vertices that survive into the actual
+    # mesh. `_dim01_finish!` drops unreferenced orphans of discarded
+    # (remeshed) owners and old interpolation vertices — the same rule
+    # filters the owner-orphan rows below once the caller supplies it.
+    referenced=nothing
+    if discarded!==nothing || high_order!==nothing || native_orphan_births!==nothing
+        referenced=falses(length(assembly.nodes))
+        for cell in assembly.cells,row in cell.nodes
+            referenced[row]=true
+        end
+    end
+    survives(row,node)=
+        (referenced===nothing || referenced[row]) ||
+        (native_orphan_births!==nothing && node.tag in native_orphan_births) ||
+        ((discarded===nothing || !(node.owner in discarded)) &&
+         (high_order===nothing || !(row<=length(high_order) && high_order[row])))
     for (row,node) in enumerate(assembly.nodes)
         node.owner[1]==0 || continue
         push!(get!(()->Int32[],points,Int(node.owner[2])),Int32(row))
@@ -2387,8 +3023,12 @@ function _higher_lower_geometry_parts(assembly,m;sort_points=false,geometry_cell
             row for cell in curves[tag] for row in cell.nodes])
         if dimension==1
             used=Set(rows)
+            # An orphan kept alive by another entity's incidence still
+            # lists: it remains an actual vertex owned by this Curve. A
+            # dead orphan of a remeshed Curve does not.
             append!(rows,Int32[row for (row,node) in enumerate(assembly.nodes)
-                if node.owner==(1,Int32(tag)) && !(Int32(row) in used)])
+                if node.owner==(1,Int32(tag)) && !(Int32(row) in used) &&
+                survives(row,node)])
         end
         local_rows=Dict(row=>Int32(position) for (position,row) in enumerate(rows))
         coords=Matrix{Float64}(undef,3,length(rows))
@@ -2452,7 +3092,8 @@ function _higher_geometry_carrier(plan,assembly,parts,dimension,caller;
             source_tag=assembly.nodes[mapping[position]].tag
             final_tag=get(plan.node_tag_map,source_tag,nothing)
             actual_row=get(positions,final_tag,Int32(0))
-            actual_row>0 || throw(ArgumentError("$caller: produced geometry vertex loses its actual identity"))
+            actual_row>0 || throw(ArgumentError(
+                "$caller: produced geometry vertex loses its actual identity"))
             rows[merged_row]==0 || rows[merged_row]==actual_row || throw(ArgumentError(
                 "$caller: merged geometry vertex has conflicting actual identities"))
             rows[merged_row]=actual_row
@@ -2664,7 +3305,8 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
         sort_points=any(volume->Model._extrude_is_nonew(Model._extrude_gate(m,3,volume)),
                         keys(m.volumes))
         append!(geometry_parts,_higher_lower_geometry_parts(assembly,m;
-            sort_points,geometry_cells,geometry_birth))
+            sort_points,geometry_cells,geometry_birth,discarded,high_order,
+            native_orphan_births))
     end
     p2_pass=element_order>1 && any(cell->cell.owner[1]>0,assembly.cells)
     sort!(assembly.cells;by=_dim01_cell_order,alg=Base.Sort.MergeSort)

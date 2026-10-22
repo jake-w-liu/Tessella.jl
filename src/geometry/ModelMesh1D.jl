@@ -1411,6 +1411,35 @@ function _model_discrete_curve_grade_params(m::GeoModel,curve::Integer,
         size_function=size_function,
         integration_precision=options.integration_precision*options.ctx_lc,
         minimum_segments=_model_minimum_curve_segments(m,curve,options,caller))
+    # Every integer parameter is a frame knot — an original polyline vertex
+    # of the retained discretization. A graded sample that skips a knot
+    # replaces its two incident edges with one chord cutting across the
+    # corner; on a thin shared boundary that chord can cross the sibling
+    # ring's own chain, an inconsistency no later surface triangulation can
+    # repair. Knots are forced stations: grading may subdivide a retained
+    # edge but never bypass a retained vertex.
+    knots=Float64[Float64(k) for k in ceil(Int,t0):floor(Int,t1)]
+    parameters=sort!(unique!(append!(parameters,knots)))
+    # The arc-length inverter resolves a graded station only to the
+    # integrator's own precision, so a sample that should sit on a forced
+    # knot lands beside it instead — e.g. u=13.00000000341882 next to the
+    # knot at 13. The two stations evaluate a few ulps apart on the frame,
+    # and the pair becomes a sliver source every boundary consumer has to
+    # carry: the patch subdivision must reference both born Curve vertices,
+    # and the resulting hairline triangles fold the merged Region PLC past
+    # what the native recovery kernels accept. The knot already covers that
+    # station's span, so a graded sample within the integrator's spatial
+    # precision of a knot is folded back onto it.
+    precision=options.integration_precision*options.ctx_lc
+    if precision>0.0
+        filter!(parameters) do p
+            k=round(p)
+            p==k && return true
+            point=γ(p);vertex=γ(k)
+            dx=point[1]-vertex[1];dy=point[2]-vertex[2];dz=point[3]-vertex[3]
+            return dx*dx+dy*dy+dz*dz>precision*precision
+        end
+    end
     return parameters
 end
 

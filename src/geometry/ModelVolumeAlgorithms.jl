@@ -310,10 +310,23 @@ function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
     end
     if applicable(_recover_boundary_exact,surface)
         try
-            mesh=_recover_boundary_exact(surface)
-            valid,reason=certify(mesh)
-            valid && return _finish_interior(mesh,extra)
-            push!(failures,reason)
+            # The exact-CDT backend only returns a mesh after its own
+            # `certify_exact` — a Rational{BigInt} audit strictly stronger than
+            # the Float64 `_certify_surface_fill` gate above: same crease-chain,
+            # pierce, boundary-membership and per-region-area predicates, all in
+            # exact arithmetic. Re-running the float gate here can only produce
+            # false negatives on its output: exact Steiner vertices split crease
+            # and facet chains at rational parameters whose Float64 images land
+            # ~1 ulp off the supporting line, so `_rb_onseg`'s exact-zero
+            # collinearity probe finds no covering chain and reports "crease
+            # segment not recovered" for a segment the exact certificate proved
+            # conforming. `_model_native_boundary_facets_match` is likewise
+            # unsatisfiable by construction for any Steiner-subdivided boundary —
+            # its literal-incidence check guards against `oriented_surface_
+            # constructor` diagonal flips, and the exact backend never consumes
+            # the constructor mesh. `tetrahedralize` already trusts this same
+            # certificate; match it.
+            return _finish_interior(_recover_boundary_exact(surface),extra)
         catch error
             error isa InterruptException && rethrow()
             (error isa ArgumentError || error isa ErrorException) || rethrow()

@@ -969,6 +969,70 @@ Base.getindex(::_UnreadableExactPoints,::Int)=
             # exact twist-preserved volume: cross-section area 7 stays, faceted solid ≈ 4.4186
             @test mesh_vol(mc) ≈ 4.418609603270241 rtol=1e-9
         end
+
+        @testset "native volume fill trusts the exact-CDT certificate (t13 regression)" begin
+            # Same non-star twisted prism as above. `recover_boundary_cdt`
+            # splits crease edges at exact rational Steiner points; their
+            # Float64 output images land ~1 ulp off the supporting line, so
+            # `_certify_surface_fill`'s exact-zero collinearity probe cannot
+            # find the covering chain and reports "crease segment not
+            # recovered" — a false negative against the exact-arithmetic
+            # certificate `certify_exact` already proved. The native model
+            # fill (used by `Mesh 3` on discrete/native geometry, the t13
+            # blocker) must therefore trust that certificate instead of
+            # re-running the Float64 gate — same contract `tetrahedralize`
+            # already uses. Before the fix this threw "native Volume[1]
+            # boundary recovery failed".
+            U = [(0.,0.),(3.,0.),(3.,3.),(2.,3.),(2.,1.),(1.,1.),(1.,3.),(0.,3.)]
+            twisted = begin
+                n=length(U); cx=sum(p[1] for p in U)/n; cy=sum(p[2] for p in U)/n; θ=deg2rad(40)
+                rot(p)=((p[1]-cx)*cos(θ)-(p[2]-cy)*sin(θ)+cx, (p[1]-cx)*sin(θ)+(p[2]-cy)*cos(θ)+cy)
+                xs=Float64[p[1] for p in U]; ys=Float64[p[2] for p in U]
+                cdt=constrained_delaunay(xs,ys,[(i,i%n+1) for i in 1:n])
+                cap=to_mesh(cdt; interior=classify_interior(cdt))
+                capn=[(cap.coords[1,i],cap.coords[2,i]) for i in 1:size(cap.coords,2)]
+                pid=Dict((U[i][1],U[i][2])=>i for i in 1:n)
+                coords=vcat([(p[1],p[2],0.0) for p in U], [(rot(p)[1],rot(p)[2],1.0) for p in U])
+                tr=NTuple{3,Int}[]
+                for i in 1:n; j=i%n+1; push!(tr,(i,j,n+j)); push!(tr,(i,n+j,n+i)); end
+                for t in 1:ntris(cap)
+                    a=pid[capn[cap.tris[1,t]]]; b=pid[capn[cap.tris[2,t]]]; c=pid[capn[cap.tris[3,t]]]
+                    push!(tr,(a,c,b)); push!(tr,(n+a,n+b,n+c))
+                end
+                C=Matrix{Float64}(undef,3,length(coords)); for (i,p) in enumerate(coords); C[:,i]=[p...]; end
+                Tm=Matrix{Int32}(undef,3,length(tr)); for (t,f) in enumerate(tr); Tm[:,t]=Int32[f...]; end
+                Mesh(C; tris=Tm)
+            end
+            # pin the certificate divergence on this fixture's exact-CDT mesh:
+            mc = recover_boundary_cdt(twisted)
+            float_ok, _ = Mesh3D._certify_surface_fill(twisted, mc)
+            @test !float_ok          # Float64 gate false-negative on exact-conforming mesh
+            order = collect(Int32.(1:size(twisted.coords,2)))
+            m = Tessella.Model._model_native_initial_volume_fill(
+                twisted, 1, "native-fill-exact-cert";
+                node_order=order, initial_surface=twisted)
+            @test validate(m).ok
+            @test is_closed_manifold(m)
+            @test bndarea(m) ≈ surfarea(twisted) rtol=1e-9
+            @test mesh_vol(m) ≈ 4.418609603270241 rtol=1e-9
+            # Remaining pipeline-level blocker on this PLC class (t13 reports
+            # the same message): the native volume-constraint certificate
+            # requires literal boundary facet incidence — every published
+            # Surface cell exactly one tet face — which cannot hold once exact
+            # recovery places Steiner vertices on the boundary. The parity
+            # path is a volume-boundary subdivision write-back into the
+            # surface products (the dim-2 analog of
+            # `_model_surface_boundary_writeback!`); until that lands, pin the
+            # explicit blocker so the contract is visible.
+            bf, _ = boundary_faces(mc.tets)
+            @test length(bf) > ntris(twisted)   # boundary genuinely subdivided
+            cons = (outer_faces=[(2, UInt64(t), Tuple(Int32.(twisted.tris[:,t])))
+                                 for t in axes(twisted.tris,2)],
+                    embedded_faces=Tuple{Int,UInt64,NTuple{3,Int32}}[],
+                    edges=Tuple{Int,UInt64,Tuple{Int32,Int32}}[])
+            @test_throws ArgumentError Tessella.Model._model_certify_native_volume_constraints(
+                mc, cons, 1, "native-fill-exact-cert")
+        end
         @testset "recover_boundary_cdt is general (supported classes too)" begin
             # the same exact CDT recovery conforms the supported classes with the exact volume.
             for (s, v, sha) in ((box_surface(0,4,0,4,0,4), 64.0,

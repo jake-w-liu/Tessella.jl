@@ -20,11 +20,15 @@ the exact 3-D Delaunay rather than a conservative diametral proxy, which is what
  3. once all creases are present, any Delaunay **edge that pierces a coplanar region's
     interior** means that facet-region is not yet recovered → insert the **exact rational
     point where that edge crosses the region plane** (a Steiner point exactly on the facet);
- 4. repeat until no crease is missing and no edge pierces a region;
- 5. assemble (interior tets kept by centroid ray-cast against the input surface) and pass
-    an **exact `Rational{BigInt}` conformity certificate** (crease edges present, no edge
-    pierces a region, every boundary face lies in the surface, per-region exact projected
-    area matches) — accept only if it passes.
+ 4. repeat until no crease is missing and no edge pierces a region, and every
+    region triangle's sample points are covered by a coplanar Delaunay face
+    (uncovered triangles get their exact centroid as a facet Steiner point);
+ 5. carve the exterior (flood-fill from convex-hull boundary faces across
+    non-constraint faces — faces not lying inside an input facet) and keep each
+    unreached tet component whose centroids vote majority-inside, then pass an
+    **exact `Rational{BigInt}` conformity certificate** (crease edges present,
+    no edge pierces a region, every boundary face lies in the surface,
+    per-region exact projected area matches) — accept only if it passes.
 
 All Steiner coordinates are exact `Rational{BigInt}` (midpoints / edge–plane
 intersections of rational points), so they stay exactly on-feature — impossible with a
@@ -129,6 +133,10 @@ end
 @inline rsign(x)=x>0 ? 1 : (x<0 ? -1 : 0)
 @inline det3(a,b,c)=a[1]*(b[2]*c[3]-b[3]*c[2])-a[2]*(b[1]*c[3]-b[3]*c[1])+a[3]*(b[1]*c[2]-b[2]*c[1])
 @inline ekey(a,b)=a<=b ? (a,b) : (b,a)
+@inline function ekey3(a,b,c)
+    a>b && ((a,b)=(b,a)); b>c && ((b,c)=(c,b)); a>b && ((a,b)=(b,a))
+    return (a,b,c)
+end
 @inline proj2(p,drop)= drop==1 ? (p[2],p[3]) : (drop==2 ? (p[1],p[3]) : (p[1],p[2]))
 @inline function orient2(a,b,c)
     rsign((b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]))
@@ -332,34 +340,21 @@ function certify_exact(surface::Mesh,m::Mesh,pts::Vector{RBv},regions,seg2regs,
     return (true,"conforming (exact)")
 end
 
-function _finalize(surface,pts,etets,tet_limit::Int,caller::AbstractString)
-    length(pts)<=typemax(Int32) ||
-        throw(ArgumentError("$caller: output node count exceeds Int32"))
-    g=Mesh3D._raygrid(surface)
-    coordsF=Matrix{Float64}(undef,3,length(pts))
-    seen=Dict{NTuple{3,Float64},Int}()
-    for i in 1:length(pts)
-        p=(Float64(pts[i][1]),Float64(pts[i][2]),Float64(pts[i][3]))
-        (isfinite(p[1])&&isfinite(p[2])&&isfinite(p[3])) ||
-            throw(ArgumentError("$caller: exact point $i cannot be represented by finite Float64 output"))
-        haskey(seen,p) && throw(ArgumentError(
-            "$caller: distinct exact points $(seen[p]) and $i collapse to one Float64 coordinate"))
-        seen[p]=i;coordsF[1,i]=p[1];coordsF[2,i]=p[2];coordsF[3,i]=p[3]
-    end
-    keep=NTuple{4,Int}[]
-    for t in etets
-        cx=Float64((pts[t[1]][1]+pts[t[2]][1]+pts[t[3]][1]+pts[t[4]][1])/4)
-        cy=Float64((pts[t[1]][2]+pts[t[2]][2]+pts[t[3]][2]+pts[t[4]][2])/4)
-        cz=Float64((pts[t[1]][3]+pts[t[2]][3]+pts[t[3]][3]+pts[t[4]][3])/4)
-        if Mesh3D._inside_grid((cx,cy,cz),g)
-            length(keep)<tet_limit || throw(ArgumentError(
-                "$caller: output tetrahedra exceed max_tets=$tet_limit; " *
-                "increase max_tets or reduce the PLC"))
-            push!(keep,t)
-        end
-    end
+# Assemble the kept working tets (indices into `etets`, chosen by the carving
+# classification in `_recover`) into the output Float64 mesh.  Exact point
+# images are checked for collisions so the certificate can map every mesh node
+# back to its rational preimage.
+function _finalize(pts,etets,keep,tet_limit::Int,caller::AbstractString)
+    coordsF=_float_coords(pts,caller)
+    length(keep)<=tet_limit || throw(ArgumentError(
+        "$caller: output tetrahedra exceed max_tets=$tet_limit; " *
+        "increase max_tets or reduce the PLC"))
+    isempty(keep) && throw(ErrorException("$caller: the carved interior is empty"))
     tetM=Matrix{Int32}(undef,4,length(keep))
-    for (j,t) in enumerate(keep); tetM[1,j]=t[1];tetM[2,j]=t[2];tetM[3,j]=t[3];tetM[4,j]=t[4]; end
+    for (j,ti) in enumerate(keep)
+        t=etets[ti]
+        tetM[1,j]=Int32(t[1]);tetM[2,j]=Int32(t[2]);tetM[3,j]=Int32(t[3]);tetM[4,j]=Int32(t[4])
+    end
     Mesh(coordsF; tets=tetM)
 end
 
@@ -961,6 +956,16 @@ function _recover(surface::Mesh,limits::_RecoveryLimits,caller::AbstractString)
     seg2regs=Dict{NTuple{2,Int},Vector{Int}}()
     for (ri,reg) in enumerate(regions), e in reg.bnd; push!(get!(seg2regs,e,Int[]),ri); end
     raygrid=Mesh3D._raygrid(surface)
+    # Per-region exact plane-side cache — `pts` only ever grows, so every
+    # entry is computed once and appended.  The piercing scan and the
+    # constraint-face test both consume it, replacing O(regions×edges) exact
+    # dot products per round by O(regions×new points).
+    sidesmap=[Int8[] for _ in 1:length(regions)]
+    function sides!(ri::Int)
+        s=sidesmap[ri];pl=regions[ri].plane
+        for i in (length(s)+1):length(pts);push!(s,Int8(side(pl,pts[i])));end
+        return s
+    end
 
     function split_seg!(e)
         a,b=e;mid=rscale(radd(pts[a],pts[b]),1//2);m=get(pointmap,mid,0)
@@ -1001,32 +1006,20 @@ function _recover(surface::Mesh,limits::_RecoveryLimits,caller::AbstractString)
             for e in missing; haskey(seg2regs,e) && split_seg!(e); end
             continue
         end
-        # 1b) `_finalize` keeps only interior-classified tets — a crease
-        # subsegment carried solely by exterior tets drops out of the kept
-        # boundary and fails `certify_exact`.  Split until interior tets carry
-        # it instead of reaching the certificate late.
-        keptE=Set{NTuple{2,Int}}()
-        for t in etets
-            cf=(Float64((pts[t[1]][1]+pts[t[2]][1]+pts[t[3]][1]+pts[t[4]][1])/4),
-                Float64((pts[t[1]][2]+pts[t[2]][2]+pts[t[3]][2]+pts[t[4]][2])/4),
-                Float64((pts[t[1]][3]+pts[t[2]][3]+pts[t[3]][3]+pts[t[4]][3])/4))
-            Mesh3D._inside_grid(cf,raygrid) || continue
-            for i in 1:4,j in i+1:4; push!(keptE,ekey(t[i],t[j])); end
-        end
-        dropped=NTuple{2,Int}[]
-        for e in keys(seg2regs); (e in keptE) || push!(dropped,e); end
-        sort!(dropped)
-        if !isempty(dropped)
-            for e in dropped; haskey(seg2regs,e) && split_seg!(e); end
-            continue
-        end
-        # 2) facet piercing -> insert exact piercing point (one per region per iter)
+        # 2) facet piercing -> insert every exact piercing point found this
+        #    round.  One-per-region batching would need a full re-triangulation
+        #    per pierced facet, which dense PLCs cannot afford; every inserted
+        #    point is the exact edge/plane intersection, so batching changes
+        #    only the iteration count, never the certificate.
         newpts=RBv[]
         sortedE=sort!(collect(E))
-        for reg in regions
+        for (ri,reg) in enumerate(regions)
+            s=sides!(ri)
             for e in sortedE
+                sp=s[e[1]];sq=s[e[2]]
+                (sp!=0 && sq!=0 && sp!=sq) || continue
                 pr,y=edge_pierces(reg,pts,e[1],e[2],budget)
-                pr && (push!(newpts,y); break)
+                pr && push!(newpts,y)
             end
         end
         if !isempty(newpts)
@@ -1040,10 +1033,150 @@ function _recover(surface::Mesh,limits::_RecoveryLimits,caller::AbstractString)
             for y in fresh;push!(pts,y);pointmap[y]=length(pts);end
             continue
         end
-        # converged: assemble + EXACT certification (never return a silently non-conforming mesh)
-        m = _finalize(surface,pts,etets,limits.tets,caller)
-        ok, reason = certify_exact(surface,m,pts,regions,seg2regs,budget)
-        ok && return (m, pts, regions, seg2regs, n0)
+        # 3) pierce-free: build the tet adjacency and find the constraint
+        #    faces — Delaunay faces lying inside an input region (coplanar
+        #    vertices and centroid inside the region, the same test the
+        #    certificate applies to boundary faces).
+        face2tets=Dict{NTuple{3,Int},Vector{Int}}()
+        for (ti,t) in enumerate(etets)
+            for f in (ekey3(t[1],t[2],t[3]),ekey3(t[1],t[2],t[4]),
+                      ekey3(t[1],t[3],t[4]),ekey3(t[2],t[3],t[4]))
+                push!(get!(face2tets,f,Int[]),ti)
+            end
+        end
+        onplane=[Int[] for _ in 1:length(pts)]
+        for ri in eachindex(regions)
+            s=sides!(ri)
+            for p in eachindex(s); s[p]==0 && push!(onplane[p],ri); end
+        end
+        constraint=Set{NTuple{3,Int}}()
+        regfaces=Dict{Int,Vector{NTuple{3,Int}}}()
+        for f in keys(face2tets)
+            (isempty(onplane[f[1]])||isempty(onplane[f[2]])||isempty(onplane[f[3]])) && continue
+            for ri in intersect(onplane[f[1]],onplane[f[2]],onplane[f[3]])
+                reg=regions[ri]
+                cen=rscale(radd(radd(pts[f[1]],pts[f[2]]),pts[f[3]]),1//3)
+                if in_region_closed(reg,pts,cen,budget)
+                    push!(constraint,f)
+                    push!(get!(regfaces,ri,NTuple{3,Int}[]),f)
+                end
+            end
+        end
+        # 3a) facet coverage — pierce-free does not imply recovered: a region
+        #     triangle can still have no coplanar face over part of its area
+        #     (the hole would let the carve flood the interior).  A triangle
+        #     whose centroid or edge midpoints are covered by no constraint
+        #     face gets its exact centroid as a facet Steiner point.
+        uncovered=RBv[]
+        for (ri,reg) in enumerate(regions)
+            fl=get(regfaces,ri,NTuple{3,Int}[])
+            drop=reg.plane.drop
+            for (a,b,c) in reg.tris
+                cen=rscale(radd(radd(pts[a],pts[b]),pts[c]),1//3)
+                hole=false
+                for q in (cen,rscale(radd(pts[a],pts[b]),1//2),
+                          rscale(radd(pts[b],pts[c]),1//2),
+                          rscale(radd(pts[c],pts[a]),1//2))
+                    q2=proj2(q,drop);inside=false
+                    for f in fl
+                        s1=orient2(proj2(pts[f[1]],drop),proj2(pts[f[2]],drop),q2)
+                        s2=orient2(proj2(pts[f[2]],drop),proj2(pts[f[3]],drop),q2)
+                        s3=orient2(proj2(pts[f[3]],drop),proj2(pts[f[1]],drop),q2)
+                        if !(((s1>0)||(s2>0)||(s3>0))&&((s1<0)||(s2<0)||(s3<0)))
+                            inside=true;break
+                        end
+                    end
+                    inside || (hole=true;break)
+                end
+                hole && push!(uncovered,cen)
+            end
+        end
+        if !isempty(uncovered)
+            fresh=RBv[y for y in unique(uncovered) if !haskey(pointmap,y)]
+            isempty(fresh) && throw(ErrorException(
+                "$caller: a facet remains uncovered but every candidate centroid already exists"))
+            length(fresh)<=nmax-length(pts) || throw(ArgumentError(
+                "$caller: adding facet Steiner points would exceed maxpts=$nmax; " *
+                "increase maxpts or simplify the PLC"))
+            for y in fresh;push!(pts,y);pointmap[y]=length(pts);end
+            continue
+        end
+        # 4) carve: flood exterior tets from convex-hull boundary faces across
+        #    non-constraint faces.  With every subsegment and facet conforming,
+        #    the constraint faces form a closed superset of the surface, so an
+        #    unreached tet cannot cross the boundary — the per-tet centroid
+        #    ray-cast this replaces could flip a wholly-interior tet whose
+        #    centroid landed on a sliver wall.  Unreached *components* are
+        #    interior unless their centroids vote majority-outside (voids
+        #    enclosed by an inner surface component, e.g. the hollow shell).
+        reached=falses(length(etets));stack=Int[]
+        for (f,ts) in face2tets
+            if length(ts)==1 && !(f in constraint)
+                reached[ts[1]]=true;push!(stack,ts[1])
+            end
+        end
+        while !isempty(stack)
+            ti=pop!(stack);t=etets[ti]
+            for f in (ekey3(t[1],t[2],t[3]),ekey3(t[1],t[2],t[4]),
+                      ekey3(t[1],t[3],t[4]),ekey3(t[2],t[3],t[4]))
+                f in constraint&&continue
+                for tj in get(face2tets,f,Int[])
+                    reached[tj] || (reached[tj]=true;push!(stack,tj))
+                end
+            end
+        end
+        compid=zeros(Int32,length(etets));comps=Vector{Int}[]
+        for ti in eachindex(etets)
+            (reached[ti]||compid[ti]!=0) && continue
+            compid[ti]=Int32(length(comps)+1);members=Int[ti];st=Int[ti]
+            while !isempty(st)
+                u=pop!(st);t=etets[u]
+                for f in (ekey3(t[1],t[2],t[3]),ekey3(t[1],t[2],t[4]),
+                          ekey3(t[1],t[3],t[4]),ekey3(t[2],t[3],t[4]))
+                    f in constraint && continue
+                    for v in get(face2tets,f,Int[])
+                        (reached[v]||compid[v]!=0) && continue
+                        compid[v]=compid[ti];push!(members,v);push!(st,v)
+                    end
+                end
+            end
+            push!(comps,members)
+        end
+        keep=Int[]
+        for members in comps
+            inside=0
+            for ti in members
+                t=etets[ti]
+                cf=(Float64((pts[t[1]][1]+pts[t[2]][1]+pts[t[3]][1]+pts[t[4]][1])/4),
+                    Float64((pts[t[1]][2]+pts[t[2]][2]+pts[t[3]][2]+pts[t[4]][2])/4),
+                    Float64((pts[t[1]][3]+pts[t[2]][3]+pts[t[3]][3]+pts[t[4]][3])/4))
+                Mesh3D._inside_grid(cf,raygrid) && (inside+=1)
+            end
+            inside*2>length(members) && append!(keep,members)
+        end
+        # 4b) a crease subsegment still carried solely by reached tets drops
+        #     out of the kept complex — split it.  This is the post-conformity
+        #     safety net the old pre-conformity placement made divergent on
+        #     thin reflex rims: run before facet recovery, the unreliable
+        #     centroid classification kept flagging unrecoverable creases and
+        #     each split generated two more flagged subsegments.
+        keptE=Set{NTuple{2,Int}}()
+        for ti in keep
+            t=etets[ti]
+            for i in 1:4,j in i+1:4;push!(keptE,ekey(t[i],t[j]));end
+        end
+        dropped=NTuple{2,Int}[]
+        for e in keys(seg2regs); (e in keptE) || push!(dropped,e); end
+        sort!(dropped)
+        if !isempty(dropped)
+            for e in dropped; haskey(seg2regs,e) && split_seg!(e); end
+            continue
+        end
+        # 5) converged: assemble + EXACT certification (never return a
+        #    silently non-conforming mesh)
+        m=_finalize(pts,etets,keep,limits.tets,caller)
+        ok,reason=certify_exact(surface,m,pts,regions,seg2regs,budget)
+        ok && return (m,pts,regions,seg2regs,n0)
         throw(ErrorException(
             "$caller: convergence gate passed but exact certification failed: $reason"))
     end

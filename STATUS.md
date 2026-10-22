@@ -72,6 +72,59 @@ strictly improved) plus a `=0` bitwise no-op.  `test/meshing/
 highorder_optimize_test.jl` 224/224 unchanged.  Not committed per the
 current request; OPT01 remainder: a truthful Pyr14 bound if one exists.
 
+### t13 discrete pipeline: exact-CDT fill admitted; volume boundary write-back remains (2026-10-22, uncommitted in tree)
+
+The t13 pipeline (`Merge "t13_data.stl" → ClassifySurfaces → CreateGeometry →
+Surface Loop → Volume → Mesh 3`) advanced past its volume-fill recovery blocker.
+Two distinct layers were diagnosed on the aneurysm PLC (913 vertices / 1830
+facets / 1141 coplanar regions / 2047 crease segments):
+
+**Layer 1 — FIXED (certificate-transport bug, not an algorithm gap).**
+`recover_boundary_cdt` converges on the PLC (7716 tets / 2516 nodes, ~237 s)
+and its `Rational{BigInt}` `certify_exact` proves every crease chain, pierce,
+boundary-membership and per-region-area predicate in exact arithmetic. The
+fill was nevertheless rejected because `_model_native_initial_volume_fill`
+re-ran the Float64 `_certify_surface_fill`/`_rb_gate` plus literal
+`_model_native_boundary_facets_match` on the output: exact Steiner vertices
+split creases at rational parameters (e.g. segment (101,304) split at `s=1//2`
+by node 936) whose Float64 images land ~1 ulp (≈9e-16) off the supporting
+line, so `_rb_onseg`'s exact-zero collinearity probe finds no covering chain —
+541 of 2047 creases false-reported "not recovered". The literal-incidence
+check is additionally unsatisfiable by construction for any
+Steiner-subdivided boundary (it guards against `oriented_surface_constructor`
+diagonal flips, which the exact backend never consumes). Fix: the exact-CDT
+fallback now returns `_finish_interior` on the certified mesh directly, the
+same contract `tetrahedralize` already uses (`src/geometry/
+ModelVolumeAlgorithms.jl`, `_model_native_initial_volume_fill`). No
+certificate was weakened — `certify_exact` strictly dominates the float gate.
+Regression pin in `test/meshing/mesh3d_test.jl` ("native volume fill trusts
+the exact-CDT certificate (t13 regression)", 7/7): a 16-vertex twisted-prism
+PLC whose exact-CDT mesh the float gate rejects identically, now accepted by
+the native fill with valid manifold + exact boundary area + exact volume.
+
+**Layer 2 — REMAINING BLOCKER (feature gap, precisely classified).**
+`_t13_check.jl` now reaches `mesh_model_volume`'s constraint certificate:
+`Volume[1] lost actual boundary Surface[2] cell 2582`.
+`_model_certify_native_volume_constraints` (`src/geometry/
+ModelNativeInitialTet.jl`) requires literal PLC facet incidence on the tet
+boundary — every published Surface cell exactly one tet face — which is
+unsatisfiable once exact recovery places Steiner vertices on boundary facets
+or creases (the twisted prism's boundary is 90 tet faces over 28 input
+facets; the aneurysm is non-star-shaped so boundary Steiner vertices are
+required, not an artifact). This is the same consistency problem upstream
+Gmsh solves by writing recovered boundary subdivisions back into each
+`GFace` mesh so emitted surface elements stay coincident with the volume
+boundary. The Tessella analog of `_model_surface_boundary_writeback!`
+(dim-1 write-back, `src/geometry/ModelMesh1D.jl:2035`) does not exist at
+dim 2: the needed work is propagating each fill boundary face to its parent
+facet/surface, minting node UIDs and cell labels for the new boundary
+vertices/cells inside the surface products' identity bookkeeping, then
+certifying subdivided incidence against them. The focused testset pins this
+explicit blocker at certificate level (`_model_certify_native_volume_constraints`
+throws `lost actual boundary Surface[2] cell 1` on the subdivided mesh) so the
+gap has a small reproduction; flip it to a write-back success assertion when
+the feature lands.
+
 ### UI01 plugin batch 2: MakeSimplex/ModifyComponents/FieldFromAmplitudePhase/ExtractEdges/Vorticity (2026-10-21, uncommitted in tree)
 
 Five `API.plugin` catalog entries landed in `src/interfaces/APIPlugins.jl`
