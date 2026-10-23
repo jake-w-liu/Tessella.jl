@@ -35,12 +35,14 @@ end
 
 function _struct_error(source::AbstractString)
     try
-        mktemp() do path,io
+        ex=mktemp() do path,io
             write(io,source)
             close(io)
             execute_geo(path)
         end
-        return nothing
+        # Recoverable `Error   :` diagnostics surface through `exec.errors`.
+        return !isempty(ex.errors) ?
+            ArgumentError(join(ex.errors,"\n")) : nothing
     catch err
         return err
     end

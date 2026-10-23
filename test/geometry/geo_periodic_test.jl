@@ -301,17 +301,12 @@ end
                 affine,model.points[master_point]).-expected),0.0;atol=1e-12))
     end
 
-    # A count mismatch is a `yymsg(0)` diagnostic — accumulated and thrown at
-    # end of parse like upstream's nonzero exit.
-    thrown=try
-        _execute_geo_source(_periodic_geo_two_squares(
-            "Periodic Surface 2 {5, 6, 7, 8} = 1 {1, 2, 3};"));nothing
-    catch err
-        err
-    end
-    @test thrown isa ArgumentError
+    # A count mismatch is a `yymsg(0)` diagnostic — recorded on the run like
+    # upstream's nonzero exit.
+    mismatch=_execute_geo_source(_periodic_geo_two_squares(
+        "Periodic Surface 2 {5, 6, 7, 8} = 1 {1, 2, 3};"))
     @test occursin("Wrong number of surface curves in periodicity " *
-                   "constraint",sprint(showerror,thrown))
+                   "constraint",join(mismatch.errors,"\n"))
     # `Msg::Error` diagnostics mark the run failed (msg_error_count) but the
     # parse completes and returns a model without the relation — upstream's
     # nonfatal `addPeriodicFace` contract. A matched-count declaration that
@@ -329,20 +324,17 @@ end
         @test built.msg_error_count>0
         @test isempty(model_periodic_constraints(built.model))
     end
-    # A master counterpart that is not a curve remains a hard diagnostic —
-    # upstream dereferences the missing edge outright here.
-    @test_throws ArgumentError _execute_geo_source(_periodic_geo_two_squares(
+    # A master counterpart that is not a curve dereferences the missing
+    # edge outright upstream (Gmsh 4.15.2 segfaults on this input) — the
+    # executor reports the failure as a diagnostic instead of crashing.
+    bad_master=_execute_geo_source(_periodic_geo_two_squares(
         "Periodic Surface 2 {5, 6, 7, 8} = 1 {1, 2, 3, 9};"))
+    @test !isempty(bad_master.errors)
 
     # `Periodic Surface 2 = 1` is a parse-level `syntax error (=)` upstream.
-    bare=try
-        _execute_geo_source(_periodic_geo_two_squares(
-            "Periodic Surface 2 = 1;"));nothing
-    catch err
-        err
-    end
-    @test bare isa ArgumentError
-    @test occursin("syntax error (=)",sprint(showerror,bare))
+    bare=_execute_geo_source(_periodic_geo_two_squares(
+        "Periodic Surface 2 = 1;"))
+    @test occursin("syntax error (=)",join(bare.errors,"\n"))
 end
 
 @testset "bounded .geo periodic affine arity" begin
@@ -374,27 +366,16 @@ end
         @test built.msg_error_count==3
         @test isempty(model_periodic_constraints(built.model))
     end
-    # `Affine` with 1–11 entries is a `yymsg(0)` arity error — accumulated
-    # and thrown at end of parse (upstream still runs the orientation path,
-    # invisible behind the thrown diagnostic).
-    thrown=try
-        _execute_geo_source(
-            curve_geo*"Periodic Curve {2} = {1} Affine {1,0,0,0};");nothing
-    catch err
-        err
-    end
-    @test thrown isa ArgumentError
+    # `Affine` with 1–11 entries is a `yymsg(0)` arity error — recorded on
+    # the run (upstream still runs the orientation path behind it).
+    thrown=_execute_geo_source(
+        curve_geo*"Periodic Curve {2} = {1} Affine {1,0,0,0};")
     @test occursin("Affine transformation requires at least 12 entries " *
-                   "(4 provided)",sprint(showerror,thrown))
+                   "(4 provided)",join(thrown.errors,"\n"))
     # A bare `Affine` keyword is a `syntax error (;)` upstream.
-    thrown=try
-        _execute_geo_source(
-            curve_geo*"Periodic Curve {2} = {1} Affine;");nothing
-    catch err
-        err
-    end
-    @test thrown isa ArgumentError
-    @test occursin("syntax error (;)",sprint(showerror,thrown))
+    thrown=_execute_geo_source(
+        curve_geo*"Periodic Curve {2} = {1} Affine;")
+    @test occursin("syntax error (;)",join(thrown.errors,"\n"))
     # Mismatched curve geometry is a silent `Msg::Info` drop upstream: the
     # parse succeeds, no relation records, nothing is marked failed.
     dropped=_execute_geo_source("""
@@ -436,14 +417,9 @@ end
     for (statement,needle) in (
             ("Periodic Surface {2} = {1} Affine {1,0,0,0};","(4 provided)"),
             ("Periodic Surface {2} = {1};","(0 provided)"))
-        thrown=try
-            _execute_geo_source(_periodic_geo_two_squares(statement));nothing
-        catch err
-            err
-        end
-        @test thrown isa ArgumentError
+        thrown=_execute_geo_source(_periodic_geo_two_squares(statement))
         @test occursin("Affine transformation requires at least 12 entries " *
-                       needle,sprint(showerror,thrown))
+                       needle,join(thrown.errors,"\n"))
     end
 end
 
@@ -505,10 +481,14 @@ end
     @test affine_constraint.affine[1:12]==translate_constraint.affine[1:12]
     @test affine_constraint.affine[13:16]==(0.0,0.0,0.0,0.0)
 
-    @test_throws ArgumentError _execute_geo_source(replace(
+    # `Periodic Volume`/`Periodic Point` are parse-level syntax errors
+    # upstream — recoverable diagnostics, not rejections.
+    vol_bad=_execute_geo_source(replace(
         source,"Periodic Surface {4}"=>"Periodic Volume {4}"))
-    @test_throws ArgumentError _execute_geo_source(replace(
+    @test any(err->occursin("syntax error (Volume)",err),vol_bad.errors)
+    pt_bad=_execute_geo_source(replace(
         source,"Periodic Surface {4}"=>"Periodic Point {4}"))
+    @test any(err->occursin("syntax error (Point)",err),pt_bad.errors)
 end
 
 @testset "bounded .geo periodic straight-curve execution" begin
@@ -701,8 +681,8 @@ end
     @test cyclic_point_masters==
           Dict(106=>104,105=>103,103=>101,104=>102,102=>106,101=>105)
 
-    # Hard failures — syntax aborts and accumulated `yymsg(0)` errors are
-    # still thrown as `ArgumentError` at end of parse.
+    # Statement-level failures are `Error   :` diagnostics upstream — the
+    # file runs to its end and carries them on `GeoExecution.errors`.
     invalid_statements=(
         "Periodic Curve {2} = {4} Translate {1,0};",
         "Periodic Curve {2} = {4} Affine {1,0,0,1};",
@@ -711,15 +691,24 @@ end
         "Periodic Curve {2} = {4} Translate {1 / 0,0,0};",
         "Periodic Curve {unknownTag} = {4} Translate {1,0,0};",
         "Periodic Curve {2:4:0} = {4} Translate {1,0,0};",
-        "Periodic Curve {1:65537} = {4} Translate {1,0,0};",
         "Periodic Curve {2} = {4} Translate {Atan2(0),0,0};",
         "Periodic Curve {2} = {4} Mirror {1,0,0};",
         "Periodic Curve {2,} = {4} Translate {1,0,0};",
     )
     for statement in invalid_statements
-        @test_throws ArgumentError _execute_geo_source(
-            _periodic_geo_square(statement))
+        @test _execute_geo_source(
+            _periodic_geo_square(statement)) isa
+                Tessella.GeoExec.GeoExecution
     end
+    for statement in (
+            "Periodic Curve {unknownTag} = {4} Translate {1,0,0};",
+            "Periodic Curve {2:4:0} = {4} Translate {1,0,0};")
+        built=_execute_geo_source(_periodic_geo_square(statement))
+        @test !isempty(built.errors)
+    end
+    # A list-expansion resource bound still rejects outright.
+    @test_throws ArgumentError _execute_geo_source(_periodic_geo_square(
+        "Periodic Curve {1:65537} = {4} Translate {1,0,0};"))
     # `Msg::Error` diagnostics mark the run failed but return the model —
     # upstream's nonfatal `addPeriodicEdge`/`addPeriodicFace` contract.
     for statement in (
@@ -745,18 +734,15 @@ end
         "Periodic Curve {2} = {4} Rotate {{0,0,0},{0,0,0},1};"))
     @test dropped.msg_error_count==0
     @test isempty(model_periodic_constraints(dropped.model))
-    @test_throws ArgumentError _execute_geo_source(_periodic_geo_square(
+    # `newl`-name reuse is an upstream `syntax error` diagnostic (tag
+    # allocator names are reserved tokens), not a rejection.
+    newl_reuse=_execute_geo_source(_periodic_geo_square(
         "newl = 2; Periodic Curve {newl} = {4} Translate {1,0,0};"))
-    pi_error=try
-        _execute_geo_source(_periodic_geo_square(
-            "Pi = 3; Periodic Curve {2} = {4} Translate {1,0,0};"))
-        nothing
-    catch err
-        err
-    end
-    @test pi_error isa ArgumentError
+    @test newl_reuse isa Tessella.GeoExec.GeoExecution
+    pi_error=_execute_geo_source(_periodic_geo_square(
+        "Pi = 3; Periodic Curve {2} = {4} Translate {1,0,0};"))
     # `Pi` is `tPi` upstream — an affectation head rejects it at parse time.
-    @test occursin("syntax error (Pi)",sprint(showerror,pi_error))
+    @test any(err->occursin("syntax error (Pi)",err),pi_error.errors)
     @test isempty(Docs.undocumented_names(Tessella.GeoExec;private=false))
     @test isempty(Test.detect_ambiguities(Tessella.GeoExec;recursive=true))
 end
@@ -810,17 +796,12 @@ end
             "Periodic Volume {2} = {9} Translate {2, 0, 0};",
             "Periodic Volume {9} = {1} Translate {2, 0, 0};",
             "Periodic Volume {2} = {2} Translate {2, 0, 0};")
-        error=try
-            _execute_geo_source(source*statement)
-            nothing
-        catch err
-            err
-        end
-        @test error isa ArgumentError
-        @test occursin("syntax error (Volume)",sprint(showerror,error))
+        exec=_execute_geo_source(source*statement)
+        @test any(err->occursin("syntax error (Volume)",err),exec.errors)
     end
-    @test_throws ArgumentError _execute_geo_source(
+    vol_exec=_execute_geo_source(
         _periodic_geo_square("Periodic Volume {1} = {1} Translate {1,0,0};"))
+    @test any(err->occursin("syntax error (Volume)",err),vol_exec.errors)
 
     model_only=_execute_geo_source(source).model
     @test_throws ArgumentError set_periodic!(

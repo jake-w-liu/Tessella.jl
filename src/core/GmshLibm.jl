@@ -484,7 +484,7 @@ end
     abs(y)<9007199254740992.0 && isodd(Int64(y))
 
 function _win_pow(x::Float64,y::Float64)
-    !_win_x87_llvm() || return _gm_pow(x,y)
+    !_win_x87_llvm() && return _gm_pow(x,y)
     if _win_cli_precision()
         saved=_win_x87_control_word()
         _win_x87_set_control_word!((saved&0xfcff)|UInt16(0x0300))

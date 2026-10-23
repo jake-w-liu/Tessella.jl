@@ -18,8 +18,12 @@ end
 
 function _curved_error(source::AbstractString)
     try
-        _execute_curved_source(source)
-        return nothing
+        ex=_execute_curved_source(source)
+        # Recoverable `Error   :` diagnostics surface through
+        # `exec.errors`, not a throw — re-materialize them so the
+        # assertions below keep checking the upstream text.
+        !isempty(ex.errors) ?
+            ArgumentError(join(ex.errors,"\n")) : nothing
     catch err
         return err
     end
@@ -319,29 +323,29 @@ end
 end
 
 @testset ".geo curved statement failures" begin
-    @test_throws ArgumentError _execute_curved_source("""
+    @test _curved_error("""
         Point(1) = {1,0,0};
         Circle(1) = {1,1,1};
-        """)
-    @test_throws ArgumentError _execute_curved_source("""
+        """) isa ArgumentError
+    @test _curved_error("""
         Point(1) = {1,0,0};
         Point(2) = {0,0,0};
         Circle(1) = {1,2};
-        """)
-    @test_throws ArgumentError _execute_curved_source("""
+        """) isa ArgumentError
+    @test _curved_error("""
         Point(1) = {1,0,0};
         Point(2) = {0,0,0};
         Point(3) = {0,1,0};
         Circle(1) = {1,2,3} Sphere {0,0,1};
-        """)
-    @test_throws ArgumentError _execute_curved_source("""
+        """) isa ArgumentError
+    @test _curved_error("""
         Point(1) = {0,0,0};
         Point(2) = {1,0,0};
         Line(1) = {1,2};
         Line(2) = {2,1};
         Curve Loop(1) = {1,2};
         Surface(1) = {1};
-        """)
+        """) isa ArgumentError
 end
 
 @testset "arc extrusion produces Gmsh surface kinds" begin

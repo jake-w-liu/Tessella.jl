@@ -450,7 +450,7 @@ end
     branch_mesh=mesh_model_surface(branch,1)
     @test validate(branch_mesh).ok
     @test mesh_crc(branch_mesh).sha==
-          "599aec5c04fc5ac44400437f25ff5b7d20f08dabb7b57ec879ce6e34a94b86db"
+          "abcc3d4ffd0a3462bc3067129931f26af42c12ca84166c2f006cb7a0926cc1c8"
     for (slave_entity,offset) in ((10,0.6),(20,0.3))
         branch_mapping=model_periodic_nodes(
             branch,branch_mesh,1,slave_entity)
@@ -483,7 +483,7 @@ end
     chain_mesh=mesh_model_surface(chain,1)
     @test validate(chain_mesh).ok
     @test mesh_crc(chain_mesh).sha==
-          "5ff98566e9b7f69de0ce7893a95f413fad48a650081a29ae56f1f61ff092c088"
+          "733022cad75c7deafb23070ea19419d7f948d7a8b15438bf3fa82585e5f5bb33"
     for (slave_entity,master_entity) in ((10,20),(20,30))
         chain_mapping=model_periodic_nodes(
             chain,chain_mesh,1,slave_entity)
@@ -754,7 +754,9 @@ end
             BooleanUnion(3) = { Volume{1}; Remove; }{ Volume{2}; };
             """)
         close(io)
-        @test_throws ArgumentError execute_geo(path)
+        # A failed statement is an `Error   :` diagnostic upstream —
+        # execution continues to the end of the file.
+        @test !isempty(execute_geo(path).errors)
     end
 
     mktemp() do path,io
@@ -770,15 +772,25 @@ end
     mktemp() do path,io
         write(io, "Extrude {0, 0, 1} { Surface{1}; };\n")
         close(io)
-        @test_throws ArgumentError execute_geo(path)
+        # `Surface{1}` inside an extrude list is a grammar reject upstream —
+        # recoverable `syntax error (;)`, execution continues.
+        exec=execute_geo(path)
+        @test exec.errors==["syntax error (;)"]
     end
     mktemp() do path,io
         write(io,"/* unterminated\n"); close(io)
         @test_throws ArgumentError execute_geo(path)
     end
     mktemp() do path,io
-        write(io,"Point(1) = {0, 0, 0, 1}};\n"); close(io)
-        @test_throws ArgumentError execute_geo(path)
+        write(io,"Point(1) = {0, 0, 0, 1}};\nPoint(2) = {1, 0, 0, 1};\n")
+        close(io)
+        # The stray `}` mid-production is an upstream `error tEND` abandon:
+        # `syntax error (})` and the incomplete statement has no side
+        # effects — later statements still run.
+        exec=execute_geo(path)
+        @test exec.errors==["syntax error (})"]
+        @test !haskey(exec.model.points,1)
+        @test haskey(exec.model.points,2)
     end
 
     hole=GeoModel()

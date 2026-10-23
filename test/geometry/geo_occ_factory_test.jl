@@ -45,17 +45,17 @@ TT(2,-2,0, 2,2,0, -1,2,0){4,0,0,0,4,0,0,0,1, 4,0,0,0,4,0,0,0,1, 4,0,0,0,4,0,0,0,
 };
 """
 
-# `execute_geo` collects per-statement diagnostics and throws a combined
-# ArgumentError at the end of the run; return its message for assertions on
-# the upstream error surface.
+# `execute_geo` collects per-statement diagnostics on `exec.errors`; join
+# them for assertions on the upstream error surface (fatal input still
+# throws an `ArgumentError`, whose message is returned).
 function _occ_geo_error(source::AbstractString)
     try
-        _occ_geo(source)
+        ex=_occ_geo(source)
+        return join(ex.errors,"\n")
     catch err
         err isa ArgumentError || rethrow()
         return err.msg
     end
-    return ""
 end
 
 @testset "OCC factory .geo routing" begin

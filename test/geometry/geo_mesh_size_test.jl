@@ -18,8 +18,12 @@ end
 
 function _point_mesh_size_error(source::AbstractString)
     try
-        _execute_point_mesh_size_source(source)
-        return nothing
+        ex=_execute_point_mesh_size_source(source)
+        # Recoverable `Error   :` diagnostics surface through
+        # `exec.errors`, not a throw — re-materialize them so the
+        # assertions below keep checking the upstream text.
+        !isempty(ex.errors) ?
+            ArgumentError(join(ex.errors,"\n")) : nothing
     catch err
         return err
     end
@@ -295,13 +299,27 @@ end
     @test expressions.model.point_size==Dict(
         1=>0.7,2=>0.5,3=>0.6,4=>0.5,5=>0.8)
 
+    # `GModel::setMeshSize` silently skips unknown tags, nonpositive sizes,
+    # empty selectors, and topology queries it does not consume — the `.geo`
+    # statement records no diagnostic and applies to the resolvable subset.
+    silent_sources=(
+        ("Point(1)={0,0,0,1}; MeshSize {1,99}=0.5;",Dict(1=>0.5)),
+        ("MeshSize {1}=0.5; Point(1)={0,0,0,1};",Dict(1=>1.0)),
+        ("Point(1)={0,0,0,1}; MeshSize {1}=0;",Dict(1=>1.0)),
+        ("Point(1)={0,0,0,1}; MeshSize {1}=-0.1;",Dict(1=>1.0)),
+        ("Point(1)={0,0,0,1}; MeshSize {}=0.5;",Dict(1=>1.0)),
+        ("MeshSize {:}=0.5;",Dict{Int,Float64}()),
+        ("Point(1)={0,0,0,1}; MeshSize{PointsOf{}}=0.5;",Dict(1=>1.0)),
+        ("Point(1)={0,0,0,1}; MeshSize{Boundary{Point{1};}}=0.5;",
+            Dict(1=>1.0)),
+    )
+    for (source,expected) in silent_sources
+        silent=_execute_point_mesh_size_source(source)
+        @test isempty(silent.errors)
+        @test silent.model.point_size==expected
+    end
+
     invalid_sources=(
-        "Point(1)={0,0,0,1}; MeshSize {1,99}=0.5;"=>"unknown Point[99]",
-        "MeshSize {1}=0.5; Point(1)={0,0,0,1};"=>"unknown Point[1]",
-        "Point(1)={0,0,0,1}; MeshSize {1}=0;"=>"finite and positive",
-        "Point(1)={0,0,0,1}; MeshSize {1}=-0.1;"=>"finite and positive",
-        "Point(1)={0,0,0,1}; MeshSize {}=0.5;"=>"entity list is empty",
-        "MeshSize {:}=0.5;"=>"matched no explicit modeled points",
         "Point(1)={0,0,0,1}; MeshSize{PointsOf{Surface{99};}}=0.5;"=>
             "unknown Surface[99]",
         "SetFactory(\"OpenCASCADE\"); Sphere(1)={0,0,0,0.5}; " *
@@ -310,16 +328,12 @@ end
             "every PointsOf entity block must end with a semicolon",
         "Point(1)={0,0,0,1}; MeshSize{PointsOf{Surface{};}}=0.5;"=>
             "entity list is empty",
-        "Point(1)={0,0,0,1}; MeshSize{PointsOf{}}=0.5;"=>
-            "PointsOf must contain at least one entity block",
         "Point(1)={0,0,0,1}; MeshSize{PointsOf{Surface{-2147483648};}}=0.5;"=>
             "magnitude exceeds Int32",
         "Point(1)={0,0,0,1}; MeshSize{PointsOf{Point{1:40000}; Point{1:40000};}}=0.5;"=>
             "PointsOf expands beyond 65536 entities",
         "Point(1)={0,0,0,1}; MeshSize{PointsOf{Curve Loop{1};}}=0.5;"=>
             "supports Point, Curve/Line, Surface, and Volume blocks",
-        "Point(1)={0,0,0,1}; MeshSize{Boundary{Point{1};}}=0.5;"=>
-            "unsupported topology query",
         "Physical Curve(\"bad\",1)=Boundary{Surface{99};};"=>
             "unknown Surface[99]",
         "SetFactory(\"OpenCASCADE\"); Cone(1)={0,0,0,0,0,1,0.5,0.2}; " *

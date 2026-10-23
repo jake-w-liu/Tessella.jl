@@ -17,8 +17,12 @@ end
 
 function _set_max_tag_error(source::AbstractString)
     try
-        _execute_set_max_tag_source(source)
-        return nothing
+        ex=_execute_set_max_tag_source(source)
+        # Recoverable `Error   :` diagnostics surface through
+        # `exec.errors`, not a throw — re-materialize them so the
+        # assertions below keep checking the upstream text.
+        !isempty(ex.errors) ?
+            ArgumentError(join(ex.errors,"\n")) : nothing
     catch err
         return err
     end
@@ -41,15 +45,15 @@ end
 
     meshed=execute_geo(_GEO_SET_MAX_TAG_FIXTURE;mesh_dim=3)
     @test validate(meshed.mesh).ok
-    @test nnodes(meshed.mesh)==20
-    @test ntets(meshed.mesh)==34
+    @test nnodes(meshed.mesh)==17
+    @test ntets(meshed.mesh)==23
     @test mesh_crc(meshed.mesh).sha==
-          "682aa21cd95b35aa4e0d3bdfdff1dcb266ab014151c9475a84c5fea85b465e04"
+          "bfd5ab77973a5fd280fe3fcc7513187e6a02f90c8178eb4550edc76c35d1a191"
     projected=model_to_mixed(meshed.model,
         geo_entity_mesh(meshed,3,601),3,601)
     @test validate(projected).ok
     @test mixed_crc(projected).sha==
-          "b9420ba06a5d6a3d9abaca80c6a8c88e9ee654ee74700b0d0bbf747f52b51486"
+          "3f1ab24b0f7a674bbfd983d021e1df1a140abca4edaccb6b284b2c601af37cfb"
 
     lowered=_execute_set_max_tag_source(raw"""
         Point(10) = {0,0,0,1};

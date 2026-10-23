@@ -11,8 +11,9 @@ end
 
 function _execute_geo_error(source::AbstractString;mesh_dim=0)
     return try
-        _execute_geo_source(source;mesh_dim=mesh_dim)
-        nothing
+        ex=_execute_geo_source(source;mesh_dim=mesh_dim)
+        !isempty(ex.errors) ?
+            ArgumentError(join(ex.errors,"\n")) : nothing
     catch err
         err isa InterruptException && rethrow()
         err

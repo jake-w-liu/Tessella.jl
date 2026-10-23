@@ -11,8 +11,12 @@ end
 
 function _control_error(source::AbstractString)
     try
-        _execute_control_source(source)
-        return nothing
+        ex=_execute_control_source(source)
+        # Recoverable `Error   :` diagnostics surface through
+        # `exec.errors`, not a throw — re-materialize them so the
+        # assertions below keep checking the upstream text.
+        !isempty(ex.errors) ?
+            ArgumentError(join(ex.errors,"\n")) : nothing
     catch err
         return err
     end
@@ -458,7 +462,7 @@ end
         EndIf
         """)
     @test err isa ArgumentError
-    @test sprint(showerror,err)=="ArgumentError: execute_geo: syntax error (y)"
+    @test sprint(showerror,err)=="ArgumentError: syntax error (y)"
     # When the discard swallows the `EndIf` itself, no orphan diagnostic
     # follows — the first `;`-statement ends the recovery.
     err2=_control_error(raw"""
@@ -598,7 +602,10 @@ end
     # platforms link the system libm upstream, so the pins are Windows-only.
     # These CLI pins use the standalone executable's PC64 precision. Direct
     # DLL/API calls instead retain the caller's precision and rounding.
-    if Sys.iswindows()
+    # Under `--compile=min` `llvmcall` is unavailable — `_win_x87_llvm()`
+    # reports false and the emulation path serves the expressions instead,
+    # so the hardware-pinned block is skipped.
+    if Sys.iswindows() && Tessella.GmshLibm._win_x87_llvm()
         x87_source=
             "a = Sin(1e300); b = Cos(1e300); c = Sin(9.5e18); " *
             "d = Cos(9.5e18); e = Sin(-9.3e18); f = Cos(-9.3e18); " *

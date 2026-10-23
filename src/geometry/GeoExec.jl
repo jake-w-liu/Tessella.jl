@@ -37,6 +37,8 @@ BREP remain explicit blockers.
 """
 module GeoExec
 
+using Printf: Format, format as _printf_format
+
 import ..Model
 import ..Elements
 
@@ -428,22 +430,30 @@ struct GeoExecution
     # payloads plus `Plugin(...).Run` products) — upstream's `GModel._views`
     # ordering; `Background Mesh View[i]`/`Field[i] = "PostView"` index it.
     views::Vector
+    # Statement-level diagnostics (`Error   : ...`) that Gmsh reports and
+    # continues past — `yymsg(0)` parse diagnostics and recoverable
+    # statement failures. Empty for a clean run; `execute_geo` still
+    # throws for fatal input (unterminated statements, unmatched braces,
+    # resource bounds) exactly like upstream's parser aborts.
+    errors::Vector{String}
 end
 
 GeoExecution(model,mesh,params,transfinite_tri,values,lists,strings,warnings,
              msg_error_count,exit_code,mesh_parts)=GeoExecution(model,mesh,params,
     transfinite_tri,values,lists,strings,warnings,msg_error_count,exit_code,
-    mesh_parts,mesh_parts,UInt64(0),UInt64(0),1.0,false,nothing,Any[])
+    mesh_parts,mesh_parts,UInt64(0),UInt64(0),1.0,false,nothing,Any[],String[])
 
 GeoExecution(model,mesh,params,transfinite_tri,values,lists,strings,warnings,
     msg_error_count,exit_code,mesh_parts,node_max,element_max,lc,forced_bbox)=
     GeoExecution(model,mesh,params,transfinite_tri,values,lists,strings,warnings,
-        msg_error_count,exit_code,mesh_parts,mesh_parts,node_max,element_max,lc,forced_bbox,nothing,Any[])
+        msg_error_count,exit_code,mesh_parts,mesh_parts,node_max,element_max,
+        lc,forced_bbox,nothing,Any[],String[])
 
 GeoExecution(model,mesh,params,transfinite_tri,values,lists,strings,warnings,
     msg_error_count,exit_code,mesh_parts,actual_mesh_parts,node_max,element_max,lc,forced_bbox)=
     GeoExecution(model,mesh,params,transfinite_tri,values,lists,strings,warnings,
-        msg_error_count,exit_code,mesh_parts,actual_mesh_parts,node_max,element_max,lc,forced_bbox,nothing,Any[])
+        msg_error_count,exit_code,mesh_parts,actual_mesh_parts,node_max,
+        element_max,lc,forced_bbox,nothing,Any[],String[])
 
 """
     geo_entity_mesh(execution, dim, tag; geometry=false) -> Union{Mesh,MixedMesh}
@@ -569,9 +579,18 @@ function _geo_exec_statements(stream::Base.IO)
             elseif c=='{'
                 depth+=1; write(buf,c); buf_has_content=true
             elseif c=='}'
-                depth>0 || throw(ArgumentError(
-                    "execute_geo: unmatched closing brace"))
-                depth-=1; write(buf,c); buf_has_content=true
+                if depth==0
+                    # A stray `}` mid-production: bison's `error tEND`
+                    # abandons the incomplete statement at the `}` token —
+                    # no side effects — then recovers through the next `;`.
+                    # Drop the fragment and let `}` lead its own statement,
+                    # which execution reports as `syntax error (})`.
+                    take!(buf)
+                    buf_has_content=false
+                else
+                    depth-=1
+                end
+                write(buf,c); buf_has_content=true
                 if depth==0 && _geo_brace_terminated_statement(
                         String(buf.data[1:position(buf)]))
                     if _geo_extrude_pipe_candidate(
@@ -864,11 +883,16 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
         # `exit(0)` leaves before the end-of-parse errorstate check.
         empty!(context.exec_errors)
     end
-    isempty(context.exec_errors) || throw(ArgumentError(
-        "execute_geo: $(join(context.exec_errors,"; "))"))
+    # Statement-level diagnostics (`Error   : ...`) do not fail the run —
+    # upstream reports them and continues; they surface on
+    # `GeoExecution.errors`/`msg_error_count` like the Gmsh batch exit
+    # status. A `:toomany` stop is upstream's parser abort (>20 errors in
+    # one file), which does reject.
+    context.stop===:toomany && throw(ArgumentError(
+        "execute_geo: Too many errors: aborting parser..."))
     # `Msg::Error` diagnostics (option writes, `Error(...)`) do not fail the
-    # parse — they surface through `GeoExecution.msg_error_count` like the
-    # Gmsh batch exit code.
+    # parse — they surface through `GeoExecution.msg_error_count`/`errors`
+    # like the Gmsh batch exit code.
     # A mid-file `Mesh n` leaves its product on the model for `Save` and the
     # mesh-operation statements; the mesh_dim keyword still generates on
     # request.
@@ -880,19 +904,15 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
         mesh,context.mesh_node_owner=_geo_mesh_model(model,1,context)
         context.mesh=mesh
     elseif dim==2
-        (isempty(model.surfaces) && !any(key->key[1]==2,
-            Iterators.flatten((keys(model.discrete),keys(model.meshing.attached))))) &&
-            throw(ArgumentError("execute_geo: Mesh 2 requested but no surfaces exist"))
         # Upstream `Mesh n` meshes every entity of dimension <= n regardless
         # of entity count: vertex parts (including orphan `Point` entities),
         # graded curve parts, and the surface parts merge on bitwise
-        # coordinates with per-node ownership for the mesh operations.
+        # coordinates with per-node ownership for the mesh operations. An
+        # empty dimension silently produces a smaller mesh, like `gmsh -2`
+        # on a curve-only model.
         mesh,context.mesh_node_owner=_geo_mesh_model(model,2,context)
         context.mesh=mesh
     elseif dim==3
-        (isempty(model.volumes) && !any(key->key[1]==3,
-            Iterators.flatten((keys(model.discrete),keys(model.meshing.attached))))) &&
-            throw(ArgumentError("execute_geo: Mesh 3 requested but no volumes exist"))
         mesh,context.mesh_node_owner=_geo_mesh_model(model,3,context)
         context.mesh=mesh
     end
@@ -917,7 +937,8 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
                         context.mesh_node_max,context.mesh_element_max,
                         context.native_context_lc,context.native_context_forced_bbox,
                         context.native_element_lookup_receipt,
-                        copy(get(_GEO_EXEC_VIEWS,context,Any[])))
+                        copy(get(_GEO_EXEC_VIEWS,context,Any[])),
+                        copy(context.error_log))
 end
 
 # Upstream control flow is a token stream, not a block tree (Gmsh.y
@@ -1208,6 +1229,24 @@ function _geo_exec_endwhile!(statements::Vector{String},i::Int,
     return lvl.body_start
 end
 
+# Executor safety bounds stay fatal — they guard the interpreter itself
+# (statement/byte/loop/call-depth budgets, like upstream's own aborts),
+# not the `.geo` semantics Gmsh reports and recovers from. They are the
+# `ArgumentError`s whose message reports a budget violation; ordinary
+# statement-level `ArgumentError`s are upstream `Error   :` diagnostics.
+_geo_argerror_fatal(err)=
+    err isa ArgumentError &&
+        occursin(r"\bexceed|\bbeyond\b",sprint(showerror,err))
+
+# Drop the `ArgumentError:`/`execute_geo:` wrappers so recorded diagnostics
+# read like upstream's `Error   : <msg>` stream instead of internal call
+# sites.
+function _geo_stmt_error_text(err)
+    text=sprint(showerror,err)
+    return String(replace(text,
+        r"^(?:ArgumentError:\s*)?execute_geo:\s*"=>"";count=1))
+end
+
 # Execute statements[lo:hi]; returns the last Mesh.TransfiniteTri assignment, if
 # any. Control constructs recurse into their block ranges; If evaluates
 # constant-expression conditions, For iterates `name In {a:b[:c]}` evaluated
@@ -1246,8 +1285,15 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
                         m,statements,line,context,allocator_state,executed)
                 catch err
                     err isa InterruptException && rethrow()
-                    err isa _GeoSyntaxAbort || rethrow()
-                    _geo_yyerror!(context,"syntax error ($(err.token))")
+                    if err isa _GeoSyntaxAbort
+                        _geo_yyerror!(context,"syntax error ($(err.token))")
+                    else
+                        # A recoverable statement failure is an upstream
+                        # `Error :` diagnostic — record and continue.
+                        err isa ArgumentError || rethrow()
+                        _geo_argerror_fatal(err) && rethrow()
+                        _geo_yyerror!(context,_geo_stmt_error_text(err))
+                    end
                     nothing
                 end
                 assigned===nothing || (transfinite_tri=assigned)
@@ -1274,18 +1320,31 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
                 _exec_line!(m,line,context,allocator_state)
             catch err
                 err isa InterruptException && rethrow()
-                err isa _GeoSyntaxAbort || rethrow()
-                # A `header` abort surfaces at the *next* token upstream:
-                # the nested production already consumed this statement's
-                # `;` (the `Split` Transform inside an `x =`/`x() =` list),
-                # so the error lands on the following statement's head —
-                # `$end` at the stream tail.
-                token=err.header ?
-                    (i+1<=lastindex(statements) ?
-                        _geo_stmt_head_token(statements[i+1]) : "\$end") :
-                    err.token
-                _geo_yyerror!(context,"syntax error ($token)")
-                syntax_aborted=true;abort_ate_end=err.header;nothing
+                if err isa _GeoSyntaxAbort
+                    # A `header` abort surfaces at the *next* token upstream:
+                    # the nested production already consumed this statement's
+                    # `;` (the `Split` Transform inside an `x =`/`x() =` list),
+                    # so the error lands on the following statement's head —
+                    # `$end` at the stream tail.
+                    token=err.header ?
+                        (i+1<=lastindex(statements) ?
+                            _geo_stmt_head_token(statements[i+1]) : "\$end") :
+                        err.token
+                    _geo_yyerror!(context,"syntax error ($token)")
+                    syntax_aborted=true;abort_ate_end=err.header
+                else
+                    # Statement-level `ArgumentError` — upstream diagnoses
+                    # it (`Error   : ...`) and executes the next statement.
+                    # The statement was syntactically complete, so its
+                    # terminator already ended the discard: no recovery
+                    # skip, and the allocator observer still runs (the
+                    # statement may have partially executed, exactly like
+                    # a mid-action upstream failure).
+                    err isa ArgumentError || rethrow()
+                    _geo_argerror_fatal(err) && rethrow()
+                    _geo_yyerror!(context,_geo_stmt_error_text(err))
+                end
+                nothing
             end
             assigned===nothing || (transfinite_tri=assigned)
             # `Delete`-family statements already drove the allocator update
@@ -1372,8 +1431,17 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
                 end
             catch err
                 err isa InterruptException && rethrow()
-                err isa _GeoSyntaxAbort || rethrow()
-                _geo_yyerror!(context,"syntax error ($(err.token))")
+                if err isa _GeoSyntaxAbort
+                    _geo_yyerror!(context,"syntax error ($(err.token))")
+                else
+                    # A recoverable header failure (`For`/`If`/`While`
+                    # condition errors, function-definition failures) is a
+                    # diagnostic; `error tEND` recovery still discards
+                    # through the next `;`-statement like upstream.
+                    err isa ArgumentError || rethrow()
+                    _geo_argerror_fatal(err) && rethrow()
+                    _geo_yyerror!(context,_geo_stmt_error_text(err))
+                end
                 _geo_recovery_next_i(statements,i)
             end
         end
@@ -2133,14 +2201,10 @@ function _geo_exec_transform_term(m::GeoModel,raw::AbstractString,
         isempty(rest) || _geo_selector_abort(rest)
         entities=_geo_shape_list_entities!(m,shape_list,context,caller;
                                            allocator_state=allocator_state)
-        if allocator_state!==nothing && allocator_state.factory===:opencascade
-            entities=_geo_occ_apply_transform!(
-                m,entities,t,context,caller,_GEO_OCC_TRANSFORM_WHAT[name])
-        else
-            transform_entities!(m,t,entities;caller=caller,
-                                auto_coherence=_geo_auto_coherence(context))
-            context.geo_changed=true
-        end
+        _geo_apply_transform_entities!(m,name,t,entities,context,caller;
+                                       allocator_state=allocator_state)
+        # Gmsh yields the parsed entity list itself (`$$ = $MultipleShape`),
+        # including any tags the endpoint skipped.
         return Float64[Float64(tag) for (_,tag) in entities]
     end
     if !startswith(rest,"{")
@@ -3399,6 +3463,89 @@ function _geo_shape_list_entities!(m::GeoModel, raw::AbstractString,
     return entities
 end
 
+# Entity nouns in upstream diagnostics: the `GEO_Internals` endpoints use
+# the geometry word ("Unknown GEO point with tag 9" / "Unknown GEO point
+# 9"), the `GModel` endpoints the model word ("Unknown model curve with
+# tag 9" — region for volumes, vertex for points).
+const _GEO_KIND_NOUNS=("point","curve","surface","volume")
+const _GEO_MODEL_NOUNS=("vertex","curve","surface","region")
+
+# `GEO_Internals`/`OCC_Internals` transform endpoints follow any `Msg::Error`
+# entity lookups with a recoverable `yymsg(0)` "Could not ..." diagnostic.
+const _GEO_TRANSFORM_FAIL=Dict(
+    "Translate"=>"Could not translate shapes",
+    "Rotate"=>"Could not rotate shapes",
+    "Dilate"=>"Could not dilate shapes",
+    "Symmetry"=>"Could not apply symmetry transform")
+
+# Apply a transform (Translate/Rotate/Dilate/Symmetry) to a resolved
+# MultipleShape list the way upstream's endpoints do: each unknown entity
+# is a `Msg::Error` and is skipped, the transform still applies to the
+# rest, and a dropped entity or an endpoint failure adds the recoverable
+# "Could not <verb> ..." `yymsg(0)`. Returns the entities that were kept.
+# A `.geo` entity reference resolves under either kernel: explicit
+# `m.<kind>` stores, `m.discrete` imports, and lazy OCC bindings
+# (`Box(1)` lives in `occ_kernel.bindings` until materialized).
+_geo_geo_entity_known(m::GeoModel,dim::Int,tag::Int)=
+    _model_entity_known(m,dim,tag) ||
+    haskey(m.occ_kernel.bindings,(dim,tag))
+
+function _geo_apply_transform_entities!(m::GeoModel,kind::AbstractString,t,
+        entities,context::_GeoNumericContext,caller::AbstractString;
+        allocator_state=nothing)
+    kept=NTuple{2,Int}[];dropped=false
+    for (d,tag) in entities
+        if 0<=d<=3 && _geo_geo_entity_known(m,d,abs(tag))
+            push!(kept,(d,tag))
+        else
+            dropped=true
+            _geo_msg_error!(context,"Unknown GEO " *
+                "$(_GEO_KIND_NOUNS[clamp(d,0,3)+1]) with tag $(abs(tag))")
+        end
+    end
+    base=length(context.exec_errors)
+    if allocator_state!==nothing && allocator_state.factory===:opencascade
+        _geo_occ_apply_transform!(m,kept,t,context,caller,
+                                _GEO_OCC_TRANSFORM_WHAT[kind])
+    else
+        try
+            transform_entities!(m,t,kept;caller=caller,
+                auto_coherence=_geo_auto_coherence(context))
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_msg_error!(context,_geo_stmt_error_text(err))
+            _geo_yyerror!(context,_GEO_TRANSFORM_FAIL[kind])
+        end
+        context.geo_changed=true
+    end
+    dropped && length(context.exec_errors)==base &&
+        _geo_yyerror!(context,_GEO_TRANSFORM_FAIL[kind])
+    return kept
+end
+
+# `X{...} In Surface{...}`/`In Volume{...}` — `GModel::embed` upstream:
+# a missing parent or member is a `Msg::Error` naming what was skipped;
+# every resolvable member still embeds.
+function _geo_exec_embed!(m::GeoModel,dim::Int,ids,target_dim::Int,target,
+                          context::_GeoNumericContext)
+    _geo_geo_entity_known(m,target_dim,target) || (
+        _geo_msg_error!(context,"Unknown model " *
+            "$(_GEO_MODEL_NOUNS[target_dim+1]) with tag $target");
+        return nothing)
+    kept=Int[]
+    for id in ids
+        if _geo_geo_entity_known(m,dim,id)
+            push!(kept,Int(id))
+        else
+            _geo_msg_error!(context,"Unknown model " *
+                "$(_GEO_MODEL_NOUNS[dim+1]) with tag $id")
+        end
+    end
+    isempty(kept) || embed!(m,dim,kept,target_dim,target)
+    return nothing
+end
+
 # One MultipleShape element. Returns (entities, remaining_text, is_transform).
 # `signed_tags` allows negative entity tags (`Curve{-1}`) — Gmsh's
 # `RecursiveListOfDouble` permits them and `Extrude` reads the sign as the
@@ -3480,13 +3627,8 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
         (inner_list,s)=_geo_balanced_group(s,nested)
         inner=_geo_shape_list_entities!(m,inner_list,context,caller;
                                         allocator_state=allocator_state)
-        if allocator_state!==nothing && allocator_state.factory===:opencascade
-            _geo_occ_apply_transform!(
-                m,inner,t,context,nested,_GEO_OCC_TRANSFORM_WHAT[name])
-        else
-            transform_entities!(m,t,inner;caller=nested,
-                                auto_coherence=_geo_auto_coherence(context))
-        end
+        _geo_apply_transform_entities!(m,name,t,inner,context,nested;
+                                       allocator_state=allocator_state)
         # Gmsh returns the input shape list (`$$ = $MultipleShape`).
         return (inner,s,true)
     end
@@ -3709,32 +3851,73 @@ function _geo_shape_action!(m::GeoModel, name::AbstractString,
                             caller::AbstractString;
                             allocator_state=nothing)
     if name=="Duplicata"
+        # Unknown entities are upstream `Msg::Error`s ("Unknown GEO <kind>
+        # <n>") — each is skipped, the copy still runs on the rest, and a
+        # dropped entity or a copy failure ends in the recoverable
+        # `yymsg(0)` "Could not apply operation on shapes".
+        kept=NTuple{2,Int}[];dropped=false
+        for (d,tag) in inner
+            if 0<=d<=3 && _geo_geo_entity_known(m,d,abs(tag))
+                push!(kept,(d,tag))
+            else
+                dropped=true
+                _geo_msg_error!(context,"Unknown GEO " *
+                    "$(_GEO_KIND_NOUNS[clamp(d,0,3)+1]) $(abs(tag))")
+            end
+        end
+        base=length(context.exec_errors)
         if allocator_state!==nothing && allocator_state.factory===:opencascade
             # `OCC_Internals::copy` — `_multiBind` binds the inputs at their
             # tags, duplicates, and reports the new highest-dimension tags.
             kernel=_geo_occ_prepare_kernel!(m)
             out=try
-                _geo_occ_bind_entities!(m,inner,kernel,"$caller: Duplicata")
-                Model._model_occ_copy_entities!(m,inner)
+                _geo_occ_bind_entities!(m,kept,kernel,"$caller: Duplicata")
+                Model._model_occ_copy_entities!(m,kept)
             catch err
                 err isa InterruptException && rethrow()
                 err isa ArgumentError || rethrow()
                 _geo_occ_fail!(context,err,"Could not copy shapes")
                 nothing
             end
+            dropped && length(context.exec_errors)==base &&
+                _geo_yyerror!(context,"Could not apply operation on shapes")
             out===nothing && return NTuple{2,Int}[]
             _geo_occ_finish!(m,context)
             return NTuple{2,Int}[(d,t) for (d,t) in out]
         end
-        return duplicate_entities!(m,inner;caller="$caller: Duplicata")
+        out=try
+            duplicate_entities!(m,kept;caller="$caller: Duplicata")
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_msg_error!(context,_geo_stmt_error_text(err))
+            dropped=true;nothing
+        end
+        dropped && _geo_yyerror!(context,"Could not apply operation on shapes")
+        return out===nothing ? NTuple{2,Int}[] : out
     elseif name in ("Boundary","CombinedBoundary","OrientedBoundary",
                     "OrientedCombinedBoundary")
         combined=occursin("Combined",name)
         oriented=occursin("Oriented",name)
-        entries=NTuple{2,Int}[]
+        entries=NTuple{2,Int}[];failed=false
         for d in sort!(unique!(first.(inner));rev=true)
             d==0 && continue   # Points have no boundary (Gmsh returns none)
-            group=[e for e in inner if e[1]==d]
+            # Unknown entities are upstream `Msg::Error`s ("Unknown model
+            # <kind> with tag <n>") — skipped while the boundary still
+            # applies to the rest; any drop ends in the recoverable
+            # `yymsg(0)` "Could not apply operation on shapes".
+            group=NTuple{2,Int}[]
+            for (ed,t) in inner
+                ed==d || continue
+                if _geo_geo_entity_known(m,d,abs(t))
+                    push!(group,(d,t))
+                else
+                    failed=true
+                    _geo_msg_error!(context,"Unknown model " *
+                        "$(_GEO_MODEL_NOUNS[d+1]) with tag $(abs(t))")
+                end
+            end
+            isempty(group) && continue
             if oriented
                 for (_,signed_tag) in Iterators.flatten(
                         _model_direct_boundary(
@@ -3750,6 +3933,7 @@ function _geo_shape_action!(m::GeoModel, name::AbstractString,
                 end
             end
         end
+        failed && _geo_yyerror!(context,"Could not apply operation on shapes")
         return entries
     elseif name=="PointsOf"
         return NTuple{2,Int}[(0,t) for t in _model_points_of(
@@ -4276,6 +4460,11 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
     # upstream, whose OCC gate also sits between the two.
     entities,params=_geo_extrude_shape_list!(m,shapes,context,caller,
                                              allocator_state)
+    # `GEO_Internals::extrude`/`ExtrudeShapes` silently skips tags that do
+    # not resolve to a live entity — unlike the transform endpoints it
+    # emits no per-entity diagnostic.
+    entities=NTuple{2,Int}[e for e in entities
+        if _geo_geo_entity_known(m,e[1],abs(e[2]))]
     if nvec==0
         # `BOUNDARY_LAYER` (`Extrude {shapes; params}`): upstream rejects it
         # in the parser action under OCC before `ExtrudeShapes` runs.
@@ -5081,13 +5270,8 @@ function _geo_exec_transform_statement!(m::GeoModel,line::AbstractString,
         "$caller: unexpected text after the shape list"))
     entities=_geo_shape_list_entities!(m,shape_list,context,caller;
                                        allocator_state=allocator_state)
-    if allocator_state!==nothing && allocator_state.factory===:opencascade
-        _geo_occ_apply_transform!(
-            m,entities,t,context,caller,_GEO_OCC_TRANSFORM_WHAT[kind])
-        return nothing
-    end
-    transform_entities!(m,t,entities;caller=caller,auto_coherence=_geo_auto_coherence(context))
-    context.geo_changed=true
+    _geo_apply_transform_entities!(m,kind,t,entities,context,caller;
+                                   allocator_state=allocator_state)
     return nothing
 end
 
@@ -6553,6 +6737,15 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         entities=_geo_shape_list_entities!(
             m,inner,context,caller;signed_tags=true,
             allocator_state=allocator_state)
+        # `GModel::remove` reports each unresolved entity as a
+        # `Msg::Error` and still removes the rest — the deletion itself
+        # skips missing tags like upstream's best-effort removal.
+        for (d,t) in entities
+            (0<=d<=3 && _geo_geo_entity_known(m,d,abs(t))) &&
+                continue
+            _geo_msg_error!(context,"Unknown model " *
+                "$(_GEO_MODEL_NOUNS[clamp(d,0,3)+1]) with tag $(abs(t))")
+        end
         removed=_geo_delete_entities!(m,entities;recursive=recursive)
         # `GModel::remove` unbinds every OCC-resident entity it deletes —
         # leaving the binding would resurrect the tag at the next
@@ -6586,7 +6779,8 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         _geo_sync_physical_view!(m,context)
         return nothing
     end
-    recursive && _geo_syntax_abort(isempty(s) ? ";" : string(first(s)))
+    recursive && _geo_syntax_abort(
+        isempty(s) ? ";" : _geo_stmt_head_token(s))
     # `Delete Embedded { Surface{...}; Volume{...}; }` clears every embedding
     # on the listed parents (dims 2 and 3 only — lower-dim entries are ignored
     # and a missing parent is an error), matching `removeEmbedded`.
@@ -6603,8 +6797,13 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         dim_tags=NTuple{2,Int}[]
         for (dim,tag) in entities
             dim in (2,3) || continue
-            haskey(_model_entity_dictionary(m,dim),tag) || throw(ArgumentError(
-                "$caller: unknown model $(_entity_label(dim)) with tag $tag"))
+            if !_geo_geo_entity_known(m,dim,tag)
+                # `removeEmbedded` reports a `Msg::Error` per missing
+                # parent and clears the embeddings it did resolve.
+                _geo_msg_error!(context,"Unknown model " *
+                    "$(_GEO_MODEL_NOUNS[dim+1]) with tag $tag")
+                continue
+            end
             push!(dim_tags,(dim,tag))
         end
         remove_embedded!(m,dim_tags)
@@ -6624,12 +6823,17 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
             index=_geo_int_value(
                 _geo_eval_numeric(fm.captures[2],context,caller),caller)
             store=get(_GEO_EXEC_VIEWS,context,nothing)
-            (store===nothing || !(0<=index<length(store))) &&
-                throw(ArgumentError("$caller: unknown view $index"))
+            if store===nothing || !(0<=index<length(store))
+                # `GModel::removeViewByIndex` → `yymsg(0, "Unknown view")`,
+                # recoverable.
+                _geo_yyerror!(context,"Unknown view $index")
+                return nothing
+            end
             deleteat!(store,index+1)
             return nothing
         end
-        throw(ArgumentError("$caller: unknown command 'Delete $base'"))
+        _geo_yyerror!(context,"Unknown command 'Delete $base'")
+        return nothing
     end
     # `Delete Empty Views` clears post-processing views carrying no records;
     # any other two-word form is an unknown command.
@@ -6641,8 +6845,9 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
                 filter!(v->!(isempty(v.elements)&&isempty(v.texts)),store)
             return nothing
         end
-        throw(ArgumentError(
-            "$caller: unknown command 'Delete $(tm.captures[1]) $(tm.captures[2])'"))
+        _geo_yyerror!(context,
+            "Unknown command 'Delete $(tm.captures[1]) $(tm.captures[2])'")
+        return nothing
     end
     # Named forms: `Delete All|Model|Physicals|Variables|Options|Meshes|Struct;`,
     # `Delete <variable>;`, and the `Delete <name>~{expr};` namespaced symbol
@@ -6663,8 +6868,8 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         else
             # `tDelete` expects a name, `name~{i}`, `{...}` or `[...]` —
             # the syntax error lands on the offending token (`Delete = 5`
-            # → `(=)`).
-            _geo_syntax_abort(isempty(s) ? ";" : string(first(s)))
+            # → `(=)`, `Delete Point{9}` → `(Point)`).
+            _geo_syntax_abort(isempty(s) ? ";" : _geo_stmt_head_token(s))
         end
     end
     if name=="All"
@@ -7688,8 +7893,8 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             "execute_geo: OnelabRun")
         length(nargs) in (1,2) || _geo_yyerror!(context,
             "OnelabRun takes one or two arguments")
-        length(nargs) in (1,2) && throw(ArgumentError(
-            "execute_geo: OnelabRun: external ONELAB clients are not supported"))
+        length(nargs) in (1,2) && _geo_yyerror!(context,
+            "OnelabRun: external ONELAB clients are not supported")
         return
     elseif (mm=match(
             r"^Boolean(Difference|Union|Intersection|Fragments|Section|Fuse|Coherence|Common|Cut)\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
@@ -7701,9 +7906,12 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_eval_numeric(mm.captures[2],context,"$caller result tag"),
             "$caller result tag"))
         groups=_geo_boolean_groups(mm.captures[3],caller)
-        # Upstream `BooleanShape` skips both the diagnostic and operand
-        # resolution when the OCC kernel is inactive — a silent no-op.
+        # `BooleanShape` reports a recoverable `yymsg(0)` and skips operand
+        # resolution when the OCC kernel is inactive.
         if allocator_state===nothing || allocator_state.factory!==:opencascade
+            _geo_yyerror!(context,
+                "Boolean operators only available with OpenCASCADE " *
+                "geometry kernel")
             return
         end
         opname=_GEO_BOOLEAN_NAMES[mm.captures[1]]
@@ -7747,11 +7955,13 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         caller="execute_geo: $(mm.captures[1]) In Surface"
         dim=mm.captures[1]=="Point" ? 0 : 1
         # `addEmbedded` resolves members through `getVertexByTag` — raw
-        # tags, no `abs` (unlike point-creation references).
+        # tags, no `abs` (unlike point-creation references). Missing
+        # members and a missing target are upstream `Msg::Error`s that
+        # skip only what they name.
         ids=_geo_exec_entity_tags(mm.captures[2],context,"$caller entities")
         target=_geo_exec_single_entity(
             mm.captures[3],context,"$caller target")
-        embed!(m,dim,ids,2,target)
+        _geo_exec_embed!(m,dim,ids,2,target,context)
         return
     elseif (mm=match(
             r"^(Point|Line|Curve|Surface)\s*\{\s*(.*?)\s*\}\s+In\s+Volume\s*\{\s*(.*?)\s*\}\s*;$",
@@ -7761,7 +7971,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         ids=_geo_exec_entity_tags(mm.captures[2],context,"$caller entities")
         target=_geo_exec_single_entity(
             mm.captures[3],context,"$caller target")
-        embed!(m,dim,ids,3,target)
+        _geo_exec_embed!(m,dim,ids,3,target,context)
         return
     elseif (physical=_geo_physical_declaration(line)) !== nothing
         caller="execute_geo: Physical $(physical.kind)"
@@ -7832,22 +8042,30 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             line)) !== nothing
         caller="execute_geo: $(mm.captures[1])"
         selector=String(strip(mm.captures[2]))
+        # Gmsh's `GModel::setMeshSize` is silent on `MeshSize {}`, topology
+        # queries that are not `PointsOf` (`Boundary`, `CombinedBoundary`,
+        # `Closest`, ...), and empty `PointsOf{}` blocks.
+        isempty(selector) && return
         point_tags=if selector==":"
             sort!(collect(keys(m.points)))
         elseif match(r"^PointsOf(?:\s|\{)",selector)!==nothing
-            _geo_exec_points_of(m,selector,context,caller)
+            match(r"^PointsOf\s*\{\s*\}$",selector)!==nothing ? Int[] :
+                _geo_exec_points_of(m,selector,context,caller)
         else
-            occursin(r"[A-Za-z_][A-Za-z0-9_]*\s*\{",selector) &&
-                throw(ArgumentError(
-                    "$caller: unsupported topology query; use inline PointsOf " *
-                    "with Point, Curve/Line, Surface, or explicit Volume blocks"))
+            occursin(r"[A-Za-z_][A-Za-z0-9_]*\s*\{",selector) && return
             _geo_exec_entity_tags(selector,context,"$caller Point selector";
                                   abs_refs=true)
         end
-        isempty(point_tags) && throw(ArgumentError(
-            "$caller: Point selector matched no explicit modeled points"))
+        # `GModel::setMeshSize` resolves each tag through
+        # `getVertexByTag` and silently skips what is not a modeled point.
+        point_tags=Int[t for t in point_tags if haskey(m.points,t)]
+        isempty(point_tags) && return
         mesh_size=_geo_eval_numeric(
             mm.captures[3],context,"$caller value")
+        # A nonpositive size parses and stores like any other number, but every
+        # `lc <= 0` vertex behaves as unconstrained downstream — silently
+        # skipping produces the observable-equivalent model.
+        mesh_size<=0 && return
         set_point_mesh_size!(m,point_tags,mesh_size)
         return
     elseif (mm=match(
@@ -8266,17 +8484,19 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         return
     elseif match(r"^SendToServer\b",line)!==nothing
         # Not a grammar verb in Gmsh 4.15.2 — upstream reports an unknown
-        # command rather than a view operation.
-        throw(ArgumentError(
-            "execute_geo: unknown command 'SendToServer'"))
-    elseif match(r"^(CutMesh|SplitMesh)\b",line)!==nothing
+        # command rather than a view operation, and continues.
+        _geo_yyerror!(context,"Unknown command 'SendToServer'")
+        return
+    elseif (cm=match(r"^(CutMesh|SplitMesh)\b",line))!==nothing
         # Legacy `CutMesh <fexpr>`/`SplitMesh <fexpr>` mesh-surgery verbs —
-        # the cutting backend is not part of the executor surface.
-        throw(ArgumentError(
-            "execute_geo: post-processing view operations are not supported: $line"))
+        # the cutting backend is not part of the executor surface; the
+        # diagnostic is recoverable like every other statement error.
+        _geo_yyerror!(context,
+            "post-processing view operations are not supported: $line")
+        return
     elseif match(r"^Levelset\b",line)!==nothing
-        throw(ArgumentError(
-            "execute_geo: Levelset definitions are not supported"))
+        _geo_yyerror!(context,"Levelset definitions are not supported")
+        return
     elseif (mm=match(r"^(Homology|Cohomology|Betti)\b(.*)$",line))!==nothing
         # `Homology`/`Cohomology`/`Betti` queue a request like
         # `GModel::addHomologyRequest`; requests run inside the next
@@ -9483,11 +9703,15 @@ function _geo_exec_partition_mesh!(m::GeoModel,args::AbstractString,
                                    context::_GeoNumericContext,caller::AbstractString)
     caller="$caller: PartitionMesh"
     count=_geo_int_value(_geo_eval_numeric(String(strip(args)),context,caller),caller)
-    count>=1 || throw(ArgumentError(
-        "$caller: PartitionMesh requires a positive partition count"))
+    # `GModel::partitionMesh(0)` partitions into no parts — a silent no-op.
+    count<1 && return nothing
     _geo_sync_physical_view_if_changed!(m,context)
-    context.mesh===nothing && throw(ArgumentError(
-        "$caller: PartitionMesh requires a current mesh — run `Mesh n;` first"))
+    if context.mesh===nothing
+        # `GModel::partitionMesh` with no mesh is a `Msg::Warning`, not
+        # an error — execution continues.
+        _geo_yywarn!(context,"No mesh nodes were found")
+        return nothing
+    end
     _geo_check_part_rows(context)
     topology=!iszero(something(
         _geo_option_number(context,"Mesh",0,"PartitionCreateTopology"),1.0))
@@ -9498,11 +9722,15 @@ function _geo_exec_partition_mesh!(m::GeoModel,args::AbstractString,
         context.mesh_parts,context.mesh_part_rows,context.mesh_node_owner,caller;
         initial_max_node_tag=context.mesh_node_max,
         initial_max_element_tag=context.mesh_element_max)
-    actual===nothing && throw(ArgumentError(
-        "$caller: PartitionMesh requires a current mesh — run `Mesh n;` first"))
+    if actual===nothing
+        _geo_yywarn!(context,"No mesh nodes were found")
+        return nothing
+    end
     _,_,total=api._mesh_element_offsets(actual)
-    total>0 || throw(ArgumentError(
-        "$caller: PartitionMesh requires a mesh with elements"))
+    if total==0
+        _geo_yywarn!(context,"No mesh elements were found")
+        return nothing
+    end
     assignment=api._partition_lower_inherit(api._partition_elements(actual,count),actual)
     plan=topology||ghosts ?
         api._partition_tet_production_plan(source,actual,class,count,assignment,
@@ -10646,7 +10874,9 @@ function _geo_exec_mesh_statement!(m::GeoModel,line::AbstractString,
     elseif (mm=match(r"^SetOrder\s+(.*?)\s*;?\s*$",s))!==nothing
         order=_geo_int_value(
             _geo_eval_numeric(mm.captures[1],context,caller),caller)
-        order<1 && throw(ArgumentError("$caller: SetOrder requires order >= 1"))
+        # `SetOrder 0` is silently accepted upstream (`Mesh.ElementOrder`
+        # just stores the value).
+        order<1 && return nothing
         if !isempty(context.mesh_parts) ||
                 context.mesh isa MixedMesh && context.mesh.entity_data!==nothing
             _geo_operate_actual_mesh!(m,context,:order,"$caller: SetOrder";element_order=order)
@@ -11106,16 +11336,18 @@ function _geo_exec_command!(m::GeoModel,word::AbstractString,
     elseif word=="CreateDir"
         mkpath(_geo_fix_relative_path(context.file_name,arg))
     elseif word=="OnelabRun"
-        throw(ArgumentError(
-            "$caller: external ONELAB clients are not supported"))
+        # `Msg::Error`-level upstream diagnostic — the run continues.
+        _geo_yyerror!(context,
+            "OnelabRun: external ONELAB clients are not supported")
+        return nothing
     elseif word=="OptimizeMesh"
         # `GModel::optimizeMesh(how)` — the method is validated before any
         # entity iteration, so an unknown name errors even without a mesh;
         # a mesh without the relevant cells is a silent no-op.
         arg in ("","Gmsh","Optimize","Relocate3D","Laplace2D","Relocate2D") ||
-            throw(ArgumentError(
-                "$caller: unknown or unsupported mesh optimization " *
-                "method \"$arg\""))
+            (_geo_yyerror!(context,
+                "unknown or unsupported mesh optimization method \"$arg\"");
+             return nothing)
         context.mesh===nothing && return nothing
         mesh=context.mesh
         if arg in ("","Gmsh","Optimize","Relocate3D")
@@ -11137,15 +11369,17 @@ function _geo_exec_command!(m::GeoModel,word::AbstractString,
         end
         return nothing
     elseif word=="SetBoundingBox"
-        throw(ArgumentError(
-            "$caller: `SetBoundingBox` was removed in Gmsh 3.0; " *
-            "use `BoundingBox{...}`"))
+        _geo_yyerror!(context,
+            "`SetBoundingBox` was removed in Gmsh 3.0; use `BoundingBox{...}`")
+        return nothing
     elseif word in ("SetCurrentWindow","SplitCurrentWindowHorizontal",
                     "SplitCurrentWindowVertical")
         # GUI window management — no-op in batch.
         return nothing
     else
-        throw(ArgumentError("$caller: unknown command '$word'"))
+        # `yymsg(0, "Unknown command '%s'")` — recoverable.
+        _geo_yyerror!(context,"Unknown command '$word'")
+        return nothing
     end
     return nothing
 end
@@ -11220,11 +11454,27 @@ function _geo_exec_plugin!(m::GeoModel,line::AbstractString,
     api=getfield(parentmodule(@__MODULE__),:API)
     name=api._plugin_check_name(String(mm.captures[1]),caller)
     field=mm.captures[2];value_src=mm.captures[3]
+    if !haskey(api._PLUGINS,name)
+        # `Failed action '<a>' or unknown plugin '<n>'` on actions; the
+        # option form reports `Unknown option '<o>' or plugin '<n>'` —
+        # both recoverable `yymsg(0)` diagnostics upstream.
+        _geo_yyerror!(context,field=="Run" ?
+            "Failed action 'Run' or unknown plugin '$name'" :
+            "Unknown option '$field' or plugin '$name'")
+        return nothing
+    end
     if field=="Run"
         run=value_src===nothing ||
             !iszero(_geo_eval_numeric(value_src,context,caller))
         if run
-            _geo_plugin_run!(api,name,m,context,caller)
+            try
+                _geo_plugin_run!(api,name,m,context,caller)
+            catch err
+                err isa InterruptException && rethrow()
+                err isa ArgumentError || rethrow()
+                # A plugin `run()` failure is an upstream `Msg::Error`.
+                _geo_msg_error!(context,_geo_stmt_error_text(err))
+            end
         else
             lock(api.STATE_LOCK) do
                 api._plugin_state_locked(name).numbers["Run"]=0.0
@@ -11232,8 +11482,13 @@ function _geo_exec_plugin!(m::GeoModel,line::AbstractString,
         end
         return nothing
     end
-    value_src===nothing && throw(ArgumentError(
-        "$caller: Plugin($name).$field needs a value"))
+    if value_src===nothing
+        # `Plugin(X).Foo` is an action call upstream — `Failed action`
+        # when `Foo` is not a runnable action.
+        _geo_yyerror!(context,
+            "Failed action '$field' or unknown plugin '$name'")
+        return nothing
+    end
     entry=api._plugin_entry(name,caller)
     if haskey(entry.number_options,field)
         api._plugin_set_number(name,field,
@@ -11242,8 +11497,7 @@ function _geo_exec_plugin!(m::GeoModel,line::AbstractString,
         api._plugin_set_string(name,field,
             _geo_eval_string(value_src,context,caller))
     else
-        throw(ArgumentError(
-            "$caller: unknown option '$field' for plugin '$name'"))
+        _geo_yyerror!(context,"Unknown option '$field' or plugin '$name'")
     end
     return nothing
 end
@@ -11332,6 +11586,34 @@ end
 # `Save View[i] "file";` — upstream `PView::write` exports one post-processing
 # view; the execution view list serializes the parsed `.pos` record table.
 # `Print` is not a view verb upstream ("Unknown operation 'Print' on view N").
+# Flat text view export — upstream `PViewData::writeTXT` emits one row per
+# node: `step time ent ele x y z v1 v2 ...`. List-parsed views carry a
+# single entity/step, so `step`/`ent` are 0 and `ele` is the flat element
+# index; `time` is the step time (0 here).
+function _geo_view_write_txt(file::AbstractString,view)
+    fmt(v)=isa(v,AbstractFloat) ?
+        _printf_format(Format("%.16g"),v) : v
+    open(file,"w") do io
+        nsteps=isempty(view.elements) ? 0 :
+            maximum(e->size(e.values,3),view.elements)
+        for step in 1:nsteps
+            for (ele,e) in enumerate(view.elements)
+                size(e.values,3)<step && continue
+                for node in axes(e.coords,2)
+                    print(io,step-1," ",fmt(0.0)," 0 ",ele-1," ",
+                          fmt(e.coords[1,node])," ",fmt(e.coords[2,node])," ",
+                          fmt(e.coords[3,node])," ")
+                    for comp in axes(e.values,1)
+                        print(io,fmt(e.values[comp,node,step])," ")
+                    end
+                    print(io,"\n")
+                end
+            end
+        end
+    end
+    return nothing
+end
+
 function _geo_exec_save_view!(kind::AbstractString,index_src::AbstractString,
                               file_src::AbstractString,
                               context::_GeoNumericContext)
@@ -11339,25 +11621,37 @@ function _geo_exec_save_view!(kind::AbstractString,index_src::AbstractString,
     index=_geo_int_value(
         _geo_eval_numeric(index_src,context,caller),caller)
     store=get(_GEO_EXEC_VIEWS,context,nothing)
-    (store===nothing || !(0<=index<length(store))) && throw(ArgumentError(
-        "$caller: unknown view $index"))
-    kind=="Print" && throw(ArgumentError(
-        "$caller: unknown operation 'Print' on view $index"))
+    if store===nothing || !(0<=index<length(store))
+        # `yymsg(0, "Unknown view %d")` — recoverable.
+        _geo_yyerror!(context,"Unknown view $index")
+        return nothing
+    end
+    if kind=="Print"
+        # `Print` is not a view verb upstream.
+        _geo_yyerror!(context,"Unknown operation 'Print' on view $index")
+        return nothing
+    end
     file=_geo_fix_relative_path(context.file_name,
         _geo_eval_string(file_src,context,caller))
     extension=lowercase(splitext(file)[2])
-    extension==".pos" || throw(ArgumentError(
-        "$caller: view export writes `.pos` records (got '$file')"))
     post=getfield(parentmodule(@__MODULE__),:Post)
     view=store[index+1]
-    # Upstream refuses to serialize scheme-bound datasets to old POS
-    # format (its `PViewDataList::writePOS` guard) — same rejection text
-    # as the API export path.
-    isempty(view.interpolations) || throw(ArgumentError(
-        "$caller: Cannot export datasets with interpolation matrices in "*
-        "old POS format: consider using the new mesh-based format "*
-        "instead, or select 'Adapt post-processing data' before exporting"))
-    post.write_pos(file,view)
+    if extension==".pos"
+        # Upstream refuses to serialize scheme-bound datasets to old POS
+        # format (its `PViewDataList::writePOS` guard) — a `Msg::Error`.
+        if !isempty(view.interpolations)
+            _geo_msg_error!(context,
+                "Cannot export datasets with interpolation matrices in " *
+                "old POS format: consider using the new mesh-based " *
+                "format instead, or select 'Adapt post-processing data' " *
+                "before exporting")
+            return nothing
+        end
+        post.write_pos(file,view)
+        return nothing
+    end
+    # Every other extension takes upstream's flat-text export.
+    _geo_view_write_txt(file,view)
     return nothing
 end
 
@@ -11371,8 +11665,11 @@ function _geo_exec_alias_view!(kind::AbstractString,index_src::AbstractString,
     index=_geo_int_value(
         _geo_eval_numeric(index_src,context,caller),caller)
     store=get(_GEO_EXEC_VIEWS,context,nothing)
-    (store===nothing || !(0<=index<length(store))) && throw(ArgumentError(
-        "$caller: unknown view $index"))
+    if store===nothing || !(0<=index<length(store))
+        # `yymsg(0, "Unknown view %d")` — recoverable.
+        _geo_yyerror!(context,"Unknown view $index")
+        return nothing
+    end
     post=getfield(parentmodule(@__MODULE__),:Post)
     src=store[index+1]
     push!(store,post.PosView(src.name;
@@ -11445,9 +11742,12 @@ function _geo_exec_combine!(mode_src::AbstractString,
                             context::_GeoNumericContext)
     caller="execute_geo: Combine"
     mode=strip(mode_src)
-    mode in ("ElementsFromAllViews","ElementsByViewName",
-             "TimeStepsByViewName") || throw(ArgumentError(
-        "$caller: unknown 'Combine' command $(repr(mode))"))
+    if !(mode in ("ElementsFromAllViews","ElementsByViewName",
+                  "TimeStepsByViewName"))
+        # `yymsg(0, "Unknown 'Combine' command")` — recoverable.
+        _geo_yyerror!(context,"Unknown 'Combine' command")
+        return nothing
+    end
     store=get(_GEO_EXEC_VIEWS,context,nothing)
     (store===nothing || isempty(store)) && return nothing
     post=getfield(parentmodule(@__MODULE__),:Post)
@@ -11497,7 +11797,12 @@ function _geo_exec_include!(m::GeoModel,path::AbstractString,
                             context::_GeoNumericContext,caller::AbstractString,
                             allocator_state)
     file=_geo_fix_relative_path(context.file_name,path)
-    isfile(file) || throw(ArgumentError("$caller: missing file '$file'"))
+    if !isfile(file)
+        # `GModel::readGEO`/the file dispatcher reports `Msg::Error` and
+        # the stream resumes at the next statement.
+        _geo_msg_error!(context,"Unable to open file '$path'")
+        return nothing
+    end
     ext=lowercase(splitext(file)[2])
     if ext==".pos"
         # `Merge`/`Include` of a `.pos` file appends its views to the model's
@@ -11559,6 +11864,13 @@ function _geo_exec_include!(m::GeoModel,path::AbstractString,
         _exec_geo_statements!(
             m,statements,firstindex(statements),lastindex(statements),
             context,allocator_state,Ref(0))
+    catch err
+        err isa InterruptException && rethrow()
+        # A syntax error that escapes statement dispatch is recorded like
+        # the included file's own parse diagnostics — upstream's parser
+        # returns to the caller's stream after reporting it.
+        err isa _GeoSyntaxAbort || rethrow()
+        _geo_yyerror!(context,"syntax error ($(err.token))")
     finally
         context.file_name=parent_file
         context.file_error_base=parent_base
@@ -11900,9 +12212,12 @@ function _geo_exec_save!(m::GeoModel,path::AbstractString,
     else
         -1.0
     end
-    (version>0 || extension==".stl") || throw(ArgumentError(
-        "$caller: supported output extensions are .msh, .msh2/.msh22, " *
-        ".msh4/.msh41 and .stl (got '$file')"))
+    if !(version>0 || extension in (".stl",".pos",".vtk"))
+        # `CreateOutputFile` reports an unrecognized extension as a
+        # `Msg::Error` and the stream continues.
+        _geo_msg_error!(context,"Unknown output file format")
+        return nothing
+    end
     # `CreateOutputFile` writes the synced model — materialize the physical
     # view (and pending unknown-member warnings) first, when internals changed.
     _geo_sync_physical_view_if_changed!(m,context)
@@ -11912,13 +12227,25 @@ function _geo_exec_save!(m::GeoModel,path::AbstractString,
         mesh=authority.mesh
     end
     if mesh===nothing
-        isempty(m.points) || throw(ArgumentError(
-            "$caller: no mesh exists — run `Mesh n;` first"))
+        # `CreateOutputFile` writes whatever the (possibly empty) mesh is.
         mesh=Mesh(zeros(3,0))
     end
     if extension==".stl"
         io_mod=getfield(parentmodule(@__MODULE__),:IO)
         io_mod.write_stl(file,mesh)
+        return nothing
+    end
+    if extension==".vtk"
+        io_mod=getfield(parentmodule(@__MODULE__),:IO)
+        io_mod.write_vtk(file,mesh)
+        return nothing
+    end
+    if extension==".pos"
+        # `CreateOutputFile` serializes the built-in mesh-statistics view
+        # (the only `.pos` payload a mesh-only model carries).
+        post=getfield(parentmodule(@__MODULE__),:Post)
+        post.write_pos(file,[post.PosView("Statistics";
+            time=Float64[0.0])])
         return nothing
     end
     # `.msh` keeps MSH 2.2 for backward compatibility, but an explicit

@@ -271,28 +271,25 @@ end
     """)
     @test sort!(collect(keys(parsed.model.volumes)))==[1,2,3]
 
-    # single-brace form is a syntax error in Gmsh too — rejected
-    @test_throws ArgumentError _exec_geo("""
+    # single-brace form is a syntax error in Gmsh too — a recoverable
+    # `Error   :` diagnostic upstream, recorded on the run.
+    single_brace=_exec_geo("""
     SetFactory("OpenCASCADE");
     Box(1) = {0,0,0, 1,1,1};
     Box(2) = {0.5,0,0, 1,1,1};
     v() = BooleanUnion{ Volume{1,2}; Delete; };
     """)
+    @test !isempty(single_brace.errors)
 
-    # explicit tag on a multi-piece result errors inside .geo as well
-    err=try
-        _exec_geo("""
+    # explicit tag on a multi-piece result errors inside .geo as well — a
+    # recoverable `Error   :` diagnostic upstream, recorded on the run.
+    err_exec=_exec_geo("""
         SetFactory("OpenCASCADE");
         Box(1) = {0,0,0, 1,1,1};
         Box(2) = {0.4,-0.5,-0.5, 0.2,2,2};
         BooleanDifference(9) = { Volume{1}; Delete; }{ Volume{2}; Delete; };
         """)
-        nothing
-    catch e
-        e
-    end
-    @test err!==nothing
-    @test occursin("2 result volumes", sprint(showerror,err))
+    @test occursin("2 result volumes",join(err_exec.errors,"\n"))
 
     # tagged form with multi-operand groups in BOTH braces — a single fused
     # piece binds the requested tag; a later Point(newp) resolves against the

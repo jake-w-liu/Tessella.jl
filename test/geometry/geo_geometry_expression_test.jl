@@ -17,8 +17,12 @@ end
 
 function _geometry_expression_error(source::AbstractString)
     try
-        _execute_geometry_expression_source(source)
-        return nothing
+        ex=_execute_geometry_expression_source(source)
+        # Recoverable `Error   :` diagnostics surface through
+        # `exec.errors`, not a throw — re-materialize them so the
+        # assertions below keep checking the upstream text.
+        !isempty(ex.errors) ?
+            ArgumentError(join(ex.errors,"\n")) : nothing
     catch err
         return err
     end

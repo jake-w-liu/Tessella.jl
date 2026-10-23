@@ -16,8 +16,12 @@ end
 
 function _dynamic_tag_error(source::AbstractString)
     try
-        _execute_dynamic_tag_source(source)
-        return nothing
+        ex=_execute_dynamic_tag_source(source)
+        # Recoverable `Error   :` diagnostics surface through
+        # `exec.errors`, not a throw — re-materialize them so the
+        # assertions below keep checking the upstream text.
+        !isempty(ex.errors) ?
+            ArgumentError(join(ex.errors,"\n")) : nothing
     catch err
         return err
     end
@@ -30,7 +34,11 @@ function _dynamic_tag_stderr(source::AbstractString)
     text=mktemp() do path,io
         redirect_stdio(;stderr=io) do
             try
-                _execute_dynamic_tag_source(source)
+                ex=_execute_dynamic_tag_source(source)
+                # Recoverable `yymsg(0)` diagnostics live on `exec.errors`
+                # — re-materialize the "would have thrown" surface.
+                !isempty(ex.errors) &&
+                    (err=ArgumentError(join(ex.errors,"\n")))
             catch e
                 err=e
             end
@@ -424,7 +432,9 @@ end
         @test isempty(ordering.fields[9].options)
 
         missing_delete=_dynamic_tag_stderr("Field[1]=Box; Delete Field[9];")
-        @test missing_delete[1]===nothing
+        # Upstream prints `Error   : Cannot delete field id 9, it does not
+        # exist` and continues — a recoverable error diagnostic.
+        @test missing_delete[1] isa ArgumentError
         @test occursin("Cannot delete field id 9, it does not exist",
                        missing_delete[2])
 

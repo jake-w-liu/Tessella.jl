@@ -104,10 +104,15 @@ end
     @test seen[(0,1)].tets == seen[(0,0)].tets     # ghosts stay aliases
 end
 
-@testset "GEO PartitionMesh rejects invalid use" begin
-    @test_throws ArgumentError _pm_execute("PartitionMesh(0);\n")
+@testset "GEO PartitionMesh on absent meshes is a warning" begin
+    # `GModel::partitionMesh(0)` is a silent no-op upstream.
+    @test _pm_execute("PartitionMesh(0);\n") isa Tessella.GeoExec.GeoExecution
     nomesh = joinpath(tempdir(),"pm_nomesh.geo")
     write(nomesh,BOX*"Delete Meshes;\nPartitionMesh(3);\n")
-    @test_throws ArgumentError Tessella.GeoExec.execute_geo(nomesh)
+    # With no current mesh upstream emits `No mesh nodes were found` as a
+    # `Msg::Warning` and continues.
+    ex = Tessella.GeoExec.execute_geo(nomesh)
+    @test isempty(ex.errors)
+    @test ex.warnings==["No mesh nodes were found"]
 end
 end

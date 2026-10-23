@@ -2175,6 +2175,11 @@ mutable struct _GeoNumericContext
     # warnings.
     exec_errors::Vector{String}
     exec_warnings::Vector{String}
+    # The ordered union of every `Error   :` diagnostic (`yymsg(0)` and
+    # `Msg::Error`) — the user-visible stream a run produced. `exec_errors`
+    # stays the errorstate counter; `error_log` carries both channels so
+    # `GeoExecution.errors` reflects the whole diagnostic stream in order.
+    error_log::Vector{String}
     # `gmsh_yyerrorstate` is saved/restored per parsed file: the >20-error
     # abort cap counts only errors raised inside the current file's stream.
     # File-boundary callers (`execute_geo`, `Include`) set the base.
@@ -2264,7 +2269,7 @@ _GeoNumericContext()=_GeoNumericContext(
     Dict{Tuple{String,Int,String},String}(),
     Dict{Tuple{String,Int,String},Float64}(),
     Dict{Tuple{String,Int,String},NTuple{4,Int}}(),0,nothing,0,Int[],nothing,
-    String[],String[],0,false,:run,0,Dict{Int,Tuple{Int,Int}}(),
+    String[],String[],String[],0,false,:run,0,Dict{Int,Tuple{Int,Int}}(),
     Tuple{Int,Int,Union{Mesh,MixedMesh}}[],Vector{Int32}[],nothing,
     Union{Nothing,Vector{Float64}}[],UInt64(0),UInt64(0),
     Dict{Tuple{Int,Int},Vector{Int}}(),true,true,nothing,
@@ -2304,6 +2309,7 @@ function _geo_yyerror!(context::_GeoNumericContext,message::AbstractString)
     context.stderr_diagnostics &&
         (print(stderr,"Error   : ",message,"\n");flush(stderr))
     push!(context.exec_errors,String(message))
+    push!(context.error_log,String(message))
     return nothing
 end
 
@@ -2334,6 +2340,7 @@ function _geo_msg_error!(context::_GeoNumericContext,message::AbstractString)
     context.stderr_diagnostics &&
         (print(stderr,"Error   : ",message,"\n");flush(stderr))
     context.msg_error_count+=1
+    push!(context.error_log,String(message))
     return nothing
 end
 
@@ -8841,8 +8848,12 @@ function _geo_record_scalar!(context::_GeoNumericContext,name_raw::AbstractStrin
     # upstream rejects the statement as a syntax error, so the scan leaves
     # no binding behind.
     name in _GEO_LEXER_KEYWORDS && return nothing
-    name in _GEO_SIDE_EFFECT_SYMBOLS && throw(ArgumentError(
-        "read_geo_params: dynamic tag allocator $name is read-only"))
+    if name in _GEO_SIDE_EFFECT_SYMBOLS
+        # Recoverable statement diagnostic upstream — record and continue
+        # like `_geo_exec_scalar!` does under the executor's catch.
+        _geo_yyerror!(context,"dynamic tag allocator $name is read-only")
+        return nothing
+    end
     try
         # `String__Index NumericAffectation ListOfDouble`: the RHS is a
         # list production, so `a = {1,2}` defines a list while a single
@@ -8898,8 +8909,10 @@ function _geo_record_list!(context::_GeoNumericContext,raw::AbstractString)
     matched=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*[\[\(]",strip(raw))
     matched===nothing && return false
     name=String(matched.captures[1])
-    name in _GEO_SIDE_EFFECT_SYMBOLS && throw(ArgumentError(
-        "read_geo_params: dynamic tag allocator $name is read-only"))
+    if name in _GEO_SIDE_EFFECT_SYMBOLS
+        _geo_yyerror!(context,"dynamic tag allocator $name is read-only")
+        return true
+    end
     try
         return _geo_apply_list_assignment!(
             context,raw,"read_geo_params: numeric list assignment")
@@ -10742,24 +10755,28 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
                 isempty(tail) ? ";" : string(first(tail)))
             if (em=match(r"^([A-Za-z_][A-Za-z0-9_]*|\"[^\"]*\")\s*\{",tail))!==nothing
                 word=strip(em.captures[1],'"')
-                word=="Embedded" || throw(ArgumentError(
-                    "read_geo_params: unknown command 'Delete $word { ... }'"))
+                # Anything other than `Embedded` is the executor's
+                # recoverable syntax/unknown-command diagnostic (`Delete
+                # Point{9}` → `syntax error (Point)` upstream).
+                word=="Embedded" || return
                 return  # `Delete Embedded` clears embeddings — no params state
             end
             if (vm=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;?$",
                          tail))!==nothing
                 vm.captures[1]=="Empty" && vm.captures[2]=="Views" && return
-                throw(ArgumentError("read_geo_params: unknown command " *
-                    "'Delete $(vm.captures[1]) $(vm.captures[2])'"))
+                # `Delete X Y` reports `Unknown command` at execution —
+                # recoverable, no params state.
+                return
             end
             if (fm=match(r"^([A-Za-z_][A-Za-z0-9_]*|\"[^\"]*\")\s*\[\s*(.*?)\s*\]\s*;?$",
                          tail))!==nothing
                 base=String(strip(fm.captures[1],'"'))
                 # `Delete View[i]` erases an exec-layer post-processing view —
                 # no params state. `Delete Field[i]` updates the field tables.
+                # Any other indexed name is the executor's recoverable
+                # `Unknown command` diagnostic.
                 base=="View" && return
-                base=="Field" || throw(ArgumentError(
-                    "read_geo_params: unknown command 'Delete $base[...]'"))
+                base=="Field" || return
                 tag=_geo_signed_gmsh_int_value(
                     _geo_eval_numeric(fm.captures[2],context,
                         "read_geo_params: Delete Field tag"),

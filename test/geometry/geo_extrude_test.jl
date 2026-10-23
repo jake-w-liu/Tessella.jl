@@ -11,8 +11,12 @@ end
 
 function _extrude_error(source::AbstractString)
     try
-        _execute_extrude_source(source)
-        return nothing
+        ex=_execute_extrude_source(source)
+        # Recoverable `Error   :` diagnostics surface through
+        # `exec.errors`, not a throw — re-materialize them so the
+        # assertions below keep checking the upstream text.
+        !isempty(ex.errors) ?
+            ArgumentError(join(ex.errors,"\n")) : nothing
     catch err
         return err
     end
@@ -842,12 +846,13 @@ end
     @test err isa ArgumentError
     @test occursin("Volume",sprint(showerror,err))
 
+    # An unresolved entity in the shape list is skipped silently upstream —
+    # no `Error`/`Warning` diagnostic at all (Gmsh 4.15.2 verified).
     err=_extrude_error("""
         Point(1) = {0,0,0,1};
         Extrude {0,0,1} { Point{99}; }
         """)
-    @test err isa ArgumentError
-    @test occursin("Point[99]",sprint(showerror,err))
+    @test err===nothing
 
     # Every entity block in the shape list must end with a semicolon.
     err=_extrude_error("""

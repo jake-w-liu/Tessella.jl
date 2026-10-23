@@ -90,13 +90,14 @@ ST(0,0,0, 1,0,0, 0,1,0){1.0, 2.0, 3.0};
         files=Dict("v.pos"=>_TRI_POS))
     @test length(ex.views)==1
 
-    # Malformed / unknown names and options reject like the API surface.
-    @test_throws ArgumentError _execute_geo_source(
-        "Plugin(NoSuchPlugin).Run;")
-    @test_throws ArgumentError _execute_geo_source(
-        "Plugin(Integrate).NoSuchOption = 1;")
-    @test_throws ArgumentError _execute_geo_source(
-        "Plugin(Integrate).View;")
+    # Unknown plugin names/options are recoverable `Error   :` diagnostics
+    # upstream — execution continues and the run records them.
+    ex=_execute_geo_source("Plugin(NoSuchPlugin).Run;")
+    @test ex.errors==["Failed action 'Run' or unknown plugin 'NoSuchPlugin'"]
+    ex=_execute_geo_source("Plugin(Integrate).NoSuchOption = 1;")
+    @test ex.errors==["Unknown option 'NoSuchOption' or plugin 'Integrate'"]
+    ex=_execute_geo_source("Plugin(Integrate).View;")
+    @test ex.errors==["Failed action 'View' or unknown plugin 'Integrate'"]
 
     # Mesh plugins bind the mid-file mesh as the current slot: SimplePartition
     # slices it and the produced `_MeshPartition` republishes through the
@@ -153,20 +154,34 @@ end
     # `Delete View[0]` left only the (now index-0) empty view.
     @test ex.views[1].name=="v1"
     @test isempty(ex.views[1].elements)
-    @test_throws ArgumentError _execute_geo_source(
-        "Merge \"in.pos\";\nSave View[9] \"x.pos\";",files=Dict("in.pos"=>"View \"v\" {\n};\n"))
-    @test_throws ArgumentError _execute_geo_source(
-        "Save View[0] \"x.pos\";")
-    @test_throws ArgumentError _execute_geo_source(
-        "Merge \"in.pos\";\nDelete View[5];",files=Dict("in.pos"=>"View \"v\" {\n};\n"))
-    @test_throws ArgumentError _execute_geo_source(
-        "Merge \"in.pos\";\nSave View[0] \"x.txt\";",files=Dict("in.pos"=>"View \"v\" {\n};\n"))
+    # Out-of-range and non-verb view operations are recoverable upstream
+    # `yymsg(0)` diagnostics, not rejections.
+    ex=_execute_geo_source(
+        "Merge \"in.pos\";\nSave View[9] \"x.pos\";",
+        files=Dict("in.pos"=>"View \"v\" {\n};\n"))
+    @test ex.errors==["Unknown view 9"]
+    ex=_execute_geo_source("Save View[0] \"x.pos\";")
+    @test ex.errors==["Unknown view 0"]
+    ex=_execute_geo_source(
+        "Merge \"in.pos\";\nDelete View[5];",
+        files=Dict("in.pos"=>"View \"v\" {\n};\n"))
+    @test ex.errors==["Unknown view 5"]
+    # A non-`.pos` extension takes upstream's flat-text view export.
+    write(joinpath(dir,"in2.pos"),"View \"v\" {\nSP(0,0,0){1.0};\n};\n")
+    geo=joinpath(dir,"vt.geo")
+    write(geo,"Merge \"in2.pos\";\nSave View[0] \"x.txt\";")
+    ex=execute_geo(geo)
+    @test isempty(ex.errors)
+    @test read(joinpath(dir,"x.txt"),String)=="0 0 0 0 0 0 0 1 \n" ||
+          read(joinpath(dir,"x.txt"),String)=="0 0 0 0 0 0 0 1 \r\n"
     # Upstream: `Print` is not a view verb — "Unknown operation 'Print' on
     # view N" — but only after the index resolves to a real view.
-    @test_throws ArgumentError _execute_geo_source(
-        "Merge \"in.pos\";\nPrint View[0] \"x.pos\";",files=Dict("in.pos"=>"View \"v\" {\n};\n"))
-    @test_throws ArgumentError _execute_geo_source(
-        "Print View[9] \"x.pos\";")
+    ex=_execute_geo_source(
+        "Merge \"in.pos\";\nPrint View[0] \"x.pos\";",
+        files=Dict("in.pos"=>"View \"v\" {\n};\n"))
+    @test ex.errors==["Unknown operation 'Print' on view 0"]
+    ex=_execute_geo_source("Print View[9] \"x.pos\";")
+    @test ex.errors==["Unknown view 9"]
     # `Delete Empty Views` drops only the record-less entries.
     geo2=joinpath(dir,"t2.geo")
     write(geo2,"""
@@ -209,9 +224,12 @@ end
     @test length(ex.views[4].elements)==1
     @test read(joinpath(dir,"alias.pos"),String)==
         "View \"a\" {"*nl*"SP(0,0,0){1};"*nl*"};"*nl
-    @test_throws ArgumentError _execute_geo_source("Alias View[0];")
-    @test_throws ArgumentError _execute_geo_source(
-        "Merge \"in.pos\";\nAlias View[9];",files=Dict("in.pos"=>"View \"v\" {\n};\n"))
+    ex=_execute_geo_source("Alias View[0];")
+    @test ex.errors==["Unknown view 0"]
+    ex=_execute_geo_source(
+        "Merge \"in.pos\";\nAlias View[9];",
+        files=Dict("in.pos"=>"View \"v\" {\n};\n"))
+    @test ex.errors==["Unknown view 9"]
 
     # `Combine ElementsByViewName`: singletons stay, multi-view names merge.
     geo=joinpath(dir,"byname.geo")
@@ -252,8 +270,10 @@ end
     @test read(joinpath(dir,"ts.pos"),String)==
         "View \"a_Combine\" {"*nl*"TIME{0,1};"*nl*"SP(0,0,0){1,3};"*nl*"};"*nl
 
-    @test_throws ArgumentError _execute_geo_source(
-        "Merge \"in.pos\";\nCombine BogusMode;",files=Dict("in.pos"=>"View \"v\" {\n};\n"))
+    ex=_execute_geo_source(
+        "Merge \"in.pos\";\nCombine BogusMode;",
+        files=Dict("in.pos"=>"View \"v\" {\n};\n"))
+    @test ex.errors==["Unknown 'Combine' command"]
     # Combining zero views is a no-op upstream.
     ex0=_execute_geo_source("Combine ElementsFromAllViews;")
     @test isempty(ex0.views)
