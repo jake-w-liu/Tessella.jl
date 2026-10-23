@@ -24,7 +24,59 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
-### `.geo` view ops + `Plugin(...)` dispatch + `DefineConstant` whitespace grammar (2026-10-23, landed `1dfc9e4`, `72fd7a1`, uncommitted view-ops slice)
+### CutPlane/CutSphere/Isosurface oracle-exact parity + `.pos` transport (2026-10-23, landed `6d6c071`)
+
+Deep-debugged record-by-record against gmsh 4.15.2 (`APIPlugins.jl`,
+`PostViewIO.jl`):
+
+- CutPlane/CutSphere sections now run through the same upstream machinery as
+  Isosurface (`_plugin_levelset_sections`): `_PLUGIN_ISO_SIMPLICES`
+  decomposition (quadrangle→2 tris, hexahedron→6 tets, prism→3, pyramid→2 —
+  a cut hexahedron is per-sub-tet sections, not a polygon fan),
+  `la*lb <= 0` edge predicate with the `la==lb` first-vertex arm, non-fused
+  `c*(b-a)+a` interpolation, first-seen per-coordinate `abs < 1e-12` dedup,
+  dimensional gates (3-D drops sections with <3 distinct points — a
+  vertex-touched element emits nothing; 2-D drops <2), four-point butterfly
+  reorder into `SQ`, and the MAP orientation flip. All-on-levelset elements
+  emit the degenerate section upstream does (line→`SP` at its first node,
+  triangle→`SL` on its first edge, quadrangle→two `SL`, tetrahedron→`ST` on
+  its first face).
+- The orientation gradient is now the affine solve on each **sub-simplex's
+  own** four nodes (was the parent's first four — coplanar on a hex's flat
+  faces, which suppressed required flips). CutSphere overrides it with the
+  analytic field gradient: emitted facets' geometric normal follows the
+  outward radial direction `section_centroid − centre` (verified on both
+  origin-centred and off-centre spheres; neither affine-sign convention
+  explains both oracles).
+- `ExtractVolume` keeps whole elements on the requested side of the raw
+  field sign (CutPlane `plane`, CutSphere `|x-c|²−R²`; `+` = positive side)
+  and re-emits them **through the same simplex decomposition** — a kept
+  quadrangle publishes two `ST`, a kept hexahedron six `SS`, verified
+  byte-identical for both signs.
+- Output naming: CutPlane/CutSphere publish `<name>_Levelset`, Isosurface
+  `<name>_Levelset_<step>` (including `_0` for a single-step view).
+- `write_pos` now emits platform text newlines — CRLF on Windows like
+  gmsh's text-mode streams (`_POS_LF`) — and no longer writes a spurious
+  `TIME{0}` when the stored times are the implicit default sequence.
+
+Oracle verification (all byte-identical `.pos` output vs live gmsh 4.15.2,
+CRLF included): t9 `view3.pos` Isosurface (640 records) and CutPlane
+(155 `SQ` + 391 `ST` = 546 — the former 718-record fan residual closed);
+mixed tet/hex/quad CutSphere fixtures (three views incl. empty);
+CutSphere `ExtractVolume` ±1 (hex→6 `SS`, quad→2 `ST`, verbatim tet);
+CutPlane `ExtractVolume` quad→2 `ST`; a unit-hex z=0.5 cut (4 `ST`+2 `SQ`
+tiling the square); vertex-touch → empty; on-plane triangle → `SL`.
+Stale pins re-aimed to the verified semantics (`api_plugin_section_test`
+45/45, `api_plugin_compute_test` CutSphere 15/15, `api_plugin_isosurface_test`
+72/72+11/11, `post_view_io_test` 14/14, `geo_plugin_test` all green under
+`--compile=min`; `postview_highorder` 53/53 at normal compilation).
+
+Newly confirmed gaps (recorded for the next increments): `.geo` statement
+errors abort where upstream prints `Error :` and continues (unknown plugin
+options/commands); `read_pos` hard-errors on malformed records where
+upstream warns-and-skips.
+
+### `.geo` view ops + `Plugin(...)` dispatch + `DefineConstant` whitespace grammar (2026-10-23, landed `1dfc9e4`, `72fd7a1`, `2330f0b`)
 
 `1dfc9e4` — `DefineConstant`/`UndefineConstant` entries now split on
 whitespace/newline boundaries as well as commas (upstream accepts

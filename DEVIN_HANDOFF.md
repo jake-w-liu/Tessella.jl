@@ -135,10 +135,21 @@ the owned files:
   republish through the `PartitionMesh` production plan. Annotate's T2/T3
   appends now pad to the table's coordinate width (4-coord x/y/z/style
   convention), fixing a PosView round-trip width collision.
-  Verbatim t9 executes (Isosurface 640 = gmsh count; CutPlane 718 vs 546
-  API-level residual; 2 Annotate texts land). `GeoExecution` gained a
-  `views` field mirroring the execution view list. T8-style `.pos`
-  `T2`/`T3` text expressions landed earlier (`2bdd230`).
+  Verbatim t9 executes (Isosurface 640 = gmsh count; 2 Annotate texts
+  land). `GeoExecution` gained a `views` field mirroring the execution
+  view list. T8-style `.pos` `T2`/`T3` text expressions landed earlier
+  (`2bdd230`). CutPlane/CutSphere/Isosurface now match gmsh 4.15.2
+  byte-for-byte (`6d6c071`, 2026-10-23): shared `_plugin_levelset_sections`
+  (sub-simplex decomposition, `la*lb<=0`, non-fused `c*(b-a)+a`, `1e-12`
+  per-coord dedup, dimension gates, butterfly reorder, per-sub-simplex
+  MAP gradient — CutSphere uses the radial analytic gradient),
+  `ExtractVolume` re-emits kept elements through the same decomposition,
+  `_Levelset`/`_Levelset_<step>` names, `.pos` platform newlines
+  (CRLF on Windows) and no spurious `TIME{0}`. Verified record-by-record
+  on t9 (640 iso + 546 cut) plus tet/hex/quad/orientation/ExtractVolume
+  fixtures — all byte-identical. Newly confirmed gaps in flight:
+  `.geo` statement errors abort where upstream prints `Error :` and
+  continues; `read_pos` hard-errors where upstream warns-and-skips.
   `.geo` post-processing view verbs landed 2026-10-23 (`2330f0b`,
   oracle-verified): `Save View[i] "f.pos"` byte-identical export,
   `Print View[i]` upstream-identical rejection, `Delete View[i]`/

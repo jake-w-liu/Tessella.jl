@@ -11349,7 +11349,15 @@ function _geo_exec_save_view!(kind::AbstractString,index_src::AbstractString,
     extension==".pos" || throw(ArgumentError(
         "$caller: view export writes `.pos` records (got '$file')"))
     post=getfield(parentmodule(@__MODULE__),:Post)
-    post.write_pos(file,store[index+1])
+    view=store[index+1]
+    # Upstream refuses to serialize scheme-bound datasets to old POS
+    # format (its `PViewDataList::writePOS` guard) — same rejection text
+    # as the API export path.
+    isempty(view.interpolations) || throw(ArgumentError(
+        "$caller: Cannot export datasets with interpolation matrices in "*
+        "old POS format: consider using the new mesh-based format "*
+        "instead, or select 'Adapt post-processing data' before exporting"))
+    post.write_pos(file,view)
     return nothing
 end
 
