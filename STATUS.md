@@ -24,6 +24,79 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Dense curved-PLC recovery: input-proportional `maxpts` — t13 verbatim arm completes (2026-10-23, uncommitted in tree)
+
+The t13 verbatim `Field[1].F = "4"` arm and t19 dense `NumSubEdges=1000`
+pipe volume were the same defect class: conforming boundary recovery
+stalling on dense curved PLCs. Diagnosis and fix:
+
+**Root cause — a capacity threshold, not an algorithm gap.** Instrumented
+exact-CDT recovery on the remeshed aneurysm PLC (1233 vertices / 2470
+facets / 1436 coplanar regions / 5324 crease subsegments) converges
+monotonically: missing creases fall 591→0 over ~12 midpoint-split rounds,
+then 1046+18+75 exact edge/plane pierce points insert in three batches,
+then coverage centroids; no stall, no missing fallback. The mesh simply
+needs 6238 points — ~5.1× input vertices — while the flat default
+`maxpts=6000` aborted it at `adding piercing points would exceed
+maxpts=6000`. The t19 Volume[12]/[13] PLCs (182/360 and 569/1134) already
+converged under the old cap (213/818 nodes), so that arm's earlier
+`no valid topology in 17 attempts` failure was the stale
+preimage-orientation check repaired by `fpts` (commit `7e65e3d`), not
+capacity.
+
+**Fix (`src/meshing/RecoverCDT.jl`).** `maxpts=0` (the new default for
+`recover_boundary_cdt`, `recover_partition_cdt`, `mesh_sized_cdt` and
+`_recovery_limits`) is now an auto sentinel resolved once the
+deduplicated PLC is known: `max(6000, 8·input vertices)`. Explicit
+values remain literal hard caps — `maxpts=4` on a box still throws, and
+`maxpts=200` on the 213-node pipe PLC throws at refinement. Resolution
+sites: `_recover` and `recover_partition_cdt` resolve after `dedup`/
+`dedup_partition` (before the prismatic partition path, which therefore
+receives concrete limits); `mesh_sized_cdt` resolves before the
+`min(·, max_nodes)` coupling; `_partition_tets_float` resolves the
+sentinel defensively for direct internal callers. No certificate was
+weakened — the cap only bounds *how much* Steiner refinement may run;
+`certify_exact` still proves creases, piercing, boundary membership and
+per-region area exactly on every output.
+
+**Verification (Julia 1.13.1, this machine).**
+
+- Direct: `recover_boundary_cdt` on the dumped t13 Volume[1] PLC →
+  6238 nodes / 18468 tets / valid closed manifold / 755 s (was:
+  `ArgumentError: adding piercing points would exceed maxpts=6000`).
+- `validation/gmsh_parity/t13.jl` → `GMSH_PARITY_T13_TUTORIAL_OK`:
+  verbatim `geo=OK nodes=7033 tets=21886 volume=67815.766`;
+  no-field `nofield=OK nodes=2596 tets=7706 volume=67815.766`;
+  twisted-prism repro pin OK (gmsh oracle: 4297/13256/68360.842 —
+  different remesh density, same parity class). The boundary
+  write-back transported the ~5000-vertex Steiner subdivision into the
+  Surface/Curve products — ownership preserved end to end.
+- `validation/gmsh_parity/t19.jl` → `GMSH_PARITY_T19_PARTIAL`:
+  `nofillet=OK nodes=2387 tets=5800` (dense pipe-wall arm now completes;
+  previously `266/360 facets recovered` + degenerate tets), `nosize=OK`;
+  verbatim remains `BLOCKED(fillet)` — the intentional classified OCC
+  fillet rejection (`fillet edge must be a line`), a separate known gap.
+- `test/meshing/recover_cdt_topology_test.jl` → 33/33 (new testset
+  "Dense curved PLC converges under auto maxpts", 13 assertions: real
+  t19 Volume[12] PLC fixture `test/fixtures/plc_helical_pipe_wall_360.txt`
+  converges to the deterministic 213 nodes / 665 tets with exact
+  boundary area, sentinel-resolution unit checks, explicit-cap
+  hard-bound check).
+- `mesh3d_test.jl` → the observed failures are the documented
+  pre-existing baseline (1 fail `max_predicate_tests=1` +
+  3 `recover_partition_cdt` prismatic-certificate errors); the diff is
+  input-proportional and identical on every input ≤750 vertices, so
+  small-PLC behaviour is bit-identical.
+
+**Residual.** Recovery runtime is superlinear in input density
+(~755 s at 1233 vertices under normal compilation; the exact BigInt
+kernel dominates). PLCs at ~10⁴+ input vertices would take hours under
+the proportional cap — still sound (converges or throws on the bounded
+budgets), but a performance limit, not a correctness one. Options not
+yet taken: spatial indexing in the pierce/coverage scans, lighter
+per-iteration topology audits, or a tiered cap beyond ~5000 input
+vertices.
+
 ### UI01 parser/fltk/graphics surfaces + CLI save/high-order flags, MSH2.2 parametric/topology transport (2026-10-23, uncommitted in tree)
 
 The remaining headless session surfaces landed in

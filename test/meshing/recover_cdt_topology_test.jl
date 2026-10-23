@@ -91,3 +91,90 @@ end
                for t in inner; init=0.0)
     @test ivol ≈ 4r^3/3 rtol=1e-9
 end
+
+# ── dense curved PLC: input-proportional maxpts ────────────────────────────
+#
+# Regression for the t13 verbatim arm (`Field[1].F = "4"`, ~2470-facet
+# aneurysm wall): `recover_boundary_cdt` converges that PLC at 6238 points —
+# ~5.1× its 1233 input vertices — but the flat default `maxpts=6000` rejected
+# it while splitting creases / inserting pierce points.  A dense curved PLC's
+# Steiner demand is proportional to its input density, so the default
+# `maxpts=0` now resolves to `max(6000, 8·input vertices)` once the
+# deduplicated PLC is known; explicit values remain literal hard caps.
+#
+# The fixture below is the real t19 helical-pipe `Volume[12]` PLC (dense
+# curved wall, 182 vertices / 360 facets, non-star): recovery must insert 31
+# exact boundary Steiner points (creases split, pierce points, coverage
+# centroids) before the input facets are Delaunay-recoverable.  The exact
+# certificate runs inside `recover_boundary_cdt`; returning without throwing
+# is itself the conformance evidence.  Full-scale verification of the
+# 1233-vertex case lives in the opt-in `validation/gmsh_parity/t13.jl`
+# driver (~12 minutes of exact recovery).
+
+function _load_plc_txt(path)
+    lines = readlines(path)
+    n, f = parse.(Int, split(lines[1]))
+    coords = Matrix{Float64}(undef, 3, n)
+    for i in 1:n
+        coords[:, i] .= parse.(Float64, split(lines[1+i]))
+    end
+    tris = Matrix{Int32}(undef, 3, f)
+    for c in 1:f
+        tris[:, c] .= parse.(Int32, split(lines[1+n+c]))
+    end
+    return Mesh(coords; tris=tris)
+end
+
+_tri_area(a, b, c) = 0.5 * sqrt(
+    ((b[2]-a[2])*(c[3]-a[3]) - (b[3]-a[3])*(c[2]-a[2]))^2 +
+    ((b[3]-a[3])*(c[1]-a[1]) - (b[1]-a[1])*(c[3]-a[3]))^2 +
+    ((b[1]-a[1])*(c[2]-a[2]) - (b[2]-a[2])*(c[1]-a[1]))^2)
+
+function _surf_area(m)
+    s = 0.0
+    for t in 1:ntris(m)
+        s += _tri_area(node(m,m.tris[1,t]), node(m,m.tris[2,t]),
+                       node(m,m.tris[3,t]))
+    end
+    s
+end
+
+function _bnd_area(m)
+    bf, _ = boundary_faces(m.tets)
+    s = 0.0
+    for f in bf
+        s += _tri_area(node(m,f[1]), node(m,f[2]), node(m,f[3]))
+    end
+    s
+end
+
+@testset "Dense curved PLC converges under auto maxpts" begin
+    # Sentinel resolution: 0 → max(6000, 8·deduplicated input vertices);
+    # explicit values pass through unchanged.
+    lims = RC._recovery_limits("recover_boundary_cdt")
+    @test lims.points == 0
+    @test RC._resolve_recovery_limits(lims, 8).points == 6000
+    @test RC._resolve_recovery_limits(lims, 1233).points == 9864
+    @test RC._resolve_recovery_limits(
+        RC._recovery_limits("recover_boundary_cdt"; maxpts=999), 2000).points == 999
+
+    plc = _load_plc_txt(joinpath(@__DIR__, "..", "fixtures",
+                                 "plc_helical_pipe_wall_360.txt"))
+    @test nnodes(plc) == 182
+    @test ntris(plc) == 360
+    @test validate(plc).ok
+
+    m = recover_boundary_cdt(plc)
+    @test validate(m).ok
+    @test is_closed_manifold(m)
+    # The recovery is deterministic: 182 input + 31 exact Steiner points.
+    @test nnodes(m) == 213
+    @test ntets(m) == 665
+    # Boundary Steiner subdivision covers the input surface exactly.
+    @test _bnd_area(m) ≈ _surf_area(plc) rtol=1e-12
+
+    # Explicit caps remain literal hard bounds: the PLC genuinely needs the
+    # 31 Steiner points above, so maxpts=200 must fail cleanly (not silently
+    # truncate the boundary).
+    @test_throws ArgumentError recover_boundary_cdt(plc; maxpts=200)
+end

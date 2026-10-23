@@ -30,6 +30,18 @@
   2,313 assertions green).
 - `7e65e3d` recover_cdt orients emitted tets on Float64 output coordinates —
   fixes manufactured negative-orientation cells (20/20).
+- dense curved-PLC recovery capacity — UNCOMMITTED in tree
+  (`RecoverCDT.jl` +52, `recover_cdt_topology_test.jl` +87,
+  `test/fixtures/plc_helical_pipe_wall_360.txt`): `maxpts` default is now
+  input-proportional (`0` → `max(6000, 8·input vertices)`); t13 verbatim
+  `GMSH_PARITY_T13_TUTORIAL_OK` (geo=OK 7,033 nodes/21,886 tets/vol
+  67,815.766; no-field 2,596/7,706), t19 `GMSH_PARITY_T19_PARTIAL`
+  (nofillet=OK 2,387/5,800 — the dense pipe-wall arm now completes;
+  verbatim still classified `BLOCKED(fillet)`), direct dense-PLC recovery
+  6,238 nodes/18,468 tets/755 s, focused testset 33/33. Root cause was a
+  flat `maxpts=6000` cap below the legitimate ~5.1× Steiner demand, not an
+  algorithm gap. Residual: recovery is superlinear — ~10⁴-vertex PLCs take
+  hours (sound, bounded), a performance limit only.
 
 ### In-flight workers (launched 2026-10-23, disjoint file ownership)
 
@@ -37,11 +49,15 @@ If the session dropped them, their diffs survive uncommitted — verify each
 independently (its own new test file + affected regressions), then commit only
 the owned files:
 
-- PLC-recovery (IN FLIGHT): `src/meshing/RecoverCDT.jl` +52,
-  `src/geometry/ModelVolumeAlgorithms.jl`, `ModelNativeInitialTet.jl`,
-  `test/meshing/recover_cdt_topology_test.jl` +87, `mesh1d_test.jl`,
+- PLC-recovery (COMPLETE, uncommitted): `src/meshing/RecoverCDT.jl` +52,
+  `test/meshing/recover_cdt_topology_test.jl` +87,
   new `test/fixtures/plc_helical_pipe_wall_360.txt` — dense curved-PLC
-  recovery for t13-field / t19-density.
+  recovery for t13-field / t19-density VERIFIED on both drivers (t13
+  verbatim `GMSH_PARITY_T13_TUTORIAL_OK`, t19 dense arm `nofillet=OK`).
+  `ModelVolumeAlgorithms.jl`/`ModelNativeInitialTet.jl` ended unchanged —
+  the diagnosis needed no write-back or acceptance-check edits; the prior
+  `fpts` orientation fix plus the proportional `maxpts` cap sufficed.
+  Commit only the three owned files when pushing.
 - MET01/02 (PARTIALLY LANDED `4cef4d1`, still running): committed
   `ModelMetricSurfaceProducer.jl` +584 + `model_metric_surface_density_test.jl`
   — metric-Delaunay Steiner insertion replaced midpoint bisection, fixing the
@@ -66,10 +82,11 @@ the owned files:
 
 ### Genuinely remaining (next session)
 
-- Dense curved-PLC recovery capacity: t13 `Field[1].F="4"` edge (~2,470 facets)
-  and t19 `NumSubEdges=1000`+`MeshSizeFromCurvature=20` pipe wall exceed
-  conforming-recovery capacity — same defect class, both classified in their
-  drivers. `RecoverCDT`/`ModelVolumeAlgorithms`.
+- ~~Dense curved-PLC recovery capacity~~ — LANDED in tree 2026-10-23
+  (uncommitted diff, verified on both drivers — see landed ledger above).
+  Residual performance note: recovery is superlinear in input density;
+  ~10⁴-vertex PLCs would take hours under the proportional cap — sound and
+  bounded, but a candidate for scan indexing if density tests demand it.
 - MET01/02: 1-D anisotropic grading, tensor-metric Delaunay arms, OCC alg-7
   curved metric, variable-metric volume, metric-Delaunay over-density (~47x on
   t17). Metric*/ModelMetric* files.

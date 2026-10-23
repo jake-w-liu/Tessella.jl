@@ -52,6 +52,15 @@ const RB = Rational{BigInt}
 const RBv = NTuple{3,RB}
 const _DEFAULT_MAX_FACETS = 1_000_000
 const _DEFAULT_MAX_RECOVERY_TESTS = 100_000_000
+# `maxpts=0` (the public default) resolves the Steiner-point budget against the
+# input vertex count: dense curved PLCs legitimately need a multiple of their
+# vertex count in crease-split/pierce/coverage points — the t13 remeshed
+# aneurysm (1233 vertices / 2470 facets / 1436 regions) converges at ~5.1×
+# (6238 points) and was rejected by the flat 6000 cap.  Eight times input
+# vertices keeps the bound proportional so a small pathological PLC still
+# stops quickly; explicit `maxpts` values remain literal hard caps.
+const _AUTO_MAXPTS_FACTOR = 8
+@inline _auto_maxpts(n0::Int) = max(6000, _AUTO_MAXPTS_FACTOR * n0)
 
 struct _RecoveryLimits
     iterations::Int
@@ -61,6 +70,15 @@ struct _RecoveryLimits
     work_tets::Int
     predicate_tests::Int
     recovery_tests::Int
+end
+
+# Resolve the `maxpts=0` auto sentinel into a concrete bound once the
+# deduplicated input size is known; explicit limits pass through unchanged.
+function _resolve_recovery_limits(limits::_RecoveryLimits, n0::Int)
+    limits.points != 0 && return limits
+    return _RecoveryLimits(limits.iterations, _auto_maxpts(n0), limits.facets,
+        limits.tets, limits.work_tets, limits.predicate_tests,
+        limits.recovery_tests)
 end
 
 mutable struct _RecoveryBudget
@@ -88,14 +106,14 @@ end
 end
 
 function _recovery_limits(caller::AbstractString;
-                          maxiter=2000,maxpts=6000,
+                          maxiter=2000,maxpts=0,
                           max_facets=_DEFAULT_MAX_FACETS,
                           max_tets=DEFAULT_MAX_TETS,
                           max_work_tets=DEFAULT_MAX_WORK_TETS,
                           max_predicate_tests=DEFAULT_MAX_PREDICATE_TESTS,
                           max_recovery_tests=_DEFAULT_MAX_RECOVERY_TESTS)
     iterations=_recovery_limit(maxiter,caller,"maxiter";minimum=1)
-    points=_recovery_limit(maxpts,caller,"maxpts";minimum=4,
+    points=maxpts==0 ? 0 : _recovery_limit(maxpts,caller,"maxpts";minimum=4,
                            maximum=Int(typemax(Int32)))
     facets=_recovery_limit(max_facets,caller,"max_facets";minimum=4,
                            maximum=Int(typemax(Int32)))
@@ -400,7 +418,8 @@ function _partition_tets_float(pts,limits::_RecoveryLimits;seed::Int=1,
     function dyadic_attempt()
         try
             candidate=delaunay3d_exact(
-                fpts;max_points=limits.points,max_tets=limits.work_tets,
+                fpts;max_points=limits.points==0 ? _auto_maxpts(length(pts)) :
+                    limits.points,max_tets=limits.work_tets,
                 max_work_tets=limits.work_tets,
                 max_predicate_tests=limits.predicate_tests)
             etets=NTuple{4,Int}[];used=falses(length(pts));flat=false
@@ -772,7 +791,7 @@ function _recover_prismatic_partition(surfaces,limits::_RecoveryLimits,
 end
 
 """
-    recover_boundary_cdt(surface; maxiter=2000, maxpts=6000,
+    recover_boundary_cdt(surface; maxiter=2000, maxpts=0,
                          max_facets=1_000_000, max_tets=10_000_000,
                          max_work_tets=20_000_000,
                          max_predicate_tests=500_000_000,
@@ -788,10 +807,13 @@ faceted cylinder) with 0 Steiner points where they are already Delaunay-conformi
 `max_facets` bounds input triangles, and `max_tets` bounds the returned volume mesh.
 `max_work_tets` and `max_predicate_tests` bound each exact triangulation's retained
 work cells and exact predicate evaluations. `max_recovery_tests` bounds exact
-edge/region and certification tests across the complete recovery call.
+edge/region and certification tests across the complete recovery call. The default
+`maxpts=0` resolves to `max(6000, 8·input vertices)` — dense curved PLCs
+legitimately need several Steiner points per input vertex; explicit values are
+literal hard caps.
 """
 function recover_boundary_cdt(surface;
-                              maxiter=2000,maxpts=6000,
+                              maxiter=2000,maxpts=0,
                               max_facets=_DEFAULT_MAX_FACETS,
                               max_tets=DEFAULT_MAX_TETS,
                               max_work_tets=DEFAULT_MAX_WORK_TETS,
@@ -810,7 +832,7 @@ function recover_boundary_cdt(surface;
 end
 
 """
-    recover_partition_cdt(surfaces; maxiter=2000, maxpts=6000,
+    recover_partition_cdt(surfaces; maxiter=2000, maxpts=0,
                           max_facets=1_000_000, max_tets=10_000_000,
                           max_work_tets=20_000_000,
                           max_predicate_tests=500_000_000,
@@ -828,7 +850,7 @@ Resource keywords have the meanings documented by [`recover_boundary_cdt`](@ref)
 here `max_facets` applies to the combined input collection.
 """
 function recover_partition_cdt(surfaces;
-                               maxiter=2000,maxpts=6000,
+                               maxiter=2000,maxpts=0,
                                max_facets=_DEFAULT_MAX_FACETS,
                                max_tets=DEFAULT_MAX_TETS,
                                max_work_tets=DEFAULT_MAX_WORK_TETS,
@@ -846,8 +868,9 @@ function recover_partition_cdt(surfaces;
     for (r,s) in enumerate(surfaces)
         Mesh3D._require_surface3(s,"recover_partition_cdt region $r")
     end
-    nit=limits.iterations;nmax=limits.points
+    nit=limits.iterations
     pts,facets=dedup_partition(surfaces)
+    limits=_resolve_recovery_limits(limits,length(pts));nmax=limits.points
     length(pts)>=4 || throw(ArgumentError("recover_partition_cdt: need at least 4 distinct vertices"))
     length(pts)<=nmax || throw(ArgumentError(
         "recover_partition_cdt: input already has $(length(pts)) points, exceeding " *
@@ -951,13 +974,14 @@ end
 # internal: run the refinement and return (mesh, pts, regions, seg2regs, n0) so sizing can reuse it.
 function _recover(surface::Mesh,limits::_RecoveryLimits,caller::AbstractString)
     Mesh3D._require_surface3(surface,caller)
-    nit=limits.iterations;nmax=limits.points
+    nit=limits.iterations
     budget=_RecoveryBudget(limits.recovery_tests,limits.recovery_tests,
                            String(caller))
     pts, facets = dedup(surface)
     length(pts)>=4 || throw(ArgumentError("$caller: need ≥ 4 distinct vertices"))
     isempty(facets) && throw(ArgumentError("$caller: surface has no facets"))
     n0=length(pts)
+    limits=_resolve_recovery_limits(limits,n0);nmax=limits.points
     n0<=nmax || throw(ArgumentError(
         "$caller: input already has $n0 points, exceeding maxpts=$nmax; " *
         "increase maxpts or simplify the PLC"))
@@ -1196,7 +1220,7 @@ function _recover(surface::Mesh,limits::_RecoveryLimits,caller::AbstractString)
 end
 
 """
-    mesh_sized_cdt(surface; hmax, maxiter=2000, maxpts=6000,
+    mesh_sized_cdt(surface; hmax, maxiter=2000, maxpts=0,
                    max_nodes=10_000_000, max_facets=1_000_000,
                    max_tets=10_000_000, max_work_tets=20_000_000,
                    max_predicate_tests=500_000_000,
@@ -1214,7 +1238,7 @@ Recovery limits have the meanings documented by [`recover_boundary_cdt`](@ref).
 longest-edge refinement.
 """
 function mesh_sized_cdt(surface;hmax,
-                        maxiter=2000,maxpts=6000,
+                        maxiter=2000,maxpts=0,
                         max_nodes=PIPELINE_DEFAULT_MAX_NODES,
                         max_facets=_DEFAULT_MAX_FACETS,
                         max_tets=DEFAULT_MAX_TETS,
@@ -1237,8 +1261,10 @@ function mesh_sized_cdt(surface;hmax,
         throw(ArgumentError("mesh_sized_cdt: hmax must be Float64-representable: $(sprint(showerror,err))"))
     end
     (isfinite(hm)&&hm>0) || throw(ArgumentError("mesh_sized_cdt: hmax must be finite and positive (got $hmax)"))
+    point_bound=limits.points==0 ? _auto_maxpts(size(surface.coords,2)) :
+                                   limits.points
     effective_limits=_RecoveryLimits(
-        limits.iterations,min(limits.points,node_limit),limits.facets,limits.tets,
+        limits.iterations,min(point_bound,node_limit),limits.facets,limits.tets,
         limits.work_tets,limits.predicate_tests,limits.recovery_tests)
     m0,_,_,_,_=_recover(surface,effective_limits,"mesh_sized_cdt")
     m=Mesh3D.refine_to_size(
