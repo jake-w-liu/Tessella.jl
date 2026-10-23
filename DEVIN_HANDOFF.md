@@ -37,17 +37,32 @@ If the session dropped them, their diffs survive uncommitted — verify each
 independently (its own new test file + affected regressions), then commit only
 the owned files:
 
-- PLC-recovery: `src/meshing/RecoverCDT.jl`, `src/geometry/ModelVolumeAlgorithms.jl`,
-  `src/geometry/ModelNativeInitialTet.jl`, `test/meshing/` — dense curved-PLC
+- PLC-recovery (IN FLIGHT): `src/meshing/RecoverCDT.jl` +52,
+  `src/geometry/ModelVolumeAlgorithms.jl`, `ModelNativeInitialTet.jl`,
+  `test/meshing/recover_cdt_topology_test.jl` +87, `mesh1d_test.jl`,
+  new `test/fixtures/plc_helical_pipe_wall_360.txt` — dense curved-PLC
   recovery for t13-field / t19-density.
-- MET01/02: `src/meshing/Metric*.jl`, `src/geometry/ModelMetric*.jl`,
-  `src/geometry/ModelMeshingAttributes.jl`, `src/geometry/ModelGmshSurfaceProducer.jl`,
-  `src/interfaces/APISizeFields*.jl`/`APIField*.jl`.
-- PAR01: `src/interfaces/APIParallel*.jl`, `src/parallel/`.
-- CAD04/05: `src/geometry/ModelBoolean.jl`, `ModelNURBS*.jl`,
-  `ModelOCCCurveShapes.jl`, `ModelOCCLoft.jl`, `ModelOCCTransforms.jl`.
-- UI01/CLI: `src/interfaces/CLI.jl`, `APIOnelab.jl`, `APIParser*.jl`,
-  `APIFltk*.jl`, `APIGraphics*.jl`, `IO.jl`, `GeoOptionTables.jl`.
+- MET01/02 (PARTIALLY LANDED `4cef4d1`, still running): committed
+  `ModelMetricSurfaceProducer.jl` +584 + `model_metric_surface_density_test.jl`
+  — metric-Delaunay Steiner insertion replaced midpoint bisection, fixing the
+  ~47x over-density (163,908 → ~3,458-class count). 199 assertions green in its
+  isolated worktree. Remaining: aniso curve grading, tensor-metric arms in
+  volumes, OCC alg-7, variable-metric volume.
+- PAR01 (LANDED `7adc0a1` + wiring worker `4dc7b27c` in flight): parallel core
+  committed (seed ledger, 64/64 both thread counts). In-flight diff:
+  `APIGenerate01.jl`/`APIGenerateHigher.jl` (+286) = cross-phase spawn wiring
+  per the documented call sites in the 7adc0a1 commit message.
+- CAD04/05 (LANDED `09da3ee`): circle-rim fillets + trimmed tensor faces,
+  52/52 + OCC regressions green. t19 verbatim `Fillet` now rejects precisely
+  (tensor_bspline rims need ChFi3d — still classified; driver comment updated).
+  Residual: surface-Boolean fragments (t20/t21) needs ModelOCCBoolean dim-2.
+- UI01/CLI (LANDED `9467923`): parser/fltk/graphics surfaces,
+  SaveParametric ($ParametricNodes MSH4+2.2+binary), SaveTopology,
+  -optimize_ho plumbing. 58+30+38+68+1324+81 green. FLAG: `cli_test.jl`
+  13 mesh-content pins (mixed_crc + periodic slave_nodes 21→20 etc.) failed
+  DURING in-flight meshing worker edits — RE-VERIFY after recovery/parallel
+  workers land; if still failing, diagnose whether recovery changed mesh
+  output legitimately (re-pin) or regressed (fix).
 
 ### Genuinely remaining (next session)
 
