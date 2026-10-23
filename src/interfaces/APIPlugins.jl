@@ -25,14 +25,16 @@
 #   Gradient        per-node spatial gradient of scalar data into `*_Gradient`
 #                   vector records,
 #   CutPlane        `A x + B y + C z + D = 0` levelset sections into
-#                   `*_CutPlane` point/line/triangle records (ExtractVolume
-#                   keeps the whole elements on the selected side),
+#                   `*_Levelset` point/line/triangle/quadrangle records
+#                   (ExtractVolume keeps the whole elements on the selected
+#                   side),
 #   CutSphere       `(X-Xc)^2 + (Y-Yc)^2 + (Z-Zc)^2 = R^2` levelset sections
-#                   into `*_CutSphere` records through the same linear-edge
-#                   levelset interpolation (sections ordered about the
-#                   outward radial direction),
+#                   into `*_Levelset` records through the same linear-edge
+#                   levelset interpolation (sections oriented by the
+#                   levelset-gradient rule like upstream),
 #   Isosurface      `scalar value == Value` level sets of the view's own
-#                   data into `*_Isosurface` point/line/triangle/quadrangle
+#                   data into `*_Levelset_<step>` point/line/triangle/
+#                   quadrangle
 #                   records — one list view per populated step since the
 #                   section geometry is value-dependent; non-simplex
 #                   elements cut through upstream's simplex decomposition
@@ -1639,93 +1641,6 @@ const _PLUGIN_CUT_EDGES=(
     prism=((1,2),(2,3),(3,1),(4,5),(5,6),(6,4),(1,4),(2,5),(3,6)),
     pyramid=((1,2),(2,3),(3,4),(4,1),(1,5),(2,5),(3,5),(4,5)))
 
-# Unique `ls = 0` crossing points over the element's primary edges in
-# first-seen edge order. Each point stores its interpolation weights as
-# `(primary node, weight)` pairs; a zero-levelset endpoint contributes its own
-# node, so vertex touches deduplicate across their incident edges.
-function _plugin_cut_crossings(element,ls)
-    geo=element.geo
-    points=NTuple{3,Float64}[]
-    weights=Vector{Tuple{Int,Float64}}[]
-    seen=Set{NTuple{3,Float64}}()
-    for (a,b) in _PLUGIN_CUT_EDGES[element.kind]
-        la=ls[a];lb=ls[b]
-        ((la<0&&lb>0)||(la>0&&lb<0)||(la==0.0&&lb!=0.0)||(la!=0.0&&lb==0.0)) ||
-            continue
-        t=la/(la-lb)
-        point=(muladd(t,geo[1,b]-geo[1,a],geo[1,a]),
-               muladd(t,geo[2,b]-geo[2,a],geo[2,a]),
-               muladd(t,geo[3,b]-geo[3,a],geo[3,a]))
-        point in seen && continue
-        push!(seen,point)
-        push!(points,point)
-        push!(weights,[(a,1.0-t),(b,t)])
-    end
-    return points,weights
-end
-
-# Angle-ordered polygon index around the section centroid: the plane normal's
-# cross-products give an in-plane frame, and linear elements are convex so the
-# angular order is the polygon order.
-function _plugin_cut_order(points,normal::NTuple{3,Float64})
-    n=length(points)
-    n<=2 && return collect(1:n)
-    cx=cy=cz=0.0
-    for p in points;cx+=p[1];cy+=p[2];cz+=p[3];end
-    cx/=n;cy/=n;cz/=n
-    ex=points[1][1]-cx;ey=points[1][2]-cy;ez=points[1][3]-cz
-    s=_plugin_norm3((ex,ey,ez))
-    s==0.0 && return collect(1:n)
-    ex/=s;ey/=s;ez/=s
-    fx,fy,fz=_plugin_cross3(normal,(ex,ey,ez))
-    angles=[atan(muladd(p[1]-cx,fx,muladd(p[2]-cy,fy,(p[3]-cz)*fz)),
-                 muladd(p[1]-cx,ex,muladd(p[2]-cy,ey,(p[3]-cz)*ez)))
-            for p in points]
-    return sortperm(angles)
-end
-
-# Zero-levelset section of one element as `(kind, points, point-weights)`
-# primitives: a single crossing emits a point, two a line, three or more a
-# triangle fan over the angle-ordered polygon — the simplex-only record set
-# upstream levelset plugins emit. A collinear polygon (an in-plane edge plus
-# a touching vertex) collapses to its farthest-pair segment.
-function _plugin_cut_sections(element,ls,normal::NTuple{3,Float64})
-    points,weights=_plugin_cut_crossings(element,ls)
-    n=length(points)
-    out=Tuple{Symbol,Vector{NTuple{3,Float64}},
-              Vector{Vector{Tuple{Int,Float64}}}}[]
-    n==0 && return out
-    n==1 && return push!(out,(:point,points,weights))
-    n==2 && return push!(out,(:line,points,weights))
-    order=_plugin_cut_order(points,normal)
-    cx=cy=cz=0.0
-    for p in points;cx+=p[1];cy+=p[2];cz+=p[3];end
-    cx/=n;cy/=n;cz/=n
-    sx=sy=sz=0.0;maxlen=0.0
-    for i in 1:n
-        pa=points[order[i]];pb=points[order[mod1(i+1,n)]]
-        u=(pa[1]-cx,pa[2]-cy,pa[3]-cz);v=(pb[1]-cx,pb[2]-cy,pb[3]-cz)
-        cr=_plugin_cross3(u,v)
-        sx+=cr[1];sy+=cr[2];sz+=cr[3]
-        maxlen=max(maxlen,_plugin_norm3(u),_plugin_norm3(v))
-    end
-    if hypot(sx,sy,sz)<=8eps(Float64)*maxlen*maxlen
-        bi=1;bj=n;best=-1.0
-        for i in 1:n,j in i+1:n
-            dist=_plugin_norm3(_plugin_sub3(points[i],points[j]))
-            dist>best && (best=dist;bi=i;bj=j)
-        end
-        return push!(out,(:line,[points[bi],points[bj]],
-                          [weights[bi],weights[bj]]))
-    end
-    for k in 2:n-1
-        index=(order[1],order[k],order[k+1])
-        push!(out,(:triangle,[points[i] for i in index],
-                   [weights[i] for i in index]))
-    end
-    return out
-end
-
 function _plugin_exec_cutplane(spec::_PluginSpec,caller::AbstractString)
     numbers=spec.numbers
     pa=_mesh_query_coordinate(numbers["A"],caller,"A")
@@ -1742,25 +1657,28 @@ function _plugin_exec_cutplane(spec::_PluginSpec,caller::AbstractString)
     out=_PluginElement[]
     for element in elements
         ga=size(element.geo,2);va=size(element.vcoords,2);nc=element.ncomp
-        ls=ntuple(i->muladd(pa,element.geo[1,i],
-                    muladd(pb,element.geo[2,i],
-                           muladd(pc,element.geo[3,i],pd))),ga)
+        # Plain `x*A + y*B + z*C + D` order — the fused-muladd chain rounds
+        # differently (observable as `-0.0` on on-plane vertices).
+        ls=ntuple(i->element.geo[1,i]*pa + element.geo[2,i]*pb +
+                     element.geo[3,i]*pc + pd,ga)
         if !iszero(volume)
             # Whole-element extraction keeps elements whose corner levelset
-            # values all lie on the selected side, re-emitted verbatim — only
-            # linear records round-trip.
-            if (volume>0 ? all(l->l>=0.0,ls) : all(l->l<=0.0,ls)) &&
-                va==ga && _plugin_record_type(element.kind,nc)!==nothing
-                push!(out,element)
+            # values all lie on the selected side; upstream re-emits them
+            # through the iso-simplex decomposition (a kept quadrangle is two
+            # `ST` records, a kept hexahedron six `SS`) — only linear records
+            # round-trip.
+            if (volume>0 ? all(l->l>=0.0,ls) : all(l->l<=0.0,ls)) && va==ga
+                _plugin_push_subsimplices!(out,element,steps)
             end
             continue
         end
-        if all(l->l==0.0,ls)
-            va==ga && _plugin_record_type(element.kind,nc)!==nothing &&
-                push!(out,element)
-            continue
-        end
-        for (kind,points,weights) in _plugin_cut_sections(element,ls,normal)
+        # The levelset section machinery (sub-simplex edge scan, `1e-12`
+        # dedup, dimension gates, butterfly reorder, MAP orientation) is
+        # shared with `Isosurface` — upstream emits the same records for an
+        # all-on-plane element (a line gives `SP` at its first node, a
+        # triangle `SL` on its first edge, a tet `ST` on its first face),
+        # not the element verbatim.
+        for (kind,points,weights) in _plugin_levelset_sections(element,ls)
             _plugin_record_type(kind,nc)===nothing && continue
             arity=length(points)
             geo=Matrix{Float64}(undef,3,arity)
@@ -1769,18 +1687,17 @@ function _plugin_exec_cutplane(spec::_PluginSpec,caller::AbstractString)
             end
             vals=Vector{Float64}(undef,arity*nc*steps)
             for step in 1:steps,i in 1:arity,comp in 1:nc
-                acc=0.0
-                for (node,factor) in weights[i]
-                    acc=muladd(factor,
-                        element.vals[(step-1)*va*nc+(node-1)*nc+comp],acc)
-                end
-                vals[(step-1)*arity*nc+(i-1)*nc+comp]=acc
+                # Upstream value interpolation: v0 + c*(v1-v0).
+                a=weights[i][1][1];b=weights[i][2][1];c=weights[i][2][2]
+                v0=element.vals[(step-1)*va*nc+(a-1)*nc+comp]
+                vals[(step-1)*arity*nc+(i-1)*nc+comp]=
+                    v0+c*(element.vals[(step-1)*va*nc+(b-1)*nc+comp]-v0)
             end
             push!(out,_PluginElement(kind,_PLUGIN_KIND_DIM[kind],geo,geo,
                                      vals,nc,element.etag))
         end
     end
-    _plugin_extract_emit(view.name*"_CutPlane",out,-1,steps,times,caller)
+    _plugin_extract_emit(view.name*"_Levelset",out,-1,steps,times,caller)
     return nothing
 end
 
@@ -1822,40 +1739,36 @@ function _plugin_exec_cutsphere(spec::_PluginSpec,caller::AbstractString)
     out=_PluginElement[]
     for element in elements
         ga=size(element.geo,2);va=size(element.vcoords,2);nc=element.ncomp
+        # Plain left-associative arithmetic like the CutPlane levelset —
+        # fused muladd rounds differently on exact-sphere vertices.
         ls=ntuple(ga) do i
             dx=element.geo[1,i]-xc;dy=element.geo[2,i]-yc
             dz=element.geo[3,i]-zc
-            return muladd(dx,dx,muladd(dy,dy,dz*dz))-r*r
+            return dx*dx+dy*dy+dz*dz-r*r
         end
         if !iszero(volume)
-            # Whole-element extraction: `ExtractVolume < 0` keeps elements
-            # fully inside the sphere (all ls <= 0), `> 0` fully outside —
-            # same convention as CutPlane.
-            if (volume>0 ? all(l->l>=0.0,ls) : all(l->l<=0.0,ls)) &&
-                va==ga && _plugin_record_type(element.kind,nc)!==nothing
-                push!(out,element)
+            # Whole-element extraction: `ExtractVolume > 0` keeps elements
+            # fully outside the sphere (all ls >= 0), `< 0` fully inside —
+            # same convention as CutPlane. Kept elements re-emit through
+            # the iso-simplex decomposition like upstream.
+            if (volume>0 ? all(l->l>=0.0,ls) : all(l->l<=0.0,ls)) && va==ga
+                _plugin_push_subsimplices!(out,element,steps)
             end
             continue
         end
-        if all(l->l==0.0,ls)
-            va==ga && _plugin_record_type(element.kind,nc)!==nothing &&
-                push!(out,element)
-            continue
+        # Shared levelset section machinery (see `_plugin_levelset_sections`)
+        # with the sphere's analytic field gradient — the emitted facet's
+        # geometric normal follows the outward radial direction
+        # `centroid - centre` (the gradient of `|x-c|²-R²` at the section),
+        # not the per-simplex affine fit.
+        radial(points)=begin
+            n=length(points)
+            (sum(p->p[1],points)/n-xc,
+             sum(p->p[2],points)/n-yc,
+             sum(p->p[3],points)/n-zc)
         end
-        # Order the section polygon about the outward radial direction at the
-        # crossing centroid, so emitted facets face away from the sphere
-        # centre (upstream's `SPHERE` orientation rule).
-        points,_=_plugin_cut_crossings(element,ls)
-        if !isempty(points)
-            cx=cy=cz=0.0
-            for p in points;cx+=p[1];cy+=p[2];cz+=p[3];end
-            nrm=(_plugin_sub3((cx/length(points),cy/length(points),
-                               cz/length(points)),center))
-            _plugin_norm3(nrm)==0.0 && (nrm=(0.0,0.0,1.0))
-        else
-            nrm=(0.0,0.0,1.0)
-        end
-        for (kind,spoints,weights) in _plugin_cut_sections(element,ls,nrm)
+        for (kind,spoints,weights) in _plugin_levelset_sections(element,ls;
+                                                              orient=radial)
             _plugin_record_type(kind,nc)===nothing && continue
             arity=length(spoints)
             geo=Matrix{Float64}(undef,3,arity)
@@ -1864,18 +1777,16 @@ function _plugin_exec_cutsphere(spec::_PluginSpec,caller::AbstractString)
             end
             vals=Vector{Float64}(undef,arity*nc*steps)
             for step in 1:steps,i in 1:arity,comp in 1:nc
-                acc=0.0
-                for (node,factor) in weights[i]
-                    acc=muladd(factor,
-                        element.vals[(step-1)*va*nc+(node-1)*nc+comp],acc)
-                end
-                vals[(step-1)*arity*nc+(i-1)*nc+comp]=acc
+                a=weights[i][1][1];b=weights[i][2][1];c=weights[i][2][2]
+                v0=element.vals[(step-1)*va*nc+(a-1)*nc+comp]
+                vals[(step-1)*arity*nc+(i-1)*nc+comp]=
+                    v0+c*(element.vals[(step-1)*va*nc+(b-1)*nc+comp]-v0)
             end
             push!(out,_PluginElement(kind,_PLUGIN_KIND_DIM[kind],geo,geo,
                                      vals,nc,element.etag))
         end
     end
-    _plugin_extract_emit(view.name*"_CutSphere",out,-1,steps,times,caller)
+    _plugin_extract_emit(view.name*"_Levelset",out,-1,steps,times,caller)
     return nothing
 end
 
@@ -1886,9 +1797,9 @@ end
 # `ComputeScalarRep` of that node's components minus `Value` (scalars pass
 # through, vectors their norm, tensors the Von-Mises invariant). The section
 # geometry is value-dependent — upstream's "moving" levelset — so like
-# upstream the plugin emits one list-based view per populated step:
-# `<name>_Isosurface` for a single step, `<name>_Isosurface_<step>` per step
-# otherwise.
+# upstream the plugin emits one list-based view per populated step, always
+# named `<name>_Levelset_<step>` (verified on the oracle — a single-step view
+# produces `<name>_Levelset_0`).
 #
 # Non-simplex elements pass through upstream's `getSimplexDec` decomposition
 # (quadrangle → two triangles, hexahedron → six tetrahedra, prism → three,
@@ -1947,15 +1858,44 @@ function _plugin_grad_simplex(coords,vals)
     return (g1,g2,g3)
 end
 
-# Append one element's single-step levelset section records to `out`: every
-# sub-simplex scans its edges for `levels[a]*levels[b] <= 0` crossings and
-# emits the record its deduplicated crossings form. `levels` holds the
-# element-node levelset values (scalar representation minus `Value`); the
-# constant `Value` shift leaves the orientation gradient unchanged.
-function _plugin_iso_sections!(out,element,levels,step,nsteps)
-    kind=element.kind;geo=element.geo;nc=element.ncomp
-    va=size(element.vcoords,2)
+# `ExtractVolume`-style verbatim emission: upstream re-emits a kept element
+# through the same `_PLUGIN_ISO_SIMPLICES` decomposition it cuts with, so a
+# quadrangle publishes two `ST` records and a hexahedron six `SS` records —
+# geometry and values are gathered, never interpolated.
+const _PLUGIN_SIMPLEX_KIND=(:point,:line,:triangle,:tetrahedron)
+function _plugin_push_subsimplices!(out,element,steps)
+    va=size(element.vcoords,2);nc=element.ncomp
+    for map in _PLUGIN_ISO_SIMPLICES[element.kind]
+        kind=_PLUGIN_SIMPLEX_KIND[length(map)]
+        _plugin_record_type(kind,nc)===nothing && continue
+        arity=length(map)
+        geo=Matrix{Float64}(undef,3,arity)
+        for i in 1:arity,axis in 1:3
+            geo[axis,i]=element.geo[axis,map[i]]
+        end
+        vals=Vector{Float64}(undef,arity*nc*steps)
+        for step in 1:steps,i in 1:arity,comp in 1:nc
+            vals[(step-1)*arity*nc+(i-1)*nc+comp]=
+                element.vals[(step-1)*va*nc+(map[i]-1)*nc+comp]
+        end
+        push!(out,_PluginElement(kind,_PLUGIN_KIND_DIM[kind],geo,geo,
+                                 vals,nc,element.etag))
+    end
+    return out
+end
+
+# One element's levelset section records as `(kind, points, weights)`:
+# every sub-simplex (`_PLUGIN_ISO_SIMPLICES`) scans its edges for
+# `levels[a]*levels[b] <= 0` crossings — the `la==lb` degenerate arm emits
+# the edge's first vertex — and upstream `removeIdenticalNodes` keeps the
+# first crossing within a per-coordinate `1e-12` box. `levels` holds the
+# element-node levelset values (scalar representation minus the level);
+# the constant level shift leaves the orientation gradient unchanged.
+function _plugin_levelset_sections(element,levels;orient=nothing)
+    kind=element.kind;geo=element.geo
     numedges=length(_PLUGIN_CUT_EDGES[kind])
+    out=Tuple{Symbol,Vector{NTuple{3,Float64}},
+              Vector{Vector{Tuple{Int,Float64}}}}[]
     for simplex in _PLUGIN_ISO_SIMPLICES[kind]
         points=NTuple{3,Float64}[];weights=Vector{Tuple{Int,Float64}}[]
         for (ea,eb) in _PLUGIN_ISO_SUBEDGES[length(simplex)]
@@ -1994,17 +1934,38 @@ function _plugin_iso_sections!(out,element,levels,step,nsteps)
         end
         if np==3 || np==4
             # MAP orientation: the emitted section's normal opposes the
-            # element's scalar gradient — upstream flips the polygon when
-            # the (p3-p1)x(p2-p1) normal already points along it.
+            # scalar gradient — upstream flips the polygon when the
+            # (p3-p1)x(p2-p1) normal already points along it. The gradient
+            # is the linear solve on THIS sub-simplex's four nodes (only a
+            # tetrahedron simplex can reach np >= 3), not the parent's
+            # first four — for a decomposed hex those can be coplanar. An
+            # `orient` callback overrides the gradient for fields whose
+            # orientation direction is not the affine fit (CutSphere's
+            # radial normal).
             normal=_plugin_cross3(_plugin_sub3(points[3],points[1]),
                                   _plugin_sub3(points[2],points[1]))
-            grad=size(geo,2)>=4 ? _plugin_grad_simplex(geo,levels) :
+            grad=orient!==nothing ? orient(points) :
+                length(simplex)==4 ?
+                _plugin_grad_simplex(
+                    [geo[axis,simplex[i]] for axis in 1:3,i in 1:4],
+                    (levels[simplex[1]],levels[simplex[2]],
+                     levels[simplex[3]],levels[simplex[4]])) :
                 (0.0,0.0,0.0)
             _plugin_dot3(grad,normal)>0.0 &&
                 (reverse!(points);reverse!(weights))
         end
-        outkind=np==1 ? :point : np==2 ? :line : np==3 ? :triangle : :quadrangle
+        push!(out,(np==1 ? :point : np==2 ? :line :
+                   np==3 ? :triangle : :quadrangle,points,weights))
+    end
+    return out
+end
+
+# Append one element's single-step levelset section records to `out`.
+function _plugin_iso_sections!(out,element,levels,step,nsteps)
+    nc=element.ncomp;va=size(element.vcoords,2)
+    for (outkind,points,weights) in _plugin_levelset_sections(element,levels)
         _plugin_record_type(outkind,nc)===nothing && continue
+        np=length(points)
         section=Matrix{Float64}(undef,3,np)
         for i in 1:np,axis in 1:3
             section[axis,i]=points[i][axis]
@@ -2053,8 +2014,7 @@ function _plugin_exec_isosurface(spec::_PluginSpec,caller::AbstractString)
                 (verbatim && push!(out,element);continue)
             _plugin_iso_sections!(out,element,levels,step,steps)
         end
-        name=steps==1 ? view.name*"_Isosurface" :
-            view.name*"_Isosurface_"*string(step)
+        name=view.name*"_Levelset_"*string(step)
         _plugin_extract_emit(name,out,step,steps,times,caller)
     end
     return nothing

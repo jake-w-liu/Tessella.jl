@@ -67,7 +67,7 @@ ST(0,0,0, 1,0,0, 0,1,0){1.0, 2.0, 3.0};
         Plugin(CutPlane).Run;""";
         files=Dict("v.pos"=>_TRI_POS))
     @test length(ex.views)==2
-    @test ex.views[2].name=="v_CutPlane"
+    @test ex.views[2].name=="v_Levelset"
     @test !isempty(ex.views[2].elements)
     for element in ex.views[2].elements
         for node in axes(element.coords,2)
@@ -180,6 +180,7 @@ end
 
 @testset ".geo Alias/Combine views" begin
     dir=mktempdir()
+    nl=Sys.iswindows() ? "\r\n" : "\n"
     # Two views named "a" plus singleton "b" — mirrors the upstream probe:
     # by-name combine keeps the singleton first, then "a_Combine".
     write(joinpath(dir,"in.pos"),"""
@@ -206,7 +207,8 @@ end
     @test length(ex.views)==5
     @test ex.views[4].name=="a"
     @test length(ex.views[4].elements)==1
-    @test read(joinpath(dir,"alias.pos"),String)=="View \"a\" {\nSP(0,0,0){1};\n};\n"
+    @test read(joinpath(dir,"alias.pos"),String)==
+        "View \"a\" {"*nl*"SP(0,0,0){1};"*nl*"};"*nl
     @test_throws ArgumentError _execute_geo_source("Alias View[0];")
     @test_throws ArgumentError _execute_geo_source(
         "Merge \"in.pos\";\nAlias View[9];",files=Dict("in.pos"=>"View \"v\" {\n};\n"))
@@ -222,7 +224,7 @@ end
     ex=execute_geo(geo)
     @test [v.name for v in ex.views]==["b","a_Combine"]
     @test read(joinpath(dir,"s1.pos"),String)==
-        "View \"a_Combine\" {\nSP(0,0,0){1};\nSP(2,2,2){3};\n};\n"
+        "View \"a_Combine\" {"*nl*"SP(0,0,0){1};"*nl*"SP(2,2,2){3};"*nl*"};"*nl
 
     # `Combine ElementsFromAllViews` collapses everything into "all_Combine".
     geo=joinpath(dir,"all.geo")
@@ -234,7 +236,8 @@ end
     ex=execute_geo(geo)
     @test length(ex.views)==1
     @test read(joinpath(dir,"all.pos"),String)==
-        "View \"all_Combine\" {\nSP(0,0,0){1};\nSP(1,1,1){2};\nSP(2,2,2){3};\n};\n"
+        "View \"all_Combine\" {"*nl*"SP(0,0,0){1};"*nl*"SP(1,1,1){2};"*nl*
+        "SP(2,2,2){3};"*nl*"};"*nl
 
     # `Combine TimeStepsByViewName` zips aligned rows into step columns —
     # byte-identical to the upstream `a_Combine` table.
@@ -247,7 +250,7 @@ end
     ex=execute_geo(geo)
     @test [v.name for v in ex.views]==["b","a_Combine"]
     @test read(joinpath(dir,"ts.pos"),String)==
-        "View \"a_Combine\" {\nTIME{0,1};\nSP(0,0,0){1,3};\n};\n"
+        "View \"a_Combine\" {"*nl*"TIME{0,1};"*nl*"SP(0,0,0){1,3};"*nl*"};"*nl
 
     @test_throws ArgumentError _execute_geo_source(
         "Merge \"in.pos\";\nCombine BogusMode;",files=Dict("in.pos"=>"View \"v\" {\n};\n"))

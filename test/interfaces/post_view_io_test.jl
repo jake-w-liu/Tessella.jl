@@ -223,13 +223,16 @@ end
                  texts=PosText[PosText(2,(5.0,6.0,0.0),12.0,["tag"])])
     io=IOBuffer()
     write_pos(io,view)
-    expected="View \"mixed\" {\n" *
-        "SP(1,2,3){0.5};\n" *
-        "SL(0,0,0,1,0,0){0.2,0.8};\n" *
-        "VT(0,0,0,1,0,0,0,1,0){1,2,3,4,5,6,7,8,9};\n" *
-        "SS(0,0,0,1,0,0,0,1,0,0,0,1){0.1,0.2,0.3,0.4};\n" *
-        "T2(5,6,12){\"tag\"};\n" *
-        "};\n"
+    # Gmsh writes platform text newlines (CRLF on Windows) — the writer pins
+    # the same convention.
+    nl=Sys.iswindows() ? "\r\n" : "\n"
+    expected="View \"mixed\" {" * nl *
+        "SP(1,2,3){0.5};" * nl *
+        "SL(0,0,0,1,0,0){0.2,0.8};" * nl *
+        "VT(0,0,0,1,0,0,0,1,0){1,2,3,4,5,6,7,8,9};" * nl *
+        "SS(0,0,0,1,0,0,0,1,0,0,0,1){0.1,0.2,0.3,0.4};" * nl *
+        "T2(5,6,12){\"tag\"};" * nl *
+        "};" * nl
     @test String(take!(io))==expected
 
     # write → read → write is a fixed point.
@@ -255,7 +258,8 @@ end
     legacy=View("legacy",[0.0 2.0;0.0 0.0;0.0 0.0],[0.25,0.75])
     io5=IOBuffer();write_pos(io5,legacy)
     @test String(take!(io5))==
-        "View \"legacy\" {\nSP(0,0,0){0.25};\nSP(2,0,0){0.75};\n};\n"
+        "View \"legacy\" {" * nl * "SP(0,0,0){0.25};" * nl *
+        "SP(2,0,0){0.75};" * nl * "};" * nl
     io6=IOBuffer();write_pos(io6,[view,timed])
     @test String(take!(io6))==expected*text3
     @test_throws ArgumentError write_pos(IOBuffer(),Any["bogus"])

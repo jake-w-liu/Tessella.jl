@@ -41,8 +41,9 @@ end
         @test sort!([collect(p) for p in pts])≈
             sort!([[0.25,0.,0.],[0.,0.25,0.],[0.,0.,0.25]])
         @test sort(rec[10:12])≈[2.5,5.0,7.5]
-        # The polygon normal follows the outward radial direction at the
-        # section centroid ((1,1,1)/3 here).
+        # Upstream faces the section's normal along the outward radial
+        # direction (away from the sphere centre at the origin here), which
+        # the (p2-p1)x(p3-p1) winding measures directly.
         e1=(pts[2][1]-pts[1][1],pts[2][2]-pts[1][2],pts[2][3]-pts[1][3])
         e2=(pts[3][1]-pts[1][1],pts[3][2]-pts[1][2],pts[3][3]-pts[1][3])
         n=(e1[2]*e2[3]-e1[3]*e2[2],e1[3]*e2[1]-e1[1]*e2[3],

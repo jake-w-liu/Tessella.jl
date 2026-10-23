@@ -146,8 +146,9 @@ end
         end
         @test got==Set([(0.0,0.0,0.5,2.5),(0.5,0.0,0.5,3.0),(0.0,0.5,0.5,3.5)])
 
-        # Unit hexahedron cut by z = 0.5: four vertical-edge crossings emit a
-        # two-triangle fan covering the unit square section exactly once.
+        # Unit hexahedron cut by z = 0.5: upstream decomposes the hex into
+        # six tetrahedra whose sections emit 4 ST + 2 SQ records tiling the
+        # unit square exactly once (verified byte-identical to gmsh 4.15.2).
         hex=A.view.add("chex")
         A.view.add_list_data(hex,"SH",1,
             [0.,1.,1.,0., 0.,1.,1.,0.,   # x1..x8
@@ -157,32 +158,37 @@ end
         A.plugin.set_number("CutPlane","View",hex)
         A.plugin.run("CutPlane")
         types,data=A.view.get_list_data(latest())
-        @test types==["ST"]
-        rec=data[1]
-        corners=Set{NTuple{3,Float64}}()
+        @test types==["ST","SQ"]
+        tris,quads=data
+        @test length(tris)==4*12 && length(quads)==2*16
         area=0.0
-        for element in 0:1
-            base=element*12
-            pts=[(rec[base+i],rec[base+3+i],rec[base+6+i]) for i in 1:3]
+        for element in 0:3
+            rec=tris[element*12+1:element*12+12]
+            pts=[(rec[i],rec[3+i],rec[6+i]) for i in 1:3]
             for p in pts
-                push!(corners,p)
                 @test p[3]≈0.5
             end
             e1=(pts[2].-pts[1]);e2=(pts[3].-pts[1])
             area+=0.5hypot(e1[2]*e2[3]-e1[3]*e2[2],
                            e1[3]*e2[1]-e1[1]*e2[3],
                            e1[1]*e2[2]-e1[2]*e2[1])
+            @test rec[10:12]≈fill(0.5,3)
+        end
+        for element in 0:1
+            rec=quads[element*16+1:element*16+16]
+            pts=[(rec[i],rec[4+i],rec[8+i]) for i in 1:4]
+            for p in pts
+                @test p[3]≈0.5
+            end
+            e1=(pts[3].-pts[1]);e2=(pts[4].-pts[2])
+            area+=0.5abs(e1[1]*e2[2]-e1[2]*e2[1])
+            @test rec[13:16]≈fill(0.5,4)
         end
         @test area≈1.0
-        @test corners==Set([(0.,0.,0.5),(1.,0.,0.5),(1.,1.,0.5),(0.,1.,0.5)])
-        # Section values interpolate the z field to 0.5 everywhere: each
-        # emitted ST record is 9 geometry + 3 values wide.
-        for element in 0:1
-            @test rec[element*12+7:element*12+9]≈fill(0.5,3)
-        end
 
         # A plane touching a single vertex (x + y = 0 hits only node 1, whose
-        # incident edges both report it) emits a single point record.
+        # incident edges both report it) emits nothing upstream — sections
+        # below the element's codimension are discarded.
         apex=A.view.add("capex")
         A.view.add_list_data(apex,"ST",1,
             [0.,1.,0., 0.,0.,1., 0.,0.,0., 9.,3.,5.])
@@ -192,10 +198,10 @@ end
         end
         A.plugin.run("CutPlane")
         types,data=A.view.get_list_data(latest())
-        @test types==["SP"]
-        @test data[1]≈[0.,0.,0.,9.]
+        @test isempty(types)
 
-        # A triangle lying in the cut plane is re-emitted verbatim.
+        # A triangle lying in the cut plane emits its first edge as an `SL`
+        # record (upstream's all-on-levelset degenerate case).
         flat=A.view.add("cflat")
         A.view.add_list_data(flat,"ST",1,
             [0.,1.,0., 0.,0.,1., 0.,0.,0., 4.,5.,6.])
@@ -205,8 +211,8 @@ end
         end
         A.plugin.run("CutPlane")
         types,data=A.view.get_list_data(latest())
-        @test types==["ST"]
-        @test data[1]≈[0.,1.,0., 0.,0.,1., 0.,0.,0., 4.,5.,6.]
+        @test types==["SL"]
+        @test data[1]≈[0.,1., 0.,0., 0.,0., 4.,5.]
 
         # ExtractVolume keeps whole elements on the selected side: the
         # straddling tetrahedron goes to neither side, the low one to -1.

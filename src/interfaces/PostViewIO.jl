@@ -40,6 +40,10 @@ end
 
 const _POS_MAX_NAME_BYTES=1<<20
 const _POS_MAX_STRING_BYTES=1<<20
+# Upstream serializes `.pos` through a C++ text-mode stream, so the file's
+# line terminators follow the platform convention — CRLF on Windows, LF
+# elsewhere (verified on the Windows oracle: `Save View` output is CRLF).
+const _POS_LF=Sys.iswindows() ? "\r\n" : "\n"
 
 """
     PosScheme(coefval, expval)
@@ -1598,7 +1602,7 @@ function _pos_write_element(io::IO,element::PosElement)
         index>1 && print(io,',')
         print(io,_pos_fmt(element.values[c,j,s]))
     end
-    println(io,"};")
+    print(io,"};",_POS_LF)
     return nothing
 end
 
@@ -1612,20 +1616,22 @@ function _pos_write_interpolation(io::IO,scheme::AbstractVector)
         end
         print(io,'}')
     end
-    println(io,';')
+    print(io,';',_POS_LF)
     return nothing
 end
 
 function _pos_write_view(io::IO,view::PosView)
     nsteps=isempty(view.elements) ? length(view.time) :
         size(view.elements[1].values,3)
-    print(io,"View \"",view.name,"\" {\n")
+    print(io,"View \"",view.name,"\" {",_POS_LF)
     # A nondefault literal time also matters for one step or an empty view.
-    # Ordinary implicit single-step [0] output retains its existing layout.
-    explicit_time=!isempty(view.time) && (isempty(view.elements) ||
-        any(i->!isequal(view.time[i],Float64(i-1)),eachindex(view.time)))
-    (nsteps>1 || explicit_time) && println(io,"TIME{",join((_pos_fmt(t) for t in view.time),','),
-                        "};")
+    # Ordinary implicit single-step [0] output retains its existing layout —
+    # upstream emits no `TIME` table for an empty view whose stored times are
+    # the implicit defaults (verified on the oracle).
+    explicit_time=!isempty(view.time) &&
+        any(i->!isequal(view.time[i],Float64(i-1)),eachindex(view.time))
+    (nsteps>1 || explicit_time) && print(io,"TIME{",join((_pos_fmt(t) for t in view.time),','),
+                        "};",_POS_LF)
     nschemes=length(view.interpolations)
     next_scheme=1
     nelem=length(view.elements)
@@ -1644,16 +1650,16 @@ function _pos_write_view(io::IO,view::PosView)
     for text in view.texts
         quoted=join((string('"',s,'"') for s in text.strings),',')
         if text.dim==2
-            println(io,"T2(",_pos_fmt(text.coords[1]),",",
+            print(io,"T2(",_pos_fmt(text.coords[1]),",",
                     _pos_fmt(text.coords[2]),",",_pos_fmt(text.style),
-                    "){",quoted,"};")
+                    "){",quoted,"};",_POS_LF)
         else
-            println(io,"T3(",_pos_fmt(text.coords[1]),",",
+            print(io,"T3(",_pos_fmt(text.coords[1]),",",
                     _pos_fmt(text.coords[2]),",",_pos_fmt(text.coords[3]),",",
-                    _pos_fmt(text.style),"){",quoted,"};")
+                    _pos_fmt(text.style),"){",quoted,"};",_POS_LF)
         end
     end
-    print(io,"};\n")
+    print(io,"};",_POS_LF)
     return nothing
 end
 
