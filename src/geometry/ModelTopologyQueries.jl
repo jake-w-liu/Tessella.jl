@@ -147,11 +147,7 @@ function _model_direct_boundary(
         # tags of Curve/Surface boundary entries like the native path.
         entries=Tuple{Int,Int}[]
         for (bdim,btag) in discrete.boundary
-            # Curve-endpoint records sign-tag the LAST point (-last) for
-            # partition/ghost imports; boundary queries expose unsigned
-            # Point tags exactly like the native path. Curve/Surface
-            # entries keep their orientation sign under a reversed query.
-            signed=bdim==0 ? abs(btag) : (signed_tag<0 ? -btag : btag)
+            signed=signed_tag<0 ? -btag : btag
             push!(entries,(bdim,signed))
         end
         dimension==1 && signed_tag<0 && reverse!(entries)
