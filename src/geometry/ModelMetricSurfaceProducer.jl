@@ -5,6 +5,12 @@ using ..PipelineSupport: pipeline_float, pipeline_limit, PIPELINE_DEFAULT_MAX_NO
 using ..Mesh3D: _EHeap, _hpush!, _hpop!
 
 @inline _metric_surface_edges(cell)=((cell[1],cell[2]),(cell[2],cell[3]),(cell[3],cell[1]))
+# Unsigned parametric (u,v) triangle area — `orient2` is a sign predicate, so
+# the conservation certificates use the raw determinant.
+@inline _metric_uv_area(pa,pb,pc)=
+    abs((pb[1]-pa[1])*(pc[2]-pa[2])-(pb[2]-pa[2])*(pc[1]-pa[1]))/2
+@inline _metric_uv_signed(pa,pb,pc)=
+    ((pb[1]-pa[1])*(pc[2]-pa[2])-(pb[2]-pa[2])*(pc[1]-pa[1]))/2
 
 function _metric_surface_incidence(cells,caller)
     incidence=Dict{NTuple{2,Int32},Vector{Int}}()
@@ -65,81 +71,36 @@ function _metric_boundary_curve_stale(m,curve,params,tag,field,target,caller)
     return false
 end
 
-function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
-                                input,options,node_high_water,element_high_water,caller)
-    # Boundary cells that are lazily graded while building the lower input
-    # must satisfy this producer's strict `metric_edge_length` certificate
-    # against `field`. The curve graders only see `options.inner_field` and
-    # the `F_Lc_aniso` dispatch on `m.meshing.algorithm_2d`, so transport the
-    # certificate requirement into the grading context: bind the resolved
-    # field as the background field and select the BAMG integrand for the
-    # duration of the lower-dimensional pass. `m` is the working model; the
-    # stored flag is restored afterwards so unrelated surfaces keep their
-    # caller's resolution.
-    options=_mesh1d_options_with_inner_field(options,field)
-    saved_algorithm=m.meshing.algorithm_2d
-    m.meshing.algorithm_2d=7
-    local authority, limit
-    try
-        # A boundary Curve may already carry parameters graded under a
-        # different sizing context — e.g. `mesh_model_surface`'s
-        # `Mesh1D`-before-`Mesh2D` front pass (`_attribute_forced_parameters`)
-        # grades lazily under the model's scalar options before this
-        # producer's dispatch, and `reuse_curve_params` then keeps them
-        # verbatim. A retained boundary cell must already satisfy the strict
-        # certificate below, so re-grade any stored boundary discretization
-        # whose edges violate it; the lower pass then derives it under the
-        # transported metric. Periodic dependencies of a stale curve are
-        # dropped too — a slave's params are only a copy of its master's.
-        input===nothing && for loop_id in m.surfaces[tag],signed in m.loops[loop_id]
-            curve=abs(signed)
-            params=get(m.curve_params,curve,nothing)
-            params===nothing && continue
-            _metric_boundary_curve_stale(m,curve,params,tag,field,target,
-                                         caller) || continue
-            delete!(m.curve_params,curve)
-            for dep in _model_curve_mesh_dependencies(m,curve)
-                delete!(m.curve_params,dep)
-            end
-        end
-        authority,limit=_gmsh_native_surface_lower_input(m,options,input,
-            node_high_water,caller)
-    finally
-        m.meshing.algorithm_2d=saved_algorithm
-    end
-    frame=_gmsh_native_surface_frame(m,tag,options,caller)
-    source=_gmsh_native_surface_source(m,tag,authority,frame,caller;ctx_lc=options.ctx_lc)
-    length(source.tags)<=node_limit || throw(ArgumentError(
-        "$caller: retained lower vertices exceed max_nodes"))
-    # Without interior constraints, Euler's disk-with-holes relation fixes
-    # the initial triangle count before its triangulation is allocated.
-    initial_count=length(source.tags)+2(length(m.surfaces[tag])-1)-2
-    initial_count<=triangle_limit || throw(ArgumentError(
-        "$caller: initial Surface exceeds max_triangles"))
-    initial=_gmsh_native_initial_surface(m,tag,options,authority,limit,caller;
-        algorithm=3,element_high_water)
-    mesh=initial.mesh
-    nnodes(mesh)<=node_limit && ntris(mesh)<=triangle_limit || throw(ArgumentError(
-        "$caller: initial lower mesh exceeds max_nodes or max_triangles"))
-    validate(mesh).ok || throw(ArgumentError("$caller: initial Surface is invalid"))
-    coordinates=NTuple{3,Float64}[Tuple(mesh.coords[:,row]) for row in axes(mesh.coords,2)]
-    parameters=NTuple{2,Float64}[_gmsh_native_surface_parameters(frame,point) for point in coordinates]
-    cells=NTuple{3,Int32}[Tuple(cell) for cell in eachcol(mesh.tris)]
-    incidence=_metric_surface_incidence(cells,caller)
-    boundary=Set(edge for (edge,hits) in incidence if length(hits)==1)
-    original_boundary=Set(minmax(initial.node_tags[edge[1]],initial.node_tags[edge[2]]) for edge in boundary)
-    wanted_boundary=Set(minmax(source.tags[edge[1]],source.tags[edge[2]]) for edge in source.boundaries)
-    original_boundary==wanted_boundary || throw(ArgumentError(
-        "$caller: initial Surface loses its actual lower Curve-cell incidence"))
-    score(edge)=metric_edge_length(field,coordinates[edge[1]],coordinates[edge[2]];entity=(2,tag))
-    all(edge->score(edge)<=target,boundary) || throw(ArgumentError(
-        "$caller: retained boundary exceeds max_metric_edge; provide finer lower Curve cells"))
-    labels=copy(initial.element_tags);numbers=copy(initial.node_tags)
-    owners=copy(initial.node_owners);node_parameters=deepcopy(initial.node_parameters)
-    retained=copy(initial.retained_nodes);birth_rows=copy(initial.birth_rows)
+# ── shared certified metric refinement core ──────────────────────────────────
+#
+# The BAMG-like certified loop behind `Mesh.Algorithm=7`: a priority queue of
+# metric-Delaunay Steiner insertions, conforming edge bisections and the
+# razor/star repair family, followed by certified metric-flip and vertex
+# dissolution sweeps. `chart` supplies the surface's parameter geometry:
+#
+#   chart.lift(u,v)                  — world position of a parametric point
+#   chart.metric(u,v)                — pullback metric J'MJ at (u,v)
+#   chart.split(pa,pb,wa,wb)         — canonical representable bisection
+#   chart.candidates(pa,pb,wa,wb)    — dyadic+ULP fallback splits
+#   chart.fan(polygon,cuv,coordinates) — world point for a cavity-fan Steiner
+#
+# The planar producer's chart is the affine mean-Plane frame (a constant
+# pullback); the OCC chart is the face's own non-affine parametrization with
+# the Jacobian of `_occ_surface_d1`. `data` carries the initial triangulation
+# state — unwrapped coordinates, parametric positions, cells, edge incidence
+# and the retained boundary — and is refined in place; the return holds the
+# surviving rows and the consumed label high waters.
+function _metric_surface_refine_core(tag,field,target,node_limit,
+        triangle_limit,caller,chart,data)
+    coordinates=data.coordinates;parameters=data.parameters;cells=data.cells
+    incidence=data.incidence;boundary=data.boundary
+    numbers=data.numbers;owners=data.owners;node_parameters=data.node_parameters
+    retained=data.retained;birth_rows=data.birth_rows;labels=data.labels
+    node_max=data.node_max;cell_max=data.cell_max
+    score(edge)=metric_edge_length(field,coordinates[edge[1]],
+        coordinates[edge[2]];entity=(2,tag))
     alive=trues(length(cells));live_count=length(cells)
     node_alive=trues(length(coordinates))
-    node_max=initial.node_high_water;cell_max=initial.element_high_water
     heap=_EHeap();queued=Set{NTuple{2,Int32}}()
     function enqueue(edge)
         haskey(incidence,edge) && !(edge in queued) || return
@@ -157,22 +118,13 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
     # Dissolved vertex positions stay reserved so a later split cannot birth a
     # vertex back onto the exact razor site the repair just removed.
     retired=Set{NTuple{3,Float64}}()
-    # Tangent-frame pullback of the world metric at a surface point. In the
-    # affine plane coordinates the quadratic form J'MJ gives exactly the
-    # `metric_edge_length` of any in-plane chord, so circumcenter and
-    # in-circle computations in (u,v) are the world tests on lifted points.
-    function uv_metric(point)
-        mm=metric_at(field,point[1],point[2],point[3],(2,tag))
-        f=frame.first;s=frame.second
-        a=mm.m11*f[1]*f[1]+mm.m22*f[2]*f[2]+mm.m33*f[3]*f[3]+
-          2*(mm.m12*f[1]*f[2]+mm.m13*f[1]*f[3]+mm.m23*f[2]*f[3])
-        b=mm.m11*f[1]*s[1]+mm.m22*f[2]*s[2]+mm.m33*f[3]*s[3]+
-          mm.m12*(f[1]*s[2]+f[2]*s[1])+mm.m13*(f[1]*s[3]+f[3]*s[1])+
-          mm.m23*(f[2]*s[3]+f[3]*s[2])
-        d=mm.m11*s[1]*s[1]+mm.m22*s[2]*s[2]+mm.m33*s[3]*s[3]+
-          2*(mm.m12*s[1]*s[2]+mm.m13*s[1]*s[3]+mm.m23*s[2]*s[3])
-        return (a,b,d)
-    end
+    # Pullback metric at a parametric point. In the affine plane coordinates
+    # J'MJ gives exactly the `metric_edge_length` of any in-plane chord, so
+    # circumcenter and in-circle computations in (u,v) are the world tests on
+    # lifted points; on an OCC face the same quadratic form is the local
+    # tangent-space metric — evaluated pointwise through the chart, not a
+    # constant frame.
+    uv_metric(u,v)=chart.metric(u,v)
     # Metric circumcircle of a live cell under `metric` (a 2x2 pullback).
     # `_gmsh_sys2x2` hands back (0,0) on a degenerate solve, so the returned
     # center is re-certified by equal metric distance to all three corners.
@@ -256,21 +208,21 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
                 pa,pb,pc=parameters[cell[1]],parameters[cell[2]],parameters[cell[3]]
                 centroid=((pa[1]+pb[1]+pc[1])/3,(pa[2]+pb[2]+pc[2])/3)
                 solved=uv_circumcircle(column,
-                    uv_metric(_surface_metric_lift(frame,centroid[1],centroid[2])))
+                    uv_metric(centroid[1],centroid[2]))
                 solved===nothing ? 0.0 : solved[2]
             end,rev=true)
             cell=cells[column]
             pa,pb,pc=parameters[cell[1]],parameters[cell[2]],parameters[cell[3]]
             centroid=((pa[1]+pb[1]+pc[1])/3,(pa[2]+pb[2]+pc[2])/3)
             solved=uv_circumcircle(column,
-                uv_metric(_surface_metric_lift(frame,centroid[1],centroid[2])))
+                uv_metric(centroid[1],centroid[2]))
             solved===nothing && (steiner_fail[:cc]=get(steiner_fail,:cc,0)+1;continue)
             p_uv,_=solved
-            p_world=_surface_metric_lift(frame,p_uv[1],p_uv[2])
+            p_world=chart.lift(p_uv[1],p_uv[2])
             (haskey(positions,p_world) || p_world in retired) && (steiner_fail[:dup]=get(steiner_fail,:dup,0)+1;continue)
             home=uv_locate(column,p_uv,w)
             home===nothing && (steiner_fail[:locate]=get(steiner_fail,:locate,0)+1;continue)
-            mp=uv_metric(p_world)
+            mp=uv_metric(p_uv[1],p_uv[2])
             _metric_steiner_commit(p_uv,p_world,home,mp,w) && return true
         end
         return false
@@ -503,55 +455,28 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
             end
             return true
         end
-        midpoint=ntuple(axis->_convex_coordinate(coordinates[a][axis],coordinates[b][axis],.5),3)
-        uv=ntuple(axis->_convex_coordinate(parameters[a][axis],parameters[b][axis],.5),2)
+        midpoint,uv=chart.split(parameters[a],parameters[b],
+                                coordinates[a],coordinates[b])
         splitpoint=midpoint;split_uv=uv
         if haskey(positions,midpoint) || midpoint in retired ||
                !admissible(midpoint,uv)
-            # On a near-degenerate Float64 lattice the canonical midpoint can
-            # land on an existing vertex or produce razor children even when
-            # the parents are nondegenerate — the same representability
+            # On a near-degenerate Float64 lattice the canonical split point
+            # can land on an existing vertex or produce razor children even
+            # when the parents are nondegenerate — the same representability
             # failure the volumetric kernel's `fallback_split_point`
-            # (refine_to_size, Mesh3D.jl) resolves. Search dyadic positions
-            # near 1/2 with widening ULP shifts and keep the most balanced
-            # admissible candidate; the certificate itself is unchanged.
-            lerp(x,y,t)=signbit(x)==signbit(y) ? muladd(t,y-x,x) : (1-t)*x+t*y
-            shiftulp(x,k)=begin
-                y=x
-                if k<0;for _ in 1:-k;y=prevfloat(y);end
-                elseif k>0;for _ in 1:k;y=nextfloat(y);end
-                end
-                y
-            end
-            pa=coordinates[a];pb=coordinates[b]
+            # (refine_to_size, Mesh3D.jl) resolves. The chart searches dyadic
+            # positions near 1/2 with widening ULP shifts — on the world
+            # chord for a plane, in (u,v) for a curved patch — and the core
+            # keeps the most balanced admissible candidate; the certificate
+            # itself is unchanged.
             found=nothing;found_score=nothing
-            for radius in 0:2,n in 1:31
-                n==16&&continue
-                t=n/32
-                base=(lerp(pa[1],pb[1],t),lerp(pa[2],pb[2],t),lerp(pa[3],pb[3],t))
-                for ox in -radius:radius,oy in -radius:radius,oz in -radius:radius
-                    max(abs(ox),abs(oy),abs(oz))==radius||continue
-                    ((pa[1]==pb[1]&&ox!=0)||(pa[2]==pb[2]&&oy!=0)||
-                     (pa[3]==pb[3]&&oz!=0))&&continue
-                    point=(shiftulp(base[1],ox),shiftulp(base[2],oy),
-                           shiftulp(base[3],oz))
-                    all(i->min(pa[i],pb[i])<=point[i]<=max(pa[i],pb[i]),1:3)||continue
-                    (point!=pa && point!=pb)||continue
-                    haskey(positions,point)&&continue
-                    point in retired && continue
-                    # Keep the candidate's parameter consistent with its
-                    # world point: for a ULP-perturbed point `lerp` would put
-                    # the uv exactly back on the edge's parametric segment, so
-                    # razor-chain children would stay exactly flat no matter
-                    # how the world coordinate is perturbed.  The affine frame
-                    # map carries the perturbation into parameter space and is
-                    # the same map used for every born vertex.
-                    point_uv=_gmsh_native_surface_parameters(frame,point)
-                    admissible(point,point_uv)||continue
-                    candidate=(abs(n-16),radius,abs(ox)+abs(oy)+abs(oz),ox,oy,oz)
-                    (found_score===nothing||candidate<found_score)&&
-                        (found=(point,point_uv);found_score=candidate)
-                end
+            for (point,point_uv,candidate) in chart.candidates(
+                    parameters[a],parameters[b],coordinates[a],coordinates[b])
+                haskey(positions,point)&&continue
+                point in retired && continue
+                admissible(point,point_uv)||continue
+                (found_score===nothing||candidate<found_score)&&
+                    (found=(point,point_uv);found_score=candidate)
             end
             if found===nothing
                 # When no representable split point exists — razor parent
@@ -936,17 +861,16 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
                     # When the zigzag perimeter admits no ear, fall back to a
                     # centroid fan: one Steiner vertex on the rail midline
                     # still gives every fan cell the ring's real width.
-                    # For a planar surface the affine frame makes the world
-                    # centroid and the parameter centroid the same vertex.
+                    # The chart resolves the fan vertex — on a plane the
+                    # world centroid and the parameter centroid coincide,
+                    # while a curved patch lifts the uv centroid.
                     steiner=nothing
                     if !ear_ok
                         empty!(newcells)
                         nump=length(polygon)
                         cuv=(sum(parameters[v][1] for v in polygon)/nump,
                              sum(parameters[v][2] for v in polygon)/nump)
-                        cxyz=(sum(coordinates[v][1] for v in polygon)/nump,
-                              sum(coordinates[v][2] for v in polygon)/nump,
-                              sum(coordinates[v][3] for v in polygon)/nump)
+                        cxyz=chart.fan(polygon,cuv,coordinates)
                         (haskey(positions,cxyz) || cxyz in retired) &&
                             return false
                         fan=NTuple{3,Int32}[];fan_ok=true
@@ -1490,11 +1414,228 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
     end
     get(ENV,"TESS_METRIC_DEBUG","")!="" && println(stderr,
         "metric steiner: attempts=$(steiner_stats[1]) commits=$(steiner_stats[2]) fails=$(sort!(collect(steiner_fail))) tris=$live_count nodes=$(count(node_alive))")
-    live=findall(alive)
+    return (live=findall(alive),live_nodes=findall(node_alive),
+        node_alive=node_alive,node_max=node_max,cell_max=cell_max)
+end
+
+# ── surface charts ───────────────────────────────────────────────────────────
+#
+# A chart maps the refinement core's shared operations onto one surface's
+# parametric geometry. Both constructors share the dyadic+ULP representable
+# fallback contract: the candidate rank is `(abs(n-16), radius, |shift|₁, …)`
+# so the most balanced nearest-representable point wins deterministically.
+
+# The planar chart: the mean-Plane frame's affine (u,v). Its pullback J'MJ is
+# constant, the canonical split is the world midpoint (whose uv is the frame
+# image), the fallback shifts the world point's ULP lattice and the cavity-fan
+# centroid is the world mean of the ring.
+function _metric_surface_planar_chart(frame,field,tag)
+    lift=(u,v)->_surface_metric_lift(frame,u,v)
+    function metric(u,v)
+        point=lift(u,v)
+        mm=metric_at(field,point[1],point[2],point[3],(2,tag))
+        f=frame.first;s=frame.second
+        a=mm.m11*f[1]*f[1]+mm.m22*f[2]*f[2]+mm.m33*f[3]*f[3]+
+          2*(mm.m12*f[1]*f[2]+mm.m13*f[1]*f[3]+mm.m23*f[2]*f[3])
+        b=mm.m11*f[1]*s[1]+mm.m22*f[2]*s[2]+mm.m33*f[3]*s[3]+
+          mm.m12*(f[1]*s[2]+f[2]*s[1])+mm.m13*(f[1]*s[3]+f[3]*s[1])+
+          mm.m23*(f[2]*s[3]+f[3]*s[2])
+        d=mm.m11*s[1]*s[1]+mm.m22*s[2]*s[2]+mm.m33*s[3]*s[3]+
+          2*(mm.m12*s[1]*s[2]+mm.m13*s[1]*s[3]+mm.m23*s[2]*s[3])
+        return (a,b,d)
+    end
+    split=(pa_uv,pb_uv,wa,wb)->(
+        ntuple(axis->_convex_coordinate(wa[axis],wb[axis],.5),3),
+        ntuple(axis->_convex_coordinate(pa_uv[axis],pb_uv[axis],.5),2))
+    lerp(x,y,t)=signbit(x)==signbit(y) ? muladd(t,y-x,x) : (1-t)*x+t*y
+    function shiftulp(x,k)
+        y=x
+        k<0 && for _ in 1:-k;y=prevfloat(y);end
+        k>0 && for _ in 1:k;y=nextfloat(y);end
+        return y
+    end
+    function candidates(pa_uv,pb_uv,wa,wb)
+        found=Tuple{NTuple{3,Float64},NTuple{2,Float64},NTuple{6,Int}}[]
+        for radius in 0:2,n in 1:31
+            n==16&&continue
+            t=n/32
+            base=(lerp(wa[1],wb[1],t),lerp(wa[2],wb[2],t),lerp(wa[3],wb[3],t))
+            for ox in -radius:radius,oy in -radius:radius,oz in -radius:radius
+                max(abs(ox),abs(oy),abs(oz))==radius||continue
+                ((wa[1]==wb[1]&&ox!=0)||(wa[2]==wb[2]&&oy!=0)||
+                 (wa[3]==wb[3]&&oz!=0))&&continue
+                point=(shiftulp(base[1],ox),shiftulp(base[2],oy),
+                       shiftulp(base[3],oz))
+                all(i->min(wa[i],wb[i])<=point[i]<=max(wa[i],wb[i]),1:3)||continue
+                (point!=wa && point!=wb)||continue
+                # Keep the candidate's parameter consistent with its world
+                # point: for a ULP-perturbed point `lerp` would put the uv
+                # exactly back on the edge's parametric segment, so
+                # razor-chain children would stay exactly flat no matter how
+                # the world coordinate is perturbed. The affine frame map
+                # carries the perturbation into parameter space and is the
+                # same map used for every born vertex.
+                point_uv=_gmsh_native_surface_parameters(frame,point)
+                rank=(abs(n-16),radius,abs(ox)+abs(oy)+abs(oz),ox,oy,oz)
+                push!(found,(point,point_uv,rank))
+            end
+        end
+        return found
+    end
+    fan=(polygon,cuv,coordinates)->(
+        sum(coordinates[v][1] for v in polygon)/length(polygon),
+        sum(coordinates[v][2] for v in polygon)/length(polygon),
+        sum(coordinates[v][3] for v in polygon)/length(polygon))
+    return (lift=lift,metric=metric,split=split,candidates=candidates,fan=fan)
+end
+
+# The OCC parametric chart: the face's own (u,v) coordinates. The lift is
+# `_occ_surface_point`; the pullback is J'MJ with the Jacobian of
+# `_occ_surface_d1` and the world metric evaluated at the lifted point —
+# the non-affine counterpart of the planar frame's constant pullback. The
+# canonical split is the (u,v) midpoint lifted back onto the surface so every
+# born vertex stays on the face, and the fallback searches the same dyadic+ULP
+# lattice in (u,v). Unwrapped periodic seams are ordinary sheet coordinates;
+# the two sheets weld only at output.
+function _metric_occ_chart(sg,field,tag)
+    lift=(u,v)->_occ_surface_point(sg,u,v)
+    function metric(u,v)
+        _,du,dv=_occ_surface_d1(sg,u,v)
+        p=_occ_surface_point(sg,u,v)
+        mm=metric_at(field,p[1],p[2],p[3],(2,tag))
+        a=mm.m11*du[1]*du[1]+mm.m22*du[2]*du[2]+mm.m33*du[3]*du[3]+
+          2*(mm.m12*du[1]*du[2]+mm.m13*du[1]*du[3]+mm.m23*du[2]*du[3])
+        b=mm.m11*du[1]*dv[1]+mm.m22*du[2]*dv[2]+mm.m33*du[3]*dv[3]+
+          mm.m12*(du[1]*dv[2]+du[2]*dv[1])+mm.m13*(du[1]*dv[3]+du[3]*dv[1])+
+          mm.m23*(du[2]*dv[3]+du[3]*dv[2])
+        d=mm.m11*dv[1]*dv[1]+mm.m22*dv[2]*dv[2]+mm.m33*dv[3]*dv[3]+
+          2*(mm.m12*dv[1]*dv[2]+mm.m13*dv[1]*dv[3]+mm.m23*dv[2]*dv[3])
+        return (a,b,d)
+    end
+    split=function(pa_uv,pb_uv,wa,wb)
+        uv=ntuple(axis->_convex_coordinate(pa_uv[axis],pb_uv[axis],.5),2)
+        return (lift(uv[1],uv[2]),uv)
+    end
+    lerp(x,y,t)=signbit(x)==signbit(y) ? muladd(t,y-x,x) : (1-t)*x+t*y
+    function shiftulp(x,k)
+        y=x
+        k<0 && for _ in 1:-k;y=prevfloat(y);end
+        k>0 && for _ in 1:k;y=nextfloat(y);end
+        return y
+    end
+    function candidates(pa_uv,pb_uv,wa,wb)
+        found=Tuple{NTuple{3,Float64},NTuple{2,Float64},NTuple{6,Int}}[]
+        for radius in 0:2,n in 1:31
+            n==16&&continue
+            t=n/32
+            base=(lerp(pa_uv[1],pb_uv[1],t),lerp(pa_uv[2],pb_uv[2],t))
+            for ou in -radius:radius,ov in -radius:radius
+                max(abs(ou),abs(ov))==radius||continue
+                ((pa_uv[1]==pb_uv[1]&&ou!=0)||(pa_uv[2]==pb_uv[2]&&ov!=0))&&continue
+                point_uv=(shiftulp(base[1],ou),shiftulp(base[2],ov))
+                all(i->min(pa_uv[i],pb_uv[i])<=point_uv[i]<=
+                          max(pa_uv[i],pb_uv[i]),1:2)||continue
+                (point_uv!=pa_uv && point_uv!=pb_uv)||continue
+                point=lift(point_uv[1],point_uv[2])
+                rank=(abs(n-16),radius,abs(ou)+abs(ov),ou,ov,0)
+                push!(found,(point,point_uv,rank))
+            end
+        end
+        return found
+    end
+    fan=(polygon,cuv,coordinates)->lift(cuv[1],cuv[2])
+    return (lift=lift,metric=metric,split=split,candidates=candidates,fan=fan)
+end
+
+# ── planar front ─────────────────────────────────────────────────────────────
+function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
+                                input,options,node_high_water,element_high_water,caller)
+    # Boundary cells that are lazily graded while building the lower input
+    # must satisfy this producer's strict `metric_edge_length` certificate
+    # against `field`. The curve graders only see `options.inner_field` and
+    # the `F_Lc_aniso` dispatch on `m.meshing.algorithm_2d`, so transport the
+    # certificate requirement into the grading context: bind the resolved
+    # field as the background field and select the BAMG integrand for the
+    # duration of the lower-dimensional pass. `m` is the working model; the
+    # stored flag is restored afterwards so unrelated surfaces keep their
+    # caller's resolution.
+    options=_mesh1d_options_with_inner_field(options,field)
+    saved_algorithm=m.meshing.algorithm_2d
+    m.meshing.algorithm_2d=7
+    local authority, limit
+    try
+        # A boundary Curve may already carry parameters graded under a
+        # different sizing context — e.g. `mesh_model_surface`'s
+        # `Mesh1D`-before-`Mesh2D` front pass (`_attribute_forced_parameters`)
+        # grades lazily under the model's scalar options before this
+        # producer's dispatch, and `reuse_curve_params` then keeps them
+        # verbatim. A retained boundary cell must already satisfy the strict
+        # certificate below, so re-grade any stored boundary discretization
+        # whose edges violate it; the lower pass then derives it under the
+        # transported metric. Periodic dependencies of a stale curve are
+        # dropped too — a slave's params are only a copy of its master's.
+        input===nothing && for loop_id in m.surfaces[tag],signed in m.loops[loop_id]
+            curve=abs(signed)
+            params=get(m.curve_params,curve,nothing)
+            params===nothing && continue
+            _metric_boundary_curve_stale(m,curve,params,tag,field,target,
+                                         caller) || continue
+            delete!(m.curve_params,curve)
+            for dep in _model_curve_mesh_dependencies(m,curve)
+                delete!(m.curve_params,dep)
+            end
+        end
+        authority,limit=_gmsh_native_surface_lower_input(m,options,input,
+            node_high_water,caller)
+    finally
+        m.meshing.algorithm_2d=saved_algorithm
+    end
+    frame=_gmsh_native_surface_frame(m,tag,options,caller)
+    source=_gmsh_native_surface_source(m,tag,authority,frame,caller;ctx_lc=options.ctx_lc)
+    length(source.tags)<=node_limit || throw(ArgumentError(
+        "$caller: retained lower vertices exceed max_nodes"))
+    # Without interior constraints, Euler's disk-with-holes relation fixes
+    # the initial triangle count before its triangulation is allocated.
+    initial_count=length(source.tags)+2(length(m.surfaces[tag])-1)-2
+    initial_count<=triangle_limit || throw(ArgumentError(
+        "$caller: initial Surface exceeds max_triangles"))
+    initial=_gmsh_native_initial_surface(m,tag,options,authority,limit,caller;
+        algorithm=3,element_high_water)
+    mesh=initial.mesh
+    nnodes(mesh)<=node_limit && ntris(mesh)<=triangle_limit || throw(ArgumentError(
+        "$caller: initial lower mesh exceeds max_nodes or max_triangles"))
+    validate(mesh).ok || throw(ArgumentError("$caller: initial Surface is invalid"))
+    coordinates=NTuple{3,Float64}[Tuple(mesh.coords[:,row]) for row in axes(mesh.coords,2)]
+    parameters=NTuple{2,Float64}[_gmsh_native_surface_parameters(frame,point) for point in coordinates]
+    cells=NTuple{3,Int32}[Tuple(cell) for cell in eachcol(mesh.tris)]
+    incidence=_metric_surface_incidence(cells,caller)
+    boundary=Set(edge for (edge,hits) in incidence if length(hits)==1)
+    original_boundary=Set(minmax(initial.node_tags[edge[1]],initial.node_tags[edge[2]]) for edge in boundary)
+    wanted_boundary=Set(minmax(source.tags[edge[1]],source.tags[edge[2]]) for edge in source.boundaries)
+    original_boundary==wanted_boundary || throw(ArgumentError(
+        "$caller: initial Surface loses its actual lower Curve-cell incidence"))
+    score(edge)=metric_edge_length(field,coordinates[edge[1]],coordinates[edge[2]];entity=(2,tag))
+    all(edge->score(edge)<=target,boundary) || throw(ArgumentError(
+        "$caller: retained boundary exceeds max_metric_edge; provide finer lower Curve cells"))
+    data=(coordinates=coordinates,parameters=parameters,cells=cells,
+        incidence=incidence,boundary=boundary,
+        numbers=copy(initial.node_tags),owners=copy(initial.node_owners),
+        node_parameters=deepcopy(initial.node_parameters),
+        retained=copy(initial.retained_nodes),
+        birth_rows=copy(initial.birth_rows),
+        labels=copy(initial.element_tags),
+        node_max=initial.node_high_water,cell_max=initial.element_high_water)
+    state=_metric_surface_refine_core(tag,field,target,node_limit,
+        triangle_limit,caller,_metric_surface_planar_chart(frame,field,tag),
+        data)
+    live=state.live;live_nodes=state.live_nodes;node_alive=state.node_alive
+    node_max=state.node_max;cell_max=state.cell_max
+    numbers=data.numbers;owners=data.owners
+    node_parameters=data.node_parameters;retained=data.retained
+    birth_rows=data.birth_rows;labels=data.labels
     # Star dissolutions retire born vertices in place; compact the node rows
     # so the emitted mesh carries only live vertices. Every retained lower row
     # is always live, so the retained prefix keeps its order and coordinates.
-    live_nodes=findall(node_alive)
     remap=zeros(Int32,length(coordinates))
     for (index,row) in enumerate(live_nodes);remap[row]=Int32(index);end
     connectivity=Matrix{Int32}(undef,3,length(live))
@@ -1535,6 +1676,302 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
     return _ModelSurfaceProduction(output,numbers[live_nodes],owners[live_nodes],
         node_parameters[live_nodes],retained[live_nodes],node_max,
         labels[live],cell_max,Int32[remap[row] for row in birth_rows if node_alive[row]])
+end
+
+# ── OCC parametric front ─────────────────────────────────────────────────────
+#
+# The actual lower product cell set the unwrapped boundary must carry:
+# consecutive node pairs of every wire Curve's actual mesh product, plus the
+# degenerate apex's welded self-pair for a collapsed pole row. This is the
+# curved counterpart of the planar front's `source.boundaries` — the same
+# strict incidence certificate, keyed by the product's own external tags.
+function _occ_metric_wanted_boundary(m,tag,authority,lookup,caller)
+    wanted=Set{NTuple{2,UInt64}}()
+    for loop_id in m.surfaces[tag],signed in m.loops[loop_id]
+        curve=abs(signed)
+        crec=get(m.curve_geometry,curve,nothing)
+        if (crec!==nothing && get(crec,:occ,nothing)===:degenerate) ||
+                get(m.curve_types,curve,nothing)===:degenerate
+            a,_=m.curves[curve]
+            uid=get(lookup,(0,a,m.points[a]),UInt64(0))
+            uid==0 && throw(ArgumentError(
+                "$caller: Surface[$tag] degenerate Curve[$curve] apex lacks its actual Point product"))
+            push!(wanted,(uid,uid))
+            continue
+        end
+        product=_model_mesh_product(authority,1,curve;caller)
+        (product===nothing || product.entity_data===nothing) && throw(ArgumentError(
+            "$caller: Surface[$tag] boundary lacks actual Curve[$curve] products"))
+        data=product.entity_data
+        cells_seen=0
+        for block in product.blocks
+            block.msh==1 || throw(ArgumentError(
+                "$caller: actual Curve[$curve] products must be linear"))
+            for column in axes(block.nodes,2)
+                push!(wanted,minmax(data.external_node_tags[block.nodes[1,column]],
+                                    data.external_node_tags[block.nodes[2,column]]))
+                cells_seen+=1
+            end
+        end
+        cells_seen==0 && throw(ArgumentError(
+            "$caller: actual Curve[$curve] products carry no Line cells"))
+    end
+    return wanted
+end
+
+# The `Mesh.Algorithm=7` producer for parametric OCC faces. The tracked OCC
+# builder supplies the unwrapped parametric sheet — the same PSLG/CDT the
+# Delaunay-family policies lift — and the shared core refines it in (u,v)
+# under the J'MJ pullback. Refined sheet rows weld back onto bitwise-equal
+# world positions exactly like the lifted CDT does, so the periodic seam and
+# degenerate poles close; the emitted mesh, certificates and production record
+# all live on the welded world triangulation.
+function _occ_metric_surface_refine(m,tag,field,target,node_limit,
+        triangle_limit,input,options,node_high_water,element_high_water,caller)
+    sg=get(m.surface_geometry,tag,nothing)
+    sg===nothing && throw(ArgumentError(
+        "$caller: Surface[$tag] has no parametric OCC record"))
+    options=_mesh1d_options_with_inner_field(options,field)
+    saved_algorithm=m.meshing.algorithm_2d
+    m.meshing.algorithm_2d=7
+    local authority,limit,unwrapped
+    try
+        input===nothing && for loop_id in m.surfaces[tag],signed in m.loops[loop_id]
+            curve=abs(signed)
+            params=get(m.curve_params,curve,nothing)
+            params===nothing && continue
+            _metric_boundary_curve_stale(m,curve,params,tag,field,target,
+                                         caller) || continue
+            delete!(m.curve_params,curve)
+            for dep in _model_curve_mesh_dependencies(m,curve)
+                delete!(m.curve_params,dep)
+            end
+        end
+        authority,limit=_gmsh_native_surface_lower_input(m,options,input,
+            node_high_water,caller)
+        _,_,_,unwrapped=_model_occ_curved_surface_mesh_tracked(
+            m,tag,caller;_mesh1d_options=options)
+    finally
+        m.meshing.algorithm_2d=saved_algorithm
+    end
+    # Resolve the unwrapped sheet's rows against the actual lower products:
+    # curve-owned and point-owned rows keep their product UID bitwise, interior
+    # rows mint fresh labels above the consumed high water — the
+    # `_occ_curved_surface_production` identity contract.
+    src=authority.mesh
+    data_src=src===nothing ? nothing : src.entity_data
+    lookup=Dict{Tuple{Int,Int32,NTuple{3,Float64}},UInt64}()
+    if data_src!==nothing
+        for row in 1:nnodes(src)
+            entity=data_src.node_entities[row]
+            entity===nothing && continue
+            key=(entity[1],entity[2],
+                 (src.coords[1,row],src.coords[2,row],src.coords[3,row]))
+            haskey(lookup,key) || (lookup[key]=data_src.external_node_tags[row])
+        end
+    end
+    nrows=length(unwrapped.u)
+    coordinates=unwrapped.world
+    parameters=NTuple{2,Float64}[(unwrapped.u[r],unwrapped.v[r]) for r in 1:nrows]
+    cells=copy(unwrapped.cells)
+    numbers=Vector{UInt64}(undef,nrows)
+    owners=copy(unwrapped.owners)
+    node_parameters=Union{Nothing,Vector{Float64}}[
+        p===nothing ? nothing : copy(p) for p in unwrapped.params]
+    retained=falses(nrows)
+    next=UInt64(limit)
+    for row in 1:nrows
+        owner=owners[row]
+        found=owner[1]<2 ? get(lookup,(owner[1],owner[2],coordinates[row]),
+            UInt64(0)) : UInt64(0)
+        if found!=0
+            numbers[row]=found;retained[row]=true
+        else
+            next=_metric_surface_birth(next,1,caller,"node")
+            numbers[row]=next
+        end
+    end
+    nrows<=node_limit || throw(ArgumentError(
+        "$caller: retained lower vertices exceed max_nodes"))
+    length(cells)<=triangle_limit || throw(ArgumentError(
+        "$caller: initial Surface exceeds max_triangles"))
+    labels=UInt64[element_high_water+UInt64(i) for i in 1:length(cells)]
+    cell_max=element_high_water+UInt64(length(cells))
+    incidence=_metric_surface_incidence(cells,caller)
+    boundary=Set(edge for (edge,hits) in incidence if length(hits)==1)
+    original_boundary=Set(minmax(numbers[edge[1]],numbers[edge[2]]) for edge in boundary)
+    wanted_boundary=_occ_metric_wanted_boundary(m,tag,authority,lookup,caller)
+    original_boundary==wanted_boundary || throw(ArgumentError(
+        "$caller: initial Surface loses its actual lower Curve-cell incidence"))
+    score(edge)=metric_edge_length(field,coordinates[edge[1]],
+        coordinates[edge[2]];entity=(2,tag))
+    all(edge->score(edge)<=target,boundary) || throw(ArgumentError(
+        "$caller: retained boundary exceeds max_metric_edge; provide finer lower Curve cells"))
+    # Planar-embedding certificate for the unwrapped sheet: the lifted weld
+    # repair may leave covering-position cells (a star rebuilt across the
+    # seam on the covering sheet), which is fine for the welded product but
+    # not a uv triangulation the parametric refinement can certify on — the
+    # cells must tile the parametric rectangle exactly with one winding.
+    signed_a=0.0;abs_a=0.0
+    for cell in cells
+        pa,pb,pc=parameters[cell[1]],parameters[cell[2]],parameters[cell[3]]
+        signed_a+=_metric_uv_signed(pa,pb,pc)
+        abs_a+=_metric_uv_area(pa,pb,pc)
+    end
+    (uvlo,uvhi)=_occ_surface_bounds(sg)
+    dom=(uvhi[1]-uvlo[1])*(uvhi[2]-uvlo[2])
+    isfinite(signed_a) && isfinite(abs_a) && dom>0 &&
+        isapprox(abs(signed_a),abs_a;rtol=1e-9,atol=1e-9*max(1.0,abs_a)) &&
+        isapprox(abs_a,dom;rtol=1e-9,atol=1e-9*max(1.0,dom)) || throw(
+        ArgumentError("$caller: Mesh.Algorithm=7 on Surface[$tag] requires " *
+            "a planar-embedded unwrapped parametric sheet"))
+    state=_metric_surface_refine_core(tag,field,target,node_limit,
+        triangle_limit,caller,_metric_occ_chart(sg,field,tag),
+        (coordinates=coordinates,parameters=parameters,cells=cells,
+         incidence=incidence,boundary=boundary,
+         numbers=numbers,owners=owners,node_parameters=node_parameters,
+         retained=retained,birth_rows=Int32.(1:nrows),
+         labels=labels,node_max=next,cell_max=cell_max))
+    live=state.live;live_nodes=state.live_nodes
+    node_max=state.node_max;cell_max=state.cell_max
+    # Weld the refined sheet back onto bitwise-equal world rows — the tracked
+    # builder's own contract: the lowest-dimensional preimage supplies
+    # ownership, cells collapsed by degenerate rows drop, and the surviving
+    # edges keep their incidence.
+    weld=Dict{NTuple{3,Float64},Int32}()
+    remap=zeros(Int32,length(coordinates))
+    kept=Int32[]
+    for row in live_nodes
+        r=get(weld,coordinates[row],Int32(0))
+        r==0 && (push!(kept,row);r=Int32(length(kept));weld[coordinates[row]]=r)
+        remap[row]=r
+    end
+    srcrow=Vector{Int32}(undef,length(kept))
+    for (k,row) in enumerate(kept);srcrow[k]=row;end
+    for row in live_nodes
+        k=remap[row]
+        owners[row][1]<owners[srcrow[k]][1] && (srcrow[k]=row)
+    end
+    out_params=Union{Nothing,Vector{Float64}}[
+        let p=node_parameters[srcrow[k]]
+            p===nothing ? nothing : copy(p)
+        end for k in eachindex(srcrow)]
+    # A closed seam row's canonical face parameter is the wrapped one — the
+    # same fold `_gmsh_native_surface_record` applies to shared boundary rows.
+    if unwrapped.period>0.0
+        ulo=_occ_surface_bounds(sg)[1][1]
+        for k in eachindex(srcrow)
+            owners[srcrow[k]][1]==2 || continue
+            p=out_params[k]
+            p===nothing && continue
+            p[1]=ulo+mod(p[1]-ulo,unwrapped.period)
+        end
+    end
+    out_cells=NTuple{3,Int32}[]
+    out_labels=UInt64[]
+    for column in live
+        cell=cells[column]
+        c=(remap[cell[1]],remap[cell[2]],remap[cell[3]])
+        (c[1]==c[2] || c[2]==c[3] || c[3]==c[1]) && continue
+        push!(out_cells,c);push!(out_labels,labels[column])
+    end
+    isempty(out_cells) && throw(ArgumentError(
+        "$caller: Surface[$tag] parametric triangulation collapsed entirely"))
+    out_coords=Matrix{Float64}(undef,3,length(kept))
+    for (k,row) in enumerate(kept)
+        out_coords[1,k]=coordinates[row][1]
+        out_coords[2,k]=coordinates[row][2]
+        out_coords[3,k]=coordinates[row][3]
+    end
+    # Align the patch with the face's geometric normal: the unwrapped uv-CCW
+    # winding lifts to either side depending on the parametrization's
+    # handedness — the tracked builder's own flip, repeated on the weld.
+    uv_of(k)=parameters[kept[k]]
+    cell=out_cells[1]
+    um=(uv_of(cell[1])[1]+uv_of(cell[2])[1]+uv_of(cell[3])[1])/3
+    vm=(uv_of(cell[1])[2]+uv_of(cell[2])[2]+uv_of(cell[3])[2])/3
+    nn=_brep_surface_normal(sg,um,vm)
+    pa=out_coords[:,cell[1]];pb=out_coords[:,cell[2]];pc=out_coords[:,cell[3]]
+    n3=_b3cross(_b3(pb,pa),_b3(pc,pa))
+    if _b3dot(n3,nn)<0
+        flipped=Matrix{Int32}(undef,3,length(out_cells))
+        flipped[1,:].=getindex.(out_cells,1)
+        flipped[2,:].=getindex.(out_cells,3)
+        flipped[3,:].=getindex.(out_cells,2)
+        out_cells=NTuple{3,Int32}[Tuple(flipped[:,i]) for i in 1:length(out_cells)]
+    end
+    out_tris=Matrix{Int32}(undef,3,length(out_cells))
+    for (i,c) in enumerate(out_cells)
+        out_tris[1,i]=c[1];out_tris[2,i]=c[2];out_tris[3,i]=c[3]
+    end
+    output=Mesh(out_coords;tris=out_tris)
+    diag=validate(output)
+    diag.ok || throw(ErrorException("$caller: refined Surface is invalid — "*
+        join(diag.messages,"; ")))
+    # Manifold welded-boundary audit: every unwrapped boundary edge's welded
+    # image either survives as the unique output perimeter edge (a real rim)
+    # or appears twice — the periodic seam's two sheets closing on the same
+    # world edge. Degenerate-row images collapse and cannot appear.
+    welded_boundary=Dict{NTuple{2,Int32},Int}()
+    for edge in boundary
+        wa,wb=remap[edge[1]],remap[edge[2]]
+        wa==wb && continue
+        key=minmax(wa,wb)
+        welded_boundary[key]=get(welded_boundary,key,0)+1
+    end
+    all(<=(2),values(welded_boundary)) || throw(ErrorException(
+        "$caller: refined Surface boundary weld is not manifold"))
+    final_incidence=_metric_surface_incidence(out_cells,caller)
+    output_boundary=Set(key for (key,hits) in final_incidence if length(hits)==1)
+    output_boundary==Set(key for (key,count) in welded_boundary if count==1) ||
+        throw(ErrorException("$caller: refined Surface changes its retained boundary"))
+    output_score(edge)=metric_edge_length(field,
+        Tuple(out_coords[:,edge[1]]),Tuple(out_coords[:,edge[2]]);
+        entity=(2,tag))
+    all(edge->output_score(edge)<=target,keys(final_incidence)) || throw(
+        ErrorException("$caller: final edge exceeds max_metric_edge"))
+    # The planar front certifies world-area conservation; on a curved patch
+    # the conserved quantity is the parametric footprint — every certified
+    # operation preserves the (u,v) domain exactly.
+    uv_area(cell)=_metric_uv_area(parameters[cell[1]],parameters[cell[2]],
+                                  parameters[cell[3]])
+    initial_uv=sum(uv_area,unwrapped.cells)
+    final_uv=sum(uv_area(cells[column]) for column in live)
+    isfinite(initial_uv) && initial_uv>0 && isfinite(final_uv) &&
+        isapprox(final_uv,initial_uv;rtol=256eps(Float64)*max(1,length(live)),atol=0) ||
+        throw(ErrorException("$caller: refinement changes the Surface parameter domain"))
+    for row in live_nodes
+        retained[row] || continue
+        isequal(Tuple(out_coords[:,remap[row]]),coordinates[row]) || throw(
+            ErrorException("$caller: refinement changes a retained lower vertex"))
+    end
+    minpre=Vector{Int32}(undef,length(kept))
+    for (k,row) in enumerate(kept);minpre[k]=row;end
+    for row in live_nodes
+        k=remap[row];row<minpre[k] && (minpre[k]=row)
+    end
+    return _ModelSurfaceProduction(output,numbers[srcrow],owners[srcrow],
+        out_params,retained[srcrow],node_max,out_labels,cell_max,
+        Int32.(sortperm(minpre)))
+end
+
+# `Mesh.Algorithm=7` dispatch entry for parametric OCC faces. Upstream's BAMG
+# selector requires a metric field on curved faces — a scalar or absent
+# selection rejects rather than degrading to the planar isotropic fallback,
+# which has no surface parameter meaning on a non-affine chart.
+function _model_occ_metric_surface_mesh(m::GeoModel,tag::Int,
+        caller::AbstractString;size_field=nothing,_mesh_input=nothing,
+        _mesh1d_options=nothing,_mesh_node_high_water=nothing,
+        _mesh_element_high_water=UInt64(0))
+    options=_model_algorithm_size_options(m,_mesh1d_options,caller)
+    raw=options.inner_field===nothing ? size_field : options.inner_field
+    raw isa AbstractAnisoField || throw(ArgumentError(
+        "$caller: Mesh.Algorithm=7 on curved Surface[$tag] requires an " *
+        "anisotropic (tensor) background size field"))
+    field=_metric_surface_algorithm_field(m,tag,options,size_field,caller)
+    return _occ_metric_surface_refine(m,tag,field,1.0,
+        PIPELINE_DEFAULT_MAX_NODES,20_000_000,_mesh_input,options,
+        _mesh_node_high_water,_mesh_element_high_water,caller)
 end
 
 """

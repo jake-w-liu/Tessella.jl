@@ -4620,6 +4620,19 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
     mesh=Mesh(coords;tris=tris)
     isempty(cells) && throw(ArgumentError(
         "$caller: Surface[$t] parametric triangulation collapsed entirely"))
+    # The unwrapped (u,v) triangulation behind the welded product: the
+    # algorithm-7 metric producer refines this preimage representation —
+    # seam columns and collapsed degenerate rows stay distinct parametric
+    # vertices sharing world positions — so its certified local operations
+    # run on an ordinary manifold disk before the same weld folds the
+    # refined sheet back onto the closed surface. `world` carries the
+    # canonical lifted position per row (`kept[remap]`, so boundary rows
+    # keep the curve product's bitwise coordinates and every row of a weld
+    # class shares one position); `owners`/`params` are the per-row
+    # provenance `pre_owner`/`pre_param`; `cells` index the unwrapped rows.
+    unwrapped=(u=uxs,v=uys,cells=tris_uv,owners=pre_owner,params=pre_param,
+        world=NTuple{3,Float64}[kept[remap[k]] for k in eachindex(uxs)],
+        period=period)
     # The uv-CCW winding lifts to either side of the face depending on the
     # parametrization's handedness; align the patch with the face's
     # geometric normal like a planar patch follows its `axis`.
@@ -4636,14 +4649,14 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
         flipped[3,:].=mesh.tris[2,:]
         mesh=Mesh(coords;tris=flipped)
     end
-    return mesh,kept_owner,kept_param
+    return mesh,kept_owner,kept_param,unwrapped
 end
 
 # The lifted tessellation alone — the volume-PLC consumer classifies boundary
 # vertices geometrically and does not need per-node provenance.
 function _model_occ_curved_surface_mesh(m::GeoModel,t::Int,
                                         caller::AbstractString;kwargs...)
-    mesh,_,_=_model_occ_curved_surface_mesh_tracked(m,t,caller;kwargs...)
+    mesh,_,_,_=_model_occ_curved_surface_mesh_tracked(m,t,caller;kwargs...)
     return mesh
 end
 

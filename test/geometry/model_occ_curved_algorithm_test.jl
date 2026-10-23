@@ -57,13 +57,26 @@ _error(f)=try;f();nothing catch err;err end
     @test MT.nnodes(initial)<MT.nnodes(refined)
 
     # Selectors without a native producer keep the loud rejection — the
-    # lateral rejects 2 (AUTO resolves to MeshAdapt off-plane), 1, 7, 8, 9,
+    # lateral rejects 2 (AUTO resolves to MeshAdapt off-plane), 1, 8, 9,
     # 10 and 11 even though the caps would accept several of them.
-    for algorithm in (1,2,7,8,9,10,11)
+    for algorithm in (1,2,8,9,10,11)
         err=_error(()->M.mesh_model_volume(_sector(algorithm),1))
         @test err isa ArgumentError
         @test occursin("not implemented",sprint(showerror,err))
     end
+    # Upstream's BAMG selector is now the certified OCC metric producer on
+    # the curved lateral: it requires an anisotropic background field, so a
+    # global algorithm-7 request with no field keeps a loud rejection —
+    # naming the requirement rather than silently substituting the scalar
+    # context — while the same request with a tensor field fills the solid.
+    err=_error(()->M.mesh_model_volume(_sector(7),1))
+    @test err isa ArgumentError
+    @test occursin("anisotropic",sprint(showerror,err))
+    aniso=MathEvalAnisoField(m11="1",m22="1",m33="1")
+    mesh=M.mesh_model_volume(_sector(6;per_face=(lateral,7)),1;
+        size_field=aniso)
+    @test MT.validate(mesh).ok
+    @test MT.ntets(mesh)>0
     # A per-face request names the rejecting surface in the diagnostic.
     err=_error(()->M.mesh_model_volume(_sector(6;per_face=(lateral,8)),1))
     @test err isa ArgumentError

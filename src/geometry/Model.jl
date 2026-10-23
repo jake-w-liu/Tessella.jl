@@ -9007,14 +9007,41 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         get(m.meshing.smoothing,(2,t),0)>0 && throw(ArgumentError(
             "$caller: surface smoothing on curved Surface[$t] is not " *
             "implemented"))
-        size_field===nothing || throw(ArgumentError(
-            "$caller: a background size field on curved Surface[$t] is not " *
-            "implemented"))
         # Same admission `_model_volume_surface_mesh` applies: the parametric
         # kernel is the supported native producer for the Delaunay-family
-        # policies 3/5/6 only — AUTO resolves to MeshAdapt off-plane and the
-        # remaining selectors keep the loud not-implemented rejection.
-        algorithm=_normal_surface_mesh_algorithm(m,t,caller)
+        # policies 3/5/6 — AUTO resolves to MeshAdapt off-plane and the
+        # remaining selectors keep the loud not-implemented rejection. The
+        # `metric=true` extension additionally admits upstream's BAMG
+        # selector, which `_model_occ_metric_surface_mesh` implements on the
+        # face's own (u,v) chart.
+        algorithm=_normal_surface_mesh_algorithm(m,t,caller;metric=true)
+        (size_field===nothing || algorithm==7) || throw(ArgumentError(
+            "$caller: a background size field on curved Surface[$t] is not " *
+            "implemented"))
+        if algorithm==7
+            production=_model_occ_metric_surface_mesh(m,t,caller;
+                size_field=size_field,_mesh_input=_mesh_input,
+                _mesh1d_options=options,
+                _mesh_node_high_water=_mesh_node_high_water,
+                _mesh_element_high_water=_mesh_element_high_water)
+            mesh=production.mesh
+            diag=validate(mesh)
+            diag.ok || throw(ErrorException(
+                "$caller: invalid mesh — "*join(diag.messages,"; ")))
+            _surface_cell_count(mesh)>0 || throw(ErrorException(
+                "$caller: Surface[$t] produced no cells"))
+            if get(m.meshing.reverse,(2,t),false)
+                mesh=_reversed_surface_mesh(mesh,caller,t)
+                production=_ModelSurfaceProduction(mesh,production.node_tags,
+                    production.node_owners,production.node_parameters,
+                    production.retained_nodes,production.node_high_water,
+                    production.element_tags,production.element_high_water,
+                    production.birth_rows,production.constructor_mesh,
+                    production.source_node_updates,
+                    production.native_recombine_events,production.curve_chains)
+            end
+            return _return_surface_production ? production : mesh
+        end
         if _return_surface_production
             # meshGFace consumes the actual lower-dimensional products, so
             # the detached Point/Curve producer supplies the boundary
@@ -9022,7 +9049,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             # native path — while interior vertices mint fresh labels.
             lower_input,lower_limit=_gmsh_native_surface_lower_input(
                 m,options,_mesh_input,_mesh_node_high_water,caller)
-            mesh,owners,params=_model_occ_curved_surface_mesh_tracked(
+            mesh,owners,params,_=_model_occ_curved_surface_mesh_tracked(
                 m,t,caller;initial_only=algorithm==3,_mesh1d_options=options)
             diag=validate(mesh)
             diag.ok || throw(ErrorException(
@@ -9482,9 +9509,16 @@ function _model_volume_surface_mesh(m::GeoModel,surface::Int,
         # Delaunay-family policies 3/5/6 — initial-only suppresses its
         # interior (u,v) lattice seeds below, matching upstream's
         # boundary-vertices-only initial mesh — while AUTO resolves to
-        # MeshAdapt off-plane and 1/7/8/9/10/11 keep the loud
-        # not-implemented rejection.
-        algorithm=_normal_surface_mesh_algorithm(m,surface,caller)
+        # MeshAdapt off-plane and 1/8/9/10/11 keep the loud
+        # not-implemented rejection. `metric=true` additionally admits
+        # upstream's BAMG selector: `_model_occ_metric_surface_mesh` runs the
+        # certified parametric refinement on the face's own (u,v) chart and
+        # returns a production record, of which the PLC consumes the mesh.
+        algorithm=_normal_surface_mesh_algorithm(m,surface,caller;metric=true)
+        algorithm==7 && return _model_occ_metric_surface_mesh(m,surface,
+            caller;size_field=get(kwargs,:size_field,nothing),
+            _mesh_input=get(kwargs,:_mesh_input,nothing),
+            _mesh1d_options=get(kwargs,:_mesh1d_options,nothing)).mesh
         return _model_occ_curved_surface_mesh(m,surface,caller;
                                             initial_only=algorithm==3)
     end
