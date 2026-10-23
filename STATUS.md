@@ -2881,11 +2881,11 @@ t19 alone remains unported.
   `Rectangle` cutting plane, `Rotate`/`Translate`/`Duplicata` and the
   `For` slice loop before stopping at the classified operand-grammar
   gap `execute_geo: BooleanFragments: only Volume Boolean operands are
-  supported; got Surface{1}`. Behind it, the multi-entry
-  `DefineConstant[N=..\n dir=..\n surf=..]` newline-separated form
-  still emits a recoverable `syntax error (})` plus `Unknown
-  variable`/`Division by zero` diagnostics (comma-separated entries
-  parse) — recorded, not hidden. The session mirror
+  supported; got Surface{1}`. The multi-entry
+  `DefineConstant[N=..\n dir=..\n surf=..]` newline-separated form was
+  fixed 2026-10-23 (`1dfc9e4`, whitespace-separated entries) — the block
+  now parses and execution reaches the same classified
+  Boolean-operand stop. The session mirror
   (`occ.import_shapes` → `synchronize` → `occ.add_rectangle` →
   `occ.rotate`/`occ.translate`/`occ.copy`) verifies the four cutting
   planes land at stations `xmin + i·dx/5` with exact Y/Z spans, then
@@ -2909,11 +2909,12 @@ t19 alone remains unported.
   supported`; and `.geo` `PartitionMesh 3;` now executes on the
   supported built-in route (`geo_partitionmesh=OK nparts=3`).
   `Plugin(SimplePartition)` runs through `API.plugin`
-  (`NumSlicesX=3` → `nparts=3`); `.geo` `Plugin(...)` actions remain
-  rejected — `execute_geo: Plugin(...) actions are not supported`
-  (GeoExec.jl throws before dispatch). Behind the boolean, the
-  newline-separated `DefineConstant` block in `t21.geo` still emits
-  `syntax error (})`/`Unknown variable` diagnostics. Receipt:
+  (`NumSlicesX=3` → `nparts=3`); `.geo` `Plugin(SimplePartition)` now
+  dispatches through the session-store bridge (2026-10-23 `72fd7a1`),
+  transporting the produced `_MeshPartition` through the `PartitionMesh`
+  production path. The newline-separated `DefineConstant` block in
+  `t21.geo` now parses (2026-10-23 `1dfc9e4`); execution reaches the
+  classified Boolean-operand stop above. Receipt:
   `GMSH_PARITY_T21_TUTORIAL_OK` with the four probe lines attached.
 - Registrations: `validation/run_all.jl` tutorial tuple now includes
   `t13` and `t20`; the corpus comment records their verbatim-first
