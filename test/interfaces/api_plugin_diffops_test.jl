@@ -286,7 +286,7 @@ end
         types,strings,coords=A.view.get_list_data_strings(tri,1,-1,true)
         @test types==["T3"]
         @test strings==["hello"]
-        @test coords≈[1.,2.,3.]
+        @test coords≈[1.,2.,3.,0.]
 
         # A second annotation appends to the same record block.
         A.plugin.set_string("Annotate","Text","again")
@@ -294,7 +294,7 @@ end
         types,strings,coords=A.view.get_list_data_strings(tri,2,-1,true)
         @test types==["T3"]
         @test strings==["hello","again"]
-        @test coords≈[1.,2.,3., 1.,2.,3.]
+        @test coords≈[1.,2.,3.,0., 1.,2.,3.,0.]
 
         # ThreeD=0 stores screen coordinates with z = 0 under "T2".
         A.plugin.set_number("Annotate","ThreeD",0)
@@ -302,7 +302,7 @@ end
         types,strings,coords=A.view.get_list_data_strings(tri,1,-1,true)
         @test types==["T2"]
         @test strings==["again"]
-        @test coords≈[1.,2.,0.]
+        @test coords≈[1.,2.,0.,0.]
 
         # Model input creates a new `*_Annotate` view carrying the string
         # and the source time table.

@@ -2986,7 +2986,9 @@ function _plugin_exec_annotate(spec::_PluginSpec,caller::AbstractString)
     # Session string records hold one entry per element: the upstream 2-D
     # (`T2`, screen coordinates) or 3-D (`T3`, model coordinates) anchor
     # plus the text. There is no per-string style slot, so the FontSize/
-    # Font/Align options are accepted but not retained.
+    # Font/Align options are accepted but not retained. Stored coords are
+    # `width` per record (3 = xyz, 4 = xyz+style); new records pad with the
+    # table's existing width so mixed appends keep the flat layout aligned.
     key=dim3 ? "T3" : "T2"
     coord=dim3 ? Float64[x,y,z] : Float64[x,y,0.0]
     if view.model_kind===nothing
@@ -2996,8 +2998,12 @@ function _plugin_exec_annotate(spec::_PluginSpec,caller::AbstractString)
             view.list_string_coords[key]=Float64[]
             view.list_string_counts[key]=0
         end
+        prior=view.list_string_coords[key]
+        width=view.list_string_counts[key]>0 ?
+            div(length(prior),view.list_string_counts[key]) : 4
         push!(view.list_strings[key],text)
-        append!(view.list_string_coords[key],coord)
+        append!(view.list_string_coords[key],
+                width==4 ? vcat(coord,0.0) : coord)
         view.list_string_counts[key]+=1
         return nothing
     end
@@ -3006,7 +3012,7 @@ function _plugin_exec_annotate(spec::_PluginSpec,caller::AbstractString)
     out=_SessionView(view.name*"_Annotate")
     push!(out.list_string_types,key)
     out.list_strings[key]=String[text]
-    out.list_string_coords[key]=coord
+    out.list_string_coords[key]=vcat(coord,0.0)
     out.list_string_counts[key]=1
     # Upstream copies the whole `getNumTimeSteps` table — the step-range
     # extent, including unpopulated gaps.

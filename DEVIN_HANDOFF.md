@@ -126,11 +126,19 @@ the owned files:
   verbatim `.geo` scripts now parse their `DefineConstant` blocks and
   stop only at the previously-classified OCC dim-2 Boolean operand gap
   (`BooleanFragments` Surface operands) — see `geo_define_constant_test`.
-  `.geo` `Plugin(...)` actions remain rejected (plugins exist on
-  `API.plugin`; the `.geo` executor's `_GEO_EXEC_VIEWS` store is a
-  separate view list from `SESSION_VIEWS` — a store-agnostic bridge is
-  the remaining work). T8-style `.pos` `T2`/`T3` text expressions landed
-  earlier (`2bdd230`).
+  `.geo` `Plugin(Name).Opt = v`/`Plugin(Name).Run` landed 2026-10-23
+  (`geo_plugin_test`, 24 assertions): option writes share the API plugin
+  spec; `Run` swaps `_GEO_EXEC_VIEWS` into `SESSION_VIEWS` (geo index →
+  tag) plus a current-slot bind (`CURRENT[]`/`LAST_MESH[]`/authority
+  `actual`) under `STATE_LOCK` with `finally` restore — so view plugins
+  publish onto the execution list and mesh plugins (SimplePartition)
+  republish through the `PartitionMesh` production plan. Annotate's T2/T3
+  appends now pad to the table's coordinate width (4-coord x/y/z/style
+  convention), fixing a PosView round-trip width collision.
+  Verbatim t9 executes (Isosurface 640 = gmsh count; CutPlane 718 vs 546
+  API-level residual; 2 Annotate texts land). `GeoExecution` gained a
+  `views` field mirroring the execution view list. T8-style `.pos`
+  `T2`/`T3` text expressions landed earlier (`2bdd230`).
 - CLI flags: `-0` unrolled `.geo` output (`GeoUnrolled.jl`) and
   `-barycentric_refine` (`Elements.jl`) landed this session (570+28+72
   assertions green under `--compile=min`; oracle-verified connectivity,

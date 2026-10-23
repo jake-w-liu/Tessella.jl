@@ -2634,14 +2634,30 @@ support/common.jl` gained `run_gmsh_dim`, `gmsh_mixed` and `cell_metrics`.
 
 **Blocked tutorials — exact constructs (official files):**
 
-- t7: `Merge "t7_bgmesh.pos"` — `.pos` merge unsupported (only `.geo/.msh/.stl`).
-- t8: `Include "view*.pos"` post-processing views, image export, animation — `.pos` unsupported.
-- t9: `Plugin(...)` actions (`execute_geo` rejects them outright).
+- t7: unblocked 2026-10-23 — `Merge "*.pos"`, `Background Mesh View[i]` and
+  the three `Mesh.MeshSize*` option writes execute verbatim (5364 nodes;
+  density residual vs the API-route 1788/gmsh count recorded — option
+  transport into the `.geo` mesher, not a grammar gap).
+- t8: unblocked — `Include "view*.pos"` appends views (T2/T3 expressions
+  parse since `2bdd230`); image export/animation stay GUI-only.
+- t9: unblocked 2026-10-23 — verbatim file executes: `Plugin(Isosurface)`
+  emits 640 records (matches the gmsh-4.15.2 count), `Plugin(CutPlane)`
+  718 (vs upstream 546 — the existing API-level section-count residual),
+  both `Plugin(Annotate)` runs append T2 text records to view 0.
+  `Plugin(Name).Opt = v`/`Plugin(Name).Run` dispatch through the API
+  plugin engine with the execution view store swapped into
+  `SESSION_VIEWS` under `STATE_LOCK` (always restored); mesh plugins bind
+  the actual authority mesh so `Plugin(SimplePartition).Run` partitions
+  mid-file meshes (republished through the `PartitionMesh` plan —
+  `$PartitionedEntities` in `Save` output verified).
 - t13: `Merge "t13_data.stl"` discrete-geometry rebuild — `create_geometry!` aborts on conflicting per-node geometry sources (native STL reparametrization gap).
 - t17: OCC `Rectangle` + anisotropic background `.pos` mesh — OCC backend primitives unimplemented.
 - t19: OCC `ThruSections`, fillets, `Pipe` — all require an OCC backend.
-- t20: `Merge "t20_data.step"` (STEP import) + OCC `Rectangle` cutting planes + `PartitionMesh`.
-- t21: `PartitionMesh`/`Plugin(SimplePartition)` (mesh partitioning unsupported) + multiline `If` formatting the parser rejects.
+- t20: `Merge "t20_data.step"` (STEP import) + OCC `Rectangle` cutting planes + `PartitionMesh` (now implemented — the remaining stop is the classified OCC/STEP operand chain).
+- t21: `Plugin(SimplePartition)` now dispatches in `.geo` (see t9 note) and
+  `PartitionMesh` executes on the built-in route; the verbatim file still
+  stops at the classified OCC `BooleanFragments`/`Rectangle` operand gap
+  upstream of those statements.
 
 Also recorded: high-order `.geo` paths and `Recombine` of >4-curve
 transfinite surfaces remain outside the executor (t6 adaptation documents

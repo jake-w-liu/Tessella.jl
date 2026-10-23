@@ -424,22 +424,26 @@ struct GeoExecution
     native_context_lc::Float64
     native_context_forced_bbox::Bool
     native_element_lookup_receipt::Any
+    # Post-processing views owned by the execution (`Merge`/`Include` `.pos`
+    # payloads plus `Plugin(...).Run` products) — upstream's `GModel._views`
+    # ordering; `Background Mesh View[i]`/`Field[i] = "PostView"` index it.
+    views::Vector
 end
 
 GeoExecution(model,mesh,params,transfinite_tri,values,lists,strings,warnings,
              msg_error_count,exit_code,mesh_parts)=GeoExecution(model,mesh,params,
     transfinite_tri,values,lists,strings,warnings,msg_error_count,exit_code,
-    mesh_parts,mesh_parts,UInt64(0),UInt64(0),1.0,false,nothing)
+    mesh_parts,mesh_parts,UInt64(0),UInt64(0),1.0,false,nothing,Any[])
 
 GeoExecution(model,mesh,params,transfinite_tri,values,lists,strings,warnings,
     msg_error_count,exit_code,mesh_parts,node_max,element_max,lc,forced_bbox)=
     GeoExecution(model,mesh,params,transfinite_tri,values,lists,strings,warnings,
-        msg_error_count,exit_code,mesh_parts,mesh_parts,node_max,element_max,lc,forced_bbox,nothing)
+        msg_error_count,exit_code,mesh_parts,mesh_parts,node_max,element_max,lc,forced_bbox,nothing,Any[])
 
 GeoExecution(model,mesh,params,transfinite_tri,values,lists,strings,warnings,
     msg_error_count,exit_code,mesh_parts,actual_mesh_parts,node_max,element_max,lc,forced_bbox)=
     GeoExecution(model,mesh,params,transfinite_tri,values,lists,strings,warnings,
-        msg_error_count,exit_code,mesh_parts,actual_mesh_parts,node_max,element_max,lc,forced_bbox,nothing)
+        msg_error_count,exit_code,mesh_parts,actual_mesh_parts,node_max,element_max,lc,forced_bbox,nothing,Any[])
 
 """
     geo_entity_mesh(execution, dim, tag; geometry=false) -> Union{Mesh,MixedMesh}
@@ -912,7 +916,8 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
                         _geo_execution_geometry_parts(model,context),context.mesh_parts,
                         context.mesh_node_max,context.mesh_element_max,
                         context.native_context_lc,context.native_context_forced_bbox,
-                        context.native_element_lookup_receipt)
+                        context.native_element_lookup_receipt,
+                        copy(get(_GEO_EXEC_VIEWS,context,Any[])))
 end
 
 # Upstream control flow is a token stream, not a block tree (Gmsh.y
@@ -8224,8 +8229,8 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                            allocator_state)
         return
     elseif match(r"^Plugin\s*\(",line)!==nothing
-        throw(ArgumentError(
-            "execute_geo: Plugin(...) actions are not supported"))
+        _geo_exec_plugin!(m,line,context)
+        return
     elseif (mm=match(
             r"^Background\s+Mesh\s+View\s*\[\s*([^\]]*)\s*\]\s*;$",
             line))!==nothing
@@ -11164,6 +11169,132 @@ field_value(field::_GeoPostViewSizeField,x,y,z)=
     field_value(field.field,x,y,z)
 field_value(field::_GeoPostViewSizeField,x,y,z,::Tuple{T,U}) where
         {T<:Integer,U<:Integer}=field_value(field.field,x,y,z)
+
+# `Plugin(Name).Opt = value` shares the API plugin option store (upstream has
+# one plugin-option table per name across `.geo` and the API). `Run` executes
+# the plugin with `_GEO_EXEC_VIEWS` standing in for `SESSION_VIEWS` — swapped
+# in under `STATE_LOCK` and restored in `finally`, so a failed run leaves the
+# session store untouched and the geo store keeps its prior contents.
+# Plugin-published views append to the geo store in tag order, keeping the
+# positional indexing `Background Mesh View[]`/`PostView` fields resolve on.
+function _geo_exec_plugin!(m::GeoModel,line::AbstractString,
+                           context::_GeoNumericContext)
+    caller="execute_geo: Plugin"
+    mm=match(r"^Plugin\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*\." *
+             r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:=\s*(.*?)\s*)?;?\s*$",line)
+    mm===nothing && throw(ArgumentError(
+        "$caller: malformed statement: $line"))
+    api=getfield(parentmodule(@__MODULE__),:API)
+    name=api._plugin_check_name(String(mm.captures[1]),caller)
+    field=mm.captures[2];value_src=mm.captures[3]
+    if field=="Run"
+        run=value_src===nothing ||
+            !iszero(_geo_eval_numeric(value_src,context,caller))
+        if run
+            _geo_plugin_run!(api,name,m,context,caller)
+        else
+            lock(api.STATE_LOCK) do
+                api._plugin_state_locked(name).numbers["Run"]=0.0
+            end
+        end
+        return nothing
+    end
+    value_src===nothing && throw(ArgumentError(
+        "$caller: Plugin($name).$field needs a value"))
+    entry=api._plugin_entry(name,caller)
+    if haskey(entry.number_options,field)
+        api._plugin_set_number(name,field,
+            _geo_eval_numeric(value_src,context,caller))
+    elseif haskey(entry.string_options,field)
+        api._plugin_set_string(name,field,
+            _geo_eval_string(value_src,context,caller))
+    else
+        throw(ArgumentError(
+            "$caller: unknown option '$field' for plugin '$name'"))
+    end
+    return nothing
+end
+
+# Runs `entry.run_fn` with the geo view store swapped into `SESSION_VIEWS`
+# (geo index → tag) and the execution model+mesh bound as the current slot so
+# model- and mesh-based plugins (SimplePartition, model-data Integrate…)
+# resolve `MODEL_SLOTS`/`CURRENT[]` the same way upstream's `GModel` view of
+# them does. Slot mesh shares `context.mesh`, so in-place producers land on
+# the mid-file mesh. Harvested views return to the geo store by tag order
+# (originals first, in-place mutation survives; published views appended).
+# Everything runs under `STATE_LOCK` and always restores, preserving
+# execution-failure atomicity.
+function _geo_plugin_run!(api,name,m,context,caller)
+    lock(api.STATE_LOCK) do
+        store=get!(_GEO_EXEC_VIEWS,context,Any[])
+        saved_views=collect(pairs(api.SESSION_VIEWS))
+        saved_current=api.CURRENT[]
+        saved_name=api.MODEL_NAME[]
+        saved_file=api.MODEL_FILE_NAME[]
+        saved_mesh=api.LAST_MESH[]
+        saved_partition=api.LAST_MESH_PARTITION[]
+        slot=api._new_slot(m.name)
+        slot.model=m;slot.mesh=context.mesh
+        # Mesh plugins bind the actual authority mesh (not the merged carrier
+        # `context.mesh`), so produced `_MeshPartition` rows are already in the
+        # production-plan catalog order `_partition_assign_production_plan`
+        # consumes — the same `actual`/`class` `PartitionMesh` resolves.
+        actual_input=nothing
+        if context.mesh!==nothing
+            actual_input=api._higher_frontend_input(m,context.mesh,
+                context.mesh_parts,context.mesh_part_rows,context.mesh_node_owner,
+                caller;initial_max_node_tag=context.mesh_node_max,
+                initial_max_element_tag=context.mesh_element_max)
+            actual_input[2]===nothing && (actual_input=nothing)
+            actual_input!==nothing && (slot.mesh=actual_input[2])
+        end
+        empty!(api.SESSION_VIEWS)
+        try
+            for (index,source) in enumerate(store)
+                api.SESSION_VIEWS[index-1]=
+                    api._session_view_from_pos(source,caller)
+            end
+            api.CURRENT[]=m
+            api.MODEL_NAME[]=slot.name
+            api.MODEL_FILE_NAME[]=context.file_name
+            api.LAST_MESH[]=slot.mesh
+            api.LAST_MESH_PARTITION[]=nothing
+            push!(api.MODEL_SLOTS,slot)
+            api._plugin_entry(name,caller).run_fn(
+                api._plugin_state_locked(name),caller)
+            # A produced `_MeshPartition` on this mesh transports through the
+            # `PartitionMesh` production plan — the actual published mesh
+            # carries the partition entities and element columns `Save` emits.
+            produced=api.LAST_MESH_PARTITION[]
+            if produced!==nothing && actual_input!==nothing &&
+                    produced.mesh===actual_input[2]
+                plan=api._partition_assign_production_plan(actual_input[1],
+                    actual_input[2],actual_input[3],produced.num_partitions,
+                    produced.element_partitions,caller)
+                _geo_publish_actual_plan!(m,context,plan,caller)
+            end
+            tags=sort!(collect(keys(api.SESSION_VIEWS)))
+            empty!(store)
+            for tag in tags
+                push!(store,api._native_list_view_pos(
+                    api.SESSION_VIEWS[tag],caller))
+            end
+        finally
+            index=findfirst(==(slot),api.MODEL_SLOTS)
+            index===nothing || deleteat!(api.MODEL_SLOTS,index)
+            api.CURRENT[]=saved_current
+            api.MODEL_NAME[]=saved_name
+            api.MODEL_FILE_NAME[]=saved_file
+            api.LAST_MESH[]=saved_mesh
+            api.LAST_MESH_PARTITION[]=saved_partition
+            empty!(api.SESSION_VIEWS)
+            for (tag,view) in saved_views
+                api.SESSION_VIEWS[tag]=view
+            end
+        end
+    end
+    return nothing
+end
 
 # OCC shape merge — STEP/IGES dispatch lives behind `invokelatest` so the
 # importer's compile graph never enters `_geo_exec_include!` inference (the
