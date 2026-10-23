@@ -1,6 +1,65 @@
 # Devin handoff — complete Tessella's remaining implementation
 
-This is the current continuation checklist requested by the user on 2026-10-11.
+## 2026-10-23 landed arc (commits `ce99742`..`7e65e3d`, all pushed to `main`)
+
+- `ce99742` OCC curved faces mesh via API (parametrization round-trip ≤5.6e-16),
+  pipe-wall direction-aware UV repair, precise fillet admission.
+- `4b161c1` mapped-occurrence overlap pin corrected (conforming-contact weld is
+  deliberate CAD05 semantics — no certificate gap existed).
+- `26a4eb2` `.geo` `PartitionMesh` executes through the partition producer (33/33).
+- `2e242a1` parametrized discrete-surface remesh + transport; exact-CDT fill trust.
+- `a041e84` embedded sheets: subdivided/holed/multiple/mixed inventories (1,511/1,511).
+- `62e8532` STEP two-edge loops + frustum wrap + `.step` Merge (9/9 fixtures).
+- `545fa58` metric-producer certified local retriangulation (t17: 163,942 valid tris).
+- `eadc4bd` face-owned `(u,v)` parametric sliding (87/87 + 224/224).
+- `d2d17ad` MATCH01 native-exact through Blossom seed; residual restricted.
+- `011e4dc` AutomaticMeshSizeField on real adaptive octree (46,503/46,503).
+- `874fd4e` volume-boundary subdivision write-back — closes the shared t13/t19
+  Layer-2 blocker: t13 no-field `Mesh 3` = 2,596 nodes/7,706 tets; t19 session
+  API = 346/414.
+- `9cda518` explicit-shell OCC-curved faces mesh as surface products (fixes
+  `.geo` loft `(3,1)` ownership crash; OCC regressions 1141+26+15 green).
+- `338589f` P601 receipts — **21/21 tutorials now have drivers** (t19 added).
+- `cf0fec2`+`7d3b2b5`+`3d16803` PART01: topology=0 gate, unsigned Point boundary
+  tags, declared physical-tag order on MSH import (unpartition-transfer pins 201/201).
+- `b1535bd` VIEW/IO02: incomplete-element `$InterpolationScheme` serialization,
+  list-view export, .pos T2/T3 expressions (all six suites green).
+- `a49a1e6` IGES: native OCC-kernel reader (MSBO solids, bounded faces, bare
+  surfaces, curves, points, CSG) + STEP/IGES geo-include routing (65/65).
+- `1af38a0` HO01 first-element-order transition (34/34; recombine lifecycle
+  2,313 assertions green).
+- `7e65e3d` recover_cdt orients emitted tets on Float64 output coordinates —
+  fixes manufactured negative-orientation cells (20/20).
+
+### Genuinely remaining (next session)
+
+- Dense curved-PLC recovery capacity: t13 `Field[1].F="4"` edge (~2,470 facets)
+  and t19 `NumSubEdges=1000`+`MeshSizeFromCurvature=20` pipe wall exceed
+  conforming-recovery capacity — same defect class, both classified in their
+  drivers. `RecoverCDT`/`ModelVolumeAlgorithms`.
+- MET01/02: 1-D anisotropic grading, tensor-metric Delaunay arms, OCC alg-7
+  curved metric, variable-metric volume, metric-Delaunay over-density (~47x on
+  t17). Metric*/ModelMetric* files.
+- PAR01: cross-phase scheduling, per-entity RNG ledger. `APIParallel*`.
+- CAD04/05: curved trims, NURBS topology, surface Booleans (t20/t21 depth),
+  ChFi3d fillet (t19 verbatim `Fillet` stays classified non-planar-edge reject).
+- UI01: `onelab`/`parser`/headless `fltk`/`graphics` surface stubs.
+- CLI flags: `Mesh.SaveParametric`/`SaveTopology` need `$ParametricNodes` and
+  topology-only writers; `-0` unrolled .geo output; `-barycentric_refine`;
+  partition option flags; `-optimize_ho` plumbing to the (u,v) optimizer.
+  `CLI.jl`'s classified-rejection table stays until each lands.
+- `api_partition_ghost_collision` last testset: 8 digest fails + 1 missing-script
+  error are GITIGNORED-fixture drift (`test/data`,`test/artifacts` ignored;
+  `partition_ghost_membership_native_v1.py` absent) — environmental, not a
+  regression; regenerate fixtures only via the original capture pipeline.
+- Pre-existing classified: `mesh3d_test` 1f+3e, `api_native_initial_tet`
+  exception-type pin, Blossom post-seed tie chronology (restricted internals),
+  Pyr14 bound, mapped-occurrence = verified clean.
+- FINAL GATE: Julia 1.12.7+1.13.1 suites, docs, remote SHA, no overclaim.
+
+---
+
+This is the original continuation checklist requested by the user on 2026-10-11.
 **Tessella is not complete. All P1–P6 parity tracks remain open.** The original
 Stage0–6 simplex baseline is complete; it is not the broader completion target.
 Finish every open requirement below, update the ledger as work lands, and stop
