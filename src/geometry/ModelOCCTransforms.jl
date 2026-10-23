@@ -77,7 +77,7 @@ end
 # Compact `primitive` record on a solid — the same family-limited update the
 # public `_plan_volume_transform` applies to `m.cylinders`/`m.spheres`/`m.cones`.
 function _model_occ_transform_primitive(record,t,caller,what)
-    if haskey(record,:radius) && haskey(record,:axis)
+    if (haskey(record,:radius)||haskey(record,:r1)) && haskey(record,:axis)
         tr=_transform_axis_encoding(t,record.center,record.axis,caller,what)
         return haskey(record,:r1) ?
             (center=tr.center,axis=tr.axis,r1=record.r1*tr.perp,
@@ -126,10 +126,39 @@ function _model_occ_transform_sector(rec,t::_AffineTransform,caller,what)
                    r1=rec.r1*tr.perp,r2=rec.r2*tr.perp,height=tr.height))
 end
 
+# GEO-bound volume encodings (`add_box!`/`add_cylinder!`-family records and
+# native Boolean snapshots) live on the model, not the kernel — re-derive the
+# transformed records so the rebound solid's re-import restores the same
+# analytic contract. Boxes travel as the raw encoding: whether the new shell
+# still forms an axis-aligned box is a post-materialization check.
+function _occ_bound_geo_encodings(m::GeoModel,tag::Int,t,caller)
+    enc=NamedTuple()
+    haskey(m.cylinders,tag) && (enc=merge(enc,(cylinder=
+        _model_occ_transform_primitive(m.cylinders[tag],t,caller,"Cylinder[$tag]"),)))
+    haskey(m.spheres,tag) && (enc=merge(enc,(sphere=
+        _model_occ_transform_primitive(m.spheres[tag],t,caller,"Sphere[$tag]"),)))
+    haskey(m.cones,tag) && (enc=merge(enc,(cone=
+        _model_occ_transform_primitive(m.cones[tag],t,caller,"Cone[$tag]"),)))
+    haskey(m.box_extents,tag) && (enc=merge(enc,(box=m.box_extents[tag],)))
+    haskey(m.booleans,tag) && (enc=merge(enc,(booleans=m.booleans[tag],)))
+    haskey(m.boolean_components,tag) &&
+        (enc=merge(enc,(boolean_components=m.boolean_components[tag],)))
+    if haskey(m.boolean_operands,tag)
+        ops=m.boolean_operands[tag]
+        enc=merge(enc,(boolean_operands=ops isa Tuple{Mesh,Mesh} ?
+            (_transform_mesh_snapshot(ops[1],t,caller),
+             _transform_mesh_snapshot(ops[2],t,caller)) :
+            merge(ops,(meshes=[_transform_mesh_snapshot(snap,t,caller)
+                               for snap in ops.meshes],)),))
+    end
+    return isempty(fieldnames(typeof(enc))) ? nothing : enc
+end
+
 # New geometry tuple for one shape under transform `t`. Wire/shell `uses`
 # children are remapped separately by the caller; face `pcurves` stay keyed
 # by the pre-transform curve tags until the realized tag map exists.
-function _model_occ_transform_geometry(m::GeoModel,shape,t,caller,what)
+function _model_occ_transform_geometry(m::GeoModel,shape,t,caller,what;
+                                       oldtag::Int=0)
     d=shape.dimension; g=shape.geometry
     d==0 && return merge(g,(point=_finite_result(
         _occ_trsf_apply(t,g.point),caller),))
@@ -188,6 +217,11 @@ function _model_occ_transform_geometry(m::GeoModel,shape,t,caller,what)
         sector!==nothing && return merge(g,
             (sector=_model_occ_transform_sector(sector,t,caller,what),))
         primitive=get(g,:primitive,nothing)
+        if primitive===nothing && oldtag>0
+            enc=_occ_bound_geo_encodings(m,oldtag,t,caller)
+            enc===nothing && return g
+            return merge(g,(geo_encodings=enc,))
+        end
         primitive===nothing && return g
         return merge(g,(primitive=(occ=primitive.occ,
             record=_model_occ_transform_primitive(
@@ -219,7 +253,11 @@ function _model_occ_bind_tree!(kernel:: _ModelNativeOCCKernel,shapes,id,dim,
     for cid in shapes[id].children
         haskey(kernel.shape_tags,cid) && continue
         cdim=shapes[cid].dimension
-        ctag=_model_occ_next_tag(kernel,cdim,-1,ctx.caller)
+        # Re-bound sub-shapes take their precomputed `getMaxTag+1` tag —
+        # upstream emits them in original enumeration order; never-bound
+        # shapes take the next fresh tag in walk order.
+        ctag=get(ctx.newtags,cid,0)
+        ctag==0 && (ctag=_model_occ_next_tag(kernel,cdim,-1,ctx.caller))
         _model_occ_bind_tree!(kernel,shapes,cid,cdim,ctag,ctx)
     end
     return nothing
@@ -329,16 +367,58 @@ function _model_occ_transform!(m::GeoModel,dim_tags,t::_AffineTransform,
         label=_model_periodic_entity_label(shape.dimension)
         what="OCC $label[$(get(oldtags,id,0))]"
         geometry=_model_occ_remap_uses(
-            _model_occ_transform_geometry(m,shape,t,caller,what),remap)
+            _model_occ_transform_geometry(m,shape,t,caller,what;
+                oldtag=get(oldtags,id,0)),remap)
         newshapes[remap[id]]=_ModelOCCShape(shape.dimension,geometry,
             UInt64[remap[c] for c in shape.children])
     end
-    # Interleaved unbind/bind, in input order: the ownership-protected
-    # recursive unbind mirrors `_unbind(shape, tag, true)`; the recursive
-    # rebind mirrors `_bind(out, dim, tag, true)` with fresh sub-tags.
-    ctx=(inverse=inverse,oldtags=oldtags,tagmap=Dict{Int,Int}(),caller=caller)
+    # Two phases: unbind every input first so `kernel.maxima` reflects the
+    # surviving entities, then rebind. Upstream's `_bind(out, tag, true)`
+    # emits each re-created sub-shape at `getMaxTag+1` in original
+    # enumeration order — assign those tags before the walk.
     for (d,tg,id) in entries
         _model_occ_unbind!(kernel,id,true)
+    end
+    # `getMaxTag` counts every live GModel entity — including lazily-bound
+    # `.geo` records a shared-boundary transform leaves alone — so rebind
+    # tags can never overwrite an unrelated public tag.
+    for d in 0:3
+        store=d==0 ? m.points : d==1 ? m.curves : d==2 ? m.surfaces : m.volumes
+        for t in keys(store)
+            (d,t) in kernel.removed && continue
+            kernel.maxima[d+3]=max(kernel.maxima[d+3],t)
+        end
+    end
+    for t in keys(m.loops)
+        (-1,t) in kernel.removed || (kernel.maxima[2]=max(kernel.maxima[2],t))
+    end
+    for t in keys(m.surface_loops)
+        (-2,t) in kernel.removed || (kernel.maxima[1]=max(kernel.maxima[1],t))
+    end
+    newtags=Dict{UInt64,Int}()
+    order=Tuple{Int,Int,UInt64}[]
+    for id in union
+        haskey(oldtags,id) || continue
+        push!(order,(kernel.shapes[id].dimension,oldtags[id],remap[id]))
+    end
+    sort!(order)
+    for (d,old,nid) in order
+        d>=-2 || continue
+        t=_model_occ_next_tag(kernel,d,-1,caller)
+        kernel.maxima[d+3]=t
+        newtags[nid]=t
+    end
+    ctx=(inverse=inverse,oldtags=oldtags,newtags=newtags,
+         tagmap=Dict{Int,Int}(),caller=caller)
+    for (d,tg,id) in entries
+        if d==0 && haskey(kernel.shape_tags,id)
+            # The ownership-protected unbind refused an owned leaf — replace
+            # the bound shape in place like upstream's binding swap; every
+            # parent edge/face still references this shape identity.
+            kernel.shapes[id]=newshapes[remap[id]]
+            kernel.changed=true
+            continue
+        end
         _model_occ_bind_tree!(kernel,newshapes,remap[id],d,tg,ctx)
     end
     _model_occ_rekey_pcurves!(kernel,newshapes,ctx.tagmap;
@@ -386,7 +466,8 @@ function _model_occ_copy!(m::GeoModel,dim_tags,caller::AbstractString)
         newshapes[remap[id]]=_ModelOCCShape(shape.dimension,geometry,
             UInt64[remap[c] for c in shape.children])
     end
-    ctx=(inverse=inverse,oldtags=oldtags,tagmap=Dict{Int,Int}(),caller=caller)
+    ctx=(inverse=inverse,oldtags=oldtags,newtags=Dict{UInt64,Int}(),
+         tagmap=Dict{Int,Int}(),caller=caller)
     out=Tuple{Int,Int}[]
     for (d,id) in units
         nid=remap[id]

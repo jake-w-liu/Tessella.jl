@@ -60,8 +60,12 @@ end
 
 function _transform_error(source::AbstractString)
     try
-        _execute_transform_source(source)
-        return nothing
+        ex=_execute_transform_source(source)
+        # Recoverable `Error   :` diagnostics surface through
+        # `exec.errors`, not a throw — re-materialize them so the
+        # assertions below keep checking the upstream text.
+        !isempty(ex.errors) ?
+            ArgumentError(join(ex.errors,"\n")) : nothing
     catch err
         return err
     end
@@ -394,7 +398,9 @@ end
 
 @testset ".geo transform error paths" begin
     @test _transform_error("Point(1)={0,0,0,1}; Translate {1,0,0} { Point{9}; }") isa ArgumentError
-    @test occursin("unknown Point",_transform_error(
+    @test occursin("Unknown GEO point with tag 9",_transform_error(
+        "Point(1)={0,0,0,1}; Translate {1,0,0} { Point{9}; }").msg)
+    @test occursin("Could not translate shapes",_transform_error(
         "Point(1)={0,0,0,1}; Translate {1,0,0} { Point{9}; }").msg)
     @test occursin("syntax error",_transform_error(
         "Point(1)={0,0,0,1}; Translate {1,0,0} { Point{1} }").msg)

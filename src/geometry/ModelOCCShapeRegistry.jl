@@ -211,6 +211,10 @@ function _model_occ_synchronize!(m::GeoModel)
             m.points[tag]=g.point;m.point_size[tag]=0.0
             m.next_tag[1]=max(m.next_tag[1],tag)
             imported=true
+        elseif haskey(m.points,tag)
+            # A transform may replace a bound vertex's geometry in place —
+            # the kernel record is authoritative for bound entities.
+            m.points[tag]=g.point
         end
         g.mesh_size>0 && (m.point_size[tag]=g.mesh_size)
     end
@@ -299,9 +303,37 @@ function _model_occ_synchronize!(m::GeoModel)
                 primitive.occ===:cone &&
                     (m.cones[tag]=primitive.record)
             end
+            # GEO-bound encodings rebound through a transform restore the
+            # same stores `add_*!`/native Booleans maintain.
+            geo_enc=get(shape.geometry,:geo_encodings,nothing)
+            if geo_enc!==nothing
+                haskey(geo_enc,:cylinder) && (m.cylinders[tag]=geo_enc.cylinder)
+                haskey(geo_enc,:sphere) && (m.spheres[tag]=geo_enc.sphere)
+                haskey(geo_enc,:cone) && (m.cones[tag]=geo_enc.cone)
+                haskey(geo_enc,:booleans) && (m.booleans[tag]=geo_enc.booleans)
+                haskey(geo_enc,:boolean_operands) &&
+                    (m.boolean_operands[tag]=geo_enc.boolean_operands)
+                haskey(geo_enc,:boolean_components) &&
+                    (m.boolean_components[tag]=geo_enc.boolean_components)
+                if haskey(geo_enc,:box)
+                    owned=sort!(collect(_model_volume_owned_points(m,tag)))
+                    new=_volume_box_extents(m,owned,geo_enc.box)
+                    new===nothing || (m.box_extents[tag]=new)
+                end
+            end
             m.next_tag[4]=max(m.next_tag[4],tag)
             imported=true
         end
+    end
+    # `box_extents` tracks materialized shells, not kernel bindings — a
+    # rebound or sub-entity move that leaves the corners off the per-axis
+    # extrema drops the encoding (`transform_entities!` contract).
+    for (tag,ext) in collect(m.box_extents)
+        (haskey(m.volumes,tag) && !isempty(m.volumes[tag])) ||
+            (delete!(m.box_extents,tag);continue)
+        owned=sort!(collect(_model_volume_owned_points(m,tag)))
+        new=_volume_box_extents(m,owned,ext)
+        new===nothing ? delete!(m.box_extents,tag) : (m.box_extents[tag]=new)
     end
     kernel.changed=false
     return imported || !isempty(removed)

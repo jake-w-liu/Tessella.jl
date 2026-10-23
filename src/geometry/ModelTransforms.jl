@@ -866,27 +866,31 @@ end
 # validates this). After a point move, re-derive extents when the moved corners
 # still form an axis-aligned box; otherwise drop the encoding so queries and
 # meshing fall back to the explicit shell rather than reading stale bounds.
+# `_volume_box_extents` is the keep-side: `owned` corner tags still on the
+# per-axis extrema product yield re-derived extents, anything else `nothing`.
+function _volume_box_extents(m::GeoModel,owned,ext)
+    x0,y0,z0,dx,dy,dz=ext
+    scale=max(1.0,abs(x0),abs(y0),abs(z0),abs(dx),abs(dy),abs(dz))
+    tol=1e-9*scale
+    length(owned)==8 || return nothing
+    mapped=[m.points[p] for p in owned]
+    lo=ntuple(k->minimum(getindex.(mapped,k)),3)
+    hi=ntuple(k->maximum(getindex.(mapped,k)),3)
+    ext2=hi .- lo
+    corners=[(lo[1]+ix*ext2[1],lo[2]+iy*ext2[2],lo[3]+iz*ext2[3])
+             for ix in (0,1),iy in (0,1),iz in (0,1)]
+    (all(e->e>0,ext2) && length(unique(mapped))==8 && all(
+        c->any(p->_points_close(p,c,tol),mapped),corners)) || return nothing
+    return (lo[1],lo[2],lo[3],ext2[1],ext2[2],ext2[3])
+end
+
 function _reconcile_box_encodings!(m::GeoModel, moved::Set{Int})
     for (tag,ext) in collect(m.box_extents)
         owned=sort!(collect(_model_volume_owned_points(m,tag)))
         any(p->p in moved,owned) || continue
-        x0,y0,z0,dx,dy,dz=ext
-        scale=max(1.0,abs(x0),abs(y0),abs(z0),abs(dx),abs(dy),abs(dz))
-        tol=1e-9*scale
-        keep=false
-        if length(owned)==8
-            mapped=[m.points[p] for p in owned]
-            lo=ntuple(k->minimum(getindex.(mapped,k)),3)
-            hi=ntuple(k->maximum(getindex.(mapped,k)),3)
-            ext2=hi .- lo
-            corners=[(lo[1]+ix*ext2[1],lo[2]+iy*ext2[2],lo[3]+iz*ext2[3])
-                     for ix in (0,1),iy in (0,1),iz in (0,1)]
-            keep=all(e->e>0,ext2) && length(unique(mapped))==8 && all(
-                c->any(p->_points_close(p,c,tol),mapped),corners)
-            keep && (m.box_extents[tag]=(lo[1],lo[2],lo[3],
-                                         ext2[1],ext2[2],ext2[3]))
-        end
-        keep || delete!(m.box_extents,tag)
+        new=_volume_box_extents(m,owned,ext)
+        new===nothing ? delete!(m.box_extents,tag) :
+            (m.box_extents[tag]=new)
     end
     return nothing
 end
