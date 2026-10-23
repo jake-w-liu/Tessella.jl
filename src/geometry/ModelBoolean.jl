@@ -109,8 +109,18 @@ function _brep_surface_uv(sg::NamedTuple,p::NTuple{3,Float64})
     throw(ArgumentError("_brep_surface_uv: unsupported surface $(sg.occ)"))
 end
 
+# u-period of a parametrization: analytic revolutions wrap at 2π; a
+# tensor patch's u-period is its knot-domain width when its seam is
+# geometrically closed (STEP/IGES B-spline bounded faces on periodic
+# supports) — projection pcurves unwrap across the seam with it.
 _brep_uperiod(sg::NamedTuple) =
-    sg.occ in (:cylinder,:sphere,:cone,:torus) ? _OCC_TWO_PI : 0.0
+    if sg.occ in (:cylinder,:sphere,:cone,:torus)
+        _OCC_TWO_PI
+    elseif sg.occ in (:tensor_bspline,:tensor_bezier)
+        _model_nurbs_patch_seam_period(sg,1)
+    else
+        0.0
+    end
 
 # ── pcurve evaluation ────────────────────────────────────────────────────────
 

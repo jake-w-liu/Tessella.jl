@@ -1167,6 +1167,31 @@ end
 # through unwrapped (period-corrected) projection samples. Without a
 # surfaceTag the wire resolves through the plane path.
 
+# (u,v) parameter periods of a trim support: the torus additionally wraps
+# in v, and tensor patches report their knot-domain width in whichever
+# direction the seam is geometrically closed (`_brep_uperiod` covers u).
+function _trim_uv_periods(face_g)
+    face_g.occ===:plane && return 0.0,0.0
+    uperiod=_brep_uperiod(face_g)
+    vperiod=if face_g.occ===:torus
+        _OCC_TWO_PI
+    elseif face_g.occ in (:tensor_bspline,:tensor_bezier)
+        _model_nurbs_patch_seam_period(face_g,2)
+    else
+        0.0
+    end
+    return uperiod,vperiod
+end
+
+# Parameter-domain limits used to detect off-domain trim projections:
+# tensor patches are defined only over their knot domain; bounded OCC
+# faces carry `uvb`. Returns `(lo,hi)` or `nothing` when unknown.
+function _trim_domain_bounds(face_g)
+    face_g.occ in (:tensor_bspline,:tensor_bezier) &&
+        return _model_nurbs_surface_bounds(face_g)
+    return get(face_g,:uvb,nothing)
+end
+
 # Project edge `eid` onto base record `face_g`; returns a lin2d or spl2d
 # pcurve over the edge's own parameter range.
 function _trim_project_pcurve(m,kernel,face_g,eid,caller)
@@ -1176,7 +1201,7 @@ function _trim_project_pcurve(m,kernel,face_g,eid,caller)
     ns=17
     ts=Float64[t0+(t1-t0)*i/(ns-1) for i in 0:ns-1]
     uvs=Vector{NTuple{2,Float64}}(undef,ns)
-    period=face_g.occ===:plane ? 0.0 : _brep_uperiod(face_g)
+    period,period_v=_trim_uv_periods(face_g)
     prev=nothing
     for (i,u) in enumerate(ts)
         P=_pipe_edge_point(m,g,etag,u)
@@ -1184,8 +1209,32 @@ function _trim_project_pcurve(m,kernel,face_g,eid,caller)
         pr===nothing && throw(ArgumentError(
             "$caller: Curve[$etag] does not project onto the surface"))
         uv=(pr[1],pr[2])
-        if prev!==nothing && period>0.0
-            uv=(uv[1]+period*round((prev[1]-uv[1])/period),uv[2])
+        # Off-surface edges legitimately project (3-D chords between
+        # on-surface points become spl2d traces), but a wire whose
+        # projection misses the domain must not silently clamp onto its
+        # boundary: reject only when the closest uv is pinned at a
+        # NON-periodic domain bound while the edge point stays off the
+        # surface. Planes are unbounded — their `uvb` is a sampling box,
+        # never a trim limit.
+        if face_g.occ!==:plane &&
+           _occ_modulus(_arc_sub(pr[3],P))>1e-7*max(1.0,maximum(abs,P))
+            db=_trim_domain_bounds(face_g)
+            if db!==nothing
+                dlo,dhi=db
+                for d in 1:2
+                    (d==1 ? period : period_v)>0.0 && continue
+                    span=dhi[d]-dlo[d]; span>0 || continue
+                    (uv[d]-dlo[d]<1e-9*span || dhi[d]-uv[d]<1e-9*span) &&
+                        throw(ArgumentError(
+                            "$caller: Curve[$etag] does not project within the surface domain"))
+                end
+            end
+        end
+        if prev!==nothing
+            period>0.0 && (uv=(uv[1]+period*round((prev[1]-uv[1])/period),
+                               uv[2]))
+            period_v>0.0 && (uv=(uv[1],
+                uv[2]+period_v*round((prev[2]-uv[2])/period_v)))
         end
         prev=uv; uvs[i]=uv
     end
@@ -1925,15 +1974,537 @@ function _model_occ_chamfer(m::GeoModel,volume_tags,curve_tags,
 end
 
 
-# ── `fillet` ──────────────────────────────────────────────────────────────────
+# ── circle-edge fillets (ChFi3d on coaxial surfaces of revolution) ────────────
 #
-# `BRepFilletAPI_MakeFillet` restricted to the exact planar-solid case:
-# line edges, planar faces, end faces orthogonal to the filleted edge
-# (so the fillet/corner-face intersection is circular), and no two
-# filleted edges sharing a vertex (corner blends need spheres — loud
-# rejection). Each filleted edge becomes a cylindrical sector tangent
-# to both adjacent faces; sibling edges truncate at the tangent/arc
-# points; each end vertex becomes a circular arc on the corner face.
+# A full-circle fillet edge shared by two faces of revolution that share the
+# edge's axis gets a rolling-ball fillet which is itself a surface of
+# revolution: the torus whose meridian is the 2-D fillet of the two faces'
+# meridian profiles in the (r,z) half-plane — r = distance from the edge
+# axis, z = height along +axis measured from the edge centre. Plane,
+# cylinder and cone faces give line profiles; sphere and torus faces give
+# circle profiles. The tube centre is the intersection of the two profiles
+# offset by the fillet radius toward the material; the feet of
+# perpendiculars are the two tangent circles that replace the rim on each
+# kept face.
+
+@inline _fillet_dot2(a,b)=a[1]*b[1]+a[2]*b[2]
+@inline _fillet_sub2(a,b)=(a[1]-b[1],a[2]-b[2])
+@inline _fillet_sc2(a,s)=(a[1]*s,a[2]*s)
+@inline _fillet_add2(a,b)=(a[1]+b[1],a[2]+b[2])
+@inline _fillet_perp(v)=(-v[2],v[1])
+@inline _fillet_norm2(v)=sqrt(_fillet_dot2(v,v))
+@inline _fillet_cross(a,b)=a[1]*b[2]-a[2]*b[1]
+
+# Point of a kernel edge record at parameter t (strip-overrun sampling).
+function _occ_fillet_edge_point(g,t)
+    k=get(g,:occ,nothing)
+    k===:line && return _occ_line_point(g,t)
+    k===:circle && return _occ_circle_point(g,t)
+    k===:copied_curve && return first(_model_occ_curve_d2(g.curve,t))
+    throw(ArgumentError(
+        "OCC.fillet: fillet strip sampling needs line or circle boundary " *
+        "edges (got $k)"))
+end
+
+# Meridian profile of the face record `sg` along its rim with the filleted
+# circle edge. `σ` is the shell-outward orientation of the stored record
+# (use-rev × `reversed` flag). All coordinates live in the rim's (r,z)
+# half-plane where the rim sits at (R,0): `:line` profiles carry the
+# profile tangent `d`, `:circ` profiles carry centre `O` and `rad`; `nin`
+# is the material-inward unit normal of the profile at the rim.
+function _occ_fillet_rim_profile(sg,σ,axis,o,R,et,caller)
+    rim=(R,0.0)
+    tol=1e-7*max(1.0,R)
+    function onaxis(p)
+        d=_arc_sub(p,o)
+        _occ_modulus(_arc_sub(d,_occ3_scale(axis,_dot3(d,axis))))<tol
+    end
+    k=get(sg,:occ,nothing)
+    if k===:plane
+        abs(_dot3(sg.axis,axis))>1-1e-9 || throw(ArgumentError(
+            "$caller: Curve[$et] rim lies in a plane not perpendicular " *
+            "to the edge axis"))
+        abs(_dot3(_arc_sub(o,sg.center),sg.axis))<tol || throw(
+            ArgumentError(
+                "$caller: Curve[$et] rim does not lie in its incident " *
+                "plane"))
+        nz=σ*_dot3(sg.axis,axis)
+        return (kind=:line,P=rim,d=(1.0,0.0),nin=(0.0,-nz),sg=sg,σ=σ)
+    elseif k===:cylinder
+        (abs(_dot3(sg.axis,axis))>1-1e-9 && onaxis(sg.center)) || throw(
+            ArgumentError("$caller: Curve[$et] touches a cylinder that " *
+                          "is not coaxial with the edge"))
+        abs(sg.radius-R)<tol || throw(ArgumentError(
+            "$caller: Curve[$et] is not a rim of its incident cylinder"))
+        return (kind=:line,P=rim,
+                d=(0.0,sign(_dot3(sg.axis,axis))),nin=(-σ,0.0),sg=sg,σ=σ)
+    elseif k===:cone
+        (abs(_dot3(sg.axis,axis))>1-1e-9 && onaxis(sg.center)) || throw(
+            ArgumentError("$caller: Curve[$et] touches a cone that is " *
+                          "not coaxial with the edge"))
+        hr=_dot3(_arc_sub(o,sg.center),sg.axis)
+        sa=atan((sg.r2-sg.r1)/sg.height)
+        σc=sign(_dot3(sg.axis,axis))
+        abs(sg.r1+hr*tan(sa)-R)<tol || throw(ArgumentError(
+            "$caller: Curve[$et] is not a rim of its incident cone"))
+        cs,ss=cos(sa),sin(sa)
+        return (kind=:line,P=rim,d=(ss,σc*cs),nin=(-σ*cs,σ*σc*ss),
+                sg=sg,σ=σ)
+    elseif k===:sphere
+        onaxis(sg.center) || throw(ArgumentError(
+            "$caller: Curve[$et] touches a sphere that is not coaxial " *
+            "with the edge"))
+        hz=_dot3(_arc_sub(sg.center,o),axis)
+        abs(R*R+hz*hz-sg.radius*sg.radius)<tol*max(1.0,sg.radius) ||
+            throw(ArgumentError(
+                "$caller: Curve[$et] is not a rim of its incident sphere"))
+        return (kind=:circ,P=rim,O=(0.0,hz),rad=sg.radius,
+                nin=(-σ*R/sg.radius,σ*hz/sg.radius),sg=sg,σ=σ)
+    elseif k===:torus
+        onaxis(sg.center) || throw(ArgumentError(
+            "$caller: Curve[$et] touches a torus that is not coaxial " *
+            "with the edge"))
+        hc=_dot3(_arc_sub(sg.center,o),axis); dr=R-sg.r1
+        abs(dr*dr+hc*hc-sg.r2*sg.r2)<tol*max(1.0,sg.r2) || throw(
+            ArgumentError(
+                "$caller: Curve[$et] is not a rim of its incident torus"))
+        return (kind=:circ,P=rim,O=(sg.r1,hc),rad=sg.r2,
+                nin=(-σ*dr/sg.r2,σ*hc/sg.r2),sg=sg,σ=σ)
+    end
+    throw(ArgumentError(
+        "$caller: Curve[$et] is a circle edge shared by an occ=$k face " *
+        "— only coaxial plane/cylinder/cone/sphere/torus rims are " *
+        "supported"))
+end
+
+# Offset-intersection solve: the tube centre C of the radius-ρ fillet is a
+# point at inward distance ρ from both profiles, inside the notch (the
+# wedge where both inward normals apply) and with its tangent feet on the
+# domain side of each rim. Nearest valid candidate to the rim wins.
+function _occ_fillet_meridian(pA,pB,R,ρ,et,caller)
+    rim=(R,0.0); tol=1e-9*max(1.0,R,ρ)
+    nA,nB=pA.nin,pB.nin
+    cands=NTuple{2,Float64}[]
+    if pA.kind===:line && pB.kind===:line
+        det=_fillet_cross(nA,nB)
+        abs(det)>1e-12 || throw(ArgumentError(
+            "$caller: Curve[$et] has parallel rim profiles — no " *
+            "fillet centre"))
+        b1=_fillet_dot2(nA,rim)+ρ; b2=_fillet_dot2(nB,rim)+ρ
+        push!(cands,((b1*nB[2]-b2*nA[2])/det,
+                     (nA[1]*b2-nB[1]*b1)/det))
+    else
+        offs=Tuple{NTuple{2,Float64},Float64}[]
+        for p in (pA,pB)
+            p.kind===:line && continue
+            er=_fillet_sc2(_fillet_sub2(p.P,p.O),1.0/p.rad)
+            s=_fillet_dot2(p.nin,er)>=0 ? 1.0 : -1.0
+            Rp=p.rad+s*ρ
+            Rp>tol || throw(ArgumentError(
+                "$caller: fillet radius $ρ swallows the profile circle " *
+                "on Curve[$et]"))
+            push!(offs,(p.O,Rp))
+        end
+        if pA.kind!==:circ || pB.kind!==:circ
+            L=pA.kind===:line ? pA : pB
+            Oc,Rp=only(offs)
+            Q=_fillet_add2(rim,_fillet_sc2(L.nin,ρ))
+            rel=_fillet_sub2(Q,Oc)
+            b=_fillet_dot2(rel,L.d); c=_fillet_dot2(rel,rel)-Rp*Rp
+            disc=b*b-c
+            disc>=-tol || throw(ArgumentError(
+                "$caller: Curve[$et] fillet radius $ρ does not reach " *
+                "the profile circle"))
+            for sgn in (1.0,-1.0)
+                h=sqrt(max(0.0,disc))
+                push!(cands,_fillet_add2(Q,_fillet_sc2(L.d,-b+sgn*h)))
+            end
+        else
+            (O1,Rp1),(O2,Rp2)=offs
+            dv=_fillet_sub2(O2,O1); d=_fillet_norm2(dv)
+            d>1e-12 || throw(ArgumentError(
+                "$caller: Curve[$et] has concentric rim profiles — no " *
+                "isolated fillet centre"))
+            a=(d*d+Rp1*Rp1-Rp2*Rp2)/(2d)
+            h2=Rp1*Rp1-a*a
+            h2>=-tol || throw(ArgumentError(
+                "$caller: Curve[$et] profile circles cannot reach a " *
+                "radius-$ρ fillet"))
+            h=sqrt(max(0.0,h2))
+            e=_fillet_sc2(dv,1.0/d)
+            base=_fillet_add2(O1,_fillet_sc2(e,a))
+            m=_fillet_perp(e)
+            push!(cands,_fillet_add2(base,_fillet_sc2(m,h)),
+                         _fillet_add2(base,_fillet_sc2(m,-h)))
+        end
+    end
+    best=nothing; bestd=Inf
+    for C in cands
+        (_fillet_dot2(_fillet_sub2(C,rim),nA)>tol &&
+         _fillet_dot2(_fillet_sub2(C,rim),nB)>tol) || continue
+        Ts=NTuple{2,Float64}[]; legs=Float64[]; ok=true
+        for (p,nother) in ((pA,nB),(pB,nA))
+            local T,leg
+            if p.kind===:line
+                T=_fillet_add2(p.P,_fillet_sc2(p.d,
+                    _fillet_dot2(_fillet_sub2(C,p.P),p.d)))
+                leg=_fillet_dot2(_fillet_sub2(T,p.P),p.d)*
+                    sign(_fillet_dot2(p.d,nother))
+            else
+                rel=_fillet_sub2(C,p.O); l=_fillet_norm2(rel)
+                l>tol || (ok=false; break)
+                T=_fillet_add2(p.O,_fillet_sc2(rel,p.rad/l))
+                er=_fillet_sc2(_fillet_sub2(p.P,p.O),1.0/p.rad)
+                s=sign(_fillet_dot2(_fillet_perp(er),nother))
+                leg=atan(_fillet_cross(er,_fillet_sc2(rel,1.0/l)),
+                         _fillet_dot2(er,_fillet_sc2(rel,1.0/l)))*s*p.rad
+            end
+            leg>tol || (ok=false; break)
+            push!(Ts,T); push!(legs,leg)
+        end
+        ok || continue
+        dd=_fillet_dot2(_fillet_sub2(C,rim),_fillet_sub2(C,rim))
+        dd<bestd && (best=(C,Ts[1],Ts[2],legs[1],legs[2]); bestd=dd)
+    end
+    best===nothing && throw(ArgumentError(
+        "$caller: Curve[$et] fillet radius $ρ does not fit the rim " *
+        "notch — concave or over-running fillets are unsupported"))
+    return best
+end
+
+# (domain-arclength s, inward distance δ) of meridian point `m` against
+# profile `p`'s rim — `nother` is the companion face's inward normal
+# (the domain side of the profile keeps inside the other's inward side).
+function _occ_fillet_strip_coords(p,rim,nother,m)
+    if p.kind===:line
+        s=_fillet_dot2(_fillet_sub2(m,rim),p.d)*
+            sign(_fillet_dot2(p.d,nother))
+        return s,_fillet_dot2(_fillet_sub2(m,rim),p.nin)
+    end
+    er=_fillet_sc2(_fillet_sub2(rim,p.O),1.0/p.rad)
+    rel=_fillet_sub2(m,p.O); l=_fillet_norm2(rel)
+    em=l>0 ? _fillet_sc2(rel,1.0/l) : er
+    s=sign(_fillet_dot2(_fillet_perp(er),nother))*
+        atan(_fillet_cross(er,em),_fillet_dot2(er,em))*p.rad
+    δ=sign(_fillet_dot2(p.nin,er))*(l-p.rad)
+    return s,δ
+end
+
+# Strip-overrun certificate for one kept face: every other boundary of the
+# face must stay strictly outside the strip the fillet removes — the
+# domain-arclength interval (0, leg) from the rim to its tangent point.
+# `rim_eid` is the edge being replaced (its own original position sits at
+# s=0 by construction); `extra_ms` carries the tangent meridian points of
+# other filleted rims on the same face so colliding fillets reject.
+# Parametric seam edges (two uses inside the same face) are interior to
+# the parametrization, not material boundaries — skipped. A boundary
+# landing exactly on the tangent circle would leave a degenerate remnant.
+function _occ_fillet_overrun(kernel,fid,rim_eid,p,rim,nother,leg,extra_ms,
+                             axis,o,face_wires,et,caller)
+    tol=1e-8*max(1.0,leg)
+    counts=Dict{UInt64,Int}()
+    for wid in face_wires[fid], (u,_) in kernel.shapes[wid].geometry.uses
+        counts[u]=get(counts,u,0)+1
+    end
+    ftag=_model_occ_shape_tag(kernel,fid,caller)
+    function check(m)
+        s,δ=_occ_fillet_strip_coords(p,rim,nother,m)
+        abs(s-leg)<=tol && throw(ArgumentError(
+            "$caller: Curve[$et] fillet tangent lands on another " *
+            "boundary of Surface[$ftag]"))
+        (tol<s<leg-tol && δ>-tol) && throw(ArgumentError(
+            "$caller: Curve[$et] fillet overruns a boundary of " *
+            "Surface[$ftag]"))
+    end
+    for m in extra_ms
+        check(m)
+    end
+    for wid in face_wires[fid], (u,_) in kernel.shapes[wid].geometry.uses
+        u==rim_eid && continue
+        get(counts,u,0)>=2 && continue
+        g2=kernel.shapes[u].geometry.geometry
+        coaxial=get(g2,:occ,nothing)===:circle &&
+            abs(_dot3(g2.n,axis))>1-1e-9 && begin
+            dc=_arc_sub(g2.center,o)
+            _occ_modulus(_arc_sub(dc,_occ3_scale(axis,_dot3(dc,axis))))<
+                1e-7*max(1.0,_occ_modulus(dc))
+        end
+        if coaxial
+            check((g2.r,_dot3(_arc_sub(g2.center,o),axis)))
+        else
+            for i in 0:12
+                t=g2.t0+(g2.t1-g2.t0)*i/12
+                pt=_occ_fillet_edge_point(g2,t)
+                d=_arc_sub(pt,o)
+                check((_occ_modulus(_arc_sub(d,
+                    _occ3_scale(axis,_dot3(d,axis)))),_dot3(d,axis)))
+            end
+        end
+    end
+    return nothing
+end
+
+# Plan one circle-edge fillet: rim profiles → meridian offset solve.
+# Returns the spec the rebuild consumes; every fallible step precedes any
+# kernel mutation (overrun certificates run in a separate pass once every
+# filleted rim is known).
+function _occ_fillet_circle_plan(kernel,eg,eid,fids,frev_of,vert_pos,
+                                 et,r,caller)
+    abs(eg.t1-eg.t0-_OCC_TWO_PI)<1e-6 || throw(ArgumentError(
+        "$caller: fillet Curve[$et] must be a full 2π circle edge — " *
+        "partial rims are unsupported"))
+    axis=_occ_dir(eg.n); o=eg.center; R=eg.r
+    fA,fB=fids
+    sgA=kernel.shapes[fA].geometry.geometry
+    sgB=kernel.shapes[fB].geometry.geometry
+    # Outward normals through the shell-use sign alone — the measure path
+    # (`_model_occ_get_mass`) certifies σ·axis/σ·(du×dv); the record's
+    # `reversed` flag mirrors the same TopAbs orientation and must not be
+    # multiplied in a second time.
+    σA=frev_of[fA] ? -1.0 : 1.0
+    σB=frev_of[fB] ? -1.0 : 1.0
+    pA=_occ_fillet_rim_profile(sgA,σA,axis,o,R,et,caller)
+    pB=_occ_fillet_rim_profile(sgB,σB,axis,o,R,et,caller)
+    C2,TA,TB,legA,legB=_occ_fillet_meridian(pA,pB,R,r,et,caller)
+    r_c,z_c=C2
+    sc=max(1.0,R,r)
+    r_c>1e-7*sc || throw(ArgumentError(
+        "$caller: fillet on Curve[$et] has its tube centre on the " *
+        "axis — spindle fillets are unsupported"))
+    TA[1]>1e-7*sc && TB[1]>1e-7*sc || throw(ArgumentError(
+        "$caller: fillet on Curve[$et] tangent collapses to a pole " *
+        "on the axis — unsupported"))
+    rimvid=kernel.shapes[eid].children[1]
+    return (axis=axis,o=o,R=R,C2=C2,rho=r,rim=(R,0.0),
+            rimvid=rimvid,rim_vpos=vert_pos[rimvid],
+            fA=fA,fB=fB,sgA=sgA,sgB=sgB,pA=pA,pB=pB,
+            TA=TA,TB=TB,legA=legA,legB=legB)
+end
+
+# Torus frame/v-range for one planned circle fillet: X_t is the seam
+# azimuth (the rim vertex's radial direction); the v interval spans the
+# two tangent meridians through the rim direction, canonicalized into the
+# [0,2π] period when it fits.
+function _occ_fillet_circle_frames(s)
+    d=_arc_sub(s.rim_vpos,s.o)
+    X_t=_occ_dir(_arc_sub(d,_occ3_scale(s.axis,_dot3(d,s.axis))))
+    r_c,z_c=s.C2
+    vof(T)=atan(T[2]-z_c,T[1]-r_c)
+    vA,vB=vof(s.TA),vof(s.TB); vrim=atan(-z_c,s.R-r_c)
+    al,ah=minmax(vA,vB)
+    I=al<=vrim<=ah ? (al,ah) : (ah,al+_OCC_TWO_PI)
+    mid=(I[1]+I[2])/2
+    k=round((π-mid)/_OCC_TWO_PI)
+    lo,hi=I[1]+k*_OCC_TWO_PI,I[2]+k*_OCC_TWO_PI
+    function repv(T)
+        v=vof(T)
+        for q in (v,v+_OCC_TWO_PI,v-_OCC_TWO_PI)
+            lo-1e-9<=q<=hi+1e-9 && return q
+        end
+        return v
+    end
+    vA,vB=repv(s.TA),repv(s.TB)
+    vlo,vhi=minmax(vA,vB)
+    # Spindle certificate: r_c + ρ·cos v must stay positive over the
+    # fillet meridian — otherwise the torus tube self-intersects on the
+    # axis and the patch folds through its own normal.
+    cmin=min(cos(vlo),cos(vhi))
+    for q in (π,π+_OCC_TWO_PI,π-_OCC_TWO_PI)
+        vlo<q<vhi && (cmin=-1.0)
+    end
+    r_c+s.rho*cmin>1e-9*s.rho || throw(ArgumentError(
+        "OCC.fillet: fillet tube radius swallows its own axis — " *
+        "spindle fillets are unsupported"))
+    return merge(s,(X_t=X_t,vlo=vlo,vhi=vhi,vA=vA,vB=vB))
+end
+
+# (u0, du, v_t) of a fresh tangent-circle edge `nc_eid` on face record `sg`:
+# u0 lands on the [0,2π] period boundary for the seam azimuth, du is the
+# azimuth direction sign, v_t the face's own v-coordinate at the tangent.
+function _occ_fillet_face_uv(sg,nc_eid,kernel,caller)
+    ng=kernel.shapes[nc_eid].geometry.geometry
+    u0=atan(_dot3(ng.X,sg.Y),_dot3(ng.X,sg.X))
+    du=sign(_dot3(ng.n,sg.axis))
+    u0n=mod(u0,_OCC_TWO_PI)
+    cen=ng.center; rt=ng.r
+    vt=if sg.occ===:cone
+        h=_dot3(_arc_sub(cen,sg.center),sg.axis)
+        L=sqrt(sg.height*sg.height+(sg.r2-sg.r1)*(sg.r2-sg.r1))
+        h*L/sg.height
+    elseif sg.occ===:sphere
+        atan(_dot3(_arc_sub(cen,sg.center),sg.axis),rt)
+    elseif sg.occ===:torus
+        atan(_dot3(_arc_sub(cen,sg.center),sg.axis),rt-sg.r1)
+    else
+        _dot3(_arc_sub(cen,sg.center),sg.axis)
+    end
+    return u0n,du,vt
+end
+
+# Publish every planned circle fillet: tangent circles replace the rims on
+# the kept faces (wires/pcurves/vertex_uv re-bound on fresh face shapes,
+# plane faces regenerated through `add_plane_surface`), meridian seam arcs
+# and torus fillet faces bound directly. `new_face2` collects
+# fid ⇒ (new fid, shell-rev) for the shell rewrite.
+function _occ_fillet_circle_rebuild!(m,kernel,circ_specs,wires_of,frev_of,
+                                    fnormals,new_face2,shell_uses,caller)
+    isempty(circ_specs) && return nothing
+    rim_repl=Dict{Tuple{UInt64,UInt64},NamedTuple}()
+    vmap=Dict{Tuple{UInt64,UInt64},UInt64}()
+    for (eid,s0) in circ_specs
+        s=_occ_fillet_circle_frames(s0)
+        circ_specs[eid]=s
+        for (fid,T,sg) in ((s.fA,s.TA,s.sgA),(s.fB,s.TB,s.sgB))
+            cen3=_occ3_add(s.o,_occ3_scale(s.axis,T[2]))
+            nct=_model_occ_add_circle!(m,cen3[1],cen3[2],cen3[3],T[1];
+                zaxis=collect(s.axis),
+                xaxis=collect(_arc_sub(s.rim_vpos,cen3)))
+            nc_eid=kernel.bindings[(1,nct)]
+            nc_vid=kernel.shapes[nc_eid].children[1]
+            u0,du,vt=sg.occ===:plane ? (0.0,1.0,0.0) :
+                _occ_fillet_face_uv(sg,nc_eid,kernel,caller)
+            rim_repl[(fid,eid)]=(eid_new=nc_eid,etag=nct,vid=nc_vid,
+                vtag=_model_occ_shape_tag(kernel,nc_vid,caller),
+                u0=u0,du=du,vt=vt)
+            vmap[(fid,s.rimvid)]=nc_vid
+        end
+    end
+    # Kept faces: replace rim edges in their wires, retarget edges that
+    # shared the rim vertex (meridian seams), swap rim pcurve/vertex_uv
+    # entries, then rebind each face under a fresh tag.
+    dirty=Set{UInt64}(fid for (fid,_) in keys(rim_repl))
+    for fid in dirty
+        fgsh=kernel.shapes[fid]; fg=fgsh.geometry.geometry
+        ispl=fg.occ===:plane
+        ftag=_model_occ_shape_tag(kernel,fid,caller)
+        if !ispl
+            hasproperty(fg,:pcurves) || throw(ArgumentError(
+                "$caller: Surface[$ftag] carries no pcurves"))
+        end
+        pco=ispl ? nothing : copy(fg.pcurves)
+        vuvo=hasproperty(fg,:vertex_uv) ? copy(fg.vertex_uv) : nothing
+        new_wtags=Int[]; new_wids=UInt64[]
+        for wid in wires_of[fid]
+            uses=kernel.shapes[wid].geometry.uses
+            changed=false; nuses=Tuple{UInt64,Bool}[]
+            for (u,rev) in uses
+                repl=get(rim_repl,(fid,u),nothing)
+                if repl!==nothing
+                    push!(nuses,(repl.eid_new,rev)); changed=true
+                    continue
+                end
+                ch=kernel.shapes[u].children
+                c1=get(vmap,(fid,ch[1]),ch[1])
+                c2=get(vmap,(fid,ch[2]),ch[2])
+                if c1==ch[1] && c2==ch[2]
+                    push!(nuses,(u,rev)); continue
+                end
+                changed=true
+                g2=kernel.shapes[u].geometry.geometry
+                tA=_occ_2df_param(g2,kernel.shapes[c1].geometry.point)
+                tB=_occ_2df_param(g2,kernel.shapes[c2].geometry.point)
+                tA<tB-1e-12 || throw(ArgumentError(
+                    "$caller: fillet truncation inverts an edge of " *
+                    "Surface[$ftag]"))
+                rec=merge(g2,(t0=tA,t1=tB))
+                hasproperty(rec,:native_geometry) && (rec=merge(rec,
+                    (native_geometry=merge(rec.native_geometry,
+                        (t0=tA,t1=tB)),)))
+                neid=only(_model_occ_reserve_shapes(kernel,1,caller))
+                netag=_model_occ_next_tag(kernel,1,-1,caller)
+                _model_occ_bind_shape!(kernel,1,netag,neid,
+                    _ModelOCCShape(1,(kind=kernel.shapes[u].geometry.kind,
+                                    geometry=rec),UInt64[c1,c2]))
+                kernel.next_shape=neid+UInt64(1)
+                push!(nuses,(neid,rev))
+                if pco!==nothing
+                    oldt=_model_occ_shape_tag(kernel,u,caller)
+                    haskey(pco,oldt) && (pco[netag]=pop!(pco,oldt))
+                end
+            end
+            if changed
+                wt=_occ_wire_from_uses!(m,nuses,caller)
+                push!(new_wtags,wt); push!(new_wids,kernel.bindings[(-1,wt)])
+            else
+                push!(new_wtags,_model_occ_shape_tag(kernel,wid,caller))
+                push!(new_wids,wid)
+            end
+        end
+        if pco!==nothing
+            for ((ffid,ueid),repl) in rim_repl
+                ffid===fid || continue
+                delete!(pco,_model_occ_shape_tag(kernel,ueid,caller))
+                pco[repl.etag]=(fwd=(lin2d=((repl.u0,repl.vt),
+                                            (repl.du,0.0)),),rev=nothing)
+            end
+        end
+        if vuvo!==nothing
+            for ((ffid,ueid),repl) in rim_repl
+                ffid===fid || continue
+                ovt=_model_occ_shape_tag(kernel,
+                    kernel.shapes[ueid].children[1],caller)
+                haskey(vuvo,ovt) && delete!(vuvo,ovt)
+                vuvo[repl.vtag]=(repl.u0,repl.vt)
+            end
+        end
+        if ispl
+            nft=_model_occ_add_plane_surface!(m,new_wtags)
+            nfid=kernel.bindings[(2,nft)]
+            nga=kernel.shapes[nfid].geometry.geometry.axis
+            # Outward use-sign σ·axis (rev only) — same convention the
+            # measure path certifies.
+            σo=frev_of[fid] ? -1.0 : 1.0
+            new_face2[fid]=(nfid,_dot3(nga,fg.axis)*σo<0)
+        else
+            newgeo=merge(fg,(pcurves=pco,))
+            vuvo!==nothing && (newgeo=merge(newgeo,(vertex_uv=vuvo,)))
+            nft=_model_occ_next_tag(kernel,2,-1,caller)
+            nfid=only(_model_occ_reserve_shapes(kernel,1,caller))
+            _model_occ_bind_shape!(kernel,2,nft,nfid,
+                _ModelOCCShape(2,(kind=fgsh.geometry.kind,geometry=newgeo),
+                               new_wids))
+            kernel.next_shape=nfid+UInt64(1)
+            new_face2[fid]=(nfid,frev_of[fid])
+        end
+    end
+    # Torus fillet faces — one per circle edge, 4-edge periodic wire like
+    # the canonical cylinder lateral.
+    for (eid,s) in circ_specs
+        a=s.axis; X_t=s.X_t; ρ=s.rho; r_c,z_c=s.C2
+        flo,fhi=s.vA<=s.vB ? (s.fA,s.fB) : (s.fB,s.fA)
+        rlo=rim_repl[(flo,eid)]; rhi=rim_repl[(fhi,eid)]
+        Y_t=_occ_cross(a,X_t)
+        C3=_occ3_add(s.o,_occ3_scale(a,z_c))
+        Cm=_occ3_add(C3,_occ3_scale(X_t,r_c))
+        seid=only(_model_occ_reserve_shapes(kernel,1,caller))
+        setag=_model_occ_next_tag(kernel,1,-1,caller)
+        _model_occ_bind_shape!(kernel,1,setag,seid,
+            _ModelOCCShape(1,(kind=:circle,
+                geometry=(occ=:circle,center=Cm,n=_occ_cross(X_t,a),
+                          X=X_t,Y=a,r=ρ,t0=s.vlo,t1=s.vhi)),
+                UInt64[rlo.vid,rhi.vid]))
+        kernel.next_shape=seid+UInt64(1)
+        pc=Dict{Int,NamedTuple}(
+            rlo.etag=>(fwd=(lin2d=((0.0,s.vlo),(1.0,0.0)),),rev=nothing),
+            rhi.etag=>(fwd=(lin2d=((0.0,s.vhi),(1.0,0.0)),),rev=nothing),
+            setag=>(fwd=(lin2d=((_OCC_TWO_PI,0.0),(0.0,1.0)),),
+                    rev=(lin2d=((0.0,0.0),(0.0,1.0)),)))
+        wuses=Tuple{UInt64,Bool}[(rhi.eid_new,true),(seid,true),
+                                 (rlo.eid_new,false),(seid,false)]
+        wt=_occ_wire_from_uses!(m,wuses,caller)
+        wid2=kernel.bindings[(-1,wt)]
+        nft=_model_occ_next_tag(kernel,2,-1,caller)
+        nfid=only(_model_occ_reserve_shapes(kernel,1,caller))
+        _model_occ_bind_shape!(kernel,2,nft,nfid,
+            _ModelOCCShape(2,(kind=:torus,
+                geometry=(occ=:torus,center=C3,axis=a,X=X_t,Y=Y_t,
+                          r1=r_c,r2=ρ,angle=_OCC_TWO_PI,pcurves=pc)),
+                UInt64[wid2]))
+        kernel.next_shape=nfid+UInt64(1)
+        push!(shell_uses,(nfid,false))
+    end
+    return nothing
+end
 function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
                            caller="OCC.fillet")
     kernel=m.occ_kernel
@@ -1955,11 +2526,14 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
         vert_edges=Dict{UInt64,Vector{UInt64}}()
         vert_pos=Dict{UInt64,NTuple{3,Float64}}()
         wire_of=Dict{UInt64,UInt64}()
+        wires_of=Dict{UInt64,Vector{UInt64}}()
+        frev_of=Dict{UInt64,Bool}()
         planes=NTuple{3,Float64}[]; bs=Float64[]
         shell_uses=copy(kernel.shapes[
             kernel.shapes[vid].children[1]].geometry.uses)
         isplane=Dict{UInt64,Bool}()
         for (fid,rev) in shell_uses
+            frev_of[fid]=rev
             fg=kernel.shapes[fid].geometry
             isplane[fid]=get(fg.geometry,:occ,nothing)===:plane
             if isplane[fid]
@@ -1970,9 +2544,10 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
                 fnormals[fid]=n; fcenters[fid]=fg.geometry.center
                 push!(planes,n); push!(bs,_dot3(n,fg.geometry.center))
             end
-            wid=kernel.shapes[fid].children[1]
-            wire_of[fid]=wid
-            for (u,_) in kernel.shapes[wid].geometry.uses
+            wlist=kernel.shapes[fid].children
+            wires_of[fid]=wlist
+            wire_of[fid]=wlist[1]
+            for wid in wlist, (u,_) in kernel.shapes[wid].geometry.uses
                 push!(get!(edge_faces,u,UInt64[]),fid)
                 for c in kernel.shapes[u].children
                     push!(get!(vert_edges,c,UInt64[]),u)
@@ -1999,6 +2574,7 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
         tangent=Dict{Tuple{UInt64,UInt64},Dict{UInt64,NTuple{3,Float64}}}()
         arc_at=Dict{Tuple{UInt64,UInt64},NTuple{3,Float64}}()
         fillet_of=Dict{UInt64,NamedTuple}()
+        circ_specs=Dict{UInt64,NamedTuple}()
         for (ct,r) in zip(curve_tags,rs)
             et=abs(_model_occ_requested_tag(ct,caller))
             eid=get(kernel.bindings,(1,et),nothing)
@@ -2009,8 +2585,21 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
                 "$caller: Curve[$et] is not an edge shared by two " *
                 "faces of Volume[$vt]"))
             eg=kernel.shapes[eid].geometry.geometry
-            get(eg,:occ,nothing)==:line || throw(ArgumentError(
-                "$caller: fillet edge must be a line"))
+            eocc=get(eg,:occ,nothing)
+            if eocc===:circle
+                for vv in unique(kernel.shapes[eid].children)
+                    vv in fil_verts && throw(ArgumentError(
+                        "$caller: filleted edges share a vertex — " *
+                        "corner blends are unsupported"))
+                    push!(fil_verts,vv)
+                end
+                circ_specs[eid]=_occ_fillet_circle_plan(
+                    kernel,eg,eid,fids,frev_of,vert_pos,et,r,caller)
+                continue
+            end
+            eocc===:line || throw(ArgumentError(
+                "$caller: fillet edge must be a line or a full circle " *
+                "on coaxial revolution faces (Curve[$et] is occ=$eocc)"))
             t=_occ3_scale(eg.dir,1.0/_occ_modulus(eg.dir))
             va,vb=kernel.shapes[eid].children
             pa,pb=vert_pos[va],vert_pos[vb]
@@ -2092,8 +2681,24 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
             fillet_of[eid]=(t=t,pa=pa,pb=pb,va=va,vb=vb,r=r,
                             bdir=bdir,fA=fA,fB=fB,ends=ends)
         end
-        isempty(fillet_of) && throw(ArgumentError(
+        isempty(fillet_of) && isempty(circ_specs) && throw(ArgumentError(
             "$caller: no valid edges to fillet"))
+        # Strip-overrun certificates for the circle fillets, now that
+        # every filleted rim on each face is known.
+        for (eid,s) in circ_specs
+            et=_model_occ_shape_tag(kernel,eid,caller)
+            for (fid,p,other,T,leg) in ((s.fA,s.pA,s.pB,s.TA,s.legA),
+                                        (s.fB,s.pB,s.pA,s.TB,s.legB))
+                extra=NTuple{2,Float64}[]
+                for (eid2,s2) in circ_specs
+                    eid2===eid && continue
+                    s2.fA===fid && push!(extra,s2.TA)
+                    s2.fB===fid && push!(extra,s2.TB)
+                end
+                _occ_fillet_overrun(kernel,fid,eid,p,s.rim,other.nin,leg,
+                    extra,s.axis,s.o,wires_of,et,caller)
+            end
+        end
         # ── rebuild geometry ─────────────────────────────────────────
         ptag=Dict{NTuple{3,Float64},Int}()
         function _pt(p)
@@ -2190,6 +2795,16 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
             wt=_occ_wire_from_uses!(m,wuses,caller)
             new_face[fid]=_model_occ_add_plane_surface!(m,[wt])
         end
+        # Circle-edge fillets: conflict with the planar line-edge rebuild
+        # is a shared dirty face — reject loudly rather than tangle.
+        for (eid,s) in circ_specs, fid in (s.fA,s.fB)
+            haskey(new_face,fid) && throw(ArgumentError(
+                "$caller: fillet mixes line and circle edges on one " *
+                "face — unsupported"))
+        end
+        new_face2=Dict{UInt64,Tuple{UInt64,Bool}}()
+        _occ_fillet_circle_rebuild!(m,kernel,circ_specs,wires_of,
+            frev_of,fnormals,new_face2,shell_uses,caller)
         for (eid,spec) in fillet_of
             e0,e1=spec.ends
             lidA,dirA=_line(e0.tA,e1.tA)
@@ -2269,6 +2884,9 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
                 nf=kernel.bindings[(2,new_face[fid])]
                 na=kernel.shapes[nf].geometry.geometry.axis
                 push!(sus,(nf,_dot3(na,fnormals[fid])<0))
+            elseif haskey(new_face2,fid)
+                nf,rv=new_face2[fid]
+                push!(sus,(nf,rv))
             else
                 push!(sus,(fid,rev))
             end

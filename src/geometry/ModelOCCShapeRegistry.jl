@@ -62,6 +62,20 @@ function _model_occ_tensor_surface!(m::GeoModel,points,num_points_u,family;
     allocated=_model_occ_next_tag(kernel,2,requested,caller)
     haskey(kernel.bindings,(2,allocated)) && throw(ArgumentError(
         "$caller: OCC Surface[$allocated] already exists"))
+    # Resolve trim wires BEFORE the scratch build so every validator still
+    # precedes publication. `wireTags[1]` is the outer boundary, the rest
+    # are holes — same ordering convention as imported bounded faces.
+    trim_wids=UInt64[]
+    for raw in wire_tags
+        wt=abs(_model_occ_requested_tag(raw,caller))
+        wid=get(kernel.bindings,(-1,wt),nothing)
+        wid===nothing && throw(ArgumentError("$caller: unknown OCC Wire[$wt]"))
+        wid in trim_wids && throw(ArgumentError(
+            "$caller: OCC Wire[$wt] listed twice"))
+        isempty(kernel.shapes[wid].geometry.uses) && throw(ArgumentError(
+            "$caller: OCC Wire[$wt] has no edges"))
+        push!(trim_wids,wid)
+    end
     control_tags=Int[_model_occ_requested_tag(t,caller) for t in points]
     scratch=GeoModel()
     for t in control_tags
@@ -79,8 +93,39 @@ function _model_occ_tensor_surface!(m::GeoModel,points,num_points_u,family;
     build_tag=allocated==0 ? 1 : allocated
     surface=_model_tensor_surface!(scratch,control_tags,num_points_u,family,
         build_tag,degree_u,degree_v,weights,knots_u,knots_v,multiplicities_u,
-        multiplicities_v,wire_tags,wire_3d,caller)
+        multiplicities_v,Int[],wire_3d,caller)
     geometry=scratch.surface_geometry[surface]
+    if !isempty(trim_wids)
+        # Curved trim: project every wire edge onto the canonical patch
+        # domain — the same BRepBuilderAPI_MakeFace path as
+        # `addTrimmedSurface`, including seam-period unwrapping for
+        # geometrically closed patches (144/114-style bounded faces).
+        tag_of=id->_model_occ_shape_tag(kernel,id,caller)
+        pc=Dict{Int,NamedTuple}(); vuv=Dict{Int,NTuple{2,Float64}}()
+        for wid in trim_wids, (eid,_) in kernel.shapes[wid].geometry.uses
+            etag=tag_of(eid)
+            haskey(pc,etag) || (pc[etag]=
+                (fwd=_trim_project_pcurve(m,kernel,geometry,eid,caller),
+                 rev=nothing))
+        end
+        for wid in trim_wids, (eid,_) in kernel.shapes[wid].geometry.uses,
+                vid in kernel.shapes[eid].children
+            vtag=tag_of(vid)
+            haskey(vuv,vtag) && continue
+            pr=_occ_surface_closest(geometry,kernel.shapes[vid].geometry.point,1.0)
+            pr===nothing && throw(ArgumentError(
+                "$caller: trim wire vertex does not project onto the surface"))
+            vuv[vtag]=(pr[1],pr[2])
+        end
+        geometry=merge(Base.structdiff(geometry,(boundary_curves=nothing,)),
+                       (pcurves=pc,vertex_uv=vuv,trimmed=true))
+        face=_ModelOCCShape(2,(kind=scratch.surface_types[surface],
+                               geometry=geometry),trim_wids)
+        id=only(_model_occ_reserve_shapes(kernel,1,caller))
+        _model_occ_bind_shape!(kernel,2,allocated,id,face)
+        kernel.next_shape=id+UInt64(1)
+        return allocated
+    end
     curve_tags=geometry.boundary_curves
     boundary_tags=Int[]
     for c in curve_tags,p in scratch.curves[c]

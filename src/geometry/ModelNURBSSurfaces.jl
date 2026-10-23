@@ -110,6 +110,33 @@ function _model_nurbs_surface_bounds(g)
            [s.knots_u[end-s.degree_u],s.knots_v[end-s.degree_v]]
 end
 
+# Geometric seam test for trim/boolean unwrap support: the patch is
+# periodic in `dim` (1=u, 2=v) when the two active-domain boundary
+# isoparametric lines coincide pointwise — sampled across the interior
+# of the opposite direction so pole singularities cannot mask the seam.
+# Returns the parameter period (the knot-domain width) or 0.0. Closed
+# clamped B-spline supports (STEP/IGES 114-style bounded faces) qualify:
+# their wrap pole rows coincide exactly.
+function _model_nurbs_patch_seam_period(g,dim::Int)
+    lo,hi=_model_nurbs_surface_bounds(g)
+    a0,a1=lo[dim],hi[dim]
+    b0,b1=lo[3-dim],hi[3-dim]
+    a1-a0>0 || return 0.0
+    evalp(a,b)=dim==1 ? first(_model_nurbs_surface_d2(g,a,b)) :
+                        first(_model_nurbs_surface_d2(g,b,a))
+    scale=1.0
+    for i in 0:3, j in 0:3
+        p=evalp(a0+(a1-a0)*i/3,b0+(b1-b0)*j/3)
+        scale=max(scale,maximum(abs,p))
+    end
+    tol=1e-7*scale
+    for i in 0:8
+        b=b0+(b1-b0)*i/8
+        _occ_modulus(_arc_sub(evalp(a1,b),evalp(a0,b)))>tol && return 0.0
+    end
+    return a1-a0
+end
+
 function _model_nurbs_knots(count,degree,knots,multiplicities,caller,axis)
     mult=Int[]
     for value in multiplicities
