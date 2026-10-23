@@ -11067,6 +11067,16 @@ field_value(field::_GeoPostViewSizeField,x,y,z)=
 field_value(field::_GeoPostViewSizeField,x,y,z,::Tuple{T,U}) where
         {T<:Integer,U<:Integer}=field_value(field.field,x,y,z)
 
+# OCC shape merge — STEP/IGES dispatch lives behind `invokelatest` so the
+# importer's compile graph never enters `_geo_exec_include!` inference (the
+# executor ↔ include recursion would otherwise carry the whole OCC chain).
+@noinline function _geo_include_occ_shapes!(m::GeoModel,file::AbstractString,
+                                            context::_GeoNumericContext)
+    Model._model_occ_import_shapes(m,file;caller="OCC.importShapes")
+    _geo_occ_finish!(m,context)
+    return nothing
+end
+
 # `Include`/`Merge` of a `.geo` file runs its statements in the same context
 # and model (Gmsh's `ParseFile` shares the parser globals). `.msh` files merge
 # their mesh into the current mid-file mesh.
@@ -11109,19 +11119,23 @@ function _geo_exec_include!(m::GeoModel,path::AbstractString,
         _geo_import_mesh_file!(m,context,file,caller)
         return nothing
     end
-    if ext in (".step",".stp")
-        # `GModel::readOCCSTEP` — STEP always imports through the OCC
-        # kernel upstream, whatever the active factory. The native
-        # importer binds into the OCC kernel; synchronize publishes the
-        # merged solids immediately (same `geo_changed` receipt a GEO
-        # create carries).
-        Model._model_occ_import_shapes(m,file;caller="OCC.importShapes")
-        _geo_occ_finish!(m,context)
+    if ext in (".step",".stp",".igs",".iges")
+        # `GModel::readOCCSTEP`/`readOCCIGES` — STEP and IGES always
+        # import through the OCC kernel upstream, whatever the active
+        # factory. The native importer binds into the OCC kernel;
+        # synchronize publishes the merged solids immediately (same
+        # `geo_changed` receipt a GEO create carries). `invokelatest`
+        # keeps the OCC importer's inference graph out of this
+        # dispatcher — `_exec_geo_statements!` ↔ `_geo_exec_include!`
+        # recursion would otherwise compile the whole kernel chain
+        # (STEP+IGES conversion, OCC binding, synchronize) into the
+        # first call of every GEO execution.
+        Base.invokelatest(_geo_include_occ_shapes!,m,file,context)
         return nothing
     end
     ext==".geo" || throw(ArgumentError(
         "$caller: merging '$ext' files is not supported " *
-        "(only .geo, .msh, .stl, .pos, .step and .stp)"))
+        "(only .geo, .msh, .stl, .pos, .step, .stp, .igs and .iges)"))
     statements=_geo_exec_statements(file)
     parent_file=context.file_name
     parent_base=context.file_error_base

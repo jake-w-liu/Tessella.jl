@@ -868,6 +868,7 @@ include("ModelOCCBoolean.jl")
 include("ModelOCCNurbsConvert.jl")
 include("ModelOCCLoft.jl")
 include("ModelOCCImport.jl")
+include("ModelOCCIGES.jl")
 
 @inline function _model_periodic_entity_label(dim::Int)
     dim==1 && return "Curve"

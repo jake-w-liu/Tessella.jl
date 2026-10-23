@@ -1150,6 +1150,11 @@ end
 function _model_occ_import_shapes(m::GeoModel,path;highest_dim_only=true,
                                   caller="OCC.importShapes")
     isfile(path) || throw(ArgumentError("$caller: missing file $path"))
+    ext=lowercase(splitext(path)[2])
+    if ext in (".igs",".iges")
+        return _model_occ_import_iges(m,path;
+            highest_dim_only=highest_dim_only,caller=caller)
+    end
     source=read(path,String)
     occursin("ISO-10303-21",source) || throw(ArgumentError(
         "$caller: $path is not an ISO-10303-21 STEP file"))
