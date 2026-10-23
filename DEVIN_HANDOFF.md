@@ -75,10 +75,17 @@ the owned files:
 - UI01/CLI (LANDED `9467923`): parser/fltk/graphics surfaces,
   SaveParametric ($ParametricNodes MSH4+2.2+binary), SaveTopology,
   -optimize_ho plumbing. 58+30+38+68+1324+81 green. FLAG: `cli_test.jl`
-  13 mesh-content pins (mixed_crc + periodic slave_nodes 21→20 etc.) failed
-  DURING in-flight meshing worker edits — RE-VERIFY after recovery/parallel
-  workers land; if still failing, diagnose whether recovery changed mesh
-  output legitimately (re-pin) or regressed (fix).
+  13 mesh-content pins still fail AFTER all meshing landings
+  (`cli_test.jl:276,296,382,395,409,420,441,444`): every periodic-link
+  `slave_nodes` count dropped by exactly one (21→20) plus `mixed_crc`/
+  `mesh_crc` SHA mismatches on periodic_graph/embedded/set_max_tag/
+  point_mesh_size/points_of/periodic_surface_volume fixtures.
+  Signature = one seam/corner node deduplicated per periodic link OR a
+  real periodic-transport regression. NEXT SESSION: mesh
+  `periodic_surface_volume` fixture, `validate` the mesh, and check
+  every slave_node still maps 1:1 to master nodes; if valid → re-pin
+  the 13 expectations to current output; if a slave lost its master →
+  bisect among `9d3998e`,`3599fc0`,`4cef4d1`,`9cda518`,`ce99742`.
 
 ### Genuinely remaining (next session)
 
