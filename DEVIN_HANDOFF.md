@@ -125,6 +125,19 @@ the owned files:
   topology-only writers; `-0` unrolled .geo output; `-barycentric_refine`;
   partition option flags; `-optimize_ho` plumbing to the (u,v) optimizer.
   `CLI.jl`'s classified-rejection table stays until each lands.
+### FINAL GATE findings (2026-10-23, runtests.jl 417-baseline)
+
+- `occ_revolve_smoke` abort: `_gm87_sincos` x87 `llvmcall` can't run under
+  `--compile=min` — FIXED `0a16797` (one-time `_win_x87_llvm()` probe →
+  BigFloat emulation path; CPUID + sincos sites guarded).
+- `partition_brep` sign regression: `7d3b2b5` (blanket abs on dim-0 boundary
+  presentation) was WRONG — declared entities keep signed bounds per
+  `partition_brep.jl` pins + the APIPartitionBRep orientation guard. Reverted
+  `093e962`. Remaining: ghost suite's imported partition records expect
+  UNSIGNED dim-0 in state dumps vs local children expecting SIGNED — real
+  discriminator (import provenance vs local production) under worker
+  `6237e5ee`; `partition_brep` currently 9/1 with only the :56 child-sign
+  pin failing pre-fix (needs signed — matches post-revert behavior).
 - `api_partition_ghost_collision` last testset: 8 digest fails + 1 missing-script
   error are GITIGNORED-fixture drift (`test/data`,`test/artifacts` ignored;
   `partition_ghost_membership_native_v1.py` absent) — environmental, not a
