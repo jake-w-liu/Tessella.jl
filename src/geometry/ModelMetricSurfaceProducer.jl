@@ -157,6 +157,292 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
     # Dissolved vertex positions stay reserved so a later split cannot birth a
     # vertex back onto the exact razor site the repair just removed.
     retired=Set{NTuple{3,Float64}}()
+    # Tangent-frame pullback of the world metric at a surface point. In the
+    # affine plane coordinates the quadratic form J'MJ gives exactly the
+    # `metric_edge_length` of any in-plane chord, so circumcenter and
+    # in-circle computations in (u,v) are the world tests on lifted points.
+    function uv_metric(point)
+        mm=metric_at(field,point[1],point[2],point[3],(2,tag))
+        f=frame.first;s=frame.second
+        a=mm.m11*f[1]*f[1]+mm.m22*f[2]*f[2]+mm.m33*f[3]*f[3]+
+          2*(mm.m12*f[1]*f[2]+mm.m13*f[1]*f[3]+mm.m23*f[2]*f[3])
+        b=mm.m11*f[1]*s[1]+mm.m22*f[2]*s[2]+mm.m33*f[3]*s[3]+
+          mm.m12*(f[1]*s[2]+f[2]*s[1])+mm.m13*(f[1]*s[3]+f[3]*s[1])+
+          mm.m23*(f[2]*s[3]+f[3]*s[2])
+        d=mm.m11*s[1]*s[1]+mm.m22*s[2]*s[2]+mm.m33*s[3]*s[3]+
+          2*(mm.m12*s[1]*s[2]+mm.m13*s[1]*s[3]+mm.m23*s[2]*s[3])
+        return (a,b,d)
+    end
+    # Metric circumcircle of a live cell under `metric` (a 2x2 pullback).
+    # `_gmsh_sys2x2` hands back (0,0) on a degenerate solve, so the returned
+    # center is re-certified by equal metric distance to all three corners.
+    function uv_circumcircle(column,metric)
+        cell=cells[column]
+        pa,pb,pc=parameters[cell[1]],parameters[cell[2]],parameters[cell[3]]
+        cc,r2=Mesh2D._gmsh_circumcenter_metric(pa,pb,pc,metric)
+        (isfinite(cc[1]) && isfinite(cc[2]) && isfinite(r2) && r2>0) ||
+            return nothing
+        for corner in (pa,pb,pc)
+            other=Mesh2D._gmsh_metric_distance2(cc,corner,metric)
+            (isfinite(other) && abs(other-r2)<=1e-9*r2) || return nothing
+        end
+        return cc,r2
+    end
+    # Visibility walk to the live cell containing `q` in parameter space,
+    # starting from cell `seed`. Every live cell carries the same winding `w`;
+    # crossing the edge whose orientation disagrees advances the walk. Returns
+    # `nothing` when `q` leaves the domain or the walk cannot converge.
+    function uv_locate(seed,q,w)
+        column=seed;seen=Set{Int}()
+        while true
+            column in seen && return nothing
+            push!(seen,column)
+            alive[column] || return nothing
+            cell=cells[column]
+            # Cross the edge whose Float64 signed area against `q` is most
+            # violated — the steepest-descent visibility walk that resists
+            # cycling on non-Delaunay intermediate triangulations. A violated
+            # boundary edge only means `q` left the domain through it; another
+            # violated edge with a live neighbour still advances the walk.
+            best=0.0;next_column=0;crossed_boundary=false
+            for index in 1:3
+                u=cell[index];v=cell[mod1(index+1,3)]
+                x1,y1=parameters[u];x2,y2=parameters[v]
+                violation=-w*((x2-x1)*(q[2]-y1)-(y2-y1)*(q[1]-x1))
+                (isfinite(violation) && violation>0) || continue
+                nb=0
+                for candidate in get(incidence,minmax(u,v),Int[])
+                    candidate!=column && (nb=candidate)
+                end
+                nb==0 && (crossed_boundary=true;continue)
+                violation>best && (best=violation;next_column=nb)
+            end
+            next_column!=0 && (column=next_column;continue)
+            crossed_boundary && return nothing
+            return column
+        end
+    end
+    # Metric-Delaunay Steiner insertion. Conforming midpoint bisection can
+    # only shorten edges — it can never reorient connectivity onto the metric
+    # ellipse — so under strongly anisotropic fields every direction collapses
+    # toward h_min and the fill overshoots the prescribed triangle count by
+    # tens of times. The upstream remedy is an anisotropic Delaunay
+    # construction; here the worst violating edge's incident cells nominate a
+    # Steiner point at their metric circumcenter, inserted through an
+    # anisotropic Bowyer-Watson cavity under the constant local metric at the
+    # point. The commit keeps every certificate of the split path:
+    # the perimeter — including every retained boundary edge — survives
+    # verbatim as fan edges, each fan cell carries the cavity winding and a
+    # positive physical area, no surviving live vertex lands strictly inside
+    # a fan cell, cavity-interior vertices are non-retained and dissolve like
+    # the razor repair, and the birth is a distinct representable position.
+    # Any failed check falls through to the certified midpoint split.
+    function _metric_insert_steiner(sides,hits)
+        length(sides)==2 || return false
+        (f1,l1,o1),(f2,l2,o2)=sides
+        o1!=o2 || return false
+        (f2,l2)==(l1,f1) || return false
+        w=orient2(parameters[f1],parameters[l1],parameters[o1])
+        (isfinite(w) && w!=0 &&
+         orient2(parameters[f2],parameters[l2],parameters[o2])==w) ||
+            return false
+        # Candidate insertion points are the incident cells' metric
+        # circumcenters, worst first. An outside center is the usual case for
+        # a metric-obtuse violating cell — locate the containing cell by a
+        # parameter-space visibility walk and let the cavity flood reach the
+        # popped edge's cells when the metric says they belong.
+        for column in sort!(collect(hits);by=column->begin
+                cell=cells[column]
+                pa,pb,pc=parameters[cell[1]],parameters[cell[2]],parameters[cell[3]]
+                centroid=((pa[1]+pb[1]+pc[1])/3,(pa[2]+pb[2]+pc[2])/3)
+                solved=uv_circumcircle(column,
+                    uv_metric(_surface_metric_lift(frame,centroid[1],centroid[2])))
+                solved===nothing ? 0.0 : solved[2]
+            end,rev=true)
+            cell=cells[column]
+            pa,pb,pc=parameters[cell[1]],parameters[cell[2]],parameters[cell[3]]
+            centroid=((pa[1]+pb[1]+pc[1])/3,(pa[2]+pb[2]+pc[2])/3)
+            solved=uv_circumcircle(column,
+                uv_metric(_surface_metric_lift(frame,centroid[1],centroid[2])))
+            solved===nothing && (steiner_fail[:cc]=get(steiner_fail,:cc,0)+1;continue)
+            p_uv,_=solved
+            p_world=_surface_metric_lift(frame,p_uv[1],p_uv[2])
+            (haskey(positions,p_world) || p_world in retired) && (steiner_fail[:dup]=get(steiner_fail,:dup,0)+1;continue)
+            home=uv_locate(column,p_uv,w)
+            home===nothing && (steiner_fail[:locate]=get(steiner_fail,:locate,0)+1;continue)
+            mp=uv_metric(p_world)
+            _metric_steiner_commit(p_uv,p_world,home,mp,w) && return true
+        end
+        return false
+    end
+    # Commit one Bowyer-Watson insertion: flood the constant-local-metric
+    # cavity from `home` through interior edges while neighbours' metric
+    # circumcircles contain p, certify the disk and the retriangulated fan,
+    # then apply the shared bookkeeping. Boundary edges carry one live cell,
+    # so the flood can never leave the domain.
+    function _metric_steiner_commit(p_uv,p_world,home,mp,w)
+        cavity=Set{Int}(home);stack=Int[home]
+        while !isempty(stack) && length(cavity)<=2048
+            column=pop!(stack)
+            for cav_edge in _metric_surface_edges(cells[column])
+                neighbours=get(incidence,minmax(cav_edge...),Int[])
+                length(neighbours)==2 || continue
+                for neighbour in neighbours
+                    (neighbour in cavity || !alive[neighbour]) && continue
+                    solved=uv_circumcircle(neighbour,mp)
+                    solved===nothing && continue
+                    Mesh2D._gmsh_metric_distance2(solved[1],p_uv,mp)<solved[2] ||
+                        continue
+                    push!(cavity,neighbour);push!(stack,neighbour)
+                end
+            end
+        end
+        (isempty(stack) && length(cavity)<=2048) || return false
+        # Cavity perimeter: edges carried by exactly one cavity cell. The
+        # cavity must be a topological disk — a degree-two single cycle.
+        count_in=Dict{NTuple{2,Int32},Int}()
+        for column in cavity
+            for cav_edge in _metric_surface_edges(cells[column])
+                key=minmax(cav_edge...)
+                count_in[key]=get(count_in,key,0)+1
+            end
+        end
+        perimeter=[key for (key,c) in count_in if c==1]
+        isempty(perimeter) && (steiner_fail[:disk]=get(steiner_fail,:disk,0)+1;return false)
+        adjacency=Dict{Int32,Vector{Int32}}()
+        for (first,last) in perimeter
+            push!(get!(()->Int32[],adjacency,first),last)
+            push!(get!(()->Int32[],adjacency,last),first)
+        end
+        (length(adjacency)==length(perimeter) &&
+            all(choices->length(choices)==2,values(adjacency))) || (steiner_fail[:disk]=get(steiner_fail,:disk,0)+1;return false)
+        polygon=Int32[]
+        start=perimeter[1][1];cur=start;prev=Int32(0)
+        for _ in 1:length(perimeter)+1
+            push!(polygon,cur)
+            choices=adjacency[cur]
+            nxt=choices[1]==prev ? choices[2] : choices[1]
+            prev,cur=cur,nxt
+            cur==start && break
+        end
+        (cur==start && length(polygon)==length(perimeter)) || (steiner_fail[:disk]=get(steiner_fail,:disk,0)+1;return false)
+        # Orient the walk with the cavity winding, then p must see every
+        # perimeter edge from the inside — the fan star-shaped certificate.
+        shoelace=sum(parameters[polygon[index]][1]*
+                     parameters[polygon[mod1(index+1,length(polygon))]][2]-
+                     parameters[polygon[index]][2]*
+                     parameters[polygon[mod1(index+1,length(polygon))]][1]
+                     for index in 1:length(polygon))
+        sign(shoelace)==w || reverse!(polygon)
+        inset=Set(polygon)
+        interior=Set{Int32}()
+        for column in cavity
+            for vertex in cells[column]
+                vertex in inset || push!(interior,vertex)
+            end
+        end
+        all(vertex->node_alive[vertex] && !retained[vertex],interior) ||
+            (steiner_fail[:interior]=get(steiner_fail,:interior,0)+1;return false)
+        for vertex in polygon
+            Mesh2D._gmsh_metric_distance2(p_uv,parameters[vertex],mp)>
+                (0.02*target)^2 || (steiner_fail[:close]=get(steiner_fail,:close,0)+1;return false)
+        end
+        newcells=NTuple{3,Int32}[]
+        for index in 1:length(polygon)
+            u=polygon[index];v=polygon[mod1(index+1,length(polygon))]
+            orient2(parameters[u],parameters[v],p_uv)==w || (steiner_fail[:star]=get(steiner_fail,:star,0)+1;return false)
+            area=triangle_area(coordinates[u],coordinates[v],p_world)
+            (isfinite(area) && area>0) || (steiner_fail[:star]=get(steiner_fail,:star,0)+1;return false)
+            push!(newcells,(u,v,Int32(-1)))
+        end
+        # No surviving live vertex may land strictly inside a new cell; the
+        # cavity's own interior vertices are dying with it.
+        near=Set{Int32}(polygon)
+        for column in cavity
+            for vertex in cells[column];push!(near,vertex);end
+        end
+        for column in cavity
+            for cav_edge in _metric_surface_edges(cells[column])
+                for neighbour in get(incidence,minmax(cav_edge...),Int[])
+                    alive[neighbour] && !(neighbour in cavity) || continue
+                    for vertex in cells[neighbour];push!(near,vertex);end
+                end
+            end
+        end
+        setdiff!(near,interior)
+        for child in newcells
+            c1,c2=child[1],child[2]
+            for wtest in near
+                (wtest==c1 || wtest==c2) && continue
+                pw=parameters[wtest]
+                o1=orient2(parameters[c1],parameters[c2],pw)
+                o2=orient2(parameters[c2],p_uv,pw)
+                o3=orient2(p_uv,parameters[c1],pw)
+                (o1==w && o2==w && o3==w) && (steiner_fail[:inside]=get(steiner_fail,:inside,0)+1;return false)
+                # Strictly on a fan edge is no better than strictly inside:
+                # the new edge would carry a T-junction vertex it cannot
+                # express, so reject rather than emit a nonmanifold cell.
+                for (o,(s,e)) in ((o1,(parameters[c1],parameters[c2])),
+                                  (o2,(parameters[c2],p_uv)),
+                                  (o3,(p_uv,parameters[c1])))
+                    o==0 || continue
+                    (min(s[1],e[1])<=pw[1]<=max(s[1],e[1]) &&
+                     min(s[2],e[2])<=pw[2]<=max(s[2],e[2])) && (steiner_fail[:onedge]=get(steiner_fail,:onedge,0)+1;return false)
+                end
+            end
+        end
+        (length(coordinates)-length(interior)<node_limit &&
+            live_count-length(cavity)+length(newcells)<=triangle_limit) ||
+            (steiner_fail[:limit]=get(steiner_fail,:limit,0)+1;return false)
+        next_node=_metric_surface_birth(node_max,1,caller,"node")
+        next_cell=_metric_surface_birth(cell_max,length(newcells),
+                                        caller,"cell")
+        row=Int32(length(coordinates)+1)
+        push!(coordinates,p_world);push!(parameters,p_uv)
+        positions[p_world]=row
+        push!(numbers,next_node);push!(owners,(2,Int32(tag)))
+        push!(node_parameters,collect(p_uv))
+        push!(retained,false);push!(birth_rows,row);push!(node_alive,true)
+        node_max=next_node
+        for column in cavity
+            alive[column]=false
+            for old_edge in _metric_surface_edges(cells[column])
+                key=minmax(old_edge...)
+                filter!(!=(column),incidence[key])
+                isempty(incidence[key]) && delete!(incidence,key)
+            end
+        end
+        new_edges=Set{NTuple{2,Int32}}()
+        for child in newcells
+            born=(child[1],child[2],row)
+            push!(cells,born);push!(alive,true)
+            cell_max+=UInt64(1);push!(labels,cell_max)
+            for child_edge in _metric_surface_edges(born)
+                key=minmax(child_edge...)
+                push!(get!(()->Int[],incidence,key),length(cells))
+                push!(new_edges,key)
+            end
+        end
+        cell_max==next_cell ||
+            error("$caller: internal cell birth count mismatch")
+        for vertex in interior
+            node_alive[vertex]=false
+            push!(retired,coordinates[vertex])
+            delete!(positions,coordinates[vertex])
+        end
+        live_count+=length(newcells)-length(cavity)
+        for new_edge in sort!(collect(new_edges));enqueue(new_edge);end
+        return true
+    end
+    steiner_budget=Dict{NTuple{2,Int32},Int}()
+    steiner_stats=[0,0]  # temporary diagnostic: attempts, commits
+    steiner_fail=Dict{Symbol,Int}()
+    function _metric_steiner_attempt(sides,hits)
+        steiner_stats[1]+=1
+        ok=_metric_insert_steiner(sides,hits)
+        ok && (steiner_stats[2]+=1)
+        return ok
+    end
     deferred=Set{NTuple{2,Int32}}()
     edge_deferrals=Dict{NTuple{2,Int32},Int}()
     deferred_signature=Dict{NTuple{2,Int32},NTuple{2,NTuple{3,Int32}}}()
@@ -186,6 +472,20 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
                 minmax(cell[index],cell[mod1(index+1,3)])==edge)
             (cell[slot],cell[mod1(slot+1,3)],cell[mod1(slot+2,3)])
         end for column in hits]
+        # Prefer a metric-Delaunay Steiner insertion over splitting: the
+        # cavity commit above carries the same certificates while building
+        # the connectivity the metric actually prescribes. The per-edge
+        # budget keeps an unresolvable edge on the certified split path.
+        if get(steiner_budget,edge,0)<2
+            steiner_budget[edge]=get(steiner_budget,edge,0)+1
+            if _metric_steiner_attempt(sides,hits)
+                # The insertion point can land outside this edge's star — the
+                # popped edge then survives its pop and must go back on the
+                # queue rather than escape the certificate.
+                enqueue(edge)
+                continue
+            end
+        end
         # A split point is admissible when every incident cell keeps both
         # exact-orientation children and a representable physical area — the
         # certificate the canonical midpoint is checked against below.
@@ -929,6 +1229,267 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
         live_count+=length(hits)
         for new_edge in sort!(collect(new_edges));enqueue(new_edge);end
     end
+    # ── Certified coarsening post-pass ───────────────────────────────────
+    # Edge bisection can only shorten edges: it cannot reorient connectivity
+    # onto the metric ellipse, so under anisotropic fields the fill packs
+    # vertices toward the smallest prescribed direction and overshoots the
+    # requested density by orders of magnitude. Two certified sweeps undo
+    # that collapse once every edge already satisfies the bound:
+    #
+    #  * metric diagonal flips trade the longer diagonal of every interior
+    #    quad for the shorter one — the same certified 2-2 edge-star
+    #    retriangulation the razor repair uses — walking the connectivity
+    #    toward the metric-Delaunay triangulation without touching the
+    #    boundary or any vertex;
+    #  * star dissolution removes a non-retained interior vertex whose link
+    #    polygon ear-clips with every new chord at or below `target`, so
+    #    removal never recreates a violating edge.
+    #
+    # Both keep the boundary set, manifold incidence, exact winding and the
+    # physical-area certificate; the pair repeats while either makes
+    # progress so alignment created by a flip can unblock the next removal.
+    vertcells=Dict{Int32,Vector{Int}}()
+    for (column,cell) in enumerate(cells)
+        alive[column] || continue
+        for vertex in cell
+            push!(get!(()->Int[],vertcells,vertex),column)
+        end
+    end
+    function starcells_of(vertex)
+        star=Int32[]
+        for column in get(vertcells,vertex,Int[])
+            alive[column] && vertex in cells[column] && push!(star,column)
+        end
+        return star
+    end
+    function drop_cell(column)
+        alive[column] || return
+        alive[column]=false
+        for old_edge in _metric_surface_edges(cells[column])
+            key=minmax(old_edge...)
+            filter!(!=(column),incidence[key])
+            isempty(incidence[key]) && delete!(incidence,key)
+        end
+        for vertex in cells[column]
+            hits_v=get(vertcells,vertex,nothing)
+            hits_v===nothing || filter!(!=(column),hits_v)
+        end
+    end
+    function add_cell(child)
+        push!(cells,child);push!(alive,true)
+        cell_max+=UInt64(1);push!(labels,cell_max)
+        for child_edge in _metric_surface_edges(child)
+            push!(get!(()->Int[],incidence,minmax(child_edge...)),length(cells))
+        end
+        for vertex in child
+            push!(get!(()->Int[],vertcells,vertex),length(cells))
+        end
+    end
+    # Certified 2-2 diagonal flip for the post-pass: the new diagonal must be
+    # strictly shorter under the metric (so the sweep cannot cycle), the
+    # quad must be strictly convex in parameter space, the diagonal must not
+    # already exist, and both children keep the winding and a positive
+    # physical area. A convex quad contains no other live vertex, so the
+    # children inherit the no-inside-vertex certificate from their parents.
+    function metric_flip(edge)
+        edge in boundary && return false
+        hits=copy(get(incidence,edge,Int[]))
+        (length(hits)!=2 ||
+         !alive[hits[1]] || !alive[hits[2]]) && return false
+        cell1,cell2=cells[hits[1]],cells[hits[2]]
+        slot1=only(index for index in 1:3 if
+                   minmax(cell1[index],cell1[mod1(index+1,3)])==edge)
+        slot2=only(index for index in 1:3 if
+                   minmax(cell2[index],cell2[mod1(index+1,3)])==edge)
+        f1,l1,o1=cell1[slot1],cell1[mod1(slot1+1,3)],cell1[mod1(slot1+2,3)]
+        f2,l2,o2=cell2[slot2],cell2[mod1(slot2+1,3)],cell2[mod1(slot2+2,3)]
+        (f2,l2)==(l1,f1) && o1!=o2 || return false
+        old=score((f1,l1));new=score((o1,o2))
+        (isfinite(new) && new<=target && new<old*(1-1e-9)) || return false
+        haskey(incidence,minmax(o1,o2)) && return false
+        w1=orient2(parameters[f1],parameters[l1],parameters[o1])
+        w2=orient2(parameters[f2],parameters[l2],parameters[o2])
+        (isfinite(w1) && isfinite(w2) && w1!=0 && w1==w2) || return false
+        # The quad must be strictly convex in parameter space — a reflex
+        # corner lets the swapped children cover area outside the two
+        # dropped cells and overlap a neighbour.
+        orient2(parameters[f1],parameters[o1],parameters[l1])==w1 &&
+            orient2(parameters[o1],parameters[l1],parameters[o2])==w1 &&
+            orient2(parameters[l1],parameters[o2],parameters[f1])==w1 &&
+            orient2(parameters[o2],parameters[f1],parameters[o1])==w1 ||
+            return false
+        orient2(parameters[f1],parameters[o2],parameters[o1])==w1 &&
+            orient2(parameters[o2],parameters[l1],parameters[o1])==w1 ||
+            return false
+        area1=triangle_area(coordinates[f1],coordinates[o2],coordinates[o1])
+        area2=triangle_area(coordinates[o2],coordinates[l1],coordinates[o1])
+        (isfinite(area1) && area1>0 && isfinite(area2) && area2>0) ||
+            return false
+        isapprox(area1+area2,
+                 triangle_area(coordinates[f1],coordinates[l1],
+                               coordinates[o1])+
+                 triangle_area(coordinates[l1],coordinates[f1],
+                               coordinates[o2]);rtol=1e-9,atol=0) ||
+            return false
+        _metric_surface_birth(cell_max,2,caller,"cell")
+        drop_cell(hits[1]);drop_cell(hits[2])
+        add_cell((f1,o2,o1));add_cell((o2,l1,o1))
+        return true
+    end
+    # Certified vertex removal for the post-pass: ear-clip the interior
+    # vertex's link polygon in the star's winding exactly like the razor
+    # dissolution, and additionally require every emitted chord to score at
+    # or below `target` — coarsening must not hand the loop a violating
+    # edge it has already drained.
+    function remove_star(vertex)
+        node_alive[vertex] && !retained[vertex] || return false
+        star=starcells_of(vertex)
+        length(star)>=3 || return false
+        link=NTuple{2,Int32}[]
+        for column in star
+            cell=cells[column]
+            slot=only(index for index in 1:3 if cell[index]==vertex)
+            minmax(vertex,cell[mod1(slot+1,3)]) in boundary && return false
+            minmax(vertex,cell[mod1(slot+2,3)]) in boundary && return false
+            push!(link,(cell[mod1(slot+1,3)],cell[mod1(slot+2,3)]))
+        end
+        length(unique(minmax(e...) for e in link))==length(link) ||
+            return false
+        nxt=Dict{Int32,Int32}(e[1]=>e[2] for e in link)
+        length(nxt)==length(link) || return false
+        polygon=Int32[];start=link[1][1];cur=start
+        for _ in 1:length(link)
+            push!(polygon,cur)
+            cur=get(nxt,cur,Int32(0));cur==0 && return false
+        end
+        cur==start || return false
+        w=orient2(parameters[cells[star[1]][1]],
+                  parameters[cells[star[1]][2]],
+                  parameters[cells[star[1]][3]])
+        (isfinite(w) && w!=0) || return false
+        remaining=collect(polygon);newcells=NTuple{3,Int32}[]
+        while length(remaining)>3
+            m=length(remaining);best=0;best_area=-Inf
+            for index in 1:m
+                prev=remaining[mod1(index-1,m)]
+                vtx=remaining[index]
+                nxtv=remaining[mod1(index+1,m)]
+                orient2(parameters[prev],parameters[vtx],
+                        parameters[nxtv])==w || continue
+                area=triangle_area(coordinates[prev],coordinates[vtx],
+                                   coordinates[nxtv])
+                (isfinite(area) && area>0) || continue
+                any(k->k!=mod1(index-1,m) && k!=index &&
+                        k!=mod1(index+1,m) &&
+                        begin
+                            q=parameters[remaining[k]]
+                            orient2(parameters[prev],parameters[vtx],q)==w &&
+                            orient2(parameters[vtx],parameters[nxtv],q)==w &&
+                            orient2(parameters[nxtv],parameters[prev],q)==w
+                        end,1:m) && continue
+                haskey(incidence,minmax(prev,nxtv)) && continue
+                score((prev,nxtv))<=target || continue
+                area>best_area && (best=index;best_area=area)
+            end
+            best==0 && return false
+            index=best
+            prev=remaining[mod1(index-1,m)]
+            vtx=remaining[index]
+            nxtv=remaining[mod1(index+1,m)]
+            push!(newcells,(prev,vtx,nxtv))
+            deleteat!(remaining,index)
+        end
+        prev,vtx,nxtv=remaining
+        orient2(parameters[prev],parameters[vtx],
+                parameters[nxtv])==w || return false
+        area=triangle_area(coordinates[prev],coordinates[vtx],
+                           coordinates[nxtv])
+        (isfinite(area) && area>0) || return false
+        score((prev,nxtv))<=target || return false
+        push!(newcells,(prev,vtx,nxtv))
+        # Overlap certificates. The ear-clip above only inspects polygon
+        # corners; a neighbouring vertex could still sit strictly inside or
+        # strictly on an emitted ear. Check every vertex of every live cell
+        # touching the polygon (the star cells themselves are about to be
+        # removed, so only their corners matter as emitters).
+        near=Set{Int32}(polygon)
+        for column in star
+            for corner in cells[column];push!(near,corner);end
+        end
+        for index in 1:length(polygon)
+            u=polygon[index];v=polygon[mod1(index+1,length(polygon))]
+            for column in get(incidence,minmax(u,v),Int[])
+                column in star && continue
+                alive[column] || continue
+                for corner in cells[column];push!(near,corner);end
+            end
+        end
+        delete!(near,vertex)
+        for child in newcells
+            c1,c2,c3=child
+            for wtest in near
+                (wtest==c1 || wtest==c2 || wtest==c3) && continue
+                pw=parameters[wtest]
+                o1=orient2(parameters[c1],parameters[c2],pw)
+                o2=orient2(parameters[c2],parameters[c3],pw)
+                o3=orient2(parameters[c3],parameters[c1],pw)
+                (o1==w && o2==w && o3==w) && return false
+                for (o,(s,e)) in ((o1,(parameters[c1],parameters[c2])),
+                                  (o2,(parameters[c2],parameters[c3])),
+                                  (o3,(parameters[c3],parameters[c1])))
+                    o==0 || continue
+                    (min(s[1],e[1])<=pw[1]<=max(s[1],e[1]) &&
+                     min(s[2],e[2])<=pw[2]<=max(s[2],e[2])) && return false
+                end
+            end
+        end
+        # The emitted ears must retile exactly the region the star covered:
+        # any ear escaping a self-intersecting link polygon, or overlapping
+        # a neighbour, unbalances the world-area sum.
+        new_area=sum(triangle_area(coordinates[child[1]],
+                                   coordinates[child[2]],
+                                   coordinates[child[3]])
+                     for child in newcells)
+        star_area=sum(triangle_area(coordinates[cells[column][1]],
+                                    coordinates[cells[column][2]],
+                                    coordinates[cells[column][3]])
+                      for column in star)
+        (isfinite(new_area) && isfinite(star_area) &&
+         isapprox(new_area,star_area;rtol=1e-9,
+                  atol=1024eps(Float64)*star_area)) || return false
+        _metric_surface_birth(cell_max,length(newcells),caller,"cell")
+        for column in star;drop_cell(column);end
+        for child in newcells;add_cell(child);end
+        node_alive[vertex]=false
+        push!(retired,coordinates[vertex])
+        delete!(positions,coordinates[vertex])
+        live_count-=2
+        return true
+    end
+    for _ in 1:64
+        moved=false
+        for edge in sort!(collect(keys(incidence)));metric_flip(edge) && (moved=true);end
+        verts=Int32[vertex for vertex in eachindex(node_alive) if
+                    node_alive[vertex] && !retained[vertex]]
+        shortest=Dict{Int32,Float64}()
+        for (edge,hits) in incidence
+            isempty(hits) && continue
+            violation=score(edge)
+            isfinite(violation) || continue
+            for vertex in edge
+                node_alive[vertex] || continue
+                shortest[vertex]=min(get(shortest,vertex,Inf),violation)
+            end
+        end
+        sort!(verts,by=vertex->get(shortest,vertex,Inf))
+        for vertex in verts
+            node_alive[vertex] || continue
+            remove_star(vertex) && (moved=true)
+        end
+        moved || break
+    end
+    get(ENV,"TESS_METRIC_DEBUG","")!="" && println(stderr,
+        "metric steiner: attempts=$(steiner_stats[1]) commits=$(steiner_stats[2]) fails=$(sort!(collect(steiner_fail))) tris=$live_count nodes=$(count(node_alive))")
     live=findall(alive)
     # Star dissolutions retire born vertices in place; compact the node rows
     # so the emitted mesh carries only live vertices. Every retained lower row
@@ -952,8 +1513,17 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
     output_score(edge)=metric_edge_length(field,
         Tuple(output_coordinates[:,edge[1]]),Tuple(output_coordinates[:,edge[2]]);
         entity=(2,tag))
-    all(edge->output_score(edge)<=target,keys(final_incidence)) || throw(ErrorException(
-        "$caller: final edge exceeds max_metric_edge"))
+    if !all(edge->output_score(edge)<=target,keys(final_incidence))
+        if get(ENV,"TESS_METRIC_DEBUG","")!=""
+            for edge in keys(final_incidence)
+                s=output_score(edge)
+                s>target && println(stderr,"violating edge $edge s=$s at ",
+                    Tuple(output_coordinates[:,edge[1]])," ",Tuple(output_coordinates[:,edge[2]]),
+                    " boundary=$(edge in boundary) hits=$(length(final_incidence[edge]))")
+            end
+        end
+        throw(ErrorException("$caller: final edge exceeds max_metric_edge"))
+    end
     area(mesh)=sum(triangle_area((Tuple(mesh.coords[:,row]) for row in cell)...) for cell in eachcol(mesh.tris))
     initial_area=area(mesh);final_area=area(output)
     isfinite(initial_area) && initial_area>0 && isfinite(final_area) &&
@@ -973,9 +1543,13 @@ end
                        max_triangles=20_000_000) -> Mesh
 
 Generate an ordinary planar triangular Surface using a spatially varying tensor
-field. Conforming interior edge bisection measures the full world-coordinate
-metric, equivalently its tangential pullback, at both endpoints and the midpoint
-of every edge. The output satisfies `metric_edge_length(field,a,b)<=max_metric_edge`.
+field. Interior refinement prefers metric-Delaunay Steiner insertions at
+certified circumcenters, falls back to conforming edge bisection that measures
+the full world-coordinate metric — equivalently its tangential pullback — at
+both endpoints and the midpoint of every edge, and finishes with certified
+metric flip and vertex-removal sweeps so the count tracks the prescribed
+density. The output satisfies
+`metric_edge_length(field,a,b)<=max_metric_edge`.
 
 Actual lower Point/Line products retain their UID, XYZ and boundary incidence.
 They must already satisfy the requested bound: coarse boundary edges are rejected
