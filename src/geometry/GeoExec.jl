@@ -11451,7 +11451,14 @@ function _geo_merge_discrete!(m::GeoModel,mixed::MixedMesh,
         entity=get(entity_records,key,nothing)
         entity===nothing && continue
         dim=key[1];dim==0 && continue
-        record.boundary=NTuple{2,Int}[(dim-1,Int(b)) for b in entity.boundaries]
+        # Mesh entities carry no orientation upstream: a partitioned MSH4
+        # import presents every owned entity's dim-0 boundary tags unsigned,
+        # even though the file's entity records keep the writer's signed
+        # last-endpoint convention. Non-partitioned imports retain the
+        # file-signed bounds verbatim (certificate transport).
+        unsigned_points=dim==1 && mixed.partition_data!==nothing
+        record.boundary=NTuple{2,Int}[(dim-1,
+            unsigned_points ? abs(Int(b)) : Int(b)) for b in entity.boundaries]
     end
     for (key,name) in mixed.physical_names
         get!(m.physical_names,key,name)
