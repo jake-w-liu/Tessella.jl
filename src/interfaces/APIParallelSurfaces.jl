@@ -25,6 +25,28 @@
 # all keep the original serial arm — their producer contracts consume or
 # publish shared state outside the recorded footprint.
 #
+# Non-contiguous scheduling: eligible slots separated by serial units used to
+# run serially (a one-element run never paid for a detached copy).  `_parallel_
+# eager_indices` now lets a fill also produce *later* eligible slots whose
+# footprints are disjoint from the accumulated write-potential of every unit
+# in between — literally "distinct owners, disjoint products" — so a serial
+# unit between them can never dirty their receipts.  Each eligible work
+# records `gap_writes`: the write-set estimate of the serial slots since the
+# previous eligible slot (`nothing` when an in-between serial unit's
+# write-set cannot be bounded, which stops the eager scan entirely).  The
+# merge-time staleness check remains the sole authority — the predictor only
+# decides which slots are worth producing detached, so a wrong guess costs a
+# discarded produce, never a wrong mesh.
+#
+# RNG ledger: every detached task runs under a private `random_state` Ref
+# (`_parallel_task_options`) seeded at the batch's serial `Mesh.RandomSeed`
+# position and reporting its exit value — the same draw ledger the Region arm
+# keeps.  Surface and Curve produces are not expected to touch the seed (only
+# `ModelNativeInitialTet`'s kernel and the native hybrid paths draw), but the
+# ledger turns that contract from an assumption into a check: an unexpected
+# consumption is adopted only when the live serial position still equals the
+# observed entry value, otherwise the slot is stale and re-runs serially.
+#
 # Two determinism details the worker path must preserve:
 # * `GmshLibm._win_cli_precision()` is task-local (CLI x87 libm selector);
 #   worker tasks re-run the produce under `_with_win_cli_precision` when the
@@ -33,12 +55,78 @@
 # * Task exceptions are captured into the slot and the affected unit re-runs
 #   serially, so a failing producer reports at the same merge position the
 #   serial traversal would have reached.
+#
+# Cross-phase scheduling entry points `_parallel_surface_ready` and
+# `_parallel_surface_spawn!` additionally allow a caller to detach ONE
+# Surface ahead of the phase barrier once every footprint dep exists — each
+# dim-1 entry owning its stored `m.curve_params` discretization and every
+# other dep an authority product in the `input` the produce will read ("a
+# Surface cannot mesh before its Curves' products exist").  The spawned task
+# touches only private state; the merge resolves the `Task` head at the
+# unit's serial merge position under the unchanged staleness/ledger checks.
 
 import ..GmshLibm
 
 struct _ParallelSurfaceWork
     tag::Int
     footprint::Set{Tuple{Int,Int32}}
+    # Write-set estimate of the serial units since the previous eligible
+    # slot (`nothing` = an unbounded serial write precedes).  Read only by
+    # `_parallel_eager_indices`; not part of the staleness contract.
+    gap_writes::Union{Nothing,Set{Tuple{Int,Int32}}}
+end
+
+# A detached task must never touch the caller's shared `random_state` Ref —
+# serial ordering reads the same position at merge.  Every other option field
+# is shared read-only, so the task-local bundle copies the `Ref` slot only;
+# `random_state` is the sole mutable field of `_ModelMesh1DOptions`.
+function _parallel_task_options(options::Model._ModelMesh1DOptions,seed::UInt32)
+    return Model._ModelMesh1DOptions(
+        (name===:random_state ? Base.RefValue{UInt32}(seed) :
+            getfield(options,name)
+         for name in fieldnames(Model._ModelMesh1DOptions))...)
+end
+
+# Non-contiguous eligible slots whose footprints are disjoint from the
+# accumulated write-potential of every unit ahead of them in this phase may
+# be produced in the same batch as the contiguous `range`: a serial unit
+# between the batch and the slot writes only inside its own footprint, so a
+# disjoint slot observes identical state at merge.  `work.gap_writes` carries
+# each eligible slot's preceding serial write-estimate; `nothing` marks an
+# unbounded serial writer (a footprint that could not be computed), which
+# conservatively ends the scan.  Already-filled slots still contribute their
+# footprints.  The merge-time staleness check stays authoritative — this is
+# purely a "which copies are worth making" predictor.
+function _parallel_eager_indices(prepared,results,range)
+    seen=Set{Tuple{Int,Int32}}()
+    for index in range
+        work=prepared[index]
+        work===nothing || union!(seen,work.footprint)
+    end
+    eager=Int[]
+    for index in last(range)+1:length(prepared)
+        work=prepared[index]
+        work===nothing && continue
+        gap=work.gap_writes
+        gap===nothing && break
+        union!(seen,gap)
+        isdisjoint(work.footprint,seen) && results[index]===nothing &&
+            push!(eager,index)
+        union!(seen,work.footprint)
+    end
+    return eager
+end
+
+# Serial write-set estimate of one ineligible Surface unit — the union of its
+# member tags' footprints (the same contract the dirty scan relies on).
+# `nothing` marks an unbounded writer and stops the eager scan at the next
+# eligible slot.
+function _parallel_surface_serial_writes(m::GeoModel,tags)
+    acc=Set{Tuple{Int,Int32}}()
+    for tag in tags
+        union!(acc,_parallel_surface_footprint(m,tag))
+    end
+    return acc
 end
 
 # `General.NumThreads` requests the worker count; `Mesh.MaxNumThreads2D` caps
@@ -136,9 +224,33 @@ function _parallel_surface_prepare(m::GeoModel,units,caller::AbstractString;
         tag in m.meshing.quad_tri && continue
         Model._extrude_gate(m,2,tag)!==nothing && continue
         prepared[index]=_ParallelSurfaceWork(tag,
-            _parallel_surface_footprint(m,tag))
+            _parallel_surface_footprint(m,tag),nothing)
     end
     any(!isnothing,prepared) || return nothing
+    # Second pass: record each eligible slot's preceding serial write-set for
+    # the eager scheduler.  `serial_unbounded` marks an in-between unit whose
+    # footprint could not be bounded; it stops the scan at the next slot.
+    serial_writes=Set{Tuple{Int,Int32}}()
+    serial_unbounded=false
+    for (index,tags) in enumerate(units)
+        work=prepared[index]
+        if work===nothing
+            if !serial_unbounded
+                estimate=try
+                    _parallel_surface_serial_writes(m,tags)
+                catch err
+                    err isa InterruptException && rethrow()
+                    nothing
+                end
+                estimate===nothing ? (serial_unbounded=true) :
+                    union!(serial_writes,estimate)
+            end
+            continue
+        end
+        prepared[index]=_ParallelSurfaceWork(work.tag,work.footprint,
+            serial_unbounded ? nothing : copy(serial_writes))
+        empty!(serial_writes);serial_unbounded=false
+    end
     return prepared
 end
 
@@ -177,43 +289,63 @@ function _parallel_replay_param_diffs!(m::GeoModel,diffs)
     return nothing
 end
 
-# Threaded detached production over one contiguous eligible run.  `range`
+# One detached Surface produce on a premade transaction copy.  The task's
+# private `random_state` Ref enters at the batch seed and reports its exit
+# value — the draw ledger the merge checks.  Shared by the `@threads` batch
+# arm and the `Threads.@spawn` cross-phase arm.
+function _parallel_surface_attempt(working::GeoModel,work::_ParallelSurfaceWork,
+        input,detached_options::Model._ModelMesh1DOptions,
+        base_params::Dict{Int,Vector{Float64}},geom_points,
+        hn::UInt64,hc::UInt64,base_seed::UInt32,precise::Bool)
+    out=try
+        body=()->begin
+            produced=mesh_model_surface(working,work.tag;
+                size_field=nothing,_extrude_scope=nothing,
+                _mesh_input=input,_mesh1d_options=detached_options,
+                _mesh_node_high_water=hn,_mesh_element_high_water=hc,
+                _return_surface_production=true,
+                _geometry_points=geom_points)
+            (produced,_parallel_curve_param_diffs(
+                working.curve_params,base_params,work.footprint),
+                base_seed,detached_options.random_state[])
+        end
+        (;ok=true,value=precise ?
+            GmshLibm._with_win_cli_precision(body) : body())
+    catch err
+        err isa InterruptException && rethrow()
+        (;ok=false,value=err)
+    end
+    return out
+end
+
+# Threaded detached production over one contiguous eligible run plus every
+# predicted-independent later slot (`_parallel_eager_indices`).  `range`
 # shares the batch's serial merge position: `hn`/`hc` fix the allocator base,
 # `base_params`/`base_dirty` fix the state the detached copies observed,
-# `geom_points` fixes the geometry-birth overlay the produce can consult, and
-# every slot records the produce's outcome for the in-order merge.  A run of
-# one would pay the copy for no concurrency, so it falls back to the serial
-# arm by leaving its slot empty.
+# `geom_points` fixes the geometry-birth overlay the produce can consult,
+# `base_seed` fixes the `Mesh.RandomSeed` ledger position each task's private
+# Ref starts from, and every slot records the produce's outcome for the
+# in-order merge.  A batch of one would pay the copy for no concurrency, so
+# it falls back to the serial arm by leaving its slot empty.
 function _parallel_surface_fill!(results::Vector{Any},range,m::GeoModel,
         prepared,input,options,assembly,dirty::Set{Tuple{Int,Int32}},
         precise::Bool,geometry_birth)
-    length(range)<2 && return nothing
     hn=assembly.node_max;hc=assembly.cell_max
     base_params=_parallel_surface_param_refs(m)
     base_dirty=copy(dirty)
     geom_points=_higher_geometry_source_points(assembly,geometry_birth)
-    Threads.@threads for offset in eachindex(range)
-        index=range[offset]
+    base_seed=options.random_state[]
+    eager=_parallel_eager_indices(prepared,results,range)
+    (length(range)<2 && isempty(eager)) && return nothing
+    indices=Int[index for index in range]
+    append!(indices,eager)
+    Threads.@threads for index in indices
         work=prepared[index]
-        out=try
-            body=()->begin
-                working=Model._model_mesh_transaction_copy(m)
-                produced=mesh_model_surface(working,work.tag;
-                    size_field=nothing,_extrude_scope=nothing,
-                    _mesh_input=input,_mesh1d_options=options,
-                    _mesh_node_high_water=hn,_mesh_element_high_water=hc,
-                    _return_surface_production=true,
-                    _geometry_points=geom_points)
-                return (produced,_parallel_curve_param_diffs(
-                    working.curve_params,base_params,work.footprint))
-            end
-            (;ok=true,value=precise ?
-                GmshLibm._with_win_cli_precision(body) : body())
-        catch err
-            err isa InterruptException && rethrow()
-            (;ok=false,value=err)
-        end
-        results[index]=(out,hn,hc,base_dirty,geom_points)
+        detached_options=_parallel_task_options(options,base_seed)
+        results[index]=(_parallel_surface_attempt(
+            Model._model_mesh_transaction_copy(m),work,input,detached_options,
+            base_params,geom_points,hn,hc,base_seed,precise),
+            hn,hc,base_dirty,geom_points,base_seed)
     end
     return nothing
 end
@@ -266,9 +398,14 @@ end
 # dirt the detached copy could not have seen.  Entries already dirty at fill
 # time were part of the produce's observed state, as was the recorded
 # geometry-birth overlay; a changed `_geometry_points` view is stale too.
+# The RNG ledger completes the contract the same way the Region arm does:
+# `seed_in==base_seed` certifies the task observed the recorded ledger
+# position; a consumed seed is admissible only when the live serial position
+# still equals that entry value (the exit state is then written back at
+# merge), otherwise the slot is stale and re-runs serially.
 function _parallel_surface_fresh(work::_ParallelSurfaceWork,out,
         dirty::Set{Tuple{Int,Int32}},base_dirty::Set{Tuple{Int,Int32}},
-        assembly,geometry_birth,geom_points)
+        assembly,geometry_birth,geom_points,options,base_seed::UInt32)
     out.ok || return false
     for entity in work.footprint
         entity in base_dirty && continue
@@ -277,20 +414,27 @@ function _parallel_surface_fresh(work::_ParallelSurfaceWork,out,
     geom_points===nothing ||
         _higher_geometry_source_points(assembly,geometry_birth)==geom_points ||
         return false
-    return _parallel_surface_remap_supported(out.value[1])
+    produced,_,seed_in,seed_out=out.value
+    _parallel_surface_remap_supported(produced) || return false
+    seed_in==base_seed || return false
+    seed_out==seed_in || seed_in==options.random_state[] || return false
+    return true
 end
 
 # Resolve a prepared slot into the unit's `products` list.  A fresh receipt
 # replays its detached `m.curve_params` writeback onto the live model (the
-# serial produce would have written it during the call) and remaps its fresh
-# UIDs; anything else re-runs the identical serial produce so the merge sees
-# exactly the state it always owned.
+# serial produce would have written it during the call), restores the serial
+# RNG ledger position the produce consumed, and remaps its fresh UIDs;
+# anything else re-runs the identical serial produce so the merge sees
+# exactly the state it always owned.  A `Task` head (`Threads.@spawn`
+# cross-phase arms) is fetched at the slot's merge position.
 function _parallel_surface_products(m::GeoModel,work::_ParallelSurfaceWork,
         entry,dirty::Set{Tuple{Int,Int32}},assembly;
         input,scope,options,size_field,geometry_birth,caller)
-    out,hn,hc,base_dirty,geom_points=entry
+    head,hn,hc,base_dirty,geom_points,base_seed=entry
+    out=head isa Task ? fetch(head) : head
     if !_parallel_surface_fresh(work,out,dirty,base_dirty,assembly,
-            geometry_birth,geom_points)
+            geometry_birth,geom_points,options,base_seed)
         return [(work.tag,mesh_model_surface(m,work.tag;
             size_field=size_field,_extrude_scope=scope,_mesh_input=input,
             _mesh1d_options=options,_mesh_node_high_water=assembly.node_max,
@@ -299,8 +443,9 @@ function _parallel_surface_products(m::GeoModel,work::_ParallelSurfaceWork,
             _geometry_points=_higher_geometry_source_points(
                 assembly,geometry_birth)))]
     end
-    produced,diffs=out.value
+    produced,diffs,seed_in,seed_out=out.value
     _parallel_replay_param_diffs!(m,diffs)
+    seed_out==seed_in || (options.random_state[]=seed_out)
     return [(work.tag,_parallel_surface_remap_production(produced,
         assembly.node_max-hn,assembly.cell_max-hc,hn,hc))]
 end
@@ -326,5 +471,55 @@ function _parallel_surface_mark_dirty!(dirty::Set{Tuple{Int,Int32}},
             row>0 && push!(dirty,assembly.nodes[row].owner)
         end
     end
+    return nothing
+end
+
+# Cross-phase readiness, the Surface analogue of `_parallel_volume_ready`:
+# the ordering constraint itself — a Surface cannot mesh before its Curve
+# products exist.  Every dim-1 footprint entry (boundary loops, embedded
+# Curves and their periodic partners, all pulled in by
+# `_parallel_surface_footprint`) must already own a stored discretization on
+# the live model — the produce would otherwise lazily grade it on the
+# detached copy and the receipt could only fall back at merge once the live
+# Curve merged anyway.  Every non-dim-1 dep (curve endpoints, discrete
+# boundary Points, embedded Points) must already own an authority product in
+# the exact `input` the detached produce will read.  Run on the caller's
+# merge task — `m.curve_params` and `input` are merge-task state.
+function _parallel_surface_ready(m::GeoModel,input,work::_ParallelSurfaceWork)
+    input isa Model._ModelMeshAuthority || return false
+    for dep in work.footprint
+        if dep[1]==1
+            haskey(m.curve_params,Int(dep[2])) || return false
+        else
+            haskey(input.products,dep) || return false
+        end
+    end
+    return true
+end
+
+# Cross-phase scheduling entry point: spawn ONE detached Surface produce.
+# The transaction copy and every snapshot are taken on the *calling* task —
+# the spawned task then touches only private state, so it may run while the
+# serial merge of an earlier phase (Curves, for a Surface scheduled ahead of
+# the phase barrier) continues; a copy made inside the task would race the
+# live merge.  The slot is shaped exactly like a `_parallel_surface_fill!`
+# slot, so `_parallel_surface_products` resolves it at the unit's serial
+# merge position under the unchanged freshness/ledger checks.  The caller
+# owns the ordering contract: spawn only once every lower producer the unit
+# can consult (its boundary Curves' `curve_params`, embedded-entity products)
+# has been merged, and thread ONE `dirty` set through both phases so dirt
+# accumulated between the spawn and the merge still invalidates the receipt.
+function _parallel_surface_spawn!(results::Vector{Any},index::Int,m::GeoModel,
+        work::_ParallelSurfaceWork,input,options,assembly,
+        dirty::Set{Tuple{Int,Int32}},geometry_birth;precise::Bool)
+    working=Model._model_mesh_transaction_copy(m)
+    hn=assembly.node_max;hc=assembly.cell_max
+    base_params=_parallel_surface_param_refs(m)
+    geom_points=_higher_geometry_source_points(assembly,geometry_birth)
+    base_seed=options.random_state[]
+    detached_options=_parallel_task_options(options,base_seed)
+    task=Threads.@spawn _parallel_surface_attempt(working,work,input,
+        detached_options,base_params,geom_points,hn,hc,base_seed,precise)
+    results[index]=(task,hn,hc,copy(dirty),geom_points,base_seed)
     return nothing
 end

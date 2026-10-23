@@ -29,11 +29,27 @@
 # keep the original serial arm — their producer contracts consume or publish
 # shared state outside the recorded footprint.
 #
-# Unlike the Region arm there is no seed ledger: `options.random_state` feeds
-# only `ModelNativeInitialTet`'s perturbation kernel and the native hybrid
-# batch/components paths — no 1-D grading reach it — so the shared options
-# bundle is read-only for detached Curves.  Two determinism details the
-# worker path must preserve, as in the Surface arm:
+# The RNG ledger is uniform across arms: each detached task runs a private
+# `random_state` Ref (`_parallel_task_options`) entering at the batch's
+# serial `Mesh.RandomSeed` position and reporting its exit value.
+# `options.random_state` feeds only `ModelNativeInitialTet`'s perturbation
+# kernel and the native hybrid batch/components paths — no 1-D grading
+# reaches it — so detached Curves are expected to observe `seed_out==seed_in`
+# every time; the ledger turns that contract into a check exactly like the
+# Surface arm: an unexpected consumption is adopted only when the live serial
+# position still equals the observed entry value, otherwise the slot is stale
+# and re-runs serially.
+#
+# Non-contiguous scheduling mirrors the other arms: `_parallel_eager_indices`
+# lets a fill also produce later eligible slots whose footprints are disjoint
+# from the accumulated write-potential of every unit in between (a serial
+# Curve between them cannot dirty their receipts).  Each eligible work
+# records `gap_writes` — the write-set estimate of the serial slots since the
+# previous eligible slot — and the merge-time staleness check remains the
+# sole authority.
+#
+# Two determinism details the worker path must preserve, as in the Surface
+# arm:
 # * `GmshLibm._win_cli_precision()` is task-local (CLI x87 libm selector);
 #   worker tasks re-run the produce under `_with_win_cli_precision` when the
 #   flag is set on the orchestrating task, so trig/pow kernels cannot differ
@@ -47,6 +63,10 @@ import ..GmshLibm
 struct _ParallelCurveWork
     tag::Int
     footprint::Set{Tuple{Int,Int32}}
+    # Write-set estimate of the serial slots since the previous eligible
+    # slot (`nothing` = an unbounded serial write precedes) — read only by
+    # `_parallel_eager_indices`, not part of the staleness contract.
+    gap_writes::Union{Nothing,Set{Tuple{Int,Int32}}}
 end
 
 # `General.NumThreads` requests the worker count; `Mesh.MaxNumThreads1D` caps
@@ -140,55 +160,106 @@ function _parallel_curve_prepare(m::GeoModel,ordered::Vector{Int},
         curve in embedded_curves && continue
         curve in compound_members && continue
         prepared[index]=_ParallelCurveWork(curve,
-            _parallel_curve_footprint(m,curve))
+            _parallel_curve_footprint(m,curve),nothing)
     end
     any(!isnothing,prepared) || return nothing
+    # Second pass: record each eligible slot's preceding serial write-set for
+    # the eager scheduler.  Keep-gated and ineligible Curves alike take the
+    # serial arm; their write-set estimate is their footprint (the same
+    # contract the dirty scan relies on), so a `nothing` estimate — which
+    # cannot arise from `_parallel_curve_footprint`'s get-only reads — would
+    # stop the scan at the next eligible slot.
+    serial_writes=Set{Tuple{Int,Int32}}()
+    serial_unbounded=false
+    for (index,curve) in enumerate(ordered)
+        work=prepared[index]
+        if work===nothing
+            if !serial_unbounded
+                estimate=try
+                    _parallel_curve_footprint(m,curve)
+                catch err
+                    err isa InterruptException && rethrow()
+                    nothing
+                end
+                estimate===nothing ? (serial_unbounded=true) :
+                    union!(serial_writes,estimate)
+            end
+            continue
+        end
+        prepared[index]=_ParallelCurveWork(work.tag,work.footprint,
+            serial_unbounded ? nothing : copy(serial_writes))
+        empty!(serial_writes);serial_unbounded=false
+    end
     return prepared
 end
 
-# Threaded detached production over one contiguous eligible run of a pass.
+# One detached Curve produce on a premade transaction copy.  The task's
+# private `random_state` Ref enters at the batch seed and reports its exit
+# value — the draw ledger the merge checks.
+function _parallel_curve_attempt(working::GeoModel,work::_ParallelCurveWork,
+        detached_options::Model._ModelMesh1DOptions,base_seed::UInt32,
+        caller::AbstractString,precise::Bool)
+    out=try
+        body=()->begin
+            result=Model._model_mesh_curve!(working,work.tag,
+                detached_options,caller;_native_producer=true)
+            (result,base_seed,detached_options.random_state[])
+        end
+        (;ok=true,value=precise ?
+            GmshLibm._with_win_cli_precision(body) : body())
+    catch err
+        err isa InterruptException && rethrow()
+        (;ok=false,value=err)
+    end
+    return out
+end
+
+# Threaded detached production over one contiguous eligible run of a pass
+# plus every predicted-independent later slot (`_parallel_eager_indices`).
 # `range` shares the batch's serial merge position: `base_dirty` fixes the
-# dirt the detached copies could already see, and every slot records the
-# produce's outcome for the in-order merge.  A run of one would pay the copy
-# for no concurrency, so it falls back to the serial arm by leaving its slot
-# empty.  The produce mints no public UIDs and writes only the working copy's
-# own `curve_params` slot — the merge replays the identical writeback and
-# emits on the live assembly, so no UID remap ledger is needed.
+# dirt the detached copies could already see, `base_seed` fixes the
+# `Mesh.RandomSeed` ledger position each task's private Ref starts from, and
+# every slot records the produce's outcome for the in-order merge.  A batch
+# of one would pay the copy for no concurrency, so it falls back to the
+# serial arm by leaving its slot empty.  The produce mints no public UIDs and
+# writes only the working copy's own `curve_params` slot — the merge replays
+# the identical writeback and emits on the live assembly, so no UID remap
+# ledger is needed.
 function _parallel_curve_fill!(results::Vector{Any},range,m::GeoModel,
         prepared,options::Model._ModelMesh1DOptions,
         dirty::Set{Tuple{Int,Int32}},precise::Bool,caller::AbstractString)
-    length(range)<2 && return nothing
     base_dirty=copy(dirty)
-    Threads.@threads for offset in eachindex(range)
-        index=range[offset]
+    base_seed=options.random_state[]
+    eager=_parallel_eager_indices(prepared,results,range)
+    (length(range)<2 && isempty(eager)) && return nothing
+    indices=Int[index for index in range]
+    append!(indices,eager)
+    Threads.@threads for index in indices
         work=prepared[index]
-        out=try
-            body=()->begin
-                working=Model._model_mesh_transaction_copy(m)
-                return Model._model_mesh_curve!(working,work.tag,options,caller;
-                    _native_producer=true)
-            end
-            (;ok=true,value=precise ?
-                GmshLibm._with_win_cli_precision(body) : body())
-        catch err
-            err isa InterruptException && rethrow()
-            (;ok=false,value=err)
-        end
-        results[index]=(out,base_dirty)
+        detached_options=_parallel_task_options(options,base_seed)
+        results[index]=(_parallel_curve_attempt(
+            Model._model_mesh_transaction_copy(m),work,detached_options,
+            base_seed,caller,precise),base_dirty,base_seed)
     end
     return nothing
 end
 
 # Staleness is measured against dirt accumulated after the batch's snapshot —
 # dirt the detached copy could not have seen.  Entries already dirty at fill
-# time were part of the produce's observed state.
+# time were part of the produce's observed state.  The RNG ledger completes
+# the contract as in the other arms: a consumed seed is admissible only when
+# the live serial position still equals the recorded entry value.
 function _parallel_curve_fresh(work::_ParallelCurveWork,out,
-        dirty::Set{Tuple{Int,Int32}},base_dirty::Set{Tuple{Int,Int32}})
+        dirty::Set{Tuple{Int,Int32}},base_dirty::Set{Tuple{Int,Int32}},
+        options::Model._ModelMesh1DOptions,base_seed::UInt32)
     out.ok || return false
     for entity in work.footprint
         entity in base_dirty && continue
         entity in dirty && return false
     end
+    _,seed_in,seed_out=out.value
+    seed_in==base_seed || return false
+    seed_out==seed_in || seed_in==options.random_state[] || return false
     return true
 end
 
@@ -196,17 +267,20 @@ end
 # returned at this merge position.  A fresh receipt replays the one live-side
 # mutation a `:pending` arm owns — `_model_mesh_curve!` drops the stale stored
 # discretization before grading (`deMeshGEdge`), which a pending Curve never
-# writes back — and returns the transported value for the unchanged emit arm.
-# Anything else re-runs the identical live serial call.
+# writes back — restores the serial RNG ledger position the produce consumed,
+# and returns the transported value for the unchanged emit arm.  Anything
+# else re-runs the identical live serial call.
 function _parallel_curve_result(m::GeoModel,work::_ParallelCurveWork,entry,
         dirty::Set{Tuple{Int,Int32}},options::Model._ModelMesh1DOptions,
         caller::AbstractString)
-    out,base_dirty=entry
-    if !_parallel_curve_fresh(work,out,dirty,base_dirty)
+    head,base_dirty,base_seed=entry
+    out=head isa Task ? fetch(head) : head
+    if !_parallel_curve_fresh(work,out,dirty,base_dirty,options,base_seed)
         return Model._model_mesh_curve!(m,work.tag,options,caller;
             _native_producer=true)
     end
-    result=out.value
+    result,seed_in,seed_out=out.value
+    seed_out==seed_in || (options.random_state[]=seed_out)
     result===:pending && delete!(m.curve_params,work.tag)
     return result
 end
