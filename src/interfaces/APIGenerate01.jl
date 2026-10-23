@@ -493,7 +493,7 @@ end
 
 function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
                               done=nothing,geometry_birth=nothing,curve_births=nothing,
-                              reuse_curve_params::Bool=false)
+                              reuse_curve_params::Bool=false,surface_forward=nothing)
     endpoint_counts=_dim01_curve_endpoint_counts(m)
     pending=Set{Int}(tag for (dim,tag) in entities if dim==1)
     # Generator::Mesh1D resets every Curve to PENDING before its skip gates.
@@ -504,6 +504,39 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
     owned_nodes=Dict{Tuple{Int,Int32},Vector{Int32}}()
     for (position,node) in enumerate(assembly.nodes)
         push!(get!(()->Int32[],owned_nodes,node.owner),Int32(position))
+    end
+    # PAR01 cross-phase scheduling: once every product a planned Surface can
+    # consult exists — its boundary Curves emitted (fresh discretizations land
+    # in `m.curve_params` here), its Points already published — detach its
+    # produce on a worker while later Curves still merge.  The spawn-time
+    # authority is rebuilt over the projected post-compaction cell set (stale
+    # source cells of remeshed Curves still sit in `assembly.cells` until the
+    # pass below finishes) exactly the way the Surface phase will, and the
+    # phase re-verifies every adopted slot against its real gates.
+    function scan_surface_spawns!()
+        (surface_forward===nothing || done===nothing) && return nothing
+        spawn_input=nothing
+        for (wi,work) in enumerate(surface_forward.prepared)
+            work===nothing && continue
+            surface_forward.results[wi]===nothing || continue
+            all(dep->dep[1]!=1 || haskey(m.curve_params,Int(dep[2])),
+                work.footprint) || continue
+            if spawn_input===nothing
+                live_cells=_Dim01Cell[cell for (position,cell) in
+                    enumerate(assembly.cells)
+                    if !(position<=source_cells && cell.owner in removed)]
+                spawn_input=_higher_surface_spawn_input(assembly,m,done,
+                    live_cells;ranks=surface_forward.ranks,
+                    old_supports=surface_forward.old_supports,
+                    surface_parts=surface_forward.surface_parts,curve_births)
+                spawn_input===nothing && return nothing
+            end
+            _parallel_surface_ready(m,spawn_input,work) || continue
+            _parallel_surface_spawn!(surface_forward.results,wi,m,work,
+                spawn_input,options,assembly,surface_forward.dirty,
+                geometry_birth;precise=surface_forward.precise)
+        end
+        return nothing
     end
     iterations=0
     while !isempty(pending)
@@ -520,7 +553,11 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
             have_cells,reuse_curve_params)
         parallel_results=prepared===nothing ? nothing :
             fill!(Vector{Any}(undef,length(ordered)),nothing)
-        parallel_dirty=Set{Tuple{Int,Int32}}()
+        # Cross-phase slots share this ledger: every Curve mutation marked
+        # here also invalidates any Surface spawned mid-phase that read the
+        # old state.
+        parallel_dirty=surface_forward===nothing ? Set{Tuple{Int,Int32}}() :
+            surface_forward.dirty
         parallel_last=prepared===nothing ? 0 :
             something(findlast(!isnothing,prepared),0)
         parallel_precise=prepared===nothing ? false :
@@ -551,6 +588,7 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
                     push!(have_cells,owner)
                 end
                 delete!(pending,curve)
+                scan_surface_spawns!()
                 continue
             end
             work=prepared===nothing ? nothing : prepared[index]
@@ -562,7 +600,8 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
                 _parallel_curve_fill!(parallel_results,index:vend,m,prepared,
                     options,parallel_dirty,parallel_precise,assembly.caller)
             end
-            refs=index<parallel_last ? _parallel_surface_param_refs(m) : nothing
+            refs=index<parallel_last || surface_forward!==nothing ?
+                _parallel_surface_param_refs(m) : nothing
             result=work!==nothing && parallel_results[index]!==nothing ?
                 _parallel_curve_result(m,work,parallel_results[index],
                     parallel_dirty,options,assembly.caller) :
@@ -583,6 +622,7 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
                 delete!(pending,curve)
                 refs===nothing ||
                     _parallel_volume_mark_dirty!(parallel_dirty,m,refs)
+                scan_surface_spawns!()
                 continue
             end
             birth=result isa Model._ModelNativeCurveGrade ? result : nothing
@@ -594,11 +634,24 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
             geometry_parameters=geometry_birth===nothing ? params :
                 _dim01_geometry_curve_parameters!(geometry_birth,m,curve,params,options,assembly.caller)
             copied_points=_dim01_extruded_curve_points(assembly,m,curve,params,curve_births)
+            # A closed native Curve's begin-node recompute relocates the
+            # Point-owned vertex in place — a mutation the curve_params diff
+            # cannot see.  Mark the point owner so a spawned Surface whose
+            # footprint holds it re-runs serially.
+            endpoint_records=surface_forward===nothing ? nothing :
+                copy(m.meshing.native_curve_endpoints)
             _dim01_emit_curve!(assembly,m,curve,params,first_nodes;
                 geometry_birth,geometry_parameters,curve_births,endpoint_counts,birth,copied_points)
             push!(have_cells,owner)
             delete!(pending,curve)
             refs===nothing || _parallel_volume_mark_dirty!(parallel_dirty,m,refs)
+            if endpoint_records!==nothing
+                for (point,entry) in m.meshing.native_curve_endpoints
+                    get(endpoint_records,point,nothing)===entry && continue
+                    push!(parallel_dirty,(0,Int32(point)))
+                end
+            end
+            scan_surface_spawns!()
         end
         isempty(pending) && break
         if length(pending)==stalled
@@ -610,6 +663,8 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
             # master-node projection (no master nodes exist yet).
             for seed in Model._model_periodic_cycle_seeds(m,pending)
                 owner=(1,Int32(seed))
+                srefs=surface_forward===nothing ? nothing :
+                    _parallel_surface_param_refs(m)
                 result=Model._model_mesh_curve!(m,seed,options,assembly.caller;
                     _native_producer=true,_force_native=true)
                 result===:pending && continue
@@ -620,6 +675,9 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
                         push!(have_cells,owner)
                     end
                     delete!(pending,seed)
+                    srefs===nothing ||
+                        _parallel_volume_mark_dirty!(parallel_dirty,m,srefs)
+                    scan_surface_spawns!()
                     continue
                 end
                 birth=result isa Model._ModelNativeCurveGrade ? result : nothing
@@ -630,10 +688,21 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
                 geometry_parameters=geometry_birth===nothing ? params :
                     _dim01_geometry_curve_parameters!(geometry_birth,m,seed,params,options,assembly.caller)
                 copied_points=_dim01_extruded_curve_points(assembly,m,seed,params,curve_births)
+                endpoint_records=surface_forward===nothing ? nothing :
+                    copy(m.meshing.native_curve_endpoints)
                 _dim01_emit_curve!(assembly,m,seed,params,first_nodes;
                     geometry_birth,geometry_parameters,curve_births,endpoint_counts,birth,copied_points)
                 push!(have_cells,owner)
                 delete!(pending,seed)
+                srefs===nothing ||
+                    _parallel_volume_mark_dirty!(parallel_dirty,m,srefs)
+                if endpoint_records!==nothing
+                    for (point,entry) in m.meshing.native_curve_endpoints
+                        get(endpoint_records,point,nothing)===entry && continue
+                        push!(parallel_dirty,(0,Int32(point)))
+                    end
+                end
+                scan_surface_spawns!()
             end
             length(pending)<stalled && continue
         end

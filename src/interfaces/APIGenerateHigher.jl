@@ -1666,20 +1666,18 @@ function _higher_discrete_surface_transport!(assembly,m,entities;options,
     return nothing
 end
 
-function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
-                                size_field=nothing,metric_surface=nothing,
-                                source_nodes=length(assembly.nodes),ranks=nothing,
-                                old_supports=nothing,geometry_parts=nothing,dimension=2,
-                                 geometry_cells=nothing,geometry_birth=nothing,
-                                 geometry_alternates=nothing,curve_births=Dict{Tuple{Int,Int32},Vector{UInt64}}(),
-                                 periodic_pairs=nothing,native_orphan_births=nothing,native_recombine_events=nothing,
-                                 surface_constructor_inputs=nothing)
-    # Mesh2D resets all face statuses before OnlyEmpty/OnlyVisible dispatch.
-    filter!(owner->owner[1]!=2,done)
-    have=Set(cell.owner for cell in assembly.cells)
+# The dim-2 keep/mesh scan `_higher_surface_phase!` runs before its unit
+# merge: fully discrete, MeshOnlyVisible-hidden and MeshOnlyEmpty-occupied
+# Faces retain their cells; every other Face meshes and sheds its stale
+# products.  PAR01 runs the same scan ahead of the Curve phase as well (the
+# keep predicates are phase-stable — the Curve phase only appends dim-0/1
+# cells, so a Face's `have` membership and visibility do not move) so that
+# detached Surfaces can spawn as soon as their boundary Curve products land.
+function _higher_surface_mesh_scan(m,entities,options,have,discarded,caller;
+                                   dimension=3)
     retained=Set{Tuple{Int,Int32}}()
     meshed=Int[]
-    analytic_boundaries=_higher_analytic_boundary_surfaces(m,dimension,assembly.caller)
+    analytic_boundaries=_higher_analytic_boundary_surfaces(m,dimension,caller)
     for (dim,tag) in entities
         dim==2 || continue
         owner=(2,Int32(tag))
@@ -1689,7 +1687,7 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
             # independent Surface product; do not turn a supported Volume
             # request into that standalone-face diagnostic.
             owner in have && throw(ArgumentError(
-                "$(assembly.caller): actual curved Surface[$tag] cells cannot be consumed " *
+                "$caller: actual curved Surface[$tag] cells cannot be consumed " *
                 "by the analytic primitive Volume producer"))
             continue
         end
@@ -1702,6 +1700,100 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
             push!(meshed,tag);push!(discarded,owner)
         end
     end
+    return meshed,retained
+end
+
+# The dim-3 keep/mesh scan `_higher_volume_phase!` runs before its merge: a
+# Region meshes unless it is fully discrete, MeshOnlyVisible-hidden or a
+# MeshOnlyEmpty-occupied non-swept primitive.  PAR01 runs the same scan inside
+# the Surface merge loop so eligible Regions can spawn while Surfaces still
+# merge; the Region phase re-derives it verbatim before adopting the slots.
+function _higher_volume_mesh_tags(m,entities,options,have)
+    tags=Int[]
+    for (dim,tag) in entities
+        dim==3 || continue
+        owner=(3,Int32(tag))
+        visible=!(options.mesh_only_visible && model_entity_visibility(m,3,tag)==0)
+        swept=Model._extrude_gate(m,3,tag)!==nothing
+        keep=_dim01_fully_discrete(m,(3,tag)) ||
+             (!swept && (!visible || (options.mesh_only_empty && owner in have)))
+        keep || push!(tags,tag)
+    end
+    return tags
+end
+
+# A `_Dim01Assembly` view sharing the live node vector but presenting a
+# projected cell list.  The Curve phase appends fresh products for a remeshed
+# Curve before its end-of-phase compaction drops the stale source cells, so an
+# authority built mid-phase must be derived over the projected post-compaction
+# cell set — the exact list the Surface phase's own `_higher_assembly_authority`
+# call will read.  The node vector is shared (cells only ever select rows) and
+# the view is never used for appends.
+function _higher_assembly_view(assembly,cells)
+    return _Dim01Assembly(assembly.nodes,cells,assembly.node_positions,
+        assembly.node_max,assembly.cell_max,assembly.max_nodes,
+        assembly.max_cells,assembly.caller,assembly.node_counter_wrapped,
+        assembly.cell_counter_wrapped)
+end
+
+# The Surface-arm authority a detached produce must see, rebuilt mid-Curve-
+# phase over the projected post-compaction cell set.  Mirrors the phase's
+# `input` construction exactly (ranks, producer rows with `curve_births`
+# replacement, curve-birth row binding).  Returns `nothing` when the rebuild
+# throws (a retained producer losing actual rows is only fatal when the
+# serial phase itself reaches the same call — skipped spawns simply rerun).
+function _higher_surface_spawn_input(assembly,m,done,live_cells;ranks,
+        old_supports,surface_parts,curve_births)
+    return try
+        view=_higher_assembly_view(assembly,live_cells)
+        ranks===nothing || _higher_complete_ranks!(ranks,view)
+        authority=_higher_assembly_authority(view,m,done;ranks,old_supports)
+        authority=_higher_bind_producer_rows(authority,view,
+            surface_parts===nothing ? Tuple[] : surface_parts,
+            m.meshing.mesh_authority;curve_births)
+        Model._model_mesh_with_curve_births(authority,curve_births;
+            caller=assembly.caller)
+    catch err
+        err isa InterruptException && rethrow()
+        nothing
+    end
+end
+
+# The Region-arm authority a detached produce must see, rebuilt mid-Surface-
+# merge exactly like the Region phase's `input` (actual lower products,
+# producer-row birth bindings for every merged part, then the surface
+# constructor-input table).  `nothing` on a rebuilding failure — the serial
+# path re-attempts the identical construction at Region-phase entry.
+function _higher_volume_spawn_input(assembly,m,done;ranks,old_supports,
+        surface_parts,constructor_inputs)
+    return try
+        ranks===nothing || _higher_complete_ranks!(ranks,assembly)
+        authority=_higher_assembly_authority(assembly,m,done;ranks,old_supports)
+        authority=_higher_bind_producer_rows(authority,assembly,
+            surface_parts===nothing ? Tuple[] : surface_parts,
+            m.meshing.mesh_authority)
+        Model._model_mesh_with_surface_constructor_inputs(authority,
+            constructor_inputs;caller=assembly.caller)
+    catch err
+        err isa InterruptException && rethrow()
+        nothing
+    end
+end
+
+function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
+                                size_field=nothing,metric_surface=nothing,
+                                source_nodes=length(assembly.nodes),ranks=nothing,
+                                old_supports=nothing,geometry_parts=nothing,dimension=2,
+                                 geometry_cells=nothing,geometry_birth=nothing,
+                                 geometry_alternates=nothing,curve_births=Dict{Tuple{Int,Int32},Vector{UInt64}}(),
+                                 periodic_pairs=nothing,native_orphan_births=nothing,native_recombine_events=nothing,
+                                 surface_constructor_inputs=nothing,
+                                 surface_forward=nothing,optimize_pyramids::Float64=0.0)
+    # Mesh2D resets all face statuses before OnlyEmpty/OnlyVisible dispatch.
+    filter!(owner->owner[1]!=2,done)
+    have=Set(cell.owner for cell in assembly.cells)
+    meshed,retained=_higher_surface_mesh_scan(m,entities,options,have,
+        discarded,assembly.caller;dimension)
     filter!(cell->cell.source_tag===nothing || !(cell.owner in discarded),assembly.cells)
     _higher_discrete_surface_transport!(assembly,m,entities;options,
         discarded,parts=geometry_parts,geometry_cells)
@@ -1751,10 +1843,45 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
     parallel_results=parallel_units===nothing ? nothing :
         fill!(Vector{Any}(undef,length(units)),nothing)
     parallel_dirty=Set{Tuple{Int,Int32}}()
-    parallel_last=parallel_units===nothing ? 0 :
-        something(findlast(!isnothing,parallel_units),0)
     parallel_precise=parallel_units===nothing ? false :
         GmshLibm._win_cli_precision()
+    # Cross-phase adoption: `_dim01_curve_phase!` may already have spawned
+    # detached Surfaces once their boundary Curve products landed.  Adopt
+    # exactly the slots this phase's real eligibility scan still admits
+    # (footprint/deps/scope are phase-stable, so the adopted work records are
+    # interchangeable) and fold its ledger entries into the merge-time dirty
+    # set so every mark the workers observed — or missed — is honoured.
+    if parallel_units!==nothing && surface_forward!==nothing &&
+            surface_forward.units==units
+        for (ui,work) in enumerate(parallel_units)
+            work===nothing && continue
+            spawned=surface_forward.results[ui]
+            spawned===nothing && continue
+            parallel_results[ui]=spawned
+        end
+        union!(parallel_dirty,surface_forward.dirty)
+        parallel_precise=surface_forward.precise
+    end
+    parallel_last=parallel_units===nothing ? 0 :
+        something(findlast(!isnothing,parallel_units),0)
+    # Cross-phase scheduling the other way: precompute the Region eligibility
+    # plan so eligible Regions spawn inside the merge loop below while later
+    # Surfaces still produce.  The Region phase re-verifies each adopted slot
+    # against its real `extruded`/`staged`/hybrid gates and discards whatever
+    # it cannot adopt.  `parallel_dirty` is shared with the spawn ledger so a
+    # Region spawned now still observes every later Surface mutation.
+    volume_forward=nothing
+    if dimension==3
+        volume_tags=sort!(_higher_volume_mesh_tags(m,entities,options,have))
+        volume_prepared=isempty(volume_tags) ? nothing :
+            _parallel_volume_prepare(m,volume_tags,input,assembly.caller;
+                size_field,scope=nothing,extruded=nothing,
+                hybrid_batch=nothing,staged=false)
+        volume_prepared===nothing || (volume_forward=(
+            tags=volume_tags,prepared=volume_prepared,
+            results=fill!(Vector{Any}(undef,length(volume_tags)),nothing),
+            dirty=parallel_dirty,precise=GmshLibm._win_cli_precision()))
+    end
     for (ui,tags) in enumerate(units)
         work=parallel_units===nothing ? nothing : parallel_units[ui]
         if work!==nothing && parallel_results[ui]===nothing
@@ -1766,7 +1893,8 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
                 input,options,assembly,parallel_dirty,parallel_precise,
                 geometry_birth)
         end
-        refs=ui<parallel_last ? _parallel_surface_param_refs(m) : nothing
+        refs=ui<parallel_last || volume_forward!==nothing ?
+            _parallel_surface_param_refs(m) : nothing
         products=metric_surface!==nothing ? [(only(tags),mesh_model_surface(m,only(tags),size_field;
             max_metric_edge=metric_surface.max_metric_edge,max_nodes=metric_surface.max_nodes,
             max_triangles=metric_surface.max_triangles,_mesh_input=input,_mesh1d_options=options,
@@ -1894,8 +2022,39 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
         # relocated source nodes — remesh owners already landed above.
         refs===nothing || _parallel_surface_mark_dirty!(parallel_dirty,m,
             assembly,products,refs)
+        # Cross-phase spawn: once every dependency a Region can consult has a
+        # product — its boundary Surfaces merged (in `done`), its embedded
+        # entities present — detach its produce on a worker now rather than
+        # inside the Region phase's own batch arm.  The spawn-time authority
+        # rebuilds `input` exactly the way the Region phase will, so a fresh
+        # receipt consumes identical boundary/embedded rows.
+        if volume_forward!==nothing
+            spawn_input=nothing
+            for (vi,vwork) in enumerate(volume_forward.prepared)
+                vwork===nothing && continue
+                volume_forward.results[vi]===nothing || continue
+                all(dep->dep[1]!=2 || dep in done ||
+                    haskey(input.products,dep),vwork.deps) || continue
+                if spawn_input===nothing
+                    spawn_input=_higher_volume_spawn_input(assembly,m,done;
+                        ranks,old_supports,surface_parts=geometry_parts,
+                        constructor_inputs)
+                    spawn_input===nothing && break
+                end
+                _parallel_volume_ready(spawn_input,vwork) || continue
+                # `periodic_pairs` is still being written by this merge loop —
+                # hand the worker a snapshot taken on this task so it never
+                # races a later entry.  Eligible Regions have no periodic
+                # boundary anyway, so the copy is never consulted.
+                _parallel_volume_spawn!(volume_forward.results,vi,m,vwork,
+                    spawn_input,options,assembly,parallel_dirty,geometry_birth;
+                    periodic_surface_pairs=periodic_pairs===nothing ? nothing :
+                        copy(periodic_pairs),
+                    optimize_pyramids,precise=volume_forward.precise)
+            end
+        end
     end
-    return input,scope,retained
+    return input,scope,retained,volume_forward
 end
 
 function _higher_mesh_periodic_links(mesh,links)
@@ -2739,19 +2898,13 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
                                periodic_surface_pairs=nothing,
                                optimize_pyramids::Float64=0.0,
                                retained_surfaces=Set{Tuple{Int,Int32}}(),
-                               surface_constructor_inputs=Dict{Tuple{Int,Int32},MixedMesh}())
+                               surface_constructor_inputs=Dict{Tuple{Int,Int32},MixedMesh}(),
+                               volume_forward=nothing)
     have=Set(cell.owner for cell in assembly.cells)
-    meshed=Int[]
-    for (dim,tag) in entities
-        dim==3 || continue
-        owner=(3,Int32(tag))
-        visible=!(options.mesh_only_visible && model_entity_visibility(m,3,tag)==0)
-        # Native extrusion is scheduled before meshGRegion's OnlyEmpty gate.
-        swept=Model._extrude_gate(m,3,tag)!==nothing
-        keep=_dim01_fully_discrete(m,(3,tag)) ||
-             (!swept && (!visible || (options.mesh_only_empty && owner in have)))
-        keep && continue
-        push!(meshed,tag);push!(discarded,owner)
+    # Native extrusion is scheduled before meshGRegion's OnlyEmpty gate.
+    meshed=_higher_volume_mesh_tags(m,entities,options,have)
+    for tag in meshed
+        push!(discarded,(3,Int32(tag)))
     end
     filter!(cell->cell.source_tag===nothing || !(cell.owner in discarded),assembly.cells)
     ranks===nothing || _higher_complete_ranks!(ranks,assembly)
@@ -2817,10 +2970,27 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
     parallel_results=parallel_units===nothing ? nothing :
         fill!(Vector{Any}(undef,length(volume_tags)),nothing)
     parallel_dirty=Set{Tuple{Int,Int32}}()
-    parallel_last=parallel_units===nothing ? 0 :
-        something(findlast(!isnothing,parallel_units),0)
     parallel_precise=parallel_units===nothing ? false :
         GmshLibm._win_cli_precision()
+    # Cross-phase adoption: the Surface merge loop may already have spawned
+    # detached Regions whose full dependency set had landed.  Adopt exactly
+    # the slots this phase's real gates (`extruded`/`staged`/hybrid arms,
+    # footprint eligibility) still admit, and thread the shared dirty ledger
+    # through — it carries every Curve- and Surface-phase mark the spawned
+    # workers must be tested against.
+    if parallel_units!==nothing && volume_forward!==nothing &&
+            volume_forward.tags==volume_tags
+        for (vi,work) in enumerate(parallel_units)
+            work===nothing && continue
+            spawned=volume_forward.results[vi]
+            spawned===nothing && continue
+            parallel_results[vi]=spawned
+        end
+        union!(parallel_dirty,volume_forward.dirty)
+        parallel_precise=volume_forward.precise
+    end
+    parallel_last=parallel_units===nothing ? 0 :
+        something(findlast(!isnothing,parallel_units),0)
     for (vi,tag) in enumerate(volume_tags)
         work=parallel_units===nothing ? nothing : parallel_units[vi]
         if work!==nothing && parallel_results[vi]===nothing
@@ -3434,6 +3604,14 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
         Tuple{Int,Union{Mesh,MixedMesh},_MeshClassification,Vector{Int32}}[]
     discarded=Set{Tuple{Int,Int32}}()
     native_orphan_births=Set{UInt64}()
+    # PAR01 cross-phase scheduling state: `surface_forward` plans the Surface
+    # units before Mesh1D so the Curve merge loop can detach each eligible
+    # Face the moment its boundary products land; `volume_forward` plans the
+    # Region units inside `_higher_surface_phase!` so each eligible Region can
+    # detach while later Faces still merge.  Both remain speculative on the
+    # consuming phase's real gates, which re-verify every adopted slot.
+    surface_forward=nothing
+    volume_forward=nothing
     if phases.one
         for entity in entities
             entity[1]>=2 && !_dim01_fully_discrete(m,entity) &&
@@ -3442,8 +3620,45 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
         filter!(cell->!(cell.owner in discarded),assembly.cells)
         filter!(owner->!(owner in discarded),done)
         first_nodes=_dim01_point_phase!(assembly,m,entities)
+        if phases.two
+            # The keep/mesh scan is phase-stable (Mesh1D only appends dim-0/1
+            # cells), so the unit plan the Surface phase will adopt already
+            # exists here; `scope` alone stays speculative and the phase's
+            # real `_parallel_surface_prepare` keeps the final word on every
+            # adopted slot.
+            forward_have=Set(cell.owner for cell in assembly.cells)
+            forward_meshed,_=_higher_surface_mesh_scan(m,entities,options,
+                forward_have,discarded,assembly.caller;dimension)
+            forward_units=_higher_surface_units(m,
+                _generate_units(m,2,sort!(forward_meshed)),assembly.caller)
+            forward_periodic_masters=Set(Int(constraint.master_entity) for
+                constraint in Model.model_periodic_constraints(m) if constraint.dim==2)
+            forward_ordinary=Set{Int}();forward_unmerged=Set{Int}()
+            for volume in keys(m.volumes)
+                Model._extrude_nonew_unmerged_b4_incidence(m,volume,assembly.caller) || continue
+                push!(forward_unmerged,abs(m.meshing.extrude_sources[(3,volume)][2]))
+            end
+            for ((dim,entity),link) in m.meshing.extrude_sources
+                dim in (2,3) && link[1]==2 || continue
+                params=Model._extrude_gate(m,dim,entity)
+                params!==nothing && params.quad_to_tri===:none || continue
+                push!(forward_ordinary,abs(link[2]))
+            end
+            forward_prepared=_parallel_surface_prepare(m,forward_units,
+                assembly.caller;metric_surface,scope=nothing,
+                periodic_masters=forward_periodic_masters,
+                ordinary_sources=forward_ordinary,
+                unmerged_nonew_sources=forward_unmerged,
+                size_field,geometry_birth)
+            forward_prepared===nothing || (surface_forward=(
+                units=forward_units,prepared=forward_prepared,
+                results=fill!(Vector{Any}(undef,length(forward_units)),nothing),
+                dirty=Set{Tuple{Int,Int32}}(),
+                precise=GmshLibm._win_cli_precision(),
+                ranks,old_supports=high_order,surface_parts))
+        end
         union!(discarded,_dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
-            done,geometry_birth,curve_births))
+            done,geometry_birth,curve_births,surface_forward))
     else
         # The legacy Surface/Volume projection omitted its completed Mesh0D
         # products. Recover those once, just as skipped Curve products are
@@ -3463,11 +3678,12 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
                 push!(discarded,(3,Int32(entity[2])))
         end
         filter!(cell->cell.source_tag===nothing || !(cell.owner in discarded),assembly.cells)
-        _,_,retained_surfaces=_higher_surface_phase!(assembly,m,options,entities,discarded,done;
+        _,_,retained_surfaces,volume_forward=_higher_surface_phase!(assembly,m,options,entities,discarded,done;
                                size_field,metric_surface,source_nodes=length(high_order),ranks,old_supports=high_order,
                                 geometry_parts=surface_parts,dimension,geometry_cells,
                                 geometry_birth,geometry_alternates,curve_births,periodic_pairs,native_orphan_births,native_recombine_events,
-                                surface_constructor_inputs)
+                                surface_constructor_inputs,surface_forward,
+                                optimize_pyramids=Float64(get(generation_meshing,:optimize_pyramids,0.0)))
     end
     if phases.three
         _higher_volume_phase!(assembly,m,options,entities,discarded,done;
@@ -3476,7 +3692,7 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
                              periodic_surface_pairs=periodic_pairs,
                              optimize_pyramids=Float64(get(generation_meshing,:optimize_pyramids,0.0)),
                              retained_surfaces,
-                             surface_constructor_inputs)
+                             surface_constructor_inputs,volume_forward)
     end
     if preserve_geometry && geometry_layout===:all
         # GEO's native carrier has the Surface/Volume products followed by
