@@ -34,7 +34,9 @@ using ..Model: model_periodic_constraints, model_to_mixed
 using ..Elements: write_mixed_msh, read_mixed_msh, MixedMesh, MixedEntity,
     MixedEntityData, MixedPartitionData, MixedGhostElement, MixedPeriodicLink,
     ElementBlock, SpecialElementBlock, MixedElementBlock, ElementRef,
-    msh_dimension, simplex_to_mixed, validate
+    msh_dimension, simplex_to_mixed, barycentric_refine, validate
+using ..MeshTypes: Mesh
+using ..GeoUnrolled: write_geo_unrolled
 using ..GmshLibm: _with_win_cli_precision
 import ..IO
 import ..Post
@@ -54,7 +56,7 @@ Usage: tessella file.geo [-1|-2|-3] [-o output.msh] [-format msh2|msh4] [-bin]
        [-setstring name value] [-setlist name n v1 ... vn] [-string str]
        [-option file.geo]
        tessella file.msh -check
-       tessella file.(geo|msh|pos) [-refine] [-part n] [-save]
+       tessella file.(geo|msh|pos) [-refine] [-barycentric_refine] [-part n] [-save] [-0]
        [-reclassify deg] [-reparam deg] [-open] [-merge] [-new]
        [-part_topo|-part_no_topo] [-part_ghosts|-part_no_ghosts]
        [-part_split|-part_split_files|-oneFilePerPart]
@@ -75,7 +77,11 @@ before the input file; on non-.geo inputs only `-setnumber` option names
 Mesh.SaveTopology on MSH 2.2 and MSH 4.1 output (parametric node records and
 topology-only \$Entities, matching Gmsh 4.15.2). -optimize_ho/-hoOptimize and
 the -ho_min/-ho_max/-ho_nlayers options drive the session high-order
-relocation optimizer.
+relocation optimizer. -barycentric_refine subdivides the current mesh's
+model-dimension simplices around their barycenter (triangles on 2-D models,
+tetrahedra on 3-D models), matching Gmsh 4.15.2. -0 writes the executed
+model's unrolled .geo script to <stem>.geo_unrolled (or -o), matching Gmsh
+4.15.2 — periodic constraints and non-built-in entity kinds are dropped.
 GUI-only, display, solver-daemon and unimplemented upstream flags reject.
 """
 
@@ -129,9 +135,7 @@ const _ALGORITHMS=Dict(
 # loud rejection naming the missing functionality instead of falling into the
 # generic "unsupported flag" error (which stays for genuinely unknown words).
 const _REJECTED_FLAGS=Dict{String,String}(
-    "-0"=>"model .geo output (unrolled geometry) is not implemented",
     "-4"=>"adaptive meshing (batch mode 4) is not implemented",
-    "-barycentric_refine"=>"barycentric refinement is not implemented",
     "-save_entities"=>"unrolled .geo entity output is not implemented",
     "-switch_tags"=>"element tag switching is not implemented",
     "-preserve_numbering_msh2"=>"MSH2 element-number preservation is not implemented",
@@ -337,11 +341,11 @@ function _convert_file(path::String)
         Post.write_pos(destination,views)
         return destination
     elseif extension==".geo"
-        # Upstream writes an unrolled `.geo` for `.geo` inputs — Tessella has
-        # no unrolled-geometry writer, so this is an explicit rejection.
-        throw(ArgumentError(
-            "tessella: -convert of .geo inputs needs the unrolled .geo " *
-            "exporter, which is not implemented"))
+        # Upstream converts `.geo` inputs by writing the unrolled model
+        # script — the same artifact `-0` produces.
+        result=execute_geo(path;mesh_dim=0)
+        write_geo_unrolled(destination,result.model)
+        return destination
     end
     throw(ArgumentError(
         "tessella: -convert supports .msh and .pos inputs, got $path"))
@@ -429,7 +433,8 @@ function _main(args::AbstractVector{<:AbstractString})
     dim=0;outfile=nothing;version=4.1;binary=false
     dimension_seen=false;output_seen=false
     format_seen=false;binary_seen=false;check_seen=false
-    refine_seen=false;save_seen=false;parse_seen=false
+    refine_seen=false;save_seen=false;parse_seen=false;barycentric_seen=false
+    unroll_seen=false
     reclassify=nothing;reparam=nothing
     part=nothing;part_topo=nothing;part_ghosts=nothing;part_split=nothing
     algo_seen=false;quad_seen=false
@@ -441,9 +446,14 @@ function _main(args::AbstractVector{<:AbstractString})
                 "tessella: -convert cannot follow an input file"))
             i+1<=length(tokens) || throw(ArgumentError(
                 "tessella: -convert needs at least one file"))
-            outputs=[_convert_file(_path_argument(token,"-convert"))
-                     for token in tokens[i+1:end]]
-            return last(outputs)
+            # An explicit loop avoids the comprehension's element-type
+            # inference — `collect` would query `return_types` on
+            # `_convert_file`, forcing the `execute_geo` graph to infer.
+            destination=nothing
+            for token in tokens[i+1:end]
+                destination=_convert_file(_path_argument(token,"-convert"))
+            end
+            return something(destination)
         elseif a in ("-","-parse_and_exit")
             parse_seen && throw(ArgumentError(
                 "tessella: duplicate $a flag"))
@@ -520,6 +530,13 @@ function _main(args::AbstractVector{<:AbstractString})
         elseif a=="-refine"
             refine_seen && throw(ArgumentError("tessella: duplicate -refine flag"))
             refine_seen=true
+        elseif a=="-barycentric_refine"
+            barycentric_seen && throw(ArgumentError(
+                "tessella: duplicate -barycentric_refine flag"))
+            barycentric_seen=true
+        elseif a=="-0"
+            unroll_seen && throw(ArgumentError("tessella: duplicate -0 flag"))
+            unroll_seen=true
         elseif a=="-save"
             save_seen && throw(ArgumentError("tessella: duplicate -save flag"))
             save_seen=true
@@ -637,7 +654,8 @@ function _main(args::AbstractVector{<:AbstractString})
     # combinations instead of keeping only the last one.
     batch_actions=(dimension_seen ? 1 : 0)+(refine_seen ? 1 : 0)+
         (save_seen ? 1 : 0)+(reclassify===nothing ? 0 : 1)+
-        (reparam===nothing ? 0 : 1)
+        (reparam===nothing ? 0 : 1)+(barycentric_seen ? 1 : 0)+
+        (unroll_seen ? 1 : 0)
     batch_actions>1 && throw(ArgumentError(
         "tessella: conflicting batch action flags"))
     inputs=[file for (file,_) in files]
@@ -645,7 +663,8 @@ function _main(args::AbstractVector{<:AbstractString})
     if check_seen
         (dimension_seen || output_seen || format_seen || binary_seen ||
          !isempty(numeric_options) || !isempty(preludes) ||
-         refine_seen || save_seen || parse_seen ||
+         refine_seen || barycentric_seen || unroll_seen || save_seen ||
+         parse_seen ||
          reclassify!==nothing || reparam!==nothing || part!==nothing ||
          length(files)>1) && throw(ArgumentError(
             "tessella: -check cannot be combined with generation, sizing, " *
@@ -661,6 +680,7 @@ function _main(args::AbstractVector{<:AbstractString})
         return first(inputs)
     end
     parse_seen && (dimension_seen || save_seen || refine_seen ||
+        barycentric_seen || unroll_seen ||
         reclassify!==nothing || reparam!==nothing || part!==nothing ||
         output_seen || format_seen || binary_seen) && throw(ArgumentError(
             "tessella: parse-and-exit cannot be combined with meshing or " *
@@ -671,10 +691,23 @@ function _main(args::AbstractVector{<:AbstractString})
     # including extensionless `.geo` sources — keeps the standalone `.geo`
     # execution path.
     session=extension in (".msh",".pos") || length(files)>1 || refine_seen ||
+        barycentric_seen ||
         save_seen || reclassify!==nothing || reparam!==nothing ||
         part!==nothing ||
         get(numeric_options,"Mesh.HighOrderOptimize",0.0)!=0.0
     if !session
+        if unroll_seen
+            # `-0` writes the model's unrolled `.geo` script — the geometry
+            # executes without meshing, and the default destination is the
+            # input stem with a `.geo_unrolled` suffix (upstream convention).
+            destination=outfile===nothing ?
+                splitext(first(inputs))[1]*".geo_unrolled" : outfile
+            _same_file_target(first(inputs),destination) && throw(ArgumentError(
+                "tessella: -0 output path must not alias the input file"))
+            result=execute_geo(first(inputs);mesh_dim=0)
+            write_geo_unrolled(destination,result.model)
+            return destination
+        end
         dim==0 && outfile!==nothing && throw(ArgumentError(
             "tessella: -o requires -1, -2 or -3"))
         dim==0 && (format_seen || binary_seen) && throw(ArgumentError(
@@ -800,7 +833,8 @@ function _main(args::AbstractVector{<:AbstractString})
     end
     return _session_main(files,preludes,numeric_options;
         dim,outfile,version,binary,output_flags=format_seen || binary_seen,
-        refine=refine_seen,save=save_seen,
+        refine=refine_seen,barycentric=barycentric_seen,save=save_seen,
+        unroll=unroll_seen,
         reclassify,reparam,part,part_topo,part_ghosts,part_split)
 end
 
@@ -814,14 +848,51 @@ function _cli_classified_mesh(result)
     return result.mesh
 end
 
+# `-barycentric_refine` refines the session's current mesh in place — the
+# Gmsh 4.15.2 action subdivides only linear simplices owned by entities at
+# the model dimension (triangles on 2-D models, tetrahedra on 3-D models);
+# every other cell passes through. The transform runs on the stored mesh
+# product and the stale index caches are invalidated so `API.write`
+# serializes the refined mesh.
+function _session_barycentric_refine!()
+    lock(API.STATE_LOCK) do
+        cached=API.LAST_MESH[]
+        # Upstream refines whatever mesh is loaded; an unmeshed model
+        # (e.g. a `.geo` opened without generation) is a no-op.
+        cached===nothing && return nothing
+        refined=(cached isa MixedMesh || cached isa Mesh) ?
+                barycentric_refine(cached) : throw(ArgumentError(
+                    "tessella: -barycentric_refine cannot refine $(typeof(cached))"))
+        refined===cached && return nothing
+        # Rebuild the session classification from the refined mesh's own
+        # entity metadata — `API.write` rejects an unclassified cache.
+        class=nothing
+        if refined isa MixedMesh && refined.entity_data!==nothing
+            class=API._higher_classification_from_data(
+                refined,"tessella: -barycentric_refine")
+            class=API._mixed_rebind_class(class,refined;
+                node_parametric=refined.entity_data.node_parametric)
+        end
+        API._replace_mesh_cache_locked!(refined,class)
+        API.LAST_MESH_LOCATOR[]=nothing
+        API.LAST_MESH_EDGES[]=nothing
+        API.LAST_MESH_FACES[]=nothing
+        isdefined(API,:LAST_MESH_HIGH_ORDER) &&
+            (API.LAST_MESH_HIGH_ORDER[]=nothing)
+        return nothing
+    end
+end
+
 # Session path: files route through `API.open`/`API.merge`/`API.model.add`,
 # option writes through `API.option`, meshing through `API.mesh.generate`,
 # post-mesh actions through `API.mesh.refine`/`classify_surfaces`/
 # `create_geometry`/`partition`, and output through `API.write`.
 function _session_main(files,preludes,numeric_options;
                        dim,outfile,version,binary,output_flags,refine,save,
-                       reclassify,reparam,part,part_topo,part_ghosts,part_split)
-    need_output=dim>0 || refine || save || reclassify!==nothing ||
+                       reclassify,reparam,part,part_topo,part_ghosts,part_split,
+                       barycentric=false,unroll=false)
+    need_output=dim>0 || refine || barycentric || unroll || save ||
+        reclassify!==nothing ||
         reparam!==nothing || part!==nothing
     !need_output && outfile!==nothing && throw(ArgumentError(
         "tessella: -o requires a meshing, conversion or save action"))
@@ -874,9 +945,12 @@ function _session_main(files,preludes,numeric_options;
         haskey(API.DEFAULT_OPTIONS,name) ? (session_numeric[name]=value) :
             push!(geo_numeric_preludes,"$name = $value;")
     end
-    destination=outfile===nothing ? _default_output(files[1][1]) : outfile
+    # `-0` always defaults to `<stem>.geo_unrolled`, even on mesh inputs.
+    destination=outfile===nothing ?
+        (unroll ? splitext(files[1][1])[1]*".geo_unrolled" :
+         _default_output(files[1][1])) : outfile
     extension=lowercase(splitext(files[1][1])[2])
-    if extension!=".geo" && need_output
+    if extension!=".geo" && need_output && !unroll
         outfile===nothing && throw(ArgumentError(
             "tessella: non-.geo inputs require -o for output"))
     end
@@ -929,6 +1003,7 @@ function _session_main(files,preludes,numeric_options;
         end
         dim>0 && API.mesh.generate(dim)
         refine && API.mesh.refine()
+        barycentric && _session_barycentric_refine!()
         reclassify===nothing ||
             API.mesh.classify_surfaces(reclassify*pi/180,true,false,pi)
         if reparam!==nothing
@@ -936,6 +1011,17 @@ function _session_main(files,preludes,numeric_options;
             API.mesh.create_geometry()
         end
         part===nothing || API.mesh.partition(part)
+        if unroll
+            # `-0` on a mesh input serializes the loaded model's discrete
+            # point records — the only entities the unrolled format carries.
+            mesh=lock(API.STATE_LOCK) do
+                API.LAST_MESH[]
+            end
+            mesh isa MixedMesh || throw(ArgumentError(
+                "tessella: -0 on a mesh input requires entity metadata"))
+            write_geo_unrolled(destination,mesh)
+            return destination
+        end
         if need_output
             # `-part_split` only takes effect on an active partition request —
             # upstream's Mesh.PartitionSplitMeshFiles is inert otherwise.

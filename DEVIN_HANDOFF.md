@@ -20,8 +20,10 @@
 - `9cda518` explicit-shell OCC-curved faces mesh as surface products (fixes
   `.geo` loft `(3,1)` ownership crash; OCC regressions 1141+26+15 green).
 - `338589f` P601 receipts — **21/21 tutorials now have drivers** (t19 added).
-- `cf0fec2`+`7d3b2b5`+`3d16803` PART01: topology=0 gate, unsigned Point boundary
-  tags, declared physical-tag order on MSH import (unpartition-transfer pins 201/201).
+- `cf0fec2`+`3d16803` PART01: topology=0 gate + declared physical-tag order
+  on MSH import (unpartition-transfer pins 201/201). (`7d3b2b5` blanket-abs
+  was reverted `093e962`; boundary signs superseded by `f4bb0e8` — unsigned
+  dim-0 bounds only on partitioned MSH imports.)
 - `b1535bd` VIEW/IO02: incomplete-element `$InterpolationScheme` serialization,
   list-view export, .pos T2/T3 expressions (all six suites green).
 - `a49a1e6` IGES: native OCC-kernel reader (MSBO solids, bounded faces, bare
@@ -30,7 +32,7 @@
   2,313 assertions green).
 - `7e65e3d` recover_cdt orients emitted tets on Float64 output coordinates —
   fixes manufactured negative-orientation cells (20/20).
-- dense curved-PLC recovery capacity — UNCOMMITTED in tree
+- `9d3998e` dense curved-PLC recovery capacity
   (`RecoverCDT.jl` +52, `recover_cdt_topology_test.jl` +87,
   `test/fixtures/plc_helical_pipe_wall_360.txt`): `maxpts` default is now
   input-proportional (`0` → `max(6000, 8·input vertices)`); t13 verbatim
@@ -49,7 +51,7 @@ If the session dropped them, their diffs survive uncommitted — verify each
 independently (its own new test file + affected regressions), then commit only
 the owned files:
 
-- PLC-recovery (COMPLETE, uncommitted): `src/meshing/RecoverCDT.jl` +52,
+- PLC-recovery (COMMITTED `9d3998e`): `src/meshing/RecoverCDT.jl` +52,
   `test/meshing/recover_cdt_topology_test.jl` +87,
   new `test/fixtures/plc_helical_pipe_wall_360.txt` — dense curved-PLC
   recovery for t13-field / t19-density VERIFIED on both drivers (t13
@@ -57,7 +59,6 @@ the owned files:
   `ModelVolumeAlgorithms.jl`/`ModelNativeInitialTet.jl` ended unchanged —
   the diagnosis needed no write-back or acceptance-check edits; the prior
   `fpts` orientation fix plus the proportional `maxpts` cap sufficed.
-  Commit only the three owned files when pushing.
 - MET01/02 (LANDED `4cef4d1` + `74436ac`): `4cef4d1` committed
   `ModelMetricSurfaceProducer.jl` +584 + `model_metric_surface_density_test.jl`
   — metric-Delaunay Steiner insertion replaced midpoint bisection, fixing the
@@ -81,33 +82,27 @@ the owned files:
   the scalarized min-direction bound (BAMG-style unit-edge density remains the
   alg-7 producer's contract); the alg-6 factory-encoding path
   (`_model_factory_surface_refine!`) is still scalar-only.
-- PAR01 (LANDED `7adc0a1` + wiring worker `4dc7b27c` in flight): parallel core
-  committed (seed ledger, 64/64 both thread counts). In-flight diff:
-  `APIGenerate01.jl`/`APIGenerateHigher.jl` (+286) = cross-phase spawn wiring
-  per the documented call sites in the 7adc0a1 commit message.
+- PAR01 (LANDED `7adc0a1` + `3599fc0`): parallel core committed (seed
+  ledger, 64/64 both thread counts) plus the cross-phase spawn wiring in
+  `APIGenerate01.jl`/`APIGenerateHigher.jl` (+286, byte-identical output
+  with 18 surface + 3 region adoptions).
 - CAD04/05 (LANDED `09da3ee`): circle-rim fillets + trimmed tensor faces,
   52/52 + OCC regressions green. t19 verbatim `Fillet` now rejects precisely
   (tensor_bspline rims need ChFi3d — still classified; driver comment updated).
   Residual: surface-Boolean fragments (t20/t21) needs ModelOCCBoolean dim-2.
 - UI01/CLI (LANDED `9467923`): parser/fltk/graphics surfaces,
   SaveParametric ($ParametricNodes MSH4+2.2+binary), SaveTopology,
-  -optimize_ho plumbing. 58+30+38+68+1324+81 green. FLAG: `cli_test.jl`
-  13 mesh-content pins still fail AFTER all meshing landings
-  (`cli_test.jl:276,296,382,395,409,420,441,444`): every periodic-link
-  `slave_nodes` count dropped by exactly one (21→20) plus `mixed_crc`/
-  `mesh_crc` SHA mismatches on periodic_graph/embedded/set_max_tag/
-  point_mesh_size/points_of/periodic_surface_volume fixtures.
-  Signature = one seam/corner node deduplicated per periodic link OR a
-  real periodic-transport regression. NEXT SESSION: mesh
-  `periodic_surface_volume` fixture, `validate` the mesh, and check
-  every slave_node still maps 1:1 to master nodes; if valid → re-pin
-  the 13 expectations to current output; if a slave lost its master →
-  bisect among `9d3998e`,`3599fc0`,`4cef4d1`,`9cda518`,`ce99742`.
+  -optimize_ho plumbing. 58+30+38+68+1324+81 green. RESOLVED: the 13
+  `cli_test.jl` mesh-content pin fails were stale pins from legitimate
+  session-arc drift — periodic dedup removes one seam node per link
+  (21→20 slaves), meshes `validate()` clean and live-gmsh cross-checks
+  agreed. Re-pinned `f09a298` (cli_test) + `fe20e0d` (geo_list_variable/
+  geo_dynamic_tag/geo_mesh_size siblings — 240/240, 121/121, 51/51).
 
 ### Genuinely remaining (next session)
 
-- ~~Dense curved-PLC recovery capacity~~ — LANDED in tree 2026-10-23
-  (uncommitted diff, verified on both drivers — see landed ledger above).
+- ~~Dense curved-PLC recovery capacity~~ — LANDED `9d3998e` 2026-10-23
+  (verified on both drivers — see landed ledger above).
   Residual performance note: recovery is superlinear in input density;
   ~10⁴-vertex PLCs would take hours under the proportional cap — sound and
   bounded, but a candidate for scan indexing if density tests demand it.
@@ -117,14 +112,26 @@ the owned files:
   tweak), native 3-D hybrid tensor sizing (ModelNativeHybridInsertion
   still scalarizes), and metric-Delaunay arm density parity (connectivity
   is tensor-aware; sizing stays scalarized). Metric*/ModelMetric* files.
-- PAR01: cross-phase scheduling, per-entity RNG ledger. `APIParallel*`.
-- CAD04/05: curved trims, NURBS topology, surface Booleans (t20/t21 depth),
-  ChFi3d fillet (t19 verbatim `Fillet` stays classified non-planar-edge reject).
-- UI01: `onelab`/`parser`/headless `fltk`/`graphics` surface stubs.
-- CLI flags: `Mesh.SaveParametric`/`SaveTopology` need `$ParametricNodes` and
-  topology-only writers; `-0` unrolled .geo output; `-barycentric_refine`;
-  partition option flags; `-optimize_ho` plumbing to the (u,v) optimizer.
-  `CLI.jl`'s classified-rejection table stays until each lands.
+- PAR01: core landed `7adc0a1`+`3599fc0` (seed ledger + cross-phase spawns).
+  Residual: RNG-consuming Region fills still serialize by eligibility,
+  broader eligibility, `ModelIdentity`/`APIModelMerge` transports. `APIParallel*`.
+- CAD04/05: landed `09da3ee` (circle-rim fillets, trimmed tensor faces).
+  Residual: NURBS topology trims, surface Booleans (t20/t21 depth —
+  needs ModelOCCBoolean dim-2 operands), ChFi3d fillet on tensor_bspline
+  rims (t19 verbatim `Fillet` stays classified non-planar-edge reject).
+- UI01: parser/fltk/graphics surfaces landed `9467923` — only `onelab`
+  solver-client backend remains a documented no-op.
+- CLI flags: `-0` unrolled `.geo` output (`GeoUnrolled.jl`) and
+  `-barycentric_refine` (`Elements.jl`) landed this session (570+28+72
+  assertions green under `--compile=min`; oracle-verified connectivity,
+  tag renumbering, `<stem>.geo_unrolled` defaults and discrete-point
+  emission). `-convert .geo` writes the same artifact; the action loop is
+  explicit because `collect`'s `return_types` query on `_convert_file`
+  dragged `execute_geo` into pathological inference under `--compile=min`.
+  SaveParametric/SaveTopology, partition flags and `-optimize_ho` landed
+  earlier (`9467923`, `306d7c9`). Still rejected: `-save_entities`,
+  BAMG anisotropics, ONELAB solver-client flags, scaling/random
+  perturbation flags — the classified-rejection table stays until each lands.
 ### FINAL GATE findings (2026-10-23, runtests.jl 417-baseline)
 
 - `occ_revolve_smoke` abort: `_gm87_sincos` x87 `llvmcall` can't run under
@@ -133,11 +140,11 @@ the owned files:
 - `partition_brep` sign regression: `7d3b2b5` (blanket abs on dim-0 boundary
   presentation) was WRONG — declared entities keep signed bounds per
   `partition_brep.jl` pins + the APIPartitionBRep orientation guard. Reverted
-  `093e962`. Remaining: ghost suite's imported partition records expect
-  UNSIGNED dim-0 in state dumps vs local children expecting SIGNED — real
-  discriminator (import provenance vs local production) under worker
-  `6237e5ee`; `partition_brep` currently 9/1 with only the :56 child-sign
-  pin failing pre-fix (needs signed — matches post-revert behavior).
+  `093e962`. RESOLVED `f4bb0e8`: the discriminator is import provenance —
+  `_geo_merge_discrete!` stores `abs(b)` for dim-0 bounds only when
+  `partition_data !== nothing` (partitioned MSH imports), while declared
+  and locally-produced children keep signed bounds. `partition_brep`
+  39/39, ghost suite runtime green, unpartition transfers 201/201.
 - `api_partition_ghost_collision` last testset: 8 digest fails + 1 missing-script
   error are GITIGNORED-fixture drift (`test/data`,`test/artifacts` ignored;
   `partition_ghost_membership_native_v1.py` absent) — environmental, not a
@@ -163,8 +170,10 @@ The final batch follows parent `da92208`; its commit is recorded by Git rather
 than a self-referential hash in this file. Read this checklist, [HANDOFF](HANDOFF.md),
 [STATUS](STATUS.md), [PLAN](PLAN.md), [AGENTS](AGENTS.md) and [test instructions](test/README.md).
 Resume from checked-out Main, not an old C:/tmp candidate. No implementation
-agent or Julia reader remains active at handoff. Existing unrelated untracked
-`nul` and `Ctmppel_repro1.jl` were preserved; do not remove them.
+agent or Julia reader remains active at handoff. The ~450 untracked `_probe_*`/`_repro_*`/`_test_logs`/`_tmp*`/`probe_bl*`
+scratch files were cleaned up 2026-10-23 under explicit user instruction -
+they were throwaway debug scripts never referenced by src/ or test/. The
+unrelated untracked `nul` file remains preserved; do not remove it.
 
 The final ordinary suite passes **224/224 on both supported runtimes**, actual
 exit 0: Julia 1.12.7 **45.21 s**, body 11.5 s; Julia 1.13.1 **38.38 s**, body 10.6 s.

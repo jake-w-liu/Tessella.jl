@@ -612,8 +612,9 @@ is the opt-in rigid/hybrid fixture. The preceding224-check increment added two c
 list/model representation checks. The preceding218-check increment added two
 file-merge and two read-only CLI assertions; periodic Volume, tensor production, native and solver
 campaigns remain opt-in. Portable final224 receipts and Source hashes are also
-committed under `test/artifacts/handoff_20261011`; see the
-[Devin continuation checklist](../DEVIN_HANDOFF.md). The preceding214-check bodies took11.1/10.9 s and
+retained locally under `test/artifacts/handoff_20261011` — the directory
+is gitignored and regenerable through the `validation/*/reconstruct`
+scripts; see the [Devin continuation checklist](../DEVIN_HANDOFF.md). The preceding214-check bodies took11.1/10.9 s and
 qualify their own Source. The preceding 209-check
 bodies took 11.1/10.7 s and qualify their own Source. The preceding 207-check
 bodies took 10.1 s on both runtimes and qualify their own Source. The preceding203-check

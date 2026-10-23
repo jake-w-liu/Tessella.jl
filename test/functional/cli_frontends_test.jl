@@ -112,8 +112,10 @@ SP(1,0,0){2};
         @test pos_new==pos_path*"_new" && isfile(pos_new)
         @test length(Tessella.Post.read_pos(pos_new))==1
 
-        # .geo -convert needs the unimplemented unrolled-geometry writer.
-        @test_throws ArgumentError Tessella.CLI.main(["-convert",line_geo])
+        # .geo -convert writes the unrolled model script (the `-0` artifact).
+        geo_new=Tessella.CLI.main(["-convert",line_geo])
+        @test geo_new==line_geo*"_new" && isfile(geo_new)
+        @test occursin("Point(",read(geo_new,String))
         @test_throws ArgumentError Tessella.CLI.main(["-convert"])
         @test_throws ArgumentError Tessella.CLI.main(
             ["-convert",joinpath(directory,"missing.msh")])
@@ -200,12 +202,16 @@ SP(1,0,0){2};
         # Loud rejections: batch conflicts, unsupported and obsolete flags.
         @test_throws ArgumentError Tessella.CLI.main([square_geo,"-2","-refine"])
         @test_throws ArgumentError Tessella.CLI.main([line_msh,"-refine","-save","-o",classified])
-        for flag in ("-0","-4","-barycentric_refine","-rand","-ho_min",
-                     "-optimize_ho","-camera","-newreg","-part_weight",
-                     "-save_parametric","-aniso_max","-numsubedges","-nodb",
+        for flag in ("-4","-rand","-ho_min",
+                     "-camera","-newreg","-part_weight",
+                     "-aniso_max","-numsubedges","-nodb",
                      "-post_pro","-min","-listnumber","-view","-clear")
             @test_throws ArgumentError Tessella.CLI.main([line_geo,"-1",flag])
         end
+        # `-0`/`-barycentric_refine` conflict with `-1` as batch actions;
+        # `-optimize_ho`/`-save_parametric` are implemented session flags.
+        @test_throws ArgumentError Tessella.CLI.main([line_geo,"-1","-0"])
+        @test_throws ArgumentError Tessella.CLI.main([line_geo,"-1","-barycentric_refine"])
         @test_throws ArgumentError Tessella.CLI.main([line_geo,"-1","-part"])
         @test_throws ArgumentError Tessella.CLI.main([line_geo,"-1","-part","0"])
         @test_throws ArgumentError Tessella.CLI.main([line_geo,"-1","-part_topo","-part_no_topo"])

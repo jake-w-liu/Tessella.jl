@@ -68,6 +68,7 @@ include("geometry/Model.jl")      # P2: tagged geometry/entity kernel
 include("geometry/GeoExec.jl")    # P3: bounded .geo execution
 include("meshing/BoundaryLayer.jl") # P4: prismatic and 2-D quad/fan boundary-layer extrusion
 include("interfaces/Post.jl")     # P5: views and plugins
+include("interfaces/GeoUnrolled.jl") # P5: .geo_unrolled (-0) serialization
 include("interfaces/API.jl")      # P5: model/mesh/option façade
 include("interfaces/CLI.jl")      # P5: command-line entry
 include("interfaces/GUI.jl")      # P5: headless GUI state machine

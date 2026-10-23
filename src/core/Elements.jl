@@ -12,18 +12,18 @@ retained as owned metadata.
 """
 module Elements
 
-using ..MeshTypes: Mesh, MeshDiagnostic, nnodes, nsegs, ntris, ntets
+using ..MeshTypes: Mesh, MeshDiagnostic, nsegs, ntris, ntets
 import ..MeshTypes: validate, nnodes
 using ..Transform: _periodic_affine_input
 using SHA
-using Printf: @printf, @sprintf
+using Printf: @printf
 
 export ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimension, msh_order,
        msh_family, msh_type, msh_properties
 export ElementBlock, ElementRef, SpecialElementBlock, MixedEntity, MixedEntityData,
        MshAncillarySection, MshDataSection,
        MixedPeriodicLink, MixedMesh
-export mixed_crc, simplex_to_mixed, mixed_to_simplex
+export mixed_crc, simplex_to_mixed, mixed_to_simplex, barycentric_refine
 export write_mixed_msh, read_mixed_msh
 export lagrange_nodes, add_block!, validate
 
@@ -1585,6 +1585,199 @@ function mixed_to_simplex(m::MixedMesh)
         end
     end
     return Mesh(m.coords; segs=segs, tris=tris, tets=tets, seg_tag=st, tri_tag=tt, tet_tag=qt)
+end
+
+"""
+    barycentric_refine(m::MixedMesh) -> MixedMesh
+
+Gmsh 4.15.2 `-barycentric_refine` semantics: entities at the model dimension
+subdivide their linear simplex cells around the element barycenter `c` — a
+triangle (v1,v2,v3) emits the centroid-connected children
+(v3,v1,c),(v1,v2,c),(v2,v3,c); a tetrahedron (v1,v2,v3,v4) emits
+(v1,v2,v3,c),(v2,v3,v4,c),(v3,v4,v1,c),(v4,v1,v2,c). Each parent contributes its own
+centroid node (appended in block/cell order) and its physical tag is
+inherited by every child; element file tags are renumbered sequentially in
+emission order, as upstream writes them. Lower-dimensional entities,
+non-simplex cells, and empty blocks pass through unchanged — on a volume
+model the boundary triangles are not subdivided, on a curve model nothing
+changes, and quads are inert at every dimension, matching the oracle.
+"""
+function barycentric_refine(m::MixedMesh)
+    _assert_mixed_structure(m,"barycentric_refine")
+    data=m.entity_data
+    model_dim=data===nothing || isempty(data.entities) ?
+        maximum((Int(_block_dim(b)) for b in m.blocks);init=0) :
+        maximum(key->key[1],keys(data.entities))
+    ncoords=size(m.coords,2)
+    appends=Vector{NTuple{3,Float64}}()
+    append_entities=Tuple{Int,Int32}[]
+    append_parametric=Union{Nothing,Vector{Float64}}[]
+    next_node_tag=data===nothing || isempty(data.external_node_tags) ?
+                  UInt64(ncoords) : maximum(data.external_node_tags)
+    append_tags=UInt64[]
+    new_blocks=MixedElementBlock[]
+    new_element_tags=Vector{UInt64}[]
+    new_block_entities=Vector{Int32}[]
+    element_tag=UInt64(0)
+    changed=false
+    for (bi,block) in pairs(m.blocks)
+        ncell=_block_ncells(block)
+        ncell==0 && (push!(new_blocks,block);
+                     data===nothing ||
+                         (push!(new_element_tags,UInt64[]);
+                          push!(new_block_entities,Int32[]));
+                     continue)
+        if !(block isa ElementBlock) ||
+           !((model_dim==2 && block.msh==2) || (model_dim==3 && block.msh==4))
+            push!(new_blocks,block)
+            if data!==nothing
+                tags=data.external_element_tags[bi]
+                length(tags)==ncell || throw(ArgumentError(
+                    "barycentric_refine: block $bi external element tags desynchronized"))
+                pass_tags=Vector{UInt64}(undef,ncell)
+                for k in 1:ncell
+                    pass_tags[k]=(element_tag+=UInt64(1))
+                end
+                push!(new_element_tags,pass_tags)
+                push!(new_block_entities,copy(data.block_entities[bi]))
+            end
+            continue
+        end
+        changed=true
+        degree=Int(msh_spec(block.msh).nnodes)
+        children=block.msh==2 ? 3 : 4
+        child_nodes=Matrix{Int32}(undef,degree,ncell*children)
+        child_phys=Vector{Int32}(undef,ncell*children)
+        child_tags=Vector{UInt64}(undef,ncell*children)
+        child_entities=Vector{Int32}(undef,ncell*children)
+        column=0
+        for j in 1:ncell
+            v=block.nodes[:,j]
+            center=ntuple(d->begin
+                acc=Float64(m.coords[d,v[1]])+Float64(m.coords[d,v[2]])+
+                    Float64(m.coords[d,v[3]])
+                degree==4 && (acc+=Float64(m.coords[d,v[4]]))
+                acc/degree
+            end,3)
+            push!(appends,center)
+            cindex=Int32(ncoords+length(appends))
+            parent_entity=data===nothing ? Int32(0) : data.block_entities[bi][j]
+            if data!==nothing
+                push!(append_entities,(model_dim,parent_entity))
+                # The centroid inherits a parametric record only when every
+                # parent vertex is owned by the same entity — a curve-u and a
+                # surface-(u,v) are different parameter spaces, and the record
+                # length must equal the owning entity's dimension.
+                param=nothing
+                if all(k->data.node_entities[v[k]]==(model_dim,parent_entity),
+                       1:degree)
+                    parents=(data.node_parametric[v[1]],
+                             data.node_parametric[v[2]],
+                             data.node_parametric[v[3]])
+                    degree==4 &&
+                        (parents=(parents...,data.node_parametric[v[4]]))
+                    all(p->p!==nothing && length(p)==model_dim,parents) &&
+                        (param=[sum(getindex.(parents,i))/degree
+                                for i in 1:model_dim])
+                end
+                push!(append_parametric,param)
+                push!(append_tags,next_node_tag+=UInt64(1))
+            end
+            phys=block.tags[j]
+            if block.msh==2
+                child_nodes[:,column+1]=[v[3],v[1],cindex]
+                child_nodes[:,column+2]=[v[1],v[2],cindex]
+                child_nodes[:,column+3]=[v[2],v[3],cindex]
+            else
+                child_nodes[:,column+1]=[v[1],v[2],v[3],cindex]
+                child_nodes[:,column+2]=[v[2],v[3],v[4],cindex]
+                child_nodes[:,column+3]=[v[3],v[4],v[1],cindex]
+                child_nodes[:,column+4]=[v[4],v[1],v[2],cindex]
+            end
+            for k in 1:children
+                child_phys[column+k]=phys
+                child_tags[column+k]=(element_tag+=UInt64(1))
+                child_entities[column+k]=parent_entity
+            end
+            column+=children
+        end
+        push!(new_blocks,ElementBlock(block.msh,child_nodes,child_phys))
+        data===nothing || (push!(new_element_tags,child_tags);
+                           push!(new_block_entities,child_entities))
+    end
+    changed || return m
+    coords=hcat(m.coords,reshape(reinterpret(Float64,appends),3,:))
+    new_data=data===nothing ? nothing : MixedEntityData(data.entities;
+        node_entities=vcat(data.node_entities,append_entities),
+        node_parametric=vcat(data.node_parametric,append_parametric),
+        external_node_tags=vcat(data.external_node_tags,append_tags),
+        block_entities=new_block_entities,
+        external_element_tags=new_element_tags,
+        _native_mesh_tags=data.native_mesh_tags)
+    return MixedMesh(coords,new_blocks;
+        physical_names=m.physical_names,entity_data=new_data,
+        elementary_entities=m.elementary_entities,
+        periodic_links=m.periodic_links,
+        ancillary_sections=m.ancillary_sections,
+        data_sections=m.data_sections,
+        partition_data=m.partition_data)
+end
+
+"""
+    barycentric_refine(m::Mesh) -> Mesh
+
+Flat-mesh [`barycentric_refine`](@ref): the highest populated cell dimension
+plays the model-dimension role — a tetrahedral input subdivides only its
+tetrahedra (boundary triangles are inert, as in upstream), a triangulated
+input subdivides its triangles, and a segment-only input is a no-op.
+Physical tags are inherited by every child and centroid nodes append in
+cell order.
+"""
+function barycentric_refine(m::Mesh)
+    appends=Vector{NTuple{3,Float64}}()
+    function split_simplex(nodes::AbstractMatrix{Int32},tags::Vector{Int32},
+                           degree::Int,children::Int)
+        ncell=size(nodes,2)
+        out_nodes=Matrix{Int32}(undef,degree,ncell*children)
+        out_tags=Vector{Int32}(undef,ncell*children)
+        column=0
+        for j in 1:ncell
+            v=nodes[:,j]
+            center=ntuple(d->begin
+                acc=Float64(m.coords[d,v[1]])+Float64(m.coords[d,v[2]])+
+                    Float64(m.coords[d,v[3]])
+                degree==4 && (acc+=Float64(m.coords[d,v[4]]))
+                acc/degree
+            end,3)
+            push!(appends,center)
+            cindex=Int32(size(m.coords,2)+length(appends))
+            if degree==3
+                out_nodes[:,column+1]=[v[3],v[1],cindex]
+                out_nodes[:,column+2]=[v[1],v[2],cindex]
+                out_nodes[:,column+3]=[v[2],v[3],cindex]
+            else
+                out_nodes[:,column+1]=[v[1],v[2],v[3],cindex]
+                out_nodes[:,column+2]=[v[2],v[3],v[4],cindex]
+                out_nodes[:,column+3]=[v[3],v[4],v[1],cindex]
+                out_nodes[:,column+4]=[v[4],v[1],v[2],cindex]
+            end
+            for k in 1:children; out_tags[column+k]=tags[j]; end
+            column+=children
+        end
+        return out_nodes,out_tags
+    end
+    if ntets(m)>0
+        tets,tet_tag=split_simplex(m.tets,m.tet_tag,4,4)
+        coords=hcat(m.coords,reshape(reinterpret(Float64,appends),3,:))
+        return Mesh(coords;segs=m.segs,tris=m.tris,tets=tets,
+                    seg_tag=m.seg_tag,tri_tag=m.tri_tag,tet_tag=tet_tag)
+    elseif ntris(m)>0
+        tris,tri_tag=split_simplex(m.tris,m.tri_tag,3,3)
+        coords=hcat(m.coords,reshape(reinterpret(Float64,appends),3,:))
+        return Mesh(coords;segs=m.segs,tris=tris,tets=m.tets,
+                    seg_tag=m.seg_tag,tri_tag=tri_tag,tet_tag=m.tet_tag)
+    end
+    return m
 end
 
 struct _MixedCellRef

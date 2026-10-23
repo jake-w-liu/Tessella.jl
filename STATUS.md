@@ -24,6 +24,55 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### CLI `-0`/`-barycentric_refine`/`-convert .geo` + `.geo_unrolled` serializer (2026-10-23, uncommitted in tree)
+
+`src/core/Elements.jl` `barycentric_refine` subdivides linear simplices
+at the model dimension only — tri→3 children `(v3,v1,c),(v1,v2,c),(v2,v3,c)`,
+tet→4 `(v1,v2,v3,c),(v2,v3,v4,c),(v3,v4,v1,c),(v4,v1,v2,c)` — matching the
+Gmsh 4.15.2 oracle exactly, including its mixed signed orientations (the
+oracle's own output validates, so the ordering is parity, not a defect).
+Lower-dimension cells, quads, and higher-order blocks pass through;
+physical tags inherit, external element tags renumber sequentially in
+emission order (pass-through included — verified against oracle), and
+centroid nodes carry parametric coordinates only when every parent shares
+one owner entity whose dimension matches the parameter length. The `Mesh`
+variant refines tets when present else tris. `-barycentric_refine` is a
+mutually exclusive batch action; on the session path the refined
+`MixedMesh` rebuilds classification via `_higher_classification_from_data`
++ `_mixed_rebind_class` so `API.write` keeps working. `Mesh.SaveAll=0`
+still drops non-physical cells on write — upstream-identical, so the 3-D
+test asserts with `-save_all`.
+
+`src/interfaces/GeoUnrolled.jl` `write_geo_unrolled` serializes a
+`GeoModel` as the `-0` artifact: `cl__N` size variables in first-use
+order (point `lc` folded in), points, curves interleaved with
+`Transfinite Curve`, lazily emitted `Curve Loop`s before each surface,
+`Transfinite Surface`/`Recombine`/`In` embeds, `Surface Loop`s + volumes,
+then physical groups — named groups emit `("name")` without a numeric
+tag, auto-tag groups drop, periodic constraints and non-built-in
+(NURBS/BSpline) entities drop, matching oracle. `-0` defaults to
+`<stem>.geo_unrolled` on every input kind (`.msh` inputs emit discrete
+`Point` records with `cl__ = 1e22`, empty when no point entities — both
+verified against the oracle). `-convert .geo` produces the same artifact
+at `file_new`; `-o` overrides; input aliasing rejects.
+
+Also in this slice: the `-convert` action loop replaced a comprehension —
+`collect` queried `return_types` on `_convert_file`, dragging the whole
+`execute_geo` graph into inference and effectively hanging the
+`--compile=min` interpreter (now an explicit loop, ~0.1 s). Removed
+confirmed-dead imports (`@sprintf` in Elements.jl, `ElementBlock` in
+GeoUnrolled.jl, `boundary_edges` in Heal.jl). `cli_frontends_test.jl`
+re-pins: `.geo -convert` now expects the unrolled artifact instead of the
+former loud rejection, `-optimize_ho`/`-save_parametric` (implemented in
+`9467923`) left the reject list, `-0`/`-barycentric_refine` batch-action
+conflicts assert explicitly. Deleted ~450 untracked root scratch files
+(audit-confirmed; `nul` preserved per handoff instruction).
+
+Verified under `--compile=min` on Julia 1.13.1:
+`cli_barycentric_refine_test.jl` 570/570 (2-D/3-D subdivision, boundary
+pass-through, batch contract, flat `Mesh`), `cli_unrolled_geo_test.jl`
+28/28, `cli_frontends_test.jl` 72/72.
+
 ### MET01/02 metric checklist: anisotropic surface density fix + tensor Delaunay/Frontal arms (2026-10-24, pushed `4cef4d1`, `74436ac`)
 
 `4cef4d1` (`ModelMetricSurfaceProducer.jl`): the alg-7 metric surface
@@ -72,7 +121,7 @@ mesh1d 106/106, metric surface battery 62/62, volume functional 30/30
 (one `.geo` Box testset errors on this machine's absent OCC kernel —
 pre-existing/environmental), native-initial path 68/68.
 
-### Dense curved-PLC recovery: input-proportional `maxpts` — t13 verbatim arm completes (2026-10-23, uncommitted in tree)
+### Dense curved-PLC recovery: input-proportional `maxpts` — t13 verbatim arm completes (2026-10-23, landed `9d3998e`)
 
 The t13 verbatim `Field[1].F = "4"` arm and t19 dense `NumSubEdges=1000`
 pipe volume were the same defect class: conforming boundary recovery
@@ -145,7 +194,7 @@ yet taken: spatial indexing in the pierce/coverage scans, lighter
 per-iteration topology audits, or a tiered cap beyond ~5000 input
 vertices.
 
-### UI01 parser/fltk/graphics surfaces + CLI save/high-order flags, MSH2.2 parametric/topology transport (2026-10-23, uncommitted in tree)
+### UI01 parser/fltk/graphics surfaces + CLI save/high-order flags, MSH2.2 parametric/topology transport (2026-10-23, landed `9467923`)
 
 The remaining headless session surfaces landed in
 `src/interfaces/APIParser.jl`, `APIFltk.jl`, `APIGraphics.jl` (sibling
@@ -203,9 +252,10 @@ CLI additions in `src/interfaces/CLI.jl` route through existing machinery:
   parametric metadata reach the writer; a missing classified mesh with
   MSH2.2 save flags rejects loudly. `-part_split` forwards both save
   flags to the per-partition writers.
-- Still rejected: `-0` (no model→`.geo` writer exists), `-save_entities`,
-  `-barycentric_refine` (no native split producer), BAMG anisotropics,
-  ONELAB solver client flags, matching/`Concorde` backends.
+- Still rejected: `-save_entities`, BAMG anisotropics, ONELAB solver
+  client flags, matching/`Concorde` backends. (`-0` and
+  `-barycentric_refine` subsequently landed — see the 2026-10-23 CLI
+  entry below.)
 
 `APIOnelab.jl`'s `onelab.run` stays the documented no-op for `run()` and a
 loud `ArgumentError` for any client/command — no solver-client backend
@@ -227,7 +277,7 @@ default `write_mixed_msh`/`read_mixed_msh` path, and uncommitted
 from a concurrent in-flight workstream are in the tree — attribution
 points there, not to this slice.
 
-### OPT01 face-owned (u,v) parametric sliding for Mesh.HighOrderOptimize (2026-10-22, uncommitted in tree)
+### OPT01 face-owned (u,v) parametric sliding for Mesh.HighOrderOptimize (2026-10-22, landed `eadc4bd`)
 
 The remaining OPT01 gap after the elastic stage — dim-2-owned high-order mids
 previously stayed fixed while curve-owned mids already slid along their CAD
@@ -275,7 +325,7 @@ strictly improved) plus a `=0` bitwise no-op.  `test/meshing/
 highorder_optimize_test.jl` 224/224 unchanged.  Not committed per the
 current request; OPT01 remainder: a truthful Pyr14 bound if one exists.
 
-### t13 discrete pipeline: exact-CDT fill admitted; volume boundary write-back remains (2026-10-22, uncommitted in tree)
+### t13 discrete pipeline: exact-CDT fill admitted; volume boundary write-back landed `874fd4e` (2026-10-22, landed `2e242a1`)
 
 The t13 pipeline (`Merge "t13_data.stl" → ClassifySurfaces → CreateGeometry →
 Surface Loop → Volume → Mesh 3`) advanced past its volume-fill recovery blocker.
@@ -328,7 +378,7 @@ throws `lost actual boundary Surface[2] cell 1` on the subdivided mesh) so the
 gap has a small reproduction; flip it to a write-back success assertion when
 the feature lands.
 
-### UI01 plugin batch 2: MakeSimplex/ModifyComponents/FieldFromAmplitudePhase/ExtractEdges/Vorticity (2026-10-21, uncommitted in tree)
+### UI01 plugin batch 2: MakeSimplex/ModifyComponents/FieldFromAmplitudePhase/ExtractEdges/Vorticity (2026-10-21, landed `83763580`)
 
 Five `API.plugin` catalog entries landed in `src/interfaces/APIPlugins.jl`
 (+605 lines, all behind `SESSION_PLUGINS`/`_PLUGINS`):
@@ -371,7 +421,7 @@ FieldFromAmplitudePhase identical two-step values (−2.232051/−0.133975 on
 the constant-fixture box). 30 plugins registered; ~11 remain (the catalog
 claim is bounded, not exhaustive parity).
 
-### UI01 plugin batch 3: grid probes, integrators, remeshers, model plugins (2026-10-21, uncommitted in tree)
+### UI01 plugin batch 3: grid probes, integrators, remeshers, model plugins (2026-10-21, landed `3915f8b`)
 
 Eighteen upstream plugin registrations plus shared-machinery fixes in
 `src/interfaces/APIPlugins.jl` — **48 plugins registered** (47 upstream +

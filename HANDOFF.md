@@ -5361,7 +5361,7 @@ unchanged: tangent-contact sections still reject
 exact-Delaunay provenance snapshot can still escalate to ~20 GB on
 rim-heavy curved fragments (memory-bound, tracked open item).
 
-## Working-tree increment (MET03 octree rewrite, uncommitted)
+## Working-tree increment (MET03 octree rewrite, landed `011e4dc`)
 
 **`AutomaticMeshSizeField` storage/evaluation rewritten as a genuine adaptive
 octree** (`src/fields/SizeFieldCatalog.jl`, `_AutoOctree` at line ~4410). The
@@ -5401,7 +5401,7 @@ rejection unchanged. Files: `src/fields/SizeFieldCatalog.jl`,
 `test/fields/sizefield_test.jl`, `STATUS.md`, `DEVIN_HANDOFF.md`,
 `HANDOFF.md`.
 
-## Working-tree increment (MATCH01 solver-state boundary, uncommitted)
+## Working-tree increment (MATCH01 solver-state boundary, landed `d2d17ad`)
 
 **Retained native `S` records fully decoded; the verified alignment boundary
 is now pinned corpus-wide; multi-cycle tie-context residual stays open.**
@@ -5453,7 +5453,7 @@ unrelated failures reproduce identically with the change stashed:
 `api_native_recombine_adapter_test.jl` 36 fails (expects `ErrorException`,
 `APITaggedCache` throws `ArgumentError` — unrelated files).
 
-## Working-tree increment (`.geo` `PartitionMesh`, uncommitted)
+## Working-tree increment (`.geo` `PartitionMesh`, landed `26a4eb2`)
 
 **`PartitionMesh n;` now executes in `.geo` scripts end to end** — the
 session-API `mesh.partition(n)` equivalent. `GeoExec` gains

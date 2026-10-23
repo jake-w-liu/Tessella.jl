@@ -15,7 +15,7 @@ is the go/no-go gate used by the volume mesher.
 module Heal
 
 using ..MeshTypes: Mesh, nnodes, ntris, ntets, node, triangle_area,
-                   boundary_edges, _tri_topology, _assert_mesh_structure
+                   _tri_topology, _assert_mesh_structure
 
 export SurfaceReport, surface_diagnostics, is_meshable
 
