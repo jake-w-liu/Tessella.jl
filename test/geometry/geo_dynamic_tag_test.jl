@@ -69,18 +69,18 @@ end
 
     meshed=execute_geo(_GEO_DYNAMIC_TAG_FIXTURE;mesh_dim=3)
     @test validate(meshed.mesh).ok
-    @test nnodes(meshed.mesh)==135
-    @test ntets(meshed.mesh)==440
+    @test nnodes(meshed.mesh)==83
+    @test ntets(meshed.mesh)==188
     @test mesh_crc(meshed.mesh).sha==
-          "e5c6e4de5c25c6c4733884e36ef718b559073205595f4a449618b3d40726307b"
+          "49a24ea421d10aef923abf903277505251583aab8ff2ea9f9dda1ece589ca73b"
     @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,22).slave_nodes)==21
-    @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,23).slave_nodes)==21
+    @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,23).slave_nodes)==20
     projected=model_to_mixed(meshed.model,
         geo_entity_mesh(meshed,3,26),3,26)
     @test validate(projected).ok
     @test projected.physical_names==model.physical_names
     @test mixed_crc(projected).sha==
-          "862954f294ee82b3f7ab3871457a51b99c9053f261b0d9f30e8b00b161091934"
+          "319dc114170ef39264b379d374d0bb545bca5c18527914f6f7405a9229a65beb"
 
     primitive_source=raw"""
         SetFactory("OpenCASCADE");

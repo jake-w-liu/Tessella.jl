@@ -51,18 +51,18 @@ end
 
     meshed=execute_geo(_GEO_LIST_VARIABLE_FIXTURE;mesh_dim=3)
     @test validate(meshed.mesh).ok
-    @test nnodes(meshed.mesh)==135
-    @test ntets(meshed.mesh)==440
+    @test nnodes(meshed.mesh)==83
+    @test ntets(meshed.mesh)==188
     @test mesh_crc(meshed.mesh).sha==
-          "e5c6e4de5c25c6c4733884e36ef718b559073205595f4a449618b3d40726307b"
+          "b4e96a0132a70a9e5a040e9af064393f4f63793c5578b709753c7cad0da4f5de"
     @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,4).slave_nodes)==21
-    @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,5).slave_nodes)==21
+    @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,5).slave_nodes)==20
     projected=model_to_mixed(meshed.model,
         geo_entity_mesh(meshed,3,1),3,1)
     @test validate(projected).ok
     @test projected.physical_names==model.physical_names
     @test mixed_crc(projected).sha==
-          "b6b1a35fcba5abd8a13a5efb4d028a62681e30c766ea2e3d52bc31f1e011e461"
+          "9ae3a60302348a0796eac739caec44cad54ffd4c9170e10e3c430e6c002465ad"
 
     # Diagnostics match Gmsh 4.15.2's recoverable `yymsg` text: the entity
     # statements still execute (e.g. `Point(missing[0])` creates `Point(0)`

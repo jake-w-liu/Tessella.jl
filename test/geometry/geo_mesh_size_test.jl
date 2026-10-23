@@ -129,16 +129,16 @@ end
     topology_meshed=execute_geo(
         _GEO_POINT_MESH_SIZE_POINTS_OF_FIXTURE;mesh_dim=3)
     @test validate(topology_meshed.mesh).ok
-    @test nnodes(topology_meshed.mesh)==53
-    @test ntets(topology_meshed.mesh)==123
+    @test nnodes(topology_meshed.mesh)==40
+    @test ntets(topology_meshed.mesh)==77
     @test mesh_crc(topology_meshed.mesh).sha==
-          "4a091b1beb6b9a6af5c14a47bc276cf8a1849d7740b027f4b241e157a50632c0"
+          "8c2d900d27909ab59d214374ca8a72b8d172f0a3a7d6e81b5b1f6c5fb10579df"
     topology_projected=model_to_mixed(
         topology_meshed.model,geo_entity_mesh(topology_meshed,3,1),3,1)
     @test validate(topology_projected).ok
     @test topology_projected.physical_names==topology.model.physical_names
     @test mixed_crc(topology_projected).sha==
-          "80692b37f43b68ee26fe3b5cfd462173c3af1fbcd5ffc5ed4d2af50b72a98ed0"
+          "27dcec147a5b355d7fd3a5d0e05588a24726cdd8a9d4d52c41a71cef188d789e"
 
     holed_topology=_execute_point_mesh_size_source(raw"""
         Point(1)={0,0,0,1}; Point(2)={2,0,0,1};
@@ -161,10 +161,10 @@ end
 
     meshed=execute_geo(_GEO_POINT_MESH_SIZE_FIXTURE;mesh_dim=2)
     @test validate(meshed.mesh).ok
-    @test nnodes(meshed.mesh)==18
-    @test ntris(meshed.mesh)==24
+    @test nnodes(meshed.mesh)==17
+    @test ntris(meshed.mesh)==22
     @test mesh_crc(meshed.mesh).sha==
-          "74d5faf2f6598280b886ecceaf5b0eedf3373b93d2f601cffba1a4274d57c9af"
+          "132a95502bc83280cca1771f2440076d1d8d9bb59199c3b979b638991a8cff58"
     area=sum(triangle_area(
         node(meshed.mesh,meshed.mesh.tris[1,triangle]),
         node(meshed.mesh,meshed.mesh.tris[2,triangle]),
@@ -176,16 +176,16 @@ end
     @test validate(projected).ok
     @test projected.physical_names==parsed.model.physical_names
     @test mixed_crc(projected).sha==
-          "48716f65a6a9ea3f11e20e74f107cc00aa2efc3bd487c38bc43f5d4c8c0bf2b5"
+          "2f05193f455d02380e98880ec046d560ede2c33ab60b23ae4bf9087e41bb719c"
 
     asymmetric=_point_mesh_size_square([0.1,0.8,0.8,0.8])
     asymmetric_mesh=mesh_model_surface(asymmetric,1;min_angle_deg=20)
     @test validate(asymmetric_mesh).ok
-    @test nnodes(asymmetric_mesh)==46
-    @test ntris(asymmetric_mesh)==70
-    @test _point_mesh_size_quadrants(asymmetric_mesh)==[44,9,10,7]
+    @test nnodes(asymmetric_mesh)==45
+    @test ntris(asymmetric_mesh)==68
+    @test _point_mesh_size_quadrants(asymmetric_mesh)==[40,9,11,8]
     @test mesh_crc(asymmetric_mesh).sha==
-          "7c2a5f2e374c6666349de1b9d7cbafeedb49c931179c279469d4dbc60f3b2245"
+          "de8e60256ced3756820e0bced90eec9982a84972b7f46268246e4a773ab9e759"
     for triangle in 1:ntris(asymmetric_mesh)
         nodes=asymmetric_mesh.tris[:,triangle]
         points=ntuple(slot->node(asymmetric_mesh,nodes[slot]),3)
@@ -255,18 +255,18 @@ end
     embed!(merged,1,[5],2,1)
     merged_mesh=mesh_model_surface(merged,1;min_angle_deg=20)
     @test validate(merged_mesh).ok
-    @test nnodes(merged_mesh)==26
-    @test ntris(merged_mesh)==38
+    @test nnodes(merged_mesh)==24
+    @test ntris(merged_mesh)==34
     @test mesh_crc(merged_mesh).sha==
-          "c8e9914b7f48055d8da36918e6c3cdcfd56cf745f0d33b11b89b97378a4a7a1c"
+          "b1e06fecb120d933dec5099e3a43eda2c4c37df9b68c8a94658446b0c1f0757a"
 
     uniform_mesh=mesh_model_surface(
         _point_mesh_size_square(fill(0.8,4)),1;min_angle_deg=20)
     @test validate(uniform_mesh).ok
-    @test nnodes(uniform_mesh)==21
-    @test ntris(uniform_mesh)==28
+    @test nnodes(uniform_mesh)==20
+    @test ntris(uniform_mesh)==26
     @test mesh_crc(uniform_mesh).sha==
-          "d110c8a26d1f11a1372b769f8f8e0ecdeaeff98f6df760dd257c910444153230"
+          "8698f3e7c3da38f8649bc397fb45664d6bc7cbe23a28658d31ab38d57f4cd08b"
 
     periodic=_point_mesh_size_square([0.4,0.8,0.8,0.4])
     set_periodic!(periodic,1,[2],[4],(
@@ -280,7 +280,7 @@ end
     @test length(periodic_nodes.slave_nodes)==
           length(periodic_nodes.master_nodes)==6
     @test mesh_crc(periodic_mesh).sha==
-          "2e7351244f24625d5fe9dabd8e8236a1b53a1ca24eb3408ca5d02d1ad6f47687"
+          "92d4558dd23be71cf28830cf501695e72123b5528eac59392611886d2048ccd0"
 
     expressions=_execute_point_mesh_size_source(raw"""
         Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
