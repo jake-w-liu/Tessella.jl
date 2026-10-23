@@ -6612,22 +6612,35 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
     end
     # `Delete Field[i]` drops a mesh field from the live exec map;
     # `FieldManager::deleteField` reports a `Msg::Error` when the id is missing.
-    # `Delete View[i]` reports an unknown view and any other indexed name an
-    # unknown command in Gmsh.
+    # `Delete View[i]` erases a post-processing view from the exec list and
+    # reports an unknown view when the index is out of range; any other
+    # indexed name is an unknown command in Gmsh.
     if (fm=match(
             r"^([A-Za-z_][A-Za-z0-9_]*|\"[^\"]*\")\s*\[\s*(.*?)\s*\]\s*;?$",
             s))!==nothing
         base=String(strip(fm.captures[1],'"'))
         base=="Field" && return _geo_exec_delete_field!(context,fm.captures[2])
-        base=="View" && throw(ArgumentError(
-            "$caller: unknown view $(strip(fm.captures[2]))"))
+        if base=="View"
+            index=_geo_int_value(
+                _geo_eval_numeric(fm.captures[2],context,caller),caller)
+            store=get(_GEO_EXEC_VIEWS,context,nothing)
+            (store===nothing || !(0<=index<length(store))) &&
+                throw(ArgumentError("$caller: unknown view $index"))
+            deleteat!(store,index+1)
+            return nothing
+        end
         throw(ArgumentError("$caller: unknown command 'Delete $base'"))
     end
-    # `Delete Empty Views` clears empty post-processing views — none exist
-    # during `.geo` execution; any other two-word form is an unknown command.
+    # `Delete Empty Views` clears post-processing views carrying no records;
+    # any other two-word form is an unknown command.
     if (tm=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;?$",
                  s))!==nothing
-        tm.captures[1]=="Empty" && tm.captures[2]=="Views" && return nothing
+        if tm.captures[1]=="Empty" && tm.captures[2]=="Views"
+            store=get(_GEO_EXEC_VIEWS,context,nothing)
+            store===nothing ||
+                filter!(v->!(isempty(v.elements)&&isempty(v.texts)),store)
+            return nothing
+        end
         throw(ArgumentError(
             "$caller: unknown command 'Delete $(tm.captures[1]) $(tm.captures[2])'"))
     end
@@ -8223,6 +8236,12 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         context.mesh,context.mesh_node_owner=
             _geo_mesh_model(m,Int(d),context)
         return
+    elseif (mm=match(
+            r"^(Save|Print)\s+View\s*\[\s*(.*?)\s*\]\s+(.*?)\s*;?\s*$",
+            line))!==nothing
+        _geo_exec_save_view!(mm.captures[1],mm.captures[2],mm.captures[3],
+                             context)
+        return
     elseif (mm=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+(.*?)\s*;?\s*$",line)) !== nothing &&
            mm.captures[1] in _GEO_COMMAND_WORDS
         _geo_exec_command!(m,mm.captures[1],mm.captures[2],context,
@@ -8237,8 +8256,22 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         _geo_exec_background_mesh_view!(
             mm.captures[1],context,allocator_state)
         return
-    elseif match(Regex("^(Combine|Alias|AliasWithOptions|Save\\s+View|" *
-        "CutMesh|SplitMesh|SendToServer)\\b"),line)!==nothing
+    elseif (mm=match(
+            r"^(Alias|AliasWithOptions)\s+View\s*\[\s*(.*?)\s*\]\s*;?\s*$",
+            line))!==nothing
+        _geo_exec_alias_view!(mm.captures[1],mm.captures[2],context)
+        return
+    elseif (mm=match(r"^Combine\s+(.*?)\s*;?\s*$",line))!==nothing
+        _geo_exec_combine!(mm.captures[1],context)
+        return
+    elseif match(r"^SendToServer\b",line)!==nothing
+        # Not a grammar verb in Gmsh 4.15.2 — upstream reports an unknown
+        # command rather than a view operation.
+        throw(ArgumentError(
+            "execute_geo: unknown command 'SendToServer'"))
+    elseif match(r"^(CutMesh|SplitMesh)\b",line)!==nothing
+        # Legacy `CutMesh <fexpr>`/`SplitMesh <fexpr>` mesh-surgery verbs —
+        # the cutting backend is not part of the executor surface.
         throw(ArgumentError(
             "execute_geo: post-processing view operations are not supported: $line"))
     elseif match(r"^Levelset\b",line)!==nothing
@@ -11293,6 +11326,149 @@ function _geo_plugin_run!(api,name,m,context,caller)
             end
         end
     end
+    return nothing
+end
+
+# `Save View[i] "file";` — upstream `PView::write` exports one post-processing
+# view; the execution view list serializes the parsed `.pos` record table.
+# `Print` is not a view verb upstream ("Unknown operation 'Print' on view N").
+function _geo_exec_save_view!(kind::AbstractString,index_src::AbstractString,
+                              file_src::AbstractString,
+                              context::_GeoNumericContext)
+    caller="execute_geo: $kind View"
+    index=_geo_int_value(
+        _geo_eval_numeric(index_src,context,caller),caller)
+    store=get(_GEO_EXEC_VIEWS,context,nothing)
+    (store===nothing || !(0<=index<length(store))) && throw(ArgumentError(
+        "$caller: unknown view $index"))
+    kind=="Print" && throw(ArgumentError(
+        "$caller: unknown operation 'Print' on view $index"))
+    file=_geo_fix_relative_path(context.file_name,
+        _geo_eval_string(file_src,context,caller))
+    extension=lowercase(splitext(file)[2])
+    extension==".pos" || throw(ArgumentError(
+        "$caller: view export writes `.pos` records (got '$file')"))
+    post=getfield(parentmodule(@__MODULE__),:Post)
+    post.write_pos(file,store[index+1])
+    return nothing
+end
+
+# `Alias View[i]`/`AliasWithOptions View[i]` append an independent copy of
+# the indexed view to the exec list (upstream `new PView(*src)` — the alias
+# keeps the source name and records; `AliasWithOptions` additionally copies
+# the option table, which PosView views do not carry).
+function _geo_exec_alias_view!(kind::AbstractString,index_src::AbstractString,
+                               context::_GeoNumericContext)
+    caller="execute_geo: $kind"
+    index=_geo_int_value(
+        _geo_eval_numeric(index_src,context,caller),caller)
+    store=get(_GEO_EXEC_VIEWS,context,nothing)
+    (store===nothing || !(0<=index<length(store))) && throw(ArgumentError(
+        "$caller: unknown view $index"))
+    post=getfield(parentmodule(@__MODULE__),:Post)
+    src=store[index+1]
+    push!(store,post.PosView(src.name;
+        tag=src.tag,time=copy(src.time),
+        elements=copy(src.elements),texts=copy(src.texts),
+        interpolations=[copy(entry) for entry in src.interpolations],
+        scheme_positions=copy(src.scheme_positions)))
+    return nothing
+end
+
+# `Combine ElementsFromAllViews|ElementsByViewName|TimeStepsByViewName` —
+# upstream `PView::combine`. Element rows concatenate into `all_Combine` or
+# per-name `{name}_Combine` views; the time-step mode instead zips aligned
+# element rows and appends one value step per source view.
+function _geo_combine_elements(views,combine_timesteps::Bool,caller,name)
+    if !combine_timesteps
+        elements=Any[]
+        for v in views
+            append!(elements,v.elements)
+        end
+        return elements,copy(views[1].time)
+    end
+    n=length(views[1].elements)
+    all(v->length(v.elements)==n,views) || throw(ArgumentError(
+        "$caller: views named $(repr(name)) carry different element " *
+        "counts and cannot be combined as time steps"))
+    elements=Any[]
+    for j in 1:n
+        e0=views[1].elements[j]
+        vals=e0.values
+        for k in 2:length(views)
+            e=views[k].elements[j]
+            # Upstream zips rows by position — the first view's geometry is
+            # authoritative; only the record family must be compatible.
+            (e.kind==e0.kind && size(e.values,1)==size(e0.values,1) &&
+             size(e.values,2)==size(e0.values,2)) ||
+                throw(ArgumentError(
+                    "$caller: element row $j does not align across the " *
+                    "views named $(repr(name))"))
+            vals=cat(vals,e.values;dims=3)
+        end
+        push!(elements,typeof(e0)(e0.kind,e0.coords,vals;
+            suffix=e0.suffix,scheme=e0.scheme))
+    end
+    # Each source contributes one step per its own step count. A view with no
+    # explicit time table contributes its index (upstream emits implicit step
+    # numbers); explicit `TIME{...}` values pass through.
+    time=Float64[]
+    for (k,v) in enumerate(views)
+        append!(time,(isempty(v.time) || v.time==[0.0]) ?
+            Float64[k-1] : v.time)
+    end
+    return elements,time
+end
+
+function _geo_combine_view(post,views,name,combine_timesteps::Bool,caller)
+    elements,time=_geo_combine_elements(views,combine_timesteps,caller,name)
+    texts=Any[];interpolations=Any[];scheme_positions=Int[]
+    for v in views
+        append!(texts,v.texts)
+        append!(interpolations,[copy(entry) for entry in v.interpolations])
+        append!(scheme_positions,v.scheme_positions)
+    end
+    return post.PosView(name;
+        time=time,elements=elements,texts=texts,
+        interpolations=interpolations,scheme_positions=scheme_positions)
+end
+
+function _geo_exec_combine!(mode_src::AbstractString,
+                            context::_GeoNumericContext)
+    caller="execute_geo: Combine"
+    mode=strip(mode_src)
+    mode in ("ElementsFromAllViews","ElementsByViewName",
+             "TimeStepsByViewName") || throw(ArgumentError(
+        "$caller: unknown 'Combine' command $(repr(mode))"))
+    store=get(_GEO_EXEC_VIEWS,context,nothing)
+    (store===nothing || isempty(store)) && return nothing
+    post=getfield(parentmodule(@__MODULE__),:Post)
+    if mode=="ElementsFromAllViews"
+        combined=_geo_combine_view(post,store,"all_Combine",false,caller)
+        empty!(store);push!(store,combined)
+        return nothing
+    end
+    # By-name modes: single-name views stay in place; each multi-view name
+    # produces one appended `{name}_Combine` view in encounter order.
+    order=String[];groups=Dict{String,Vector{Any}}()
+    for v in store
+        if !haskey(groups,v.name)
+            groups[v.name]=Any[];push!(order,v.name)
+        end
+        push!(groups[v.name],v)
+    end
+    singles=Any[];combined_views=Any[]
+    for name in order
+        g=groups[name]
+        if length(g)==1
+            push!(singles,g[1])
+        else
+            push!(combined_views,_geo_combine_view(post,g,name*"_Combine",
+                mode=="TimeStepsByViewName",caller))
+        end
+    end
+    empty!(store)
+    append!(store,singles);append!(store,combined_views)
     return nothing
 end
 

@@ -24,6 +24,44 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### `.geo` view ops + `Plugin(...)` dispatch + `DefineConstant` whitespace grammar (2026-10-23, landed `1dfc9e4`, `72fd7a1`, uncommitted view-ops slice)
+
+`1dfc9e4` — `DefineConstant`/`UndefineConstant` entries now split on
+whitespace/newline boundaries as well as commas (upstream accepts
+comma-less `name = spec` sequences — the t20/t21 tutorial blocks), with
+strict `,,` rejection and nested-brace/string preservation;
+`geo_define_constant_test.jl` 8/8.
+
+`72fd7a1` — `Plugin(Name).Opt = v` / `Plugin(Name).Run` dispatch through
+the API plugin registry: options share the API spec table, runs swap
+`_GEO_EXEC_VIEWS` into `SESSION_VIEWS` under `STATE_LOCK` (execution index
+0 ↦ session tag 0), bind the model/mesh as the current slot so mesh
+plugins such as `SimplePartition` act on the mid-file mesh, harvest
+published views back in tag order, and transport a produced
+`_MeshPartition` through the `PartitionMesh` production path (saved MSH
+emits `$PartitionedEntities`). All session globals restore in `finally`.
+t9 verbatim executes (Isosurface 640 records = oracle, CutPlane, two
+Annotate T2 texts on view 0); Annotate now pads T2/T3 records to the
+4-wide `[x,y,z,style]` session layout. `GeoExecution` gained a `views`
+carrier. `geo_plugin_test.jl` 24/24 under `--compile=min`.
+
+Uncommitted slice — post-processing view verbs on the exec store
+(oracle-verified against Gmsh 4.15.2): `Save View[i] "f.pos"` exports the
+parsed record table byte-identically (`Print View[i]` stays an upstream
+"Unknown operation" error, thrown only after the index resolves);
+`Delete View[i]` erases in place and `Delete Empty Views` drops
+record-less entries (out-of-range reports "unknown view N" like
+upstream); `Alias View[i]`/`AliasWithOptions View[i]` append an
+independent copy; `Combine ElementsFromAllViews` collapses to
+`all_Combine`, `ElementsByViewName` merges multi-view names into
+appended `{name}_Combine` while singletons keep position, and
+`TimeStepsByViewName` zips aligned rows into step columns emitting
+implicit `TIME{0,1,...}` (byte-identical `a_Combine` probe). Combining
+zero views is a no-op. Remaining rejects reclassified: `SendToServer` is
+an unknown command upstream too; `CutMesh`/`SplitMesh` take an FExpr arg
+but are legacy mesh-surgery verbs outside the executor surface.
+`geo_plugin_test.jl` +29 assertions (53/53 under `--compile=min`).
+
 ### CLI `-0`/`-barycentric_refine`/`-convert .geo` + `.geo_unrolled` serializer (2026-10-23, uncommitted in tree)
 
 `src/core/Elements.jl` `barycentric_refine` subdivides linear simplices

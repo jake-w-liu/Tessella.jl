@@ -122,3 +122,136 @@ ST(0,0,0, 1,0,0, 0,1,0){1.0, 2.0, 3.0};
     # The session view store is untouched by `.geo` plugin runs.
     @test isempty(Tessella.API.SESSION_VIEWS)
 end
+
+@testset ".geo Save/Print/Delete View" begin
+    dir=mktempdir()
+    write(joinpath(dir,"in.pos"),"""
+        View "v0" {
+        SP(0,0,0){1.0};
+        SP(1,0,0){2.0};
+        };
+        View "v1" {
+        };
+        """)
+    geo=joinpath(dir,"t.geo")
+    write(geo,"""
+        Merge "in.pos";
+        Save View[0] "out0.pos";
+        Save View[1] "out1.pos";
+        Delete View[0];
+        """)
+    ex=execute_geo(geo)
+    @test length(ex.views)==1
+    # `Save View` exports `.pos` records from the exec view list — including
+    # an empty view's name-only table (upstream writes the same block).
+    saved=read(joinpath(dir,"out0.pos"),String)
+    @test occursin("View \"v0\"",saved)
+    @test occursin("SP(0,0,0){1};",saved)
+    @test occursin("SP(1,0,0){2};",saved)
+    printed=read(joinpath(dir,"out1.pos"),String)
+    @test printed=="View \"v1\" {\n};\n" || occursin("View \"v1\"",printed)
+    # `Delete View[0]` left only the (now index-0) empty view.
+    @test ex.views[1].name=="v1"
+    @test isempty(ex.views[1].elements)
+    @test_throws ArgumentError _execute_geo_source(
+        "Merge \"in.pos\";\nSave View[9] \"x.pos\";",files=Dict("in.pos"=>"View \"v\" {\n};\n"))
+    @test_throws ArgumentError _execute_geo_source(
+        "Save View[0] \"x.pos\";")
+    @test_throws ArgumentError _execute_geo_source(
+        "Merge \"in.pos\";\nDelete View[5];",files=Dict("in.pos"=>"View \"v\" {\n};\n"))
+    @test_throws ArgumentError _execute_geo_source(
+        "Merge \"in.pos\";\nSave View[0] \"x.txt\";",files=Dict("in.pos"=>"View \"v\" {\n};\n"))
+    # Upstream: `Print` is not a view verb — "Unknown operation 'Print' on
+    # view N" — but only after the index resolves to a real view.
+    @test_throws ArgumentError _execute_geo_source(
+        "Merge \"in.pos\";\nPrint View[0] \"x.pos\";",files=Dict("in.pos"=>"View \"v\" {\n};\n"))
+    @test_throws ArgumentError _execute_geo_source(
+        "Print View[9] \"x.pos\";")
+    # `Delete Empty Views` drops only the record-less entries.
+    geo2=joinpath(dir,"t2.geo")
+    write(geo2,"""
+        Merge "in.pos";
+        Delete Empty Views;
+        """)
+    ex2=execute_geo(geo2)
+    @test length(ex2.views)==1
+    @test ex2.views[1].name=="v0"
+end
+
+@testset ".geo Alias/Combine views" begin
+    dir=mktempdir()
+    # Two views named "a" plus singleton "b" — mirrors the upstream probe:
+    # by-name combine keeps the singleton first, then "a_Combine".
+    write(joinpath(dir,"in.pos"),"""
+        View "a" {
+        SP(0,0,0){1.0};
+        };
+        View "b" {
+        SP(1,1,1){2.0};
+        };
+        View "a" {
+        SP(2,2,2){3.0};
+        };
+        """)
+
+    # `Alias View[i]`/`AliasWithOptions View[i]` append an independent copy.
+    geo=joinpath(dir,"alias.geo")
+    write(geo,"""
+        Merge "in.pos";
+        Alias View[0];
+        AliasWithOptions View[0];
+        Save View[4] "alias.pos";
+        """)
+    ex=execute_geo(geo)
+    @test length(ex.views)==5
+    @test ex.views[4].name=="a"
+    @test length(ex.views[4].elements)==1
+    @test read(joinpath(dir,"alias.pos"),String)=="View \"a\" {\nSP(0,0,0){1};\n};\n"
+    @test_throws ArgumentError _execute_geo_source("Alias View[0];")
+    @test_throws ArgumentError _execute_geo_source(
+        "Merge \"in.pos\";\nAlias View[9];",files=Dict("in.pos"=>"View \"v\" {\n};\n"))
+
+    # `Combine ElementsByViewName`: singletons stay, multi-view names merge.
+    geo=joinpath(dir,"byname.geo")
+    write(geo,"""
+        Merge "in.pos";
+        Combine ElementsByViewName;
+        Save View[0] "s0.pos";
+        Save View[1] "s1.pos";
+        """)
+    ex=execute_geo(geo)
+    @test [v.name for v in ex.views]==["b","a_Combine"]
+    @test read(joinpath(dir,"s1.pos"),String)==
+        "View \"a_Combine\" {\nSP(0,0,0){1};\nSP(2,2,2){3};\n};\n"
+
+    # `Combine ElementsFromAllViews` collapses everything into "all_Combine".
+    geo=joinpath(dir,"all.geo")
+    write(geo,"""
+        Merge "in.pos";
+        Combine ElementsFromAllViews;
+        Save View[0] "all.pos";
+        """)
+    ex=execute_geo(geo)
+    @test length(ex.views)==1
+    @test read(joinpath(dir,"all.pos"),String)==
+        "View \"all_Combine\" {\nSP(0,0,0){1};\nSP(1,1,1){2};\nSP(2,2,2){3};\n};\n"
+
+    # `Combine TimeStepsByViewName` zips aligned rows into step columns —
+    # byte-identical to the upstream `a_Combine` table.
+    geo=joinpath(dir,"ts.geo")
+    write(geo,"""
+        Merge "in.pos";
+        Combine TimeStepsByViewName;
+        Save View[1] "ts.pos";
+        """)
+    ex=execute_geo(geo)
+    @test [v.name for v in ex.views]==["b","a_Combine"]
+    @test read(joinpath(dir,"ts.pos"),String)==
+        "View \"a_Combine\" {\nTIME{0,1};\nSP(0,0,0){1,3};\n};\n"
+
+    @test_throws ArgumentError _execute_geo_source(
+        "Merge \"in.pos\";\nCombine BogusMode;",files=Dict("in.pos"=>"View \"v\" {\n};\n"))
+    # Combining zero views is a no-op upstream.
+    ex0=_execute_geo_source("Combine ElementsFromAllViews;")
+    @test isempty(ex0.views)
+end

@@ -10755,6 +10755,9 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
             if (fm=match(r"^([A-Za-z_][A-Za-z0-9_]*|\"[^\"]*\")\s*\[\s*(.*?)\s*\]\s*;?$",
                          tail))!==nothing
                 base=String(strip(fm.captures[1],'"'))
+                # `Delete View[i]` erases an exec-layer post-processing view —
+                # no params state. `Delete Field[i]` updates the field tables.
+                base=="View" && return
                 base=="Field" || throw(ArgumentError(
                     "read_geo_params: unknown command 'Delete $base[...]'"))
                 tag=_geo_signed_gmsh_int_value(
