@@ -31,6 +31,24 @@
 - `7e65e3d` recover_cdt orients emitted tets on Float64 output coordinates —
   fixes manufactured negative-orientation cells (20/20).
 
+### In-flight workers (launched 2026-10-23, disjoint file ownership)
+
+If the session dropped them, their diffs survive uncommitted — verify each
+independently (its own new test file + affected regressions), then commit only
+the owned files:
+
+- PLC-recovery: `src/meshing/RecoverCDT.jl`, `src/geometry/ModelVolumeAlgorithms.jl`,
+  `src/geometry/ModelNativeInitialTet.jl`, `test/meshing/` — dense curved-PLC
+  recovery for t13-field / t19-density.
+- MET01/02: `src/meshing/Metric*.jl`, `src/geometry/ModelMetric*.jl`,
+  `src/geometry/ModelMeshingAttributes.jl`, `src/geometry/ModelGmshSurfaceProducer.jl`,
+  `src/interfaces/APISizeFields*.jl`/`APIField*.jl`.
+- PAR01: `src/interfaces/APIParallel*.jl`, `src/parallel/`.
+- CAD04/05: `src/geometry/ModelBoolean.jl`, `ModelNURBS*.jl`,
+  `ModelOCCCurveShapes.jl`, `ModelOCCLoft.jl`, `ModelOCCTransforms.jl`.
+- UI01/CLI: `src/interfaces/CLI.jl`, `APIOnelab.jl`, `APIParser*.jl`,
+  `APIFltk*.jl`, `APIGraphics*.jl`, `IO.jl`, `GeoOptionTables.jl`.
+
 ### Genuinely remaining (next session)
 
 - Dense curved-PLC recovery capacity: t13 `Field[1].F="4"` edge (~2,470 facets)
