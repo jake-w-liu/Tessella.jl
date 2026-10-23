@@ -252,9 +252,9 @@ CLI additions in `src/interfaces/CLI.jl` route through existing machinery:
   parametric metadata reach the writer; a missing classified mesh with
   MSH2.2 save flags rejects loudly. `-part_split` forwards both save
   flags to the per-partition writers.
-- Still rejected: `-save_entities`, BAMG anisotropics, ONELAB solver
-  client flags, matching/`Concorde` backends. (`-0` and
-  `-barycentric_refine` subsequently landed — see the 2026-10-23 CLI
+- Still rejected: BAMG anisotropics, ONELAB solver client flags,
+  matching/`Concorde` backends. (`-0`, `-barycentric_refine` and the
+  `-save_entities` alias subsequently landed — see the 2026-10-23 CLI
   entry below.)
 
 `APIOnelab.jl`'s `onelab.run` stays the documented no-op for `run()` and a

@@ -51,7 +51,7 @@ Usage: tessella file.geo [-1|-2|-3] [-o output.msh] [-format msh2|msh4] [-bin]
        [-clextend n] [-smooth n] [-algo del2d|front2d|del3d] [-quad]
        [-optimize] [-optimize_netgen] [-optimize_threshold value]
        [-optimize_ho|-hoOptimize] [-ho_min v] [-ho_max v] [-ho_nlayers v]
-       [-save_parametric|-parametric] [-save_topology]
+       [-save_parametric|-parametric] [-save_topology|-save_entities]
        [-save_all] [-nopopup] [-v int] [-nt int] [-setnumber name value]
        [-setstring name value] [-setlist name n v1 ... vn] [-string str]
        [-option file.geo]
@@ -73,8 +73,8 @@ without -part it is inert, like upstream Mesh.PartitionSplitMeshFiles.
 -setnumber/-setstring/-setlist and -string/-option act as .geo parser input
 before the input file; on non-.geo inputs only `-setnumber` option names
 (Family.Member) apply, through the session option table.
--save_parametric/-parametric and -save_topology honor Mesh.SaveParametric and
-Mesh.SaveTopology on MSH 2.2 and MSH 4.1 output (parametric node records and
+-save_parametric/-parametric and -save_topology/-save_entities honor
+Mesh.SaveParametric and Mesh.SaveTopology on MSH 2.2 and MSH 4.1 output (parametric node records and
 topology-only \$Entities, matching Gmsh 4.15.2). -optimize_ho/-hoOptimize and
 the -ho_min/-ho_max/-ho_nlayers options drive the session high-order
 relocation optimizer. -barycentric_refine subdivides the current mesh's
@@ -117,6 +117,8 @@ const _BOOLEAN_FLAGS=Dict(
     "-save_parametric"=>"Mesh.SaveParametric",
     "-parametric"=>"Mesh.SaveParametric",
     "-save_topology"=>"Mesh.SaveTopology",
+    # Upstream `-save_entities` aliases `-save_topology` (same CTX store).
+    "-save_entities"=>"Mesh.SaveTopology",
     "-optimize_ho"=>"Mesh.HighOrderOptimize",
     "-hoOptimize"=>"Mesh.HighOrderOptimize",
     "-nopopup"=>"General.NoPopup",
@@ -136,7 +138,6 @@ const _ALGORITHMS=Dict(
 # generic "unsupported flag" error (which stays for genuinely unknown words).
 const _REJECTED_FLAGS=Dict{String,String}(
     "-4"=>"adaptive meshing (batch mode 4) is not implemented",
-    "-save_entities"=>"unrolled .geo entity output is not implemented",
     "-switch_tags"=>"element tag switching is not implemented",
     "-preserve_numbering_msh2"=>"MSH2 element-number preservation is not implemented",
     "-preserveNumberingMsh2"=>"MSH2 element-number preservation is not implemented",

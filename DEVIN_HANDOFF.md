@@ -129,9 +129,13 @@ the owned files:
   explicit because `collect`'s `return_types` query on `_convert_file`
   dragged `execute_geo` into pathological inference under `--compile=min`.
   SaveParametric/SaveTopology, partition flags and `-optimize_ho` landed
-  earlier (`9467923`, `306d7c9`). Still rejected: `-save_entities`,
-  BAMG anisotropics, ONELAB solver-client flags, scaling/random
-  perturbation flags — the classified-rejection table stays until each lands.
+  earlier (`9467923`, `306d7c9`). `-save_entities` landed as a
+  `Mesh.SaveTopology` alias (upstream `CommandLine.cpp` maps both
+  spellings to `mesh.saveTopology`; verified inert on MSH 4.1 and
+  injecting `$Entities` on MSH 2.2, matching Gmsh 4.15.2 byte-for-byte).
+  Still rejected: BAMG anisotropics, ONELAB solver-client flags,
+  scaling/random perturbation flags — the classified-rejection table
+  stays until each lands.
 ### FINAL GATE findings (2026-10-23, runtests.jl 417-baseline)
 
 - `occ_revolve_smoke` abort: `_gm87_sincos` x87 `llvmcall` can't run under

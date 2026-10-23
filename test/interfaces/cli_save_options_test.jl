@@ -132,6 +132,19 @@ end
         mfb=read_msh(both)
         @test haskey(mfb.entities,(2,1))
         @test !isempty(mfb.node_entities)
+        # `-save_entities` is the upstream alias of `-save_topology` — it
+        # stores the same `Mesh.SaveTopology` value (Gmsh 4.15.2
+        # CommandLine.cpp maps both spellings to `mesh.saveTopology`).
+        aliased=joinpath(dir,"entities.msh")
+        main([geo,"-2","-o",aliased,"-format","msh2","-save_entities"])
+        @test occursin("\$Entities",read(aliased,String))
+        @test haskey(read_msh(aliased).entities,(2,1))
+        # On MSH 4.1 the option is inert (entities always serialize) — the
+        # alias writes the same byte stream as `-save_topology`.
+        a4=joinpath(dir,"a4.msh"); t4=joinpath(dir,"t4.msh")
+        main([geo,"-2","-o",a4,"-save_entities"])
+        main([geo,"-2","-o",t4,"-save_topology"])
+        @test read(a4)==read(t4)
     end
 end
 
@@ -210,10 +223,16 @@ end
 @testset "retained rejections" begin
     mktempdir() do dir
         geo=joinpath(dir,"sq.geo"); write(geo,_SQUARE_GEO)
-        for flag in ("-0","-barycentric_refine","-save_entities")
-            @test occursin("not implemented",
+        # `-0`/`-barycentric_refine` are batch actions now — combined with
+        # `-2` they reject through mutual exclusion, not "not implemented".
+        for flag in ("-0","-barycentric_refine")
+            @test occursin("conflicting batch action",
                 _errtext(()->main([geo,"-2",flag])))
         end
+        # `-save_entities` is implemented (Mesh.SaveTopology alias); both
+        # spellings on one option reject like the parametric pair.
+        @test occursin("duplicate or conflicting",
+            _errtext(()->main([geo,"-2","-save_topology","-save_entities"])))
         for flag in ("-aniso_max","-smooth_ratio")
             @test occursin("BAMG",
                 _errtext(()->main([geo,"-2",flag,"1"])))
