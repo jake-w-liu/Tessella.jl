@@ -362,5 +362,6 @@ using Tessella
     include(joinpath(@__DIR__, "..", "interfaces/api_partition_producer_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_partition_brep_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_partition_open_seams_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "partition/part_partition_tail_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/geo_hybrid_pyramid_options_functional_test.jl"))
 end
