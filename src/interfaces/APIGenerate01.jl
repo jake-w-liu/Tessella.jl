@@ -1086,18 +1086,36 @@ _occ_p2_curved_surface(geometry)=geometry!==nothing && hasproperty(geometry,:occ
 
 function _dim01_quadratic!(assembly,m,entities;only_visible=false,linear=false,geometry_birth=nothing)
     _dim01_p2_curve_edge_guard(assembly,m,only_visible)
+    # HighOrder.cpp transitions each entity from the order of its first stored
+    # element: an entity already at the requested order keeps every cell
+    # unchanged, including lower-order ones, while all other entities convert
+    # their cells to the target. The first stored cell in this pass's
+    # (owner,family)-sorted order is the deterministic analogue of the native
+    # storage order. Order-1 cells lift through the quadratic factory below and
+    # existing order-2 cells keep their actual supports; a retained cell above
+    # the target on a converting entity would need the general order path's
+    # downward transition, which this pass does not implement.
     entity_orders=Dict{Tuple{Int,Int32},Int}()
     for cell in assembly.cells
         cell.owner[1]>0 || continue
         only_visible && model_entity_visibility(m,cell.owner[1],Int(cell.owner[2]))==0 && continue
-        order=msh_spec(cell.msh).order
-        previous=get(entity_orders,cell.owner,order)
-        previous==order || throw(ArgumentError(
-            "$(assembly.caller): mixed polynomial orders on entity $(cell.owner); " *
-            "Gmsh's first-element high-order transition is not implemented"))
-        entity_orders[cell.owner]=order
+        get!(entity_orders,cell.owner,msh_spec(cell.msh).order)
+    end
+    for cell in assembly.cells
+        spec=msh_spec(cell.msh)
+        cell.owner[1]>0 || continue
+        only_visible && model_entity_visibility(m,cell.owner[1],Int(cell.owner[2]))==0 && continue
+        first_order=entity_orders[cell.owner]
+        first_order==2 && continue
+        spec.order==first_order && continue
+        first_order==1 && spec.order in (1,2) && continue
+        throw(ArgumentError(
+            "$(assembly.caller): entity $(cell.owner) mixes polynomial orders under a first " *
+            "element of order $first_order; its first-element high-order transition to " *
+            "order 2 is not implemented"))
     end
     any(cell->cell.owner[1]>0 && msh_spec(cell.msh).order==1 &&
+        get(entity_orders,cell.owner,0)!=2 &&
         (!only_visible || model_entity_visibility(m,cell.owner[1],Int(cell.owner[2]))!=0),
         assembly.cells) || return false
     # The general affine full-P2 stencils share topological supports. Native
@@ -1105,6 +1123,7 @@ function _dim01_quadratic!(assembly,m,entities;only_visible=false,linear=false,g
     # available; already quadratic discrete cells retain their actual supports.
     native_entities=Set{Tuple{Int,Int32}}(cell.owner for cell in assembly.cells
         if cell.owner[1]>0 && msh_spec(cell.msh).order==1 &&
+           get(entity_orders,cell.owner,0)!=2 &&
            (!only_visible || model_entity_visibility(m,cell.owner[1],Int(cell.owner[2]))!=0) &&
            !_dim01_fully_discrete(m,(cell.owner[1],Int(cell.owner[2]))))
     if !linear && !isempty(native_entities)
@@ -1165,6 +1184,7 @@ function _dim01_quadratic!(assembly,m,entities;only_visible=false,linear=false,g
         spec=msh_spec(cell.msh)
         cell.owner[1]>0 && spec.order==1 || continue
         only_visible && model_entity_visibility(m,cell.owner[1],Int(cell.owner[2]))==0 && continue
+        entity_orders[cell.owner]==2 && continue
         target=msh_type(spec.family,2)
         reference=Elements.lagrange_nodes(target)
         primary=copy(cell.nodes)
@@ -1753,8 +1773,12 @@ function _generate_dim01_plan(source_model,cached,cached_class,dimension::Int,
         cell.nodes=cell.nodes[_mixed_reverse_permutation(cell.msh)]
     end
     # The post-generation high-order pass does not run for a point-only mesh.
+    # Retained cells above the requested order (or a serendipity request) take
+    # the general order path — the same dispatch `set_order` uses — so a
+    # discrete entity storing mixed P1/P3 cells converts rather than throwing.
     p2_pass=element_order>1 && any(cell->cell.owner[1]>0,assembly.cells)
-    if element_order>2
+    if element_order>2 || (element_order==2 && (incomplete ||
+            any(cell->msh_spec(cell.msh).order>2,assembly.cells)))
         _dim01_higher_order!(assembly,m,entities,element_order;
             only_visible=options.mesh_only_visible,linear,incomplete)
     elseif p2_pass

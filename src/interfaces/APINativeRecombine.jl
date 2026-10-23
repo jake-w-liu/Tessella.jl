@@ -289,10 +289,16 @@ function _api_native_recombine_surface_signature(mesh,owner)
 end
 
 function _api_native_recombine_has_surfaces(m,cached)
+    # Recombination pairs first-order Surface elements; a Surface whose stored
+    # cells are all high-order has nothing to pair and keeps its mesh.
     cached isa Mesh && ntris(cached)>0 && return true
-    cached isa MixedMesh && any(block->msh_dimension(block.msh)==2 && !isempty(block.nodes),
+    cached isa MixedMesh && any(block->msh_dimension(block.msh)==2 &&
+                                    msh_spec(block.msh).order==1 &&
+                                    !isempty(block.nodes),
                                cached.blocks) && return true
-    return any(pair->pair[1][1]==2 && !isempty(pair[2].element_types),
+    return any(pair->pair[1][1]==2 &&
+                   any(type->msh_dimension(type)==2 && msh_spec(type).order==1,
+                       pair[2].element_types),
                Model._discrete_mesh_records_model(m))
 end
 
@@ -436,7 +442,7 @@ function _api_native_recombine_plan(m,cached,class,caller;
     elseif run_recombination
         _primary_recombine_mixed(input;algorithm=settings.algorithm,angles,
         minimum_quality=settings.minimum_quality,
-        initial_max_element_tag=source.max_element_tag,maximum_element_tag=typemax(UInt64),
+        initial_max_element_tag=source.max_element_tag,maximum_element_tag=UInt64(typemax(Int32)),
         boundary_curves=boundaries,embedded_curves=embedded,surface_contexts=surface_context)
     else
         (mesh=input,maximum_element_tag=source.max_element_tag)

@@ -35,7 +35,10 @@ function _primary_recombine_mixed(mesh::Elements.MixedMesh;algorithm=:blossom,an
                 push!(get!(()->Set{Tuple{Int32,Int32}}(),lines,owner),minmax(block.nodes[1,column],block.nodes[2,column]))
             end
         elseif spec.dim==2 && spec.family in (:tri,:qua)
-            spec.order==1 || throw(ArgumentError("actual high-order Surface pairing is not implemented"))
+            # Native recombination pairs first-order Surface elements only;
+            # cells already above order one stay stored untouched, so a
+            # Surface holding exclusively high-order cells returns unchanged.
+            spec.order==1 || continue
             for column in axes(block.nodes,2)
                 owner=data.block_entities[bi][column]
                 haskey(data.entities,(2,Int(owner))) || throw(ArgumentError("missing actual Surface entity"))
@@ -43,14 +46,18 @@ function _primary_recombine_mixed(mesh::Elements.MixedMesh;algorithm=:blossom,an
             end
         end
     end
+    # An entirely high-order Surface has no pairable cells: return the stored
+    # mesh itself so callers keep the cache object identity.
+    isempty(groups) && return (mesh=mesh,maximum_element_tag=maximum_tag)
     blocks=Elements.ElementBlock[];block_owners=Vector{Int32}[];element_tags=Vector{UInt64}[]
     coordinates_out=copy(mesh.coords)
     parameters_out=deepcopy(data.node_parametric)
     removed_nodes=falses(size(mesh.coords,2))
-    # Untouched lower and Volume cells remain in their stored order.
+    # Untouched lower, Volume and high-order Surface cells remain in their
+    # stored order.
     for (bi,block) in enumerate(mesh.blocks)
         spec=Elements.msh_spec(block.msh)
-        spec.dim==2 && spec.family in (:tri,:qua) && continue
+        spec.dim==2 && spec.family in (:tri,:qua) && spec.order==1 && continue
         push!(blocks,block);push!(block_owners,data.block_entities[bi]);push!(element_tags,data.external_element_tags[bi])
     end
     for owner in sort!(collect(keys(groups)))
@@ -126,8 +133,14 @@ function _primary_recombine_mixed(mesh::Elements.MixedMesh;algorithm=:blossom,an
                 parameters_out[row]=copy(result.node_parameters[:,local_row])
             end
         end
-        maximum_tag<=limit && result.primary_factory_births<=limit-maximum_tag ||
-            throw(ArgumentError("factory tag reservation exceeds the limit"))
+        # Public element tags stay Int32-bounded while the label history is in
+        # that domain; an existing UInt64 history keeps native UInt64 counter
+        # arithmetic and rejects only an actual UInt64 reservation overflow.
+        ceiling=maximum_tag>typemax(Int32) ? typemax(UInt64) : limit
+        result.primary_factory_births<=ceiling-maximum_tag ||
+            throw(ArgumentError(ceiling>typemax(Int32) ?
+                "recombined element tags exceed UInt64" :
+                "recombined element tags exceed Int32"))
         origin=maximum_tag;maximum_tag+=result.primary_factory_births
         for (bi,block) in enumerate(result.mesh.blocks)
             nodes=rows[block.nodes];external=UInt64[]

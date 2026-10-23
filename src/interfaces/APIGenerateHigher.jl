@@ -3528,7 +3528,11 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
     end
     p2_pass=element_order>1 && any(cell->cell.owner[1]>0,assembly.cells)
     sort!(assembly.cells;by=_dim01_cell_order,alg=Base.Sort.MergeSort)
-    if element_order>2 || (p2_pass && incomplete)
+    # Retained cells above the requested order take the general order path —
+    # the same dispatch `set_order` uses — so a discrete entity storing mixed
+    # P1/P3 cells converts rather than hitting the P2 pass's first-element guard.
+    if element_order>2 || (p2_pass && (incomplete ||
+            any(cell->msh_spec(cell.msh).order>2,assembly.cells)))
         _dim01_higher_order!(assembly,m,entities,element_order;
             only_visible=options.mesh_only_visible,linear,incomplete)
     elseif p2_pass
