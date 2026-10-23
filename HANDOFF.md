@@ -4778,6 +4778,61 @@ fold audits (`f515628`).
   dyn-tag `75365136…`, set-max `d5d07bb1…`
 - `.geo` embedded sheet: `validate=true`, `covers=true`, 1067 tets
 
+## Latest landed increments (`4cef4d1`, `74436ac`, pushed to `origin/main`)
+
+**MET01/MET02 metric-meshing checklist (2026-10-24)** — two pushes close the
+bounded items of the metric work. `4cef4d1` rewrote the alg-7 metric surface
+producer's interior fill: strict midpoint bisection could satisfy edge-length
+certificates but could not reorient connectivity toward anisotropic metric
+ellipses (~47x over-density on t17). The producer now runs a certified
+metric-Delaunay/Steiner insertion — tangent-frame metric pullback,
+`_gmsh_circumcenter_metric` candidates, visibility-walk cavity location,
+certified insertion with conforming-split fallback — followed by certified
+coarsening sweeps (strictly-shorter metric diagonal flips and ear-clipped
+interior vertex-star dissolution, all under convexity/area/containment
+certificates with boundary edges protected). Result: t17 lands 8,872 tris /
+4,493 nodes (2.57x the Gmsh 3,458 reference, inside the 0.2–5.0x band), zero
+metric edges above target, `validate` clean; constant isotropic 4I, aniso
+diag(1,400,1)/diag(1,1600,1), graded and sheared SPD cases all pass in the
+new `model_metric_surface_density_test.jl` (10 assertions).
+
+`74436ac` closes the remaining items. (a) Tensor-metric arms in the native
+Delaunay/Frontal surface sizers: `Mesh2DGmshSurfaceTrace.jl` widens the
+trace's metric slot to a parametric type and `_gmsh_surface_metric` gains a
+per-triangle form evaluating a callable metric source at the cell's lifted
+parameter centroid; the new `_GmshSurfaceMetricCarrier` (world/lift/metric
+only) rides the same dispatch points — cavity in-circle, Delaunay point,
+frontal direction, Cartesian admission — while slot order, incoming-edge
+order, queue radii and element bookkeeping keep the untraced scalar
+semantics (the radii fast path now guards `isa _GmshSurfaceTrace`).
+`ModelSurfaceAlgorithms._surface_metric_trace_carrier` wraps the resolved
+anisotropic selection with the metric producer's directional size policy
+(CTX::lc cap, lcMin/lcMax clamp, lcFactor per direction) and pulls it back
+through the PSLG frame's affine Jacobian; `_gmsh_native_initial_surface`'s
+full trace gets the identical evaluator. `model_metric_delaunay_arm_test.jl`
+proves transport: m11=16 vs m22=16 fields scalarize to the same background
+size, so differing connectivity is tensor-attributable — mean |dx|/|dy|
+edge ratios land 0.38 vs 2.65 (correct weak-direction elongation), both
+algorithms, all valid (11 assertions). (b) 1-D anisotropic grading
+verification: mesh1d 106/106 with new perpendicular-stretch assertions.
+(c) Variable-metric volume verification: `model_metric_volume_functional_test.jl`
+gained the isotropic-varying local-bound testset — per-edge
+`sqrt(d'Md) <= 2` certificate with zero violations and tensor/scalar fills
+within 15% (the documented contract is a local upper bound over the
+inherited initial-Delaunay floor, not ideal determinant-weighted density).
+
+Classified residual scope (not claimed as parity): alg-7 remains restricted
+to planar surfaces with straight-Line boundaries — OCC-curved metric meshing
+needs a separate producer with non-affine Jacobian transport and on-surface
+lifting; the Delaunay/Frontal arm carries tensor *connectivity* while queue
+sizing keeps the scalarized min-direction bound; `ModelNativeHybridInsertion`
+(3-D hybrid sizer) still scalarizes tensors; the alg-6 factory-encoding path
+(`_model_factory_surface_refine!`) stays scalar-only. Verified this session:
+delaunay arm 11/11, mesh1d 106/106, metric-surface battery 62/62, volume
+functional 30/30 (`.geo` Box set errors on this machine's missing OCC
+kernel — pre-existing/environmental, identical on pristine HEAD),
+native-initial carrier path 68/68, scalar alg-5/6/2 arms unchanged.
+
 ## Latest landed increment (`659d8c7`, pushed to `origin/main`)
 
 The stash `wip-inventory` is fully superseded — every change it contained was

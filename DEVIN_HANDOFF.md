@@ -58,12 +58,29 @@ the owned files:
   the diagnosis needed no write-back or acceptance-check edits; the prior
   `fpts` orientation fix plus the proportional `maxpts` cap sufficed.
   Commit only the three owned files when pushing.
-- MET01/02 (PARTIALLY LANDED `4cef4d1`, still running): committed
+- MET01/02 (LANDED `4cef4d1` + `74436ac`): `4cef4d1` committed
   `ModelMetricSurfaceProducer.jl` +584 + `model_metric_surface_density_test.jl`
   — metric-Delaunay Steiner insertion replaced midpoint bisection, fixing the
-  ~47x over-density (163,908 → ~3,458-class count). 199 assertions green in its
-  isolated worktree. Remaining: aniso curve grading, tensor-metric arms in
-  volumes, OCC alg-7, variable-metric volume.
+  ~47x over-density (t17: 163,942 → 8,872 tris = 2.57x the 3,458 reference).
+  `74436ac` adds the remaining checklist items: (a) tensor-metric arms in the
+  native Delaunay/Frontal surface sizers — `_GmshSurfaceMetricCarrier` carries
+  a per-cell callable metric through `refine!`'s existing trace dispatch
+  (in-circle, circumcenter, frontal direction, Cartesian admission) while the
+  untraced slot/radii/bookkeeping semantics stay untouched, plus the identical
+  evaluator wired into `_gmsh_native_initial_surface`'s full trace;
+  `model_metric_delaunay_arm_test.jl` pins directionality (m11=16 vs m22=16
+  share one scalarized size, so differing connectivity is tensor-attributable).
+  (b) 1-D anisotropic grading verification: mesh1d 106/106 including new
+  perpendicular-stretch assertions. (c) variable-metric volume verified:
+  `model_metric_volume_functional_test.jl` gained an isotropic-varying
+  local-bound testset (0 violations, scalar/tensor fills within 15%).
+  Residual: alg-7 stays classified to planar surfaces with straight-Line
+  boundaries (`_metric_surface_admit` — OCC-curved metric meshing needs a
+  non-affine Jacobian transport producer, not a delta on the plane path); the
+  Delaunay/Frontal arm carries tensor *connectivity* while queue sizing keeps
+  the scalarized min-direction bound (BAMG-style unit-edge density remains the
+  alg-7 producer's contract); the alg-6 factory-encoding path
+  (`_model_factory_surface_refine!`) is still scalar-only.
 - PAR01 (LANDED `7adc0a1` + wiring worker `4dc7b27c` in flight): parallel core
   committed (seed ledger, 64/64 both thread counts). In-flight diff:
   `APIGenerate01.jl`/`APIGenerateHigher.jl` (+286) = cross-phase spawn wiring
@@ -94,9 +111,12 @@ the owned files:
   Residual performance note: recovery is superlinear in input density;
   ~10⁴-vertex PLCs would take hours under the proportional cap — sound and
   bounded, but a candidate for scan indexing if density tests demand it.
-- MET01/02: 1-D anisotropic grading, tensor-metric Delaunay arms, OCC alg-7
-  curved metric, variable-metric volume, metric-Delaunay over-density (~47x on
-  t17). Metric*/ModelMetric* files.
+- MET01/02: landed `4cef4d1`+`74436ac` (see ledger). Remaining classified
+  scope: OCC-curved alg-7 producer (non-affine uv metric transport + curved
+  boundary/on-surface lifting — a separate producer, not an admission-gate
+  tweak), native 3-D hybrid tensor sizing (ModelNativeHybridInsertion
+  still scalarizes), and metric-Delaunay arm density parity (connectivity
+  is tensor-aware; sizing stays scalarized). Metric*/ModelMetric* files.
 - PAR01: cross-phase scheduling, per-entity RNG ledger. `APIParallel*`.
 - CAD04/05: curved trims, NURBS topology, surface Booleans (t20/t21 depth),
   ChFi3d fillet (t19 verbatim `Fillet` stays classified non-planar-edge reject).

@@ -185,8 +185,11 @@ membership-cell decomposition and preserve-numbering tag rebinding, Box/Cylinder
 Explicit [constant-tensor box grids](docs/constant_metric_boxes.md) now generate
 direction-aware meshes, including shared material interfaces and voids. They
 use conservative axis-aligned grids. Variable tensors also drive the explicit
-planar Surface constructor and API below; variable-metric volumes and full
-native metric-algorithm parity remain open.
+planar Surface constructor and API below, the native Delaunay/Frontal surface
+arms (per-cell pulled-back metric through `refine!`, `74436ac`), the
+metric-Delaunay alg-7 producer with certified coarsening (`4cef4d1`), and the
+volume edge fill's local metric bound; OCC-curved alg-7 and native 3-D hybrid
+tensor sizing remain classified open scope.
 Single convex hybrid Regions admit negative normal-offset Pyramid factors and
 nonnegative values with actual relocation or the separate
 [Winslow optimizer](docs/hybrid_winslow.md) at `1.0`, retaining existing

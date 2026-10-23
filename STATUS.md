@@ -24,6 +24,54 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### MET01/02 metric checklist: anisotropic surface density fix + tensor Delaunay/Frontal arms (2026-10-24, pushed `4cef4d1`, `74436ac`)
+
+`4cef4d1` (`ModelMetricSurfaceProducer.jl`): the alg-7 metric surface
+producer's interior fill moved from strict conforming midpoint bisection —
+which satisfied edge-length certificates but could not reorient connectivity
+toward anisotropic metric ellipses — to a certified metric-Delaunay Steiner
+insertion (tangent-frame pullback, metric circumcenter candidates,
+visibility-walk cavity location, certified cavity commits with conforming
+splits as fallback) followed by certified coarsening (shorter-metric
+diagonal flips + ear-clipped vertex-star dissolution; boundary edges and
+retained lower-dimension nodes protected). t17 over-density resolved:
+163,942 → 8,872 triangles / 4,493 nodes = 2.57x the Gmsh 3,458 reference,
+within the 0.2–5.0x target band; zero edges above metric target;
+`validate` clean. `model_metric_surface_density_test.jl` (10 assertions)
+pins constant iso/aniso (4I, diag(1,400,1), diag(1,1600,1)), graded and
+sheared SPD cases inside the band.
+
+`74436ac` (src/meshing/Mesh2DGmshSurfaceTrace.jl, Mesh2DGmshInsertion.jl,
+Mesh2D.jl; src/geometry/Model.jl, ModelSurfaceAlgorithms.jl,
+ModelGmshSurfaceProducer.jl; + tests): tensor-metric arms for the native
+Delaunay/Frontal surface sizers. `_GmshSurfaceMetricCarrier` (world/lift/
+metric only) rides `refine!`'s existing trace dispatch — cavity in-circle,
+metric circumcenter, frontal direction, Cartesian admission — evaluated
+per-cell at the lifted parameter centroid; untraced slot order, queue
+radii and element bookkeeping are unchanged (radii fast path now guards
+`isa _GmshSurfaceTrace`). The carrier builder wraps the resolved
+`AbstractAnisoField` in the same directional size policy as
+`_metric_surface_algorithm_field` and pulls the field through the PSLG
+frame's affine Jacobian; the native-initial trace path gets the identical
+evaluator. `model_metric_delaunay_arm_test.jl` (11 assertions): m11=16 vs
+m22=16 share one scalarized background size, so differing connectivity is
+tensor-attributable — edge anisotropy ratios 0.38 vs 2.65 confirm
+weak-direction elongation on both algorithms. Also landed: mesh1d
+perpendicular-stretch assertions (106/106) and the isotropic-varying
+volume local-bound testset (`sqrt(d'Md) <= 2` certificate, 0 violations,
+tensor/scalar fills within 15% — the volume contract is a local upper
+bound, not determinant-weighted ideal density).
+
+Classified residual scope: alg-7 stays planar+straight-Line
+(`_metric_surface_admit`); OCC-curved metric meshing needs a separate
+producer with non-affine Jacobian transport. Delaunay/Frontal arm carries
+tensor connectivity while queue sizing keeps the scalarized min-direction
+bound; `ModelNativeHybridInsertion` (3-D hybrid) and the alg-6
+factory-encoding path remain scalar-only. Verified: delaunay arm 11/11,
+mesh1d 106/106, metric surface battery 62/62, volume functional 30/30
+(one `.geo` Box testset errors on this machine's absent OCC kernel —
+pre-existing/environmental), native-initial path 68/68.
+
 ### Dense curved-PLC recovery: input-proportional `maxpts` — t13 verbatim arm completes (2026-10-23, uncommitted in tree)
 
 The t13 verbatim `Field[1].F = "4"` arm and t19 dense `NumSubEdges=1000`
