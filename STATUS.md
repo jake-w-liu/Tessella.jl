@@ -2673,9 +2673,10 @@ support/common.jl` gained `run_gmsh_dim`, `gmsh_mixed` and `cell_metrics`.
 **Blocked tutorials — exact constructs (official files):**
 
 - t7: unblocked 2026-10-23 — `Merge "*.pos"`, `Background Mesh View[i]` and
-  the three `Mesh.MeshSize*` option writes execute verbatim (5364 nodes;
-  density residual vs the API-route 1788/gmsh count recorded — option
-  transport into the `.geo` mesher, not a grammar gap).
+  the three `Mesh.MeshSize*` option writes execute verbatim and now
+  produce **1788 nodes / 3315 tris = gmsh exactly** (the earlier 5364
+  reading was a stale-process artifact of the in-flight plugin edits —
+  re-verified verbatim on `2330f0b`).
 - t8: unblocked — `Include "view*.pos"` appends views (T2/T3 expressions
   parse since `2bdd230`); image export/animation stay GUI-only.
 - t9: unblocked 2026-10-23 — verbatim file executes: `Plugin(Isosurface)`
