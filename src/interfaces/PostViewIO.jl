@@ -1233,6 +1233,12 @@ function _pos_matrix!(r::_PosReader,limits::_PosReadLimits,
             push!(rows,row)
         elseif t.kind==:num
             push!(rows,[t.value])
+        elseif t.kind==:minus || t.kind==:plus
+            value=_pos_take!(r)
+            value.kind==:num || throw(ArgumentError(
+                "$caller: expected an interpolation row at byte $(t.at), got " *
+                _pos_token_desc(value)))
+            push!(rows,[t.kind==:minus ? -value.value : value.value])
         else
             throw(ArgumentError(
                 "$caller: expected an interpolation row at byte $(t.at), got " *
@@ -1244,6 +1250,9 @@ function _pos_matrix!(r::_PosReader,limits::_PosReadLimits,
             "max_interpolation_entries=$(limits.matrices)"))
         t=_pos_take!(r)
         t.kind==:comma && continue
+        # Upstream's documented matrix form separates row groups by
+        # whitespace alone — `{r1}{r2}` — commas are optional.
+        t.kind==:lbrace && (r.pending=t;continue)
         t.kind==:rbrace && break
         throw(ArgumentError(
             "$caller: expected ',' or '}' at byte $(t.at), got $(_pos_token_desc(t))"))
@@ -1341,9 +1350,25 @@ function _pos_parse_view(r::_PosReader,tag::Int,limits::_PosReadLimits,
             push!(scheme_positions,length(raw_elements))
             _pos_expect!(r,:semi)
         else
-            ncodeunits(word)>=2 || throw(_pos_unknown_record(word,caller,t.at))
-            spec=get(_POS_RECORD_TYPES,word[1:2],nothing)
-            spec===nothing && throw(_pos_unknown_record(word,caller,t.at))
+            spec=ncodeunits(word)>=2 ?
+                get(_POS_RECORD_TYPES,word[1:2],nothing) : nothing
+            if spec===nothing
+                # Upstream (`pos.yy`) reports `Unknown element type '<word>'`
+                # on the error channel and skips the record when it keeps
+                # the `<word>(<coords>){<values>};` shape — the rest of the
+                # view still loads. Any other token sequence cascades into
+                # a syntax error that aborts the view, so it stays a throw.
+                _pos_peek!(r).kind!=:lparen &&
+                    throw(_pos_unknown_record(word,caller,t.at))
+                print(stderr,"Error   : $caller: unknown view record " *
+                            "'$word' at byte $(t.at)\n")
+                _pos_number_list!(r,:lparen,:rparen,caller)
+                _pos_peek!(r).kind==:lbrace ||
+                    throw(_pos_unknown_record(word,caller,t.at))
+                _pos_number_list!(r,:lbrace,:rbrace,caller)
+                _pos_expect!(r,:semi)
+                continue
+            end
             kind,_,ncomp=spec
             flat_coords=_pos_number_list!(r,:lparen,:rparen,caller)
             length(flat_coords)%3==0 || throw(ArgumentError(
@@ -1507,10 +1532,13 @@ parentheses, the `Pi` constant, built-in calls (`Sqrt`, `Exp`, `Log`,
 are not bound in standalone `.pos` reads; unknown identifiers, functions and
 option names raise `ArgumentError`.
 
-The reader is strict: malformed syntax, unknown or higher-order (`SL2`, …)
-record types, wrong node counts, value counts that are not a multiple of
-`nodes×components`, inconsistent or missing time steps, non-finite numbers,
-and resource-limit violations all raise `ArgumentError`. Resources are bounded
+The reader is strict: malformed syntax, wrong node counts, value counts that
+are not a multiple of `nodes×components`, inconsistent or missing time steps,
+non-finite numbers, and resource-limit violations all raise `ArgumentError`.
+Records with an unknown type name that keep the `<type>(<coords>){<values>};`
+shape are handled like upstream (`pos.yy`): an `Error` diagnostic goes to
+stderr and the record is skipped while the rest of the view still loads;
+any other token sequence after an unknown name aborts the view. Resources are bounded
 before record structures are allocated: `max_file_bytes` (path only, checked
 against the file size), `max_views`, `max_elements` (records per view),
 `max_values` (coordinate+value numbers per record), `max_steps` (TIME entries

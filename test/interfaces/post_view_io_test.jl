@@ -169,7 +169,9 @@ end
     # malformed count.
     @test size(io("View \"v\" { SP(0,0,0){1,2}; };")[1].elements[1].values,3)==2
     @test_throws ArgumentError io("View \"v\" { SL(0,0,0){1,2}; };")
-    @test_throws ArgumentError io("View \"v\" { XX(0,0,0){1}; };")
+    # `XX` keeps the element record shape — upstream reports
+    # `Unknown element type` and skips it, leaving an empty view.
+    @test isempty(io("View \"v\" { XX(0,0,0){1}; };")[1].elements)
     # SL2 is a supported order-2 record (3 geometry + 3 value nodes).
     @test io("View \"v\" { SL2(0,0,0, 1,0,0, 0.5,0,0){1,2,3}; };"
         )[1].elements[1].suffix=="2"
@@ -299,4 +301,48 @@ end
         PosElement(:line,[0.0 2.0;0.0 0.0;0.0 0.0],[3.0 0.0;0.0 4.0;0.0 0.0])])
     mixed_field=postview_field(mixed;use_closest=false)
     @test field_value(mixed_field,1.0,0.0,0.0)==2.5
+end
+
+@testset "read_pos skips unknown records like upstream" begin
+    nl=Sys.iswindows() ? "\r\n" : "\n"
+    # Gmsh `pos.yy`: `Unknown element type` records keeping the
+    # `<type>(<coords>){<values>};` shape print `Error` and skip; the rest
+    # of the view still loads.
+    view=read_pos(IOBuffer("""
+        View "v" {
+        QQ(0,0,0){1};
+        SL(0,0,0, 1,0,0){2,2};
+        QQ(1,2,3,4){5,6,7,8};
+        SL(2,0,0, 3,0,0){5,5};
+        };
+        """))[1]
+    @test length(view.elements)==2
+    @test all(e->e.kind==:line,view.elements)
+    @test view.elements[1].coords==[0.0 1.0;0.0 0.0;0.0 0.0]
+    @test view.elements[2].coords==[2.0 3.0;0.0 0.0;0.0 0.0]
+
+    # An unknown name not followed by the element record shape cascades
+    # into a syntax error upstream — the view fails to load.
+    @test_throws ArgumentError read_pos(IOBuffer("""
+        View "v" { SL(0,0,0, 1,0,0){2,2}; garbage text here };
+        """))
+    @test_throws ArgumentError read_pos(IOBuffer("""
+        View "v" { QQ; SL(0,0,0, 1,0,0){2,2}; };
+        """))
+    @test_throws ArgumentError read_pos(IOBuffer("""
+        View "v" { QQ(0,0,0); SL(0,0,0, 1,0,0){2,2}; };
+        """))
+end
+
+@testset "read_pos interpolation rows take signed entries" begin
+    view=read_pos(IOBuffer("""
+        View "v" {
+        INTERPOLATION_SCHEME {1,0,0, 0,1,0, 0,0,1}
+            {{0.5,0.5,0} {-0.5,0.5,0} {0,-0.5,1}};
+        SL2(0,0,0, 0.5,0,0, 1,0,0){1,2,3};
+        };
+        """))[1]
+    @test length(view.elements)==1
+    @test view.elements[1].kind==:line
+    @test length(view.interpolations)==1
 end
