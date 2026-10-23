@@ -20,8 +20,10 @@ module IO
 
 using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets, node, validate
 using ..Elements: MSH_PHYSICAL_NAME_MAX_BYTES, _copy_physical_names, MixedMesh,
-                  ElementBlock, SpecialElementBlock, msh_spec, msh_dimension,
-                  msh_family, msh_num_nodes, msh_type, simplex_to_mixed
+                  MixedEntityData, ElementBlock, SpecialElementBlock, msh_spec,
+                  msh_dimension, msh_family, msh_num_nodes, msh_type,
+                  simplex_to_mixed, write_mixed_msh, read_mixed_msh,
+                  _block_ncells
 using ..Predicates: _two_diff_tail
 using ..GmshLibm: _gm87_sin, _gm87_cos, _gm_tan, _gm_asin, _gm_acos, _gm_atan,
                   _gm87_atan2, _gm_sinh, _gm_cosh, _gm_tanh, _gm87_exp, _gm87_log,
@@ -100,7 +102,23 @@ Result of `read_msh`: the compact `mesh`, and `physical_names` mapping
 struct MshFile
     mesh::Mesh
     physical_names::Dict{Tuple{Int,Int},String}
+    # Classified node metadata recovered from the file, in mesh-node order.
+    # `node_entities[i]` is the `(entityDim, entityTag)` owner of node `i`
+    # when the input carried ownership records (MSH 4.1 node blocks or an
+    # MSH 2.2 `$ParametricNodes` section); both vectors stay empty otherwise.
+    # `node_parametric[i]` is the stored `(u)`/`(u,v)` parameter vector —
+    # `nothing` marks a classified non-parametric node.
+    node_entities::Vector{Tuple{Int,Int32}}
+    node_parametric::Vector{Union{Nothing,Vector{Float64}}}
+    # Declared topology records `(dim, tag) => (boundaries, physical_tags)`.
+    # MSH 4.1 `$Entities` keep their signed boundary tags; the MSH 2.2
+    # `$Entities` topology section is unsigned on disk and stored that way.
+    entities::Dict{Tuple{Int,Int},Tuple{Vector{Int32},Vector{Int32}}}
 end
+
+MshFile(mesh,physical_names) = MshFile(mesh,physical_names,
+    Tuple{Int,Int32}[],Union{Nothing,Vector{Float64}}[],
+    Dict{Tuple{Int,Int},Tuple{Vector{Int32},Vector{Int32}}}())
 
 # Mutable accumulator used while parsing, converted to a `Mesh` at the end.
 mutable struct _Accum
@@ -119,10 +137,15 @@ mutable struct _Accum
     element_tags::Set{UInt64}
     physical_name_records::Int
     element_blocks::Int
+    node_entities::Vector{Tuple{Int,Int32}}
+    node_parametric::Vector{Union{Nothing,Vector{Float64}}}
+    topo_entities::Dict{Tuple{Int,Int},Tuple{Vector{Int32},Vector{Int32}}}
     _Accum() = new(Float64[], Float64[], Float64[], Dict{UInt64,Int32}(),
                    NTuple{2,Int32}[], NTuple{3,Int32}[], NTuple{4,Int32}[],
                    Int32[], Int32[], Int32[], Dict{Tuple{Int,Int},String}(),
-                   Dict{Tuple{Int,Int},Int}(),Set{UInt64}(),0,0)
+                   Dict{Tuple{Int,Int},Int}(),Set{UInt64}(),0,0,
+                   Tuple{Int,Int32}[],Union{Nothing,Vector{Float64}}[],
+                   Dict{Tuple{Int,Int},Tuple{Vector{Int32},Vector{Int32}}}())
 end
 
 @inline function _nodeidx!(acc::_Accum, tag::UInt64)
@@ -211,13 +234,19 @@ function _read_msh(io::Base.IO,limits::_MshReadLimits,
         elseif line == "\$PhysicalNames"
             seen_format || throw(ArgumentError("IO: \$PhysicalNames appeared before \$MeshFormat"))
             _read_physical_names!(acc, io, limits, tessella_extensions)
-        elseif line == "\$Nodes"
+        elseif line == "\$Nodes" || line == "\$ParametricNodes"
             seen_nodes && throw(ArgumentError("IO: duplicate \$Nodes section"))
             seen_elements && throw(ArgumentError("IO: \$Nodes must precede \$Elements"))
             seen_nodes=true
             version != 0 || throw(ArgumentError("IO: \$Nodes appeared before \$MeshFormat"))
-            version < 3 ? _read_nodes_v2!(acc, io, limits) :
-                          _read_nodes_v4!(acc, io, limits)
+            if line == "\$ParametricNodes"
+                version < 3 || throw(ArgumentError(
+                    "IO: \$ParametricNodes is only valid in MSH v2"))
+                _read_parametric_nodes_v2!(acc, io, limits)
+            else
+                version < 3 ? _read_nodes_v2!(acc, io, limits) :
+                              _read_nodes_v4!(acc, io, limits)
+            end
         elseif line == "\$Elements"
             seen_nodes || throw(ArgumentError("IO: \$Elements appeared before \$Nodes"))
             seen_elements && version<3 && throw(ArgumentError(
@@ -230,8 +259,13 @@ function _read_msh(io::Base.IO,limits::_MshReadLimits,
             seen_format || throw(ArgumentError("IO: \$Entities appeared before \$MeshFormat"))
             (seen_nodes || seen_elements) &&
                 throw(ArgumentError("IO: \$Entities must precede \$Nodes and \$Elements"))
-            version == 4.1 || throw(ArgumentError("IO: \$Entities is only valid in MSH v4.1"))
-            _read_entities_v4!(acc, io, limits)
+            if version < 3
+                _read_topo_entities_v2!(acc, io, limits)
+            else
+                version == 4.1 || throw(ArgumentError(
+                    "IO: \$Entities is only valid in MSH v2/v4.1"))
+                _read_entities_v4!(acc, io, limits)
+            end
         elseif startswith(line, "\$") && !startswith(line, "\$End")
             _skip_section(io, "\$End" * line[2:end])   # ignore unknown sections
         end
@@ -242,7 +276,12 @@ function _read_msh(io::Base.IO,limits::_MshReadLimits,
     diagnostic=validate(mesh)
     diagnostic.ok || throw(ArgumentError(
         "read_msh: parsed mesh is invalid — " * join(diagnostic.messages,"; ")))
-    return MshFile(mesh, acc.pnames)
+    length(acc.node_entities) in (0, nnodes(mesh)) ||
+        throw(ArgumentError("IO: classified node-owner records do not match the node count"))
+    length(acc.node_parametric) in (0, nnodes(mesh)) ||
+        throw(ArgumentError("IO: parametric node records do not match the node count"))
+    return MshFile(mesh, acc.pnames, acc.node_entities,
+                   acc.node_parametric, acc.topo_entities)
 end
 
 function _expect_end(io, tok)
@@ -376,6 +415,116 @@ function _read_elements_v2!(acc, io, limits::_MshReadLimits)
     _expect_end(io, "\$EndElements")
 end
 
+# MSH 2.2 `$ParametricNodes` (emitted by `-save_parametric`): each record is
+#   nodeTag x y z entityDim entityTag [u [v [w]]]
+# where the owner dimension decides the parameter count. A node with no stored
+# parameters appears as the bare `nodeTag x y z entityDim entityTag` record.
+function _read_parametric_nodes_v2!(acc, io, limits::_MshReadLimits)
+    n = parse(Int, strip(readline(io)))
+    n >= 0 || throw(ArgumentError("IO: negative v2 parametric node count $n"))
+    n <= typemax(Int32)-length(acc.node_x) ||
+        throw(ArgumentError("IO: v2 parametric node count exceeds Int32 indexing"))
+    n <= limits.nodes-length(acc.node_x) || throw(ArgumentError(
+        "read_msh: v2 parametric node count exceeds max_nodes=$(limits.nodes)"))
+    for _ in 1:n
+        p = split(strip(readline(io)))
+        length(p) >= 6 || throw(ArgumentError(
+            "IO: malformed v2 parametric node record (expected ≥ 6 fields)"))
+        tag = _io_mesh_uid(p[1],"v2 parametric node")
+        tag > 0 || throw(ArgumentError("IO: node tag must be positive (got $tag)"))
+        haskey(acc.tag2idx,tag) && throw(ArgumentError("IO: duplicate node tag $tag"))
+        x=parse(Float64,p[2]); y=parse(Float64,p[3]); z=parse(Float64,p[4])
+        (isfinite(x)&&isfinite(y)&&isfinite(z)) || throw(ArgumentError(
+            "IO: node $tag has non-finite coordinates"))
+        edim = parse(Int, p[5]); etag = parse(Int, p[6])
+        0 <= edim <= 3 || throw(ArgumentError(
+            "IO: v2 parametric node $tag owner dimension $edim is outside 0:3"))
+        etag > 0 || throw(ArgumentError(
+            "IO: v2 parametric node $tag owner entity tag must be positive"))
+        _int32_tag(etag, "v2 parametric node owner")
+        extra = length(p)-6
+        (extra == 0 || extra == edim) || throw(ArgumentError(
+            "IO: v2 parametric node $tag carries $extra parameters; expected 0 or $edim"))
+        params = extra == 0 ? nothing : begin
+            uv = parse.(Float64, @view p[7:end])
+            all(isfinite,uv) || throw(ArgumentError(
+                "IO: node $tag has non-finite parametric coordinates"))
+            Vector{Float64}(uv)
+        end
+        push!(acc.node_x, x); push!(acc.node_y, y); push!(acc.node_z, z)
+        acc.tag2idx[tag] = length(acc.node_x)
+        push!(acc.node_entities, (edim, Int32(etag)))
+        push!(acc.node_parametric, params)
+    end
+    _expect_end(io, "\$EndParametricNodes")
+end
+
+# MSH 2.2 `$Entities` (emitted by `-save_topology` on discrete models): a
+# topology-only section — no bounding boxes, unsigned boundary tags.
+#   numPoints numCurves numSurfaces numVolumes
+#   pointTag numPhysicalTags physicalTag...                       (points)
+#   tag numBounding boundingTag... numPhysicalTags physicalTag... (dim ≥ 1)
+function _read_topo_entities_v2!(acc, io, limits::_MshReadLimits)
+    hdr = split(strip(readline(io)))
+    length(hdr)==4 || throw(ArgumentError("IO: malformed v2 entity header"))
+    counts = parse.(Int, hdr[1:4])
+    all(>=(0),counts) || throw(ArgumentError("IO: negative v2 entity count"))
+    total = try Base.checked_add(Base.checked_add(counts[1],counts[2]),
+                                 Base.checked_add(counts[3],counts[4])) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("IO: v2 entity count overflows Int"))
+    end
+    total<=typemax(Int32) || throw(ArgumentError("IO: v2 entity count exceeds Int32"))
+    total<=limits.entities-length(acc.topo_entities) || throw(ArgumentError(
+        "read_msh: v2 entity count exceeds max_entities=$(limits.entities)"))
+    for dim in 0:3
+        for _ in 1:counts[dim+1]
+            p = split(strip(readline(io)))
+            tag = parse(Int, p[1])
+            tag > 0 || throw(ArgumentError(
+                "IO: v2 entity tag must be positive (got $tag)"))
+            _int32_tag(tag, "v2 entity")
+            haskey(acc.topo_entities,(dim,tag)) && throw(ArgumentError(
+                "IO: duplicate v2 dimension-$dim entity tag $tag"))
+            pos = 2
+            bounds = Int32[]
+            if dim > 0
+                length(p)>=pos || throw(ArgumentError(
+                    "IO: truncated v2 entity record ($dim,$tag)"))
+                nb = parse(Int, p[pos]); pos += 1
+                nb >= 0 || throw(ArgumentError(
+                    "IO: negative bounding-entity count on v2 entity ($dim,$tag)"))
+                length(p)>=pos+nb-1+1 || throw(ArgumentError(
+                    "IO: truncated boundary list on v2 entity ($dim,$tag)"))
+                for j in 1:nb
+                    bt = parse(Int, p[pos]); pos += 1
+                    bt > 0 || throw(ArgumentError(
+                        "IO: v2 bounding entity tag must be positive (entity ($dim,$tag))"))
+                    _int32_tag(bt, "v2 bounding entity")
+                    push!(bounds, Int32(bt))
+                end
+            end
+            length(p)>=pos || throw(ArgumentError(
+                "IO: truncated v2 entity record ($dim,$tag)"))
+            nphys = parse(Int, p[pos]); pos += 1
+            nphys >= 0 || throw(ArgumentError(
+                "IO: negative physical-tag count on v2 entity ($dim,$tag)"))
+            length(p)==pos+nphys-1 || throw(ArgumentError(
+                "IO: physical-tag count mismatch on v2 entity ($dim,$tag)"))
+            phys = Int32[]
+            for j in 1:nphys
+                pt = parse(Int, p[pos]); pos += 1
+                pt > 0 || throw(ArgumentError(
+                    "IO: v2 physical tag must be positive (entity ($dim,$tag))"))
+                _int32_tag(pt, "v2 physical")
+                push!(phys, Int32(pt))
+            end
+            acc.topo_entities[(dim,tag)] = (bounds, phys)
+        end
+    end
+    _expect_end(io, "\$EndEntities")
+end
+
 # ── v4.1 ────────────────────────────────────────────────────────────────────────
 function _read_entities_v4!(acc, io, limits::_MshReadLimits)
     hdr = split(strip(readline(io)))
@@ -389,14 +538,15 @@ function _read_entities_v4!(acc, io, limits::_MshReadLimits)
     total<=typemax(Int32) || throw(ArgumentError("IO: v4 entity count exceeds Int32"))
     total<=limits.entities-length(acc.ep) || throw(ArgumentError(
         "read_msh: v4 entity count exceeds max_entities=$(limits.entities)"))
-    _read_entity_block!(acc.ep, io, nP, 0)   # points
-    _read_entity_block!(acc.ep, io, nC, 1)   # curves
-    _read_entity_block!(acc.ep, io, nS, 2)   # surfaces
-    _read_entity_block!(acc.ep, io, nV, 3)   # volumes
+    _read_entity_block!(acc, io, nP, 0)   # points
+    _read_entity_block!(acc, io, nC, 1)   # curves
+    _read_entity_block!(acc, io, nS, 2)   # surfaces
+    _read_entity_block!(acc, io, nV, 3)   # volumes
     _expect_end(io, "\$EndEntities")
 end
 
-function _read_entity_block!(ep, io, count, dim)
+function _read_entity_block!(acc, io, count, dim)
+    ep = acc.ep
     for _ in 1:count
         p = split(strip(readline(io)))
         idx = dim == 0 ? 5 : 8
@@ -418,17 +568,19 @@ function _read_entity_block!(ep, io, count, dim)
         nphys<=1 || throw(ArgumentError(
             "IO: entity ($dim,$tag) belongs to $nphys physical groups; Mesh supports one physical tag per cell"))
         length(p)>=idx+nphys || throw(ArgumentError("IO: truncated physical-tag list on entity ($dim,$tag)"))
+        physlist = Int32[]
         for j in 1:nphys
             physj=parse(Int,p[idx+j])
             physj>0 || throw(ArgumentError("IO: physical tag on entity ($dim,$tag) must be positive"))
             _int32_tag(physj,"physical")
+            push!(physlist, Int32(physj))
         end
         if nphys >= 1
-            phys=parse(Int,p[idx+1])
-            ep[(dim, tag)] = phys   # first physical group tag
+            ep[(dim, tag)] = physlist[1]   # first physical group tag
         else
             ep[(dim,tag)]=0         # record existence, even without a physical group
         end
+        bounds = Int32[]
         if dim == 0
             length(p)==idx+nphys ||
                 throw(ArgumentError("IO: unexpected trailing fields on point entity $tag"))
@@ -444,8 +596,10 @@ function _read_entity_block!(ep, io, count, dim)
                     throw(ArgumentError("IO: bounding entity tag cannot be zero on entity ($dim,$tag)"))
                 haskey(ep,(dim-1,abs(bt))) || throw(ArgumentError(
                     "IO: entity ($dim,$tag) references undeclared boundary entity ($(dim-1),$(abs(bt)))"))
+                push!(bounds, Int32(bt))
             end
         end
+        acc.topo_entities[(dim,tag)] = (bounds, physlist)
     end
 end
 
@@ -496,12 +650,17 @@ function _read_nodes_v4!(acc, io, limits::_MshReadLimits)
                 throw(ArgumentError("IO: v4 node coordinate record has $(length(c)) fields; expected $expected"))
             x=parse(Float64,c[1]); y=parse(Float64,c[2]); z=parse(Float64,c[3])
             (isfinite(x)&&isfinite(y)&&isfinite(z)) || throw(ArgumentError("IO: node $(tags[i]) has non-finite coordinates"))
+            params = nothing
             if parametric==1
-                all(isfinite(parse(Float64,c[j])) for j in 4:expected) ||
+                uv = parse.(Float64, @view c[4:expected])
+                all(isfinite,uv) ||
                     throw(ArgumentError("IO: node $(tags[i]) has non-finite parametric coordinates"))
+                params = Vector{Float64}(uv)
             end
             push!(acc.node_x,x); push!(acc.node_y,y); push!(acc.node_z,z)
             acc.tag2idx[tags[i]] = length(acc.node_x)
+            push!(acc.node_entities, (edim, Int32(etag)))
+            push!(acc.node_parametric, params)
             nread += 1
         end
     end
@@ -915,6 +1074,443 @@ function _write_entity_record(io,entity::Integer,phys::Integer,bounds)
     @printf(io,"%d %.17g %.17g %.17g %.17g %.17g %.17g %d",entity,bounds...,phys==0 ? 0 : 1)
     phys==0 || print(io," ",phys)
     println(io," 0")
+end
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Classified MixedMesh output honouring `Mesh.SaveParametric`/`Mesh.SaveTopology`
+# (the CLI `-save_parametric`/`-parametric` and `-save_topology` flags).
+#
+# Verified Gmsh 4.15.2 semantics:
+#   * MSH 4.1 — `Mesh.SaveParametric=0` clears the per-node parametric flag and
+#     drops the stored `(u[,v])` coordinates; the default output carries them.
+#     `Mesh.SaveTopology` is a no-op because `$Entities` is always declared.
+#   * MSH 2.2 — `Mesh.SaveParametric=1` replaces `$Nodes` with
+#     `$ParametricNodes` records `tag x y z entityDim entityTag [u [v]]` (the
+#     owner dimension decides the parameter count); `Mesh.SaveTopology=1`
+#     inserts a topology-only `$Entities` section (no bounding boxes, unsigned
+#     boundary tags) immediately before the nodes.
+# ══════════════════════════════════════════════════════════════════════════════
+
+@inline function _msh_save_flag(value,name::AbstractString)
+    value===nothing && return nothing
+    value isa Bool && return value
+    (value isa Real && !(value isa Bool)) || throw(ArgumentError(
+        "write_msh: $name must be Bool, 0/1, or nothing"))
+    v=try Float64(value) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("write_msh: $name must be representable as Float64"))
+    end
+    v==0.0 && return false
+    v==1.0 && return true
+    throw(ArgumentError("write_msh: $name must be 0 or 1 (got $value)"))
+end
+
+"""
+    write_msh(path, m::MixedMesh; version=4.1, binary=false,
+              gmsh_compatible=true, save_parametric=nothing,
+              save_topology=nothing) -> path
+
+Serialize a classified `MixedMesh` honouring the `Mesh.SaveParametric` and
+`Mesh.SaveTopology` options with Gmsh 4.15.2 semantics (see the section banner
+above). `nothing` keeps the default writer behaviour.
+"""
+function write_msh(path, m::MixedMesh; version=4.1, binary=false,
+                   gmsh_compatible=true, save_parametric=nothing,
+                   save_topology=nothing)
+    path isa AbstractString || throw(ArgumentError(
+        "write_msh: path must be a string"))
+    version isa Real || throw(ArgumentError("write_msh: version must be real"))
+    version isa Bool && throw(ArgumentError(
+        "write_msh: version must not be Bool"))
+    ver = try
+        Float64(version)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("write_msh: version must be representable as Float64"))
+    end
+    ver in (2.2,4.1) ||
+        throw(ArgumentError("write_msh: version must be 2.2 or 4.1 (got $version)"))
+    binary isa Bool || throw(ArgumentError("write_msh: binary must be Bool"))
+    gmsh_compatible isa Bool || throw(ArgumentError(
+        "write_msh: gmsh_compatible must be Bool"))
+    sp=_msh_save_flag(save_parametric,"save_parametric")
+    st=_msh_save_flag(save_topology,"save_topology")
+    if ver==4.1
+        target=sp===false ? _msh_strip_parametric(m) : m
+        write_mixed_msh(path,target;version=ver,binary=binary,
+                                 gmsh_compatible=gmsh_compatible)
+        return path
+    end
+    # ── MSH 2.2 ───────────────────────────────────────────────────────────────
+    if sp===true
+        m.entity_data===nothing && throw(ArgumentError(
+            "write_msh: save_parametric requires classified node/entity " *
+            "metadata (MixedMesh.entity_data)"))
+        records=_msh2_node_records(m)
+    else
+        records=nothing
+    end
+    entities=st===true ? _msh2_entity_records(m) : nothing
+    if records===nothing && entities===nothing
+        write_mixed_msh(path,m;version=ver,binary=binary,
+                                 gmsh_compatible=gmsh_compatible)
+        return path
+    end
+    parent=dirname(path); isempty(parent) && (parent=".")
+    isdir(parent) || throw(ArgumentError(
+        "write_msh: output directory does not exist: $parent"))
+    tmp,tmpio=mktemp(parent;cleanup=false)
+    close(tmpio)
+    try
+        write_mixed_msh(tmp,m;version=ver,binary=binary,
+                                 gmsh_compatible=gmsh_compatible)
+        bytes=read(tmp)
+        out=_msh2_transform(bytes;binary=binary,entities=entities,
+                            parametric=records)
+        write(path,out)
+    finally
+        isfile(tmp) && rm(tmp;force=true)
+    end
+    return path
+end
+
+# Copy `m` with every `node_parametric` record cleared — the MSH 4.1 writer keys
+# the parametric flag off `node_parametric[i] !== nothing`.
+function _msh_strip_parametric(m::MixedMesh)
+    data=m.entity_data
+    data===nothing && return m
+    any(p->p!==nothing,data.node_parametric) || return m
+    cleared=Union{Nothing,Vector{Float64}}[nothing for _ in data.node_parametric]
+    newdata=MixedEntityData(data.entities;
+        node_entities=data.node_entities,
+        node_parametric=cleared,
+        external_node_tags=data.external_node_tags,
+        block_entities=data.block_entities,
+        external_element_tags=data.external_element_tags,
+        _native_mesh_tags=data.native_mesh_tags)
+    return MixedMesh(m.coords,m.blocks;
+        physical_names=m.physical_names,
+        entity_data=newdata,
+        elementary_entities=m.elementary_entities,
+        periodic_links=m.periodic_links,
+        ancillary_sections=m.ancillary_sections,
+        data_sections=m.data_sections,
+        partition_data=m.partition_data)
+end
+
+# Per-node `(entityDim, entityTag, params)` records for `$ParametricNodes` —
+# indexed by mesh-node order, matching the dense tags the v2 writers emit.
+function _msh2_node_records(m::MixedMesh)
+    data=m.entity_data
+    data===nothing && throw(ArgumentError(
+        "write_msh: save_parametric requires classified node/entity metadata"))
+    nn=size(m.coords,2)
+    length(data.node_entities)==nn || throw(ArgumentError(
+        "write_msh: node-entity classification does not cover all nodes"))
+    length(data.node_parametric)==nn || throw(ArgumentError(
+        "write_msh: parametric node records do not cover all nodes"))
+    records=Tuple{Int,Int32,Vector{Float64}}[]
+    sizehint!(records,nn)
+    @inbounds for i in 1:nn
+        dim,etag=data.node_entities[i]
+        0<=dim<=3 || throw(ArgumentError(
+            "write_msh: node $i owner dimension $dim is outside 0:3"))
+        params=data.node_parametric[i]
+        values=params===nothing ? Float64[] : params
+        (length(values)==0 || length(values)==dim) || throw(ArgumentError(
+            "write_msh: node $i carries $(length(values)) parameters; " *
+            "expected 0 or owner dimension $dim"))
+        push!(records,(dim,etag,Float64.(values)))
+    end
+    return records
+end
+
+# Topology records `(dim,tag) => (unsigned boundaries, physical tags)` for the
+# MSH 2.2 `$Entities` section. Declared `MixedEntity` records are preferred;
+# without entity_data the section is derived from per-cell elementary tags.
+function _msh2_entity_records(m::MixedMesh)
+    data=m.entity_data
+    records=Dict{Tuple{Int,Int},Tuple{Vector{Int32},Vector{Int32}}}()
+    if data!==nothing
+        for ((dim,tag),entity) in data.entities
+            bounds=Int32[]
+            for b in entity.boundaries
+                b==0 && continue
+                push!(bounds,Int32(abs(b)))
+            end
+            records[(dim,tag)]=(bounds,Int32.(entity.physical_tags))
+        end
+        return records
+    end
+    elementary=m.elementary_entities
+    elementary===nothing && return records
+    for (bi,block) in pairs(m.blocks)
+        dim=msh_dimension(block.msh)
+        0<=dim<=3 || continue
+        tags=elementary[bi]
+        for j in 1:_mixed_ncells(block)
+            etag=tags[j]
+            etag<=0 && continue
+            key=(dim,Int(etag))
+            bounds,phys=get(records,key,(Int32[],Int32[]))
+            pt=block.tags[j]
+            if pt>0 && !(Int32(pt) in phys)
+                phys=copy(phys); push!(phys,Int32(pt))
+            end
+            records[key]=(bounds,phys)
+        end
+    end
+    return records
+end
+
+@inline _mixed_ncells(b)=_block_ncells(b)
+
+# Splice an MSH 2.2 byte stream: optionally insert `$Entities` before `$Nodes`
+# and/or replace `$Nodes` with `$ParametricNodes`.
+# `parametric` is a per-file-node vector of `(entityDim, entityTag, params)` —
+# or a `Dict`-style lookup closure returning those records (session path).
+function _msh2_transform(bytes::Vector{UInt8};binary::Bool,
+                         entities=nothing,parametric=nothing)
+    sm=findfirst(codeunits("\$Nodes\n"),bytes)
+    sm===nothing && throw(ArgumentError(
+        "write_msh: MSH 2.2 stream is missing the \$Nodes section"))
+    (sm[1]==1 || bytes[sm[1]-1]==UInt8('\n')) || throw(ArgumentError(
+        "write_msh: malformed MSH 2.2 \$Nodes marker"))
+    em=findfirst(codeunits("\$EndNodes"),bytes)
+    em===nothing && throw(ArgumentError(
+        "write_msh: MSH 2.2 stream is missing \$EndNodes"))
+    em[1]>sm[end] || throw(ArgumentError(
+        "write_msh: \$EndNodes precedes \$Nodes"))
+    send=em[end]
+    (send<length(bytes) && bytes[send+1]==UInt8('\n')) && (send+=1)
+    # The node count line is text in both ASCII and binary modes.
+    count_eol=findnext(isequal(UInt8('\n')),bytes,sm[end]+1)
+    count_eol===nothing && throw(ArgumentError(
+        "write_msh: truncated MSH 2.2 node count"))
+    count=try
+        parse(Int,String(@view bytes[sm[end]+1:count_eol-1]))
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("write_msh: malformed MSH 2.2 node count"))
+    end
+    count>=0 || throw(ArgumentError("write_msh: negative MSH 2.2 node count"))
+    records_start=count_eol+1
+    io=IOBuffer()
+    write(io,@view bytes[1:sm[1]-1])
+    entities===nothing || _msh2_write_entities(io,entities)
+    if parametric===nothing
+        write(io,@view bytes[sm[1]:send])
+    else
+        length(parametric)==count || throw(ArgumentError(
+            "write_msh: parametric records do not cover all nodes"))
+        if binary
+            records_bytes=count*28
+            records_start+records_bytes-1<=em[1]-1 || throw(ArgumentError(
+                "write_msh: truncated binary MSH 2.2 node records"))
+            length(parametric)==count || throw(ArgumentError(
+                "write_msh: parametric records do not cover all nodes"))
+            println(io,"\$ParametricNodes"); println(io,count)
+            @inbounds for k in 1:count
+                off=records_start+(k-1)*28
+                write(io,@view bytes[off:off+27])   # tag + xyz verbatim
+                dim,etag,params=parametric[k]
+                write(io,Int32(dim)); write(io,Int32(etag))
+                for v in params
+                    write(io,Float64(v))
+                end
+            end
+            write(io,UInt8('\n')); println(io,"\$EndParametricNodes")
+        else
+            println(io,"\$ParametricNodes"); println(io,count)
+            pos=records_start
+            @inbounds for k in 1:count
+                eol=findnext(isequal(UInt8('\n')),bytes,pos)
+                eol===nothing && throw(ArgumentError(
+                    "write_msh: truncated MSH 2.2 node record $k"))
+                eol<=em[1] || throw(ArgumentError(
+                    "write_msh: MSH 2.2 node record $k overruns \$EndNodes"))
+                line_end=eol-1
+                (line_end>=pos && bytes[line_end]==UInt8('\r')) && (line_end-=1)
+                write(io,@view bytes[pos:line_end])    # `tag x y z` verbatim
+                dim,etag,params=parametric[k]
+                @printf(io," %d %d",dim,etag)
+                for v in params
+                    @printf(io," %.17g",v)
+                end
+                write(io,UInt8('\n'))
+                pos=eol+1
+            end
+            println(io,"\$EndParametricNodes")
+        end
+    end
+    write(io,@view bytes[send+1:end])
+    return take!(io)
+end
+
+function _msh2_write_entities(io,
+        entities::Dict{Tuple{Int,Int},Tuple{Vector{Int32},Vector{Int32}}})
+    counts=zeros(Int,4)
+    for (dim,tag) in keys(entities)
+        0<=dim<=3 || throw(ArgumentError(
+            "write_msh: topology entity dimension $dim is outside 0:3"))
+        tag>0 || throw(ArgumentError(
+            "write_msh: topology entity tag must be positive (got $tag)"))
+        counts[dim+1]+=1
+    end
+    println(io,"\$Entities")
+    println(io,counts[1]," ",counts[2]," ",counts[3]," ",counts[4])
+    for dim in 0:3
+        members=sort!(collect(
+            tag for (d,tag) in keys(entities) if d==dim))
+        for tag in members
+            bounds,phys=entities[(dim,tag)]
+            if dim==0
+                print(io,tag," ",length(phys))
+            else
+                print(io,tag," ",length(bounds))
+                for b in bounds
+                    print(io," ",b)
+                end
+                print(io," ",length(phys))
+            end
+            for p in phys
+                print(io," ",p)
+            end
+            # Upstream v2 records carry a trailing space — kept for parity.
+            println(io," ")
+        end
+    end
+    println(io,"\$EndEntities")
+    return nothing
+end
+
+# Map 3-D coordinates to the mesh node index — exact binary reinterpretation,
+# deterministic under the `%.17g` text round-trip. Values are queues so
+# coincident nodes resolve in mesh order.
+function _msh_coord_index(m::MixedMesh)
+    index=Dict{NTuple{3,Int},Vector{Int}}()
+    @inbounds for i in axes(m.coords,2)
+        key=(reinterpret(Int,m.coords[1,i]),
+             reinterpret(Int,m.coords[2,i]),
+             reinterpret(Int,m.coords[3,i]))
+        push!(get!(index,key,Int[]),i)
+    end
+    return index
+end
+
+"""
+    _msh_rewrite_save_options(path; version, binary, save_parametric,
+                              save_topology, source=nothing) -> nothing
+
+Post-process an MSH file already written by `API.write` so it honours
+`Mesh.SaveParametric`/`Mesh.SaveTopology` (used by the CLI session path, where
+the session writer owns serialization). `source` is the classified `MixedMesh`
+the file was exported from; it is required for MSH 2.2 `save_parametric` and
+supplies the `\$Entities` records for `save_topology`.
+"""
+function _msh_rewrite_save_options(path;version,binary,
+                                   save_parametric,save_topology,
+                                   source=nothing)
+    version isa Real || throw(ArgumentError(
+        "write_msh: version must be real"))
+    ver=Float64(version)
+    ver in (2.2,4.1) || throw(ArgumentError(
+        "write_msh: version must be 2.2 or 4.1 (got $version)"))
+    sp=_msh_save_flag(save_parametric,"save_parametric")
+    st=_msh_save_flag(save_topology,"save_topology")
+    if ver==4.1
+        # SaveTopology is a no-op; only a 0-valued SaveParametric acts.
+        sp===false || return nothing
+        m=read_mixed_msh(path)
+        stripped=_msh_strip_parametric(m)
+        write_mixed_msh(path,stripped;version=4.1,binary=binary)
+        return nothing
+    end
+    # ── MSH 2.2 ───────────────────────────────────────────────────────────────
+    (sp===true || st===true) || return nothing
+    bytes=read(path)
+    records=nothing
+    if sp===true
+        source isa MixedMesh || throw(ArgumentError(
+            "write_msh: save_parametric requires the classified source mesh"))
+        data=source.entity_data
+        data===nothing && throw(ArgumentError(
+            "write_msh: save_parametric requires classified node/entity " *
+            "metadata on the source mesh"))
+        records=_msh2_parametric_lookup(bytes,source,binary)
+    end
+    entities=nothing
+    if st===true
+        if source isa MixedMesh
+            entities=_msh2_entity_records(source)
+        else
+            entities=Dict{Tuple{Int,Int},Tuple{Vector{Int32},Vector{Int32}}}()
+        end
+    end
+    out=_msh2_transform(bytes;binary=binary,entities=entities,
+                        parametric=records)
+    tmp=path*".rewrite.tmp"
+    write(tmp,out)
+    mv(tmp,path;force=true)
+    return nothing
+end
+
+# Build per-file-node `(dim,tag,params)` records by matching the file's node
+# coordinates against `source`'s coordinate map.
+function _msh2_parametric_lookup(bytes::Vector{UInt8},source::MixedMesh,
+                               binary::Bool)
+    data=source.entity_data
+    index=_msh_coord_index(source)
+    sm=findfirst(codeunits("\$Nodes\n"),bytes)
+    sm===nothing && throw(ArgumentError(
+        "write_msh: MSH 2.2 stream is missing the \$Nodes section"))
+    em=findfirst(codeunits("\$EndNodes"),bytes)
+    count_eol=findnext(isequal(UInt8('\n')),bytes,sm[end]+1)
+    count=parse(Int,String(@view bytes[sm[end]+1:count_eol-1]))
+    records=Tuple{Int,Int32,Vector{Float64}}[]
+    sizehint!(records,count)
+    if binary
+        @inbounds for k in 1:count
+            off=count_eol+1+(k-1)*28
+            x=reinterpret(Float64,@view bytes[off+4:off+11])[1]
+            y=reinterpret(Float64,@view bytes[off+12:off+19])[1]
+            z=reinterpret(Float64,@view bytes[off+20:off+27])[1]
+            push!(records,_msh2_lookup_record(index,data,x,y,z,k))
+        end
+    else
+        pos=count_eol+1
+        @inbounds for k in 1:count
+            eol=findnext(isequal(UInt8('\n')),bytes,pos)
+            eol===nothing && throw(ArgumentError(
+                "write_msh: truncated MSH 2.2 node record $k"))
+            line_end=eol-1
+            (line_end>=pos && bytes[line_end]==UInt8('\r')) && (line_end-=1)
+            fields=split(String(@view bytes[pos:line_end]))
+            length(fields)==4 || throw(ArgumentError(
+                "write_msh: malformed MSH 2.2 node record $k"))
+            x=parse(Float64,fields[2]); y=parse(Float64,fields[3])
+            z=parse(Float64,fields[4])
+            push!(records,_msh2_lookup_record(index,data,x,y,z,k))
+            pos=eol+1
+        end
+    end
+    return records
+end
+
+function _msh2_lookup_record(index,data,x,y,z,k)
+    key=(reinterpret(Int,x),reinterpret(Int,y),reinterpret(Int,z))
+    queue=get(index,key,nothing)
+    (queue===nothing || isempty(queue)) && throw(ArgumentError(
+        "write_msh: file node $k at ($x,$y,$z) has no counterpart in the " *
+        "classified source mesh"))
+    i=popfirst!(queue)
+    dim,etag=data.node_entities[i]
+    params=data.node_parametric[i]
+    values=params===nothing ? Float64[] : Float64.(params)
+    (length(values)==0 || length(values)==dim) || throw(ArgumentError(
+        "write_msh: source node $i carries $(length(values)) parameters; " *
+        "expected 0 or owner dimension $dim"))
+    return (dim,etag,values)
 end
 
 function _cell_bounds(m::Mesh,cells::Matrix{Int32},cols)

@@ -24,6 +24,88 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### UI01 parser/fltk/graphics surfaces + CLI save/high-order flags, MSH2.2 parametric/topology transport (2026-10-23, uncommitted in tree)
+
+The remaining headless session surfaces landed in
+`src/interfaces/APIParser.jl`, `APIFltk.jl`, `APIGraphics.jl` (sibling
+includes at the end of `APIOnelab.jl`, inside `module API`):
+
+- `API.parser` mirrors the `gmshParser*` store — `set_number`/`set_string`
+  (scalar or vector), `get_number`/`get_string` (empty vector for missing
+  variables, upstream semantics), `get_names` with a regex `search`,
+  `clear(name)`/`clear()`, and `parse(fileName)` which runs a detached
+  `execute_geo` and merges the file's `values`/`lists`/`strings` symbol
+  table into the store without touching session geometry. Calls require an
+  initialized session like the rest of the API.
+- `API.fltk` is a deterministic headless contract: `is_available()` is `0`
+  (no FLTK backend exists — honest for both missing backend and headless
+  runs), `run`/`wait`/`update`/`awake`/`lock`/`unlock`/`initialize`/
+  `finalize` are validated no-ops returning `nothing`, selection entry
+  points return empty selections, and window/status helpers validate
+  arguments (dim in `0:3`, ratio inside `(0,1)`, non-negative window index)
+  before no-op'ing. `API.graphics.draw()` is the upstream-consistent no-op.
+
+MSH writer/reader work in `src/interfaces/IO.jl` honours
+`Mesh.SaveParametric`/`Mesh.SaveTopology` with Gmsh 4.15.2 semantics:
+
+- `write_msh(path, ::MixedMesh; version, binary, save_parametric,
+  save_topology)` — MSH 4.1 drops the inline `$Nodes` parametric flag and
+  coordinates when `save_parametric=false` (`_msh_strip_parametric`);
+  MSH 2.2 emits a `$ParametricNodes` section (`nodeTag x y z entityDim
+  entityTag [u [v]]`, owner dimension controls parameter count) and/or a
+  topology-only unsigned `$Entities` section, both by transforming the
+  existing writer's byte stream (`_msh2_transform`) in ASCII and binary.
+- `read_msh` now returns the classified metadata in `MshFile.node_entities`
+  /`node_parametric`/`entities` — MSH 4.1 node-block owners and inline
+  parameters, the MSH 2.2 `$ParametricNodes` section, and v2 topology
+  `$Entities` are all validated and stored. `MshFile(mesh, pnames)` keeps
+  the old two-argument call signature. `read_mixed_msh`/`write_mixed_msh`
+  in `Elements.jl` are untouched; the default write path with no save
+  flags is byte-identical to before.
+- `_msh_rewrite_save_options` applies the save flags to `API.write` output
+  in the session path via a temp file in the destination directory,
+  always cleaned up.
+
+CLI additions in `src/interfaces/CLI.jl` route through existing machinery:
+
+- Valueless: `-save_parametric`/`-parametric` → `Mesh.SaveParametric`,
+  `-save_topology` → `Mesh.SaveTopology`, `-optimize_ho`/`-hoOptimize` →
+  `Mesh.HighOrderOptimize` (consumers already in `APIHighOrderOptimize.jl`
+  via `_apply_mesh_order`; the flag forces the session path so the
+  option reaches it).
+- Numeric: `-ho_min`/`-ho_max` → `Mesh.HighOrderThresholdMin/Max`,
+  `-ho_nlayers` → `Mesh.HighOrderNumLayers` (declared in
+  `GeoOptionTables.jl`, stored into `API.OPTIONS`; no producer consumes it
+  yet — settable like upstream's stored-but-pipeline-gated option).
+- Standalone `.geo` output prefers the meshing authority's native
+  `MixedMesh` (`_cli_classified_mesh`) so classified ownership and
+  parametric metadata reach the writer; a missing classified mesh with
+  MSH2.2 save flags rejects loudly. `-part_split` forwards both save
+  flags to the per-partition writers.
+- Still rejected: `-0` (no model→`.geo` writer exists), `-save_entities`,
+  `-barycentric_refine` (no native split producer), BAMG anisotropics,
+  ONELAB solver client flags, matching/`Concorde` backends.
+
+`APIOnelab.jl`'s `onelab.run` stays the documented no-op for `run()` and a
+loud `ArgumentError` for any client/command — no solver-client backend
+exists.
+
+Verification (Julia 1.13.1, `--project=.`):
+`test/interfaces/cli_save_options_test.jl` 58/58 (MSH 4.1 flag control
+9/9, MSH 2.2 `$ParametricNodes` 18/18, MSH 2.2 `$Entities` topology 10/10,
+binary MSH 2.2 3/3, session path 6/6, high-order flags 7/7, retained
+rejections 5/5); `api_parser_test.jl` 30/30; `api_fltk_graphics_test.jl`
+38/38; `api_onelab_test.jl` 68/68; `io_test.jl` 1324/1324;
+`gui_test.jl` 81/81 — all exit 0. `cli_test.jl` shows 118/131 with 13
+failures that are mesh-content CRC / periodic-link `slave_nodes`
+assertions (e.g. `cli_test.jl:276`,`:296`,`:382`,`:441`,`:444`) in the
+`bounded non-destructive CLI` set — in-memory `MixedMesh` content produced
+by the meshing pipeline; this slice's diff touches neither meshing nor the
+default `write_mixed_msh`/`read_mixed_msh` path, and uncommitted
+`src/meshing/RecoverCDT.jl` + `src/interfaces/APIGenerate*.jl` changes
+from a concurrent in-flight workstream are in the tree — attribution
+points there, not to this slice.
+
 ### OPT01 face-owned (u,v) parametric sliding for Mesh.HighOrderOptimize (2026-10-22, uncommitted in tree)
 
 The remaining OPT01 gap after the elastic stage — dim-2-owned high-order mids

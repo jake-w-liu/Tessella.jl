@@ -29,7 +29,7 @@ wrong data.
 module CLI
 
 using ..GeoExec: execute_geo, geo_entity_mesh
-using ..IO: write_msh
+using ..IO: write_msh, _msh_rewrite_save_options
 using ..Model: model_periodic_constraints, model_to_mixed
 using ..Elements: write_mixed_msh, read_mixed_msh, MixedMesh, MixedEntity,
     MixedEntityData, MixedPartitionData, MixedGhostElement, MixedPeriodicLink,
@@ -48,6 +48,8 @@ Usage: tessella file.geo [-1|-2|-3] [-o output.msh] [-format msh2|msh4] [-bin]
        [-tol value] [-clcurv n] [-epslc1d value] [-edgelmin value]
        [-clextend n] [-smooth n] [-algo del2d|front2d|del3d] [-quad]
        [-optimize] [-optimize_netgen] [-optimize_threshold value]
+       [-optimize_ho|-hoOptimize] [-ho_min v] [-ho_max v] [-ho_nlayers v]
+       [-save_parametric|-parametric] [-save_topology]
        [-save_all] [-nopopup] [-v int] [-nt int] [-setnumber name value]
        [-setstring name value] [-setlist name n v1 ... vn] [-string str]
        [-option file.geo]
@@ -69,6 +71,11 @@ without -part it is inert, like upstream Mesh.PartitionSplitMeshFiles.
 -setnumber/-setstring/-setlist and -string/-option act as .geo parser input
 before the input file; on non-.geo inputs only `-setnumber` option names
 (Family.Member) apply, through the session option table.
+-save_parametric/-parametric and -save_topology honor Mesh.SaveParametric and
+Mesh.SaveTopology on MSH 2.2 and MSH 4.1 output (parametric node records and
+topology-only \$Entities, matching Gmsh 4.15.2). -optimize_ho/-hoOptimize and
+the -ho_min/-ho_max/-ho_nlayers options drive the session high-order
+relocation optimizer.
 GUI-only, display, solver-daemon and unimplemented upstream flags reject.
 """
 
@@ -88,6 +95,9 @@ const _NUMERIC_FLAGS=Dict(
     "-clextend"=>("Mesh.MeshSizeExtendFromBoundary",:finite),
     "-smooth"=>("Mesh.Smoothing",:nonnegint),
     "-optimize_threshold"=>("Mesh.OptimizeThreshold",:finite),
+    "-ho_min"=>("Mesh.HighOrderThresholdMin",:finite),
+    "-ho_max"=>("Mesh.HighOrderThresholdMax",:finite),
+    "-ho_nlayers"=>("Mesh.HighOrderNumLayers",:nonnegint),
     "-v"=>("General.Verbosity",:finite),
     "-verbose"=>("General.Verbosity",:finite),
     "-nt"=>("General.NumThreads",:nonnegint))
@@ -98,6 +108,11 @@ const _BOOLEAN_FLAGS=Dict(
     "-optimize_netgen"=>"Mesh.OptimizeNetgen",
     "-save_all"=>"Mesh.SaveAll",
     "-saveall"=>"Mesh.SaveAll",
+    "-save_parametric"=>"Mesh.SaveParametric",
+    "-parametric"=>"Mesh.SaveParametric",
+    "-save_topology"=>"Mesh.SaveTopology",
+    "-optimize_ho"=>"Mesh.HighOrderOptimize",
+    "-hoOptimize"=>"Mesh.HighOrderOptimize",
     "-nopopup"=>"General.NoPopup",
     "-renumber"=>"Mesh.Renumber",
     "-term"=>"General.Terminal")
@@ -117,10 +132,7 @@ const _REJECTED_FLAGS=Dict{String,String}(
     "-0"=>"model .geo output (unrolled geometry) is not implemented",
     "-4"=>"adaptive meshing (batch mode 4) is not implemented",
     "-barycentric_refine"=>"barycentric refinement is not implemented",
-    "-parametric"=>"parametric node output control (Mesh.SaveParametric) is not implemented",
-    "-save_parametric"=>"parametric node output control (Mesh.SaveParametric) is not implemented",
-    "-save_topology"=>"topology-only output (Mesh.SaveTopology) is not implemented",
-    "-save_entities"=>"topology-only output (Mesh.SaveTopology) is not implemented",
+    "-save_entities"=>"unrolled .geo entity output is not implemented",
     "-switch_tags"=>"element tag switching is not implemented",
     "-preserve_numbering_msh2"=>"MSH2 element-number preservation is not implemented",
     "-preserveNumberingMsh2"=>"MSH2 element-number preservation is not implemented",
@@ -130,11 +142,6 @@ const _REJECTED_FLAGS=Dict{String,String}(
     "-savePartTopology"=>"partition topology .pro output is not implemented",
     "-part_physicals"=>"partition physical-group toggling is not implemented",
     "-part_no_physicals"=>"partition physical-group toggling is not implemented",
-    "-optimize_ho"=>"high-order mesh optimization is not implemented",
-    "-hoOptimize"=>"high-order mesh optimization is not implemented",
-    "-ho_min"=>"high-order optimization is not implemented",
-    "-ho_max"=>"high-order optimization is not implemented",
-    "-ho_nlayers"=>"high-order optimization is not implemented",
     "-aniso_max"=>"the BAMG backend is not implemented",
     "-anisoMax"=>"the BAMG backend is not implemented",
     "-smooth_ratio"=>"the BAMG backend is not implemented",
@@ -659,11 +666,14 @@ function _main(args::AbstractVector{<:AbstractString})
             "tessella: parse-and-exit cannot be combined with meshing or " *
             "output options"))
     # `.msh`/`.pos` inputs, multiple files, and post-mesh actions run on the
-    # API session. Everything else — including extensionless `.geo` sources —
-    # keeps the standalone `.geo` execution path.
+    # API session. High-order optimization lives in the session meshing plan,
+    # so `-optimize_ho`/`-hoOptimize` routes there as well. Everything else —
+    # including extensionless `.geo` sources — keeps the standalone `.geo`
+    # execution path.
     session=extension in (".msh",".pos") || length(files)>1 || refine_seen ||
         save_seen || reclassify!==nothing || reparam!==nothing ||
-        part!==nothing
+        part!==nothing ||
+        get(numeric_options,"Mesh.HighOrderOptimize",0.0)!=0.0
     if !session
         dim==0 && outfile!==nothing && throw(ArgumentError(
             "tessella: -o requires -1, -2 or -3"))
@@ -679,22 +689,37 @@ function _main(args::AbstractVector{<:AbstractString})
                 "tessella: minimum mesh size exceeds maximum"))
         source=first(inputs)
         temporary=nothing
+        # The `.geo` numeric-option store is internal to the execution;
+        # `Mesh.SaveParametric`/`Mesh.SaveTopology` values assigned inside the
+        # script or by flags reach the writer through this recorder.
+        save_options=Dict{String,Float64}()
+        save_recorder=(family,member,value)->begin
+            family=="Mesh" &&
+                member in ("SaveParametric","SaveTopology") &&
+                (save_options[member]=Float64(value))
+            return nothing
+        end
         result=try
             if !isempty(preludes)
                 temporary=_inject_geo(source,preludes)
                 source=temporary
             end
-            execute_geo(source;mesh_dim=dim,_forced_numeric_options=numeric_options)
+            execute_geo(source;mesh_dim=dim,
+                _forced_numeric_options=numeric_options,
+                _initial_numeric_option_callback=save_recorder)
         finally
             temporary===nothing || rm(temporary;force=true)
         end
+        save_parametric=get(save_options,"SaveParametric",nothing)
+        save_topology=get(save_options,"SaveTopology",nothing)
         if dim>0
             result.mesh===nothing && throw(ErrorException("tessella: no mesh produced"))
             if dim==1
                 authority=result.model.meshing.mesh_authority
                 authority!==nothing && authority.mesh!==nothing || throw(ErrorException(
                     "tessella: one-dimensional generation omitted its classified mesh"))
-                write_mixed_msh(destination,authority.mesh;version,binary)
+                write_msh(destination,authority.mesh;version,binary,
+                          save_parametric,save_topology)
                 return destination
             end
             constraints=model_periodic_constraints(result.model)
@@ -714,7 +739,27 @@ function _main(args::AbstractVector{<:AbstractString})
             explicit_shell=dim==3 && target!==nothing &&
                            !isempty(result.model.volumes[target])
             if isempty(constraints) && !embedded && !explicit_shell
-                if result.mesh isa MixedMesh
+                # `-save_parametric`/`-save_topology` need classified
+                # ownership/parameters — prefer the meshing authority's
+                # native `MixedMesh` when one was produced.
+                if save_parametric!==nothing || save_topology!==nothing
+                    classified=_cli_classified_mesh(result)
+                    if classified isa MixedMesh
+                        write_msh(destination,classified;version,binary,
+                                  save_parametric,save_topology)
+                    else
+                        (version==2.2 &&
+                            (save_parametric==1.0 || save_topology==1.0)) &&
+                            throw(ArgumentError(
+                                "tessella: -save_parametric/-save_topology " *
+                                "requires a classified mesh (the run produced " *
+                                "no entity metadata)"))
+                        binary ?
+                            write_mixed_msh(destination,
+                                simplex_to_mixed(result.mesh);version,binary) :
+                            write_msh(destination,result.mesh;version)
+                    end
+                elseif result.mesh isa MixedMesh
                     write_mixed_msh(destination,result.mesh;version,binary)
                 elseif binary
                     write_mixed_msh(destination,simplex_to_mixed(result.mesh);version,binary)
@@ -746,7 +791,8 @@ function _main(args::AbstractVector{<:AbstractString})
                 isempty(missing_relations) || throw(ArgumentError(
                     "tessella: selected $entity_name projection omits periodic " *
                     "relations $missing_relations"))
-                write_mixed_msh(destination,projected;version,binary)
+                write_msh(destination,projected;version,binary,
+                          save_parametric,save_topology)
             end
             return destination
         end
@@ -756,6 +802,16 @@ function _main(args::AbstractVector{<:AbstractString})
         dim,outfile,version,binary,output_flags=format_seen || binary_seen,
         refine=refine_seen,save=save_seen,
         reclassify,reparam,part,part_topo,part_ghosts,part_split)
+end
+
+# Classified `MixedMesh` preferred for `-save_parametric`/`-save_topology`
+# output: the meshing authority's native record retains entity ownership and
+# parametric node coordinates the merged `result.mesh` may not carry.
+function _cli_classified_mesh(result)
+    authority=result.model.meshing.mesh_authority
+    authority!==nothing && authority.mesh isa MixedMesh && return authority.mesh
+    result.mesh isa MixedMesh && return result.mesh
+    return result.mesh
 end
 
 # Session path: files route through `API.open`/`API.merge`/`API.model.add`,
@@ -771,6 +827,14 @@ function _session_main(files,preludes,numeric_options;
         "tessella: -o requires a meshing, conversion or save action"))
     !need_output && output_flags && throw(ArgumentError(
         "tessella: output format flags require a meshing, conversion or save action"))
+    # `Mesh.SaveParametric`/`Mesh.SaveTopology`/`Mesh.HighOrderNumLayers` live
+    # in the `.geo` option table but outside `API.DEFAULT_OPTIONS`; the save
+    # pair is applied to the serialized file after `API.write` and all three
+    # are recorded in the session option table directly — so `-setnumber`
+    # preludes behave like session options rather than `.geo` injections.
+    save_option_values=Dict{String,Float64}()
+    session_save_names=("Mesh.SaveParametric","Mesh.SaveTopology",
+                        "Mesh.HighOrderNumLayers")
     # Literal `.geo` statements need a leading `.geo` file; `(name, value)`
     # option preludes become session options when the session table knows the
     # name and `.geo` assignments otherwise (`General.NoPopup` and friends).
@@ -779,9 +843,13 @@ function _session_main(files,preludes,numeric_options;
     lines=String[]
     for prelude in preludes
         if prelude isa Tuple
-            haskey(API.DEFAULT_OPTIONS,prelude[1]) ?
-                push!(option_preludes,prelude) :
+            if prelude[1] in session_save_names
+                save_option_values[prelude[1]]=prelude[2]
+            elseif haskey(API.DEFAULT_OPTIONS,prelude[1])
+                push!(option_preludes,prelude)
+            else
                 push!(lines,"$(prelude[1]) = $(prelude[2]);")
+            end
         else
             push!(lines,prelude)
         end
@@ -789,12 +857,20 @@ function _session_main(files,preludes,numeric_options;
     !first_is_geo && !isempty(lines) && throw(ArgumentError(
         "tessella: -setstring/-setlist/-string/-option inject .geo parser " *
         "input and require a .geo input file"))
+    for (name,value) in numeric_options
+        name in session_save_names &&
+            (save_option_values[name]=value)
+    end
+    save_parametric=get(save_option_values,"Mesh.SaveParametric",nothing)
+    save_topology=get(save_option_values,"Mesh.SaveTopology",nothing)
+    save_flags_set=save_parametric!==nothing || save_topology!==nothing
     # Session-table options apply through `API.option`; options that live only
     # in the `.geo` table (`General.NoPopup`, `General.Terminal`) are injected
     # into a leading `.geo` file and are inert on non-.geo inputs.
     session_numeric=Dict{String,Float64}()
     geo_numeric_preludes=Union{String,Tuple{String,Float64}}[]
     for (name,value) in numeric_options
+        name in session_save_names && continue
         haskey(API.DEFAULT_OPTIONS,name) ? (session_numeric[name]=value) :
             push!(geo_numeric_preludes,"$name = $value;")
     end
@@ -846,6 +922,11 @@ function _session_main(files,preludes,numeric_options;
             API.option("Mesh.PartitionCreateTopology",part_topo ? 1.0 : 0.0)
         part_ghosts===nothing ||
             API.option("Mesh.PartitionCreateGhostCells",part_ghosts ? 1.0 : 0.0)
+        # `.geo`-table options the session table does not declare are stored
+        # directly — the same place `API.option` would have put them.
+        for (name,value) in save_option_values
+            API.OPTIONS[name]=value
+        end
         dim>0 && API.mesh.generate(dim)
         refine && API.mesh.refine()
         reclassify===nothing ||
@@ -858,9 +939,38 @@ function _session_main(files,preludes,numeric_options;
         if need_output
             # `-part_split` only takes effect on an active partition request —
             # upstream's Mesh.PartitionSplitMeshFiles is inert otherwise.
-            part_split===true && part!==nothing ?
-                _write_partition_files(destination;version,binary) :
+            out_extension=lowercase(splitext(destination)[2])
+            if part_split===true && part!==nothing
+                _write_partition_files(destination;version,binary,
+                    save_parametric,save_topology)
+            elseif save_flags_set &&
+                   out_extension in (".msh",".msh2",".msh22",".msh4",".msh41")
+                write_version=out_extension in (".msh2",".msh22") ? 2.2 :
+                              out_extension in (".msh4",".msh41") ? 4.1 :
+                              version
+                API.option("Mesh.MshFileVersion",write_version)
+                parent=dirname(destination)
+                isempty(parent) && (parent=".")
+                tmp,tmpio=mktemp(parent;cleanup=false)
+                close(tmpio)
+                tmpmsh=tmp*".msh"
+                try
+                    API.write(tmpmsh)
+                    source=lock(API.STATE_LOCK) do
+                        API.LAST_MESH[]
+                    end
+                    _msh_rewrite_save_options(tmpmsh;
+                        version=write_version,binary=binary,
+                        save_parametric=save_parametric,
+                        save_topology=save_topology,
+                        source=source)
+                    mv(tmpmsh,destination;force=true)
+                finally
+                    isfile(tmpmsh) && rm(tmpmsh;force=true)
+                end
+            else
                 API.write(destination)
+            end
         end
     finally
         temporary===nothing || rm(temporary;force=true)
@@ -1203,7 +1313,8 @@ end
 # combined model write is staged into a throwaway file so the split works on
 # exactly what `API.write` would serialize — MSH 4.1 keeps partition and ghost
 # metadata through that read-back regardless of the requested output version.
-function _write_partition_files(destination::String;version,binary)
+function _write_partition_files(destination::String;version,binary,
+                                save_parametric=nothing,save_topology=nothing)
     parent=dirname(abspath(destination))
     isdir(parent) || throw(ArgumentError(
         "tessella: -part_split output directory does not exist: $parent"))
@@ -1231,14 +1342,16 @@ function _write_partition_files(destination::String;version,binary)
         labels=_partition_label_assignment(mesh,partition,public)
         for part in 1:partition.num_partitions
             view=_partition_label_view(mesh,labels,part;v2=version!=4.1)
-            write_mixed_msh(stem*"_$part.msh",view;version,binary)
+            write_msh(stem*"_$part.msh",view;version,binary,
+                      save_parametric,save_topology)
         end
         return destination
     end
     pdata.num_partitions>1 || return API.write(destination)
     for part in 1:Int(pdata.num_partitions)
         view=_partition_view(mesh,part;partition_metadata=version==4.1)
-        write_mixed_msh(stem*"_$part.msh",view;version,binary)
+        write_msh(stem*"_$part.msh",view;version,binary,
+                  save_parametric,save_topology)
     end
     return destination
 end

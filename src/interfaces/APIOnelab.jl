@@ -797,3 +797,9 @@ function _onelab_clear_changed()
         return nothing
     end
 end
+
+# Sibling interface modules included here so they land inside `module API`
+# like `module onelab` (API.jl's include list is owned elsewhere).
+include("APIParser.jl")
+include("APIFltk.jl")
+include("APIGraphics.jl")
