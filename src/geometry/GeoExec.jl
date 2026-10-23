@@ -8096,7 +8096,8 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         _geo_exec_define_constants!(context,mm.captures[1])
         return
     elseif (mm=match(r"^UndefineConstant\s*\[\s*(.*?)\s*\]\s*;?\s*$",line)) !== nothing
-        for arg in _geo_split_args(mm.captures[1],"execute_geo: UndefineConstant")
+        for arg in _geo_split_define_constants(mm.captures[1],
+                                               "execute_geo: UndefineConstant")
             name=_geo_symbol_name(arg,context,"execute_geo: UndefineConstant")
             delete!(context.onelab_numbers,name)
             delete!(context.onelab_strings,name)
@@ -8429,10 +8430,107 @@ end
 # comes from the `Name` option (missing `Name` + any option → a Gmsh error),
 # an existing server value overrides the default, and the symbol is only
 # created when absent.
+#
+# Entries are separated by commas OR bare whitespace/newlines — the official
+# tutorials (t20/t21) write newline-separated `name = {v, options}` blocks
+# with commas only inside the braces. Gmsh's token grammar needs no comma:
+# an entry ends where a new entry can start, i.e. an identifier immediately
+# following a completed atom (`name`, literal, `)`, `]`, `}` or string close)
+# at bracket depth zero. `B = A + 1 C = 5` therefore parses as two entries
+# upstream (`B = A + 1`, `C = 5`) — `C` cannot extend the finished FExpr.
+function _geo_split_define_constants(raw::AbstractString,
+                                     caller::AbstractString)
+    src=String(strip(raw))
+    isempty(src) && return String[]
+    items=String[];start=firstindex(src);i=firstindex(src);last=lastindex(src)
+    parens=0;brackets=0;braces=0;quote_char='\0'
+    # `prev_atom` records whether the last significant depth-0 token ended an
+    # expression atom (:atom) or left the RHS open (:open). An identifier seen
+    # while :atom starts a new entry.
+    prev_atom=Symbol(:open)
+    function boundary!(next_start::Int;strict::Bool=false)
+        item=String(strip(src[start:prevind(src,i)]))
+        if isempty(item)
+            # A `,,` run is a hard syntax error upstream; identifier
+            # boundaries legitimately produce empty slices.
+            strict && _geo_syntax_abort(",")
+        else
+            push!(items,item)
+        end
+        start=next_start;prev_atom=Symbol(:open)
+    end
+    while i<=last
+        c=src[i]
+        if quote_char!='\0'
+            if c==quote_char
+                quote_char='\0'
+                parens==0 && brackets==0 && braces==0 &&
+                    (prev_atom=Symbol(:atom))
+            end
+        elseif parens==0 && brackets==0 && braces==0
+            if isspace(c)
+                # Whitespace/newlines are transparent to the atom state —
+                # they are exactly what separates two comma-less entries.
+            elseif c in ('"','\'')
+                quote_char=c
+            elseif isletter(c) || c=='_'
+                prev_atom==Symbol(:atom) && boundary!(i)
+                j=nextind(src,i)
+                while j<=last &&
+                      (isletter(src[j]) || isdigit(src[j]) || src[j]=='_')
+                    j=nextind(src,j)
+                end
+                prev_atom=Symbol(:atom);i=j;continue
+            elseif isdigit(c) || c=='.'
+                prev_atom=Symbol(:atom)
+            elseif c=='('
+                parens+=1;prev_atom=Symbol(:open)
+            elseif c=='['
+                brackets+=1;prev_atom=Symbol(:open)
+            elseif c=='{'
+                braces+=1;prev_atom=Symbol(:open)
+            elseif c==','
+                boundary!(nextind(src,i);strict=true)
+            else
+                # Operators, `=`, `?`, `:` and friends leave the RHS open.
+                prev_atom=Symbol(:open)
+            end
+        else
+            # Nested depth — track only structure and quotes.
+            if c in ('"','\'')
+                quote_char=c
+            elseif c=='(' parens+=1
+            elseif c==')'
+                parens-=1;parens>=0 || _geo_syntax_abort(")")
+                parens==0 && brackets==0 && braces==0 &&
+                    (prev_atom=Symbol(:atom))
+            elseif c=='[' brackets+=1
+            elseif c==']'
+                brackets-=1;brackets>=0 || _geo_syntax_abort("]")
+                parens==0 && brackets==0 && braces==0 &&
+                    (prev_atom=Symbol(:atom))
+            elseif c=='{' braces+=1
+            elseif c=='}'
+                braces-=1;braces>=0 || _geo_syntax_abort("}")
+                parens==0 && brackets==0 && braces==0 &&
+                    (prev_atom=Symbol(:atom))
+            end
+        end
+        i=nextind(src,i)
+    end
+    parens==0 || _geo_syntax_abort("(")
+    brackets==0 || _geo_syntax_abort("[")
+    braces==0 || _geo_syntax_abort("{")
+    quote_char=='\0' || _geo_syntax_abort("\"")
+    item=String(strip(src[start:last]))
+    isempty(item) || push!(items,item)
+    return items
+end
+
 function _geo_exec_define_constants!(context::_GeoNumericContext,
                                    raw::AbstractString)
     caller="execute_geo: DefineConstant"
-    for item in _geo_split_args(raw,caller)
+    for item in _geo_split_define_constants(raw,caller)
         spec=String(strip(item))
         if (m=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*$",spec))!==nothing
             name=String(m.captures[1])

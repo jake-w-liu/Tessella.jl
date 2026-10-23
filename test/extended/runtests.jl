@@ -79,6 +79,7 @@ using Tessella
     include(joinpath(@__DIR__, "..", "geometry/geo_recoverable_add_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/geo_list_variable_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/geo_dynamic_tag_test.jl"))
+    include(joinpath(@__DIR__, "..", "geometry/geo_define_constant_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/geo_set_max_tag_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/geo_constraints_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/geo_transfquadtri_test.jl"))

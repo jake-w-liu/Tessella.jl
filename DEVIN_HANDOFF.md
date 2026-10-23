@@ -121,6 +121,16 @@ the owned files:
   rims (t19 verbatim `Fillet` stays classified non-planar-edge reject).
 - UI01: parser/fltk/graphics surfaces landed `9467923` — only `onelab`
   solver-client backend remains a documented no-op.
+- GEO01 grammar tail: `DefineConstant`/`UndefineConstant`
+  whitespace/newline-separated entries landed 2026-10-23 — the t20/t21
+  verbatim `.geo` scripts now parse their `DefineConstant` blocks and
+  stop only at the previously-classified OCC dim-2 Boolean operand gap
+  (`BooleanFragments` Surface operands) — see `geo_define_constant_test`.
+  `.geo` `Plugin(...)` actions remain rejected (plugins exist on
+  `API.plugin`; the `.geo` executor's `_GEO_EXEC_VIEWS` store is a
+  separate view list from `SESSION_VIEWS` — a store-agnostic bridge is
+  the remaining work). T8-style `.pos` `T2`/`T3` text expressions landed
+  earlier (`2bdd230`).
 - CLI flags: `-0` unrolled `.geo` output (`GeoUnrolled.jl`) and
   `-barycentric_refine` (`Elements.jl`) landed this session (570+28+72
   assertions green under `--compile=min`; oracle-verified connectivity,
