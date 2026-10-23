@@ -263,22 +263,67 @@ function _parallel_surface_param_refs(m::GeoModel)
 end
 
 # `m.curve_params` writes a detached produce can own: boundary writeback,
-# lazy grading of missing curves and the native lower-input `merge!`.  All
-# land inside the footprint; anything outside is the serial arm's business.
-# A `nothing` value records a deleted entry for replay symmetry.
+# lazy grading of missing curves and the native lower-input `merge!` for the
+# recorded footprint.  The write scan must cover the *whole* store, not just
+# the footprint: a produce writing a slot outside its recorded read set means
+# the transport contract was violated — replaying only footprint diffs would
+# silently drop live state (and skip the dirty propagation a live write
+# owns).  Such writes are flagged `foreign`; the slot re-runs the identical
+# serial call instead of adopting an untransportable receipt.  A `nothing`
+# value records a deleted entry for replay symmetry.
 function _parallel_curve_param_diffs(params::Dict{Int,Vector{Float64}},
         base::Dict{Int,Vector{Float64}},footprint::Set{Tuple{Int,Int32}})
     diffs=Dict{Int,Union{Nothing,Vector{Float64}}}()
-    for (dim,curve) in footprint
-        dim==1 || continue
-        key=Int(curve)
-        current=get(params,key,nothing);before=get(base,key,nothing)
+    foreign=false
+    for (curve,current) in params
+        before=get(base,curve,nothing)
         current===before && continue
-        (current===nothing || before===nothing || current!=before) ||
-            continue
-        diffs[key]=current
+        (before===nothing || current!=before) || continue
+        if (1,Int32(curve)) in footprint
+            diffs[curve]=current
+        else
+            foreign=true
+        end
     end
-    return diffs
+    for curve in keys(base)
+        haskey(params,curve) && continue
+        (1,Int32(curve)) in footprint ? (diffs[Int(curve)]=nothing) :
+            (foreign=true)
+    end
+    return diffs,foreign
+end
+
+# The second half of the transport certificate: a detached produce's
+# contract is "read model state, write `curve_params`", so a mutation
+# anywhere else in the model stores — entity births through `next_tag`,
+# topology, names, constraints, discrete records, kernel records, meshing
+# attributes — can never be transported and must send the slot back to the
+# serial arm.  The parent's stores are safe to read from a worker: while a
+# fill runs, the merge loop is suspended inside the same batch, and during a
+# spawned attempt the only live `m` writes are `m.curve_params` (covered by
+# the diff scan) and `m.meshing.mesh_authority` (rebound by merges —
+# excluded below).  `size_callback` is the one shared field of the
+# transaction copy and cannot diverge.  Every record type in these stores
+# (`DiscreteEntity`, `_ModelNativeGeoKernel`, `_ModelNativeOCCKernel`,
+# `ModelPeriodicConstraint`, ...) defines `==`, so a plain fieldwise
+# comparison is the certificate.
+function _parallel_model_foreign_writes(working::GeoModel,m::GeoModel)
+    for name in (:points,:point_size,:point_w,:curves,:curve_control_points,
+            :curve_types,:curve_geometry,:loops,:surfaces,:surface_loops,
+            :surface_types,:surface_geometry,:volumes,:entity_names,
+            :entity_visibility,:entity_colors,:attributes,:physical,
+            :physical_names,:entity_physicals,:physical_tag_max,:box_extents,
+            :cylinders,:spheres,:cones,:booleans,:boolean_operands,
+            :boolean_components,:periodic,:embeds,:discrete,:next_tag,:name,
+            :occ_kernel)
+        getfield(working,name)==getfield(m,name) || return true
+    end
+    wa,ma=working.meshing,m.meshing
+    for name in fieldnames(Model.ModelMeshingAttributes)
+        name in (:mesh_authority,:size_callback) && continue
+        getfield(wa,name)==getfield(ma,name) || return true
+    end
+    return false
 end
 
 function _parallel_replay_param_diffs!(m::GeoModel,diffs)
@@ -289,12 +334,22 @@ function _parallel_replay_param_diffs!(m::GeoModel,diffs)
     return nothing
 end
 
+# Observability for the detach transport itself: the merge thread increments
+# this once per adopted detached receipt (per entity), so tests can prove a
+# run took the parallel path rather than silently collapsing to serial.
+# Stores happen only inside the in-order merge — never inside workers.
+const _PARALLEL_ADOPTED=Ref{Int}(0)
+
 # One detached Surface produce on a premade transaction copy.  The task's
 # private `random_state` Ref enters at the batch seed and reports its exit
-# value — the draw ledger the merge checks.  Shared by the `@threads` batch
-# arm and the `Threads.@spawn` cross-phase arm.
+# value — the draw ledger the merge checks.  `foreign` is the transport
+# certificate: the produce must write only `m.curve_params` slots inside its
+# footprint — a write anywhere else could never reach the live model and
+# sends the receipt back to the serial arm instead of being silently
+# dropped.  Shared by the `@threads` batch arm and the `Threads.@spawn`
+# cross-phase arm.
 function _parallel_surface_attempt(working::GeoModel,work::_ParallelSurfaceWork,
-        input,detached_options::Model._ModelMesh1DOptions,
+        m::GeoModel,input,detached_options::Model._ModelMesh1DOptions,
         base_params::Dict{Int,Vector{Float64}},geom_points,
         hn::UInt64,hc::UInt64,base_seed::UInt32,precise::Bool)
     out=try
@@ -305,9 +360,10 @@ function _parallel_surface_attempt(working::GeoModel,work::_ParallelSurfaceWork,
                 _mesh_node_high_water=hn,_mesh_element_high_water=hc,
                 _return_surface_production=true,
                 _geometry_points=geom_points)
-            (produced,_parallel_curve_param_diffs(
-                working.curve_params,base_params,work.footprint),
-                base_seed,detached_options.random_state[])
+            diffs,foreign=_parallel_curve_param_diffs(
+                working.curve_params,base_params,work.footprint)
+            foreign || (foreign=_parallel_model_foreign_writes(working,m))
+            (produced,diffs,base_seed,detached_options.random_state[],foreign)
         end
         (;ok=true,value=precise ?
             GmshLibm._with_win_cli_precision(body) : body())
@@ -343,8 +399,8 @@ function _parallel_surface_fill!(results::Vector{Any},range,m::GeoModel,
         work=prepared[index]
         detached_options=_parallel_task_options(options,base_seed)
         results[index]=(_parallel_surface_attempt(
-            Model._model_mesh_transaction_copy(m),work,input,detached_options,
-            base_params,geom_points,hn,hc,base_seed,precise),
+            Model._model_mesh_transaction_copy(m),work,m,input,
+            detached_options,base_params,geom_points,hn,hc,base_seed,precise),
             hn,hc,base_dirty,geom_points,base_seed)
     end
     return nothing
@@ -414,7 +470,8 @@ function _parallel_surface_fresh(work::_ParallelSurfaceWork,out,
     geom_points===nothing ||
         _higher_geometry_source_points(assembly,geometry_birth)==geom_points ||
         return false
-    produced,_,seed_in,seed_out=out.value
+    produced,_,seed_in,seed_out,foreign=out.value
+    foreign && return false
     _parallel_surface_remap_supported(produced) || return false
     seed_in==base_seed || return false
     seed_out==seed_in || seed_in==options.random_state[] || return false
@@ -443,7 +500,8 @@ function _parallel_surface_products(m::GeoModel,work::_ParallelSurfaceWork,
             _geometry_points=_higher_geometry_source_points(
                 assembly,geometry_birth)))]
     end
-    produced,diffs,seed_in,seed_out=out.value
+    produced,diffs,seed_in,seed_out,foreign=out.value
+    _PARALLEL_ADOPTED[]+=1
     _parallel_replay_param_diffs!(m,diffs)
     seed_out==seed_in || (options.random_state[]=seed_out)
     return [(work.tag,_parallel_surface_remap_production(produced,
@@ -518,7 +576,7 @@ function _parallel_surface_spawn!(results::Vector{Any},index::Int,m::GeoModel,
     geom_points=_higher_geometry_source_points(assembly,geometry_birth)
     base_seed=options.random_state[]
     detached_options=_parallel_task_options(options,base_seed)
-    task=Threads.@spawn _parallel_surface_attempt(working,work,input,
+    task=Threads.@spawn _parallel_surface_attempt(working,work,m,input,
         detached_options,base_params,geom_points,hn,hc,base_seed,precise)
     results[index]=(task,hn,hc,copy(dirty),geom_points,base_seed)
     return nothing

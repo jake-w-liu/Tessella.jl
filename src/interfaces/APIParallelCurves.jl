@@ -193,17 +193,39 @@ function _parallel_curve_prepare(m::GeoModel,ordered::Vector{Int},
     return prepared
 end
 
+# `m.curve_params` slots an eligible `_model_mesh_curve!` may touch: its own
+# tag only (the produce's `deMeshGEdge` drop and the caller's writeback).
+# A write to any other slot — a dependency the footprint never claimed — can
+# never be transported, so like the Surface/Region arms it flags the receipt
+# `foreign` and the merge re-runs the identical serial call.
+function _parallel_curve_foreign_params(working::GeoModel,m::GeoModel,tag::Int)
+    for (curve,params) in working.curve_params
+        curve==tag && continue
+        get(m.curve_params,curve,nothing)!=params && return true
+    end
+    for curve in keys(m.curve_params)
+        curve==tag && continue
+        haskey(working.curve_params,curve) || return true
+    end
+    return false
+end
+
 # One detached Curve produce on a premade transaction copy.  The task's
 # private `random_state` Ref enters at the batch seed and reports its exit
-# value — the draw ledger the merge checks.
+# value — the draw ledger the merge checks.  `foreign` is the transport
+# certificate shared with the other arms: the produce must write only its
+# own `curve_params` slot — a mutation anywhere else in the model stores
+# (including `next_tag` entity births) could never reach the live model.
 function _parallel_curve_attempt(working::GeoModel,work::_ParallelCurveWork,
-        detached_options::Model._ModelMesh1DOptions,base_seed::UInt32,
-        caller::AbstractString,precise::Bool)
+        m::GeoModel,detached_options::Model._ModelMesh1DOptions,
+        base_seed::UInt32,caller::AbstractString,precise::Bool)
     out=try
         body=()->begin
             result=Model._model_mesh_curve!(working,work.tag,
                 detached_options,caller;_native_producer=true)
-            (result,base_seed,detached_options.random_state[])
+            foreign=_parallel_curve_foreign_params(working,m,work.tag) ||
+                _parallel_model_foreign_writes(working,m)
+            (result,base_seed,detached_options.random_state[],foreign)
         end
         (;ok=true,value=precise ?
             GmshLibm._with_win_cli_precision(body) : body())
@@ -238,7 +260,7 @@ function _parallel_curve_fill!(results::Vector{Any},range,m::GeoModel,
         work=prepared[index]
         detached_options=_parallel_task_options(options,base_seed)
         results[index]=(_parallel_curve_attempt(
-            Model._model_mesh_transaction_copy(m),work,detached_options,
+            Model._model_mesh_transaction_copy(m),work,m,detached_options,
             base_seed,caller,precise),base_dirty,base_seed)
     end
     return nothing
@@ -257,7 +279,8 @@ function _parallel_curve_fresh(work::_ParallelCurveWork,out,
         entity in base_dirty && continue
         entity in dirty && return false
     end
-    _,seed_in,seed_out=out.value
+    _,seed_in,seed_out,foreign=out.value
+    foreign && return false
     seed_in==base_seed || return false
     seed_out==seed_in || seed_in==options.random_state[] || return false
     return true
@@ -279,7 +302,8 @@ function _parallel_curve_result(m::GeoModel,work::_ParallelCurveWork,entry,
         return Model._model_mesh_curve!(m,work.tag,options,caller;
             _native_producer=true)
     end
-    result,seed_in,seed_out=out.value
+    result,seed_in,seed_out,foreign=out.value
+    _PARALLEL_ADOPTED[]+=1
     seed_out==seed_in || (options.random_state[]=seed_out)
     result===:pending && delete!(m.curve_params,work.tag)
     return result

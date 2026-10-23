@@ -45,17 +45,28 @@
 # `_ModelMesh1DOptions.random_state` Ref seeds `ModelNativeInitialTet`'s
 # perturbation kernel on the native lower-authority fill (`native_input`) and
 # advances by a seed-dependent draw count, so later Regions can never replay
-# the serial seed chain out of order.  `_parallel_volume_rng_free` predicts at
+# the serial seed chain out of order.  This mirrors upstream faithfully:
+# `GenerateMesh` seeds the process RNG once per operation
+# (`srand(CTX::instance()->mesh.randomSeed)`), so Region fills draw from one
+# globally ordered stream — a per-entity re-seed would change the serial
+# output and is not an option.  `_parallel_volume_rng_free` predicts at
 # prepare time which Regions provably avoid that kernel — implicit factory
 # solids (analytic boundary + seeded-local `tetrahedralize`), non-native
 # explicit shells (a boundary product absent from the authority kills
 # `native_identity` and selects the `perturb=false` recovery path) and
-# factory-encoded shells without embedded constraints.  Each task still runs
-# under a private `options` copy whose `random_state` Ref starts at the batch
-# seed and records its exit value; at merge a consumed seed is admissible only
-# when the live serial state still equals the observed entry value, in which
-# case the exit state is written back — the same interleaved RNG ledger the
-# serial arm keeps.  A consumed-but-mis-seeded slot is stale and re-runs.
+# factory-encoded shells without embedded constraints.  Predicted consumers
+# stay eligible now (`may_consume`), but the ledger replay supports at most
+# ONE consuming produce per batch: a consumer's correct entry seed is a
+# deterministic function of every earlier consumer's finished produce, which
+# cannot be known without running it — so `_parallel_volume_fill!` detaches
+# only the first predicted consumer in merge order and every later one keeps
+# its serial arm rather than paying a detached produce whose entry seed is
+# already out of date.  Each task still runs under a private `options` copy
+# whose `random_state` Ref starts at the batch seed and records its exit
+# value; at merge a consumed seed is admissible only when the live serial
+# state still equals the observed entry value, in which case the exit state
+# is written back — the same interleaved RNG ledger the serial arm keeps.  A
+# consumed-but-mis-seeded slot is stale and re-runs.
 #
 # Two determinism details the worker path must preserve:
 # * `GmshLibm._win_cli_precision()` is task-local (CLI x87 libm selector);
@@ -80,6 +91,11 @@ struct _ParallelVolumeWork
     # one present before a cross-phase spawn is ordered — the detached
     # produce must never need a serial arm's just-emitted product.
     deps::Vector{Tuple{Int,Int32}}
+    # Predicted consumer of the shared `Mesh.RandomSeed` ledger — the
+    # `ModelNativeInitialTet` kernel or a native hybrid fill.  Only the
+    # first predicted consumer in a batch's merge order is detached (see the
+    # header note); the merge-time seed-ledger check stays the authority.
+    may_consume::Bool
 end
 
 # `General.NumThreads` requests the worker count; `Mesh.MaxNumThreads3D` caps
@@ -296,12 +312,13 @@ function _parallel_volume_prepare(m::GeoModel,volume_tags,input,caller;
             err isa InterruptException && rethrow()
             continue
         end
-        _parallel_volume_rng_free(m,input,tag,boundary,caller) || continue
+        may_consume=!_parallel_volume_rng_free(m,input,tag,boundary,caller)
         deps=Tuple{Int,Int32}[(2,Int32(abs(signed))) for signed in boundary]
         for (dim,entity) in get(m.embeds,(3,tag),NTuple{2,Int}[])
             push!(deps,(dim,Int32(entity)))
         end
-        prepared[index]=_ParallelVolumeWork(tag,footprint,nothing,deps)
+        prepared[index]=_ParallelVolumeWork(tag,footprint,nothing,deps,
+            may_consume)
     end
     any(!isnothing,prepared) || return nothing
     # Second pass: record each eligible slot's preceding serial write-set for
@@ -321,7 +338,8 @@ function _parallel_volume_prepare(m::GeoModel,volume_tags,input,caller;
             continue
         end
         prepared[index]=_ParallelVolumeWork(work.tag,work.footprint,
-            serial_unbounded ? nothing : copy(serial_writes),work.deps)
+            serial_unbounded ? nothing : copy(serial_writes),work.deps,
+            work.may_consume)
         empty!(serial_writes);serial_unbounded=false
     end
     return prepared
@@ -329,10 +347,15 @@ end
 
 # One detached Region produce on a premade transaction copy.  The task's
 # private `random_state` Ref enters at the batch seed and reports its exit
-# value — the draw ledger the merge checks.  Shared by the `@threads` batch
-# arm and the `Threads.@spawn` cross-phase arm.
+# value — the draw ledger the merge checks.  `foreign` is the transport
+# certificate: the produce must write only `m.curve_params` slots inside its
+# footprint — a write anywhere else (another curve, an entity birth through
+# `next_tag`, a naming or meshing-attribute mutation) could never reach the
+# live model, so it sends the receipt back to the serial arm rather than
+# being silently dropped at merge.  Shared by the `@threads` batch arm and
+# the `Threads.@spawn` cross-phase arm.
 function _parallel_volume_attempt(working::GeoModel,work::_ParallelVolumeWork,
-        input,detached_options::Model._ModelMesh1DOptions,
+        m::GeoModel,input,detached_options::Model._ModelMesh1DOptions,
         geom_points,base_params::Dict{Int,Vector{Float64}},
         base_seed::UInt32,hn::UInt64,hc::UInt64;
         periodic_surface_pairs,optimize_pyramids,precise::Bool)
@@ -347,9 +370,10 @@ function _parallel_volume_attempt(working::GeoModel,work::_ParallelVolumeWork,
                 _optimize_pyramids=optimize_pyramids,
                 _mesh_node_high_water=hn,_mesh_element_high_water=hc,
                 _geometry_points=geom_points)
-            (produced,_parallel_curve_param_diffs(
-                working.curve_params,base_params,work.footprint),
-                base_seed,detached_options.random_state[])
+            diffs,foreign=_parallel_curve_param_diffs(
+                working.curve_params,base_params,work.footprint)
+            foreign || (foreign=_parallel_model_foreign_writes(working,m))
+            (produced,diffs,base_seed,detached_options.random_state[],foreign)
         end
         (;ok=true,value=precise ?
             GmshLibm._with_win_cli_precision(body) : body())
@@ -381,12 +405,28 @@ function _parallel_volume_fill!(results::Vector{Any},range,m::GeoModel,
     (length(range)<2 && isempty(eager)) && return nothing
     indices=Int[index for index in range]
     append!(indices,eager)
+    # The shared `Mesh.RandomSeed` ledger replays at most one consuming
+    # produce per batch — the first in merge order (`indices` is already
+    # merge-ordered: every `range` slot precedes every `eager` slot).  A
+    # later predicted consumer's detached attempt could only observe the
+    # batch's stale entry seed — its correct seed is a deterministic
+    # function of the earlier consumer's finished produce — so it keeps the
+    # identical serial arm at its merge position instead of paying a
+    # detached produce guaranteed to be stale.
+    admitted_consumer=false
+    filter!(indices) do index
+        prepared[index].may_consume || return true
+        admitted_consumer && return false
+        admitted_consumer=true
+        return true
+    end
+    length(indices)<2 && return nothing
     Threads.@threads for index in indices
         work=prepared[index]
         detached_options=_parallel_task_options(options,base_seed)
         results[index]=(_parallel_volume_attempt(
-            Model._model_mesh_transaction_copy(m),work,input,detached_options,
-            geom_points,base_params,base_seed,hn,hc;
+            Model._model_mesh_transaction_copy(m),work,m,input,
+            detached_options,geom_points,base_params,base_seed,hn,hc;
             periodic_surface_pairs,optimize_pyramids,precise),
             hn,hc,base_dirty,geom_points,base_seed)
     end
@@ -442,7 +482,8 @@ function _parallel_volume_fresh(work::_ParallelVolumeWork,out,
     geom_points===nothing ||
         _higher_geometry_source_points(assembly,geometry_birth)==geom_points ||
         return false
-    produced,diffs,seed_in,seed_out=out.value
+    produced,diffs,seed_in,seed_out,foreign=out.value
+    foreign && return false
     _parallel_volume_remap_supported(produced) || return false
     seed_in==base_seed || return false
     seed_out==seed_in || seed_in==options.random_state[] || return false
@@ -476,7 +517,8 @@ function _parallel_volume_product(m::GeoModel,work::_ParallelVolumeWork,
             _geometry_points=_higher_geometry_source_points(
                 assembly,geometry_birth))
     end
-    produced,diffs,seed_in,seed_out=out.value
+    produced,diffs,seed_in,seed_out,foreign=out.value
+    _PARALLEL_ADOPTED[]+=1
     _parallel_replay_param_diffs!(m,diffs)
     seed_out==seed_in || (options.random_state[]=seed_out)
     return _parallel_volume_remap_production(produced,
@@ -544,7 +586,7 @@ function _parallel_volume_spawn!(results::Vector{Any},index::Int,m::GeoModel,
     geom_points=_higher_geometry_source_points(assembly,geometry_birth)
     base_seed=options.random_state[]
     detached_options=_parallel_task_options(options,base_seed)
-    task=Threads.@spawn _parallel_volume_attempt(working,work,input,
+    task=Threads.@spawn _parallel_volume_attempt(working,work,m,input,
         detached_options,geom_points,base_params,base_seed,hn,hc;
         periodic_surface_pairs,optimize_pyramids,precise)
     results[index]=(task,hn,hc,copy(dirty),geom_points,base_seed)
