@@ -377,6 +377,17 @@ function _partition_tets_float(pts,limits::_RecoveryLimits;seed::Int=1,
                                exact_first::Bool=true)
     caller="recover_partition_cdt"
     coords=_float_coords(pts,caller)
+    # Exact rational images of the Float64 coordinates actually emitted.  The
+    # returned topology is certified by `validate` on those Float64 rows (its
+    # sign comes from the exact `orient3` predicate), so each tet's orientation
+    # and flatness must be judged on `fpts` — the exact determinant of the
+    # output coordinates — and not on the arbitrary-rational preimage `pts`.
+    # Recovery Steiner vertices sit ~1 ulp off their Float64 images; on a
+    # near-flat tet the two determinants can disagree in sign (and exact-flat
+    # preimages can image nonzero), so orienting by `pts` both manufactured
+    # negatively-oriented output cells and voided attempts on tets that are
+    # positive in the coordinate system the certificate checks.
+    fpts=RBv[(RB(coords[1,i]),RB(coords[2,i]),RB(coords[3,i])) for i in axes(coords,2)]
     lastreason="no triangulation attempted"
     # First use the exact kernel on the bounded-size dyadic Float64 images.  Unlike
     # repeatedly feeding it arbitrary intersection rationals, operand sizes cannot
@@ -388,14 +399,13 @@ function _partition_tets_float(pts,limits::_RecoveryLimits;seed::Int=1,
     # topology directly.
     function dyadic_attempt()
         try
-            dyadic=RBv[(RB(coords[1,i]),RB(coords[2,i]),RB(coords[3,i])) for i in axes(coords,2)]
             candidate=delaunay3d_exact(
-                dyadic;max_points=limits.points,max_tets=limits.work_tets,
+                fpts;max_points=limits.points,max_tets=limits.work_tets,
                 max_work_tets=limits.work_tets,
                 max_predicate_tests=limits.predicate_tests)
             etets=NTuple{4,Int}[];used=falses(length(pts));flat=false
             for q0 in candidate
-                q=q0;s=det3(rsub(pts[q[2]],pts[q[1]]),rsub(pts[q[3]],pts[q[1]]),rsub(pts[q[4]],pts[q[1]]))
+                q=q0;s=det3(rsub(fpts[q[2]],fpts[q[1]]),rsub(fpts[q[3]],fpts[q[1]]),rsub(fpts[q[4]],fpts[q[1]]))
                 if s==0;flat=true;break;end
                 s<0&&(q=(q[1],q[2],q[4],q[3]))
                 push!(etets,q);for v in q;used[v]=true;end
@@ -443,7 +453,7 @@ function _partition_tets_float(pts,limits::_RecoveryLimits;seed::Int=1,
                 (T.alive[ti]&&!Mesh3D._is_ghost_tet(T,ti))||continue
                 q=(Int(Mesh3D._vert(T,ti,1)),Int(Mesh3D._vert(T,ti,2)),
                    Int(Mesh3D._vert(T,ti,3)),Int(Mesh3D._vert(T,ti,4)))
-                s=det3(rsub(pts[q[2]],pts[q[1]]),rsub(pts[q[3]],pts[q[1]]),rsub(pts[q[4]],pts[q[1]]))
+                s=det3(rsub(fpts[q[2]],fpts[q[1]]),rsub(fpts[q[3]],fpts[q[1]]),rsub(fpts[q[4]],fpts[q[1]]))
                 if s==0;flat=true;break;end
                 s<0&&(q=(q[1],q[2],q[4],q[3]))
                 length(etets)<limits.work_tets || throw(ArgumentError(
