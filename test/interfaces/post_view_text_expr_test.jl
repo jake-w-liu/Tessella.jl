@@ -163,7 +163,7 @@ end
         dir=mktempdir();bad=joinpath(dir,"bad.pos")
         for body in ("View \"v\" {T2(Unknown.Width,0,0){\"a\"};};",
                      "View \"v\" {T2(1,2){\"a\"};};",
-                     "View \"v\" {INTERPOLATION_SCHEME{{1}}{{0}};};")
+                     "View \"v\" {INTERPOLATION_SCHEME{{1}};};")
             Base.write(bad,"View \"ok\" {SP(0,0,0){1};};\n"*body)
             @test_throws ArgumentError A.merge(bad)
             @test A.view.get_tags()==prior

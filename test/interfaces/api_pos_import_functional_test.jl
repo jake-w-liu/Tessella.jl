@@ -118,8 +118,12 @@ function exercise(directory)
             prior=A.view.add("prior");A.view.add_list_data(prior,"SP",1,[0.,0,0,7])
             bodies=("View \"bad\" {SL(0,0){1};};",
                 "View \"text\" {T2(1,2){\"a\"};};",
-                "View \"high\" {SL2(0,0,0,1,0,0,.5,0,0){1,2,3};};",
-                "View \"scheme\" {INTERPOLATION_SCHEME{{1}}{{0}};};")
+                # Suffixed names are real records now: SL2 is a 3-node
+                # order-2 line, so two-node geometry is a bound-scheme
+                # mismatch, not an unsupported record.
+                "View \"bad high\" {SL2(0,0,0,1,0,0){1,2,3};};",
+                # A lone INTERPOLATION_SCHEME needs 2 or 4 matrices.
+                "View \"bad scheme\" {INTERPOLATION_SCHEME{{1}};};")
             for (ordinal,body) in enumerate(bodies)
                 invalid=joinpath(directory,"invalid_$ordinal.pos")
                 Base.write(invalid,"View \"valid prefix\" {SP(0,0,0){1};};\n"*body)

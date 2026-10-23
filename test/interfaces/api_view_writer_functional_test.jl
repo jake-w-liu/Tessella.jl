@@ -191,9 +191,14 @@ end
             @test vec(element.values)==[1.,3.,4.]
             A.view.write(point,path,true)
             @test length(Tessella.Post.read_pos(path))==2
-            unsupported=joinpath(directory,"unsupported.msh")
+            # .msh is a supported list export since $ElementNodeData payloads;
+            # a foreign extension is still refused before touching the disk.
+            unsupported=joinpath(directory,"unsupported.med")
             @test_throws ArgumentError A.view.write(point,unsupported)
             @test !ispath(unsupported)
+            msh=joinpath(directory,"point.msh")
+            A.view.write(point,msh)
+            @test occursin("\$ElementNodeData",read(msh,String))
             A.view.add_list_data(point,"ST",1,[1.,2.])
             before=read(path)
             @test_throws ArgumentError A.view.write(point,path)

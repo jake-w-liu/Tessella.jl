@@ -1,6 +1,9 @@
 # View selection is display state. Actual list/model data determine the legal
 # step count; updates do not silently change an existing displayed selection.
-function _view_plain_list_steps(types,counts,data)
+# `interp` carries the view's bound family interpolation matrices: a bound
+# scheme, not the record name, defines each flat record's geometry/value
+# widths. Callers without a view handle pass `nothing` (canonical arity).
+function _view_plain_list_steps(types,counts,data;interp=nothing)
     steps=nothing
     for type in types
         count=counts[type];values=data[type]
@@ -8,13 +11,13 @@ function _view_plain_list_steps(types,counts,data)
             isempty(values) || return nothing
             continue
         end
-        layout=get(Post._POS_RECORD_TYPES,type,nothing)
+        layout=Post._pos_list_record_layout(interp===nothing ?
+            Dict{Int32,Vector{Matrix{Float64}}}() : interp,type)
         layout===nothing && return nothing
-        _,nodes,components=layout
         length(values)%count==0 || return nothing
-        width=length(values)÷count-3nodes
-        width>0 && width%(nodes*components)==0 || return nothing
-        current=width÷(nodes*components)
+        width=length(values)÷count-3layout.ngeo
+        width>0 && width%(layout.nval*layout.ncomp)==0 || return nothing
+        current=width÷(layout.nval*layout.ncomp)
         steps=steps===nothing ? current : min(steps,current)
     end
     return steps
@@ -22,13 +25,16 @@ end
 
 function _view_list_time_plan(view,type,count,values;reset_model=false)
     view=_view_data_owner(view)
-    reset_model && !haskey(Post._POS_RECORD_TYPES,type) && throw(ArgumentError(
-        "API.view.add_list_data: model-to-list conversion supports plain linear list records"))
+    # The public endpoint only knows the canonical 24 record names — upstream
+    # rejects suffixed names ("Unknown data type for list import"). Imported
+    # suffix keys bypass this path (they are stored by the POS importer).
+    haskey(Post._POS_RECORD_TYPES,type) || throw(ArgumentError(
+        "API.view.add_list_data: Unknown data type for list import"))
     types=reset_model ? String[] : copy(view.list_types)
     type in types || push!(types,type)
     counts=reset_model ? empty(view.list_counts) : copy(view.list_counts);counts[type]=count
     data=reset_model ? empty(view.list_data) : copy(view.list_data);data[type]=values
-    steps=_view_plain_list_steps(types,counts,data)
+    steps=_view_plain_list_steps(types,counts,data;interp=view.interp)
     if reset_model && steps===nothing
         count==0 && isempty(values) || throw(ArgumentError(
             "API.view.add_list_data: model-to-list conversion requires complete linear list payloads"))
@@ -47,7 +53,8 @@ function _view_data_steps(view)
     if !isempty(view.model_step_ranges)
         return Base.checked_add(last(view.model_step_ranges).last,1)
     end
-    steps=_view_plain_list_steps(view.list_types,view.list_counts,view.list_data)
+    steps=_view_plain_list_steps(view.list_types,view.list_counts,view.list_data;
+        interp=view.interp)
     steps===nothing && return Int(get(view.numbers,"NbTimeStep",0.0))
     view.numbers["NbTimeStep"]=Float64(steps)
     return steps

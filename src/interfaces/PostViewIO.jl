@@ -126,6 +126,83 @@ _pos_scheme_geom_nodes(scheme::PosScheme,kind::Symbol)=
     isempty(scheme.coefgeo) ? _POS_ELEMENT_ARITY[kind] : size(scheme.coefgeo,1)
 _pos_scheme_value_nodes(scheme::PosScheme)=size(scheme.coefval,1)
 
+# POS record family code per kind — the type table order upstream's
+# `PViewData::setInterpolationMatrices` and `INTERPOLATION_SCHEME` MSH
+# sections use (point 1, line 2, triangle 3, quadrangle 4, tetrahedron 5,
+# pyramid 6, prism 7, hexahedron 8).
+const _POS_FAMILY_CODES=(point=Int32(1),line=Int32(2),triangle=Int32(3),
+    quadrangle=Int32(4),tetrahedron=Int32(5),pyramid=Int32(6),prism=Int32(7),
+    hexahedron=Int32(8))
+const _POS_FAMILY_DIMS=(point=0,line=1,triangle=2,quadrangle=2,
+    tetrahedron=3,pyramid=3,prism=3,hexahedron=3)
+
+# Stored session interpolation matrices are the 2- or 4-matrix form kept by
+# `setInterpolationMatrices` (value coefficients/exponents, then optional
+# geometry coefficients/exponents). Rebuild the record scheme they imply.
+function _pos_matrices_scheme(matrices)
+    matrices isa AbstractVector || return nothing
+    length(matrices)==2 && return PosScheme(matrices[1],matrices[2])
+    length(matrices)==4 &&
+        return PosScheme(matrices[1],matrices[2],matrices[3],matrices[4])
+    return nothing
+end
+
+# Exponent tables are stored with the family's parametric width (upstream's
+# built-in schemes trim them; the API accepts 3 columns). Two schemes are
+# equivalent when their coefficient matrices are equal and their exponent
+# tables agree modulo trailing zero columns — the omitted higher parametric
+# dimensions only ever carry zero exponents.
+function _pos_exp_equiv(a::AbstractMatrix,b::AbstractMatrix)
+    size(a,1)==size(b,1) || return false
+    wide,narrow=size(a,2)>=size(b,2) ? (a,b) : (b,a)
+    @views return narrow==wide[:,1:size(narrow,2)] &&
+        all(iszero,wide[:,size(narrow,2)+1:end])
+end
+function _pos_schemes_equivalent(a::PosScheme,b::PosScheme)
+    return a.coefval==b.coefval && a.coefgeo==b.coefgeo &&
+        _pos_exp_equiv(a.expval,b.expval) && _pos_exp_equiv(a.expgeo,b.expgeo)
+end
+
+# Decoded flat-list layout for a stored type key under the view's bound
+# interpolation matrices. The bound family scheme defines record widths —
+# a suffixed record name falls back to the built-in order-2 scheme ("…2")
+# only when its family has no stored binding. Point records keep their
+# single node regardless of any stored point matrices. Returns a named
+# tuple (kind, ngeo, nval, ncomp, scheme, suffix) or `nothing` for an
+# unsupported type.
+function _pos_list_record_layout(interp,type_key::AbstractString)
+    name=ncodeunits(type_key)>=2 ? type_key[1:2] : type_key
+    layout=get(_POS_RECORD_TYPES,name,nothing)
+    layout===nothing && return nothing
+    kind,arity,ncomp=layout
+    suffix=ncodeunits(type_key)>2 ? String(type_key[3:end]) : ""
+    if kind===:point
+        return (kind=kind,ngeo=1,nval=1,ncomp=ncomp,scheme=nothing,
+                suffix=suffix)
+    end
+    scheme=nothing
+    matrices=get(interp,_POS_FAMILY_CODES[kind],nothing)
+    if matrices!==nothing
+        # A stored binding governs the record layout. Malformed matrix
+        # storage is unsupported rather than a fallback to the name.
+        scheme=_pos_matrices_scheme(matrices)
+        scheme===nothing && return nothing
+        # A stored order-2 basis (suffix-bound or user-supplied) is the
+        # shared canonical scheme — record identity, not just equality, is
+        # what downstream order-2 serialization checks test.
+        _pos_schemes_equivalent(scheme,_pos_order2_scheme(kind)) &&
+            (scheme=_pos_order2_scheme(kind))
+    end
+    if scheme===nothing && !isempty(suffix)
+        suffix=="2" || return nothing
+        scheme=_pos_order2_scheme(kind)
+    end
+    ngeo=scheme===nothing ? arity : _pos_scheme_geom_nodes(scheme,kind)
+    nval=scheme===nothing ? arity : _pos_scheme_value_nodes(scheme)
+    return (kind=kind,ngeo=ngeo,nval=nval,ncomp=ncomp,scheme=scheme,
+            suffix=suffix)
+end
+
 # Order-2 MSH type per record family, matching PViewDataList::setOrder2.
 const _POS_ORDER2_MSH=(line=8,triangle=9,quadrangle=10,tetrahedron=11,
                        hexahedron=12,prism=13,pyramid=14)

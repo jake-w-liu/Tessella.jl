@@ -147,8 +147,15 @@ end
         A.option("General.Terminal",0)
         malformed=A.view.add("incomplete")
         A.view.add_list_data(malformed,"ST",1,zeros(10))
-        unsupported=A.view.add("unsupported cell")
-        A.view.add_list_data(unsupported,"ST2",1,zeros(12))
+        # The public endpoint only knows the canonical 24 record names —
+        # suffixed high-order records enter through parsed .pos import and
+        # stay unsupported for the corner VTK layout.
+        @test_throws ArgumentError A.view.add_list_data(
+            A.view.add("suffixed name"),"ST2",1,zeros(12))
+        prior_tags=A.view.get_tags()
+        high="$(tempname()).pos"
+        Base.write(high,"View \"quad\" {ST2(0,0,0,1,0,0,0,1,0,.5,0,0,0,.5,0,.5,.5,0){1,2,3,4,5,6};};\n")
+        A.merge(high);unsupported=only(setdiff(A.view.get_tags(),prior_tags))
         mismatch=A.view.add("different time counts")
         A.view.add_list_data(mismatch,"SP",1,[0.,0.,0.,1.,2.])
         A.view.add_list_data(mismatch,"SL",1,[0.,1.,0.,0.,0.,0.,1.,2.])
@@ -156,11 +163,18 @@ end
         A.view.add_list_data(mixed,"SP",1,[0.,0.,0.,1.])
         A.view.add_list_data(mixed,"VP",1,[1.,2.,3.,4.,5.,6.])
         mktempdir() do directory
-            for extension in (".txt",".csv",".vtk"),tag in (malformed,unsupported,mismatch)
+            for extension in (".txt",".csv",".vtk"),tag in (malformed,mismatch)
                 path=joinpath(directory,"preserved"*extension);write(path,"sentinel")
                 @test_throws ArgumentError A.view.write(tag,path)
                 @test read(path,String)=="sentinel"
             end
+            # The corner VTK layout has no high-order cells; raw text/CSV
+            # tables stay a faithful flat representation of the same record.
+            path=joinpath(directory,"quad.vtk");write(path,"sentinel")
+            @test_throws ArgumentError A.view.write(unsupported,path)
+            @test read(path,String)=="sentinel"
+            txt=joinpath(directory,"quad.txt");A.view.write(unsupported,txt)
+            @test length(readlines(txt))==1
             path=joinpath(directory,"mixed.vtk");write(path,"sentinel")
             @test_throws ArgumentError A.view.write(mixed,path)
             @test read(path,String)=="sentinel"

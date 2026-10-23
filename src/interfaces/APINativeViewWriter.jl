@@ -505,33 +505,42 @@ end
 
 # addListData stores one element at a time: all x coordinates, then all y,
 # all z, and component/node values for every time step (Gmsh tutorial x3).
-function _native_list_view_pos(view,caller;name=view.name)
+# The bound family scheme — not the stored type name — defines each flat
+# record's geometry/value widths, matching PViewDataList's `_stat` decode.
+function _native_list_view_records(view,caller)
     view=_view_data_owner(view)
     elements=Post.PosElement[]
     for type_key in view.list_types
-        layout=get(Post._POS_RECORD_TYPES,type_key,nothing)
+        layout=Post._pos_list_record_layout(view.interp,type_key)
         layout===nothing && throw(ArgumentError("$caller: unsupported list data type $type_key"))
-        kind,nodes,components=layout
+        ngeo,nval=layout.ngeo,layout.nval
         count=view.list_counts[type_key];data=view.list_data[type_key]
         if count==0
             isempty(data) || throw(ArgumentError("$caller: zero list element count has data"))
             continue
         end
         length(data)%count==0 || throw(ArgumentError("$caller: list data do not align with numEle"))
-        width=length(data)÷count;value_width=width-3nodes
-        value_width>0 && value_width%(nodes*components)==0 || throw(ArgumentError(
+        width=length(data)÷count;value_width=width-3ngeo
+        value_width>0 && value_width%(nval*layout.ncomp)==0 || throw(ArgumentError(
             "$caller: list data do not contain complete time-step values"))
-        steps=value_width÷(nodes*components)
+        steps=value_width÷(layout.nval*layout.ncomp)
         for element in 0:count-1
             offset=element*width
-            coords=Matrix{Float64}(undef,3,nodes)
-            for axis in 1:3,node in 1:nodes
-                coords[axis,node]=data[offset+(axis-1)*nodes+node]
+            coords=Matrix{Float64}(undef,3,ngeo)
+            for axis in 1:3,node in 1:ngeo
+                coords[axis,node]=data[offset+(axis-1)*ngeo+node]
             end
-            values=reshape(copy(@view(data[offset+3nodes+1:offset+width])),components,nodes,steps)
-            push!(elements,Post.PosElement(kind,coords,values))
+            values=reshape(copy(@view(data[offset+3ngeo+1:offset+width])),layout.ncomp,nval,steps)
+            push!(elements,Post.PosElement(layout.kind,coords,values;
+                suffix=layout.suffix,scheme=layout.scheme))
         end
     end
+    return elements
+end
+
+function _native_list_view_pos(view,caller;name=view.name)
+    view=_view_data_owner(view)
+    elements=_native_list_view_records(view,caller)
     # T2/T3 string blocks (POS text records and Annotate annotations) decode
     # back to PosText records: one list entry per record, '\0'-joined
     # per-step strings; 3 coords per record carry x/y/z with implicit style
@@ -565,15 +574,35 @@ function _native_list_view_pos(view,caller;name=view.name)
 end
 
 
+# The exported step table: declared physical times, padded by step index when
+# shorter (upstream's implicit 0,1,2… numbering), capped at the smallest
+# record's step count like `NbTimeStepLIST`. Records must share a common step
+# count, as in upstream `PViewDataList` (`different steps` views cannot be
+# represented).
+function _native_list_view_times(view,elements)
+    view=_view_data_owner(view)
+    steps=isempty(elements) ? 0 : size(first(elements).values,3)
+    all(element->size(element.values,3)==steps,elements) ||
+        throw(ArgumentError("API.view.write: list data records do not share " *
+            "a common time step count"))
+    times=copy(view.list_time)
+    length(times)<steps &&
+        append!(times,Float64(index) for index in length(times):steps-1)
+    length(times)>steps && resize!(times,steps)
+    return times
+end
+
 # Raw TXT uses the model writer's numeric corner records. CSV separates the
 # same fields with commas. A row is one element/time pair, with the step, time,
 # list entity (0), element ordinal, XYZ and components repeated per corner.
-function _native_list_view_text_payload(parsed,separator::Char)
+function _native_list_view_text_payload(elements,times,separator::Char)
     io=IOBuffer()
-    for step in eachindex(parsed.time),(ordinal,element) in enumerate(parsed.elements)
+    for step in eachindex(times),(ordinal,element) in enumerate(elements)
         first_value=true
-        for node in axes(element.coords,2)
-            for value in (step-1,parsed.time[step],0,ordinal-1)
+        # Rows pair each node coordinate with its node value; value-only
+        # scheme nodes beyond the stored geometry are not representable.
+        for node in 1:min(size(element.coords,2),size(element.values,2))
+            for value in (step-1,times[step],0,ordinal-1)
                 first_value || print(io,separator)
                 @printf(io,"%.17g",value);first_value=false
             end
@@ -600,8 +629,7 @@ function _native_list_view_vtk_values(io,elements,step)
     end
 end
 
-function _native_list_view_vtk_payload(parsed,caller)
-    elements=parsed.elements
+function _native_list_view_vtk_payload(elements,times,caller)
     components=isempty(elements) ? 1 : size(first(elements).values,1)
     all(element->size(element.values,1)==components,elements) || throw(ArgumentError(
         "$caller: VTK list export requires a common scalar, vector or tensor component count"))
@@ -630,8 +658,8 @@ function _native_list_view_vtk_payload(parsed,caller)
     end
     println(io,"CELL_TYPES ",length(elements))
     for element in elements;println(io,getproperty(cell_types,element.kind));end
-    println(io,"FIELD FieldData 1\nTIME 1 ",length(parsed.time)," double")
-    for (step,time) in enumerate(parsed.time)
+    println(io,"FIELD FieldData 1\nTIME 1 ",length(times)," double")
+    for (step,time) in enumerate(times)
         step==1 || print(io,' ');@printf(io,"%.17g",time)
     end
     println(io)
@@ -639,13 +667,13 @@ function _native_list_view_vtk_payload(parsed,caller)
     if components==9
         # Legacy TENSORS are symmetric. A FIELD array retains all nine public
         # tensor components, including nonsymmetric input, for every time step.
-        println(io,"FIELD ListData ",length(parsed.time))
-        for step in eachindex(parsed.time)
+        println(io,"FIELD ListData ",length(times))
+        for step in eachindex(times)
             println(io,"step_",step-1," 9 ",points," double")
             _native_list_view_vtk_values(io,elements,step)
         end
     else
-        for step in eachindex(parsed.time)
+        for step in eachindex(times)
             if components==1
                 println(io,"SCALARS step_",step-1," double 1\nLOOKUP_TABLE default")
             else
@@ -657,13 +685,143 @@ function _native_list_view_vtk_payload(parsed,caller)
     return take!(io)
 end
 
-function _native_list_view_payload(parsed,extension,caller)
-    extension==".txt" && return _native_list_view_text_payload(parsed,' ')
-    extension==".csv" && return _native_list_view_text_payload(parsed,',')
-    extension==".vtk" && return _native_list_view_vtk_payload(parsed,caller)
-    extension==".pos" || throw(ArgumentError("$caller: unsupported list export format"))
-    io=IOBuffer();Post.write_pos(io,parsed)
+# Record family → MSH catalog family for list-view mesh export.
+const _LIST_MSH_FAMILY=(point=:pnt,line=:lin,triangle=:tri,quadrangle=:qua,
+    tetrahedron=:tet,hexahedron=:hex,prism=:pri,pyramid=:pyr)
+
+# (family, node count) → Gmsh 4.15.2 type tag. Complete shapes win; the
+# incomplete (serendipity) table then fills gaps like the 13-node quadratic
+# pyramid (type 19). Higher-order incomplete pyramids have no upstream
+# `MElement` class — Gmsh 4.15.2 itself rejects type 125 on import — so they
+# are excluded from the table and fail as unsupported rather than emitting
+# an unreadable file.
+const _LIST_MSH_TYPE_TABLE=let table=Dict{Tuple{Symbol,Int},Int}()
+    for serendipity in (false,true)
+        for (tag,spec) in Elements.MSH_CATALOG
+            spec.serendipity==serendipity || continue
+            serendipity && spec.family===:pyr && spec.order>2 && continue
+            key=(spec.family,spec.nnodes)
+            haskey(table,key) || (table[key]=tag)
+        end
+    end
+    table
+end
+
+# Mesh-based MSH 2.2 export of a list view, matching upstream's
+# PViewDataList::writeMSH path: first-seen node table sharing, per-record
+# element connectivity in stored node order, an $InterpolationScheme section
+# when the view binds family matrices, and one $ElementNodeData section per
+# step (the section's component count comes from the first populated type in
+# canonical order; rows emit the element's flat per-step value prefix).
+function _native_list_view_msh_payload(view,elements,times,caller;
+        name=view.name,scheme::Bool=true)
+    view=_view_data_owner(view)
+    interp=scheme ? view.interp : Dict{Int32,Vector{Matrix{Float64}}}()
+    io=IOBuffer()
+    println(io,"\$MeshFormat");println(io,"2.2 0 8");println(io,"\$EndMeshFormat")
+    tags=Dict{NTuple{3,Float64},Int32}();nodes=NTuple{3,Float64}[]
+    connectivity=Vector{Int32}[]
+    for element in elements
+        ids=Int32[]
+        for column in axes(element.coords,2)
+            key=(element.coords[1,column],element.coords[2,column],
+                 element.coords[3,column])
+            push!(ids,get!(tags,key) do
+                push!(nodes,key);Int32(length(nodes))
+            end)
+        end
+        push!(connectivity,ids)
+    end
+    println(io,"\$Nodes");println(io,length(nodes))
+    for (tag,(x,y,z)) in enumerate(nodes)
+        @printf(io,"%d %.16g %.16g %.16g\n",tag,x,y,z)
+    end
+    println(io,"\$EndNodes\n\$Elements");println(io,length(elements))
+    for (tag,(element,ids)) in enumerate(zip(elements,connectivity))
+        family=_LIST_MSH_FAMILY[element.kind]
+        msh=get(_LIST_MSH_TYPE_TABLE,(family,size(element.coords,2)),0)
+        msh==0 && throw(ArgumentError(
+            "$caller: no supported MSH element type for a $(element.kind) " *
+            "record with $(size(element.coords,2)) geometry nodes"))
+        print(io,tag,' ',msh," 2 1 1")
+        for node in ids;print(io,' ',node);end
+        println(io)
+    end
+    println(io,"\$EndElements")
+    if !isempty(interp)
+        println(io,"\$InterpolationScheme\n\"INTERPOLATION_SCHEME\"")
+        println(io,length(interp))
+        for code in sort!(collect(keys(interp)))
+            matrices=interp[code]
+            length(matrices)>=2 || throw(ArgumentError(
+                "$caller: malformed interpolation matrices for family $code"))
+            # Upstream's MSH writer emits the two value matrices.
+            println(io,code);println(io,2)
+            for matrix in matrices[1:2]
+                matrix isa AbstractMatrix && size(matrix,1)>=1 &&
+                    size(matrix,2)>=1 || throw(ArgumentError(
+                        "$caller: malformed interpolation matrices for family $code"))
+                println(io,size(matrix,1),' ',size(matrix,2))
+                for row in axes(matrix,1)
+                    for column in axes(matrix,2)
+                        @printf(io,"%.16g ",matrix[row,column])
+                    end
+                    println(io)
+                end
+            end
+        end
+        println(io,"\$EndInterpolationScheme")
+    end
+    # The shared section component count is the first populated canonical
+    # type's; rows carry that many components per declared value node —
+    # extra components of wider records keep upstream's flat-prefix
+    # truncation, narrower records are zero-padded.
+    components=0
+    for type_key in view.list_types
+        get(view.list_counts,type_key,0)>0 || continue
+        layout=Post._pos_list_record_layout(view.interp,type_key)
+        layout===nothing && throw(ArgumentError(
+            "$caller: unsupported list data type $type_key"))
+        components=layout.ncomp;break
+    end
+    for (index,time) in enumerate(times)
+        println(io,"\$ElementNodeData")
+        strings=String["\""*name*"\""]
+        isempty(interp) || push!(strings,"\"INTERPOLATION_SCHEME\"")
+        println(io,length(strings));foreach(line->println(io,line),strings)
+        println(io,1);@printf(io,"%.16g\n",time)
+        println(io,3);println(io,index-1);println(io,components)
+        println(io,length(elements))
+        for (tag,element) in enumerate(elements)
+            nval=size(element.values,2)
+            print(io,tag,' ',nval)
+            width=nval*components
+            flat=vec(@view element.values[:,:,index])
+            for column in 1:width
+                @printf(io," %.16g",column<=length(flat) ? flat[column] : 0.0)
+            end
+            println(io)
+        end
+        println(io,"\$EndElementNodeData")
+    end
     return take!(io)
+end
+
+function _native_list_view_payload(view,extension,caller;name=view.name)
+    if extension==".pos"
+        parsed=_native_list_view_pos(view,caller;name)
+        io=IOBuffer();Post.write_pos(io,parsed)
+        return take!(io)
+    end
+    elements=_native_list_view_records(view,caller)
+    times=_native_list_view_times(view,elements)
+    extension==".txt" && return _native_list_view_text_payload(elements,times,' ')
+    extension==".csv" && return _native_list_view_text_payload(elements,times,',')
+    extension==".vtk" && return _native_list_view_vtk_payload(elements,times,caller)
+    extension==".msh" || throw(ArgumentError("$caller: unsupported list export format"))
+    scheme=!iszero(get(OPTIONS,"PostProcessing.SaveInterpolationMatrices",1.0))
+    return _native_list_view_msh_payload(view,elements,times,caller;
+        name,scheme)
 end
 
 include("APINativeModelViewFormats.jl")
@@ -681,14 +839,28 @@ function _view_write(tag,filename,append=false)
         extension in (".msh",".pos",".txt",".csv",".vtk") || throw(ArgumentError(
             "$caller: this view export format is not implemented"))
         if isempty(view.model_step_ranges)
-            extension in (".pos",".txt",".csv",".vtk") || throw(ArgumentError(
-                "$caller: list-based views support .pos, .txt, .csv and .vtk export"))
+            extension in (".msh",".pos",".txt",".csv",".vtk") || throw(ArgumentError(
+                "$caller: list-based views support .pos, .msh, .txt, .csv and .vtk export"))
             extension==".vtk" && append_value && throw(ArgumentError(
                 "$caller: appending list data to a VTK file is not supported"))
-            # Text/VTK need the checked geometry/value decoder but do not use
-            # POS's quoted view name grammar.
-            parsed=_native_list_view_pos(view,caller;name=extension==".pos" ? name : "")
-            bytes=_native_list_view_payload(parsed,extension,caller)
+            extension==".msh" && append_value && throw(ArgumentError(
+                "$caller: appending list data to a MSH file is not supported"))
+            if extension==".pos" && !isempty(view.interp)
+                message="Cannot export datasets with interpolation matrices in "*
+                    "old POS format: consider using the new mesh-based format "*
+                    "instead, or select 'Adapt post-processing data' before exporting"
+                NATIVE_LOOKUP_QUERY_ERRORS[]+=1
+                NATIVE_MSG_LAST_ERROR[]=message
+                _native_diagnostic_emit_locked(:error,message)
+                throw(ArgumentError(message))
+            end
+            if extension==".msh"
+                msh_version=get(OPTIONS,"Mesh.MshFileVersion",4.1)
+                msh_version!=2.2 && _native_diagnostic_emit_locked(:warning,
+                    "Mesh-based export of list-based datasets not available "*
+                    "with MSH $(msh_version): using MSH 2.2")
+            end
+            bytes=_native_list_view_payload(view,extension,caller;name)
             Sys.iswindows() && (bytes=Vector{UInt8}(codeunits(replace(String(bytes),"\n"=>"\r\n"))))
             _native_diagnostic_emit_locked(:info,"Writing '$filename'...")
             if !iszero(get(OPTIONS,"PostProcessing.Binary",0.0))

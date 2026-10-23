@@ -155,7 +155,7 @@ end
     end
 end
 
-@testset "model VTK prevalidates unsupported higher order and held multi-model steps" begin
+@testset "model VTK exports higher-order Lagrange cells and held multi-model steps" begin
     A.initialize()
     try
         A.option("General.Terminal",0)
@@ -166,9 +166,13 @@ end
         A.mesh.add_elements_by_type(7,21,[301],tags)
         cubic=A.view.add("cubic values");A.view.add_model_data(cubic,0,"cubic","NodeData",[101],[[1.]])
         mktempdir() do directory
-            path=joinpath(directory,"cubic.vtk");write(path,"sentinel")
-            @test_throws ArgumentError A.view.write(cubic,path)
-            @test read(path,String)=="sentinel"
+            # VTK 5.1 carries the cubic triangle as a VTK_LAGRANGE_TRIANGLE
+            # (69); higher-order model cells are no longer refused.
+            path=joinpath(directory,"cubic.vtk");A.view.write(cubic,path)
+            cubic_vtk=read(path,String)
+            @test occursin("# vtk DataFile Version 5.1",cubic_vtk)
+            @test occursin("POINTS $count double",cubic_vtk)
+            @test occursin("CELL_TYPES 1\r\n69\r\n",cubic_vtk)
             path=joinpath(directory,"cubic.csv");A.view.write(cubic,path);rows=csv_rows(path)
             @test length(split(only(row["connectivity"] for row in rows if row["record"]=="cell"),';'))==count
             multi=A.view.add("two models")

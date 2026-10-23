@@ -1,8 +1,22 @@
-# Plain list records have a literal API storage layout. The full POS decoder
-# remains richer; unsupported text/schemes/high-order records never disappear.
+# List records keep upstream's flat API storage layout — per type name, all x
+# coordinates, all y, all z, then component/node values per time step. Suffixed
+# record names keep their suffix so distinct bound layouts stay separate; the
+# bound family scheme lives in the view's interpolation-matrices storage.
 const _LIST_IMPORT_TYPE_ORDER=String[
     head*shape for shape in ("P","L","T","Q","S","H","I","Y")
     for head in ("S","V","T")]
+
+# A suffix-bound family stores the resolved scheme's full four-matrix form so
+# its geometry width survives the flat storage; exponent tables keep the
+# family's parametric dimension like upstream's built-in schemes.
+function _list_import_suffix_matrices(kind,scheme::Post.PosScheme)
+    dim=Post._POS_FAMILY_DIMS[kind]
+    matrices=Matrix{Float64}[copy(scheme.coefval),
+        copy(scheme.expval[:,1:dim])]
+    isempty(scheme.coefgeo) || append!(matrices,Matrix{Float64}[
+        copy(scheme.coefgeo),copy(scheme.expgeo[:,1:dim])])
+    return matrices
+end
 
 function _list_model_views_prepare(path,caller)
     # Session options feed `Family.Option` reads inside record expressions
@@ -10,14 +24,27 @@ function _list_model_views_prepare(path,caller)
     parsed=Post.read_pos(path;options=OPTIONS)
     views=_SessionView[]
     for source in parsed
-        isempty(source.interpolations) &&
-            all(element->isempty(element.suffix) && element.scheme===nothing,source.elements) ||
-            throw(ArgumentError("$caller: POS session import supports plain linear list records without interpolation schemes"))
         view=_SessionView(source.name)
         view.list_time=copy(source.time)
         # Native empty views have no data steps, even when TIME is declared.
         view.numbers["NbTimeStep"]=isempty(source.elements) ? 0.0 :
             Float64(size(first(source.elements).values,3))
+        # INTERPOLATION_SCHEME records and record-name suffixes bind a family
+        # scheme in file order — first binding wins. `scheme_source` keeps the
+        # interpolation record index per family (0 for suffix-bound schemes)
+        # so session storage mirrors what upstream's binding stores.
+        bound,scheme_source=Post._pos_resolve_schemes(
+            Symbol[element.kind for element in source.elements],
+            String[element.suffix for element in source.elements],
+            Union{Nothing,Post.PosScheme}[nothing for _ in source.elements],
+            source.interpolations,source.scheme_positions,caller)
+        for (kind,scheme) in bound
+            index=scheme_source[kind]
+            view.interp[Post._POS_FAMILY_CODES[kind]]=index==0 ?
+                _list_import_suffix_matrices(kind,scheme) :
+                Matrix{Float64}[copy(matrix) for matrix in
+                    source.interpolations[index]]
+        end
         # T2/T3 text records keep upstream's PViewDataList layout: one list
         # entry per record, the record's per-step strings '\0'-joined (T2C/
         # T3C), and 4 coords per record — x, y, z (0 for T2), style (T2D/T3D
@@ -37,11 +64,18 @@ function _list_model_views_prepare(path,caller)
         end
         for element in source.elements
             components=size(element.values,1)
-            type_key=Post._POS_RECORD_NAME[(element.kind,components)]
-            kind,nodes,expected_components=Post._POS_RECORD_TYPES[type_key]
-            kind==element.kind && size(element.coords)==(3,nodes) &&
-                components==expected_components || throw(ArgumentError(
-                    "$caller: POS record does not match its actual linear list layout"))
+            base_key=Post._POS_RECORD_NAME[(element.kind,components)]
+            kind,arity,expected_components=Post._POS_RECORD_TYPES[base_key]
+            scheme=element.scheme
+            ngeo=scheme===nothing ? arity : Post._pos_scheme_geom_nodes(scheme,kind)
+            nval=scheme===nothing ? arity : Post._pos_scheme_value_nodes(scheme)
+            kind==element.kind && components==expected_components &&
+                size(element.coords)==(3,ngeo) &&
+                size(element.values,2)==nval || throw(ArgumentError(
+                    "$caller: POS record does not match its bound interpolation scheme"))
+            # Verbatim record names keep suffixed (high-order or otherwise
+            # rebound) payload layouts distinguishable inside the flat lists.
+            type_key=base_key*element.suffix
             count=Base.checked_add(get(view.list_counts,type_key,0),1)
             count<=typemax(Int32) || throw(ArgumentError("$caller: list element count is out of range"))
             view.list_counts[type_key]=count
@@ -49,8 +83,14 @@ function _list_model_views_prepare(path,caller)
             for axis in 1:3;append!(values,@view(element.coords[axis,:]));end
             append!(values,vec(element.values))
         end
-        view.list_types=String[type_key for type_key in _LIST_IMPORT_TYPE_ORDER
-            if haskey(view.list_counts,type_key)]
+        # Canonical type ordering first (upstream's fixed list table), then
+        # suffixed variants ordered after their base name.
+        base_order=Dict(name=>index for (index,name) in
+            enumerate(_LIST_IMPORT_TYPE_ORDER))
+        view.list_types=sort!(collect(keys(view.list_counts));
+            by=key->(get(base_order,ncodeunits(key)>=2 ? key[1:2] : key,
+                         typemax(Int)),
+                     ncodeunits(key)>2 ? String(key[3:end]) : ""))
         push!(views,view)
     end
     tags=Int[];next_tag=VIEW_TAG_MAX[]
