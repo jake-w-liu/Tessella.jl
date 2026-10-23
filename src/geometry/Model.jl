@@ -33,6 +33,7 @@ using ..Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh,
 using ..SizeField: AbstractField, AbstractSizeField, AbstractAnisoField,
                    ConstantSize, FunctionSize, MinSize,
                    MinAnisoField, Metric3, metric_size, PostViewField,
+                   BoundedSize,
                    field_value, size_at,
                    AutomaticMeshSizeField,
                    GMSH_MAX_SIZE, _gmsh_bbox_characteristic_length, _metric_scale,
@@ -7062,8 +7063,12 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
     else
         bgm_size=_ModelSurfaceBackgroundSize(frame,
             _ModelAlgorithmBackgroundSize(m,2,t,options,size_field,caller))
+        # A tensor size selection arms Delaunay/Frontal with the per-cell
+        # field metric; a scalar or absent field leaves the trace nothing.
+        trace=_surface_metric_trace_carrier(m,options,size_field,frame,T,t,caller)
         _surface_algorithm_refine!(m,T,xs,ys,segs,markers,embedded,index,
-                                   bgm_size,algorithm,t,caller)
+                                   bgm_size,algorithm,t,caller;
+                                   _gmsh_surface_trace=trace)
     end
     mesh=to_mesh(T; interior=interior)
     # Upstream `meshGFace` recombination ordering: recombine the freshly

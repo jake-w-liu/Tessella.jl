@@ -2,6 +2,8 @@
 # lower-dimensional products determine identity; coordinates only verify an
 # existing identity and evaluate its Surface parametrization.
 import ..Mesh2D
+using ..SizeField: AbstractAnisoField, BoundedSize, GMSH_MAX_SIZE
+import ..SizeField: metric_at
 struct _GmshNativePlaneFrame
     origin::NTuple{3,Float64}
     first::NTuple{3,Float64}
@@ -747,12 +749,43 @@ function _gmsh_native_initial_surface(m::GeoModel,tag::Int,options,input,
             push!(model_vertices,Int32(row))
         end
         extend=_resolved_extend_from_boundary(m,2,tag)
-        trace=Mesh2D._gmsh_surface_trace(T,inside,source.world,_GmshNativeSurfaceLift(frame),
+        # Tensor background arm: when the resolved size selection is a metric
+        # field, hand the trace a per-cell evaluator. Each cavity in-circle
+        # test and circumcenter then uses the tensor pulled back at the cell's
+        # lifted centroid; the queue's scalar criterion keeps the same
+        # directional-size policy as `_metric_surface_algorithm_field`.
+        lift=_GmshNativeSurfaceLift(frame)
+        trace_metric=let raw=options.inner_field===nothing ? size_field :
+                            options.inner_field
+            if raw isa AbstractAnisoField
+                lc_min=isnan(options.lc_min) ? 0.0 : options.lc_min
+                lc_max=isnan(options.lc_max) ? GMSH_MAX_SIZE : options.lc_max
+                lo=min(lc_min,lc_max)
+                hi=max(lo,min(lc_max,options.ctx_lc))
+                wrapped=BoundedSize(raw;size_min=lo,size_max=hi,
+                                    factor=options.lc_factor)
+                f=frame.first;s=frame.second;entity=(2,tag)
+                (u,v)->begin
+                    w=lift(u,v)
+                    mm=metric_at(wrapped,w[1],w[2],w[3],entity)
+                    (mm.m11*f[1]*f[1]+mm.m22*f[2]*f[2]+mm.m33*f[3]*f[3]+
+                     2*(mm.m12*f[1]*f[2]+mm.m13*f[1]*f[3]+mm.m23*f[2]*f[3]),
+                     mm.m11*f[1]*s[1]+mm.m22*f[2]*s[2]+mm.m33*f[3]*f[3]+
+                     mm.m12*(f[1]*s[2]+f[2]*s[1])+mm.m13*(f[1]*s[3]+f[3]*s[1])+
+                     mm.m23*(f[2]*s[3]+f[3]*s[2]),
+                     mm.m11*s[1]*s[1]+mm.m22*s[2]*s[2]+mm.m33*s[3]*s[3]+
+                     2*(mm.m12*s[1]*s[2]+mm.m13*s[1]*s[3]+mm.m23*s[2]*s[3]))
+                end
+            else
+                (Mesh2D._gmsh_dot3(frame.first,frame.first),
+                 Mesh2D._gmsh_dot3(frame.first,frame.second),
+                 Mesh2D._gmsh_dot3(frame.second,frame.second))
+            end
+        end
+        trace=Mesh2D._gmsh_surface_trace(T,inside,source.world,lift,
             element_high_water,sizes,background_sizes,extend>0 || extend==-2;
             temporary_cells=length(source.tags)==3 ? 0 : count(inside),
-            metric=(Mesh2D._gmsh_dot3(frame.first,frame.first),
-                    Mesh2D._gmsh_dot3(frame.first,frame.second),
-                    Mesh2D._gmsh_dot3(frame.second,frame.second)))
+            metric=trace_metric)
         insertion=refine!(T;min_angle_deg=0,gmsh_insertion=true,
             gmsh_algorithm=algorithm==5 ? :delaunay : :frontal,
             gmsh_extend_boundary=extend>0 || extend==-2,

@@ -91,8 +91,49 @@ function _normal_surface_mesh_algorithm(m::GeoModel,t::Int,caller;metric::Bool=f
     return algorithm
 end
 
+# Tensor background arm for the ordinary Delaunay/Frontal refinement: when
+# the resolved size selection is an `AbstractAnisoField` the insertion kernel
+# receives a metric-only carrier, so every cavity in-circle test,
+# circumcenter and frontal direction step uses the tensor pulled back at the
+# triangle's lifted centroid. The directional metric gets the same global
+# size policy as `_metric_surface_algorithm_field` — the CTX::lc cap, the
+# [lcMin,lcMax] clamp and lcFactor applied per direction — while queue radii
+# and size propagation keep the untraced scalar semantics (`size_at` on a
+# tensor scalarizes to the strongest direction). A scalar or absent
+# selection returns `nothing`, leaving the Euclidean arm unchanged.
+function _surface_metric_trace_carrier(m,options,size_field,frame,T,t,caller)
+    raw=options.inner_field===nothing ? size_field : options.inner_field
+    raw isa AbstractAnisoField || return nothing
+    lc_min=isnan(options.lc_min) ? 0.0 : options.lc_min
+    lc_max=isnan(options.lc_max) ? GMSH_MAX_SIZE : options.lc_max
+    lo=min(lc_min,lc_max)
+    hi=max(lo,min(lc_max,options.ctx_lc))
+    wrapped=BoundedSize(raw;size_min=lo,size_max=hi,factor=options.lc_factor)
+    # The PSLG frame's lift is affine and isometric, so the world-metric
+    # pullback onto its coordinate columns e1,e2 gives the exact uv tensor.
+    origin=_surface_metric_lift(frame,0.0,0.0)
+    e1=ntuple(k->_surface_metric_lift(frame,1.0,0.0)[k]-origin[k],3)
+    e2=ntuple(k->_surface_metric_lift(frame,0.0,1.0)[k]-origin[k],3)
+    entity=(2,t)
+    metric=function(u,v)
+        w=_surface_metric_lift(frame,u,v)
+        mm=metric_at(wrapped,w[1],w[2],w[3],entity)
+        return (mm.m11*e1[1]*e1[1]+mm.m22*e1[2]*e1[2]+mm.m33*e1[3]*e1[3]+
+            2*(mm.m12*e1[1]*e1[2]+mm.m13*e1[1]*e1[3]+mm.m23*e1[2]*e1[3]),
+            mm.m11*e1[1]*e2[1]+mm.m22*e1[2]*e2[2]+mm.m33*e1[3]*e2[3]+
+            mm.m12*(e1[1]*e2[2]+e1[2]*e2[1])+mm.m13*(e1[1]*e2[3]+e1[3]*e2[1])+
+            mm.m23*(e1[2]*e2[3]+e1[3]*e2[2]),
+            mm.m11*e2[1]*e2[1]+mm.m22*e2[2]*e2[2]+mm.m33*e2[3]*e2[3]+
+            2*(mm.m12*e2[1]*e2[2]+mm.m13*e2[1]*e2[3]+mm.m23*e2[2]*e2[3]))
+    end
+    lift=(u,v)->_surface_metric_lift(frame,u,v)
+    world=[lift(T.x[row],T.y[row]) for row in 1:Int(T.nreal)]
+    return Mesh2D._GmshSurfaceMetricCarrier(world,lift,metric)
+end
+
 function _surface_algorithm_refine!(m,T,xs,ys,segs,markers,embedded,index,
-                                     bgm_size,algorithm,t,caller)
+                                     bgm_size,algorithm,t,caller;
+                                     _gmsh_surface_trace=nothing)
     interior=Vector{Bool}(collect(classify_interior(T)))
     algorithm==3 && return interior
     embedded_ids=_surface_embedded_vertex_ids(embedded,index)
@@ -113,7 +154,7 @@ function _surface_algorithm_refine!(m,T,xs,ys,segs,markers,embedded,index,
         gmsh_algorithm=algorithm==5 ? :delaunay : :frontal,
         gmsh_extend_boundary=extend>0 || extend==-2,
         vertex_sizes=sizes,vertex_bgm=vbgm,bgm_size=bgm_size,
-        model_vertices=embedded_vids)
+        model_vertices=embedded_vids,_gmsh_surface_trace)
 end
 
 # Box factories carry their explicit encoding provenance in each typed face.

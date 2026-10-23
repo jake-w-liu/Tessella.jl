@@ -109,6 +109,35 @@ end
     @test right>left
 end
 
+@testset "isotropic-varying tensor keeps the local edge bound" begin
+    # h(x)=1/(4x+1) in every direction on the unit box: the wrapped metric
+    # certificate is |edge| <= 2*h(midpoint), so every edge's raw
+    # sqrt(d'Md) must stay <= 2 — assert that per x-bin, with zero
+    # violating edges for this smooth field, plus the density ordering the
+    # fill actually produces (the right end may only coarsen to its bound;
+    # a monotone count decrease across x is not required — the criterion is
+    # an upper bound over an inherited initial-Delaunay floor).
+    model=box_model()
+    field=MathEvalAnisoField(m11="(4*x+1)^2",m22="(4*x+1)^2",m33="(4*x+1)^2")
+    mesh=mesh_model_volume(model,1;size_field=field)
+    @test validate(mesh).ok && size(mesh.tets,2)>0
+    checked=metric_edge_audit(mesh,point->Diagonal(fill((4*point[1]+1)^2,3)))
+    @test checked.violating==0 && checked.maximum_metric<=2.0
+    # h halves from x=0 (h=1) to x=1 (h=1/5): the fine end must not carry
+    # fewer cells than the coarse end.
+    right=count(vertices->sum(mesh.coords[1,vertices])/4>0.5,eachcol(mesh.tets))
+    left=size(mesh.tets,2)-right
+    @test right>=left
+    # The isotropic tensor arm and the equivalent scalar FunctionSize run
+    # mathematically the same edge criterion; their fills must track the
+    # same density — best-effort ordering can shift the count a few
+    # percent, so compare with a generous tolerance.
+    smodel=box_model()
+    smesh=mesh_model_volume(smodel,1;
+        size_field=FunctionSize((x,y,z)->1.0/(4x+1)))
+    @test isapprox(size(mesh.tets,2),size(smesh.tets,2);rtol=0.15)
+end
+
 @testset "scalar size_callback keeps the scalar arm" begin
     # An installed size_callback is a scalar lc contract: the tensor field
     # must be scalarized through _volume_size_field (callback is invoked) and

@@ -296,6 +296,18 @@ end
                                     anisotropic_metric=true)
         @test length(scalar_nodes) == 2
         @test length(bamg_nodes) == 51
+
+        # The anisotropic arm grades by the tangent-projected metric only:
+        # a field strong purely perpendicular to the segment direction
+        # leaves the count at the isotropic scale, while the same strength
+        # along the tangent refines at its own h.
+        perpendicular = MathEvalAnisoField(m11="1",m22="10000",m33="1")
+        perp_x,_ = mesh_segment((0,0,0),(10,0,0),perpendicular;
+                                anisotropic_metric=true)
+        perp_y,_ = mesh_segment((0,0,0),(0,10,0),perpendicular;
+                                anisotropic_metric=true)
+        @test length(perp_x) == 11
+        @test length(perp_y) == 1001
     end
 
     @testset "graded size: local edge length tracks h" begin

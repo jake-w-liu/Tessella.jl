@@ -1,10 +1,10 @@
 # The public native producer retains the literal MTriangle slots, Cartesian
 # radius arithmetic and every MElement construction, including rejected cells.
 # Generic/raw refinement keeps its existing storage and arithmetic contract.
-mutable struct _GmshSurfaceTrace{F}
+mutable struct _GmshSurfaceTrace{F,G}
     world::Vector{NTuple{3,Float64}}
     lift::F
-    metric::NTuple{3,Float64}
+    metric::G
     triangles::Dict{NTuple{3,Int32},NTuple{3,Int32}}
     elements::Dict{NTuple{3,Int32},UInt64}
     radii::Dict{NTuple{3,Int32},Float64}
@@ -70,12 +70,23 @@ function _gmsh_surface_trace(T,inside,world,lift,high_water,sizes,background,ext
 end
 @inline _gmsh_surface_metric(::Nothing)=(1.0,0.0,1.0)
 @inline _gmsh_surface_metric(trace::_GmshSurfaceTrace)=trace.metric
+# Per-triangle tensor arm: a constant (a,b,d) pullback stays constant, while a
+# callable metric source evaluates at the cell's parameter centroid so the
+# cavity in-circle test and circumcenter use the local background tensor.
+@inline _gmsh_surface_metric(::Nothing,pu,pv,pw)=(1.0,0.0,1.0)
+@inline _gmsh_surface_metric(trace::_GmshSurfaceTrace,pu,pv,pw)=
+    _gmsh_trace_metric(trace.metric,pu,pv,pw)
+@inline _gmsh_trace_metric(metric::NTuple{3,Float64},pu,pv,pw)=metric
+@inline _gmsh_trace_metric(metric,pu,pv,pw)=metric(
+    (pu[1]+pv[1]+pw[1])/3.0,(pu[2]+pv[2]+pw[2])/3.0)
 @inline _gmsh_surface_delaunay_point(T,a,b,c,::Nothing)=
     _gmsh_circumcenter_xy(_pt(T,a),_pt(T,b),_pt(T,c))
 @inline function _gmsh_surface_delaunay_point(T,a,b,c,trace::_GmshSurfaceTrace)
     # bowyerWatson recomputes circumCenterMetric after circUV. The earlier
     # Euclidean XY construction is overwritten and must not decide a birth.
-    center,_=_gmsh_circumcenter_metric(_pt(T,a),_pt(T,b),_pt(T,c),trace.metric)
+    pa=_pt(T,a);pb=_pt(T,b);pc=_pt(T,c)
+    metric=_gmsh_surface_metric(trace,pa,pb,pc)
+    center,_=_gmsh_circumcenter_metric(pa,pb,pc,metric)
     return center
 end
 function _gmsh_surface_trace_children!(trace,T,cavity,boundary,vid,gsizes,lc1,bg)
@@ -134,3 +145,37 @@ struct _GmshSurfaceCircleTest{S}
     trace::S
 end
 (test::_GmshSurfaceCircleTest)(T,t,vid)=_gmsh_in_circumcircle(T,t,vid,test.trace)
+
+# Metric-only carrier for the ordinary (non-trace) Surface algorithms: a
+# tensor background rides the same dispatch points as a full trace —
+# cavity in-circle, circumcenter, frontal direction and the Cartesian
+# admission distances — while triangle slot order, incoming-edge order,
+# queue radii and element bookkeeping keep the untraced scalar semantics.
+# `world` covers the birth rows exactly like `_gmsh_surface_trace`, so the
+# admission path's `trace.world`/`trace.lift` reads stay consistent as
+# inserted vertices append world rows.
+struct _GmshSurfaceMetricCarrier{L,G}
+    world::Vector{NTuple{3,Float64}}
+    lift::L
+    metric::G
+end
+@inline _gmsh_surface_triangle_nodes(T,t,::_GmshSurfaceMetricCarrier)=
+    (_vert(T,t,1),_vert(T,t,2),_vert(T,t,3))
+@inline _gmsh_surface_incoming_slots(T,t,::_GmshSurfaceMetricCarrier)=(2,3,1)
+@inline _gmsh_surface_metric(carrier::_GmshSurfaceMetricCarrier)=carrier.metric
+@inline _gmsh_surface_metric(carrier::_GmshSurfaceMetricCarrier,pu,pv,pw)=
+    _gmsh_trace_metric(carrier.metric,pu,pv,pw)
+@inline function _gmsh_surface_world(carrier::_GmshSurfaceMetricCarrier,T,row)
+    row<=length(carrier.world) && return carrier.world[row]
+    return carrier.lift(T.x[row],T.y[row])
+end
+@inline function _gmsh_surface_delaunay_point(T,a,b,c,carrier::_GmshSurfaceMetricCarrier)
+    pa=_pt(T,a);pb=_pt(T,b);pc=_pt(T,c)
+    metric=_gmsh_surface_metric(carrier,pa,pb,pc)
+    center,_=_gmsh_circumcenter_metric(pa,pb,pc,metric)
+    return center
+end
+function _gmsh_surface_trace_children!(::_GmshSurfaceMetricCarrier,T,cavity,
+                                       boundary,vid,gsizes,lc1,bg)
+    return nothing
+end

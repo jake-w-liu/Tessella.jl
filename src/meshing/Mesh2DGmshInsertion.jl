@@ -14,7 +14,7 @@ include("Mesh2DGmshSurfaceTrace.jl")
     _is_ghost_tri(T,t) && return false
     first,second,third=_gmsh_surface_triangle_nodes(T,t,trace)
     a=_pt(T,first);b=_pt(T,second);c=_pt(T,third)
-    metric=_gmsh_surface_metric(trace)
+    metric=_gmsh_surface_metric(trace,a,b,c)
     center,radius=_gmsh_circumcenter_metric(a,b,c,metric)
     point=_pt(T,vid)
     distance=_gmsh_metric_distance2(center,point,metric)
@@ -195,7 +195,10 @@ function _gmsh_heap_pop!(queue::_GmshTriangleQueue)
 end
 
 @inline function _gmsh_triangle_radius(T,t,gsizes,extend_boundary)
-    gsizes.trace===nothing || return gsizes.trace.radii[_gmsh_triangle_key(T,t)]
+    # Only a full trace carries persistent birth radii; a metric-only carrier
+    # keeps the untraced scalar radius computation.
+    gsizes.trace isa _GmshSurfaceTrace &&
+        return gsizes.trace.radii[_gmsh_triangle_key(T,t)]
     a=_vert(T,t,1);b=_vert(T,t,2);c=_vert(T,t,3)
     background=_gmsh_mean_size3(gsizes.vbgm[a],gsizes.vbgm[b],gsizes.vbgm[c])
     lc=extend_boundary ? min(background,
@@ -282,7 +285,7 @@ end
 # directions differ for an obtuse triangle whose circumcenter is outside.
 function _gmsh_frontal_point(T,t,slot,gsizes,extend_boundary)
     a,b,c=_gmsh_surface_triangle_nodes(T,t,gsizes.trace)
-    metric=_gmsh_surface_metric(gsizes.trace)
+    metric=_gmsh_surface_metric(gsizes.trace,_pt(T,a),_pt(T,b),_pt(T,c))
     center,_=_gmsh_circumcenter_metric(_pt(T,a),_pt(T,b),_pt(T,c),
                                      metric)
     u,v=_edge(T,t,slot)

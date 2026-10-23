@@ -1645,7 +1645,7 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
                 # `forceRadius(0)`/`forceRadius(-1)`: drop the point, keep the
                 # triangle out of the queue.
                 push!(skipped,_trikey(T,t))
-                _gmsh_surface_trace===nothing ||
+                _gmsh_surface_trace isa _GmshSurfaceTrace &&
                     (_gmsh_surface_trace.radii[_gmsh_triangle_key(T,t)]=ptin==0 ? 0.0 : -1.0)
                 continue
             end
