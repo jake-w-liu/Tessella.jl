@@ -147,9 +147,16 @@ the owned files:
   `_Levelset`/`_Levelset_<step>` names, `.pos` platform newlines
   (CRLF on Windows) and no spurious `TIME{0}`. Verified record-by-record
   on t9 (640 iso + 546 cut) plus tet/hex/quad/orientation/ExtractVolume
-  fixtures — all byte-identical. Newly confirmed gaps in flight:
-  `.geo` statement errors abort where upstream prints `Error :` and
-  continues; `read_pos` hard-errors where upstream warns-and-skips.
+  fixtures — all byte-identical. `.pos` reader parity landed 2026-10-24
+  (`c8ce9eb`): unknown-type records keeping the `type(coords){values};`
+  shape print `Error   :` to stderr and skip (rest of the view loads);
+  non-record-shaped unknown tokens still abort — upstream's syntax-error
+  cascade kills the view there too. `INTERPOLATION_SCHEME` now accepts
+  signed entries (`-0.5`) and comma-less row groups (`{r1}{r2}`).
+  Arity-mismatch greedy-fill (uninitialized floats upstream) classified
+  unreproducible UB — Tessella's strict arity error is intentional.
+  Remaining gap in flight: `.geo` statement errors abort where upstream
+  prints `Error :` and continues.
   `.geo` post-processing view verbs landed 2026-10-23 (`2330f0b`,
   oracle-verified): `Save View[i] "f.pos"` byte-identical export,
   `Print View[i]` upstream-identical rejection, `Delete View[i]`/

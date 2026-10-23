@@ -76,6 +76,22 @@ errors abort where upstream prints `Error :` and continues (unknown plugin
 options/commands); `read_pos` hard-errors on malformed records where
 upstream warns-and-skips.
 
+### `read_pos` upstream leniency + `INTERPOLATION_SCHEME` grammar (2026-10-24, landed `c8ce9eb`)
+
+Oracle probe of the exact skip contract rewrote the earlier guess:
+gmsh 4.15.2 does **not** warn-and-skip generally — it prints
+`Error : 'file', line N: Unknown element type 'QQ'` and skips records
+only when they keep the `<type>(<coords>){<values>};` shape (the rest of
+the view then loads); a bare unknown identifier or missing record
+braces cascades into `syntax error` and the view fails. Arity-mismatched
+records are silently *greedy-filled* across record boundaries with
+uninitialized floats — unreproducible UB, classified intentional
+strictness (Tessella's arity `ArgumentError` stays). Implemented:
+unknown-type records print `Error   : …` to stderr and skip;
+`INTERPOLATION_SCHEME` accepts signed scalar entries (`-0.5`) and
+whitespace-separated row groups (`{r1}{r2}`) — both previously threw
+where upstream parses. `post_view_io_test` 116/116.
+
 ### `.geo` view ops + `Plugin(...)` dispatch + `DefineConstant` whitespace grammar (2026-10-23, landed `1dfc9e4`, `72fd7a1`, `2330f0b`)
 
 `1dfc9e4` — `DefineConstant`/`UndefineConstant` entries now split on
