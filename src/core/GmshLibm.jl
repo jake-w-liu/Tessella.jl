@@ -176,7 +176,7 @@ function _x87_trig(r::BigFloat)
 end
 
 function _win_sincos(x::Float64)
-    _WIN_X87_NATIVE && return _win_x87_cli_call(_win_x87_sincos,x)
+    _win_x87_llvm() && return _win_x87_cli_call(_win_x87_sincos,x)
     ax = abs(x)
     if ax < _X87_LIM
         ax <= _X87_PI_HI/2 && return (Float64(_x87e(sin(_x87b(x)))),
@@ -193,7 +193,7 @@ end
 function _win_exp(x::Float64)
     (isnan(x) || x == Inf) && return x
     x == -Inf && return 0.0
-    _WIN_X87_NATIVE && return _win_x87_cli_call(_win_x87_exp,x)
+    _win_x87_llvm() && return _win_x87_cli_call(_win_x87_exp,x)
     v = _x87e(_x87b(x) * _X87_L2E[])
     vf = Float64(v)
     abs(vf) >= _X87_LIM && return vf > 0 ? Inf : 0.0
@@ -208,7 +208,7 @@ function _win_log(x::Float64)
     x < 0.0 && return NaN
     x == 0.0 && return -Inf
     x == Inf && return x
-    _WIN_X87_NATIVE && return _win_x87_cli_call(_win_x87_log,x)
+    _win_x87_llvm() && return _win_x87_cli_call(_win_x87_log,x)
     l2 = _x87e(log2(_x87b(x)))
     return Float64(_x87e(l2 * _X87_LN2[]))
 end
@@ -217,6 +217,29 @@ end
 # Larger integral exponents use log2l/exp2l, whose rounding is observably
 # different from repeated Float64 squaring near one.
 const _WIN_X87_NATIVE = Sys.iswindows() && Sys.ARCH === :x86_64
+
+# `Base.llvmcall` bodies cannot run under the interpreter (`--compile=min`,
+# the suite's minimal-JIT gate): every attempted native call would raise
+# "'llvmcall' requires the compiler". Probe the FPU control-word read once
+# and cache the answer — native entry points then fall through to the
+# extended-precision emulation path the non-Windows ports already use.
+@static if Sys.iswindows() && Sys.ARCH === :x86_64
+    const _WIN_X87_LLVM = Ref{Union{Nothing,Bool}}(nothing)
+    function _win_x87_llvm()
+        flag=_WIN_X87_LLVM[]
+        flag===nothing || return flag
+        ok=false
+        try
+            _win_x87_control_word();ok=true
+        catch
+            ok=false
+        end
+        _WIN_X87_LLVM[]=ok
+        return ok
+    end
+else
+    _win_x87_llvm()=false
+end
 const _WIN_CLI_PRECISION_KEY = gensym(:TessellaCLIPrecision)
 
 @static if Sys.iswindows() && Sys.ARCH === :x86_64
@@ -461,7 +484,7 @@ end
     abs(y)<9007199254740992.0 && isodd(Int64(y))
 
 function _win_pow(x::Float64,y::Float64)
-    _WIN_X87_NATIVE || return _gm_pow(x,y)
+    !_win_x87_llvm() || return _gm_pow(x,y)
     if _win_cli_precision()
         saved=_win_x87_control_word()
         _win_x87_set_control_word!((saved&0xfcff)|UInt16(0x0300))
@@ -504,7 +527,7 @@ function _win_atan2(y::Float64, x::Float64)
     (isnan(y) || isnan(x)) && return y + x
     # FPATAN has fixed internal precision; its Float64 store obeys caller RC.
     # It needs no CLI precision override and leaves the stack/control word intact.
-    _WIN_X87_NATIVE && return _win_x87_atan2(y,x)
+    _win_x87_llvm() && return _win_x87_atan2(y,x)
     return Float64(_x87e(atan(_x87b(y), _x87b(x))))
 end
 
@@ -567,9 +590,9 @@ end
 # retain their independently captured system-libm resolution.
 # ---------------------------------------------------------------------------
 @inline _gm87_sin(x::Float64) = Sys.iswindows() ?
-    (_WIN_X87_NATIVE ? _win_x87_cli_call(_win_x87_sin,x) : _win_sincos(x)[1]) : _gm_sin(x)
+    (_win_x87_llvm() ? _win_x87_cli_call(_win_x87_sin,x) : _win_sincos(x)[1]) : _gm_sin(x)
 @inline _gm87_cos(x::Float64) = Sys.iswindows() ?
-    (_WIN_X87_NATIVE ? _win_x87_cli_call(_win_x87_cos,x) : _win_sincos(x)[2]) : _gm_cos(x)
+    (_win_x87_llvm() ? _win_x87_cli_call(_win_x87_cos,x) : _win_sincos(x)[2]) : _gm_cos(x)
 @inline _gm87_exp(x::Float64) = Sys.iswindows() ? _win_exp(x) : _gm_exp(x)
 @inline _gm87_log(x::Float64) = Sys.iswindows() ? _win_log(x) : _gm_log(x)
 @inline _gm87_pow(x::Float64, y::Float64) =

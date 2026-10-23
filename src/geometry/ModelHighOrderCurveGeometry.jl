@@ -39,7 +39,8 @@ end
 @inline function _model_high_order_curve_sincos(x::Float64)
     @static if Sys.iswindows() && Sys.ARCH in (:x86_64,:i686)
         if isfinite(x) && abs(x)<0x1p63
-            return Base.llvmcall(raw"""
+            try
+                return Base.llvmcall(raw"""
                 %input = alloca double, align 8
                 %output = alloca [2 x double], align 8
                 store double %0, ptr %input, align 8
@@ -49,6 +50,11 @@ end
                 %result = load [2 x double], ptr %output, align 8
                 ret [2 x double] %result
             """,NTuple{2,Float64},Tuple{Float64},x)
+            catch err
+                err isa ErrorException || rethrow()
+                # `llvmcall` needs the compiler — interpreted minimal-JIT
+                # runs take the same `_gm_sincos` path other platforms use.
+            end
         end
     end
     return _gm_sincos(x)

@@ -71,7 +71,8 @@ end
 # recorded row interchanges, solve A12 and update the trailing Schur block.
 @static if Sys.ARCH in (:x86_64,:i686)
     function _native_cell_cpuid(leaf::UInt32,subleaf::UInt32)
-        return Base.llvmcall(raw"""
+        try
+            return Base.llvmcall(raw"""
             %r = call {i32,i32,i32,i32} asm sideeffect "cpuid", "={ax},={bx},={cx},={dx},0,2"(i32 %0, i32 %1)
             %a = extractvalue {i32,i32,i32,i32} %r, 0
             %b = extractvalue {i32,i32,i32,i32} %r, 1
@@ -83,6 +84,12 @@ end
             %t3 = insertvalue [4 x i32] %t2, i32 %d, 3
             ret [4 x i32] %t3
             """,NTuple{4,UInt32},Tuple{UInt32,UInt32},leaf,subleaf)
+        catch err
+            err isa ErrorException || rethrow()
+            # `llvmcall` needs the compiler — interpreted minimal-JIT runs
+            # fall through to the documented default cache sizes.
+            return (UInt32(0),UInt32(0),UInt32(0),UInt32(0))
+        end
     end
 end
 
