@@ -180,12 +180,17 @@ function _model_merge_prepare(path)
     result=if extension==".msh"
         GeoExec._geo_stage_mesh_merge(path,model,seed;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
-    elseif extension in (".unv",".mesh",".meshb",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk")
+    elseif extension in (".unv",".mesh",".meshb",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk",".wrl")
         IO._stage_foreign_mesh_merge(path,model,seed;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
     elseif extension==".stl"
         IO._stage_stl_mesh_merge(path,model,seed;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
+    elseif extension in (".xao",".brep")
+        throw(ArgumentError("$caller: $extension CAD import requires the " *
+            "OpenCASCADE BRep boundary kernel (TShape curve/surface " *
+            "reconstruction), which Tessella does not implement; " *
+            "IO.read_xao/IO.read_brep expose the envelope census"))
     else
         _model_import_execute_geo(path,0,options,diagnostics;legacy=true,
             initial_model=model,initial_mesh_context=seed,initial_fields=fields)
@@ -217,7 +222,8 @@ end
     merge(filename::AbstractString)
 
 Merge a `.geo`, `.msh`, `.unv`, `.mesh`, `.meshb`, `.stl`, `.su2`, `.bdf`,
-`.nas`, `.inp`, `.neu`, `.p3d`, `.mail`, `.ir3`, `.diff`, `.vtk` or supported
+`.nas`, `.inp`, `.neu`, `.p3d`, `.mail`, `.ir3`, `.diff`, `.vtk`, `.wrl` or
+supported
 linear-list `.pos` file atomically. Existing models,
 the current model slot, associated filename and held views survive. GEO executes
 against current entities, fields and options; an explicit `SetName` is honored.

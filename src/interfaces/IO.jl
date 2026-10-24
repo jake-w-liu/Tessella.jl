@@ -40,6 +40,7 @@ export read_p3d, write_p3d, read_mail, write_mail, read_ir3, write_ir3,
        P3dFile, MailFile, Ir3File
 export read_diff, write_diff, DiffFile
 export read_vtk, write_vtk, VtkFile
+export read_wrl, WrlFile, read_xao, XaoFile, read_brep, BrepFile
 
 include("GeoColorNames.jl")
 include("GeoOptionTables.jl")
@@ -12521,6 +12522,28 @@ function _read_foreign_records(path,caller::AbstractString)
                 rethrow()
             end
         end
+    elseif extension==".wrl"
+        node_labels,coords,records=open(path,"r") do io
+            try
+                return _read_wrl(io,caller,
+                    Int(typemax(Int32)),Int(typemax(Int32)))
+            catch err
+                err isa InterruptException && rethrow()
+                err isa EOFError && throw(ArgumentError(
+                    "$caller: truncated .wrl file"))
+                rethrow()
+            end
+        end
+        return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
+    elseif extension in (".xao",".brep")
+        # `.xao`/`.brep` carry an OCCT CASCADE BRep dump: publishing model
+        # entities needs the analytic curve/surface boundary kernel, which is
+        # the classified `importShapes` gap — `read_xao`/`read_brep` expose the
+        # truthful envelope/shape census instead of fabricating a model.
+        throw(ArgumentError("$caller: $extension CAD import requires the " *
+            "OpenCASCADE BRep boundary kernel (TShape curve/surface " *
+            "reconstruction), which Tessella does not implement; " *
+            "IO.read_xao/IO.read_brep expose the envelope census"))
     else
         throw(ArgumentError("$caller: unsupported mesh extension '$extension'"))
     end
@@ -16630,6 +16653,755 @@ function write_vtk(path,m;title::AbstractString="Tessella mesh")
         mv(temporary,target;force=true)
     end
     return path
+end
+
+# ── VRML (.wrl) ────────────────────────────────────────────────────────────────
+#
+# VRML 1.0 (`#VRML V1.0 ascii`) and VRML 2.0/97 (`#VRML V2.0 utf8`) indexed
+# geometry import. A file contributes one geometry set per
+# `IndexedFaceSet`/`IndexedLineSet`: in V1 the current `Coordinate3` sibling
+# supplies the points (state-style, rebindable per set); in V2 the set's own
+# `coord Coordinate`/`Coordinate3` field does, inside a `Shape { geometry ... }`
+# wrapper like the pinned reader requires.
+#
+# Face classification follows the observed upstream element rules — V2 emits a
+# sliding-window triangle strip `(v_i, v_{i+1}, v_{i+2})` for `i = 0..k-3` with
+# alternating orientation (odd windows reversed, keeping consistent winding —
+# the diagonal `v_i..v_{i+2}` zig-zag triangulation); V1 classes by arity: 2
+# indices → line, 3 → triangle, 4 → quad, ≥5 → a `(v_0, v_i, v_{i+1})` fan.
+# Two-index runs become line cells on the set's curve entity in both versions;
+# single-index runs carry no geometry and are dropped. Elements land on one
+# entity per dimension per set, node tags keep the source point index (+1,
+# unused points skipped), and `IndexedLineSet` takes the identical walk — all
+# matching the pinned `GModelIO_VRML` outputs. Documented upstream defects that
+# are deliberately NOT reproduced: the first face's first index is not
+# duplicated here (upstream repeats it, minting a phantom leading vertex and
+# extra degenerate/overlapping cells), and multi-shape V2 files merge their
+# sets instead of collapsing to nothing.
+#
+# Bounded scope: `coord USE` references and every non-indexed geometry node
+# (`PointSet`, `ElevationGrid`, `Extrusion`, `Sphere`, ...) are outside the
+# indexed-set contract; `normalIndex`/`materialIndex`/`texCoordIndex`-class
+# fields are parsed through and ignored.
+
+struct _WrlGeometry
+    v2::Bool
+    points::Union{Nothing,Vector{Float64}}   # flat xyz triples, nothing when no coord
+    faces::Vector{Vector{Int32}}             # 0-based vertex indices per face
+    coord_index_seen::Bool
+end
+
+# Tokens: `#` comments to end-of-line, `{}`/`[]` structural, `,` separators,
+# `"..."` quoted literals, everything else a whitespace-delimited word.
+function _wrl_tokens(text::AbstractString,caller::AbstractString)
+    tokens=String[];i=firstindex(text);last=lastindex(text)
+    while i<=last
+        c=text[i]
+        if isspace(c) || c==','
+            i=nextind(text,i);continue
+        end
+        if c=='#'
+            j=findnext('\n',text,i)
+            i=j===nothing ? last+1 : j
+            continue
+        end
+        if c=='"'
+            j=findnext('"',text,nextind(text,i))
+            j===nothing && throw(ArgumentError(
+                "$caller: unterminated string literal"))
+            push!(tokens,String(SubString(text,i,j)))
+            i=nextind(text,j);continue
+        end
+        if c in "{}[]"
+            push!(tokens,string(c));i=nextind(text,i);continue
+        end
+        j=i
+        while j<=last && !(isspace(text[j]) || text[j]==',' || text[j]=='#' ||
+                           text[j]=='"' || text[j] in "{}[]")
+            j=nextind(text,j)
+        end
+        push!(tokens,String(SubString(text,i,prevind(text,j))))
+        i=j
+    end
+    return tokens
+end
+
+function _wrl_float(tok::AbstractString,caller::AbstractString)
+    value=tryparse(Float64,tok)
+    value===nothing && throw(ArgumentError(
+        "$caller: invalid coordinate '$tok'"))
+    isfinite(value) || throw(ArgumentError(
+        "$caller: non-finite coordinate '$tok'"))
+    return value
+end
+
+# `tokens[i] == "["`; returns (parsed ints, index after "]").
+function _wrl_index_list(tokens::Vector{String},i::Int,caller::AbstractString)
+    values=Int[];j=i+1;last=length(tokens)
+    while j<=last && tokens[j]!="]"
+        tok=tokens[j]
+        value=tryparse(Int,tok)
+        value===nothing && throw(ArgumentError(
+            "$caller: invalid coordIndex value '$tok'"))
+        value < -1 && throw(ArgumentError(
+            "$caller: negative coordIndex value $value"))
+        push!(values,value)
+        j+=1
+    end
+    j>last && throw(ArgumentError("$caller: unterminated '[' index list"))
+    return values,j+1
+end
+
+# `tokens[i] == "["`; returns (parsed floats, index after "]").
+function _wrl_point_list(tokens::Vector{String},i::Int,caller::AbstractString)
+    values=Float64[];j=i+1;last=length(tokens)
+    while j<=last && tokens[j]!="]"
+        push!(values,_wrl_float(tokens[j],caller))
+        j+=1
+    end
+    j>last && throw(ArgumentError("$caller: unterminated '[' point list"))
+    return values,j+1
+end
+
+# Split a raw index list on the -1 face separator. A trailing unterminated run
+# still closes a face (upstream requires the terminator; the lenient read keeps
+# the data rather than discarding the file over one missing sentinel).
+function _wrl_faces!(dst::Vector{Vector{Int32}},values::Vector{Int})
+    face=Int32[]
+    for value in values
+        if value==-1
+            push!(dst,copy(face));empty!(face)
+        else
+            push!(face,Int32(value))
+        end
+    end
+    push!(dst,face)
+    return dst
+end
+
+# V2: `Shape { ... geometry IndexedFaceSet|IndexedLineSet { coord <node>
+# coordIndex [...] } }`. Returns (sets, index after the Shape's '}').
+function _wrl_v2_shape!(sets,tokens::Vector{String},i::Int,
+                        caller::AbstractString)
+    last=length(tokens);depth=1;j=i
+    while j<=last
+        t=tokens[j]
+        if t=="{"
+            depth+=1;j+=1;continue
+        elseif t=="}"
+            depth-=1;j+=1
+            depth==0 && return j
+            continue
+        elseif t=="geometry" && depth==1
+            j+=1
+            j<=last && tokens[j]=="DEF" && (j+=2)
+            j>last && break
+            name=tokens[j]
+            if name=="IndexedFaceSet" || name=="IndexedLineSet"
+                (j+1<=last && tokens[j+1]=="{") || throw(ArgumentError(
+                    "$caller: expected '{' after geometry $name"))
+                set,j=_wrl_v2_set(tokens,j+2,caller,name)
+                push!(sets,set);continue
+            else
+                # Unhandled geometry node: its braces are consumed by the
+                # depth walk like any other field.
+                j+=1;continue
+            end
+        else
+            j+=1;continue
+        end
+    end
+    throw(ArgumentError("$caller: unterminated Shape node"))
+end
+
+# `i` = first token inside the geometry set's braces. Returns (_WrlGeometry, j)
+# with `j` the index after the closing brace.
+function _wrl_v2_set(tokens::Vector{String},i::Int,caller::AbstractString,
+                     name::AbstractString)
+    last=length(tokens);depth=1;j=i
+    points=nothing;faces=Vector{Int32}[];ci_seen=false
+    while j<=last
+        t=tokens[j]
+        if t=="{"
+            depth+=1;j+=1;continue
+        elseif t=="}"
+            depth-=1;j+=1
+            depth==0 &&
+                return _WrlGeometry(true,points,faces,ci_seen),j
+            continue
+        elseif t=="coord" && depth==1
+            j+=1
+            j<=last && tokens[j]=="DEF" && (j+=2)
+            j>last && break
+            node=tokens[j]
+            node=="USE" && throw(ArgumentError(
+                "$caller: 'coord USE' references are not supported"))
+            node in ("Coordinate","Coordinate3") || throw(ArgumentError(
+                "$caller: expected a Coordinate node after 'coord', " *
+                "got '$node'"))
+            j+=1
+            (j<=last && tokens[j]=="{") || throw(ArgumentError(
+                "$caller: expected '{' after $node"))
+            j+=1;cdepth=1;values=Float64[]
+            while j<=last && cdepth>0
+                tj=tokens[j]
+                if tj=="{";cdepth+=1;j+=1;continue
+                elseif tj=="}";cdepth-=1;j+=1;continue
+                elseif tj=="point" && cdepth==1 && j+1<=last &&
+                        tokens[j+1]=="["
+                    vals,j=_wrl_point_list(tokens,j+1,caller)
+                    append!(values,vals);continue
+                else
+                    j+=1;continue
+                end
+            end
+            cdepth==0 || throw(ArgumentError(
+                "$caller: unterminated $node node"))
+            length(values)%3==0 || throw(ArgumentError(
+                "$caller: point list has $(length(values)) values, " *
+                "not a multiple of 3"))
+            points=values;continue
+        elseif t=="coordIndex" && depth==1
+            j+=1
+            (j<=last && tokens[j]=="[") || throw(ArgumentError(
+                "$caller: expected '[' after 'coordIndex'"))
+            vals,j=_wrl_index_list(tokens,j,caller)
+            ci_seen=true
+            _wrl_faces!(faces,vals);continue
+        else
+            j+=1;continue
+        end
+    end
+    throw(ArgumentError("$caller: unterminated $name node"))
+end
+
+function _wrl_v2_sets(tokens::Vector{String},caller::AbstractString)
+    sets=_WrlGeometry[];i=firstindex(tokens);last=lastindex(tokens)
+    while i<=last
+        if tokens[i]=="Shape" && i+1<=last && tokens[i+1]=="{"
+            i=_wrl_v2_shape!(sets,tokens,i+2,caller)
+        else
+            i+=1
+        end
+    end
+    return sets
+end
+
+# V1: `Coordinate3` nodes set the current points for every following
+# `IndexedFaceSet`/`IndexedLineSet` sibling until the next `Coordinate3`,
+# wherever they appear (Separator/Group wrappers carry no scan semantics).
+function _wrl_v1_sets(tokens::Vector{String},caller::AbstractString)
+    sets=_WrlGeometry[];points=nothing
+    i=firstindex(tokens);last=lastindex(tokens)
+    while i<=last
+        t=tokens[i]
+        if t=="Coordinate3" && i+1<=last && tokens[i+1]=="{"
+            depth=1;j=i+2;values=Float64[]
+            while j<=last && depth>0
+                tj=tokens[j]
+                if tj=="{";depth+=1;j+=1;continue
+                elseif tj=="}";depth-=1;j+=1;continue
+                elseif tj=="point" && j+1<=last && tokens[j+1]=="["
+                    vals,j=_wrl_point_list(tokens,j+1,caller)
+                    append!(values,vals);continue
+                else
+                    j+=1;continue
+                end
+            end
+            depth==0 || throw(ArgumentError(
+                "$caller: unterminated Coordinate3 node"))
+            length(values)%3==0 || throw(ArgumentError(
+                "$caller: point list has $(length(values)) values, " *
+                "not a multiple of 3"))
+            points=values;i=j;continue
+        elseif (t=="IndexedFaceSet" || t=="IndexedLineSet") &&
+                i+1<=last && tokens[i+1]=="{"
+            depth=1;j=i+2;faces=Vector{Int32}[];ci_seen=false
+            while j<=last && depth>0
+                tj=tokens[j]
+                if tj=="{";depth+=1;j+=1;continue
+                elseif tj=="}";depth-=1;j+=1;continue
+                elseif depth==1 && tj=="coordIndex" && j+1<=last &&
+                        tokens[j+1]=="["
+                    vals,j=_wrl_index_list(tokens,j+1,caller)
+                    ci_seen=true
+                    _wrl_faces!(faces,vals);continue
+                else
+                    j+=1;continue
+                end
+            end
+            depth==0 || throw(ArgumentError(
+                "$caller: unterminated $t node"))
+            push!(sets,_WrlGeometry(false,points,faces,ci_seen))
+            i=j;continue
+        else
+            i+=1;continue
+        end
+    end
+    return sets
+end
+
+# Emit each set's faces as `_TextMeshCell` records. Per set, two-index faces
+# become lines on that set's curve entity and 3+-index faces become triangles
+# (V2 sliding strip, V1 4→quad/≥5→fan) on its surface entity; the source
+# point index stays the node label so sparse point usage keeps its tag gaps.
+function _wrl_records(v2::Bool,sets::Vector{_WrlGeometry},
+                      caller::AbstractString,node_limit::Int,element_limit::Int)
+    node_labels=Int64[];coords=Float64[];records=_TextMeshCell[]
+    stag=0;ctag=0;base=Int64(0);label=Int64(0);saw_index=false
+    for set in sets
+        np=set.points===nothing ? 0 : div(length(set.points),3)
+        set.coord_index_seen || (base+=np;continue)
+        saw_index=true
+        used1=Int32[];used2=Int32[]
+        dim1=Vector{NTuple{2,Int32}}();dim2=Vector{NTuple{4,Int32}}()
+        dim2msh=Int8[]
+        for face in set.faces
+            k=length(face)
+            k==0 && continue
+            set.points===nothing && throw(ArgumentError(
+                "$caller: coordIndex faces appear in a geometry set " *
+                "without a Coordinate point list"))
+            for value in face
+                (0<=value<np) || throw(ArgumentError(
+                    "$caller: coordIndex value $value out of range " *
+                    "(0:$(np-1))"))
+            end
+            if k==1
+                continue
+            elseif k==2
+                push!(dim1,(face[1],face[2]))
+            elseif v2
+                for i in 0:k-3
+                    a,b,c=face[i+1],face[i+2],face[i+3]
+                    push!(dim2,isodd(i) ? (c,b,a,Int32(-1)) :
+                                          (a,b,c,Int32(-1)))
+                    push!(dim2msh,Int8(2))
+                end
+            else
+                if k==3
+                    push!(dim2,(face[1],face[2],face[3],Int32(-1)))
+                    push!(dim2msh,Int8(2))
+                elseif k==4
+                    push!(dim2,(face[1],face[2],face[3],face[4]))
+                    push!(dim2msh,Int8(3))
+                else
+                    for i in 1:k-2
+                        push!(dim2,(face[1],face[i+1],face[i+2],Int32(-1)))
+                        push!(dim2msh,Int8(2))
+                    end
+                end
+            end
+        end
+        (isempty(dim1) && isempty(dim2)) && (base+=np;continue)
+        for (a,b) in dim1
+            push!(used1,a);push!(used1,b)
+        end
+        for (ci,cell) in enumerate(dim2)
+            for e in 1:(dim2msh[ci]==Int8(3) ? 4 : 3)
+                push!(used2,cell[e])
+            end
+        end
+        sort!(unique!(used1));sort!(unique!(used2))
+        rows=Dict{Int32,Int32}()
+        for p in used1
+            push!(node_labels,base+Int64(p)+1);rows[p]=Int32(length(node_labels))
+            append!(coords,@view(set.points[3p+1:3p+3]))
+        end
+        for p in used2
+            p in used1 && continue
+            push!(node_labels,base+Int64(p)+1);rows[p]=Int32(length(node_labels))
+            append!(coords,@view(set.points[3p+1:3p+3]))
+        end
+        length(node_labels)>node_limit && throw(ArgumentError(
+            "$caller: node count exceeds max_nodes=$node_limit"))
+        base+=np
+        if !isempty(dim1)
+            ctag+=1
+            for (a,b) in dim1
+                label+=1
+                push!(records,_TextMeshCell(label,1,
+                    Int32[rows[a],rows[b]],Int64(ctag),Int64(0)))
+            end
+        end
+        if !isempty(dim2)
+            stag+=1
+            for (cell,msh) in zip(dim2,dim2msh)
+                arity=msh==Int8(3) ? 4 : 3
+                label+=1
+                push!(records,_TextMeshCell(label,Int(msh),
+                    Int32[rows[cell[e]] for e in 1:arity],
+                    Int64(stag),Int64(0)))
+            end
+        end
+        length(records)>element_limit && throw(ArgumentError(
+            "$caller: element count exceeds max_elements=$element_limit"))
+    end
+    saw_index || throw(ArgumentError(
+        "$caller: file contains no IndexedFaceSet/IndexedLineSet " *
+        "coordIndex geometry"))
+    return node_labels,coords,records
+end
+
+# Header (V1 `ascii` or V2 `utf8`), tokenization and set extraction shared by
+# the public reader and the foreign-mesh staging path. Returns (v2, sets).
+function _wrl_parse(text::AbstractString,caller::AbstractString)
+    i=firstindex(text)
+    # An optional UTF-8 BOM precedes the required header comment.
+    if length(text)>=3 && codeunit(text,1)==0xEF && codeunit(text,2)==0xBB &&
+            codeunit(text,3)==0xBF
+        i=nextind(text,nextind(text,nextind(text,i)))
+    end
+    head=match(r"^[^\S\n]*#VRML[^\S\n]+V([12])(?:\.0)?[^\S\n]",text[i:end])
+    head===nothing && throw(ArgumentError(
+        "$caller: missing '#VRML V1.0' or '#VRML V2.0' header"))
+    v2=head.captures[1]=="2"
+    tokens=_wrl_tokens(text,caller)
+    return v2,v2 ? _wrl_v2_sets(tokens,caller) : _wrl_v1_sets(tokens,caller)
+end
+
+function _read_wrl(io::Base.IO,caller::AbstractString,
+                   node_limit::Int,element_limit::Int)
+    v2,sets=_wrl_parse(read(io,String),caller)
+    return _wrl_records(v2,sets,caller,node_limit,element_limit)
+end
+
+"""
+    WrlFile
+
+Result of [`read_wrl`](@ref): the compact `mesh` (an MSH2-style `MixedMesh`
+whose per-cell `elementary_entities` hold the VRML geometry-set entity tag —
+one surface and/or one curve tag per `IndexedFaceSet`/`IndexedLineSet`),
+the source `node_tags` (1-based point indices, preserving gaps left by
+unused points), the per-block `element_tags`, and the parsed VRML `version`
+(1 or 2).
+"""
+struct WrlFile
+    mesh::MixedMesh
+    node_tags::Vector{UInt64}
+    element_tags::Vector{Vector{UInt64}}
+    version::Int
+end
+
+"""
+    read_wrl(path; max_nodes, max_elements, max_file_bytes) -> WrlFile
+
+Read a VRML 1.0/2.0 `.wrl` file's indexed geometry. Each
+`IndexedFaceSet`/`IndexedLineSet` contributes its `Coordinate`/`Coordinate3`
+point list (V2 requires the `Shape { geometry ... }` nesting; V1 consumes the
+current sibling `Coordinate3`) and the `-1`-separated `coordIndex` faces.
+Two-index faces become line cells; V2 faces of three or more indices become a
+sliding-window alternating-orientation triangle strip, V1 three-index faces a
+triangle, four a quad, and five or more a vertex-0 fan — all matching the
+observed upstream element walk. Elements land on one entity per dimension per
+geometry set, node tags are the 1-based source point indices, and missing
+`-1` terminators, comma-free separators and multi-shape files are accepted as
+documented leniencies where upstream's reader is stricter or buggy. Index
+overruns, `coord USE` references, malformed structure, and files with no
+indexed geometry are errors.
+"""
+function read_wrl(path;
+                  max_nodes=typemax(Int32),max_elements=typemax(Int32),
+                  max_file_bytes=typemax(Int))
+    caller="read_wrl"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    node_limit=_io_limit(max_nodes,caller,"max_nodes";ceiling=Int(typemax(Int32)))
+    element_limit=_io_limit(
+        max_elements,caller,"max_elements";ceiling=Int(typemax(Int32)))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
+    v2,sets=_wrl_parse(read(path,String),caller)
+    node_labels,coords,records=_wrl_records(
+        v2,sets,caller,node_limit,element_limit)
+    mesh,node_tags,element_tags=_foreign_mesh_result(
+        caller,node_labels,coords,records)
+    return WrlFile(mesh,node_tags,element_tags,v2 ? 2 : 1)
+end
+
+# ── XAO/BRep CAD envelopes (.xao/.brep) ────────────────────────────────────────
+#
+# `.xao` is gmsh's native OpenCASCADE interchange: an XML envelope naming the
+# model, a `<shape format="BREP">` CDATA carrying the OCCT `CASCADE Topology`
+# BRep text dump, a `<topology>` section mapping gmsh entity indices to TShape
+# references (with optional entity `name`s), `<groups>` = physical groups with
+# their member entity indices, and `<fields>` = mesh fields. `.brep` is the
+# same CASCADE dump without the XML envelope.
+#
+# Entity publication from these formats needs the full BRep boundary kernel
+# (TShape graph → analytic curves/surfaces → trimmed faces/solids) — the same
+# classified `importShapes` boundary as upstream's OCC route; `API.open` and
+# `API.merge` reject with that named boundary instead of fabricating a model.
+# `read_xao`/`read_brep` are the honest partial contract: they parse and
+# validate the real envelope/section structure and report the census, leaving
+# the TShape geometry graph to a future kernel.
+
+struct BrepFile
+    header::String                    # e.g. "CASCADE Topology V1, (c) Matra-Datavision"
+    locations::Int
+    curve2ds::Int
+    curves::Int
+    polygons3d::Int
+    polygons_on_triangulations::Int
+    surfaces::Int
+    triangulations::Int
+    tshape_total::Int                 # declared `TShapes N`
+    tshapes::Dict{Symbol,Int}         # :vertex/:edge/:wire/:face/:shell/:solid/:compsolid/:compound census
+end
+
+const _BREP_SECTIONS=("Locations","Curve2ds","Curves","Polygon3D",
+                      "PolygonOnTriangulations","Surfaces","Triangulations")
+const _BREP_TSHAPE_KINDS=Dict{String,Symbol}(
+    "Ve"=>:vertex,"Ed"=>:edge,"Wi"=>:wire,"Fa"=>:face,"Sh"=>:shell,
+    "So"=>:solid,"Cs"=>:compsolid,"Co"=>:compound)
+
+# Parse the `CASCADE Topology` text envelope: header line, the section-count
+# declarations and the per-kind TShape census. Geometry sections' records are
+# not interpreted — only the declared counts and the shape-kind census are
+# verified against the file.
+function _brep_census(text::AbstractString,caller::AbstractString)
+    # A stray UTF-8 BOM must not hide the header.
+    if length(text)>=3 && codeunit(text,1)==0xEF && codeunit(text,2)==0xBB &&
+            codeunit(text,3)==0xBF
+        text=text[nextind(text,3):end]
+    end
+    header=match(r"^[ \t]*(CASCADE Topology V\d+[^\r\n]*)",text)
+    header===nothing && throw(ArgumentError(
+        "$caller: missing 'CASCADE Topology V<version>' header"))
+    counts=Dict{String,Int}(kw=>0 for kw in _BREP_SECTIONS)
+    tshape_total=-1
+    for line in eachsplit(text,'\n';keepempty=false)
+        m=match(r"^([A-Za-z]+)\s+(\d+)\s*$",line)
+        m===nothing && continue
+        kw,count=m.captures[1],tryparse(Int,m.captures[2])
+        count===nothing && continue
+        haskey(counts,kw) && (counts[kw]=count)
+        kw=="TShapes" && (tshape_total=count)
+    end
+    tshape_total<0 && throw(ArgumentError(
+        "$caller: missing 'TShapes <count>' declaration"))
+    census=Dict{Symbol,Int}(kind=>0 for kind in values(_BREP_TSHAPE_KINDS))
+    seen=0;inside=false
+    for line in eachsplit(text,'\n';keepempty=false)
+        stripped=strip(line)
+        if !inside
+            match(r"^TShapes\s+\d+\s*$",stripped)!==nothing && (inside=true)
+            continue
+        end
+        kind=get(_BREP_TSHAPE_KINDS,stripped,nothing)
+        kind===nothing && continue
+        census[kind]+=1;seen+=1
+    end
+    seen==tshape_total || throw(ArgumentError(
+        "$caller: declared $tshape_total TShapes but found $seen " *
+        "shape records"))
+    return BrepFile(String(header.captures[1]),counts["Locations"],
+        counts["Curve2ds"],counts["Curves"],counts["Polygon3D"],
+        counts["PolygonOnTriangulations"],counts["Surfaces"],
+        counts["Triangulations"],tshape_total,census)
+end
+
+"""
+    read_brep(path; max_file_bytes) -> BrepFile
+
+Read the envelope census of an OCCT `CASCADE Topology` `.brep` text dump:
+the versioned header, the `Locations`/`Curve2ds`/`Curves`/`Polygon3D`/
+`PolygonOnTriangulations`/`Surfaces`/`Triangulations` declared counts, and a
+per-kind `TShapes` census verified against its declared total. Malformed or
+truncated dumps are errors. Model reconstruction is not attempted — the
+TShape geometry graph needs the full OpenCASCADE boundary kernel, which is
+the classified `importShapes` boundary also enforced by `API.open`/`API.merge`.
+"""
+function read_brep(path;max_file_bytes=typemax(Int))
+    caller="read_brep"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
+    return _brep_census(read(path,String),caller)
+end
+
+"""
+    XaoEntity
+
+One `<topology>` entry of an `.xao` file: its model `dim` (0–3), the 0-based
+topology `index`, the published entity `tag` (`index+1`), the optional entity
+`name`, and the OCCT TShape `reference` it binds in the embedded BRep.
+"""
+struct XaoEntity
+    dim::Int
+    index::Int
+    tag::Int
+    name::String
+    reference::Int
+end
+
+"""
+    XaoGroup
+
+One `<groups>/<group>` physical group of an `.xao` file: its `name`, entity
+`dim`, `tag`, and the member entity `tags` resolved from the topology indices.
+"""
+struct XaoGroup
+    name::String
+    dim::Int
+    tag::Int
+    tags::Vector{Int}
+end
+
+"""
+    XaoFile
+
+Result of [`read_xao`](@ref): the XAO `version` and model `name`, the
+`<shape>` `format` (`"BREP"`, or `""` when the model stores none), the
+`<topology>` `entities`, physical `groups`, raw `<field>` attribute rows, and
+the [`BrepFile`](@ref) census of the embedded CASCADE shape (`nothing` when
+absent).
+"""
+struct XaoFile
+    version::String
+    name::String
+    format::String
+    entities::Vector{XaoEntity}
+    groups::Vector{XaoGroup}
+    fields::Vector{Dict{String,String}}
+    brep::Union{Nothing,BrepFile}
+end
+
+const _XAO_TOPOLOGY_SECTIONS=("vertices"=>0,"edges"=>1,"faces"=>2,"solids"=>3)
+const _XAO_GROUP_DIMS=Dict{String,Int}(
+    "vertex"=>0,"edge"=>1,"face"=>2,"solid"=>3)
+
+function _xao_attrs(tag::AbstractString)
+    attrs=Dict{String,String}()
+    for m in eachmatch(r"([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*\"([^\"]*)\"",tag)
+        attrs[m.captures[1]]=m.captures[2]
+    end
+    return attrs
+end
+
+function _xao_unescape(s::AbstractString)
+    s=replace(s,"&quot;"=>"\"","&apos;"=>"'","&lt;"=>"<","&gt;"=>">")
+    s=replace(s,r"&#(\d+);"=>m->string(Char(parse(Int,m[2:findfirst(';',m)-1]))))
+    return replace(s,"&amp;"=>"&")
+end
+
+function _xao_int(attrs,key,caller,what)
+    raw=get(attrs,key,nothing)
+    raw===nothing && throw(ArgumentError(
+        "$caller: $what is missing the '$key' attribute"))
+    value=tryparse(Int,raw)
+    value===nothing && throw(ArgumentError(
+        "$caller: $what has an invalid '$key' value '$raw'"))
+    return value
+end
+
+"""
+    read_xao(path; max_file_bytes) -> XaoFile
+
+Read the envelope of a gmsh XAO `.xao` CAD file: the `<XAO>` version and
+`<geometry>` name, the `<shape format>` + embedded `CASCADE Topology` dump
+census (as a [`BrepFile`](@ref), via [`read_brep`](@ref)'s parser), the
+`<topology>` index→TShape entity map (with optional names; entity tag =
+index+1 like upstream), `<groups>` physical groups resolved to member entity
+tags, and `<fields>` rows. Entity materialization is not attempted — the
+embedded BRep needs the full OpenCASCADE boundary kernel, which is the
+classified `importShapes` boundary also enforced by `API.open`/`API.merge`.
+"""
+function read_xao(path;max_file_bytes=typemax(Int))
+    caller="read_xao"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
+    text=read(path,String)
+    root=match(r"<XAO\b([^>]*)>",text)
+    root===nothing && throw(ArgumentError(
+        "$caller: missing the <XAO> root element"))
+    version=_xao_unescape(get(_xao_attrs(root.captures[1]),"version",""))
+    geo=match(r"<geometry\b([^>]*)>",text)
+    name=geo===nothing ? "" : _xao_unescape(get(_xao_attrs(geo.captures[1]),"name",""))
+    shape=match(r"(?s)<shape\b([^>]*)>(.*?)</shape>",text)
+    format="";brep=nothing
+    if shape!==nothing
+        format=_xao_unescape(get(_xao_attrs(shape.captures[1]),"format",""))
+        body=shape.captures[2]
+        cdata=match(r"(?s)<!\[CDATA\[(.*)\]\]>\s*$",body)
+        payload=strip(cdata===nothing ? body : cdata.captures[1])
+        isempty(payload) || (brep=_brep_census(payload,caller))
+    end
+    entities=XaoEntity[]
+    for (section,dim) in _XAO_TOPOLOGY_SECTIONS
+        block=match(Regex("(?s)<$section\\b([^>]*)>(.*?)</$section>"),text)
+        block===nothing && continue
+        sattrs=_xao_attrs(block.captures[1]);tag=block.captures[2]
+        node=section=="vertices" ? "vertex" :
+              section=="edges" ? "edge" :
+              section=="faces" ? "face" : "solid"
+        n=0
+        for m in eachmatch(Regex("<$node\\b([^>]*)/?>"),tag)
+            attrs=_xao_attrs(m.captures[1])
+            index=_xao_int(attrs,"index",caller,"$section entry")
+            reference=_xao_int(attrs,"reference",caller,"$section entry")
+            index>=0 || throw(ArgumentError(
+                "$caller: $section entry has a negative index"))
+            push!(entities,XaoEntity(dim,index,index+1,
+                _xao_unescape(get(attrs,"name","")),reference))
+            n+=1
+        end
+        declared=tryparse(Int,get(sattrs,"count",""))
+        (declared===nothing || declared==n) || throw(ArgumentError(
+            "$caller: <$section> declares count=$declared but has " *
+            "$n entries"))
+    end
+    groups=XaoGroup[]
+    gblock=match(r"(?s)<groups\b([^>]*)>(.*?)</groups>",text)
+    if gblock!==nothing
+        for m in eachmatch(r"(?s)<group\b([^>]*)>(.*?)</group>",gblock.captures[2])
+            attrs=_xao_attrs(m.captures[1])
+            dimword=get(attrs,"dimension",nothing)
+            dimword===nothing && throw(ArgumentError(
+                "$caller: group is missing the 'dimension' attribute"))
+            dim=get(_XAO_GROUP_DIMS,dimword,nothing)
+            dim===nothing && throw(ArgumentError(
+                "$caller: group dimension '$dimword' is not " *
+                "vertex/edge/face/solid"))
+            gtag=_xao_int(attrs,"tag",caller,"group")
+            members=Int[]
+            for em in eachmatch(r"<element\b([^>]*)/?>",m.captures[2])
+                eattrs=_xao_attrs(em.captures[1])
+                eindex=_xao_int(eattrs,"index",caller,"group element")
+                eindex>=0 || throw(ArgumentError(
+                    "$caller: group element has a negative index"))
+                push!(members,eindex+1)
+            end
+            declared=tryparse(Int,get(attrs,"count",""))
+            (declared===nothing || declared==length(members)) ||
+                throw(ArgumentError("$caller: group '$gtag' declares " *
+                    "count=$declared but has $(length(members)) elements"))
+            push!(groups,XaoGroup(_xao_unescape(get(attrs,"name","")),
+                dim,gtag,members))
+        end
+        gdeclared=tryparse(Int,get(_xao_attrs(gblock.captures[1]),"count",""))
+        (gdeclared===nothing || gdeclared==length(groups)) ||
+            throw(ArgumentError("$caller: <groups> declares " *
+                "count=$gdeclared but has $(length(groups)) groups"))
+    end
+    fields=Dict{String,String}[]
+    # `<fields/>` self-closes; `<fields>...</fields>` carries `<field>` rows.
+    fblock=match(r"(?s)<fields\b[^>]*>(.*?)</fields>",text)
+    if fblock!==nothing
+        for m in eachmatch(r"<field\b([^>]*)/?>",fblock.captures[1])
+            push!(fields,_xao_attrs(m.captures[1]))
+        end
+    end
+    return XaoFile(version,name,format,entities,groups,fields,brep)
 end
 
 end # module IO

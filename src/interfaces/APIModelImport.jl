@@ -165,12 +165,21 @@ function _model_import_prepare(path,dimension;legacy=false)
     result=if extension==".msh"
         GeoExec._geo_stage_mesh_file(path;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
-    elseif extension in (".unv",".mesh",".meshb",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk")
+    elseif extension in (".unv",".mesh",".meshb",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk",".wrl")
         IO._stage_foreign_mesh_file(path;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
     elseif extension==".stl"
         IO._stage_stl_mesh_file(path;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
+    elseif extension in (".xao",".brep")
+        # `.xao`/`.brep` carry an OCCT CASCADE BRep dump: publishing model
+        # entities needs the analytic curve/surface boundary kernel, which is
+        # the classified `importShapes` gap — `IO.read_xao`/`IO.read_brep`
+        # expose the truthful envelope census instead of fabricating a model.
+        throw(ArgumentError("$caller: $extension CAD import requires the " *
+            "OpenCASCADE BRep boundary kernel (TShape curve/surface " *
+            "reconstruction), which Tessella does not implement; " *
+            "IO.read_xao/IO.read_brep expose the envelope census"))
     else
         _model_import_execute_geo(path,dimension,options,diagnostics;legacy)
     end
@@ -290,8 +299,8 @@ function _model_import_filename(filename,caller;geo_only=false)
     filename isa AbstractString && !isempty(filename) && !occursin('\0',filename) ||
         throw(ArgumentError("$caller: filename must be a nonempty NUL-free string"))
     extension=lowercase(splitext(filename)[2])
-    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos",".unv",".mesh",".meshb",".stl",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk")) || throw(ArgumentError(
-        "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh, .pos, .unv, .mesh, .meshb, .stl, .su2, .bdf, .nas, .inp, .neu, .p3d, .mail, .ir3, .diff and .vtk")"))
+    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos",".unv",".mesh",".meshb",".stl",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk",".wrl",".xao",".brep")) || throw(ArgumentError(
+        "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh, .pos, .unv, .mesh, .meshb, .stl, .su2, .bdf, .nas, .inp, .neu, .p3d, .mail, .ir3, .diff, .vtk, .wrl, .xao and .brep")"))
     isfile(filename) || throw(ArgumentError("$caller: missing file $filename"))
     return String(filename)
 end
@@ -300,7 +309,8 @@ end
     open(filename)
 
 Import a `.geo`, `.msh`, `.unv`, `.mesh`, `.meshb`, `.stl`, `.su2`, `.bdf`,
-`.nas`, `.inp`, `.neu`, `.p3d`, `.mail`, `.ir3`, `.diff`, `.vtk` or supported
+`.nas`, `.inp`, `.neu`, `.p3d`, `.mail`, `.ir3`, `.diff`, `.vtk`, `.wrl` or
+supported
 linear-list `.pos` file into a new current model, reusing an empty
 current model. Nonempty prior models and session views remain alive. MSH
 imports keep actual UIDs, entity ownership and retained metadata; UNV and
@@ -317,7 +327,11 @@ self-describing element records on the tag-column entities; DIFF imports
 publish their subdomain-column records on per-subdomain entities like the
 pinned reader; VTK imports
 publish unstructured-grid/polydata cells on per-dimension entities like
-upstream;
+upstream; WRL imports
+publish VRML 1.0/2.0 `IndexedFaceSet`/`IndexedLineSet` coordIndex geometry
+through `read_wrl` on per-set curve/surface entities like the pinned reader,
+while `.xao`/`.brep` CAD files reject at the classified OCCT BRep boundary
+kernel (`IO.read_xao`/`IO.read_brep` expose their envelope census);
 STL imports weld through
 `read_stl` and publish one discrete Surface; ordinary
 model data sections create views bound to the imported model. The model name
