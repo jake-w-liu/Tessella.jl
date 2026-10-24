@@ -76,6 +76,11 @@
 #   Density         per-node element-incidence count into a single-step
 #                   `*_Density` scalar view (the upstream plugin predates
 #                   Gmsh 4.15.2; `View` is its only surviving option).
+#   BoundaryAngles  per-surface boundary-vertex interior angles (mod 2π, kept
+#                   negative like upstream) into one `<Filename base>_<tag>`
+#                   SP list view per face, from the parity boundary-edge chain
+#                   — a model scan, so the registered `View` option is stored
+#                   but unused exactly like upstream `execute(nullptr)`.
 #
 # Divergence, Curl and Lambda2 differentiate through the corner-node linear
 # map like upstream `getNumCornerNodes`/`element::interpolate*`, so
@@ -5804,6 +5809,235 @@ function _plugin_exec_meshsubentities(spec::_PluginSpec,caller::AbstractString)
     return nothing
 end
 
+# ---- BoundaryAngles -------------------------------------------------------------
+#
+# Upstream `Plugin(BoundaryAngles)` (a `GMSH_PostPlugin`) scans every dim-2
+# entity of the current model — the registered `View` option is stored but
+# never read (upstream `run()` calls `execute(nullptr)`). For each face it
+# toggles every element edge in a set keyed by the unordered vertex pair
+# (`MEdgeLessThan` on `getNum()`, i.e. the public node tag): an edge shared by
+# two elements cancels, so the surviving "boundary" set is the odd-incidence
+# edges — each carrying the directed pair and element of its last insert. A
+# face with an empty boundary set gets no view at all.
+#
+# When the set is nonempty, `SortEdgeConsecutive` chains it (ported verbatim
+# in `_plugin_sort_edge_consecutive`): a vertex adjacent to three edges or a
+# walk re-entering an erased vertex fails the sort silently (upstream only
+# emits debug diagnostics), a face splitting into more than one chain warns
+# "Non connected boundary!" — both cases still publish the (empty) view like
+# upstream. For a single chain the orientation fix compares the smallest
+# (minTag,maxTag) edge's stored direction against the chain and reverses the
+# chain when they disagree; the chain is then closed by appending its second
+# node and each consecutive triple contributes an SP record at the middle
+# vertex holding the *interior* angle: `signedAngle(v1, v2, n)` =
+# `atan2((v1×v2)·n, v1·v2)` with `v1 = p1-p2`, `v2 = p3-p2`, folded into
+# (-2π, 0] by upstream's `a > 0 -> -(2π - a)` choice. `n` is the
+# `normal3points` (normalized first-three-corner cross product) of the element
+# stored with the smallest boundary edge.
+#
+# The view name is `<root>_<tag>` where `root` is `Filename` reduced to its
+# basename without extension (upstream `SplitFileName`). The output path is
+# computed unconditionally: `Dir` appended to the directory of the current
+# model's file name (each gaining a trailing separator; the empty-`Dir` read
+# of `opt_dir[-1]` upstream is UB that behaves like appending one anyway, so
+# an empty `Dir` just stays the model directory). `CreatePath` is faithful to
+# its `/`-only splitting — on Windows the backslash path creates nothing —
+# `Save` then writes `<dir><root>_<tag>.pos` through the session list-view
+# writer, `Remove` deletes the view afterwards, and `Visible` — whose
+# registered default is 0 despite the help text's "Default = 1" — marks the
+# view invisible when unset.
+
+# Element edge tables keyed on primary corner positions. `lin` contributes
+# its own segment as an edge like upstream `MLine::getEdge(0)`; dim-3 families
+# keep their ordinary edge tables (a stray record element still toggles its
+# edges like upstream `getNumEdges`/`getEdge` would).
+const _PLUGIN_BA_EDGES=(
+    pnt=(),lin=((1,2),),
+    tri=_PLUGIN_SUBEDGE_TABLE.tri,qua=_PLUGIN_SUBEDGE_TABLE.qua,
+    tet=_PLUGIN_SUBEDGE_TABLE.tet,hex=_PLUGIN_SUBEDGE_TABLE.hex,
+    pri=_PLUGIN_SUBEDGE_TABLE.pri,pyr=_PLUGIN_SUBEDGE_TABLE.pyr,
+    trih=())
+
+# Faithful port of upstream `SortEdgeConsecutive` (MEdge.cpp): adjacency over
+# public node tags iterated in ascending order like the
+# `std::map<MVertex*,...,MVertexPtrLessThan>` it replaces. Returns the chains,
+# or `nothing` on the upstream `return false` paths (a vertex adjacent to more
+# than two edges, or a walk re-entering an already-visited vertex).
+function _plugin_sort_edge_consecutive(edges)
+    isempty(edges) && return Vector{UInt64}[]
+    adj=Dict{UInt64,Tuple{UInt64,Union{UInt64,Nothing}}}()
+    for (v0,v1) in edges
+        entry=get(adj,v0,nothing)
+        if entry===nothing
+            adj[v0]=(v1,nothing)
+        elseif entry[2]===nothing
+            adj[v0]=(entry[1],v1)
+        else
+            return nothing
+        end
+        entry=get(adj,v1,nothing)
+        if entry===nothing
+            adj[v1]=(v0,nothing)
+        elseif entry[2]===nothing
+            adj[v1]=(entry[1],v0)
+        else
+            return nothing
+        end
+    end
+    chains=Vector{UInt64}[]
+    while !isempty(adj)
+        ordered=sort!(collect(keys(adj)))
+        start=ordered[1]
+        for vertex in ordered
+            adj[vertex][2]===nothing || continue
+            start=vertex;break
+        end
+        pair=adj[start]
+        prev=pair[2]==start ? pair[1] : pair[2]
+        current=start
+        chain=UInt64[]
+        while true
+            isempty(adj) && return nothing
+            push!(chain,current)
+            entry=get(adj,current,nothing)
+            entry===nothing && return nothing
+            delete!(adj,current)
+            previous=current
+            if entry[1]==prev
+                current=entry[2]
+            elseif entry[2]==prev
+                current=entry[1]
+            else
+                break
+            end
+            prev=previous
+            current==start && push!(chain,current)
+            (current===nothing || current==start) && break
+        end
+        length(chain)>2 && chain[end-1]==chain[end] && pop!(chain)
+        push!(chains,chain)
+    end
+    return chains
+end
+
+# Upstream `normal3points`: normalized cross product of the first three
+# corner positions (MFace::normal on the element itself, `getFace(0)`).
+function _plugin_normal3(p0,p1,p2)
+    t1=(p1[1]-p0[1],p1[2]-p0[2],p1[3]-p0[3])
+    t2=(p2[1]-p0[1],p2[2]-p0[2],p2[3]-p0[3])
+    nx=t1[2]*t2[3]-t1[3]*t2[2]
+    ny=t1[3]*t2[1]-t1[1]*t2[3]
+    nz=t1[1]*t2[2]-t1[2]*t2[1]
+    len=sqrt(nx*nx+ny*ny+nz*nz)
+    return (nx/len,ny/len,nz/len)
+end
+
+# Upstream `CreatePath`: splits the path at its last '/' and creates the
+# directory chain. Windows backslash paths contain no '/', so they create
+# nothing — the quirk is upstream's own.
+function _plugin_ba_create_path(path::AbstractString)
+    position=findlast('/',path)
+    position===nothing && return nothing
+    mkpath(path[1:prevind(path,position)])
+    return nothing
+end
+
+function _plugin_exec_boundaryangles(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    visible=iszero(numbers["Visible"]) ? false : true
+    save=!iszero(numbers["Save"])
+    remove=!iszero(numbers["Remove"])
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    slot=MODEL_SLOTS[index]
+    m=slot.model
+    cached=slot.mesh
+    class=cached===nothing ? nothing :
+        (slot.class===nothing ? _cached_classification_locked(cached) :
+         slot.class)
+    coordinates=_homology_public_coordinates(m,cached,class)
+    rootname=splitext(basename(spec.strings["Filename"]))[1]
+    sep=Sys.iswindows() ? '\\' : '/'
+    model_file=MODEL_FILE_NAME[]
+    model_dir=isempty(model_file) ? "" :
+        (let dir=dirname(abspath(model_file));
+         isempty(dir) ? "" : string(dir,sep) end)
+    opt_dir=spec.strings["Dir"]
+    isempty(opt_dir) || opt_dir[end]==sep || (opt_dir=string(opt_dir,sep))
+    outputdir=string(model_dir,opt_dir)
+    for (_,etag) in model_entities(m,2)
+        elements=Vector{UInt64}[]
+        boundary=Dict{NTuple{2,UInt64},Tuple{NTuple{2,UInt64},Int}}()
+        for (msh,nodes) in _entity_all_elements(m,cached,class,2,etag)
+            type=try msh_spec(msh) catch err
+                err isa InterruptException && rethrow()
+                continue
+            end
+            table=getproperty(_PLUGIN_BA_EDGES,type.family)
+            isempty(table) && continue
+            primary=Elements._msh_primary_nodes(type.family)
+            push!(elements,copy(nodes));eindex=length(elements)
+            for (a,b) in table
+                a<=primary && b<=primary || continue
+                directed=(nodes[a],nodes[b])
+                key=minmax(directed[1],directed[2])
+                if haskey(boundary,key)
+                    delete!(boundary,key)
+                else
+                    boundary[key]=(directed,eindex)
+                end
+            end
+        end
+        isempty(boundary) && continue
+        ordered=sort!(collect(keys(boundary)))
+        entries=[boundary[key] for key in ordered]
+        corners=elements[entries[1][2]]
+        normal=_plugin_normal3(coordinates[corners[1]],
+                               coordinates[corners[2]],
+                               coordinates[corners[3]])
+        chains=_plugin_sort_edge_consecutive(
+            [entry[1] for entry in entries])
+        data=Float64[]
+        if chains!==nothing && length(chains)!=1
+            _native_diagnostic_emit_locked(:warning,"Non connected boundary!")
+        elseif chains!==nothing
+            chain=chains[1]
+            reference=entries[1][1]
+            for j in 1:length(chain)-1
+                chain[j]==reference[1] || continue
+                chain[j+1]==reference[2] || reverse!(chain)
+                break
+            end
+            push!(chain,chain[2])
+            for i in 1:length(chain)-2
+                p1=coordinates[chain[i]]
+                p2=coordinates[chain[i+1]]
+                p3=coordinates[chain[i+2]]
+                v1=(p1[1]-p2[1],p1[2]-p2[2],p1[3]-p2[3])
+                v2=(p3[1]-p2[1],p3[2]-p2[2],p3[3]-p2[3])
+                cx=v1[2]*v2[3]-v1[3]*v2[2]
+                cy=v1[3]*v2[1]-v1[1]*v2[3]
+                cz=v1[1]*v2[2]-v1[2]*v2[1]
+                a=atan(cx*normal[1]+cy*normal[2]+cz*normal[3],
+                       v1[1]*v2[1]+v1[2]*v2[2]+v1[3]*v2[3])
+                a>0 && (a=-(2*pi-a))
+                push!(data,p2[1],p2[2],p2[3],a)
+            end
+        end
+        viewname=string(rootname,"_",etag)
+        tag=_plugin_publish_list_view!(viewname,["SP"],
+            Dict("SP"=>length(data)÷4),Dict("SP"=>data),[0.0];caller)
+        visible || (SESSION_VIEWS[tag].numbers["Visible"]=0.0)
+        _plugin_ba_create_path(outputdir)
+        if save
+            _view_write(tag,string(outputdir,rootname,"_",etag,".pos"))
+        end
+        remove && delete!(SESSION_VIEWS,tag)
+    end
+    return nothing
+end
+
 # ---- registry --------------------------------------------------------------------------------
 
 const _PLUGINS=Dict{String,NamedTuple}(
@@ -6032,4 +6266,19 @@ const _PLUGINS=Dict{String,NamedTuple}(
         "OuputDimension"=>0.0,"OuputPhysicalGroup"=>2000.0),
         string_options=Dict{String,String}(),
         run_fn=_plugin_exec_meshsubentities),
+    "BoundaryAngles"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"View"=>-1.0,"Save"=>0.0,"Visible"=>0.0,"Remove"=>0.0),
+        string_options=Dict{String,String}(
+            "Filename"=>"Angles_Surface","Dir"=>""),
+        run_fn=_plugin_exec_boundaryangles),
+    # `Echo`, `TimeReport`, `DuplicatedBoundaries` and `PolarView` are not
+    # registered: Gmsh 4.15.2 ships none of them (the oracle reports
+    # `Failed action 'Run' or unknown plugin '<name>'`), and they are absent
+    # from every released upstream plugin catalog too — Echo/TimeReport/
+    # PolarView never appear in the Plugin/ directory as far back as the
+    # git history reaches (1.20), and the boundary-duplication plugin
+    # upstream actually spelled `DuplicateBoundaries` disappeared in the 4.0
+    # plugin port ("removed unmaintained plugins"). Leaving them unregistered
+    # preserves the upstream unknown-plugin diagnostics on both the `.geo`
+    # and the API paths.
 )
