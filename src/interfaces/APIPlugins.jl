@@ -5033,6 +5033,80 @@ function _plugin_exec_showneighbor(spec::_PluginSpec,caller::AbstractString)
     return nothing
 end
 
+# ---- Invisible ------------------------------------------------------------------
+#
+# Upstream `Plugin(Invisible)` (a `GMSH_PostPlugin` whose `execute` ignores its
+# view argument and scans `GModel::current()`): when the `XMin..ZMax` box is
+# non-degenerate every entity's elements are marked — `Inside=0` hides an
+# element only when NO vertex sits inside the box, `Inside=1` hides it when
+# ANY vertex does (the upstream loop breaks at the first inside vertex, so
+# the two arms are not complementary). `DeleteElements` then calls
+# `GModel::removeInvisibleElements` and `ReverseElements` calls
+# `reverseInvisibleElements`, both acting on the CURRENT invisible set — so
+# elements an earlier pass already hid are removed/reversed too, exactly like
+# upstream `MElement::getVisibility()==0` scans. Marks land in the same
+# `ELEMENT_VISIBILITY` slot `API.mesh.set_visibility` manipulates.
+
+function _plugin_exec_invisible(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    xmin=numbers["XMin"];ymin=numbers["YMin"];zmin=numbers["ZMin"]
+    xmax=numbers["XMax"];ymax=numbers["YMax"];zmax=numbers["ZMax"]
+    inside=!iszero(numbers["Inside"])
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    slot=MODEL_SLOTS[index]
+    mesh=slot.mesh
+    mesh===nothing && throw(ArgumentError("$caller: mesh is empty"))
+    class=slot.class===nothing ? _cached_classification_locked(mesh) :
+        slot.class
+    public=_mesh_public_tags(mesh)
+    _,_,total=_mesh_element_offsets(mesh)
+    if (xmax-xmin)>0 || (ymax-ymin)>0 || (zmax-zmin)>0
+        for ei in 1:total
+            rec=mesh_element_record(mesh,ei)
+            inbox=false
+            for t in rec.node_tags
+                x=mesh.coords[1,t];y=mesh.coords[2,t];z=mesh.coords[3,t]
+                if xmin<=x<=xmax && ymin<=y<=ymax && zmin<=z<=zmax
+                    inbox=true;break
+                end
+            end
+            visible=inside ? !inbox : inbox
+            if !visible
+                etag=public===nothing ? UInt64(ei) :
+                    get(public.element_tags,ei,UInt64(ei))
+                ELEMENT_VISIBILITY[][etag]=Int32(0)
+            end
+        end
+    end
+    if !iszero(numbers["DeleteElements"])
+        byent=Dict{Tuple{Int,Int},Vector{UInt64}}()
+        for ei in 1:total
+            etag=public===nothing ? UInt64(ei) :
+                get(public.element_tags,ei,UInt64(ei))
+            get(ELEMENT_VISIBILITY[],etag,Int32(1))==0 || continue
+            ent=_plugin_element_entity(mesh,class,ei)
+            ent===nothing && continue
+            push!(get!(byent,ent,UInt64[]),etag)
+        end
+        for ent in sort!(collect(keys(byent)))
+            _remove_elements(ent[1],ent[2],byent[ent])
+        end
+    end
+    if !iszero(numbers["ReverseElements"])
+        hidden=UInt64[]
+        for ei in 1:total
+            etag=public===nothing ? UInt64(ei) :
+                get(public.element_tags,ei,UInt64(ei))
+            get(ELEMENT_VISIBILITY[],etag,Int32(1))==0 || continue
+            push!(hidden,etag)
+        end
+        isempty(hidden) || _reverse_elements(hidden)
+    end
+    return nothing
+end
+
 # ---- SimplePartition --------------------------------------------------------------------
 #
 # Upstream `Plugin(SimplePartition)` clears existing partitions, evaluates
@@ -6271,6 +6345,12 @@ const _PLUGINS=Dict{String,NamedTuple}(
         string_options=Dict{String,String}(
             "Filename"=>"Angles_Surface","Dir"=>""),
         run_fn=_plugin_exec_boundaryangles),
+    "Invisible"=>(number_options=Dict{String,Float64}(
+        "DeleteElements"=>1.0,"ReverseElements"=>0.0,
+        "XMin"=>0.0,"YMin"=>0.0,"ZMin"=>0.0,
+        "XMax"=>0.0,"YMax"=>0.0,"ZMax"=>0.0,"Inside"=>0.0),
+        string_options=Dict{String,String}(),
+        run_fn=_plugin_exec_invisible),
     # `Echo`, `TimeReport`, `DuplicatedBoundaries` and `PolarView` are not
     # registered: Gmsh 4.15.2 ships none of them (the oracle reports
     # `Failed action 'Run' or unknown plugin '<name>'`), and they are absent
