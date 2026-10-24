@@ -256,6 +256,138 @@ volume functional 30/30 (one `.geo` Box testset errors on this machine's
 absent OCC kernel — pre-existing/environmental), native-initial path
 68/68.
 
+### Session increments: `.geo` diagnostics, OCC transform encodings, PAR01 transports, OCC alg-7 curved selector, `Mesh.Nb*` live stats (2026-10-24, pushed `9484d3b`, `0f1c8f1`, `3de35c4`, `42a0581`, `50a14c5`)
+
+`9484d3b` (.geo recoverable diagnostics): statement failures migrate to
+the recoverable `Error` diagnostics channel matching upstream
+severity/continuation (`exec_errors`/`msg_error_count`/`error_log`
+distinctions preserved); `MeshSize` silently filters unknown/empty
+selectors like upstream; stale `@test_throws`/error pins repinned to the
+materialized channel. Also fixed a pre-existing `_win_pow` inverted
+guard (llvmcall x87 kernel selected when the compiler is *unavailable*)
+that surfaced under `--compile=min`. Verified: `.geo` model suites green
+(106/106 geo_geometry_expression, 240/240 mesh_size, 95/95 set_max_tag).
+
+`0f1c8f1` (OCC transform encodings): transformed materialized boxes and
+analytic primitives now retain their `box_extents`/curved encodings —
+the sync import carries `geo_encodings` on the new volume shape and a
+global box revalidation covers sub-entity moves; `_model_occ_transform_primitive`
+cone arm fixed (`r1/r2` record guard was dead code). Sub-entity rebind
+follows upstream's verified semantics: fresh `getMaxTag+1` tags in
+original enumeration order with a public-tag floor on the recomputed
+maxima (union shells reusing operand surface tags no longer collide).
+Verified: geo_transform 26/26, api_occ_transform 215/215.
+
+`3de35c4` (PAR01): deterministic RNG/model identity/merge transports —
+`next_tag` per-dim high-water semantics pinned (merged OCC `Box(20)`
+advances `next_tag[4]` to 21, matching upstream `getMaxTag(3)+1`; the
+cross-dim pin was unreachable under upstream's per-dim namespaces).
+Verified: 49/49 under `-t4`, byte-identical serial vs threaded.
+
+`42a0581` (OCC alg-7): `Mesh.Algorithm=7` on OCC-curved faces routes to
+the chart-parameterized certified metric producer (planar + OCC J'MJ
+pullback charts with the unwrapped-seam preimage) — previously rejected.
+24/24 focused assertions.
+
+`50a14c5` (`Mesh.Nb*` live statistics): the eight `Mesh.Nb*` element
+statistics (`NbNodes`/`NbTriangles`/`NbQuadrangles`/`NbTetrahedra`/
+`NbPrisms`/`NbPyramids`/`NbHexahedra`/`NbTrihedra`) now return live
+mesh counts like upstream's `GModel` getters — script writes never
+stick (`Mesh.NbNodes=42` reads 5 after `Mesh 2`, 0 before meshing,
+updates after `RefineMesh`; pinned on Gmsh 4.15.2 binary).
+`Mesh.NbPartitions` is the exception — an ordinary stored option (the
+`PartitionMesh` count, write verified sticking upstream). Also repinned
+two `mesh_model_surface` density pins (drift confirmed identical at
+pre-session baseline `5e70d51`). Verified: byte-identical oracle output
+on all five probe cases; `geo_mesh_dim_test` 118/118.
+
+`119fd63` (CLI01): stale option flags wired — `-aniso_max`/`-anisoMax`,
+`-rand`, `-smooth_ratio`/`-smoothRatio` map to their `Mesh.*` stores;
+`-ignore_periodicity`/`-ignorePeriodicity`, `-clcurviso` toggle the
+matching booleans; obsolete spellings (`-claniso`, `-ignore_periocity`)
+still reject. `-bgm <file.pos>` parses through `Post.read_pos` and
+injects `Merge`+`Background Mesh View[i]` for `.geo` inputs or a
+PostView field on session/API paths. Verified:
+cli_options_functional + cli_save_options suites green (13/13 flag
+wiring, 8/8 bgm).
+
+`e84a9f1` (OPT01): Pyr14 admitted into certificate-gated interior
+relocation — `_P2OPT_PYR14` family descriptor (5 primaries, 8
+interleaved edge slots, base-quad face center), apex-limit-safe
+collapsed-map derivative weights for `_p2opt_grads(::Val{14})`, and
+`_p2opt_certify(::Val{14})` delegating fail-closed to the tensor-
+Bernstein bound. Admission via strictly-more-specific concrete-Integer
+methods (precompilation forbids overwriting the generic). Verified:
+highorder_optimize 248/248 incl. new dipyramid shared-center relocation
+(0.9255→1.0) and mirror-wound fail-closed testsets.
+
+`0d565bf` (UI01 slice): `Plugin(MeshSubEntities)` — unique vertex/edge
+sub-entity enumeration with upstream's `Ouput*` typo preserved,
+owner reuse for realized sub-entities, discrete-entity spawn for the
+rest, per-sub-entity output-group membership, silent no-ops for
+face/volume and edge-on-line requests, and the upstream
+`Physical group N (dimension D) is empty` diagnostic. Verified:
+api_plugin_subentities 10/10. Remaining leaf plugins
+(Echo/TimeReport/DuplicatedBoundaries/PolarView) still open —
+BoundaryAngles landed below.
+
+### Session increments: metric-volume arm, relocation star fix, BRep sectors, BoundaryAngles (2026-10-24, pushed `52f3247`, `58e6716`, `c372806`, `53acd61`, `53263d1`, `6c16576`)
+
+`52f3247` (metric volumes): hybrid Volume/connected-component producers
+pass the resolved anisotropic field into `refine` via
+`_volume_metric_insertion_field`; relocation adjacency now carries each
+movable vertex's complete incident-tet star (cells touching a movable
+vertex but no neighborhood vertex folded unchecked before — the source
+of 74 overlapping face pairs feeding the optimizer); edge-swap
+reconnections must satisfy an exact tiling certificate plus a sidedness
+clause so a non-convex ring ear cannot re-enter a live outside cell;
+`t17` boundary regrade machinery threads `_boundary_regrade=false`
+through every internal re-meshing path; non-SPD metric samples degrade
+to the unconstrained fallback on surface producers instead of throwing.
+Live-oracle pinning: gmsh 4.15.2 ignores `MathEvalAniso` in 3-D
+entirely (14-node cube under diagonal tensor and under poisoned
+`F2 + Sin(z)` defaults alike), refines the free cube to exactly 716
+nodes under scalar `MathEval F=0.125` — Tessella matches both, and its
+tensor arm is a documented superset on the hybrid path. Verified:
+model_metric_hybrid_volume 67/67, model_metric_volume_functional all
+green, api_native_hybrid_general 66, api_native_hybrid_public 1402,
+volume pipeline 30; relocate produces zero overlapping pairs.
+
+`58e6716` (fields): `AutomaticMeshSizeField` gains the upstream HXT
+prescription stages — non-surface sources (points/segments/fields)
+insert into the adaptive octree with exact triangle/segment/box
+overlap; leaf refinement/balance reproduces HXT grading. Verified:
+sizefield suite 46790/46790.
+
+`c372806`: metric hybrid volume parity test file (351 assertions
+across floor/circumcenter/normalized-radius/elongation/certificates/
+API-driven anisotropy/716-node scalar parity).
+
+`53acd61` (occ): `model.occ.add_thick_sections` — documented Tessella
+extension (gmsh 4.15.2 has no such endpoint) following the OCCT
+BRepOffset recipe on the certified sweep profiles; slabs share
+intermediate section topology. Verified: 39/39.
+
+`53263d1` (brep): trimmed `CYLINDRICAL_SURFACE` sector certificate —
+one cylindrical lateral face + PLANE caps/walls certifies rim-arc
+tiling at two heights and emits a welded manifold boundary. Sorted-
+cluster dedup fix in `_dedup_positions`/`_dedup_ring_nodes`: comparing
+only the latest cluster head split duplicated positions when a z-twin
+sorted between (exactly the two-rim layout) — heads now stay eligible
+until the primary sort key outruns the tolerance. Three stale
+expectations repinned (multi-solid assembly since `ab70238`,
+holed-face diagnostic wording, degenerate-seam full torus). Verified:
+brep_test 162/162 + cylinder/cone/sphere/torus/bounded143/faceholes
+functional suites green.
+
+`6c16576` (plugins): `Plugin(BoundaryAngles)` — upstream port:
+odd-incidence edge toggle set, `SortEdgeConsecutive` chaining,
+signed interior angle folded to (-2π,0], per-surface
+`<Filename>_<tag>` SP list view, upstream quirks preserved
+(registered-but-unused View, Visible default 0, '/'-only CreatePath,
+Save/Remove). Verified: 102/102 end-to-end on a meshed square
+(4 corners -π/2, 28 edge nodes -π).
+
 ### Dense curved-PLC recovery: input-proportional `maxpts` — t13 verbatim arm completes (2026-10-23, landed `9d3998e`)
 
 The t13 verbatim `Field[1].F = "4"` arm and t19 dense `NumSubEdges=1000`
