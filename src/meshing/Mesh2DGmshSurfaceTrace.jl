@@ -132,8 +132,38 @@ function _gmsh_native_trace_cavity_accept(T,cavity,boundary,parameter,onmodel,
             cross=_gmsh_cross3(_gmsh_sub3(second,first),_gmsh_sub3(point,first))
             perpendicular=_gmsh_norm3(cross)/d3
         end
-        (d1<limit*.5 || d2<limit*.5 || perpendicular<limit*.4 || cosine<-.9999) &&
-            (too_close=true)
+        if trace isa _GmshSurfaceMetricCarrier
+            # Metric-only carrier: the local `vsize` bound folds into the
+            # tensor as the same isotropic size floor the queue radius uses
+            # (`min(lc_bgm, lc_vsize)` in metric space — the tensor already
+            # carries `lc_bgm`); distances are read in normalized units so
+            # the `.5`/`.4` bounds apply to the directional local length
+            # scale, not the min-direction scalar.
+            pb=(T.x[b],T.y[b]);pa=(T.x[a],T.y[a])
+            vs=length_scale isa _GmshShellLL ?
+                _gmsh_mean_size3(length_scale.sizes.vsize[b],
+                                length_scale.sizes.vsize[a],
+                                length_scale.propagated) : limit
+            mn=_gmsh_metric_floor(
+                _gmsh_surface_metric(trace,pb,pa,parameter),vs)
+            d1n=sqrt(max(_gmsh_metric_distance2(pb,parameter,mn),0.0))
+            d2n=sqrt(max(_gmsh_metric_distance2(pa,parameter,mn),0.0))
+            close=d1n<.5 || d2n<.5
+            if b in onmodel && a in onmodel
+                ex=pa[1]-pb[1];ey=pa[2]-pb[2];e2=ex*ex+ey*ey
+                if e2>0
+                    proj=((parameter[1]-pb[1])*ex+(parameter[2]-pb[2])*ey)/e2
+                    qx=parameter[1]-pb[1]-proj*ex
+                    qy=parameter[2]-pb[2]-proj*ey
+                    close |= sqrt(max(qx*qx*mn[1]+qy*qy*mn[3]+
+                                      2.0*qx*qy*mn[2],0.0))<.4
+                end
+            end
+            (close || cosine<-.9999) && (too_close=true)
+        else
+            (d1<limit*.5 || d2<limit*.5 || perpendicular<limit*.4 ||
+             cosine<-.9999) && (too_close=true)
+        end
         area=_gmsh_surface_area2(_pt(T,b),_pt(T,a),parameter)
         area<1e-25 && (area=1e22)
         new_volume+=area
@@ -148,9 +178,12 @@ end
 
 # Metric-only carrier for the ordinary (non-trace) Surface algorithms: a
 # tensor background rides the same dispatch points as a full trace —
-# cavity in-circle, circumcenter, frontal direction and the Cartesian
-# admission distances — while triangle slot order, incoming-edge order,
-# queue radii and element bookkeeping keep the untraced scalar semantics.
+# cavity in-circle, circumcenter, frontal direction, the Cartesian
+# admission distances, queue radii and the close-point `LL` bound —
+# while triangle slot order, incoming-edge order and element bookkeeping
+# keep the untraced scalar semantics. Scalar local bounds (`vsize`, `LL`)
+# fold into the tensor through `_gmsh_metric_floor` — the metric-space
+# analogue of `min(lc_bgm, lc_vsize)`.
 # `world` covers the birth rows exactly like `_gmsh_surface_trace`, so the
 # admission path's `trace.world`/`trace.lift` reads stay consistent as
 # inserted vertices append world rows.

@@ -98,8 +98,9 @@ end
 # triangle's lifted centroid. The directional metric gets the same global
 # size policy as `_metric_surface_algorithm_field` — the CTX::lc cap, the
 # [lcMin,lcMax] clamp and lcFactor applied per direction — while queue radii
-# and size propagation keep the untraced scalar semantics (`size_at` on a
-# tensor scalarizes to the strongest direction). A scalar or absent
+# measure the metric-normalized circumradius and scalar local bounds fold in
+# through `_gmsh_metric_floor`; `vbgm` itself stays scalarized to the
+# strongest direction for the vertex-size records. A scalar or absent
 # selection returns `nothing`, leaving the Euclidean arm unchanged.
 function _surface_metric_trace_carrier(m,options,size_field,frame,T,t,caller)
     raw=options.inner_field===nothing ? size_field : options.inner_field

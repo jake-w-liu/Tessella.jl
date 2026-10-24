@@ -219,13 +219,42 @@ bound, not determinant-weighted ideal density).
 
 Classified residual scope: alg-7 stays planar+straight-Line
 (`_metric_surface_admit`); OCC-curved metric meshing needs a separate
-producer with non-affine Jacobian transport. Delaunay/Frontal arm carries
-tensor connectivity while queue sizing keeps the scalarized min-direction
-bound; `ModelNativeHybridInsertion` (3-D hybrid) and the alg-6
-factory-encoding path remain scalar-only. Verified: delaunay arm 11/11,
-mesh1d 106/106, metric surface battery 62/62, volume functional 30/30
-(one `.geo` Box testset errors on this machine's absent OCC kernel —
-pre-existing/environmental), native-initial path 68/68.
+producer with non-affine Jacobian transport. `ModelNativeHybridInsertion`
+(3-D hybrid) and the alg-6 factory-encoding path remain scalar-only.
+
+MET01(d) queue-sizing residual — CLOSED (2026-10-24): the Delaunay/Frontal
+tensor arm now measures queue priority in metric space.
+`_gmsh_triangle_radius` under `_GmshSurfaceMetricCarrier` returns the
+metric-normalized circumradius `sqrt(R'MR)` instead of Euclidean `R/lc`
+with the scalarized min-direction `lc`; `_gmsh_frontal_point` caps the
+Voronoi step at `sqrt(3)/2` normalized units; and the `extendBoundary`
+composition `min(lc_bgm, lc_vsize)` becomes the canonical metric
+intersection — `_gmsh_metric_floor` clamps each eigendirection's
+eigenvalue to `>= 1/vsize²`, so scalar local bounds act as isotropic
+size caps without destroying directionality. The insertVertexB
+close-point admission (`d < .5·LL` / `.4·LL`) reads distances in the
+same floored-metric normalized units under the carrier (vsize part of
+`llof` only — the tensor already carries `lc_bgm`). Scalar/untraced and
+full-trace paths are unchanged (the arm dispatches on
+`isa _GmshSurfaceMetricCarrier` only).
+
+Oracle check: `.geo` `Mesh.Algorithm={5,6}` + `MathEvalAniso(16,1,1)`
+`BackgroundField` on a unit square — upstream 4.15.2 produces 5 nodes /
+4 triangles (interior node at (0.5,0.5)); Tessella produces 5 nodes /
+4 triangles in all four (algorithm, tensor-orientation) cases — exact
+density parity on the session-field path. Transfinite-boundary probes
+confirm the directional queue: m11=64 cells (0.125x0.5) yield 90 tris,
+m11=16 (0.25x0.5) 54 tris, isotropic-h=0.25 70 tris — refinement follows
+the tensor, not the min-direction scalar.
+
+Verified this increment: delaunay arm 19/19 (new `metric queue radius
+replaces the scalarized bound` testset: tensor arm strictly coarser than
+isotropic-min-direction, monotone in tensor strength), mesh2d 925/925,
+meshsurface 60/60, refine 131/131, metric surface density 10/10.
+Prior receipts retained: mesh1d 106/106, metric surface battery 62/62,
+volume functional 30/30 (one `.geo` Box testset errors on this machine's
+absent OCC kernel — pre-existing/environmental), native-initial path
+68/68.
 
 ### Dense curved-PLC recovery: input-proportional `maxpts` — t13 verbatim arm completes (2026-10-23, landed `9d3998e`)
 

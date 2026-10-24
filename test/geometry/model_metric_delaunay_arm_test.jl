@@ -76,4 +76,27 @@ end
     @test edge_anisotropy(xmesh)<edge_anisotropy(ymesh)
 end
 
+@testset "metric queue radius replaces the scalarized bound" begin
+    # Under the carrier the queue radius is the metric-normalized
+    # circumradius: weak-direction elongation must not fire the
+    # min-direction scalar bound. An isotropic field pinned at the
+    # tensor's min direction (h=0.25) therefore refines strictly more,
+    # and strengthening the tensor's fine direction adds cells.
+    for algorithm in (5,6)
+        tmodel,ttag=rectangle();tmodel.meshing.algorithm_2d=algorithm
+        tmesh=mesh_model_surface(tmodel,ttag;
+            size_field=MathEvalAnisoField(m11="16",m22="1",m33="1"))
+        imodel,itag=rectangle();imodel.meshing.algorithm_2d=algorithm
+        imesh=mesh_model_surface(imodel,itag;
+            size_field=MathEvalField("0.25"))
+        smodel,stag=rectangle();smodel.meshing.algorithm_2d=algorithm
+        smesh=mesh_model_surface(smodel,stag;
+            size_field=MathEvalAnisoField(m11="64",m22="1",m33="1"))
+        @test validate(tmesh).ok && validate(imesh).ok && validate(smesh).ok
+        @test isapprox(area(tmesh),1.;atol=1e-12)
+        @test N.ntris(tmesh)<N.ntris(imesh)
+        @test N.ntris(smesh)>N.ntris(tmesh)
+    end
+end
+
 end

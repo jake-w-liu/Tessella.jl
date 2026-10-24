@@ -194,12 +194,56 @@ function _gmsh_heap_pop!(queue::_GmshTriangleQueue)
     return first
 end
 
+# Scalar local bound folded into a 2×2 SPD metric: `min(lc_bgm, lc_vsize)`
+# composed in metric space — the local `h` caps every directional size, so
+# each eigendirection's eigenvalue floors at `1/h²` (the canonical metric
+# intersection under simultaneous diagonalization).
+@inline function _gmsh_metric_floor(metric,h)
+    a,b,d=metric
+    (h>0 && isfinite(h)) || return metric
+    tr=0.5*(a+d)
+    det_half=sqrt(0.25*(a-d)*(a-d)+b*b)
+    lmin=tr-det_half;lmax=tr+det_half
+    floor_=1.0/(h*h)
+    lmin>=floor_ && return metric
+    if det_half<=1e-14*max(tr,1.0)
+        return (max(a,floor_),0.0,max(d,floor_))
+    end
+    # Eigenvector of lmin: both null-space candidates (b, lmin-a) and
+    # (lmin-d, -b) satisfy the eigen equation; keep the better-conditioned
+    # one (the first degenerates when lmin==a, the second when lmin==d).
+    vx=b;vy=lmin-a
+    wx=lmin-d;wy=-b
+    if wx*wx+wy*wy>vx*vx+vy*vy
+        vx=wx;vy=wy
+    end
+    nv=sqrt(vx*vx+vy*vy)
+    vx/=nv;vy/=nv
+    ux=-vy;uy=vx
+    return (floor_*vx*vx+lmax*ux*ux,
+            floor_*vx*vy+lmax*ux*uy,
+            floor_*vy*vy+lmax*uy*uy)
+end
+
 @inline function _gmsh_triangle_radius(T,t,gsizes,extend_boundary)
     # Only a full trace carries persistent birth radii; a metric-only carrier
     # keeps the untraced scalar radius computation.
     gsizes.trace isa _GmshSurfaceTrace &&
         return gsizes.trace.radii[_gmsh_triangle_key(T,t)]
     a=_vert(T,t,1);b=_vert(T,t,2);c=_vert(T,t,3)
+    if gsizes.trace isa _GmshSurfaceMetricCarrier
+        # Directional queue radius: the metric-normalized circumradius
+        # `sqrt(R'M R)` measures the cell in units of `h`, so weak-direction
+        # elongation no longer fires the scalar min-direction bound.
+        pa=_pt(T,a);pb=_pt(T,b);pc=_pt(T,c)
+        metric=_gmsh_surface_metric(gsizes.trace,pa,pb,pc)
+        if extend_boundary
+            vs=_gmsh_mean_size3(gsizes.vsize[a],gsizes.vsize[b],gsizes.vsize[c])
+            metric=_gmsh_metric_floor(metric,vs)
+        end
+        _,r2=_gmsh_circumcenter_metric(pa,pb,pc,metric)
+        return sqrt(max(r2,0.0))
+    end
     background=_gmsh_mean_size3(gsizes.vbgm[a],gsizes.vbgm[b],gsizes.vbgm[c])
     lc=extend_boundary ? min(background,
         _gmsh_mean_size3(gsizes.vsize[a],gsizes.vsize[b],gsizes.vsize[c])) : background
@@ -286,9 +330,15 @@ end
 function _gmsh_frontal_point(T,t,slot,gsizes,extend_boundary)
     a,b,c=_gmsh_surface_triangle_nodes(T,t,gsizes.trace)
     metric=_gmsh_surface_metric(gsizes.trace,_pt(T,a),_pt(T,b),_pt(T,c))
+    u,v=_edge(T,t,slot)
+    # The carrier's `q` is metric-normalized: `extend_boundary` composes
+    # the edge's local scalar bound as the same eigenvalue floor used by
+    # the queue radius.
+    extend_boundary && gsizes.trace isa _GmshSurfaceMetricCarrier &&
+        (metric=_gmsh_metric_floor(metric,
+            0.5*(gsizes.vsize[u]+gsizes.vsize[v])))
     center,_=_gmsh_circumcenter_metric(_pt(T,a),_pt(T,b),_pt(T,c),
                                      metric)
-    u,v=_edge(T,t,slot)
     pu=_pt(T,u);pv=_pt(T,v)
     midpoint=(0.5*(pu[1]+pv[1]),0.5*(pu[2]+pv[2]))
     dx=center[1]-midpoint[1];dy=center[2]-midpoint[2]
@@ -297,10 +347,16 @@ function _gmsh_frontal_point(T,t,slot,gsizes,extend_boundary)
     (isfinite(q) && q>0) || return nothing
     dirx=dx/direction_norm;diry=dy/direction_norm
     ratio=sqrt(dirx*dirx*metric[1]+2.0*diry*dirx*metric[2]+diry*diry*metric[3])
-    background=0.5*(gsizes.vbgm[u]+gsizes.vbgm[v])
-    lc=extend_boundary ? min(background,
-        0.5*(gsizes.vsize[u]+gsizes.vsize[v])) : background
-    distance=min(lc*sqrt(3.0)*0.5,q)
+    distance=if gsizes.trace isa _GmshSurfaceMetricCarrier
+        # In metric units a perfectly-sized triangle puts its circumcenter
+        # `sqrt(3)/2` normalized units off the edge — the lc-free cap.
+        min(sqrt(3.0)*0.5,q)
+    else
+        background=0.5*(gsizes.vbgm[u]+gsizes.vbgm[v])
+        lc=extend_boundary ? min(background,
+            0.5*(gsizes.vsize[u]+gsizes.vsize[v])) : background
+        min(lc*sqrt(3.0)*0.5,q)
+    end
     fast=(midpoint[1]+distance*dirx/ratio,
           midpoint[2]+distance*diry/ratio)
     opposite=_pt(T,_vert(T,t,slot))
