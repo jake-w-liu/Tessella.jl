@@ -51,6 +51,8 @@ Usage: tessella file.geo [-1|-2|-3] [-o output.msh] [-format msh2|msh4] [-bin]
        [-clextend n] [-smooth n] [-algo del2d|front2d|del3d] [-quad]
        [-optimize] [-optimize_netgen] [-optimize_threshold value]
        [-optimize_ho|-hoOptimize] [-ho_min v] [-ho_max v] [-ho_nlayers v]
+       [-aniso_max value] [-rand value] [-smooth_ratio value] [-clcurviso]
+       [-ignore_periodicity] [-bgm file.pos]
        [-save_parametric|-parametric] [-save_topology|-save_entities]
        [-save_all] [-nopopup] [-v int] [-nt int] [-setnumber name value]
        [-setstring name value] [-setlist name n v1 ... vn] [-string str]
@@ -82,6 +84,11 @@ model-dimension simplices around their barycenter (triangles on 2-D models,
 tetrahedra on 3-D models), matching Gmsh 4.15.2. -0 writes the executed
 model's unrolled .geo script to <stem>.geo_unrolled (or -o), matching Gmsh
 4.15.2 — periodic constraints and non-built-in entity kinds are dropped.
+-aniso_max stores Mesh.AnisoMax (caps the 1-D background-mesh metric);
+-rand/-smooth_ratio store Mesh.RandomFactor/Mesh.SmoothRatio; -clcurviso
+stores Mesh.MeshSizeFromCurvatureIsotropic; -ignore_periodicity stores
+Mesh.IgnorePeriodicity. -bgm merges a .pos view file and uses its last view
+as the PostView background-mesh field.
 GUI-only, display, solver-daemon and unimplemented upstream flags reject.
 """
 
@@ -96,6 +103,15 @@ const _NUMERIC_FLAGS=Dict(
     "-degree"=>("Mesh.ElementOrder",:order),
     "-tol"=>("Geometry.Tolerance",:positive),
     "-clcurv"=>("Mesh.MeshSizeFromCurvature",:nonnegative),
+    # `Mesh.AnisoMax` is consumed by `metric_aniso_cap` on the 1-D BGM metric.
+    "-aniso_max"=>("Mesh.AnisoMax",:finite),
+    "-anisoMax"=>("Mesh.AnisoMax",:finite),
+    # `Mesh.RandomFactor`/`Mesh.SmoothRatio` are option stores upstream: the
+    # only documented consumer is the absent BAMG backend, so the flag's whole
+    # observable contract is the stored value.
+    "-rand"=>("Mesh.RandomFactor",:finite),
+    "-smooth_ratio"=>("Mesh.SmoothRatio",:finite),
+    "-smoothRatio"=>("Mesh.SmoothRatio",:finite),
     "-epslc1d"=>("Mesh.LcIntegrationPrecision",:positive),
     "-edgelmin"=>("Mesh.ToleranceEdgeLength",:positive),
     "-clextend"=>("Mesh.MeshSizeExtendFromBoundary",:finite),
@@ -123,6 +139,14 @@ const _BOOLEAN_FLAGS=Dict(
     "-hoOptimize"=>"Mesh.HighOrderOptimize",
     "-nopopup"=>"General.NoPopup",
     "-renumber"=>"Mesh.Renumber",
+    # `Mesh.IgnorePeriodicity` gates periodic-section handling on MSH 2.x
+    # reads; the flag stores 1 (the documented and compiled-in default).
+    "-ignore_periodicity"=>"Mesh.IgnorePeriodicity",
+    "-ignorePeriodicity"=>"Mesh.IgnorePeriodicity",
+    # `MeshSizeFromCurvatureIsotropic` forces isotropic curvature sizing —
+    # the only variant the 1-D curvature estimator computes, so the stored
+    # option is consistent with the produced grading.
+    "-clcurviso"=>"Mesh.MeshSizeFromCurvatureIsotropic",
     "-term"=>"General.Terminal")
 
 # `-algo` names we can back with a real implemented algorithm.
@@ -147,20 +171,9 @@ const _REJECTED_FLAGS=Dict{String,String}(
     "-savePartTopology"=>"partition topology .pro output is not implemented",
     "-part_physicals"=>"partition physical-group toggling is not implemented",
     "-part_no_physicals"=>"partition physical-group toggling is not implemented",
-    "-aniso_max"=>"the BAMG backend is not implemented",
-    "-anisoMax"=>"the BAMG backend is not implemented",
-    "-smooth_ratio"=>"the BAMG backend is not implemented",
-    "-smoothRatio"=>"the BAMG backend is not implemented",
     "-swapangle"=>"boundary-edge swap optimization is not implemented",
-    "-rand"=>"random mesh perturbation is not implemented",
     "-scale"=>"geometrical scaling is not implemented",
     "-meshscale"=>"mesh scaling is not implemented",
-    "-clcurviso"=>"isotropic curvature sizing is not implemented",
-    "-claniso"=>"anisotropic curvature sizing is not implemented",
-    "-ignore_periodicity"=>"periodic-constraint ignoring is not implemented",
-    "-ignorePeriodicity"=>"periodic-constraint ignoring is not implemented",
-    "-ignore_periocity"=>"periodic-constraint ignoring is not implemented",
-    "-bgm"=>"background mesh file import is not implemented",
     "-match"=>"geometry/mesh matching is not implemented",
     "-numsubedges"=>"high-order element display subdivision is GUI-only",
     "-debugSurface"=>"surface debugging is GUI-only",
@@ -202,10 +215,14 @@ const _REJECTED_FLAGS=Dict{String,String}(
     "-combine"=>"view combination is GUI-only")
 
 # Flags that upstream removed before 4.15.2 or that never existed there —
-# rejected with an explicit "not an upstream option" message.
+# rejected with an explicit "not an upstream option" message. `-claniso` and
+# `-ignore_periocity` never existed: the upstream parser answers them with
+# "Skipping unknown option" (`-ignore_periocity` survives only as a typo in
+# the `-help` listing; the accepted spelling is `-ignore_periodicity`).
 const _OBSOLETE_FLAGS=("-newreg","-newvol","-newsur","-post_pro","-clear",
     "-liststring","-listnumber","-min","-min0","-min1","-min2","-max",
-    "-view","-size_field","-quadlayout","-autoex","-openFile")
+    "-view","-size_field","-quadlayout","-autoex","-openFile",
+    "-claniso","-ignore_periocity")
 
 function _numeric_argument(flag::String,raw::String,kind::Symbol)
     value=tryparse(Float64,raw)
@@ -361,11 +378,15 @@ Execute the bounded Gmsh-style command line. A single `.geo` input runs the
 `-bin` selects binary output. Output flags require an output-producing action.
 `-clscale`, `-clmin`, `-clmax`, `-order`/`-degree`, `-tol`, `-clcurv`,
 `-epslc1d`, `-edgelmin`, `-clextend`, `-smooth`, `-optimize_threshold`,
+`-aniso_max`/`-anisoMax`, `-rand`, `-smooth_ratio`/`-smoothRatio`,
 `-v`/`-verbose` and `-nt` set real numeric options; they retain priority over
 script assignments, including option aliases. `-optimize`, `-optimize_netgen`,
-`-save_all`/`-saveall`, `-renumber`, `-nopopup`, `-term` and `-quad` set the
-matching boolean/algorithm options; `-algo name` selects an implemented
-algorithm (`del2d`, `front2d`, `del3d` and their upstream aliases).
+`-save_all`/`-saveall`, `-renumber`, `-nopopup`, `-term`, `-clcurviso`,
+`-ignore_periodicity`/`-ignorePeriodicity` and `-quad` set the matching
+boolean/algorithm options; `-algo name` selects an implemented algorithm
+(`del2d`, `front2d`, `del3d` and their upstream aliases). `-bgm file.pos`
+loads a `.pos` view file before the input runs and installs its last view as
+the `PostView` background-mesh field, on both the `.geo` and session paths.
 `-setnumber`, `-setstring`, `-setlist`/`-setlistofnumbers`, `-string` and
 `-option` inject parser input before a `.geo` file (on non-`.geo` inputs only
 `-setnumber` option names apply, through `API.option`).
@@ -439,6 +460,12 @@ function _main(args::AbstractVector{<:AbstractString})
     reclassify=nothing;reparam=nothing
     part=nothing;part_topo=nothing;part_ghosts=nothing;part_split=nothing
     algo_seen=false;quad_seen=false
+    # `-bgm` files, in argument order: `(path, index of the file's last view)`.
+    # The index is a 0-based position in the merged view list — only the
+    # views these flags merge precede it, since the injected `Merge`s run
+    # before every other prelude and before the script body.
+    bgm_specs=Tuple{String,Int}[]
+    bgm_view_base=0;bgm_seen=false
     i=1
     while i<=length(tokens)
         a=tokens[i]
@@ -632,6 +659,34 @@ function _main(args::AbstractVector{<:AbstractString})
                 "tessella: -option file $option_file does not exist"))
             push!(preludes,
                 "Include $(_escape_geo_string(abspath(option_file),a));")
+        elseif a=="-bgm"
+            bgm_seen=true
+            i+=1;i<=length(tokens) || throw(ArgumentError(
+                "tessella: -bgm needs a background-mesh file"))
+            bgm_file=_path_argument(tokens[i],"background mesh")
+            lowercase(splitext(bgm_file)[2])==".pos" || throw(ArgumentError(
+                "tessella: -bgm supports .pos background-mesh files only"))
+            if !isfile(bgm_file)
+                # Upstream reports `Invalid background mesh` and meshes on —
+                # the flag's file is optional input, not a hard dependency.
+                println(stderr,"tessella: -bgm file $bgm_file does not " *
+                    "exist; continuing without a background mesh")
+            else
+                views=try
+                    Post.read_pos(bgm_file)
+                catch err
+                    err isa InterruptException && rethrow()
+                    throw(ArgumentError(
+                        "tessella: -bgm could not parse $bgm_file"))
+                end
+                # A view-less file loads but selects nothing — upstream's
+                # "Invalid background mesh (no view)" arm. The `Merge` still
+                # runs on the standalone path.
+                isempty(views) ||
+                    push!(bgm_specs,
+                        (abspath(bgm_file),bgm_view_base+length(views)-1))
+                bgm_view_base+=length(views)
+            end
         else
             if startswith(a,"-")
                 haskey(_REJECTED_FLAGS,a) && throw(ArgumentError(
@@ -663,7 +718,7 @@ function _main(args::AbstractVector{<:AbstractString})
     extension=lowercase(splitext(first(inputs))[2])
     if check_seen
         (dimension_seen || output_seen || format_seen || binary_seen ||
-         !isempty(numeric_options) || !isempty(preludes) ||
+         !isempty(numeric_options) || !isempty(preludes) || bgm_seen ||
          refine_seen || barycentric_seen || unroll_seen || save_seen ||
          parse_seen ||
          reclassify!==nothing || reparam!==nothing || part!==nothing ||
@@ -723,6 +778,21 @@ function _main(args::AbstractVector{<:AbstractString})
                 "tessella: minimum mesh size exceeds maximum"))
         source=first(inputs)
         temporary=nothing
+        # `-bgm` files load as `.pos` views before the input script runs —
+        # upstream reads the background-mesh file at startup — and each file's
+        # last view becomes a `PostView` background field. The injected
+        # `Merge`/`Background Mesh View` statements run ahead of every other
+        # prelude, so the recorded view index is exact.
+        injected=preludes
+        if !isempty(bgm_specs)
+            statements=String[]
+            for (bgm_path,bgm_index) in bgm_specs
+                push!(statements,"Merge $(_escape_geo_string(
+                    replace(bgm_path,'\\'=>'/'),"-bgm"));")
+                push!(statements,"Background Mesh View[$bgm_index];")
+            end
+            injected=vcat(statements,preludes)
+        end
         # The `.geo` numeric-option store is internal to the execution;
         # `Mesh.SaveParametric`/`Mesh.SaveTopology` values assigned inside the
         # script or by flags reach the writer through this recorder.
@@ -734,8 +804,8 @@ function _main(args::AbstractVector{<:AbstractString})
             return nothing
         end
         result=try
-            if !isempty(preludes)
-                temporary=_inject_geo(source,preludes)
+            if !isempty(injected)
+                temporary=_inject_geo(source,injected)
                 source=temporary
             end
             execute_geo(source;mesh_dim=dim,
@@ -835,7 +905,7 @@ function _main(args::AbstractVector{<:AbstractString})
     return _session_main(files,preludes,numeric_options;
         dim,outfile,version,binary,output_flags=format_seen || binary_seen,
         refine=refine_seen,barycentric=barycentric_seen,save=save_seen,
-        unroll=unroll_seen,
+        unroll=unroll_seen,bgm=[path for (path,_) in bgm_specs],
         reclassify,reparam,part,part_topo,part_ghosts,part_split)
 end
 
@@ -891,7 +961,7 @@ end
 function _session_main(files,preludes,numeric_options;
                        dim,outfile,version,binary,output_flags,refine,save,
                        reclassify,reparam,part,part_topo,part_ghosts,part_split,
-                       barycentric=false,unroll=false)
+                       barycentric=false,unroll=false,bgm=String[])
     need_output=dim>0 || refine || barycentric || unroll || save ||
         reclassify!==nothing ||
         reparam!==nothing || part!==nothing
@@ -987,6 +1057,17 @@ function _session_main(files,preludes,numeric_options;
             else
                 API.merge(source)
             end
+        end
+        # `-bgm`: merge the `.pos` views and point a `PostView` background
+        # field at each file's last view — the same semantics the standalone
+        # path's `Merge` + `Background Mesh View[i]` prelude expresses.
+        for bgm_path in bgm
+            API.merge(bgm_path)
+            count=length(API.SESSION_VIEWS)
+            count>0 || continue
+            tag=API.mesh.field.add("PostView")
+            API.mesh.field.set_number(tag,"ViewIndex",count-1)
+            API.mesh.field.set_as_background_mesh(tag)
         end
         for (name,value) in session_numeric
             API.option(name,value)

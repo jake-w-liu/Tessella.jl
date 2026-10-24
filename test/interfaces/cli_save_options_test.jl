@@ -233,8 +233,10 @@ end
         # spellings on one option reject like the parametric pair.
         @test occursin("duplicate or conflicting",
             _errtext(()->main([geo,"-2","-save_topology","-save_entities"])))
-        for flag in ("-aniso_max","-smooth_ratio")
-            @test occursin("BAMG",
+        # Options whose only documented consumers are absent upstream
+        # backends still reject — the rejection names the missing feature.
+        for flag in ("-swapangle","-scale","-match")
+            @test occursin("not implemented",
                 _errtext(()->main([geo,"-2",flag,"1"])))
         end
     end
