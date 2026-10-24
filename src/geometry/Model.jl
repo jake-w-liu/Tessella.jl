@@ -3823,6 +3823,31 @@ function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh,
     return changed
 end
 
+# A deferred slave copy reparametrizes on the slave geometry: `parFromPoint`
+# converges a ~`1e-8·lc` coordinate residual of `affine(master)`, which maps
+# back through a chord-`c`, span-`Δu` curve as a `1e-8·lc·Δu/c` parameter
+# drift — the window `_model_periodic_curve_nodes` adds to its positional
+# pairing on each side of a relation. A degenerate (zero-chord) curve keeps
+# the raw residual as a floor.
+function _periodic_pair_parameter_window(m::GeoModel,curve::Int,
+                                         bounds::NTuple{2,Float64})
+    endpoints=get(m.curves,curve,nothing)
+    endpoints===nothing && return 0.0
+    chord=_model_point_distance(m.points[endpoints[1]],
+                                m.points[endpoints[2]])
+    span=abs(bounds[2]-bounds[1])
+    return chord>0 ? 1e-8*_model_lc(m)*max(1.0,span)/chord :
+        1e-8*_model_lc(m)*max(1.0,span)
+end
+
+# The coordinate-space counterpart: native periodic copies reparametrize on
+# the slave geometry instead of publishing `affine(master)` bitwise, so a
+# positional certificate must accept the projection's `1e-8·lc` residual —
+# never less than the declaring relation's own `atol`.
+function _periodic_coordinate_tolerance(m::GeoModel,atol::Float64)
+    return max(atol,1e-8*_model_lc(m))
+end
+
 function _model_periodic_curve_nodes(m::GeoModel,mesh,
                                      constraint::ModelPeriodicConstraint)
     mesh_edges=_model_projection_triangle_edges(mesh)
@@ -3837,9 +3862,14 @@ function _model_periodic_curve_nodes(m::GeoModel,mesh,
     ordered_slave=constraint.reversed ? reverse(slave_entries) : slave_entries
     length(master_entries)==length(ordered_slave) || throw(ErrorException(
         "model_periodic_nodes: Curve[$slave] and Curve[$master] node counts differ"))
-    tolerance=max(master_tolerance,slave_tolerance)
     slave_bounds=_model_curve_param_bounds(m,slave,"model_periodic_nodes")
     master_bounds=_model_curve_param_bounds(m,master,"model_periodic_nodes")
+    # Positional pairing stays exact — the recovered parameters merely
+    # certify each ordinal names the same vertex, so the window widens by
+    # the reparametrization drift both curves can carry.
+    tolerance=max(master_tolerance,slave_tolerance,
+        _periodic_pair_parameter_window(m,slave,slave_bounds),
+        _periodic_pair_parameter_window(m,master,master_bounds))
     master_nodes=Vector{Int32}(undef,length(master_entries))
     slave_nodes=similar(master_nodes)
     for index in eachindex(master_entries)
@@ -3873,12 +3903,14 @@ function _model_periodic_nodes(m::GeoModel,mesh,
         "model_periodic_nodes: unsupported periodic dimension $(constraint.dim)"))
 end
 
-function _model_mapping_matches(mesh,constraint::ModelPeriodicConstraint,
+function _model_mapping_matches(m::GeoModel,mesh,
+                                constraint::ModelPeriodicConstraint,
                                 mapping,caller::AbstractString;exact::Bool)
     # Orientation-only curve relations carry no affine: the node pairing is
     # parameter-based and was already verified while the mapping was built.
     constraint.affine===nothing && return true
     coefficients,translation=_periodic_affine_3x4(constraint.affine)
+    tolerance=_periodic_coordinate_tolerance(m,constraint.atol)
     for (master_node,slave_node) in zip(mapping.master_nodes,
                                         mapping.slave_nodes)
         master=(mesh.coords[1,master_node],mesh.coords[2,master_node],
@@ -3889,7 +3921,7 @@ function _model_mapping_matches(mesh,constraint::ModelPeriodicConstraint,
                mesh.coords[3,slave_node])
         if exact
             slave==expected || return false
-        elseif _model_point_distance(slave,expected)>constraint.atol
+        elseif _model_point_distance(slave,expected)>tolerance
             throw(ArgumentError(
                 "$caller: slave node $slave_node is not affine(master node $master_node)"))
         end
@@ -3936,12 +3968,12 @@ function _snap_surface_periodic(m::GeoModel,mesh,constraints,
         isempty(mapping.slave_nodes) && continue
         output=periodic_identify_affine(
             output,constraint.affine,mapping.master_nodes,mapping.slave_nodes;
-            atol=constraint.atol)
+            atol=_periodic_coordinate_tolerance(m,constraint.atol))
     end
     for constraint in ordered
         mapping=_model_periodic_snap_mapping(m,output,constraint)
         _model_mapping_matches(
-            output,constraint,mapping,caller;exact=true) || throw(ErrorException(
+            m,output,constraint,mapping,caller;exact=true) || throw(ErrorException(
             "$caller: stored periodic constraints do not share an exact curve-node solution"))
     end
     return output
@@ -3982,7 +4014,7 @@ function model_periodic_nodes(m::GeoModel,mesh,dim,slave_entity)
             master_nodes=Int32[_model_periodic_point_node(
                 m,mesh,relation.master,relation.atol,caller)],
             affine=relation.affine)
-        _model_mapping_matches(mesh,constraint,mapping,caller;exact=false)
+        _model_mapping_matches(m,mesh,constraint,mapping,caller;exact=false)
         return mapping
     end
     constraint=get(m.periodic,(d,slave),nothing)
@@ -3992,7 +4024,7 @@ function model_periodic_nodes(m::GeoModel,mesh,dim,slave_entity)
     diagnostic.ok || throw(ArgumentError(
         "$caller: input mesh is invalid — "*join(diagnostic.messages,"; ")))
     mapping=_model_periodic_nodes(m,mesh,constraint)
-    _model_mapping_matches(mesh,constraint,mapping,caller;exact=false)
+    _model_mapping_matches(m,mesh,constraint,mapping,caller;exact=false)
     return mapping
 end
 
@@ -4283,7 +4315,7 @@ function _model_projection_periodic_links(m::GeoModel,mesh,point_nodes,
             # filtering `_snap_surface_periodic` snaps with.
             interior=_model_periodic_snap_mapping(m,mesh,constraint)
             _model_mapping_matches(
-                mesh,constraint,interior,caller;exact=true) ||
+                m,mesh,constraint,interior,caller;exact=true) ||
                 throw(ArgumentError(
                     "$caller: periodic Curve[$(constraint.slave_entity)] nodes are not exactly snapped"))
             push!(curve_links,MixedPeriodicLink(
@@ -5855,7 +5887,7 @@ function _model_projection_boundary_surface_faces!(
 end
 
 function _model_affine_node_pairs(
-    mesh,constraint::ModelPeriodicConstraint,master_nodes_raw,
+    m::GeoModel,mesh,constraint::ModelPeriodicConstraint,master_nodes_raw,
     slave_nodes_raw,caller::AbstractString)
     master_nodes=sort!(unique!(Int[Int(node) for node in master_nodes_raw]))
     slave_nodes=sort!(unique!(Int[Int(node) for node in slave_nodes_raw]);
@@ -5867,6 +5899,9 @@ function _model_affine_node_pairs(
         "$(_model_periodic_entity_label(constraint.dim))" *
         "[$(constraint.master_entity)] node counts differ"))
     coefficients,translation=_periodic_affine_3x4(constraint.affine)
+    # Native slave copies reparametrize on their own geometry — pair within
+    # the projection residual, not the declaring `atol` alone.
+    tolerance=_periodic_coordinate_tolerance(m,constraint.atol)
     slave_x=Float64[mesh.coords[1,node] for node in slave_nodes]
     used=Set{Int}()
     mapped_slaves=Vector{Int32}(undef,length(master_nodes))
@@ -5876,9 +5911,9 @@ function _model_affine_node_pairs(
         expected=_model_affine_point(
             coefficients,translation,master,caller,master_node)
         first_candidate=searchsortedfirst(
-            slave_x,expected[1]-constraint.atol)
+            slave_x,expected[1]-tolerance)
         last_candidate=searchsortedlast(
-            slave_x,expected[1]+constraint.atol)
+            slave_x,expected[1]+tolerance)
         matches=Int[]
         for position in first_candidate:last_candidate
             position in eachindex(slave_nodes) || continue
@@ -5886,7 +5921,7 @@ function _model_affine_node_pairs(
             slave_node in used && continue
             _model_point_distance(
                 _model_mesh_coordinate(mesh,slave_node),expected)<=
-                constraint.atol && push!(matches,slave_node)
+                tolerance && push!(matches,slave_node)
         end
         length(matches)==1 || throw(ArgumentError(
             "$caller: affine image of master node $master_node matches " *
@@ -5920,7 +5955,7 @@ function _model_periodic_surface_nodes(
     slave_nodes,_=_model_projection_face_topology(slave_faces)
     master_nodes,_=_model_projection_face_topology(master_faces)
     mapping=_model_affine_node_pairs(
-        mesh,constraint,master_nodes,slave_nodes,caller)
+        m,mesh,constraint,master_nodes,slave_nodes,caller)
     node_map=Dict(master_node=>slave_node for (master_node,slave_node) in
         zip(mapping.master_nodes,mapping.slave_nodes))
     mapped_master_faces=Set{NTuple{N,Int32} where N}()
@@ -6262,7 +6297,7 @@ function _model_periodic_spanning_relations(
 end
 
 function _model_periodic_curve_entry_mapping(
-    mesh,slave::Int,master::Int,affine,atol::Float64,
+    m::GeoModel,mesh,slave::Int,master::Int,affine,atol::Float64,
     slave_entries,master_entries,caller::AbstractString;
     reversed::Bool=false)
     constraint=ModelPeriodicConstraint(
@@ -6285,7 +6320,7 @@ function _model_periodic_curve_entry_mapping(
          affine=nothing)
     else
         _model_affine_node_pairs(
-            mesh,constraint,last.(master_entries),last.(slave_entries),caller)
+            m,mesh,constraint,last.(master_entries),last.(slave_entries),caller)
     end
     node_map=Dict(master_node=>slave_node for (master_node,slave_node) in
         zip(mapping.master_nodes,mapping.slave_nodes))
@@ -6314,7 +6349,7 @@ function _model_periodic_surface_nodes_2d(
     surface_nodes,surface_tris,caller::AbstractString)
     slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
     mapping=_model_affine_node_pairs(
-        mesh,constraint,surface_nodes[master],surface_nodes[slave],caller)
+        m,mesh,constraint,surface_nodes[master],surface_nodes[slave],caller)
     node_map=Dict(master_node=>slave_node for (master_node,slave_node) in
         zip(mapping.master_nodes,mapping.slave_nodes))
     mapped_master_faces=Set{NTuple{3,Int32}}()
@@ -6387,7 +6422,7 @@ function _model_projection_periodic_surface_links(
         mapping=(master_entity=master,
                  slave_nodes=Int32[point_nodes[slave]],
                  master_nodes=Int32[point_nodes[master]],affine=affine)
-        _model_mapping_matches(mesh,constraint,mapping,caller;exact=false)
+        _model_mapping_matches(m,mesh,constraint,mapping,caller;exact=false)
         push!(links,MixedPeriodicLink(
             0,slave,master,mapping.slave_nodes,mapping.master_nodes;
             affine=affine))
@@ -6421,7 +6456,7 @@ function _model_projection_periodic_surface_links(
                            constraint.reversed,
             curve_constraints)
         mapping=_model_periodic_curve_entry_mapping(
-            mesh,slave,master,affine,atol,
+            m,mesh,slave,master,affine,atol,
             curve_entries[slave],curve_entries[master],caller;
             reversed=reversed)
         push!(links,MixedPeriodicLink(
@@ -6439,7 +6474,7 @@ function _model_projection_periodic_surface_links(
             "$caller: periodic Surface[$slave] mapping omits classified nodes"))
         Set(mapping.master_nodes)==surface_nodes[master] || throw(ErrorException(
             "$caller: periodic Surface[$master] mapping omits classified nodes"))
-        _model_mapping_matches(mesh,constraint,mapping,caller;exact=false)
+        _model_mapping_matches(m,mesh,constraint,mapping,caller;exact=false)
         push!(links,MixedPeriodicLink(
             2,constraint.slave_entity,constraint.master_entity,
             mapping.slave_nodes,mapping.master_nodes;
@@ -9163,7 +9198,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             # Validate the existing relation tolerance without moving them.
             for constraint in _model_periodic_constraint_order(constraints,caller)
                 mapping=_model_periodic_snap_mapping(m,mesh,constraint)
-                _model_mapping_matches(mesh,constraint,mapping,caller;exact=false)
+                _model_mapping_matches(m,mesh,constraint,mapping,caller;exact=false)
             end
         end
         break
@@ -10311,7 +10346,7 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
     end
     for constraint in periodic_surfaces
         mapping=_model_periodic_surface_nodes(m,mesh,constraint)
-        _model_mapping_matches(mesh,constraint,mapping,caller;exact=false)
+        _model_mapping_matches(m,mesh,constraint,mapping,caller;exact=false)
     end
     tet_edges=_tet_edge_set(mesh)
     point_nodes=Dict{Int,Int32}()

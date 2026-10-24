@@ -324,6 +324,7 @@ using Tessella
     include(joinpath(@__DIR__, "..", "interfaces/api_view_writer_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_crossfield_tri3_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_periodic_lifecycle_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "interfaces/api_multi_periodic_pairs_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_compact_prism_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_hybrid_cube_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/cli_curve_functional_test.jl"))
