@@ -5562,6 +5562,248 @@ function _plugin_exec_meshsizefieldview(spec::_PluginSpec,
     return nothing
 end
 
+# ---- MeshSubEntities -------------------------------------------------------------
+#
+# Upstream `Plugin(MeshSubEntities)` enumerates the unique mesh sub-entities
+# of the elements carried by `InputPhysicalGroup` (dimension
+# `InputDimension`): vertices when `OuputDimension` is 0 and element edges
+# when it is 1 — upstream's own option spelling `Ouput*` is kept verbatim.
+# Face (2) and volume (3) requests produce no output upstream, and an edge
+# request on 1-dimensional input does the same (line elements have no proper
+# 1-dimensional sub-entities), so only `(0, >=0)` and `(1, >=2)` pairs act.
+# Each sub-entity that is not already realized by a mesh element spawns a
+# new discrete entity holding that element; sub-entities realized on an
+# existing entity leave the mesh untouched. In both cases the owning entity
+# gains `OuputPhysicalGroup` once per sub-entity. A missing or empty input
+# group reports the upstream "Physical group N (dimension D) is empty"
+# diagnostic and produces nothing. Newly created vertex entities claim their
+# node like upstream (dim-0 reclassification); new curves keep their
+# endpoint nodes on the original owners, matching upstream's empty curve
+# node blocks.
+
+const _PLUGIN_SUBEDGE_TABLE=(
+    pnt=(),lin=(),
+    tri=((1,2),(2,3),(3,1)),
+    qua=((1,2),(2,3),(3,4),(4,1)),
+    tet=((1,2),(2,3),(3,1),(1,4),(2,4),(3,4)),
+    hex=((1,2),(2,3),(3,4),(4,1),(5,6),(6,7),(7,8),(8,5),
+         (1,5),(2,6),(3,7),(4,8)),
+    pri=((1,2),(2,3),(3,1),(4,5),(5,6),(6,4),(1,4),(2,5),(3,6)),
+    pyr=((1,2),(2,3),(3,4),(4,1),(1,5),(2,5),(3,5),(4,5)),
+    trih=())
+
+# Map every node tag that already carries a realizing point element to the
+# entity holding that element, across both the cached mesh and the discrete
+# records.
+function _plugin_sub_point_owners(m,cached,class)
+    owners=Dict{UInt64,Tuple{Int,Int}}()
+    if cached!==nothing && class!==nothing
+        for (msh,dim,_,cells,ents) in _cache_catalog(cached,class)
+            Int(msh)==15 || continue
+            for column in axes(cells,2)
+                node=_cache_node_tag(class.public_tags,Int(cells[1,column]))
+                owners[node]=(Int(dim),Int(ents[column]))
+            end
+        end
+    end
+    for ((dim,etag),record) in Model._discrete_mesh_records_model(m)
+        for index in eachindex(record.element_types)
+            record.element_types[index]==15 || continue
+            owners[record.element_nodes[index][1]]=(dim,etag)
+        end
+    end
+    return owners
+end
+
+# Same map for line elements, keyed by the unordered endpoint tag pair.
+function _plugin_sub_line_owners(m,cached,class)
+    owners=Dict{Tuple{UInt64,UInt64},Tuple{Int,Int}}()
+    if cached!==nothing && class!==nothing
+        for (msh,dim,_,cells,ents) in _cache_catalog(cached,class)
+            Int(msh)==1 || continue
+            for column in axes(cells,2)
+                a=_cache_node_tag(class.public_tags,Int(cells[1,column]))
+                b=_cache_node_tag(class.public_tags,Int(cells[2,column]))
+                owners[minmax(a,b)]=(Int(dim),Int(ents[column]))
+            end
+        end
+    end
+    for ((dim,etag),record) in Model._discrete_mesh_records_model(m)
+        for index in eachindex(record.element_types)
+            record.element_types[index]==1 || continue
+            nodes=record.element_nodes[index]
+            owners[minmax(nodes[1],nodes[2])]=(dim,etag)
+        end
+    end
+    return owners
+end
+
+# The classifying entity of a cache node, looked up through the public tag
+# table so record-only callers still work on generated meshes.
+function _plugin_sub_node_entity(class,public,node)
+    class===nothing && return nothing
+    public===nothing && return nothing
+    dense=get(public.node_indices,node,0)
+    dense==0 && return nothing
+    dense>length(class.node_entities) && return nothing
+    owner=class.node_entities[dense]
+    return (Int(owner[1]),Int(owner[2]))
+end
+
+# Dim-0 entities that claim a node through their record's node list (a
+# discrete point may own a vertex without a point element yet).
+function _plugin_sub_point_claims(m)
+    claims=Dict{UInt64,Int}()
+    for ((dim,etag),record) in Model._discrete_mesh_records_model(m)
+        dim==0 || continue
+        for node in record.node_tags
+            get!(()->etag,claims,node)
+        end
+    end
+    return claims
+end
+
+# Every node tag the model knows about: cache public tags plus record nodes.
+function _plugin_sub_known_nodes(m,cached,class)
+    known=Set{UInt64}()
+    if class!==nothing && class.public_tags!==nothing
+        union!(known,class.public_tags.node_tags)
+    elseif cached!==nothing
+        union!(known,UInt64.(1:nnodes(cached)))
+    end
+    for (_,record) in Model._discrete_mesh_records_model(m)
+        union!(known,record.node_tags)
+    end
+    return known
+end
+
+function _plugin_exec_meshsubentities(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    in_dim=_mesh_query_integer(Int(numbers["InputDimension"]),caller,
+                             "InputDimension")
+    in_phys=_mesh_query_integer(Int(numbers["InputPhysicalGroup"]),caller,
+                                "InputPhysicalGroup")
+    out_dim=_mesh_query_integer(Int(numbers["OuputDimension"]),caller,
+                                "OuputDimension")
+    out_phys=_mesh_query_integer(Int(numbers["OuputPhysicalGroup"]),caller,
+                                 "OuputPhysicalGroup")
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    slot=MODEL_SLOTS[index]
+    m=slot.model
+    # Only vertices and edges are realized upstream; everything else leaves
+    # the model untouched without a diagnostic.
+    (out_dim==0 && 0<=in_dim<=3) || (out_dim==1 && 2<=in_dim<=3) ||
+        return nothing
+    members_raw=get(m.physical,(in_dim,in_phys),nothing)
+    members=members_raw===nothing ? Int[] :
+        Int[t for t in members_raw if Model._model_entity_known(m,in_dim,t)]
+    if isempty(members)
+        _native_diagnostic_emit_locked(:error,
+            "Physical group $in_phys (dimension $in_dim) is empty")
+        return nothing
+    end
+    cached=slot.mesh
+    class=cached===nothing ? nothing :
+        (slot.class===nothing ? _cached_classification_locked(cached) :
+         slot.class)
+    public=class===nothing ? nothing : class.public_tags
+    # Unique sub-entities in first-encounter order: upstream traverses the
+    # group's entities in stored order and dedupes through its support sets.
+    order=Any[]
+    if out_dim==0
+        seen=Set{UInt64}()
+        for etag in members
+            for (msh,nodes) in _entity_all_elements(m,cached,class,in_dim,etag)
+                type=try msh_spec(msh) catch err
+                    err isa InterruptException && rethrow()
+                    continue
+                end
+                type.dim==in_dim || continue
+                for node in nodes
+                    node in seen && continue
+                    push!(seen,node);push!(order,(node,))
+                end
+            end
+        end
+    else
+        seen=Set{Tuple{UInt64,UInt64}}()
+        for etag in members
+            for (msh,nodes) in _entity_all_elements(m,cached,class,in_dim,etag)
+                type=try msh_spec(msh) catch err
+                    err isa InterruptException && rethrow()
+                    continue
+                end
+                type.dim==in_dim || continue
+                table=getproperty(_PLUGIN_SUBEDGE_TABLE,type.family)
+                primary=Elements._msh_primary_nodes(type.family)
+                for (a,b) in table
+                    a<=primary && b<=primary || continue
+                    pair=minmax(nodes[a],nodes[b])
+                    pair in seen && continue
+                    push!(seen,pair);push!(order,pair)
+                end
+            end
+        end
+    end
+    isempty(order) && return nothing
+    realized=out_dim==0 ? _plugin_sub_point_owners(m,cached,class) :
+                        _plugin_sub_line_owners(m,cached,class)
+    point_claims=out_dim==0 ? _plugin_sub_point_claims(m) : nothing
+    known=_plugin_sub_known_nodes(m,cached,class)
+    staged=_reclassify_model_copy(m)
+    element_type=out_dim==0 ? Int32(15) : Int32(1)
+    next_element=_get_max_element_tag()+UInt64(1)
+    for sub in order
+        key=out_dim==0 ? sub[1] : sub
+        owner=get(realized,key,nothing)
+        if owner===nothing
+            # No realizing element: reuse the entity that already owns the
+            # support when it has the requested dimension, else create a new
+            # discrete entity like upstream.
+            if out_dim==0
+                claim=_plugin_sub_node_entity(class,public,sub[1])
+                owner=claim!==nothing && claim[1]==0 ? (0,claim[2]) :
+                    (e=get(point_claims,sub[1],0); e==0 ? nothing : (0,e))
+            else
+                public1=public===nothing ? nothing :
+                    get(public.node_indices,sub[1],0)
+                public2=public===nothing ? nothing :
+                    get(public.node_indices,sub[2],0)
+                claim=class===nothing || public1===nothing ||
+                    public2===nothing || public1==0 || public2==0 ? nothing :
+                    get(class.edge_entities,
+                        minmax(Int32(public1),Int32(public2)),nothing)
+                owner=claim!==nothing && claim[1]==1 ? (1,Int(claim[2])) :
+                    nothing
+            end
+            if owner===nothing
+                etag2=add_discrete_entity!(staged,out_dim)
+                owner=(out_dim,etag2)
+            end
+            add_discrete_elements!(staged,out_dim,owner[2],[element_type],
+                [UInt64[next_element]],
+                [UInt64[u for u in sub]];_known_node_tags=known)
+            realized[key]=owner
+            next_element+=UInt64(1)
+        end
+        # Upstream adds the entity to the output group once per sub-entity;
+        # the per-entity tag list therefore repeats the tag.
+        push!(get!(()->Int[],staged.entity_physicals,owner),out_phys)
+        group=get!(()->Int[],staged.physical,(out_dim,out_phys))
+        owner[2] in group || push!(group,owner[2])
+        out_phys>0 && (staged.physical_tag_max=
+            max(staged.physical_tag_max,out_phys))
+    end
+    plan=_reclassify_nodes_plan(staged,cached,class,caller;
+        node_max=NODE_TAG_MAX[],element_max=next_element-UInt64(1),
+        preserve_mesh_owners=(out_dim==1))
+    _commit_tagged_plan_locked!(plan;preserve_visibility=true,
+        reconcile_records=false)
+    return nothing
+end
+
 # ---- registry --------------------------------------------------------------------------------
 
 const _PLUGINS=Dict{String,NamedTuple}(
@@ -5783,4 +6025,11 @@ const _PLUGINS=Dict{String,NamedTuple}(
         string_options=Dict{String,String}(
             "MappingX"=>"t","MappingY"=>"t","MappingZ"=>"t"),
         run_fn=_plugin_simple_partition_exec),
+    # `OuputDimension`/`OuputPhysicalGroup` keep upstream's own misspelled
+    # option names — `Output*` is an unknown option in Gmsh 4.15.2.
+    "MeshSubEntities"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"InputDimension"=>1.0,"InputPhysicalGroup"=>1.0,
+        "OuputDimension"=>0.0,"OuputPhysicalGroup"=>2000.0),
+        string_options=Dict{String,String}(),
+        run_fn=_plugin_exec_meshsubentities),
 )
