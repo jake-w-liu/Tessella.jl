@@ -5287,6 +5287,142 @@ function _plugin_exec_distance(spec::_PluginSpec,caller::AbstractString)
     return nothing
 end
 
+# ---- SpanningTree -------------------------------------------------------------------
+#
+# Upstream `Plugin(SpanningTree)` (N. Marsic): collect every mesh element on
+# the entities of the physical groups listed in `PhysicalCurves`,
+# `PhysicalSurfaces` and `PhysicalVolumes`; extract each element's edges
+# (corner-vertex pairs) into a canonical set; run sorted-edge Kruskal over a
+# shared vertex union-find in ascending dimension order (curves, then
+# surfaces, then volumes); and store the resulting tree as MLINE elements on
+# a new discrete curve entity — tag `max elementary + 1` — inside physical
+# group `OutputPhysical`, or `max physical + 1` when it is -1. Upstream
+# iterates `std::set` edges, so the tree is deterministic.
+
+const _PLUGIN_SPANNING_EDGES=Dict{Symbol,Vector{NTuple{2,Int}}}(
+    :lin=>[(0,1)],
+    :tri=>[(0,1),(1,2),(2,0)],
+    :qua=>[(0,1),(1,2),(2,3),(3,0)],
+    :tet=>[(0,1),(1,2),(2,0),(3,0),(3,2),(3,1)],
+    :hex=>[(0,1),(0,3),(0,4),(1,2),(1,5),(2,3),(2,6),(3,7),(4,5),(4,7),
+           (5,6),(6,7)],
+    :pri=>[(0,1),(0,2),(0,3),(1,2),(1,4),(2,5),(3,4),(3,5),(4,5)],
+    :pyr=>[(0,1),(0,3),(0,4),(1,2),(1,4),(2,3),(2,4),(3,4)])
+
+# Upstream `parse` strips spaces, turns commas into whitespace and keeps
+# every word `sscanf("%d")` accepts — a word may carry a numeric prefix only.
+function _plugin_spanning_parse(text::AbstractString)
+    cleaned=replace(replace(text,' '=>""),','=>' ')
+    tags=Int[]
+    for word in eachsplit(cleaned,' ';keepempty=false)
+        m=match(r"^[+-]?\d+",word)
+        m===nothing || push!(tags,parse(Int,m.match))
+    end
+    return tags
+end
+
+function _plugin_exec_spanningtree(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers;strings=spec.strings
+    output=_mesh_query_integer(Int(numbers["OutputPhysical"]),
+                               caller,"OutputPhysical")
+    wanted=(_plugin_spanning_parse(strings["PhysicalCurves"]),
+            _plugin_spanning_parse(strings["PhysicalSurfaces"]),
+            _plugin_spanning_parse(strings["PhysicalVolumes"]))
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    slot=MODEL_SLOTS[index]
+    mesh=slot.mesh;model=slot.model
+    mesh===nothing && throw(ArgumentError("$caller: mesh is empty"))
+    class=slot.class===nothing ? _cached_classification_locked(mesh) :
+        slot.class
+    public=_mesh_public_tags(mesh)
+    _,_,total=_mesh_element_offsets(mesh)
+    tagof=col->public===nothing ? UInt64(col) :
+        get(public.node_tags,col,UInt64(col))
+    # Canonical element edges per dimension — upstream stores
+    # `std::set<pair<v0-1,v1-1>,Sort>`: unique undirected pairs iterated in
+    # sorted (min,max) order.
+    edges=[Set{Tuple{UInt64,UInt64}}() for _ in 1:3]
+    for index in 1:total
+        ent=_plugin_element_entity(mesh,class,index)
+        ent===nothing && continue
+        dim=ent[1]
+        1<=dim<=3 || continue
+        model===nothing && continue
+        phys=model_physical_groups_for_entity(model,dim,ent[2])
+        any(t->t in phys,wanted[dim]) || continue
+        rec=mesh_element_record(mesh,index)
+        spec_rec=msh_spec(Int(rec.element_type))
+        table=get(_PLUGIN_SPANNING_EDGES,spec_rec.family,nothing)
+        table===nothing && continue
+        nprim=Elements._msh_primary_nodes(spec_rec.family)
+        for (a,b) in table
+            (a<nprim && b<nprim) || continue
+            ta=tagof(Int(rec.node_tags[a+1]));tb=tagof(Int(rec.node_tags[b+1]))
+            push!(edges[dim],minmax(ta,tb))
+        end
+    end
+    if all(isempty,edges)
+        _native_diagnostic_emit_locked(:warning,
+            "No elements found in the given physcials: abording!")
+        return nothing
+    end
+    parent=Dict{UInt64,UInt64}();rank=Dict{UInt64,Int}()
+    function findroot(v)
+        root=get(parent,v,v)
+        while true
+            p=get(parent,root,root)
+            p==root && return root
+            root=get(parent,p,p)
+        end
+    end
+    function unite(a,b)
+        ra,rb=findroot(a),findroot(b)
+        ra==rb && return false
+        get(rank,ra,0)<get(rank,rb,0) && ((ra,rb)=(rb,ra))
+        parent[rb]=ra
+        get(rank,ra,0)==get(rank,rb,0) && (rank[ra]=get(rank,ra,0)+1)
+        return true
+    end
+    tree=Tuple{UInt64,UInt64}[]
+    for dim in 1:3,edge in sort!(collect(edges[dim]))
+        unite(edge[1],edge[2]) && push!(tree,edge)
+    end
+    entitynum=0
+    if model!==nothing
+        for (d,t) in model_entities(model)
+            t>entitynum && (entitynum=t)
+        end
+        for (d,t) in keys(model.discrete)
+            t>entitynum && (entitynum=t)
+        end
+    end
+    entitynum+=1
+    physicalnum=output
+    if output<0
+        physicalnum=0
+        if model!==nothing
+            for (d,t) in model_physical_groups(model)
+                t>physicalnum && (physicalnum=t)
+            end
+        end
+        physicalnum+=1
+    end
+    add_discrete_entity!(model,1,entitynum,())
+    connectivity=UInt64[]
+    for (a,b) in tree
+        push!(connectivity,a,b)
+    end
+    isempty(tree) ||
+        _native_add_element_block_locked!(1,entitynum,Int32(1),
+            UInt64[],connectivity,caller)
+    # The element staging path can swap the live model object; re-fetch it so
+    # the physical group lands on the current one rather than a stale copy.
+    add_physical_group!(_model_locked(),1,[entitynum];tag=physicalnum)
+    return nothing
+end
+
 # ---- SimplePartition --------------------------------------------------------------------
 #
 # Upstream `Plugin(SimplePartition)` clears existing partitions, evaluates
@@ -6536,6 +6672,12 @@ const _PLUGINS=Dict{String,NamedTuple}(
         "DistanceType"=>0.0,"MinScale"=>0.0,"MaxScale"=>0.0),
         string_options=Dict{String,String}(),
         run_fn=_plugin_exec_distance),
+    "SpanningTree"=>(number_options=Dict{String,Float64}(
+        "OutputPhysical"=>-1.0),
+        string_options=Dict{String,String}(
+            "PhysicalVolumes"=>"","PhysicalSurfaces"=>"",
+            "PhysicalCurves"=>""),
+        run_fn=_plugin_exec_spanningtree),
     # `Echo`, `TimeReport`, `DuplicatedBoundaries` and `PolarView` are not
     # registered: Gmsh 4.15.2 ships none of them (the oracle reports
     # `Failed action 'Run' or unknown plugin '<name>'`), and they are absent
