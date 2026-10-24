@@ -214,3 +214,94 @@ end
     zs = extrema(vec(surface.coords[3, :]))
     @test zs == (0.0, 1.0)
 end
+
+@testset ".geo boundary-layer curved generatrix" begin
+    # A `Circle` generatrix is re-graded by the native 1-D producer between
+    # the boundary layer's refresh-time parameter sweep and the chapeau's
+    # own emission: the same logical wall node re-evaluates a few e-9 along
+    # the curve. The chapeau's top-row lookup has to recover that
+    # correspondence (the drift stays far inside the key's Voronoi cell) —
+    # upstream's `copyMesh` maps the stored source *vertices* themselves,
+    # so the row binding is by node identity, not bitwise position.
+    r = _execute_bl_source("""
+        Point(1) = {0,0,0,1};
+        Point(2) = {1,0,0,1};
+        Point(3) = {1,1,0,1};
+        Circle(1) = {1,2,3};
+        out[] = Extrude { Curve{1}; Layers{3}; Recombine; };
+        Mesh 1;
+        """)
+    @test r.errors == String[]
+    @test r.lists["out"] == [2.0, 5.0, 4.0, -3.0]
+
+    # The generatrix keeps two Line cells; its regraded interior node is
+    # the arc midpoint Tessella's native grading produces (upstream emits
+    # the same point).
+    gen = geo_entity_mesh(r, 1, 1)
+    @test sum(size(b.nodes, 2) for b in gen.blocks) == 2
+    @test Set(Tuple(round.(gen.coords[:, i]; digits=9))
+              for i in axes(gen.coords, 2)) ==
+          Set([(0.0, 0.0, 0.0), (0.292893219, 0.707106781, 0.0),
+               (1.0, 1.0, 0.0)])
+
+    # Chapeau: one Line cell per generatrix element on the welded top row.
+    # The unique positions match Gmsh 4.15.2's emission within ~4e-10 —
+    # the endpoint smoothed normals differ only in the oracle's
+    # accumulation order, and the oracle writes a coincident duplicate of
+    # the interior top node which Tessella welds onto the strip's row.
+    chapeau = geo_entity_mesh(r, 1, 2)
+    @test sum(size(b.nodes, 2) for b in chapeau.blocks) == 2
+    @test Set(Tuple(round.(chapeau.coords[:, i]; digits=9))
+              for i in axes(chapeau.coords, 2)) ==
+          Set([(0.923879533, -0.382683432, 0.0), (1.0, 0.0, 0.0),
+               (1.382683432, 0.076120467, 0.0)])
+
+    # Each connector emits one segment per layer along the smoothed end
+    # normal, sharing the strip's column nodes.
+    c3 = geo_entity_mesh(r, 1, 3)
+    @test sum(size(b.nodes, 2) for b in c3.blocks) == 3
+    @test Set(Tuple(round.(c3.coords[:, i]; digits=9))
+              for i in axes(c3.coords, 2)) ==
+          Set([(0.0, 0.0, 0.0), (0.307959844, -0.127561144, 0.0),
+               (0.615919688, -0.255122288, 0.0),
+               (0.923879533, -0.382683432, 0.0)])
+    c4 = geo_entity_mesh(r, 1, 4)
+    @test sum(size(b.nodes, 2) for b in c4.blocks) == 3
+    @test Set(Tuple(round.(c4.coords[:, i]; digits=9))
+              for i in axes(c4.coords, 2)) ==
+          Set([(1.0, 1.0, 0.0), (1.127561144, 0.692040156, 0.0),
+               (1.255122288, 0.384080312, 0.0),
+               (1.382683432, 0.076120467, 0.0)])
+end
+
+@testset "boundary-layer top-row lookup tolerance" begin
+    # `_extrude_at`'s `:boundary_layer` arm binds an evaluated generatrix
+    # position to its stored top node. Exact keys hit bitwise; a few e-9
+    # of re-evaluation drift is recovered only when the nearest row is
+    # unambiguous (an order of magnitude closer than the runner-up); a
+    # genuinely foreign point between rows still rejects.
+    spec = (type=:boundary_layer,
+            tops=Dict((0.0, 0.0, 0.0) => (0.0, -1.0, 0.0),
+                      (1.0, 0.0, 0.0) => (1.0, -1.0, 0.0)))
+    @test Tessella.Model._extrude_at(spec, (0.0, 0.0, 0.0), 0.5, "test") ==
+          (0.0, -1.0, 0.0)
+    # The strict 1e-9·scale arm.
+    @test Tessella.Model._extrude_at(spec, (1e-10, 0.0, 0.0), 0.5, "test") ==
+          (0.0, -1.0, 0.0)
+    # The observed ~2.2e-9 re-grading drift recovers through the
+    # Voronoi-dominance arm (nearest key ~5e5× closer than the runner-up).
+    @test Tessella.Model._extrude_at(spec, (2.2e-9, 0.0, 0.0), 0.5, "test") ==
+          (0.0, -1.0, 0.0)
+    # Drift past the 1e-7·scale cap still rejects even when unambiguous.
+    @test_throws ArgumentError Tessella.Model._extrude_at(
+        spec, (1e-6, 0.0, 0.0), 0.5, "test")
+    # A point between keys (best ≈ runner-up distance) rejects.
+    @test_throws ArgumentError Tessella.Model._extrude_at(
+        spec, (0.5, 0.0, 0.0), 0.5, "test")
+    @test_throws ArgumentError Tessella.Model._extrude_at(
+        spec, (0.5, 5.0, 0.0), 0.5, "test")
+    @test_throws ArgumentError Tessella.Model._extrude_at(
+        (type=:boundary_layer, tops=Dict{NTuple{3,Float64},
+                                       NTuple{3,Float64}}()),
+        (0.0, 0.0, 0.0), 0.5, "test")
+end

@@ -54,12 +54,26 @@ function _extrude_at(spec,p::NTuple{3,Float64},t::Float64,
         for pos in keys(tops)
             scale=max(scale,abs(pos[1]),abs(pos[2]),abs(pos[3]))
         end
-        best=nothing;bd=Inf
+        best=nothing;bd=Inf;bd2=Inf
         for (pos,v) in tops
             d=hypot(p[1]-pos[1],p[2]-pos[2],p[3]-pos[3])
-            d<bd && (bd=d;best=v)
+            if d<bd
+                bd2=bd;bd=d;best=v
+            elseif d<bd2
+                bd2=d
+            end
         end
         bd<=1e-9*scale && return best
+        # The stored keys were evaluated at the generatrix's refresh-time
+        # parameters; a later native re-grading can shift the same logical
+        # node a few e-9 along the curve (a curved generatrix's u drifts
+        # when the 1-D producer re-integrates it). The row correspondence is
+        # still unambiguous — the drift stays far inside the key's Voronoi
+        # cell — so accept the nearest row when it dominates the runner-up
+        # by an order of magnitude and the displacement stays well under
+        # any reachable layer offset. A genuinely foreign point sits between
+        # keys with best≈second distances and still rejects.
+        bd<=1e-7*scale && bd<=0.1*bd2 && return best
         throw(ArgumentError(
             "$caller: boundary-layer copy evaluated $(p) off the wall's " *
             "stored nodes"))
