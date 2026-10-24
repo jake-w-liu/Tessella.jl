@@ -459,6 +459,14 @@ const _OPT_HEX_FACES = ((1,4,3,2),(1,2,6,5),(1,5,8,4),
 const _OPT_PRI_EDGES = ((1,2),(1,3),(1,4),(2,3),(2,5),(3,6),
                         (4,5),(4,6),(5,6))
 const _OPT_PRI_QFACES = ((1,2,5,4),(1,4,6,3),(2,3,6,5))
+# gmsh type-14 reference pyramid in slot order: base corners 1:4 on
+# {-1,1}² at w=0, apex 5 at w=1, edge mids 6:13 in the interleaved
+# (1,2),(1,4),(1,5),(2,3),(2,5),(3,4),(3,5),(4,5) order, base-quad
+# center 14.
+const _OPT_PYR_REF = ((-1.,-1.,0.),(1.,-1.,0.),(1.,1.,0.),(-1.,1.,0.),
+                      (0.,0.,1.),(0.,-1.,0.),(-1.,0.,0.),(-.5,-.5,.5),
+                      (1.,0.,0.),(.5,-.5,.5),(0.,1.,0.),(.5,.5,.5),
+                      (-.5,.5,.5),(0.,0.,0.))
 
 # Node positions of one unit reference element mapped by `mapfn` (identity
 # gives the unit reference shape itself).
@@ -497,6 +505,10 @@ function _opt_block_nodes(family::Symbol, mapfn)
             push!(pts, mapfn(0.25 .* (pc[f[1]] .+ pc[f[2]] .+
                                       pc[f[3]] .+ pc[f[4]])))
         end
+    elseif family === :pyr14
+        for p in _OPT_PYR_REF
+            push!(pts, mapfn(p))
+        end
     elseif family === :tri6
         for p in ((0.,0.),(1.,0.),(0.,1.),(0.5,0.),(0.5,0.5),(0.,0.5))
             push!(pts, mapfn((p[1], p[2], 0.0)))
@@ -510,7 +522,7 @@ end
 # Intern a list of per-element node-position vectors into shared coordinates
 # and an nnodes × nelements connectivity; returns (coords, conn, positions).
 function _opt_assemble(families::Vector{Symbol}, maps::Vector)
-    rows = Dict(:tri6=>6, :quad9=>9, :hex27=>27, :pri18=>18)
+    rows = Dict(:tri6=>6, :quad9=>9, :hex27=>27, :pri18=>18, :pyr14=>14)
     index = Dict{NTuple{3,Float64},Int32}()
     nodes = NTuple{3,Float64}[]
     per_elem = [ _opt_block_nodes(f, maps[i]) for (i,f) in enumerate(families)]
@@ -556,6 +568,40 @@ function _opt_oracle_grads(::Val{13}, r, s, w)
     return [(dr[a]*lw[b], ds[a]*lw[b], tv[a]*dw[b])
             for (a,b) in HighOrder._P2PRI_NODES]
 end
+function _opt_oracle_grads(::Val{14}, r, s, w)
+    # Collapsed-map Jacobian weights of the type-14 pyramid in loop form:
+    # each node's (du,dv,dw) coefficient is found by scanning the semantic
+    # node→index tables rather than the module's per-node ntuple tables.
+    # u=(1-w)r, v=(1-w)s; the third column carries the apex-limit-safe
+    # directional derivative  cw + r·du + s·dv.
+    q = 1.0 - w; w2 = 1.0 - 2.0w
+    lr = _opt_lag(r); dlr = _opt_dlag(r)
+    ls = _opt_lag(s); dls = _opt_dlag(s)
+    br = (0.5 - 0.5r, 0.5 + 0.5r); dbr = (-0.5, 0.5)
+    bs = (0.5 - 0.5s, 0.5 + 0.5s); dbs = (-0.5, 0.5)
+    grads = Vector{NTuple{3,Float64}}(undef, 14)
+    for k in 1:14
+        au = 0.0; av = 0.0; cw = 0.0
+        for (node, i, j) in HighOrder._P2PYR_BASE_NODES
+            node == k || continue
+            au += q*dlr[i]*ls[j]; av += q*lr[i]*dls[j]
+            cw += -2.0*q*lr[i]*ls[j]
+        end
+        for (node, i, j) in HighOrder._P2PYR_CORNER_NODES
+            node == k || continue
+            au += -w*dbr[i]*bs[j]; av += -w*br[i]*dbs[j]
+            cw += -w2*br[i]*bs[j]
+        end
+        for (node, i, j) in HighOrder._P2PYR_MIDDLE_NODES
+            node == k || continue
+            au += 4.0w*dbr[i]*bs[j]; av += 4.0w*br[i]*dbs[j]
+            cw += 4.0w2*br[i]*bs[j]
+        end
+        k == 5 && (cw += 4.0w - 1.0)
+        grads[k] = (au, av, cw + r*au + s*av)
+    end
+    return grads
+end
 function _opt_oracle_J(coords, conn, t, grads)
     J = zeros(3,3)
     for (k,g) in enumerate(grads)
@@ -593,6 +639,16 @@ function _opt_oracle_min_scaled(coords, conn, kind, ts=axes(conn,2))
                      s in range(0., 1.; length=3),
                      w in range(-1., 1.; length=3)
             r + s > 1 && continue
+            J = _opt_oracle_J(coords, conn, t,
+                              _opt_oracle_grads(kind, r, s, w))
+            v = _opt_oracle_scaled(J)
+            v < mn && (mn = v)
+        end
+    elseif kind == Val(14)
+        # Collapsed coordinates: r,s ∈ [-1,1]² and the height w ∈ [0,1].
+        for t in ts, r in range(-1., 1.; length=3),
+                     s in range(-1., 1.; length=3),
+                     w in range(0., 1.; length=3)
             J = _opt_oracle_J(coords, conn, t,
                               _opt_oracle_grads(kind, r, s, w))
             v = _opt_oracle_scaled(J)
@@ -742,15 +798,59 @@ end
         end
     end
 
-    @testset "uncertified families no-op and exclude shared nodes" begin
-        # A pure Pyr14 block is skipped: it has no boolean Bernstein bound.
-        pyr = reshape(Int32.(collect(1:14)), 14, 1)
-        coords = repeat(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1], 1, 4)[:,1:14]
+    @testset "Pyr14 shared-base center relocates under the pyramid certificate" begin
+        # Two pyramids glued base-to-base (an octahedron): the second is the
+        # determinant-(+1) composition (-x, y, -z), so both elements carry
+        # positive orientation while the base quad and its center are
+        # interior to the complex.  The shared base center is the sole
+        # movable slot — base-perimeter edge mids lie on boundary side
+        # facets and the apex mids are boundary too.
+        flip = p -> (-p[1], p[2], -p[3])
+        coords, p14, index = _opt_assemble([:pyr14,:pyr14], [identity, flip])
+        center = Int(index[(0.0,0.0,0.0)])
+        target = copy(coords[:,center])
         before = copy(coords)
-        moved = optimize_p2_interior!(coords, ((Int32(14), pyr),),
-                                      trues(size(coords,2)))
-        @test moved == (0, Inf, Inf, 0, 0)
+        coords[:,center] .+= (0.10, -0.12, 0.0)   # in-plane warp, stays valid
+        warped = copy(coords[:,center])
+        min0 = _opt_oracle_min_scaled(coords, p14, Val(14))
+        @test min0 > 0
+        moved = optimize_p2_interior!(coords, ((Int32(14), p14),),
+                                      trues(size(coords,2));
+                                      itermax=60, passes=10)
+        @test moved[1] >= 1
+        @test _opt_oracle_min_scaled(coords, p14, Val(14)) > min0
+        @test norm(coords[:,center] .- target) < norm(warped .- target)
+        for (p,i) in index
+            Int(i) == center && continue
+            @test coords[:,Int(i)] == before[:,Int(i)]
+        end
+    end
+
+    @testset "Pyr14 lone element and folded incident element stay fixed" begin
+        # A lone pyramid's every facet is complex boundary: no candidates.
+        coords, p14, _ = _opt_assemble([:pyr14], [identity])
+        before = copy(coords)
+        moved = optimize_p2_interior!(coords, ((Int32(14), p14),),
+                                      trues(size(coords,2));
+                                      itermax=60, passes=10)
+        @test moved[1] == 0
         @test coords == before
+        # A mirror-wound neighbor keeps negative orientation: its incident
+        # certificate fails closed, so the shared base center cannot move.
+        mirror = p -> (p[1], p[2], -p[3])
+        coords2, p14b, index2 =
+            _opt_assemble([:pyr14,:pyr14], [identity, mirror])
+        center2 = Int(index2[(0.0,0.0,0.0)])
+        coords2[:,center2] .+= (0.10, -0.12, 0.0)
+        before2 = copy(coords2)
+        moved2 = optimize_p2_interior!(coords2, ((Int32(14), p14b),),
+                                       trues(size(coords2,2));
+                                       itermax=60, passes=10)
+        @test moved2[1] == 0
+        @test coords2 == before2
+    end
+
+    @testset "uncertified families no-op and exclude shared nodes" begin
         # A node shared between a certified Tet10 interior edge and a Tri6
         # block is a cross-family support: it never moves even though the
         # same edge is a Tet10-interior candidate.

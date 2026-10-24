@@ -16,8 +16,9 @@
 #
 # The pass itself lives in HighOrder.optimize_p2_interior! and covers every
 # full-P2 family with an exact Bernstein positivity bound — Tri6, Quad9,
-# Tet10, Hex27, Prism18 — while Pyr14 and every uncertified block family
-# keep their nodes fixed.  Curve-owned mids additionally slide along their
+# Tet10, Hex27, Prism18 and Pyr14 (the collapsed-map certificate of
+# HighOrderPyramid.jl supplies its boolean bound) — while every uncertified
+# block family keeps its nodes fixed.  Curve-owned mids additionally slide along their
 # owning CAD curve in parameter space and face-owned mids slide in the
 # owning surface's (u,v) parameters — both re-evaluated through the same
 # model evaluators that produced the stored parameters.  This file

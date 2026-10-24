@@ -268,3 +268,144 @@ function _p2_pyramid_jacobian_certify(v::NTuple{14,NTuple{3,Float64}},
         "certified by tensor Bernstein bounds; the general isoparametric " *
         "placement planner is pending"))
 end
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Mesh.HighOrderOptimize — Pyr14 admission into the certificate-gated interior
+# relocation engine (OPT01 bounded slice).
+#
+# optimize_p2_interior! admits a block family through exactly one gate — the
+# _p2opt_family lookup defined earlier in this module — evaluates per-element
+# acceptance through _p2opt_certify, and samples the minimum scaled Jacobian
+# through _p2opt_grads.  This include is loaded after every certified-family
+# table, so the Pyr14 pieces live here beside the sign certificate they reuse:
+#
+#   * _P2OPT_PYR14 is the family descriptor in the same layout as the
+#     _P2OPT_FAMILIES entries.  Node roles follow the gmsh type-14 order —
+#     primaries 1:5 (four base corners + apex), edge mids 6:13 in the
+#     interleaved order (1,2),(1,4),(1,5),(2,3),(2,5),(3,4),(3,5),(4,5), and
+#     the base-quad center 14 as the sole face-center slot; triangles carry
+#     no face-center mid, so there are no interior slots.
+#   * _p2opt_family is extended below on every builtin concrete Integer
+#     subtype — new, strictly-more-specific methods (the existing generic
+#     ::Integer method stays in place and still answers for custom Integer
+#     subtypes, where type 14 resolves to `nothing` exactly as before).
+#     This include is loaded after the generic method was defined, and
+#     module precompilation forbids overwriting it; dispatching on the
+#     concrete tag types the gmsh catalog stores is the lawful extension
+#     point that admits the descriptor into the single admission gate.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Per-node (i,j) index tables of _p2opt_grads(::Val{14}), (0,0) = unused:
+# the base quad's quadratic-Lagrange index on {-1,0,1}² (nodes 1:4,6,7,9,11,
+# 14 per _P2PYR_BASE_NODES), the bilinear index on {-1,1}² of the base
+# corners feeding B4 (_P2PYR_CORNER_NODES), and of the sloping-edge mids
+# feeding M4 (_P2PYR_MIDDLE_NODES).
+const _P2OPT_PYR14_Q9 = ((1,1),(3,1),(3,3),(1,3),(0,0),(2,1),(1,2),
+                        (0,0),(3,2),(0,0),(2,3),(0,0),(0,0),(2,2))
+const _P2OPT_PYR14_B4 = ((1,1),(2,1),(2,2),(1,2),(0,0),(0,0),(0,0),
+                        (0,0),(0,0),(0,0),(0,0),(0,0),(0,0),(0,0))
+const _P2OPT_PYR14_M4 = ((0,0),(0,0),(0,0),(0,0),(0,0),(0,0),(0,0),
+                        (1,1),(0,0),(2,1),(0,0),(2,2),(1,2),(0,0))
+
+# Collapsed coordinates (r,s,w) of the fourteen lagrange nodes — the sample
+# set of the relocation engine.  u=(1-w)r, v=(1-w)s maps the physical node
+# positions onto r,s ∈ [-1,1]; the apex maps every (r,s,1) to the apex, and
+# the (0,0,1) axis direction is used as its sample point.
+const _P2OPT_PYR14_SAMPLES = (
+    (-1.,-1.,0.), (1.,-1.,0.), (1.,1.,0.), (-1.,1.,0.), (0.,0.,1.),
+    (0.,-1.,0.), (-1.,0.,0.), (-1.,-1.,.5), (1.,0.,0.), (1.,-1.,.5),
+    (0.,1.,0.), (1.,1.,.5), (-1.,1.,.5), (0.,0.,0.))
+
+const _P2OPT_PYR14 = (
+    kind=Val(14), msh=Int32(14), rows=14, primary=5,
+    edge_slots=((6,1,2),(7,1,4),(8,1,5),(9,2,3),(10,2,5),
+                (11,3,4),(12,3,5),(13,4,5)),
+    face_slots=((14,(1,2,3,4)),), interior_slots=(),
+    facets=((1,2,3,4),(1,2,5),(2,3,5),(3,4,5),(4,1,5)),
+    samples=_P2OPT_PYR14_SAMPLES, volume=true)
+
+# Physical (u,v,w) derivative weights of the collapsed type-14 map at the
+# collapsed point (r,s,w) — the per-node coefficients of the Jacobian
+# columns, so Σ_k x_k·g_k yields F_u, F_v, F_w:
+#   A = F_u = ∂_rG/(1-w) = (1-w)·∂_rQ9 + w·∂_r(4M4-B4)
+#   B = F_v = ∂_sG/(1-w) = (1-w)·∂_sQ9 + w·∂_s(4M4-B4)
+#   F_w   = G_w + r·A + s·B,
+#   G_w = C = -2(1-w)·Q9 + (1-2w)·(4M4-B4) + (4w-1)·P
+# All terms are polynomial in (r,s,w), so the apex limit w→1 stays finite
+# for every approach direction (det(A,B,C) equals the physical Jacobian
+# determinant — the r·A+s·B column operation leaves det invariant while
+# giving F_w its true directional value for the scaled-Jacobian norms).
+@inline function _p2opt_grads(::Val{14}, r, s, w)
+    q = 1.0 - w
+    lr = _p2opt_lagrange1(r); dlr = _p2opt_dlagrange1(r)
+    ls = _p2opt_lagrange1(s); dls = _p2opt_dlagrange1(s)
+    br = (0.5 - 0.5*r, 0.5 + 0.5*r); dbr = (-0.5, 0.5)
+    bs = (0.5 - 0.5*s, 0.5 + 0.5*s); dbs = (-0.5, 0.5)
+    w2 = 1.0 - 2.0*w
+    return ntuple(Val(14)) do k
+        au = 0.0; av = 0.0; cw = 0.0
+        qi = _P2OPT_PYR14_Q9[k]
+        if qi[1] != 0
+            i, j = qi
+            au += q*dlr[i]*ls[j]
+            av += q*lr[i]*dls[j]
+            cw += -2.0*q*lr[i]*ls[j]
+        end
+        ci = _P2OPT_PYR14_B4[k]
+        if ci[1] != 0
+            i, j = ci
+            au += -w*dbr[i]*bs[j]
+            av += -w*br[i]*dbs[j]
+            cw += -w2*br[i]*bs[j]
+        end
+        mi = _P2OPT_PYR14_M4[k]
+        if mi[1] != 0
+            i, j = mi
+            au += 4.0*w*dbr[i]*bs[j]
+            av += 4.0*w*br[i]*dbs[j]
+            cw += 4.0*w2*br[i]*bs[j]
+        end
+        k == 5 && (cw += 4.0*w - 1.0)
+        (au, av, cw + r*au + s*av)
+    end
+end
+
+# The certified relocation families by gmsh type.  The single admission
+# gate is _p2opt_family(::Integer) defined earlier in this module and it
+# must not be overwritten during module precompilation, so Pyr14 is
+# admitted through strictly-more-specific methods on every builtin concrete
+# Integer subtype — the concrete tag types a caller can actually hand the
+# optimizer — while the generic method keeps serving every custom Integer
+# subtype with the original _P2OPT_FAMILIES scan (type 14 stays `nothing`
+# there, the pre-admission fail-closed behavior).
+@inline function _p2opt_pyr14_family(msh::Integer)
+    msh == 14 && return _P2OPT_PYR14
+    for fam in _P2OPT_FAMILIES
+        fam.msh == msh && return fam
+    end
+    return nothing
+end
+for T in (Bool, Int8, Int16, Int32, Int64, Int128,
+          UInt8, UInt16, UInt32, UInt64, UInt128, BigInt)
+    @eval _p2opt_family(msh::$T) = _p2opt_pyr14_family(msh)
+end
+
+# The family's exact positivity certificate — the relocation gate.  The
+# existing sufficient bound (interval derivative box first, then the 144
+# exact dyadic Bernstein coefficients) is evaluated at strict positive
+# orientation; its throw contract becomes `false` for the optimizer, so an
+# inconclusive bound freezes the element without ever asserting a folded
+# element is valid.
+@inline function _p2opt_certify(::Val{14}, coords, conn, t)
+    v = ntuple(Val(14)) do k
+        n = conn[k, t]
+        (coords[1, n], coords[2, n], coords[3, n])
+    end
+    try
+        _p2_pyramid_jacobian_certify(v, 1, "optimize_p2_interior!")
+        return true
+    catch err
+        (err isa InterruptException || err isa OutOfMemoryError) && rethrow()
+        return false
+    end
+end
