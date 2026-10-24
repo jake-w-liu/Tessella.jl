@@ -79,13 +79,22 @@ end
 # construction in ModelMetricSurfaceProducer; the OCC-curved and primitive
 # factory kernels keep the unextended set because 7 names machinery they do
 # not have.
+# Upstream `Mesh.Algorithm=2` (AUTO) resolves per face: Delaunay on planes
+# and MeshAdapt on every non-planar class — verified on the Gmsh 4.15.2
+# binary, where Cylinder/Sphere/ruled Surface/BSpline faces all report
+# "Meshing surface N (<kind>, MeshAdapt)". No native MeshAdapt producer
+# exists, so the implemented Frontal-Delaunay construction serves the
+# off-plane admission instead of rejecting: it is the closest native
+# producer for upstream's curved-face outcome. On the planar PSLG path
+# `:ruled`/`:tric` faces mesh through the `:frontal` arm; on OCC-curved
+# faces the parametric kernel treats 5/6 identically.
 function _normal_surface_mesh_algorithm(m::GeoModel,t::Int,caller;metric::Bool=false)
     algorithm=_surface_mesh_algorithm(m,t)
-    algorithm==2 && (algorithm=_surface_type(m,t)==:plane ? 5 : 1)
+    algorithm==2 && (algorithm=_surface_type(m,t)==:plane ? 5 : 6)
     algorithm in (metric ? (3,5,6,7) : (3,5,6)) || throw(ArgumentError(
         "$caller: mesh algorithm $algorithm on Surface[$t] is not " *
         "implemented by the ordinary native surface mesher; supported: " *
-        "2 (Auto on Plane), 3 (initial only), 5 (Delaunay), " *
+        "2 (Auto), 3 (initial only), 5 (Delaunay), " *
         "6 (Frontal-Delaunay)" *
         (metric ? ", 7 (metric-driven bisection)" : "")))
     return algorithm

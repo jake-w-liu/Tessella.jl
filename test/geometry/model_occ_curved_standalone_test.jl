@@ -142,18 +142,21 @@ end
         M._model_occ_synchronize!(m)
         return m,findfirst(==(:cylinder),m.surface_types)
     end
-    # Mesh.Algorithm admission is shared with the volume path: 7 (BAMG) and
-    # the other producer-less selectors reject on curved faces.
+    # Mesh.Algorithm admission is shared with the volume path: 7 (BAMG) is
+    # implemented on curved faces through the metric producer — without an
+    # anisotropic background size field it rejects loudly with the field
+    # requirement rather than a not-implemented claim.
     m,lat=_sector()
     M.set_algorithm!(m,2,lat,7)
     err=_error(()->M.mesh_model_surface(m,lat))
     @test err isa ArgumentError
-    @test occursin("not implemented",sprint(showerror,err))
+    @test occursin("anisotropic",sprint(showerror,err))
     m,lat=_sector()
-    m.meshing.algorithm_2d=2   # AUTO resolves to MeshAdapt off-plane
-    err=_error(()->M.mesh_model_surface(m,lat))
-    @test err isa ArgumentError
-    @test occursin("not implemented",sprint(showerror,err))
+    m.meshing.algorithm_2d=2   # AUTO resolves to Frontal-Delaunay off-plane
+    amesh=M.mesh_model_surface(m,lat)
+    @test MT.validate(amesh).ok
+    @test MT.ntris(amesh)>0
+    @test _on_cylinder(amesh,1.0,0.0,2.0)
     # Recombination has no uv analogue in the lifted construction.
     m,lat=_sector()
     m.meshing.recombine_all=true

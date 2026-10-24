@@ -6,8 +6,10 @@
 # primitive factories' analytic boundary (implicit volumes) may silently
 # substitute their own construction for a selector naming different
 # machinery. The Delaunay-family policies 3/5/6 are admitted; AUTO resolves
-# to MeshAdapt off-plane and every selector without a native producer keeps
-# the ordinary surface mesher's loud not-implemented rejection.
+# per face to Delaunay on planes and to the native Frontal-Delaunay
+# construction off-plane (upstream's AUTO picks MeshAdapt — no native
+# producer exists — so Frontal serves the admission), and every selector
+# without a native producer keeps the loud not-implemented rejection.
 #
 # Before the admission was wired, every `Mesh.Algorithm` value produced the
 # identical mesh on a cylinder volume — a silent degradation.
@@ -56,10 +58,18 @@ _error(f)=try;f();nothing catch err;err end
     @test MT.ntets(initial)>0
     @test MT.nnodes(initial)<MT.nnodes(refined)
 
+    # AUTO resolves per face like upstream: plane caps take Delaunay and
+    # the curved lateral takes the native Frontal-Delaunay arm (the
+    # stand-in for upstream's unimplemented MeshAdapt) — the whole solid
+    # fills instead of rejecting.
+    auto=M.mesh_model_volume(_sector(2),1)
+    @test MT.validate(auto).ok
+    @test MT.ntets(auto)>0
+
     # Selectors without a native producer keep the loud rejection — the
-    # lateral rejects 2 (AUTO resolves to MeshAdapt off-plane), 1, 8, 9,
-    # 10 and 11 even though the caps would accept several of them.
-    for algorithm in (1,2,8,9,10,11)
+    # lateral rejects 1, 8, 9, 10 and 11 even though the caps would accept
+    # several of them.
+    for algorithm in (1,8,9,10,11)
         err=_error(()->M.mesh_model_volume(_sector(algorithm),1))
         @test err isa ArgumentError
         @test occursin("not implemented",sprint(showerror,err))
@@ -86,15 +96,15 @@ end
 @testset "implicit primitive volumes admit the Delaunay family only" begin
     # The canned `cylinder_surface` boundary is the native analytic product
     # serving the admitted family — the surface is the deterministic initial
-    # boundary, so 3/5/6 all fill the solid — while every selector that
+    # boundary, so AUTO and 3/5/6 all fill the solid — while every selector that
     # names machinery without a native producer now rejects loudly instead
     # of silently returning the same tessellation.
-    for algorithm in (3,5,6)
+    for algorithm in (2,3,5,6)
         mesh=M.mesh_model_volume(_primitive_cylinder(algorithm),1)
         @test MT.validate(mesh).ok
         @test MT.ntets(mesh)>0
     end
-    for algorithm in (1,2,7,8,9,10,11)
+    for algorithm in (1,7,8,9,10,11)
         err=_error(()->M.mesh_model_volume(_primitive_cylinder(algorithm),1))
         @test err isa ArgumentError
         @test occursin("not implemented",sprint(showerror,err))
@@ -108,8 +118,8 @@ end
     @test occursin("Surface[$cap]",sprint(showerror,err))
 
     # AUTO still resolves per face: an all-plane primitive box takes the
-    # Delaunay branch, while a sphere's face resolves to the unimplemented
-    # MeshAdapt and rejects.
+    # Delaunay branch, and a sphere's curved face takes Frontal-Delaunay —
+    # the native stand-in for upstream's unimplemented MeshAdapt.
     box=GeoModel()
     add_box!(box,0.0,0.0,0.0,1.0,1.0,1.0;tag=1)
     box.meshing.algorithm_2d=2
@@ -118,9 +128,8 @@ end
     sphere=GeoModel()
     add_sphere!(sphere,0.0,0.0,0.0,1.0;tag=1)
     sphere.meshing.algorithm_2d=2
-    err=_error(()->M.mesh_model_volume(sphere,1))
-    @test err isa ArgumentError
-    @test occursin("not implemented",sprint(showerror,err))
+    smesh=M.mesh_model_volume(sphere,1)
+    @test MT.validate(smesh).ok && MT.ntets(smesh)>0
 end
 
 @testset "Mesh.Algorithm3D ordinary-volume admission" begin
