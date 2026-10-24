@@ -563,7 +563,16 @@ end
 
 function _chain_ring(edges,caller)
     if length(edges)<3
-        (isempty(edges) || !all(e->e[1]==e[2],edges)) && throw(ArgumentError(
+        # One or two self-loop edges (closed rim circles on a slit face) are
+        # legal without chaining; a two-edge loop is legal when the pair
+        # chains closed (a trimmed face's arc+chord bound). Anything else —
+        # a single open edge, an unchained pair, or an empty loop — is not a
+        # closed boundary.
+        ok=!isempty(edges) &&
+            (all(e->e[1]==e[2],edges) ||
+             (length(edges)==2 &&
+              edges[1][2]==edges[2][1] && edges[2][2]==edges[1][1]))
+        ok || throw(ArgumentError(
             "$caller: face boundary loop has fewer than three edges"))
     end
     for i in 1:length(edges)-1
@@ -1079,6 +1088,719 @@ function _step_cylinder_shell(entities,faces,curvekinds,caller)
     t_hi=maximum(_brep_vdot(_brep_vsub(q,c0),z) for q in qc)
     base_center=(c0[1]+t_lo*z[1],c0[2]+t_lo*z[2],c0[3]+t_lo*z[3])
     return cylinder_surface(base_center,z,R,t_hi-t_lo)
+end
+
+# ── trimmed cylindrical sector ────────────────────────────────────────────────
+
+# Cylinder placement including the reference X axis: the canonical rim grid of
+# a trimmed sector is measured about (x,y) in the surface's own frame, so a
+# rotated placement produces the correct angular window.
+function _step_cylinder_frame(entities,surf,caller)
+    length(surf.args)>=3 || throw(ArgumentError(
+        "$caller: CYLINDRICAL_SURFACE #$(surf.id) is truncated"))
+    R=Float64(surf.args[end])
+    (isfinite(R) && R>0) || throw(ArgumentError(
+        "$caller: CYLINDRICAL_SURFACE #$(surf.id) radius must be positive"))
+    center=(0.0,0.0,0.0); z=(0.0,0.0,1.0); x=nothing
+    plcref=_first_ref(surf.args)
+    if plcref!==nothing
+        plc=_deref_entity(entities,plcref)
+        if plc!==nothing && plc.kind=="AXIS2_PLACEMENT_3D"
+            p=_deref_point(entities,_first_ref(plc.args))
+            p===nothing || (center=p)
+            refs=[a for a in plc.args if a isa Tuple && a[1]===:ref]
+            if length(refs)>=2
+                d=_deref_direction(entities,refs[2]); d===nothing || (z=d)
+            end
+            if length(refs)>=3
+                x=_deref_direction(entities,refs[3])
+            end
+        end
+    end
+    all(isfinite,center) || throw(ArgumentError(
+        "$caller: CYLINDRICAL_SURFACE #$(surf.id) has a non-finite center"))
+    z=_brep_vunit(z,caller)
+    x=x===nothing ? _brep_default_x(z,caller) : _brep_ortho(x,z,caller)
+    y=_brep_vcross(z,x)
+    return center,z,x,y,R
+end
+
+# CIRCLE placement including its in-plane orthonormal axes; a missing ref dir
+# falls back to the deterministic perpendicular, matching the frame rule used
+# by the torus certificate.
+function _step_circle_frame_full(entities,ent,caller)
+    length(ent.args)>=3 || throw(ArgumentError(
+        "$caller: CIRCLE #$(ent.id) is truncated"))
+    r=Float64(ent.args[end])
+    (isfinite(r) && r>0) || throw(ArgumentError(
+        "$caller: CIRCLE #$(ent.id) radius must be positive"))
+    center=(0.0,0.0,0.0); z=(0.0,0.0,1.0); x=nothing
+    plcref=_first_ref(ent.args)
+    if plcref!==nothing
+        plc=_deref_entity(entities,plcref)
+        if plc!==nothing && plc.kind=="AXIS2_PLACEMENT_3D"
+            p=_deref_point(entities,_first_ref(plc.args))
+            p===nothing || (center=p)
+            refs=[a for a in plc.args if a isa Tuple && a[1]===:ref]
+            if length(refs)>=2
+                d=_deref_direction(entities,refs[2]); d===nothing || (z=d)
+            end
+            if length(refs)>=3
+                x=_deref_direction(entities,refs[3])
+            end
+        end
+    end
+    all(isfinite,center) || throw(ArgumentError(
+        "$caller: CIRCLE #$(ent.id) has a non-finite center"))
+    z=_brep_vunit(z,caller)
+    x=x===nothing ? _brep_default_x(z,caller) : _brep_ortho(x,z,caller)
+    y=_brep_vcross(z,x)
+    return center,z,x,y,r
+end
+
+const _BREP_EDGE_USE=NamedTuple{(:ec,:v1,:v2,:base),
+    Tuple{StepEntity,NTuple{3,Float64},NTuple{3,Float64},StepEntity}}
+
+# Per-bound ordered edge uses of one face: each bound must be an EDGE_LOOP over
+# ORIENTED_EDGEs; a use carries its EDGE_CURVE entity, the traversal endpoints
+# (ORIENTED_EDGE flag applied) and the innermost curve record. This mirrors
+# _step_face_edge_bounds but keeps bound grouping and edge identity so the
+# trimmed-sector certificate can reason about shared-edge incidence.
+function _step_face_bound_uses(entities,fe,curvekinds,caller)
+    i=_skip_name(fe.args)
+    bounds=fe.args[i]
+    bounds isa Vector || throw(ArgumentError(
+        "$caller: $(fe.kind) #$(fe.id) boundary list is malformed"))
+    isempty(bounds) && throw(ArgumentError(
+        "$caller: $(fe.kind) #$(fe.id) has no face boundaries"))
+    out=Vector{_BREP_EDGE_USE}[]
+    for bref in bounds
+        be=_deref_entity(entities,bref)
+        (be!==nothing && be.kind in _STEP_BREP_BOUND_KINDS) || throw(ArgumentError(
+            "$caller: $(fe.kind) #$(fe.id) boundary is not a FACE_BOUND/FACE_OUTER_BOUND"))
+        loop=_deref_entity(entities,be.args[2])
+        (loop!==nothing && loop.kind=="EDGE_LOOP") || throw(ArgumentError(
+            "$caller: curved-face certificate requires EDGE_LOOP bounds; saw "*
+            "$(loop===nothing ? "a missing loop" : loop.kind)"))
+        j=_skip_name(loop.args)
+        refs=loop.args[j]
+        refs isa Vector || throw(ArgumentError(
+            "$caller: EDGE_LOOP #$(loop.id) member list is malformed"))
+        uses=_BREP_EDGE_USE[]
+        for r in refs
+            oe=_deref_entity(entities,r)
+            (oe!==nothing && oe.kind=="ORIENTED_EDGE") || throw(ArgumentError(
+                "$caller: EDGE_LOOP #$(loop.id) member is not an ORIENTED_EDGE"))
+            ecref=nothing
+            for a in oe.args
+                a isa Tuple && a[1]===:ref && (ecref=a)
+            end
+            ec=_deref_entity(entities,ecref)
+            (ec!==nothing && ec.kind=="EDGE_CURVE") || throw(ArgumentError(
+                "$caller: ORIENTED_EDGE #$(oe.id) does not reference an EDGE_CURVE"))
+            (v1,v2),_,curve=_step_oriented_edge(entities,oe,curvekinds,caller)
+            base=_step_curve_base(entities,curve,0)
+            base===nothing && throw(ArgumentError(
+                "$caller: EDGE_CURVE geometry of ORIENTED_EDGE #$(oe.id) is unresolvable"))
+            push!(uses,(ec=ec,v1=v1,v2=v2,base=base))
+        end
+        push!(out,uses)
+    end
+    return out
+end
+
+# Rim-arc certificate for the trimmed sector: an open EDGE_CURVE whose
+# resolved CIRCLE is coaxial with the certified cylinder at radius R. Returns
+# (rim, lo, span) — the arc's axial coordinate and the CCW angular window
+# [lo, lo+span] it covers, measured in the cylinder's own (x,y) frame. The
+# parametric span comes from the CIRCLE's own placement; the EDGE_CURVE
+# same_sense flag selects which of the complementary arcs is covered — for
+# same_sense the param-forward arc runs vs→ve, otherwise ve→vs — and the
+# circle axis's sign relative to the cylinder axis converts it to the CCW
+# window. The trailing consistency check pins the coverage endpoints to the
+# actual vertices so a flipped frame cannot alias the complement.
+function _step_cyl_rim_arc(entities,use,c0,z,x,y,R,tol,atol,caller)
+    ec=use.ec; base=use.base
+    length(ec.args)>=4 || throw(ArgumentError(
+        "$caller: EDGE_CURVE #$(ec.id) is truncated"))
+    vs=_step_vertex_point(entities,ec.args[2])
+    ve=_step_vertex_point(entities,ec.args[3])
+    (vs===nothing || ve===nothing) && throw(ArgumentError(
+        "$caller: EDGE_CURVE #$(ec.id) has unresolvable vertex geometry"))
+    vs!=ve || throw(ArgumentError(
+        "$caller: closed CIRCLE rim edge #$(ec.id) — a full rim belongs to "*
+        "the full-cylinder certificate"))
+    sense=length(ec.args)>=5 ? _brep_enum(ec.args[5]) : nothing
+    sense===nothing && (sense=true)
+    center,nr,xr,yr,cr=_step_circle_frame_full(entities,base,caller)
+    abs(cr-R)<=tol || throw(ArgumentError(
+        "$caller: rim CIRCLE #$(base.id) radius does not match the "*
+        "cylindrical surface"))
+    nrz=_brep_vdot(nr,z)
+    abs(nrz)>=1.0-atol || throw(ArgumentError(
+        "$caller: rim CIRCLE #$(base.id) is not perpendicular to the "*
+        "cylinder axis"))
+    _brep_axis_dist(center,c0,z)<=tol || throw(ArgumentError(
+        "$caller: rim CIRCLE #$(base.id) center is off the cylinder axis"))
+    for v in (vs,ve)
+        abs(_brep_axis_dist(v,c0,z)-R)<=tol || throw(ArgumentError(
+            "$caller: rim arc EDGE_CURVE #$(ec.id) endpoint is off the "*
+            "cylindrical surface"))
+    end
+    ta=atan(_brep_vdot(_brep_vsub(vs,center),yr),
+            _brep_vdot(_brep_vsub(vs,center),xr))
+    tb=atan(_brep_vdot(_brep_vsub(ve,center),yr),
+            _brep_vdot(_brep_vsub(ve,center),xr))
+    span=sense ? mod(tb-ta,2π) : mod(ta-tb,2π)
+    (span>atol && span<2π-atol) || throw(ArgumentError(
+        "$caller: rim arc EDGE_CURVE #$(ec.id) is degenerate"))
+    th(p)=atan(_brep_vdot(_brep_vsub(p,c0),y),_brep_vdot(_brep_vsub(p,c0),x))
+    sa,sb=th(vs),th(ve)
+    forward=(nrz>0)==sense      # coverage CCW window starts at vs
+    lo=forward ? sa : sb
+    other=forward ? sb : sa
+    err=mod(other-lo-span,2π); err>π && (err-=2π)
+    abs(err)<=atol || throw(ArgumentError(
+        "$caller: rim arc EDGE_CURVE #$(ec.id) frame does not span its "*
+        "endpoints on the cylindrical surface"))
+    return (rim=_brep_vdot(_brep_vsub(center,c0),z),lo=lo,span=span)
+end
+
+# Snap-deduplicate a flat position list: returns (nodes, canon) where canon[i]
+# is the node index of pts[i]. Same sorted-cluster rule as _dedup_ring_nodes —
+# only points within a relative 1e-9 tolerance merge.
+function _dedup_positions(pts,caller)
+    isempty(pts) && throw(ArgumentError("$caller: shell has no vertices"))
+    tol=1e-9*max(_poly_scale(pts),1.0)
+    order=sortperm(pts)
+    canon=Vector{Int32}(undef,length(pts))
+    nodes=NTuple{3,Float64}[]
+    # Sorted-cluster merge: x is the primary sort key, so a cluster head can
+    # only retire once p[1] outruns it — every head inside the x window stays
+    # eligible on the remaining coordinates. Comparing only the latest head
+    # splits a duplicated position whenever an (x,y,z±h) twin sorts between
+    # two (x,y,z) copies, which is exactly the two-rim layout of a cylinder.
+    heads=Int[]; lo=1
+    for oi in order
+        p=pts[oi]
+        while lo<=length(heads) && nodes[heads[lo]][1]<p[1]-tol
+            lo+=1
+        end
+        hit=0
+        for k in lo:length(heads)
+            q=nodes[heads[k]]
+            if abs(p[1]-q[1])<=tol && abs(p[2]-q[2])<=tol && abs(p[3]-q[3])<=tol
+                hit=heads[k]; break
+            end
+        end
+        if hit==0
+            push!(nodes,p); push!(heads,length(nodes)); hit=length(nodes)
+        end
+        canon[oi]=Int32(hit)
+    end
+    length(nodes)<=_BREP_MAX_SURFACE_NODES || throw(ArgumentError(
+        "$caller: shell exceeds the surface node limit"))
+    return nodes,canon
+end
+
+# A closed shell over exactly one CYLINDRICAL_SURFACE lateral face plus PLANE
+# faces covers a trimmed cylindrical sector — the solid between two rim arcs,
+# two cap half-disks/segments perpendicular to the axis and one or two
+# vertical side walls — when:
+#   * the lateral bounds are open rim arcs (certified coaxial CIRCLE edges of
+#     radius R) tiled contiguously on exactly two rim heights plus axial seam
+#     LINEs whose endpoints lie on the wall at the window ends;
+#   * each PLANE face is a rim cap (⊥ axis at one rim height, bounded by rim
+#     arcs of that rim and in-plane chords/radii) or a side wall (∥ axis,
+#     bounded by lines whose vertices sit at the rim heights, with at least
+#     one on-wall axial shared with the lateral face);
+#   * every geometric edge is shared by exactly two faces — LINE edges by
+#     canonical endpoint pair, rim arcs by angular coverage of the certified
+#     window: every elementary interval between consecutive knots is covered
+#     exactly twice (once by the lateral face, once by a cap).
+# The emitted boundary welds one canonical rim grid — knot-aligned at every
+# arc endpoint — so the wall rows and cap arc slices coincide bitwise; cap and
+# wall polygons are ear-clipped and every triangle is oriented by a strict
+# interior point. Returns nothing when the face inventory is not this shape;
+# throws on certified mismatches.
+function _step_partial_cylinder_shell(entities,faces,curvekinds,caller)
+    cyl_index=0
+    for (i,face) in enumerate(faces)
+        face.surf===nothing && return nothing
+        face.rings===nothing && return nothing
+        if face.surf.kind=="CYLINDRICAL_SURFACE"
+            cyl_index==0 || return nothing; cyl_index=i
+        elseif face.surf.kind!="PLANE"
+            return nothing
+        end
+    end
+    (cyl_index!=0 && length(faces)>=4) || return nothing
+    all(f->f.role==1,faces) || return nothing
+    cyl_face=faces[cyl_index]
+    c0,z,x,y,R=_step_cylinder_frame(entities,cyl_face.surf,caller)
+    tol=1e-9*max(R,1.0); atol=1e-9
+    # A trimmed sector's faces are simply connected; a second wire is a hole.
+    all(f->length(f.rings)==1,faces) || throw(ArgumentError(
+        "$caller: trimmed-cylinder shell face has multiple boundary wires — "*
+        "holed faces unsupported"))
+
+    fuses=Vector{_BREP_EDGE_USE}[]
+    for face in faces
+        fe=_deref_entity(entities,(:ref,face.id))
+        fe===nothing && throw(ArgumentError(
+            "$caller: face #$(face.id) record is missing"))
+        push!(fuses,only(_step_face_bound_uses(entities,fe,curvekinds,caller)))
+    end
+
+    # ── lateral face: open rim arcs on two rim heights + axial seams ──────
+    lat_arcs=NamedTuple{(:rim,:lo,:span),Tuple{Float64,Float64,Float64}}[]
+    lat_axial=Tuple{NTuple{3,Float64},NTuple{3,Float64}}[]
+    for u in fuses[cyl_index]
+        if u.base.kind=="CIRCLE"
+            a=_step_cyl_rim_arc(entities,u,c0,z,x,y,R,tol,atol,caller)
+            push!(lat_arcs,(rim=a.rim,lo=a.lo,span=a.span))
+        elseif u.base.kind=="LINE"
+            u.v1!=u.v2 || throw(ArgumentError(
+                "$caller: closed LINE edge #$(u.ec.id) of cylindrical face "*
+                "#$(cyl_face.id) is not an axial seam"))
+            d=_brep_vsub(u.v2,u.v1)
+            abs(_brep_vdot(_brep_vunit(d,caller),z))>=1.0-atol ||
+                throw(ArgumentError(
+                    "$caller: seam edge #$(u.ec.id) of cylindrical face "*
+                    "#$(cyl_face.id) is not parallel to the cylinder axis"))
+            push!(lat_axial,(u.v1,u.v2))
+        else
+            push!(curvekinds,u.base.kind)
+            return nothing
+        end
+    end
+    isempty(lat_arcs) && throw(ArgumentError(
+        "$caller: cylindrical face #$(cyl_face.id) bounds no rim arcs — "*
+        "trimmed cylinders need arcs on both rims"))
+
+    # Cluster the arc rim heights: exactly two distinct rims.
+    ts=sort!([a.rim for a in lat_arcs])
+    h0=first(ts); h1=last(ts)
+    h1-h0>tol || throw(ArgumentError(
+        "$caller: cylindrical face #$(cyl_face.id) rim arcs all share one "*
+        "height — the lateral face cannot be a sector band"))
+    for a in lat_arcs
+        (abs(a.rim-h0)<=tol || abs(a.rim-h1)<=tol) || throw(ArgumentError(
+            "$caller: cylindrical face #$(cyl_face.id) has rim arcs at more "*
+            "than two heights"))
+    end
+    rim_h=(h0,h1)
+    rim_c=( (c0[1]+h0*z[1],c0[2]+h0*z[2],c0[3]+h0*z[3]),
+            (c0[1]+h1*z[1],c0[2]+h1*z[2],c0[3]+h1*z[3]) )
+    rim_arcs=[eltype(lat_arcs)[],eltype(lat_arcs)[]]
+    for a in lat_arcs
+        push!(rim_arcs[abs(a.rim-h0)<=tol ? 1 : 2],a)
+    end
+
+    # Per rim the arcs must tile one contiguous angular window: sorted by
+    # coverage start, every consecutive junction is zero-gap except exactly
+    # one — the complement of the window. A rim tiled complete (split open
+    # arcs spanning the full circle) is a full-cylinder layout variant —
+    # flagged separately because its coincident slit faces cannot be emitted.
+    windows=Tuple{Float64,Float64}[]
+    for arcs in rim_arcs
+        sort!(arcs,by=a->a.lo)
+        W=sum(a.span for a in arcs)
+        (W>atol && W<=2π+atol) || throw(ArgumentError(
+            "$caller: cylindrical face #$(cyl_face.id) rim arcs do not bound "*
+            "a proper window"))
+        gaps=0; start=0.0
+        for i in eachindex(arcs)
+            nxt=i==length(arcs) ? arcs[1] : arcs[i+1]
+            gap=mod(nxt.lo-(arcs[i].lo+arcs[i].span),2π)
+            if gap>atol
+                gaps+=1
+                start=mod(nxt.lo,2π)
+            end
+        end
+        gaps==1 || throw(ArgumentError(
+            "$caller: cylindrical face #$(cyl_face.id) rim arcs overlap or "*
+            "leave disjoint runs — not one trimmed window"))
+        W<2π-atol || throw(ArgumentError(
+            "$caller: cylindrical face #$(cyl_face.id) rim arcs tile the "*
+            "complete circle — a split-rim full cylinder belongs to the "*
+            "closed-rim layout"))
+        push!(windows,(start,W))
+    end
+    th0,W=windows[1]
+    dth=mod(windows[2][1]-th0,2π); dth>π && (dth-=2π)
+    (abs(dth)<=atol && abs(windows[2][2]-W)<=atol) || throw(ArgumentError(
+        "$caller: cylindrical face #$(cyl_face.id) rims do not bound the "*
+        "same angular window"))
+    th_of(p)=atan(_brep_vdot(_brep_vsub(p,c0),y),_brep_vdot(_brep_vsub(p,c0),x))
+    # Angular offset into [0,W]: values just below the window start wrap past
+    # 2π and snap to 0; values at the window end snap to W.
+    offset(p)=(s=mod(th_of(p)-th0,2π);
+               s>2π-atol ? 0.0 : (abs(s-W)<=atol ? W : s))
+    for (v1,v2) in lat_axial
+        for v in (v1,v2)
+            abs(_brep_axis_dist(v,c0,z)-R)<=tol || throw(ArgumentError(
+                "$caller: seam vertex of cylindrical face #$(cyl_face.id) "*
+                "is off the cylindrical surface"))
+            t=_brep_vdot(_brep_vsub(v,c0),z)
+            (abs(t-h0)<=tol || abs(t-h1)<=tol) || throw(ArgumentError(
+                "$caller: seam vertex of cylindrical face #$(cyl_face.id) "*
+                "is off both rim planes"))
+            s=offset(v)
+            (s<=atol || abs(s-W)<=atol) || throw(ArgumentError(
+                "$caller: seam edge of cylindrical face #$(cyl_face.id) "*
+                "does not meet a trimmed window end"))
+        end
+        t1=_brep_vdot(_brep_vsub(v1,c0),z); t2=_brep_vdot(_brep_vsub(v2,c0),z)
+        (abs(t1-h0)<=tol && abs(t2-h1)<=tol) ||
+        (abs(t1-h1)<=tol && abs(t2-h0)<=tol) || throw(ArgumentError(
+            "$caller: seam edge of cylindrical face #$(cyl_face.id) does "*
+            "not join the two rims"))
+        w1=_brep_vsub(v1,c0); w2=_brep_vsub(v2,c0)
+        r1=(w1[1]-t1*z[1],w1[2]-t1*z[2],w1[3]-t1*z[3])
+        r2=(w2[1]-t2*z[1],w2[2]-t2*z[2],w2[3]-t2*z[3])
+        d=_brep_vsub(r1,r2)
+        sqrt(_brep_vdot(d,d))<=tol || throw(ArgumentError(
+            "$caller: seam edge of cylindrical face #$(cyl_face.id) is not "*
+            "a straight generator of the wall"))
+    end
+    end_axial=[false,false]
+    for (v1,v2) in lat_axial
+        s=offset(v1)
+        s<=atol && (end_axial[1]=true)
+        abs(s-W)<=atol && (end_axial[2]=true)
+    end
+    all(end_axial) || throw(ArgumentError(
+        "$caller: cylindrical face #$(cyl_face.id) does not close both "*
+        "window ends with axial seams"))
+
+    # ── planar faces: rim caps or axial side walls ────────────────────────
+    cap_rim=Int[]; cap_i=Int[]; wall_i=Int[]
+    cap_arcs=Vector{NamedTuple{(:rim,:lo,:span),Tuple{Float64,Float64,Float64}}}[]
+    cap_lines=Vector{Tuple{NTuple{3,Float64},NTuple{3,Float64}}}[]
+    for i in eachindex(faces)
+        i==cyl_index && continue
+        face=faces[i]
+        p0,pn=_step_plane_frame(entities,face.surf,caller)
+        pz=_brep_vdot(pn,z)
+        if abs(pz)>=1.0-atol
+            # Rim cap at whichever rim height its plane contains.
+            t=_brep_vdot(_brep_vsub(p0,c0),z)
+            rim=abs(t-h0)<=abs(t-h1) ? 1 : 2
+            H=rim_h[rim]; C=rim_c[rim]
+            abs(_brep_vdot(_brep_vsub(C,p0),pn))<=tol || throw(ArgumentError(
+                "$caller: cap PLANE #$(face.surf.id) does not contain its "*
+                "rim circle"))
+            arcs=eltype(lat_arcs)[]; lines=Tuple{NTuple{3,Float64},NTuple{3,Float64}}[]
+            for u in fuses[i]
+                if u.base.kind=="CIRCLE"
+                    a=_step_cyl_rim_arc(entities,u,c0,z,x,y,R,tol,atol,caller)
+                    abs(a.rim-H)<=tol || throw(ArgumentError(
+                        "$caller: cap face #$(face.id) rim arc #$(u.ec.id) "*
+                        "does not lie in the cap's rim plane"))
+                    slo=mod(a.lo-th0,2π); slo>2π-atol && (slo=0.0)
+                    (slo>=-atol && slo+a.span<=W+atol) || throw(ArgumentError(
+                        "$caller: cap arc #$(u.ec.id) extends past the "*
+                        "trimmed window"))
+                    push!(arcs,a)
+                elseif u.base.kind=="LINE"
+                    u.v1!=u.v2 || throw(ArgumentError(
+                        "$caller: closed LINE edge #$(u.ec.id) of cap face "*
+                        "#$(face.id)"))
+                    for v in (u.v1,u.v2)
+                        abs(_brep_vdot(_brep_vsub(v,c0),z)-H)<=tol ||
+                            throw(ArgumentError(
+                                "$caller: cap face #$(face.id) vertex is "*
+                                "off its rim plane"))
+                        _brep_axis_dist(v,c0,z)<=R+tol || throw(ArgumentError(
+                            "$caller: cap face #$(face.id) vertex lies "*
+                            "outside the rim disk"))
+                        abs(_brep_vdot(_brep_vsub(v,p0),pn))<=tol ||
+                            throw(ArgumentError(
+                                "$caller: cap face #$(face.id) vertex is "*
+                                "off its PLANE"))
+                    end
+                    d=_brep_vsub(u.v2,u.v1)
+                    abs(_brep_vdot(_brep_vunit(d,caller),z))<=atol ||
+                        throw(ArgumentError(
+                            "$caller: cap edge #$(u.ec.id) of face "*
+                            "#$(face.id) is not in the rim plane"))
+                    push!(lines,(u.v1,u.v2))
+                else
+                    push!(curvekinds,u.base.kind)
+                    return nothing
+                end
+            end
+            isempty(arcs) && throw(ArgumentError(
+                "$caller: cap face #$(face.id) bounds no rim arc"))
+            isempty(lines) && throw(ArgumentError(
+                "$caller: cap face #$(face.id) has no closing chord or "*
+                "radius edge — a disk cap belongs to the full cylinder"))
+            push!(cap_rim,rim); push!(cap_i,i)
+            push!(cap_arcs,arcs); push!(cap_lines,lines)
+        elseif abs(pz)<=atol
+            # Vertical side wall: lines only, vertices at rim heights.
+            onwall=false
+            for u in fuses[i]
+                u.base.kind=="LINE" || throw(ArgumentError(
+                    "$caller: side wall face #$(face.id) carries a "*
+                    "$(u.base.kind) edge — not a sector wall"))
+                u.v1!=u.v2 || throw(ArgumentError(
+                    "$caller: closed LINE edge #$(u.ec.id) of side wall "*
+                    "face #$(face.id)"))
+                d=_brep_vsub(u.v2,u.v1); ud=_brep_vunit(d,caller)
+                dz=_brep_vdot(ud,z)
+                (abs(dz)>=1.0-atol || abs(dz)<=atol) || throw(ArgumentError(
+                    "$caller: side wall edge #$(u.ec.id) of face "*
+                    "#$(face.id) is neither axial nor in a rim plane"))
+                for v in (u.v1,u.v2)
+                    t=_brep_vdot(_brep_vsub(v,c0),z)
+                    (abs(t-h0)<=tol || abs(t-h1)<=tol) || throw(
+                        ArgumentError(
+                            "$caller: side wall face #$(face.id) vertex "*
+                            "is off both rim planes"))
+                    _brep_axis_dist(v,c0,z)<=R+tol || throw(ArgumentError(
+                        "$caller: side wall face #$(face.id) vertex lies "*
+                        "outside the cylinder"))
+                    abs(_brep_vdot(_brep_vsub(v,p0),pn))<=tol || throw(
+                        ArgumentError(
+                            "$caller: side wall face #$(face.id) vertex "*
+                            "is off its PLANE"))
+                end
+                if abs(dz)>=1.0-atol &&
+                   abs(_brep_axis_dist(u.v1,c0,z)-R)<=tol
+                    onwall=true
+                end
+            end
+            onwall || throw(ArgumentError(
+                "$caller: side wall face #$(face.id) is not bounded to the "*
+                "cylindrical wall"))
+            push!(wall_i,i)
+        else
+            throw(ArgumentError(
+                "$caller: PLANE face #$(face.id) is neither a rim-plane cap "*
+                "nor an axial side wall of the trimmed cylinder"))
+        end
+    end
+    covered=[false,false]
+    for rim in cap_rim; covered[rim]=true; end
+    all(covered) || throw(ArgumentError(
+        "$caller: trimmed-cylinder shell caps do not close both rims"))
+
+    # ── shared-edge incidence ─────────────────────────────────────────────
+    # Canonical vertices over every use endpoint; LINE edges pair by their
+    # unordered endpoint key, rim arcs by angular coverage.
+    vpos=NTuple{3,Float64}[]
+    for us in fuses, u in us
+        push!(vpos,u.v1); push!(vpos,u.v2)
+    end
+    vnodes,vcanon=_dedup_positions(vpos,caller)
+    line_count=Dict{Tuple{Int32,Int32},Int}()
+    k=0
+    for (i,us) in enumerate(fuses), u in us
+        if u.base.kind=="LINE"
+            a=vcanon[2k+1]; b=vcanon[2k+2]
+            key=a<b ? (a,b) : (b,a)
+            line_count[key]=get(line_count,key,0)+1
+        end
+        k+=1
+    end
+    for (key,c) in line_count
+        c==2 || throw(ArgumentError(
+            "$caller: trimmed-cylinder shell edge $key is shared by $c "*
+            "faces — the shell is not closed"))
+    end
+    # Angular knots: window ends plus every arc endpoint offset, snapped.
+    knots=Float64[0.0,W]
+    all_arcs=vcat(rim_arcs...,cap_arcs...)
+    for a in all_arcs
+        slo=mod(a.lo-th0,2π); slo>2π-atol && (slo=0.0)
+        shi=slo+a.span
+        push!(knots,slo<=atol ? 0.0 : (abs(slo-W)<=atol ? W : slo))
+        push!(knots,abs(shi-W)<=atol ? W : shi)
+    end
+    sort!(knots)
+    bk=Float64[knots[1]]
+    for s in knots[2:end]
+        s-bk[end]>atol && push!(bk,s)
+    end
+    (length(bk)>=2 && bk[1]==0.0 && abs(bk[end]-W)<=atol) || throw(ArgumentError(
+        "$caller: trimmed-cylinder knot set is degenerate"))
+    bk[end]=W
+    K=length(bk)-1
+    # Per rim, per elementary interval: exactly two covering arc uses.
+    idxof(s)=(j=findfirst(b->abs(b-s)<=atol,bk);
+              j===nothing && throw(ArgumentError(
+                  "$caller: arc endpoint is not a window knot"));
+              j)
+    cov=[zeros(Int,K) for _ in 1:2]
+    for rim in 1:2
+        for a in rim_arcs[rim]
+            slo=mod(a.lo-th0,2π); slo>2π-atol && (slo=0.0)
+            i1=idxof(slo<=atol ? 0.0 : slo)
+            i2=idxof(slo+a.span>=W-atol ? W : slo+a.span)
+            i2>i1 || throw(ArgumentError(
+                "$caller: rim arc coverage does not advance within the window"))
+            for j in i1:i2-1; cov[rim][j]+=1; end
+        end
+    end
+    for (ci,i) in enumerate(cap_i)
+        for a in cap_arcs[ci]
+            slo=mod(a.lo-th0,2π); slo>2π-atol && (slo=0.0)
+            i1=idxof(slo<=atol ? 0.0 : slo)
+            i2=idxof(slo+a.span>=W-atol ? W : slo+a.span)
+            for j in i1:i2-1; cov[cap_rim[ci]][j]+=1; end
+        end
+    end
+    for rim in 1:2, j in 1:K
+        cov[rim][j]==2 || throw(ArgumentError(
+            "$caller: rim $(rim) angular span $(bk[j])..$(bk[j+1]) is "*
+            "covered by $(cov[rim][j]) faces — rim arcs are not shared "*
+            "between the lateral face and its cap"))
+    end
+
+    # ── emission ──────────────────────────────────────────────────────────
+    # Canonical rim grid: knots at every arc endpoint, subdivided uniformly.
+    Nseg=[max(1,ceil(Int,_BREP_TORUS_NU*(bk[j+1]-bk[j])/(2π))) for j in 1:K]
+    M=sum(Nseg)
+    cum=Vector{Int}(undef,K+1); cum[1]=1
+    for j in 1:K; cum[j+1]=cum[j]+Nseg[j]; end
+    grid=Vector{Float64}(undef,M+1)
+    k=1
+    for j in 1:K
+        for m in 0:Nseg[j]-1
+            grid[k]=bk[j]+(bk[j+1]-bk[j])*m/Nseg[j]; k+=1
+        end
+    end
+    grid[M+1]=W
+    nn=_checked_brep_mul(2,M+1,caller,"trimmed cylinder node count")
+    nn<=_BREP_MAX_SURFACE_NODES || throw(ArgumentError(
+        "$caller: trimmed cylinder boundary exceeds the surface node limit"))
+
+    pool=NTuple{3,Float64}[]
+    row=Vector{Vector{Int}}(undef,2)
+    for rim in 1:2
+        idxs=Vector{Int}(undef,M+1)
+        H=rim_h[rim]
+        for kk in 1:M+1
+            th=th0+grid[kk]; ct=cos(th); st=sin(th)
+            push!(pool,(c0[1]+H*z[1]+R*(ct*x[1]+st*y[1]),
+                        c0[2]+H*z[2]+R*(ct*x[2]+st*y[2]),
+                        c0[3]+H*z[3]+R*(ct*x[3]+st*y[3])))
+            idxs[kk]=length(pool)
+        end
+        row[rim]=idxs
+    end
+    nodeof(s)=(j=findfirst(b->abs(b-s)<=atol,bk);
+               j===nothing && throw(ArgumentError(
+                   "$caller: arc endpoint is not a window knot"));
+               cum[j])
+    # Cap polygons in traversal order: arc uses emit their canonical grid
+    # slice (skipping the shared first node), line uses emit their end point.
+    cap_rings=Vector{Int}[]
+    for (ci,i) in enumerate(cap_i)
+        rim=cap_rim[ci]; ring=Int[]
+        for u in fuses[i]
+            if u.base.kind=="CIRCLE"
+                i1=nodeof(offset(u.v1)); i2=nodeof(offset(u.v2))
+                if i2>i1
+                    append!(ring,row[rim][i1+1:i2])
+                else
+                    append!(ring,row[rim][i2:i1-1][end:-1:1])
+                end
+            else
+                push!(pool,u.v2); push!(ring,length(pool))
+            end
+        end
+        push!(cap_rings,ring)
+    end
+    wall_rings=Vector{Int}[]
+    for i in wall_i
+        ring=Int[]
+        for p in faces[i].rings[1]
+            push!(pool,p); push!(ring,length(pool))
+        end
+        push!(wall_rings,ring)
+    end
+    nodes,canon=_dedup_positions(pool,caller)
+
+    # Strict interior reference: midpoint of the mid-arc wall point and the
+    # mean cap-chord point. Sector and segment cross-sections are both
+    # star-shaped about it, so S lies strictly inside the solid.
+    thmid=th0+W/2
+    md=(R*cos(thmid),R*sin(thmid),0.0)
+    koff=(0.0,0.0,0.0); kl=0
+    for lines in cap_lines, (v1,v2) in lines, v in (v1,v2)
+        t=_brep_vdot(_brep_vsub(v,c0),z)
+        w=_brep_vsub(v,c0)
+        o=(w[1]-t*z[1],w[2]-t*z[2],w[3]-t*z[3])
+        koff=(koff[1]+o[1],koff[2]+o[2],koff[3]+o[3]); kl+=1
+    end
+    kl>0 || throw(ArgumentError(
+        "$caller: trimmed cylinder has no cap chord — interior point undefined"))
+    koff=(koff[1]/kl,koff[2]/kl,koff[3]/kl)
+    hmid=(h0+h1)/2
+    S=(c0[1]+hmid*z[1]+(md[1]+koff[1])/2,
+       c0[2]+hmid*z[2]+(md[2]+koff[2])/2,
+       c0[3]+hmid*z[3]+(md[3]+koff[3])/2)
+
+    itris=NTuple{3,Int32}[]
+    # Lateral wall: quad columns between the two rim rows.
+    for kk in 1:M
+        a=canon[row[1][kk]]; b=canon[row[1][kk+1]]
+        c=canon[row[2][kk+1]]; d=canon[row[2][kk]]
+        push!(itris,(a,b,c)); push!(itris,(a,c,d))
+    end
+    # Cap and side-wall polygons ear-clipped in their traversal order.
+    for ring in cap_rings
+        ir=Int32[]; prev=Int32(0)
+        for pi in ring
+            v=canon[pi]
+            v!=prev && push!(ir,v); prev=v
+        end
+        length(ir)>1 && first(ir)==last(ir) && pop!(ir)
+        _ear_clip!(itris,ir,nodes,caller)
+    end
+    for ring in wall_rings
+        ir=Int32[]; prev=Int32(0)
+        for pi in ring
+            v=canon[pi]
+            v!=prev && push!(ir,v); prev=v
+        end
+        length(ir)>1 && first(ir)==last(ir) && pop!(ir)
+        _ear_clip!(itris,ir,nodes,caller)
+    end
+    length(itris)<=_BREP_MAX_SURFACE_TRIS || throw(ArgumentError(
+        "$caller: trimmed cylinder boundary exceeds the surface triangle limit"))
+
+    # Geometric outward orientation: a triangle's normal must agree with the
+    # direction from the strict interior point to its centroid.
+    tris=NTuple{3,Int32}[]
+    for t in itris
+        a,b,c=nodes[t[1]],nodes[t[2]],nodes[t[3]]
+        n=_brep_vcross(_brep_vsub(b,a),_brep_vsub(c,a))
+        cen=((a[1]+b[1]+c[1])/3,(a[2]+b[2]+c[2])/3,(a[3]+b[3]+c[3])/3)
+        s=_brep_vdot(n,_brep_vsub(cen,S))
+        abs(s)>1e-14 || throw(ArgumentError(
+            "$caller: trimmed cylinder face normal is parallel to the "*
+            "interior direction — degenerate orientation"))
+        s>0 ? push!(tris,t) : push!(tris,(t[1],t[3],t[2]))
+    end
+    C=Matrix{Float64}(undef,3,length(nodes))
+    for (i,p) in enumerate(nodes); C[:,i]=[p...]; end
+    T=Matrix{Int32}(undef,3,length(tris))
+    for (i,t) in enumerate(tris); T[:,i]=[t...]; end
+    surface=Mesh(C;tris=T)
+    diag=validate(surface)
+    diag.ok || throw(ErrorException(
+        "$caller: trimmed cylinder boundary mesh is invalid — "*
+        join(diag.messages,"; ")))
+    scale=max(_poly_scale(nodes),1.0)
+    V=sum(_brep_vdot(nodes[t[1]],
+        _brep_vcross(nodes[t[2]],nodes[t[3]]))/6 for t in tris)
+    V<-1e-12*scale*scale*scale && throw(ErrorException(
+        "$caller: trimmed cylinder certificate produced an inverted shell"))
+    return surface
 end
 
 function _step_cone_params(entities,surf,caller)
@@ -1600,14 +2322,23 @@ function _dedup_ring_nodes(rings,caller)
     order=sortperm(pts)
     canon=Vector{Int32}(undef,length(pts))
     nodes=NTuple{3,Float64}[]
-    lastpt=nothing
+    heads=Int[]; lo=1
     for oi in order
         p=pts[oi]
-        if lastpt===nothing ||
-          !(abs(p[1]-lastpt[1])<=tol && abs(p[2]-lastpt[2])<=tol && abs(p[3]-lastpt[3])<=tol)
-            push!(nodes,p); lastpt=p
+        while lo<=length(heads) && nodes[heads[lo]][1]<p[1]-tol
+            lo+=1
         end
-        canon[oi]=Int32(length(nodes))
+        hit=0
+        for k in lo:length(heads)
+            q=nodes[heads[k]]
+            if abs(p[1]-q[1])<=tol && abs(p[2]-q[2])<=tol && abs(p[3]-q[3])<=tol
+                hit=heads[k]; break
+            end
+        end
+        if hit==0
+            push!(nodes,p); push!(heads,length(nodes)); hit=length(nodes)
+        end
+        canon[oi]=Int32(hit)
     end
     length(nodes)<=_BREP_MAX_SURFACE_NODES || throw(ArgumentError(
         "$caller: polyhedral shell exceeds the surface node limit"))
@@ -1859,6 +2590,9 @@ function _step_brep_solid(brep::StepEntity,entities,fill;factor::Float64=1.0)
     end
     if any(f->f.surf!==nothing && f.surf.kind=="CYLINDRICAL_SURFACE",faces)
         cylinder=_step_cylinder_shell(entities,faces,curvekinds,caller)
+        if cylinder===nothing
+            cylinder=_step_partial_cylinder_shell(entities,faces,curvekinds,caller)
+        end
         if cylinder!==nothing
             cylinder=_step_unit_scaled(cylinder,factor)
             return fill ? _filled(cylinder,caller) : cylinder

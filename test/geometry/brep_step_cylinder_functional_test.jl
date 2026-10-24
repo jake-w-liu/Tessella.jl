@@ -110,10 +110,12 @@ end
     end
 
     # An extra shell face is a different solid, not a cylinder certificate.
+    # The duplicated cap routes the shell into the trimmed-sector arm, whose
+    # rim certificate rejects the closed full circle it sees there first.
     _with_source("#16 = CLOSED_SHELL('',(#17,#40,#50));"=>"#16 = CLOSED_SHELL('',(#17,#40,#50,#40));") do path
         err=try import_step(path;fill=false); nothing catch e e end
         @test err isa ArgumentError
-        @test occursin("degenerate",sprint(showerror,err))
+        @test occursin("full-cylinder certificate",sprint(showerror,err))
     end
 
     # A lone cylindrical face stays an unsupported-topology blocker.
@@ -127,6 +129,29 @@ end
 @testset "primitive RIGHT_CIRCULAR_CYLINDER path is unchanged" begin
     primitive=import_step(joinpath(FIXTURES,"cylinder.step");fill=false)
     @test primitive isa E.Mesh && validate(primitive).ok
+end
+
+@testset "trimmed CYLINDRICAL_SURFACE sector welds both rims" begin
+    # Half cylinder (angular window π) between two rim planes: the lateral
+    # grid, cap chords and axial wall rows must weld into one manifold
+    # shell — the two rims sort-interleave identical (x,y) positions at
+    # different heights, which is exactly what the cluster merge must not
+    # split.
+    surface=import_step(joinpath(FIXTURES,"brep_occ_half_cylinder.step");fill=false)
+    @test surface isa E.Mesh && validate(surface).ok
+    @test size(surface.tris,2)>0 && size(surface.tets,2)==0
+    @test vec(minimum(surface.coords,dims=2))≈[-1.,-1.,0.] atol=1e-12
+    @test vec(maximum(surface.coords,dims=2))≈[1.,0.,4.] atol=1e-12
+    exact=2π # (1/2)πR²·L for R=1, L=4
+    @test _signed_surface_volume(surface)>0.9exact
+    @test _signed_surface_volume(surface)<=exact
+
+    filled=import_step(joinpath(FIXTURES,"brep_occ_half_cylinder.step"))
+    @test filled isa E.Mesh && validate(filled).ok
+    @test size(filled.tets,2)>0
+    volumes=_tet_volumes(filled)
+    @test all(>(0),volumes)
+    @test isapprox(sum(volumes),exact;rtol=0.1)
 end
 
 end # module

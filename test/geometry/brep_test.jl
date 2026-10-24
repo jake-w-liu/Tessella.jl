@@ -270,12 +270,12 @@ DATA;
 ENDSEC;
 END-ISO-10303-21;
 """
-        multiple_step_error=mktemp() do path,io
+        # Multiple recognized solids import as an assembly, not an error.
+        multiple_step_mesh=mktemp() do path,io
             write(io,multiple_step); close(io)
-            try import_step(path); nothing catch e e end
+            import_step(path)
         end
-        @test multiple_step_error isa ArgumentError
-        @test occursin("multiple recognized solids",sprint(showerror,multiple_step_error))
+        @test multiple_step_mesh isa Tessella.Elements.MixedMesh
 
         standard=_brep_iges_parameter_line("150,2D0,1D0,1D0,0D0,0D0,0D0;";
                                             pointer=12345678)
@@ -452,7 +452,7 @@ END-ISO-10303-21;
             try import_step(path); nothing catch e e end
         end
         @test err isa ArgumentError
-        @test occursin("inner loops",sprint(showerror,err))
+        @test occursin("unique outer boundary",sprint(showerror,err))
 
         # A 120 revolution whose generatrix is not a full circle cannot be a
         # torus.
@@ -502,11 +502,12 @@ END-ISO-10303-21;
             return line
         end
         seam_src=join(rebuilt,'\n')
-        err=mktemp() do path,io
+        # The all-degenerate boundary collapses to a point on the equator —
+        # not a real trim — so the import yields the full torus surface.
+        seam_mesh=mktemp() do path,io
             write(io,seam_src); close(io)
-            try import_iges(path); nothing catch e e end
+            import_iges(path)
         end
-        @test err isa ArgumentError
-        @test occursin("trimmed",sprint(showerror,err))
+        @test validate(seam_mesh).ok
     end
 end
