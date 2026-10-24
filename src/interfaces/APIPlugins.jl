@@ -5555,6 +5555,127 @@ function _plugin_exec_discerr(spec::_PluginSpec,caller::AbstractString)
     return nothing
 end
 
+# ---- HomologyComputation ---------------------------------------------------------------
+#
+# Upstream `Plugin(HomologyComputation)` (KBIPACK `Homology`): parse the
+# physical-group lists, compute the (relative) (co)homology basis, publish
+# each non-zero basis chain as a discrete entity plus physical group, and —
+# `CreatePostProcessingViews != 0` — attach a `"<phys>=<name>"` ElementData
+# view whose per-element value is |coefficient|. Tessella bridges to the
+# native `compute_homology!` solver: the request queue is drained for the
+# run, published `(dim, physical)` chains map to upstream's
+# `addChainsToModel`, and one list view per chain carries the chain cells
+# with their |coefficient|. The upstream reduction knobs (ReductionOmit /
+# ReductionCombine / PostProcessSimplify / ReductionHeuristic /
+# ReductionImmunePhysicalGroups) are accepted for interface parity — the
+# native solver runs its own certified reduction pipeline. `Filename`
+# persistence (upstream writes mesh+chains) is an accepted-but-documented
+# bound, and Homology/CohomologyPhysicalGroupsBegin numbering follows the
+# native allocator rather than a caller-requested base.
+
+# Upstream `parseStringOpt`: whitespace-separated integers with mandatory
+# comma separators — a bad character errors and aborts the run.
+function _plugin_int_list(text::AbstractString,caller::AbstractString,
+                          option::AbstractString)
+    cleaned=replace(text,','=>' ')
+    out=Int[]
+    for word in eachsplit(cleaned;keepempty=false)
+        value=tryparse(Int,word)
+        value===nothing && throw(ArgumentError(
+            "$caller: Unexpected character while parsing " *
+            "'$word' in $option"))
+        push!(out,value)
+    end
+    return out
+end
+
+function _plugin_exec_homology(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers;strings=spec.strings
+    hom=!iszero(numbers["ComputeHomology"])
+    coh=!iszero(numbers["ComputeCohomology"])
+    pviews=!iszero(numbers["CreatePostProcessingViews"])
+    domain=_plugin_int_list(strings["DomainPhysicalGroups"],caller,
+        "DomainPhysicalGroups")
+    subdomain=_plugin_int_list(strings["SubdomainPhysicalGroups"],caller,
+        "SubdomainPhysicalGroups")
+    _plugin_int_list(strings["ReductionImmunePhysicalGroups"],caller,
+        "ReductionImmunePhysicalGroups")
+    dimsave=_plugin_int_list(strings["DimensionOfChainsToSave"],caller,
+        "DimensionOfChainsToSave")
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    model=_model_locked()
+    # Each run computes fresh requests only — upstream builds a new Homology
+    # per execute.
+    empty!(model.meshing.homology_requests)
+    dims=Int[d for d in dimsave if 0<=d<=3]
+    hom && _add_homology_request("Homology",domain,subdomain,dims)
+    coh && _add_homology_request("Cohomology",domain,subdomain,dims)
+    (hom || coh) || return nothing
+    published=_compute_homology()
+    if pviews
+        for (dim,phys) in published
+            model=_model_locked()
+            entities=model_entities_for_physical_group(model,dim,phys)
+            types=String[];counts=Dict{String,Int}()
+            datas=Dict{String,Vector{Float64}}()
+            name=get(model.physical_names,(dim,phys),"")
+            for etag in entities
+                record=get(model.discrete,(dim,etag),nothing)
+                record===nothing && continue
+                for i in eachindex(record.element_types)
+                    spec_rec=msh_spec(Int(record.element_types[i]))
+                    kind=get(_PLUGIN_FAMILY_KIND,spec_rec.family,nothing)
+                    kind===nothing && continue
+                    type=_plugin_record_type(kind,1)
+                    type===nothing && continue
+                    nodes=record.element_nodes[i]
+                    flat=haskey(datas,type) ? datas[type] :
+                        (datas[type]=Float64[];counts[type]=0;
+                         push!(types,type);datas[type])
+                    for node in nodes, axis in 1:3
+                        push!(flat,_plugin_node_coord(axis,node))
+                    end
+                    # Upstream `data[e]` = |coeff|; published copies already
+                    # expand |coeff|>1 into extra elements, so every emitted
+                    # cell carries value 1.
+                    for _ in nodes; push!(flat,1.0); end
+                    counts[type]+=1
+                end
+            end
+            isempty(types) && continue
+            _plugin_publish_list_view!("$phys=$name",types,counts,datas,
+                [0.0];caller)
+        end
+    end
+    return nothing
+end
+
+# Resolve a public node tag to a coordinate — chain entities share the live
+# mesh's vertex tags, so the current cache is authoritative.
+function _plugin_node_coord(axis::Int,tag)
+    cached=LAST_MESH[]
+    if cached!==nothing
+        public=_mesh_public_tags(cached)
+        if public!==nothing
+            for (col,t) in enumerate(public.node_tags)
+                t==tag && return cached.coords[axis,col]
+            end
+        else
+            1<=tag<=size(cached.coords,2) &&
+                return cached.coords[axis,Int(tag)]
+        end
+    end
+    model=_model_locked()
+    for (_,record) in _discrete_mesh_records(model)
+        for (i,t) in enumerate(record.node_tags)
+            t==tag && return record.node_coords[3(i-1)+axis]
+        end
+    end
+    return 0.0
+end
+
 # ---- SimplePartition --------------------------------------------------------------------
 #
 # Upstream `Plugin(SimplePartition)` clears existing partitions, evaluates
@@ -6814,6 +6935,17 @@ const _PLUGINS=Dict{String,NamedTuple}(
         "SuperSamplingNodes"=>10.0),
         string_options=Dict{String,String}(),
         run_fn=_plugin_exec_discerr),
+    "HomologyComputation"=>(number_options=Dict{String,Float64}(
+        "ComputeHomology"=>1.0,"ComputeCohomology"=>0.0,
+        "HomologyPhysicalGroupsBegin"=>-1.0,"CohomologyPhysicalGroupsBegin"=>-1.0,
+        "CreatePostProcessingViews"=>1.0,"ReductionOmit"=>1.0,
+        "ReductionCombine"=>3.0,"PostProcessSimplify"=>1.0,
+        "ReductionHeuristic"=>1.0),
+        string_options=Dict{String,String}(
+            "DomainPhysicalGroups"=>"","SubdomainPhysicalGroups"=>"",
+            "ReductionImmunePhysicalGroups"=>"",
+            "DimensionOfChainsToSave"=>"0, 1, 2, 3","Filename"=>""),
+        run_fn=_plugin_exec_homology),
     # `Echo`, `TimeReport`, `DuplicatedBoundaries` and `PolarView` are not
     # registered: Gmsh 4.15.2 ships none of them (the oracle reports
     # `Failed action 'Run' or unknown plugin '<name>'`), and they are absent
