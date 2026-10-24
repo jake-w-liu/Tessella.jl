@@ -7934,10 +7934,42 @@ function _geo_option_number_unknown!(context::_GeoNumericContext,
     throw(ArgumentError("$caller: Unknown number option '$family.$member'"))
 end
 
+# `Mesh.Nb*` element statistics — upstream's option getters return the live
+# `GModel` mesh statistics, so script writes never stick (`Mesh.NbNodes=42`
+# still reads the generated count after `Mesh 2`, and 0 before any mesh).
+# `Mesh.NbPartitions` is the exception: it is an ordinary stored option (the
+# `PartitionMesh` count) and keeps the standard read path.
+const _GEO_MESH_STAT_OPTIONS=Dict{String,Symbol}(
+    "NbNodes"=>:nodes,"NbTriangles"=>:tri,"NbQuadrangles"=>:qua,
+    "NbTetrahedra"=>:tet,"NbPrisms"=>:pri,"NbPyramids"=>:pyr,
+    "NbHexahedra"=>:hex,"NbTrihedra"=>:trih)
+
+function _geo_mesh_stat(mesh::Mesh,stat::Symbol)
+    stat===:nodes && return Float64(nnodes(mesh))
+    stat===:tri && return Float64(ntris(mesh))
+    stat===:tet && return Float64(ntets(mesh))
+    return 0.0
+end
+
+function _geo_mesh_stat(mesh::MixedMesh,stat::Symbol)
+    stat===:nodes && return Float64(size(mesh.coords,2))
+    count=0
+    for block in mesh.blocks
+        msh_family(block.msh)===stat || continue
+        count+=_block_ncells(block)
+    end
+    return Float64(count)
+end
+
 # `NumberOption(GMSH_GET)` — `nothing` for unknown option names.
 function _geo_option_number(context::_GeoNumericContext,family::String,
                             index::Int,member::String;warn::Bool=false)
     family=="General" && member=="BoundingBoxSize" && return context.native_context_lc
+    if family=="Mesh" && index==0
+        stat=get(_GEO_MESH_STAT_OPTIONS,member,nothing)
+        stat===nothing || return context.mesh===nothing ? 0.0 :
+            _geo_mesh_stat(context.mesh,stat)
+    end
     haskey(context.option_numbers,(family,index,member)) &&
         return context.option_numbers[(family,index,member)]
     table=get(_GEO_NUMBER_OPTION_TABLE,family,nothing)

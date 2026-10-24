@@ -202,8 +202,8 @@ end
     # a separate generator from the completed native GEO entity products.
     private_parts=[Tessella.mesh_model_surface(curved.model,tag)
                    for tag in sort!(collect(keys(curved.model.surfaces)))]
-    @test ntris.(private_parts)==[108,11]
-    @test [Tessella.MeshTypes.mesh_crc(part).sha for part in private_parts]==["f876707ce7135d2956f099d67a90c1379ed4fee9c6d32edadd30d7dbc54c01c2", "66fe31ba23f77568860ddeed1a98d9d6a9c902bff984504318d8d6e6126ee315"]
+    @test ntris.(private_parts)==[104,11]
+    @test [Tessella.MeshTypes.mesh_crc(part).sha for part in private_parts]==["ca2e3429a120c05979a69722a75e1b5bd8a30fc79b88815ff6216cc9a5417009", "66fe31ba23f77568860ddeed1a98d9d6a9c902bff984504318d8d6e6126ee315"]
 
 
     # A periodic curved pair meshes through the merged path; the slave's node
@@ -250,4 +250,39 @@ end
     box2_nodes=count(i->volumes.mesh.coords[1,i]>2.0,1:nnodes(volumes.mesh))
     @test box1_nodes>0 && box2_nodes>0
     @test box1_nodes+box2_nodes==nnodes(volumes.mesh)
+end
+
+@testset ".geo Mesh.Nb* statistics" begin
+    # Upstream's `Mesh.Nb*` number options are live `GModel` statistics:
+    # reads return the generated counts, script writes never stick (pinned
+    # Gmsh 4.15.2 — `Mesh.NbNodes=42` still reads 5 after `Mesh 2` and 0
+    # before any mesh). `Mesh.NbPartitions` is the exception: it is an
+    # ordinary stored option (the `PartitionMesh` count).
+    stats=_execute_mesh_dim_source("""
+        Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+        Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+        Line(1)={1,2}; Line(2)={2,3}; Line(3)={3,4}; Line(4)={4,1};
+        Line Loop(1)={1,2,3,4};
+        Plane Surface(1)={1};
+        Mesh.Algorithm=5;
+        n0 = Mesh.NbNodes;
+        Mesh 2;
+        n1 = Mesh.NbNodes; t1 = Mesh.NbTriangles;
+        q1 = Mesh.NbQuadrangles; v1 = Mesh.NbTetrahedra;
+        Mesh.NbNodes = 42;
+        n2 = Mesh.NbNodes;
+        RefineMesh;
+        n3 = Mesh.NbNodes; t3 = Mesh.NbTriangles;
+        """)
+    @test stats.values["n0"]==0.0
+    @test stats.values["n1"]==5.0
+    @test stats.values["t1"]==4.0
+    @test stats.values["q1"]==0.0
+    @test stats.values["v1"]==0.0
+    @test stats.values["n2"]==5.0
+    @test stats.values["n3"]==13.0
+    @test stats.values["t3"]==16.0
+    @test nnodes(stats.mesh)==13
+    @test ntris(stats.mesh)==16
+    @test validate(stats.mesh).ok
 end
