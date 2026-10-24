@@ -671,7 +671,10 @@ function _step_face_parts(entities,fe,curvekinds,caller)
         length(outer)<=1 || throw(ArgumentError(
             "$caller: holed face #$(fe.id) declares multiple FACE_OUTER_BOUND wires"))
         if isempty(outer)
-            rings=_brep_face_outer_wire_order(rings,caller)
+            # Closed-circle wires reduce to a single shared vertex and are
+            # reordered by the curved-trim certificate instead.
+            all(ring->length(ring)>=3,rings) &&
+                (rings=_brep_face_outer_wire_order(rings,caller))
         else
             index=only(outer)
             rings=vcat(rings[index:index],rings[1:index-1],rings[index+1:end])
@@ -2591,6 +2594,9 @@ function _step_brep_solid(brep::StepEntity,entities,fill;factor::Float64=1.0)
     if any(f->f.surf!==nothing && f.surf.kind=="CYLINDRICAL_SURFACE",faces)
         cylinder=_step_cylinder_shell(entities,faces,curvekinds,caller)
         if cylinder===nothing
+            cylinder=_step_tubed_shell(entities,faces,curvekinds,caller)
+        end
+        if cylinder===nothing
             cylinder=_step_partial_cylinder_shell(entities,faces,curvekinds,caller)
         end
         if cylinder!==nothing
@@ -4035,5 +4041,7 @@ function export_iges_nurbs(path::AbstractString, objects)
     end
     return _write_iges(path, records)
 end
+
+include("BRepCurvedTrims.jl")
 
 end # module

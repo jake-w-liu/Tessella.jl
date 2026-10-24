@@ -354,6 +354,7 @@ using Tessella
     include(joinpath(@__DIR__, "..", "meshing/constant_metric_regions_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "meshing/prismatic_fill_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_hybrid_normal_apex_functional_test.jl"))
+    include(joinpath(@__DIR__, "..", "geometry/brep_curved_trims_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/brep_bounded143_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/brep_plane190_uv_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/brep_plane190_transform_functional_test.jl"))
