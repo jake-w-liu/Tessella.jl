@@ -5423,6 +5423,138 @@ function _plugin_exec_spanningtree(spec::_PluginSpec,caller::AbstractString)
     return nothing
 end
 
+# ---- DiscretizationError --------------------------------------------------------------
+#
+# Upstream `Plugin(DiscretizationError)` supersamples every surface element —
+# quadrangles on an `n×n` tensor grid over [-1+5tol, ~1-5tol]^2, triangles on
+# the (n+1)n/2-point simplicial grid over [5tol, ~1-5tol] — evaluates each
+# sample through the element's `pnt`, projects it onto the owning face via
+# `closestPoint`, and emits the (n-1)^2 sub-quadrangles/sub-triangles as
+# SQ/ST records carrying the unsigned projection distance. `tol` is the
+# geometry tolerance; the view is named "Discretization Error".
+
+function _plugin_exec_discerr(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    n=_mesh_query_integer(Int(numbers["SuperSamplingNodes"]),
+                          caller,"SuperSamplingNodes")
+    tol=get(OPTIONS,"Geometry.Tolerance",1.0e-8)
+    paramquandt=1.0/(n-1)-10tol
+    paramquandtquad=2.0/(n-1)-10tol
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    slot=MODEL_SLOTS[index]
+    mesh=slot.mesh;model=slot.model
+    mesh===nothing && throw(ArgumentError("$caller: mesh is empty"))
+    model===nothing && throw(ArgumentError("$caller: model is empty"))
+    class=slot.class===nothing ? _cached_classification_locked(mesh) :
+        slot.class
+    _,_,total=_mesh_element_offsets(mesh)
+    byent=Dict{Tuple{Int,Int},Vector{Int}}()
+    for index in 1:total
+        ent=_plugin_element_entity(mesh,class,index)
+        ent===nothing && continue
+        push!(get!(byent,ent,Int[]),index)
+    end
+    by_type=Dict{String,Vector{Float64}}()
+    counts=Dict{String,Int}();order=String[]
+    function emit!(type,coords,vals)
+        haskey(by_type,type) ||
+            (by_type[type]=Float64[];counts[type]=0;push!(order,type))
+        append!(by_type[type],coords);append!(by_type[type],vals)
+        counts[type]+=1
+        return nothing
+    end
+    function element_pnt(rec,uvw)
+        _,N,_=mesh_basis_functions(Int(rec.element_type),uvw,"Lagrange")
+        x=y=z=0.0
+        for k in 1:min(length(N),length(rec.node_tags))
+            col=Int(rec.node_tags[k])
+            x+=N[k]*mesh.coords[1,col]
+            y+=N[k]*mesh.coords[2,col]
+            z+=N[k]*mesh.coords[3,col]
+        end
+        return x,y,z
+    end
+    function face_dist(entity,x,y,z)
+        closest,_=try
+            model_closest_point(model,2,entity,[x,y,z])
+        catch err
+            err isa InterruptException && rethrow()
+            return nothing
+        end
+        length(closest)>=3 || return nothing
+        return hypot(closest[1]-x,closest[2]-y,closest[3]-z)
+    end
+    for ent in sort!(collect(keys(byent)))
+        ent[1]==2 || continue
+        for index in byent[ent]
+            rec=mesh_element_record(mesh,index)
+            family=msh_spec(Int(rec.element_type)).family
+            if family===:qua
+                pts=Vector{NTuple{3,Float64}}(undef,n*n)
+                dvals=Vector{Union{Nothing,Float64}}(undef,n*n)
+                for j in 0:n-1,i in 0:n-1
+                    x,y,z=element_pnt(rec,
+                        [-1+5tol+paramquandtquad*i,
+                         -1+5tol+paramquandtquad*j,0.0])
+                    k=j*n+i+1
+                    pts[k]=(x,y,z);dvals[k]=face_dist(ent[2],x,y,z)
+                end
+                for j in 0:n-2,i in 0:n-2
+                    idx=(j*n+i+1,j*n+i+2,(j+1)*n+i+2,(j+1)*n+i+1)
+                    any(dvals[k]===nothing for k in idx) && continue
+                    coords=Float64[]
+                    for axis in 1:3,k in idx
+                        push!(coords,pts[k][axis])
+                    end
+                    emit!("SQ",coords,[dvals[k] for k in idx])
+                end
+            elseif family===:tri
+                count=n*(n+1)÷2
+                pts=Vector{NTuple{3,Float64}}(undef,count)
+                dvals=Vector{Union{Nothing,Float64}}(undef,count)
+                counter=1
+                for i in 0:n-1,j in 0:i
+                    x,y,z=element_pnt(rec,
+                        [5tol+paramquandt*(i-j),5tol+paramquandt*j,0.0])
+                    pts[counter]=(x,y,z)
+                    dvals[counter]=face_dist(ent[2],x,y,z)
+                    counter+=1
+                end
+                for j in 0:n-2
+                    odd=false
+                    for i in 0:2*j
+                        if !odd
+                            idx=(i÷2+(j+1)*j÷2+1,
+                                 i÷2+(j+1)*j÷2+j+2,
+                                 i÷2+(j+1)*j÷2+j+3)
+                        else
+                            idx=((i-1)÷2+(j+1)*j÷2+1,
+                                 (i-1)÷2+(j+1)*j÷2+j+3,
+                                 (i-1)÷2+(j+1)*j÷2+2)
+                        end
+                        any(dvals[k]===nothing for k in idx) && continue
+                        coords=Float64[]
+                        for axis in 1:3,k in idx
+                            push!(coords,pts[k][axis])
+                        end
+                        emit!("ST",coords,[dvals[k] for k in idx])
+                        odd=!odd
+                    end
+                end
+            end
+        end
+    end
+    types=String[];datas=Dict{String,Vector{Float64}}()
+    for type in order
+        push!(types,type);datas[type]=by_type[type]
+    end
+    _plugin_publish_list_view!("Discretization Error",types,counts,datas,
+        [0.0];caller)
+    return nothing
+end
+
 # ---- SimplePartition --------------------------------------------------------------------
 #
 # Upstream `Plugin(SimplePartition)` clears existing partitions, evaluates
@@ -6678,6 +6810,10 @@ const _PLUGINS=Dict{String,NamedTuple}(
             "PhysicalVolumes"=>"","PhysicalSurfaces"=>"",
             "PhysicalCurves"=>""),
         run_fn=_plugin_exec_spanningtree),
+    "DiscretizationError"=>(number_options=Dict{String,Float64}(
+        "SuperSamplingNodes"=>10.0),
+        string_options=Dict{String,String}(),
+        run_fn=_plugin_exec_discerr),
     # `Echo`, `TimeReport`, `DuplicatedBoundaries` and `PolarView` are not
     # registered: Gmsh 4.15.2 ships none of them (the oracle reports
     # `Failed action 'Run' or unknown plugin '<name>'`), and they are absent
