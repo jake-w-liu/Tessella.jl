@@ -1775,6 +1775,140 @@ end
             """)
         @test_throws ArgumentError Tessella.GeoExec.execute_geo(
             p4est_path;mesh_dim=2)
+
+        # ── MET03: exact HXT grading + non-surface sources ────────────────
+        # Upstream `curvatureRefineCallback` refines a surface-touching leaf
+        # while `edge > min(hc/nElemPerCell, hf)` with `nElemPerCell = 2` —
+        # the curvature prescription is halved, the feature prescription is
+        # not — and stores `clamp(min(hc, hf))`. On the unit octahedron
+        # (κ ≈ 1, no gap stage) the leaf holding a ±x vertex must satisfy
+        # edge ≤ hc/2; the stored leaf size stays the unhalved hc.
+        octm=Mesh(Float64[1 -1 0 0 0 0; 0 0 1 -1 0 0; 0 0 0 0 1 -1];
+                  tris=Int32[1 1 1 1 2 2 2 2;3 5 4 6 3 6 4 5;
+                             5 4 6 3 6 4 5 3])
+        graded=AutomaticMeshSizeField(octm;n_nodes_per_circle=40,
+            hmin=1e-9,hmax=2.0,smoothing=false)
+        gleaf=Tessella.SizeField._auto_octree_locate(
+            graded.octree,(1.0,0.0,0.0))
+        _,_,gedge=Tessella.SizeField._auto_octree_box(graded.octree,gleaf)
+        hcurv=size_at(graded,1.0,0.0,0.0)
+        @test gedge<=hcurv/2+1e-12
+        @test graded.octree.size[gleaf]==hcurv
+        # A feature-dominated leaf is NOT halved: the slab plates prescribe
+        # hf = 0.1/5 = 0.02, so a touched leaf stops at edge ≤ 0.02, not
+        # 0.01 — distinguishable from halving every prescription.
+        slabgap=AutomaticMeshSizeField([_quad(0.0),_quad(0.1)];
+            n_points_per_gap=5,smoothing=false)
+        sgleaf=Tessella.SizeField._auto_octree_locate(
+            slabgap.octree,(0.0,0.0,0.0))
+        _,_,sgedge=Tessella.SizeField._auto_octree_box(slabgap.octree,sgleaf)
+        @test sgedge<=0.02
+        @test sgedge>0.02/2
+
+        # Point sources: a prescribed size refines the containing leaf while
+        # its edge exceeds the size, then stores it — the unhalved
+        # feature-like rule. Points outside stay at hBulk. A source on the
+        # surface takes the min of both prescriptions.
+        ptsrc=AutomaticMeshSizeField(_quad(0.0);smoothing=false,
+            source_points=[(0.5,0.5,0.4),(0.5,0.5,0.0)],
+            source_point_sizes=[0.02,0.01])
+        @test size_at(ptsrc,0.5,0.5,0.4)==0.02
+        @test size_at(ptsrc,0.5,0.5,0.0)==0.01     # min(surface, point)
+        @test size_at(ptsrc,-0.05,-0.05,-0.05)==ptsrc.hbulk
+        unsized=AutomaticMeshSizeField(_quad(0.0);smoothing=false,
+            source_points=[(0.5,0.5,0.4)])
+        @test size_at(unsized,0.5,0.5,0.4)==unsized.hbulk   # default lc
+
+        # Curve sources enter as segments — exact segment/box overlap, so a
+        # line through the plate drills every leaf it crosses to h_seg
+        # without needing dense samples.
+        segsrc=AutomaticMeshSizeField(_quad(0.0);smoothing=false,
+            source_segments=[((0.5,0.5,-0.2),(0.5,0.5,0.2))],
+            source_segment_sizes=0.03)
+        @test size_at(segsrc,0.5,0.5,0.15)==0.03
+        @test size_at(segsrc,0.5,0.5,0.0)==0.03   # on-plate point: min wins
+        @test size_at(segsrc,0.1,0.1,0.15)==segsrc.hbulk
+        # Segment sizes track the tighter of the pair inside one leaf.
+        segmix=AutomaticMeshSizeField(_quad(0.0);smoothing=false,
+            source_segments=[((0.2,0.2,0.3),(0.8,0.8,0.3)),
+                             ((0.4,0.4,0.3),(0.6,0.6,0.3))],
+            source_segment_sizes=[0.04,0.015])
+        @test size_at(segmix,0.5,0.5,0.3)==0.015
+        @test size_at(segmix,0.25,0.25,0.3)<=0.04
+
+        # Volume sources enter as their discretization's nodes — a tet mesh
+        # over a region prescribes the size at its vertices, same as the
+        # upstream vertex-cloud channel.
+        volmesh=Mesh(Float64[0.4 0.6 0.4 0.5;0.4 0.4 0.6 0.5;
+                             0.3 0.3 0.3 0.45];
+                     tets=Int32[1;2;3;4;;])
+        volsrc=AutomaticMeshSizeField(_quad(0.0);smoothing=false,
+            source_points=volmesh,source_point_sizes=0.025)
+        @test size_at(volsrc,0.5,0.5,0.45)<=0.025
+        @test size_at(volsrc,0.1,0.1,0.6)==volsrc.hbulk
+
+        # Scalar field sources — the upstream `sizeFunction` hook made
+        # effective. A bounded distance field prescribes small sizes near
+        # its point skeleton and relaxes to hBulk away from it.
+        dfield=BoundedSize(DistanceField(;points=[(0.5,0.5,0.3)]);
+                           size_min=0.02,size_max=0.5)
+        fldsrc=AutomaticMeshSizeField(_quad(0.0);smoothing=false,
+            source_fields=[dfield])
+        @test size_at(fldsrc,0.5,0.5,0.3)<=0.03
+        @test size_at(fldsrc,0.5,0.5,0.9)==fldsrc.hbulk
+        @test size_at(fldsrc,0.0,0.0,0.0)==0.065  # surface min still wins
+        # MathEval sources work the same way through the sampler channel.
+        mfield=MathEvalField("0.02+0.5*(x-0.5)^2+0.5*(z-0.35)^2")
+        mfldsrc=AutomaticMeshSizeField(_quad(0.0);smoothing=false,
+            source_fields=mfield)
+        @test size_at(mfldsrc,0.5,0.25,0.35)<0.04
+        @test size_at(mfldsrc,-0.1,-0.1,-0.1)==mfldsrc.hbulk
+
+        # Deterministic rebuild — identical octree structure and sizes —
+        # and 2:1 face balance still holds over a sampled certificate.
+        combo=AutomaticMeshSizeField(_quad(0.0);smoothing=false,
+            source_points=[(0.5,0.5,0.4),(0.5,0.5,0.0)],
+            source_point_sizes=[0.02,0.01],
+            source_segments=[((0.5,0.5,-0.2),(0.5,0.5,0.2))],
+            source_segment_sizes=0.03)
+        combo2=AutomaticMeshSizeField(_quad(0.0);smoothing=false,
+            source_points=[(0.5,0.5,0.4),(0.5,0.5,0.0)],
+            source_point_sizes=[0.02,0.01],
+            source_segments=[((0.5,0.5,-0.2),(0.5,0.5,0.2))],
+            source_segment_sizes=0.03)
+        @test combo.octree.size==combo2.octree.size
+        @test combo.octree.level==combo2.octree.level
+        @test size_at(combo,0.5,0.5,0.15)==0.03   # leaf on the segment only
+        @test size_at(combo,0.5,0.5,0.0)==0.01    # min(plate, seg, point)
+        @test size_at(combo,0.5,0.5,0.4)==0.02    # off-seg point leaf
+        nfo=Int32[];nfs=Int32[];nchecked=0
+        for n in eachindex(combo.octree.child)
+            Tessella.SizeField._auto_isleaf(combo.octree,n) || continue
+            n%29==0 || continue
+            for dir in 1:6
+                Tessella.SizeField._auto_face_neighbors!(
+                    nfo,nfs,combo.octree,n,dir)
+                for nb in nfo
+                    nchecked+=1
+                    @test abs(Int(combo.octree.level[Int(nb)])-
+                              Int(combo.octree.level[n]))<=1
+                end
+            end
+        end
+        @test nchecked>50
+
+        # Validation battery for the source channels.
+        @test_throws ArgumentError AutomaticMeshSizeField(_quad(0.0);
+            source_points=[(0.5,0.5,0.4)],source_point_sizes=[0.02,0.03])
+        @test_throws ArgumentError AutomaticMeshSizeField(_quad(0.0);
+            source_points=[(0.5,0.5,0.4)],source_point_sizes=-0.1)
+        @test_throws ArgumentError AutomaticMeshSizeField(_quad(0.0);
+            source_point_sizes=0.02)
+        @test_throws ArgumentError AutomaticMeshSizeField(_quad(0.0);
+            source_segments=[((0.0,0.0,0.0),(1.0,1.0,1.0))],
+            source_segment_sizes=[0.1,0.2])
+        @test_throws ArgumentError AutomaticMeshSizeField(_quad(0.0);
+            source_fields=[42])
     end
 
     @testset "directional anisotropic 1-D/2-D/3-D sizing" begin

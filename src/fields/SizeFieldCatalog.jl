@@ -4420,7 +4420,8 @@ end
     AutomaticMeshSizeField(surface; n_nodes_per_circle=20, hmin, hmax)
     AutomaticMeshSizeField(surfaces; n_nodes_per_circle=20, n_points_per_gap=0,
                            hmin, hmax, hbulk, gradation=1.1, smoothing=true,
-                           features=true)
+                           features=true, source_points, source_point_sizes,
+                           source_segments, source_segment_sizes, source_fields)
 
 Native analogue of Gmsh `AutomaticMeshSizeField` over one or more
 triangulated surfaces. Surface vertices carry prescribed sizes: per-vertex
@@ -4447,12 +4448,47 @@ prescription stages of Gmsh's HXT field as discrete analogues:
   before the sizes are stored (the surface-edge part of upstream's
   gradation model).
 
+Non-surface size sources feed the same octree through optional keyword
+arguments — the analogue of the extra vertex/`sizeFunction` channels the
+upstream forest accepts (`forestOptions->sizeFunction`,
+`featureSizeAtVertices`; upstream's field itself exposes no source options,
+so these are constructor-level here):
+
+- `source_points` — a `3×n` matrix, a list of point tuples, or one or more
+  `Mesh`es (their nodes) prescribing `source_point_sizes` (scalar or
+  per-point; default `hbulk`, upstream's unspecified-`lc` behaviour). A
+  leaf containing a point refines while its edge exceeds the smallest
+  prescribed size inside it, then stores that minimum — the same
+  feature-like (unhalved) rule the upstream cell test applies to
+  `featureSizeAtVertices`.
+- `source_segments` — `(a,b)` endpoint pairs or `Mesh`es (their segments)
+  prescribing `source_segment_sizes` (scalar or per-segment). A leaf whose
+  box overlaps a segment refines the same way, so a curve source tightens
+  the field along its whole length without dense sampling.
+- `source_fields` — one or more scalar `AbstractField`s (`DistanceField`
+  wrapped by `ThresholdField`, `MathEvalField`, `ExtendField`, …) sampled
+  at cell centers and corners: a leaf refines while its edge exceeds the
+  smallest sample, then stores the clamped center sample. This is the
+  upstream `sizeFunction` hook made effective — upstream only assigns it
+  and never refines on it — so a source feature narrower than a leaf's
+  nine-point stencil can still be under-resolved (documented bound;
+  upstream's bulk grid can likewise miss features smaller than `hbulk`).
+
 The sizes are stored on an adaptive octree over the `1.3·span` cube centred
 on the surface bounding box — the analogue of upstream's p4est/HXT map,
 which keeps one size "at the center of the cells". A leaf intersected by
-surface triangles refines while its edge exceeds the smallest prescribed
-size of the triangles touching it, then stores that minimum; leaves the
-surface never reaches keep `hbulk`. The tree is 2:1 face-balanced, and
+surface triangles refines while its edge exceeds `min(hc/2, hf)` — the
+exact upstream `curvatureRefineCallback` criterion `h > fmin(hc /
+nElemPerCell, hf)` with `nElemPerCell = 2` (the curvature prescription is
+halved, the feature prescription is not), still bounded by `edge ≥ hmin` —
+and stores the clamped `min(hc, hf)`; non-surface sources refine with the
+feature-like (unhalved) target. Triangle touchers are detected by exact
+SAT triangle/box overlap — strictly tighter than upstream's triangle-AABB
+R-Tree candidate test, which can flag cells the surface never reaches. The
+unconditional `edge ≤ hBulk` cover pass upstream runs
+(`refineToBulkSizeCallback`) is not reproduced: untouched leaves carry
+`hbulk` at coarser granularity, which is value-equal but cheaper than the
+`O((span/hbulk)³)` uniform grid. The tree is 2:1 face-balanced, and
 `smoothing` applies the volumetric gradation — the upstream `limitSize`
 analogue, `h[q] = min(h[q], h[p] + (gradation−1)·|c_p − c_q|)` over
 face-adjacent leaf pairs, solved as a multi-source shortest path so the
@@ -4490,7 +4526,12 @@ function AutomaticMeshSizeField(surfaces::Tuple;
                                 n_points_per_gap::Real=0.0,
                                 hmin=nothing,hmax=nothing,hbulk=nothing,
                                 gradation::Real=1.1,smoothing::Bool=true,
-                                features::Bool=true)
+                                features::Bool=true,
+                                source_points=nothing,
+                                source_point_sizes=nothing,
+                                source_segments=nothing,
+                                source_segment_sizes=nothing,
+                                source_fields=nothing)
     caller="AutomaticMeshSizeField"
     n=_float_value(n_nodes_per_circle,caller,"n_nodes_per_circle")
     n>=0 || throw(ArgumentError(
@@ -4562,13 +4603,16 @@ function AutomaticMeshSizeField(surfaces::Tuple;
         a=Int(tris[1,t]); b=Int(tris[2,t]); c=Int(tris[3,t])
         push!(rings[a],b,c); push!(rings[b],a,c); push!(rings[c],a,b)
     end
-    h=Vector{Float64}(undef,nv_total)
+    # Curvature and feature prescriptions stay separate: the upstream cell
+    # test refines on `min(hc/nElemPerCell, hf)` with `nElemPerCell = 2`, so
+    # only the curvature half is halved, while the stored leaf size is the
+    # clamped `min(hc, hf)` — the combined `h` below.
+    hc=Vector{Float64}(undef,nv_total)
     @inbounds for i in 1:nv_total
         nbr=unique(rings[i])
         κ=_sphere_fit_curvature(coords,i,nbr)
         # Upstream's nodePerTwoPi>0 gate: n=0 disables the curvature stage.
-        raw=(κ>0 && n>0) ? 2*π/(n*κ) : Inf
-        h[i]=raw
+        hc[i]=(κ>0 && n>0) ? 2*π/(n*κ) : Inf
     end
     # Local feature size between non-incident, normal-facing triangles —
     # the discrete analogue of hxtOctreeSurfacesProches. Co-located
@@ -4577,8 +4621,11 @@ function AutomaticMeshSizeField(surfaces::Tuple;
     lfs=features && ngap>0 ?
         _auto_local_feature_sizes(coords,tris,groups=_auto_colocated_groups(
             coords),bound=hx*ngap) : fill(Inf,nv_total)
+    hf=Vector{Float64}(undef,nv_total)
+    h=Vector{Float64}(undef,nv_total)
     @inbounds for i in 1:nv_total
-        raw=min(h[i],isfinite(lfs[i]) ? lfs[i]/ngap : Inf)
+        hf[i]=isfinite(lfs[i]) ? lfs[i]/ngap : Inf
+        raw=min(hc[i],hf[i])
         isfinite(raw) || (raw=hb)
         h[i]=clamp(raw,hn,hx)
         isfinite(h[i]) && h[i]>0 || throw(ArgumentError(
@@ -4586,13 +4633,112 @@ function AutomaticMeshSizeField(surfaces::Tuple;
     end
     slope=max(0.0,g-1.0)
     smoothing && _auto_smooth_sizes!(h,coords,tris,slope)
+    # Non-surface size sources: point prescriptions (model points, curve or
+    # volume mesh nodes), segment prescriptions (curve skeletons), and
+    # scalar field samplers (distance-field compositions). Unsized discrete
+    # sources default to `hbulk` — upstream's unspecified-`lc` behaviour —
+    # so they place no constraint beyond the bulk size.
+    spts=_auto_source_point_matrix(source_points,caller)
+    sph=_auto_source_sizes(source_point_sizes,size(spts,2),hb,
+                           caller,"source_point_sizes")
+    ssegs=_auto_source_segment_matrix(source_segments,caller)
+    ssh=_auto_source_sizes(source_segment_sizes,size(ssegs,2),hb,
+                           caller,"source_segment_sizes")
+    sfields=_auto_source_fields(source_fields,caller)
     # The octree domain is the `1.3·span` cube centred on the surface bounding
     # box — upstream builds the tree over `1.3·bbox`.
     half=padded_length/2
     center=((xmin+xmax)/2,(ymin+ymax)/2,(zmin+zmax)/2)
-    octree=_auto_octree_build(coords,tris,h,hb,slope,smoothing,
-        (center[1]-half,center[2]-half,center[3]-half),padded_length)
+    octree=_auto_octree_build(coords,tris,h,hc,hf,hb,hn,slope,smoothing,
+        (center[1]-half,center[2]-half,center[3]-half),padded_length,
+        spts,sph,ssegs,ssh,sfields)
     return AutomaticMeshSizeField(coords,h,octree,slope,hb,hn,hx,smoothing)
+end
+
+# Non-surface source normalization for the automatic octree. Points accept a
+# `3×n` matrix, a list of coordinate triples, or one or more `Mesh`es (the
+# nodes — this is also how curve and volume discretizations enter); segments
+# accept `(a, b)` endpoint pairs or `Mesh`es (their segments); fields accept
+# one or more `AbstractField` scalar samplers.
+function _auto_source_point_matrix(spec,caller::AbstractString)
+    spec===nothing && return Matrix{Float64}(undef,3,0)
+    spec isa Mesh && return Matrix{Float64}(spec.coords)
+    if spec isa Union{Tuple,AbstractVector} && !isempty(spec) &&
+            all(m->m isa Mesh,spec)
+        total=sum(m->size(m.coords,2),spec)
+        out=Matrix{Float64}(undef,3,total);off=0
+        for m in spec
+            for i in axes(m.coords,2),d in 1:3
+                out[d,off+i]=m.coords[d,i]
+            end
+            off+=size(m.coords,2)
+        end
+        return out
+    end
+    return _point_matrix(spec,caller)
+end
+function _auto_source_segment_matrix(spec,caller::AbstractString)
+    spec===nothing && return Matrix{Float64}(undef,6,0)
+    meshes=spec isa Mesh ? (spec,) :
+        (spec isa Union{Tuple,AbstractVector} && !isempty(spec) &&
+         all(m->m isa Mesh,spec) ? spec : nothing)
+    if meshes!==nothing
+        total=sum(m->size(m.segs,2),meshes)
+        out=Matrix{Float64}(undef,6,total);off=0
+        for m in meshes
+            for i in axes(m.segs,2)
+                a=Int(m.segs[1,i]);b=Int(m.segs[2,i])
+                for d in 1:3
+                    out[d,off+i]=m.coords[d,a];out[d+3,off+i]=m.coords[d,b]
+                end
+            end
+            off+=size(m.segs,2)
+        end
+        return out
+    end
+    if spec isa AbstractMatrix
+        size(spec,1)==6 || throw(ArgumentError(
+            "$caller: source_segments matrix must have 6 rows (a|b columns)"))
+        return Matrix{Float64}(spec)
+    end
+    return _primitive_matrix(spec,2,caller)
+end
+function _auto_source_sizes(spec,count::Int,hbulk::Float64,
+                            caller::AbstractString,name)
+    count==0 &&
+        return (spec===nothing || (spec isa Union{Tuple,AbstractVector} &&
+                isempty(spec))) ?
+            Float64[] : throw(ArgumentError(
+                "$caller: $name given without matching sources"))
+    if spec===nothing
+        return fill(hbulk,count)
+    elseif spec isa Real
+        v=_positive_value(spec,caller,name)
+        return fill(v,count)
+    end
+    vals=collect(spec)
+    length(vals)==count || throw(ArgumentError(
+        "$caller: $name must be a scalar or one value per source " *
+        "(got $(length(vals)), expected $count)"))
+    out=Vector{Float64}(undef,count)
+    @inbounds for i in 1:count
+        out[i]=_positive_value(vals[i],caller,name)
+    end
+    return out
+end
+function _auto_source_fields(spec,caller::AbstractString)
+    spec===nothing && return AbstractField[]
+    raws=spec isa AbstractField ? (spec,) : collect(spec)
+    fields=AbstractField[]
+    for (index,f) in pairs(raws)
+        f isa AbstractField || throw(ArgumentError(
+            "$caller: source_fields[$index] is a $(typeof(f)), " *
+            "expected an AbstractField scalar sampler"))
+        applicable(field_value,f,0.0,0.0,0.0) || throw(ArgumentError(
+            "$caller: source_fields[$index] does not support field_value(x,y,z)"))
+        push!(fields,f)
+    end
+    return fields
 end
 
 # Vertices that share an identical position — duplicates introduced when the
@@ -4747,14 +4893,39 @@ function _auto_octree(lo::NTuple{3,Float64},edge::Float64)
                        Int32[0],Float64[Inf])
 end
 
-# Split leaf `n`. Touching triangles are re-tested against each child box, so
-# a child the surface does not reach goes back to interior (its running
-# minimum stays `Inf` and resolves to `hbulk` at finalisation).
+# Every prescription channel the octree resolves. `tri_ref`/`tri_sto` keep the
+# upstream split between the refinement target `min(hc/2, hf)` (raw,
+# `nElemPerCell = 2` halves the curvature part only) and the stored leaf size
+# `min(hc, hf)` clamped into `[hmin, hmax]`. Non-surface sources carry
+# feature-like (unhalved) refine targets and stored minima.
+struct _AutoSources
+    coords::Matrix{Float64}
+    tris::Matrix{Int32}
+    tri_ref::Vector{Float64}     # per-triangle refine target min(hc/2, hf)
+    tri_sto::Vector{Float64}     # per-triangle stored size (clamped vertex min)
+    pts::Matrix{Float64}         # 3×np point sources
+    pt_h::Vector{Float64}        # prescribed size per point
+    segs::Matrix{Float64}        # 6×ns segment sources (a|b columns)
+    seg_h::Vector{Float64}       # prescribed size per segment
+    fields::Vector{AbstractField} # scalar field samplers
+    hn::Float64                  # hmin — global refinement floor
+end
+
+# Per-node membership of the prescription channels — split leaves re-sort
+# their parents' lists into the children they still reach.
+struct _AutoTouchers
+    tri::Vector{Vector{Int32}}
+    seg::Vector{Vector{Int32}}
+    pt::Vector{Vector{Int32}}
+end
+_auto_touchers()=_AutoTouchers([Int32[]],[Int32[]],[Int32[]])
+
+# Split leaf `n`. Touching triangles/segments and contained source points are
+# re-tested against each child box, so a child no prescription reaches goes
+# back to interior (its running minimum stays `Inf` and resolves to `hbulk`
+# at finalisation).
 function _auto_octree_split!(t::_AutoOctree,n::Int,
-                             touchers::Vector{Vector{Int32}},
-                             coords::AbstractMatrix{Float64},
-                             tris::AbstractMatrix{Int32},
-                             tri_h::AbstractVector{Float64})
+                             touch::_AutoTouchers,src::_AutoSources)
     lo,_,e=_auto_octree_box(t,n);h2=e/2
     kids=Vector{Int32}(undef,8)
     for slot in 1:8
@@ -4762,13 +4933,14 @@ function _auto_octree_split!(t::_AutoOctree,n::Int,
         clo=(lo[1]+b0*h2,lo[2]+b1*h2,lo[3]+b2*h2)
         push!(t.nodelo,clo);push!(t.level,t.level[n]+Int32(1))
         push!(t.child,ntuple(_->Int32(0),8));push!(t.size,Inf)
-        push!(touchers,Int32[])
+        push!(touch.tri,Int32[]);push!(touch.seg,Int32[]);push!(touch.pt,Int32[])
         kids[slot]=Int32(length(t.child))
     end
     t.child[n]=Tuple(kids)
-    old=touchers[n]
-    touchers[n]=Int32[]          # `n` is internal now; `old` keeps the list
-    for j in old
+    old_tri=touch.tri[n];old_seg=touch.seg[n];old_pt=touch.pt[n]
+    touch.tri[n]=Int32[];touch.seg[n]=Int32[];touch.pt[n]=Int32[]
+    coords=src.coords;tris=src.tris
+    for j in old_tri
         a=(coords[1,Int(tris[1,j])],coords[2,Int(tris[1,j])],
            coords[3,Int(tris[1,j])])
         b=(coords[1,Int(tris[2,j])],coords[2,Int(tris[2,j])],
@@ -4778,9 +4950,31 @@ function _auto_octree_split!(t::_AutoOctree,n::Int,
         for k in kids
             c_lo,c_hi,_=_auto_octree_box(t,Int(k))
             _auto_tri_box_overlap(c_lo,c_hi,a,b,c) || continue
-            push!(touchers[Int(k)],j)
-            v=t.size[Int(k)];h2v=tri_h[j]
-            t.size[Int(k)]=v<h2v ? v : h2v
+            push!(touch.tri[Int(k)],j)
+            v=t.size[Int(k)];hv=src.tri_sto[j]
+            t.size[Int(k)]=v<hv ? v : hv
+        end
+    end
+    for j in old_seg
+        a=(src.segs[1,j],src.segs[2,j],src.segs[3,j])
+        b=(src.segs[4,j],src.segs[5,j],src.segs[6,j])
+        for k in kids
+            c_lo,c_hi,_=_auto_octree_box(t,Int(k))
+            _auto_seg_box_overlap(c_lo,c_hi,a,b) || continue
+            push!(touch.seg[Int(k)],j)
+            v=t.size[Int(k)];hv=src.seg_h[j]
+            t.size[Int(k)]=v<hv ? v : hv
+        end
+    end
+    for j in old_pt
+        p=(src.pts[1,j],src.pts[2,j],src.pts[3,j])
+        for k in kids
+            c_lo,c_hi,_=_auto_octree_box(t,Int(k))
+            (c_lo[1]<=p[1]<=c_hi[1] && c_lo[2]<=p[2]<=c_hi[2] &&
+             c_lo[3]<=p[3]<=c_hi[3]) || continue
+            push!(touch.pt[Int(k)],j)
+            v=t.size[Int(k)];hv=src.pt_h[j]
+            t.size[Int(k)]=v<hv ? v : hv
         end
     end
     return t
@@ -4826,39 +5020,163 @@ function _auto_tri_box_overlap(lo::NTuple{3,Float64},hi::NTuple{3,Float64},
     return abs(s)<=r
 end
 
+# Exact segment/AABB overlap — Liang–Barsky slab clipping of `ab`'s parameter
+# interval by the three box slabs. The segment touches the box iff the
+# clipped interval is non-empty.
+function _auto_seg_box_overlap(lo::NTuple{3,Float64},hi::NTuple{3,Float64},
+                               a,b)
+    t0=0.0;t1=1.0
+    @inbounds for d in 1:3
+        dir=b[d]-a[d]
+        if dir==0
+            (a[d]<lo[d] || a[d]>hi[d]) && return false
+        else
+            u1=(lo[d]-a[d])/dir;u2=(hi[d]-a[d])/dir
+            u1>u2 && ((u1,u2)=(u2,u1))
+            t0=t0>u1 ? t0 : u1;t1=t1<u2 ? t1 : u2
+            t0>t1 && return false
+        end
+    end
+    return true
+end
+
 # Depth-first insertion of triangle `j`: every leaf whose box overlaps the
-# triangle records it, and a touched leaf refines until its edge no longer
-# exceeds `tri_h[j]` — so leaf sizes track the prescribed surface size.
-function _auto_octree_insert_tri!(t::_AutoOctree,
-                                  touchers::Vector{Vector{Int32}},j::Int,
-                                  coords::AbstractMatrix{Float64},
-                                  tris::AbstractMatrix{Int32},
-                                  tri_h::AbstractVector{Float64})
+# triangle records it, and a touched leaf refines while
+# `edge > min(hc/2, hf)` — the exact upstream `curvatureRefineCallback`
+# criterion (`nElemPerCell = 2` halves the curvature prescription; the
+# feature prescription is not halved) — still bounded by `edge ≥ hmin`,
+# then stores the clamped `min(hc, hf)` minimum over its touchers.
+function _auto_octree_insert_tri!(t::_AutoOctree,touch::_AutoTouchers,
+                                  src::_AutoSources,j::Int)
+    coords=src.coords;tris=src.tris
     a=(coords[1,Int(tris[1,j])],coords[2,Int(tris[1,j])],
        coords[3,Int(tris[1,j])])
     b=(coords[1,Int(tris[2,j])],coords[2,Int(tris[2,j])],
        coords[3,Int(tris[2,j])])
     c=(coords[1,Int(tris[3,j])],coords[2,Int(tris[3,j])],
        coords[3,Int(tris[3,j])])
-    ht=tri_h[j]
+    target=src.tri_ref[j];hv=src.tri_sto[j];hn=src.hn
     stack=Int32[1]
     while !isempty(stack)
         n=Int(pop!(stack))
         lo,hi,e=_auto_octree_box(t,n)
         _auto_tri_box_overlap(lo,hi,a,b,c) || continue
         if _auto_isleaf(t,n)
-            if e>ht && t.level[n]<64
-                _auto_octree_split!(t,n,touchers,coords,tris,tri_h)
+            if e>target && e>=hn && t.level[n]<64
+                _auto_octree_split!(t,n,touch,src)
                 append!(stack,t.child[n])
             else
-                push!(touchers[n],Int32(j))
-                t.size[n]>ht && (t.size[n]=ht)
+                push!(touch.tri[n],Int32(j))
+                t.size[n]>hv && (t.size[n]=hv)
             end
         else
             append!(stack,t.child[n])
         end
     end
     return t
+end
+
+# Point source `j`: every leaf whose (closed) box contains the point records
+# it and refines while its edge exceeds the prescribed size — the feature-like
+# unhalved rule upstream applies to `featureSizeAtVertices`. A point on a
+# shared face may sit in several leaves; all of them tighten identically.
+function _auto_octree_insert_point!(t::_AutoOctree,touch::_AutoTouchers,
+                                    src::_AutoSources,j::Int)
+    p=(src.pts[1,j],src.pts[2,j],src.pts[3,j])
+    hv=src.pt_h[j];hn=src.hn
+    stack=Int32[1]
+    while !isempty(stack)
+        n=Int(pop!(stack))
+        lo,hi,e=_auto_octree_box(t,n)
+        (lo[1]<=p[1]<=hi[1] && lo[2]<=p[2]<=hi[2] && lo[3]<=p[3]<=hi[3]) ||
+            continue
+        if _auto_isleaf(t,n)
+            if e>hv && e>=hn && t.level[n]<64
+                _auto_octree_split!(t,n,touch,src)
+                append!(stack,t.child[n])
+            else
+                push!(touch.pt[n],Int32(j))
+                t.size[n]>hv && (t.size[n]=hv)
+            end
+        else
+            append!(stack,t.child[n])
+        end
+    end
+    return t
+end
+
+# Segment source `j`: same prescription as a point, detected by the exact
+# segment/box overlap — a curve tightens the octree along its whole length.
+function _auto_octree_insert_seg!(t::_AutoOctree,touch::_AutoTouchers,
+                                  src::_AutoSources,j::Int)
+    a=(src.segs[1,j],src.segs[2,j],src.segs[3,j])
+    b=(src.segs[4,j],src.segs[5,j],src.segs[6,j])
+    hv=src.seg_h[j];hn=src.hn
+    stack=Int32[1]
+    while !isempty(stack)
+        n=Int(pop!(stack))
+        lo,hi,e=_auto_octree_box(t,n)
+        _auto_seg_box_overlap(lo,hi,a,b) || continue
+        if _auto_isleaf(t,n)
+            if e>hv && e>=hn && t.level[n]<64
+                _auto_octree_split!(t,n,touch,src)
+                append!(stack,t.child[n])
+            else
+                push!(touch.seg[n],Int32(j))
+                t.size[n]>hv && (t.size[n]=hv)
+            end
+        else
+            append!(stack,t.child[n])
+        end
+    end
+    return t
+end
+
+# Smallest finite sample of the source fields at `p`; non-finite answers
+# place no constraint.
+function _auto_fields_at(fields,p)
+    m=Inf
+    @inbounds for f in fields
+        v=field_value(f,p[1],p[2],p[3])
+        (isfinite(v) && v<m) && (m=v)
+    end
+    return m
+end
+
+# Scalar field sources — the upstream `sizeFunction` hook made effective.
+# A leaf refines while its edge exceeds the smallest finite sample over the
+# nine-point stencil (center + corners): corner samples catch a thin source
+# band crossing the cell edge that the center alone would miss. A source
+# strictly interior to a leaf and invisible to the stencil stays
+# under-resolved — the documented bound on this channel (upstream's uniform
+# hBulk grid misses sub-hBulk features the same way).
+function _auto_octree_fields_refine!(t::_AutoOctree,touch::_AutoTouchers,
+                                     src::_AutoSources)
+    isempty(src.fields) && return t
+    hn=src.hn
+    while true
+        marked=Int32[]
+        for n in eachindex(t.child)
+            _auto_isleaf(t,n) || continue
+            t.level[n]<64 || continue
+            lo,hi,e=_auto_octree_box(t,n)
+            e>=hn || continue
+            c=((lo[1]+hi[1])/2,(lo[2]+hi[2])/2,(lo[3]+hi[3])/2)
+            m=_auto_fields_at(src.fields,c)
+            @inbounds for b0 in (0,1),b1 in (0,1),b2 in (0,1)
+                p=(b0==0 ? lo[1] : hi[1],b1==0 ? lo[2] : hi[2],
+                   b2==0 ? lo[3] : hi[3])
+                s=_auto_fields_at(src.fields,p)
+                s<m && (m=s)
+            end
+            (isfinite(m) && e>m) && push!(marked,Int32(n))
+        end
+        isempty(marked) && return t
+        for n in marked
+            _auto_isleaf(t,Int(n)) &&
+                _auto_octree_split!(t,Int(n),touch,src)
+        end
+    end
 end
 
 # Leaves sharing positive area with leaf `n`'s face in direction `dir`
@@ -4910,13 +5228,10 @@ function _auto_face_neighbors!(out::Vector{Int32},stack::Vector{Int32},
     return out
 end
 # 2:1 face balance: no leaf may sit next to a face-adjacent leaf more than
-# one level deeper. Splits redistribute touching triangles the same way the
-# refinement splits do.
-function _auto_octree_balance!(t::_AutoOctree,
-                               touchers::Vector{Vector{Int32}},
-                               coords::AbstractMatrix{Float64},
-                               tris::AbstractMatrix{Int32},
-                               tri_h::AbstractVector{Float64})
+# one level deeper. Splits redistribute every prescription channel the same
+# way the refinement splits do.
+function _auto_octree_balance!(t::_AutoOctree,touch::_AutoTouchers,
+                               src::_AutoSources)
     out=Int32[];stack=Int32[]
     while true
         marked=Int32[]
@@ -4935,7 +5250,7 @@ function _auto_octree_balance!(t::_AutoOctree,
         isempty(marked) && return t
         for n in marked
             _auto_isleaf(t,Int(n)) &&
-                _auto_octree_split!(t,Int(n),touchers,coords,tris,tri_h)
+                _auto_octree_split!(t,Int(n),touch,src)
         end
     end
 end
@@ -5010,24 +5325,68 @@ end
 
 function _auto_octree_build(coords::AbstractMatrix{Float64},
                             tris::AbstractMatrix{Int32},
-                            h::AbstractVector{Float64},hbulk::Float64,
+                            h::AbstractVector{Float64},
+                            hc::AbstractVector{Float64},
+                            hf::AbstractVector{Float64},
+                            hbulk::Float64,hn::Float64,
                             slope::Float64,extend::Bool,
-                            lo::NTuple{3,Float64},edge::Float64)
+                            lo::NTuple{3,Float64},edge::Float64,
+                            spts::AbstractMatrix{Float64},
+                            sph::AbstractVector{Float64},
+                            ssegs::AbstractMatrix{Float64},
+                            ssh::AbstractVector{Float64},
+                            sfields::Vector{AbstractField})
     t=_auto_octree(lo,edge)
-    touchers=Vector{Vector{Int32}}(undef,1);touchers[1]=Int32[]
-    tri_h=Vector{Float64}(undef,size(tris,2))
+    touch=_auto_touchers()
+    nt=size(tris,2)
+    tri_ref=Vector{Float64}(undef,nt);tri_sto=Vector{Float64}(undef,nt)
     @inbounds for j in axes(tris,2)
-        tri_h[j]=min(h[Int(tris[1,j])],h[Int(tris[2,j])],h[Int(tris[3,j])])
+        a=Int(tris[1,j]);b=Int(tris[2,j]);c=Int(tris[3,j])
+        # Upstream `curvatureRefineCallback`: refine while
+        # `edge > min(hc/nElemPerCell, hf)` with `nElemPerCell = 2`; store the
+        # clamped `min(hc, hf)` (the per-vertex `h` already combines both).
+        tri_ref[j]=min(min(hc[a]/2,hf[a]),min(hc[b]/2,hf[b]),
+                       min(hc[c]/2,hf[c]))
+        tri_sto[j]=min(h[a],h[b],h[c])
     end
+    src=_AutoSources(coords,tris,tri_ref,tri_sto,spts,sph,ssegs,ssh,
+                     sfields,hn)
     for j in axes(tris,2)
-        _auto_octree_insert_tri!(t,touchers,j,coords,tris,tri_h)
+        _auto_octree_insert_tri!(t,touch,src,j)
     end
-    _auto_octree_balance!(t,touchers,coords,tris,tri_h)
-    # Interior leaves — no touching triangle — take `hbulk`; internal nodes
-    # carry the children minimum for introspection only.
+    @inbounds for k in axes(spts,2)
+        _auto_octree_insert_point!(t,touch,src,k)
+    end
+    @inbounds for k in axes(ssegs,2)
+        _auto_octree_insert_seg!(t,touch,src,k)
+    end
+    _auto_octree_balance!(t,touch,src)
+    if !isempty(sfields)
+        # Balance may expose a field source to new leaf centers/corners, so
+        # alternate refinement and balance until both are stable.
+        while true
+            _auto_octree_fields_refine!(t,touch,src)
+            count=length(t.child)
+            _auto_octree_balance!(t,touch,src)
+            length(t.child)==count && break
+        end
+    end
+    # Interior leaves — no prescription reaches them — take `hbulk`; a
+    # source field still tightens every leaf to its clamped center sample,
+    # the upstream `sizeFunction`/`assignSizeAfterRefinement` semantics.
+    # Internal nodes carry the children minimum for introspection only.
     @inbounds for n in eachindex(t.child)
         if _auto_isleaf(t,n)
-            isfinite(t.size[n]) || (t.size[n]=hbulk)
+            v=t.size[n]
+            isfinite(v) || (v=hbulk)
+            if !isempty(sfields)
+                lo_n,hi_n,_=_auto_octree_box(t,n)
+                fc=_auto_fields_at(sfields,
+                    ((lo_n[1]+hi_n[1])/2,(lo_n[2]+hi_n[2])/2,
+                     (lo_n[3]+hi_n[3])/2))
+                (isfinite(fc) && fc<v) && (v=fc)
+            end
+            t.size[n]=v
         end
     end
     @inbounds for n in reverse(eachindex(t.child))
