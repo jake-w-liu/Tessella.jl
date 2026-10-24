@@ -87,6 +87,15 @@ add_thick_solid(volume_tag,exclude_surface_tags,offset;tag=-1)=
                                      Float64(offset))
     end
 
+# Tessella extension — gmsh 4.15.2 publishes no `occ.addThickSections`
+# (its OCC set ends at `addThruSections`/`addThickSolid`). This follows
+# the OCCT `BRepOffset` thick-sections recipe: each listed offset bounds
+# one solid slab along the face normal, sharing the intermediate
+# section faces. See `Model._model_occ_thick_sections`.
+add_thick_sections(surface_tag,offsets;tag=-1)=_with_model() do m
+    Model._model_occ_thick_sections(m,tag,surface_tag,offsets)
+end
+
 import_shapes(file_name;highestDimOnly=true,format="")=_with_model() do m
     Model._model_occ_import_shapes(m,String(file_name);
                                    highest_dim_only=highestDimOnly)

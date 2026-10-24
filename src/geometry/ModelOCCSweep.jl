@@ -486,8 +486,7 @@ end
 
 function _model_occ_extrude(m::GeoModel,dim_tags,dx,dy,dz;
                             num_elements=Int[],heights=Float64[],
-                            recombine=false)
-    caller="OCC.extrude"
+                            recombine=false,caller="OCC.extrude")
     params=_model_occ_sweep_mesh_params(num_elements,heights,recombine,caller)
     d=_model_occ_extrude_direction(dx,dy,dz,caller)
     kernel=m.occ_kernel
@@ -1535,4 +1534,148 @@ function _model_occ_revolve(m::GeoModel,dim_tags,x,y,z,ax,ay,az,angle;
     params===nothing || _model_occ_sweep_transport!(
         m,kernel,sw,params,spec)
     return out
+end
+
+# ---------------------------------------------------------------------------
+# `model.occ.addThickSections` — thicken a bound OCC surface into solids
+# along its normal. Upstream gmsh 4.15.2 publishes no endpoint of this
+# name (its OCC set ends at `addThruSections`/`addThickSolid`); the
+# contract here follows the OCCT `BRepOffset` thickening recipe — a face
+# offset copy at each listed distance bounds one *thick section*, so
+# `offsets` reads as the signed section boundaries measured along the
+# face normal with an implicit leading 0 at the source surface. Each of
+# the `n` slabs [o_{i-1}, o_i] is the exact prism sweep of the lower
+# section face along ±n̂ — the same records `_model_occ_extrude_planar!`
+# certifies — and adjacent slabs share the intermediate offset face,
+# wires, edges and vertices, matching the Layers-style conforming
+# decomposition. The offset list must be strictly monotone so the
+# sections cannot overlap or degenerate. The bounded scope mirrors the
+# prism sweep's two exact profile classes: all-line boundaries (ruled
+# side walls) and the single full-circle profile (compact cylinder
+# wall); every other surface family rejects loudly. `tag` binds the sole
+# resulting solid like upstream's `_multiBind` tag rule — it applies
+# only when a single entity is produced.
+
+# Retag a bound shape in place: upstream's `_multiBind` honors `tag`
+# only for a sole result entity, which the sweep cursor already
+# allocated by the time the caller knows the answer. The entity is a
+# leaf (no bound parent references it), so moving its tag touches only
+# the three lookup tables plus the per-dim maximum.
+function _model_occ_retag_shape!(kernel,dimension,from,to,caller)
+    from==to && return nothing
+    id=get(kernel.bindings,(dimension,from),nothing)
+    id===nothing && throw(ArgumentError(
+        "$caller: OCC entity ($dimension,$from) is unbound"))
+    haskey(kernel.bindings,(dimension,to)) && throw(ArgumentError(
+        "$caller: OCC entity ($dimension,$to) already exists"))
+    _model_occ_entity_map_unbind!(kernel.entity_maps[dimension+3],from)
+    delete!(kernel.bindings,(dimension,from))
+    kernel.bindings[(dimension,to)]=id
+    _model_occ_entity_map_bind!(kernel.entity_maps[dimension+3],to)
+    kernel.shape_tags[id]=(dimension,to)
+    kernel.maxima[dimension+3]=maximum(
+        (t for (d,t) in keys(kernel.bindings) if d==dimension);init=0)
+    kernel.changed=true
+    return nothing
+end
+
+function _model_occ_thick_sections(m::GeoModel,tag,surface_tag,offsets;
+                                   caller="OCC.addThickSections")
+    kernel=m.occ_kernel
+    requested=_model_occ_requested_tag(tag,caller)
+    # A negative tag flips the face normal — the same reversed-use
+    # convention `add_wire` applies to negative curve tags.
+    st=_model_occ_requested_tag(surface_tag,caller)
+    st==0 && throw(ArgumentError("$caller: OCC Surface[0] is invalid"))
+    flip=st<0
+    fid=get(kernel.bindings,(2,abs(st)),nothing)
+    fid===nothing && throw(ArgumentError(
+        "$caller: unknown OCC Surface[$(abs(st))]"))
+    fshape=kernel.shapes[fid]
+    fg=fshape.geometry
+    fg.kind===:plane || throw(ArgumentError(
+        "$caller: addThickSections needs a planar surface " *
+        "(got kind=$(fg.kind))"))
+    offs=Float64[_finite_scalar(o,caller,"offset") for o in offsets]
+    isempty(offs) && throw(ArgumentError(
+        "$caller: addThickSections requires at least one offset"))
+    # The source surface is the implicit 0-boundary; every listed offset
+    # bounds one slab, so the sequence must march strictly in one
+    # direction along the normal.
+    sign_of=offs[1]>0.0 ? 1.0 : offs[1]<0.0 ? -1.0 : 0.0
+    sign_of==0.0 && throw(ArgumentError(
+        "$caller: the first offset must be non-zero — the source " *
+        "surface is the implicit zero-thickness section"))
+    bounds=Vector{Float64}(undef,length(offs)+1)
+    bounds[1]=0.0
+    for i in eachindex(offs)
+        bounds[i+1]=offs[i]
+        step=bounds[i+1]-bounds[i]
+        step*sign_of>0.0 || throw(ArgumentError(
+            "$caller: offsets must be strictly monotone — the thick " *
+            "sections would overlap or degenerate"))
+    end
+    # Profile admissibility — the same two classes the prism sweep
+    # certifies exactly (the sweep direction below is always the face
+    # normal, so the direction gates cannot fire).
+    edges=0;all_lines=true
+    for wid in fshape.children,
+            (eid,_) in kernel.shapes[wid].geometry.uses
+        edges+=1
+        kernel.shapes[eid].geometry.kind===:line || (all_lines=false)
+    end
+    if !all_lines
+        edges==1 || throw(ArgumentError(
+            "$caller: addThickSections supports all-line boundaries " *
+            "or a single full-circle profile only"))
+        eid=only(kernel.shapes[only(fshape.children)].geometry.uses)[1]
+        eg=kernel.shapes[eid].geometry.geometry
+        if eg.occ===:circle || (eg.occ===:ellipse &&
+                abs(eg.rx-eg.ry)<=_OCC_CONFUSION*eg.rx)
+            eg.t1-eg.t0==_OCC_TWO_PI || throw(ArgumentError(
+                "$caller: addThickSections supports full-circle " *
+                "profiles only"))
+        else
+            throw(ArgumentError(
+                "$caller: addThickSections supports circular " *
+                "profiles only"))
+        end
+    end
+    # The face's canonical normal — `reversed` marks records baked with
+    # the opposite intent, the same convention `_occ_surface_normal`
+    # applies.
+    n_eff=get(fg.geometry,:reversed,false) ? (.-fg.geometry.axis) :
+                                           fg.geometry.axis
+    flip && (n_eff=(.-n_eff))
+    ndir=_occ_dir(n_eff)
+    nsolids=length(offs)
+    # Upstream `_multiBind` binds `tag` to the first entity only and
+    # errors when a second entity of that dimension would share it —
+    # reject before any bind so the failure stays atomic.
+    requested>0 && nsolids>1 && throw(ArgumentError(
+        "$caller: cannot bind $nsolids volumes to a single tag " *
+        "$requested — use tag=-1 for multi-slab thickening"))
+    requested>0 && haskey(kernel.bindings,(3,requested)) &&
+        throw(ArgumentError(
+            "$caller: OCC Volume[$requested] already exists"))
+    # Each interval is the lower face swept by the signed step along
+    # n̂; the previous slab's cap is the next section's source face, so
+    # the intermediate offset faces stay shared entities.
+    solid_tags=Int[]
+    prev_tag=abs(st)
+    for i in eachindex(offs)
+        step=bounds[i+1]-bounds[i]
+        d=_occ3_scale(ndir,step)
+        seg=_model_occ_extrude(m,[(2,prev_tag)],d[1],d[2],d[3];
+                               caller=caller)
+        # dim-2 extrusion reports [(2,cap),(3,solid),(2,laterals…)].
+        cap_tag=seg[1][2]; solid_tag=seg[2][2]
+        push!(solid_tags,solid_tag)
+        prev_tag=cap_tag
+    end
+    if requested>0 && nsolids==1
+        _model_occ_retag_shape!(kernel,3,solid_tags[1],requested,caller)
+        solid_tags[1]=requested
+    end
+    return Tuple{Int,Int}[(3,t) for t in solid_tags]
 end
