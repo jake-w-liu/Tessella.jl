@@ -5676,6 +5676,172 @@ function _plugin_node_coord(axis::Int,tag)
     return 0.0
 end
 
+# ---- Bubbles ----------------------------------------------------------------------------
+#
+# Upstream `Plugin(Bubbles)` (Bubbles.cpp) writes one `.geo` file: the model's
+# points/lines/surfaces verbatim, each surface deleted and replaced by the
+# "bubbles" of its triangulation's vertex Voronoi — for every mesh vertex with
+# >2 incident cell-boundary points (triangle barycenters, plus the vertex's own
+# position when it lies on a dim<2 entity), the points are angle-sorted around
+# their barycenter, shrunk by `ShrinkFactor` toward it, and emitted as
+# Point/BSpline/Curve Loop/Plane Surface records. A Physical Surface per input
+# face holds the bubbles; the face loop plus every bubble loop becomes the
+# leftover plane surface under a second Physical Surface.
+
+function _plugin_bubble_angle(center::NTuple{3,Float64},p::NTuple{3,Float64})
+    # angle_plan(c, {1,0,0}, p, z): reference ray is center→(1,0,0), the
+    # upstream quirk — not the +x axis.
+    ref=(1.0-center[1],-center[2],-center[3])
+    dir=(p[1]-center[1],p[2]-center[2],p[3]-center[3])
+    n1=hypot(ref...);n2=hypot(dir...)
+    (n1==0.0 || n2==0.0) && return 0.0
+    sinc=(ref[1]*dir[2]-ref[2]*dir[1])/(n1*n2)
+    cosc=(ref[1]*dir[1]+ref[2]*dir[2])/(n1*n2)
+    return atan(sinc,cosc)
+end
+
+function _plugin_exec_bubbles(spec::_PluginSpec,caller::AbstractString)
+    shrink=spec.numbers["ShrinkFactor"]
+    filename=spec.strings["OutputFile"]
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    slot=MODEL_SLOTS[index]
+    model=slot.model
+    mesh=slot.mesh
+    Base.open(filename,"w") do io
+        p=maximum((t for (d,t) in model_entities(model) if d==0);init=0)+1
+        l=maximum((t for (d,t) in model_entities(model) if d==1);init=0)+1
+        s=maximum((t for (d,t) in model_entities(model) if d==2);init=0)+1
+        ll=s;ps=1
+        lo=(Inf,Inf,Inf);hi=(-Inf,-Inf,-Inf)
+        for xyz in values(model.points)
+            lo=min.(lo,xyz);hi=max.(hi,xyz)
+        end
+        mesh!==nothing && for col in axes(mesh.coords,2)
+            pt=ntuple(a->mesh.coords[a,col],3)
+            lo=min.(lo,pt);hi=max.(hi,pt)
+        end
+        lc=isfinite(lo[1]) ? hypot((hi.-lo)...)/100 : 1.0
+        println(io,"lc = $(_plugin_gnum(lc;significant=6));")
+        for tag in sort!(collect(keys(model.points)))
+            x,y,z=model.points[tag]
+            println(io,"Point($tag) = {$(_plugin_gnum(x)), " *
+                "$(_plugin_gnum(y)), $(_plugin_gnum(z)), lc};")
+        end
+        for tag in sort!(collect(keys(model.curves)))
+            kind=get(model.curve_types,tag,:line)
+            kind==:line || continue
+            a,b=model.curves[tag]
+            println(io,"Line($tag) = {$a, $b};")
+        end
+        # Nodes classified on dim<2 entities get their position appended to
+        # the cell so bubbles reach the boundary.
+        boundary_nodes=Set{UInt64}()
+        _plugin_each_mesh_element(mesh,model) do dim,_etag,msh,nodes
+            dim<2 || return
+            union!(boundary_nodes,nodes)
+            return nothing
+        end
+        for tag in sort!(collect(keys(model.surfaces)))
+            for lp in model.surfaces[tag]
+                println(io,"Curve Loop($(abs(lp))) = " *
+                    "{$(join(model.loops[abs(lp)],", "))};")
+            end
+            kw=get(model.surface_types,tag,:plane)==:plane ?
+                "Plane Surface" : "Surface"
+            println(io,"$kw($tag) = {$(join(model.surfaces[tag],", "))};")
+            println(io,"Delete { Surface {$tag}; }")
+            sbeg=s;llbeg=ll
+            v2t=Dict{UInt64,Vector{NTuple{3,Float64}}}()
+            vpos=Dict{UInt64,NTuple{3,Float64}}()
+            _plugin_each_mesh_element(mesh,model) do dim,etag,msh,nodes
+                (dim==2 && etag==tag) || return nothing
+                spec_rec=msh_spec(Int(msh))
+                spec_rec.family!=:tri && return nothing
+                bary=(0.0,0.0,0.0)
+                for node in nodes
+                    pt=(_plugin_node_coord(1,node),
+                        _plugin_node_coord(2,node),_plugin_node_coord(3,node))
+                    vpos[node]=pt
+                    bary=bary.+pt./3
+                end
+                for node in nodes
+                    push!(get!(()->NTuple{3,Float64}[],v2t,node),bary)
+                end
+                return nothing
+            end
+            for node in keys(v2t)
+                node in boundary_nodes && push!(v2t[node],vpos[node])
+            end
+            for node in sort!(collect(keys(v2t)))
+                pts=v2t[node]
+                length(pts)>2 || continue
+                bc=ntuple(a->sum(pt->pt[a],pts)/length(pts),3)
+                sort!(pts;by=pt->_plugin_bubble_angle(bc,pt))
+                if !iszero(shrink)
+                    pts=[pt.-shrink.*(pt.-bc) for pt in pts]
+                end
+                nump=length(pts)
+                for pt in pts
+                    println(io,"Point($p) = {$(_plugin_gnum(pt[1])), " *
+                        "$(_plugin_gnum(pt[2])), $(_plugin_gnum(pt[3])), lc};")
+                    p+=1
+                end
+                ids=string.(p-nump:p-1)
+                println(io,"BSpline($l) = {$(join(ids,", ")), $(p-nump)};")
+                l+=1
+                println(io,"Curve Loop($ll) = {$(l-1)};");ll+=1
+                println(io,"Plane Surface($s) = {$(ll-1)};");s+=1
+            end
+            println(io,"Physical Surface($ps) = {$(sbeg):$(s-1)};")
+            ps+=1
+            # Upstream emits the *face* tag as the outer loop reference and
+            # the bubble loops as a `llbeg:ll-1` range — verbatim.
+            println(io,"Plane Surface($s) = {$tag, $llbeg:$(ll-1)};");s+=1
+            println(io,"Physical Surface($ps) = {$(s-1)};");ps+=1
+        end
+        return nothing
+    end
+    return nothing
+end
+
+# Iterate every (dim, entity, msh, node-tags) element of the live mesh and
+# discrete records — shared by file-emitter plugins.
+function _plugin_each_mesh_element(f,mesh,model)
+    if mesh!==nothing
+        data=mesh.entity_data
+        if data!==nothing
+            public=_mesh_public_tags(mesh)
+            nodetags=public===nothing ? UInt64.(1:size(mesh.coords,2)) :
+                public.node_tags
+            for (bi,block) in enumerate(mesh.blocks)
+                block isa ElementBlock || continue
+                dim=msh_dimension(block.msh)
+                for col in axes(block.nodes,2)
+                    etag=Int(data.block_entities[bi][col])
+                    nodes=UInt64[nodetags[n] for n in block.nodes[:,col]]
+                    f(dim,etag,Int(block.msh),nodes)
+                end
+            end
+        end
+    end
+    for ((dim,etag),record) in _discrete_mesh_records(model)
+        for i in eachindex(record.element_types)
+            f(dim,etag,Int(record.element_types[i]),record.element_nodes[i])
+        end
+    end
+    return nothing
+end
+
+function _plugin_gnum(x::Real;significant::Int=16)
+    isinteger(x) && abs(x)<1e15 && return string(Int(x))
+    s=string(round(Float64(x);sigdigits=significant))
+    # C `%g` style: trim a redundant ".0" tail.
+    endswith(s,".0") && return s[1:end-2]
+    return s
+end
+
 # ---- SimplePartition --------------------------------------------------------------------
 #
 # Upstream `Plugin(SimplePartition)` clears existing partitions, evaluates
@@ -6946,6 +7112,10 @@ const _PLUGINS=Dict{String,NamedTuple}(
             "ReductionImmunePhysicalGroups"=>"",
             "DimensionOfChainsToSave"=>"0, 1, 2, 3","Filename"=>""),
         run_fn=_plugin_exec_homology),
+    "Bubbles"=>(number_options=Dict{String,Float64}(
+        "ShrinkFactor"=>0.0),
+        string_options=Dict{String,String}("OutputFile"=>"bubbles.geo"),
+        run_fn=_plugin_exec_bubbles),
     # `Echo`, `TimeReport`, `DuplicatedBoundaries` and `PolarView` are not
     # registered: Gmsh 4.15.2 ships none of them (the oracle reports
     # `Failed action 'Run' or unknown plugin '<name>'`), and they are absent
