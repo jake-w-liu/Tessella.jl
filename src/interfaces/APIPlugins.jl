@@ -5107,6 +5107,186 @@ function _plugin_exec_invisible(spec::_PluginSpec,caller::AbstractString)
     return nothing
 end
 
+# ---- Distance ---------------------------------------------------------------------
+#
+# Upstream `Plugin(Distance)` scans `GModel::current()` when `DistanceType <=
+# 0`: every mesh vertex's distance map starts at 0, then each boundary
+# entity's LINE and TRIANGLE elements min-update every vertex's unsigned
+# distance via `signedDistancesPoints{Line,Triangle}` (other element kinds are
+# skipped upstream — a `PhysicalPoint` target therefore yields an all-zero
+# field). Boundary set: with all Physical* options 0, entities of dimension
+# `maxDim-1`; otherwise entities whose physical tags match the option for
+# their dimension. `printView` emits one record per element on maxDim
+# entities with per-node distances — `MinScale`/`MaxScale` rescale the value
+# column when both are positive and the field is non-constant, `MinScale`
+# alone shifts it. The view is named `distance` with one time step at t=0.
+# `DistanceType > 0` solves the Legrand diffusion PDE upstream under
+# HAVE_SOLVER; that arm is not yet ported.
+
+function _plugin_point_seg_dist(px,py,pz,a,b)
+    abx=b[1]-a[1];aby=b[2]-a[2];abz=b[3]-a[3]
+    ab2=abx*abx+aby*aby+abz*abz
+    α=ab2>0 ? ((px-a[1])*abx+(py-a[2])*aby+(pz-a[3])*abz)/ab2 : 0.0
+    α=clamp(α,0.0,1.0)
+    return hypot(px-(a[1]+α*abx),py-(a[2]+α*aby),pz-(a[3]+α*abz))
+end
+
+# Unsigned point-triangle distance: |normal component| when the projection
+# lands inside the triangle, otherwise the minimum edge distance (upstream
+# `signedDistancesPointsTriangle` magnitude — the plugin takes abs()).
+function _plugin_point_tri_dist(px,py,pz,a,b,c)
+    e1x=b[1]-a[1];e1y=b[2]-a[2];e1z=b[3]-a[3]
+    e2x=c[1]-a[1];e2y=c[2]-a[2];e2z=c[3]-a[3]
+    nx=e1y*e2z-e1z*e2y;ny=e1z*e2x-e1x*e2z;nz=e1x*e2y-e1y*e2x
+    n2=nx*nx+ny*ny+nz*nz
+    if n2>0
+        # Barycentric coordinates of the orthogonal projection.
+        d11=e1x*e1x+e1y*e1y+e1z*e1z;d12=e1x*e2x+e1y*e2y+e1z*e2z
+        d22=e2x*e2x+e2y*e2y+e2z*e2z
+        px1=px-a[1];py1=py-a[2];pz1=pz-a[3]
+        b1=px1*e1x+py1*e1y+pz1*e1z;b2=px1*e2x+py1*e2y+pz1*e2z
+        det=d11*d22-d12*d12
+        if det>0
+            u=(b1*d22-b2*d12)/det;v=(b2*d11-b1*d12)/det
+            if u>=0 && v>=0 && u+v<=1
+                return abs(px1*nx+py1*ny+pz1*nz)/sqrt(n2)
+            end
+        end
+    end
+    return min(_plugin_point_seg_dist(px,py,pz,a,b),
+               _plugin_point_seg_dist(px,py,pz,a,c),
+               _plugin_point_seg_dist(px,py,pz,b,c))
+end
+
+function _plugin_exec_distance(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    id_point=_mesh_query_integer(Int(numbers["PhysicalPoint"]),caller,"PhysicalPoint")
+    id_line=_mesh_query_integer(Int(numbers["PhysicalLine"]),caller,"PhysicalLine")
+    id_face=_mesh_query_integer(Int(numbers["PhysicalSurface"]),caller,"PhysicalSurface")
+    dtype=numbers["DistanceType"]
+    minscale=numbers["MinScale"];maxscale=numbers["MaxScale"]
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    slot=MODEL_SLOTS[index]
+    mesh=slot.mesh
+    mesh===nothing && throw(ArgumentError(
+        "$caller: Plugin(Distance) needs a mesh"))
+    class=slot.class===nothing ? _cached_classification_locked(mesh) :
+        slot.class
+    _,_,total=_mesh_element_offsets(mesh)
+    total==0 && throw(ArgumentError(
+        "$caller: Plugin(Distance) needs a mesh"))
+    maxdim=0
+    for index in 1:total
+        dim=mesh_element_record(mesh,index).dimension
+        dim>maxdim && (maxdim=dim)
+    end
+    nn=nnodes(mesh)
+    best=fill(Inf,nn)
+    exist=false
+    noids=id_point==0 && id_line==0 && id_face==0
+    if dtype<=0.0
+        for index in 1:total
+            ent=_plugin_element_entity(mesh,class,index)
+            ent===nothing && continue
+            if noids
+                ent[1]==maxdim-1 || continue
+            else
+                phys=slot.model===nothing ? Int[] :
+                    model_physical_groups_for_entity(slot.model,ent[1],ent[2])
+                ok=(ent[1]==0 && id_point in phys) ||
+                   (ent[1]==1 && id_line in phys) ||
+                   (ent[1]==2 && id_face in phys)
+                ok || continue
+            end
+            rec=mesh_element_record(mesh,index)
+            spec_rec=msh_spec(Int(rec.element_type))
+            # Upstream handles TYPE_LIN and TYPE_TRI only — every other
+            # boundary element kind leaves every distance untouched.
+            spec_rec.family===:lin || spec_rec.family===:tri || continue
+            exist=true
+            na=Int(rec.node_tags[1]);nb=Int(rec.node_tags[2])
+            pa=(mesh.coords[1,na],mesh.coords[2,na],mesh.coords[3,na])
+            pb=(mesh.coords[1,nb],mesh.coords[2,nb],mesh.coords[3,nb])
+            if spec_rec.family===:lin
+                for k in 1:nn
+                    d=_plugin_point_seg_dist(mesh.coords[1,k],
+                        mesh.coords[2,k],mesh.coords[3,k],pa,pb)
+                    d<best[k] && (best[k]=d)
+                end
+            else
+                nc=Int(rec.node_tags[3])
+                pc=(mesh.coords[1,nc],mesh.coords[2,nc],mesh.coords[3,nc])
+                for k in 1:nn
+                    d=_plugin_point_tri_dist(mesh.coords[1,k],
+                        mesh.coords[2,k],mesh.coords[3,k],pa,pb,pc)
+                    d<best[k] && (best[k]=d)
+                end
+            end
+        end
+        if !exist
+            id_point!=0 && _native_diagnostic_emit_locked(:warning,
+                "Physical Point $id_point does not exist")
+            id_line!=0 && _native_diagnostic_emit_locked(:warning,
+                "Physical Curve $id_line does not exist")
+            id_face!=0 && _native_diagnostic_emit_locked(:warning,
+                "Physical Surface $id_face does not exist")
+        end
+    else
+        # Upstream HAVE_SOLVER arm: diffusion-PDE distance. Not yet ported —
+        # emit the same empty named view upstream's non-solver build makes.
+        _plugin_publish_list_view!("distance",String[],Dict{String,Int}(),
+            Dict{String,Vector{Float64}}(),[0.0];caller)
+        return nothing
+    end
+    # `distanceMap`: vertices untouched by any boundary element keep 0.
+    dist=[isfinite(best[k]) ? best[k] : 0.0 for k in 1:nn]
+    mind,maxd=extrema(dist)
+    by_type=Dict{String,Vector{Float64}}()
+    counts=Dict{String,Int}();order=String[]
+    byent=Dict{Tuple{Int,Int},Vector{Int}}()
+    for index in 1:total
+        ent=_plugin_element_entity(mesh,class,index)
+        ent===nothing && continue
+        ent[1]==maxdim || continue
+        push!(get!(byent,ent,Int[]),index)
+    end
+    for ent in sort!(collect(keys(byent)))
+        for index in byent[ent]
+            rec=mesh_element_record(mesh,index)
+            spec_rec=msh_spec(Int(rec.element_type))
+            kind=get(_PLUGIN_FAMILY_KIND,spec_rec.family,nothing)
+            kind===nothing && continue
+            type=_plugin_record_type(kind,1)
+            type===nothing && continue
+            nvert=length(rec.node_tags)
+            haskey(by_type,type) ||
+                (by_type[type]=Float64[];counts[type]=0;push!(order,type))
+            flat=by_type[type]
+            for axis in 1:3,node in 1:nvert
+                push!(flat,mesh.coords[axis,Int(rec.node_tags[node])])
+            end
+            for node in 1:nvert
+                d=dist[Int(rec.node_tags[node])]
+                if minscale>0 && maxscale>0 && maxd!=mind
+                    d=minscale+(d-mind)/(maxd-mind)*(maxscale-minscale)
+                elseif minscale>0
+                    d=minscale+d
+                end
+                push!(flat,d)
+            end
+            counts[type]+=1
+        end
+    end
+    types=String[];datas=Dict{String,Vector{Float64}}()
+    for type in order
+        push!(types,type);datas[type]=by_type[type]
+    end
+    _plugin_publish_list_view!("distance",types,counts,datas,[0.0];caller)
+    return nothing
+end
+
 # ---- SimplePartition --------------------------------------------------------------------
 #
 # Upstream `Plugin(SimplePartition)` clears existing partitions, evaluates
@@ -6351,6 +6531,11 @@ const _PLUGINS=Dict{String,NamedTuple}(
         "XMax"=>0.0,"YMax"=>0.0,"ZMax"=>0.0,"Inside"=>0.0),
         string_options=Dict{String,String}(),
         run_fn=_plugin_exec_invisible),
+    "Distance"=>(number_options=Dict{String,Float64}(
+        "PhysicalPoint"=>0.0,"PhysicalLine"=>0.0,"PhysicalSurface"=>0.0,
+        "DistanceType"=>0.0,"MinScale"=>0.0,"MaxScale"=>0.0),
+        string_options=Dict{String,String}(),
+        run_fn=_plugin_exec_distance),
     # `Echo`, `TimeReport`, `DuplicatedBoundaries` and `PolarView` are not
     # registered: Gmsh 4.15.2 ships none of them (the oracle reports
     # `Failed action 'Run' or unknown plugin '<name>'`), and they are absent
@@ -6358,7 +6543,10 @@ const _PLUGINS=Dict{String,NamedTuple}(
     # PolarView never appear in the Plugin/ directory as far back as the
     # git history reaches (1.20), and the boundary-duplication plugin
     # upstream actually spelled `DuplicateBoundaries` disappeared in the 4.0
-    # plugin port ("removed unmaintained plugins"). Leaving them unregistered
-    # preserves the upstream unknown-plugin diagnostics on both the `.geo`
-    # and the API paths.
+    # plugin port ("removed unmaintained plugins"). `Levelset`,
+    # `NearToFarField`, `CVTRemesh`, `Crack`, `HomologyPostProcessing` and
+    # `VoroMetal` are likewise absent from the 4.15.2 oracle's registry
+    # (feature-gated out of the distributed build). Leaving them
+    # unregistered preserves the upstream unknown-plugin diagnostics on
+    # both the `.geo` and the API paths.
 )
