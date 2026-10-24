@@ -8,8 +8,9 @@ hexpoint(xs)=Float64[Core.eval(@__MODULE__,Meta.parse(x)) for x in xs]
 function opened(f,source)
     A.initialize()
     try
-        mktemp() do path,io
-            write(io,source);close(io);A.open_geo!(path;mesh_dim=0);f()
+        mktempdir() do directory
+            path=joinpath(directory,"case.geo");write(path,source)
+            A.open_geo!(path;mesh_dim=0);f()
         end
     finally
         A.finalize()

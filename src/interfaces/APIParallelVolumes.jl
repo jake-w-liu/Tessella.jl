@@ -369,7 +369,7 @@ function _parallel_volume_attempt(working::GeoModel,work::_ParallelVolumeWork,
                 _periodic_surface_pairs=periodic_surface_pairs,
                 _optimize_pyramids=optimize_pyramids,
                 _mesh_node_high_water=hn,_mesh_element_high_water=hc,
-                _geometry_points=geom_points)
+                _boundary_regrade=false,_geometry_points=geom_points)
             diffs,foreign=_parallel_curve_param_diffs(
                 working.curve_params,base_params,work.footprint)
             foreign || (foreign=_parallel_model_foreign_writes(working,m))
@@ -513,7 +513,7 @@ function _parallel_volume_product(m::GeoModel,work::_ParallelVolumeWork,
             _periodic_surface_pairs=periodic_surface_pairs,
             _optimize_pyramids=optimize_pyramids,
             _mesh_node_high_water=assembly.node_max,
-            _mesh_element_high_water=assembly.cell_max,
+            _mesh_element_high_water=assembly.cell_max,_boundary_regrade=false,
             _geometry_points=_higher_geometry_source_points(
                 assembly,geometry_birth))
     end

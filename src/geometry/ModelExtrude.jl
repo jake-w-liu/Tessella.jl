@@ -674,7 +674,8 @@ function _extrude_top_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
     src=abs(src_signed)
     srcmesh=source_mesh===nothing ?
         mesh_model_surface(m,src;min_angle_deg=min_angle_deg,
-            max_periodic_passes=max_periodic_passes,size_field=size_field,_mesh_input) :
+            max_periodic_passes=max_periodic_passes,size_field=size_field,
+            _mesh_input,_boundary_regrade=false) :
         source_mesh
     u_top=_extrude_level_us(params)[end]
     transforms=_extrude_level_transforms(spec,(u_top,),caller)
@@ -849,7 +850,7 @@ function _extrude_volume_sweep(m::GeoModel,t::Int,params::_GeoExtrudeParams,
                                spec,src_signed::Int,caller::AbstractString;_mesh_input=nothing,
                                _record_cell_events=false)
     src=abs(src_signed)
-    srcmesh=mesh_model_surface(m,src;_mesh_input)
+    srcmesh=mesh_model_surface(m,src;_mesh_input,_boundary_regrade=false)
     us=_extrude_level_us(params)
     nlev=length(us)
     cols=_extrude_volume_columns(m,t,src,srcmesh,params,spec,us,caller)

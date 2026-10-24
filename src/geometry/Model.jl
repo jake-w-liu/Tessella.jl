@@ -5948,7 +5948,9 @@ function _model_projection_volume_surface_faces!(
         # edges need not exist in the volume face complex. `model_to_mixed`
         # remeshes surfaces without a size field, matching this call;
         # `mesh_model_volume` passes the recovered triangles explicitly.
-        generated=mesh_model_surface(m,surface)
+        # In-assembly produce: boundary Curve products are live transport
+        # sources, so the metric producer may not regrade them here.
+        generated=mesh_model_surface(m,surface;_boundary_regrade=false)
         targets=[ntuple(slot->_model_mesh_coordinate(
                      generated,generated.tris[slot,cell]),3)
                  for cell in 1:ntris(generated)]
@@ -6515,7 +6517,8 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;
 
     explicit_geometry=(nonew!==nothing || isempty(m.volumes[volume]) ||
         _implicit_volume_surface(m,volume)) ? nothing :
-        _model_explicit_volume_geometry(m,volume,caller;_mesh_input)
+        _model_explicit_volume_geometry(m,volume,caller;_mesh_input,
+            _boundary_regrade=false)
     if nonew===nothing
         domain_surface=explicit_geometry===nothing ?
             _volume_surface(m,volume,caller) : explicit_geometry.surface
@@ -7010,6 +7013,7 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
                                   _mesh_element_high_water=UInt64(0),
                                   _return_surface_production=false,
                                   _geometry_points=nothing,
+                                  _boundary_regrade::Bool=true,
                                   param_sizes::Dict{Tuple{Int,Float64},
                                                    Float64}=
                                       Dict{Tuple{Int,Float64},Float64}(),
@@ -7030,7 +7034,8 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
         size_field=size_field,_mesh_input=_mesh_input,
         _mesh1d_options=_mesh1d_options,
         _mesh_node_high_water=_mesh_node_high_water,
-        _mesh_element_high_water=_mesh_element_high_water),
+        _mesh_element_high_water=_mesh_element_high_water,
+        _boundary_regrade=_boundary_regrade),
         get(m.embeds,(2,t),NTuple{2,Int}[])
     geometry=get(m.surface_geometry,t,nothing)
     builtin_plane=_surface_type(m,t)===:plane &&
@@ -7808,7 +7813,8 @@ end
 # preserves those faces exactly instead of selecting a volume-local diagonal.
 function _model_transfinite_quadtri(m::GeoModel,t::Int,mesh::MixedMesh,
                                     boundaries,caller::AbstractString;_mesh_input=nothing)
-    parts=[(abs(s),mesh_model_surface(m,abs(s);_mesh_input)) for s in boundaries]
+    parts=[(abs(s),mesh_model_surface(m,abs(s);_mesh_input,
+        _boundary_regrade=false)) for s in boundaries]
     return _transfinite_quadtri(mesh,parts;caller="$caller: TransfQuadTri Volume[$t]")
 end
 
@@ -8319,6 +8325,33 @@ function _volume_metric_edge_field(m::GeoModel,t::Int,surface::Mesh,
     push!(fields,raw)
     return _VolumeMetricEdgeField(
         length(fields)==1 ? raw : MinAnisoField(Tuple(fields)))
+end
+
+# Unscaled tensor sizing source for the native hybrid 3-D inserter — the
+# `_volume_metric_edge_field` counterpart for cavity insertion. The
+# inserter's normalized queue radius reads `sqrt(RᵀMR)` against the raw
+# resolved metric (the `radius/lc` restatement), so the metric must NOT
+# carry `_VOLUME_METRIC_EDGE_SCALE`. The resolved field is the same source
+# `_ModelAlgorithmBackgroundSize` consults — `options.inner_field` when
+# installed, else `size_field` — kept tensor-valued, with the 2-D
+# `_GmshSurfaceMetricCarrier` arm's global policy applied per direction
+# through `BoundedSize`: [lcMin,lcMax] ∩ CTX::lc plus lcFactor. The
+# boundary-derived extension field is intentionally absent: the inserter's
+# propagated per-vertex `sizes` already deliver that bound through the
+# `extend_boundary` metric floor. An installed `size_callback` keeps the
+# scalar path — its contract is scalar `lc` in/out and cannot be
+# transported as a tensor. Returns `nothing` for scalar or absent
+# selections, leaving the established scalar insertion unchanged.
+function _volume_metric_insertion_field(m::GeoModel,size_field,options,
+                                        caller::AbstractString)
+    m.meshing.size_callback===nothing || return nothing
+    raw=options.inner_field===nothing ? size_field : options.inner_field
+    raw isa AbstractAnisoField || return nothing
+    lc_min=isnan(options.lc_min) ? 0.0 : options.lc_min
+    lc_max=isnan(options.lc_max) ? GMSH_MAX_SIZE : options.lc_max
+    lo=min(lc_min,lc_max)
+    hi=max(lo,min(lc_max,options.ctx_lc))
+    return BoundedSize(raw;size_min=lo,size_max=hi,factor=options.lc_factor)
 end
 
 # Rotate/reverse a transfinite surface's discretized side chains so the first
@@ -8899,6 +8932,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
                             _mesh_element_high_water=UInt64(0),
                             _return_surface_production=false,
                             _geometry_points=nothing,
+                            _boundary_regrade::Bool=true,
                             _mesh1d_options::Union{Nothing,_ModelMesh1DOptions}=nothing)
     caller="mesh_model_surface"
     options=_model_algorithm_size_options(m,_mesh1d_options,caller)
@@ -8982,7 +9016,8 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             m,Int(surface_constraint.master_entity);
             min_angle_deg=min_angle_deg,
             max_periodic_passes=max_periodic_passes,size_field=size_field,
-            _extrude_scope=_extrude_scope,_mesh1d_options=options)
+            _extrude_scope=_extrude_scope,_mesh1d_options=options,
+            _boundary_regrade=_boundary_regrade)
         output=_model_periodic_surface_mesh(
             m,master_mesh,surface_constraint,caller)
         return _model_surface_boundary_writeback!(m,t,output,caller)
@@ -9023,7 +9058,8 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
                 size_field=size_field,_mesh_input=_mesh_input,
                 _mesh1d_options=options,
                 _mesh_node_high_water=_mesh_node_high_water,
-                _mesh_element_high_water=_mesh_element_high_water)
+                _mesh_element_high_water=_mesh_element_high_water,
+                _boundary_regrade=_boundary_regrade)
             mesh=production.mesh
             diag=validate(mesh)
             diag.ok || throw(ErrorException(
@@ -9103,7 +9139,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             param_sizes=param_sizes,_mesh1d_options=options,_mesh_input,
             _mesh_node_high_water,_mesh_element_high_water,
             _return_surface_production,_geometry_points,
-            _periodic_positions=periodic_positions)
+            _boundary_regrade,_periodic_positions=periodic_positions)
         if mesh isa _ModelSurfaceGeometryProduction
             production=mesh;mesh=production.production.mesh
         elseif mesh isa _ModelSurfaceProduction
@@ -9518,7 +9554,8 @@ function _model_volume_surface_mesh(m::GeoModel,surface::Int,
         algorithm==7 && return _model_occ_metric_surface_mesh(m,surface,
             caller;size_field=get(kwargs,:size_field,nothing),
             _mesh_input=get(kwargs,:_mesh_input,nothing),
-            _mesh1d_options=get(kwargs,:_mesh1d_options,nothing)).mesh
+            _mesh1d_options=get(kwargs,:_mesh1d_options,nothing),
+            _boundary_regrade=get(kwargs,:_boundary_regrade,true)).mesh
         return _model_occ_curved_surface_mesh(m,surface,caller;
                                             initial_only=algorithm==3)
     end
@@ -9528,7 +9565,7 @@ end
 function _model_explicit_volume_geometry(
     m::GeoModel,t::Int,caller::AbstractString;
     size_field::Union{Nothing,AbstractSizeField}=nothing,
-    _mesh_input=nothing,_mesh1d_options=nothing)
+    _mesh_input=nothing,_mesh1d_options=nothing,_boundary_regrade::Bool=true)
     boundaries=_model_volume_boundary_surfaces(m,t,caller)
     isempty(boundaries) && throw(ArgumentError(
         "$caller: Volume[$t] has no explicit boundary surfaces"))
@@ -9544,7 +9581,8 @@ function _model_explicit_volume_geometry(
                 _model_mesh_product(_mesh_input,2,surface;caller,producer_order=true) : nothing
             produced===nothing ?
                 _model_volume_surface_mesh(m,surface,caller;size_field=size_field,
-                    _mesh_input,_mesh1d_options) : produced
+                    _mesh_input,_mesh1d_options,
+                    _boundary_regrade=_boundary_regrade) : produced
         end
     end
     for constraint in _model_volume_periodic_surface_constraints(m,t,caller)
@@ -9719,7 +9757,8 @@ function _volume_surface(m::GeoModel,t::Int,caller::AbstractString="mesh_model_v
             "recreate the Boolean in a fresh GeoModel"))
         return _boolean_result_surface(m,t,caller)
     elseif !isempty(m.volumes[t])
-        geometry=_model_explicit_volume_geometry(m,t,caller)
+        geometry=_model_explicit_volume_geometry(m,t,caller;
+            _boundary_regrade=false)
         probe=_model_explicit_volume_fill(geometry.surface,t,caller)
         _model_certify_explicit_volume_semantics(
             probe,t,geometry.expected_volume,geometry.comparison_scale,caller)
@@ -9759,7 +9798,8 @@ function mesh_model_volume(m::GeoModel, tag::Integer;
                            _mesh_element_high_water::UInt64=UInt64(0),
                            _periodic_surface_pairs=nothing,
                            _optimize_pyramids::Float64=0.0,
-                           _geometry_points=nothing)
+                           _geometry_points=nothing,
+                           _boundary_regrade::Bool=true)
     # The task-local protected-cell registry is a session record of cells
     # recovered so far, shared by the segment/sheet recovery calls below and
     # consulted by every cavity refill (including refinement-time Steiner
@@ -9776,6 +9816,7 @@ function mesh_model_volume(m::GeoModel, tag::Integer;
                                   _extrude_working_model=_extrude_working_model,_mesh_input,
                                   _native_initial_births=births,_geometry_points,
                                   _periodic_surface_pairs,_optimize_pyramids,
+                                  _boundary_regrade=_boundary_regrade,
                                   _mesh1d_options=_model_algorithm_size_options(
                                       m,_mesh1d_options,"mesh_model_volume"))
         return _return_volume_production ?
@@ -9928,6 +9969,7 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
                             _mesh_input=nothing,_mesh1d_options=nothing,
                             _periodic_surface_pairs=nothing,
                             _optimize_pyramids::Float64=0.0,
+                            _boundary_regrade::Bool=true,
                             _native_initial_births=nothing,_geometry_points=nothing)
     caller="mesh_model_volume"
     options=_model_algorithm_size_options(m,_mesh1d_options,caller)
@@ -9981,7 +10023,8 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
     explicit_geometry=(isempty(m.volumes[t]) ||
         _implicit_volume_surface(m,t)) ? nothing :
         _model_explicit_volume_geometry(m,t,caller;size_field=size_field,
-                                       _mesh_input,_mesh1d_options=options)
+                                       _mesh_input,_mesh1d_options=options,
+                                       _boundary_regrade=_boundary_regrade)
     periodic_surfaces=explicit_geometry===nothing ? ModelPeriodicConstraint[] :
         _model_volume_periodic_surface_constraints(m,t,caller)
     surface=explicit_geometry===nothing ? _volume_surface(m,t) :
@@ -10035,7 +10078,8 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
             # `extra` so face recovery never has to invent them (upstream's
             # embedded-face vertices are real mesh vertices upfront).
             sheet_mesh=mesh_model_surface(m,etag;size_field=size_field,
-                                         _mesh_input,_mesh1d_options=options)
+                                         _mesh_input,_mesh1d_options=options,
+                                         _boundary_regrade=false)
             for node in 1:nnodes(sheet_mesh)
                 push!(extra,(sheet_mesh.coords[1,node],
                              sheet_mesh.coords[2,node],

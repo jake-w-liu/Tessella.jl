@@ -1899,7 +1899,7 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
             max_metric_edge=metric_surface.max_metric_edge,max_nodes=metric_surface.max_nodes,
             max_triangles=metric_surface.max_triangles,_mesh_input=input,_mesh1d_options=options,
             _mesh_node_high_water=assembly.node_max,_mesh_element_high_water=assembly.cell_max,
-            _return_surface_production=true))] : work!==nothing &&
+            _return_surface_production=true,_boundary_regrade=false))] : work!==nothing &&
             parallel_results[ui]!==nothing ?
             _parallel_surface_products(m,work,parallel_results[ui],
                 parallel_dirty,assembly;input,scope,options,size_field,
@@ -1907,7 +1907,7 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
             length(tags)==1 ? [(tags[1],mesh_model_surface(m,tags[1];
             size_field=size_field,_extrude_scope=scope,_mesh_input=input,_mesh1d_options=options,
             _mesh_node_high_water=assembly.node_max,_return_surface_production=true,
-            _mesh_element_high_water=assembly.cell_max,
+            _mesh_element_high_water=assembly.cell_max,_boundary_regrade=false,
             _geometry_points=_higher_geometry_source_points(assembly,geometry_birth)))] :
             _compound_surface_meshes(m,tags,assembly.caller;size_field=size_field,
                 _mesh1d_options=options)
@@ -3027,6 +3027,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
                 _periodic_surface_pairs=periodic_surface_pairs,
                 _optimize_pyramids=optimize_pyramids,
                 _mesh_node_high_water=assembly.node_max,_mesh_element_high_water=assembly.cell_max,
+                _boundary_regrade=false,
                 _geometry_points=_higher_geometry_source_points(assembly,geometry_birth))) :
                 hybrid_batch.products[tag]
             production isa Union{Model._ModelVolumeGeometryProduction,Model._ModelNativeHybridVolumeProduction} &&
@@ -3152,7 +3153,8 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
     for tag in sort!(collect(laterals))
         plan=get(lateral_plans,tag,nothing)
         mesh=plan===nothing ? mesh_model_surface(m,tag;size_field,_extrude_scope=scope,
-            _extrude_edges=extruded===nothing ? nothing : extruded.edges,_mesh1d_options=options) :
+            _extrude_edges=extruded===nothing ? nothing : extruded.edges,_mesh1d_options=options,
+            _boundary_regrade=false) :
             plan.production.mesh
         swept=plan===nothing ? _higher_nonew_identity_classification(
             assembly,m,mesh,input,scope,2,tag,assembly.caller) : nothing

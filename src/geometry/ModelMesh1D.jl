@@ -758,10 +758,8 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
                                                _native_producer,_birth_rows=_native_producer)
     end
     γ=u->_model_curve_point(m,curve,u,caller)
-    field=_ModelCurveEntityField(m,options,String(caller))
     a,b=m.curves[curve]
     closed=a==b
-    size_function=u->_model_curve_bgm(m,curve,u,γ(u),t0,t1,options,caller)
     # Upstream `meshGEdge` switches its integrand to `F_Lc_aniso` when
     # `CTX::mesh.algo2d == ALGO_2D_BAMG`: the directional curve metric
     # `BGM_MeshMetric(ge,u,x,y,z)` replaces the scalar size. The curve metric
@@ -769,17 +767,29 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
     # it reaches the kernel through `metric_function` rather than
     # `metric_at` — and unlike the scalar `F_Lc`, no `size_function` applies.
     aniso=_model_curve_aniso_grading(m,curve)
-    metric_function=if aniso
-        (u,xyz,entity)->begin
-            dim,tag=entity===nothing ? (1,curve) :
-                (Int(entity[1]),Int(entity[2]))
-            dim==0 ? _model_vertex_bgm_metric(
-                         m,tag,xyz,options,caller;_native_producer) :
-                     _model_curve_bgm_metric(
-                         m,tag,u,xyz,t0,t1,options,caller;_native_producer)
+    inner=options.inner_field
+    # An incident Surface resolving to algorithm 7 certifies every retained
+    # boundary edge by its world-chord `metric_edge_length` (<=1.0, the BAMG
+    # unit bound). `mesh_curve` places nodes by metric integral, which can
+    # leave a chord remnant over the bound on strongly varying tensor fields
+    # — and once this phase has emitted the Curve products the certificate
+    # cannot be repaired without desynchronizing them. So when a tensor
+    # `inner_field` feeds an algorithm-7 face, measure the emitted
+    # parameters against the producer's own certificate field and re-place
+    # under a progressively tightened grading metric while a remnant
+    # persists — the same tightening the standalone producer applies, moved
+    # upstream of emission where regrading is still legal.
+    cert_fields=Tuple{Int,Any}[]
+    # A `_MetricScaledAniso` inner_field is the standalone producer's own
+    # regrade in flight — it owns the tightening, and measuring the emitted
+    # parameters against a cert built from the scaled field would scale the
+    # bound up with the grading and never converge.
+    if aniso && inner isa AbstractAnisoField && !(inner isa _MetricScaledAniso)
+        for face in _model_curve_faces(m,curve)
+            _surface_mesh_algorithm(m,face)==7 || continue
+            push!(cert_fields,(Int(face),
+                _metric_surface_algorithm_field(m,face,options,nothing,caller)))
         end
-    else
-        nothing
     end
     minimum=_model_minimum_curve_segments(m,curve,options,caller)
     endpoints=((0,a),(0,b))
@@ -804,19 +814,55 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
             m.points[a],m.points[b],points) : nothing
     # `Integration` precision upstream is `lcIntegrationPrecision * lc`.
     precision=options.integration_precision*options.ctx_lc
-    _,parameters=mesh_curve(
-        γ,field;t0=t0,t1=t1,closed=closed,
-        entity=(1,curve),endpoint_entities=endpoints,
-        anisotropic_metric=aniso,
-        size_function=aniso ? nothing : size_function,
-        metric_function=metric_function,
-        integration_precision=precision,
-        minimum_segments=minimum,force_odd=force_odd,
-        _recombine_odd_nodes=odd_nodes,
-        _recombination_primitive=count_primitive,
-        max_integration_points=_point_store===nothing ? _DEFAULT_MAX_INTEGRATION_POINTS :
-            _GMSH_CURVE_INTEGRATION_CAPACITY,
-        _point_store)
+    runopts=options
+    scale=1.0
+    local parameters
+    for _attempt in 1:8
+        _point_store===nothing || empty!(_point_store)
+        runfield=_ModelCurveEntityField(m,runopts,String(caller))
+        run_size_function=u->_model_curve_bgm(m,curve,u,γ(u),t0,t1,runopts,
+            caller)
+        run_metric_function=if aniso
+            (u,xyz,entity)->begin
+                dim,tag=entity===nothing ? (1,curve) :
+                    (Int(entity[1]),Int(entity[2]))
+                dim==0 ? _model_vertex_bgm_metric(
+                             m,tag,xyz,runopts,caller;_native_producer) :
+                         _model_curve_bgm_metric(
+                             m,tag,u,xyz,t0,t1,runopts,caller;_native_producer)
+            end
+        else
+            nothing
+        end
+        _,parameters=mesh_curve(
+            γ,runfield;t0=t0,t1=t1,closed=closed,
+            entity=(1,curve),endpoint_entities=endpoints,
+            anisotropic_metric=aniso,
+            size_function=aniso ? nothing : run_size_function,
+            metric_function=run_metric_function,
+            integration_precision=precision,
+            minimum_segments=minimum,force_odd=force_odd,
+            _recombine_odd_nodes=odd_nodes,
+            _recombination_primitive=count_primitive,
+            max_integration_points=_point_store===nothing ? _DEFAULT_MAX_INTEGRATION_POINTS :
+                _GMSH_CURVE_INTEGRATION_CAPACITY,
+            _point_store)
+        isempty(cert_fields) && return parameters
+        worst=0.0
+        for (face,cert) in cert_fields
+            previous=γ(first(parameters))
+            for u in Iterators.drop(parameters,1)
+                point=γ(u)
+                worst=max(worst,metric_edge_length(cert,previous,point;
+                                                 entity=(2,face)))
+                previous=point
+            end
+        end
+        worst<=1.0 && return parameters
+        scale=max(scale*1.02,worst*worst)
+        runopts=_mesh1d_options_with_inner_field(options,
+            _MetricScaledAniso(inner,scale))
+    end
     return parameters
 end
 

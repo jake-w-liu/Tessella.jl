@@ -199,6 +199,7 @@ end
 
 @testset ".geo MathEvalAniso background field reaches Box meshing" begin
     source="""
+    SetFactory("OpenCASCADE");
     Mesh.MeshSizeExtendFromBoundary = 0;
     Mesh.MeshSizeFromPoints = 0;
     Mesh.MeshSizeFromCurvature = 0;

@@ -669,7 +669,7 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
     source_mesh=produced_source===nothing ?
         mesh_model_surface(m,source;min_angle_deg=min_angle_deg,
             max_periodic_passes=max_periodic_passes,size_field=size_field,
-            _mesh_input=_mesh_input) : produced_source
+            _mesh_input=_mesh_input,_boundary_regrade=false) : produced_source
     if quad_patch
         catalog=_extrude_nonew_quad_patch_catalog(m,source,source_mesh,spec,
             levels,refs,params.recomb_laterals,caller)

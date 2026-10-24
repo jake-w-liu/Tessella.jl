@@ -1,6 +1,7 @@
 using ..SizeField: AbstractAnisoField, metric_edge_length,
                    isotropic_metric, BoundedSize, GMSH_MAX_SIZE
-import ..SizeField: metric_at
+import ..SizeField: metric_at, field_value, metric_aniso_cap, metric_size,
+                    _gmsh_metric_intersection, Metric3
 using ..PipelineSupport: pipeline_float, pipeline_limit, PIPELINE_DEFAULT_MAX_NODES
 using ..Mesh3D: _EHeap, _hpush!, _hpop!
 
@@ -69,6 +70,99 @@ function _metric_boundary_curve_stale(m,curve,params,tag,field,target,caller)
         previous=point
     end
     return false
+end
+
+# The worst emitted-cell certificate over a stored Curve discretization —
+# the same `metric_edge_length` bound the retained boundary is certified
+# against below, reported as a value rather than a stale flag so the regrade
+# loop can scale its grading field by the observed overshoot.
+function _metric_boundary_curve_worst(m,curve,params,tag,field,caller)
+    γ=u->_model_curve_point(m,curve,u,caller)
+    previous=γ(first(params));worst=0.0
+    for u in Iterators.drop(params,1)
+        point=γ(u)
+        worst=max(worst,metric_edge_length(field,previous,point;
+                                         entity=(2,tag)))
+        previous=point
+    end
+    return worst
+end
+
+# Regrade-only adapter: the strict retained-boundary certificate is measured
+# under `field`, but the lazy boundary grader only reads
+# `options.inner_field`. When the integrand-graded discretization leaves an
+# under-resolution remnant above the stricter max-sampled certificate,
+# tightening the grading metric by `factor` draws proportionally more nodes
+# from the same upstream placement law; the emitted boundary is then
+# re-measured under the unchanged certificate field.
+struct _MetricScaledAniso{F<:AbstractAnisoField} <: AbstractAnisoField
+    input::F
+    factor::Float64
+end
+metric_at(field::_MetricScaledAniso,x,y,z)=
+    _metric_scale(metric_at(field.input,x,y,z),field.factor)
+metric_at(field::_MetricScaledAniso,x,y,z,entity::Tuple{T,U}) where
+        {T<:Integer,U<:Integer}=
+    _metric_scale(metric_at(field.input,x,y,z,entity),field.factor)
+field_value(field::_MetricScaledAniso,x,y,z)=
+    metric_size(metric_at(field,x,y,z))
+field_value(field::_MetricScaledAniso,x,y,z,entity::Tuple{T,U}) where
+        {T<:Integer,U<:Integer}=
+    metric_size(metric_at(field,x,y,z,entity))
+
+# Regrade stale boundary Curves under the producer's certificate field — and
+# under a progressively tightened metric while an under-resolution remnant
+# persists — before the lower products are consumed. `input!==nothing`
+# carries already-owned products and can never be regraded. Transfinite
+# pins re-derive identical parameters under any field, so a stale pinned
+# curve is left for the strict certificate to report rather than iterated.
+function _metric_surface_boundary_grade!(m,tag,field,target,options,input,
+                                         node_high_water,caller,
+                                         allow_regrade::Bool)
+    grading=field;scale=1.0
+    local authority,limit
+    for _ in 1:8
+        pinned=false
+        # The higher-dimensional assembly emits boundary Curve products
+        # before the Surface phase runs: their `curve_params` entries are
+        # live transport sources and purging them desynchronizes emitted
+        # node ownership. `allow_regrade=false` callers therefore consume
+        # the stored discretization verbatim and let an under-resolved
+        # remnant reject through the strict retained-boundary certificate.
+        if allow_regrade && input===nothing
+            for loop_id in m.surfaces[tag],signed in m.loops[loop_id]
+                curve=abs(signed)
+                params=get(m.curve_params,curve,nothing)
+                params===nothing && continue
+                _metric_boundary_curve_stale(m,curve,params,tag,field,target,
+                                             caller) || continue
+                if haskey(m.meshing.transfinite_curves,curve)
+                    pinned=true;continue
+                end
+                delete!(m.curve_params,curve)
+                for dep in _model_curve_mesh_dependencies(m,curve)
+                    delete!(m.curve_params,dep)
+                end
+            end
+        end
+        authority,limit=_gmsh_native_surface_lower_input(m,
+            _mesh1d_options_with_inner_field(options,grading),input,
+            node_high_water,caller)
+        input!==nothing && return authority,limit
+        pinned && return authority,limit
+        allow_regrade || return authority,limit
+        worst=0.0
+        for loop_id in m.surfaces[tag],signed in m.loops[loop_id]
+            params=get(m.curve_params,abs(signed),nothing)
+            params===nothing && continue
+            worst=max(worst,_metric_boundary_curve_worst(m,abs(signed),params,
+                                                       tag,field,caller))
+        end
+        worst<=target && return authority,limit
+        scale=max(scale*1.02,(worst/target)^2)
+        grading=_MetricScaledAniso(field,scale)
+    end
+    return authority,limit
 end
 
 # ── shared certified metric refinement core ──────────────────────────────────
@@ -1549,7 +1643,8 @@ end
 
 # ── planar front ─────────────────────────────────────────────────────────────
 function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
-                                input,options,node_high_water,element_high_water,caller)
+                                input,options,node_high_water,element_high_water,caller;
+                                allow_regrade::Bool=true)
     # Boundary cells that are lazily graded while building the lower input
     # must satisfy this producer's strict `metric_edge_length` certificate
     # against `field`. The curve graders only see `options.inner_field` and
@@ -1574,19 +1669,8 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
         # whose edges violate it; the lower pass then derives it under the
         # transported metric. Periodic dependencies of a stale curve are
         # dropped too — a slave's params are only a copy of its master's.
-        input===nothing && for loop_id in m.surfaces[tag],signed in m.loops[loop_id]
-            curve=abs(signed)
-            params=get(m.curve_params,curve,nothing)
-            params===nothing && continue
-            _metric_boundary_curve_stale(m,curve,params,tag,field,target,
-                                         caller) || continue
-            delete!(m.curve_params,curve)
-            for dep in _model_curve_mesh_dependencies(m,curve)
-                delete!(m.curve_params,dep)
-            end
-        end
-        authority,limit=_gmsh_native_surface_lower_input(m,options,input,
-            node_high_water,caller)
+        authority,limit=_metric_surface_boundary_grade!(m,tag,field,target,
+            options,input,node_high_water,caller,allow_regrade)
     finally
         m.meshing.algorithm_2d=saved_algorithm
     end
@@ -1615,8 +1699,10 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
     original_boundary==wanted_boundary || throw(ArgumentError(
         "$caller: initial Surface loses its actual lower Curve-cell incidence"))
     score(edge)=metric_edge_length(field,coordinates[edge[1]],coordinates[edge[2]];entity=(2,tag))
-    all(edge->score(edge)<=target,boundary) || throw(ArgumentError(
+    if !all(edge->score(edge)<=target,boundary)
+        throw(ArgumentError(
         "$caller: retained boundary exceeds max_metric_edge; provide finer lower Curve cells"))
+    end
     data=(coordinates=coordinates,parameters=parameters,cells=cells,
         incidence=incidence,boundary=boundary,
         numbers=copy(initial.node_tags),owners=copy(initial.node_owners),
@@ -1727,7 +1813,8 @@ end
 # degenerate poles close; the emitted mesh, certificates and production record
 # all live on the welded world triangulation.
 function _occ_metric_surface_refine(m,tag,field,target,node_limit,
-        triangle_limit,input,options,node_high_water,element_high_water,caller)
+        triangle_limit,input,options,node_high_water,element_high_water,caller;
+        allow_regrade::Bool=true)
     sg=get(m.surface_geometry,tag,nothing)
     sg===nothing && throw(ArgumentError(
         "$caller: Surface[$tag] has no parametric OCC record"))
@@ -1736,19 +1823,8 @@ function _occ_metric_surface_refine(m,tag,field,target,node_limit,
     m.meshing.algorithm_2d=7
     local authority,limit,unwrapped
     try
-        input===nothing && for loop_id in m.surfaces[tag],signed in m.loops[loop_id]
-            curve=abs(signed)
-            params=get(m.curve_params,curve,nothing)
-            params===nothing && continue
-            _metric_boundary_curve_stale(m,curve,params,tag,field,target,
-                                         caller) || continue
-            delete!(m.curve_params,curve)
-            for dep in _model_curve_mesh_dependencies(m,curve)
-                delete!(m.curve_params,dep)
-            end
-        end
-        authority,limit=_gmsh_native_surface_lower_input(m,options,input,
-            node_high_water,caller)
+        authority,limit=_metric_surface_boundary_grade!(m,tag,field,target,
+            options,input,node_high_water,caller,allow_regrade)
         _,_,_,unwrapped=_model_occ_curved_surface_mesh_tracked(
             m,tag,caller;_mesh1d_options=options)
     finally
@@ -1962,7 +2038,7 @@ end
 function _model_occ_metric_surface_mesh(m::GeoModel,tag::Int,
         caller::AbstractString;size_field=nothing,_mesh_input=nothing,
         _mesh1d_options=nothing,_mesh_node_high_water=nothing,
-        _mesh_element_high_water=UInt64(0))
+        _mesh_element_high_water=UInt64(0),_boundary_regrade::Bool=true)
     options=_model_algorithm_size_options(m,_mesh1d_options,caller)
     raw=options.inner_field===nothing ? size_field : options.inner_field
     raw isa AbstractAnisoField || throw(ArgumentError(
@@ -1971,7 +2047,8 @@ function _model_occ_metric_surface_mesh(m::GeoModel,tag::Int,
     field=_metric_surface_algorithm_field(m,tag,options,size_field,caller)
     return _occ_metric_surface_refine(m,tag,field,1.0,
         PIPELINE_DEFAULT_MAX_NODES,20_000_000,_mesh_input,options,
-        _mesh_node_high_water,_mesh_element_high_water,caller)
+        _mesh_node_high_water,_mesh_element_high_water,caller;
+        allow_regrade=_boundary_regrade)
 end
 
 """
@@ -2003,7 +2080,8 @@ minimum triangle angle, or pointwise bounds between the three metric samples.
 function mesh_model_surface(m::GeoModel,tag::Integer,field::AbstractAnisoField;
         max_metric_edge=1.0,max_nodes=PIPELINE_DEFAULT_MAX_NODES,max_triangles=20_000_000,
         _mesh_input=nothing,_mesh1d_options=nothing,_mesh_node_high_water=nothing,
-        _mesh_element_high_water=UInt64(0),_return_surface_production=false)
+        _mesh_element_high_water=UInt64(0),_return_surface_production=false,
+        _boundary_regrade::Bool=true)
     caller="mesh_model_surface tensor metric"
     target=pipeline_float(max_metric_edge,caller,"max_metric_edge")
     target>0 || throw(ArgumentError("$caller: max_metric_edge must be positive"))
@@ -2013,7 +2091,8 @@ function mesh_model_surface(m::GeoModel,tag::Integer,field::AbstractAnisoField;
     working=_model_mesh_transaction_copy(m)
     options=_model_algorithm_size_options(working,_mesh1d_options,caller)
     product=_metric_surface_refine(working,t,field,target,node_limit,triangle_limit,
-        _mesh_input,options,_mesh_node_high_water,_mesh_element_high_water,caller)
+        _mesh_input,options,_mesh_node_high_water,_mesh_element_high_water,caller;
+        allow_regrade=_boundary_regrade)
     return _return_surface_production ? product : product.mesh
 end
 
@@ -2037,6 +2116,29 @@ end
 
 metric_at(field::_MetricIsotropicSize,x,y,z)=isotropic_metric(field.size(x,y,z))
 
+# Upstream `BGM_MeshMetric` applies `CTX::mesh.aniso_max` after the field's
+# own bound and the `lcFactor` rescale — the same terminal clamp
+# `_model_curve_bgm_metric` applies before it hands the integrand to the
+# boundary grader. Resolving the producer's certificate metric with the
+# identical clamp keeps the strict retained-boundary and interior
+# `metric_edge_length` certificates on the metric the whole pass graded to,
+# instead of a stiffer uncapped tensor the boundary products can never have
+# been generated against.
+struct _MetricAnisoCapped{F<:AbstractAnisoField} <: AbstractAnisoField
+    input::F
+    aniso_max::Float64
+end
+metric_at(field::_MetricAnisoCapped,x,y,z)=
+    metric_aniso_cap(metric_at(field.input,x,y,z),field.aniso_max)
+metric_at(field::_MetricAnisoCapped,x,y,z,entity::Tuple{T,U}) where
+        {T<:Integer,U<:Integer}=
+    metric_aniso_cap(metric_at(field.input,x,y,z,entity),field.aniso_max)
+field_value(field::_MetricAnisoCapped,x,y,z)=
+    metric_size(metric_at(field,x,y,z))
+field_value(field::_MetricAnisoCapped,x,y,z,entity::Tuple{T,U}) where
+        {T<:Integer,U<:Integer}=
+    metric_size(metric_at(field,x,y,z,entity))
+
 # Resolve the producer's metric field the way `_ModelAlgorithmBackgroundSize`
 # resolves its scalar: `options.inner_field` is the raw selected background
 # and shadows the `size_field` argument. A tensor selection gets the global
@@ -2054,7 +2156,9 @@ function _metric_surface_algorithm_field(m::GeoModel,tag::Int,options,
         lc_max=isnan(options.lc_max) ? GMSH_MAX_SIZE : options.lc_max
         lo=min(lc_min,lc_max)
         hi=max(lo,min(lc_max,options.ctx_lc))
-        return BoundedSize(raw;size_min=lo,size_max=hi,factor=options.lc_factor)
+        return _MetricAnisoCapped(
+            BoundedSize(raw;size_min=lo,size_max=hi,factor=options.lc_factor),
+            options.aniso_max)
     end
     return _MetricIsotropicSize(
         _ModelAlgorithmBackgroundSize(m,2,tag,options,size_field,caller))
@@ -2067,11 +2171,13 @@ end
 # producer consumes the actual lower Curve products through its source.
 function _metric_surface_algorithm_mesh(m::GeoModel,tag::Int,caller::AbstractString;
         size_field=nothing,_mesh_input=nothing,_mesh1d_options=nothing,
-        _mesh_node_high_water=nothing,_mesh_element_high_water=UInt64(0))
+        _mesh_node_high_water=nothing,_mesh_element_high_water=UInt64(0),
+        _boundary_regrade::Bool=true)
     _metric_surface_admit(m,tag,caller)
     options=_model_algorithm_size_options(m,_mesh1d_options,caller)
     field=_metric_surface_algorithm_field(m,tag,options,size_field,caller)
     return _metric_surface_refine(m,tag,field,1.0,
         PIPELINE_DEFAULT_MAX_NODES,20_000_000,_mesh_input,options,
-        _mesh_node_high_water,_mesh_element_high_water,caller)
+        _mesh_node_high_water,_mesh_element_high_water,caller;
+        allow_regrade=_boundary_regrade)
 end

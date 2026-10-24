@@ -219,7 +219,9 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
         minimize=_resolved_extend_from_boundary(m,3,tag)==2,
         extend=_resolved_extend_from_boundary(m,3,tag)>0,
         node_high_water=work.node_high_water,element_high_water=work.element_high_water,seeds,
-        protected_edges,protected_faces)
+        protected_edges,protected_faces,
+        metric=_volume_metric_insertion_field(m,size_field,options,caller),
+        metric_entity=(3,tag))
     smoothed=ModelNativeHybridInsertion.smooth(insertion,length(plan.node_uids),
         m.meshing.native_smoothing,caller)
     # Native negative factors select the normal-offset births and skip the
@@ -244,7 +246,10 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
     mixed=MixedMesh(mesh.coords,blocks)
     optimize_pyramids<0.0 && _model_native_hybrid_normal_apex_fixed_certificate(
         plan,mixed,work.node_tags,caller)
-    validate(mixed).ok || throw(ArgumentError("$caller: hybrid Volume produces invalid typed cells"))
+    validation=validate(mixed)
+    validation.ok || throw(ArgumentError(
+        "$caller: hybrid Volume produces invalid typed cells: "*
+        join(validation.messages,"; ")))
     _model_native_hybrid_volume_certificate(mixed,work.node_tags,constructor,caller)
     _model_native_hybrid_embedded_point_certificate(mixed,work.node_tags,constructor,caller)
     _model_native_hybrid_embedded_curve_certificate(mixed,work.node_tags,constructor,caller)

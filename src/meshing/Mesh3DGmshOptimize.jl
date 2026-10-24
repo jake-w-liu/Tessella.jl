@@ -5,6 +5,7 @@ const _GOPT_EDGES=((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))
 const _GOPT_EDGE_FACES=((1,3),(1,2),(2,3),(1,4),(3,4),(2,4))
 const _GOPT_FACES=((1,2,3),(1,3,4),(1,2,4),(2,3,4))
 const _GOPT_VERTEX_FACES=((1,2,3),(1,3,4),(1,2,4),(2,3,4))
+const _GOPT_FACE_APEX=(4,2,3,1)
 const _GOPT_EDGE_PERMUTATION=(1,4,2,3,6,5)
 
 
@@ -218,11 +219,31 @@ function _gopt_swap_edge!(state,new_cells,start,edge)
     filter!(pair->state.embedded_edge_carriers[pair[1]]==pair[2],
             constrained_edges)
     volume_ref=0.0;quality_ref=1.0
+    incidence=Dict{NTuple{3,Int32},Int}()
+    apexof=Dict{NTuple{3,Int32},Int32}()
     for index in cavity
         cell=state.cells[index]
         volume_ref+=abs(_gopt_volume(state,cell.vertices))
         quality_ref=min(quality_ref,cell.quality)
+        for face in 1:4
+            key=_gopt_face(cell.vertices,face)
+            incidence[key]=get(incidence,key,0)+1
+            apexof[key]=cell.vertices[_GOPT_FACE_APEX[face]]
+        end
     end
+    # Face incidence inside the cavity defines the certificate a reconnection
+    # must satisfy: faces carried once form the cavity boundary and must be
+    # reproduced exactly once by the new cells; every other new-cell face must
+    # pair with another new cell; and the new apex on a boundary face must
+    # stay on the cavity side of that face. The sidedness clause is what
+    # keeps a cone tet of a non-convex ring ear from re-entering a region
+    # already covered by a live cell outside the cavity — vertex-set
+    # duplicates and folded-over output both enter through that path.
+    # Upstream patterns on a complete convex star always satisfy the whole
+    # certificate, so a refusal here only ever rejects a corrupting pattern.
+    any(count->count>2,values(incidence)) && return false
+    boundary_faces=Set{NTuple{3,Int32}}(key for (key,count) in incidence if count==1)
+    boundary_apex=Dict{NTuple{3,Int32},Int32}(key=>apexof[key] for key in boundary_faces)
     triangles,triangulations=pattern
     count=length(triangles)
     qualities_first=Vector{Float64}(undef,count)
@@ -243,6 +264,52 @@ function _gopt_swap_edge!(state,new_cells,start,edge)
             volume+=volumes_first[triangle]+volumes_last[triangle]
         end
         abs(volume-volume_ref)>1e-10*(volume+volume_ref) && (quality=-1.0)
+        if quality!=-1.0
+            counts=Dict{NTuple{3,Int32},Int}()
+            for triangle in triangulation
+                slots=triangles[triangle]
+                a=ring[slots[1]];b=ring[slots[2]];c=ring[slots[3]]
+                for vertices in ((a,b,c,first),(c,b,a,last)),face in 1:4
+                    key=_gopt_face(vertices,face)
+                    counts[key]=get(counts,key,0)+1
+                end
+            end
+            tiling=isempty(boundary_faces)
+            for (key,count) in counts
+                if count==1
+                    tiling=key in boundary_faces
+                elseif count==2
+                    tiling=!(key in boundary_faces)
+                else
+                    tiling=false
+                end
+                tiling || break
+            end
+            if tiling
+                for key in boundary_faces
+                    get(counts,key,0)==1 || (tiling=false;break)
+                end
+            end
+            if tiling
+                for triangle in triangulation
+                    slots=triangles[triangle]
+                    a=ring[slots[1]];b=ring[slots[2]];c=ring[slots[3]]
+                    for vertices in ((a,b,c,first),(c,b,a,last)),face in 1:4
+                        key=_gopt_face(vertices,face)
+                        interior=get(boundary_apex,key,nothing)
+                        interior===nothing && continue
+                        fa=_gopt_point(state,key[1]);fb=_gopt_point(state,key[2])
+                        fc=_gopt_point(state,key[3])
+                        s_new=_orient3_value(fa,fb,fc,
+                            _gopt_point(state,vertices[_GOPT_FACE_APEX[face]]))
+                        s_old=_orient3_value(fa,fb,fc,_gopt_point(state,interior))
+                        s_new*s_old<0 && (tiling=false)
+                    end
+                    tiling || break
+                end
+            end
+            tiling || (quality=-1.0)
+        end
         if quality!=-1.0 &&
                 !(isempty(constrained_faces) && isempty(constrained_edges) &&
                   isempty(state.embedded_verts))
@@ -446,7 +513,10 @@ function _gmsh_optimize_tetrahedra(mesh::Mesh;
             previous_worst=worst
         end
     end
-    kept=Int32[index for index in active if !cells[index].deleted]
+    kept=Int32[]
+    for index in active
+        cells[index].deleted || push!(kept,index)
+    end
     output=Matrix{Int32}(undef,4,length(kept));tags=UInt64[];physical=Int32[]
     for (column,index) in enumerate(kept)
         vertices=cells[index].vertices

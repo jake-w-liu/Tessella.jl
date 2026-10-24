@@ -159,20 +159,30 @@ function relocate(plan,mesh,caller;birth_order=eachindex(plan.births),iterations
         "$caller: hybrid relocation omits or aliases an owned Pyramid constructor"))
     iterations==3 && tolerance==1e-2 || throw(ArgumentError(
         "$caller: hybrid relocation requires the native generation iteration/tolerance contract"))
-    adjacency=Dict{Int32,Vector{Tuple}}()
     apexes=Set(birth.apex_row for birth in plan.births)
     neighborhood=Set{Int32}()
     for cell in eachcol(mesh.tets)
         any(row->row in apexes,cell) || continue
         union!(neighborhood,cell)
     end
+    movable=Set{Int32}()
     for cell in eachcol(mesh.tets)
         any(row->row in neighborhood,cell) || continue
         for row in cell
             # Retained lower nodes keep their actual ownership. Extra rows
             # are the insertion driver's explicitly bound Region births.
             row in apexes || row>length(plan.node_uids) || continue
-            push!(get!(()->Tuple[],adjacency,row),Tuple(cell))
+            push!(movable,row)
+        end
+    end
+    # The relocation objective inspects only `incident` cells, so the native
+    # v2t star must be complete: a movable row that also sits in a cell with
+    # no neighborhood vertex would otherwise fold that cell unseen.
+    adjacency=Dict{Int32,Vector{Tuple}}()
+    for cell in eachcol(mesh.tets)
+        key=Tuple(cell)
+        for row in cell
+            row in movable && push!(get!(()->Tuple[],adjacency,row),key)
         end
     end
     for ordinal in birth_order

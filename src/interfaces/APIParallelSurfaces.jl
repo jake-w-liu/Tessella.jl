@@ -358,7 +358,7 @@ function _parallel_surface_attempt(working::GeoModel,work::_ParallelSurfaceWork,
                 size_field=nothing,_extrude_scope=nothing,
                 _mesh_input=input,_mesh1d_options=detached_options,
                 _mesh_node_high_water=hn,_mesh_element_high_water=hc,
-                _return_surface_production=true,
+                _return_surface_production=true,_boundary_regrade=false,
                 _geometry_points=geom_points)
             diffs,foreign=_parallel_curve_param_diffs(
                 working.curve_params,base_params,work.footprint)
@@ -496,7 +496,7 @@ function _parallel_surface_products(m::GeoModel,work::_ParallelSurfaceWork,
             size_field=size_field,_extrude_scope=scope,_mesh_input=input,
             _mesh1d_options=options,_mesh_node_high_water=assembly.node_max,
             _mesh_element_high_water=assembly.cell_max,
-            _return_surface_production=true,
+            _return_surface_production=true,_boundary_regrade=false,
             _geometry_points=_higher_geometry_source_points(
                 assembly,geometry_birth)))]
     end

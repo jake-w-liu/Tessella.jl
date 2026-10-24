@@ -9485,7 +9485,8 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
                 continue
             end
             push!(parts,(2,tag,mesh_model_surface(
-                m,tag;_extrude_scope=extrude_scope,_mesh1d_options=options)))
+                m,tag;_extrude_scope=extrude_scope,_mesh1d_options=options,
+                _boundary_regrade=false)))
             bind_completed && push!(producer_order,(2,tag))
         end
     end
@@ -9500,7 +9501,8 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
                 push!(parts,(3,tag,pass.parts[tag]))
             else
                 push!(parts,(3,tag,mesh_model_volume(
-                    m,tag;_extrude_scope=extrude_scope,_mesh1d_options=options)))
+                    m,tag;_extrude_scope=extrude_scope,_mesh1d_options=options,
+                    _boundary_regrade=false)))
             end
         end
         if pass!==nothing && !isempty(pass.remesh)
@@ -9508,7 +9510,7 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
                 pdim==2 && ptag in pass.remesh || continue
                 parts[i]=(2,ptag,mesh_model_surface(
                     m,ptag;_extrude_edges=pass.edges,_extrude_scope=extrude_scope,
-                    _mesh1d_options=options))
+                    _mesh1d_options=options,_boundary_regrade=false))
             end
         end
     end

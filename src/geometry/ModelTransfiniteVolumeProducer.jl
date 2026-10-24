@@ -525,7 +525,8 @@ function _model_transfinite_volume_production(m,t,mesh,bindings,input,geometry_p
     geometry=nothing
     if geometry_points!==nothing && !isempty(geometry_points)
         # Preserve the standalone geometry kernel's arithmetic and cell order.
-        geometry=_mesh_model_volume(m,t;_mesh_input=nothing,_geometry_points=nothing)
+        geometry=_mesh_model_volume(m,t;_mesh_input=nothing,_geometry_points=nothing,
+            _boundary_regrade=false)
         nnodes(geometry)==nnodes(mesh) &&
             _model_transfinite_volume_cells(geometry)==_model_transfinite_volume_cells(mesh) ||
             throw(ArgumentError("$caller: geometry volume does not share actual emitter events"))

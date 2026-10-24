@@ -89,7 +89,7 @@ function _extrude_quadtri_seam_index(m::GeoModel,r::Int,
                                      caller::AbstractString)
     root=_extrude_quadtri_closing_root(m,r,caller)
     root==0 && return nothing
-    mesh=mesh_model_surface(m,root)
+    mesh=mesh_model_surface(m,root;_boundary_regrade=false)
     tolerance=_coherence_eps(m)
     origin=nnodes(mesh)==0 ? (0.0,0.0,0.0) :
         (mesh.coords[1,1],mesh.coords[2,1],mesh.coords[3,1])
@@ -247,7 +247,8 @@ function _extrude_quadtri_boundary_edges(m::GeoModel,t::Int,
                                          caller::AbstractString;edges=nothing)
     diagonals=Set{NTuple{2,NTuple{3,Float64}}}()
     for signed in _model_volume_boundary_surfaces(m,t,caller)
-        surface=mesh_model_surface(m,abs(signed);_extrude_edges=edges)
+        surface=mesh_model_surface(m,abs(signed);_extrude_edges=edges,
+            _boundary_regrade=false)
         coords=surface.coords
         if surface isa Mesh
             cells=surface.tris

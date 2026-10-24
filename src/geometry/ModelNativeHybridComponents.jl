@@ -295,7 +295,8 @@ function _model_native_hybrid_connected_production(m,component,options,births,ca
     insertion=ModelNativeHybridInsertion.refine(mesh,work.node_tags,work.element_tags,
         triangles,_ModelNativeHybridRegionBackground(fields),caller;
         minimize=only(minimize),extend=only(extend),region_background=true,
-        node_high_water=work.node_high_water,element_high_water=work.element_high_water,seeds)
+        node_high_water=work.node_high_water,element_high_water=work.element_high_water,seeds,
+        metric=_volume_metric_insertion_field(m,size_field,options,caller))
     smoothed=ModelNativeHybridInsertion.smooth(insertion,length(plan.node_uids),m.meshing.native_smoothing,caller)
     # Native relocation is invoked separately for each restored GRegion.
     # Its two-hop Tet neighborhood must not acquire the other Region's star

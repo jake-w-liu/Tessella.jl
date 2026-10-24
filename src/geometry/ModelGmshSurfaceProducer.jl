@@ -765,9 +765,16 @@ function _gmsh_native_initial_surface(m::GeoModel,tag::Int,options,input,
                 wrapped=BoundedSize(raw;size_min=lo,size_max=hi,
                                     factor=options.lc_factor)
                 f=frame.first;s=frame.second;entity=(2,tag)
+                fallback=(Mesh2D._gmsh_dot3(f,f),Mesh2D._gmsh_dot3(f,s),
+                          Mesh2D._gmsh_dot3(s,s))
                 (u,v)->begin
                     w=lift(u,v)
-                    mm=metric_at(wrapped,w[1],w[2],w[3],entity)
+                    mm=try
+                        metric_at(wrapped,w[1],w[2],w[3],entity)
+                    catch err
+                        err isa InterruptException && rethrow()
+                        return fallback
+                    end
                     (mm.m11*f[1]*f[1]+mm.m22*f[2]*f[2]+mm.m33*f[3]*f[3]+
                      2*(mm.m12*f[1]*f[2]+mm.m13*f[1]*f[3]+mm.m23*f[2]*f[3]),
                      mm.m11*f[1]*s[1]+mm.m22*f[2]*s[2]+mm.m33*f[3]*f[3]+
