@@ -92,6 +92,26 @@ unknown-type records print `Error   : …` to stderr and skip;
 whitespace-separated row groups (`{r1}{r2}`) — both previously threw
 where upstream parses. `post_view_io_test` 116/116.
 
+### Remaining registered-plugin parity batch (`13af571`, `a0a3025`)
+
+`13af571` — `Plugin(HomologyComputation)` bridges the upstream option table
+onto the native `compute_homology!` solver: per-run request queue (fresh
+Homology object semantics), domain/subdomain/dimsave lists parsed with
+upstream `parseStringOpt` strictness, chains published as discrete
+entities + `H_<dim>{domain}<i>`/`H^` physical groups, and
+`CreatePostProcessingViews` emits one `"<phys>=<name>"` unit-valued list
+view per chain (upstream `|coeff|` semantics). Reduction-tuning knobs and
+`Filename` persist as accepted documented bounds.
+`api_plugin_homology_test.jl` 16/16.
+
+`a0a3025` — `Plugin(Bubbles)` `.geo` writer: verbatim model
+point/line/surface emission, per-face vertex-Voronoi bubble cells
+(triangle barycenters + boundary-vertex positions, upstream `angle_plan`
+center→(1,0,0) reference-ray sort, `ShrinkFactor` contraction),
+Point/BSpline/Curve Loop/Plane Surface records plus the
+bubble-range and leftover-face Physical Surfaces (face-tag quirk kept).
+`api_plugin_bubbles_test.jl` 211/211 incl. `open_geo!` round-trip.
+
 ### `.geo` view ops + `Plugin(...)` dispatch + `DefineConstant` whitespace grammar (2026-10-23, landed `1dfc9e4`, `72fd7a1`, `2330f0b`)
 
 `1dfc9e4` — `DefineConstant`/`UndefineConstant` entries now split on
