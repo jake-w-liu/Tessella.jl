@@ -249,6 +249,9 @@ function _model_occ_bind_tree!(kernel:: _ModelNativeOCCKernel,shapes,id,dim,
     if dim==1
         old=ctx.inverse[id]
         haskey(ctx.oldtags,old) && (ctx.tagmap[ctx.oldtags[old]]=tag)
+    elseif dim==0
+        old=ctx.inverse[id]
+        haskey(ctx.oldtags,old) && (ctx.tagmap0[ctx.oldtags[old]]=tag)
     end
     for cid in shapes[id].children
         haskey(kernel.shape_tags,cid) && continue
@@ -288,16 +291,32 @@ end
 # (`_transform_occ_circle`: closed circles keep +T·n with `t0,t1 -> -t1,-t0`).
 function _model_occ_rekey_pcurves!(kernel:: _ModelNativeOCCKernel,newshapes,
                                    tagmap;flipped=Set{Int}(),
+                                   tagmap0=Dict{Int,Int}(),
                                    tol=_OCC_CONFUSION,caller="OCC.transform")
     for (id,shape) in newshapes
         if shape.dimension==2
             rec=shape.geometry.geometry
-            haskey(rec,:pcurves) || continue
+            haskey(rec,:pcurves) || haskey(rec,:vertex_uv) ||
+                haskey(rec,:plane_rec) || continue
+            if haskey(rec,:pcurves)
+                rec=merge(rec,(pcurves=_model_occ_rekey_dict(
+                    rec.pcurves,tagmap,flipped,tol,caller),))
+            end
+            # vertex_uv is keyed by vertex tags — the dim-0 map —
+            # and a reclassified cap's nested `plane_rec` carries its
+            # own edge-keyed pcurve table.
+            if haskey(rec,:vertex_uv)
+                rec=merge(rec,(vertex_uv=Dict{Int,NTuple{2,Float64}}(
+                    get(tagmap0,k,k)=>v for (k,v) in rec.vertex_uv),))
+            end
+            if haskey(rec,:plane_rec) && haskey(rec.plane_rec,:pcurves)
+                rec=merge(rec,(plane_rec=merge(rec.plane_rec,
+                    (pcurves=_model_occ_rekey_dict(
+                        rec.plane_rec.pcurves,tagmap,flipped,tol,
+                        caller),)),))
+            end
             kernel.shapes[id]=_ModelOCCShape(2,
-                (kind=shape.geometry.kind,
-                 geometry=merge(rec,(pcurves=_model_occ_rekey_dict(
-                     rec.pcurves,tagmap,flipped,tol,caller),))),
-                shape.children)
+                (kind=shape.geometry.kind,geometry=rec),shape.children)
         elseif shape.dimension==1
             rec=shape.geometry.geometry
             (haskey(rec,:face) && haskey(rec.face,:pcurves)) || continue
@@ -409,7 +428,7 @@ function _model_occ_transform!(m::GeoModel,dim_tags,t::_AffineTransform,
         newtags[nid]=t
     end
     ctx=(inverse=inverse,oldtags=oldtags,newtags=newtags,
-         tagmap=Dict{Int,Int}(),caller=caller)
+         tagmap=Dict{Int,Int}(),tagmap0=Dict{Int,Int}(),caller=caller)
     for (d,tg,id) in entries
         if d==0 && haskey(kernel.shape_tags,id)
             # The ownership-protected unbind refused an owned leaf — replace
@@ -422,7 +441,7 @@ function _model_occ_transform!(m::GeoModel,dim_tags,t::_AffineTransform,
         _model_occ_bind_tree!(kernel,newshapes,remap[id],d,tg,ctx)
     end
     _model_occ_rekey_pcurves!(kernel,newshapes,ctx.tagmap;
-        flipped=flipped,caller=caller)
+        flipped=flipped,tagmap0=ctx.tagmap0,caller=caller)
     kernel.next_shape=max(kernel.next_shape,
                           maximum(collect(values(remap)))+UInt64(1))
     _model_occ_collect_shapes!(kernel)
@@ -467,7 +486,7 @@ function _model_occ_copy!(m::GeoModel,dim_tags,caller::AbstractString)
             UInt64[remap[c] for c in shape.children])
     end
     ctx=(inverse=inverse,oldtags=oldtags,newtags=Dict{UInt64,Int}(),
-         tagmap=Dict{Int,Int}(),caller=caller)
+         tagmap=Dict{Int,Int}(),tagmap0=Dict{Int,Int}(),caller=caller)
     out=Tuple{Int,Int}[]
     for (d,id) in units
         nid=remap[id]
@@ -479,7 +498,8 @@ function _model_occ_copy!(m::GeoModel,dim_tags,caller::AbstractString)
         _model_occ_bind_tree!(kernel,newshapes,nid,d,tag,ctx)
         push!(out,(d,tag))
     end
-    _model_occ_rekey_pcurves!(kernel,newshapes,ctx.tagmap)
+    _model_occ_rekey_pcurves!(kernel,newshapes,ctx.tagmap;
+        tagmap0=ctx.tagmap0)
     kernel.next_shape=max(kernel.next_shape,maximum(collect(values(remap)))+
         UInt64(1))
     return out

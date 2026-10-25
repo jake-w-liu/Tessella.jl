@@ -71,3 +71,94 @@ end
         A.finalize()
     end
 end
+
+# `occ.fillet` on B-rep lofts (the t19 case): a full-circle rim shared
+# by a cap face and the periodic tensor-B-spline lateral takes the
+# swept rolling-ball path — each rim becomes a periodic tensor-NURBS
+# fillet face, the kept faces are rebuilt as trimmed strips and the
+# periodic seam edge (the same face on both uses) is skipped per-edge
+# inside a list, while a seam-only request reports the upstream
+# "no suitable edges" failure.
+# Partial arcs and non-circle rims keep the upstream-style
+# rejections, and oversized radii carry the spindle/overrun
+# certificates.
+@testset "occ.fillet loft rims" begin
+    A.initialize(); occ=A.model.occ
+    try
+        # Three-circle smooth loft — the t19 volume.
+        c1=occ.add_circle(0,0,0,0.5); l1=occ.add_curve_loop([c1])
+        c2=occ.add_circle(0.1,0.05,1,0.1); l2=occ.add_curve_loop([c2])
+        c3=occ.add_circle(-0.1,-0.1,2,0.3); l3=occ.add_curve_loop([c3])
+        occ.add_thru_sections([l1,l2,l3]); occ.synchronize()
+        m0=occ.get_mass(3,1)
+        @test m0>0.31
+
+        # The periodic seam spans the full height; the lateral face
+        # owns both uses. It is skipped inside a mixed list, but a
+        # seam-only request has no suitable edges — matching the
+        # OCC "no suitable edges for chamfer or fillet" rejection.
+        seam=[t for (d,t) in occ.get_entities(1)
+              if (b=occ.get_bounding_box(1,t); b[6]-b[3]>1.0)]
+        @test length(seam)==1
+        @test occursin("no valid edges",
+                       _errtext(()->occ.fillet([1],seam,0.1)))
+
+        # The verbatim t19 edge list — `Unique(Boundary{Surface{f}})`
+        # — carries both rims plus the seam; the rims take the swept
+        # path and the seam is skipped inline.
+        f=A.model.get_boundary([(3,1)],true,false,false)
+        etags=sort!(unique!(abs.([t for (d,t) in
+            A.model.get_boundary(f,false,false,false)])))
+        @test length(etags)==3
+        occ.fillet([1],etags,fill(0.1,length(etags))); occ.synchronize()
+        m1=occ.get_mass(3,1)
+        @test 0.28<m1<m0
+        # Rebuilt boundary: trimmed lateral + both caps + 2 fillet
+        # pipe faces (the volume's model tables track the rebuild).
+        @test length(A.model.get_boundary([(3,1)],true,false,false))==5
+        bb=occ.get_bounding_box(3,1)
+        @test bb[1]>-0.8 && bb[4]<0.8 && bb[3]>-1e-6 && bb[6]<2.0+1e-6
+
+        # Copy/translate: the filleted B-rep is invariant under
+        # rigid copies (trimmed-NURBS CDT quadrature level).
+        dup=occ.copy([(3,1)]); occ.translate(dup,5,0,0); occ.synchronize()
+        vc=dup[1][2]
+        @test occ.get_mass(3,vc)≈m1 atol=2e-4
+        g0=occ.get_center_of_mass(3,1); gc=occ.get_center_of_mass(3,vc)
+        @test gc[1]≈g0[1]+5 atol=5e-4
+        @test gc[2]≈g0[2] atol=5e-4
+        @test gc[3]≈g0[3] atol=5e-4
+
+        # Partial-circle rims stay rejected — the sector cylinder's
+        # top/bottom rims are half arcs (z-span≈0, wide in x and y).
+        v2=occ.add_cylinder(10,0,0,0,0,2,0.5;angle=pi)
+        occ.synchronize()
+        arcs=[t for (d,t) in occ.get_entities_in_bounding_box(
+                9.4,-0.6,-0.1,10.6,0.6,2.1;dim=1)
+              if (b=occ.get_bounding_box(1,t);
+                  b[6]-b[3]<1e-6 && min(b[4]-b[1],b[5]-b[2])>0.3)]
+        @test !isempty(arcs)
+        @test occursin("full 2π circle",
+                       _errtext(()->occ.fillet([v2],arcs[1:1],0.1)))
+
+        # Non-circle rims keep the upstream rejection text.
+        ec=occ.add_circle(20,0,0,0.5); lc=occ.add_curve_loop([ec])
+        ee=occ.add_ellipse(20.05,0.02,1.0,0.4,0.25)
+        le=occ.add_curve_loop([ee])
+        ve=occ.add_thru_sections([lc,le])[1][2]; occ.synchronize()
+        @test occursin("must be a line or a full circle",
+                       _errtext(()->occ.fillet([ve],[ee],0.05)))
+
+        # Oversized radii keep their certificates: the rolling tube
+        # centre collapsing onto the rim axis (spindle) and the
+        # tangent trace overrunning a face domain.
+        d1=occ.add_circle(30,0,0,0.5); m4=occ.add_curve_loop([d1])
+        d2=occ.add_circle(30.1,0.05,1,0.1); m5=occ.add_curve_loop([d2])
+        d3=occ.add_circle(29.9,-0.1,2,0.3); m6=occ.add_curve_loop([d3])
+        v4=occ.add_thru_sections([m4,m5,m6])[1][2]; occ.synchronize()
+        @test occursin("tube centre",_errtext(()->occ.fillet([v4],[d1],0.4)))
+        @test occursin("overruns",_errtext(()->occ.fillet([v4],[d1],0.9)))
+    finally
+        A.finalize()
+    end
+end

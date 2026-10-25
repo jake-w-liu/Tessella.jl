@@ -517,20 +517,29 @@ function _transform_occ_surface_record(g, t::_AffineTransform, caller, what;tens
             return _ModelNURBSSurface(g.patch.family,updated)
         end
         patch=tensor_cache===nothing ? transform_patch() : get!(transform_patch,tensor_cache,g.patch)
-        if hasproperty(g,:reparam)
+        out=if hasproperty(g,:reparam)
             # NURBS-converted analytic record: reflections negate a conic
             # parameter on spheres/tori, which the separable axis reparam
             # cannot represent — keep det>0 transforms exact on both
             # channels and reject mirrors loudly.
             _linear_det(t.linear)<0 && throw(ArgumentError(
                 "$caller: reflection of a NURBS-converted $what is " *
-                "not implemented"))
+                    "not implemented"))
             analytic=_transform_occ_surface_record(Base.structdiff(
                 g,(patch=nothing,reparam=nothing)),t,caller,what;
                 tensor_cache=tensor_cache)
-            return merge(analytic,(patch=patch,reparam=g.reparam))
+            merge(analytic,(patch=patch,reparam=g.reparam))
+        else
+            merge(g,(patch=patch,))
         end
-        return merge(g,(patch=patch,))
+        # A reclassified cap keeps its fitted plane in `plane_rec` —
+        # the nested frame is a surface record too and must take the
+        # same transform (the plane branch absorbs the stretch in its
+        # basis, so its pcurves carry over verbatim like the parent's).
+        hasproperty(g,:plane_rec) && (out=merge(out,
+            (plane_rec=_transform_occ_surface_record(
+                g.plane_rec,t,caller,what),)))
+        return out
     end
     if g.occ===:sphere
         s2=_linear_isotropy(t.linear)

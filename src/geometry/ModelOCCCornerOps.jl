@@ -31,11 +31,35 @@ end
 _occ_2df_frame(g)=hasproperty(g,:native_geometry) ? g.native_geometry : g
 
 # Parameter of a point on the record — line projection, circle angle
-# branch-adjusted into the stored span.
+# branch-adjusted into the stored span. `copied_curve` records (loft
+# seams) take a coarse scan plus Gauss–Newton projection, which is the
+# `GeomAPI_ProjectPointOnCurve` analogue BRepTools uses for truncation.
 function _occ_2df_param(g,p)
     if g.occ===:line
         d=g.dir; rel=_arc_sub(p,g.origin)
         return (rel[1]*d[1]+rel[2]*d[2]+rel[3]*d[3])/(d[1]*d[1]+d[2]*d[2]+d[3]*d[3])
+    end
+    if g.occ===:copied_curve
+        lo,hi=g.t0,g.t1
+        best=lo; bd=Inf
+        for i in 0:24
+            t=lo+(hi-lo)*i/24
+            pt,_,_=_model_occ_curve_d2(g.curve,t)
+            d=_occ_modulus(_arc_sub(pt,p))
+            d<bd && (bd=d; best=t)
+        end
+        t=best
+        for _ in 1:40
+            pt,d1,d2=_model_occ_curve_d2(g.curve,t)
+            rel=_arc_sub(p,pt)
+            num=_dot3(rel,d1); den=_dot3(d1,d1)-_dot3(rel,d2)
+            den<=0.0 && (den=_dot3(d1,d1))
+            den==0.0 && break
+            dt=num/den
+            t=clamp(t+dt,lo,hi)
+            abs(dt)<1e-13*max(1.0,hi-lo) && break
+        end
+        return t
     end
     f=_occ_2df_frame(g)
     rel=_arc_sub(p,f.center); Y=_occ_circle_y(f)

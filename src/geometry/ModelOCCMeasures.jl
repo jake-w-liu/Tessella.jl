@@ -486,6 +486,23 @@ function _model_occ_trimmed_face_cdt(kernel,id,shape,rec)
     end
     isempty(segs) && throw(ErrorException(
         "OCC.get_mass: trimmed face has an empty uv boundary"))
+    # Interior lattice: the CDT's natural vertices are the boundary
+    # samples, so interior triangles span nearly the whole domain and
+    # the fixed-order per-triangle quadrature loses the surface's
+    # curvature (the implied area vector stopped matching the wire at
+    # ~1e-3 on curved lofts). A half-cell-offset lattice over the uv
+    # bbox refines the interior cells; the parity classification is
+    # unaffected by extra vertices and the points are deduped against
+    # the boundary samples.
+    Wu=hi[1]-lo[1]; Wv=hi[2]-lo[2]
+    pitch=max(Wu,Wv)/32
+    if isfinite(pitch) && pitch>0.0
+        nx=clamp(ceil(Int,Wu/pitch),2,64)
+        ny=clamp(ceil(Int,Wv/pitch),2,64)
+        for i in 0:nx-1, j in 0:ny-1
+            emit((lo[1]+Wu*(i+0.5)/nx,lo[2]+Wv*(j+0.5)/ny))
+        end
+    end
     T=constrained_delaunay(xs,ys,segs)
     interior=classify_interior(T)
     return xs,ys,T,interior
