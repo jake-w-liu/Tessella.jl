@@ -3338,6 +3338,17 @@ end
 # mapped to the parameter bounds. Nodes that fail the bitwise lookup fall
 # back to `model_closest_point` projection at the projector's own tolerance;
 # the sorted-chain audit is identical to the line path.
+#
+# An extruded entity is the exception: upstream `copyMesh`/`extrudeMesh`
+# positions each copied node at `ep->Extrude` of the *source's* stored
+# vertex and carries that node's parameter verbatim — the copy's own record
+# is never consulted. A boundary-layer chapeau is the extreme case: its
+# `DuplicateCurve` keeps the generatrix geometry while its emitted top row
+# follows the smoothed normal field legitimately off the source arc.
+# Classifying the chain against the emitted part (`_model_curve_part_point`,
+# which itself reduces to the native evaluation for non-extruded curves)
+# binds the node to its carried parameter — the certificate still rejects
+# any node the emitting path could not have produced.
 function _curve_parameter_nodes_curved(m::GeoModel,mesh,curve::Int,
                                        eligible_nodes,eligible_edges,
                                        atol::Float64,
@@ -3353,9 +3364,12 @@ function _curve_parameter_nodes_curved(m::GeoModel,mesh,curve::Int,
     # local extent, rather than its distance from the coordinate origin.
     scale=hypot(q[1]-p[1],q[2]-p[2],q[3]-p[3])
     stored=get(m.curve_params,curve,nothing)
+    evaluate=haskey(m.meshing.extrude_sources,(1,curve)) ?
+        u->_model_curve_part_point(m,curve,u,caller) :
+        u->_model_curve_point(m,curve,u,caller)
     if stored!==nothing
         for u in stored
-            point=_model_curve_point(m,curve,u,caller)
+            point=evaluate(u)
             all(isfinite,point) || throw(ArgumentError(
                 "$caller: Curve[$curve] evaluation is not " *
                 "Float64-representable"))
@@ -3401,7 +3415,11 @@ function _curve_parameter_nodes_curved(m::GeoModel,mesh,curve::Int,
             push!(unmatched,key[1],key[2],key[3])
         end
     end
-    if !isempty(unmatched_nodes)
+    # `GEdge::closestPoint` declines `BoundaryLayerCurve` upstream — the
+    # mesh-only chapeau has no analytic projector. Its emitted row names
+    # every admissible coordinate bitwise; an unmatched node — the shared
+    # generatrix's own vertices included — is simply foreign to it.
+    if !isempty(unmatched_nodes) && _curve_type(m,curve)!==:boundary_layer
         closest,parameters=model_closest_point(m,1,curve,unmatched)
         # `GEdge::closestPoint` converges to a ~1e-8·scale residual — the
         # admittance bound for a node the stored discretization cannot name.
@@ -3559,8 +3577,8 @@ end
 # set. At a boundary pinch two curves place distinct vertices within the
 # chain audit's projection tolerance of each other; a foreign-owned vertex
 # is not a Steiner candidate for this curve's chain, so per-curve masks
-# exclude it. Evaluations use `_periodic_curve_point` so the map names the
-# emitted (affine-copy) coordinates periodic slaves carry.
+# exclude it. Evaluations use `_model_curve_part_point` so the map names the
+# emitted coordinates periodic slaves and extruded copies carry.
 function _curve_owned_coordinates(m::GeoModel,curves,caller::AbstractString)
     owned=Dict{NTuple{3,Float64},Set{Int}}()
     for curve in curves
@@ -3573,7 +3591,11 @@ function _curve_owned_coordinates(m::GeoModel,curves,caller::AbstractString)
         params=get(m.curve_params,curve,nothing)
         params===nothing && continue
         for u in params
-            point=_periodic_curve_point(m,curve,u,caller)
+            # `_model_curve_part_point` reduces to `_periodic_curve_point`
+            # on plain curves; on an extruded copy it names the emitted
+            # position (`copyMesh` binds the copy's nodes through the source
+            # record) — a boundary-layer chapeau owns its displaced top row.
+            point=_model_curve_part_point(m,curve,u,caller)
             all(isfinite,point) || continue
             push!(get!(()->Set{Int}(),owned,point),curve)
         end

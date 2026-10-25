@@ -131,7 +131,12 @@ function _model_mesh_bbox(m::GeoModel, caller::AbstractString)
             end
         end
         for u in params
-            grow!(_model_curve_point(m,curve,u,caller))
+            # The emitting evaluator — `copyMesh` positions each extruded
+            # node's vertex through the source record, so a boundary-layer
+            # chapeau's extent is its displaced top row, not the copied
+            # curve record (upstream's `GEdge::bounds` unions mesh vertices
+            # for `BoundaryLayerCurve` the same way).
+            grow!(_model_curve_part_point(m,curve,u,caller))
         end
     end
     for (_,record) in _discrete_mesh_records_model(m)

@@ -3300,8 +3300,28 @@ function _higher_bind_producer_rows(authority,assembly,parts,previous;node_tag_m
                 "$(assembly.caller): produced Surface[$tag] loses actual node $source_tag"))
             rows[slot]=row
         end
-        authority.mesh.coords[:,rows]==mesh.coords || throw(ArgumentError(
-            "$(assembly.caller): produced Surface[$tag] coordinates disagree with actual bound rows"))
+        if authority.mesh.coords[:,rows]!=mesh.coords
+            # Upstream `pos.find` welding: a produced boundary row can bind to
+            # a vertex another producer emitted first (the curve parts' T/tops
+            # derive from an earlier kernel pass than the strip's own columns)
+            # — the appended node then carries the welded position, not the
+            # producer's own eval. The same `64eps·max(1,|p|)` rule
+            # `_higher_append_part!` welds by decides identity; a bound node
+            # beyond it is a real mismatch, not a weld.
+            delta=abs.(authority.mesh.coords[:,rows].-mesh.coords)
+            bad=count(axes(delta,2)) do j
+                tolerance=64eps(Float64)*max(1.0,maximum(@view mesh.coords[:,j]))
+                maximum(@view delta[:,j])>tolerance
+            end
+            bad>0 && begin
+                detail=join(("$(j):bound=$(authority.mesh.coords[:,rows[j]]) part=$(mesh.coords[:,j])"
+                             for j in axes(delta,2) if any(!=(0.0),delta[:,j])),"\n  ")
+                throw(ArgumentError(
+                    "$(assembly.caller): produced Surface[$tag] coordinates " *
+                    "disagree with actual bound rows " *
+                    "($bad/$(size(delta,2)) cols, max |delta|=$(maximum(delta)))\n  $detail"))
+            end
+        end
         owner=(2,Int32(tag))
         if !haskey(authority.products,owner) && Model._surface_cell_count(mesh)==0
             authority=Model._model_mesh_with_empty_surface_product(authority,owner,rows;
@@ -3464,6 +3484,52 @@ end
 function _higher_geometry_carrier(plan,assembly,parts,dimension,caller;
                                   geometry_merge=nothing,geometry_cells,geometry_birth=nothing)
     isempty(parts) && return nothing,Int32[],Vector{UInt64}[],nothing,nothing
+    # Upstream `pos.find` keeps a single vertex store: when a produced
+    # boundary row welds onto a vertex an earlier producer emitted, the
+    # welded position — not this part's own eval — is the canonical
+    # coordinate. Rewrite each part's coords to those bound values before
+    # the carrier merge, or two producers' ~1-ulp-different copies of the
+    # same logical vertex become two carrier rows bound to one actual
+    # vertex (the curve parts' T/tops derive from an earlier kernel pass
+    # than the strip's own columns). The birth record names the welded
+    # value, matching the `expected.point` audit below.
+    canonical=Vector{Tuple{Int,Union{Mesh,MixedMesh},_MeshClassification,Vector{Int32}}}(undef,length(parts))
+    for (index,(tag,mesh,class,mapping)) in enumerate(parts)
+        coords=mesh.coords
+        needs=false
+        for position in eachindex(mapping)
+            source=assembly.nodes[mapping[position]]
+            expected=geometry_birth===nothing ? source :
+                get(geometry_birth.nodes,source.tag,source)
+            expected.owner==source.owner || (expected=source)
+            coords[:,position]==collect(expected.point) || (needs=true;break)
+        end
+        if needs
+            new_coords=copy(coords)
+            for position in eachindex(mapping)
+                source=assembly.nodes[mapping[position]]
+                expected=geometry_birth===nothing ? source :
+                    get(geometry_birth.nodes,source.tag,source)
+                expected.owner==source.owner || (expected=source)
+                new_coords[:,position]=collect(expected.point)
+            end
+            new_mesh=if mesh isa Mesh
+                Mesh(new_coords;segs=mesh.segs,tris=mesh.tris,tets=mesh.tets,
+                     seg_tag=mesh.seg_tag,tri_tag=mesh.tri_tag,
+                     tet_tag=mesh.tet_tag)
+            else
+                MixedMesh(new_coords,mesh.blocks;
+                    physical_names=mesh.physical_names,
+                    elementary_entities=mesh.elementary_entities)
+            end
+            traces=get(geometry_cells,mesh,nothing)
+            traces===nothing || (geometry_cells[new_mesh]=traces)
+            canonical[index]=(tag,new_mesh,class,mapping)
+        else
+            canonical[index]=(tag,mesh,class,mapping)
+        end
+    end
+    parts=canonical
     geometry_parts=Tuple{Int,Union{Mesh,MixedMesh}}[(tag,mesh) for (tag,mesh,_,_) in parts]
     node_entities=[class.node_entities for (_,_,class,_) in parts]
     node_identities=[mapping for (_,_,_,mapping) in parts]

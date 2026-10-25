@@ -291,6 +291,10 @@ end
                 first[2]+parameter*(last[2]-first[2]),
                 first[3]+parameter*(last[3]-first[3]))
     end
+    _curve_type(m,tag)===:boundary_layer &&
+        # `TRAN_QUA` can't interpolate a discrete generatrix upstream; the
+        # emitted top row IS the chapeau's boundary — evaluate the producer.
+        return _model_curve_part_point(m,tag,parameter,caller)
     adapter=_model_high_order_curve_geometry(m,tag,caller)
     if adapter!==nothing && adapter.kind in (:arc,:spline)
         return _model_high_order_curve_point(adapter,parameter,caller)
@@ -1363,13 +1367,17 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates;
     output=Float64[]
     sizehint!(output,dimension*(length(values)÷3))
     occ=dimension==1 ? _occ_geometry_checked(m,entity_tag,caller) : nothing
-    line=nothing;arc=nothing;spline=nothing
+    line=nothing;arc=nothing;spline=nothing;bl_row=nothing
     if dimension==1 && occ===nothing
         kind=_curve_type(m,entity_tag)
         if kind==:line
             line=_model_line_geometry(m,entity_tag,caller)
         elseif kind in _SPLINE_CURVE_TYPES
             spline=_spline_geometry(m,entity_tag,caller)
+        elseif kind===:boundary_layer
+            # `GEdge::parFromPoint` declines `BoundaryLayerCurve` upstream —
+            # the mesh-only chapeau's only geometry is its emitted top row.
+            bl_row=_bl_curve_polyline(m,entity_tag,caller)
         else
             arc=_arc_geometry(m,entity_tag,caller)
         end
@@ -1407,6 +1415,11 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates;
                 # `parBounds`.
                 _,u=_spline_xyz_to_u(spline,coordinate,lc)
                 push!(output,u)
+            elseif bl_row!==nothing
+                # Emitted-row projection: nearest segment of the chapeau's
+                # top row names the carried parameter — same binding the
+                # classifier uses for the emitted chain.
+                push!(output,_bl_polyline_param(bl_row,coordinate))
             else
                 # `GEdge::parFromPoint` → `XYZToU` — multi-seed damped
                 # Newton on the `InterpolateCurve` finite difference.
@@ -1559,6 +1572,7 @@ function model_is_inside(m::GeoModel,dim,tag,coordinates,parametric=false)
                 ok && spline.ubeg<=u<=spline.uend
             end
         end
+        _curve_type(m,entity_tag)===:boundary_layer && return 0
         _curve_type(m,entity_tag)!=:line && begin
             # `GEdge::containsPoint` — `XYZToU(relax=1)` convergence plus the
             # `[0,1]` parameter check.
@@ -1641,13 +1655,17 @@ function model_closest_point(m::GeoModel,dim,tag,coordinates)
         return closest,parameters
     end
     occ=dimension==1 ? _occ_geometry_checked(m,entity_tag,caller) : nothing
-    line=nothing;arc=nothing;spline=nothing
+    line=nothing;arc=nothing;spline=nothing;bl_row=nothing
     if dimension==1 && occ===nothing
         kind=_curve_type(m,entity_tag)
         if kind==:line
             line=_model_line_geometry(m,entity_tag,caller)
         elseif kind in _SPLINE_CURVE_TYPES
             spline=_spline_geometry(m,entity_tag,caller)
+        elseif kind===:boundary_layer
+            # `GEdge::closestPoint` declines `BoundaryLayerCurve` upstream —
+            # project on the emitted top-row polyline instead.
+            bl_row=_bl_curve_polyline(m,entity_tag,caller)
         else
             arc=_arc_geometry(m,entity_tag,caller)
         end
@@ -1692,6 +1710,20 @@ function model_closest_point(m::GeoModel,dim,tag,coordinates)
                 t,pt=_spline_closest(spline,coordinate)
                 push!(parameters,t)
                 _model_append_point!(closest,pt)
+            elseif bl_row!==nothing
+                us,row=bl_row
+                best=Inf;best_point=row[1];bestu=us[1]
+                for i in 1:length(row)-1
+                    t,dist=_segment_closest(coordinate,row[i],row[i+1])
+                    if dist<best
+                        best=dist;bestu=us[i]+t*(us[i+1]-us[i])
+                        a,b=row[i],row[i+1]
+                        best_point=(a[1]+t*(b[1]-a[1]),a[2]+t*(b[2]-a[2]),
+                                    a[3]+t*(b[3]-a[3]))
+                    end
+                end
+                push!(parameters,bestu)
+                _model_append_point!(closest,best_point)
             else
                 # `GEdge::closestPoint` — 100-sample scan plus the recursive
                 # golden-section search.
@@ -1900,6 +1932,36 @@ function _barycentric3(p,a,b,c)
 end
 
 # Closest point of `p` on segment (a,b) → (clamped t, squared distance).
+# The mesh-only `BoundaryLayerCurve` chapeau carries no interpolable curve
+# upstream (`Cannot interpolate boundary layer curve`) — its geometry is the
+# emitted top row stored in `curve_params`, evaluated through
+# `_model_curve_part_point` (the producer path, tops included). These helpers
+# rebuild that row as a polyline for parametric/projection queries.
+function _bl_curve_polyline(m::GeoModel,tag::Int,caller::AbstractString)
+    params=get(m.curve_params,tag,nothing)
+    (params===nothing || length(params)<2) && throw(ArgumentError(
+        "$caller: Curve[$tag] is a BoundaryLayerCurve without an emitted " *
+        "row; the top-row producer has not run"))
+    us=Float64.(params)
+    row=NTuple{3,Float64}[
+        _model_curve_part_point(m,tag,u,caller) for u in us]
+    return us,row
+end
+
+# Nearest-point parameter on the emitted-row polyline.
+function _bl_polyline_param(bl_row,q)
+    us,row=bl_row
+    best=Inf;bestu=us[1]
+    for i in 1:length(row)-1
+        t,dist=_segment_closest(q,row[i],row[i+1])
+        if dist<best
+            best=dist
+            bestu=us[i]+t*(us[i+1]-us[i])
+        end
+    end
+    return bestu
+end
+
 function _segment_closest(p,a,b)
     d=(b[1]-a[1],b[2]-a[2],b[3]-a[3])
     l2=d[1]^2+d[2]^2+d[3]^2

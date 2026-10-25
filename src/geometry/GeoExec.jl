@@ -4273,6 +4273,23 @@ function _geo_bl_curve_lateral!(m::GeoModel,c::Int,params,closed,kernel,
     a,b=m.curves[src]
     sbeg,send=c>0 ? (a,b) : (b,a)
     chapeau=_duplicate_curve!(m,src,caller;reversed=c<0)
+    # `ExtrudeCurve` under `BOUNDARY_LAYER` retypes the copy
+    # `MSH_SEGM_BND_LAYER` — a mesh-only record `InterpolateCurve` refuses,
+    # `GEdge::point`/`parFromPoint`/`closestPoint` decline, and `CompareCurve`
+    # merges it only with another boundary-layer record. Mark the chapeau the
+    # same way: its emitted top row follows the smoothed normal field off the
+    # generatrix arc, so no analytic evaluation may consult its curve record.
+    m.curve_types[chapeau]=:boundary_layer
+    # Its interior control copies keep the source positions; upstream's
+    # coincident `DuplicateVertex` merge folds them into the generatrix's own
+    # controls. `_extrude_bl_refresh!` instead displaces every listed copy to
+    # the nearest top row — meaningless for a conic's center, and once such a
+    # copy merges into a source control the refresh would displace the
+    # generatrix's own geometry. Keep only the record's endpoint copies; the
+    # interior orphans fold at the operation's Coherence exactly like upstream.
+    cps=get(m.curve_control_points,chapeau,Int[])
+    length(cps)>2 &&
+        (m.curve_control_points[chapeau]=Int[cps[1],cps[end]])
     m.meshing.extrude[(1,chapeau)]=params
     # `geo.Source = ic` — the signed generatrix, like the ordinary path.
     m.meshing.extrude_sources[(1,chapeau)]=(1,c)
@@ -4349,6 +4366,34 @@ function _geo_boundary_layer_extrude!(m::GeoModel,
     # refreshes the sibling specs the same way. The kernel runs eagerly here
     # so malformed walls fail at the statement like upstream's `Extrude`.
     working=_extrude_curve_params_stage(m)
+    # Upstream `Mesh2DWithBoundaryLayers` builds its `smooth_data` field off
+    # the *meshed* source edges — the native 1-D producer's grading — and
+    # `setPosition`s the displaced vertices before the boundary-layer curves
+    # and strips emit. The lazy boundary grading below drifts ~1e-9 from
+    # that native grading on curved walls, which the smoothed endpoint
+    # normals amplify into displaced tops that no longer coincide with the
+    # generated entities. Seed the stage copy's stored parameters with the
+    # same native grading the mesh pass will produce so the eager kernel
+    # lands on the final top row; a curve the native pass cannot grade yet
+    # (deferred periodic copies) keeps the lazy chain, exactly the fallback
+    # `_extrude_curve_nodes` runs today.
+    mesh1d=_geo_mesh_1d_options(working,context,caller)
+    for (_,c) in entities
+        src=abs(c)
+        haskey(working.curve_params,src) && continue
+        graded=try
+            Model._model_mesh_curve!(working,src,mesh1d,caller;
+                                     _native_producer=true)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            nothing
+        end
+        graded isa Vector{Float64} &&
+            (working.curve_params[src]=graded)
+        graded isa Model._ModelNativeCurveGrade &&
+            (working.curve_params[src]=Float64.(graded.parameters))
+    end
     walls=Tuple{Vector{NTuple{3,Float64}},Bool,NTuple{3,Float64}}[]
     chains=Dict{Int,Vector{NTuple{3,Float64}}}()
     for (_,c) in entities

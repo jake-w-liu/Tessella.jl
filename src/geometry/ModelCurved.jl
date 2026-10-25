@@ -20,7 +20,8 @@ _surface_type(m::GeoModel, tag::Int) = get(m.surface_types, tag, :plane)
 const _CURVE_TYPE_NAMES = Dict{Symbol,String}(
     :line=>"Line", :circle=>"Circle", :ellipse=>"Ellipse",
     :spline=>"Nurb", :bspline=>"Nurb", :bezier=>"Nurb", :nurbs=>"Nurb",
-    :tensor_bezier=>"Bezier", :tensor_bspline=>"BSpline", :degenerate=>"Unknown")
+    :tensor_bezier=>"Bezier", :tensor_bspline=>"BSpline",
+    :boundary_layer=>"BoundaryLayerCurve", :degenerate=>"Unknown")
 const _SURFACE_TYPE_NAMES = Dict{Symbol,String}(
     :plane=>"Plane", :ruled=>"Surface", :tric=>"Surface",
     :cylinder=>"Cylinder", :sphere=>"Sphere", :cone=>"Cone",

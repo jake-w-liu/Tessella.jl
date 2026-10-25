@@ -74,7 +74,9 @@ function write_geo_unrolled(io::IO,m::GeoModel)
     end
     for tag in sort!(collect(keys(m.curves)))
         kind=get(m.curve_types,tag,:line)
-        kind==:nurbs && continue
+        # `GEdge::writeGEO` returns early for `MSH_SEGM_BND_LAYER` — a
+        # boundary-layer chapeau has no `.geo` statement.
+        kind in (:nurbs,:boundary_layer) && continue
         println(io,_unrolled_curve_statement(
             tag,kind,m.curves,m.curve_control_points))
         tf=get(m.meshing.transfinite_curves,tag,nothing)

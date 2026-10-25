@@ -231,6 +231,27 @@ function _model_curve_bounding_box(
             point=m.points[m.curves[curve][1]]
             (point[1],point[2],point[3],point[1],point[2],point[3])
         end,caller,"Curve[$curve]")
+    if _curve_type(m,curve)===:boundary_layer
+        # `GEdge::bounds` under `BoundaryLayerCurve` unions the emitted mesh
+        # vertices, never the analytic record — the mesh-only chapeau's
+        # extent is the displaced top row its boundary-layer spec stores.
+        positions=NTuple{3,Float64}[]
+        a,b=m.curves[curve]
+        haskey(m.points,a) && push!(positions,m.points[a])
+        haskey(m.points,b) && push!(positions,m.points[b])
+        spec=get(m.meshing.extrude_specs,(1,curve),nothing)
+        if spec isa NamedTuple && get(spec,:type,nothing)===:boundary_layer
+            append!(positions,values(spec.tops))
+        end
+        isempty(positions) && throw(ArgumentError(
+            "$caller: Curve[$curve] boundary-layer record has no stored " *
+            "top positions"))
+        return _model_bounds_checked(ntuple(6) do i
+            axis=mod1(i,3)
+            values=(p[axis] for p in positions)
+            i<=3 ? minimum(values) : maximum(values)
+        end,caller,"Curve[$curve]")
+    end
     if _curve_type(m,curve)==:line
         return _model_bounds_from_points(
             m,m.curves[curve],caller,"Curve[$curve]")
@@ -568,6 +589,21 @@ function _dist_curve_project(m::GeoModel,tag::Int,q::NTuple{3,Float64},
     elseif kind in _SPLINE_CURVE_TYPES
         _,pt=_spline_closest(_spline_geometry(m,tag,caller),q)
         return _sqdist(q,pt),pt
+    elseif kind===:boundary_layer
+        # Mesh-only chapeau: closest point on the emitted top-row polyline
+        # (upstream declines all analytic queries on `BoundaryLayerCurve`).
+        _,row=_bl_curve_polyline(m,tag,caller)
+        best=Inf;best_point=row[1]
+        for i in 1:length(row)-1
+            t,dist=_segment_closest(q,row[i],row[i+1])
+            if dist<best
+                best=dist
+                a,b=row[i],row[i+1]
+                best_point=(a[1]+t*(b[1]-a[1]),a[2]+t*(b[2]-a[2]),
+                            a[3]+t*(b[3]-a[3]))
+            end
+        end
+        return best,best_point
     end
     _,pt=_arc_closest(_arc_geometry(m,tag,caller),q)
     return _sqdist(q,pt),pt

@@ -73,9 +73,9 @@ end
     @test validate(projected).ok
     projected_crc=mixed_crc(projected)
     @test projected_crc.sha==
-          "e52934d2d4b6a1d8ab6dcd3082449b5ee55b0066e24ffd1fb869d1d88090e5d9"
+          "05f820bb5570d9c29ba0fd08a52d1e4cde753d5518dd64ab5211f91eb534a207"
     @test [block.msh for block in projected.blocks]==[15,1,2]
-    @test [length(block.tags) for block in projected.blocks]==[4,8,16]
+    @test [length(block.tags) for block in projected.blocks]==[4,8,14]
     @test all(==(11),projected.blocks[1].tags)
     @test all(==(12),projected.blocks[2].tags)
     @test all(==(13),projected.blocks[3].tags)
@@ -138,7 +138,7 @@ end
     end
     @test all(length(crcs)==1 for crcs in values(format_crcs))
     @test only(format_crcs[2.2])==
-          "93e8ba7e7d7da84b4c19470eedae5f5b7fea1c97891af4b5d1f7f477f2835854"
+          "bd35eeb82183c0a7d744c6f83f6c107277817afd31cc4122a3e91f656cb6ffed"
     @test only(format_crcs[4.1])==projected_crc.sha
 
     owned_crc=mixed_crc(projected)
@@ -220,7 +220,7 @@ end
                 for link in double_projection.periodic_links if link.dim==1])==
           [(2,4),(3,1)]
     @test mixed_crc(double_projection).sha==
-          "f9ef4d6e4552cd4944c61c5accb89b17497c021e54549161e5ffde2307b893b8"
+          "83e6502e987b83a84e0953c68754bf183dafa95e8b34130844011960a0b13f7f"
 
     @test isempty(Docs.undocumented_names(Tessella.Model;private=false))
     @test isempty(Test.detect_ambiguities(Tessella.Model;recursive=true))
@@ -258,7 +258,7 @@ end
 
     crc=mixed_crc(projected)
     @test crc.sha==
-          "5ebd7c701903c8dfeb270f051dde857d297cd76a28b80631435b394af399ee9c"
+          "2c73d4f8ccfa0e2b29a036ed04b06a0f42a88fd8b5bed40f19a9f6eb24c4ce2f"
     mktempdir() do directory
         for version in (2.2,4.1),binary in (false,true)
             path=joinpath(directory,"embedded-$version-$binary.msh")
@@ -325,7 +325,7 @@ end
     @test periodic_link.master_entity==5
     @test periodic_link.slave_nodes==periodic_mapping.slave_nodes
     @test mixed_crc(periodic_projection).sha==
-          "bc902c2e32f56aef07b962bdcf558e8d53b7c709e174720f41d948957b28909d"
+          "0c10e0663602261eee9c0993f306f05f63e36c16d715b86476997dd0e25fe79c"
 end
 
 @testset "holed native surface projection" begin

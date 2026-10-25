@@ -245,16 +245,16 @@ end
                (1.0, 1.0, 0.0)])
 
     # Chapeau: one Line cell per generatrix element on the welded top row.
-    # The unique positions match Gmsh 4.15.2's emission within ~4e-10 —
-    # the endpoint smoothed normals differ only in the oracle's
-    # accumulation order, and the oracle writes a coincident duplicate of
-    # the interior top node which Tessella welds onto the strip's row.
+    # The unique positions match Gmsh 4.15.2's `.msh` emission — the oracle
+    # writes `0.9238795320849413 -0.382683433394379` for the begin top and
+    # `1.000000000787784 7.877838e-10` for the interior top (its smoothed
+    # endpoint normals accumulate in the same order).
     chapeau = geo_entity_mesh(r, 1, 2)
     @test sum(size(b.nodes, 2) for b in chapeau.blocks) == 2
     @test Set(Tuple(round.(chapeau.coords[:, i]; digits=9))
               for i in axes(chapeau.coords, 2)) ==
-          Set([(0.923879533, -0.382683432, 0.0), (1.0, 0.0, 0.0),
-               (1.382683432, 0.076120467, 0.0)])
+          Set([(0.923879532, -0.382683433, 0.0), (1.000000001, 1e-9, 0.0),
+               (1.382683431, 0.076120467, 0.0)])
 
     # Each connector emits one segment per layer along the smoothed end
     # normal, sharing the strip's column nodes.
@@ -263,15 +263,15 @@ end
     @test Set(Tuple(round.(c3.coords[:, i]; digits=9))
               for i in axes(c3.coords, 2)) ==
           Set([(0.0, 0.0, 0.0), (0.307959844, -0.127561144, 0.0),
-               (0.615919688, -0.255122288, 0.0),
-               (0.923879533, -0.382683432, 0.0)])
+               (0.615919688, -0.255122289, 0.0),
+               (0.923879532, -0.382683433, 0.0)])
     c4 = geo_entity_mesh(r, 1, 4)
     @test sum(size(b.nodes, 2) for b in c4.blocks) == 3
     @test Set(Tuple(round.(c4.coords[:, i]; digits=9))
               for i in axes(c4.coords, 2)) ==
           Set([(1.0, 1.0, 0.0), (1.127561144, 0.692040156, 0.0),
-               (1.255122288, 0.384080312, 0.0),
-               (1.382683432, 0.076120467, 0.0)])
+               (1.255122288, 0.384080311, 0.0),
+               (1.382683431, 0.076120467, 0.0)])
 end
 
 @testset "boundary-layer top-row lookup tolerance" begin
