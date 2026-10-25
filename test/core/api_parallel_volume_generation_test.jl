@@ -12,10 +12,14 @@
 # The eligible set is deliberately narrow: implicit/analytic factory solids
 # and factory-encoded shells without embedded constraints (the paths that
 # provably never consume the shared `Mesh.RandomSeed` ledger — `Box`,
-# `Sphere`, `Cylinder`, `Cone`).  Explicit PLC volumes whose boundary Surfaces
-# all resolve to actual authority products take the native-initial
-# Delaunay fill, which *does* thread the shared RNG; they keep the serial arm,
-# as do transfinite, swept, compound and periodic Regions.
+# `Sphere`, `Cylinder`, `Cone`), plus explicit PLC volumes whose boundary
+# Surfaces all resolve to actual authority products — those take the
+# native-initial Delaunay fill, which *does* thread the shared RNG, and now
+# detach under speculated entry seeds reconstructed from the predicted
+# per-unit draw table (the first consumer in merge order enters at the live
+# ledger position; later ones at the LCG jump-ahead over the intervening
+# predicted draws).  Transfinite, swept, compound and periodic Regions keep
+# the serial arm, as does any consumer whose draw cannot be bounded.
 
 using Test
 using Tessella
@@ -41,8 +45,9 @@ Box(3)={0,2.5,0, 1,1,1.5};
 
 # Two disjoint explicit PLC volumes — every boundary Surface resolves to an
 # actual authority product, so each takes the native-initial fill that
-# consumes the shared RNG ledger.  Both keep the serial arm; the mesh must
-# still be byte-identical under -t1/-t4.
+# consumes the shared RNG ledger.  Both detach under speculated seeds (the
+# second enters at the LCG jump-ahead over the first's predicted draw); the
+# mesh must be byte-identical under -t1/-t4.
 const TWOVOL="""
 Point(1)={0,0,0,0.35};Point(2)={1,0,0,0.35};Point(3)={1,1,0,0.35};Point(4)={0,1,0,0.35};
 Point(5)={0,0,1,0.35};Point(6)={1,0,1,0.35};Point(7)={1,1,1,0.35};Point(8)={0,1,1,0.35};
@@ -68,8 +73,10 @@ Plane Surface(24)={24};Plane Surface(25)={25};Plane Surface(26)={26};
 Surface Loop(2)={21,22,23,24,25,26};Volume(2)={2};
 """
 
-# Two adjacent explicit volumes sharing one Plane Surface — the shared shell
-# keeps both Regions on the serial arm.
+# Two adjacent explicit volumes sharing one Plane Surface — both are
+# eligible consumers; whether the second's detached receipt is adopted
+# depends on whether the first's merge writes into the shared boundary's
+# stored curve discretizations (the dirty/geometry-birth checks decide).
 const SHAREDVOL="""
 Point(1)={0,0,0,0.35};Point(2)={1,0,0,0.35};Point(3)={1,1,0,0.35};Point(4)={0,1,0,0.35};
 Point(5)={0,0,1,0.35};Point(6)={1,0,1,0.35};Point(7)={1,1,1,0.35};Point(8)={0,1,1,0.35};
@@ -93,9 +100,9 @@ Surface Loop(1)={1,2,3,4,5,6};Volume(1)={1};
 Surface Loop(2)={7,8,9,10,11,-4};Volume(2)={2};
 """
 
-# Mixed traversal: an explicit Region (serial arm) followed by two factory
-# Boxes (a detached run) in one phase — run splitting, fill, replayed merge
-# and serial re-run coexist.
+# Mixed traversal: a seed-consuming explicit Region followed by two factory
+# Boxes in one phase — speculated-seed detachment, replayed merge and the
+# serial re-run arm coexist.
 const VOLBOX=first(split(TWOVOL,"Surface Loop(2)"))*
 """Surface Loop(2)={21,22,23,24,25,26};Volume(2)={2};
 SetFactory("OpenCASCADE");

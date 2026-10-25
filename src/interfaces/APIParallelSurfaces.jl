@@ -339,6 +339,11 @@ end
 # run took the parallel path rather than silently collapsing to serial.
 # Stores happen only inside the in-order merge — never inside workers.
 const _PARALLEL_ADOPTED=Ref{Int}(0)
+# Companion counter for the Region seed-ledger transport: incremented when
+# an adopted detached produce actually advanced the shared `Mesh.RandomSeed`
+# ledger (exit seed ≠ entry seed), so tests can prove an RNG-consuming
+# Region detached and merged rather than re-running serially.
+const _PARALLEL_SEED_ADOPTED=Ref{Int}(0)
 
 # One detached Surface produce on a premade transaction copy.  The task's
 # private `random_state` Ref enters at the batch seed and reports its exit

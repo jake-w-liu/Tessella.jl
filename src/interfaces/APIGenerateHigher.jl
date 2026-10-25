@@ -1873,12 +1873,13 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
     volume_forward=nothing
     if dimension==3
         volume_tags=sort!(_higher_volume_mesh_tags(m,entities,options,have))
-        volume_prepared=isempty(volume_tags) ? nothing :
+        volume_plan=isempty(volume_tags) ? nothing :
             _parallel_volume_prepare(m,volume_tags,input,assembly.caller;
                 size_field,scope=nothing,extruded=nothing,
                 hybrid_batch=nothing,staged=false)
-        volume_prepared===nothing || (volume_forward=(
-            tags=volume_tags,prepared=volume_prepared,
+        volume_plan===nothing || (volume_forward=(
+            tags=volume_tags,prepared=volume_plan[1],
+            pos_draws=volume_plan[2],
             results=fill!(Vector{Any}(undef,length(volume_tags)),nothing),
             dirty=parallel_dirty,precise=GmshLibm._win_cli_precision()))
     end
@@ -2046,11 +2047,24 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
                 # hand the worker a snapshot taken on this task so it never
                 # races a later entry.  Eligible Regions have no periodic
                 # boundary anyway, so the copy is never consulted.
+                # A predicted RNG consumer additionally needs its serial
+                # ledger position: the completed predecessor drawer's
+                # reported exit, else the jump-ahead over the predicted
+                # draws — `nothing` leaves it to the in-phase batch arm.
+                entry_seed=options.random_state[]
+                if vwork.may_consume
+                    seed=_parallel_volume_spawn_seed(volume_forward.prepared,
+                        volume_forward.pos_draws,volume_forward.results,vi,
+                        entry_seed)
+                    seed===nothing && continue
+                    entry_seed=seed
+                end
                 _parallel_volume_spawn!(volume_forward.results,vi,m,vwork,
                     spawn_input,options,assembly,parallel_dirty,geometry_birth;
                     periodic_surface_pairs=periodic_pairs===nothing ? nothing :
                         copy(periodic_pairs),
-                    optimize_pyramids,precise=volume_forward.precise)
+                    optimize_pyramids,precise=volume_forward.precise,
+                    entry_seed)
             end
         end
     end
@@ -2965,8 +2979,10 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
     # eligible unit produces its receipt on a transaction copy under
     # `Threads.@threads`, and the unchanged serial merge below replays or
     # re-runs each slot in Region order.  `nothing` keeps the exact serial path.
-    parallel_units=_parallel_volume_prepare(m,volume_tags,input,assembly.caller;
+    parallel_plan=_parallel_volume_prepare(m,volume_tags,input,assembly.caller;
         size_field,scope,extruded,hybrid_batch,staged)
+    parallel_units=parallel_plan===nothing ? nothing : parallel_plan[1]
+    parallel_draws=parallel_plan===nothing ? nothing : parallel_plan[2]
     parallel_results=parallel_units===nothing ? nothing :
         fill!(Vector{Any}(undef,length(volume_tags)),nothing)
     parallel_dirty=Set{Tuple{Int,Int32}}()
@@ -2999,7 +3015,8 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
                 vend+=1
             end
             _parallel_volume_fill!(parallel_results,vi:vend,m,parallel_units,
-                input,options,assembly,parallel_dirty,parallel_precise,
+                parallel_draws,input,options,assembly,parallel_dirty,
+                parallel_precise,
                 geometry_birth;periodic_surface_pairs,optimize_pyramids)
         end
         refs=vi<parallel_last ? _parallel_surface_param_refs(m) : nothing

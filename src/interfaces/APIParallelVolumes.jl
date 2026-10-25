@@ -44,29 +44,38 @@
 # A second serial-threading detail has no Surface analogue: the shared
 # `_ModelMesh1DOptions.random_state` Ref seeds `ModelNativeInitialTet`'s
 # perturbation kernel on the native lower-authority fill (`native_input`) and
-# advances by a seed-dependent draw count, so later Regions can never replay
-# the serial seed chain out of order.  This mirrors upstream faithfully:
-# `GenerateMesh` seeds the process RNG once per operation
-# (`srand(CTX::instance()->mesh.randomSeed)`), so Region fills draw from one
-# globally ordered stream — a per-entity re-seed would change the serial
-# output and is not an option.  `_parallel_volume_rng_free` predicts at
-# prepare time which Regions provably avoid that kernel — implicit factory
-# solids (analytic boundary + seeded-local `tetrahedralize`), non-native
-# explicit shells (a boundary product absent from the authority kills
-# `native_identity` and selects the `perturb=false` recovery path) and
-# factory-encoded shells without embedded constraints.  Predicted consumers
-# stay eligible now (`may_consume`), but the ledger replay supports at most
-# ONE consuming produce per batch: a consumer's correct entry seed is a
-# deterministic function of every earlier consumer's finished produce, which
-# cannot be known without running it — so `_parallel_volume_fill!` detaches
-# only the first predicted consumer in merge order and every later one keeps
-# its serial arm rather than paying a detached produce whose entry seed is
-# already out of date.  Each task still runs under a private `options` copy
-# whose `random_state` Ref starts at the batch seed and records its exit
-# value; at merge a consumed seed is admissible only when the live serial
-# state still equals the observed entry value, in which case the exit state
-# is written back — the same interleaved RNG ledger the serial arm keeps.  A
-# consumed-but-mis-seeded slot is stale and re-runs.
+# advances by a draw count dependent on that unit's geometry, so later
+# Regions can never replay the serial seed chain out of order.  This mirrors
+# upstream faithfully: `GenerateMesh` seeds the process RNG once per
+# operation (`srand(CTX::instance()->mesh.randomSeed)`), so Region fills draw
+# from one globally ordered stream — a per-entity re-seed would change the
+# serial output and is not an option.
+#
+# `_parallel_volume_pred_draws` predicts at prepare time each unit's ledger
+# draw: `UInt32(0)` for provably kernel-free fills (implicit/analytic factory
+# solids, non-native explicit shells, unconstrained factory encodings) and
+# `3*count+1` for the native-initial fill, whose constructor perturbs every
+# input row with three `rand!` draws and whose `run!` seeds the Hilbert walk
+# with one `random_cell!` call — `count` being the boundary-plus-embedded
+# born-UID row count the fill joins, computable from the authority products
+# it will read.  `nothing` marks a consumer whose draw cannot be bounded in
+# advance (native hybrid inputs, whose quad-fan kernel input expands inside
+# `_model_native_hybrid_quad_plan`) or an unresolvable unit.  `random_cell!`
+# retries (dead picks and failed walks) can push the real draw past the
+# `+1`, so the prediction is a lower bound — never a certificate.
+#
+# From that table each consumer's entry seed becomes a deterministic
+# function of its merge-order predecessors: the batch arm hands the first
+# consumer the live ledger position and later consumers an LCG jump-ahead
+# seed (`_parallel_lcg_skip`) built from the predicted draws in between; the
+# cross-phase arm prefers the nearest earlier drawer's *reported* exit
+# (`chain_pred`) once that task completes and falls back to the same
+# jump-ahead speculation.  A wrong guess is harmless by construction: at
+# merge a consumed seed is admissible only when the live serial state still
+# equals the observed entry value, in which case the exit state is written
+# back — the same interleaved RNG ledger the serial arm keeps.  A
+# consumed-but-mis-seeded slot is stale and re-runs; an unseedable consumer
+# keeps the serial arm in place.
 #
 # Two determinism details the worker path must preserve:
 # * `GmshLibm._win_cli_precision()` is task-local (CLI x87 libm selector);
@@ -92,10 +101,25 @@ struct _ParallelVolumeWork
     # produce must never need a serial arm's just-emitted product.
     deps::Vector{Tuple{Int,Int32}}
     # Predicted consumer of the shared `Mesh.RandomSeed` ledger — the
-    # `ModelNativeInitialTet` kernel or a native hybrid fill.  Only the
-    # first predicted consumer in a batch's merge order is detached (see the
-    # header note); the merge-time seed-ledger check stays the authority.
+    # `ModelNativeInitialTet` kernel or a native hybrid fill.  Detached
+    # consumers enter at a speculated ledger seed (see the header note);
+    # the merge-time seed-ledger check stays the authority.
     may_consume::Bool
+    # Merge-order index of the nearest earlier unit predicted-or-possibly
+    # drawing from the shared seed ledger, when that unit is itself an
+    # eligible (spawnable) slot — `nothing` when the nearest drawer is a
+    # serial unit (unchainable) or when nothing earlier draws.  The
+    # cross-phase spawn prefers this predecessor's *reported* exit seed
+    # once its task completes — exact even when its own draw count could
+    # not be predicted — and falls back to the cumulative jump-ahead.
+    chain_pred::Union{Nothing,Int}
+    # Predicted native-kernel input row count (`0` for predicted-free and
+    # unpredictably-consuming units).  The merge-time high-water check
+    # needs it to certify the kernel's row-space `count+8` bound could not
+    # have lifted the produce's UID base above `hn` — a lifted base is not
+    # `+dn`-congruent once earlier slots minted, while the phantom vertex
+    # numbers burned on rejected insertion candidates are.
+    kernel_rows::Int
 end
 
 # `General.NumThreads` requests the worker count; `Mesh.MaxNumThreads3D` caps
@@ -179,30 +203,59 @@ function _parallel_volume_serial_writes(m::GeoModel,tag::Int,caller)
     end
 end
 
-# Whether the serial produce is predicted to keep `options.random_state`
-# untouched.  The shared seed is consumed only by `ModelNativeInitialTet`'s
-# kernel: the native-initial fill (`native_input` — every boundary Surface
-# resolving to an actual entity-data product through `_model_mesh_product`,
-# modulo factory carve-outs) and the per-Region native hybrid path.  Every
-# other fill — analytic factory surfaces through `tetrahedralize`, the
-# `perturb=false` `delaunay3d`/`recover_boundary` fallbacks — uses local seeds
-# and is order-independent.  A misprediction is still safe: the merge-time
-# seed check on the task's private Ref catches it and re-runs serially.
-# `false` therefore only costs the detached produce.
-function _parallel_volume_rng_free(m::GeoModel,input,tag::Int,boundary,caller)
+# The `Mesh.RandomSeed` ledger is a linear congruential generator
+# (`state = state*214013 + 2531011`, `ModelNativeInitialTet.rand!`), an
+# affine map mod 2^32 — so `n` applications compose to
+# `A*state + C` computable in O(log n) squarings.  That makes a detached
+# consumer's serial entry seed a closed form of the draws its merge-order
+# predecessors will have made, without running them.
+function _parallel_lcg_skip(seed::UInt32,n)
+    a=UInt32(214013);c=UInt32(2531011)
+    pa=a;pc=c;ra=UInt32(1);rc=UInt32(0)
+    k=UInt64(n)
+    while k>0
+        if isodd(k)
+            rc=pa*rc+pc;ra=pa*ra
+        end
+        k>>=1
+        k==0 && break
+        pc=pa*pc+pc;pa=pa*pa
+    end
+    return ra*seed+rc
+end
+
+# Predicted shared-`Mesh.RandomSeed` ledger draw of one Region's serial
+# produce — or of the same produce run detached.  `UInt32(0)` = provably
+# kernel-free: the `ModelNativeInitialTet` kernel runs only under the
+# native-initial fill (`native_input` — every boundary Surface resolving to
+# an actual entity-data product through `_model_mesh_product`, modulo
+# factory carve-outs) and the per-Region native hybrid path; analytic
+# factory surfaces through `tetrahedralize` and the `perturb=false`
+# `delaunay3d`/`recover_boundary` fallbacks use local seeds and are
+# order-independent.  A positive count = `3*count+1`, the native kernel's
+# three perturbation draws per input row (row count = the born-UID union of
+# the boundary and embedded products the fill joins) plus the first
+# `random_cell!` seed — a LOWER bound, since dead-pick/walk retries inside
+# `random_cell!` draw seed-dependently on top.  `nothing` = a consumer whose
+# draw cannot be bounded here (native hybrid quad-fan input) or whose fill
+# path could not be resolved.  Every misprediction is still safe: the
+# merge-time seed check on the task's private Ref catches it and re-runs
+# serially, so a wrong guess only costs the detached produce.
+function _parallel_volume_pred_draws(m::GeoModel,input,tag::Int,boundary,caller)
+    volumes=get(m.volumes,tag,nothing)
     # `explicit_geometry===nothing` — implicit factory solids and empty shell
     # lists never build the PLC-joined boundary, so the kernel cannot run.
-    (isempty(m.volumes[tag]) || Model._implicit_volume_surface(m,tag)) &&
-        return true
+    (volumes===nothing || isempty(volumes) ||
+        Model._implicit_volume_surface(m,tag)) && return UInt32(0)
     factory=try
         Model._model_factory_volume_encoding(m,tag)
     catch err
         err isa InterruptException && rethrow()
-        return false
+        return nothing
     end
     # The per-Region hybrid constructor is probed ahead of the explicit shell
-    # and drives the same kernel.  It requires every boundary product present
-    # with only Tri/Quad blocks and at least one nonempty Quad block.
+    # and drives the same kernel — but its input row count expands inside
+    # `_model_native_hybrid_quad_plan`, which this table does not replicate.
     if !factory
         complete=true;quads=false
         for signed in boundary
@@ -219,48 +272,104 @@ function _parallel_volume_rng_free(m::GeoModel,input,tag::Int,boundary,caller)
                 Model._model_native_hybrid_volume_input(m,tag,input,caller)
             catch err
                 err isa InterruptException && rethrow()
-                return false
+                return nothing
             end
-            hybrid===nothing || return false
+            hybrid===nothing || return nothing
         end
     end
     # `native_identity` holds when every boundary Surface supplies an actual
     # authority product (`_model_mesh_product` rebinds each to a MixedMesh
     # with entity data); any miss makes the produce fall back to a fresh
-    # `mesh_model_surface`/OCC kernel result, a plain Mesh that disables the
-    # native-initial fill — except an OCC curved Surface could still return
-    # identity metadata, a misprediction the merge-time seed check absorbs.
-    all_native=true
+    # `mesh_model_surface`/OCC kernel result — a plain Mesh disables the
+    # native-initial fill, but an OCC curved Surface can still return
+    # identity metadata, so a missing product is honestly unclassifiable:
+    # `nothing`, not a free pass.  The cross-phase plan additionally builds
+    # before its Surfaces have merged, so their products are simply not
+    # minted yet — `nothing` is correct there too: the spawn arm then
+    # speculates only on units whose table is complete, and the in-phase
+    # plan re-derives this slot against the real authority anyway.
+    tags=Set{UInt64}()
     for signed in boundary
         product=try
             Model._model_mesh_product(input,2,abs(signed);caller,
                 producer_order=true)
         catch err
             err isa InterruptException && rethrow()
-            return false
+            return nothing
         end
-        product===nothing && (all_native=false;break)
+        product===nothing && return nothing
+        product isa MixedMesh && product.entity_data!==nothing ||
+            return nothing
+        union!(tags,product.entity_data.external_node_tags)
     end
-    all_native || return true
-    factory || return false
-    # `native_input` needs `!factory_encoding || factory_constraints`: a
-    # factory-encoded shell only takes the native path when the Region or a
-    # declared Surface carries embedded entities.
-    isempty(get(m.embeds,(3,tag),NTuple{2,Int}[])) || return false
+    if factory
+        # `native_input` needs `!factory_encoding || factory_constraints`: a
+        # factory-encoded shell only takes the native path when the Region or
+        # a declared Surface carries embedded entities.
+        constraints=!isempty(get(m.embeds,(3,tag),NTuple{2,Int}[]))
+        if !constraints
+            surfaces=Set{Int}(abs.(boundary))
+            for surface in surfaces
+                nested=try
+                    Model._model_surface_embedding_tags(m,surface,caller)
+                catch err
+                    err isa InterruptException && rethrow()
+                    return nothing
+                end
+                (isempty(nested[1]) && isempty(nested[2])) ||
+                    (constraints=true;break)
+            end
+        end
+        constraints || return UInt32(0)
+    end
+    # `_model_native_initial_embedded_input` unions the same born UIDs of
+    # every entity embedded in the Region into the kernel's input rows.
+    for (dim,entity) in get(m.embeds,(3,tag),NTuple{2,Int}[])
+        product=try
+            Model._model_mesh_product(input,dim,entity;caller,
+                producer_order=true)
+        catch err
+            err isa InterruptException && rethrow()
+            return nothing
+        end
+        product isa MixedMesh && product.entity_data!==nothing ||
+            return nothing
+        union!(tags,product.entity_data.external_node_tags)
+    end
+    return UInt32(3*length(tags)+1)
+end
+
+# Predicted ledger draw of a unit running serially in place — same kernel
+# accounting, plus the fills the eligibility scan excludes: swept and
+# transfinite Regions never reach the kernel, while compound members and
+# periodic-boundary Regions rebuild their inputs through paths this table
+# does not reproduce (`nothing` = unbounded draw, which just stops seed
+# speculation for later units — the serial arm is unaffected).
+function _parallel_volume_serial_draws(m::GeoModel,input,tag::Int,caller)
+    haskey(m.meshing.transfinite_volumes,tag) && return UInt32(0)
+    Model._extrude_gate(m,3,tag)!==nothing && return UInt32(0)
+    for pair in m.meshing.compounds
+        pair.first==3 && tag in pair.second && return nothing
+    end
+    boundary=try
+        Model._model_volume_boundary_surfaces(m,tag,caller)
+    catch err
+        err isa InterruptException && rethrow()
+        return nothing
+    end
     surfaces=Set{Int}(abs.(boundary))
     for (dim,entity) in get(m.embeds,(3,tag),NTuple{2,Int}[])
         dim==2 && push!(surfaces,entity)
     end
-    for surface in surfaces
-        nested=try
-            Model._model_surface_embedding_tags(m,surface,caller)
-        catch err
-            err isa InterruptException && rethrow()
-            return false
-        end
-        (isempty(nested[1]) && isempty(nested[2])) || return false
-    end
-    return true
+    any(constraint->constraint.dim==2 &&
+        (Int(constraint.slave_entity) in surfaces ||
+         Int(constraint.master_entity) in surfaces),
+        Model.model_periodic_constraints(m)) && return nothing
+    any(constraint->constraint.dim==3 &&
+        (Int(constraint.slave_entity)==tag ||
+         Int(constraint.master_entity)==tag),
+        Model.model_periodic_constraints(m)) && return nothing
+    return _parallel_volume_pred_draws(m,input,tag,boundary,caller)
 end
 
 # Per-Region eligibility under the phase-level gates.  `nothing` means the
@@ -280,6 +389,7 @@ function _parallel_volume_prepare(m::GeoModel,volume_tags,input,caller;
         append!(compound_members,pair.second)
     end
     prepared=Vector{Any}(nothing,length(volume_tags))
+    unit_draws=Vector{Union{Nothing,UInt32}}(nothing,length(volume_tags))
     for (index,tag) in enumerate(volume_tags)
         haskey(m.meshing.transfinite_volumes,tag) && continue
         Model._extrude_gate(m,3,tag)!==nothing && continue
@@ -312,24 +422,40 @@ function _parallel_volume_prepare(m::GeoModel,volume_tags,input,caller;
             err isa InterruptException && rethrow()
             continue
         end
-        may_consume=!_parallel_volume_rng_free(m,input,tag,boundary,caller)
+        draws=_parallel_volume_pred_draws(m,input,tag,boundary,caller)
+        may_consume=draws===nothing || draws>UInt32(0)
+        # `3*count+1` inverts to the kernel's input row count — the merge-time
+        # high-water gate compares `count+8` against the batch base to detect
+        # a row-space lift that phantom vertex numbers cannot explain.
+        kernel_rows=draws===nothing || draws==UInt32(0) ? 0 :
+            Int((draws-UInt32(1))÷UInt32(3))
         deps=Tuple{Int,Int32}[(2,Int32(abs(signed))) for signed in boundary]
         for (dim,entity) in get(m.embeds,(3,tag),NTuple{2,Int}[])
             push!(deps,(dim,Int32(entity)))
         end
         prepared[index]=_ParallelVolumeWork(tag,footprint,nothing,deps,
-            may_consume)
+            may_consume,nothing,kernel_rows)
+        unit_draws[index]=draws
     end
     any(!isnothing,prepared) || return nothing
     # Second pass: record each eligible slot's preceding serial write-set for
-    # the eager scheduler.  `serial_unbounded` marks an in-between Region
-    # whose footprint could not be bounded; it stops the scan at the next
-    # eligible slot.
+    # the eager scheduler, and assemble the merge-order predicted-draw table
+    # `pos_draws` the seed speculation arithmetic runs on.  `serial_unbounded`
+    # marks an in-between Region whose footprint could not be bounded; it
+    # stops the eager scan at the next eligible slot.  `last_drawer` tracks
+    # the nearest earlier position whose produce may touch the shared seed
+    # (predicted draw or unknown) — it becomes a consumer's `chain_pred` when
+    # that drawer is itself an eligible slot.
     serial_writes=Set{Tuple{Int,Int32}}()
     serial_unbounded=false
+    pos_draws=Vector{Union{Nothing,UInt32}}(undef,length(volume_tags))
+    last_drawer=0
     for (index,tag) in enumerate(volume_tags)
         work=prepared[index]
         if work===nothing
+            draws=_parallel_volume_serial_draws(m,input,tag,caller)
+            pos_draws[index]=draws
+            draws===UInt32(0) || (last_drawer=index)
             if !serial_unbounded
                 estimate=_parallel_volume_serial_writes(m,tag,caller)
                 estimate===nothing ? (serial_unbounded=true) :
@@ -337,30 +463,37 @@ function _parallel_volume_prepare(m::GeoModel,volume_tags,input,caller;
             end
             continue
         end
+        chain_pred=work.may_consume && last_drawer>0 &&
+            prepared[last_drawer]!==nothing ? last_drawer : nothing
+        pos_draws[index]=unit_draws[index]
         prepared[index]=_ParallelVolumeWork(work.tag,work.footprint,
             serial_unbounded ? nothing : copy(serial_writes),work.deps,
-            work.may_consume)
+            work.may_consume,chain_pred,work.kernel_rows)
+        work.may_consume && (last_drawer=index)
         empty!(serial_writes);serial_unbounded=false
     end
-    return prepared
+    return prepared,pos_draws
 end
 
 # One detached Region produce on a premade transaction copy.  The task's
-# private `random_state` Ref enters at the batch seed and reports its exit
-# value — the draw ledger the merge checks.  `foreign` is the transport
-# certificate: the produce must write only `m.curve_params` slots inside its
-# footprint — a write anywhere else (another curve, an entity birth through
-# `next_tag`, a naming or meshing-attribute mutation) could never reach the
-# live model, so it sends the receipt back to the serial arm rather than
-# being silently dropped at merge.  Shared by the `@threads` batch arm and
-# the `Threads.@spawn` cross-phase arm.
+# private `random_state` Ref enters at the speculated ledger seed (live
+# position for a batch's first consumer, an LCG jump-ahead or a chained
+# predecessor exit for later ones) and reports entry and exit values — the
+# draw ledger the merge checks.  `foreign` is the transport certificate: the
+# produce must write only `m.curve_params` slots inside its footprint — a
+# write anywhere else (another curve, an entity birth through `next_tag`, a
+# naming or meshing-attribute mutation) could never reach the live model, so
+# it sends the receipt back to the serial arm rather than being silently
+# dropped at merge.  Shared by the `@threads` batch arm and the
+# `Threads.@spawn` cross-phase arm.
 function _parallel_volume_attempt(working::GeoModel,work::_ParallelVolumeWork,
         m::GeoModel,input,detached_options::Model._ModelMesh1DOptions,
         geom_points,base_params::Dict{Int,Vector{Float64}},
-        base_seed::UInt32,hn::UInt64,hc::UInt64;
+        hn::UInt64,hc::UInt64;
         periodic_surface_pairs,optimize_pyramids,precise::Bool)
     out=try
         body=()->begin
+            entry_seed=detached_options.random_state[]
             produced=mesh_model_volume(working,work.tag;
                 size_field=nothing,_extrude_scope=nothing,
                 _extrude_working_model=true,_mesh_input=input,
@@ -373,7 +506,7 @@ function _parallel_volume_attempt(working::GeoModel,work::_ParallelVolumeWork,
             diffs,foreign=_parallel_curve_param_diffs(
                 working.curve_params,base_params,work.footprint)
             foreign || (foreign=_parallel_model_foreign_writes(working,m))
-            (produced,diffs,base_seed,detached_options.random_state[],foreign)
+            (produced,diffs,entry_seed,detached_options.random_state[],foreign)
         end
         (;ok=true,value=precise ?
             GmshLibm._with_win_cli_precision(body) : body())
@@ -394,7 +527,7 @@ end
 # in-order merge.  A batch of one would pay the copy for no concurrency, so
 # it falls back to the serial arm by leaving its slot empty.
 function _parallel_volume_fill!(results::Vector{Any},range,m::GeoModel,
-        prepared,input,options,assembly,dirty::Set{Tuple{Int,Int32}},
+        prepared,pos_draws,input,options,assembly,dirty::Set{Tuple{Int,Int32}},
         precise::Bool,geometry_birth;periodic_surface_pairs,optimize_pyramids)
     hn=assembly.node_max;hc=assembly.cell_max
     base_params=_parallel_surface_param_refs(m)
@@ -405,28 +538,43 @@ function _parallel_volume_fill!(results::Vector{Any},range,m::GeoModel,
     (length(range)<2 && isempty(eager)) && return nothing
     indices=Int[index for index in range]
     append!(indices,eager)
-    # The shared `Mesh.RandomSeed` ledger replays at most one consuming
-    # produce per batch — the first in merge order (`indices` is already
-    # merge-ordered: every `range` slot precedes every `eager` slot).  A
-    # later predicted consumer's detached attempt could only observe the
-    # batch's stale entry seed — its correct seed is a deterministic
-    # function of the earlier consumer's finished produce — so it keeps the
-    # identical serial arm at its merge position instead of paying a
-    # detached produce guaranteed to be stale.
-    admitted_consumer=false
+    # The shared `Mesh.RandomSeed` ledger admits every predicted consumer
+    # whose entry seed can be reconstructed without running its
+    # predecessors: each consumer enters at the LCG jump-ahead of
+    # `base_seed` by the cumulative predicted draws of every merge-order
+    # unit since `first(range)` — `indices` is already merge-ordered
+    # (every `range` slot precedes every `eager` slot), and `pos_draws`
+    # covers the serial positions between batch slots too.  When nothing in
+    # that span draws the jump collapses to `base_seed` itself — the first
+    # consumer needs no special case.  A `nothing` entry makes the consumer
+    # unseedable — it keeps the identical serial arm at its merge position.
+    # A shortfall against the real kernel retries lands on the merge-time
+    # ledger check, which re-runs the slot; speculation only ever costs a
+    # discarded produce.
+    first_index=first(indices)
+    # A cross-phase spawned slot inside the range already owns its produce
+    # task — keep it rather than racing a duplicate batch produce.
+    filter!(index->results[index]===nothing,indices)
+    entry_seeds=Dict{Int,UInt32}()
     filter!(indices) do index
         prepared[index].may_consume || return true
-        admitted_consumer && return false
-        admitted_consumer=true
+        acc=UInt32(0)
+        for k in first_index:index-1
+            draws=pos_draws[k]
+            draws===nothing && return false
+            acc+=draws
+        end
+        entry_seeds[index]=_parallel_lcg_skip(base_seed,acc)
         return true
     end
     length(indices)<2 && return nothing
     Threads.@threads for index in indices
         work=prepared[index]
-        detached_options=_parallel_task_options(options,base_seed)
+        detached_options=_parallel_task_options(options,
+            get(entry_seeds,index,base_seed))
         results[index]=(_parallel_volume_attempt(
             Model._model_mesh_transaction_copy(m),work,m,input,
-            detached_options,geom_points,base_params,base_seed,hn,hc;
+            detached_options,geom_points,base_params,hn,hc;
             periodic_surface_pairs,optimize_pyramids,precise),
             hn,hc,base_dirty,geom_points,base_seed)
     end
@@ -468,28 +616,66 @@ end
 # geometry-birth overlay.  Two volume-specific receipts checks complete the
 # contract: the RNG ledger position (`seed_out==seed_in` certifies an
 # untouched shared seed; a consumed seed must equal the live serial position
-# and is written back at merge) and the node high water (`== hn + fresh`
-# certifies the initial kernel's absolute `count+8` numbering never lifted the
-# base — a lifted base would not commute with the +dn remap).
+# and is written back at merge) and the node high water.  The births ledger
+# burns a vertex number for every rejected insertion candidate (upstream's
+# MVertex numbering — `_refine_gmsh_delaunay3` allocates the candidate
+# number before the star/compatibility rejection), so the high water
+# legitimately runs `phantoms` past `hn + fresh`: every kept label still
+# sits in (hn, nhw] and commutes with the +dn remap.  The single unsafe
+# overage is the kernel's row-space `count+8` bound overtaking the UID base
+# — labels then mint above `count+8` rather than `hn`, which is +dn-
+# congruent only when nothing earlier minted (verbatim adoption matches the
+# serial run's identical lift).
 function _parallel_volume_fresh(work::_ParallelVolumeWork,out,
         dirty::Set{Tuple{Int,Int32}},base_dirty::Set{Tuple{Int,Int32}},
         assembly,geometry_birth,geom_points,options,base_seed,hn,hc)
-    out.ok || return false
-    for entity in work.footprint
-        entity in base_dirty && continue
-        entity in dirty && return false
+    reason=nothing
+    if !out.ok
+        reason=:error
+    else
+        dirty_hit=nothing
+        for entity in work.footprint
+            entity in base_dirty && continue
+            entity in dirty && (dirty_hit=entity;break)
+        end
+        if dirty_hit!==nothing
+            reason=:dirty
+        elseif geom_points!==nothing &&
+                _higher_geometry_source_points(assembly,geometry_birth)!=geom_points
+            reason=:geom
+        else
+            produced,diffs,seed_in,seed_out,foreign=out.value
+            fresh_nodes=produced isa Model._ModelVolumeGeometryProduction ?
+                count(>(hn),produced.boundary_node_tags) : -1
+            if foreign
+                reason=:foreign
+            elseif !_parallel_volume_remap_supported(produced)
+                reason=:remap
+            elseif !(work.may_consume || seed_in==base_seed)
+                reason=:baseseed
+            elseif !(seed_out==seed_in || seed_in==options.random_state[])
+                reason=:ledger
+            elseif produced.node_high_water!=hn+fresh_nodes
+                # Under-minted receipts have no interpretation.  A positive
+                # overage is the phantom vertex numbers burned on rejected
+                # insertion candidates — still +dn-congruent — unless the
+                # kernel's row-space `count+8` bound could have lifted the
+                # UID base: that lift shifts minted labels off the +dn range
+                # as soon as an earlier slot minted (a verbatim adoption at
+                # `assembly.node_max==hn` stays identical to serial).  An
+                # unknown input-row count (`kernel_rows==0` on a consumer)
+                # cannot exclude the lift and keeps the strict certificate.
+                if produced.node_high_water<hn+fresh_nodes
+                    reason=:highwater
+                else
+                    lifted=work.kernel_rows>0 ?
+                        work.kernel_rows+8>hn : work.may_consume
+                    lifted && assembly.node_max>hn && (reason=:highwater)
+                end
+            end
+        end
     end
-    geom_points===nothing ||
-        _higher_geometry_source_points(assembly,geometry_birth)==geom_points ||
-        return false
-    produced,diffs,seed_in,seed_out,foreign=out.value
-    foreign && return false
-    _parallel_volume_remap_supported(produced) || return false
-    seed_in==base_seed || return false
-    seed_out==seed_in || seed_in==options.random_state[] || return false
-    fresh_nodes=count(>(hn),produced.boundary_node_tags)
-    produced.node_high_water==hn+fresh_nodes || return false
-    return true
+    return reason===nothing
 end
 
 # Resolve a prepared slot into the unit's produce receipt.  A fresh receipt
@@ -505,8 +691,9 @@ function _parallel_volume_product(m::GeoModel,work::_ParallelVolumeWork,
         geometry_birth,caller)
     head,hn,hc,base_dirty,geom_points,base_seed=entry
     out=head isa Task ? fetch(head) : head
-    if !_parallel_volume_fresh(work,out,dirty,base_dirty,assembly,
-            geometry_birth,geom_points,options,base_seed,hn,hc)
+    fresh=_parallel_volume_fresh(work,out,dirty,base_dirty,assembly,
+        geometry_birth,geom_points,options,base_seed,hn,hc)
+    if !fresh
         return mesh_model_volume(m,work.tag;size_field,
             _extrude_scope=scope,_extrude_working_model=true,_mesh_input=input,
             _mesh1d_options=options,_return_volume_production=true,
@@ -519,6 +706,7 @@ function _parallel_volume_product(m::GeoModel,work::_ParallelVolumeWork,
     end
     produced,diffs,seed_in,seed_out,foreign=out.value
     _PARALLEL_ADOPTED[]+=1
+    seed_out!=seed_in && (_PARALLEL_SEED_ADOPTED[]+=1)
     _parallel_replay_param_diffs!(m,diffs)
     seed_out==seed_in || (options.random_state[]=seed_out)
     return _parallel_volume_remap_production(produced,
@@ -576,18 +764,52 @@ function _parallel_volume_ready(input,work::_ParallelVolumeWork)
     return true
 end
 
+# Entry seed for a cross-phase spawned consumer, mirroring the batch arm's
+# ledger arithmetic against the whole phase's predicted-draw table.  The
+# exact path comes first: when the nearest earlier drawing unit
+# (`work.chain_pred`) is an eligible slot whose spawned task already
+# completed, its reported exit seed IS the serial stream position this
+# consumer must enter at — even when that predecessor's own draw count
+# could not be predicted.  Otherwise the jump-ahead over every earlier
+# position's predicted draw speculates the same entry.  `nothing` leaves
+# the unit for the in-phase batch arm, which recomputes the same entry
+# against the phase's real plan.  `phase_seed` must be the ledger position
+# at the phase's merge start — the caller reads `options.random_state[]`
+# while the surface merge still owns the ledger and no Region fill has run.
+function _parallel_volume_spawn_seed(prepared,pos_draws,results,index,
+        phase_seed::UInt32)
+    work=prepared[index]
+    pred=work.chain_pred
+    if pred!==nothing
+        entry=results[pred]
+        if entry!==nothing && entry[1] isa Task && istaskdone(entry[1])
+            out=fetch(entry[1])
+            out.ok && return out.value[4]
+        end
+    end
+    acc=UInt32(0)
+    for k in 1:index-1
+        draws=pos_draws[k]
+        draws===nothing && return nothing
+        acc+=draws
+    end
+    return _parallel_lcg_skip(phase_seed,acc)
+end
+
 function _parallel_volume_spawn!(results::Vector{Any},index::Int,m::GeoModel,
         work::_ParallelVolumeWork,input,options,assembly,
         dirty::Set{Tuple{Int,Int32}},geometry_birth;
-        periodic_surface_pairs,optimize_pyramids,precise::Bool)
+        periodic_surface_pairs,optimize_pyramids,precise::Bool,
+        entry_seed::Union{Nothing,UInt32}=nothing)
     working=Model._model_mesh_transaction_copy(m)
     hn=assembly.node_max;hc=assembly.cell_max
     base_params=_parallel_surface_param_refs(m)
     geom_points=_higher_geometry_source_points(assembly,geometry_birth)
     base_seed=options.random_state[]
-    detached_options=_parallel_task_options(options,base_seed)
+    detached_options=_parallel_task_options(options,
+        entry_seed===nothing ? base_seed : entry_seed)
     task=Threads.@spawn _parallel_volume_attempt(working,work,m,input,
-        detached_options,geom_points,base_params,base_seed,hn,hc;
+        detached_options,geom_points,base_params,hn,hc;
         periodic_surface_pairs,optimize_pyramids,precise)
     results[index]=(task,hn,hc,copy(dirty),geom_points,base_seed)
     return nothing

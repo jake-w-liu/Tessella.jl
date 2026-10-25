@@ -4,12 +4,17 @@
 # Residual 1 (RNG-consuming Region fills): explicit-PLC volumes take the
 # native-initial Delaunay fill, which consumes the shared `Mesh.RandomSeed`
 # ledger — a globally ordered stream, matching upstream's single
-# `srand(randomSeed)` per `GenerateMesh`.  `_parallel_volume_prepare` now
-# marks them `may_consume` and detaches at most the first predicted consumer
-# per batch; the merge-time seed-ledger check restores the serial ledger
-# position so a later serial consumer continues the chain exactly as the
-# serial arm would.  These fixtures pin that byte-identity plus actual
-# adoption of a consuming produce.
+# `srand(randomSeed)` per `GenerateMesh`.  `_parallel_volume_prepare` marks
+# them `may_consume` and predicts each unit's ledger draw (`3*count+1` for
+# the native kernel's perturbation+seed draws over its born-UID input rows);
+# detached consumers then enter at speculated positions — the live seed for
+# a batch's first consumer, an LCG jump-ahead over the intervening predicted
+# draws for later ones, or a completed predecessor's reported exit on the
+# cross-phase arm.  The merge-time seed-ledger check admits only a receipt
+# whose entry equals the live position, so a shortfall in the predicted draw
+# (kernel retries) sends the slot back to the identical serial call.  These
+# fixtures pin that byte-identity plus actual adoption of consuming
+# produces.
 #
 # Residual 2 (identity/merge transports): detached work runs on transaction
 # copies whose writes are certified by the `foreign` transport certificate
@@ -69,8 +74,9 @@ Box(5)={0,2.5,0, 1,1,1};
 """
 
 # Two explicit volumes (both predicted consumers — merge-order tags 1 and 2)
-# + three boxes: only the first consumer detaches; the second keeps the
-# serial arm and must observe the restored ledger position.
+# + three boxes: the first consumer enters at the live ledger position and
+# the second at the jump-ahead seed over the first's predicted draw — both
+# detach, and the merge-time ledger check keeps either honest.
 const TWOCONSUMEBOX=EXPLICIT_CUBE(0,0,0,0,1,1,0.0,0.0,0.0)*
     EXPLICIT_CUBE(20,20,20,20,2,2,0.0,4.0,0.0)*"""
 SetFactory("OpenCASCADE");
@@ -107,13 +113,14 @@ function _identity_generate(src,mesh_dim,workers)
     A.option("General.Terminal",0)
     A.option("General.NumThreads",workers)
     A._PARALLEL_ADOPTED[]=0
+    A._PARALLEL_SEED_ADOPTED[]=0
     ex=execute_geo(path;mesh_dim)
     rm(path)
     actual=ex.model.meshing.mesh_authority.mesh
     msh=joinpath(mktempdir(),"out.msh")
     write_mixed_msh(msh,actual;version=4.1)
     return (mixed_crc(actual),read(msh),validate(actual).ok,
-        A._PARALLEL_ADOPTED[],ex.model)
+        A._PARALLEL_ADOPTED[],A._PARALLEL_SEED_ADOPTED[],ex.model)
 end
 
 function _session_bytes(mesh)
@@ -130,27 +137,36 @@ end
     )
     try
         for (name,src,dim) in cases
-            scrc,sbytes,sok,sadopt,_=_identity_generate(src,dim,1)
-            tcrc,tbytes,tok,tadopt,tmodel=_identity_generate(src,dim,4)
+            scrc,sbytes,sok,sadopt,sseed,_=_identity_generate(src,dim,1)
+            tcrc,tbytes,tok,tadopt,tseed,tmodel=_identity_generate(src,dim,4)
             @test sok
             @test tok
             @test scrc==tcrc
             @test sbytes==tbytes
             @test sadopt==0                       # -t1 never detaches
+            @test sseed==0
             @test tadopt>=3                       # consumer+boxes adopted
+            @test tseed>=1                        # a consuming produce adopted
             scrc==tcrc && sbytes==tbytes ||
                 println("PARALLEL-DIFFERS: $name")
             # Eligibility pin: the explicit-PLC Region is predicted a
-            # consumer (`may_consume`), the factory Boxes are not.
-            prepared=A._parallel_volume_prepare(tmodel,
+            # consumer (`may_consume`), the factory Boxes are not; the
+            # predicted-draw table assigns the PLC fill its `3*count+1`
+            # lower bound and the Boxes a provable zero.
+            plan=A._parallel_volume_prepare(tmodel,
                 sort!(collect(keys(tmodel.volumes))),
                 tmodel.meshing.mesh_authority,"test";
                 size_field=nothing,scope=nothing,extruded=nothing,
                 hybrid_batch=nothing,staged=false)
-            @test prepared!==nothing
+            @test plan!==nothing
+            prepared,pos_draws=plan
             works=Any[w for w in prepared if w!==nothing]
             @test any(w->w.may_consume,works)
             @test any(w->!w.may_consume,works)
+            @test all(i->prepared[i]===nothing ||
+                          (prepared[i].may_consume ==
+                           (pos_draws[i]===nothing || pos_draws[i]>0)),
+                eachindex(pos_draws))
         end
     finally
         A.finalize()
