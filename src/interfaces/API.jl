@@ -7526,45 +7526,67 @@ function _embed(dim,tags,in_dim,in_tag)
 end
 
 # Default aliases visit native region tetrahedra and retain actual identities.
-# The existing relocation methods operate on their supported simplex caches.
+# Upstream's 2-D methods iterate every model face: `laplaceSmoothing` refuses
+# any face whose elements have order > 1 (its error precedes the niter
+# early-return), while `RelocateVertices` has no order gate and relocates
+# face-owned vertices — corners and face-owned high-order mids — in the
+# owning surface's (u,v) parameters. The quadratic-simplex arm routes those
+# face-owned mids through the certificate-gated parametric pass of
+# APIHighOrderOptimize.jl; "HighOrder"/"HighOrderElastic" route the same
+# staged relocation as Mesh.HighOrderOptimize's banded/elastic modes.
 function _optimize_mesh(method="",force=false,niter=1,dim_tags=())
     caller="API.mesh.optimize"
     method isa AbstractString || throw(ArgumentError(
         "$caller: method must be a string"))
-    method in ("","Gmsh","Optimize","Relocate3D","Laplace2D","Relocate2D") ||
+    method in ("","Gmsh","Optimize","Relocate3D","Laplace2D","Relocate2D",
+               "HighOrder","HighOrderElastic") ||
         throw(ArgumentError(
             "$caller: unknown or unsupported optimizer \"$method\""))
     force isa Bool || throw(ArgumentError("$caller: force must be Bool"))
     iterations=_mesh_query_integer(niter,caller,"niter")
     native_default=method in ("","Gmsh","Optimize")
     native_relocate3d=method=="Relocate3D"
-    native_tagged=native_default || native_relocate3d
+    native_high_order=method in ("HighOrder","HighOrderElastic")
+    native_tagged=native_default || native_relocate3d || native_high_order
     native_tagged || iterations>=0 || throw(ArgumentError("$caller: niter must be nonnegative"))
     pairs=native_tagged ? _native_optimize_selection(dim_tags,caller) :
                           _mesh_parse_dim_tags(dim_tags,caller)
     return lock(STATE_LOCK) do
         native_default && return _native_default_optimize_locked!(force,pairs,caller)
         native_relocate3d && return _native_relocate3d_locked!(iterations,pairs,caller)
+        native_high_order && return _optimize_high_order_locked!(method,pairs,caller)
         model=_model_locked()
         cached=_cached_mesh_locked(caller)
-        if cached isa MixedMesh
-            iterations==0 && return nothing
+        class=_cached_classification_locked(cached)
+        order2=_optimize_order2_surface(cached)
+        if method=="Laplace2D" && order2
+            # Upstream Msg::Error text — the order gate precedes laplaceSmoothing's
+            # `if(!niter) return`, so this fires even at niter=0.
             throw(ArgumentError(
-                "$caller: native mixed element optimization is not implemented; " *
-                "supported kernels require a linear simplex cache"))
+                "$caller: Surface mesh smoothing only valid for first order " *
+                "mesh (use the high-order optimization tools for high-order " *
+                "meshes)"))
         end
+        iterations==0 && return nothing
         for (edim,etag) in pairs
             _model_entity_known(model,edim,etag) || throw(ArgumentError(
                 "$caller: unknown " *
                 "$(_MESH_ENTITY_LABELS[edim+1])[$etag]"))
         end
-        class=_cached_classification_locked(cached)
-        iterations==0 && return nothing
-        overlay=_high_order_overlay(cached)
-        (overlay===nothing || _high_order_overlay_is_straight(overlay)) ||
+        if cached isa MixedMesh
+            order2 && return _optimize_relocate2d_mixed!(cached,class,model,
+                pairs,iterations,caller)
             throw(ArgumentError(
-                "$caller: curved quadratic simplex optimization is not " *
-                "implemented; existing actual midpoint geometry is retained"))
+                "$caller: native mixed element optimization is not implemented; " *
+                "supported kernels require a linear simplex cache"))
+        end
+        overlay=_high_order_overlay(cached)
+        if overlay!==nothing && !_high_order_overlay_is_straight(overlay)
+            # `RelocateVertices` has no order gate upstream — the retained
+            # quadratic map relocates its face-owned mids parametrically.
+            return _optimize_relocate2d_overlay!(cached,class,overlay,pairs,
+                                                 iterations,caller)
+        end
         movable=_optimize_movable_mask(cached,class,pairs)
         smoothed=if method in ("Laplace2D","Relocate2D")
             _laplacian_smooth_tri_cache(cached,iterations,movable)
@@ -11469,7 +11491,17 @@ native constructor identities. Mesh.Renumber controls the final numbering.
 tetrahedra, including explicit tagged records, and ignores `dim_tags`. Moving
 vertices are classified on volumes. Its iteration rule is `niter+2` passes
 except for zero; nonlinear and hybrid relocation remains unsupported.
-`"Laplace2D"` and `"Relocate2D"` retain their existing simplex kernels.
+`"Laplace2D"` and `"Relocate2D"` retain their existing simplex kernels and
+upstream order gates: `Laplace2D` refuses any face carrying order > 1
+elements with `Surface mesh smoothing only valid for first order mesh (use
+the high-order optimization tools for high-order meshes)` — an error that
+also fires at `niter=0` — while `Relocate2D` accepts the curved quadratic
+surface class and relocates its face-owned mid nodes in the owning surface's
+(u,v) parameters through the certificate-gated interior relocation pass.
+`"HighOrder"` runs that pass' banded stage (Mesh.HighOrderThresholdMin/Max)
+and `"HighOrderElastic"` its unbounded elastic stage on certified full-P2
+families; a mesh without quadratic elements draws upstream's
+`Applying high-order mesh optimizer to mesh with linear elements` warning.
 Other optimizer names fail explicitly.
 """
 optimize(method="",force=false,niter=1,dim_tags=())=

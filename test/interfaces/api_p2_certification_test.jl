@@ -645,7 +645,7 @@ function _p2c_prepare_default_optimizer_fixture()
     return _p2c_snapshot(),_p2c_curved_payload(),_p2c_native_default_snapshot()
 end
 
-@testset "Curved simplex unsupported rebuilding is atomic and native default optimization retains geometry" begin
+@testset "Curved simplex optimizer dispatch matches upstream order gates and native default retains geometry" begin
     _p2c_curved_triangles()
     try
         elements=_P2C.mesh.get_elements_by_type(9,1)[1]
@@ -654,12 +654,26 @@ end
         before=_p2c_snapshot()
         @test_throws r"curved quadratic simplex refinement" _P2C.mesh.refine()
         _p2c_unchanged(before)
-        for method in ("Laplace2D","Relocate2D")
-            @test_throws r"curved quadratic simplex optimization" _P2C.mesh.optimize(method)
-            _p2c_unchanged(before)
-            @test _P2C.mesh.optimize(method,false,0)===nothing
+        # Upstream `laplaceSmoothing` refuses every order>1 face with its
+        # first-order diagnostic — the check precedes its niter early-return,
+        # so the error fires at niter=0 as well.  Nothing is published.
+        for niter in (1,0)
+            @test_throws r"only valid for first order mesh" (
+                _P2C.mesh.optimize("Laplace2D",false,niter))
             _p2c_unchanged(before)
         end
+        # `RelocateVertices` has no order gate: niter=0 returns without work;
+        # at niter=1 the certificate-gated parametric arm relocates the bent
+        # face-owned midpoint back onto its owning plane through its stored
+        # (u,v) support.
+        @test _P2C.mesh.optimize("Relocate2D",false,0)===nothing
+        _p2c_unchanged(before)
+        node_tags,_=_P2C.mesh.get_nodes()
+        bent=only(tag for tag in node_tags if
+            abs(_P2C.mesh.get_node(tag)[1][3])>0.01)
+        @test _P2C.mesh.optimize("Relocate2D")===nothing
+        @test abs(_P2C.mesh.get_node(bent)[1][3])<0.05
+        @test _P2C.mesh.get_elements_by_type(9,1)[1]==elements
     finally
         _P2C.finalize()
     end
