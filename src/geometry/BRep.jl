@@ -33,7 +33,7 @@ using ..Elements: MixedMesh, ElementBlock, MixedEntity, MixedEntityData,
                   MSH_PHYSICAL_NAME_MAX_BYTES
 using ..Predicates: orient2, orient3
 import ..Mesh2D
-using ..NURBS: NURBSCurve, NURBSSurface
+using ..NURBS: NURBSCurve, NURBSSurface, nurbs_eval
 
 export import_step, import_iges, parse_step_entities
 export import_nurbs_step, import_nurbs_iges, export_iges_nurbs
@@ -471,6 +471,7 @@ include("BRepStepOccurrences.jl")
 include("BRepStepRelationships.jl")
 include("BRepPlanarFaces.jl")
 include("BRepPlanePcurves.jl")
+include("BRepNurbsShells.jl")
 
 # ── closed-shell BRep solids (planar polyhedra and full tori) ─────────────────
 
@@ -2633,7 +2634,7 @@ function _step_brep_solid(brep::StepEntity,entities,fill;factor::Float64=1.0)
         elseif face.surf.kind=="SPHERICAL_SURFACE"
             planar=false; nsphere+=1; sphere_face=face; continue
         else
-            planar=false; push!(curvekinds,"face surface $(face.surf.kind)"); continue
+            planar=false; push!(curvekinds,"face surface $(_step_surface_name(face.surf))"); continue
         end
         face.straight || (planar=false)
     end
@@ -2653,6 +2654,14 @@ function _step_brep_solid(brep::StepEntity,entities,fill;factor::Float64=1.0)
         if _step_sphere_cover(sphere_face.rings,center,z,R)
             surface=_step_unit_scaled(sphere_surface(center,R),factor)
             return fill ? _filled(surface,caller) : surface
+        end
+    end
+    if length(faces)==1 && only(faces).rings!==nothing &&
+       _step_is_nurbs_surface(only(faces).surf)
+        nurbs_shell=_step_nurbs_face_shell(entities,only(faces),curvekinds,caller)
+        if nurbs_shell!==nothing
+            nurbs_shell=_step_unit_scaled(nurbs_shell,factor)
+            return fill ? _filled(nurbs_shell,caller) : nurbs_shell
         end
     end
     ntorus==1 && length(faces)==1 && throw(ArgumentError(
@@ -3688,15 +3697,15 @@ function _bspline_surface_from_args(entities,du_arg,dv_arg,points_arg,
     return NURBSSurface(du,dv,u_knots,v_knots,C,weights)
 end
 
-function _step_nurbs_surface(ent::StepEntity, entities)
+function _step_nurbs_surface(ent::StepEntity, entities, caller="import_nurbs_step")
     if ent.kind=="B_SPLINE_SURFACE_WITH_KNOTS"
         i=_skip_name(ent.args)
         length(ent.args)>=i+10 || return nothing
         return _bspline_surface_from_args(entities,ent.args[i],ent.args[i+1],
             ent.args[i+2],ent.args[i+7],ent.args[i+8],ent.args[i+9],ent.args[i+10],
-            nothing,"import_nurbs_step")
+            nothing,caller)
     elseif ent.kind=="COMPLEX"
-        parts=_complex_parts(ent,"import_nurbs_step")
+        parts=_complex_parts(ent,caller)
         haskey(parts,"B_SPLINE_SURFACE") || return nothing
         haskey(parts,"B_SPLINE_SURFACE_WITH_KNOTS") || return nothing
         bs=parts["B_SPLINE_SURFACE"]; bk=parts["B_SPLINE_SURFACE_WITH_KNOTS"]
@@ -3709,7 +3718,7 @@ function _step_nurbs_surface(ent::StepEntity, entities)
         end
         return _bspline_surface_from_args(entities,bs.args[1],bs.args[2],bs.args[3],
             bk.args[1],bk.args[2],bk.args[3],bk.args[4],weights,
-            "import_nurbs_step")
+            caller)
     end
     return nothing
 end
