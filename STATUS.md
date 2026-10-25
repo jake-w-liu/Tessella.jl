@@ -92,6 +92,39 @@ unknown-type records print `Error   : …` to stderr and skip;
 whitespace-separated row groups (`{r1}{r2}`) — both previously threw
 where upstream parses. `post_view_io_test` 116/116.
 
+### Subagent backlog campaign (`e872a24`..`20be4b1`)
+
+- `e872a24` CAD04: `_step_tubed_shell` — closed-CIRCLE trims on PLANE caps
+  + full-tube cylindrical walls (drilled-plate/hollow-cylinder), bitwise
+  welded 24-gon rims, flip-parity orientation. 86/86+162/162.
+- `3485e11` LAY02: BL chapeau top-row Voronoi-recovery for re-graded
+  curved generatrices (strict arm kept; 10x-dominance + 1e-7·scale).
+- `1ead04c` PER02: multi-pair periodicity — widened parameter/coordinate
+  windows absorb copy-side `parFromPoint` drift; two-pair box emits the
+  oracle's exact 15 `$Periodic` links; reflection affines accepted.
+- `22df1b6` t20/t21: OCC dim-2 boolean operands — `occ.fragment` volume
+  split by walls, `occ.cut` surface-minus-volume, `occ.intersect` section
+  sheet, surface×surface adjacent/merged; unsupported dirs reject.
+- `d404379` Registered-plugin parity COMPLETE: `CurvedBndDist` (HO
+  mid-edge→curve SL view), `CutMesh` (bounded `buildCutGModel` subset),
+  `BoundaryLayer` (option-table-faithful explicit reject). All eight
+  oracle-registered plugins now implemented.
+- `6d00ea1` CAD04: `_step_nurbs_shell` — single-face closed
+  `B_SPLINE_SURFACE_WITH_KNOTS` shells (B-spline torus/sphere) via
+  evaluation-classified seam/pole rows and modulo-welded grids.
+- `7366b7c` OPT01: `mesh.optimize` upstream-faithful curved-P2 dispatch —
+  Laplace2D order-gate diagnostic, Relocate2D (u,v) mid sliding on
+  MixedMesh+overlay, `HighOrder`/`HighOrderElastic` method names.
+- `d0dc4ef` PAR01: RNG-consuming Region fills detach under per-unit LCG
+  jump-ahead seeds; `:highwater` phantom-vertex blocker fixed;
+  byte-identical `-t1`/`-t4` on multi-consumer fixtures.
+- `656ea23` LAY02: `Mesh 2` on curved-BL generatrices — chapeau nodes
+  classify via emitted `_model_curve_part_point` instead of the source
+  arc; faithful `BoundaryLayerCurve` no-analytic branches; 6 stale
+  periodic-io CRC pins repinned.
+- `20be4b1` t19: `occ.fillet` loft-rim fillets on non-line edges through
+  the loft/corner/measures/transform pipeline (16 new assertions).
+
 ### Remaining registered-plugin parity batch (`13af571`, `a0a3025`)
 
 `13af571` — `Plugin(HomologyComputation)` bridges the upstream option table
