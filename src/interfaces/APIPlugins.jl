@@ -6847,6 +6847,938 @@ function _plugin_exec_boundaryangles(spec::_PluginSpec,caller::AbstractString)
     return nothing
 end
 
+# ---- CurvedBndDist -------------------------------------------------------------
+#
+# Upstream `CurvedBndDist.cpp` is a bare `GMSH_PostPlugin` — it declares no
+# options, so only the implicit `Run` action exists (the oracle rejects every
+# named option). Its execute scans surface element edge closures; for each edge
+# whose first high-order vertex is classified on a model curve it measures the
+# Hausdorff distance between the CAD curve arc and the finite-element nodal
+# edge, emitting one SL record (values 0,1) per boundary edge. Bounded subset
+# here: order-2 overlays only — the P2 mid-edge node classified on a curve
+# entity anchors the comparison; lower-order meshes produce upstream's empty
+# view. Upstream's adaptive `parametricLine::discretize` recursion (min depth
+# 20, max 45) is computationally infeasible on curved geometry — the released
+# binary does not terminate — so this implementation samples both curves at a
+# fixed 64-point resolution and returns the intended farthest-point/projection
+# pair (upstream's literal max-pair accumulation is defective).
+
+function _cbd_curve_parameter(m::GeoModel,class,node::Int,ctag::Int,
+                              coords,caller::AbstractString)
+    if class!==nothing && node<=length(class.node_entities)
+        if class.node_entities[node]==(1,Int32(ctag))
+            parameter=class.node_parametric[node]
+            parameter!==nothing && length(parameter)>=1 && return parameter[1]
+        end
+    end
+    values=try
+        _api_model_parametrization(m,1,ctag,Float64[coords[1,node],
+            coords[2,node],coords[3,node]])
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "$caller: Plugin(CurvedBndDist) cannot parametrize mesh node " *
+            "$node on curve $ctag — "*sprint(showerror,err)))
+    end
+    isempty(values) && return nothing
+    return values[1]
+end
+
+# P2 Lagrange edge evaluation at xi in [0,1] through nodes (a,mid,b).
+function _cbd_p2_eval(a,mid,b,xi::Float64)
+    u=2xi-1
+    w0=0.5u*(u-1);w1=1-u*u;w2=0.5u*(u+1)
+    return (w0*a[1]+w1*mid[1]+w2*b[1],
+            w0*a[2]+w1*mid[2]+w2*b[2],
+            w0*a[3]+w1*mid[3]+w2*b[3])
+end
+
+# Emit one upstream SL record for a boundary edge: `n1/n2/mid` are node
+# indices into `coords`, `ctag` the curve tag the mid node is classified on.
+function _cbd_emit_edge!(data,m,class,n1::Int,n2::Int,mid::Int,ctag::Int,
+                         coords,samples::Int,caller::AbstractString)
+    u1=_cbd_curve_parameter(m,class,n1,ctag,coords,caller)
+    u2=_cbd_curve_parameter(m,class,n2,ctag,coords,caller)
+    (u1===nothing || u2===nothing) && return 0
+    # On a periodic curve the [u1,u2] interval can wrap the long way around
+    # (the FE edge midpoint then projects to the far side). Anchor the arc
+    # direction on the mid node's own parameter, which must lie on the arc:
+    # normalize all three parameters into the canonical period and pick the
+    # arc between u1 and u2 that contains u_mid.
+    u_mid=_cbd_curve_parameter(m,class,mid,ctag,coords,caller)
+    ua,ub=u1,u2
+    if u_mid!==nothing
+        bounds=try
+            model_parametrization_bounds(m,1,ctag)
+        catch err
+            err isa InterruptException && rethrow()
+            nothing
+        end
+        # bounds are per-dimension vectors; a curve's range is bounds[1][1]
+        # …bounds[2][1].
+        if bounds!==nothing && length(bounds)>=2 &&
+                !isempty(bounds[1]) && !isempty(bounds[2]) &&
+                bounds[2][1]>bounds[1][1]
+            base=bounds[1][1]
+            period=bounds[2][1]-bounds[1][1]
+            l1=mod(u1-base,period)+base
+            l2=mod(u2-base,period)+base
+            um=mod(u_mid-base,period)+base
+            lo,hi=minmax(l1,l2)
+            tol=1e-9*max(1.0,hi-lo,period)
+            if !(lo-tol<=um<=hi+tol)
+                # The mid node sits on the complement arc through the seam —
+                # sample from hi up to lo+period (periodic evaluation
+                # accepts parameters past the upper bound).
+                ua,ub=hi,lo+period
+            end
+        end
+    end
+    pa=NTuple{3,Float64}((coords[1,n1],coords[2,n1],coords[3,n1]))
+    pb=NTuple{3,Float64}((coords[1,n2],coords[2,n2],coords[3,n2]))
+    pm=NTuple{3,Float64}((coords[1,mid],coords[2,mid],coords[3,mid]))
+    fe=NTuple{3,Float64}[_cbd_p2_eval(pa,pm,pb,xi)
+                         for xi in range(0.0,1.0,samples)]
+    cad=NTuple{3,Float64}[]
+    for xi in range(0.0,1.0,samples)
+        point=try
+            model_value(m,1,ctag,[ua+(ub-ua)*xi])
+        catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "$caller: Plugin(CurvedBndDist) cannot evaluate " *
+                "curve $ctag — "*sprint(showerror,err)))
+        end
+        (length(point)<3 || any(!isfinite,point)) && return 0
+        push!(cad,NTuple{3,Float64}((point[1],point[2],point[3])))
+    end
+    isempty(cad) && return 0
+    best=-1.0;from=fe[1];near=cad[1]
+    for p in fe
+        dmin=Inf;hit=cad[1]
+        for q in cad
+            d=_plugin_norm3((p[1]-q[1],p[2]-q[2],p[3]-q[3]))
+            d<dmin && (dmin=d;hit=q)
+        end
+        dmin>best && (best=dmin;from=p;near=hit)
+    end
+    for p in cad
+        dmin=Inf;hit=fe[1]
+        for q in fe
+            d=_plugin_norm3((p[1]-q[1],p[2]-q[2],p[3]-q[3]))
+            d<dmin && (dmin=d;hit=q)
+        end
+        dmin>best && (best=dmin;from=p;near=hit)
+    end
+    append!(data,(from[1],near[1],from[2],near[2],from[3],near[3],0.0,1.0))
+    return 1
+end
+
+# Mid-edge slots of an order-2 MSH element type: (slot, i, j) with `slot` the
+# connectivity position of the mid node on primary edge (i, j). Derived from
+# the Lagrange reference positions like `_mixed_quadratic_cache` does.
+function _cbd_o2_edge_slots(family,msh::Int,caller)
+    reference=Elements.lagrange_nodes(msh)
+    nprimary=Elements._msh_primary_nodes(family)
+    out=NTuple{3,Int}[]
+    for slot in nprimary+1:size(reference,2)
+        weights=MeshFunctionSpaces._first_order_values(Val(family),
+            reference[1,slot],reference[2,slot],reference[3,slot],caller,slot)
+        support=findall(!iszero,collect(weights))
+        length(support)==2 || continue
+        push!(out,(slot,support[1],support[2]))
+    end
+    return out
+end
+
+function _plugin_exec_curvedbnddist(spec::_PluginSpec,caller::AbstractString)
+    m=_model_locked()
+    mesh=LAST_MESH[]
+    class=LAST_MESH_CLASS[]
+    overlay=LAST_MESH_HIGH_ORDER[]
+    data=Float64[]
+    count=0
+    samples=64
+    if mesh isa Mesh && overlay isa P2TriMesh
+        # Order-2 P2 overlay on a canonical linear cache: the mid owners
+        # ride `LAST_MESH_HIGH_ORDER_MIDS` (dim 1 = model curve). A P2Mesh
+        # (volume overlay) has no surface elements to scan — upstream scans
+        # `GFace` mesh elements only — so it yields the empty view.
+        mids=LAST_MESH_HIGH_ORDER_MIDS[]
+        cells=_p2_cells(overlay)
+        coords=overlay.coords
+        n0=nnodes(mesh)
+        for column in axes(cells,2)
+            for (slot,i,j) in _p2_edge_slots(overlay)
+                mid=Int(cells[slot,column])-n0
+                (1<=mid<=length(mids)) || continue
+                mids[mid][1]==1 || continue
+                n1=Int(cells[i,column]);n2=Int(cells[j,column])
+                (1<=n1<=n0 && 1<=n2<=n0) || continue
+                count+=_cbd_emit_edge!(data,m,class,n1,n2,mid+n0,
+                                       Int(mids[mid][2]),coords,samples,caller)
+            end
+        end
+    elseif mesh isa MixedMesh && class!==nothing
+        # Order-2 blocks carry elevated nodes inside the canonical mesh;
+        # curve-owned mid nodes are dim-1 entries of `node_entities`.
+        coords=mesh.coords
+        for (msh,dim,_,cells,owners) in _cache_catalog(mesh,class)
+            dim==2 || continue
+            spec2=try msh_spec(Int(msh)) catch; continue; end
+            spec2.order==2 || continue
+            slots=_cbd_o2_edge_slots(spec2.family,Int(msh),caller)
+            isempty(slots) && continue
+            for column in axes(cells,2)
+                for (slot,i,j) in slots
+                    mid=Int(cells[slot,column])
+                    mid>length(class.node_entities) && continue
+                    owner=class.node_entities[mid]
+                    owner[1]==1 || continue
+                    n1=Int(cells[i,column]);n2=Int(cells[j,column])
+                    (1<=n1<=size(coords,2) && 1<=n2<=size(coords,2)) ||
+                        continue
+                    count+=_cbd_emit_edge!(data,m,class,n1,n2,mid,
+                                           Int(owner[2]),coords,samples,caller)
+                end
+            end
+        end
+    end
+    types=count>0 ? String["SL"] : String[]
+    counts=count>0 ? Dict{String,Int}("SL"=>count) : Dict{String,Int}()
+    datas=count>0 ? Dict{String,Vector{Float64}}("SL"=>data) :
+        Dict{String,Vector{Float64}}()
+    _plugin_publish_list_view!("CurvedBndDist",types,counts,datas,[0.0];caller)
+    return nothing
+end
+
+# ---- CutMesh -------------------------------------------------------------------
+#
+# Upstream `CutMesh.cpp` runs `GModel::buildCutGModel(gLs, !split, saveTri)`
+# with `gLs` the zero level set of the selected post view — a new
+# `<model>_cut` model is created holding discrete entities whose elements are
+# the cut fragments. Bounded subset here: the scalar level set is read per
+# mesh node (model NodeData views directly; list views by exact coordinate
+# match), only point/line/triangle elements are cut, and the upstream sign
+# convention is reproduced — `ls < 0` ("inside") fragments keep the original
+# entity tag and physicals, `ls > 0` ("outside") fragments move to freshly
+# allocated entity and physical tags with `_in`/`_out` name suffixes. Border
+# segments on the zero level set are emitted as ordinary lines on new
+# curve entities (one per connected component; upstream assigns entity tag 0,
+# which the model API does not admit). `Split != 0` reproduces
+# `elementSplitMesh`: elements are not subdivided — each element is assigned
+# whole to the "inside" (all vertices `ls <= eps`) or "outside" entity, and
+# border lines are emitted on element edges lying on the inside side.
+# `makeSimplyConnected` post-regrouping is not implemented; disconnected
+# same-sign fragments share their entity. `SaveTri` is accepted but has no
+# effect — as upstream, where the DI path always triangulates the cut pieces.
+# Element types other than 15/1/2, 3-D cuts, and upstream's sub-element
+# (MSH 67-70) and polygon/polyhedron (MSH 34-35) records cannot be stored by
+# the discrete-entity records and are rejected or omitted as documented.
+
+const _CUT_LS_TOL = 1e-9
+const _CUT_SPLIT_EPS = 1e-10
+
+@inline _cut_sign(v::Float64)=abs(v)<_CUT_LS_TOL ? 0 : (v<0 ? 1 : -1)
+
+# `getElementaryTag`: `lsTag < 0` (outside) allocates one fresh entity tag per
+# source entity; `lsTag >= 0` keeps the original.
+function _cut_reg(new_tags::Dict{Int,Int},counter::Base.RefValue{Int},
+                  ls_tag::Int,elementary::Int)
+    ls_tag<0 || return elementary
+    return get!(new_tags,elementary) do
+        counter[]+=1
+        counter[]
+    end
+end
+
+# `getPhysicalTag`: outside fragments allocate a fresh physical per source
+# physical (`newPhysTags[-phys]`); inside keeps the original tag.
+function _cut_phys_tag!(phys_map::Dict{Int,Int},counter::Base.RefValue{Int},
+                        physicals,ls_tag::Int)
+    for phys in physicals
+        if ls_tag<0
+            haskey(phys_map,-phys) || (phys_map[-phys]=(counter[]+=1))
+        else
+            haskey(phys_map,phys) || (phys_map[phys]=phys)
+        end
+    end
+    return nothing
+end
+
+# `assignPhysicals`: record `reg` into the group(s) derived from the source
+# entity's physicals, renaming stored entries to `name_in`/`name_out` once a
+# named physical spans both sides.
+function _cut_assign_phys!(stored::Dict{Int,Dict{Int,String}},
+                           phys_map::Dict{Int,Int},names,physicals,
+                           reg::Int,ls_tag::Int)
+    for phys in physicals
+        # upstream getPhysicalTag: lsTag >= 0 (inside or exactly on the
+        # level set) binds the original physical; lsTag < 0 the fresh one.
+        if ls_tag>=0 && haskey(phys_map,phys)
+            phys2=phys_map[phys]
+            entry=get!(()->Dict{Int,String}(),stored,reg)
+            if phys2!=0 && !haskey(entry,phys2)
+                name=names[phys]
+                if name!="" && haskey(phys_map,-phys)
+                    for (_,other) in stored,(k,v) in other
+                        v==name && (other[k]=name*"_out")
+                    end
+                    name=name*"_in"
+                end
+                entry[phys2]=name
+            end
+        elseif ls_tag<0 && haskey(phys_map,-phys)
+            phys2=phys_map[-phys]
+            entry=get!(()->Dict{Int,String}(),stored,reg)
+            if phys2!=0 && !haskey(entry,phys2)
+                name=names[phys]
+                if name!="" && haskey(phys_map,phys)
+                    for (_,other) in stored,(k,v) in other
+                        v==name && (other[k]=name*"_in")
+                    end
+                    name=name*"_out"
+                end
+                entry[phys2]=name
+            end
+        end
+    end
+    return nothing
+end
+
+# Scalar level-set values per public node tag: model NodeData views map rows
+# to node tags; list views are matched by exact coordinate equality.
+function _cut_ls_values(view,caller::AbstractString)
+    keys=_plugin_model_keys(view)
+    if !isempty(keys)
+        key=first(sort(keys))
+        key[2]=="NodeData" || throw(ArgumentError(
+            "$caller: Plugin(CutMesh) requires scalar NodeData view data, " *
+            "got $(key[2])"))
+        tags,values,nc=view.model_data[key]
+        nc==1 || throw(ArgumentError(
+            "$caller: Plugin(CutMesh) requires scalar (1-component) view data"))
+        table=Dict{UInt64,Float64}()
+        for (row,tag) in enumerate(tags)
+            table[UInt64(tag)]=values[row]
+        end
+        return table,nothing
+    end
+    elements,steps=_plugin_list_elements(view,caller)
+    isempty(elements) && throw(ArgumentError(
+        "$caller: Plugin(CutMesh) view carries no element data"))
+    steps>1 && throw(ArgumentError(
+        "$caller: Plugin(CutMesh) does not read multi-step views"))
+    table=Dict{NTuple{3,Float64},Float64}()
+    for element in elements
+        element.ncomp==1 || throw(ArgumentError(
+            "$caller: Plugin(CutMesh) requires scalar (1-component) view data"))
+        for node in axes(element.vcoords,2)
+            table[(element.vcoords[1,node],element.vcoords[2,node],
+                   element.vcoords[3,node])]=element.vals[node]
+        end
+    end
+    return nothing,table
+end
+
+function _cut_node_ls(by_tag,by_coord,tag::UInt64,coords,caller::AbstractString)
+    if by_tag!==nothing
+        value=get(by_tag,tag,nothing)
+        value===nothing && throw(ArgumentError(
+            "$caller: Plugin(CutMesh) view has no level-set value at mesh " *
+            "node $tag"))
+        return value
+    end
+    key=NTuple{3,Float64}((coords[1],coords[2],coords[3]))
+    value=get(by_coord,key,nothing)
+    value===nothing && throw(ArgumentError(
+        "$caller: Plugin(CutMesh) list view has no node at coordinates $key " *
+        "(exact coordinate match required)"))
+    return value
+end
+
+# Triangle quality metric used by upstream's `bestQuality` quad split.
+function _cut_quality_tri(p0,p1,p2)
+    a=_plugin_norm3(_plugin_sub3(p0,p1))
+    b=_plugin_norm3(_plugin_sub3(p0,p2))
+    c=_plugin_norm3(_plugin_sub3(p1,p2))
+    den=sqrt((a+b+c)*(b+c-a)*(c+a-b)*(a+b-c))
+    den<=0 && return 0.0
+    rho_o=a*b*c/den
+    rho_o<=0 && return 0.0
+    rho_i=a*b*c/(2*(a+b+c)*rho_o)
+    return 2*rho_i/rho_o
+end
+
+# Upstream `bestQuality`: pick the quad diagonal maximizing worst-then-best
+# triangle quality; equal qualities fall back to the lowest-coordinate vertex.
+function _cut_best_quad_diag(p1,p2,p3,p4)
+    tol=1e-15
+    q11=_cut_quality_tri(p1,p2,p3);q12=_cut_quality_tri(p1,p3,p4)
+    q21=_cut_quality_tri(p1,p2,p4);q22=_cut_quality_tri(p2,p3,p4)
+    w1=min(q11,q12);w2=min(q21,q22)
+    cut=0
+    if w1-w2>tol
+        cut=1
+    elseif w2-w1>tol
+        cut=2
+    else
+        w1=max(q11,q12);w2=max(q21,q22)
+        if w1-w2>tol
+            cut=1
+        elseif w2-w1>tol
+            cut=2
+        else
+            pts=(p1,p2,p3,p4)
+            ind=1
+            for k in 2:4
+                (pts[k][1]<pts[ind][1] ||
+                 (pts[k][1]==pts[ind][1] &&
+                  (pts[k][2]<pts[ind][2] ||
+                   (pts[k][2]==pts[ind][2] && pts[k][3]<pts[ind][3])))) &&
+                    (ind=k)
+            end
+            cut=(ind==1 || ind==3) ? 1 : 2
+        end
+    end
+    return cut
+end
+
+function _plugin_exec_cutmesh(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    split=!iszero(numbers["Split"])
+    _,view=_plugin_view(numbers,caller)
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    src_slot=MODEL_SLOTS[index]
+    m=src_slot.model
+    mesh=LAST_MESH[]
+    class=LAST_MESH_CLASS[]
+    by_tag,by_coord=_cut_ls_values(view,caller)
+
+    # ---- gather the source element scan -------------------------------------
+    # The canonical mesh contributes its cached cells; discrete-only models
+    # (LAST_MESH === nothing) are covered entirely by the record scan below,
+    # matching upstream where mesh elements live directly on the entities.
+    node_tag_of=i->_cache_node_tag(mesh===nothing ? nothing : mesh,i)
+    element_tag_of=i->_cache_element_tag(mesh===nothing ? nothing : mesh,i)
+    # (dim, msh type, conn public tags, source entity, public element tag)
+    entries=Tuple{Int,Int32,Vector{UInt64},Int,UInt64}[]
+    if mesh isa Mesh
+        tri_off,tet_off,total=_mesh_element_offsets(mesh)
+        for i in 1:total
+            rec=mesh_element_record(mesh,i)
+            entity=_plugin_element_entity(mesh,class,i)
+            entity===nothing && continue
+            conn=UInt64[node_tag_of(Int(t)) for t in rec.node_tags]
+            push!(entries,(Int(entity[1]),Int32(rec.element_type),conn,
+                           Int(entity[2]),element_tag_of(i)))
+        end
+    elseif mesh isa MixedMesh
+        for (msh,dim,offset,cells,owners) in _cache_catalog(mesh,class)
+            for col in axes(cells,2)
+                col<=length(owners) || continue
+                conn=UInt64[node_tag_of(Int(t)) for t in cells[:,col]]
+                push!(entries,(dim,msh,conn,Int(owners[col]),
+                               element_tag_of(offset+col)))
+            end
+        end
+    end
+    record_nodes=Dict{UInt64,NTuple{3,Float64}}()
+    for (edim,etag,record) in _discrete_mesh_records(m)
+        coords_of=Dict{UInt64,NTuple{3,Float64}}()
+        for (pos,ntag) in enumerate(record.node_tags)
+            coords_of[UInt64(ntag)]=(record.node_coords[1,pos],
+                                     record.node_coords[2,pos],
+                                     record.node_coords[3,pos])
+        end
+        merge!(record_nodes,coords_of)
+        for (eindex,(etype,etag2)) in enumerate(zip(record.element_types,
+                                                   record.element_tags))
+            spec2=try msh_spec(Int(etype)) catch err
+                err isa InterruptException && rethrow()
+                throw(ArgumentError(
+                    "$caller: Plugin(CutMesh) cannot read record element " *
+                    "type $etype"))
+            end
+            nn=Elements._msh_primary_nodes(spec2.family)
+            conn=record.element_nodes[eindex][1:nn]
+            push!(entries,(edim,etype,UInt64.(conn),etag,etag2))
+        end
+    end
+    isempty(entries) && throw(ArgumentError(
+        "$caller: Plugin(CutMesh) found no elements to cut"))
+
+    # ---- level-set values, vertex and coordinate tables ---------------------
+    coords_by_tag=Dict{UInt64,NTuple{3,Float64}}()
+    if mesh!==nothing
+        for i in 1:nnodes(mesh)
+            coords_by_tag[node_tag_of(i)]=(mesh.coords[1,i],
+                                           mesh.coords[2,i],mesh.coords[3,i])
+        end
+    end
+    merge!(coords_by_tag,record_nodes)
+    ls=Dict{UInt64,Float64}()
+    for (tag,coord) in coords_by_tag
+        ls[tag]=_cut_node_ls(by_tag,by_coord,tag,coord,caller)
+    end
+    # element processing order: upstream walks entities in (dim, tag) order,
+    # then each entity's elements in storage order — a stable sort on
+    # (dim, source tag) reproduces that for our flat scan.
+    order=sortperm([(e[1],e[4]) for e in entries])
+
+    # upstream: numEle = max(element count + parents, max element tag)
+    num_ele=max(length(entries),maximum(e[5] for e in entries))
+    next_node=maximum(keys(coords_by_tag))
+    coords_out=Dict{UInt64,NTuple{3,Float64}}(coords_by_tag)
+    cut_points=Dict{NTuple{2,UInt64},UInt64}()
+    function cut_node(na::UInt64,nb::UInt64)
+        key=minmax(na,nb)
+        tag=get(cut_points,key,UInt64(0))
+        tag!=0 && return tag
+        la=ls[na];lb=ls[nb]
+        t=la/(la-lb)
+        p=coords_by_tag[na];q=coords_by_tag[nb]
+        next_node+=1
+        tag=next_node
+        coords_out[tag]=(p[1]+t*(q[1]-p[1]),p[2]+t*(q[2]-p[2]),
+                         p[3]+t*(q[3]-p[3]))
+        cut_points[key]=tag
+        return tag
+    end
+
+    # per-dimension new entity/physical counters and source physical names;
+    # upstream seeds them from `getMaxElementaryNumber`/`getMaxPhysicalNumber`
+    # over ALL entities (not just ones carrying elements).
+    all_ents=model_entities(m)
+    elem_counter=Dict{Int,Base.RefValue{Int}}(
+        d=>Ref(maximum((t for (dd,t) in all_ents if dd==d);init=0))
+        for d in 0:3)
+    phys_counter=Dict{Int,Base.RefValue{Int}}(
+        d=>Ref(maximum((abs(pt) for ((dd,pt),_) in m.physical if dd==d);
+                       init=0))
+        for d in 0:3)
+    new_tags=Dict{Int,Dict{Int,Int}}(d=>Dict{Int,Int}() for d in 0:3)
+    phys_map=Dict{Int,Dict{Int,Int}}(d=>Dict{Int,Int}() for d in 0:3)
+    stored=Dict{Int,Dict{Int,Dict{Int,String}}}(d=>Dict{Int,Dict{Int,String}}()
+                                               for d in 0:3)
+    phys_name=Dict{Int,Dict{Int,String}}(d=>Dict{Int,String}() for d in 0:3)
+    for ((dd,pt),_) in m.physical
+        name=get(m.physical_names,(dd,pt),"")
+        phys_name[dd][pt]=name
+        phys_name[dd][-pt]=name
+    end
+    function phys_assign!(dim::Int,physicals,reg::Int,ls_tag::Int)
+        _cut_assign_phys!(stored[dim],phys_map[dim],
+            Dict(p=>get(phys_name[dim],p,"") for p in physicals),
+            physicals,reg,ls_tag)
+        return nothing
+    end
+    elementary=function(dim::Int,ls_tag::Int,src::Int)
+        return _cut_reg(new_tags[dim],elem_counter[dim],ls_tag,src)
+    end
+
+    # output buckets: (dim, reg) -> ordered element list
+    buckets=Dict{Tuple{Int,Int},Vector{Tuple{Int32,Vector{UInt64},UInt64}}}()
+    emit=function(dim::Int,reg::Int,msh::Int32,conn::Vector{UInt64},etag::UInt64)
+        push!(get!(()->Vector{Tuple{Int32,Vector{UInt64},UInt64}}(),
+                   buckets,(dim,reg)),(msh,conn,etag))
+        return nothing
+    end
+    # Border segments on the zero level set. Cut mode keeps the first copy of
+    # a duplicated edge (`surfLines[i].contain` deletes the NEW record);
+    # split mode toggles — an inside edge shared by two split elements
+    # cancels, leaving only the inside/outside interface.
+    borders=Vector{NTuple{2,UInt64}}()
+    border_key_index=Dict{NTuple{2,UInt64},Int}()
+    emit_border=function(a::UInt64,b::UInt64)
+        key=minmax(a,b)
+        haskey(border_key_index,key) && return nothing
+        border_key_index[key]=length(borders)+1
+        push!(borders,(a,b))
+        return nothing
+    end
+    emit_border_toggle=function(a::UInt64,b::UInt64)
+        key=minmax(a,b)
+        pos=get(border_key_index,key,0)
+        if pos>0
+            delete!(border_key_index,key)
+            borders[pos]=(UInt64(0),UInt64(0))
+        else
+            border_key_index[key]=length(borders)+1
+            push!(borders,(a,b))
+        end
+        return nothing
+    end
+    # Split-mode interface faces on volume elements, same toggle semantics.
+    border_faces=Vector{Tuple{Int32,Vector{UInt64}}}()
+    border_face_index=Dict{Vector{UInt64},Int}()
+    emit_border_face=function(conn::Vector{UInt64},face)
+        nodes=UInt64[conn[i] for i in face]
+        key=sort(nodes)
+        pos=get(border_face_index,key,0)
+        if pos>0
+            delete!(border_face_index,key)
+            border_faces[pos]=(Int32(0),UInt64[])
+        else
+            msh=length(face)==3 ? Int32(2) : Int32(3)
+            border_face_index[key]=length(border_faces)+1
+            push!(border_faces,(msh,nodes))
+        end
+        return nothing
+    end
+
+    if split
+        # ---- SplitMesh: whole-element partition plus interface edges ---------
+        # Upstream `elementSplitMesh`: a vertex is "outside" iff ls > eps;
+        # any outside vertex classifies the whole element outside. Elements
+        # with mixed signs are "split" and contribute their fully-inside
+        # edges (2-D) or faces (3-D) to the border entities.
+        for pos in order
+            dim,msh,conn,src,etag=entries[pos]
+            msh in (Int32(15),Int32(1),Int32(2),Int32(3),Int32(4),Int32(5),
+                    Int32(6),Int32(7)) || throw(ArgumentError(
+                "$caller: Plugin(CutMesh) cannot split element type $msh"))
+            signs=[ls[n]>_CUT_SPLIT_EPS ? -1 : 1 for n in conn]
+            ls_tag=any(s->s<0,signs) ? -1 : 1
+            ge_phys=_cut_entity_physicals(m,dim,src)
+            reg=elementary(dim,ls_tag,src)
+            _cut_phys_tag!(phys_map[dim],phys_counter[dim],ge_phys,ls_tag)
+            emit(dim,reg,msh,conn,etag)
+            phys_assign!(dim,ge_phys,reg,ls_tag)
+            mixed=any(s->s<0,signs) && any(s->s>0,signs)
+            if dim==2 && mixed
+                # upstream allocs an outside physical for the border curve
+                # before deciding its entity (side-effect kept for tag parity)
+                _cut_phys_tag!(phys_map[1],phys_counter[1],ge_phys,-1)
+                for (a,b) in _cut_mesh_edges(msh,length(conn))
+                    if signs[a]>0 && signs[b]>0
+                        emit_border_toggle(conn[a],conn[b])
+                    end
+                end
+            elseif dim==3 && mixed
+                _cut_phys_tag!(phys_map[2],phys_counter[2],ge_phys,-1)
+                for face in _cut_mesh_faces(msh,conn)
+                    if all(i->signs[i]>0,face)
+                        emit_border_face(conn,face)
+                    end
+                end
+            end
+        end
+    else
+        # ---- CutMesh: geometric cut -------------------------------------------
+        for pos in order
+            dim,msh,conn,src,etag=entries[pos]
+            ge_phys=_cut_entity_physicals(m,dim,src)
+            signs=[_cut_sign(ls[n]) for n in conn]
+            if msh==Int32(15)
+                ls_tag=signs[1]<0 ? -1 : (signs[1]>0 ? 1 : 0)
+                reg=elementary(dim,ls_tag,src)
+                _cut_phys_tag!(phys_map[dim],phys_counter[dim],ge_phys,ls_tag)
+                emit(dim,reg,msh,conn,etag)
+                phys_assign!(dim,ge_phys,reg,ls_tag)
+            elseif msh==Int32(1)
+                s1,s2=signs
+                if s1*s2<0
+                    u=cut_node(conn[1],conn[2])
+                    for (piece,ptag) in (((conn[1],u),s1),((u,conn[2]),s2))
+                        reg=elementary(dim,ptag,src)
+                        _cut_phys_tag!(phys_map[dim],phys_counter[dim],
+                                       ge_phys,ptag)
+                        num_ele+=1
+                        emit(dim,reg,msh,UInt64[piece[1],piece[2]],num_ele)
+                        phys_assign!(dim,ge_phys,reg,ptag)
+                    end
+                else
+                    # computeLsTagDom: any outside → outside; else any inside
+                    # → inside; all-zero keeps upstream's outside default.
+                    ls_tag=any(==(-1),signs) ? -1 :
+                        (any(==(1),signs) ? 1 : -1)
+                    reg=elementary(dim,ls_tag,src)
+                    _cut_phys_tag!(phys_map[dim],phys_counter[dim],
+                                   ge_phys,ls_tag)
+                    emit(dim,reg,msh,conn,etag)
+                    phys_assign!(dim,ge_phys,reg,ls_tag)
+                end
+            elseif msh==Int32(2)
+                pos_c=count(==(-1),signs);neg_c=count(==(1),signs)
+                if pos_c>0 && neg_c>0
+                    crossed=Int[]
+                    for e in 1:3
+                        a=e;b=e==3 ? 1 : e+1
+                        signs[a]*signs[b]<0 && push!(crossed,e)
+                    end
+                    if length(crossed)==1
+                        # edge (s1,s2) crossed, s3 lies on the border
+                        s1=crossed[1];s2=s1==3 ? 1 : s1+1;s3=s2==3 ? 1 : s2+1
+                        u=cut_node(conn[s1],conn[s2])
+                        pieces=((UInt64[conn[s3],conn[s1],u],signs[s1]),
+                                (UInt64[conn[s2],conn[s3],u],signs[s2]))
+                        for (tri,tt) in pieces
+                            reg=elementary(dim,tt,src)
+                            _cut_phys_tag!(phys_map[dim],phys_counter[dim],
+                                           ge_phys,tt)
+                            num_ele+=1
+                            emit(dim,reg,msh,tri,num_ele)
+                            phys_assign!(dim,ge_phys,reg,tt)
+                        end
+                        emit_border(u,conn[s3])
+                    elseif length(crossed)==2
+                        # lone vertex s1 = third vertex index not covered by
+                        # the crossed edges (upstream's 2*e0-e1+2 mod 3)
+                        s1=mod1(2*crossed[1]-crossed[2]+2,3)
+                        s2=mod1(s1+1,3);s3=mod1(s1+2,3)
+                        e0=crossed[1];e1=crossed[2]
+                        u0=cut_node(conn[e0],conn[e0==3 ? 1 : e0+1])
+                        u1=cut_node(conn[e1],conn[e1==3 ? 1 : e1+1])
+                        s1==1 && ((u0,u1)=(u1,u0))
+                        # corner triangle takes the lone vertex's sign
+                        reg=elementary(dim,signs[s1],src)
+                        _cut_phys_tag!(phys_map[dim],phys_counter[dim],
+                                       ge_phys,signs[s1])
+                        num_ele+=1
+                        emit(dim,reg,msh,UInt64[u0,conn[s1],u1],num_ele)
+                        phys_assign!(dim,ge_phys,reg,signs[s1])
+                        emit_border(u0,u1)
+                        # quad side split by best-quality diagonal
+                        other=signs[s2]
+                        p1=coords_out[u0];p2=coords_out[u1]
+                        p3=coords_out[conn[s2]];p4=coords_out[conn[s3]]
+                        diag=_cut_best_quad_diag(p1,p2,p3,p4)
+                        pair=diag==1 ?
+                            (UInt64[u0,u1,conn[s2]],
+                             UInt64[u0,conn[s2],conn[s3]]) :
+                            (UInt64[u0,u1,conn[s3]],
+                             UInt64[u1,conn[s2],conn[s3]])
+                        reg=elementary(dim,other,src)
+                        _cut_phys_tag!(phys_map[dim],phys_counter[dim],
+                                       ge_phys,other)
+                        for tri in pair
+                            num_ele+=1
+                            emit(dim,reg,msh,tri,num_ele)
+                            phys_assign!(dim,ge_phys,reg,other)
+                        end
+                    else
+                        throw(ArgumentError(
+                            "$caller: Plugin(CutMesh) triangle crosses the " *
+                            "level set $(length(crossed)) times"))
+                    end
+                else
+                    # uncut: inside iff a negative vertex exists and none is
+                    # positive; all-zero keeps upstream's outside default.
+                    # Edges lying exactly on the level set emit no border
+                    # line upstream (the interface is the element boundary).
+                    ls_tag=neg_c>0 ? 1 : -1
+                    reg=elementary(dim,ls_tag,src)
+                    _cut_phys_tag!(phys_map[dim],phys_counter[dim],
+                                   ge_phys,ls_tag)
+                    emit(dim,reg,msh,conn,etag)
+                    phys_assign!(dim,ge_phys,reg,ls_tag)
+                end
+            else
+                throw(ArgumentError(
+                    "$caller: Plugin(CutMesh) bounded subset cuts only " *
+                    "point, line and triangle elements (type $msh)"))
+            end
+        end
+    end
+
+    # Border segments → dim-1 entities with fresh tags. Upstream cut mode
+    # splits the zero-tag bucket into connected components (each gets
+    # `++newElemTags[1][0]`, the last keeps tag 0); split mode keeps all
+    # border lines on the single border entity. Every component gets a fresh
+    # tag here since entity tag 0 cannot be represented.
+    live_borders=[s for s in borders if s[1]!=0]
+    if !isempty(live_borders)
+        if split
+            reg=(elem_counter[1][]+=1)
+            for (a,b) in live_borders
+                num_ele+=1
+                emit(1,reg,Int32(1),UInt64[a,b],num_ele)
+            end
+        else
+            parent=Dict{UInt64,UInt64}()
+            find=function(x)
+                root=x
+                while get(parent,root,root)!=root; root=parent[root]; end
+                while get(parent,x,x)!=x; parent[x]=root;x=parent[x]; end
+                return root
+            end
+            for (a,b) in live_borders
+                ra=find(a);rb=find(b)
+                ra!=rb && (parent[ra]=rb)
+            end
+            comps=Dict{UInt64,Vector{NTuple{2,UInt64}}}()
+            seen_root=UInt64[]
+            for seg in live_borders
+                root=find(seg[1])
+                if !haskey(comps,root)
+                    comps[root]=NTuple{2,UInt64}[];push!(seen_root,root)
+                end
+                push!(comps[root],seg)
+            end
+            for root in seen_root
+                reg=(elem_counter[1][]+=1)
+                for (a,b) in comps[root]
+                    num_ele+=1
+                    emit(1,reg,Int32(1),UInt64[a,b],num_ele)
+                end
+            end
+        end
+    end
+    live_faces=[f for f in border_faces if f[1]!=0]
+    if !isempty(live_faces)
+        reg=(elem_counter[2][]+=1)
+        for (fmsh,nodes) in live_faces
+            num_ele+=1
+            emit(2,reg,fmsh,nodes,num_ele)
+        end
+    end
+
+    # ---- node ownership: lowest-dim entity wins, smallest tag breaks ties ---
+    node_owner=Dict{UInt64,Tuple{Int,Int}}()
+    for (dim,reg) in sort!(collect(keys(buckets)))
+        for (_,conn,_) in buckets[(dim,reg)]
+            for tag in conn
+                owner=get(node_owner,tag,nothing)
+                (owner===nothing || dim<owner[1] ||
+                 (dim==owner[1] && reg<owner[2])) &&
+                    (node_owner[tag]=(dim,reg))
+            end
+        end
+    end
+
+    # ---- build the discrete cut model ----------------------------------------
+    new_name=src_slot.name*"_cut"
+    _model_add(new_name)
+    m2=CURRENT[]
+    for (dim,reg) in sort!(collect(keys(buckets)))
+        add_discrete_entity!(m2,dim,reg,NTuple{2,Int}[])
+    end
+    entity_nodes=Dict{Tuple{Int,Int},Vector{UInt64}}()
+    for (tag,owner) in node_owner
+        push!(get!(()->UInt64[],entity_nodes,owner),tag)
+    end
+    for (entity,tags) in entity_nodes
+        sort!(tags)
+        coords=Float64[]
+        for tag in tags
+            c=coords_out[tag]
+            append!(coords,(c[1],c[2],c[3]))
+        end
+        add_discrete_nodes!(m2,entity[1],entity[2],tags,coords)
+    end
+    for (dim,reg) in sort!(collect(keys(buckets)))
+        els=buckets[(dim,reg)]
+        types=Int32[];tags_v=Vector{UInt64}[];nodes_v=Vector{UInt64}[]
+        grouped=Dict{Int32,Tuple{Vector{UInt64},Vector{UInt64}}}()
+        order_t=Int32[]
+        for (msh,conn,etag) in els
+            if !haskey(grouped,msh)
+                grouped[msh]=(UInt64[],UInt64[]);push!(order_t,msh)
+            end
+            push!(grouped[msh][1],etag);append!(grouped[msh][2],conn)
+        end
+        for msh in order_t
+            push!(types,msh)
+            push!(tags_v,grouped[msh][1]);push!(nodes_v,grouped[msh][2])
+        end
+        add_discrete_elements!(m2,dim,reg,types,tags_v,nodes_v)
+    end
+    for dim in 0:3
+        groups=Dict{Int,Vector{Int}}()
+        for (reg,entry) in stored[dim]
+            for (phys,_) in entry
+                phys>0 || continue
+                push!(get!(()->Int[],groups,phys),reg)
+            end
+        end
+        for phys in sort!(collect(keys(groups)))
+            # upstream `_storePhysicalTagsInEntities`: the first bound name
+            # wins — iterate entities in tag order for determinism.
+            name=""
+            for reg in sort!(collect(keys(stored[dim])))
+                entry=stored[dim][reg]
+                haskey(entry,phys) && (name=entry[phys];break)
+            end
+            ents=sort!(unique!(groups[phys]))
+            try
+                add_physical_group!(m2,dim,ents;tag=phys,name=name)
+            catch err
+                err isa InterruptException && rethrow()
+                throw(ArgumentError(
+                    "$caller: Plugin(CutMesh) physical group creation " *
+                    "failed — "*sprint(showerror,err)))
+            end
+        end
+    end
+    return nothing
+end
+
+# Entity physical list used by both cut paths (`ge->physicals`).
+_cut_entity_physicals(m::GeoModel,dim::Int,tag::Int)=
+    copy(get(m.entity_physicals,(dim,tag),Int[]))
+
+# Local vertex pairs (1-based connectivity positions) forming an element's
+# edges, for the split-mode inside-edge scan.
+function _cut_mesh_edges(msh::Int32,::Int)
+    msh==Int32(2) && return ((1,2),(2,3),(3,1))
+    msh==Int32(3) && return ((1,2),(2,3),(3,4),(4,1))
+    msh==Int32(1) && return ((1,2),)
+    return NTuple{2,Int}[]
+end
+
+# Local vertex index tuples of a volume element's faces (tet/hex/pri/pyr).
+function _cut_mesh_faces(msh::Int32,conn)
+    msh==Int32(4) && return ((1,2,3),(1,2,4),(1,3,4),(2,3,4))
+    msh==Int32(5) && return ((1,2,3,4),(5,6,7,8),(1,2,6,5),(2,3,7,6),
+                             (3,4,8,7),(4,1,5,8))
+    msh==Int32(6) && return ((1,2,3),(4,5,6),(1,2,5,4),(2,3,6,5),(1,3,6,4))
+    msh==Int32(7) && return ((1,2,3,4),(1,2,5),(2,3,5),(3,4,5),(4,1,5))
+    return NTuple{4,Int}[]
+end
+
+# ---- BoundaryLayer -------------------------------------------------------------
+#
+# Upstream `BoundaryLayer.cpp` mutates the current mesh in place: it spawns
+# layer nodes on curves/faces adjacent to the selected entities, inserts zero-
+# thickness quads, splits the layer columns and runs a Winslow untangler. None
+# of that is expressible through the discrete-entity records available to this
+# file, so this registration keeps the exact option table and validates the
+# selection strings like upstream's `parse` (space/comma separated integers,
+# non-numeric words skipped), then rejects the run explicitly instead of
+# pretending to grow a boundary layer.
+
+function _bl_parse_ints(text::AbstractString)
+    out=Int[]
+    for word in split(replace(text,','=>' '))
+        isempty(word) && continue
+        value=tryparse(Int,word)
+        value===nothing || push!(out,value)
+    end
+    return out
+end
+
+function _plugin_exec_boundarylayer(spec::_PluginSpec,caller::AbstractString)
+    m=_model_locked()
+    # Upstream `parse` + `getXByTag` resolution: non-numeric words and unknown
+    # entity tags are silently skipped. The resolution is preserved here so
+    # the selection strings are interpreted exactly like upstream before the
+    # documented reject below.
+    selected=NTuple{2,Int}[]
+    for (dim,opt) in ((0,"Points"),(1,"Curves"),(2,"Surfaces"),(3,"Volumes"))
+        for tag in _bl_parse_ints(spec.strings[opt])
+            _model_entity_known(m,dim,tag) && push!(selected,(dim,tag))
+        end
+    end
+    throw(ArgumentError(
+        "$caller: Plugin(BoundaryLayer) mesh modification is not implemented " *
+        "in Tessella — the upstream plugin grows boundary-layer quads on " *
+        "$(length(selected)) selected entities and retimes curve nodes in " *
+        "place, which requires mesh-mutation support outside the " *
+        "discrete-entity records"))
+end
+
 # ---- registry --------------------------------------------------------------------------------
 
 const _PLUGINS=Dict{String,NamedTuple}(
@@ -7116,6 +8048,20 @@ const _PLUGINS=Dict{String,NamedTuple}(
         "ShrinkFactor"=>0.0),
         string_options=Dict{String,String}("OutputFile"=>"bubbles.geo"),
         run_fn=_plugin_exec_bubbles),
+    # `CurvedBndDist` declares no options upstream — the oracle rejects every
+    # named option; only the implicit `Run` action exists.
+    "CurvedBndDist"=>(number_options=Dict{String,Float64}("Run"=>0.0),
+        string_options=Dict{String,String}(),
+        run_fn=_plugin_exec_curvedbnddist),
+    "CutMesh"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"View"=>-1.0,"Split"=>0.0,"SaveTri"=>0.0),
+        string_options=Dict{String,String}(),
+        run_fn=_plugin_exec_cutmesh),
+    "BoundaryLayer"=>(number_options=Dict{String,Float64}(
+        "Run"=>0.0,"Thickness"=>0.01,"Size"=>0.001,"Ratio"=>1.2),
+        string_options=Dict{String,String}(
+            "Volumes"=>"","Surfaces"=>"","Curves"=>"","Points"=>""),
+        run_fn=_plugin_exec_boundarylayer),
     # `Echo`, `TimeReport`, `DuplicatedBoundaries` and `PolarView` are not
     # registered: Gmsh 4.15.2 ships none of them (the oracle reports
     # `Failed action 'Run' or unknown plugin '<name>'`), and they are absent
