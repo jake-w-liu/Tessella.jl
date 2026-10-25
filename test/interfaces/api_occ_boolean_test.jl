@@ -280,7 +280,7 @@ end
                    err)
     p=occ.add_point(0,0,0)
     err=_errtext(()->occ.fuse([(0,p)],[(3,1)]))
-    @test occursin("volumes only",err)
+    @test occursin("volumes and surfaces only",err)
     err=_errtext(()->occ.fuse([(3,1)],[(3,2)];tag=1.5))
     @test occursin("tag must be an integer",err)
     err=_errtext(()->occ.fuse([(3,1)],[(3,2)];removeObject=1))
@@ -361,13 +361,12 @@ end
     occ.remove_all_duplicates()   # single entity — no-op
     @test occ.get_entities(3)==[(3,1)]
     @test occ.get_mass(3,1)≈1.0
-    # maxdim 2 registry (no volumes): the volume-only bridge rejects
-    # loudly instead of silently pretending support
+    # maxdim 2 registry (no volumes): dim-2-only operands run through
+    # the mixed boolean path — a lone top-level surface is a no-op
     occ.add_rectangle(5,5,5,1,1)
     occ.remove([(3,1)])
-    err=_errtext(()->occ.remove_all_duplicates())
-    @test occursin("dimension",err) || occursin("volume",err) ||
-          occursin("unsupported",err)
+    occ.remove_all_duplicates()
+    @test (2,7) in occ.get_entities(2)
 end
 
 @testset "occ.fragment — re-fragment preserves masses and topology" begin
@@ -536,4 +535,152 @@ end
         out,_=occ.intersect([(3,k)],[(3,b)])
         @test occ.get_mass(3,out[1][2])≈mi
     end
+end
+
+# ── mixed-dimensional (surface × volume) booleans ──────────────────────
+# `booleanOperator` accepts dim-2 operands alongside volumes; the mixed
+# path decomposes them through the same face-region arrangement — sheet
+# walls split the containing cell's angular fan, free rims merge their
+# own sides, and sheet material that survives as a face publishes as a
+# surface. Disposition mirrors `occBooleanPreserveNumbering`: a sheet
+# rebound onto one fresh image claims its own tag, interior/border
+# faces of a preserved solid still credit the sheet's map, and a
+# consumed difference tool always maps empty.
+
+@testset "occ.fragment — volume split by a surface wall" begin
+    occ=_occ_setup()
+    occ.add_box(0,0,0,1,1,1)
+    occ.add_rectangle(0,0,0.5,1,1)
+    occ.synchronize()
+    out,map=occ.fragment([(3,1)],[(2,7)])
+    # two half-volumes plus the wall rebound at its own tag — upstream
+    # `_multiBind` lists a preserved face once per shell visit plus its
+    # standalone binding
+    @test out==[(3,1),(3,2),(2,7),(2,7),(2,7)]
+    @test map==[[(3,1),(3,2)],[(2,7)]]
+    @test occ.get_mass(3,1)≈0.5
+    @test occ.get_mass(3,2)≈0.5
+    @test occ.get_mass(2,7)≈1.0
+    bb=occ.get_bounding_box(3,1)
+    @test bb[3]≈0.0 && bb[6]≈0.5
+    bb2=occ.get_bounding_box(3,2)
+    @test bb2[3]≈0.5 && bb2[6]≈1.0
+end
+
+@testset "occ.fragment — two walls decompose three slabs" begin
+    occ=_occ_setup()
+    occ.add_box(0,0,0,1,1,1)
+    occ.add_rectangle(0,0,0.3,1,1)
+    occ.add_rectangle(0,0,0.7,1,1)
+    occ.synchronize()
+    out,map=occ.fragment([(3,1)],[(2,7),(2,8)])
+    @test out==[(3,1),(3,2),(3,3),(2,7),(2,8),(2,7),(2,8),(2,7),(2,8)]
+    @test map==[[(3,1),(3,2),(3,3)],[(2,7)],[(2,8)]]
+    @test [occ.get_mass(3,t) for t in (1,2,3)]≈[0.3,0.3,0.4]
+end
+
+@testset "occ.fragment — interior and outside sheets" begin
+    occ=_occ_setup()
+    occ.add_box(0,0,0,1,1,1)
+    occ.add_rectangle(0.25,0.25,0.5,0.5,0.5)
+    occ.synchronize()
+    out,map=occ.fragment([(3,1)],[(2,7)])
+    # a floating sheet never partitions the solid — the box is
+    # unmodified (Extent 0 → preserved) and the sheet stays bound
+    @test out==[(3,1),(2,7)]
+    @test map==[[(3,1)],[(2,7)]]
+    @test occ.get_mass(3,1)≈1.0
+    @test occ.get_mass(2,7)≈0.25
+    # a sheet fully outside is a no-op for the volume; both keep tags
+    occ.add_rectangle(2,2,2,1,1)
+    occ.synchronize()
+    out2,map2=occ.fragment([(3,1)],[(2,8)])
+    @test out2==[(3,1),(2,8)]
+    @test map2==[[(3,1)],[(2,8)]]
+end
+
+@testset "occ.fragment — tangent (coincident) sheet credits the shared face" begin
+    occ=_occ_setup()
+    occ.add_box(0,0,0,1,1,1)
+    occ.add_rectangle(-0.5,-0.5,1.0,2,2)
+    occ.synchronize()
+    out,map=occ.fragment([(3,1)],[(2,7)])
+    # the sheet's coincident patch IS the box's top face (preserved at
+    # its operand tag); the outside frame is the sheet's sole fresh
+    # image and reclaims tag 7
+    @test out==[(3,1),(2,7)]
+    @test map==[[(3,1)],[(2,7),(2,2)]]
+    @test occ.get_mass(3,1)≈1.0
+    @test occ.get_mass(2,7)≈3.0          # frame = 4 − 1
+    @test occ.get_mass(2,2)≈1.0          # box top, still bound
+end
+
+@testset "occ.cut — surface minus volume keeps the frame" begin
+    occ=_occ_setup()
+    occ.add_box(0,0,0,1,1,1)
+    occ.add_rectangle(-0.5,-0.5,0.5,3,3)
+    occ.synchronize()
+    out,map=occ.cut([(2,7)],[(3,1)])
+    @test out==[(2,7)]
+    @test map==[[(2,7)],Tuple{Int,Int}[]]
+    @test occ.get_mass(2,7)≈8.0          # 3×3 sheet minus 1×1 patch
+    @test (3,1) ∉ occ.get_entities(3)   # tool consumed
+    bb=occ.get_bounding_box(2,7)
+    @test bb[1]≈-0.5 && bb[4]≈2.5 && bb[3]≈bb[6]≈0.5
+end
+
+@testset "occ.intersect — volume ∩ surface yields the section sheet" begin
+    occ=_occ_setup()
+    occ.add_box(0,0,0,1,1,1)
+    occ.add_rectangle(-0.5,-0.5,0.5,3,3)
+    occ.synchronize()
+    out,map=occ.intersect([(3,1)],[(2,7)])
+    @test out==[(2,7)]
+    @test map==[Tuple{Int,Int}[],[(2,7)]]
+    @test occ.get_mass(2,7)≈1.0          # the 1×1 patch inside the box
+    @test (3,1) ∉ occ.get_entities(3)   # object volume produced no image
+end
+
+@testset "occ mixed — unsupported volume-tool directions reject atomically" begin
+    occ=_occ_setup()
+    occ.add_box(0,0,0,1,1,1)
+    occ.add_rectangle(-0.5,-0.5,0.5,3,3)
+    occ.synchronize()
+    snap=occ.get_entities();counts=_occ_counts()
+    err=_errtext(()->occ.cut([(3,1)],[(2,7)]))
+    @test occursin("Difference failed - BOPAlgo_AlertBOPNotAllowed",err)
+    @test occ.get_entities()==snap
+    @test _occ_counts()==counts
+    err=_errtext(()->occ.fuse([(3,1)],[(2,7)]))
+    @test occursin("Union failed - BOPAlgo_AlertBOPNotAllowed",err)
+    @test occ.get_entities()==snap
+    @test _occ_counts()==counts
+end
+
+@testset "occ surface×surface — adjacent and merged cases" begin
+    occ=_occ_setup()
+    occ.add_rectangle(0,0,0,1,1)
+    occ.add_rectangle(1,0,0,1,1)
+    occ.synchronize()
+    out,map=occ.fragment([(2,1)],[(2,2)])
+    @test out==[(2,1),(2,2)]
+    @test map==[[(2,1)],[(2,2)]]
+    occ2=_occ_setup()
+    occ2.add_rectangle(0,0,0,1,1)
+    occ2.add_rectangle(1,0,0,1,1)
+    occ2.synchronize()
+    out,map=occ2.fuse([(2,1)],[(2,2)])
+    # the shared rim is interior — one merged face claims the first tag
+    @test out==[(2,1)]
+    @test map==[[(2,1)],[(2,1)]]
+    @test occ2.get_mass(2,1)≈2.0
+    @test (2,2) ∉ occ2.get_entities(2)
+    occ3=_occ_setup()
+    occ3.add_rectangle(0,0,0,1,1)
+    occ3.add_rectangle(1,0,0,1,1)
+    occ3.synchronize()
+    out,map=occ3.cut([(2,1)],[(2,2)])
+    @test out==[(2,1)]
+    @test map==[[(2,1)],Tuple{Int,Int}[]]
+    @test (2,2) ∉ occ3.get_entities(2)
 end
