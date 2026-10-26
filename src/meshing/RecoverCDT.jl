@@ -500,6 +500,58 @@ function _partition_tets_float(pts,limits::_RecoveryLimits;seed::Int=1,
     throw(ErrorException("$caller: no valid Float-assisted topology in 17 deterministic attempts; $lastreason"))
 end
 
+# Exact closed-segment containment: `p` collinear with segment (a,b) and
+# between its endpoints (Rational{BigInt} arithmetic — no tolerances).
+@inline function _onseg3(p,a,b)
+    u=rsub(b,a);v=rsub(p,a);c=rcross(u,v)
+    (c[1]==0&&c[2]==0&&c[3]==0)||return false
+    for k in 1:3
+        u[k]==0&&continue
+        t=v[k]/u[k]
+        return 0<=t<=1
+    end
+    return false
+end
+
+# Is the exact segment (pa,pb) covered by kept tet edges?  Walk the kept-edge
+# adjacency from `pa`'s emitted node along edges lying on the segment and
+# union their parameter intervals: coverage from t=0 can only come from that
+# connected piece, so a dropped crease endpoint or a missing piece fails.
+# (A whole input crease the prismatic extrusion legitimately subdivides — by
+# axial levels or arrangement intersections — is recovered exactly by the
+# covering chain, the same conformance the atomic-subsegment check certifies
+# in the conforming-Delaunay path.)
+function _crease_covered(pa,pb,preimage,outidx,adj)
+    oa=get(outidx,pa,0);oa==0&&return false
+    d=rsub(pb,pa)
+    ax=d[1]!=0 ? 1 : (d[2]!=0 ? 2 : (d[3]!=0 ? 3 : 0))
+    ax==0&&return false
+    da=d[ax]
+    ints=NTuple{2,RB}[]
+    seen=Set{Int}((oa,));stack=[oa]
+    while !isempty(stack)
+        u=pop!(stack)
+        tu=(preimage[u][ax]-pa[ax])//da
+        for v in get(adj,u,Int[])
+            pv=preimage[v]
+            _onseg3(pv,pa,pb)||continue
+            tv=(pv[ax]-pa[ax])//da
+            tv==tu&&continue
+            push!(ints,tu<tv ? (tu,tv) : (tv,tu))
+            v in seen||(push!(seen,v);push!(stack,v))
+        end
+    end
+    isempty(ints)&&return false
+    sort!(ints;by=first)
+    reach=zero(RB)
+    for (s,e) in ints
+        s<=reach||return false
+        e>reach&&(reach=e)
+        reach>=1&&return true
+    end
+    return reach>=one(RB)
+end
+
 function _certify_partition_exact(surfaces,m,preimage,regions,
                                   budget::_RecoveryBudget,regionpts=preimage)
     caller="recover_partition_cdt"
@@ -513,9 +565,29 @@ function _certify_partition_exact(surfaces,m,preimage,regions,
             push!(keptE,ekey(Int(vs[i]),Int(vs[j])))
         end
     end
-    for (ri,reg) in enumerate(regions), e in reg.bnd
-        (e in keptE) || return (false,
-            "region $ri boundary segment $e is not a tet edge of the kept complex")
+    if regionpts===preimage
+        # The conforming-Delaunay path indexes `reg.bnd` and `m.tets` in the
+        # same registry: each atomic crease subsegment is itself a kept edge.
+        for (ri,reg) in enumerate(regions), e in reg.bnd
+            (e in keptE) || return (false,
+                "region $ri boundary segment $e is not a tet edge of the kept complex")
+        end
+    else
+        # The prismatic path indexes `reg.bnd` in the input point registry
+        # (`regionpts`) while `m.tets`/`keptE` index `preimage` (the emitted
+        # nodes).  Translate by exact coordinates and certify coverage: an
+        # input crease spanning several axial levels or subdivided by an
+        # arrangement intersection is recovered by a chain of kept edges.
+        outidx=Dict{RBv,Int}(p=>i for (i,p) in enumerate(preimage))
+        adj=Dict{Int,Vector{Int}}()
+        for (u,v) in keptE
+            push!(get!(adj,u,Int[]),v);push!(get!(adj,v,Int[]),u)
+        end
+        for (ri,reg) in enumerate(regions), e in reg.bnd
+            _crease_covered(regionpts[e[1]],regionpts[e[2]],
+                            preimage,outidx,adj) || return (false,
+                "region $ri boundary segment $e is not recovered by kept tet edges")
+        end
     end
     for r in eachindex(surfaces)
         ids=Int[t for t in axes(m.tets,2) if m.tet_tag[t]==Int32(r)]

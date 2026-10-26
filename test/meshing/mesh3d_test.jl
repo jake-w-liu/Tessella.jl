@@ -173,7 +173,14 @@ Base.getindex(::_UnreadableExactPoints,::Int)=
         @test_throws ArgumentError recover_boundary_cdt(cdtbox;max_facets=11)
         @test_throws ArgumentError recover_boundary_cdt(cdtbox;max_tets=5)
         @test_throws ArgumentError recover_boundary_cdt(cdtbox;max_work_tets=1)
-        @test_throws ArgumentError recover_boundary_cdt(cdtbox;max_predicate_tests=1)
+        @test_throws ArgumentError recover_boundary_cdt(cdtbox;max_predicate_tests=0)
+        # The exact-predicate budget is enforced inside `delaunay3d_exact`, which
+        # the float-first recovery only consults as a last resort — a box needs no
+        # exact triangulation, so `=1` no longer exhausts there; pin the bound at
+        # the kernel layer where it applies.
+        _bx=NTuple{3,Rational{BigInt}}[(Rational{BigInt}(x),Rational{BigInt}(y),Rational{BigInt}(z))
+                                       for x in (0,1) for y in (0,1) for z in (0,1)]
+        @test_throws ArgumentError delaunay3d_exact(_bx;max_predicate_tests=1)
         @test_throws ArgumentError recover_boundary_cdt(cdtbox;max_recovery_tests=true)
         @test_throws ArgumentError recover_boundary_cdt(cdtbox;max_recovery_tests=1)
         @test_throws ArgumentError recover_boundary_cdt(1)
@@ -1669,14 +1676,21 @@ end
         @test _rb_centroid_orient2((0.0,0.0),(1.0,1.0),(0.25,0.25),(0.5,0.5),(2.0,2.0+2^-40))==1
         @test _rb_centroid_orient2((0.0,0.0),(1.0,1.0),(0.25,0.25),(0.5,0.5),(2.0,2.0-2^-40))==-1
     end
-    # allocation: the common (non-degenerate) decisions do not allocate
-    surf=box_surface(0,2,0,1,0,1)
-    Px,Py,Pz,facets=_rb_dedup_surface(surf);regions=_rb_build_regions(Px,Py,Pz,facets)
-    reg=regions[1];probe=(0.3,0.4,0.6)
-    _rb_side_float(reg.plane,probe)
-    @test @allocated(_rb_side_float(reg.plane,probe))==0
-    Qx=vcat(Px,[0.5,0.7]);Qy=vcat(Py,[0.5,0.2]);Qz=vcat(Pz,[-0.5,0.4])
-    p=Int32(length(Qx)-1);q=Int32(length(Qx))
-    _rb_edge_pierces(reg,Qx,Qy,Qz,p,q)
-    @test @allocated(_rb_edge_pierces(reg,Qx,Qy,Qz,p,q))==0
+    # allocation: the common (non-degenerate) decisions do not allocate.
+    # This contract only applies to compiled code: under --compile=min the
+    # interpreter boxes Float64 temporaries, so @allocated measures interpreter
+    # bookkeeping rather than the kernels (compile_enabled==3, the same gate
+    # runtests.jl uses to detect minimal compilation).  Verified alloc-free
+    # under normal compilation on both supported runtimes.
+    if Base.JLOptions().compile_enabled != 3
+        surf=box_surface(0,2,0,1,0,1)
+        Px,Py,Pz,facets=_rb_dedup_surface(surf);regions=_rb_build_regions(Px,Py,Pz,facets)
+        reg=regions[1];probe=(0.3,0.4,0.6)
+        _rb_side_float(reg.plane,probe)
+        @test @allocated(_rb_side_float(reg.plane,probe))==0
+        Qx=vcat(Px,[0.5,0.7]);Qy=vcat(Py,[0.5,0.2]);Qz=vcat(Pz,[-0.5,0.4])
+        p=Int32(length(Qx)-1);q=Int32(length(Qx))
+        _rb_edge_pierces(reg,Qx,Qy,Qz,p,q)
+        @test @allocated(_rb_edge_pierces(reg,Qx,Qy,Qz,p,q))==0
+    end
 end
