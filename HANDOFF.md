@@ -5644,7 +5644,23 @@ Files: `src/geometry/GeoExec.jl`, `src/interfaces/APIPartitionBRep.jl`,
 - `Pkg.test()` Julia 1.12.7: **425,608/425,608 in 17m17.5s**.
 - `Pkg.test()` Julia 1.13.1: **427,250/427,250 in 14m39.1s**.
 
-## Remaining parity work (PLAN.md — all IN PROGRESS tracks)
+## Remaining parity work — updated 2026-10-26 (post-campaign state)
+
+The 2026-10-26 campaign closed the following from the list below:
+all eight oracle-registered plugins (`d404379`), OCC dim-2 Boolean
+operands (`22df1b6`), `.geo` `BooleanX` all-dim operand grammar
+(`abe2d6e`), `Mesh.PartitionCreateTopology` dim-2 (`0853412`),
+`_brep_edge_curve` `:bspline`/`:ellipse`/`:copied_curve` extraction
+(`4de5a04`), OCC loft-rim fillets on non-line edges (`20be4b1`), t19
+write-back attribution (`1645855`), PER02 multi-pair (`1ead04c`),
+PAR01 seeded parallel Region fills (`d0dc4ef`), OPT01 curved-P2
+(`7366b7c`), LAY02 Mesh2 classifier (`656ea23`), CAD04 tubed shells
+(`e872a24`) + NURBS closed shells (`6d00ea1`), the c7cc213/18e07e4
+regressions (`b14063f`). Driver state: **t13, t19, t21 verbatim
+`TUTORIAL_OK`; t20 verbatim reaches the named `tensor_bspline×plane`
+face-pair bound** (in progress). What remains below is the genuine
+long tail — mostly P3 unclassified-CAD/NURBS depth, P4–P6 breadth,
+and the standing differential corpus.
 
 - **P1**: remaining HXT-exact parity inside the now-octree-backed
   `AutomaticMeshSizeField` (sphere-fit curvature, facing-triangle

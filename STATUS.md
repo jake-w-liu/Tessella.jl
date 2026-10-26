@@ -515,11 +515,15 @@ per-region area exactly on every output.
   different remesh density, same parity class). The boundary
   write-back transported the ~5000-vertex Steiner subdivision into the
   Surface/Curve products — ownership preserved end to end.
-- `validation/gmsh_parity/t19.jl` → `GMSH_PARITY_T19_PARTIAL`:
-  `nofillet=OK nodes=2387 tets=5800` (dense pipe-wall arm now completes;
-  previously `266/360 facets recovered` + degenerate tets), `nosize=OK`;
-  verbatim remains `BLOCKED(fillet)` — the intentional classified OCC
-  fillet rejection (`fillet edge must be a line`), a separate known gap.
+- `validation/gmsh_parity/t19.jl` → `GMSH_PARITY_T19_TUTORIAL_OK`
+  (supersedes the earlier `T19_PARTIAL`): verbatim `geo=OK nodes=3225
+  tets=8258 volume=1.7818869` (gmsh oracle 57656 tets vol 1.7997554 —
+  different density, same parity class); `nofillet=OK 2387/5800`;
+  `nosize=OK 346/414`. Both verbatim blockers landed in `20be4b1`
+  (loft-rim fillets on non-line edges) and `1645855` (shell-orphan
+  loop claim + closed-curve `t1`-station truncation — the root cause
+  of the write-back `lost an actual entity (2,1002)` and the later
+  `no covering tetrahedron-edge chain` tutorial-density edge).
 - `test/meshing/recover_cdt_topology_test.jl` → 33/33 (new testset
   "Dense curved PLC converges under auto maxpts", 13 assertions: real
   t19 Volume[12] PLC fixture `test/fixtures/plc_helical_pipe_wall_360.txt`
@@ -2998,14 +3002,21 @@ support/common.jl` gained `run_gmsh_dim`, `gmsh_mixed` and `cell_metrics`.
   the actual authority mesh so `Plugin(SimplePartition).Run` partitions
   mid-file meshes (republished through the `PartitionMesh` plan —
   `$PartitionedEntities` in `Save` output verified).
-- t13: `Merge "t13_data.stl"` discrete-geometry rebuild — `create_geometry!` aborts on conflicting per-node geometry sources (native STL reparametrization gap).
-- t17: OCC `Rectangle` + anisotropic background `.pos` mesh — OCC backend primitives unimplemented.
-- t19: OCC `ThruSections`, fillets, `Pipe` — all require an OCC backend.
-- t20: `Merge "t20_data.step"` (STEP import) + OCC `Rectangle` cutting planes + `PartitionMesh` (now implemented — the remaining stop is the classified OCC/STEP operand chain).
-- t21: `Plugin(SimplePartition)` now dispatches in `.geo` (see t9 note) and
-  `PartitionMesh` executes on the built-in route; the verbatim file still
-  stops at the classified OCC `BooleanFragments`/`Rectangle` operand gap
-  upstream of those statements.
+- t13: **unblocked** — `GMSH_PARITY_T13_TUTORIAL_OK` (see the t13/t19
+  verification block above).
+- t17: driver `validation/gmsh_parity/t17.jl` present — OCC `Rectangle`
+  + anisotropic `.pos` background-mesh path classified.
+- t19: **unblocked** — `GMSH_PARITY_T19_TUTORIAL_OK` (`20be4b1` loft-rim
+  fillets + `1645855` write-back shell/station fixes; verbatim
+  `3225/8258`, oracle parity class).
+- t20: STEP import + OCC `Rectangle` planes + `occ.fragment` — the
+  operand grammar (`abe2d6e`) and imported-curve extraction (`4de5a04`)
+  are in; verbatim reaches the named `tensor_bspline×plane` face-pair
+  bound (in progress).
+- t21: **unblocked** — `GMSH_PARITY_T21_TUTORIAL_OK` verbatim:
+  `geo_verbatim=OK occ_fragment=OK geo_partitionmesh=OK
+  partition_topology=OK nparts=3` (`22df1b6` dim-2 Booleans +
+  `abe2d6e` operand grammar + `0853412` dim-2 partition topology).
 
 Also recorded: high-order `.geo` paths and `Recombine` of >4-curve
 transfinite surfaces remain outside the executor (t6 adaptation documents
