@@ -5,6 +5,7 @@
 using Test
 using Tessella
 const A=Tessella.API
+const M=Tessella.Model
 
 function _errtext(f)
     try
@@ -158,6 +159,122 @@ end
         v4=occ.add_thru_sections([m4,m5,m6])[1][2]; occ.synchronize()
         @test occursin("tube centre",_errtext(()->occ.fillet([v4],[d1],0.4)))
         @test occursin("overruns",_errtext(()->occ.fillet([v4],[d1],0.9)))
+    finally
+        A.finalize()
+    end
+end
+
+# The rebuilt shell survives a sibling solid's import (t19 verbatim):
+# `occ.fillet` rebinds the solid to a fresh kernel shell whose GModel
+# surface loop reuses the orphaned tag, and the stale claim only
+# releases once the shape GC sweeps the dead id — an `occ.remove` of
+# an unrelated entity.  Until then both ids map to the same loop tag;
+# deleting the loop with the stale id clobbered the live claimant, so
+# the loft and the pipe resolved to the same surface list and the
+# volume boundary write-back lost a shared `(2, ·)` source cell.
+@testset "occ.fillet rebuilt shell survives sibling import" begin
+    A.initialize(); occ=A.model.occ
+    try
+        c1=occ.add_circle(0,0,0,0.5); l1=occ.add_curve_loop([c1])
+        c2=occ.add_circle(0.1,0.05,1,0.1); l2=occ.add_curve_loop([c2])
+        c3=occ.add_circle(-0.1,-0.1,2,0.3); l3=occ.add_curve_loop([c3])
+        occ.add_thru_sections([l1,l2,l3]); occ.synchronize()
+        f=A.model.get_boundary([(3,1)],true,false,false)
+        etags=sort!(unique!(abs.([t for (d,t) in
+            A.model.get_boundary(f,false,false,false)])))
+        occ.fillet([1],etags,fill(0.1,length(etags))); occ.synchronize()
+        fillet_boundary=sort!(abs.([t for (d,t) in
+            A.model.get_boundary([(3,1)],true,false,false)]))
+        @test length(fillet_boundary)==5
+
+        # Verbatim t19 pipe: spline spine, wire, rotated disk profile,
+        # pipe, then `Delete{ Surface{1000} }` — the removal sweeps
+        # the orphaned kernel shell before the next sync.
+        pts=[occ.add_point(cos(θ),sin(θ),(i-1)/20;tag=999+i)
+             for (i,θ) in enumerate(2pi .* (0:19) ./ 20)]
+        sp=occ.add_spline(pts;tag=1000)
+        w=occ.add_wire([sp];tag=1000)
+        dk=occ.add_disk(1,0,0,0.2,0.2;tag=1000)
+        occ.rotate([(2,dk)],0,0,0,1,0,0,pi/2)
+        pipe=occ.add_pipe((2,dk),w)
+        occ.remove([(2,dk)],false)
+        occ.synchronize()
+        pipe_tag=pipe[1][2]
+
+        # The fillet loop keeps its claimant; each volume resolves
+        # its own disjoint boundary.
+        m=A._with_model(identity)
+        loft_loop=only(m.volumes[1]);pipe_loop=only(m.volumes[pipe_tag])
+        @test loft_loop!=pipe_loop
+        @test sort!(abs.(m.surface_loops[loft_loop]))==fillet_boundary
+        pipe_boundary=sort!(abs.(m.surface_loops[pipe_loop]))
+        @test length(pipe_boundary)==3
+        @test isempty(intersect(fillet_boundary,pipe_boundary))
+        @test sort!(abs.([t for (d,t) in
+            A.model.get_boundary([(3,pipe_tag)],true,false,false)]))==pipe_boundary
+
+        # The verbatim `Mesh 3` edge: both solids fill their true
+        # boundary and the subdivision write-back transports each
+        # surface product once — no shared `(2, ·)` source cell loss.
+        A.mesh.generate(3)
+        for v in (1,pipe_tag)
+            ets,etags,_=A.mesh.get_elements(3,v)
+            i=findfirst(==(4),ets)
+            @test i!==nothing
+            @test !isempty(etags[i])
+        end
+    finally
+        A.finalize()
+    end
+end
+
+# The rebuilt fillet band owns periodic tensor-B-spline seam curves —
+# closed native edges (`a==b`, `params` span `[0, 2π]`).  The native
+# grader's station list is always open-style `[t0,…,t1]` (its
+# `_gmsh_curve_parameters` pins `params[end]=t1`), so the close-point
+# filter must protect the trailing endpoint station even on closed
+# curves.  At tutorial density the last arc interval can fall inside
+# the `0.3·size` close threshold; letting the filter remove the `t1`
+# station silently truncates the stored discretization, the dim-1
+# emitter then drops the last real interior vertex, and the emitted
+# ring no longer covers the boundary the adjacent surfaces consume —
+# the verbatim t19 `Mesh 3` write-back rejected exactly that gap
+# (`no covering tetrahedron-edge chain`).  Grade every closed native
+# curve in this fixture at that density and assert the `[t0,…,t1]`
+# contract survives.
+@testset "occ.fillet closed-curve endpoint station" begin
+    A.initialize(); occ=A.model.occ
+    try
+        c1=occ.add_circle(0,0,0,0.5); l1=occ.add_curve_loop([c1])
+        c2=occ.add_circle(0.1,0.05,1,0.1); l2=occ.add_curve_loop([c2])
+        c3=occ.add_circle(-0.1,-0.1,2,0.3); l3=occ.add_curve_loop([c3])
+        occ.add_thru_sections([l1,l2,l3]); occ.synchronize()
+        f=A.model.get_boundary([(3,1)],true,false,false)
+        etags=sort!(unique!(abs.([t for (d,t) in
+            A.model.get_boundary(f,false,false,false)])))
+        occ.fillet([1],etags,fill(0.1,length(etags))); occ.synchronize()
+        m=A._with_model(identity)
+        default=M._model_default_mesh1d_options(m,"test")
+        opts=M._ModelMesh1DOptions((
+            name===:lc_min ? 0.001 :
+            name===:lc_max ? 0.3 :
+            name===:from_curvature ? 20.0 :
+            getfield(default,name) for name in fieldnames(M._ModelMesh1DOptions))...)
+        closed=[c for (c,(a,b)) in sort!(collect(m.curves)) if a==b]
+        @test !isempty(closed)
+        for curve in closed
+            t0,t1=M._model_curve_param_bounds(m,curve,"test")
+            result=M._model_mesh_curve!(m,curve,opts,"test";
+                                        _native_producer=true)
+            params=result isa M._ModelNativeCurveGrade ?
+                result.parameters : result
+            @test params isa Vector{Float64}
+            @test length(params)>=3
+            @test params[1]==t0
+            @test params[end]==t1
+            @test all(u->t0<=u<=t1,params)
+            @test issorted(params)
+        end
     finally
         A.finalize()
     end

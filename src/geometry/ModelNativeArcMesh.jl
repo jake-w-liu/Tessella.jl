@@ -143,8 +143,16 @@ function _model_native_curve_grade_with_geometry(m::GeoModel,curve::Int,
         _native_producer=true,_native_geometry=adapter)
     count=length(params)-2
     rows=_birth_rows ? collect(eachindex(params)) : nothing
+    # `params` is always open-style `[t0,…,t1]` here —
+    # `_gmsh_curve_parameters` pins `params[end]=points[end].t=t1` even when
+    # the curve is closed (`a==b`).  `filterPoints` never removes a model
+    # vertex endpoint; passing `closed=true` would expose the trailing `t1`
+    # station as a removable close-point, silently truncating the stored
+    # discretization against the `[t0,…,t1]` contract every consumer holds
+    # (`_dim01_emit_curve!`, `_surface_curve_polygon_params`, write-back
+    # span certificates).  The honest list-convention flag is `false`.
     _filter_close_points!(coordinates,params,gamma,field,(1,curve),
-                          minimum,a==b,force_odd,size_function,caller;row_map=rows)
+                          minimum,false,force_odd,size_function,caller;row_map=rows)
     return _birth_rows ? _ModelNativeCurveGrade(params,rows,count) : params
     finally
         _gmsh_curve_close_points!(points)

@@ -267,12 +267,15 @@ function _model_occ_synchronize!(m::GeoModel)
     # OCC shells are dim -2 in the shape namespace; each becomes a GModel
     # surface loop (signed member faces) consumed by the solid arm. The
     # kernel-side map keeps the binding stable across repeated syncs. A
-    # shell unbound since the last import leaves with its GModel loop.
+    # shell unbound since the last import leaves with its GModel loop —
+    # unless a surviving kernel shell still claims that loop tag: solid
+    # rebinds (fillet, chamfer, defeature) orphan the old shell id while
+    # the replacement claims the same tag until the shape GC sweeps it.
     shell_loops=kernel.shell_loops
     for (id,loop) in collect(shell_loops)
         haskey(kernel.shapes,id) && continue
         delete!(shell_loops,id)
-        delete!(m.surface_loops,loop)
+        loop in values(shell_loops) || delete!(m.surface_loops,loop)
     end
     for ((dimension,tag),id) in sort!(collect(kernel.bindings);by=first)
         dimension==-2 || continue
