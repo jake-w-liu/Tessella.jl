@@ -32,7 +32,7 @@ using ..GeoExec: execute_geo, geo_entity_mesh
 using ..IO: write_msh, _msh_rewrite_save_options
 using ..Model: model_periodic_constraints, model_to_mixed
 using ..Elements: write_mixed_msh, read_mixed_msh, MixedMesh, MixedEntity,
-                  _scaled_mesh_copy,
+                  _scaled_mesh_copy, write_partitioned_topology,
                   MixedEntityData, MixedPartitionData, MixedGhostElement, MixedPeriodicLink,
                   ElementBlock, SpecialElementBlock, MixedElementBlock, ElementRef,
                   msh_dimension, simplex_to_mixed, barycentric_refine, validate
@@ -153,7 +153,11 @@ const _BOOLEAN_FLAGS=Dict(
     # the only variant the 1-D curvature estimator computes, so the stored
     # option is consistent with the produced grading.
     "-clcurviso"=>"Mesh.MeshSizeFromCurvatureIsotropic",
-    "-term"=>"General.Terminal")
+    "-term"=>"General.Terminal",
+    # `-savePartTopology` writes `<name>_topology.pro` beside a partitioned
+    # MSH output (upstream `partitionSaveTopologyFile`).
+    "-part_topo_pro"=>"Mesh.PartitionTopologyFile",
+    "-savePartTopology"=>"Mesh.PartitionTopologyFile")
 
 # `-algo` names we can back with a real implemented algorithm.
 const _ALGORITHMS=Dict(
@@ -173,8 +177,7 @@ const _REJECTED_FLAGS=Dict{String,String}(
     "-preserveNumberingMsh2"=>"MSH2 element-number preservation is not implemented",
     "-part_weight"=>"weighted graph partitioning is not implemented",
     "-partWeight"=>"weighted graph partitioning is not implemented",
-    "-part_topo_pro"=>"partition topology .pro output is not implemented",
-    "-savePartTopology"=>"partition topology .pro output is not implemented",
+
     "-part_physicals"=>"partition physical-group toggling is not implemented",
     "-part_no_physicals"=>"partition physical-group toggling is not implemented",
     "-swapangle"=>"boundary-edge swap optimization is not implemented",
@@ -803,7 +806,8 @@ function _main(args::AbstractVector{<:AbstractString})
         save_options=Dict{String,Float64}()
         save_recorder=(family,member,value)->begin
             family=="Mesh" &&
-                member in ("SaveParametric","SaveTopology","ScalingFactor") &&
+                member in ("SaveParametric","SaveTopology","ScalingFactor",
+                           "PartitionTopologyFile") &&
                 (save_options[member]=Float64(value))
             return nothing
         end
@@ -823,6 +827,19 @@ function _main(args::AbstractVector{<:AbstractString})
         # `Mesh.ScalingFactor` (`-scale`/in-script option) multiplies the
         # serialized vertex coordinates — same hook upstream's writers take.
         scaling=Float64(get(save_options,"ScalingFactor",1.0))
+        # `Mesh.PartitionTopologyFile` (`-savePartTopology`/in-script option)
+        # writes `<name>_topology.pro` beside a partitioned MSH output.
+        topology=!iszero(Float64(get(save_options,"PartitionTopologyFile",0.0)))
+        emit_topology=(written)->begin
+            topology && written isa MixedMesh &&
+                written.partition_data!==nothing &&
+                Int(written.partition_data.num_partitions)>0 &&
+                write_partitioned_topology(
+                    joinpath(dirname(destination),
+                        splitext(basename(destination))[1]*"_topology.pro"),
+                    written)
+            return nothing
+        end
         if dim>0
             result.mesh===nothing && throw(ErrorException("tessella: no mesh produced"))
             if dim==1
@@ -857,9 +874,10 @@ function _main(args::AbstractVector{<:AbstractString})
                 if save_parametric!==nothing || save_topology!==nothing
                     classified=_cli_classified_mesh(result)
                     if classified isa MixedMesh
-                        write_msh(destination,
-                                  _scaled_mesh_copy(classified,scaling);version,binary,
+                        classified_out=_scaled_mesh_copy(classified,scaling)
+                        write_msh(destination,classified_out;version,binary,
                                   save_parametric,save_topology)
+                        emit_topology(classified_out)
                     else
                         (version==2.2 &&
                             (save_parametric==1.0 || save_topology==1.0)) &&
@@ -875,8 +893,9 @@ function _main(args::AbstractVector{<:AbstractString})
                                       version)
                     end
                 elseif result.mesh isa MixedMesh
-                    write_mixed_msh(destination,
-                        _scaled_mesh_copy(result.mesh,scaling);version,binary)
+                    mixed_out=_scaled_mesh_copy(result.mesh,scaling)
+                    write_mixed_msh(destination,mixed_out;version,binary)
+                    emit_topology(mixed_out)
                 elseif binary
                     write_mixed_msh(destination,
                         simplex_to_mixed(_scaled_mesh_copy(result.mesh,scaling));
@@ -909,9 +928,11 @@ function _main(args::AbstractVector{<:AbstractString})
                 isempty(missing_relations) || throw(ArgumentError(
                     "tessella: selected $entity_name projection omits periodic " *
                     "relations $missing_relations"))
-                write_msh(destination,_scaled_mesh_copy(projected,scaling);
+                projected_out=_scaled_mesh_copy(projected,scaling)
+                write_msh(destination,projected_out;
                           version,binary,
                           save_parametric,save_topology)
+                emit_topology(projected_out)
             end
             return destination
         end

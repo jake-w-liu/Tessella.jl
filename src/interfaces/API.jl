@@ -222,6 +222,7 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     # Preserve the existing assignment-only default; nonzero values request
     # actual, bounded Tet4 partition topology or ghost products.
     "Mesh.PartitionCreateTopology"=>0.0,
+    "Mesh.PartitionTopologyFile"=>0.0,
     "Mesh.PartitionCreateGhostCells"=>0.0,
     "Mesh.MeshSizeMin"=>0.0,
     "Mesh.MeshSizeMax"=>1.0e22,

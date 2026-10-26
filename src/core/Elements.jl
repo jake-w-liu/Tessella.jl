@@ -24,7 +24,7 @@ export ElementBlock, ElementRef, SpecialElementBlock, MixedEntity, MixedEntityDa
        MshAncillarySection, MshDataSection,
        MixedPeriodicLink, MixedMesh
 export mixed_crc, simplex_to_mixed, mixed_to_simplex, barycentric_refine
-export write_mixed_msh, read_mixed_msh
+export write_mixed_msh, read_mixed_msh, write_partitioned_topology
 export lagrange_nodes, add_block!, validate
 
 @inline function _elements_reject_bool(value,context::AbstractString)
@@ -7316,6 +7316,137 @@ function _write_mixed_v4(io,m::MixedMesh,names,gmsh_compatible::Bool,preserved)
     return nothing
 end
 
+
+"""
+    write_partitioned_topology(path, m::MixedMesh)
+
+Write the `PartitionSaveTopologyFile` GetDP-style `.pro` group file for a
+partitioned mesh. Mirrors `GModel::writePartitionedTopology` +
+`getPhyscialNameInfo`: only physical groups whose name carries the
+upstream partition encoding (`_part{p1,p2,...}_physical{X}_dim{d}`, i.e.
+the groups `Mesh.PartitionCreatePhysicals` creates) populate the
+`Part~{dim}~{parentPhysical}~{parts...} = Region[{phys}]`, `Omega`,
+`Sigma` and `D~{i}` sections; `D()` always lists the partition count.
+"""
+function _partition_physical_info(name::AbstractString)
+    (isempty(name) || name[1]!='_') && return nothing
+    pstart=findfirst("_part{",name); pstart===nothing && return nothing
+    phstart=findfirst("_physical{",name); phstart===nothing && return nothing
+    f=pstart[end]+1; l=findnext('}',name,f); l===nothing && return nothing
+    parts=[parse(Int,piece) for piece in split(name[f:l-1],',';keepempty=false)]
+    f2=phstart[end]+1; l2=findnext('}',name,f2); l2===nothing && return nothing
+    parent=parse(Int,name[f2:l2-1])
+    return (parent,parts)
+end
+
+function write_partitioned_topology(path::AbstractString,m::MixedMesh)
+    data=m.partition_data
+    data===nothing && throw(ArgumentError(
+        "write_partitioned_topology: mesh carries no partition data"))
+    num=Int(data.num_partitions)
+    num>0 || throw(ArgumentError(
+        "write_partitioned_topology: mesh is not partitioned"))
+    # allParts[dim][physical_tag] = (parent_physical_tag, partitions).
+    # Upstream iterates every model entity's physicals; the parent entries
+    # carry plain names the parser skips, so partition children plus the
+    # regular entity layer give the same coverage.
+    allParts=[Dict{Int,Tuple{Int,Vector{Int}}}() for _ in 0:3]
+    entities=m.entity_data===nothing ? data.entities :
+        merge(m.entity_data.entities,data.entities)
+    for ((dim,tag),entity) in entities
+        1<=dim+1<=4 || continue
+        for phys in entity.physical_tags
+            name=get(m.physical_names,(dim,Int(phys)),"")
+            info=_partition_physical_info(name)
+            info===nothing && continue
+            parent,parts=info
+            entry=get(allParts[dim+1],Int(phys),nothing)
+            merged=entry===nothing ? Int[] : copy(entry[2])
+            for p in parts
+                p in merged || push!(merged,p)
+            end
+            sort!(merged)
+            allParts[dim+1][Int(phys)]=(parent,merged)
+        end
+    end
+    tagToString=[Dict{Int,String}() for _ in 0:3]
+    open(path,"w") do io
+        println(io,"Group{")
+        println(io,"  // Part~{dim}~{parentPhysicalTag}~{part1}~{part2}~...\n")
+        for i in 4:-1:1
+            println(io,"  // Dim ",i-1)
+            for phys in sort!(collect(keys(allParts[i])))
+                parent,parts=allParts[i][phys]
+                partName="Part~{$(i-1)}~{$parent}"
+                print(io,"  Part~{$(i-1)}~{$parent}")
+                for p in parts
+                    partName*="~{$p}"
+                    print(io,"~{$p}")
+                end
+                tagToString[i][phys]=partName
+                println(io," = Region[{$phys}];")
+            end
+            println(io)
+        end
+        println(io,"  // Global names\n")
+        omegas=Dict{Int,Vector{Int}}()
+        sigmasij=Dict{Tuple{Int,Int},Vector{Int}}()
+        sigmas=Dict{Int,Vector{Int}}()
+        neighbors=Dict{Int,Set{Int}}()
+        omegaDim=0
+        for i in 4:-1:1
+            if !isempty(allParts[i]); omegaDim=i-1; break end
+        end
+        for (phys,(parent,parts)) in sort!(collect(pairs(allParts[omegaDim+1])),by=first)
+            length(parts)==1 && (push!(get!(omegas,parts[1],Int[]),phys))
+        end
+        println(io,"  // Omega")
+        for part in sort!(collect(keys(omegas)))
+            println(io,"  Omega~{$part} = Region[{",
+                join((tagToString[omegaDim+1][p] for p in omegas[part]),", "),"}];")
+        end
+        println(io)
+        if omegaDim>0
+            for (phys,(parent,parts)) in sort!(collect(pairs(allParts[omegaDim])),by=first)
+                length(parts)==2 || continue
+                push!(get!(sigmasij,(parts[1],parts[2]),Int[]),phys)
+                push!(get!(sigmasij,(parts[2],parts[1]),Int[]),phys)
+                push!(get!(sigmas,parts[1],Int[]),phys)
+                push!(get!(sigmas,parts[2],Int[]),phys)
+            end
+            println(io,"  // Sigma")
+            for key in sort!(collect(keys(sigmasij)))
+                println(io,"  Sigma~{$(key[1])}~{$(key[2])} = Region[{",
+                    join((tagToString[omegaDim][p] for p in sigmasij[key]),", "),"}];")
+            end
+            println(io)
+            for part in sort!(collect(keys(sigmas)))
+                println(io,"  Sigma~{$part} = Region[{",
+                    join((tagToString[omegaDim][p] for p in sigmas[part]),", "),"}];")
+            end
+            println(io)
+        end
+        print(io,"  D() = {")
+        for i in 1:num
+            i!=1 && print(io,", ")
+            print(io,i)
+        end
+        println(io,"};")
+        if omegaDim>0
+            for (phys,(parent,parts)) in sort!(collect(pairs(allParts[omegaDim])),by=first)
+                length(parts)==2 || continue
+                push!(get!(neighbors,parts[1],Set{Int}()),parts[2])
+                push!(get!(neighbors,parts[2],Set{Int}()),parts[1])
+            end
+            for i in 1:num
+                println(io,"  D~{$i}() = {",
+                    join(sort!(collect(get(neighbors,i,Set{Int}()))),", "),"};")
+            end
+        end
+        println(io,"}\n")
+    end
+    return path
+end
 
 _native_mixed_entity_data(args...;kwargs...)=MixedEntityData(args...;kwargs...,_native_mesh_tags=true)
 

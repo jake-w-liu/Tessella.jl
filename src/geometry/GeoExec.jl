@@ -143,6 +143,7 @@ using ..Recombine: recombine_triangles
 using ..IO: write_msh
 using ..Elements: read_mixed_msh, write_mixed_msh, MixedMesh, ElementBlock, msh_spec,
                   SpecialElementBlock, MixedElementBlock, _scaled_mesh_copy,
+                  write_partitioned_topology,
                   msh_dimension, msh_family, msh_num_nodes
 using ..Model: add_discrete_entity!, DiscreteEntity, _record_append_node!,
                _record_append_element!, _model_fresh_element_tag
@@ -12520,11 +12521,24 @@ function _geo_exec_save!(m::GeoModel,path::AbstractString,
         (version=Float64(_geo_option_number(context,"Mesh",0,"MshFileVersion")))
     version<4.1 && mesh isa MixedMesh && mesh.partition_data!==nothing &&
         (version=4.1)
+    # `Mesh.PartitionTopologyFile` emits `<name>_topology.pro` beside the
+    # MSH output for a partitioned mesh (CreateFile.cpp FORMAT_MSH hook).
+    topology=mesh isa MixedMesh && mesh.partition_data!==nothing &&
+        Int(mesh.partition_data.num_partitions)>0 &&
+        !iszero(something(
+            _geo_option_number(context,"Mesh",0,"PartitionTopologyFile"),0.0))
+    emit_topology=()->begin
+        topology && write_partitioned_topology(
+            joinpath(dirname(file),
+                splitext(basename(file))[1]*"_topology.pro"),mesh)
+        return nothing
+    end
     if mesh isa MixedMesh && mesh.entity_data!==nothing
         # The actual product already owns its Point cells and public labels.
         # Serialize it directly instead of appending a second Point block or
         # replacing its node/element identity tables with dense proxy labels.
         write_mixed_msh(file,mesh;version)
+        emit_topology()
         return nothing
     end
     # Upstream serializes an `MPoint` element per model vertex — the dim-0
@@ -12562,9 +12576,11 @@ function _geo_exec_save!(m::GeoModel,path::AbstractString,
                       physical_names=m.physical_names,
                       elementary_entities=elementary)
         write_mixed_msh(file,out;version)
+        emit_topology()
     else
         write_msh(file,mesh;version,physical_names=m.physical_names,
                   point_elements=point_elements)
+        emit_topology()
     end
     return nothing
 end

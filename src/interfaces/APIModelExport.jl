@@ -158,6 +158,16 @@ function _model_export_write(filename)
                 save_all,caller)
             Elements.write_mixed_msh(filename,target;version,
                 binary=!iszero(get(OPTIONS,"Mesh.Binary",0.0)))
+            # `Mesh.PartitionTopologyFile` (`-savePartTopology`): upstream
+            # writes `<name>_topology.pro` beside the MSH when the model is
+            # partitioned (CreateFile.cpp FORMAT_MSH branch).
+            if target.partition_data!==nothing &&
+                    Int(target.partition_data.num_partitions)>0 &&
+                    !iszero(get(OPTIONS,"Mesh.PartitionTopologyFile",0.0))
+                Elements.write_partitioned_topology(
+                    joinpath(dirname(filename),
+                        splitext(basename(filename))[1]*"_topology.pro"),target)
+            end
         elseif extension==".stl"
             # STL carries only surface facets: no physical selection applies,
             # so the export projection always uses SaveAll semantics.
