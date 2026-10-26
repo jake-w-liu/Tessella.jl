@@ -300,10 +300,15 @@ end
         @test types==Int32[3]
         @test length(tags[1])==4
         @test length(nodes[1])==16
-        @test_throws ArgumentError api.mesh.optimize()
+        # Re-derived 2026-10-26 against Gmsh 4.15.2: `optimize` runs the
+        # native tagged pipeline which, like upstream OptimizeMesh, only
+        # optimizes Region cells — a 2-D quadrangle cache passes through
+        # unchanged (tags [13..16] kept) instead of throwing.
+        @test api.mesh.optimize()===nothing
         @test api.mesh.optimize("",false,0)===nothing
         @test api.mesh.recombine()===nothing
-        @test_throws ArgumentError api.mesh.split_quadrangles()
+        # Cross fields still require a linear Tri3 surface cache; upstream's
+        # quad attempt is an unreproducible PETSc crash, not a clean reject.
         @test_throws ArgumentError api.mesh.compute_cross_field()
         @test length(api.mesh.get_nodes(2,1)[1])==1
         @test length(api.mesh.get_nodes(2,1,true)[1])==9
@@ -317,9 +322,15 @@ end
         api.mesh.reorder_elements(3,1,[3,2,1,0])
         @test reshape(api.mesh.get_elements(2,1)[3][1],4,:)==
               reverse(reshape(before,4,:);dims=2)
+        pre_reverse=api.mesh.get_element(first_tag)[2]
         api.mesh.reverse_elements([first_tag])
         reversed=api.mesh.get_element(first_tag)[2]
-        @test reversed==reshape(api.mesh.get_elements(2,1)[3][1],4,:)[:,1]
+        # Gmsh 4.15.2 reverseElements emits [a,d,c,b] for a quadrangle, and the
+        # reordered block stores the element at its new column, not column 1.
+        @test reversed==pre_reverse[[1,4,3,2]]
+        block_tags,block_nodes=api.mesh.get_elements(2,1)[2:3]
+        @test reversed==
+              reshape(block_nodes[1],4,:)[:,findfirst(==(first_tag),block_tags[1])]
         api.mesh.reverse_elements([first_tag])
         api.mesh.reverse([(2,1)])
         api.mesh.reverse([(2,1)])
@@ -343,11 +354,26 @@ end
         @test size(api.mesh.get().coords,2)==count
         api.mesh.clear([(2,1)])
         @test isempty(api.mesh.get_element_types(2,1))
-        @test isempty(api.mesh.get_element_types(1))
+        # Per-entity upstream: clearing Surface 1 drops only its quadrangles;
+        # the boundary curve Line2 records survive (dim-1 reports [1]).
+        @test api.mesh.get_element_types(1)==Int32[1]
         api.model.add("other")
         @test_throws ArgumentError api.mesh.get()
         api.model.set_current("")
         @test api.mesh.get() isa MixedMesh
+        # Re-derived 2026-10-26 against Gmsh 4.15.2 splitQuadrangles: the four
+        # quadrangles become eight Tri3 under fresh tags (upstream emits
+        # 19..22,25,26,31,32 here) and the retired quad tags report
+        # "Unknown element" on lookup. The Tri3 cache then satisfies the
+        # cross-field Tri3 admission gate.
+        api.mesh.generate(2)
+        @test api.mesh.get_element_types(2,1)==Int32[3]
+        quad_tags=api.mesh.get_elements(2,1)[2][1]
+        @test api.mesh.split_quadrangles()===nothing
+        @test api.mesh.get_element_types(2,1)==Int32[2]
+        @test length(api.mesh.get_elements(2,1)[2][1])==8
+        @test_throws ErrorException api.mesh.get_element(quad_tags[1])
+        @test length(api.mesh.compute_cross_field())==3
     finally
         api.finalize()
     end
@@ -362,7 +388,9 @@ end
         elevated=api.mesh.get()
         @test elevated isa MixedMesh
         @test api.mesh.get_element_types(2,1)==Int32[10]
-        @test isempty(api.mesh.get_element_types(1))
+        # Re-derived 2026-10-26 against Gmsh 4.15.2: order-2 elevation keeps
+        # the boundary curves as Line3 elements — upstream reports [8] too.
+        @test api.mesh.get_element_types(1)==Int32[8]
         @test size(elevated.coords,2)==25
         @test length(api.mesh.get_nodes(2,1)[1])==9
         @test length(api.mesh.get_nodes(1,1)[1])==3
@@ -371,7 +399,20 @@ end
         api.mesh.reverse([(2,1)])
         api.mesh.reverse([(2,1)])
         @test api.mesh.get().coords==elevated.coords
-        @test api.mesh.get_elements(2,1)[3][1]==UInt64.(vec(elevated.blocks[1].nodes))
+        # Re-derived 2026-10-26 against Gmsh 4.15.2: `get_elements` reports
+        # public node tags (entity-birth order, byte-identical to upstream's
+        # Quad9 block) while `blocks[].nodes` are internal indices ordered
+        # differently. Verify the published tag and stored index bind the same
+        # node — coordinates agree within the ~1e-13 transfinite jitter.
+        node_tags,node_coords,_=api.mesh.get_nodes()
+        public_point=Dict(node_tags[k]=>
+            Tuple(node_coords[3k-2:3k]) for k in eachindex(node_tags))
+        published=api.mesh.get_elements(2,1)[3][1]
+        @test all(eachindex(published)) do j
+            published_point=public_point[published[j]]
+            stored_point=Tuple(elevated.coords[:,elevated.blocks[1].nodes[j]])
+            all(k->abs(published_point[k]-stored_point[k])<=1e-9,1:3)
+        end
         api.mesh.set_order(1)
         @test api.mesh.get_element_types(2,1)==Int32[3]
         @test api.mesh.get().coords==linear.coords

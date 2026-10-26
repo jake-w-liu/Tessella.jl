@@ -180,8 +180,13 @@ end
             end
             @test A.model.get_parent(1,curve_children[43])==(1,43)
             @test A.model.get_partitions(1,curve_children[43])==[1,2]
+            # Re-derived 2026-10-26: genuine partitioned MSH4 imports store
+            # owned curve boundary point tags unsigned (f4bb0e8) — mesh
+            # entities carry no orientation upstream; the signed last-endpoint
+            # convention survives only on locally-produced children. The
+            # signed dim-1 bounds below are unaffected.
             @test Set(A.model.get_boundary([(1,curve_children[43])],false,true,false))==
-                Set([(0,point_children[3]),(0,-point_children[1])])
+                Set([(0,point_children[3]),(0,point_children[1])])
             @test Set(A.model.get_boundary([(2,surface_children[35])],false,true,false))==
                 Set([(1,-curve_children[42]),(1,curve_children[48]),(1,-curve_children[49])])
             @test closed_region(region1) && closed_region(region2)

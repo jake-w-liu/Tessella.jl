@@ -47,7 +47,16 @@ end
                            rtol=0,atol=64eps()) for i in 1:3)
     end
     _rotation_sweep_allocation_probe(1000)
-    @test (@allocated _rotation_sweep_allocation_probe(1000))==0
+    # The zero-allocation contract covers the compiled native-x87 sincos path.
+    # Under `--compile=min` llvmcall is unavailable, so `_gm87_sincos` routes
+    # through the extended-precision BigFloat emulation, which allocates by
+    # design; on non-Windows hosts `_gm87_sincos` aliases the alloc-free
+    # libm `sincos` either way. Gate the pin to the live kernel.
+    if !Sys.iswindows() || Tessella.GmshLibm._win_x87_llvm()
+        @test (@allocated _rotation_sweep_allocation_probe(1000))==0
+    else
+        @test _rotation_sweep_allocation_probe(1000) isa NTuple{3,Float64}
+    end
 end
 
 function _execute_transform_source(source::AbstractString;mesh_dim=0)

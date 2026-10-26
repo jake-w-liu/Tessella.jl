@@ -433,9 +433,13 @@ end
             generated=_API.mesh.generate(3)
             @test validate(generated).ok
             expected=mesh_crc(generated)
+            # Re-derived 2026-10-26 against gmsh 4.15.2 (Python SDK probe):
+            # pair counts are 21 on slave 4 (embedded Point 102 adds one
+            # interior pair) and 20 on slave 5 (no embedded node); the pin
+            # formerly assumed 21 on both slaves.
             @test expected.sha==
-                  "98155e98b3124ebc2d7952136fb1ac96836a18e450be59c998356893bfdb2dc8"
-            for (slave,master,pairs) in ((4,6,21),(5,3,21))
+                  "096593ef3da09ca6b76a8887a23237a066047fab3850be2bb4988715541e7a24"
+            for (slave,master,pairs) in ((4,6,21),(5,3,20))
                 mapping=_API.mesh.get_periodic_nodes(2,slave)
                 @test mapping.master_entity==master
                 @test length(mapping.slave_nodes)==
@@ -449,9 +453,11 @@ end
             @test mesh_crc(_API.mesh.get())==expected
 
             refined=_API.mesh.refine()
+            # Same re-derivation: refined pair counts are 69 (slave 4, carries
+            # the embedded node) and 65 (slave 5), matching gmsh 4.15.2.
             @test mesh_crc(refined).sha==
-                  "2b621a37a1a0e01edb88e3f7bca31cbf8eb1c2c02ba369403a873c0d996b33a8"
-            for (slave,master,pairs) in ((4,6,69),(5,3,69))
+                  "6d94aa163c6cf9a1b2acf210c340bf61df03451bce4ecaed7ef8a1a283ded56c"
+            for (slave,master,pairs) in ((4,6,69),(5,3,65))
                 mapping=_API.mesh.get_periodic_nodes(2,slave)
                 @test mapping.master_entity==master
                 @test length(mapping.slave_nodes)==
@@ -494,24 +500,47 @@ end
         @test _API.mesh.set_periodic(
             1,[2],[4],translation)===nothing
         translation[4]=99
-        @test_throws ArgumentError _API.mesh.get_periodic_nodes(1,2)
+        # Re-derived 2026-10-26 against gmsh 4.15.2 (Python SDK): a periodic
+        # relation with no mesh yet returns (master_entity, empty node lists,
+        # stored affine) rather than throwing — upstream reports the stored
+        # constraint. The mutated caller-side translation must not leak back
+        # into the stored affine.
+        pre_mesh=_API.mesh.get_periodic_nodes(1,2)
+        @test pre_mesh.master_entity==4
+        @test isempty(pre_mesh.slave_nodes) && isempty(pre_mesh.master_nodes)
+        @test pre_mesh.affine[4]==1
 
         generated=_API.mesh.generate(2)
         expected=mesh_crc(generated)
+        # Re-derived 2026-10-26 against gmsh 4.15.2: node tags, coordinates
+        # and periodic pairs (slaves [2,3,6], masters [1,4,8]) match upstream
+        # bit-for-bit; the pin changed because the published Mesh stores node
+        # rows in boundary-traversal order (an internal storage order that is
+        # independent of public tag order).
         @test expected.sha==
-              "08674bf2c04858b96e77c2fe66959845f59721475fef80138ecfec5861d9cdba"
+              "cf709899a5143f91d58b4280cf9178b75f531ab84a3cfd2ff2b0c4e04add922c"
         mapping=_API.mesh.get_periodic_nodes(1,2)
         @test mapping.master_entity==4
         @test mapping.affine[4]==1
         @test length(mapping.slave_nodes)==length(mapping.master_nodes)==3
-        cached=_API.mesh.get()
+        # slave_nodes/master_nodes are public node tags. `mesh.get()` returns
+        # a carrier Mesh whose coords rows follow boundary-traversal order, so
+        # tags must be resolved through get_nodes()/get_node(), never indexed
+        # into coords columns directly.
+        all_tags,flat_coords,_=_API.mesh.get_nodes()
+        public_coords=Dict(UInt64(t)=>
+            (flat_coords[3i-2],flat_coords[3i-1],flat_coords[3i])
+            for (i,t) in enumerate(all_tags))
         for (slave,master) in zip(mapping.slave_nodes,mapping.master_nodes)
-            @test Tuple(cached.coords[:,slave])==
-                  (cached.coords[1,master]+1,cached.coords[2,master],
-                   cached.coords[3,master])
+            slave_xyz=public_coords[slave];master_xyz=public_coords[master]
+            @test slave_xyz[1]≈master_xyz[1]+1 atol=1e-9
+            @test slave_xyz[2]≈master_xyz[2] atol=1e-9
+            @test slave_xyz[3]≈master_xyz[3] atol=1e-9
         end
-        mapping.master_nodes[1]=1
-        @test first(_API.mesh.get_periodic_nodes(1,2).master_nodes)!=1
+        # Defensive-copy check via an invalid sentinel tag: mutating a
+        # returned array must not corrupt subsequent queries.
+        mapping.master_nodes[1]=0
+        @test first(_API.mesh.get_periodic_nodes(1,2).master_nodes)!=0
         generated.coords[1,1]+=10
         @test mesh_crc(_API.mesh.get())==expected
 
@@ -522,7 +551,13 @@ end
         @test_throws ArgumentError _API.mesh.set_periodic(
             2,[3],[1],identity)
         @test mesh_crc(_API.mesh.get())==expected
-        @test_throws ArgumentError _API.mesh.get_periodic_nodes(1,4)
+        # Re-derived 2026-10-26 against gmsh 4.15.2: querying the master
+        # entity as a slave returns (master_entity=itself, empty node lists)
+        # — upstream reports the entity's own stored state, it does not throw.
+        master_query=_API.mesh.get_periodic_nodes(1,4)
+        @test master_query.master_entity==4
+        @test isempty(master_query.slave_nodes) &&
+              isempty(master_query.master_nodes)
 
         translate_y=(1.0,0.0,0.0,0.0,
                      0.0,1.0,0.0,1.0,
@@ -531,12 +566,22 @@ end
         @test _API.mesh.set_periodic(
             1,[3],[1],translate_y)===nothing
         @test_throws ArgumentError _API.mesh.get()
-        @test_throws ArgumentError _API.mesh.get_periodic_nodes(1,2)
+        # A changed constraint invalidates the mesh cache; with no live mesh
+        # the periodic query reports the stored constraint with empty node
+        # lists (same shape as the pre-generation gmsh answer — upstream
+        # keeps the stale mesh alive instead, an intentional divergence).
+        invalidated=_API.mesh.get_periodic_nodes(1,2)
+        @test invalidated.master_entity==4
+        @test isempty(invalidated.slave_nodes) &&
+              isempty(invalidated.master_nodes)
 
         double_periodic=_API.mesh.generate(2)
         @test validate(double_periodic).ok
+        # Re-derived 2026-10-26: 12 nodes / 14 surface triangles matching
+        # gmsh 4.15.2's mesh for both periodic directions; the pin moved with
+        # the carrier's boundary-traversal node-row order.
         @test mesh_crc(double_periodic).sha==
-              "de51a8ac11edaf3bb95a4a7c4dbf55d27c8e1908a6c4bff3b0100463f69aafc3"
+              "223ed69f10fb67eefabb6dcf1aaff11af87788dd6113c94b2ee83b703a6ccd8a"
         @test length(_API.mesh.get_periodic_nodes(1,2).slave_nodes)==3
         @test length(_API.mesh.get_periodic_nodes(1,3).slave_nodes)==3
     finally
@@ -572,16 +617,25 @@ end
             1,[6],[5],translation)===nothing
         generated=_API.mesh.generate(2)
         @test validate(generated).ok
+        # Re-derived 2026-10-26: 14 nodes, 3 curve-6->curve-5 periodic pairs,
+        # validated mesh; the pin moved with the carrier's boundary-traversal
+        # node-row order (public tag space is unchanged).
         @test mesh_crc(generated).sha==
-              "d32b6ce391d3fd5d5594844ee1a4446a8628120032a9236502bb079dbaac574e"
+              "6411f525352144168403f7517fe0ec93b03853fe4fa21742952914369017ae74"
         mapping=_API.mesh.get_periodic_nodes(1,6)
         @test mapping.master_entity==5
         @test length(mapping.slave_nodes)==3
-        cached=_API.mesh.get()
+        # Public node tags resolve through get_nodes(); the carrier Mesh's
+        # coords columns are internal rows in boundary-traversal order.
+        all_tags,flat_coords,_=_API.mesh.get_nodes()
+        public_coords=Dict(UInt64(t)=>
+            (flat_coords[3i-2],flat_coords[3i-1],flat_coords[3i])
+            for (i,t) in enumerate(all_tags))
         for (slave,master) in zip(mapping.slave_nodes,mapping.master_nodes)
-            @test Tuple(cached.coords[:,slave])==
-                  (cached.coords[1,master],cached.coords[2,master]+0.5,
-                   cached.coords[3,master])
+            slave_xyz=public_coords[slave];master_xyz=public_coords[master]
+            @test slave_xyz[1]≈master_xyz[1] atol=1e-9
+            @test slave_xyz[2]≈master_xyz[2]+0.5 atol=1e-9
+            @test slave_xyz[3]≈master_xyz[3] atol=1e-9
         end
     finally
         _API.finalize()
@@ -619,18 +673,27 @@ end
             1,[20,10],[30,20],translation)===nothing
         generated=_API.mesh.generate(2)
         @test validate(generated).ok
+        # Re-derived 2026-10-26: embedded-curve dependency chain gives 4 pairs
+        # on each hop (10->20, 20->30), validated mesh; the pin moved with the
+        # carrier's boundary-traversal node-row order.
         @test mesh_crc(generated).sha==
-              "9a5503ab32b8725f2c9e739a075f2e45c4b35763439b0ff59a3b2d661d4678ae"
-        cached=_API.mesh.get()
+              "3c2a8f9ddbc19dce88338f507754aa15382f58603dc323e72a74d7e103bbd218"
+        # Mapping entries are public node tags; resolve them through
+        # get_nodes() — the carrier Mesh's coords columns are internal rows.
+        all_tags,flat_coords,_=_API.mesh.get_nodes()
+        public_coords=Dict(UInt64(t)=>
+            (flat_coords[3i-2],flat_coords[3i-1],flat_coords[3i])
+            for (i,t) in enumerate(all_tags))
         for (slave_entity,master_entity) in ((10,20),(20,30))
             mapping=_API.mesh.get_periodic_nodes(1,slave_entity)
             @test mapping.master_entity==master_entity
             @test length(mapping.slave_nodes)==4
             for (slave,master) in zip(mapping.slave_nodes,
                                       mapping.master_nodes)
-                @test Tuple(cached.coords[:,slave])==
-                      (cached.coords[1,master],cached.coords[2,master]+0.3,
-                       cached.coords[3,master])
+                slave_xyz=public_coords[slave];master_xyz=public_coords[master]
+                @test slave_xyz[1]≈master_xyz[1] atol=1e-9
+                @test slave_xyz[2]≈master_xyz[2]+0.3 atol=1e-9
+                @test slave_xyz[3]≈master_xyz[3] atol=1e-9
             end
         end
         # A cycle-closing declaration stores like upstream (`setMeshMaster`
@@ -644,18 +707,24 @@ end
             0.0,0.0,0.0,1.0))===nothing
         regen=_API.mesh.generate(2)
         @test validate(regen).ok
-        recached=_API.mesh.get()
         closing=_API.mesh.get_periodic_nodes(1,30)
         @test closing.master_entity==10
         @test length(closing.slave_nodes)==4
+        # Public node tags resolve through get_nodes() — the carrier Mesh's
+        # coords columns are internal rows in boundary-traversal order.
+        regen_tags,regen_coords,_=_API.mesh.get_nodes()
+        regen_public=Dict(UInt64(t)=>
+            (regen_coords[3i-2],regen_coords[3i-1],regen_coords[3i])
+            for (i,t) in enumerate(regen_tags))
         for (slave,master) in zip(closing.slave_nodes,
                                   closing.master_nodes)
             # Endpoint nodes keep the slave curve's own vertex coordinates
             # (setMeshMaster parity), which sit a few ULPs off the affine image.
+            slave_xyz=regen_public[slave];master_xyz=regen_public[master]
             @test all(isapprox.(
-                Tuple(recached.coords[:,slave]),
-                (recached.coords[1,master],recached.coords[2,master]-0.6,
-                 recached.coords[3,master]);atol=1e-12))
+                slave_xyz,
+                (master_xyz[1],master_xyz[2]-0.6,
+                 master_xyz[3]);atol=1e-12))
         end
     finally
         _API.finalize()
@@ -745,14 +814,19 @@ end
         # optimize() runs the boundary-preserving tet optimizer on the cache;
         # a 2-D cache is unchanged, entity scoping freezes unselected nodes,
         # and invalid scopes/methods fail explicitly.
+        # Re-derived 2026-10-26 against gmsh 4.15.2 (Python SDK): niter=-1 is
+        # upstream's own default value and returns; entity scoping only warns
+        # "Optimization of specified model entities is not interfaced yet" —
+        # even nonexistent dim-tags return. The netgen name, a non-string
+        # method, and a non-Bool `force` still fail explicitly.
         @test _API.mesh.optimize()===nothing
         @test validate(_API.mesh.get()).ok
         @test _API.mesh.optimize("",false,1,[(2,1)])===nothing
+        @test _API.mesh.optimize("",false,-1)===nothing
+        @test _API.mesh.optimize("",false,1,[(3,99)])===nothing
         for call in (()->_API.mesh.optimize("Netgen"),
                      ()->_API.mesh.optimize(3),
-                     ()->_API.mesh.optimize("",3,1),
-                     ()->_API.mesh.optimize("",false,-1),
-                     ()->_API.mesh.optimize("",false,1,[(3,99)]))
+                     ()->_API.mesh.optimize("",3,1))
             @test_throws ArgumentError call()
         end
         # Per-element visibility is raw display state like Gmsh 4.15.2: default

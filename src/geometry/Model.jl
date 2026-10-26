@@ -1450,6 +1450,31 @@ function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
     for constraint in derived_curve_constraints
         m.periodic[(1,Int(constraint.slave_entity))]=constraint
     end
+    # A newly declared relation makes its slave's retained `Mesh 1`
+    # discretization (`GEdge::mesh_vertices`) stale: the slave must re-copy
+    # the (new) master at the next generation. Dependents that copied the
+    # stale slave are equally stale — a curve is stale whenever its master
+    # is — so the closure runs to a fixpoint over the stored constraint
+    # graph. Cycle-closing declarations therefore invalidate the whole cycle
+    # and regeneration re-derives it like a cold generate.
+    stale=Set{Int}(Int(constraint.slave_entity) for constraint in
+        Iterators.flatten((pending,derived_curve_constraints))
+        if constraint.dim==1)
+    if !isempty(stale)
+        changed=true
+        while changed
+            changed=false
+            for ((edim,slave),constraint) in m.periodic
+                edim==1 || continue
+                slave in stale && continue
+                Int(constraint.master_entity) in stale || continue
+                push!(stale,slave);changed=true
+            end
+        end
+        for curve in stale
+            delete!(m.curve_params,curve)
+        end
+    end
     return nothing
 end
 
