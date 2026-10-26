@@ -1567,13 +1567,6 @@ function _geo_exec_call!(m::GeoModel,statements::Vector{String},
     end
 end
 
-function _boolean_delete_operand(raw::AbstractString)
-    suffix=String(strip(raw))
-    match(r"^;?\s*(?:Delete\s*;?)?$",suffix)===nothing && throw(ArgumentError(
-        "execute_geo: Boolean operand suffix must contain only optional Delete; got $(repr(suffix))"))
-    return occursin(r"\bDelete\b",suffix)
-end
-
 const _GEO_BOOLEAN_OPS=Dict("Difference"=>:difference,"Union"=>:union,
                             "Intersection"=>:intersection,
                             "Fragments"=>:fragments)
@@ -1605,40 +1598,170 @@ function _geo_boolean_groups(raw::AbstractString,caller::AbstractString)
     return groups
 end
 
-# One operand group `{ Volume{tags}; Delete; }` — `;`-separated clauses of
-# `Kind{...}` entity lists and `Delete` markers. Only Volume operands are
-# supported; other dimension clauses fail explicitly.
-function _geo_boolean_operand_group(raw::AbstractString,
-                                    context::_GeoNumericContext,
-                                    caller::AbstractString)
-    tags=Int[];del=false
-    for clause in split(raw,';')
-        text=strip(String(clause))
-        isempty(text) && continue
-        text=="Delete" && (del=true;continue)
-        mm=match(r"^([A-Za-z]+)\s*\{(.*)\}$",text)
-        mm===nothing && throw(ArgumentError(
-            "$caller: malformed operand clause $(repr(text))"))
-        mm.captures[1]=="Volume" || throw(ArgumentError(
-            "$caller: only Volume Boolean operands are supported; " *
-            "got $(mm.captures[1]){$(mm.captures[2])}"))
-        append!(tags,_geo_exec_entity_tags(
-            mm.captures[2],context,"$caller Volume operands"))
+# Split an operand-group body on its top-level `;` (`tEND`) separators —
+# clauses like `Volume{1}` or inline `Point(7) = {..}` definitions carry their
+# own braces, so only depth-0 semicolons delimit members.
+function _geo_boolean_group_clauses(raw::AbstractString)
+    s=String(raw);clauses=String[]
+    depth=0;parens=0;start=firstindex(s)
+    i=start;last=lastindex(s)
+    while i<=last
+        c=s[i]
+        if c=='{'
+            depth+=1
+        elseif c=='}'
+            depth-=1
+        elseif c=='('
+            parens+=1
+        elseif c==')'
+            parens-=1
+        elseif c==';' && depth==0 && parens==0
+            # Empty segments stay in the list — a `;;`/leading `;` is a
+            # grammar error upstream, not a skippable separator.
+            push!(clauses,String(strip(s[start:prevind(s,i)])))
+            start=nextind(s,i)
+        end
+        i=nextind(s,i)
     end
-    return (tags=tags,delete=del)
+    start<=last &&
+        (clause=strip(s[start:last]);isempty(clause) ||
+         push!(clauses,String(clause)))
+    return clauses
 end
 
-function _geo_boolean_operands(groups::Vector{String},
+# One operand group `{ shapes; Delete; }` — the upstream
+# `'{' ListOfShapes BooleanOption '}'` production: `;`-terminated shape-list
+# members (`Point{..}`/`Curve{..}`/`Line{..}`/`Surface{..}`/`Volume{..}` and
+# `GeoEntity{d}{..}` tag clauses, `Kind{:}` wildcards, `Physical`/`Parent`
+# selectors, inline `Kind(tag) = ..` definitions — `Transform`/`Name{..}`
+# actions are `MultipleShape`, not `ListOfShapes`, so they reject here),
+# then the trailing option: `Delete`, `Recursive Delete`, or either followed
+# by an `FExpr` whose truthiness gates the delete (upstream does not
+# distinguish the recursive form). Returns `(dimtags, delete)` — the operand
+# entities as `(dim, tag)` pairs in list order. Members of any dimension are
+# admitted upstream; operand dims the engine cannot map fail when applied.
+function _geo_boolean_operand_group(m::GeoModel,raw::AbstractString,
+                                    context::_GeoNumericContext,
+                                    caller::AbstractString;
+                                    allocator_state=nothing)
+    body=String(strip(raw))
+    isempty(body) && return (dimtags=NTuple{2,Int}[],delete=false)
+    # Every `ListOfShapes` member and the `BooleanOption` carry their own
+    # `tEND` upstream — a non-empty group body ends with `;`. An empty
+    # clause (`;;`, leading `;`) has no production either; bison reports
+    # the unexpected `}`/`;` lookahead as a syntax error.
+    endswith(body,";") || _geo_syntax_abort("}")
+    clauses=_geo_boolean_group_clauses(body)
+    any(isempty,clauses) && _geo_syntax_abort(";")
+    del=false
+    if !isempty(clauses)
+        tail=clauses[end]
+        if (dm=match(r"^(?:Recursive\s+)?Delete\b",tail))!==nothing
+            suffix=strip(String(tail[nextind(tail,firstindex(tail),
+                                           ncodeunits(dm.match)):end]))
+            # `Delete {..}` is the entity-delete action, not a Boolean
+            # option — inside an operand group it is a syntax error upstream.
+            startswith(suffix,"{") && throw(ArgumentError(
+                "$caller: malformed operand clause $(repr(tail))"))
+            del=isempty(suffix) ? true :
+                _geo_eval_numeric(suffix,context,"$caller Delete")!=0.0
+            pop!(clauses)
+        end
+    end
+    # A `Delete` clause anywhere but the tail cannot be the BooleanOption —
+    # upstream expects `}` there, a syntax error.
+    any(c->match(r"^(?:Recursive\s+)?Delete\b",c)!==nothing,clauses) &&
+        throw(ArgumentError(
+            "$caller: `Delete` operand option must close its `{ .. }` group"))
+    for clause in clauses
+        hm=match(r"^([A-Za-z_][A-Za-z0-9_]*)",clause)
+        hm===nothing && throw(ArgumentError(
+            "$caller: malformed operand clause $(repr(clause))"))
+        head=hm.captures[1]
+        rest=strip(String(clause[nextind(clause,firstindex(clause),
+                                     ncodeunits(head)):end]))
+        # Operand members are `ListOfShapes` items: entity clauses,
+        # wildcards, `Physical`/`Parent` selectors, and `Kind(tag) = ..`
+        # definitions — all head `{` forms only for the entity/selector
+        # keywords. Any other `Name{..}` clause (a `Transform`, a shape
+        # action like `Duplicata`, or a nested `Boolean` operator) is not in
+        # the operand grammar — upstream reports a syntax error.
+        if startswith(rest,"{") && !(head in
+                ("Point","Curve","Line","Surface","Volume","GeoEntity",
+                 "Physical","Parent"))
+            throw(ArgumentError(
+                "$caller: '$(head){..}' is not a Boolean operand member"))
+        end
+    end
+    isempty(clauses) &&
+        return (dimtags=NTuple{2,Int}[],delete=del)
+    dts=_geo_shape_list_entities!(
+        m,join(clauses,";")*";",context,caller;
+        allocator_state=allocator_state)
+    return (dimtags=dts,delete=del)
+end
+
+function _geo_boolean_operands(m::GeoModel,groups::Vector{String},
                                context::_GeoNumericContext,
-                               caller::AbstractString)
+                               caller::AbstractString;allocator_state=nothing)
     length(groups)==2 || throw(ArgumentError(
         "$caller: expected `{ objects }{ tools }` operand groups; " *
         "got $(length(groups)) group$(length(groups)==1 ? "" : "s")"))
-    objects=_geo_boolean_operand_group(groups[1],context,caller)
-    tools=_geo_boolean_operand_group(groups[2],context,caller)
-    isempty(objects.tags) && throw(ArgumentError(
-        "$caller: the object operand group is empty"))
+    objects=_geo_boolean_operand_group(
+        m,groups[1],context,caller;allocator_state=allocator_state)
+    tools=_geo_boolean_operand_group(
+        m,groups[2],context,caller;allocator_state=allocator_state)
     return (objects=objects,tools=tools)
+end
+
+# Apply the resolved operands: an all-volume operation runs the native
+# arrangement `boolean_volumes_multi!` (which keeps the lazy `m.booleans`
+# provenance records); any sub-volume operand goes through the OCC kernel —
+# `OCC_Internals::booleanOperator` — with entities bound into `m.occ_kernel`
+# first and the outcome synchronized back, the same routing the
+# `model.occ.fuse/cut/intersect/fragment` API takes. Operand tags that
+# resolve to no live entity report upstream's lookup `Msg::Error` plus the
+# recoverable `Could not apply boolean operator`; engine rejections (the
+# bounded kernel admits volume/surface operands only) surface the endpoint's
+# own message before the same `yymsg(0)`. An empty object list is upstream's
+# early `return true` — a no-op producing no output entities.
+function _geo_boolean_apply!(m::GeoModel,op::Symbol,objects,tools;
+                             tag::Int=0,context::_GeoNumericContext,
+                             allocator_state,caller::AbstractString)
+    obj=objects.dimtags;tool=tools.dimtags
+    isempty(obj) && return NTuple{2,Int}[]
+    if all(e->e[1]==3,obj) && all(e->e[1]==3,tool)
+        out=boolean_volumes_multi!(m,op,
+            Int[t for (_,t) in obj],Int[t for (_,t) in tool];tag=tag,
+            remove_object=objects.delete,remove_tool=tools.delete,
+            caller=caller)
+        return NTuple{2,Int}[(3,t) for t in out]
+    end
+    kernel=_geo_occ_prepare_kernel!(m,allocator_state)
+    unknown=[e for e in Iterators.flatten((obj,tool))
+             if !_geo_geo_entity_known(m,e[1],e[2])]
+    if !isempty(unknown)
+        for (d,t) in unknown
+            _geo_msg_error!(context,"Unknown OpenCASCADE entity of " *
+                "dimension $d with tag $t")
+        end
+        _geo_yyerror!(context,"Could not apply boolean operator")
+        return NTuple{2,Int}[]
+    end
+    out_dt=try
+        _geo_occ_bind_entities!(
+            m,NTuple{2,Int}[e for e in Iterators.flatten((obj,tool))],
+            kernel,caller)
+        first(Model._model_occ_boolean(
+            m,op,obj,tool,tag,objects.delete,tools.delete,caller))
+    catch err
+        err isa InterruptException && rethrow()
+        (err isa ArgumentError || err isa ErrorException) || rethrow()
+        _geo_occ_fail!(context,err,"Could not apply boolean operator")
+        return NTuple{2,Int}[]
+    end
+    _geo_occ_finish!(m,context)
+    return NTuple{2,Int}[e for e in out_dt]
 end
 
 # A `BooleanX{...}{...}` value term — the form allowed inside `v() =` /
@@ -1654,9 +1777,14 @@ function _geo_exec_boolean_term(m::GeoModel,raw::AbstractString,
     rest=String(strip(mm.captures[2]))
     startswith(rest,"(") && return nothing
     groups=_geo_boolean_groups(rest,caller)
-    # Gmsh.y: upstream only resolves operands and applies the operator when
-    # the OCC kernel is active; under built-in the term is a recoverable
-    # diagnostic and evaluates to an empty shape list.
+    # Upstream evaluates the operand `ListOfShapes` during the parse — tag
+    # expressions, inline `Kind(tag) = ..` definitions, and transform side
+    # effects all run before the factory gate in the `Boolean` action.
+    operands=_geo_boolean_operands(m,groups,context,caller;
+                                   allocator_state=allocator_state)
+    # Gmsh.y: upstream applies the operator only when the OCC kernel is
+    # active; under built-in the term is a recoverable diagnostic and
+    # evaluates to an empty shape list.
     if allocator_state===nothing || allocator_state.factory!==:opencascade
         _geo_yyerror!(context,
             "Boolean operators only available with OpenCASCADE geometry kernel")
@@ -1666,13 +1794,12 @@ function _geo_exec_boolean_term(m::GeoModel,raw::AbstractString,
     op=get(_GEO_BOOLEAN_OPS,opname,nothing)
     op===nothing && throw(ArgumentError(
         "execute_geo: Boolean$opname is not implemented"))
-    operands=_geo_boolean_operands(groups,context,caller)
-    out=boolean_volumes_multi!(m,op,
-        operands.objects.tags,operands.tools.tags;
-        remove_object=operands.objects.delete,
-        remove_tool=operands.tools.delete,caller=caller)
+    out=_geo_boolean_apply!(m,op,operands.objects,operands.tools;
+        context=context,allocator_state=allocator_state,caller=caller)
     context.geo_changed=true
-    return Float64.(out)
+    # `VectorOfPairs2ListOfShapes` flattens outDimTags to the tag list — the
+    # term's value carries tags only, dims dropped like upstream.
+    return Float64[Float64(t) for (_,t) in out]
 end
 
 # `v() = ShapeFromFile("x.step")` — `OCC_Internals::shapeFromFile`: the
@@ -4508,8 +4635,22 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
     # `GEO_Internals::extrude`/`ExtrudeShapes` silently skips tags that do
     # not resolve to a live entity — unlike the transform endpoints it
     # emits no per-entity diagnostic.
-    entities=NTuple{2,Int}[e for e in entities
-        if _geo_geo_entity_known(m,e[1],abs(e[2]))]
+    builtin=allocator_state===nothing || allocator_state.factory!==:opencascade
+    kept=NTuple{2,Int}[]
+    for e in entities
+        if e[1]==3 && builtin
+            # `ExtrudeShapes`' `default:` arm reports `Msg::Error` for any
+            # non-extrudable type unconditionally — a `Volume` fails before
+            # its existence lookup (`MSH_VOLUME` is 400), so it cannot share
+            # the silent skip. The upstream loop still walks the remaining
+            # shapes.
+            _geo_msg_error!(context,
+                "Impossible to extrude entity $(e[2]) (of type 400)")
+        elseif _geo_geo_entity_known(m,e[1],abs(e[2]))
+            push!(kept,e)
+        end
+    end
+    entities=kept
     if nvec==0
         # `BOUNDARY_LAYER` (`Extrude {shapes; params}`): upstream rejects it
         # in the parser action under OCC before `ExtrudeShapes` runs.
@@ -7951,23 +8092,23 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_eval_numeric(mm.captures[2],context,"$caller result tag"),
             "$caller result tag"))
         groups=_geo_boolean_groups(mm.captures[3],caller)
-        # `BooleanShape` reports a recoverable `yymsg(0)` and skips operand
-        # resolution when the OCC kernel is inactive.
+        # The operand `ListOfShapes` still reduce (side effects included)
+        # under the built-in factory — only the operator application gates
+        # on OpenCASCADE upstream.
+        operands=_geo_boolean_operands(m,groups,context,caller;
+                                       allocator_state=allocator_state)
+        # Gmsh.y `BooleanShape`: unlike the bare `Boolean` term the tagged
+        # statement has no built-in-kernel diagnostic — it silently no-ops
+        # (operand side effects above still ran).
         if allocator_state===nothing || allocator_state.factory!==:opencascade
-            _geo_yyerror!(context,
-                "Boolean operators only available with OpenCASCADE " *
-                "geometry kernel")
             return
         end
         opname=_GEO_BOOLEAN_NAMES[mm.captures[1]]
         op=get(_GEO_BOOLEAN_OPS,opname,nothing)
         op===nothing && throw(ArgumentError(
             "execute_geo: Boolean$opname is not implemented"))
-        operands=_geo_boolean_operands(groups,context,caller)
-        boolean_volumes_multi!(m,op,
-            operands.objects.tags,operands.tools.tags;tag=tag,
-            remove_object=operands.objects.delete,
-            remove_tool=operands.tools.delete,caller=caller)
+        _geo_boolean_apply!(m,op,operands.objects,operands.tools;tag=tag,
+            context=context,allocator_state=allocator_state,caller=caller)
         return
     elseif match(r"^(Translate|Rotate|Dilate|Symmetry)\s*\{",line)!==nothing
         _geo_exec_transform_statement!(m,line,context,allocator_state)

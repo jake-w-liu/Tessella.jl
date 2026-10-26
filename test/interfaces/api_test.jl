@@ -186,8 +186,15 @@ end
         try
             _API.initialize()
             @test _API.model.add_box(0,0,0,1,1,1;tag=1)==1
-            @test_throws ArgumentError _API.open_geo!(invalid)
-            @test_throws ArgumentError _API.model.add_box(0,0,0,1,1,1;tag=1)
+            # `Extrude {Volume{1}}` parses, but upstream's built-in
+            # `ExtrudeShapes` reports a recoverable `Msg::Error`
+            # ("Impossible to extrude entity 1 (of type 400)") — the open
+            # still succeeds and publishes the file's empty model.
+            invalid_result=_API.open_geo!(invalid)
+            @test invalid_result.errors==
+                  ["Impossible to extrude entity 1 (of type 400)"]
+            @test invalid_result.msg_error_count==1
+            @test _API.model.add_box(0,0,0,1,1,1;tag=1)==1
             @test _API.model.add_box(2,0,0,1,1,1;tag=2)==2
 
             result=_API.open_geo!(valid)
@@ -332,7 +339,9 @@ end
         @test _API.mesh.set_size((0=>101,0=>102),0.25)===nothing
         @test _API.CURRENT[].point_size[101]==0.25
         @test _API.CURRENT[].point_size[102]==0.25
-        @test_throws ArgumentError _API.mesh.get()
+        # Upstream `setSize` only stores the prescribed size — it does not
+        # discard the generated mesh, so `mesh.get` keeps returning it.
+        @test mesh_crc(_API.mesh.get())==mesh_crc(initial)
 
         refreshed=_API.mesh.generate(3)
         @test validate(refreshed).ok
@@ -383,7 +392,7 @@ end
             node(generated,generated.tets[4,cell])) for cell in 1:ntets(generated))
         @test volume≈1/6 atol=1e-12
         @test mesh_crc(generated).sha==
-              "afbd900ddda5c89329ad94d6230283459934c17e3a32b4666e4135b59df21a72"
+              "5164ef3571ab873d6335236cb5518059e895c49591f42662d609d93a157a46fb"
         expected=mesh_crc(generated)
         @test_throws ArgumentError _API.model.add_surface_loop([1];tag=2)
         @test mesh_crc(_API.mesh.get())==expected
@@ -399,9 +408,9 @@ end
         replace(read(fixture,String),"\r\n"=>"\n"),
         "Periodic Surface {4} = {6} Translate {1, 0, 0};\n"=>"",
         "Periodic Surface {5} = {3} Translate {0, 1, 0};\n"=>"")
-    mktemp() do path,io
-        write(io,source)
-        close(io)
+    mktempdir() do directory
+        path=joinpath(directory,"periodic_volume.geo")
+        write(path,source)
         _API.finalize()
         try
             _API.initialize()

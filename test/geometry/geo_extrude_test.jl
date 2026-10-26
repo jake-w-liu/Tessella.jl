@@ -844,7 +844,10 @@ end
         out2[] = Extrude {0,0,1} { Volume{1}; };
         """)
     @test err isa ArgumentError
-    @test occursin("Volume",sprint(showerror,err))
+    # `ExtrudeShapes`' `default:` arm reports volumes with `Msg::Error` —
+    # upstream's exact wording.
+    @test occursin("Impossible to extrude entity 1 (of type 400)",
+                   sprint(showerror,err))
 
     # An unresolved entity in the shape list is skipped silently upstream —
     # no `Error`/`Warning` diagnostic at all (Gmsh 4.15.2 verified).
