@@ -204,12 +204,13 @@ end
     end
 end
 
-@testset "occ.fragment — unsupported NURBS-face pair rejects by name" begin
+@testset "occ.fragment — tensor B-spline face fragmented by box" begin
     A.initialize()
     try
         occ=A.model.occ
-        # imported trimmed B-spline surface: the section solver has no
-        # tensor_bspline×plane pair — the rejection must stay atomic
+        # imported trimmed B-spline surface × a box's six plane faces —
+        # the tensor_bspline×plane pair sections the face on each plane's
+        # zero level set and emits same-parameter section curves.
         v=occ.import_shapes(joinpath(_FIX,"iges_occ_trimmed_bspline.igs"))
         occ.synchronize()
         (x0,y0,z0,x1,y1,z1)=occ.get_bounding_box(v[1][1],v[1][2])
@@ -217,11 +218,12 @@ end
         occ.add_box(x0+0.1*(x1-x0),y0-pad,z0-pad,
                     0.4*(x1-x0),y1-y0+2pad,z1-z0+2pad)
         occ.synchronize()
-        snap=occ.get_entities()
-        err=_errtext(()->occ.fragment([(v[1][1],v[1][2])],[(3,1)]))
-        @test occursin("unsupported Boolean face pair",err)
-        @test occursin("tensor_bspline",err)
-        @test occ.get_entities()==snap
+        out,_=occ.fragment([(v[1][1],v[1][2])],[(3,1)])
+        occ.synchronize()
+        # the pair no longer rejects — both operands survive as fragments
+        @test (3,1) in out
+        ents=occ.get_entities()
+        @test count(e->e[1]==2,ents)>=7
     finally
         A.finalize()
     end

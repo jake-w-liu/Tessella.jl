@@ -656,10 +656,7 @@ function _occ_sheet_rep(m::GeoModel,tag::Int,caller)
             end
             local pc
             if occ_face
-                ent=get(sg.pcurves,ctag,nothing)
-                ent===nothing && throw(ArgumentError(
-                    "$caller: Surface[$stag] lacks a pcurve for " *
-                    "Curve[$ctag]"))
+                ent=_brep_occ_face_pc(m,sg,ctag,stag,caller)
                 pc=(sgn<0 && ent.rev!==nothing) ? ent.rev : ent.fwd
                 pc===nothing && throw(ArgumentError(
                     "$caller: Surface[$stag] lacks a pcurve for " *
@@ -716,8 +713,10 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
             # intersect's bare curve filters out below minDim
             sheets && (op===:difference || op===:intersection) && continue
             for s in _brep_face_sections(fI,fJ,caller)
-                spansI=_brep_trim_section(reps[i],fI,s.pcA,s.closed,tol)
-                spansJ=_brep_trim_section(reps[j],fJ,s.pcB,s.closed,tol)
+                spansI=_brep_trim_section(reps[i],fI,s.pcA,s.closed,tol;
+                                          scrv=s.curve)
+                spansJ=_brep_trim_section(reps[j],fJ,s.pcB,s.closed,tol;
+                                          scrv=s.curve)
                 merged=_brep_intersect_spans(spansI,spansJ,s.closed,tol,
                                              caller)
                 isempty(merged) && continue
@@ -740,7 +739,8 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
                     append!(ps,_brep_edge_face_params(reps[j],e,of,tol))
                 end
             end
-            isempty(ps) || (es[eidx]=sort!(ps))
+            isempty(ps) ||
+                (es[eidx]=_brep_edge_splits(e.curve,ps,e.t0,e.t1,tol))
         end
     end
     sec_cuts=Dict{Int,Vector{Float64}}()
@@ -872,9 +872,30 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
     end
     sec_edges=NamedTuple[]
     secs_pf=[[NamedTuple[] for _ in reps[i].faces] for i in 1:N]
+    # fitted-section endpoint anchors: a traced contour terminates a fit
+    # residual off the wire vertex it meets; on the partner face that same
+    # end is an interior pierce point whose neighbours come from other
+    # sections — only a shared 3-D anchor keeps them coincident
+    mscale=1.0
+    for S in reps, p in S.pts
+        mscale=max(mscale,abs(p[1]),abs(p[2]),abs(p[3]))
+    end
     for (si,sec) in enumerate(sections)
         esec_skip[si] && continue
         for (lo,hi) in sec.spans
+            va=_brep_sec_vertex(reps,sec.oi,sec.oj,
+                                esplits[sec.oi],esplits[sec.oj],
+                                sec,lo,tol,mscale)
+            vb=_brep_sec_vertex(reps,sec.oi,sec.oj,
+                                esplits[sec.oi],esplits[sec.oj],
+                                sec,hi,tol,mscale)
+            for a in (va,vb)
+                a===nothing && continue
+                a.A!==nothing && push!(get!(Vector{Float64},
+                    esplits[sec.oi],a.A[2]),a.A[3])
+                a.B!==nothing && push!(get!(Vector{Float64},
+                    esplits[sec.oj],a.B[2]),a.B[3])
+            end
             cuts=copy(get(sec_cuts,si,Float64[]))
             for k in (sec.oi,sec.oj)
                 S=reps[k]
@@ -889,12 +910,22 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
                 end
             end
             for (s0,s1) in _brep_split_ranges(lo,hi,cuts,tol)
+                a0=s0-lo<tol ? va : nothing
+                a1=s1-hi>-tol ? vb : nothing
                 push!(sec_edges,(curve=sec.curve,t0=s0,t1=s1))
                 se=length(sec_edges)
+                fa=reps[sec.oi].faces[sec.fa]
+                fb=reps[sec.oj].faces[sec.fb]
                 push!(secs_pf[sec.oi][sec.fa],
-                      (se=se,span=(s0,s1),pc=sec.pcA,crv=sec.curve))
+                      (se=se,span=(s0,s1),pc=sec.pcA,crv=sec.curve,
+                       anc0=a0,anc1=a1,myside=1,
+                       fix0=_brep_anchor_uv(fa,1,a0),
+                       fix1=_brep_anchor_uv(fa,1,a1)))
                 push!(secs_pf[sec.oj][sec.fb],
-                      (se=se,span=(s0,s1),pc=sec.pcB,crv=sec.curve))
+                      (se=se,span=(s0,s1),pc=sec.pcB,crv=sec.curve,
+                       anc0=a0,anc1=a1,myside=2,
+                       fix0=_brep_anchor_uv(fb,2,a0),
+                       fix1=_brep_anchor_uv(fb,2,a1)))
             end
         end
     end
@@ -903,7 +934,13 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
         for (fidx,f) in enumerate(S.faces), sf in secs_pf[i][fidx]
             uper=_brep_uperiod(f.sg)
             ulo=_brep_face_ubase(S.edges,f)
-            for tend in (sf.span[1],sf.span[2])
+            for (tend,anc) in ((sf.span[1],get(sf,:anc0,nothing)),
+                               (sf.span[2],get(sf,:anc1,nothing)))
+                # an endpoint anchored on this operand's own wire edge
+                # already pushed its authoritative pierce param —
+                # re-projecting the fitted uv would only add a
+                # residual-off duplicate split
+                _brep_anchor_own(get(sf,:myside,1),anc) && continue
                 uv=_brep_wrap_u(_brep_pc_eval(sf.pc,tend),ulo,uper)
                 for wire in f.wires,(eidx,sign,epc) in wire
                     e=S.edges[eidx]
@@ -1174,13 +1211,32 @@ function _occ_shared_rim_keys(specs,tol)
     return out
 end
 
+# uv containment against a kept region spec's wires (outer + holes —
+# parity toggles per wire)
+function _occ_spec_in_uv(spec,pu,pv,tol)
+    inside=false
+    for w in spec.wires
+        c=0
+        for ar in w
+            c+=_brep_pc_ray_crossings(ar.pc,ar.t0,ar.t1,pu,pv,tol)
+        end
+        isodd(c) && (inside=!inside)
+    end
+    return inside
+end
+
 # One face's 3-D tangent at an edge midpoint — the fan's reference direction.
 function _occ_edge_tangent(crv,t,tol)
     crv.kind===:degenerate && return nothing
     if crv.kind===:line
         return crv.d
     end
-    dt=0.25*max(tol,abs(crv.t1-crv.t0))
+    # B-spline records (including generated section curves, which carry no
+    # t0/t1 on the record) evaluate an exact derivative through the OCC
+    # curve evaluators.
+    crv.kind===:bspline &&
+        return _model_occ_curve_d2(crv.curve,t)[2]
+    dt=0.25*max(tol,hasproperty(crv,:t1) ? abs(crv.t1-crv.t0) : 1.0)
     a=_brep_curve_eval(crv,t-dt);b=_brep_curve_eval(crv,t+dt)
     return _b3(b,a)
 end
@@ -1263,9 +1319,34 @@ function _occ_mixed_cells(kept,op::Symbol,nobj::Int,caller)
             tm2=(ar.t0+ar.t1)/2
             uvm=_brep_pc_eval(ar.pc,tm2)
             n=_brep_surface_normal(spec.sg,uvm[1],uvm[2])
-            # in-plane radial toward the region's own interior sample point,
-            # projected perpendicular to the edge tangent
-            Pin=_brep_surface_eval(spec.sg,spec.ruv[1],spec.ruv[2])
+            # the fan radial must aim at the region's LOCAL interior side at
+            # this edge — a spec's stored interior sample can sit on the
+            # wrong side of a short arc of a non-convex region (e.g. a
+            # contour loop kissing the sheet boundary leaves the outside
+            # region a self-touching wire whose global sample lies inside
+            # a lobe). Nudge the edge midpoint in uv ⊥ the arc tangent and
+            # keep the side that lands inside this spec's wires.
+            Pin=nothing
+            dt=_brep_pc_tangent(ar.pc,tm2)
+            dn=hypot(dt[1],dt[2])
+            if dn>0
+                nx,ny=-dt[2]/dn,dt[1]/dn
+                ext=max(_brep_pc_uv_extent(ar.pc,ar.t0,ar.t1),tol)
+                for fδ in (1e-2,1e-3,1e-1,1e-4)
+                    δ=fδ*ext
+                    pt=nothing;nside=0
+                    for sgn in (1,-1)
+                        q=(uvm[1]+sgn*δ*nx,uvm[2]+sgn*δ*ny)
+                        _occ_spec_in_uv(spec,q[1],q[2],tol) || continue
+                        nside+=1;pt=q
+                    end
+                    nside==1 || continue
+                    Pin=_brep_surface_eval(spec.sg,pt[1],pt[2])
+                    break
+                end
+            end
+            Pin===nothing && (Pin=_brep_surface_eval(
+                spec.sg,spec.ruv[1],spec.ruv[2]))
             r=_b3(Pin,Pe);r=_b3(r,_b3mul(t,_b3dot(r,t)))
             rl=_b3norm(r);rl<tol && continue
             r=(r[1]/rl,r[2]/rl,r[3]/rl)
@@ -1586,11 +1667,101 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
     for spec in sheet_out
         verbatim(spec) || scan_arcs(spec)
     end
+    # result vertices: a vertex is one wiring NODE shared by every arc that
+    # ends there, not an independent evaluation per curve — a numerically
+    # fitted section curve can terminate a fit-residual away from the wire
+    # vertex it meets, so distance-deduping per-edge evals breaks the chain.
+    # Members are (edge, param-end) pairs unioned by wire adjacency; arcs
+    # resolved to a reused operand curve anchor their group to that curve's
+    # stored endpoint tag, and operand-edge evals outrank fitted evals for
+    # the group's position.
+    upar=Int[];upos=NTuple{3,Float64}[]
+    upref=Int[];uanchor=Int[]
+    umk=Dict{Tuple{Symbol,Int,Int},Int}()
+    function ufind(x)
+        while upar[x]!=x
+            upar[x]=upar[upar[x]];x=upar[x]
+        end
+        return x
+    end
+    function umem(key,p;anchor::Int=0,pref::Int=0)
+        i=get!(umk,key) do
+            push!(upar,length(upar)+1);push!(upos,p)
+            push!(upref,pref);push!(uanchor,anchor)
+            return length(upar)
+        end
+        pref>upref[i] && (upref[i]=pref;upos[i]=p)
+        anchor!=0 && uanchor[i]==0 && (uanchor[i]=anchor)
+        return i
+    end
+    function uunion(a,b)
+        ra,rb=ufind(a),ufind(b)
+        ra==rb && return ra
+        upar[rb]=ra
+        upref[rb]>upref[ra] && (upref[ra]=upref[rb];upos[ra]=upos[rb])
+        uanchor[rb]!=0 && uanchor[ra]==0 && (uanchor[ra]=uanchor[rb])
+        return ra
+    end
+    # occurrence members at an arc's two ends — index 0 = vt0 side
+    function arc_members(ar)
+        c=get(reuse_ctag,ar.key,0)
+        pa=_brep_vertex_eval(ar.crv,ar.vt0)
+        pb=_brep_vertex_eval(ar.crv,ar.vt1)
+        if c!=0
+            # the operand curve's own endpoints anchor both occurrences —
+            # decide by position which stored end each arc end lands on
+            ea,eb=m.curves[c]
+            qa,qb=m.points[ea],m.points[eb]
+            sa=_b3dist(pa,qb)<_b3dist(pa,qa) ? 1 : 0
+            sb=_b3dist(pb,qb)<_b3dist(pb,qa) ? 1 : 0
+            a0=umem((:c,c,sa),pa;anchor=sa==0 ? ea : eb,pref=3)
+            b0=umem((:c,c,sb),pb;anchor=sb==0 ? ea : eb,pref=3)
+            return a0,b0
+        end
+        ei=get(emap,ar.key,0)
+        ei==0 && return 0,0
+        pref=(ar.key isa Tuple && ar.key[1]===:e) ? 2 : 1
+        return umem((:e,ei,0),pa;pref=pref),
+               umem((:e,ei,1),pb;pref=pref)
+    end
+    function wire_unions(spec)
+        for wire in spec.wires
+            prev=0;first=0
+            for ar in wire
+                m0,m1=arc_members(ar)
+                (ar.fwd ⊻ ar.neg) || ((m0,m1)=(m1,m0))
+                prev!=0 && m0!=0 && uunion(prev,m0)
+                first==0 && (first=m0)
+                prev=m1
+            end
+            prev!=0 && first!=0 && uunion(prev,first)
+        end
+        return nothing
+    end
+    for (fi,spec) in enumerate(kept)
+        (emit[fi] || (fi in free && !verbatim(fi))) && wire_unions(spec)
+    end
+    for spec in sheet_out
+        verbatim(spec) || wire_unions(spec)
+    end
+    gvert=Dict{Int,Int}()        # uf root -> res_verts index
+    ganch=Dict{Int,Int}()        # res_verts index -> fixed operand tag
+    function group_vert(i)
+        r=ufind(i)
+        get!(gvert,r) do
+            uanchor[r]!=0 && (upos[r]=m.points[uanchor[r]])
+            vi=vertex_of(upos[r])
+            if uanchor[r]!=0 && !haskey(ganch,vi)
+                ganch[vi]=uanchor[r]
+            end
+            return vi
+        end
+    end
     edge_verts=Vector{Tuple{Int,Int}}(undef,length(res_edges))
     for (ei,e) in enumerate(res_edges)
-        va=vertex_of(_brep_vertex_eval(e.curve,e.t0))
-        vb=vertex_of(_brep_vertex_eval(e.curve,e.t1))
-        edge_verts[ei]=(va,vb)
+        i0=umem((:e,ei,0),_brep_vertex_eval(e.curve,e.t0);pref=2)
+        i1=umem((:e,ei,1),_brep_vertex_eval(e.curve,e.t1);pref=2)
+        edge_verts[ei]=(group_vert(i0),group_vert(i1))
     end
     points=Int[];curves=Int[];loops=Int[];surfaces=Int[];shells=Int[]
     pieces_out=Vector{NamedTuple}(undef,length(pieces))
@@ -1600,7 +1771,9 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
     try
         ptag=Vector{Int}(undef,length(res_verts))
         for (i,p) in enumerate(res_verts)
-            ptag[i]=_add_occ_point!(m,p)
+            # anchored groups reuse the operand's own endpoint tag so the
+            # emitted chain meets the verbatim curve exactly
+            ptag[i]=get(ganch,i,_add_occ_point!(m,p))
             push!(points,ptag[i])
         end
         for p in points

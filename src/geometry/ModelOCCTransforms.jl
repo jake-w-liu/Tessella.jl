@@ -74,6 +74,17 @@ function _model_occ_transform_nurbs_curve(g::_ModelOCCReparamCurve,t,caller)
     return _ModelOCCReparamCurve(inner.family,inner.curve,inner.nets,g.reparam)
 end
 
+# Boolean section curve on a tensor surface: the tensor face and the seed
+# polyline transform exactly under the affine map, and the pcurve's (u,v)
+# coordinates are parameter-space data that carry over verbatim.
+function _model_occ_transform_nurbs_curve(g::_ModelOCCSectionCurve,t,caller)
+    face=_transform_occ_surface_record(g.face,t,caller,"section curve face")
+    controls=NTuple{3,Float64}[_finite_result(_occ_trsf_apply(t,p),caller)
+                               for p in g.curve.controls]
+    poly=NURBS.NURBSCurve(g.curve.degree,g.curve.knots,controls,g.curve.weights)
+    return _ModelOCCSectionCurve(g.family,face,g.pc,poly)
+end
+
 # Compact `primitive` record on a solid — the same family-limited update the
 # public `_plan_volume_transform` applies to `m.cylinders`/`m.spheres`/`m.cones`.
 function _model_occ_transform_primitive(record,t,caller,what)

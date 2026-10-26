@@ -356,3 +356,68 @@ function _model_occ_curve_project(geometry::_ModelOCCReparamCurve,target,
     result===nothing && return nothing
     return _occ_conic_reparam_inv(geometry.reparam,result[1]),result[2]
 end
+
+# ── Boolean-generated section curves on tensor surfaces ─────────────────────
+#
+# A tensor×plane section curve is stored as its own evaluator: C(t) =
+# S(pc(t)) where `pc` is the cubic `spl2d` trace of the plane's signed-
+# distance zero contour in the surface's (u,v) domain. The composed form is
+# the OCC `same-parameter` contract taken literally — the curve rides the
+# surface exactly, so section-arc endpoints weld onto the wire vertices that
+# produced them without a secondary 3-D fit's residual. `curve` is a degree-1
+# seed polyline through the refined contour samples; it supplies the knot
+# layout (projection seeds, measure panels) and a bounded control hull.
+struct _ModelOCCSectionCurve
+    family::Symbol                 # :bspline
+    face                           # tensor surface record (:tensor_bspline/:tensor_bezier)
+    pc                             # tensor-domain spl2d pcurve record
+    curve::NURBS.NURBSCurve        # seed polyline through refined samples
+end
+
+function _model_occ_curve_d2(geometry::_ModelOCCSectionCurve,parameter)
+    uv,dt,ddt=_occ_pcurve_d2(geometry.pc,Float64(parameter))
+    point,Su,Sv,Suu,Svv,Suv=_model_nurbs_surface_d2(
+        geometry.face,uv[1],uv[2])
+    first=ntuple(axis->Su[axis]*dt[1]+Sv[axis]*dt[2],3)
+    second=ntuple(axis->Suu[axis]*dt[1]*dt[1]+
+        2.0*Suv[axis]*dt[1]*dt[2]+Svv[axis]*dt[2]*dt[2]+
+        Su[axis]*ddt[1]+Sv[axis]*ddt[2],3)
+    result=(point,first,second)
+    all(vector->all(isfinite,vector),result) || throw(ArgumentError(
+        "OCC Curve: evaluated derivatives must be finite"))
+    return result
+end
+
+_model_occ_curve_bounds(geometry::_ModelOCCSectionCurve) =
+    (geometry.curve.knots[geometry.curve.degree+1],
+     geometry.curve.knots[end-geometry.curve.degree])
+
+# Extremal-distance projection on the composed curve: Newton refinement
+# seeded on the seed-polyline's knot grid plus span midpoints, with the
+# curve endpoints admitted — mirrors the `_ModelOCCNURBSCurve` path's
+# structure at lower density.
+function _model_occ_curve_project(geometry::_ModelOCCSectionCurve,target,
+                                  lower,upper)
+    lo,hi=minmax(lower,upper)
+    bk=unique(geometry.curve.knots)
+    bounds=vcat(Float64[lo],
+                Float64[k for k in bk if lo-1e-12<k<hi+1e-12],
+                Float64[hi])
+    sort!(bounds)
+    states=Tuple{Float64,NTuple{3,Float64},Float64}[]
+    tolerance=(hi-lo)*1e-9+eps(Float64)
+    for i in 1:length(bounds)-1
+        a,b=bounds[i],bounds[i+1]
+        _model_occ_curve_interval_extrema!(states,geometry,target,
+                                           a,b,4,tolerance)
+    end
+    for t in (lo,hi)
+        point,_,_,_,dist=_model_occ_curve_extrema_state(geometry,target,t)
+        push!(states,(t,point,dist))
+    end
+    best=nothing
+    for state in states
+        (best===nothing || state[3]<best[3]) && (best=state)
+    end
+    return best===nothing ? nothing : (best[1],best[2])
+end

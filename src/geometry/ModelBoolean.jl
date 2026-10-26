@@ -112,6 +112,9 @@ function _brep_surface_uv(sg::NamedTuple,p::NTuple{3,Float64})
         v=atan(z,sqrt(rr*rr+ri*ri))
         u=atan(ri,rr); u<0 && (u+=_OCC_TWO_PI)
         return (u,v)
+    elseif sg.occ in (:tensor_bspline,:tensor_bezier)
+        u,v,_=_model_nurbs_surface_project(sg,p)
+        return (u,v)
     end
     throw(ArgumentError("_brep_surface_uv: unsupported surface $(sg.occ)"))
 end
@@ -237,8 +240,15 @@ end
 
 # implicit level of an elementary pcurve — ~signed uv distance (negative
 # inside the bounded side of conics). `nothing` for spline/reparam traces.
+# Generated spl2d section traces carry `lvl2d` — the level set the trace was
+# extracted from — which is stronger than distance-field minima where the
+# trace merely brushes a wire without crossing it.
 function _brep_pc_level(pc)
-    if hasproperty(pc,:lin2d)
+    hasproperty(pc,:neg2d) &&
+        return _brep_pc_level(pc.neg2d[1])
+    if hasproperty(pc,:lvl2d)
+        return pc.lvl2d
+    elseif hasproperty(pc,:lin2d)
         o,d=pc.lin2d
         nn=hypot(d[1],d[2])
         nn==0.0 && return nothing
@@ -275,6 +285,17 @@ end
 # g(t)=(p(t)−uv)·p′(t) normal-equation root, seeded on the curve's grid.
 # `nothing` when no in-range root matches within `tol`.
 function _brep_pc_project(pc,uv,lo,hi,tol)
+    r=_brep_pc_project_res(pc,uv,lo,hi)
+    r===nothing && return nothing
+    t,res=r
+    scl=max(1.0,abs(uv[1]),abs(uv[2]))
+    res<10tol*scl || return nothing
+    return t
+end
+
+# project uv onto pc over [lo,hi] — returns (t, uv residual) at the
+# converged nearest point regardless of tolerance
+function _brep_pc_project_res(pc,uv,lo,hi)
     ts=_brep_pc_grid(pc,lo,hi;subs=4)
     best=ts[1];bd=Inf
     for t in ts
@@ -294,10 +315,7 @@ function _brep_pc_project(pc,uv,lo,hi,tol)
         abs(step)<=2eps(Float64)*max(1.0,abs(t)) && break
     end
     p=_brep_pc_eval(pc,t)
-    scl=max(1.0,abs(uv[1]),abs(uv[2]))
-    (abs(p[1]-uv[1])<10tol*scl && abs(p[2]-uv[2])<10tol*scl) ||
-        return nothing
-    return t
+    return t,hypot(p[1]-uv[1],p[2]-uv[2])
 end
 
 # ── operand extraction ──────────────────────────────────────────────────────
@@ -335,6 +353,26 @@ function _brep_edge_curve(m::GeoModel,ctag::Int)
         # consumes it through `_brep_curve_eval`/`_brep_curve_param`.
         return (kind=:bspline,curve=rec.curve,g=rec,
                 ctype=get(m.curve_types,ctag,:copied_curve)),rec.t0,rec.t1
+    elseif rec.occ===:surface_iso && hasproperty(rec,:face) &&
+            _model_nurbs_surface(rec.face)
+        # isoparametric edge of a tensor patch — the composed
+        # surface∘lin2d evaluator rides the patch exactly; the seed
+        # polyline supplies knots/controls for grids and projections
+        lo,hi=minmax(rec.t0,rec.t1)
+        n=max(9,2*length(unique(rec.axis==1 ?
+            rec.face.patch.surface.knots_u :
+            rec.face.patch.surface.knots_v))+1)
+        pts=[_model_surface_iso_point(rec,fma(hi-lo,i/(n-1),lo))
+             for i in 0:n-1]
+        pknots=Float64[lo,lo]
+        append!(pknots,[fma(hi-lo,i/(n-1),lo) for i in 1:n-2])
+        push!(pknots,hi,hi)
+        poly=NURBS.NURBSCurve(1,pknots,pts)
+        pc=rec.axis==1 ? (lin2d=((0.0,rec.fixed),(1.0,0.0)),) :
+                         (lin2d=((rec.fixed,0.0),(0.0,1.0)),)
+        ev=_ModelOCCSectionCurve(:bspline,rec.face,pc,poly)
+        return (kind=:bspline,curve=ev,g=rec,
+                ctype=get(m.curve_types,ctag,:surface_iso)),rec.t0,rec.t1
     elseif rec.occ===:degenerate
         return (kind=:degenerate,xyz=m.points[a]),rec.t0,rec.t1
     end
@@ -465,10 +503,7 @@ function _brep_extract(m::GeoModel,tag::Int,caller::AbstractString)
                     end
                     local pc
                     if occ_face
-                        ent=get(sg.pcurves,ctag,nothing)
-                        ent===nothing && throw(ArgumentError(
-                            "$caller: Surface[$stag] lacks a pcurve for " *
-                            "Curve[$ctag]"))
+                        ent=_brep_occ_face_pc(m,sg,ctag,stag,caller)
                         pc=(sgn<0 && ent.rev!==nothing) ? ent.rev : ent.fwd
                         pc===nothing && throw(ArgumentError(
                             "$caller: Surface[$stag] lacks a pcurve for " *
@@ -500,6 +535,25 @@ function _brep_extract(m::GeoModel,tag::Int,caller::AbstractString)
     isempty(faces) && throw(ArgumentError(
         "$caller: Volume[$tag] has no materialized boundary"))
     return (pts=pts,ptags=ptags,edges=edges,ctags=ctags,faces=faces)
+end
+
+# pcurve entry `(fwd,rev)` for an edge on an OCC-geometry face — the stored
+# pcurve table, or the domain-axis lin2d for a `surface_iso` boundary edge
+# of an untrimmed tensor patch (which carries no pcurve table).
+function _brep_occ_face_pc(m,sg,ctag,stag,caller)
+    pcdict=hasproperty(sg,:pcurves) ? sg.pcurves : nothing
+    ent=pcdict===nothing ? nothing : get(pcdict,ctag,nothing)
+    ent===nothing || return ent
+    erec0=get(m.curve_geometry,ctag,nothing)
+    (erec0!==nothing && hasproperty(erec0,:occ) &&
+     erec0.occ===:surface_iso && hasproperty(erec0,:face) &&
+     hasproperty(erec0.face,:patch) && hasproperty(sg,:patch) &&
+     erec0.face.patch===sg.patch) || throw(ArgumentError(
+        "$caller: Surface[$stag] lacks a pcurve for Curve[$ctag]"))
+    return (fwd=erec0.axis==1 ?
+            (lin2d=((0.0,erec0.fixed),(1.0,0.0)),) :
+            (lin2d=((erec0.fixed,0.0),(0.0,1.0)),),
+            rev=nothing)
 end
 
 # ── 2-D wire containment (even-odd parity) ──────────────────────────────────
@@ -686,6 +740,482 @@ function _brep_pc_line_on_cylinder(sg,o,d)
     return (lin2d=(p0,(0.0,sgn)),)
 end
 
+# ── tensor-patch × plane sections ───────────────────────────────────────────
+#
+# A tensor B-spline/Bezier face meets a plane face in the zero contour of the
+# plane's signed-distance field over the patch's (u,v) domain. The contour is
+# traced by marching squares on a knot-aware grid (each crossing Newton-
+# refined onto the level set), chained into components and fit by a cubic
+# `spl2d` interpolant whose domain doubles as the section curve's parameter.
+# The 3-D section curve evaluates S∘pc — it rides the patch exactly, which is
+# what welds its endpoints onto the faces' wire vertices.
+
+# Level field of a plane record over the tensor domain: f(u,v)=⟨S(u,v)−C,n⟩.
+@inline _brep_plane_field(sg,pl,u,v) =
+    _b3dot(_b3(_brep_surface_eval(sg,u,v),pl.center),pl.axis)
+
+# Move (u,v) onto the plane level set by projected-gradient Newton — the
+# contour's own correction direction is ∇f with ∇f=⟨(S_u,S_v),n⟩. Returns
+# (u,v,on_level).
+function _brep_level_refine(sg,pl,u,v,ftol,ulo,uhi,vlo,vhi)
+    ok=false
+    for _ in 1:50
+        p,du,dv=_occ_surface_d1(sg,u,v)
+        f=_b3dot(_b3(p,pl.center),pl.axis)
+        if abs(f)<=ftol
+            ok=true;break
+        end
+        gu=_b3dot(du,pl.axis);gv=_b3dot(dv,pl.axis)
+        g2=gu*gu+gv*gv
+        g2<=0.0 && break
+        λ=f/g2
+        du_step=λ*gu;dv_step=λ*gv
+        u=clamp(u-du_step,ulo,uhi);v=clamp(v-dv_step,vlo,vhi)
+        hypot(du_step,dv_step)<=1e-14*max(1.0,hypot(u,v)) && break
+    end
+    p=_brep_surface_eval(sg,u,v)
+    return (u,v,abs(_b3dot(_b3(p,pl.center),pl.axis))<=ftol)
+end
+
+# Marching-squares trace of f=0 on the tensor patch domain. `us`/`vs` are the
+# grid node coordinates (knot-densified); F[i,j]=f(us[i],vs[j]). Nodes within
+# `ztol` of zero snap to node-keyed crossings so adjacent cells weld through
+# the shared vertex. Returns a list of components (verts, closed).
+function _brep_msq_trace(sg,pl,us,vs,F,ztol,ftol,caller)
+    nu,nv=length(us),length(vs)
+    blo=(us[1],vs[1]);bhi=(us[end],vs[end])
+    # crossing record per grid edge: h-edges (i,j)–(i+1,j), v-edges (i,j)–(i,j+1)
+    hcross=Matrix{Any}(nothing,nu-1,nv)
+    vcross=Matrix{Any}(nothing,nu,nv-1)
+    function edge_refine(ua,va,fa,ub,vb,fb)
+        # bisect on the edge param, then Newton onto the level
+        a=0.0;b=1.0;flo=fa
+        for _ in 1:60
+            m=(a+b)/2
+            fm=_brep_plane_field(sg,pl,fma(ua,1-m,ub*m),
+                                 fma(va,1-m,vb*m))
+            fm==0.0 && (a=b=m;break)
+            signbit(fm)==signbit(flo) ? (a=m;flo=fm) : (b=m)
+        end
+        m=(a+b)/2
+        u2,v2,_=_brep_level_refine(sg,pl,fma(ua,1-m,ub*m),
+                                   fma(va,1-m,vb*m),ftol,
+                                   blo[1],bhi[1],blo[2],bhi[2])
+        return (u2,v2)
+    end
+    for j in 1:nv, i in 1:nu-1
+        fa=F[i,j];fb=F[i+1,j]
+        if abs(fa)<=ztol
+            hcross[i,j]=((:n,i,j),(us[i],vs[j]))
+        elseif abs(fb)<=ztol
+            hcross[i,j]=((:n,i+1,j),(us[i+1],vs[j]))
+        elseif signbit(fa)!=signbit(fb)
+            hcross[i,j]=((:h,i,j),
+                edge_refine(us[i],vs[j],fa,us[i+1],vs[j],fb))
+        end
+    end
+    for i in 1:nu, j in 1:nv-1
+        fa=F[i,j];fb=F[i,j+1]
+        if abs(fa)<=ztol
+            vcross[i,j]=((:n,i,j),(us[i],vs[j]))
+        elseif abs(fb)<=ztol
+            vcross[i,j]=((:n,i,j+1),(us[i],vs[j+1]))
+        elseif signbit(fa)!=signbit(fb)
+            vcross[i,j]=((:v,i,j),
+                edge_refine(us[i],vs[j],fa,us[i],vs[j+1],fb))
+        end
+    end
+    # per-cell boundary crossings, cyclic order B,R,T,L; pair into segments
+    segs=Tuple{Any,NTuple{2,Float64},Any,NTuple{2,Float64}}[]
+    for j in 1:nv-1, i in 1:nu-1
+        cr=NTuple{3,Any}[]
+        for e in (hcross[i,j],vcross[i+1,j],hcross[i,j+1],vcross[i,j])
+            e===nothing || push!(cr,(e[1],e[2],length(cr)))
+        end
+        length(cr)==0 && continue
+        if length(cr)==3
+            # a zero-node contact contributes two incidences — merge the
+            # duplicate node entry so the count is even again
+            di=findfirst(x->cr[x][1] isa Tuple && cr[x][1][1]===:n &&
+                           any(y->y!=x && cr[y][1]==cr[x][1],
+                               eachindex(cr)),eachindex(cr))
+            di===nothing && throw(ErrorException(
+                "$caller: tensor×plane trace hit an odd crossing count"))
+            cr=NTuple{3,Any}[cr[k] for k in eachindex(cr) if k!=di]
+        end
+        if length(cr)==2
+            push!(segs,(cr[1][1],cr[1][2],cr[2][1],cr[2][2]))
+        elseif length(cr)==4
+            uc=(us[i]+us[i+1])/2;vc=(vs[j]+vs[j+1])/2
+            fc=_brep_plane_field(sg,pl,uc,vc)
+            # cyclic entries (B,R,T,L): same sign as the BL corner pairs
+            # (B,R)+(T,L), opposite pairs (B,L)+(R,T)
+            same=signbit(fc)==signbit(F[i,j])
+            if same
+                push!(segs,(cr[1][1],cr[1][2],cr[2][1],cr[2][2]),
+                           (cr[3][1],cr[3][2],cr[4][1],cr[4][2]))
+            else
+                push!(segs,(cr[1][1],cr[1][2],cr[4][1],cr[4][2]),
+                           (cr[2][1],cr[2][2],cr[3][1],cr[3][2]))
+            end
+        else
+            throw(ErrorException(
+                "$caller: tensor×plane trace hit an odd crossing count"))
+        end
+    end
+    return _brep_msq_chains(segs,caller)
+end
+
+# Chain cell segments through shared end keys (edge or node) into ordered
+# components. Every key has degree ≤2 for a non-self-touching level set;
+# anything higher is a genuine contour self-intersection.
+function _brep_msq_chains(segs,caller)
+    ends=Dict{Any,Vector{Tuple{Int,Int}}}()
+    for (i,s) in enumerate(segs)
+        push!(get!(Vector{Tuple{Int,Int}},ends,s[1]),(i,1))
+        push!(get!(Vector{Tuple{Int,Int}},ends,s[3]),(i,2))
+    end
+    for v in values(ends)
+        length(v)<=2 || throw(ErrorException(
+            "$caller: tensor×plane section self-intersects at a grid vertex"))
+    end
+    used=falses(length(segs))
+    comps=Tuple{Vector{NTuple{2,Float64}},Bool}[]
+    for s0 in eachindex(segs)
+        used[s0] && continue
+        s=segs[s0]
+        used[s0]=true
+        verts=NTuple{2,Float64}[s[2],s[4]]
+        closed=false
+        # forward: exit through end-2's key; the last vertex equals the first
+        # on a closed loop since shared keys carry identical uv
+        key=s[3];cur=s0
+        while true
+            nxt=nothing
+            for (si,sd) in get(ends,key,Tuple{Int,Int}[])
+                si==cur && continue
+                nxt=(si,sd);break
+            end
+            nxt===nothing && break
+            nn,nd=nxt
+            if nn==s0
+                closed=true;break
+            end
+            used[nn] && throw(ErrorException(
+                "$caller: tensor×plane section chaining is inconsistent"))
+            used[nn]=true
+            ns=segs[nn]
+            okey,ouv=nd==1 ? (ns[3],ns[4]) : (ns[1],ns[2])
+            push!(verts,ouv);key=okey;cur=nn
+        end
+        if !closed
+            key=s[1];cur=s0
+            while true
+                nxt=nothing
+                for (si,sd) in get(ends,key,Tuple{Int,Int}[])
+                    si==cur && continue
+                    nxt=(si,sd);break
+                end
+                nxt===nothing && break
+                nn,nd=nxt
+                used[nn] && throw(ErrorException(
+                    "$caller: tensor×plane section chaining is inconsistent"))
+                used[nn]=true
+                ns=segs[nn]
+                okey,ouv=nd==1 ? (ns[3],ns[4]) : (ns[1],ns[2])
+                pushfirst!(verts,ouv);key=okey;cur=nn
+            end
+        end
+        push!(comps,(verts,closed))
+    end
+    return comps
+end
+
+# Gauss–Newton projection of a 3-D point onto a tensor patch, seeded by the
+# nearest traced sample — used only while the section is built (the stored
+# lvl2d closure for the plane-side pcurve consults it per evaluation).
+function _brep_nurbs_project_seed(sg,P,seeds_uv,seeds_pt,ulo,uhi,vlo,vhi)
+    bi=1;bd=Inf
+    for i in eachindex(seeds_pt)
+        d=_b3dist(seeds_pt[i],P)
+        d<bd && (bd=d;bi=i)
+    end
+    u,v=seeds_uv[bi]
+    for _ in 1:60
+        p,du,dv=_occ_surface_d1(sg,u,v)
+        r=_b3(p,P)
+        g1=_b3dot(r,du);g2=_b3dot(r,dv)
+        a=_b3dot(du,du);b=_b3dot(du,dv);c=_b3dot(dv,dv)
+        det=a*c-b*b
+        det<=0.0 && break
+        Δu=(g1*c-g2*b)/det;Δv=(g2*a-g1*b)/det
+        u=clamp(u-Δu,ulo,uhi);v=clamp(v-Δv,vlo,vhi)
+        hypot(Δu,Δv)<=1e-13*max(1.0,hypot(u,v)) && break
+    end
+    return u,v
+end
+
+# implicit level on the PLANE's uv domain for a tensor×plane section:
+# signed distance from the lifted plane point to the tensor surface.
+# Returns (value, plane-uv gradient) — the gradient of a signed distance is
+# the surface normal at the foot, read back in the plane frame.
+function _brep_plane_lvl(sg,pl,seeds_uv,seeds_pt,ulo,uhi,vlo,vhi,x,y)
+    P=_b3add(pl.center,_b3add(_b3mul(pl.X,x),_b3mul(pl.Y,y)))
+    u,v=_brep_nurbs_project_seed(sg,P,seeds_uv,seeds_pt,ulo,uhi,vlo,vhi)
+    p,du,dv=_occ_surface_d1(sg,u,v)
+    n=_b3cross(du,dv)
+    nn=_b3norm(n)
+    nn==0.0 && return (Inf,(1.0,0.0))
+    n=_b3mul(n,1/nn)
+    r=_b3(P,p)
+    g=_b3dot(r,n)
+    return g,(_b3dot(pl.X,n),_b3dot(pl.Y,n))
+end
+
+# Newton-refine a plane-uv point onto the zero level of `_brep_plane_lvl` —
+# the plane-domain analog of `_brep_level_refine`.
+function _brep_plane_lvl_refine(sg,pl,seeds_uv,seeds_pt,ulo,uhi,vlo,vhi,
+                                x,y,ftol)
+    for _ in 1:50
+        g,(gx,gy)=_brep_plane_lvl(sg,pl,seeds_uv,seeds_pt,ulo,uhi,vlo,vhi,x,y)
+        abs(g)<=ftol && return (x,y,true)
+        g2=gx*gx+gy*gy
+        g2<=0.0 && break
+        λ=g/g2
+        x-=λ*gx;y-=λ*gy
+        abs(λ)*hypot(gx,gy)<=1e-14*max(1.0,hypot(x,y)) && break
+    end
+    g,_=_brep_plane_lvl(sg,pl,seeds_uv,seeds_pt,ulo,uhi,vlo,vhi,x,y)
+    return (x,y,abs(g)<=ftol)
+end
+
+# Joint cubic `spl2d` fit of one traced component in BOTH operand domains.
+# The tensor-side trace is chord-timed in (u,v); each refined tensor-side
+# sample lifts to its plane-domain uv exactly — the two interpolants share
+# the section parameter, so pcA(t) and pcB(t) always name the same contour
+# point (required for the engine's shared-parameter section convention).
+# Intervals are split where the interpolants' midpoints fail to refine back
+# onto the level set within `tolfit`. Returns (ts, pta, ptb).
+function _brep_fit_section_pcs(sg,pl,verts,closed,ftol,tolfit,
+                              ulo,uhi,vlo,vhi,caller)
+    # drop consecutive near-duplicate vertices (below parameter resolution)
+    pta=NTuple{2,Float64}[verts[1]]
+    for q in verts
+        hypot(q[1]-pta[end][1],q[2]-pta[end][2])>1e-14 &&
+            push!(pta,q)
+    end
+    closed || length(pta)>=2 || return nothing
+    closed && length(pta)<4 && return nothing
+    function chords(ws)
+        out=Float64[0.0]
+        for i in 2:length(ws)
+            push!(out,out[end]+hypot(ws[i][1]-ws[i-1][1],
+                                     ws[i][2]-ws[i-1][2]))
+        end
+        return out
+    end
+    ts=chords(pta)
+    ts[end]<=0.0 && return nothing
+    ptb=NTuple{2,Float64}[_brep_plane_uv(pl,_brep_surface_eval(sg,q...))
+                          for q in pta]
+    for it in 1:30
+        n=length(pta)
+        n>=2 || return nothing
+        pca=_pchip_bspline_2d(ts,pta)
+        pcb=_pchip_bspline_2d(ts,ptb)
+        bad=Int[]
+        badt=Float64[]
+        wf=wg=0.0;wfi=wgi=0
+        for i in 1:n-1
+            for frac in (0.3,0.5,0.7)
+                tm=fma(ts[i+1]-ts[i],frac,ts[i])
+                # tensor side: the interpolant's midpoint must land on the
+                # plane within `tolfit` — |f| IS the 3-D distance to it
+                uvm=_occ_spl2d_eval(pca[1],pca[2],pca[3],tm)
+                rA=abs(_brep_plane_field(sg,pl,uvm[1],uvm[2]))
+                rA>wf && (wf=rA;wfi=i)
+                rA>tolfit && (push!(bad,i);push!(badt,tm);break)
+                # plane side: pcB(t) must name the SAME contour point as
+                # pcA(t) (the shared-parameter contract) — compare the
+                # lifted plane point to the tensor-side eval directly
+                bvm=_occ_spl2d_eval(pcb[1],pcb[2],pcb[3],tm)
+                Q=_b3add(pl.center,_b3add(_b3mul(pl.X,bvm[1]),
+                                        _b3mul(pl.Y,bvm[2])))
+                rB=_b3dist(Q,_brep_surface_eval(sg,uvm[1],uvm[2]))
+                rB>wg && (wg=rB;wgi=i)
+                rB>tolfit && (push!(bad,i);push!(badt,tm);break)
+            end
+        end
+        isempty(bad) && return ts,pta,ptb
+        length(pta)+length(bad)>6000 && throw(ArgumentError(
+            "$caller: tensor×plane section trace did not converge to the " *
+            "pcurve fit tolerance"))
+        for k in length(bad):-1:1
+            i=bad[k];tm=badt[k]
+            uvm=_occ_spl2d_eval(pca[1],pca[2],pca[3],tm)
+            u2,v2,ok=_brep_level_refine(sg,pl,uvm[1],uvm[2],ftol,
+                                        ulo,uhi,vlo,vhi)
+            ok || throw(ArgumentError(
+                "$caller: tensor×plane section trace is singular " *
+                "(no local level-set point)"))
+            splice!(pta,i+1:i,[(u2,v2)])
+            splice!(ptb,i+1:i,
+                [_brep_plane_uv(pl,_brep_surface_eval(sg,u2,v2))])
+            splice!(ts,i+1:i,[tm])
+        end
+        ts=chords(pta)
+    end
+    throw(ArgumentError(
+        "$caller: tensor×plane section trace did not converge to the " *
+        "pcurve fit tolerance"))
+end
+
+# Section-builder for tensor×plane — traces the zero contour of the plane's
+# signed-distance field over the tensor patch, fits the spl2d pcurves on both
+# domains, and emits (curve,closed,pcA,pcB) records like the analytic solvers.
+function _brep_sec_tensor_plane(ts,pl,pl_is_b,caller)
+    hasproperty(ts,:reparam) && ts.reparam!==nothing && throw(ArgumentError(
+        "$caller: tensor×plane section on a reparametrized patch is " *
+        "unsupported"))
+    lo,hi=_model_nurbs_surface_bounds(ts)
+    ulo,uhi,vlo,vhi=lo[1],hi[1],lo[2],hi[2]
+    s=ts.patch.surface
+    ku=unique(s.knots_u[s.degree_u+1:end-s.degree_u])
+    kv=unique(s.knots_v[s.degree_v+1:end-s.degree_v])
+    subu=clamp(div(160,length(ku)-1),6,24)
+    subv=clamp(div(160,length(kv)-1),6,24)
+    us=Float64[]
+    for i in 1:length(ku)-1, j in 0:subu-1
+        push!(us,fma(ku[i+1]-ku[i],j/subu,ku[i]))
+    end
+    push!(us,ku[end])
+    vs=Float64[]
+    for i in 1:length(kv)-1, j in 0:subv-1
+        push!(vs,fma(kv[i+1]-kv[i],j/subv,kv[i]))
+    end
+    push!(vs,kv[end])
+    F=[_brep_plane_field(ts,pl,u,v) for u in us, v in vs]
+    fscl=max(1.0,maximum(abs,F))
+    ztol=1e-9*fscl
+    # model scale for the 3-D residual (Newton target)
+    mscale=1.0
+    for c in ts.patch.surface.controls
+        mscale=max(mscale,abs(c[1]),abs(c[2]),abs(c[3]))
+    end
+    ftol=1e-9*mscale
+    comps=_brep_msq_trace(ts,pl,us,vs,F,ztol,ftol,caller)
+    out=NamedTuple[]
+    tolfit=1e-7*mscale
+    for (ci,(verts,closed)) in enumerate(comps)
+        length(verts)<2 && continue
+        res=_brep_fit_section_pcs(ts,pl,verts,closed,ftol,tolfit,
+                                  ulo,uhi,vlo,vhi,caller)
+        res===nothing && continue
+        ts_,pta,ptb=res
+        knotsA,pdegA,cpsA=_pchip_bspline_2d(ts_,pta)
+        knotsB,pdegB,cpsB=_pchip_bspline_2d(ts_,ptb)
+        seeds_uv=copy(pta)
+        seeds_pt=NTuple{3,Float64}[_brep_surface_eval(ts,q...) for q in pta]
+        lvlA=uv->_brep_plane_field(ts,pl,uv[1],uv[2])
+        lvlB=uv->_brep_plane_lvl(ts,pl,seeds_uv,seeds_pt,ulo,uhi,vlo,vhi,
+                                 uv[1],uv[2])[1]
+        pca=(spl2d=(knotsA,pdegA,cpsA),lvl2d=lvlA)
+        pcb=(spl2d=(knotsB,pdegB,cpsB),lvl2d=lvlB)
+        # degree-1 seed polyline through the refined contour points: supplies
+        # the NURBSCurve hull (knots/controls for panels, bounds, bbox) while
+        # evaluation itself composes surface∘pcurve exactly
+        pknots=Float64[ts_[1],ts_[1]]
+        append!(pknots,ts_[2:end-1])
+        push!(pknots,ts_[end],ts_[end])
+        poly=NURBS.NURBSCurve(1,pknots,seeds_pt)
+        ev=_ModelOCCSectionCurve(:bspline,ts,
+                                 (spl2d=(knotsA,pdegA,cpsA),),poly)
+        curve=(kind=:bspline,curve=ev,
+               g=(occ=:copied_curve,curve=ev),ctype=:copied_curve)
+        push!(out,(curve=curve,closed=false,
+                   pcA=pl_is_b ? pca : pcb,
+                   pcB=pl_is_b ? pcb : pca))
+    end
+    return out
+end
+
+# Vertex anchoring for numerically-fitted section endpoints. A traced
+# contour's fitted pcurve terminates a fit-residual off the wire edge it
+# meets; projected per face that endpoint disagrees with the true pierce
+# vertex by more than the uv node tolerance, so section arcs dangle and
+# faces never split. Resolve each span end once in 3-D and consistently:
+# prefer the already-computed edge pierce params (one authoritative vertex
+# per edge crossing — every section landing there then shares bit-identical
+# uv on the partner face), falling back to a projected wire point when the
+# endpoint sits where no pierce was registered.
+function _brep_sec_vertex(solids,oi,oj,esA,esB,sec,s,tol,mscale)
+    p3=_brep_curve_eval(sec.curve,s)
+    snap3=1e-4*max(1.0,mscale)
+    recs=Any[nothing,nothing]
+    for (side,(S,fidx,spc,es)) in enumerate((
+            (solids[oi],sec.fa,sec.pcA,esA),
+            (solids[oj],sec.fb,sec.pcB,esB)))
+        f=S.faces[fidx]
+        uv=_brep_pc_eval(spc,s)
+        # per side: the authoritative vertex is this face's own wire-edge
+        # pierce — its pcurve eval at the pierce param is bitwise the edge
+        # split's node uv, where a projected candidate can sit the STEP
+        # pcurve/edge inconsistency off and the section arc dangles
+        bestd=Inf;res=nothing;proj=nothing
+        for wire in f.wires,(eidx,_,epc) in wire
+            e=S.edges[eidx]
+            e.curve.kind===:degenerate && continue
+            for tp in get(es,eidx,Float64[])
+                cand=_brep_curve_eval(e.curve,tp)
+                d=_b3dist(p3,cand)
+                d<bestd && (bestd=d;res=(cand,eidx,tp))
+            end
+            elo,ehi=minmax(e.t0,e.t1)
+            te=_brep_pc_param(epc,uv,elo,ehi,1e-3)
+            te===nothing && continue
+            cand=_brep_curve_eval(e.curve,te)
+            proj===nothing ||
+                _b3dist(p3,cand)<_b3dist(p3,proj[1]) ||
+                continue
+            proj=(cand,eidx,te)
+        end
+        if res!==nothing && bestd<snap3
+            recs[side]=res
+        elseif proj!==nothing && _b3dist(p3,proj[1])<snap3
+            recs[side]=proj
+        end
+    end
+    (recs[1]===nothing && recs[2]===nothing) && return nothing
+    return (A=recs[1],B=recs[2])
+end
+
+# An anchored section endpoint's node uv on face `f` (which belongs to
+# operand side `myside`): when the anchor is this operand's own wire-edge
+# pierce, the edge pcurve eval at the pierce param reproduces the edge
+# split's node uv bitwise — a surface projection of the 3-D vertex lands
+# the pcurve/edge inconsistency off and the arc dangles. When only the
+# partner side anchored (its edge pierces this face's interior), fall back
+# to projecting its 3-D vertex.
+function _brep_anchor_uv(f,myside,a)
+    a===nothing && return nothing
+    r=myside==1 ? a.A : a.B
+    if r!==nothing
+        for wire in f.wires,(eidx,_,epc) in wire
+            eidx==r[2] || continue
+            return _brep_pc_eval(epc,r[3])
+        end
+    end
+    ro=myside==1 ? a.B : a.A
+    ro===nothing && return nothing
+    return _brep_surface_uv(f.sg,ro[1])
+end
+
+# did this endpoint anchor on `myside`'s own wire edge? — then the pierce
+# param is already in that side's split table and no projected duplicate
+# may be added
+_brep_anchor_own(myside,a) = a!==nothing &&
+    (myside==1 ? a.A : a.B)!==nothing
+
 function _brep_face_sections(fa,fb,caller)
     ka,kb=fa.sg.occ,fb.sg.occ
     if ka===:plane && kb===:plane
@@ -710,6 +1240,10 @@ function _brep_face_sections(fa,fb,caller)
         return _brep_sec_cylinder_sphere(fb.sg,fa.sg,false,caller)
     elseif ka===:cylinder && kb===:cylinder
         return _brep_sec_cylinder_cylinder(fa.sg,fb.sg,caller)
+    elseif ka===:plane && kb in (:tensor_bspline,:tensor_bezier)
+        return _brep_sec_tensor_plane(fb.sg,fa.sg,false,caller)
+    elseif ka in (:tensor_bspline,:tensor_bezier) && kb===:plane
+        return _brep_sec_tensor_plane(fa.sg,fb.sg,true,caller)
     end
     throw(ArgumentError(
         "$caller: unsupported Boolean face pair $(ka)×$(kb)"))
@@ -902,7 +1436,8 @@ end
 # edge's pcurve (over the edge parameter range [et0,et1]); return
 # section-parameter values.
 
-function _brep_pc_intersect(sec_pc,edge_pc,et0,et1,tol)
+function _brep_pc_intersect(sec_pc,edge_pc,et0,et1,tol;
+                            sec_crv=nothing,edge_crv=nothing)
     # Unwrap neg2d pcurves: the edge parameter mirrors the inner parameter,
     # so the reported span reflects to (−et1,−et0) before dispatch. A negated
     # section pcurve reports mirrored section parameters back to the caller.
@@ -918,7 +1453,8 @@ function _brep_pc_intersect(sec_pc,edge_pc,et0,et1,tol)
     elseif hasproperty(sec_pc,:circ2d) && hasproperty(edge_pc,:circ2d)
         _brep_ix_circ_circ(sec_pc.circ2d,edge_pc.circ2d,et0,et1,tol)
     else
-        _brep_ix_generic(sec_pc,edge_pc,et0,et1,tol)
+        _brep_ix_generic(sec_pc,edge_pc,et0,et1,tol;
+                         sec_crv=sec_crv,edge_crv=edge_crv)
     end
     return nsec ? .-out : out
 end
@@ -1086,7 +1622,8 @@ end
 # its own grid for crossings of the section's implicit level (or its raw
 # distance field when the section has none), then invert each crossing uv
 # back onto the section.
-function _brep_ix_generic(sec_pc,edge_pc,et0,et1,tol)
+function _brep_ix_generic(sec_pc,edge_pc,et0,et1,tol;
+                          sec_crv=nothing,edge_crv=nothing)
     lo,hi=minmax(et0,et1)
     ts=_brep_pc_grid(edge_pc,lo,hi)
     lvl=_brep_pc_level(sec_pc)
@@ -1096,12 +1633,61 @@ function _brep_ix_generic(sec_pc,edge_pc,et0,et1,tol)
         hits=_brep_pc_curve_hits(sec_pc,edge_pc,ts,tol)
     end
     out=Float64[]
+    # fitted traces (spl2d carrying lvl2d) deviate from the true contour by
+    # their fit residual — in a distorted uv metric the gap to a wire
+    # crossing defeats the nominal inversion tolerance, so such sections
+    # get a second, slack-bounded inversion pass
+    fitted=lvl!==nothing && hasproperty(sec_pc,:spl2d)
+    ext=NaN
     for te in hits
         uv=_brep_pc_eval(edge_pc,te)
         st=_brep_pc_uv_to_t(sec_pc,uv,tol)
+        if st===nothing && fitted
+            # the wire pierce is level-exact; the trace's own uv extent
+            # calibrates how far the fit may sit from it — a crossing
+            # owned by a different contour component stays macroscopically
+            # far and is still dropped
+            dlo,dhi=_brep_pc_domain(sec_pc)
+            if isfinite(dlo)&&isfinite(dhi)
+                isnan(ext) &&
+                    (ext=_brep_pc_uv_extent(sec_pc,dlo,dhi))
+                pr=_brep_pc_project_res(sec_pc,uv,dlo,dhi)
+                if pr!==nothing &&
+                        pr[2]<=max(0.05*ext,1000tol)
+                    st=pr[1]
+                elseif sec_crv!==nothing && edge_crv!==nothing
+                    # near-degenerate uv metric: residual in uv is
+                    # meaningless — verify in 3-D instead
+                    V=_brep_curve_eval(edge_crv,te)
+                    t2=_brep_curve_param(sec_crv,V,0.0)
+                    if t2!==nothing &&
+                            _b3dist(_brep_curve_eval(sec_crv,t2),V) <=
+                            2e-3*max(1.0,_b3norm(V))
+                        st=t2
+                    end
+                end
+            end
+        end
         st===nothing || push!(out,st)
     end
     return out
+end
+
+# uv bounding-box diagonal of a pcurve over [lo,hi] — the scale a fitted
+# trace's fit residual is measured against
+function _brep_pc_uv_extent(pc,lo,hi)
+    umin=umax=vmin=vmax=nothing
+    for t in _brep_pc_grid(pc,lo,hi;subs=2)
+        p=_brep_pc_eval(pc,t)
+        if umin===nothing
+            umin=umax=p[1];vmin=vmax=p[2]
+        else
+            umin=min(umin,p[1]);umax=max(umax,p[1])
+            vmin=min(vmin,p[2]);vmax=max(vmax,p[2])
+        end
+    end
+    umin===nothing && return 0.0
+    return hypot(umax-umin,vmax-vmin)
 end
 
 # ── section trimming ────────────────────────────────────────────────────────
@@ -1148,7 +1734,7 @@ function _brep_uv_on_wire(edges,face,spc,uv,tol)
     return false
 end
 
-function _brep_trim_section(solid,face,pc,closed,tol)
+function _brep_trim_section(solid,face,pc,closed,tol;scrv=nothing)
     uper=_brep_uperiod(face.sg)
     ulo=_brep_face_ubase(solid.edges,face)
     if uper>0
@@ -1164,7 +1750,9 @@ function _brep_trim_section(solid,face,pc,closed,tol)
             e=solid.edges[eidx]
             # degenerate pole/apex edges carry real domain-boundary pcurves
             # (e.g. v=±π/2 on a sphere) — their crossings delimit sections
-            append!(params,_brep_pc_intersect(pc,epc,e.t0,e.t1,tol))
+            append!(params,_brep_pc_intersect(pc,epc,e.t0,e.t1,tol;
+                                             sec_crv=scrv,
+                                             edge_crv=e.curve))
         end
     end
     sort!(params)
@@ -1200,6 +1788,26 @@ function _brep_trim_section(solid,face,pc,closed,tol)
         end
         return out
     end
+    dlo,dhi=_brep_pc_domain(pc)
+    if isfinite(dlo) && isfinite(dhi)
+        # bounded traces (spl2d/tan2d): the section exists only on its own
+        # knot domain — wire crossings delimit sub-intervals of it, and a
+        # crossing-free contour is kept or dropped by a single probe
+        cuts=Float64[dlo]
+        for p in uniq
+            dlo+tol<p<dhi-tol && push!(cuts,p)
+        end
+        push!(cuts,dhi)
+        for i in 1:length(cuts)-1
+            a,b=cuts[i],cuts[i+1]
+            b-a<tol && continue
+            uvm=_brep_wrap_u(_brep_pc_eval(pc,(a+b)/2),ulo,uper)
+            (_brep_uv_in_face(solid.edges,face,uvm,tol) ||
+             _brep_uv_on_wire(solid.edges,face,pc,uvm,tol)) || continue
+            push!(out,(a,b))
+        end
+        return out
+    end
     isempty(uniq) && return out
     n=length(uniq)
     for i in 0:n
@@ -1225,7 +1833,11 @@ function _brep_edge_face_params(solid,e,face,tol)
     curve.kind===:degenerate && return Float64[]
     sg=face.sg
     params=Float64[]
-    if curve.kind===:line
+    if sg.occ in (:tensor_bspline,:tensor_bezier)
+        # signed closest-foot distance roots — see `_brep_edge_pierce_tensor`
+        append!(params,_brep_edge_pierce_tensor(sg,curve,
+                                                minmax(e.t0,e.t1)...,tol))
+    elseif curve.kind===:line
         append!(params,_brep_line_surface(sg,curve))
     elseif curve.kind===:circle
         append!(params,_brep_circle_surface(sg,curve,callerless=true))
@@ -1259,6 +1871,77 @@ function _brep_edge_face_params(solid,e,face,tol)
         uv=_brep_surface_uv(sg,p)
         _brep_uv_in_face(solid.edges,face,uv,tol) || continue
         push!(out,t)
+    end
+    # a grazing contact reports two roots straddling the touch point; their
+    # images coincide in 3-D — collapse them to one cut so the wire doesn't
+    # grow a sliver arc around a single vertex
+    length(out)<2 && return out
+    return _brep_edge_splits(curve,out,e.t0,e.t1,tol)
+end
+
+# sort + dedup an edge's split parameters — crossings whose 3-D images
+# coincide (grazing contacts, two faces meeting at one point) or that sit
+# within the parameter range's own resolution collapse to a single cut; a
+# sliver arc around one vertex is not a region
+function _brep_edge_splits(curve,params,t0,t1,tol)
+    ps=sort!(collect(params))
+    ptol=tol*max(1.0,abs(t0),abs(t1))
+    out=Float64[]
+    for t in ps
+        if !isempty(out)
+            if t-out[end]<ptol
+                continue
+            end
+            pa=_brep_curve_eval(curve,out[end])
+            pb=_brep_curve_eval(curve,t)
+            _b3dist(pa,pb)<100tol && continue
+        end
+        push!(out,t)
+    end
+    return out
+end
+
+# Edge × tensor-patch piercing: the unsigned distance to a free-form surface
+# has no scalar level to root, so track the closest-foot point instead —
+# g(t)=⟨C(t)−S(u(t),v(t)),n(u(t),v(t))⟩ with (u(t),v(t)) the projection foot.
+# A transversal piercing changes g's sign; bisect each sign-change bracket.
+# A discontinuous foot jump can mimic a sign change at a large residual, so
+# a candidate is kept only when g re-evaluates ~0 at the root. Tangential
+# grazes (g touches 0 without crossing) are not piercings.
+function _brep_edge_pierce_tensor(sg,crv,lo,hi,tol)
+    mscale=1.0
+    for c in sg.patch.surface.controls
+        mscale=max(mscale,abs(c[1]),abs(c[2]),abs(c[3]))
+    end
+    ftol=50tol*mscale
+    function footlvl(t)
+        P=_brep_curve_eval(crv,t)
+        u,v,xyz=_model_nurbs_surface_project(sg,P)
+        _,du,dv=_occ_surface_d1(sg,u,v)
+        n=_b3cross(du,dv)
+        nn=_b3norm(n)
+        nn<=eps(Float64) && return Inf
+        return _b3dot(_b3(P,xyz),n)/nn
+    end
+    ts=_brep_curve_grid(crv,lo,hi)
+    out=Float64[]
+    gb=footlvl(ts[1])
+    for i in 2:length(ts)
+        a,b=ts[i-1],ts[i]
+        ga=gb;gb=footlvl(b)
+        (isfinite(ga) && isfinite(gb)) || continue
+        signbit(ga)==signbit(gb) && continue
+        fa=ga
+        for _ in 1:60
+            m=(a+b)/2
+            fm=footlvl(m)
+            isfinite(fm) || break
+            fm==0.0 && (a=b=m;break)
+            signbit(fm)==signbit(fa) ? (a=m;fa=fm) : (b=m)
+        end
+        r=(a+b)/2
+        fr=footlvl(r)
+        isfinite(fr) && abs(fr)<=ftol && push!(out,r)
     end
     return out
 end
@@ -1294,6 +1977,8 @@ function _brep_curve_grid(crv,lo,hi;subs::Int=8)
         bk=unique(crv.curve.curve.knots)
     elseif crv.kind===:bspline && crv.curve isa _ModelOCCReparamCurve
         bk=crv.curve.reparam.knots
+    elseif crv.kind===:bspline && crv.curve isa _ModelOCCSectionCurve
+        bk=unique(crv.curve.curve.knots)
     else
         bk=nothing
     end
@@ -1847,8 +2532,12 @@ function _brep_shift_pc(pc,shift)
         return (ellips2d=((o[1]-shift,o[2]),x,a,b),)
     elseif hasproperty(pc,:spl2d)
         knots,p,cps=pc.spl2d
-        return (spl2d=(knots,p,
+        out=(spl2d=(knots,p,
             NTuple{2,Float64}[(c[1]-shift,c[2]) for c in cps]),)
+        hasproperty(pc,:lvl2d) &&
+            (out=merge(out,(lvl2d=let l=pc.lvl2d
+                uv->l((uv[1]+shift,uv[2])) end),))
+        return out
     elseif hasproperty(pc,:tan2d)
         inner,u0,us,vv=pc.tan2d
         return (tan2d=(inner,u0-shift,us,vv),)
@@ -1993,7 +2682,12 @@ function _brep_face_regions(solid,f,side,edge_splits,secs,extras,tol,caller)
     end
     for wire in f.wires,(eidx,sign,pc) in wire
         e=solid.edges[eidx]
-        extra=get(edge_splits,eidx,Float64[])
+        # every writer upstream (pierce roots, section endpoints, imprint
+        # contacts) feeds one vertex set — collapse params whose 3-D images
+        # coincide so a grazing or doubly-reported contact can't grow a
+        # sliver arc around a single vertex
+        extra=_brep_edge_splits(e.curve,get(edge_splits,eidx,Float64[]),
+                                e.t0,e.t1,tol)
         for (k,(ta,tb)) in enumerate(_brep_split_ranges(e.t0,e.t1,extra,tol))
             uvm=_brep_pc_eval(pc,(ta+tb)/2)
             dup=any(ks->_brep_pc_same_carrier(pc,ks.pc,tol) &&
@@ -2019,7 +2713,8 @@ function _brep_face_regions(solid,f,side,edge_splits,secs,extras,tol,caller)
     end
     for sf in kept_secs
         push!(raw,(pc=sf.pc,t0=sf.span[1],t1=sf.span[2],
-                   key=(:s,sf.se),crv=sf.crv))
+                   key=(:s,sf.se),crv=sf.crv,
+                   fix0=get(sf,:fix0,nothing),fix1=get(sf,:fix1,nothing)))
     end
     append!(raw,extras)
     # canonical cut domain: [ulo, ulo+uper], ulo = leftmost u of the face's
@@ -2052,20 +2747,31 @@ function _brep_face_regions(solid,f,side,edge_splits,secs,extras,tol,caller)
                 # both faces' seams, so each se maps to one result edge on
                 # either side; wire arcs carry their own piece key
                 va,vb=neg ? (-tb,-ta) : (ta,tb)
+                fx0=ta==ar.t0 ? get(ar,:fix0,nothing) : nothing
+                fx1=tb==ar.t1 ? get(ar,:fix1,nothing) : nothing
+                band!=0 && fx0!==nothing &&
+                    (fx0=(fx0[1]+band*uper,fx0[2]))
+                band!=0 && fx1!==nothing &&
+                    (fx1=(fx1[1]+band*uper,fx1[2]))
                 push!(arcs,(pc=pc2,t0=ta,t1=tb,key=ar.key,crv=ar.crv,
-                            vt0=va,vt1=vb,neg=neg,a=0,b=0))
+                            vt0=va,vt1=vb,neg=neg,a=0,b=0,
+                            fix0=fx0,fix1=fx1))
             end
         else
             va,vb=neg ? (-ar.t1,-ar.t0) : (ar.t0,ar.t1)
             push!(arcs,(pc=ar.pc,t0=ar.t0,t1=ar.t1,key=ar.key,crv=ar.crv,
-                        vt0=va,vt1=vb,neg=neg,a=0,b=0))
+                        vt0=va,vt1=vb,neg=neg,a=0,b=0,
+                        fix0=get(ar,:fix0,nothing),
+                        fix1=get(ar,:fix1,nothing)))
         end
     end
     isempty(arcs) && return NamedTuple[],arcs,Vector{Tuple{Int,Bool}}[]
     pts=Tuple{Float64,Float64}[]
     for ar in arcs
-        push!(pts,_brep_pc_eval(ar.pc,ar.t0))
-        push!(pts,_brep_pc_eval(ar.pc,ar.t1))
+        # anchored section ends place the shared vertex exactly — the
+        # fitted pcurve's own endpoint can sit a residual off it
+        push!(pts,ar.fix0===nothing ? _brep_pc_eval(ar.pc,ar.t0) : ar.fix0)
+        push!(pts,ar.fix1===nothing ? _brep_pc_eval(ar.pc,ar.t1) : ar.fix1)
     end
     nodes,idx=_brep_uv_nodes(pts,tol)
     arcs=[merge(ar,(a=idx[2i-1],b=idx[2i])) for (i,ar) in enumerate(arcs)]
@@ -2080,6 +2786,24 @@ function _brep_face_regions(solid,f,side,edge_splits,secs,extras,tol,caller)
         mi=_brep_pc_eval(ai.pc,(ai.t0+ai.t1)/2)
         mj=_brep_pc_eval(aj.pc,(aj.t0+aj.t1)/2)
         hypot(mi[1]-mj[1],mi[2]-mj[2])<tol && (keep_arc[j]=false)
+    end
+    arcs=arcs[keep_arc]
+    # collapsed self-loops: an arc whose endpoints merged to one node only
+    # bounds a region when the loop has real extent (a closed conic edge).
+    # A sliver piece whose whole loop fits inside tol — e.g. a grazing
+    # contact split the wire twice around one vertex — carries no region;
+    # drop it before traversal pairs it into a zero-area lens cycle
+    keep_arc=trues(length(arcs))
+    for (i,ar) in enumerate(arcs)
+        ar.a==ar.b || continue
+        p0=_brep_pc_eval(ar.pc,ar.t0)
+        dev=0.0
+        for t in _brep_pc_grid(ar.pc,ar.t0,ar.t1;subs=2)
+            q=_brep_pc_eval(ar.pc,t)
+            dev=max(dev,hypot(q[1]-p0[1],q[2]-p0[2]))
+            dev>=tol && break
+        end
+        dev<tol && (keep_arc[i]=false)
     end
     arcs=arcs[keep_arc]
     # dangling chords: a section piece may end strictly inside this face
@@ -2275,9 +2999,11 @@ function _brep_flip_pc(pc,caller)
         # exact parameter reversal: p(−t) is the same spline over mirrored
         # knots with mirrored poles
         knots,p,cps=pc.spl2d
-        return (spl2d=(Float64[-k for k in Iterators.reverse(knots)],p,
-                       NTuple{2,Float64}[cp for cp in
-                                         Iterators.reverse(cps)]),)
+        out=(spl2d=(Float64[-k for k in Iterators.reverse(knots)],p,
+                    NTuple{2,Float64}[cp for cp in
+                                      Iterators.reverse(cps)]),)
+        hasproperty(pc,:lvl2d) && (out=merge(out,(lvl2d=pc.lvl2d,)))
+        return out
     end
     throw(ArgumentError(
         "$caller: unrepresentable parameter-reversed pcurve"))
@@ -2454,12 +3180,15 @@ function _brep_pc_reparam(pc,α,β,tol,caller)
         # exact affine reparametrization of a B-spline: knots map through
         # (k−β)/α; α<0 mirrors the knot vector and pole order
         knots,p,cps=pc.spl2d
-        if α>0
-            return (spl2d=(Float64[(k-β)/α for k in knots],p,cps),),false
+        out=if α>0
+            (spl2d=(Float64[(k-β)/α for k in knots],p,cps),)
+        else
+            (spl2d=(Float64[(k-β)/α for k in Iterators.reverse(knots)],
+                    p,NTuple{2,Float64}[cp for cp in
+                                        Iterators.reverse(cps)]),)
         end
-        return (spl2d=(Float64[(k-β)/α for k in Iterators.reverse(knots)],
-                       p,NTuple{2,Float64}[cp for cp in
-                                           Iterators.reverse(cps)]),),false
+        hasproperty(pc,:lvl2d) && (out=merge(out,(lvl2d=pc.lvl2d,)))
+        return out,false
     end
     throw(ArgumentError(
         "$caller: coincident section's pcurve has no representable " *
@@ -3231,8 +3960,10 @@ function _brep_collect_faces(m::GeoModel,op::Symbol,ta::Int,tb::Int,caller)
         end
         for s in _brep_face_sections(fa,fb,caller)
             # trim each section on both faces; intersect the kept span sets
-            spansA=_brep_trim_section(A,fa,s.pcA,s.closed,tol)
-            spansB=_brep_trim_section(B,fb,s.pcB,s.closed,tol)
+            spansA=_brep_trim_section(A,fa,s.pcA,s.closed,tol;
+                                      scrv=s.curve)
+            spansB=_brep_trim_section(B,fb,s.pcB,s.closed,tol;
+                                      scrv=s.curve)
             merged=_brep_intersect_spans(spansA,spansB,s.closed,tol,caller)
             isempty(merged) && continue
             push!(sections,(curve=s.curve,closed=s.closed,pcA=s.pcA,
@@ -3251,7 +3982,8 @@ function _brep_collect_faces(m::GeoModel,op::Symbol,ta::Int,tb::Int,caller)
             for of in other.faces
                 append!(ps,_brep_edge_face_params(other,e,of,tol))
             end
-            isempty(ps) || (es[eidx]=sort!(ps))
+            isempty(ps) ||
+                (es[eidx]=_brep_edge_splits(e.curve,ps,e.t0,e.t1,tol))
         end
     end
     # coincident-face imprints: crossings and collinear contacts become edge
@@ -3405,9 +4137,25 @@ function _brep_collect_faces(m::GeoModel,op::Symbol,ta::Int,tb::Int,caller)
     sec_edges=NamedTuple[]
     secs_A=[NamedTuple[] for _ in A.faces]
     secs_B=[NamedTuple[] for _ in B.faces]
+    # fitted-section endpoint anchors — see `_brep_sec_vertex`
+    mscale=1.0
+    for S in (A,B), p in S.pts
+        mscale=max(mscale,abs(p[1]),abs(p[2]),abs(p[3]))
+    end
     for (si,sec) in enumerate(sections)
         esec_skip[si] && continue
         for (lo,hi) in sec.spans
+            va=_brep_sec_vertex((A,B),1,2,esplits[1],esplits[2],
+                                sec,lo,tol,mscale)
+            vb=_brep_sec_vertex((A,B),1,2,esplits[1],esplits[2],
+                                sec,hi,tol,mscale)
+            for a in (va,vb)
+                a===nothing && continue
+                a.A!==nothing && push!(
+                    get!(Vector{Float64},esplits[1],a.A[2]),a.A[3])
+                a.B!==nothing && push!(
+                    get!(Vector{Float64},esplits[2],a.B[2]),a.B[3])
+            end
             cuts=copy(get(sec_cuts,si,Float64[]))
             for (S,face,spc) in ((A,A.faces[sec.fa],sec.pcA),
                                  (B,B.faces[sec.fb],sec.pcB))
@@ -3420,12 +4168,22 @@ function _brep_collect_faces(m::GeoModel,op::Symbol,ta::Int,tb::Int,caller)
                 end
             end
             for (s0,s1) in _brep_split_ranges(lo,hi,cuts,tol)
+                a0=s0-lo<tol ? va : nothing
+                a1=s1-hi>-tol ? vb : nothing
                 push!(sec_edges,(curve=sec.curve,t0=s0,t1=s1))
                 se=length(sec_edges)
                 push!(secs_A[sec.fa],(se=se,span=(s0,s1),pc=sec.pcA,
-                                      crv=sec.curve))
+                                      crv=sec.curve,anc0=a0,anc1=a1,
+                                      fix0=_brep_anchor_uv(
+                                          A.faces[sec.fa],1,a0),
+                                      fix1=_brep_anchor_uv(
+                                          A.faces[sec.fa],1,a1)))
                 push!(secs_B[sec.fb],(se=se,span=(s0,s1),pc=sec.pcB,
-                                      crv=sec.curve))
+                                      crv=sec.curve,anc0=a0,anc1=a1,
+                                      fix0=_brep_anchor_uv(
+                                          B.faces[sec.fb],2,a0),
+                                      fix1=_brep_anchor_uv(
+                                          B.faces[sec.fb],2,a1)))
             end
         end
     end
@@ -3435,7 +4193,13 @@ function _brep_collect_faces(m::GeoModel,op::Symbol,ta::Int,tb::Int,caller)
         for (fidx,f) in enumerate(S.faces), sf in secs[fidx]
             uper=_brep_uperiod(f.sg)
             ulo=_brep_face_ubase(S.edges,f)
-            for tend in (sf.span[1],sf.span[2])
+            for (tend,anc) in ((sf.span[1],get(sf,:anc0,nothing)),
+                               (sf.span[2],get(sf,:anc1,nothing)))
+                # an endpoint anchored on this operand's own wire edge
+                # already pushed its authoritative pierce param —
+                # re-projecting the fitted uv would add a residual-off
+                # duplicate split
+                _brep_anchor_own(sd,anc) && continue
                 uv=_brep_wrap_u(_brep_pc_eval(sf.pc,tend),ulo,uper)
                 for wire in f.wires,(eidx,sign,epc) in wire
                     e=S.edges[eidx]
@@ -3681,8 +4445,10 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
                 continue
             end
             for s in _brep_face_sections(fI,fJ,caller)
-                spansI=_brep_trim_section(Si,fI,s.pcA,s.closed,tol)
-                spansJ=_brep_trim_section(Sj,fJ,s.pcB,s.closed,tol)
+                spansI=_brep_trim_section(Si,fI,s.pcA,s.closed,tol;
+                                          scrv=s.curve)
+                spansJ=_brep_trim_section(Sj,fJ,s.pcB,s.closed,tol;
+                                          scrv=s.curve)
                 merged=_brep_intersect_spans(spansI,spansJ,s.closed,tol,caller)
                 isempty(merged) && continue
                 push!(sections,(curve=s.curve,closed=s.closed,pcA=s.pcA,
@@ -3852,9 +4618,27 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
     # section sub-edges, cut at both faces' seam lifts and contact cuts
     sec_edges=NamedTuple[]
     secs_pf=[[NamedTuple[] for _ in solids[i].faces] for i in 1:N]
+    # fitted-section endpoint anchors — see `_brep_sec_vertex`
+    mscale=1.0
+    for S in solids, p in S.pts
+        mscale=max(mscale,abs(p[1]),abs(p[2]),abs(p[3]))
+    end
     for (si,sec) in enumerate(sections)
         esec_skip[si] && continue
         for (lo,hi) in sec.spans
+            va=_brep_sec_vertex(solids,sec.oi,sec.oj,
+                                esplits[sec.oi],esplits[sec.oj],
+                                sec,lo,tol,mscale)
+            vb=_brep_sec_vertex(solids,sec.oi,sec.oj,
+                                esplits[sec.oi],esplits[sec.oj],
+                                sec,hi,tol,mscale)
+            for a in (va,vb)
+                a===nothing && continue
+                a.A!==nothing && push!(get!(Vector{Float64},
+                    esplits[sec.oi],a.A[2]),a.A[3])
+                a.B!==nothing && push!(get!(Vector{Float64},
+                    esplits[sec.oj],a.B[2]),a.B[3])
+            end
             cuts=copy(get(sec_cuts,si,Float64[]))
             for k in (sec.oi,sec.oj)
                 S=solids[k]
@@ -3869,12 +4653,22 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
                 end
             end
             for (s0,s1) in _brep_split_ranges(lo,hi,cuts,tol)
+                a0=s0-lo<tol ? va : nothing
+                a1=s1-hi>-tol ? vb : nothing
                 push!(sec_edges,(curve=sec.curve,t0=s0,t1=s1))
                 se=length(sec_edges)
+                fa=solids[sec.oi].faces[sec.fa]
+                fb=solids[sec.oj].faces[sec.fb]
                 push!(secs_pf[sec.oi][sec.fa],
-                      (se=se,span=(s0,s1),pc=sec.pcA,crv=sec.curve))
+                      (se=se,span=(s0,s1),pc=sec.pcA,crv=sec.curve,
+                       anc0=a0,anc1=a1,myside=1,
+                       fix0=_brep_anchor_uv(fa,1,a0),
+                       fix1=_brep_anchor_uv(fa,1,a1)))
                 push!(secs_pf[sec.oj][sec.fb],
-                      (se=se,span=(s0,s1),pc=sec.pcB,crv=sec.curve))
+                      (se=se,span=(s0,s1),pc=sec.pcB,crv=sec.curve,
+                       anc0=a0,anc1=a1,myside=2,
+                       fix0=_brep_anchor_uv(fb,2,a0),
+                       fix1=_brep_anchor_uv(fb,2,a1)))
             end
         end
     end
@@ -3884,7 +4678,12 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
         for (fidx,f) in enumerate(S.faces), sf in secs_pf[i][fidx]
             uper=_brep_uperiod(f.sg)
             ulo=_brep_face_ubase(S.edges,f)
-            for tend in (sf.span[1],sf.span[2])
+            for (tend,anc) in ((sf.span[1],get(sf,:anc0,nothing)),
+                               (sf.span[2],get(sf,:anc1,nothing)))
+                # an endpoint anchored on this operand's own wire edge
+                # already pushed its pierce param — re-projecting the
+                # fitted uv would add a residual-off duplicate split
+                _brep_anchor_own(get(sf,:myside,0),anc) && continue
                 uv=_brep_wrap_u(_brep_pc_eval(sf.pc,tend),ulo,uper)
                 for wire in f.wires,(eidx,sign,epc) in wire
                     e=S.edges[eidx]
