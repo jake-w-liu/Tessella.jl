@@ -148,9 +148,29 @@ where upstream parses. `post_view_io_test` 116/116.
   profile (18e07e4). `optimize_test` 363/363, parallel `-t4` 37/37.
 - `4de5a04` `_brep_edge_curve` materializes `:bspline`/`:ellipse`/
   `:copied_curve` records + generic pcurve machinery (82-edge STEP
-  link-rod extracts; t20 `occ.fragment` reaches the named
-  `tensor_bspline×plane` bound). Fixed signed-conic-level interior
-  rejection regression in `_brep_pc_near`/`_brep_pc_param`.
+  link-rod extracts). Fixed signed-conic-level interior rejection
+  regression in `_brep_pc_near`/`_brep_pc_param`.
+- `ba7f90b` `.geo` diagnostic gaps: `KeyError` routed to the recoverable
+  boolean pair (upstream `catch(Standard_Failure)` parity), OCC kernel
+  synchronized before physical resolution, `Physical Kind(t)={..}`
+  operand members admitted as declaration side effects.
+- `f27a2b1` mesh3d `1f+3e` closed: `_certify_partition_exact` registry
+  index-space mix-up fixed by exact kept-edge-chain coverage
+  (`_onseg3`/`_crease_covered`, stricter); stale `max_predicate_tests`
+  pin re-pinned at kernel level.
+- `cb4987d` `set_periodic!` now invalidates retained `curve_params` for
+  new dim-1 slaves + transitive dependents — cyclic regeneration emitted
+  ~1e-13-stale slave vertices defeating weld. Periodic sweep green.
+- `9417a32` bare-partition entity layer: topology=0+ghosts=0 still
+  materializes upstream `createNewEntities` children (one partition
+  child per owner); `_get_partitions` fold-back gated to
+  session-produced caches (imported MSH4 stays unlabelled); `_unpartition`
+  tag reuse; CLI `-part` `owner_remap`. 75/75 new testset.
+- `2b40b4f` **`tensor_bspline×plane` Boolean sections** — the t20 bound
+  is implemented: marching-squares zero-contour trace over the knot
+  grid + Newton refinement + chord-fit pcurves, `_ModelOCCSectionCurve`
+  same-parameter composed evaluator, emit/assembly wiring.
+  `occ.fragment(imported BSpline face, box)` completes end-to-end.
 
 ### Remaining registered-plugin parity batch (`13af571`, `a0a3025`)
 
@@ -3010,9 +3030,9 @@ support/common.jl` gained `run_gmsh_dim`, `gmsh_mixed` and `cell_metrics`.
   fillets + `1645855` write-back shell/station fixes; verbatim
   `3225/8258`, oracle parity class).
 - t20: STEP import + OCC `Rectangle` planes + `occ.fragment` — the
-  operand grammar (`abe2d6e`) and imported-curve extraction (`4de5a04`)
-  are in; verbatim reaches the named `tensor_bspline×plane` face-pair
-  bound (in progress).
+  operand grammar (`abe2d6e`), imported-curve extraction (`4de5a04`),
+  and `tensor_bspline×plane` sections (`2b40b4f`) are all in; the
+  verbatim driver is being re-verified end-to-end.
 - t21: **unblocked** — `GMSH_PARITY_T21_TUTORIAL_OK` verbatim:
   `geo_verbatim=OK occ_fragment=OK geo_partitionmesh=OK
   partition_topology=OK nparts=3` (`22df1b6` dim-2 Booleans +
