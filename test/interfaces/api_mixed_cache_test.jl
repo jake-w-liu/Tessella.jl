@@ -135,7 +135,7 @@ end
     end
 end
 
-@testset "API curved CAD elevation and refinement fail before cache mutation" begin
+@testset "API curved CAD elevation and refinement update the cache" begin
     api=Tessella.API
     source="""
         Point(1)={1,0,0};Point(2)={2,0,0};Point(3)={0,2,0};
@@ -146,19 +146,25 @@ end
         """
     api.initialize()
     try
-        mktemp() do path,io
-            write(io,source);close(io)
+        mktempdir() do directory
+            path=joinpath(directory,"curved.geo")
+            write(path,source)
             api.open_geo!(path)
         end
         before=api.mesh.generate(2)
         @test before isa MixedMesh
-        @test_throws ArgumentError api.mesh.set_order(2)
-        @test api.CURRENT[].meshing.order==1
-        @test api.mesh.get().coords==before.coords
-        @test api.mesh.get().blocks[1].nodes==before.blocks[1].nodes
-        @test_throws ArgumentError api.mesh.refine()
-        @test api.mesh.get().coords==before.coords
-        @test api.mesh.get_element_types()==Int32[3]
+        api.mesh.set_order(2)
+        @test api.CURRENT[].meshing.order==2
+        elevated=api.mesh.get()
+        @test api.mesh.get_element_types()==Int32[8,10,15]
+        @test size(elevated.coords,2)==9
+        # Circle-arc midside nodes sit on the arcs, not on the chords.
+        @test elevated.coords[:,6]≈[sqrt(2),sqrt(2),0.0]
+        @test elevated.coords[:,8]≈[sqrt(2)/2,sqrt(2)/2,0.0]
+        api.mesh.refine()
+        @test api.mesh.get().coords!=elevated.coords
+        @test size(api.mesh.get().coords,2)==10
+        @test api.mesh.get_element_types()==Int32[1,3,15]
     finally
         api.finalize()
     end
@@ -195,7 +201,9 @@ end
         api.mesh.set_order(1)
         @test api.mesh.get().coords==generated.coords
         api.mesh.clear([(3,1)])
-        @test isempty(api.mesh.get_element_types())
+        # `clear` is per-entity upstream — the volume record is removed but
+        # the boundary curve, surface and point records survive.
+        @test api.mesh.get_element_types()==Int32[1,3,15]
         @test size(api.mesh.get().coords,2)==26
     finally
         api.finalize()
