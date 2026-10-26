@@ -176,11 +176,21 @@ where upstream parses. `post_view_io_test` 116/116.
   words, both top-level and nested inside Boolean operand groups (a
   member side effect contributing no operands, per `ListOfShapes`).
   `geo_diagnostic_edges_test.jl` 28/28.
-- Post-restart fix (pending commit): `_brep_msq_chains` resolves
-  degree-4 node keys — a section contour passing exactly through a
-  shared grid vertex (saddle) pairs the four incidences by opposite
-  departure direction instead of throwing "self-intersects at a grid
-  vertex". Degree-3 tangent contacts pair the most-opposite two.
+- `a962fd7` marching-squares robustness for the new section path:
+  `_brep_msq_chains` resolves degree-4 node keys — a section contour
+  passing exactly through a shared grid vertex (saddle) pairs the four
+  incidences by opposite departure direction instead of throwing
+  "self-intersects at a grid vertex". Degree-3 tangent contacts pair
+  the most-opposite two; coincident duplicated segments (level set
+  running along a shared grid edge producing out-and-back hairpin
+  cycles) are deduped before chaining. `model_boolean_conic_spline_test`
+  62/62 (27m under -O0); `occ.fragment(IGES BSpline face, box)` FRAG_OK.
+- `53a6a69` `Mesh.ScalingFactor` applied to serialized coordinates:
+  `-scale`/`-meshscale` CLI flags store the option, in-script
+  `Mesh.ScalingFactor` applies to `Save`/`Print`, `API.write` scales the
+  projected export matrix so every writer inherits it, and the CLI
+  `.geo` driver write sites apply `_scaled_mesh_copy` (live mesh never
+  mutated; tags/physicals/periodic/partition data preserved).
 - Classification note: the shipped Gmsh 4.15.2 oracle binary rejects
   `AutomaticMeshSizeField` outright ("has to be compiled with HXT and
   P4EST"), so the HXT bullets (`p4estFileToLoad`, upstream-internal
