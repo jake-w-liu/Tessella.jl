@@ -5662,6 +5662,23 @@ face-pair bound** (in progress). What remains below is the genuine
 long tail — mostly P3 unclassified-CAD/NURBS depth, P4–P6 breadth,
 and the standing differential corpus.
 
+2026-10-27 continuation landed: `Physical GeoEntity{d}` declarations
+(`528fd30`), `tensor_bspline×plane` sections + marching-squares
+saddle/coincident-edge robustness (`2b40b4f`, `a962fd7` — t20's named
+bound is now implemented; full verbatim driver run in flight),
+bare-partition entity layer (`9417a32`), `Mesh.ScalingFactor` applied
+at every writer (`53a6a69`), and `<name>_topology.pro` partition
+topology output (`97de732` — byte-identical to oracle on the default
+`PartitionCreatePhysicals=0` surface). **Next genuine bound**:
+`Mesh.PartitionCreatePhysicals` (`-part_physicals`) — upstream creates
+`_part{p1,...}_physical{X}_dim{d}` named physical groups on partition
+entities so `writePartitionedTopology` populates Part/Omega/Sigma;
+the writer already parses that encoding, so implementing the naming
+in the partitioner closes it. Remaining rejected batch flags after
+this session: `-part_weight`, `-part_physicals`, `-swapangle`,
+`-match`, `-statreport`, `-run`/ONELAB family, `-cpu`, `-log`,
+`-watch`, plus the GUI-only block (correctly rejected).
+
 - **P1**: remaining HXT-exact parity inside the now-octree-backed
   `AutomaticMeshSizeField` (sphere-fit curvature, facing-triangle
   `nPointsPerGap` local feature size, `hBulk` fallback, edge-gradation
