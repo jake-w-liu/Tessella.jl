@@ -97,7 +97,7 @@ using ..IO: _geo_allocator_delete_entities!, _geo_allocator_reset_model!
 using ..IO: _GEO_SHAPE_DEFINITION_DIMS, _geo_statement_marks_internals
 using ..IO: _geo_allocator_set_factory!
 using ..IO: _geo_context_forget!
-using ..IO: _geo_physical_declaration
+using ..IO: _geo_physical_declaration, _geo_physical_kind_dim
 using ..IO: _geo_exec_assignment!, _geo_eval_string, _geo_symbol_name
 using ..IO: _geo_split_args, _geo_yyerror!, _geo_yywarn!, _geo_yyinfo!,
             _geo_int_value
@@ -3845,6 +3845,31 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
             # evaluates with it — the lookups below then simply find nothing.
             0<=dim<=3 || _geo_yyerror!(context,
                 "GeoEntity dim out of range [0,3]")
+            # `Physical GeoEntity{d}(id) op {members};` — the declaration
+            # form also nests in a shape list as a member side effect,
+            # contributing no operand entities (same production as the
+            # kind-word arm below; `(` after the dim group distinguishes
+            # it from the `Physical GeoEntity{d}{tags}` selector).
+            if name=="Physical" && startswith(s,"(")
+                depth=0;parens=0;i=firstindex(s0);last=lastindex(s0);cut=0
+                while i<=last
+                    c=s0[i]
+                    c=='{' && (depth+=1)
+                    c=='}' && (depth-=1)
+                    c=='(' && (parens+=1)
+                    c==')' && (parens-=1)
+                    (c==';' && depth==0 && parens==0) && (cut=i; break)
+                    i=nextind(s0,i)
+                end
+                cut==0 && _geo_syntax_abort("}")
+                stmt=String(s0[firstindex(s0):cut])
+                rest=String(strip(s0[nextind(s0,cut):end]))
+                _exec_line!(m,stmt,context,allocator_state)
+                allocator_state===nothing ||
+                    _geo_allocator_observe_statement!(
+                        allocator_state,stmt,context,"execute_geo")
+                return (NTuple{2,Int}[],rest,false)
+            end
         else
             km===nothing && _geo_selector_abort(s)
             dim=_geo_shape_kind_dim(km.captures[1])
@@ -8208,8 +8233,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         return
     elseif (physical=_geo_physical_declaration(line)) !== nothing
         caller="execute_geo: Physical $(physical.kind)"
-        dim=Dict("Point"=>0,"Curve"=>1,"Line"=>1,
-                 "Surface"=>2,"Volume"=>3)[physical.kind]
+        dim=_geo_physical_kind_dim(physical,context,caller)
         name=physical.name===nothing ? "" : physical.name
         physical.tag_source===nothing && isempty(name) && throw(ArgumentError(
             "$caller: an automatic group requires a nonempty name"))

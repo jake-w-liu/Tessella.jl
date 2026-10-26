@@ -102,3 +102,44 @@ end
     @test haskey(ex.model.volumes,9)
     @test haskey(ex.model.points,98)
 end
+
+@testset "Physical GeoEntity{dim} declarations" begin
+    # Upstream's `GeoEntity` nonterminal admits the `tGeoEntity '{' FExpr '}'`
+    # dim form beside the kind words, so `Physical GeoEntity{d}(t) = {..}`
+    # parses both top-level and nested inside a boolean operand group. The
+    # nested member still runs as a side-effect declaration and contributes
+    # no operand entities.
+    ex=_execute_geo_source("""
+        SetFactory("OpenCASCADE");
+        Box(1) = {0,0,0, 1,1,1};
+        BooleanFragments{ Volume{1}; Delete; }
+            { Physical GeoEntity{3}(77)={1}; Delete; }
+        """)
+    @test isempty(ex.errors)
+    @test isempty(ex.warnings)
+    @test ex.model.physical[(3,77)]==[1]
+
+    # Top-level create, compound modify, named form, and expression dims all
+    # resolve through the same declaration path as the kind words.
+    ex=_execute_geo_source("""
+        Point(1) = {0,0,0};
+        Point(2) = {1,0,0};
+        Physical GeoEntity{0}(3) = {1};
+        Physical GeoEntity{0}(3) += {2};
+        Physical GeoEntity{0*3+0}(5) = {1};
+        Physical GeoEntity{2}("wall", 6) = {9};
+        """)
+    @test isempty(ex.errors)
+    @test ex.model.physical[(0,3)]==[1,2]
+    @test ex.model.physical[(0,5)]==[1]
+    # Unknown members warn-skip exactly like the kind-word form.
+    @test ex.warnings==["Skipping unknown surface 9 in physical surface 6"]
+    @test ex.model.physical_names[(2,6)]=="wall"
+
+    # Out-of-range dims reject through the same dim guard used by
+    # `GeoEntity{d}` selectors.
+    @test_throws ArgumentError _execute_geo_source("""
+        Point(1) = {0,0,0};
+        Physical GeoEntity{4}(5) = {1};
+        """)
+end

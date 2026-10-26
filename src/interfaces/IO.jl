@@ -8261,7 +8261,7 @@ function _geo_physical_declaration(raw::AbstractString)
             source[firstindex(source):prevind(source,lastindex(source))]))
     end
     named=match(
-        r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*\"([^\"]*)\"\s*(?:,\s*(.*?))?\s*\)\s*(=|\+=|-=|\*=|/=)\s*(.*)$",
+        r"^Physical\s+(Point|Curve|Line|Surface|Volume|GeoEntity\{[^{}]*\})\s*\(\s*\"([^\"]*)\"\s*(?:,\s*(.*?))?\s*\)\s*(=|\+=|-=|\*=|/=)\s*(.*)$",
         source)
     if named!==nothing
         raw_tag=named.captures[3]
@@ -8274,7 +8274,7 @@ function _geo_physical_declaration(raw::AbstractString)
                 membership=String(strip(named.captures[5])))
     end
     unnamed=match(
-        r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*(.*?)\s*\)\s*(=|\+=|-=|\*=|/=)\s*(.*)$",
+        r"^Physical\s+(Point|Curve|Line|Surface|Volume|GeoEntity\{[^{}]*\})\s*\(\s*(.*?)\s*\)\s*(=|\+=|-=|\*=|/=)\s*(.*)$",
         source)
     unnamed===nothing && return nothing
     tag_source=String(strip(unnamed.captures[2]))
@@ -8282,6 +8282,23 @@ function _geo_physical_declaration(raw::AbstractString)
     return (kind=String(unnamed.captures[1]),name=nothing,
             tag_source=tag_source,op=String(unnamed.captures[3]),
             membership=String(strip(unnamed.captures[4])))
+end
+
+# `Physical GeoEntity{d}(tag) op {members}` — upstream's `GeoEntity`
+# nonterminal admits the `GeoEntity{FExpr}` dim form beside the kind words
+# (Gmsh.y:2405). Evaluate the dim expression against the live context.
+function _geo_physical_kind_dim(physical,context,caller::AbstractString)
+    kind=physical.kind
+    if startswith(kind,"GeoEntity{") && endswith(kind,"}")
+        dim=_geo_int_value(_geo_eval_numeric(
+            kind[nextind(kind,firstindex(kind),10):prevind(kind,lastindex(kind))],
+            context,"$caller GeoEntity dimension"),
+            "$caller GeoEntity dimension")
+        0<=dim<=3 || throw(ArgumentError(
+            "$caller: GeoEntity dim out of range [0,3]"))
+        return dim
+    end
+    return _PHYS_DIM[kind]
 end
 
 function _geo_allocator_physical_tag!(state::_GeoTagAllocatorState,
@@ -10569,7 +10586,7 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
         _geo_context_refresh_allocators!(context,allocator_state)
         physical=_geo_physical_declaration(body)
         if physical!==nothing
-            dim=_PHYS_DIM[physical.kind]
+            dim=_geo_physical_kind_dim(physical,context,"read_geo_params")
             name=physical.name
             # `setPhysicalName(name, dim, T)` on the name->tag mirror: a bound
             # name resolves to its (possibly negative) tag; otherwise the
