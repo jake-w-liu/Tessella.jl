@@ -715,6 +715,15 @@ end
 
 function _partition_brep_production_plan(model,cached,class,count,assignment,caller;
                                          topology::Bool,ghosts::Bool)
+    # A mesh whose top partition tier is dim-2 (`t21.geo`: adjacent Surfaces
+    # sharing a Curve, plain sheets, embedded surfaces) carries no Region
+    # carrier — it runs the one-level-lower production plan instead, where
+    # inter-partition border edges become partition Curve entities.
+    catalog=[row for row in _cache_catalog(cached,class) if !isempty(row[4])]
+    !any(row->row[1] in _PARTITION_VOLUME_TYPES,catalog) &&
+        any(row->row[1] in _PARTITION_SURFACE_TYPES,catalog) &&
+        return _partition_surface_production_plan(model,cached,class,count,
+            assignment,caller;topology,ghosts)
     source=_partition_brep_snapshot(model,cached,class,assignment,caller)
     volume_parts=Int32[volume.part for volume in source.volumes]
     length(unique(volume_parts))==count || throw(ArgumentError(
@@ -1149,6 +1158,597 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
             selected=[volume for (index,volume) in enumerate(source.volumes) if Int32(part) in destinations[index]]
             rows=isempty(selected) ? Int32[] : unique(vcat([collect(volume.rows) for volume in selected]...))
             global_entities[(3,Int(tag))]=Elements.MixedEntity(3,tag,_partition_bounds(cached.coords,rows))
+        end
+    end
+    sum(size(block.nodes,2) for block in blocks)<=typemax(Int32) || throw(ArgumentError("$caller: partition cell capacity exceeded"))
+    data=Elements._native_mixed_entity_data(global_entities;node_entities=node_owners,
+        node_parametric=deepcopy(class.node_parametric),external_node_tags=copy(source.public.node_tags),
+        block_entities=owners,external_element_tags=labels)
+    partition=Elements.MixedPartitionData(count;entities=part_entities,ghost_entities,ghost_elements)
+    target=MixedMesh(cached.coords,blocks;entity_data=data,elementary_entities=owners,
+        physical_names=staged.physical_names,partition_data=partition,
+        periodic_links=cached isa MixedMesh ? cached.periodic_links : Elements.MixedPeriodicLink[],
+        ancillary_sections=cached isa MixedMesh ? cached.ancillary_sections : [],
+        data_sections=cached isa MixedMesh ? cached.data_sections : Elements.MshDataSection[])
+    validate(target).ok || throw(ArgumentError("$caller: lower BRep partition produced invalid or duplicate cells"))
+    _geo_import_entity_receipts!(staged,target)
+    identities=Dict(uid=>uid for uid in source.public.node_tags)
+    declarations=union(Set(keys(global_entities)),Set(keys(part_entities)))
+    _dim01_reconcile_records!(staged,declarations,target,identities;runtime_parameters=data.node_parametric)
+    previous=model.meshing.mesh_authority
+    ranks=previous!==nothing && previous.mesh===cached ? previous.private_rank : collect(UInt64,1:nnodes(target))
+    staged.meshing.mesh_authority=Model._model_mesh_authority(target;caller,private_rank=ranks)
+    cell_map=Dict(uid=>uid for uid in source.public.element_tags)
+    return (;model=staged,mesh=target,class=_higher_classification_from_data(target,caller),
+        authority=Set{Tuple{Int,Int32}}((dim,Int32(tag)) for (dim,tag) in declarations),
+        max_node_tag=NODE_TAG_MAX[],max_element_tag=maximum_uid,
+        node_tag_map=identities,element_tag_map=cell_map,visibility_tag_map=cell_map)
+end
+
+# ══════════════════════════════════════════════════════════════════════
+# Top-dimension-2 lower BRep partition topology — the `t21.geo` shape.
+# ══════════════════════════════════════════════════════════════════════
+# Upstream `PartitionMesh` on a surface mesh (`meshDim == 2`) creates the
+# same partition topology `createPartitionTopology` builds for volumes one
+# level lower: one partition Surface child per (surface, partition) pair,
+# one partition Curve per connected run of inter-partition border edges
+# (its parent is the Surface child of the lower-partition carrier), and a
+# partition Point at every vertex where two distinct dim-1 partition
+# entities meet with a partition vector spanning more than one part.
+# Declared Curve cells keep a single child per source Curve — its
+# partition vector already spans every incident face carrier — so a
+# declared Curve on a partition boundary doubles as the interface record
+# (the coincident-support rule the volume path uses for Surface cells).
+# The snapshot certificate below mirrors `_partition_brep_snapshot`: a
+# declared Curve cell must lie on the actual border of every Surface that
+# declares it (with matching orientation, including the shared edge two
+# Surfaces traverse oppositely), a partially declared Surface boundary
+# must cover its complete border, every declared lower entity must be
+# bound, globally shared edges carry mutually reversed traversals and no
+# edge carries three or more faces. Unlike the Region tier a Surface tier
+# need not declare any boundary at all: undeclared borders inherit the
+# original open-seam convention instead of forcing a Curve declaration.
+
+function _partition_surface_snapshot(model,cached,class,assignment,caller)
+    class.public_tags!==nothing || throw(ArgumentError(
+        "$caller: lower BRep needs actual UID authority"))
+    _high_order_overlay(cached)===nothing || throw(ArgumentError(
+        "$caller: lower BRep partitioning is unsupported for overlay-backed "*
+        "high-order caches"))
+    catalog=[row for row in _cache_catalog(cached,class) if !isempty(row[4])]
+    all(row->row[1] in (15,) || row[1] in _PARTITION_SURFACE_TYPES ||
+            row[1] in _PARTITION_CURVE_TYPES,catalog) &&
+        any(row->row[1] in _PARTITION_SURFACE_TYPES,catalog) || throw(ArgumentError(
+            "$caller: lower BRep partitioning supports complete cell families only"))
+    cached isa MixedMesh && cached.partition_data!==nothing && throw(ArgumentError(
+        "$caller: existing partition topology is unsupported"))
+    public=class.public_tags
+    length(public.element_tags)<=typemax(Int32) || throw(ArgumentError(
+        "$caller: lower BRep cell capacity exceeded"))
+    for (_,record) in Model._discrete_mesh_records_model(model)
+        all(uid->haskey(public.node_indices,uid),record.node_tags) &&
+        all(uid->haskey(public.element_indices,uid),record.element_tags) || throw(ArgumentError(
+            "$caller: lower BRep partitioning cannot omit caller-owned records outside the cache"))
+    end
+    assembly=_Dim01Assembly(_Dim01Node[],_Dim01Cell[],Dict{UInt64,Int32}(),
+        NODE_TAG_MAX[],ELEMENT_TAG_MAX[],typemax(Int32),typemax(Int32),caller)
+    _dim01_ingest!(assembly,model,cached,class;preserve_source_order=true)
+    length(assembly.nodes)==nnodes(cached) &&
+        length(assembly.cells)==length(public.element_tags) || throw(ArgumentError(
+            "$caller: cached and record BRep rows do not agree"))
+    entities,_=_dim01_entities(model,model_entities(model),assembly,eachindex(assembly.nodes))
+    workers=_partition_workers()
+    blocks=ElementBlock[];owners=Vector{Int32}[];uids=Vector{UInt64}[]
+    faces=NamedTuple[];lines=NamedTuple[];points=NamedTuple[]
+    for (msh,dim,offset,cells,classified) in catalog
+        physical=Int32[_dim01_physical(model,(dim,Int(owner))) for owner in classified]
+        push!(blocks,ElementBlock(msh,cells,physical));push!(owners,copy(classified))
+        push!(uids,copy(public.element_tags[offset+1:offset+size(cells,2)]))
+        for column in axes(cells,2)
+            rows=Tuple(cells[:,column]);labels=Tuple(public.node_tags[collect(rows)]);index=offset+column
+            record=(;rows,uids=labels,msh=Int(msh),index,parent=classified[column],part=assignment[index])
+            push!(msh in _PARTITION_SURFACE_TYPES ? faces :
+                  msh in _PARTITION_CURVE_TYPES ? lines : points,record)
+        end
+    end
+    parents=sort!(unique(face.parent for face in faces))
+    curve_parents=sort!(unique(line.parent for line in lines))
+    point_parents=sort!(unique(point.parent for point in points))
+    all(parent->parent>0 && _model_entity_known(model,2,Int(parent)),parents) &&
+    all(parent->parent>0 && _model_entity_known(model,1,Int(parent)),curve_parents) &&
+    all(parent->parent>0 && _model_entity_known(model,0,Int(parent)),point_parents) || throw(ArgumentError(
+        "$caller: lower BRep requires Surface, Curve and Point parents"))
+    line_support=Dict{Tuple{UInt64,UInt64},NamedTuple}();curve_edges=Dict{Int32,Vector{NamedTuple}}()
+    curve_nodes=Dict{Int32,Set{Int32}}();point_cells=Dict{Int32,NamedTuple}();point_rows=Set{Int32}()
+    for line in lines
+        key=minmax(line.uids[1],line.uids[2])
+        haskey(line_support,key) && throw(ArgumentError(
+            "$caller: original BRep repeats a Curve cell support"))
+        line_support[key]=line
+        ends=(line.uids[1],line.uids[2])
+        order=Elements.msh_order(line.msh)
+        push!(get!(()->NamedTuple[],curve_edges,line.parent),
+            (uids=ends,rows=line.rows,mid=order==1 ? nothing :
+                ntuple(i->line.uids[2+i],order-1)))
+        nodes=get!(()->Set{Int32}(),curve_nodes,line.parent)
+        for row in line.rows;push!(nodes,row);end
+    end
+    for point in points
+        haskey(point_cells,point.parent) && throw(ArgumentError(
+            "$caller: each declared lower Point needs exactly one actual Point15 cell"))
+        point_cells[point.parent]=point
+        point.rows[1] in point_rows && throw(ArgumentError("$caller: original BRep repeats a Point15 vertex"))
+        push!(point_rows,point.rows[1])
+    end
+    curve_ends=Dict{Int32,NTuple{2,UInt64}}();used_points=Set{Int32}()
+    curve_declared=Dict{Int32,Vector{NTuple{2,Int}}}()
+    for parent in curve_parents
+        edges=curve_edges[parent];outgoing=Dict{UInt64,Int}();incoming=Dict{UInt64,Int}()
+        for (index,edge) in enumerate(edges)
+            (haskey(outgoing,edge.uids[1]) || haskey(incoming,edge.uids[2])) && throw(ArgumentError(
+                "$caller: declared Curve $parent is not one nonbranching directed chain"))
+            outgoing[edge.uids[1]]=index;incoming[edge.uids[2]]=index
+        end
+        seed=something(findfirst(index->!haskey(incoming,edges[index].uids[1]),eachindex(edges)),1)
+        seen=falses(length(edges));index=seed;last=seed
+        while index!=0 && !seen[index]
+            seen[index]=true;last=index;index=get(outgoing,edges[index].uids[2],0)
+        end
+        all(seen) || throw(ArgumentError(
+            "$caller: declared Curve $parent is not one nonbranching directed chain"))
+        boundary=_partition_declared_boundary(model,1,Int(parent),caller)
+        if index==seed
+            isempty(boundary) || throw(ArgumentError(
+                "$caller: a closed declared Curve $parent cannot have Point boundaries"))
+            curve_ends[parent]=(UInt64(0),UInt64(0))
+            curve_declared[parent]=boundary
+            continue
+        end
+        curve_ends[parent]=(edges[seed].uids[1],edges[last].uids[2])
+        if !haskey(model.discrete,(1,Int(parent))) && length(boundary)==2
+            # A native Curve's signed ends describe the actual stored chain:
+            # `Reverse` or an opposite OCC edge use can leave the segments
+            # running against the declared endpoint order.
+            firstp,lastp=Int32(abs(boundary[1][2])),Int32(abs(boundary[2][2]))
+            if haskey(point_cells,firstp) && haskey(point_cells,lastp)
+                firstp,lastp=point_cells[firstp].uids[1]==curve_ends[parent][1] ?
+                    (firstp,lastp) : (lastp,firstp)
+                boundary=Tuple{Int,Int}[(0,firstp),(0,-lastp)]
+            end
+        end
+        curve_declared[parent]=boundary
+        length(boundary)==2 || throw(ArgumentError(
+            "$caller: declared Curve $parent needs signed start and end Point boundaries"))
+        covered_signs=Set{Int}()
+        for (bdim,bsigned) in boundary
+            bdim==0 || throw(ArgumentError(
+                "$caller: declared Curve $parent bounds require Point entities"))
+            point=Int32(abs(bsigned))
+            haskey(point_cells,point) || throw(ArgumentError(
+                "$caller: declared boundary Point $point has no actual Point15 cell"))
+            side=bsigned>0 ? 1 : 2
+            side in covered_signs && throw(ArgumentError(
+                "$caller: declared Curve $parent repeats a boundary orientation"))
+            push!(covered_signs,side);push!(used_points,point)
+            node=side==1 ? curve_ends[parent][1] : curve_ends[parent][2]
+            point_cells[point].uids[1]==node || throw(ArgumentError(
+                "$caller: declared boundary Point $point does not lie on the actual Curve end"))
+        end
+    end
+    surface_borders=_partition_brep_surface_borders(faces,caller;workers)
+    used_curves=Set{Int32}()
+    for parent in parents
+        boundary=_partition_declared_boundary(model,2,Int(parent),caller)
+        isempty(boundary) && continue
+        all(entry->entry[1]==1,boundary) && allunique(Int32(abs(entry[2])) for entry in boundary) ||
+            throw(ArgumentError(
+                "$caller: each declared Surface boundary must list distinct Curve entities"))
+        border=surface_borders.pairs[parent];covered=Set{Tuple{UInt64,UInt64}}()
+        native=!haskey(model.discrete,(2,Int(parent)))
+        for (_,signed) in boundary
+            curve=Int32(abs(signed));haskey(curve_edges,curve) || throw(ArgumentError(
+                "$caller: declared boundary Curve $curve has no actual Curve cells"))
+            if native
+                # A native Surface's Curve signs describe the actual border
+                # traversal: the OCC face's use flag, its parametric frame
+                # and Reverse/orientation flips can each leave the stored
+                # cells running against the stored loop text. A shared
+                # Curve is declared with opposite signs by the two Surfaces
+                # that meet on it — each side is checked against its own
+                # border traversal.
+                oriented=get(border,minmax(curve_edges[curve][1].uids...),nothing)
+                oriented===nothing ||
+                    (signed=oriented==curve_edges[curve][1].uids ? curve : -curve)
+            end
+            push!(used_curves,curve)
+            for edge in curve_edges[curve]
+                key=minmax(edge.uids...);oriented=get(border,key,nothing)
+                oriented===nothing && throw(ArgumentError(
+                    "$caller: declared Curve $curve cells must lie on the actual Surface border"))
+                expected=signed>0 ? edge.uids : (edge.uids[2],edge.uids[1])
+                oriented==expected || throw(ArgumentError(
+                    "$caller: declared Curve $curve orientation disagrees with its Surface border"))
+                if edge.mid!==nothing
+                    aligned=signed>0 ? edge.mid : reverse(edge.mid)
+                    surface_borders.mids[parent][key]==aligned || throw(ArgumentError(
+                        "$caller: declared Curve $curve edge node disagrees with its Surface border"))
+                end
+                key in covered && throw(ArgumentError(
+                    "$caller: declared Surface boundary repeats a border Curve cell"))
+                push!(covered,key)
+            end
+        end
+        covered==Set(keys(border)) || throw(ArgumentError(
+            "$caller: declared lower Surface Curves do not cover its complete border"))
+    end
+    Set(curve_parents)==used_curves || throw(ArgumentError(
+        "$caller: unbound lower Curves are unsupported"))
+    Set(point_parents)==used_points || throw(ArgumentError(
+        "$caller: unbound lower Points are unsupported"))
+    all(row->begin
+            dim,tag=class.node_entities[row]
+            dim==0 ? (get(point_cells,tag,nothing)!==nothing && point_cells[tag].rows[1]==row) :
+            dim==1 ? (haskey(curve_nodes,tag) && row in curve_nodes[tag]) :
+            dim==2 && tag in parents
+        end,
+        unique(vcat([collect(cell.rows) for cell in vcat(faces,lines,points)]...))) ||
+        throw(ArgumentError(
+            "$caller: referenced lower BRep vertices have inconsistent entity classification"))
+    # Global edge incidence across every face — the manifoldness and
+    # winding certificate the volume tier gets from its facet table. A
+    # shared edge carries at most two faces whose traversals must be mutual
+    # reversals, with edge-node sequences agreeing after orientation is
+    # normalized; a Curve cell's edge must sit on that incidence and its
+    # partition must come from an actual face carrier.
+    edge_faces=Dict{Tuple{UInt64,UInt64},Vector{NamedTuple}}()
+    for face in faces
+        corners,e=_partition_surface_shape(face.msh)
+        for (order,(a,b)) in enumerate(_partition_edge_patterns(face.msh))
+            mid=e==0 ? nothing : ntuple(i->(face.uids[corners+(order-1)*e+i],
+                face.rows[corners+(order-1)*e+i]),e)
+            push!(get!(()->NamedTuple[],edge_faces,minmax(face.uids[a],face.uids[b])),
+                (uids=(face.uids[a],face.uids[b]),rows=(face.rows[a],face.rows[b]),face,mid))
+        end
+    end
+    for hits in values(edge_faces)
+        length(hits)<=2 || throw(ArgumentError(
+            "$caller: original Surface mesh has a nonmanifold edge"))
+        length(hits)==2 || continue
+        hits[1].uids==reverse(hits[2].uids) || throw(ArgumentError(
+            "$caller: shared Surface edge winding disagrees"))
+        norm(hit)=hit.mid===nothing ? nothing :
+            (hit.uids[1]<hit.uids[2] ? Tuple(uid for (uid,_) in hit.mid) :
+                Tuple(uid for (uid,_) in Iterators.reverse(hit.mid)))
+        norm(hits[1])==norm(hits[2]) || throw(ArgumentError(
+            "$caller: shared Surface edge node disagrees"))
+    end
+    for line in lines
+        hits=get(edge_faces,minmax(line.uids[1],line.uids[2]),nothing)
+        hits!==nothing && !isempty(hits) || throw(ArgumentError(
+            "$caller: declared Curve cells must lie on actual Surface edges"))
+        any(entry.face.part==line.part for entry in hits) || throw(ArgumentError(
+            "$caller: each lower Curve cell partition must match an actual Surface edge carrier"))
+    end
+    return (;entities,blocks,owners,uids,public,faces,lines,points,
+        parents,curve_parents,point_parents,curve_edges,point_cells,
+        surface_borders,curve_declared,lower_edges=edge_faces,
+        facets=Dict{Tuple{Vararg{UInt64}},Vector{NamedTuple}}())
+end
+
+# Top-dimension-2 production plan: the per-(surface, partition) children
+# and lower BRep children are created first, then the topology layer emits
+# one partition Curve per maximal degree-2 chain of cross-partition border
+# edges without a declared carrier, plus a partition Point wherever two
+# distinct dim-1 partition entities meet over a partition vector spanning
+# more than one part. Surface child boundaries fall out of the same
+# border-edge tally the volume path uses for its sheet certificates, so
+# the shared Curve binds both children with opposite signs.
+function _partition_surface_production_plan(model,cached,class,count,assignment,caller;
+                                            topology::Bool,ghosts::Bool)
+    source=_partition_surface_snapshot(model,cached,class,assignment,caller)
+    length(unique(face.part for face in source.faces))==count || throw(ArgumentError(
+        "$caller: every partition must own a surface cell"))
+    staged=Model._model_mesh_transaction_copy(model)
+    part_entities=Dict{Tuple{Int,Int},Elements.MixedEntity}()
+    children=Dict{Tuple{Int,Int32,Int32},Int32}()
+    interfaces=Dict{Int32,Vector{NamedTuple}}();curves=Dict{Int32,Vector{NamedTuple}}()
+    interface_tags=Set{Int32}()
+    for (parent,part) in sort!(unique((face.parent,face.part) for face in source.faces))
+        tag=Int32(_partition_entity_birth!(staged,2,caller));children[(2,parent,part)]=tag
+        groups=Model._model_projection_physical_tags(staged,2,Int(parent))
+        staged.entity_physicals[(2,Int(tag))]=copy(groups)
+        for group in groups
+            members=staged.physical[(2,Int(group))];Int(tag) in members || push!(members,Int(tag))
+        end
+        selected=[face for face in source.faces if face.parent==parent && face.part==part]
+        rows=unique(vcat([collect(face.rows) for face in selected]...))
+        part_entities[(2,Int(tag))]=Elements.MixedEntity(2,tag,_partition_bounds(cached.coords,rows);
+            physical_tags=groups,partitions=Int32[part],parent=(2,parent))
+    end
+    curve_children=Dict{Int32,Int32}();point_children=Dict{Int32,Int32}()
+    curve_partitions=Dict{Int32,Vector{Int32}}()
+    for parent in source.curve_parents
+        tag=Int32(_partition_entity_birth!(staged,1,caller));curve_children[parent]=tag
+        groups=Model._model_projection_physical_tags(staged,1,Int(parent))
+        staged.entity_physicals[(1,Int(tag))]=copy(groups)
+        for group in groups
+            members=staged.physical[(1,Int(group))];Int(tag) in members || push!(members,Int(tag))
+        end
+        edges=source.curve_edges[parent]
+        parts=sort!(unique(Int32[entry.face.part for edge in edges
+            for entry in source.lower_edges[minmax(edge.uids[1],edge.uids[2])]]))
+        curve_partitions[parent]=parts
+        rows=unique(reduce(vcat,[collect(edge.rows) for edge in edges]))
+        part_entities[(1,Int(tag))]=Elements.MixedEntity(1,tag,_partition_bounds(cached.coords,rows);
+            physical_tags=groups,partitions=parts,parent=(1,Int(parent)))
+        curves[tag]=edges
+    end
+    point_declaring=Dict{Int32,Vector{Int32}}()
+    for parent in source.curve_parents,(_,signed) in source.curve_declared[parent]
+        push!(get!(()->Int32[],point_declaring,Int32(abs(signed))),parent)
+    end
+    for parent in source.point_parents
+        tag=Int32(_partition_entity_birth!(staged,0,caller));point_children[parent]=tag
+        groups=Model._model_projection_physical_tags(staged,0,Int(parent))
+        staged.entity_physicals[(0,Int(tag))]=copy(groups)
+        for group in groups
+            members=staged.physical[(0,Int(group))];Int(tag) in members || push!(members,Int(tag))
+        end
+        cell=source.point_cells[parent]
+        parts=sort!(unique(reduce(vcat,[curve_partitions[curve] for curve in point_declaring[parent]])))
+        part_entities[(0,Int(tag))]=Elements.MixedEntity(0,tag,_partition_bounds(cached.coords,[cell.rows[1]]);
+            physical_tags=groups,partitions=parts,parent=(0,Int(parent)))
+    end
+    flat_owners=Int32[owner for owners in source.owners for owner in owners]
+    for cell in source.faces;flat_owners[cell.index]=children[(2,cell.parent,cell.part)];end
+    for cell in source.lines;flat_owners[cell.index]=curve_children[cell.parent];end
+    for cell in source.points;flat_owners[cell.index]=point_children[cell.parent];end
+    blocks=copy(source.blocks);owners=Vector{Int32}[];offset=0
+    for block in blocks
+        n=size(block.nodes,2);push!(owners,flat_owners[offset+1:offset+n]);offset+=n
+    end
+    labels=copy(source.uids);cell_count=length(source.public.element_tags)
+    maximum_uid=max(ELEMENT_TAG_MAX[],maximum(source.public.element_tags;init=UInt64(0)))
+    boundaries=Dict(key=>Int32[] for key in keys(part_entities))
+    if topology
+        for parent in source.curve_parents
+            boundaries[(1,Int(curve_children[parent]))]=Int32[
+                sign(signed)*point_children[Int32(abs(signed))]
+                for (_,signed) in source.curve_declared[parent]]
+        end
+        edge_curve=Dict{Tuple{UInt64,UInt64},NamedTuple}()
+        for parent in source.curve_parents,edge in source.curve_edges[parent]
+            edge_curve[minmax(edge.uids...)]=(uids=edge.uids,tag=curve_children[parent])
+        end
+        seam_lookup=Dict{Tuple{UInt64,UInt64},NamedTuple}()
+        for (key,entry) in edge_curve
+            seam_lookup[key]=entry
+        end
+        # A declared Curve cell on a cross-partition border edge already
+        # carries the interface role — its child's union partition spans
+        # both sides — so only the unclaimed cross-partition edges emit new
+        # dim-1 entities. Each emitted cell stores the lower-partition
+        # carrier's traversal, matching upstream's reference-element
+        # orientation.
+        grouped=Dict{Tuple{Int32,Int32},Vector{NamedTuple}}()
+        for (key,hits) in source.lower_edges
+            length(hits)==2 || continue
+            left,right=hits;left.face.part==right.face.part && continue
+            haskey(edge_curve,key) && continue
+            lo,hi=left.face.part<right.face.part ? (left,right) : (right,left)
+            child=children[(2,lo.face.parent,lo.face.part)]
+            other=children[(2,hi.face.parent,hi.face.part)]
+            push!(get!(()->NamedTuple[],grouped,minmax(child,other)),
+                (uids=lo.uids,rows=lo.rows,mid=lo.mid,child=child,other=other))
+        end
+        for pair in sort!(collect(keys(grouped)))
+            edges=grouped[pair]
+            members=sort!(unique!(Int32[part for child in pair
+                for part in part_entities[(2,Int(child))].partitions]))
+            parent=part_entities[(2,Int(edges[1].child))].parent
+            for chain in _partition_brep_chains(edges,caller)
+                oriented=[edges[index] for index in chain.indices]
+                cell_count<=typemax(Int32)-length(oriented) || throw(ArgumentError(
+                    "$caller: interface cell capacity exceeded"))
+                cell_count+=length(oriented)
+                arity=all(edge->edge.mid===nothing,oriented) ? 2 :
+                    2+length(oriented[findfirst(edge->edge.mid!==nothing,oriented)].mid)
+                all(edge->(edge.mid===nothing)==(arity==2) &&
+                    (edge.mid===nothing || length(edge.mid)==arity-2),oriented) ||
+                    throw(ArgumentError("$caller: partition interface mixes cell orders"))
+                tag=Int32(_partition_entity_birth!(staged,1,caller))
+                nodes=Matrix{Int32}(undef,arity,length(oriented));ids=UInt64[]
+                for (column,edge) in enumerate(oriented)
+                    nodes[:,column]=arity==2 ? collect(edge.rows) :
+                        Int32[edge.rows[1],edge.rows[2],(edge.mid[i][2] for i in 1:arity-2)...]
+                    maximum_uid<typemax(UInt64) || throw(ArgumentError(
+                        "$caller: interface UID capacity exceeded"))
+                    maximum_uid+=UInt64(1);push!(ids,maximum_uid)
+                    seam_lookup[minmax(edge.uids...)]=(uids=edge.uids,tag=tag)
+                end
+                part_entities[(1,Int(tag))]=Elements.MixedEntity(1,tag,
+                    _partition_bounds(cached.coords,unique(vec(nodes)));
+                    partitions=members,parent=parent)
+                boundaries[(1,Int(tag))]=Int32[]
+                curves[tag]=oriented;push!(interface_tags,tag)
+                line_type=Elements._msh_type_exact(:lin,arity-1,false,caller)
+                push!(blocks,ElementBlock(line_type,nodes))
+                push!(owners,fill(tag,length(ids)));push!(labels,ids)
+            end
+        end
+        # Partition Points sit wherever the dim-1 partition-entity network
+        # changes membership — upstream runs the dim-1 partition entities
+        # through a second graph pass where every entity edge that touches
+        # a *different* entity is a boundary element whose endpoints inherit
+        # the entity's partition vector; a vertex whose inherited vectors
+        # span more than one part becomes a partitionVertex. The same rule
+        # here: an entity edge is entity-boundary when either endpoint is
+        # shared by another dim-1 partition entity, and a vertex earns a
+        # Point when the boundary edges incident on it span more than one
+        # part. A vertex already bound by a declared Point child reuses that
+        # child and merges the incident partition vector into it; anything
+        # else earns a fresh entity carrying a Point15 cell on the existing
+        # vertex node.
+        vertex_entities=Dict{UInt64,Set{Int32}}()
+        for (etag,entries) in curves,entry in entries,uid in entry.uids
+            push!(get!(()->Set{Int32}(),vertex_entities,uid),etag)
+        end
+        vertex_parts=Dict{UInt64,Set{Int32}}()
+        for (etag,entries) in curves,edge in entries
+            (length(vertex_entities[edge.uids[1]])>=2 ||
+             length(vertex_entities[edge.uids[2]])>=2) || continue
+            for uid in edge.uids
+                union!(get!(()->Set{Int32}(),vertex_parts,uid),
+                    part_entities[(1,Int(etag))].partitions)
+            end
+        end
+        point_nodes=Dict{UInt64,Int32}()
+        for (parent,child) in point_children
+            cell=source.point_cells[parent];uid=source.public.node_tags[cell.rows[1]]
+            point_nodes[uid]=min(get(point_nodes,uid,Int32(typemax(Int32))),child)
+        end
+        junctions=Dict{UInt64,Int32}()
+        for uid in sort!(collect(keys(vertex_parts)))
+            parts=sort!(collect(vertex_parts[uid]))
+            length(parts)<2 && continue
+            existing=get(point_nodes,uid,nothing)
+            if existing!==nothing
+                entity=part_entities[(0,Int(existing))]
+                merged=sort!(unique!(vcat(entity.partitions,parts)))
+                merged!=entity.partitions &&
+                    (part_entities[(0,Int(existing))]=Elements.MixedEntity(0,existing,entity.bbox;
+                        physical_tags=entity.physical_tags,partitions=merged,parent=entity.parent))
+                junctions[uid]=existing;continue
+            end
+            parent=minimum(part_entities[(1,Int(etag))].parent
+                for etag in vertex_entities[uid])
+            tag=Int32(_partition_entity_birth!(staged,0,caller))
+            cell_count<=typemax(Int32) || throw(ArgumentError(
+                "$caller: junction cell capacity exceeded"))
+            cell_count+=1
+            maximum_uid<typemax(UInt64) || throw(ArgumentError(
+                "$caller: junction UID capacity exceeded"))
+            maximum_uid+=UInt64(1)
+            row=source.public.node_indices[uid]
+            part_entities[(0,Int(tag))]=Elements.MixedEntity(0,tag,
+                _partition_bounds(cached.coords,Int32[row]);partitions=parts,parent=parent)
+            boundaries[(0,Int(tag))]=Int32[]
+            junctions[uid]=tag
+            push!(blocks,ElementBlock(15,reshape(Int32[row],1,1)))
+            push!(owners,[tag]);push!(labels,[maximum_uid])
+        end
+        for tag in interface_tags
+            # Each interface Curve's bounds are its junction endpoints with
+            # the sign of the stored traversal: an edge leaving a vertex
+            # starts it (+), an edge arriving ends it (−).
+            nets=Dict{UInt64,Int}()
+            for edge in curves[tag]
+                nets[edge.uids[1]]=get(nets,edge.uids[1],0)+1
+                nets[edge.uids[2]]=get(nets,edge.uids[2],0)-1
+            end
+            bounds=Int32[]
+            for uid in sort!(collect(keys(nets)))
+                net=nets[uid];net==0 && continue
+                junction=get(junctions,uid,Int32(0));junction==Int32(0) && continue
+                push!(bounds,net>0 ? junction : -junction)
+            end
+            boundaries[(1,Int(tag))]=bounds
+        end
+        for ((dim,tag),_) in part_entities
+            dim==2 || continue
+            tally=Dict{Tuple{Int32,Tuple{UInt64,UInt64}},Int}()
+            for face in source.faces,(a,b) in _partition_edge_patterns(face.msh)
+                children[(2,face.parent,face.part)]==tag || continue
+                key=minmax(face.uids[a],face.uids[b])
+                seam=get(seam_lookup,key,nothing);seam===nothing && continue
+                vote=(face.uids[a],face.uids[b])==seam.uids ? 1 : -1
+                slot=(seam.tag,key);tally[slot]=get(tally,slot,0)+vote
+            end
+            signs=Dict{Int32,Int}()
+            for ((etag,key),net) in tally
+                net==0 && continue
+                sign=net>0 ? 1 : -1
+                haskey(signs,etag) && signs[etag]!=sign && throw(ArgumentError(
+                    "$caller: Surface boundary incidence has inconsistent orientation"))
+                signs[etag]=sign
+            end
+            boundaries[(dim,tag)]=Int32[Int32(signs[etag])*etag for etag in sort!(collect(keys(signs)))]
+        end
+    end
+    _partition_brep_boundary_certificate(source,children,part_entities,boundaries,
+        interfaces,curves,caller;topology)
+    node_owners=copy(class.node_entities)
+    sentinel=(4,Int32(typemax(Int32)))
+    partials=Vector{Dict{Int32,Tuple{Tuple{Int,Int32},Tuple{Int,Int32}}}}(undef,length(blocks))
+    incident_block=function (b)
+        block=blocks[b];classified=owners[b];dim=Elements.msh_dimension(block.msh)
+        d=Dict{Int32,Tuple{Tuple{Int,Int32},Tuple{Int,Int32}}}()
+        for column in axes(block.nodes,2),row in block.nodes[:,column]
+            candidate=(dim,classified[column])
+            old=get(d,row,(sentinel,sentinel))
+            best=isless(candidate,old[1]) ? candidate : old[1]
+            parbest=old[2]
+            parameters=class.node_parametric[row]
+            if parameters!==nothing && candidate[1]==length(parameters) &&
+                    isless(candidate,old[2])
+                entry=get(part_entities,(candidate[1],Int(candidate[2])),nothing)
+                owner=(class.node_entities[row][1],Int(class.node_entities[row][2]))
+                entry!==nothing && entry.parent==owner && (parbest=candidate)
+            end
+            d[row]=(best,parbest)
+        end
+        return d
+    end
+    workers=_partition_workers()
+    if workers>1
+        Threads.@threads for b in eachindex(blocks);partials[b]=incident_block(b);end
+    else
+        for b in eachindex(blocks);partials[b]=incident_block(b);end
+    end
+    incident=fill(sentinel,nnodes(cached))
+    incident_par=fill(sentinel,nnodes(cached))
+    for d in partials,(row,(c,pc)) in pairs(d)
+        isless(c,incident[row]) && (incident[row]=c)
+        isless(pc,incident_par[row]) && (incident_par[row]=pc)
+    end
+    for row in eachindex(incident)
+        pick=class.node_parametric[row]===nothing ? incident[row] : incident_par[row]
+        pick[1]<4 && (node_owners[row]=pick)
+    end
+    for ((dim,tag),entity) in collect(part_entities)
+        boundary=boundaries[(dim,tag)]
+        staged.discrete[(dim,tag)].boundary=Tuple{Int,Int}[(dim-1,Int(value)) for value in boundary]
+        part_entities[(dim,tag)]=Elements.MixedEntity(dim,tag,entity.bbox;
+            physical_tags=entity.physical_tags,boundaries=boundary,partitions=entity.partitions,parent=entity.parent)
+    end
+    global_entities=copy(source.entities);ghost_entities=Tuple{Int32,Int32}[];ghost_elements=Elements.MixedGhostElement[]
+    if ghosts
+        node_parts=[Set{Int32}() for _ in 1:nnodes(cached)]
+        for face in source.faces,row in face.rows;push!(node_parts[row],face.part);end
+        destinations=Vector{Set{Int32}}(undef,length(source.faces))
+        if workers>1
+            Threads.@threads for index in eachindex(source.faces)
+                parts=Set{Int32}()
+                for row in source.faces[index].rows;union!(parts,node_parts[row]);end
+                destinations[index]=parts
+            end
+        else
+            for index in eachindex(source.faces)
+                parts=Set{Int32}()
+                for row in source.faces[index].rows;union!(parts,node_parts[row]);end
+                destinations[index]=parts
+            end
+        end
+        for (index,face) in enumerate(source.faces)
+            delete!(destinations[index],face.part);isempty(destinations[index]) && continue
+            push!(ghost_elements,Elements.MixedGhostElement(face.index,face.part,
+                sort!(collect(destinations[index]))))
+        end
+        for part in 1:count
+            tag=Int32(_partition_entity_birth!(staged,2,caller));push!(ghost_entities,(tag,Int32(part)))
+            selected=[face for (index,face) in enumerate(source.faces) if Int32(part) in destinations[index]]
+            rows=isempty(selected) ? Int32[] : unique(vcat([collect(face.rows) for face in selected]...))
+            global_entities[(2,Int(tag))]=Elements.MixedEntity(2,tag,_partition_bounds(cached.coords,rows))
         end
     end
     sum(size(block.nodes,2) for block in blocks)<=typemax(Int32) || throw(ArgumentError("$caller: partition cell capacity exceeded"))
