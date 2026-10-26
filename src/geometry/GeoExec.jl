@@ -1752,15 +1752,24 @@ function _geo_boolean_apply!(m::GeoModel,op::Symbol,objects,tools;
         _geo_occ_bind_entities!(
             m,NTuple{2,Int}[e for e in Iterators.flatten((obj,tool))],
             kernel,caller)
-        first(Model._model_occ_boolean(
+        out=first(Model._model_occ_boolean(
             m,op,obj,tool,tag,objects.delete,tools.delete,caller))
+        _geo_occ_finish!(m,context)
+        out
     catch err
         err isa InterruptException && rethrow()
-        (err isa ArgumentError || err isa ErrorException) || rethrow()
+        # `OCC_Internals::booleanOperator` wraps the whole apply-and-bind
+        # sequence in `try/catch(Standard_Failure)` and turns a failure into
+        # `Msg::Error` + `false`; the grammar then emits the recoverable
+        # `Could not apply boolean operator` yymsg(0). `KeyError` is the
+        # bounded engine's degenerate-operand lookup miss (e.g. a volume
+        # fragmented by its own face) — classified with the endpoint's
+        # recoverable diagnostics instead of escaping the statement.
+        (err isa ArgumentError || err isa ErrorException ||
+         err isa KeyError) || rethrow()
         _geo_occ_fail!(context,err,"Could not apply boolean operator")
         return NTuple{2,Int}[]
     end
-    _geo_occ_finish!(m,context)
     return NTuple{2,Int}[e for e in out_dt]
 end
 
@@ -3274,6 +3283,12 @@ function _geo_model_has_mesh_elements(m::GeoModel,context::_GeoNumericContext)
 end
 
 function _geo_sync_physical_view!(m::GeoModel,context::_GeoNumericContext)
+    # Upstream runs `OCC_Internals::synchronize` before the GEO internals
+    # sync at every physical-resolution point (`getElementaryTagsForPhysicalGroups`,
+    # `SetFactory`, mesh and end-of-parse syncs): lazily bound kernel
+    # entities materialize into the model first, so a `(dim, tag)` OCC
+    # binding counts as an existing physical member.
+    m.occ_kernel.changed && Model._model_occ_synchronize!(m)
     _geo_restore_orientation_constraints!(m)
     raw=context.raw_physicals
     # `synchronize` clears the entity-level memberships only when the model
@@ -3324,11 +3339,15 @@ function _geo_sync_physical_view!(m::GeoModel,context::_GeoNumericContext)
     return nothing
 end
 
-# `if(getGEOInternals()->getChanged()) synchronize(...)` — every grammar sync
-# point except `SyncModel` gates on the changed flag, so an unchanged model is
-# not resynchronized (and "unknown member" warnings are not re-emitted).
+# `if(getOCCInternals()->getChanged()) synchronize(...)` precedes
+# `if(getGEOInternals()->getChanged()) synchronize(...)` upstream — the two
+# `changed` flags are independent, so bound kernel entities materialize at
+# sync points even when the .geo-side model was not touched. An unchanged
+# model is not resynchronized (and "unknown member" warnings are not
+# re-emitted).
 function _geo_sync_physical_view_if_changed!(m::GeoModel,
                                              context::_GeoNumericContext)
+    m.occ_kernel.changed && Model._model_occ_synchronize!(m)
     context.geo_changed || return nothing
     _geo_sync_physical_view!(m,context)
     return nothing
@@ -3830,6 +3849,34 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
             km===nothing && _geo_selector_abort(s)
             dim=_geo_shape_kind_dim(km.captures[1])
             s=String(strip(s[nextind(s,firstindex(s),ncodeunits(km.match)):end]))
+            # `Physical Kind(id) op {members};` — upstream's `tPhysical
+            # GeoEntity '(' PhysicalId ')' NumericAffectation ListOfDouble
+            # tEND` Shape production: a physical declaration nested in a
+            # shape list runs as a member side effect, while the
+            # MSH_PHYSICAL_* shape type contributes no operand entities
+            # (`ListOfShapes2VectorOfPairs` keeps dims 0–3 only). The `(`
+            # after the kind word distinguishes the declaration from the
+            # `Physical Kind{tags}` selector.
+            if name=="Physical" && startswith(s,"(")
+                depth=0;parens=0;i=firstindex(s0);last=lastindex(s0);cut=0
+                while i<=last
+                    c=s0[i]
+                    c=='{' && (depth+=1)
+                    c=='}' && (depth-=1)
+                    c=='(' && (parens+=1)
+                    c==')' && (parens-=1)
+                    (c==';' && depth==0 && parens==0) && (cut=i; break)
+                    i=nextind(s0,i)
+                end
+                cut==0 && _geo_syntax_abort("}")
+                stmt=String(s0[firstindex(s0):cut])
+                rest=String(strip(s0[nextind(s0,cut):end]))
+                _exec_line!(m,stmt,context,allocator_state)
+                allocator_state===nothing ||
+                    _geo_allocator_observe_statement!(
+                        allocator_state,stmt,context,"execute_geo")
+                return (NTuple{2,Int}[],rest,false)
+            end
         end
         (group,s)=_geo_balanced_group(s,caller)
         s=_geo_require_list_semicolon(s,caller,name)
