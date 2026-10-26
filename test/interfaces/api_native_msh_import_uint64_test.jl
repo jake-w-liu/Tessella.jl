@@ -356,9 +356,17 @@ end
             geo=joinpath(directory,"duplicate.geo")
             fixed=replace(abspath(path),'\\'=>'/')
             write(geo,"Merge \"$fixed\";\nMerge \"$fixed\";\n")
+            # Gmsh 4.15.2 `gmsh.open` returns on a duplicate `Merge` (it logs
+            # `Info: Skipping duplicate element`); per-statement diagnostics
+            # ride the `Error :` stream and never raise through `open`.
+            # Tessella's UID store cannot mint occurrence identities for a bare
+            # Merge, so the same guard fires but is recorded as a statement
+            # diagnostic in `GeoExecution.errors` while `open_geo!` keeps the
+            # upstream return contract.
             error=try A.open_geo!(geo);nothing catch e;e end
-            @test error isa ArgumentError
-            @test occursin("occurrence identities",sprint(showerror,error))
+            @test error===nothing
+            execution=G.execute_geo(geo)
+            @test any(err->occursin("occurrence identities",err),execution.errors)
         end
     end
 end

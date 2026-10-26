@@ -1273,19 +1273,47 @@ end
 _get_partitions(dim,tag)=_with_model() do current
     imported=model_partitions(current,dim,tag)
     partition=LAST_MESH_PARTITION[]
-    (partition===nothing || partition.mesh!==LAST_MESH[]) && return imported
-    class=LAST_MESH_CLASS[]
-    (class===nothing || class.mesh!==partition.mesh) && return Int[]
-    cached=partition.mesh
-    entity=_mesh_query_integer(tag,"API.model.get_partitions","tag")
-    dimension=_mesh_query_integer(dim,"API.model.get_partitions","dim")
-    result=Int[]
-    for element_tag in _mesh_entity_element_tags(
-            class,current,dimension,entity,cached)
-        p=Int(partition.element_partitions[element_tag])
-        p in result || push!(result,p)
+    cached=LAST_MESH[]
+    if partition!==nothing && partition.mesh===cached
+        class=LAST_MESH_CLASS[]
+        (class===nothing || class.mesh!==partition.mesh) && return Int[]
+        entity=_mesh_query_integer(tag,"API.model.get_partitions","tag")
+        dimension=_mesh_query_integer(dim,"API.model.get_partitions","dim")
+        result=Int[]
+        for element_tag in _mesh_entity_element_tags(
+                class,current,dimension,entity,cached)
+            p=Int(partition.element_partitions[element_tag])
+            p in result || push!(result,p)
+        end
+        return sort!(result)
     end
-    return sort!(result)
+    isempty(imported) || return imported
+    # `createNewEntities`/`PartitionMesh` move each owned cell to a
+    # same-dimension partition child; the parent's public partition list folds
+    # those children back (each child's own `getPartitions` answer). Interface
+    # children parent a lower-dimension entity across partitions, so only
+    # same-dimension children aggregate onto the parent here. The fold applies
+    # when this session produced the cache (`partition` record present) or the
+    # model carries partition entities it does not natively number. Imported
+    # partitioned MSH4 files are excluded: native keeps the file-declared
+    # parents unlabelled (verified against gmsh 4.15.2, 2026-10-26 — parents
+    # (0,1),(0,2),(1,11) of partition_ascii4.msh report no partitions while
+    # only partition/ghost children carry file membership).
+    if cached isa MixedMesh && cached.partition_data!==nothing &&
+            (partition!==nothing || model_number_of_partitions(current)==0)
+        entity=_mesh_query_integer(tag,"API.model.get_partitions","tag")
+        dimension=_mesh_query_integer(dim,"API.model.get_partitions","dim")
+        result=Int[]
+        for ((child_dim,_),entity_data) in cached.partition_data.entities
+            child_dim==dimension || continue
+            entity_data.parent==(dimension,entity) || continue
+            for part in entity_data.partitions
+                Int(part) in result || push!(result,Int(part))
+            end
+        end
+        return sort!(result)
+    end
+    return imported
 end
 
 _get_entity_name(dim,tag)=_with_model() do current
@@ -8394,8 +8422,18 @@ _unpartition()=lock(STATE_LOCK) do
     cached=LAST_MESH[]
     class=cached===nothing ? nothing : _cached_classification_locked(cached)
     plan=_imported_unpartition_plan(model,cached,class,"API.mesh.unpartition")
-    plan===nothing || _commit_tagged_plan_locked!(plan;preserve_visibility=true,
-        element_tag_map=plan.visibility_tag_map)
+    if plan!==nothing
+        # Upstream births partition entities at getMaxElementaryNumber+1,
+        # which scans live entities only — freed partition entity tags are
+        # reused by the next partition round.
+        for dim in 0:3
+            live=maximum((tag for (entity_dim,tag) in
+                model_entities(plan.model) if entity_dim==dim);init=0)
+            plan.model.next_tag[dim+1]=min(plan.model.next_tag[dim+1],live)
+        end
+        _commit_tagged_plan_locked!(plan;preserve_visibility=true,
+            element_tag_map=plan.visibility_tag_map)
+    end
     model=_model_locked()
     model.meshing.imported_num_partitions=0
     LAST_MESH_PARTITION[]=nothing
@@ -8510,14 +8548,30 @@ function _partition(num_part,element_tags=(),partitions=())
         end
         topology=!iszero(OPTIONS["Mesh.PartitionCreateTopology"])
         ghosts=!iszero(OPTIONS["Mesh.PartitionCreateGhostCells"])
+        class=_cached_classification_locked(cached)
         if topology || ghosts
-            class=_cached_classification_locked(cached)
             plan=_partition_tet_production_plan(_model_locked(),cached,class,count,
                 assignment,caller;topology,ghosts)
             _commit_tagged_plan_locked!(plan;preserve_visibility=true,
                 element_tag_map=plan.visibility_tag_map)
             return nothing
         end
+        # Upstream `createNewEntities` runs before the topology/ghost gates
+        # (meshPartition.cpp): even with both options off the published mesh
+        # gains one partition child per (entity, partition) owner — only the
+        # interface-connection topology and the ghost layer are skipped.
+        if class!==nothing && class.public_tags!==nothing &&
+                _high_order_overlay(cached)===nothing &&
+                !(cached isa MixedMesh && cached.partition_data!==nothing)
+            plan=_partition_assign_production_plan(_model_locked(),cached,class,
+                count,assignment,caller)
+            _commit_tagged_plan_locked!(plan;preserve_visibility=true,
+                element_tag_map=plan.visibility_tag_map)
+        end
+        # The label record still drives the `Plugin(SimplePartition)` `.geo`
+        # transport (`produced.mesh===actual_input[2]`) and covers inputs the
+        # production plan cannot publish (unclassified or higher-order caches,
+        # re-partitioned meshes).
         LAST_MESH_PARTITION[]=_MeshPartition(
             cached,Int(count),assignment)
         return nothing
@@ -11600,25 +11654,29 @@ every model mutation.
 remove_embedded(dim_tags,dim=-1)=_remove_embedded(dim_tags,dim)
 """
 Partition the current mesh into `num_part` parts, optionally using a complete
-explicit element UID/partition list. The default preserves assignment labels.
-With `Mesh.PartitionCreateTopology` or `Mesh.PartitionCreateGhostCells` nonzero,
-bare positive first-order Tet4 discrete Regions produce actual partition child
-entities. Topology creates shared inter-partition Tri3 interfaces with opposite
-Region incidences. Existing Tri3 Surface BRep also produces exterior Surface
-children and actual Line2 interface seams, including nonbranching open paths
-across original Surfaces. Declared Line2 Curve and Point15 Point BRep produce
-one partition child per original entity with signed Curve->Point and
-Surface->Curve child closures and literal shared partition memberships. New
-interface borders are fully covered; original
+explicit element UID/partition list. Like upstream `createNewEntities`, a
+classified first-order mesh always materializes the partition entity layer:
+one partition child per (dimension, parent entity, partition) owner inherits
+the parent's physical memberships and becomes its cells' owner.
+`Mesh.PartitionCreateTopology` gates only the interface-connection layer on
+top of that — shared inter-partition Tri3 interfaces with opposite Region
+incidences, exterior Surface children with actual Line2 interface seams
+including nonbranching open paths across original Surfaces, signed
+Curve->Point and Surface->Curve child closures and literal shared partition
+memberships on declared Line2 Curve and Point15 Point BRep. New interface
+borders are fully covered; original
 Surface borders retain literal source incidence. Inputs without Point
 boundaries do not acquire fabricated Points. Original cell UIDs and physical
 memberships survive. Closed-source coverage remains complete; partial original
 BRep is not reconstructed.
-Ghost entities expose neighboring cell UID aliases while the mesh retains one
-authoritative copy of each material cell. Both options default to zero.
+`Mesh.PartitionCreateGhostCells` independently adds ghost entities that expose
+neighboring cell UID aliases while the mesh retains one authoritative copy of
+each material cell. Both options default to zero.
 Coincident original/interface Tri3 supports, malformed declared topology,
 mixed/high-order or periodic inputs reject before
-publication. Generated partition and ghost metadata can be exported as MSH4.
+publication; caches without classified UID authority or existing partition
+topology keep the plain element-assignment label record. Generated partition
+and ghost metadata can be exported as MSH4.
 """
 partition(num_part,element_tags=(),partitions=())=_partition(num_part,element_tags,partitions)
 "Import the model file's STL triangulation (when available) as discrete mesh data."

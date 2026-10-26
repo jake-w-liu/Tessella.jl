@@ -1418,9 +1418,13 @@ end
 
 # Label-mode `-part` carries no partition entities: each split file simply
 # holds the elements assigned to the partition on their original entities.
+# `owner_remap` folds a produced partition-child owner back to its declared
+# parent so the file never references entities it does not carry.
 function _partition_label_view(mesh::MixedMesh,labels::Vector{Int32},
-                               partition::Int;v2::Bool=false)
+                               partition::Int;v2::Bool=false,owner_remap=nothing)
     data=mesh.entity_data
+    remap_owner(entity)=owner_remap===nothing ? entity :
+        Int32(get(owner_remap,entity,(entity[1],entity[2]))[2])
     selected=[falses(_partition_ncells(block)) for block in mesh.blocks]
     flat=0
     for (bi,block) in enumerate(mesh.blocks),j in 1:_partition_ncells(block)
@@ -1448,14 +1452,24 @@ function _partition_label_view(mesh::MixedMesh,labels::Vector{Int32},
                 block.tags[columns]))
         end
         data===nothing || begin
-            push!(owners,data.block_entities[bi][columns])
+            dim=_partition_dim(block)
+            push!(owners,[remap_owner((dim,Int(owner)))
+                for owner in data.block_entities[bi][columns]])
             push!(element_tags,data.external_element_tags[bi][columns])
         end
-        mesh.elementary_entities===nothing ||
-            push!(elementary,mesh.elementary_entities[bi][columns])
+        mesh.elementary_entities===nothing || begin
+            dim=_partition_dim(block)
+            push!(elementary,[remap_owner((dim,Int(owner)))
+                for owner in mesh.elementary_entities[bi][columns]])
+        end
+    end
+    node_owners=data===nothing ? nothing : data.node_entities[rows]
+    if owner_remap!==nothing && node_owners!==nothing
+        node_owners=[(Int(owner[1]),remap_owner((Int(owner[1]),Int(owner[2]))))
+            for owner in node_owners]
     end
     metadata=data===nothing ? nothing : MixedEntityData(data.entities;
-        node_entities=data.node_entities[rows],
+        node_entities=node_owners,
         node_parametric=data.node_parametric[rows],
         external_node_tags=data.external_node_tags[rows],
         block_entities=owners,external_element_tags=element_tags,
@@ -1475,6 +1489,36 @@ function _partition_label_view(mesh::MixedMesh,labels::Vector{Int32},
         entity_data=metadata,physical_names=mesh.physical_names,
         elementary_entities=elementary_out,
         periodic_links=links,ancillary_sections=mesh.ancillary_sections)
+end
+
+# A produced partition whose entity layer is only `createNewEntities`' bare
+# ownership children (no interface topology, no ghost layer) splits exactly
+# like the label record did: every cell folds to its declared parent entity
+# and each per-partition file carries no partition metadata.
+function _partition_bare_labels(mesh::MixedMesh,pdata)
+    data=mesh.entity_data
+    data===nothing && return nothing
+    isempty(pdata.ghost_entities) && isempty(pdata.ghost_elements) ||
+        return nothing
+    remap=Dict{Tuple{Int,Int},Tuple{Int,Int32}}()
+    for (key,entity) in pdata.entities
+        isempty(entity.boundaries) || return nothing
+        entity.parent[1]==key[1] || return nothing
+        length(entity.partitions)==1 || return nothing
+        remap[key]=(key[1],entity.parent[2])
+    end
+    labels=Vector{Int32}(undef,sum(_partition_ncells,mesh.blocks;init=0))
+    flat=0
+    for (bi,block) in enumerate(mesh.blocks)
+        owners=data.block_entities[bi];dim=_partition_dim(block)
+        for j in 1:_partition_ncells(block)
+            flat+=1
+            record=get(pdata.entities,(dim,Int(owners[j])),nothing)
+            record===nothing && return nothing
+            labels[flat]=record.partitions[1]
+        end
+    end
+    return remap,labels
 end
 
 # `-part_split`: write `stem_1.msh`…`stem_N.msh` instead of `destination`. The
@@ -1497,19 +1541,26 @@ function _write_partition_files(destination::String;version,binary,
     end
     stem,_=splitext(destination)
     pdata=mesh.partition_data
-    if pdata===nothing
-        partition,public=lock(API.STATE_LOCK) do
-            record=API.LAST_MESH_PARTITION[]
-            (record===nothing || record.mesh!==API.LAST_MESH[]) &&
-                return (nothing,nothing)
-            return (record,API._mesh_public_tags(record.mesh))
+    bare=pdata===nothing ? nothing : _partition_bare_labels(mesh,pdata)
+    if pdata===nothing || bare!==nothing
+        npart,labels=if pdata===nothing
+            partition,public=lock(API.STATE_LOCK) do
+                record=API.LAST_MESH_PARTITION[]
+                (record===nothing || record.mesh!==API.LAST_MESH[]) &&
+                    return (nothing,nothing)
+                return (record,API._mesh_public_tags(record.mesh))
+            end
+            partition===nothing && throw(ArgumentError(
+                "tessella: -part_split found no serializable partition state"))
+            partition.num_partitions,
+            _partition_label_assignment(mesh,partition,public)
+        else
+            Int(pdata.num_partitions),bare[2]
         end
-        partition===nothing && throw(ArgumentError(
-            "tessella: -part_split found no serializable partition state"))
-        partition.num_partitions>1 || return API.write(destination)
-        labels=_partition_label_assignment(mesh,partition,public)
-        for part in 1:partition.num_partitions
-            view=_partition_label_view(mesh,labels,part;v2=version!=4.1)
+        npart>1 || return API.write(destination)
+        for part in 1:Int(npart)
+            view=_partition_label_view(mesh,labels,part;v2=version!=4.1,
+                owner_remap=bare===nothing ? nothing : bare[1])
             write_msh(stem*"_$part.msh",view;version,binary,
                       save_parametric,save_topology)
         end
