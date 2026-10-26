@@ -142,7 +142,7 @@ import ..Refine
 using ..Recombine: recombine_triangles
 using ..IO: write_msh
 using ..Elements: read_mixed_msh, write_mixed_msh, MixedMesh, ElementBlock, msh_spec,
-                  SpecialElementBlock, MixedElementBlock,
+                  SpecialElementBlock, MixedElementBlock, _scaled_mesh_copy,
                   msh_dimension, msh_family, msh_num_nodes
 using ..Model: add_discrete_entity!, DiscreteEntity, _record_append_node!,
                _record_append_element!, _model_fresh_element_tag
@@ -12489,6 +12489,11 @@ function _geo_exec_save!(m::GeoModel,path::AbstractString,
         # `CreateOutputFile` writes whatever the (possibly empty) mesh is.
         mesh=Mesh(zeros(3,0))
     end
+    # `Mesh.ScalingFactor` scales serialized vertex coordinates at every
+    # upstream writer — apply once here for the whole in-file write path.
+    sf=Float64(something(
+        _geo_option_number(context,"Mesh",0,"ScalingFactor"),1.0))
+    sf!=1.0 && (mesh=_scaled_mesh_copy(mesh,sf))
     if extension==".stl"
         io_mod=getfield(parentmodule(@__MODULE__),:IO)
         io_mod.write_stl(file,mesh)

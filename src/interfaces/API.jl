@@ -259,6 +259,9 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "Mesh.SaveAll"=>0.0,
     "Mesh.MshFileVersion"=>4.1,
     "Mesh.Binary"=>0.0,
+    # Multiplies serialized vertex coordinates at export (upstream passes it
+    # to every mesh writer; applied at the shared export projection).
+    "Mesh.ScalingFactor"=>1.0,
     "PostProcessing.Binary"=>0.0,
     "PostProcessing.SaveMesh"=>1.0,
     "PostProcessing.SaveInterpolationMatrices"=>1.0,

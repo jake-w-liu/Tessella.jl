@@ -111,7 +111,13 @@ function _model_export_mesh(model,source,class,version,save_all,caller)
     end
     sections=_model_export_data_sections(source,node_map,cell_map,caller)
     ancillary=source isa MixedMesh ? source.ancillary_sections : Elements.MshAncillarySection[]
-    return MixedMesh(complete.coords[:,rows],blocks;entity_data=metadata,
+    # `Mesh.ScalingFactor` — upstream passes it to every mesh writer, which
+    # scales the serialized vertex coordinates only (CreateFile.cpp). Doing
+    # it here at the shared projection reaches all formats uniformly.
+    sf=Float64(get(OPTIONS,"Mesh.ScalingFactor",1.0))
+    coords=complete.coords[:,rows]
+    sf!=1.0 && (coords=coords.*sf)
+    return MixedMesh(coords,blocks;entity_data=metadata,
         elementary_entities=owners,physical_names=complete.physical_names,
         periodic_links=links,partition_data=partition,ancillary_sections=ancillary,
         data_sections=sections)

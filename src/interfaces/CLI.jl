@@ -32,9 +32,10 @@ using ..GeoExec: execute_geo, geo_entity_mesh
 using ..IO: write_msh, _msh_rewrite_save_options
 using ..Model: model_periodic_constraints, model_to_mixed
 using ..Elements: write_mixed_msh, read_mixed_msh, MixedMesh, MixedEntity,
-    MixedEntityData, MixedPartitionData, MixedGhostElement, MixedPeriodicLink,
-    ElementBlock, SpecialElementBlock, MixedElementBlock, ElementRef,
-    msh_dimension, simplex_to_mixed, barycentric_refine, validate
+                  _scaled_mesh_copy,
+                  MixedEntityData, MixedPartitionData, MixedGhostElement, MixedPeriodicLink,
+                  ElementBlock, SpecialElementBlock, MixedElementBlock, ElementRef,
+                  msh_dimension, simplex_to_mixed, barycentric_refine, validate
 using ..MeshTypes: Mesh
 using ..GeoUnrolled: write_geo_unrolled
 using ..GmshLibm: _with_win_cli_precision
@@ -122,7 +123,12 @@ const _NUMERIC_FLAGS=Dict(
     "-ho_nlayers"=>("Mesh.HighOrderNumLayers",:nonnegint),
     "-v"=>("General.Verbosity",:finite),
     "-verbose"=>("General.Verbosity",:finite),
-    "-nt"=>("General.NumThreads",:nonnegint))
+    "-nt"=>("General.NumThreads",:nonnegint),
+    # `-scale`/-meshscale store `Mesh.ScalingFactor` — applied to node
+    # coordinates at export by every mesh writer upstream
+    # (`CreateFile.cpp` passes it to writeMSH/writeSTL/writeVTK/…).
+    "-scale"=>("Mesh.ScalingFactor",:finite),
+    "-meshscale"=>("Mesh.ScalingFactor",:finite))
 
 # Valueless flags that store `1` into the given numeric option.
 const _BOOLEAN_FLAGS=Dict(
@@ -172,8 +178,6 @@ const _REJECTED_FLAGS=Dict{String,String}(
     "-part_physicals"=>"partition physical-group toggling is not implemented",
     "-part_no_physicals"=>"partition physical-group toggling is not implemented",
     "-swapangle"=>"boundary-edge swap optimization is not implemented",
-    "-scale"=>"geometrical scaling is not implemented",
-    "-meshscale"=>"mesh scaling is not implemented",
     "-match"=>"geometry/mesh matching is not implemented",
     "-numsubedges"=>"high-order element display subdivision is GUI-only",
     "-debugSurface"=>"surface debugging is GUI-only",
@@ -799,7 +803,7 @@ function _main(args::AbstractVector{<:AbstractString})
         save_options=Dict{String,Float64}()
         save_recorder=(family,member,value)->begin
             family=="Mesh" &&
-                member in ("SaveParametric","SaveTopology") &&
+                member in ("SaveParametric","SaveTopology","ScalingFactor") &&
                 (save_options[member]=Float64(value))
             return nothing
         end
@@ -816,13 +820,17 @@ function _main(args::AbstractVector{<:AbstractString})
         end
         save_parametric=get(save_options,"SaveParametric",nothing)
         save_topology=get(save_options,"SaveTopology",nothing)
+        # `Mesh.ScalingFactor` (`-scale`/in-script option) multiplies the
+        # serialized vertex coordinates — same hook upstream's writers take.
+        scaling=Float64(get(save_options,"ScalingFactor",1.0))
         if dim>0
             result.mesh===nothing && throw(ErrorException("tessella: no mesh produced"))
             if dim==1
                 authority=result.model.meshing.mesh_authority
                 authority!==nothing && authority.mesh!==nothing || throw(ErrorException(
                     "tessella: one-dimensional generation omitted its classified mesh"))
-                write_msh(destination,authority.mesh;version,binary,
+                write_msh(destination,_scaled_mesh_copy(authority.mesh,scaling);
+                          version,binary,
                           save_parametric,save_topology)
                 return destination
             end
@@ -849,7 +857,8 @@ function _main(args::AbstractVector{<:AbstractString})
                 if save_parametric!==nothing || save_topology!==nothing
                     classified=_cli_classified_mesh(result)
                     if classified isa MixedMesh
-                        write_msh(destination,classified;version,binary,
+                        write_msh(destination,
+                                  _scaled_mesh_copy(classified,scaling);version,binary,
                                   save_parametric,save_topology)
                     else
                         (version==2.2 &&
@@ -860,15 +869,20 @@ function _main(args::AbstractVector{<:AbstractString})
                                 "no entity metadata)"))
                         binary ?
                             write_mixed_msh(destination,
-                                simplex_to_mixed(result.mesh);version,binary) :
-                            write_msh(destination,result.mesh;version)
+                                simplex_to_mixed(_scaled_mesh_copy(result.mesh,scaling));
+                                version,binary) :
+                            write_msh(destination,_scaled_mesh_copy(result.mesh,scaling);
+                                      version)
                     end
                 elseif result.mesh isa MixedMesh
-                    write_mixed_msh(destination,result.mesh;version,binary)
+                    write_mixed_msh(destination,
+                        _scaled_mesh_copy(result.mesh,scaling);version,binary)
                 elseif binary
-                    write_mixed_msh(destination,simplex_to_mixed(result.mesh);version,binary)
+                    write_mixed_msh(destination,
+                        simplex_to_mixed(_scaled_mesh_copy(result.mesh,scaling));
+                        version,binary)
                 else
-                    write_msh(destination,result.mesh;version)
+                    write_msh(destination,_scaled_mesh_copy(result.mesh,scaling);version)
                 end
             else
                 entity_name=dim==2 ? "surface" : "volume"
@@ -895,7 +909,8 @@ function _main(args::AbstractVector{<:AbstractString})
                 isempty(missing_relations) || throw(ArgumentError(
                     "tessella: selected $entity_name projection omits periodic " *
                     "relations $missing_relations"))
-                write_msh(destination,projected;version,binary,
+                write_msh(destination,_scaled_mesh_copy(projected,scaling);
+                          version,binary,
                           save_parametric,save_topology)
             end
             return destination

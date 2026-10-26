@@ -1587,6 +1587,28 @@ function mixed_to_simplex(m::MixedMesh)
     return Mesh(m.coords; segs=segs, tris=tris, tets=tets, seg_tag=st, tri_tag=tt, tet_tag=qt)
 end
 
+# `Mesh.ScalingFactor` analogue for the direct-write paths (CLI `.geo`
+# output and in-file `Save`): upstream passes the factor to every mesh
+# writer, which multiplies the serialized vertex coordinates. Returning a
+# scaled *copy* keeps the live mesh untouched; factor 1.0 returns the
+# input unmodified.
+function _scaled_mesh_copy(m::Mesh,sf::Float64)
+    sf==1.0 && return m
+    return Mesh(m.coords.*sf;segs=m.segs,tris=m.tris,tets=m.tets,
+                seg_tag=m.seg_tag,tri_tag=m.tri_tag,tet_tag=m.tet_tag)
+end
+function _scaled_mesh_copy(m::MixedMesh,sf::Float64)
+    sf==1.0 && return m
+    return MixedMesh(m.coords.*sf,m.blocks;
+        physical_names=m.physical_names,entity_data=m.entity_data,
+        elementary_entities=m.elementary_entities,
+        periodic_links=m.periodic_links,
+        ancillary_sections=m.ancillary_sections,
+        data_sections=m.data_sections,partition_data=m.partition_data)
+end
+_scaled_mesh_copy(m,sf)=throw(ArgumentError(
+    "_scaled_mesh_copy: unsupported mesh type $(typeof(m))"))
+
 """
     barycentric_refine(m::MixedMesh) -> MixedMesh
 
