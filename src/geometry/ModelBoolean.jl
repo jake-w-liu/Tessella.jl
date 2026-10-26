@@ -48,8 +48,15 @@ function _brep_curve_eval(curve::NamedTuple,t::Float64)
         s,c=_gm_sincos(t)
         return _b3add(curve.c,_b3add(_b3mul(curve.x,c*curve.r),
                                    _b3mul(curve.y,s*curve.r)))
+    elseif curve.kind===:ellipse
+        return _occ_ellipse_point(curve.g,t)
+    elseif curve.kind===:bspline
+        # exact evaluator of the stored/copied OCC curve — homogeneous
+        # de Boor through `_model_occ_curve_d2`
+        return _model_occ_curve_d2(curve.curve,t)[1]
     end
-    throw(ArgumentError("_brep_curve_eval: degenerate edge has no 3-D curve"))
+    throw(ArgumentError(
+        "_brep_curve_eval: $(curve.kind) edge has no 3-D curve evaluator"))
 end
 
 # ── surface evaluation / inversion ──────────────────────────────────────────
@@ -131,28 +138,166 @@ _brep_uperiod(sg::NamedTuple) =
 _brep_pc_unneg(pc) =
     hasproperty(pc,:neg2d) ? (pc.neg2d[1],true) : (pc,false)
 
+# 2π-periodic pcurves — intersection and inversion params report mod 2π, so
+# spanning and lift logic treats circles and ellipses identically (`neg2d`
+# keeps the same periodic inner record).
 _brep_pc_iscirc(pc) = hasproperty(pc,:circ2d) ||
-    (hasproperty(pc,:neg2d) && hasproperty(pc.neg2d[1],:circ2d))
+    hasproperty(pc,:ellips2d) ||
+    (hasproperty(pc,:neg2d) && _brep_pc_iscirc(pc.neg2d[1]))
 
-@inline function _brep_pc_eval(pc,t)
-    hasproperty(pc,:neg2d) && return _brep_pc_eval(pc.neg2d[1],-t)
-    return hasproperty(pc,:lin2d) ?
-        (fma(t,pc.lin2d[2][1],pc.lin2d[1][1]),
-         fma(t,pc.lin2d[2][2],pc.lin2d[1][2])) :
-        _occ_circ2d_eval(pc.circ2d[1],pc.circ2d[2],pc.circ2d[3],t)
-end
+# Every stored pcurve kind the OCC face model produces — `lin2d`, `circ2d`,
+# `ellips2d`, `spl2d`, the loft `tan2d`/`tan2dv` conic-reparam traces and the
+# `neg2d` mirror — evaluates through the shared `Geom2d` adaptors.
+@inline _brep_pc_eval(pc,t) = _occ_pcurve_d0(pc,Float64(t))
 
 # Tangent vector of a pcurve at t (not normalized).
-@inline function _brep_pc_tangent(pc,t)
-    if hasproperty(pc,:neg2d)
-        d=_brep_pc_tangent(pc.neg2d[1],-t)
-        return (.-d)
+@inline _brep_pc_tangent(pc,t) = _occ_pcurve_d1(pc,Float64(t))[2]
+
+# ── generic pcurve machinery ────────────────────────────────────────────────
+#
+# The analytic lin2d/circ2d fast paths below each carry a generic sibling
+# covering `ellips2d`, `spl2d`, `tan2d`/`tan2dv` and any future stored record:
+# structure-aware sample grids + bisected sign-changes for level roots, and a
+# grid-seeded Newton projection for parameter inversion. These are the same
+# primitives the meshing evaluators use — the records already carry exact
+# `_occ_pcurve_d0`/`d1`/`d2` semantics.
+
+# parameter-space sample grid over [lo,hi]: B-splines densify per knot span,
+# smooth records take a uniform grid
+function _brep_pc_grid(pc,lo,hi;subs::Int=8)
+    local bk
+    if hasproperty(pc,:spl2d)
+        bk=unique(pc.spl2d[1])
+    elseif hasproperty(pc,:tan2d)
+        bk=pc.tan2d[1].knots
+    elseif hasproperty(pc,:tan2dv)
+        bk=pc.tan2dv[1].knots
+    else
+        bk=nothing
     end
+    ts=Float64[]
+    if bk!==nothing
+        bounds=vcat(Float64[lo],
+                    Float64[k for k in bk if lo-1e-12<k<hi+1e-12],
+                    Float64[hi])
+        sort!(bounds)
+        for i in 1:length(bounds)-1
+            a,b=bounds[i],bounds[i+1]
+            for j in 0:subs
+                push!(ts,fma((b-a),j/subs,a))
+            end
+        end
+    else
+        n=64
+        for i in 0:n
+            push!(ts,fma(hi-lo,i/n,lo))
+        end
+    end
+    return ts
+end
+
+# all t in the sorted sample grid `ts` where the smooth scalar field `f`
+# crosses zero — sign changes bisect to parameter accuracy; interior grid
+# points whose |f| sits below `tol`·scale report as tangent contacts (the
+# analytic pair solvers' disc≈0 convention)
+function _brep_scalar_roots(f,ts::AbstractVector{<:Real},tol;
+                            tangents::Bool=true)
+    n=length(ts)
+    fs=[f(Float64(t)) for t in ts]
+    fscl=max(1.0,maximum(abs,fs))
+    ztol=tol*fscl
+    out=Float64[]
+    for i in 1:n-1
+        a,b=ts[i],ts[i+1];fa,fb=fs[i],fs[i+1]
+        if fa==0.0
+            (isempty(out) || a-out[end]>1e-9*max(1.0,b-a)) &&
+                push!(out,Float64(a))
+        elseif signbit(fa)!=signbit(fb)
+            flo=fa;lo_,hi_=a,b
+            for _ in 1:80
+                mid=(lo_+hi_)/2;fm=f(mid)
+                fm==0.0 && (lo_=hi_=mid;break)
+                signbit(fm)==signbit(flo) ? (lo_=mid;flo=fm) : (hi_=mid)
+            end
+            r=(lo_+hi_)/2
+            (isempty(out) || r-out[end]>1e-9*max(1.0,b-a)) &&
+                push!(out,r)
+        elseif tangents && i>1 && i<n-1 && abs(fa)<=ztol &&
+                abs(fa)<=abs(fs[i-1]) && abs(fa)<=abs(fb)
+            # tangent touch at a grid node — mirror the analytic
+            # disc==0 → two-coincident-roots convention as one entry
+            (isempty(out) || ts[i]-out[end]>1e-9*max(1.0,b-a)) &&
+                push!(out,Float64(ts[i]))
+        end
+    end
+    fs[n]==0.0 && (isempty(out) || ts[n]-out[end]>1e-9*max(1.0,ts[n]-ts[n-1])) &&
+        push!(out,Float64(ts[n]))
+    return out
+end
+
+# implicit level of an elementary pcurve — ~signed uv distance (negative
+# inside the bounded side of conics). `nothing` for spline/reparam traces.
+function _brep_pc_level(pc)
     if hasproperty(pc,:lin2d)
-        return pc.lin2d[2]
+        o,d=pc.lin2d
+        nn=hypot(d[1],d[2])
+        nn==0.0 && return nothing
+        return uv->((uv[1]-o[1])*d[2]-(uv[2]-o[2])*d[1])/nn
+    elseif hasproperty(pc,:circ2d)
+        c,x,r=pc.circ2d
+        return uv->(hypot(uv[1]-c[1],uv[2]-c[2])-r)
+    elseif hasproperty(pc,:ellips2d)
+        o,x,a,b=pc.ellips2d
+        return uv->(hypot(((uv[1]-o[1])*x[1]+(uv[2]-o[2])*x[2])/a,
+                          ((uv[1]-o[1])*x[2]-(uv[2]-o[2])*x[1])/b)-1.0)*
+                    min(a,b)
     end
-    c,x,r=pc.circ2d;s,co=_gm_sincos(t)
-    return (r*(-s*x[1]-co*x[2]),r*(-s*x[2]+co*x[1]))
+    return nothing
+end
+
+# natural parameter domain of a pcurve record — splines and conic-reparam
+# traces are bounded by their knot tables; elementary curves are unbounded
+function _brep_pc_domain(pc)
+    if hasproperty(pc,:spl2d)
+        k=pc.spl2d[1]
+        return (k[1],k[end])
+    elseif hasproperty(pc,:tan2d)
+        k=pc.tan2d[1].knots
+        return (k[1],k[end])
+    elseif hasproperty(pc,:tan2dv)
+        k=pc.tan2dv[1].knots
+        return (k[1],k[end])
+    end
+    return (-Inf,Inf)
+end
+
+# Newton refinement of a point-on-pcurve parameter over [lo,hi] — the
+# g(t)=(p(t)−uv)·p′(t) normal-equation root, seeded on the curve's grid.
+# `nothing` when no in-range root matches within `tol`.
+function _brep_pc_project(pc,uv,lo,hi,tol)
+    ts=_brep_pc_grid(pc,lo,hi;subs=4)
+    best=ts[1];bd=Inf
+    for t in ts
+        p=_brep_pc_eval(pc,t)
+        d2=(p[1]-uv[1])*(p[1]-uv[1])+(p[2]-uv[2])*(p[2]-uv[2])
+        d2<bd && (bd=d2;best=t)
+    end
+    t=best
+    for _ in 1:40
+        p,d1,d2=_occ_pcurve_d2(pc,t)
+        r=(p[1]-uv[1],p[2]-uv[2])
+        g=r[1]*d1[1]+r[2]*d1[2]
+        gp=d1[1]*d1[1]+d1[2]*d1[2]+r[1]*d2[1]+r[2]*d2[2]
+        gp==0.0 && break
+        step=g/gp
+        t=clamp(t-step,lo,hi)
+        abs(step)<=2eps(Float64)*max(1.0,abs(t)) && break
+    end
+    p=_brep_pc_eval(pc,t)
+    scl=max(1.0,abs(uv[1]),abs(uv[2]))
+    (abs(p[1]-uv[1])<10tol*scl && abs(p[2]-uv[2])<10tol*scl) ||
+        return nothing
+    return t
 end
 
 # ── operand extraction ──────────────────────────────────────────────────────
@@ -177,6 +322,19 @@ function _brep_edge_curve(m::GeoModel,ctag::Int)
             (rec.occ===:copied_curve && get(rec,:converted_from,nothing)===:circle)
         return (kind=:circle,c=rec.center,n=rec.n,x=rec.X,y=rec.Y,r=rec.r),
                rec.t0,rec.t1
+    elseif rec.occ===:ellipse ||
+            (rec.occ===:copied_curve && get(rec,:converted_from,nothing)===:ellipse)
+        # like the converted line/circle shadows above: a NURBS-converted
+        # ellipse keeps its analytic record as inert metadata — the same
+        # evaluator `_occ_ellipse_point` serves both forms bitwise.
+        return (kind=:ellipse,c=rec.center,n=rec.n,x=rec.X,y=rec.Y,
+                rx=rec.rx,ry=rec.ry,g=rec),rec.t0,rec.t1
+    elseif rec.occ===:copied_curve && hasproperty(rec,:curve)
+        # imported/swept B-spline or NURBS edge — the record owns the exact
+        # `_ModelOCCNURBSCurve`/`_ModelOCCReparamCurve` evaluator; the engine
+        # consumes it through `_brep_curve_eval`/`_brep_curve_param`.
+        return (kind=:bspline,curve=rec.curve,g=rec,
+                ctype=get(m.curve_types,ctag,:copied_curve)),rec.t0,rec.t1
     elseif rec.occ===:degenerate
         return (kind=:degenerate,xyz=m.points[a]),rec.t0,rec.t1
     end
@@ -192,7 +350,9 @@ function _brep_wire_pts(m::GeoModel,loop_tag::Int)
         a,b=m.curves[abs(ce)]
         push!(pts,m.points[ce>0 ? a : b])
         curve,t0,t1=_brep_edge_curve(m,abs(ce))
-        curve.kind===:circle || continue
+        # an arc's winding contribution needs a sample inside the span —
+        # every non-straight evaluable curve contributes its midpoint
+        curve.kind in (:line,:degenerate) && continue
         push!(pts,_brep_curve_eval(curve,(t0+t1)/2))
     end
     return pts
@@ -245,6 +405,27 @@ function _brep_synth_pcurve(sg,curve::NamedTuple,t0,t1,caller::AbstractString)
         xu=(_b3dot(curve.x,sg.X),_b3dot(curve.x,sg.Y))
         pc=(circ2d=(_brep_plane_uv(sg,curve.c),xu,curve.r),)
         return _b3dot(curve.n,_b3cross(sg.X,sg.Y))>=0 ? pc : (neg2d=(pc,),)
+    elseif curve.kind===:ellipse
+        # exact frame projection — same handedness rule as the circle
+        xu=(_b3dot(curve.x,sg.X),_b3dot(curve.x,sg.Y))
+        pc=(ellips2d=(_brep_plane_uv(sg,curve.c),xu,curve.rx,curve.ry),)
+        return _b3dot(curve.n,_b3cross(sg.X,sg.Y))>=0 ? pc : (neg2d=(pc,),)
+    elseif curve.kind===:bspline
+        cv=curve.curve
+        if cv isa _ModelOCCNURBSCurve &&
+                all(w->w==1.0,cv.curve.weights)
+            # exact: the plane's orthonormal projection acts on the poles
+            # affinely — a non-rational B-spline's uv trace is the B-spline
+            # of its projected control points over the same knots
+            cps=NTuple{2,Float64}[
+                _brep_plane_uv(sg,c) for c in cv.curve.controls]
+            return (spl2d=(cv.curve.knots,cv.curve.degree,cps),)
+        end
+        # rational / reparametrized trace — the importer's own convention:
+        # a monotone C1 cubic through edge-parameter samples
+        ts=[t0+(t1-t0)*i/16 for i in 0:16]
+        uvs=[_brep_plane_uv(sg,_brep_curve_eval(curve,t)) for t in ts]
+        return (spl2d=_pchip_bspline_2d(ts,uvs),)
     end
     curve.kind in (:line,:degenerate) || throw(ArgumentError(
         "$caller: unsupported $(curve.kind) edge on an untyped plane"))
@@ -341,7 +522,7 @@ function _brep_pc_ray_crossings(pc,t0,t1,pu,pv,tol)
         (t<=lo+tol && d[2]<0) && return 0
         (t>=hi-tol && d[2]>0) && return 0
         return 1
-    else
+    elseif hasproperty(pc,:circ2d)
         c,x,r=pc.circ2d
         dy=pv-c[2]
         dy*dy>r*r && return 0
@@ -369,7 +550,48 @@ function _brep_pc_ray_crossings(pc,t0,t1,pu,pv,tol)
             ok && (hits+=1)
         end
         return hits
+    elseif hasproperty(pc,:ellips2d)
+        o,x,a,b=pc.ellips2d
+        # v(t)=o2+a·x2·cos+b·x1·sin — A·cos+B·sin=pv−o2
+        A=a*x[2];B=b*x[1];C=pv-o[2]
+        amp=hypot(A,B)
+        amp<tol && return 0
+        abs(C)>amp && return 0
+        φ=atan(B,A);δ=acos(clamp(C/amp,-1.0,1.0))
+        hits=0
+        for γ in (φ-δ,φ+δ)
+            px=o[1]+a*x[1]*cos(γ)-b*x[2]*sin(γ)
+            px<=pu+tol && continue
+            dv=-a*x[2]*sin(γ)+b*x[1]*cos(γ)
+            ok=false
+            for k in -2:2
+                tk=γ+k*_OCC_TWO_PI
+                (tk<lo-tol || tk>hi+tol) && continue
+                if (tk>lo+tol && tk<hi-tol) ||
+                   (tk<=lo+tol && dv>0) || (tk>=hi-tol && dv<0)
+                    ok=true;break
+                end
+            end
+            ok && (hits+=1)
+        end
+        return hits
     end
+    # generic records (spl2d, tan2d/tan2dv): sign changes of v(t)−pv over
+    # the curve's own sample grid; tangency on the ray adds an even count,
+    # so parity follows the interior sign-change roots alone
+    ts=_brep_pc_grid(pc,lo,hi)
+    hits=0
+    for t in _brep_scalar_roots(t->_brep_pc_eval(pc,t)[2]-pv,ts,tol;
+                                tangents=false)
+        px=_brep_pc_eval(pc,t)[1]
+        px<=pu+tol && continue
+        dv=_brep_pc_tangent(pc,t)[2]
+        if (t>lo+tol && t<hi-tol) ||
+           (t<=lo+tol && dv>0) || (t>=hi-tol && dv<0)
+            hits+=1
+        end
+    end
+    return hits
 end
 
 function _brep_uv_in_wire(edges,wire,pu,pv,tol)
@@ -693,8 +915,10 @@ function _brep_pc_intersect(sec_pc,edge_pc,et0,et1,tol)
         _brep_ix_lin_circ(sec_pc.lin2d,edge_pc.circ2d,et0,et1,tol)
     elseif hasproperty(sec_pc,:circ2d) && hasproperty(edge_pc,:lin2d)
         _brep_ix_circ_lin(sec_pc.circ2d,edge_pc.lin2d,et0,et1,tol)
-    else
+    elseif hasproperty(sec_pc,:circ2d) && hasproperty(edge_pc,:circ2d)
         _brep_ix_circ_circ(sec_pc.circ2d,edge_pc.circ2d,et0,et1,tol)
+    else
+        _brep_ix_generic(sec_pc,edge_pc,et0,et1,tol)
     end
     return nsec ? .-out : out
 end
@@ -790,6 +1014,92 @@ function _brep_ix_circ_circ(sc,ec,et0,et1,tol)
         cy=(uv[2]-c2[2])*x2[1]-(uv[1]-c2[1])*x2[2]
         θ=_brep_snap_theta(atan(cy,cx),lo,hi,tol)
         θ===nothing || push!(out,mod(t,_OCC_TWO_PI))
+    end
+    return out
+end
+
+# parameter on `pc` of the point nearest `uv`, over the natural domain or
+# [lo,hi] when supplied — analytic for elementary records, the seeded Newton
+# projection for splines and conic-reparam traces.
+function _brep_pc_uv_to_t(pc,uv,tol,lo=-Inf,hi=Inf)
+    if hasproperty(pc,:lin2d)
+        o,d=pc.lin2d
+        dd=d[1]*d[1]+d[2]*d[2]
+        dd==0.0 && return nothing
+        t=((uv[1]-o[1])*d[1]+(uv[2]-o[2])*d[2])/dd
+        (t<lo-tol || t>hi+tol) && return nothing
+        return t
+    elseif hasproperty(pc,:circ2d)
+        c,x,r=pc.circ2d
+        cx=(uv[1]-c[1])*x[1]+(uv[2]-c[2])*x[2]
+        cy=(uv[2]-c[2])*x[1]-(uv[1]-c[1])*x[2]
+        return _brep_snap_theta(atan(cy,cx),lo,hi,tol)
+    elseif hasproperty(pc,:ellips2d)
+        o,x,a,b=pc.ellips2d
+        cx=((uv[1]-o[1])*x[1]+(uv[2]-o[2])*x[2])/a
+        cy=((uv[2]-o[2])*x[1]-(uv[1]-o[1])*x[2])/b
+        return _brep_snap_theta(atan(cy,cx),lo,hi,tol)
+    end
+    dlo,dhi=_brep_pc_domain(pc)
+    _brep_pc_project(pc,uv,max(lo,dlo),min(hi,dhi),tol)
+end
+
+# hits of an edge pcurve against a generic section pcurve — the distance
+# field edge(t)→dist(t,sec) has no sign change, so local minima below
+# tolerance on the sample grid get a golden-section refinement instead.
+function _brep_pc_curve_hits(sec_pc,edge_pc,ts,tol)
+    slo,shi=_brep_pc_domain(sec_pc)
+    slo=isinf(slo) ? -4*_OCC_TWO_PI : slo
+    shi=isinf(shi) ?  4*_OCC_TWO_PI : shi
+    function dist(t)
+        uv=_brep_pc_eval(edge_pc,t)
+        s=_brep_pc_project(sec_pc,uv,slo,shi,tol)
+        s===nothing && return Inf
+        p=_brep_pc_eval(sec_pc,s)
+        return hypot(p[1]-uv[1],p[2]-uv[2])
+    end
+    fs=[dist(Float64(t)) for t in ts]
+    scl=max(1.0,maximum(x->isfinite(x) ? x : 0.0,fs))
+    hits=Float64[];φ=(sqrt(5)-1)/2
+    for i in 2:length(ts)-1
+        (isfinite(fs[i]) && fs[i]<=fs[i-1] && fs[i]<=fs[i+1] &&
+         fs[i]<10tol*scl) || continue
+        a,b=ts[i-1],ts[i+1]
+        c=b-φ*(b-a);d=a+φ*(b-a);fc=dist(c);fd=dist(d)
+        for _ in 1:60
+            if fc<fd
+                b=d;d=c;fd=fc;c=b-φ*(b-a);fc=dist(c)
+            else
+                a=c;c=d;fc=fd;d=a+φ*(b-a);fd=dist(d)
+            end
+        end
+        tm=(a+b)/2
+        if dist(tm)<10tol*scl &&
+                (isempty(hits) || tm-hits[end]>1e-9*max(1.0,b-a))
+            push!(hits,tm)
+        end
+    end
+    return hits
+end
+
+# generic pair solver — the edge pcurve stays the bounded operand: march
+# its own grid for crossings of the section's implicit level (or its raw
+# distance field when the section has none), then invert each crossing uv
+# back onto the section.
+function _brep_ix_generic(sec_pc,edge_pc,et0,et1,tol)
+    lo,hi=minmax(et0,et1)
+    ts=_brep_pc_grid(edge_pc,lo,hi)
+    lvl=_brep_pc_level(sec_pc)
+    if lvl!==nothing
+        hits=_brep_scalar_roots(t->lvl(_brep_pc_eval(edge_pc,t)),ts,tol)
+    else
+        hits=_brep_pc_curve_hits(sec_pc,edge_pc,ts,tol)
+    end
+    out=Float64[]
+    for te in hits
+        uv=_brep_pc_eval(edge_pc,te)
+        st=_brep_pc_uv_to_t(sec_pc,uv,tol)
+        st===nothing || push!(out,st)
     end
     return out
 end
@@ -919,6 +1229,27 @@ function _brep_edge_face_params(solid,e,face,tol)
         append!(params,_brep_line_surface(sg,curve))
     elseif curve.kind===:circle
         append!(params,_brep_circle_surface(sg,curve,callerless=true))
+    elseif curve.kind===:ellipse && sg.occ===:plane
+        # same A·cos+B·sin=C normal-distance structure as the circle,
+        # axis-weighted by the two radii
+        A=curve.rx*_b3dot(curve.x,sg.axis)
+        B=curve.ry*_b3dot(curve.y,sg.axis)
+        C=_b3dot(_b3(sg.center,curve.c),sg.axis)
+        amp=hypot(A,B)
+        if amp>=_BREP_TOL && abs(C)<=amp+_BREP_TOL
+            φ=atan(B,A);δ=acos(clamp(C/amp,-1.0,1.0))
+            for g in (φ-δ,φ+δ), k in -1:1
+                push!(params,g+k*_OCC_TWO_PI)
+            end
+        end
+    else
+        # generic records — level roots on the curve's own knot grid
+        lvl=_brep_surface_level(sg)
+        lvl===nothing ||
+            append!(params,_brep_scalar_roots(
+                t->lvl(_brep_curve_eval(curve,t)),
+                _brep_curve_grid(curve,minmax(e.t0,e.t1)...),
+                tol;tangents=false))
     end
     out=Float64[]
     lo,hi=minmax(e.t0,e.t1)
@@ -930,6 +1261,60 @@ function _brep_edge_face_params(solid,e,face,tol)
         push!(out,t)
     end
     return out
+end
+
+# implicit level of an elementary surface record (~signed distance to the
+# underlying surface) — nothing for NURBS/revolution records, whose generic
+# edge crossings are not enumerated
+function _brep_surface_level(sg)
+    if sg.occ===:plane
+        return p->_b3dot(_b3(p,sg.center),sg.axis)
+    elseif sg.occ===:sphere
+        return p->(_b3norm(_b3(p,sg.center))-sg.radius)
+    elseif sg.occ===:cylinder || sg.occ===:cone
+        return p->begin
+            rel=_b3(p,sg.center);oa=_b3dot(rel,sg.axis)
+            rp=_b3(rel,_b3mul(sg.axis,oa))
+            if sg.occ===:cylinder
+                sqrt(_b3dot(rp,rp))-sg.radius
+            else
+                k=(sg.r2-sg.r1)/sg.height
+                sqrt(_b3dot(rp,rp))-(sg.r1+k*oa)
+            end
+        end
+    end
+    return nothing
+end
+
+# parameter-space sample grid for a 3-D curve record over [lo,hi] —
+# B-splines densify at their knot-span breakpoints like the pcurve grid
+function _brep_curve_grid(crv,lo,hi;subs::Int=8)
+    local bk
+    if crv.kind===:bspline && crv.curve isa _ModelOCCNURBSCurve
+        bk=unique(crv.curve.curve.knots)
+    elseif crv.kind===:bspline && crv.curve isa _ModelOCCReparamCurve
+        bk=crv.curve.reparam.knots
+    else
+        bk=nothing
+    end
+    ts=Float64[]
+    if bk!==nothing
+        bounds=vcat(Float64[lo],
+                    Float64[k for k in bk if lo-1e-12<k<hi+1e-12],
+                    Float64[hi])
+        sort!(bounds)
+        for i in 1:length(bounds)-1
+            a,b=bounds[i],bounds[i+1]
+            for j in 0:subs
+                push!(ts,fma(b-a,j/subs,a))
+            end
+        end
+    else
+        for i in 0:64
+            push!(ts,fma(hi-lo,i/64,lo))
+        end
+    end
+    return ts
 end
 
 # line × surface → curve params (unclamped).
@@ -1034,20 +1419,53 @@ function _brep_pc_urange(pc,t0,t1)
     if hasproperty(pc,:lin2d)
         o,d=pc.lin2d
         return minmax(o[1]+d[1]*t0,o[1]+d[1]*t1)
+    elseif hasproperty(pc,:circ2d)
+        c,x,r=pc.circ2d
+        umin,umax=Inf,-Inf
+        for t in (t0,t1)
+            u=_brep_pc_eval(pc,t)[1]
+            umin=min(umin,u);umax=max(umax,u)
+        end
+        α=atan(x[2],x[1])
+        for (g,s) in ((0.0,r),(π,-r))   # u extremum where t+α≡g
+            t=mod(g-α,_OCC_TWO_PI)
+            for k in -3:3
+                tk=t+k*_OCC_TWO_PI
+                lo<tk<hi && (umin=min(umin,c[1]+s);umax=max(umax,c[1]+s))
+            end
+        end
+        return umin,umax
+    elseif hasproperty(pc,:ellips2d)
+        # u(t)=o1+a·x1·cos−b·x2·sin — extrema where du/dt=0
+        o,x,a,b=pc.ellips2d
+        umin,umax=Inf,-Inf
+        for t in (t0,t1)
+            u=_brep_pc_eval(pc,t)[1]
+            umin=min(umin,u);umax=max(umax,u)
+        end
+        φ=atan(-b*x[2],a*x[1])          # u=A·cos+B·sin, max at t=atan(B,A)
+        for g in (φ,φ+π)
+            for k in -3:3
+                tk=g+k*_OCC_TWO_PI
+                if lo<tk<hi
+                    u=_brep_pc_eval(pc,tk)[1]
+                    umin=min(umin,u);umax=max(umax,u)
+                end
+            end
+        end
+        return umin,umax
     end
-    c,x,r=pc.circ2d
+    # generic — du/dt=0 roots on the curve's own knot grid are the exact
+    # extrema candidates; endpoints close the bracket
     umin,umax=Inf,-Inf
     for t in (t0,t1)
         u=_brep_pc_eval(pc,t)[1]
         umin=min(umin,u);umax=max(umax,u)
     end
-    α=atan(x[2],x[1])
-    for (g,s) in ((0.0,r),(π,-r))   # u extremum where t+α≡g
-        t=mod(g-α,_OCC_TWO_PI)
-        for k in -3:3
-            tk=t+k*_OCC_TWO_PI
-            lo<tk<hi && (umin=min(umin,c[1]+s);umax=max(umax,c[1]+s))
-        end
+    for t in _brep_scalar_roots(t->_brep_pc_tangent(pc,t)[1],
+                                _brep_pc_grid(pc,lo,hi),1e-9;tangents=false)
+        u=_brep_pc_eval(pc,t)[1]
+        umin=min(umin,u);umax=max(umax,u)
     end
     return umin,umax
 end
@@ -1072,26 +1490,48 @@ function _brep_pc_split_at_useam(pc,t0,t1,u_seam0,period,tol)
                 (t>t0+tol && t<t1-tol) && push!(cuts,t)
             end
         end
-    else
-        c,x,r=pc.circ2d
-        # u(t)=c1+r·cos(t+α)=u_seam0+k·period
-        α=atan(x[2],x[1])
-        kmin=floor(Int,(c[1]-r-u_seam0)/period)-1
-        kmax=ceil(Int,(c[1]+r-u_seam0)/period)+1
+    elseif hasproperty(pc,:circ2d) || hasproperty(pc,:ellips2d)
+        # u(t)=A·cos+B·sin+C=u_seam0+k·period for both conic kinds
+        if hasproperty(pc,:circ2d)
+            c,x,r=pc.circ2d
+            A=r*x[1];B=-r*x[2];C=c[1]
+        else
+            o,x,a,b=pc.ellips2d
+            A=a*x[1];B=-b*x[2];C=o[1]
+        end
+        amp=hypot(A,B)
+        amp<tol && return [(t0,t1)]
+        φ=atan(B,A)
+        lo,hi=minmax(t0,t1)
+        kmin=floor(Int,(C-amp-u_seam0)/period)-1
+        kmax=ceil(Int,(C+amp-u_seam0)/period)+1
         for k in kmin:kmax
-            du=(u_seam0+k*period-c[1])/r
+            du=(u_seam0+k*period-C)/amp
             abs(du)<=1.0 || continue
-            β=acos(clamp(du,-1.0,1.0))
-            for γ in (β,-β)
-                tt=mod(γ-α,_OCC_TWO_PI)
+            δ=acos(clamp(du,-1.0,1.0))
+            for γ in (φ-δ,φ+δ)
                 for j in -2:2
-                    tk=tt+j*_OCC_TWO_PI
+                    tk=γ+j*_OCC_TWO_PI
                     (tk>t0+tol && tk<t1-tol) && push!(cuts,tk)
                 end
             end
         end
+    else
+        # generic records — u(t)=u_seam0+k·period roots on the knot grid
+        umin,umax=_brep_pc_urange(pc,t0,t1)
+        kmin=ceil(Int,(umin-u_seam0)/period)-1
+        kmax=floor(Int,(umax-u_seam0)/period)+1
+        lo,hi=minmax(t0,t1)
+        ts=_brep_pc_grid(pc,lo,hi)
+        for k in kmin:kmax
+            append!(cuts,_brep_scalar_roots(
+                t->_brep_pc_eval(pc,t)[1]-u_seam0-k*period,ts,tol;
+                tangents=false))
+        end
+        filter!(t->t>t0+tol && t<t1-tol,cuts)
     end
     sort!(cuts)
+    unique!(cuts)
     out=Tuple{Float64,Float64}[]
     a=t0
     for t in cuts
@@ -1183,16 +1623,46 @@ function _brep_pc_arc_area(pc,ta,tb)
         u0,v0=_brep_pc_eval(pc,ta)
         u1,v1=_brep_pc_eval(pc,tb)
         return (u0*v1-u1*v0)/2
+    elseif hasproperty(pc,:circ2d)
+        c,x,r=pc.circ2d
+        # u = c1 + r(cos t·x1 − sin t·x2), v = c2 + r(cos t·x2 + sin t·x1)
+        # (Y = rot90(X)). u v'−v u' = r² + r·[cos t·(c1x1+c2x2) + sin t·(c2x1−c1x2)]
+        # — the concentric term is constant; the off-centre term integrates the
+        # frame components against ds = sin tb−sin ta, dc = cos tb−cos ta.
+        s0,co0=_gm_sincos(ta);s1,co1=_gm_sincos(tb)
+        dc=co1-co0;ds=s1-s0
+        return (r*r*(tb-ta) +
+                r*(c[1]*(x[1]*ds + x[2]*dc) + c[2]*(x[2]*ds - x[1]*dc)))/2
+    elseif hasproperty(pc,:ellips2d)
+        # u=o1+A cos+B sin, v=o2+C cos+D sin with A=a·x1,B=−b·x2,C=a·x2,
+        # D=b·x1 — the concentric term collapses to a·b(x1²+x2²)=a·b.
+        o,x,a,b=pc.ellips2d
+        A=a*x[1];B=-b*x[2];C=a*x[2];D=b*x[1]
+        s0,co0=_gm_sincos(ta);s1,co1=_gm_sincos(tb)
+        dc=co1-co0;ds=s1-s0
+        return (a*b*(tb-ta) + o[1]*(C*dc+D*ds) - o[2]*(A*dc+B*ds))/2
     end
-    c,x,r=pc.circ2d
-    # u = c1 + r(cos t·x1 − sin t·x2), v = c2 + r(cos t·x2 + sin t·x1)
-    # (Y = rot90(X)). u v'−v u' = r² + r·[cos t·(c1x1+c2x2) + sin t·(c2x1−c1x2)]
-    # — the concentric term is constant; the off-centre term integrates the
-    # frame components against ds = sin tb−sin ta, dc = cos tb−cos ta.
-    s0,co0=_gm_sincos(ta);s1,co1=_gm_sincos(tb)
-    dc=co1-co0;ds=s1-s0
-    return (r*r*(tb-ta) +
-            r*(c[1]*(x[1]*ds + x[2]*dc) + c[2]*(x[2]*ds - x[1]*dc)))/2
+    # generic records — 5-point Gauss–Legendre over each knot span
+    gn=(-0.9061798459386640,-0.5384693101056831,0.0,
+         0.5384693101056831,0.9061798459386640)
+    gw=(0.2369268850561891,0.4786286704993665,0.5688888888888889,
+        0.4786286704993665,0.2369268850561891)
+    sgn=ta<=tb ? 1.0 : -1.0
+    breaks=_brep_pc_grid(pc,min(ta,tb),max(ta,tb);subs=1)
+    total=0.0
+    for i in 1:length(breaks)-1
+        x0,x1=breaks[i],breaks[i+1]
+        h=(x1-x0)/2
+        h<=0 && continue
+        m=(x0+x1)/2;s=0.0
+        for j in 1:5
+            t=m+h*gn[j]
+            uv=_brep_pc_eval(pc,t);d=_brep_pc_tangent(pc,t)
+            s+=gw[j]*(uv[1]*d[2]-uv[2]*d[1])
+        end
+        total+=h*s
+    end
+    return sgn*total/2
 end
 
 # Point-in-cycle test (even-odd) for arc lists.
@@ -1326,13 +1796,19 @@ function _brep_pc_near(pc,t0,t1,uv,tol)
         s=clamp(s,min(t0,t1),max(t0,t1))
         dx=uv[1]-(o[1]+s*d[1]);dy=uv[2]-(o[2]+s*d[2])
         return dx*dx+dy*dy<tol*tol
+    elseif hasproperty(pc,:circ2d) || hasproperty(pc,:ellips2d)
+        # coarse radial band (absolute — the level is signed inside the
+        # conic's disk), then the exact angular range check
+        lvl=_brep_pc_level(pc)
+        abs(lvl(uv))<tol || return false
+        return _brep_pc_uv_to_t(pc,uv,tol,min(t0,t1),max(t0,t1))!==nothing
     end
-    c,x,r=pc.circ2d
-    dx=uv[1]-c[1];dy=uv[2]-c[2]
-    dist=abs(sqrt(dx*dx+dy*dy)-r)
-    dist<tol || return false
-    θ=atan((dy*x[1]-dx*x[2]),(dx*x[1]+dy*x[2]))
-    return _brep_snap_theta(θ,min(t0,t1),max(t0,t1),tol)!==nothing
+    # generic records — seeded Newton projection gives the closest point;
+    # the caller's `tol` is the near band itself (typically ~20·tol)
+    s=_brep_pc_project(pc,uv,min(t0,t1),max(t0,t1),tol)
+    s===nothing && return false
+    p=_brep_pc_eval(pc,s)
+    return hypot(p[1]-uv[1],p[2]-uv[2])<tol
 end
 
 const _BREP_RAY_DIRS = (
@@ -1363,9 +1839,24 @@ function _brep_shift_pc(pc,shift)
     if hasproperty(pc,:lin2d)
         o,d=pc.lin2d
         return (lin2d=((o[1]-shift,o[2]),d),)
+    elseif hasproperty(pc,:circ2d)
+        c,x,r=pc.circ2d
+        return (circ2d=((c[1]-shift,c[2]),x,r),)
+    elseif hasproperty(pc,:ellips2d)
+        o,x,a,b=pc.ellips2d
+        return (ellips2d=((o[1]-shift,o[2]),x,a,b),)
+    elseif hasproperty(pc,:spl2d)
+        knots,p,cps=pc.spl2d
+        return (spl2d=(knots,p,
+            NTuple{2,Float64}[(c[1]-shift,c[2]) for c in cps]),)
+    elseif hasproperty(pc,:tan2d)
+        inner,u0,us,vv=pc.tan2d
+        return (tan2d=(inner,u0-shift,us,vv),)
+    elseif hasproperty(pc,:tan2dv)
+        inner,uu,v0,vs=pc.tan2dv
+        return (tan2dv=(inner,uu-shift,v0,vs),)
     end
-    c,x,r=pc.circ2d
-    return (circ2d=((c[1]-shift,c[2]),x,r),)
+    throw(ArgumentError("_brep_shift_pc: unsupported pcurve record"))
 end
 
 # every parameter in (t0,t1) where the pcurve's u crosses a cut-domain seam
@@ -1388,25 +1879,46 @@ function _brep_pc_split_all_useams(pc,t0,t1,period,ulo,tol)
                 (t>t0+tol && t<t1-tol) && push!(cuts,t)
             end
         end
-    else
-        c,x,r=pc.circ2d
-        α=atan(x[2],x[1])
-        kmin=floor(Int,(c[1]-r-ulo)/period)-1
-        kmax=ceil(Int,(c[1]+r-ulo)/period)+1
+    elseif hasproperty(pc,:circ2d) || hasproperty(pc,:ellips2d)
+        if hasproperty(pc,:circ2d)
+            c,x,r=pc.circ2d
+            A=r*x[1];B=-r*x[2];C=c[1]
+        else
+            o,x,a,b=pc.ellips2d
+            A=a*x[1];B=-b*x[2];C=o[1]
+        end
+        amp=hypot(A,B)
+        amp<tol && return [(t0,t1)]
+        φ=atan(B,A)
+        kmin=floor(Int,(C-amp-ulo)/period)-1
+        kmax=ceil(Int,(C+amp-ulo)/period)+1
         for k in kmin:kmax
-            v=(ulo+k*period-c[1])/r
+            v=(ulo+k*period-C)/amp
             abs(v)<=1.0 || continue
-            β=acos(clamp(v,-1.0,1.0))
-            for γ in (β,-β)
-                tt=mod(γ-α,_OCC_TWO_PI)
+            δ=acos(clamp(v,-1.0,1.0))
+            for γ in (φ-δ,φ+δ)
                 for j in -2:2
-                    tk=tt+j*_OCC_TWO_PI
+                    tk=γ+j*_OCC_TWO_PI
                     (tk>t0+tol && tk<t1-tol) && push!(cuts,tk)
                 end
             end
         end
+    else
+        # generic records — seam crossings found on the curve's knot grid
+        umin,umax=_brep_pc_urange(pc,t0,t1)
+        kmin=ceil(Int,(umin-ulo)/period)-1
+        kmax=floor(Int,(umax-ulo)/period)+1
+        lo,hi=minmax(t0,t1)
+        ts=_brep_pc_grid(pc,lo,hi)
+        for k in kmin:kmax
+            append!(cuts,_brep_scalar_roots(
+                t->_brep_pc_eval(pc,t)[1]-ulo-k*period,ts,tol;
+                tangents=false))
+        end
+        filter!(t->t>t0+tol && t<t1-tol,cuts)
     end
     sort!(cuts)
+    unique!(cuts)
     out=Tuple{Float64,Float64}[]
     a=t0
     for t in cuts
@@ -1447,12 +1959,16 @@ function _brep_pc_param(pc,uv,t0,t1,tol)
         (abs(e[1]-uv[1])<10tol && abs(e[2]-uv[2])<10tol) || return nothing
         (s>=t0-tol && s<=t1+tol) || return nothing
         return s
+    elseif hasproperty(pc,:circ2d) || hasproperty(pc,:ellips2d)
+        lvl=_brep_pc_level(pc)
+        rs=hasproperty(pc,:circ2d) ? pc.circ2d[3] :
+           min(pc.ellips2d[3],pc.ellips2d[4])
+        # absolute band — the conic level is signed (negative inside)
+        abs(lvl(uv))>10tol*max(1.0,rs) && return nothing
+        return _brep_pc_uv_to_t(pc,uv,tol,t0,t1)
     end
-    c,x,r=pc.circ2d
-    dx,dy=uv[1]-c[1],uv[2]-c[2]
-    cx=dx*x[1]+dy*x[2];cy=dy*x[1]-dx*x[2]
-    abs(sqrt(cx*cx+cy*cy)-r)>10tol*max(1.0,r) && return nothing
-    return _brep_snap_theta(atan(cy,cx),t0,t1,tol)
+    # generic records — grid-seeded projection restricted to [t0,t1]
+    return _brep_pc_project(pc,uv,min(t0,t1),max(t0,t1),tol)
 end
 
 # Build the face's uv arrangement (boundary sub-edges + section pieces, cut at
@@ -1566,6 +2082,22 @@ function _brep_face_regions(solid,f,side,edge_splits,secs,extras,tol,caller)
         hypot(mi[1]-mj[1],mi[2]-mj[2])<tol && (keep_arc[j]=false)
     end
     arcs=arcs[keep_arc]
+    # dangling chords: a section piece may end strictly inside this face
+    # where the OTHER operand's boundary pierces it (e.g. a bounded sheet
+    # stabbed through a solid's wall). Such pieces split no region — prune
+    # them iteratively like graph leaves so wiring traversal never pairs a
+    # chord with itself into a zero-area lens.
+    while true
+        deg=zeros(Int,length(nodes))
+        for ar in arcs
+            deg[ar.a]+=1;deg[ar.b]+=1
+        end
+        drop=findall(i->deg[arcs[i].a]<2 || deg[arcs[i].b]<2,
+                     eachindex(arcs))
+        isempty(drop) && break
+        deleteat!(arcs,drop)
+    end
+    isempty(arcs) && return NamedTuple[],arcs,Vector{Tuple{Int,Bool}}[]
     cycles=_brep_uv_arrange(arcs,length(nodes),tol,caller)
     regions,_=_brep_group_cycles(arcs,cycles,solid.edges,f,tol,caller)
     return regions,arcs,cycles
@@ -1705,13 +2237,28 @@ function _brep_map_pc(pc,mp)
     if hasproperty(inner,:lin2d)
         o,d=inner.lin2d
         return (lin2d=(_brep_map_uv(mp,o),_brep_map_dir(mp,d)),),false
+    elseif hasproperty(inner,:circ2d) || hasproperty(inner,:ellips2d)
+        neg=(mp.c1[1]*mp.c2[2]-mp.c1[2]*mp.c2[1])<0
+        mapped=if hasproperty(inner,:circ2d)
+            c,x,r=inner.circ2d
+            (circ2d=(_brep_map_uv(mp,c),_brep_map_dir(mp,x),r),)
+        else
+            o,x,a,b=inner.ellips2d
+            (ellips2d=(_brep_map_uv(mp,o),_brep_map_dir(mp,x),a,b),)
+        end
+        # a reflection inside the map composes with an existing neg2d
+        # wrapper: mapped(inner(−t)) needs −t evaluated on the mapped conic.
+        return (wrapped ? (neg2d=(mapped,),) : mapped),neg
+    elseif hasproperty(inner,:spl2d)
+        # affine pole map is exact for B-splines and carries no handedness
+        knots,p,cps=inner.spl2d
+        mapped=(spl2d=(knots,p,
+            NTuple{2,Float64}[_brep_map_uv(mp,c) for c in cps]),)
+        return (wrapped ? (neg2d=(mapped,),) : mapped),false
     end
-    c,x,r=inner.circ2d
-    neg=(mp.c1[1]*mp.c2[2]-mp.c1[2]*mp.c2[1])<0
-    mapped=(circ2d=(_brep_map_uv(mp,c),_brep_map_dir(mp,x),r),)
-    # a reflection inside the map composes with an existing neg2d wrapper:
-    # mapped(inner(−t)) needs −t evaluated on the mapped circle.
-    return (wrapped ? (neg2d=(mapped,),) : mapped),neg
+    throw(ArgumentError(
+        "_brep_map_pc: $(first(propertynames(inner))) pcurve has no " *
+        "plane-map representable image"))
 end
 
 # pcurve with its parameter reversed (t → −t): used to store an imprinted
@@ -1722,12 +2269,22 @@ function _brep_flip_pc(pc,caller)
     hasproperty(pc,:neg2d) && return pc.neg2d[1]
     hasproperty(pc,:lin2d) &&
         return (lin2d=(pc.lin2d[1],(-pc.lin2d[2][1],-pc.lin2d[2][2])),)
-    hasproperty(pc,:circ2d) && return (neg2d=(pc,),)
+    (hasproperty(pc,:circ2d) || hasproperty(pc,:ellips2d)) &&
+        return (neg2d=(pc,),)
+    if hasproperty(pc,:spl2d)
+        # exact parameter reversal: p(−t) is the same spline over mirrored
+        # knots with mirrored poles
+        knots,p,cps=pc.spl2d
+        return (spl2d=(Float64[-k for k in Iterators.reverse(knots)],p,
+                       NTuple{2,Float64}[cp for cp in
+                                         Iterators.reverse(cps)]),)
+    end
     throw(ArgumentError(
         "$caller: unrepresentable parameter-reversed pcurve"))
 end
 
-# same carrier test: collinear lines or coincident circles
+# same carrier test: collinear lines or coincident conics — generic records
+# decide by sampling one operand's trace and projecting onto the other
 function _brep_pc_same_carrier(a,b,tol)
     a,_=_brep_pc_unneg(a);b,_=_brep_pc_unneg(b)
     if hasproperty(a,:lin2d) && hasproperty(b,:lin2d)
@@ -1741,8 +2298,32 @@ function _brep_pc_same_carrier(a,b,tol)
         c1,x1,r1=a.circ2d;c2,x2,r2=b.circ2d
         return abs(c1[1]-c2[1])<100tol && abs(c1[2]-c2[2])<100tol &&
                abs(r1-r2)<100tol
+    elseif hasproperty(a,:ellips2d) && hasproperty(b,:ellips2d)
+        o1,x1,a1,b1=a.ellips2d;o2,x2,a2,b2=b.ellips2d
+        (abs(o1[1]-o2[1])<100tol && abs(o1[2]-o2[2])<100tol &&
+         abs(a1-a2)<100tol && abs(b1-b2)<100tol) || return false
+        # a circle's x direction is arbitrary; a true ellipse needs the
+        # first semi-axis directions ±parallel
+        abs(a1-b1)<100tol &&
+            return true
+        return abs(x1[1]*x2[1]+x1[2]*x2[2])>1-100tol
     end
-    return false
+    # mismatched kinds or splines: seven samples of a's locus must each lie
+    # on b — periodic records sample one period, splines their knot domain
+    dlo,dhi=_brep_pc_domain(a)
+    if isinf(dlo)
+        dlo,dhi=0.0,_OCC_TWO_PI
+    end
+    blo,bhi=_brep_pc_domain(b)
+    if isinf(blo)
+        blo,bhi=-4*_OCC_TWO_PI,4*_OCC_TWO_PI
+    end
+    for i in 0:6
+        t=fma(dhi-dlo,i/6,dlo)
+        uv=_brep_pc_eval(a,t)
+        _brep_pc_project(b,uv,blo,bhi,tol)===nothing && return false
+    end
+    return true
 end
 
 # same 3-D carrier test for result curves (collinear lines / same circle)
@@ -1754,11 +2335,31 @@ function _brep_same_curve3d(c1,c2,tol)
     elseif c1.kind===:circle
         return _b3dist(c1.c,c2.c)<100tol && abs(c1.r-c2.r)<100tol &&
                _b3norm(_b3cross(c1.n,c2.n))<100tol
+    elseif c1.kind===:ellipse
+        _b3dist(c1.c,c2.c)<100tol || return false
+        _b3norm(_b3cross(c1.n,c2.n))<100tol || return false
+        # the conic metric xxᵀ/rx²+yyᵀ/ry² is frame-rotation invariant
+        for i in 1:3, j in i:3
+            m1=(c1.x[i]*c1.x[j])/c1.rx^2+(c1.y[i]*c1.y[j])/c1.ry^2
+            m2=(c2.x[i]*c2.x[j])/c2.rx^2+(c2.y[i]*c2.y[j])/c2.ry^2
+            abs(m1-m2)>100tol*max(1.0,abs(m1),abs(m2)) && return false
+        end
+        return true
+    elseif c1.kind===:bspline
+        c1.curve===c2.curve && return true
+        (c1.curve isa _ModelOCCNURBSCurve &&
+         c2.curve isa _ModelOCCNURBSCurve) || return false
+        k1=c1.curve.curve;k2=c2.curve.curve
+        (k1.degree==k2.degree && k1.knots==k2.knots &&
+         k1.weights==k2.weights &&
+         length(k1.controls)==length(k2.controls)) || return false
+        return all(i->_b3dist(k1.controls[i],k2.controls[i])<100tol,
+                   eachindex(k1.controls))
     end
     return false
 end
 
-# parameter of a 3-D point on a result curve, lifted near tref (circles)
+# parameter of a 3-D point on a result curve, lifted near tref (conics)
 function _brep_curve_param(crv,p,tref)
     if crv.kind===:line
         return _b3dot(_b3(p,crv.o),crv.d)
@@ -1766,6 +2367,17 @@ function _brep_curve_param(crv,p,tref)
         rel=_b3(p,crv.c)
         θ=atan(_b3dot(rel,crv.y),_b3dot(rel,crv.x))
         return tref+mod(θ-tref+π,_OCC_TWO_PI)-π
+    elseif crv.kind===:ellipse
+        rel=_b3(p,crv.c)
+        θ=atan(_b3dot(rel,crv.y)/crv.ry,_b3dot(rel,crv.x)/crv.rx)
+        return tref+mod(θ-tref+π,_OCC_TWO_PI)-π
+    elseif crv.kind===:bspline
+        lo,hi=_model_occ_curve_bounds(crv.curve)
+        res=_model_occ_curve_project(crv.curve,p,lo,hi)
+        res===nothing && return nothing
+        t,pp=res
+        _b3dist(pp,p)<1e-6*max(1.0,_b3norm(p)) || return nothing
+        return t
     end
     return nothing
 end
@@ -1790,16 +2402,68 @@ function _brep_pc_reparam(pc,α,β,tol,caller)
         o,d=pc.lin2d
         return (lin2d=((fma(β,d[1],o[1]),fma(β,d[2],o[2])),
                        (α*d[1],α*d[2])),),false
+    elseif hasproperty(pc,:circ2d)
+        abs(abs(α)-1)>100tol && throw(ArgumentError(
+            "$caller: coincident conic section with a non-angular " *
+            "parameter map has no representable pcurve"))
+        c,x=pc.circ2d[1],pc.circ2d[2]
+        sb,cb=_gm_sincos(β)
+        # frame rotated by β: eval(t) = pc(t+β); for α<0 evaluated at
+        # s=−t it yields pc(−t+β) — exactly the reversed-parameter map
+        xr=(fma(cb,x[1],-sb*x[2]),fma(cb,x[2],sb*x[1]))
+        return (circ2d=(c,xr,pc.circ2d[3]),),α<0
+    elseif hasproperty(pc,:ellips2d)
+        abs(abs(α)-1)>100tol && throw(ArgumentError(
+            "$caller: coincident ellipse section with a non-angular " *
+            "parameter map has no representable pcurve"))
+        c,x,rx,ry=pc.ellips2d
+        y=(-x[2],x[1])
+        sb,cb=_gm_sincos(β)
+        # t_old = α·s + β expanded into conjugate diameters of the shifted
+        # trace:  X' = rx·cosβ·x + α·ry·sinβ·y,
+        #         Y' = −rx·sinβ·x + α·ry·cosβ·y.
+        # ellips2d stores an axis-aligned frame, so this is representable
+        # only when X'⊥Y' — i.e. rx≈ry or β≡0 (mod π/2). Otherwise the
+        # mapped trace is sampled into spl2d below.
+        Xp=(fma(rx*cb,x[1],α*ry*sb*y[1]),fma(rx*cb,x[2],α*ry*sb*y[2]))
+        Yp=(fma(-rx*sb,x[1],α*ry*cb*y[1]),fma(-rx*sb,x[2],α*ry*cb*y[2]))
+        dot=Xp[1]*Yp[1]+Xp[2]*Yp[2]
+        nXp=hypot(Xp[1],Xp[2]); nYp=hypot(Yp[1],Yp[2])
+        if abs(dot)<=1e-9*nXp*nYp && nXp>tol && nYp>tol
+            xr=(Xp[1]/nXp,Xp[2]/nXp)
+            # perp(xr)=(−xr[2],xr[1]); Yp = ry'·perp(xr) fixes the signed
+            # minor radius (negative bakes the α<0 reflection into ry')
+            ryp=Yp[1]*(-xr[2])+Yp[2]*xr[1]
+            abs(ryp)>tol ||
+                throw(ArgumentError(
+                    "$caller: coincident ellipse section's parameter " *
+                    "map collapses a semi-axis"))
+            return (ellips2d=(c,xr,nXp,ryp),),false
+        end
+        # genuine axis-mismatch: sample the mapped conic into a spl2d
+        # carrier so coincident-arc merging still succeeds. s∈[0,2π] maps
+        # to t_old over the full period regardless of the sign of α.
+        nS=48
+        ss=collect(range(0.0,2π,nS+1))
+        uvs=[let t=fma(α,s,β)
+                 (c[1]+rx*cos(t)*x[1]+ry*sin(t)*y[1],
+                  c[2]+rx*cos(t)*x[2]+ry*sin(t)*y[2])
+             end for s in ss]
+        return (spl2d=_pchip_bspline_2d(ss,uvs),),false
+    elseif hasproperty(pc,:spl2d)
+        # exact affine reparametrization of a B-spline: knots map through
+        # (k−β)/α; α<0 mirrors the knot vector and pole order
+        knots,p,cps=pc.spl2d
+        if α>0
+            return (spl2d=(Float64[(k-β)/α for k in knots],p,cps),),false
+        end
+        return (spl2d=(Float64[(k-β)/α for k in Iterators.reverse(knots)],
+                       p,NTuple{2,Float64}[cp for cp in
+                                           Iterators.reverse(cps)]),),false
     end
-    abs(abs(α)-1)>100tol && throw(ArgumentError(
-        "$caller: coincident circle section with a non-angular parameter " *
-        "map has no representable pcurve"))
-    c,x,r=pc.circ2d
-    sb,cb=_gm_sincos(β)
-    # frame rotated by β: eval(t) = pc(t+β); for α<0 evaluated at s=−t it
-    # yields pc(−t+β) — exactly the reversed-parameter map
-    xr=(fma(cb,x[1],-sb*x[2]),fma(cb,x[2],sb*x[1]))
-    return (circ2d=(c,xr,r),),α<0
+    throw(ArgumentError(
+        "$caller: coincident section's pcurve has no representable " *
+        "affine reparametrization"))
 end
 
 # pcurve of a 3-D curve known to lie in the target surface, parametrized by
@@ -1812,6 +2476,16 @@ function _brep_pc_on_surface(sg,crv,t0,t1,tol,caller)
     ts=(t0,t0+0.25(t1-t0),0.5(t0+t1),t0+0.75(t1-t0),t1)
     for t in ts
         push!(us,_brep_surface_uv(sg,_brep_curve_eval(crv,t)))
+    end
+    # an ellipse or B-spline trace on an untyped plane is exactly its frame
+    # projection — use the synthesized record when it reproduces the samples
+    if sg.occ===:plane && crv.kind in (:ellipse,:bspline)
+        pc=_brep_synth_pcurve(sg,crv,t0,t1,caller)
+        if all(i->(pe=_brep_pc_eval(pc,ts[i]);
+                   abs(pe[1]-us[i][1])<100tol &&
+                   abs(pe[2]-us[i][2])<100tol),eachindex(us))
+            return pc,false
+        end
     end
     uper=_brep_uperiod(sg)
     u0=us[1][1]
@@ -1989,7 +2663,7 @@ function _brep_esec_tspans(we,scrv,lo,hi,tol)
     t1=_brep_curve_param(we.curve,p1,wmid)
     t2=_brep_curve_param(we.curve,p2,wmid)
     (t1===nothing || t2===nothing) && return nothing
-    per=(we.curve.kind===:circle &&
+    per=(we.curve.kind in (:circle,:ellipse) &&
          abs(we.t1-we.t0-_OCC_TWO_PI)<1e-6) ? _OCC_TWO_PI : 0.0
     a,b=minmax(t1,t2)
     if per>0
@@ -2339,6 +3013,24 @@ function _brep_canonical_map(cm,cc,vm0,tol)
         θA=_brep_curve_param(cc,pA,α*vm0)
         θA===nothing && return nothing
         return α,θA-α*vm0
+    elseif cc.kind===:ellipse && cm.kind===:ellipse
+        # same angular convention as circles — the metric check gates the
+        # shared carrier; matched radii keep the map affine
+        _brep_same_curve3d(cm,cc,tol) || return nothing
+        (abs(cm.rx-cc.rx)<100tol && abs(cm.ry-cc.ry)<100tol) ||
+            return nothing
+        nn=_b3dot(cm.n,cc.n)
+        (abs(abs(nn)-1)>100tol) && return nothing
+        α=nn>0 ? 1.0 : -1.0
+        pA=_brep_curve_eval(cm,vm0)
+        θA=_brep_curve_param(cc,pA,α*vm0)
+        θA===nothing && return nothing
+        return α,θA-α*vm0
+    elseif cc.kind===:bspline && cm.kind===:bspline
+        # one shared evaluator → the same parameter is the canonical map;
+        # distinct evaluators stay unmerged (conservative)
+        cm.curve===cc.curve || return nothing
+        return 1.0,0.0
     end
     return nothing
 end
@@ -2423,10 +3115,10 @@ function _brep_merge_edge_pieces(kept,tol,caller)
             push!(maps,(k=k,α=ab[1],β=ab[2]))
         end
         ok || continue
-        # a closed circle's canonical map is unique only mod 2π — members
+        # a closed conic's canonical map is unique only mod 2π — members
         # meeting the root through the parametrization seam must unwrap onto
         # the covered span or their canonical intervals stay disjoint
-        per=cc.kind===:circle ? _OCC_TWO_PI : 0.0
+        per=cc.kind in (:circle,:ellipse) ? _OCC_TWO_PI : 0.0
         covered=Tuple{Float64,Float64}[]
         iroot=findfirst(mp->mp.k==root,maps)
         if iroot===nothing
@@ -3502,9 +4194,26 @@ function _brep_materialize_boolean!(m::GeoModel,t::Int,op::Symbol,
                 m.curves[c]=(ptag[va],ptag[vb])
                 m.curve_geometry[c]=(occ=:line,origin=crv.o,dir=crv.d,
                                      t0=e.t0,t1=e.t1)
-            else
+            elseif crv.kind===:circle
                 c=_add_occ_circle!(m,ptag[va],ptag[vb],crv.c,crv.n,
                                    crv.x,crv.y,crv.r,e.t0,e.t1)
+            elseif crv.kind===:ellipse
+                c=_alloc_tag!(m,1,0,caller)
+                m.curves[c]=(ptag[va],ptag[vb])
+                m.curve_types[c]=:ellipse
+                m.curve_geometry[c]=(occ=:ellipse,center=crv.c,n=crv.n,
+                                     X=crv.x,Y=crv.y,rx=crv.rx,ry=crv.ry,
+                                     t0=e.t0,t1=e.t1)
+            else
+                # :bspline — re-emit the evaluator record restamped to the
+                # result span; `crv.ctype` preserves the source curve kind
+                # (:copied_curve/:tensor_bspline/:tensor_bezier)
+                crv.kind===:bspline || throw(ArgumentError(
+                    "$caller: unsupported result curve kind $(crv.kind)"))
+                c=_alloc_tag!(m,1,0,caller)
+                m.curves[c]=(ptag[va],ptag[vb])
+                m.curve_types[c]=crv.ctype
+                m.curve_geometry[c]=merge(crv.g,(t0=e.t0,t1=e.t1))
             end
             ctag[i]=c;push!(curves,c)
         end
@@ -3822,9 +4531,23 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
                 m.curves[c]=(ptag[va],ptag[vb])
                 m.curve_geometry[c]=(occ=:line,origin=crv.o,dir=crv.d,
                                      t0=e.t0,t1=e.t1)
-            else
+            elseif crv.kind===:circle
                 c=_add_occ_circle!(m,ptag[va],ptag[vb],crv.c,crv.n,
                                    crv.x,crv.y,crv.r,e.t0,e.t1)
+            elseif crv.kind===:ellipse
+                c=_alloc_tag!(m,1,0,caller)
+                m.curves[c]=(ptag[va],ptag[vb])
+                m.curve_types[c]=:ellipse
+                m.curve_geometry[c]=(occ=:ellipse,center=crv.c,n=crv.n,
+                                     X=crv.x,Y=crv.y,rx=crv.rx,ry=crv.ry,
+                                     t0=e.t0,t1=e.t1)
+            else
+                crv.kind===:bspline || throw(ArgumentError(
+                    "$caller: unsupported result curve kind $(crv.kind)"))
+                c=_alloc_tag!(m,1,0,caller)
+                m.curves[c]=(ptag[va],ptag[vb])
+                m.curve_types[c]=crv.ctype
+                m.curve_geometry[c]=merge(crv.g,(t0=e.t0,t1=e.t1))
             end
             ctag[i]=c;push!(curves,c)
         end

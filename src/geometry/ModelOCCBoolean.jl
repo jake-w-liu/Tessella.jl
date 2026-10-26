@@ -1619,9 +1619,25 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
                 m.curves[c]=(ptag[va],ptag[vb])
                 m.curve_geometry[c]=(occ=:line,origin=crv.o,dir=crv.d,
                                      t0=e.t0,t1=e.t1)
-            else
+            elseif crv.kind===:circle
                 c=_add_occ_circle!(m,ptag[va],ptag[vb],crv.c,crv.n,
                                    crv.x,crv.y,crv.r,e.t0,e.t1)
+            elseif crv.kind===:ellipse
+                c=_alloc_tag!(m,1,0,caller)
+                m.curves[c]=(ptag[va],ptag[vb])
+                m.curve_types[c]=:ellipse
+                m.curve_geometry[c]=(occ=:ellipse,center=crv.c,n=crv.n,
+                                     X=crv.x,Y=crv.y,rx=crv.rx,ry=crv.ry,
+                                     t0=e.t0,t1=e.t1)
+            else
+                # :bspline — re-emit the evaluator record restamped to the
+                # result span; `crv.ctype` preserves the source curve kind
+                crv.kind===:bspline || throw(ArgumentError(
+                    "$caller: unsupported result curve kind $(crv.kind)"))
+                c=_alloc_tag!(m,1,0,caller)
+                m.curves[c]=(ptag[va],ptag[vb])
+                m.curve_types[c]=crv.ctype
+                m.curve_geometry[c]=merge(crv.g,(t0=e.t0,t1=e.t1))
             end
             ctag[i]=c;push!(curves,c)
         end

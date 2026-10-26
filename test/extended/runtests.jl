@@ -50,6 +50,7 @@ using Tessella
     include(joinpath(@__DIR__, "..", "geometry/model_discrete_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/model_boolean_snapshot_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/model_boolean_multi_test.jl"))
+    include(joinpath(@__DIR__, "..", "geometry/model_boolean_conic_spline_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/model_topology_query_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/model_entity_identity_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/model_entity_removal_test.jl"))
