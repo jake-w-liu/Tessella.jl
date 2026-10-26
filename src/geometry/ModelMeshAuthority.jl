@@ -800,7 +800,11 @@ end
 
 function _model_mesh_curve_births(authority,model,curve::Int,caller;used_only=false)
     authority===nothing && return nothing
-    mesh=_model_mesh_product(authority,1,curve;caller)
+    # A re-generated Curve leaves its superseded owned vertices in the actual
+    # mesh until `_dim01_finish!` drops them. The bound producer rows name the
+    # emitted chain, so read the emitted product view — owned orphans must not
+    # join the open-chain check. An unbound product keeps its full row list.
+    mesh=_model_mesh_product(authority,1,curve;caller,producer_order=true)
     mesh===nothing && return nothing
     all(block->isempty(block.nodes),mesh.blocks) && return nothing
     all(block->block.msh==1,mesh.blocks) || throw(ArgumentError(

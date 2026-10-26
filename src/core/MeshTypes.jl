@@ -1042,9 +1042,21 @@ function validate(m::Mesh; require_positive_tets::Bool=true,
     # `allow_degenerate_segs` exists for serialization: MSH stores degenerate
     # elements (closed zero-length curves) that Gmsh itself writes.
     segkeys = Vector{NTuple{2,Int32}}(undef, nsegs(m))
-    segflags = Vector{UInt8}(undef, nsegs(m))
-    _scan_seg_entries!(segkeys,segflags,m,allow_degenerate_segs,workers)
-    nbadseg=count(==(UInt8(1)),segflags); ndegseg=count(==(UInt8(2)),segflags)
+    nbadseg=0; ndegseg=0
+    if workers>1
+        segflags = Vector{UInt8}(undef, nsegs(m))
+        _scan_seg_entries!(segkeys,segflags,m,allow_degenerate_segs,workers)
+        nbadseg=count(==(UInt8(1)),segflags); ndegseg=count(==(UInt8(2)),segflags)
+    else
+        # The serial path fuses key emission and measure counting — no
+        # per-element flag vector is materialized.
+        @inbounds for s in 1:nsegs(m)
+            key,flag=_validate_seg_entry(m,allow_degenerate_segs,s)
+            segkeys[s]=key
+            flag==UInt8(1) && (nbadseg+=1)
+            flag==UInt8(2) && (ndegseg+=1)
+        end
+    end
     nbadseg > 0 && push!(msgs, "$nbadseg segments have non-finite computed length")
     ndegseg > 0 && push!(msgs, "$ndegseg degenerate (zero-length) segments")
     sort!(segkeys; alg=QuickSort)
@@ -1054,26 +1066,46 @@ function validate(m::Mesh; require_positive_tets::Bool=true,
     end
     ndupseg > 0 && push!(msgs, "$ndupseg duplicate undirected segments")
     # degenerate / inverted tets
-    tetflags = Vector{UInt8}(undef, ntets(m))
-    _scan_tet_entries!(tetflags,m,workers)
-    nbadvol=count(==(UInt8(1)),tetflags); nflat=count(==(UInt8(2)),tetflags)
-    nneg=count(==(UInt8(3)),tetflags)
+    nbadvol=0; nflat=0; nneg=0
+    if workers>1
+        tetflags = Vector{UInt8}(undef, ntets(m))
+        _scan_tet_entries!(tetflags,m,workers)
+        nbadvol=count(==(UInt8(1)),tetflags); nflat=count(==(UInt8(2)),tetflags)
+        nneg=count(==(UInt8(3)),tetflags)
+    else
+        @inbounds for t in 1:ntets(m)
+            flag=_validate_tet_entry(m,t)
+            flag==UInt8(1) && (nbadvol+=1)
+            flag==UInt8(2) && (nflat+=1)
+            flag==UInt8(3) && (nneg+=1)
+        end
+    end
     nbadvol > 0 && push!(msgs, "$nbadvol tets have non-finite computed volume")
     nflat > 0 && push!(msgs, "$nflat degenerate (zero-volume) tets")
     if require_positive_tets && nneg > 0
         push!(msgs, "$nneg negatively-oriented tets")
     end
     # degenerate triangles
-    triflags = Vector{UInt8}(undef, ntris(m))
-    trikeys = Vector{NTuple{3,Int32}}(undef, ntris(m))
-    _scan_tri_entries!(trikeys,triflags,m,workers)
-    nbadtri=count(==(UInt8(1)),triflags); ndegtri=count(==(UInt8(2)),triflags)
-    nbadtri > 0 && push!(msgs, "$nbadtri triangles have non-finite computed area")
-    ndegtri > 0 && push!(msgs, "$ndegtri degenerate (zero-area) triangles")
-    # Full combinatorial-manifold audits (incidence alone misses vertex pinches).
-    # Lower-dimensional cells in a volume mesh may be arbitrary physical or embedded
-    # entity subsets. They still may not duplicate a canonical cell globally.
+    nbadtri=0; ndegtri=0
     if ntris(m) > 0
+        trikeys = Vector{NTuple{3,Int32}}(undef, ntris(m))
+        if workers>1
+            triflags = Vector{UInt8}(undef, ntris(m))
+            _scan_tri_entries!(trikeys,triflags,m,workers)
+            nbadtri=count(==(UInt8(1)),triflags); ndegtri=count(==(UInt8(2)),triflags)
+        else
+            @inbounds for t in 1:ntris(m)
+                key,flag=_validate_tri_entry(m,t)
+                trikeys[t]=key
+                flag==UInt8(1) && (nbadtri+=1)
+                flag==UInt8(2) && (ndegtri+=1)
+            end
+        end
+        nbadtri > 0 && push!(msgs, "$nbadtri triangles have non-finite computed area")
+        ndegtri > 0 && push!(msgs, "$ndegtri degenerate (zero-area) triangles")
+        # Full combinatorial-manifold audits (incidence alone misses vertex pinches).
+        # Lower-dimensional cells in a volume mesh may be arbitrary physical or embedded
+        # entity subsets. They still may not duplicate a canonical cell globally.
         sort!(trikeys;alg=QuickSort)
         duplicate=any(trikeys[i]==trikeys[i-1] for i in 2:length(trikeys))
         if duplicate
@@ -1176,14 +1208,24 @@ function _mesh_structure_messages!(messages::Vector{String},m::Mesh;
     valid=true
     workers=_parallel_workers()
     if require_finite_coords
-        # One flag per node column; the serial walk emits every offending node
-        # in ascending order, identical to the fused scan.
-        bad_nodes=_scan_nonfinite_nodes!(
-            Vector{Bool}(undef,nnodes(m)),m.coords,workers)
-        for i in eachindex(bad_nodes)
-            bad_nodes[i] || continue
-            push!(messages,"node $i has a non-finite coordinate")
-            valid=false
+        if workers>1
+            # One flag per node column; the serial walk emits every offending
+            # node in ascending order, identical to the fused scan.
+            bad_nodes=_scan_nonfinite_nodes!(
+                Vector{Bool}(undef,nnodes(m)),m.coords,workers)
+            for i in eachindex(bad_nodes)
+                bad_nodes[i] || continue
+                push!(messages,"node $i has a non-finite coordinate")
+                valid=false
+            end
+        else
+            @inbounds for i in 1:nnodes(m),dimension in 1:3
+                if !isfinite(m.coords[dimension,i])
+                    push!(messages,"node $i has a non-finite coordinate")
+                    valid=false
+                    break
+                end
+            end
         end
     end
     for (what,cells,tags) in (("segment",m.segs,m.seg_tag),
@@ -1194,21 +1236,44 @@ function _mesh_structure_messages!(messages::Vector{String},m::Mesh;
             valid=false
         end
         # First negative tag and first out-of-range cell keep their serial
-        # index: disjoint flags are reduced in traversal order.
-        negative=_scan_negative_tags!(Vector{Bool}(undef,length(tags)),tags,workers)
-        index=findfirst(identity,negative)
-        if index!==nothing
-            tag=tags[index]
-            push!(messages,"$what tag $index is negative ($tag)")
-            valid=false
-        end
-        out_of_range=_scan_out_of_range!(
-            Vector{Int8}(undef,size(cells,2)),cells,nnodes(m),workers)
-        index=findfirst(!iszero,out_of_range)
-        if index!==nothing
-            value=cells[Int(out_of_range[index]),index]
-            push!(messages,"$what $index references node $value outside 1:$(nnodes(m))")
-            valid=false
+        # index: disjoint flags are reduced in traversal order. The serial
+        # path fuses both early-exit scans — no flag vectors materialize.
+        if workers>1
+            negative=_scan_negative_tags!(Vector{Bool}(undef,length(tags)),tags,workers)
+            index=findfirst(identity,negative)
+            if index!==nothing
+                tag=tags[index]
+                push!(messages,"$what tag $index is negative ($tag)")
+                valid=false
+            end
+            out_of_range=_scan_out_of_range!(
+                Vector{Int8}(undef,size(cells,2)),cells,nnodes(m),workers)
+            index=findfirst(!iszero,out_of_range)
+            if index!==nothing
+                value=cells[Int(out_of_range[index]),index]
+                push!(messages,"$what $index references node $value outside 1:$(nnodes(m))")
+                valid=false
+            end
+        else
+            @inbounds for (i,tag) in pairs(tags)
+                if tag<0
+                    push!(messages,"$what tag $i is negative ($tag)")
+                    valid=false
+                    break
+                end
+            end
+            bad=false
+            @inbounds for cell in axes(cells,2)
+                for local_index in axes(cells,1)
+                    value=cells[local_index,cell]
+                    if !(1<=value<=nnodes(m))
+                        push!(messages,"$what $cell references node $value outside 1:$(nnodes(m))")
+                        valid=false;bad=true
+                        break
+                    end
+                end
+                bad && break
+            end
         end
     end
     return valid
