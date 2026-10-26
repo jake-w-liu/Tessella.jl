@@ -125,6 +125,33 @@ where upstream parses. `post_view_io_test` 116/116.
 - `20be4b1` t19: `occ.fillet` loft-rim fillets on non-line edges through
   the loft/corner/measures/transform pipeline (16 new assertions).
 
+### Tutorial-driver closure campaign (`777679c`..`4de5a04`)
+
+- `777679c` test hygiene: `api_mixed_cache` tempfile needs `.geo` suffix
+  for the importer gate; per-entity `clear` expectation corrected.
+- `0853412` `Mesh.PartitionCreateTopology=1` for dim-2 meshes —
+  `_partition_surface_snapshot` admission/certificate +
+  `_partition_surface_production_plan` (partition Surface children,
+  coincident-support Curve children, emitted interface Curves via
+  `_partition_brep_chains`, vertexToElement Points, signed bounds,
+  ghosts). t21 verbatim `GMSH_PARITY_T21_TUTORIAL_OK` end-to-end.
+- `abe2d6e` `.geo` `BooleanX` operand groups admit all dims (upstream
+  `ListOfShapes`): Point/Curve/Line/Surface/Volume, `GeoEntity{d}`,
+  `:` wildcard, Physical/Parent selectors, inline `Kind(tag)=` defs,
+  `Delete`/`Recursive Delete` with FExpr gating; sub-volume mixes route
+  to the dim-2 OCC engine. Upstream `(of type 400)` extrude diagnostic
+  emitted for `Volume{}` extrusions under built-in.
+- `b14063f` two regressions fixed: `_model_mesh_curve_births` reads the
+  emitted product view (`producer_order=true`) so remesh orphan rows no
+  longer trip the open-chain check (c7cc213); serial `validate()` flag
+  vectors gated behind `workers>1`, restoring the fused inline count
+  profile (18e07e4). `optimize_test` 363/363, parallel `-t4` 37/37.
+- `4de5a04` `_brep_edge_curve` materializes `:bspline`/`:ellipse`/
+  `:copied_curve` records + generic pcurve machinery (82-edge STEP
+  link-rod extracts; t20 `occ.fragment` reaches the named
+  `tensor_bspline×plane` bound). Fixed signed-conic-level interior
+  rejection regression in `_brep_pc_near`/`_brep_pc_param`.
+
 ### Remaining registered-plugin parity batch (`13af571`, `a0a3025`)
 
 `13af571` — `Plugin(HomologyComputation)` bridges the upstream option table
