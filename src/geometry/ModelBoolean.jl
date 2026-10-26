@@ -863,21 +863,75 @@ function _brep_msq_trace(sg,pl,us,vs,F,ztol,ftol,caller)
                 "$caller: tensor×plane trace hit an odd crossing count"))
         end
     end
+    # A level set running exactly along a shared grid edge emits the same
+    # segment (same node/edge key pair, same endpoints) from both adjacent
+    # cells — dedup, else the chainer welds the coincident pair into an
+    # out-and-back hairpin that later trips the zero-area wire guard.
+    if !isempty(segs)
+        seen=Dict{Tuple{Any,Any},Int}()
+        keep=trues(length(segs))
+        for (i,s) in enumerate(segs)
+            kk=isless(s[1],s[3]) ? (s[1],s[3]) : (s[3],s[1])
+            j=get(seen,kk,0)
+            if j!=0
+                o=segs[j]
+                same_uv=(hypot(s[2][1]-o[2][1],s[2][2]-o[2][2])<=ztol &&
+                         hypot(s[4][1]-o[4][1],s[4][2]-o[4][2])<=ztol) ||
+                        (hypot(s[2][1]-o[4][1],s[2][2]-o[4][2])<=ztol &&
+                         hypot(s[4][1]-o[2][1],s[4][2]-o[2][2])<=ztol)
+                same_uv && (keep[i]=false;continue)
+            end
+            seen[kk]=i
+        end
+        segs=segs[keep]
+    end
     return _brep_msq_chains(segs,caller)
 end
 
 # Chain cell segments through shared end keys (edge or node) into ordered
-# components. Every key has degree ≤2 for a non-self-touching level set;
-# anything higher is a genuine contour self-intersection.
+# components. Edge keys have degree ≤2; a node key can reach degree 4 when
+# the level set runs through a shared grid vertex (saddle contact) — the
+# four incidences then pair by opposite departure direction so both smooth
+# branches continue through the vertex rather than turning.
 function _brep_msq_chains(segs,caller)
     ends=Dict{Any,Vector{Tuple{Int,Int}}}()
     for (i,s) in enumerate(segs)
         push!(get!(Vector{Tuple{Int,Int}},ends,s[1]),(i,1))
         push!(get!(Vector{Tuple{Int,Int}},ends,s[3]),(i,2))
     end
+    partner=Dict{Tuple{Int,Int},Tuple{Int,Int}}()
     for v in values(ends)
-        length(v)<=2 || throw(ErrorException(
+        n=length(v)
+        n<=2 && continue
+        n>4 && throw(ErrorException(
             "$caller: tensor×plane section self-intersects at a grid vertex"))
+        vuv=nothing;angs=Float64[]
+        for (si,sd) in v
+            s=segs[si]
+            if sd==1
+                vuv===nothing && (vuv=s[2])
+                push!(angs,atan(s[4][2]-vuv[2],s[4][1]-vuv[1]))
+            else
+                vuv===nothing && (vuv=s[4])
+                push!(angs,atan(s[2][2]-vuv[2],s[2][1]-vuv[1]))
+            end
+        end
+        ord=sortperm(angs)
+        if n==4
+            for k in 1:2
+                a=v[ord[k]];b=v[ord[k+2]]
+                partner[a]=b;partner[b]=a
+            end
+        else
+            # degree 3: a through-branch plus a tangent contact — pair the
+            # most-opposite incidences; the odd one stays an open endpoint
+            bi,bj,bd=1,2,0.0
+            for a in 1:n, b in a+1:n
+                d=abs(angs[a]-angs[b]);d=min(d,2π-d)
+                d>bd && (bd=d;bi=a;bj=b)
+            end
+            partner[v[bi]]=v[bj];partner[v[bj]]=v[bi]
+        end
     end
     used=falses(length(segs))
     comps=Tuple{Vector{NTuple{2,Float64}},Bool}[]
@@ -889,12 +943,14 @@ function _brep_msq_chains(segs,caller)
         closed=false
         # forward: exit through end-2's key; the last vertex equals the first
         # on a closed loop since shared keys carry identical uv
-        key=s[3];cur=s0
+        key=s[3];cur=s0;curside=2
         while true
-            nxt=nothing
-            for (si,sd) in get(ends,key,Tuple{Int,Int}[])
-                si==cur && continue
-                nxt=(si,sd);break
+            nxt=get(partner,(cur,curside),nothing)
+            if nxt===nothing
+                for (si,sd) in get(ends,key,Tuple{Int,Int}[])
+                    si==cur && continue
+                    nxt=(si,sd);break
+                end
             end
             nxt===nothing && break
             nn,nd=nxt
@@ -906,15 +962,17 @@ function _brep_msq_chains(segs,caller)
             used[nn]=true
             ns=segs[nn]
             okey,ouv=nd==1 ? (ns[3],ns[4]) : (ns[1],ns[2])
-            push!(verts,ouv);key=okey;cur=nn
+            push!(verts,ouv);key=okey;cur=nn;curside=nd==1 ? 2 : 1
         end
         if !closed
-            key=s[1];cur=s0
+            key=s[1];cur=s0;curside=1
             while true
-                nxt=nothing
-                for (si,sd) in get(ends,key,Tuple{Int,Int}[])
-                    si==cur && continue
-                    nxt=(si,sd);break
+                nxt=get(partner,(cur,curside),nothing)
+                if nxt===nothing
+                    for (si,sd) in get(ends,key,Tuple{Int,Int}[])
+                        si==cur && continue
+                        nxt=(si,sd);break
+                    end
                 end
                 nxt===nothing && break
                 nn,nd=nxt
@@ -923,7 +981,7 @@ function _brep_msq_chains(segs,caller)
                 used[nn]=true
                 ns=segs[nn]
                 okey,ouv=nd==1 ? (ns[3],ns[4]) : (ns[1],ns[2])
-                pushfirst!(verts,ouv);key=okey;cur=nn
+                pushfirst!(verts,ouv);key=okey;cur=nn;curside=nd==1 ? 2 : 1
             end
         end
         push!(comps,(verts,closed))

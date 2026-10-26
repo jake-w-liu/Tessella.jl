@@ -171,6 +171,21 @@ where upstream parses. `post_view_io_test` 116/116.
   grid + Newton refinement + chord-fit pcurves, `_ModelOCCSectionCurve`
   same-parameter composed evaluator, emit/assembly wiring.
   `occ.fragment(imported BSpline face, box)` completes end-to-end.
+- `528fd30` `Physical GeoEntity{d}(t)={..}` — the `.geo` declaration
+  parser admits upstream's `tGeoEntity{FExpr}` dim form beside the kind
+  words, both top-level and nested inside Boolean operand groups (a
+  member side effect contributing no operands, per `ListOfShapes`).
+  `geo_diagnostic_edges_test.jl` 28/28.
+- Post-restart fix (pending commit): `_brep_msq_chains` resolves
+  degree-4 node keys — a section contour passing exactly through a
+  shared grid vertex (saddle) pairs the four incidences by opposite
+  departure direction instead of throwing "self-intersects at a grid
+  vertex". Degree-3 tangent contacts pair the most-opposite two.
+- Classification note: the shipped Gmsh 4.15.2 oracle binary rejects
+  `AutomaticMeshSizeField` outright ("has to be compiled with HXT and
+  P4EST"), so the HXT bullets (`p4estFileToLoad`, upstream-internal
+  grading detail) are unreachable on the reference binary — the native
+  octree field is already a working superset there.
 
 ### Remaining registered-plugin parity batch (`13af571`, `a0a3025`)
 
