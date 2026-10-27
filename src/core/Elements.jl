@@ -1125,6 +1125,13 @@ end
 # Internal readers may transfer freshly allocated storage without a second
 # full copy; public construction always takes the detached path.
 struct _OwnedMixedMesh end
+# UID-decoded preserved view-data sections carry their logical storage extent
+# so later writer passes can renumber rows without losing insertion history.
+struct _MshUIDContext
+    logical_extent::UInt64
+    _MshUIDContext(extent::UInt64)=new(extent)
+end
+
 """
     MshAncillarySection
 
@@ -1139,11 +1146,6 @@ unrecognized section).
 corresponding emitted section, or at the end when the anchor section is not
 written.
 """
-struct _MshUIDContext
-    logical_extent::UInt64
-    _MshUIDContext(extent::UInt64)=new(extent)
-end
-
 struct MshAncillarySection
     name::String
     binary::Bool
@@ -7344,6 +7346,19 @@ function _partition_physical_info(name::AbstractString)
     return (parent,parts)
 end
 
+"""
+    write_partitioned_topology(path, m::MixedMesh) -> path
+
+Write Gmsh's `<name>_topology.pro` partition-topology file for a partitioned
+`MixedMesh` (one carrying `partition_data` with `num_partitions > 0`). The
+`Group{...}` record maps each `Part~{dim}~{parentPhysicalTag}~{partitions...}`
+name to its physical region tag, emits the per-partition `Omega~{i}` volume
+groups, the `Sigma~{i}~{j}` interface groups and `Sigma~{i}` unions for
+dim>0 models, the partition list `D() = {1,…,N}`, and each partition's
+neighbor list `D~{i}()`. Partition memberships are decoded from physical
+names of the form `<parent>_{p1,p2,…}`; unlabeled entities contribute only
+the parent layer. Throws `ArgumentError` for an unpartitioned mesh.
+"""
 function write_partitioned_topology(path::AbstractString,m::MixedMesh)
     data=m.partition_data
     data===nothing && throw(ArgumentError(
