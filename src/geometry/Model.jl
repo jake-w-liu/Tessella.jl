@@ -2172,17 +2172,30 @@ only image is itself (no geometric interaction) keeps its tag and stays in
 `out`; an operand whose image is a single piece is rebound to its tag when
 the operand is removed; all other pieces get fresh tags after the surviving
 maximum. `remove_object`/`remove_tool` are the `Delete;` markers of each
-operand group. With an explicit `tag`, a multi-piece result is an error (one
-tag cannot bind several volumes — OCC reports the same). Returns the output
-volume tags in piece order, matching Gmsh's `outDimTags`. When `image_out`
+operand group. With an explicit `tag`, upstream `_multiBind` binds the first
+top-dim piece to `tag` and reports `Msg::Error` on every further piece — the
+operation still succeeds and the extra pieces are dropped, not rebound.
+`msg_out` collects that recoverable diagnostic for the caller's Msg channel;
+without a sink it prints through Julia's logger. Returns the output volume
+tags in piece order, matching Gmsh's `outDimTags`. When `image_out`
 is a `Vector{Vector{Int}}` it is resized to the operand count and filled with
 each operand's result-tag image — the `outDimTagsMap` equivalent.
 """
+# Recoverable `Msg::Error` for diagnostics the operation survives (upstream
+# reports them through `Msg::Error` and keeps going — e.g. `_multiBind`'s
+# "Cannot bind multiple volumes to single tag"). Callers that own a Msg
+# channel pass a `Vector{String}` sink; without one the diagnostic surfaces
+# through Julia's error logger like an unconsumed stderr line.
+_boolean_bind_msg!(sink::AbstractVector{String},msg::AbstractString)=
+    (push!(sink,msg);nothing)
+_boolean_bind_msg!(::Nothing,msg::AbstractString)=(@error msg;nothing)
+
 function boolean_volumes_multi!(m::GeoModel,op::Symbol,
         objects::AbstractVector{<:Integer},tools::AbstractVector{<:Integer};
         tag::Integer=0,remove_object::Bool=true,remove_tool::Bool=true,
         caller::AbstractString="boolean_volumes_multi!",
-        image_out::Union{Nothing,Vector{Vector{Int}}}=nothing)
+        image_out::Union{Nothing,Vector{Vector{Int}}}=nothing,
+        msg_out::Union{Nothing,AbstractVector{String}}=nothing)
     op in (:union,:intersection,:difference,:fragments) || throw(ArgumentError(
         "$caller: op must be :union, :intersection, :difference, or :fragments"))
     remove_object isa Bool && remove_tool isa Bool || throw(ArgumentError(
@@ -2252,9 +2265,12 @@ function boolean_volumes_multi!(m::GeoModel,op::Symbol,
                 end
             end
         else
-            length(pieces)>1 && throw(ArgumentError(
-                "$caller: cannot bind $(length(pieces)) result volumes to " *
-                "Volume[$requested]"))
+            # upstream `_multiBind(result, tag, …)`: the first result piece
+            # binds at `tag` (recursively); a second top-dim piece reports
+            # `Msg::Error("Cannot bind multiple volumes to single tag")` and
+            # the unbound remainder is dropped — the operator still succeeds.
+            length(pieces)>1 && _boolean_bind_msg!(msg_out,
+                "Cannot bind multiple volumes to single tag $requested")
             for i in 1:N
                 rem=i<=nobj ? remove_object : remove_tool
                 imgs=image[i]
@@ -2267,7 +2283,7 @@ function boolean_volumes_multi!(m::GeoModel,op::Symbol,
             end
         end
         if requested!=0
-            p=only(pieces)
+            p=pieces[1]
             for i in 1:N
                 (unbind[i] && i!=p.pseudo) || continue
                 _remove_volume_entity!(m,tags[i])
@@ -2282,6 +2298,54 @@ function boolean_volumes_multi!(m::GeoModel,op::Symbol,
             else
                 _bind_boolean_piece!(m,requested,op,tags,meshes,p,caller)
             end
+            # upstream `_multiBind` never binds the remainder pieces — their
+            # exclusive sub-entities leave the model with them (shared
+            # partition faces stay reachable through the bound volume)
+            if length(pieces)>1
+                keep_sh=Set{Int}();keep_s=Set{Int}();keep_l=Set{Int}()
+                keep_c=Set{Int}();keep_p=Set{Int}()
+                for (_,vol) in m.volumes, sh in vol
+                    push!(keep_sh,abs(sh))
+                    for st in get(m.surface_loops,abs(sh),Int[])
+                        push!(keep_s,abs(st))
+                    end
+                end
+                for st in keep_s, lt in get(m.surfaces,st,Int[])
+                    push!(keep_l,abs(lt))
+                end
+                for lt in keep_l, ct in get(m.loops,lt,Int[])
+                    push!(keep_c,abs(ct))
+                end
+                for ct in keep_c, pt in get(m.curves,ct,())
+                    push!(keep_p,pt)
+                end
+                for sh in created.shells
+                    sh in keep_sh || delete!(m.surface_loops,sh)
+                end
+                for st in created.surfaces
+                    st in keep_s && continue
+                    delete!(m.surfaces,st)
+                    delete!(m.surface_types,st)
+                    delete!(m.surface_geometry,st)
+                end
+                for lt in created.loops
+                    lt in keep_l || delete!(m.loops,lt)
+                end
+                for ct in created.curves
+                    ct in keep_c && continue
+                    delete!(m.curves,ct)
+                    delete!(m.curve_types,ct)
+                    delete!(m.curve_geometry,ct)
+                    delete!(m.curve_control_points,ct)
+                    delete!(m.curve_params,ct)
+                end
+                for pt in created.points
+                    pt in keep_p && continue
+                    delete!(m.points,pt)
+                    delete!(m.point_size,pt)
+                    delete!(m.point_w,pt)
+                end
+            end
             if image_out!==nothing
                 resize!(image_out,N)
                 for i in 1:N
@@ -2289,7 +2353,9 @@ function boolean_volumes_multi!(m::GeoModel,op::Symbol,
                     if length(imgs)==1 && pieces[imgs[1]].pseudo==i &&
                             !unbind[i]
                         image_out[i]=Int[tags[i]]
-                    elseif isempty(imgs)
+                    elseif isempty(imgs) || !(1 in imgs)
+                        # dropped pieces leave no bound image — only the
+                        # operand(s) producing the tagged piece map to it
                         image_out[i]=Int[]
                     else
                         image_out[i]=Int[requested]

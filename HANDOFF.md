@@ -12,6 +12,42 @@ small real fixtures. Full native-oracle sweeps, source/AST audits, memory stress
 benchmarks, the 22 HFSS cases, aggregate validation, and external ASCENT solves
 are opt-in campaigns. See [test/README.md](test/README.md).
 
+### OCC Boolean generic curved sections and `_multiBind` tag bind (2026-10-28)
+
+Devin continued the CAD05/P3 Boolean backlog with two verified pieces (receipts
+and full detail in STATUS.md's same-dated entry). `_brep_face_sections` now
+covers every analytic×analytic and tensor×analytic face pair through a generic
+marching-squares level-set trace (`_brep_sec_msq`) on the better-conditioned
+partner chart — tensor patches first, sphere/cylinder/cone/torus next, planes
+never host — with Newton-refined contour vertices, seam-aware periodic
+unwrapping, torus UV/normal support, and shared-parameter Hermite pcurves
+(`_brep_fit_section_pcs`, `_hermite_bspline_2d`). The previously rejected
+oblique/conic pairs redirect through it; finite pcurve domains still take the
+`_brep_ix_sec_lin` solver via `_brep_pc_domain` so the ellipse-disk versus
+rectangle case is unchanged, and a degenerate-edge remap recursion plus richer
+degenerate-wire diagnostics landed alongside. Explicit-tag multi-piece results
+now follow upstream `_multiBind` exactly (verified live on Gmsh 4.15.2): first
+top-dim piece binds at the tag, `Cannot bind multiple volumes to single tag N`
+is a recoverable `Msg::Error` — not a failure — and the unbound remainder is
+dropped with its exclusive sub-entities; `msg_out` transports the diagnostic
+through `boolean_volumes_multi!`, `_model_occ_boolean(_mixed)`, GeoExec's
+`GeoExecution.errors` and the API Msg channel.
+
+Verification (all `julia --compile=min -O0`, Julia 1.12.7):
+`model_boolean_conic_spline_test` EXIT 0 (incl. new tensor×analytic 18/18,
+analytic×analytic 15/15, sphere×cone four-ops 16/16), `api_occ_boolean_test`
+EXIT 0 all 30 testsets (explicit-tag-first-piece 4/4, periodic seam 16/16),
+`geo_boolean_operands_test`/`model_boolean_multi_test`/
+`model_boolean_snapshot_test`/`model_boolean_occ_transform_regression_test`
+(165)/`api_boolean_lifecycle_test` (20/20)/`occ_boolean_smoke` all EXIT 0.
+Sphere×cone masses match Gmsh 4.15.2 to five digits on every piece — intersect
+2.5651564, cut 4.6730758, fuse 7.3999795, fragment 4.6730758+2.5651564+0.1617473
+(= fused total) — and the cut result surface-meshes to 241 nodes. Known
+residual: the fused cone lateral stays two seam-split faces where OCC unifies
+them into one (periodic-face unification remains on the CAD05 list); STEP
+surface Booleans (t20/t21-style dim-2 operand cases) and curved-surface contact
+welding remain open as before.
+
 ### Nested STEP product-usage DAGs verified (2026-10-11)
 
 Devin resumed the checklist and completed CAD01. `BRepStepRelationships.jl` now

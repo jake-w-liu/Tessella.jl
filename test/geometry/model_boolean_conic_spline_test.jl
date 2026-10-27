@@ -228,3 +228,141 @@ end
         A.finalize()
     end
 end
+
+@testset "Boolean face sections — tensor patch × analytic partners" begin
+    A.initialize()
+    try
+        occ=A.model.occ
+        # mildly wavy 4×4 B-spline sheet over [0,2.1]² × z≤0.15, pierced
+        # by each analytic primitive — the marching-squares contour and
+        # the Hermite-fitted same-parameter pcurves must ride both
+        # surfaces within the fit tolerance.
+        tags=Int[]
+        for j in 0:3, i in 0:3
+            x,y=i*0.7,j*0.7
+            push!(tags,occ.add_point(x,y,0.15*sin(π*x)*sin(π*y)))
+        end
+        occ.add_bspline_surface(tags,4)
+        occ.add_sphere(1.05,1.05,0.0,0.9)
+        occ.add_cylinder(0.4,0.4,-1.0,0.0,0.0,3.0,0.5)
+        occ.add_cone(1.5,0.5,-0.5,0.0,0.0,2.0,0.7,0.2)
+        occ.add_torus(1.05,1.05,0.0,0.8,0.25)
+        occ.synchronize()
+        m=A._with_model(identity)
+        tsg=nothing
+        sgs=Dict{Symbol,NamedTuple}()
+        for sg in values(m.surface_geometry)
+            k=get(sg,:occ,nothing)
+            k in (:tensor_bspline,:tensor_bezier) && (tsg=sg)
+            k in (:sphere,:cylinder,:cone,:torus) &&
+                !haskey(sgs,k) && (sgs[k]=sg)
+        end
+        @test tsg!==nothing
+        @test length(sgs)==4
+        for kind in (:sphere,:cylinder,:cone,:torus)
+            sgB=sgs[kind]
+            fld,_=M._brep_partner_field(sgB)
+            secs=M._brep_face_sections((sg=tsg,),(sg=sgB,),"test")
+            @test !isempty(secs)
+            for s in secs
+                kn=s.curve.g.curve.curve.knots
+                t0,t1=kn[1],kn[end]
+                md=0.0
+                for i in 0:20
+                    tt=fma(t1-t0,i/20,t0)
+                    p=M._brep_curve_eval(s.curve,tt)
+                    md=max(md,abs(fld(p)))
+                end
+                # the section curve stays on the partner surface —
+                # the fitted pcurves share the section parameter, so the
+                # mid-span lifts name the same contour point
+                @test md<5e-6
+                tm=(t0+t1)/2
+                PA=M._brep_surface_eval(tsg,M._brep_pc_eval(s.pcA,tm)...)
+                PB=M._brep_surface_eval(sgB,M._brep_pc_eval(s.pcB,tm)...)
+                @test M._b3dist(PA,PB)<5e-6
+            end
+        end
+    finally
+        A.finalize()
+    end
+end
+
+@testset "Boolean face sections — analytic × analytic pairs" begin
+    A.initialize()
+    try
+        occ=A.model.occ
+        # mutually piercing analytic primitives covering the formerly
+        # unsupported pairs — the generic level-set section traces the
+        # contour on the better-conditioned chart, unwraps periodic
+        # parameters, and emits shared-parameter fitted pcurves.
+        occ.add_sphere(0.0,0.0,0.0,1.2)
+        occ.add_cone(0.3,0.0,-0.7,0.0,0.0,1.6,0.5,0.95)
+        occ.add_cylinder(0.0,0.0,-1.0,0.0,0.0,2.4,0.55)
+        occ.add_torus(0.55,0.0,0.0,0.9,0.3)
+        occ.synchronize()
+        m=A._with_model(identity)
+        sgs=NamedTuple[]
+        for sg in values(m.surface_geometry)
+            get(sg,:occ,nothing) in (:sphere,:cone,:cylinder,:torus) &&
+                push!(sgs,sg)
+        end
+        @test length(sgs)>=4
+        by=Dict(s.occ=>s for s in sgs)
+        for (ka,kb) in ((:sphere,:cone),(:cone,:cylinder),
+                        (:torus,:cylinder),(:sphere,:torus))
+            sa,sb=by[ka],by[kb]
+            fld,_=M._brep_partner_field(sb)
+            secs=M._brep_face_sections((sg=sa,),(sg=sb,),"test")
+            @test !isempty(secs)
+            for s in secs
+                kn=s.curve.g.curve.curve.knots
+                t0,t1=kn[1],kn[end]
+                md=0.0
+                for i in 0:20
+                    tt=fma(t1-t0,i/20,t0)
+                    p=M._brep_curve_eval(s.curve,tt)
+                    md=max(md,abs(fld(p)))
+                end
+                @test md<5e-6
+                tm=(t0+t1)/2
+                PA=M._brep_surface_eval(sa,M._brep_pc_eval(s.pcA,tm)...)
+                PB=M._brep_surface_eval(sb,M._brep_pc_eval(s.pcB,tm)...)
+                @test M._b3dist(PA,PB)<5e-6
+            end
+        end
+    finally
+        A.finalize()
+    end
+end
+
+@testset "occ.boolean — sphere × cone all four operations materialize" begin
+    # Upstream Gmsh 4.15.2 on this fixture: cut/fuse/intersect each emit
+    # one volume, fragment emits three. The generic level-set section
+    # crosses the sphere's periodic-u seam; the fitted pcurve endpoints
+    # must lift into each piece's u band (not the canonical band) and the
+    # closed-carrier merge must not join across the evaluator's domain
+    # wrap — both regressions produced dangling/one-edge wires here.
+    A.initialize()
+    try
+        occ=A.model.occ
+        occ.add_sphere(0.0,0.0,0.0,1.2)
+        occ.add_cone(0.3,0.0,-0.7,0.0,0.0,1.6,0.5,0.95)
+        occ.synchronize()
+        for (op,want) in ((occ.cut,1),(occ.fuse,1),
+                          (occ.intersect,1),(occ.fragment,3))
+            out,_=op([(3,1)],[(3,2)];removeObject=false,removeTool=false)
+            @test length(out)==want
+            for (_,t) in out
+                # materialized volume evaluates a finite bounding box —
+                # a dropped/merged section would leave a degenerate loop
+                bb=collect(occ.get_bounding_box(3,t))
+                @test all(isfinite,bb)
+                @test bb[4]-bb[1]>0.1 && bb[5]-bb[2]>0.1 &&
+                      bb[6]-bb[3]>0.1
+            end
+        end
+    finally
+        A.finalize()
+    end
+end

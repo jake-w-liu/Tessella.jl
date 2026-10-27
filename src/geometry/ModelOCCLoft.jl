@@ -1294,15 +1294,21 @@ function _pchip_bspline_2d(ts,uvs)
         return m
     end
     mu=slopes(us); mv=slopes(vs)
+    return _hermite_bspline_layout(ts,us,vs,mu,mv)
+end
+
+# Shared piecewise-Bezier layout for Hermite-family 2-D interpolants:
+# interior knots at full multiplicity p=3 (C0 in the B-spline
+# parameterization, tangent-continuous in geometry), junction pole stored
+# once per side.
+function _hermite_bspline_layout(ts,us,vs,mu,mv)
+    n=length(ts)
     knots=Float64[]; cps=NTuple{2,Float64}[]
     for i in 1:n-1
         h=ts[i+1]-ts[i]
         p0=(us[i],vs[i]); p3=(us[i+1],vs[i+1])
         p1=(us[i]+mu[i]*h/3,vs[i]+mv[i]*h/3)
         p2=(us[i+1]-mu[i+1]*h/3,vs[i+1]-mv[i+1]*h/3)
-        # Piecewise-Bezier layout: interior knots at full multiplicity p=3
-        # (C0 in the B-spline parameterization, tangent-continuous in
-        # geometry), junction pole stored once per side.
         i>1 && append!(knots,[ts[i],ts[i],ts[i]])
         i==1 && append!(knots,[ts[1],ts[1],ts[1],ts[1]])
         push!(cps,p0); push!(cps,p1); push!(cps,p2)
@@ -1310,6 +1316,33 @@ function _pchip_bspline_2d(ts,uvs)
                    append!(knots,[ts[end],ts[end],ts[end],ts[end]]))
     end
     return (knots,3,cps)
+end
+
+# Cubic Hermite interpolant through (ts[i], uvs[i]) with PRESCRIBED
+# per-knot derivatives `duv[i]=(du/dt,dv/dt)` — a NaN entry falls back to
+# the centred secant slope so callers can mark points where the exact
+# tangent is unavailable (e.g. a vanishing level gradient). Exact
+# tangents converge several orders faster than the estimated pchip
+# slopes on a strongly curved trace.
+function _hermite_bspline_2d(ts,uvs,duv)
+    n=length(ts)
+    us=[p[1] for p in uvs]; vs=[p[2] for p in uvs]
+    function fallback(i)
+        lo=i==1 ? 1 : i-1
+        hi=i==n ? n : i+1
+        h=ts[hi]-ts[lo]
+        return h>0.0 ? ((us[hi]-us[lo])/h,(vs[hi]-vs[lo])/h) : (0.0,0.0)
+    end
+    mu=Vector{Float64}(undef,n); mv=Vector{Float64}(undef,n)
+    for i in 1:n
+        d=duv[i]
+        if isnan(d[1]) || isnan(d[2])
+            mu[i],mv[i]=fallback(i)
+        else
+            mu[i],mv[i]=d
+        end
+    end
+    return _hermite_bspline_layout(ts,us,vs,mu,mv)
 end
 
 function _model_occ_trimmed_surface(m::GeoModel,tag,wire_tag,surface_tag;

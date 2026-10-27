@@ -369,14 +369,15 @@ end
 # layout (projection seeds, measure panels) and a bounded control hull.
 struct _ModelOCCSectionCurve
     family::Symbol                 # :bspline
-    face                           # tensor surface record (:tensor_bspline/:tensor_bezier)
-    pc                             # tensor-domain spl2d pcurve record
+    face                           # trace-domain surface record
+    pc                             # trace-domain spl2d pcurve record
     curve::NURBS.NURBSCurve        # seed polyline through refined samples
 end
 
 function _model_occ_curve_d2(geometry::_ModelOCCSectionCurve,parameter)
     uv,dt,ddt=_occ_pcurve_d2(geometry.pc,Float64(parameter))
-    point,Su,Sv,Suu,Svv,Suv=_model_nurbs_surface_d2(
+    # generic surface D2 — tensor patches and analytic records alike
+    point,Su,Sv,Suu,Svv,Suv=_occ_surface_d2(
         geometry.face,uv[1],uv[2])
     first=ntuple(axis->Su[axis]*dt[1]+Sv[axis]*dt[2],3)
     second=ntuple(axis->Suu[axis]*dt[1]*dt[1]+

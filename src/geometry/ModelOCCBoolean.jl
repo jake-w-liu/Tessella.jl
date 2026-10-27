@@ -184,14 +184,21 @@ function _model_occ_boolean_edge!(pub::_ModelOCCBooleanPub,s::Int,caller)
             g=pub.kernel.shapes[kid].geometry.geometry
         end
     end
-    haskey(g,:face) && (g=merge(g,(face=_model_occ_boolean_remap_face(
-        pub,g.face,caller),)))
     id=_model_occ_boolean_id!(pub)
     tag=_model_occ_boolean_tag!(pub,1)
+    # publish the id BEFORE the face remap descends: a degenerate edge's
+    # `face` record carries the adopting face's pcurve table keyed by that
+    # face's edges — the degenerate edge itself included — so the remap's
+    # per-key `edge!` calls re-enter this function for `s`. With the id
+    # already registered the re-entry returns it verbatim and the pcurve
+    # key resolves through `ktags` below; without it the recursion never
+    # terminates.
+    pub.ids[skey]=id;pub.ktags[skey]=tag
+    haskey(g,:face) && (g=merge(g,(face=_model_occ_boolean_remap_face(
+        pub,g.face,caller),)))
     pub.staged[id]=_ModelOCCShape(1,(kind=get(pub.sm.curve_types,s,:line),
         geometry=g),UInt64[aid,bid])
     push!(pub.planned,(1,tag,id))
-    pub.ids[skey]=id;pub.ktags[skey]=tag
     return id
 end
 
@@ -247,7 +254,9 @@ function _model_occ_boolean_face_probe(sm::GeoModel,stag::Int,caller)
     loops=sm.surfaces[stag]
     nw,_=_model_occ_boolean_wire_normal(sm,loops[1])
     L=sqrt(_dot3(nw,nw))
-    L==0.0 && throw(ErrorException("$caller: degenerate wire"))
+    L==0.0 && throw(ErrorException(
+        "$caller: degenerate wire on Surface[$stag] " *
+        "(loop $(loops[1]): $(sm.loops[loops[1]]))"))
     n=(nw[1]/L,nw[2]/L,nw[3]/L)
     k=argmax(abs.(collect(n)))
     pr=k==3 ? (1,2) : k==2 ? (1,3) : (2,3)
@@ -432,7 +441,9 @@ function _model_occ_boolean_dim_tags(entries,caller)
 end
 
 function _model_occ_boolean(m::GeoModel,op::Symbol,objects,tools,
-                            tag,removeObject,removeTool,caller)
+                            tag,removeObject,removeTool,caller;
+                            msg_out::Union{Nothing,AbstractVector{String}}=
+                            nothing)
     caller=String(caller)
     kernel=m.occ_kernel
     removeObject isa Bool || throw(ArgumentError(
@@ -478,7 +489,8 @@ function _model_occ_boolean(m::GeoModel,op::Symbol,objects,tools,
     end
     if any(d->d!=3,first.(in_dt))
         return _model_occ_boolean_mixed(m,op,obj_dt,tool_dt,requested,
-                                        removeObject,removeTool,caller)
+                                        removeObject,removeTool,caller;
+                                        msg_out=msg_out)
     end
     obj_tags=Int[t for (_,t) in odt]
     tool_tags=Int[t for (_,t) in tdt]
@@ -506,7 +518,7 @@ function _model_occ_boolean(m::GeoModel,op::Symbol,objects,tools,
     image=Vector{Int}[]
     out=boolean_volumes_multi!(sm,op,obj_tags,tool_tags;
         tag=explicit,remove_object=removeObject,remove_tool=removeTool,
-        caller=caller,image_out=image)
+        caller=caller,image_out=image,msg_out=msg_out)
     # explicit-tag corner: the sole result is an unmodified operand kept in
     # place — upstream's `_multiBind` reports its own tag rather than the
     # requested one; the owning operand is the one mapping to itself
@@ -1949,7 +1961,9 @@ end
 # difference rejects a solid object minus a surface tool — OCCT's
 # BOPAlgo_AlertBOPNotAllowed for both.
 function _model_occ_boolean_mixed(m::GeoModel,op::Symbol,odt,tdt,requested,
-                                  removeObject,removeTool,caller)
+                                  removeObject,removeTool,caller;
+                                  msg_out::Union{Nothing,AbstractVector{String}}=
+                                  nothing)
     kernel=m.occ_kernel
     nobj=length(odt)
     in_dt=vcat(odt,tdt)
@@ -2018,15 +2032,23 @@ function _model_occ_boolean_mixed(m::GeoModel,op::Symbol,odt,tdt,requested,
     end
     rem(i)=i<=nobj ? removeObject : removeTool
     # explicit tag — upstream `_multiBind(result, tag, …, highestDimOnly,
-    # recursive)`: only the result's single top-dim entity binds, at `tag`
+    # recursive)`: the first top-dim entity binds at `tag` (sub-shapes
+    # recursively); any second one is a `Msg::Error`, not a throw, and the
+    # unbound remainder is dropped from the model.
     if requested>0
         top_dim=isempty(pieces) ? 2 : 3
         members=top_dim==3 ? pieces : faces
-        length(members)==1 || throw(ErrorException(
+        isempty(members) && return Tuple{Int,Int}[],
+                                 [Tuple{Int,Int}[] for _ in 1:N]
+        # upstream `_multiBind(result, tag, …, highestDimOnly=true)` binds
+        # the FIRST top-dim piece at `tag` (recursively), then reports
+        # `Msg::Error` and drops the rest — the operator still returns true,
+        # so no `Could not apply` follows.
+        length(members)>1 && _boolean_bind_msg!(msg_out,
             "Cannot bind multiple " *
             (top_dim==3 ? "volumes" : "surfaces") *
-            " to single tag $requested"))
-        member=only(members)
+            " to single tag $requested")
+        member=members[1]
         pub=_ModelOCCBooleanPub(caller,kernel,sm,matmap,
             collect(kernel.maxima),kernel.next_shape,
             Dict{UInt64,_ModelOCCShape}(),Tuple{Int,Int,UInt64}[],
@@ -2055,10 +2077,12 @@ function _model_occ_boolean_mixed(m::GeoModel,op::Symbol,odt,tdt,requested,
             if preserved[i]
                 rem(i) || push!(lst,(d,t))
             elseif isvol[i]
-                top_dim==3 && !isempty(vol_image[i]) &&
+                # only the operand(s) producing the bound piece map to the
+                # tag — dropped pieces leave no bound image
+                top_dim==3 && (1 in vol_image[i]) &&
                     push!(lst,(3,requested))
             else
-                top_dim==2 && !isempty(face_image[i]) &&
+                top_dim==2 && (member.stag in face_image[i]) &&
                     push!(lst,(2,requested))
             end
             push!(out_map,lst)

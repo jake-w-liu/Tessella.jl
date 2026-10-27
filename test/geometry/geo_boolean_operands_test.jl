@@ -47,19 +47,20 @@ const _BOX_WALL="""
         """)
     @test ex.errors==["syntax error (;)"]
     @test sort(collect(keys(ex.model.volumes)))==[1,2]
-    # tagged form binds the single result — an overhanging wall leaves
-    # one volume so `BooleanX(t)` has one top-dim entity to bind
+    # tagged form with a multi-piece result — upstream `_multiBind` binds
+    # the first top-dim piece at the tag (a half-box, six faces, mass 0.5),
+    # reports `Msg::Error` on the second and drops the unbound remainder;
+    # `booleanOperator` still returns true so no `Could not apply` follows
+    # (verified live against Gmsh 4.15.2)
     ex=_execute_geo_source("""
         SetFactory("OpenCASCADE");
         Box(1) = {0,0,0, 1,1,1};
         Rectangle(7) = {-0.5,-0.5,0.5, 2,2};
         BooleanFragments(9) = { Volume{1}; Delete; }{ Surface{7}; Delete; };
         """)
-    @test isempty(ex.errors)
+    @test ex.errors==["Cannot bind multiple volumes to single tag 9"]
     @test sort(collect(keys(ex.model.volumes)))==[9]
-    # the deleted wall's image pieces bind fresh — upstream `_multiBind`
-    # applies the requested tag to the single top-dim result only
-    @test length(ex.model.surfaces)==10
+    @test length(ex.model.surfaces)==6
 end
 
 # A unit box plus a `2×2` wall overhanging its footprint — the sheet's

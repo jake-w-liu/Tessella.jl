@@ -1733,10 +1733,17 @@ function _geo_boolean_apply!(m::GeoModel,op::Symbol,objects,tools;
     obj=objects.dimtags;tool=tools.dimtags
     isempty(obj) && return NTuple{2,Int}[]
     if all(e->e[1]==3,obj) && all(e->e[1]==3,tool)
+        msgs=String[]
         out=boolean_volumes_multi!(m,op,
             Int[t for (_,t) in obj],Int[t for (_,t) in tool];tag=tag,
             remove_object=objects.delete,remove_tool=tools.delete,
-            caller=caller)
+            caller=caller,msg_out=msgs)
+        # recoverable `Msg::Error` diagnostics (e.g. `_multiBind`'s tag
+        # overflow) surface without failing the statement — upstream's
+        # `booleanOperator` still returns true
+        for msg in msgs
+            _geo_msg_error!(context,msg)
+        end
         return NTuple{2,Int}[(3,t) for t in out]
     end
     kernel=_geo_occ_prepare_kernel!(m,allocator_state)
@@ -1750,12 +1757,14 @@ function _geo_boolean_apply!(m::GeoModel,op::Symbol,objects,tools;
         _geo_yyerror!(context,"Could not apply boolean operator")
         return NTuple{2,Int}[]
     end
+    msgs=String[]
     out_dt=try
         _geo_occ_bind_entities!(
             m,NTuple{2,Int}[e for e in Iterators.flatten((obj,tool))],
             kernel,caller)
         out=first(Model._model_occ_boolean(
-            m,op,obj,tool,tag,objects.delete,tools.delete,caller))
+            m,op,obj,tool,tag,objects.delete,tools.delete,caller;
+            msg_out=msgs))
         _geo_occ_finish!(m,context)
         out
     catch err
@@ -1771,6 +1780,11 @@ function _geo_boolean_apply!(m::GeoModel,op::Symbol,objects,tools;
          err isa KeyError) || rethrow()
         _geo_occ_fail!(context,err,"Could not apply boolean operator")
         return NTuple{2,Int}[]
+    end
+    # `_multiBind`'s recoverable `Msg::Error` diagnostics (tag overflow):
+    # reported but the operation still succeeded — no `Could not apply`.
+    for msg in msgs
+        _geo_msg_error!(context,msg)
     end
     return NTuple{2,Int}[e for e in out_dt]
 end

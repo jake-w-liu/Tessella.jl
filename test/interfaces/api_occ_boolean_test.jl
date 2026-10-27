@@ -247,16 +247,21 @@ end
     @test occursin("already exists",err)
 end
 
-@testset "occ booleans — explicit tag multi-piece rejection" begin
+@testset "occ booleans — explicit tag binds the first piece" begin
     occ=_occ_setup()
     occ.add_box(0,0,0,1,1,1)
     occ.add_box(0.4,-0.5,-0.5,0.2,2,2)
     occ.synchronize()
-    before=_occ_counts()
-    err=_errtext(()->occ.cut([(3,1)],[(3,2)];tag=77))
-    @test occursin("cannot bind 2 result volumes",err)
-    @test _occ_counts()==before
-    @test sort(occ.get_entities(3))==[(3,1),(3,2)]
+    # upstream `_multiBind(result, tag, …)`: the first result piece binds at
+    # the tag (recursively); a second top-dim piece reports a recoverable
+    # `Msg::Error("Cannot bind multiple volumes to single tag")` and the
+    # unbound remainder is dropped — the operator still succeeds. Verified
+    # live against Gmsh 4.15.2: one volume at the tag, mass of one slab.
+    out,map=occ.cut([(3,1)],[(3,2)];tag=77)
+    @test out==[(3,77)]
+    @test map==[[(3,77)],Tuple{Int,Int}[]]
+    @test occ.get_entities(3)==[(3,77)]
+    @test occ.get_mass(3,77)≈0.4
 end
 
 @testset "occ.cut — empty result" begin

@@ -166,14 +166,19 @@ end
     @test _xbounds(m,1)==(5.0,5.4)
     @test _xbounds(m,2)==(0.6,1.0)
 
-    # an explicit tag on a multi-piece result is an error (Gmsh: "could not
-    # apply boolean operator" / single tag expected)
+    # an explicit tag on a multi-piece result — upstream `_multiBind` binds
+    # the first piece at the tag, reports a recoverable `Msg::Error` on the
+    # second and drops the unbound remainder (verified against Gmsh 4.15.2:
+    # one volume at tag 9, mass 0.4, six faces)
     m=GeoModel()
     add_box!(m,0,0,0,1,1,1;tag=1)
     add_box!(m,0.4,-0.5,-0.5,0.2,2,2;tag=2)
-    @test_throws ArgumentError boolean_volumes_multi!(
-        m,:difference,[1],[2];tag=9,remove_object=true,remove_tool=true)
-    @test haskey(m.volumes,1) && haskey(m.volumes,2)
+    msgs=String[]
+    out=boolean_volumes_multi!(m,:difference,[1],[2];tag=9,
+        remove_object=true,remove_tool=true,msg_out=msgs)
+    @test msgs==["Cannot bind multiple volumes to single tag 9"]
+    @test out==[9]
+    @test sort!(collect(keys(m.volumes)))==[9]
 
     # empty result — a fully-swallowed object under Delete removes both
     # operands and binds nothing; Gmsh 4.15.2: out=[], no volumes remain
@@ -281,15 +286,18 @@ end
     """)
     @test !isempty(single_brace.errors)
 
-    # explicit tag on a multi-piece result errors inside .geo as well — a
-    # recoverable `Error   :` diagnostic upstream, recorded on the run.
+    # explicit tag on a multi-piece result inside .geo — upstream binds the
+    # first piece and records the recoverable `_multiBind` `Msg::Error`;
+    # `booleanOperator` still returns true so `Could not apply` is absent
+    # (verified live against Gmsh 4.15.2)
     err_exec=_exec_geo("""
         SetFactory("OpenCASCADE");
         Box(1) = {0,0,0, 1,1,1};
         Box(2) = {0.4,-0.5,-0.5, 0.2,2,2};
         BooleanDifference(9) = { Volume{1}; Delete; }{ Volume{2}; Delete; };
         """)
-    @test occursin("2 result volumes",join(err_exec.errors,"\n"))
+    @test err_exec.errors==["Cannot bind multiple volumes to single tag 9"]
+    @test sort!(collect(keys(err_exec.model.volumes)))==[9]
 
     # tagged form with multi-operand groups in BOTH braces — a single fused
     # piece binds the requested tag; a later Point(newp) resolves against the

@@ -1,7 +1,19 @@
 """Pending OCC shape operations, separate from the public geometry model."""
 module occ
 import ....Model
-using ...API: _with_model, OPTIONS
+using ...API: _with_model, OPTIONS, _native_diagnostic_emit_locked
+
+# Recoverable OCC `Msg::Error` diagnostics the operation survives — e.g.
+# `_multiBind`'s "Cannot bind multiple volumes to single tag" — ride the
+# `msg_out` sink and emit through the native Msg channel like upstream.
+function _occ_boolean_msgs(f)
+    msgs=String[]
+    out=f(msgs)
+    for msg in msgs
+        _native_diagnostic_emit_locked(:error,msg)
+    end
+    return out
+end
 
 add_point(x,y,z;tag=-1,meshSize=0.0)=_with_model() do m
     Model._model_occ_add_point!(m,x,y,z;tag,mesh_size=meshSize)
@@ -210,21 +222,25 @@ revolve(dim_tags,x,y,z,ax,ay,az,angle;numElements=Int[],
     m->Model._model_occ_revolve(m,dim_tags,x,y,z,ax,ay,az,angle;
         num_elements=numElements,heights=heights,recombine=recombine))
 fuse(objectDimTags,toolDimTags;tag=-1,removeObject=true,removeTool=true)=
-    _with_model(m->Model._model_occ_boolean(
-        m,:union,objectDimTags,toolDimTags,tag,removeObject,removeTool,
-        "OCC.fuse"))
+    _with_model(m->_occ_boolean_msgs(
+        msgs->Model._model_occ_boolean(
+            m,:union,objectDimTags,toolDimTags,tag,removeObject,removeTool,
+            "OCC.fuse";msg_out=msgs)))
 cut(objectDimTags,toolDimTags;tag=-1,removeObject=true,removeTool=true)=
-    _with_model(m->Model._model_occ_boolean(
-        m,:difference,objectDimTags,toolDimTags,tag,removeObject,removeTool,
-        "OCC.cut"))
+    _with_model(m->_occ_boolean_msgs(
+        msgs->Model._model_occ_boolean(
+            m,:difference,objectDimTags,toolDimTags,tag,removeObject,
+            removeTool,"OCC.cut";msg_out=msgs)))
 intersect(objectDimTags,toolDimTags;tag=-1,removeObject=true,removeTool=true)=
-    _with_model(m->Model._model_occ_boolean(
-        m,:intersection,objectDimTags,toolDimTags,tag,removeObject,
-        removeTool,"OCC.intersect"))
+    _with_model(m->_occ_boolean_msgs(
+        msgs->Model._model_occ_boolean(
+            m,:intersection,objectDimTags,toolDimTags,tag,removeObject,
+            removeTool,"OCC.intersect";msg_out=msgs)))
 fragment(objectDimTags,toolDimTags;tag=-1,removeObject=true,removeTool=true)=
-    _with_model(m->Model._model_occ_boolean(
-        m,:fragments,objectDimTags,toolDimTags,tag,removeObject,removeTool,
-        "OCC.fragment"))
+    _with_model(m->_occ_boolean_msgs(
+        msgs->Model._model_occ_boolean(
+            m,:fragments,objectDimTags,toolDimTags,tag,removeObject,removeTool,
+            "OCC.fragment";msg_out=msgs)))
 remove_all_duplicates()=_with_model(
     m->Model._model_occ_remove_all_duplicates(m,"OCC.removeAllDuplicates"))
 fillet_2d(edge_tag1,edge_tag2,radius;tag=-1,pointTag=-1,reverse=false)=

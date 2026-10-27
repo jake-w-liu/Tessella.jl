@@ -367,7 +367,8 @@ arrangement into membership-labeled cells like OCC, result pieces preserve or
 rebind operand tags under Gmsh 4.15.2's preserve-numbering rules (unmodified
 operands kept, unique sole-image modifications rebound, shared-image and
 multi-source pieces allocated fresh after the surviving maximum, explicit-tag
-requests rejecting multi-piece results), and `v[] = BooleanX{…}{…}` plus
+requests binding the first top-dim piece while the recoverable `_multiBind`
+`Msg::Error` reports the dropped remainder like upstream), and `v[] = BooleanX{…}{…}` plus
 `v() = BooleanX{…}{…}` capture the result list for later statements —
 Translate of remaining native solids,
 Dilate about a center, and coordinate-axis rotations by integer multiples of π/2
@@ -524,9 +525,14 @@ axial sections, plane×sphere (latitude circles and meridian great circles),
 plane×cone axial sections, sphere×sphere, and coaxial cylinder×sphere. Disjoint
 solids materialize as separate component volumes sharing the operation's
 snapshot; cavities attach as inner shells; a geometrically empty result binds
-nothing. Oblique plane×cylinder ellipses, non-axial plane×cone conics, off-axis
-cylinder×sphere sections, and cylinder×cylinder intersections raise explicit
-errors rather than approximating.
+nothing. Pairs with no closed-form section — oblique plane×cylinder ellipses,
+non-axial plane×cone conics, off-axis cylinder×sphere, sphere×cone,
+cone×cylinder, cylinder×cylinder, torus sections, and every
+tensor-BSpline/Bézier×analytic or tensor×plane combination — trace through the
+generic marching-squares level-set section on the better-conditioned partner
+chart and lift into shared-parameter fitted pcurves with periodic seam
+unwrapping; genuinely degenerate cases (coincident same-domain faces, tangent
+sphere contact, coaxial cylinders) still raise explicit errors.
 `MeshSize {points} = value` and `Characteristic Length` store finite positive
 constraints on existing explicit Points selected by `:`, bounded numeric expressions
 and ranges, whole/selected numeric-list variables, or inline `PointsOf` blocks.

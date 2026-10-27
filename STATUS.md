@@ -24,6 +24,59 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### OCC Boolean generic curved sections + `_multiBind` first-piece tag bind (2026-10-28, working tree)
+
+Two P3/CAD05 pieces. First, `_brep_face_sections` in `ModelBoolean.jl` gains a
+generic level-set section for every face-pair combination with no closed form:
+`_brep_sec_msq` marches the zero contour of one face's signed-distance field
+over the partner's uv domain on a chart picked by quality (tensor knot-adapted
+grid first, then sphere/cylinder/cone/torus — a plane never hosts), refines
+each contour vertex by projected Newton, and lifts both sides into fitted
+shared-parameter Hermite pcurves (`_brep_fit_section_pcs`,
+`_hermite_bspline_2d` in `ModelOCCLoft.jl` with prescribed contour tangents and
+a centered-secant NaN fallback). Periodic charts unwrap through
+`_brep_unwrap_axis!` and a seam-aware marching-squares trace so contours may
+cross u=0; torus UV/normal evaluation and `_brep_uperiod` support landed with
+it. Oblique plane×cylinder ellipses, non-axial plane×cone conics and off-axis
+cylinder×sphere now redirect here instead of throwing; the former finite-domain
+dispatch is preserved through `_brep_pc_domain` so finite pcurves keep
+`_brep_ix_sec_lin` while infinite generic domains use `_brep_ix_generic`
+(ellipse-disk versus rectangle unchanged). `_ModelOCCSectionCurve` evaluation
+moved to generic `_occ_surface_d2` so section curves ride analytic records too.
+Degenerate-edge remap recursion fixed by publishing the edge id before the
+face-pcurve descent; degenerate-wire errors now name the surface and loop.
+
+Second, explicit-tag multi-piece binds now follow upstream `GModelIO_OCC.cpp`
+`_multiBind` verbatim (verified live against Gmsh 4.15.2): the first
+top-dimensional piece binds at the requested tag recursively, each further
+piece produces a recoverable `Cannot bind multiple volumes to single tag`
+`Msg::Error`, and the unbound remainder is dropped with its exclusive
+sub-entities while shared partition faces stay reachable through the bound
+volume — the operator still succeeds so no `Could not apply boolean operator`
+follows. `boolean_volumes_multi!` and `_model_occ_boolean`/`_mixed` thread a
+`msg_out` sink (`_boolean_bind_msg!`) which GeoExec records into
+`GeoExecution.errors` and `APIOCCShapeRegistry` emits through the native Msg
+channel; `outDimTagsMap` credits only the operand(s) producing the bound piece.
+Untagged multi-piece results are unchanged.
+
+Verified under `julia --compile=min -O0` on Julia 1.12.7:
+`model_boolean_conic_spline_test` EXIT 0 including the new tensor×analytic
+(18/18), analytic×analytic (15/15) and sphere×cone all-four-ops (16/16)
+testsets; `api_occ_boolean_test` EXIT 0 — all 30 testsets with explicit-tag
+first-piece 4/4 and periodic seam/partial sectors 16/16;
+`geo_boolean_operands_test` EXIT 0; `model_boolean_multi_test` EXIT 0;
+`model_boolean_snapshot_test` EXIT 0;
+`model_boolean_occ_transform_regression_test` EXIT 0 (165);
+`api_boolean_lifecycle_test` EXIT 0 (20/20); `occ_boolean_smoke` EXIT 0.
+Sphere×cone masses (default-compilation probe against the verified binary):
+intersect 2.5651564/5 faces, cut 4.6730758/4 faces, fuse 7.3999795/4 faces,
+fragment 4.6730758+2.5651564+0.1617473 summing exactly to the fused volume —
+every mass matches Gmsh 4.15.2 to five digits; the fused boundary keeps the
+cone lateral as two seam-split faces where OCC unifies (4 vs 3 faces, a
+documented periodic-face unification residual). Tagged wall fragment: errors
+`["Cannot bind multiple volumes to single tag 9"]`, volumes `[9]`, six
+surfaces — identical to upstream. Sphere×cone cut meshes to 241 nodes.
+
 ### Warped ruled `Surface` fill through its parameter domain (2026-10-27, working tree)
 
 Declared `Surface`/`RuledSurface` records whose boundary wires do not fit one

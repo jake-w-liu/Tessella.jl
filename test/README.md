@@ -242,7 +242,7 @@ lists modified), `removeObject`/`removeTool` independence, fused
 mass `1.875` + centroid `(0.75)^3`, cut `0.875`/split `0.4+0.4`,
 intersect `0.125`, fragment cell images with a disjoint operand
 keeping its tag, objects-only and three-way fuses, explicit-tag
-single-piece binds and multi-piece rejection, empty results,
+single-piece binds and multi-piece first-piece binds, empty results,
 `get_entities` sub-shape counts (9/21/14 on the notched box),
 registry-byte-identical atomicity under publication failure,
 post-sync queries and `generate(3)` on the all-plane union —
