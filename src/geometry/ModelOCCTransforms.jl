@@ -88,6 +88,29 @@ end
 # Compact `primitive` record on a solid — the same family-limited update the
 # public `_plan_volume_transform` applies to `m.cylinders`/`m.spheres`/`m.cones`.
 function _model_occ_transform_primitive(record,t,caller,what)
+    if haskey(record,:V)
+        # `:revolved` Pappus record — only a mass/centroid carrier
+        # (`point + h_c·axis + arm·bisector` is the centroid), so the exact
+        # affine image exists for every nonsingular map: the centroid maps
+        # with the entity and the volume scales by |det|.
+        det=_linear_det(t.linear)
+        det==0.0 && throw(ArgumentError(
+            "$caller: transform collapses $what"))
+        ax=_occ_linear_apply(t,record.axis)
+        na=sqrt(_dot(ax,ax))
+        na>0 || throw(ArgumentError("$caller: transform collapses $what"))
+        new=(point=_finite_result(_occ_trsf_apply(t,record.point),caller),
+             axis=_finite_result(ax./na,caller),
+             V=record.V*abs(det),h_c=record.h_c*na)
+        if haskey(record,:bisector)
+            bs=_occ_linear_apply(t,record.bisector)
+            nb=sqrt(_dot(bs,bs))
+            nb>0 || throw(ArgumentError("$caller: transform collapses $what"))
+            new=merge(new,(angle=record.angle,
+                bisector=_finite_result(bs./nb,caller),arm=record.arm*nb))
+        end
+        return new
+    end
     if (haskey(record,:radius)||haskey(record,:r1)) && haskey(record,:axis)
         tr=_transform_axis_encoding(t,record.center,record.axis,caller,what)
         return haskey(record,:r1) ?
@@ -175,36 +198,7 @@ function _model_occ_transform_geometry(m::GeoModel,shape,t,caller,what;
         _occ_trsf_apply(t,g.point),caller),))
     if d==1
         rec=g.geometry
-        new=if rec.occ===:degenerate
-            # The bound face record embedded in the degenerate edge moves
-            # with the surface transform; its pcurves are re-keyed below.
-            merge(rec,(face=_transform_occ_surface_record(
-                rec.face,t,caller,what),))
-        elseif rec.occ===:copied_curve
-            new_curve=_model_occ_transform_nurbs_curve(rec.curve,t,caller)
-            source_kind=get(rec,:converted_from,nothing)
-            if source_kind===nothing
-                new=merge(rec,(curve=new_curve,))
-            else
-                # NURBS-converted analytic record: keep the inert analytic
-                # metadata consistent with the transformed poles. Under
-                # reflection a closed conic flips its parameter range, which
-                # the preserved reparam cannot represent.
-                _linear_det(t.linear)<0 && throw(ArgumentError(
-                    "$caller: reflection of a NURBS-converted $what is " *
-                    "not implemented"))
-                source=merge(
-                    Base.structdiff(rec,(occ=nothing,curve=nothing,
-                        converted_from=nothing)),
-                    (occ=source_kind,))
-                shadow=_transform_occ_curve_record(m,0,source,t,caller,what)
-                new=merge(shadow,(occ=:copied_curve,
-                    converted_from=source_kind,curve=new_curve))
-            end
-            new
-        else
-            _transform_occ_curve_record(m,0,rec,t,caller,what)
-        end
+        new=_transform_occ_curve_record(m,0,rec,t,caller,what)
         # Embedded face records (degenerate poles, surface_iso seams) carry
         # the same tag-keyed pcurves as bound faces — scale their `v`
         # coordinate like the dim-2 branch.

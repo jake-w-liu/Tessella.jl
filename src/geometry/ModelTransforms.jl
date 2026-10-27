@@ -470,12 +470,39 @@ function _plan_occ_geometry_transforms(m::GeoModel, normalized, t,
 end
 
 # The transformed OCC curve record for `curve`, or `g` unchanged when the
-# record carries no coordinates (`:degenerate` stores only its parameter
-# range).
+# record carries no coordinates.
 function _transform_occ_curve_record(m::GeoModel, curve::Int, g,
                                      t::_AffineTransform, caller, what;tensor_cache=nothing)
     if g.occ===:surface_iso
         return merge(g,(face=_transform_occ_surface_record(g.face,t,caller,what;tensor_cache),))
+    end
+    if g.occ===:degenerate
+        # The bound face record embedded in the degenerate edge moves with
+        # the surface transform; its pcurves are re-keyed/re-scaled by the
+        # caller. A bare range-only record has no coordinates to update.
+        hasproperty(g,:face) || return g
+        return merge(g,(face=_transform_occ_surface_record(
+            g.face,t,caller,what;tensor_cache),))
+    end
+    if g.occ===:copied_curve && hasproperty(g,:curve)
+        new_curve=_model_occ_transform_nurbs_curve(g.curve,t,caller)
+        source_kind=get(g,:converted_from,nothing)
+        source_kind===nothing && return merge(g,(curve=new_curve,))
+        # NURBS-converted analytic record: keep the inert analytic
+        # metadata consistent with the transformed poles. Under
+        # reflection a closed conic flips its parameter range, which
+        # the preserved reparam cannot represent.
+        _linear_det(t.linear)<0 && throw(ArgumentError(
+            "$caller: reflection of a NURBS-converted $what is " *
+            "not implemented"))
+        source=merge(
+            Base.structdiff(g,(occ=nothing,curve=nothing,
+                converted_from=nothing)),
+            (occ=source_kind,))
+        shadow=_transform_occ_curve_record(m,curve,source,t,caller,what;
+                                           tensor_cache=tensor_cache)
+        return merge(shadow,(occ=:copied_curve,
+            converted_from=source_kind,curve=new_curve))
     end
     if g.occ===:circle
         return _transform_occ_circle(g,t,caller,what)

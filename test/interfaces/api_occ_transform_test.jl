@@ -245,3 +245,46 @@ end
         @test 5.0-1e-9<=z<=8.0+1e-9
     end
 end
+
+@testset "occ transform revolved-solid measure record" begin
+    occ=_occ_setup()
+    # A generic (non-canonical) revolved profile carries the compact
+    # `primitive = (occ=:revolved)` Pappus record — its mass/centroid must
+    # map with the entity: `get_mass` scales by |det| and the centroid is
+    # the affine image (`point + h_c·axis + arm·bisector` → T·centroid).
+    pts=[occ.add_point(x,0.0,z) for (x,z) in
+         ((1.0,0.0),(2.0,0.0),(2.0,1.0),(1.5,1.0),(1.5,0.5),(1.0,0.5))]
+    ls=[occ.add_line(pts[i],pts[mod(i,6)+1]) for i in 1:6]
+    w=occ.add_wire(ls)
+    f=occ.add_plane_surface(w)
+    occ.synchronize()
+    out=occ.revolve([(2,f)],0.0,0.0,0.0, 0.0,0.0,1.0, π)
+    occ.synchronize()
+    v=[e for e in out if e[1]==3][1][2]
+    m=_current_model()
+    id=m.occ_kernel.bindings[(3,v)]
+    @test m.occ_kernel.shapes[id].geometry.primitive.occ===:revolved
+    V0=occ.get_mass(3,v)
+    c0=collect(occ.get_center_of_mass(3,v))
+    @test V0≈3.730641276137879 rtol=1e-12
+    @test c0≈[0.0,1.0386954180734225,0.4342105263157895] atol=1e-12
+    occ.translate([(3,v)],10.0,20.0,30.0)
+    occ.synchronize()
+    @test occ.get_mass(3,v)≈V0 rtol=1e-14
+    @test collect(occ.get_center_of_mass(3,v))≈c0.+[10.0,20.0,30.0] atol=1e-12
+    occ.dilate([(3,v)],0.0,0.0,0.0, 2.0,2.0,2.0)
+    occ.synchronize()
+    @test occ.get_mass(3,v)≈8V0 rtol=1e-14
+    c1=collect(occ.get_center_of_mass(3,v))
+    @test c1≈2.0.*(c0.+[10.0,20.0,30.0]) atol=1e-12
+    occ.mirror([(3,v)],0.0,0.0,1.0,0.0)
+    occ.synchronize()
+    @test occ.get_mass(3,v)≈8V0 rtol=1e-14
+    @test collect(occ.get_center_of_mass(3,v))≈[c1[1],c1[2],-c1[3]] atol=1e-12
+    occ.rotate([(3,v)],0.0,0.0,0.0, 0.0,0.0,1.0, π/3)
+    occ.synchronize()
+    @test occ.get_mass(3,v)≈8V0 rtol=1e-14
+    c2=collect(occ.get_center_of_mass(3,v))
+    s,c=sincos(π/3)
+    @test c2≈[c1[1]*c-c1[2]*s, c1[1]*s+c1[2]*c, -c1[3]] atol=1e-12
+end
