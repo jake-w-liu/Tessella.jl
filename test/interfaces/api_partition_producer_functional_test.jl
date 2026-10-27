@@ -134,7 +134,11 @@ end
 @testset "ghost-only production and existing assignment default" begin
     try
         fixture();A.mesh.partition(2,[501,502],[1,2])
-        @test A.model.get_entities()==[(3,11),(3,22)] && A.model.get_number_of_partitions()==2
+        # The entity layer materializes one child per (dim,parent,partition)
+        # even with topology/ghosts off (`9417a32` / upstream
+        # `createNewEntities`) — the children list beside the parents.
+        @test A.model.get_entities()==[(3,11),(3,22),(3,23),(3,24)] &&
+              A.model.get_number_of_partitions()==2
         @test A.model.get_partitions(3,11)==[1] && A.model.get_partitions(3,22)==[2]
         A.mesh.unpartition();A.option("Mesh.PartitionCreateGhostCells",1)
         A.mesh.partition(2,[501,502],[1,2])

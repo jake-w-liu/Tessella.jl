@@ -223,6 +223,9 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     # actual, bounded Tet4 partition topology or ghost products.
     "Mesh.PartitionCreateTopology"=>0.0,
     "Mesh.PartitionTopologyFile"=>0.0,
+    # Upstream `partitionCreatePhysicals` defaults on: partition entities gain
+    # `_part{..}_physical{X}_dim{d}` named groups (see `_partition_create_physicals!`).
+    "Mesh.PartitionCreatePhysicals"=>1.0,
     "Mesh.PartitionCreateGhostCells"=>0.0,
     "Mesh.MeshSizeMin"=>0.0,
     "Mesh.MeshSizeMax"=>1.0e22,
@@ -854,6 +857,7 @@ function option(name::AbstractString, value::Real)
                         "Mesh.RecombineNodeRepositioning","Mesh.Smoothing","General.AbortOnError",
                         "Mesh.Optimize","Mesh.OptimizeNetgen",
                         "Mesh.PartitionCreateTopology","Mesh.PartitionCreateGhostCells",
+                        "Mesh.PartitionCreatePhysicals",
                         "Mesh.Binary","PostProcessing.Binary",
                         "General.Terminal","General.Verbosity","General.NumThreads")
             # Gmsh stores `(int)val` — truncation, not a 0/1 restriction.

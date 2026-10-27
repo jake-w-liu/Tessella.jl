@@ -1164,6 +1164,8 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
     data=Elements._native_mixed_entity_data(global_entities;node_entities=node_owners,
         node_parametric=deepcopy(class.node_parametric),external_node_tags=copy(source.public.node_tags),
         block_entities=owners,external_element_tags=labels)
+    !iszero(get(OPTIONS,"Mesh.PartitionCreatePhysicals",1.0)) &&
+        _partition_create_physicals!(staged,part_entities,blocks,owners)
     partition=Elements.MixedPartitionData(count;entities=part_entities,ghost_entities,ghost_elements)
     target=MixedMesh(cached.coords,blocks;entity_data=data,elementary_entities=owners,
         physical_names=staged.physical_names,partition_data=partition,
@@ -1755,6 +1757,8 @@ function _partition_surface_production_plan(model,cached,class,count,assignment,
     data=Elements._native_mixed_entity_data(global_entities;node_entities=node_owners,
         node_parametric=deepcopy(class.node_parametric),external_node_tags=copy(source.public.node_tags),
         block_entities=owners,external_element_tags=labels)
+    !iszero(get(OPTIONS,"Mesh.PartitionCreatePhysicals",1.0)) &&
+        _partition_create_physicals!(staged,part_entities,blocks,owners)
     partition=Elements.MixedPartitionData(count;entities=part_entities,ghost_entities,ghost_elements)
     target=MixedMesh(cached.coords,blocks;entity_data=data,elementary_entities=owners,
         physical_names=staged.physical_names,partition_data=partition,

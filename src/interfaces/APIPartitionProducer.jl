@@ -19,6 +19,75 @@ function _partition_bounds(coordinates,rows)
         maximum(coordinates[axis-3,row] for row in rows),6)
 end
 
+# `Mesh.PartitionCreatePhysicals` (upstream `addPhysical` in meshPartition.cpp):
+# each partition entity gains physical groups whose names encode its partition
+# list, parent physical and dimension — `_part{p1,p2}_physical{X}_dim{d}` —
+# plus `_part{p1,p2}_dim{d}` for entities with no parent physicals. The new
+# tags follow upstream's `++numPhysical` (a counter seeded once at
+# `getMaxPhysicalNumber` — the live group maximum, shared across dims) so a
+# repartition after `unpartitionMesh` reuses the freed tags the way upstream
+# does. Transported parent memberships are kept; the encoded tags are what
+# `writePartitionedTopology` parses.
+function _partition_create_physicals!(staged,part_entities,blocks,block_entities)
+    counter=maximum((Int(key[2]) for key in keys(staged.physical));init=0)
+    cache=Dict{String,Int32}()
+    function encoded_tag(dimension,name)
+        haskey(cache,name) && return cache[name]
+        existing=findfirst(key->key[1]==dimension &&
+            get(staged.physical_names,(key[1],key[2]),"")==name,
+            collect(keys(staged.physical)))
+        if existing!==nothing
+            tag=Int32(existing[2])
+        else
+            # upstream's `++numPhysical` — one global counter for every dim.
+            tag=Int32(counter+=1)
+            staged.physical[(dimension,Int(tag))]=Int[]
+            staged.physical_names[(dimension,Int(tag))]=name
+        end
+        cache[name]=tag
+        return tag
+    end
+    for ((dimension,tag),entity) in sort!(collect(part_entities),by=first)
+        pstr="_part{"*join((Int(p) for p in entity.partitions),",")*"}"
+        encoded=Int32[]
+        for physical in entity.physical_tags
+            push!(encoded,encoded_tag(dimension,
+                pstr*"_physical{"*string(Int(physical))*"}_dim{"*
+                string(dimension)*"}"))
+        end
+        isempty(entity.physical_tags) && push!(encoded,
+            encoded_tag(dimension,pstr*"_dim{"*string(dimension)*"}"))
+        isempty(encoded) && continue
+        groups=Int32[entity.physical_tags;encoded]
+        staged.entity_physicals[(dimension,Int(tag))]=copy(groups)
+        for group in encoded
+            members=staged.physical[(dimension,Int(group))]
+            Int(tag) in members || push!(members,Int(tag))
+        end
+        part_entities[(dimension,tag)]=Elements.MixedEntity(
+            dimension,Int32(tag),entity.bbox;physical_tags=groups,
+            boundaries=entity.boundaries,
+            embedded_curves=entity.embedded_curves,
+            partitions=entity.partitions,parent=entity.parent)
+    end
+    staged.physical_tag_max=max(staged.physical_tag_max,counter)
+    # Upstream writes each element's physical tag from its owning partition
+    # entity's first physical (`MElement` stores none). Once the encoded
+    # groups are appended, a child of a physical-less parent projects its
+    # `_part{..}_dim{d}` tag instead of 0 — retag every cell a partition
+    # entity owns so the legacy tag stays the owner projection.
+    for (index,block) in enumerate(blocks)
+        dim=Elements._block_dim(block);owners=block_entities[index]
+        for j in 1:Elements._block_ncells(block)
+            entity=get(part_entities,(dim,Int(owners[j])),nothing)
+            entity===nothing && continue
+            block.tags[j]=isempty(entity.physical_tags) ?
+                Int32(0) : first(entity.physical_tags)
+        end
+    end
+    return nothing
+end
+
 # `General.NumThreads` requests the parallel worker count for the O(cells)
 # extraction stages below; `Threads.@threads` caps actual concurrency at the
 # runtime thread pool. Every parallel stage writes disjoint per-index slots
@@ -360,6 +429,8 @@ function _partition_tet_production_plan(model,cached,class,count,assignment,call
     data=Elements._native_mixed_entity_data(global_entities;node_entities=node_owners,
         node_parametric=deepcopy(class.node_parametric),external_node_tags=copy(source.public.node_tags),
         block_entities=owners,external_element_tags=element_uids)
+    !iszero(get(OPTIONS,"Mesh.PartitionCreatePhysicals",1.0)) &&
+        _partition_create_physicals!(staged,part_entities,blocks,owners)
     partition=Elements.MixedPartitionData(count;entities=part_entities,ghost_entities,ghost_elements)
     target=MixedMesh(cached.coords,blocks;entity_data=data,elementary_entities=owners,
         physical_names=staged.physical_names,partition_data=partition,
@@ -498,6 +569,8 @@ function _partition_assign_production_plan(model,cached,class,count,assignment,c
         node_parametric=deepcopy(class.node_parametric),
         external_node_tags=copy(public.node_tags),
         block_entities=owners,external_element_tags=uids)
+    !iszero(get(OPTIONS,"Mesh.PartitionCreatePhysicals",1.0)) &&
+        _partition_create_physicals!(staged,part_entities,blocks,owners)
     partition=Elements.MixedPartitionData(count;entities=part_entities)
     target=MixedMesh(cached.coords,blocks;entity_data=data,elementary_entities=owners,
         physical_names=staged.physical_names,partition_data=partition,

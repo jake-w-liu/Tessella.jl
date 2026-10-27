@@ -72,8 +72,13 @@ end
         # memberships transported (verified layout of gmsh 4.15.2).
         @test isempty(pdata.entities[(3,23)].boundaries) &&
               isempty(pdata.entities[(3,24)].boundaries)
-        @test pdata.entities[(3,23)].physical_tags==Int32[101] &&
-              pdata.entities[(3,24)].physical_tags==Int32[202]
+        # `Mesh.PartitionCreatePhysicals` (upstream default on) keeps the
+        # transported parent tag and appends the encoded
+        # `_part{..}_physical{X}_dim{d}` group — fresh tags `++numPhysical`.
+        @test pdata.entities[(3,23)].physical_tags==Int32[101,203] &&
+              pdata.entities[(3,24)].physical_tags==Int32[202,204]
+        @test A.model.get_physical_name(3,203)=="_part{1}_physical{101}_dim{3}" &&
+              A.model.get_physical_name(3,204)=="_part{2}_physical{202}_dim{3}"
         @test A.model.get_entities()==[(3,11),(3,22),(3,23),(3,24)]
         @test A.model.get_number_of_partitions()==2
         @test A.model.get_parent(3,23)==(3,11) && A.model.get_partitions(3,23)==[1]

@@ -9994,10 +9994,23 @@ function _geo_exec_partition_mesh!(m::GeoModel,args::AbstractString,
         return nothing
     end
     assignment=api._partition_lower_inherit(api._partition_elements(actual,count),actual)
-    plan=topology||ghosts ?
-        api._partition_tet_production_plan(source,actual,class,count,assignment,
-            caller;topology,ghosts) :
-        api._partition_assign_production_plan(source,actual,class,count,assignment,caller)
+    # `Mesh.PartitionCreatePhysicals` gates the `_part{..}_physical{X}_dim{d}`
+    # naming pass inside the production plans; scope the `.geo` context value
+    # into the session option for the duration of the call.
+    physicals=something(
+        _geo_option_number(context,"Mesh",0,"PartitionCreatePhysicals"),1.0)
+    before=get(api.OPTIONS,"Mesh.PartitionCreatePhysicals",nothing)
+    api.OPTIONS["Mesh.PartitionCreatePhysicals"]=physicals
+    plan=try
+        topology||ghosts ?
+            api._partition_tet_production_plan(source,actual,class,count,assignment,
+                caller;topology,ghosts) :
+            api._partition_assign_production_plan(source,actual,class,count,assignment,caller)
+    finally
+        before===nothing ?
+            delete!(api.OPTIONS,"Mesh.PartitionCreatePhysicals") :
+            api.OPTIONS["Mesh.PartitionCreatePhysicals"]=before
+    end
     _geo_publish_actual_plan!(m,context,plan,caller)
     return nothing
 end
@@ -11817,9 +11830,21 @@ function _geo_plugin_run!(api,name,m,context,caller)
             produced=api.LAST_MESH_PARTITION[]
             if produced!==nothing && actual_input!==nothing &&
                     produced.mesh===actual_input[2]
-                plan=api._partition_assign_production_plan(actual_input[1],
-                    actual_input[2],actual_input[3],produced.num_partitions,
-                    produced.element_partitions,caller)
+                # `Mesh.PartitionCreatePhysicals` scopes the same `.geo`
+                # option `PartitionMesh` honors into the production plan.
+                physicals=something(
+                    _geo_option_number(context,"Mesh",0,"PartitionCreatePhysicals"),1.0)
+                before=get(api.OPTIONS,"Mesh.PartitionCreatePhysicals",nothing)
+                api.OPTIONS["Mesh.PartitionCreatePhysicals"]=physicals
+                plan=try
+                    api._partition_assign_production_plan(actual_input[1],
+                        actual_input[2],actual_input[3],produced.num_partitions,
+                        produced.element_partitions,caller)
+                finally
+                    before===nothing ?
+                        delete!(api.OPTIONS,"Mesh.PartitionCreatePhysicals") :
+                        api.OPTIONS["Mesh.PartitionCreatePhysicals"]=before
+                end
                 _geo_publish_actual_plan!(m,context,plan,caller)
             end
             tags=sort!(collect(keys(api.SESSION_VIEWS)))

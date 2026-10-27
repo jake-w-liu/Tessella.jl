@@ -194,9 +194,6 @@ const _REJECTED_FLAGS=Dict{String,String}(
     # values would silently do nothing.
     "-part_weight"=>"weighted graph partitioning is not implemented",
     "-partWeight"=>"weighted graph partitioning is not implemented",
-
-    "-part_physicals"=>"partition physical-group toggling is not implemented",
-    "-part_no_physicals"=>"partition physical-group toggling is not implemented",
     # `Mesh.AllowSwapAngle` is consumed upstream only by the BDS
     # discrete-surface boundary-edge swap optimizer, which Tessella's
     # surface pipelines do not expose.
@@ -507,6 +504,7 @@ function _run(tokens::Vector{String})
     unroll_seen=false
     reclassify=nothing;reparam=nothing
     part=nothing;part_topo=nothing;part_ghosts=nothing;part_split=nothing
+    part_physicals=nothing
     algo_seen=false;quad_seen=false
     # `-statreport`/`-append_statreport` — `(path, :write|:append)`; the last
     # occurrence wins like upstream's `createAppendMeshStatReport` store.
@@ -670,6 +668,14 @@ function _run(tokens::Vector{String})
             part_ghosts!==nothing && throw(ArgumentError(
                 "tessella: duplicate or conflicting partition ghost flag"))
             part_ghosts=false
+        elseif a=="-part_physicals"
+            part_physicals!==nothing && throw(ArgumentError(
+                "tessella: duplicate or conflicting partition physicals flag"))
+            part_physicals=true
+        elseif a=="-part_no_physicals"
+            part_physicals!==nothing && throw(ArgumentError(
+                "tessella: duplicate or conflicting partition physicals flag"))
+            part_physicals=false
         elseif a in ("-part_split","-part_split_files","-oneFilePerPart")
             part_split!==nothing && throw(ArgumentError(
                 "tessella: duplicate or conflicting partition-split flag"))
@@ -1017,7 +1023,8 @@ function _run(tokens::Vector{String})
         refine=refine_seen,barycentric=barycentric_seen,save=save_seen,
         statreport,
         unroll=unroll_seen,bgm=[path for (path,_) in bgm_specs],
-        reclassify,reparam,part,part_topo,part_ghosts,part_split)
+        reclassify,reparam,part,part_topo,part_ghosts,part_split,
+        part_physicals)
 end
 
 # Classified `MixedMesh` preferred for `-save_parametric`/`-save_topology`
@@ -1291,6 +1298,7 @@ end
 function _session_main(files,preludes,numeric_options;
                        dim,outfile,version,binary,output_flags,refine,save,
                        reclassify,reparam,part,part_topo,part_ghosts,part_split,
+                       part_physicals,
                        barycentric=false,unroll=false,bgm=String[],
                        statreport=nothing)
     need_output=dim>0 || refine || barycentric || unroll || save ||
@@ -1423,6 +1431,8 @@ function _session_main(files,preludes,numeric_options;
             API.option("Mesh.PartitionCreateTopology",part_topo ? 1.0 : 0.0)
         part_ghosts===nothing ||
             API.option("Mesh.PartitionCreateGhostCells",part_ghosts ? 1.0 : 0.0)
+        part_physicals===nothing ||
+            API.option("Mesh.PartitionCreatePhysicals",part_physicals ? 1.0 : 0.0)
         # `.geo`-table options the session table does not declare are stored
         # directly — the same place `API.option` would have put them.
         for (name,value) in save_option_values
