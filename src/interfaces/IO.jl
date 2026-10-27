@@ -1117,7 +1117,7 @@ above). `nothing` keeps the default writer behaviour.
 """
 function write_msh(path, m::MixedMesh; version=4.1, binary=false,
                    gmsh_compatible=true, save_parametric=nothing,
-                   save_topology=nothing)
+                   save_topology=nothing, preserve_numbering=false)
     path isa AbstractString || throw(ArgumentError(
         "write_msh: path must be a string"))
     version isa Real || throw(ArgumentError("write_msh: version must be real"))
@@ -1134,6 +1134,8 @@ function write_msh(path, m::MixedMesh; version=4.1, binary=false,
     binary isa Bool || throw(ArgumentError("write_msh: binary must be Bool"))
     gmsh_compatible isa Bool || throw(ArgumentError(
         "write_msh: gmsh_compatible must be Bool"))
+    preserve_numbering isa Bool || throw(ArgumentError(
+        "write_msh: preserve_numbering must be Bool"))
     sp=_msh_save_flag(save_parametric,"save_parametric")
     st=_msh_save_flag(save_topology,"save_topology")
     if ver==4.1
@@ -1154,7 +1156,8 @@ function write_msh(path, m::MixedMesh; version=4.1, binary=false,
     entities=st===true ? _msh2_entity_records(m) : nothing
     if records===nothing && entities===nothing
         write_mixed_msh(path,m;version=ver,binary=binary,
-                                 gmsh_compatible=gmsh_compatible)
+                                 gmsh_compatible=gmsh_compatible,
+                                 preserve_numbering=preserve_numbering)
         return path
     end
     parent=dirname(path); isempty(parent) && (parent=".")
@@ -1164,7 +1167,8 @@ function write_msh(path, m::MixedMesh; version=4.1, binary=false,
     close(tmpio)
     try
         write_mixed_msh(tmp,m;version=ver,binary=binary,
-                                 gmsh_compatible=gmsh_compatible)
+                                 gmsh_compatible=gmsh_compatible,
+                                 preserve_numbering=preserve_numbering)
         bytes=read(tmp)
         out=_msh2_transform(bytes;binary=binary,entities=entities,
                             parametric=records)

@@ -179,7 +179,8 @@ function _model_merge_prepare(path)
     extension=lowercase(splitext(path)[2])
     result=if extension==".msh"
         GeoExec._geo_stage_mesh_merge(path,model,seed;
-            context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
+            context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[],
+            switch_tags=!iszero(get(options,"Mesh.SwitchElementTags",0.0)))
     elseif extension in (".unv",".mesh",".meshb",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk",".wrl")
         IO._stage_foreign_mesh_merge(path,model,seed;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])

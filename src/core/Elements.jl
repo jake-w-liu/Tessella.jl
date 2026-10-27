@@ -3100,6 +3100,7 @@ a section whose terminator never appears is rejected explicitly.
 """
 function read_mixed_msh(path::AbstractString;
                         tessella_extensions=false,
+                        switch_tags=false,
                         max_nodes=typemax(Int32),
                         max_elements=typemax(Int32),
                         max_connectivity=typemax(Int32)-1,
@@ -3114,6 +3115,8 @@ function read_mixed_msh(path::AbstractString;
     isfile(path) || throw(ArgumentError("read_mixed_msh: missing regular file $path"))
     tessella_extensions isa Bool || throw(ArgumentError(
         "read_mixed_msh: tessella_extensions must be Bool"))
+    switch_tags isa Bool || throw(ArgumentError(
+        "read_mixed_msh: switch_tags must be Bool"))
     limits=_MixedReadLimits(
         _read_limit(max_nodes,"max_nodes";ceiling=typemax(Int32)),
         _read_limit(max_elements,"max_elements";ceiling=typemax(Int32)),
@@ -3129,7 +3132,8 @@ function read_mixed_msh(path::AbstractString;
         "read_mixed_msh: file exceeds max_file_bytes=$(limits.max_file_bytes)"))
     open(path,"r") do io
         try
-            return _read_mixed_stream(io,limits,tessella_extensions,_source_identities,_factory_context)
+            return _read_mixed_stream(io,limits,tessella_extensions,_source_identities,_factory_context;
+                                      switch_tags)
         catch err
             err isa InterruptException && rethrow()
             err isa EOFError && throw(ArgumentError("read_mixed_msh: truncated MSH file"))
@@ -3705,7 +3709,8 @@ function _section_count(io,context::AbstractString,maximum::Int)
 end
 
 function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Bool,
-                            source_identities=nothing,factory_context=nothing)
+                            source_identities=nothing,factory_context=nothing;
+                            switch_tags::Bool=false)
     acc=_MixedReadAccum(source_identities!==nothing,factory_context)
     version=0.0
     binary=false; swap=false; wide=true
@@ -3804,8 +3809,8 @@ function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Boo
                 "read_mixed_msh: \$Elements appeared before \$Nodes"))
             seen_elements=true
             if version==2.2
-                binary ? _read_mixed_elements_v2_binary!(acc,io,limits,swap) :
-                         _read_mixed_elements_v2!(acc,io,limits)
+                binary ? _read_mixed_elements_v2_binary!(acc,io,limits,swap;switch_tags) :
+                         _read_mixed_elements_v2!(acc,io,limits;switch_tags)
             else
                 binary ? _read_mixed_elements_v4_binary!(acc,io,limits,swap,wide) :
                          _read_mixed_elements_v4!(acc,io,limits)
@@ -4900,7 +4905,7 @@ function _mixed_elementary_entity!(acc,value::Int,dim::Int,context::AbstractStri
     return entity
 end
 
-function _read_mixed_elements_v2!(acc,io,limits)
+function _read_mixed_elements_v2!(acc,io,limits;switch_tags::Bool=false)
     remaining=limits.max_elements-length(acc.element_tags)
     count=_section_count(io,"v2 element",remaining)
     for _ in 1:count
@@ -4912,7 +4917,7 @@ function _read_mixed_elements_v2!(acc,io,limits)
         ntags=_msh_record_int!(reader,"v2 element tag count")
         ntags>=0 || throw(ArgumentError(
             "read_mixed_msh: negative v2 element tag count"))
-        physical=Int32(0)
+        physical_value=0
         elementary_value=0
         npart=0
         base_tags=ntags
@@ -4920,7 +4925,7 @@ function _read_mixed_elements_v2!(acc,io,limits)
         second_link=0
         for i in 1:ntags
             value=_msh_record_int!(reader,"v2 element metadata tag")
-            i==1 && (physical=_mixed_physical_tag(value,"physical tag"))
+            i==1 && (physical_value=value)
             i==2 && (elementary_value=value)
             if i==3 && ntags>3
                 npart=value
@@ -4937,6 +4942,12 @@ function _read_mixed_elements_v2!(acc,io,limits)
             i==base_tags+1 && (first_link=value)
             i==base_tags+2 && (second_link=value)
         end
+        # `Mesh.SwitchElementTags` swaps the file's physical and elementary
+        # fields before validation, exactly like upstream's
+        # `_storeElementInEntity` `reg`/`physical` exchange.
+        switch_tags && ((physical_value,elementary_value)=
+                        (elementary_value,physical_value))
+        physical=_mixed_physical_tag(physical_value,"physical tag")
         elementary=_mixed_elementary_entity!(
             acc,elementary_value,layout.dim,"elementary entity tag")
         parent_tag=UInt64(0); domain_tags=(UInt64(0),UInt64(0))
@@ -4986,7 +4997,8 @@ function _read_mixed_elements_v2!(acc,io,limits)
     _expect_msh_end(io,"\$EndElements")
 end
 
-function _read_mixed_elements_v2_binary!(acc,io,limits,swap::Bool)
+function _read_mixed_elements_v2_binary!(acc,io,limits,swap::Bool;
+                                         switch_tags::Bool=false)
     remaining=limits.max_elements-length(acc.element_tags)
     count=_section_count(io,"v2 element",remaining)
     # Point elements have the smallest record: an element tag and one node tag.
@@ -5032,12 +5044,13 @@ function _read_mixed_elements_v2_binary!(acc,io,limits,swap::Bool)
                 "read_mixed_msh: element tags must be positive"))
             element_tag=UInt64(signed_element_tag)
             _record_mixed_element_tag!(acc,element_tag)
-            physical=Int32(0)
-            if ntags>0
-                physical=_mixed_physical_tag(
-                    Int(data[offset+1]),"physical tag")
-            end
+            physical_value=ntags>0 ? Int(data[offset+1]) : 0
             elementary_value=ntags>1 ? Int(data[offset+2]) : 0
+            # `Mesh.SwitchElementTags` exchanges the physical and elementary
+            # fields like the ASCII reader.
+            switch_tags && ((physical_value,elementary_value)=
+                            (elementary_value,physical_value))
+            physical=_mixed_physical_tag(physical_value,"physical tag")
             elementary=_mixed_elementary_entity!(
                 acc,elementary_value,layout.dim,"elementary entity tag")
             parent_tag=UInt64(0)
@@ -6163,7 +6176,8 @@ write volume-embedding relations, so only their classified entities and elements
 are serialized.
 """
 function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
-                         binary=false,gmsh_compatible=true,size_t_bytes=8)
+                         binary=false,gmsh_compatible=true,size_t_bytes=8,
+                         preserve_numbering=false)
     version isa Real || throw(ArgumentError(
         "write_mixed_msh: version must be real"))
     _elements_reject_bool(version,"write_mixed_msh: version")
@@ -6179,6 +6193,8 @@ function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
         "write_mixed_msh: gmsh_compatible must be Bool"))
     binary isa Bool || throw(ArgumentError(
         "write_mixed_msh: binary must be Bool"))
+    preserve_numbering isa Bool || throw(ArgumentError(
+        "write_mixed_msh: preserve_numbering must be Bool"))
     _elements_reject_bool(size_t_bytes,"write_mixed_msh: size_t_bytes")
     size_t_bytes isa Integer || throw(ArgumentError(
         "write_mixed_msh: size_t_bytes must be 4 or 8"))
@@ -6255,8 +6271,10 @@ function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
         "write_mixed_msh: destination is a directory: $target"))
     mktemp(parent) do temporary,io
         if value==2.2
-            binary ? _write_mixed_v2_binary(io,m,names,gmsh_compatible,preserved) :
-                     _write_mixed_v2(io,m,names,gmsh_compatible,preserved)
+            binary ? _write_mixed_v2_binary(io,m,names,gmsh_compatible,preserved;
+                                            preserve_numbering) :
+                     _write_mixed_v2(io,m,names,gmsh_compatible,preserved;
+                                     preserve_numbering)
         else
             binary ? _write_mixed_v4_binary(io,m,names,gmsh_compatible,
                                             preserved,wide) :
@@ -6467,6 +6485,33 @@ end
     return output_tags[Int(ref.block)][Int(ref.cell)]
 end
 
+# `Mesh.PreserveNumberingMsh2`: MSH 2.2 emission uses the stored external
+# element tags instead of the sequential order positions, so a
+# read-modify-write round trip keeps the file's element numbers. Parent and
+# domain link fields translate through the same array, staying consistent
+# with the emitted tags. A mesh without `entity_data` carries no stored
+# numbering — the sequential order positions are its own numbering already.
+function _v2_write_tags(m::MixedMesh,output_tags,preserve_numbering::Bool,
+                        context::AbstractString)
+    preserve_numbering || return output_tags
+    data=m.entity_data
+    data===nothing && return output_tags
+    tags=Vector{Int32}[Vector{Int32}(undef,length(row)) for row in output_tags]
+    for (bi,row) in pairs(tags)
+        external=data.external_element_tags[bi]
+        length(external)==length(row) || throw(ArgumentError(
+            "$context: external element tag row $bi length mismatch"))
+        @inbounds for j in eachindex(row)
+            tag=external[j]
+            1<=tag<=typemax(Int32) || throw(ArgumentError(
+                "$context: preserved element tag $tag is outside " *
+                "1:$(typemax(Int32))"))
+            row[j]=Int32(tag)
+        end
+    end
+    return tags
+end
+
 function _v2_entity_ids(m::MixedMesh)
     keys=Set{Tuple{Int,Int32}}()
     @inbounds for b in m.blocks
@@ -6496,7 +6541,8 @@ end
     return Int32(ids[(_block_dim(block),block.tags[cell])])
 end
 
-function _write_mixed_v2(io,m::MixedMesh,names,gmsh_compatible::Bool,preserved)
+function _write_mixed_v2(io,m::MixedMesh,names,gmsh_compatible::Bool,preserved;
+                         preserve_numbering::Bool=false)
     println(io,"\$MeshFormat"); println(io,"2.2 0 8"); println(io,"\$EndMeshFormat")
     _emit_preserved!(io,preserved,0)
     _write_mixed_physical_names(io,names,gmsh_compatible)
@@ -6511,19 +6557,20 @@ function _write_mixed_v2(io,m::MixedMesh,names,gmsh_compatible::Bool,preserved)
     nel=_assert_mixed_structure(m,"write_mixed_msh")
     println(io,"\$Elements"); println(io,nel)
     ids=_v2_entity_ids(m); order,output_tags=_mixed_v2_order(m)
+    write_tags=_v2_write_tags(m,output_tags,preserve_numbering,"write_mixed_msh")
     @inbounds for ref in order
         b=m.blocks[ref.block]; j=ref.cell; physical=b.tags[j]
         entity=_v2_cell_entity(m,ids,ref.block,j)
-        print(io,output_tags[ref.block][j]," ",b.msh)
+        print(io,write_tags[ref.block][j]," ",b.msh)
         if b isa SpecialElementBlock
             record=MSH_SPECIAL_RECORDS[b.msh]
             if record.links===:parent && !_missing_ref(b.parent_refs[j])
                 print(io," 5 ",physical," ",entity," 1 0 ",
-                      _v2_link_tag(output_tags,b.parent_refs[j]))
+                      _v2_link_tag(write_tags,b.parent_refs[j]))
             elseif record.links===:domains && !_missing_ref(b.domain_refs[1,j])
                 print(io," 6 ",physical," ",entity," 1 0 ",
-                      _v2_link_tag(output_tags,b.domain_refs[1,j])," ",
-                      _v2_link_tag(output_tags,b.domain_refs[2,j]))
+                      _v2_link_tag(write_tags,b.domain_refs[1,j])," ",
+                      _v2_link_tag(write_tags,b.domain_refs[2,j]))
             else
                 print(io," 2 ",physical," ",entity)
             end
@@ -6549,7 +6596,8 @@ function _write_mixed_binary_format(io,version::AbstractString,data_size::Int)
     return nothing
 end
 
-function _write_mixed_v2_binary(io,m::MixedMesh,names,gmsh_compatible::Bool,preserved)
+function _write_mixed_v2_binary(io,m::MixedMesh,names,gmsh_compatible::Bool,preserved;
+                                preserve_numbering::Bool=false)
     _write_mixed_binary_format(io,"2.2",8)
     _emit_preserved!(io,preserved,0)
     _write_mixed_physical_names(io,names,gmsh_compatible)
@@ -6565,6 +6613,7 @@ function _write_mixed_v2_binary(io,m::MixedMesh,names,gmsh_compatible::Bool,pres
     nel=_assert_mixed_structure(m,"write_mixed_msh")
     println(io,"\$Elements"); println(io,nel)
     ids=_v2_entity_ids(m); order,output_tags=_mixed_v2_order(m)
+    write_tags=_v2_write_tags(m,output_tags,preserve_numbering,"write_mixed_msh")
     position=1
     @inbounds while position<=length(order)
         first_ref=order[position]; first_block=m.blocks[first_ref.block]
@@ -6585,10 +6634,10 @@ function _write_mixed_v2_binary(io,m::MixedMesh,names,gmsh_compatible::Bool,pres
         write(io,Int32(ntags))
         for index in position:last
             ref=order[index]; block=m.blocks[ref.block]; j=ref.cell
-            write(io,output_tags[ref.block][j]); write(io,block.tags[j])
+            write(io,write_tags[ref.block][j]); write(io,block.tags[j])
             write(io,_v2_cell_entity(m,ids,ref.block,j))
             if ntags==3
-                write(io,_v2_link_tag(output_tags,block.parent_refs[j]))
+                write(io,_v2_link_tag(write_tags,block.parent_refs[j]))
             end
             for i in 1:_cell_arity(block,j)
                 write(io,_cell_node(block,j,i))

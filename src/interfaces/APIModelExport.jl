@@ -157,7 +157,11 @@ function _model_export_write(filename)
             target=_model_export_mesh(model,LAST_MESH[],LAST_MESH_CLASS[],version,
                 save_all,caller)
             Elements.write_mixed_msh(filename,target;version,
-                binary=!iszero(get(OPTIONS,"Mesh.Binary",0.0)))
+                binary=!iszero(get(OPTIONS,"Mesh.Binary",0.0)),
+                # `Mesh.PreserveNumberingMsh2` keeps the stored element
+                # numbering on MSH 2.2 output (upstream's writeMSH arm).
+                preserve_numbering=!iszero(get(OPTIONS,
+                    "Mesh.PreserveNumberingMsh2",0.0)))
             # `Mesh.PartitionTopologyFile` (`-savePartTopology`): upstream
             # writes `<name>_topology.pro` beside the MSH when the model is
             # partitioned (CreateFile.cpp FORMAT_MSH branch).

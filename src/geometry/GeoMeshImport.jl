@@ -384,8 +384,10 @@ end
 function _geo_import_cleared_native_factory!(m,context,file,caller)
     _geo_native_lower_factory_scope(m,context,file) || return false
     previous=m.meshing.mesh_authority
+    switch_tags=_geo_mesh_switch_tags(context)
     mixed,identities=Elements._read_mixed_msh_factory_with_identities(file,
-        Elements._mixed_msh_factory_context(context.mesh_node_max,context.mesh_element_max))
+        Elements._mixed_msh_factory_context(context.mesh_node_max,context.mesh_element_max);
+        switch_tags)
     plan=Model._model_mesh_factory_authority(m,mixed,identities,previous;caller)
     actual=plan.authority.mesh
     carrier=_geo_mixed_simplex_mesh(actual,caller)
@@ -414,12 +416,17 @@ end
 
 # A real file frontend can stage this same importer without generating a GEO
 # wrapper or installing a temporary model in the live API session.
-function _geo_stage_mesh_file(file;context_lc=1.0,forced_bbox=false)
+function _geo_stage_mesh_file(file;context_lc=1.0,forced_bbox=false,
+                              switch_tags=false)
     model=GeoModel();context=_GeoNumericContext()
     model.name=splitext(basename(file))[1]
     context.file_name=String(file)
     context.native_context_lc=context_lc
     context.native_context_forced_bbox=forced_bbox
+    # `Mesh.SwitchElementTags` is a stored option like any other — the API
+    # session's option table seeds it into the staged context.
+    switch_tags &&
+        (context.option_numbers[("Mesh",0,"SwitchElementTags")]=1.0)
     _geo_import_mesh_file!(model,context,file,"API.open")
     return (model=model,mesh=context.mesh,params=nothing,transfinite_tri=nothing,
         mesh_node_max=context.mesh_node_max,mesh_element_max=context.mesh_element_max,
@@ -438,11 +445,14 @@ function _geo_seed_mesh_context!(context,seed)
     return nothing
 end
 
-function _geo_stage_mesh_merge(file,model,seed;context_lc=1.0,forced_bbox=false)
+function _geo_stage_mesh_merge(file,model,seed;context_lc=1.0,forced_bbox=false,
+                               switch_tags=false)
     context=_GeoNumericContext();_geo_seed_mesh_context!(context,seed)
     context.file_name=String(file)
     context.native_context_lc=context_lc
     context.native_context_forced_bbox=forced_bbox
+    switch_tags &&
+        (context.option_numbers[("Mesh",0,"SwitchElementTags")]=1.0)
     _geo_import_mesh_file!(model,context,file,"API.merge")
     return (model=model,mesh=context.mesh,params=nothing,transfinite_tri=nothing,
         mesh_node_max=context.mesh_node_max,mesh_element_max=context.mesh_element_max,
@@ -451,9 +461,15 @@ function _geo_stage_mesh_merge(file,model,seed;context_lc=1.0,forced_bbox=false)
         native_element_lookup_receipt=context.native_element_lookup_receipt)
 end
 
+# `Mesh.SwitchElementTags` — stored like any other `.geo` numeric option,
+# consumed when an MSH 2.2 file is merged/imported through this context.
+_geo_mesh_switch_tags(context)=
+    !iszero(_geo_option_number(context,"Mesh",0,"SwitchElementTags"))
+
 function _geo_import_mesh_file!(m,context,file,caller)
     _geo_import_cleared_native_factory!(m,context,file,caller) && return nothing
-    mixed,identities=Elements._read_mixed_msh_with_identities(file)
+    switch_tags=_geo_mesh_switch_tags(context)
+    mixed,identities=Elements._read_mixed_msh_with_identities(file;switch_tags)
     # Native MSH4 creates ghosts at the live model dimension after ordinary
     # file entities are read, before partition entities are constructed.
     file_dimension=mixed.entity_data===nothing ? -1 :
