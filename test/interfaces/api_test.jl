@@ -951,8 +951,13 @@ end
         node_tags,_=_API.mesh.get_nodes()
         element_types,element_tags,_=_API.mesh.get_elements()
         @test length(node_tags)==64        # 4x4x4 structured grid
-        @test element_types==Int32[4]
-        @test length(element_tags[1])==162 # 3x3x3 cells x 6 tets
+        # Gmsh 4.15.2 `getElements(-1,-1)` aggregates every classified entity:
+        # the boundary Point/Line/Triangle products ride along with the
+        # volume's tets, emitted in ascending type-block order.
+        @test element_types==Int32[1,2,4,15]
+        @test [length(block) for block in element_tags]==[36,108,162,8]
+        # 3x3x3 cells x 6 tets live in the type-4 block
+        @test length(element_tags[findfirst(==(Int32(4)),element_types)])==162
         # A mismatched edge family fails explicitly.
         _API.mesh.set_transfinite_curve(1,6)
         @test_throws ArgumentError _API.mesh.generate(3)
@@ -993,11 +998,13 @@ end
         callback_nodes,_=_API.mesh.get_nodes()
         @test length(callback_nodes)>100
         _API.mesh.set_size_callback(nothing)
-        # optimize accepts entity scopes and the 2-D method aliases; unknown
-        # entities and unimplemented methods still fail.
+        # optimize accepts entity scopes and the 2-D method aliases; upstream
+        # only warns "Optimization of specified model entities is not
+        # interfaced yet" for dim_tags — even nonexistent entities return —
+        # while unimplemented methods still fail explicitly.
         _API.mesh.optimize("",false,1,[(3,1)])
         @test validate(_API.mesh.get()).ok
-        @test_throws ArgumentError _API.mesh.optimize("",false,1,[(3,99)])
+        @test _API.mesh.optimize("",false,1,[(3,99)])===nothing
         @test_throws ArgumentError _API.mesh.optimize("Netgen")
         # After clear(), queries answer empty arrays instead of throwing —
         # Gmsh parity for an unmeshed-but-known model.
@@ -1059,7 +1066,12 @@ end
         _API.mesh.generate(2)
         all_nodes,all_coords,_=_API.mesh.get_nodes()
         @test length(all_nodes)==21
-        lattice=sort!([(all_coords[3i-2],all_coords[3i-1]) for i in 1:21])
+        # Gmsh evaluates transfinite boundary parameters through its sampled
+        # density inversion, so the lattice carries ~1e-12 solver residue
+        # rather than exact quarter fractions — round it off before sorting
+        # (the residue can otherwise reorder near-tied sort keys).
+        lattice=sort!([(round(all_coords[3i-2],digits=6),
+                       round(all_coords[3i-1],digits=6)) for i in 1:21])
         @test lattice==sort!(vcat([(0.0,0.0)],
             [(i*(4-j)/16,i*j/16) for i in 1:4 for j in 0:4]))
         # Boundary nodes classify on the curves/points, so the surface entity
@@ -1071,12 +1083,17 @@ end
         @test validate(_API.mesh.get()).ok
         # The collapsed algorithm accepts unequal counts when the two sides
         # incident to the rotated collapsed corner match: (5,5,6) succeeds.
+        # Upstream mesh(2) skips Mesh1D once the edge mesh exists, so the new
+        # count only takes effect after clear() drops the stored boundary
+        # discretization.
         _API.mesh.set_transfinite_curve(ec,6)
+        _API.mesh.clear()
         _API.mesh.generate(2)
         un_nodes,_=_API.mesh.get_nodes()
         @test length(un_nodes)==25
-        # (5,6,7) has no valid collapsed corner and still fails explicitly.
+        # (5,7,6) has no valid collapsed corner and still fails explicitly.
         _API.mesh.set_transfinite_curve(eb,7)
+        _API.mesh.clear()
         @test_throws ArgumentError _API.mesh.generate(2)
         _API.mesh.set_transfinite_curve(eb,5)
         _API.mesh.set_transfinite_curve(ec,5)
@@ -1089,15 +1106,19 @@ end
         _API.mesh.generate(2)
         all_nodes,all_coords,_=_API.mesh.get_nodes()
         @test length(all_nodes)==15
-        lattice=sort!([(all_coords[3i-2],all_coords[3i-1]) for i in 1:15])
+        # Same ~1e-12 density-inversion residue as the collapsed lattice.
+        lattice=sort!([(round(all_coords[3i-2],digits=6),
+                       round(all_coords[3i-1],digits=6)) for i in 1:15])
         @test lattice==sort!([(i/4,j/4) for i in 0:4 for j in 0:4-i])
         tri_nodes,_=_API.mesh.get_nodes(2,tri_face)
         @test length(tri_nodes)==3
         _,_,tri_blocks=_API.mesh.get_elements(2,tri_face)
         @test div(length(tri_blocks[1]),3)==16
         @test validate(_API.mesh.get()).ok
-        # Mismatched transfinite curve counts fail explicitly under Tri=1.
+        # Mismatched transfinite curve counts fail explicitly under Tri=1;
+        # clear() forces the boundary re-mesh so the new count is real.
         _API.mesh.set_transfinite_curve(ec,6)
+        _API.mesh.clear()
         @test_throws ArgumentError _API.mesh.generate(2)
         _API.mesh.set_transfinite_curve(ec,5)
         # A loop built from reversed curve signs still meshes.
@@ -1121,7 +1142,9 @@ end
         _API.mesh.generate(2)
         pin_nodes,pin_coords,_=_API.mesh.get_nodes()
         @test length(pin_nodes)==21
-        pin_lattice=sort!([(pin_coords[3i-2],pin_coords[3i-1]) for i in 1:21])
+        # Same ~1e-12 density-inversion residue as above.
+        pin_lattice=sort!([(round(pin_coords[3i-2],digits=6),
+                           round(pin_coords[3i-1],digits=6)) for i in 1:21])
         @test pin_lattice==sort!(vcat([(0.0,1.0)],
             [(i*j/16,(4-i)/4) for i in 1:4 for j in 0:4]))
         @test validate(_API.mesh.get()).ok
