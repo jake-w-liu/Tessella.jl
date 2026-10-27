@@ -235,7 +235,9 @@ end
             _errtext(()->main([geo,"-2","-save_topology","-save_entities"])))
         # Options whose only documented consumers are absent upstream
         # backends still reject — the rejection names the missing feature.
-        for flag in ("-swapangle","-scale","-match")
+        # `-scale` is implemented (Mesh.ScalingFactor) and no longer
+        # belongs on this list.
+        for flag in ("-swapangle","-match")
             @test occursin("not implemented",
                 _errtext(()->main([geo,"-2",flag,"1"])))
         end
