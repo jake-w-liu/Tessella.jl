@@ -4425,11 +4425,19 @@ end
 
 Native analogue of Gmsh `AutomaticMeshSizeField` over one or more
 triangulated surfaces. Surface vertices carry prescribed sizes: per-vertex
-sphere-fit curvature `κ` yields `h = clamp(2π /(n κ), hmin, hmax)` — the
-upstream `2π/(nodePerTwoPi·kmax)` rule — and `n_nodes_per_circle = 0`
-disables the curvature stage, matching upstream's `nodePerTwoPi > 0` gate.
-Each input mesh keeps its own vertex set, so curvature rings never bleed
-across crease boundaries.
+maximum principal curvature `kmax` — estimated per input mesh by the same
+published Rusinkiewicz 2004 construction upstream's `CurvatureRusinkiewicz`
+runs on each model face (per-triangle least-squares second-fundamental
+tensors, vertex-frame projection, 2×2 eigensystem) — yields
+`h = clamp(2π /(n·kmax), hmin, hmax)`, the upstream
+`2π/(nodePerTwoPi·kmax)` rule. `n_nodes_per_circle = 0` disables the
+curvature channel here; upstream's `nodePerTwoPi > 0` test instead gates
+its whole octree refine pass (bulk refinement included) — a divergent
+bundle the per-channel form below deliberately avoids, since its only
+observable difference is on the `nPointsPerGap > 0` feature channel, which
+keeps working here. Each input mesh keeps its own vertex set, so curvature
+estimates never bleed across crease boundaries (upstream's shared-vertex
+merge likewise resolves per-face, last face winning).
 
 On a vector/tuple of surfaces the union additionally applies the remaining
 prescription stages of Gmsh's HXT field as discrete analogues:
@@ -4437,12 +4445,23 @@ prescription stages of Gmsh's HXT field as discrete analogues:
 - `features && n_points_per_gap > 0` — local feature size between
   non-incident triangles whose closest point lies within 60° of the
   candidate's normal cone ("thin layers"), contributing
-  `h_gap = dist / n_points_per_gap`. Triangles incident to the query
-  vertex — including co-located duplicate vertices on neighbouring
-  surfaces — are excluded so shared edges are not phantom gaps.
+  `h_gap = dist / n_points_per_gap` — upstream's `featureSize` writes the
+  same `edgeLength / nPointsPerGap` prescription onto Delaunay edges
+  spanning a medial-axis pole; the nearest-facing-triangle detector is the
+  honest stand-in for that Delaunay/medial machinery, which cannot be
+  reproduced without the restricted HXT tetrahedralizer (and cannot be
+  verified — the shipped oracle binary lacks HXT+P4EST). Triangles
+  incident to the query vertex — including co-located duplicate vertices
+  on neighbouring surfaces — are excluded so shared edges are not phantom
+  gaps. Note: upstream binds `features` to a flag it never reads — the
+  probe gates on `nPointsPerGap > 0` alone there; here the documented
+  option is honoured, so `features=false` suppresses the stage (a strict
+  superset of upstream's behaviour).
 - `hbulk` — fallback size where neither curvature nor a gap prescribes
   one (default `1.3·span/20`, the size upstream assigns to octree cells
-  that never touched the surface).
+  that never touched the surface; upstream additionally coarsens
+  all-untouched families — value-equal here since such leaves store the
+  same `hbulk`).
 - `smoothing && gradation > 0` — relaxation so sizes grow by at most
   `max(0, gradation−1)` per unit of distance, applied along union edges
   before the sizes are stored (the surface-edge part of upstream's
@@ -4490,15 +4509,23 @@ unconditional `edge ≤ hBulk` cover pass upstream runs
 `hbulk` at coarser granularity, which is value-equal but cheaper than the
 `O((span/hbulk)³)` uniform grid. The tree is 2:1 face-balanced, and
 `smoothing` applies the volumetric gradation — the upstream `limitSize`
-analogue, `h[q] = min(h[q], h[p] + (gradation−1)·|c_p − c_q|)` over
-face-adjacent leaf pairs, solved as a multi-source shortest path so the
-result is order-independent.
+analogue, `h[q] = min(h[q], h[p] + (gradation−1)·(edge_p+edge_q)/2)` over
+face-adjacent leaf pairs (upstream's exact per-pair axial distance), solved
+as a multi-source shortest path so the result is order-independent;
+upstream converges a finite-difference gradient sweep to the same family
+of bounds within a 1e-3 tolerance.
 
-Evaluation is cell-local, like upstream: `field_value` descends to the
-leaf containing the query (out-of-domain points clamp onto the boundary
-leaf) and returns its stored size clamped to `[hmin, hmax]` — piecewise
-constant across the domain, not a continuous extension of the vertex
-samples.
+Evaluation is cell-local: `field_value` descends to the leaf containing
+the query (out-of-domain points clamp onto the boundary leaf; upstream
+returns an unfound `1e22` sentinel outside its padded domain) and returns
+its stored size clamped to `[hmin, hmax]` — piecewise constant across the
+domain. Upstream's scalar `operator()` evaluates `size + ds·(p−c)` per
+leaf — a first-order correction by the residual finite-difference
+gradient left over from its smoothing iterations (bounded by
+`(gradation−1+1e-3)·edge/2`, and identically zero when `smoothing=false`)
+— and takes the minimum over leaves containing a boundary point; the
+piecewise-constant leaf value kept here agrees at every cell centre and
+differs inside a leaf by at most that bounded tilt.
 
 Default sizes follow upstream's resolution order: the model scale is the
 largest surface bounding-box span padded by 1.3, `hmin` defaults to
@@ -4596,28 +4623,34 @@ function AutomaticMeshSizeField(surfaces::Tuple;
         throw(ArgumentError(
             "$caller: default sizes are not representable"))
     hx>=hn || throw(ArgumentError("$caller: require hmax >= hmin"))
-    # Curvature rings stay inside each input surface's own vertex set: the
-    # union offsets already keep neighbouring meshes disjoint.
-    rings=[Int[] for _ in 1:nv_total]
-    @inbounds for t in axes(tris,2)
-        a=Int(tris[1,t]); b=Int(tris[2,t]); c=Int(tris[3,t])
-        push!(rings[a],b,c); push!(rings[b],a,c); push!(rings[c],a,b)
-    end
     # Curvature and feature prescriptions stay separate: the upstream cell
     # test refines on `min(hc/nElemPerCell, hf)` with `nElemPerCell = 2`, so
     # only the curvature half is halved, while the stored leaf size is the
     # clamped `min(hc, hf)` — the combined `h` below.
     hc=Vector{Float64}(undef,nv_total)
-    @inbounds for i in 1:nv_total
-        nbr=unique(rings[i])
-        κ=_sphere_fit_curvature(coords,i,nbr)
-        # Upstream's nodePerTwoPi>0 gate: n=0 disables the curvature stage.
-        hc[i]=(κ>0 && n>0) ? 2*π/(n*κ) : Inf
+    voff=0
+    @inbounds for mesh in surfaces
+        # Upstream runs `CurvatureRusinkiewicz` on each face's own mesh, so
+        # each input surface estimates its principal curvatures alone —
+        # estimates never bleed across crease boundaries or co-located
+        # copies. `n_nodes_per_circle=0` disables the curvature channel only
+        # (upstream's `nodePerTwoPi>0` test gates its whole refine pass, but
+        # the curvature term is the only part it changes here).
+        kmax=_auto_vertex_max_curvature(mesh.coords,mesh.tris)
+        for i in axes(kmax,1)
+            κ=kmax[i]
+            hc[voff+i]=(κ>0 && n>0) ? 2*π/(n*κ) : Inf
+        end
+        voff+=length(kmax)
     end
     # Local feature size between non-incident, normal-facing triangles —
-    # the discrete analogue of hxtOctreeSurfacesProches. Co-located
-    # duplicate vertices on neighbouring surfaces count as incident, so
-    # glued edges do not register zero-width gaps.
+    # the honest stand-in for upstream's Delaunay/medial-axis `featureSize`
+    # (which prescribes the same `length/nPointsPerGap` on gap-spanning
+    # Delaunay edges). Co-located duplicate vertices on neighbouring
+    # surfaces count as incident, so glued edges are not phantom gaps.
+    # Upstream binds its `features` option to a flag nothing reads — the
+    # stage is gated on `nPointsPerGap > 0` alone there; here the option is
+    # honoured and also disables the stage.
     lfs=features && ngap>0 ?
         _auto_local_feature_sizes(coords,tris,groups=_auto_colocated_groups(
             coords),bound=hx*ngap) : fill(Inf,nv_total)
@@ -5256,9 +5289,14 @@ function _auto_octree_balance!(t::_AutoOctree,touch::_AutoTouchers,
 end
 
 # Volumetric gradation (the upstream `limitSize` analogue): the multi-source
-# shortest-path fixpoint `h[q] = min(h[q], h[p] + slope·|c_p − c_q|)` over
-# face-adjacent leaf pairs. Deterministic (float-key, id tie-break) and
-# order-independent.
+# shortest-path fixpoint `h[q] = min(h[q], h[p] + slope·(edge_p+edge_q)/2)`
+# over face-adjacent leaf pairs — upstream's per-pair bound uses exactly the
+# cell-edge half-sum `data_opp1->h/2 + data->h/2`, the axial centre distance
+# across the shared face. Deterministic (float-key, id tie-break) and
+# order-independent; upstream instead iterates a finite-difference gradient
+# estimate and clamps pairs while the net directional gradient exceeds
+# α+1e-3, so this fixpoint enforces the same bound uniformly and a little
+# more strongly.
 function _auto_octree_gradation!(t::_AutoOctree,slope::Float64)
     # Every face-adjacent pair is recorded exactly once: a deeper leaf's
     # across-face probe lands in its coarser neighbour leaf directly (the
@@ -5294,12 +5332,12 @@ function _auto_octree_gradation!(t::_AutoOctree,slope::Float64)
     nbr=Vector{Int32}(undef,2*length(pairs))
     wgt=Vector{Float64}(undef,2*length(pairs))
     for (a,b) in pairs
-        la,_,ea=_auto_octree_box(t,Int(a))
-        lb,_,eb=_auto_octree_box(t,Int(b))
-        dx=(la[1]+ea/2)-(lb[1]+eb/2)
-        dy=(la[2]+ea/2)-(lb[2]+eb/2)
-        dz=(la[3]+ea/2)-(lb[3]+eb/2)
-        w=sqrt(dx*dx+dy*dy+dz*dz)*slope
+        _,_,ea=_auto_octree_box(t,Int(a))
+        _,_,eb=_auto_octree_box(t,Int(b))
+        # Upstream `limitSize` distances face neighbours by the axial
+        # centre separation (edge_a + edge_b)/2 — tangential offsets of
+        # hanging centres do not relax the bound.
+        w=(ea+eb)/2*slope
         ia=firsts[a]+deg[a];deg[a]+=1;nbr[ia]=b;wgt[ia]=w
         ib=firsts[b]+deg[b];deg[b]+=1;nbr[ib]=a;wgt[ib]=w
     end
@@ -5512,49 +5550,174 @@ function _auto_heap_pop!(heap::Vector{Tuple{Float64,Int32}})
     end
     return top
 end
-function _sphere_fit_curvature(coords,i,nbr)
-    isempty(nbr) && return 0.0
-    # Algebraic fit of xᵀx + d·x + e = 0 through vertex i and its 1-ring.
-    pts=Vector{NTuple{3,Float64}}(undef,length(nbr)+1)
-    pts[1]=(coords[1,i],coords[2,i],coords[3,i])
-    @inbounds for (k,j) in enumerate(nbr)
-        pts[k+1]=(coords[1,j],coords[2,j],coords[3,j])
-    end
-    # Shift to vertex i for conditioning.
-    c0=pts[1]
-    scale=0.0
-    @inbounds for p in pts
-        scale=max(scale,abs(p[1]-c0[1]),abs(p[2]-c0[2]),abs(p[3]-c0[3]))
-    end
-    (isfinite(scale) && scale>0) || return 0.0
-    N=zeros(Float64,4,4); b=zeros(Float64,4)
-    @inbounds for k in eachindex(pts)
-        x=(pts[k][1]-c0[1])/scale
-        y=(pts[k][2]-c0[2])/scale
-        z=(pts[k][3]-c0[3])/scale
-        row=(x,y,z,1.0); rhs=-(x*x+y*y+z*z)
-        for i in 1:4, j in 1:4
-            N[i,j]+=row[i]*row[j]
+# Per-vertex maximum principal curvature |κ| — the native counterpart of
+# upstream's `CurvatureRusinkiewicz` (src/numeric/curvature.cpp), which the
+# automatic field runs separately on each model face. The pipeline is the
+# published Rusinkiewicz 2004 construction: area-weighted vertex normals, a
+# 6×4 least-squares second-fundamental tensor per triangle in its own edge
+# frame, a per-vertex projection/accumulation into the vertex tangent frame
+# (uniform mean, as upstream — no Voronoi weighting), and the 2×2 symmetric
+# eigendecomposition whose extreme |λ| is the kmax upstream feeds
+# `2π/(nodePerTwoPi·kmax)`. Only the eigenvalue magnitudes are needed, so the
+# eigenvectors upstream builds for its vector output are skipped.
+function _auto_vertex_max_curvature(coords::AbstractMatrix{Float64},
+                                    tris::AbstractMatrix{Int32})
+    nv=size(coords,2);nt=size(tris,2)
+    normals=zeros(Float64,3,nv)
+    incident=[Int32[] for _ in 1:nv]
+    @inbounds for t in 1:nt
+        a=Int(tris[1,t]);b=Int(tris[2,t]);c=Int(tris[3,t])
+        ab=_sub3((coords[1,b],coords[2,b],coords[3,b]),
+                 (coords[1,a],coords[2,a],coords[3,a]))
+        ac=_sub3((coords[1,c],coords[2,c],coords[3,c]),
+                 (coords[1,a],coords[2,a],coords[3,a]))
+        n=(ab[2]*ac[3]-ab[3]*ac[2],ab[3]*ac[1]-ab[1]*ac[3],
+           ab[1]*ac[2]-ab[2]*ac[1])
+        for v in (a,b,c)
+            normals[1,v]+=n[1];normals[2,v]+=n[2];normals[3,v]+=n[3]
+            push!(incident[v],Int32(t))
         end
-        for i in 1:4; b[i]+=row[i]*rhs; end
     end
-    d=_solve4(N,b)
-    d===nothing && return 0.0
-    center=(-0.5d[1],-0.5d[2],-0.5d[3])
-    r2=center[1]^2+center[2]^2+center[3]^2-d[4]
-    r2>0 || return 0.0
-    radius=scale*sqrt(r2)
-    radius>0 || return Inf
-    return inv(radius)
+    @inbounds for i in 1:nv
+        nn=_norm3((normals[1,i],normals[2,i],normals[3,i]))
+        if isfinite(nn) && nn>0
+            normals[1,i]/=nn;normals[2,i]/=nn;normals[3,i]/=nn
+        else
+            normals[1,i]=0.0;normals[2,i]=0.0;normals[3,i]=0.0
+        end
+    end
+    # Second fundamental tensor per triangle, solved in the triangle's own
+    # frame u = p1−p0, v = n×u. The 6×4 least-squares system pairs each
+    # opposite-edge direction with the normal difference across it
+    # (eₖ = pₖ₊₁−pₖ₊₂, Δnₖ = nₖ₊₁−nₖ₊₂), then symmetrizes the two
+    # off-diagonal coefficients.
+    tensor=zeros(Float64,3,nt)   # rows: c00, c01=c10 (symmetrized), c11
+    sys=zeros(Float64,6,4);rhs=zeros(Float64,6)
+    @inbounds for t in 1:nt
+        i0=Int(tris[1,t]);i1=Int(tris[2,t]);i2=Int(tris[3,t])
+        p=((coords[1,i0],coords[2,i0],coords[3,i0]),
+           (coords[1,i1],coords[2,i1],coords[3,i1]),
+           (coords[1,i2],coords[2,i2],coords[3,i2]))
+        e=(_sub3(p[2],p[3]),_sub3(p[3],p[1]),_sub3(p[1],p[2]))
+        dn=(_sub3((normals[1,i1],normals[2,i1],normals[3,i1]),
+                  (normals[1,i2],normals[2,i2],normals[3,i2])),
+            _sub3((normals[1,i2],normals[2,i2],normals[3,i2]),
+                  (normals[1,i0],normals[2,i0],normals[3,i0])),
+            _sub3((normals[1,i0],normals[2,i0],normals[3,i0]),
+                  (normals[1,i1],normals[2,i1],normals[3,i1])))
+        e0=_sub3(p[2],p[1]);e1=_sub3(p[3],p[1])
+        nx=e0[2]*e1[3]-e0[3]*e1[2]
+        ny=e0[3]*e1[1]-e0[1]*e1[3]
+        nz=e0[1]*e1[2]-e0[2]*e1[1]
+        nn=_norm3((nx,ny,nz))
+        (isfinite(nn) && nn>0) || continue    # degenerate: zero tensor
+        nu=(nx/nn,ny/nn,nz/nn)
+        lu=_norm3(e0)
+        (isfinite(lu) && lu>0) || continue
+        u=(e0[1]/lu,e0[2]/lu,e0[3]/lu)
+        v=(nu[2]*u[3]-nu[3]*u[2],nu[3]*u[1]-nu[1]*u[3],nu[1]*u[2]-nu[2]*u[1])
+        fill!(sys,0.0);fill!(rhs,0.0)
+        for k in 1:3
+            eu=_distance_dot3(e[k],u);ev=_distance_dot3(e[k],v)
+            sys[2k-1,1]=eu;sys[2k-1,2]=ev
+            sys[2k,3]=eu;sys[2k,4]=ev
+            rhs[2k-1]=_distance_dot3(dn[k],u);rhs[2k]=_distance_dot3(dn[k],v)
+        end
+        # Normal equations solved by the shared 4×4 elimination — the
+        # upstream cofactor inverse is used unconditionally there (its
+        # singular-det path returns garbage); a singular system here keeps
+        # the zero tensor, which a planar triangle produces anyway.
+        N=zeros(Float64,4,4);B=zeros(Float64,4)
+        for i in 1:4,j in 1:4
+            s=0.0
+            for k in 1:6; s+=sys[k,i]*sys[k,j]; end
+            N[i,j]=s
+        end
+        for i in 1:4
+            s=0.0
+            for k in 1:6; s+=sys[k,i]*rhs[k]; end
+            B[i]=s
+        end
+        sol=_solve4(N,B)
+        sol===nothing && continue
+        tensor[1,t]=sol[1]
+        tensor[2,t]=0.5*(sol[2]+sol[3])
+        tensor[3,t]=sol[4]
+    end
+    # Per-vertex: project each incident triangle's tensor into the vertex
+    # tangent frame and average — upstream's uniform `A /= count` form, no
+    # area weighting. kmax is the extreme |λ| of the 2×2 symmetric tensor.
+    kmax=zeros(Float64,nv)
+    @inbounds for i in 1:nv
+        inc=incident[i]
+        isempty(inc) && continue
+        n=(normals[1,i],normals[2,i],normals[3,i])
+        # computeLocalFrame: u along z if |nx| dominates, else x.
+        seed=abs(n[1])>abs(n[2]) && abs(n[1])>abs(n[3]) ?
+             (0.0,0.0,1.0) : (1.0,0.0,0.0)
+        vP=_cross3(n,seed);lv=_norm3(vP)
+        (isfinite(lv) && lv>0) || continue   # zero normal: no curvature
+        vP=(vP[1]/lv,vP[2]/lv,vP[3]/lv)
+        uP=_cross3(vP,n)
+        A=0.0;B=0.0;D=0.0;count=0
+        for t32 in inc
+            t=Int(t32)
+            i0=Int(tris[1,t]);i1=Int(tris[2,t]);i2=Int(tris[3,t])
+            p0=(coords[1,i0],coords[2,i0],coords[3,i0])
+            p1=(coords[1,i1],coords[2,i1],coords[3,i1])
+            p2=(coords[1,i2],coords[2,i2],coords[3,i2])
+            e0=_sub3(p1,p0);e1=_sub3(p2,p0)
+            nx=e0[2]*e1[3]-e0[3]*e1[2]
+            ny=e0[3]*e1[1]-e0[1]*e1[3]
+            nz=e0[1]*e1[2]-e0[2]*e1[1]
+            nn=_norm3((nx,ny,nz))
+            (isfinite(nn) && nn>0) || continue
+            nu=(nx/nn,ny/nn,nz/nn)
+            lu=_norm3(e0)
+            (isfinite(lu) && lu>0) || continue
+            uF=(e0[1]/lu,e0[2]/lu,e0[3]/lu)
+            vF=_cross3(nu,uF)
+            up=(_distance_dot3(uP,uF),_distance_dot3(uP,vF))
+            lup=hypot(up[1],up[2])
+            (isfinite(lup) && lup>0) || continue
+            up=(up[1]/lup,up[2]/lup)
+            vp=(_distance_dot3(vP,uF),_distance_dot3(vP,vF))
+            lvp=hypot(vp[1],vp[2])
+            (isfinite(lvp) && lvp>0) || continue
+            vp=(vp[1]/lvp,vp[2]/lvp)
+            c0=tensor[1,t];c1=tensor[2,t];c3=tensor[3,t]
+            A+=up[1]*up[1]*c0+2*up[1]*up[2]*c1+up[2]*up[2]*c3
+            D+=vp[1]*vp[1]*c0+2*vp[1]*vp[2]*c1+vp[2]*vp[2]*c3
+            B+=vp[1]*up[1]*c0+(vp[2]*up[1]+vp[1]*up[2])*c1+vp[2]*up[2]*c3
+            count+=1
+        end
+        count>0 || continue
+        A/=count;B/=count;D/=count
+        tr=A+D;det2=A*D-B*B
+        s=sqrt(max(tr*tr/4-det2,0.0))
+        λ1=tr/2+s;λ2=tr/2-s
+        kmax[i]=max(abs(λ1),abs(λ2))
+    end
+    return kmax
 end
+# 4×4 partial-pivot solve for the curvature normal equations. The pivot test
+# is relative to the input's own magnitude — an absolute `eps` floor would
+# misreport any mesh scaled below ~1e-8 as singular (the normal-equation
+# entries scale with edge², so a 1e-9 octahedron sits at 1e-18), silently
+# dropping every triangle's tensor and flattening the curvature estimate.
 function _solve4(A::Matrix{Float64},b::Vector{Float64})
     M=copy(A); x=copy(b)
+    ref=0.0
+    @inbounds for i in 1:4, j in 1:4
+        ref=max(ref,abs(M[i,j]))
+    end
+    tol=eps(Float64)*ref
     @inbounds for k in 1:4
         piv=k; amax=abs(M[k,k])
         for i in k+1:4
             if abs(M[i,k])>amax; amax=abs(M[i,k]); piv=i; end
         end
-        amax<=eps(Float64) && return nothing
+        amax<=tol && return nothing
         if piv!=k
             for j in k:4; M[k,j],M[piv,j]=M[piv,j],M[k,j]; end
             x[k],x[piv]=x[piv],x[k]
@@ -5568,7 +5731,7 @@ function _solve4(A::Matrix{Float64},b::Vector{Float64})
     @inbounds for i in 4:-1:1
         s=x[i]
         for j in i+1:4; s-=M[i,j]*x[j]; end
-        abs(M[i,i])<=eps(Float64) && return nothing
+        abs(M[i,i])<=tol && return nothing
         x[i]=s/M[i,i]
     end
     return x

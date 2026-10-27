@@ -225,6 +225,57 @@ end
             floor_*vy*vy+lmax*uy*uy)
 end
 
+# The same scalar-bound fold for a parameter domain whose UV coordinates are
+# not world units: `h` is a world length, so the bound pulls back to
+# `N = G/h²` (first fundamental form over the bound), and the fold is the
+# simultaneous-diagonalization intersection `max(M, N)` — each generalized
+# eigendirection of `(M, N)` floors at 1. `M' = M + (1−λmin)·(Nv)(Nv)ᵀ` for
+# `v` N-normalized realizes exactly that: `Mv = λmin·Nv` becomes `M'v = Nv`
+# while the N-orthogonal eigendirection keeps `λmax` — exact when `M ∥ N`
+# (isotropic background), the canonical intersection approximation otherwise.
+# Unlike `_gmsh_metric_floor`, which retains a strong `lmax` below the bound
+# (the scalar-radius approximation upstream applies beside the metric), this
+# fold returns `N` itself when `λmax ≤ 1`: `G/h²` is a genuine metric cap, so
+# every generalized direction floors at the world-space bound.
+function _gmsh_metric_ground_floor(metric,ground,h)
+    a,b,d=metric
+    (h>0 && isfinite(h)) || return metric
+    inv2=1.0/(h*h)
+    n11=ground[1]*inv2;n12=ground[2]*inv2;n22=ground[3]*inv2
+    detn=n11*n22-n12*n12
+    detn>0 || return _gmsh_metric_floor(metric,h)
+    # det(M-λN)=0 → λ²·detN − λ·(a·n22 + d·n11 − 2b·n12) + detM = 0
+    cB=a*n22+d*n11-2.0*b*n12
+    detm=a*d-b*b
+    disc=cB*cB-4.0*detn*detm
+    # det(M-λN) has nonnegative roots for this SPD pair; a tiny negative
+    # discriminant is rounding on a repeated eigenvalue, which is the common
+    # case when `metric` and `ground/h²` are both proportional to the first
+    # fundamental form. Clamping keeps the pulled-back bound; only a grossly
+    # negative discriminant indicates a degenerate input and falls back.
+    disc < -64.0*eps(Float64)*max(cB*cB,4.0*detn*abs(detm),1.0) &&
+        return _gmsh_metric_floor(metric,h)
+    r=sqrt(max(disc,0.0))
+    lmin=(cB-r)/(2.0*detn);lmax=(cB+r)/(2.0*detn)
+    lmax<=1.0 && return (n11,n12,n22)
+    lmin>=1.0 && return metric
+    # Generalized eigenvector of the weak direction: (M − λmin·N)x = 0,
+    # null-space candidates (b − λmin·n12, λmin·n11 − a) and
+    # (λmin·n22 − d, b − λmin·n12) — keep the better-conditioned one.
+    vx=b-lmin*n12;vy=lmin*n11-a
+    wx=lmin*n22-d;wy=b-lmin*n12
+    wx*wx+wy*wy>vx*vx+vy*vy && ((vx,vy)=(wx,wy))
+    nv=sqrt(vx*vx+vy*vy)
+    nv>0 || return _gmsh_metric_floor(metric,h)
+    vx/=nv;vy/=nv
+    nx=n11*vx+n12*vy;ny=n12*vx+n22*vy
+    nvN=sqrt(vx*nx+vy*ny)
+    nvN>0 || return _gmsh_metric_floor(metric,h)
+    nx/=nvN;ny/=nvN
+    s=1.0-lmin
+    return (a+s*nx*nx,b+s*nx*ny,d+s*ny*ny)
+end
+
 @inline function _gmsh_triangle_radius(T,t,gsizes,extend_boundary)
     # Only a full trace carries persistent birth radii; a metric-only carrier
     # keeps the untraced scalar radius computation.
@@ -239,7 +290,7 @@ end
         metric=_gmsh_surface_metric(gsizes.trace,pa,pb,pc)
         if extend_boundary
             vs=_gmsh_mean_size3(gsizes.vsize[a],gsizes.vsize[b],gsizes.vsize[c])
-            metric=_gmsh_metric_floor(metric,vs)
+            metric=_gmsh_surface_metric_floor(gsizes.trace,metric,pa,pb,pc,vs)
         end
         _,r2=_gmsh_circumcenter_metric(pa,pb,pc,metric)
         return sqrt(max(r2,0.0))
@@ -335,7 +386,8 @@ function _gmsh_frontal_point(T,t,slot,gsizes,extend_boundary)
     # the edge's local scalar bound as the same eigenvalue floor used by
     # the queue radius.
     extend_boundary && gsizes.trace isa _GmshSurfaceMetricCarrier &&
-        (metric=_gmsh_metric_floor(metric,
+        (metric=_gmsh_surface_metric_floor(gsizes.trace,metric,
+            _pt(T,a),_pt(T,b),_pt(T,c),
             0.5*(gsizes.vsize[u]+gsizes.vsize[v])))
     center,_=_gmsh_circumcenter_metric(_pt(T,a),_pt(T,b),_pt(T,c),
                                      metric)
@@ -360,6 +412,15 @@ function _gmsh_frontal_point(T,t,slot,gsizes,extend_boundary)
     fast=(midpoint[1]+distance*dirx/ratio,
           midpoint[2]+distance*diry/ratio)
     opposite=_pt(T,_vert(T,t,slot))
+    if gsizes.trace isa _GmshSurfaceMetricCarrier
+        # optimalPointFrontalB's real surface circle: the circle is built in
+        # world space from the lifted vertices, not in the parametric plane.
+        wa=_gmsh_surface_world(gsizes.trace,T,u)
+        wb=_gmsh_surface_world(gsizes.trace,T,v)
+        wc=_gmsh_surface_world(gsizes.trace,T,_vert(T,t,slot))
+        return _gmsh_surface_circle_intersection(fast,gsizes.trace.lift,
+            wa,wb,wc)
+    end
     ex=pv[1]-pu[1];ey=pv[2]-pu[2]
     cross=ex*(opposite[2]-midpoint[2])-ey*(opposite[1]-midpoint[1])
     # optimalPointFrontalB retains its fast point when the cross-product

@@ -24,6 +24,46 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Warped ruled `Surface` fill through its parameter domain (2026-10-27, working tree)
+
+Declared `Surface`/`RuledSurface` records whose boundary wires do not fit one
+plane no longer reject as non-coplanar: `_model_surface_plane_admission`
+(`Model.jl`) admits genuinely warped `:ruled`/`:tric` faces, and
+`_model_ruled_surface_mesh` (`ModelSurfaceAlgorithms.jl`) meshes the patch's
+own `(u,v)` domain — boundary/embedded geometry maps through
+`_ruled_*_parameters`, a constrained Delaunay triangulation refines under a
+metric-only `_GmshSurfaceMetricCarrier` carrying `Jᵀ M_world J` plus the
+`G=JᵀJ` ground form, and nodes lift through `_ruled_surface_point` with
+canonical entity coordinates preserved bitwise. Insertion-kernel fixes that
+make the fill reach Gmsh 4.15.2 density:
+
+- `_gmsh_metric_ground_floor` pulls a world scalar bound back as `G/h²` via
+  generalized eigenvalues — repeated-eigenvalue discriminant clamps
+  Float64 cancellation (`≈−3e−11` for proportional pairs), mixed-branch
+  eigenvector corrected to `wy = b − λmin·n12`, `λmax ≤ 1` returns `N`
+  (the `lmax≤floor_` early-return experiment on the scalar
+  `_gmsh_metric_floor` was reverted: it neutered the planar tensor arm's
+  anisotropy — `model_metric_delaunay_arm` restored to 19/19).
+- `_gmsh_surface_circle_intersection` (`Mesh2DGmshNumeric.jl`) implements
+  `optimalPointFrontalB`'s true surface circle for carriers — Newton over
+  `lift(u,v) == middle₃ + d·(n₂cos t + n₁sin t)` — replacing the UV-plane
+  proxy that had applied the metric-normalized distance as a raw UV radius
+  (the Frontal-Delaunay stall cause: candidates overshot onto existing
+  lattice vertices, ~200 rejections, ~181 real nodes).
+- `_GmshSurfaceCircleTest` is mutable-armed per candidate with the seed
+  centroid metric — upstream `recurFindCavityAniso`'s `metricb` contract.
+
+Results through `execute_geo` (Julia 1.12.7, `--compile=min -O0`, actual
+exit 0): unit warped fixture 14 nodes/16 tris, deterministic, on-surface
+residual 3e-17; the 10×10 fixture 572 nodes/1056 tris vs gmsh's
+573/≈1058, residual 2.7e-15, min angle 33.7°. New coverage
+`test/geometry/model_warped_ruled_surface_test.jl` (32 assertions, extended
+runner) + a `test/functional/meshing.jl` e2e smoke. Regressions run: default
+suite 473/473, `meshsurface_test` 60/60, `model_metric_delaunay_arm` 19/19,
+`model_metric_surface_functional` 33/33, `model_surface_auto_algorithm`
+21/21. The AutomaticMeshSizeField audit items (`nPointsPerGap`, `hBulk`,
+smoothing/`limitSize`, adaptive octree, `p4estFileToLoad`) remain open.
+
 ### CLI batch flags: `-log`, `-cpu`, `-statreport`/`-append_statreport`, `-switch_tags`, `-preserve_numbering_msh2` (2026-10-27, landed `ac7cad6`, `2af3416`, `0c1934f`, `6389caa`)
 
 Remaining genuinely batch-implementable rejected flags gained real

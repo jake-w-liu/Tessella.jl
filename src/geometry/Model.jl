@@ -4596,18 +4596,47 @@ function model_to_mixed(m::GeoModel,mesh::Union{Mesh,MixedMesh},
     embedded_points,embedded_curves=
         _model_surface_embedding_tags(m,surface,caller)
 
-    plane=_model_surface_plane(m,surface,caller;allow_ruled=true)
+    plane=_model_surface_plane_admission(m,surface,caller)
     constraints=_surface_periodic_constraints(
         m,surface,caller;external_curves=external_curves)
     geometric_tolerance=max(1e-12,
         isempty(constraints) ? 0.0 : maximum(c.atol for c in constraints))
-    for node in axes(mesh.coords,2)
-        coordinate=(mesh.coords[1,node],mesh.coords[2,node],
-                    mesh.coords[3,node])
-        offset=_plane_offset(plane,coordinate)
-        abs(offset)<=geometric_tolerance || throw(ArgumentError(
-            "$caller: input node $node is $offset off the Surface[$surface] " *
-            "plane, outside the tolerance $geometric_tolerance"))
+    if plane===nothing
+        # A genuinely warped declared ruled patch: `parFromPoint`
+        # (`XYZtoUV`) round-trips each coordinate through the patch
+        # evaluator; the residual distance is the on-surface audit the
+        # plane offset performs for coplanar members. The floor carries the
+        # inverse map's own convergence scale, `1e-8·lc`, matching the
+        # `XYZtoUV` error bound.
+        ruled_lc=_model_lc(m)
+        ruled_lift=(u,v)->_ruled_surface_point(m,surface,u,v,caller)
+        ruled_tol=max(geometric_tolerance,1e-8*ruled_lc)
+        ruled_silent=Returns(nothing)
+        ruled_offset=(coordinate)->begin
+            u,v=_ruled_xyz_to_uv(m,surface,coordinate,1.0,ruled_lc,false,
+                ruled_silent,ruled_silent,caller)
+            point=ruled_lift(u,v)
+            hypot(point[1]-coordinate[1],point[2]-coordinate[2],
+                  point[3]-coordinate[3])
+        end
+        for node in axes(mesh.coords,2)
+            coordinate=(mesh.coords[1,node],mesh.coords[2,node],
+                        mesh.coords[3,node])
+            offset=ruled_offset(coordinate)
+            (isfinite(offset) && offset<=ruled_tol) || throw(ArgumentError(
+                "$caller: input node $node is $offset off Surface[$surface], " *
+                "outside the tolerance $ruled_tol"))
+        end
+    else
+        for node in axes(mesh.coords,2)
+            coordinate=(mesh.coords[1,node],mesh.coords[2,node],
+                        mesh.coords[3,node])
+            offset=_plane_offset(plane,coordinate)
+            abs(offset)<=geometric_tolerance || throw(ArgumentError(
+                "$caller: input node $node is $offset off the " *
+                "Surface[$surface] plane, outside the tolerance " *
+                "$geometric_tolerance"))
+        end
     end
     curve_tags=_model_projection_surface_curves(m,surface)
     isempty(curve_tags) && throw(ArgumentError(
@@ -4615,20 +4644,40 @@ function model_to_mixed(m::GeoModel,mesh::Union{Mesh,MixedMesh},
     any(curve->curve in curve_tags,embedded_curves) && throw(ArgumentError(
         "$caller: a surface curve cannot be both bounding and embedded"))
     all_curve_tags=sort!(unique!(vcat(curve_tags,embedded_curves)))
-    for curve in all_curve_tags,
-        point in Iterators.flatten(
-            (m.curves[curve],get(m.curve_control_points,curve,Int[])))
-        p=m.points[point]
-        scale=max(1.0,hypot(p...))
-        abs(_plane_offset(plane,p))<=1e-12*scale || throw(ArgumentError(
-            "$caller: Point[$point] is not coplanar with Surface[$surface]"))
-    end
-    for point in embedded_points
-        p=m.points[point]
-        scale=max(1.0,hypot(p...))
-        abs(_plane_offset(plane,p))<=1e-12*scale || throw(ArgumentError(
-            "$caller: embedded Point[$point] is not coplanar with " *
-            "Surface[$surface]"))
+    if plane===nothing
+        for curve in all_curve_tags,
+            point in Iterators.flatten(
+                (m.curves[curve],get(m.curve_control_points,curve,Int[])))
+            p=m.points[point]
+            offset=ruled_offset(p)
+            (isfinite(offset) && offset<=ruled_tol) || throw(ArgumentError(
+                "$caller: Point[$point] is not on Surface[$surface] " *
+                "(offset $offset)"))
+        end
+        for point in embedded_points
+            p=m.points[point]
+            offset=ruled_offset(p)
+            (isfinite(offset) && offset<=ruled_tol) || throw(ArgumentError(
+                "$caller: embedded Point[$point] is not on " *
+                "Surface[$surface] (offset $offset)"))
+        end
+    else
+        for curve in all_curve_tags,
+            point in Iterators.flatten(
+                (m.curves[curve],get(m.curve_control_points,curve,Int[])))
+            p=m.points[point]
+            scale=max(1.0,hypot(p...))
+            abs(_plane_offset(plane,p))<=1e-12*scale || throw(ArgumentError(
+                "$caller: Point[$point] is not coplanar with " *
+                "Surface[$surface]"))
+        end
+        for point in embedded_points
+            p=m.points[point]
+            scale=max(1.0,hypot(p...))
+            abs(_plane_offset(plane,p))<=1e-12*scale || throw(ArgumentError(
+                "$caller: embedded Point[$point] is not coplanar with " *
+                "Surface[$surface]"))
+        end
     end
     boundary,boundary_edges=_surface_boundary_topology(mesh,caller)
     isempty(boundary_edges) && throw(ArgumentError(
@@ -5387,6 +5436,24 @@ function _model_surface_plane(m::GeoModel,surface::Int,caller::AbstractString;
             norm=sqrt(normal[1]^2+normal[2]^2+normal[3]^2))
 end
 
+# Ordinary-fill plane admission shared by `mesh_model_surface`'s early gate
+# and the surface-once fallback: a declared ruled/tric patch whose boundary
+# cannot be coplanar is admissible (it routes to the parameter-domain ruled
+# fill, matching upstream's `RuledSurface` GFace triangulation); every other
+# plane-fit failure — unknown entities, degenerate loops, collinear wires —
+# still reports through the planar-surface contract.
+function _model_surface_plane_admission(m::GeoModel,t::Int,caller)
+    ruled=_surface_type(m,t) in (:ruled,:tric)
+    try
+        return _model_surface_plane(m,t,caller;allow_ruled=true)
+    catch err
+        err isa InterruptException && rethrow()
+        (ruled && err isa ArgumentError &&
+         occursin("not coplanar with",err.msg)) || rethrow()
+        return nothing
+    end
+end
+
 # Signed distance from `point` to `plane`, in absolute units. On an axis plane
 # this reduces to the single dropped-coordinate difference the historical z=0
 # checks measured.
@@ -5409,6 +5476,16 @@ function _model_surface_projection(
     surface::Int,caller::AbstractString)
     length(coordinates)>=3 || throw(ArgumentError(
         "$caller: Surface[$surface] needs at least three points"))
+    # Canonicalize mantissa dust before the exact predicates. Boolean
+    # materialization snaps vertex stores to fifteen significant digits
+    # (`_model_occ_snap_coord`), but evaluated boundary samples keep their
+    # record arithmetic — the same rim lands ~ulp off the snapped vertex,
+    # and the exact orient3 certificate compares unlike quantities.
+    # Running every coordinate through the same canonicalization makes
+    # the predicate decide geometry, not evaluation dust; genuinely
+    # non-planar boundaries still fail at any meaningful offset.
+    coordinates=NTuple{3,Float64}[
+        _model_occ_snap_coord.(c) for c in coordinates]
     anchor=coordinates[1]
     second_index=findfirst(point->point!=anchor,@view coordinates[2:end])
     second_index===nothing && throw(ArgumentError(
@@ -7135,7 +7212,16 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
             _periodic_positions)
         return production,get(m.embeds,(2,t),NTuple{2,Int}[])
     end
-    plane=_model_surface_plane(m,t,caller;allow_ruled=true)
+    plane=_model_surface_plane_admission(m,t,caller)
+    # A genuinely warped ruled patch has no planar projection: mesh its own
+    # parameter domain with the ruled lift and metric, the way upstream's
+    # `RuledSurface` GFace triangulates inside `parBounds`.
+    if plane===nothing
+        return _model_ruled_surface_mesh(m,t,forced,caller;
+            size_field=size_field,_mesh1d_options=_mesh1d_options,
+            param_sizes=param_sizes,_periodic_positions=_periodic_positions,
+            algorithm=algorithm)
+    end
     frame=_surface_metric_frame(plane)
     raw_xs,raw_ys,markers,segs,embedded,internal,index,raw_canonical=
         _surface_pslg(m,t,forced,caller;param_sizes=param_sizes,plane=plane,
@@ -9199,7 +9285,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     # through the planar-surface contract, not a downstream evaluator error.
     # Transfinite surfaces grade their boundary laws directly instead.
     if !haskey(m.meshing.transfinite_surfaces,t) && _surface_mesh_algorithm(m,t)!=3
-        _model_surface_plane(m,t,caller;allow_ruled=true)
+        _model_surface_plane_admission(m,t,caller)
     end
     forced=Dict{Int,Vector{Float64}}()
     param_sizes=if !haskey(m.meshing.transfinite_surfaces,t) &&

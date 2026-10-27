@@ -116,6 +116,7 @@ using Tessella
     include(joinpath(@__DIR__, "..", "geometry/model_native_line_sampling_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/geo_mesh_size_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/geo_mesh_dim_test.jl"))
+    include(joinpath(@__DIR__, "..", "geometry/model_warped_ruled_surface_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/geo_mesh_onlyempty_higher_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/geo_mesh_higher_default_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/geo_periodic_test.jl"))

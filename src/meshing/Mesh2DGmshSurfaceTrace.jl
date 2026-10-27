@@ -144,8 +144,8 @@ function _gmsh_native_trace_cavity_accept(T,cavity,boundary,parameter,onmodel,
                 _gmsh_mean_size3(length_scale.sizes.vsize[b],
                                 length_scale.sizes.vsize[a],
                                 length_scale.propagated) : limit
-            mn=_gmsh_metric_floor(
-                _gmsh_surface_metric(trace,pb,pa,parameter),vs)
+            mn=_gmsh_surface_metric_floor(trace,
+                _gmsh_surface_metric(trace,pb,pa,parameter),pb,pa,parameter,vs)
             d1n=sqrt(max(_gmsh_metric_distance2(pb,parameter,mn),0.0))
             d2n=sqrt(max(_gmsh_metric_distance2(pa,parameter,mn),0.0))
             close=d1n<.5 || d2n<.5
@@ -171,10 +171,25 @@ function _gmsh_native_trace_cavity_accept(T,cavity,boundary,parameter,onmodel,
     epsilon=verify_star ? 1e-12 : 1e12
     return abs(old_volume-new_volume)<epsilon*old_volume && !too_close
 end
-struct _GmshSurfaceCircleTest{S}
+# The `metricb` overload of inCircumCircleAniso evaluates every cavity
+# member against the candidate's metric — the tensor `buildMetric` returns
+# for the seed triangle's centroid in `insertAPoint`'s caller — not a fresh
+# per-member tensor. `metric[]` is armed per candidate by `refine!`; a
+# `nothing` payload keeps the per-member evaluation for other callers.
+mutable struct _GmshSurfaceCircleTest{S}
     trace::S
+    metric::Base.RefValue{Any}
 end
-(test::_GmshSurfaceCircleTest)(T,t,vid)=_gmsh_in_circumcircle(T,t,vid,test.trace)
+_GmshSurfaceCircleTest(trace)=_GmshSurfaceCircleTest{typeof(trace)}(trace,Ref{Any}(nothing))
+function (test::_GmshSurfaceCircleTest)(T,t,vid)
+    test.metric[]===nothing && return _gmsh_in_circumcircle(T,t,vid,test.trace)
+    _is_ghost_tri(T,t) && return false
+    first,second,third=_gmsh_surface_triangle_nodes(T,t,test.trace)
+    a=_pt(T,first);b=_pt(T,second);c=_pt(T,third)
+    center,radius=_gmsh_circumcenter_metric(a,b,c,test.metric[])
+    point=_pt(T,vid)
+    return _gmsh_metric_distance2(center,point,test.metric[])<radius
+end
 
 # Metric-only carrier for the ordinary (non-trace) Surface algorithms: a
 # tensor background rides the same dispatch points as a full trace —
@@ -187,11 +202,19 @@ end
 # `world` covers the birth rows exactly like `_gmsh_surface_trace`, so the
 # admission path's `trace.world`/`trace.lift` reads stay consistent as
 # inserted vertices append world rows.
-struct _GmshSurfaceMetricCarrier{L,G}
+struct _GmshSurfaceMetricCarrier{L,G,G2}
     world::Vector{NTuple{3,Float64}}
     lift::L
     metric::G
+    # First-fundamental tensor `G(u,v)=JᵀJ` of the lifted domain — `nothing`
+    # for isometric (planar) coordinates where UV units are world units.
+    # Armed on genuinely warped parameter domains so a world scalar bound
+    # `vs` folds into the UV metric as `G/vs²` (the `I/vs²` pullback), not
+    # the dimensionless `I/vs²` eigenvalue floor `_gmsh_metric_floor` uses.
+    ground::G2
 end
+@inline _GmshSurfaceMetricCarrier(world,lift,metric)=
+    _GmshSurfaceMetricCarrier(world,lift,metric,nothing)
 @inline _gmsh_surface_triangle_nodes(T,t,::_GmshSurfaceMetricCarrier)=
     (_vert(T,t,1),_vert(T,t,2),_vert(T,t,3))
 @inline _gmsh_surface_incoming_slots(T,t,::_GmshSurfaceMetricCarrier)=(2,3,1)
@@ -207,6 +230,18 @@ end
     metric=_gmsh_surface_metric(carrier,pa,pb,pc)
     center,_=_gmsh_circumcenter_metric(pa,pb,pc,metric)
     return center
+end
+# Scalar local bound folded into the UV metric at the evaluation point
+# `(pu,pv,pw)` — the trace centroid like `_gmsh_surface_metric`. World-aligned
+# traces keep `_gmsh_metric_floor`; a carrier armed with `ground` folds the
+# pulled-back bound `G/h²` through `_gmsh_metric_ground_floor`.
+@inline _gmsh_surface_metric_floor(trace,metric,pu,pv,pw,h)=
+    _gmsh_metric_floor(metric,h)
+@inline function _gmsh_surface_metric_floor(
+        carrier::_GmshSurfaceMetricCarrier,metric,pu,pv,pw,h)
+    carrier.ground===nothing && return _gmsh_metric_floor(metric,h)
+    u=(pu[1]+pv[1]+pw[1])/3.0;v=(pu[2]+pv[2]+pw[2])/3.0
+    return _gmsh_metric_ground_floor(metric,carrier.ground(u,v),h)
 end
 function _gmsh_surface_trace_children!(::_GmshSurfaceMetricCarrier,T,cavity,
                                        boundary,vid,gsizes,lc1,bg)

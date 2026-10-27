@@ -1560,6 +1560,13 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
         if gmsh_insertion
             # Upstream `insertAPoint`: the point is placed first (the exact
             # predicates need its coordinates), the cavity grows from `worst`
+            if false && circle_test isa _GmshSurfaceCircleTest
+                # recurFindCavityAniso's `metricb` overload: the whole cavity
+                # is grown against the candidate's seed-metric, not fresh
+                # per-member tensors.
+                circle_test.metric[]=_gmsh_surface_metric(_gmsh_surface_trace,
+                    _pt(T,a),_pt(T,b),_pt(T,c))
+            end
             # while the point is strictly inside its circumcircle and
             # otherwise from the triangle actually containing it (`ptin`),
             # and `insertVertexB` then rejects on a single-triangle cavity,

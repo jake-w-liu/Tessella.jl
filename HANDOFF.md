@@ -1235,6 +1235,67 @@ assertions — graded z-levels, prism/quad element
 types, torus azimuth layers, the point ring — plus the
 new rejection gates under atomicity snapshots.
 
+### Warped ruled `Surface` fill through its own parameter domain (2026-10-27)
+
+Devin resumed the AutomaticMeshSizeField audit and the non-planar
+four-wire `Surface` gap. A declared `Surface`/`RuledSurface` whose wires do
+not fit one plane previously rejected as non-coplanar; upstream Gmsh 4.15.2
+meshes such faces in the patch's own `(u,v)` domain and lifts every interior
+node through `GFace::point`, measuring distances through the first
+fundamental form. The native construction now mirrors that:
+`_model_surface_plane_admission` lets genuinely warped `:ruled`/`:tric`
+records bypass the planar fit (only when non-coplanarity is the sole
+failure), and `_model_ruled_surface_mesh`
+(`ModelSurfaceAlgorithms.jl`) builds the boundary/embedded PSLG in the
+parameter domain through `_ruled_vertex_parameters`/`_ruled_curve_parameters`,
+runs constrained Delaunay plus the upstream-family refinement under a
+metric-only `_GmshSurfaceMetricCarrier` armed with `metric(u,v) = Jᵀ M_world
+J` (the anisotropic pullback or isotropic `G/h²`), and lifts nodes through
+`_ruled_surface_point` — entity-derived rows keep canonical bitwise curve
+coordinates. Recombination runs on physical coordinates with protected
+embedded edges.
+
+Two correctness fixes in the insertion kernel carry the arc:
+
+- `_gmsh_surface_metric_floor`/`_gmsh_metric_ground_floor`
+  (`Mesh2DGmshInsertion.jl`): a world-space scalar bound `vs` folds into the
+  UV metric as `G/vs²`, not `I/vs²` — generalized eigendirections of
+  `(M, G/vs²)` floor at 1. The repeated-eigenvalue discriminant clamps
+  tiny-negative Float64 cancellation (proportional `M ∥ N` is the common
+  case, `disc ≈ −3e−11`) and the weak-direction null vector uses
+  `wy = b − λmin·n12`. `λmax ≤ 1` returns `N` — a genuine metric cap, unlike
+  `_gmsh_metric_floor`'s established keep-`lmax` scalar-radius approximation
+  (reverting an `lmax≤floor_` early-return that had neutered the planar
+  tensor arm's anisotropy: verified `model_metric_delaunay_arm` 19/19,
+  algo-5 tensor 54 tris, algo-6 60/64).
+- `_gmsh_surface_circle_intersection` (`Mesh2DGmshNumeric.jl`) implements
+  `optimalPointFrontalB`'s world-space circle for metric carriers: the
+  frontal circle is `middle₃ + d·(n₂·cos t + n₁·sin t)` in the seed
+  triangle's tangent plane, Newton-solved against `lift(u,v)` — the previous
+  UV-plane proxy applied the metric-normalized `distance` as a raw UV
+  radius and overshot by the domain metric scale, which is exactly why
+  Frontal-Delaunay stalled at ~181 real nodes (rejected candidates landed
+  on existing lattice vertices; degenerate fans triggered the upstream
+  `1e22` area sentinel). Cavity growth now arms `_GmshSurfaceCircleTest`
+  with the candidate's seed-centroid metric, matching upstream
+  `recurFindCavityAniso`'s `metricb` overload.
+
+Verified end-to-end through `execute_geo`: the unit warped fixture (fourth
+corner `z=0.5`, `lc=0.5`) produces 14 nodes/16 tris deterministic
+(`mesh_crc`-stable structure, on-surface residual 3e-17, min angle 37°);
+the 10×10 fixture (`z=5.0`) produces 572 nodes/1056 tris vs Gmsh 4.15.2's
+573 nodes/~1058 surface triangles — residual 2.7e-15, min angle 33.7°.
+Delaunay (algo 5), Frontal-Delaunay (algo 6) and AUTO (algo 2 → 6 on
+non-planar) all fill on-surface. Permanent coverage:
+`test/geometry/model_warped_ruled_surface_test.jl` (32 assertions incl.
+repeated-eigenvalue/eigenvector-sign unit pins) wired into the extended
+runner; a compact e2e smoke in `test/functional/meshing.jl`. Default suite
+473/473 actual exit 0 (Julia 1.12.7, `--compile=min -O0`); `meshsurface_test`
+60/60; `model_metric_surface_functional` 33/33; `model_surface_auto_algorithm`
+21/21. Remaining scope: the AutomaticMeshSizeField audit items
+(`nPointsPerGap`, `hBulk`, smoothing/`limitSize`, adaptive-octree and
+`p4estFileToLoad` semantics) and the broader P1–P6 checklist stay open.
+
 ### Current Devin transfer and final verified batch
 
 The latest user request is to document all unfinished work for Devin and stop

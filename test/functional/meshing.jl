@@ -49,4 +49,31 @@
     @test validate(quadratic).ok && p2_min_jacobian(quadratic) > 0
     @test p2_volume(quadratic) ≈ 1 / 6
     @test quadratic.tet_tag == Int32[7]
+
+    # A genuinely non-coplanar four-wire Surface meshes in its ruled
+    # parameter domain (no planar projection exists) and every node lifts
+    # onto the bilinear patch z = 0.5·(1−x)·y.
+    warped = mktemp() do path, io
+        write(io, """
+            Point(1) = {0, 0, 0, 0.5};
+            Point(2) = {1, 0, 0, 0.5};
+            Point(3) = {1, 1, 0, 0.5};
+            Point(4) = {0, 1, 0.5, 0.5};
+            Line(1) = {1, 2};
+            Line(2) = {2, 3};
+            Line(3) = {3, 4};
+            Line(4) = {4, 1};
+            Curve Loop(1) = {1, 2, 3, 4};
+            Surface(1) = {1};
+            """)
+        close(io)
+        execute_geo(path; mesh_dim=2).mesh
+    end
+    @test validate(warped).ok && MT.ntris(warped) > 0
+    for column in axes(warped.coords, 2)
+        x, y, z = warped.coords[1, column], warped.coords[2, column],
+                  warped.coords[3, column]
+        u = clamp(x, 0.0, 1.0); v = clamp(y, 0.0, 1.0)
+        @test abs(z - 0.5 * (1 - u) * v) < 1e-12
+    end
 end

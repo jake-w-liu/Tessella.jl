@@ -260,3 +260,64 @@ function _gmsh_plane_circle_intersection(fast,middle,tangent,distance)
     success,point=_gmsh_plane_circle_newton(fast,middle,tangent,distance)
     return success ? (point[1],point[2]) : fast
 end
+
+# optimalPointFrontalB on a genuinely warped chart: the frontal circle lives
+# in world space — radius `d` around the edge's world midpoint in the seed
+# triangle's tangent plane, `middle + d·(n2·cos t + n1·sin t)` — and
+# `intersectCurveSurface` Newton-solves `lift(u,v) == circle(t)` for
+# `(u,v,t)` from the fast UV guess. The UV-plane proxy cannot express that
+# circle: it applied the metric-normalized `distance` as a raw UV radius and
+# overshot by the domain's metric scale. A degenerate tangent normal or a
+# failed Newton keeps the fast point, matching upstream's `return true`.
+@inline function _gmsh_surface_circle_residual!(residual,x,lift,middle,n2,n1,d)
+    s=lift(x[1],x[2])
+    cs=cos(x[3]);sn=sin(x[3])
+    residual[1]=s[1]-(middle[1]+d*(n2[1]*cs+n1[1]*sn))
+    residual[2]=s[2]-(middle[2]+d*(n2[2]*cs+n1[2]*sn))
+    residual[3]=s[3]-(middle[3]+d*(n2[3]*cs+n1[3]*sn))
+    return nothing
+end
+
+function _gmsh_surface_circle_intersection(fast,lift,wa,wb,wc)
+    middle=((wa[1]+wb[1])*0.5,(wa[2]+wb[2])*0.5,(wa[3]+wb[3])*0.5)
+    e=_gmsh_sub3(wb,wa)
+    g=_gmsh_sub3(wc,middle)
+    n1=_gmsh_cross3(e,g)
+    n1n=_gmsh_norm3(n1)
+    n1n<1e-12 && return fast
+    n1=(n1[1]/n1n,n1[2]/n1n,n1[3]/n1n)
+    n2=_gmsh_normalize3(_gmsh_cross3(n1,e))
+    # The circle's world radius is the fast point's own world distance to the
+    # edge midpoint — exactly the `L` optimalPointFrontal returned upstream.
+    wf=lift(fast[1],fast[2])
+    d=_gmsh_norm3(_gmsh_sub3(wf,middle))
+    (isfinite(d) && d>0) || return fast
+    x=Float64[fast[1],fast[2],0.0]
+    residual=zeros(3);perturbed=similar(residual);step=similar(residual)
+    qr=Matrix{Float64}(undef,3,3);h=similar(residual)
+    norms=similar(residual);direct=similar(residual)
+    permutation=Vector{Int}(undef,3)
+    _gmsh_surface_circle_residual!(residual,x,lift,middle,n2,n1,d)
+    _gmsh_norm3(residual)<d*1e-8 && return (fast[1],fast[2])
+    for _ in 1:100
+        _gmsh_norm3(x)>1e6 && return fast
+        _gmsh_surface_circle_residual!(residual,x,lift,middle,n2,n1,d)
+        all(iszero,residual) && break
+        for column in 1:3
+            difference=1e-4*abs(x[column])
+            difference==0.0 && (difference=1e-4)
+            x[column]+=difference
+            _gmsh_surface_circle_residual!(perturbed,x,lift,middle,n2,n1,d)
+            for row in 1:3
+                qr[row,column]=(perturbed[row]-residual[row])/difference
+            end
+            x[column]-=difference
+        end
+        _gmsh_qr_solve3!(qr,residual,step,h,norms,direct,permutation)
+        for row in 1:3
+            x[row]-=step[row]
+        end
+        _gmsh_norm3(step)<1e-6 && return (x[1],x[2])
+    end
+    return fast
+end
