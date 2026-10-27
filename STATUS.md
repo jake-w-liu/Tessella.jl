@@ -24,6 +24,52 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### CLI batch flags: `-log`, `-cpu`, `-statreport`/`-append_statreport`, `-switch_tags`, `-preserve_numbering_msh2` (2026-10-27, landed `ac7cad6`, `2af3416`, `0c1934f`, `6389caa`)
+
+Remaining genuinely batch-implementable rejected flags gained real
+observable behavior, with public Gmsh 4.15.2 source as the spec:
+
+- `-log <file>` opens/truncates a Msg log for the `CLI.main` duration;
+  every message-channel emission mirrors into it — direct `.geo`
+  `Printf` output unprefixed, `Warning :`/`Error   :`/`Info    :`
+  rows, native diagnostics, and post-view parser errors. Implemented
+  via process-global `_MSG_LOG_IO` in `IO.jl` (`_msg_log_open/close/
+  write`), reliably closed in `finally`.
+- `-cpu` sets `_MSG_INFO_RESOURCES`; Info and Error rows append the
+  exact upstream suffix ` (From start: Wall %gs, CPU %gs, Mem %gMb)`
+  with user CPU time (Windows `GetProcessTimes` user FILETIME, POSIX
+  `getrusage` `ru_utime`) and peak RSS in MiB. Warnings and direct
+  output carry no suffix, matching upstream `Msg::Info`/`Msg::Error`.
+- `-statreport <file>` truncates and writes the upstream
+  `PrintMesh2dStatistics` header plus one row after a 2-D generation
+  pass; `-append_statreport` appends the row only. Both work on the
+  standalone `.geo` path (via `geo_entity_mesh` per model surface) and
+  the API/session path (via `API.LAST_MESH` + model entities, skipping
+  `DiscreteSurface` like upstream's CAD-face iteration). Fields:
+  `#faces`, `#fail`, `#t`, `Qavg`/`Qbest`/`Qworst` from triangle
+  `gamma` (`2*r_in/r_circ`), `#Q>90`(+ratio), unique-edge `#e`, `tau`,
+  `#Egood`(+ratio), `CPU` seconds; emits
+  `Info : Efficiency index for surface mesh tau=%g`.
+- `-switch_tags`/`Mesh.SwitchElementTags` swaps MSH 2.2 physical and
+  elementary tag fields in both text and binary readers, wired through
+  `.geo` `Merge`, `GeoMeshImport`, and API open/merge staging; the
+  session path installs it into `API.OPTIONS` before the file loop.
+- `-preserve_numbering_msh2`/`Mesh.PreserveNumberingMsh2` makes MSH 2.2
+  writers emit stored external element tags, centralized in
+  `_v2_write_tags` and propagated through classified, mixed, projected,
+  and API export paths.
+- Still rejected with precise reasons: `-4`, `-part_weight`/`-partWeight`
+  (no weighted graph partition producer), `-swapangle` (no boundary-edge
+  swap optimizer), `-match`, `-watch`, `-debugSurface`, `-run`/ONELAB.
+  `-part_physicals` is another agent's in-flight work (uncommitted).
+- Verification: focused `.geo` fixture checks of every flag end-to-end
+  (log mirroring, resource suffixes, stat rows on both paths,
+  preserved tags `[5,17]`, tag swap `3→9`, rejection texts); regression
+  suites `cli_frontends_test` 87/87, `cli_test` 224/224,
+  `cli_save_options_test` 61/61 (fixed a stale `-scale` rejection left
+  red by `119fd63`), `cli_options_functional_test` 48/48 — all under
+  `julia --compile=min -O0` on Julia 1.12.7.
+
 ### CutPlane/CutSphere/Isosurface oracle-exact parity + `.pos` transport (2026-10-23, landed `6d6c071`)
 
 Deep-debugged record-by-record against gmsh 4.15.2 (`APIPlugins.jl`,

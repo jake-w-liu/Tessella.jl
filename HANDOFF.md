@@ -5679,6 +5679,33 @@ this session: `-part_weight`, `-part_physicals`, `-swapangle`,
 `-match`, `-statreport`, `-run`/ONELAB family, `-cpu`, `-log`,
 `-watch`, plus the GUI-only block (correctly rejected).
 
+2026-10-27 CLI batch-flag increment landed: `-log <file>` mirrors the
+full Msg channel (direct `.geo` `Printf`, warnings, errors, native
+diagnostics, post-view errors) into the log file; `-cpu` appends the
+upstream `(From start: Wall %gs, CPU %gs, Mem %gMb)` suffix to
+Info/Error rows using user CPU time (GetProcessTimes/getrusage) and
+`Sys.maxrss` MiB (`2af3416`); `-statreport`/`-append_statreport` write
+the upstream `PrintMesh2dStatistics` header+row (face/fail counts,
+triangle-gamma aggregates, unique edges, tau efficiency index,
+generation CPU) on both the standalone `.geo` path and the API session
+path, skipping `DiscreteSurface` entities (`0c1934f`);
+`-switch_tags`/`Mesh.SwitchElementTags` swaps MSH 2.2
+physical/elementary fields on text+binary input through `.geo` Merge,
+factory, and API open/merge staging; `-preserve_numbering_msh2`/
+`Mesh.PreserveNumberingMsh2` writes stored external element tags on
+MSH 2.2 output through every writer (`ac7cad6`); stale `-scale`
+retained-rejection test fixed (`6389caa`). Remaining rejected batch
+flags: `-4` (adaptive batch mode), `-part_weight` (no weighted
+partition producer), `-swapangle` (no boundary-edge swap optimizer),
+`-match`, `-watch`, `-debugSurface`, `-run`/ONELAB family, and the
+GUI-only block. `-part_physicals` is another agent's in-flight work —
+its implementation stays uncommitted in the tree. Verified: focused
+`.geo` fixture checks for every flag (log mirror, resource suffix,
+stat report rows on both paths, preserved tags `[5,17]`, tag swap
+`3→9`), `cli_frontends_test` 87/87, `cli_test` 224/224,
+`cli_save_options` 61/61, `cli_options_functional` 48/48 — all under
+`--compile=min -O0`.
+
 - **P1**: remaining HXT-exact parity inside the now-octree-backed
   `AutomaticMeshSizeField` (sphere-fit curvature, facing-triangle
   `nPointsPerGap` local feature size, `hBulk` fallback, edge-gradation
