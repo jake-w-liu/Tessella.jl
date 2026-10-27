@@ -13,11 +13,17 @@ function _native_diagnostic_emit_locked(kind::Symbol,message::AbstractString;opt
     end
     threshold=kind===:error ? 1 : kind===:warning ? 2 : kind===:info ? 4 : 99
     get(options,"General.Verbosity",5.0)>=threshold || return nothing
+    # `-cpu` (`Msg::SetInfoCpu/SetInfoMem`): Info and Error messages carry the
+    # resource suffix into every channel before the log/terminal emit
+    # (upstream appends `PrintResources` inside `Msg::Info` and `Msg::Error`).
+    kind in (:info,:error) && IO._MSG_INFO_RESOURCES[] &&
+        (message=message*IO._msg_resource_suffix())
     label=kind===:error ? "Error" : kind===:warning ? "Warning" : kind===:info ? "Info" : "Debug"
     NATIVE_LOGGER_ACTIVE[] && push!(NATIVE_LOGGER_MESSAGES,string(label,": ",message))
+    prefix=kind===:error ? "Error   : " : kind===:warning ? "Warning : " : kind===:info ? "Info    : " : "Debug   : "
+    IO._msg_log_write(prefix,message)
     if !iszero(get(options,"General.Terminal",1.0))
         stream=kind in (:error,:warning) ? stderr : stdout
-        prefix=kind===:error ? "Error   : " : kind===:warning ? "Warning : " : kind===:info ? "Info    : " : "Debug   : "
         println(stream,prefix,message);flush(stream)
     end
     return nothing

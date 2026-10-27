@@ -107,6 +107,7 @@ using ..IO: _geo_string_rhs, _geo_eval_string_list
 using ..IO: _geo_matching_delim, _GEO_COLOR_NAMES, _geo_braced_end
 using ..IO: _geo_option_number
 using ..IO: _geo_msg_error!, _geo_eof_error!, _geo_context_has_variable
+using ..IO: _msg_log_write
 using ..IO: _geo_exec_struct_def!
 using ..IO: _GeoSyntaxAbort, _geo_syntax_abort, _geo_first_token,
             _geo_stmt_head_token, _GeoLoopLevel, _GeoWhileLevel
@@ -9193,8 +9194,9 @@ function _geo_exec_print!(kind::AbstractString,args_src::AbstractString,
     expanded=_geo_vsnprintf_expand(output)
     if kind=="Printf"
         # `Msg::Direct` strips one trailing newline then writes `str\n` to
-        # stdout.
+        # stdout (and verbatim into `-log`).
         print(stdout,chomp(expanded),"\n");flush(stdout)
+        _msg_log_write("",chomp(expanded))
     elseif kind=="Warning"
         _geo_yywarn!(context,expanded)
     else

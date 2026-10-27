@@ -2301,6 +2301,76 @@ end
 
 _geo_syntax_abort(token::AbstractString)=
     throw(_GeoSyntaxAbort(String(token),"",false))
+# ---------------------------------------------------------------------------
+# `-log <file>` / `-cpu` — the Tessella counterparts of upstream's
+# `Msg::_logFile` (`Msg::SetLogFileName`) and `Msg::SetInfoCpu`/
+# `Msg::SetInfoMem`. The CLI installs the sinks for the duration of a `main`
+# call: every Msg-channel line the terminal prints (Error/Warning/Info/Debug
+# plus verbatim `Msg::Direct` text) is mirrored into the log file, and
+# Info/StatusBar messages carry the ` (From start: Wall %gs, CPU %gs, Mem
+# %gMb)` resource suffix. Both are process-global like the upstream
+# originals; `CLI.main` resets them in a `finally`, so API-only runs are
+# unaffected.
+const _MSG_LOG_IO=Ref{Any}(nothing)
+const _MSG_INFO_RESOURCES=Ref{Bool}(false)
+const _MSG_START_NS=Ref{UInt64}(0)
+# Upstream's `Fopen(name,"w")` is a text-mode stream — CRLF on Windows.
+const _MSG_LOG_NEWLINE=Sys.iswindows() ? "\r\n" : "\n"
+
+function _msg_log_open(path::AbstractString)
+    io=try
+        open(path,"w")
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("tessella: -log could not open file '$path'"))
+    end
+    _MSG_LOG_IO[]=io
+    return io
+end
+
+function _msg_log_close()
+    io=_MSG_LOG_IO[]
+    _MSG_LOG_IO[]=nothing
+    io===nothing || close(io)
+    return nothing
+end
+
+function _msg_log_write(prefix::AbstractString,message::AbstractString)
+    io=_MSG_LOG_IO[]
+    io===nothing && return nothing
+    print(io,prefix,message,_MSG_LOG_NEWLINE)
+    flush(io)
+    return nothing
+end
+
+# User-mode process CPU seconds — the `Cpu()` upstream's `GetResources`
+# reports (Windows process user FILETIME, POSIX `ru_utime`).
+function _msg_cpu_time()
+    if Sys.iswindows()
+        creation=Ref{UInt64}(0);exit_time=Ref{UInt64}(0)
+        kernel=Ref{UInt64}(0);user_time=Ref{UInt64}(0)
+        handle=ccall((:GetCurrentProcess,"kernel32"),Ptr{Cvoid},())
+        ok=ccall((:GetProcessTimes,"kernel32"),Int32,
+            (Ptr{Cvoid},Ref{UInt64},Ref{UInt64},Ref{UInt64},Ref{UInt64}),
+            handle,creation,exit_time,kernel,user_time)
+        ok!=0 || return 0.0
+        return Float64(user_time[])/1.e7
+    end
+    # `struct rusage` opens with `ru_utime` — two Clong fields on LP64.
+    usage=zeros(Clong,32)
+    ccall(:getrusage,Cint,(Cint,Ptr{Cvoid}),Cint(0),usage)
+    return Float64(usage[1])+Float64(usage[2])/1.e6
+end
+
+# ` (From start: Wall %gs, CPU %gs, Mem %gMb)` — upstream
+# `Msg::PrintResources(false, cpu, cpu, mem)`. `Sys.maxrss` is the same peak
+# working set upstream reads (`PeakWorkingSetSize`/`ru_maxrss`).
+function _msg_resource_suffix()
+    wall=Float64(time_ns()-_MSG_START_NS[])/1.e9
+    return @sprintf(" (From start: Wall %gs, CPU %gs, Mem %gMb)",
+        wall,_msg_cpu_time(),Float64(Sys.maxrss())/1048576.0)
+end
+
 _geo_syntax_abort(token::AbstractString,detail::AbstractString)=
     throw(_GeoSyntaxAbort(String(token),String(detail),false))
 
@@ -2311,8 +2381,12 @@ Base.showerror(io::Base.IO,err::_GeoSyntaxAbort)=
 # throws the accumulated diagnostics at the end (or at `Exit`/`Abort`).
 function _geo_yyerror!(context::_GeoNumericContext,message::AbstractString)
     context.suppress_diagnostics && return nothing
-    context.stderr_diagnostics &&
-        (print(stderr,"Error   : ",message,"\n");flush(stderr))
+    if context.stderr_diagnostics
+        # `-cpu` appends `PrintResources` inside `Msg::Error` too.
+        text=_MSG_INFO_RESOURCES[] ? message*_msg_resource_suffix() : message
+        print(stderr,"Error   : ",text,"\n");flush(stderr)
+        _msg_log_write("Error   : ",text)
+    end
     push!(context.exec_errors,String(message))
     push!(context.error_log,String(message))
     return nothing
@@ -2322,18 +2396,23 @@ end
 # continues.
 function _geo_yywarn!(context::_GeoNumericContext,message::AbstractString)
     context.suppress_diagnostics && return nothing
-    context.stderr_diagnostics &&
-        (print(stderr,"Warning : ",message,"\n");flush(stderr))
+    if context.stderr_diagnostics
+        print(stderr,"Warning : ",message,"\n");flush(stderr)
+        _msg_log_write("Warning : ",message)
+    end
     push!(context.exec_warnings,String(message))
     return nothing
 end
 
 # `Msg::Info` — `Info    : <msg>` on stdout at `General.Verbosity ≥ 4` (the
 # default is 5). Recorded nowhere upstream — purely observable output.
+# `-cpu` appends upstream's `PrintResources` suffix before every channel.
 function _geo_yyinfo!(context::_GeoNumericContext,message::AbstractString)
     something(_geo_option_number(context,"General",0,"Verbosity"),5.0)<4 &&
         return nothing
-    print(stdout,"Info    : ",message,"\n");flush(stdout)
+    text=_MSG_INFO_RESOURCES[] ? message*_msg_resource_suffix() : message
+    print(stdout,"Info    : ",text,"\n");flush(stdout)
+    _msg_log_write("Info    : ",text)
     return nothing
 end
 
@@ -2342,8 +2421,11 @@ end
 # does not bump `gmsh_yyerrorstate` (no >20 abort).
 function _geo_msg_error!(context::_GeoNumericContext,message::AbstractString)
     context.suppress_diagnostics && return nothing
-    context.stderr_diagnostics &&
-        (print(stderr,"Error   : ",message,"\n");flush(stderr))
+    if context.stderr_diagnostics
+        text=_MSG_INFO_RESOURCES[] ? message*_msg_resource_suffix() : message
+        print(stderr,"Error   : ",text,"\n");flush(stderr)
+        _msg_log_write("Error   : ",text)
+    end
     context.msg_error_count+=1
     push!(context.error_log,String(message))
     return nothing

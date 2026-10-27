@@ -1360,8 +1360,10 @@ function _pos_parse_view(r::_PosReader,tag::Int,limits::_PosReadLimits,
                 # a syntax error that aborts the view, so it stays a throw.
                 _pos_peek!(r).kind!=:lparen &&
                     throw(_pos_unknown_record(word,caller,t.at))
-                print(stderr,"Error   : $caller: unknown view record " *
-                            "'$word' at byte $(t.at)\n")
+                pos_record_error="$caller: unknown view record " *
+                    "'$word' at byte $(t.at)"
+                print(stderr,"Error   : $pos_record_error\n")
+                IO._msg_log_write("Error   : ",pos_record_error)
                 _pos_number_list!(r,:lparen,:rparen,caller)
                 _pos_peek!(r).kind==:lbrace ||
                     throw(_pos_unknown_record(word,caller,t.at))
