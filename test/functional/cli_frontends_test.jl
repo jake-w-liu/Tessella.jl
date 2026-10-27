@@ -222,4 +222,98 @@ SP(1,0,0){2};
         @test_throws ArgumentError Tessella.CLI.main([line_msh,"-setstring","s","v"])
     end
 end
+
+@testset "CLI log/cpu/statreport/switch-tags flags" begin
+    mktempdir() do directory
+        square_geo=joinpath(directory,"square.geo")
+        write(square_geo,SQUARE*"Printf(\"cli-log-probe\");\n")
+        square_msh=joinpath(directory,"square.msh")
+        log_path=joinpath(directory,"run.log")
+        rep_path=joinpath(directory,"stats.txt")
+
+        # -log mirrors the Msg channels (Direct rows carry no prefix); -cpu
+        # appends the upstream resource suffix to Info/Error rows — the
+        # statreport tau index is the one Info this pipeline emits.
+        @test Tessella.CLI.main([square_geo,"-2","-o",square_msh,
+            "-log",log_path,"-cpu","-statreport",rep_path])==square_msh
+        log_text=read(log_path,String)
+        @test occursin("cli-log-probe",log_text)
+        @test occursin(
+            r"Info    : Efficiency index for surface mesh tau=0\s*\(From start: Wall [0-9.e+-]+s, CPU [0-9.e+-]+s, Mem [0-9.e+-]+Mb\)",
+            log_text)
+
+        # -statreport truncates with the header + one row; -append adds rows.
+        rows=split(chomp(read(rep_path,String)),r"\r?\n")
+        @test length(rows)==2 && startswith(rows[1],"2D stats\tname")
+        nums=[strip(f) for f in split(rows[2],'\t') if !isempty(strip(f))]
+        @test nums[1]=="square" && parse(Int,nums[2])==1 &&
+              parse(Int,nums[3])==0 && parse(Int,nums[4])>0
+        Tessella.CLI.main([square_geo,"-2","-o",square_msh,
+                           "-append_statreport",rep_path])
+        @test length(split(chomp(read(rep_path,String)),r"\r?\n"))==3
+        # A pure .msh session run reports only non-discrete faces.
+        session_rep=joinpath(directory,"session.txt")
+        Tessella.CLI.main([square_msh,"-2","-o",
+            joinpath(directory,"session.msh"),"-statreport",session_rep])
+        session_rows=split(chomp(read(session_rep,String)),r"\r?\n")
+        @test length(session_rows)==2
+
+        # -preserve_numbering_msh2 emits the stored element numbering on MSH
+        # 2.2 output; the same run without it renumbers sequentially.
+        sparse_in=joinpath(directory,"sparse.msh")
+        write(sparse_in,"""\$MeshFormat
+2.2 0 8
+\$EndMeshFormat
+\$Nodes
+4
+1 0 0 0
+2 1 0 0
+3 0 1 0
+4 1 1 0
+\$EndNodes
+\$Elements
+2
+5 2 2 9 3 1 2 3
+17 2 2 9 3 2 4 3
+\$EndElements
+""")
+        function elem_tags(path)
+            lines=split(read(path,String),'\n')
+            i=findfirst(==("\$Elements"),chomp.(lines))
+            n=parse(Int,strip(lines[i+1]))
+            return sort!([parse(Int,split(lines[i+1+j])[1]) for j in 1:n])
+        end
+        out_seq=joinpath(directory,"seq.msh2")
+        out_pres=joinpath(directory,"pres.msh2")
+        Tessella.CLI.main([sparse_in,"-save","-o",out_seq])
+        Tessella.CLI.main([sparse_in,"-save","-o",out_pres,
+                           "-preserve_numbering_msh2"])
+        @test elem_tags(out_seq)==[1,2]
+        @test elem_tags(out_pres)==[5,17]
+
+        # -switch_tags swaps the MSH 2.2 physical/elementary fields on input:
+        # the imported cell's owner entity follows the swapped elementary tag.
+        function imported_owners(path,switch)
+            A.initialize()
+            A.OPTIONS["Mesh.SwitchElementTags"]=switch ? 1.0 : 0.0
+            A.open(path)
+            mesh=lock(A.STATE_LOCK) do
+                A.LAST_MESH[]
+            end
+            A.finalize()
+            return sort!(reduce(vcat,copy.(mesh.entity_data.block_entities)))
+        end
+        @test imported_owners(sparse_in,false)==Int32[3,3]
+        @test imported_owners(sparse_in,true)==Int32[9,9]
+
+        # Flags that stay rejected keep an informative message.
+        for (flag,fragment) in (("-4","adaptive meshing"),
+                                ("-part_weight","weighted graph partitioning"),
+                                ("-swapangle","boundary-edge swap"),
+                                ("-match","matching"))
+            @test_throws ArgumentError Tessella.CLI.main(
+                [square_geo,"-2","-o",square_msh,flag])
+        end
+    end
+end
 end

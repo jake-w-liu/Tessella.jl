@@ -30,15 +30,16 @@ module CLI
 
 using ..GeoExec: execute_geo, geo_entity_mesh
 using ..IO: write_msh, _msh_rewrite_save_options
-using ..Model: model_periodic_constraints, model_to_mixed
+using ..Model: model_periodic_constraints, model_to_mixed, model_entities
 using ..Elements: write_mixed_msh, read_mixed_msh, MixedMesh, MixedEntity,
                   _scaled_mesh_copy, write_partitioned_topology,
                   MixedEntityData, MixedPartitionData, MixedGhostElement, MixedPeriodicLink,
                   ElementBlock, SpecialElementBlock, MixedElementBlock, ElementRef,
-                  msh_dimension, simplex_to_mixed, barycentric_refine, validate
+                  msh_dimension, msh_spec, simplex_to_mixed, barycentric_refine, validate
 using ..MeshTypes: Mesh
 using ..GeoUnrolled: write_geo_unrolled
 using ..GmshLibm: _with_win_cli_precision
+using Printf: @sprintf
 import ..IO
 import ..Post
 import ..API
@@ -57,7 +58,8 @@ Usage: tessella file.geo [-1|-2|-3] [-o output.msh] [-format msh2|msh4] [-bin]
        [-save_parametric|-parametric] [-save_topology|-save_entities]
        [-save_all] [-nopopup] [-v int] [-nt int] [-setnumber name value]
        [-setstring name value] [-setlist name n v1 ... vn] [-string str]
-       [-option file.geo]
+       [-option file.geo] [-log file] [-cpu] [-statreport file]
+       [-append_statreport file] [-switch_tags] [-preserve_numbering_msh2]
        tessella file.msh -check
        tessella file.(geo|msh|pos) [-refine] [-barycentric_refine] [-part n] [-save] [-0]
        [-reclassify deg] [-reparam deg] [-open] [-merge] [-new]
@@ -90,6 +92,12 @@ model's unrolled .geo script to <stem>.geo_unrolled (or -o), matching Gmsh
 stores Mesh.MeshSizeFromCurvatureIsotropic; -ignore_periodicity stores
 Mesh.IgnorePeriodicity. -bgm merges a .pos view file and uses its last view
 as the PostView background-mesh field.
+-log file mirrors Msg-channel output into the file; -cpu appends the
+(From start: Wall, CPU, Mem) resource suffix to Info/Error messages.
+-statreport writes (truncating) and -append_statreport appends the upstream
+2-D statistics header/row after 2-D generation. -switch_tags swaps MSH 2.2
+elementary/physical tags on input; -preserve_numbering_msh2 emits the stored
+element numbering on MSH 2.2 output.
 GUI-only, display, solver-daemon and unimplemented upstream flags reject.
 """
 
@@ -157,7 +165,15 @@ const _BOOLEAN_FLAGS=Dict(
     # `-savePartTopology` writes `<name>_topology.pro` beside a partitioned
     # MSH output (upstream `partitionSaveTopologyFile`).
     "-part_topo_pro"=>"Mesh.PartitionTopologyFile",
-    "-savePartTopology"=>"Mesh.PartitionTopologyFile")
+    "-savePartTopology"=>"Mesh.PartitionTopologyFile",
+    # `Mesh.SwitchElementTags` swaps the elementary and physical tag fields
+    # while an MSH 2.2 file is read (`Merge`, `API.open`/`API.merge`) —
+    # upstream's `_storeElementInEntity` `reg`/`physical` exchange.
+    "-switch_tags"=>"Mesh.SwitchElementTags",
+    # `Mesh.PreserveNumberingMsh2` emits the stored element numbering on
+    # MSH 2.2 output instead of sequential order positions.
+    "-preserve_numbering_msh2"=>"Mesh.PreserveNumberingMsh2",
+    "-preserveNumberingMsh2"=>"Mesh.PreserveNumberingMsh2")
 
 # `-algo` names we can back with a real implemented algorithm.
 const _ALGORITHMS=Dict(
@@ -172,29 +188,29 @@ const _ALGORITHMS=Dict(
 # generic "unsupported flag" error (which stays for genuinely unknown words).
 const _REJECTED_FLAGS=Dict{String,String}(
     "-4"=>"adaptive meshing (batch mode 4) is not implemented",
-    "-switch_tags"=>"element tag switching is not implemented",
-    "-preserve_numbering_msh2"=>"MSH2 element-number preservation is not implemented",
-    "-preserveNumberingMsh2"=>"MSH2 element-number preservation is not implemented",
+    # Upstream `-part_weight` switches to partition algorithm 3 and feeds
+    # per-element-family weights into its graph partitioner; no Tessella
+    # partition producer consumes `Mesh.Partition*Weight`, so storing the
+    # values would silently do nothing.
     "-part_weight"=>"weighted graph partitioning is not implemented",
     "-partWeight"=>"weighted graph partitioning is not implemented",
 
     "-part_physicals"=>"partition physical-group toggling is not implemented",
     "-part_no_physicals"=>"partition physical-group toggling is not implemented",
+    # `Mesh.AllowSwapAngle` is consumed upstream only by the BDS
+    # discrete-surface boundary-edge swap optimizer, which Tessella's
+    # surface pipelines do not expose.
     "-swapangle"=>"boundary-edge swap optimization is not implemented",
     "-match"=>"geometry/mesh matching is not implemented",
     "-numsubedges"=>"high-order element display subdivision is GUI-only",
-    "-debugSurface"=>"surface debugging is GUI-only",
-    "-statreport"=>"mesh statistics reports are not implemented",
-    "-append_statreport"=>"mesh statistics reports are not implemented",
+    "-debugSurface"=>"surface mesh debugging is not implemented",
     "-run"=>"ONELAB solver clients are not implemented",
     "-onelab"=>"ONELAB solver clients are not implemented",
     "-socket"=>"ONELAB solver clients are not implemented",
     "-listen"=>"solver socket listeners are not implemented",
     "-minterpreter"=>"Octave interpreters are not implemented",
     "-pyinterpreter"=>"Python interpreters are not implemented",
-    "-cpu"=>"CPU-time reporting is not implemented",
-    "-log"=>"message log files are not implemented",
-    "-watch"=>"file watching is not implemented",
+    "-watch"=>"file watching is GUI-only",
     "-bg"=>"background images are GUI-only",
     "-n"=>"view visibility options are GUI-only",
     "-nodb"=>"double buffering is GUI-only",
@@ -415,6 +431,17 @@ or parsed view text) and must come last.
 `file.msh -check` validates the mesh without writing. `-`, `-parse_and_exit`,
 `-help`/`--help`, `-version`/`--version`, `-info`/`--info`, `-help_options`
 and `-pid` are informational; the first four must be used alone.
+`-log file` mirrors every Msg-channel message into `file` (upstream's
+`Msg::SetLogFileName`), and `-cpu` appends upstream's
+`(From start: Wall %gs, CPU %gs, Mem %gMb)` resource suffix to Info and Error
+messages (`Msg::SetInfoCpu`/`SetInfoMem`). `-statreport file` truncates `file`
+and writes the 2-D statistics header plus one row after 2-D generation;
+`-append_statreport file` appends the row only — both reproduce upstream's
+`PrintMesh2dStatistics` layout. `-switch_tags` stores `Mesh.SwitchElementTags`
+to swap elementary/physical fields on MSH 2.2 input, and
+`-preserve_numbering_msh2`/`-preserveNumberingMsh2` stores
+`Mesh.PreserveNumberingMsh2` to emit the stored element numbering on MSH 2.2
+output.
 Duplicate or conflicting flags, unmarked multiple inputs, ignored output
 arguments, and any output that aliases its input are rejected. Upstream
 GUI-only, solver-daemon and unimplemented flags are rejected by name.
@@ -447,6 +474,20 @@ function _main(args::AbstractVector{<:AbstractString})
         println(message)
         return message
     end
+    # `-cpu` resource reporting measures from the start of the batch run;
+    # `-log`'s file lives for the whole `main` call. Both are process-global
+    # like upstream's `Msg` state, so the `finally` restores them for callers
+    # (API sessions, repeated `main` invocations) that never saw the flags.
+    IO._MSG_START_NS[]=time_ns()
+    try
+        return _run(tokens)
+    finally
+        IO._msg_log_close()
+        IO._MSG_INFO_RESOURCES[]=false
+    end
+end
+
+function _run(tokens::Vector{String})
     numeric_options=Dict{String,Float64}()
     # Pre-file parser input, in flag order: literal `.geo` statements and
     # `(name, value)` numeric option assignments. On `.geo` inputs both are
@@ -467,6 +508,9 @@ function _main(args::AbstractVector{<:AbstractString})
     reclassify=nothing;reparam=nothing
     part=nothing;part_topo=nothing;part_ghosts=nothing;part_split=nothing
     algo_seen=false;quad_seen=false
+    # `-statreport`/`-append_statreport` — `(path, :write|:append)`; the last
+    # occurrence wins like upstream's `createAppendMeshStatReport` store.
+    statreport=nothing
     # `-bgm` files, in argument order: `(path, index of the file's last view)`.
     # The index is a 0-based position in the merged view list — only the
     # views these flags merge precede it, since the injected `Merge`s run
@@ -562,6 +606,22 @@ function _main(args::AbstractVector{<:AbstractString})
             binary=true;binary_seen=true
         elseif a=="-pid"
             println(getpid())
+        elseif a=="-cpu"
+            # `Msg::SetInfoCpu(true)` + `Msg::SetInfoMem(true)` — Info and
+            # StatusBar messages carry the resource suffix. Upstream accepts
+            # repeats; the flag is idempotent.
+            IO._MSG_INFO_RESOURCES[]=true
+        elseif a=="-log"
+            i+=1;i<=length(tokens) || throw(ArgumentError(
+                "tessella: -log needs a file path"))
+            # `Msg::SetLogFileName` closes a previously opened log file.
+            IO._msg_log_close()
+            IO._msg_log_open(_path_argument(tokens[i],"-log"))
+        elseif a in ("-statreport","-append_statreport")
+            i+=1;i<=length(tokens) || throw(ArgumentError(
+                "tessella: $a needs a file path"))
+            statreport=(_path_argument(tokens[i],a),
+                a=="-statreport" ? :write : :append)
         elseif a=="-refine"
             refine_seen && throw(ArgumentError("tessella: duplicate -refine flag"))
             refine_seen=true
@@ -807,10 +867,11 @@ function _main(args::AbstractVector{<:AbstractString})
         save_recorder=(family,member,value)->begin
             family=="Mesh" &&
                 member in ("SaveParametric","SaveTopology","ScalingFactor",
-                           "PartitionTopologyFile") &&
+                           "PartitionTopologyFile","PreserveNumberingMsh2") &&
                 (save_options[member]=Float64(value))
             return nothing
         end
+        exec_t0=time_ns()
         result=try
             if !isempty(injected)
                 temporary=_inject_geo(source,injected)
@@ -824,6 +885,17 @@ function _main(args::AbstractVector{<:AbstractString})
         end
         save_parametric=get(save_options,"SaveParametric",nothing)
         save_topology=get(save_options,"SaveTopology",nothing)
+        # `Mesh.PreserveNumberingMsh2` (`-preserve_numbering_msh2`/in-script
+        # option) emits the stored element numbering on MSH 2.2 output.
+        preserve_numbering=!iszero(Float64(get(save_options,
+            "PreserveNumberingMsh2",0.0)))
+        statreport!==nothing && _geo_stat_report(
+            statreport[1],statreport[2],result,dim,first(inputs),
+            Float64(time_ns()-exec_t0)/1.e9,
+            Dict{String,Float64}("General.Verbosity"=>
+                get(numeric_options,"General.Verbosity",5.0),
+                "General.Terminal"=>
+                get(numeric_options,"General.Terminal",1.0)))
         # `Mesh.ScalingFactor` (`-scale`/in-script option) multiplies the
         # serialized vertex coordinates — same hook upstream's writers take.
         scaling=Float64(get(save_options,"ScalingFactor",1.0))
@@ -848,7 +920,7 @@ function _main(args::AbstractVector{<:AbstractString})
                     "tessella: one-dimensional generation omitted its classified mesh"))
                 write_msh(destination,_scaled_mesh_copy(authority.mesh,scaling);
                           version,binary,
-                          save_parametric,save_topology)
+                          save_parametric,save_topology,preserve_numbering)
                 return destination
             end
             constraints=model_periodic_constraints(result.model)
@@ -876,7 +948,8 @@ function _main(args::AbstractVector{<:AbstractString})
                     if classified isa MixedMesh
                         classified_out=_scaled_mesh_copy(classified,scaling)
                         write_msh(destination,classified_out;version,binary,
-                                  save_parametric,save_topology)
+                                  save_parametric,save_topology,
+                                  preserve_numbering)
                         emit_topology(classified_out)
                     else
                         (version==2.2 &&
@@ -888,18 +961,19 @@ function _main(args::AbstractVector{<:AbstractString})
                         binary ?
                             write_mixed_msh(destination,
                                 simplex_to_mixed(_scaled_mesh_copy(result.mesh,scaling));
-                                version,binary) :
+                                version,binary,preserve_numbering) :
                             write_msh(destination,_scaled_mesh_copy(result.mesh,scaling);
                                       version)
                     end
                 elseif result.mesh isa MixedMesh
                     mixed_out=_scaled_mesh_copy(result.mesh,scaling)
-                    write_mixed_msh(destination,mixed_out;version,binary)
+                    write_mixed_msh(destination,mixed_out;version,binary,
+                        preserve_numbering)
                     emit_topology(mixed_out)
                 elseif binary
                     write_mixed_msh(destination,
                         simplex_to_mixed(_scaled_mesh_copy(result.mesh,scaling));
-                        version,binary)
+                        version,binary,preserve_numbering)
                 else
                     write_msh(destination,_scaled_mesh_copy(result.mesh,scaling);version)
                 end
@@ -931,7 +1005,7 @@ function _main(args::AbstractVector{<:AbstractString})
                 projected_out=_scaled_mesh_copy(projected,scaling)
                 write_msh(destination,projected_out;
                           version,binary,
-                          save_parametric,save_topology)
+                          save_parametric,save_topology,preserve_numbering)
                 emit_topology(projected_out)
             end
             return destination
@@ -941,6 +1015,7 @@ function _main(args::AbstractVector{<:AbstractString})
     return _session_main(files,preludes,numeric_options;
         dim,outfile,version,binary,output_flags=format_seen || binary_seen,
         refine=refine_seen,barycentric=barycentric_seen,save=save_seen,
+        statreport,
         unroll=unroll_seen,bgm=[path for (path,_) in bgm_specs],
         reclassify,reparam,part,part_topo,part_ghosts,part_split)
 end
@@ -953,6 +1028,225 @@ function _cli_classified_mesh(result)
     authority!==nothing && authority.mesh isa MixedMesh && return authority.mesh
     result.mesh isa MixedMesh && return result.mesh
     return result.mesh
+end
+
+# ---------------------------------------------------------------------------
+# `-statreport` / `-append_statreport`
+#
+# Upstream's `PrintMesh2dStatistics` runs at the end of the 2-D generation
+# pass: `-statreport` truncates the report file and writes the header (header
+# only when the model is empty), `-append_statreport` appends one row with no
+# header. Tessella emits the same row layout, filled only with values the
+# produced mesh honestly carries: `#faces`/`#fail` count the model's surfaces
+# and the ones the run left unmeshed, `#t` and the `Q` aggregates evaluate
+# upstream's `qmTriangle::gamma` (`2·r_in/r_circ`) per triangle, `#Q>90`
+# counts `gamma > 0.9`, `#e` is the surface triangulation's unique-edge
+# count, and `CPU` is the generation wall time. Upstream never assigns the
+# per-face edge-length and efficiency-index fields (the oracle emits whatever
+# the uninitialized memory held — typically zeros, occasionally garbage), so
+# `tau`/`#Egood`/`#Egood/#e` stay 0 as "not computed" markers.
+# ---------------------------------------------------------------------------
+
+@inline _stat_sub(p,q)=(p[1]-q[1],p[2]-q[2],p[3]-q[3])
+@inline _stat_norm(v)=hypot(v[1],v[2],v[3])
+@inline _stat_cross(a,b)=(a[2]*b[3]-a[3]*b[2],
+                         a[3]*b[1]-a[1]*b[3],
+                         a[1]*b[2]-a[2]*b[1])
+@inline _stat_edge(i,j)=i<j ? (Int32(i),Int32(j)) : (Int32(j),Int32(i))
+
+function _stat_unit(v)
+    magnitude=_stat_norm(v)
+    magnitude>0 || return nothing
+    return (v[1]/magnitude,v[2]/magnitude,v[3]/magnitude)
+end
+
+# `qmTriangle::gamma` — `2 * (2·sinA·sinB·sinC / (sinA+sinB+sinC))` on the
+# corner sines, i.e. `2·r_in/r_circ`.
+function _stat_tri_gamma(pa,pb,pc)
+    a=_stat_unit(_stat_sub(pc,pb));b=_stat_unit(_stat_sub(pa,pc))
+    c=_stat_unit(_stat_sub(pb,pa))
+    (a===nothing || b===nothing || c===nothing) && return 0.0
+    sina=_stat_norm(_stat_cross(b,c));sinb=_stat_norm(_stat_cross(c,a))
+    sinc=_stat_norm(_stat_cross(a,b))
+    sina==0.0 && sinb==0.0 && sinc==0.0 && return 0.0
+    return 2*(2*sina*sinb*sinc/(sina+sinb+sinc))
+end
+
+# Triangle index triples in `mesh`, keyed by owner entity tag (0 when the
+# mesh carries no entity classification).
+function _stat_surface_tris(mesh)
+    tris=Dict{Int32,Vector{NTuple{3,Int32}}}()
+    if mesh isa Mesh
+        for j in axes(mesh.tris,2)
+            push!(get!(()->NTuple{3,Int32}[],tris,Int32(0)),
+                (Int32(mesh.tris[1,j]),Int32(mesh.tris[2,j]),
+                 Int32(mesh.tris[3,j])))
+        end
+        return mesh.coords,tris
+    elseif mesh isa MixedMesh
+        data=mesh.entity_data
+        for (bi,block) in enumerate(mesh.blocks)
+            block isa ElementBlock || continue
+            spec=msh_spec(block.msh)
+            (spec.dim==2 && spec.family===:tri) || continue
+            owners=data===nothing ? nothing : data.block_entities[bi]
+            for j in axes(block.nodes,2)
+                push!(get!(()->NTuple{3,Int32}[],tris,
+                        owners===nothing ? Int32(0) : Int32(owners[j])),
+                    (Int32(block.nodes[1,j]),Int32(block.nodes[2,j]),
+                     Int32(block.nodes[3,j])))
+            end
+        end
+        return mesh.coords,tris
+    end
+    return nothing
+end
+
+# Append gamma qualities and unique edges for every triangle in `mesh` and
+# return the per-owner triangle counts keyed like `_stat_surface_tris`.
+# `allowed` restricts accumulation to the listed owner tags (`nothing` keeps
+# every cell); counts still report every owner so callers can count failures.
+function _stat_accumulate_part!(qualities::Vector{Float64},
+                                edges::Set{NTuple{2,Int32}},
+                                mesh;allowed=nothing)
+    collected=_stat_surface_tris(mesh)
+    collected===nothing && return Dict{Int32,Int}()
+    coords,tris=collected
+    counts=Dict{Int32,Int}()
+    for (owner,cells) in tris
+        counts[owner]=get(counts,owner,0)+length(cells)
+        (allowed===nothing || owner in allowed) || continue
+        for (i1,i2,i3) in cells
+            push!(qualities,_stat_tri_gamma(
+                coords[:,Int(i1)],coords[:,Int(i2)],coords[:,Int(i3)]))
+            push!(edges,_stat_edge(i1,i2),_stat_edge(i2,i3),
+                  _stat_edge(i3,i1))
+        end
+    end
+    return counts
+end
+
+const _STAT_HEADER="2D stats\tname\t\t#faces\t\t#fail\t\t#t\t\t" *
+    "Qavg\t\tQbest\t\tQworst\t\t#Q>90\t\t#Q>90/#t\t#e\t\ttau\t\t" *
+    "#Egood\t\t#Egood/#e\tCPU"
+
+# Write (or append) the single 2-D statistics row. `face_counts` maps model
+# surface tags to their produced triangle counts; `unattributed` holds counts
+# for cells whose owner could not be resolved — they contribute to the global
+# `#t`/`Q`/`#e` aggregates and count as meshed faces only when every surface
+# would otherwise report zero.
+function _emit_stat_report(path::String,mode::Symbol,name::String,
+                           faces::Vector{Int},face_counts::Dict{Int,Int},
+                           unattributed::Int,qualities::Vector{Float64},
+                           n_edges::Int,wall::Float64,model_empty::Bool,
+                           options::Dict{String,Float64})
+    io=try
+        open(path,mode===:append ? "a" : "w")
+    catch err
+        err isa InterruptException && rethrow()
+        # Upstream reports the failure on the Msg channel and keeps going.
+        API._native_detached_diagnostic_emit(:error,
+            "Could not open file '$path'",options)
+        return nothing
+    end
+    newline=IO._MSG_LOG_NEWLINE
+    try
+        if mode===:write
+            print(io,_STAT_HEADER,newline)
+            model_empty && return nothing
+        end
+        nt=length(qualities)
+        # Upstream divides the accumulated stats by the produced counts —
+        # a zero-element pass prints NaN, so the honest emission does too.
+        avg=nt>0 ? sum(qualities)/nt : NaN
+        best=nt>0 ? maximum(qualities) : 0.0
+        worst=nt>0 ? minimum(qualities) : 1.0
+        n_good=count(>(0.9),qualities)
+        nfail=count(tag->get(face_counts,tag,0)==0,faces)
+        # Unattributed cells land on no face; when they are the only product
+        # the honest statement is that the face(s) meshed.
+        unattributed>0 && nfail==length(faces) && (nfail=0)
+        n_e=n_edges
+        # The upstream efficiency-index and good-length fields are never
+        # populated (uninitialized memory); emit 0 as the uncomputed marker.
+        print(io,@sprintf("\t%16s\t%d\t\t%d\t\t",name,length(faces),nfail))
+        print(io,@sprintf("%d\t\t%8.7f\t%8.7f\t%8.7f\t%d\t\t%8.7f\t",
+            nt,avg,best,worst,n_good,
+            nt>0 ? n_good/nt : NaN))
+        print(io,@sprintf("%d\t\t%8.7f\t%d\t\t%8.7f\t%8.1f",
+            n_e,0.0,0,n_e>0 ? 0.0 : NaN,wall),newline)
+        # `Msg::Info("Efficiency index for surface mesh tau=%g ", ...)`.
+        API._native_detached_diagnostic_emit(:info,
+            @sprintf("Efficiency index for surface mesh tau=%g ",0.0),
+            options)
+        return nothing
+    finally
+        close(io)
+    end
+end
+
+# `.geo` path: per-face products come from `result.actual_mesh_parts` via
+# `geo_entity_mesh`, which throws for a face the run left unmeshed.
+function _geo_stat_report(path::String,mode::Symbol,result,dim::Int,
+                          input::String,wall::Float64,
+                          options::Dict{String,Float64})
+    faces=sort!(Int[tag for tag in keys(result.model.surfaces)])
+    # The report is produced only when the 2-D pass ran: `-2`/`-3` requests
+    # it, and an in-script `Mesh 2` produces dim-2 actual parts.
+    produced=dim>=2 || any(part->part[1]==2,result.actual_mesh_parts)
+    produced || return nothing
+    model=result.model
+    model_empty=isempty(model.points) && isempty(model.curves) &&
+        isempty(model.surfaces) && isempty(model.volumes) &&
+        isempty(model.discrete)
+    qualities=Float64[];edges=Set{NTuple{2,Int32}}()
+    face_counts=Dict{Int,Int}()
+    for tag in faces
+        part=try
+            geo_entity_mesh(result,2,tag)
+        catch err
+            err isa InterruptException && rethrow()
+            nothing
+        end
+        # Every cell of an entity part belongs to `tag` regardless of the
+        # part's internal owner keys (dense `Mesh` parts carry none).
+        counts=part===nothing ? Dict{Int32,Int}() :
+            _stat_accumulate_part!(qualities,edges,part)
+        face_counts[tag]=sum(values(counts);init=0)
+    end
+    name=isempty(model.name) ? splitext(basename(input))[1] : model.name
+    _emit_stat_report(path,mode,name,faces,face_counts,0,
+        qualities,length(edges),wall,model_empty,options)
+    return nothing
+end
+
+# Session path: the generated mesh's own entity classification gives the
+# per-face attribution; the model's dim-2 entity list gives `#faces`. Discrete
+# entities are skipped like upstream's `firstFace()` CAD-only iteration.
+function _session_stat_report(path::String,mode::Symbol,wall::Float64,
+                              options::Dict{String,Float64})
+    mesh,faces,model_empty=lock(API.STATE_LOCK) do
+        current=API._model_locked()
+        entities=model_entities(current)
+        face_tags=sort!(Int[Int(tag) for (d,tag) in entities
+            if d==2 && !haskey(current.discrete,(d,tag))])
+        (API.LAST_MESH[],face_tags,isempty(entities))
+    end
+    qualities=Float64[];edges=Set{NTuple{2,Int32}}()
+    # Upstream aggregates only the non-discrete faces' statistics — cells
+    # owned by discrete or non-surface entities do not enter the row.
+    # Owner 0 (unclassified cells) has no upstream analog and stays honest.
+    allowed=union!(Set{Int32}(Int32.(faces)),Int32[0])
+    counts=mesh===nothing ? Dict{Int32,Int}() :
+        _stat_accumulate_part!(qualities,edges,mesh;allowed)
+    face_counts=Dict{Int,Int}();unattributed=0
+    for tag in faces
+        face_counts[tag]=get(counts,Int32(tag),0)
+    end
+    unattributed=get(counts,Int32(0),0)
+    _emit_stat_report(path,mode,API.MODEL_NAME[],faces,face_counts,
+        unattributed,qualities,length(edges),wall,model_empty,options)
+    return nothing
 end
 
 # `-barycentric_refine` refines the session's current mesh in place — the
@@ -997,7 +1291,8 @@ end
 function _session_main(files,preludes,numeric_options;
                        dim,outfile,version,binary,output_flags,refine,save,
                        reclassify,reparam,part,part_topo,part_ghosts,part_split,
-                       barycentric=false,unroll=false,bgm=String[])
+                       barycentric=false,unroll=false,bgm=String[],
+                       statreport=nothing)
     need_output=dim>0 || refine || barycentric || unroll || save ||
         reclassify!==nothing ||
         reparam!==nothing || part!==nothing
@@ -1012,7 +1307,12 @@ function _session_main(files,preludes,numeric_options;
     # preludes behave like session options rather than `.geo` injections.
     save_option_values=Dict{String,Float64}()
     session_save_names=("Mesh.SaveParametric","Mesh.SaveTopology",
-                        "Mesh.HighOrderNumLayers")
+                        "Mesh.HighOrderNumLayers","Mesh.PreserveNumberingMsh2")
+    # Options consumed while files are opened/merged must be in `API.OPTIONS`
+    # before the file loop — `Mesh.SwitchElementTags` swaps MSH 2.2
+    # elementary/physical fields during import.
+    session_preopen_names=("Mesh.SwitchElementTags",)
+    preopen_values=Dict{String,Float64}()
     # Literal `.geo` statements need a leading `.geo` file; `(name, value)`
     # option preludes become session options when the session table knows the
     # name and `.geo` assignments otherwise (`General.NoPopup` and friends).
@@ -1021,7 +1321,9 @@ function _session_main(files,preludes,numeric_options;
     lines=String[]
     for prelude in preludes
         if prelude isa Tuple
-            if prelude[1] in session_save_names
+            if prelude[1] in session_preopen_names
+                preopen_values[prelude[1]]=prelude[2]
+            elseif prelude[1] in session_save_names
                 save_option_values[prelude[1]]=prelude[2]
             elseif haskey(API.DEFAULT_OPTIONS,prelude[1])
                 push!(option_preludes,prelude)
@@ -1036,6 +1338,7 @@ function _session_main(files,preludes,numeric_options;
         "tessella: -setstring/-setlist/-string/-option inject .geo parser " *
         "input and require a .geo input file"))
     for (name,value) in numeric_options
+        name in session_preopen_names && (preopen_values[name]=value;continue)
         name in session_save_names &&
             (save_option_values[name]=value)
     end
@@ -1048,6 +1351,7 @@ function _session_main(files,preludes,numeric_options;
     session_numeric=Dict{String,Float64}()
     geo_numeric_preludes=Union{String,Tuple{String,Float64}}[]
     for (name,value) in numeric_options
+        name in session_preopen_names && continue
         name in session_save_names && continue
         haskey(API.DEFAULT_OPTIONS,name) ? (session_numeric[name]=value) :
             push!(geo_numeric_preludes,"$name = $value;")
@@ -1075,6 +1379,11 @@ function _session_main(files,preludes,numeric_options;
     try
         for (name,value) in option_preludes
             API.option(name,value)
+        end
+        # Options consumed during open/merge (e.g. `Mesh.SwitchElementTags`
+        # steering the MSH 2.2 reader) land before the first file is read.
+        for (name,value) in preopen_values
+            API.OPTIONS[name]=value
         end
         for (index,(file,file_marker)) in enumerate(files)
             source=file
@@ -1119,7 +1428,12 @@ function _session_main(files,preludes,numeric_options;
         for (name,value) in save_option_values
             API.OPTIONS[name]=value
         end
+        gen_t0=statreport!==nothing && dim>=2 ? time_ns() : UInt64(0)
         dim>0 && API.mesh.generate(dim)
+        if statreport!==nothing && dim>=2
+            _session_stat_report(statreport[1],statreport[2],
+                Float64(time_ns()-gen_t0)/1.e9,copy(API.OPTIONS))
+        end
         refine && API.mesh.refine()
         barycentric && _session_barycentric_refine!()
         reclassify===nothing ||
