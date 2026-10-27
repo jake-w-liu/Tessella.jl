@@ -5624,12 +5624,13 @@ function _resolve_pending_data_sections(acc,tag_to_ref,ordered)
         entry isa _PendingDataSection ||
             (push!(fallback,entry); continue)
         section=_parse_data_section(entry,acc.node_map,tag_to_ref,starts)
+        insertion_history=false
         if section!==nothing
             rows=section.name=="NodeData" ? section.nodes : section.elements
             # Repeated file UIDs denote row insertion history, not a dense
             # simultaneous data table. Decode that history through owned UID
             # rows while keeping the generic dense constructor unchanged.
-            allunique(rows) || (section=nothing)
+            allunique(rows) || (section=nothing; insertion_history=true)
         end
         if section===nothing
             out=IOBuffer()
@@ -5638,7 +5639,11 @@ function _resolve_pending_data_sections(acc,tag_to_ref,ordered)
             end
             entry.rows===nothing || write(out,entry.rows)
             preserved=MshAncillarySection(entry.name,entry.binary,take!(out),entry.anchor)
-            try
+            # Only the duplicate-UID history is re-encoded: rows the dense
+            # parser could not bind to a live node or cell stay opaque, so
+            # their payload is emitted verbatim and a later renumbering pass
+            # cannot silently drop them.
+            insertion_history && try
                 initial=entry.name=="NodeData" ? length(acc.node_map) : starts[end]-1
                 uid=_msh_uid_decode(preserved;initial,swap=entry.swap)
                 preserved=_msh_uid_ancillary(uid;binary=entry.binary)
