@@ -575,4 +575,61 @@ end
             _SU2_BDF_API.finalize()
         end
     end
+
+    # ── SU2 keyword variants ──────────────────────────────────────────────────
+    # Upstream Gmsh 4.15.2 has no SU2 reader at all (only writeSU2): the
+    # reader scope here is a Tessella extension. Multi-zone and periodic
+    # decks cannot be expressed through the single-domain bridge and must
+    # reject loudly; ancillary SU2 solver keys (MARKER_PERIODIC etc.) are
+    # skipped like upstream's unknown-keyword scan.
+    @testset "su2 zone/marker variants" begin
+        _SU2_BDF_API.initialize()
+        try
+            _SU2_BDF_API.option("General.Terminal", 0)
+            mktempdir() do dir
+                # Multi-zone and periodic forms reject with the key named.
+                for (key, deck) in (
+                    ("NZONE", "NDIME= 2\nNZONE= 2\nIZONE= 1\nNPOIN= 0\n"),
+                    ("IZONE", "NDIME= 2\nIZONE= 1\nNPOIN= 0\n"),
+                    ("NPERIODIC", "NDIME= 2\nNPOIN= 0\nNPERIODIC= 1\n"))
+                    p = joinpath(dir, key * ".su2")
+                    write(p, deck)
+                    _SU2_BDF_API.model.add("z" * key)
+                    err = try
+                        _SU2_BDF_API.open(p); nothing
+                    catch e; e; end
+                    @test err isa ArgumentError
+                    @test occursin(key, sprint(showerror, err))
+                end
+                # Marker elements carrying the optional trailing element index
+                # plus an ignored solver key between marker sections.
+                p = joinpath(dir, "marks.su2")
+                write(p, """
+NDIME= 2
+NPOIN= 3
+0.0 0.0 0
+1.0 0.0 1
+0.0 1.0 2
+NELEM= 1
+5 0 1 2 0
+NMARK= 2
+MARKER_TAG= wall
+MARKER_ELEMS= 1
+3 0 1 7
+MARKER_PERIODIC= NO
+MARKER_TAG= inlet
+MARKER_ELEMS= 1
+3 1 2 8
+""")
+                _SU2_BDF_API.model.add("marks")
+                @test _SU2_BDF_API.open(p) === nothing
+                names = Dict(_SU2_BDF_API.model.get_physical_groups()
+                    .=> [_SU2_BDF_API.model.get_physical_name(d, t)
+                         for (d, t) in _SU2_BDF_API.model.get_physical_groups()])
+                @test names[(1, 1)] == "wall" && names[(1, 2)] == "inlet"
+            end
+        finally
+            _SU2_BDF_API.finalize()
+        end
+    end
 end

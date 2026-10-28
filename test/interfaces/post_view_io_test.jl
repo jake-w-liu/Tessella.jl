@@ -210,6 +210,30 @@ end
     @test_throws ArgumentError read_pos(IOBuffer(bounded);max_views=-1)
     @test_throws ArgumentError read_pos(IOBuffer(bounded);max_views=1.5)
     @test_throws ArgumentError read_pos(IOBuffer(bounded);max_views=true)
+
+    # .geo control constructs inside a View body are upstream-evaluated
+    # through the script parser; standalone .pos reads name the construct
+    # instead of a bare "unknown record" when the tokens do not keep the
+    # `<word>(<coords>){<values>};` element shape.
+    for word in ("For", "If", "While", "Function", "Macro", "EndFor")
+        err = try
+            io("View \"v\" { $word x In {1:2} SP(0,0,0){1}; EndFor; };"); nothing
+        catch e; e; end
+        @test err isa ArgumentError
+        @test occursin("control construct", sprint(showerror, err))
+        @test occursin(word, sprint(showerror, err))
+    end
+    # An element-shaped unknown record is reported and skipped like
+    # upstream's `Unknown element type` — even when its name spells a
+    # control keyword.
+    @test isempty(io("View \"v\" { For(0,0,0){1}; };")[1].elements)
+    # T3 world-space text records carry x,y,z,style + strings (upstream
+    # `Text3D`); T2 keeps z = 0.
+    t3 = read_pos(IOBuffer(
+        "View \"v\" { T3(1,2,3,8){\"world\"}; T2(4,5,9){\"flat\"}; };"))
+    @test t3[1].texts[1].dim == 3 && t3[1].texts[1].coords == (1.0, 2.0, 3.0)
+    @test t3[1].texts[1].style == 8.0 && t3[1].texts[1].strings == ["world"]
+    @test t3[1].texts[2].dim == 2 && t3[1].texts[2].coords == (4.0, 5.0, 0.0)
 end
 
 @testset "write_pos deterministic output and round-trip" begin

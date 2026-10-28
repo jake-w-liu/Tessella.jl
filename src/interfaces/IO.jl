@@ -12644,6 +12644,9 @@ function _read_foreign_records(path,caller::AbstractString)
     elseif extension==".obj"
         node_labels,coords,records=_read_obj(path,caller)
         return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
+    elseif extension==".ply"
+        node_labels,coords,records=_read_ply(path,caller)
+        return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
     elseif extension==".ply2"
         node_labels,coords,records=_read_ply2(path,caller)
         return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
@@ -12656,6 +12659,14 @@ function _read_foreign_records(path,caller::AbstractString)
             "OpenCASCADE BRep boundary kernel (TShape curve/surface " *
             "reconstruction), which Tessella does not implement; " *
             "IO.read_xao/IO.read_brep expose the envelope census"))
+    elseif extension in (".med",".mmed",".omm")
+        throw(ArgumentError("$caller: $extension import requires the " *
+            "MED/MED-file library (upstream Gmsh must be compiled with " *
+            "MED support), which Tessella does not link"))
+    elseif extension==".cgns"
+        throw(ArgumentError("$caller: .cgns import requires the CGNS " *
+            "library (upstream Gmsh must be compiled with CGNS support), " *
+            "which Tessella does not link"))
     else
         throw(ArgumentError("$caller: unsupported mesh extension '$extension'"))
     end
@@ -17881,6 +17892,205 @@ function _read_ply2(path,caller::AbstractString)
         push!(records,_TextMeshCell(Int64(i),2,Int32.(f),Int64(1),Int64(0)))
     end
     return node_labels,flat,records
+end
+
+# ── Stanford PLY (.ply) ──────────────────────────────────────────────────────
+# Upstream `GModel::readPLY` accepts ASCII plus experimental
+# `binary_little_endian`/`binary_big_endian` decks. The header is scanned for
+# `element vertex`/`element face` counts and `property` declarations; vertex
+# rows carry x,y,z followed by extra scalar properties (which upstream turns
+# into per-node PViews — no channel exists through the mesh bridge, so they
+# are read and dropped). Faces are triangles: upstream `sscanf`s the count and
+# the first three vertex indices regardless of the declared arity, which the
+# ASCII path matches verbatim. Ordinary `.ply` is read-only upstream (the
+# writable dialect is `.ply2`), so there is no writer here.
+const _PLY_SCALAR_TYPES=Dict{String,DataType}(
+    "char"=>Int8,"int8"=>Int8,"uchar"=>UInt8,"uint8"=>UInt8,
+    "short"=>Int16,"int16"=>Int16,"ushort"=>UInt16,"uint16"=>UInt16,
+    "int"=>Int32,"int32"=>Int32,"uint"=>UInt32,"uint32"=>UInt32,
+    "float"=>Float32,"float32"=>Float32,
+    "double"=>Float64,"float64"=>Float64)
+
+function _ply_scalar_type(word,caller)
+    T=get(_PLY_SCALAR_TYPES,word,nothing)
+    T===nothing && throw(ArgumentError(
+        "$caller: unsupported PLY property type '$word'"))
+    return T
+end
+
+# One scalar property value; `swap` byte-reverses big-endian payloads. Upstream
+# swaps only the face indices (an acknowledged gap — big-endian coordinates
+# come back garbled there); the declared-width swap here follows the PLY spec.
+function _ply_read_scalar(io,T,swap)
+    v=read(io,T)
+    return swap ? bswap(v) : v
+end
+
+function _read_ply(path,caller::AbstractString)
+    _foreign_surface_records(path,caller)
+    io=open(path,"r")
+    try
+        format=:ascii;swap=false
+        element="";nbv=-1;nbf=-1
+        # Vertex properties in declaration order (scalars only); face
+        # properties keep `(count_type, item_type)` for list entries and the
+        # scalar type otherwise — needed to walk binary face records.
+        vprops=DataType[];fprops=Tuple{DataType,Union{DataType,Nothing}}[]
+        ordered_elements=String[]
+        while true
+            eof(io) && throw(ArgumentError(
+                "$caller: truncated PLY header (no end_header)"))
+            line=readline(io)
+            words=split(strip(line))
+            isempty(words) && continue
+            head=words[1]
+            if head=="comment" || head=="obj_info" || head=="ply"
+                continue
+            elseif head=="format"
+                length(words)>=2 || throw(ArgumentError(
+                    "$caller: malformed PLY format line"))
+                words[2]=="ascii" && continue
+                words[2] in ("binary_little_endian","binary_big_endian") ||
+                    throw(ArgumentError(
+                        "$caller: unsupported PLY format '$(words[2])'"))
+                format=:binary;swap=words[2]=="binary_big_endian"
+            elseif head=="element"
+                length(words)>=3 || throw(ArgumentError(
+                    "$caller: malformed PLY element line"))
+                element=words[2]
+                push!(ordered_elements,element)
+                n=tryparse(Int,words[3])
+                n===nothing && throw(ArgumentError(
+                    "$caller: invalid PLY element count '$(words[3])'"))
+                if element=="vertex"
+                    nbv<0 || throw(ArgumentError(
+                        "$caller: duplicate 'element vertex' declaration"))
+                    nbv=n
+                elseif element=="face"
+                    nbf<0 || throw(ArgumentError(
+                        "$caller: duplicate 'element face' declaration"))
+                    nbf=n
+                else
+                    throw(ArgumentError(
+                        "$caller: unsupported PLY element '$element' " *
+                        "(upstream reads only vertex/face)"))
+                end
+            elseif head=="property"
+                length(words)>=3 || throw(ArgumentError(
+                    "$caller: malformed PLY property line"))
+                if words[2]=="list"
+                    length(words)>=5 || throw(ArgumentError(
+                        "$caller: malformed PLY list property"))
+                    element=="vertex" && throw(ArgumentError(
+                        "$caller: list property '$(words[end])' on the " *
+                        "vertex element is unsupported"))
+                    element=="face" ||
+                        throw(ArgumentError(
+                            "$caller: property outside vertex/face scope"))
+                    # `list <count_type> <item_type> <name>`: the count is
+                    # read first, then `count` items of the item type.
+                    push!(fprops,(_ply_scalar_type(words[3],caller),
+                        _ply_scalar_type(words[4],caller)))
+                else
+                    T=_ply_scalar_type(words[2],caller)
+                    element=="vertex" && push!(vprops,T)
+                    element=="face" && push!(fprops,(T,nothing))
+                    element in ("vertex","face") ||
+                        throw(ArgumentError(
+                            "$caller: property outside vertex/face scope"))
+                end
+            elseif head=="end_header"
+                break
+            end
+            # Unrecognized header keywords are skipped, matching upstream's
+            # sscanf-driven scan.
+        end
+        nbv<0 && throw(ArgumentError(
+            "$caller: PLY file declares no 'element vertex'"))
+        nbf<0 && (nbf=0)
+        # PLY orders body records by element declaration; upstream assumes
+        # vertices then faces.
+        vertex_first=findfirst(==("vertex"),ordered_elements)
+        face_first=findfirst(==("face"),ordered_elements)
+        (vertex_first!==nothing &&
+         (face_first===nothing || vertex_first<face_first)) ||
+            throw(ArgumentError(
+                "$caller: PLY face data must follow vertex data"))
+        length(vprops)>=3 || throw(ArgumentError(
+            "$caller: PLY vertex element needs at least x, y, z properties"))
+        coords=zeros(Float64,3,nbv)
+        faces=Vector{Int}[]
+        if format==:ascii
+            for i in 1:nbv
+                eof(io) && throw(ArgumentError(
+                    "$caller: truncated PLY vertex data"))
+                t=tryparse.(Float64,split(strip(readline(io))))
+                (length(t)>=3 && !any(x->x===nothing,t[1:3])) ||
+                    throw(ArgumentError(
+                        "$caller: could not read PLY vertex $i"))
+                coords[1,i],coords[2,i],coords[3,i]=t[1],t[2],t[3]
+            end
+            for i in 1:nbf
+                eof(io) && throw(ArgumentError(
+                    "$caller: truncated PLY face data"))
+                t=tryparse.(Int,split(strip(readline(io))))
+                # Upstream reads `count i0 i1 i2` unconditionally and builds a
+                # triangle from the first three indices.
+                (length(t)>=4 && !any(x->x===nothing,t[1:4])) ||
+                    throw(ArgumentError(
+                        "$caller: could not read PLY face $i"))
+                t[1]>=3 || throw(ArgumentError(
+                    "$caller: PLY face $i declares fewer than 3 vertices"))
+                push!(faces,Int.(t[2:4]).+1)
+            end
+        else
+            for i in 1:nbv
+                for (k,T) in enumerate(vprops)
+                    v=_ply_read_scalar(io,T,swap)
+                    k<=3 && (coords[k,i]=Float64(v))
+                end
+            end
+            for i in 1:nbf
+                indices=nothing
+                for (T,itemT) in fprops
+                    if itemT===nothing
+                        _ply_read_scalar(io,T,swap) # scalar face property: skip
+                    else
+                        nbe=Int(_ply_read_scalar(io,T,swap))
+                        nbe==3 || throw(ArgumentError(
+                            "$caller: binary PLY face $i has $nbe vertices " *
+                            "(upstream handles only triangles)"))
+                        row=[Int(_ply_read_scalar(io,itemT,swap)) for _ in 1:nbe]
+                        indices===nothing && (indices=row)
+                    end
+                end
+                indices===nothing && throw(ArgumentError(
+                    "$caller: binary PLY face element declares no index list"))
+                push!(faces,indices.+1)
+            end
+        end
+        nv=size(coords,2)
+        for (i,f) in enumerate(faces)
+            all(j->1<=j<=nv,f) || throw(ArgumentError(
+                "$caller: PLY face $i references a missing vertex"))
+        end
+        # upstream `_storeVerticesInEntities` deletes unreferenced vertices.
+        flat=vec(coords)
+        flat,faces=_drop_unref_vertices(flat,faces)
+        node_labels=collect(Int64(1):Int64(div(length(flat),3)))
+        records=_TextMeshCell[]
+        for (i,f) in enumerate(faces)
+            push!(records,_TextMeshCell(Int64(i),2,Int32.(f),Int64(1),Int64(0)))
+        end
+        return node_labels,flat,records
+    catch err
+        err isa InterruptException && rethrow()
+        err isa EOFError && throw(ArgumentError(
+            "$caller: truncated .ply file"))
+        rethrow()
+    finally
+        close(io)
+    end
 end
 
 # ── TOCHNOG (.dat) ────────────────────────────────────────────────────────────

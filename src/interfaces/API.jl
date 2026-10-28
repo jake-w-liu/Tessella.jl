@@ -9608,6 +9608,38 @@ function _view_get_number(tag,name)
     end
 end
 
+# `setColor`/`getColor` store upstream's packed `A<<24|B<<16|G<<8|R` word
+# (little-endian host layout) in the same numeric option table — upstream
+# routes through GmshSetOption("View", name, packed, index) too.
+function _view_set_color(tag,name,r,g,b,a=255)
+    caller="API.view.set_color"
+    name isa AbstractString || throw(ArgumentError(
+        "$caller: name must be a string"))
+    rgba=(_mesh_query_integer(r,caller,"r"),_mesh_query_integer(g,caller,"g"),
+        _mesh_query_integer(b,caller,"b"),_mesh_query_integer(a,caller,"a"))
+    all(c->0<=c<=255,rgba) || throw(ArgumentError(
+        "$caller: color components must be in [0, 255]"))
+    packed=Float64(UInt32(rgba[4])<<24 | UInt32(rgba[3])<<16 |
+        UInt32(rgba[2])<<8 | UInt32(rgba[1]))
+    return lock(STATE_LOCK) do
+        view=_session_view(tag,caller)
+        view.numbers[String(name)]=packed
+        return nothing
+    end
+end
+
+function _view_get_color(tag,name)
+    caller="API.view.get_color"
+    name isa AbstractString || throw(ArgumentError(
+        "$caller: name must be a string"))
+    return lock(STATE_LOCK) do
+        view=_session_view(tag,caller)
+        packed=UInt32(round(get(view.numbers,String(name),0.0)))
+        return (Int(packed & 0xff),Int((packed>>8) & 0xff),
+            Int((packed>>16) & 0xff),Int((packed>>24) & 0xff))
+    end
+end
+
 function _view_set_string(tag,name,value)
     caller="API.view.set_string"
     name isa AbstractString || throw(ArgumentError(
@@ -12084,7 +12116,8 @@ using ..API: _view_add,_view_remove,_view_get_index,_view_get_tags,
              _view_copy_options,_view_set_visibility_per_window,
              _view_add_homogeneous_model_data,
              _view_get_homogeneous_model_data,_view_probe,
-             _view_add_alias,_view_combine,_view_set_interpolation_matrices
+             _view_add_alias,_view_combine,_view_set_interpolation_matrices,
+             _view_set_color,_view_get_color
 
 """Add a new empty view named `name`, returning its tag."""
 add(name,tag=-1)=_view_add(name,tag)
@@ -12117,6 +12150,10 @@ get_number(tag,name)=_view_get_number(tag,name)
 set_string(tag,name,value)=_view_set_string(tag,name,value)
 "Return string option `name` of view `tag` (empty if unset)."
 get_string(tag,name)=_view_get_string(tag,name)
+"Set color option `name` of view `tag` to the packed rgba components."
+set_color(tag,name,r,g,b,a=255)=_view_set_color(tag,name,r,g,b,a)
+"Return color option `name` of view `tag` as `(r, g, b, a)`."
+get_color(tag,name)=_view_get_color(tag,name)
 """Attach per-element label `data` strings with 3-D `coord` anchors
 to view `tag` under `data_type` (`numEle` defaults to `length(data)`)."""
 add_list_data_string(tag,data_type,data,coord,num_ele=-1)=

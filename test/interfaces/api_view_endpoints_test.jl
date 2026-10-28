@@ -60,6 +60,20 @@ end
         @test A.view.get_string(dst,"Format")=="binary"
         @test A.view.get_string(dst,"Name")=="target"
 
+        # setColor/getColor pack upstream's `A<<24|B<<16|G<<8|R` word into the
+        # same numeric option table, so copyOptions carries colors too.
+        A.view.set_color(src,"Color.Ambient",10,20,30,40)
+        @test A.view.get_color(src,"Color.Ambient")==(10,20,30,40)
+        A.view.set_color(src,"Color.Points",1,2,3)   # default alpha 255
+        @test A.view.get_color(src,"Color.Points")==(1,2,3,255)
+        A.view.copy_options(src,dst)
+        @test A.view.get_color(dst,"Color.Ambient")==(10,20,30,40)
+        @test A.view.get_color(dst,"Color.Missing")==(0,0,0,0)
+        @test_throws ArgumentError A.view.set_color(src,"C",-1,0,0)
+        @test_throws ArgumentError A.view.set_color(src,"C",0,0,256)
+        @test occursin("unknown view tag",
+            _errtext(()->A.view.set_color(99999,"C",0,0,0)))
+
         # Per-window visibility persists as a numbered option row.
         A.view.set_visibility_per_window(dst,0.0,2)
         @test A.view.get_number(dst,"VisibilityPerWindow:2")==0.0

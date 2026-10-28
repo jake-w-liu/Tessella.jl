@@ -9,7 +9,7 @@
 
 using ..SizeField: PostViewField, PostViewAnisoField, AbstractField
 using ..Elements: lagrange_nodes
-using ..IO: _GEO_NUMBER_OPTION_TABLE
+using ..IO: _GEO_NUMBER_OPTION_TABLE, _msg_log_write
 using LinearAlgebra: inv
 using Printf: @sprintf
 
@@ -1272,6 +1272,11 @@ function _pos_matrix!(r::_PosReader,limits::_PosReadLimits,
 end
 
 function _pos_unknown_record(word::AbstractString,caller::AbstractString,at::Int)
+    word in ("For","EndFor","If","EndIf","While","EndWhile","Function",
+        "Return","Macro","Call") && return ArgumentError(
+        "$caller: view record '$word' at byte $at is a .geo control " *
+        "construct; upstream evaluates it through the script parser, " *
+        "which standalone .pos reads do not implement")
     return ArgumentError(
         "$caller: unknown view record '$word' at byte $at")
 end
@@ -1363,7 +1368,7 @@ function _pos_parse_view(r::_PosReader,tag::Int,limits::_PosReadLimits,
                 pos_record_error="$caller: unknown view record " *
                     "'$word' at byte $(t.at)"
                 print(stderr,"Error   : $pos_record_error\n")
-                IO._msg_log_write("Error   : ",pos_record_error)
+                _msg_log_write("Error   : ",pos_record_error)
                 _pos_number_list!(r,:lparen,:rparen,caller)
                 _pos_peek!(r).kind==:lbrace ||
                     throw(_pos_unknown_record(word,caller,t.at))
@@ -1654,12 +1659,12 @@ function _pos_write_view(io::IO,view::PosView)
     nsteps=isempty(view.elements) ? length(view.time) :
         size(view.elements[1].values,3)
     print(io,"View \"",view.name,"\" {",_POS_LF)
-    # A nondefault literal time also matters for one step or an empty view.
-    # Ordinary implicit single-step [0] output retains its existing layout —
-    # upstream emits no `TIME` table for an empty view whose stored times are
-    # the implicit defaults (verified on the oracle).
-    explicit_time=!isempty(view.time) &&
-        any(i->!isequal(view.time[i],Float64(i-1)),eachindex(view.time))
+    # A nondefault literal time also matters for one step or an empty view —
+    # and for an element-less view ANY declared `time` list is explicit
+    # metadata (there are no element rows to carry the implicit default), so
+    # a declared `TIME{0}` round-trips.
+    explicit_time=!isempty(view.time) && (isempty(view.elements) ||
+        any(i->!isequal(view.time[i],Float64(i-1)),eachindex(view.time)))
     (nsteps>1 || explicit_time) && print(io,"TIME{",join((_pos_fmt(t) for t in view.time),','),
                         "};",_POS_LF)
     nschemes=length(view.interpolations)
