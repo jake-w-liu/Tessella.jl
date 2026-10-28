@@ -1,811 +1,112 @@
 # Tessella.jl
 
-Tessella is a Julia-native tetrahedral mesh generator built around exact geometric
-predicates, certified topology, conforming boundary recovery, and explicit failure
-diagnostics. It was created for the ASCENT electromagnetics workflow after gmsh
-4.13.1 and 4.15.2-git left the enclosure/coax acceptance geometry with zero volume
-elements.
+Tessella is a **Julia-native tetrahedral mesh generator** built around exact
+geometric predicates, certified topology, conforming boundary recovery, and
+explicit failure diagnostics. It targets public Gmsh 4.15.2 behavior parity —
+Gmsh is used only as a reference oracle; all meshing runs natively in Julia.
 
-The original simplex-mesher roadmap is complete through Stage 6. The broader
-Gmsh 4.15.2 feature and behavioral parity goal remains **in progress across all
-P1–P6 tracks**, with ASCENT meshing capabilities prioritized.
+It was created for the ASCENT electromagnetics workflow after gmsh 4.13.1 and
+4.15.2-git left the enclosure/coax acceptance geometry with zero volume
+elements. The simplex-mesher roadmap is complete; full Gmsh parity is in
+progress across the P1–P6 tracks — see
+[DEVIN_HANDOFF.md](DEVIN_HANDOFF.md) for the open-work ledger.
 
-The 2026-10-11 Main integration includes Devin's hybrid/import/lifecycle work
-and reviewed curved, periodic, matching and writer fixes. The concise default
-suite now passes 224 assertions on Julia 1.12.7 and 1.13.1. Ordinary
-`Pkg.test()` automatically selects minimal compilation; test bodies took
-11.5 and 10.6 seconds. Cold package runs took 45.21 and 38.38 seconds including
-precompilation.
-Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
-[current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
-and [test/README.md](test/README.md) describes routine and extended tests.
-[`STATUS.md`](STATUS.md) retains dated verification evidence. Supported runtimes
-remain Julia 1.12.x and 1.13.x.
-The user-requested [Devin handoff](DEVIN_HANDOFF.md) lists all known unfinished
-work, prepared designs, portable evidence and full completion criteria.
+## Quickstart
 
-The CLI accepts `file.geo -1|-2|-3`, `-o output.msh`, `-format msh2|msh4`
-and `-bin`, with `-clscale`, `-clmin`, `-clmax` and `-order` controls.
-`-help` and `-version` work without an input file. `file.msh -check` validates
-mesh structure without generation or writing; see [CLI controls](docs/cli_controls.md).
-One-dimensional output keeps classified Point/Curve ownership,
-physical names, periodic node pairs and configured Curve orders.
-List-based views export POS, TXT, CSV and legacy VTK with all time steps;
-see [list export formats](docs/list_view_exports.md) for their data layout.
-[Atomic model opening](docs/model_import.md) uses `API.open` for GEO/MSH/POS files,
-preserving prior models and held views. [Atomic session merging](docs/model_merge.md)
-executes against the current model and retains its slot and filename. [Direct model MSH export](docs/model_export.md) uses `API.write` with physical
-selection, ASCII/binary encodings and retained metadata. Model views also
-export [CSV and VTK](docs/model_view_exports.md), preserving
-UIDs, ownership, sparse time steps and full supported connectivity. Recognized
-independent STEP/IGES solids import as [classified mixed meshes](docs/cad_mesh_imports.md).
-[Mapped STEP occurrences](docs/step_mapped_occurrences.md) retain actual rigid
-placement and nested instance paths, including proper unit-scale
-[Cartesian targets](docs/step_cartesian_rigid_targets.md).
-[Direct product-usage assemblies](docs/step_relationship_assemblies.md) retain
-actual NAUO/CDSR/IDT placement paths, separate occurrence identities and rigid
-frames with actual [SI source/placement length conversion](docs/step_relationship_si_units.md).
-[POS list importing](docs/session_pos_import.md) retains all24 plain linear
-record families, names and physical times through atomic open/merge.
-[View time metadata](docs/view_time.md) derives actual counts, selects displayed
-physical times and correctly resets model step bounds after data-kind changes.
-[View representation changes](docs/view_representations.md) replace obsolete
-list/model storage atomically and preserve the view identity and display state.
-One translated copied Surface pair is supported per Region in separate
-[ordinary hybrid components](docs/periodic_hybrid_boundaries.md), including connected
-Regions with [shared Tri interfaces](docs/shared_periodic_hybrids.md), and a strictly
-interior [embedded Point](docs/embedded_hybrid_points.md) or one connected
-[embedded Line2 Curve](docs/hybrid_embedded_curves.md), or one retained
-[Tri3 Surface](docs/hybrid_embedded_surfaces.md) can be recovered in a convex
-hybrid shell, with one endpoint-only3–6-vertex disk and `n-2` actual Tri3 cells
-per Surface; see the [polygonal scope](docs/hybrid_polygon_sheets.md). [Multiple Point/Curve constraints](docs/hybrid_constraint_collections.md)
-are supported within one convex Region. Supported planar STEP/IGES Faces retain outer/inner wires
-and triangulate holes. [Explicit IGES plane charts](docs/iges_plane_charts.md)
-map bounded UV wires and rigid surface transforms; general curved CAD trimming
-remains open. Retained rigid-prism shells with matching cap triangles also
-have a [certified fast fill](docs/prismatic_fill.md), preserving every source
-coordinate and boundary triangle.
-
-Explicit [constant-tensor box grids](docs/constant_metric_boxes.md) retain
-directional edge bounds, shared material interfaces and voids. An explicit
-[variable-tensor Surface constructor](docs/metric_model_surfaces.md) refines
-ordinary planar triangles while retaining lower boundary identities. The
-[explicit tensor API](docs/api_metric_surfaces.md) consumes the selected tensor
-background without changing ordinary algorithm dispatch. Single convex
-hybrid Regions support [negative pyramid factors](docs/hybrid_normal_apices.md)
-and [nonnegative relocation settings](docs/hybrid_relocate_modes.md), including
-the separate [Winslow optimizer](docs/hybrid_winslow.md).
-[Region batches](docs/hybrid_batch_pyramids.md), including shared triangulated
-interfaces, support these Pyramid settings with per-Region certificates. [GEO and CLI calls](docs/geo_pyramid_option_scope.md)
-use their own generation option context.
-Bare first-order Tet Regions can produce [partition interfaces and ghost
-queries](docs/partitioned_tets.md). A complete discrete Tri3 boundary also
-supports [Surface children and closed interface seams](docs/partitioned_brep.md).
-[Open seams across original Surfaces](docs/partitioned_open_seams.md) also
-retain literal original border incidence. These producers preserve actual
-cell UIDs and MSH4 metadata.
+Requires **Julia 1.12.x or 1.13.x**.
 
 ```julia
 using Tessella
-using Tessella.IO: write_msh
-
-m = mesh_volume(surface)                 # closed triangle surface → validated tets
-ms = mesh_sized(surface; hmax=0.5)       # certified maximum-edge size bound
-near = DistanceField(surface)
-field = ThresholdField(near; dist_min=0.0, dist_max=0.2,
-                       size_min=0.02, size_max=0.5)
-mf = mesh_sized(surface; field=field)    # spatially graded volume mesh
-write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 ```
 
-## Implemented scope
+### Command line
 
-- adaptive exact 2-D/3-D predicates — allocation-free Float64 expansion stages
-  with a guarded exact-dyadic fallback — an exact diametral test, one
-  consistent Simulation-of-Simplicity convention, and exact-rational test
-  oracles;
-- compact simplex meshes with finite-input, cell, tag, manifold-link, and quality
-  validation;
-- 2-D Delaunay/CDT and quality refinement, graded curves, and planar, cylindrical,
-  and parametric surface meshing;
-- Float64 and exact-coordinate 3-D Delaunay kernels, constrained boundary recovery,
-  multi-region partitions, and explicit recovery blockers;
-- uniform and field-driven 1-D, 2-D, surface, and 3-D sizing, including geometric and
-  composite (`Distance`, `Threshold`, `Box`, `Ball`, finite `Cylinder`, `Frustum`,
-  `Min`, `Max`, bounds), analytic/derivative (`MathEval`, `Gradient`, `Laplacian`,
-  `Mean`, `Curvature`, `MaxEigenHessian`), coordinate/storage (`LonLat`, `Parametric`,
-  `Structured`), entity-aware (`Restrict`, `Constant`), sampled/context (`Extend`,
-  `Octree`, first-order scalar/vector `PostView` on every standard point/line/surface/
-  volume list element), scalar `BoundaryLayer`,
-  discrete `AutomaticMeshSizeField` analogue, and `ExternalProcess` fields;
-- anisotropic metric primitives and `MathEvalAniso`, `MinAniso`, `IntersectAniso`, and
-  `AttractorAnisoCurve`; discrete distance queries use a deterministic AABB hierarchy,
-  and lower-dimensional cells and tags are preserved through volume refinement;
-- quality reporting, flips, Laplacian/ODT/targeted sliver smoothing, healing
-  diagnostics, native box/cylinder/cone/geodesic-sphere primitives, analytical
-  surfaces, imprints, mesh Boolean CSG, and validated affine transformations of
-  finalized simplex meshes with orientation and physical-tag preservation;
-- Gmsh-shaped cached segment/triangle/tetrahedron quality queries with scaled
-  arithmetic and exact/BigFloat fallbacks for extreme or ill-conditioned geometry;
-- actual- and explicit-order nodal reference functions and gradients for every
-  fixed family, plus hierarchical H1 bases at orders 1:15 over Point, Line,
-  Triangle, Tetrahedron, Quadrangle, Hexahedron, and Prism reference families
-  with hierarchical H(curl) bases at orders 0:11 on Line/Triangle/Tetrahedron
-  and 0:10 on Quadrangle/Hexahedron/Prism,
-  lexicographic orientations, and global vertex/edge/face/bubble
-  degree-of-freedom keys;
-- deterministic global edge and triangular/quadrangular-face catalogs for cached
-  simplex and native mixed meshes, with atomic explicit insertion, orientation-stable lookup, and
-  detached tag/node arrays;
-- native mixed API caches for standard linear/full quadratic families, preserving
-  classification through reference/Jacobian/location queries, basis keys,
-  affine transforms, duplicate removal, partitioning, order changes, and
-  family-preserving uniform refinement; new full P2 products receive complete
-  reference-domain certificates for all seven standard families, including
-  Pyramid14's rational map; curved CAD elevation/refinement has an
-  explicit placement-kernel blocker;
-- globally certified quadratic segments, triangles, and tetrahedra (exact
-  Bernstein Jacobian certificates, curve/surface curving, and Gmsh type-8/9/11
-  output), plus strict and atomic simplex MSH
-  v2.2/v4.1 and STL I/O;
-- a resource-bounded `.geo` scanner for finite arithmetic constants, pure numeric
-  functions, comparison/logical/ternary operators, prior scalar bindings, sizing
-  options, explicit field/physical tags, and
-  finite constant `start:end[:increment]` lists in recognized numeric contexts, plus
-  read-only tag allocators over tracked Point, shared-region, and Field namespaces and
-  factory-aware, checked `SetMaxTag` control of geometric counters; the
-  executor applies the same checked semantics to numeric parameters, entity tags,
-  and entity lists in every supported geometry statement, executes
-  `If`/`ElseIf`/`Else`/`EndIf` and `For name In {start:end[:increment]}`/`EndFor`
-  with the built-in kernel's semantics plus a bounded `While`/`EndWhile`
-  extension, runs `Function name ... Return` bodies re-executed by `Call name;`
-  in shared scope with bounded recursion, executes N-way multi-operand
-  `BooleanDifference`/`Union`/`Intersection`/`Fragments` with per-group
-  `Delete;` markers, OCC membership-cell decomposition, preserve-numbering tag
-  rebinding, and `v[]`/`v()` result-list capture, and stores positive
-  `MeshSize`/`Characteristic Length` constraints on existing explicit Points,
-  including recursive explicit-topology `PointsOf` selection;
-- a 125-type fixed-node Gmsh catalog plus ten serializable cut/border/child/
-  sub-element records, compact variable connectivity and parent/domain references,
-  canonical family/order-to-type lookup and detached local-node property metadata,
-  mixed entity/classification metadata, structural validation/CRC, and ASCII/binary
-  MSH v2.2/v4.1 mixed-element I/O with opposite-endian decoding and cumulative
-  repeated pre-element node sections, plus owned periodic metadata in ASCII and
-  binary MSH2/MSH4 files, including entity transforms, node correspondences, and
-  declared MSH2 elementary-entity tags; MSH4 partition metadata
-  (`$PartitionedEntities` and `$GhostElements`) is carried structurally on
-  `MixedMesh` and re-emitted through ASCII and binary output; binary MSH4
-  `size_t` fields decode at either declared width and can be emitted at 4
-  bytes with `size_t_bytes=4` for Tessella-only serialization; positive,
-  physically consistent MSH2
-  entities can be converted to discrete MSH4 entities without changing their
-  entity tags;
-- deterministic, physical-tag-preserving surface triangle-to-quadrangle
-  recombination with convexity, resource-growth, CRC, and Gmsh-load gates;
-- oriented-normal extrusion of coherently directed planar polylines into
-  first-order quadrangle strips with optional convex-corner fans, exact projected
-  corner-Jacobian checks, resource bounds, and rigid-motion certification;
-- translation and general finite nonsingular affine periodic node-pair
-  certification/snapping using Gmsh's row-major 4×4 convention, with node numbers,
-  connectivity, and physical tags preserved; the native model/API owns straight-
-  curve relations with one master per slave, reusable masters, and
-  master/slave chains or cycles; it synchronizes planar subdivisions for boundary or
-  embedded curves and returns detached node maps; it also owns affine-equivalent
-  planar boundary-surface pairs on explicit volume shells, synchronizes each slave
-  triangulation from its master, and certifies the tetrahedron-face map;
-  `model_to_mixed` emits
-  classified point/line/triangle blocks, signed hole boundaries, embedded point
-  and curve cells, physical memberships, and periodic curve/endpoint
-  links for planar surfaces; mixed meshes retain periodic maps and Gmsh's MSH4
-  curve-in-surface relation, and the CLI uses this path for periodic or embedded
-  `-2` output; the dimension-explicit form also emits classified boundary and
-  Point/Line/Surface-In-Volume cells after certifying the selected solid fill,
-  including nested Point/Line-In-Surface constraints, holed planar sheets, and
-  explicit planar surface-loop volumes with cavity signs; periodic explicit volumes
-  retain their derived boundary point/curve forest and surface-node maps through
-  MSH2/MSH4 output, and the CLI uses this path for classified `-3` output;
-  the multi-surface `model_to_mixed` overload projects standalone periodic
-  surface pairs, merging shared nodes, emitting each shared entity's cells
-  once, and serializing the surface map, induced boundary links, and explicit
-  curve relations spanning the projected surfaces;
-- model and synchronized session APIs for dimension-scoped entity names, atomic
-  positive-tag changes, ordered dependency-safe removal, analytical bounding boxes,
-  containment selection, native entity types and plane equations, and explicit
-  nonpartition metadata, plus native Point/straight-Line/explicit-Plane values,
-  derivatives, curvature, normals, parametrization, containment, projection, and
-  Point/Line-to-Plane reparametrization, and Circle/Ellipse-arc values,
-  derivatives, and curvature; built-in Spline/BSpline/Bezier/Nurbs curves
-  (the `Nurb` entity type) additionally evaluate, differentiate, measure
-  curvature, bound, parametrize, project, and contain bit-for-bit against
-  Gmsh 4.15.2's `InterpolateCurve` family; owned entity visibility and RGBA colors,
-  model string attributes, and finite Point-coordinate updates;
-  retagging moves every live reference, while removal skips surviving
-  boundary/embedding dependencies, can recurse through explicit boundaries, and
-  cleans owned metadata and encodings without rewinding automatic tags;
-- one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
-  child templates, shared deterministic edge midpoints, tag preservation, resource
-  bounds, and output validation, available directly or as an atomic operation on the
-  synchronized session mesh cache;
-- validated four-sided planar transfinite triangle patches using average-chord Coons
-  interpolation, all four Gmsh diagonal arrangements, physical tags, bounded
-  intersection auditing, and exact orientation postconditions;
-- transfinite curve subdivision for Gmsh's Progression/Power, Bump, and Beta
-  laws plus all three HWall variants, with native `F_Transfinite` density
-  integration and inversion for nonuniform Lines, flexible Circles, arcs and
-  splines; standalone analytic helpers and nonflexible Circles retain their
-  closed-form grading. Subdivision has signed orientation and Float64
-  representability gates, and `Mesh.FlexibleTransfinite` count scaling
-  by `Mesh.CharacteristicLengthFactor`/`Mesh.MeshSizeFactor` with the
-  recombined-boundary odd-count rule;
-- validated three-sided structured patches using both Gmsh
-  `Mesh.TransfiniteTri` algorithms — the legacy collapsed-quadrilateral grid
-  (default `0`, with auto-rotated or pinned collapsed corners) and the compact
-  triangular lattice (`1`) — with all four diagonal arrangements, recombined
-  triangle/quadrangle layouts, ruled-surface fills (including warped and
-  spherical boundaries via the `XYZtoUV` → `point(Up,Vp)` inversion), and
-  exact geometry/boundary postconditions;
-- recombined four-sided planar transfinite patches with Gmsh type-3 quadrangles,
-  physical tags, and exact projected corner-Jacobian certification;
-- affine and face-interpolated warped six-face transfinite volumes using Gmsh's unrecombined six-tetrahedron
-  subdivision, with boundary tags, exact topology/orientation postconditions,
-  exact-dyadic remote-grid interpolation, and represented-volume certification;
-- affine and face-interpolated five-face triangular prisms using Gmsh's collapsed
-  and compact layouts, with recombined prism/hex emission and exact orientation,
-  boundary, and represented-volume certification;
-- native `TransfQuadTri` and `QuadTriAddVerts` transitions, using actual boundary
-  diagonals and certified tetrahedron/pyramid fans alongside retained hexes/prisms;
-  AddVerts checks the complete reference maps of its actual retained cells.
-  Translation, rotation, twist, fixed columns, graded layers, neighboring sweeps,
-  and toroidal revolutions have pinned oracle coverage.
-- native `QuadTriNoNewVerts` for an isolated source triangle or quadrangle, or a
-  strictly convex four-corner planar transfinite source containing two Tri3 cells,
-  or a recombined 2-by-2 Quad4 patch with an existing interior source pivot,
-  or a recombined strip containing two, three or four Quad4 cells,
-  or a regular recombined rectangular Quad4 source grid with at least two
-  cells in each direction, or an arbitrary-length recombined one-cell-wide
-  Quad4 strip with at least five cells,
-  with normalized
-  positive layer groups and the lateral policies described below; one completed operation
-  plan supplies the volume, surfaces, and classified projection. Whole-domain
-  P1 Jacobian and typed-boundary checks plus bounded convex-hull separation reject
-  uncertified or overlapping layers before publishing mesh state.
-  Triangular sources emit three tetrahedra or one retained prism per interval
-  without adding nodes; their caps preserve the actual source-cell ordering.
-  Two-triangle sources support axis-aligned normal translation in either
-  direction. Their joined prism relation emits six tetrahedra or two prisms per
-  interval with exactly `4(N+1)` nodes. Actual source incidence and strictly
-  ordered column planes certify the complete product; shared typed faces have
-  opposite outward cycles, and the internal diagonal has no CAD lateral surface.
-  The bounded 2-by-2 patch retains actual three-node native boundary chains and
-  supports normal translation in either direction. Free laterals emit
-  `(24N-8)` tetrahedra and four pyramids; recombined laterals emit `4(N-1)`
-  hexahedra and twelve pyramids, using exactly `9(N+1)` primary nodes without
-  an added centroid. The actual source partition and element maps are certified
-  before the complete typed boundary and projection are published.
-  The two-, three- and four-Quad strips retain their actual three-/two-node,
-  four-/two-node and five-/two-node native Line chains. They support axis-normal translation in
-  either direction and preserve the original source-cell ordering. Free
-  products use exactly `6(N+1)`, `8(N+1)` or `10(N+1)` primary nodes; recombined laterals
-  add exactly two, three or four strictly representable terminal centroids. Their
-  quadratic meshes have `30N+15`, `42N+21` or `54N+27` nodes for free laterals, and
-  `30N+31`, `42N+45` or `54N+59` for recombined laterals. Every shared face in a
-  strip is solved together before indexed output is emitted.
-  Arbitrary-length one-cell-wide strips support free and recombined laterals.
-  They retain the actual native Line chains and original cell identities,
-  including convex skew and graded sources, in either axis-normal direction.
-  For `M` source Quads and `N` intervals, they emit `2M` Tet4, `M(N-1)` Hex8
-  and `5M` Pyr5 cells with one strictly representable actual terminal centroid
-  per source cell. P1 and P2 contain `2(M+1)(N+1)+M` and
-  `(12M+6)N+14M+3` nodes. Full cell maps, source partitions, typed faces and
-  actual primary/support carriers are certified before publication.
-  Free laterals use actual shared-face propagation before selecting existing-corner
-  tetrahedron/pyramid templates. Each retained problem receives one actual
-  eight-corner mean and a certified fan in its own interval, including
-  nonterminal intervals and final masks that become template-eligible.
-  With `C` retained problems, the primary node count is
-  `2(M+1)(N+1)+C`; checked admission reserves `MN` possible means and `12MN`
-  cells before allocating layers. Complete P2 maps and support carriers are
-  certified against the actual emitted cells rather than a fixed family count.
-  Rectangular grids retain the actual four native Line chains and original
-  cell identities. A strict source disk and axis-normal column certificate
-  admits convex skew, trapezoid and graded grids as well as rectangles. Shared
-  physical faces are planned once, with B3 corners, adjacent-B2 edge cells and
-  B0 interior cells; no centroid is added. An `a`-by-`b` source with `N`
-  intervals has `(a+1)(b+1)(N+1)` primary nodes and
-  `(2a+1)(2b+1)(2N+1)` quadratic nodes. Recombined laterals emit
-  `ab(N-1)` Hex8, `4ab-4(a+b)` Tet4 and `ab+2(a+b)` Pyr5 cells.
-  Exact actual P2 map certificates cover all emitted families, including
-  Prism18 and rational Pyramid14. Native primary-column ordinal ranking gives
-  consistent eligible cap and terminal shared-face choices; upstream pointer
-  ordering can produce other admissible connectivity.
+```sh
+julia -e 'using Tessella; Tessella.CLI.main(ARGS)' file.geo -3 -o mesh.msh
+```
 
-All P1–P6 parity tracks remain **in progress**. Published-scope non-claims include boundary-layer
-topologies beyond the certified multi-region fan layouts, the full Gmsh
-automatic-sizing pipeline, materially warped unstructured surface fills,
-general tensor/metric meshing parity, general OpenCASCADE/unclassified NURBS CAD, and full
-`.geo` execution (including boundary-layer and pipe (`Using Wire`)
-extrusion forms, `Fillet`/`Chamfer`, allocator reads after topology-changing
-or untracked
-declarations, and geometry-derived physical-group RHSs beyond the documented inline
-topology queries),
-mixed-element generation beyond the listed structured and surface-recombination paths,
-quasi-transfinite or holed transfinite patches,
-other `QuadTriNoNewVerts` source topologies, B1 categories, transformed
-source grids, mixed roots, collapsed
-columns, shared neighbors, and copied-source chains; curved CAD mixed order elevation/refinement,
-selective refinement, simplex-kernel integration,
-curved-cell Jacobian certification beyond the documented P2 families,
-and explicit-tag `$ElementNodeData` output that the
-connectivity-implied record cannot express under `gmsh_compatible=true`. MSH2
-ASCII is the lossless
-format for variable connectivity and parent/domain links; binary MSH2 and MSH4 have
-explicitly narrower special-record contracts. Type 69 and some registered fixed tags
-require Tessella-only output because Gmsh 4.15.2 cannot consume them safely, and
-nonzero-physical special MSH4 requires compatible classification metadata for a
-Gmsh-safe rewrite. MSH2 retains cell-level elementary ownership but has no entity
-topology record for signed boundaries or embedding relations. Native model periodicity
-covers straight or curved curve pairs on one planar triangle-meshed surface, disjoint
-affine-equivalent planar boundary surfaces of one explicit surface-loop volume,
-and stored mesh-inert volume relations. Each
-slave has one master; curve masters may be reused, a curve slave may become a master
-in a chain or cycle, and independent relations may share corner points. The bounded
-`.geo` executor applies prior scalar bindings, finite arithmetic, pure numeric
-functions, comparison/logical/ternary operators, bounded numeric list
-assignment/indexing/selection/mutation, entity
-ranges, `If`/`ElseIf`/`Else`/`EndIf`, `For name In
-{start:end[:increment]}`/`EndFor`, bounded `While`/`EndWhile`,
-`Function`/`Macro`/`Call`/`Return` control flow, and named option reads/writes to
-all supported geometry statements. Entity lists, including periodic
-slave/master sets, can reuse whole or selected list variables.
-Point `MeshSize` selectors can likewise use `:`, expressions, ranges, and
-whole or selected numeric-list variables. Inline `PointsOf` blocks additionally
-select the recursive boundary Points of explicit Point, Curve/Line, Surface, and
-Volume entities; signed entity tags are normalized, hole boundaries participate,
-and embeddings do not. Tessella requires existing explicit Points and finite positive
-sizes; Gmsh's permissive zero/negative and missing-Point behavior is outside this
-bounded contract. The planar surface path extends Point constraints
-piecewise-linearly over its deterministic initial constrained triangulation. Generated
-straight-curve subdivision nodes interpolate their endpoint sizes, while equal Point
-sizes retain the constant-size path and coincident PSLG inputs use the smaller
-constraint. Exact Gmsh mesh topology and mesh-size selectors other than
-inline `PointsOf` remain
-outside this bounded contract.
-Physical declarations accept an explicit positive tag, with an optional name, or a
-nonempty name with an automatic tag. Automatic Physical tags share one namespace
-across entity dimensions and advance later shared-region allocator reads. Physical
-Point accepts inline `PointsOf`; Physical Point/Curve/Surface accept inline `Boundary` and
-`CombinedBoundary` over Curve/Line, Surface, and explicit Volume entities,
-respectively. `Boundary` collects immediate boundaries before physical membership is
-deduplicated; `CombinedBoundary` keeps tags with odd multiplicity. Hole and cavity
-boundaries participate, while embeddings do not; Boolean volumes
-answer boundary queries through their materialized result shells. Empty
-combined boundaries and unsupported dimensions
-are explicit blockers.
-The model and session APIs return detached, sorted group, membership, reverse-membership,
-and name-query results. Names are unique within an entity dimension and can be removed
-independently of their groups. Selective or all-group removal leaves geometry intact
-and does not rewind the global automatic Physical-tag counter.
-They also enumerate explicit entities, report model dimension, and return direct or
-recursive boundaries and direct adjacencies with deterministic Gmsh-compatible
-ordering, orientation, and combined-incidence cancellation. `is_entity_orphan`
-reports downward-closure connectivity to the highest-dimension entities,
-excluding embeddings, matching Gmsh 4.15.2. Topology queries preserve
-the session mesh cache and exclude embeddings. Box and Cylinder/Sphere/Cone/Torus volumes expose their
-materialized OCC boundary topology, and Boolean volumes expose their
-materialized result boundary the same way.
-Entity names belong only to existing entities and need not be unique. Names can be
-replaced, cleared per entity, or removed by value across dimensions. Entity tags are
-positive `Int32` values in dimensions 0 through 3. Unlike Gmsh 4.15.2, Tessella does
-not preload names for missing entities or accept nonpositive retag targets, and a
-name follows its entity when the tag changes.
-Ordered entity removal matches Gmsh's dependency behavior for explicit topology:
-entities used by surviving boundaries or embedding targets are skipped, and recursive
-removal walks boundary entities down to Points without treating embeddings as
-boundaries. Tessella validates the whole request before committing, removes names,
-visibility, colors, empty Physical groups, affected periodic relations, target
-embeddings, native solid encodings, and Boolean-result snapshots, and keeps allocator
-counters monotonic.
-Box and Cylinder/Sphere/Cone/Torus boundaries recurse through the materialized
-shell, and Boolean result boundaries recurse through their materialized shells
-the same way — the operation-time operand snapshots and component links are
-cleaned with the volume. Unlike Gmsh's separate model/CAD layers, removal changes
-Tessella's owning native model and is not undone by a later synchronization.
-Entity and whole-model bounding boxes are exact for explicit straight-edge topology
-and analytical native primitives. Boolean bounds follow the owned operation-time
-result geometry. Containment queries return only entities whose complete box lies in
-the finite query box, ignore embeddings when bounding their target, and preserve the
-session mesh cache. Tessella omits OpenCASCADE shape-tolerance padding (`1e-7` in
-the pinned fixtures) and rejects nonfinite boxes and invalid dimensions.
-Entity metadata identifies every explicit entity as `Point`, `Line`, `Circle`,
-`Ellipse`, `Plane`, `Surface`, `Cylinder`, `Sphere`, `Cone`, `Torus`,
-`Unknown` (degenerate edges), or
-`Volume`; Box and Cylinder/Sphere/Cone/Torus solids expose their materialized
-Point/Line/Plane/Circle/Cylinder/Sphere/Cone/Torus children, and
-Boolean result boundaries classify like any materialized topology. Native `GeoModel`
-plane properties are the detached unit-normal coefficients `[a,b,c,d]` for
-`a*x+b*y+c*z=d`; other visible native types have empty property vectors. Per-window
-visibility is stored display state. Ordinary unpartitioned geometry entities
-have parent `(-1,-1)` and no partition membership. Models without partition
-metadata or assignments have partition count zero. Generated or imported
-[partition entities](docs/partitioned_tets.md) expose their actual parents,
-memberships and ghost aliases. These direct and session queries are read-only
-and preserve the mesh cache.
-Native geometry evaluation covers Points, straight Lines, Circle and Ellipse
-arcs, the built-in Spline/BSpline/Bezier/Nurbs family (reported as `Nurb`),
-OCC circle/line/degenerate edges, and explicit Planes through
-matching direct and session APIs. Lines, arcs, and the non-Nurbs splines use
-parameters `[0,1]`, with
-arcs evaluated through Gmsh's `InterpolateCurve` frame and the spline family
-through bit-exact `InterpolateCurve` ports — Catmull–Rom ghost endpoints,
-piecewise UBS matrices, De Casteljau, and float32-rounded knot vectors;
-Nurbs curves report their raw knot interval and OCC edges report
-their stored ranges (full circles `[0,2π]`, arc-length seam lines, the
-sphere meridian `[3π/2,5π/2]`). Spline-family derivatives, second
-derivatives, and curvature reproduce Gmsh's finite differences, bounds and
-bounding boxes follow the stored intervals and 10-sample scan, and
-parametrization, closest point, and containment run Gmsh's `XYZToU`/
-golden-section/`containsPoint` pipeline. Planes use a
-deterministic Gmsh-compatible orthonormal frame. Physical Plane containment tests the
-exact trimmed interior and excludes boundary loops, while parametric containment
-tests the inclusive rectangular bounds. Closest Line points are clamped to the
-segment; Plane projection is untrimmed. Malformed, nonfinite, implicit, degenerate,
-and unrepresentable inputs fail explicitly. Supported materialized Cylinder,
-Sphere, Cone, Torus and ruled Surfaces already provide native evaluation and
-projection; general CAD registry/trimmed parametrization remains unfinished.
-Point and straight-Line parameters can be reparametrized on any explicit Plane,
-including off-plane sources; the result is the orthogonal Plane parametrization.
-The `which` selector is accepted for API compatibility but has no effect because
-native Planes are not periodic.
-Entity visibility defaults to `1` and RGBA color to `(0,0,255,0)`. Recursive setters
-walk explicit boundaries down to Points; both states follow entity retagging and are
-cleaned on removal without invalidating the mesh cache. Global attributes store
-detached NUL-free string vectors under sorted names. Finite Point-coordinate updates
-preserve tag-owned state and invalidate a synchronized mesh after success; dependent
-native geometry queries immediately use the new coordinates. Box and
-Cylinder/Sphere/Cone/Torus volumes present their materialized boundary
-entities, and Boolean volumes present their materialized result boundary the
-same way.
-`API.mesh.generate(0)` postprocesses existing data and leaves fresh geometry
-empty. `generate(1)` emits classified Point15 and Line1/Line8 cells using the
-shared native curve evaluator, including fields, callbacks, size limits,
-graded laws, and periodic curves. `Mesh.ElementOrder` controls generation;
-`set_order` changes the existing mesh independently. `Mesh.Renumber=0`
-retains sparse public tags, while renumbering can prioritize physical groups.
-Tagged queries, topology, keys, and supported mutations resolve public labels
-through inverse tables; distinct coincident raw vertices retain their source
-identity. Historical maximum tags survive clear and renumber. Periodic nodes
-can include P2 nodes, and periodic keys return seven arrays with master
-coordinates before slave coordinates, matching Gmsh 4.15.2.
+The CLI mirrors gmsh's batch interface: `file.geo -1|-2|-3`, `-o out.msh`,
+`-format msh2|msh4`, `-bin`, `-clscale`/`-clmin`/`-clmax`, `-order`,
+`-scale`, `-part N`, `-refine`, `-save_all`, `-log`, `-cpu`, `-statreport`
+and more. `-help` and `-version` work standalone; `file.msh -check` validates
+a mesh without generating. See [docs/cli_controls.md](docs/cli_controls.md).
 
-P2 nodes inherit ownership from actual classified primary edges and faces.
-Simplex and native mixed refinement preserve child edge and face supports,
-including sparse tagged node identities. `get_nodes` with
-`include_boundary=true` includes the quadratic boundary nodes. These supports
-follow primary node identity through cache edits and renumbering, including
-native mixed edge and face nodes after duplicate-node compaction.
+### `.geo` scripts
 
-Legacy Tri6/Tet10 query overlays use their retained interpolation nodes for
-reference maps, inverse coordinates, location, keys and connectivity-derived
-data. Exact-type queries omit the replaced linear block;
-`get_nodes_by_element_type` selects the family across orders and returns its
-actual nodes. Quadratic simplex qualities follow Gmsh's sampled shape and
-subdivided Bernstein conventions. Triangle `volume` integrates curved area;
-tetrahedron `volume` uses its corner tetrahedron.
-Explicit-order nodal keys identify the element's actual stored nodes while
-`get_number_of_keys` reports the requested basis count. Nodal key information
-omits an incomplete requested-basis group. Hierarchical key information retains
-the supplied length and pads an incomplete tail with `(0, 0)`.
+Standard gmsh `.geo` files execute natively — geometry kernels
+(`Point`/`Line`/`Circle`/`Ellipse`/`Spline`/`BSpline`/`Nurbs`,
+`Extrude`/`Revolve`/`Fillet`/`Chamfer`, `Boolean*` CSG in both the built-in
+and OpenCASCADE factories), `Physical` groups (including
+`Physical GeoEntity{d}` forms), `Transfinite`/`Recombine`, `Field` size
+specs, periodicity, `PartitionMesh`, `Plugin(...)` dispatch, and
+`Save`/`Print` output.
 
-Dimension-one transitions reject legacy native dimension-2/3 caches with
-nonempty attached mesh records before mutation because their source allocation
-history is unavailable. This does not block verified lower-dimensional tagged
-attachments. Native raw Line8 fixtures without actual Point boundary meshes
-remain an oracle gap: four pinned Gmsh setter fixtures crashed its DLL. Fully
-discrete P2 and native raw P2 with actual Point records have verified coverage;
-see [`validation/api_generate01/README.md`](validation/api_generate01/README.md).
+### Public API
 
-`API.mesh.refine` atomically refines linear-simplex caches and supported native
-mixed P1/P2 Point, Line, Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism,
-and Pyramid cells. Mixed refinement returns linear child cells; supported
-legacy straight-simplex refinement retains its re-elevated query overlay.
-Returned mesh storage is independent. Unsupported curved native CAD
-refinement placement rejects before mutation; supported native order factories
-already use actual geometry evaluation and projection.
-`API.mesh.clear` discards the complete cache, or only the cells and
-owned nodes classified on the entities passed in `dim_tags`, without changing
-model geometry; entities owning no cache cells are no-ops, matching Gmsh's
-boundary-mesh retention. `API.mesh.affine_transform` applies a finite nonsingular
-4×4 matrix or a strict 12-/16-entry Gmsh row-major transform to the complete
-cache, or only to the nodes owned by the entities in `dim_tags`.
-`API.mesh.remove_elements` drops listed public element tags — or every element
-on an entity — while retaining nodes; `reverse` and `reverse_elements` flip
-first-order simplex orientation with Gmsh 4.15.2's vertex conventions;
-`reorder_elements` permutes an entity's element block with Gmsh's zero-based
-source-position ordering; `set_node`, `renumber_nodes`, and
-`renumber_elements` update coordinates and labels. Classified native simplex,
-quadratic and mixed caches use geometry-preserving public label tables for
-sparse renaming and retain surviving identities on removal. Unclassified
-legacy caches retain their dense-permutation contract. Existing native Point
-attachments preserve their identities through generation with renumbering
-disabled; cache/record references are checked before publication.
-`get_duplicate_nodes`, `remove_duplicate_nodes`, and
-`remove_duplicate_elements` report and repair exact-coordinate or same-entity
-duplicates with optional entity filters. `remove_embedded` drops embedding
-records from parent surfaces and volumes, `get_periodic` reports each entity's
-periodic master, `compute_renumbering` returns a reverse Cuthill-McKee node
-renumbering for all or a selected subset of elements, `optimize` runs the
-boundary-preserving tetrahedral optimizer on the cache, `set_visibility`/
-`get_visibility` track raw per-element display state, and
-`remove_constraints` is a validated no-op matching Gmsh 4.15.2's
-per-entity-attribute scope. The session owns a Gmsh-parity multi-model list:
-`model.add` appends a fresh named model and selects it, `set_current` restores
-a named model's geometry, mesh, and visibility state, `remove` drops the
-current model and selects the last remaining one, and `model`/`mesh`
-`set_visibility_per_window` store per-window display state.
-It commits only a validated, independently owned result and rewinds reflected simplex
-connectivity to keep the mesh valid. Model geometry and periodic relations remain
-unchanged, and the index-aligned entity-classification snapshot is retained
-through the transform.
-`API.model.add_discrete_entity` registers parametrization-free entities and
-`API.mesh.add_nodes`, `add_elements`, and `add_elements_by_type` attach
-tag-addressed node and element records to them; `import_stl` loads the model
-file's STL as a discrete surface. `create_topology` rebuilds BRep topology
-from the mesh records, `classify_surfaces` regroups discrete faces by
-dihedral angle, `create_geometry` derives chord/PCA parametrizations,
-`compute_homology` emits GF(2) chain generators inside new physical groups,
-and `compute_cross_field` fills a session-owned view with a smoothed
-element-wise frame field. The `API.mesh.field` submodule composes
-MathEval, Distance, and Threshold fields, background and boundary-layer
-assignments, and field removal; the generators consume it together with
-per-entity meshing attributes — `set_transfinite_*` on curves, surfaces,
-and volumes, `set_recombine`, `set_algorithm`, `set_smoothing`,
-`set_reverse`,
-`set_outward_orientation`, `set_compound`, `set_size_at_parametric_points`,
-`set_size_from_boundary`, and the size-callback pair. `recombine` and
-`split_quadrangles` move quadrangles between the simplex cache and entity
-records, `get_periodic_keys` pairs periodic nodes into function-space key
-sequences, `optimize` accepts Gmsh's method names with `dim_tags` entity
-scoping, and `generate` meshes multi-entity selections. Queries on a
-present-but-unmeshed model return empty data like Gmsh 4.15.2. Generation uses
-`Mesh.ElementOrder`; native tagged `set_order` supports catalogued family
-orders1–10 independently of that option. The legacy compact overlay supports
-orders1/2. Native Plane Tri/Quad and transfinite Hex generation already admit
-orders above two; curved and hybrid contexts retain their specific guards.
-Public `set_smoothing` applies only to Surfaces, and `set_reverse` applies
-only to Curves and Surfaces. Other integer dimensions are no-ops, matching
-the pinned native API, including region-level calls.
-Legacy simplex P2 edits retain actual midpoint geometry through relabeling,
-selection, affine maps, and repeated order-two requests. Primary-node edits
-change only the requested node. Refinement and optimization of edited curved
-simplex overlays require a placement kernel and reject before changing state.
-The `.geo` executor reaches the same discrete layer: `Merge "file.msh"`
-imports the file's elementary (MSH2) or entity (MSH4) cell classification
-as discrete entities carrying their cells — node/element tags, node
-classification, parametric coordinates, declared boundaries, physical
-memberships, and physical names are preserved where the format declares
-them — and `Homology`/`Cohomology`/`Betti`,
-`CreateTopology{,a,b}`, `ClassifySurfaces{a,b,c[,d]}`, and
-`CreateGeometry{,shapes}` run their `Gmsh.y` forms on those entities.
-Homology requests execute at the end of `Mesh n` like
-`GModel::computeHomology`: an empty domain covers the model's
-top-dimensional entities, `Betti` reports ranks only, and stored
-generators join `H_k{dom[,sub]}i`/`H^k{…}i` physical groups named and
-allocated like the pinned binary (upstream's `.msh` output drops the mesh
-when chains exist; Tessella preserves the mesh and adds the chains).
-`API.mesh.get_nodes`, `get_elements`, `get_element_types`,
-`get_elements_by_type`, `get_max_node_tag`, and `get_max_element_tag` expose
-detached Gmsh-shaped arrays for simplex and native mixed caches. Legacy caches
-use dense node and element identifiers; tagged caches expose their stored
-public labels, including sparse tags. Element families are returned in numeric
-MSH type order, independently of their internal block positions.
-Whole-dimension element filters are supported, and a nonnegative `tag` filters
-node, element, type-funnel, Jacobian, orientation, key, and `get_element` queries
-onto the `(dim, tag)` model entity through the `model_to_mixed` classification
-snapshot stored with the cache; `dim=-1` ignores `tag`, `include_boundary` appends
-transitive boundary-entity nodes after the entity's own, and unknown entities fail
-explicitly. Native geometry queries compute available curve or surface
-parameters, including ruled and three-sided fills. Tagged raw records preserve
-their stored parameters; Gmsh can leave new face-center parameters unstored.
-Points, Volumes, and
-all-dimension queries emit none. `get_nodes_by_element_type` packs each repeated
-node's parameters on its owning entity, matching Gmsh 4.15.2.
-`get_elements_by_type` accepts nondefault `task`/`num_tasks` and returns
-the contiguous Gmsh block slice (`task>=num_tasks` is empty).
-`get_nodes_by_element_type`, `get_barycenters`, `get_element_edge_nodes`, and
-`get_element_face_nodes` provide the corresponding detached, connectivity-derived
-arrays. Type-node results repeat shared nodes in element order, and edge/face results
-use Gmsh's local ordering. Full quadratic edge/face queries include interpolation
-nodes, while `primary=true` returns corners.
-`get_barycenters`, `get_element_edge_nodes`, and `get_element_face_nodes` accept
-nondefault `task`/`num_tasks` and return the contiguous Gmsh block slice
-(`task>=num_tasks` is empty); `get_nodes_by_element_type` takes no task parameters
-in Gmsh 4.15.2 and neither does this query.
-`create_edges` and `create_faces` idempotently fill missing whole-cache primary
-topology and preserve entries attached with `add_edges` or `add_faces`.
-`add_edges` accepts node pairs; `add_faces` accepts triangles or quadrangles. Both
-operations require positive identifiers, enforce one edge or face per identifier,
-and commit the complete batch only after every tag and node group is valid. Face
-identifiers share one namespace across triangle and quadrangle catalogs. Exact
-edge/tag or face/tag repeats are idempotent. Automatic candidates start at the
-current catalog size plus one and advance past explicit identifiers already in use.
-`get_edges` returns one global tag per node pair and orientation `+1` or `-1` from
-ascending node-tag order; `get_faces` returns the pinned Gmsh 4.15.2 zero
-orientation for both face types.
-`get_all_edges` and `get_all_faces` return detached arrays in ascending global-tag
-order. Unlike Gmsh 4.15.2, Tessella rejects zero identifiers, duplicate identifiers
-on different entities, conflicting identifiers for the same entity, repeated nodes,
-and malformed or partly invalid batches without changing the catalog. Every mesh
-replacement discards both catalogs. Entity-selective creation adds only the
-cells classified on the listed `dim_tags` entities.
-`get_element_by_coordinates`, `get_elements_by_coordinates`, and
-`get_local_coordinates_in_element` use a reusable AABB hierarchy over the current
-cache. Matches are deterministic: greatest dimension first, then smallest public
-element tag, using dense tags for legacy caches.
-Strict search uses the pinned Gmsh 4.15.2 `1e-6` reference tolerance; relaxed search
-widens it by decades through `1.0` and stops at the first nonempty level. Scaled
-affine inversion falls back to exact rational arithmetic for ill-conditioned cases;
-native mixed P1/P2 cells use their actual isoparametric maps with conservative
-quadratic candidate bounds.
-Off-span segment and triangle coordinates are stable orthogonal projections with
-unused coordinates set to zero. The locator is discarded whenever the mesh cache
-changes. Degenerate cells and Float64-unrepresentable local coordinates fail
-explicitly. `API.mesh.get_element` resolves a public element tag to its type,
-connectivity, and owning entity through the classification snapshot;
-`API.mesh.get_node` resolves a public node tag to its coordinates, owning
-entity, and stored or owner-parametrized coordinates.
-`API.mesh.get_nodes_for_physical_group` returns the sorted unique node set
-over a Physical group's member, boundary, and embedded entities;
-`API.mesh.get_embedded` reports an entity's embedded entities and
-`API.mesh.get_sizes` reports Point mesh sizes with Gmsh-compatible zeros for
-other and unknown entities.
-`get_jacobians` and `get_jacobian` return detached forward-map data for cached
-linear simplex maps and native mixed P1/P2 cell maps. Evaluation points are
-concatenated `(u,v,w)` triples; outputs follow Gmsh's element-then-point ordering and
-column-flattened 3×3 matrices. Segment and triangle frames use Gmsh-compatible
-low-dimensional regularization, while tetrahedron determinants retain orientation.
-Malformed or nonfinite evaluation coordinates, degenerate maps, and
-Float64-unrepresentable results fail explicitly. Entity filtering requires a
-classified cache. Nondefault `task`/`num_tasks` returns the
-contiguous Gmsh block slice of cached elements (`task>=num_tasks` is empty).
-`get_integration_points` returns detached `(u,v,w)` reference coordinates and
-weights for every fixed-node Point, Line, Triangle, Quadrangle, Tetrahedron,
-Hexahedron, Prism, and Pyramid type, independent of interpolation order and session
-state. `GaussN` preserves every Gmsh 4.15.2 economical table, including Triangle
-through order 20 and Tetrahedron through order 21. Higher orders use Gmsh's tensor
-rules, and Prism combines the matching Triangle and Line rules. Bounded
-`CompositeGaussN` rules use native Gauss--Legendre, Duffy, and Gauss--Jacobi
-construction with at most 128 points per axis and one million output points. Bare
-rule names mean order zero, and malformed or excessive requests fail before output
-allocation. Trihedra have no integration rule in Gmsh 4.15.2 and fail explicitly.
-`get_basis_functions` evaluates each fixed type's actual nodal basis through
-`Lagrange`, `IsoParametric`, `GradLagrange`, and `GradIsoParametric`. Explicit
-`LagrangeN` and `GradLagrangeN` names select the complete order-`N` basis of the
-input family. Point accepts each supported numeric name from 0 through 10; the
-other families use the same range, subject to the catalog limit of order 9 for
-Hexahedron, Prism, and Pyramid.
-`H1LegendreN`/`GradH1LegendreN` cover orders 1 through 15 on Line, Triangle,
-Tetrahedron, Quadrangle, Hexahedron, and Prism families, plus the
-order-independent Point basis on type 15. Order-one H1 values repeat the
-reference family's vertex functions once per orientation; higher orders add the
-hierarchical edge, face, and bubble functions in Gmsh's order.
-`HcurlLegendreN`/`CurlHcurlLegendreN` cover orders 0 through 11 on Line,
-Triangle, and Tetrahedron and orders 0 through 10 on Quadrangle, Hexahedron,
-and Prism.
-Point H1 key metadata reports order 0 and the Point H1 gradient is the verified
-zero vector (the pinned release answers `[1,0,0]` there instead). Hexahedron H1
-orientation counts use 8!, matching the pinned release's basis count rather than
-its uninitialized-memory metadata read, which returns different values across
-processes. Pyramid and Trihedron hierarchical spaces stay rejected: the pinned
-release defines no Pyramid hierarchical family and no Trihedron basis.
-Results use Gmsh's orientation-then-point-then-function-then-component
-layout. Hierarchical orientations use the lexicographic rank of the primary node
-tags; bulk and single-element orientation queries return those indices directly.
-`get_keys` and `get_keys_for_element` return node keys for Lagrange spaces and
-hierarchical vertex, edge, face, and bubble keys for H1/H(curl) spaces, laid out
-like Gmsh 4.15.2's `getKeys`. Edge- and face-key queries lazily create only the
-topology visited by the requested type or element, reuse explicit or previously
-created identifiers, and return stable midpoint or centroid coordinates.
-Actual- and explicit-order nodal key queries identify the interpolation nodes
-stored on the queried element; the requested order controls reference basis
-counts and metadata. Number-of-key/orientation and key-information
-queries remain session-independent. `get_basis_functions_orientation` accepts
-nondefault `task`/`num_tasks` and returns the contiguous Gmsh block slice
-(`task>=num_tasks` is empty, where Gmsh 4.15.2 segfaults). Trihedron bases remain
-explicit blockers; entity filtering requires a classified cache.
-Tessella evaluates the catalogued
-higher-order Prism and incomplete Pyramid spaces that Gmsh 4.15.2 cannot construct
-reliably; those paths are certified by nodality, partition, and gradient invariants.
-`get_element_qualities` returns detached values in public-tag request order.
-Linear triangles and tetrahedra support the 13 documented Gmsh 4.15.2 measures;
-native mixed P1/P2 cells also support `minEdge` and `maxEdge`. Remaining
-unsupported family/order combinations fail precisely. It preserves signed
-tetrahedron Jacobian, volume, inverse-condition, inverse-gradient-error, and inradius behavior, while
-degenerate shape measures return zero and undefined circumradii return `Inf`.
-Gmsh 4.15.2 has no reliable linear-segment implementation for `minDetJac`,
-`maxDetJac`, `minSIGE`, or `minIsotropy`; Tessella rejects those combinations
-explicitly. Nondefault `task`/`num_tasks` partitions the requested-tag positions
-and returns the contiguous Gmsh block slice with slice-scoped validation
-(`task>=num_tasks` is empty, where Gmsh 4.15.2 reads its request vector out of
-bounds).
-`msh_type` and `msh_properties`, with session-independent
-`API.mesh.get_element_type` and `get_element_properties` wrappers, query the native
-Gmsh 4.15.2 catalog. Family names in the API are case-insensitive, and requested
-serendipity types use Gmsh's complete-type fallback when no distinct incomplete type
-exists. Property results cover all 125 fixed types and return detached local-node
-coordinates. Tessella retains verified high-order-prism and trihedron properties where
-Gmsh 4.15.2's property call fails; compatible zero-node special metadata is returned,
-while special records without nodal properties fail explicitly.
-Boolean volumes own operation-time operand geometry. API Boolean operations and
-`.geo` `Delete` clauses make deleted volume tags reusable without changing an
-existing Boolean result.
-It accepts `Periodic Line`, `Periodic Curve`, and `Periodic Surface` with
-`Translate`, `Rotate`, and `Affine` transforms, the transform-free
-orientation-only curve form, and the `Periodic Surface j {curves} = k {curves}`
-edge-counterpart form that derives its transform from mapped boundary vertices.
-`Periodic Volume` is a `syntax error (Volume)` like Gmsh's grammar; volume
-relations can still be stored through `set_periodic!` as a Tessella extension
-(Gmsh's `setPeriodic` silently ignores dimension 3) and remain mesh-inert.
-Cyclic Curve relations are retained and synchronized pairwise. Unsupported
-cyclic Surface generation contexts, general curved periodic Surfaces, and
-allocator reads after topology-changing or untracked declarations remain
-pending. Gmsh 4.15.2 has no
-serialized Point-In-Surface or Point/Line/Surface-In-Volume relation:
-the classified nodes and elements remain available instead. Its ASCII
-MSH4 reader reconstructs curve embeddings, while its binary reader drops that
-relation with a warning; Tessella reads both variants losslessly. Classified
-volume-embedding and explicit-shell entities and cells, including nested
-point/curve/surface classification, survive MSH2/MSH4 output. MSH4 retains signed
-surface boundaries for explicit planar volumes; MSH2 retains cell ownership but not
-the entity topology.
-Complete CAD/BREP, broad file/API compatibility,
-GUI, and post-processing remain pending. See
-[`PLAN.md`](PLAN.md) rather than treating the completed Stage 0–6 baseline as Gmsh
-completeness. ASCENT remains Tessella's primary solver consumer.
+```julia
+const A = Tessella.API
+A.initialize()
+occ = A.model.occ
+occ.add_box(0, 0, 0, 1, 1, 1)
+occ.synchronize()
+A.mesh.generate(3)
+A.write("box.msh")
+A.finalize()
+```
 
-## Verification
+The API mirrors `gmsh/model`, `gmsh/model/occ`, `gmsh/model/geo`,
+`gmsh/model/mesh`, `gmsh/mesh`, `gmsh/mesh/field`, `gmsh/option`, `gmsh/view`,
+and `gmsh/plugin` surfaces, plus `API.open`/`API.merge`/`API.write` for
+MSH/GEO/POS files. The oracle-registered plugin set is complete (CurvedBnd
+distance fields, Bubbles, Crack, Homology, NearToFarField, SimplePartition,
+and the full cut/transform/compute families).
 
-The default package suite checks functionality and correctness with small real
-fixtures and analytic invariants. Run it on Julia 1.12.x and 1.13.x:
+## What Tessella does
+
+- **Meshing**: Delaunay/frontal 2-D and 3-D with conforming boundary
+  recovery, transfinite and structured grids, recombination to
+  triangles/quads, uniform and barycentric refinement, high-order elements
+  with whole-domain Jacobian certification, size-field evaluation
+  (MathEval/PostView/octree `AutomaticMeshSizeField`), periodic and embedded
+  constraints, partitioning with entity/ghost/topology layers.
+- **Geometry**: built-in and OCC-kernel modeling, Booleans on solids and
+  surfaces with generic curved-section tracing, STEP/IGES import (solids,
+  surface sheets, mapped occurrences, assemblies, SI units), affine
+  transforms, extrusion/lofts/fillets.
+- **I/O**: MSH 2.2 + 4.1 (ASCII/binary, UInt64 tags, preserved sections),
+  STL, UNV, Medit `.mesh`/`.meshb`, SU2, BDF, INP, NEU, P3D, MAIL, IR3,
+  DIFF, VTK, OFF, OBJ, PLY2, TOCHNOG `.dat`, MATLAB `.m`, VRML, LS-DYNA
+  `.key`, RADIOSS `.rad`, X3D, POS/CSV view data. Clear errors for
+  dependency-gated formats (CGNS/MED/CDF).
+
+Feature details and per-topic scope live in [`docs/`](docs/).
+
+## Testing
 
 ```sh
 julia --project=. --startup-file=no --check-bounds=yes -e 'using Pkg; Pkg.test()'
 ```
 
-Ordinary `Pkg.test()` also selects minimal compilation automatically before
-loading Tessella. For the same assertions with normal optimized compilation,
-set `TESSELLA_TEST_COMPILER=optimized`, use `-O2` and omit `--compile=min` from
-both Julia and `julia_args`; see the exact command in [test/README.md](test/README.md).
-
-It covers geometry, bounded meshing, refinement, high-order elements, I/O and
-API ownership, state and errors without external tools. Exhaustive native sweeps,
-stress tests, allocation/source audits, benchmarks and application/solver
-campaigns are opt-in and may take hours:
+`Pkg.test()` selects minimal compilation automatically; for optimized-mode
+runs set `TESSELLA_TEST_COMPILER=optimized` (see
+[test/README.md](test/README.md)). The default suite is small real fixtures
+and analytic invariants — no external tools. Extended sweeps, allocation
+audits, benchmarks, and solver campaigns are opt-in:
 
 ```sh
-julia --project=. --startup-file=no --check-bounds=yes test/extended/runtests.jl
-julia --project=. --check-bounds=yes validation/run_all.jl
+julia --project=. --check-bounds=yes test/extended/runtests.jl
 ```
-
-The extended runner retains the historical regression files. The validation
-driver compares Tessella against Gmsh 4.15.2 and needs its external dependencies.
-See [`test/README.md`](test/README.md) for commands and suite boundaries, and
-[`DEVELOPMENT.md`](DEVELOPMENT.md) for correctness requirements. Historical
-release and parity evidence remains in [`HANDOFF.md`](HANDOFF.md); it does not
-turn an ordinary package test into a production validation campaign.
 
 ## Repository map
 
-- [`src/`](src/) — package entry point plus domain folders: `core`, `fields`,
-  `geometry`, `meshing`, `structured`, and `interfaces`
-- [`test/`](test/) — package runner plus matching `core`, `fields`, `geometry`,
-  `meshing`, `structured`, and `interfaces` suites, with end-to-end cases in
-  `integration`
-- [`validation/`](validation/) — workflow-specific external-tool and solver-facing
-  fixtures, with shared harness code in `support`
+- [`src/`](src/) — `core`, `fields`, `geometry`, `meshing`, `structured`, `interfaces`
+- [`test/`](test/) — matching suites plus `integration` end-to-end cases
+- [`validation/`](validation/) — external-tool and solver-facing fixtures
+- [`docs/`](docs/) — per-topic implementation scope
 - [`PLAN.md`](PLAN.md) — architecture and scope boundary
-- [`STATUS.md`](STATUS.md) — dated verification evidence and continuation state
-- [`HANDOFF.md`](HANDOFF.md#takeover-2026-10-11) — remaining implementation, reader ownership and release requirements
-- [`ASCENT.md`](ASCENT.md) — external solver integration and HFSS campaign
+- [`STATUS.md`](STATUS.md) / [`HANDOFF.md`](HANDOFF.md) — dated verification
+  evidence and remaining work
+- [`DEVIN_HANDOFF.md`](DEVIN_HANDOFF.md) — complete open-work checklist
 
 ## License
 
