@@ -24,6 +24,85 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Verification ledger — t20 verbatim `TUTORIAL_OK`, api_test tail re-pins (2026-10-28)
+
+- **t20 driver `GMSH_PARITY_T20_TUTORIAL_OK`** on `8a4ba1a` (worktree,
+  `julia -O2 validation/gmsh_parity/t20.jl`): verbatim
+  `execute_geo(t20.geo)` completes the STEP import + `BoundingBox` +
+  multi-entry `DefineConstant` + rotated/translated/duplicated cutting
+  planes + `BooleanFragments{Volume;Delete}{Surface;Delete}` +
+  `Recursive Delete` → `geo=OK vols=6`; session mirror
+  `step_import=OK` (1 vol/21 surf/48 curves/28 pts, bbox MATCH),
+  `cutplanes=4 positions=MATCH`, `fragment=OK vols=6`; live Gmsh 4.15.2
+  oracle `cuts=4 vols=6 surfs=66 curves=128 points=68 nodes=1543
+  elems=9293 tets=5649`. Receipt `_t20_drv_o2.log`. The
+  `tensor_bspline×plane` bound (`2b40b4f`/`a962fd7`/`874177b`) is thus
+  closed end-to-end on the tutorial. Caveat: under
+  `--compile=min -O0` the verbatim stage is a multi-hour interpreted
+  computation (STEP import alone measured 2588.9s; a -O0 rerun PID
+  launched 11:01 was still inside the fragment >10h — same terminating
+  path, not a hang; literal -O0 gate left running).
+- **api_test.jl** (`_api_test_full.log`, worktree run ~4h38m, exit 0):
+  all 13 testsets green — `volume attribute consumption` 42/42
+  (120m22s, the `2c36378` re-pin confirmed), plus the two tail testsets
+  exercised for the first time: `Mesh.FlexibleTransfinite plumbing`
+  15/15 and `generation 0/1 staged options` 84/84. Both tail testsets
+  carried unverified pins that upstream disproved — re-pinned to
+  live-checked 4.15.2 semantics in `8a4ba1a` (dim-2 generate reuses
+  retained dim-1 discretizations 9/9/40/121; second-order regenerate
+  succeeds [8,15]).
+- **model_boolean_conic_spline_test.jl** on `874177b`: 9/9 testsets,
+  131/131 assertions green (`_conic_spline_run.log`), incl.
+  `occ.fragment tensor B-spline×box` 2/2 (28m09s) and
+  `sphere×cone all four operations` 16/16 (37m13s).
+
+### OPT01 optimizer parity slice (working tree, uncommitted)
+
+Volume optimizer parity work landed across this slice:
+
+- `Mesh.OptimizeNetgen` no longer throws in producer generation:
+  `ModelVolumeAlgorithms` interleaves the configured Gmsh/Netgen pass
+  counters per upstream `Generator.cpp` — each arm consumes the previous
+  arm's product — and hybrid volume factories route the Netgen counter as
+  an upstream no-op (`hybrid=true`).
+- `_netgen_optimize_tetrahedra` (`Mesh3DGmshOptimize.jl`) is the
+  independent Netgen-role implementation: per-point worst-cell quality
+  line-search smoothing plus certified edge-swap sweeps. Node removal and
+  midpoint insertion are not implemented; coverage is preserved.
+- `API.mesh.optimize("Netgen")` works on session caches through
+  `_Dim01Assembly`: tetrahedral regions are optimized per region with
+  `Optimizing volume <tag>` diagnostics; regions containing `:hex`,`:pri`,
+  or `:pyr` cells emit upstream's `Skipping Netgen optimizer for hybrid
+  mesh` info line and are skipped. Transfinite/extruded/discrete
+  exclusions match the Gmsh arm; `niter`/`dimTags` are ignored upstream.
+- `Relocate3D` admits every catalogued dim-3 family: sampled SICN was
+  extended to `:pri` (unit-triangle lattice tensorized with the line
+  lattice) alongside `:tet`/`:hex`/`:pyr`; type-4 tets keep the gamma
+  path. The default Gmsh arm skips relocation on hybrid regions while
+  retaining tetrahedral swaps.
+- Quality dispatch in `APIMixedQueries` is order-agnostic for
+  `:hex`/`:pri`/`:pyr` and `:qua` measures — primary-vertex
+  `angleShape`/`innerRadius`/`minNCJ` measures were added per upstream
+  `qualityMeasures.cpp`; unsupported measures still throw.
+- Linear `MixedMesh` `Laplace2D`/`Relocate2D` landed
+  (`APIHighOrderOptimize.jl`): per-face parametric relocation over the
+  classified linear `:tri`/`:qua` cells — `Laplace2D` is upstream's
+  `_relocate` (metric-weighted neighbour centroid via `model_derivative`
+  first fundamental form, ≤5 damped trials gated by
+  `_isItAGoodIdeaToMoveThatVertex`: parametric area must not grow, minimum
+  eta must not drop); `Relocate2D` is `relocateVertex` (incident-vertex
+  (u,v) centroid + `Maximize_Quality_Golden_Section` on [0,1], tol 1e-6,
+  eta for 4-node cells and |gamma| otherwise, lifted by `model_value`),
+  with the `relocateVertex2` real-space/`model_closest_point` arm for
+  parameterless vertices. Verified: relocated lateral nodes on an OCC
+  cylinder stay on the surface to ~1e-16.
+
+Truthful bounded deviations: Tessella does not track per-face
+boundary-layer column marks (`getAllBoundaryLayerVertices` is an empty
+set here) and periodic-seam detection is omitted, so the upstream
+`isSeam` bail-out does not fire — both affect only which vertices move.
+Netgen-role optimization does not claim Netgen's full pass set.
+
 ### Order-≥3 curved-cell whole-domain Jacobian certificates (2026-10-28, landed `9e64650`)
 
 The P2 certified-publication gate now extends to every catalogued curved family
