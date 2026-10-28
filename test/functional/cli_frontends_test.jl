@@ -306,13 +306,24 @@ end
         @test imported_owners(sparse_in,false)==Int32[3,3]
         @test imported_owners(sparse_in,true)==Int32[9,9]
 
-        # Flags that stay rejected keep an informative message.
-        for (flag,fragment) in (("-4","adaptive meshing"),
-                                ("-part_weight","weighted graph partitioning"),
-                                ("-swapangle","boundary-edge swap"),
-                                ("-match","matching"))
-            @test_throws ArgumentError Tessella.CLI.main(
-                [square_geo,"-2","-o",square_msh,flag])
+        # Flags that stay rejected keep an informative upstream-accurate
+        # message naming the absent producer.
+        for (flag,fragment) in (("-4","AdaptMesh"),
+                                ("-part_weight","Partition*Weight"),
+                                ("-swapangle","edge-swap"),
+                                ("-match","GeomMeshMatcher"),
+                                ("-watch","GUI"),
+                                ("-debugSurface","debugSurface.brep"),
+                                ("-run","ONELAB"))
+            err=try
+                Tessella.CLI.main([square_geo,"-2","-o",square_msh,flag])
+                nothing
+            catch failure
+                failure
+            end
+            @test err isa ArgumentError
+            err isa ArgumentError &&
+                @test occursin(fragment,sprint(showerror,err))
         end
     end
 end

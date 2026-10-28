@@ -5803,6 +5803,49 @@ stat report rows on both paths, preserved tags `[5,17]`, tag swap
 `cli_save_options` 61/61, `cli_options_functional` 48/48 — all under
 `--compile=min -O0`.
 
+2026-10-27 rejected-flag audit (P2/CLI): every remaining rejected
+flag was verified unreachable against the pinned 4.15.2 source —
+`-4` → `GModel::adaptMesh` (Coupez edge split/collapse/swap; `.geo`
+`AdaptMesh` already rejects for the same absent producer);
+`-part_weight`/`-partWeight` → `Mesh.PartitionMetisAlgorithm=3` +
+`Mesh.Partition*Weight` consumed only by the METIS graph partitioner
+(Tessella's producer is connected-region BFS); `-swapangle` →
+`Mesh.AllowSwapAngle` consumed only by `meshGFaceBDS` `edgeSwapTest`
+(no BDS surface pipeline exists); `-match` → `GeomMeshMatcher::match`
+on CGNS/MSH opens (no matcher); `-debugSurface` → per-face debug
+gating + `debugSurface.brep` dump; `-watch` → GUI watched-file
+reloading; `-run`/`-onelab`/`-socket`/`-listen`/`-minterpreter`/
+`-pyinterpreter` → ONELAB/solver-client integration. Rejection
+messages now name the upstream producer, and `cli_frontends_test`
+asserts each message fragment (97/97 under `--compile=min -O0`).
+
+2026-10-27 indexing-beyond-Int32 audit (P2): the external tag spaces
+are already at the format's full `size_t` width —
+`MixedEntityData.external_node_tags`/`external_element_tags` are
+`UInt64` end to end (read: `_msh_size_t`/4-or-8-byte binary
+`_binary_size_t`; write: `_write_size_t`), and a mesh carrying node
+tags `[2147483748, 2147483749, 3000000005]` + element tag
+`4294967297` round-trips losslessly through MSH 4.1 ASCII+binary with
+a stable `mixed_crc` (live Gmsh 4.15.2 reads the node tags verbatim;
+upstream itself truncates element tags to 32 bits — its writer emits
+`5000000000` as `705032704`). `API.mesh.add_nodes` keeps full-width
+node tags (`get_max_node_tag` = 5000000003, oracle-verified);
+`add_elements_by_type` routes tags through the upstream signed
+32-bit `MElement(int)` constructor slot — `3000000007` →
+`18446744072414584327`, `5000000000` → `705032704`, identical to the
+live oracle bit-for-bit (`APINativeMeshTags.jl`
+`_native_element_constructor_uid`). The remaining `typemax(Int32)`
+sites are upstream `int` surfaces (entity/physical tags — upstream
+`addDiscreteEntity` auto-renumbers beyond Int32), internal flat
+indices/counts (`ElementBlock.nodes` connectivity positions,
+`ElementRef`, CSR offsets, ghost indices, read resource caps —
+unreachable below the multi-GB memory bound a >2³¹-node mesh needs),
+and format-defined `int` fields (MSH 2.2 numbering incl. the
+`preserve_numbering_msh2` bound, view-data tags, embedded-curve
+encodings). Default-suite pins added: `test/functional/io.jl` wide-tag
+MSH 4.1 round-trip, `test/functional/api.jl` node/element tag-width
+session pins (41/41 + 27/27).
+
 - **P1**: remaining HXT-exact parity inside the now-octree-backed
   `AutomaticMeshSizeField` (sphere-fit curvature, facing-triangle
   `nPointsPerGap` local feature size, `hBulk` fallback, edge-gradation

@@ -187,20 +187,27 @@ const _ALGORITHMS=Dict(
 # loud rejection naming the missing functionality instead of falling into the
 # generic "unsupported flag" error (which stays for genuinely unknown words).
 const _REJECTED_FLAGS=Dict{String,String}(
-    "-4"=>"adaptive meshing (batch mode 4) is not implemented",
+    # Upstream batch mode 4 runs `GModel::adaptMesh` — the Coupez-style
+    # levelset/metric edge split-collapse-swap remesher; Tessella's
+    # `AdaptMesh` .geo command rejects for the same absent producer.
+    "-4"=>"adaptive remeshing (AdaptMesh, batch mode 4) is not implemented",
     # Upstream `-part_weight` switches to partition algorithm 3 and feeds
-    # per-element-family weights into its graph partitioner; no Tessella
-    # partition producer consumes `Mesh.Partition*Weight`, so storing the
-    # values would silently do nothing.
-    "-part_weight"=>"weighted graph partitioning is not implemented",
-    "-partWeight"=>"weighted graph partitioning is not implemented",
+    # per-element-family weights into its METIS graph partitioner; Tessella's
+    # partition producer is a connected-region BFS, so storing the
+    # `Mesh.Partition*Weight` values would silently do nothing.
+    "-part_weight"=>"weighted graph partitioning (Mesh.Partition*Weight) is not implemented",
+    "-partWeight"=>"weighted graph partitioning (Mesh.Partition*Weight) is not implemented",
     # `Mesh.AllowSwapAngle` is consumed upstream only by the BDS
-    # discrete-surface boundary-edge swap optimizer, which Tessella's
-    # surface pipelines do not expose.
-    "-swapangle"=>"boundary-edge swap optimization is not implemented",
-    "-match"=>"geometry/mesh matching is not implemented",
+    # discrete-surface edge-swap pass (meshGFaceBDS edgeSwapTest), which
+    # Tessella's surface pipelines do not expose.
+    "-swapangle"=>"BDS surface edge-swap optimization (Mesh.AllowSwapAngle) is not implemented",
+    # `Geometry.MatchGeomAndMesh` runs `GeomMeshMatcher::match` — pairing an
+    # imported mesh onto existing model entities — on CGNS/MSH opens.
+    "-match"=>"geometry/mesh matching (GeomMeshMatcher) is not implemented",
     "-numsubedges"=>"high-order element display subdivision is GUI-only",
-    "-debugSurface"=>"surface mesh debugging is not implemented",
+    # Upstream `-debugSurface` restricts surface meshing to a tagged face and
+    # dumps `debugSurface.brep`; a diagnostic-only debug knob.
+    "-debugSurface"=>"per-surface mesh debugging (debugSurface.brep) is not implemented",
     "-run"=>"ONELAB solver clients are not implemented",
     "-onelab"=>"ONELAB solver clients are not implemented",
     "-socket"=>"ONELAB solver clients are not implemented",

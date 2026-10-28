@@ -77,6 +77,26 @@
         @test isempty(api.model.get_attribute_names())
         api.model.set_current("")
         @test api.model.get_entities(1) == [(1, 1)]
+
+        # MSH4 node tags span the full `size_t` range upstream — verified
+        # against live Gmsh 4.15.2 (node tag 5000000003 stores verbatim).
+        api.model.add("wide")
+        api.model.add_discrete_entity(2, 7)
+        wide_nodes = [2_147_483_748, 3_000_000_005, 5_000_000_003]
+        api.mesh.add_nodes(2, 7, wide_nodes,
+                           [0.0, 0, 0, 1, 0, 0, 0, 1, 0])
+        @test api.mesh.get_max_node_tag() == 5_000_000_003
+        @test api.mesh.get_nodes(2, 7)[1] == UInt64.(wide_nodes)
+        # Element tags route through the upstream signed 32-bit constructor
+        # slot (`MElement(int)` sign-extended into size_t): live Gmsh 4.15.2
+        # returns these exact widened values for the same inputs.
+        api.mesh.add_elements_by_type(7, 2, [777], [2_147_483_748, 3_000_000_005, 5_000_000_003])
+        api.mesh.add_elements_by_type(7, 2, [3_000_000_007], [2_147_483_748, 3_000_000_005, 5_000_000_003])
+        api.mesh.add_elements_by_type(7, 2, [5_000_000_000], [2_147_483_748, 3_000_000_005, 5_000_000_003])
+        _, element_tags, _ = api.mesh.get_elements(2, 7)
+        @test reduce(vcat, element_tags) ==
+              UInt64[777, 18_446_744_072_414_584_327, 705_032_704]
+        @test api.mesh.get_max_element_tag() == 18_446_744_072_414_584_327
     finally
         api.finalize()
     end
