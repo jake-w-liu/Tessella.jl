@@ -3021,6 +3021,21 @@ end
 # surface, keep hits whose uv lands inside the trimmed face, count. Ambiguous
 # (grazing/boundary) directions fall through to the next candidate.
 
+# u-coordinate of a face wire's period image center — the mean of its
+# arc midpoints' u. Union-merged faces on periodic carriers live on an
+# unwrapped chart (u off the canonical [0,2π) window), so containment
+# tests must first re-center the probe uv onto the wire's period image.
+function _brep_face_wire_ucenter(solid,face)
+    s=0.0;n=0
+    for wire in face.wires,(eidx,_,pc) in wire
+        e=solid.edges[eidx]
+        e.curve.kind===:degenerate && continue
+        s+=_brep_pc_eval(pc,(e.t0+e.t1)/2)[1];n+=1
+    end
+    n==0 && return 0.0
+    return s/n
+end
+
 function _brep_ray_face_hits(solid,face,P,D,tol)
     sg=face.sg
     params=_brep_line_surface(sg,(o=P,d=D))
@@ -3029,6 +3044,11 @@ function _brep_ray_face_hits(solid,face,P,D,tol)
         t<=tol && continue
         p=_b3add(P,_b3mul(D,t))
         uv=_brep_surface_uv(sg,p)
+        uper=_brep_uperiod(sg)
+        if uper>0
+            cu=_brep_face_wire_ucenter(solid,face)
+            uv=(uv[1]+uper*round((cu-uv[1])/uper),uv[2])
+        end
         # inside the trimmed face?
         inside=_brep_uv_in_face(solid.edges,face,uv,tol)
         # near a wire boundary → ambiguous direction
@@ -4198,12 +4218,57 @@ function _brep_merge_union_faces(kept,comp,tol,caller)
     ref=kept[comp[1]]
     maps=Dict{Int,Any}(mi => (kept[mi].sg.occ===:plane ?
         _brep_plane_map(ref.sg,kept[mi].sg) : nothing) for mi in comp)
+    # Periodic-carrier unwrap: two member pieces of one periodic patch are
+    # split by the canonical chart cut — their shared result edge's two
+    # pcurve copies sit whole periods apart (the face's own seam edge).
+    # OCC unifies them into one face, so place every member's chart at the
+    # whole-period offset that lands its shared arcs on an already-placed
+    # member's position; the coincident copies then drop as internal below
+    # and the merged domain reads contiguously across the seam. Members
+    # sharing no key with a placed member keep the canonical chart — any
+    # non-coincident shared arcs simply stay boundary (previous behavior).
+    uper=_brep_uperiod(ref.sg)
+    ushift=Dict{Int,Float64}()
+    if uper>0
+        ushift[comp[1]]=0.0
+        member_arcs=Dict{Int,Vector{NamedTuple}}(
+            mi=>NamedTuple[ar for w in kept[mi].wires for ar in w]
+            for mi in comp)
+        grown=true
+        while grown
+            grown=false
+            for mi in comp
+                haskey(ushift,mi) || continue
+                si=ushift[mi]
+                for ar in member_arcs[mi]
+                    mu=_brep_pc_eval(ar.pc,(ar.t0+ar.t1)/2)
+                    for mj in comp
+                        mj==mi && continue
+                        haskey(ushift,mj) && continue
+                        for br in member_arcs[mj]
+                            br.key==ar.key || continue
+                            abs((br.t1-br.t0)-(ar.t1-ar.t0))<tol || continue
+                            bu=_brep_pc_eval(br.pc,(br.t0+br.t1)/2)
+                            # the two copies of one periodic-edge span carry
+                            # identical v; a whole-period u offset aligns them
+                            abs(bu[2]-mu[2])>10tol && continue
+                            k=round(Int,(mu[1]+si-bu[1])/uper)
+                            sj=k*uper
+                            abs(mu[1]+si-(bu[1]+sj))>10tol && continue
+                            ushift[mj]=sj;grown=true;break
+                        end
+                    end
+                end
+            end
+        end
+    end
     marcs=NamedTuple[]
     test_arcs=NamedTuple[]
     member_cycles=Vector{Vector{Vector{Tuple{Int,Bool}}}}()
     keylocs=Dict{Any,Vector{Tuple{Int,Int}}}()   # key -> [(member, marcs idx)]
     for mi in comp
         mp=maps[mi]
+        sj=get(ushift,mi,0.0)
         cycs=Vector{Tuple{Int,Bool}}[]
         for w in kept[mi].wires
             cy=Tuple{Int,Bool}[]
@@ -4219,6 +4284,13 @@ function _brep_merge_union_faces(kept,comp,tol,caller)
                     rec=(key=ar.key,fwd=ar.fwd,pc=mpc,t0=a0,t1=a1,
                          crv=ar.crv,vt0=(n2 ? -a1 : a0),
                          vt1=(n2 ? -a0 : a1),neg=n2)
+                elseif sj!=0.0
+                    # `_brep_shift_pc` subtracts its argument from the
+                    # evaluated u — negate to land the arc at +sj
+                    rec=(key=ar.key,fwd=ar.fwd,
+                         pc=_brep_shift_pc(ar.pc,-sj),
+                         t0=ar.t0,t1=ar.t1,crv=ar.crv,
+                         vt0=ar.vt0,vt1=ar.vt1,neg=ar.neg)
                 end
                 push!(test_arcs,rec)
                 push!(cy,(length(test_arcs),ar.fwd))
@@ -4235,7 +4307,9 @@ function _brep_merge_union_faces(kept,comp,tol,caller)
     # the same edge over the same uv segment. Period-shifted copies of a
     # periodic seam edge share the key at different uv positions; they are
     # distinct domain boundaries and must be kept, or the merged region would
-    # wrap the seam and lose its planar cycle representation.
+    # wrap the seam and lose its planar cycle representation — unless the
+    # members were unwrapped onto one contiguous domain above, which lands
+    # the copies at the same uv so they cancel like any shared edge.
     keeparc=trues(length(marcs))
     for lst in values(keylocs)
         length(lst)>1 || continue
@@ -4251,7 +4325,21 @@ function _brep_merge_union_faces(kept,comp,tol,caller)
         end
     end
     marcs=marcs[keeparc]
-    isempty(marcs) && return [kept[mi] for mi in comp]
+    if isempty(marcs)
+        # every member arc was claimed by another member at the same uv —
+        # the members cover one identical domain (a duplicate split), so
+        # the unified result is a single face carrying the union of the
+        # members' cell memberships, like OCC's same-domain merge
+        spec=(sg=ref.sg,sgn=ref.sgn,wires=ref.wires,stag=ref.stag)
+        if hasproperty(ref,:uses)
+            uses=Tuple{UInt64,Int}[]
+            for mi in comp, u in kept[mi].uses
+                u in uses || push!(uses,u)
+            end
+            spec=merge(spec,(uses=uses,))
+        end
+        return [spec]
+    end
     pts=Tuple{Float64,Float64}[]
     for ar in marcs
         push!(pts,_brep_pc_eval(ar.pc,ar.t0))
@@ -4368,7 +4456,8 @@ function _brep_unify_union(kept,tol,caller;same_uses::Bool=false)
             end
         end
     end
-    return _brep_merge_edge_pieces(out,tol,caller)
+    out=_brep_merge_edge_pieces(out,tol,caller)
+    return out
 end
 
 # affine map v_new → v_old between two result curves on one carrier, or

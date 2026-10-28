@@ -366,3 +366,36 @@ end
         A.finalize()
     end
 end
+
+@testset "occ.fuse — sphere × cone unifies the seam-split lateral face" begin
+    # Gmsh 4.15.2 on this fixture binds the fused volume with THREE
+    # boundary faces: the sphere piece, the cone's top-disc crescent, and
+    # ONE cone-lateral band — OCC unifies the two pieces the canonical
+    # periodic-u chart split across its seam (they share a seam edge and
+    # tile one contiguous uv patch). Tessella previously emitted the two
+    # pieces separately (4 faces); `_brep_merge_union_faces` now unwraps
+    # member charts onto one domain so the shared seam arcs cancel and
+    # the band materializes as a single face.
+    A.initialize()
+    try
+        occ=A.model.occ
+        occ.add_sphere(0.0,0.0,0.0,1.2)
+        occ.add_cone(0.3,0.0,-0.7,0.0,0.0,1.6,0.5,0.95)
+        occ.synchronize()
+        out,_=occ.fuse([(3,1)],[(3,2)];removeObject=false,removeTool=false)
+        occ.synchronize()
+        @test length(out)==1
+        (_,t)=only(out)
+        b=M.model_boundary(A._with_model(identity),[(3,t)],true,false,false)
+        faces=sort!([t2 for (d2,t2) in b if d2==2])
+        @test length(faces)==3
+        kinds=sort!([get(A._with_model(identity).surface_geometry,
+                         s,(occ=:?,)).occ for s in faces];by=String)
+        @test kinds==[:cone,:plane,:sphere]
+        # mass parity is preserved through the merge — the unified face
+        # covers the union of its members' domains exactly once
+        @test occ.get_mass(3,t)≈7.3999795 atol=1e-5
+    finally
+        A.finalize()
+    end
+end

@@ -37,6 +37,48 @@ interfaces-registered callback — plain `validate` is unchanged. Focused suite
 not this increment). Bounded scope: certificate coverage for catalogued
 families — not a full-parity claim.
 
+### Periodic-face unification + STEP surface-root Boolean operands (2026-10-28, working tree)
+
+Devin closed the two CAD05 residuals named in the entry below. In
+`_brep_merge_union_faces`, same-carrier members that share a result edge
+whose pcurve copies sit a whole u-period apart are now unwrapped onto one
+contiguous chart before internal-edge cancellation — the sphere∪cone
+fixture's two seam-split cone-lateral pieces merge into the single band
+OCC emits (fuse now binds 3 boundary faces: cone+plane+sphere, mass
+7.3999795 = Gmsh 4.15.2 to five digits). Members with no coincident
+shared key keep the canonical chart, and identical-domain member sets
+collapse to one spec carrying the union of cell `uses` (same-domain
+dedup). Two downstream consequences needed fixes:
+`_brep_ray_face_hits` re-centers the probe uv onto the wire's period
+image (`_brep_face_wire_ucenter`) — without it, faces published on
+unwrapped charts are invisible to point-in-solid at wrapped locations and
+result-face orientations flip (box∩full-cylinder intersect regressed to
+1.6308 during development, now 1.3908 with the unified face); and
+`_model_occ_boolean_face_rev` walks every interior probe candidate,
+keeping decisive inside/outside reads and falling back to the provenance
+use sign only when every candidate reads inside-inside (engulfed faces —
+the sphere∩cone disc crescent is exactly that), with both-outside still a
+hard failure. `importShapes` gained the `_multiBind` surface tier:
+`SHELL_BASED_SURFACE_MODEL`/`OPEN_SHELL`/`CLOSED_SHELL`/stray-face roots
+bind their member faces as dim-2 entities usable in Booleans; fixture
+`test/fixtures/brep_occ_surface_sheet.step`.
+
+Verified on Julia 1.12.7 under `--compile=min -O0`:
+`model_boolean_conic_spline_test` EXIT 0 — all testsets green including
+the new unify testset 4/4 and the sphere×cone all-operations 16/16;
+`api_occ_boolean_test` EXIT 0 — all 30 testsets including the periodic
+seam/partial-sector 16/16 and the mixed-dimension surface suites;
+`api_occ_import_shapes_test` EXIT 0 — 23/23 including the new
+surface-model testset. box∩full-cylinder intersect keeps 1.3907963 with
+one unified lateral face; identical-sphere fuse still binds two
+preserved volumes; identical-box intersect binds one volume with six
+boundary faces (same-domain merge). Remaining bounds: shift inference
+requires one coincident-span shared key (partial-overlap seam pieces stay
+boundary); same-domain collapse runs on union/intersection keep lists
+only; STEP files mixing solid and surface roots bind the highest
+dimension; imported-sheet fragment topology follows the existing
+preserved-tag convention, not the multiBind shell-visit listing.
+
 ### OCC Boolean generic curved sections and `_multiBind` tag bind (2026-10-28)
 
 Devin continued the CAD05/P3 Boolean backlog with two verified pieces (receipts

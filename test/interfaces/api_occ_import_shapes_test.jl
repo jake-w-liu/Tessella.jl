@@ -58,3 +58,43 @@ end
         A.finalize()
     end
 end
+
+@testset "occ.import_shapes — STEP surface models bind dim-2 faces" begin
+    A.initialize(); occ=A.model.occ
+    try
+        # `brep_occ_surface_sheet.step`: one ADVANCED_FACE under an
+        # OPEN_SHELL/SHELL_BASED_SURFACE_MODEL — a 0.5×0.5 plane sheet at
+        # z=0.5 over x,y∈[0.25,0.75]. Upstream `_multiBind` reaches the
+        # surface tier when no transferable solid is present: each member
+        # face binds as its own dim-2 entity.
+        out=occ.import_shapes(joinpath(FIX,"brep_occ_surface_sheet.step"))
+        @test length(out)==1 && out[1][1]==2
+        stag=out[1][2]
+        @test occ.get_mass(2,stag)≈0.25
+        bb=collect(occ.get_bounding_box(2,stag))
+        @test bb[1]≈0.25 && bb[4]≈0.75 && bb[3]≈bb[6]≈0.5
+
+        # the imported sheet is a real dim-2 Boolean operand — the same
+        # mixed path a native `add_rectangle` sheet takes. A sheet wholly
+        # inside the box never partitions it (Extent 0 → preserved), and
+        # the sheet stays bound at its import tag — identical to the
+        # native-sheet disposition pinned in `occ.fragment — interior
+        # and outside sheets` upstream.
+        btag=occ.add_box(0,0,0,1,1,1)
+        occ.synchronize()
+        fout,fmap=occ.fragment([(3,btag)],[(2,stag)])
+        @test fout==[(3,btag),(2,stag)]
+        @test fmap==[[(3,btag)],[(2,stag)]]
+        @test occ.get_mass(3,btag)≈1.0
+        @test occ.get_mass(2,stag)≈0.25
+        # intersect volume∩surface: the whole sheet lies inside the box —
+        # the object produces no image and the sheet maps onto its own
+        # rebound tag, like the native-sheet direction.
+        cout,cmap=occ.intersect([(3,btag)],[(2,stag)])
+        @test cmap==[Tuple{Int,Int}[],[(2,stag)]]
+        @test cout==[(2,stag)]
+        @test occ.get_mass(2,stag)≈0.25
+    finally
+        A.finalize()
+    end
+end

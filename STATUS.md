@@ -79,7 +79,67 @@ with a catalogued basis is covered, but this is a certificate increment, not a
 full-parity claim — orders >10 and exotic unsupported types remain
 uncertified.
 
-### OCC Boolean generic curved sections + `_multiBind` first-piece tag bind (2026-10-28, working tree)
+### Periodic-face unification in Boolean merges + STEP surface-root import (2026-10-28, working tree)
+
+Two CAD05 follow-ups close the sphere×cone 4-vs-3-face residual and the
+dim-2 STEP operand gap from the same-dated entry below.
+
+First, `_brep_merge_union_faces` (`ModelBoolean.jl`) unwraps member charts
+onto one contiguous domain before internal-edge cancellation: when two
+same-carrier members share a result edge whose pcurve copies sit a whole
+u-period apart (the carrier's own seam edge split by the canonical chart
+cut), the member is re-placed at the inferred whole-period offset so the
+coincident copies cancel like any shared edge and the merged domain reads
+contiguously across the seam — the unified face OCC emits. Members sharing
+no coincident key with a placed member keep the canonical chart (previous
+keep-both behavior). Same-domain dedup: when every member arc cancels, the
+members cover one identical domain — the merge emits a single spec
+carrying the union of the members' cell `uses` (OCC's same-domain merge)
+instead of silently dropping the face. Downstream, `_brep_ray_face_hits`
+re-centers the canonical probe uv onto the wire's period image
+(`_brep_face_wire_ucenter`) so point-in-solid containment stays correct
+for faces published on unwrapped charts — without it the merged
+seam-wrapping face reads as absent at wrapped locations and result-face
+orientations flip (the full-cylinder ∩ box intersection regressed to
+1.6308 from 1.3908 in development; now correct). `_model_occ_boolean_face_
+rev` also walks every interior probe candidate: a single sample can sit
+inside the solid on both offset sides where the face is engulfed — the
+sphere∪cone top-disc crescent reads inside-inside at all 18 candidates —
+so decisive inside/outside readings win, an all-inside-inside face falls
+back to its provenance use sign, and both-outside stays a hard failure.
+
+Second, `importShapes` reaches the upstream surface tier:
+`_occ_import_step_surfaces!` (`ModelOCCImport.jl`) binds every member face
+of `SHELL_BASED_SURFACE_MODEL` shells, orphan `OPEN_SHELL`/`CLOSED_SHELL`
+entities and stray faces as its own dim-2 entity when a STEP file holds
+them — `_multiBind`'s face-level binding when no transferable solid is
+present. Solid roots keep precedence under `highest_dim_only`, faces
+dedupe per shared curve across roots, and imported sheets work as Boolean
+operands through the existing mixed-dimension path. New fixture
+`test/fixtures/brep_occ_surface_sheet.step` (one 0.5×0.5 `ADVANCED_FACE`
+under `OPEN_SHELL`/`SHELL_BASED_SURFACE_MODEL`, z=0.5 over
+x,y∈[0.25,0.75]).
+
+Verified on Julia 1.12.7 under `--compile=min -O0`:
+`model_boolean_conic_spline_test` EXIT 0 — all testsets green including
+the new "sphere×cone unifies the seam-split lateral face" (fuse → one
+volume, 3 boundary faces, carriers cone+plane+sphere, mass 7.3999795 —
+Gmsh 4.15.2 parity at five digits vs the former 4-face split);
+`api_occ_boolean_test` EXIT 0 — all 30 testsets including the periodic
+seam/partial-sector 16/16 and the mixed-dimension surface suites;
+`api_occ_import_shapes_test` EXIT 0 — 23/23 including the new
+surface-model testset (mass 0.25, bounding box, interior-sheet fragment
+preserves box+sheet, volume∩surface yields the sheet). box∩full-cylinder
+intersect mass 1.3907963 with ONE unified lateral face (Gmsh parity —
+previously two seam-split pieces); identical-box intersect binds one
+volume with six boundary faces (same-domain merge). Bounds: period-shift
+inference needs one coincident-span
+shared key per member chain (partial-overlap seam pieces stay boundary,
+conservative); same-domain collapse applies to union/intersection keep
+lists (fragment/cut keep imprint splits by design); multi-root STEP
+surface+solid files bind the highest dimension only.
+
+### OCC Boolean generic curved sections + `_multiBind` first-piece tag bind (2026-10-28, landed `874177b`)
 
 Two P3/CAD05 pieces. First, `_brep_face_sections` in `ModelBoolean.jl` gains a
 generic level-set section for every face-pair combination with no closed form:

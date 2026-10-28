@@ -245,12 +245,17 @@ end
 _model_occ_boolean_wire_pts(sm::GeoModel,loop_tag::Int) =
     _brep_wire_pts(sm,loop_tag)
 
-# A 3-D point strictly inside a scratch face's outer wire (and outside
+# 3-D points strictly inside a scratch face's outer wire (and outside
 # its hole wires) plus the face's unit winding normal. Concave faces put
 # the polygon centroid outside the polygon, so candidates are edge
 # midpoints nudged along the in-plane perpendicular until the projected
 # point-in-polygon test accepts one.
-function _model_occ_boolean_face_probe(sm::GeoModel,stag::Int,caller)
+# Every accepted interior probe candidate of a scratch face (edge-midpoint
+# nudges first, wire centroid last) — `face_rev` walks the list because one
+# candidate can sit where the face is not a true boundary (e.g. a result
+# face region covered by another kept piece of the same solid), giving
+# inside-inside on both offset sides.
+function _model_occ_boolean_face_probe_cands(sm::GeoModel,stag::Int,caller)
     loops=sm.surfaces[stag]
     nw,_=_model_occ_boolean_wire_normal(sm,loops[1])
     L=sqrt(_dot3(nw,nw))
@@ -273,6 +278,7 @@ function _model_occ_boolean_face_probe(sm::GeoModel,stag::Int,caller)
         end
         return true
     end
+    cands=NTuple{3,Float64}[]
     for (i,p) in enumerate(outer)
         q=outer[mod1(i+1,length(outer))]
         e=(q[1]-p[1],q[2]-p[2],q[3]-p[3])
@@ -281,13 +287,14 @@ function _model_occ_boolean_face_probe(sm::GeoModel,stag::Int,caller)
         mid=((p[1]+q[1])/2,(p[2]+q[2])/2,(p[3]+q[3])/2)
         for sgn in (1.0,-1.0),sc in (1e-3,1e-4,1e-5)
             cand=mid.+sgn*sc*el.*perp
-            inside(cand) && return cand,n
+            inside(cand) && push!(cands,cand)
         end
     end
     _,cw=_model_occ_boolean_wire_normal(sm,loops[1])
-    inside(cw) && return cw,n
-    throw(ErrorException(
+    inside(cw) && push!(cands,cw)
+    isempty(cands) && throw(ErrorException(
         "$caller: no interior probe on boolean result face"))
+    return cands,n
 end
 
 function _model_occ_boolean_face!(pub::_ModelOCCBooleanPub,s::Int,caller)
@@ -348,25 +355,41 @@ end
 # untyped-default materialization the record axes don't reflect it
 # either — so the use direction is measured directly: a probe offset
 # along the outer wire's winding normal lands inside the solid exactly
-# when that normal points into it.
+# when that normal points into it. A single interior sample can sit
+# where the face is not a true outer boundary (a piece of the same solid
+# covers it on both sides — inside-inside answers); walk every accepted
+# wire-interior candidate before declaring the face unorientable.
 function _model_occ_boolean_face_rev(pub::_ModelOCCBooleanPub,stag::Int,
                                      sv::NamedTuple,diag::Float64,
                                      sm_rev::Bool,caller)
     get(pub.sm.surface_types,stag,:plane)===:plane || return sm_rev
-    c,n=_model_occ_boolean_face_probe(pub.sm,stag,caller)
-    for scale in (1e-6,1e-7,1e-8)
-        ε=scale*diag
-        pin=pout=nothing
-        try pin=_brep_point_in_solid(sv,c.+ε.*n,_BREP_TOL,caller)
-        catch
+    cands,n=_model_occ_boolean_face_probe_cands(pub.sm,stag,caller)
+    saw_in=false
+    for c in cands
+        for scale in (1e-6,1e-7,1e-8)
+            ε=scale*diag
+            pin=pout=nothing
+            try pin=_brep_point_in_solid(sv,c.+ε.*n,_BREP_TOL,caller)
+            catch
+            end
+            try pout=_brep_point_in_solid(sv,c.-ε.*n,_BREP_TOL,caller)
+            catch
+            end
+            pin===true && pout===false && return true
+            pin===false && pout===true && return false
+            pin===pout===true && (saw_in=true)
         end
-        try pout=_brep_point_in_solid(sv,c.-ε.*n,_BREP_TOL,caller)
-        catch
-        end
-        pin===true && pout===false && return true
-        pin===false && pout===true && return false
     end
-    throw(ErrorException("$caller: cannot orient boolean result face"))
+    # Every decisive candidate read inside on both sides — the face is
+    # covered everywhere it was sampled: it is interior to the solid
+    # (like a shared wall between two kept cells, or a boundary piece
+    # engulfed by the partner operand's material). sm_rev's provenance
+    # sign is the best available answer. Both-outside (and a mix with no
+    # inside-inside at all) stays a hard failure — the face does not
+    # touch the result volume and something upstream is broken.
+    saw_in ||
+        throw(ErrorException("$caller: cannot orient boolean result face"))
+    return sm_rev
 end
 
 function _model_occ_boolean_shell!(pub::_ModelOCCBooleanPub,sl::Int,

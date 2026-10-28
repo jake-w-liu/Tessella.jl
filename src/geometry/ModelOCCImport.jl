@@ -1147,6 +1147,112 @@ function _occ_import_step_solid(m,brep,entities,caller)
     return [(3,_model_occ_add_volume!(m,shell_tags))]
 end
 
+# One shell entity (`OPEN_SHELL`/`CLOSED_SHELL`) of a surface root → the
+# `(2, tag)` of every member face. Upstream `importShapes` binds each
+# FACE of a surface-only compound as its own dim-2 entity — the shell
+# itself is not a boundable gmsh entity, and the STEP `same_sense` use
+# sign lives in the shell topology, which a free surface does not carry.
+function _occ_import_step_shell_faces(m,d,st,kernel,entities,se,
+                                      curvekinds,caller)
+    i=BRep._skip_name(se.args)
+    i>length(se.args) && throw(ArgumentError(
+        "$caller: $(se.kind) #$(se.id) has no face list"))
+    flist=se.args[i]
+    flist isa Vector || throw(ArgumentError(
+        "$caller: $(se.kind) #$(se.id) face list is malformed"))
+    out=Tuple{Int,Int}[]
+    for fref in flist
+        fe=BRep._deref_entity(entities,fref)
+        (fe!==nothing &&
+         fe.kind in BRep._STEP_BREP_FACE_KINDS) || throw(ArgumentError(
+            "$caller: $(se.kind) #$(se.id) member is not a face"))
+        ftag,_=_occ_import_step_face(m,d,st,kernel,entities,fe,
+                                     curvekinds,caller)
+        push!(out,(2,ftag))
+    end
+    isempty(out) && throw(ArgumentError(
+        "$caller: $(se.kind) #$(se.id) is empty"))
+    return out
+end
+
+# Surface-root pass: `SHELL_BASED_SURFACE_MODEL` models, orphaned
+# `OPEN_SHELL`/`CLOSED_SHELL` entities, and stray faces not consumed by
+# any shell or solid each bind their member faces as dim-2 entities —
+# the `importShapes`/`_multiBind` surface-tier behavior when a STEP file
+# holds no transferable solids. `d`/`st`/`curvekinds` are shared across
+# roots so faces meeting at a common edge dedupe to one result curve.
+function _occ_import_step_surfaces!(m,entities,out,caller)
+    kernel=m.occ_kernel
+    d=_OCCImportDedupe(); st=_OCCImportStructural()
+    curvekinds=Set{String}()
+    consumed=Set{Int}()      # face ids already owned by some shell
+    shells=Set{Int}()        # shell ids owned by a surface model
+    for e in values(entities)
+        if e.kind in BRep._STEP_BREP_SOLID_KINDS ||
+           e.kind=="SHELL_BASED_SURFACE_MODEL"
+            for a in e.args[2:end]
+                items=a isa Vector ? a : Any[a]
+                for item in items
+                    se=BRep._deref_entity(entities,item)
+                    se===nothing && continue
+                    se.kind in ("OPEN_SHELL","CLOSED_SHELL") ||
+                        continue
+                    push!(shells,se.id)
+                end
+            end
+        end
+    end
+    for e in values(entities)
+        e.kind in ("OPEN_SHELL","CLOSED_SHELL") || continue
+        i=BRep._skip_name(e.args)
+        i>length(e.args) && continue
+        flist=e.args[i]
+        flist isa Vector || continue
+        for fref in flist
+            fe=BRep._deref_entity(entities,fref)
+            fe===nothing || push!(consumed,fe.id)
+        end
+    end
+    done_shells=Set{Int}()
+    for e in sort!([e for e in values(entities)
+                    if e.kind=="SHELL_BASED_SURFACE_MODEL"];by=e->e.id)
+        for a in e.args[2:end]
+            items=a isa Vector ? a : Any[a]
+            for item in items
+                se=BRep._deref_entity(entities,item)
+                se===nothing && throw(ArgumentError(
+                    "$caller: SHELL_BASED_SURFACE_MODEL #$(e.id) " *
+                    "references a missing shell"))
+                se.kind in ("OPEN_SHELL","CLOSED_SHELL") ||
+                    throw(ArgumentError(
+                        "$caller: SHELL_BASED_SURFACE_MODEL #$(e.id) " *
+                        "references $(se.kind) #$(se.id) where a shell " *
+                        "was expected"))
+                se.id in done_shells && continue
+                push!(done_shells,se.id)
+                append!(out,_occ_import_step_shell_faces(
+                    m,d,st,kernel,entities,se,curvekinds,caller))
+            end
+        end
+    end
+    # orphan shells (not owned by any solid or surface model)
+    for e in sort!([e for e in values(entities)
+                    if e.kind in ("OPEN_SHELL","CLOSED_SHELL") &&
+                       !(e.id in shells)];by=e->e.id)
+        append!(out,_occ_import_step_shell_faces(
+            m,d,st,kernel,entities,e,curvekinds,caller))
+    end
+    # stray faces outside every shell
+    for e in sort!([e for e in values(entities)
+                    if e.kind in BRep._STEP_BREP_FACE_KINDS &&
+                       !(e.id in consumed)];by=e->e.id)
+        ftag,_=_occ_import_step_face(m,d,st,kernel,entities,e,
+                                     curvekinds,caller)
+        push!(out,(2,ftag))
+    end
+    return out
+end
+
 function _model_occ_import_shapes(m::GeoModel,path;highest_dim_only=true,
                                   caller="OCC.importShapes")
     isfile(path) || throw(ArgumentError("$caller: missing file $path"))
@@ -1173,12 +1279,22 @@ function _model_occ_import_shapes(m::GeoModel,path;highest_dim_only=true,
     entities=BRep.parse_step_entities(source)
     breps=sort!([e for e in values(entities)
                  if e.kind in BRep._STEP_BREP_SOLID_KINDS]; by=e->e.id)
-    isempty(breps) && throw(ArgumentError(
-        "$caller: no MANIFOLD_SOLID_BREP/FACETED_BREP/BREP_WITH_VOIDS " *
-        "found in $path"))
     out=Tuple{Int,Int}[]
     for brep in breps
         append!(out,_occ_import_step_solid(m,brep,entities,caller))
+    end
+    # `SHELL_BASED_SURFACE_MODEL`/`OPEN_SHELL`/loose-face roots bind their
+    # member faces as dim-2 entities — upstream `_multiBind` reaches the
+    # surface tier when no transferable solid is present, and the same
+    # faces stay usable as Boolean operands.
+    _occ_import_step_surfaces!(m,entities,out,caller)
+    isempty(out) && throw(ArgumentError(
+        "$caller: no MANIFOLD_SOLID_BREP/FACETED_BREP/BREP_WITH_VOIDS " *
+        "or SHELL_BASED_SURFACE_MODEL/OPEN_SHELL/face roots found " *
+        "in $path"))
+    if highest_dim_only
+        top=maximum(d for (d,_) in out)
+        out=Tuple{Int,Int}[dt for dt in out if dt[1]==top]
     end
     return out
 end
