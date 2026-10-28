@@ -24,6 +24,61 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Order-≥3 curved-cell whole-domain Jacobian certificates (2026-10-28, working tree)
+
+The P2 certified-publication gate now extends to every catalogued curved family
+at order ≥2 through `_ho_cell_jacobian_verdict` (`APICellBezier.jl`): the
+Jacobian determinant is sampled on the upstream `JacobianBasis::jacobianOrder`
+Lagrange points, converted to Bernstein coefficients and tightened by the
+existing dyadic-subdivision extrema loop; a strictly one-sided bound certifies
+the map on its own primary orientation. Two new determinant spaces landed:
+`:pri` (degree-3p−1 triangular slices × the line direction, upstream
+`FuncSpaceData` layout; gradient samples come through the public `GradLagrange`
+nodal evaluator) and a collapsed-coordinate `:pyr` certificate — with
+u=(1−w)r, v=(1−w)s the reduced columns A=G_r/(1−w), B=G_s/(1−w), C=G_w make
+det(A,B,C) exactly the physical Jacobian determinant, a polynomial of tensor
+degree ≤ (3p−1,3p−1,3p−3) bounded over the whole collapsed box including
+every apex direction. Gmsh's physical-space sampling only covers a z≤a<1
+sub-range and cannot certify the apex; the collapsed representation can.
+Bergot mode validity matches upstream `validIJ` (complete pyramids keep all
+i,j≤p; serendipity keeps i+j≤p plus the two shell modes — Pyr13→13 modes,
+Pyr30→30). Serendipity pyramids above order 2 stay loudly unsupported,
+matching Gmsh 4.15.2.
+
+Integration: `_dim01_higher_order!` certifies every lifted dim≥2 cell before
+publication via `_ho_constructed_cell_certify` (unsupported families pass
+uncertified, as upstream); `validate(m::MixedMesh; certify_jacobians=true)`
+iterates blocks/cells deterministically through an interfaces-registered
+certifier while plain `validate` stays structural-only. Surface cells reuse
+the P2 semantics — any one component of du×dv keeping a one-sided bound
+proves the map is an immersion even when the sheet tilts away from its
+primary plane; volume cells keep the primary-orientation sign rule, so
+reversed-but-consistent connectivity still publishes.
+
+Verification (all `julia --compile=min -O0`, Julia 1.12.7):
+`test/meshing/high_order_jacobian_certificate_test.jl` 96/96 — independent
+textbook order-3 oracles (`_sfac`/`_c4` bases decoded from `lagrange_nodes`,
+deliberately not the certificate's machinery) verify each family: affine
+tri10/qua16/tet20/hex64/pri40/pyr30 certify det≈1 (the pyr degree-8 tensor
+conversion has a ~1e-9 noise floor, asserted at 1e-8), curved-valid cells
+certify with bounds bracketing independently sampled ranges, oracle-verified
+folded fixtures and serendipity folds reject `:invalid`, mirrored maps
+certify, coplanar/degenerate/non-finite verdicts correct, `validate` rejects a
+folded tet20 while structural validation still passes it, the construction
+gate throws on an uncertified tet20, `set_order(3)` publishes only certified
+tri10 cells, and a mixed tri/qua/tet/pri/hex/pyr block set round-trips
+MSH2.2/MSH4.1 ASCII+binary with a stable structural CRC. Regressions:
+`highorder_test` 897/897, `highorder_jacobian_test` 123/123,
+`core/elements_test` all-green, `model_occ_surface_p2_test` 44/44.
+`high_order_pyramid_test`'s five `warmed_bytes` allocation assertions fail
+identically on clean `f65744d` — a pre-existing baseline, unrelated. The
+collapsed-pyramid reduced evaluator was cross-checked against the published
+`GradLagrange` evaluator to ~1e-15 at interior points on Pyr13 and Pyr30 and
+is finite at the apex. Bounded-scope caveat: every complete/serendipity family
+with a catalogued basis is covered, but this is a certificate increment, not a
+full-parity claim — orders >10 and exotic unsupported types remain
+uncertified.
+
 ### OCC Boolean generic curved sections + `_multiBind` first-piece tag bind (2026-10-28, working tree)
 
 Two P3/CAD05 pieces. First, `_brep_face_sections` in `ModelBoolean.jl` gains a

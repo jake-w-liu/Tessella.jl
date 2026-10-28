@@ -75,6 +75,13 @@ function _native_bezier_space_build(family,degree,nij,nk)
         for k in nk:-1:0,j in 0:nij,i in 0:nij
             push!(exponents,(i,j,k))
         end
+    elseif family===:pri
+        # TYPE_PRI determinant space is the order-q triangular slice times the
+        # order-q line direction (FuncSpaceData(el,jacobianOrder) upstream):
+        # w-major slices, each holding one degree-q triangle fan.
+        for k in 0:degree,j in 0:degree,i in 0:degree-j
+            push!(exponents,(i,j,k))
+        end
     else
         throw(ArgumentError("unsupported native Bernstein family $family"))
     end
@@ -87,6 +94,11 @@ function _native_bezier_space_build(family,degree,nij,nk)
         end
     elseif degree==0
         push!(points,(0.0,0.0,0.0))
+    elseif family===:pri
+        scale=1.0/degree
+        for (i,j,k) in exponents
+            push!(points,(Float64(i)*scale,Float64(j)*scale,Float64(k)*2.0/degree-1.0))
+        end
     else
         scale=family in (:tri,:tet) ? 1.0/degree : 2.0/degree
         for exponent in exponents
@@ -111,6 +123,9 @@ function _native_bezier_space_build(family,degree,nij,nk)
     elseif family===:hex
         Int[1,n,n*n,n*degree+1,n*n*degree+1,n*n*degree+degree+1,count,
             (degree+2)*(degree+1)*degree+1]
+    elseif family===:pri
+        npt=(degree+1)*(degree+2)÷2
+        Int[1,degree+1,npt,degree*npt+1,degree*npt+degree+1,count]
     else
         m=nij+1
         nk==0 ? Int[1,nij+1,m*m,m*nij+1] :
@@ -153,13 +168,39 @@ end
 
 function _native_bezier_jacobian_build(msh,caller)
     spec=msh_spec(msh);family=spec.family;p=spec.order
-    _native_cell_numeric_contract(spec,caller)
-    family in (:tri,:qua,:tet,:hex,:pyr) || throw(ArgumentError(
+    # The shared numeric contract still applies to every full-closure
+    # consumer. Jacobian sampling is coefficient space only: it needs the
+    # family evaluator, which upstream supports for complete Prism orders and
+    # Tessella additionally provides through the nodal engine.
+    spec.family===:pyr && spec.serendipity && spec.order>2 && throw(ArgumentError(
+        "$caller: Gmsh 4.15.2 does not implement incomplete Pyramid bases above order two"))
+    family in (:tri,:qua,:tet,:hex,:pri,:pyr) || throw(ArgumentError(
         "$caller: native Bernstein determinant space is unavailable for $family"))
     degree=family===:tri ? 2p-2 : family===:qua ? 2p-1 : family===:tet || family===:pyr ? 3p-3 : 3p-1
     space=family===:pyr ? _native_bezier_space(family,degree,degree+2,degree) :
         _native_bezier_space(family,degree)
     gradients=ntuple(_->Matrix{Float64}(undef,length(space.points),spec.nnodes),3)
+    if family===:pri
+        # The prism evaluator is the nodal engine used by the public Jacobian
+        # path: one batched GradLagrange call over the determinant points.
+        flat=Vector{Float64}(undef,3length(space.points))
+        for (sample,point) in enumerate(space.points)
+            flat[3sample-2]=point[1];flat[3sample-1]=point[2];flat[3sample]=point[3]
+        end
+        _,sampled,_=mesh_basis_functions(msh,flat,"GradLagrange";caller=caller)
+        primary=msh_type(family,1)
+        _,primary_sampled,_=mesh_basis_functions(primary,[0.0,0.0,0.0],"GradLagrange";caller=caller)
+        count=spec.nnodes
+        for sample in eachindex(space.points),node in 1:count,axis in 1:3
+            gradients[axis][sample,node]=sampled[3(count*(sample-1)+node-1)+axis]
+        end
+        primary_count=Elements.msh_num_nodes(primary)
+        primary_gradients=Matrix{Float64}(undef,3,primary_count)
+        for node in 1:primary_count,axis in 1:3
+            primary_gradients[axis,node]=primary_sampled[3(node-1)+axis]
+        end
+        return _NativeBezierJacobianRule(space,gradients,primary_gradients,spec.dim)
+    end
     data=family===:pyr ? _native_bezier_pyramid_reference(msh,caller) :
         _native_cell_polynomial(msh,caller)
     for (sample,point) in enumerate(space.points)
@@ -357,6 +398,23 @@ function _native_bezier_coefficients(space,samples)
         for jk in 0:ni*nz-1
             _native_bezier_convert_line!(coefficients,ni-1,jk*ni+1,1,coefficients)
         end
+    elseif family===:pri
+        # Upstream _computeCoefficients for TYPE_PRI: every w-slice carries a
+        # full degree-q triangle fan converted by the triangular Lagrange→
+        # Bernstein inverse, then each fixed triangle index is converted along
+        # the line direction. _native_bezier_product! accumulates into its
+        # target, so each slice needs a fresh output column.
+        npt=(degree+1)*(degree+2)÷2
+        triangular=_native_bezier_space(:tri,degree)
+        for k in 0:degree
+            column=zeros(Float64,npt,1)
+            _native_bezier_product!(column,triangular.inverse,
+                reshape(@view(samples[k*npt+1:(k+1)*npt]),npt,1))
+            coefficients[k*npt+1:(k+1)*npt]=vec(column)
+        end
+        for t in 0:npt-1
+            _native_bezier_convert_line!(coefficients,degree,t+1,npt,coefficients)
+        end
     else
         throw(ArgumentError("unsupported native Bernstein coefficient family $family"))
     end
@@ -488,9 +546,40 @@ function _native_bezier_tensor_split(space,coefficients)
     return children
 end
 
+function _native_bezier_prism_split(space,coefficients)
+    # Upstream _subdividePrism: split the order-q line direction at its
+    # midpoint, then split every w-level triangle fan into four children.
+    q=space.degree;npt=(q+1)*(q+2)÷2
+    workspace=zeros(Float64,(2q+1)*npt)
+    for k in 0:q,t in 0:npt-1
+        workspace[2k*npt+t+1]=coefficients[k*npt+t+1]
+    end
+    for t in 0:npt-1
+        _native_bezier_casteljau!(workspace,q+1,t+1,npt)
+    end
+    children=Vector{Vector{Float64}}(undef,8)
+    for half in 0:1
+        base=half*q*npt
+        slices=Vector{Vector{Vector{Float64}}}(undef,q+1)
+        for k in 0:q
+            slices[k+1]=_native_bezier_triangle_split(
+                workspace[base+k*npt+1:base+(k+1)*npt],q+1)
+        end
+        for sub in 1:4
+            output=Vector{Float64}(undef,(q+1)*npt)
+            for k in 0:q
+                output[k*npt+1:(k+1)*npt]=slices[k+1][sub]
+            end
+            children[4half+sub]=output
+        end
+    end
+    return children
+end
+
 function _native_bezier_split(space,coefficients)
     space.family===:tri && return _native_bezier_triangle_split(coefficients,space.degree+1)
     space.family===:tet && return _native_bezier_tet_split(coefficients,space.degree+1)
+    space.family===:pri && return _native_bezier_prism_split(space,coefficients)
     return _native_bezier_tensor_split(space,coefficients)
 end
 
@@ -603,3 +692,209 @@ function _native_cell_quality_bezier(mesh,cells,cell,msh,name,caller)
     lower,upper=_native_bezier_extrema(rule.space,coefficients)
     return name=="minDetJac" ? lower : upper
 end
+
+# ── Order-≥3 curved-cell Jacobian certificates ────────────────────────────
+# The P2 path certifies newly constructed second-order cells with exact
+# Bernstein bounds. Orders three and higher reuse the same determinant space
+# machinery as `minDetJac`/`maxDetJac`: sample the Jacobian determinant at the
+# upstream `JacobianBasis::jacobianOrder` Lagrange points, convert to Bézier
+# coefficients, then tighten the control bounds by the shared subdivision
+# loop. The returned bound is rigorous: `lower` never exceeds and `upper`
+# never undershoots the true determinant range on the whole reference
+# element, so a strictly one-sided bound certifies the curved map.
+#
+# Certificate rules evaluate shape gradients through the public nodal engine
+# (`mesh_basis_functions`, the same evaluator `getJacobians` reaches for
+# these types), so the certified map is exactly the published one — including
+# the native Prism and Pyramid extensions and every serendipity type with a
+# catalogued basis.
+
+const _HO_JACOBIAN_RULES=Dict{Int,_NativeBezierJacobianRule}()
+
+function _ho_jacobian_rule_build(msh,caller)
+    spec=msh_spec(msh);family=spec.family;p=spec.order
+    family in (:tri,:qua,:tet,:hex,:pri,:pyr) || throw(ArgumentError(
+        "$caller: high-order Jacobian determinant space is unavailable for $family"))
+    if family===:pyr
+        # In collapsed coordinates (r,s,w) with u=(1-w)r, v=(1-w)s the
+        # pyramid Jacobian determinant det[A,B,C] is a polynomial of tensor
+        # degree at most (3p-1,3p-1,3p-3) — see _native_bezier_bergot_reduced.
+        # The degree-(3p-1) tensor space on the [-1,1]^3 box (with w mapped to
+        # [0,1]) contains it, so the certified bound covers the entire
+        # pyramid domain — including every apex direction — rather than the
+        # z<=a<1 sub-range sampled by the quality queries.
+        space=_native_bezier_space(:hex,3p-1)
+        data=_native_bezier_pyramid_reference(msh,caller)
+        count=spec.nnodes
+        gradients=ntuple(_->Matrix{Float64}(undef,length(space.points),count),3)
+        for (sample,point) in enumerate(space.points)
+            w=0.5*(point[3]+1.0)
+            a,b,c=_native_bezier_pyramid_reduced_shape(data,
+                (point[1],point[2],w))
+            for node in 1:count
+                gradients[1][sample,node]=a[node]
+                gradients[2][sample,node]=b[node]
+                gradients[3][sample,node]=c[node]
+            end
+        end
+        primary=msh_type(family,1)
+        primary_data=_native_bezier_pyramid_reference(primary,caller)
+        pa,pb,pc=_native_bezier_pyramid_reduced_shape(primary_data,(0.0,0.0,0.0))
+        primary_count=Elements.msh_num_nodes(primary)
+        primary_gradients=Matrix{Float64}(undef,3,primary_count)
+        for node in 1:primary_count
+            primary_gradients[1,node]=pa[node]
+            primary_gradients[2,node]=pb[node]
+            primary_gradients[3,node]=pc[node]
+        end
+        return _NativeBezierJacobianRule(space,gradients,primary_gradients,spec.dim)
+    end
+    degree=family===:tri ? 2p-2 : family===:qua ? 2p-1 :
+        family===:tet ? 3p-3 : 3p-1
+    space=_native_bezier_space(family,degree)
+    flat=Vector{Float64}(undef,3length(space.points))
+    for (sample,point) in enumerate(space.points)
+        flat[3sample-2]=point[1];flat[3sample-1]=point[2];flat[3sample]=point[3]
+    end
+    _,sampled,_=mesh_basis_functions(msh,flat,"GradLagrange";caller=caller)
+    count=spec.nnodes
+    gradients=ntuple(_->Matrix{Float64}(undef,length(space.points),count),3)
+    for sample in eachindex(space.points),node in 1:count,axis in 1:3
+        gradients[axis][sample,node]=sampled[3(count*(sample-1)+node-1)+axis]
+    end
+    primary=msh_type(family,1)
+    _,primary_sampled,_=mesh_basis_functions(primary,[0.0,0.0,0.0],"GradLagrange";caller=caller)
+    primary_count=Elements.msh_num_nodes(primary)
+    primary_gradients=Matrix{Float64}(undef,3,primary_count)
+    for node in 1:primary_count,axis in 1:3
+        primary_gradients[axis,node]=primary_sampled[3(node-1)+axis]
+    end
+    return _NativeBezierJacobianRule(space,gradients,primary_gradients,spec.dim)
+end
+
+function _ho_jacobian_rule(msh,caller)
+    lock(_NATIVE_BEZIER_LOCK)
+    try
+        haskey(_HO_JACOBIAN_RULES,msh) && return _HO_JACOBIAN_RULES[msh]
+        rule=_ho_jacobian_rule_build(msh,caller)
+        _HO_JACOBIAN_RULES[msh]=rule
+        return rule
+    finally
+        unlock(_NATIVE_BEZIER_LOCK)
+    end
+end
+
+_ho_primary_orientation(v,family::Symbol)=
+    family===:tet ? _api_p2_sign(-Model.orient3(v[1],v[2],v[3],v[4])) :
+    family===:hex ? _api_p2_sign(-Model.orient3(v[1],v[2],v[4],v[5])) :
+    family===:pri ? _api_p2_sign(-Model.orient3(v[1],v[2],v[3],v[4])) :
+    family===:pyr ? _api_p2_sign(-Model.orient3(v[1],v[2],v[4],v[5])) : 1
+
+function _ho_cell_jacobian_verdict(vertices,msh,caller)
+    spec=msh_spec(msh)
+    (spec.order<2 || spec.dim<2) && return (status=:unsupported,
+        detail="has no Jacobian determinant space",lower=NaN,upper=NaN)
+    all(point->all(isfinite,point),vertices) || return (status=:invalid,
+        detail="has non-finite high-order coordinates",lower=NaN,upper=NaN)
+    rule=try
+        _ho_jacobian_rule(msh,caller)
+    catch err
+        err isa InterruptException && rethrow()
+        err isa ArgumentError || rethrow()
+        return (status=:unsupported,
+            detail="has no supported Jacobian determinant space",lower=NaN,upper=NaN)
+    end
+    count=spec.nnodes
+    coordinates=Matrix{Float64}(undef,count,3)
+    for node in 1:count,axis in 1:3
+        coordinates[node,axis]=vertices[node][axis]
+    end
+    samples=length(rule.space.points)
+    derivatives=ntuple(_->zeros(Float64,samples,3),3)
+    for axis in 1:rule.dimension
+        _native_bezier_product!(derivatives[axis],rule.gradients[axis],coordinates)
+    end
+    primary=zeros(Float64,3,3)
+    for node in axes(rule.primary_gradients,2),axis in 1:3,coordinate in 1:3
+        primary[axis,coordinate]+=rule.primary_gradients[axis,node]*coordinates[node,coordinate]
+    end
+    values=Vector{Float64}(undef,samples)
+    if rule.dimension==2
+        # Surface cells embed in 3D: the validity field is the normal
+        # du x dv, and the P2 gate certifies when any single component keeps
+        # a one-sided bound over the whole element (the map is then an
+        # immersion regardless of how far the sheet tilts from the primary
+        # element's plane). The same certificate is used here: each component
+        # gets its own Bernstein bound and the strictest candidate reports.
+        a=(primary[1,1],primary[1,2],primary[1,3])
+        b=(primary[2,1],primary[2,2],primary[2,3])
+        normal=(a[2]*b[3]-a[3]*b[2],-a[1]*b[3]+a[3]*b[1],a[1]*b[2]-a[2]*b[1])
+        magnitude=sqrt(normal[1]*normal[1]+normal[2]*normal[2]+normal[3]*normal[3])
+        magnitude==0.0 && return (status=:degenerate,
+            detail="has degenerate primary reference orientation",lower=NaN,upper=NaN)
+        bounds=ntuple(3) do axis
+            for sample in 1:samples
+                a1=derivatives[1][sample,1];a2=derivatives[1][sample,2]
+                a3=derivatives[1][sample,3]
+                b1=derivatives[2][sample,1];b2=derivatives[2][sample,2]
+                b3=derivatives[2][sample,3]
+                values[sample]=axis==1 ? a2*b3-a3*b2 :
+                    axis==2 ? a3*b1-a1*b3 : a1*b2-a2*b1
+            end
+            _native_bezier_extrema(rule.space,
+                _native_bezier_coefficients(rule.space,values))
+        end
+        # The certified component is reported; otherwise the component whose
+        # bound came closest to excluding zero carries the failure detail.
+        best=argmax(i->max(bounds[i][1],-bounds[i][2]),1:3)
+        lower,upper=bounds[best]
+        (lower>0.0 || upper<0.0) && return (status=:certified,detail="",
+            lower=lower,upper=upper)
+        return (status=:invalid,
+            detail="lacks a whole-domain Jacobian certificate (bounds $lower, $upper)",
+            lower=lower,upper=upper)
+    end
+    for sample in 1:samples
+        columns=ntuple(axis->(derivatives[axis][sample,1],
+            derivatives[axis][sample,2],derivatives[axis][sample,3]),3)
+        values[sample]=_native_bezier_det(columns...)
+    end
+    orientation=_ho_primary_orientation(vertices,spec.family)
+    orientation==0 && return (status=:degenerate,
+        detail="has degenerate primary reference orientation",lower=NaN,upper=NaN)
+    coefficients=_native_bezier_coefficients(rule.space,values)
+    lower,upper=_native_bezier_extrema(rule.space,coefficients)
+    certified=orientation==1 ? lower>0.0 : upper<0.0
+    certified && return (status=:certified,detail="",lower=lower,upper=upper)
+    return (status=:invalid,
+        detail="lacks a whole-domain Jacobian certificate (bounds $lower, $upper)",
+        lower=lower,upper=upper)
+end
+
+function _ho_constructed_cell_certify(nodes,cell,caller)
+    msh=Int(cell.msh)
+    vertices=NTuple{3,Float64}[nodes[row].point for row in cell.nodes]
+    verdict=_ho_cell_jacobian_verdict(vertices,msh,caller)
+    verdict.status===:unsupported && return false
+    verdict.status===:certified || throw(ArgumentError(
+        "$caller: newly constructed MSH $msh $(verdict.detail)"))
+    return true
+end
+
+# `validate(m::MixedMesh; certify_jacobians=true)` calls this registered
+# callback for every fixed-node curved block. It mirrors the construction
+# gate verdicts: a cell is certified only when its Jacobian determinant keeps
+# a strictly one-sided Bézier bound on its own primary orientation.
+function _mixed_curved_jacobian_verdict(coords,msh,nodes)
+    caller="validate(MixedMesh)"
+    spec=get(Elements._MSH_CATALOG_LOOKUP,msh,nothing)
+    spec===nothing && return (status=:unsupported,detail="is not a fixed-node element type")
+    vertices=Vector{NTuple{3,Float64}}(undef,spec.nnodes)
+    for node in 1:spec.nnodes
+        row=nodes[node]
+        vertices[node]=(coords[1,row],coords[2,row],coords[3,row])
+    end
+    return _ho_cell_jacobian_verdict(vertices,msh,caller)
+end
+
+Elements._set_mixed_jacobian_certifier!(_mixed_curved_jacobian_verdict)

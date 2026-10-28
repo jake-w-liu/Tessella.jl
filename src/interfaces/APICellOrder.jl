@@ -267,6 +267,11 @@ function _dim01_higher_order!(assembly,m,entities,order;only_visible=false,linea
         cell.nodes=boundary
         cell.msh=target
         cell.tag=_dim01_next_tag!(assembly,false)
+        # The lifted cell only carries a curved map once geometric placement
+        # moved its high-order nodes; the whole-domain Jacobian bound certifies
+        # it exactly like the P2 construction gate. Families whose upstream
+        # determinant space does not exist stay uncertified, as upstream.
+        _ho_constructed_cell_certify(assembly.nodes,cell,assembly.caller)
     end
     return nothing
 end

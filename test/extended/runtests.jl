@@ -263,6 +263,7 @@ using Tessella
     include(joinpath(@__DIR__, "..", "meshing/highorder_test.jl"))
     include(joinpath(@__DIR__, "..", "meshing/highorder_jacobian_test.jl"))
     include(joinpath(@__DIR__, "..", "meshing/high_order_pyramid_test.jl"))
+    include(joinpath(@__DIR__, "..", "meshing/high_order_jacobian_certificate_test.jl"))
     include(joinpath(@__DIR__, "..", "integration/hfss_cases_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_native_geo_cpu_time_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_public_point_line_quality_native_test.jl"))

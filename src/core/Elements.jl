@@ -2194,9 +2194,19 @@ function _assert_mixed_partition_data(m::MixedMesh,nel::Int,
     return nothing
 end
 
+# Curved high-order cells carry no topology defect: their Jacobian validity is
+# a whole-domain polynomial question the structural pass cannot answer. The
+# interfaces layer owns the determinant-space certificate (it needs the public
+# nodal evaluator and the Bézier extrema engine); like the parallel-worker
+# source above it registers a callback returning
+# `(status=..., detail=...)` per cell for `certify_jacobians`.
+const _MIXED_JACOBIAN_CERTIFIER=Ref{Any}(nothing)
+_set_mixed_jacobian_certifier!(certifier)=(_MIXED_JACOBIAN_CERTIFIER[]=certifier;nothing)
+
 """
     validate(m::MixedMesh; reject_duplicate_cells=true,
-             reject_duplicate_point_cells=true) -> MeshDiagnostic
+             reject_duplicate_point_cells=true,
+             certify_jacobians=false) -> MeshDiagnostic
 
 Validate finite coordinates and connectivity. The check rejects repeated
 indices within each ordinary cell or constituent simplex and, by default,
@@ -2206,15 +2216,30 @@ duplicate non-Point cells still reject. Lossless MSH4 metadata
 is checked for aligned arrays, valid entity references and topology, legacy-tag
 consistency, finite parametrics, globally unique positive external tags,
 aligned non-negative MSH2 elementary-entity tags, and structurally valid
-periodic entity/node links. Geometry/Jacobian validity for curved high-order
-cells is not inferred from nodal coordinates by this structural validator.
+periodic entity/node links. With `certify_jacobians=true`, every dim-2 and
+dim-3 cell of order two or higher also requires a whole-domain Jacobian
+determinant certificate: the registered certificate must prove the
+determinant keeps one strictly nonzero sign matching the cell's own primary
+orientation. Cells whose family/order has no determinant space report
+explicitly rather than passing silently; dim-1 and dim-0 cells keep the
+structural checks only.
 """
 function validate(m::MixedMesh; reject_duplicate_cells=true,
-                  reject_duplicate_point_cells=true)
+                  reject_duplicate_point_cells=true,
+                  certify_jacobians=false)
     reject_duplicate_cells isa Bool || throw(ArgumentError(
         "validate(MixedMesh): reject_duplicate_cells must be Bool"))
     reject_duplicate_point_cells isa Bool || throw(ArgumentError(
         "validate(MixedMesh): reject_duplicate_point_cells must be Bool"))
+    certify_jacobians isa Bool || throw(ArgumentError(
+        "validate(MixedMesh): certify_jacobians must be Bool"))
+    certifier=nothing
+    if certify_jacobians
+        certifier=_MIXED_JACOBIAN_CERTIFIER[]
+        certifier===nothing && throw(ArgumentError(
+            "validate(MixedMesh): certify_jacobians requires the interfaces " *
+            "Jacobian certificate, which is unavailable"))
+    end
     messages=String[]
     try
         _assert_mixed_structure(m,"validate(MixedMesh)")
@@ -2281,6 +2306,27 @@ function validate(m::MixedMesh; reject_duplicate_cells=true,
                 else
                     push!(seen,key)
                 end
+            end
+        end
+    end
+    if certifier!==nothing
+        unsupported=Set{Int}()
+        for (bi,b) in pairs(m.blocks)
+            spec=get(_MSH_CATALOG_LOOKUP,b.msh,nothing)
+            (spec===nothing || spec.order<2 || spec.dim<2) && continue
+            for j in 1:_block_ncells(b)
+                k=_cell_arity(b,j)
+                nodes=Int32[_cell_node(b,j,i) for i in 1:k]
+                verdict=certifier(m.coords,b.msh,nodes)
+                if verdict.status===:unsupported
+                    b.msh in unsupported ||
+                        (push!(unsupported,b.msh);push!(messages,
+                        "block $bi type $(b.msh) lacks a Jacobian determinant " *
+                        "space for certification"))
+                    continue
+                end
+                verdict.status===:certified || push!(messages,
+                    "block $bi type $(b.msh) cell $j $(verdict.detail)")
             end
         end
     end

@@ -12,6 +12,31 @@ small real fixtures. Full native-oracle sweeps, source/AST audits, memory stress
 benchmarks, the 22 HFSS cases, aggregate validation, and external ASCENT solves
 are opt-in campaigns. See [test/README.md](test/README.md).
 
+### Order-≥3 curved-cell whole-domain Jacobian certificates (2026-10-28)
+
+Devin closed the HO01 certification gap for catalogued curved cells: the P2
+publication gate's semantics now cover every fixed-node family at order ≥2 via
+`_ho_cell_jacobian_verdict` in `APICellBezier.jl` (full receipts in the
+same-dated STATUS.md entry). The determinant is sampled on the upstream
+`jacobianOrder` Lagrange lattice and bounded rigorously in Bernstein space.
+Prisms get their upstream determinant space (tri-slice × line, degree 3p−1)
+with gradients from the published `GradLagrange` evaluator; pyramids are
+certified in collapsed coordinates — the reduced Jacobian columns make
+det(A,B,C) exactly the physical determinant as a polynomial bounded over the
+whole domain including the apex, where Gmsh's own physical-space quality
+sampling deliberately stops at z≤a<1. Bergot mode selection matches upstream
+`validIJ`; serendipity pyramids above order 2 remain loudly unsupported. The
+construction gate `_ho_constructed_cell_certify` runs on every lifted dim≥2
+cell in `_dim01_higher_order!`, and `validate(m::MixedMesh;
+certify_jacobians=true)` certifies curved cells deterministically through an
+interfaces-registered callback — plain `validate` is unchanged. Focused suite
+96/96 with independent textbook oracles; `highorder_test` 897/897,
+`highorder_jacobian_test` 123/123, `elements_test` and
+`model_occ_surface_p2_test` green; `high_order_pyramid_test`'s five
+`warmed_bytes` failures reproduce identically on clean `f65744d` (pre-existing,
+not this increment). Bounded scope: certificate coverage for catalogued
+families — not a full-parity claim.
+
 ### OCC Boolean generic curved sections and `_multiBind` tag bind (2026-10-28)
 
 Devin continued the CAD05/P3 Boolean backlog with two verified pieces (receipts
