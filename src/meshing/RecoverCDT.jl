@@ -294,9 +294,241 @@ function build_regions(pts, facets)
     regions
 end
 
+# ---- conservative AABB candidate index --------------------------------------
+#
+# Every acceptance decision in this module is exact; this uniform grid only
+# narrows the *candidate enumeration* in the O(regions × edges/faces) scans.
+# Stored boxes are Float64 images of exact rational extents expanded by a
+# further 2 ulps per side, so each exact box lies strictly inside its stored
+# box and exact overlap ⇒ stored overlap.  The query result is therefore a
+# conservative superset of the pairs the exact predicates could accept —
+# the same conservative-superset argument `_raygrid` uses for its haloed
+# rasterisation — and dropping never-overlapping pairs cannot change any
+# accept/reject outcome.  Items whose box has a non-finite side (only
+# reachable via Float64 overflow of an exact coordinate) are kept on an
+# overflow list and tested against every query.
+
+const _AABB_MAXREFS_FACTOR = 64
+
+mutable struct _AABBGrid
+    lo::Vector{NTuple{3,Float64}}     # padded Float64 box lows per item
+    hi::Vector{NTuple{3,Float64}}     # padded Float64 box highs per item
+    big::Vector{Int32}                # non-finite items, tested on every query
+    omin::NTuple{3,Float64}
+    ospan::NTuple{3,Float64}
+    nx::Int; ny::Int; nz::Int
+    off::Vector{Int32}                # CSR cell -> items
+    items::Vector{Int32}
+    seen::Vector{Int32}               # per-query dedupe stamp
+    stamp::Int32
+end
+
+@inline function _box_overlap(alo, ahi, blo, bhi)
+    return alo[1] <= bhi[1] && ahi[1] >= blo[1] &&
+           alo[2] <= bhi[2] && ahi[2] >= blo[2] &&
+           alo[3] <= bhi[3] && ahi[3] >= blo[3]
+end
+
+# Float64 box strictly containing the exact extent of `pts[i]` for `i in ids`.
+# `Float64(::Rational{BigInt})` rounds to nearest (≤ ½ ulp error); the extra
+# 2-ulp pad makes the stored box a strict superset of the exact extent, so an
+# exact overlap always implies a stored overlap.
+@inline _fpad_lo(x) = prevfloat(x, 2)
+@inline _fpad_hi(x) = nextfloat(x, 2)
+
+function _exact_points_box(pts, ids)
+    xlo = Inf; ylo = Inf; zlo = Inf; xhi = -Inf; yhi = -Inf; zhi = -Inf
+    for i in ids
+        p = pts[i]
+        x = Float64(p[1]); y = Float64(p[2]); z = Float64(p[3])
+        x < xlo && (xlo = x); y < ylo && (ylo = y); z < zlo && (zlo = z)
+        x > xhi && (xhi = x); y > yhi && (yhi = y); z > zhi && (zhi = z)
+    end
+    return (_fpad_lo(xlo), _fpad_lo(ylo), _fpad_lo(zlo)),
+           (_fpad_hi(xhi), _fpad_hi(yhi), _fpad_hi(zhi))
+end
+
+@inline function _agrid_coord(q, qmin, qspan, n)
+    qspan == 0 && return 0
+    q <= qmin && return 0
+    q >= qmin + qspan && return n - 1
+    r = (q - qmin) / qspan
+    (r <= 0 || isnan(r)) && return 0
+    r >= 1 && return n - 1
+    return floor(Int, r * n)
+end
+
+# Cell span of a box on the grid, clamped; assumes finite inputs.
+@inline function _agrid_cellspan(nx, ny, nz, omin, ospan, lo, hi)
+    i0 = _agrid_coord(lo[1], omin[1], ospan[1], nx)
+    i1 = _agrid_coord(hi[1], omin[1], ospan[1], nx)
+    j0 = _agrid_coord(lo[2], omin[2], ospan[2], ny)
+    j1 = _agrid_coord(hi[2], omin[2], ospan[2], ny)
+    k0 = _agrid_coord(lo[3], omin[3], ospan[3], nz)
+    k1 = _agrid_coord(hi[3], omin[3], ospan[3], nz)
+    return i0, i1, j0, j1, k0, k1
+end
+
+@inline function _agrid_dims(ncell, ospan)
+    smax = max(ospan[1], ospan[2], ospan[3])
+    d(k) = (smax > 0 && ospan[k] > 0) ?
+        clamp(round(Int, ncell * ospan[k] / smax), 1, ncell) : 1
+    return d(1), d(2), d(3)
+end
+
+function _aabb_grid(los::Vector{NTuple{3,Float64}},
+                    his::Vector{NTuple{3,Float64}})
+    length(los) == length(his) || throw(DimensionMismatch(
+        "_aabb_grid: box array length mismatch"))
+    n = length(los)
+    big = Int32[]
+    omin = (Inf, Inf, Inf); omax = (-Inf, -Inf, -Inf)
+    for i in 1:n
+        lo = los[i]; hi = his[i]
+        if !(isfinite(lo[1]) && isfinite(lo[2]) && isfinite(lo[3]) &&
+             isfinite(hi[1]) && isfinite(hi[2]) && isfinite(hi[3]))
+            push!(big, Int32(i)); continue
+        end
+        omin = (min(omin[1], lo[1]), min(omin[2], lo[2]), min(omin[3], lo[3]))
+        omax = (max(omax[1], hi[1]), max(omax[2], hi[2]), max(omax[3], hi[3]))
+    end
+    seen = zeros(Int32, n)
+    nfin = n - length(big)
+    if nfin == 0
+        return _AABBGrid(los, his, big, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+                         1, 1, 1, Int32[1, 1], Int32[], seen, Int32(0))
+    end
+    ospan = (omax[1] - omin[1], omax[2] - omin[2], omax[3] - omin[3])
+    for k in 1:3
+        (isfinite(ospan[k]) && ospan[k] >= 0) || (ospan = Base.setindex(ospan, 0.0, k))
+    end
+    ncell = max(1, floor(Int, cbrt(2 * nfin)))
+    # CSR storage is Int32-indexed like `_raygrid`; the ref budget keeps the
+    # total rasterised references comfortably inside that range.
+    maxrefs = min(Int(typemax(Int32)) - 1,
+                  max(nfin, _AABB_MAXREFS_FACTOR * nfin))
+    nx = ny = nz = 1
+    total = 0
+    while true
+        nx, ny, nz = _agrid_dims(ncell, ospan)
+        total = 0; fits = true
+        for i in 1:n
+            lo = los[i]
+            (isfinite(lo[1]) && isfinite(lo[2]) && isfinite(lo[3])) || continue
+            i0, i1, j0, j1, k0, k1 =
+                _agrid_cellspan(nx, ny, nz, omin, ospan, lo, his[i])
+            add = (i1 - i0 + 1) * (j1 - j0 + 1) * (k1 - k0 + 1)
+            if add > maxrefs - total; fits = false; break; end
+            total += add
+        end
+        (fits || ncell == 1) && break
+        ncell = max(1, ncell ÷ 2)
+    end
+    ncells = nx * ny * nz
+    cnt = zeros(Int32, ncells)
+    for i in 1:n
+        lo = los[i]
+        (isfinite(lo[1]) && isfinite(lo[2]) && isfinite(lo[3])) || continue
+        i0, i1, j0, j1, k0, k1 =
+            _agrid_cellspan(nx, ny, nz, omin, ospan, lo, his[i])
+        for k in k0:k1, j in j0:j1, ci in i0:i1
+            cnt[(k * ny + j) * nx + ci + 1] += Int32(1)
+        end
+    end
+    off = Vector{Int32}(undef, ncells + 1)
+    off[1] = Int32(1)
+    for c in 1:ncells
+        off[c+1] = off[c] + cnt[c]
+    end
+    items = Vector{Int32}(undef, Int(off[end]) - 1)
+    cur = copy(off)
+    for i in 1:n
+        lo = los[i]
+        (isfinite(lo[1]) && isfinite(lo[2]) && isfinite(lo[3])) || continue
+        i0, i1, j0, j1, k0, k1 =
+            _agrid_cellspan(nx, ny, nz, omin, ospan, lo, his[i])
+        for k in k0:k1, j in j0:j1, ci in i0:i1
+            c = (k * ny + j) * nx + ci + 1
+            items[cur[c]] = Int32(i); cur[c] += Int32(1)
+        end
+    end
+    return _AABBGrid(los, his, big, omin, ospan, nx, ny, nz, off, items,
+                     seen, Int32(0))
+end
+
+# Sorted (ascending item id) conservative candidate list: every stored box
+# overlapping the query box, plus the non-finite overflow items.  `out` is a
+# caller-owned buffer reused across queries.
+function _aabb_candidates!(out::Vector{Int32}, g::_AABBGrid, qlo, qhi)
+    empty!(out)
+    g.stamp == typemax(Int32) && (fill!(g.seen, 0); g.stamp = Int32(0))
+    st = (g.stamp += Int32(1))
+    scanall = !(isfinite(qlo[1]) && isfinite(qlo[2]) && isfinite(qlo[3]) &&
+                isfinite(qhi[1]) && isfinite(qhi[2]) && isfinite(qhi[3]))
+    if !scanall
+        i0, i1, j0, j1, k0, k1 =
+            _agrid_cellspan(g.nx, g.ny, g.nz, g.omin, g.ospan, qlo, qhi)
+        scanall = (i1 - i0 + 1) * (j1 - j0 + 1) * (k1 - k0 + 1) * 2 >
+                  g.nx * g.ny * g.nz
+    end
+    if scanall
+        for id in eachindex(g.lo)
+            g.seen[id] == st && continue
+            g.seen[id] = st
+            _box_overlap(g.lo[id], g.hi[id], qlo, qhi) && push!(out, Int32(id))
+        end
+    else
+        for k in k0:k1, j in j0:j1, i in i0:i1
+            c = (k * g.ny + j) * g.nx + i + 1
+            @inbounds for p in g.off[c]:(g.off[c+1] - Int32(1))
+                id = g.items[p]
+                g.seen[id] == st && continue
+                g.seen[id] = st
+                _box_overlap(g.lo[id], g.hi[id], qlo, qhi) && push!(out, id)
+            end
+        end
+        for id in g.big
+            g.seen[id] == st && continue
+            g.seen[id] = st
+            _box_overlap(g.lo[id], g.hi[id], qlo, qhi) && push!(out, id)
+        end
+    end
+    sort!(out)
+    return out
+end
+
+# Padded Float64 boxes over each planar region's input triangles.  Region
+# `tris`/planes are immutable for a whole recovery run (only `bnd`/`intedges`
+# mutate), so one index serves every round.
+function _region_boxes(pts, regions)
+    los = Vector{NTuple{3,Float64}}(undef, length(regions))
+    his = similar(los)
+    for (ri, reg) in enumerate(regions)
+        xlo = Inf; ylo = Inf; zlo = Inf; xhi = -Inf; yhi = -Inf; zhi = -Inf
+        for (a, b, c) in reg.tris, v in (a, b, c)
+            p = pts[v]
+            x = Float64(p[1]); y = Float64(p[2]); z = Float64(p[3])
+            x < xlo && (xlo = x); y < ylo && (ylo = y); z < zlo && (zlo = z)
+            x > xhi && (xhi = x); y > yhi && (yhi = y); z > zhi && (zhi = z)
+        end
+        los[ri] = (_fpad_lo(xlo), _fpad_lo(ylo), _fpad_lo(zlo))
+        his[ri] = (_fpad_hi(xhi), _fpad_hi(yhi), _fpad_hi(zhi))
+    end
+    return los, his
+end
+
+_region_grid(pts, regions) = _aabb_grid(_region_boxes(pts, regions)...)
+
 # ---- exact certification: does mesh m conform to the input surface, in exact arithmetic? ----
+#
+# The three O(regions × candidates) scans below enumerate their (region,
+# edge/face) pairs through `_aabb_candidates!` — a pierce point / in-region
+# centroid lies inside the region's exact extent, hence inside its padded
+# Float64 box, so box-disjoint pairs could never pass the exact predicates.
+# Every exact test runs on the surviving candidates unchanged.
 function certify_exact(surface::Mesh,m::Mesh,pts::Vector{RBv},regions,seg2regs,
-                       budget::_RecoveryBudget)
+                       budget::_RecoveryBudget,
+                       regidx::_AABBGrid=_region_grid(pts,regions))
     v=validate(m); v.ok || return (false, "invalid mesh: "*join(v.messages,"; "))
     is_closed_manifold(m) || return (false, "not closed manifold")
     key2pid=Dict{NTuple{3,Float64},Int}()
@@ -322,27 +554,50 @@ function certify_exact(surface::Mesh,m::Mesh,pts::Vector{RBv},regions,seg2regs,
     for e in keys(seg2regs)
         (e in E) || return (false,"crease subsegment $e not a tet edge")
     end
-    for (ri,reg) in enumerate(regions), e in E
-        pr,_ = edge_pierces(reg,pts,e[1],e[2],budget)
-        pr && return (false,"tet edge $e pierces region $ri interior")
+    buf=Int32[]
+    # An edge whose exact pierce point lands inside a region overlaps that
+    # region's padded box — index the sorted edge set once and let each
+    # region test only its overlap candidates (region-major order retained).
+    edges=sort!(collect(E))
+    elos=Vector{NTuple{3,Float64}}(undef,length(edges))
+    ehis=similar(elos)
+    for (i,e) in enumerate(edges)
+        elos[i],ehis[i]=_exact_points_box(pts,e)
+    end
+    eidx=_aabb_grid(elos,ehis)
+    for (ri,reg) in enumerate(regions)
+        for ei in _aabb_candidates!(buf,eidx,regidx.lo[ri],regidx.hi[ri])
+            e=edges[ei]
+            pr,_ = edge_pierces(reg,pts,e[1],e[2],budget)
+            pr && return (false,"tet edge $e pierces region $ri interior")
+        end
     end
     bf = first(boundary_faces(m.tets))
     for f in bf
         a=mid[f[1]]; b=mid[f[2]]; c=mid[f[3]]
         cen=rscale(radd(radd(pts[a],pts[b]),pts[c]), 1//3)
+        qlo,qhi=_exact_points_box(pts,(a,b,c))
         found=false
-        for reg in regions
+        for ri in _aabb_candidates!(buf,regidx,qlo,qhi)
+            reg=regions[ri]
             (side(reg.plane,pts[a])==0 && side(reg.plane,pts[b])==0 && side(reg.plane,pts[c])==0) || continue
             in_region_closed(reg,pts,cen,budget) && (found=true; break)
         end
         found || return (false,"boundary face ($a,$b,$c) lies outside the input surface")
     end
     # EXACT per-region area conformity: rational projected boundary-face area == input facet area
+    blos=Vector{NTuple{3,Float64}}(undef,length(bf))
+    bhis=similar(blos)
+    for (i,f) in enumerate(bf)
+        blos[i],bhis[i]=_exact_points_box(pts,(mid[f[1]],mid[f[2]],mid[f[3]]))
+    end
+    bidx=_aabb_grid(blos,bhis)
     for (ri,reg) in enumerate(regions)
         want=zero(RB)
         for (a,b,c) in reg.tris; want += parea2(pts[a],pts[b],pts[c],reg.plane.drop); end
         got=zero(RB)
-        for f in bf
+        for fi in _aabb_candidates!(buf,bidx,regidx.lo[ri],regidx.hi[ri])
+            f=bf[fi]
             a=mid[f[1]]; b=mid[f[2]]; c=mid[f[3]]
             (side(reg.plane,pts[a])==0 && side(reg.plane,pts[b])==0 && side(reg.plane,pts[c])==0) || continue
             # count only faces belonging to THIS region — not merely coplanar with its plane.
@@ -553,7 +808,8 @@ function _crease_covered(pa,pb,preimage,outidx,adj)
 end
 
 function _certify_partition_exact(surfaces,m,preimage,regions,
-                                  budget::_RecoveryBudget,regionpts=preimage)
+                                  budget::_RecoveryBudget,regionpts=preimage,
+                                  regidx::_AABBGrid=_region_grid(regionpts,regions))
     caller="recover_partition_cdt"
     # Every current crease subsegment must survive interior classification —
     # a segment carried only by exterior-classified tets drops out of the kept
@@ -589,6 +845,7 @@ function _certify_partition_exact(surfaces,m,preimage,regions,
                 "region $ri boundary segment $e is not recovered by kept tet edges")
         end
     end
+    buf=Int32[]
     for r in eachindex(surfaces)
         ids=Int[t for t in axes(m.tets,2) if m.tet_tag[t]==Int32(r)]
         isempty(ids)&&return (false,"effective region $r received no tet")
@@ -600,8 +857,10 @@ function _certify_partition_exact(surfaces,m,preimage,regions,
             a=Int(f[1]);b=Int(f[2]);c=Int(f[3])
             pa=preimage[a];pb=preimage[b];pc=preimage[c]
             cen=rscale(radd(radd(pa,pb),pc),1//3)
+            qlo,qhi=_exact_points_box(preimage,(a,b,c))
             found=false
-            for reg in regions
+            for ri in _aabb_candidates!(buf,regidx,qlo,qhi)
+                reg=regions[ri]
                 (side(reg.plane,pa)==0&&side(reg.plane,pb)==0&&side(reg.plane,pc)==0)||continue
                 if in_region_closed(reg,regionpts,cen,budget);found=true;break;end
             end
@@ -651,7 +910,7 @@ end
 
 function _finalize_partition(surfaces,pts,etets,regions,tet_limit::Int,
                              budget::_RecoveryBudget;
-                             grids_bboxes=nothing)
+                             grids_bboxes=nothing,regidx=nothing)
     caller="recover_partition_cdt"
     coords=_float_coords(pts,caller)
     grids,bboxes=grids_bboxes===nothing ? _partition_grids_bboxes(surfaces) :
@@ -671,7 +930,8 @@ function _finalize_partition(surfaces,pts,etets,regions,tet_limit::Int,
     for r in eachindex(surfaces)
         get(counts,Int32(r),0)>0 || throw(ErrorException("$caller: effective region $r received no tet"))
     end
-    ok,reason=_certify_partition_exact(surfaces,out,pts,regions,budget)
+    ok,reason=_certify_partition_exact(surfaces,out,pts,regions,budget,pts,
+        regidx===nothing ? _region_grid(pts,regions) : regidx)
     ok||throw(ErrorException("$caller: exact partition certification failed — $reason"))
     out
 end
@@ -955,6 +1215,12 @@ function recover_partition_cdt(surfaces;
     pointmap=Dict{RBv,Int}(p=>i for (i,p) in enumerate(pts))
     regions=build_regions(pts,facets)
     isempty(regions) && throw(ArgumentError("recover_partition_cdt: combined PLC has no planar regions"))
+    # Static conservative region index: the piercing scan below enumerates
+    # (region, edge) candidates by padded Float64 box overlap; a true pierce
+    # point lies inside the region's exact extent, so no accepting pair is
+    # dropped.  `regidx` is reused by the final exact certificate.
+    regidx=_region_grid(pts,regions)
+    candbuf=Int32[]
     seg2regs=Dict{NTuple{2,Int},Vector{Int}}()
     for (ri,reg) in enumerate(regions),e in reg.bnd
         push!(get!(seg2regs,e,Int[]),ri)
@@ -1017,11 +1283,22 @@ function recover_partition_cdt(surfaces;
 
         candidates=RBv[]
         sortedE=sort!(collect(E))
-        for reg in regions
-            for e in sortedE
-                pierced,y=edge_pierces(reg,pts,e[1],e[2],budget)
-                if pierced;push!(candidates,y);break;end
+        # Same semantics as the literal scan — one piercing point per region,
+        # emitted in region order — but each edge only tests the regions whose
+        # padded boxes overlap its own.  `firsty` keeps the first piercing
+        # edge per region in `sortedE` order, exactly like the original
+        # region-outer `break` enumeration.
+        firsty=Dict{Int,RBv}()
+        for e in sortedE
+            qlo,qhi=_exact_points_box(pts,e)
+            for ri in _aabb_candidates!(candbuf,regidx,qlo,qhi)
+                haskey(firsty,ri) && continue
+                pierced,y=edge_pierces(regions[ri],pts,e[1],e[2],budget)
+                pierced && (firsty[ri]=y)
             end
+        end
+        for ri in sort!(collect(keys(firsty)))
+            push!(candidates,firsty[ri])
         end
         if !isempty(candidates)
             fresh=RBv[y for y in unique(candidates) if !haskey(pointmap,y)]
@@ -1036,7 +1313,7 @@ function recover_partition_cdt(surfaces;
 
         return _finalize_partition(
             surfaces,pts,etets,regions,limits.tets,budget;
-            grids_bboxes=(grids,bboxes))
+            grids_bboxes=(grids,bboxes),regidx=regidx)
     end
     throw(ArgumentError(
         "recover_partition_cdt: maxiter=$nit reached before convergence " *
@@ -1062,14 +1339,23 @@ function _recover(surface::Mesh,limits::_RecoveryLimits,caller::AbstractString)
     seg2regs=Dict{NTuple{2,Int},Vector{Int}}()
     for (ri,reg) in enumerate(regions), e in reg.bnd; push!(get!(seg2regs,e,Int[]),ri); end
     raygrid=Mesh3D._raygrid(surface)
-    # Per-region exact plane-side cache — `pts` only ever grows, so every
-    # entry is computed once and appended.  The piercing scan and the
-    # constraint-face test both consume it, replacing O(regions×edges) exact
-    # dot products per round by O(regions×new points).
-    sidesmap=[Int8[] for _ in 1:length(regions)]
-    function sides!(ri::Int)
-        s=sidesmap[ri];pl=regions[ri].plane
-        for i in (length(s)+1):length(pts);push!(s,Int8(side(pl,pts[i])));end
+    # Conservative static region index for the whole run (region tris and
+    # planes never change): the piercing scan and the constraint-face test
+    # enumerate (region, edge/face) candidates by padded Float64 box overlap
+    # — a true pierce/in-region point lies inside the region's exact extent,
+    # hence inside its padded box, so no accepting pair is ever dropped.
+    regidx=_region_grid(pts,regions)
+    candbuf=Int32[]
+    # Per-(region, point) exact plane-side cache — `pts` only ever grows, so
+    # every entry stays valid.  Only pairs that survive the box filter ever
+    # get evaluated, replacing the former O(regions×pts) materialisation.
+    sidecache=[Dict{Int,Int8}() for _ in 1:length(regions)]
+    function sideof(ri,p)
+        c=sidecache[ri]
+        s=get(c,p,Int8(-2))
+        if s==Int8(-2)
+            s=Int8(side(regions[ri].plane,pts[p]));c[p]=s
+        end
         return s
     end
 
@@ -1119,15 +1405,22 @@ function _recover(surface::Mesh,limits::_RecoveryLimits,caller::AbstractString)
         #    only the iteration count, never the certificate.
         newpts=RBv[]
         sortedE=sort!(collect(E))
-        for (ri,reg) in enumerate(regions)
-            s=sides!(ri)
-            for e in sortedE
-                sp=s[e[1]];sq=s[e[2]]
-                (sp!=0 && sq!=0 && sp!=sq) || continue
-                pr,y=edge_pierces(reg,pts,e[1],e[2],budget)
-                pr && push!(newpts,y)
+        # Same enumeration as the literal regions×edges scan — per region the
+        # piercing edges in `sortedE` order — but each edge only tests the
+        # regions whose padded box overlaps its own.  An edge piercing a
+        # region's interior lands inside the region's exact extent, hence
+        # inside its padded box: the candidate list is a superset filter.
+        perreg=[RBv[] for _ in 1:length(regions)]
+        for e in sortedE
+            qlo,qhi=_exact_points_box(pts,e)
+            for ri in _aabb_candidates!(candbuf,regidx,qlo,qhi)
+                sp=sideof(ri,e[1]);sp==0 && continue
+                sq=sideof(ri,e[2]);(sq!=0 && sp!=sq) || continue
+                pr,y=edge_pierces(regions[ri],pts,e[1],e[2],budget)
+                pr && push!(perreg[ri],y)
             end
         end
+        for ri in 1:length(regions); append!(newpts,perreg[ri]); end
         if !isempty(newpts)
             fresh=RBv[y for y in unique(newpts) if !haskey(pointmap,y)]
             isempty(fresh) && throw(ErrorException(
@@ -1142,7 +1435,9 @@ function _recover(surface::Mesh,limits::_RecoveryLimits,caller::AbstractString)
         # 3) pierce-free: build the tet adjacency and find the constraint
         #    faces — Delaunay faces lying inside an input region (coplanar
         #    vertices and centroid inside the region, the same test the
-        #    certificate applies to boundary faces).
+        #    certificate applies to boundary faces).  Candidate regions are
+        #    enumerated by face/region box overlap: a region admitting the
+        #    face contains its centroid, hence overlaps the face's box.
         face2tets=Dict{NTuple{3,Int},Vector{Int}}()
         for (ti,t) in enumerate(etets)
             for f in (ekey3(t[1],t[2],t[3]),ekey3(t[1],t[2],t[4]),
@@ -1150,16 +1445,12 @@ function _recover(surface::Mesh,limits::_RecoveryLimits,caller::AbstractString)
                 push!(get!(face2tets,f,Int[]),ti)
             end
         end
-        onplane=[Int[] for _ in 1:length(pts)]
-        for ri in eachindex(regions)
-            s=sides!(ri)
-            for p in eachindex(s); s[p]==0 && push!(onplane[p],ri); end
-        end
         constraint=Set{NTuple{3,Int}}()
         regfaces=Dict{Int,Vector{NTuple{3,Int}}}()
         for f in keys(face2tets)
-            (isempty(onplane[f[1]])||isempty(onplane[f[2]])||isempty(onplane[f[3]])) && continue
-            for ri in intersect(onplane[f[1]],onplane[f[2]],onplane[f[3]])
+            qlo,qhi=_exact_points_box(pts,f)
+            for ri in _aabb_candidates!(candbuf,regidx,qlo,qhi)
+                (sideof(ri,f[1])==0&&sideof(ri,f[2])==0&&sideof(ri,f[3])==0)||continue
                 reg=regions[ri]
                 cen=rscale(radd(radd(pts[f[1]],pts[f[2]]),pts[f[3]]),1//3)
                 if in_region_closed(reg,pts,cen,budget)
@@ -1281,7 +1572,7 @@ function _recover(surface::Mesh,limits::_RecoveryLimits,caller::AbstractString)
         # 5) converged: assemble + EXACT certification (never return a
         #    silently non-conforming mesh)
         m=_finalize(pts,etets,keep,limits.tets,caller)
-        ok,reason=certify_exact(surface,m,pts,regions,seg2regs,budget)
+        ok,reason=certify_exact(surface,m,pts,regions,seg2regs,budget,regidx)
         ok && return (m,pts,regions,seg2regs,n0)
         throw(ErrorException(
             "$caller: convergence gate passed but exact certification failed: $reason"))

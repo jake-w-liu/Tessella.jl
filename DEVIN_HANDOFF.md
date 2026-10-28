@@ -43,7 +43,10 @@
   6,238 nodes/18,468 tets/755 s, focused testset 33/33. Root cause was a
   flat `maxpts=6000` cap below the legitimate ~5.1× Steiner demand, not an
   algorithm gap. Residual: recovery is superlinear — ~10⁴-vertex PLCs take
-  hours (sound, bounded), a performance limit only.
+  hours (sound, bounded), a performance limit only. RESOLVED 2026-10-29:
+  `_AABBGrid` conservative candidate indexing (see next entry) made the
+  `regions × edges/faces` scans ≈linear — 3872-vertex PLC recovers in
+  24.5 s vs 2935 s baseline (~120×), byte-identical.
 
 ### In-flight workers (launched 2026-10-23, disjoint file ownership)
 
@@ -103,9 +106,14 @@ the owned files:
 
 - ~~Dense curved-PLC recovery capacity~~ — LANDED `9d3998e` 2026-10-23
   (verified on both drivers — see landed ledger above).
-  Residual performance note: recovery is superlinear in input density;
-  ~10⁴-vertex PLCs would take hours under the proportional cap — sound and
-  bounded, but a candidate for scan indexing if density tests demand it.
+  Residual performance note RESOLVED 2026-10-29: `_AABBGrid` uniform-CSR
+  AABB indexing (`src/meshing/RecoverCDT.jl`) replaced the superlinear
+  `regions × edges/faces` enumeration with a conservative superset filter
+  (padded Float64 boxes; exact `Rational{BigInt}` accept/reject unchanged).
+  -O2: 512/1152/2048/3872-vertex torus PLCs recover in 2.9/7.6/11.3/24.5 s
+  vs baseline 59.9/298.2/868.5/2935.2 s (~21–120×; the 3872 baseline needed
+  a lifted test-guard to finish at all) — byte-identical `mesh_crc` + counts
+  at all four sizes. Receipts in STATUS.md 2026-10-29.
 - MET01/02: landed `4cef4d1`+`74436ac` (see ledger). Remaining classified
   scope: OCC-curved alg-7 producer (non-affine uv metric transport + curved
   boundary/on-surface lifting — a separate producer, not an admission-gate

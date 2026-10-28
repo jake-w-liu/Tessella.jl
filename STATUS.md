@@ -10712,3 +10712,95 @@ Two tracks verified on this pass; the PAR01 code landed on earlier commits
   `mixed_crc`, serialized MSH4 bytes and `validate` under
   `General.NumThreads=1` vs `4`, including the RNG-consuming explicit
   Region cases. Bounded suites; no full P1–P6 parity claim.
+
+### RecoverCDT dense-PLC AABB candidate index — sub-quadratic recovery (2026-10-29)
+
+Closes the residual performance note from `9d3998e`: exact boundary recovery
+was superlinear in input density because every recovery/certification round
+re-enumerated **all** `regions × candidate edges/faces` through exact
+`Rational{BigInt}` predicates.
+
+- **Hotspot** (`-O2`, `Profile` on a 512-vertex torus PLC): `certify_exact`'s
+  region×edge `edge_pierces` scan ≈58% of samples (~16 039), its
+  boundary-face + per-region-area scans ≈13% (~2 347 + ~1 198), `_recover`'s
+  piercing/plane-side scans ≈25% (~6 800); Delaunay/topology ≈3%. The cost
+  was candidate *enumeration*, not the exact predicates.
+- **Index**: `_AABBGrid` (`src/meshing/RecoverCDT.jl` ≈L297–520) — a bounded
+  uniform 3-D CSR grid over per-item padded Float64 AABBs, modelled on the
+  conservative-superset argument `Mesh3D._raygrid` already uses. Each stored
+  box is the Float64 image of the exact rational extent padded a further
+  2 ulps per side, so exact overlap ⇒ stored overlap: `_aabb_candidates!`
+  returns a **superset** of the pairs the exact predicates could accept
+  (sorted, so accept/reject order is preserved). Non-finite boxes
+  (Float64 overflow only) go to an overflow list consulted on every query.
+  Every surviving pair still runs the unchanged exact `side` /
+  `edge_pierces` / `in_region_closed` predicates — the index only narrows
+  enumeration; no certificate was weakened or re-ordered.
+- **Indexed scans**: `certify_exact` edge-pierce, boundary-face→region and
+  per-region-area loops; `_certify_partition_exact` boundary-face→region
+  match; `recover_partition_cdt` piercing scan (`firsty` keeps per-region
+  first-pierce in `sortedE` order); `_recover` piercing scan and
+  constraint-face detection — the O(regions×pts) `onplane`/`sidesmap`
+  materialisation is replaced by a lazy per-(region,point) `sidecache`
+  evaluated only for box-surviving pairs. The region index is built once
+  per run and reused across rounds (region `tris`/`planes` are immutable
+  while `pts` grows).
+
+Correctness (Julia 1.12.7, `--compile=min -O0`):
+- `test/meshing/recover_cdt_topology_test.jl` — all 33 tests pass, exit 0.
+- `test/geometry/cad_test.jl` — 8205/8205 pass, exit 0 (incl. the 3-material
+  `tetrahedralize_conforming_exact` partition through `_certify_partition_exact`).
+- `test/integration/pipeline_test.jl` — 98/98 pass, exit 0.
+- Index differential: 8000 random box/query pairs vs a brute-force overlap
+  scan — 0 mismatches (incl. non-finite overflow items), i.e. the index
+  returns exactly the overlap set.
+- **Byte-identical outputs** on the generated dense torus PLCs — `mesh_crc`
+  SHA and node/tet counts match the pre-index code (`HEAD 7cc49ca`) at every
+  measured size:
+
+  | input          | baseline out          | indexed out           | sha |
+  |----------------|-----------------------|-----------------------|-----|
+  | 512v/1024f     | 559v/2051t            | 559v/2051t            | `81cc671738a6…` |
+  | 1152v/2304f    | 1278v/4882t           | 1278v/4882t           | `374bbaec073d…` |
+  | 2048v/4096f    | 2154v/8387t           | 2154v/8387t           | `f763d5caa5c3…` |
+  | 3872v/7744f    | 4060v/16181t          | 4060v/16181t          | `e114b5d95e3d…` |
+
+  (The 3872 baseline was obtained under a lifted `max_recovery_tests=10¹²`
+  guard — identical code path — because it cannot finish under the default
+  10⁸ cap; see below.)
+
+- Path sanity (all match earlier receipts): box sha `f2451e6cb9e4…` (pinned),
+  twisted prism 47v/106t sha `117b7014fe39…` vol ≈4.4186, oct-in-box
+  partition 14v/36t tags [1,2] sha `8010c508adeb…`, prismatic 32v/90t sha
+  `298dafe5b55e…`, `mesh_sized_cdt` 77v/228t. Hard caps unchanged:
+  `maxpts=200` and `max_recovery_tests=1` both throw `ArgumentError`.
+
+`-O2` scaling (same fixtures; baseline = pre-index `HEAD 7cc49ca`,
+indexed = this change):
+
+  | input          | baseline    | indexed   | speedup |
+  |----------------|------------:|----------:|--------:|
+  | 512v/1024f     |    59.87 s  |   2.86 s  |   ~21×  |
+  | 1152v/2304f    |   298.21 s  |   7.56 s  |   ~39×  |
+  | 2048v/4096f    |   868.53 s  |  11.32 s  |   ~77×  |
+  | 3872v/7744f    |  2935.24 s* |  24.45 s  |  ~120×  |
+
+  Baseline grows ≈quadratically (≈5.0×, ≈2.9×, ≈3.4× per ~2× vertex step);
+  indexed growth is ≈linear (2.6×, 1.5×, 2.2×) — the superlinear residual is
+  gone.
+
+  \* At 3872 input vertices the pre-index scan exceeds the default
+  `max_recovery_tests=10⁸` operational cap inside `certify_exact` (ArgumentError
+  at `edge_pierces`) — under the default guard the baseline cannot finish at
+  all at that density; the indexed run completes in 24.45 s well under the
+  same cap. The 2935 s baseline figure was measured on the identical code
+  path with the guard lifted to 10¹² purely to produce the byte-identical
+  output receipt above.
+
+Scope: bounded dense fixtures and suites; no full P1–P6 parity claim. The
+index accelerates candidate enumeration only — every exact-rational
+certificate is unchanged. `test/meshing/mesh3d_test.jl` (the ~146 k-assert
+monolith) was still running on a snapshot predating the final edit at
+commit; its recovery-adjacent coverage is superseded here by the fresh
+`recover_cdt_topology`/`cad`/`pipeline` receipts and the byte-identical
+outputs above.
