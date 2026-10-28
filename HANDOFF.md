@@ -57,6 +57,45 @@ STATUS.md entry for semantics):
   full functional + -O2 gate reruns, oracle comparisons for
   histograms/metrics where useful.
 
+### MET02 algorithm-7 trimmed/curved admission + closed-Curve contract (2026-10-28)
+
+Devin closed two confirmed `Mesh.Algorithm=7` admission gaps and a
+reachable lower-ownership defect on this pass (see the same-dated
+STATUS.md entry for full semantics):
+
+- `_occ_metric_surface_refine` (`ModelMetricSurfaceProducer.jl`) now
+  certifies the unwrapped UV sheet against its own directed
+  boundary chain (shoelace area == signed tiled area, one outgoing edge
+  per chain vertex) instead of the analytic parameter rectangle —
+  trimmed OCC faces (Boolean bands, holed sheets) are admissible while
+  cracks, T-junctions, bowties and duplicated slivers still reject.
+- `_metric_surface_admit` accepts the geometric curve kinds on planar
+  faces (`:line,:circle,:ellipse,:spline,:bspline,:bezier,:nurbs,
+  :tensor_bezier,:tensor_bspline,:copied_curve,:surface_iso`);
+  pseudo-constructions (`:degenerate`, `:boundary_layer`) keep
+  rejecting and the strict retained-boundary metric certificate is
+  unchanged.
+- Closed-Curve storage contract: `mesh_curve(closed=true)` returns the
+  nedge-station list (closing `t1` implicit); `_model_curve_grade_params`
+  and `_model_discrete_curve_grade_params` (`ModelMesh1D.jl`) now pin
+  `t1` so stored `curve_params` keep the open-style `[t0,…,t1]`
+  contract every consumer holds. The public algorithm-5-then-7 sequence
+  on a closed-boundary face no longer loses a Curve cell on reuse.
+- Aniso density vs the live oracle measured and classified: upstream
+  algorithms 5/6 scalarize through `BGM_MeshSize`, BAMG 7 reads
+  `BGM_MeshMetric`; the remaining count spread is a policy difference,
+  not an implementable gap.
+- Verification (`--compile=min -O0`):
+  `model_occ_metric_algorithm7_test.jl` 8 testsets 52/52 (trimmed band,
+  OCC ellipse disk, builtin circle plane, lofted tensor face, seam
+  weld, sector volume, field contract, alg5→alg7 regression);
+  `model_metric_delaunay_arm_test.jl` 19/19;
+  `model_metric_surface_density_test.jl` 10/10;
+  `model_metric_hybrid_volume_test.jl` green;
+  `mesh1d_test.jl` 106/106; `mesh2d_test.jl` 925/925;
+  `model_metric_volume_functional_test.jl` in flight (first testset
+  10/10; the suite is an ~80-min/testset interpreted sweep).
+
 ### Order-≥3 curved-cell whole-domain Jacobian certificates (2026-10-28, landed `9e64650`)
 
 Devin closed the HO01 certification gap for catalogued curved cells: the P2

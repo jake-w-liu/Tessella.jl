@@ -103,6 +103,61 @@ set here) and periodic-seam detection is omitted, so the upstream
 `isSeam` bail-out does not fire — both affect only which vertices move.
 Netgen-role optimization does not claim Netgen's full pass set.
 
+### MET02 algorithm-7 trimmed/curved admission + closed-Curve storage contract (2026-10-28)
+
+Two confirmed `Mesh.Algorithm=7` admission gaps and one reachable
+storage-contract defect landed on this pass (`ModelMetricSurfaceProducer.jl`,
+`ModelMesh1D.jl`):
+
+- **Trimmed OCC faces admitted.** `_occ_metric_surface_refine` previously
+  certified the unwrapped UV sheet against the analytic parameter-support
+  rectangle, which rejects any trimmed face (a Boolean band covers only
+  part of the support). The domain certificate now measures the sheet's
+  own boundary chain: the directed shoelace sum over incidence-1 edges
+  must reproduce the signed tiled area — exactly one winding of a single
+  cover, with reversed hole wires subtracting their enclosed area — and
+  every chain vertex must carry exactly one outgoing edge (a 1-manifold
+  chain). Cracks, T-junctions, bowties, duplicated boundary slivers and
+  invalid incidence still reject; the signed/absolute-area one-cover and
+  metric-edge/lower-product/ownership/parametric/world-lift certificates
+  are unchanged. A cylinder-minus-box band now refines to a valid product
+  with every vertex on the analytic lateral and the perimeter exactly the
+  two retained boundary circles.
+- **Curved boundaries admitted on planar faces.** `_metric_surface_admit`
+  required every boundary Curve to be `:line`, but upstream's BAMG
+  selector reaches real curved boundaries on plane faces (OCC `addDisk`
+  ellipse rim, builtin circle loops, iso/copied/tensor edges). The gate
+  now accepts the geometric kinds `:line,:circle,:ellipse,:spline,
+  :bspline,:bezier,:nurbs,:tensor_bezier,:tensor_bspline,:copied_curve,
+  :surface_iso` and keeps rejecting non-geometric pseudo-curves
+  (`:degenerate` apex, `:boundary_layer` chapeau); the strict
+  retained-boundary metric certificate applies to every emitted Curve
+  edge as before.
+- **Closed-Curve stored-parameter contract normalized.** A scalar
+  surface pass could store `curve_params` in `mesh_curve(closed=true)`'s
+  nedge-station convention (closing `t1` implicit), while every consumer
+  holds the open-style `[t0,…,t1]` contract (`_dim01_emit_curve!`,
+  `_surface_curve_parameters`, write-back spans, the metric staleness
+  audit). A later reuse pass then re-emitted one Curve cell short of the
+  owned lower product and the incidence certificate rejected — the
+  public algorithm-5-then-7 sequence on a closed-boundary face.
+  `_model_curve_grade_params` and `_model_discrete_curve_grade_params`
+  now pin `t1` before storage; the boundary certificate also measures
+  the closing edge it used to skip. Verified end-to-end: alg-5 pass →
+  closed curves store `[t0,…,2π]`; alg-7 on the same model meshes the
+  trimmed lateral (110 nodes / 156 tris) with the metric certificate.
+- Density classification (bounded, `MathEvalAniso` x/y/graded fixtures):
+  upstream algorithms 5/6 scalarize sizing through `BGM_MeshSize` while
+  BAMG algorithm 7 consumes the tensor via `BGM_MeshMetric`; the
+  remaining node/tri-count spread vs the live oracle is the documented
+  scalarization policy difference, not an implementable tensor gap.
+  Tessella's tensor connectivity and certified metric-edge bound are
+  retained.
+- Focused suite `model_occ_metric_algorithm7_test.jl` (8 testsets,
+  52/52): seam weld, sector surface+volume, field-contract rejections,
+  trimmed band, OCC ellipse disk, builtin circle plane, lofted tensor
+  face, and the new alg5→alg7 closed-Curve regression.
+
 ### Order-≥3 curved-cell whole-domain Jacobian certificates (2026-10-28, landed `9e64650`)
 
 The P2 certified-publication gate now extends to every catalogued curved family
