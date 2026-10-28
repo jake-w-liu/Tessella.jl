@@ -1190,7 +1190,15 @@ end
         _API.mesh.generate(2)
         nodes,_,_=_API.mesh.get_nodes()
         @test length(nodes)==9
+        # Gmsh 4.15.2 (live-verified): a dim-2 generate reuses the retained
+        # dim-1 discretizations — the flexible 3x3 grid persists until the
+        # curves themselves re-mesh. generate(1) + generate(2) then restores
+        # the declared 11x11 density.
         _API.option("Mesh.FlexibleTransfinite",0)
+        _API.mesh.generate(2)
+        nodes,_,_=_API.mesh.get_nodes()
+        @test length(nodes)==9
+        _API.mesh.generate(1)
         _API.mesh.generate(2)
         nodes,_,_=_API.mesh.get_nodes()
         @test length(nodes)==121
@@ -1293,18 +1301,19 @@ end
         _API.option("Mesh.RecombineAll",1)
         _API.option("Mesh.RecombinationAlgorithm",0)
         _API.option("Mesh.ElementOrder",2)
-        model=_API.CURRENT[];cache=_API.LAST_MESH[];class=_API.LAST_MESH_CLASS[]
-        model_before=repr(model)
-        payload=(_API.mesh.get_nodes(),_API.mesh.get_elements())
-        counters=(_API.NODE_TAG_MAX[],_API.ELEMENT_TAG_MAX[])
         options=copy(_API.OPTIONS)
-        @test_throws ArgumentError _API.mesh.generate(1)
-        @test _API.CURRENT[]===model && repr(model)==model_before
-        @test _API.LAST_MESH[]===cache && _API.LAST_MESH_CLASS[]===class
-        @test (_API.mesh.get_nodes(),_API.mesh.get_elements())==payload
-        @test (_API.NODE_TAG_MAX[],_API.ELEMENT_TAG_MAX[])==counters
+        # Gmsh 4.15.2 (live-verified): the second-order regenerate succeeds —
+        # the retained transfinite line becomes one 3-node Line8 and the two
+        # Point15 vertices are re-emitted. The options table and the
+        # registered size callback are untouched by the successful publish.
+        _API.mesh.generate(1)
+        node_tags,_,_=_API.mesh.get_nodes()
+        element_types,element_tags,_=_API.mesh.get_elements()
+        @test length(node_tags)==3
+        @test element_types==Int32[8,15]
+        @test [length(block) for block in element_tags]==[1,2]
         @test _API.OPTIONS==options
-        @test model.meshing.size_callback===callback
+        @test _API.CURRENT[].meshing.size_callback===callback
     finally
         _API.finalize()
     end
