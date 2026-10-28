@@ -10449,3 +10449,89 @@ The final hardening commits on `main` were pushed individually, including:
 Historical closure claims above are tied to their dated commands and measurements.
 Current P1/P2 claims are limited to the checked source, tests, differential, aggregate
 validation, and memory evidence above; the explicit P1/P2 non-claims remain open.
+
+## 2026-10-28 — Pyramid14 `warmed_bytes` gate (Devin subagent)
+
+`test/meshing/high_order_pyramid_test.jl` "Pyramid14 bounded certificate
+resources": the five `warmed_bytes(value)==0` assertions failed identically
+(~1.87 MB each) under `--compile=min -O0`, the routine-suite flag set. Bisected
+with `@allocated` probes (`_alloc_pyr_probe.jl`): under the interpreter every
+kernel in the interval path reports interpreter bookkeeping — the `isfinite`
+scan alone measures 5,296 B, one `_p2pyr_interval_scale` 2,864 B, one
+`_p2pyr_interval_row` 35,024 B. Under `-O2` the same measurements are 0 B
+end-to-end for all five fixtures, and every fixture exits via the interval
+fast path (`bound.lo>0`), never reaching the BigInt exact path — the
+production certificate is genuinely allocation-free; there is no hot-loop
+allocation to fix at source. The five assertions are therefore gated on
+`Base.JLOptions().compile_enabled != 3`, the same minimal-compiler gate
+`test/runtests.jl:10` and `test/meshing/mesh3d_test.jl:1685` already use for
+compiled-only allocation contracts; the `==0` bound stays pinned wherever the
+optimizing compiler runs.
+
+Receipts (Julia 1.12.7, `--check-bounds=yes`):
+
+- before: `--compile=min -O0` → 26 pass / 5 fail (1,870,880 / 1,880,512 /
+  1,871,280 / 1,872,592 / 1,871,584 B); `-O2` → 3408/3408 pass.
+- after: `--compile=min -O0` → 3403/3403 pass (five gated); `-O2` →
+  3408/3408 pass (all five still asserted at 0 B).
+- regression: `test/meshing/highorder_test.jl` `-O2` → 897/897 pass.
+
+## 2026-10-28 — Long-tail format/view audit closure (Devin subagent)
+
+Closed the remaining formats-agent audit items against the pinned
+`reference/gmsh_quadtri/gmsh-4.15.2-source` tree and the live
+`gmsh-4.15.2-Windows64` oracle:
+
+- **`.ply` (Stanford PLY)**: implemented `_read_ply` in `IO.jl` — ASCII plus
+  `binary_little_endian`/`binary_big_endian` decks (upstream `readPLY`
+  marks binary experimental). Declared scalar property types are honored in
+  binary (an intentional spec-correct deviation: upstream swaps only face
+  indices and returns garbled big-endian coordinates). Faces are triangles
+  from the first three indices, unreferenced vertices dropped — both
+  upstream-verbatim. Wired into `_read_foreign_records` and the
+  `API.open`/`API.merge` extension lists. `.ply` stays write-rejected:
+  upstream has no ordinary `.ply` writer (`.ply2` is the writable dialect).
+- **MSH 2.2 binary**: oracle-verified already-correct behavior — interleaved
+  element-type blocks and repeated type headers inside one binary
+  `$Elements` section, `$PhysicalNames` + binary, and binary
+  `$NodeData`/`$ElementData`/`$ElementNodeData` rows all decode correctly;
+  truncated block payloads reject loudly. Pinned by a byte-level fixture
+  suite (`test/functional/io.jl` "MSH 2.2 binary edges", 13 checks); an
+  identical framing was loaded by the oracle without errors.
+- **`.su2`**: upstream 4.15.2 has no SU2 reader at all (only `writeSU2`) —
+  the Tessella reader is a strict superset. `NZONE`/`IZONE`/`MULTIZONE`/
+  `NPERIODIC` keep loud named rejections (no single-domain representation);
+  marker rows with/without trailing element indices and non-indexed NPOIN
+  rows pinned; ancillary solver keys skip.
+- **`.pos` custom fields**: `Text3D` long-name is a `.geo`-grammar token —
+  `.pos` files use serialized `T2`/`T3` records (already supported);
+  per-view `Type` is the upstream plot-type option stored through the
+  generic option table; `AdaptedView` is upstream adaptive-VTK export
+  machinery, not a `.pos` field (classified unreachable). `.geo` control
+  constructs inside View bodies now get a named rejection instead of a
+  bare "unknown record".
+- **View ops**: upstream `gmsh::view` surface verified against `api/gmsh.h` —
+  `add/remove/getIndex/getTags/model+list data/addAlias/combine/probe/
+  write/setVisibilityPerWindow/option.*` all present; `transform`, `coords`,
+  `refine`, `tag` are not upstream view ops (model.mesh-level or absent).
+  Added missing `view.set_color`/`get_color` (upstream `option.setColor`/
+  `getColor`) packing `A<<24|B<<16|G<<8|R` into the numeric option table,
+  so `copy_options` carries colors.
+- **MED/CGNS/CDF**: `.med`/`.mmed`/`.omm` and `.cgns` now reject with the
+  missing upstream dependency named ("must be compiled with MED/CGNS
+  support") on both open and merge; `.cdf` falls through to the `.geo`
+  executor exactly like upstream's `readGEO` fallthrough for unknown
+  extensions.
+- **Pre-existing regressions fixed**: `PostViewIO` called
+  `IO._msg_log_write` on `Base.IO` (DataType) — `FieldError` on every
+  skip-unknown-record path (commit `2af3416`); and `write_pos` lost the
+  `isempty(view.elements)` clause from `explicit_time`, dropping declared
+  `TIME{0}` on element-less views (`api_pos_import_functional_test`
+  "single and empty times retain declared metadata" was failing at HEAD).
+
+Receipts (Julia 1.12.7, `--compile=min -O0`): `io_surfacedeck_test.jl`
+64+14+19 pass; `functional/io.jl` 17+10+13 pass; `io_su2_bdf_test.jl`
+177 pass; `post_view_io_test.jl` all pass (58/58 rejection set);
+`api_view_endpoints_test.jl` 25+12 pass; `api_pos_import_functional_test.jl`
+9+3+5+2+9 pass (previously 1 fail); view writer/time/alias/probe/model-data
+suites all pass.
