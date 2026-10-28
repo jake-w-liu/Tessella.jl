@@ -123,7 +123,7 @@ function _geo_orientation_actual!(m,context,regions,caller)
     completed=(;model=working,mesh=replacement,max_node_tag=context.mesh_node_max,
                max_element_tag=context.mesh_element_max)
     _geo_publish_actual_plan!(m,context,completed,caller;carrier)
-    for message in plan.diagnostics;_geo_yywarn!(context,message);end
+    for message in plan.diagnostics;_geo_msg_warn!(context,message);end
     return nothing
 end
 
@@ -171,6 +171,6 @@ function _geo_exec_reorient_mesh!(m,list_source,context)
     Model._model_publish_mesh_orientation!(working,plan)
     for name in fieldnames(GeoModel);setfield!(m,name,getfield(working,name));end
     context.mesh=replacement;context.mesh_parts=parts
-    for message in plan.diagnostics;_geo_yywarn!(context,message);end
+    for message in plan.diagnostics;_geo_msg_warn!(context,message);end
     return nothing
 end

@@ -126,7 +126,7 @@ function _native_cell_measure_rule(msh,caller)
     spec=msh_spec(msh)
     _native_cell_numeric_contract(spec,caller)
     coordinates,weights=mesh_integration_points(msh,"Gauss$(spec.order+3)";caller=caller)
-    data=spec.family in (:tri,:qua,:tet,:hex) ? _native_cell_polynomial(msh,caller) : nothing
+    data=spec.family in (:tri,:qua,:tet,:hex,:pri) ? _native_cell_polynomial(msh,caller) : nothing
     shapes=Tuple{Vector{Float64},Vector{NTuple{3,Float64}}}[]
     sizehint!(shapes,length(weights))
     for point in eachindex(weights)
@@ -145,4 +145,47 @@ function _native_cell_quality_volume(mesh,cells,cell,rule,caller,tag)
         result+=determinant*rule.weights[point]
     end
     return result
+end
+
+# Order-agnostic MElement measures that upstream defines on the primary
+# vertices of hexahedra and prisms.
+function _native_cell_hexahedron_angles(mesh,cells,cell)
+    # qmHexahedron::angles: smallest corner angle over the six quad faces.
+    angle_max=0.0;angle_min=pi
+    for face in MeshEntityTopology._HEXAHEDRON_FACES
+        corners=ntuple(i->_mixed_node(mesh,cells,cell,face[i]),4)
+        for j in 1:4
+            a=_native_cell_difference(corners[mod1(j+2,4)],corners[mod1(j+1,4)])
+            b=_native_cell_difference(corners[mod1(j+1,4)],corners[j])
+            angle=acos(_native_cell_dot(a,b)/(_native_cell_norm(a)*_native_cell_norm(b)))
+            angle>angle_max && (angle_max=angle)
+            angle<angle_min && (angle_min=angle)
+        end
+    end
+    return 1.0-max((angle_max-0.5*pi)/(0.5*pi),(0.5*pi-angle_min)/(0.5*pi))
+end
+
+function _native_cell_hexahedron_inner_radius(mesh,cells,cell)
+    # MHexahedron::getInnerRadius: the smallest face tangent radius.
+    radius=Inf
+    for face in MeshEntityTopology._HEXAHEDRON_FACES
+        points=ntuple(i->_mixed_node(mesh,cells,cell,face[i]),4)
+        value=MeshElementQuality._quadrangle_native_inner_radius(points)
+        value<radius && (radius=value)
+    end
+    return radius
+end
+
+function _native_cell_prism_inner_radius(mesh,cells,cell)
+    # MPrism::getInnerRadius: min(inradius of the bottom triangular edges
+    # {0,1,3}, half the (0,3) vertical edge length).
+    a=_mixed_node(mesh,cells,cell,1);b=_mixed_node(mesh,cells,cell,2)
+    c=_mixed_node(mesh,cells,cell,3);d=_mixed_node(mesh,cells,cell,4)
+    dist=(_native_cell_norm(_native_cell_difference(b,a)),
+          _native_cell_norm(_native_cell_difference(c,a)),
+          _native_cell_norm(_native_cell_difference(c,b)))
+    k=0.5*(dist[1]+dist[2]+dist[3])
+    rad_tri=sqrt(k*(k-dist[1])*(k-dist[2])*(k-dist[3]))/k
+    rad_vert=0.5*_native_cell_norm(_native_cell_difference(d,a))
+    return min(rad_tri,rad_vert)
 end

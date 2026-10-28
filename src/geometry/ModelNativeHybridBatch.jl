@@ -86,7 +86,8 @@ function _model_native_hybrid_batch_production(m,regions,input,options,births,ca
                                                 size_field=nothing,optimize_pyramids::Float64=0.0,
                                                 periodic_surface_pairs=nothing)
     isfinite(optimize_pyramids) || throw(ArgumentError("$caller: hybrid batch Pyramid setting must be finite"))
-    options.optimize_netgen==0 || throw(ArgumentError("$caller: hybrid batch Netgen optimization is not implemented"))
+    # Mesh.OptimizeNetgen skips hybrid regions upstream; `hybrid=true` in the
+    # deferred optimizer call keeps that skip instead of failing.
     groups,receipts=_model_native_hybrid_groups(m,regions,input,caller)
     _model_native_hybrid_global_triangles(m,input,caller)
     _model_native_hybrid_global_size_seeds(m,input,caller)
@@ -128,7 +129,7 @@ function _model_native_hybrid_batch_production(m,regions,input,options,births,ca
         work.node_tags=copy(product.boundary_node_tags)
         work.cell_source=mesh;work.element_tags=copy(product.element_tags[1:size(tet.nodes,2)])
         optimized=_model_native_optimize_volume(mesh,options,work,input,
-            NTuple{3,Int32}[],NTuple{2,Int32}[],caller)
+            NTuple{3,Int32}[],NTuple{2,Int32}[],caller;hybrid=true)
         element_clock=work.element_high_water
         blocks=ElementBlock[ElementBlock(4,copy(optimized.tets)),ElementBlock(7,copy(pyramid.nodes))]
         mixed=MixedMesh(optimized.coords,blocks)

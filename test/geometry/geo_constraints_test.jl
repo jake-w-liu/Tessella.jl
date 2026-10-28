@@ -781,11 +781,13 @@ end
     @test ntris(execution.mesh)>0
     @test validate(execution.mesh).ok
 
-    err=_constraint_error(_GEO_SQUARE * raw"""
+    # "Netgen" is a supported region optimizer; a 2-D mesh has no regions,
+    # so upstream's per-region loop is a silent no-op like the 3-D methods.
+    execution=_execute_constraint_source(_GEO_SQUARE * raw"""
         OptimizeMesh "Netgen";
         """; mesh_dim=2)
-    @test err isa ArgumentError
-    @test occursin("optimization method", sprint(showerror,err))
+    @test execution.mesh!==nothing
+    @test validate(execution.mesh).ok
 end
 
 @testset ".geo Delete per-entity semantics" begin

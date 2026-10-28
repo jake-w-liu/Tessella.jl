@@ -59,6 +59,15 @@ function _native_cell_reference_nodes(spec)
         end
         return result
     end
+    # Prism monomials index the unit triangle in (i,j) and the [-1,1] line in k.
+    if spec.family===:pri
+        for (column,point) in enumerate(points)
+            result[1,column]=Float64(point[1])/p
+            result[2,column]=Float64(point[2])/p
+            result[3,column]=2.0*Float64(point[3])/p-1.0
+        end
+        return result
+    end
     factor=spec.family in (:tri,:tet) ? 1.0/p : 2.0/p
     for (column,point) in enumerate(points),axis in 1:spec.dim
         result[axis,column]=Float64(point[axis])*factor
@@ -330,7 +339,7 @@ end
 
 function _native_cell_polynomial(msh,caller)
     spec=msh_spec(msh)
-    spec.family in (:tri,:qua,:tet,:hex) && 1<=spec.order<=10 ||
+    spec.family in (:tri,:qua,:tet,:hex,:pri) && 1<=spec.order<=10 ||
         throw(ArgumentError("$caller: type $msh has no native polynomial cell evaluator"))
     points=_native_cell_reference_nodes(spec)
     raw=spec.serendipity ? MeshFunctionSpaces._serendipity_exponents(spec.family,spec.order) :

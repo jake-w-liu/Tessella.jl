@@ -81,7 +81,7 @@ function _native_optimize_embedded(m,region,cells,positions)
     return faces,edges
 end
 
-function _native_optimize_region!(assembly,m,region,cells)
+function _native_optimize_region!(assembly,m,region,cells;netgen=false,relocate=true)
     rows=Int32[];positions=Dict{Int32,Int32}()
     for cell in cells,slot in 1:4
         node=cell.nodes[slot]
@@ -105,10 +105,16 @@ function _native_optimize_region!(assembly,m,region,cells)
         original[cell.tag]=cell
     end
     faces,edges=_native_optimize_embedded(m,region,assembly.cells,positions)
-    product=Model._gmsh_optimize_tetrahedra(Mesh(coords;tets=connectivity,tet_tag=physical);
-        element_numbers=numbers,element_high_water=assembly.cell_max,movable=movement,
-        threshold=OPTIONS["Mesh.OptimizeThreshold"],embedded_faces=faces,
-        embedded_edges=edges,positive=false)
+    product=if netgen
+        Model._netgen_optimize_tetrahedra(Mesh(coords;tets=connectivity,tet_tag=physical);
+            element_numbers=numbers,element_high_water=assembly.cell_max,movable=movement,
+            embedded_faces=faces,embedded_edges=edges,positive=false)
+    else
+        Model._gmsh_optimize_tetrahedra(Mesh(coords;tets=connectivity,tet_tag=physical);
+            element_numbers=numbers,element_high_water=assembly.cell_max,movable=movement,
+            threshold=OPTIONS["Mesh.OptimizeThreshold"],embedded_faces=faces,
+            embedded_edges=edges,positive=false,relocate=relocate)
+    end
     assembly.cell_max=product.element_high_water
     for (row,node) in enumerate(rows)
         previous=assembly.nodes[node]
@@ -134,7 +140,7 @@ function _native_optimize_region!(assembly,m,region,cells)
     return replacement
 end
 
-function _native_default_optimize_locked!(force,pairs,caller)
+function _native_default_optimize_locked!(force,pairs,caller;netgen=false)
     model=_model_locked();cached=LAST_MESH[]
     class=cached===nothing ? nothing : _cached_classification_locked(cached)
     # The legacy simplex carrier stores its actual quadratic cells and edited
@@ -151,15 +157,34 @@ function _native_default_optimize_locked!(force,pairs,caller)
     admitted=iszero(OPTIONS["General.AbortOnError"]) || NATIVE_LOOKUP_QUERY_ERRORS[]==0
     if admitted
         regions=Dict{Int,Vector{_Dim01Cell}}()
+        # Upstream's hybrid gates inspect only hexahedra, prisms and pyramids:
+        # optimizeMeshGRegion still swaps hybrid edges but skips its relocate
+        # pass, while optimizeMeshGRegionNetgen skips the region outright.
+        hybrid=Set{Int}()
         for cell in assembly.cells
-            cell.owner[1]==3 && msh_spec(cell.msh).family===:tet || continue
-            push!(get!(()->_Dim01Cell[],regions,Int(cell.owner[2])),cell)
+            cell.owner[1]==3 || continue
+            family=msh_spec(cell.msh).family
+            if family===:tet
+                push!(get!(()->_Dim01Cell[],regions,Int(cell.owner[2])),cell)
+            elseif family in (:hex,:pri,:pyr)
+                push!(hybrid,Int(cell.owner[2]))
+            end
         end
         replacements=Dict{Int,Vector{_Dim01Cell}}()
         for (_,region) in model_entities(source,3)
             _native_optimize_region_skipped(source,region,force) && continue
+            if netgen
+                if region in hybrid
+                    _native_diagnostic_emit_locked(:info,
+                        "Skipping Netgen optimizer for hybrid mesh")
+                    continue
+                end
+                _native_diagnostic_emit_locked(:info,"Optimizing volume $region")
+            end
             cells=get(regions,region,nothing)
-            cells===nothing || (replacements[region]=_native_optimize_region!(assembly,source,region,cells))
+            cells===nothing || (replacements[region]=
+                _native_optimize_region!(assembly,source,region,cells;
+                    netgen=netgen,relocate=!(region in hybrid)))
         end
         result=_Dim01Cell[];emitted=Set{Int}()
         for cell in assembly.cells

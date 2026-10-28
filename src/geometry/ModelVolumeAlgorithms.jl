@@ -32,7 +32,7 @@ function _model_native_volume_optimizer_movable(mesh,births,input)
 end
 
 function _model_native_optimize_volume(mesh,options,births,input,faces,edges,caller;
-                                       protected_nodes=())
+                                       protected_nodes=(),hybrid::Bool=false)
     if births!==nothing
         if births.cell_source===nothing
             # The inherited factory fill creates its cells before optimization.
@@ -44,9 +44,16 @@ function _model_native_optimize_volume(mesh,options,births,input,faces,edges,cal
             births.cell_source=mesh
         end
     end
-    options.optimize_netgen>0 && ntets(mesh)>0 && throw(ArgumentError(
-        "$caller: the native Netgen tetrahedron optimizer is not implemented"))
-    options.optimize>0 && options.optimize_threshold>0.0 || return mesh
+    # Generator.cpp's `for i in 0:max(optimize,optimizeNetgen)-1` interleave:
+    # each arm fires while its own counter exceeds i. optimizeMesh returns
+    # early when OptimizeThreshold <= 0 and only runs its relocate pass on
+    # non-hybrid regions; optimizeMeshGRegionNetgen skips hybrid regions
+    # outright ("Skipping Netgen optimizer for hybrid mesh").
+    gmsh_passes=options.optimize>0 && options.optimize_threshold>0.0 ?
+        options.optimize : 0
+    netgen_passes=options.optimize_netgen>0 && !hybrid ?
+        options.optimize_netgen : 0
+    gmsh_passes>0 || netgen_passes>0 || return mesh
     receipt=births!==nothing && births.cell_source===mesh ? births : nothing
     movement=_model_native_volume_optimizer_movable(mesh,receipt,input)
     for node in protected_nodes
@@ -58,17 +65,33 @@ function _model_native_optimize_volume(mesh,options,births,input,faces,edges,cal
     for edge in edges,node in edge
         movement[node]=false
     end
-    for _ in 1:options.optimize
-        numbers=receipt===nothing ? collect(UInt64,1:ntets(mesh)) : receipt.element_tags
-        high_water=receipt===nothing ? maximum(numbers;init=UInt64(0)) : receipt.element_high_water
-        product=_gmsh_optimize_tetrahedra(mesh;movable=movement,
-            element_numbers=numbers,element_high_water=high_water,
-            threshold=options.optimize_threshold,embedded_faces=faces,embedded_edges=edges)
-        mesh=product.mesh
-        if receipt!==nothing
-            receipt.cell_source=mesh
-            receipt.element_tags=product.element_numbers
-            receipt.element_high_water=product.element_high_water
+    for pass in 0:max(gmsh_passes,netgen_passes)-1
+        if pass<gmsh_passes
+            numbers=receipt===nothing ? collect(UInt64,1:ntets(mesh)) : receipt.element_tags
+            high_water=receipt===nothing ? maximum(numbers;init=UInt64(0)) : receipt.element_high_water
+            product=_gmsh_optimize_tetrahedra(mesh;movable=movement,
+                element_numbers=numbers,element_high_water=high_water,
+                threshold=options.optimize_threshold,embedded_faces=faces,
+                embedded_edges=edges,relocate=!hybrid)
+            mesh=product.mesh
+            if receipt!==nothing
+                receipt.cell_source=mesh
+                receipt.element_tags=product.element_numbers
+                receipt.element_high_water=product.element_high_water
+            end
+        end
+        if pass<netgen_passes && ntets(mesh)>0
+            numbers=receipt===nothing ? collect(UInt64,1:ntets(mesh)) : receipt.element_tags
+            high_water=receipt===nothing ? maximum(numbers;init=UInt64(0)) : receipt.element_high_water
+            product=_netgen_optimize_tetrahedra(mesh;movable=movement,
+                element_numbers=numbers,element_high_water=high_water,
+                embedded_faces=faces,embedded_edges=edges)
+            mesh=product.mesh
+            if receipt!==nothing
+                receipt.cell_source=mesh
+                receipt.element_tags=product.element_numbers
+                receipt.element_high_water=product.element_high_water
+            end
         end
     end
     return mesh

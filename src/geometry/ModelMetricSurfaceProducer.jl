@@ -43,8 +43,18 @@ function _metric_surface_admit(m,tag,caller)
     get(m.meshing.smoothing,(2,tag),0)==0 || throw(ArgumentError(
         "$caller: Surface smoothing is not supported"))
     curves=_gmsh_native_surface_curves(m,tag)
-    all(curve->_curve_type(m,curve)===:line,curves) || throw(ArgumentError(
-        "$caller: requires straight boundary Curves"))
+    # Upstream's BAMG selector reaches real curved boundaries on plane
+    # faces — a builtin arc-bounded Plane or an OCC Plane record carries
+    # circles, ellipses, splines or iso/copied edges whose actual lower
+    # products the strict retained-boundary certificate measures like any
+    # line's. Only non-geometric pseudo-curves keep rejecting: a
+    # collapsed `:degenerate` apex has no span to grade, and a
+    # `:boundary_layer` chapeau belongs to its own construction path.
+    all(curve->_curve_type(m,curve) in
+        (:line,:circle,:ellipse,:spline,:bspline,:bezier,:nurbs,
+         :tensor_bezier,:tensor_bspline,:copied_curve,:surface_iso),
+        curves) || throw(ArgumentError(
+        "$caller: requires geometric boundary Curves"))
     curve_set=Set(curves)
     any(constraint->constraint.dim==2 &&
         (abs(Int(constraint.slave_entity))==tag || abs(Int(constraint.master_entity))==tag) ||
@@ -1886,19 +1896,35 @@ function _occ_metric_surface_refine(m,tag,field,target,node_limit,
     # Planar-embedding certificate for the unwrapped sheet: the lifted weld
     # repair may leave covering-position cells (a star rebuilt across the
     # seam on the covering sheet), which is fine for the welded product but
-    # not a uv triangulation the parametric refinement can certify on — the
-    # cells must tile the parametric rectangle exactly with one winding.
+    # not a uv triangulation the parametric refinement can certify on. A
+    # trimmed face covers only part of its surface's analytic parameter
+    # rectangle, so the domain is measured through the sheet's own
+    # boundary chain rather than the support bounds: the directed shoelace
+    # sum must reproduce the signed tiled area (exactly one winding of a
+    # single cover — hole loops stay admissible, a reversed hole wire
+    # subtracts its enclosed area in the same sum), and every chain
+    # vertex must carry exactly one outgoing edge — a 1-manifold chain.
+    # Cracks, T-junctions, bowties and duplicated boundary slivers all
+    # violate one of the two conditions.
     signed_a=0.0;abs_a=0.0
     for cell in cells
         pa,pb,pc=parameters[cell[1]],parameters[cell[2]],parameters[cell[3]]
         signed_a+=_metric_uv_signed(pa,pb,pc)
         abs_a+=_metric_uv_area(pa,pb,pc)
     end
-    (uvlo,uvhi)=_occ_surface_bounds(sg)
-    dom=(uvhi[1]-uvlo[1])*(uvhi[2]-uvlo[2])
-    isfinite(signed_a) && isfinite(abs_a) && dom>0 &&
+    boundary_shoe=0.0
+    boundary_out=Dict{Int32,Int}()
+    for cell in cells,edge in _metric_surface_edges(cell)
+        length(get(incidence,minmax(edge...),Int[]))==1 || continue
+        pa,pb=parameters[edge[1]],parameters[edge[2]]
+        boundary_shoe+=pa[1]*pb[2]-pb[1]*pa[2]
+        boundary_out[edge[1]]=get(boundary_out,edge[1],0)+1
+    end
+    all(==(1),values(boundary_out)) && isfinite(signed_a) &&
+        isfinite(abs_a) && isfinite(boundary_shoe) && abs_a>0 &&
         isapprox(abs(signed_a),abs_a;rtol=1e-9,atol=1e-9*max(1.0,abs_a)) &&
-        isapprox(abs_a,dom;rtol=1e-9,atol=1e-9*max(1.0,dom)) || throw(
+        isapprox(boundary_shoe/2,signed_a;rtol=1e-9,
+                 atol=1e-9*max(1.0,abs_a)) || throw(
         ArgumentError("$caller: Mesh.Algorithm=7 on Surface[$tag] requires " *
             "a planar-embedded unwrapped parametric sheet"))
     state=_metric_surface_refine_core(tag,field,target,node_limit,

@@ -92,9 +92,12 @@ end
         # "not interfaced yet" warning.
         @test api.mesh.optimize("HighOrder",false,-1,[(2,1)])===nothing
 
+        # "Netgen" is a supported region optimizer: a surface-only cache has
+        # no regions, so the call is accepted without work (upstream iterates
+        # model regions; there are none to optimize).
+        @test api.mesh.optimize("Netgen")===nothing
+        @test _oc_nodes()==relocated
         # Unsupported kernels keep their atomic rejection.
-        @test_throws r"unknown or unsupported optimizer" (
-            api.mesh.optimize("Netgen"))
         @test_throws r"unknown or unsupported optimizer" (
             api.mesh.optimize("Pachyderm"))
     finally
@@ -102,23 +105,29 @@ end
     end
 end
 
-@testset "Linear native cache optimizer behavior is unchanged" begin
+@testset "Linear MixedMesh surface optimizer dispatch" begin
     before=_oc_cylinder(;order=false)
     try
         @test api.LAST_MESH[] isa Tessella.Elements.MixedMesh
-        # The native MixedMesh keeps its pre-existing bound for the
-        # legacy-kernel methods — the "linear simplex cache" rejection is
-        # unchanged by the order-2 arms.
+        # Linear MixedMesh Laplace2D/Relocate2D run upstream's per-face
+        # parametric surface kernels — relocated face-owned vertices keep
+        # their owning-surface support (lateral r=1 or cap z∈{0,2}).
         for method in ("Laplace2D","Relocate2D")
-            @test_throws r"native mixed element optimization is not implemented" (
-                api.mesh.optimize(method))
-            @test _oc_nodes()==before
+            @test api.mesh.optimize(method)===nothing
+        end
+        relocated=_oc_nodes()
+        @test keys(relocated)==keys(before)
+        for tag in keys(before)
+            p=relocated[tag]
+            @test isapprox(hypot(p[1],p[2]),1.0,atol=2e-2) ||
+                  isapprox(p[3],0.0,atol=2e-2) ||
+                  isapprox(p[3],2.0,atol=2e-2)
         end
         # Upstream warns and no-ops when the dedicated optimizer meets a
         # purely linear mesh.
         @test api.mesh.optimize("HighOrder")===nothing
         @test api.mesh.optimize("HighOrderElastic")===nothing
-        @test _oc_nodes()==before
+        @test _oc_nodes()==relocated
     finally
         api.finalize()
     end

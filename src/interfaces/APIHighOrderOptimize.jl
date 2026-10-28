@@ -599,6 +599,398 @@ function _optimize_relocate2d_mixed!(cached::MixedMesh, class, model, pairs,
     return nothing
 end
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Linear-MixedMesh surface kernels (OPT01): upstream `laplaceSmoothing(GFace)`
+# / `RelocateVertices(GFace)` — per-face parametric relocation.
+#
+# For each model face's classified linear `:tri`/`:qua` cells, face-owned
+# vertices (owner dim 2, matching tag) are moved in the owning surface's
+# (u,v) parameter space and re-lifted through `model_value` — the same
+# evaluator family that produced their stored parameters
+# (reparamMeshVertexOnFace maps every incident vertex onto the face; stored
+# node_parametric covers face-owned vertices and `model_parametrization`
+# projects edge/point-owned neighbours).  `"Laplace2D"` is upstream's
+# `_relocate`: a metric-weighted centroid of edge neighbours (first
+# fundamental form from `model_derivative`, mirroring `buildMetric`), then
+# up to five damped trials accepted only when `_isItAGoodIdeaToMoveThatVertex`
+# passes — parametric-space cell area may not grow and the minimum
+# etaShapeMeasure may not drop.  `"Relocate2D"` is `relocateVertex`: the
+# (u,v) centroid of every incident cell vertex gives the target, then
+# `Maximize_Quality_Golden_Section` on [0,1] (tol 1e-6, the GFace default)
+# against the worst incident shape measure — eta for 4-node cells,
+# |gamma| otherwise.  A vertex without a stored parameter takes upstream's
+# `relocateVertex2` real-space arm: golden search along the segment to the
+# incident-vertex centroid with positions re-projected by
+# `model_closest_point`.
+#
+# Bounded-scope deviations from upstream, kept truthful: Tessella does not
+# track per-face boundary-layer column marks, so
+# `getAllBoundaryLayerVertices` is an empty set and every eligible
+# face-owned vertex participates; and periodic-seam vertices are not
+# detected, so the `isSeam` bail-out is omitted.  Both affect only which
+# vertices move, never the move semantics themselves.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# (u,v) of `node` on face `tag`: stored parameters when face-owned, else a
+# `model_parametrization` projection — `reparamMeshVertexOnFace` upstream.
+function _surface_optimize_uv(model,class,tag,node,coords,params)
+    stored=params[node]
+    owner=class.node_entities[node]
+    if owner[1]==2 && Int(owner[2])==tag && stored!==nothing &&
+            length(stored)>=2 && isfinite(stored[1]) && isfinite(stored[2])
+        return Float64[stored[1],stored[2]]
+    end
+    point=Float64[coords[1,node],coords[2,node],coords[3,node]]
+    value=try
+        Model.model_parametrization(model,2,tag,point)
+    catch err
+        (err isa InterruptException||err isa OutOfMemoryError)&&rethrow()
+        return nothing
+    end
+    (value===nothing||length(value)<2||!isfinite(value[1])||!isfinite(value[2]))&&
+        return nothing
+    return Float64[value[1],value[2]]
+end
+
+# `gf->point(uv)`: lift through `model_value`; nothing on evaluator failure.
+function _surface_optimize_lift(model,tag,uv)
+    values=try
+        Model.model_value(model,2,tag,uv;
+            old_ruled_surface=!iszero(OPTIONS["Geometry.OldRuledSurface"]))
+    catch err
+        (err isa InterruptException||err isa OutOfMemoryError)&&rethrow()
+        return nothing
+    end
+    (length(values)==3&&all(isfinite,values))||return nothing
+    return (values[1],values[2],values[3])
+end
+
+# `buildMetric(gf,uv)`: first fundamental form E,F,G from `model_derivative`.
+function _surface_optimize_metric(model,tag,uv)
+    values=try
+        Model.model_derivative(model,2,tag,uv;
+            old_ruled_surface=!iszero(OPTIONS["Geometry.OldRuledSurface"]))
+    catch err
+        (err isa InterruptException||err isa OutOfMemoryError)&&rethrow()
+        return nothing
+    end
+    length(values)>=6 || return nothing
+    e=values[1]^2+values[2]^2+values[3]^2
+    f=values[1]*values[4]+values[2]*values[5]+values[3]*values[6]
+    g=values[4]^2+values[5]^2+values[6]^2
+    (isfinite(e)&&isfinite(f)&&isfinite(g))||return nothing
+    return (e,f,g)
+end
+
+# MTriangle::etaShapeMeasure — 1-|60°-a_min|/60 over interior angles.
+function _surface_optimize_tri_eta(a,b,c)
+    angle(p,q,r)=begin
+        u=_native_cell_difference(p,q);v=_native_cell_difference(r,q)
+        180.0*atan(_native_cell_norm(_native_cell_cross(u,v)),
+            _native_cell_dot(u,v))/pi
+    end
+    amin=min(angle(a,b,c),angle(b,c,a),angle(c,a,b))
+    return 1.0-abs(60.0-amin)*(1.0/60.0)
+end
+
+# The relocateVertex objective: etaShapeMeasure for 4-node cells,
+# |gammaShapeMeasure| otherwise.
+_surface_optimize_cell_objective(family,points)=
+    length(points)==4 ? MeshElementQuality._quadrangle_native_eta(points) :
+        abs(_native_cell_triangle_gamma(points[1],points[2],points[3]))
+
+# The _isItAGoodIdeaToMoveThatVertex measure: etaShapeMeasure on every cell.
+_surface_optimize_cell_eta(family,points)=
+    length(points)==4 ? MeshElementQuality._quadrangle_native_eta(points) :
+        _surface_optimize_tri_eta(points[1],points[2],points[3])
+
+@inline _surface_uv_tri_area(u1,u2,u3)=0.5*abs(
+    (u2[1]-u1[1])*(u3[2]-u1[2])-(u3[1]-u1[1])*(u2[2]-u1[2]))
+
+# surfaceFaceUV(t,gf,false): tri → half-cross; quad → min over the two
+# diagonal split sums.
+function _surface_uv_cell_area(uvs)
+    length(uvs)==3 && return _surface_uv_tri_area(uvs[1],uvs[2],uvs[3])
+    a1=_surface_uv_tri_area(uvs[1],uvs[2],uvs[3])+
+        _surface_uv_tri_area(uvs[3],uvs[4],uvs[1])
+    a2=_surface_uv_tri_area(uvs[2],uvs[3],uvs[4])+
+        _surface_uv_tri_area(uvs[4],uvs[1],uvs[2])
+    return min(a1,a2)
+end
+
+# `_isItAGoodIdeaToMoveThatVertex`: probe `trial`, then restore.  Accepts
+# only when the lifted point exists, parametric cell area does not grow
+# (1+1e-10 slack) and the minimum eta does not drop.  The probe vertex's
+# (u,v) is `trial` during the new-state pass and its committed (u,v)
+# during the old-state pass — the shared `uvmap` cache is never mutated.
+function _surface_optimize_good_move(coords,uv_for,node,incident,cells,
+                                     model,tag,trial)
+    pafter=_surface_optimize_lift(model,tag,trial)
+    pafter===nothing && return false
+    points(cell)=ntuple(i->(coords[1,cell[2][i]],coords[2,cell[2][i]],
+        coords[3,cell[2][i]]),length(cell[2]))
+    function sweep(probe)
+        surface=0.0;minq=1.0
+        for index in incident
+            cell=cells[index]
+            cell_uvs=Union{Nothing,Vector{Float64}}[
+                slot==node ? probe : uv_for(slot) for slot in cell[2]]
+            any(u->u===nothing,cell_uvs) && continue
+            surface+=_surface_uv_cell_area(cell_uvs)
+            minq=min(minq,_surface_optimize_cell_eta(cell[1],points(cell)))
+        end
+        return surface,minq
+    end
+    surface_old,minq=sweep(uv_for(node))
+    px,py,pz=coords[1,node],coords[2,node],coords[3,node]
+    coords[1,node],coords[2,node],coords[3,node]=pafter
+    surface_new,minq_new=sweep(trial)
+    coords[1,node],coords[2,node],coords[3,node]=px,py,pz
+    (1.0+1e-10)*surface_old<surface_new && return false
+    minq_new<minq && return false
+    return true
+end
+
+# Upstream `_relocate` (laplaceSmoothing): metric-weighted neighbour
+# centroid in (u,v), five damped trials gated by _isItAGoodIdea…  Returns
+# the last accepted trial (u,v), or `nothing` when no move was taken.
+function _surface_laplace_vertex!(coords,uv_for,node,incident,cells,
+                                  edges_of,model,tag)
+    before=uv_for(node)
+    before===nothing && return nothing
+    neighbours=Dict{Int,Vector{Float64}}()
+    for index in incident
+        family,nodes=cells[index]
+        for (i,j) in edges_of[family]
+            # Element edge tables are 0-based vertex slots.
+            other=nodes[i+1]==node ? nodes[j+1] :
+                  nodes[j+1]==node ? nodes[i+1] : 0
+            (other==0||haskey(neighbours,other)) && continue
+            uv=uv_for(other)
+            uv===nothing || (neighbours[other]=uv)
+        end
+    end
+    isempty(neighbours) && return nothing
+    after=(0.0,0.0);weight=0.0
+    for (other,adj) in neighbours
+        du=adj[1]-before[1];dv=adj[2]-before[2]
+        norm=sqrt(du*du+dv*dv)
+        norm>0 || continue
+        du/=norm;dv/=norm
+        metric=_surface_optimize_metric(model,tag,adj)
+        metric===nothing && continue
+        f=sqrt(metric[1]*du*du+2*metric[2]*du*dv+metric[3]*dv*dv)
+        isfinite(f) || continue
+        after=(after[1]+adj[1]*f,after[2]+adj[2]*f);weight+=f
+    end
+    weight>0 || return nothing
+    after=(after[1]/weight,after[2]/weight)
+    factor=1.0;accepted=nothing
+    for _ in 1:5
+        trial=Float64[after[1]*factor+before[1]*(1.0-factor),
+                      after[2]*factor+before[2]*(1.0-factor)]
+        if _surface_optimize_good_move(coords,uv_for,node,incident,cells,
+                                       model,tag,trial)
+            pafter=_surface_optimize_lift(model,tag,trial)
+            if pafter!==nothing
+                coords[1,node],coords[2,node],coords[3,node]=pafter
+                accepted=trial
+            end
+        end
+        factor/=1.4
+    end
+    return accepted
+end
+
+# Parametric golden section on ξ∈[0,1] — mirrors
+# Maximize_Quality_Golden_Section including its `worst` bookkeeping: the
+# caller records f(0) first, accepts the full move when it already beats
+# 0.5, and falls back to it when the refined best does not improve on it.
+function _surface_golden_search(objective,tol,worst)
+    lambda=0.5*(sqrt(5.0)-1.0);mu=0.5*(3.0-sqrt(5.0))
+    a=0.0;b=1.0
+    x1=b-lambda*(b-a);x2=a+lambda*(b-a)
+    fx1=objective(x1);fx2=objective(x2)
+    while abs(b-a)>=tol
+        if fx1<fx2
+            a=x1;abs(b-a)<tol&&break
+            x1=x2;fx1=fx2;x2=b-mu*(b-a);fx2=objective(x2)
+        else
+            b=x2;abs(b-a)<tol&&break
+            x2=x1;fx2=fx1;x1=a+mu*(b-a);fx1=objective(x1)
+        end
+    end
+    final=objective(a)
+    final<worst && return 0.0
+    return a
+end
+
+# Upstream `relocateVertex(gf,ver,lt)`: parametric centroid + golden
+# search; `relocateVertex2` real-space arm when the vertex stores no (u,v).
+# Returns the accepted (u,v), `true` for the real-space arm (upstream
+# leaves the vertex's stored parameters untouched there), or `nothing`.
+function _surface_relocate_vertex!(coords,uv_for,node,incident,cells,
+                                   model,tag)
+    points(cell)=ntuple(i->(coords[1,cell[2][i]],coords[2,cell[2][i]],
+        coords[3,cell[2][i]]),length(cell[2]))
+    objective=function(point_at,xi)
+        xyz=point_at(xi)
+        xyz===nothing && return -1.0
+        px,py,pz=coords[1,node],coords[2,node],coords[3,node]
+        coords[1,node],coords[2,node],coords[3,node]=xyz
+        worst=1.0
+        for index in incident
+            cell=cells[index]
+            worst=min(worst,_surface_optimize_cell_objective(
+                cell[1],points(cell)))
+        end
+        coords[1,node],coords[2,node],coords[3,node]=px,py,pz
+        return worst
+    end
+    p2=uv_for(node)
+    if p2===nothing
+        # relocateVertex2 — real-space centroid + closestPoint projection.
+        counter=0;cx=0.0;cy=0.0;cz=0.0
+        for index in incident, slot in cells[index][2]
+            cx+=coords[1,slot];cy+=coords[2,slot];cz+=coords[3,slot]
+            counter+=1
+        end
+        counter==0 && return nothing
+        cx/=counter;cy/=counter;cz/=counter
+        point_at=function(xi)
+            q=Float64[cx*(1.0-xi)+coords[1,node]*xi,
+                      cy*(1.0-xi)+coords[2,node]*xi,
+                      cz*(1.0-xi)+coords[3,node]*xi]
+            closest,_=try
+                Model.model_closest_point(model,2,tag,q)
+            catch err
+                (err isa InterruptException||err isa OutOfMemoryError)&&rethrow()
+                return nothing
+            end
+            (length(closest)>=3&&all(isfinite,view(closest,1:3)))||return nothing
+            return (closest[1],closest[2],closest[3])
+        end
+        worst=objective(point_at,0.0)
+        xi_final=worst>0.5 ? 0.0 :
+            _surface_golden_search(xi->objective(point_at,xi),1e-6,worst)
+        xyz=point_at(xi_final)
+        xyz===nothing && return nothing
+        coords[1,node],coords[2,node],coords[3,node]=xyz
+        return true
+    end
+    counter=0;cu=0.0;cv=0.0
+    for index in incident, slot in cells[index][2]
+        uv=uv_for(slot)
+        uv===nothing || (cu+=uv[1];cv+=uv[2];counter+=1)
+    end
+    counter==0 && return nothing
+    cu/=counter;cv/=counter
+    point_at=function(xi)
+        uv=Float64[cu*(1.0-xi)+p2[1]*xi,cv*(1.0-xi)+p2[2]*xi]
+        return _surface_optimize_lift(model,tag,uv)
+    end
+    worst=objective(point_at,0.0)
+    xi_final=worst>0.5 ? 0.0 :
+        _surface_golden_search(xi->objective(point_at,xi),1e-6,worst)
+    uv=Float64[cu*(1.0-xi_final)+p2[1]*xi_final,
+               cv*(1.0-xi_final)+p2[2]*xi_final]
+    xyz=_surface_optimize_lift(model,tag,uv)
+    xyz===nothing && return nothing
+    coords[1,node],coords[2,node],coords[3,node]=xyz
+    return uv
+end
+
+# Linear MixedMesh driver for Laplace2D/Relocate2D: per-face vertex→cell
+# adjacency over the classified dim-2 linear cells, per-face niter passes
+# over the face-owned vertices in deterministic tag order, then the same
+# atomic coordinate/parameter commit as the quadratic arm.
+function _optimize_surface_mixed_linear!(cached::MixedMesh,class,model,pairs,
+                                         iterations,caller::AbstractString,
+                                         relocate::Bool)
+    class===nothing && return nothing
+    nn=nnodes(cached)
+    (length(class.node_entities)==nn &&
+     length(class.node_parametric)==nn) || return nothing
+    selected=Set{Tuple{Int,Int32}}(
+        (dim,Int32(tag)) for (dim,tag) in pairs)
+    faces=Dict{Int32,Vector{Tuple{Symbol,Vector{Int32}}}}()
+    for block in cached.blocks
+        block isa ElementBlock || continue
+        spec=msh_spec(block.msh)
+        (spec.dim==2&&spec.order==1&&spec.family in (:tri,:qua))||continue
+        owners=get(class.cell_entities,block.msh,Int32[])
+        length(owners)==size(block.nodes,2) || return nothing
+        for column in axes(block.nodes,2)
+            tag=owners[column]
+            (isempty(selected)||(2,tag) in selected)||continue
+            push!(get!(Vector{Tuple{Symbol,Vector{Int32}}},faces,tag),
+                (spec.family,collect(block.nodes[:,column])))
+        end
+    end
+    isempty(faces) && return nothing
+    edges_of=Dict(:tri=>Elements._TRI_EDGES,:qua=>Elements._QUA_EDGES)
+    coords=copy(cached.coords)
+    params=Union{Nothing,Vector{Float64}}[
+        p===nothing ? nothing : copy(p) for p in class.node_parametric]
+    moved=false
+    for tag in sort!(collect(keys(faces)))
+        cells=faces[tag]
+        adjacency=Dict{Int,Vector{Int}}()
+        for (index,(family,nodes)) in enumerate(cells),slot in nodes
+            push!(get!(Vector{Int},adjacency,slot),index)
+        end
+        uvmap=Dict{Int,Union{Nothing,Vector{Float64}}}()
+        # Per-face (u,v) lookup: stored parameters for face-owned nodes,
+        # `model_parametrization` projections for edge/point-owned
+        # neighbours — `reparamMeshVertexOnFace` upstream.  Accepted moves
+        # are written back so later vertices see the updated parametric
+        # position just like upstream's setParameter.
+        uv_for=function(node)
+            get!(uvmap,node) do
+                _surface_optimize_uv(model,class,tag,node,coords,params)
+            end
+        end
+        in_scope(owner)=owner[1]==2&&Int(owner[2])==tag&&
+            (isempty(selected)||(2,Int32(tag)) in selected)
+        for _ in 1:iterations
+            for vertex in sort!(collect(keys(adjacency)))
+                in_scope(class.node_entities[vertex]) || continue
+                incident=adjacency[vertex]
+                result=relocate ?
+                    _surface_relocate_vertex!(coords,uv_for,vertex,incident,
+                        cells,model,tag) :
+                    _surface_laplace_vertex!(coords,uv_for,vertex,incident,
+                        cells,edges_of,model,tag)
+                result===nothing && continue
+                moved=true
+                if result isa Vector{Float64}
+                    uvmap[vertex]=copy(result)
+                    params[vertex]=copy(result)
+                end
+            end
+        end
+    end
+    moved || return nothing
+    slid=Dict{Int,Vector{Float64}}()
+    for vertex in 1:nn
+        stored=params[vertex]
+        original=class.node_parametric[vertex]
+        (stored===nothing&&original===nothing) && continue
+        (stored===nothing||original===nothing||
+         !isequal(stored,original)) &&
+            stored!==nothing && (slid[vertex]=stored)
+    end
+    mesh=_mixed_rebuild_metadata(cached,cached.blocks;coords=coords)
+    new_class=_mixed_rebind_class(class,mesh)
+    if !isempty(slid)
+        mesh,new_class=_high_order_optimize_commit_sliders(
+            mesh,new_class,slid)
+    end
+    _replace_mesh_cache_with_overlay_locked!(mesh,new_class,caller;
+        preserve_visibility=true)
+    return nothing
+end
+
 # Same arm for a legacy simplex cache's retained curved overlay.  The linear
 # skeleton and its corner vertices stay untouched; each face-owned mid with a
 # stored surface parameter gets a slider like upstream's parametric

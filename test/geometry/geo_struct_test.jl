@@ -24,10 +24,10 @@ function _exec_ctx(source::AbstractString)
         allocator_state=_GE._GeoTagAllocatorState()
         context.exec_hook=src->_GE._geo_exec_value_term(
             model,src,context,allocator_state)
-        statements=_GE._geo_exec_statements(path)
+        statements,stmt_locs=_GE._geo_exec_statements(path)
         _GE._exec_geo_statements!(
-            model,statements,firstindex(statements),lastindex(statements),
-            context,allocator_state,Ref(0))
+            model,statements,stmt_locs,firstindex(statements),
+            lastindex(statements),context,allocator_state,Ref(0))
         _GE._geo_sync_physical_view!(model,context)
         return model,context
     end

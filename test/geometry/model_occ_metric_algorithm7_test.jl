@@ -37,6 +37,21 @@ function _sector_lateral()
     return m,findfirst(==(:cylinder),m.surface_types)
 end
 
+# A cylinder cut by an axis-interior box: the surviving lateral band is a
+# *trimmed* :cylinder face — its unwrapped sheet covers only part of the
+# analytic (u,v) support rectangle, the case the boundary-chain domain
+# certificate exists for.
+function _trimmed_lateral()
+    m=GeoModel()
+    M.add_cylinder!(m,0.0,0.0,-1.0,0.0,0.0,4.0,1.5;tag=1)
+    M.add_box!(m,-5.0,-5.0,0.0,10.0,10.0,4.5;tag=2)
+    M.boolean_volumes_multi!(m,:difference,[1],[2])
+    lateral=first(t for t in sort!(collect(keys(m.surface_geometry))) if
+                  get(m.surface_geometry[t],:occ,nothing)===:cylinder)
+    m.meshing.algorithm_2d=7
+    return m,lateral
+end
+
 function _edge_incidence(mesh)
     incidence=Dict{NTuple{2,Int32},Int}()
     for c in axes(mesh.tris,2),(a,b) in ((1,2),(2,3),(3,1))
@@ -148,4 +163,133 @@ end
     err=_error(()->M.mesh_model_volume(m,1))
     @test err isa ArgumentError
     @test occursin("anisotropic",sprint(showerror,err))
+end
+
+@testset "trimmed OCC cylinder face: algorithm 7 covers the cut domain" begin
+    m,lateral=_trimmed_lateral()
+    field=MathEvalAnisoField(m11="1",m22="1",m33="1")
+    production=M.mesh_model_surface(m,lateral;size_field=field,
+        _return_surface_production=true)
+    @test production isa M._ModelSurfaceProduction
+    mesh=production.mesh
+    @test MT.validate(mesh).ok && MT.ntris(mesh)>0
+    # The surviving band is z∈[-1,0] — every vertex lifts onto the analytic
+    # lateral, and no vertex crosses the trimming box's section plane.
+    @test all(k->abs(mesh.coords[1,k]^2+mesh.coords[2,k]^2-1.5^2)<1e-9,
+              1:MT.nnodes(mesh))
+    @test all(k->-1.0-1e-12<=mesh.coords[3,k]<=1e-12,1:MT.nnodes(mesh))
+    # The face-owned rows evaluate their own (u,v) provenance.
+    sg=m.surface_geometry[lateral]
+    @test all(eachindex(production.node_tags)) do i
+        production.node_owners[i][1]!=2 ||
+            (p=production.node_parameters[i]; p!==nothing &&
+             M._occ_surface_point(sg,p[1],p[2])==Tuple(mesh.coords[:,i]))
+    end
+    # The perimeter is exactly the two boundary circles — the section curve
+    # at z=0 and the rim at z=-1 — every edge a retained lower product.
+    incidence=_edge_incidence(mesh)
+    perimeter=[edge for (edge,hits) in incidence if hits==1]
+    @test !isempty(perimeter)
+    @test all(edge->production.retained_nodes[edge[1]] &&
+                  production.retained_nodes[edge[2]],perimeter)
+    @test sort!(collect(Set(round(mesh.coords[3,e[1]];digits=9)
+                            for e in perimeter)))==[-1.0,0.0]
+    @test _assert_metric_cert(mesh,field,lateral)
+    # Deterministic bitwise weld on a same-field rerun.
+    m2,lateral2=_trimmed_lateral()
+    rerun=M.mesh_model_surface(m2,lateral2;size_field=field)
+    @test _boundary_coords(rerun)==_boundary_coords(mesh)
+end
+
+@testset "OCC plane face with ellipse boundary: algorithm 7" begin
+    # `OCC.addDisk` binds a `:plane` face whose single boundary edge is an
+    # ellipse — the upstream metric selector reaches curved boundaries on
+    # plane faces through exactly this path.
+    m=GeoModel()
+    disk=M._model_occ_add_disk!(m,0.0,0.0,0.0,1.0,1.0)
+    M._model_occ_synchronize!(m)
+    m.meshing.algorithm_2d=7
+    field=MathEvalAnisoField(m11="1",m22="1",m33="1")
+    mesh=M.mesh_model_surface(m,disk;size_field=field)
+    @test MT.validate(mesh).ok && MT.ntris(mesh)>0
+    @test all(k->abs(mesh.coords[3,k])<1e-12,1:MT.nnodes(mesh))
+    @test all(k->mesh.coords[1,k]^2+mesh.coords[2,k]^2<=1.0+1e-9,
+              1:MT.nnodes(mesh))
+    @test _assert_metric_cert(mesh,field,disk)
+end
+
+@testset "builtin circle-bounded plane: algorithm 7" begin
+    m=GeoModel()
+    M.add_point!(m,1.0,0.0,0.0;tag=1)
+    M.add_point!(m,-1.0,0.0,0.0;tag=2)
+    M.add_point!(m,0.0,0.0,0.0;tag=3)
+    M.add_circle_arc!(m,1,3,2;tag=1)
+    M.add_circle_arc!(m,2,3,1;tag=2)
+    loop=M.add_curve_loop!(m,[1,2];tag=1)
+    disk=M.add_plane_surface!(m,[loop];tag=1)
+    m.meshing.algorithm_2d=7
+    field=MathEvalAnisoField(m11="1",m22="1",m33="1")
+    mesh=M.mesh_model_surface(m,disk;size_field=field)
+    @test MT.validate(mesh).ok && MT.ntris(mesh)>0
+    @test all(k->abs(mesh.coords[3,k])<1e-12,1:MT.nnodes(mesh))
+    @test all(k->mesh.coords[1,k]^2+mesh.coords[2,k]^2<=1.0+1e-9,
+              1:MT.nnodes(mesh))
+    @test _assert_metric_cert(mesh,field,disk)
+end
+
+@testset "lofted tensor face: algorithm 7 refines the pcurve domain" begin
+    m=GeoModel()
+    c1=M._model_occ_add_circle!(m,0.0,0.0,0.0,1.0)
+    c2=M._model_occ_add_circle!(m,0.0,0.0,2.0,0.5)
+    w1=M._model_occ_add_wire!(m,[c1])
+    w2=M._model_occ_add_wire!(m,[c2])
+    M._model_occ_thru_sections!(m,-1,[w1,w2];make_solid=false)
+    M._model_occ_synchronize!(m)
+    lateral=only([t for t in keys(m.surface_types)
+                  if m.surface_types[t]===:tensor_bspline])
+    m.meshing.algorithm_2d=7
+    field=MathEvalAnisoField(m11="1",m22="1",m33="1")
+    mesh=M.mesh_model_surface(m,lateral;size_field=field)
+    @test MT.validate(mesh).ok && MT.ntris(mesh)>0
+    # The loft is the conical frustum r(z)=1-z/4 between the two wires.
+    @test all(k->abs(sqrt(mesh.coords[1,k]^2+mesh.coords[2,k]^2)-
+                     (1.0-0.25*mesh.coords[3,k]))<1e-7,1:MT.nnodes(mesh))
+    @test _assert_metric_cert(mesh,field,lateral)
+end
+
+@testset "scalar pass then algorithm 7: closed Curve params stay complete" begin
+    # Regression for the stored-parameter contract on closed curves:
+    # `mesh_curve(closed=true)` returns the nedge station list — the
+    # closing t1 is implicit — while every `curve_params` consumer holds
+    # the open-style `[t0,…,t1]` contract. A first scalar surface pass
+    # used to store the truncated list verbatim; the algorithm-7 reuse
+    # path then re-emitted one Curve cell short of the owned lower
+    # product and the incidence certificate rejected. The grading layer
+    # now pins the endpoint before storage.
+    m=GeoModel()
+    M.add_cylinder!(m,0.0,0.0,-1.0,0.0,0.0,4.0,1.5;tag=1)
+    M.add_box!(m,-5.0,-5.0,0.0,10.0,10.0,4.5;tag=2)
+    M.boolean_volumes_multi!(m,:difference,[1],[2])
+    lateral=first(t for t in sort!(collect(keys(m.surface_geometry))) if
+                  get(m.surface_geometry[t],:occ,nothing)===:cylinder)
+    m.meshing.algorithm_2d=5
+    mesh5=M.mesh_model_surface(m,lateral)
+    @test MT.validate(mesh5).ok && MT.ntris(mesh5)>0
+    # Every stored closed-curve list carries both pinned endpoints.
+    stored_closed=[(c,p) for (c,p) in m.curve_params
+                   if get(m.curves,c,(0,1))[1]==get(m.curves,c,(0,1))[2]]
+    @test !isempty(stored_closed)
+    for (c,p) in stored_closed
+        t0,t1=M._model_curve_param_bounds(m,c,"test")
+        @test p[1]==t0 && p[end]==t1
+    end
+    # The metric reuse path re-emits the same closed discretization —
+    # no incidence loss against the owned lower products.
+    m.meshing.algorithm_2d=7
+    field=MathEvalAnisoField(m11="1",m22="1",m33="1")
+    mesh7=M.mesh_model_surface(m,lateral;size_field=field)
+    @test MT.validate(mesh7).ok && MT.ntris(mesh7)>0
+    @test all(k->abs(mesh7.coords[1,k]^2+mesh7.coords[2,k]^2-1.5^2)<1e-9,
+              1:MT.nnodes(mesh7))
+    @test _assert_metric_cert(mesh7,field,lateral)
 end

@@ -7574,21 +7574,23 @@ function _optimize_mesh(method="",force=false,niter=1,dim_tags=())
     caller="API.mesh.optimize"
     method isa AbstractString || throw(ArgumentError(
         "$caller: method must be a string"))
-    method in ("","Gmsh","Optimize","Relocate3D","Laplace2D","Relocate2D",
+    method in ("","Gmsh","Optimize","Netgen","Relocate3D","Laplace2D","Relocate2D",
                "HighOrder","HighOrderElastic") ||
         throw(ArgumentError(
             "$caller: unknown or unsupported optimizer \"$method\""))
     force isa Bool || throw(ArgumentError("$caller: force must be Bool"))
     iterations=_mesh_query_integer(niter,caller,"niter")
     native_default=method in ("","Gmsh","Optimize")
+    native_netgen=method=="Netgen"
     native_relocate3d=method=="Relocate3D"
     native_high_order=method in ("HighOrder","HighOrderElastic")
-    native_tagged=native_default || native_relocate3d || native_high_order
+    native_tagged=native_default || native_netgen || native_relocate3d || native_high_order
     native_tagged || iterations>=0 || throw(ArgumentError("$caller: niter must be nonnegative"))
     pairs=native_tagged ? _native_optimize_selection(dim_tags,caller) :
                           _mesh_parse_dim_tags(dim_tags,caller)
     return lock(STATE_LOCK) do
         native_default && return _native_default_optimize_locked!(force,pairs,caller)
+        native_netgen && return _native_default_optimize_locked!(force,pairs,caller;netgen=true)
         native_relocate3d && return _native_relocate3d_locked!(iterations,pairs,caller)
         native_high_order && return _optimize_high_order_locked!(method,pairs,caller)
         model=_model_locked()
@@ -7612,9 +7614,8 @@ function _optimize_mesh(method="",force=false,niter=1,dim_tags=())
         if cached isa MixedMesh
             order2 && return _optimize_relocate2d_mixed!(cached,class,model,
                 pairs,iterations,caller)
-            throw(ArgumentError(
-                "$caller: native mixed element optimization is not implemented; " *
-                "supported kernels require a linear simplex cache"))
+            return _optimize_surface_mixed_linear!(cached,class,model,
+                pairs,iterations,caller,method=="Relocate2D")
         end
         overlay=_high_order_overlay(cached)
         if overlay!==nothing && !_high_order_overlay_is_straight(overlay)
@@ -11578,13 +11579,21 @@ compute_renumbering(method="RCMK",element_tags=())=
 Optimize the current mesh. The default method and `"Gmsh"`/`"Optimize"` use
 native tetrahedron edge swaps and relocation. These aliases ignore `niter`
 and `dim_tags`; `force=true` admits fully discrete volumes. Transfinite and
-layer-extruded volumes retain their optimizer exclusion. Surviving elements
-keep their identities and interpolation vertices, while new tetrahedra receive
-native constructor identities. Mesh.Renumber controls the final numbering.
-`"Relocate3D"` applies native golden-section relocation to actual linear
-tetrahedra, including explicit tagged records, and ignores `dim_tags`. Moving
-vertices are classified on volumes. Its iteration rule is `niter+2` passes
-except for zero; nonlinear and hybrid relocation remains unsupported.
+layer-extruded volumes retain their optimizer exclusion. Regions also owning
+hexahedra, prisms or pyramids keep the swap arm but skip relocation, matching
+`optimizeMeshGRegion`. Surviving elements keep their identities and
+interpolation vertices, while new tetrahedra receive native constructor
+identities. Mesh.Renumber controls the final numbering. `"Netgen"` runs the
+native Netgen-role pass — certified edge swaps plus a per-point worst-cell
+quality line search, without Netgen's node-removal or midpoint-insertion
+moves — on each region's tetrahedra. It ignores `niter` and `dim_tags`,
+shares the same region exclusions, and skips hybrid regions with upstream's
+`Skipping Netgen optimizer for hybrid mesh` information.
+`"Relocate3D"` applies native golden-section relocation to the catalogued
+volume families (linear and high-order tetrahedra, hexahedra, prisms and
+pyramids where sampled SICN quality exists), including explicit tagged
+records, and ignores `dim_tags`. Moving vertices are classified on volumes.
+Its iteration rule is `niter+2` passes except for zero.
 `"Laplace2D"` and `"Relocate2D"` retain their existing simplex kernels and
 upstream order gates: `Laplace2D` refuses any face carrying order > 1
 elements with `Surface mesh smoothing only valid for first order mesh (use

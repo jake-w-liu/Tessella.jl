@@ -100,7 +100,7 @@ using ..IO: _geo_context_forget!
 using ..IO: _geo_physical_declaration, _geo_physical_kind_dim
 using ..IO: _geo_exec_assignment!, _geo_eval_string, _geo_symbol_name
 using ..IO: _geo_split_args, _geo_yyerror!, _geo_yywarn!, _geo_yyinfo!,
-            _geo_int_value
+            _geo_msg_warn!, _geo_yymsg_info!, _geo_int_value
 using ..IO: _geo_fix_relative_path, _geo_print_list_of_double
 using ..IO: _geo_vsnprintf_expand
 using ..IO: _geo_string_rhs, _geo_eval_string_list
@@ -150,6 +150,7 @@ using ..Model: add_discrete_entity!, DiscreteEntity, _record_append_node!,
                _record_append_element!, _model_fresh_element_tag
 using ..MeshTypes: validate
 using ..Optimize: smooth_optimize, _laplacian_smooth_tri_cache
+using ..Mesh3D: _netgen_optimize_tetrahedra
 using ..IO: _geo_gmsh_number
 using ..Transform: _affine_coordinate, _periodic_affine_3x4
 using LinearAlgebra: norm, svd
@@ -511,6 +512,13 @@ end
 # `;`; each is emitted as its own statement whenever it starts at a statement
 # boundary. Transform and query statements may end at their final `}` (the Gmsh
 # grammar needs no `;` there) or at a `;`.
+#
+# Returns `(statements, locs)` — `locs[k]` pairs each statement with its
+# `gmsh_yylineno` bookkeeping: the file line its first non-blank character
+# sits on, and the byte offsets inside the statement text at which consumed
+# line feeds stand (the scanner writes one `' '` per crossed line boundary —
+# `'\n'` inside quoted text — so each recorded offset marks one consumed
+# line, exactly like the flex scanner's `yylineno++`).
 function _geo_exec_statements(path::AbstractString)
     open(path,"r") do stream
         _geo_exec_statements(stream)
@@ -519,25 +527,77 @@ end
 
 function _geo_exec_statements(stream::Base.IO)
     statements=String[]
+    locs=Tuple{Int,Vector{Int},Vector{Bool}}[]
     buf=IOBuffer()
+    # Byte offsets inside `buf` where a line feed was consumed (the boundary
+    # `' '` writes and the quoted `'\n'`), and the source line on which the
+    # buffer's first non-blank character sat.
+    buf_nl=Int[]
+    buf_line0=0
     depth=0
     quote_char='\0'
     block_comment=false
     buf_has_content=false
+    cur_line=0
+    # Per-source-line `'\n'`-termination flags. Upstream `YY_INPUT` refills
+    # one source line per read and bumps `gmsh_yylineno` only on `'\n'`: a
+    # LF line's feed is consumed inside its own buffer (tokens report their
+    # true line), while a CRLF line stops at `'\r'` and defers the `'\n'`
+    # to the next refill (tokens report one less), as does an unterminated
+    # last line. `line_lfs[L]` records whether line `L` ended with a lone
+    # `'\n'`, so each loc tuple can report `line-1+flag` like yymsg does.
+    line_lfs=Bool[]
     # `Extrude {shapes}` is `}`-complete but may still take the `Using Wire`
     # pipe suffix — its emit is deferred until the next real token, even
     # across line boundaries.
     extrude_pending=false
-    for raw in eachline(stream)
+    # Emit the buffer as a statement plus its `(line0, newline-offsets)`
+    # pair: leading blanks trim first, so the recorded offsets shift into
+    # statement coordinates.
+    function emit!()
+        raw_stmt=String(take!(buf))
+        statement=strip(raw_stmt)
+        lead=0;rn=ncodeunits(raw_stmt)
+        while lead<rn && isspace(raw_stmt[lead+1])
+            lead+=1
+        end
+        nl=Int[]
+        for p in buf_nl
+            q=p-lead
+            1<=q<=ncodeunits(statement) && push!(nl,q)
+        end
+        length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
+            "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
+        push!(statements,String(statement))
+        # The statement's file lines are `buf_line0 .. buf_line0+length(nl)`;
+        # each loc carries their lone-`'\n'` flags for `yylineno-1` parity.
+        first=buf_line0>0 ? buf_line0 : cur_line
+        lastline=min(first+length(nl),length(line_lfs))
+        push!(locs,(first,nl,Bool[line_lfs[l] for l in first:lastline]))
+        empty!(buf_nl)
+        buf_has_content=false
+        return nothing
+    end
+    for rawline in eachline(stream;keep=true)
+        cur_line+=1
+        # `'\n'` vs `'\r\n'`/unterminated decides the reported line
+        # (see `line_lfs` above); the terminator itself never reaches buf.
+        cur_lf=endswith(rawline,"\n") && !endswith(rawline,"\r\n")
+        raw=rawline
+        endswith(raw,"\n") && (raw=chop(raw))
+        endswith(raw,"\r") && (raw=chop(raw))
+        push!(line_lfs,cur_lf)
         i=firstindex(raw); last=lastindex(raw)
         while i<=last
             if !block_comment && quote_char=='\0' && !buf_has_content
                 control=_geo_control_statement(raw,i,last)
                 if control!==nothing
                     take!(buf)
+                    empty!(buf_nl)
                     length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
                         "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
                     push!(statements,control[1])
+                    push!(locs,(cur_line,Int[],Bool[cur_lf]))
                     i=nextind(raw,control[2])
                     continue
                 end
@@ -550,14 +610,7 @@ function _geo_exec_statements(stream::Base.IO)
                 extrude_pending=false
                 if !(c=='U' &&
                      match(r"^Using\b",SubString(raw,i,last))!==nothing)
-                    statement=strip(String(take!(buf)))
-                    isempty(statement) || (
-                        length(statements)<_MAX_GEO_EXEC_STATEMENTS ||
-                            throw(ArgumentError(
-                                "execute_geo: input exceeds " *
-                                "$_MAX_GEO_EXEC_STATEMENTS statements"));
-                        push!(statements,statement))
-                    buf_has_content=false
+                    emit!()
                 end
             end
             if block_comment
@@ -577,8 +630,10 @@ function _geo_exec_statements(stream::Base.IO)
                 write(buf,c)
                 c==quote_char && (quote_char='\0')
             elseif c=='"' || c=='\''
+                buf_has_content || (buf_line0=cur_line)
                 quote_char=c; write(buf,c); buf_has_content=true
             elseif c=='{'
+                buf_has_content || (buf_line0=cur_line)
                 depth+=1; write(buf,c); buf_has_content=true
             elseif c=='}'
                 if depth==0
@@ -588,10 +643,12 @@ function _geo_exec_statements(stream::Base.IO)
                     # Drop the fragment and let `}` lead its own statement,
                     # which execution reports as `syntax error (})`.
                     take!(buf)
+                    empty!(buf_nl)
                     buf_has_content=false
                 else
                     depth-=1
                 end
+                buf_has_content || (buf_line0=cur_line)
                 write(buf,c); buf_has_content=true
                 if depth==0 && _geo_brace_terminated_statement(
                         String(buf.data[1:position(buf)]))
@@ -601,24 +658,18 @@ function _geo_exec_statements(stream::Base.IO)
                         # hold the emit until the next real token.
                         extrude_pending=true
                     else
-                        statement=strip(String(take!(buf)))
-                        length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
-                            "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
-                        push!(statements,statement)
-                        buf_has_content=false
+                        emit!()
                     end
                 end
             elseif c==';' && depth==0
+                buf_has_content || (buf_line0=cur_line)
                 write(buf,c)
-                statement=strip(String(take!(buf)))
                 # A `;` left after a `}`-terminated transform or between
                 # statements is an upstream `syntax error (;)` — it is kept
                 # as a statement so execution reports and recovers on it.
-                length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
-                    "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
-                push!(statements,statement)
-                buf_has_content=false
+                emit!()
             else
+                buf_has_content || isspace(c) || (buf_line0=cur_line)
                 write(buf,c)
                 isspace(c) || (buf_has_content=true)
             end
@@ -628,24 +679,46 @@ function _geo_exec_statements(stream::Base.IO)
         end
         if quote_char!='\0'
             write(buf,'\n')
+            push!(buf_nl,position(buf))
         elseif position(buf)>0
             write(buf,' ')
+            push!(buf_nl,position(buf))
         end
     end
     quote_char=='\0' || throw(ArgumentError("execute_geo: unterminated quoted string"))
     block_comment && throw(ArgumentError("execute_geo: unterminated block comment"))
     depth==0 || throw(ArgumentError("execute_geo: unmatched opening brace"))
-    tail=strip(String(take!(buf)))
+    raw_tail=String(take!(buf))
+    tail=strip(raw_tail)
+    tail_lead=0;rn=ncodeunits(raw_tail)
+    while tail_lead<rn && isspace(raw_tail[tail_lead+1])
+        tail_lead+=1
+    end
+    tail_nl=buf_nl
+    tail_first=buf_line0>0 ? buf_line0 : cur_line
+    function tail_flags(kept::Int)
+        lastline=min(tail_first+kept,length(line_lfs))
+        return Bool[line_lfs[l] for l in tail_first:lastline]
+    end
     if extrude_pending && !isempty(tail)
         # A held `Extrude {shapes}` with no `Using Wire` following is
         # complete — emit it before the trailing-content checks.
-        push!(statements,tail);tail=""
+        length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
+            "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
+        push!(statements,String(tail))
+        kept_nl=Int[p-tail_lead for p in tail_nl if
+                    1<=p-tail_lead<=ncodeunits(tail)]
+        push!(locs,(tail_first,kept_nl,tail_flags(length(kept_nl))))
+        tail=""
     end
     # A trailing run of bare `;` is still statements upstream — `syntax error
     # (;)` per stray terminator — so it is pushed for execution to report.
     if !isempty(tail) && all(c->c==';'||isspace(c),tail)
         for _ in 1:count(==(';'),tail)
+            length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
+                "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
             push!(statements,";")
+            push!(locs,(tail_first,Int[],tail_flags(0)))
         end
     elseif !isempty(tail)
         # Control keywords need no `;` upstream — a trailing `EndFor`,
@@ -654,9 +727,12 @@ function _geo_exec_statements(stream::Base.IO)
         control=_geo_control_statement(tail,firstindex(tail),lastindex(tail))
         control===nothing && throw(ArgumentError(
             "execute_geo: unterminated statement: $tail"))
+        length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
+            "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
         push!(statements,control[1])
+        push!(locs,(tail_first,Int[],tail_flags(0)))
     end
-    return statements
+    return statements,locs
 end
 
 """
@@ -865,11 +941,11 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
     end
     context.exec_hook=src->_geo_exec_value_term(
         model,src,context,allocator_state)
-    statements=_geo_exec_statements(path)
+    statements,stmt_locs=_geo_exec_statements(path)
     executed=Ref(0)
     transfinite_tri=_exec_geo_statements!(
-        model,statements,firstindex(statements),lastindex(statements),
-        context,allocator_state,executed)
+        model,statements,stmt_locs,firstindex(statements),
+        lastindex(statements),context,allocator_state,executed)
     # End-of-parse `synchronize` — the raw physical-group records materialize
     # into the observable view (`m.physical`), forwarding-declared members
     # resolve, and unknown members warn once.
@@ -1253,8 +1329,15 @@ end
 # any. Control constructs recurse into their block ranges; If evaluates
 # constant-expression conditions, For iterates `name In {a:b[:c]}` evaluated
 # once at loop entry, and While (a bounded Tessella extension) re-evaluates its
-# condition each iteration.
+# condition each iteration. `stmt_locs` carries the splitter's `(line0,
+# newline-offsets, lone-'\n' flags)` triple per statement — `context.exec_stmt_*`
+# publishes it so evaluators and diagnostics recover the same `gmsh_yylineno`
+# upstream's lexer would have reached: a token on file line `N` reports
+# `N-1+flag` — its true line on LF input, one less on CRLF or at an
+# unterminated EOF.
 function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
+                               stmt_locs::Vector{Tuple{Int,Vector{Int},
+                                                     Vector{Bool}}},
                                lo::Int,hi::Int,
                                context::_GeoNumericContext,
                                allocator_state::_GeoTagAllocatorState,
@@ -1270,11 +1353,23 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
         # stop unwinds Call frames too: `enterFunction` stays inside the same
         # FILE, so the abort kills the whole stream, not just the body.
         if length(context.exec_errors)-context.file_error_base>20
-            _geo_yyerror!(context,"Too many errors: aborting parser...")
+            # `Msg::Error` upstream (OpenFile.cpp), not a `yymsg` diagnostic.
+            _geo_msg_error!(context,"Too many errors: aborting parser...")
             context.stop=:toomany
             break
         end
         line=statements[i]
+        loc=stmt_locs[i]
+        context.exec_stmt_src=line
+        context.exec_stmt_nl=loc[2]
+        context.exec_stmt_line=loc[1]
+        context.exec_stmt_lf=loc[3]
+        # Statement-level diagnostics (e.g. `Could not add line`) report the
+        # `;`-line upstream — the statement's last file line — as
+        # `line-1+flag` per `gmsh_yylineno - 1`.
+        lastline_idx=length(loc[2])+1
+        context.exec_line=loc[1]+length(loc[2])-1+
+            (lastline_idx<=length(loc[3]) && loc[3][lastline_idx] ? 1 : 0)
         control=_geo_control_parse(line)
         if control===nothing
             executed[]+=1
@@ -1328,10 +1423,18 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
                     # `;` (the `Split` Transform inside an `x =`/`x() =` list),
                     # so the error lands on the following statement's head —
                     # `$end` at the stream tail.
-                    token=err.header ?
-                        (i+1<=lastindex(statements) ?
-                            _geo_stmt_head_token(statements[i+1]) : "\$end") :
-                        err.token
+                    if err.header
+                        if i+1<=lastindex(statements)
+                            nloc=stmt_locs[i+1]
+                            context.exec_line=nloc[1]-1+
+                                (!isempty(nloc[3]) && nloc[3][1] ? 1 : 0)
+                            token=_geo_stmt_head_token(statements[i+1])
+                        else
+                            token="\$end"
+                        end
+                    else
+                        token=err.token
+                    end
                     _geo_yyerror!(context,"syntax error ($token)")
                     syntax_aborted=true;abort_ate_end=err.header
                 else
@@ -1416,7 +1519,7 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
                 elseif control.kind===:endwhile
                     _geo_exec_endwhile!(statements,i,context)
                 elseif control.kind===:function
-                    _geo_exec_function_def!(statements,i,context)
+                    _geo_exec_function_def!(statements,stmt_locs,i,context)
                 elseif control.kind===:return
                     # `leaveFunction` pops the call stack: inside a `Call`
                     # body the flag unwinds to `_geo_exec_call!`; at top
@@ -1524,14 +1627,20 @@ end
 # so the function is registered even when no `Return` follows (its body then
 # runs to the end of the array when called), and a redefinition is a
 # recoverable `yymsg(0)` diagnostic that keeps the existing body.
-function _geo_exec_function_def!(statements::Vector{String},i::Int,
-                                 context::_GeoNumericContext)
+function _geo_exec_function_def!(statements::Vector{String},
+                                 stmt_locs::Vector{Tuple{Int,Vector{Int},
+                                                     Vector{Bool}}},
+                                 i::Int,context::_GeoNumericContext)
     control=_geo_control_parse(statements[i])
     name=_geo_function_name_def(control.name,context,"execute_geo: Function")
     if haskey(context.functions,name)
         _geo_yyerror!(context,"Redefinition of function $name")
     else
-        context.functions[name]=(statements,i+1)
+        # Upstream stores the body's (file, fpos) — the statement array and
+        # its per-statement `gmsh_yylineno` bookkeeping keep both here, so a
+        # `Call` reports body errors at their own source lines, under the
+        # definition file's `gmsh_yyname` (`enterFunction` swaps it in).
+        context.functions[name]=(statements,stmt_locs,i+1,context.file_name)
     end
     return _geo_exec_skip_return(statements,i+1,context)
 end
@@ -1555,16 +1664,35 @@ function _geo_exec_call!(m::GeoModel,statements::Vector{String},
         _geo_yyerror!(context,"Unknown function '$name'")
         return nothing
     end
-    (body_statements,body_start)=body
+    (body_statements,body_locs,body_start,body_file)=body
+    # Upstream `FunctionManager::enterFunction` pushes the caller's
+    # (filename, lineno) and re-parses the body at its definition site —
+    # diagnostics inside a `Call`ed body name the file where the function
+    # was defined (possibly an `Include`d file), then `leaveFunction`
+    # restores the caller's. The error counter is the caller file's
+    # `gmsh_yyerrorstate` and is NOT reset (`ParseFile` owns that).
+    parent_file=context.file_name
+    parent_stmt_src=context.exec_stmt_src
+    parent_stmt_nl=context.exec_stmt_nl
+    parent_stmt_lf=context.exec_stmt_lf
+    parent_stmt_line=context.exec_stmt_line
+    parent_exec_line=context.exec_line
+    context.file_name=body_file
     context.call_depth+=1
     try
         context.call_depth<=_MAX_GEO_CALL_DEPTH || throw(ArgumentError(
             "execute_geo: Call depth exceeds $_MAX_GEO_CALL_DEPTH"))
         return _exec_geo_statements!(
-            m,body_statements,body_start,lastindex(body_statements),
+            m,body_statements,body_locs,body_start,lastindex(body_statements),
             context,allocator_state,executed)
     finally
         context.call_depth-=1
+        context.file_name=parent_file
+        context.exec_stmt_src=parent_stmt_src
+        context.exec_stmt_nl=parent_stmt_nl
+        context.exec_stmt_lf=parent_stmt_lf
+        context.exec_stmt_line=parent_stmt_line
+        context.exec_line=parent_exec_line
         context.stop===:return && (context.stop=:run)
     end
 end
@@ -2158,7 +2286,7 @@ function _geo_selector_parametric(m::GeoModel,tail::String,
             old_ruled_surface=_geo_exec_old_ruled(context),
             newton_convergence_xyz=_geo_exec_newton_xyz(context),
             lc=_geo_exec_lc(context),
-            warn=msg->_geo_yywarn!(context,msg),
+            warn=msg->_geo_msg_warn!(context,msg),
             info=msg->_geo_yyinfo!(context,msg)))
     end
     # `tParametric` expects `tBoundingBox` or `tPoint` upstream.
@@ -2756,7 +2884,7 @@ function _geo_line_tolerance_warn!(m::GeoModel,context::_GeoNumericContext,
     pa,pb=m.points[a],m.points[b]
     (abs(pa[1]-pb[1])<=eps && abs(pa[2]-pb[2])<=eps &&
      abs(pa[3]-pb[3])<=eps) || return nothing
-    _geo_yywarn!(context,
+    _geo_msg_warn!(context,
         "Start point $a and end point $b of GEO line $(trunc(Int,tag)) are " *
         "closer than the geometrical tolerance, at position " *
         "($(_geo_gmsh_number(pa[1])), $(_geo_gmsh_number(pa[2])), " *
@@ -3336,7 +3464,7 @@ function _geo_sync_physical_view!(m::GeoModel,context::_GeoNumericContext)
                 p=_gmsh_sign(member)*tag
                 p in ep || push!(ep,p)
             else
-                _geo_yywarn!(context,
+                _geo_msg_warn!(context,
                     "Skipping unknown $word $entity in physical $word $tag")
             end
         end
@@ -6822,7 +6950,7 @@ function _geo_split_curve_args(s::AbstractString,
     s=String(strip(s[nextind(s,firstindex(s),5):end]))
     deprecated=startswith(s,"(")
     if deprecated
-        _geo_yywarn!(context,
+        _geo_yymsg_info!(context,
             "'Split Curve(c) {...}' is deprecated: use 'Split Curve {c} " *
             "Point {...}' instead")
         (inner,s)=_geo_balanced_paren(s,caller)
@@ -7702,6 +7830,10 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         wires=_geo_exec_entity_tags(group,context,"$caller loops";
                                     abs_refs=true,allow_empty=true)
         sphere_center=_geo_surface_constraint(rest,context,caller)
+        # `tRuled tSurface (...)` — upstream's action opens with `yymsg(2)`
+        # after the operands have reduced.
+        mm.captures[1]===nothing || _geo_yymsg_info!(context,
+            "'Ruled Surface' command is deprecated: use 'Surface' instead")
         _geo_dup_entity!(context,haskey(m.surfaces,trunc(Int,tag)),
                          :surface,"surface",tag,zero_literal,
                          allocator_state) && return
@@ -9212,7 +9344,9 @@ function _geo_exec_print!(kind::AbstractString,args_src::AbstractString,
         print(stdout,chomp(expanded),"\n");flush(stdout)
         _msg_log_write("",chomp(expanded))
     elseif kind=="Warning"
-        _geo_yywarn!(context,expanded)
+        # `Warning(...)` is `Msg::Warning` — the unprefixed channel, unlike
+        # the `yymsg(1)` arg-count diagnostics above.
+        _geo_msg_warn!(context,expanded)
     else
         # `Error(...)` is `Msg::Error` — counted on the msg channel (it sets
         # `_atLeastOneErrorInRun` and the batch exit code) but does not fail
@@ -9628,7 +9762,7 @@ function _geo_mesh_1d_options(m::GeoModel,context::_GeoNumericContext,
         iopt("MaxRetries",10.0),
         _geo_mesh_background_field(m,context,caller),
         m.meshing.size_callback,
-        msg->_geo_yywarn!(context,msg),
+        msg->_geo_msg_warn!(context,msg),
         msg->_geo_msg_error!(context,msg),
         Ref(Model._model_native_random_seed(Int(something(opt("RandomSeed"),1.0)))),
         something(opt("RandomFactor3D"),1e-12),
@@ -9985,7 +10119,7 @@ function _geo_exec_partition_mesh!(m::GeoModel,args::AbstractString,
     if context.mesh===nothing
         # `GModel::partitionMesh` with no mesh is a `Msg::Warning`, not
         # an error — execution continues.
-        _geo_yywarn!(context,"No mesh nodes were found")
+        _geo_msg_warn!(context,"No mesh nodes were found")
         return nothing
     end
     _geo_check_part_rows(context)
@@ -9999,12 +10133,12 @@ function _geo_exec_partition_mesh!(m::GeoModel,args::AbstractString,
         initial_max_node_tag=context.mesh_node_max,
         initial_max_element_tag=context.mesh_element_max)
     if actual===nothing
-        _geo_yywarn!(context,"No mesh nodes were found")
+        _geo_msg_warn!(context,"No mesh nodes were found")
         return nothing
     end
     _,_,total=api._mesh_element_offsets(actual)
     if total==0
-        _geo_yywarn!(context,"No mesh elements were found")
+        _geo_msg_warn!(context,"No mesh elements were found")
         return nothing
     end
     assignment=api._partition_lower_inherit(api._partition_elements(actual,count),actual)
@@ -11633,18 +11767,25 @@ function _geo_exec_command!(m::GeoModel,word::AbstractString,
         # `GModel::optimizeMesh(how)` — the method is validated before any
         # entity iteration, so an unknown name errors even without a mesh;
         # a mesh without the relevant cells is a silent no-op.
-        arg in ("","Gmsh","Optimize","Relocate3D","Laplace2D","Relocate2D") ||
+        arg in ("","Gmsh","Optimize","Relocate3D","Laplace2D","Relocate2D",
+                "Netgen") ||
             (_geo_yyerror!(context,
                 "unknown or unsupported mesh optimization method \"$arg\"");
              return nothing)
         context.mesh===nothing && return nothing
         mesh=context.mesh
-        if arg in ("","Gmsh","Optimize","Relocate3D")
+        if arg in ("","Gmsh","Optimize","Relocate3D","Netgen")
             _geo_mesh_dim_cells(mesh,3)>0 || return nothing
             mesh isa Mesh || throw(ArgumentError(
                 "$caller: OptimizeMesh \"$arg\" requires a simplex mesh — " *
                 "the current mesh carries non-simplex elements"))
-            replacement=smooth_optimize(mesh;iters=1,require_positive_tets=false)
+            replacement=arg=="Netgen" ?
+                # OptimizeMesh("Netgen") — the region optimizer pass; a
+                # 2-D-only mesh above skipped it entirely (no regions).
+                # `positive` performs upstream's final positive-volume
+                # correction on the way out.
+                _netgen_optimize_tetrahedra(mesh;rounds=1).mesh :
+                smooth_optimize(mesh;iters=1,require_positive_tets=false)
             receipt=_geo_geometry_coordinate_receipt(context.mesh_geometry_parts,replacement,caller)
             context.mesh=replacement;context.mesh_geometry_parts=receipt
         else
@@ -12155,16 +12296,28 @@ function _geo_exec_include!(m::GeoModel,path::AbstractString,
     ext==".geo" || throw(ArgumentError(
         "$caller: merging '$ext' files is not supported " *
         "(only .geo, .msh, .stl, .pos, .step, .stp, .igs and .iges)"))
-    statements=_geo_exec_statements(file)
+    statements,stmt_locs=_geo_exec_statements(file)
     parent_file=context.file_name
     parent_base=context.file_error_base
     parent_stop=context.stop
+    # The included file parses with its own name/line state — upstream's
+    # `ParseFile` pushes `gmsh_yyname`/`gmsh_yylineno` for the new FILE*.
+    parent_stmt_src=context.exec_stmt_src
+    parent_stmt_nl=context.exec_stmt_nl
+    parent_stmt_lf=context.exec_stmt_lf
+    parent_stmt_line=context.exec_stmt_line
+    parent_exec_line=context.exec_line
     context.file_name=file
     context.file_error_base=length(context.exec_errors)
+    context.exec_stmt_src=nothing
+    context.exec_stmt_nl=Int[]
+    context.exec_stmt_lf=Bool[]
+    context.exec_stmt_line=0
+    context.exec_line=0
     try
         _exec_geo_statements!(
-            m,statements,firstindex(statements),lastindex(statements),
-            context,allocator_state,Ref(0))
+            m,statements,stmt_locs,firstindex(statements),
+            lastindex(statements),context,allocator_state,Ref(0))
     catch err
         err isa InterruptException && rethrow()
         # A syntax error that escapes statement dispatch is recorded like
@@ -12175,6 +12328,11 @@ function _geo_exec_include!(m::GeoModel,path::AbstractString,
     finally
         context.file_name=parent_file
         context.file_error_base=parent_base
+        context.exec_stmt_src=parent_stmt_src
+        context.exec_stmt_nl=parent_stmt_nl
+        context.exec_stmt_lf=parent_stmt_lf
+        context.exec_stmt_line=parent_stmt_line
+        context.exec_line=parent_exec_line
         # `Abort` (errorstate 999) and too-many-errors are local to the
         # included file's ParseFile — the parent stream resumes; `Exit` is
         # process-global and propagates.

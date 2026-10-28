@@ -42,6 +42,7 @@ import ..SizeField: metric_at, field_value
 using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
 using ..Mesh3D: tetrahedralize, mesh_boolean, recover_segment3, recover_triangle3,
                 refine_to_size, _refine_gmsh_delaunay3, _gmsh_optimize_tetrahedra,
+                _netgen_optimize_tetrahedra,
                 _gopt_gamma, _gopt_area, _gmsh3_native_center
 using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3,
                 _tet_edge_set, _volume_edge_set, _volume_cell_boundary_faces,

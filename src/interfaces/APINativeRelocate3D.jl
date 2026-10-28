@@ -12,9 +12,14 @@ struct _NativeRelocate3DCell
 end
 
 function _native_relocate3d_cell(cell,caller)
+    # Upstream RelocateVertices(GRegion) builds vertex adjacency from the
+    # region's tetrahedra, pyramids, prisms and hexahedra only; every other
+    # stored cell (embedded faces, polyhedra, trihedra, uncatalogued records)
+    # is excluded from relocation instead of rejecting the region.
+    spec=get(Elements._MSH_CATALOG_LOOKUP,Int(cell.msh),nothing)
+    (spec===nothing || spec.dim!=3 || !(spec.family in (:tet,:hex,:pri,:pyr))) &&
+        return nothing
     cell.msh==4 && return _NativeRelocate3DCell(cell,nothing)
-    cell.msh==11 || throw(ArgumentError(
-        "$caller: native Relocate3D for this high-order or hybrid volume cell is not implemented"))
     rule=_native_cell_sample_rule(cell.msh,caller)
     coordinates=Matrix{Float64}(undef,length(cell.nodes),3)
     derivatives=ntuple(_->zeros(Float64,size(rule.ideal_gradients[1],1),3),3)
@@ -133,6 +138,7 @@ function _native_relocate3d_locked!(iterations,pairs,caller)
         for cell in assembly.cells
             cell.owner[1]==3 || continue
             entry=_native_relocate3d_cell(cell,caller)
+            entry===nothing && continue
             push!(get!(()->_NativeRelocate3DCell[],regions,Int(cell.owner[2])),entry)
         end
         for (_,region) in model_entities(source,3)

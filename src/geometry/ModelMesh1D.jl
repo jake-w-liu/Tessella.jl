@@ -852,6 +852,15 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
             max_integration_points=_point_store===nothing ? _DEFAULT_MAX_INTEGRATION_POINTS :
                 _GMSH_CURVE_INTEGRATION_CAPACITY,
             _point_store)
+        # `mesh_curve(closed=true)` returns the nedge station list — the
+        # closing `t1` stays implicit — while every `curve_params` consumer
+        # holds the open-style `[t0,…,t1]` contract (`_dim01_emit_curve!`,
+        # `_surface_curve_parameters`, write-back span certificates, the
+        # stale-parameter audits). Restore the pinned endpoint so a stored
+        # closed discretization re-emits its full cell set verbatim; the
+        # certificate below then measures the closing edge along with the
+        # rest of the emitted chain.
+        closed && parameters[end]!=t1 && push!(parameters,t1)
         isempty(cert_fields) && return parameters
         worst=0.0
         for (face,cert) in cert_fields
@@ -1491,6 +1500,12 @@ function _model_discrete_curve_grade_params(m::GeoModel,curve::Integer,
             return dx*dx+dy*dy+dz*dz>precision*precision
         end
     end
+    # Same open-style storage contract as `_model_curve_grade_params`:
+    # `mesh_curve(closed=true)` leaves the closing `t1` implicit while
+    # every `curve_params` consumer holds the `[t0,…,t1]` list contract —
+    # restore the pinned endpoint when the knot merge did not already
+    # supply it, so the stored discretization re-emits its full cell set.
+    closed && parameters[end]!=t1 && push!(parameters,t1)
     return parameters
 end
 

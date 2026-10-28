@@ -39,7 +39,7 @@ function _native_cell_local_coordinates(mesh,cells,cell,msh,p,caller,tag;locatio
         end
     end
     coordinates=(references[1,nearest],references[2,nearest],references[3,nearest])
-    data=spec.family in (:tri,:qua,:tet,:hex) ? _native_cell_polynomial(msh,caller) : nothing
+    data=spec.family in (:tri,:qua,:tet,:hex,:pri) ? _native_cell_polynomial(msh,caller) : nothing
     iteration=1;error=1.0
     while error>1.e-6 && iteration<20
         shape=_native_cell_query_shape(msh,coordinates,data,caller)

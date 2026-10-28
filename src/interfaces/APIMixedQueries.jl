@@ -859,20 +859,37 @@ function mesh_element_qualities(mesh::MixedMesh,element_tags,quality_name="minSI
             result[index]=quality
         elseif msh in (9,11)
             result[index]=_legacy_p2_quality(mesh,cell,name,caller;cells,triangle=msh==9)
-        elseif msh_spec(msh).order>2 && name in ("minDetJac","maxDetJac","minSJ") &&
+        # Upstream's element-quality dispatch is flat across orders: the
+        # Jacobian-based measures apply to every catalogued element. Orders
+        # above two always take the native paths; linear and quadratic
+        # hexahedra, prisms and pyramids — and quadratic quadrangles — take
+        # them at their low orders too. (Prisms above order two still hit the
+        # unsupported-closure contract; linear/quadratic triangles and
+        # tetrahedra and MSH_QUA_4 keep their dedicated branches below.)
+        elseif (msh_spec(msh).order>2 || family===:qua ? msh_spec(msh).order==2 :
+                family in (:hex,:pri,:pyr)) &&
+               name in ("minDetJac","maxDetJac","minSJ") &&
                family in (:tri,:qua,:tet,:hex,:pri,:pyr)
             result[index]=_native_cell_quality_bezier(mesh,cells,cell,msh,name,caller)
-        elseif msh_spec(msh).order>2 && name in ("minSICN","minSIGE") &&
+        elseif (msh_spec(msh).order>2 || family===:qua ? msh_spec(msh).order==2 :
+                family in (:hex,:pri,:pyr)) &&
+               name in ("minSICN","minSIGE") &&
                family in (:tri,:qua,:tet,:hex,:pri,:pyr)
             result[index]=_native_cell_quality_sampled(mesh,cells,cell,msh,name,caller)
-        elseif msh_spec(msh).order>2 && name=="minIsotropy" && family in (:tri,:qua,:tet,:hex,:pri,:pyr)
+        elseif (msh_spec(msh).order>2 || family===:qua ? msh_spec(msh).order==2 :
+                family in (:hex,:pri,:pyr)) &&
+               name=="minIsotropy" && family in (:tri,:qua,:tet,:hex,:pri,:pyr)
             result[index]=_native_cell_quality_isotropy(mesh,cells,cell,msh,caller)
-        elseif msh_spec(msh).order>2 && name=="gamma" && family in (:tri,:qua,:tet,:hex,:pri,:pyr)
+        elseif (msh_spec(msh).order>2 || family===:qua ? msh_spec(msh).order==2 :
+                family in (:hex,:pri,:pyr)) &&
+               name=="gamma" && family in (:tri,:qua,:tet,:hex,:pri,:pyr)
             result[index]=_native_cell_quality_gamma(mesh,cells,cell,family,caller)
         elseif msh_spec(msh).order>2 && name=="volume" && family===:tet
             result[index]=_native_cell_tetrahedron_volume(a,_mixed_node(mesh,cells,cell,2),
                 _mixed_node(mesh,cells,cell,3),_mixed_node(mesh,cells,cell,4))
-        elseif msh_spec(msh).order>2 && name=="volume" && family in (:tri,:qua,:tet,:hex,:pri,:pyr)
+        elseif (msh_spec(msh).order>2 || family===:qua ? msh_spec(msh).order==2 :
+                family in (:hex,:pri,:pyr)) &&
+               name=="volume" && family in (:tri,:qua,:tet,:hex,:pri,:pyr)
             if !haskey(rules,msh)
                 rules[msh]=_native_cell_measure_rule(msh,caller)
             end
@@ -897,6 +914,25 @@ function mesh_element_qualities(mesh::MixedMesh,element_tags,quality_name="minSI
                 name=="outerRadius" ? 1.0 : name=="minIsotropy" ?
                 MeshElementQuality._quadrangle_native_isotropy(points) :
                 MeshElementQuality._quadrangle_native_jacobian_quality(name,points)
+        elseif family===:qua && name in ("eta","angleShape","innerRadius","outerRadius")
+            # Higher-order quadrangles share the linear element's
+            # primary-vertex measures upstream.
+            points=ntuple(i->_mixed_node(mesh,cells,cell,i),4)
+            result[index]=name=="eta" ? MeshElementQuality._quadrangle_native_eta(points) :
+                name=="angleShape" ? MeshElementQuality._quadrangle_native_angle_shape(points) :
+                name=="innerRadius" ? MeshElementQuality._quadrangle_native_inner_radius(points) :
+                1.0
+        elseif family in (:hex,:pri,:pyr) &&
+               name in ("eta","outerRadius","angleShape","innerRadius")
+            # Order-agnostic MElement measures on the primary vertices:
+            # eta and outerRadius keep their MElement defaults (zero),
+            # pyramids additionally keep angleShape=1.0, and the
+            # hexahedron/prism overrides evaluate the ported kernels.
+            result[index]=name in ("eta","outerRadius") ? 0.0 :
+                name=="angleShape" ?
+                    (family===:hex ? _native_cell_hexahedron_angles(mesh,cells,cell) : 1.0) :
+                family===:hex ? _native_cell_hexahedron_inner_radius(mesh,cells,cell) :
+                family===:pri ? _native_cell_prism_inner_radius(mesh,cells,cell) : 0.0
         else
             throw(ArgumentError("$caller: quality $(repr(name)) is unsupported for native " *
                 "type-$msh $family elements; supported native measures are minEdge and maxEdge"))

@@ -34,6 +34,13 @@ function _native_cell_quality_points(family,p)
         for k in 0:p,j in 0:p,i in 0:p
             push!(points,(Float64(i)*scale-1.0,Float64(j)*scale-1.0,Float64(k)*scale-1.0))
         end
+    elseif family===:pri
+        # FuncSpaceData(TYPE_PRI) samples the tensor product of the order-p
+        # triangle lattice in (u,v) with the order-p [-1,1] line lattice in w.
+        scale=1.0/p
+        for k in 0:p,j in 0:p,i in 0:p-j
+            push!(points,(Float64(i)*scale,Float64(j)*scale,Float64(2k)*scale-1.0))
+        end
     elseif family===:pyr
         # FuncSpaceData(TYPE_PYR,true,1,p-1,false), unlike the tensorial
         # determinant/bounding space.

@@ -425,12 +425,8 @@ function _gopt_smooth_vertex!(state,index,role)
     return true
 end
 
-function _gmsh_optimize_tetrahedra(mesh::Mesh;
-        element_numbers=collect(UInt64,1:size(mesh.tets,2)),
-        element_high_water=maximum(element_numbers;init=UInt64(0)),
-        movable=nothing,threshold=0.3,embedded_faces=Set{NTuple{3,Int32}}(),
-        embedded_edges=Set{Tuple{Int32,Int32}}(),positive=true)
-    isfinite(threshold) || throw(ArgumentError("native optimizer threshold must be finite"))
+function _gopt_ingest(mesh::Mesh,element_numbers,element_high_water,movable,
+                      embedded_faces,embedded_edges)
     numbers=collect(UInt64,element_numbers)
     length(numbers)==size(mesh.tets,2) && allunique(numbers) || throw(ArgumentError(
         "native optimizer element identities must bind every input cell uniquely"))
@@ -472,7 +468,42 @@ function _gmsh_optimize_tetrahedra(mesh::Mesh;
         _gopt_note_carriers!(state,vertices,1)
     end
     _gopt_connect!(state,eachindex(cells))
-    active=collect(Int32,eachindex(cells))
+    return state,collect(Int32,eachindex(cells))
+end
+
+function _gopt_finish(state,mesh,active,swaps,relocations;positive=true)
+    kept=Int32[]
+    for index in active
+        state.cells[index].deleted || push!(kept,index)
+    end
+    output=Matrix{Int32}(undef,4,length(kept));tags=UInt64[];physical=Int32[]
+    for (column,index) in enumerate(kept)
+        vertices=state.cells[index].vertices
+        if positive && _gopt_volume(state,vertices)<0.0
+            vertices=(vertices[2],vertices[1],vertices[3],vertices[4])
+        end
+        for slot in 1:4
+            output[slot,column]=vertices[slot]
+        end
+        push!(tags,state.cells[index].number)
+        push!(physical,state.cells[index].physical)
+    end
+    product=Mesh(state.coords;segs=mesh.segs,seg_tag=mesh.seg_tag,
+        tris=mesh.tris,tri_tag=mesh.tri_tag,tets=output,
+        tet_tag=physical)
+    return (mesh=product,element_numbers=tags,element_high_water=state.element_max,
+        edge_swaps=swaps,vertex_relocations=relocations)
+end
+
+function _gmsh_optimize_tetrahedra(mesh::Mesh;
+        element_numbers=collect(UInt64,1:size(mesh.tets,2)),
+        element_high_water=maximum(element_numbers;init=UInt64(0)),
+        movable=nothing,threshold=0.3,embedded_faces=Set{NTuple{3,Int32}}(),
+        embedded_edges=Set{Tuple{Int32,Int32}}(),positive=true,relocate=true)
+    isfinite(threshold) || throw(ArgumentError("native optimizer threshold must be finite"))
+    state,active=_gopt_ingest(mesh,element_numbers,element_high_water,movable,
+        embedded_faces,embedded_edges)
+    cells=state.cells
     swaps=0;relocations=0;previous_worst=0.0
     if threshold>0.0
         while true
@@ -496,12 +527,16 @@ function _gmsh_optimize_tetrahedra(mesh::Mesh;
             for index in new_cells
                 cells[index].deleted || push!(active,index)
             end
-            for index in active
-                cell=cells[index]
-                cell.deleted && continue
-                if cell.quality<threshold
-                    for role in 1:4
-                        _gopt_smooth_vertex!(state,index,role) && (relocations+=1)
+            # optimizeMesh's relocate pass only runs when the region holds no
+            # hexahedra, prisms or pyramids; hybrid regions get swaps alone.
+            if relocate
+                for index in active
+                    cell=cells[index]
+                    cell.deleted && continue
+                    if cell.quality<threshold
+                        for role in 1:4
+                            _gopt_smooth_vertex!(state,index,role) && (relocations+=1)
+                        end
                     end
                 end
             end
@@ -513,25 +548,136 @@ function _gmsh_optimize_tetrahedra(mesh::Mesh;
             previous_worst=worst
         end
     end
-    kept=Int32[]
-    for index in active
-        cells[index].deleted || push!(kept,index)
+    return _gopt_finish(state,mesh,active,swaps,relocations;positive)
+end
+
+# Independent Netgen-role volume pass. Ng_OptimizeVolumeMesh drives Netgen's
+# optsteps3d rounds of "cmdmustm" (CombineImprove, ImproveMesh, SplitImprove,
+# SwapImprove, SwapImprove2, ImproveMesh). This pass reproduces the certified
+# swap sweep and per-point quality line search roles; CombineImprove node
+# removal, SplitImprove midpoint insertion and the upstream-disabled surface
+# swap are not implemented, and it never drops element coverage.
+function _ng_vertex_quality(state,cavity,vertex,trial)
+    worst=1.0
+    for index in cavity
+        cell=state.cells[index]
+        cell.deleted && continue
+        vertices=cell.vertices
+        points=ntuple(slot->vertices[slot]==vertex ? trial :
+            _gopt_point(state,vertices[slot]),4)
+        value,_=_gopt_gamma(points...)
+        orient3(points...)>0 && (value=-value)
+        value<worst && (worst=value)
     end
-    output=Matrix{Int32}(undef,4,length(kept));tags=UInt64[];physical=Int32[]
-    for (column,index) in enumerate(kept)
-        vertices=cells[index].vertices
-        if positive && _gopt_volume(state,vertices)<0.0
-            vertices=(vertices[2],vertices[1],vertices[3],vertices[4])
-        end
+    return worst
+end
+
+function _ng_vertex_objective(state,cavity,vertex,old,target,xi)
+    trial=((1.0-xi)*old[1]+xi*target[1],
+           (1.0-xi)*old[2]+xi*target[2],
+           (1.0-xi)*old[3]+xi*target[3])
+    return _ng_vertex_quality(state,cavity,vertex,trial)
+end
+
+function _ng_smooth_vertex!(state,index,role)
+    cell=state.cells[index]
+    cell.deleted && return false
+    vertex=cell.vertices[role]
+    state.movable[vertex] || return false
+    cavity=_gopt_vertex_cavity(state,index,vertex)
+    cavity===nothing && return false
+    x=0.0;y=0.0;z=0.0;count=0
+    for index in cavity
+        vertices=state.cells[index].vertices
         for slot in 1:4
-            output[slot,column]=vertices[slot]
+            node=vertices[slot]
+            node==vertex && continue
+            point=_gopt_point(state,node)
+            x+=point[1];y+=point[2];z+=point[3];count+=1
         end
-        push!(tags,cells[index].number)
-        push!(physical,cells[index].physical)
     end
-    product=Mesh(state.coords;segs=mesh.segs,seg_tag=mesh.seg_tag,
-        tris=mesh.tris,tri_tag=mesh.tri_tag,tets=output,
-        tet_tag=physical)
-    return (mesh=product,element_numbers=tags,element_high_water=state.element_max,
-        edge_swaps=swaps,vertex_relocations=relocations)
+    count==0 && return false
+    target=(x/count,y/count,z/count)
+    old=_gopt_point(state,vertex)
+    lambda=0.5*(sqrt(5.0)-1.0);mu=0.5*(3.0-sqrt(5.0))
+    a=0.0;b=2.0;tolerance=1e-2
+    x1=b-lambda*(b-a);x2=a+lambda*(b-a)
+    f1=_ng_vertex_objective(state,cavity,vertex,old,target,x1)
+    f2=_ng_vertex_objective(state,cavity,vertex,old,target,x2)
+    while !(abs(b-a)<tolerance)
+        if f1<f2
+            a=x1
+            abs(b-a)<tolerance && break
+            x1=x2;f1=f2;x2=b-mu*(b-a)
+            f2=_ng_vertex_objective(state,cavity,vertex,old,target,x2)
+        else
+            b=x2
+            abs(b-a)<tolerance && break
+            x2=x1;f2=f1;x1=a+mu*(b-a)
+            f1=_ng_vertex_objective(state,cavity,vertex,old,target,x1)
+        end
+    end
+    # Strict improvement only: a plateau or zero-length move reports no work,
+    # which keeps the caller's round loop a bounded strict-descent sequence.
+    before=_ng_vertex_objective(state,cavity,vertex,old,target,0.0)
+    after=_ng_vertex_objective(state,cavity,vertex,old,target,a)
+    after<=before && return false
+    point=((1.0-a)*old[1]+a*target[1],
+           (1.0-a)*old[2]+a*target[2],
+           (1.0-a)*old[3]+a*target[3])
+    state.coords[1,vertex]=point[1];state.coords[2,vertex]=point[2]
+    state.coords[3,vertex]=point[3]
+    for index in cavity
+        cell=state.cells[index]
+        cell.deleted && continue
+        quality,_=_gopt_quality(state,cell.vertices)
+        cell.quality=quality
+    end
+    return true
+end
+
+function _netgen_optimize_tetrahedra(mesh::Mesh;
+        element_numbers=collect(UInt64,1:size(mesh.tets,2)),
+        element_high_water=maximum(element_numbers;init=UInt64(0)),
+        movable=nothing,embedded_faces=Set{NTuple{3,Int32}}(),
+        embedded_edges=Set{Tuple{Int32,Int32}}(),positive=true,rounds=3)
+    rounds>=0 || throw(ArgumentError("native Netgen-role rounds must be non-negative"))
+    state,active=_gopt_ingest(mesh,element_numbers,element_high_water,movable,
+        embedded_faces,embedded_edges)
+    cells=state.cells
+    swaps=0;relocations=0
+    for _ in 1:rounds
+        changed=false
+        new_cells=Int32[]
+        for index in active
+            cells[index].deleted && continue
+            for role in 1:4
+                _ng_smooth_vertex!(state,index,role) &&
+                    (relocations+=1;changed=true)
+            end
+        end
+        for index in active
+            cell=cells[index]
+            cell.deleted && continue
+            for edge in 1:6
+                slots=_GOPT_EDGES[_GOPT_EDGE_PERMUTATION[edge]]
+                key=_gopt_edge(cell.vertices[slots[1]],cell.vertices[slots[2]])
+                key in state.embedded_edges && continue
+                _gopt_swap_edge!(state,new_cells,index,edge) &&
+                    (swaps+=1;changed=true;break)
+            end
+        end
+        for index in new_cells
+            cells[index].deleted || push!(active,index)
+        end
+        for index in active
+            cells[index].deleted && continue
+            for role in 1:4
+                _ng_smooth_vertex!(state,index,role) &&
+                    (relocations+=1;changed=true)
+            end
+        end
+        changed || break
+    end
+    return _gopt_finish(state,mesh,active,swaps,relocations;positive)
 end

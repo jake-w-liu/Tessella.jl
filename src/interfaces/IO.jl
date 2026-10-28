@@ -2112,10 +2112,14 @@ mutable struct _GeoNumericContext
     # extrude result lists append the lateral entities.
     extrude_return_lateral::Bool
     # `.geo` `Function`/`Macro`/`Call` support: each name maps to
-    # `(statement_array, body_start_index)` — the array reference keeps
-    # `Include`d files' bodies alive for later calls (Gmsh's FunctionManager
-    # stores file positions and survives `Delete All`/`NewModel`).
-    functions::Dict{String,Tuple{Vector{String},Int}}
+    # `(statement_array, body_locs, body_start_index, def_file)` — the array
+    # reference keeps `Include`d files' bodies alive for later calls (Gmsh's
+    # FunctionManager stores file positions and survives `Delete All`/
+    # `NewModel`); `def_file` is the definition file's `gmsh_yyname`, which
+    # `enterFunction` swaps in for the duration of a `Call`.
+    functions::Dict{String,
+        Tuple{Vector{String},Vector{Tuple{Int,Vector{Int},Vector{Bool}}},
+            Int,String}}
     call_depth::Int
     # `gmsh_yynamespaces` — `Struct` definitions per namespace: float members
     # (fopt), char members (copt), the resolved tag and the running enum
@@ -2262,11 +2266,31 @@ mutable struct _GeoNumericContext
     native_recombine_partial_callback::Any
     # Optional detached diagnostics for atomic API file preparation.
     native_recombine_diagnostics::Any
+    # `gmsh_yylineno` bookkeeping for `_exec_geo_statements!`: the statement
+    # source string currently executing (`exec_stmt_src`, kept as the object
+    # so SubString captures map back through `.string`), the byte offsets
+    # inside it that stand for source line breaks (`exec_stmt_nl`), the
+    # physical 1-based file line where it starts (`exec_stmt_line`), the
+    # per-line lone-`'\n'` flags for its file lines (`exec_stmt_lf` — a
+    # LF-terminated line's feed is consumed in its own YY_INPUT refill, so
+    # its tokens report their true line; CRLF and unterminated lines report
+    # one less), and the *reported* line of the last lexed token
+    # (`exec_line` — upstream prints `gmsh_yylineno - 1`, the count of
+    # consumed line feeds). `-1`/`nothing`/`Int[]`/`Bool[]` in contexts
+    # without live parser tracking (pure eval, scan mirrors, mesh-file
+    # imports).
+    exec_stmt_src::Any
+    exec_stmt_nl::Vector{Int}
+    exec_stmt_lf::Vector{Bool}
+    exec_stmt_line::Int
+    exec_line::Int
 end
 _GeoNumericContext()=_GeoNumericContext(
     Dict{String,Float64}(),Dict{String,Vector{Float64}}(),Set{String}(),
     Dict{String,String}(),Dict{String,String}(),0,nothing,true,
-    Dict{String,Tuple{Vector{String},Int}}(),0,
+    Dict{String,
+        Tuple{Vector{String},Vector{Tuple{Int,Vector{Int},Vector{Bool}}},
+            Int,String}}(),0,
     Dict{String,Dict{String,_GeoStructDef}}(),Dict{String,Int}(),
     Dict{String,Vector{String}}(),Dict{String,Float64}(),
     Dict{String,String}(),"",nothing,0,falses(101),
@@ -2278,7 +2302,8 @@ _GeoNumericContext()=_GeoNumericContext(
     Tuple{Int,Int,Union{Mesh,MixedMesh}}[],Vector{Int32}[],nothing,
     Union{Nothing,Vector{Float64}}[],UInt64(0),UInt64(0),
     Dict{Tuple{Int,Int},Vector{Int}}(),true,true,nothing,
-    Dict{Int,Any}(),nothing,false,1.0,false,nothing,nothing,nothing,nothing,nothing,nothing,nothing)
+    Dict{Int,Any}(),nothing,false,1.0,false,nothing,nothing,nothing,nothing,
+    nothing,nothing,nothing,nothing,Int[],Bool[],0,-1)
 
 # Thrown where the upstream grammar fails to reduce — a bison syntax error.
 # `execute_geo` catches it per statement, records `syntax error (<token>)`
@@ -2377,13 +2402,26 @@ _geo_syntax_abort(token::AbstractString,detail::AbstractString)=
 Base.showerror(io::Base.IO,err::_GeoSyntaxAbort)=
     print(io,isempty(err.detail) ? "syntax error ($(err.token))" : err.detail)
 
+# Upstream `yyerror`/`yymsg` prepend `'gmsh_yyname', line gmsh_yylineno - 1: `
+# whenever a `.geo` file is being parsed — `exec_line` already stores that
+# *reported* number (the count of line feeds the lexer has consumed, i.e.
+# the physical line minus one). Direct `Msg::*` calls stay unprefixed, and
+# contexts that only borrow `file_name` for path resolution (mesh imports)
+# keep `exec_line == -1` and print bare diagnostics. The prefix is a
+# property of the printed stream — `exec_errors`/`exec_warnings`/`error_log`
+# keep the bare message text.
+_geo_diag_prefix(context::_GeoNumericContext)=
+    (isempty(context.file_name) || context.exec_line<0) ? "" :
+    "'$(context.file_name)', line $(context.exec_line): "
+
 # `yymsg(0, ...)` — record a parse error; the stream continues and `execute_geo`
 # throws the accumulated diagnostics at the end (or at `Exit`/`Abort`).
 function _geo_yyerror!(context::_GeoNumericContext,message::AbstractString)
     context.suppress_diagnostics && return nothing
     if context.stderr_diagnostics
+        printed=_geo_diag_prefix(context)*message
         # `-cpu` appends `PrintResources` inside `Msg::Error` too.
-        text=_MSG_INFO_RESOURCES[] ? message*_msg_resource_suffix() : message
+        text=_MSG_INFO_RESOURCES[] ? printed*_msg_resource_suffix() : printed
         print(stderr,"Error   : ",text,"\n");flush(stderr)
         _msg_log_write("Error   : ",text)
     end
@@ -2392,9 +2430,22 @@ function _geo_yyerror!(context::_GeoNumericContext,message::AbstractString)
     return nothing
 end
 
-# `yymsg(1, ...)` — a warning; printed like `Msg::Warning`, execution
-# continues.
+# `yymsg(1, ...)` — a warning; printed like `Msg::Warning` but carrying the
+# same `'file', line N:` prefix as the parse errors, execution continues.
 function _geo_yywarn!(context::_GeoNumericContext,message::AbstractString)
+    context.suppress_diagnostics && return nothing
+    if context.stderr_diagnostics
+        printed=_geo_diag_prefix(context)*message
+        print(stderr,"Warning : ",printed,"\n");flush(stderr)
+        _msg_log_write("Warning : ",printed)
+    end
+    push!(context.exec_warnings,String(message))
+    return nothing
+end
+
+# `Msg::Warning` — the *unprefixed* warning channel (`Warning("...")` text,
+# unknown physical members, partition/degenerate-entity notes).
+function _geo_msg_warn!(context::_GeoNumericContext,message::AbstractString)
     context.suppress_diagnostics && return nothing
     if context.stderr_diagnostics
         print(stderr,"Warning : ",message,"\n");flush(stderr)
@@ -2411,6 +2462,20 @@ function _geo_yyinfo!(context::_GeoNumericContext,message::AbstractString)
     something(_geo_option_number(context,"General",0,"Verbosity"),5.0)<4 &&
         return nothing
     text=_MSG_INFO_RESOURCES[] ? message*_msg_resource_suffix() : message
+    print(stdout,"Info    : ",text,"\n");flush(stdout)
+    _msg_log_write("Info    : ",text)
+    return nothing
+end
+
+# `yymsg(2, ...)` — a *parser-level* info diagnostic: `Msg::Info` carrying the
+# same `'file', line N:` prefix as `yyerror`/`yymsg(0/1)` (e.g. the `Split
+# Curve(c) {...}` deprecation notice).
+function _geo_yymsg_info!(context::_GeoNumericContext,message::AbstractString)
+    context.suppress_diagnostics && return nothing
+    something(_geo_option_number(context,"General",0,"Verbosity"),5.0)<4 &&
+        return nothing
+    printed=_geo_diag_prefix(context)*message
+    text=_MSG_INFO_RESOURCES[] ? printed*_msg_resource_suffix() : printed
     print(stdout,"Info    : ",text,"\n");flush(stdout)
     _msg_log_write("Info    : ",text)
     return nothing
@@ -2564,6 +2629,12 @@ mutable struct _GeoExprParser
     depth::Int
     context::_GeoNumericContext
     caller::String
+    # `gmsh_yylineno` tracking: the file line where `source` begins
+    # (0 = untracked) plus `source`'s byte offset inside
+    # `context.exec_stmt_src`, so each lexed token maps back to its file
+    # line through `context.exec_stmt_nl`.
+    line0::Int
+    src_off::Int
 end
 
 const _GEO_SIDE_EFFECT_SYMBOLS=Set((
@@ -3604,10 +3675,42 @@ function _geo_lex_token!(parser::_GeoExprParser)
         i=nextind(source,i)
     end
     if i>last
+        if parser.line0>0
+            # The eof lookahead reports one past the last consumed line
+            # feed — the same `gmsh_yylineno - 1` upstream prints for a
+            # trailing `;`.
+            off=parser.src_off+lastindex(source)
+            j=0
+            for p in parser.context.exec_stmt_nl
+                p<off || break
+                j+=1
+            end
+            lf=parser.context.exec_stmt_lf
+            line=parser.context.exec_stmt_line-1+j+
+                (j+1<=length(lf) && lf[j+1] ? 1 : 0)
+            parser.context.exec_line=line
+        end
         parser.index=i
         return _GeoExprToken(:eof,"",0.0,ncodeunits(source)+1)
     end
     start=i;c=source[i];i=nextind(source,i)
+    if parser.line0>0
+        # The reported `gmsh_yylineno - 1` for this token: the statement's
+        # first line (minus one), plus the recorded line-break offsets
+        # strictly before the token, plus one when that file line's feed
+        # was consumed in its own refill (lone `'\n'` — LF, not CRLF or an
+        # unterminated last line).
+        off=parser.src_off+start-1
+        j=0
+        for p in parser.context.exec_stmt_nl
+            p<off || break
+            j+=1
+        end
+        lf=parser.context.exec_stmt_lf
+        line=parser.context.exec_stmt_line-1+j+
+            (j+1<=length(lf) && lf[j+1] ? 1 : 0)
+        parser.context.exec_line=line
+    end
     token=if _geo_ascii_digit(c) ||
              (c=='.' && i<=last && _geo_ascii_digit(source[i]))
         had_digit=_geo_ascii_digit(c)
@@ -4821,14 +4924,80 @@ function _geo_increment_indexed!(context::_GeoNumericContext,name::String,
     return old
 end
 
+# Map an evaluation source back to its file position: when `src` is a
+# `SubString` slice of the statement currently executing (regex captures and
+# `s[i:j]` cuts keep `.string` rooted at `exec_stmt_src`), its byte offset
+# plus `exec_stmt_nl` gives the line its first character sits on. String
+# copies of the statement (`String(strip(line))`) still match by content —
+# their byte offsets are identical. Returns `(line0, offset)` or `nothing`.
+function _geo_stmt_src_loc(context::_GeoNumericContext,src::AbstractString)
+    stmt=context.exec_stmt_src
+    stmt isa AbstractString || return nothing
+    context.exec_stmt_line>0 || return nothing
+    stripped=strip(src)
+    stripped isa SubString || return nothing
+    root=stripped.string
+    # `exec_stmt_src` is the statement string; evaluators also slice trimmed
+    # copies (`body=String(strip(line))` in `_exec_line!`/assignment), whose
+    # bytes still match a prefix of the statement — offsets stay valid.
+    if root===stmt || root==stmt ||
+       (root isa AbstractString && ncodeunits(root)<=ncodeunits(stmt) &&
+        SubString(stmt,1,ncodeunits(root))==root)
+        off=stripped.offset
+    else
+        # A `String` copy of an inner slice (regex capture converted to
+        # `String`): locate the stripped content inside the statement — a
+        # unique occurrence pins the offset, anything else stays untracked
+        # rather than guess the wrong line.
+        isempty(stripped) && return nothing
+        span=findfirst(stripped,stmt)
+        span===nothing && return nothing
+        findnext(stripped,stmt,last(span)+1)===nothing || return nothing
+        off=first(span)-1
+    end
+    line=context.exec_stmt_line
+    for p in context.exec_stmt_nl
+        p<off || break
+        line+=1
+    end
+    return (line,off)
+end
+
+# The `gmsh_yylineno - 1` report for a token on physical file line `line`:
+# one less than the line, plus one when that line's own line feed was
+# consumed in its refill — a lone `'\n'` (LF). CRLF lines stop the refill at
+# `'\r'` and unterminated last lines have no feed at all, so both report
+# `line - 1`. `exec_stmt_lf` indexes the current statement's lines from
+# `exec_stmt_line` on.
+function _geo_report_line(context::_GeoNumericContext,line::Int)
+    k=line-context.exec_stmt_line+1
+    lf=context.exec_stmt_lf
+    return line-1+(1<=k<=length(lf) && lf[k] ? 1 : 0)
+end
+
+# A completed whole-expression eval leaves `gmsh_yylineno` reporting the
+# statement's terminator line: upstream statement actions run at the
+# `tEND`-adjacent reduction, so post-eval diagnostics (`Could not add
+# line`, affectation mismatches) land on the `;` line, not on the last
+# expression token. Mid-eval errors keep their lookahead position instead —
+# they throw before this reset runs.
+function _geo_stmt_eval_done!(context::_GeoNumericContext)
+    context.exec_stmt_line>0 || return nothing
+    context.exec_line=_geo_report_line(
+        context,context.exec_stmt_line+length(context.exec_stmt_nl))
+    return nothing
+end
+
 function _geo_eval_numeric(raw::AbstractString,context::_GeoNumericContext,
                            caller::AbstractString)
     source=String(strip(raw))
     isempty(source) && throw(ArgumentError("$caller: numeric expression must not be empty"))
     ncodeunits(source)<=_MAX_GEO_EXPRESSION_BYTES || throw(ArgumentError(
         "$caller: expression exceeds $_MAX_GEO_EXPRESSION_BYTES bytes"))
+    loc=_geo_stmt_src_loc(context,raw)
+    line0,src_off=loc===nothing ? (0,0) : loc
     parser=_GeoExprParser(source,firstindex(source),_GeoExprToken(:eof,"",0.0,1),
-                          0,0,context,String(caller))
+                          0,0,context,String(caller),line0,src_off)
     _geo_advance!(parser)
     value=_geo_parse_ternary!(parser)
     parser.token.kind==:eof || begin
@@ -4843,6 +5012,7 @@ function _geo_eval_numeric(raw::AbstractString,context::_GeoNumericContext,
         end
         _geo_expr_error(parser,"unexpected token $(repr(token.text))",token.pos)
     end
+    _geo_stmt_eval_done!(context)
     return _geo_finite_result(parser,value,"expression",1)
 end
 
@@ -5572,9 +5742,13 @@ end
 # Convenience wrapper: evaluate a string expression without surrounding junk.
 function _geo_eval_string(raw::AbstractString,context::_GeoNumericContext,
                           caller::AbstractString)::String
+    loc=_geo_stmt_src_loc(context,raw)
+    loc===nothing || (context.exec_line=_geo_report_line(context,loc[1]))
     s=String(strip(raw))
     isempty(s) && throw(ArgumentError("$caller: string expression must not be empty"))
-    return _geo_string_expr(s,context,caller)
+    value=_geo_string_expr(s,context,caller)
+    _geo_stmt_eval_done!(context)
+    return value
 end
 
 # `--`/`++` fold `a-b`/`a+b` on string symbols? No — Gmsh strings do not combine;
@@ -6116,8 +6290,11 @@ function _geo_fix_relative_path(reference::AbstractString,in::AbstractString)
     (startswith(in,"/") || startswith(in,"\\") ||
      (ncodeunits(in)>3 && in[2]==':' &&
       (in[3]=='/' || in[3]=='\\'))) && return String(in)
-    dir=dirname(String(reference))
-    return isempty(dir) ? String(in) : dir*"/"*in
+    # Upstream `SplitFileName` keeps the reference's own trailing separator —
+    # the joined path prints verbatim in `'file', line N:` diagnostics, so a
+    # backslash-rooted script names `dir\inc.geo`, not `dir/inc.geo`.
+    idx=findlast(c->c=='/' || c=='\\',reference)
+    return idx===nothing ? String(in) : String(reference[1:idx])*String(in)
 end
 
 # `printListOfDouble` from Gmsh.y: each `%`-format consumes one list element plus
@@ -7212,6 +7389,8 @@ function _geo_numeric_list_values(raw::AbstractString,
                                   depth::Int=0)
     depth<=_MAX_GEO_EXPRESSION_DEPTH || throw(ArgumentError(
         "$caller: list expansion nesting exceeds $_MAX_GEO_EXPRESSION_DEPTH"))
+    loc=_geo_stmt_src_loc(context,raw)
+    loc===nothing || (context.exec_line=_geo_report_line(context,loc[1]))
     source=String(strip(raw))
     isempty(source) && throw(ArgumentError(
         "$caller: numeric list expression must not be empty"))
@@ -7219,12 +7398,18 @@ function _geo_numeric_list_values(raw::AbstractString,
         "$caller: list expression exceeds $_MAX_GEO_EXPRESSION_BYTES bytes"))
     referenced=_geo_list_reference_values(
         source,context,caller;depth=depth+1)
-    referenced!==nothing && return referenced
+    if referenced!==nothing
+        _geo_stmt_eval_done!(context)
+        return referenced
+    end
     # Side-effecting list terms (translational `Extrude`) can form a whole
     # RHS, not only a `{...}` member — try the hook before the brace grammar.
     if context.exec_hook!==nothing
         hooked=context.exec_hook(source)
-        hooked!==nothing && return hooked
+        if hooked!==nothing
+            _geo_stmt_eval_done!(context)
+            return hooked
+        end
     end
     list_source,multiplier=_geo_braced_list_source(
         source,context,caller;allow_multiplier=allow_multiplier)
@@ -7234,7 +7419,9 @@ function _geo_numeric_list_values(raw::AbstractString,
         # single-scalar case.
         term=_geo_numeric_list_term(source,context,caller,_MAX_GEO_LIST_ITEMS;
                                     tail=";")
-        return _geo_list_term_values(term)
+        values=_geo_list_term_values(term)
+        _geo_stmt_eval_done!(context)
+        return values
     end
 
     items=_geo_split_list(list_source,caller)
@@ -7263,6 +7450,7 @@ function _geo_numeric_list_values(raw::AbstractString,
             values[index]=scaled
         end
     end
+    _geo_stmt_eval_done!(context)
     return values
 end
 
@@ -7857,9 +8045,12 @@ function _geo_string_rhs(rhs::AbstractString)
     # wins upstream and the resolved name reads as a numeric variable.
     m!==nothing && m.captures[1] in _GEO_STRING_FUNCTIONS &&
         !(m.captures[1] in ("StringToName","S2N")) && return true
-    # `Point{i}`/`Surface{i}`/`Physical X{i}` are entity-name StringExprVars.
-    match(r"^(?:Physical\s+)?(?:Point|Line|Curve|Surface|Volume)\s*\{",s)!==
-        nothing && return true
+    # `Point{i}`/`Physical X{i}` are *not* routed to string here: in `x =`
+    # RHS position the upstream LALR reduces `tPoint '{' FExpr '}'` as the
+    # `FExpr_Multi` coordinate list and `tPhysical GeoEntity '{' FExpr '}'`
+    # as the physical-member tag list — the entity-name `StringExprVar`
+    # reading only survives inside string contexts (`StrCat`, `Printf`,
+    # member reads), which `_geo_string_expr` still owns.
     s in ("Today","CodeName","GmshExecutableName","OnelabAction",
           "CurrentFileName","CurrentDirectory") && return true
     return false
@@ -8434,26 +8625,23 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
     factory=match(r"^SetFactory\s*\(\s*\"([^\"]*)\"\s*\)$",source)
     if factory!==nothing
         name=String(factory.captures[1])
-        if name in ("Built-in","OpenCASCADE")
-            _geo_allocator_set_factory!(state,name)
-        else
-            reason="SetFactory accepts only \"Built-in\" or \"OpenCASCADE\"; got " *
-                   repr(name)
-            if conservative
-                _geo_allocator_invalidate!(
-                    state,reason;geometry=true,fields=false)
-                return nothing
-            end
-            throw(ArgumentError("$caller: $reason"))
-        end
+        # The exec path reports `Unknown factory "x" - using "Built-in"
+        # instead` and applies the fallback — unknown literal names are a
+        # warning upstream, not a failure, so the observer mirrors the
+        # resolved factory instead of rejecting the statement.
+        _geo_allocator_set_factory!(
+            state,name in ("Built-in","OpenCASCADE") ? name : "Built-in")
         return nothing
     elseif startswith(source,"SetFactory")
-        reason="SetFactory requires a literal \"Built-in\" or \"OpenCASCADE\" name"
+        # A non-literal name is resolved by the exec path (which applies the
+        # same fallback); the params pass cannot evaluate it, so a
+        # conservative caller invalidates rather than guessing.
         if conservative
-            _geo_allocator_invalidate!(state,reason;geometry=true,fields=false)
-            return nothing
+            _geo_allocator_invalidate!(state,
+                "SetFactory requires a literal \"Built-in\" or " *
+                "\"OpenCASCADE\" name";geometry=true,fields=false)
         end
-        throw(ArgumentError("$caller: $reason"))
+        return nothing
     end
 
     field=match(r"^Field\s*\[\s*(.*?)\s*\]\s*=\s*([A-Za-z][A-Za-z0-9_]*)$",source)
@@ -10261,7 +10449,9 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
         # own budget.
         if !stopped[] &&
            length(context.exec_errors)-context.file_error_base>20
-            _geo_yyerror!(context,"Too many errors: aborting parser...")
+            # OpenFile.cpp emits this through `Msg::Error`, not `yymsg` —
+            # unprefixed and outside the errorstate count.
+            _geo_msg_error!(context,"Too many errors: aborting parser...")
             stopped[]=true
             stop_kind[]=:toomany
         end

@@ -824,8 +824,10 @@ end
         @test _API.mesh.optimize("",false,1,[(2,1)])===nothing
         @test _API.mesh.optimize("",false,-1)===nothing
         @test _API.mesh.optimize("",false,1,[(3,99)])===nothing
-        for call in (()->_API.mesh.optimize("Netgen"),
-                     ()->_API.mesh.optimize(3),
+        # "Netgen" is a supported region optimizer — on a 2-D cache it has
+        # no regions to visit, a silent no-op like the other 3-D methods.
+        @test _API.mesh.optimize("Netgen")===nothing
+        for call in (()->_API.mesh.optimize(3),
                      ()->_API.mesh.optimize("",3,1))
             @test_throws ArgumentError call()
         end
@@ -1005,7 +1007,8 @@ end
         _API.mesh.optimize("",false,1,[(3,1)])
         @test validate(_API.mesh.get()).ok
         @test _API.mesh.optimize("",false,1,[(3,99)])===nothing
-        @test_throws ArgumentError _API.mesh.optimize("Netgen")
+        @test _API.mesh.optimize("Netgen")===nothing
+        @test validate(_API.mesh.get()).ok
         # After clear(), queries answer empty arrays instead of throwing —
         # Gmsh parity for an unmeshed-but-known model.
         maxima=(_API.mesh.get_max_node_tag(),_API.mesh.get_max_element_tag())

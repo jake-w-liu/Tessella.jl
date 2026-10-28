@@ -12,6 +12,51 @@ small real fixtures. Full native-oracle sweeps, source/AST audits, memory stress
 benchmarks, the 22 HFSS cases, aggregate validation, and external ASCENT solves
 are opt-in campaigns. See [test/README.md](test/README.md).
 
+### OPT01 optimizer parity slice (working tree)
+
+The OPT01 optimizer checklist advanced on this pass (see the same-dated
+STATUS.md entry for semantics):
+
+- `Mesh.OptimizeNetgen` interleaves Gmsh/Netgen counters in producer
+  generation (`ModelVolumeAlgorithms`), hybrid factories pass `hybrid=true`
+  (upstream no-op), and `_netgen_optimize_tetrahedra`
+  (`Mesh3DGmshOptimize.jl`) is the independent Netgen-role pass:
+  worst-cell line-search smoothing + certified edge swaps, bounded rounds,
+  coverage-preserving, no node removal/midpoint insertion.
+- `API.mesh.optimize("Netgen")` works on session caches via
+  `_Dim01Assembly` — tet regions emit `Optimizing volume <tag>`, regions
+  carrying `:hex`/`:pri`/`:pyr` emit `Skipping Netgen optimizer for hybrid
+  mesh` and are skipped. `.geo` `OptimizeMesh "Netgen"` routes to the same
+  kernel on the legacy context mesh (2-D caches are upstream no-ops).
+- `Relocate3D` admits all catalogued dim-3 families (sampled SICN extended
+  to `:pri`); the default Gmsh arm skips relocation on hybrid regions.
+  `APIMixedQueries` quality dispatch is order-agnostic for
+  `:hex`/`:pri`/`:pyr`/`:qua` primary-vertex measures.
+- Linear `MixedMesh` `Laplace2D`/`Relocate2D` landed:
+  `_optimize_surface_mixed_linear!` in `APIHighOrderOptimize.jl` performs
+  per-face parametric relocation — upstream `_relocate` (metric-weighted
+  centroid, `model_derivative` first fundamental form, ≤5 damped trials
+  gated by area/eta acceptance) and `relocateVertex` (incident-vertex
+  (u,v) centroid + golden section on [0,1] tol 1e-6, eta for 4-node cells,
+  |gamma| otherwise, `model_value` lift), plus the `relocateVertex2`
+  real-space/`model_closest_point` arm for parameterless vertices.
+  Accepted (u,v) states commit through the same
+  `_high_order_optimize_commit_sliders` path as the P2 arm.
+- Truthful bounds: no per-face boundary-layer column marks
+  (`getAllBoundaryLayerVertices` is empty), no periodic-seam detection
+  (`isSeam` bail-out omitted); the Netgen-role pass does not claim
+  Netgen's full algorithm set.
+- Test updates: `api_optimize_curved_p2_test.jl` asserts `"Netgen"`
+  accepted (no regions → no-op) and linear MixedMesh surface dispatch;
+  `api_test.jl` and `geo_constraints_test.jl` assert the same acceptance.
+- Verification so far: package loads; OCC cylinder surface relocate keeps
+  nodes on the surface to ~1e-16; `optimize_test.jl` functional sets pass
+  (its allocation-budget set is a -O2-gated measurement, not a
+  `--compile=min` check); curved-P2 dispatch suite 601/602 with the sole
+  failure being the stale Netgen expectation now updated. Remaining:
+  full functional + -O2 gate reruns, oracle comparisons for
+  histograms/metrics where useful.
+
 ### Order-≥3 curved-cell whole-domain Jacobian certificates (2026-10-28, landed `9e64650`)
 
 Devin closed the HO01 certification gap for catalogued curved cells: the P2

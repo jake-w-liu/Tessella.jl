@@ -247,8 +247,10 @@ function _model_native_hybrid_connected_production(m,component,options,births,ca
                                                    periodic_surface_pairs=nothing)
     # Tet optimization is deferred until every selected component has
     # completed construction with its continuing global factory clocks.
+    # Mesh.OptimizeNetgen is an upstream no-op on hybrid regions, so only the
+    # deferred default optimization counter remains gated.
     component isa _ModelNativeHybridComponentReceipt && !isempty(component.regions) &&
-        m.meshing.algorithm_3d==1 && options.optimize==0 && options.optimize_netgen==0 ||
+        m.meshing.algorithm_3d==1 && options.optimize==0 ||
         throw(ArgumentError("$caller: hybrid connected production requires its recorded batch and deferred default optimization"))
     isfinite(optimize_pyramids) || throw(ArgumentError("$caller: hybrid Pyramid setting must be finite"))
     fresh=_model_native_hybrid_component_receipt(m,component.regions,component.input,caller)

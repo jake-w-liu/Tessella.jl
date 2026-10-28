@@ -179,8 +179,8 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
         !get(m.meshing.reverse,(3,tag),false) && get(m.meshing.smoothing,(3,tag),0)==0 || throw(ArgumentError(
         "$caller: hybrid Volume requires its owned ordinary Delaunay constructor without additional planner attributes"))
     _model_native_hybrid_periodic_boundary_certificate(m,tag,constructor,periodic_surface_pairs,caller)
-    options.optimize_netgen==0 || throw(ArgumentError(
-        "$caller: native hybrid Netgen optimization is not implemented"))
+    # Mesh.OptimizeNetgen on a hybrid region is an upstream no-op (the Netgen
+    # optimizer skips hybrid meshes); `hybrid=true` below encodes that skip.
     node_clock=births===nothing ? maximum(constructor.input.mesh.entity_data.external_node_tags;init=UInt64(0)) : births.node_high_water
     element_clock=births===nothing ? maximum((uid for tags in constructor.input.mesh.entity_data.external_element_tags for uid in tags);init=UInt64(0)) : births.element_high_water
     work=_ModelNativeVolumeBirths(node_clock,element_clock)
@@ -241,7 +241,7 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
         _model_native_hybrid_constraints_segments(constructor,work.node_tags,caller),
         final_sheet.edges,final_csheet.edges)
     mesh=_model_native_optimize_volume(relocated,options,work,constructor.input,
-        vcat(final_sheet.facets,final_csheet.facets),final_edges,caller)
+        vcat(final_sheet.facets,final_csheet.facets),final_edges,caller;hybrid=true)
     blocks=ElementBlock[ElementBlock(4,copy(mesh.tets)),ElementBlock(7,pyramids.nodes)]
     mixed=MixedMesh(mesh.coords,blocks)
     optimize_pyramids<0.0 && _model_native_hybrid_normal_apex_fixed_certificate(

@@ -568,3 +568,37 @@ include(normpath(joinpath(@__DIR__,"..","..","validation","native_geometry",
         @test read(input,String)==_SQUARE_GEO
     end
 end
+
+@testset "CLI .geo diagnostics carry file/line prefixes" begin
+    # Gmsh 4.15.2's `yymsg` prefix `'gmsh_yyname', line gmsh_yylineno - 1:` —
+    # pinned on the same scripts against the reference binary. LF input
+    # (what `write` emits) reports the physical line; the `-0` unroll and
+    # `-2` mesh still complete past recoverable statement failures.
+    mktempdir() do directory
+        input=joinpath(directory,"diag.geo")
+        write(input,"Point(1) = {0, 0, 0, 1};\nbad = undef;\n"*
+                    "Point(2) = {1, 0, 0, 1};\n")
+        err=mktemp() do errpath,errstream
+            redirect_stderr(errstream) do
+                @test main([input,"-0","-o",
+                    joinpath(directory,"diag_unrolled.geo")])==
+                    joinpath(directory,"diag_unrolled.geo")
+            end
+            flush(errstream);read(errpath,String)
+        end
+        @test occursin("Error   : '$input', line 2: Unknown variable 'undef'",err)
+
+        # Syntax errors carry the same prefix; execution continues to `-2`.
+        write(input,"Point(1) = {0, 0, 0, 1};\na = 1 +;\n"*
+                    "Point(2) = {1, 0, 0, 1};\n")
+        output=joinpath(directory,"diag.msh")
+        err=mktemp() do errpath,errstream
+            redirect_stderr(errstream) do
+                @test main([input,"-2","-o",output])==output
+            end
+            flush(errstream);read(errpath,String)
+        end
+        @test occursin("Error   : '$input', line 2: syntax error (;)",err)
+        @test isfile(output) && validate(read_msh(output).mesh).ok
+    end
+end
