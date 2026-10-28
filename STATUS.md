@@ -79,7 +79,7 @@ with a catalogued basis is covered, but this is a certificate increment, not a
 full-parity claim — orders >10 and exotic unsupported types remain
 uncertified.
 
-### Periodic-face unification in Boolean merges + STEP surface-root import (2026-10-28, working tree)
+### Periodic-face unification in Boolean merges + STEP surface-root import (2026-10-28, landed `ff578f0`)
 
 Two CAD05 follow-ups close the sphere×cone 4-vs-3-face residual and the
 dim-2 STEP operand gap from the same-dated entry below.

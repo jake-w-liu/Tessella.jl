@@ -37,7 +37,7 @@ interfaces-registered callback — plain `validate` is unchanged. Focused suite
 not this increment). Bounded scope: certificate coverage for catalogued
 families — not a full-parity claim.
 
-### Periodic-face unification + STEP surface-root Boolean operands (2026-10-28, working tree)
+### Periodic-face unification + STEP surface-root Boolean operands (2026-10-28, landed `ff578f0`)
 
 Devin closed the two CAD05 residuals named in the entry below. In
 `_brep_merge_union_faces`, same-carrier members that share a result edge
