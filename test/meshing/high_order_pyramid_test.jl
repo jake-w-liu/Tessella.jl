@@ -241,12 +241,22 @@ end
 @testset "Pyramid14 bounded certificate resources" begin
     @test isbitstype(HO._P2JacInterval)
     @test size(HO._p2pyr_exact_coefficients(REFERENCE))==(6,6,4)
-    for value in (REFERENCE,WARPED,
-        ntuple(i->ntuple(d->REFERENCE[i][d]*1e-200,3),14),
-        ntuple(i->ntuple(d->REFERENCE[i][d]*1e200,3),14),
-        ntuple(i->(REFERENCE[i][1]*1e-200,REFERENCE[i][2]*1e200,REFERENCE[i][3]),14))
-        warmed_bytes(value)
-        @test warmed_bytes(value)==0
+    # The zero-allocation certificate contract only applies to compiled code:
+    # under --compile=min the interpreter boxes Float64 temporaries and the
+    # ntuple generator closures, so @allocated measures interpreter bookkeeping
+    # (~1.87 MB per cert call) rather than the certificate kernels
+    # (compile_enabled==3, the same gate runtests.jl and mesh3d_test.jl use to
+    # detect minimal compilation). Verified alloc-free for all five fixtures
+    # under normal compilation: each takes the interval fast path
+    # (bound.lo>0, never reaching the BigInt exact path) at 0 bytes.
+    if Base.JLOptions().compile_enabled != 3
+        for value in (REFERENCE,WARPED,
+            ntuple(i->ntuple(d->REFERENCE[i][d]*1e-200,3),14),
+            ntuple(i->ntuple(d->REFERENCE[i][d]*1e200,3),14),
+            ntuple(i->(REFERENCE[i][1]*1e-200,REFERENCE[i][2]*1e200,REFERENCE[i][3]),14))
+            warmed_bytes(value)
+            @test warmed_bytes(value)==0
+        end
     end
     @test boxed(Base.uncompressed_ast(only(methods(deliberate_box))))>0
     for symbol in names(HO;all=true)
