@@ -115,6 +115,30 @@ end
     @test damaged.next_tag==damaged_next_tag
 end
 
+@testset "same-domain merge — coincident boxes collapse doubled faces" begin
+    # Two identical boxes intersect: every kept face pair covers the SAME
+    # domain on the same carrier. `_brep_unify_union` must collapse each
+    # identical-domain set to ONE face (OCC's same-domain merge) — six
+    # boundary faces, not a doubled twelve — and the union path likewise.
+    model=GeoModel()
+    add_box!(model,0,0,0,1,1,1;tag=1)
+    add_box!(model,0,0,0,1,1,1;tag=2)
+    @test boolean_volumes!(model,:intersection,1,2;tag=3)==3
+    owned=sort!(unique!([abs(s) for shell in model.volumes[3]
+        for s in model.surface_loops[shell]]))
+    @test length(owned)==6
+    @test _snapshot_volume(mesh_model_volume(model,3))≈1.0 atol=1e-12
+
+    model2=GeoModel()
+    add_box!(model2,0,0,0,1,1,1;tag=1)
+    add_box!(model2,0,0,0,1,1,1;tag=2)
+    @test boolean_volumes!(model2,:union,1,2;tag=3)==3
+    owned2=sort!(unique!([abs(s) for shell in model2.volumes[3]
+        for s in model2.surface_loops[shell]]))
+    @test length(owned2)==6
+    @test _snapshot_volume(mesh_model_volume(model2,3))≈1.0 atol=1e-12
+end
+
 @testset "bounded .geo Boolean snapshots and selective Delete" begin
     execution=mktemp() do path,io
         write(io,"""
