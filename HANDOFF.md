@@ -12,7 +12,7 @@ small real fixtures. Full native-oracle sweeps, source/AST audits, memory stress
 benchmarks, the 22 HFSS cases, aggregate validation, and external ASCENT solves
 are opt-in campaigns. See [test/README.md](test/README.md).
 
-### Order-≥3 curved-cell whole-domain Jacobian certificates (2026-10-28)
+### Order-≥3 curved-cell whole-domain Jacobian certificates (2026-10-28, landed `9e64650`)
 
 Devin closed the HO01 certification gap for catalogued curved cells: the P2
 publication gate's semantics now cover every fixed-node family at order ≥2 via

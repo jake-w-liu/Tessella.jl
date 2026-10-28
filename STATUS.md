@@ -24,7 +24,7 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
-### Order-≥3 curved-cell whole-domain Jacobian certificates (2026-10-28, working tree)
+### Order-≥3 curved-cell whole-domain Jacobian certificates (2026-10-28, landed `9e64650`)
 
 The P2 certified-publication gate now extends to every catalogued curved family
 at order ≥2 through `_ho_cell_jacobian_verdict` (`APICellBezier.jl`): the
