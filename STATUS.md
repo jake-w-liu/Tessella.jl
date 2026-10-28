@@ -10614,3 +10614,46 @@ Receipts (Julia 1.12.7, `--compile=min -O0`): `io_surfacedeck_test.jl`
 `api_view_endpoints_test.jl` 25+12 pass; `api_pos_import_functional_test.jl`
 9+3+5+2+9 pass (previously 1 fail); view writer/time/alias/probe/model-data
 suites all pass.
+### GEO01 statement-error continuation diagnostics + PAR01 Region seed-ledger verification (2026-10-28)
+
+Two tracks verified on this pass; the PAR01 code landed on earlier commits
+(`1be2911`, `7adc0a1`, `3de35c4`, `d0dc4ef`) and was audited, not modified.
+
+- **GEO01 (landed in `526458e`)**: recoverable `.geo` statement errors now
+  emit upstream-style ``Error   : 'file', line N: message`` diagnostics and
+  execution continues with later statements, matching `Parser.cpp`/`Gmsh.y`
+  semantics. Line attribution reproduces the `YY_INPUT` scanner contract:
+  LF-terminated statements report their physical line while CRLF and
+  unterminated-EOF statements report one less (only `'\n'` advances
+  `gmsh_yylineno`); multiline statements report the terminator line;
+  `Include` resolves relative to the including file (`FixRelativePath`
+  path spelling preserved) and `Call` switches diagnostics to the
+  function's *defining* file for the body, restoring the caller
+  afterwards. Syntax/grammar errors, parser abort and fatal malformed
+  input keep their distinct channels; `SetFactory("bogus")` matches the
+  upstream `Warning : 'file', line 1: Unknown factory ...` verbatim.
+- **PAR01 audit**: RNG-consuming Region fills already detach under the
+  `Mesh.RandomSeed` ledger — each eligible consumer enters at the live
+  ledger position or an LCG jump-ahead over predicted predecessor draws
+  (`_parallel_lcg_skip`/`_parallel_volume_pred_draws`); the merge-time
+  seed-ledger check stays the sole authority and re-runs mispredicted or
+  dirty slots serially. Detached-state transport certified by audit:
+  `Model._model_mesh_transaction_copy` deep-copies the model (only the
+  `size_callback` Ref is shared and cannot diverge), and
+  `_parallel_model_foreign_writes` fieldwise-compares every model store —
+  `entity_names`, `physical*`, `periodic`, `embeds`, `discrete`,
+  `next_tag`, kernel records and all meshing attributes — so products
+  carrying `entity_data`, `partition_data`, physical names and periodic
+  links ride the receipt verbatim while any outside-footprint mutation
+  sends the slot back to the identical serial call.
+- Receipts (Julia 1.12.7, `--compile=min -O0`):
+  `geo_diagnostic_line_test.jl` 14/14; `geo_recoverable_add_test.jl` all
+  pass; `geo_struct_test.jl` all pass; `cli_test.jl` 229 pass incl. the
+  new file/line diagnostics testset 5/5 — all exit 0. Live Gmsh 4.15.2
+  oracle confirmed `line 0`/`line 1` on unterminated/LF single-line
+  fixtures and the `SetFactory` warning verbatim. Under `julia -t4`:
+  `api_parallel_surface_generation_test.jl` 28/28 (~14 min) and
+  `api_parallel_volume_generation_test.jl` 32/32 (~60 min) — identical
+  `mixed_crc`, serialized MSH4 bytes and `validate` under
+  `General.NumThreads=1` vs `4`, including the RNG-consuming explicit
+  Region cases. Bounded suites; no full P1–P6 parity claim.
