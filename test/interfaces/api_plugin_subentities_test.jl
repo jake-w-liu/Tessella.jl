@@ -64,7 +64,9 @@ const A=Tessella.API
         @test_throws ArgumentError A.model.get_entities_for_physical_group(1,6)
 
         # An empty input physical group reports the upstream diagnostic
-        # and produces no output.
+        # and produces no output. Upstream `Msg::Error` only returns
+        # (rather than throwing) when `General.AbortOnError` is 0.
+        A.option("General.AbortOnError",0)
         A.logger.start()
         A.plugin.set_number("MeshSubEntities","InputDimension",2)
         A.plugin.set_number("MeshSubEntities","InputPhysicalGroup",99)
@@ -77,6 +79,7 @@ const A=Tessella.API
                   msgs)
         @test_throws ArgumentError A.model.get_entities_for_physical_group(0,7)
     finally
+        A.option("General.AbortOnError",2)
         A.finalize()
     end
 end

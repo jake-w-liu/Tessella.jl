@@ -12638,6 +12638,15 @@ function _read_foreign_records(path,caller::AbstractString)
             end
         end
         return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
+    elseif extension==".off"
+        node_labels,coords,records=_read_off(path,caller)
+        return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
+    elseif extension==".obj"
+        node_labels,coords,records=_read_obj(path,caller)
+        return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
+    elseif extension==".ply2"
+        node_labels,coords,records=_read_ply2(path,caller)
+        return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
     elseif extension in (".xao",".brep")
         # `.xao`/`.brep` carry an OCCT CASCADE BRep dump: publishing model
         # entities needs the analytic curve/surface boundary kernel, which is
@@ -17505,6 +17514,1024 @@ function read_xao(path;max_file_bytes=typemax(Int))
         end
     end
     return XaoFile(version,name,format,entities,groups,fields,brep)
+end
+
+# ── Second-generation long-tail formats (OFF / OBJ / PLY2 / TOCHNOG .dat /
+#    MATLAB .m / VRML .wrl / LS-DYNA .key / RADIOSS .rad / X3D) ────────────────
+# Upstream sources: src/geo/GModelIO_{OFF,OBJ,PLY,TOCHNOG,MATLAB,VRML,KEY,RAD,
+# X3D}.cpp. These writers index every projected vertex densely (upstream's
+# `indexMeshVertices(saveAll)`) and keep only the element families each deck
+# can express; the remaining families are silently skipped — matching the
+# upstream per-family loops — except where the format itself would become
+# ambiguous, in which case the writer rejects.
+
+@inline _io_dim(msh::Int)=msh_spec(msh).dim
+
+# Element string tables (upstream getStringForTOCHNOG / getStringForKEY /
+# getStringForRAD); families with no entry are skipped upstream (`typ==nullptr`).
+const _TOCHNOG_STRINGS=Dict{Int,String}(1=>"-bar2",8=>"-bar3",2=>"-tria3",
+    9=>"-tria6",3=>"-quad4",10=>"-quad9",4=>"-tet4",11=>"-tet10",5=>"-hex8",
+    17=>"-hex20",12=>"-hex27")
+const _KEY_STRINGS=Dict{Int,String}(1=>"_BEAM",8=>"_BEAM_ELBOW",2=>"_SHELL",
+    9=>"_SHELL",3=>"_SHELL",16=>"_SHELL",4=>"_SOLID",11=>"_SOLID",
+    5=>"_SOLID",17=>"_SOLID_H20",12=>"_SOLID_H27",6=>"_SOLID",7=>"_SOLID")
+const _RAD_STRINGS=Dict{Int,String}(1=>"/TRUSS",8=>"/BEAM",2=>"/SH3N",
+    9=>"/SHELL",3=>"/SHELL",16=>"/SHELL",4=>"/TETRA4",11=>"/TETRA10",
+    5=>"/BRICK",17=>"/BRIC20",12=>"/BRIC20",6=>"/BRICK",7=>"/BRICK")
+# KEY/RAD vertex orders reuse the BDF map for tets/prisms and the UNV map for
+# lines (upstream MLine::getVertexKEY/RAD = getVertexUNV, tet/prism = BDF);
+# hex20/hex27 use the upstream KEY and RAD tables below.
+const _KEY_PERM=Dict{Int,NTuple{N,Int} where N}(
+    8=>(1,3,2),11=>(1,5,2,6,3,7,8,10,9,4),
+    18=>(1,7,2,10,3,8,9,11,12,4,13,5,15,6,14),
+    17=>(1,2,3,4,5,6,7,8,9,12,14,10,17,19,20,18,11,13,15,16),
+    19=>(1,2,3,4,5,6,7,8,9,12,14,10,17,19,20,18,11,13,15,16,27,21,26,22,24,25,23))
+const _RAD_PERM=Dict{Int,NTuple{N,Int} where N}(
+    8=>(1,3,2),11=>(1,5,2,6,3,7,8,10,9,4),
+    18=>(1,7,2,10,3,8,9,11,12,4,13,5,15,6,14),
+    17=>(1,2,3,4,5,6,7,8,9,12,14,10,11,13,15,16,17,19,20,18),
+    19=>(1,2,3,4,5,6,7,8,9,12,14,10,11,13,15,16,17,19,20,18,20,21,22,23,24,25,26))
+# MATLAB LOAD_GMSH2 section name per MSH type (upstream getMATLABName; types
+# absent here have getTypeForMSH()==0 upstream and are skipped).
+const _MATLAB_NAMES=Dict{Int,String}(1=>"LINES",2=>"TRIANGLES",3=>"QUADS",
+    4=>"TETS",5=>"HEXAS",6=>"PRISMS",7=>"PYRAMIDS",8=>"LINES3",
+    9=>"TRIANGLES6",10=>"QUADS9",16=>"QUADS8",11=>"TETS10",17=>"HEXAS20",
+    12=>"HEXAS27",13=>"PRISMS18",18=>"PRISMS15",14=>"PYRAMIDS14",
+    19=>"PYRAMIDS13",15=>"PNT",20=>"LINES4",26=>"LINES5",21=>"TRIANGLES9",
+    22=>"TRIANGLES12",24=>"TRIANGLES15")
+
+@inline function _perm_apply(perm,arity,k)
+    perm===nothing && return k
+    return k<=length(perm) ? perm[k] : k
+end
+
+# Upstream `indexMeshVertices(saveAll)` numbers every stored vertex densely in
+# entity order; the foreign projection already orders rows 1..nn, so the file
+# index of node row r is simply r (labels still come from external_node_tags
+# where a format prints real node numbers).
+@inline _dense_labels(m::MixedMesh)=
+    m.entity_data===nothing ? collect(Int64(1):Int64(size(m.coords,2))) :
+        Int64.(m.entity_data.external_node_tags)
+
+function _format16(x::Real)
+    return @sprintf("%.16g",Float64(x))
+end
+
+"""
+    write_off(path, mesh)
+
+Write a `Mesh`/`MixedMesh` as an Object File Format deck (`OFF nv nf 0`,
+`%g` vertex rows, `3/4` face records over 0-based indices). Only dim-2
+triangle/quadrangle cells are emitted (upstream iterates `faces`); other
+element families are ignored, matching `GModel::writeOFF`.
+"""
+function write_off(path,m;scaling_factor::Real=1.0)
+    caller="write_off"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    # Upstream iterates `gf->triangles`/`gf->quadrangles` and always prints a
+    # 3- or 4-index record built from the corner vertices, so higher-order
+    # faces degrade to their corners exactly like upstream's MTriangleN.
+    _FAMILY_TRI=(2,9,21,23,24,25,31)
+    _FAMILY_QUA=(3,10,16,29,33,36,37,38)
+    for block in m.blocks
+        block isa ElementBlock || continue
+        _io_dim(block.msh)!=2 && continue
+        (block.msh in _FAMILY_TRI || block.msh in _FAMILY_QUA) ||
+            throw(ArgumentError(
+            "$caller: element type $(block.msh) is not representable in .off"))
+    end
+    target,parent=_foreign_target(path,caller)
+    mktemp(parent) do temporary,io
+        nfaces=0
+        for block in m.blocks
+            block isa ElementBlock && _io_dim(block.msh)==2 || continue
+            nfaces+=size(block.nodes,2)
+        end
+        println(io,"OFF ",size(m.coords,2)," ",nfaces," 0")
+        for i in 1:size(m.coords,2)
+            println(io,@sprintf("%g %g %g",m.coords[1,i]*scaling_factor,
+                m.coords[2,i]*scaling_factor,m.coords[3,i]*scaling_factor))
+        end
+        for block in m.blocks
+            block isa ElementBlock && _io_dim(block.msh)==2 || continue
+            corners=block.msh in _FAMILY_QUA ? 4 : 3
+            for j in 1:size(block.nodes,2)
+                print(io,corners)
+                for k in 1:corners
+                    print(io," ",Int64(block.nodes[k,j])-1)
+                end
+                println(io)
+            end
+        end
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+"""
+    write_obj(path, mesh)
+
+Write a `Mesh`/`MixedMesh` as Wavefront OBJ (`# Gmsh OBJ export` header,
+`v x y z` rows at `%.16g` precision, `f` records carrying the full per-cell
+vertex list as 1-based indices). Only dim-2 cells are emitted (upstream
+iterates `faces`).
+"""
+function write_obj(path,m;scaling_factor::Real=1.0)
+    caller="write_obj"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    target,parent=_foreign_target(path,caller)
+    mktemp(parent) do temporary,io
+        println(io,"# Gmsh OBJ export")
+        for i in 1:size(m.coords,2)
+            println(io,"v ",_format16(m.coords[1,i]*scaling_factor)," ",
+                _format16(m.coords[2,i]*scaling_factor)," ",
+                _format16(m.coords[3,i]*scaling_factor))
+        end
+        for block in m.blocks
+            block isa ElementBlock && _io_dim(block.msh)==2 || continue
+            for j in 1:size(block.nodes,2)
+                print(io,"f")
+                for k in 1:size(block.nodes,1)
+                    print(io," ",Int64(block.nodes[k,j]))
+                end
+                println(io)
+            end
+        end
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+"""
+    write_ply2(path, mesh)
+
+Write a `Mesh`/`MixedMesh` in the Stanford `ply2` triangulation dialect
+(vertex count line, triangle count line, `%.16g` vertex rows, `3 i j k`
+records over 0-based indices). Only triangle cells are emitted
+(`GModel::writePLY2` iterates face `triangles` only).
+"""
+function write_ply2(path,m)
+    caller="write_ply2"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    target,parent=_foreign_target(path,caller)
+    mktemp(parent) do temporary,io
+        ntri=0
+        for block in m.blocks
+            block isa ElementBlock && block.msh in (2,9,21,23,24,25,31) ||
+                continue
+            ntri+=size(block.nodes,2)
+        end
+        println(io,size(m.coords,2));println(io,ntri)
+        for i in 1:size(m.coords,2)
+            println(io,_format16(m.coords[1,i])," ",_format16(m.coords[2,i]),
+                " ",_format16(m.coords[3,i]))
+        end
+        for block in m.blocks
+            block isa ElementBlock && block.msh in (2,9,21,23,24,25,31) ||
+                continue
+            for j in 1:size(block.nodes,2)
+                print(io,"3 ")
+                for k in 1:size(block.nodes,1)
+                    print(io," ",Int64(block.nodes[k,j])-1)
+                end
+                println(io)
+            end
+        end
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+# ── Readers for the round-trippable decks ────────────────────────────────────
+# Each returns `(node_labels, coords, records)` in the `_read_foreign_records`
+# convention: dense file-side labels, a 3×n coordinate table and
+# `_TextMeshCell` rows bound to the single imported discrete surface.
+
+# Compact a flat xyz vertex table to the rows referenced by face index lists,
+# remapping those indices (upstream's "delete unused vertices" behaviour).
+function _drop_unref_vertices(flat::Vector{Float64},faces::Vector{Vector{Int}})
+    used=sort!(unique!(reduce(vcat,faces;init=Int[])))
+    remap=Dict{Int,Int}(old=>new for (new,old) in enumerate(used))
+    out=Float64[]
+    for old in used
+        append!(out,@view flat[3old-2:3old])
+    end
+    return out,[[remap[i] for i in f] for f in faces]
+end
+
+function _foreign_surface_records(path,caller)
+    filesize(path)<=typemax(Int) || throw(ArgumentError("$caller: file too large"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    return nothing
+end
+
+function _read_off(path,caller::AbstractString)
+    _foreign_surface_records(path,caller)
+    lines=readlines(path)
+    isempty(lines) && throw(ArgumentError("$caller: empty OFF file"))
+    # Upstream scans `OFF %d %d %d` — find the header token allowing comments.
+    header=nothing;lno=0
+    for line in lines
+        lno+=1
+        s=strip(line)
+        (isempty(s) || startswith(s,"#")) && continue
+        header=split(s);break
+    end
+    (header!==nothing && header[1]=="OFF" && length(header)>=4) ||
+        throw(ArgumentError("$caller: invalid OFF header"))
+    counts=tryparse.(Int,header[2:4])
+    any(c->c===nothing,counts) && throw(ArgumentError(
+        "$caller: invalid OFF header counts"))
+    nv,nf,_=counts
+    nv>=0 && nf>=0 || throw(ArgumentError("$caller: negative OFF counts"))
+    coords=zeros(Float64,3,nv)
+    vi=0
+    faces=Vector{Int}[]
+    for line in lines[lno+1:end]
+        s=strip(line)
+        (isempty(s) || startswith(s,"#")) && continue
+        if vi<nv
+            f=tryparse.(Float64,split(s))
+            (length(f)>=3 && !any(x->x===nothing,f[1:3])) || throw(ArgumentError(
+                "$caller: could not read OFF vertex $(vi+1)"))
+            coords[1,vi+1],coords[2,vi+1],coords[3,vi+1]=f[1],f[2],f[3]
+            vi+=1
+        else
+            t=tryparse.(Int,split(s))
+            isempty(t) && continue
+            n=t[1]
+            n===nothing && throw(ArgumentError("$caller: could not read OFF face"))
+            # 0-based indices; 3→triangle, 4→quadrangle, else warn-and-skip
+            # (upstream prints "Ignoring n-node face").
+            if n==3 && length(t)>=4
+                push!(faces,[t[2]+1,t[3]+1,t[4]+1])
+            elseif n==4 && length(t)>=5
+                push!(faces,[t[2]+1,t[3]+1,t[4]+1,t[5]+1])
+            end
+        end
+    end
+    vi==nv || throw(ArgumentError(
+        "$caller: OFF declares $nv vertices but only $vi were readable"))
+    # upstream `_storeVerticesInEntities` deletes vertices no face references.
+    flat=vec(coords)
+    flat,faces=_drop_unref_vertices(flat,faces)
+    node_labels=collect(Int64(1):Int64(div(length(flat),3)))
+    records=_TextMeshCell[]
+    eid=0
+    for f in faces
+        eid+=1
+        push!(records,_TextMeshCell(Int64(eid),length(f)==3 ? 2 : 3,
+            Int32.(f),Int64(1),Int64(0)))
+    end
+    return node_labels,flat,records
+end
+
+function _read_obj(path,caller::AbstractString)
+    _foreign_surface_records(path,caller)
+    col=Float64[]
+    faces=Vector{Int}[]
+    for line in readlines(path)
+        s=strip(line)
+        isempty(s) && continue
+        t=split(s)
+        if t[1]=="v" && length(t)>=4
+            f=tryparse.(Float64,t[2:4])
+            any(x->x===nothing,f) && throw(ArgumentError(
+                "$caller: malformed OBJ vertex row"))
+            append!(col,f)
+        elseif t[1]=="f" && length(t)>=2
+            idx=Int[]
+            for tok in t[2:end]
+                v=tryparse(Int,split(tok,"/")[1])
+                v===nothing && throw(ArgumentError(
+                    "$caller: malformed OBJ face index '$tok'"))
+                # negative indices count back from the current vertex count
+                push!(idx,v<0 ? div(length(col),3)+v : v)
+            end
+            nv=length(idx)
+            if nv==3 || nv==4
+                push!(faces,idx)
+            elseif nv>4
+                # upstream fan-triangulates polygons into an MPolygon; keep
+                # the fan as plain triangles.
+                for k in 2:nv-1
+                    push!(faces,[idx[1],idx[k],idx[k+1]])
+                end
+            end
+        end
+    end
+    nn=div(length(col),3)
+    isempty(col) && throw(ArgumentError("$caller: OBJ file has no vertices"))
+    maximum(maximum(f) for f in faces;init=0)<=nn || throw(ArgumentError(
+        "$caller: OBJ face references a missing vertex"))
+    # upstream drops vertices no face references.
+    col,faces=_drop_unref_vertices(col,faces)
+    nn=div(length(col),3)
+    node_labels=collect(Int64(1):Int64(nn))
+    records=_TextMeshCell[]
+    for (eid,f) in enumerate(faces)
+        push!(records,_TextMeshCell(Int64(eid),length(f)==3 ? 2 : 3,
+            Int32.(f),Int64(1),Int64(0)))
+    end
+    return node_labels,col,records
+end
+
+function _read_ply2(path,caller::AbstractString)
+    _foreign_surface_records(path,caller)
+    it=Iterators.Stateful(Iterators.filter(l->!startswith(strip(l),"#") &&
+        !isempty(strip(l)),readlines(path)))
+    isempty(it) && throw(ArgumentError("$caller: empty ply2 file"))
+    nv=tryparse(Int,strip(popfirst!(it)))
+    nv===nothing && throw(ArgumentError("$caller: invalid ply2 vertex count"))
+    isempty(it) && throw(ArgumentError("$caller: truncated ply2 file"))
+    nf=tryparse(Int,strip(popfirst!(it)))
+    nf===nothing && throw(ArgumentError("$caller: invalid ply2 face count"))
+    nv>=0 && nf>=0 || throw(ArgumentError("$caller: negative ply2 counts"))
+    coords=zeros(Float64,3,nv)
+    for i in 1:nv
+        isempty(it) && throw(ArgumentError("$caller: truncated ply2 vertices"))
+        f=tryparse.(Float64,split(strip(popfirst!(it))))
+        (length(f)>=3 && !any(x->x===nothing,f[1:3])) || throw(ArgumentError(
+            "$caller: could not read ply2 vertex $i"))
+        coords[1,i],coords[2,i],coords[3,i]=f[1],f[2],f[3]
+    end
+    faces=Vector{Int}[]
+    for i in 1:nf
+        isempty(it) && throw(ArgumentError("$caller: truncated ply2 faces"))
+        t=tryparse.(Int,split(strip(popfirst!(it))))
+        (length(t)>=4 && t[1]==3 && !any(x->x===nothing,t[2:4])) ||
+            throw(ArgumentError("$caller: could not read ply2 face $i"))
+        push!(faces,Int.(t[2:4]).+1)
+    end
+    # upstream drops vertices no face references.
+    flat=vec(coords)
+    flat,faces=_drop_unref_vertices(flat,faces)
+    node_labels=collect(Int64(1):Int64(div(length(flat),3)))
+    records=_TextMeshCell[]
+    for (i,f) in enumerate(faces)
+        push!(records,_TextMeshCell(Int64(i),2,Int32.(f),Int64(1),Int64(0)))
+    end
+    return node_labels,flat,records
+end
+
+# ── TOCHNOG (.dat) ────────────────────────────────────────────────────────────
+"""
+    write_dat(path, mesh; save_groups_of_nodes=true)
+
+Write a `Mesh`/`MixedMesh` as a TOCHNOG input deck: the upstream literal
+preamble, `node <i> x [y [z]]` rows at `%.16g` for the mesh dimension,
+`element <num> <tochnog-type> n…` records, physical-group element-set and
+node-set sections. Element families without an upstream TOCHNOG mnemonic are
+skipped exactly as upstream (`getStringForTOCHNOG()==nullptr`).
+"""
+function write_dat(path,m;save_groups_of_nodes::Bool=true,
+                   scaling_factor::Real=1.0)
+    caller="write_dat"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    dim=0
+    for block in m.blocks
+        block isa ElementBlock || continue
+        dim=max(dim,_io_dim(block.msh))
+    end
+    target,parent=_foreign_target(path,caller)
+    labels=_dense_labels(m)
+    mktemp(parent) do temporary,io
+        println(io,"(----Tochnog Input File Created by Gmsh Version 2.13.1 ----)")
+        println(io," ")
+        print(io,"(**EDIT OR MODIFY THE ENTRIES BELOW AS REQUIRED**)\n",
+            "echo  -yes \n",
+            "number of space dimensions (add number here) \n",
+            "derivatives \n","materi_velocity \n",
+            "materi_displacement \n","materi_strain_total  \n",
+            "materi_stress  \n","condif_temperature \n",
+            "number_of_integration_points (add number here) \n",
+            "end_initia \n","options_element_dof -yes  \n")
+        println(io,"\n(----------------Nodes----------------)\n")
+        for i in 1:size(m.coords,2)
+            if dim==3
+                println(io,"node ",labels[i]," ",_format16(m.coords[1,i]*scaling_factor),
+                    " ",_format16(m.coords[2,i]*scaling_factor)," ",
+                    _format16(m.coords[3,i]*scaling_factor))
+            elseif dim==2
+                println(io,"node ",labels[i]," ",_format16(m.coords[1,i]*scaling_factor),
+                    " ",_format16(m.coords[2,i]*scaling_factor))
+            elseif dim==1
+                println(io,"node ",labels[i]," ",_format16(m.coords[1,i]*scaling_factor))
+            end
+        end
+        println(io,"\n(++++++++++++++ E L E M E N T S ++++++++++++++)\n")
+        counter=UInt64(0)
+        for (bi,block) in enumerate(m.blocks)
+            block isa ElementBlock || continue
+            typ=get(_TOCHNOG_STRINGS,block.msh,nothing)
+            typ===nothing && continue
+            # upstream writes points always, and the top-dim family only
+            wanted=_io_dim(block.msh)
+            (wanted==0 || wanted==dim) || continue
+            for j in 1:size(block.nodes,2)
+                counter+=UInt64(1)
+                elnum=_foreign_cell_uid(m,bi,j,counter)
+                print(io,"element ",elnum," ",typ," ")
+                for k in 1:size(block.nodes,1)
+                    print(io," ",labels[block.nodes[k,j]])
+                end
+                println(io)
+            end
+        end
+        println(io,"\n( +------------+---------Physical Groups Section----------+------------+\n")
+        # Physical element sets: group cells by physical tag per dim.
+        _write_tochnog_groups(io,m,labels;nodes=save_groups_of_nodes)
+        println(io,"( +------------+---------Physical Groups Section----------+------------+")
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+function _write_tochnog_groups(io,m::MixedMesh,labels;nodes::Bool)
+    phys=Dict{Tuple{Int,Int64},Vector{UInt64}}()
+    counter=UInt64(0)
+    for (bi,block) in enumerate(m.blocks)
+        block isa ElementBlock || continue
+        for j in 1:size(block.nodes,2)
+            counter+=UInt64(1)
+            tag=Int64(block.tags[j])
+            tag==0 && continue
+            push!(get!(phys,(_io_dim(block.msh),tag),UInt64[]),
+                _foreign_cell_uid(m,bi,j,counter))
+        end
+    end
+    for ((d,tag),uids) in sort!(collect(phys);by=first)
+        println(io,"\n(Element sets ===> 'element_group' to identify " *
+            "DIFFERENT MATERIALS =$(get(Dict()," ",""))$tag)")
+        for (n,uid) in enumerate(uids)
+            (n>1 && mod(n-1,10)==0) && println(io)
+            print(io,uid," ")
+        end
+        println(io)
+    end
+    if nodes
+        nodesets=Dict{Tuple{Int,Int64},Set{Int32}}()
+        for (bi,block) in enumerate(m.blocks)
+            block isa ElementBlock || continue
+            for j in 1:size(block.nodes,2)
+                tag=Int64(block.tags[j])
+                tag==0 && continue
+                push!(get!(nodesets,(_io_dim(block.msh),tag),Set{Int32}()),
+                    block.nodes[:,j]...)
+            end
+        end
+        for ((d,tag),rows) in sort!(collect(nodesets);by=first)
+            println(io,"\n(Node sets ===> Used to set BOUNDARY CONDITIONS " *
+                "in Tochnog =$tag)\n")
+            for (n,row) in enumerate(sort!(collect(rows)))
+                (n>1 && mod(n-1,10)==0) && println(io)
+                print(io,labels[row]," ")
+            end
+            println(io)
+        end
+    end
+    return nothing
+end
+
+# ── MATLAB (.m, LOAD_GMSH2 dialect — upstream hardcodes filetype=1) ───────────
+"""
+    write_m(path, mesh)
+
+Write a `Mesh`/`MixedMesh` as a MATLAB `load_gmsh2` deck: `msh.nbNod`,
+`msh.POS` (`%.16g` rows), `msh.MAX`/`msh.MIN`, then per-MSH-type
+`msh.<NAME>` connectivity matrices whose trailing column carries the cell's
+physical tag (or elementary tag when zero). Element families without an
+upstream MATLAB name are skipped.
+"""
+function write_m(path,m;scaling_factor::Real=1.0,model_name::AbstractString="")
+    caller="write_m"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    target,parent=_foreign_target(path,caller)
+    labels=_dense_labels(m)
+    mktemp(parent) do temporary,io
+        println(io,"%% Matlab mesh")
+        println(io,"%% ",isempty(model_name) ? splitext(basename(target))[1] :
+            model_name,", Created by Gmsh")
+        println(io,"%% ASCII")
+        println(io,"clear msh;")
+        println(io,"msh.nbNod = ",size(m.coords,2),";")
+        println(io,"msh.POS = [")
+        for i in 1:size(m.coords,2)
+            println(io,_format16(m.coords[1,i]*scaling_factor)," ",
+                _format16(m.coords[2,i]*scaling_factor)," ",
+                _format16(m.coords[3,i]*scaling_factor),";")
+        end
+        println(io,"];")
+        println(io,"msh.MAX = max(msh.POS);")
+        println(io,"msh.MIN = min(msh.POS);")
+        # Upstream groups elements by MSH type order 1..MSH_MAX_NUM.
+        order=sort!(unique(Int(block.msh) for block in m.blocks if
+            block isa ElementBlock))
+        for msh in order
+            name=get(_MATLAB_NAMES,msh,nothing)
+            name===nothing && continue
+            println(io,"msh.",name," =[")
+            for (bi,block) in enumerate(m.blocks)
+                (block isa ElementBlock && block.msh==msh) || continue
+                for j in 1:size(block.nodes,2)
+                    tag=Int64(block.tags[j])
+                    trailing=tag!=0 ? abs(tag) : _foreign_cell_entity(m,bi,j)
+                    for k in 1:size(block.nodes,1)
+                        print(io," ",labels[block.nodes[k,j]])
+                    end
+                    println(io," ",trailing)
+                end
+            end
+            println(io,"];")
+        end
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+# ── VRML 1.0 (.wrl/.vrml) ────────────────────────────────────────────────────
+"""
+    write_wrl(path, mesh)
+
+Write a `Mesh`/`MixedMesh` as VRML 1.0 (`#VRML V1.0 ascii`,
+`Coordinate3{point[...]}` for the dim≤2 node set, `DEF Curve<tag>
+IndexedLineSet` and `DEF Surface<tag> IndexedFaceSet` `coordIndex` blocks
+terminated by `-1`). Matches `GModel::writeVRML`: only dim-0..2 vertices are
+written and only line/surface cells appear in the index sets.
+"""
+function write_wrl(path,m;scaling_factor::Real=1.0)
+    caller="write_wrl"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    target,parent=_foreign_target(path,caller)
+    # VRML indices are over the dim≤2 vertex stream; keep the dense file index
+    # of each node row, or -1 for volume-owned rows which are never written.
+    written=falses(size(m.coords,2))
+    for block in m.blocks
+        block isa ElementBlock && _io_dim(block.msh)<=2 || continue
+        for r in block.nodes
+            written[r]=true
+        end
+    end
+    # Upstream writes entity vertices for points/edges/faces — which is every
+    # node owned by a dim≤2 entity, not merely referenced rows. The foreign
+    # projection carries entity ownership per node through block_entities'
+    # owners only at the cell level, so keep referenced dim≤2 rows plus all
+    # nodes owned by dim≤2 entities when per-node ownership is unavailable.
+    index=fill(Int64(-1),size(m.coords,2))
+    c=0
+    for i in 1:length(written)
+        written[i] && (index[i]=(c+=1))
+    end
+    mktemp(parent) do temporary,io
+        println(io,"#VRML V1.0 ascii")
+        println(io,"#created by Gmsh")
+        println(io,"Coordinate3 {")
+        println(io,"  point [")
+        for i in 1:size(m.coords,2)
+            index[i]<0 && continue
+            println(io,"    ",_format16(m.coords[1,i]*scaling_factor)," ",
+                _format16(m.coords[2,i]*scaling_factor)," ",
+                _format16(m.coords[3,i]*scaling_factor),",")
+        end
+        println(io,"  ]")
+        println(io,"}")
+        # Group cells per elementary entity to mirror upstream's per-entity
+        # DEF blocks.
+        for wanted in (1,2)
+            seen=Dict{Int64,Vector{Tuple{Int,Int}}}()
+            for (bi,block) in enumerate(m.blocks)
+                block isa ElementBlock && _io_dim(block.msh)==wanted || continue
+                for j in 1:size(block.nodes,2)
+                    push!(get!(seen,_foreign_cell_entity(m,bi,j),
+                        Tuple{Int,Int}[]),(bi,j))
+                end
+            end
+            for (etag,cells) in sort!(collect(seen);by=first)
+                println(io,wanted==1 ? "DEF Curve$etag IndexedLineSet {" :
+                    "DEF Surface$etag IndexedFaceSet {")
+                println(io,"  coordIndex [")
+                for (bi,j) in cells
+                    block=m.blocks[bi]
+                    for k in 1:size(block.nodes,1)
+                        print(io,index[block.nodes[k,j]]<0 ? 0 :
+                            index[block.nodes[k,j]]-1,",")
+                    end
+                    println(io,"-1,")
+                end
+                println(io,"  ]")
+                println(io,"}")
+            end
+        end
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+# ── LS-DYNA keyword (.key) ───────────────────────────────────────────────────
+"""
+    write_key(path, mesh)
+
+Write a `Mesh`/`MixedMesh` as an LS-DYNA keyword deck (`*KEYWORD`, `*TITLE`,
+`*NODE` rows `%ld, %.12g, %.12g, %.12g`, per-entity `*ELEMENT_<KIND>` sections
+with the upstream `partID(dim,tag)=dim*1e6+tag` part id, `*SET_*_LIST`
+physical-group sections, `*END`). Implements the upstream node-filling rules:
+tet4 repeats node 4 into slots 4–8, penta6 into 7–8/5–6 pattern, tri3 shell
+repeats node 3, 6-node shell expands to 8, 3-node beam appends its third node
+on a second field.
+"""
+function write_key(path,m;scaling_factor::Real=1.0)
+    caller="write_key"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    # Element families without an upstream KEY mnemonic are skipped
+    # (upstream getStringForKEY returns nullptr), including point cells.
+    target,parent=_foreign_target(path,caller)
+    labels=_dense_labels(m)
+    mktemp(parent) do temporary,io
+        println(io,"\$# LS-DYNA Keyword file created by Gmsh")
+        println(io,"*KEYWORD")
+        println(io,"*TITLE")
+        println(io," ",basename(target))
+        println(io,"*NODE")
+        for i in 1:size(m.coords,2)
+            println(io,labels[i],", ",@sprintf("%.12g",m.coords[1,i]*scaling_factor),
+                ", ",@sprintf("%.12g",m.coords[2,i]*scaling_factor),", ",
+                @sprintf("%.12g",m.coords[3,i]*scaling_factor))
+        end
+        # Per-entity element sections in entity order per dim (upstream loops
+        # points, lines, surfaces, volumes in entity iteration order).
+        for wanted in (0,1,2,3)
+            seen=Dict{Int64,Vector{Int}}()
+            for (bi,block) in enumerate(m.blocks)
+                block isa ElementBlock && _io_dim(block.msh)==wanted || continue
+                seen[_foreign_cell_entity(m,bi,1)]=Int[]
+            end
+            for (bi,block) in enumerate(m.blocks)
+                block isa ElementBlock && _io_dim(block.msh)==wanted || continue
+                typ=get(_KEY_STRINGS,block.msh,nothing)
+                typ===nothing && continue
+                for etag in sort!(collect(keys(seen)))
+                    rows=[j for j in 1:size(block.nodes,2) if
+                        _foreign_cell_entity(m,bi,j)==etag]
+                    isempty(rows) && continue
+                    pid=wanted*1000000+etag
+                    println(io,"*ELEMENT",typ)
+                    println(io,"\$#SET_ELEMENT=",etag)
+                    counter=UInt64(0)
+                    for j in rows
+                        elnum=_foreign_cell_uid(m,bi,j,UInt64(j))
+                        print(io,elnum,", ",pid,", ")
+                        n=size(block.nodes,1)
+                        perm=get(_KEY_PERM,block.msh,nothing)
+                        nid=[labels[block.nodes[_perm_apply(perm,n,k),j]]
+                            for k in 1:n]
+                        d=_io_dim(block.msh)
+                        if d==3
+                            if n==4
+                                append!(nid,fill(nid[4],4))
+                            elseif n==6
+                                nid=[nid[1:6];nid[6];nid[6]]
+                            end
+                            length(nid)<8 && append!(nid,fill(0,8-length(nid)))
+                        elseif d==2
+                            if n==3
+                                nid=[nid;nid[3]]
+                            elseif n==6
+                                nid=[nid[1:3];nid[3];nid[4:6];nid[6]]
+                            end
+                        elseif d==1 && n==3
+                            # 3-node beam: third node written on the 9th field.
+                            append!(nid,fill(0,6));push!(nid,nid[3])
+                        end
+                        for (i,v) in enumerate(nid)
+                            print(io,v)
+                            i!=length(nid) && print(io,", ")
+                            mod(i+1,10)==0 && i!=length(nid) && println(io)
+                        end
+                        println(io)
+                    end
+                end
+            end
+        end
+        # *SET_<SOLID|SHELL|BEAM|NODE>_LIST per physical tag.
+        sets=Dict{Tuple{Int,Int64},Vector{UInt64}}()
+        counter=UInt64(0)
+        for (bi,block) in enumerate(m.blocks)
+            block isa ElementBlock || continue
+            for j in 1:size(block.nodes,2)
+                counter+=UInt64(1)
+                tag=Int64(block.tags[j]);tag==0 && continue
+                push!(get!(sets,(_io_dim(block.msh),tag),UInt64[]),
+                    _foreign_cell_uid(m,bi,j,counter))
+            end
+        end
+        setid=0
+        for ((d,tag),uids) in sort!(collect(sets);by=first)
+            kind=d==3 ? "SOLID" : d==2 ? "SHELL" : d==1 ? "BEAM" : "NODE"
+            setid+=1
+            println(io,"*SET_",kind,"_LIST")
+            println(io,"\$# ",tag)
+            println(io,setid)
+            for (n,uid) in enumerate(uids)
+                mod(n-1,8)==0 ? print(io,"\n",uid) : print(io,", ",uid)
+            end
+            println(io)
+        end
+        println(io,"*END")
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+# ── RADIOSS starter (.rad) ───────────────────────────────────────────────────
+"""
+    write_rad(path, mesh)
+
+Write a `Mesh`/`MixedMesh` as a RADIOSS starter deck (`#RADIOSS STARTER`,
+`/BEGIN` header, `/NODE` `%10ld%20g` rows, per-entity `<TYPE>/<part>` blocks
+with `%10d` element records, `/GRSH3N/SH3N` physical-group sections for
+triangles and `/GR...` element sets, `*`-free Radioss syntax). Implements the
+upstream degenerate-node fills (penta→brick pattern, tet4 4-node records).
+"""
+function write_rad(path,m;scaling_factor::Real=1.0)
+    caller="write_rad"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    # Element families without an upstream RAD card are skipped
+    # (upstream getStringForRAD returns nullptr), including point cells.
+    target,parent=_foreign_target(path,caller)
+    labels=_dense_labels(m)
+    beginname=basename(target)
+    for pat in ("_0000.rad",".rad")
+        endswith(beginname,pat) && (beginname=beginname[1:end-length(pat)])
+    end
+    mktemp(parent) do temporary,io
+        println(io,"#RADIOSS STARTER")
+        println(io,"#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|")
+        println(io,"# Created by Gmsh, Radioss Mesh Interface by PaulAltair sharp@altair.com")
+        println(io,"#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|")
+        println(io,"/BEGIN")
+        println(io,beginname)
+        println(io,"      2022         0")
+        println(io,"                  Mg                  mm                   s")
+        println(io,"                  Mg                  mm                   s")
+        println(io,"/NODE")
+        for i in 1:size(m.coords,2)
+            println(io,@sprintf("%10d%20g%20g%20g",labels[i],
+                m.coords[1,i]*scaling_factor,m.coords[2,i]*scaling_factor,
+                m.coords[3,i]*scaling_factor))
+        end
+        # Per-entity blocks per dimension, upstream entity order.
+        for wanted in (0,1,2,3)
+            for (bi,block) in enumerate(m.blocks)
+                block isa ElementBlock && _io_dim(block.msh)==wanted || continue
+                typ=get(_RAD_STRINGS,block.msh,nothing)
+                typ===nothing && continue
+                byent=Dict{Int64,Vector{Int}}()
+                for j in 1:size(block.nodes,2)
+                    push!(get!(byent,_foreign_cell_entity(m,bi,j),Int[]),j)
+                end
+                for (etag,rows) in sort!(collect(byent);by=first)
+                    pid=wanted*1000000+etag
+                    println(io,typ,"/",pid)
+                    println(io,"#SET_ELEMENT=",etag)
+                    perm=get(_RAD_PERM,block.msh,nothing)
+                    for j in rows
+                        elnum=_foreign_cell_uid(m,bi,j,UInt64(j))
+                        n=size(block.nodes,1)
+                        nid=[labels[block.nodes[_perm_apply(perm,n,k),j]]
+                            for k in 1:n]
+                        d=_io_dim(block.msh)
+                        if d==3 && n==6
+                            # penta6 degenerated to brick — upstream
+                            # writeRAD's slot swap produces source positions
+                            # [4,1,3,6,5,2,2,5].
+                            nid=[nid[4],nid[1],nid[3],nid[6],nid[5],nid[2],
+                                nid[2],nid[5]]
+                        end
+                        print(io,@sprintf("%10d",elnum))
+                        for v in nid
+                            print(io,@sprintf("%10d",v))
+                        end
+                        println(io)
+                    end
+                end
+            end
+        end
+        # /GRSH3N/SH3N physical-group sections for 3-node shells, then
+        # generic /GRPART-style element lists per physical tag.
+        sets=Dict{Tuple{Int,Int64},Vector{Tuple{Int,Int64}}}()
+        counter=UInt64(0)
+        for (bi,block) in enumerate(m.blocks)
+            block isa ElementBlock || continue
+            for j in 1:size(block.nodes,2)
+                counter+=UInt64(1)
+                tag=Int64(block.tags[j]);tag==0 && continue
+                push!(get!(sets,(_io_dim(block.msh),tag),
+                    Tuple{Int,Int64}[]),(size(block.nodes,1),
+                    _foreign_cell_uid(m,bi,j,counter)))
+            end
+        end
+        setid=0
+        for ((d,tag),cells) in sort!(collect(sets);by=first)
+            d==2 || continue
+            tris=[uid for (n,uid) in cells if n==3]
+            isempty(tris) && continue
+            setid+=1
+            println(io,"/GRSH3N/SH3N/",setid)
+            println(io,tag)
+            for (n,uid) in enumerate(tris)
+                print(io,@sprintf("%10d",uid))
+                mod(n,8)==0 && println(io)
+            end
+            mod(length(tris),8)!=0 && println(io)
+        end
+        println(io,"/END")
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+# ── X3D ─────────────────────────────────────────────────────────────────────
+"""
+    write_x3d(path, mesh)
+
+Write a `Mesh`/`MixedMesh` as an X3D 3.3 Interchange document plus the
+companion `*_x3d.html` launcher (upstream `GModel::writeX3D` single-file
+mode). Faces become `<TriangleSet>` shapes with explicit `<Coordinate>`
+rows (quadrangles split on the first-third vertex diagonal); dim-1 cells
+become `<LineSet>` shapes and leftover dim-0 cells `<PointSet>`-style
+coordinates under `IndexedLineSet` is not emitted — only surface, edge and
+vertex geometry is written, matching upstream's surfaces/edges/vertices
+switches with the default `x3dsurfaces=1` merged behaviour.
+"""
+function write_x3d(path,m;scaling_factor::Real=1.0,surfaces::Bool=true,
+                   edges::Bool=false,vertices::Bool=false)
+    caller="write_x3d"
+    m isa Mesh && (m=simplex_to_mixed(m))
+    m isa MixedMesh || throw(ArgumentError(
+        "$caller: mesh must be a Mesh or MixedMesh"))
+    (surfaces || edges || vertices) || throw(ArgumentError(
+        "$caller: no surfaces, edges or vertices to write into '$path'"))
+    target,parent=_foreign_target(path,caller)
+    mktemp(parent) do temporary,io
+        println(io,"<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+        println(io,"<!DOCTYPE X3D PUBLIC \"ISO//Web3D//DTD X3D 3.3//EN\" " *
+            "\"http://www.web3d.org/specifications/x3d-3.3.dtd\">")
+        println(io,"<X3D profile='Interchange' version='3.3'  " *
+            "xmlns:xsd='http://www.w3.org/2001/XMLSchema-instance' >")
+        println(io,"  <head>")
+        println(io,"    <meta name='creator' content='gmsh'/> ")
+        println(io,"  </head>")
+        println(io,"  <Scene>")
+        if surfaces
+            println(io,"   <Group DEF=\"faces\">")
+            println(io,"    <Shape DEF=\"face\">")
+            println(io,"     <Appearance><Material DEF=\"matface\"></Material></Appearance>")
+            println(io,"     <TriangleSet DEF=\"setface\">")
+            println(io,"      <Coordinate point=\"")
+            for block in m.blocks
+                block isa ElementBlock && _io_dim(block.msh)==2 || continue
+                n=size(block.nodes,1)
+                for j in 1:size(block.nodes,2)
+                    if n>=3
+                        tris=n==3 ? ((1,2,3),) :
+                            n==4 ? ((1,2,3),(1,3,4)) :
+                            ((1,2,3),)
+                        for t in tris
+                            for k in t
+                                r=block.nodes[k,j]
+                                println(io,_format16(m.coords[1,r]*scaling_factor)," ",
+                                    _format16(m.coords[2,r]*scaling_factor)," ",
+                                    _format16(m.coords[3,r]*scaling_factor))
+                            end
+                        end
+                    end
+                end
+            end
+            println(io,"\"></Coordinate>")
+            println(io,"     </TriangleSet>")
+            println(io,"    </Shape>")
+            println(io,"   </Group>")
+        end
+        if edges
+            println(io,"   <Group DEF=\"edges\">")
+            for (bi,block) in enumerate(m.blocks)
+                block isa ElementBlock && _io_dim(block.msh)==1 || continue
+                for j in 1:size(block.nodes,2)
+                    println(io,"    <Shape DEF=\"edge\">")
+                    println(io,"     <Appearance><Material DEF=\"matedge\"></Material><LineProperties id=\"propedge\"></LineProperties></Appearance>")
+                    println(io,"     <LineSet vertexCount=\"",size(block.nodes,1),"\">")
+                    println(io,"      <Coordinate point=\"")
+                    for k in 1:size(block.nodes,1)
+                        r=block.nodes[k,j]
+                        println(io,_format16(m.coords[1,r]*scaling_factor)," ",
+                            _format16(m.coords[2,r]*scaling_factor)," ",
+                            _format16(m.coords[3,r]*scaling_factor))
+                    end
+                    println(io,"\"/>")
+                    println(io,"     </LineSet>")
+                    println(io,"    </Shape>")
+                end
+            end
+            println(io,"   </Group>")
+        end
+        if vertices
+            println(io,"   <Group DEF=\"vertices\">")
+            for block in m.blocks
+                block isa ElementBlock && _io_dim(block.msh)==0 || continue
+                for j in 1:size(block.nodes,2)
+                    r=block.nodes[1,j]
+                    println(io,"    <Shape DEF=\"vertex\">")
+                    println(io,"     <PointSet>")
+                    println(io,"      <Coordinate point=\"",
+                        _format16(m.coords[1,r]*scaling_factor)," ",
+                        _format16(m.coords[2,r]*scaling_factor)," ",
+                        _format16(m.coords[3,r]*scaling_factor),"\"/>")
+                    println(io,"     </PointSet>")
+                    println(io,"    </Shape>")
+                end
+            end
+            println(io,"   </Group>")
+        end
+        println(io,"  </Scene>")
+        println(io,"</X3D>")
+        flush(io);close(io)
+        mv(temporary,target;force=true)
+    end
+    # Companion html launcher (upstream always writes it next to the x3d).
+    htmlname=string(splitext(target)[1],"_x3d.html")
+    open(htmlname,"w") do io
+        println(io,"<!DOCTYPE HTML\n>")
+        println(io,"<html lang=\"en\"> ")
+        println(io,"<head>")
+        println(io,"  <title> gmsh x3d render</title>")
+        println(io,"  <meta charset=\"utf-8\">")
+        println(io,"  <link rel=\"stylesheet\" type=\"text/css\" href=\"https://x3dom.org/release/x3dom.css\">")
+        println(io,"  <script src=\"https://x3dom.org/release/x3dom.js\"></script>")
+        println(io,"</head>")
+        println(io,"<body>")
+        println(io,"  <x3d id=\"gmsh-scene\" style=\"width: 100%; height: 100%;border: none\" >")
+        println(io,"    <Scene>")
+        println(io,"      <transform scale=\"1,1,1\">")
+        println(io,"      <transform id=\"components\" rotation=\"1 0 0 -1.57079632679\">")
+        println(io,"        <inline onload=\"fit()\" mapDEFToID=\"true\" url=",basename(target),"></inline>")
+        println(io,"      </transform>")
+        println(io,"      </transform>")
+        println(io,"    </Scene>")
+        println(io,"  </x3d>")
+        println(io,"  <script>")
+        println(io,"  function fit()")
+        println(io,"  {")
+        println(io,"    var x3dElem = document.getElementById('gmsh-scene');")
+        println(io,"    x3dElem.runtime.fitAll();")
+        println(io,"  }")
+        println(io,"  </script>")
+        println(io,"</body>")
+        println(io,"</html>")
+    end
+    return path
+end
+
+"""
+    write_celum(path, mesh)
+
+The CELUM deck (`<name>_f` faces file, `<name>_s` vertices file) requires
+per-vertex exterior normals and principal curvatures, which upstream obtains
+by reparametrizing each node on its CAD surface (`reparamMeshVertexOnFace` +
+`f->normal(param)`/`f->curvatures(param,...)`). Tessella's foreign-format
+projection carries no parametric surface, so this writer rejects truthfully
+instead of fabricating curvature data.
+"""
+function write_celum(path,m;kwargs...)
+    caller="write_celum"
+    throw(ArgumentError("$caller: CELUM export requires per-vertex surface " *
+        "normals and principal curvatures from the parametric surface, " *
+        "which the mesh-only projection cannot supply (upstream warns and " *
+        "writes undefined data on discrete faces); use .off/.ply2/.wrl for " *
+        "triangulated surface export"))
 end
 
 end # module IO

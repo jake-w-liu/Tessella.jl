@@ -107,7 +107,9 @@ end
         @test data[1][4:6]≈[5.,0.,5.]
         @test data[1][7:9]≈[atan(4,3),0.0,atan(-3,4)]
 
-        # Out-of-range indices emit the upstream diagnostic and leave data.
+        # Out-of-range indices emit the upstream diagnostic and leave
+        # data; `Msg::Error` only continues when `General.AbortOnError` is 0.
+        A.option("General.AbortOnError",0)
         bad=A.view.add("bad")
         A.view.add_list_data(bad,"ST",1,
             [0.,1.,0., 0.,0.,1., 0.,0.,0., 3.,-3.,0., 4.,0.,-1.])
@@ -136,6 +138,7 @@ end
         @test sort(vals1)≈sort([atan(4,3),atan(2,0),atan(-8,6)])
         @test A.view.get_string(md,"Name")=="md_ModulusPhase"
     finally
+        A.option("General.AbortOnError",2)
         A.finalize()
     end
 end
@@ -194,7 +197,9 @@ end
         A.plugin.set_number("HarmonicToTime","NumSteps",20)
 
         # NumSteps <= 0 and out-of-range step indices log the upstream
-        # errors and create nothing.
+        # errors and create nothing; `Msg::Error` only continues when
+        # `General.AbortOnError` is 0.
+        A.option("General.AbortOnError",0)
         before=length(A.view.get_tags())
         A.plugin.set_number("HarmonicToTime","NumSteps",0)
         A.plugin.set_number("HarmonicToTime","View",h4)
@@ -207,6 +212,7 @@ end
         A.plugin.set_number("HarmonicToTime","ImaginaryPart",1)
         A.plugin.set_number("HarmonicToTime","NumSteps",20)
     finally
+        A.option("General.AbortOnError",2)
         A.finalize()
     end
 end

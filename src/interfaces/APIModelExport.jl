@@ -142,10 +142,13 @@ function _model_export_write(filename)
     end
     (haskey(_MSH_EXTENSION_VERSIONS,extension) ||
         extension in (".unv",".mesh",".meshb",".stl",".su2",".bdf",".nas",
-                      ".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk")) || throw(ArgumentError(
+                      ".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk",
+                      ".off",".obj",".ply2",".dat",".m",".wrl",".vrml",".key",
+                      ".rad",".x3d",".celum")) || throw(ArgumentError(
         "$caller: current-model export supports .msh, .msh2/.msh22, " *
         ".msh4/.msh41, .unv, .mesh, .meshb, .stl, .su2, .bdf, .nas, .inp, " *
-        ".neu, .p3d, .mail, .ir3, .diff and .vtk"))
+        ".neu, .p3d, .mail, .ir3, .diff, .vtk, .off, .obj, .ply2, .dat, .m, " *
+        ".wrl/.vrml, .key, .rad, .x3d and .celum"))
     return lock(STATE_LOCK) do
         model=_model_locked()
         save_all=!iszero(get(OPTIONS,"Mesh.SaveAll",0.0))
@@ -215,6 +218,20 @@ function _model_export_write(filename)
                     element_tag_type=tag_type) :
                 extension==".diff" ? IO.write_diff(filename,target) :
                 extension==".vtk" ? IO.write_vtk(filename,target) :
+                extension==".off" ? IO.write_off(filename,target) :
+                extension==".obj" ? IO.write_obj(filename,target) :
+                extension==".ply2" ? IO.write_ply2(filename,target) :
+                extension==".dat" ? IO.write_dat(filename,target) :
+                extension==".m" ? IO.write_m(filename,target;
+                    model_name=model.name) :
+                extension in (".wrl",".vrml") ? IO.write_wrl(filename,target) :
+                extension==".key" ? IO.write_key(filename,target) :
+                extension==".rad" ? IO.write_rad(filename,target) :
+                extension==".x3d" ? IO.write_x3d(filename,target;
+                    surfaces=!iszero(get(OPTIONS,"Print.X3DSurfaces",1.0)),
+                    edges=!iszero(get(OPTIONS,"Print.X3DEdges",0.0)),
+                    vertices=!iszero(get(OPTIONS,"Print.X3DVertices",0.0))) :
+                extension==".celum" ? IO.write_celum(filename,target) :
                     IO.write_bdf(filename,target)
         end
         return nothing

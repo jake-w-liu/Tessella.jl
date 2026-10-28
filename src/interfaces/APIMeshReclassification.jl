@@ -140,7 +140,8 @@ function _reclassify_element_nodes!(assembly;chains=Set{Tuple{Int,Int}}(),
 end
 
 function _reclassify_nodes_plan(model,cached,class,caller;node_max,element_max,
-                                preserve_mesh_owners::Bool=false)
+                                preserve_mesh_owners::Bool=false,
+                                cell_edit=nothing)
     staged=_reclassify_model_copy(model)
     actual,actual_class=_dim01_actual_cache(cached,class;physical_names=model.physical_names)
     assembly=_Dim01Assembly(_Dim01Node[],_Dim01Cell[],Dict{UInt64,Int32}(),
@@ -157,6 +158,10 @@ function _reclassify_nodes_plan(model,cached,class,caller;node_max,element_max,
     # every admitted source MSH slot, including higher-order supports.
     source_rows=_dim01_ingest!(assembly,staged,actual,actual_class;
                               preserve_source_order=true)
+    # Surgical plugins (Crack) rewrite connectivity after ingest: `cell_edit`
+    # receives the assembly and may retarget `cell.nodes` positions, e.g. to
+    # duplicated nodes staged on a fresh record.
+    cell_edit===nothing || cell_edit(assembly)
     orphan=_reclassify_element_nodes!(assembly;chains=staged.meshing.chain_entities,
                                       preserve_mesh_owners)
     sort!(assembly.cells;by=_dim01_cell_order,alg=Base.Sort.MergeSort)

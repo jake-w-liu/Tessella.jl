@@ -173,9 +173,7 @@ function _plugin_set_number(name,option,value)
     return lock(STATE_LOCK) do
         spec=_plugin_state_locked(pname)
         spec.numbers[opt]=numeric
-        if opt=="Run" && !iszero(numeric)
-            entry.run_fn(spec,caller)
-        end
+        opt=="Run" && !iszero(numeric) && _plugin_run_fn(pname,entry,spec,caller)
         return nothing
     end
 end
@@ -195,13 +193,34 @@ function _plugin_set_string(name,option,value)
     end
 end
 
+# Upstream `PluginManager::action(name, "Run", nullptr)` logs
+# `"Running Plugin(<name>)..."`/`"Done running Plugin(<name>)"` around
+# `plugin->run()`, and `gmsh::plugin::run` catches every exception the run
+# raises (including the `std::runtime_error` `Msg::Error` throws under
+# `General.AbortOnError >= 2`) and reports `"Unknown plugin or plugin
+# action"` through `Msg::Error` itself. Error-level diagnostics inside
+# executors therefore already carry `Msg::Error` semantics via
+# `_native_mesh_input_error_locked`; an escaping `ErrorException` is the
+# wrapped action failure.
+function _plugin_run_fn(pname::String,entry,spec,caller::AbstractString)
+    _native_diagnostic_emit_locked(:info,"Running Plugin($pname)...")
+    try
+        entry.run_fn(spec,caller)
+    catch err
+        err isa ErrorException || rethrow()
+        _native_mesh_input_error_locked("Unknown plugin or plugin action")
+    end
+    _native_diagnostic_emit_locked(:info,"Done running Plugin($pname)")
+    return nothing
+end
+
 function _plugin_run(name)
     caller="API.plugin.run"
     pname=_plugin_check_name(name,caller)
     entry=_plugin_entry(pname,caller)
     return lock(STATE_LOCK) do
         spec=_plugin_state_locked(pname)
-        entry.run_fn(spec,caller)
+        _plugin_run_fn(pname,entry,spec,caller)
         return nothing
     end
 end
@@ -1152,7 +1171,7 @@ function _plugin_exec_extract_elements(spec::_PluginSpec,caller::AbstractString)
         elements,steps=_plugin_list_elements(view,caller)
         eval_step=this_step<0 ? 0 : this_step
         if eval_step>steps-1
-            _native_diagnostic_emit_locked(:error,
+            _native_mesh_input_error_locked(
                 "Invalid time step ($eval_step) in View[$tag]: using first step instead")
             eval_step=0
         end
@@ -1186,7 +1205,7 @@ function _plugin_exec_extract_elements(spec::_PluginSpec,caller::AbstractString)
     else
         found=findfirst(key->key[1]==this_step,keys)
         if found===nothing
-            _native_diagnostic_emit_locked(:error,
+            _native_mesh_input_error_locked(
                 "Invalid time step ($this_step) in View[$tag]: using first step instead")
             1
         else
@@ -2127,11 +2146,11 @@ function _plugin_exec_warp(spec::_PluginSpec,caller::AbstractString)
     oelements=normals_mode ? _PluginElement[] :
         _plugin_list_elements(oview,caller)[1]
     normals_mode || length(oelements)==length(positions) || begin
-        _native_diagnostic_emit_locked(:error,"Incompatible views")
+        _native_mesh_input_error_locked("Incompatible views")
         return nothing
     end
     0<=timestep<=osteps-1 || begin
-        _native_diagnostic_emit_locked(:error,
+        _native_mesh_input_error_locked(
             "Invalid TimeStep ($timestep) in View[$otag]")
         return nothing
     end
@@ -2403,7 +2422,7 @@ function _plugin_exec_matheval(spec::_PluginSpec,caller::AbstractString)
             push!(slots,get(mview.model_contexts[key],:model_slot,nothing))
         end
         length(slots)>1 && begin
-            _native_diagnostic_emit_locked(:error,
+            _native_mesh_input_error_locked(
                 "MathEval plugin cannot be applied to multi-mesh views")
             return nothing
         end
@@ -2416,11 +2435,11 @@ function _plugin_exec_matheval(spec::_PluginSpec,caller::AbstractString)
         [key[1] for key in _plugin_model_keys(oview)]
     end
     if ots<0 && length(ostepnums)!=length(stepnums)
-        _native_diagnostic_emit_locked(:error,
+        _native_mesh_input_error_locked(
             "Number of time steps don't match: using step 0")
         ots=0
     elseif ots>0 && !(ots in ostepnums)
-        _native_diagnostic_emit_locked(:error,
+        _native_mesh_input_error_locked(
             "Invalid time step ($ots) in View[$otag]: using step 0 instead")
         ots=0
     end
@@ -2430,7 +2449,7 @@ function _plugin_exec_matheval(spec::_PluginSpec,caller::AbstractString)
     emit_positions=if timestep<0
         collect(1:steps)
     elseif !isempty(stepnums) && timestep>last(stepnums)
-        _native_diagnostic_emit_locked(:error,
+        _native_mesh_input_error_locked(
             "Invalid time step ($timestep) in View[$tag]: " *
             "using all steps instead")
         collect(1:steps)
@@ -2690,7 +2709,7 @@ function _plugin_check_single_mesh(view,name::AbstractString)
         push!(slots,get(view.model_contexts[key],:model_slot,nothing))
     end
     length(slots)>1 || return true
-    _native_diagnostic_emit_locked(:error,
+    _native_mesh_input_error_locked(
         "$name plugin cannot be run on multi-mesh views")
     return false
 end
@@ -2830,7 +2849,7 @@ function _plugin_exec_lambda2(spec::_PluginSpec,caller::AbstractString)
     numbers=spec.numbers
     ev=_mesh_query_integer(Int(numbers["Eigenvalue"]),caller,"Eigenvalue")
     if !(1<=ev<=3)
-        _native_diagnostic_emit_locked(:error,
+        _native_mesh_input_error_locked(
             "Eigenvalue should be 1, 2 or 3")
         return nothing
     end
@@ -2903,7 +2922,7 @@ function _plugin_exec_spherical_raise(spec::_PluginSpec,caller::AbstractString)
         "$caller: SphericalRaise rewrites list data only; model views are unsupported"))
     steps=_plugin_list_steps(view,caller)
     if timestep<0 || timestep>steps-1
-        _native_diagnostic_emit_locked(:error,
+        _native_mesh_input_error_locked(
             "Invalid TimeStep ($timestep) in view")
         return nothing
     end
@@ -3074,7 +3093,7 @@ function _plugin_exec_modulus_phase(spec::_PluginSpec,caller::AbstractString)
     # Upstream bounds-checks the indices against `getNumTimeSteps`.
     steps=_view_data_steps(view)
     if !(0<=rindex<steps) || !(0<=iindex<steps)
-        _native_diagnostic_emit_locked(:error,
+        _native_mesh_input_error_locked(
             "Wrong real or imaginary part index")
         return nothing
     end
@@ -3148,11 +3167,11 @@ function _plugin_exec_harmonic_to_time(spec::_PluginSpec,caller::AbstractString)
     nperiods=_mesh_query_integer(Int(numbers["NumPeriods"]),caller,"NumPeriods")
     elements,steps,_=_plugin_elements_all_steps(view,caller)
     if !(0<=rindex<steps) || !(0<=iindex<steps)
-        _native_diagnostic_emit_locked(:error,"Wrong real or imaginary part index")
+        _native_mesh_input_error_locked("Wrong real or imaginary part index")
         return nothing
     end
     if nsteps<=0
-        _native_diagnostic_emit_locked(:error,"nSteps should be > 0")
+        _native_mesh_input_error_locked("nSteps should be > 0")
         return nothing
     end
     out=_PluginElement[]
@@ -3332,7 +3351,7 @@ function _plugin_exec_modifycomponents(spec::_PluginSpec,caller::AbstractString)
     forcerep=!iszero(numbers["ForceInterpolation"])
     nsteps1=_view_data_steps(view)
     if timestep>nsteps1-1
-        _native_diagnostic_emit_locked(:error,
+        _native_mesh_input_error_locked(
             "Invalid time step ($timestep) in View[$tag]: using step 0 instead")
         timestep=0
     end
@@ -3345,17 +3364,17 @@ function _plugin_exec_modifycomponents(spec::_PluginSpec,caller::AbstractString)
         if haskey(SESSION_VIEWS,oi)
             otag,oview=oi,_session_view_data(oi,caller)
         else
-            _native_diagnostic_emit_locked(:error,
+            _native_mesh_input_error_locked(
                 "View[$oi] does not exist: using self")
         end
     end
     nsteps2=oview===view ? nsteps1 : _view_data_steps(oview)
     if ots<0 && nsteps2!=nsteps1
-        _native_diagnostic_emit_locked(:error,
+        _native_mesh_input_error_locked(
             "Number of time steps don't match: using step 0")
         ots=0
     elseif ots>nsteps2-1
-        _native_diagnostic_emit_locked(:error,
+        _native_mesh_input_error_locked(
             "Invalid time step ($ots) in View[$otag]: using step 0 instead")
         ots=0
     end
@@ -3601,7 +3620,7 @@ function _plugin_exec_field_from_amplitude_phase(spec::_PluginSpec,
     end
     atag,aview=_plugin_view_tag(numbers,"AmplitudeView",caller)
     if _view_data_steps(aview)!=2
-        _native_diagnostic_emit_locked(:error,
+        _native_mesh_input_error_locked(
             "Invalid number of time steps for AView, it must be complex!")
         return nothing
     end
@@ -3613,7 +3632,7 @@ function _plugin_exec_field_from_amplitude_phase(spec::_PluginSpec,
         Elements.read_mixed_msh(meshfile)
     catch err
         err isa InterruptException && rethrow()
-        _native_diagnostic_emit_locked(:error,
+        _native_mesh_input_error_locked(
             "Unable to open file '$meshfile'")
         return nothing
     end
@@ -4367,7 +4386,7 @@ function _plugin_exec_particles(spec::_PluginSpec,caller::AbstractString)
     timestep=_mesh_query_integer(Int(numbers["TimeStep"]),caller,"TimeStep")
     elements,nsteps,times=_plugin_elements_all_steps(view,caller)
     if timestep>=nsteps
-        _native_diagnostic_emit_locked(:error,
+        _native_mesh_input_error_locked(
             "Invalid time step ($timestep) in view[$tag]: using 0")
         timestep=0
     end
@@ -4751,7 +4770,7 @@ function _plugin_exec_eigenvectors(spec::_PluginSpec,caller::AbstractString)
         push!(outmax,_PluginElement(element.kind,element.dim,element.vcoords,
                                     element.vcoords,vmax,3,etag))
     end
-    nbcomplex>0 && _native_diagnostic_emit_locked(:error,
+    nbcomplex>0 && _native_mesh_input_error_locked(
         "$nbcomplex tensors have complex eigenvalues")
     name=view.name
     _plugin_extract_emit(name*"_MinEigenvectors",outmin,-1,nsteps,times,caller)
@@ -4788,7 +4807,7 @@ function _plugin_exec_summation(spec::_PluginSpec,caller::AbstractString)
     # Upstream reports the grid mismatch once per offending view, then keeps
     # summing whatever `getValue` can reach (failures leave zeros).
     for oe in others
-        length(oe)==length(elements) || _native_diagnostic_emit_locked(:error,
+        length(oe)==length(elements) || _native_mesh_input_error_locked(
             "Summation plugin: views based on different grid.")
     end
     out=_PluginElement[]
@@ -5676,6 +5695,1470 @@ function _plugin_node_coord(axis::Int,tag)
     return 0.0
 end
 
+# ---- HomologyPostProcessing ----------------------------------------------------
+#
+# Upstream `Plugin(HomologyPostProcessing)` (KBIPACK `Chain<int>` algebra,
+# HomologyPostProcessing.cpp + Chain.h/Chain.cpp): elementary chains are the
+# primary-vertex lists of mesh elements keyed by their *sorted* public node
+# tags; the coefficient map carries the first-seen vertex order so
+# `compareOrientation` can charge incoming orderings a sign. Upstream computes
+# that sign by stepping `std::next_permutation`/`prev_permutation` over the
+# vertex-tag sequence — i.e. `(-1)^|rank(stored) - rank(incoming)|` where the
+# rank is the sequence's position in the lexicographic permutation order of the
+# sorted tag list (Lehmer code). That is *not* the ordinary permutation parity:
+# the cyclic triangle [b,c,a] sits at rank 3 and charges −1 against [a,b,c].
+# We reproduce the rank-parity rule verbatim.
+#
+# `Chain(m, phys)` builds a chain from every entity of every physical group
+# carrying `phys` (all four dims are scanned; `_dim` follows the last entity's
+# dim and the name is `getPhysicalName(lastDim, phys)`). `getBoundary` emits
+# each cell's boundary faces with coefficient +1 — except the first endpoint
+# of a dim-1 cell which takes −1. `getTrace`/`getProject` keep cells whose
+# vertices all lie in / do not all lie in the target entities' element vertex
+# sets. `addToModel` expands |coeff|>1 into repeated copies, reverses negative
+# coefficients, publishes one new discrete entity at `max(entity tags)+1` and
+# one physical group at `max(physical tags)+1` named "C<dim> <Name><i>". The
+# upstream ElementData post-processing view is gated by `batch == 0`; the API
+# runs in batch semantics, so no view is created (identical to upstream batch).
+#
+# Upstream boundary face table quirk: for a pyramid (`numVertices == 5`) the
+# `i < 3` test sends face 3 (`{2,3,4,-1}`) down the four-vertex branch and
+# reads `faces_pyramid(3,3) == -1` — undefined behavior upstream. We emit the
+# intended triangle {2,3,4} instead and document the divergence.
+
+mutable struct _HomPPChain
+    dim::Int
+    # (nverts, sorted tag tuple) -> (stored vertex order, cell dim, coefficient);
+    # upstream's map key ignores the cell dimension, so a dim-2 quad and a
+    # dim-3 tet on the same vertex set merge into one entry — the stored dim
+    # is the first-inserted cell's, like `ElemChain::_dim`.
+    cells::Dict{Tuple{Int,NTuple{8,UInt64}},Tuple{Vector{UInt64},Int,Int}}
+end
+
+# Key size is the stored vector length (1..8 covers every elementary cell).
+function _hompp_key(order::AbstractVector{UInt64})
+    n=length(order)
+    s=sort!(collect(order))
+    sorted=ntuple(8) do i
+        i<=n ? s[i] : UInt64(0)
+    end
+    return (n,sorted)
+end
+
+function _hompp_key_less(a,b)
+    a[1]!=b[1] && return a[1]<b[1]
+    for i in 1:a[1]
+        a[2][i]!=b[2][i] && return a[2][i]<b[2][i]
+    end
+    return false
+end
+
+# Lexicographic permutation rank (Lehmer code) of `order` over its sorted
+# tag multiset — matches the number of `std::next_permutation` steps from the
+# sorted arrangement.
+function _hompp_perm_rank(order::AbstractVector{UInt64})
+    n=length(order)
+    rank=0;fact=1
+    for i in n:-1:1
+        count=0
+        for j in i+1:n
+            order[j]<order[i] && (count+=1)
+        end
+        rank+=count*fact
+        fact*=(n-i+1)
+    end
+    return rank
+end
+
+_hompp_sign(a,b)=isodd(abs(_hompp_perm_rank(a)-_hompp_perm_rank(b))) ? -1 : 1
+
+function _hompp_add!(chain::_HomPPChain,dim::Int,order::AbstractVector{UInt64},
+                     coeff::Int)
+    iszero(coeff) && return chain
+    if chain.dim!=-1 && chain.dim!=dim
+        _native_mesh_input_error_locked(
+            "Cannot add elementary $dim-chain to $(chain.dim)-chain")
+        return chain
+    end
+    chain.dim==-1 && (chain.dim=dim)
+    key=_hompp_key(order)
+    entry=get(chain.cells,key,nothing)
+    if entry===nothing
+        chain.cells[key]=(collect(order),dim,coeff)
+    else
+        stored,stored_dim,stcoeff=entry
+        stcoeff+=coeff*_hompp_sign(order,stored)
+        iszero(stcoeff) ? delete!(chain.cells,key) :
+            (chain.cells[key]=(stored,stored_dim,stcoeff))
+    end
+    return chain
+end
+
+# `Chain::getCoefficient(ElemChain)` — signed lookup under rank parity.
+function _hompp_coeff(chain::_HomPPChain,order::AbstractVector{UInt64})
+    entry=get(chain.cells,_hompp_key(order),nothing)
+    entry===nothing && return 0
+    return entry[3]*_hompp_sign(order,entry[1])
+end
+
+# Upstream boundary sub-cell vertex orderings (Chain.cpp `getBoundaryVertices`,
+# converted to 1-based positions over the element's primary vertices).
+const _HOMPP_BOUNDARY=(
+    lin=(NTuple{1,Int}[(1,),(2,)],[ -1,1 ]),
+    tri=NTuple{2,Int}[(1,2),(2,3),(3,1)],
+    qua=NTuple{2,Int}[(1,2),(2,3),(3,4),(4,1)],
+    tet=NTuple{3,Int}[(1,3,2),(1,2,4),(1,4,3),(4,2,3)],
+    pyr=(NTuple{3,Int}[(1,2,5),(4,1,5),(2,3,5),(3,4,5)],(1,4,3,2)),
+    pri=(NTuple{3,Int}[(1,3,2),(4,5,6)],(1,2,5,4),(1,4,6,3),(2,3,6,5)),
+    hex=NTuple{4,Int}[(1,4,3,2),(1,2,6,5),(1,5,8,4),(2,3,7,6),(3,4,8,7),(5,6,7,8)])
+
+function _hompp_cell_boundaries(dim::Int,nv::Int)
+    dim==1 && return (UInt64[1],UInt64[2])
+    dim==2 && return nv==3 ? _HOMPP_BOUNDARY.tri : _HOMPP_BOUNDARY.qua
+    if dim==3
+        nv==4 && return _HOMPP_BOUNDARY.tet
+        nv==5 && return _HOMPP_BOUNDARY.pyr
+        nv==6 && return _HOMPP_BOUNDARY.pri
+        nv==8 && return _HOMPP_BOUNDARY.hex
+    end
+    return ()
+end
+
+# `Chain::boundary` — +1 on every boundary cell except the first vertex of a
+# dim-1 cell (upstream hard-codes that single −1). Each boundary runs on the
+# stored cell's own `_dim`, not the chain's.
+function _hompp_boundary(chain::_HomPPChain)
+    result=_HomPPChain(-1,Dict{Tuple{Int,NTuple{8,UInt64}},
+                                  Tuple{Vector{UInt64},Int,Int}}())
+    for (key,(order,celldim,coeff)) in chain.cells
+        nv=key[1]
+        if celldim==1
+            _hompp_add!(result,0,UInt64[order[1]],-coeff)
+            _hompp_add!(result,0,UInt64[order[2]],coeff)
+        else
+            for face in _hompp_cell_boundaries(celldim,nv)
+                verts=UInt64[order[i] for i in face]
+                _hompp_add!(result,celldim-1,verts,coeff)
+            end
+        end
+    end
+    if isempty(result.cells)
+        _native_diagnostic_emit_locked(:info,
+            "The boundary chain is zero element in C$(result.dim)")
+    end
+    return result
+end
+
+# `findEntitiesInPhysicalGroups` — every entity of every group carrying the
+# tag (all four dims are scanned), with the upstream diagnostic on misses.
+function _hompp_physical_entities(m,phys)
+    entities=Tuple{Int,Int}[]
+    found=false
+    for dim in 0:3
+        members=get(m.physical,(dim,phys),nothing)
+        members===nothing && continue
+        found=true
+        for etag in members
+            push!(entities,(dim,etag))
+        end
+    end
+    found || _native_mesh_input_error_locked(
+        "Physical group $phys does not exist")
+    return entities
+end
+
+# `Chain(m, phys)` — one elementary chain per entity element (primary vertices
+# only, coefficient 1); `_dim` tracks the last entity's dim like upstream.
+function _hompp_chain_from_physical(m,cached,class,phys)
+    chain=_HomPPChain(0,Dict{Tuple{Int,NTuple{8,UInt64}},
+                             Tuple{Vector{UInt64},Int,Int}}())
+    for (dim,etag) in _hompp_physical_entities(m,phys)
+        chain.dim=dim
+        for (msh,nodes) in _entity_all_elements(m,cached,class,dim,etag)
+            spec=try msh_spec(Int(msh)) catch err
+                err isa InterruptException && rethrow()
+                continue
+            end
+            nv=Elements._msh_primary_nodes(spec.family)
+            nv<=length(nodes) || continue
+            _hompp_add!(chain,dim,nodes[1:nv],1)
+        end
+    end
+    name=get(m.physical_names,(chain.dim,phys),"")
+    return (chain=chain,name=name)
+end
+
+function _hompp_incidence(c1::_HomPPChain,c2::_HomPPChain)
+    c1.dim!=c2.dim && return 0
+    value=0
+    for (_,(order,_,coeff)) in c1.cells
+        value+=coeff*_hompp_coeff(c2,order)
+    end
+    return value
+end
+
+# `Chain::_getTraceOrProject` — entity vertex sets over full connectivity
+# (upstream `inEntity` uses every vertex of every element on the entity).
+function _hompp_trace_or_project(chain::_HomPPChain,m,cached,class,
+                                 physicals,trace::Bool)
+    entities=Tuple{Int,Int}[]
+    for phys in physicals
+        append!(entities,_hompp_physical_entities(m,phys))
+    end
+    isempty(entities) && return _HomPPChain(-1,
+        Dict{Tuple{Int,NTuple{8,UInt64}},Tuple{Vector{UInt64},Int,Int}}())
+    vertex_sets=[Set{UInt64}() for _ in entities]
+    for (i,(dim,etag)) in enumerate(entities)
+        for (msh,nodes) in _entity_all_elements(m,cached,class,dim,etag)
+            union!(vertex_sets[i],nodes)
+        end
+    end
+    result=_HomPPChain(-1,Dict{Tuple{Int,NTuple{8,UInt64}},
+                               Tuple{Vector{UInt64},Int,Int}}())
+    for (key,(order,celldim,coeff)) in chain.cells
+        inside=any(vs->all(t->t in vs,order),vertex_sets)
+        inside==trace && _hompp_add!(result,celldim,order,coeff)
+    end
+    return result
+end
+
+# Upstream `parseStringOpt`: `ss >> n` then `ss >> a` — a `,` separator keeps
+# the list going, any other character (including a second integer's first
+# digit) is a parse error; a bare EOF after an int ends the list cleanly.
+# Returns `nothing` on the upstream error path.
+function _hompp_parse_int_list(text::AbstractString,option::AbstractString)
+    out=Int[]
+    bytes=codeunits(text);pos=1;L=length(bytes)
+    function skip_ws()
+        while pos<=L && bytes[pos] in (0x20,0x09,0x0a,0x0d,0x0b,0x0c)
+            pos+=1
+        end
+        return nothing
+    end
+    while true
+        skip_ws()
+        start=pos
+        (pos<=L && (bytes[pos]==0x2b || bytes[pos]==0x2d)) && (pos+=1)
+        digit=false
+        while pos<=L && 0x30<=bytes[pos]<=0x39
+            pos+=1;digit=true
+        end
+        digit || break
+        push!(out,parse(Int,String(bytes[start:pos-1])))
+        skip_ws()
+        pos>L && break
+        a=Char(bytes[pos]);pos+=1
+        a!=',' && begin
+            _native_mesh_input_error_locked(
+                "Unexpected character '$a' while parsing '$option'")
+            return nothing
+        end
+    end
+    return out
+end
+
+# Integer-matrix parsing: `ss >> n` then `ss >> a`; `,` continues a row,
+# `;` closes it (all rows must share the column count). A failed trailing
+# read ends the list silently like upstream's istringstream.
+function _hompp_parse_matrix(text::AbstractString,caller)
+    flat=Int[];cols=0;col=0
+    bytes=codeunits(text);pos=1;L=length(bytes)
+    function skip_ws()
+        while pos<=L && bytes[pos] in (0x20,0x09,0x0a,0x0d,0x0b,0x0c)
+            pos+=1
+        end
+        return nothing
+    end
+    while true
+        skip_ws()
+        start=pos
+        (pos<=L && (bytes[pos]==0x2b || bytes[pos]==0x2d)) && (pos+=1)
+        digit=false
+        while pos<=L && 0x30<=bytes[pos]<=0x39
+            pos+=1;digit=true
+        end
+        digit || break
+        push!(flat,parse(Int,String(bytes[start:pos-1])));col+=1
+        skip_ws()
+        pos>L && break
+        a=Char(bytes[pos]);pos+=1
+        if a==','
+            continue
+        elseif a==';'
+            if cols!=0 && cols!=col
+                _native_mesh_input_error_locked(
+                    "Number of columns must match ($cols != $col)")
+                return nothing
+            end
+            cols=col;col=0
+            continue
+        else
+            _native_mesh_input_error_locked(
+                "Unexpected character '$a' while parsing 'TransformationMatrix'")
+            return nothing
+        end
+    end
+    if cols!=0 && cols!=col && col!=0
+        _native_mesh_input_error_locked(
+            "Number of columns must match ($cols != $col)")
+        return nothing
+    end
+    cols==0 && (cols=col)
+    if !isempty(flat)
+        length(flat)%cols!=0 && begin
+            _native_mesh_input_error_locked(
+                "Number of matrix rows and columns aren't compatible " *
+                "(residual: $(length(flat)%cols))")
+            return nothing
+        end
+    end
+    return (flat=flat,cols=cols)
+end
+
+# `detIntegerMatrix`/`invertIntegerMatrix`: upstream truncates `sqrt` of the
+# flat length to size the matrix, computes on `fullMatrix<double>` (LU with
+# pivoting) and truncates inverse entries back into the int vector.
+function _hompp_int_matrix(flat,n)
+    m=zeros(Float64,n,n)
+    for i in 1:n, j in 1:n
+        m[i,j]=flat[(i-1)*n+j]
+    end
+    return m
+end
+
+# `storeChain`-equivalent publish: sorted-cell order, |coeff| copies, reversed
+# negative coefficients (upstream `e->reverse()` vertex permutations), fresh
+# entity at global max elementary tag + 1 and physical at global max + 1.
+const _HOMPP_REVERSE=(
+    lin=(2,1),tri=(1,3,2),qua=(1,4,3,2),tet=(2,1,3,4),
+    pyr=(3,2,1,4,5),pri=(2,1,3,5,4,6),hex=(3,2,1,4,7,6,5,8))
+
+function _hompp_cell_type(dim::Int,nv::Int)
+    dim==0 && return Int32(15)
+    dim==1 && return Int32(1)
+    dim==2 && return nv==3 ? Int32(2) : nv==4 ? Int32(3) : Int32(0)
+    if dim==3
+        nv==4 && return Int32(4)
+        nv==5 && return Int32(7)
+        nv==6 && return Int32(6)
+        nv==8 && return Int32(5)
+    end
+    return Int32(0)
+end
+
+function _hompp_add_to_model!(staged,chain::_HomPPChain,name::AbstractString,
+                             known::Set{UInt64},element_counter::Ref{UInt64},
+                             caller::AbstractString)
+    if isempty(chain.cells)
+        _native_diagnostic_emit_locked(:info,
+            "A chain is zero element of C$(chain.dim), not added to the model")
+        return -1
+    end
+    dim=chain.dim
+    keys=collect(Base.keys(chain.cells))
+    sort!(keys;lt=_hompp_key_less)
+    entity_tag=maximum(last,model_entities(staged);init=0)+1
+    add_discrete_entity!(staged,dim,entity_tag)
+    push!(staged.meshing.chain_entities,(dim,entity_tag))
+    record=staged.discrete[(dim,entity_tag)]
+    for key in keys
+        order,celldim,coeff=chain.cells[key]
+        msh=_hompp_cell_type(celldim,key[1])
+        msh==0 && throw(ArgumentError(
+            "$caller: no MSH element type for a $(celldim)d cell with " *
+            "$(key[1]) vertices"))
+        all(t->t in known,order) || throw(ArgumentError(
+            "$caller: chain cell references a node tag not in the model"))
+        # Upstream gates reversal on the chain's dim, not the cell's.
+        nodes=dim>0 && coeff<0 ?
+            UInt64[order[i] for i in _HOMPP_REVERSE[key[1]==1 ? :lin :
+                key[1]==3 ? :tri : key[1]==4 && celldim==2 ? :qua :
+                celldim==3 && key[1]==4 ? :tet : key[1]==5 ? :pyr :
+                key[1]==6 ? :pri : :hex]] : copy(order)
+        for _ in 1:abs(coeff)
+            element_counter[]+=UInt64(1)
+            _record_append_element!(record,Int(msh),element_counter[],
+                copy(nodes))
+        end
+    end
+    phys=add_physical_group!(staged,dim,[entity_tag];name=name)
+    return phys
+end
+
+function _plugin_exec_homologypost(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers;strings=spec.strings
+    matrix_string=strings["TransformationMatrix"]
+    cname=strings["NameForResultChains"]
+    bd=!iszero(numbers["ApplyBoundaryOperatorToResults"])
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    slot=MODEL_SLOTS[index]
+    m=slot.model
+    cached=slot.mesh
+    class=cached===nothing ? nothing :
+        (slot.class===nothing ? _cached_classification_locked(cached) :
+         slot.class)
+
+    matrix=Int[];cols=0
+    if matrix_string!="I"
+        parsed=_hompp_parse_matrix(matrix_string,caller)
+        parsed===nothing && return nothing
+        matrix=parsed.flat;cols=parsed.cols
+    end
+    basis=_hompp_parse_int_list(strings["PhysicalGroupsOfOperatedChains"],
+                                "PhysicalGroupsOfOperatedChains")
+    basis===nothing && return nothing
+    basis2=_hompp_parse_int_list(strings["PhysicalGroupsOfOperatedChains2"],
+                                 "PhysicalGroupsOfOperatedChains2")
+    basis2===nothing && return nothing
+    rows=0
+    if matrix_string!="I" && !isempty(matrix)
+        length(matrix)%cols!=0 && begin
+            _native_mesh_input_error_locked(
+                "Number of matrix rows and columns aren't compatible " *
+                "(residual: $(length(matrix)%cols))")
+            return nothing
+        end
+        rows=length(matrix)÷cols
+    end
+    if matrix_string!="I" && length(basis)!=cols && isempty(basis2)
+        _native_mesh_input_error_locked(
+            "Number of matrix columns and operated chains must match " *
+            "($cols != $(length(basis)))")
+        return nothing
+    elseif matrix_string=="I"
+        cols=length(basis);rows=cols
+        matrix=[i==j ? 1 : 0 for i in 1:cols, j in 1:cols][:]
+    end
+    if !isempty(basis2) && length(basis)!=length(basis2)
+        _native_mesh_input_error_locked(
+            "Number of operated chains must match " *
+            "($(length(basis)) != $(length(basis2)))")
+        return nothing
+    end
+    trace=_hompp_parse_int_list(strings["PhysicalGroupsToTraceResults"],
+                                "PhysicalGroupsToTraceResults")
+    trace===nothing && return nothing
+    project=_hompp_parse_int_list(strings["PhysicalGroupsToProjectResults"],
+                                  "PhysicalGroupsToProjectResults")
+    project===nothing && return nothing
+
+    curbasis=[_hompp_chain_from_physical(m,cached,class,p).chain for p in basis]
+    isempty(curbasis) && begin
+        _native_mesh_input_error_locked("No operated chains given")
+        return nothing
+    end
+    dim=curbasis[1].dim
+    curbasis2=[_hompp_chain_from_physical(m,cached,class,p).chain for p in basis2]
+
+    if !isempty(curbasis2)
+        rows=length(curbasis2);cols=length(curbasis)
+        matrix=Int[_hompp_incidence(curbasis2[i],curbasis[j])
+                   for i in 1:rows, j in 1:cols][:]
+    end
+
+    newbasis=_HomPPChain[_HomPPChain(-1,
+        Dict{Tuple{Int,NTuple{8,UInt64}},Tuple{Vector{UInt64},Int,Int}}())
+        for _ in 1:rows]
+    if !isempty(curbasis2)
+        _native_diagnostic_emit_locked(:info,
+            "Computing new basis $dim-chains such that the incidence matrix " *
+            "of $dim-chain bases $(strings["PhysicalGroupsOfOperatedChains"]) " *
+            "and $(strings["PhysicalGroupsOfOperatedChains2"]) is the " *
+            "indentity matrix")
+        n=isqrt(length(matrix))
+        # determinant via Float64 LU like upstream fullMatrix<double>
+        detv=LinearAlgebra.det(_hompp_int_matrix(matrix,n))
+        det_i=Int(trunc(detv))
+        (det_i==1 || det_i==-1) || _native_diagnostic_emit_locked(:warning,
+            "Incidence matrix is not unimodular (det = $det_i)")
+        inverted=try
+            LinearAlgebra.inv(_hompp_int_matrix(matrix,n))
+        catch err
+            err isa InterruptException && rethrow()
+            nothing
+        end
+        inverted===nothing && begin
+            _native_mesh_input_error_locked("Matrix is not unimodular")
+            return nothing
+        end
+        # Truncate the Float64 inverse back into the integer matrix like
+        # upstream `matrix.at(i*n+j) = m(i,j)`.
+        for i in 1:n, j in 1:n
+            matrix[(i-1)*n+j]=Int(trunc(inverted[i,j]))
+        end
+        for i in 1:rows, j in 1:cols
+            coeff=matrix[(i-1)*cols+j]
+            for (_,(order,celldim,ocoeff)) in curbasis2[j].cells
+                _hompp_add!(newbasis[i],celldim,order,coeff*ocoeff)
+            end
+        end
+    else
+        _native_diagnostic_emit_locked(:info,
+            "Applying transformation matrix [$matrix_string] to $dim-chains " *
+            strings["PhysicalGroupsOfOperatedChains"])
+        if rows==cols
+            n=isqrt(length(matrix))
+            detv=LinearAlgebra.det(_hompp_int_matrix(matrix,n))
+            det_i=Int(trunc(detv))
+            (det_i==1 || det_i==-1) || _native_diagnostic_emit_locked(:warning,
+                "Transformation matrix is not unimodular (det = $det_i)")
+        end
+        for i in 1:rows, j in 1:cols
+            coeff=matrix[(i-1)*cols+j]
+            for (_,(order,celldim,ocoeff)) in curbasis[j].cells
+                _hompp_add!(newbasis[i],celldim,order,coeff*ocoeff)
+            end
+        end
+    end
+
+    if bd
+        _native_diagnostic_emit_locked(:info,
+            "Applying boundary operator to the result $dim-chains")
+        for i in eachindex(newbasis)
+            newbasis[i]=_hompp_boundary(newbasis[i])
+        end
+    end
+    if !isempty(trace)
+        _native_diagnostic_emit_locked(:info,
+            "Taking trace of result $dim-chains to domain " *
+            strings["PhysicalGroupsToTraceResults"])
+        for i in eachindex(newbasis)
+            newbasis[i]=_hompp_trace_or_project(newbasis[i],m,cached,class,
+                                                trace,true)
+        end
+    end
+    if !isempty(project)
+        _native_diagnostic_emit_locked(:info,
+            "Taking projection of result $dim-chains to the complement of " *
+            "the domain $(strings["PhysicalGroupsToProjectResults"])")
+        for i in eachindex(newbasis)
+            newbasis[i]=_hompp_trace_or_project(newbasis[i],m,cached,class,
+                                                project,false)
+        end
+    end
+
+    # `storeChain` publishes through the same detached reclassification plan
+    # every mesh-mutating plugin uses, so chain entities become visible to
+    # cached queries and exports immediately.
+    staged=_reclassify_model_copy(m)
+    known=_plugin_sub_known_nodes(staged,cached,class)
+    element_counter=Ref(ELEMENT_TAG_MAX[])
+    for (i,chain) in enumerate(newbasis)
+        name="C$(chain.dim) $cname$i"
+        length(name)>128 && (name=name[1:128])
+        _hompp_add_to_model!(staged,chain,name,known,element_counter,caller)
+    end
+    plan=_reclassify_nodes_plan(staged,cached,class,caller;
+        node_max=NODE_TAG_MAX[],element_max=element_counter[])
+    _commit_tagged_plan_locked!(plan;preserve_visibility=true,
+        reconcile_records=false)
+    return nothing
+end
+
+# ---- VoroMetal --------------------------------------------------------------------
+#
+# Upstream `Plugin(VoroMetal)` (VoroMetal.cpp, `HAVE_MESH && HAVE_VOROPP`):
+# `execute` ignores its view argument entirely — without the Voro++
+# microstructure library it reports
+# "Plugin(VoroMetal) requires mesh module and voro++" and returns the view
+# unchanged. Tessella carries no Voro++ implementation, so the plugin
+# registers with the upstream option table and truthfully emits the same
+# error rather than fabricating a microstructure.
+
+function _plugin_exec_vorometal(spec::_PluginSpec,caller::AbstractString)
+    _native_mesh_input_error_locked(
+        "Plugin(VoroMetal) requires mesh module and voro++")
+    return nothing
+end
+
+# ---- NearToFarField ---------------------------------------------------------------
+#
+# Upstream `Plugin(NearToFarField)` (NearToFarField.cpp): reads complex-valued
+# E and H vector fields (two steps: real, imag) on a surface, forms the
+# equivalent currents Js = n×H and Ms = -n×E on every 1- or 2-node//3- or
+# 4-node element, integrates the far-field kernel over each element with the
+# fixed post-element Gauss rules of `post/shapeFunctions.h` (line: 1pt @u=0
+# w=2; triangle: 1pt @u=v=1/3 w=1/2; quadrangle: 4pt @(±1/√3,±1/√3) w=1), then
+# evaluates Jin (e^{+iωt}, default) or Mönk (e^{-iωt}, `NegativeTime`) far
+# fields on a (phi,theta) grid and emits a `_NearToFarField` view with SP or
+# SQ records plus an optional Matlab dump. `elementFactory` maps every
+# element to a LINEAR post element (dim1→2 nodes, dim2 → 3 unless
+# numNodes==4 → 4); currents consume the view element's full node count while
+# the kernel only reads the first `arity` nodes — including upstream's
+# sequential-cursor misalignment for high-order elements.
+
+const _N2FF_GAUSS=(
+    line=NTuple{2,Float64}[(0.0,2.0)],
+    triangle=NTuple{3,Float64}[(0.333333333333333,0.333333333333333,0.5)],
+    quadrangle=NTuple{3,Float64}[(0.577350269189,0.577350269189,1.0),
+                                 (-0.577350269189,0.577350269189,1.0),
+                                 (0.577350269189,-0.577350269189,1.0),
+                                 (-0.577350269189,-0.577350269189,1.0)])
+
+# Shape functions of the upstream post `line`/`triangle`/`quadrangle` classes.
+function _n2ff_shape(kind::Symbol,u::Float64,v::Float64)
+    kind===:line && return (0.5*(1.0-u),0.5*(1.0+u))
+    kind===:triangle && return (1.0-u-v,u,v)
+    return (0.25*(1.0-u)*(1.0-v),0.25*(1.0+u)*(1.0-v),
+            0.25*(1.0+u)*(1.0+v),0.25*(1.0-u)*(1.0+v))
+end
+
+function _n2ff_dshape(kind::Symbol,u::Float64,v::Float64)
+    kind===:line && return ((-0.5,0.5),(0.0,0.0))
+    kind===:triangle && return ((-1.0,1.0,0.0),(-1.0,0.0,1.0))
+    du=(0.25*(v-1.0),0.25*(1.0-v),0.25*(1.0+v),-0.25*(1.0+v))
+    dv=(0.25*(u-1.0),-0.25*(1.0+u),0.25*(1.0+u),0.25*(1.0-u))
+    return (du,dv)
+end
+
+# `element::getJacobian` — |∂x/∂u| for lines, |∂x/∂u × ∂x/∂v| for surfaces.
+function _n2ff_jac(kind::Symbol,geo::Matrix{Float64},u::Float64,v::Float64)
+    du,dv=_n2ff_dshape(kind,u,v)
+    jx=0.0;jy=0.0;jz=0.0;kx=0.0;ky=0.0;kz=0.0
+    for i in 1:length(du)
+        jx+=geo[1,i]*du[i];jy+=geo[2,i]*du[i];jz+=geo[3,i]*du[i]
+        kx+=geo[1,i]*dv[i];ky+=geo[2,i]*dv[i];kz+=geo[3,i]*dv[i]
+    end
+    kind===:line && return hypot(jx,jy,jz)
+    a1=jx*ky-jy*kx;a2=jz*kx-jx*kz;a3=jy*kz-jz*ky
+    return hypot(a1,a2,a3)
+end
+
+# `element::integrate(&vals[comp], 3)`: nodal field interpolated by the linear
+# shape functions and summed over the element's fixed Gauss points.
+function _n2ff_integrate(kind::Symbol,geo::Matrix{Float64},
+                         vals::AbstractVector{Float64},comp::Int)
+    sum=0.0
+    if kind===:line
+        for (u,w) in _N2FF_GAUSS.line
+            n=_n2ff_shape(kind,u,0.0);d=_n2ff_jac(kind,geo,u,0.0)
+            f=0.0
+            for i in 1:2
+                f+=n[i]*vals[3*(i-1)+comp]
+            end
+            sum+=f*w*d
+        end
+        return sum
+    end
+    table=kind===:triangle ? _N2FF_GAUSS.triangle : _N2FF_GAUSS.quadrangle
+    for (u,v,w) in table
+        n=_n2ff_shape(kind,u,v);d=_n2ff_jac(kind,geo,u,v)
+        f=0.0
+        for i in 1:length(n)
+            f+=n[i]*vals[3*(i-1)+comp]
+        end
+        sum+=f*w*d
+    end
+    return sum
+end
+
+# `normal3points`/`normal2points` (Numeric.cpp) — unit normals.
+function _n2ff_normal(coords::Matrix{Float64},numnodes::Int)
+    if numnodes>2
+        t1=(coords[1,2]-coords[1,1],coords[2,2]-coords[2,1],coords[3,2]-coords[3,1])
+        t2=(coords[1,3]-coords[1,1],coords[2,3]-coords[2,1],coords[3,3]-coords[3,1])
+    else
+        t1=(coords[1,2]-coords[1,1],coords[2,2]-coords[2,1],coords[3,2]-coords[3,1])
+        ex=if t1[1]==0.0
+            (1.0,0.0,0.0)
+        elseif t1[2]==0.0
+            (0.0,1.0,0.0)
+        else
+            (0.0,0.0,1.0)
+        end
+        t2=ex
+    end
+    n=_plugin_cross3(t1,t2)
+    l=_plugin_norm3(n)
+    l==0.0 && return (0.0,0.0,0.0)
+    return (n[1]/l,n[2]/l,n[3]/l)
+end
+
+# `elementFactory::create(numNodes, dim, ...)` — linear post arity per element.
+_n2ff_post_arity(dim::Int,numnodes::Int)=
+    dim==1 ? 2 : dim==2 ? (numnodes==4 ? 4 : 3) : 0
+_n2ff_post_kind(arity::Int,dim::Int)=
+    dim==1 ? :line : (arity==4 ? :quadrangle : :triangle)
+
+# Decode one view into flat element records carrying per-node component values
+# for the first two steps (step index 0 = real, 1 = imag). Returns
+# `(elements, nsteps)` where `elements` holds `(kind, dim, coords, vals0,
+# vals1)` per element; when the view does not carry exactly two steps the
+# entries that cannot be paired keep step-0 data in `vals1` — the caller
+# reports the upstream diagnostics before reading them.
+function _n2ff_view_elements(view,caller::AbstractString)
+    out=Tuple{Symbol,Int,Matrix{Float64},Vector{Float64},Vector{Float64}}[]
+    if view.model_kind===nothing
+        elements,steps=_plugin_list_elements(view,caller)
+        for element in elements
+            arity=size(element.vcoords,2);nc=element.ncomp
+            nv=nc*arity
+            nv*steps==length(element.vals) || throw(ArgumentError(
+                "$caller: malformed view element payload"))
+            v0=steps>=1 ? collect(Float64,@view(element.vals[1:nv])) :
+                zeros(nv)
+            v1=steps>=2 ? collect(Float64,@view(element.vals[nv+1:2nv])) :
+                copy(v0)
+            push!(out,(element.kind,element.dim,element.vcoords,v0,v1))
+        end
+        return (elements=out,steps=steps)
+    end
+    keys=_plugin_model_keys(view)
+    isempty(keys) && return (elements=out,steps=0)
+    stepnums=sort!(unique(first(key) for key in keys))
+    for type in sort!(unique(last(key) for key in keys))
+        key0=(stepnums[1],type)
+        haskey(view.model_data,key0) || continue
+        e0,_=_plugin_model_elements(view,key0,caller)
+        e1=_PluginElement[]
+        key1=length(stepnums)>=2 ? (stepnums[2],type) : nothing
+        key1!==nothing && haskey(view.model_data,key1) &&
+            (e1,_=_plugin_model_elements(view,key1,caller))
+        for (i,element) in enumerate(e0)
+            other=i<=length(e1) ? e1[i] : element
+            push!(out,(element.kind,element.dim,element.vcoords,
+                       element.vals,other.vals))
+        end
+    end
+    return (elements=out,steps=length(stepnums))
+end
+
+# Jin far field (e^{+iωt}): N = ∮ Js e^{ik r̂·r'} dS, L = ∮ Ms e^{ik r̂·r'} dS,
+# E_θ/E_φ per Jin p.176, returns |E|²/(2Z0).
+function _n2ff_jin(elems,js0,js1,ms0,ms1,k0::Float64,rfar::Float64,
+                   theta::Float64,phi::Float64)
+    sθ,cθ=sin(theta),cos(theta);sϕ,cϕ=sin(phi),cos(phi)
+    r=(sθ*cϕ,sθ*sϕ,cθ)
+    z0=120.0*pi
+    N=zeros(2,3);L=zeros(2,3)
+    i=1
+    for (kind,geo) in elems
+        arity=size(geo,2)
+        valN0=zeros(3arity);valN1=zeros(3arity)
+        valL0=zeros(3arity);valL1=zeros(3arity)
+        for nod in 1:arity
+            rr=geo[1,nod]*r[1]+geo[2,nod]*r[2]+geo[3,nod]*r[3]
+            e0=cos(k0*rr);e1=sin(k0*rr)
+            for comp in 1:3
+                if i<=length(js0)
+                    valN0[3*(nod-1)+comp]=js0[i]*e0-js1[i]*e1
+                    valN1[3*(nod-1)+comp]=js0[i]*e1+js1[i]*e0
+                    valL0[3*(nod-1)+comp]=ms0[i]*e0-ms1[i]*e1
+                    valL1[3*(nod-1)+comp]=ms0[i]*e1+ms1[i]*e0
+                    i+=1
+                end
+            end
+        end
+        for comp in 1:3
+            N[1,comp]+=_n2ff_integrate(kind,geo,valN0,comp)
+            N[2,comp]+=_n2ff_integrate(kind,geo,valN1,comp)
+            L[1,comp]+=_n2ff_integrate(kind,geo,valL0,comp)
+            L[2,comp]+=_n2ff_integrate(kind,geo,valL1,comp)
+        end
+    end
+    Ns=zeros(2,3);Ls=zeros(2,3)
+    for step in 1:2
+        Ns[step,1]=N[step,1]*sθ*cϕ+N[step,2]*sθ*sϕ+N[step,3]*cθ
+        Ns[step,2]=N[step,1]*cθ*cϕ+N[step,2]*cθ*sϕ-N[step,3]*sθ
+        Ns[step,3]=-N[step,1]*sϕ+N[step,2]*cϕ
+        Ls[step,1]=L[step,1]*sθ*cϕ+L[step,2]*sθ*sϕ+L[step,3]*cθ
+        Ls[step,2]=L[step,1]*cθ*cϕ+L[step,2]*cθ*sϕ-L[step,3]*sθ
+        Ls[step,3]=-L[step,1]*sϕ+L[step,2]*cϕ
+    end
+    kf=k0/(4.0*pi*rfar);ck=cos(k0*rfar);sk=sin(k0*rfar)
+    et0=-kf*((Ls[1,3]+z0*Ns[1,2])*sk-(Ls[2,3]+z0*Ns[2,2])*ck)
+    et1=-kf*((Ls[1,3]+z0*Ns[1,2])*ck+(Ls[2,3]+z0*Ns[2,2])*sk)
+    ep0=kf*((Ls[1,2]-z0*Ns[1,3])*sk-(Ls[2,2]-z0*Ns[2,3])*ck)
+    ep1=kf*((Ls[1,2]-z0*Ns[1,3])*ck+(Ls[2,2]-z0*Ns[2,3])*sk)
+    return (et0*et0+et1*et1+ep0*ep0+ep1*ep1)/(2.0*z0)
+end
+
+# Mönk far field (e^{-iωt}): einf = i k/(4π) xHat × ∮(n×E + Z0(n×H)×xHat)
+# e^{-ik xHat·r'} dS; returns Σ|einf|² and the raw ffvec components.
+function _n2ff_monk(elems,js0,js1,ms0,ms1,k0::Float64,
+                    theta::Float64,phi::Float64,ffvec::Matrix{Float64})
+    sθ,cθ=sin(theta),cos(theta);sϕ,cϕ=sin(phi),cos(phi)
+    xhat=(sθ*cϕ,sθ*sϕ,cθ)
+    z0=120.0*pi
+    ir=zeros(3);ii=zeros(3)
+    i=1
+    for (kind,geo) in elems
+        arity=size(geo,2)
+        irv=zeros(3arity);iiv=zeros(3arity)
+        for nod in 1:arity
+            d=geo[1,nod]*xhat[1]+geo[2,nod]*xhat[2]+geo[3,nod]*xhat[3]
+            ne_r=(i<=length(ms0) ? -ms0[i] : 0.0,
+                  i+1<=length(ms0) ? -ms0[i+1] : 0.0,
+                  i+2<=length(ms0) ? -ms0[i+2] : 0.0)
+            ne_i=(i<=length(ms1) ? -ms1[i] : 0.0,
+                  i+1<=length(ms1) ? -ms1[i+1] : 0.0,
+                  i+2<=length(ms1) ? -ms1[i+2] : 0.0)
+            nh_r=(i<=length(js0) ? js0[i] : 0.0,
+                  i+1<=length(js0) ? js0[i+1] : 0.0,
+                  i+2<=length(js0) ? js0[i+2] : 0.0)
+            nh_i=(i<=length(js1) ? js1[i] : 0.0,
+                  i+1<=length(js1) ? js1[i+1] : 0.0,
+                  i+2<=length(js1) ? js1[i+2] : 0.0)
+            nx_r=_plugin_cross3(nh_r,xhat);nx_i=_plugin_cross3(nh_i,xhat)
+            ck=cos(-k0*d);sk=sin(-k0*d)
+            for comp in 1:3
+                gr=ne_r[comp]+z0*nx_r[comp]
+                gi=ne_i[comp]+z0*nx_i[comp]
+                irv[3*(nod-1)+comp]=gr*ck-gi*sk
+                iiv[3*(nod-1)+comp]=gr*sk+gi*ck
+            end
+            i+=3
+        end
+        for comp in 1:3
+            ir[comp]+=_n2ff_integrate(kind,geo,irv,comp)
+            ii[comp]+=_n2ff_integrate(kind,geo,iiv,comp)
+        end
+    end
+    xr=_plugin_cross3(xhat,ir);xi=_plugin_cross3(xhat,ii)
+    c1=k0/(4.0*pi)
+    acc=0.0
+    for comp in 1:3
+        # einf = (ik0/4π)*(xHat×∫)  →  |einf|² = c1²*|xHat×∫|²
+        acc+=c1*c1*(xr[comp]*xr[comp]+xi[comp]*xi[comp])
+        ffvec[comp,1]=-c1*xi[comp]
+        ffvec[comp,2]=c1*xr[comp]
+    end
+    return acc
+end
+
+function _n2ff_matlab_vector(io::IO,name::AbstractString,mat)
+    print(io,name," = [")
+    for i in axes(mat,1),j in axes(mat,2)
+        print(io,_plugin_gnum(mat[i,j];significant=16)," ")
+    end
+    print(io,"];\n")
+end
+
+function _plugin_exec_nearfarfield(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers;strings=spec.strings
+    k0=numbers["Wavenumber"]
+    phi_start=numbers["PhiStart"];phi_end=numbers["PhiEnd"]
+    nbphi=_mesh_query_integer(Int(numbers["NumPointsPhi"]),caller,"NumPointsPhi")
+    theta_start=numbers["ThetaStart"];theta_end=numbers["ThetaEnd"]
+    nbthe=_mesh_query_integer(Int(numbers["NumPointsTheta"]),caller,
+                              "NumPointsTheta")
+    normalize=!iszero(numbers["Normalize"]);db=!iszero(numbers["dB"])
+    negtime=!iszero(numbers["NegativeTime"])
+    rfar=trunc(Int,numbers["RFar"]) # upstream `(int)` cast truncates
+    outfile=strings["MatlabOutputFile"]
+
+    etag,eview=_plugin_view_tag(numbers,"EView",caller)
+    htag,hview=_plugin_view_tag(numbers,"HView",caller)
+
+    edec=_n2ff_view_elements(eview,caller)
+    hdec=_n2ff_view_elements(hview,caller)
+    # Upstream order: compare the entity/element/step counts first
+    # ("Incompatible views"), then require exactly two steps ("Invalid number
+    # of steps ... (must be complex)").
+    if length(edec.elements)!=length(hdec.elements) ||
+       edec.steps!=hdec.steps
+        _native_mesh_input_error_locked(
+            "Incompatible views for E field and H field")
+        return nothing
+    end
+    if edec.steps!=2 || hdec.steps!=2
+        _native_mesh_input_error_locked(
+            "Invalid number of steps for E or H fields (must be complex)")
+        return nothing
+    end
+    eels=edec.elements;heels=hdec.elements
+
+    # Bounding box of the E data (upstream `getBoundingBox` over node coords).
+    lo=fill(Inf,3);hi=fill(-Inf,3)
+    for (_,_,coords,_,_) in eels
+        for node in axes(coords,2),axis in 1:3
+            v=coords[axis,node]
+            v<lo[axis] && (lo[axis]=v)
+            v>hi[axis] && (hi[axis]=v)
+        end
+    end
+    any(!isfinite,lo) && begin
+        _native_mesh_input_error_locked(
+            "No valid elements found to compute far field")
+        return nothing
+    end
+    x0=(lo[1]+hi[1])/2;y0=(lo[2]+hi[2])/2;z0=(lo[3]+hi[3])/2
+    lc=_plugin_norm3(hi.-lo);r_sph=iszero(lc) ? 1.0 : lc/2
+
+    hlo=fill(Inf,3);hhi=fill(-Inf,3)
+    for (_,_,coords,_,_) in heels
+        for node in axes(coords,2),axis in 1:3
+            v=coords[axis,node]
+            v<hlo[axis] && (hlo[axis]=v)
+            v>hhi[axis] && (hhi[axis]=v)
+        end
+    end
+    if (hlo[1]+hhi[1])/2!=x0 || (hlo[2]+hhi[2])/2!=y0 ||
+       (hlo[3]+hhi[3])/2!=z0
+        _native_mesh_input_error_locked(
+            "E and H fields must be given on the same grid")
+        return nothing
+    end
+
+    # Surface currents: js/ms hold three components per VIEW node (upstream
+    # loops the view element's own node count), in file order; the H element
+    # shares the same positional slot like upstream's (ent,ele) indexing.
+    elems=Tuple{Symbol,Matrix{Float64}}[]
+    js0=Float64[];js1=Float64[];ms0=Float64[];ms1=Float64[]
+    for idx in eachindex(eels)
+        kind,dim,coords,es0,es1=eels[idx]
+        nc=size(coords,2)==0 ? 0 : length(es0)÷size(coords,2)
+        (dim!=1 && dim!=2) && continue
+        nc!=3 && continue
+        vnodes=size(coords,2)
+        parity=_n2ff_post_arity(dim,vnodes)
+        parity==0 && continue
+        pgeo=Matrix{Float64}(undef,3,parity)
+        for axis in 1:3,node in 1:parity
+            pgeo[axis,node]=coords[axis,node]
+        end
+        push!(elems,(_n2ff_post_kind(parity,dim),pgeo))
+        n=_n2ff_normal(coords,vnodes)
+        hs0=heels[idx][4];hs1=heels[idx][5]
+        for nod in 1:vnodes
+            b=(nod-1)*3
+            e0=(es0[b+1],es0[b+2],es0[b+3]);e1=(es1[b+1],es1[b+2],es1[b+3])
+            h0=b+3<=length(hs0) ?
+                (hs0[b+1],hs0[b+2],hs0[b+3]) : (0.0,0.0,0.0)
+            h1=b+3<=length(hs1) ?
+                (hs1[b+1],hs1[b+2],hs1[b+3]) : (0.0,0.0,0.0)
+            j0=_plugin_cross3(n,h0);j1=_plugin_cross3(n,h1)
+            m0=_plugin_cross3(e0,n);m1=_plugin_cross3(e1,n)
+            append!(js0,j0);append!(js1,j1);append!(ms0,m0);append!(ms1,m1)
+        end
+    end
+    isempty(elems) && begin
+        _native_mesh_input_error_locked(
+            "No valid elements found to compute far field")
+        return nothing
+    end
+
+    dphi=(phi_end-phi_start)/nbphi;dtheta=(theta_end-theta_start)/nbthe
+    rows=nbphi+1;cols=nbthe+1
+    phi=zeros(rows,cols);theta=zeros(rows,cols)
+    xs=zeros(rows,cols);ys=zeros(rows,cols);zs=zeros(rows,cols)
+    farfield=zeros(rows,cols)
+    ff1r=zeros(rows,cols);ff2r=zeros(rows,cols);ff3r=zeros(rows,cols)
+    ff1i=zeros(rows,cols);ff2i=zeros(rows,cols);ff3i=zeros(rows,cols)
+    ffvec=zeros(3,2)
+    ffmin=1e200;ffmax=-1e200
+    for i in 0:nbphi, j in 0:nbthe
+        phi[i+1,j+1]=phi_start+i*dphi
+        theta[i+1,j+1]=theta_start+j*dtheta
+        if negtime
+            farfield[i+1,j+1]=_n2ff_monk(elems,js0,js1,ms0,ms1,k0,
+                                        theta[i+1,j+1],phi[i+1,j+1],ffvec)
+            ff1r[i+1,j+1]=ffvec[1,1];ff2r[i+1,j+1]=ffvec[2,1]
+            ff3r[i+1,j+1]=ffvec[3,1]
+            ff1i[i+1,j+1]=ffvec[1,2];ff2i[i+1,j+1]=ffvec[2,2]
+            ff3i[i+1,j+1]=ffvec[3,2]
+        else
+            rf=iszero(rfar) ? 10.0*lc : Float64(rfar)
+            farfield[i+1,j+1]=_n2ff_jin(elems,js0,js1,ms0,ms1,k0,rf,
+                                        theta[i+1,j+1],phi[i+1,j+1])
+        end
+        ffmin=min(ffmin,farfield[i+1,j+1])
+        ffmax=max(ffmax,farfield[i+1,j+1])
+    end
+    if normalize
+        if iszero(ffmax)
+            _native_diagnostic_emit_locked(:warning,
+                "Cannot normalize far field (max = 0)")
+        else
+            for i in 0:nbphi,j in 0:nbthe
+                farfield[i+1,j+1]/=ffmax
+            end
+        end
+    end
+    if db
+        ffmin=1e200;ffmax=-1e200
+        for i in 0:nbphi,j in 0:nbthe
+            farfield[i+1,j+1]=10.0*log10(farfield[i+1,j+1])
+            ffmin=min(ffmin,farfield[i+1,j+1])
+            ffmax=max(ffmax,farfield[i+1,j+1])
+        end
+    end
+    for i in 0:nbphi,j in 0:nbthe
+        df=ffmax-ffmin
+        if iszero(df)
+            _native_diagnostic_emit_locked(:warning,"zero far field range")
+            df=1.0
+        end
+        f=(farfield[i+1,j+1]-ffmin)/df
+        xs[i+1,j+1]=x0+r_sph*f*sin(theta[i+1,j+1])*cos(phi[i+1,j+1])
+        ys[i+1,j+1]=y0+r_sph*f*sin(theta[i+1,j+1])*sin(phi[i+1,j+1])
+        zs[i+1,j+1]=z0+r_sph*f*cos(theta[i+1,j+1])
+    end
+    if !isempty(outfile)
+        ok=false
+        try
+            # `open` here is the API filename importer; raw stream writes
+            # need `Base.open` explicitly.
+            Base.open(outfile,"w") do io
+                _n2ff_matlab_vector(io,"phi",phi)
+                _n2ff_matlab_vector(io,"theta",theta)
+                _n2ff_matlab_vector(io,"farField",farfield)
+                if negtime
+                    _n2ff_matlab_vector(io,"farField1r",ff1r)
+                    _n2ff_matlab_vector(io,"farField2r",ff2r)
+                    _n2ff_matlab_vector(io,"farField3r",ff3r)
+                    _n2ff_matlab_vector(io,"farField1i",ff1i)
+                    _n2ff_matlab_vector(io,"farField2i",ff2i)
+                    _n2ff_matlab_vector(io,"farField3i",ff3i)
+                end
+                _n2ff_matlab_vector(io,"x",xs)
+                _n2ff_matlab_vector(io,"y",ys)
+                _n2ff_matlab_vector(io,"z",zs)
+            end
+            ok=true
+        catch err
+            err isa InterruptException && rethrow()
+        end
+        ok || _native_mesh_input_error_locked(
+            "Could not open file '$outfile'")
+    end
+
+    types=String[];counts=Dict{String,Int}();datas=Dict{String,Vector{Float64}}()
+    if nbphi==1 || nbthe==1
+        flat=Float64[]
+        for i in 0:nbphi-1,j in 0:nbthe-1
+            push!(flat,xs[i+1,j+1],ys[i+1,j+1],zs[i+1,j+1],
+                  farfield[i+1,j+1])
+        end
+        push!(types,"SP");counts["SP"]=nbphi*nbthe;datas["SP"]=flat
+    else
+        flat=Float64[]
+        for i in 0:nbphi-1,j in 0:nbthe-1
+            p1=(xs[i+1,j+1],ys[i+1,j+1],zs[i+1,j+1])
+            p2=(xs[i+2,j+1],ys[i+2,j+1],zs[i+2,j+1])
+            p3=(xs[i+2,j+2],ys[i+2,j+2],zs[i+2,j+2])
+            p4=(xs[i+1,j+2],ys[i+1,j+2],zs[i+1,j+2])
+            for axis in 1:3
+                push!(flat,p1[axis],p2[axis],p3[axis],p4[axis])
+            end
+            push!(flat,farfield[i+1,j+1],farfield[i+2,j+1],
+                  farfield[i+2,j+2],farfield[i+1,j+2])
+        end
+        push!(types,"SQ");counts["SQ"]=nbphi*nbthe;datas["SQ"]=flat
+    end
+    _plugin_publish_list_view!("_NearToFarField",types,counts,datas,
+                               Float64[];caller)
+    return nothing
+end
+
+# ---- Crack -------------------------------------------------------------------------
+#
+# Upstream `Plugin(Crack)` (Crack.cpp) duplicates the internal vertices of an
+# orientable, manifold physical group of dimension 1 or 2 (the crack), stores
+# copies of the crack elements on a fresh discrete curve/surface entity
+# (`getMaxElementaryNumber(dim)+1`), and rebinds the vertices of elements on
+# the positive side of the crack to the duplicates. Boundary vertices are the
+# odd-incidence crack vertices (dim 1: primary-vertex XOR; dim 2:
+# `MEdge`-keyed toggle whose `data` carries every vertex of each surviving
+# edge, including high-order interior nodes). An `OpenBoundaryPhysicalGroup`
+# (dimension `dim-1`) unseals its covered boundary vertices except the odd
+# incidence ones at its own boundary. Positive-side membership compares the
+# element-to-crack barycenter displacement against `cross(normal1d,
+# edge.tangent())` (dim 1) or `face.normal()` (dim 2). `SwapOrientation`
+# reverses the copies through `MElement::reverse`; `DebugView` publishes an
+# `ElementNodeData` view of the per-vertex duplication flags on the
+# positive-side elements. Upstream's own TODO notes the new entity has no
+# consistent topological boundary — Tessella mirrors that limitation.
+#
+# Publication flows through `_reclassify_nodes_plan`: the duplicated nodes
+# and copied crack elements are staged as records on the new entity, and a
+# `cell_edit` hook rebinds the positive-side assembly cells (cached and
+# record cells alike) to the duplicated vertices — the ownership-safe
+# equivalent of upstream's in-place `setVertex`.
+
+const _CRACK_EDGES=(
+    lin=(),
+    tri=((1,2),(2,3),(1,3)),
+    qua=((1,2),(2,3),(3,4),(4,1)),
+    tet=((1,2),(2,3),(1,3),(4,1),(4,3),(4,2)),
+    pri=((1,2),(1,3),(1,4),(2,3),(2,5),(3,6),(4,5),(4,6),(5,6)),
+    pyr=((1,2),(1,4),(1,5),(2,3),(2,5),(3,4),(3,5),(4,5)),
+    hex=((1,2),(1,4),(1,5),(2,3),(2,6),(3,4),(3,7),(4,8),(5,6),(5,8),
+         (6,7),(7,8)),
+    trih=())
+
+# `MElement::reverse` for the families a crack stores (`TYPE_LIN`,
+# `TYPE_TRI`, `TYPE_QUA`) at arbitrary order. Corners use the upstream swaps;
+# `_vs` (all non-corner vertices in MSH order) follows the upstream
+# per-order block loop for `MTriangleN`/`MQuadrangleN`, or a plain reversal
+# for `MLineB`.
+function _crack_reverse(family::Symbol,order::Int,nodes::Vector{UInt64})
+    family===:lin &&
+        return UInt64[nodes[2],nodes[1],nodes[end:-1:3]...]
+    if family===:tri
+        out=UInt64[nodes[1],nodes[3],nodes[2]]
+        vs=copy(nodes[4:end]);npts=order-1;base=0;start=0
+        while npts>0
+            reverse!(@view vs[start+1:start+3*npts])
+            base+=3*npts
+            if npts>2
+                tmp=vs[base+2];vs[base+2]=vs[base+3];vs[base+3]=tmp
+            end
+            npts-=3;start=base+3
+        end
+        append!(out,vs);return out
+    end
+    # :qua — upstream MQuadrangleN::reverse.
+    out=UInt64[nodes[1],nodes[4],nodes[3],nodes[2]]
+    vs=copy(nodes[5:end]);npts=order-1;base=0;start=0
+    while npts>0
+        reverse!(@view vs[start+1:start+4*npts])
+        base+=4*npts
+        if npts>1
+            tmp=vs[base+2];vs[base+2]=vs[base+4];vs[base+4]=tmp
+        end
+        npts-=2;start=base+4
+    end
+    append!(out,vs);return out
+end
+
+# All mesh elements with their owning entity and public element tag —
+# the Crack scan upstream performs over `getEntities`.
+function _plugin_mesh_element_scan(m,cached,class)
+    node_tag_of=i->_cache_node_tag(cached===nothing ? nothing : cached,i)
+    element_tag_of=i->_cache_element_tag(cached===nothing ? nothing : cached,i)
+    entries=Tuple{Int,Int,Int32,Vector{UInt64},UInt64}[]
+    # Upstream iterates `GEntity::getNumMeshElements` — each element lives on
+    # exactly one entity. A post-reclassify cache and the model's discrete
+    # records carry the same public element tags for discrete entities, so
+    # record entries are admitted only for tags the cache does not carry.
+    seen=Set{UInt64}()
+    if cached isa Mesh
+        _,_,total=_mesh_element_offsets(cached)
+        for i in 1:total
+            rec=mesh_element_record(cached,i)
+            entity=_plugin_element_entity(cached,class,i)
+            entity===nothing && continue
+            conn=UInt64[node_tag_of(Int(t)) for t in rec.node_tags]
+            etag_pub=element_tag_of(i)
+            etag_pub in seen && continue
+            push!(seen,etag_pub)
+            push!(entries,(Int(entity[1]),Int(entity[2]),
+                           Int32(rec.element_type),conn,etag_pub))
+        end
+    elseif cached isa MixedMesh && class!==nothing
+        for (msh,dim,offset,cells,owners) in _cache_catalog(cached,class)
+            for col in axes(cells,2)
+                col<=length(owners) || continue
+                conn=UInt64[node_tag_of(Int(t)) for t in cells[:,col]]
+                etag_pub=element_tag_of(offset+col)
+                etag_pub in seen && continue
+                push!(seen,etag_pub)
+                push!(entries,(Int(dim),Int(owners[col]),msh,conn,etag_pub))
+            end
+        end
+    end
+    for ((dim,etag),record) in Model._discrete_mesh_records_model(m)
+        for index in eachindex(record.element_types)
+            msh=record.element_types[index]
+            spec=try msh_spec(Int(msh)) catch err
+                err isa InterruptException && rethrow()
+                continue
+            end
+            spec.dim==dim || continue
+            etag_pub=record.element_tags[index]
+            etag_pub in seen && continue
+            push!(seen,etag_pub)
+            push!(entries,(dim,etag,msh,copy(record.element_nodes[index]),
+                           etag_pub))
+        end
+    end
+    return entries
+end
+
+# `ElementNodeData` publication used by the Crack DebugView (the
+# `ElementData` publisher fixes a unit row width; node rows carry the
+# per-element vertex count in `counts` like upstream `data[e->getNum()]`).
+function _plugin_publish_element_node_view!(name,tags,widths,values,slot,
+                                          mesh;caller)
+    view=_SessionView(name)
+    view.model_kind="ElementNodeData"
+    view.model_step_ranges=[_NativeViewStepRange(0,0,slot,1)]
+    counts=Int32.(widths)
+    flat=Float64.(values)
+    extent=_native_model_view_extent(tags,
+        _native_view_model_count(slot,"ElementNodeData"))
+    view.model_data[(0,"ElementNodeData")]=(UInt64.(tags),flat,1)
+    view.model_contexts[(0,"ElementNodeData")]=(
+        model_slot=slot,time=0.0,counts=counts,extent=extent,
+        partitions=Set{Int}([0]),
+        interpolation_msh=_plugin_mesh_msh_types(mesh))
+    view.numbers["NbTimeStep"]=1.0
+    tag=_fresh_view_tag()
+    SESSION_VIEWS[tag]=view
+    VIEW_TAG_MAX[]=max(VIEW_TAG_MAX[],tag)
+    return tag
+end
+
+function _plugin_exec_crack(spec::_PluginSpec,caller::AbstractString)
+    numbers=spec.numbers
+    dim=_mesh_query_integer(Int(numbers["Dimension"]),caller,"Dimension")
+    physical=_mesh_query_integer(Int(numbers["PhysicalGroup"]),caller,
+                                 "PhysicalGroup")
+    open=_mesh_query_integer(Int(numbers["OpenBoundaryPhysicalGroup"]),caller,
+                             "OpenBoundaryPhysicalGroup")
+    normal1d=(numbers["NormalX"],numbers["NormalY"],numbers["NormalZ"])
+    newphys=_mesh_query_integer(Int(numbers["NewPhysicalGroup"]),caller,
+                                "NewPhysicalGroup")
+    debug=!iszero(numbers["DebugView"])
+    swap=!iszero(numbers["SwapOrientation"])
+    if dim!=1 && dim!=2
+        _native_mesh_input_error_locked(
+            "Crack dimension should be 1 or 2")
+        return nothing
+    end
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    slot=MODEL_SLOTS[index]
+    m=slot.model
+    cached=slot.mesh
+    class=cached===nothing ? nothing :
+        (slot.class===nothing ? _cached_classification_locked(cached) :
+         slot.class)
+    entities=Int[t for t in get(m.physical,(dim,physical),Int[])]
+    if isempty(entities)
+        _native_mesh_input_error_locked(
+            "Physical group $physical (dimension $dim) is empty")
+        return nothing
+    end
+    open_entities=Int[]
+    if open>0
+        open_entities=Int[t for t in get(m.physical,(dim-1,open),Int[])]
+        if isempty(open_entities)
+            _native_mesh_input_error_locked(
+                "Open boundary physical group $open (dimension $(dim-1)) " *
+                "is empty")
+            return nothing
+        end
+    end
+    crack_entities=Set{Tuple{Int,Int}}(
+        vcat([(dim,e) for e in entities],
+             [(dim-1,e) for e in open_entities]))
+
+    entries=_plugin_mesh_element_scan(m,cached,class)
+    isempty(entries) && return nothing
+
+    # Node coordinates over cache and records, for barycentres.
+    coords_by_tag=Dict{UInt64,NTuple{3,Float64}}()
+    if cached!==nothing
+        for i in 1:nnodes(cached)
+            coords_by_tag[_cache_node_tag(cached,i)]=(cached.coords[1,i],
+                cached.coords[2,i],cached.coords[3,i])
+        end
+    end
+    for ((_,_),record) in Model._discrete_mesh_records_model(m)
+        for (pos,ntag) in enumerate(record.node_tags)
+            coords_by_tag[UInt64(ntag)]=(record.node_coords[1,pos],
+                record.node_coords[2,pos],record.node_coords[3,pos])
+        end
+    end
+
+    entity_members=Set{Tuple{Int,Int}}((dim,e) for e in entities)
+    open_members=Set{Tuple{Int,Int}}((dim-1,e) for e in open_entities)
+    crack_elements=[e for e in entries if (e[1],e[2]) in entity_members]
+    isempty(crack_elements) && begin
+        _native_mesh_input_error_locked(
+            "Physical group $physical (dimension $dim) is empty")
+        return nothing
+    end
+
+    crack_vertices=Set{UInt64}();bnd_vertices=Set{UInt64}()
+    if dim==1
+        for (_,_,msh,conn,_) in crack_elements
+            union!(crack_vertices,conn)
+            spec=msh_spec(Int(msh))
+            np=min(Elements._msh_primary_nodes(spec.family),length(conn))
+            for j in 1:np
+                node=conn[j]
+                node in bnd_vertices ? delete!(bnd_vertices,node) :
+                    push!(bnd_vertices,node)
+            end
+        end
+    else
+        bnd=Dict{NTuple{2,UInt64},Vector{UInt64}}()
+        for (_,_,msh,conn,_) in crack_elements
+            union!(crack_vertices,conn)
+            spec=msh_spec(Int(msh))
+            primary=min(Elements._msh_primary_nodes(spec.family),
+                        length(conn))
+            edges=getproperty(_CRACK_EDGES,spec.family)
+            per_edge=spec.order-1
+            for (j,(a,b)) in enumerate(edges)
+                (a<=primary && b<=primary) || continue
+                key=minmax(conn[a],conn[b])
+                if haskey(bnd,key)
+                    delete!(bnd,key)
+                else
+                    data=UInt64[conn[a],conn[b]]
+                    for k in 1:per_edge
+                        pos=primary+(j-1)*per_edge+k
+                        pos<=length(conn) && push!(data,conn[pos])
+                    end
+                    bnd[key]=data
+                end
+            end
+        end
+        for data in values(bnd)
+            union!(bnd_vertices,data)
+        end
+    end
+
+    # Boundary of the open boundary: odd incidence over its primary vertices
+    # (upstream only computes this for entities of dimension >= 1 — for a
+    # dim-1 crack the open group holds dim-0 entities and the set stays
+    # empty, so every covered vertex unseals).
+    bnd_from_open=Set{UInt64}()
+    if dim>=2
+        for oetag in open_entities
+            for (msh2,conn2) in _entity_all_elements(m,cached,class,dim-1,
+                                                   oetag)
+                spec=try msh_spec(Int(msh2)) catch err
+                    err isa InterruptException && rethrow()
+                    continue
+                end
+                np=min(Elements._msh_primary_nodes(spec.family),length(conn2))
+                for j in 1:np
+                    node=conn2[j]
+                    node in bnd_from_open ? delete!(bnd_from_open,node) :
+                        push!(bnd_from_open,node)
+                end
+            end
+        end
+    end
+    isempty(bnd_from_open) || _native_diagnostic_emit_locked(:info,
+        "$(length(bnd_from_open)) nodes on boundary of " *
+        "OpenBoundaryPhysicalGroup")
+    # Unseal every vertex covered by the open boundary that is not on the
+    # open boundary's own boundary.
+    for (odim,oetag) in open_members
+        for (_,nodes) in _entity_all_elements(m,cached,class,odim,oetag)
+            for node in nodes
+                node in bnd_from_open || delete!(bnd_vertices,node)
+            end
+        end
+    end
+    setdiff!(crack_vertices,bnd_vertices)
+
+    # Elements touching the crack from a non-crack entity: the closest crack
+    # element's orientation decides the positive side.
+    oneside=Set{UInt64}()
+    function barycenter(conn)
+        sx=0.0;sy=0.0;sz=0.0;n=length(conn)
+        for t in conn
+            c=coords_by_tag[t];sx+=c[1];sy+=c[2];sz+=c[3]
+        end
+        return (sx/n,sy/n,sz/n)
+    end
+    crack_bary=[barycenter(e[4]) for e in crack_elements]
+    for (edim,etag,msh,conn,etag_pub) in entries
+        (edim,etag) in crack_entities && continue
+        any(t->t in crack_vertices,conn) || continue
+        b=barycenter(conn)
+        dmin=Inf;ce=0
+        for (k,cb) in enumerate(crack_bary)
+            d2=(b[1]-cb[1])^2+(b[2]-cb[2])^2+(b[3]-cb[3])^2
+            if d2<dmin;dmin=d2;ce=k;end
+        end
+        ceconn=crack_elements[ce][4]
+        cb=crack_bary[ce]
+        dv=(b[1]-cb[1],b[2]-cb[2],b[3]-cb[3])
+        n=if dim==1
+            c1=coords_by_tag[ceconn[1]];c2=coords_by_tag[ceconn[2]]
+            t=(c2[1]-c1[1],c2[2]-c1[2],c2[3]-c1[3])
+            tl=_plugin_norm3(t)
+            tl==0.0 && (t=(0.0,0.0,0.0))
+            tl!=0.0 && (t=(t[1]/tl,t[2]/tl,t[3]/tl))
+            _plugin_cross3(normal1d,t)
+        else
+            _plugin_normal3(coords_by_tag[ceconn[1]],
+                            coords_by_tag[ceconn[2]],
+                            coords_by_tag[ceconn[3]])
+        end
+        n[1]*dv[1]+n[2]*dv[2]+n[3]*dv[3]>0 && push!(oneside,etag_pub)
+    end
+
+    staged=_reclassify_model_copy(m)
+    etag_new=maximum((t for (d,t) in model_entities(staged) if d==dim);
+                     init=0)+1
+    add_discrete_entity!(staged,dim,etag_new)
+    record=staged.discrete[(dim,etag_new)]
+    phys_tag=newphys>0 ? newphys : physical
+    push!(get!(()->Int[],staged.entity_physicals,(dim,etag_new)),phys_tag)
+    group=get!(()->Int[],staged.physical,(dim,phys_tag))
+    etag_new in group || push!(group,etag_new)
+    phys_tag>0 && (staged.physical_tag_max=
+        max(staged.physical_tag_max,phys_tag))
+
+    # Duplicate the internal crack vertices in ascending tag order, exactly
+    # like upstream's `MVertexPtrLessThan` set traversal.
+    vxv=Dict{UInt64,UInt64}()
+    node_counter=NODE_TAG_MAX[]
+    for old in sort!(collect(crack_vertices))
+        node_counter+=UInt64(1)
+        c=coords_by_tag[old]
+        _record_append_node!(record,node_counter,[c[1],c[2],c[3]],Float64[])
+        vxv[old]=node_counter
+    end
+
+    # Copy the crack elements onto the new entity; only the element types
+    # upstream stores survive (`TYPE_LIN` for dim 1, `TYPE_TRI`/`TYPE_QUA`
+    # for dim 2 — the factory `else` drops anything else).
+    element_counter=ELEMENT_TAG_MAX[]
+    allowed=dim==1 ? (:lin,) : (:tri,:qua)
+    for (_,_,msh,conn,_) in crack_elements
+        spec=msh_spec(Int(msh))
+        spec.family in allowed || continue
+        newconn=UInt64[get(vxv,t,t) for t in conn]
+        swap && (newconn=_crack_reverse(spec.family,spec.order,newconn))
+        element_counter+=UInt64(1)
+        _record_append_element!(record,Int(msh),element_counter,newconn)
+    end
+
+    cell_edit=function(assembly)
+        for cell in assembly.cells
+            cell.tag in oneside || continue
+            for j in eachindex(cell.nodes)
+                pos=cell.nodes[j]
+                pos==0 && continue
+                new=get(vxv,assembly.nodes[pos].tag,UInt64(0))
+                new==0 && continue
+                cell.nodes[j]=assembly.node_positions[new]
+            end
+        end
+        return nothing
+    end
+    plan=_reclassify_nodes_plan(staged,cached,class,caller;
+        node_max=NODE_TAG_MAX[],element_max=ELEMENT_TAG_MAX[],
+        cell_edit)
+    _commit_tagged_plan_locked!(plan;preserve_visibility=true,
+        reconcile_records=false)
+    debug && begin
+        tags=UInt64[];widths=Int[];values=Float64[]
+        for (_,_,_,conn,etag_pub) in entries
+            etag_pub in oneside || continue
+            push!(tags,etag_pub);push!(widths,length(conn))
+            append!(values,(t in keys(vxv) ? 1.0 : 0.0 for t in conn))
+        end
+        _plugin_publish_element_node_view!(
+            "Positive-side elements and duplicated nodes (1: true, 0: false)",
+            tags,widths,values,slot,LAST_MESH[];caller)
+    end
+    return nothing
+end
+
 # ---- Bubbles ----------------------------------------------------------------------------
 #
 # Upstream `Plugin(Bubbles)` (Bubbles.cpp) writes one `.geo` file: the model's
@@ -6031,7 +7514,7 @@ function _plugin_exec_gausspoints(spec::_PluginSpec,caller::AbstractString)
         end
     end
     if isempty(flat)
-        _native_diagnostic_emit_locked(:error,"No entities")
+        _native_mesh_input_error_locked("No entities")
         return nothing
     end
     _plugin_publish_list_view!("GaussPoints",["SP"],Dict("SP"=>length(flat)÷4),
@@ -6514,7 +7997,7 @@ function _plugin_exec_meshsubentities(spec::_PluginSpec,caller::AbstractString)
     members=members_raw===nothing ? Int[] :
         Int[t for t in members_raw if Model._model_entity_known(m,in_dim,t)]
     if isempty(members)
-        _native_diagnostic_emit_locked(:error,
+        _native_mesh_input_error_locked(
             "Physical group $in_phys (dimension $in_dim) is empty")
         return nothing
     end
@@ -8062,6 +9545,35 @@ const _PLUGINS=Dict{String,NamedTuple}(
         string_options=Dict{String,String}(
             "Volumes"=>"","Surfaces"=>"","Curves"=>"","Points"=>""),
         run_fn=_plugin_exec_boundarylayer),
+    "HomologyPostProcessing"=>(number_options=Dict{String,Float64}(
+        "ApplyBoundaryOperatorToResults"=>0.0),
+        string_options=Dict{String,String}(
+            "TransformationMatrix"=>"1, 0; 0, 1",
+            "PhysicalGroupsOfOperatedChains"=>"1, 2",
+            "PhysicalGroupsOfOperatedChains2"=>"",
+            "PhysicalGroupsToTraceResults"=>"",
+            "PhysicalGroupsToProjectResults"=>"",
+            "NameForResultChains"=>"c"),
+        run_fn=_plugin_exec_homologypost),
+    "VoroMetal"=>(number_options=Dict{String,Float64}(
+        "ComputeBestSeeds"=>0.0,"ComputeMicrostructure"=>1.0),
+        string_options=Dict{String,String}("SeedsFile"=>"seeds.txt"),
+        run_fn=_plugin_exec_vorometal),
+    "NearToFarField"=>(number_options=Dict{String,Float64}(
+        "Wavenumber"=>1.0,"PhiStart"=>0.0,"PhiEnd"=>2*pi,
+        "NumPointsPhi"=>60.0,"ThetaStart"=>0.0,"ThetaEnd"=>pi,
+        "NumPointsTheta"=>30.0,"EView"=>0.0,"HView"=>1.0,
+        "Normalize"=>1.0,"dB"=>1.0,"NegativeTime"=>0.0,"RFar"=>0.0),
+        string_options=Dict{String,String}(
+            "MatlabOutputFile"=>"farfield.m"),
+        run_fn=_plugin_exec_nearfarfield),
+    "Crack"=>(number_options=Dict{String,Float64}(
+        "Dimension"=>1.0,"PhysicalGroup"=>1.0,
+        "OpenBoundaryPhysicalGroup"=>0.0,"NormalX"=>0.0,"NormalY"=>0.0,
+        "NormalZ"=>1.0,"NewPhysicalGroup"=>0.0,"DebugView"=>0.0,
+        "SwapOrientation"=>0.0),
+        string_options=Dict{String,String}(),
+        run_fn=_plugin_exec_crack),
     # `Echo`, `TimeReport`, `DuplicatedBoundaries` and `PolarView` are not
     # registered: Gmsh 4.15.2 ships none of them (the oracle reports
     # `Failed action 'Run' or unknown plugin '<name>'`), and they are absent
@@ -8069,10 +9581,11 @@ const _PLUGINS=Dict{String,NamedTuple}(
     # PolarView never appear in the Plugin/ directory as far back as the
     # git history reaches (1.20), and the boundary-duplication plugin
     # upstream actually spelled `DuplicateBoundaries` disappeared in the 4.0
-    # plugin port ("removed unmaintained plugins"). `Levelset`,
-    # `NearToFarField`, `CVTRemesh`, `Crack`, `HomologyPostProcessing` and
-    # `VoroMetal` are likewise absent from the 4.15.2 oracle's registry
-    # (feature-gated out of the distributed build). Leaving them
-    # unregistered preserves the upstream unknown-plugin diagnostics on
-    # both the `.geo` and the API paths.
+    # plugin port ("removed unmaintained plugins"). `Levelset` and
+    # `CVTRemesh` are likewise absent from the 4.15.2 oracle's registry —
+    # `CVTRemesh` is feature-gated out of the distributed build
+    # (`HAVE_CVTR`), and `Levelset` is a `.geo`-only statement without a
+    # matching statement production upstream. Leaving them unregistered
+    # preserves the upstream unknown-plugin diagnostics on both the `.geo`
+    # and the API paths.
 )

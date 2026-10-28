@@ -120,6 +120,10 @@ end
     A.initialize()
     try
         A.option("General.Terminal",0)
+        # Out-of-range step requests emit upstream `Msg::Error` ("Number of
+        # time steps don't match: using step 0") and continue only when
+        # `General.AbortOnError` is 0.
+        A.option("General.AbortOnError",0)
 
         # Default Expression0 = "v0 * Sin(x)" rewrites the scalar component
         # in place; the view tag and record layout are unchanged.
@@ -211,6 +215,7 @@ end
         @test data[1][7:10]≈[4.,4.,4.,4.]
         @test data[1][17:20]≈[4.,4.,4.,4.]
     finally
+        A.option("General.AbortOnError",2)
         A.finalize()
     end
 end
@@ -300,7 +305,9 @@ end
         end
 
         # A wrong amplitude step count reports the upstream error and emits
-        # no extra view.
+        # no extra view; `Msg::Error` only continues when
+        # `General.AbortOnError` is 0.
+        A.option("General.AbortOnError",0)
         bad=A.view.add("bad")
         A.view.add_model_data(bad,0,"m","NodeData",
             node_ids,[[0.0] for _ in node_ids])
@@ -309,6 +316,7 @@ end
         A.plugin.run("FieldFromAmplitudePhase")
         @test length(A.view.get_tags())==ntags
     finally
+        A.option("General.AbortOnError",2)
         A.finalize()
     end
 end

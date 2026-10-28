@@ -183,13 +183,17 @@ end
         _,data=A.view.get_list_data(latest())
         @test data[1]≈[1.,2.,3.,1.]
 
-        # Out-of-range Eigenvalue logs the upstream error and emits nothing.
+        # Out-of-range Eigenvalue logs the upstream error and emits
+        # nothing; `Msg::Error` only continues when `General.AbortOnError`
+        # is 0.
+        A.option("General.AbortOnError",0)
         before=length(A.view.get_tags())
         A.plugin.set_number("Lambda2","Eigenvalue",4)
         A.plugin.run("Lambda2")
         @test length(A.view.get_tags())==before
         A.plugin.set_number("Lambda2","Eigenvalue",2)
     finally
+        A.option("General.AbortOnError",2)
         A.finalize()
     end
 end
@@ -237,7 +241,9 @@ end
         _,data=A.view.get_list_data(tri3)
         @test data[1]≈[11.,0.,0., 0.,21.,0., 0.,0.,31., 1.,2.,3.,10.,20.,30.]
 
-        # An invalid TimeStep logs the upstream error and leaves the view.
+        # An invalid TimeStep logs the upstream error and leaves the
+        # view; `Msg::Error` only continues when `General.AbortOnError` is 0.
+        A.option("General.AbortOnError",0)
         tri4=A.view.add("tri4")
         A.view.add_list_data(tri4,"ST",1,
             [1.,0.,0., 0.,2.,0., 0.,0.,3., 1.,2.,3.])
@@ -262,6 +268,7 @@ end
         @test occursin("rewrites list data only",
             _errtext(()->A.plugin.run("SphericalRaise")))
     finally
+        A.option("General.AbortOnError",2)
         A.finalize()
     end
 end

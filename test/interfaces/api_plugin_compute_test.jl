@@ -165,7 +165,9 @@ end
         A.plugin.set_number("Warp","TimeStep",0)
 
         # A mismatched element count logs "Incompatible views" and leaves
-        # the target unchanged.
+        # the target unchanged. Upstream `Msg::Error` returns without
+        # throwing only when `General.AbortOnError` is 0.
+        A.option("General.AbortOnError",0)
         other=A.view.add("other")
         A.view.add_list_data(other,"VT",2,
             [0.,1.,0., 0.,0.,1., 0.,0.,0., 0.,1.,0., 0.,0.,1., 0.,0.,0.,
@@ -176,6 +178,7 @@ end
         A.plugin.set_number("Warp","View",target3)
         A.plugin.set_number("Warp","OtherView",other)
         A.plugin.run("Warp")
+        @test A.logger.get_last_error()=="Incompatible views"
         _,data=A.view.get_list_data(target3)
         @test data[1]≈[0.,1.,0., 0.,0.,1., 0.,0.,0., 1.,3.,5.]
 

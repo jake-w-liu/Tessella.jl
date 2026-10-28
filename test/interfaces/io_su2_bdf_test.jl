@@ -568,7 +568,7 @@ end
                     @test_throws ArgumentError _SU2_BDF_API.open(missing)
                     @test_throws ArgumentError _SU2_BDF_API.merge(missing)
                 end
-                bad = joinpath(dir, "x.vtk")
+                bad = joinpath(dir, "x.foo")
                 @test_throws ArgumentError _SU2_BDF_API.write(bad)
             end
         finally

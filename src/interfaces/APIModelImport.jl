@@ -166,7 +166,7 @@ function _model_import_prepare(path,dimension;legacy=false)
         GeoExec._geo_stage_mesh_file(path;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[],
             switch_tags=!iszero(get(options,"Mesh.SwitchElementTags",0.0)))
-    elseif extension in (".unv",".mesh",".meshb",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk",".wrl")
+    elseif extension in (".unv",".mesh",".meshb",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk",".wrl",".off",".obj",".ply2")
         IO._stage_foreign_mesh_file(path;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
     elseif extension==".stl"
@@ -300,7 +300,7 @@ function _model_import_filename(filename,caller;geo_only=false)
     filename isa AbstractString && !isempty(filename) && !occursin('\0',filename) ||
         throw(ArgumentError("$caller: filename must be a nonempty NUL-free string"))
     extension=lowercase(splitext(filename)[2])
-    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos",".unv",".mesh",".meshb",".stl",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk",".wrl",".xao",".brep")) || throw(ArgumentError(
+    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos",".unv",".mesh",".meshb",".stl",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk",".wrl",".off",".obj",".ply2",".xao",".brep")) || throw(ArgumentError(
         "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh, .pos, .unv, .mesh, .meshb, .stl, .su2, .bdf, .nas, .inp, .neu, .p3d, .mail, .ir3, .diff, .vtk, .wrl, .xao and .brep")"))
     isfile(filename) || throw(ArgumentError("$caller: missing file $filename"))
     return String(filename)

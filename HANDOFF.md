@@ -5892,3 +5892,40 @@ can reach output), run focused tests + allocation audit, then commit/push.
   process peaks at several GB; that is what OOM-killed the machine.
 - Debug instrumentation is fully removed; `DBG_*`/`REFILL_NOCLEAN` env vars
   no longer exist.
+
+## 2026-02-26 — P4/P5: plugin parity + long-tail mesh decks
+
+- Plugin registry is now oracle-complete for Gmsh 4.15.2: added
+  `HomologyPostProcessing`, `VoroMetal` (truthful voro++ rejection),
+  `NearToFarField` (complex E/H → far-field publication) and `Crack`
+  (staged reclassification surgery with cell_edit connectivity rebinding,
+  NewPhysicalGroup, DebugView, SwapOrientation). `Echo`, `TimeReport`,
+  `DuplicatedBoundaries`, `PolarView`, `Levelset`, `CVTRemesh` stay
+  deliberately unregistered (upstream-absent or feature-gated), preserving
+  the unknown-plugin diagnostics.
+- Plugin run diagnostics now match upstream `Msg::Error` semantics:
+  `_plugin_run_fn` emits `Running Plugin(<name>)...`/`Done running ...`,
+  `_native_mesh_input_error_locked` sites update `logger.get_last_error`
+  and throw under `General.AbortOnError>=2`; `gmsh::plugin::run` wraps
+  escaping errors as `Unknown plugin or plugin action`. Tests exercising
+  continuation semantics set `AbortOnError=0` and restore `2` in `finally`.
+- Long-tail write dispatch (`CreateFile.cpp` FORMAT_* audit): added
+  `.off`, `.obj`, `.ply2` (write + read), `.dat` (TOCHNOG), `.m` (MATLAB
+  LOAD_GMSH2), `.wrl`/`.vrml` (VRML 1.0), `.key` (LS-DYNA), `.rad`
+  (RADIOSS) and `.x3d` (+ companion html launcher) writers under
+  `IO.write_{off,obj,ply2,dat,m,wrl,key,rad,x3d}` with per-family string/
+  permutation tables ported from upstream GModelIO_*.cpp. `.celum` rejects
+  truthfully (needs parametric-surface normals/curvatures); CGNS/MED/CDF
+  remain dependency-gated rejections; `.txt` has no upstream writer case.
+- OFF/OBJ/PLY2 readers land in `_read_foreign_records` and re-import via
+  `API.open`/`API.merge` like other foreign decks, dropping
+  face-unreferenced vertices to match upstream `_storeVerticesInEntities`.
+- Tests: `test/interfaces/io_surfacedeck_test.jl` (64 checks, all pass,
+  `julia --compile=min -O0`), `api_plugin_mesh_post_test.jl` (Crack/
+  Homology/NearToFarField/VoroMetal — all pass); plugin batch2, subentities,
+  diffops, fieldops, compute suites re-verified after the diagnostic change;
+  `io_su2_bdf_test.jl` guard updated to use a genuinely unsupported
+  extension (`.vtk` write support landed earlier, making the old guard stale).
+- Remaining audit items: `.msh2` binary edge cases and `.su2` variants,
+  `.pos` custom view fields beyond statistics, MED/CGNS evaluation when a
+  dependency story exists.

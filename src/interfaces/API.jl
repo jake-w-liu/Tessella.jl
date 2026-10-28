@@ -12168,18 +12168,23 @@ end # module view
 Post-processing plugins operating on the session views (Gmsh `plugin` module
 counterpart). `set_number(name, option, value)` and `set_string(name, option,
 value)` configure a registered plugin's options; `run(name)` executes it.
-Supported plugins: `AnalyseMeshQuality`, `Annotate`, `Curl`, `CutBox`,
-`CutGrid`, `CutParametric`, `CutPlane`, `CutSphere`, `Density`, `Divergence`,
-`Eigenvalues`, `Eigenvectors`, `ExtractEdges`, `ExtractElements`,
+Supported plugins: `AnalyseMeshQuality`, `Annotate`, `BoundaryAngles`,
+`BoundaryLayer`, `Bubbles`, `Crack`, `Curl`, `CurvedBndDist`, `CutBox`,
+`CutGrid`, `CutMesh`, `CutParametric`, `CutPlane`, `CutSphere`, `Density`,
+`DiscretizationError`, `Distance`, `Divergence`, `Eigenvalues`,
+`Eigenvectors`, `ExtractEdges`, `ExtractElements`,
 `FieldFromAmplitudePhase`, `GaussPoints`, `Gradient`, `HarmonicToTime`,
-`Integrate`, `Isosurface`, `Lambda2`, `LongitudeLatitude`, `MakeSimplex`,
-`MathEval`, `MeshSizeFieldView`, `MeshVolume`, `MinMax`, `ModifyComponents`,
-`ModulusPhase`, `NearestNeighbor`, `NewView`, `Particles`, `Probe`, `Remove`,
-`Scal2Tens`, `Scal2Vec`, `ShowNeighborElements`, `SimplePartition`, `Skin`,
-`Smooth`, `SphericalRaise`, `StreamLines`, `Summation`, `Tetrahedralize`,
-`Transform`, `Triangulate`, `Warp`, plus the Tessella `Vorticity` extension
-(Gmsh registers `Curl`, not `Vorticity`). Setting the numeric option `Run`
-to a nonzero value executes the plugin immediately.
+`HomologyComputation`, `HomologyPostProcessing`, `Integrate`, `Invisible`,
+`Isosurface`, `Lambda2`, `LongitudeLatitude`, `MakeSimplex`,
+`MathEval`, `MeshSizeFieldView`, `MeshSubEntities`, `MeshVolume`, `MinMax`,
+`ModifyComponents`, `ModulusPhase`, `NearestNeighbor`, `NearToFarField`,
+`NewView`, `Particles`, `Probe`, `Remove`, `Scal2Tens`, `Scal2Vec`,
+`ShowNeighborElements`, `SimplePartition`, `Skin`, `Smooth`,
+`SpanningTree`, `SphericalRaise`, `StreamLines`, `Summation`,
+`Tetrahedralize`, `Transform`, `Triangulate`, `VoroMetal`, `Warp`, plus
+the Tessella `Vorticity` extension (Gmsh registers `Curl`, not
+`Vorticity`). Setting the numeric option `Run` to a nonzero value
+executes the plugin immediately.
 """
 module plugin
 
