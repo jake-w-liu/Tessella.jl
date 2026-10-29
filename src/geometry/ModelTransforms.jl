@@ -1487,6 +1487,44 @@ function _occ_volume_entity(m::GeoModel, src::Int)
     return false
 end
 
+# `Surface::Generatrices` — upstream's canonical signed traversal of a face's
+# wires, built by `SetSurfaceGeneratrices`. Each wire's stored entries fold
+# the wire reference's sign with a hole flip, and the traversal order
+# reverses whenever the wire sign differs from its position's canonical
+# sign: `curve = entry * sign(wire) * (i>1 ? -1 : 1)`, iterated forward on
+# `(i==1)==(wire>0)` and reversed otherwise. Since the `.geo` parser stores
+# positive wire references only, the reachable forms reduce to the
+# exterior's declared entries and each hole's `-reverse(entries)`. Product
+# builders (`ExtrudeSurface` laterals, `DuplicateSurface` copies, the
+# `geo.Source` links pairing them) iterate this canonical sequence — tag
+# allocation and orientation both follow it, so iterating the raw declared
+# loops mis-orders every holed face. The per-wire layout is returned so a
+# caller can still group products back under Tessella's one-loop-per-wire
+# storage.
+function _geo_surface_generatrices(m::GeoModel, tag::Int)
+    canon=Vector{Int}[]
+    for (i,l) in enumerate(m.surfaces[tag])
+        entries=m.loops[abs(l)]
+        xor(l<0,i>1) &&
+            (entries=Int[-e for e in Iterators.reverse(entries)])
+        push!(canon,entries)
+    end
+    return canon
+end
+
+# The inverse of `_geo_surface_generatrices`'s per-wire canonicalization:
+# given the canonical product list for one wire (copies traversing the
+# canonical direction, positive tags), produce the entries the stored loop
+# must carry so the next canonicalization pass reconstructs that same list.
+# A positive exterior reference stores its products forward; every hole
+# wire stores the reversed-and-negated list — the same relation the source
+# surface's declared `{5,6,7,8}` bears to its canonical `{-8,-7,-6,-5}`.
+# Negative wire references flip the convention, matching the upstream
+# `iLoop<0` branch.
+_geo_surface_loop_stored(copies::AbstractVector{Int},i::Int,wire_sign::Int=1) =
+    xor(wire_sign<0,i>1) ? Int[-c for c in Iterators.reverse(copies)] :
+                         copies
+
 # Gmsh's `DuplicateCurve` allocates the curve tag first (shared `NEWREG`
 # counter), then one coincident copy per control point — stored on the copy as
 # its `curve_control_points` — and finally the wired beg/end vertex copies.
@@ -1557,21 +1595,25 @@ function _duplicate_surface!(m::GeoModel, src::Int, caller, memo=nothing)
     occ && memo!==nothing && haskey(memo[3],src) && return memo[3][src]
     t=_geo_newreg_alloc!(m,2,caller)
     loops=Int[]
+    gen_loops=occ ? nothing : _geo_surface_generatrices(m,src)
     for (i,l) in enumerate(m.surfaces[src])
         # OCC copies share each memoized edge and keep the orientation sign in
         # the loop (`BRepBuilderAPI_Copy` preserves the wire's orientation
         # flags). The built-in `DuplicateSurface` instead resolves each
         # generatrix record first: a `-c` member duplicates the reversed
         # record (reversed data — mirrored Nurbs knots, `[1-uend,1-ubeg]`)
-        # and the copy enters the new loop under a positive tag.
+        # and the copy enters the new loop under a positive tag. Iterating
+        # `ps->Generatrices` means the canonical signed traversal: a hole
+        # wire's copies allocate in reversed-negated order like upstream.
         curves=occ ?
             [sign(c)*_duplicate_curve!(m,abs(c),caller;memo=memo)
              for c in m.loops[l]] :
             [_duplicate_curve!(m,abs(c),caller;reversed=c<0)
-             for c in m.loops[l]]
+             for c in gen_loops[i]]
         lt=(i==1 && !haskey(m.loops,t)) ? t :
            ((isempty(m.loops) ? 0 : maximum(keys(m.loops)))+1)
-        m.loops[lt]=curves
+        m.loops[lt]=occ ? curves :
+            _geo_surface_loop_stored(curves,i,sign(l))
         push!(loops,lt)
     end
     m.surfaces[t]=loops
@@ -1983,13 +2025,18 @@ function _extrude_surface!(m::GeoModel, is::Int, spec,
                            caller,auto_coherence::Integer)
     tag=abs(is)   # `ps = FindSurface(std::abs(is))`; the sign is metadata-only
     _geo_newreg_alloc!(m,2,caller)   # transient chapeau tag — burned
+    # `DuplicateSurface` and the lateral sweep both iterate
+    # `ps->Generatrices` — the canonical signed wire traversal rather than
+    # the declared loop order — so chapeau copies, `geo.Source` pairs, and
+    # lateral tag allocation follow the source face's canonical sequence.
+    gen_loops=_geo_surface_generatrices(m,tag)
     top_loops=[Int[_duplicate_curve!(m,abs(c),caller;reversed=c<0)
-                   for c in m.loops[l]] for l in m.surfaces[tag]]
+                   for c in entries] for entries in gen_loops]
     if params!==nothing
         for (i,copies) in enumerate(top_loops)
             # `geo.Source = c2num` — the signed source generatrix entry,
             # positionally paired with the duplicated top loop.
-            source_loop=m.loops[m.surfaces[tag][i]]
+            source_loop=gen_loops[i]
             for (j,c) in enumerate(copies)
                 m.meshing.extrude[(1,c)]=params
                 m.meshing.extrude_sources[(1,c)]=(1,source_loop[j])
@@ -2006,7 +2053,7 @@ function _extrude_surface!(m::GeoModel, is::Int, spec,
         m.meshing.extrude_specs[(3,vol)]=spec
     end
     laterals=Int[]
-    for l in m.surfaces[tag], c in m.loops[l]
+    for entries in gen_loops, c in entries
         result=_extrude_curve_lateral!(m,c,spec,params,caller)
         result===nothing && continue
         push!(laterals,c<0 ? -result[1] : result[1])
@@ -2019,7 +2066,11 @@ function _extrude_surface!(m::GeoModel, is::Int, spec,
     loop_tags=Int[]
     for (i,copies) in enumerate(top_loops)
         lt=i==1 ? _geo_derived_loop_tag(m,top) : _geo_next_loop_tag(m)
-        m.loops[lt]=copies
+        # The stored wire keeps the declared-traversal convention — a hole
+        # loop lists its copies reversed and negated — so a later generatrix
+        # pass reconstructs this canonical order back out of `m.loops[lt]`.
+        m.loops[lt]=_geo_surface_loop_stored(copies,i,
+                                             sign(m.surfaces[tag][i]))
         push!(loop_tags,lt)
     end
     m.surfaces[top]=loop_tags

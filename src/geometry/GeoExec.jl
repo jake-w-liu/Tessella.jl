@@ -138,7 +138,9 @@ using ..Model: _extrude_level_us, _extrude_curve_nodes,
                _extrude_bl_view_fields, _extrude_bl_prepare!,
                _ExtrudeBlWall, _EMPTY_BL_FIELD,
                _duplicate_curve!, _fresh_point_copy!, _coherence_merge!,
-               _geo_derived_loop_tag
+               _geo_derived_loop_tag, _geo_next_loop_tag,
+               _geo_next_surface_loop_tag,
+               _geo_surface_generatrices, _geo_surface_loop_stored
 using ..MeshTypes: nnodes, nsegs, ntris, ntets
 using ..Refine: refine_uniform
 import ..Refine
@@ -4792,10 +4794,16 @@ function _geo_bl_surface_extrude!(m::GeoModel,is::Int,params,blmeta,
     # chapeau tag before its generatrix copies — burned like the ordinary
     # path's transient tag, because the final rename happens only at the end.
     _geo_newreg_alloc!(m,2,caller)
+    # `DuplicateSurface` and the lateral sweep iterate `ps->Generatrices` —
+    # the canonical signed wire traversal, not the declared loop order — so
+    # the chapeau copies, their `geo.Source` links, and the lateral tag
+    # sequence match a face whose hole wires canonicalize to the
+    # reversed-negated traversal.
+    gen_loops=_geo_surface_generatrices(m,tag)
     top_loops=[Int[_duplicate_curve!(m,abs(c),caller;reversed=c<0)
-                   for c in m.loops[l]] for l in m.surfaces[tag]]
+                   for c in entries] for entries in gen_loops]
     for (i,copies) in enumerate(top_loops)
-        source_loop=m.loops[m.surfaces[tag][i]]
+        source_loop=gen_loops[i]
         for (j,c) in enumerate(copies)
             # `geo.Source = c2num` — the signed source generatrix, positionally
             # paired, so the copy meshes through the boundary-layer field like
@@ -4827,7 +4835,7 @@ function _geo_bl_surface_extrude!(m::GeoModel,is::Int,params,blmeta,
     m.meshing.extrude_specs[(3,vol)]=(type=:bl_surface,bl3d=true,src=is,
         index=index,view=blmeta.view_index,scale_last=params.scale_last)
     laterals=Int[]
-    for l in m.surfaces[tag], c in m.loops[l]
+    for entries in gen_loops, c in entries
         src=abs(c)
         closed=m.curves[src][1]==m.curves[src][2]
         (chapeau,surf)=_geo_bl_curve_lateral!(m,c,params,closed,
@@ -4847,7 +4855,11 @@ function _geo_bl_surface_extrude!(m::GeoModel,is::Int,params,blmeta,
     loop_tags=Int[]
     for (i,copies) in enumerate(top_loops)
         lt=i==1 ? _geo_derived_loop_tag(m,top) : _geo_next_loop_tag(m)
-        m.loops[lt]=copies
+        # Stored wires keep the declared-traversal convention: a hole loop
+        # lists its copies reversed and negated so the next generatrix pass
+        # reconstructs this canonical order from `m.loops[lt]`.
+        m.loops[lt]=_geo_surface_loop_stored(copies,i,
+                                             sign(m.surfaces[tag][i]))
         push!(loop_tags,lt)
     end
     m.surfaces[top]=loop_tags
@@ -5035,7 +5047,8 @@ function _geo_boundary_layer_extrude!(m::GeoModel,
         # built field at exec time too (refreshed again at mesh time) — a
         # lone point with no field entry stays degenerate like upstream's
         # zero normal.
-        _extrude_bl_prepare!(m,caller;_fields=fields,_model=working)
+        _extrude_bl_prepare!(m,caller;_fields=fields,_model=working,
+            _mesh1d_options=mesh1d)
     end
     # Upstream's `ReplaceAllDuplicates` runs on the coincident copy set
     # *before* any vertex takes its displaced position: ordinary control
@@ -10259,7 +10272,8 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
         end
     end
     if dim>=2
-        point_parts=_model_point_mesh_parts(m,caller)
+        point_parts=_model_point_mesh_parts(m,caller;
+            _mesh1d_options=options)
         # NoNew retains CAD control points as well as the completed sweep.
         # Give those point parts a stable order within this scoped product.
         extrude_scope!==nothing && sort!(point_parts;by=part->part[2])

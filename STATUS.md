@@ -113,6 +113,73 @@ classified; all three were genuine Tessella bugs, fixed narrowly:
   `brep_occ_nurbs_torus` 1.5344, `brep_occ_nurbs_sphere` 3.1939,
   `brep_occ_torus_segment` 14.8044). No P1–P6 completeness claim.
 
+### LAY02 holed-face generatrix ordering + native BL grading transport (2026-10-29, working tree)
+
+- Multi-loop surfaces now canonicalize their wires once the way upstream's
+  `SetSurfaceGeneratrices` does — `_geo_surface_generatrices` folds each
+  stored wire reference's sign with the hole-position flip (a positive
+  hole reference traverses `-reverse(entries)`), and
+  `_geo_surface_loop_stored` inverts products back into Tessella's
+  per-wire storage so a later canonicalization reconstructs the same
+  sequence. Ordinary `_extrude_surface!`, `_duplicate_surface!`, and
+  boundary-layer `_geo_bl_surface_extrude!` iterate the canonical signed
+  generatrices for chapeau copies, `geo.Source` pairs, lateral tag
+  allocation, and shell orientation — a holed face now emits Gmsh
+  4.15.2's exact records: `out=[50,1,21,25,29,33,37,41,45,49]`, hole
+  laterals `37/41/45/49` on loops `{-8,36,-14,-35}` … `{-5,35,-17,-44}`,
+  volume shell `{-1,50,21,25,29,33,-37,-41,-45,-49}`, and the chapeau's
+  hole wire stored `{-17,-16,-15,-14}` (re-canonicalizing to
+  `{14,15,16,17}`). `Duplicata`/second-level extrusion follow the same
+  canonical order.
+- Boundary-layer preparation now seeds its generatrix and source-face
+  boundary curves through the native 1-D producer under the caller's
+  `_ModelMesh1DOptions` (`_extrude_bl_seed_curves` +
+  `_extrude_bl_seed_native!`, threaded via `_model_point_mesh_parts`).
+  The lazy grading fallback previously drifted a few ulps from the
+  produced curve rows, splitting the position-keyed `levels`/`tops` maps
+  and tripping exact ownership validation at `lc=0.5`; the seed regrades
+  on the same transport the exec-time stage copy uses, with the lazy
+  chain retained only for `:pending` periodic/deferred curves. The
+  reproducing unit-square fixture (`Layers{3}; Recombine`) now meshes to
+  the oracle's 48 nodes / 28 triangles / 24 quadrangles / 42 prisms over
+  `z∈{0,1/3,2/3,1}`.
+- `model_to_mixed`'s non-planar admission audits each boundary curve's
+  endpoints only: a ruled patch interpolates its bounding curves as
+  parametric edges, so auxiliary construction points — a Circle's
+  center, a spline's interior poles — legitimately sit off the surface
+  (every produced mesh node is still audited against the patch through
+  `ruled_offset`, and planar faces keep the full coplanarity audit
+  including control points). A non-planar `Surface` bounded by a Circle
+  arc whose center lies off the patch now meshes — matching Gmsh
+  4.15.2, which fronts the same wire as a `Surface` fill (8 nodes)
+  rather than rejecting it — while `add_plane_surface!` + a bulging arc
+  still throws `not coplanar` loudly.
+- Ruled/tric patches bounded by curved wires recover their volume
+  boundary faces through `_model_curved_boundary_surface_faces!`: the
+  surface's own generated mesh supplies the faces (generated-cell
+  registration with quad-diagonal split matching, boundary-face
+  incidence, intrinsic winding) — the same generated-triangulation
+  transport used for embedded sheets — because the planar PSLG area
+  certificate cannot be reached by any chord-facet covering.
+  Polygonal-wired patches keep the exact planar path.
+- `APIGenerateHigher`'s staged volume publication now certifies swept
+  Regions that carry no ordinary production (QuadTri/NoNew planners)
+  through their own classification, emitting cells in Region order from
+  the part's block order and threading geometry births through
+  `_extrude_nonew_b4_geometry`; the all-or-nothing staged guard accepts
+  `extruded.parts` membership alongside certified productions.
+- Tests: `geo_extrude_boundarylayer_test.jl` 69+10+7+23+48+43+4 = 204
+  assertions green under `--compile=min -O0` (holed BL fixture oracle:
+  156 nodes / 144 tris / 64 quads / 144 prisms, lateral tag-to-edge
+  plane map proving hole strips grow into the hole); `geo_extrude_test`
+  +108 (41-assertion holed generatrix ordering incl. second-level
+  extrusion and `Duplicata`); `geo_curved_test` +40 (ruled
+  control-point admission regression) and one stale pin corrected —
+  the `m2` bulging-arc fixture already meshed on clean `b2650db`
+  (oracle admits it as a `Surface` fill), so the pin now asserts the
+  on-arc boundary instead of the old over-strict throw. Bounded
+  fixtures; no full P1–P6 parity claim.
+
 ### LAY02 3-D surface boundary-layer `Extrude` (2026-10-29, working tree)
 
 - `Extrude {Surface{...}; Layers{...}}` under boundary-layer mode now
@@ -11262,6 +11329,92 @@ drivers audited t1–t21, this cycle ran the genuinely unverified t2–t18
 
 These are bounded single-driver receipts against the tutorial corpus;
 they do not establish full P1–P6 parity.
+
+## 2026-10-29 — Torus Boolean/measures seam trio + `-part_split` label-mode tag fix (Devin subagent)
+
+Three pre-existing defects reproduced, classified and fixed — all genuine
+Tessella bugs, none stale pins or upstream behavior. Bounded fixtures and
+focused suites only; no P1–P6 parity claim.
+
+**1. CLI `-part_split` label-mode physical-tag mismatch** — genuine bug,
+fixed in `_partition_label_view` (`src/interfaces/CLI.jl`). Root cause:
+the label view folds partition children back to their declared parents but
+kept the child's projected element tag — a `Mesh.PartitionCreatePhysicals`
+`_part{..}` group or the shared parent physical — which is partition
+metadata, not the folded entity's own projection. Fix: folded cells
+re-project the parent entity record's physical (0 when the parent carries
+none); orphan `_part{..}` `$PhysicalNames` records no longer referenced by
+any entity are dropped. Oracle receipt (Gmsh 4.15.2 API, Windows —
+`gmsh.exe` CLI does not run on this host): label-mode `partition(2)` +
+`PartitionSplitMeshFiles` on the two-tet fixture declares the parent
+`(3,1)` physical-less — byte-identical `$Entities` row to Tessella's fixed
+output (`1 0 0 0 0 0 0 0 0`). Upstream keeps `$PartitionedEntities`
+children in the split files; Tessella's fold-to-parent label-view
+convention predates this fix and is pinned by the existing test contract.
+`cli_part_split_test` 57/57 (2m44s, `--compile=min -O0`).
+
+**2. Torus operand PLC/containment** — genuine bug, fixed in
+`src/geometry/ModelBoolean.jl`. Root causes: (a)
+`_model_occ_curved_surface_mesh_tracked` unwrapped pcurve `u` across the
+azimuth seam but never `v`, so a wire walking the tube seam re-entered the
+chart one period off and `insert_segment!` reported an overlap on the
+retraced edge (the reported torus×box failure); (b) `_brep_surface_level`
+and `_brep_line_surface` had no torus arm, so kept-region parity tests
+lacked the implicit tube level — added the exact `(ρ−r1)²+a²−r2²` level
+and a bounding-sphere-bracketed, tube-scaled-grid line×torus root finder
+(transversal crossings only — grazes are parity-neutral). Receipts:
+primitive torus `_model_occ_curved_surface_mesh_tracked` → OK; torus×box
+`cut`/`intersect` complete with correct topology (1 and 4 volumes);
+`brep_torus_segment_smoke` and `brep_curved_trims_smoke` green.
+
+**3. Torus solid/face measures misrouted** — genuine bug, fixed in
+`src/geometry/ModelOCCMeasures.jl`. Root causes: (a) the solid-measure
+Pappus shortcut recognized any one-torus-face-plus-planes solid as a
+canonical sector without checking the wire — Boolean kept pieces and STEP
+trims got the full-torus volume attributed to every output (fuse/cut/
+intersect each reported 1.7765287921960844, intersect total 7.106 for 4
+pieces); (b) `_model_occ_face_measure` likewise applied the whole-domain
+quadric formula to noncanonical pcurve-bounded torus faces. Fixes:
+`_occ_torus_sector_window` now certifies the sector shape from the actual
+wire (single wire, v extent covers the canonical tube circle, every use
+degenerate to a rectangle side) — canonical partial sweeps keep the exact
+Pappus arm (verified on the primitive 2π torus and the
+`brep_occ_torus_segment.step` sector), trimmed pieces integrate through
+the generic divergence path; `_model_occ_torus_face_div` adds the torus
+Green's-theorem boundary integral (the tube-chart counterpart of
+`_model_occ_cyl_face_div`, `p_u×p_v = R·r2·(cos v·q̂+sin v·Z)` outward).
+Wire orientation is classified on the wire's own period-unwrapped lift —
+the plain `.fwd`-pcurve shoelace degenerates to ≈0 on the doubly-periodic
+seam-rectangle outer wire and left the sign to rounding noise (observed as
+fuse≈box−torus=−0.7765 and cut≈−torus=−1.7765 before the fix; the small
+no-seam sliver pieces were already correct). `_model_occ_trimmed_face_cdt`
+gains the matching v-period unwrap plus an opt-in `TESS_CDT_DEBUG`
+failure dump. Solid guard relaxed: multiple torus faces or non-plane
+companions now integrate generically instead of throwing `non-canonical
+boundary` — only faces the generic path cannot handle still reject.
+
+**Receipts** (`--compile=min -O0`, Julia 1.12.7): direct
+`_model_occ_torus_face_div` on the primitive's seam-rectangle wire =
+1.7765287921960844, err 0.0 vs analytic `2π²r1r2²`. Slab cap intersect
+mass 0.1946205497484487 vs analytic 0.19462053895010475 (~1e-8). torus×box
+on the fixed code: `cut` 1 volume, mass 1.7765155687330054 (expected
+torus_vol−shared = 1.776515568… to ~9 digits; buggy code read −1.7765);
+`intersect` 4 volumes, sliver masses 3.3058657695e-6 each —
+cut+intersect = 1.7765287921960837 vs analytic 1.7765287921960844,
+err −6.7e-16 (inclusion–exclusion to machine precision);
+`fuse` 1 volume, mass 2.7765155687330068 = torus_vol+1−shared to ~9
+digits (buggy code read −0.7765); `fragment` pending in flight. `brep_occ_nurbs_torus.step` solid mass
+1.5344247749455389 (13.8s) + face mass 10.74641627995413 —
+trimmed-NURBS CDT holds on the fixtures; the t20 STEP probe is still in
+flight with `TESS_CDT_DEBUG` armed. `model_boolean_snapshot_test` exit 0,
+68/68. `model_boolean_conic_spline_test` and `api_occ_boolean_test` in
+flight; `cli_part_split_test` 57/57 (above).
+
+**Still open (not claimed)**: fuse/fragment op-level mass receipts on the
+fixed code (the mechanism is shared with `cut`; the smoke regression pins
+`cut`+`intersect` by inclusion–exclusion); t20 STEP face/volume mass
+classification pending the in-flight probe; centroid of trimmed-torus
+solids still walks the CDT quadrature (volume uses the analytic arm).
 
 ## 2026-10-30 — QuadTri staged-sweep ownership + curved-surface transport (Devin subagent)
 

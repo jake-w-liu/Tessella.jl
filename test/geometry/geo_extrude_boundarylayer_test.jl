@@ -650,3 +650,153 @@ end
     @test sort!(unique!(round.(r.mesh.coords[3, :]; digits=12))) ≈
         [0.0, 2/3, 4/3, 2.0]
 end
+
+# The lateral strips' plane from the executed mesh — used to pin each
+# canonical tag to its geometric edge.
+function _bl_strip_plane(r, tag)
+    part = geo_entity_mesh(r, 2, tag)
+    isempty(part.coords) && return nothing
+    return extrema(part.coords, dims = 2)
+end
+
+@testset ".geo boundary-layer holed surface Extrude" begin
+    # A holed source face canonicalizes its wires once in
+    # `SetSurfaceGeneratrices`: a positive hole reference enumerates its
+    # curves reversed and negated, so `Extrude{Surface}` allocates the
+    # hole's chapeau copies, `geo.Source` links and lateral tags in the
+    # canonical `-8,-7,-6,-5` order rather than the declared `{5,6,7,8}`.
+    # Gmsh 4.15.2 `-0` on this fixture emits exactly:
+    #   Curve Loop(37) = {-8, 36, -14, -35};  Curve Loop(41) = {-7, 40, -15, -36};
+    #   Curve Loop(45) = {-6, 44, -16, -40};  Curve Loop(49) = {-5, 35, -17, -44};
+    #   Surface Loop(1) = {1, 50, 21, 25, 29, 33, 37, 41, 45, 49};
+    # with `SurfacesOrientations` -1 on the four hole laterals.
+    src = """
+        Point(1) = {0,0,0,1};
+        Point(2) = {4,0,0,1};
+        Point(3) = {4,4,0,1};
+        Point(4) = {0,4,0,1};
+        Point(5) = {1,1,0,0.5};
+        Point(6) = {3,1,0,0.5};
+        Point(7) = {3,3,0,0.5};
+        Point(8) = {1,3,0,0.5};
+        Line(1) = {1,2}; Line(2) = {2,3}; Line(3) = {3,4}; Line(4) = {4,1};
+        Line(5) = {5,6}; Line(6) = {6,7}; Line(7) = {7,8}; Line(8) = {8,5};
+        Curve Loop(1) = {1,2,3,4};
+        Curve Loop(2) = {5,6,7,8};
+        Plane Surface(1) = {1,2};
+        """
+    r = _execute_bl_source(src * """
+        out[] = Extrude { Surface{1}; Layers{2}; Recombine; };
+        """)
+    @test r.errors == String[]
+    @test r.lists["out"] == [50.0, 1.0, 21.0, 25.0, 29.0, 33.0, 37.0, 41.0,
+                             45.0, 49.0]
+    m = r.model
+    # Canonical hole laterals — the signed generatrix record, its end
+    # connector, the negated chapeau copy, and the negated beg connector.
+    @test m.loops[only(m.surfaces[21])] == [1, 20, -10, -19]
+    @test m.loops[only(m.surfaces[25])] == [2, 24, -11, -20]
+    @test m.loops[only(m.surfaces[29])] == [3, 28, -12, -24]
+    @test m.loops[only(m.surfaces[33])] == [4, 19, -13, -28]
+    @test m.loops[only(m.surfaces[37])] == [-8, 36, -14, -35]
+    @test m.loops[only(m.surfaces[41])] == [-7, 40, -15, -36]
+    @test m.loops[only(m.surfaces[45])] == [-6, 44, -16, -40]
+    @test m.loops[only(m.surfaces[49])] == [-5, 35, -17, -44]
+    # The copy set itself lands on the canonical edges: curves 14..17 are
+    # the reversed records' duplicates — copies of -8,-7,-6,-5 traversing
+    # the hole clockwise. Their wired endpoints are the `MSH_POINT`-class
+    # orphans' siblings — the beg/end `MSH_POINT_BND_LAYER` copies weld
+    # per vertex under `CompareTwoPoints`'s type-plus-index merge key, so
+    # 27,28,32,36 are the survivors (the control orphans stay at
+    # 25,26,29,30,33,34,37,38 and never join the curve's wired pair).
+    @test m.curves[14] == (27, 28)
+    @test m.curves[15] == (28, 32)
+    @test m.curves[16] == (32, 36)
+    @test m.curves[17] == (36, 27)
+    @test m.points[27] == (1.0, 1.0, 0.0)
+    @test m.points[28] == (1.0, 3.0, 0.0)
+    @test m.points[32] == (3.0, 3.0, 0.0)
+    @test m.points[36] == (3.0, 1.0, 0.0)
+    # Signed `geo.Source` links follow the canonical entries, and the
+    # chapeau/volume carry the signed source face.
+    @test m.meshing.extrude_sources[(2, 37)] == (1, -8)
+    @test m.meshing.extrude_sources[(2, 41)] == (1, -7)
+    @test m.meshing.extrude_sources[(2, 45)] == (1, -6)
+    @test m.meshing.extrude_sources[(2, 49)] == (1, -5)
+    @test m.meshing.extrude_sources[(3, 1)] == (2, 1)
+    @test m.meshing.extrude_sources[(2, 50)] == (2, 1)
+    # The volume's shell lists every lateral in canonical order — the
+    # hole's `SurfacesOrientations` entries are the negative tags.
+    @test m.surface_loops[only(m.volumes[1])] ==
+        [-1, 50, 21, 25, 29, 33, -37, -41, -45, -49]
+    # The chapeau's hole wire stores its declared traversal — the copies
+    # reversed and negated — so a later generatrix pass reconstructs the
+    # upstream `Curve Loop(50) = {10,...,17}` flat order.
+    @test length(m.surfaces[50]) == 2
+    @test m.loops[m.surfaces[50][2]] == [-17, -16, -15, -14]
+
+    # `Mesh 3`: the oracle's 156 nodes, 144 triangles (72+72 on the source
+    # and displaced chapeau), 64 lateral quadrangles and 144 swept prisms.
+    # Hole strips point their normals into the solid annulus while the
+    # outer strips point outward, matching the oracle block-for-block.
+    r = _execute_bl_source(src * """
+        out[] = Extrude { Surface{1}; Layers{2}; Recombine; };
+        """; mesh_dim=3)
+    mesh = r.mesh
+    @test r.errors == String[]
+    @test size(mesh.coords, 2) == 156
+    cells = (tris = sum(size(b.nodes, 2) for b in mesh.blocks if b.msh == 2; init = 0),
+             quads = sum(size(b.nodes, 2) for b in mesh.blocks if b.msh == 3; init = 0),
+             prisms = sum(size(b.nodes, 2) for b in mesh.blocks if b.msh == 6; init = 0))
+    @test cells == (tris = 144, quads = 64, prisms = 144)
+    @test sort!(unique!(round.(mesh.coords[3, :]; digits=12))) ≈ [0.0, 0.5, 1.0]
+    for t in (21, 25, 29, 33, 37, 41, 45, 49)
+        @test _bl_cells(geo_entity_mesh(r, 2, t)) == (tris=0, quads=8)
+    end
+    # Each canonical tag binds to its oracle edge plane: the hole strips
+    # sit on the inner square's left (x=1), top (y=3), right (x=3) and
+    # bottom (y=1) edges in tag order — the declared order would instead
+    # put them on y=1, x=3, y=3, x=1.
+    plane = _bl_strip_plane(r, 37)
+    @test abs(plane[1][1] - 1.0) < 1e-9 && abs(plane[1][2] - 1.0) < 1e-9
+    plane = _bl_strip_plane(r, 41)
+    @test abs(plane[2][1] - 3.0) < 1e-9 && abs(plane[2][2] - 3.0) < 1e-9
+    plane = _bl_strip_plane(r, 45)
+    @test abs(plane[1][1] - 3.0) < 1e-9 && abs(plane[1][2] - 3.0) < 1e-9
+    plane = _bl_strip_plane(r, 49)
+    @test abs(plane[2][1] - 1.0) < 1e-9 && abs(plane[2][2] - 1.0) < 1e-9
+end
+
+@testset ".geo boundary-layer native grading at small lc" begin
+    # BL preparation seeds each generatrix and source boundary curve with
+    # the native 1-D producer — under the caller's `_ModelMesh1DOptions` —
+    # so the position-keyed `levels`/`tops` maps store exactly the
+    # coordinates the curve producer later emits. Before the seeding the
+    # lazy grading fallback drifted a few ulps at this `lc`: ownership then
+    # rejected a lower cell whose stored row no longer matched the emitted
+    # node, and `Mesh 3` failed inside certificate validation. The unit
+    # square at `lc = 0.5` exercises the drift; Gmsh 4.15.2 meshes it to
+    # the counts asserted below.
+    r = _execute_bl_source("""
+        Point(1) = {0,0,0,0.5};
+        Point(2) = {1,0,0,0.5};
+        Point(3) = {1,1,0,0.5};
+        Point(4) = {0,1,0,0.5};
+        Line(1) = {1,2};
+        Line(2) = {2,3};
+        Line(3) = {3,4};
+        Line(4) = {4,1};
+        Curve Loop(1) = {1,2,3,4};
+        Plane Surface(1) = {1};
+        out[] = Extrude { Surface{1}; Layers{3}; Recombine; };
+        """; mesh_dim=3)
+    @test r.errors == String[]
+    mesh = r.mesh
+    @test size(mesh.coords, 2) == 48
+    cells = (tris = sum(size(b.nodes, 2) for b in mesh.blocks if b.msh == 2; init = 0),
+             quads = sum(size(b.nodes, 2) for b in mesh.blocks if b.msh == 3; init = 0),
+             prisms = sum(size(b.nodes, 2) for b in mesh.blocks if b.msh == 6; init = 0))
+    @test cells == (tris = 28, quads = 24, prisms = 42)
+    @test sort!(unique!(round.(mesh.coords[3, :]; digits=12))) ≈
+        [0.0, 1/3, 2/3, 1.0]
+end

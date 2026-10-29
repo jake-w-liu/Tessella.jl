@@ -233,8 +233,13 @@ end
         abs(hypot(mesh.coords[1,node],mesh.coords[2,node])-1.0)<1e-9 &&
             mesh.coords[2,node]>1e-9
     end
-    # A boundary arc bulging out of the surface plane still fails explicitly
-    # rather than silently degrading to a chord.
+    # A ruled patch bounded by a non-coplanar wire is a genuinely curved
+    # surface — upstream's `addSurfaceFilling` admits the wire and meshes
+    # the patch interpolating the bulging arc (Gmsh 4.15.2 fronts it as
+    # "Surface": 8 nodes), not a chord-flattened sheet. The produced
+    # boundary still follows the evaluated arc: a boundary node sits on
+    # the circle — radius √1.25 about (0,0,0.5) on the wire plane
+    # x+y+2z=1 — below the z=0 chord between the arc's endpoints.
     m2=GeoModel()
     add_point!(m2,1.0,0.0,0.0;tag=1)
     add_point!(m2,0.0,0.0,0.5;tag=2)
@@ -245,8 +250,53 @@ end
     add_line!(m2,4,1;tag=3)
     l2=add_curve_loop!(m2,[1,2,3])
     s2=add_ruled_surface!(m2,[l2];tag=1)
-    err=try mesh_model_surface(m2,s2); nothing catch e; e end
-    @test err isa ArgumentError
+    mesh2=mesh_model_surface(m2,s2)
+    @test nnodes(mesh2)>0 && ntris(mesh2)>0
+    @test validate(mesh2).ok
+    @test any(1:nnodes(mesh2)) do node
+        px,py,pz=mesh2.coords[:,node]
+        abs(hypot(px,py,pz-0.5)-sqrt(1.25))<1e-9 && pz<-0.05
+    end
+end
+
+@testset "ruled patch admits off-surface curve control points" begin
+    # A non-planar ruled patch interpolates its boundary curves as
+    # parametric edges; auxiliary construction points — a Circle's center,
+    # a spline's interior poles — legitimately sit off the surface. The
+    # `model_to_mixed` admission audit therefore checks each boundary
+    # curve's endpoints only (the produced boundary nodes are still audited
+    # on-surface): before the fix it audited `curve_control_points` and
+    # rejected this fixture with "Point[5] is not on Surface[1]" because
+    # the arc's construction center lies below the patch.
+    ruled=_execute_curved_source("""
+        lc = 0.3;
+        Point(1) = {0,0,0,lc};
+        Point(2) = {1,0,0,lc};
+        Point(3) = {1,1,0.6,lc};
+        Point(4) = {0,1,0.6,lc};
+        Point(5) = {0.5,0,-0.8,lc};
+        Circle(1) = {1,5,2};
+        Line(2) = {2,3};
+        Line(3) = {3,4};
+        Line(4) = {4,1};
+        Curve Loop(1) = {1,2,3,4};
+        Surface(1) = {1};
+        """;mesh_dim=2)
+    @test ruled.msg_error_count==0
+    @test nnodes(ruled.mesh)>0 && ntris(ruled.mesh)>0
+    # The circular edge is honored, not chord-flattened: the arc bulges
+    # above its 1→2 chord into the patch (radius √0.89 about (0.5,0,-0.8)
+    # gives a ≈0.143 sagitta).
+    @test any(1:nnodes(ruled.mesh)) do node
+        abs(ruled.mesh.coords[2,node])<1e-9 &&
+            ruled.mesh.coords[3,node]>0.05 &&
+            abs(ruled.mesh.coords[1,node]-0.5)<0.4
+    end
+    # The surface part keeps its boundary classification through the
+    # projection — the same path that previously threw inside the audit.
+    part=Tessella.Model.model_to_mixed(
+        ruled.model,mesh_model_surface(ruled.model,1),1)
+    @test part isa MixedMesh && !isempty(part.blocks)
 end
 
 @testset "arc lifecycle" begin

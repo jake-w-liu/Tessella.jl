@@ -64,8 +64,6 @@ function _extrude_bl_row_lookup(rows::AbstractDict{NTuple{3,Float64},V},
     end
     bd<=1e-9*scale && return best
     bd<=1e-7*scale && bd<=0.1*bd2 && return best
-    get(ENV,"TESS_DEBUG_BL","")=="1" &&
-        println("BL MISS p=",p," keys=",collect(keys(rows)))
     throw(ArgumentError(
         "$caller: boundary-layer copy evaluated $(p) off the wall's " *
         "stored nodes"))
@@ -1491,6 +1489,78 @@ function _extrude_bl_view_fields(walls,caller;
             samplers=samplers,bg=_background_field)
 end
 
+# Every curve whose stored discretization a pending boundary-layer
+# resolution is about to read: the wall generatrices (2-D arms and 3-D
+# lateral strips alike — `Mesh2DWithBoundaryLayers` merges the smooth-data
+# field globally) plus the boundary curves of each `bl_surface`/lateral
+# source face, whose `meshGFace` chains feed `addExtrudeNormals`.
+function _extrude_bl_seed_curves(m::GeoModel)
+    curves=Set{Int}()
+    for ((d,tag),spec) in m.meshing.extrude_specs
+        spec isa NamedTuple || continue
+        st=get(spec,:type,nothing)
+        if d==2 && st===:boundary_layer
+            link=get(m.meshing.extrude_sources,(2,tag),nothing)
+            link!==nothing && link[1]==1 &&
+                push!(curves,abs(link[2]))
+            stag=abs(Int(get(spec,:surf,0)))
+            stag==0 && continue
+        elseif st===:bl_surface
+            stag=abs(Int(get(spec,:src,0)))
+            stag==0 && continue
+        else
+            continue
+        end
+        haskey(m.surfaces,stag) || continue
+        for l in m.surfaces[stag],c in m.loops[l]
+            push!(curves,abs(c))
+        end
+    end
+    return curves
+end
+
+# `Mesh2DWithBoundaryLayers` resolves its displaced-position maps off the
+# native 1-D producer's stored grading — the parameters the curve phase
+# publishes on the actual products. A lazy grade drifts ~1e-9 from it on
+# curved walls (the `_native_producer` lc clamps differ in the last ulp),
+# leaving every position-keyed `levels`/`tops` map split into stale keys
+# and stale values the welded consumers cannot reconcile bitwise. Re-grade
+# the seed set natively on `sm` — the same transport the exec-time stage
+# copy already performs for `working` — so the maps land on the final
+# coordinates. Entries are always re-graded: an existing lazy entry is
+# exactly the drift being removed, and a native one re-grades identically.
+# Curves the producer cannot grade yet (`:pending` periodic copies, deferred
+# sources) keep the lazy chain, exactly `_extrude_curve_nodes`'s fallback.
+function _extrude_bl_seed_native!(sm::GeoModel,curves,
+                                  options::_ModelMesh1DOptions,
+                                  caller::AbstractString)
+    pending=Set{Int}(curves)
+    for _ in 1:max(1,length(curves))
+        isempty(pending) && break
+        progressed=false
+        for c in sort!(collect(pending))
+            graded=try
+                _model_mesh_curve!(sm,c,options,caller;_native_producer=true)
+            catch err
+                err isa InterruptException && rethrow()
+                err isa ArgumentError || rethrow()
+                nothing
+            end
+            graded===:pending && continue
+            if graded isa Vector{Float64}
+                sm.curve_params[c]=graded
+            elseif graded isa _ModelNativeCurveGrade
+                sm.curve_params[c]=Float64.(graded.parameters)
+            else
+                # `:keep` — the stored discretization stands untouched.
+            end
+            progressed=true;delete!(pending,c)
+        end
+        progressed || break
+    end
+    return nothing
+end
+
 # `Mesh2DWithBoundaryLayers`'s `ExtrudePoint` arm: a standalone
 # point-generatrix connector (`type=:bl_point` until resolved) sweeps along
 # the smooth field's normal at its source position — zero when the position
@@ -1542,6 +1612,23 @@ function _extrude_bl_prepare_inner!(m::GeoModel,caller::AbstractString;
     isempty(pending) && isempty(pending_surf) && isempty(pending_lat) &&
         return nothing
     field_model=_model===nothing ? m : _model
+    # The chains and source-face meshes these maps key on must be the
+    # *native* 1-D grading — the parameters the curve phase will publish —
+    # not a lazy grade (whose `_native_producer`-off clamps drift ~1e-9 in
+    # the last ulp). Re-grade the wall generatrices and face boundaries
+    # before any lazy `_extrude_curve_source`/`_extrude_bl_srcmesh` read can
+    # freeze drifted entries into the stored spec maps. `_mesh1d_options`
+    # is the caller's own producer options so the seeded grading is the
+    # same one the products carry.
+    seed_options=_mesh1d_options===nothing ?
+        _model_default_mesh1d_options(m,caller) : _mesh1d_options
+    seed_curves=_extrude_bl_seed_curves(m)
+    if !isempty(seed_curves)
+        _extrude_bl_seed_native!(m,seed_curves,seed_options,caller)
+        field_model===m ||
+            _extrude_bl_seed_native!(field_model,seed_curves,
+                                     seed_options,caller)
+    end
     if _fields===nothing
         walls=_extrude_bl_walls(m,caller;_mesh_input,
             _mesh1d_options=_mesh1d_options)
@@ -1583,9 +1670,6 @@ function _extrude_bl_prepare_inner!(m::GeoModel,caller::AbstractString;
         srcmesh=_extrude_bl_srcmesh(field_model,stag;
             size_field=_size_field,_mesh_input=_mesh_input,
             _mesh1d_options=_mesh1d_options)
-        get(ENV,"TESS_DEBUG_BL","")=="1" &&
-            println("BL PREPARE (d=$d,tag=$tag,src=$stag) srcmesh coords=",
-                [Tuple(srcmesh.coords[:,i]) for i in 1:size(srcmesh.coords,2)])
         index=Int(get(spec,:index,0))
         field=get(_fields.fields,index,_EMPTY_BL_FIELD)
         scale_field=get(_fields.scales,index,nothing)

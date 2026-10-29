@@ -910,3 +910,111 @@ end
     end
     @test gp.mesh_size_min==0.25
 end
+
+@testset ".geo holed surface Extrude generatrix ordering" begin
+    # `SetSurfaceGeneratrices` canonicalizes a face's wires at parse time:
+    # a positive hole-loop reference enumerates its curves reversed and
+    # negated, so `ExtrudeSurface`'s lateral sweep, `DuplicateSurface`'s
+    # chapeau copies, and every `geo.Source` link follow the canonical
+    # `{-8,-7,-6,-5}` order rather than the declared `{5,6,7,8}`. Gmsh
+    # 4.15.2 `-0` on this fixture writes exactly the records asserted
+    # below (its surface loops fold orientation into `SurfacesOrientations`
+    # — the hole laterals carry -1 — while serializing positive tags).
+    src = """
+        Point(1) = {0,0,0,1};
+        Point(2) = {4,0,0,1};
+        Point(3) = {4,4,0,1};
+        Point(4) = {0,4,0,1};
+        Point(5) = {1,1,0,0.5};
+        Point(6) = {3,1,0,0.5};
+        Point(7) = {3,3,0,0.5};
+        Point(8) = {1,3,0,0.5};
+        Line(1) = {1,2}; Line(2) = {2,3}; Line(3) = {3,4}; Line(4) = {4,1};
+        Line(5) = {5,6}; Line(6) = {6,7}; Line(7) = {7,8}; Line(8) = {8,5};
+        Curve Loop(1) = {1,2,3,4};
+        Curve Loop(2) = {5,6,7,8};
+        Plane Surface(1) = {1,2};
+        """
+    r=_execute_extrude_source(src * """
+        out[] = Extrude {0,0,1} { Surface{1}; };
+        """)
+    @test r.errors==String[]
+    @test r.lists["out"]==[50.0,1.0,21.0,25.0,29.0,33.0,37.0,41.0,45.0,49.0]
+    m=r.model
+    # Lateral loops in generatrix order — outer edges forward, hole edges
+    # signed-reversed — each wired `pc, CurveEnd, -chapeau, -CurveBeg`.
+    @test m.loops[only(m.surfaces[21])]==[1,20,-10,-19]
+    @test m.loops[only(m.surfaces[25])]==[2,24,-11,-20]
+    @test m.loops[only(m.surfaces[29])]==[3,28,-12,-24]
+    @test m.loops[only(m.surfaces[33])]==[4,19,-13,-28]
+    @test m.loops[only(m.surfaces[37])]==[-8,36,-14,-35]
+    @test m.loops[only(m.surfaces[41])]==[-7,40,-15,-36]
+    @test m.loops[only(m.surfaces[45])]==[-6,44,-16,-40]
+    @test m.loops[only(m.surfaces[49])]==[-5,35,-17,-44]
+    # Chapeau copies: canonical duplicates 10..17 — the hole copies are the
+    # reversed records' duplicates (copy of -8 runs its source's end→beg).
+    @test m.curves[10]==(9,10)
+    @test m.curves[13]==(18,9)
+    @test m.curves[14]==(25,26)
+    @test m.curves[15]==(26,30)
+    @test m.curves[16]==(30,34)
+    @test m.curves[17]==(34,25)
+    # Signed `geo.Source` links on the laterals and the chapeau copies.
+    @test m.meshing.extrude_sources[(2,37)]==(1,-8)
+    @test m.meshing.extrude_sources[(2,49)]==(1,-5)
+    @test m.meshing.extrude_sources[(1,14)]==(1,-8)
+    @test m.meshing.extrude_sources[(1,17)]==(1,-5)
+    # The shell's signed orientation list: hole laterals enter negated.
+    @test m.surface_loops[only(m.volumes[1])]==
+        [-1,50,21,25,29,33,-37,-41,-45,-49]
+    # The chapeau's hole wire stores its declared traversal — copies
+    # reversed and negated — so a second extrusion canonicalizes back to
+    # upstream's flat `{10,...,17}` sequence.
+    @test length(m.surfaces[50])==2
+    @test m.loops[m.surfaces[50][2]]==[-17,-16,-15,-14]
+
+    # A second-level extrude of the displaced chapeau must regenerate the
+    # canonical order from the stored wire — the hole copies canonicalize
+    # back to the flat positive `{14,...,17}` sequence, and the new hole
+    # laterals sweep those copy records forward like upstream's generatrix
+    # list for the duplicated surface.
+    r2=_execute_extrude_source(src * """
+        Extrude {0,0,1} { Surface{1}; }
+        out2[] = Extrude {0,0,1} { Surface{50}; };
+        """)
+    @test r2.errors==String[]
+    top2=r2.model
+    gens=Tessella.Model._geo_surface_generatrices(top2,50)
+    @test gens[1]==[10,11,12,13]
+    @test gens[2]==[14,15,16,17]
+    hole_gens=Int[]
+    for (s,wires) in top2.surfaces
+        length(wires)==1 || continue
+        loop=top2.loops[only(wires)]
+        abs(loop[1]) in (14,15,16,17) && push!(hole_gens,loop[1])
+    end
+    @test sort!(abs.(hole_gens))==[14,15,16,17]
+    @test all(>(0),hole_gens)
+
+    # `Duplicata{Surface}` runs the same `DuplicateSurface` generatrix
+    # iteration — copy curves 10..17 land on the canonical edges and the
+    # stored hole wire is again the reversed-negated traversal.
+    r=_execute_extrude_source(src * """
+        Translate {0,0,1} { Duplicata{ Surface{1}; } }
+        """)
+    @test r.errors==String[]
+    m=r.model
+    @test m.curves[10]==(9,10)
+    @test m.curves[13]==(18,9)
+    @test m.curves[14]==(25,26)
+    @test m.curves[15]==(26,30)
+    @test m.curves[16]==(30,34)
+    @test m.curves[17]==(34,25)
+    @test m.points[25]==(1.0,1.0,1.0)
+    @test m.points[26]==(1.0,3.0,1.0)
+    @test m.points[30]==(3.0,3.0,1.0)
+    @test m.points[34]==(3.0,1.0,1.0)
+    copy_loops=m.surfaces[9]
+    @test m.loops[copy_loops[1]]==[10,11,12,13]
+    @test m.loops[copy_loops[2]]==[-17,-16,-15,-14]
+end

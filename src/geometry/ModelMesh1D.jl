@@ -1843,11 +1843,13 @@ function _model_mesh_part_node_entities(m::GeoModel,dim::Int,tag::Int,mesh,
     return copy(data.node_entities)
 end
 
-function _model_point_mesh_parts(m::GeoModel,caller::AbstractString)
+function _model_point_mesh_parts(m::GeoModel,caller::AbstractString;
+                                 _mesh1d_options=nothing)
     _model_require_point_mesh_geometry(m,caller)
     # Pending boundary-layer point copies displace inside the pass before
-    # any point part publishes a coordinate.
-    _extrude_bl_prepare!(m,caller)
+    # any point part publishes a coordinate; the caller's producer options
+    # keep the boundary-layer seed grading bitwise on the curve phase's own.
+    _extrude_bl_prepare!(m,caller;_mesh1d_options=_mesh1d_options)
     parts=Tuple{Int,Int,Mesh}[]
     for (tag,point) in m.points
         record=get(m.meshing.attached,(0,tag),nothing)
@@ -2080,7 +2082,7 @@ end
 function _model_mesh_dim01!(m::GeoModel,options::_ModelMesh1DOptions,
                           caller::AbstractString)
     _model_mesh_curves!(m,options,caller)
-    parts=_model_point_mesh_parts(m,caller)
+    parts=_model_point_mesh_parts(m,caller;_mesh1d_options=options)
     append!(parts,_model_curve_mesh_parts(m,caller))
     return parts
 end
@@ -2103,7 +2105,7 @@ function _model_mesh_dim01_parts!(m::GeoModel,
                                 options::_ModelMesh1DOptions,
                                 caller::AbstractString)
     _model_mesh_dim01_grade!(m,options,caller)
-    parts=_model_point_mesh_parts(m,caller)
+    parts=_model_point_mesh_parts(m,caller;_mesh1d_options=options)
     append!(parts,_model_curve_mesh_parts(m,caller))
     return parts
 end
