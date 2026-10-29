@@ -313,14 +313,15 @@ function _extrude_nonew_chain(intervals::Int,preferred,top_state::UInt8,caller;
     templates=_extrude_nonew_templates()
     length(templates)<=typemax(UInt16) || throw(ErrorException(
         "QuadTriNoNewVerts template table exceeds its packed index range"))
-    function build_relation(side::Int,state::Int)
+    function build_relation(constraints)
         relation=zeros(UInt16,3,3)
         costs=fill(typemax(Int),3,3)
         for (index,template) in enumerate(templates)
             all(k->template.faces[k]!=0,1:4) || continue
-            # A bound shared lateral accepts only the templates whose
-            # matching face emits the transported geometric diagonal.
-            side!=0 && template.faces[side]!=state && continue
+            # Each bound shared lateral accepts only the templates whose
+            # matching face emits its transported geometric diagonal.
+            all(constraint->template.faces[Int(constraint[1])]==Int(constraint[2]),
+                constraints) || continue
             lower=Int(template.faces[5])+1
             upper=Int(template.faces[6])+1
             cost=4count(k->template.faces[k]!=preferred[k],1:4)
@@ -332,13 +333,12 @@ function _extrude_nonew_chain(intervals::Int,preferred,top_state::UInt8,caller;
         end
         return relation,costs
     end
-    relation,costs=build_relation(0,0)
+    relation,costs=build_relation(NTuple{2,UInt8}[])
     layered=nothing
     if forced!==nothing
         length(forced)==intervals || throw(ArgumentError(
             "$caller: QuadTriNoNewVerts shared Region diagonal contract has inconsistent layers"))
-        layered=[build_relation(Int(forced[layer][1]),Int(forced[layer][2]))
-                 for layer in 1:intervals]
+        layered=[build_relation(forced[layer]) for layer in 1:intervals]
     end
     parents=zeros(UInt8,3,intervals)
     selected=zeros(UInt16,3,intervals)
@@ -382,41 +382,46 @@ function _extrude_nonew_chain(intervals::Int,preferred,top_state::UInt8,caller;
     return result
 end
 
-# Translate the lateral-wall diagonal edge positions the bound shared
-# Surface emits (one unordered position pair per layer) into this Region's
-# per-layer (side,state) template constraint: the same geometric edge must
-# be the diagonal of the matching hex face on every layer. Each pair is a
-# diagonal of exactly one lateral face, so the side is unambiguous.
+# Translate the lateral-wall diagonal edge positions each bound shared
+# Surface emits (one unordered position pair per layer, per shared wall)
+# into this Region's per-layer (side,state) template constraints: the same
+# geometric edge must be the diagonal of each matching hex face on every
+# layer. Each pair is a diagonal of exactly one lateral face, so each wall's
+# side is unambiguous, and distinct shared walls occupy distinct source
+# edges — a Region bounded by two partners may therefore carry two
+# constraints on one layer.
 function _extrude_nonew_shared_chain_contract(cols,cell::NTuple{4,Int32},
-        intervals::Int,required,caller)
-    length(required)==intervals || throw(ArgumentError(
-        "$caller: QuadTriNoNewVerts shared Region diagonal contract has inconsistent layers"))
-    forced=Vector{NTuple{2,UInt8}}(undef,intervals)
-    side0=0
-    for layer in 1:intervals
-        req=required[layer]
-        req===nothing && throw(ArgumentError(
-            "$caller: QuadTriNoNewVerts shared Region wall loses its bound diagonal"))
-        v=_extrude_nonew_corners(cols,cell,layer)
-        side=0;state=0
-        for k in 1:4
-            face=_EXTRUDE_NONEW_HEX_FACES[k]
-            if _extrude_ekey(v[face[1]],v[face[3]])==req
-                side!=0 && throw(ArgumentError(
-                    "$caller: QuadTriNoNewVerts shared Region diagonal is not unique to one wall"))
-                side=k;state=1
-            elseif _extrude_ekey(v[face[2]],v[face[4]])==req
-                side!=0 && throw(ArgumentError(
-                    "$caller: QuadTriNoNewVerts shared Region diagonal is not unique to one wall"))
-                side=k;state=2
+        intervals::Int,required_map,caller)
+    forced=[NTuple{2,UInt8}[] for _ in 1:intervals]
+    for (_,required) in required_map
+        length(required)==intervals || throw(ArgumentError(
+            "$caller: QuadTriNoNewVerts shared Region diagonal contract has inconsistent layers"))
+        side0=0
+        for layer in 1:intervals
+            req=required[layer]
+            req===nothing && throw(ArgumentError(
+                "$caller: QuadTriNoNewVerts shared Region wall loses its bound diagonal"))
+            v=_extrude_nonew_corners(cols,cell,layer)
+            side=0;state=0
+            for k in 1:4
+                face=_EXTRUDE_NONEW_HEX_FACES[k]
+                if _extrude_ekey(v[face[1]],v[face[3]])==req
+                    side!=0 && throw(ArgumentError(
+                        "$caller: QuadTriNoNewVerts shared Region diagonal is not unique to one wall"))
+                    side=k;state=1
+                elseif _extrude_ekey(v[face[2]],v[face[4]])==req
+                    side!=0 && throw(ArgumentError(
+                        "$caller: QuadTriNoNewVerts shared Region diagonal is not unique to one wall"))
+                    side=k;state=2
+                end
             end
+            side==0 && throw(ArgumentError(
+                "$caller: QuadTriNoNewVerts shared Region wall does not reach its bound diagonal"))
+            layer==1 && (side0=side)
+            side==side0 || throw(ArgumentError(
+                "$caller: QuadTriNoNewVerts shared Region wall changes sides between layers"))
+            push!(forced[layer],(UInt8(side),UInt8(state)))
         end
-        side==0 && throw(ArgumentError(
-            "$caller: QuadTriNoNewVerts shared Region wall does not reach its bound diagonal"))
-        layer==1 && (side0=side)
-        side==side0 || throw(ArgumentError(
-            "$caller: QuadTriNoNewVerts shared Region wall changes sides between layers"))
-        forced[layer]=(UInt8(side),UInt8(state))
     end
     return forced
 end
@@ -615,7 +620,8 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
     sides in (3,4) || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts other source boundaries require the boundary-category planner"))
     # Certified literal shared laterals of the bounded two-Region
-    # translation slice (at most one); every other incidence still rejects.
+    # translation slice (this Region may bound several such walls);
+    # every other incidence still rejects.
     shared=_extrude_nonew_shared_for(m,t,caller)
     top,laterals=_extrude_nonew_region_boundary(m,t,source,caller;sides,shared)
     quad_patch=_extrude_nonew_quad_patch_candidate(m,source,sides,caller)
@@ -778,7 +784,8 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
         states[6,intervals]=top_state
         # A transported shared-wall diagonal cannot land on a whole
         # RecombLaterals quad — symmetric parameters keep this defensive.
-        _shared_diagonals===nothing || all(isnothing,_shared_diagonals) ||
+        _shared_diagonals===nothing ||
+            all(required->all(isnothing,required),values(_shared_diagonals)) ||
             throw(ArgumentError(
                 "$caller: QuadTriNoNewVerts shared Region wall keeps a diagonal its partner does not emit"))
         # The five required whole faces plus a divided final cap cannot be

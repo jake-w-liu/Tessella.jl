@@ -86,12 +86,13 @@ function _extrude_nonew_surface_projection(m::GeoModel,mesh,surface::Int,
         # Tagged actual products have already taken the UID-bound projection
         # path. A naked standalone product was built from the geometric Source;
         # replay that same operation rather than substituting attached records.
-        # A certified shared lateral replays the joint pair scope — the same
-        # operation scope its bound product was planned under — so the
-        # replayed part is the certified single emission, not an independent
-        # wall triangulation.
+        # A certified shared lateral replays the joint scope — the same
+        # operation scope its bound product was planned under, closed under
+        # the shared-wall neighbor graph — so the replayed part is the
+        # certified single emission, not an independent wall triangulation.
         length(regions)==2 ?
-            _extrude_nonew_scope(working,caller;tags=regions,
+            _extrude_nonew_scope(working,caller;
+                tags=_extrude_nonew_shared_closure(working,regions,caller),
                 _working_model=true).volumes[owner] :
             _extrude_nonew_complete_plan(working,owner,caller;_working_model=true)
     else

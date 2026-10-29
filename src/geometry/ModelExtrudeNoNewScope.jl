@@ -482,17 +482,20 @@ function _extrude_nonew_b4_geometry(m::GeoModel,t::Int,completed::_ExtrudeNoNewC
 end
 
 # ─── Bounded shared-lateral slice (LAY01) ───────────────────────────────────
-# Two adjacent QuadTriNoNewVerts sweeps may share exactly one literal lateral
-# Surface when both record the identical linear translation operation. The
-# shared Surface is emitted once — the first partner's plan binds its actual
-# cells — and its corner/column incidence is transported into the second
-# plan as a per-layer diagonal contract, so each Region's lateral boundary
-# sees identical wall sub-edges. A joint oriented-incidence check then
-# certifies opposite child faces, matching side diagonals, positive typed
-# volumes and the closed exterior boundary. Everything outside this slice
-# (third sharer, multiple or non-literal sharing, non-lateral partners,
-# unequal or nonlinear sweeps, non-generic catalogs) keeps the original
-# loud diagnostic.
+# Adjacent QuadTriNoNewVerts sweeps may share literal lateral Surfaces when
+# both partners record the identical linear translation operation. Each
+# shared Surface is emitted once — the earlier-tag partner's plan binds its
+# actual cells — and its corner/column incidence is transported into the
+# later plan as a per-layer diagonal contract, so each Region's lateral
+# boundary sees identical wall sub-edges. A Region may bound several such
+# walls (a chain or corner of paired sweeps); every shared edge keeps the
+# same literal-pair contract, and one Region's plan may carry several
+# transported diagonal constraints at once. A joint oriented-incidence check
+# then certifies each pair's opposite child faces, matching side diagonals,
+# positive typed volumes and the closed exterior boundary. Everything outside
+# this slice (a Surface with three or more Region owners, non-literal
+# sharing, non-lateral partners, unequal or nonlinear sweeps, non-generic
+# catalogs) keeps the original loud diagnostic.
 
 @noinline _extrude_nonew_shared_planner_error(caller,surface)=
     throw(ArgumentError(
@@ -548,9 +551,9 @@ function _extrude_nonew_shared_validate(m::GeoModel,t::Int,s::Int,
     return partner
 end
 
-# The bounded shared laterals of one Region — surface => partner. The
-# current slice admits at most one shared lateral per Region, and only
-# inside a literal two-Region pair.
+# The bounded shared laterals of one Region — surface => partner. A Region
+# may bound several literal shared laterals (a chain or corner of paired
+# sweeps); every wall still requires its own certified two-Region pair.
 function _extrude_nonew_shared_for(m::GeoModel,t::Int,caller::AbstractString)
     shared=Dict{Int,Int}()
     for shell in m.volumes[t],signed in m.surface_loops[abs(shell)]
@@ -559,9 +562,25 @@ function _extrude_nonew_shared_for(m::GeoModel,t::Int,caller::AbstractString)
         length(adjacent)==1 && continue
         shared[s]=_extrude_nonew_shared_validate(m,t,s,adjacent,caller)
     end
-    length(shared)<=1 || _extrude_nonew_shared_planner_error(
-        caller,minimum(keys(shared)))
     return shared
+end
+
+# The shared-lateral neighbor graph is closed under the literal-pair
+# relation: any operation that must plan one member plans the whole
+# connected component, so every bound wall keeps its joint certificate.
+function _extrude_nonew_shared_closure(m::GeoModel,seeds,
+                                       caller::AbstractString)
+    closure=Set{Int}(seeds)
+    queue=Int[seeds...]
+    while !isempty(queue)
+        tag=pop!(queue)
+        for (_,partner) in _extrude_nonew_shared_for(m,tag,caller)
+            partner in closure && continue
+            push!(closure,partner)
+            push!(queue,partner)
+        end
+    end
+    return sort!(collect(closure))
 end
 
 # The shared generatrix occupies one side of the completed partner's Source
@@ -761,47 +780,57 @@ function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
     sort!(selected)
     working=_working_model ? m : deepcopy(m)
     # Discover every bounded shared-lateral pair before any planning, so
-    # admission failures stay atomic. `shared_of` is Region => (surface,
-    # partner); each Region participates in at most one pair.
+    # admission failures stay atomic. `shared_of` is Region => (surface =>
+    # partner) over all its shared walls, and each directed edge must record
+    # the symmetric pair entry.
     selected_set=Set(selected)
-    shared_of=Dict{Int,NTuple{2,Int}}()
+    shared_of=Dict{Int,Dict{Int,Int}}()
     for tag in selected
-        for (s,partner) in _extrude_nonew_shared_for(working,tag,caller)
+        edges=_extrude_nonew_shared_for(working,tag,caller)
+        isempty(edges) && continue
+        for (s,partner) in edges
             partner in selected_set ||
                 _extrude_nonew_shared_planner_error(caller,s)
-            shared_of[tag]=(s,partner)
         end
+        shared_of[tag]=edges
     end
-    for (tag,(s,partner)) in shared_of
-        get(shared_of,partner,nothing)==(s,tag) ||
+    for (tag,edges) in shared_of,(s,partner) in edges
+        get(get(shared_of,partner,Dict{Int,Int}()),s,0)==tag ||
             _extrude_nonew_shared_planner_error(caller,s)
     end
     volumes=Dict{Int,_ExtrudeNoNewCompletePlan}()
     surfaces=Dict{Int,Union{Mesh,MixedMesh}}()
     for tag in selected
-        info=get(shared_of,tag,nothing)
+        edges=get(shared_of,tag,nothing)
         diagonals=nothing
-        if info!==nothing && info[2]<tag
-            # The earlier partner already bound the shared Surface: read
-            # its emitted wall diagonals and constrain this plan to them.
-            s,partner=info
-            owner=volumes[partner]
-            generatrix=abs(working.meshing.extrude_sources[(2,s)][2])
-            side=_extrude_nonew_shared_side(working,owner,generatrix,s,caller)
-            diagonals=_extrude_nonew_shared_diagonals(owner,side,s,caller)
+        if edges!==nothing
+            for (s,partner) in edges
+                partner<tag || continue
+                # The earlier partner already bound the shared Surface: read
+                # its emitted wall diagonals and constrain this plan to them.
+                owner=volumes[partner]
+                generatrix=abs(working.meshing.extrude_sources[(2,s)][2])
+                side=_extrude_nonew_shared_side(working,owner,generatrix,s,caller)
+                required=_extrude_nonew_shared_diagonals(owner,side,s,caller)
+                required===nothing &&
+                    _extrude_nonew_shared_planner_error(caller,s)
+                diagonals===nothing && (diagonals=Dict{Int,
+                    Vector{Union{Nothing,NTuple{2,NTuple{3,Float64}}}}}())
+                diagonals[s]=required
+            end
         end
         completed=_extrude_nonew_complete_plan(working,tag,caller;
             min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
             size_field=size_field,_working_model=true,_mesh_input=_mesh_input,
             _trace_columns=_trace_columns,_shared_diagonals=diagonals)
-        info===nothing || completed.catalog isa _ExtrudeNoNewCatalog ||
-            _extrude_nonew_shared_planner_error(caller,info[1])
+        edges===nothing || completed.catalog isa _ExtrudeNoNewCatalog ||
+            _extrude_nonew_shared_planner_error(caller,minimum(keys(edges)))
         volumes[tag]=completed
         for (surface,part) in completed.surfaces
             if haskey(surfaces,surface)
-                # Only the certified shared lateral may repeat, and only
-                # when both Regions emitted bitwise-identical cells.
-                (info!==nothing && surface==info[1] &&
+                # Only a certified shared lateral may repeat, and only when
+                # both Regions emitted bitwise-identical cells.
+                (edges!==nothing && haskey(edges,surface) &&
                  _extrude_nonew_shared_part_equal(part,surfaces[surface])) ||
                     _extrude_nonew_shared_planner_error(caller,surface)
                 continue
@@ -810,12 +839,13 @@ function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
         end
     end
     for tag in selected
-        info=get(shared_of,tag,nothing)
-        info===nothing && continue
-        # Certify each pair once, from the earlier Region's plan.
-        tag<info[2] || continue
-        s,partner=info
-        _extrude_nonew_shared_certify(volumes[tag],volumes[partner],s,caller)
+        edges=get(shared_of,tag,nothing)
+        edges===nothing && continue
+        for (s,partner) in edges
+            # Certify each pair once, from the earlier Region's plan.
+            tag<partner || continue
+            _extrude_nonew_shared_certify(volumes[tag],volumes[partner],s,caller)
+        end
     end
     m.curve_params=working.curve_params
     return _ExtrudeNoNewScope(m,volumes,surfaces)
@@ -848,15 +878,18 @@ function _extrude_nonew_surface_mesh(m::GeoModel,t::Int,
         push!(owners,region)
     end
     if length(owners)==2
-        # The bounded literal-lateral pair plans its scope jointly; any
-        # other multi-owner incidence keeps the original diagnostic.
+        # The bounded literal-lateral pair plans its scope jointly, closed
+        # under the shared-wall neighbor graph so a middle Region keeps the
+        # certificates of its other bound walls; any other multi-owner
+        # incidence keeps the original diagnostic.
         a,b=owners
         get(_extrude_nonew_shared_for(m,a,caller),t,0)==b &&
             get(_extrude_nonew_shared_for(m,b,caller),t,0)==a ||
             _extrude_nonew_shared_planner_error(caller,t)
         scope===nothing || throw(ArgumentError(
             "$caller: QuadTriNoNewVerts Surface[$t] is absent from this mesh scope"))
-        built=_extrude_nonew_scope(m,caller;tags=owners,
+        built=_extrude_nonew_scope(m,caller;
+            tags=_extrude_nonew_shared_closure(m,owners,caller),
             min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
             size_field=size_field)
         return built.surfaces[t]

@@ -11580,3 +11580,71 @@ Regression suites (`--compile=min -O0`, working tree incl. sibling WIP):
 (`_extrude_bl_seed_*`, `_mesh1d_options` threading, `_geo_surface_generatrices`
 holed-wire traversal) and torus/STATUS drafts remain uncommitted and are
 not part of this increment.
+
+## 2026-10-30 — NoNew shared-lateral neighbor graphs (Devin subagent)
+
+**Scope**: LAY01 neighboring/shared-Region propagation follow-on. The
+bounded literal pair already planned jointly (commits `0db2802`,
+`2a3e919`), but `_extrude_nonew_shared_for` still rejected a Region
+bounding **more than one** certified shared lateral, so three-box chains,
+L-arrangements and 2×2 grids of `QuadTriNoNewVerts` sweeps threw
+`shared Surface[..] requires the shared-region planner` while upstream
+Gmsh 4.15.2 meshes them.
+
+**Changes** (`src/geometry`):
+
+1. **Multi-edge neighbor discovery** — `_extrude_nonew_shared_for` now
+   returns every certified literal shared lateral of a Region instead of
+   rejecting `length(shared)>1`. Each edge still must satisfy the same
+   `_extrude_nonew_shared_validate` contract: exactly two Region owners,
+   identical `Layers`/`Recombine`/`QuadTriNoNewVerts` operation records,
+   a lateral generatrix product bounding both Sources, opposite shell
+   signs.
+
+2. **Connected-component operation scope** — `_extrude_nonew_scope`'s
+   `shared_of` is now `Region => (surface => partner)` over all shared
+   walls. Every directed edge requires its symmetric pair entry and a
+   partner inside `tags` (the atomicity guard is unchanged). Planning
+   proceeds in tag order: for each edge whose partner planned earlier,
+   the earlier plan's emitted wall diagonals become a per-layer contract
+   keyed by shared Surface, so one Region can carry several contracts at
+   once (the 2×2 corner Region carries two). The scope's shared-surface
+   dedup still requires bitwise-identical emissions, and the joint
+   oriented-incidence certificate now runs once per pair edge.
+   `_extrude_nonew_shared_closure` walks the neighbor graph so the
+   standalone `mesh_model_surface` / `model_to_mixed` projection paths
+   plan the whole connected component — a middle Region's other bound
+   walls keep their joint certificate.
+
+3. **Multi-constraint template chain** — `_extrude_nonew_shared_chain_contract`
+   translates each wall's transported geometric diagonals into per-layer
+   `(side,state)` constraint *vectors* (one entry per contracted wall),
+   and `_extrude_nonew_chain`'s `build_relation` filters the hex template
+   relation on every constraint at once. The RecombLaterals guard checks
+   each wall's transported vector independently.
+
+**Oracle receipts** (Gmsh 4.15.2, `C:\Users\User\Tools\gmsh-4.15.2-`…):
+`chain3.geo` (3-box chain, RecombLaterals off) → 24 nodes/128 elements;
+`chain3_recomb.geo` → 27 nodes; `lshape.geo` → 24 nodes; `grid22.geo`
+(2×2, corner Region with two contracts) → 27 nodes/150 elements.
+Tessella emits the identical node counts (24/27/24/27) and welds each
+shared wall once under its own Surface tag — matching upstream's
+single-emission `from->mesh_vertices` semantics where both owning
+Regions reference the same shared boundary cells.
+
+**Receipts** (`--compile=min -O0`, Julia 1.12.7, working tree incl.
+sibling WIP):
+`extrude_nonew_shared_lateral_test.jl` → **306 pass / 0 fail** (was
+108/108; new chain/L-shape/2×2 sets cover one-emission bucketing,
+per-pair opposite orientation, joint exterior coverage, standalone
+closure replay and RecombLaterals variants),
+`geo_quadtri_extrude_test.jl` → **334 pass / 0 fail** (12m33s),
+`geo_extrude_test.jl` → **495 pass / 0 fail**,
+`geo_extrude_boundarylayer_test.jl` → **204 pass / 0 fail**.
+
+**Not claimed**: full shared-Region parity. A Surface with three or more
+Region owners, non-literal sharing, mixed NoNew/ordinary/AddVerts
+partners, unequal or nonlinear sweeps, non-generic catalogs (transfinite
+source grids/patches) and stacked/shared-cap sweeps still keep their
+loud planner diagnostics; the sibling boundary-layer, boolean and
+Mesh2D WIP remain uncommitted.

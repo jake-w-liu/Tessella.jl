@@ -1,12 +1,15 @@
-# LAY01 bounded slice: two adjacent QuadTriNoNewVerts sweeps that AutoCoherence
-# welded onto ONE literal lateral Surface. The shared Surface's corner/column
+# LAY01 bounded slice: adjacent QuadTriNoNewVerts sweeps that AutoCoherence
+# welded onto literal lateral Surfaces. Each shared Surface's corner/column
 # incidence binds once in the operation scope and transports into both Region
 # plans; the joint certificate checks opposite child orientation, matching
 # wall diagonals, positive typed volumes and the closed exterior boundary.
-# Everything outside the literal two-Region equal-translation pair keeps its
-# planner diagnostic. The certified pair also classifies through the API
-# projection: the bound Surface part's `model_to_mixed` metadata is valid for
-# both owning Regions, so `execute_geo`/`mesh.generate(3)` emit it once.
+# A Region may bound several such walls — chains and corners of paired sweeps
+# plan the whole connected component, carrying one transported diagonal
+# contract per earlier partner. Everything outside the literal two-Region
+# equal-translation pair keeps its planner diagnostic. The certified pairs
+# also classify through the API projection: a bound Surface part's
+# `model_to_mixed` metadata is valid for both owning Regions, so
+# `execute_geo`/`mesh.generate(3)` emit it once.
 using Test
 using Tessella
 using Tessella.Elements: MixedMesh, ElementBlock, _VOLUME_CELL_FACES, msh_dimension
@@ -34,6 +37,78 @@ function _sl_squares()
     Transfinite Surface{1};Transfinite Surface{2};
     Recombine Surface{1,2};
     """
+end
+
+# Three transfinite unit squares in a row — the middle sweep welds its left
+# lateral onto the left pair's wall and its right lateral onto the right
+# pair's wall, so one Region bounds two literal shared Surfaces.
+function _sl_chain_squares()
+    return """
+    Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+    Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+    Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+    Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+    Point(5)={2,0,0,1};Point(6)={2,1,0,1};
+    Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+    Curve Loop(2)={5,6,7,-2};Plane Surface(2)={2};
+    Point(7)={3,0,0,1};Point(8)={3,1,0,1};
+    Line(8)={5,7};Line(9)={7,8};Line(10)={8,6};
+    Curve Loop(3)={-6,8,9,10};Plane Surface(3)={3};
+    Transfinite Curve{:}=2;
+    Transfinite Surface{:};
+    Recombine Surface{:};
+    """
+end
+
+# Three transfinite unit squares in an L — the corner sweep bounds shared
+# walls with both neighbors on adjacent source edges.
+function _sl_lshape_squares()
+    return """
+    Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+    Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+    Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+    Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+    Point(5)={2,0,0,1};Point(6)={2,1,0,1};
+    Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+    Curve Loop(2)={5,6,7,-2};Plane Surface(2)={2};
+    Point(7)={1,2,0,1};Point(8)={0,2,0,1};
+    Line(8)={3,7};Line(9)={7,8};Line(10)={8,4};
+    Curve Loop(3)={-3,8,9,10};Plane Surface(3)={3};
+    Transfinite Curve{:}=2;
+    Transfinite Surface{:};
+    Recombine Surface{:};
+    """
+end
+
+# Four transfinite unit squares in a 2×2 arrangement — the last sweep carries
+# two transported diagonal contracts on the same plan.
+function _sl_grid22_squares()
+    return """
+    Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+    Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+    Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+    Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+    Point(5)={2,0,0,1};Point(6)={2,1,0,1};
+    Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+    Curve Loop(2)={5,6,7,-2};Plane Surface(2)={2};
+    Point(7)={1,2,0,1};Point(8)={0,2,0,1};
+    Line(8)={3,7};Line(9)={7,8};Line(10)={8,4};
+    Curve Loop(3)={-3,8,9,10};Plane Surface(3)={3};
+    Point(9)={2,2,0,1};
+    Line(11)={7,9};Line(12)={9,6};
+    Curve Loop(4)={-7,-12,-11,-8};Plane Surface(4)={4};
+    Transfinite Curve{:}=2;
+    Transfinite Surface{:};
+    Recombine Surface{:};
+    """
+end
+
+# The literal Surface two named extrusion return-lists welded together.
+function _sl_pair_tag(execution,left::AbstractString,right::AbstractString)
+    shared=intersect(Int.(execution.lists[left])[3:end],
+                     Int.(execution.lists[right])[3:end])
+    @test length(shared)==1
+    return only(shared)
 end
 
 function _sl_model(source;mesh_dim=0)
@@ -238,6 +313,134 @@ end
             union!(exterior,_sl_surface_faces(scope.surfaces[tag]))
         end
         @test exterior==external
+    end
+
+    @testset "three-Region chain welds both shared laterals" for laterals in (false,true)
+        flag=laterals ? " RecombLaterals" : ""
+        execution=_sl_model(_sl_chain_squares()*"""
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts$flag;};
+        b[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts$flag;};
+        c[]=Extrude{0,0,1}{Surface{3};Layers{2};Recombine;QuadTriNoNewVerts$flag;};
+        """;mesh_dim=3)
+        model=execution.model
+        s12=_sl_pair_tag(execution,"a","b")
+        s23=_sl_pair_tag(execution,"b","c")
+        @test s12!=s23
+        # Each wall keeps its literal two-Region pair; the middle Region
+        # bounds both.
+        @test sort(_extrude_quadtri_regions(model,s12,_SL_CALLER))==[1,2]
+        @test sort(_extrude_quadtri_regions(model,s23,_SL_CALLER))==[2,3]
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test allunique(Tuple(merged.coords[:,node]) for node in 1:nnodes(merged))
+        pass=_extrude_volume_pass(model,_SL_CALLER)
+        scope=pass.scope
+        @test scope!==nothing
+        for (s,x,lo,hi) in ((s12,1.0,1,2),(s23,2.0,2,3))
+            bound=scope.surfaces[s]
+            @test validate(bound).ok
+            wall=_sl_surface_faces(bound)
+            # One bound product per wall: both Region plans emitted the same
+            # part and the scope stores it once.
+            @test _sl_part_equal(scope.volumes[lo].surfaces[s],bound)
+            @test _sl_part_equal(scope.volumes[hi].surfaces[s],bound)
+            # The standalone surface path replays the connected component and
+            # returns the identical emission.
+            @test _sl_part_equal(mesh_model_surface(model,s),bound)
+            # The merged mesh buckets each shared wall under its own Surface
+            # exactly once, on its plane.
+            @test _sl_surface_faces(geo_entity_mesh(execution,2,s))==wall
+            @test _sl_dim2_faces_on(merged,1,x)==wall
+            # Opposite child incidences between the wall's two owners.
+            cycles_lo=_sl_wall_cycles(pass.parts[lo],x)
+            cycles_hi=_sl_wall_cycles(pass.parts[hi],x)
+            @test Set(keys(cycles_lo))==Set(keys(cycles_hi))==wall
+            for key in keys(cycles_lo)
+                @test _sl_reversed(cycles_lo[key],cycles_hi[key])
+            end
+        end
+        for tag in (1,2,3)
+            _sl_positive(pass.parts[tag])
+        end
+        # Joint boundary across all three Regions: each wall welds exactly on
+        # its plane (incidence two); the remainder is exactly the exterior
+        # boundary.
+        counts=_sl_face_counts(pass.parts[1],pass.parts[2],pass.parts[3])
+        @test all(c in (1,2) for c in values(counts))
+        interior=Set(k for (k,c) in counts if c==2)
+        @test Set(k for k in interior if all(v->v[1]==1.0,k))==
+            _sl_surface_faces(scope.surfaces[s12])
+        @test Set(k for k in interior if all(v->v[1]==2.0,k))==
+            _sl_surface_faces(scope.surfaces[s23])
+        external=Set(k for (k,c) in counts if c==1)
+        exterior=Set{Tuple}()
+        for volume in (1,2,3),shell in model.volumes[volume],
+            signed in model.surface_loops[abs(shell)]
+            tag=abs(signed)
+            tag in (s12,s23) && continue
+            union!(exterior,_sl_surface_faces(scope.surfaces[tag]))
+        end
+        @test exterior==external
+    end
+
+    @testset "corner Region claims two shared laterals" begin
+        # The L-arrangement's corner Region plans first and binds both walls;
+        # each neighbor transports its own diagonal contract.
+        execution=_sl_model(_sl_lshape_squares()*"""
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        b[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        c[]=Extrude{0,0,1}{Surface{3};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        model=execution.model
+        @test validate(execution.mesh).ok
+        sx=_sl_pair_tag(execution,"a","b")
+        sy=_sl_pair_tag(execution,"a","c")
+        scope=_extrude_volume_pass(model,_SL_CALLER).scope
+        @test scope!==nothing
+        for s in (sx,sy)
+            @test _sl_part_equal(mesh_model_surface(model,s),scope.surfaces[s])
+        end
+        # Two contracts on one plan: the 2×2 corner Region must satisfy the
+        # diagonal transported through each earlier partner.
+        execution=_sl_model(_sl_grid22_squares()*"""
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        b[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        c[]=Extrude{0,0,1}{Surface{3};Layers{2};Recombine;QuadTriNoNewVerts;};
+        d[]=Extrude{0,0,1}{Surface{4};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        model=execution.model
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test allunique(Tuple(merged.coords[:,node]) for node in 1:nnodes(merged))
+        walls=(_sl_pair_tag(execution,"a","b"),_sl_pair_tag(execution,"a","c"),
+               _sl_pair_tag(execution,"b","d"),_sl_pair_tag(execution,"c","d"))
+        @test allunique(collect(walls))
+        scope=_extrude_volume_pass(model,_SL_CALLER).scope
+        @test scope!==nothing
+        owners=Dict(walls[1]=>(1,2),walls[2]=>(1,3),
+                    walls[3]=>(2,4),walls[4]=>(3,4))
+        for (s,(lo,hi)) in owners
+            bound=scope.surfaces[s]
+            @test validate(bound).ok
+            @test _sl_part_equal(scope.volumes[lo].surfaces[s],bound)
+            @test _sl_part_equal(scope.volumes[hi].surfaces[s],bound)
+            @test _sl_part_equal(mesh_model_surface(model,s),bound)
+        end
+        # All four walls weld exactly once across the grid's volume parts —
+        # filtered by wall plane since interior incidence also counts each
+        # Region's own cell interfaces.
+        counts=_sl_face_counts((scope.volumes[tag].volume for tag in 1:4)...)
+        @test all(c in (1,2) for c in values(counts))
+        interior=Set(k for (k,c) in counts if c==2)
+        @test Set(k for k in interior if all(v->v[1]==1.0,k))==
+            union(_sl_surface_faces(scope.surfaces[walls[1]]),
+                  _sl_surface_faces(scope.surfaces[walls[4]]))
+        @test Set(k for k in interior if all(v->v[2]==1.0,k))==
+            union(_sl_surface_faces(scope.surfaces[walls[2]]),
+                  _sl_surface_faces(scope.surfaces[walls[3]]))
+        for tag in 1:4
+            _sl_positive(scope.volumes[tag].volume)
+        end
     end
 
     @testset "shared laterals reject outside the literal pair" begin
