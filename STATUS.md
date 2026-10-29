@@ -113,7 +113,50 @@ classified; all three were genuine Tessella bugs, fixed narrowly:
   `brep_occ_nurbs_torus` 1.5344, `brep_occ_nurbs_sphere` 3.1939,
   `brep_occ_torus_segment` 14.8044). No P1–P6 completeness claim.
 
-### LAY02 holed-face generatrix ordering + native BL grading transport (2026-10-29, working tree)
+### LAY02 fan/pipe frontend audit + rotational-BL classification (2026-10-30, oracle-verified)
+
+- `.geo` `Fan{i}{...}`, `Fan{...}`, `FanPoints{...}` and `FanPointsList{...}`
+  inside an `Extrude{...}` parameter list are **not valid Gmsh 4.15.2
+  syntax** — verified against the live oracle CLI (every form reports
+  `syntax error (Fan)` / `syntax error (FanPoints)`). Tessella likewise
+  rejects them loudly (the unknown element fails shape parsing). There is
+  no upstream `.geo` Extrude fan frontend to mirror; topological fans are
+  selected only through `Field[BoundaryLayer].FanPointsList`/
+  `FanNodesList`/`FanPointsSizesList` and `Mesh.BoundaryLayerFanElements`
+  (default 5), all of which parse into the `BoundaryLayerField` config.
+  Their only consumer — `BoundaryLayer Field =` topological meshing —
+  still throws loudly at `GeoExec.jl` (`BoundaryLayer Field = ... is not
+  implemented`), and the scalar background-field path drops the fan keys
+  exactly as upstream's scalar `BoundaryLayer` operator ignores them
+  (confirmed: the oracle accepts `FanPointsList`+`FanPointsSizesList` on
+  a `BoundaryLayer` field and the fan meshing fails independently, not in
+  parsing). The native `mesh_boundary_layer_2d(fans=, fan_elements=)`
+  kernel and the joined multi-region `mesh_boundary_layer_fan` remain the
+  reachable fan surface (`test/meshing/boundary_layer_fan_test.jl`,
+  `boundarylayer_test.jl` green).
+- Rotational boundary layers are **not an upstream form**: with a motion
+  vector/rotation group the `.geo` `Extrude` is ordinary
+  REVOLVE/TRANSLATE (`Extrude{{0,0,1},{0,0,0},Pi/2}{Curve{1};Layers{3}}`
+  produces a rigid rotated sweep — verified), while the boundary-layer
+  mode is the motion-free `Extrude{Curve{1};Layers{3}}` form (verified:
+  grows 6 displaced nodes on the smoothed-normal side). No motion+BL
+  combination exists to support; curved-wall BL growth (arcs, circles)
+  is already covered by the curved-generatrix tests.
+- `Extrude {shapes} Using Wire {expr}` OCC pipe extrusion is already
+  implemented (`_geo_exec_extrude_pipe!` + `_model_occ_add_pipe!`, OCC
+  kernel loft with GEO-record binding) and tested
+  (`io_stl_frontend_test.jl` OCC `Using Wire` testset); the built-in
+  factory rejects loudly (`pipe extrusion ... is OpenCASCADE-only`,
+  `geo_extrude_test.jl` error-path testset). No gap here.
+- Remaining genuine LAY01/LAY02 items: the QuadTriNoNewVerts
+  neighboring-region planner (two adjacent NoNew sweeps sharing one
+  literal lateral Surface — the bounded design in
+  `docs/handoff/meshing_remaining.md`), curved 3-D BL source-surface
+  admission beyond planar/ruled-certifiable cases, and the
+  `BoundaryLayer Field =` topological mesher itself. Each currently
+  rejects loudly rather than silently mis-meshing.
+
+### LAY02 holed-face generatrix ordering + native BL grading transport (2026-10-29, `e1eee82`)
 
 - Multi-loop surfaces now canonicalize their wires once the way upstream's
   `SetSurfaceGeneratrices` does — `_geo_surface_generatrices` folds each
