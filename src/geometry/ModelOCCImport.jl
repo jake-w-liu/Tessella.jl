@@ -1314,11 +1314,11 @@ end
 # lin2d via affine reparam, spl2d by knot-mirror + pole reversal.
 function _occ_heal_pcurve_reverse(pc,T::Float64,kernel,caller)
     if hasproperty(pc,:neg2d)
-        inner=pc.neg2d[1]
-        hasproperty(inner,:lin2d) || throw(ArgumentError(caller*
-            ": cannot weld edge — unsupported negated pcurve kind"))
-        o,d=inner.lin2d
-        return (neg2d=((lin2d=((o[1]-T*d[1],o[2]-T*d[2]),d),),))
+        # pc(t)=inner(−t) reverses to pc'(s)=inner(s−T) — a plain
+        # parameter advance of the inner record, no wrapper needed;
+        # `_occ_import_pc_paramshift` covers every representable kind
+        # and still throws its classified reject for unknown ones.
+        return _occ_import_pc_paramshift(pc.neg2d[1],-T,caller)
     end
     if hasproperty(pc,:lin2d)
         o,d=pc.lin2d

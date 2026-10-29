@@ -10969,3 +10969,81 @@ Residual gaps (unchanged by design): `Mesh.Recombine3DLevel`/
 `Mesh.Recombine3DConformity` are verbatim stored options only — upstream's
 `ALGO_3D_RTREE` `meshCombine3D` volume recombination arm remains
 unimplemented; `API.mesh.recombine` is the 2D surface operation.
+
+## 2026-10-29 — OCC Boolean curved-continuation landing (Devin subagent)
+
+Completed and verified the uncommitted CAD04/05-tail continuation left by a
+killed agent — periodic-seam unwrap, curved same-domain contact
+classification, NURBS trim transport, and endpoint anchoring — in
+`ModelBoolean.jl`, `ModelOCCBoolean.jl`, `ModelOCCImport.jl` and
+`ModelOCCMeasures.jl` only; sibling-owned files untouched.
+
+**Finished/kept hunks**
+
+- `_brep_merge_union_faces` periodic unwrap (`ModelBoolean.jl`): sub-span
+  shared-key arcs now certify the whole-period shift through the junction
+  endpoint + same interior side (the u-seam split is the only producer of
+  adjacent same-key sub-spans); distinct constant-u slit partners a period
+  apart certify at the v-overlap midpoint with opposite interior sides.
+  Pinched/opposite-side members stay unplaced and keep separate specs.
+- `_brep_face_sections` + `_brep_sec_msq` (`ModelBoolean.jl`): coincident
+  curved carriers classify as same-domain contacts — identical
+  cone/torus/tensor carriers throw a named rejection up front, equal
+  coaxial cylinders and equal concentric spheres keep their dedicated
+  classified throws, and the msq level-set rejects an all-zero field
+  instead of flood-triangulating a coincident pair.
+- **Fix landed in this session**: `_brep_sg_identical`/`_brep_unifiable`
+  scalar lists missed cone `r1`/`r2`/`height` and torus `r1`/`r2` — two
+  *distinct* coaxial cones/tori sharing only apex+axis were falsely
+  certified coincident. Certificates now compare those fields (torus
+  `:angle` and cylinder `:height` stay extent bounds, not identity).
+- Section-endpoint anchoring (`ModelBoolean.jl` materialize + multi,
+  `ModelOCCBoolean.jl` `sev` transport): fitted trace endpoints weld to
+  operand-edge pierce evals so fit residuals cannot split one result
+  vertex and dead-end the wire.
+- `ModelOCCImport.jl` `neg2d` reversal delegates to
+  `_occ_import_pc_paramshift` (covers spl2d/conic inners, not just lin2d).
+- `ModelOCCMeasures.jl` spline-trace shoelace uses the same symmetric
+  Green's-theorem convention as the elementary branches — mixed-wire
+  boundary terms now cancel exactly.
+- Reverted: nothing — every hunk verified against tests/oracle.
+
+**Audit conclusions**
+
+- (d) ChFi3d tensor-B-spline rim fillets: already landed by `20be4b1` +
+  `1645855` (`_occ_fillet_sweep_plan` admits general faces); preserved,
+  not duplicated.
+- (e) Same-domain collapse stays keep-lists-only: identical boxes give
+  fuse 1v/6f, fragment 1v/6f, **cut 0 vols, intersect 1v/6f** — all
+  oracle-correct; the earlier "empty reduce" was the probe's own `sum`.
+  Half-overlap fragment 3v/18f likewise matches the 4.15.2 oracle.
+- Observed pre-existing (out of scope, documented): torus operand PLC
+  tessellation trips `insert_segment!` overlaps in
+  `_model_occ_curved_surface_mesh_tracked` (torus×box fails the same way
+  before any section runs); trimmed-NURBS face CDT `insert_segment!`
+  crossing seen on the t20 mass query — separate subsystem, unchanged by
+  this diff.
+
+**Verification (Julia 1.12.7, `--compile=min -O0`)**
+
+- `model_boolean_conic_spline_test` — exit 0; 10 landed testsets,
+  115/115 (incl. sphere×cone 4 ops, seam-unify 3-face fuse, mass
+  7.3999795) + appended same-domain testset 11/11 standalone (6m52s).
+- `api_occ_boolean_test` — exit 0, 30 testsets / 185 assertions (periodic
+  seam/partial-sector 16/16 included; runner injected the sibling's
+  pending `Mesh.Recombine3D*` option defaults into `DEFAULT_OPTIONS`
+  before `initialize`).
+- `model_boolean_snapshot_test` — exit 0, 68/68.
+- `api_boolean_lifecycle_test` — exit 0, 20/20.
+- `model_boolean_occ_transform_regression_test` — exit 0, 165/165.
+- Scratch receipts: `_synth_seam_test` (slit 2π merge, sub-span rejoin,
+  pinch stays 2 specs), `_synth_subspan_only` (1 spec/6 arcs),
+  `_coincident_probe` 8/8 classified, `_verify_c_fixes` C_FIXES_OK
+  (neg2d spl2d reversal 1e-12, mixed shoelace 1.0/0.5/0.5),
+  `_cylcyl_probe` fuse 1v/4f mass 15.164446825712506 and cut 1v/4f mass
+  5.739668864943115 — matching the 4.15.2 oracle. t20 STEP mirror
+  fragment reached 6 vols/70 surfs (mass query separately trips the
+  pre-existing trimmed-NURBS CDT issue above).
+- Scope note: bounded fixtures and focused suites only; no P1–P6 parity
+  claim. Torus operands and trimmed-NURBS CDT remain open pre-existing
+  items outside this diff.

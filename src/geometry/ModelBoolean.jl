@@ -1443,6 +1443,11 @@ function _brep_sec_msq(ts,sgB,sgB_is_b,caller)
     F=[fld2(u,v) for u in us, v in vs]
     fscl=max(1.0,maximum(abs,F))
     ztol=1e-9*fscl
+    # a field below the zero tolerance on EVERY grid node is a coincident
+    # surface pair (same-domain contact) — every cell would flood with
+    # node crossings; reject like the other same-domain carriers
+    maximum(abs,F)<=ztol && throw(ArgumentError(
+        "$caller: coincident surfaces (same-domain) are not yet supported"))
     # model scale for the 3-D residual (Newton target): control-pole
     # bound on tensor patches, sampled-lift bound on analytic charts
     mscale=1.0
@@ -1586,6 +1591,12 @@ function _brep_sec_vertex(solids,oi,oj,esA,esB,sec,s,tol,mscale)
     return (A=recs[1],B=recs[2])
 end
 
+# An anchored section span end's authoritative 3-D vertex — the operand-
+# edge pierce evaluation the anchored side's wire pieces materialize
+# bitwise. Unanchored endpoints keep the section curve's own evaluation.
+_brep_sec_vfix(a)=a===nothing ? nothing :
+    (a.A!==nothing ? a.A[1] : a.B[1])
+
 # An anchored section endpoint's node uv on face `f` (which belongs to
 # operand side `myside`): when the anchor is this operand's own wire-edge
 # pierce, the edge pcurve eval at the pierce param reproduces the edge
@@ -1615,6 +1626,15 @@ _brep_anchor_own(myside,a) = a!==nothing &&
 
 function _brep_face_sections(fa,fb,caller)
     ka,kb=fa.sg.occ,fb.sg.occ
+    # identical curved carriers are a same-domain contact — their wires
+    # coincide on one physical surface, so no section curve exists.
+    # Planes go through the coincident-imprint path upstream; cylinders
+    # and spheres have their own coaxial/concentric branches below.
+    if ka===kb && ka in (:cone,:torus,:tensor_bspline,:tensor_bezier) &&
+            _brep_sg_identical(fa.sg,fb.sg,_BREP_TOL)
+        throw(ArgumentError(
+            "$caller: coincident $ka faces (same-domain) are not yet supported"))
+    end
     if ka===:plane && kb===:plane
         return _brep_sec_plane_plane(fa.sg,fb.sg,caller)
     elseif ka===:plane && kb===:cylinder
@@ -1784,7 +1804,13 @@ end
 
 function _brep_sec_sphere_sphere(sa,sb,caller)
     d=_b3(sb.center,sa.center);dist=_b3norm(d)
-    dist<_BREP_TOL && return NamedTuple[]
+    if dist<_BREP_TOL
+        # concentric: equal radii → coincident surfaces (same-domain
+        # contact, no section); different radii never touch
+        abs(sa.radius-sb.radius)<=_BREP_TOL && throw(ArgumentError(
+            "$caller: coincident spheres (same-domain) are not yet supported"))
+        return NamedTuple[]
+    end
     (dist>sa.radius+sb.radius-_BREP_TOL ||
      dist<abs(sa.radius-sb.radius)+_BREP_TOL) && return NamedTuple[]
     a=(sa.radius^2-sb.radius^2+dist^2)/(2dist)
@@ -1853,9 +1879,24 @@ function _brep_sec_cylinder_cylinder(ca,cb,caller)
     if _b3norm(_b3cross(ca.axis,cb.axis))<_BREP_TOL
         d=_b3(cb.center,ca.center)
         proj=_b3(d,_b3mul(ca.axis,_b3dot(d,ca.axis)))
-        _b3norm(proj)<_BREP_TOL && throw(ArgumentError(
-            "$caller: coaxial cylinders (same-domain) are not yet supported"))
-        return NamedTuple[]
+        rd=_b3norm(proj)
+        if rd<_BREP_TOL
+            # coaxial: equal radii → coincident surfaces (same-domain
+            # contact, no section); different radii never touch
+            abs(ca.radius-cb.radius)<=_BREP_TOL && throw(ArgumentError(
+                "$caller: coaxial cylinders (same-domain) are not yet " *
+                "supported"))
+            return NamedTuple[]
+        end
+        # parallel off-axis: the section is axial lines where the
+        # lateral fields meet — the generic trace finds them; a
+        # single-line tangent contact is a degenerate root the trace
+        # cannot certify
+        (abs(rd-(ca.radius+cb.radius))<=_BREP_TOL ||
+         abs(rd-abs(ca.radius-cb.radius))<=_BREP_TOL) &&
+            throw(ArgumentError(
+                "$caller: tangent cylinder×cylinder contact is unsupported"))
+        return _brep_sec_msq(ca,cb,true,caller)
     end
     # non-parallel axes — the generic level-set section traces the
     # curve on the first cylinder's domain
@@ -2736,6 +2777,25 @@ function _brep_pc_urange(pc,t0,t1)
     return umin,umax
 end
 
+# v-extent of a pcurve arc over [t0,t1] — the generic mirror of
+# `_brep_pc_urange` (endpoints + dv/dt=0 roots on the knot grid).
+function _brep_pc_vrange(pc,t0,t1)
+    hasproperty(pc,:neg2d) &&
+        return _brep_pc_vrange(pc.neg2d[1],-t1,-t0)
+    lo,hi=minmax(t0,t1)
+    vmin,vmax=Inf,-Inf
+    for t in (t0,t1)
+        v=_brep_pc_eval(pc,t)[2]
+        vmin=min(vmin,v);vmax=max(vmax,v)
+    end
+    for t in _brep_scalar_roots(t->_brep_pc_tangent(pc,t)[2],
+                                _brep_pc_grid(pc,lo,hi),1e-9;tangents=false)
+        v=_brep_pc_eval(pc,t)[2]
+        vmin=min(vmin,v);vmax=max(vmax,v)
+    end
+    return vmin,vmax
+end
+
 # Split a pcurve segment at u=u_seam0+k·period crossings (periodic cut-domain
 # seam). Returns (t_ranges) covering [t0,t1] with no interior seam crossing.
 function _brep_pc_split_at_useam(pc,t0,t1,u_seam0,period,tol)
@@ -3456,8 +3516,13 @@ function _brep_face_regions(solid,f,side,edge_splits,secs,extras,tol,caller)
     end
     cycles=_brep_uv_arrange(arcs,length(nodes),tol,caller)
     regions,_=_brep_group_cycles(arcs,cycles,solid.edges,f,tol,caller)
-    get(ENV,"BREP_DEBUG_ARCS","")!="" &&
+    if get(ENV,"BREP_DEBUG_ARCS","")!=""
         println("DBG   cycles=$(cycles) regions=$regions")
+        for (ci,cy) in enumerate(cycles)
+            println("DBG   cycle$ci area=",
+                    round(_brep_cycle_area(arcs,cy),sigdigits=6))
+        end
+    end
     return regions,arcs,cycles
 end
 
@@ -4202,9 +4267,53 @@ function _brep_unifiable(a,b,tol)
         _b3dist(getproperty(a.sg,k),getproperty(b.sg,k))>100tol &&
             return false
     end
-    for k in (:radius,:radius1,:radius2,:half_angle)
+    for k in (:radius,:radius1,:radius2,:half_angle,:r1,:r2)
         hasproperty(a.sg,k) || continue
         abs(getproperty(a.sg,k)-getproperty(b.sg,k))>100tol && return false
+    end
+    if a.sg.occ===:cone
+        abs(a.sg.height-b.sg.height)>100tol && return false
+    end
+    # tensor carriers merge only across one shared patch record — two
+    # distinct patches' uv domains are unrelated even when their
+    # surfaces coincide
+    if hasproperty(a.sg,:patch)
+        (hasproperty(b.sg,:patch) && a.sg.patch===b.sg.patch) ||
+            return false
+    elseif hasproperty(b.sg,:patch)
+        return false
+    end
+    return true
+end
+
+# Same-physical-surface certificate for a cross-operand face pair: same
+# carrier kind with every geometric parameter equal — the uv frame fields
+# (:X,:Y) are chart choices, not surface identity, so rotated frames of one
+# cylinder still count; tensor carriers must share one patch record. A
+# coincident pair is a same-domain contact, not a Boolean section.
+function _brep_sg_identical(a,b,tol)
+    a.occ===b.occ || return false
+    for k in (:axis,:center)
+        hasproperty(a,k) || continue
+        _b3dist(getproperty(a,k),getproperty(b,k))>100tol &&
+            return false
+    end
+    # carrier-identity scalar fields: :radius for sphere/cylinder,
+    # :r1/:r2 for cone (frustum radii — with the axial :height they fix
+    # apex and slope) and torus (spine and tube radii). A torus's :angle
+    # and a cylinder's :height are chart extents, not carrier identity.
+    for k in (:radius,:radius1,:radius2,:half_angle,:r1,:r2)
+        hasproperty(a,k) || continue
+        abs(getproperty(a,k)-getproperty(b,k))>100tol && return false
+    end
+    if a.occ===:cone
+        # same apex+frame but a different slant extent is a different cone
+        abs(a.height-b.height)>100tol && return false
+    end
+    if hasproperty(a,:patch)
+        (hasproperty(b,:patch) && a.patch===b.patch) || return false
+    elseif hasproperty(b,:patch)
+        return false
     end
     return true
 end
@@ -4228,44 +4337,176 @@ function _brep_merge_union_faces(kept,comp,tol,caller)
     # sharing no key with a placed member keep the canonical chart — any
     # non-coincident shared arcs simply stay boundary (previous behavior).
     uper=_brep_uperiod(ref.sg)
+    # interior side of each arc at its stored direction: an outer (CCW)
+    # wire puts the region left of a forward traversal, a hole (CW) wire
+    # puts it right — used by the sub-span certificate to require both
+    # regions on the same side of the shared edge, and by the coincident
+    # drop below to certify a wall carried by distinct edges is internal
+    # to the merged domain (opposite sides)
+    member_side=Dict{Int,Vector{Int}}(
+        mi=>Int[(wi==1)==ar.fwd ? 1 : -1
+                for (wi,w) in enumerate(kept[mi].wires) for ar in w]
+        for mi in comp)
     ushift=Dict{Int,Float64}()
     if uper>0
         ushift[comp[1]]=0.0
         member_arcs=Dict{Int,Vector{NamedTuple}}(
             mi=>NamedTuple[ar for w in kept[mi].wires for ar in w]
             for mi in comp)
+        # constant-u ("slit") arcs per member — `(marc base index is the
+        # flattened position below)`, u position and v extent in the
+        # member's own chart. Two such arcs a whole u-period apart trace
+        # the same physical slit line — the members bound the chart cut
+        # through distinct edges (a periodic face whose window ends are
+        # carried by separate edges, e.g. an imported trimmed periodic
+        # face or an imprint on the cut) and share no result-edge key.
+        member_cu=Dict{Int,
+            Vector{Tuple{Int,NamedTuple,Float64,Float64,Float64,Int}}}(
+            mi=>Tuple{Int,NamedTuple,Float64,Float64,Float64,Int}[]
+            for mi in comp)
+        let flat=0
+            for mi in comp
+                ai=0
+                for ar in member_arcs[mi]
+                    flat+=1;ai+=1
+                    # lin2d-only: the residual v→t cut below is exact
+                    # for a straight uv trace — a curved slit trace
+                    # stays conservative (no partner, previous behavior)
+                    hasproperty(ar.pc,:lin2d) || continue
+                    u0,u1=_brep_pc_urange(ar.pc,ar.t0,ar.t1)
+                    abs(u1-u0)<tol || continue
+                    v0,v1=_brep_pc_vrange(ar.pc,ar.t0,ar.t1)
+                    push!(member_cu[mi],
+                          (flat,ar,u0,min(v0,v1),max(v0,v1),
+                           member_side[mi][ai]))
+                end
+            end
+        end
         grown=true
         while grown
             grown=false
             for mi in comp
                 haskey(ushift,mi) || continue
                 si=ushift[mi]
-                for ar in member_arcs[mi]
+                for (ai,ar) in enumerate(member_arcs[mi])
                     mu=_brep_pc_eval(ar.pc,(ar.t0+ar.t1)/2)
                     for mj in comp
                         mj==mi && continue
                         haskey(ushift,mj) && continue
-                        for br in member_arcs[mj]
+                        for (bi,br) in enumerate(member_arcs[mj])
                             br.key==ar.key || continue
-                            abs((br.t1-br.t0)-(ar.t1-ar.t0))<tol || continue
-                            bu=_brep_pc_eval(br.pc,(br.t0+br.t1)/2)
-                            # the two copies of one periodic-edge span carry
-                            # identical v; a whole-period u offset aligns them
-                            abs(bu[2]-mu[2])>10tol && continue
-                            k=round(Int,(mu[1]+si-bu[1])/uper)
+                            if abs((br.t1-br.t0)-(ar.t1-ar.t0))<tol
+                                bu=_brep_pc_eval(br.pc,(br.t0+br.t1)/2)
+                                # the two copies of one periodic-edge span
+                                # carry identical v; a whole-period u
+                                # offset aligns them. When the copies are
+                                # not coincident the pair may still be
+                                # adjacent pieces of one seam-split span,
+                                # so fall through to the junction
+                                # certificate below instead of skipping.
+                                if abs(bu[2]-mu[2])<=10tol
+                                    k=round(Int,(mu[1]+si-bu[1])/uper)
+                                    sj=k*uper
+                                    if abs(mu[1]+si-(bu[1]+sj))<=10tol
+                                        ushift[mj]=sj;grown=true;break
+                                    end
+                                end
+                            end
+                            # Sub-span shared key: the canonical u-seam
+                            # split cuts one edge piece into adjacent
+                            # spans that keep the parent's key and land
+                            # in different members — a periodic carrier
+                            # whose face wires hold no seam edge (tensor
+                            # patch, imported trimmed periodic face)
+                            # gives no coincident-span copy to place the
+                            # far member through. Two adjacent same-key
+                            # sub-spans still certify the period shift:
+                            # the only producer of such pairs is the
+                            # seam split, so their shared endpoint sits
+                            # exactly on a u-seam line — evaluate both
+                            # pcurves at the junction and require the
+                            # same v at a u a whole number of periods
+                            # apart (non-adjacent or overlapping
+                            # sub-spans prove nothing and stay
+                            # conservative). The members must also bound
+                            # the shared edge from the same side — the
+                            # two pieces continue through the junction
+                            # along one curve, so equal interior sides
+                            # put both regions on one side of it and the
+                            # union tiles the seam wedge; opposite
+                            # senses only touch at the point and a shift
+                            # would weld a pinched domain.
+                            tj=abs(ar.t1-br.t0)<=tol ? (ar.t1,br.t0) :
+                               (abs(br.t1-ar.t0)<=tol ?
+                                (ar.t0,br.t1) : nothing)
+                            tj===nothing && continue
+                            member_side[mi][ai]==
+                                member_side[mj][bi] || continue
+                            muj=_brep_pc_eval(ar.pc,tj[1])
+                            buj=_brep_pc_eval(br.pc,tj[2])
+                            abs(buj[2]-muj[2])>10tol && continue
+                            k=round(Int,(muj[1]+si-buj[1])/uper)
                             sj=k*uper
-                            abs(mu[1]+si-(bu[1]+sj))>10tol && continue
+                            abs(muj[1]+si-(buj[1]+sj))>10tol &&
+                                continue
                             ushift[mj]=sj;grown=true;break
                         end
                     end
                 end
+                # Slit partners: two members may bound the chart cut
+                # through distinct constant-u edges a whole period
+                # apart whose v extents overlap — the same physical
+                # slit line carried by different edges (an imported
+                # trimmed periodic face stores the two window uses as
+                # separate edges, or an imprint lies on the cut) — so
+                # their domains are contiguous across it. Certify at
+                # the overlap midpoint: the two traces must land on one
+                # uv point under the candidate whole-period shift. A
+                # same-key slit edge is already matched by the loops
+                # above.
+                for mj in comp
+                    mj==mi && continue
+                    haskey(ushift,mj) && continue
+                    placed=false
+                    for (_,sa,ua,va0,va1,sidea) in member_cu[mi],
+                        (_,sb,ub,vb0,vb1,sideb) in member_cu[mj]
+                        abs(abs(ua-ub)-uper)>10tol && continue
+                        # a real slit wall is internal to the union —
+                        # the members must bound it from opposite sides
+                        sidea==sideb && continue
+                        vl=max(va0,vb0);vh=min(va1,vb1)
+                        vh-vl>tol || continue
+                        vm=(vl+vh)/2
+                        ta=_brep_pc_param(sa.pc,(ua,vm),sa.t0,sa.t1,tol)
+                        tb=_brep_pc_param(sb.pc,(ub,vm),sb.t0,sb.t1,tol)
+                        (ta===nothing || tb===nothing) && continue
+                        muj=_brep_pc_eval(sa.pc,ta)
+                        buj=_brep_pc_eval(sb.pc,tb)
+                        abs(muj[2]-buj[2])>10tol && continue
+                        k=round(Int,(muj[1]+si-buj[1])/uper)
+                        sj=k*uper
+                        abs(muj[1]+si-(buj[1]+sj))>10tol && continue
+                        ushift[mj]=sj;grown=true;placed=true;break
+                    end
+                    placed && break
+                end
             end
+        end
+    end
+    if get(ENV,"BREP_DEBUG_UNWRAP","")!="" && uper>0
+        unplaced=[mi for mi in comp if !haskey(ushift,mi)]
+        println("DBGUNWRAP comp=$comp uper=$uper ushift=$ushift unplaced=$unplaced")
+        for mi in comp, (wi,w) in enumerate(kept[mi].wires), ar in w
+            mu=_brep_pc_eval(ar.pc,(ar.t0+ar.t1)/2)
+            println("DBGUNWRAP   m$mi w$wi key=$(ar.key) t=($(ar.t0),$(ar.t1)) " *
+                    "vt=($(ar.vt0),$(ar.vt1)) uvmid=$(round.(mu,digits=4)) neg=$(ar.neg)")
         end
     end
     marcs=NamedTuple[]
     test_arcs=NamedTuple[]
     member_cycles=Vector{Vector{Vector{Tuple{Int,Bool}}}}()
     keylocs=Dict{Any,Vector{Tuple{Int,Int}}}()   # key -> [(member, marcs idx)]
+    marc_member=Int[]                            # marcs idx -> member
     for mi in comp
         mp=maps[mi]
         sj=get(ushift,mi,0.0)
@@ -4295,6 +4536,7 @@ function _brep_merge_union_faces(kept,comp,tol,caller)
                 push!(test_arcs,rec)
                 push!(cy,(length(test_arcs),ar.fwd))
                 push!(marcs,merge(rec,(a=0,b=0)))
+                push!(marc_member,mi)
                 push!(get!(Vector{Tuple{Int,Int}},keylocs,ar.key),
                       (mi,length(marcs)))
             end
@@ -4324,13 +4566,118 @@ function _brep_merge_union_faces(kept,comp,tol,caller)
             keeparc[ix]=keeparc[iy]=false
         end
     end
+    # The same physical wall may reach the merge through distinct edges —
+    # a periodic face whose window ends are stored as separate edges, an
+    # imprint lying on a boundary, or a seam slit carried by non-lin2d
+    # pcurves the overlap pass below cannot cut. Two such arcs bound one
+    # uv segment as an internal wall only when the members' regions lie
+    # on opposite sides of it — sample each member's domain on both
+    # sides of the coincident midpoint (the member_cycles polygon is
+    # already in this reference chart, so no map bookkeeping is needed);
+    # equal-side or uncovered coincidences stay boundary.
+    cpos=Dict{Int,Int}(mi=>k for (k,mi) in enumerate(comp))
+    in_member=function(mpos,uv)
+        cycs=member_cycles[mpos]
+        _brep_cycle_inside(test_arcs,cycs[1],uv,tol) || return false
+        any(h->_brep_cycle_inside(test_arcs,h,uv,tol),cycs[2:end]) &&
+            return false
+        return true
+    end
+    side_of=function(mpos,uv,n)
+        off=100tol
+        pin=(uv[1]+n[1]*off,uv[2]+n[2]*off)
+        pout=(uv[1]-n[1]*off,uv[2]-n[2]*off)
+        in_member(mpos,pin) && return 1
+        in_member(mpos,pout) && return -1
+        return 0
+    end
+    for i in 1:length(marcs)-1, j in i+1:length(marcs)
+        mi=marc_member[i];mj=marc_member[j]
+        mi==mj && continue
+        ax=marcs[i];ay=marcs[j]
+        ax.key==ay.key && continue
+        abs((ax.t1-ax.t0)-(ay.t1-ay.t0))<tol || continue
+        mx=_brep_pc_eval(ax.pc,(ax.t0+ax.t1)/2)
+        my=_brep_pc_eval(ay.pc,(ay.t0+ay.t1)/2)
+        hypot(mx[1]-my[1],mx[2]-my[2])<tol || continue
+        d=_brep_pc_tangent(ax.pc,(ax.t0+ax.t1)/2)
+        L=hypot(d[1],d[2]);L<tol && continue
+        n=(-d[2]/L,d[1]/L)
+        sa=side_of(cpos[mi],mx,n)
+        sb=side_of(cpos[mj],mx,n)
+        (sa==0 || sb==0 || sa==sb) && continue
+        keeparc[i]=keeparc[j]=false
+    end
+    # Different-edge slit partners: two uses of one physical slit line
+    # carried by distinct edges land coincident once the members are
+    # unwrapped — the shared part is internal to the unified domain.
+    # The overlap drops; each use's residual ends stay boundary (the
+    # slit arcs are lin2d by the partner certificate, so the residual
+    # v→parameter cut is exact).
+    extra_marcs=NamedTuple[]
+    if uper>0 && !isempty(member_cu)
+        drop_iv=Dict{Int,Vector{Tuple{Float64,Float64}}}()
+        for (ix,mi) in enumerate(comp),jx in ix+1:length(comp)
+            mj=comp[jx]
+            si=get(ushift,mi,0.0);sjb=get(ushift,mj,0.0)
+            for (fi,sa,ua,va0,va1,sidea) in member_cu[mi],
+                (fj,sb,ub,vb0,vb1,sideb) in member_cu[mj]
+                sa.key==sb.key && continue
+                # only a wall bounded by the two members from opposite
+                # sides is internal to the merged domain
+                sidea==sideb && continue
+                vl=max(va0,vb0);vh=min(va1,vb1)
+                vh-vl>tol || continue
+                # the partner copies land coincident only when both
+                # members were placed consistently — a member that
+                # failed to place leaves its arc's u a whole period
+                # off, where the pair can stay boundary as before
+                abs(ua+si-(ub+sjb))>10tol && continue
+                push!(get!(Vector{Tuple{Float64,Float64}},drop_iv,fi),
+                      (vl,vh))
+                push!(get!(Vector{Tuple{Float64,Float64}},drop_iv,fj),
+                      (vl,vh))
+            end
+        end
+        for (ix,ivs) in drop_iv
+            keeparc[ix] || continue
+            ar=marcs[ix]
+            o,d=ar.pc.lin2d
+            v0,v1=_brep_pc_vrange(ar.pc,ar.t0,ar.t1)
+            sort!(ivs)
+            res=Tuple{Float64,Float64}[]
+            cur=v0
+            for (dl,dh) in ivs
+                dl-cur>tol && push!(res,(cur,dl))
+                cur=max(cur,dh)
+            end
+            v1-cur>tol && push!(res,(cur,v1))
+            keeparc[ix]=false
+            for (rl,rh) in res
+                rh-rl>tol || continue
+                ta=(rl-o[2])/d[2];tb=(rh-o[2])/d[2]
+                q0,q1=minmax(ta,tb)
+                (q0>=ar.t0-tol && q1<=ar.t1+tol) || continue
+                f0=(q0-ar.t0)/(ar.t1-ar.t0)
+                f1=(q1-ar.t0)/(ar.t1-ar.t0)
+                push!(extra_marcs,
+                      (key=ar.key,fwd=ar.fwd,pc=ar.pc,t0=q0,t1=q1,
+                       crv=ar.crv,
+                       vt0=ar.vt0+f0*(ar.vt1-ar.vt0),
+                       vt1=ar.vt0+f1*(ar.vt1-ar.vt0),
+                       neg=ar.neg,a=0,b=0))
+            end
+        end
+    end
     marcs=marcs[keeparc]
+    append!(marcs,extra_marcs)
     if isempty(marcs)
         # every member arc was claimed by another member at the same uv —
         # the members cover one identical domain (a duplicate split), so
         # the unified result is a single face carrying the union of the
         # members' cell memberships, like OCC's same-domain merge
         spec=(sg=ref.sg,sgn=ref.sgn,wires=ref.wires,stag=ref.stag)
+        hasproperty(ref,:sev) && (spec=merge(spec,(sev=ref.sev,)))
         if hasproperty(ref,:uses)
             uses=Tuple{UInt64,Int}[]
             for mi in comp, u in kept[mi].uses
@@ -4396,6 +4743,7 @@ function _brep_merge_union_faces(kept,comp,tol,caller)
                          for (i,fwd) in cycles[h]])
         end
         spec=(sg=ref.sg,sgn=ref.sgn,wires=wires,stag=ref.stag)
+        hasproperty(ref,:sev) && (spec=merge(spec,(sev=ref.sev,)))
         if hasproperty(ref,:uses)
             # N-way specs keep their cell memberships — the merged face
             # carries the union of its members' uses
@@ -4440,6 +4788,44 @@ function _brep_unify_union(kept,tol,caller;same_uses::Bool=false)
             else
                 ra,rb=findr(mi),findr(o)
                 ra!=rb && (uf[ra]=rb)
+            end
+        end
+        # slit partners carry no shared key: two members may bound the
+        # periodic chart cut through distinct constant-u edges a whole
+        # u-period apart (a periodic face whose window ends are stored
+        # as separate edges — e.g. an imported trimmed periodic face —
+        # or an imprint lying on the cut). The traces are the same
+        # physical slit line, so whenever their v extents overlap AND
+        # the members bound them from opposite sides — a real slit wall
+        # is internal — the members' domains are contiguous across the
+        # slit: group them. Same-side traces are duplicate-domain
+        # artifacts the merge certificates reject anyway.
+        uperg=_brep_uperiod(kept[reps[g]].sg)
+        if uperg>0
+            for (ix,mi) in enumerate(mem),jx in ix+1:length(mem)
+                mj=mem[jx]
+                findr(mi)==findr(mj) && continue
+                hit=false
+                for (wi,wa) in enumerate(kept[mi].wires),aa in wa
+                    hasproperty(aa.pc,:lin2d) || continue
+                    ua0,ua1=_brep_pc_urange(aa.pc,aa.t0,aa.t1)
+                    abs(ua1-ua0)<tol || continue
+                    va0,va1=_brep_pc_vrange(aa.pc,aa.t0,aa.t1)
+                    sa=(wi==1)==aa.fwd ? 1 : -1
+                    for (wj,wb) in enumerate(kept[mj].wires),bb in wb
+                        hasproperty(bb.pc,:lin2d) || continue
+                        ub0,ub1=_brep_pc_urange(bb.pc,bb.t0,bb.t1)
+                        abs(ub1-ub0)<tol || continue
+                        abs(abs(ua0-ub0)-uperg)>10tol && continue
+                        vb0,vb1=_brep_pc_vrange(bb.pc,bb.t0,bb.t1)
+                        min(va1,vb1)-max(va0,vb0)>tol || continue
+                        sb=(wj==1)==bb.fwd ? 1 : -1
+                        sa==sb && continue
+                        hit=true;break
+                    end
+                    hit && break
+                end
+                hit && (uf[findr(mi)]=findr(mj))
             end
         end
         comps=Dict{Int,Vector{Int}}()
@@ -4690,6 +5076,7 @@ function _brep_merge_edge_pieces(kept,tol,caller)
         end
         spec=(sg=s.sg,sgn=s.sgn,wires=wires,stag=s.stag)
         hasproperty(s,:uses) && (spec=merge(spec,(uses=s.uses,)))
+        hasproperty(s,:sev) && (spec=merge(spec,(sev=s.sev,)))
         push!(out,spec)
     end
     return out
@@ -4926,7 +5313,9 @@ function _brep_collect_faces(m::GeoModel,op::Symbol,ta::Int,tb::Int,caller)
             for (s0,s1) in _brep_split_ranges(lo,hi,cuts,tol)
                 a0=s0-lo<tol ? va : nothing
                 a1=s1-hi>-tol ? vb : nothing
-                push!(sec_edges,(curve=sec.curve,t0=s0,t1=s1))
+                push!(sec_edges,(curve=sec.curve,t0=s0,t1=s1,
+                                 v0=_brep_sec_vfix(a0),
+                                 v1=_brep_sec_vfix(a1)))
                 se=length(sec_edges)
                 fA=_brep_anchor_uv(A.faces[sec.fa],1,a0)
                 fA1=_brep_anchor_uv(A.faces[sec.fa],1,a1)
@@ -5045,7 +5434,10 @@ function _brep_collect_faces(m::GeoModel,op::Symbol,ta::Int,tb::Int,caller)
                            vt0=arcs[i].vt0,vt1=arcs[i].vt1,neg=arcs[i].neg)
                          for (i,fwd) in cycles[c] ] for c in region ]
                 sgn=flip ? -f.orev : f.orev
-                push!(kept,(sg=f.sg,sgn=sgn,wires=wires,stag=f.stag))
+                spec=(sg=f.sg,sgn=sgn,wires=wires,stag=f.stag)
+                isempty(sec_edges) ||
+                    (spec=merge(spec,(sev=sec_edges,)))
+                push!(kept,spec)
             end
         end
     end
@@ -5424,7 +5816,9 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
             for (s0,s1) in _brep_split_ranges(lo,hi,cuts,tol)
                 a0=s0-lo<tol ? va : nothing
                 a1=s1-hi>-tol ? vb : nothing
-                push!(sec_edges,(curve=sec.curve,t0=s0,t1=s1))
+                push!(sec_edges,(curve=sec.curve,t0=s0,t1=s1,
+                                 v0=_brep_sec_vfix(a0),
+                                 v1=_brep_sec_vfix(a1)))
                 se=length(sec_edges)
                 fa=solids[sec.oi].faces[sec.fa]
                 fb=solids[sec.oj].faces[sec.fb]
@@ -5511,6 +5905,13 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
             for region in regions
                 uv=_brep_region_sample(arcs,cycles,region,tol,caller)
                 P=_brep_surface_eval(f.sg,uv[1],uv[2])
+                if get(ENV,"BREP_DEBUG_ARCS","")!=""
+                    println("DBG   region i=$i fidx=$fidx stag=" *
+                            "$(get(f,:stag,0)) uv=$(round.(uv,digits=3)) " *
+                            "P=$(round.(P,digits=3)) area=",
+                            round(sum(abs,_brep_cycle_area(arcs,cycles[c])
+                                     for c in region),sigdigits=6))
+                end
                 # a region sitting on coincident partner faces is on those
                 # solids' boundary — point-in-solid cannot classify them; the
                 # partners join the membership labels by normal direction
@@ -5569,8 +5970,11 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
                            t0=arcs[k].t0,t1=arcs[k].t1,crv=arcs[k].crv,
                            vt0=arcs[k].vt0,vt1=arcs[k].vt1,neg=arcs[k].neg)
                          for (k,fwd) in cycles[c] ] for c in region ]
-                push!(kept,(sg=f.sg,stag=f.stag,wires=wires,uses=uses,
-                            sgn=uses[1][2]))
+                spec=(sg=f.sg,stag=f.stag,wires=wires,uses=uses,
+                      sgn=uses[1][2])
+                isempty(sec_edges) ||
+                    (spec=merge(spec,(sev=sec_edges,)))
+                push!(kept,spec)
             end
         end
     end
@@ -5672,6 +6076,15 @@ function _brep_materialize_boolean!(m::GeoModel,t::Int,op::Symbol,
         end
         push!(res_verts,p);return length(res_verts)
     end
+    # anchored section span ends materialize at the operand-edge pierce
+    # eval — every fitted trace's endpoint sits a few ulps off it, which
+    # would split one result vertex into two and dead-end the wire
+    sev=nothing
+    for spec in kept
+        hasproperty(spec,:sev) && spec.sev!==nothing &&
+            (sev=spec.sev;break)
+    end
+    vfix=Dict{Int,NamedTuple}()
     for spec in kept, wire in spec.wires, ar in wire
         ei=get!(emap,ar.key) do
             # vt0/vt1 are the 3-D curve's own parameters (imprint arcs carry
@@ -5684,14 +6097,24 @@ function _brep_materialize_boolean!(m::GeoModel,t::Int,op::Symbol,
         lo=min(e.t0,ar.vt0,ar.vt1);hi=max(e.t1,ar.vt0,ar.vt1)
         (lo==e.t0 && hi==e.t1) ||
             (res_edges[ei]=(curve=e.curve,t0=lo,t1=hi))
+        if sev!==nothing && !haskey(vfix,ei) && ar.key isa Tuple &&
+                length(ar.key)>=2 && ar.key[1]===:s &&
+                1<=ar.key[2]<=length(sev)
+            vfix[ei]=sev[ar.key[2]]
+        end
     end
     # endpoints → vertices (deduped, first appearance in wire order); the
     # endpoints of a merged edge are its span extrema — interior piece
     # junctions are not result vertices
     edge_verts=Vector{Tuple{Int,Int}}(undef,length(res_edges))
     for (ei,e) in enumerate(res_edges)
-        va=vertex_of(_brep_vertex_eval(e.curve,e.t0))
-        vb=vertex_of(_brep_vertex_eval(e.curve,e.t1))
+        fx=get(vfix,ei,nothing)
+        p0=fx!==nothing && e.t0==fx.t0 && fx.v0!==nothing ?
+            fx.v0 : _brep_vertex_eval(e.curve,e.t0)
+        p1=fx!==nothing && e.t1==fx.t1 && fx.v1!==nothing ?
+            fx.v1 : _brep_vertex_eval(e.curve,e.t1)
+        va=vertex_of(p0)
+        vb=vertex_of(p1)
         edge_verts[ei]=(va,vb)
     end
     # shell components: faces adjacent through shared result edges
@@ -6054,6 +6477,15 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
         end
         push!(res_verts,p);return length(res_verts)
     end
+    # anchored section span ends materialize at the operand-edge pierce
+    # eval — every fitted trace's endpoint sits a few ulps off it, which
+    # would split one result vertex into two and dead-end the wire
+    sev=nothing
+    for spec in kept
+        hasproperty(spec,:sev) && spec.sev!==nothing &&
+            (sev=spec.sev;break)
+    end
+    vfix=Dict{Int,NamedTuple}()
     for (fi,spec) in enumerate(kept)
         emit[fi] || continue
         for wire in spec.wires, ar in wire
@@ -6065,12 +6497,22 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
             lo=min(e.t0,ar.vt0,ar.vt1);hi=max(e.t1,ar.vt0,ar.vt1)
             (lo==e.t0 && hi==e.t1) ||
                 (res_edges[ei]=(curve=e.curve,t0=lo,t1=hi))
+            if sev!==nothing && !haskey(vfix,ei) && ar.key isa Tuple &&
+                    length(ar.key)>=2 && ar.key[1]===:s &&
+                    1<=ar.key[2]<=length(sev)
+                vfix[ei]=sev[ar.key[2]]
+            end
         end
     end
     edge_verts=Vector{Tuple{Int,Int}}(undef,length(res_edges))
     for (ei,e) in enumerate(res_edges)
-        va=vertex_of(_brep_vertex_eval(e.curve,e.t0))
-        vb=vertex_of(_brep_vertex_eval(e.curve,e.t1))
+        fx=get(vfix,ei,nothing)
+        p0=fx!==nothing && e.t0==fx.t0 && fx.v0!==nothing ?
+            fx.v0 : _brep_vertex_eval(e.curve,e.t0)
+        p1=fx!==nothing && e.t1==fx.t1 && fx.v1!==nothing ?
+            fx.v1 : _brep_vertex_eval(e.curve,e.t1)
+        va=vertex_of(p0)
+        vb=vertex_of(p1)
         edge_verts[ei]=(va,vb)
     end
     points=Int[];curves=Int[];loops=Int[];surfaces=Int[];shells=Int[]
@@ -6159,7 +6601,33 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
                                    rev=pcst)
                     end
                 end
-                lt=add_curve_loop!(m,ids)
+                lt=try
+                    add_curve_loop!(m,ids)
+                catch err
+                    if get(ENV,"BREP_DEBUG_LOOP","")!=""
+                        println("DBGLOOP fi=$fi sg=$(spec.sg.occ) " *
+                                "nwire=$(length(spec.wires)) ids=$ids")
+                        for (k,id) in enumerate(ids)
+                            a,b=m.curves[abs(id)]
+                            pa=m.points[a];pb=m.points[b]
+                            dprev=0.0
+                            if k>1
+                                a0,b0=m.curves[abs(ids[k-1])]
+                                pend=m.points[ids[k-1]>0 ? b0 : a0]
+                                dprev=_b3dist(pend,id>0 ? pa : pb)
+                            end
+                            println("  id=$id ends=($a,$b) " *
+                                    "pa=$(round.(pa,digits=10)) " *
+                                    "pb=$(round.(pb,digits=10)) " *
+                                    "dgap=$(round(dprev,sigdigits=3))")
+                        end
+                        for (wi,ww) in enumerate(spec.wires), ar in ww
+                            println("  w$wi key=$(ar.key) vt=($(ar.vt0)," *
+                                    "$(ar.vt1)) fwd=$(ar.fwd) neg=$(ar.neg)")
+                        end
+                    end
+                    rethrow()
+                end
                 push!(loops,lt);push!(loop_tags,lt)
             end
             sg=merge(spec.sg,(pcurves=pcdict,))

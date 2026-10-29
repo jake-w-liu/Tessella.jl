@@ -947,7 +947,9 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
             for (s0,s1) in _brep_split_ranges(lo,hi,cuts,tol)
                 a0=s0-lo<tol ? va : nothing
                 a1=s1-hi>-tol ? vb : nothing
-                push!(sec_edges,(curve=sec.curve,t0=s0,t1=s1))
+                push!(sec_edges,(curve=sec.curve,t0=s0,t1=s1,
+                                 v0=_brep_sec_vfix(a0),
+                                 v1=_brep_sec_vfix(a1)))
                 se=length(sec_edges)
                 fa=reps[sec.oi].faces[sec.fa]
                 fb=reps[sec.oj].faces[sec.fb]
@@ -1124,7 +1126,8 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
                             !isempty(uses)
                         push!(sheet_out,
                               (sg=f.sg,stag=f.stag,wires=wires,
-                               uses=Tuple{UInt64,Int}[],oi=i,ruv=uv,sgn=1))
+                               uses=Tuple{UInt64,Int}[],oi=i,ruv=uv,sgn=1,
+                               sev=sec_edges))
                     else
                         touched[i]=true
                     end
@@ -1138,7 +1141,7 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
                     else
                         push!(sheet_out,(sg=f.sg,stag=f.stag,wires=wires,
                                          uses=Tuple{UInt64,Int}[],oi=i,
-                                         ruv=uv,sgn=1))
+                                         ruv=uv,sgn=1,sev=sec_edges))
                         continue
                     end
                 end
@@ -1149,11 +1152,11 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
                     # image; it is not a cell wall of any volume piece
                     push!(sheet_out,(sg=f.sg,stag=f.stag,wires=wires,
                                      uses=Tuple{UInt64,Int}[],oi=i,ruv=uv,
-                                     sgn=1))
+                                     sgn=1,sev=sec_edges))
                     continue
                 end
                 push!(kept,(sg=f.sg,stag=f.stag,wires=wires,uses=uses,
-                            sgn=uses[1][2],oi=i,ruv=uv))
+                            sgn=uses[1][2],oi=i,ruv=uv,sev=sec_edges))
             end
         end
     end
@@ -1680,6 +1683,15 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
         end
         push!(res_verts,p);return length(res_verts)
     end
+    # anchored section span ends materialize at the operand-edge pierce
+    # eval — every fitted trace's endpoint sits a few ulps off it, which
+    # would split one result vertex into two and dead-end the wire
+    sev=nothing
+    for spec in Iterators.flatten((kept,sheet_out))
+        hasproperty(spec,:sev) && spec.sev!==nothing &&
+            (sev=spec.sev;break)
+    end
+    emap_sev=Dict{Int,NamedTuple}()
     function scan_arcs(spec)
         for wire in spec.wires, ar in wire
             ei=get!(emap,ar.key) do
@@ -1690,6 +1702,11 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
             lo=min(e.t0,ar.vt0,ar.vt1);hi=max(e.t1,ar.vt0,ar.vt1)
             (lo==e.t0 && hi==e.t1) ||
                 (res_edges[ei]=(curve=e.curve,t0=lo,t1=hi))
+            if sev!==nothing && !haskey(emap_sev,ei) &&
+                    ar.key isa Tuple && length(ar.key)>=2 &&
+                    ar.key[1]===:s && 1<=ar.key[2]<=length(sev)
+                emap_sev[ei]=sev[ar.key[2]]
+            end
         end
         return nothing
     end
@@ -1756,6 +1773,15 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
         ei=get(emap,ar.key,0)
         ei==0 && return 0,0
         pref=(ar.key isa Tuple && ar.key[1]===:e) ? 2 : 1
+        # an anchored section endpoint welds to the operand-edge pierce
+        # eval — the fitted trace's own eval is fit-residual off it
+        if pref==1
+            fx=get(emap_sev,ei,nothing)
+            if fx!==nothing
+                fx.v0!==nothing && ar.vt0==fx.t0 && (pa=fx.v0)
+                fx.v1!==nothing && ar.vt1==fx.t1 && (pb=fx.v1)
+            end
+        end
         return umem((:e,ei,0),pa;pref=pref),
                umem((:e,ei,1),pb;pref=pref)
     end
@@ -1794,8 +1820,13 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
     end
     edge_verts=Vector{Tuple{Int,Int}}(undef,length(res_edges))
     for (ei,e) in enumerate(res_edges)
-        i0=umem((:e,ei,0),_brep_vertex_eval(e.curve,e.t0);pref=2)
-        i1=umem((:e,ei,1),_brep_vertex_eval(e.curve,e.t1);pref=2)
+        fx=get(emap_sev,ei,nothing)
+        p0=fx!==nothing && e.t0==fx.t0 && fx.v0!==nothing ?
+            fx.v0 : _brep_vertex_eval(e.curve,e.t0)
+        p1=fx!==nothing && e.t1==fx.t1 && fx.v1!==nothing ?
+            fx.v1 : _brep_vertex_eval(e.curve,e.t1)
+        i0=umem((:e,ei,0),p0;pref=2)
+        i1=umem((:e,ei,1),p1;pref=2)
         edge_verts[ei]=(group_vert(i0),group_vert(i1))
     end
     points=Int[];curves=Int[];loops=Int[];surfaces=Int[];shells=Int[]

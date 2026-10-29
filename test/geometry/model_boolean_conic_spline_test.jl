@@ -399,3 +399,99 @@ end
         A.finalize()
     end
 end
+
+@testset "occ.fuse — coincident curved carriers classify same-domain" begin
+    # Coincident curved carriers are a same-domain contact, not a Boolean
+    # section — every identical pair throws a named same-domain rejection
+    # instead of fabricating a section or welding fake geometry. Distinct
+    # coaxial/concentric carriers of one family keep their real semantics:
+    # nested spheres fuse silently and different-slope coaxial cones cut a
+    # genuine section circle. Identical tori trip the pre-existing operand
+    # PLC weakness upstream of the section stage (torus×box fails the same
+    # way), so the torus check exercises `_brep_face_sections` directly.
+    A.initialize()
+    try
+        occ=A.model.occ
+        occ.add_sphere(0.0,0.0,0.0,1.0)
+        occ.add_sphere(0.0,0.0,0.0,1.0)
+        occ.synchronize()
+        err=_errtext(()->occ.fuse([(3,1)],[(3,2)]))
+        @test occursin("coincident spheres",err)
+        @test occursin("same-domain",err)
+    finally
+        A.finalize()
+    end
+    A.initialize()
+    try
+        occ=A.model.occ
+        # equal coaxial cylinders — different extents, one carrier
+        occ.add_cylinder(0.0,0.0,-1.0,0.0,0.0,3.0,0.5)
+        occ.add_cylinder(0.0,0.0,0.0,0.0,0.0,2.0,0.5)
+        occ.synchronize()
+        err=_errtext(()->occ.fuse([(3,1)],[(3,2)]))
+        @test occursin("coaxial cylinders",err)
+        @test occursin("same-domain",err)
+    finally
+        A.finalize()
+    end
+    A.initialize()
+    try
+        occ=A.model.occ
+        occ.add_cone(0.0,0.0,0.0,0.0,0.0,2.0,0.5,0.95)
+        occ.add_cone(0.0,0.0,0.0,0.0,0.0,2.0,0.5,0.95)
+        occ.synchronize()
+        err=_errtext(()->occ.fuse([(3,1)],[(3,2)]))
+        @test occursin("coincident cone faces",err)
+        @test occursin("same-domain",err)
+    finally
+        A.finalize()
+    end
+    A.initialize()
+    try
+        occ=A.model.occ
+        # identical tori — classified at the section stage (the
+        # end-to-end fuse hits the pre-existing torus operand PLC first)
+        a=occ.add_torus(0.0,0.0,0.0,1.0,0.3)
+        b=occ.add_torus(0.0,0.0,0.0,1.0,0.3)
+        # same spine circle, smaller tube — a DIFFERENT nested carrier
+        c=occ.add_torus(0.0,0.0,0.0,1.0,0.25)
+        occ.synchronize()
+        m=A._with_model(identity)
+        fa=M._brep_extract(m,a,"occ.fuse").faces[1]
+        fb=M._brep_extract(m,b,"occ.fuse").faces[1]
+        fc=M._brep_extract(m,c,"occ.fuse").faces[1]
+        err=_errtext(()->M._brep_face_sections(fa,fb,"occ.fuse"))
+        @test occursin("coincident torus faces",err)
+        @test occursin("same-domain",err)
+        # distinct nested tori are NOT coincident — empty section set
+        @test isempty(M._brep_face_sections(fa,fc,"occ.fuse"))
+    finally
+        A.finalize()
+    end
+    A.initialize()
+    try
+        occ=A.model.occ
+        # distinct coaxial cones — different slopes cross in a real
+        # section circle; the carrier-identity certificate must compare
+        # r1/r2/height, not just apex+axis
+        occ.add_cone(0.0,0.0,0.0,0.0,0.0,2.0,0.5,1.0)
+        occ.add_cone(0.0,0.0,0.0,0.0,0.0,2.0,0.6,0.9)
+        occ.synchronize()
+        out,_=occ.fuse([(3,1)],[(3,2)];removeObject=false,removeTool=false)
+        @test length(out)>=1
+    finally
+        A.finalize()
+    end
+    A.initialize()
+    try
+        occ=A.model.occ
+        # nested distinct spheres — no contact at all, quiet fuse
+        occ.add_sphere(0.0,0.0,0.0,1.0)
+        occ.add_sphere(0.0,0.0,0.0,0.6)
+        occ.synchronize()
+        out,_=occ.fuse([(3,1)],[(3,2)];removeObject=false,removeTool=false)
+        @test length(out)>=1
+    finally
+        A.finalize()
+    end
+end

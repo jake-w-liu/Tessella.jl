@@ -148,8 +148,11 @@ function _model_occ_wire_shoelace(kernel,face_rec,uses)
         end
         if !(haskey(pc,:circ2d) || haskey(pc,:ellips2d))
             # Non-elementary trace (spl2d): shoelace moments by Green's
-            # theorem — A=∮u dv, ∬u=∮u²/2 dv, ∬v=∮v²/2 du, GL8 per
-            # B-spline span.
+            # theorem in the SAME symmetric convention as the elementary
+            # branches — A=∮(u dv−v du)/2, ∬u=∮(u²dv−uv du)/3,
+            # ∬v=∮(uv dv−v² du)/3 — GL8 per B-spline span. A mixed
+            # convention (say ∮u dv here) leaves each such edge's boundary
+            # term (u1v1−u0v0)/2 uncancelled inside a closed wire.
             knots=pc.spl2d[1]
             cuts=Float64[t0]
             for k in knots
@@ -161,7 +164,9 @@ function _model_occ_wire_shoelace(kernel,face_rec,uses)
                 for i in 1:4,s in (-1,1)
                     t=mid+s*h*_OCC_GL_T[i]; w=_OCC_GL_W[i]*h
                     (u,v),(du,dv)=_occ_pcurve_d1(pc,t)
-                    area+=w*u*dv; Mx+=w*(u*u/2)*dv; My+=w*(-(v*v/2))*du
+                    area+=w*(u*dv-v*du)/2
+                    Mx+=w*(u*u*dv-u*v*du)/3
+                    My+=w*(u*v*dv-v*v*du)/3
                 end
             end
             continue
