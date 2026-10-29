@@ -3193,12 +3193,24 @@ end
             _postview_weighted_component(field,cells,j,weights,arity,9))
 end
 
+# Vector-valued queries reuse the same geometric point-location code; the
+# combine maps to a plain 3-component tuple (Gmsh's `searchVector` result —
+# the raw interpolated vector, not its Euclidean norm).
+@inline function _postview_vector_combine(field,cells,j,weights,arity::Int)
+    return (_postview_weighted_component(field,cells,j,weights,arity,1),
+            _postview_weighted_component(field,cells,j,weights,arity,2),
+            _postview_weighted_component(field,cells,j,weights,arity,3))
+end
+
 @inline _postview_cell_miss(::typeof(_postview_weighted_scalar_operator))=NaN
 @inline _postview_cell_miss(::typeof(_postview_tensor_combine))=
     ntuple(_->NaN,Val(9))
+@inline _postview_cell_miss(::typeof(_postview_vector_combine))=
+    ntuple(_->NaN,Val(3))
 
 @inline _postview_hit(value::Float64)=!isnan(value)
 @inline _postview_hit(value::NTuple{9,Float64})=!any(isnan,value)
+@inline _postview_hit(value::NTuple{3,Float64})=!any(isnan,value)
 
 @inline function _postview_check_interpolant(value::Float64,
                                              what::AbstractString,j::Int)
@@ -3207,6 +3219,12 @@ end
     return value
 end
 @inline function _postview_check_interpolant(value::NTuple{9,Float64},
+                                             what::AbstractString,j::Int)
+    any(isnan,value) && throw(ArgumentError(
+        "PostViewField: $what $j produced a NaN interpolant"))
+    return value
+end
+@inline function _postview_check_interpolant(value::NTuple{3,Float64},
                                              what::AbstractString,j::Int)
     any(isnan,value) && throw(ArgumentError(
         "PostViewField: $what $j produced a NaN interpolant"))
@@ -3223,6 +3241,10 @@ end
      _postview_component(field,5,index),_postview_component(field,6,index),
      _postview_component(field,7,index),_postview_component(field,8,index),
      _postview_component(field,9,index))
+@inline _postview_node_combine(::typeof(_postview_vector_combine),
+                               field,index::Integer)=
+    (_postview_component(field,1,index),_postview_component(field,2,index),
+     _postview_component(field,3,index))
 
 @inline function _postview_big_combine(field::PostViewField,kind::UInt8,j::Int,p,
                                        ::typeof(_postview_weighted_scalar_operator))
@@ -3231,6 +3253,10 @@ end
 @inline function _postview_big_combine(field::PostViewField,kind::UInt8,j::Int,p,
                                        ::typeof(_postview_tensor_combine))
     return _postview_big_tensor(field,kind,j,p)
+end
+@inline function _postview_big_combine(field::PostViewField,kind::UInt8,j::Int,p,
+                                       ::typeof(_postview_vector_combine))
+    return _postview_big_vector(field,kind,j,p)
 end
 
 # Rational-precision componentwise tensor interpolation for the near-boundary
@@ -3251,6 +3277,15 @@ function _postview_big_tensor(field::PostViewField,kind::UInt8,j::Int,p)
             _postview_cell_value_big(field,kind,j,p,7)[2]::Float64,
             _postview_cell_value_big(field,kind,j,p,8)[2]::Float64,
             _postview_cell_value_big(field,kind,j,p,9)[2]::Float64)
+end
+
+# The three-component counterpart for vector queries.
+function _postview_big_vector(field::PostViewField,kind::UInt8,j::Int,p)
+    found,value=_postview_cell_value_big(field,kind,j,p,1)
+    found || return _postview_cell_miss(_postview_vector_combine)
+    return (value::Float64,
+            _postview_cell_value_big(field,kind,j,p,2)[2]::Float64,
+            _postview_cell_value_big(field,kind,j,p,3)[2]::Float64)
 end
 
 function _postview_cell_value_big(field::PostViewField,kind::UInt8,j::Int,p,
@@ -3816,6 +3851,25 @@ function _pv_scheme_tensor(cell::_PVSchemeCell,u,v,w)
     return (t1,t2,t3,t4,t5,t6,t7,t8,t9)
 end
 
+# The same fold for the three vector components — Gmsh's `searchVector`
+# result for a 3-component scheme element.
+function _pv_scheme_vector(cell::_PVSchemeCell,u,v,w)
+    values=cell.values
+    cv=cell.coefval
+    pyramid=cell.pyramid
+    x=0.0;y=0.0;z=0.0
+    @inbounds for t in eachindex(cell.expval)
+        m=_pv_monomial(cell.expval[t],u,v,w,pyramid)
+        for i in 1:size(values,2)
+            a=cv[i,t]*m
+            x=muladd(a,values[1,i],x)
+            y=muladd(a,values[2,i],y)
+            z=muladd(a,values[3,i],z)
+        end
+    end
+    return (x,y,z)
+end
+
 # Newton inversion of the scheme geometry map followed by the value fold —
 # the `_postview_cell_value` arm for kind-8 cells. Only the element's
 # intrinsic coordinates are iterated (the off-direction artificial parameters
@@ -3871,6 +3925,8 @@ function _postview_scheme_value(field::PostViewField,j::Int,p,
         return _postview_cell_miss(combine)
     value=if combine===_postview_weighted_scalar_operator
         _pv_scheme_scalar(cell,field.num_components,u,v,w)
+    elseif combine===_postview_vector_combine
+        _pv_scheme_vector(cell,u,v,w)
     else
         _pv_scheme_tensor(cell,u,v,w)
     end
@@ -4130,6 +4186,41 @@ function metric_raw(field::PostViewField,x,y,z)
             "metric_raw: closest active node is not contained in any view element"))
     end
     return value::NTuple{9,Float64}
+end
+
+"""
+    vector_raw(field::PostViewField, x, y, z) -> Union{NTuple{3,Float64},Nothing}
+
+Interpolate the three components of a vector `PostViewField` at `(x,y,z)`,
+returning the raw vector exactly as stored in the view — Gmsh's
+`OctreePost::searchVector` result, used (un-normalized) by boundary-layer
+`Extrude` `View[i]` directions. A `use_closest` field falls back to the
+closest active node like Gmsh's `searchVectorClosest`; otherwise an
+uncovered query returns `nothing` (upstream's `false` return, which callers
+translate to a zero vector). Throws `ArgumentError` unless the field holds
+3-component data.
+"""
+function vector_raw(field::PostViewField,x,y,z)
+    field.num_components==3 || throw(ArgumentError(
+        "vector_raw: PostViewField does not hold vector data " *
+        "(num_components=$(Int(field.num_components)))"))
+    p=(_float_value(x,"vector_raw","x"),_float_value(y,"vector_raw","y"),
+       _float_value(z,"vector_raw","z"))
+    _,value=_postview_bvh_lookup(field,1,p,typemax(Int),
+                                 _postview_cell_miss(_postview_vector_combine),
+                                 _postview_vector_combine)
+    if any(isnan,value)
+        field.use_closest || return nothing
+        _,nearest=_nearest_point(field.tree,p)
+        closest=(field.tree.points[1,nearest],field.tree.points[2,nearest],
+                 field.tree.points[3,nearest])
+        _,value=_postview_bvh_lookup(field,1,closest,typemax(Int),
+                                     _postview_cell_miss(_postview_vector_combine),
+                                     _postview_vector_combine)
+        any(isnan,value) && throw(ErrorException(
+            "vector_raw: closest active node is not contained in any view element"))
+    end
+    return value::NTuple{3,Float64}
 end
 
 """

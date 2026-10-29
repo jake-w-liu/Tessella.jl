@@ -28,7 +28,7 @@ export MinAnisoField, IntersectAnisoField, AttractorAnisoCurveField
 export BoundaryLayerField, AutomaticMeshSizeField, ExternalProcessField
 export parse_matheval, eval_matheval, intersection_alauzet, intersection_conserve_mostaniso
 export build_geo_boundary_layer_fields
-export PostViewAnisoField, metric_raw, geo_postview_context
+export PostViewAnisoField, metric_raw, vector_raw, geo_postview_context
 
 """Finite sentinel used by Gmsh fields for "do not constrain the mesh size"."""
 const GMSH_MAX_SIZE = 1.0e22

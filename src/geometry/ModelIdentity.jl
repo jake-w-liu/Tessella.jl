@@ -694,6 +694,14 @@ function _model_identity_meshing(
         migrated.native_curve_endpoints[new_point]=
             _ModelNativeCurveEndpoint(curve,birth.node,birth.point)
     end
+    # Boundary-layer point classes follow the Point retag (`CompareTwoPoints`
+    # metadata keys on vertex tags); the post-view list is global, not
+    # entity-keyed, so it crosses the retag unchanged.
+    for (tag,cls) in attributes.point_bl
+        moved=dimension==0 && tag==old_tag ? new_tag : tag
+        migrated.point_bl[moved]=cls
+    end
+    migrated.post_views=copy(attributes.post_views)
     return migrated
 end
 

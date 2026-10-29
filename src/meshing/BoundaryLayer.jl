@@ -430,7 +430,10 @@ end
 # `Layers{{c1,c2},{h1,h2}}` definitions sweep exactly as specified. `vertex_dirs`
 # optionally overrides a wall node's growth direction — the geo path injects the
 # smoothed normal field so a vertex shared between sibling walls grows one
-# common column. Directions are renormalized; the returned `dirs`/`tops` maps
+# common column. Directions are renormalized unless `normalize_dirs=false`,
+# the boundary-layer `Extrude` `View[i]` mode where upstream grows along the
+# view's raw (un-normalized) vectors, magnitude included — a zero vector then
+# leaves the vertex on its source row. The returned `dirs`/`tops` maps
 # (keyed by wall-node position) record the exact 3-D direction and last-offset
 # position used, so connector and top-copy evaluators weld bitwise onto the
 # emitted strip.
@@ -439,6 +442,9 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
                       plane_normal=(0.0,0.0,1.0),
                       max_cells::Integer=10_000_000,
                       vertex_dirs=nothing,
+                      vertex_scale_last=nothing,
+                      scale_hprev::Real=0.0,
+                      normalize_dirs::Bool=true,
                       caller::AbstractString="mesh_boundary_layer_2d")
     nsegs(curve)>0 || throw(ArgumentError("$caller: curve has no segments"))
     (ntris(curve)==0 && ntets(curve)==0) || throw(ArgumentError(
@@ -457,10 +463,42 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
             1<=v<=nv0 || throw(ArgumentError(
                 "$caller: vertex_dirs key $v is not a curve node index"))
             L=hypot(d[1],d[2],d[3])
-            (isfinite(L) && L>0) || throw(ArgumentError(
-                "$caller: vertex_dirs[$v] is not finite and nonzero"))
-            dirs_over[Int(v)]=(d[1]/L,d[2]/L,d[3]/L)
+            if normalize_dirs
+                (isfinite(L) && L>0) || throw(ArgumentError(
+                    "$caller: vertex_dirs[$v] is not finite and nonzero"))
+                dirs_over[Int(v)]=(d[1]/L,d[2]/L,d[3]/L)
+            else
+                # Post-view `View[i]` mode: upstream feeds `searchVector`'s
+                # raw vector into `Extrude` (`x += n[i]*t`), so the vector
+                # magnitude scales the layer heights; a zero vector — the
+                # searchVector miss result — keeps the vertex on its source
+                # row like upstream's non-displaced copy.
+                all(isfinite,d) || throw(ArgumentError(
+                    "$caller: vertex_dirs[$v] is not finite"))
+                dirs_over[Int(v)]=(Float64(d[1]),Float64(d[2]),Float64(d[3]))
+            end
         end
+    end
+    scale_over=vertex_scale_last===nothing ? nothing : Dict{Int,Float64}()
+    if vertex_scale_last!==nothing
+        nv0s=nnodes(curve)
+        for (v,s) in vertex_scale_last
+            1<=v<=nv0s || throw(ArgumentError(
+                "$caller: vertex_scale_last key $v is not a curve node index"))
+            isfinite(s) || throw(ArgumentError(
+                "$caller: vertex_scale_last[$v] is not finite"))
+            scale_over[Int(v)]=Float64(s)
+        end
+    end
+    # Upstream's `ScaleLastLayer` rescale applies inside the last layer
+    # *group*: `t = h[N-2] + (t - h[N-2])·scale` per vertex (element-length
+    # scale), where `h[N-2]` is the cumulative height at the group's lower
+    # bound — every sublevel offset above it remaps, not just the last row.
+    scale_prev=Float64(scale_hprev)
+    @inline function _offset_at(v,k)
+        off=offsets[k]
+        (scale_over!==nothing && off>scale_prev) || return off
+        return scale_prev+(off-scale_prev)*get(scale_over,v,1.0)
     end
     nfan=_bounded_int(fan_elements,caller,"fan_elements";minimum=2)
     normal=_plane_unit_normal(plane_normal,caller)
@@ -559,7 +597,7 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
                 dx=nin[1]*c-nin[2]*s
                 dy=nin[1]*s+nin[2]*c
                 new_point=_offset_point(
-                    points[v],basis_u,basis_v,dx,dy,offsets[k])
+                    points[v],basis_u,basis_v,dx,dy,_offset_at(v,k))
                 all(isfinite,new_point) || throw(ArgumentError(
                     "$caller: extruded node is non-finite"))
                 new_plane_point=_plane_point(
@@ -572,12 +610,13 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
             end
         else
             dir=dirs_over===nothing ? nothing : get(dirs_over,v,nothing)
+            off=_offset_at(v,k)
             new_point=dir===nothing ?
                 _offset_point(points[v],basis_u,basis_v,
-                              n_avg[idx][1],n_avg[idx][2],offsets[k]) :
-                (points[v][1]+offsets[k]*dir[1],
-                 points[v][2]+offsets[k]*dir[2],
-                 points[v][3]+offsets[k]*dir[3])
+                              n_avg[idx][1],n_avg[idx][2],off) :
+                (points[v][1]+off*dir[1],
+                 points[v][2]+off*dir[2],
+                 points[v][3]+off*dir[3])
             all(isfinite,new_point) || throw(ArgumentError(
                 "$caller: extruded node is non-finite"))
             new_plane_point=_plane_point(
@@ -592,7 +631,10 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
     length(points)==npoints || throw(ErrorException("$caller: node count mismatch"))
     length(plane_points)==npoints || throw(ErrorException(
         "$caller: projected node count mismatch"))
-    _validate_plane(points,normal,caller)
+    # Raw `View[i]` vectors can displace the strip out of the wall plane —
+    # upstream emits the warped rows without a planarity gate, so the
+    # re-check only runs for normalized directions.
+    normalize_dirs && _validate_plane(points,normal,caller)
 
     quads=Matrix{Int32}(undef,4,nquads)
     tris=ntris_out==0 ? Matrix{Int32}(undef,3,0) : Matrix{Int32}(undef,3,ntris_out)
@@ -609,9 +651,13 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
             t1=_id_layer(id_of,a,k,ray_a,a_fan)
             p1=plane_points[b1]; p2=plane_points[b2]
             p3=plane_points[t2]; p4=plane_points[t1]
-            _positive_quad(p1,p2,p3,p4) || throw(ArgumentError(
-                "$caller: quadrangle on segment $i layer $k has a zero or "*
-                "reversed corner Jacobian"))
+            # Raw `View[i]` vectors can grow the strip to either side of the
+            # wall frame; upstream emits the quad with no Jacobian gate, so
+            # the orientation check only runs for normalized directions.
+            (!normalize_dirs || _positive_quad(p1,p2,p3,p4)) ||
+                throw(ArgumentError(
+                    "$caller: quadrangle on segment $i layer $k has a zero "*
+                    "or reversed corner Jacobian"))
             qcursor+=1
             quads[:,qcursor].=(Int32(b1),Int32(b2),Int32(t2),Int32(t1))
         end

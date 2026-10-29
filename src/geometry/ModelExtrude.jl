@@ -78,6 +78,13 @@ function _extrude_at(spec,p::NTuple{3,Float64},t::Float64,
             "$caller: boundary-layer copy evaluated $(p) off the wall's " *
             "stored nodes"))
     elseif spec.type===:translate
+        # A boundary-layer ScaleLast connector remaps the last layer's `u`
+        # interval through its source vertex's accumulated scale
+        # (`ExtrudeParams::Extrude` — `t = (t-h[N-2])·scale + h[N-2]`).
+        if haskey(spec,:scale) && spec.scale!==nothing
+            hprev,by=spec.scale
+            t>hprev && (t=hprev+(t-hprev)*by)
+        end
         T=spec.T
         return (p[1]+t*T[1],p[2]+t*T[2],p[3]+t*T[3])
     elseif spec.type===:rotate
@@ -389,49 +396,183 @@ function _extrude_bl_polyline(chain,closed::Bool)
     return Mesh(coords;segs=segs)
 end
 
+# One boundary-layer wall record: the generatrix's stored node chain, whether
+# the source curve is closed, its plane-aligned growth normal, and the
+# statement-level `mesh.BoundaryLayerIndex`/`mesh.ViewIndex`/`mesh.ScaleLast`
+# the entity records carry.
+const _ExtrudeBlWall=NamedTuple{(:chain,:closed,:peff,:index,:view,:scale_last),
+    Tuple{Vector{NTuple{3,Float64}},Bool,NTuple{3,Float64},Int,Int,Bool}}
+
 # `smooth_data::add(x,y,z,3,nn)` — every wall segment's left normal
 # (`cross(peff, t)`: `t × ẑ` upstream, generalized to each wall's own plane)
-# accumulates on both endpoint positions; the merged per-position sum
+# accumulates on both endpoint positions; the merged per-position mean
 # normalizes into the growth direction. Positions whose incident segments
 # cancel (opposing walls) stay unset and keep the kernel's own average.
-function _extrude_bl_normal_field(walls)
-    sums=Dict{NTuple{3,Float64},NTuple{3,Float64}}()
+#
+# Upstream keeps two independent `normals[index]` fields selected by each
+# copy's `mesh.BoundaryLayerIndex` (`Using Index[i]`): walls under different
+# indices never share a column, and `normalsCoherence` only bridges the two
+# fields at explicitly merged points. Walls whose index falls outside 0..1
+# contribute nothing (upstream errors and skips them), leaving their strip on
+# the kernel's own vertex normals.
+#
+# ScaleLast walls additionally accumulate each source element's average edge
+# length per vertex (`smooth_data::add_scale`); non-ScaleLast walls at an
+# index where any wall is ScaleLast contribute 1.0 instead
+# (`skipScaleCalc`), so a shared vertex "averages" between scaled and
+# unscaled. The mean is upstream's running-average update.
+# `samplers` maps a nonnegative `ViewIndex` to the resolved
+# `OctreePost`-equivalent vector sampler (`PostViewField` restricted to the
+# view's vector records, `use_closest=false`) or `nothing` when that view
+# carries no vector data — `addExtrudeNormals`'s `octree && !gouraud` gate.
+function _extrude_bl_normal_field(walls,samplers::AbstractDict=Dict{Int,Any}())
+    sums=Dict{Int,Dict{NTuple{3,Float64},NTuple{3,Float64}}}()
+    counts=Dict{Int,Dict{NTuple{3,Float64},Int}}()
+    scale_sums=Dict{Int,Dict{NTuple{3,Float64},Float64}}()
+    scale_counts=Dict{Int,Dict{NTuple{3,Float64},Int}}()
+    # `calcLayerScaleFactor[index]` — a global gate upstream sets when any
+    # copy at that index is ScaleLast; only then does anything add_scale.
+    scale_gate=Dict{Int,Bool}()
     for wall in walls
-        chain,closed,peff=wall
+        0<=wall.index<=1 || continue
+        wall.scale_last && (scale_gate[wall.index]=true)
+    end
+    sf_mod=getfield(parentmodule(@__MODULE__),:SizeField)
+    for wall in walls
+        0<=wall.index<=1 || continue
+        chain=wall.chain;closed=wall.closed;peff=wall.peff
         nnode=length(chain)
         nseg=closed ? nnode : nnode-1
+        sf=get!(Dict{NTuple{3,Float64},NTuple{3,Float64}},sums,wall.index)
+        cf=get!(Dict{NTuple{3,Float64},Int},counts,wall.index)
+        gated=get(scale_gate,wall.index,false)
+        ss=gated ? get!(Dict{NTuple{3,Float64},Float64},
+                        scale_sums,wall.index) : nothing
+        sc=gated ? get!(Dict{NTuple{3,Float64},Int},
+                        scale_counts,wall.index) : nothing
+        sampler=wall.view>=0 ? get(samplers,wall.view,nothing) : nothing
+        if sampler!==nothing
+            # Post-view direction: upstream dedupes the wall's vertices
+            # (`verts` set) and adds each `searchVector` result once — the
+            # raw interpolated vector, magnitude included, with no `invert`
+            # applied to signed generatrices. A miss contributes the zero
+            # vector the C++ call leaves in `nn`.
+            seen=Set{NTuple{3,Float64}}()
+            for pos in chain
+                pos in seen && continue
+                push!(seen,pos)
+                v=sf_mod.vector_raw(sampler,pos[1],pos[2],pos[3])
+                n=v===nothing ? (0.0,0.0,0.0) : v
+                s=get(sf,pos,(0.0,0.0,0.0))
+                sf[pos]=(s[1]+n[1],s[2]+n[2],s[3]+n[3])
+                cf[pos]=get(cf,pos,0)+1
+            end
+        else
+            for i in 1:nseg
+                j=i==nnode ? 1 : i+1
+                p,q=chain[i],chain[j]
+                t=(q[1]-p[1],q[2]-p[2],q[3]-p[3])
+                Lt=hypot(t...)
+                Lt>0 || continue
+                t=(t[1]/Lt,t[2]/Lt,t[3]/Lt)
+                n=(peff[2]*t[3]-peff[3]*t[2],
+                   peff[3]*t[1]-peff[1]*t[3],
+                   peff[1]*t[2]-peff[2]*t[1])
+                for pos in (p,q)
+                    s=get(sf,pos,(0.0,0.0,0.0))
+                    sf[pos]=(s[1]+n[1],s[2]+n[2],s[3]+n[3])
+                    cf[pos]=get(cf,pos,0)+1
+                end
+            end
+        end
+        # `add_scale` stays per element-vertex in both modes — a shared
+        # vertex averages its incident segment lengths either way
+        # (`aveLength = GetAveEdgeLength(elem)`; `skipScaleCalc` → 1.0).
+        ss===nothing && continue
         for i in 1:nseg
             j=i==nnode ? 1 : i+1
             p,q=chain[i],chain[j]
-            t=(q[1]-p[1],q[2]-p[2],q[3]-p[3])
-            Lt=hypot(t...)
+            Lt=hypot(q[1]-p[1],q[2]-p[2],q[3]-p[3])
             Lt>0 || continue
-            t=(t[1]/Lt,t[2]/Lt,t[3]/Lt)
-            n=(peff[2]*t[3]-peff[3]*t[2],
-               peff[3]*t[1]-peff[1]*t[3],
-               peff[1]*t[2]-peff[2]*t[1])
+            seg_scale=wall.scale_last ? Lt : 1.0
             for pos in (p,q)
-                s=get(sums,pos,(0.0,0.0,0.0))
-                sums[pos]=(s[1]+n[1],s[2]+n[2],s[3]+n[3])
+                ss[pos]=get(ss,pos,0.0)+seg_scale
+                sc[pos]=get(sc,pos,0)+1
             end
         end
     end
-    field=Dict{NTuple{3,Float64},NTuple{3,Float64}}()
-    for (pos,s) in sums
+    fields=Dict{Int,Dict{NTuple{3,Float64},NTuple{3,Float64}}}()
+    for (index,sf) in sums
+        cf=counts[index]
+        field=Dict{NTuple{3,Float64},NTuple{3,Float64}}()
+        for (pos,s) in sf
+            # `smooth_data` keeps a running mean per position — kept raw
+            # here; unit normalization is `_extrude_bl_view_fields`'s
+            # global `normalize` pass so a single vector-view wall leaves
+            # every index's field un-normalized like upstream.
+            c=cf[pos]
+            field[pos]=(s[1]/c,s[2]/c,s[3]/c)
+        end
+        fields[index]=field
+    end
+    scales=Dict{Int,Dict{NTuple{3,Float64},Float64}}()
+    for (index,ss) in scale_sums
+        sc=scale_counts[index]
+        field=Dict{NTuple{3,Float64},Float64}()
+        for (pos,s) in ss
+            field[pos]=s/sc[pos]
+        end
+        scales[index]=field
+    end
+    return (fields=fields,scales=scales)
+end
+
+# Upstream `smooth_data::normalize` — unit-normalize each field entry in
+# place; a zero mean drops out like the previous sum-normalized path did.
+function _extrude_bl_unitize!(field::Dict{NTuple{3,Float64},NTuple{3,Float64}})
+    for (pos,s) in collect(field)
         L=hypot(s[1],s[2],s[3])
-        L>0 || continue
-        field[pos]=(s[1]/L,s[2]/L,s[3]/L)
+        if L>0
+            field[pos]=(s[1]/L,s[2]/L,s[3]/L)
+        else
+            delete!(field,pos)
+        end
     end
     return field
 end
 
-# `(chain, closed, peff)` for every boundary-layer surface's generatrix — the
-# mesh-time equivalent of the exec-time entity list, so the field merges
-# across `Extrude` statements just as upstream accumulates every
-# BoundaryLayerCurve's edges.
+# `View[-3]` — upstream's `special3dbox` post-normalize snap: every field
+# entry's component becomes ±1/0 by a 0.1 deadband, turning merged diagonals
+# into axis-aligned growth.
+function _extrude_bl_snap_axis!(field::Dict{NTuple{3,Float64},NTuple{3,Float64}})
+    for (pos,n) in field
+        field[pos]=(n[1]<-0.1 ? -1.0 : n[1]>0.1 ? 1.0 : 0.0,
+                    n[2]<-0.1 ? -1.0 : n[2]>0.1 ? 1.0 : 0.0,
+                    n[3]<-0.1 ? -1.0 : n[3]>0.1 ? 1.0 : 0.0)
+    end
+    return field
+end
+
+# `View[-5]` — upstream's `extrudeField`: scale every normalized entry by the
+# background field's value at its position (no background → unchanged).
+function _extrude_bl_scale_background!(field,bg)
+    bg===nothing && return field
+    evalbg=getfield(parentmodule(@__MODULE__),:SizeField).field_value
+    for (pos,n) in field
+        r=evalbg(bg,pos[1],pos[2],pos[3])
+        (isfinite(r) && r!=0) || continue
+        field[pos]=(n[1]*r,n[2]*r,n[3]*r)
+    end
+    return field
+end
+
+# `(chain, closed, peff, index, view, scale_last)` for every boundary-layer
+# surface's generatrix — the mesh-time equivalent of the exec-time entity
+# list, so the field merges across `Extrude` statements just as upstream
+# accumulates every BoundaryLayerCurve's edges.
 function _extrude_bl_walls(m::GeoModel,caller::AbstractString;
                            _mesh_input=nothing)
-    walls=Tuple{Vector{NTuple{3,Float64}},Bool,NTuple{3,Float64}}[]
+    walls=_ExtrudeBlWall[]
     for (d,tag) in sort!(collect(keys(m.meshing.extrude_specs)))
         d==2 || continue
         spec=m.meshing.extrude_specs[(d,tag)]
@@ -446,14 +587,33 @@ function _extrude_bl_walls(m::GeoModel,caller::AbstractString;
         a,b=m.curves[abs(link[2])]
         closed=a==b
         peff=_extrude_bl_plane_normal(chain,closed,link[2]>0,caller)
-        push!(walls,(chain,closed,peff))
+        params=get(m.meshing.extrude,(2,tag),nothing)
+        push!(walls,(chain=chain,closed=closed,peff=peff,
+            index=Int(get(spec,:index,0)),view=Int(get(spec,:view,-1)),
+            scale_last=params===nothing ? false : params.scale_last))
     end
     return walls
 end
 
+# Upstream's `addExtrudeNormals` view semantics are global over the whole
+# pass: `special3dbox`/`extrudeField` snap/scale every built field once any
+# wall selects them. Returns `(snap_axis, scale_background)` flags.
+function _extrude_bl_view_flags(walls)
+    snap=false;scale=false
+    for wall in walls
+        wall.view==-3 && (snap=true)
+        wall.view==-5 && (scale=true)
+    end
+    return (snap,scale)
+end
+
 # One wall's strip emission: explicit cumulative offsets plus the merged-field
-# direction per shared wall vertex.
-function _extrude_bl_kernel(chain,closed::Bool,peff,field,offsets,caller)
+# direction per shared wall vertex. `scale_last` carries the wall's per-vertex
+# last-layer scale (`Dict` node-index→factor) for upstream's `ScaleLastLayer`
+# rescale of the last `u` interval.
+function _extrude_bl_kernel(chain,closed::Bool,peff,field,offsets,caller;
+                            scale_last=nothing,scale_hprev=0.0,
+                            normalize_dirs::Bool=true)
     poly=_extrude_bl_polyline(chain,closed)
     vd=Dict{Int,NTuple{3,Float64}}()
     for (i,pos) in enumerate(chain)
@@ -463,7 +623,9 @@ function _extrude_bl_kernel(chain,closed::Bool,peff,field,offsets,caller)
     # `BoundaryLayer` is a sibling submodule included after `Model` — resolve
     # it lazily like `.geo`'s `SizeField` lookup.
     return getfield(parentmodule(@__MODULE__),:BoundaryLayer)._bl_2d_offsets(
-        poly,offsets;plane_normal=peff,vertex_dirs=vd,caller=caller)
+        poly,offsets;plane_normal=peff,vertex_dirs=vd,caller=caller,
+        vertex_scale_last=scale_last,scale_hprev=scale_hprev,
+        normalize_dirs=normalize_dirs)
 end
 
 # Exact-match lookup, else the nearest kernel row — mirrored chapeau evals can
@@ -492,12 +654,16 @@ end
 # `copyMesh`'s position→top map for the chapeau: every stored chapeau
 # parameter evals (`_model_curve_part_point`) to a generatrix position —
 # direct for a forward copy, `t1+u_min-v` mirrored for a reversed one — which
-# keys the kernel's exact top-row node.
+# keys the kernel's exact top-row node. The ordered `(usrc, top)` row backs
+# the same discrete-edge eval upstream's `boundaryLayerEdge` runs — a query
+# between stored nodes interpolates the top polyline instead of rejecting
+# an off-key position.
 function _extrude_bl_tops_dict(m::GeoModel,gen::Int,chapeau::Int,
                                signed_c::Int,top_of::AbstractDict,
                                caller::AbstractString)
     params=get(m.meshing.extrude,(1,chapeau),nothing)
-    params===nothing && return Dict{NTuple{3,Float64},NTuple{3,Float64}}()
+    params===nothing && return (Dict{NTuple{3,Float64},NTuple{3,Float64}}(),
+                                Tuple{Float64,NTuple{3,Float64}}[])
     vals=_model_curve_extrude_params(m,chapeau,params,
         _model_default_mesh1d_options(m,caller),caller)
     vals===:pending && throw(ArgumentError(
@@ -506,12 +672,71 @@ function _extrude_bl_tops_dict(m::GeoModel,gen::Int,chapeau::Int,
     _,t1=_model_curve_param_bounds(m,chapeau,caller)
     u_min=_model_curve_param_bounds(m,gen,caller)[1]
     tops=Dict{NTuple{3,Float64},NTuple{3,Float64}}()
+    row=Tuple{Float64,NTuple{3,Float64}}[]
     for v in vals
         usrc=signed_c<0 ? (t1+u_min)-v : v
         p=_periodic_curve_point(m,gen,usrc,caller)
-        tops[p]=_extrude_bl_top_at(top_of,p,caller)
+        top=_extrude_bl_top_at(top_of,p,caller)
+        tops[p]=top
+        push!(row,(usrc,top))
     end
-    return tops
+    sort!(row;by=first)
+    # A closed source can store the seam parameter twice; duplicate
+    # parameters describe the same top vertex.
+    keep=ones(Bool,length(row))
+    for i in 2:length(row)
+        row[i][1]==row[i-1][1] && (keep[i]=false)
+    end
+    all(keep) || (row=row[keep])
+    return (tops,row)
+end
+
+# Continuous `boundaryLayerEdge` eval: bitwise key hits return the stored
+# top node; a re-graded query drifting an ulp off the stored key still binds
+# by node identity — upstream's `pos.find` answers with the Voronoi cell's
+# stored vertex — and only a genuinely interior probe interpolates the
+# ordered top row. A spec without row data (built before this field
+# existed) keeps the strict position-lookup behavior.
+function _extrude_bl_row_eval(spec,p,usrc::Float64,caller::AbstractString)
+    tops=get(spec,:tops,nothing)
+    if tops!==nothing
+        top=get(tops,p,nothing)
+        top===nothing || return top
+        if !isempty(tops)
+            scale=1.0
+            for pos in keys(tops)
+                scale=max(scale,abs(pos[1]),abs(pos[2]),abs(pos[3]))
+            end
+            best=nothing;bd=Inf;bd2=Inf
+            for (pos,v) in tops
+                d=hypot(p[1]-pos[1],p[2]-pos[2],p[3]-pos[3])
+                if d<bd
+                    bd2=bd;bd=d;best=v
+                elseif d<bd2
+                    bd2=d
+                end
+            end
+            bd<=1e-9*scale && return best
+            bd<=1e-7*scale && bd<=0.1*bd2 && return best
+        end
+    end
+    row=get(spec,:top_row,nothing)
+    if row!==nothing && !isempty(row)
+        length(row)==1 && return row[1][2]
+        usrc<=row[1][1] && return row[1][2]
+        usrc>=row[end][1] && return row[end][2]
+        i=searchsortedlast(row,usrc;by=first)
+        i=min(max(i,1),length(row)-1)
+        u0,t0=row[i];u1,t1=row[i+1]
+        u1==u0 && return t0
+        f=(usrc-u0)/(u1-u0)
+        abs(f)<=1e-9 && return t0
+        abs(1-f)<=1e-9 && return t1
+        return (t0[1]+f*(t1[1]-t0[1]),
+                t0[2]+f*(t1[2]-t0[2]),
+                t0[3]+f*(t1[3]-t0[3]))
+    end
+    return _extrude_at(spec,p,1.0,caller)
 end
 
 # Write the kernel's exact directions/positions back onto the sibling
@@ -519,7 +744,9 @@ end
 # direction (the stored level params are absolute heights, so `p + h·T`
 # lands bitwise on the strip's rows), the chapeau keeps the position→top map
 # its `_extrude_at` branch reads, and every generated vertex takes the
-# kernel's top-row coordinate.
+# kernel's top-row coordinate. A ScaleLast connector additionally carries
+# `scale=(h_prev, s)` — the `Extrude(iLayer=last)` rescale evaluated at the
+# connector's own source vertex.
 function _extrude_bl_refresh!(m::GeoModel,spec,gen::Int,signed_c::Int,
                               closed::Bool,kernel,
                               caller::AbstractString;
@@ -528,32 +755,41 @@ function _extrude_bl_refresh!(m::GeoModel,spec,gen::Int,signed_c::Int,
     sbeg,send=signed_c>0 ? (a,b) : (b,a)
     beg_pos=m.points[sbeg];end_pos=m.points[send]
     cbeg,cend=spec.connectors
+    scale_last=get(spec,:scale_last,nothing)
+    hprev=get(spec,:scale_hprev,0.0)
     # Sibling walls share coincident connectors — the operation's coherence
     # pass keeps one tag; refresh only rewrites survivors.
     if haskey(m.curves,cbeg)
         m.points[m.curves[cbeg][2]]=kernel.tops[beg_pos]
+        s=scale_last===nothing ? 1.0 : get(scale_last,beg_pos,1.0)
         m.meshing.extrude_specs[(1,cbeg)]=
-            (type=:translate,T=kernel.dirs[beg_pos])
+            (type=:translate,T=kernel.dirs[beg_pos],
+             scale=s==1.0 ? nothing : (hprev,s))
     end
     if cend>0 && haskey(m.curves,cend)
         m.points[m.curves[cend][2]]=kernel.tops[end_pos]
+        s=scale_last===nothing ? 1.0 : get(scale_last,end_pos,1.0)
         m.meshing.extrude_specs[(1,cend)]=
-            (type=:translate,T=kernel.dirs[end_pos])
+            (type=:translate,T=kernel.dirs[end_pos],
+             scale=s==1.0 ? nothing : (hprev,s))
     end
     chapeau=spec.chapeau
     if haskey(m.curves,chapeau)
-        tops=_extrude_bl_tops_dict(_params_model,gen,chapeau,signed_c,
-                                   kernel.tops,caller)
-        m.meshing.extrude_specs[(1,chapeau)]=(type=:boundary_layer,tops=tops)
+        tops,row=_extrude_bl_tops_dict(_params_model,gen,chapeau,signed_c,
+                                       kernel.tops,caller)
+        m.meshing.extrude_specs[(1,chapeau)]=
+            (type=:boundary_layer,tops=tops,top_row=row)
         m.points[m.curves[chapeau][1]]=kernel.tops[beg_pos]
         closed || (m.points[m.curves[chapeau][2]]=kernel.tops[end_pos])
-        # The chapeau's materialized control copies follow it to the top
-        # row — otherwise coincident-with-source copies merge into the
-        # source's endpoints and `Coherence` collapses the record back into
-        # its generatrix. Interior copies of non-line sources bind to the
-        # nearest wall row.
+        # The chapeau's materialized control copies keep `MSH_POINT` type
+        # upstream, so `boundaryLayerVertices` never displaces them: index-0
+        # copies rewired into their sources at the coherence merge and
+        # nonzero-index orphans simply stay coincident with the generatrix.
+        # Only a boundary-layer-typed control record (a welded beg/end that
+        # also serves as a control) takes the top row.
         for cp in get(m.curve_control_points,chapeau,Int[])
             haskey(m.points,cp) || continue
+            _point_bl_class(m,cp)[1] || continue
             m.points[cp]=_extrude_bl_top_at(kernel.tops,m.points[cp],caller;
                                             unbounded=true)
         end
@@ -593,7 +829,8 @@ end
 # chapeau evals bitwise-aligned with the emitted columns.
 function _extrude_bl_lateral_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
                                   spec,gen_signed::Int,caller::AbstractString;
-                                  _mesh_input=nothing)
+                                  _mesh_input=nothing,_size_field=nothing,
+                                  _options=nothing)
     gen=abs(gen_signed)
     chain,_,orphans,_=_extrude_curve_source(m,gen,_mesh_input,caller)
     isempty(orphans) || throw(ArgumentError(
@@ -602,12 +839,194 @@ function _extrude_bl_lateral_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
     a,b=m.curves[gen]
     closed=a==b
     peff=_extrude_bl_plane_normal(chain,closed,gen_signed>0,caller)
+    index=Int(get(spec,:index,0))
     walls=_extrude_bl_walls(m,caller;_mesh_input)
-    field=_extrude_bl_normal_field(walls)
-    kernel=_extrude_bl_kernel(chain,closed,peff,field,
-        _extrude_level_us(params)[2:end],caller)
+    # `extrudeField` reads `BGM_MeshSize` — the mesh pass's background field,
+    # carried on the 1-D options bundle when no explicit `size_field` rides
+    # this call.
+    background=_size_field===nothing ?
+        (_options===nothing ? nothing : getproperty(_options,:inner_field)) :
+        _size_field
+    fields=_extrude_bl_view_fields(walls,caller;
+                                   _background_field=background,
+                                   _options=_options,
+                                   _views=m.meshing.post_views)
+    # Resolve any standalone point-generatrix connectors against the same
+    # field — upstream displaces them inside this pass.
+    _extrude_bl_prepare!(m,caller;_fields=fields,_mesh_input)
+    field=get(fields.fields,index,_EMPTY_BL_FIELD)
+    offsets=_extrude_level_us(params)[2:end]
+    # The `calcLayerScaleFactor[index]` gate: only when some copy at this
+    # index is ScaleLast does the last `u` interval rescale per vertex —
+    # upstream's `Extrude(iLayer=NbLayer-1)` consults the accumulated scale
+    # for every BL entity at the index, ScaleLast or not.
+    scale_field=get(fields.scales,index,nothing)
+    hprev=length(params.layers)>=2 ? params.heights[end-1] : 0.0
+    vertex_scale=nothing
+    if scale_field!==nothing
+        vertex_scale=Dict{Int,Float64}()
+        for (i,pos) in enumerate(chain)
+            s=get(scale_field,pos,1.0)
+            abs(s-1.0)<=1e-12 && (s=1.0)
+            vertex_scale[i]=s
+        end
+    end
+    spec=(;spec...,scale_last=scale_field,scale_hprev=hprev)
+    kernel=_extrude_bl_kernel(chain,closed,peff,field,offsets,caller;
+                              scale_last=vertex_scale,scale_hprev=hprev,
+                              normalize_dirs=fields.normalize)
     _extrude_bl_refresh!(m,spec,gen,gen_signed,closed,kernel,caller)
     return params.recombine ? kernel.mesh : _extrude_bl_unrecombined(kernel.mesh)
+end
+
+const _EMPTY_BL_FIELD=Dict{NTuple{3,Float64},NTuple{3,Float64}}()
+
+# Upstream resolves boundary-layer metadata inside `Mesh2DWithBoundaryLayers`:
+# an out-of-range `BoundaryLayerIndex` is a non-fatal `Msg::Error` and the
+# wall's copy keeps the default field; a `ViewIndex` of -3/-5 selects the
+# global special modes, a nonnegative index must name a live post view
+# (otherwise `Unknown View[i]: using normals instead`), and any other
+# negative value silently keeps plain normals.
+function _extrude_bl_check_meta!(walls,options,views=nothing)
+    options===nothing && return nothing
+    nviews=views===nothing ? 0 : length(views)
+    for wall in walls
+        wall.index in (0,1) || _model_mesh_error(options,
+            "Invalid boundary layer index $(wall.index)")
+        v=wall.view
+        (v==-1 || v==-3 || v==-5) && continue
+        (v>=0 && v<nviews) && continue
+        v>=0 && _model_mesh_error(options,
+            "Unknown View[$v]: using normals instead")
+    end
+    return nothing
+end
+
+# `_SessionView`/`PosView` → element records for the vector sampler.
+# `PosView` exposes `.elements` directly; a session view's flat list data
+# decodes through the API writer's record builder. Anything else has no
+# vector data and takes the gouraud fallback.
+function _extrude_bl_view_records(view,caller)
+    if hasproperty(view,:elements)
+        return view.elements
+    elseif hasproperty(view,:list_types)
+        api=getfield(parentmodule(@__MODULE__),:API)
+        return api._native_list_view_records(view,caller)
+    end
+    return nothing
+end
+
+# `OctreePost(PView::list[view])` restricted to the view's vector records —
+# `getNumVectors() > 0` is the gouraud→octree switch upstream. Returns
+# `nothing` when the view carries no vector data.
+function _extrude_bl_view_sampler(view,caller)
+    records=_extrude_bl_view_records(view,caller)
+    records===nothing && return nothing
+    vectors=[e for e in records
+        if hasproperty(e,:values) && e.values isa AbstractArray &&
+           size(e.values,1)==3]
+    isempty(vectors) && return nothing
+    sf_mod=getfield(parentmodule(@__MODULE__),:SizeField)
+    return sf_mod.PostViewField(vectors;use_closest=false)
+end
+
+# Per-`ViewIndex` sampler table for the wall set — keyed on the view index
+# so sibling walls sharing a `Using View[i]` share one octree.
+function _extrude_bl_view_samplers(walls,views,caller)
+    samplers=Dict{Int,Any}()
+    views===nothing && return samplers
+    for wall in walls
+        v=wall.view
+        (v>=0 && v<length(views)) || continue
+        haskey(samplers,v) && continue
+        samplers[v]=_extrude_bl_view_sampler(views[v+1],caller)
+    end
+    return samplers
+end
+
+# Build the per-index smooth-data fields for the current wall set, applying
+# upstream's global `special3dbox`/`extrudeField` post-normalize passes.
+# `normalize` follows upstream's single flag: one resolved vector view
+# (`octree && !gouraud`) skips normalization AND the snap/field post passes
+# for every index — the view vectors and gouraud means stay raw, and the
+# extrude kernel consumes their magnitudes (`x += n[i]*t`).
+function _extrude_bl_view_fields(walls,caller;
+                                 _background_field=nothing,_options=nothing,
+                                 _views=nothing)
+    _extrude_bl_check_meta!(walls,_options,_views)
+    samplers=_extrude_bl_view_samplers(walls,_views,caller)
+    normalize=!any(s->s!==nothing,values(samplers))
+    built=_extrude_bl_normal_field(walls,samplers)
+    snap,scale_bg=_extrude_bl_view_flags(walls)
+    for (index,field) in built.fields
+        if normalize
+            _extrude_bl_unitize!(field)
+            snap && _extrude_bl_snap_axis!(field)
+            scale_bg && _extrude_bl_scale_background!(field,_background_field)
+        end
+    end
+    # The kernel consumes the field as upstream's `Extrude` reads `nn`: raw,
+    # never re-normalized. `normalize=false` (`_bl_2d_offsets`'s raw mode) is
+    # therefore required not only for vector views but also for the
+    # `special3dbox`/`extrudeField` post passes — a snapped (1,-1,0) or
+    # background-scaled (0,-2,0) entry loses its magnitude to a unitizing
+    # re-pass, and either can leave the wall plane.
+    return (;built...,normalize=normalize && !snap && !scale_bg)
+end
+
+# `Mesh2DWithBoundaryLayers`'s `ExtrudePoint` arm: a standalone
+# point-generatrix connector (`type=:bl_point` until resolved) sweeps along
+# the smooth field's normal at its source position — zero when the position
+# has no accumulated entry, which leaves the `MSH_POINT_BND_LAYER` copy
+# coincident with its source exactly like upstream's degenerate output. The
+# resolved `:translate` spec (plus its ScaleLast remap, when both the copy
+# selects ScaleLast and the index's scale gate is armed) is idempotent:
+# re-entry finds no pending specs.
+function _extrude_bl_prepare!(m::GeoModel,caller::AbstractString;
+                              _fields=nothing,_mesh_input=nothing,
+                              _options=nothing)
+    pending=Tuple{Int,Any}[]
+    for ((d,tag),spec) in m.meshing.extrude_specs
+        d==1 || continue
+        spec isa NamedTuple || continue
+        get(spec,:type,nothing)===:bl_point || continue
+        push!(pending,(tag,spec))
+    end
+    isempty(pending) && return nothing
+    if _fields===nothing
+        walls=_extrude_bl_walls(m,caller;_mesh_input)
+        _fields=_extrude_bl_view_fields(walls,caller;_options=_options,
+                                        _views=m.meshing.post_views)
+    end
+    for (tag,spec) in pending
+        haskey(m.curves,tag) || continue
+        a,b=m.curves[tag]
+        src_pt=Int(get(spec,:src,a))
+        haskey(m.points,src_pt) || continue
+        pos=m.points[src_pt]
+        index=Int(get(spec,:index,0))
+        field=get(_fields.fields,index,_EMPTY_BL_FIELD)
+        n=get(field,pos,(0.0,0.0,0.0))
+        params=get(m.meshing.extrude,(1,tag),nothing)
+        # `scaleLast && scaleFactor` — both the copy's own flag and the
+        # index's armed scale gate must hold before the last interval scales.
+        scale_field=get(_fields.scales,index,nothing)
+        s=(scale_field===nothing || !get(spec,:scale_last,false)) ? 1.0 :
+            get(scale_field,pos,1.0)
+        (isfinite(s) && abs(s-1.0)<=1e-12) && (s=1.0)
+        hprev=params===nothing || length(params.layers)<2 ? 0.0 :
+              params.heights[end-1]
+        m.meshing.extrude_specs[(1,tag)]=(type=:translate,T=n,
+            scale=s==1.0 ? nothing : (hprev,s))
+        # The `ExtrudePoint` copy moves to the connector's top level along
+        # the resolved normal; a zero normal leaves it coincident.
+        dest=a==src_pt ? b : a
+        haskey(m.points,dest) || continue
+        t_top=params===nothing ? 0.0 : params.heights[end]
+        s!=1.0 && (t_top=hprev+(t_top-hprev)*s)
+        m.points[dest]=(pos[1]+t_top*n[1],pos[2]+t_top*n[2],pos[3]+t_top*n[3])
+    end
+    return nothing
 end
 
 # `extrudeMesh(GEdge *from, GFace *to, ...)` — sweep the generatrix's stored
@@ -1272,7 +1691,8 @@ function _extrude_surface_mesh(m::GeoModel,t::Int,caller::AbstractString;
                                min_angle_deg::Real=25.0,
                                max_periodic_passes=8,
                                size_field::Union{Nothing,AbstractSizeField}=nothing,
-                               edges=nothing,scope=nothing,_mesh_input=nothing,_return_production=false)
+                               edges=nothing,scope=nothing,_mesh_input=nothing,_return_production=false,
+                               _options=nothing)
     planned=_extrude_nonew_surface_mesh(m,t,caller;scope=scope,
         min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
         size_field=size_field)
@@ -1285,7 +1705,8 @@ function _extrude_surface_mesh(m::GeoModel,t::Int,caller::AbstractString;
             "$caller: Surface[$t] boundary-layer extrusion needs a curve " *
             "generatrix"))
         return _extrude_bl_lateral_mesh(m,t,params,spec,link[2],caller;
-                                        _mesh_input)
+                                        _mesh_input,_size_field=size_field,
+                                        _options=_options)
     end
     if link[1]==1
         return _extrude_lateral_mesh(m,t,params,spec,link[2],caller;

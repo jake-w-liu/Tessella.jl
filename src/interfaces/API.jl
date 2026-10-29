@@ -2613,6 +2613,15 @@ function _apply_generation_meshing_options!(m::GeoModel,settings)
     m.meshing.lc_extend_from_boundary=settings.lc_extend_from_boundary
     m.meshing.aniso_max=settings.aniso_max
     m.meshing.order=settings.order
+    # `PView::list` for boundary-layer `Extrude` `Using View[i]`: session
+    # views in tag order (upstream keeps them in creation order, which the
+    # sequential session tags reproduce). A caller that runs its own view
+    # store — `.geo` execution's `_GEO_EXEC_VIEWS` — carries it explicitly on
+    # the settings bundle; `SESSION_VIEWS` is not populated there.
+    post_views=get(settings,:post_views,nothing)
+    m.meshing.post_views=post_views===nothing ?
+        Any[SESSION_VIEWS[tag] for tag in sort!(collect(keys(SESSION_VIEWS)))] :
+        Any[view for view in post_views]
     return nothing
 end
 

@@ -359,6 +359,20 @@ mutable struct ModelMeshingAttributes
     # `Mesh.AnisoMax` — bounds the BGM metric aspect ratio hmax/hmin at mesh
     # time (upstream `CTX::mesh.aniso_max`; 1e33 is the unbounded default).
     aniso_max::Float64
+    # Per-vertex `Vertex::Typ`/`boundaryLayerIndex` merge class —
+    # `(is_boundary_layer_typ, boundary_layer_index)`. Absent entries are the
+    # ordinary `(false, 0)` class. `CompareTwoPoints` compares type and index
+    # before position, so a boundary-layer copy only ever welds to a same
+    # class coincident record, while an ordinary control copy carrying a
+    # nonzero index stays coincident with the index-0 source it duplicated.
+    point_bl::Dict{Int,Tuple{Bool,Int}}
+    # Positional post-view store — upstream's `PView::list`: `.geo`
+    # `Merge`/`Include` `.pos` payloads and `Plugin(...).Run` products append
+    # in load order (`_geo_sync_meshing_options!` snapshots the geo store);
+    # the API path keeps session views in tag order (`SESSION_VIEWS`).
+    # Boundary-layer `Extrude`'s `Using View[i]` indexes this list the same
+    # way upstream's `PView::list[i]` does.
+    post_views::Vector{Any}
 end
 
 ModelMeshingAttributes() = ModelMeshingAttributes(
@@ -408,7 +422,9 @@ ModelMeshingAttributes() = ModelMeshingAttributes(
     _ModelNativeGeoKernel(),Dict{Tuple{Int,Int},_ModelImportedEntity}(),0,
     Dict{Tuple{Int,Int},Vector{Tuple{UInt64,Int32}}}(),
     Dict{Tuple{Int,Int},_ModelPeriodicUIDHistory}(),
-    1e33)
+    1e33,
+    Dict{Int,Tuple{Bool,Int}}(),
+    Any[])
 
 Base.:(==)(a::ModelMeshingAttributes,b::ModelMeshingAttributes)=
     all(n->getfield(a,n)==getfield(b,n),fieldnames(ModelMeshingAttributes))
@@ -9228,7 +9244,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             m,t,caller;min_angle_deg=min_angle_deg,
             max_periodic_passes=max_periodic_passes,size_field=size_field,
             edges=_extrude_edges,scope=_extrude_scope,_mesh_input,
-            _return_production=_return_surface_production)
+            _return_production=_return_surface_production,_options=options)
         swept===nothing || return _recombine3d_fold_surface_part(m,t,swept)
     end
     # A slave surface takes its master's mesh verbatim, like upstream's

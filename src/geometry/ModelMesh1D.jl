@@ -684,6 +684,28 @@ function _model_curve_extrude_params(m::GeoModel,curve::Integer,
         src=(0,first(m.curves[curve]))
     end
     if src[1]==0
+        # A boundary-layer point connector resolved to a zero normal is
+        # upstream's degenerate `MSH_SEGM_BND_LAYER`. `Mesh2DWithBoundary-
+        # Layers` only sweeps connector columns while walls exist — with no
+        # boundary-layer surface in the model the connector stores no
+        # parameters and emits no line elements; otherwise it meshes all
+        # its layers at coincident positions.
+        spec=get(m.meshing.extrude_specs,(1,curve),nothing)
+        if spec isa NamedTuple && get(spec,:type,nothing)===:bl_point
+            _extrude_bl_prepare!(m,caller)
+            spec=get(m.meshing.extrude_specs,(1,curve),nothing)
+        end
+        if spec isa NamedTuple && get(spec,:type,nothing)===:translate &&
+                haskey(spec,:T) && spec.T==(0.0,0.0,0.0)
+            walls=false
+            for ((d,t),s2) in m.meshing.extrude_specs
+                if d==2 && s2 isa NamedTuple &&
+                   get(s2,:type,nothing)===:boundary_layer
+                    walls=true;break
+                end
+            end
+            walls || return Float64[]
+        end
         # `extrudeMesh`: interior nodes at `ep->u(j,k+1)`, skipping the last
         # element's last node (the end vertex owns it).
         heights=params.heights;layers=params.layers
@@ -1823,6 +1845,9 @@ end
 
 function _model_point_mesh_parts(m::GeoModel,caller::AbstractString)
     _model_require_point_mesh_geometry(m,caller)
+    # Pending boundary-layer point copies displace inside the pass before
+    # any point part publishes a coordinate.
+    _extrude_bl_prepare!(m,caller)
     parts=Tuple{Int,Int,Mesh}[]
     for (tag,point) in m.points
         record=get(m.meshing.attached,(0,tag),nothing)
@@ -1867,6 +1892,13 @@ function _model_curve_part_point(m::GeoModel,curve::Integer,u::Float64,
     if src!==nothing
         params=get(m.meshing.extrude,(1,Int(curve)),nothing)
         spec=get(m.meshing.extrude_specs,(1,Int(curve)),nothing)
+        # A standalone boundary-layer point generatrix resolves its sweep
+        # direction lazily against the smooth-normal field — the same arm
+        # `Mesh2DWithBoundaryLayers` runs on BoundaryLayerPoint copies.
+        spec isa NamedTuple &&
+            get(spec,:type,nothing)===:bl_point &&
+            (_extrude_bl_prepare!(m,caller);
+             spec=get(m.meshing.extrude_specs,(1,Int(curve)),nothing))
         if params!==nothing && !isempty(params.layers) && spec!==nothing
             if src[1]==0 && haskey(m.points,src[2])
                 t0,t1=_model_curve_param_bounds(m,curve,caller)
@@ -1880,6 +1912,20 @@ function _model_curve_part_point(m::GeoModel,curve::Integer,u::Float64,
                     _,t1=_model_curve_param_bounds(m,curve,caller)
                     u_min=_model_curve_param_bounds(m,gen,caller)[1]
                     usrc=t1+u_min-u
+                end
+                # Inverse-parametrization probes iterate past the copy's own
+                # bounds; a boundary-layer copy has no extrapolatable source
+                # eval (its tops table is discrete), so the source parameter
+                # clamps to the generatrix domain. Rigid copies keep their
+                # ordinary extrapolation.
+                spec isa NamedTuple &&
+                    get(spec,:type,nothing)===:boundary_layer &&
+                    (usrc=clamp(usrc,_model_curve_param_bounds(m,gen,caller)...))
+                if spec isa NamedTuple &&
+                   get(spec,:type,nothing)===:boundary_layer
+                    p=_periodic_curve_point(m,gen,usrc,caller;
+                        _native_producer,_parameter_source)
+                    return _extrude_bl_row_eval(spec,p,usrc,caller)
                 end
                 u_top=_extrude_level_us(params)[end]
                 return _extrude_at(spec,

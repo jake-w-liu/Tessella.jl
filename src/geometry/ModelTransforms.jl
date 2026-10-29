@@ -1007,11 +1007,12 @@ end
 # Run the three merge passes and return each dimension's dropped=>survivor
 # tag map so callers can resolve post-merge entity tags.
 function _coherence_merge!(m::GeoModel, tol::Real=_COHERENCE_RTOL;
-                          enabled::Bool=true,remove_degenerated::Bool=false)
+                          enabled::Bool=true,remove_degenerated::Bool=false,
+                          keep_points=nothing)
     enabled || return (points=Dict{Int,Int}(),curves=Dict{Int,Int}(),
                        surfaces=Dict{Int,Int}(),removed=Tuple{Int,Int}[])
     eps=_coherence_eps(m,tol)
-    points=_merge_points!(m,eps)
+    points=_merge_points!(m,eps;keep_points)
     curves=_merge_curves!(m)
     surfaces=_merge_surfaces!(m)
     removed=remove_degenerated ? _coherence_remove_degenerated!(m) :
@@ -1090,23 +1091,43 @@ function merge_vertices!(m::GeoModel, tags;
 end
 
 # Returns the dropped=>survivor tag map; empty when nothing merged.
-function _merge_points!(m::GeoModel,eps)
+# `Vertex` merge class — `(Typ != MSH_POINT, boundaryLayerIndex)` upstream;
+# absent entries are ordinary `(false, 0)` records. `CompareTwoPoints` tests
+# the class before position, so boundary-layer copies weld only within their
+# own type+index class and an ordinary copy carrying a nonzero index stays
+# coincident with — never folded into — the index-0 source it duplicated.
+_point_bl_class(m::GeoModel,tag::Int)=
+    get(m.meshing.point_bl,tag,(false,0))
+
+function _merge_points!(m::GeoModel,eps;keep_points=nothing)
     mapping=Dict{Int,Int}()
     isempty(m.points) && return mapping
+    # `keep_points` records created before this merge's class-aware form still
+    # name `MSH_POINT_BND_LAYER` copies; fold them into the boundary-layer
+    # class so both callers see one rule.
+    if keep_points!==nothing
+        for tag in keep_points
+            haskey(m.meshing.point_bl,tag) ||
+                (m.meshing.point_bl[tag]=(true,0))
+        end
+    end
     order=sort!(collect(keys(m.points)))
     if eps==0.0
-        seen=Dict{NTuple{3,Float64},Int}()
+        seen=Dict{Tuple{Bool,Int},Dict{NTuple{3,Float64},Int}}()
         for tag in order
+            cls=_point_bl_class(m,tag)
+            tab=get!(seen,cls,Dict{NTuple{3,Float64},Int}())
             p=m.points[tag]
             key=(p[1]==0.0 ? 0.0 : p[1],p[2]==0.0 ? 0.0 : p[2],
                  p[3]==0.0 ? 0.0 : p[3])
-            keep=get(seen,key,0)
-            keep==0 ? (seen[key]=tag) : (mapping[tag]=keep)
+            keep=get(tab,key,0)
+            keep==0 ? (tab[key]=tag) : (mapping[tag]=keep)
         end
     else
         origin=m.points[first(order)]
         grid=Dict{NTuple{3,Int},Vector{Int}}()
         for tag in order
+            cls=_point_bl_class(m,tag)
             p=m.points[tag]
             cell=_coherence_spatial_cell(p,origin,eps)
             keep=0
@@ -1114,6 +1135,7 @@ function _merge_points!(m::GeoModel,eps)
                 bucket=get(grid,(cell[1]+dx,cell[2]+dy,cell[3]+dz),nothing)
                 bucket===nothing && continue
                 for other in bucket
+                    _point_bl_class(m,other)==cls || continue
                     if _points_close(p,m.points[other],eps)
                         keep=other; break
                     end
@@ -1336,6 +1358,7 @@ function _drop_entity_state!(m::GeoModel, dim::Int, tag::Int)
     delete!(m.meshing.attached,key)
     if dim==0
         delete!(m.point_w,tag)
+        delete!(m.meshing.point_bl,tag)
     elseif dim==1
         delete!(m.meshing.transfinite_curves,tag)
         delete!(m.meshing.degenerated,tag)

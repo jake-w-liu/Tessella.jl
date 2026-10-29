@@ -24,6 +24,51 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### LAY02 boundary-layer `Using View[i]` post-view directions (2026-10-29, working tree)
+
+- `Extrude {Curve{...}; Layers{...}; Using View[i]}` now resolves the merged
+  `.pos` view's vector field as the wall's raw growth direction, matching
+  upstream `addExtrudeNormals`: nonnegative `i` indexes `PView::list` in
+  merge order, `OctreePost::searchVector` vectors feed `x += n[i]*t` with
+  magnitude included (a `(0,2,0)` field tops the strip at `y=+2`), a view
+  with no vector records falls back to the gouraud field, an out-of-range
+  index reports the recoverable `Unknown View[i]: using normals instead`
+  and falls back, `View[-3]` snaps each normalized component with the 0.1
+  deadband, `View[-5]` scales the normalized field by the background field
+  value, and other negatives keep plain normals. A resolved vector view
+  disables the global normalize pass exactly like upstream's
+  `octree && !gouraud` switch — sibling walls keep raw means — and the
+  snap/scale post passes likewise feed the kernel un-renormalized
+  (snapped `(1,-1,0)` stays magnitude √2; a background scale of 2 grows
+  two units), so `_bl_2d_offsets` raw mode skips renormalization and the
+  planar/Jacobian gates whenever a view sampler or post pass owns the
+  direction.
+- `PostViewField` gains `vector_raw`, a raw 3-component interpolant over
+  the same element/scheme infrastructure as the scalar operator (point,
+  line, triangle, quadrangle, tetrahedron, hexahedron, prism, pyramid,
+  and interpolation-scheme records), returning `nothing` for uncovered
+  positions so the miss contributes the zero vector upstream leaves in
+  `nn`.
+- The view list survives into the mesh pass through a new
+  `ModelMeshingAttributes.post_views` snapshot: `_geo_sync_meshing_options!`
+  copies `_GEO_EXEC_VIEWS` at mesh-time model staging, the higher-generation
+  `settings` bundle carries it as `settings.post_views` so
+  `_apply_generation_meshing_options!` does not overwrite it with an empty
+  `SESSION_VIEWS` (the API fallback), and `_model_identity_meshing`
+  migrates both `post_views` and the `point_bl` merge-class map across
+  retags. Transaction copies iterate `fieldnames` and already carried it.
+- Verified against Gmsh 4.15.2 on small fixtures: `Using View[0]` with a
+  `VP` view returns `out=[2,5,4,-3]`, tops `(0,2,0)`/`(1,2,0)`, and
+  `Mesh 2` emits 2 quads spanning `y∈{0,1,2}` identical to the oracle;
+  out-of-plane `(0,1,1)` vectors top at `(0,1,1)`/`(1,1,1)` like the
+  oracle; `View[-3]` on a 45° wall tops `(1,-1)`/`(2,0)` like the oracle;
+  `View[-5]` with `Field[1]=MathEval;F="2";Background Field=1` tops
+  `(0,-2)`/`(1,-2)` like the oracle; `View[9]` reports the same
+  `Unknown View[9]: using normals instead` and still produces.
+- `test/geometry/geo_extrude_boundarylayer_test.jl` now runs
+  69+10+7+23 = 109 assertions green under `--compile=min -O0`;
+  `geo_extrude_test.jl` stays green.
+
 ### Verification ledger — t20 verbatim `TUTORIAL_OK`, api_test tail re-pins (2026-10-28)
 
 - **t20 driver `GMSH_PARITY_T20_TUTORIAL_OK`** on `8a4ba1a` (worktree,
