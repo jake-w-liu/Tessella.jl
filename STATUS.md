@@ -148,13 +148,24 @@ classified; all three were genuine Tessella bugs, fixed narrowly:
   (`io_stl_frontend_test.jl` OCC `Using Wire` testset); the built-in
   factory rejects loudly (`pipe extrusion ... is OpenCASCADE-only`,
   `geo_extrude_test.jl` error-path testset). No gap here.
+- Curved 3-D BL source surfaces already produce the oracle's entity set:
+  a revolved flat-annulus source (`Extrude{Surface{...};Layers{2};
+  Recombine}`) yields exactly the oracle's 31 nodes / 24 segs / 20 tris /
+  16 quads / 20 prisms with 25/31 nodes bitwise and the 6 interior
+  source-mesh nodes differing only by Delaunay placement (r≈1.394 vs
+  1.446); a genuinely cylindrical source (vertical quarter-cylinder wall)
+  yields exactly the oracle's 26 nodes / 20 segs / 16 tris / 12 quads /
+  16 prisms with matching boundary set — the ~18 displaced interior nodes
+  land within ≈0.05 of the oracle (the gouraud corner-fan direction is
+  approximate, not bitwise) rather than rejecting. Spherical and ruled
+  sources still need the same admission audit before a parity claim.
 - Remaining genuine LAY01/LAY02 items: the QuadTriNoNewVerts
   neighboring-region planner (two adjacent NoNew sweeps sharing one
   literal lateral Surface — the bounded design in
-  `docs/handoff/meshing_remaining.md`), curved 3-D BL source-surface
-  admission beyond planar/ruled-certifiable cases, and the
-  `BoundaryLayer Field =` topological mesher itself. Each currently
-  rejects loudly rather than silently mis-meshing.
+  `docs/handoff/meshing_remaining.md`), bitwise curved-wall BL normal
+  fidelity on the cylindrical-source corner fans, and the
+  `BoundaryLayer Field =` topological mesher itself. The unsupported
+  forms each still reject loudly rather than silently mis-meshing.
 
 ### LAY02 holed-face generatrix ordering + native BL grading transport (2026-10-29, `e1eee82`)
 
