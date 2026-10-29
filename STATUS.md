@@ -10870,3 +10870,57 @@ constructor's embedded-constraint plumbing (loud specific reject today);
 the OCC-curved embedded sheet family and `:tric` patch certificates remain
 unimplemented; `model_to_mixed` still rejects surfaces whose curve control
 points leave the surface (sibling-owned file this round).
+
+## 2026-10-29 — HO01 Recombine3D retained-product fold (Devin subagent)
+
+- `Model._recombine3d_fold_authority` (`src/geometry/ModelGmshSurfaceRecombine.jl`)
+  completes the Recombine3D contract for the retained path. Upstream
+  `Mesh3D`/`quadsToTriangles` folds the STORED boundary quadrangles of a
+  `recombine3D` Region before `MeshDelaunayVolume`, so a face meshed before
+  `Recombine Volume`/`Mesh.Recombine3DAll` took effect still reaches the
+  fill all-triangle and stays split in every later read. Tessella now folds
+  the retained authority identically at `_generate_higher_plan` ingest
+  (`dimension==3`): actual Surface cells, per-entity stored records
+  (`m.discrete`/`m.meshing.attached`, folded to the same minted labels and
+  UID supports so ingest dedup still applies), the geometry carrier through
+  its actual-label bindings, and the Surface constructor receipts — each
+  folded quad adopting the two minted triangle labels via `tag_map`/
+  `uid_map`. Labels mint above the caller element high-water, retained tags
+  and record tags, so `_dim01_ingest!` never renumbers a folded triangle
+  away from its constructor/carrier siblings; Transfinite and Layers
+  Regions stay outside the delaunay set as before.
+- Retained receipt: `Mesh 2; Recombine Volume{1}; Mesh 3` on the transfinite
+  recombined unit cube now yields `Dict(4 => 43, 2 => 48, 1 => 24)` — an
+  all-tet fill, all-triangle boundary, folded products and folded
+  constructor receipts (`SURF[i]/CTOR[2,i] -> Dict(2 => 8)`),
+  `validate=true`. Previously the same script retained quads on the
+  boundary and emitted 24 pyramids (`Dict(4 => 124, 7 => 24, 3 => 24,
+  1 => 24)`), contradicting upstream's all-triangle PLC.
+- New regression testset "retained Mesh 2 products fold at Mesh 3 fill
+  time" (22 assertions) covers `Recombine Volume` and a late
+  `Mesh.Recombine3DAll=1` between `Mesh 2`/`Mesh 3`.
+
+Receipts (Julia 1.12.7, `--compile=min -O0` unless noted):
+
+- `test/interfaces/geo_recombine3d_fold_functional_test.jl` — 75/75
+  (was 53/53 before the retained testset).
+- `test/meshing/highorder_test.jl` — 897/897.
+- `test/meshing/highorder_jacobian_test.jl` — 123/123.
+- `test/meshing/high_order_jacobian_certificate_test.jl` — 96/96.
+- `test/geometry/model_occ_surface_p2_test.jl` — 44/44.
+- `test/functional/api.jl` (runner-identical wrapper) — 41/41.
+- `test/meshing/recombine_test.jl` — `--compile=min -O0`: 428 pass,
+  15 `@allocated == 0` fails (minimal-compilation mode artifact, per the
+  documented compiler-mode split); `-O2`: module 1 all pass, pinned
+  directed-edge/priority captures diverge (72/570) — FP-sensitive pinned
+  artifacts on 1e160-scale coordinates, on the discrete-2D
+  `_api_native_recombine_plan` path that this change provably does not
+  touch (`dimension==3` gate); the same pins pass under `--compile=min`.
+- `test/meshing/recombine_matching_test.jl` — `-O2`: 67744+34+30+8 all
+  pass; `--compile=min -O0`: only the `@allocated` bound asserts fail
+  (same mode artifact).
+
+Residual gaps (unchanged by design): `Mesh.Recombine3DLevel`/
+`Mesh.Recombine3DConformity` are verbatim stored options only — upstream's
+`ALGO_3D_RTREE` `meshCombine3D` volume recombination arm remains
+unimplemented; `API.mesh.recombine` is the 2D surface operation.

@@ -196,6 +196,35 @@ end
     m.meshing.recombine_all ||
     haskey(m.meshing.recombine,(2,surface))
 
+# `GRegion::meshAttributes.recombine3D` — `Recombine Volume{...}` or
+# `API.mesh.set_recombine(dim=3)`, plus the `Mesh.Recombine3DAll` global.
+# Upstream's `Generator.cpp` `Mesh3D` splits every quadrangle on each flagged
+# Region's boundary faces back to triangles (`quadsToTriangles`) before the
+# Delaunay fill. Only Delaunay-admitted Regions qualify: Transfinite and
+# Layers-extruded volumes never enter upstream's `delaunay` list, so their
+# face quads are not split there either.
+@inline _model_volume_recombine3d(m::GeoModel,volume::Int) =
+    (m.meshing.recombine_3d_all || haskey(m.meshing.recombine,(3,volume))) &&
+    !haskey(m.meshing.transfinite_volumes,volume) &&
+    ((params=get(m.meshing.extrude,(3,volume),nothing))===nothing ||
+     isempty(params.layers))
+
+# Whether Surface[surface] bounds at least one recombined-3D Region. The
+# literal shell membership read avoids `_model_volume_boundary_surfaces`'s
+# validation throws — the split gate must not fail a face while its Region
+# is still being declared.
+function _model_surface_recombine3d(m::GeoModel,surface::Int)
+    for (volume,shells) in m.volumes
+        _model_volume_recombine3d(m,volume) || continue
+        for shell in shells
+            members=get(m.surface_loops,shell,nothing)
+            members===nothing && continue
+            any(signed->abs(signed)==surface,members) && return true
+        end
+    end
+    return false
+end
+
 """
     set_smoothing!(model, dim, tag, val)
 

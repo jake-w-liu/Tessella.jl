@@ -654,6 +654,9 @@ function _model_identity_meshing(
     migrated.aniso_max=attributes.aniso_max
     migrated.recombine_all=attributes.recombine_all
     migrated.recombine_algo=attributes.recombine_algo
+    migrated.recombine_3d_all=attributes.recombine_3d_all
+    migrated.recombine_3d_level=attributes.recombine_3d_level
+    migrated.recombine_3d_conformity=attributes.recombine_3d_conformity
     migrated.recombine_topology_passes=attributes.recombine_topology_passes
     migrated.recombine_node_repositioning=attributes.recombine_node_repositioning
     migrated.recombine_minimum_quality=attributes.recombine_minimum_quality

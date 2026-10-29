@@ -315,6 +315,14 @@ mutable struct ModelMeshingAttributes
     lc_factor::Float64
     recombine_all::Bool
     recombine_algo::Int
+    # `Mesh.Recombine3DAll` (upstream `CTX::mesh.recombine3DAll`) — the
+    # region-global form of `Recombine Volume`'s `recombine3D` attribute.
+    # `Recombine3DLevel`/`Recombine3DConformity` are stored verbatim; upstream
+    # only consumes them inside the `ALGO_3D_RTREE` `meshCombine3D` path,
+    # which this kernel does not implement.
+    recombine_3d_all::Bool
+    recombine_3d_level::Int
+    recombine_3d_conformity::Int
     recombine_topology_passes::Int
     recombine_node_repositioning::Int
     recombine_minimum_quality::Float64
@@ -380,6 +388,9 @@ ModelMeshingAttributes() = ModelMeshingAttributes(
     1.0,
     false,
     1,
+    false,
+    0,
+    0,
     5,
     true,
     0.01,
@@ -9189,7 +9200,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     planned=_extrude_nonew_surface_mesh(m,t,caller;scope=_extrude_scope,
         min_angle_deg=min_angle_deg,max_periodic_passes=npasses,
         size_field=size_field)
-    planned===nothing || return planned
+    planned===nothing || return _recombine3d_fold_surface_part(m,t,planned)
     # A periodic curve relation whose far endpoint lives on a surface paired
     # with this one by a dim-2 relation needs no local synchronization — the
     # slave-copy path reproduces the master's boundary nodes by construction.
@@ -9218,7 +9229,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             max_periodic_passes=max_periodic_passes,size_field=size_field,
             edges=_extrude_edges,scope=_extrude_scope,_mesh_input,
             _return_production=_return_surface_production)
-        swept===nothing || return swept
+        swept===nothing || return _recombine3d_fold_surface_part(m,t,swept)
     end
     # A slave surface takes its master's mesh verbatim, like upstream's
     # meshGFace copy path — the master is meshed on demand so the relation
@@ -9244,8 +9255,9 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             current=Int(m.periodic[(2,current)].master_entity)
         end
         if _mesh_input!==nothing && _return_surface_production
-            return _model_periodic_surface_production(m,surface_constraint,
-                _mesh_input,_mesh_node_high_water,_mesh_element_high_water,caller)
+            return _recombine3d_fold_surface_part(m,t,
+                _model_periodic_surface_production(m,surface_constraint,
+                _mesh_input,_mesh_node_high_water,_mesh_element_high_water,caller))
         end
         master_mesh=mesh_model_surface(
             m,Int(surface_constraint.master_entity);
@@ -9255,7 +9267,8 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             _boundary_regrade=_boundary_regrade)
         output=_model_periodic_surface_mesh(
             m,master_mesh,surface_constraint,caller)
-        return _model_surface_boundary_writeback!(m,t,output,caller)
+        return _recombine3d_fold_surface_part(m,t,
+            _model_surface_boundary_writeback!(m,t,output,caller))
     end
     # Parametric OCC faces — analytic Cylinder/Sphere/Cone/Torus records and
     # tensor patches carrying edge pcurves (trimmed NURBS surfaces, lofts and
@@ -9311,7 +9324,8 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
                     production.source_node_updates,
                     production.native_recombine_events,production.curve_chains)
             end
-            return _return_surface_production ? production : mesh
+            return _recombine3d_fold_surface_part(m,t,
+                _return_surface_production ? production : mesh)
         end
         if _return_surface_production
             # meshGFace consumes the actual lower-dimensional products, so
@@ -9329,8 +9343,9 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
                 "$caller: Surface[$t] produced no cells"))
             get(m.meshing.reverse,(2,t),false) &&
                 (mesh=_reversed_surface_mesh(mesh,caller,t))
-            return _occ_curved_surface_production(m,t,mesh,owners,params,
-                lower_input,lower_limit,caller)
+            return _recombine3d_fold_surface_part(m,t,
+                _occ_curved_surface_production(m,t,mesh,owners,params,
+                lower_input,lower_limit,caller))
         end
         mesh=_model_occ_curved_surface_mesh(m,t,caller;
             initial_only=algorithm==3,_mesh1d_options=options)
@@ -9345,7 +9360,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         # canonical `_periodic_curve_point` evaluations shared bitwise with
         # every sibling face, and the welded 3-D mesh carries no dedicated
         # boundary-edge chain for seam edges to recover against.
-        return mesh
+        return _recombine3d_fold_surface_part(m,t,mesh)
     end
     # Gate the CDT path before lazy boundary-curve grading touches curve
     # evaluators — a curved or geometrically inconsistent surface must reject
@@ -9423,10 +9438,11 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             actual.element_tags,actual.element_high_water,actual.birth_rows,
             actual.constructor_mesh,actual.source_node_updates,
             actual.native_recombine_events,actual.curve_chains)
-        return production isa _ModelSurfaceGeometryProduction ?
-            _ModelSurfaceGeometryProduction(result,production.geometry) : result
+        return _recombine3d_fold_surface_part(m,t,
+            production isa _ModelSurfaceGeometryProduction ?
+            _ModelSurfaceGeometryProduction(result,production.geometry) : result)
     end
-    return mesh
+    return _recombine3d_fold_surface_part(m,t,mesh)
 end
 
 @inline function _model_compensated_add(

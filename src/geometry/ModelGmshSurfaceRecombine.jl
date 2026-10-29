@@ -672,3 +672,432 @@ function _gmsh_native_surface_recombine(m,tag,product,world,protected,frame,call
     _native_recombine_process!(state,m,tag,protected)
     return _native_recombine_export(product,state,tag,caller)
 end
+
+# ── Recombine3D surface fold ────────────────────────────────────────────────
+# Upstream `Generator.cpp` `Mesh3D` runs `quadsToTriangles(gf, 1e6)` on every
+# boundary GFace of a `recombine3D`-flagged (or `Mesh.Recombine3DAll`) Region
+# before `MeshDelaunayVolume`, so the stored face mesh ends with the split
+# triangles and the volume fill sees an all-triangle PLC. Folding the same
+# dim-2 cells at the product boundary reproduces that contract: the published
+# Surface blocks keep the split triangles in quad order and the Region's
+# native hybrid admission sees no quadrangles.
+#
+# The diagonal choice mirrors `meshGFaceOptimize.cpp`'s — the better of the
+# two candidate pairs by triangle gamma, with the second diagonal chosen when
+# folding the first would revert orientation on a non-convex quad. It is the
+# same test `_native_recombine_split_quality!` applies for
+# `RecombineMinimumQuality`.
+@inline function _recombine3d_tri_gamma(p,q,r)
+    va=_native_recombine_unit(Mesh2D._gmsh_sub3(r,q))
+    vb=_native_recombine_unit(Mesh2D._gmsh_sub3(p,r))
+    vc=_native_recombine_unit(Mesh2D._gmsh_sub3(q,p))
+    sa=Mesh2D._gmsh_norm3(Mesh2D._gmsh_cross3(vb,vc))
+    sb=Mesh2D._gmsh_norm3(Mesh2D._gmsh_cross3(vc,va))
+    sc=Mesh2D._gmsh_norm3(Mesh2D._gmsh_cross3(va,vb))
+    sa==0 && sb==0 && sc==0 && return 0.0
+    return 2.0*(2.0*sa*sb*sc/(sa+sb+sc))
+end
+
+function _recombine3d_fold_pair(coords,nodes::NTuple{4,Int32})
+    p=ntuple(i->ntuple(axis->coords[axis,Int(nodes[i])],3),4)
+    first=(nodes[1],nodes[2],nodes[3]);second=(nodes[3],nodes[4],nodes[1])
+    third=(nodes[2],nodes[3],nodes[4]);fourth=(nodes[4],nodes[1],nodes[2])
+    quality1=min(_recombine3d_tri_gamma(p[1],p[2],p[3]),
+                 _recombine3d_tri_gamma(p[3],p[4],p[1]))
+    quality2=min(_recombine3d_tri_gamma(p[2],p[3],p[4]),
+                 _recombine3d_tri_gamma(p[4],p[1],p[2]))
+    n1=Mesh2D._gmsh_cross3(Mesh2D._gmsh_sub3(p[3],p[2]),
+                           Mesh2D._gmsh_sub3(p[4],p[2]))
+    n2=Mesh2D._gmsh_cross3(Mesh2D._gmsh_sub3(p[1],p[4]),
+                           Mesh2D._gmsh_sub3(p[2],p[4]))
+    return quality1>quality2 || Mesh2D._gmsh_dot3(n1,n2)<0 ?
+        ((first,second),(1,2)) : ((third,fourth),(3,4))
+end
+
+# Fold every linear quadrangle block into the published triangle set. The
+# merged msh-2 block takes the first dim-2 block's position — the same
+# triangles-first order upstream's appended `gf->triangles` produce.
+function _recombine3d_fold_mesh(mesh::MixedMesh)
+    any(block->block isa ElementBlock && block.msh==3 && !isempty(block.nodes),
+        mesh.blocks) || return mesh
+    triangles=NTuple{3,Int32}[];triangle_tags=Int32[]
+    offsets=Vector{NTuple{2,Int}}()
+    for block in mesh.blocks
+        block isa ElementBlock || continue
+        block.msh==2 || continue
+        for column in axes(block.nodes,2)
+            push!(triangles,Tuple(block.nodes[:,column]))
+            push!(triangle_tags,block.tags[column])
+        end
+    end
+    for block in mesh.blocks
+        block isa ElementBlock && block.msh==3 || continue
+        for column in axes(block.nodes,2)
+            pair,offset=_recombine3d_fold_pair(mesh.coords,
+                Tuple(block.nodes[:,column]))
+            push!(triangles,pair[1],pair[2]);push!(offsets,offset)
+            append!(triangle_tags,(block.tags[column],block.tags[column]))
+        end
+    end
+    nodes=Matrix{Int32}(undef,3,length(triangles))
+    for column in eachindex(triangles),row in 1:3
+        nodes[row,column]=triangles[column][row]
+    end
+    blocks=ElementBlock[];inserted=false
+    for block in mesh.blocks
+        if block isa ElementBlock && block.msh in (2,3)
+            inserted || (push!(blocks,ElementBlock(2,nodes,triangle_tags));
+                         inserted=true)
+        else
+            push!(blocks,block)
+        end
+    end
+    inserted || push!(blocks,ElementBlock(2,nodes,triangle_tags))
+    return MixedMesh(copy(mesh.coords),blocks;
+        physical_names=mesh.physical_names,
+        elementary_entities=mesh.elementary_entities,
+        periodic_links=mesh.periodic_links,
+        ancillary_sections=mesh.ancillary_sections,
+        data_sections=mesh.data_sections,
+        partition_data=mesh.partition_data),
+        length(offsets),offsets
+end
+_recombine3d_fold_mesh(mesh::Mesh)=(mesh,0,NTuple{2,Int}[])
+
+# The fold keeps every node — parameters, owners, retained flags and birth
+# rows carry over unchanged. Element births follow the native split-quality
+# convention: each folded quad reserves four consecutive labels and emits
+# the chosen pair's offsets, so the published tag list matches the native
+# recombination receipt when it would have split the same quads.
+function _recombine3d_fold_production(m::GeoModel,surface::Int,production)
+    _model_surface_recombine3d(m,surface) || return production
+    production isa _ModelSurfaceProduction || return production
+    folded,nquads,offsets=_recombine3d_fold_mesh(production.mesh)
+    folded===production.mesh && return production
+    element_tags=production.element_tags
+    element_high_water=production.element_high_water
+    if !isempty(element_tags)
+        tri_cells=sum(size(block.nodes,2) for block in production.mesh.blocks
+            if block isa ElementBlock && block.msh==2;init=0)
+        length(element_tags)==tri_cells+nquads || throw(ArgumentError(
+            "recombine3d fold: production element receipts do not cover its dim-2 cells"))
+        element_high_water+UInt64(4)*nquads<=typemax(UInt64) || throw(ArgumentError(
+            "recombine3d fold: quad split births exhaust UInt64 labels"))
+        base=element_high_water
+        folded_tags=UInt64[]
+        sizehint!(folded_tags,tri_cells+2*nquads)
+        append!(folded_tags,element_tags[1:tri_cells])
+        for (index,offset) in enumerate(offsets)
+            birth=base+UInt64(4)*(index-1)
+            push!(folded_tags,birth+offset[1],birth+offset[2])
+        end
+        element_tags=folded_tags;element_high_water=base+UInt64(4)*nquads
+    end
+    constructor_mesh=production.constructor_mesh===nothing ? nothing :
+        first(_recombine3d_fold_mesh(production.constructor_mesh))
+    return _ModelSurfaceProduction(folded,production.node_tags,
+        production.node_owners,production.node_parameters,
+        production.retained_nodes,production.node_high_water,
+        element_tags,element_high_water,production.birth_rows,constructor_mesh,
+        production.source_node_updates,production.native_recombine_events,
+        production.curve_chains)
+end
+
+function _recombine3d_fold_surface_part(m::GeoModel,surface::Int,part)
+    _model_surface_recombine3d(m,surface) || return part
+    part isa _ModelSurfaceGeometryProduction && return _ModelSurfaceGeometryProduction(
+        _recombine3d_fold_production(m,surface,part.production),
+        first(_recombine3d_fold_mesh(part.geometry)))
+    part isa _ModelSurfaceProduction && return _recombine3d_fold_production(m,surface,part)
+    part isa MixedMesh && return first(_recombine3d_fold_mesh(part))
+    return part
+end
+
+# ── Recombine3D retained-product fold ───────────────────────────────────────
+# Upstream's `Mesh3D` (`Generator.cpp`) runs `quadsToTriangles` on the STORED
+# face mesh of every boundary `GFace` of a `recombine3D` Region at volume-fill
+# time, so a face meshed before `Recombine Volume`/`Mesh.Recombine3DAll` took
+# effect still feeds `MeshDelaunayVolume` an all-triangle PLC — and stays
+# split for every later read of that face's mesh.  The retained authority is
+# that stored state: fold its actual Surface cells, the shared geometry
+# carrier and the Surface constructor receipts identically, minting each
+# split child a fresh element label.  `_dim01_ingest!` raises the assembly
+# counter over the minted labels like any other retained source, and the
+# republished products keep the split for good.
+#
+# Only the all-triangle Delaunay arm folds; Transfinite and Layers-extruded
+# Regions are excluded by `_model_volume_recombine3d` exactly like upstream's
+# `delaunay` list.
+function _recombine3d_fold_authority(m::GeoModel,authority;caller="recombine3D retained fold",
+                                     above::UInt64=UInt64(0))
+    authority===nothing && return authority
+    mesh=authority.mesh
+    mesh isa MixedMesh && mesh.entity_data!==nothing || return authority
+    surfaces=Set{Int32}()
+    for (volume,shells) in m.volumes
+        _model_volume_recombine3d(m,volume) || continue
+        for shell in shells
+            members=get(m.surface_loops,shell,nothing)
+            members===nothing && continue
+            for signed in members
+                push!(surfaces,Int32(abs(signed)))
+            end
+        end
+    end
+    isempty(surfaces) && return authority
+    data=mesh.entity_data
+    # Mint above every label the assembler can already own — retained cells,
+    # the caller's element high-water and discrete-record cells — so ingest
+    # never renumbers a folded triangle away from its constructor/carrier
+    # sibling labels.
+    next=max(above,
+        maximum(tags->maximum(tags;init=UInt64(0)),
+            data.external_element_tags;init=UInt64(0)),
+        maximum(pair->maximum(pair[2].element_tags;init=UInt64(0)),
+            _discrete_mesh_records_model(m);init=UInt64(0)))
+    # old actual quad label -> (two emitted triangle labels, their node-UID
+    # supports in emitted order), so the carrier bindings, the stored records
+    # and the constructor receipts adopt identical labels and support.
+    tag_map=Dict{UInt64,NTuple{2,UInt64}}()
+    uid_map=Dict{UInt64,NTuple{2,NTuple{3,UInt64}}}()
+    blocks=ElementBlock[];owners_out=Vector{Int32}[];tags_out=Vector{UInt64}[]
+    elementary_out=mesh.elementary_entities===nothing ? nothing :
+        Vector{Int32}[]
+    folded_any=false
+    for (bi,block) in enumerate(mesh.blocks)
+        block isa ElementBlock || throw(ArgumentError(
+            "$caller: retained authority carries a non-element block"))
+        owners=data.block_entities[bi];tags=data.external_element_tags[bi]
+        elementary_b=mesh.elementary_entities===nothing ? nothing :
+            mesh.elementary_entities[bi]
+        if block.msh!=3 || isempty(block.nodes) ||
+                !any(owner->owner in surfaces,owners)
+            push!(blocks,block);push!(owners_out,owners);push!(tags_out,tags)
+            elementary_out===nothing || push!(elementary_out,elementary_b)
+            continue
+        end
+        folded_any=true
+        tris=Int32[];tri_phys=Int32[];tri_owners=Int32[];tri_tags=UInt64[]
+        quads=Int32[];quad_phys=Int32[];quad_owners=Int32[];quad_tags=UInt64[]
+        tri_elementary=Int32[];quad_elementary=Int32[]
+        for column in axes(block.nodes,2)
+            if owners[column] in surfaces
+                pair,_=_recombine3d_fold_pair(mesh.coords,Tuple(block.nodes[:,column]))
+                first_tag=next+UInt64(1);second_tag=next+UInt64(2);next=second_tag
+                tag_map[tags[column]]=(first_tag,second_tag)
+                uid_map[tags[column]]=(Tuple(data.external_node_tags[pair[1][k]]
+                                             for k in 1:3),
+                                       Tuple(data.external_node_tags[pair[2][k]]
+                                             for k in 1:3))
+                for (conn,label) in zip(pair,(first_tag,second_tag))
+                    append!(tris,conn)
+                    push!(tri_phys,block.tags[column])
+                    push!(tri_owners,owners[column]);push!(tri_tags,label)
+                    elementary_b===nothing ||
+                        push!(tri_elementary,elementary_b[column])
+                end
+            else
+                append!(quads,block.nodes[:,column])
+                push!(quad_phys,block.tags[column])
+                push!(quad_owners,owners[column]);push!(quad_tags,tags[column])
+                elementary_b===nothing ||
+                    push!(quad_elementary,elementary_b[column])
+            end
+        end
+        isempty(tris) || (push!(blocks,ElementBlock(2,reshape(tris,3,:),tri_phys));
+            push!(owners_out,tri_owners);push!(tags_out,tri_tags);
+            elementary_out===nothing || push!(elementary_out,tri_elementary))
+        isempty(quads) || (push!(blocks,ElementBlock(3,reshape(quads,4,:),quad_phys));
+            push!(owners_out,quad_owners);push!(tags_out,quad_tags);
+            elementary_out===nothing || push!(elementary_out,quad_elementary))
+    end
+    folded_any || return authority
+    # `Mesh 2` products also live as per-entity stored records, which ingest
+    # dedups against the authoritative cells by (type, owner, connectivity).
+    # A folded triangle never dedups a stored quad, so the same split must be
+    # applied to every flagged Surface record — the second copy of upstream's
+    # stored face state.  Elements whose stored support disagrees with the
+    # actual quad are left untouched for ingest to arbitrate.
+    for (owner,record) in _discrete_mesh_records_model(m)
+        owner[1]==2 && Int32(owner[2]) in surfaces || continue
+        isempty(record.element_tags) && continue
+        any(i->record.element_types[i]==Int32(3) &&
+            haskey(tag_map,record.element_tags[i]),
+            eachindex(record.element_tags)) || continue
+        types=Int32[];tags=UInt64[];nodes=Vector{UInt64}[]
+        for i in eachindex(record.element_tags)
+            label=record.element_tags[i]
+            if record.element_types[i]==Int32(3) && haskey(tag_map,label)
+                conns=uid_map[label]
+                if Set(Iterators.flatten(conns))==Set(record.element_nodes[i])
+                    for (child,support) in zip(tag_map[label],conns)
+                        push!(types,Int32(2));push!(tags,child)
+                        push!(nodes,collect(support))
+                    end
+                    continue
+                end
+            end
+            push!(types,record.element_types[i]);push!(tags,label)
+            push!(nodes,record.element_nodes[i])
+        end
+        record.element_types=types;record.element_tags=tags
+        record.element_nodes=nodes
+    end
+    folded_data=Elements._native_mixed_entity_data(data.entities;
+        node_entities=data.node_entities,node_parametric=data.node_parametric,
+        external_node_tags=data.external_node_tags,
+        block_entities=owners_out,external_element_tags=tags_out)
+    folded_mesh=MixedMesh(mesh.coords,blocks;
+        physical_names=mesh.physical_names,entity_data=folded_data,
+        elementary_entities=elementary_out,
+        periodic_links=mesh.periodic_links,
+        ancillary_sections=mesh.ancillary_sections,
+        data_sections=mesh.data_sections,partition_data=mesh.partition_data)
+    # Surface constructor receipts mirror their surface's actual cells; each
+    # folded quad keeps the two labels the actual fold minted for it.
+    folded_inputs=Dict{Tuple{Int,Int32},MixedMesh}()
+    for (owner,constructor) in authority.surface_constructor_inputs
+        if !(owner[1]==2 && owner[2] in surfaces)
+            folded_inputs[owner]=constructor;continue
+        end
+        cdata=constructor.entity_data
+        cdata===nothing && throw(ArgumentError(
+            "$caller: retained Surface[$(Int(owner[2]))] constructor receipt lacks element labels"))
+        cblocks=ElementBlock[];cowners=Vector{Int32}[];ctags=Vector{UInt64}[]
+        celem=constructor.elementary_entities===nothing ? nothing :
+            Vector{Int32}[]
+        for (bi,block) in enumerate(constructor.blocks)
+            owners_b=cdata.block_entities[bi];tags_b=cdata.external_element_tags[bi]
+            elem_b=constructor.elementary_entities===nothing ? nothing :
+                constructor.elementary_entities[bi]
+            if block.msh!=3 || isempty(block.nodes)
+                push!(cblocks,block);push!(cowners,owners_b);push!(ctags,tags_b)
+                celem===nothing || push!(celem,elem_b)
+                continue
+            end
+            cnodes=Int32[];cphys=Int32[];co=Int32[];ct=UInt64[];ce=Int32[]
+            for column in axes(block.nodes,2)
+                mapped=get(tag_map,tags_b[column],nothing)
+                mapped===nothing && throw(ArgumentError(
+                    "$caller: retained Surface[$(Int(owner[2]))] constructor quad lost its actual element label"))
+                pair,_=_recombine3d_fold_pair(constructor.coords,
+                    Tuple(block.nodes[:,column]))
+                for (conn,label) in zip(pair,mapped)
+                    append!(cnodes,conn)
+                    push!(cphys,block.tags[column])
+                    push!(co,owners_b[column]);push!(ct,label)
+                    elem_b===nothing || push!(ce,elem_b[column])
+                end
+            end
+            push!(cblocks,ElementBlock(2,reshape(cnodes,3,:),cphys))
+            push!(cowners,co);push!(ctags,ct)
+            celem===nothing || push!(celem,ce)
+        end
+        new_data=Elements._native_mixed_entity_data(cdata.entities;
+            node_entities=cdata.node_entities,node_parametric=cdata.node_parametric,
+            external_node_tags=cdata.external_node_tags,
+            block_entities=cowners,external_element_tags=ctags)
+        folded_inputs[owner]=MixedMesh(constructor.coords,cblocks;
+            physical_names=constructor.physical_names,entity_data=new_data,
+            elementary_entities=celem,
+            periodic_links=constructor.periodic_links,
+            ancillary_sections=constructor.ancillary_sections,
+            data_sections=constructor.data_sections,
+            partition_data=constructor.partition_data)
+    end
+    # The geometry carrier folds the same cells through its actual-label
+    # bindings; a carrier that is the actual mesh is already folded, and a
+    # plain Mesh carrier holds only simplices.
+    carrier=authority.carrier
+    folded_carrier=carrier;folded_bindings=nothing
+    if carrier===mesh
+        folded_carrier=folded_mesh
+        folded_bindings=tags_out
+    elseif carrier isa MixedMesh && !isempty(authority.carrier_cells)
+        cdata=carrier.entity_data
+        cnext=cdata===nothing ? UInt64(0) : maximum(
+            tags->maximum(tags;init=UInt64(0)),cdata.external_element_tags;
+            init=UInt64(0))
+        cblocks=ElementBlock[];cowners=Vector{Int32}[];ctags=Vector{UInt64}[]
+        cbind=Vector{Union{Nothing,UInt64}}[]
+        celem=carrier.elementary_entities===nothing ? nothing :
+            Vector{Int32}[]
+        for (bi,block) in enumerate(carrier.blocks)
+            bind_b=authority.carrier_cells[bi]
+            owners_b=cdata===nothing ? fill(Int32(0),size(block.nodes,2)) :
+                cdata.block_entities[bi]
+            tags_b=cdata===nothing ? fill(UInt64(0),size(block.nodes,2)) :
+                cdata.external_element_tags[bi]
+            elem_b=carrier.elementary_entities===nothing ? nothing :
+                carrier.elementary_entities[bi]
+            foldable=block.msh==3 && !isempty(block.nodes) &&
+                any(column->(bind_b[column]!==nothing &&
+                             haskey(tag_map,bind_b[column])) ||
+                            (bind_b[column]===nothing &&
+                             owners_b[column] in surfaces),
+                    axes(block.nodes,2))
+            if !foldable
+                push!(cblocks,block);push!(cowners,owners_b)
+                push!(ctags,tags_b);push!(cbind,bind_b)
+                celem===nothing || push!(celem,elem_b)
+                continue
+            end
+            cnodes=Int32[];cphys=Int32[];co=Int32[];ct=UInt64[]
+            cb=Union{Nothing,UInt64}[];ce=Int32[]
+            for column in axes(block.nodes,2)
+                bound=bind_b[column]
+                if bound!==nothing && haskey(tag_map,bound)
+                    pair,_=_recombine3d_fold_pair(carrier.coords,
+                        Tuple(block.nodes[:,column]))
+                    mapped=tag_map[bound]
+                    for (conn,label) in zip(pair,mapped)
+                        append!(cnodes,conn)
+                        push!(cphys,block.tags[column]);push!(co,owners_b[column])
+                        cnext+=UInt64(1);push!(ct,cnext);push!(cb,label)
+                        elem_b===nothing || push!(ce,elem_b[column])
+                    end
+                elseif bound===nothing && owners_b[column] in surfaces
+                    # Stored face quad with no actual backing — upstream
+                    # still splits it; the children stay unbound.
+                    pair,_=_recombine3d_fold_pair(carrier.coords,
+                        Tuple(block.nodes[:,column]))
+                    for conn in pair
+                        append!(cnodes,conn)
+                        push!(cphys,block.tags[column]);push!(co,owners_b[column])
+                        cnext+=UInt64(1);push!(ct,cnext);push!(cb,nothing)
+                        elem_b===nothing || push!(ce,elem_b[column])
+                    end
+                else
+                    append!(cnodes,block.nodes[:,column])
+                    push!(cphys,block.tags[column]);push!(co,owners_b[column])
+                    push!(ct,tags_b[column]);push!(cb,bound)
+                    elem_b===nothing || push!(ce,elem_b[column])
+                end
+            end
+            push!(cblocks,ElementBlock(2,reshape(cnodes,3,:),cphys))
+            push!(cowners,co);push!(ctags,ct);push!(cbind,cb)
+            celem===nothing || push!(celem,ce)
+        end
+        new_data=cdata===nothing ? nothing :
+            Elements._native_mixed_entity_data(cdata.entities;
+                node_entities=cdata.node_entities,
+                node_parametric=cdata.node_parametric,
+                external_node_tags=cdata.external_node_tags,
+                block_entities=cowners,external_element_tags=ctags)
+        folded_carrier=MixedMesh(carrier.coords,cblocks;
+            physical_names=carrier.physical_names,entity_data=new_data,
+            elementary_entities=celem,
+            periodic_links=carrier.periodic_links,
+            ancillary_sections=carrier.ancillary_sections,
+            data_sections=carrier.data_sections,
+            partition_data=carrier.partition_data)
+        folded_bindings=cbind
+    end
+    base=_model_mesh_authority(folded_mesh,authority.done;caller,
+        private_rank=authority.private_rank,
+        carrier=folded_carrier,carrier_rows=authority.carrier_rows,
+        carrier_cells=folded_bindings)
+    return _ModelMeshAuthority(base.mesh,base.products,base.done,
+        base.private_rank,authority.native_inputs,base.carrier,base.carrier_rows,
+        authority.producer_rows,base.carrier_cells,folded_inputs)
+end

@@ -1032,6 +1032,7 @@ end
 function validate(m::Mesh; require_positive_tets::Bool=true,
                   require_manifold_tris::Bool=ntets(m)==0,
                   allow_degenerate_segs::Bool=false,
+                  allow_flat_tets::Bool=false,
                   tri_owners::Union{Nothing,AbstractVector{<:Integer}}=nothing,
                   pinch_link_chi::AbstractDict{Int32,Int}=Dict{Int32,Int}())
     msgs = String[]
@@ -1081,7 +1082,7 @@ function validate(m::Mesh; require_positive_tets::Bool=true,
         end
     end
     nbadvol > 0 && push!(msgs, "$nbadvol tets have non-finite computed volume")
-    nflat > 0 && push!(msgs, "$nflat degenerate (zero-volume) tets")
+    nflat > 0 && !allow_flat_tets && push!(msgs, "$nflat degenerate (zero-volume) tets")
     if require_positive_tets && nneg > 0
         push!(msgs, "$nneg negatively-oriented tets")
     end

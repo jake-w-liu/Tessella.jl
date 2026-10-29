@@ -213,6 +213,9 @@ function _model_import_prepare_result(result,path,options,diagnostics;legacy=fal
     model.meshing.transfinite_tri=Int(options["Mesh.TransfiniteTri"])
     if extension==".geo"
         for (name,field) in (("Mesh.Algorithm",:algorithm_2d),("Mesh.Algorithm3D",:algorithm_3d),
+                ("Mesh.Recombine3DAll",:recombine_3d_all),
+                ("Mesh.Recombine3DLevel",:recombine_3d_level),
+                ("Mesh.Recombine3DConformity",:recombine_3d_conformity),
                 ("Mesh.RecombineOptimizeTopology",:recombine_topology_passes),
                 ("Mesh.RecombineNodeRepositioning",:recombine_node_repositioning),
                 ("Mesh.RecombineMinimumQuality",:recombine_minimum_quality),

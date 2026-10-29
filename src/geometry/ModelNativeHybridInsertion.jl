@@ -471,6 +471,59 @@ function smooth(product,initial_rows,passes,caller)
     return merge(product,(mesh=mesh,))
 end
 
+# An exactly-flat queued constructor cell has no finite circumcentre, and its
+# coplanar barycentre would simply recreate the degeneracy on retriangulation.
+# Its cavity is instead consumed by a Steiner vertex displaced along the cell
+# normal toward the region interior — the same transient admission upstream
+# performs inside insertVerticesInRegion, where inserted interior vertices
+# absorb the co-spherical coplanar cell through ordinary cavity growth.
+function _flat_native_candidate(T,t,vertices)
+    points=ntuple(slot->D._pt(T,vertices[slot]),4)
+    a,b,c,d=points
+    bary=ntuple(axis->(a[axis]+b[axis]+c[axis]+d[axis])/4,3)
+    # The most robust plane normal comes from the largest-area face triple.
+    faces=((a,b,c),(a,b,d),(a,c,d),(b,c,d))
+    normal=nothing;magnitude=0.0
+    for (p,q,r) in faces
+        u=(q[1]-p[1],q[2]-p[2],q[3]-p[3]);v=(r[1]-p[1],r[2]-p[2],r[3]-p[3])
+        n=(u[2]*v[3]-u[3]*v[2],u[3]*v[1]-u[1]*v[3],u[1]*v[2]-u[2]*v[1])
+        m=n[1]*n[1]+n[2]*n[2]+n[3]*n[3]
+        if m>magnitude;magnitude=m;normal=n;end
+    end
+    (normal===nothing || !(magnitude>0.0) || !isfinite(magnitude)) && return nothing
+    scale=sqrt(magnitude);normal=(normal[1]/scale,normal[2]/scale,normal[3]/scale)
+    edge=0.0;count=0
+    for first in 1:4,last in first+1:4
+        p=points[first];q=points[last]
+        edge+=sqrt((p[1]-q[1])^2+(p[2]-q[2])^2+(p[3]-q[3])^2);count+=1
+    end
+    mean_edge=edge/count
+    # Orient the normal toward the interior: any live non-coplanar neighbour's
+    # centroid sits on the region side of the constructor plane.
+    offset=nothing
+    for slot in 1:4
+        nb=D._nbr(T,t,slot)
+        # A ghost or dead neighbour has no finite region-side centroid —
+        # its GHOST3 vertex would read outside the coordinate arrays.
+        (nb!=0 && T.alive[nb] && !D._is_ghost_tet(T,nb)) || continue
+        centre=ntuple(axis->begin
+            s=0.0
+            for k in 1:4;s+=D._pt(T,D._vert(T,nb,k))[axis];end
+            s/4
+        end,3)
+        projection=(centre[1]-bary[1])*normal[1]+(centre[2]-bary[2])*normal[2]+
+            (centre[3]-bary[3])*normal[3]
+        abs(projection)<=1e-12*mean_edge && continue
+        distance=abs(projection)
+        (offset===nothing || distance<offset[2]) &&
+            (offset=(sign(projection),distance))
+    end
+    offset===nothing && return nothing
+    step=min(0.5*offset[2],0.25*mean_edge)
+    step>0 || return nothing
+    return ntuple(axis->bary[axis]+offset[1]*step*normal[axis],3)
+end
+
 function refine_owned(mesh::M.Mesh,background_size,sizing,caller;
         extend_boundary::Bool=true,minimize_boundary::Bool=false,
         embedded_sizes=Dict{Int32,Float64}(),
@@ -490,7 +543,12 @@ function refine_owned(mesh::M.Mesh,background_size,sizing,caller;
     nn=size(mesh.coords,2);nt=size(mesh.tets,2)
     (nn<=max_nodes && nt<=max_tets) || throw(ArgumentError(
         "$caller: input exceeds the construction limits"))
-    diagnostic=M.validate(mesh)
+    # A centroid-fan boundary can feed the exact-coordinate kernel a co-spherical
+    # coplanar set whose only valid-by-construction cell is flat in real
+    # coordinates — upstream's insertVerticesInRegion admits such transient
+    # constructor cells and the cavity refinement below consumes them
+    # identically. Every other input invariant still applies.
+    diagnostic=M.validate(mesh;allow_flat_tets=true)
     diagnostic.ok || throw(ArgumentError("$caller: invalid input — "*join(diagnostic.messages,"; ")))
     T,tags,exterior=D._gmsh3_triangulation(mesh)
     region_background && (length(mesh.tet_tag)!=nt || any(<=(0),mesh.tet_tag)) &&
@@ -536,6 +594,19 @@ function refine_owned(mesh::M.Mesh,background_size,sizing,caller;
         iteration+=1
         point=storage===nothing ? D._gmsh3_center(T,t) :
             D._gmsh3_native_center(T,storage[t])
+        if storage!==nothing
+            flat_points=ntuple(slot->D._pt(T,storage[t][slot]),4)
+            if D._orient3_value(flat_points[2],flat_points[3],flat_points[4],
+                    flat_points[1])==0.0
+                offset=_flat_native_candidate(T,t,storage[t])
+                if offset===nothing
+                    # No interior neighbour can orient the displaced candidate;
+                    # leave the transient cell for another insertion's cavity.
+                    push!(skipped,entry.key);continue
+                end
+                point=offset
+            end
+        end
         if metric!==nothing
             vertices=storage===nothing ?
                 ntuple(slot->D._vert(T,t,slot),4) : storage[t]

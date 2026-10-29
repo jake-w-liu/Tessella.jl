@@ -7354,6 +7354,9 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         m.meshing.aniso_max=1e33
         m.meshing.recombine_all=false
         m.meshing.recombine_algo=1
+        m.meshing.recombine_3d_all=false
+        m.meshing.recombine_3d_level=0
+        m.meshing.recombine_3d_conformity=0
         m.meshing.lc_extend_from_boundary=1
         context.extrude_return_lateral=true
         empty!(context.option_strings);empty!(context.option_numbers)
@@ -9560,6 +9563,14 @@ function _geo_sync_meshing_options!(m::GeoModel,context::_GeoNumericContext)
     m.meshing.recombine_algo=_geo_signed_gmsh_int_value(something(
         _geo_option_number(context,"Mesh",0,"RecombinationAlgorithm"),1.0),
         "execute_geo: Mesh.RecombinationAlgorithm")
+    m.meshing.recombine_3d_all=!iszero(something(
+        _geo_option_number(context,"Mesh",0,"Recombine3DAll"),0.0))
+    m.meshing.recombine_3d_level=_geo_signed_gmsh_int_value(something(
+        _geo_option_number(context,"Mesh",0,"Recombine3DLevel"),0.0),
+        "execute_geo: Mesh.Recombine3DLevel")
+    m.meshing.recombine_3d_conformity=_geo_signed_gmsh_int_value(something(
+        _geo_option_number(context,"Mesh",0,"Recombine3DConformity"),0.0),
+        "execute_geo: Mesh.Recombine3DConformity")
     _geo_sync_native_surface_controls!(m,context)
     m.meshing.lc_extend_from_boundary=_geo_signed_gmsh_int_value(something(
         _geo_option_number(context,"Mesh",0,"MeshSizeExtendFromBoundary"),1.0),
@@ -10016,6 +10027,9 @@ function _geo_mesh_actual_higher(m,dim,context,caller)
         flexible_transfinite=working.meshing.flexible_transfinite,
         lc_factor=working.meshing.lc_factor,recombine_all=working.meshing.recombine_all,
         recombine_algo=working.meshing.recombine_algo,
+        recombine_3d_all=working.meshing.recombine_3d_all,
+        recombine_3d_level=working.meshing.recombine_3d_level,
+        recombine_3d_conformity=working.meshing.recombine_3d_conformity,
         recombine_topology_passes=working.meshing.recombine_topology_passes,
         recombine_node_repositioning=working.meshing.recombine_node_repositioning,
         recombine_minimum_quality=working.meshing.recombine_minimum_quality,

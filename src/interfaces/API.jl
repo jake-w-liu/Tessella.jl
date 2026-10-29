@@ -239,6 +239,13 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "Mesh.FlexibleTransfinite"=>0.0,
     "Mesh.RecombineAll"=>0.0,
     "Mesh.RecombinationAlgorithm"=>1.0,
+    # Upstream `mesh.recombine3DAll/Level/Conformity` — all stored `(int)`,
+    # default 0 (DefaultOptions.h). Only the all-triangle boundary fold is
+    # implemented; Level/Conformity remain verbatim storage for the
+    # unimplemented ALGO_3D_RTREE `meshCombine3D` arm.
+    "Mesh.Recombine3DAll"=>0.0,
+    "Mesh.Recombine3DLevel"=>0.0,
+    "Mesh.Recombine3DConformity"=>0.0,
     "Mesh.RecombineOptimizeTopology"=>5.0,
     "Mesh.RecombineNodeRepositioning"=>1.0,
     "Mesh.RecombineMinimumQuality"=>0.01,
@@ -854,6 +861,8 @@ function option(name::AbstractString, value::Real)
                         "Mesh.ElementOrder","Mesh.SaveAll","Geometry.OldRuledSurface",
                         "Mesh.Algorithm","Mesh.Algorithm3D","Mesh.SecondOrderLinear",
                         "Mesh.SecondOrderIncomplete","Mesh.RecombineOptimizeTopology",
+                        "Mesh.Recombine3DAll","Mesh.Recombine3DLevel",
+                        "Mesh.Recombine3DConformity",
                         "Mesh.RecombineNodeRepositioning","Mesh.Smoothing","General.AbortOnError",
                         "Mesh.Optimize","Mesh.OptimizeNetgen",
                         "Mesh.PartitionCreateTopology","Mesh.PartitionCreateGhostCells",
@@ -2570,6 +2579,9 @@ function _generation_meshing_options(order::Int)
         lc_factor=OPTIONS["Mesh.MeshSizeFactor"],
         recombine_all=!iszero(OPTIONS["Mesh.RecombineAll"]),
         recombine_algo=Int(OPTIONS["Mesh.RecombinationAlgorithm"]),
+        recombine_3d_all=!iszero(OPTIONS["Mesh.Recombine3DAll"]),
+        recombine_3d_level=Int(OPTIONS["Mesh.Recombine3DLevel"]),
+        recombine_3d_conformity=Int(OPTIONS["Mesh.Recombine3DConformity"]),
         recombine_topology_passes=Int(OPTIONS["Mesh.RecombineOptimizeTopology"]),
         recombine_node_repositioning=Int(OPTIONS["Mesh.RecombineNodeRepositioning"]),
         recombine_minimum_quality=OPTIONS["Mesh.RecombineMinimumQuality"],
@@ -2589,6 +2601,9 @@ function _apply_generation_meshing_options!(m::GeoModel,settings)
     m.meshing.lc_factor=settings.lc_factor
     m.meshing.recombine_all=settings.recombine_all
     m.meshing.recombine_algo=settings.recombine_algo
+    m.meshing.recombine_3d_all=settings.recombine_3d_all
+    m.meshing.recombine_3d_level=settings.recombine_3d_level
+    m.meshing.recombine_3d_conformity=settings.recombine_3d_conformity
     m.meshing.recombine_topology_passes=settings.recombine_topology_passes
     m.meshing.recombine_node_repositioning=settings.recombine_node_repositioning
     m.meshing.recombine_minimum_quality=settings.recombine_minimum_quality

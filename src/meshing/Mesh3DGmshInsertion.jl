@@ -116,6 +116,13 @@ function _gmsh3_native_center(a,b,c,d)
     wu=(w[2]*u[3]-u[2]*w[3],w[3]*u[1]-u[3]*w[1],w[1]*u[2]-u[1]*w[2])
     uv=(u[2]*v[3]-v[2]*u[3],u[3]*v[1]-v[3]*u[1],u[1]*v[2]-v[1]*u[2])
     orientation=_orient3_value(b,c,d,a)
+    if isfinite(orientation) && iszero(orientation)
+        # An exactly-flat constructor cell has no finite circumcentre; its
+        # barycentre is the interior candidate the cavity refinement needs
+        # to consume it (upstream's insertion admits the same transient
+        # cells rather than rejecting them).
+        return ntuple(axis->(a[axis]+b[axis]+c[axis]+d[axis])/4,3)
+    end
     (isfinite(orientation) && !iszero(orientation)) || return _gmsh3_exact_center(a,b,c,d)
     denominator=.5/orientation
     result=ntuple(axis->(uu*vw[axis]+vv*wu[axis]+ww*uv[axis])*denominator+a[axis],3)
@@ -132,6 +139,9 @@ end
 
 @inline function _gmsh3_native_radius(T,vertices,sizes,background,extend)
     points=ntuple(slot->_pt(T,vertices[slot]),4)
+    # A co-spherical coplanar constructor cell has an infinite circumradius —
+    # it is the queue's highest-priority refinement target upstream too.
+    _orient3_value(points[2],points[3],points[4],points[1])==0.0 && return floatmax(Float64)
     center=_gmsh3_native_center(points...)
     dx=points[1][1]-center[1];dy=points[1][2]-center[2];dz=points[1][3]-center[3]
     radius=sqrt(dx*dx+dy*dy+dz*dz)

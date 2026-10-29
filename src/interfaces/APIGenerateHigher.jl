@@ -2628,12 +2628,117 @@ function _higher_volume_wb_rebuild_part(assembly,m,wb,mapping,source_tags,
     return (tag,new_mesh,new_class,new_mapping)
 end
 
+# The same write-back in constructor label space. A registered Surface
+# constructor input is bound against its actual cell UIDs; when the Region's
+# recovery replaces boundary cells, the constructor receipt must drop the
+# consumed labels and adopt the realized children, or the publication check
+# can no longer match its stored labels to live events.
+function _higher_volume_wb_rebuild_constructor(assembly,m,wb,mapping,source_tags,
+        tag,constructor,added_cells,caller)
+    cells_wb=get(wb.surfaces,tag,nothing)
+    cells_wb===nothing && return nothing
+    data=constructor.entity_data
+    data===nothing && return nothing
+    owner=(2,Int32(tag))
+    function conn_uids(conn)
+        uids=UInt64[]
+        for row in conn
+            position=mapping[Int(row)]
+            position==0 && return nothing
+            push!(uids,assembly.nodes[position].tag)
+        end
+        return Tuple(sort(uids))
+    end
+    emitted_keys=Set{Tuple}()
+    child_physical=Dict{Tuple,Int32}()
+    for (_,conn,_,physical) in get(wb.added,owner,Tuple{Int,Vector{Int32},UInt64,Int32}[])
+        child_physical[Tuple(sort(conn))]=physical
+    end
+    for (_,conn,_) in cells_wb
+        key=conn_uids(conn)
+        key===nothing || push!(emitted_keys,key)
+    end
+    row_of_uid=Dict(uid=>Int32(row) for (row,uid) in enumerate(data.external_node_tags))
+    old_index=Set{Tuple}()
+    blocks=ElementBlock[];labels=Vector{UInt64}[];owners=Vector{Int32}[]
+    for (bi,block) in enumerate(constructor.blocks)
+        blabels=data.external_element_tags[bi];bowners=data.block_entities[bi]
+        if msh_dimension(block.msh)!=2
+            push!(blocks,block);push!(labels,blabels);push!(owners,bowners)
+            continue
+        end
+        keep=Int32[]
+        for column in axes(block.nodes,2)
+            key=Tuple(sort(data.external_node_tags[block.nodes[:,column]]))
+            push!(old_index,key)
+            key in emitted_keys && push!(keep,Int32(column))
+        end
+        isempty(keep) && continue
+        push!(blocks,ElementBlock(block.msh,block.nodes[:,keep],block.tags[keep]))
+        push!(labels,blabels[keep]);push!(owners,bowners[keep])
+    end
+    # Recovered children join as fresh columns, like the product rebuild's
+    # trailing Triangle block; fresh boundary vertices append to the
+    # constructor's node receipt so every child's support binds to an actual
+    # UID row.
+    extra_uids=UInt64[];extra_entities=Tuple{Int,Int32}[];
+        extra_params=Union{Nothing,Vector{Float64}}[];extra_coords=NTuple{3,Float64}[]
+    child_nodes=Matrix{Int32}(undef,3,0);child_labels=UInt64[];child_tags=Int32[]
+    for (msh,conn,_) in cells_wb
+        msh==2 || throw(ArgumentError(
+            "$caller: written-back Surface[$tag] constructor cannot emit non-Triangle children"))
+        key=conn_uids(conn)
+        key===nothing && continue
+        key in old_index && continue
+        ckey=Tuple(sort(conn))
+        mapped=Int32[]
+        for (slot,vrow) in enumerate(conn)
+            uid=assembly.nodes[mapping[Int(vrow)]].tag
+            row=get(row_of_uid,uid,Int32(0))
+            if row==0
+                push!(extra_uids,uid)
+                push!(extra_entities,get(wb.nodes,Int32(vrow),owner))
+                push!(extra_params,nothing)
+                push!(extra_coords,assembly.nodes[mapping[Int(vrow)]].point)
+                row=Int32(length(data.external_node_tags)+length(extra_uids))
+                row_of_uid[uid]=row
+            end
+            push!(mapped,row)
+        end
+        child_nodes=hcat(child_nodes,reshape(mapped,3,1))
+        event=get(added_cells,(owner,ckey),nothing)
+        event===nothing && throw(ArgumentError(
+            "$caller: written-back Surface[$tag] constructor child lacks its actual event"))
+        push!(child_labels,event.tag)
+        push!(child_tags,get(child_physical,ckey,_dim01_physical(m,(2,tag))))
+    end
+    if size(child_nodes,2)>0
+        push!(blocks,ElementBlock(2,child_nodes,child_tags))
+        push!(labels,child_labels);push!(owners,fill(Int32(tag),length(child_labels)))
+    end
+    isempty(extra_uids) || allunique(extra_uids) || throw(ArgumentError(
+        "$caller: written-back Surface[$tag] constructor repeats a fresh node UID"))
+    node_tags=vcat(collect(data.external_node_tags),extra_uids)
+    node_entities=vcat(collect(data.node_entities),extra_entities)
+    node_parametric=vcat(collect(data.node_parametric),extra_params)
+    coords=isempty(extra_coords) ? copy(constructor.coords) :
+        hcat(constructor.coords,reduce(hcat,(collect(p) for p in extra_coords);init=Matrix{Float64}(undef,3,0)))
+    metadata=Elements._native_mixed_entity_data(data.entities;
+        node_entities=node_entities,node_parametric=node_parametric,
+        external_node_tags=node_tags,block_entities=owners,
+        external_element_tags=labels)
+    return MixedMesh(coords,blocks;physical_names=constructor.physical_names,
+        entity_data=metadata,
+        elementary_entities=constructor.elementary_entities===nothing ? nothing : owners)
+end
+
 # Commit the volume-boundary subdivision write-back onto the emitted
 # Surface/Curve products: drop every consumed source cell, emit the realized
 # children under their owning entity, then re-bind the geometry-view parts so
 # the published products match the recovered boundary exactly.
 function _higher_volume_boundary_writeback!(assembly,m,wb,mapping,source_tags,caller;
-                                           geometry_parts=nothing,geometry_cells=nothing)
+                                           geometry_parts=nothing,geometry_cells=nothing,
+                                           surface_constructor_inputs=nothing)
     source_tags===nothing && throw(ArgumentError(
         "$caller: native Volume boundary write-back lacks its row UID binding"))
     if !isempty(wb.replaced)
@@ -2662,11 +2767,21 @@ function _higher_volume_boundary_writeback!(assembly,m,wb,mapping,source_tags,ca
             added_cells[(owner,Tuple(sort(conn)))]=last(assembly.cells)
         end
     end
-    geometry_parts===nothing && return nothing
-    for (index,(tag,mesh,class,part_mapping)) in enumerate(geometry_parts)
-        rebuilt=_higher_volume_wb_rebuild_part(assembly,m,wb,mapping,source_tags,
-            tag,mesh,class,part_mapping,added_cells,caller;geometry_cells)
-        rebuilt===nothing || (geometry_parts[index]=rebuilt)
+    if geometry_parts!==nothing
+        for (index,(tag,mesh,class,part_mapping)) in enumerate(geometry_parts)
+            rebuilt=_higher_volume_wb_rebuild_part(assembly,m,wb,mapping,source_tags,
+                tag,mesh,class,part_mapping,added_cells,caller;geometry_cells)
+            rebuilt===nothing || (geometry_parts[index]=rebuilt)
+        end
+    end
+    surface_constructor_inputs===nothing && return nothing
+    for tag in sort!(collect(keys(wb.surfaces)))
+        owner=(2,Int32(tag))
+        constructor=get(surface_constructor_inputs,owner,nothing)
+        constructor===nothing && continue
+        rebuilt=_higher_volume_wb_rebuild_constructor(assembly,m,wb,mapping,source_tags,
+            tag,constructor,added_cells,caller)
+        rebuilt===nothing || (surface_constructor_inputs[owner]=rebuilt)
     end
     return nothing
 end
@@ -2868,8 +2983,9 @@ function _higher_surface_constructor_publication(authority,constructors,cells,no
                 event=get(cells,uid,nothing)
                 event!==nothing && event.owner==owner && (event.tag>0 ||
                     (authority.mesh.entity_data.native_mesh_tags &&
-                     any(labels->event.tag in labels,authority.mesh.entity_data.external_element_tags))) || throw(ArgumentError(
-                    "$caller: Surface constructor publication loses its owned actual cell event"))
+                     any(labels->event.tag in labels,authority.mesh.entity_data.external_element_tags))) ||
+                    throw(ArgumentError(
+                        "$caller: Surface constructor publication loses its owned actual cell event"))
                 push!(final,event.tag)
             end
             allunique(final) || throw(ArgumentError(
@@ -3132,7 +3248,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
         # geometry vector only collects Volume parts inside this phase).
         wb_receipt===nothing || _higher_volume_boundary_writeback!(
             assembly,m,wb_receipt,mapping,source_rows,assembly.caller;
-            geometry_parts=surface_parts,geometry_cells)
+            geometry_parts=surface_parts,geometry_cells,surface_constructor_inputs)
         if alternate!==nothing
             geometry_cells===nothing || (geometry_cells[alternate]=geometry_cells[mesh])
             if geometry_birth!==nothing
@@ -3333,8 +3449,23 @@ function _higher_bind_producer_rows(authority,assembly,parts,previous;node_tag_m
 end
 
 function _higher_geometry_part_class(mesh,dimension,tag,node_entities)
-    segments=fill(Int32(tag),nsegs(mesh));triangles=fill(Int32(tag),ntris(mesh))
-    tetrahedra=fill(Int32(tag),ntets(mesh))
+    # MixedMesh parts (folded recombination products, retained quads) carry
+    # their per-family cell counts in the blocks — the simplex vectors stay
+    # filled for every dimension the part actually emits.
+    nseg_count,ntri_count,ntet_count=if mesh isa MixedMesh
+        counts=(0,0,0)
+        for block in mesh.blocks
+            block isa ElementBlock || continue
+            d=msh_dimension(block.msh)
+            1<=d<=3 || continue
+            counts=Base.setindex(counts,counts[d]+size(block.nodes,2),d)
+        end
+        counts
+    else
+        (nsegs(mesh),ntris(mesh),ntets(mesh))
+    end
+    segments=fill(Int32(tag),nseg_count);triangles=fill(Int32(tag),ntri_count)
+    tetrahedra=fill(Int32(tag),ntet_count)
     return _MeshClassification(mesh,(dimension,Int32(tag)),[(dimension,Int32(tag))],
         node_entities,Dict{Tuple{Int,Int32},Vector{Int32}}(),segments,triangles,tetrahedra,
         Dict{Int,Vector{Int32}}(1=>segments,2=>triangles,4=>tetrahedra),nothing,
@@ -3637,6 +3768,21 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
     assembly=_Dim01Assembly(_Dim01Node[],_Dim01Cell[],Dict{UInt64,Int32}(),
         UInt64(initial_max_node_tag),UInt64(initial_max_element_tag),
         Int(typemax(Int32)),Int(typemax(Int32)),String(caller))
+    if dimension==3
+        # `Mesh3D` folds the STORED boundary quads of `recombine3D` Regions at
+        # fill time (`quadsToTriangles`), so a face meshed before
+        # `Recombine Volume`/`Mesh.Recombine3DAll` was set still reaches the
+        # Delaunay PLC all-triangle — and stays split for every later read.
+        # `cached` is always the frontend's `authority.mesh` (the retained
+        # actual), so the folded replacement is its logical successor.
+        folded=Model._recombine3d_fold_authority(m,m.meshing.mesh_authority;caller,
+            above=UInt64(initial_max_element_tag))
+        if folded!==m.meshing.mesh_authority
+            m.meshing.mesh_authority=folded
+            cached=folded.mesh
+            cached_class=_higher_classification_from_data(cached,caller)
+        end
+    end
     source_node_positions=_dim01_ingest!(assembly,m,cached,cached_class;preserve_source_order=true)
     old=m.meshing.mesh_authority
     _higher_native_parameters!(assembly,m)
