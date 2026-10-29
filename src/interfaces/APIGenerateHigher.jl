@@ -695,7 +695,9 @@ function _higher_ordinary_sweep_classification(assembly,m,production,input,dimen
             "cell UID $uid at $point owner $(data.node_entities[row])"))
         if retained[target]
             node_tags[target]==uid || throw(ArgumentError(
-                "$caller: ordinary Layers emitter welds distinct lower cell UIDs"))
+                "$caller: ordinary Layers emitter welds distinct lower cell UIDs "*
+                "($dimension,$tag) point=$point uid=$uid prior=$(node_tags[target]) "*
+                "owner=$(data.node_entities[row])"))
         end
         position=get(assembly.node_positions,uid,Int32(0))
         position>0 || throw(ArgumentError(
@@ -3850,7 +3852,8 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
         end
         filter!(cell->!(cell.owner in discarded),assembly.cells)
         filter!(owner->!(owner in discarded),done)
-        first_nodes=_dim01_point_phase!(assembly,m,entities)
+        first_nodes=_dim01_point_phase!(assembly,m,entities;
+            options=options,size_field=size_field)
         if phases.two
             # The keep/mesh scan is phase-stable (Mesh1D only appends dim-0/1
             # cells), so the unit plan the Surface phase will adopt already
@@ -3896,7 +3899,8 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
         # recovered below; an actual cache never invents a skipped Point cell.
         legacy_points=old!==nothing && old.mesh===nothing && cached!==nothing
         first_nodes=_dim01_point_phase!(assembly,m,entities;
-                                       create_cells=legacy_points,create_nodes=legacy_points)
+                                       create_cells=legacy_points,create_nodes=legacy_points,
+                                       options=options,size_field=size_field)
         _higher_retained_curves!(assembly,m,entities,first_nodes,high_order,done)
     end
     periodic_pairs=Dict{Int,Tuple{Int,Vector{Tuple{UInt64,UInt64}}}}()

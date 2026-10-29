@@ -1176,7 +1176,7 @@ function _merge_curves!(m::GeoModel)
     # the reversed direction therefore merges into the surviving *reversed*
     # record, so the dropped tag maps to `-keep`. Group by the canonical
     # undirected key, then resolve each drop's sign from its direction.
-    seen=Dict{Tuple{Symbol,Int,Vector{Int},Any},Int}()
+    seen=Dict{Tuple{Symbol,Int,Vector{Int},Any,Int},Int}()
     dir=Dict{Int,Vector{Int}}()
     mapping=Dict{Int,Int}()
     for tag in sort!(collect(keys(m.curves)))
@@ -1206,8 +1206,18 @@ function _merge_curves!(m::GeoModel)
                        nothing,
                        occ.t1-occ.t0<_OCC_TWO_PI ? (occ.t0,occ.t1) : nothing) :
                   occ.occ===:line ? (occ.t0,occ.t1) : nothing
-        ukey=(_curve_type(m,tag),length(dkey),min(dkey,reverse(dkey)),
-              signature)
+        ctype=_curve_type(m,tag)
+        # `CompareTwoCurves` separates `MSH_SEGM_BND_LAYER` records by
+        # `abs(Extrude->geo.Source)` after the geometric comparison: two
+        # boundary-layer duplicates with coincident controls stay distinct
+        # when they name different source edges.
+        blsrc=ctype===:boundary_layer ?
+            begin
+                link=get(m.meshing.extrude_sources,(1,tag),nothing)
+                link===nothing ? 0 : abs(link[2])
+            end : 0
+        ukey=(ctype,length(dkey),min(dkey,reverse(dkey)),
+              signature,blsrc)
         if haskey(seen,ukey)
             keep=seen[ukey]
             mapping[tag]=dkey==dir[keep] ? keep : -keep
@@ -1237,14 +1247,29 @@ function _merge_surfaces!(m::GeoModel)
     # `CompareTwoSurfaces` runs `Compare2Lists` over the generatrices with
     # `CompareAbsCurve`: both lists are sorted first and compared by
     # `abs(num)`, so equality is a multiset of absolute curve tags —
-    # insensitive to loop order, starting edge, and orientation.
-    seen=Dict{Vector{Int},Int}()
+    # insensitive to loop order, starting edge, and orientation. A
+    # boundary-layer surface additionally never welds with a non-layer record
+    # (`Typ` mismatch) and separates from another boundary-layer surface when
+    # `abs(Extrude->geo.Source)` differs — the chapeau's surface source and a
+    # lateral's curve source keep their own classes.
+    seen=Dict{Tuple{Vector{Int},Int},Int}()
     mapping=Dict{Int,Int}()
     for tag in sort!(collect(keys(m.surfaces)))
         flat=Int[]
         for l in m.surfaces[tag]; append!(flat,abs.(m.loops[l])); end
         sort!(flat)
-        haskey(seen,flat) ? (mapping[tag]=seen[flat]) : (seen[flat]=tag)
+        spec=get(m.meshing.extrude_specs,(2,tag),nothing)
+        bltype=spec isa NamedTuple &&
+               get(spec,:type,nothing) in (:boundary_layer,:bl_surface)
+        # `MSH_SURF_BND_LAYER` records compare `abs(Extrude->geo.Source)` —
+        # a single integer space regardless of the source's dimension.
+        blsrc=bltype ?
+            begin
+                link=get(m.meshing.extrude_sources,(2,tag),nothing)
+                link===nothing ? 0 : abs(link[2])
+            end : 0
+        skey=(flat,bltype ? max(blsrc,1) : 0)
+        haskey(seen,skey) ? (mapping[tag]=seen[skey]) : (seen[skey]=tag)
     end
     isempty(mapping) && return mapping
     for (drop,keep) in sort!(collect(mapping))

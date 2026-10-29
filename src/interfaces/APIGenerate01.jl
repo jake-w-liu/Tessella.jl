@@ -287,7 +287,16 @@ function _dim01_first_order!(assembly,m;skip_discrete=true,retired_nodes=nothing
     return high_order
 end
 
-function _dim01_point_phase!(assembly,m,entities;create_cells=true,create_nodes=true)
+function _dim01_point_phase!(assembly,m,entities;create_cells=true,create_nodes=true,
+                             options=nothing,size_field=nothing)
+    # Pending boundary-layer copies — point-generatrix connectors and the
+    # chapeau/connector/A-curve records of a 3-D boundary layer — displace
+    # inside `Mesh2DWithBoundaryLayers`; upstream mutates the coincident
+    # MVertices in place, so every downstream part must see the displaced
+    # positions before the first one publishes a node. `options` keeps the
+    # lazy boundary grading bitwise equal to the curve phase's producer runs.
+    Model._extrude_bl_prepare!(m,assembly.caller;
+        _mesh1d_options=options,_size_field=size_field)
     first_nodes=Dict{Int,Int32}()
     owned=Dict{Tuple{Int,Int32},Vector{Int32}}()
     for (position,node) in enumerate(assembly.nodes)
@@ -1829,7 +1838,7 @@ function _generate_dim01_plan(source_model,cached,cached_class,dimension::Int,
         end
         filter!(cell->!(cell.owner in discarded),assembly.cells)
         filter!(owner->!(owner in discarded),done)
-        first_nodes=_dim01_point_phase!(assembly,m,entities)
+        first_nodes=_dim01_point_phase!(assembly,m,entities;options=options)
         union!(discarded,_dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;done,geometry_birth,curve_births,reuse_curve_params))
         for (dim,tag) in discarded
             dim==1 && delete!(m.meshing.native_geo_kernel.retired_point_curves,Int(tag))

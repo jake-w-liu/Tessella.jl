@@ -801,6 +801,12 @@ function _model_curve_point(
         _,frames=_discrete_eval_setup(m,1,tag,caller)
         return _discrete_curve_point(frames,parameter,caller)
     end
+    _curve_type(m,tag)===:boundary_layer &&
+        # Upstream's `GEdge::point` is empty for a `BoundaryLayerCurve` —
+        # the copy has no CAD; evaluate the extrude spec (the displaced
+        # top row, or the coincident generatrix before resolution), the
+        # same producer `_dim1` uses at line ~297.
+        return _model_curve_part_point(m,tag,parameter,caller)
     occ=_occ_geometry_checked(m,tag,caller)
     if occ!==nothing && occ.occ===:surface_iso
         return _model_surface_iso_point(occ,parameter)

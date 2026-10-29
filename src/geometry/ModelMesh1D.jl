@@ -692,7 +692,7 @@ function _model_curve_extrude_params(m::GeoModel,curve::Integer,
         # its layers at coincident positions.
         spec=get(m.meshing.extrude_specs,(1,curve),nothing)
         if spec isa NamedTuple && get(spec,:type,nothing)===:bl_point
-            _extrude_bl_prepare!(m,caller)
+            _extrude_bl_prepare!(m,caller;_mesh1d_options=options)
             spec=get(m.meshing.extrude_specs,(1,curve),nothing)
         end
         if spec isa NamedTuple && get(spec,:type,nothing)===:translate &&
@@ -1931,6 +1931,23 @@ function _model_curve_part_point(m::GeoModel,curve::Integer,u::Float64,
                 return _extrude_at(spec,
                     _periodic_curve_point(m,gen,usrc,caller;_native_producer,_parameter_source),u_top,caller)
             end
+        end
+        # A `BOUNDARY_LAYER` copy whose spec is not resolved yet — the
+        # chapeau generatrices of a 3-D boundary layer — is coincident with
+        # its generatrix until `Mesh2DWithBoundaryLayers` displaces it;
+        # evaluate the source record position like upstream's un-displaced
+        # `boundaryLayerVertices` miss.
+        if spec===nothing && src[1]==1 &&
+            _curve_type(m,Int(curve))===:boundary_layer &&
+            haskey(m.curves,abs(src[2]))
+            gen=abs(src[2]);usrc=u
+            if src[2]<0
+                _,t1=_model_curve_param_bounds(m,curve,caller)
+                u_min=_model_curve_param_bounds(m,gen,caller)[1]
+                usrc=t1+u_min-u
+            end
+            return _periodic_curve_point(m,gen,usrc,caller;
+                _native_producer,_parameter_source)
         end
     end
     return _periodic_curve_point(m,curve,u,caller;_native_producer,_parameter_source)

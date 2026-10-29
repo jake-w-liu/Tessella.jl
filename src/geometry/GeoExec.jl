@@ -4710,27 +4710,48 @@ function _geo_bl_rebind!(m::GeoModel,maps)
             keep=get(maps.points,stag,0)
             keep!=0 && (m.meshing.extrude_sources[key]=(0,keep))
         elseif sdim==1
-            keep=get(maps.curves,abs(stag),stag)
+            keep=abs(get(maps.curves,abs(stag),abs(stag)))
             nk=sign(stag)*keep
             nk!=stag && (m.meshing.extrude_sources[key]=(1,nk))
+        elseif sdim==2
+            keep=abs(get(maps.surfaces,abs(stag),abs(stag)))
+            nk=sign(stag)*keep
+            nk!=stag && (m.meshing.extrude_sources[key]=(2,nk))
         end
     end
     for (key,spec) in collect(m.meshing.extrude_specs)
+        spec isa NamedTuple || continue
+        spectype=get(spec,:type,nothing)
+        if spectype===:bl_surface
+            # `src` names the signed source face — a source merge rewrites it
+            # like upstream's `geo.Source` bookkeeping.
+            src=Int(get(spec,:src,0))
+            src==0 && continue
+            keep=abs(get(maps.surfaces,abs(src),abs(src)))
+            nk=sign(src)*keep
+            nk==src && continue
+            m.meshing.extrude_specs[key]=(;spec...,src=nk)
+            continue
+        end
         # Only the dim-2 lateral specs carry `connectors`/`chapeau` — the
         # dim-1 chapeau record shares `type=:boundary_layer` but stores
         # `tops`, which has no tags to rebind.
-        (key[1]==2 && spec isa NamedTuple &&
-         get(spec,:type,nothing)===:boundary_layer) || continue
+        (key[1]==2 && spectype===:boundary_layer) || continue
+        haskey(spec,:connectors) || continue
         cb,cn=spec.connectors
         cb2=abs(get(maps.curves,abs(cb),cb))
         cn2=abs(get(maps.curves,abs(cn),cn))
         ch2=abs(get(maps.curves,abs(spec.chapeau),spec.chapeau))
-        (cb2,cn2,ch2)==(cb,cn,spec.chapeau) && continue
+        srcsurf=Int(get(spec,:surf,0))
+        ss2=srcsurf==0 ? 0 :
+            sign(srcsurf)*abs(get(maps.surfaces,abs(srcsurf),srcsurf))
+        (cb2,cn2,ch2,ss2)==(cb,cn,spec.chapeau,srcsurf) && continue
         m.meshing.extrude_specs[key]=(type=:boundary_layer,
             connectors=(cb2,cn2),chapeau=ch2,
             index=Int(get(spec,:index,0)),view=Int(get(spec,:view,-1)),
             scale_last=get(spec,:scale_last,nothing),
-            scale_hprev=Float64(get(spec,:scale_hprev,0.0)))
+            scale_hprev=Float64(get(spec,:scale_hprev,0.0)),
+            surf=ss2)
     end
     return nothing
 end
@@ -4753,11 +4774,108 @@ function _geo_bl_point_extrude!(m::GeoModel,src_pt::Int,params,blmeta,
     return (curve,dest)
 end
 
+# `ExtrudeSurface` under `BOUNDARY_LAYER` — `DuplicateSurface` chapeau,
+# `CreateVolume(NEWVOLUME())` under `oldNewreg == 0`, one `ExtrudeCurve`
+# boundary-layer arm per signed generatrix (its own duplicate, two
+# `ExtrudePoint` connectors, and the `MSH_SURF_BND_LAYER` lateral), then the
+# chapeau's delayed `NEWSURFACE()` rename. The generated entities are left
+# coincident with their sources: `Mesh2DWithBoundaryLayers` displaces the
+# boundary-layer copies inside the mesh pass, so no kernel runs here.
+# Returns `(top, volume, laterals)` for the `out[]` assembly.
+function _geo_bl_surface_extrude!(m::GeoModel,is::Int,params,blmeta,
+                                  context,caller)
+    tag=abs(is)   # `ps = FindSurface(std::abs(is))`; the sign is invert metadata
+    haskey(m.surfaces,tag) || throw(ArgumentError(
+        "$caller: unknown Surface[$tag]"))
+    index=blmeta.boundary_layer_index
+    # `CreateSurface(NEWSURFACE())` inside `DuplicateSurface` allocates the
+    # chapeau tag before its generatrix copies — burned like the ordinary
+    # path's transient tag, because the final rename happens only at the end.
+    _geo_newreg_alloc!(m,2,caller)
+    top_loops=[Int[_duplicate_curve!(m,abs(c),caller;reversed=c<0)
+                   for c in m.loops[l]] for l in m.surfaces[tag]]
+    for (i,copies) in enumerate(top_loops)
+        source_loop=m.loops[m.surfaces[tag][i]]
+        for (j,c) in enumerate(copies)
+            # `geo.Source = c2num` — the signed source generatrix, positionally
+            # paired, so the copy meshes through the boundary-layer field like
+            # upstream's COPIED_ENTITY `Extrude` record.
+            m.meshing.extrude[(1,c)]=params
+            m.meshing.extrude_sources[(1,c)]=(1,source_loop[j])
+            # `case BOUNDARY_LAYER` in `ExtrudeSurface` retypes the chapeau
+            # generatrices `MSH_SEGM_BND_LAYER`, their wired vertices
+            # `MSH_POINT_BND_LAYER`, and stamps the index on the coincident
+            # control copies (which keep `MSH_POINT`).
+            m.curve_types[c]=:boundary_layer
+            cps=get(m.curve_control_points,c,Int[])
+            length(cps)>2 && (m.curve_control_points[c]=Int[cps[1],cps[end]])
+            for cp in get(m.curve_control_points,c,Int[])
+                m.meshing.point_bl[cp]=(false,index)
+            end
+            for v in (m.curves[c][1],m.curves[c][2])
+                m.meshing.point_bl[v]=(true,index)
+            end
+        end
+    end
+    # `CreateVolume(NEWVOLUME())` — dedicated per-dimension tag under the
+    # `oldNewreg == 0` backward-compat window.
+    vol=_alloc_tag!(m,3,0,caller)
+    m.meshing.extrude[(3,vol)]=params
+    # `geo.Mode = EXTRUDED_ENTITY` / `geo.Source = is` — the signed source
+    # surface `meshGRegionExtruded` sweeps.
+    m.meshing.extrude_sources[(3,vol)]=(2,is)
+    m.meshing.extrude_specs[(3,vol)]=(type=:bl_surface,bl3d=true,src=is,
+        index=index,view=blmeta.view_index,scale_last=params.scale_last)
+    laterals=Int[]
+    for l in m.surfaces[tag], c in m.loops[l]
+        src=abs(c)
+        closed=m.curves[src][1]==m.curves[src][2]
+        (chapeau,surf)=_geo_bl_curve_lateral!(m,c,params,closed,
+            caller,blmeta)
+        # The lateral's generatrices are `pc, CurveEnd, -chapeau, -CurveBeg`
+        # — after the coherence merge the chapeau duplicate welds onto the
+        # `DuplicateSurface` copy of the same source edge. `surf` marks the
+        # strip as belonging to a 3-D boundary layer so the mesh pass knows
+        # its growth field comes from the source face's elements.
+        spec=m.meshing.extrude_specs[(2,surf)]
+        m.meshing.extrude_specs[(2,surf)]=(;spec...,surf=is)
+        push!(laterals,c<0 ? -surf : surf)
+    end
+    # `chapeau->Num = NEWSURFACE()` — the delayed rename runs after every
+    # lateral took its tag, matching the ordinary `_extrude_surface!` burn.
+    top=_geo_newreg_alloc!(m,2,caller)
+    loop_tags=Int[]
+    for (i,copies) in enumerate(top_loops)
+        lt=i==1 ? _geo_derived_loop_tag(m,top) : _geo_next_loop_tag(m)
+        m.loops[lt]=copies
+        push!(loop_tags,lt)
+    end
+    m.surfaces[top]=loop_tags
+    # `Typ = MSH_SURF_BND_LAYER` upstream — a mesh-only record class. Keep
+    # the source's geometric type for surface queries; the pending
+    # `bl_surface` spec carries the boundary-layer semantics.
+    haskey(m.surface_types,tag) &&
+        (m.surface_types[top]=m.surface_types[tag])
+    m.meshing.extrude[(2,top)]=params
+    # `geo.Mode = COPIED_ENTITY` / `geo.Source = is` — the copy path
+    # `MeshExtrudedSurface` takes, and the record `Mesh2DWithBoundaryLayers`
+    # collects into `sourceFaceInfo`.
+    m.meshing.extrude_sources[(2,top)]=(2,is)
+    m.meshing.extrude_specs[(2,top)]=(type=:bl_surface,bl3d=true,src=is,
+        index=index,view=blmeta.view_index,scale_last=params.scale_last)
+    slt=haskey(m.surface_loops,vol) ? _geo_next_surface_loop_tag(m) : vol
+    # `v->Surfaces` order: source (ori -1), chapeau (ori +1), laterals in
+    # generatrix order (ori by the signed curve tag).
+    m.surface_loops[slt]=vcat(-tag,top,laterals)
+    m.volumes[vol]=Int[slt]
+    return (top=top,vol=vol,laterals=laterals)
+end
+
 function _geo_boundary_layer_extrude!(m::GeoModel,
                                       entities::AbstractVector{<:NTuple{2,Int}},
                                       params,blmeta,context,caller)
     for (dim,tag) in entities
-        dim in (0,1) || throw(ArgumentError(
+        dim in (0,1,2) || throw(ArgumentError(
             "$caller: boundary-layer extrusion of " *
             "$(_entity_label(dim))[$tag] is not implemented"))
     end
@@ -4802,6 +4920,29 @@ function _geo_boundary_layer_extrude!(m::GeoModel,
         graded isa Model._ModelNativeCurveGrade &&
             (working.curve_params[src]=Float64.(graded.parameters))
     end
+    # A surface generatrix stages its boundary curves the same way — the
+    # eager wall kernels read `working`'s stored chains.
+    for (d,e) in entities
+        d==2 || continue
+        stag=abs(e)
+        haskey(m.surfaces,stag) || continue
+        for l in m.surfaces[stag],c in m.loops[l]
+            src=abs(c)
+            haskey(working.curve_params,src) && continue
+            graded=try
+                Model._model_mesh_curve!(working,src,mesh1d,caller;
+                                         _native_producer=true)
+            catch err
+                err isa InterruptException && rethrow()
+                err isa ArgumentError || rethrow()
+                nothing
+            end
+            graded isa Vector{Float64} &&
+                (working.curve_params[src]=graded)
+            graded isa Model._ModelNativeCurveGrade &&
+                (working.curve_params[src]=Float64.(graded.parameters))
+        end
+    end
     # Statement walls plus every earlier boundary-layer spec — upstream's
     # `Mesh2DWithBoundaryLayers` merges the smooth-data field globally, so a
     # shared vertex column belongs to the whole accumulated wall set (per
@@ -4810,6 +4951,7 @@ function _geo_boundary_layer_extrude!(m::GeoModel,
     chains=Dict{Int,Vector{NTuple{3,Float64}}}()
     curve_entities=Tuple{Int,Int}[]
     point_out=NTuple{2,Int}[]
+    surf_made=Tuple{Int,Any}[]
     for (d,e) in entities
         if d==1
             c=e
@@ -4826,7 +4968,7 @@ function _geo_boundary_layer_extrude!(m::GeoModel,
             push!(walls,(chain=chain,closed=closed,
                 peff=_extrude_bl_plane_normal(chain,closed,c>0,caller),
                 index=blmeta.boundary_layer_index,view=blmeta.view_index,
-                scale_last=params.scale_last))
+                scale_last=params.scale_last,surf=0))
         elseif d==0
             src=abs(e)
             haskey(m.points,src) || throw(ArgumentError(
@@ -4834,47 +4976,67 @@ function _geo_boundary_layer_extrude!(m::GeoModel,
             (curve,dest)=_geo_bl_point_extrude!(m,src,params,blmeta,
                                                context,caller)
             push!(point_out,(dest,curve))
+        else
+            src=abs(e)
+            haskey(m.surfaces,src) || throw(ArgumentError(
+                "$caller: unknown Surface[$src]"))
+            push!(surf_made,(e,_geo_bl_surface_extrude!(
+                m,e,params,blmeta,context,caller)))
         end
     end
     append!(walls,_extrude_bl_walls(working,caller))
-    # `extrudeField` (`View[-5]`) reads the background field lazily inside
-    # the pass — build it only when a wall actually selects that mode, so a
-    # missing/undeclared field fails at the same point upstream queries it.
-    background=any(wall->wall.view==-5,walls) ?
-        _geo_mesh_background_field(m,context,caller) : nothing
-    fields=_extrude_bl_view_fields(walls,caller;
-        _background_field=background,
-        _views=get(_GEO_EXEC_VIEWS,context,nothing))
-    offsets=_extrude_level_us(params)[2:end]
-    hprev=length(params.layers)>=2 ? params.heights[end-1] : 0.0
+    # Upstream resolves every boundary-layer copy's displaced position inside
+    # `Mesh2DWithBoundaryLayers`; the eager field below only serves the
+    # statement's own curve walls and any point-generatrix connector, so a
+    # pure surface list skips it entirely (its copies weld coincident until
+    # the mesh pass, exactly like the oracle's pre-mesh state).
+    pending_points=any(spec->spec isa NamedTuple &&
+        get(spec,:type,nothing)===:bl_point,
+        values(m.meshing.extrude_specs))
+    fields=nothing
     made=Any[]
-    for (c,closed_flag) in curve_entities
-        chain=chains[c]
-        closed=closed_flag==1
-        peff=_extrude_bl_plane_normal(chain,closed,c>0,caller)
-        index=blmeta.boundary_layer_index
-        field=get(fields.fields,index,_EMPTY_BL_FIELD)
-        scale_field=get(fields.scales,index,nothing)
-        vertex_scale=nothing
-        if scale_field!==nothing
-            vertex_scale=Dict{Int,Float64}()
-            for (i,pos) in enumerate(chain)
-                s=get(scale_field,pos,1.0)
-                abs(s-1.0)<=1e-12 && (s=1.0)
-                vertex_scale[i]=s
+    if !isempty(curve_entities) || pending_points
+        # `extrudeField` (`View[-5]`) reads the background field lazily inside
+        # the pass — build it only when a wall actually selects that mode, so
+        # a missing/undeclared field fails at the same point upstream queries it.
+        background=any(wall->wall.view==-5,walls) ?
+            _geo_mesh_background_field(m,context,caller) : nothing
+        fields=_extrude_bl_view_fields(walls,caller;
+            _background_field=background,
+            _views=get(_GEO_EXEC_VIEWS,context,nothing),
+            _model=working)
+        offsets=_extrude_level_us(params)[2:end]
+        hprev=length(params.layers)>=2 ? params.heights[end-1] : 0.0
+        for (c,closed_flag) in curve_entities
+            chain=chains[c]
+            closed=closed_flag==1
+            peff=_extrude_bl_plane_normal(chain,closed,c>0,caller)
+            index=blmeta.boundary_layer_index
+            field=get(fields.fields,index,_EMPTY_BL_FIELD)
+            scale_field=get(fields.scales,index,nothing)
+            vertex_scale=nothing
+            if scale_field!==nothing
+                vertex_scale=Dict{Int,Float64}()
+                for (i,pos) in enumerate(chain)
+                    s=get(scale_field,pos,1.0)
+                    abs(s-1.0)<=1e-12 && (s=1.0)
+                    vertex_scale[i]=s
+                end
             end
+            kernel=_extrude_bl_kernel(chain,closed,peff,field,offsets,caller;
+                                      scale_last=vertex_scale,
+                                      scale_hprev=hprev,
+                                      normalize_dirs=fields.normalize)
+            (chapeau,surf)=_geo_bl_curve_lateral!(m,c,params,closed,
+                caller,blmeta,scale_field,hprev)
+            push!(made,(c,chapeau,surf,kernel))
         end
-        kernel=_extrude_bl_kernel(chain,closed,peff,field,offsets,caller;
-                                  scale_last=vertex_scale,scale_hprev=hprev,
-                                  normalize_dirs=fields.normalize)
-        (chapeau,surf)=_geo_bl_curve_lateral!(m,c,params,closed,
-            caller,blmeta,scale_field,hprev)
-        push!(made,(c,chapeau,surf,kernel))
+        # Point-generatrix connectors resolve their direction against the
+        # built field at exec time too (refreshed again at mesh time) — a
+        # lone point with no field entry stays degenerate like upstream's
+        # zero normal.
+        _extrude_bl_prepare!(m,caller;_fields=fields,_model=working)
     end
-    # Point-generatrix connectors resolve their direction against the built
-    # field at exec time too (refreshed again at mesh time) — a lone point
-    # with no field entry stays degenerate like upstream's zero normal.
-    _extrude_bl_prepare!(m,caller;_fields=fields)
     # Upstream's `ReplaceAllDuplicates` runs on the coincident copy set
     # *before* any vertex takes its displaced position: ordinary control
     # copies at index 0 fold into their sources, nonzero-index copies stay
@@ -4896,21 +5058,45 @@ function _geo_boundary_layer_extrude!(m::GeoModel,
                              _params_model=working)
     end
     out=Int[]
-    for (dest,curve) in point_out
-        push!(out,get(maps.points,dest,dest))
-        haskey(m.curves,curve) && push!(out,curve)
-    end
-    for (c,chapeau,surf,_kernel) in made
-        top=get(maps.curves,chapeau,chapeau)
-        haskey(m.curves,abs(top)) && push!(out,top)
-        haskey(m.surfaces,surf) || continue
-        push!(out,surf)
-        # `Geometry.ExtrudeReturnLateralEntities` — the connector
-        # generatrices. Upstream compares `abs(record tag)` against the
-        # *signed* input, so a negative generatrix keeps its own `-tag`.
-        iszero(context.extrude_return_lateral) && continue
-        for g in m.loops[only(m.surfaces[surf])]
-            (abs(g)==c || abs(g)==abs(top)) || push!(out,g)
+    pcur=0;ccur=0;scur=0
+    for (d,e) in entities
+        if d==0
+            pcur+=1
+            dest,curve=point_out[pcur]
+            push!(out,get(maps.points,dest,dest))
+            haskey(m.curves,curve) && push!(out,curve)
+        elseif d==1
+            ccur+=1
+            c,chapeau,surf,_kernel=made[ccur]
+            top=get(maps.curves,chapeau,chapeau)
+            haskey(m.curves,abs(top)) && push!(out,top)
+            haskey(m.surfaces,surf) || continue
+            push!(out,surf)
+            # `Geometry.ExtrudeReturnLateralEntities` — the connector
+            # generatrices. Upstream compares `abs(record tag)` against the
+            # *signed* input, so a negative generatrix keeps its own `-tag`.
+            iszero(context.extrude_return_lateral) && continue
+            for g in m.loops[only(m.surfaces[surf])]
+                (abs(g)==c || abs(g)==abs(top)) || push!(out,g)
+            end
+        else
+            scur+=1
+            is,(top,vol,laterals)=surf_made[scur]
+            top_out=get(maps.surfaces,top,top)
+            haskey(m.surfaces,top_out) && push!(out,top_out)
+            haskey(m.volumes,vol) && push!(out,vol)
+            # `Geometry.ExtrudeReturnLateralEntities` — every boundary
+            # surface in `v->Surfaces` order except those whose absolute
+            # tag equals the *signed* input or the chapeau, by absolute
+            # record tag. A negative source passes its own `abs` filter
+            # upstream, so the source face itself is listed as a lateral.
+            iszero(context.extrude_return_lateral) && continue
+            for s in vcat(-abs(is),top_out,laterals)
+                s2=get(maps.surfaces,abs(s),abs(s))
+                (s2==is || s2==top_out || !haskey(m.surfaces,s2)) &&
+                    continue
+                push!(out,s2)
+            end
         end
     end
     return out

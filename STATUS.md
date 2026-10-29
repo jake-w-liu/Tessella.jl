@@ -24,6 +24,47 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### LAY02 3-D surface boundary-layer `Extrude` (2026-10-29, working tree)
+
+- `Extrude {Surface{...}; Layers{...}}` under boundary-layer mode now
+  builds the upstream entity set in `NEWREG` order: a burned transient
+  surface tag, one `DuplicateCurve` top-row copy per source-loop edge
+  (`MSH_SEGM_BND_LAYER`/`MSH_POINT_BND_LAYER` copies), the dedicated
+  `NEWVOLUME()` body, one `MSH_SURF_BND_LAYER` lateral per signed
+  generatrix (`ExtrudeCurve` arm: chapeau duplicate + two `ExtrudePoint`
+  connectors), then the delayed `NEWSURFACE()` chapeau rename — the
+  square fixture returns `out=[26,1,13,17,21,25]` with volume shell
+  `[-1,26,13,17,21,25]`, and the signed source reproduces upstream's
+  absolute-tag lateral filter quirk `out=[26,1,1,13,17,21,25]`.
+- Mesh time resolves the gouraud field from the source face's *produced*
+  element normals (`_return_surface_production` keeps the native
+  discretization — angle-weighted `2·angle/π` means, signed-source
+  inversion, `GetAveEdgeLength` scale accumulation for `ScaleLastLayer`,
+  `faceSkipScaleCalc`), displaces the chapeau/volume/lateral row maps,
+  and re-extends them when a consumer's live face mesh differs from the
+  prepared one (`bl_ctx` + `_extrude_bl_ensure_srcmesh!`); a task-local
+  guard keeps the detached dim-01 producer's incidental re-entry out of
+  the resolve pass. `Using Index[i]` groups the accumulation, `Using
+  View[i]`/`View[-3]`/`View[-5]` now reach the face arm through the same
+  sampler/flag/metadata plumbing the curve walls use.
+- `_dim01_point_phase!` runs the resolve before any downstream part
+  publishes a node (upstream mutates the coincident `MVertex`s in place);
+  `_merge_curves!`/`_merge_surfaces!` separate boundary-layer records by
+  `abs(Extrude->geo.Source)` like `CompareTwoCurves`/`CompareTwoSurfaces`.
+- Verified against Gmsh 4.15.2: recombined `Mesh 3` is 20 nodes / 8
+  triangles / 12 quadrangles / 12 prisms / 20 segments with the exact
+  oracle node set (four corner columns plus the center-fan column);
+  unrecombined is 20 segments / 32 triangles / 36 tetrahedra; signed
+  sources grow `z∈[-1,0]`; `ScaleLastLayer` reproduces the oracle level
+  set `[0, 0.268245951, 0.536491903, 0.804737854]`; a `VT`-field
+  `Using View[0]` grows `z∈{0,2/3,4/3,2}`.
+- `test/geometry/geo_extrude_boundarylayer_test.jl` runs
+  69+10+7+23+48 = 157 assertions green under `--compile=min -O0`;
+  `geo_extrude_test.jl` and `extrude_nonew_shared_lateral_test.jl`
+  (108/108) stay green. `geo_quadtri_extrude_test.jl` carries 8 fails +
+  4 errors identical on clean `HEAD` (`8c23abd`) — pre-existing, not a
+  regression of this slice.
+
 ### LAY02 boundary-layer `Using View[i]` post-view directions (2026-10-29, working tree)
 
 - `Extrude {Curve{...}; Layers{...}; Using View[i]}` now resolves the merged

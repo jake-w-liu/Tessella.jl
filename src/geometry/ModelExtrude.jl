@@ -32,6 +32,45 @@ function _extrude_level_us(params::_GeoExtrudeParams)
     return us
 end
 
+# Position-keyed row lookup shared by the boundary-layer arms of
+# `_extrude_at`/`_extrude_level_at`: exact hit first, then the nearest row
+# within a scale-aware tolerance — mirror-evaluated keys can drift an ulp
+# off the stored positions, and a later native re-grading shifts the same
+# logical node a few e-9 along its curve. The row correspondence stays
+# unambiguous — the drift sits far inside the key's Voronoi cell — so the
+# nearest row is accepted when it dominates the runner-up by an order of
+# magnitude and the displacement stays well under any reachable layer
+# offset. A genuinely foreign point sits between keys with best≈second
+# distances and still rejects.
+function _extrude_bl_row_lookup(rows::AbstractDict{NTuple{3,Float64},V},
+                                p::NTuple{3,Float64},
+                                caller::AbstractString) where V
+    top=get(rows,p,nothing)
+    top===nothing || return top
+    isempty(rows) && throw(ArgumentError(
+        "$caller: boundary-layer copy has no stored top positions"))
+    scale=1.0
+    for pos in keys(rows)
+        scale=max(scale,abs(pos[1]),abs(pos[2]),abs(pos[3]))
+    end
+    best=nothing;bd=Inf;bd2=Inf
+    for (pos,v) in rows
+        d=hypot(p[1]-pos[1],p[2]-pos[2],p[3]-pos[3])
+        if d<bd
+            bd2=bd;bd=d;best=v
+        elseif d<bd2
+            bd2=d
+        end
+    end
+    bd<=1e-9*scale && return best
+    bd<=1e-7*scale && bd<=0.1*bd2 && return best
+    get(ENV,"TESS_DEBUG_BL","")=="1" &&
+        println("BL MISS p=",p," keys=",collect(keys(rows)))
+    throw(ArgumentError(
+        "$caller: boundary-layer copy evaluated $(p) off the wall's " *
+        "stored nodes"))
+end
+
 # `ExtrudeParams::Extrude(t)` — the rigid sweep transform at the normalized
 # parameter: `x += t·T` for `:translate`, `ProtudeXYZ` (rotate about the
 # axis point by `angle·t`) for `:rotate`, and `ProtudeXYZ` followed by
@@ -39,44 +78,11 @@ end
 function _extrude_at(spec,p::NTuple{3,Float64},t::Float64,
                      caller::AbstractString)
     if spec.type===:boundary_layer
-        # The chapeau of a `BOUNDARY_LAYER` curve extrusion has no rigid
-        # transform: each generatrix node follows its own field direction to
-        # the strip's top row. `spec.tops` maps the evaluated generatrix
-        # position to that exact emitted top node; mirror-evaluated keys can
-        # drift an ulp off the stored chain, so fall back to the nearest row
-        # within a scale-aware tolerance.
-        tops=spec.tops
-        top=get(tops,p,nothing)
-        top===nothing || return top
-        isempty(tops) && throw(ArgumentError(
-            "$caller: boundary-layer copy has no stored top positions"))
-        scale=1.0
-        for pos in keys(tops)
-            scale=max(scale,abs(pos[1]),abs(pos[2]),abs(pos[3]))
-        end
-        best=nothing;bd=Inf;bd2=Inf
-        for (pos,v) in tops
-            d=hypot(p[1]-pos[1],p[2]-pos[2],p[3]-pos[3])
-            if d<bd
-                bd2=bd;bd=d;best=v
-            elseif d<bd2
-                bd2=d
-            end
-        end
-        bd<=1e-9*scale && return best
-        # The stored keys were evaluated at the generatrix's refresh-time
-        # parameters; a later native re-grading can shift the same logical
-        # node a few e-9 along the curve (a curved generatrix's u drifts
-        # when the 1-D producer re-integrates it). The row correspondence is
-        # still unambiguous — the drift stays far inside the key's Voronoi
-        # cell — so accept the nearest row when it dominates the runner-up
-        # by an order of magnitude and the displacement stays well under
-        # any reachable layer offset. A genuinely foreign point sits between
-        # keys with best≈second distances and still rejects.
-        bd<=1e-7*scale && bd<=0.1*bd2 && return best
-        throw(ArgumentError(
-            "$caller: boundary-layer copy evaluated $(p) off the wall's " *
-            "stored nodes"))
+        # The chapeau of a `BOUNDARY_LAYER` extrusion has no rigid transform:
+        # each generatrix node follows its own field direction to the copy's
+        # top row. `spec.tops` maps the evaluated source position to that
+        # exact emitted top node.
+        return _extrude_bl_row_lookup(spec.tops,p,caller)
     elseif spec.type===:translate
         # A boundary-layer ScaleLast connector remaps the last layer's `u`
         # interval through its source vertex's accumulated scale
@@ -120,6 +126,24 @@ end
 
 @inline function _extrude_level_at(spec,p::NTuple{3,Float64},u::Float64,
                                    transforms,l::Int)
+    if spec.type===:boundary_layer && haskey(spec,:levels)
+        # A resolved `bl_surface` spec stores each source position's whole
+        # displaced column (`x + t·nn` per level, ScaleLast already baked
+        # into the last row). `u` is the absolute level height — callers pass
+        # the exact stored `us` entries, so the row index resolves by the
+        # first `uvals` hit; `u <= 0` is the source level itself.
+        u<=0 && return p
+        row=_extrude_bl_row_lookup(spec.levels,p,
+            "boundary-layer level evaluation")
+        k=searchsortedfirst(spec.uvals,u)
+        return row[min(k,length(row))]
+    end
+    if spec.type===:boundary_layer
+        # Curve-arm `boundary_layer` records carry only the top row;
+        # intermediate-level queries land on it like `_extrude_at`.
+        return u<=0 ? p : _extrude_at(spec,p,u,
+            "boundary-layer level evaluation")
+    end
     if transforms===nothing
         return (p[1]+u*spec.T[1],p[2]+u*spec.T[2],p[3]+u*spec.T[3])
     end
@@ -136,12 +160,14 @@ end
 # identical params, evaluator, and vertex snaps, so swept columns weld
 # bitwise onto the curve's own line elements. Lazily grades on demand like
 # `_model_surface_mesh_curves!` (upstream's global 1-D pass always ran).
-function _extrude_curve_nodes(m::GeoModel,curve::Int,caller::AbstractString)
+function _extrude_curve_nodes(m::GeoModel,curve::Int,caller::AbstractString;
+                              _mesh1d_options=nothing)
     haskey(m.curves,curve) || throw(ArgumentError(
         "$caller: unknown Curve[$curve]"))
     params=get(m.curve_params,curve,nothing)
     if params===nothing
-        _model_surface_mesh_curves!(m,Int[curve],caller)
+        _model_surface_mesh_curves!(m,Int[curve],caller;
+            _mesh1d_options=_mesh1d_options)
         params=get(m.curve_params,curve,nothing)
         params===nothing && throw(ArgumentError(
             "$caller: Curve[$curve] could not be meshed"))
@@ -174,9 +200,10 @@ end
 _ExtrudeMeshProduction(mesh,positions,source_tags,columns)=
     _ExtrudeMeshProduction(mesh,positions,source_tags,columns,Tuple{Int,Int}[])
 
-function _extrude_curve_source(m,curve,input,caller)
-    input===nothing && return (_extrude_curve_nodes(m,curve,caller),UInt64[],
-        NTuple{3,Float64}[],UInt64[])
+function _extrude_curve_source(m,curve,input,caller;_mesh1d_options=nothing)
+    input===nothing && return (
+        _extrude_curve_nodes(m,curve,caller;_mesh1d_options=_mesh1d_options),
+        UInt64[],NTuple{3,Float64}[],UInt64[])
     rows,mesh=if m.curves[curve][1]!=m.curves[curve][2]
         source=_model_mesh_curve_births(input,m,curve,caller;used_only=true)
         source!==nothing || throw(ArgumentError("$caller: extrusion lacks actual Curve[$curve] cells"))
@@ -399,9 +426,12 @@ end
 # One boundary-layer wall record: the generatrix's stored node chain, whether
 # the source curve is closed, its plane-aligned growth normal, and the
 # statement-level `mesh.BoundaryLayerIndex`/`mesh.ViewIndex`/`mesh.ScaleLast`
-# the entity records carry.
-const _ExtrudeBlWall=NamedTuple{(:chain,:closed,:peff,:index,:view,:scale_last),
-    Tuple{Vector{NTuple{3,Float64}},Bool,NTuple{3,Float64},Int,Int,Bool}}
+# the entity records carry. `surf` is the signed source face of a 3-D
+# boundary-layer strip (0 for the ordinary 2-D curve arm): the field then
+# comes from the face's elements, and the strip kernel cannot rely on a
+# planar frame.
+const _ExtrudeBlWall=NamedTuple{(:chain,:closed,:peff,:index,:view,:scale_last,:surf),
+    Tuple{Vector{NTuple{3,Float64}},Bool,NTuple{3,Float64},Int,Int,Bool,Int}}
 
 # `smooth_data::add(x,y,z,3,nn)` — every wall segment's left normal
 # (`cross(peff, t)`: `t × ẑ` upstream, generalized to each wall's own plane)
@@ -425,79 +455,152 @@ const _ExtrudeBlWall=NamedTuple{(:chain,:closed,:peff,:index,:view,:scale_last),
 # `OctreePost`-equivalent vector sampler (`PostViewField` restricted to the
 # view's vector records, `use_closest=false`) or `nothing` when that view
 # carries no vector data — `addExtrudeNormals`'s `octree && !gouraud` gate.
-function _extrude_bl_normal_field(walls,samplers::AbstractDict=Dict{Int,Any}())
+#
+# The source-face mesh `addExtrudeNormals` accumulates over: with a
+# `_mesh_input`, the carried dim-2 product (the pipeline's produced face
+# mesh); otherwise the native producer's own output — requested as a
+# production so a plane face takes the same `_gmsh_native_initial_surface`
+# path the dim-2 phase's `_return_surface_production` call uses instead of
+# the lazy CDT fallback. `production.mesh` and a retained product are both
+# returned as the plain mesh.
+function _extrude_bl_srcmesh(m::GeoModel,stag::Int;
+                             size_field=nothing,_mesh_input=nothing,
+                             _mesh1d_options=nothing)
+    mesh=mesh_model_surface(m,stag;
+        size_field=size_field,_mesh_input=_mesh_input,
+        _boundary_regrade=false,_mesh1d_options=_mesh1d_options,
+        _return_surface_production=true)
+    return mesh isa Mesh || mesh isa MixedMesh ? mesh : mesh.mesh
+end
+
+# `_model` enables the 3-D arm: pending/resolved `bl_surface` records
+# (COPIED_ENTITY chapeaux of `Extrude{Surface{...};Layers{...}}`) name their
+# source faces, whose mesh elements contribute the way upstream's
+# `addExtrudeNormals(sourceFaces, sourceFaceInfo, faceSkipScaleCalc)` does —
+# and when any source face exists upstream skips the edge arm entirely.
+# `_mesh_input` reuses the produced face mesh the volume sweep consumes, so
+# field keys land bitwise on the sweep's source-node columns.
+function _extrude_bl_normal_field(walls,samplers::AbstractDict=Dict{Int,Any}();
+                                  _model=nothing,_mesh_input=nothing,
+                                  _mesh1d_options=nothing,_size_field=nothing)
     sums=Dict{Int,Dict{NTuple{3,Float64},NTuple{3,Float64}}}()
     counts=Dict{Int,Dict{NTuple{3,Float64},Int}}()
     scale_sums=Dict{Int,Dict{NTuple{3,Float64},Float64}}()
     scale_counts=Dict{Int,Dict{NTuple{3,Float64},Int}}()
     # `calcLayerScaleFactor[index]` — a global gate upstream sets when any
     # copy at that index is ScaleLast; only then does anything add_scale.
+    # Face sources arm it through their chapeau's `mesh.ScaleLast` the same
+    # way edge walls do.
     scale_gate=Dict{Int,Bool}()
     for wall in walls
         0<=wall.index<=1 || continue
         wall.scale_last && (scale_gate[wall.index]=true)
     end
-    sf_mod=getfield(parentmodule(@__MODULE__),:SizeField)
-    for wall in walls
-        0<=wall.index<=1 || continue
-        chain=wall.chain;closed=wall.closed;peff=wall.peff
-        nnode=length(chain)
-        nseg=closed ? nnode : nnode-1
-        sf=get!(Dict{NTuple{3,Float64},NTuple{3,Float64}},sums,wall.index)
-        cf=get!(Dict{NTuple{3,Float64},Int},counts,wall.index)
-        gated=get(scale_gate,wall.index,false)
-        ss=gated ? get!(Dict{NTuple{3,Float64},Float64},
-                        scale_sums,wall.index) : nothing
-        sc=gated ? get!(Dict{NTuple{3,Float64},Int},
-                        scale_counts,wall.index) : nothing
-        sampler=wall.view>=0 ? get(samplers,wall.view,nothing) : nothing
-        if sampler!==nothing
-            # Post-view direction: upstream dedupes the wall's vertices
-            # (`verts` set) and adds each `searchVector` result once — the
-            # raw interpolated vector, magnitude included, with no `invert`
-            # applied to signed generatrices. A miss contributes the zero
-            # vector the C++ call leaves in `nn`.
-            seen=Set{NTuple{3,Float64}}()
-            for pos in chain
-                pos in seen && continue
-                push!(seen,pos)
-                v=sf_mod.vector_raw(sampler,pos[1],pos[2],pos[3])
-                n=v===nothing ? (0.0,0.0,0.0) : v
-                s=get(sf,pos,(0.0,0.0,0.0))
-                sf[pos]=(s[1]+n[1],s[2]+n[2],s[3]+n[3])
-                cf[pos]=get(cf,pos,0)+1
+    faces=_model===nothing ? nothing : _extrude_bl_face_infos(_model)
+    if faces!==nothing && !isempty(faces.infos)
+        for (stag,infos) in faces.infos
+            for (_,index,_) in infos
+                faces.scale_last[stag] &&
+                    0<=index<=1 && (scale_gate[index]=true)
             end
-        else
-            for i in 1:nseg
-                j=i==nnode ? 1 : i+1
-                p,q=chain[i],chain[j]
-                t=(q[1]-p[1],q[2]-p[2],q[3]-p[3])
-                Lt=hypot(t...)
-                Lt>0 || continue
-                t=(t[1]/Lt,t[2]/Lt,t[3]/Lt)
-                n=(peff[2]*t[3]-peff[3]*t[2],
-                   peff[3]*t[1]-peff[1]*t[3],
-                   peff[1]*t[2]-peff[2]*t[1])
-                for pos in (p,q)
+        end
+    end
+    sf_mod=getfield(parentmodule(@__MODULE__),:SizeField)
+    if faces!==nothing && !isempty(faces.infos)
+        # `sourceFaces` non-empty: `addExtrudeNormals` iterates the source
+        # faces only — every source *edge* contribution is skipped, even for
+        # sibling curve walls. Each `(invert,index,view)` info entry is one
+        # boundary-layer copy's contribution set.
+        for (stag,infos) in faces.infos
+            # `_return_surface_production` selects the native producer the
+            # dim-2 phase uses — `addExtrudeNormals` accumulates over the
+            # face's *produced* vertices, and the returned production's mesh
+            # is the discretization the consumers' `_mesh_input` products
+            # carry (a lazy CDT would miss interior nodes like the
+            # recombined face's center fan).
+            srcmesh=_extrude_bl_srcmesh(_model,stag;
+                size_field=_size_field,_mesh_input=_mesh_input,
+                _mesh1d_options=_mesh1d_options)
+            for (invert,index,view) in infos
+                0<=index<=1 || continue
+                sf=get!(Dict{NTuple{3,Float64},NTuple{3,Float64}},
+                        sums,index)
+                cf=get!(Dict{NTuple{3,Float64},Int},counts,index)
+                gated=get(scale_gate,index,false)
+                ss=gated ? get!(Dict{NTuple{3,Float64},Float64},
+                                scale_sums,index) : nothing
+                sc=gated ? get!(Dict{NTuple{3,Float64},Int},
+                                scale_counts,index) : nothing
+                skip_scale=!faces.scale_last[stag]
+                sampler=view>=0 ? get(samplers,view,nothing) : nothing
+                _extrude_bl_face_accumulate!(srcmesh,sf,cf,ss,sc;
+                    invert=invert,sampler=sampler,skip_scale=skip_scale,
+                    sf_mod=sf_mod)
+            end
+        end
+    else
+        for wall in walls
+            0<=wall.index<=1 || continue
+            chain=wall.chain;closed=wall.closed;peff=wall.peff
+            nnode=length(chain)
+            nseg=closed ? nnode : nnode-1
+            sf=get!(Dict{NTuple{3,Float64},NTuple{3,Float64}},
+                    sums,wall.index)
+            cf=get!(Dict{NTuple{3,Float64},Int},counts,wall.index)
+            gated=get(scale_gate,wall.index,false)
+            ss=gated ? get!(Dict{NTuple{3,Float64},Float64},
+                            scale_sums,wall.index) : nothing
+            sc=gated ? get!(Dict{NTuple{3,Float64},Int},
+                            scale_counts,wall.index) : nothing
+            sampler=wall.view>=0 ? get(samplers,wall.view,nothing) : nothing
+            if sampler!==nothing
+                # Post-view direction: upstream dedupes the wall's vertices
+                # (`verts` set) and adds each `searchVector` result once —
+                # the raw interpolated vector, magnitude included, with no
+                # `invert` applied to signed generatrices. A miss contributes
+                # the zero vector the C++ call leaves in `nn`.
+                seen=Set{NTuple{3,Float64}}()
+                for pos in chain
+                    pos in seen && continue
+                    push!(seen,pos)
+                    v=sf_mod.vector_raw(sampler,pos[1],pos[2],pos[3])
+                    n=v===nothing ? (0.0,0.0,0.0) : v
                     s=get(sf,pos,(0.0,0.0,0.0))
                     sf[pos]=(s[1]+n[1],s[2]+n[2],s[3]+n[3])
                     cf[pos]=get(cf,pos,0)+1
                 end
+            else
+                for i in 1:nseg
+                    j=i==nnode ? 1 : i+1
+                    p,q=chain[i],chain[j]
+                    t=(q[1]-p[1],q[2]-p[2],q[3]-p[3])
+                    Lt=hypot(t...)
+                    Lt>0 || continue
+                    t=(t[1]/Lt,t[2]/Lt,t[3]/Lt)
+                    n=(peff[2]*t[3]-peff[3]*t[2],
+                       peff[3]*t[1]-peff[1]*t[3],
+                       peff[1]*t[2]-peff[2]*t[1])
+                    for pos in (p,q)
+                        s=get(sf,pos,(0.0,0.0,0.0))
+                        sf[pos]=(s[1]+n[1],s[2]+n[2],s[3]+n[3])
+                        cf[pos]=get(cf,pos,0)+1
+                    end
+                end
             end
-        end
-        # `add_scale` stays per element-vertex in both modes — a shared
-        # vertex averages its incident segment lengths either way
-        # (`aveLength = GetAveEdgeLength(elem)`; `skipScaleCalc` → 1.0).
-        ss===nothing && continue
-        for i in 1:nseg
-            j=i==nnode ? 1 : i+1
-            p,q=chain[i],chain[j]
-            Lt=hypot(q[1]-p[1],q[2]-p[2],q[3]-p[3])
-            Lt>0 || continue
-            seg_scale=wall.scale_last ? Lt : 1.0
-            for pos in (p,q)
-                ss[pos]=get(ss,pos,0.0)+seg_scale
-                sc[pos]=get(sc,pos,0)+1
+            # `add_scale` stays per element-vertex in both modes — a shared
+            # vertex averages its incident segment lengths either way
+            # (`aveLength = GetAveEdgeLength(elem)`; `skipScaleCalc` → 1.0).
+            ss===nothing && continue
+            for i in 1:nseg
+                j=i==nnode ? 1 : i+1
+                p,q=chain[i],chain[j]
+                Lt=hypot(q[1]-p[1],q[2]-p[2],q[3]-p[3])
+                Lt>0 || continue
+                seg_scale=wall.scale_last ? Lt : 1.0
+                for pos in (p,q)
+                    ss[pos]=get(ss,pos,0.0)+seg_scale
+                    sc[pos]=get(sc,pos,0)+1
+                end
             end
         end
     end
@@ -525,6 +628,169 @@ function _extrude_bl_normal_field(walls,samplers::AbstractDict=Dict{Int,Any}())
         scales[index]=field
     end
     return (fields=fields,scales=scales)
+end
+
+# The `(invert,index,view)` info set `Mesh2DWithBoundaryLayers` collects per
+# source face from every COPIED_ENTITY boundary-layer record — pending
+# `bl_surface` specs plus their resolved `boundary_layer` forms keep the
+# same bookkeeping fields (`bl3d` marks both). `scale_last` folds
+# `faceSkipScaleCalc[tag]`: the last copy record's flag wins upstream, so
+# iterating sorted spec tags reproduces the same per-source flag.
+function _extrude_bl_face_infos(m::GeoModel)
+    infos=Dict{Int,Set{Tuple{Bool,Int,Int}}}()
+    scale_last=Dict{Int,Bool}()
+    for (d,tag) in sort!(collect(keys(m.meshing.extrude_specs)))
+        d==2 || continue
+        spec=m.meshing.extrude_specs[(d,tag)]
+        spec isa NamedTuple || continue
+        get(spec,:bl3d,false) || continue
+        src=Int(get(spec,:src,0))
+        src==0 && continue
+        stag=abs(src)
+        push!(get!(infos,stag,Set{Tuple{Bool,Int,Int}}()),
+              (src<0,Int(get(spec,:index,0)),Int(get(spec,:view,-1))))
+        params=get(m.meshing.extrude,(2,tag),nothing)
+        scale_last[stag]=params===nothing ? false : params.scale_last
+    end
+    return (infos=infos,scale_last=scale_last)
+end
+
+# `addExtrudeNormals` over one source face's triangle/quadrangle elements:
+# gouraud arm — unit element normals angle-weighted per corner
+# (`getAngleAtVertex·2/π`), or raw normals plus `aveLength` scale
+# accumulation when the index's scale gate is armed; vector-view arm —
+# deduped `searchVector` samples (`invert` never applies). `invert` follows
+# the chapeau's signed `geo.Source`.
+function _extrude_bl_face_accumulate!(srcmesh,sf,cf,ss,sc;
+                                    invert::Bool,sampler,skip_scale::Bool,
+                                    sf_mod)
+    scoords=srcmesh.coords
+    posat(row)=(scoords[1,row],scoords[2,row],scoords[3,row])
+    cells=_extrude_bl_face_cells(srcmesh)
+    if sampler!==nothing
+        seen=Set{NTuple{3,Float64}}()
+        for cell in cells
+            if ss!==nothing
+                Lt=_extrude_bl_ave_edge_length(map(posat,cell))
+                seg_scale=skip_scale ? 1.0 : Lt
+                for row in cell
+                    pos=posat(row)
+                    push!(seen,pos)
+                    seg_scale==0.0 && continue
+                    ss[pos]=get(ss,pos,0.0)+seg_scale
+                    sc[pos]=get(sc,pos,0)+1
+                end
+            else
+                for row in cell
+                    push!(seen,posat(row))
+                end
+            end
+        end
+        for pos in seen
+            v=sf_mod.vector_raw(sampler,pos[1],pos[2],pos[3])
+            n=v===nothing ? (0.0,0.0,0.0) : v
+            s=get(sf,pos,(0.0,0.0,0.0))
+            sf[pos]=(s[1]+n[1],s[2]+n[2],s[3]+n[3])
+            cf[pos]=get(cf,pos,0)+1
+        end
+        return nothing
+    end
+    gated=ss!==nothing
+    for cell in cells
+        pts=map(posat,cell)
+        n=if length(cell)==3
+            _extrude_bl_cell_normal(pts[1],pts[2],pts[3])
+        else
+            _extrude_bl_quad_normal(pts[1],pts[2],pts[3],pts[4])
+        end
+        n===nothing && continue
+        invert && (n=(-n[1],-n[2],-n[3]))
+        if gated
+            Lt=skip_scale ? 1.0 : _extrude_bl_ave_edge_length(pts)
+            for k in eachindex(cell)
+                pos=pts[k]
+                s=get(sf,pos,(0.0,0.0,0.0))
+                sf[pos]=(s[1]+n[1],s[2]+n[2],s[3]+n[3])
+                cf[pos]=get(cf,pos,0)+1
+                Lt==0.0 && continue
+                ss[pos]=get(ss,pos,0.0)+Lt
+                sc[pos]=get(sc,pos,0)+1
+            end
+        else
+            for k in eachindex(cell)
+                pos=pts[k]
+                fact=_extrude_bl_corner_angle(pts,k)*2/π
+                w=fact>0 ? fact : 1.0
+                s=get(sf,pos,(0.0,0.0,0.0))
+                sf[pos]=(s[1]+n[1]*w,s[2]+n[2]*w,s[3]+n[3]*w)
+                cf[pos]=get(cf,pos,0)+1
+            end
+        end
+    end
+    return nothing
+end
+
+# The triangle/quadrangle node-row tuples a face mesh contributes to the
+# `addExtrudeNormals` accumulation — `Mesh` tris plus a `MixedMesh`'s
+# dim-2 element blocks.
+function _extrude_bl_face_cells(srcmesh)
+    cells=Tuple{Vararg{Int}}[]
+    if srcmesh isa Mesh
+        for i in 1:ntris(srcmesh)
+            push!(cells,(srcmesh.tris[1,i],srcmesh.tris[2,i],
+                         srcmesh.tris[3,i]))
+        end
+    else
+        for block in srcmesh.blocks
+            block isa ElementBlock && msh_dimension(block.msh)==2 ||
+                continue
+            for i in axes(block.nodes,2)
+                block.msh==2 &&
+                    push!(cells,(block.nodes[1,i],block.nodes[2,i],
+                                 block.nodes[3,i]))
+                block.msh==3 &&
+                    push!(cells,(block.nodes[1,i],block.nodes[2,i],
+                                 block.nodes[3,i],block.nodes[4,i]))
+            end
+        end
+    end
+    return cells
+end
+
+# `MElement::getFace(0).normal()` — unit normal of a triangle/quadrangle
+# element (diagonal cross for the quad). `nothing` when degenerate.
+function _extrude_bl_cell_normal(a,b,c)
+    ux,uy,uz=b[1]-a[1],b[2]-a[2],b[3]-a[3]
+    vx,vy,vz=c[1]-a[1],c[2]-a[2],c[3]-a[3]
+    nx,ny,nz=uy*vz-uz*vy,uz*vx-ux*vz,ux*vy-uy*vx
+    L=hypot(nx,ny,nz)
+    L>0 || return nothing
+    return (nx/L,ny/L,nz/L)
+end
+_extrude_bl_quad_normal(a,b,c,d)=
+    _extrude_bl_cell_normal(a,c,b,d)
+
+# `GetAveEdgeLength` — mean of the element's edge lengths.
+function _extrude_bl_ave_edge_length(pts)
+    n=length(pts)
+    total=0.0
+    for i in 1:n
+        p,q=pts[i],pts[mod1(i+1,n)]
+        total+=hypot(q[1]-p[1],q[2]-p[2],q[3]-p[3])
+    end
+    return total/n
+end
+
+# `MElement::getAngleAtVertex` — the interior angle at corner `k` in
+# radians, between the two incident polygon edges.
+function _extrude_bl_corner_angle(pts,k::Int)
+    n=length(pts)
+    p=pts[k]
+    q1=pts[mod1(k-1,n)];q2=pts[mod1(k+1,n)]
+    ux,uy,uz=q1[1]-p[1],q1[2]-p[2],q1[3]-p[3]
+    vx,vy,vz=q2[1]-p[1],q2[2]-p[2],q2[3]-p[3]
+    cx,cy,cz=uy*vz-uz*vy,uz*vx-ux*vz,ux*vy-uy*vx
+    return atan(hypot(cx,cy,cz),ux*vx+uy*vy+uz*vz)
 end
 
 # Upstream `smooth_data::normalize` — unit-normalize each field entry in
@@ -566,12 +832,149 @@ function _extrude_bl_scale_background!(field,bg)
     return field
 end
 
+# One node position's mean normal direction and incident scale over the
+# *live* source-face mesh — the same arms `_extrude_bl_face_accumulate!`
+# contributes for every `(invert,index,view)` copy, plus the
+# `_extrude_bl_view_fields` post passes (`unitize` covers
+# `smooth_data::normalize`; `snap`/`scale_bg` only fire when no resolved
+# vector view exists, mirroring the global `normalize` flag).
+function _extrude_bl_live_node(srcmesh,pos,cells,normalmap,ctx)
+    sampler=ctx.sampler
+    sf_mod=getfield(parentmodule(@__MODULE__),:SizeField)
+    if sampler!==nothing
+        v=sf_mod.vector_raw(sampler,pos[1],pos[2],pos[3])
+        return v===nothing ? (0.0,0.0,0.0) : v
+    end
+    contrib=_extrude_bl_live_contrib(srcmesh,pos,cells,normalmap,ctx)
+    c=length(contrib)
+    c==0 && return (0.0,0.0,0.0)
+    # `smooth_data`'s running mean per position (upstream also divides a
+    # vertex's accumulated normals by its contribution count).
+    sx=sy=sz=0.0
+    for v in contrib
+        sx+=v[1];sy+=v[2];sz+=v[3]
+    end
+    n=(sx/c,sy/c,sz/c)
+    if ctx.unitize
+        L=hypot(n[1],n[2],n[3])
+        n=L>0 ? (n[1]/L,n[2]/L,n[3]/L) : (0.0,0.0,0.0)
+        if ctx.snap
+            n=(n[1]<-0.1 ? -1.0 : n[1]>0.1 ? 1.0 : 0.0,
+               n[2]<-0.1 ? -1.0 : n[2]>0.1 ? 1.0 : 0.0,
+               n[3]<-0.1 ? -1.0 : n[3]>0.1 ? 1.0 : 0.0)
+        end
+        if ctx.scale_bg && ctx.bg!==nothing
+            r=sf_mod.field_value(ctx.bg,pos[1],pos[2],pos[3])
+            (isfinite(r) && r!=0) && (n=(n[1]*r,n[2]*r,n[3]*r))
+        end
+    end
+    return n
+end
+
+# Per-cell normal (or angle-weighted) contributions incident to `pos` —
+# the `_extrude_bl_face_accumulate!` gouraud/gated arms restricted to the
+# elements touching one vertex. `normalmap` caches element normals.
+function _extrude_bl_live_contrib(srcmesh,pos,cells,normalmap,ctx)
+    posat(row)=(srcmesh.coords[1,row],srcmesh.coords[2,row],
+                srcmesh.coords[3,row])
+    out=NTuple{3,Float64}[]
+    for (ci,cell) in enumerate(cells)
+        hit=0
+        for k in eachindex(cell)
+            posat(cell[k])==pos && (hit=k;break)
+        end
+        hit==0 && continue
+        n=get!(normalmap,ci) do
+            pts=map(posat,cell)
+            en=length(cell)==3 ?
+                _extrude_bl_cell_normal(pts[1],pts[2],pts[3]) :
+                _extrude_bl_quad_normal(pts[1],pts[2],pts[3],pts[4])
+            en===nothing ? (0.0,0.0,0.0) :
+                ctx.invert ? (-en[1],-en[2],-en[3]) : en
+        end
+        n==(0.0,0.0,0.0) && continue
+        if ctx.gated
+            push!(out,n)
+        else
+            pts=map(posat,cell)
+            fact=_extrude_bl_corner_angle(pts,hit)*2/π
+            w=fact>0 ? fact : 1.0
+            push!(out,(n[1]*w,n[2]*w,n[3]*w))
+        end
+    end
+    return out
+end
+
+# `boundaryLayerVertices` covers `face->mesh_vertices` — the *live* face
+# mesh — but a resolved `bl_surface` spec's `levels`/`tops` were keyed by
+# the mesh `prepare` measured. The detached dim-0/1 phases can resolve the
+# spec before the native surface producer's exact discretization exists;
+# when the consumer's mesh is a different discretization of the same face,
+# extend the row maps for its uncovered positions with the same
+# incident-element accumulation, keyed once per mesh object.
+function _extrude_bl_ensure_srcmesh!(m::GeoModel,dim::Int,tag::Int,
+                                   caller::AbstractString,srcmesh)
+    spec=get(m.meshing.extrude_specs,(dim,tag),nothing)
+    spec isa NamedTuple || return spec
+    ctx=get(spec,:bl_ctx,nothing)
+    ctx===nothing && return spec
+    oid=objectid(srcmesh)
+    oid in ctx.seen && return spec
+    push!(ctx.seen,oid)
+    levels=spec.levels;tops=spec.tops
+    uvals=spec.uvals;nl=length(uvals)
+    cells=_extrude_bl_face_cells(srcmesh)
+    normalmap=Dict{Int,NTuple{3,Float64}}()
+    changed=false
+    for i in 1:nnodes(srcmesh)
+        pos=(srcmesh.coords[1,i],srcmesh.coords[2,i],srcmesh.coords[3,i])
+        # The live mesh is authoritative: a position the prepare-time mesh
+        # already covered still gets recomputed — its incident elements (and
+        # therefore its angle-weighted normal and `GetAveEdgeLength` scale)
+        # belong to the discretization the consumers actually sweep.
+        n=_extrude_bl_live_node(srcmesh,pos,cells,normalmap,ctx)
+        row=n==(0.0,0.0,0.0) ? fill(pos,nl) :
+            [(pos[1]+t*n[1],pos[2]+t*n[2],pos[3]+t*n[3]) for t in uvals]
+        if ctx.scale_active && n!=(0.0,0.0,0.0)
+            s=_extrude_bl_live_scale(srcmesh,pos,cells,ctx)
+            if s!=1.0
+                for l in eachindex(uvals)
+                    t=uvals[l]
+                    t>ctx.hprev || continue
+                    t2=ctx.hprev+(t-ctx.hprev)*s
+                    row[l]=(pos[1]+t2*n[1],pos[2]+t2*n[2],
+                            pos[3]+t2*n[3])
+                end
+            end
+        end
+        levels[pos]=row;tops[pos]=row[end];changed=true
+    end
+    changed || return spec
+    return spec
+end
+
+# `GetAveEdgeLength` mean over the elements incident to `pos` — the
+# `add_scale` accumulation for a vertex `prepare`'s mesh never covered.
+function _extrude_bl_live_scale(srcmesh,pos,cells,ctx)
+    posat(row)=(srcmesh.coords[1,row],srcmesh.coords[2,row],
+                srcmesh.coords[3,row])
+    total=0.0;count=0
+    for cell in cells
+        any(row->posat(row)==pos,cell) || continue
+        pts=map(posat,cell)
+        Lt=ctx.skip_scale ? 1.0 : _extrude_bl_ave_edge_length(pts)
+        Lt==0.0 && continue
+        total+=Lt;count+=1
+    end
+    return count==0 ? 1.0 : total/count
+end
+
 # `(chain, closed, peff, index, view, scale_last)` for every boundary-layer
 # surface's generatrix — the mesh-time equivalent of the exec-time entity
 # list, so the field merges across `Extrude` statements just as upstream
 # accumulates every BoundaryLayerCurve's edges.
 function _extrude_bl_walls(m::GeoModel,caller::AbstractString;
-                           _mesh_input=nothing)
+                           _mesh_input=nothing,_mesh1d_options=nothing)
     walls=_ExtrudeBlWall[]
     for (d,tag) in sort!(collect(keys(m.meshing.extrude_specs)))
         d==2 || continue
@@ -580,7 +983,8 @@ function _extrude_bl_walls(m::GeoModel,caller::AbstractString;
         get(spec,:type,nothing)===:boundary_layer || continue
         link=get(m.meshing.extrude_sources,(2,tag),nothing)
         link===nothing && continue
-        chain,_,orphans,_=_extrude_curve_source(m,abs(link[2]),_mesh_input,caller)
+        chain,_,orphans,_=_extrude_curve_source(m,abs(link[2]),_mesh_input,
+            caller;_mesh1d_options=_mesh1d_options)
         isempty(orphans) || throw(ArgumentError(
             "$caller: Surface[$tag] boundary-layer generatrix " *
             "Curve[$(abs(link[2]))] has unreferenced mesh nodes"))
@@ -590,7 +994,8 @@ function _extrude_bl_walls(m::GeoModel,caller::AbstractString;
         params=get(m.meshing.extrude,(2,tag),nothing)
         push!(walls,(chain=chain,closed=closed,peff=peff,
             index=Int(get(spec,:index,0)),view=Int(get(spec,:view,-1)),
-            scale_last=params===nothing ? false : params.scale_last))
+            scale_last=params===nothing ? false : params.scale_last,
+            surf=Int(get(spec,:surf,0))))
     end
     return walls
 end
@@ -797,6 +1202,54 @@ function _extrude_bl_refresh!(m::GeoModel,spec,gen::Int,signed_c::Int,
     return nothing
 end
 
+# The 3-D counterpart of `_extrude_bl_refresh!`: the source-face field — not
+# a planar kernel — produced the strip's `dirs`/`tops`, so the connector
+# `:translate` records, the A-curve's `tops`/`top_row` map, and the
+# `MSH_POINT_BND_LAYER` vertices are written straight from that field.
+# `boundaryLayerVertices` semantics are the same: every boundary-layer copy
+# vertex moves to `x + t_top·nn` (with the ScaleLast `get_scale` remap).
+function _extrude_bl_surf_refresh!(m::GeoModel,spec,gen::Int,signed_c::Int,
+                                   closed::Bool,dirs,tops,scale_field,hprev,
+                                   caller::AbstractString;
+                                   _params_model::GeoModel=m)
+    a,b=m.curves[gen]
+    sbeg,send=signed_c>0 ? (a,b) : (b,a)
+    beg_pos=m.points[sbeg];end_pos=m.points[send]
+    cbeg,cend=spec.connectors
+    if haskey(m.curves,cbeg)
+        m.points[m.curves[cbeg][2]]=tops[beg_pos]
+        s=scale_field===nothing ? 1.0 : get(scale_field,beg_pos,1.0)
+        (isfinite(s) && abs(s-1.0)<=1e-12) && (s=1.0)
+        m.meshing.extrude_specs[(1,cbeg)]=
+            (type=:translate,T=dirs[beg_pos],
+             scale=s==1.0 ? nothing : (hprev,s))
+    end
+    if cend>0 && haskey(m.curves,cend)
+        m.points[m.curves[cend][2]]=tops[end_pos]
+        s=scale_field===nothing ? 1.0 : get(scale_field,end_pos,1.0)
+        (isfinite(s) && abs(s-1.0)<=1e-12) && (s=1.0)
+        m.meshing.extrude_specs[(1,cend)]=
+            (type=:translate,T=dirs[end_pos],
+             scale=s==1.0 ? nothing : (hprev,s))
+    end
+    chapeau=spec.chapeau
+    if haskey(m.curves,chapeau)
+        ctops,row=_extrude_bl_tops_dict(_params_model,gen,chapeau,signed_c,
+                                       tops,caller)
+        m.meshing.extrude_specs[(1,chapeau)]=
+            (type=:boundary_layer,tops=ctops,top_row=row)
+        m.points[m.curves[chapeau][1]]=tops[beg_pos]
+        closed || (m.points[m.curves[chapeau][2]]=tops[end_pos])
+        for cp in get(m.curve_control_points,chapeau,Int[])
+            haskey(m.points,cp) || continue
+            _point_bl_class(m,cp)[1] || continue
+            m.points[cp]=_extrude_bl_top_at(tops,m.points[cp],caller;
+                                            unbounded=true)
+        end
+    end
+    return nothing
+end
+
 # Non-recombined product: split each strip quadrangle on the `(b1,b2,t2)` /
 # `(b1,t2,t1)` diagonal — the same fan `_extrude_quatri!` emits.
 function _extrude_bl_unrecombined(mesh::MixedMesh)
@@ -832,7 +1285,8 @@ function _extrude_bl_lateral_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
                                   _mesh_input=nothing,_size_field=nothing,
                                   _options=nothing)
     gen=abs(gen_signed)
-    chain,_,orphans,_=_extrude_curve_source(m,gen,_mesh_input,caller)
+    chain,_,orphans,_=_extrude_curve_source(m,gen,_mesh_input,caller;
+        _mesh1d_options=_options)
     isempty(orphans) || throw(ArgumentError(
         "$caller: Surface[$t] boundary-layer generatrix Curve[$gen] has " *
         "unreferenced mesh nodes"))
@@ -840,7 +1294,7 @@ function _extrude_bl_lateral_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
     closed=a==b
     peff=_extrude_bl_plane_normal(chain,closed,gen_signed>0,caller)
     index=Int(get(spec,:index,0))
-    walls=_extrude_bl_walls(m,caller;_mesh_input)
+    walls=_extrude_bl_walls(m,caller;_mesh_input,_mesh1d_options=_options)
     # `extrudeField` reads `BGM_MeshSize` — the mesh pass's background field,
     # carried on the 1-D options bundle when no explicit `size_field` rides
     # this call.
@@ -850,10 +1304,14 @@ function _extrude_bl_lateral_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
     fields=_extrude_bl_view_fields(walls,caller;
                                    _background_field=background,
                                    _options=_options,
-                                   _views=m.meshing.post_views)
+                                   _views=m.meshing.post_views,
+                                   _model=m,_mesh_input=_mesh_input,
+                                   _mesh1d_options=_options,
+                                   _size_field=_size_field)
     # Resolve any standalone point-generatrix connectors against the same
     # field — upstream displaces them inside this pass.
-    _extrude_bl_prepare!(m,caller;_fields=fields,_mesh_input)
+    _extrude_bl_prepare!(m,caller;_fields=fields,_mesh_input,
+        _options=_options,_mesh1d_options=_options,_size_field=_size_field)
     field=get(fields.fields,index,_EMPTY_BL_FIELD)
     offsets=_extrude_level_us(params)[2:end]
     # The `calcLayerScaleFactor[index]` gate: only when some copy at this
@@ -931,8 +1389,10 @@ function _extrude_bl_view_sampler(view,caller)
 end
 
 # Per-`ViewIndex` sampler table for the wall set — keyed on the view index
-# so sibling walls sharing a `Using View[i]` share one octree.
-function _extrude_bl_view_samplers(walls,views,caller)
+# so sibling walls sharing a `Using View[i]` share one octree. 3-D
+# boundary-layer copies carry `Using View[i]` on their `bl_surface` specs
+# rather than a wall record, so `face_infos` entries join the same table.
+function _extrude_bl_view_samplers(walls,views,caller;face_infos=nothing)
     samplers=Dict{Int,Any}()
     views===nothing && return samplers
     for wall in walls
@@ -941,7 +1401,52 @@ function _extrude_bl_view_samplers(walls,views,caller)
         haskey(samplers,v) && continue
         samplers[v]=_extrude_bl_view_sampler(views[v+1],caller)
     end
+    if face_infos!==nothing
+        for (_,infos) in face_infos
+            for (_,_,v) in infos
+                (v>=0 && v<length(views)) || continue
+                haskey(samplers,v) && continue
+                samplers[v]=_extrude_bl_view_sampler(views[v+1],caller)
+            end
+        end
+    end
     return samplers
+end
+
+# The `bl3d` copy-record analogue of `_extrude_bl_view_flags`: the
+# `special3dbox` snap (`View[-3]`) and `extrudeField` background scale
+# (`View[-5]`) modes arm on a surface copy's `Using View[...]` the same way
+# they arm on a wall's.
+function _extrude_bl_face_view_flags(face_infos)
+    snap=scale=false
+    face_infos===nothing && return (snap=snap,scale=scale)
+    for (_,infos) in face_infos
+        for (_,_,v) in infos
+            v==-3 && (snap=true)
+            v==-5 && (scale=true)
+        end
+    end
+    return (snap=snap,scale=scale)
+end
+
+# `_extrude_bl_check_meta!` for the `bl3d` records — same recoverable
+# diagnostics on `Using Index[...]`/`Using View[...]` metadata a wall
+# carries (`addExtrudeNormals` runs its `Msg::Error` switch per copied
+# entity the same way it runs it per boundary-layer wall).
+function _extrude_bl_check_meta_faces!(face_infos,options,views=nothing)
+    (options===nothing || face_infos===nothing) && return nothing
+    nviews=views===nothing ? 0 : length(views)
+    for (_,infos) in face_infos
+        for (_,index,v) in infos
+            index in (0,1) || _model_mesh_error(options,
+                "Invalid boundary layer index $index")
+            (v==-1 || v==-3 || v==-5) && continue
+            (v>=0 && v<nviews) && continue
+            v>=0 && _model_mesh_error(options,
+                "Unknown View[$v]: using normals instead")
+        end
+    end
+    return nothing
 end
 
 # Build the per-index smooth-data fields for the current wall set, applying
@@ -952,12 +1457,23 @@ end
 # extrude kernel consumes their magnitudes (`x += n[i]*t`).
 function _extrude_bl_view_fields(walls,caller;
                                  _background_field=nothing,_options=nothing,
-                                 _views=nothing)
+                                 _views=nothing,_model=nothing,
+                                 _mesh_input=nothing,_mesh1d_options=nothing,
+                                 _size_field=nothing)
     _extrude_bl_check_meta!(walls,_options,_views)
-    samplers=_extrude_bl_view_samplers(walls,_views,caller)
+    face_infos=_model===nothing ? nothing :
+        _extrude_bl_face_infos(_model).infos
+    _extrude_bl_check_meta_faces!(face_infos,_options,_views)
+    samplers=_extrude_bl_view_samplers(walls,_views,caller;
+                                       face_infos=face_infos)
     normalize=!any(s->s!==nothing,values(samplers))
-    built=_extrude_bl_normal_field(walls,samplers)
+    built=_extrude_bl_normal_field(walls,samplers;
+        _model=_model,_mesh_input=_mesh_input,
+        _mesh1d_options=_mesh1d_options,_size_field=_size_field)
     snap,scale_bg=_extrude_bl_view_flags(walls)
+    face_flags=_extrude_bl_face_view_flags(face_infos)
+    snap = snap || face_flags.snap
+    scale_bg = scale_bg || face_flags.scale
     for (index,field) in built.fields
         if normalize
             _extrude_bl_unitize!(field)
@@ -971,7 +1487,8 @@ function _extrude_bl_view_fields(walls,caller;
     # `special3dbox`/`extrudeField` post passes — a snapped (1,-1,0) or
     # background-scaled (0,-2,0) entry loses its magnitude to a unitizing
     # re-pass, and either can leave the wall plane.
-    return (;built...,normalize=normalize && !snap && !scale_bg)
+    return (;built...,normalize=normalize && !snap && !scale_bg,
+            samplers=samplers,bg=_background_field)
 end
 
 # `Mesh2DWithBoundaryLayers`'s `ExtrudePoint` arm: a standalone
@@ -982,21 +1499,210 @@ end
 # resolved `:translate` spec (plus its ScaleLast remap, when both the copy
 # selects ScaleLast and the index's scale gate is armed) is idempotent:
 # re-entry finds no pending specs.
+# Re-entrancy gate: meshing a source face through the native producer runs a
+# detached dim-01 plan whose `_model_point_mesh_parts` re-enters this
+# function on its transaction copy — that inner resolution is incidental to
+# face meshing (upstream's `(*it)->mesh(true)` never re-enters the BL pass).
+# Task-local so detached parallel surface units keep their own gate.
 function _extrude_bl_prepare!(m::GeoModel,caller::AbstractString;
                               _fields=nothing,_mesh_input=nothing,
-                              _options=nothing)
-    pending=Tuple{Int,Any}[]
-    for ((d,tag),spec) in m.meshing.extrude_specs
-        d==1 || continue
-        spec isa NamedTuple || continue
-        get(spec,:type,nothing)===:bl_point || continue
-        push!(pending,(tag,spec))
+                              _options=nothing,_model=nothing,
+                              _mesh1d_options=nothing,_size_field=nothing)
+    get(task_local_storage(),:TESS_BL_PREPARE,false) && return nothing
+    task_local_storage(:TESS_BL_PREPARE,true)
+    try
+        _extrude_bl_prepare_inner!(m,caller;_fields,_mesh_input,_options,
+            _model,_mesh1d_options,_size_field)
+    finally
+        delete!(task_local_storage(),:TESS_BL_PREPARE)
     end
-    isempty(pending) && return nothing
+    return nothing
+end
+
+function _extrude_bl_prepare_inner!(m::GeoModel,caller::AbstractString;
+                              _fields=nothing,_mesh_input=nothing,
+                              _options=nothing,_model=nothing,
+                              _mesh1d_options=nothing,_size_field=nothing)
+    pending=Tuple{Int,Any}[]
+    pending_surf=Tuple{Int,Int,Any}[]
+    pending_lat=Tuple{Int,Any}[]
+    for ((d,tag),spec) in m.meshing.extrude_specs
+        spec isa NamedTuple || continue
+        if d==1 && get(spec,:type,nothing)===:bl_point
+            push!(pending,(tag,spec))
+        elseif d in (2,3) && get(spec,:type,nothing)===:bl_surface
+            push!(pending_surf,(d,tag,spec))
+        elseif d==2 && get(spec,:type,nothing)===:boundary_layer &&
+            Int(get(spec,:surf,0))!=0 && !haskey(spec,:levels)
+            # A 3-D boundary-layer strip: the source-face field resolves its
+            # generatrix columns and sibling connector/chapeau records.
+            push!(pending_lat,(tag,spec))
+        end
+    end
+    isempty(pending) && isempty(pending_surf) && isempty(pending_lat) &&
+        return nothing
+    field_model=_model===nothing ? m : _model
     if _fields===nothing
-        walls=_extrude_bl_walls(m,caller;_mesh_input)
+        walls=_extrude_bl_walls(m,caller;_mesh_input,
+            _mesh1d_options=_mesh1d_options)
         _fields=_extrude_bl_view_fields(walls,caller;_options=_options,
-                                        _views=m.meshing.post_views)
+                                        _views=m.meshing.post_views,
+                                        _model=field_model,
+                                        _mesh_input=_mesh_input,
+                                        _mesh1d_options=_mesh1d_options,
+                                        _size_field=_size_field)
+    end
+    # `Mesh2DWithBoundaryLayers`'s `ExtrudeSurface` arm: each COPIED_ENTITY
+    # chapeau/volume record resolves into a column field — the displaced
+    # position `x + t·nn` for every level `t`, keyed by the source face's
+    # mesh-node positions, exactly like `boundaryLayerVertices`. ScaleLast
+    # remaps the top level through the index's scale field the way
+    # `ExtrudeParams::Extrude(iLayer, iElemLayer, ..., scaleFactor)` does.
+    # `bl_ctx` lets a later consumer re-extend the row maps against the
+    # *actual* discretization it sweeps when the producer's face mesh
+    # differs from the one resolved here (`face->mesh_vertices` upstream).
+    if !isempty(pending_surf)
+        samplers_ctx=get(_fields,:samplers,nothing)
+        rawnorm_ctx=samplers_ctx===nothing ||
+            !any(s->s!==nothing,values(samplers_ctx))
+        snap_ctx,scale_bg_ctx=_extrude_bl_view_flags(
+            _extrude_bl_walls(m,caller;_mesh_input,
+                _mesh1d_options=_mesh1d_options))
+        face_flags_ctx=_extrude_bl_face_view_flags(
+            _extrude_bl_face_infos(m).infos)
+        snap_ctx = snap_ctx || face_flags_ctx.snap
+        scale_bg_ctx = scale_bg_ctx || face_flags_ctx.scale
+        faces_scale_ctx=_extrude_bl_face_infos(m).scale_last
+        bg_ctx=get(_fields,:bg,nothing)
+    end
+    for (d,tag,spec) in pending_surf
+        src=Int(get(spec,:src,0))
+        src==0 && continue
+        stag=abs(src)
+        haskey(m.surfaces,stag) || continue
+        srcmesh=_extrude_bl_srcmesh(field_model,stag;
+            size_field=_size_field,_mesh_input=_mesh_input,
+            _mesh1d_options=_mesh1d_options)
+        get(ENV,"TESS_DEBUG_BL","")=="1" &&
+            println("BL PREPARE (d=$d,tag=$tag,src=$stag) srcmesh coords=",
+                [Tuple(srcmesh.coords[:,i]) for i in 1:size(srcmesh.coords,2)])
+        index=Int(get(spec,:index,0))
+        field=get(_fields.fields,index,_EMPTY_BL_FIELD)
+        scale_field=get(_fields.scales,index,nothing)
+        scale_active=scale_field!==nothing && get(spec,:scale_last,false)
+        params=get(m.meshing.extrude,(d,tag),nothing)
+        params===nothing && continue
+        offsets=_extrude_level_us(params)[2:end]
+        nl=length(offsets)
+        levels=Dict{NTuple{3,Float64},Vector{NTuple{3,Float64}}}()
+        scales=scale_active ?
+            Dict{NTuple{3,Float64},Float64}() : nothing
+        hprev=length(params.layers)>=2 ? params.heights[end-1] : 0.0
+        t_top=params.heights[end]
+        for i in 1:size(srcmesh.coords,2)
+            pos=(srcmesh.coords[1,i],srcmesh.coords[2,i],srcmesh.coords[3,i])
+            n=get(field,pos,(0.0,0.0,0.0))
+            # `nn[0] = 0` — a position the field never covered leaves every
+            # level coincident with the source vertex.
+            row=n==(0.0,0.0,0.0) ? fill(pos,nl) :
+                [(pos[1]+t*n[1],pos[2]+t*n[2],pos[3]+t*n[3]) for t in offsets]
+            if scale_active
+                s=get(scale_field,pos,1.0)
+                (isfinite(s) && abs(s-1.0)<=1e-12) && (s=1.0)
+                scales[pos]=s
+                # `Extrude(iLayer==NbLayer-1, scale)` — every element level
+                # inside the last layer group remaps its `u` as
+                # `u = h[N-2] + (u-h[N-2])·scale` (`u·scale` when NbLayer≤1,
+                # i.e. `hprev==0`), not just the final row.
+                if s!=1.0 && n!=(0.0,0.0,0.0)
+                    for l in eachindex(offsets)
+                        t=offsets[l]
+                        t>hprev || continue
+                        t2=hprev+(t-hprev)*s
+                        row[l]=(pos[1]+t2*n[1],pos[2]+t2*n[2],
+                                pos[3]+t2*n[3])
+                    end
+                end
+            end
+            levels[pos]=row
+        end
+        # `tops` keeps the top-row mapping `_extrude_at` and the volume
+        # sweep already read; `levels` serves per-level evaluation.
+        tops=Dict{NTuple{3,Float64},NTuple{3,Float64}}(
+            pos=>row[end] for (pos,row) in levels)
+        view_ctx=Int(get(spec,:view,-1))
+        bl_ctx=(seen=Set{UInt}((objectid(srcmesh),)),
+            view=view_ctx,
+            sampler=view_ctx>=0 && samplers_ctx!==nothing ?
+                get(samplers_ctx,view_ctx,nothing) : nothing,
+            gated=haskey(_fields.scales,index),
+            skip_scale=!get(faces_scale_ctx,stag,false),
+            invert=src<0,
+            unitize=rawnorm_ctx,
+            snap=rawnorm_ctx && snap_ctx,
+            scale_bg=rawnorm_ctx && scale_bg_ctx,
+            bg=bg_ctx,
+            scale_active=scale_active,
+            hprev=hprev,t_top=t_top)
+        m.meshing.extrude_specs[(d,tag)]=(type=:boundary_layer,bl3d=true,
+            src=src,tops=tops,levels=levels,uvals=offsets,
+            scales=scales,hprev=hprev,
+            index=index,view=view_ctx,
+            scale_last=get(spec,:scale_last,false),bl_ctx=bl_ctx)
+    end
+    # The `MSH_SURF_BND_LAYER` laterals of a 3-D boundary layer resolve the
+    # same way, keyed on their source *edge's* stored chain — a subset of
+    # the source face's mesh nodes, so the strip columns weld bitwise onto
+    # the chapeau/volume rows. `levels` marks the spec resolved; the generic
+    # `_extrude_lateral_mesh` product grid (quads or the
+    # `SubdivideExtrudedMesh` triangle pairs) sweeps it.
+    for (tag,spec) in pending_lat
+        link=get(m.meshing.extrude_sources,(2,tag),nothing)
+        link===nothing && continue
+        signed_c=link[2];gen=abs(signed_c)
+        haskey(m.curves,gen) || continue
+        chain,_,orphans,_=_extrude_curve_source(m,gen,_mesh_input,caller;
+            _mesh1d_options=_mesh1d_options)
+        a,b=m.curves[gen];closed=a==b
+        index=Int(get(spec,:index,0))
+        field=get(_fields.fields,index,_EMPTY_BL_FIELD)
+        scale_field=get(_fields.scales,index,nothing)
+        params=get(m.meshing.extrude,(2,tag),nothing)
+        params===nothing && continue
+        scale_active=scale_field!==nothing && params.scale_last
+        offsets=_extrude_level_us(params)[2:end]
+        nl=length(offsets)
+        hprev=length(params.layers)>=2 ? params.heights[end-1] : 0.0
+        t_top=params.heights[end]
+        dirs=Dict{NTuple{3,Float64},NTuple{3,Float64}}()
+        levels=Dict{NTuple{3,Float64},Vector{NTuple{3,Float64}}}()
+        for pos in chain
+            n=get(field,pos,(0.0,0.0,0.0))
+            dirs[pos]=n
+            row=n==(0.0,0.0,0.0) ? fill(pos,nl) :
+                [(pos[1]+t*n[1],pos[2]+t*n[2],pos[3]+t*n[3])
+                 for t in offsets]
+            if scale_active
+                s=get(scale_field,pos,1.0)
+                (isfinite(s) && abs(s-1.0)<=1e-12) && (s=1.0)
+                if s!=1.0 && n!=(0.0,0.0,0.0)
+                    for l in eachindex(offsets)
+                        t=offsets[l]
+                        t>hprev || continue
+                        t2=hprev+(t-hprev)*s
+                        row[l]=(pos[1]+t2*n[1],pos[2]+t2*n[2],
+                                pos[3]+t2*n[3])
+                    end
+                end
+            end
+            levels[pos]=row
+        end
+        tops=Dict{NTuple{3,Float64},NTuple{3,Float64}}(
+            pos=>row[end] for (pos,row) in levels)
+        m.meshing.extrude_specs[(2,tag)]=(;spec...,levels=levels,tops=tops,
+                                          uvals=offsets)
+        _extrude_bl_surf_refresh!(m,spec,gen,signed_c,closed,dirs,tops,
+            scale_active ? scale_field : nothing,hprev,caller)
     end
     for (tag,spec) in pending
         haskey(m.curves,tag) || continue
@@ -1105,11 +1811,18 @@ function _extrude_top_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
                            size_field::Union{Nothing,AbstractSizeField}=nothing,
                            source_mesh=nothing,_mesh_input=nothing,_return_production=false)
     src=abs(src_signed)
+    blspec=spec isa NamedTuple && get(spec,:bl3d,false)
     srcmesh=source_mesh===nothing ?
-        mesh_model_surface(m,src;min_angle_deg=min_angle_deg,
-            max_periodic_passes=max_periodic_passes,size_field=size_field,
-            _mesh_input,_boundary_regrade=false) :
+        (blspec ?
+            _extrude_bl_srcmesh(m,src;size_field=size_field,
+                _mesh_input=_mesh_input) :
+            mesh_model_surface(m,src;min_angle_deg=min_angle_deg,
+                max_periodic_passes=max_periodic_passes,
+                size_field=size_field,_mesh_input,
+                _boundary_regrade=false)) :
         source_mesh
+    ensured=_extrude_bl_ensure_srcmesh!(m,2,t,caller,srcmesh)
+    ensured===nothing || (spec=ensured)
     u_top=_extrude_level_us(params)[end]
     transforms=_extrude_level_transforms(spec,(u_top,),caller)
     scoords=srcmesh.coords
@@ -1283,7 +1996,11 @@ function _extrude_volume_sweep(m::GeoModel,t::Int,params::_GeoExtrudeParams,
                                spec,src_signed::Int,caller::AbstractString;_mesh_input=nothing,
                                _record_cell_events=false)
     src=abs(src_signed)
-    srcmesh=mesh_model_surface(m,src;_mesh_input,_boundary_regrade=false)
+    srcmesh=spec isa NamedTuple && get(spec,:bl3d,false) ?
+        _extrude_bl_srcmesh(m,src;_mesh_input=_mesh_input) :
+        mesh_model_surface(m,src;_mesh_input,_boundary_regrade=false)
+    ensured=_extrude_bl_ensure_srcmesh!(m,3,t,caller,srcmesh)
+    ensured===nothing || (spec=ensured)
     us=_extrude_level_us(params)
     nlev=length(us)
     cols=_extrude_volume_columns(m,t,src,srcmesh,params,spec,us,caller)
@@ -1674,7 +2391,8 @@ function _extrude_gate(m::GeoModel,dim::Int,tag::Int)
 end
 
 function _extrude_entity_params(m::GeoModel,dim::Int,tag::Int,
-                                caller::AbstractString)
+                                caller::AbstractString;_mesh_input=nothing,
+                                _mesh1d_options=nothing,_size_field=nothing)
     params=_extrude_gate(m,dim,tag)
     params===nothing && return nothing
     spec=get(m.meshing.extrude_specs,(dim,tag),nothing)
@@ -1682,6 +2400,19 @@ function _extrude_entity_params(m::GeoModel,dim::Int,tag::Int,
     (spec===nothing || link===nothing) && throw(ArgumentError(
         "$caller: $(dim==2 ? "Surface" : "Volume")[$tag] Layers " *
         "extrusion is missing recorded extrusion parameters"))
+    if spec isa NamedTuple
+        st=get(spec,:type,nothing)
+        if st===:bl_surface ||
+            (dim==2 && st===:boundary_layer &&
+             Int(get(spec,:surf,0))!=0 && !haskey(spec,:levels))
+            # Upstream resolves every boundary-layer copy's displaced rows
+            # inside `Mesh2DWithBoundaryLayers` before the swept mesh reads
+            # them — pending records finish their column fields here.
+            _extrude_bl_prepare!(m,caller;_mesh_input,
+                _mesh1d_options=_mesh1d_options,_size_field=_size_field)
+            spec=get(m.meshing.extrude_specs,(dim,tag),nothing)
+        end
+    end
     return params,spec,link
 end
 
@@ -1697,13 +2428,12 @@ function _extrude_surface_mesh(m::GeoModel,t::Int,caller::AbstractString;
         min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
         size_field=size_field)
     planned===nothing || return planned
-    entry=_extrude_entity_params(m,2,t,caller)
+    entry=_extrude_entity_params(m,2,t,caller;_mesh_input,
+        _mesh1d_options=_options,_size_field=size_field)
     entry===nothing && return nothing
     params,spec,link=entry
-    if spec isa NamedTuple && get(spec,:type,nothing)===:boundary_layer
-        link[1]==1 || throw(ArgumentError(
-            "$caller: Surface[$t] boundary-layer extrusion needs a curve " *
-            "generatrix"))
+    if spec isa NamedTuple && get(spec,:type,nothing)===:boundary_layer &&
+        link[1]==1 && !haskey(spec,:levels)
         return _extrude_bl_lateral_mesh(m,t,params,spec,link[2],caller;
                                         _mesh_input,_size_field=size_field,
                                         _options=_options)
@@ -1738,7 +2468,8 @@ function _extrude_volume_mesh(m::GeoModel,t::Int,caller::AbstractString;
                               _working_model::Bool=false,_mesh_input=nothing)
     planned=_extrude_nonew_volume_mesh(m,t,caller;scope=scope,size_field=size_field)
     planned===nothing || return planned
-    entry=_extrude_entity_params(m,3,t,caller)
+    entry=_extrude_entity_params(m,3,t,caller;_mesh_input,
+        _size_field=size_field)
     entry===nothing && return nothing
     params,spec,link=entry
     staged=params.recombine && params.quad_to_tri===:add_verts && !_working_model
@@ -1773,7 +2504,7 @@ function _extrude_volume_pass(m::GeoModel,caller::AbstractString;
     productions=Dict{Int,_ExtrudeMeshProduction}()
     temporary_elements=Dict{Int,Int}()
     for tag in tags
-        params,spec,link=_extrude_entity_params(m,3,tag,caller)
+        params,spec,link=_extrude_entity_params(m,3,tag,caller;_mesh_input)
         if _extrude_is_nonew(params)
             parts[tag]=_extrude_nonew_volume_mesh(m,tag,caller;scope=scope)
             continue

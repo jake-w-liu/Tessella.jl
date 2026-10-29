@@ -247,7 +247,9 @@ end
     @test r.model.points[7] == (2.0,1.0,0.0)
 
     # Boundary-layer extrusion still requires `Layers` and rejects the
-    # parameters upstream does not honor on this mode.
+    # parameters upstream does not honor on this mode. `Surface{1}` itself
+    # is supported now — the empty `Plane Surface(1) = {}` keeps this row on
+    # the diagnostic path it always exercised.
     for src in ("out[] = Extrude { Curve{1}; Recombine; };",
                 "out[] = Extrude { Curve{1}; Layers{3}; ScaleLastLayer; };",
                 "out[] = Extrude { Curve{1}; Layers{3}; QuadTriAddVerts; };",
@@ -491,4 +493,160 @@ VP(1.0,0.0,0.0) {0.0,2.0,0.0};
     @test r.errors == String[]
     @test all(r.model.points[5] .≈ (0.0, -2.0, 0.0))
     @test all(r.model.points[6] .≈ (1.0, -2.0, 0.0))
+end
+
+@testset ".geo boundary-layer 3-D surface Extrude" begin
+    src = """
+        Point(1) = {0,0,0,1};
+        Point(2) = {1,0,0,1};
+        Point(3) = {1,1,0,1};
+        Point(4) = {0,1,0,1};
+        Line(1) = {1,2};
+        Line(2) = {2,3};
+        Line(3) = {3,4};
+        Line(4) = {4,1};
+        Curve Loop(1) = {1,2,3,4};
+        Plane Surface(1) = {1};
+        """
+    # `Extrude {Surface{1}; Layers{3}; Recombine}` — the 3-D boundary layer
+    # clones the face's edges (`DuplicateCurve` top-row copies 6..9), sweeps
+    # per-point connector columns (11,12,16,20), one `MSH_SURF_BND_LAYER`
+    # strip per source edge (13,17,21,25), a delayed-rename chapeau (26) and
+    # the volume (1) — the exact NEWREG order the oracle emits.
+    r = _execute_bl_source(src * """
+        out[] = Extrude { Surface{1}; Layers{3}; Recombine; };
+        """)
+    @test r.errors == String[]
+    @test r.lists["out"] == [26.0, 1.0, 13.0, 17.0, 21.0, 25.0]
+    m = r.model
+    # Upstream leaves the chapeau's geometry unextruded until mesh time —
+    # `-0 -o *.geo_unrolled` writes `Point(7) = {0,0,0,…}` and fails to
+    # serialize the internal boundary-layer curve type — so the stored
+    # coordinates stay on the source plane.
+    @test m.points[7] == (0.0, 0.0, 0.0)
+    @test m.points[8] == (1.0, 0.0, 0.0)
+    @test m.points[12] == (1.0, 1.0, 0.0)
+    @test m.points[16] == (0.0, 1.0, 0.0)
+    @test m.curves[6] == (7, 8)
+    @test m.curves[7] == (8, 12)
+    @test m.curves[8] == (12, 16)
+    @test m.curves[9] == (16, 7)
+    @test m.curves[11] == (1, 7)
+    @test m.curves[12] == (2, 8)
+    @test m.curves[16] == (3, 12)
+    @test m.curves[20] == (4, 16)
+    @test m.loops[only(m.surfaces[13])] == [1, 12, -6, -11]
+    @test m.loops[only(m.surfaces[17])] == [2, 16, -7, -12]
+    @test m.loops[only(m.surfaces[21])] == [3, 20, -8, -16]
+    @test m.loops[only(m.surfaces[25])] == [4, 11, -9, -20]
+    @test m.loops[only(m.surfaces[26])] == [6, 7, 8, 9]
+    @test m.surface_loops[only(m.volumes[1])] == [-1, 26, 13, 17, 21, 25]
+    # `geo.Source` records — signed source on the chapeau/volume, the
+    # generatrix edge on each lateral.
+    @test m.meshing.extrude_sources[(3, 1)] == (2, 1)
+    @test m.meshing.extrude_sources[(2, 26)] == (2, 1)
+    @test m.meshing.extrude_sources[(2, 13)] == (1, 1)
+    @test get(m.meshing.extrude_specs[(2, 26)], :type, nothing) in
+        (:bl_surface, :boundary_layer)
+    @test Int(get(m.meshing.extrude_specs[(2, 13)], :surf, 0)) == 1
+
+    # `Mesh 3`: the recombined product matches the oracle layout — the
+    # source face's native mesh carries a center fan (its interior node
+    # grows its own displaced column), each lateral emits one quadrangle
+    # per layer row and the swept volume is twelve prisms.
+    r = _execute_bl_source(src * """
+        out[] = Extrude { Surface{1}; Layers{3}; Recombine; };
+        """; mesh_dim=3)
+    mesh = r.mesh
+    @test size(mesh.coords, 2) == 20
+    cells = (tris = sum(size(b.nodes, 2) for b in mesh.blocks if b.msh == 2; init = 0),
+             quads = sum(size(b.nodes, 2) for b in mesh.blocks if b.msh == 3; init = 0),
+             prisms = sum(size(b.nodes, 2) for b in mesh.blocks if b.msh == 6; init = 0),
+             lines = sum(size(b.nodes, 2) for b in mesh.blocks if b.msh == 1; init = 0))
+    @test cells == (tris = 8, quads = 12, prisms = 12, lines = 20)
+    want = Set{NTuple{3,Float64}}()
+    for corner in ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.5, 0.5))
+        for z in (0.0, 1/3, 2/3, 1.0)
+            push!(want, (corner[1], corner[2], z))
+        end
+    end
+    got = Set(Tuple(round.(mesh.coords[:, i]; digits=12))
+              for i in axes(mesh.coords, 2))
+    want = Set(Tuple(round.(collect(p); digits=12)) for p in want)
+    @test got == want
+    for t in (13, 17, 21, 25)
+        @test _bl_cells(geo_entity_mesh(r, 2, t)) == (tris=0, quads=3)
+    end
+    @test _bl_cells(geo_entity_mesh(r, 2, 26)) == (tris=4, quads=0)
+
+    # Without `Recombine` the strips split on the lateral diagonal and the
+    # volume subdivides into tetrahedra — the oracle's 20 nodes, 20 line
+    # segments, 32 triangles and 36 tetrahedra.
+    r = _execute_bl_source(src * """
+        out[] = Extrude { Surface{1}; Layers{3}; };
+        """; mesh_dim=3)
+    mesh = r.mesh
+    @test size(mesh.coords, 2) == 20
+    @test size(mesh.segs, 2) == 20
+    @test size(mesh.tris, 2) == 32
+    @test size(mesh.tets, 2) == 36
+
+    # The signed source inverts the growth direction; upstream's lateral
+    # `out` filter compares `abs(tag)` against the *signed* input, so the
+    # source face itself lists between the body and the side surfaces.
+    r = _execute_bl_source(src * """
+        out[] = Extrude { Surface{-1}; Layers{3}; Recombine; };
+        """; mesh_dim=3)
+    @test r.lists["out"] == [26.0, 1.0, 1.0, 13.0, 17.0, 21.0, 25.0]
+    @test r.model.surface_loops[only(r.model.volumes[1])] ==
+        [-1, 26, 13, 17, 21, 25]
+    mesh = r.mesh
+    @test size(mesh.coords, 2) == 20
+    @test sort!(unique!(round.(mesh.coords[3, :]; digits=12))) ≈
+        [-1.0, -2/3, -1/3, 0.0]
+    cells = (quads = sum(size(b.nodes, 2) for b in mesh.blocks if b.msh == 3; init = 0),
+             prisms = sum(size(b.nodes, 2) for b in mesh.blocks if b.msh == 6; init = 0))
+    @test cells == (quads = 12, prisms = 12)
+
+    # `ScaleLastLayer` rescales every element level inside the last layer
+    # group by the vertex's incident mean element edge length — for the
+    # center-fan face mesh every vertex measures ~0.8047379, the oracle's
+    # exact level set.
+    r = _execute_bl_source(src * """
+        out[] = Extrude { Surface{1}; Layers{3}; ScaleLastLayer; Recombine; };
+        """; mesh_dim=3)
+    zs = sort!(unique!(round.(r.mesh.coords[3, :]; digits=9)))
+    @test zs ≈ [0.0, 0.268245951, 0.536491903, 0.804737854]
+
+    # `Using Index[i]` keeps the same layout — the index only partitions
+    # which contributions accumulate into the normal field.
+    r = _execute_bl_source(src * """
+        out[] = Extrude { Surface{1}; Layers{3}; Using Index[0]; Recombine; };
+        """; mesh_dim=3)
+    @test r.lists["out"] == [26.0, 1.0, 13.0, 17.0, 21.0, 25.0]
+    @test size(r.mesh.coords, 2) == 20
+    @test sort!(unique!(round.(r.mesh.coords[3, :]; digits=12))) ≈
+        [0.0, 1/3, 2/3, 1.0]
+
+    # `Using View[i]` samples the post view's vector records instead of the
+    # gouraud field — a uniform (0,0,2) field doubles the growth direction.
+    # Two `VT` vector triangles tile the source face so every sample point
+    # lies inside an element; upstream's `searchVector` interpolates the
+    # (constant) nodal vectors rather than falling back to the zero-vector
+    # miss that keeps a vertex on its source row.
+    r = _execute_bl_source(src * """
+        Merge "vec.pos";
+        out[] = Extrude { Surface{1}; Layers{3}; Using View[0]; Recombine; };
+        """;
+        files=Dict("vec.pos"=>"""
+        View "vec" {
+        VT(0.0,0.0,0.0, 1.0,0.0,0.0, 1.0,1.0,0.0)
+            {0.0,0.0,2.0, 0.0,0.0,2.0, 0.0,0.0,2.0};
+        VT(0.0,0.0,0.0, 1.0,1.0,0.0, 0.0,1.0,0.0)
+            {0.0,0.0,2.0, 0.0,0.0,2.0, 0.0,0.0,2.0};
+        };
+        """), mesh_dim=3)
+    @test r.errors == String[]
+    @test sort!(unique!(round.(r.mesh.coords[3, :]; digits=12))) ≈
+        [0.0, 2/3, 4/3, 2.0]
 end
