@@ -247,7 +247,12 @@ single-piece binds and multi-piece first-piece binds, empty results,
 registry-byte-identical atomicity under publication failure,
 post-sync queries and `generate(3)` on the all-plane union —
 while unknown/duplicate/non-volume operands and unsupported
-analytic sections reject loudly. The preceding increment adds a
+analytic sections reject loudly. A torus × slab subset exercises
+the doubly-periodic torus operand chart: `cut` keeps one volume and
+`intersect` returns the four contact slivers, with their masses
+checked by inclusion–exclusion against the analytic torus volume
+(periodic v-seam unwrapping plus line×torus containment). The
+preceding increment adds a
 compact OCC revolve check (`occ_revolve_smoke`: a point's rim
 circle, a line's cylinder lateral with `[top, face, rim, rim]`
 ordering, an on-axis rectangle's cylinder-solid mass/centroid, a

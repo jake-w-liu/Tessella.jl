@@ -24,6 +24,95 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Pre-existing defect triage: `-part_split` physicals, torus×box Boolean PLC, STEP trimmed-wire CDT (2026-10-29, working tree)
+
+Three reported pre-existing defects were reproduced before any edit and
+classified; all three were genuine Tessella bugs, fixed narrowly:
+
+- **CLI `-part_split` label-mode physical-tag drop — genuine Tessella bug,
+  fixed.** When `_partition_label_view` folds a produced partition's bare
+  ownership children back to their declared parents, each element's legacy
+  physical tag used to keep the *child* entity's projection. For a child of
+  a physical-less parent that projection is the partition-encoded
+  `_part{p}_dim{d}` tag (`_partition_create_physicals!`), which is partition
+  metadata — not the folded entity's physical — and orphan `_part{..}` name
+  records survived into the split file. The view now re-projects the folded
+  parent entity's own `physical_tags` (same-owner blocks keep their tag) and
+  drops orphan `_part{..}` names while preserving user names a regular
+  entity still references. Gmsh 4.15.2 comparison (`gmsh sq.geo -2 -part 2
+  -part_split`, and the `Mesh.PartitionCreateTopology=0` Python-API variant
+  whose bare ownership children are the same layout Tessella folds):
+  upstream keeps parent `$Entities`/`$PhysicalNames` intact and projects
+  the parent's physical on each partition child, so the folded files carry
+  exactly that projection. `cli_part_split_test.jl` gained a label-mode
+  physicals regression (names, entity records, per-element tags, no
+  `_part{` leftovers); the testset is 69/69 green.
+- **Torus×box OCC Boolean PLC `insert_segment!` overlap — genuine Tessella
+  bug, fixed.** `_model_occ_curved_surface_mesh_tracked` unwrapped the
+  periodic u coordinate along pcurve walks but not v, so on the doubly
+  periodic torus chart a wire crossing the tube-circle seam retraced its
+  sampled polyline and the operand PLC emitted overlapping constraints.
+  `_brep_vperiod` (torus 2π, tensor-patch v-seam period) is now tracked and
+  unwrapped beside u, pole/degenerate bookkeeping advances both previous
+  coordinates, `_brep_surface_level` gained the torus implicit tube level,
+  and `_brep_line_surface` roots line×torus on a bounded sphere-bracketed
+  scan (no elementary quartic solver — sampled/bracketed roots only).
+  Verification: fuse 1 volume mass 2.7765155687330068; cut 1 volume mass
+  1.7765155687330054; intersect 4 slivers totalling 1.3223463e-5;
+  fragment 6 coherent volumes; `cut+intersect` reassembles the analytic
+  torus volume 2π²r1r2² = 1.7765287921960844 to 7e-16. Focused
+  `occ_boolean_smoke.jl` torus subset added (`:cut`/`:intersect`, counts
+  and inclusion–exclusion).
+- **OCC torus measure misrouting — genuine Tessella bug, fixed.** The
+  Pappus sector shortcut in `_model_occ_solid_measure` fired on *any*
+  solid with a torus face, and `_model_occ_face_measure`'s canonical
+  quadric arm integrated the carrier's whole chart for trimmed torus
+  wires — a Boolean kept piece measured box−torus instead of its own
+  volume (fuse mass read −0.7765). `_occ_torus_sector_window` now admits
+  only a true sector tiling (one wire, full v range, every edge a
+  rectangle side); non-sector trimmed torus pieces fall through to the
+  generic divergence path via the new `_model_occ_torus_face_div`
+  boundary integral, whose wire orientation comes from the same
+  period-unwrapped lift it integrates (the raw `.fwd` pcurve shoelace
+  collapses to ≈0 on the seam-rectangle outer wire). Primitive torus
+  check: `torus_face_div` returns the analytic volume exactly.
+  `_model_occ_face_moment2` had the same misrouting for trimmed faces —
+  it now integrates `_model_occ_trimmed_face_moment2` (CDT quadrature
+  with the r⊗r integrand); trimmed planes keep the exact wire tensor and
+  canonical sectors keep the closed form.
+- **STEP-imported trimmed-NURBS `get_mass` CDT failure — genuine Tessella
+  bug, fixed.** `t20_data.step` (21 faces) previously threw
+  `insert_segment!: proposed constraint (4482,4483) crosses existing
+  constraint (1,2)` from `_model_occ_trimmed_face_cdt` — the same
+  endpoint-mismatch class as the torus seam (consecutive pcurve uses
+  evaluate their shared vertex ~1e-12 apart, which the CDT reads as a
+  constraint crossing; the wire's closing vertex mismatches the same way).
+  The scaffold now unwraps v by `_brep_vperiod` beside u, welds each use's
+  first sample onto the previous terminal index, welds a geometrically
+  closing wire end, and skips zero-length constraints. A wire-level audit
+  replaying the emitted sampling without the triangulation confirms all
+  21 t20 faces produce crossing-free constraint lists (nv/nseg 3027–10150)
+  — `get_mass` now returns real masses where it previously threw (face 1
+  → 424.14064940539924, face 2 → 15.926279680585285). The residual cost is
+  CDT throughput on densely-sampled wires (~3–10k constraints plus the
+  interior lattice per face — tens of minutes per face under
+  `--compile=min`), a performance characteristic, not a correctness
+  defect; the reported failure is resolved.
+- Trimmed-face CDT gains an opt-in `TESS_CDT_DEBUG` dump
+  (`_tcdt_dump.txt`) for constraint-failure forensics — diagnostic only,
+  off by default.
+- Regressions: `cli_part_split_test` 69/69, `api_occ_measures_test` 8/8
+  testsets (61 assertions), `api_occ_inertia_test` 4/4 testsets (33
+  assertions), `api_occ_boolean_test` all testsets green incl. the 16-
+  assertion periodic-seam subset, `model_boolean_snapshot_test` all
+  testsets green (49+6+13), `model_boolean_conic_spline_test` all 11
+  testsets green under `--check-bounds=yes`, `occ_boolean_smoke` clean
+  exit incl. the new torus×box subset, `iges_occ_test` all 9 testsets
+  (64 assertions), `api_occ_trimmed_surface_test` 21/21, retained
+  STEP/IGES fixture masses (`iges_occ_trimmed_bspline` 1.2808,
+  `brep_occ_nurbs_torus` 1.5344, `brep_occ_nurbs_sphere` 3.1939,
+  `brep_occ_torus_segment` 14.8044). No P1–P6 completeness claim.
+
 ### LAY02 3-D surface boundary-layer `Extrude` (2026-10-29, working tree)
 
 - `Extrude {Surface{...}; Layers{...}}` under boundary-layer mode now

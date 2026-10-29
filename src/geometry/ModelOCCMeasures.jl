@@ -434,6 +434,7 @@ end
 # constrained triangulation, and `classify_interior`'s inside mask.
 function _model_occ_trimmed_face_cdt(kernel,id,shape,rec)
     period=_brep_uperiod(rec)
+    vperiod=_brep_vperiod(rec)
     xs=Float64[]; ys=Float64[]; segs=Tuple{Int,Int}[]
     index=Dict{NTuple{2,Float64},Int}()
     emit(uv)=get!(index,uv) do
@@ -442,7 +443,7 @@ function _model_occ_trimmed_face_cdt(kernel,id,shape,rec)
     lo=[Inf,Inf]; hi=[-Inf,-Inf]
     for wire_id in shape.children
         uses=kernel.shapes[wire_id].geometry.uses
-        loop_idx=Int[]; u_prev=nothing
+        loop_idx=Int[]; u_prev=nothing; v_prev=nothing
         for (eid,rev) in uses
             etag=kernel.shape_tags[eid][2]
             eg=kernel.shapes[eid].geometry.geometry
@@ -459,7 +460,10 @@ function _model_occ_trimmed_face_cdt(kernel,id,shape,rec)
                 if period>0.0 && u_prev!==nothing
                     u+=period*round((u_prev-u)/period)
                 end
-                u_prev=u
+                if vperiod>0.0 && v_prev!==nothing
+                    v+=vperiod*round((v_prev-v)/vperiod)
+                end
+                u_prev=u;v_prev=v
                 lo[1]=min(lo[1],u); hi[1]=max(hi[1],u)
                 lo[2]=min(lo[2],v); hi[2]=max(hi[2],v)
                 # Consecutive uses meet at the wire's shared vertices —
@@ -508,7 +512,26 @@ function _model_occ_trimmed_face_cdt(kernel,id,shape,rec)
             emit((lo[1]+Wu*(i+0.5)/nx,lo[2]+Wv*(j+0.5)/ny))
         end
     end
-    T=constrained_delaunay(xs,ys,segs)
+    T=try
+        constrained_delaunay(xs,ys,segs)
+    catch err
+        if get(ENV,"TESS_CDT_DEBUG","")!=""
+            io=IOBuffer()
+            println(io,"trimmed face CDT failed: ",
+                    sprint(showerror,err))
+            println(io,"uperiod=$period vperiod=$vperiod")
+            println(io,"bbox u=[$(lo[1]),$(hi[1])] v=[$(lo[2]),$(hi[2])] " *
+                    "nv=$(length(xs)) nseg=$(length(segs))")
+            for (i,(a,b)) in enumerate(segs)
+                println(io,"seg$i ($a)->($b) " *
+                        "($(xs[a]),$(ys[a])) -> ($(xs[b]),$(ys[b]))")
+            end
+            path=joinpath(pwd(),"_tcdt_dump.txt")
+            open(io2->write(io2,take!(io)),path,"w")
+            println(stderr,"trimmed face CDT debug dump -> $path")
+        end
+        rethrow()
+    end
     interior=classify_interior(T)
     return xs,ys,T,interior
 end
@@ -592,6 +615,15 @@ function _model_occ_face_measure(kernel,id)
         return A,_occ3_scale(M,1.0/A)
     end
     if get(rec,:trimmed,false)
+        return _model_occ_trimmed_face_measure(kernel,id)
+    end
+    # A torus face whose wire bounds a sub-domain of the tube chart
+    # (boolean kept pieces, STEP trims) is no canonical sector — the
+    # quadric closed form below would integrate the carrier's whole
+    # domain. Route it through the trimmed-CDT measure like the other
+    # pcurve-bounded faces.
+    if occ===:torus && haskey(rec,:pcurves) &&
+            _occ_torus_sector_window(kernel,id,rec)===nothing
         return _model_occ_trimmed_face_measure(kernel,id)
     end
     # Quadric patches over their canonical domains — the closed-form
@@ -785,6 +817,173 @@ function _occ_sector_stats(rec)
     return V,_occ3_scale(M,1.0/V),Q
 end
 
+# Divergence integral ∬_F p·(p_u×p_v) over a trimmed torus face — the
+# boundary-integral counterpart of `_model_occ_trimmed_face_div`, the
+# same Green's-theorem reduction `_model_occ_cyl_face_div` uses for
+# cylinders. For p(u,v)=C+R(v)·(cos u·X+sin u·Y)+r2·sin v·Z with
+# R(v)=r1+r2·cos v, the surface element is p_u×p_v =
+# R·r2·(cos v·q̂ + sin v·Z) (q̂ = cos u·X+sin u·Y the radial unit
+# direction — the parametrization normal is outward), so
+#   p·(p_u×p_v) = r2·R·[R cos v + r2 sin²v
+#                      + cos v·(Cx cos u + Cy sin u) + Cz sin v]
+# with Ci = C·Xi. Every term is trig-polynomial in u, so the domain
+# integral reduces to the boundary line integral ∬p·n̂ dA = ∮ I(u,v) dv,
+#   I = r2·R·[ u·(R cos v + r2 sin²v + Cz sin v)
+#             + cos v·(Cx sin u − Cy cos u) ].
+# The stored pcurve walk unwraps u across the 2π azimuth seam (the bare
+# u factor is rep-sensitive) and v across the tube seam so the closure
+# chord measures the true geometric gap; a residual period-folded gap
+# is a chart-identified seam, not a chord, so the closing leg only
+# fires on a real sub-tolerance break. Wire orientation is normalized
+# by shoelace sign exactly like the cylinder path — outer positive,
+# holes negative — and the face use's σ applies the BRep sense as
+# usual. Returns ∬rn/3 to match `_model_occ_trimmed_face_div`.
+function _model_occ_torus_face_div(kernel,id)
+    shape=kernel.shapes[id]; rec=shape.geometry.geometry
+    r1,r2=rec.r1,rec.r2
+    X,Y,Z=rec.X,rec.Y,rec.axis
+    C=rec.center
+    Cx=_dot3(C,X); Cy=_dot3(C,Y); Cz=_dot3(C,Z)
+    J=0.0
+    @inline function Igv(u,v)
+        su,cu=_gm_sincos(u); sv,cv=_gm_sincos(v)
+        R=fma(r2,cv,r1)
+        return r2*R*(u*(R*cv+r2*sv*sv+Cz*sv)+cv*(Cx*su-Cy*cu))
+    end
+    for (wi,wire_id) in enumerate(shape.children)
+        uses=kernel.shapes[wire_id].geometry.uses
+        # Orientation: classify the wire on its OWN period-unwrapped
+        # lift (accumulate the same Green's shoelace ∮(u dv−v du)/2 the
+        # line integral walks). `_model_occ_wire_shoelace` cannot be
+        # reused — it reads un-unwrapped `.fwd` pcurves, so a seam-
+        # rectangle outer wire (the doubly-periodic chart's boundary —
+        # its two copies of each seam edge cancel exactly) collapses to
+        # raw≈0 and leaves the sign to rounding noise.
+        raw=0.0
+        j=0.0; u_prev=nothing; v_prev=nothing
+        uv_first=nothing; uv_last=nothing
+        for (eid,rev) in uses
+            etag=kernel.shape_tags[eid][2]
+            eg=kernel.shapes[eid].geometry.geometry
+            ent=rec.pcurves[etag]
+            pc=(rev && ent.rev!==nothing) ? ent.rev : ent.fwd
+            t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
+            if haskey(pc,:neg2d)
+                pc=pc.neg2d[1];t0,t1=-t0,-t1
+            end
+            # u and v are 2π-periodic: stored pcurves pick arbitrary
+            # representatives mod the period — unwrap the wire so each
+            # edge continues the previous one in both coordinates,
+            # like the cylinder path's u-unwrap.
+            us,vs0=_occ_pcurve_d0(pc,t0)
+            ushift=u_prev===nothing ? 0.0 :
+                _OCC_TWO_PI*round((u_prev-us)/_OCC_TWO_PI)
+            vshift=v_prev===nothing ? 0.0 :
+                _OCC_TWO_PI*round((v_prev-vs0)/_OCC_TWO_PI)
+            uv_first===nothing &&
+                (uv_first=(us+ushift,vs0+vshift))
+            panels=max(1,ceil(Int,abs(t1-t0)/(π/2)))
+            span=(t1-t0)/panels
+            for k in 0:panels-1
+                a=t0+k*span; h=span/2; mid=a+h
+                for i in 1:4, s in (-1,1)
+                    t=mid+s*h*_OCC_GL_T[i]; w=_OCC_GL_W[i]*h
+                    (u,v),(du,dv)=_occ_pcurve_d1(pc,t)
+                    u+=ushift; v+=vshift
+                    j+=w*Igv(u,v)*dv
+                    raw+=w*(u*dv-v*du)/2
+                end
+            end
+            ue,ve=_occ_pcurve_d0(pc,t1)
+            uv_last=(ue+ushift,ve+vshift)
+            u_prev=ue+ushift; v_prev=ve+vshift
+        end
+        # A wire closed only through the chart's periodic
+        # identification unwraps to a period-sized gap — that is a
+        # seam, not a chord to integrate. A residual sub-tolerance
+        # break (weld mismatch between stored pcurves) still needs the
+        # closing leg like the cylinder path's chord.
+        if uv_first!==nothing
+            du0=uv_first[1]-uv_last[1]
+            dv0=uv_first[2]-uv_last[2]
+            du0-=2π*round(du0/2π); dv0-=2π*round(dv0/2π)
+            if du0!=0.0 || dv0!=0.0
+                raw+=_occ2_cross(uv_last,uv_first)/2
+                for k in 0:7
+                    a=(k+0.5)/8
+                    for i in 1:4, s in (-1,1)
+                        t=a+s*(1/16)*_OCC_GL_T[i]
+                        w=_OCC_GL_W[i]*(1/16)
+                        u=fma(t,du0,uv_last[1]); v=fma(t,dv0,uv_last[2])
+                        j+=w*Igv(u,v)*dv0
+                    end
+                end
+            end
+        end
+        w=(wi==1 ? 1.0 : -1.0)*(raw>=0 ? 1.0 : -1.0)
+        J+=w*j
+    end
+    return J/3
+end
+
+# The Pappus sector shortcut in `_model_occ_solid_measure` is exact only
+# when the torus face is the carrier's canonical sector boundary: a
+# single wire whose pcurves tile one u-window × the full tube-circle
+# rectangle. Boolean kept pieces and STEP trims reuse the same carrier
+# record over sub-domain wires — extra hole wires, curved section
+# windows, or a v-window all fail the tiling test and integrate through
+# the generic divergence path instead. Returns the sector's (umin,umax)
+# window — its azimuth span is the Pappus angle and its midpoint the
+# centroid's bisector — or `nothing` for a non-sector wire.
+function _occ_torus_sector_window(kernel,fid,rec)
+    shape=kernel.shapes[fid]
+    length(shape.children)==1 || return nothing
+    haskey(rec,:pcurves) || return nothing
+    uses=kernel.shapes[first(shape.children)].geometry.uses
+    lo_b,hi_b=_occ_surface_bounds(rec)
+    vtol=1e-9*max(1.0,hi_b[1]-lo_b[1],hi_b[2]-lo_b[2])
+    boxes=NTuple{2,Float64}[]
+    umin=vmin=Inf; umax=vmax=-Inf
+    for (eid,rev) in uses
+        etag=kernel.shape_tags[eid][2]
+        eg=kernel.shapes[eid].geometry.geometry
+        ent=get(rec.pcurves,etag,nothing)
+        ent===nothing && return nothing
+        pc=(rev && ent.rev!==nothing) ? ent.rev : ent.fwd
+        t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
+        if haskey(pc,:neg2d)
+            pc=pc.neg2d[1];t0,t1=-t0,-t1
+        end
+        lo,hi=_occ_pcurve_fillbndbox(pc,min(t0,t1),max(t0,t1))
+        push!(boxes,lo);push!(boxes,hi)
+        umin=min(umin,lo[1]); vmin=min(vmin,lo[2])
+        umax=max(umax,hi[1]); vmax=max(vmax,hi[2])
+    end
+    isfinite(umin) || return nothing
+    # The sector sweeps the full tube circle: the wire's v extent must
+    # cover the canonical v range exactly.
+    vmin<=lo_b[2]+vtol && vmax>=hi_b[2]-vtol || return nothing
+    # ... and every use must lie on a rectangle side: a v-degenerate
+    # rim spanning the u window at a v bound, or a u-degenerate
+    # meridian spanning the full v range at a window end. A curved
+    # section pcurve fails both degeneracy tests.
+    for k in 1:2:length(boxes)
+        lo,hi=boxes[k],boxes[k+1]
+        if hi[2]-lo[2]<=vtol
+            (abs(lo[2]-lo_b[2])<=vtol || abs(lo[2]-hi_b[2])<=vtol) ||
+                return nothing
+            lo[1]<=umin+vtol && hi[1]>=umax-vtol || return nothing
+        elseif hi[1]-lo[1]<=vtol
+            (abs(lo[1]-umin)<=vtol || abs(lo[1]-umax)<=vtol) ||
+                return nothing
+            lo[2]<=lo_b[2]+vtol && hi[2]>=hi_b[2]-vtol || return nothing
+        else
+            return nothing
+        end
+    end
+    return (umin,umax)
+end
+
 function _model_occ_solid_measure(kernel,id;want_centroid=true)
     shape=kernel.shapes[id]; g=shape.geometry
     if haskey(g,:sector)
@@ -828,27 +1027,38 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
     isempty(uses) && return 0.0,(0.0,0.0,0.0)
     face_kind=u->get(kernel.shapes[u[1]].geometry.geometry,:occ,nothing)
     torus=count(u->face_kind(u)===:torus,uses)
-    if torus>0
-        # Torus sector — the swept profile's Pappus integrals. V =
-        # φ·πr2²·r1; the centroid rides the sector bisector at
-        # (r1+r2²/4r1)·sinc(φ/2) from center.
-        (torus==1 && all(u->face_kind(u)===:torus ||
-            face_kind(u)===:plane,uses)) ||
-            throw(ErrorException(
-                "OCC.get_mass: torus solid with non-canonical boundary"))
-        rec=only(kernel.shapes[fid].geometry.geometry
-                 for (fid,_) in uses
-                 if get(kernel.shapes[fid].geometry.geometry,:occ,
-                        nothing)===:torus)
-        φ=rec.angle
-        V=φ*π*rec.r2*rec.r2*rec.r1
-        mean_r=rec.r1+rec.r2*rec.r2/(4*rec.r1)
-        arm=φ==0.0 ? 0.0 : mean_r*sin(φ/2)/(φ/2)
-        s,c=_gm_sincos(φ/2)
-        return V,_occ3_add(rec.center,
-            (arm*c*rec.X[1]+arm*s*rec.Y[1],
-             arm*c*rec.X[2]+arm*s*rec.Y[2],
-             arm*c*rec.X[3]+arm*s*rec.Y[3]))
+    if torus==1 && all(u->face_kind(u)===:torus ||
+                       face_kind(u)===:plane,uses)
+        # A purely torus+plane boundary may be a torus sector — the
+        # swept profile's Pappus integrals. V = φ·πr2²·r1; the centroid
+        # rides the sector bisector at (r1+r2²/4r1)·sinc(φ/2) from
+        # center. Verified against the actual wire below: trimmed
+        # pieces share the carrier record over sub-domain wires and
+        # fall through to the generic divergence path instead.
+        tfid=only(fid for (fid,_) in uses
+                  if get(kernel.shapes[fid].geometry.geometry,:occ,
+                         nothing)===:torus)
+        rec=kernel.shapes[tfid].geometry.geometry
+        win=_occ_torus_sector_window(kernel,tfid,rec)
+        if win!==nothing
+            # Torus sector [umin,umax] — the swept profile's Pappus
+            # integrals. V = φ·πr2²·r1; the centroid rides the sector
+            # bisector at (r1+r2²/4r1)·sinc(φ/2) from center.
+            φ=win[2]-win[1]
+            V=φ*π*rec.r2*rec.r2*rec.r1
+            mean_r=rec.r1+rec.r2*rec.r2/(4*rec.r1)
+            arm=φ==0.0 ? 0.0 : mean_r*sin(φ/2)/(φ/2)
+            bm=(win[1]+win[2])/2
+            sb,cb=_gm_sincos(bm)
+            return V,_occ3_add(rec.center,
+                (arm*(cb*rec.X[1]+sb*rec.Y[1]),
+                 arm*(cb*rec.X[2]+sb*rec.Y[2]),
+                 arm*(cb*rec.X[3]+sb*rec.Y[3])))
+        end
+        # A trimmed torus piece shares the carrier's record over a
+        # sub-domain wire (boolean kept faces, STEP trims, section
+        # windows) — it is no sector, so it integrates through the
+        # generic divergence path below via its pcurves.
     end
     all(u->face_kind(u)===:plane || face_kind(u)===:cylinder ||
            haskey(kernel.shapes[u[1]].geometry.geometry,:patch) ||
@@ -889,6 +1099,19 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
             continue
         end
         occ=get(rec,:occ,nothing)
+        if occ===:torus && haskey(rec,:pcurves)
+            if want_centroid
+                # The boundary reduction carries only the volume
+                # integral — the centroid moment still walks the CDT
+                # quadrature for trimmed torus pieces.
+                Vp,Mp=_model_occ_trimmed_face_div(kernel,fid)
+                V+=σ*Vp
+                M=_occ3_add(M,_occ3_scale(Mp,σ))
+            else
+                V+=σ*_model_occ_torus_face_div(kernel,fid)
+            end
+            continue
+        end
         if haskey(rec,:pcurves) &&
             occ!==:cylinder && occ!==:plane
             Vp,Mp=_model_occ_trimmed_face_div(kernel,fid)
@@ -1088,10 +1311,56 @@ function _model_occ_plane_moment3(kernel,id)
     return U
 end
 
+# Face second-moment tensor T_F = ∬_F r⊗r dA over a trimmed parametric
+# face — the CDT quadrature of `_model_occ_trimmed_face_measure` carrying
+# the tensor integrand (the same 4×-split three-point rule). Used for any
+# face whose wire bounds a sub-domain of its base — the canonical-domain
+# quadric arms below would otherwise integrate the carrier's whole chart.
+function _model_occ_trimmed_face_moment2(kernel,id)
+    shape=kernel.shapes[id]; rec=shape.geometry.geometry
+    xs,ys,T,interior=_model_occ_trimmed_face_cdt(kernel,id,shape,rec)
+    nodes=((1/6,1/6),(2/3,1/6),(1/6,2/3))
+    m=zeros(3,3)
+    for t in eachindex(interior)
+        interior[t] || continue
+        p1=(xs[T.tv[3t-2]],ys[T.tv[3t-2]])
+        p2=(xs[T.tv[3t-1]],ys[T.tv[3t-1]])
+        p3=(xs[T.tv[3t]],ys[T.tv[3t]])
+        m12=_occ2_mid(p1,p2); m23=_occ2_mid(p2,p3); m31=_occ2_mid(p3,p1)
+        for (q1,q2,q3) in ((p1,m12,m31),(m12,p2,m23),(m31,m23,p3),
+                          (m12,m23,m31))
+            jac=abs((q2[1]-q1[1])*(q3[2]-q1[2])-
+                    (q3[1]-q1[1])*(q2[2]-q1[2]))
+            for (s,tt) in nodes
+                u=q1[1]+s*(q2[1]-q1[1])+tt*(q3[1]-q1[1])
+                v=q1[2]+s*(q2[2]-q1[2])+tt*(q3[2]-q1[2])
+                p,du,dv=_occ_surface_d1(rec,u,v)
+                w=jac/2/3*_occ_modulus(_occ_cross(du,dv))
+                for i in 1:3,j in 1:3
+                    m[i,j]+=w*p[i]*p[j]
+                end
+            end
+        end
+    end
+    return m
+end
+
 function _model_occ_face_moment2(kernel,id)
     shape=kernel.shapes[id]; rec=shape.geometry.geometry
     occ=get(rec,:occ,nothing)
     m=zeros(3,3)
+    # A wire that bounds only a sub-domain of the base chart — STEP trims
+    # and Boolean kept pieces — cannot use the canonical-domain arms
+    # below: integrate the CDT of the sampled uv boundary instead. The
+    # sector-window check keeps genuine canonical torus sectors on the
+    # exact arm, and trimmed planes keep `_model_occ_plane_stats`'s exact
+    # wire tensor.
+    if occ!==:plane &&
+        ((get(rec,:trimmed,false) && haskey(rec,:pcurves)) ||
+         (occ===:torus && haskey(rec,:pcurves) &&
+          _occ_torus_sector_window(kernel,id,rec)===nothing))
+        return _model_occ_trimmed_face_moment2(kernel,id)
+    end
     if occ===:plane
         _,_,T=_model_occ_plane_stats(kernel,id;want_tensor=true,
             caller="OCC.get_matrix_of_inertia")

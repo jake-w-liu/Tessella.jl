@@ -2587,6 +2587,15 @@ function _brep_surface_level(sg)
                 sqrt(_b3dot(rp,rp))-(sg.r1+k*oa)
             end
         end
+    elseif sg.occ===:torus
+        # tube-distance squared: (ρ−r1)²+a²−r2² in the torus frame —
+        # negative inside the solid's tube, zero on the surface
+        return p->begin
+            rel=_b3(p,sg.center);a=_b3dot(rel,sg.axis)
+            rho2=_b3dot(rel,rel)-a*a
+            rho=sqrt(max(0.0,rho2))
+            (rho-sg.r1)^2+a*a-sg.r2^2
+        end
     end
     return nothing
 end
@@ -2655,6 +2664,24 @@ function _brep_line_surface(sg,curve)
         disc<0 && return Float64[]
         sq=sqrt(max(0.0,disc))
         return [(-B+sq)/(2A),(-B-sq)/(2A)]
+    elseif sg.occ===:torus
+        # line × torus is a quartic — no elementary solver. The torus sits
+        # inside the bounding sphere |p−c| ≤ r1+2·r2, so the line's possible
+        # hits bracket exactly inside its sphere passage; root the implicit
+        # tube level on a tube-scaled grid there (transversal crossings only
+        # — grazes carry no sign change and are parity-neutral).
+        lvl=_brep_surface_level(sg)
+        rel=_b3(o,sg.center)
+        R=sg.r1+2*sg.r2
+        A=_b3dot(d,d);B=2*_b3dot(d,rel);C=_b3dot(rel,rel)-R*R
+        disc=B*B-4A*C
+        (A<_BREP_TOL || disc<0) && return Float64[]
+        sq=sqrt(disc)
+        lo,hi=(-B-sq)/(2A),(-B+sq)/(2A)
+        n=clamp(ceil(Int,8*(hi-lo)/max(sg.r2,eps())),64,2048)
+        ts=[fma(hi-lo,i/n,lo) for i in 0:n]
+        return _brep_scalar_roots(
+            t->lvl(_b3add(o,_b3mul(d,t))),ts,_BREP_TOL;tangents=false)
     end
     return Float64[]
 end
@@ -6820,6 +6847,7 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
     pcurves===nothing && throw(ArgumentError(
         "$caller: Surface[$t] carries no pcurves"))
     period=_brep_uperiod(sg)
+    vperiod=_brep_vperiod(sg)
     forced=Dict{Int,Vector{Float64}}()
     _attribute_forced_parameters(m,t,forced,caller;
         _mesh1d_options=_mesh1d_options)
@@ -6843,7 +6871,7 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
     for loop_id in m.surfaces[t]
         _verify_loop_closed(m,loop_id,caller,"Surface[$t]")
         loop_idx=Int[]
-        u_prev=nothing
+        u_prev=nothing;v_prev=nothing
         for signed in m.loops[loop_id]
             curve=abs(signed)
             a,b=m.curves[curve]
@@ -6931,7 +6959,7 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
                         _b3dist(lifted,pole)<=ptol || throw(ArgumentError(
                             "$caller: Surface[$t] degenerate Curve[$curve] " *
                             "pcurve does not collapse onto its pole vertex"))
-                        u_prev=u
+                        u_prev=u;v_prev=v
                         # Every sample on the collapsed row is the same 3-D
                         # vertex — the degenerate edge's own Point entity.
                         push!(loop_idx,emit((u,v),pole,(0,Int32(a)),
@@ -6954,7 +6982,10 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
                 if period>0.0 && u_prev!==nothing
                     u+=period*round((u_prev-u)/period)
                 end
-                u_prev=u
+                if vperiod>0.0 && v_prev!==nothing
+                    v+=vperiod*round((v_prev-v)/vperiod)
+                end
+                u_prev=u;v_prev=v
                 push!(loop_idx,emit((u,v),p3,owner,param))
             end
         end

@@ -186,6 +186,29 @@ cell_key_set(m)=Set(cell_key(m,bi,j) for (bi,block) in enumerate(m.blocks)
         @test isempty(square_sets[2] ∩ square_sets[3])
         @test length(union(square_sets...))==sum(total_cells,square_views)
 
+        # Label-mode physicals: every split file keeps the parent's own
+        # physical projection — names, entity records and the legacy
+        # per-element tag — with no partition-encoded `_part{..}` leftovers.
+        phys_geo=joinpath(directory,"phys.geo")
+        write(phys_geo,SQUARE*"""
+            Physical Curve("bd",21)={1,2,3,4};
+            Physical Surface("plate",22)={1};
+            """)
+        Tessella.CLI.main([phys_geo,"-2","-part","3","-part_split"])
+        phys_views=[E.read_mixed_msh(joinpath(directory,"phys_$p.msh"))
+                    for p in 1:3]
+        for v in phys_views
+            @test v.physical_names[(1,21)]=="bd" &&
+                  v.physical_names[(2,22)]=="plate"
+            @test all(name->!startswith(name,"_part{"),
+                      values(v.physical_names))
+            @test v.entity_data.entities[(2,1)].physical_tags==Int32[22]
+            for (bi,block) in enumerate(v.blocks)
+                _block_dim(block)==2 || continue
+                @test all(==(Int32(22)),block.tags)
+            end
+        end
+
         # `-part_split` without `-part` is inert: the normal single output.
         plain=joinpath(directory,"plain.msh")
         @test Tessella.CLI.main([two_tets,"-save","-part_split","-o",plain])==plain

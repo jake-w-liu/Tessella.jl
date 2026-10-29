@@ -2312,18 +2312,38 @@ function _partition_label_view(mesh::MixedMesh,labels::Vector{Int32},
     elementary=Vector{Int32}[]
     for (bi,block) in enumerate(mesh.blocks)
         columns=findall(selected[bi]);isempty(columns) && continue
+        dim=_partition_dim(block)
+        block_owners=data===nothing ? nothing :
+            Int32[remap_owner((dim,Int(owner)))
+                for owner in data.block_entities[bi][columns]]
+        tags=block.tags[columns]
+        if block_owners!==nothing
+            # Folding a partition-child owner back to its declared parent
+            # re-projects the legacy physical tag: the child's projected tag
+            # (a `Mesh.PartitionCreatePhysicals` `_part{..}` group when the
+            # parent is physical-less, the shared parent physical otherwise)
+            # is partition metadata, not the folded entity's own projection.
+            tags=Vector{Int32}(undef,length(columns))
+            for k in eachindex(columns)
+                folded=(dim,Int(block_owners[k]))
+                if folded==(dim,Int(data.block_entities[bi][columns[k]]))
+                    tags[k]=block.tags[columns[k]]
+                else
+                    entity=get(data.entities,folded,nothing)
+                    tags[k]=entity===nothing || isempty(entity.physical_tags) ?
+                        Int32(0) : first(entity.physical_tags)
+                end
+            end
+        end
         if block isa ElementBlock
             push!(blocks,ElementBlock(block.msh,
-                inverse[block.nodes[:,columns]],block.tags[columns]))
+                inverse[block.nodes[:,columns]],tags))
         else
             cells=[inverse[collect(_partition_nodes(block,j))] for j in columns]
-            push!(blocks,SpecialElementBlock(block.msh,cells,
-                block.tags[columns]))
+            push!(blocks,SpecialElementBlock(block.msh,cells,tags))
         end
-        data===nothing || begin
-            dim=_partition_dim(block)
-            push!(owners,[remap_owner((dim,Int(owner)))
-                for owner in data.block_entities[bi][columns]])
+        block_owners===nothing || begin
+            push!(owners,block_owners)
             push!(element_tags,data.external_element_tags[bi][columns])
         end
         mesh.elementary_entities===nothing || begin
@@ -2354,8 +2374,21 @@ function _partition_label_view(mesh::MixedMesh,labels::Vector{Int32},
     end
     elementary_out=mesh.elementary_entities===nothing ?
         (v2 && data!==nothing ? copy.(owners) : nothing) : elementary
+    # Partition-encoded `_part{..}` physicals only ever attach to partition
+    # children, which the label view folds away — drop the orphan name records
+    # so the split files carry no partition metadata. A same-named group a
+    # regular entity still references is user data and stays.
+    names=mesh.physical_names
+    if data!==nothing && any(startswith(name,"_part{") for name in values(names))
+        referenced=Set{Tuple{Int,Int}}()
+        for entity in values(data.entities),physical in entity.physical_tags
+            push!(referenced,(Int(entity.dim),Int(physical)))
+        end
+        names=Dict{Tuple{Int,Int},String}(key=>name for (key,name) in names
+            if !startswith(name,"_part{") || key in referenced)
+    end
     return MixedMesh(mesh.coords[:,rows],blocks;
-        entity_data=metadata,physical_names=mesh.physical_names,
+        entity_data=metadata,physical_names=names,
         elementary_entities=elementary_out,
         periodic_links=links,ancillary_sections=mesh.ancillary_sections)
 end
