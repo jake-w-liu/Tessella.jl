@@ -580,9 +580,15 @@ end
                     "Point(2) = {1, 0, 0, 1};\n")
         err=mktemp() do errpath,errstream
             redirect_stderr(errstream) do
-                @test main([input,"-0","-o",
-                    joinpath(directory,"diag_unrolled.geo")])==
-                    joinpath(directory,"diag_unrolled.geo")
+                # Upstream validates the `-o` name inside `CreateOutputFile`
+                # (FORMAT_AUTO → `.geo` is not an output format) — after the
+                # script executes — so the diagnostic prints before the
+                # format rejection.
+                e=try
+                    main([input,"-0","-o",
+                        joinpath(directory,"diag_unrolled.geo")]);""
+                catch x;sprint(showerror,x);end
+                @test occursin("unknown output file format",e)
             end
             flush(errstream);read(errpath,String)
         end

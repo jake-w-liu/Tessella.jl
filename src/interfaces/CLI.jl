@@ -11,17 +11,22 @@ The session path (`-refine`, `-reclassify`, `-reparam`, `-part`, `-save`,
 `-open`, `-merge`, `-new`, and `.msh`/`.pos` inputs) runs on the `API` session:
 `API.open`/`API.merge` import the files, `API.mesh.generate`/`refine`/
 `classify_surfaces`/`create_geometry`/`partition` perform the batch action, and
-`API.write` exports the current model mesh. `-convert` rewrites each listed
-file into its `_new` counterpart (binary MSH 4.1 for meshes, parsed `.pos`
-text for views), matching the upstream conversion contract. `-part` assigns
+`API.write` exports the current model mesh — `-o`/`-format` select any
+implemented output format, and `<name>.geo_unrolled` writes the unrolled
+model script (`FORMAT_GEO` upstream). `-convert` rewrites each listed
+file into its `_new` counterpart: binary MSH 4.1 for mesh inputs (`.msh`
+and the foreign formats the import layer reads), binary `.pos` 1.3 for
+post views, and for `.geo` inputs the accumulated views followed by binary
+MSH 4.1 when the script produced a mesh — geometry-only scripts create no
+`_new`, exactly like upstream `OpenProject` + `PView::write` +
+`CreateOutputFile`. `-part` assigns
 partition labels like `API.mesh.partition`; `-part_topo`/`-part_ghosts` opt
 into partition topology/ghost production where the discrete producer supports
 it and reject loudly elsewhere. `-part_split` (aliases `-part_split_files`,
 `-oneFilePerPart`) writes one `<stem>_<p>.msh` file per partition instead of
 the combined output when `-part` is active, carrying each partition's own
 entities' cells plus its ghost cells as regular cells on its ghost entity —
-the upstream `Mesh.PartitionSplitMeshFiles` layout. `.geo` `-convert` rejects
-(no unrolled writer).
+the upstream `Mesh.PartitionSplitMeshFiles` layout.
 `-reclassify`/`-reparam` route to the real classify/create-geometry pipeline —
 BRep-imported models can hit bounded export paths that reject rather than write
 wrong data.
@@ -47,7 +52,7 @@ import ..API
 export main
 
 const _HELP="""
-Usage: tessella file.geo [-1|-2|-3] [-o output.msh] [-format msh2|msh4] [-bin]
+Usage: tessella file.geo [-1|-2|-3] [-o output.msh] [-format format] [-bin]
        [-clscale value] [-clmin value] [-clmax value] [-order int]
        [-tol value] [-clcurv n] [-epslc1d value] [-edgelmin value]
        [-clextend n] [-smooth n] [-algo del2d|front2d|del3d] [-quad]
@@ -65,7 +70,7 @@ Usage: tessella file.geo [-1|-2|-3] [-o output.msh] [-format msh2|msh4] [-bin]
        [-reclassify deg] [-reparam deg] [-open] [-merge] [-new]
        [-part_topo|-part_no_topo] [-part_ghosts|-part_no_ghosts]
        [-part_split|-part_split_files|-oneFilePerPart]
-       tessella -convert file.(msh|pos) [file2 ...]
+       tessella -convert file [file2 ...]
        tessella -help | -version | -info | -help_options
 
 Mesh size bounds apply before the positive size factor. CLI numeric options
@@ -175,13 +180,125 @@ const _BOOLEAN_FLAGS=Dict(
     "-preserve_numbering_msh2"=>"Mesh.PreserveNumberingMsh2",
     "-preserveNumberingMsh2"=>"Mesh.PreserveNumberingMsh2")
 
-# `-algo` names we can back with a real implemented algorithm.
+# `-algo` names — the complete upstream 4.15.2 spelling set. Every name stores
+# the real `Mesh.Algorithm`/`Mesh.Algorithm3D` value; algorithms without a
+# native producer reject at generation, like upstream's absent-backend errors.
 const _ALGORITHMS=Dict(
+    "meshadapt"=>("Mesh.Algorithm",1.0),"iso"=>("Mesh.Algorithm",1.0),
+    "auto"=>("Mesh.Algorithm",2.0),
+    "initial2d"=>("Mesh.Algorithm",3.0),
     "del2d"=>("Mesh.Algorithm",5.0),"delaunay"=>("Mesh.Algorithm",5.0),
-    "tri"=>("Mesh.Algorithm",5.0),
+    "tri"=>("Mesh.Algorithm",5.0),"delaunay2d"=>("Mesh.Algorithm",5.0),
     "front2d"=>("Mesh.Algorithm",6.0),"frontal"=>("Mesh.Algorithm",6.0),
+    "frontaldelaunay2d"=>("Mesh.Algorithm",6.0),
+    "bamg"=>("Mesh.Algorithm",7.0),
+    "delquad"=>("Mesh.Algorithm",8.0),
+    "delaunayfrontalforquads"=>("Mesh.Algorithm",8.0),
+    "pack"=>("Mesh.Algorithm",9.0),
+    "packingofparallelograms"=>("Mesh.Algorithm",9.0),
+    "quadqs"=>("Mesh.Algorithm",11.0),
+    "quadquasistructured"=>("Mesh.Algorithm",11.0),
     "del3d"=>("Mesh.Algorithm3D",1.0),"delaunay3d"=>("Mesh.Algorithm3D",1.0),
-    "gmsh3d"=>("Mesh.Algorithm3D",1.0))
+    "gmsh3d"=>("Mesh.Algorithm3D",1.0),
+    "initial3d"=>("Mesh.Algorithm3D",3.0),
+    "front3d"=>("Mesh.Algorithm3D",4.0),"netgen"=>("Mesh.Algorithm3D",4.0),
+    "mmg3d"=>("Mesh.Algorithm3D",7.0),
+    "rtree3d"=>("Mesh.Algorithm3D",9.0),
+    "hxt"=>("Mesh.Algorithm3D",10.0))
+
+# `-format`/`-f` names that select a non-MSH output format: name → canonical
+# output extension (upstream `GetDefaultFileExtension`). `geo_unrolled` selects
+# the unrolled-script writer (`FORMAT_GEO` upstream). MSH dialects keep their
+# version-selection role; every other upstream name maps to a writer Tessella
+# has, so the flag's whole contract is extension selection on the output path.
+const _FORMAT_EXTENSIONS=Dict{String,String}(
+    "stl"=>".stl","unv"=>".unv","mesh"=>".mesh","su2"=>".su2",
+    "bdf"=>".bdf","nas"=>".bdf","inp"=>".inp","neu"=>".neu",
+    "p3d"=>".p3d","mail"=>".mail","ir3"=>".ir3","diff"=>".diff",
+    "vtk"=>".vtk","off"=>".off","obj"=>".obj","ply2"=>".ply2",
+    "dat"=>".dat","m"=>".m","wrl"=>".wrl","vrml"=>".wrl",
+    "key"=>".key","rad"=>".rad","x3d"=>".x3d","celum"=>".celum",
+    "geo_unrolled"=>".geo_unrolled")
+
+# Output filename extensions `API.write`/`write_msh` can serialize — the MSH
+# dialects plus the foreign-mesh writers. `.geo_unrolled` routes to the
+# unrolled-script writer instead.
+const _MESH_OUTPUT_EXTENSIONS=(".msh",".msh2",".msh22",".msh4",".msh41")
+const _FOREIGN_OUTPUT_EXTENSIONS=(".stl",".unv",".mesh",".meshb",".su2",
+    ".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk",
+    ".off",".obj",".ply2",".dat",".m",".wrl",".vrml",".key",".rad",
+    ".x3d",".celum")
+
+# Upstream `-format` names (CreateFile.cpp `GetKnownFileFormats`) that exist
+# but have no Tessella writer — rejected as "not implemented" rather than
+# "unknown" so the diagnosis names the real gap.
+const _UNIMPLEMENTED_FORMATS=Dict{String,String}(
+    "pos"=>"statistics-view POS output",
+    "pvtu"=>"parallel VTK view output",
+    "opt"=>"optimizer-report output",
+    "vis"=>"visibility output",
+    "txt"=>"GUI view text output",
+    "cgns"=>"CGNS output",
+    "med"=>"MED output",
+    "rmed"=>"MED field output",
+    "py_unrolled"=>"unrolled Python script output",
+    "gif"=>"image capture",
+    "jpg"=>"image capture",
+    "jpeg"=>"image capture",
+    "mpg"=>"video capture",
+    "mpeg"=>"video capture",
+    "png"=>"image capture",
+    "pgf"=>"PGF plot output",
+    "ps"=>"PostScript capture",
+    "eps"=>"PostScript capture",
+    "pdf"=>"PDF capture",
+    "tex"=>"TeX plot output",
+    "svg"=>"SVG capture",
+    "tikz"=>"TikZ plot output",
+    "ppm"=>"image capture",
+    "yuv"=>"video capture",
+    "brep"=>"BREP geometry output",
+    "xao"=>"XAO geometry output",
+    "iges"=>"IGES geometry output",
+    "igs"=>"IGES geometry output",
+    "step"=>"STEP geometry output",
+    "stp"=>"STEP geometry output",
+    "xmt_txt"=>"Parasolid geometry output")
+
+# The matching `-o` extension table — upstream `GuessFileFormatFromFileName`
+# knows these names but Tessella has no writer for them. They parse so a
+# `-format` override can still win; reaching output with one rejects by name.
+const _UNIMPLEMENTED_EXTENSIONS=Dict{String,String}(
+    ".pvtu"=>"parallel VTK view output",
+    ".opt"=>"optimizer-report output",
+    ".vis"=>"visibility output",
+    ".txt"=>"GUI view text output",
+    ".cgns"=>"CGNS output",
+    ".med"=>"MED output",
+    ".rmed"=>"MED field output",
+    ".py_unrolled"=>"unrolled Python script output",
+    ".gif"=>"image capture",
+    ".jpg"=>"image capture",
+    ".jpeg"=>"image capture",
+    ".mpg"=>"video capture",
+    ".mpeg"=>"video capture",
+    ".png"=>"image capture",
+    ".pgf"=>"PGF plot output",
+    ".ps"=>"PostScript capture",
+    ".eps"=>"PostScript capture",
+    ".pdf"=>"PDF capture",
+    ".tex"=>"TeX plot output",
+    ".svg"=>"SVG capture",
+    ".tikz"=>"TikZ plot output",
+    ".ppm"=>"image capture",
+    ".yuv"=>"video capture",
+    ".brep"=>"BREP geometry output",
+    ".xao"=>"XAO geometry output",
+    ".iges"=>"IGES geometry output",
+    ".igs"=>"IGES geometry output",
+    ".step"=>"STEP geometry output",
+    ".stp"=>"STEP geometry output",
+    ".xmt_txt"=>"Parasolid geometry output")
 
 # Upstream flags that are explicitly not implemented in Tessella. Each gets a
 # loud rejection naming the missing functionality instead of falling into the
@@ -233,8 +350,17 @@ const _REJECTED_FLAGS=Dict{String,String}(
     "-p"=>"initial GUI modules are GUI-only",
     "-windows"=>"GUI window management is GUI-only",
     "-tiles"=>"GUI window tiling is GUI-only",
-    "-dual"=>"dual-mesh display is GUI-only",
-    "-voronoi"=>"Voronoi display is GUI-only",
+    # `-hybrid` upstream stores `Mesh.Recombine3DAll` and switches the volume
+    # and surface algorithms to `ALGO_3D_RTREE` + `ALGO_2D_PACK_PRLGRMS`
+    # (the hybrid hex-dominant/trihedron-transition pipeline) — none of the
+    # three pieces has a native producer, so storing the values would lie.
+    "-hybrid"=>"hybrid hex-tet meshing (Mesh.Recombine3DAll + ALGO_3D_RTREE + " *
+        "ALGO_2D_PACK_PRLGRMS) is not implemented",
+    # `-dual`/`-voronoi` store `Mesh.Dual`/`Mesh.Voronoi` — generation options
+    # that make the volume stage emit the Voronoi-dual mesh; Tessella's volume
+    # pipelines do not implement dual-cell output.
+    "-dual"=>"dual (Voronoi) mesh generation (Mesh.Dual) is not implemented",
+    "-voronoi"=>"dual (Voronoi) mesh generation (Mesh.Voronoi) is not implemented",
     "-noview"=>"view visibility is GUI-only",
     "-nomesh"=>"mesh visibility is GUI-only",
     "-link"=>"view linking is GUI-only",
@@ -250,6 +376,15 @@ const _OBSOLETE_FLAGS=("-newreg","-newvol","-newsur","-post_pro","-clear",
     "-liststring","-listnumber","-min","-min0","-min1","-min2","-max",
     "-view","-size_field","-quadlayout","-autoex","-openFile",
     "-claniso","-ignore_periocity")
+
+# Upstream flags that are consumed before option parsing and have no batch
+# semantics: `-noenv` skips gmsh's PATH/PYTHONPATH environment setup and
+# `-nolocale` skips the locale reset — both are process-launch controls with
+# no observable effect inside a Tessella `main` call, so they parse and carry
+# on (the shipped oracle binary only warns because its PETSc build reports
+# every unrecognized flag the same way). `-psn`/`-psn_*` is the macOS Finder
+# launch argument upstream ignores silently (`#if defined(__APPLE__)`).
+const _IGNORED_FLAGS=("-noenv","-nolocale","-psn")
 
 function _numeric_argument(flag::String,raw::String,kind::Symbol)
     value=tryparse(Float64,raw)
@@ -368,6 +503,143 @@ function _inject_geo(path::String,preludes)
     return temporary
 end
 
+# `-convert` writes every input into `<input>_new`: post views go out in the
+# binary `.pos` (PViewDataList 1.3) layout and meshes as binary MSH 4.1 —
+# `PView::write(fileName, binary=1, append)` then `CreateOutputFile(FORMAT_MSH)`
+# upstream, so a mesh overwrites the view payload of the same `_new` file.
+
+# Element families in `$View` header order; the component count selects the
+# scalar/vector/tensor slot inside each family triple.
+const _POS_BINARY_KINDS=(:point,:line,:triangle,:quadrangle,:tetrahedron,
+                         :hexahedron,:prism,:pyramid)
+const _POS_BINARY_COMP=Dict(1=>0,3=>1,9=>2)
+
+# Serialize one `PosView` to `io` in the binary `.pos` layout: an ASCII
+# `$View` header with the timestep count and each family's record count,
+# the int32 `1` endianness sentinel, then each family's flat double list
+# (per record: all node x's, then y's, then z's, then step-major node-major
+# component values) and the T2/T3 text payloads.
+function _convert_pos_view(io::Base.IO,view)
+    caller="tessella: -convert"
+    # Upstream refuses old-POS export only for views carrying interpolation
+    # matrices (`haveInterpolationMatrices`); its own error text is kept.
+    isempty(view.interpolations) || throw(ArgumentError(
+        "$caller: cannot export datasets with interpolation matrices in " *
+        "old POS format: consider using the new mesh-based format instead, " *
+        "or select 'Adapt post-processing data' before exporting"))
+    steps=length(view.time)
+    buckets=[Float64[] for _ in 1:24]
+    widths=zeros(Int,24)
+    for element in view.elements
+        # Built-in order-2 records (suffixed names or the shared order-2
+        # scheme) serialize as ordinary wider records — upstream merges them
+        # into the first-order family on read. A non-order-2 element scheme
+        # cannot appear without stored matrices, but a programmatic PosView
+        # could carry one; it has no old-POS representation.
+        element.scheme===nothing ||
+            element.scheme===Post._pos_order2_scheme(element.kind) ||
+            throw(ArgumentError(
+                "$caller: cannot export scheme-bound records in old POS " *
+                "format"))
+        kind=findfirst(==(element.kind),_POS_BINARY_KINDS)
+        kind===nothing && throw(ArgumentError(
+            "$caller: unsupported .pos element kind $(element.kind)"))
+        ncomp=size(element.values,1)
+        comp=get(_POS_BINARY_COMP,ncomp,nothing)
+        comp===nothing && throw(ArgumentError(
+            "$caller: unsupported .pos value component count $ncomp"))
+        size(element.values,3)==steps || throw(ArgumentError(
+            "$caller: .pos element step count $(size(element.values,3)) " *
+            "does not match the view timestep count $steps"))
+        slot=(kind-1)*3+comp+1
+        width=3*size(element.coords,2)+steps*size(element.values,2)*ncomp
+        # Upstream's family lists are uniform-width — a bucket mixing
+        # different node counts could never have been parsed and cannot
+        # round-trip, so mixing rejects instead of writing a corrupt file.
+        iszero(widths[slot]) && (widths[slot]=width)
+        widths[slot]==width || throw(ArgumentError(
+            "$caller: .pos $(element.kind) records have mixed widths and " *
+            "cannot round-trip in old POS format"))
+        append!(buckets[slot],vec(transpose(element.coords)))
+        append!(buckets[slot],vec(permutedims(element.values,(3,2,1))))
+    end
+    t2d=Float64[];t2c=UInt8[];t3d=Float64[];t3c=UInt8[]
+    for text in view.texts
+        if text.dim==2
+            push!(t2d,text.coords[1],text.coords[2],text.style,length(t2c))
+            for s in text.strings
+                append!(t2c,codeunits(s));push!(t2c,0x00)
+            end
+        else
+            push!(t3d,text.coords[1],text.coords[2],text.coords[3],
+                  text.style,length(t3c))
+            for s in text.strings
+                append!(t3c,codeunits(s));push!(t3c,0x00)
+            end
+        end
+    end
+    name=replace(view.name,' '=>'^')
+    write(io,"\$View /* $(view.name) */\n")
+    isempty(name) ? write(io,"noname ") : write(io,name*" ")
+    # The header lists the timestep count, each family's RECORD count (the
+    # flat double list divided by its uniform record width), then the T2/T3
+    # record and byte counts.
+    record_counts=Int[steps]
+    for slot in 1:24
+        push!(record_counts,iszero(widths[slot]) ? 0 :
+              length(buckets[slot])÷widths[slot])
+    end
+    push!(record_counts,length(t2d)÷4,length(t2c),
+          length(t3d)÷5,length(t3c))
+    write(io,join(record_counts," "))
+    write(io,"\n")
+    write(io,Int32(1))
+    write(io,view.time)
+    for bucket in buckets
+        write(io,bucket)
+    end
+    write(io,t2d);write(io,t2c);write(io,t3d);write(io,t3c)
+    write(io,"\n\$EndView\n")
+    return nothing
+end
+
+function _convert_pos_views(path::String,views)
+    open(path,"w") do io
+        write(io,"\$PostFormat /* Gmsh 1.3, binary */\n")
+        write(io,"1.3 1 8\n\$EndPostFormat\n")
+        for view in views
+            _convert_pos_view(io,view)
+        end
+    end
+    return path
+end
+
+# `-convert` reads every mesh-bearing input the import layer supports and
+# rewrites it as binary MSH 4.1 — the same `OpenProject` + `CreateOutputFile`
+# pipeline upstream runs for foreign formats.
+const _CONVERT_MESH_READERS=Dict{String,Function}(
+    ".stl"=>p->IO.read_stl(p),
+    ".unv"=>p->IO.read_unv(p).mesh,
+    ".mesh"=>p->IO.read_mesh(p).mesh,
+    ".meshb"=>p->IO.read_meshb(p).mesh,
+    ".su2"=>p->IO.read_su2(p).mesh,
+    ".bdf"=>p->IO.read_bdf(p).mesh,
+    ".nas"=>p->IO.read_bdf(p).mesh,
+    ".inp"=>p->IO.read_inp(p).mesh,
+    ".neu"=>p->IO.read_neu(p).mesh,
+    ".p3d"=>p->IO.read_p3d(p).mesh,
+    ".mail"=>p->IO.read_mail(p).mesh,
+    ".ir3"=>p->IO.read_ir3(p).mesh,
+    ".diff"=>p->IO.read_diff(p).mesh,
+    ".vtk"=>p->IO.read_vtk(p).mesh,
+    ".wrl"=>p->IO.read_wrl(p).mesh)
+
+function _convert_write_mesh(path::String,mesh)
+    target=mesh isa MixedMesh ? mesh : simplex_to_mixed(mesh)
+    write_mixed_msh(path,target;version=4.1,binary=true)
+    return path
+end
+
 function _convert_file(path::String)
     isfile(path) || throw(ArgumentError(
         "tessella: -convert input file $path does not exist"))
@@ -376,24 +648,31 @@ function _convert_file(path::String)
     _same_file_target(path,destination) && throw(ArgumentError(
         "tessella: -convert output path must not alias the input file"))
     if extension==".msh"
-        mesh=read_mixed_msh(path)
-        write_mixed_msh(destination,mesh;version=4.1,binary=true)
-        return destination
+        return _convert_write_mesh(destination,read_mixed_msh(path))
     elseif extension==".pos"
         views=Post.read_pos(path)
-        isempty(views) && throw(ArgumentError(
-            "tessella: -convert found no views in $path"))
-        Post.write_pos(destination,views)
+        # A view-less file loads nothing upstream, so no `_new` is written.
+        isempty(views) || _convert_pos_views(destination,views)
         return destination
     elseif extension==".geo"
-        # Upstream converts `.geo` inputs by writing the unrolled model
-        # script — the same artifact `-0` produces.
+        # Upstream opens the script, serializes the accumulated post views
+        # (binary `.pos`, appended), then overwrites the file with binary
+        # MSH 4.1 when a mesh exists — so in-script `Mesh n` output wins
+        # over views, and geometry-only scripts produce no `_new` at all.
         result=execute_geo(path;mesh_dim=0)
-        write_geo_unrolled(destination,result.model)
+        views=[view for view in result.views if view isa Post.PosView]
+        isempty(views) || _convert_pos_views(destination,views)
+        # Prefer the classified product so the MSH keeps entity ownership —
+        # the same data upstream's `GModel::current()` mesh carries.
+        mesh=_cli_classified_mesh(result)
+        mesh!==nothing && _convert_write_mesh(destination,mesh)
         return destination
     end
-    throw(ArgumentError(
-        "tessella: -convert supports .msh and .pos inputs, got $path"))
+    reader=get(_CONVERT_MESH_READERS,extension,nothing)
+    reader===nothing && throw(ArgumentError(
+        "tessella: -convert supports .geo, .pos and mesh-format inputs, " *
+        "got $path"))
+    return _convert_write_mesh(destination,reader(path))
 end
 
 """
@@ -401,8 +680,13 @@ end
 
 Execute the bounded Gmsh-style command line. A single `.geo` input runs the
 `.geo` executor with optional `-1`, `-2` or `-3` meshing and `-o output`.
-`-format`/`-f`/`msh2|msh4` or `-vmsh` select MSH 2.2 or 4.1 (the default), and
-`-bin` selects binary output. Output flags require an output-producing action.
+`-format`/`-f`/`msh2|msh4` or `-vmsh` select MSH 2.2 or 4.1 (the default);
+`-format`/`f` also accepts every non-MSH name that maps to an implemented
+writer (`stl`, `unv`, `mesh`, `su2`, `bdf`/`nas`, `inp`, `neu`, `p3d`,
+`mail`, `ir3`, `diff`, `vtk`, `off`, `obj`, `ply2`, `dat`, `m`, `wrl`/`vrml`,
+`key`, `rad`, `x3d`, `celum` and `geo_unrolled`), selecting the payload
+format like upstream `Mesh.FileFormat`. `-bin` selects binary output.
+Output flags require an output-producing action.
 `-clscale`, `-clmin`, `-clmax`, `-order`/`-degree`, `-tol`, `-clcurv`,
 `-epslc1d`, `-edgelmin`, `-clextend`, `-smooth`, `-optimize_threshold`,
 `-aniso_max`/`-anisoMax`, `-rand`, `-smooth_ratio`/`-smoothRatio`,
@@ -410,8 +694,9 @@ Execute the bounded Gmsh-style command line. A single `.geo` input runs the
 script assignments, including option aliases. `-optimize`, `-optimize_netgen`,
 `-save_all`/`-saveall`, `-renumber`, `-nopopup`, `-term`, `-clcurviso`,
 `-ignore_periodicity`/`-ignorePeriodicity` and `-quad` set the matching
-boolean/algorithm options; `-algo name` selects an implemented algorithm
-(`del2d`, `front2d`, `del3d` and their upstream aliases). `-bgm file.pos`
+boolean/algorithm options; `-algo name` accepts every upstream 4.15.2
+algorithm spelling and stores the matching option value — algorithms without
+a native producer reject at generation. `-bgm file.pos`
 loads a `.pos` view file before the input runs and installs its last view as
 the `PostView` background-mesh field, on both the `.geo` and session paths.
 `-setnumber`, `-setstring`, `-setlist`/`-setlistofnumbers`, `-string` and
@@ -430,8 +715,9 @@ ghost cells it receives, emitted as regular cells on its ghost entity — the
 upstream `Mesh.PartitionSplitMeshFiles` layout. Without `-part`, or when the
 partitioned result holds a single partition, the flag is inert and the normal
 output is written.
-`-convert files...` rewrites `.msh`/`.pos` files to `file_new` (binary MSH 4.1
-or parsed view text) and must come last.
+`-convert files...` rewrites each file to `file_new` (binary MSH 4.1 for
+mesh inputs, binary `.pos` for views; `.geo` inputs emit their accumulated
+views plus the in-script mesh when one exists) and must come last.
 `file.msh -check` validates the mesh without writing. `-`, `-parse_and_exit`,
 `-help`/`--help`, `-version`/`--version`, `-info`/`--info`, `-help_options`
 and `-pid` are informational; the first four must be used alone.
@@ -505,6 +791,10 @@ function _run(tokens::Vector{String})
     files=Tuple{String,Symbol}[]
     marker=:none;markers_seen=false
     dim=0;outfile=nothing;version=4.1;binary=false
+    # `-format`/`-f` non-MSH selection: the canonical output extension the
+    # serialized payload takes (upstream `Mesh.FileFormat`); `nothing` keeps
+    # extension-driven output.
+    output_format=nothing
     dimension_seen=false;output_seen=false
     format_seen=false;binary_seen=false;check_seen=false
     refine_seen=false;save_seen=false;parse_seen=false;barycentric_seen=false
@@ -528,8 +818,8 @@ function _run(tokens::Vector{String})
         if a=="-convert"
             isempty(files) || throw(ArgumentError(
                 "tessella: -convert cannot follow an input file"))
-            i+1<=length(tokens) || throw(ArgumentError(
-                "tessella: -convert needs at least one file"))
+            # Bare `-convert` converts nothing and exits, like upstream.
+            i+1<=length(tokens) || return ""
             # An explicit loop avoids the comprehension's element-type
             # inference — `collect` would query `return_types` on
             # `_convert_file`, forcing the `execute_geo` graph to infer.
@@ -553,16 +843,45 @@ function _run(tokens::Vector{String})
             startswith(tokens[i],'-') && throw(ArgumentError(
                 "tessella: -o needs a path, got flag $(tokens[i])"))
             outfile=_path_argument(tokens[i],"output")
+            # Upstream accepts any `-o` name at parse and validates the
+            # extension only inside `CreateOutputFile` — after the input has
+            # executed — so every format rejection lands at write dispatch
+            # below (diagnostics from the run still print, exactly like the
+            # oracle's "Unknown output file format" ordering).
             output_seen=true
         elseif a in ("-format","-f")
             format_seen && throw(ArgumentError(
                 "tessella: duplicate output format flag"))
             i+=1;i<=length(tokens) || throw(ArgumentError(
-                "tessella: $a needs msh2 or msh4"))
+                "tessella: $a needs an output format name"))
             format=tokens[i]
-            format in ("msh2","msh4") || throw(ArgumentError(
-                "tessella: unsupported output format $format; supported: msh2, msh4"))
-            version=format=="msh2" ? 2.2 : 4.1
+            # Upstream's format selection wins over the `-o` filename's
+            # extension guessing, so every dialect name also fixes
+            # `output_format` to the canonical extension. MSH dialect names
+            # additionally select the file version.
+            if format in ("msh2","msh22")
+                version=2.2;output_format=".msh"
+            elseif format in ("msh4","msh41")
+                version=4.1;output_format=".msh"
+            elseif format=="msh"
+                output_format=".msh"
+            elseif format=="auto"
+                # Upstream `FORMAT_AUTO`: extension-driven output (default).
+                output_format=nothing
+            elseif format in ("msh1","msh3","msh40")
+                throw(ArgumentError(
+                    "tessella: unsupported MSH version for -format $format " *
+                    "(supported: 2.2 and 4.1)"))
+            elseif haskey(_UNIMPLEMENTED_FORMATS,format)
+                throw(ArgumentError(
+                    "tessella: output format '$format' is not implemented " *
+                    "($(_UNIMPLEMENTED_FORMATS[format]))"))
+            else
+                format_ext=get(_FORMAT_EXTENSIONS,format,nothing)
+                format_ext===nothing && throw(ArgumentError(
+                    "tessella: unknown output format '$format'"))
+                output_format=format_ext
+            end
             format_seen=true
         elseif a=="-vmsh"
             format_seen && throw(ArgumentError(
@@ -584,7 +903,23 @@ function _run(tokens::Vector{String})
             option=_BOOLEAN_FLAGS[a]
             haskey(numeric_options,option) && throw(ArgumentError(
                 "tessella: duplicate or conflicting option flag $a"))
-            numeric_options[option]=1.0
+            # `-optimize_ho`/`-hoOptimize` store 2 upstream
+            # (`opt_mesh_ho_optimize(GMSH_SET,2)` — elastic pass plus
+            # relocation optimization); every other boolean stores 1.
+            numeric_options[option]=
+                a in ("-optimize_ho","-hoOptimize") ? 2.0 : 1.0
+            if a=="-optimize"
+                # Upstream keeps `-optimize` as an obsolete alias for
+                # `Mesh.Optimize` and warns on every use (CommandLine.cpp).
+                for line in ("the '-optimize' option is now obsolete: " *
+                             "Tessella optimizes tetrahedral meshes by default",
+                             "use '-optimize_threshold threshold' to " *
+                             "control which elements are optimized",
+                             "option '-optimize_threshold 0' leads to no " *
+                             "optimization")
+                    println(stderr,"tessella: Warning : $line")
+                end
+            end
         elseif a=="-quad"
             quad_seen && throw(ArgumentError("tessella: duplicate -quad flag"))
             numeric_options["Mesh.RecombineAll"]=1.0
@@ -595,10 +930,12 @@ function _run(tokens::Vector{String})
             i+=1;i<=length(tokens) || throw(ArgumentError(
                 "tessella: -algo needs an algorithm name"))
             name=tokens[i]
-            haskey(_ALGORITHMS,name) || throw(ArgumentError(
-                "tessella: unsupported mesh algorithm \"$name\"; supported: " *
-                "del2d, front2d, del3d"))
-            option,value=_ALGORITHMS[name]
+            # Upstream accepts the canonical CamelCase spellings plus the
+            # short lowercase forms; the table keys are lowercase.
+            key=lowercase(name)
+            haskey(_ALGORITHMS,key) || throw(ArgumentError(
+                "tessella: unknown mesh algorithm \"$name\""))
+            option,value=_ALGORITHMS[key]
             haskey(numeric_options,option) && throw(ArgumentError(
                 "tessella: -algo conflicts with an earlier $option option"))
             numeric_options[option]=value
@@ -769,6 +1106,8 @@ function _run(tokens::Vector{String})
             end
         else
             if startswith(a,"-")
+                (a in _IGNORED_FLAGS || startswith(a,"-psn_")) &&
+                    (i+=1;continue)
                 haskey(_REJECTED_FLAGS,a) && throw(ArgumentError(
                     "tessella: $a is not supported: $(_REJECTED_FLAGS[a])"))
                 a in _OBSOLETE_FLAGS && throw(ArgumentError(
@@ -823,24 +1162,60 @@ function _run(tokens::Vector{String})
             "output options"))
     # `.msh`/`.pos` inputs, multiple files, and post-mesh actions run on the
     # API session. High-order optimization lives in the session meshing plan,
-    # so `-optimize_ho`/`-hoOptimize` routes there as well. Everything else —
-    # including extensionless `.geo` sources — keeps the standalone `.geo`
-    # execution path.
+    # so `-optimize_ho`/`-hoOptimize` routes there as well. Non-MSH output
+    # (`-o` foreign extensions or a non-MSH `-format` selection) also needs
+    # the session `API.write` writers — the standalone path only serializes
+    # MSH and the unrolled script. Everything else — including extensionless
+    # `.geo` sources — keeps the standalone `.geo` execution path.
+    out_extension=outfile===nothing ? nothing :
+        lowercase(splitext(outfile)[2])
+    # The `-format` selection wins over the `-o` filename's extension
+    # guessing upstream (`Mesh.FileFormat` + `CreateOutputFile`); with no
+    # format flag the output name decides.
+    effective_format=output_format===nothing ? out_extension : output_format
+    geo_unrolled_output=effective_format==".geo_unrolled"
+    foreign_output=effective_format!==nothing &&
+        effective_format in _FOREIGN_OUTPUT_EXTENSIONS
     session=extension in (".msh",".pos") || length(files)>1 || refine_seen ||
         barycentric_seen ||
         save_seen || reclassify!==nothing || reparam!==nothing ||
-        part!==nothing ||
+        part!==nothing || foreign_output ||
+        (geo_unrolled_output && extension!=".geo") ||
         get(numeric_options,"Mesh.HighOrderOptimize",0.0)!=0.0
     if !session
         if unroll_seen
             # `-0` writes the model's unrolled `.geo` script — the geometry
             # executes without meshing, and the default destination is the
             # input stem with a `.geo_unrolled` suffix (upstream convention).
+            # Upstream honors other `-o`/`-format` selections here by
+            # serializing the unmeshed model's entities (entity-only MSH and
+            # the foreign writers); those payloads stay unimplemented, so a
+            # non-`.geo_unrolled` effective format rejects by name — but only
+            # after the script runs, like upstream's `CreateOutputFile`.
             destination=outfile===nothing ?
                 splitext(first(inputs))[1]*".geo_unrolled" : outfile
             _same_file_target(first(inputs),destination) && throw(ArgumentError(
                 "tessella: -0 output path must not alias the input file"))
             result=execute_geo(first(inputs);mesh_dim=0)
+            if effective_format!==nothing &&
+               effective_format!=".geo_unrolled"
+                haskey(_UNIMPLEMENTED_EXTENSIONS,effective_format) &&
+                    throw(ArgumentError(
+                        "tessella: output format '$effective_format' is " *
+                        "not implemented " *
+                        "($(_UNIMPLEMENTED_EXTENSIONS[effective_format]))"))
+                effective_format==".pos" && throw(ArgumentError(
+                    "tessella: statistics-view POS output is not implemented"))
+                (effective_format in _MESH_OUTPUT_EXTENSIONS ||
+                 effective_format in _FOREIGN_OUTPUT_EXTENSIONS) && throw(
+                    ArgumentError(
+                        "tessella: -0 output requires a .geo_unrolled name " *
+                        "(entity-only $effective_format output is not " *
+                        "implemented)"))
+                throw(ArgumentError(
+                    "tessella: unknown output file format " *
+                    "'$effective_format'"))
+            end
             write_geo_unrolled(destination,result.model)
             return destination
         end
@@ -848,8 +1223,17 @@ function _run(tokens::Vector{String})
             "tessella: -o requires -1, -2 or -3"))
         dim==0 && (format_seen || binary_seen) && throw(ArgumentError(
             "tessella: output format flags require -1, -2 or -3"))
+        dim>0 && effective_format==".pos" && throw(ArgumentError(
+            "tessella: statistics-view POS output is not implemented"))
+        dim>0 && haskey(_UNIMPLEMENTED_EXTENSIONS,effective_format) &&
+            throw(ArgumentError(
+                "tessella: output format '$effective_format' is not " *
+                "implemented ($(_UNIMPLEMENTED_EXTENSIONS[effective_format]))"))
         destination=dim==0 ? nothing :
-            (outfile===nothing ? _default_output(first(inputs)) : outfile)
+            (outfile===nothing ?
+             (output_format!==nothing ?
+              splitext(first(inputs))[1]*output_format :
+              _default_output(first(inputs))) : outfile)
         destination!==nothing &&
             _same_file_target(first(inputs),destination) && throw(ArgumentError(
                 "tessella: output path must not alias the input file"))
@@ -926,6 +1310,27 @@ function _run(tokens::Vector{String})
             return nothing
         end
         if dim>0
+            # `-o <name>.geo_unrolled` / `-format geo_unrolled` writes the
+            # executed model script — the same artifact `-0` emits, reached
+            # through the output name upstream (`FORMAT_GEO`).
+            if geo_unrolled_output
+                write_geo_unrolled(destination,result.model)
+                return destination
+            end
+            # Upstream validates the output format inside `CreateOutputFile`
+            # — after generation — so a foreign `-o` name reaches here before
+            # rejecting; `.pos`/unimplemented names already rejected above.
+            effective_format!==nothing &&
+                !(effective_format in _MESH_OUTPUT_EXTENSIONS) && throw(
+                    ArgumentError(
+                        "tessella: unknown output file format " *
+                        "'$effective_format'"))
+            # With no explicit `-format` (`FORMAT_AUTO` upstream) the `-o`
+            # name's version suffix selects the MSH dialect —
+            # `.msh2`/`.msh22` → 2.2, `.msh4`/`.msh41` → 4.1.
+            version=output_format===nothing && out_extension!==nothing ?
+                (out_extension in (".msh2",".msh22") ? 2.2 :
+                 out_extension in (".msh4",".msh41") ? 4.1 : version) : version
             result.mesh===nothing && throw(ErrorException("tessella: no mesh produced"))
             if dim==1
                 authority=result.model.meshing.mesh_authority
@@ -1028,7 +1433,7 @@ function _run(tokens::Vector{String})
     return _session_main(files,preludes,numeric_options;
         dim,outfile,version,binary,output_flags=format_seen || binary_seen,
         refine=refine_seen,barycentric=barycentric_seen,save=save_seen,
-        statreport,
+        statreport,output_format,
         unroll=unroll_seen,bgm=[path for (path,_) in bgm_specs],
         reclassify,reparam,part,part_topo,part_ghosts,part_split,
         part_physicals)
@@ -1307,7 +1712,7 @@ function _session_main(files,preludes,numeric_options;
                        reclassify,reparam,part,part_topo,part_ghosts,part_split,
                        part_physicals,
                        barycentric=false,unroll=false,bgm=String[],
-                       statreport=nothing)
+                       statreport=nothing,output_format=nothing)
     need_output=dim>0 || refine || barycentric || unroll || save ||
         reclassify!==nothing ||
         reparam!==nothing || part!==nothing
@@ -1371,9 +1776,13 @@ function _session_main(files,preludes,numeric_options;
         haskey(API.DEFAULT_OPTIONS,name) ? (session_numeric[name]=value) :
             push!(geo_numeric_preludes,"$name = $value;")
     end
-    # `-0` always defaults to `<stem>.geo_unrolled`, even on mesh inputs.
+    # `-0` always defaults to `<stem>.geo_unrolled`, even on mesh inputs; a
+    # non-MSH `-format` selection defaults to the format's canonical
+    # extension (upstream `GetDefaultFileName(Mesh.FileFormat)`).
     destination=outfile===nothing ?
         (unroll ? splitext(files[1][1])[1]*".geo_unrolled" :
+         output_format!==nothing ?
+         splitext(files[1][1])[1]*output_format :
          _default_output(files[1][1])) : outfile
     extension=lowercase(splitext(files[1][1])[2])
     if extension!=".geo" && need_output && !unroll
@@ -1463,6 +1872,31 @@ function _session_main(files,preludes,numeric_options;
         if unroll
             # `-0` on a mesh input serializes the loaded model's discrete
             # point records — the only entities the unrolled format carries.
+            # Upstream would serialize the model's entities for other
+            # `-o`/`-format` selections; those stay unimplemented, so the
+            # effective format must select the unrolled script.
+            out_extension=lowercase(splitext(destination)[2])
+            effective_format=output_format===nothing ?
+                out_extension : output_format
+            if effective_format!==nothing &&
+               effective_format!=".geo_unrolled"
+                haskey(_UNIMPLEMENTED_EXTENSIONS,effective_format) &&
+                    throw(ArgumentError(
+                        "tessella: output format '$effective_format' is " *
+                        "not implemented " *
+                        "($(_UNIMPLEMENTED_EXTENSIONS[effective_format]))"))
+                effective_format==".pos" && throw(ArgumentError(
+                    "tessella: statistics-view POS output is not implemented"))
+                (effective_format in _MESH_OUTPUT_EXTENSIONS ||
+                 effective_format in _FOREIGN_OUTPUT_EXTENSIONS) && throw(
+                    ArgumentError(
+                        "tessella: -0 output requires a .geo_unrolled name " *
+                        "(entity-only $effective_format output is not " *
+                        "implemented)"))
+                throw(ArgumentError(
+                    "tessella: unknown output file format " *
+                    "'$effective_format'"))
+            end
             mesh=lock(API.STATE_LOCK) do
                 API.LAST_MESH[]
             end
@@ -1475,7 +1909,75 @@ function _session_main(files,preludes,numeric_options;
             # `-part_split` only takes effect on an active partition request —
             # upstream's Mesh.PartitionSplitMeshFiles is inert otherwise.
             out_extension=lowercase(splitext(destination)[2])
-            if part_split===true && part!==nothing
+            effective_format=output_format===nothing ?
+                out_extension : output_format
+            effective_format==".pos" && throw(ArgumentError(
+                "tessella: statistics-view POS output is not implemented"))
+            haskey(_UNIMPLEMENTED_EXTENSIONS,effective_format) &&
+                throw(ArgumentError(
+                    "tessella: output format '$effective_format' is not " *
+                    "implemented " *
+                    "($(_UNIMPLEMENTED_EXTENSIONS[effective_format]))"))
+            effective_format===nothing ||
+                effective_format in _MESH_OUTPUT_EXTENSIONS ||
+                effective_format in _FOREIGN_OUTPUT_EXTENSIONS ||
+                effective_format==".geo_unrolled" || throw(
+                    ArgumentError(
+                        "tessella: unknown output file format " *
+                        "'$effective_format'"))
+            if effective_format==".geo_unrolled"
+                # `FORMAT_GEO` output writes the model script on a `.geo`
+                # input and the discrete-entity record on a mesh input —
+                # the same content `-0` produces.
+                if extension==".geo"
+                    model=lock(API.STATE_LOCK) do
+                        API._model_locked()
+                    end
+                    write_geo_unrolled(destination,model)
+                else
+                    mesh=lock(API.STATE_LOCK) do
+                        API.LAST_MESH[]
+                    end
+                    mesh isa MixedMesh || throw(ArgumentError(
+                        "tessella: .geo_unrolled output on a mesh input " *
+                        "requires entity metadata"))
+                    write_geo_unrolled(destination,mesh)
+                end
+            elseif output_format!==nothing &&
+                   out_extension!=output_format
+                # `-format` selects the payload format upstream — the `-o`
+                # name does not change it. Serialize through a sibling
+                # temporary carrying the format's canonical extension; the
+                # MSH path keeps the `-save_*` rewrite the matching-name arm
+                # runs.
+                parent=dirname(destination)
+                isempty(parent) && (parent=".")
+                tmp,tmpio=mktemp(parent;cleanup=false)
+                close(tmpio)
+                tmpname=tmp*output_format
+                try
+                    if output_format in _MESH_OUTPUT_EXTENSIONS &&
+                       save_flags_set
+                        write_version=output_format in (".msh2",".msh22") ?
+                            2.2 : version
+                        API.option("Mesh.MshFileVersion",write_version)
+                        API.write(tmpname)
+                        source=lock(API.STATE_LOCK) do
+                            API.LAST_MESH[]
+                        end
+                        _msh_rewrite_save_options(tmpname;
+                            version=write_version,binary=binary,
+                            save_parametric=save_parametric,
+                            save_topology=save_topology,
+                            source=source)
+                    else
+                        API.write(tmpname)
+                    end
+                    mv(tmpname,destination;force=true)
+                finally
+                    isfile(tmpname) && rm(tmpname;force=true)
+                end
+            elseif part_split===true && part!==nothing
                 _write_partition_files(destination;version,binary,
                     save_parametric,save_topology)
             elseif save_flags_set &&

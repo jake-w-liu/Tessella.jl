@@ -11047,3 +11047,88 @@ classification, NURBS trim transport, and endpoint anchoring — in
 - Scope note: bounded fixtures and focused suites only; no P1–P6 parity
   claim. Torus operands and trimmed-NURBS CDT remain open pre-existing
   items outside this diff.
+
+## 2026-10-29 — CLI01 tail: conversion/output formats + P601 tutorial receipts
+
+CLI batch-conversion and output-format conformance against the pinned
+Gmsh 4.15.2 oracle (`src/interfaces/CLI.jl` only; bounded scope — no
+P1–P6 parity claim).
+
+**Implemented**
+
+- `-convert` covers the upstream input set: `.msh` → binary MSH 4.1
+  `<file>_new`; `.pos` → binary PViewDataList 1.3 `_new` (view-less files
+  write nothing, like upstream); `.geo` executes with `mesh_dim=0`,
+  serializes accumulated post views, then the in-script mesh when one
+  exists — geometry-only scripts produce no `_new`. Fifteen foreign mesh
+  formats the import layer reads (`.stl .unv .mesh .meshb .su2 .bdf
+  .nas .inp .neu .p3d .mail .ir3 .diff .vtk .wrl`) convert to binary
+  MSH 4.1. Bare `-convert` exits quietly like upstream.
+- `-format`/`-f` accepts the upstream `GetFileFormatFromExtension` name
+  set: `msh2/msh22`→2.2, `msh4/msh41`→4.1, `msh` keeps the default
+  version, `auto` keeps extension guessing, every implemented foreign
+  name (`stl unv mesh su2 bdf nas inp neu p3d mail ir3 diff vtk off obj
+  ply2 dat m wrl vrml key rad x3d celum`) selects the payload format,
+  and `geo_unrolled` writes the unrolled script. `msh1/msh3/msh40` and
+  the remaining upstream names (`pos pvtu opt vis txt cgns med rmed
+  py_unrolled`, image/video captures, `brep xao iges igs step stp
+  xmt_txt`) reject with a named "not implemented" gap.
+- Output-name validation deferred to write dispatch (upstream
+  `CreateOutputFile` ordering): `.geo` scripts execute and print their
+  diagnostics before an unknown/unimplemented `-o` name rejects.
+  `.geo`/`.msh` extension dialect selection and the `-save_*` rewrite
+  keep working through a canonical-extension sibling temporary when the
+  `-o` name differs from the `-format` payload extension.
+- `-algo` accepts every upstream 4.15.2 spelling (case-folded);
+  `-optimize_ho`/`-hoOptimize` store `2.0` (elastic + relocation, was
+  `1.0`); obsolete `-optimize` emits the upstream warning trio;
+  `-noenv`/`-nolocale`/`-psn_*` parse as ignored launch controls;
+  `-hybrid`/`-dual`/`-voronoi` keep named rejections.
+- Session output honors non-MSH `-format` payloads and `.geo_unrolled`
+  output on `.geo`/mesh inputs (same artifact `-0` emits).
+
+**Tests** (`test/interfaces/cli_unrolled_geo_test.jl` +189 lines,
+`cli_test.jl` diagnostics updated): binary-POS header built
+programmatically against the oracle layout, `_new` payloads for
+`.msh/.pos/.geo/.stl`, foreign-output payloads, deferred format
+rejection ordering, algo spellings, ignored/rejected/obsolete flags,
+bare `-convert`. Exits: `cli_unrolled_geo_test` 69/69,
+`cli_test` 131+93+5/... all pass post-change, `cli_save_options` 18/18,
+`cli_options_functional` 48/48, `cli_barycentric_refine` 570/570.
+`cli_part_split_test` keeps one **pre-existing** label-mode
+`MixedMesh` physical-tag mismatch (reproduced with this diff stashed —
+unrelated partition state, out of scope).
+
+**P601 tutorial corpus** — `-O2` runs vs pinned `gmsh-4.15.2` CLI;
+drivers audited t1–t21, this cycle ran the genuinely unverified t2–t18
+(t1, t19, t20, t21 were already verified and not rerun). All exited 0:
+
+- `GMSH_PARITY_T2_OK` nodes=1532 tets=2347 vol≈1.2788225e-3 (gmsh
+  1139/2367 same vol)
+- `GMSH_PARITY_T3_OK` nodes=11330 elems=40414 vol≈1.6179147e-2
+- `GMSH_PARITY_T4_OK` nodes=787 tris=1449 area≈1.04136e-2 (gmsh exact)
+- `GMSH_PARITY_T5_OK` entity counts 49/81/49/6, vol_tags match,
+  gmsh_parse=OK
+- `GMSH_PARITY_T6_OK` 391 nodes/646 tris + transfinite patch
+  100/162, area≈4.625e-2 (gmsh 388/640)
+- `GMSH_PARITY_T7_TUTORIAL_OK` 1788/3315 area=0.03 (gmsh exact)
+- `GMSH_PARITY_T8_TUTORIAL_OK` 6 views, counts/ranges MATCH, 4 texts
+- `GMSH_PARITY_T9_TUTORIAL_OK` iso 640 + cut 546 + annotations MATCH
+- `GMSH_PARITY_T10_OK` 23170/45762 area=1 (gmsh exact)
+- `GMSH_PARITY_T11_OK` 3518/3550 quads 3484 area=4.375
+- `GMSH_PARITY_T12_OK` compounds=3, gmsh_parse=OK
+- `GMSH_PARITY_T13_TUTORIAL_OK` geo 7419/23005 + nofield 2892/8602,
+  vol≈67815.77; verbatim repro records the classified boundary-loss
+  bound (`repro=OK:ArgumentError ... Volume[1] lost actual boundary
+  Surface[2] cell 1`)
+- `GMSH_PARITY_T14_OK` 2044/7716 vol=192 (gmsh 2051/7745 same vol)
+- `GMSH_PARITY_T15_OK` 162/432 vol=0.003 (gmsh 166/473 same vol)
+- `GMSH_PARITY_T16_OK` 236/54 vol=0.875 (gmsh 2737/12890 same vol —
+  element counts diverge, driver criteria pass on volume+parse)
+- `GMSH_PARITY_T17_TUTORIAL_OK` BAMG aniso 4507/8900 area=16 vs gmsh
+  1750/3458 (tri_ratio=2.57 — bounded producer difference, receipt
+  recorded)
+- `GMSH_PARITY_T18_OK` 1350/2696 area=6 (gmsh 1212/2420)
+
+These are bounded single-driver receipts against the tutorial corpus;
+they do not establish full P1–P6 parity.
