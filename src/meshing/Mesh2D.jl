@@ -69,12 +69,31 @@ mutable struct Triangulation
     sorted_segs::Vector{NTuple{2,Int32}}
     sorted_segs_valid::Bool
     bad_scan_from::Int32
+    # Constraint-box index for `_check_constraint_intersections`: a uniform
+    # cell -> constraint-key raster over the point domain. A true crossing or
+    # overlap implies the two segments' padded Float64 boxes share a point,
+    # so only constraints whose boxes overlap the proposed segment's box can
+    # flag the exact predicates — box-disjoint constraints skip the scan
+    # without changing which violation reports first (surviving candidates
+    # are tested in `_sorted_segs` order). Built lazily on first use and
+    # updated incrementally at the two constraint-mutation sites
+    # (`_mark_constraint!`, `_split_subsegment!`).
+    segidx_cells::Dict{NTuple{2,Int32},Vector{NTuple{2,Int32}}}
+    segidx_box::Dict{NTuple{2,Int32},NTuple{4,Float64}}
+    segidx_extra::Vector{NTuple{2,Int32}}    # non-finite / oversized boxes — always scanned
+    segidx_origin::NTuple{2,Float64}
+    segidx_inv::Float64                      # inverse cell size (0 = grid disabled)
+    segidx_n::Int32                          # cells per axis
+    segidx_valid::Bool
 
     function Triangulation(xs::Vector{Float64},ys::Vector{Float64})
         n=_validate_points(xs,ys,"Triangulation")
         new(copy(xs),copy(ys),Int32[],Int32[],Bool[],Int32[],n,Int32(0),
             zeros(Int32,n),Set{NTuple{2,Int32}}(),Set{NTuple{2,Int32}}(),
-            NTuple{2,Int32}[],false,Int32(1))
+            NTuple{2,Int32}[],false,Int32(1),
+            Dict{NTuple{2,Int32},Vector{NTuple{2,Int32}}}(),
+            Dict{NTuple{2,Int32},NTuple{4,Float64}}(),
+            NTuple{2,Int32}[],(0.0,0.0),0.0,Int32(1),false)
     end
 end
 
@@ -639,9 +658,176 @@ function _overlaps_segment(T::Triangulation,e1,e2,vi,vj)
            _strictly_between(pe1,pe2,pvi) || _strictly_between(pe1,pe2,pvj)
 end
 
+# ── constraint-box spatial index ───────────────────────────────────────────
+#
+# `_check_constraint_intersections` must only run the exact predicates on
+# constraints that could actually cross or overlap the proposed segment.
+# `_crosses_segment`/`_overlaps_segment` are positive only when the two open
+# segments share a point, so a flagged pair always has overlapping padded
+# Float64 boxes — the raster's candidate set is a conservative superset.
+# The grid is the 2-D analogue of RecoverCDT's `_AABBGrid`, incremental
+# rather than rebuilt: `segidx_cells` maps a cell to the constraint keys
+# rasterized into it, `segidx_box` stores each key's padded box (needed to
+# delete a key's raster footprint later), and `segidx_extra` holds boxes
+# that are non-finite or cover too many cells — those are tested against
+# every query. Boxes rasterize to clamped cell ranges; the clamp map is
+# monotone, so two truly-overlapping boxes always share at least one cell
+# (both ranges contain the clamped image of their shared point).
+
+const _SEGIDX_GRID_MAX=128        # cells per axis cap
+const _SEGIDX_CELL_MAXSPAN=4096   # a box rasterizing to more cells goes to extra
+
+@inline _segbox_pad_lo(x)=prevfloat(x,2)
+@inline _segbox_pad_hi(x)=nextfloat(x,2)
+
+function _seg_box(T::Triangulation,a,b)
+    ax,ay=_pt(T,a); bx,by=_pt(T,b)
+    return (_segbox_pad_lo(min(ax,bx)),_segbox_pad_lo(min(ay,by)),
+            _segbox_pad_hi(max(ax,bx)),_segbox_pad_hi(max(ay,by)))
+end
+
+@inline _segidx_gridable(T::Triangulation,box)=
+    T.segidx_inv!=0.0 && isfinite(box[1]) && isfinite(box[2]) &&
+    isfinite(box[3]) && isfinite(box[4])
+
+# One coordinate -> clamped cell index. (box-ox) may overflow to +-Inf when
+# the box and origin are huge opposite-signed Float64s; that still carries
+# the correct side, so it maps to the corresponding boundary cell. Finite
+# ratios outside [0,n) short-circuit too — `floor(Int,1e19)` would throw.
+@inline function _segidx_c(v,ox,inv,n)
+    r=(v-ox)*inv
+    isfinite(r) || return signbit(r) ? 0 : n-1
+    r<=0.0 && return 0
+    r>=n && return n-1
+    return floor(Int,r)
+end
+
+@inline function _segidx_span(T::Triangulation,box)
+    ox,oy=T.segidx_origin; inv=T.segidx_inv; n=Int(T.segidx_n)
+    i0=_segidx_c(box[1],ox,inv,n)
+    i1=_segidx_c(box[3],ox,inv,n)
+    j0=_segidx_c(box[2],oy,inv,n)
+    j1=_segidx_c(box[4],oy,inv,n)
+    return i0,i1,j0,j1
+end
+
+function _segidx_insert!(T::Triangulation,key::NTuple{2,Int32})
+    T.segidx_valid || return
+    haskey(T.segidx_box,key) && return
+    a,b=key
+    box=_seg_box(T,a,b)
+    T.segidx_box[key]=box
+    gridable=_segidx_gridable(T,box)
+    i0=i1=j0=j1=0
+    if gridable
+        i0,i1,j0,j1=_segidx_span(T,box)
+        gridable=(i1-i0+1)*(j1-j0+1)<=_SEGIDX_CELL_MAXSPAN
+    end
+    gridable || (push!(T.segidx_extra,key);return)
+    for j in j0:j1, i in i0:i1
+        cellkey=(Int32(i),Int32(j))
+        vec=get!(T.segidx_cells,cellkey) do
+            NTuple{2,Int32}[]
+        end
+        push!(vec,key)
+    end
+    return
+end
+
+function _segidx_delete!(T::Triangulation,key::NTuple{2,Int32})
+    T.segidx_valid || return
+    box=get(T.segidx_box,key,nothing)
+    box===nothing && return
+    delete!(T.segidx_box,key)
+    k=findfirst(==(key),T.segidx_extra)
+    if k!==nothing
+        deleteat!(T.segidx_extra,k); return
+    end
+    _segidx_gridable(T,box) || return
+    i0,i1,j0,j1=_segidx_span(T,box)
+    for j in j0:j1, i in i0:i1
+        cellkey=(Int32(i),Int32(j))
+        vec=get(T.segidx_cells,cellkey,nothing)
+        vec===nothing && continue
+        k2=findfirst(==(key),vec)
+        k2===nothing || deleteat!(vec,k2)
+        isempty(vec) && delete!(T.segidx_cells,cellkey)
+    end
+    return
+end
+
+# One-time build: grid over the stored point cloud's bbox, then rasterize
+# every existing constraint. Coordinates are immutable once stored, so the
+# boxes stay exact for the index's lifetime; constraints added later go
+# through `_segidx_insert!`, removals through `_segidx_delete!`.
+function _segidx_prepare!(T::Triangulation)
+    T.segidx_valid && return
+    lo_x=Inf;lo_y=Inf;hi_x=-Inf;hi_y=-Inf
+    for i in 1:T.nreal
+        x=T.x[i];y=T.y[i]
+        x<lo_x&&(lo_x=x);x>hi_x&&(hi_x=x)
+        y<lo_y&&(lo_y=y);y>hi_y&&(hi_y=y)
+    end
+    span=max(hi_x-lo_x,hi_y-lo_y)
+    if isfinite(span)&&span>0
+        G=clamp(ceil(Int,sqrt(2*max(T.nreal,1))),8,_SEGIDX_GRID_MAX)
+        cell=span/G
+        T.segidx_origin=(lo_x,lo_y);T.segidx_inv=1/cell;T.segidx_n=Int32(G)
+    else
+        # degenerate point cloud (or +-Inf extremes): no grid — every
+        # constraint lands on `extra` and is scanned exactly like before.
+        T.segidx_origin=(0.0,0.0);T.segidx_inv=0.0;T.segidx_n=Int32(1)
+    end
+    T.segidx_valid=true
+    for key in T.seg
+        _segidx_insert!(T,key)
+    end
+    for key in T.internal
+        _segidx_insert!(T,key)
+    end
+    return
+end
+
+# Sorted candidate list: every existing constraint whose padded box overlaps
+# the proposed segment's box. The sort reproduces `_sorted_segs` iteration
+# order so a PSLG with several violations reports the same first one as the
+# former full scan.
+function _segidx_candidates(T::Triangulation,vi::Int32,vj::Int32)
+    _segidx_prepare!(T)
+    box=_seg_box(T,vi,vj)
+    seen=Set{NTuple{2,Int32}}()
+    gridable=_segidx_gridable(T,box)
+    if gridable
+        i0,i1,j0,j1=_segidx_span(T,box)
+        if (i1-i0+1)*(j1-j0+1)<=_SEGIDX_CELL_MAXSPAN
+            for j in j0:j1, i in i0:i1
+                vec=get(T.segidx_cells,(Int32(i),Int32(j)),nothing)
+                vec===nothing && continue
+                for key in vec
+                    b2=T.segidx_box[key]
+                    (b2[1]<=box[3]&&b2[3]>=box[1]&&
+                     b2[2]<=box[4]&&b2[4]>=box[2]) && push!(seen,key)
+                end
+            end
+        else
+            gridable=false    # oversized query — same fallback as extras
+        end
+    end
+    if !gridable
+        for key in T.seg; push!(seen,key); end
+        for key in T.internal; push!(seen,key); end
+    end
+    for key in T.segidx_extra
+        b2=T.segidx_box[key]
+        (b2[1]<=box[3]&&b2[3]>=box[1]&&
+         b2[2]<=box[4]&&b2[4]>=box[2]) && push!(seen,key)
+    end
+    return sort!(collect(seen))
+end
+
 function _check_constraint_intersections(T::Triangulation,vi::Int32,vj::Int32)
     proposed=_skey(vi,vj)
-    for (a,b) in _sorted_segs(T)
+    for (a,b) in _segidx_candidates(T,vi,vj)
         (a,b)==proposed && continue
         if _crosses_segment(T,a,b,vi,vj)
             throw(ArgumentError(
@@ -818,6 +1004,10 @@ function _mark_constraint!(T::Triangulation, vi::Int32, vj::Int32, internal::Boo
         delete!(T.internal, key)
         push!(T.seg, key)
     end
+    # either branch leaves `key` a member of the constraint union — the index
+    # tracks union membership only, so a boundary<->internal move needs no
+    # update; `_segidx_insert!` is idempotent for an already-indexed key.
+    _segidx_insert!(T,key)
     return nothing
 end
 
@@ -1321,6 +1511,8 @@ function _split_subsegment!(T::Triangulation, a::Int32, b::Int32, interior::Vect
         delete!(T.seg, key)
         push!(T.seg, _skey(a,mid)); push!(T.seg, _skey(mid,b))
     end
+    _segidx_delete!(T,key)
+    _segidx_insert!(T,_skey(a,mid)); _segidx_insert!(T,_skey(mid,b))
     _insert_point!(T, mid; constrained=true)
     # constraints changed → recompute interior (segment splits are comparatively rare)
     ni = classify_interior(T)

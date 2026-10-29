@@ -11648,3 +11648,105 @@ partners, unequal or nonlinear sweeps, non-generic catalogs (transfinite
 source grids/patches) and stacked/shared-cap sweeps still keep their
 loud planner diagnostics; the sibling boundary-layer, boolean and
 Mesh2D WIP remain uncommitted.
+
+## 2026-10-30 — CDT constraint-intersection box index + mesh3d baseline closure (Devin subagent)
+
+**Scope**: the requested re-verification of `test/meshing/mesh3d_test.jl`
+on `9d997bc` plus the t20 trimmed-NURBS CDT throughput audit. Two
+production diffs landed:
+
+1. **`Mesh2D` segment-box index kills the O(S²) constraint-intersection
+   bookkeeping.** `_check_constraint_intersections` scanned `_sorted_segs`
+   for every inserted constraint — a full scan plus a re-sort each time
+   `sorted_segs_valid` flipped, i.e. O(S²+S²·log S) per PSLG. Sampling
+   profile on a 12000-segment PSLG (`-O2`): `_insert_segment!` ≈ 94% of
+   `constrained_delaunay`, `_check_constraint_intersections` ≈ 58%.
+   `Triangulation` now carries a lazily-built uniform raster
+   (`segidx_cells`/`segidx_box`/`segidx_extra`/`segidx_origin`/
+   `segidx_inv`/`segidx_n`/`segidx_valid`): two-ulp-padded Float64 boxes
+   rasterize into clamped cell ranges — a true crossing/overlap implies
+   overlapping boxes, so the candidate set is a conservative superset
+   (non-finite/oversized boxes fall back to `segidx_extra`, and the
+   oversized-query path falls back to a full scan — same guarantee as
+   RecoverCDT's `_AABBGrid`). Candidates are filtered by padded-box
+   overlap and sorted into `_sorted_segs` order, so multi-violation PSLGs
+   report the same first error. The index is maintained incrementally at
+   the only two constraint-mutation sites (`_mark_constraint!`,
+   `_split_subsegment!`). `floor(Int,·)` is bypassed for ratios outside
+   `[0,n)` so far-out-of-domain query points cannot throw `InexactError`.
+   Exact predicates (`_crosses_segment`/`_overlaps_segment`,
+   orient/incircle SoS) are untouched.
+
+   **Output is byte-identical.** SHA-256 over live triangles, `seg`,
+   `internal`, `alive`, interior mask and coordinates matches the
+   pre-index build on an 8-case battery (circles 257/997/3000,
+   square+hole, star chords, grid skew, nested wires, dense
+   square+hole at 2400 segs) **and** on the five real t20 trimmed-face
+   PSLGs spot-verified against a `9d997bc` worktree (faces 2, 10, 11,
+   4, 21 — up to 10,150 constraints). Determinism also holds across
+   compile modes (`--compile=min -O0` ≡ `-O2`). Error behavior pins:
+   crossing diagonals still raise
+   `proposed constraint (2,3) crosses existing constraint (1,4)`;
+   endpoint-sharing collinear sub-segments remain legal exactly as
+   before.
+
+   **Measured scaling** (`-O2`, circle+lattice PSLG, CDT only):
+   baseline 0.20/0.62/2.07/8.04 s at S=2000/4000/8000/16000 (≈×3.5–3.9
+   per doubling — superlinear); indexed 0.08/0.05/0.15/0.20 s (≈linear,
+   **40× at S=16000**). Post-index profile: `_check_constraint_intersections`
+   no longer samples; residual CDT time is `_insert_point!`/`locate`
+   (with SoS-exact BigInt predicates on the cocircular interior lattice —
+   inherent to degenerate grids, not a bookkeeping term).
+
+   **t20 production path** (`occ.import_shapes(t20_data.step)` +
+   `get_mass(2,·)`, `-O2`, same session before/after):
+   face 1 mass `424.14064940539924` — index 1.0 s vs baseline 2.1 s at
+   HEAD (the historical 3722.5 s receipt predates the recent CDT/mesh
+   work and/or ran under minimal compilation); face 4 —
+   `305.1171529469401`, 7.0 s vs 10.6 s; face 21 raw CDT —
+   0.169 s vs 2.74 s (**16×**); face 4 raw CDT — 3.11 s vs 7.91 s;
+   mass values bit-identical everywhere. Post-fix `get_mass` profile:
+   ~48% NURBS `_model_nurbs_surface_d2` integration evals, ~39% CDT
+   point insertion, zero segment-intersection bookkeeping.
+
+2. **`boolean_volumes_multi!` docstring attached to the helper, not the
+   export** (`src/geometry/Model.jl`). The public doc block sat above the
+   `_boolean_bind_msg!` method definitions, so it documented the helper
+   and `Base.Docs.undocumented_names(Tessella; private=false)` returned
+   `[:boolean_volumes_multi!]` — failing the mesh3d documentation gate at
+   `mesh3d_test.jl:201` before any assertion ran (new failure relative to
+   the documented `1f+3e` baseline). The helper definitions now precede
+   the docstring; `undocumented_names` returns `Symbol[]`. No behavior
+   change.
+
+**Receipts** (Julia 1.12.7):
+
+- `test/meshing/mesh3d_test.jl` (`--compile=min -O0 --check-bounds=yes`,
+  working tree incl. both diffs): **146,760/146,760 pass, exit 0** —
+  `Mesh3D Delaunay (Stage 3)` 587/587 (135m05s) + `recovery gate:
+  predicate forms agree with rational references` 146,173/146,173
+  (1m06s). The documented baseline's `1f+3e` (`max_predicate_tests=1`
+  failure + three `recover_partition_cdt` prismatic-certificate errors)
+  **no longer occurs** — the certificate fix at `f27a2b1` cleared the
+  three errors and the predicate-form gate is fully green; the new docs
+  failure is fixed by the docstring move.
+- `test/meshing/mesh2d_test.jl` (`--compile=min -O0`): **925/925 pass** —
+  Delaunay 112, CDT 54, Ruppert 30, insertion contracts 119, refinement
+  scan-cache parity 608, docs+deterministic CRC 2 (exit 0, 91s).
+- `test/meshing/recover_cdt_topology_test.jl` (`--compile=min -O0`):
+  **33/33 pass** (exit 0).
+- `test/meshing/meshsurface_test.jl` (`--compile=min -O0`): **60/60
+  pass** (exit 0, 7m04s) — downstream CDT consumer.
+- `test/core/api_parallel_determinism_test.jl` (`-t4 --compile=min
+  -O0`): **64/64 pass** (exit 0, 56m42s).
+- `test/geometry/model_metric_volume_functional_test.jl`
+  (`--compile=min -O0`): **36/36 pass** (exit 0) — 10+4+5+4+2+5+6.
+- `test/functional/io.jl` + `test/functional/api.jl` spot-check under the
+  runtests harness (`--compile=min -O0`): **81/81 pass** (exit 0, 1.1s).
+
+**Not claimed**: CDT point-insertion (`locate` walk + SoS-exact
+fallback) and the trimmed-face NURBS quadrature are unchanged and remain
+the residual costs — both linear in practice here; reducing the lattice's
+cocircular-predicate pressure is a possible follow-up, out of scope. The
+sibling `ModelExtrude.jl` `_BL_DBG_SRCMESHES` debug WIP stays uncommitted
+and unowned by this entry.

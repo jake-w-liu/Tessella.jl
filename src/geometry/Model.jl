@@ -2182,6 +2182,15 @@ function boolean_volumes!(m::GeoModel, op::Symbol, a, b; tag::Integer=0)
     return t
 end
 
+# Recoverable `Msg::Error` for diagnostics the operation survives (upstream
+# reports them through `Msg::Error` and keeps going — e.g. `_multiBind`'s
+# "Cannot bind multiple volumes to single tag"). Callers that own a Msg
+# channel pass a `Vector{String}` sink; without one the diagnostic surfaces
+# through Julia's error logger like an unconsumed stderr line.
+_boolean_bind_msg!(sink::AbstractVector{String},msg::AbstractString)=
+    (push!(sink,msg);nothing)
+_boolean_bind_msg!(::Nothing,msg::AbstractString)=(@error msg;nothing)
+
 """
     boolean_volumes_multi!(model, op, objects, tools; tag=0,
                            remove_object=true, remove_tool=true) -> out tags
@@ -2209,15 +2218,6 @@ tags in piece order, matching Gmsh's `outDimTags`. When `image_out`
 is a `Vector{Vector{Int}}` it is resized to the operand count and filled with
 each operand's result-tag image — the `outDimTagsMap` equivalent.
 """
-# Recoverable `Msg::Error` for diagnostics the operation survives (upstream
-# reports them through `Msg::Error` and keeps going — e.g. `_multiBind`'s
-# "Cannot bind multiple volumes to single tag"). Callers that own a Msg
-# channel pass a `Vector{String}` sink; without one the diagnostic surfaces
-# through Julia's error logger like an unconsumed stderr line.
-_boolean_bind_msg!(sink::AbstractVector{String},msg::AbstractString)=
-    (push!(sink,msg);nothing)
-_boolean_bind_msg!(::Nothing,msg::AbstractString)=(@error msg;nothing)
-
 function boolean_volumes_multi!(m::GeoModel,op::Symbol,
         objects::AbstractVector{<:Integer},tools::AbstractVector{<:Integer};
         tag::Integer=0,remove_object::Bool=true,remove_tool::Bool=true,
