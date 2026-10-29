@@ -10804,3 +10804,69 @@ monolith) was still running on a snapshot predating the final edit at
 commit; its recovery-adjacent coverage is superseded here by the fresh
 `recover_cdt_topology`/`cad`/`pipeline` receipts and the byte-identical
 outputs above.
+
+## 2026-10-29 — EMB01 hybrid-route next tier + ALG01 dispatch audit
+
+EMB01 (embedded-geometry files):
+
+- `ModelNativeHybridEmbeddedSurface.jl` admits warped `:ruled` boundary-loop
+  sheets and nonlinear Curve boundaries into the certified hybrid route. The
+  literal-Tri3 disk certificate is parameterized: planar sheets keep the
+  dominant-axis exact-orient2 projection plus the planarity determinants;
+  ruled sheets certify the same embedded-disk incidence in the patch's own
+  (u,v) domain via `_ruled_xyz_to_uv`. Ruled sheets carry no registered
+  unlifted constructor input, so the `constructor` witness field is now
+  `Union{Nothing,MixedMesh}` and `_model_surface_constructor_binding` runs
+  only when one exists; every other UID/owner/cell/product check is
+  unchanged.
+- `ModelNativeHybridEmbedded{Point,Curve,Surface}.jl` containment:
+  certified-convex shells keep the exact halfspace certificates. Nonconvex
+  shells now use a shared exact segment/triangle predicate with ray-parity
+  strict-interior tests for nodes and per-segment panel clearance for
+  curves; embedded sheets additionally reject any shell edge piercing a
+  literal facet. Entities outside the shell (e.g. an L-shape notch) throw
+  "outside or on the hybrid shell boundary".
+- Per-Region scoping: the `length(m.volumes)==1` guards became
+  `haskey(m.volumes,region)` in the four embedded input functions and in
+  `_model_native_hybrid_volume_scope`, so a per-Region hybrid embedded fill
+  is valid inside a multi-Region model. The connected/batch planner
+  (`ModelNativeHybrid{Batch,Components}`) still rejects embedded
+  multi-Region composition specifically ("unsupported selected Region
+  planner attributes"), and shared-Quad two-Region pyramid recovery remains
+  a loud residual gap.
+- Verified end-to-end constraint enforcement: warped ruled sheets,
+  three-Circle planar disks, and nonconvex Point/Curve inserts all emit as
+  interior facets/edges/nodes with two-sided Tet incidence — new test file
+  `test/geometry/embedded_hybrid_constraints_test.jl` (27 assertions).
+- Upstream audit (gmsh-4.15.2): `X{..} In Y{..}` admits only target dims 2/3
+  with source < target, so `Point In Curve` is an upstream parse-level
+  rejection (Tessella: loud "unrecognized statement"); `Delete Embedded`
+  and `getEmbedded` already have equivalents (`remove_embedded!`,
+  `m.embeds`); `Mesh.Embedded` is not an upstream option name (only
+  `Geometry.OCCAutoEmbed`).
+
+ALG01 audit (no code change this round): `Mesh.Algorithm` selectors
+2/3/5/6/7 mesh natively; 1/4/8/9/10/11/99/-1 reject specifically with no
+silent reroute. `Mesh.Algorithm3D` 1/3 mesh; 4/7/9/10/99/-1 reject
+specifically; `.geo` normalizes selector 2 to 1 exactly like upstream's
+alias. Per-entity `MeshAlgorithm Surface{...}` attributes store per-face
+dispatch. Upstream's `meshGFace` unknown-selector `else` runs a
+Bowyer-Watson/BAMG fallback rather than rejecting — a documented policy
+difference, not silent wrong routing.
+
+Receipts (Julia 1.12.7, `--compile=min -O0`, `--check-bounds=yes`):
+
+- `test/geometry/embedded_hybrid_constraints_test.jl` — 27/27 (9m10s).
+- `test/geometry/embedded_sheets_test.jl` — 33/33 (12m30s).
+- `test/interfaces/api_hybrid_embedded_{point,curve,surface}_functional_test.jl`
+  — 23 / 32 / 161 pass.
+- `test/interfaces/api_hybrid_multi_constraints_functional_test.jl` — 96.
+- `test/interfaces/api_hybrid_planar_sheet_functional_test.jl` — 49.
+- `test/interfaces/api_native_hybrid_global_embedded_sizes_test.jl` — 72.
+- `test/interfaces/api_hybrid_cube_functional_test.jl` — 35.
+
+Residual gaps: hybrid multi-Region embedded composition needs the shared
+constructor's embedded-constraint plumbing (loud specific reject today);
+the OCC-curved embedded sheet family and `:tric` patch certificates remain
+unimplemented; `model_to_mixed` still rejects surfaces whose curve control
+points leave the surface (sibling-owned file this round).

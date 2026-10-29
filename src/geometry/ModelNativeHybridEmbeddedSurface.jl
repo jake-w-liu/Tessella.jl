@@ -1,12 +1,14 @@
-# A literal planar Tri3 sheet with actual Point/Line boundary products,
-# optional interior loops, subdivision chains, interior vertices and nested
-# declared Point/Curve constraints.
+# A literal Tri3 sheet with actual Point/Line boundary products, optional
+# interior loops, subdivision chains, interior vertices and nested declared
+# Point/Curve constraints. Planar sheets certify as a dominant-axis planar
+# disk; warped ruled patches certify the same embedded-disk incidence in the
+# declared (u,v) parameter domain.
 struct _ModelNativeHybridEmbeddedSurfaceInput
     model::GeoModel
     region::Int
     surface::Int
     input::_ModelMeshAuthority
-    constructor::MixedMesh
+    constructor::Union{Nothing,MixedMesh}
     loops::Dict{Int,Vector{Int}}
     endpoints::Dict{Int,NTuple{2,Int}}
     triangles::Vector{NamedTuple}
@@ -82,16 +84,20 @@ function _model_native_hybrid_embedded_surface_input(m,region,input,caller;surfa
     embeds=copy(get(m.embeds,(3,region),NTuple{2,Int}[]))
     if surface===nothing
         # The original single-entity route remains separate.
-        length(m.volumes)==1 && length(embeds)==1 && only(embeds)[1]==2 || return nothing
+        haskey(m.volumes,region) && length(embeds)==1 && only(embeds)[1]==2 || return nothing
         surface=only(embeds)[2]
     else
-        length(m.volumes)==1 && (2,surface) in embeds &&
+        haskey(m.volumes,region) && (2,surface) in embeds &&
             all(owner->owner[1] in (0,1,2),embeds) || throw(ArgumentError(
             "$caller: selected embedded Surface lacks its actual Region declaration"))
     end
+    # Planar sheets certify in a dominant-axis projection; genuinely warped
+    # boundary-loop patches (`:ruled`, the upstream `RuledSurface` GFace)
+    # certify in the patch's own (u,v) domain instead — the same literal
+    # Tri3 cells and lower products feed the kernel either way.
     haskey(m.surfaces,surface) && !isempty(m.surfaces[surface]) &&
-        get(m.surface_types,surface,:plane)==:plane || throw(ArgumentError(
-        "$caller: embedded Surface requires declared planar boundary loops"))
+        get(m.surface_types,surface,:plane) in (:plane,:ruled) || throw(ArgumentError(
+        "$caller: embedded Surface requires a declared planar or ruled boundary loop sheet"))
     loops=m.surfaces[surface]
     nested=copy(get(m.embeds,(2,surface),NTuple{2,Int}[]))
     allunique(nested) && all(owner->owner[1] in (0,1),nested) || throw(ArgumentError(
@@ -103,8 +109,9 @@ function _model_native_hybrid_embedded_surface_input(m,region,input,caller;surfa
     all(loop->length(m.loops[loop])>=3,loops) && length(declared)==length(curves) &&
         allunique(declared) || throw(ArgumentError(
         "$caller: embedded Surface requires three or more distinct boundary Curves per loop"))
-    all(curve->get(m.curve_types,curve,:line)==:line,curves) || throw(ArgumentError(
-        "$caller: embedded Surface requires its declared straight Line boundary"))
+    # Any declared Curve whose actual product is a linear Line2 chain is a
+    # legal sheet boundary: nonlinear Circles/Splines discretize to the same
+    # cell family upstream inserts into the volume triangulation.
     all(curve->!(curve in curves),nested_curves) || throw(ArgumentError(
         "$caller: embedded Surface names a boundary Curve as a nested constraint"))
     product=_model_mesh_product(input,2,surface;caller)
@@ -112,10 +119,16 @@ function _model_native_hybrid_embedded_surface_input(m,region,input,caller;surfa
         only(product.blocks).msh==2 && size(only(product.blocks).nodes,1)==3 &&
         !isempty(only(product.blocks).nodes) || throw(ArgumentError(
         "$caller: embedded Surface needs its actual linear Tri3 sheet"))
+    # A planar sheet binds its unlifted PSLG constructor input; a warped
+    # ruled patch has no such registered input — its evidence is the lifted
+    # actual product plus the declared (u,v) reparameterization below.
     constructor=get(input.surface_constructor_inputs,(2,Int32(surface)),nothing)
-    constructor!==nothing || throw(ArgumentError(
-        "$caller: embedded Surface lacks its owned actual Surface constructor"))
-    _model_surface_constructor_binding(product,constructor,caller)
+    if constructor===nothing
+        get(m.surface_types,surface,:plane)==:ruled || throw(ArgumentError(
+            "$caller: embedded Surface lacks its owned actual Surface constructor"))
+    else
+        _model_surface_constructor_binding(product,constructor,caller)
+    end
     data=product.entity_data;block=only(product.blocks)
     labels=only(data.external_element_tags);owners=only(data.block_entities)
     length(labels)==length(owners)==size(block.nodes,2) && all(>(0),labels) &&
@@ -188,7 +201,27 @@ function _model_native_hybrid_embedded_surface_input(m,region,input,caller;surfa
         end
         push!(records,(uid=uid,coordinate=Tuple(product.coords[:,row]),node_owner=owner))
     end
-    _model_native_hybrid_surface_disk_certificate(triangles,records,actual_edges,length(loops),caller)
+    parameters=nothing
+    if get(m.surface_types,surface,:plane)==:ruled
+        # Upstream's `RuledSurface` GFace triangulates inside `parBounds`, so
+        # the literal lifted facets form their embedded disk in the patch's
+        # own (u,v) domain. Each stored vertex is reparameterized through the
+        # same `XYZtoUV` solve the dim-2 ruled mesher uses.
+        silent=Returns(nothing)
+        span=maximum(LinearAlgebra.norm(collect(record.coordinate).-
+            collect(first(records).coordinate)) for record in records)
+        lc=max(1.0,span)
+        parameters=Dict{UInt64,NTuple{2,Float64}}()
+        for record in records
+            u,v=_ruled_xyz_to_uv(m,surface,record.coordinate,1.0,lc,false,
+                                 silent,silent,caller)
+            (isfinite(u) && isfinite(v)) || throw(ArgumentError(
+                "$caller: embedded Surface vertex has no finite ruled parameter"))
+            parameters[record.uid]=(u,v)
+        end
+    end
+    _model_native_hybrid_surface_disk_certificate(triangles,records,actual_edges,
+        length(loops),caller;parameters)
     return _ModelNativeHybridEmbeddedSurfaceInput(m,region,surface,input,constructor,
         Dict(loop=>copy(m.loops[loop]) for loop in loops),endpoints,triangles,records,
         lower_cells,embeds)
@@ -197,8 +230,12 @@ end
 # The literal boundary must be `cycles` connected cycles and the triangle dual
 # graph connected. Exact projected incidence checks certify adjacent and
 # nonadjacent triangles; no triangulation, source coordinates or constructor
-# order is reconstructed.
-function _model_native_hybrid_surface_disk_certificate(triangles,records,boundary,cycles,caller)
+# order is reconstructed. `parameters` supplies the certifying 2D embedding:
+# nothing means the sheet is planar and is certified in its dominant-axis
+# projection (the planarity block below also runs), while a ruled sheet
+# supplies each vertex's own (u,v) parameter and skips only that block.
+function _model_native_hybrid_surface_disk_certificate(triangles,records,boundary,cycles,caller;
+                                                       parameters=nothing)
     incidence=Dict{NTuple{2,UInt64},Vector{NTuple{2,UInt64}}}()
     adjacent=Dict{NTuple{2,UInt64},Vector{Int}}()
     supports=Set{NTuple{3,UInt64}}()
@@ -252,21 +289,27 @@ function _model_native_hybrid_surface_disk_certificate(triangles,records,boundar
     length(reached_triangles)==length(triangles) || throw(ArgumentError(
         "$caller: embedded Surface has disconnected actual triangles"))
     coordinates=Dict(record.uid=>record.coordinate for record in records)
-    a,b,c=map(uid->coordinates[uid],first(triangles).nodes)
-    normal=LinearAlgebra.cross(collect(b).-collect(a),collect(c).-collect(a))
-    magnitude=LinearAlgebra.norm(normal)
-    isfinite(magnitude) && magnitude>0 || throw(ArgumentError(
-        "$caller: embedded Surface has a degenerate actual triangle"))
-    scale=max(1.0,maximum(LinearAlgebra.norm(collect(record.coordinate).-collect(a)) for record in records))
-    bound=128eps(Float64)*scale*magnitude
-    # orient3 is an exact sign predicate; plane distance needs the adaptive
-    # determinant magnitude on the same literal stored coordinates.
-    determinants=[parentmodule(@__MODULE__).Predicates._orient3_value(a,b,c,record.coordinate)
-                  for record in records]
-    isfinite(bound) && all(value->isfinite(value) && abs(value)<=bound,determinants) ||
-        throw(ArgumentError("$caller: embedded Surface is not a certified planar sheet"))
-    drop=argmax(abs.(normal));axes=filter(!=(drop),collect(1:3))
-    project(uid)=ntuple(index->coordinates[uid][axes[index]],2)
+    project=if parameters===nothing
+        a,b,c=map(uid->coordinates[uid],first(triangles).nodes)
+        normal=LinearAlgebra.cross(collect(b).-collect(a),collect(c).-collect(a))
+        magnitude=LinearAlgebra.norm(normal)
+        isfinite(magnitude) && magnitude>0 || throw(ArgumentError(
+            "$caller: embedded Surface has a degenerate actual triangle"))
+        scale=max(1.0,maximum(LinearAlgebra.norm(collect(record.coordinate).-collect(a)) for record in records))
+        bound=128eps(Float64)*scale*magnitude
+        # orient3 is an exact sign predicate; plane distance needs the adaptive
+        # determinant magnitude on the same literal stored coordinates.
+        determinants=[parentmodule(@__MODULE__).Predicates._orient3_value(a,b,c,record.coordinate)
+                      for record in records]
+        isfinite(bound) && all(value->isfinite(value) && abs(value)<=bound,determinants) ||
+            throw(ArgumentError("$caller: embedded Surface is not a certified planar sheet"))
+        drop=argmax(abs.(normal));axes=filter(!=(drop),collect(1:3))
+        uid->ntuple(index->coordinates[uid][axes[index]],2)
+    else
+        # A warped patch keeps its literal 3D lift; the declared (u,v)
+        # domain is where the embedded-disk incidence certificates hold.
+        uid->parameters[uid]
+    end
     allunique(project(record.uid) for record in records) || throw(ArgumentError(
         "$caller: embedded Surface repeats a projected vertex"))
     areas=[orient2((project(uid) for uid in triangle.nodes)...) for triangle in triangles]
@@ -344,20 +387,32 @@ function _model_native_hybrid_surface_containment_certificate(constructor,caller
     coordinate(uid)=Tuple(constructor.coordinates[:,positions[uid]])
     all(record->!(record.uid in boundary),witness.records) || throw(ArgumentError(
         "$caller: embedded Surface must be strictly inside the shell"))
-    for panel in panels
-        triangles=length(panel.nodes)==3 ? (panel.nodes,) :
-            ((panel.nodes[1],panel.nodes[2],panel.nodes[3]),(panel.nodes[1],panel.nodes[3],panel.nodes[4]))
-        for triangle in triangles
-            a,b,c=map(coordinate,triangle)
-            sides=[orient3(a,b,c,coordinate(uid)) for uid in boundary]
-            all(isfinite,sides) || throw(ArgumentError("$caller: embedded Surface shell halfspaces are not finite"))
-            signs=Set(sign(side) for side in sides if side!=0)
-            length(signs)==1 || throw(ArgumentError("$caller: embedded Surface needs a certified convex shell"))
-            all(record->begin
-                side=orient3(a,b,c,record.coordinate)
-                isfinite(side) && side!=0 && sign(side)==only(signs)
-            end,witness.records) || throw(ArgumentError(
-                "$caller: embedded Surface is outside or on the shell boundary"))
+    entries=_model_native_hybrid_convex_shell(panels,coordinate,boundary,caller,"embedded Surface")
+    if entries!==nothing
+        _model_native_hybrid_convex_inside(witness.records,entries,caller,"embedded Surface")
+    else
+        for record in witness.records
+            _model_native_hybrid_shell_inside(record.coordinate,panels,coordinate,
+                                              caller,"embedded Surface")
+        end
+        lookup=Dict(record.uid=>record.coordinate for record in witness.records)
+        # Every literal sheet edge stays clear of the shell panels, and no
+        # literal panel edge pierces a sheet facet: strictly-inside nodes
+        # plus pairwise non-intersection certify the lifted disk inside.
+        sheet_edges=Set(minmax(triangle.nodes[index],triangle.nodes[mod1(index+1,3)])
+                        for triangle in witness.triangles for index in 1:3)
+        _model_native_hybrid_shell_segments_inside(
+            sheet_edges,uid->lookup[uid],panels,coordinate,caller,"embedded Surface")
+        for panel in panels,panel_triangle in _model_native_hybrid_panel_triangles(panel)
+            for index in 1:3
+                p,q=map(coordinate,(panel_triangle[index],panel_triangle[mod1(index+1,3)]))
+                for triangle in witness.triangles
+                    a,b,c=map(uid->lookup[uid],triangle.nodes)
+                    _model_native_hybrid_segment_triangle_relation(p,q,a,b,c)==0 ||
+                        throw(ArgumentError(
+                        "$caller: embedded Surface is outside or on the hybrid shell boundary"))
+                end
+            end
         end
     end
     return nothing

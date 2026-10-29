@@ -13,10 +13,10 @@ function _model_native_hybrid_embedded_curve_input(m,region,input,caller;curve=n
     embeds=copy(get(m.embeds,(3,region),NTuple{2,Int}[]))
     if curve===nothing
         # The original single-entity route remains separate.
-        length(m.volumes)==1 && length(embeds)==1 && only(embeds)[1]==1 || return nothing
+        haskey(m.volumes,region) && length(embeds)==1 && only(embeds)[1]==1 || return nothing
         curve=only(embeds)[2]
     else
-        length(m.volumes)==1 && (1,curve) in embeds && all(owner->owner[1] in (0,1,2),embeds) ||
+        haskey(m.volumes,region) && (1,curve) in embeds && all(owner->owner[1] in (0,1,2),embeds) ||
             throw(ArgumentError("$caller: selected embedded Curve lacks its actual Region declaration"))
     end
     haskey(m.curves,curve) || throw(ArgumentError("$caller: embedded Curve has no declared geometry"))
@@ -105,26 +105,23 @@ function _model_native_hybrid_curve_containment_certificate(constructor,caller)
         constructor.node_uids,constructor.coordinates,caller)
     positions=Dict(uid=>row for (row,uid) in enumerate(constructor.node_uids))
     panels=vcat(constructor.triangles,constructor.quads)
-    boundary=Set(uid for panel in panels for uid in panel.nodes)
+    boundary=_model_native_hybrid_shell_boundary(panels)
     coordinate(uid)=Tuple(constructor.coordinates[:,positions[uid]])
     for record in witness.records
         record.uid in boundary && throw(ArgumentError("$caller: embedded Curve must be strictly inside the shell"))
     end
-    for panel in panels
-        triangles=length(panel.nodes)==3 ? (panel.nodes,) :
-            ((panel.nodes[1],panel.nodes[2],panel.nodes[3]),(panel.nodes[1],panel.nodes[3],panel.nodes[4]))
-        for triangle in triangles
-            a,b,c=map(coordinate,triangle)
-            sides=[orient3(a,b,c,coordinate(uid)) for uid in boundary]
-            all(isfinite,sides) || throw(ArgumentError("$caller: embedded Curve shell halfspaces are not finite"))
-            signs=Set(sign(side) for side in sides if side!=0)
-            length(signs)==1 || throw(ArgumentError("$caller: embedded Curve needs a certified convex shell"))
-            for record in witness.records
-                side=orient3(a,b,c,record.coordinate)
-                isfinite(side) && side!=0 && sign(side)==only(signs) || throw(ArgumentError(
-                    "$caller: embedded Curve is outside or on the shell boundary"))
-            end
+    entries=_model_native_hybrid_convex_shell(panels,coordinate,boundary,caller,"embedded Curve")
+    if entries!==nothing
+        _model_native_hybrid_convex_inside(witness.records,entries,caller,"embedded Curve")
+    else
+        for record in witness.records
+            _model_native_hybrid_shell_inside(record.coordinate,panels,coordinate,
+                                              caller,"embedded Curve")
         end
+        lookup=Dict(record.uid=>record.coordinate for record in witness.records)
+        _model_native_hybrid_shell_segments_inside(
+            (cell.nodes for cell in witness.cells),uid->lookup[uid],panels,coordinate,
+            caller,"embedded Curve")
     end
     return nothing
 end

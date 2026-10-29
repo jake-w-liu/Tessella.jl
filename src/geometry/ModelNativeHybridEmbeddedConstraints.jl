@@ -12,7 +12,7 @@ end
 
 function _model_native_hybrid_embedded_constraints_input(m,region,input,caller)
     inventory=copy(get(m.embeds,(3,region),NTuple{2,Int}[]))
-    length(m.volumes)==1 && length(inventory)>1 && all(owner->owner[1] in (0,1,2),inventory) ||
+    haskey(m.volumes,region) && length(inventory)>1 && all(owner->owner[1] in (0,1,2),inventory) ||
         return nothing
     allunique(inventory) || throw(ArgumentError("$caller: hybrid constraint inventory repeats an entity"))
     # Surface witnesses are built first: each embedded Point's sizing receipt

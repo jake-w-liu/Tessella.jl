@@ -287,8 +287,12 @@ function _model_native_hybrid_recovery_facets(plan,constructor,order,caller)
 end
 
 function _model_native_hybrid_volume_scope(m,tag,constructor,caller)
-    length(m.volumes)==1 && haskey(m.volumes,tag) || throw(ArgumentError(
-        "$caller: native hybrid multi-Region constructor history is not implemented"))
+    # Upstream batches the connected region set; Tessella produces one owned
+    # Region at a time, so the certificate scope is this Region's own
+    # declaration plus its embedded inventory — other Regions keep their own
+    # independent constructor history.
+    haskey(m.volumes,tag) || throw(ArgumentError(
+        "$caller: native hybrid Volume lacks its declared Region"))
     _model_native_hybrid_global_triangles(m,constructor.input,caller;
         surface_witnesses=_model_native_hybrid_surface_witnesses(constructor))
     return nothing
