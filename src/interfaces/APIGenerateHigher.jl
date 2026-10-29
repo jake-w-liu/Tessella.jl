@@ -651,6 +651,28 @@ function _higher_ordinary_sweep_classification(assembly,m,production,input,dimen
     levels=copied ? us[end:end] : us
     size(production.column_rows,1)==length(levels) || throw(ArgumentError(
         "$caller: ordinary Layers source columns have inconsistent layer provenance"))
+    # Closing rows of a toroidal QuadToTri chain are seam-snapped at the
+    # source mesh before emission (`_extrude_volume_columns`,
+    # `_extrude_lateral_mesh`), so the certificate must replay the same snap —
+    # the raw transform eval differs by evaluator noise from the welded
+    # canonical vertex. Copied tops keep the verbatim transform (no snap in
+    # `_extrude_top_mesh`).
+    seam=if copied
+        nothing
+    elseif dimension==3
+        Model._extrude_quadtri_seam_index(m,tag,caller)
+    elseif dimension==2
+        begin
+            found=nothing
+            for region in Model._extrude_quadtri_regions(m,tag,caller)
+                found=Model._extrude_quadtri_seam_index(m,region,caller)
+                found===nothing || break
+            end
+            found
+        end
+    else
+        nothing
+    end
     spec=m.meshing.extrude_specs[(dimension,tag)]
     transforms=Model._extrude_level_transforms(spec,levels,caller)
     source_positions=Dict(uid=>row for (row,uid) in enumerate(source_product.entity_data.external_node_tags))
@@ -677,6 +699,8 @@ function _higher_ordinary_sweep_classification(assembly,m,production,input,dimen
                 "$caller: ordinary Layers source column has an invalid emitted row"))
             point=!copied && level==1 ? node.point :
                 Model._extrude_level_at(spec,node.point,u,transforms,level)
+            seam!==nothing && level==length(levels) &&
+                (point=Model._extrude_quadtri_snap_seam(seam,point,caller))
             isequal(point,ntuple(axis->mesh.coords[axis,row],3)) || throw(ArgumentError(
                 "$caller: ordinary Layers source column does not consume actual UID $uid"))
         end
@@ -2874,13 +2898,59 @@ function _higher_ordinary_volume_cells!(assembly,m,production,class,mapping,geom
     return nothing
 end
 
+# Volume-cell publication for a swept part that carries no ordinary
+# production — QuadTri and NoNew Regions keep their own planners but emit
+# cells during `meshGRegionExtruded` in Region order like recombined
+# producers. Synthesize their constructor events from the part's block
+# order, the same ordering the unsplit `_higher_append_part!` cell pass
+# uses, then replay the certified publication loop.
+function _higher_emitted_volume_cells!(assembly,m,mesh,class,mapping,geometry_cells)
+    events=Tuple{Int,Int}[]
+    for (msh,cells,_) in _cache_native_blocks(mesh)
+        msh_dimension(msh)==3 || continue
+        for column in axes(cells,2)
+            push!(events,(msh,column))
+        end
+    end
+    _higher_ordinary_volume_cells!(assembly,m,
+        (mesh=mesh,cell_events=events),class,mapping,geometry_cells)
+    return nothing
+end
+
 function _higher_ordinary_volume_stage!(assembly,m,input,extruded,meshed,lateral_plans,
-        discarded,done,emitted;source_nodes,geometry_parts,geometry_cells,native_orphan_births)
+        discarded,done,emitted;source_nodes,geometry_parts,geometry_cells,native_orphan_births,
+        scope=nothing,geometry_birth=nothing)
     # All prospective cell and vertex incidence is certified before allocating
     # this stage. The detached operation later certifies the final lower cells.
+    # Swept Regions without an ordinary production — QuadTri and NoNew
+    # volumes — certify through their own planner instead, matching the
+    # per-Region classification the unstaged loop applies.
     prepared=Dict{Int,Any}()
     for tag in sort!(copy(meshed))
-        production=extruded.productions[tag]
+        production=get(extruded.productions,tag,nothing)
+        if production===nothing
+            mesh=extruded.parts[tag]
+            alternate=nothing
+            if geometry_parts!==nothing && scope!==nothing
+                completed=get(scope.volumes,tag,nothing)
+                completed===nothing || (alternate=Model._extrude_nonew_b4_geometry(
+                    m,tag,completed,
+                    uid->_higher_geometry_source_point(assembly,geometry_birth,uid),
+                    assembly.caller))
+            end
+            swept=_higher_nonew_identity_classification(
+                assembly,m,mesh,input,scope,3,tag,assembly.caller)
+            class=swept===nothing ? _classify_cached_mesh(
+                m,_classification_skeleton(
+                    mesh,get(m.meshing.reverse,(3,tag),false)),3,tag,mesh;
+                _extrude_scope=scope) : swept.class
+            class===nothing && throw(ArgumentError(
+                "$(assembly.caller): staged non-ordinary Volume[$tag] lacks ownership metadata"))
+            prepared[tag]=(mesh=mesh,class=class,alternate=alternate,
+                node_tags=swept===nothing ? nothing : swept.node_tags,
+                retained=swept===nothing ? nothing : swept.retained)
+            continue
+        end
         certified=_higher_ordinary_sweep_classification(assembly,m,production,input,3,tag,
             assembly.caller;planned_laterals=lateral_plans)
         certified!==nothing || throw(ArgumentError(
@@ -2895,30 +2965,48 @@ function _higher_ordinary_volume_stage!(assembly,m,input,extruded,meshed,lateral
     end
     mappings=Dict{Int,Vector{Int32}}()
     for tag in sort!(copy(meshed))
-        item=prepared[tag];certified=item.certificate
-        mappings[tag]=_higher_append_part!(assembly,m,item.production.mesh,certified.class,3,tag,discarded;
-            emitted,source_nodes,source_row_tags=certified.node_tags,
-            source_row_retained=certified.retained,source_rows_existing_only=true,
-            native_orphan_births,emit_cells=false)
+        item=prepared[tag]
+        if hasproperty(item,:production)
+            certified=item.certificate
+            mappings[tag]=_higher_append_part!(assembly,m,item.production.mesh,certified.class,3,tag,discarded;
+                emitted,source_nodes,source_row_tags=certified.node_tags,
+                source_row_retained=certified.retained,source_rows_existing_only=true,
+                native_orphan_births,emit_cells=false)
+        else
+            mappings[tag]=_higher_append_part!(assembly,m,item.mesh,item.class,3,tag,discarded;
+                emitted,source_nodes,source_row_tags=item.node_tags,
+                source_row_retained=item.retained,
+                source_rows_existing_only=item.node_tags!==nothing,
+                native_orphan_births,
+                emit_cells=false)
+        end
     end
     # meshGRegionExtruded visits Regions in tag order. Recombined cell births
     # survive; non-recombined initial cells are deleted by subdivision.
     for tag in sort!(copy(meshed))
         item=prepared[tag]
-        if Model._extrude_gate(m,3,tag).recombine
-            _higher_ordinary_volume_cells!(assembly,m,item.production,item.certificate.class,
-                mappings[tag],geometry_cells)
-        else
-            count=get(extruded.temporary_elements,tag,nothing)
-            count!==nothing || throw(ArgumentError(
-                "$(assembly.caller): subdivision lost consumed initial Volume cell events"))
-            for _ in 1:count
-                _dim01_next_tag!(assembly,false)
+        if hasproperty(item,:production)
+            if Model._extrude_gate(m,3,tag).recombine
+                _higher_ordinary_volume_cells!(assembly,m,item.production,item.certificate.class,
+                    mappings[tag],geometry_cells)
+            else
+                count=get(extruded.temporary_elements,tag,nothing)
+                count!==nothing || throw(ArgumentError(
+                    "$(assembly.caller): subdivision lost consumed initial Volume cell events"))
+                for _ in 1:count
+                    _dim01_next_tag!(assembly,false)
+                end
             end
+        else
+            # QuadTri/NoNew cells are born during the same Region visit and
+            # carry no consumed provisional events.
+            _higher_emitted_volume_cells!(assembly,m,item.mesh,item.class,
+                mappings[tag],geometry_cells)
         end
     end
     # SubdivideExtrudedMesh then allocates final cells for each pending Region.
     for tag in sort!(copy(meshed))
+        hasproperty(prepared[tag],:production) || continue
         Model._extrude_gate(m,3,tag).recombine && continue
         item=prepared[tag]
         _higher_ordinary_volume_cells!(assembly,m,item.production,item.certificate.class,
@@ -2926,8 +3014,34 @@ function _higher_ordinary_volume_stage!(assembly,m,input,extruded,meshed,lateral
     end
     for tag in sort!(copy(meshed))
         item=prepared[tag]
-        geometry_parts===nothing || push!(geometry_parts,
-            (tag,item.production.mesh,item.certificate.class,mappings[tag]))
+        if !hasproperty(item,:production) && item.alternate!==nothing
+            geometry_cells===nothing ||
+                (geometry_cells[item.alternate]=geometry_cells[item.mesh])
+            if geometry_birth!==nothing
+                for (row,position) in enumerate(mappings[tag])
+                    node=assembly.nodes[position]
+                    point=(item.alternate.coords[1,row],
+                           item.alternate.coords[2,row],
+                           item.alternate.coords[3,row])
+                    geometry_birth.nodes[node.tag]=
+                        _Dim01Node(node.tag,point,node.owner,node.parameter)
+                end
+            end
+        end
+        if geometry_parts!==nothing
+            if hasproperty(item,:production)
+                push!(geometry_parts,
+                    (tag,item.production.mesh,item.certificate.class,mappings[tag]))
+            else
+                geometry_mesh,geometry_class,geometry_mapping=
+                    _higher_volume_geometry_order(
+                        item.alternate===nothing ? item.mesh : item.alternate,
+                        item.class,mappings[tag],m,tag,input,scope;
+                        geometry_cells,caller=assembly.caller)
+                push!(geometry_parts,
+                    (tag,geometry_mesh,geometry_class,geometry_mapping))
+            end
+        end
         push!(done,(3,Int32(tag)))
     end
     return nothing
@@ -3054,10 +3168,17 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
     staged=extruded!==nothing && any(tag->haskey(extruded.productions,tag) &&
         !Model._extrude_gate(m,3,tag).recombine,meshed)
     if staged
-        all(tag->haskey(extruded.productions,tag),meshed) || throw(ArgumentError(
+        # Every scheduled Region must live in the shared sweep: ordinary
+        # producers carry a certified production, while the other swept
+        # planners (QuadTri, NoNew) publish their part through the same
+        # tag-ordered node and cell passes below. A non-swept Region still
+        # has no swept birth plan and keeps the existing guard.
+        all(tag->haskey(extruded.productions,tag) ||
+            haskey(extruded.parts,tag),meshed) || throw(ArgumentError(
             "$(assembly.caller): ordinary subdivision combined with another Region planner lacks a complete birth plan"))
         _higher_ordinary_volume_stage!(assembly,m,input,extruded,meshed,lateral_plans,
-            discarded,done,emitted;source_nodes,geometry_parts,geometry_cells,native_orphan_births)
+            discarded,done,emitted;source_nodes,geometry_parts,geometry_cells,native_orphan_births,
+            scope,geometry_birth)
     end
     hybrid_batch=nothing;hybrid_batch_receipt=nothing
     retained_periodic=periodic_surface_pairs!==nothing && any(constraint->
@@ -3243,8 +3364,12 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
             source_row_order=hybrid_production===nothing ? nothing : hybrid_production.registration_rows,
             source_volume_production=hybrid_production,
             # Recorded TF producers can create unused Region-owned logical rows.
-            # Keep their born identities through finish, like ordinary sweep events.
-            native_orphan_births=ordinary===nothing && source_emission===nothing ?
+            # Keep their born identities through finish, like ordinary sweep
+            # events — swept non-ordinary Regions share that convention
+            # (QuadTri preallocates unused interior centroids upstream).
+            native_orphan_births=(ordinary===nothing && swept===nothing &&
+                source_emission===nothing &&
+                (extruded===nothing || !haskey(extruded.parts,tag))) ?
                 nothing : native_orphan_births)
         # The consumed Surface products live in `surface_parts` (the emitted
         # geometry vector only collects Volume parts inside this phase).

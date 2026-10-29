@@ -91,9 +91,9 @@ end
         if n==2 && layers==2 && laterals
             @test mixed_crc(execution.mesh)==(n_nodes=31,n_blocks=21,n_cells=84,
                 bbox=((0.0,0.0,0.0),(1.0,1.0,1.0)),
-                sha="731dff627c14f4982ac1dcab342c69f49c07ed13e1d78b35b64f72d79eb5a2d4")
+                sha="f357daac81da0b8e7a29fb67bdf5052690561edfb5e6ac0199b25f37aaada86e")
             @test mixed_crc(volume).sha==
-                "510be5d0090dcf135ac3f26f8dd9b89e86a186acd643ed9289d1226abf3e4377"
+                "b12d047c13c133ae3a86a283a1b22d82624c9bfbd5c9607bac83551fcfcde4b3"
         end
         @test validate(execution.mesh).ok
         @test validate(volume).ok

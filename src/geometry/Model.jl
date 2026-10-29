@@ -4739,9 +4739,15 @@ function model_to_mixed(m::GeoModel,mesh::Union{Mesh,MixedMesh},
         "$caller: a surface curve cannot be both bounding and embedded"))
     all_curve_tags=sort!(unique!(vcat(curve_tags,embedded_curves)))
     if plane===nothing
+        # Only the boundary curves' endpoints are guaranteed to lie on a
+        # non-planar ruled patch: the patch interpolates its bounding curves
+        # as parametric edges, while auxiliary control points — a Circle's
+        # center, a spline's interior poles — are construction aids that
+        # legitimately sit off the surface (unlike a plane face, where the
+        # coplanarity audit must cover them). The curves' on-surface-ness is
+        # still audited through their produced boundary mesh nodes above.
         for curve in all_curve_tags,
-            point in Iterators.flatten(
-                (m.curves[curve],get(m.curve_control_points,curve,Int[])))
+            point in m.curves[curve]
             p=m.points[point]
             offset=ruled_offset(p)
             (isfinite(offset) && offset<=ruled_tol) || throw(ArgumentError(
@@ -5941,10 +5947,160 @@ end
     return _model_projection_coordinate_key(value)
 end
 
+# All six ways four positions split into two triangles sharing an edge —
+# the shared pair is a candidate quad diagonal. Only the split matching the
+# generated triangulation registers, because a side-sharing half describes
+# a triangle outside the face that the sheet cannot contain.
+const _CURVED_BOUNDARY_QUAD_HALVES=(
+    ((1,2,3),(1,2,4)),((1,2,3),(1,3,4)),((1,2,4),(1,3,4)),
+    ((1,2,3),(2,3,4)),((1,2,4),(2,3,4)),((1,3,4),(2,3,4)))
+
+# A ruled or triangulated boundary patch interpolates its curved wires; its
+# volume-cell faces cannot be certified against one fitted plane. Recover
+# them through the surface's own generated mesh instead — the same
+# generated-triangulation transport `_model_projection_volume_surface_faces!`
+# applies to embedded sheets, tightened to boundary-face incidence: every
+# generated cell must land on a boundary face of the volume mesh, and its
+# winding carries the surface's intrinsic orientation.
+function _model_curved_boundary_surface_faces!(
+        claimed_faces,mesh_boundary_faces,
+        m::GeoModel,mesh,surface::Int,caller::AbstractString)
+    generated=mesh_model_surface(m,surface;_boundary_regrade=false)
+    # Generated rows and the volume's boundary faces share producer
+    # arithmetic; snap keys to the same fifteen-digit store canonicalization
+    # so only genuine evaluation noise welds.
+    index=Dict{NTuple{3,Float64},Int32}()
+    for node in axes(generated.coords,2)
+        get!(index,_model_occ_snap_coord.(
+            _model_mesh_coordinate(generated,node)),Int32(node))
+    end
+    cells=Dict{NTuple{N,Int32} where N,NTuple{N,Int32} where N}()
+    used=Set{NTuple{N,Int32} where N}()
+    ncells=0
+    function register!(vertices::NTuple{N,Int32}) where N
+        ncells+=1
+        key=_model_projection_face_key(vertices)
+        haskey(cells,key) && throw(ArgumentError(
+            "$caller: boundary Surface[$surface] generated mesh repeats " *
+            "cell $key"))
+        cells[key]=vertices
+        return nothing
+    end
+    if generated isa Mesh
+        for cell in 1:ntris(generated)
+            register!(ntuple(slot->generated.tris[slot,cell],3))
+        end
+    else
+        for block in generated.blocks
+            block isa ElementBlock || continue
+            block.msh in (2,3) || continue
+            for column in axes(block.nodes,2)
+                # `block.msh` is the MSH element-type code (2 = triangle,
+                # 3 = quadrilateral), not the node count — the row count
+                # carries the arity.
+                register!(ntuple(slot->block.nodes[slot,column],
+                                 size(block.nodes,1)))
+            end
+        end
+    end
+    output=(NTuple{N,Int32} where N)[]
+    function generated_index(coordinate)
+        return get(index,_model_occ_snap_coord.(coordinate),Int32(0))
+    end
+    # Emit the face's own nodes in the generated cell's winding — the
+    # surface's intrinsic orientation.
+    face_node(face,vertices,g) =
+        face[findfirst(vertex->vertex==g,vertices)]
+    for key in sort!(collect(mesh_boundary_faces))
+        face=key
+        vertices=ntuple(slot->generated_index(
+            _model_mesh_coordinate(mesh,face[slot])),length(face))
+        any(==(Int32(0)),vertices) && continue
+        if length(face)==3
+            gkey=_model_projection_face_key(vertices)
+            order=get(cells,gkey,nothing)
+            order===nothing && continue
+            push!(used,gkey)
+            oriented=ntuple(slot->face_node(face,vertices,order[slot]),3)
+        else
+            gkey=_model_projection_face_key(vertices)
+            order=get(cells,gkey,nothing)
+            if order!==nothing && length(order)==4
+                push!(used,gkey)
+                oriented=ntuple(slot->face_node(face,vertices,order[slot]),4)
+            else
+                # A quadrilateral face may be tiled by two generated
+                # triangles sharing one of its diagonals. Only the genuine
+                # diagonal's split can register both halves: a split whose
+                # shared edge is a side of the quad describes a triangle
+                # extending outside the face, which the generated sheet
+                # cannot contain.
+                oriented=nothing
+                for halves in _CURVED_BOUNDARY_QUAD_HALVES
+                    first_key=_model_projection_face_key(
+                        ntuple(i->vertices[halves[1][i]],3))
+                    second_key=_model_projection_face_key(
+                        ntuple(i->vertices[halves[2][i]],3))
+                    first_order=get(cells,first_key,nothing)
+                    second_order=get(cells,second_key,nothing)
+                    (first_order===nothing || second_order===nothing ||
+                     length(first_order)!=3 || length(second_order)!=3) &&
+                        continue
+                    shared=Tuple(g for g in first_order if g in second_order)
+                    length(shared)==2 || continue
+                    outer1=only(g for g in first_order if !(g in shared))
+                    outer2=only(g for g in second_order if !(g in shared))
+                    # Rotate the first generated triangle so its unique
+                    # vertex sits second: (d1, u1, d2). The quad's cyclic
+                    # order then appends the second triangle's unique
+                    # vertex: (d1, u1, d2, u2).
+                    rotation=findfirst(g->g==outer1,first_order)
+                    quad_order=(first_order[mod1(rotation-1,3)],outer1,
+                                first_order[mod1(rotation+1,3)],outer2)
+                    all(g->g in vertices,quad_order) || continue
+                    push!(used,first_key);push!(used,second_key)
+                    oriented=ntuple(slot->face_node(face,vertices,
+                        quad_order[slot]),4)
+                    break
+                end
+                oriented===nothing && continue
+            end
+        end
+        key in claimed_faces && throw(ArgumentError(
+            "$caller: mesh face $key belongs to multiple model surfaces"))
+        push!(claimed_faces,key)
+        push!(output,oriented)
+    end
+    isempty(output) && throw(ArgumentError(
+        "$caller: boundary Surface[$surface] has no volume-cell faces"))
+    length(used)==ncells || throw(ArgumentError(
+        "$caller: boundary Surface[$surface] generated mesh is not covered " *
+        "by volume boundary faces ($(length(used)) of $ncells cells)"))
+    return output
+end
+
+# Whether any boundary wire of the surface is a genuinely curved entity —
+# an arc, spline, Bézier, ellipse, or OCC curve rather than a `Line`. A
+# non-`Line` curve bulges off its chord inside the surface, so chord facets
+# never cover the modeled region. Loops are validated by the caller's chain
+# build before this runs.
+function _model_surface_curved_wire(m::GeoModel,surface::Int)
+    for loop in m.surfaces[surface],signed in m.loops[loop]
+        _curve_type(m,abs(signed))===:line || return true
+    end
+    return false
+end
+
 function _model_projection_boundary_surface_faces!(
     claimed_faces,mesh_boundary_faces,
     m::GeoModel,mesh,surface::Int,caller::AbstractString;
     face_orders::Union{Nothing,AbstractDict}=nothing)
+    # A surface whose boundary cannot certify a plane — a ruled patch or a
+    # three-sided fill interpolating curved wires — cannot be recovered
+    # through the planar PSLG below; classify it against its generated mesh.
+    _model_surface_plane_admission(m,surface,caller)===nothing &&
+        return _model_curved_boundary_surface_faces!(
+            claimed_faces,mesh_boundary_faces,m,mesh,surface,caller)
     chains=Vector{NTuple{3,Float64}}[]
     coordinates=NTuple{3,Float64}[]
     point_tags=Int[]
@@ -5961,6 +6117,23 @@ function _model_projection_boundary_surface_faces!(
             end
         end
     end
+    # A ruled or triangulated patch bounded by curved wires meshes as the
+    # swept/filled chord grid — extruded laterals are the common case — so
+    # its volume-cell faces are chords of the modeled wires. The planar
+    # certificate below compares covered facet area against the wire-following
+    # PSLG area, which no chord-facet covering can reach: the chord hull is
+    # strictly inside the curved boundary. Route those patches through the
+    # same generated-mesh transport non-planar ruled surfaces already use —
+    # the volume's boundary faces coincide cell-wise with `mesh_model_surface`
+    # output because upstream derives swept surface meshes from the volume's
+    # own side faces (`MeshExtrudedSurface`/`copyMesh`). Polygonal-wired
+    # patches keep the planar path: their chords are the true boundary and
+    # the area certificate stays exact (shared-diagonal subdivision faces
+    # rely on that freedom).
+    (_surface_type(m,surface) in (:ruled,:tric) &&
+     _model_surface_curved_wire(m,surface)) &&
+        return _model_curved_boundary_surface_faces!(
+            claimed_faces,mesh_boundary_faces,m,mesh,surface,caller)
     # The exact fit prefers declared model points; evaluated samples join only
     # when the declared set cannot fit a plane (a closed-curve loop declares a
     # single distinct endpoint). Evaluated coordinates are coplanar modulo
@@ -9583,7 +9756,14 @@ function _volume_cell_signed_volume(coords::AbstractMatrix{Float64},
 end
 
 function _model_mesh_volume(mesh::MixedMesh,caller::AbstractString)
-    total=0.0;correction=0.0
+    # The represented volume is the divergence sum over the cell complex's
+    # boundary. A per-cell corner fan is not a valid substitute: two cells
+    # sharing a warped quadrilateral fan its interior on opposite diagonals,
+    # so those interior contributions never cancel. Boundary faces are
+    # stored once each in their outward cyclic order, which also reproduces
+    # the emitted surface winding's own diagonal split.
+    incidence=Dict{NTuple{N,Int32} where N,Int}()
+    orders=Dict{NTuple{N,Int32} where N,NTuple{N,Int32} where N}()
     for block in mesh.blocks
         block isa ElementBlock || continue
         haskey(_VOLUME_CELL_FACES,Int(block.msh)) || continue
@@ -9592,12 +9772,48 @@ function _model_mesh_volume(mesh::MixedMesh,caller::AbstractString)
                 mesh.coords,block.nodes,cell,Int(block.msh))
             isfinite(value) || throw(ArgumentError(
                 "$caller: MSH $(block.msh) cell $cell has non-finite volume"))
-            total,correction=_model_compensated_add(total,correction,value)
+            for (face_index,f) in pairs(_VOLUME_CELL_FACES[Int(block.msh)])
+                # `_VOLUME_CELL_FACES` stores incidence cycles, not outward
+                # windings: `_volume_cell_signed_volume` negates the slots
+                # that wind into the cell. Reverse exactly those slots so
+                # every boundary face is summed in its outward orientation —
+                # the divergence total is anchor-invariant only for a
+                # consistently oriented shell.
+                reverse_face=Int(block.msh)==4 ?
+                    (face_index==1 || face_index==3) :
+                    ((Int(block.msh)==5 || Int(block.msh)==6) &&
+                     face_index==1)
+                face=ntuple(k->block.nodes[f[k],cell],length(f))
+                reverse_face && (face=ntuple(
+                    k->k==1 ? face[1] : face[end+2-k],length(f)))
+                key=_model_projection_face_key(face)
+                incidence[key]=get(incidence,key,0)+1
+                haskey(orders,key) || (orders[key]=face)
+            end
         end
     end
-    (isfinite(total) && total>0) || throw(ArgumentError(
+    isempty(orders) && throw(ArgumentError(
         "$caller: volume mesh has no finite positive volume"))
-    return total
+    anchor=nothing;total=0.0;correction=0.0
+    for (key,count) in pairs(incidence)
+        count==1 || continue
+        face=orders[key]
+        anchor===nothing &&
+            (anchor=_model_mesh_coordinate(mesh,face[1]))
+        pa=_model_mesh_coordinate(mesh,face[1])
+        for k in 2:length(face)-1
+            pb=_model_mesh_coordinate(mesh,face[k])
+            pc=_model_mesh_coordinate(mesh,face[k+1])
+            value=tet_signed_volume(anchor,pa,pb,pc)
+            isfinite(value) || throw(ArgumentError(
+                "$caller: boundary mesh face $key has non-finite volume"))
+            total,correction=_model_compensated_add(
+                total,correction,value)
+        end
+    end
+    (isfinite(total) && total!=0) || throw(ArgumentError(
+        "$caller: volume mesh has no finite positive volume"))
+    return abs(total)
 end
 
 function _model_certify_explicit_volume_semantics(

@@ -11262,3 +11262,114 @@ drivers audited t1–t21, this cycle ran the genuinely unverified t2–t18
 
 These are bounded single-driver receipts against the tutorial corpus;
 they do not establish full P1–P6 parity.
+
+## 2026-10-30 — QuadTri staged-sweep ownership + curved-surface transport (Devin subagent)
+
+**Scope**: `test/geometry/geo_quadtri_extrude_test.jl` deep-debug/repair —
+mixed-stage and closed-revolution `QuadTriAddVerts` extrusions lost
+ownership/identity; ruled curved-wire surfaces could not classify volume
+boundary faces; two SHA pins were stale.
+
+**Root causes fixed** (all in `src/`):
+
+1. **Staged non-ordinary Regions had no birth plan** —
+   `_higher_volume_phase!` required every swept Region to carry an
+   ordinary `production` once any sibling staged subdivision
+   (`APIGenerateHigher.jl`). QuadTri/NoNew volumes publish their part
+   through their own planner (`extruded.parts`), so a mixed
+   ordinary+QuadTri `.geo` script threw
+   `ordinary subdivision combined with another Region planner lacks a
+   complete birth plan` / `generated entity (2,N) has no ownership
+   metadata`. `_higher_ordinary_volume_stage!` now certifies non-ordinary
+   swept Regions through `_higher_nonew_identity_classification` (with a
+   `_classify_cached_mesh` fallback), emits their cells via the new
+   `_higher_emitted_volume_cells!` in Region tag order like upstream
+   `meshGRegionExtruded`, and remaps geometry births through
+   `_higher_volume_geometry_order`.
+
+2. **QuadTri orphan centroids lost identity** — `_extrude_quadtri_addverts!`
+   preallocates final-layer interior centroids that emitted cells may not
+   reference. The volume phase forwarded `native_orphan_births` only for
+   ordinary/source-emission producers, so the retention filter dropped the
+   unused-but-owned rows and the identity gate threw
+   `produced geometry vertex loses its actual identity` /
+   `ordinary Layers source column does not consume actual UID`. Swept
+   non-ordinary parts now keep `native_orphan_births` (condition extended
+   with `swept===nothing` and `!haskey(extruded.parts,tag)`).
+
+3. **Toroidal seam rows rejected by the UID certificate** —
+   `_higher_ordinary_sweep_classification` replayed the raw transform eval
+   for closing rows, but the mesh welds those rows onto the canonical seam
+   vertex (`_extrude_quadtri_snap_seam` in `_extrude_volume_columns`), so
+   evaluator noise (~1e-16) tripped the bitwise
+   `ordinary Layers source column does not consume actual UID` check. The
+   certificate now replays the same seam snap via
+   `Model._extrude_quadtri_seam_index`/`_extrude_quadtri_snap_seam`
+   (dimension 3, and per-region for dimension 2); copied tops keep the
+   verbatim transform.
+
+4. **Curved ruled/triangulated boundary faces unclassifiable** —
+   `_model_projection_boundary_surface_faces!` routed every non-planar
+   patch through the planar PSLG/area path. A ruled surface bounded by
+   curved wires (e.g. revolution laterals such as Surface 13) generated a
+   polar-quad sheet while the volume boundary used chord-based QuadTri
+   faces, so `model_to_mixed` reported
+   `boundary Surface[13] has no volume-cell faces`. Surfaces with
+   `_surface_type in (:ruled,:tric)` and a genuinely curved wire
+   (`_model_surface_curved_wire`) now route through the new
+   `_model_curved_boundary_surface_faces!` transport: generated cells are
+   registered by actual row arity (`size(block.nodes,1)` — the earlier
+   probe's `Int(block.msh)` confused MSH codes with arity), volume
+   boundary faces are matched by normalized face keys, and quadrilateral
+   faces split into two generated triangles via
+   `_CURVED_BOUNDARY_QUAD_HALVES`. `model_to_mixed` also now audits only
+   stored boundary-curve endpoints for on-surface-ness on non-planar ruled
+   patches — construction-aid control points (Circle centers) legitimately
+   sit off the patch (was `Point[26] is not on Surface[17]`).
+
+5. **MixedMesh volume certification fanned shared warped quads** —
+   `_model_mesh_volume` summed per-cell corner fans; two cells sharing a
+   warped quadrilateral fan it on opposite diagonals, so interior
+   contributions never cancel and explicit-volume semantics drifted. The
+   measure is now the divergence sum over the cell complex's boundary
+   faces, each stored once in outward cyclic order (reversing the
+   incidence slots `_volume_cell_signed_volume` negates), which also
+   reproduces the emitted surface winding's own diagonal split.
+
+6. **Source-sweep replay ignored the retained product** —
+   `_extrude_volume_sweep` always remeshed the source; upstream
+   `extrudeMesh` reads the mesh the source GFace currently carries
+   (`from->mesh_vertices`). `_mesh_input===nothing` now falls back to
+   `m.meshing.mesh_authority`, so `mesh_model_volume` on a generated model
+   reproduces the pass's column order bitwise and
+   `direct.coords == volume.coords` holds.
+
+**Stale pins updated** (`n=2,layers=2,laterals=true`): counts/bbox/topology
+unchanged (31 nodes, 21 blocks, 84 cells, unit bbox); clean HEAD
+`b2650db`/`b507027` reproduces the new SHAs, so only the ordering
+fingerprint moved. mesh SHA →
+`f357daac81da0b8e7a29fb67bdf5052690561edfb5e6ac0199b25f37aaada86e`,
+volume SHA → `b12d047c13c133ae3a86a283a1b22d82624c9bfbd5c9607bac83551fcfcde4b3`.
+
+**Oracle** (Gmsh 4.15.2, `C:/tmp/qt_oracle/case.msh`): same case meshed to
+31 nodes / 92 elements with matching per-surface cell inventory
+(5 surfaces × 4 quads + top 8 tris + volume tets/hexes) — topology and
+counts agree; element/node ordering is implementation-specific.
+
+**Receipts** (`--compile=min -O0`, Julia 1.12.7):
+`geo_quadtri_extrude_test.jl` → **332 pass / 0 fail** after pin update
+(before: 332/2, the two stale SHAs only; closed-revolution set 174/174,
+fixed-column revolutions 16/16, graded transforms 38/38, shared laterals
+21/21). Closed-revolution pinned node counts hold for all combos:
+stages=(1,3) 90/82, stages=(1,2,3,4) 106/90 (laterals false/true).
+Direct `mesh_model_volume` coords equal API volume coords; all four
+staged regions measure 2.121320343559642(4|3) vs expected.
+Regression suites (`--compile=min -O0`, working tree incl. sibling WIP):
+`geo_extrude_test.jl` exit 0 (all 495 asserts pass),
+`extrude_nonew_shared_lateral_test.jl` exit 0 (108/108),
+`geo_extrude_boundarylayer_test.jl` exit 0 (all 204 asserts pass).
+
+**Not claimed**: full P1–P6 parity; the in-flight sibling boundary-layer
+(`_extrude_bl_seed_*`, `_mesh1d_options` threading, `_geo_surface_generatrices`
+holed-wire traversal) and torus/STATUS drafts remain uncommitted and are
+not part of this increment.

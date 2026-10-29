@@ -1996,9 +1996,16 @@ function _extrude_volume_sweep(m::GeoModel,t::Int,params::_GeoExtrudeParams,
                                spec,src_signed::Int,caller::AbstractString;_mesh_input=nothing,
                                _record_cell_events=false)
     src=abs(src_signed)
+    # Replaying an already-meshed model sweeps the retained actual Source
+    # product — upstream `extrudeMesh` reads `from->mesh_vertices`, the
+    # mesh the source GFace currently carries — so a `mesh_model_volume`
+    # on a generated model reproduces the pass's column order bitwise.
+    # When no product is retained this falls through to a fresh mesh, the
+    # same as an explicit `_mesh_input` miss.
+    input=_mesh_input===nothing ? m.meshing.mesh_authority : _mesh_input
     srcmesh=spec isa NamedTuple && get(spec,:bl3d,false) ?
-        _extrude_bl_srcmesh(m,src;_mesh_input=_mesh_input) :
-        mesh_model_surface(m,src;_mesh_input,_boundary_regrade=false)
+        _extrude_bl_srcmesh(m,src;_mesh_input=input) :
+        mesh_model_surface(m,src;_mesh_input=input,_boundary_regrade=false)
     ensured=_extrude_bl_ensure_srcmesh!(m,3,t,caller,srcmesh)
     ensured===nothing || (spec=ensured)
     us=_extrude_level_us(params)
