@@ -46,12 +46,20 @@ end
 function _higher_hybrid_product_snapshot(production,tag,input,m,caller)
     production.input===input && validate(production.mesh).ok || throw(ArgumentError(
         "$caller: hybrid publication has a foreign or invalid Region product"))
+    # The embedded witnesses pass through verbatim so `isequal` binds their
+    # identity while the constructor input re-runs every source certificate
+    # (including the pooled multi-Region receipt branch) against the current
+    # authority.
     current=Model._model_native_hybrid_constructor_input(input,production.constructor.boundaries,
-        production.constructor.node_uids,production.constructor.coordinates,caller)
+        production.constructor.node_uids,production.constructor.coordinates,caller;
+        embedded_point=production.constructor.embedded_point,
+        embedded_curve=production.constructor.embedded_curve,
+        embedded_surface=production.constructor.embedded_surface,
+        embedded_constraints=production.constructor.embedded_constraints)
     isequal(current,production.constructor) || throw(ArgumentError(
         "$caller: hybrid publication changed its current owned constructor presentation"))
     Model._model_native_hybrid_volume_certificate(production.mesh,production.boundary_node_tags,
-        production.constructor,caller)
+        production.constructor,caller;embedded_pool=production.embedded_pool)
     ids=production.boundary_node_tags
     length(ids)==nnodes(production.mesh) && allunique(ids) && all(!iszero,ids) ||
         throw(ArgumentError("$caller: hybrid publication lacks complete product node UIDs"))
@@ -97,6 +105,16 @@ function _higher_native_hybrid_batch_receipt(assembly,m,batch,input,regions,call
             "$caller: hybrid Region product loses the final operation factory clocks"))
         record=_higher_hybrid_product_snapshot(production,tag,input,m,caller)
         closure=Model._model_mesh_projection_closure(m,3,tag,caller)
+        # A joint embedded pool can serve a neighbor-declared entity to this
+        # Region: the shared interface sub-facets bind that entity's actual
+        # nodes on both sides, so its node owners join the consumed closure.
+        pool=production.embedded_pool
+        if pool!==nothing
+            served=Set(get(pool.region_records,tag,UInt64[]))
+            for entry in pool.records
+                entry.uid in served && push!(closure,entry.node_owner)
+            end
+        end
         for (row,uid) in enumerate(record.uids)
             node=get(source,uid,nothing)
             if node===nothing

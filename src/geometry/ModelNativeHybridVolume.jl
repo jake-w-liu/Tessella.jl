@@ -8,6 +8,7 @@ struct _ModelNativeHybridVolumeProduction
     input::_ModelMeshAuthority
     constructor::NamedTuple
     registration_rows::Vector{Int32}
+    embedded_pool::Union{Nothing,_ModelNativeHybridEmbeddedComponentInput}
 end
 
 # Successful insertion registers its MVertices before split-Quad recovery
@@ -43,7 +44,14 @@ function _model_native_hybrid_registration_rows(constructor,plan,insertion,node_
     return Int32[positions[uid] for uid in registered]
 end
 
-function _model_native_hybrid_volume_input(m,tag,input,caller)
+# `embedded_pool` supplies the connected component's deduplicated embedded
+# inventory: the Region's own strict-interior assignment enters its Source and
+# embedded certificates, while interface entities stay joint pool constraints.
+# `_deferred_embeds` is the batch-dispatch probe mode: `Embedded{}` inventories
+# are deferred to the joint pool validation, so a Region declaring an entity
+# contained by a neighbor still reports its batchable boundary constructor.
+function _model_native_hybrid_volume_input(m,tag,input,caller;embedded_pool=nothing,
+                                           _deferred_embeds::Bool=false)
     input isa _ModelMeshAuthority && input.mesh!==nothing || return nothing
     boundaries=_model_volume_boundary_surfaces(m,tag,caller)
     isempty(boundaries) && return nothing
@@ -62,13 +70,27 @@ function _model_native_hybrid_volume_input(m,tag,input,caller)
         end
     end
     quads || return nothing
-    embedded_point=_model_native_hybrid_embedded_point_input(m,tag,input,caller)
+    embedded_point=nothing;embedded_curve=nothing;embedded_surface=nothing
+    embedded_constraints=nothing
+    if embedded_pool!==nothing
+        (embedded_point,embedded_curve,embedded_surface,embedded_constraints)=
+            _model_native_hybrid_pool_region_fields(embedded_pool,tag,caller)
+        for witness in (embedded_point,embedded_curve,embedded_surface,embedded_constraints)
+            witness===nothing && continue
+            union!(used,(record.uid for record in
+                (witness isa _ModelNativeHybridEmbeddedPointInput ? (witness.record,) :
+                 witness.records)))
+        end
+        union!(used,get(embedded_pool.region_records,tag,UInt64[]))
+    elseif !_deferred_embeds
+        embedded_point=_model_native_hybrid_embedded_point_input(m,tag,input,caller)
+        embedded_curve=_model_native_hybrid_embedded_curve_input(m,tag,input,caller)
+        embedded_surface=_model_native_hybrid_embedded_surface_input(m,tag,input,caller)
+        embedded_constraints=_model_native_hybrid_embedded_constraints_input(m,tag,input,caller)
+    end
     embedded_point===nothing || push!(used,embedded_point.record.uid)
-    embedded_curve=_model_native_hybrid_embedded_curve_input(m,tag,input,caller)
     embedded_curve===nothing || union!(used,(record.uid for record in embedded_curve.records))
-    embedded_surface=_model_native_hybrid_embedded_surface_input(m,tag,input,caller)
     embedded_surface===nothing || union!(used,(record.uid for record in embedded_surface.records))
-    embedded_constraints=_model_native_hybrid_embedded_constraints_input(m,tag,input,caller)
     embedded_constraints===nothing || union!(used,(record.uid for record in embedded_constraints.records))
     # Only actual selected lower cell incidence enters the native Source.
     # Unreferenced lower rows remain global.
@@ -262,7 +284,8 @@ function _model_native_hybrid_volume_production(m,tag,constructor,options,births
     return _ModelNativeHybridVolumeProduction(mixed,copy(work.node_tags),work.node_high_water,
         work.temporary_elements,vcat(work.element_tags,pyramids.element_tags),work.element_high_water,
         constructor.input,constructor,
-        _model_native_hybrid_registration_rows(constructor,plan,insertion,work.node_tags,caller))
+        _model_native_hybrid_registration_rows(constructor,plan,insertion,work.node_tags,caller),
+        nothing)
 end
 
 # Native boundary reconstruction creates the actual GFace Tri vectors first,
@@ -338,7 +361,8 @@ function _model_native_hybrid_global_triangles(m,input,caller;surface_witnesses=
     return triangles
 end
 
-function _model_native_hybrid_volume_certificate(mesh,node_uids,constructor,caller)
+function _model_native_hybrid_volume_certificate(mesh,node_uids,constructor,caller;
+                                                 embedded_pool=nothing)
     constructor.input isa _ModelMeshAuthority && length(node_uids)==nnodes(mesh) &&
         allunique(node_uids) && all(!iszero,node_uids) || throw(ArgumentError(
         "$caller: hybrid Volume lacks complete operation-owned current UID rows"))
@@ -353,13 +377,30 @@ function _model_native_hybrid_volume_certificate(mesh,node_uids,constructor,call
     end
     all(count->count<=2,values(counts)) || throw(ArgumentError(
         "$caller: hybrid Volume has non-manifold typed face incidence"))
-    wanted=Set{Tuple}()
+    splits=embedded_pool===nothing ? nothing : embedded_pool.splits
+    wanted=Set{Tuple}();emitted=Set{Int}()
     for face in vcat(constructor.triangles,constructor.quads)
-        all(uid->haskey(positions,uid),face.nodes) || throw(ArgumentError(
-            "$caller: hybrid Volume omits an actual Surface constructor vertex"))
-        key=Tuple(sort!(Int32[positions[uid] for uid in face.nodes]))
-        key in wanted && throw(ArgumentError("$caller: hybrid Source repeats a typed shell panel"))
-        push!(wanted,key)
+        # A shared Face retriangulated at embedded interface records is
+        # replaced by its certified sub-facets in both neighbor Regions'
+        # wanted shells; the Face's literal panels drop out exactly once.
+        face_tag=Int(face.owner[2])
+        subs=splits===nothing ? nothing : get(splits,face_tag,nothing)
+        if subs===nothing
+            all(uid->haskey(positions,uid),face.nodes) || throw(ArgumentError(
+                "$caller: hybrid Volume omits an actual Surface constructor vertex"))
+            key=Tuple(sort!(Int32[positions[uid] for uid in face.nodes]))
+            key in wanted && throw(ArgumentError("$caller: hybrid Source repeats a typed shell panel"))
+            push!(wanted,key)
+        elseif !(face_tag in emitted)
+            push!(emitted,face_tag)
+            for sub in subs
+                all(uid->haskey(positions,uid),sub) || throw(ArgumentError(
+                    "$caller: hybrid Volume omits an embedded interface constructor vertex"))
+                key=Tuple(sort!(Int32[positions[uid] for uid in sub]))
+                key in wanted && throw(ArgumentError("$caller: hybrid Source repeats a typed shell panel"))
+                push!(wanted,key)
+            end
+        end
     end
     boundary=Set(face for (face,count) in counts if count==1)
     boundary==wanted || throw(ArgumentError(

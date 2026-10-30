@@ -383,7 +383,7 @@ function _higher_append_part!(assembly,m,mesh,class,dimension,tag,discarded;
             source_row_order==production.registration_rows && length(source_row_order)==nnodes(mesh) &&
             allunique(source_row_order) && all(row->0<row<=nnodes(mesh),source_row_order) ||
             throw(ArgumentError("$(assembly.caller): foreign or incomplete hybrid producer registration receipt"))
-        Model._model_native_hybrid_volume_certificate(mesh,source_row_tags,production.constructor,assembly.caller)
+        Model._model_native_hybrid_volume_certificate(mesh,source_row_tags,production.constructor,assembly.caller;embedded_pool=production.embedded_pool)
     end
     if source_batch_receipt!==nothing
         source_binding===nothing && source_emission===nothing &&
@@ -2371,8 +2371,11 @@ function _higher_hybrid_volume_input_classification(assembly,m,production,input,
     mesh=production.mesh;source_tags=production.boundary_node_tags
     constructor=production.constructor
     Model._model_native_hybrid_constructor_input(input,constructor.boundaries,
-        constructor.node_uids,constructor.coordinates,caller;embedded_point=constructor.embedded_point)
-    Model._model_native_hybrid_volume_certificate(mesh,source_tags,constructor,caller)
+        constructor.node_uids,constructor.coordinates,caller;embedded_point=constructor.embedded_point,
+        embedded_curve=constructor.embedded_curve,embedded_surface=constructor.embedded_surface,
+        embedded_constraints=constructor.embedded_constraints)
+    Model._model_native_hybrid_volume_certificate(mesh,source_tags,constructor,caller;
+        embedded_pool=production.embedded_pool)
     Model._model_native_hybrid_embedded_point_certificate(mesh,source_tags,constructor,caller)
     length(source_tags)==nnodes(mesh) && allunique(source_tags) && all(!iszero,source_tags) ||
         throw(ArgumentError("$caller: hybrid Volume lacks complete current UID rows"))
@@ -2380,6 +2383,34 @@ function _higher_hybrid_volume_input_classification(assembly,m,production,input,
     rows=Dict(uid=>Int32(row) for (row,uid) in enumerate(source_tags))
     old_rows=Dict(uid=>Int32(row) for (row,uid) in enumerate(data.external_node_tags))
     closure=Model._model_mesh_projection_closure(m,3,tag,caller)
+    # A joint embedded pool can serve a neighbor-declared entity to this
+    # Region (shared interface sub-facets bind its nodes on both sides); its
+    # served record node owners join the closure, and a pooled entity's lower
+    # cells outside the served set drop instead of demanding local incidence.
+    pool=production.embedded_pool
+    pool_entities=Set{Tuple{Int,Int32}}()
+    if pool!==nothing
+        served=Set(get(pool.region_records,tag,UInt64[]))
+        for entry in pool.records
+            entry.uid in served && push!(closure,entry.node_owner)
+        end
+        # A pooled entity contributes its complete lower product once: where
+        # the pool serves it to another Region its cells drop here, and so do
+        # the cells of its lower boundary wire (an embedded sheet's Curves and
+        # Points have no served vertices in this Region either).
+        pending=NTuple{2,Int}[entity for entity in pool.inventory]
+        while !isempty(pending)
+            owner=pop!(pending);owner[1]<1 && continue
+            key=(owner[1],Int32(owner[2]))
+            key in pool_entities && continue
+            push!(pool_entities,key)
+            haskey(data.entities,key) ||
+                throw(ArgumentError("$caller: hybrid embedded pool declares a foreign lower entity"))
+            for child in data.entities[key].boundaries
+                push!(pending,(owner[1]-1,Int(abs(child))))
+            end
+        end
+    end
     primary=(3,Int32(tag));node_entities=fill(primary,nnodes(mesh))
     parameters=Union{Nothing,Vector{Float64}}[nothing for _ in 1:nnodes(mesh)]
     for (row,uid) in enumerate(source_tags)
@@ -2413,7 +2444,7 @@ function _higher_hybrid_volume_input_classification(assembly,m,production,input,
                 uid=data.external_node_tags[product.rows[block.nodes[slot,column]]]
                 row=get(rows,uid,Int32(0));mapped[slot,column]=row
                 if row==0
-                    owner[1]==0 || throw(ArgumentError(
+                    owner[1]==0 || owner in pool_entities || throw(ArgumentError(
                         "$caller: hybrid Volume omits an actual lower cell vertex $uid"))
                     keep[column]=false
                 end

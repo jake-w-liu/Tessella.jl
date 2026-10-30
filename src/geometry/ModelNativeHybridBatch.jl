@@ -60,7 +60,8 @@ function _model_native_hybrid_batch_periodic_certificate(m,receipt,pairs,optimiz
                 get(receipt.face_regions,master,Int[])==[tag] || throw(ArgumentError(
                 "$caller: periodic hybrid Faces must be uniquely owned exterior boundaries of their selected Region"))
         end
-        constructor=_model_native_hybrid_volume_input(m,tag,receipt.input,caller)
+        constructor=_model_native_hybrid_volume_input(m,tag,receipt.input,caller;
+            embedded_pool=receipt.embedded)
         constructor!==nothing || throw(ArgumentError(
             "$caller: periodic hybrid batch Region lacks its actual lower constructor"))
         _model_native_hybrid_periodic_boundary_certificate(m,tag,constructor,pairs,caller)
@@ -89,10 +90,16 @@ function _model_native_hybrid_batch_production(m,regions,input,options,births,ca
     # Mesh.OptimizeNetgen skips hybrid regions upstream; `hybrid=true` in the
     # deferred optimizer call keeps that skip instead of failing.
     groups,receipts=_model_native_hybrid_groups(m,regions,input,caller)
-    _model_native_hybrid_global_triangles(m,input,caller)
-    _model_native_hybrid_global_size_seeds(m,input,caller)
+    surface_witnesses=Tuple(witness for receipt in receipts
+        if receipt.embedded!==nothing for witness in receipt.embedded.surfaces)
+    _model_native_hybrid_global_triangles(m,input,caller;surface_witnesses)
+    _model_native_hybrid_global_size_seeds(m,input,caller;surface_witnesses)
     for receipt in receipts,tag in receipt.regions
-        m.meshing.algorithm_3d==1 && isempty(get(m.embeds,(3,tag),NTuple{2,Int}[])) &&
+        # `Embedded{}` inventories are admitted by the joint pool certificate
+        # each component receipt already ran above; remaining rejects name the
+        # concrete uncertifiable incidence (owner bound, non-node crossing,
+        # overlapping sheet, outer-shell or missing-product case).
+        m.meshing.algorithm_3d==1 &&
             !get(m.meshing.reverse,(3,tag),false) && get(m.meshing.smoothing,(3,tag),0)==0 || throw(ArgumentError(
                 "$caller: hybrid batch has unsupported selected Region planner attributes"))
     end
@@ -116,6 +123,7 @@ function _model_native_hybrid_batch_production(m,regions,input,options,births,ca
         node_clock=group.node_high_water;element_clock=group.element_high_water
     end
     tags=sort!(Int.(collect(regions)))
+    pools=Dict(tag=>receipt.embedded for receipt in receipts for tag in receipt.regions)
     # Native default optimization follows construction of every selected
     # component, including all Pyramid births. Each Region then consumes the
     # same continuing global element factory in declared Region order.
@@ -136,14 +144,23 @@ function _model_native_hybrid_batch_production(m,regions,input,options,births,ca
         optimize_pyramids<0.0 && _model_native_hybrid_normal_apex_fixed_certificate(
             plans[tag],mixed,product.boundary_node_tags,caller)
         validate(mixed).ok || throw(ArgumentError("$caller: hybrid batch produces invalid typed cells"))
-        _model_native_hybrid_volume_certificate(mixed,product.boundary_node_tags,product.constructor,caller)
+        _model_native_hybrid_volume_certificate(mixed,product.boundary_node_tags,
+            product.constructor,caller;embedded_pool=pools[tag])
+        _model_native_hybrid_embedded_point_certificate(mixed,product.boundary_node_tags,
+            product.constructor,caller)
+        _model_native_hybrid_embedded_curve_certificate(mixed,product.boundary_node_tags,
+            product.constructor,caller)
+        _model_native_hybrid_embedded_surface_certificate(mixed,product.boundary_node_tags,
+            product.constructor,caller)
+        _model_native_hybrid_embedded_constraints_certificate(mixed,product.boundary_node_tags,
+            product.constructor,caller)
         _model_native_hybrid_periodic_boundary_certificate(m,tag,product.constructor,periodic_surface_pairs,caller)
         geometry=_model_explicit_volume_geometry(m,tag,caller;_mesh_input=input,_mesh1d_options=options)
         _model_certify_explicit_volume_semantics(mixed,tag,geometry.expected_volume,
             geometry.comparison_scale,caller)
         products[tag]=_ModelNativeHybridVolumeProduction(mixed,copy(product.boundary_node_tags),node_clock,
             product.temporary_elements,vcat(work.element_tags,product.element_tags[size(tet.nodes,2)+1:end]),
-            element_clock,input,product.constructor,copy(product.registration_rows))
+            element_clock,input,product.constructor,copy(product.registration_rows),pools[tag])
     end
     # The operation publishes its final aggregate clocks on every product;
     # each retained UID still belongs to its explicit Region product once.
@@ -151,7 +168,7 @@ function _model_native_hybrid_batch_production(m,regions,input,options,births,ca
         product=products[tag]
         products[tag]=_ModelNativeHybridVolumeProduction(product.mesh,product.boundary_node_tags,
             node_clock,product.temporary_elements,product.element_tags,element_clock,input,product.constructor,
-            copy(product.registration_rows))
+            copy(product.registration_rows),pools[tag])
     end
     return _ModelNativeHybridBatchProduction(input,tags,groups,products,node_clock,element_clock,options.random_state[])
 end

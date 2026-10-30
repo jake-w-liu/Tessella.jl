@@ -43,11 +43,13 @@ function _model_native_hybrid_global_size_seeds(m,input,caller;surface_witnesses
     entities=Set{Tuple{Int,Int}}()
     for region in sort!(collect(keys(m.volumes))),entity in get(m.embeds,(3,region),NTuple{2,Int}[])
         if entity[1]==2
+            entity in entities && continue
             witnesses=_ModelNativeHybridEmbeddedSurfaceInput[witness for witness in surface_witnesses
                 if witness isa _ModelNativeHybridEmbeddedSurfaceInput && witness.model===m &&
-                    witness.region==region && witness.surface==entity[2]]
+                    witness.surface==entity[2]]
             length(witnesses)==1 || throw(ArgumentError(
                 "$caller: hybrid embedded Face recovery requires a separate native constructor receipt"))
+            push!(entities,entity)
             embedded_surface=only(witnesses)
             _model_native_hybrid_surface_source_certificate(embedded_surface,input,
                 data.external_node_tags,actual.coords,caller)

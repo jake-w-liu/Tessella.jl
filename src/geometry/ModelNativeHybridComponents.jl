@@ -1,11 +1,15 @@
 # Connected Region recovery binds actual lower Face closures and keeps their
 # declared Region ownership through shared-panel partitioning and publication.
+# `embedded` carries the deduplicated joint embedded pool whenever any member
+# Region declares `Embedded{}` entities (see the pool section of
+# ModelNativeHybridEmbeddedConstraints.jl); `nothing` when no member embeds.
 struct _ModelNativeHybridComponentReceipt
     input::_ModelMeshAuthority
     regions::Vector{Int}
     boundaries::Dict{Int,Vector{Int}}
     face_regions::Dict{Int,Vector{Int}}
     constructor::NamedTuple
+    embedded::Union{Nothing,_ModelNativeHybridEmbeddedComponentInput}
 end
 
 struct _ModelNativeHybridRecoveryReceipt
@@ -104,12 +108,20 @@ function _model_native_hybrid_component_receipt(m,region_tags,input,caller)
             for row in block.nodes;push!(used,data.external_node_tags[product.rows[row]]);end
         end
     end
+    # The joint embedded pool is built in two phases: witnesses supply their
+    # actual node UIDs to the shared Source before the constructor exists;
+    # record classification then runs against the finished constructor's
+    # literal panels (see ModelNativeHybridEmbeddedConstraints.jl).
+    pool_witnesses=_model_native_hybrid_embedded_pool_witnesses(m,tags,input,caller)
+    pool_witnesses===nothing || union!(used,pool_witnesses.uids)
     ids=sort!(collect(used));positions=Dict(uid=>Int32(row) for (row,uid) in enumerate(data.external_node_tags))
     all(uid->haskey(positions,uid),ids) || throw(ArgumentError(
         "$caller: connected hybrid Face incidence omits an actual current node UID"))
     coordinates=actual.coords[:,Int32[positions[uid] for uid in ids]]
     constructor=_model_native_hybrid_constructor_input(input,faces,ids,coordinates,caller)
-    return _ModelNativeHybridComponentReceipt(input,tags,boundaries,face_regions,constructor)
+    embedded=_model_native_hybrid_embedded_component_input(m,tags,input,boundaries,
+        face_regions,constructor,caller;witnesses=pool_witnesses)
+    return _ModelNativeHybridComponentReceipt(input,tags,boundaries,face_regions,constructor,embedded)
 end
 
 function _model_native_hybrid_component_facets(receipt,plan,caller)
@@ -118,6 +130,7 @@ function _model_native_hybrid_component_facets(receipt,plan,caller)
         "$caller: connected hybrid facet receipt changes its owned constructor"))
     positions=Dict(uid=>Int32(row) for (row,uid) in enumerate(plan.node_uids))
     facets=Dict{NTuple{3,Int32},Tuple{Int,UInt64}}()
+    pool=receipt.embedded
     function add(rows,owner,uid)
         key=Tuple(sort!(Int32[rows...]))
         haskey(facets,key) && throw(ArgumentError(
@@ -126,8 +139,21 @@ function _model_native_hybrid_component_facets(receipt,plan,caller)
             "$caller: connected hybrid panel has a foreign Face owner"))
         facets[key]=(owner,uid)
     end
+    emitted=Set{Int}()
     for triangle in receipt.constructor.triangles
-        add(ntuple(slot->positions[triangle.nodes[slot]],3),Int(triangle.owner[2]),triangle.uid)
+        face=Int(triangle.owner[2])
+        subs=pool===nothing ? nothing : get(pool.splits,face,nothing)
+        if subs===nothing
+            add(ntuple(slot->positions[triangle.nodes[slot]],3),face,triangle.uid)
+        elseif !(face in emitted)
+            # A certified whole-Face split keeps the shared Face owner on every
+            # published sub-facet; provenance records the Face's first literal
+            # panel UID since sub-facets no longer descend from one cell.
+            push!(emitted,face)
+            for sub in subs
+                add(ntuple(slot->positions[sub[slot]],3),face,triangle.uid)
+            end
+        end
     end
     for birth in plan.births,side in 1:4
         add((birth.base_rows[side],birth.base_rows[mod1(side+1,4)],birth.apex_row),
@@ -213,6 +239,8 @@ function _model_native_hybrid_component_recovery_receipt(component,plan,order,ke
         "$caller: hybrid recovery changes its initial constructor row permutation"))
     panels=_model_native_hybrid_component_facets(component,plan,caller)
     facets=_model_native_hybrid_recovery_facets(plan,component.constructor,order,caller)
+    component.embedded===nothing ||
+        (facets=_model_native_hybrid_pool_split_facets(facets,component.embedded,plan,order,caller))
     inverse=invperm(order)
     multiplicities=Dict(Tuple(sort!(Int32[inverse[row] for row in panel]))=>
         length(component.face_regions[owner]) for (panel,(owner,uid)) in panels)
@@ -255,16 +283,26 @@ function _model_native_hybrid_connected_production(m,component,options,births,ca
     isfinite(optimize_pyramids) || throw(ArgumentError("$caller: hybrid Pyramid setting must be finite"))
     fresh=_model_native_hybrid_component_receipt(m,component.regions,component.input,caller)
     fresh.boundaries==component.boundaries && fresh.face_regions==component.face_regions &&
-        isequal(fresh.constructor,component.constructor) || throw(ArgumentError(
+        isequal(fresh.constructor,component.constructor) &&
+        _model_native_hybrid_pool_equal(fresh.embedded,component.embedded) || throw(ArgumentError(
         "$caller: hybrid connected production changes its current declared Region or lower constructor receipt"))
     for tag in component.regions
-        isempty(get(m.embeds,(3,tag),NTuple{2,Int}[])) &&
-            !get(m.meshing.reverse,(3,tag),false) && get(m.meshing.smoothing,(3,tag),0)==0 || throw(ArgumentError(
+        !get(m.meshing.reverse,(3,tag),false) && get(m.meshing.smoothing,(3,tag),0)==0 ||
+            throw(ArgumentError(
                 "$caller: hybrid connected production has unsupported current Region planner attributes"))
     end
+    pool=component.embedded
+    # The joint embedded pool supplies per-Region constructor fields; the
+    # normal-apex Pyramid relocation tier keeps its own Region-local Source
+    # projection and stays a loud specific reject for embedded batches.
+    (pool===nothing || optimize_pyramids>=0.0) || throw(ArgumentError(
+        "$caller: hybrid embedded batch requires nonnegative Pyramid optimization"))
     _model_native_hybrid_batch_periodic_certificate(m,component,periodic_surface_pairs,optimize_pyramids,caller)
-    triangles=_model_native_hybrid_global_triangles(m,component.input,caller)
-    seeds=_model_native_hybrid_global_size_seeds(m,component.input,caller)
+    surface_witnesses=pool===nothing ? () : Tuple(pool.surfaces)
+    triangles=_model_native_hybrid_global_triangles(m,component.input,caller;
+        surface_witnesses)
+    seeds=_model_native_hybrid_global_size_seeds(m,component.input,caller;
+        surface_witnesses)
     constructor=component.constructor
     work=_ModelNativeVolumeBirths(births.node_high_water,births.element_high_water)
     plan=_model_native_hybrid_quad_plan(constructor.node_uids,constructor.coordinates,
@@ -282,8 +320,18 @@ function _model_native_hybrid_connected_production(m,component,options,births,ca
     _model_native_initial_delaunay_fill(Mesh(plan.coordinates;tris=plan.fan_facets),order,
         options,caller;births=work,kernel_output=kernel)
     facets=_model_native_hybrid_recovery_facets(plan,constructor,order,caller)
+    embedded_segments=NTuple{2,Int32}[];embedded_facets=NTuple{3,Int32}[]
+    if pool!==nothing
+        # Shared interface panels carrying on-panel records are replaced by
+        # their certified CDT sub-facets; strictly-interior segments and sheet
+        # facets join the recovery as protected interior constraints.
+        facets=_model_native_hybrid_pool_split_facets(facets,pool,plan,order,caller)
+        embedded_segments,embedded_facets=
+            _model_native_hybrid_pool_kernel_constraints(pool,plan.node_uids,order,caller)
+    end
     recovery=_model_native_hybrid_component_recovery_receipt(component,plan,order,kernel[],caller)
-    initial=ModelNativeHybridInterior.recover(kernel[],facets;component=recovery)
+    initial=ModelNativeHybridInterior.recover(kernel[],facets;component=recovery,
+        embedded_segments=embedded_segments,embedded_facets=embedded_facets)
     mesh=Mesh(plan.coordinates;tets=reduce(hcat,Int32[order[row] for row in cell] for cell in initial.cells))
     _model_native_volume_cell_births!(work,mesh)
     owners=_model_native_hybrid_component_partition(mesh,plan.node_uids,work.element_tags,component,plan,caller)
@@ -333,15 +381,23 @@ function _model_native_hybrid_connected_production(m,component,options,births,ca
             ElementBlock(7,inverse[pyramids.nodes[:,pyramid_columns]])]
         mixed=MixedMesh(relocated.coords[:,selected],blocks)
         node_uids=insertion.node_numbers[selected]
-        region_constructor=_model_native_hybrid_volume_input(m,tag,component.input,caller)
+        region_constructor=_model_native_hybrid_volume_input(m,tag,component.input,caller;
+            embedded_pool=pool)
         region_constructor!==nothing || throw(ArgumentError("$caller: hybrid connected Region loses its current lower constructor"))
-        _model_native_hybrid_volume_certificate(mixed,node_uids,region_constructor,caller)
+        _model_native_hybrid_volume_certificate(mixed,node_uids,region_constructor,caller;
+            embedded_pool=pool)
+        _model_native_hybrid_embedded_point_certificate(mixed,node_uids,region_constructor,caller)
+        _model_native_hybrid_embedded_curve_certificate(mixed,node_uids,region_constructor,caller)
+        _model_native_hybrid_embedded_surface_certificate(mixed,node_uids,region_constructor,caller)
+        _model_native_hybrid_embedded_constraints_certificate(mixed,node_uids,region_constructor,caller)
         _model_native_hybrid_periodic_boundary_certificate(m,tag,region_constructor,periodic_surface_pairs,caller)
         products[tag]=_ModelNativeHybridVolumeProduction(mixed,node_uids,insertion.node_high_water,
             work.temporary_elements,vcat(insertion.element_numbers[tet_columns],pyramids.element_tags[pyramid_columns]),
             pyramids.element_high_water,component.input,region_constructor,
-            _model_native_hybrid_registration_rows(region_constructor,plan,insertion,node_uids,caller))
+            _model_native_hybrid_registration_rows(region_constructor,plan,insertion,node_uids,caller),
+            pool)
     end
+    pool===nothing || _model_native_hybrid_embedded_pool_certificate(products,pool,caller)
     return (input=component.input,component=component,plan=plan,normal_plans=normal_plans,products=products,
         node_high_water=insertion.node_high_water,element_high_water=pyramids.element_high_water,
         random_state=options.random_state[])

@@ -11940,3 +11940,126 @@ out of scope; the bounded suite does not prove complete Gmsh parity.
 Unrelated uncommitted WIP in `ModelNativeHybrid*`/`APIHybridBatchPublication`
 and the embedded-pool hunks of `APIGenerateHigher.jl` preserved and not
 included in this work.
+
+## 2026-10-30 — EMB01: multi-Region embedded composition in the native hybrid batch planner (Devin subagent)
+
+**Scope.** `Embedded{}`/`X In Volume{…}` and `X In Surface{…}` composition
+across Region boundaries in the connected hybrid batch planner: two unit
+cubes sharing the x=1 interface Face (Surface Loop orientation `+4`/`-4`)
+were audited against the Gmsh 4.15.2 oracle and the certified subset
+implemented natively.
+
+**Oracle-audited semantics.** The same entity declared on two Regions is
+deduplicated once and lands in the strictly-containing Region (interior
+Point: 449 nodes/730+717 Tets whether declared on Volume 1, Volume 2, or
+both; interior Curve: 451/733+717 for one or two declarations). Records
+lying on a shared interface panel serve both neighbors (interface Point:
+450 nodes; Curve ending on the interface: 451; Curve on the interface:
+453; `Point In Surface{shared}`: 445/715+712; `Curve In Surface{shared}`:
+453/737+722). Upstream tolerates interface records by remeshing only the
+absorbing side, producing a nonconforming interface; the native tier
+performs a conforming split of the whole shared Face so the node/segment
+binds both neighbor products — node parity is exact, tet partition counts
+can differ legitimately. Upstream itself fails with no volume output on
+a Curve crossing the boundary at a non-node point (`f_curve_cross_*`,
+`g_curve_cross_both`), an embedded sheet overlapping the shared Face
+(`i_surf_shared_both`, `p_surf_shared_split`), and `n_curve_touch_both`.
+
+**Implemented** (`ModelNativeHybridEmbeddedConstraints.jl`, +757):
+`_model_native_hybrid_embedded_pool_witnesses` phase one deduplicates the
+member Regions' `Embedded{}` inventory into one witness per unique entity
+(provenance Region retained), audits the upstream two-owner bound
+(`embedded <Entity> spans more than two Region owners`), and supplies
+actual node UIDs to the shared Source before the constructor exists.
+`_model_native_hybrid_embedded_component_input` phase two classifies every
+record against the finished constructor's literal panels — strict-interior
+nodes map to one Region (`node_regions`), on-panel nodes bind their shared
+Faces (`panel_nodes`/`panel_containers`), shell-boundary and outside
+records reject (`outside or on the hybrid batch boundary`), and a
+same-Region segment check distinguishes legitimate interior chains from
+`embedded Curve crosses a Region boundary at a non-shared-boundary point`.
+`_model_native_hybrid_pool_split_face` retriangulates each affected shared
+Face by 2-D CDT with the literal panel vertices as the point set, embedded
+on-panel nodes as free interior vertices, and certified on-panel segments
+as internal constraints; it certifies the boundary wire is unchanged, all
+literal/embedded vertices survive, and every constraint is a sub-facet
+edge. `region_records` maps each Region to its served record UIDs.
+
+**Integration.** `ModelNativeHybridComponents.jl`: component receipt
+carries the pool; shared-panel facets are replaced by certified
+sub-facets in the recovery facet list (`_model_native_hybrid_pool_split_facets`);
+interior segments and sheet facets join the kernel as protected
+constraints (`_model_native_hybrid_pool_kernel_constraints`; sheet wire
+edges stay facet-only so no duplicate-edge tripping); per-Region products
+are built with `_model_native_hybrid_volume_input(…;embedded_pool=…)` and
+run the four embedded certificates plus the joint
+`_model_native_hybrid_embedded_pool_certificate` (records live in each
+served product, interior segments are product cell edges, on-panel
+segments are shared sub-facet edges on both neighbors). `ModelNativeHybridBatch.jl`:
+the batch gate relaxes its `isempty(embeds)` clause, pooled surface
+witnesses feed global triangles/size seeds, and every Region product runs
+the embedded certificates and carries its pool. `ModelNativeHybridVolume.jl`:
+`_model_native_hybrid_volume_input` gains `embedded_pool` (per-Region pool
+fields, `region_records` into Source) and `_deferred_embeds` (batch-dispatch
+probe so a Region declaring a neighbor-contained entity still reports its
+batchable constructor); `_model_native_hybrid_volume_certificate` emits a
+split Face's sub-facets instead of its literal panels exactly once.
+`ModelNativeHybridSizing.jl`: surface-witness lookup deduplicates by
+entity tag across Regions. `APIGenerateHigher.jl`: `length(meshed)>1`
+batchability probes with `_deferred_embeds=true`; the hybrid volume
+classification pushes served record node owners into the projection
+closure and drops pooled lower cells with unserved vertices — extended to
+each pooled entity's whole lower boundary wire so an embedded sheet's
+Curves/Points drop cleanly in an unserved Region (non-pooled missing
+vertices still reject with the original message).
+`APIHybridBatchPublication.jl`: the product snapshot re-binds embedded
+constructor witnesses by identity, re-runs the pool-aware volume
+certificate, and joins served foreign node owners into the consumed
+closure. The semantic-freshness `_model_native_hybrid_pool_equal` compares
+two independently built pools by content so connected production's
+re-receipt check stays honest.
+
+**Retained loud bounds.** >2 Region owners; Curve crossing a Region
+boundary at a non-shared-boundary point; sheet overlapping/touching a
+shared panel (`overlapping facets`); embedded nodes outside or on the
+outer shell; records on nonplanar shared Faces; interface records
+coinciding with literal wire vertices; negative `Mesh.OptimizeNetgen`
+Pyramid setting under an embedded batch. `GeoExec.jl` embedded sections
+left untouched.
+
+**Receipts** (Julia 1.12.7, `--compile=min -O0`, redirected stdout; exit
+noted per file):
+
+- `test/geometry/embedded_multiregion_test.jl` (new): **98/98 pass,
+  exit 0** — 68m27.6s. Interior Points land in the containing Region
+  however declared (449 nodes, 730+717 Tets oracle-exact); interface
+  Point splits its Face conformally (450 nodes, serves both Regions);
+  interior Curve deduplicates across declarations (451/733+717
+  oracle-exact, consecutive nodes are tet edges); Curve ending on the
+  interface certified at both sides (451 nodes); Curve on the interface
+  serves both Regions (452 nodes); interior sheet deduplicates and all 4
+  emitted facets are interior/double-sided; `X In Surface{4}` shared-Face
+  declarations keep oracle node parity (445/715+712 Point, 452 Curve) and
+  deduplicate with `In Volume`; the five uncertifiable fixtures reject
+  with their specific message fragments.
+- `test/geometry/embedded_hybrid_constraints_test.jl`: **27/27 pass,
+  exit 0** — 8m37.5s.
+- `test/geometry/embedded_sheets_test.jl`: **32/33, exit 1** — the single
+  failure is `non-planar embedded sheet rejects loudly` (expected
+  `ArgumentError`, got a valid mesh). Verified pre-existing on the
+  unmodified parent HEAD: the same fixture also generates successfully
+  with this worktree's changes stashed (`-O2`, "NO EXCEPTION" on both
+  trees) — the curved `Ruled Surface` admission predates this work (the
+  earlier `67bd8db` curved-ruled-source tier made the case certifiable;
+  the test expectation is stale and the suite was already not-green
+  before this change). Left untouched for the owning thread.
+
+**Not claimed.** Multi-Region embedded composition is implemented for the
+oracle-certified subset above; the bounded suite does not prove complete
+upstream parity. Remaining gaps: >2-owner inventories, non-node boundary
+crossings, nonplanar/on-wire interface records and sheet-on-panel overlap
+stay rejected rather than admitted; upstream's nonconforming absorbing
+side is deliberately not reproduced — the native conforming split is a
+documented, better-formed difference. Scratch `_emb01_audit/` probes and
+oracle fixtures remain untracked.
+
