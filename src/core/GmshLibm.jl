@@ -176,7 +176,14 @@ function _x87_trig(r::BigFloat)
 end
 
 function _win_sincos(x::Float64)
-    _win_x87_llvm() && return _win_x87_cli_call(_win_x87_sincos,x)
+    if _win_x87_llvm()
+        try
+            return _win_x87_cli_call(_win_x87_sincos,x)
+        catch err
+            err isa InterruptException && rethrow()
+            _win_x87_native_broken!()
+        end
+    end
     ax = abs(x)
     if ax < _X87_LIM
         ax <= _X87_PI_HI/2 && return (Float64(_x87e(sin(_x87b(x)))),
@@ -193,7 +200,14 @@ end
 function _win_exp(x::Float64)
     (isnan(x) || x == Inf) && return x
     x == -Inf && return 0.0
-    _win_x87_llvm() && return _win_x87_cli_call(_win_x87_exp,x)
+    if _win_x87_llvm()
+        try
+            return _win_x87_cli_call(_win_x87_exp,x)
+        catch err
+            err isa InterruptException && rethrow()
+            _win_x87_native_broken!()
+        end
+    end
     v = _x87e(_x87b(x) * _X87_L2E[])
     vf = Float64(v)
     abs(vf) >= _X87_LIM && return vf > 0 ? Inf : 0.0
@@ -208,7 +222,14 @@ function _win_log(x::Float64)
     x < 0.0 && return NaN
     x == 0.0 && return -Inf
     x == Inf && return x
-    _win_x87_llvm() && return _win_x87_cli_call(_win_x87_log,x)
+    if _win_x87_llvm()
+        try
+            return _win_x87_cli_call(_win_x87_log,x)
+        catch err
+            err isa InterruptException && rethrow()
+            _win_x87_native_broken!()
+        end
+    end
     l2 = _x87e(log2(_x87b(x)))
     return Float64(_x87e(l2 * _X87_LN2[]))
 end
@@ -252,8 +273,13 @@ const _WIN_X87_NATIVE = Sys.iswindows() && Sys.ARCH === :x86_64
         _WIN_X87_LLVM[]=ok
         return ok
     end
+    # The serialized pkgimage can restore a stale `true` flag or hold native
+    # instances for only some kernels; a throwing native call then rescues
+    # once per site, pins the flag false, and emulation serves the process.
+    _win_x87_native_broken!()=(_WIN_X87_LLVM[]=false;nothing)
 else
     _win_x87_llvm()=false
+    _win_x87_native_broken!()=nothing
 end
 const _WIN_CLI_PRECISION_KEY = gensym(:TessellaCLIPrecision)
 
@@ -500,18 +526,24 @@ end
 
 function _win_pow(x::Float64,y::Float64)
     !_win_x87_llvm() && return _gm_pow(x,y)
-    if _win_cli_precision()
-        saved=_win_x87_control_word()
-        _win_x87_set_control_word!((saved&0xfcff)|UInt16(0x0300))
-        try
-            # This kernel contains no Julia allocation, callbacks, or yielding
-            # operations. Restore this OS thread before task scheduling resumes.
-            return _win_pow_native(x,y)
-        finally
-            _win_x87_set_control_word!(saved)
+    try
+        if _win_cli_precision()
+            saved=_win_x87_control_word()
+            _win_x87_set_control_word!((saved&0xfcff)|UInt16(0x0300))
+            try
+                # This kernel contains no Julia allocation, callbacks, or yielding
+                # operations. Restore this OS thread before task scheduling resumes.
+                return _win_pow_native(x,y)
+            finally
+                _win_x87_set_control_word!(saved)
+            end
         end
+        return _win_pow_native(x,y)
+    catch err
+        err isa InterruptException && rethrow()
+        _win_x87_native_broken!()
+        return _gm_pow(x,y)
     end
-    return _win_pow_native(x,y)
 end
 
 function _win_pow_native(x::Float64,y::Float64)
@@ -542,7 +574,14 @@ function _win_atan2(y::Float64, x::Float64)
     (isnan(y) || isnan(x)) && return y + x
     # FPATAN has fixed internal precision; its Float64 store obeys caller RC.
     # It needs no CLI precision override and leaves the stack/control word intact.
-    _win_x87_llvm() && return _win_x87_atan2(y,x)
+    if _win_x87_llvm()
+        try
+            return _win_x87_atan2(y,x)
+        catch err
+            err isa InterruptException && rethrow()
+            _win_x87_native_broken!()
+        end
+    end
     return Float64(_x87e(atan(_x87b(y), _x87b(x))))
 end
 
@@ -604,10 +643,30 @@ end
 # from system-libm. OCC rotation and other geometry-evaluation internals
 # retain their independently captured system-libm resolution.
 # ---------------------------------------------------------------------------
-@inline _gm87_sin(x::Float64) = Sys.iswindows() ?
-    (_win_x87_llvm() ? _win_x87_cli_call(_win_x87_sin,x) : _win_sincos(x)[1]) : _gm_sin(x)
-@inline _gm87_cos(x::Float64) = Sys.iswindows() ?
-    (_win_x87_llvm() ? _win_x87_cli_call(_win_x87_cos,x) : _win_sincos(x)[2]) : _gm_cos(x)
+@inline function _gm87_sin(x::Float64)
+    Sys.iswindows() || return _gm_sin(x)
+    if _win_x87_llvm()
+        try
+            return _win_x87_cli_call(_win_x87_sin,x)
+        catch err
+            err isa InterruptException && rethrow()
+            _win_x87_native_broken!()
+        end
+    end
+    return _win_sincos(x)[1]
+end
+@inline function _gm87_cos(x::Float64)
+    Sys.iswindows() || return _gm_cos(x)
+    if _win_x87_llvm()
+        try
+            return _win_x87_cli_call(_win_x87_cos,x)
+        catch err
+            err isa InterruptException && rethrow()
+            _win_x87_native_broken!()
+        end
+    end
+    return _win_sincos(x)[2]
+end
 @inline _gm87_exp(x::Float64) = Sys.iswindows() ? _win_exp(x) : _gm_exp(x)
 @inline _gm87_log(x::Float64) = Sys.iswindows() ? _win_log(x) : _gm_log(x)
 @inline _gm87_pow(x::Float64, y::Float64) =
