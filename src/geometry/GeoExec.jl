@@ -10133,12 +10133,25 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
     context.native_element_lookup_receipt=nothing
     context.native_mesh_begin_callback===nothing || context.native_mesh_begin_callback()
     caller="execute_geo: Mesh"
+    if dim>=2 && isempty(context.boundary_layer_fields) &&
+            !isempty(m.meshing.boundary_layer_fields)
+        # A cleared `BoundaryLayer Field =` selection unregisters the
+        # fields — upstream's `getBoundaryLayerFields` returns the live set.
+        empty!(m.meshing.boundary_layer_fields)
+    end
     if dim>=2 && !isempty(context.boundary_layer_fields)
-        # `BoundaryLayer Field =` selections feed the wall-extrusion pass
-        # upstream runs inside `meshGFace`/`meshGRegion`; the Tessella
-        # surface/volume meshers have no boundary-layer consumer, so the
-        # selection must reject loudly instead of silently meshing on.
+        # `BoundaryLayer Field =` selections feed the wall-offset pass
+        # upstream runs inside `meshGFace` (`Mesh2DWithBoundaryLayers`):
+        # resolve each selected BoundaryLayer field once per Mesh statement
+        # into `m.meshing.boundary_layer_fields`, and let
+        # `mesh_model_surface` grow the certified strip off each listed
+        # boundary curve before the ordinary fill covers the shrunken face.
         fields=context.fields
+        fields_mod=getfield(parentmodule(@__MODULE__),:SizeField)
+        fan_elements=_geo_signed_gmsh_int_value(something(
+            _geo_option_number(context,"Mesh",0,"BoundaryLayerFanElements"),
+            5.0),caller)
+        resolved=Dict{Int,Model._ModelBoundaryLayerField}()
         for tag in context.boundary_layer_fields
             spec=fields===nothing ? nothing : get(fields,tag,nothing)
             spec===nothing && throw(ArgumentError(
@@ -10146,10 +10159,11 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
             lowercase(spec.kind)=="boundarylayer" || throw(ArgumentError(
                 "$caller $dim: BoundaryLayer Field[$tag] has kind " *
                 "$(spec.kind), not BoundaryLayer"))
+            config=fields_mod._geo_boundary_layer_config(spec,fan_elements)
+            resolved[tag]=Model._ModelBoundaryLayerField(
+                tag,config,"$caller $dim")
         end
-        throw(ArgumentError(
-            "$caller $dim: `BoundaryLayer Field =` selects boundary-layer " *
-            "mesh generation, which is not implemented"))
+        m.meshing.boundary_layer_fields=resolved
     end
     only_empty=!iszero(something(_geo_option_number(context,"Mesh",0,"MeshOnlyEmpty"),0.0))
     actual=(context.mesh isa MixedMesh && context.mesh.entity_data!==nothing) ||

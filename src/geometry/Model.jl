@@ -267,6 +267,35 @@ const _ModelImportedEntity=NamedTuple{(:kind,:parent,:partitions),
 
 include("ModelPeriodicUIDHistory.jl")
 
+# Per-selected-field normalized record for `BoundaryLayer Field =`
+# selections (upstream `BoundaryLayerField` options after `Field.cpp` list
+# resolution). Entity tags are literal model tags; the per-face curve
+# intersection upstream computes in `setupFor2d` happens at mesh time in
+# `_model_surface_bl_specs` (`ModelBoundaryLayerField.jl`).
+struct _ModelBoundaryLayerField
+    tag::Int
+    curves::Vector{Int}
+    points::Vector{Int}
+    fan_points::Vector{Int}
+    fan_sizes::Vector{Int}
+    excluded_surfaces::Vector{Int}
+    hwall::Float64
+    sizes::Vector{Float64}
+    ratio::Float64
+    hfar::Float64
+    thickness::Float64
+    quads::Bool
+    fan_elements::Int
+    beta_law::Bool
+    beta::Float64
+    nb_layers::Int
+    intersect_metrics::Bool
+    aniso_max::Float64
+    curve_set::Set{Int}
+    fan_set::Set{Int}
+    excluded_set::Set{Int}
+end
+
 mutable struct ModelMeshingAttributes
     transfinite_curves::Dict{Int,NamedTuple{(:num_nodes,:kind,:coef,:reversed),
                                            Tuple{Int,Symbol,Float64,Bool}}}
@@ -373,6 +402,12 @@ mutable struct ModelMeshingAttributes
     # Boundary-layer `Extrude`'s `Using View[i]` indexes this list the same
     # way upstream's `PView::list[i]` does.
     post_views::Vector{Any}
+    # `BoundaryLayer Field = tag` selections — the resolved topological
+    # consumer record (`GModel::getBoundaryLayerFields`). `Mesh n≥2`
+    # installs one `_ModelBoundaryLayerField` per selected BoundaryLayer
+    # field; `mesh_model_surface` grows the certified wall strip off each
+    # listed boundary curve and refills the shrunken face.
+    boundary_layer_fields::Dict{Int,_ModelBoundaryLayerField}
 end
 
 ModelMeshingAttributes() = ModelMeshingAttributes(
@@ -424,7 +459,8 @@ ModelMeshingAttributes() = ModelMeshingAttributes(
     Dict{Tuple{Int,Int},_ModelPeriodicUIDHistory}(),
     1e33,
     Dict{Int,Tuple{Bool,Int}}(),
-    Any[])
+    Any[],
+    Dict{Int,_ModelBoundaryLayerField}())
 
 Base.:(==)(a::ModelMeshingAttributes,b::ModelMeshingAttributes)=
     all(n->getfield(a,n)==getfield(b,n),fieldnames(ModelMeshingAttributes))
@@ -9573,6 +9609,43 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     # paired node's coordinates through the transform — see
     # `_synchronize_periodic_parameters!`/`_periodic_forced_curve_point`.
     periodic_positions=Dict{Int,Dict{Float64,NTuple{3,Float64}}}()
+    # `BoundaryLayer Field =` wall-offset pass — upstream's
+    # `Mesh2DWithBoundaryLayers` grows vertex columns off the face's
+    # field-listed boundary edges and re-fills the shrunken domain before the
+    # ordinary mesher runs. Bounded to the plane CDT path: transfinite,
+    # extruded, periodic-slave and parametric faces keep their producers
+    # (the early returns above already claimed them), while periodic-curve
+    # constraints and production tracking have no BL consumer and reject.
+    bl_specs=_model_surface_bl_specs(m,t)
+    if bl_specs!==nothing && !haskey(m.meshing.transfinite_surfaces,t)
+        isempty(constraints) || throw(ArgumentError(
+            "$caller: boundary-layer field on periodic-curve Surface[$t] " *
+            "is not implemented"))
+        plane=_model_surface_plane(m,t,caller;allow_ruled=true)
+        mesh,bl_owners,bl_params=_model_bl_surface_mesh(
+            m,t,bl_specs,forced,param_sizes,plane,caller;
+            _periodic_positions=periodic_positions)
+        get(m.meshing.reverse,(2,t),false) &&
+            (mesh=_reversed_surface_mesh(mesh,caller,t))
+        mesh=_model_surface_boundary_writeback!(m,t,mesh,caller)
+        _validate_surface_embeddings(m,mesh,
+            get(m.embeds,(2,t),NTuple{2,Int}[]),caller;surface=t)
+        diagnostic=validate(mesh)
+        diagnostic.ok || throw(ErrorException(
+            "$caller: invalid final mesh — "*join(diagnostic.messages,"; ")))
+        if _mesh_input!==nothing || _return_surface_production
+            # The actual lower-dimension producer has already minted the
+            # boundary vertices' real identities — retained bitwise, like
+            # the planar native path — while strip/fill vertices mint fresh
+            # labels off the authority's high water.
+            lower_input,lower_limit=_gmsh_native_surface_lower_input(
+                m,options,_mesh_input,_mesh_node_high_water,caller)
+            return _recombine3d_fold_surface_part(m,t,
+                _bl_surface_production(m,t,mesh,bl_owners,bl_params,
+                                       lower_input,lower_limit,caller))
+        end
+        return _recombine3d_fold_surface_part(m,t,mesh)
+    end
     for pass in 1:npasses
         mesh,embedded=_mesh_model_surface_once(
             m,t,forced,min_angle_deg,caller;size_field=size_field,
@@ -11137,6 +11210,7 @@ function _point_in_polygon(x,y,xs,ys,polygon)
     return inside
 end
 
+include("ModelBoundaryLayerField.jl")
 include("ModelExtrude.jl")
 include("ModelNativeGeoKernel.jl")
 

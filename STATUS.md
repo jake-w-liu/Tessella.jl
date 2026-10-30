@@ -12144,3 +12144,58 @@ Two independent resolved threads on `main`.
 degeneracies, `orient3_sos`/`insphere_sos` and the canonical
 `_orient_nd_sos_exact` remain unchanged and available. Bounded-suite
 evidence only; no parity claim beyond the verified receipts.
+
+## 2026-10-31 — `BoundaryLayer Field =` topological surface pass (Devin subagent)
+
+The `.geo` `BoundaryLayer Field = n` selection now drives a bounded
+wall-offset pass on plane surfaces instead of rejecting.
+
+- Oracle: Gmsh 4.15.2 (`buildAdditionalPoints2D` → `getEdgesData` →
+  `getNormals` → `modifyInitialMeshForBoundaryLayers` in
+  `src/geo/boundaryLayersData.cpp` + `meshGFace.cpp`) grows vertex
+  columns off the face's field-listed boundary edges, emits a certified
+  strip, then fills the shrunken domain; `addColumnAtTheEndOfTheBL`
+  rides run-end columns along the adjacent ordinary edge and
+  `setupFor2d` rejects a wall curve adjacent to >1 non-excluded,
+  non-extruded surface. A corrected probe (12 nodes/26 elements)
+  confirmed the selection is consumed topologically, not as sizing.
+- Transport (`GeoExec._geo_mesh_model`): each selected BoundaryLayer
+  field is resolved once per `Mesh n≥2` through
+  `_geo_boundary_layer_config` + `Model._ModelBoundaryLayerField` into
+  `m.meshing.boundary_layer_fields` (the `getBoundaryLayerFields`
+  analogue); a cleared selection unregisters. Unknown/non-BoundaryLayer
+  tags and unsupported option combinations still reject loudly.
+- Producer (`ModelBoundaryLayerField.jl`, hooked in
+  `mesh_model_surface` before the ordinary passes):
+  `_model_surface_bl_specs` intersects field curves with the face
+  boundary and applies the upstream shared-wall rejection;
+  `_bl_surface_pslg` rebuilds ordered wires retaining per-segment
+  curve ownership; `_model_bl_surface_mesh` grows maximal wall runs
+  through the certified `_bl_2d_offsets` kernel, extends run-end
+  columns onto adjacent ordinary chains (`addColumnAtTheEndOfTheBL`
+  analogue), pools strip+fill into one CDT, writes graded boundary
+  nodes back through `_model_surface_boundary_writeback!`, validates,
+  and reuses retained lower-dimensional node identities in
+  `_bl_surface_production` when the production path requests it.
+  `ModelIdentity` retag migrates the records; `Quads` recombines the
+  strip. Both `Mesh 2` and `Mesh 3` verified (flat plate 14 nodes;
+  box shared wall rejects with the upstream message).
+- Bounded to plane surfaces only: transfinite, extruded,
+  periodic-slave and parametric/OCC faces keep their producers;
+  periodic-curve constraints reject. Unsupported combinations reject
+  loudly: `SizesList`/per-node grading (`PointsList`/`NodesList`
+  endpoint grading not ported), `FanPointsSizesList` mismatches,
+  `IntersectMetrics`, `AnisoMax`, and run-end spans exceeding the
+  available adjacent curve.
+- Receipts (`--compile=min -O0 --project=.`):
+  `geo_boundary_layer_field_test.jl` 37/37 (single wall, two disjoint
+  runs, closed ring, Quads, shared-wall rejection, loud rejections,
+  transfinite preservation), registered in `test/extended/runtests.jl`;
+  `boundarylayer_test.jl` exit 0; `boundary_layer_fan_test.jl` exit 0;
+  `geo_dynamic_tag_test.jl` 121/121 exit 0.
+
+**Not claimed.** Plane faces only — no curved-surface column
+construction, no 3D volume boundary layers, no
+`PointsList`/`NodesList` grading, no fan-size lists, no
+metric-intersection controls. Bounded-suite evidence; not full
+Gmsh boundary-layer parity.

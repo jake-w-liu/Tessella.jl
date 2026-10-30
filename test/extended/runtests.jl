@@ -87,6 +87,7 @@ using Tessella
     include(joinpath(@__DIR__, "..", "geometry/geo_diagnostic_edges_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/geo_constraints_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/geo_transfquadtri_test.jl"))
+    include(joinpath(@__DIR__, "..", "geometry/geo_boundary_layer_field_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/geo_quadtri_extrude_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/quadtri_nonew_templates_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/quadtri_nonew_prism_templates_test.jl"))

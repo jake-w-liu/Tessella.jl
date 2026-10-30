@@ -702,6 +702,12 @@ function _model_identity_meshing(
         migrated.point_bl[moved]=cls
     end
     migrated.post_views=copy(attributes.post_views)
+    # `BoundaryLayer Field =` records carry entity tags in their option
+    # lists — retag them like every other attribute.
+    for (tag,bl) in attributes.boundary_layer_fields
+        migrated.boundary_layer_fields[tag]=
+            _model_identity_bl_field(bl,dimension,old_tag,new_tag)
+    end
     return migrated
 end
 
