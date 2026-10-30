@@ -486,22 +486,29 @@ end
 # every NoNewVerts owner records the identical linear translation operation.
 # Upstream (Gmsh 4.15.2 oracle) admits one literal Surface bounded by three
 # or more such Regions, a lateral shared with an ordinary layered Region
-# (which keeps the welded wall in whole quads and sweeps around it), and a
-# copied cap that is literally the next stacked sweep's Source. Each shared
+# (a recombined partner keeps the welded wall in whole quads and sweeps
+# around it; an unrecombined partner welds the split wall its prism
+# subdivision emits), and a copied cap that is literally the next stacked
+# sweep's Source. Each shared
 # Surface is emitted once: the earliest NoNewVerts owner's plan binds the
 # wall's actual cells on a pure-NoNewVerts wall and transports its per-layer
 # diagonals into each later plan as a (side,state) contract, while a wall
-# shared with an ordinary partner carries no diagonal — every NoNewVerts
-# owner fans the affected layers instead. A shared copied cap is simply the
-# top owner's emitted cap, reused bitwise as the next sweep's Source mesh.
-# A joint oriented-incidence check certifies each wall's per-owner child
-# faces, matching surface cells, positive typed volumes and the closed
-# exterior boundary — with three or more owners every wall facet must
-# arrive once per Region with mixed outward orientation. Everything outside
-# this slice (non-literal sharing, AddVerts or non-Recombine partners,
-# unequal sweep records on pure walls, unequal/bent cap transforms,
-# non-generic catalogs that cannot reproduce the bound emission, Sources
-# welded onto a partner's lateral) keeps the original loud diagnostic.
+# shared with a recombined ordinary partner carries no diagonal — every
+# NoNewVerts owner fans the affected layers instead. An unrecombined
+# partner keeps the bound wall's split facets: its emitted diagonals seed
+# the global `SubdivideExtrudedMesh` edge set (and its swap protection), so
+# the partner's own phase-3 tetrahedra arrive on the welded triangles. A
+# shared copied cap is simply the top owner's emitted cap, reused bitwise
+# as the next sweep's Source mesh. A joint oriented-incidence check
+# certifies each wall's per-owner child faces, matching surface cells,
+# positive typed volumes and the closed exterior boundary — with three or
+# more owners every wall facet must arrive once per Region with mixed
+# outward orientation. Everything outside this slice (non-literal sharing,
+# partners whose recombination cannot reproduce the welded wall — such as
+# mixed recombined/unrecombined owner sets on one wall — unequal sweep
+# records on pure walls, unequal/bent cap transforms, non-generic catalogs
+# that cannot reproduce the bound emission, Sources welded onto a
+# partner's lateral) keeps the original loud diagnostic.
 
 @noinline _extrude_nonew_shared_planner_error(caller,surface)=
     throw(ArgumentError(
@@ -605,9 +612,14 @@ function _extrude_nonew_shared_validate(m::GeoModel,t::Int,s::Int,
         else
             # An ordinary layered partner (`Layers+Recombine`) or an
             # AddVerts partner keeps its whole-quad wall faces upstream
-            # refuses to split; the layer grid and translation must match
-            # so the welded wall is geometrically identical.
-            p_params.recombine && p_params.quad_to_tri in (:none,:add_verts) &&
+            # refuses to split. An unrecombined partner welds the split
+            # wall its own prism subdivision emits — the oracle's mixed
+            # NoNewVerts/ordinary shared lateral arrives on the partner's
+            # diagonal triangles, which `_extrude_subdivide!` receives as
+            # seeded edges. Either way the layer grid and translation must
+            # match so the welded wall is geometrically identical.
+            ((p_params.recombine && p_params.quad_to_tri in (:none,:add_verts)) ||
+             !p_params.recombine) &&
                 isequal(p_params.layers,params.layers) &&
                 isequal(p_params.heights,params.heights) &&
                 isequal(p_params.scale_last,params.scale_last) &&
@@ -1009,11 +1021,19 @@ function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
                 s_link=working.meshing.extrude_sources[(2,s)]
                 # Copied caps carry no lateral diagonal contract — the
                 # Source owner's plan consumes the top owner's emitted cap
-                # bitwise. Walls shared with an ordinary partner stay in
-                # whole quads; every NoNewVerts owner fans them instead.
+                # bitwise. Walls shared with a recombined ordinary partner
+                # stay in whole quads; every NoNewVerts owner fans them
+                # instead.
                 s_link[1]==1 || continue
                 _extrude_nonew_wall_split(working,owners,caller) || continue
-                binder=owners[1]
+                # The earliest NoNewVerts owner bound the shared Surface —
+                # an unrecombined ordinary partner plans outside the scope
+                # and holds no diagonal contract (its subdivision receives
+                # the bound diagonals as seeded edges instead).
+                binder_i=findfirst(owner->_extrude_is_nonew(
+                    _extrude_gate(working,3,owner)),owners)
+                binder_i===nothing && continue
+                binder=owners[binder_i]
                 binder==tag && continue
                 # The earliest NoNewVerts owner already bound the shared
                 # Surface: read its emitted wall diagonals and constrain

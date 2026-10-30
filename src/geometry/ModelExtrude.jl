@@ -2336,17 +2336,25 @@ end
 # non-recombined volume: `phase1` seeds laterals, `phase2` untwists to a
 # fixpoint (one retry on a stalled cycle, exactly like `ntry`), then
 # `phase3` emits the tets. Returns the shared diagonal set the lateral
-# surfaces remesh against.
+# surfaces remesh against. `seeds` carries already-bound diagonals — a
+# lateral Surface welded by a QuadTriNoNewVerts plan emits its split wall
+# before this subdivision runs, so the seeded face's diagonal is fixed
+# upstream-style (surface cells precede volume cells); seeding `swapset`
+# keeps `phase2` rotating the prism's other faces instead.
 function _extrude_subdivide!(sweeps::Vector{_ExtrudeVolumeSweep},
-                             caller::AbstractString)
+                             caller::AbstractString;
+                             seeds::Union{Nothing,AbstractSet{
+                                 NTuple{2,NTuple{3,Float64}}}}=nothing)
     edges=Set{NTuple{2,NTuple{3,Float64}}}()
     solved=false
     for ntry in 1:2
         empty!(edges)
+        seeds===nothing || union!(edges,seeds)
         for sweep in sweeps
             _extrude_phase1!(sweep.prism6,edges,ntry)
         end
         swapset=Set{NTuple{2,NTuple{3,Float64}}}()
+        seeds===nothing || union!(swapset,seeds)
         prev=0
         stall=false
         while true
@@ -2369,6 +2377,11 @@ function _extrude_subdivide!(sweeps::Vector{_ExtrudeVolumeSweep},
     solved || throw(ErrorException(
         "$caller: unable to subdivide extruded mesh: change surface " *
         "mesh or recombine extrusion instead"))
+    # A seeded diagonal is swap-protected, so it can only be lost if the
+    # seed itself named no prism face — check regardless.
+    seeds===nothing || issubset(seeds,edges) || throw(ArgumentError(
+        "$caller: a bound shared-lateral diagonal lies outside the " *
+        "subdivision edge set"))
     for sweep in sweeps
         _extrude_phase3!(sweep,edges)
     end
@@ -2648,7 +2661,39 @@ function _extrude_volume_pass(m::GeoModel,caller::AbstractString;
         temporary_elements[sweep.tag]=length(sweep.prism6)
     end
     edges=nothing
-    isempty(subdivided) || (edges=_extrude_subdivide!(subdivided,caller))
+    if !isempty(subdivided)
+        # A lateral welded onto a QuadTriNoNewVerts Region was bound by the
+        # scope before this subdivision runs: its emitted split wall fixes
+        # the partner's prism-face diagonals (upstream fixes surface cells
+        # before `SubdivideExtrudedMesh`), so seed the global edge set with
+        # the bound wall's per-layer diagonals.
+        seeds=Set{NTuple{2,NTuple{3,Float64}}}()
+        if scope!==nothing
+            for sweep in subdivided,shell in m.volumes[sweep.tag],
+                    signed in m.surface_loops[shell]
+                s=abs(signed)
+                get(scope.surfaces,s,nothing)===nothing && continue
+                owners=_extrude_quadtri_regions(m,s,caller)
+                length(owners)<2 && continue
+                binder_i=findfirst(owner->_extrude_is_nonew(
+                    _extrude_gate(m,3,owner)),owners)
+                binder_i===nothing && continue
+                binder=owners[binder_i]
+                haskey(scope.volumes,binder) ||
+                    _extrude_nonew_shared_planner_error(caller,s)
+                required=_extrude_nonew_wall_diagonals(
+                    m,scope.volumes[binder],s,caller)
+                # A whole-quad layer on this wall cannot weld the partner's
+                # triangles — the certified wall must carry a split on
+                # every layer (a recombined partner keeps quads instead
+                # and never reaches this branch).
+                (required===nothing || any(isnothing,required)) &&
+                    _extrude_nonew_shared_planner_error(caller,s)
+                union!(seeds,required)
+            end
+        end
+        edges=_extrude_subdivide!(subdivided,caller;seeds=seeds)
+    end
     for sweep in sweeps
         params=_extrude_gate(m,3,sweep.tag)
         params.recombine && params.quad_to_tri===:add_verts || continue

@@ -39,6 +39,24 @@ function _sl_squares()
     """
 end
 
+# The same pair with a triangle-meshed right Source — the certified
+# unrecombined-partner wall. The oracle (Gmsh 4.15.2) welds the shared
+# lateral onto the partner's prism-subdivision triangles.
+function _sl_squares_tri()
+    return """
+    Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+    Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+    Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+    Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+    Point(5)={2,0,0,1};Point(6)={2,1,0,1};
+    Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+    Curve Loop(2)={5,6,7,-2};Plane Surface(2)={2};
+    Transfinite Curve{:}=2;
+    Transfinite Surface{1};Transfinite Surface{2};
+    Recombine Surface{1};
+    """
+end
+
 # Three transfinite unit squares in a row — the middle sweep welds its left
 # lateral onto the left pair's wall and its right lateral onto the right
 # pair's wall, so one Region bounds two literal shared Surfaces.
@@ -461,19 +479,28 @@ end
         """)
         s=_sl_shared_tag(execution)
         @test_throws r"shared-region planner" mesh_model_volume(execution.model,2)
-        # A non-recombine layered partner keeps the original loud diagnostic —
-        # upstream (Gmsh 4.15.2 oracle) welds the same literal Surface
-        # nonconformingly: the NoNewVerts owner's split wall and the partner's
-        # opposite-diagonal prism faces coexist on one entity. The certified
-        # welded-incidence model cannot represent that without fabricating a
-        # mismatch, so the bound stays loud.
+        # An unrecombined partner whose own Source carries quadrangles keeps
+        # a different loud diagnostic — upstream (Gmsh 4.15.2 oracle) rejects
+        # that sweep with `Cannot extrude quadrangles without Recombine`
+        # before the wall is ever welded. That is a distinguishable
+        # producer diagnostic, not the shared-planner diagnostic and not a
+        # nonconformity: a triangle-sourced partner welds the certified
+        # split wall (the "unrecombined partner" testset below). The NoNew
+        # owner's own part and the bound wall part still certify
+        # standalone.
         execution=_sl_model(_sl_squares()*"""
         left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
         right[]=Extrude{0,0,1}{Surface{2};Layers{2};};
         """)
         s=_sl_shared_tag(execution)
-        @test_throws r"shared-region planner" mesh_model_volume(execution.model,1)
-        @test_throws r"shared-region planner" mesh_model_surface(execution.model,s)
+        @test validate(mesh_model_volume(execution.model,1)).ok
+        @test validate(mesh_model_surface(execution.model,s)).ok
+        @test_throws r"Cannot extrude quadrangles without Recombine" mesh_model_volume(execution.model,2)
+        @test_throws r"Cannot extrude quadrangles" _sl_model(
+            _sl_squares()*"""
+            left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+            right[]=Extrude{0,0,1}{Surface{2};Layers{2};};
+            """;mesh_dim=3)
         # Boundary overrides attached to the shared Surface keep the
         # constrained-boundary diagnostic before any shared admission.
         execution=_sl_model(_sl_squares()*"""
@@ -647,6 +674,75 @@ end
             @test Set(keys(_sl_wall_cycles(pass.parts[nonew],1.0)))==wall
             _sl_positive(pass.parts[nonew])
         end
+    end
+
+    @testset "unrecombined partner welds the certified split wall" begin
+        # Gmsh 4.15.2 oracle (`_nonew_mixed` capture): the literal lateral
+        # is emitted once as the partner's prism-subdivision triangles and
+        # every owner arrives on the identical facets — the NoNewVerts
+        # owner fans no centroids here, the welded wall is split. The
+        # bound wall's diagonals seed the global `SubdivideExtrudedMesh`
+        # edge set so the partner's phase-3 tetrahedra land on them.
+        execution=_sl_model(_sl_squares_tri()*"""
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};};
+        """;mesh_dim=3)
+        model=execution.model
+        merged=execution.mesh
+        @test validate(merged).ok
+        s=_sl_shared_tag(execution)
+        @test sort(_extrude_quadtri_regions(model,s,_SL_CALLER))==[1,2]
+        pass=_extrude_volume_pass(model,_SL_CALLER)
+        scope=pass.scope
+        @test scope!==nothing
+        bound=scope.surfaces[s]
+        @test validate(bound).ok && validate(pass.parts[1]).ok &&
+            validate(pass.parts[2]).ok
+        # Exactly the oracle's emitted wall: each layer quadrangle split on
+        # the (bottom-first, top-opposite) diagonal.
+        wall=_sl_surface_faces(bound)
+        @test wall==Set((
+            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,1.0,0.5)),
+            ((1.0,0.0,0.0),(1.0,1.0,0.0),(1.0,1.0,0.5)),
+            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,1.0,1.0)),
+            ((1.0,0.0,0.5),(1.0,1.0,0.5),(1.0,1.0,1.0))))
+        @test _sl_dim2_faces_on(merged,1,1.0)==wall
+        # Both Regions' wall incidences equal the bound Surface's cells —
+        # the seeded subdivision lands the partner's prism faces on them.
+        for tag in (1,2)
+            @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
+            _sl_positive(pass.parts[tag])
+        end
+        # Opposite child incidences on every shared facet.
+        left=_sl_wall_cycles(pass.parts[1],1.0)
+        right=_sl_wall_cycles(pass.parts[2],1.0)
+        @test keys(left)==keys(right)
+        for key in keys(left)
+            @test _sl_reversed(left[key],right[key])
+        end
+        # The shared wall welds (incidence two); the rest of both Regions'
+        # surfaces is exactly the external boundary.
+        counts=_sl_face_counts(pass.parts[1],pass.parts[2])
+        @test all(c in (1,2) for c in values(counts))
+        external=Set(k for (k,c) in counts if c==1)
+        interior=Set(k for (k,c) in counts if c==2)
+        interior_wall=Set(k for k in interior if all(v->v[1]==1.0,k))
+        @test wall ⊆ interior && interior_wall==wall
+        exterior=Set{Tuple}()
+        for volume in (1,2),shell in model.volumes[volume],
+            signed in model.surface_loops[abs(shell)]
+            tag=abs(signed)
+            tag==s && continue
+            # The NoNewVerts Region's surfaces live in the scope; the
+            # partner's own laterals remesh against the same seeded edges.
+            part=get(scope.surfaces,tag,nothing)
+            part===nothing && (part=mesh_model_surface(
+                model,tag;_extrude_edges=pass.edges))
+            union!(exterior,_sl_surface_faces(part))
+        end
+        @test exterior==external
+        # The standalone surface lookup replays the same bound wall.
+        @test _sl_surface_faces(mesh_model_surface(model,s))==wall
     end
 
     @testset "stacked copied cap is the next sweep's Source" begin

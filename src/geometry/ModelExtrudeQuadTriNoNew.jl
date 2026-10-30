@@ -628,21 +628,27 @@ function _extrude_nonew_generic_source(m::GeoModel,source::Int,
     return true
 end
 
-# A welded lateral wall may keep its split emission only when every owner is
-# a QuadTriNoNewVerts Region whose own catalog is the generic single-quad
-# family — the diagonal contract transports between them. A wall with an
-# ordinary/AddVerts partner or a non-generic NoNewVerts owner stays in whole
-# quadrangles upstream (the generic owners fan their layers to centroids, so
-# the welded face is the pyramid base) — the same end the mixed-partner
-# oracle reaches.
+# A welded lateral wall may keep its split emission only when every
+# NoNewVerts owner is a Region whose own catalog is the generic single-quad
+# family — the diagonal contract transports between them — and every
+# ordinary partner is unrecombined: the partner's prism subdivision emits
+# the same diagonal triangles upstream keeps for it, and the bound wall's
+# diagonals seed the global `SubdivideExtrudedMesh` edge set so both arrive
+# on one facet set. A wall with a recombined ordinary/AddVerts partner or a
+# non-generic NoNewVerts owner stays in whole quadrangles upstream (the
+# generic owners fan their layers to centroids, so the welded face is the
+# pyramid base) — the same end the mixed-partner oracle reaches.
 function _extrude_nonew_wall_split(m::GeoModel,owners,caller::AbstractString)
     for owner in owners
         entry=_extrude_entity_params(m,3,owner,caller)
         entry===nothing && return false
         o_params,_,o_link=entry
-        _extrude_is_nonew(o_params) || return false
         o_link[1]==2 || return false
-        _extrude_nonew_generic_source(m,abs(o_link[2]),caller) || return false
+        if _extrude_is_nonew(o_params)
+            _extrude_nonew_generic_source(m,abs(o_link[2]),caller) || return false
+        else
+            o_params.recombine && return false
+        end
     end
     return true
 end

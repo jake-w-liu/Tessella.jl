@@ -12282,3 +12282,58 @@ construction, no 3D volume boundary layers, no
 `PointsList`/`NodesList` grading, no fan-size lists, no
 metric-intersection controls. Bounded-suite evidence; not full
 Gmsh boundary-layer parity.
+
+## 2026-10-31 — NoNew shared laterals admit unrecombined ordinary partners (Devin subagent)
+
+A `QuadTriNoNewVerts` sweep may now share its literal lateral Surface
+with an ordinary layered partner that is **not** recombined — the case
+the prior checklist had pinned as unrepresentable.
+
+- Oracle correction: the earlier claim that upstream welds the shared
+  wall "nonconformingly" conflated two outcomes. On a quad-sourced
+  partner upstream actually fails with
+  `Cannot extrude quadrangles without Recombine` (a distinguishable
+  producer diagnostic, preserved). On a triangle-sourced partner
+  (`_nonew_mixed` capture) upstream emits the shared lateral **once**
+  as the partner's prism-subdivision triangles (each layer quadrangle
+  split on the bottom-first→top-opposite diagonal), and both volumes'
+  boundary facet sets on the wall are bitwise identical — a conforming
+  weld, not a nonconforming coexistence.
+- Mechanism: `_extrude_nonew_shared_validate` admits
+  `!p_params.recombine` partners under the same identical-operation
+  contract (matching `Layers`/`heights`/`scale_last`/transform);
+  `_extrude_nonew_wall_split` treats an unrecombined ordinary owner as
+  a split-wall owner so the generic catalog's chain places a diagonal
+  on that side (recombined/AddVerts partners still keep whole quads —
+  the centroid fan pyramid-base path is unchanged); the scope's
+  diagonal contract flows between NoNewVerts owners only, with the
+  binder selected as the earliest NoNewVerts owner; and
+  `_extrude_volume_pass` extracts the bound wall's per-layer diagonals
+  via `_extrude_nonew_wall_diagonals` and seeds them into the global
+  `SubdivideExtrudedMesh` edge set **and** its `swapset` protection —
+  the partner's `phase1`/`phase2` then keeps the bound diagonal (the
+  prism's other faces untwist instead), so `phase3` tetrahedra and the
+  remeshed lateral land on the welded triangles. A seed that cannot be
+  honored (whole-quad layer on the bound wall, twisted-prism stall)
+  keeps a loud diagnostic.
+- Verified on the probe pair: shared Surface emitted once as the
+  oracle's four triangles; both Regions' wall incidences equal the
+  bound cells bitwise; the merged `Mesh 3` validates. Reversed
+  extrusion order and a NoNew chain carrying a pure-NoNew wall plus a
+  mixed wall both mesh; `RecombLaterals` + unrecombined partner
+  rejects on the boundary-coverage certificate; the quad-source
+  partner keeps the upstream `Cannot extrude quadrangles without
+  Recombine` diagnostic.
+- Receipts: `extrude_nonew_shared_lateral_test.jl` — the
+  "unrecombined partner" testset asserts the oracle's exact wall
+  facet set, both-owner incidence equality, opposite orientation,
+  positive volumes and exterior/interior closure; the
+  quad-source-partner assertions distinguish the two diagnostics.
+
+**Not claimed.** Single-curve generatrices on the bounded linear
+translation slice only; the seeded-diagonal guarantee covers the
+global-subdivision path (`Mesh 3` / `_extrude_volume_pass`), not
+per-volume standalone calls (which stay self-consistent); non-generic
+NoNewVerts catalogs on such a wall keep the planner diagnostic;
+partner `PointsList`-style layer overrides remain unsupported. Bounded
+fixture evidence only.
