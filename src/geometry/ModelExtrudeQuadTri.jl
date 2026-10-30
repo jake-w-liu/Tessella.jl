@@ -131,17 +131,29 @@ function _extrude_quadtri_lateral_recombine(m::GeoModel,t::Int,params,
         link!==nothing && link[1]==1 && (qt=r;break)
     end
     qt==0 && return params.recombine
-    length(adjacent)<=2 || throw(ArgumentError(
-        "$caller: too many regions adjacent to QuadToTri Surface[$t]"))
     ep=_extrude_gate(m,3,qt)
     length(adjacent)==1 && return ep.recomb_laterals
-    neighbor=adjacent[1]==qt ? adjacent[2] : adjacent[1]
-    haskey(m.meshing.transfinite_volumes,neighbor) && return params.recombine
-    other=_extrude_gate(m,3,neighbor)
-    other===nothing && return false
-    source=get(m.meshing.extrude_sources,(3,neighbor),nothing)
-    source!==nothing && abs(source[2])==t && return ep.recomb_laterals
-    return other.quad_to_tri===:none ? other.recombine : true
+    recombine=nothing
+    for neighbor in adjacent
+        neighbor==qt && continue
+        haskey(m.meshing.transfinite_volumes,neighbor) && return params.recombine
+        other=_extrude_gate(m,3,neighbor)
+        other===nothing && return false
+        source=get(m.meshing.extrude_sources,(3,neighbor),nothing)
+        if source!==nothing && abs(source[2])==t
+            answer=ep.recomb_laterals
+        else
+            answer=other.quad_to_tri===:none ? other.recombine : true
+        end
+        # Every owner must agree on the welded wall's representation — the
+        # shared-incidence validator has already bounded the incidence to
+        # identical sweep records, so conflicting answers reject.
+        recombine===nothing || recombine==answer || throw(ArgumentError(
+            "$caller: regions adjacent to QuadToTri Surface[$t] disagree " *
+            "on its recombination"))
+        recombine=answer
+    end
+    return recombine
 end
 
 function _extrude_quadtri_top(m::GeoModel,t::Int,params,

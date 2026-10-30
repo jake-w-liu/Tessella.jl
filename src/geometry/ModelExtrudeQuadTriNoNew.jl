@@ -232,7 +232,7 @@ function _extrude_nonew_boundary_surfaces(m::GeoModel,t::Int,caller)
 end
 
 function _extrude_nonew_region_boundary(m,t,source,caller;sides::Int=4,
-                                        shared::Dict{Int,Int}=Dict{Int,Int}())
+                                        shared::Dict{Int,Vector{Int}}=Dict{Int,Vector{Int}}())
     boundary=abs.(_extrude_nonew_boundary_surfaces(m,t,caller))
     length(boundary)==sides+2 && allunique(boundary) && source in boundary ||
         throw(ArgumentError(
@@ -245,12 +245,12 @@ function _extrude_nonew_region_boundary(m,t,source,caller;sides::Int=4,
         isempty(get(m.embeds,(2,surface),NTuple{2,Int}[])) || throw(ArgumentError(
             "$caller: QuadTriNoNewVerts embedded surface constraints require the region planner"))
         adjacent=_extrude_quadtri_regions(m,surface,caller)
-        # `shared` carries the bounded literal-lateral pairs certified by the
-        # scope (surface => partner Region); every other multi-Region
-        # incidence keeps the original loud diagnostic.
+        # `shared` carries the certified shared incidences from the scope
+        # (surface => its complete sorted Region owner set); every other
+        # multi-Region incidence keeps the original loud diagnostic.
         length(adjacent)==1 && adjacent[1]==t ||
-            (haskey(shared,surface) &&
-             adjacent==sort!(Int[t,shared[surface]])) || throw(ArgumentError(
+            (haskey(shared,surface) && adjacent==shared[surface]) ||
+            throw(ArgumentError(
             "$caller: QuadTriNoNewVerts shared surfaces require the neighboring-region planner"))
         surface==source && continue
         link=get(m.meshing.extrude_sources,(2,surface),nothing)
@@ -302,6 +302,26 @@ function _extrude_nonew_preferences(m,source,cell,source_mesh,caller)
     all(!iszero,choices) || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts has a source corner outside its boundary"))
     return ntuple(k->choices[k],sides)
+end
+
+# Which Source-cell side a shared wall's generatrix chain occupies: the
+# generatrix's two endpoints match exactly one consecutive corner pair of
+# the actual source cell, on either traversal direction. Every certified
+# shared lateral's generatrix is a Source boundary curve, so exactly one
+# side answers.
+function _extrude_nonew_whole_side(m,cell::NTuple{4,Int32},source_mesh,
+                                   generatrix::Int,s::Int,caller)
+    coordinates=ntuple(k->ntuple(d->source_mesh.coords[d,cell[k]],3),4)
+    chain=_extrude_curve_nodes(m,generatrix,caller)
+    length(chain)==2 || _extrude_nonew_shared_planner_error(caller,s)
+    for side in 1:4
+        next=mod1(side+1,4)
+        (chain[1]==coordinates[side] && chain[2]==coordinates[next]) ||
+            (chain[2]==coordinates[side] && chain[1]==coordinates[next]) ||
+            continue
+        return side
+    end
+    _extrude_nonew_shared_planner_error(caller,s)
 end
 
 # Build the constant-size cap transition relation once for the actual lateral
@@ -548,9 +568,30 @@ end
 # Called on an operation-owned working model by the scope helper. No region
 # mesh, cache or allocator state is published until its completed face complex
 # and every actual cell have passed certification.
+# A certified shared copied cap is a two-triangle Source whenever its
+# transfinite root is — the cap's own Surface/Curves are generated copies,
+# so the native controls bind on the root and each copied boundary chain
+# must be its two endpoints.
+function _extrude_nonew_cap_source(m::GeoModel,source::Int,sides::Int,
+                                   caller::AbstractString)
+    sides==4 || return false
+    link=get(m.meshing.extrude_sources,(2,source),nothing)
+    (link===nothing || link[1]!=2) && return false
+    root=_extrude_quadtri_source_root(m,source)
+    haskey(m.meshing.transfinite_surfaces,root) || return false
+    for curve in _model_projection_surface_curves(m,source)
+        chain=_extrude_curve_nodes(m,curve,caller)
+        length(chain)==2 || return false
+    end
+    return !_model_surface_recombined(m,source)
+end
+
 function _extrude_nonew_two_tri_candidate(m::GeoModel,source::Int,sides::Int,
                                           caller::AbstractString)
-    sides==4 && haskey(m.meshing.transfinite_surfaces,source) || return false
+    sides==4 || return false
+    if !haskey(m.meshing.transfinite_surfaces,source)
+        return _extrude_nonew_cap_source(m,source,sides,caller)
+    end
     curves=_model_projection_surface_curves(m,source)
     # Reject known larger grids before source/column allocation. Missing curve
     # controls remain the ordinary native surface mesher's diagnostic.
@@ -562,6 +603,48 @@ function _extrude_nonew_two_tri_candidate(m::GeoModel,source::Int,sides::Int,
                 "$caller: QuadTriNoNewVerts multiple source cells require the boundary-category planner"))
     end
     return !_model_surface_recombined(m,source)
+end
+
+# Whether `source`'s four-sided sweep resolves to the generic single-quad
+# catalog — the only family that carries a transported per-side diagonal
+# contract. Every bounded/strip/grid/triangle family answers false; an
+# evaluation failure of a candidate probe conservatively counts as
+# non-generic (the wall then stays whole and the dedup certificate decides).
+function _extrude_nonew_generic_source(m::GeoModel,source::Int,
+                                       caller::AbstractString)
+    length(_model_projection_surface_curves(m,source))==4 || return false
+    try
+        _extrude_nonew_quad_patch_candidate(m,source,4,caller) && return false
+        _extrude_nonew_quad_strip_candidate(m,source,4,caller) && return false
+        _extrude_nonew_three_quad_strip_candidate(m,source,4,caller) && return false
+        _extrude_nonew_four_quad_strip_candidate(m,source,4,caller) && return false
+        _extrude_nonew_rect_grid_shape(m,source,4,caller)===nothing || return false
+        _extrude_nonew_rect_grid_shape(m,source,4,caller;mode=:b4_strip)===nothing ||
+            return false
+        _extrude_nonew_two_tri_candidate(m,source,4,caller) && return false
+    catch
+        return false
+    end
+    return true
+end
+
+# A welded lateral wall may keep its split emission only when every owner is
+# a QuadTriNoNewVerts Region whose own catalog is the generic single-quad
+# family — the diagonal contract transports between them. A wall with an
+# ordinary/AddVerts partner or a non-generic NoNewVerts owner stays in whole
+# quadrangles upstream (the generic owners fan their layers to centroids, so
+# the welded face is the pyramid base) — the same end the mixed-partner
+# oracle reaches.
+function _extrude_nonew_wall_split(m::GeoModel,owners,caller::AbstractString)
+    for owner in owners
+        entry=_extrude_entity_params(m,3,owner,caller)
+        entry===nothing && return false
+        o_params,_,o_link=entry
+        _extrude_is_nonew(o_params) || return false
+        o_link[1]==2 || return false
+        _extrude_nonew_generic_source(m,abs(o_link[2]),caller) || return false
+    end
+    return true
 end
 
 function _extrude_nonew_quad_patch_candidate(m::GeoModel,source::Int,sides::Int,
@@ -614,15 +697,23 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
     spec.type===:rotate && abs(spec.angle)>=2pi && throw(ArgumentError(
         "$caller: QuadTriNoNewVerts full or multiple revolutions require the cyclic/global self-intersection planner"))
     source=abs(link[2])
-    haskey(m.meshing.extrude_sources,(2,source)) && throw(ArgumentError(
-        "$caller: QuadTriNoNewVerts copied or chained sources require the dependency planner"))
     sides=length(_model_projection_surface_curves(m,source))
     sides in (3,4) || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts other source boundaries require the boundary-category planner"))
-    # Certified literal shared laterals of the bounded two-Region
-    # translation slice (this Region may bound several such walls);
-    # every other incidence still rejects.
+    # Certified shared incidences of the bounded translation slice (this
+    # Region may bound several such walls and one stacked cap); every other
+    # incidence still rejects.
     shared=_extrude_nonew_shared_for(m,t,caller)
+    source_link=get(m.meshing.extrude_sources,(2,source),nothing)
+    # A Source that is itself a generated Surface is admitted only as the
+    # certified stacked cap — literally one partner's copied top re-used as
+    # this Region's Source. Every other copied or chained source keeps the
+    # dependency-planner diagnostic.
+    source_link===nothing ||
+        (source_link[1]==2 && haskey(shared,source) &&
+         shared[source]==sort!(_extrude_quadtri_regions(m,source,caller))) ||
+        throw(ArgumentError(
+        "$caller: QuadTriNoNewVerts copied or chained sources require the dependency planner"))
     top,laterals=_extrude_nonew_region_boundary(m,t,source,caller;sides,shared)
     quad_patch=_extrude_nonew_quad_patch_candidate(m,source,sides,caller)
     quad_strip=!quad_patch && _extrude_nonew_quad_strip_candidate(m,source,sides,caller)
@@ -638,12 +729,21 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
     b4_strip=strip_shape!==nothing
     two_tri=!quad_patch && !quad_strip && !three_quad_strip && !four_quad_strip && !rect_grid && !b4_strip &&
         _extrude_nonew_two_tri_candidate(m,source,sides,caller)
-    # Only the generic single-quad catalog transports shared-wall diagonals;
-    # every bounded/strip/grid/triangle family keeps its isolated planner.
-    isempty(shared) || (sides==4 && !quad_patch && !quad_strip &&
+    # Only the generic single-quad catalog carries shared-lateral wall
+    # contracts — a copied shared cap is not a lateral and leaves every
+    # certified catalog free. A wall that stays in whole quadrangles (an
+    # ordinary/AddVerts partner or a non-generic NoNewVerts owner upstream
+    # refuses to split) carries no contract either, so a non-generic owner
+    # may free-emit it and let the shared-part dedup and joint incidence
+    # certificate decide; a split wall still requires the generic catalog.
+    split_walls=[key for key in keys(shared) if
+        get(m.meshing.extrude_sources,(2,key),(0,0))[1]==1 &&
+        _extrude_nonew_wall_split(m,shared[key],caller)]
+    isempty(split_walls) || (sides==4 && !quad_patch && !quad_strip &&
         !three_quad_strip && !four_quad_strip && !rect_grid && !b4_strip &&
         !two_tri) ||
-        _extrude_nonew_shared_planner_error(caller,minimum(keys(shared)))
+        _extrude_nonew_shared_planner_error(caller,minimum(
+            isempty(split_walls) ? collect(keys(shared)) : split_walls))
     grid_nodes,grid_cells_per_interval,grid_centers,grid_interval_centers=if rect_grid
         vertices,cells=_extrude_nonew_rect_grid_preflight(grid_shape,caller)
         (vertices,cells,0,0)
@@ -774,6 +874,22 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
             cell,preferred,cols,levels,refs,top,laterals,caller)
     end
     intervals=length(refs)
+    # A shared lateral whose certified owner set contains a non-NoNewVerts
+    # Region stays in whole quadrangles — an ordinary layered or AddVerts
+    # partner sweeps quad boundary faces upstream keeps for it — so this
+    # Region must not put a diagonal on that wall. No template can (the
+    # chain requires every lateral face split); such layers fan to their
+    # centroid, which lands the wall face on a pyramid's whole-quad base.
+    whole_sides=Set{Int}()
+    for (s,owners) in shared
+        s_link=get(m.meshing.extrude_sources,(2,s),nothing)
+        (s_link===nothing || s_link[1]!=1) && continue
+        _extrude_nonew_wall_split(m,owners,caller) && continue
+        side=_extrude_nonew_whole_side(m,cell,source_mesh,
+            abs(s_link[2]),s,caller)
+        side in whole_sides && _extrude_nonew_shared_planner_error(caller,s)
+        push!(whole_sides,side)
+    end
     top_state=UInt8(_extrude_nonew_top_diagonal(cell) ? 1 : 2)
     states=Matrix{UInt8}(undef,6,intervals)
     problems=falses(intervals)
@@ -803,12 +919,39 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
             end
         end
     else
-        picks=_extrude_nonew_chain(intervals,preferred,top_state,caller;
-            forced=_shared_diagonals===nothing ? nothing :
-                _extrude_nonew_shared_chain_contract(
-                    cols,cell,intervals,_shared_diagonals,caller))
-        for layer in 1:intervals,side in 1:6
-            states[side,layer]=templates[picks[layer]].faces[side]
+        forced=_shared_diagonals===nothing ? nothing :
+            _extrude_nonew_shared_chain_contract(
+                cols,cell,intervals,_shared_diagonals,caller)
+        if isempty(whole_sides)
+            picks=_extrude_nonew_chain(intervals,preferred,top_state,caller;
+                forced=forced)
+            for layer in 1:intervals,side in 1:6
+                states[side,layer]=templates[picks[layer]].faces[side]
+            end
+        else
+            # Whole-quad walls cannot come from the template chain (every
+            # lateral face must carry a diagonal): every layer fans to its
+            # centroid, so the shared side stays the pyramid's whole-quad
+            # base. A transported diagonal on another shared wall still
+            # binds that side; free laterals take their preferred diagonal;
+            # the bottom cap stays whole on its single-quad Source and
+            # interior caps stay whole between consecutive fans.
+            fill!(problems,true)
+            for layer in 1:intervals
+                for side in 1:4
+                    states[side,layer]=side in whole_sides ? 0 : preferred[side]
+                end
+                states[5,layer]=0
+                states[6,layer]=layer==intervals ? top_state : 0
+            end
+            forced===nothing || for layer in 1:intervals
+                for (side,state) in forced[layer]
+                    Int(side) in whole_sides && throw(ArgumentError(
+                        "$caller: QuadTriNoNewVerts shared Region wall " *
+                        "keeps both a whole-quad and a diagonal contract"))
+                    states[Int(side),layer]=state
+                end
+            end
         end
     end
     edges=Set{NTuple{2,NTuple{3,Float64}}}()

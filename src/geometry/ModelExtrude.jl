@@ -2555,7 +2555,7 @@ function _extrude_surface_mesh(m::GeoModel,t::Int,caller::AbstractString;
                                _options=nothing)
     planned=_extrude_nonew_surface_mesh(m,t,caller;scope=scope,
         min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
-        size_field=size_field)
+        size_field=size_field,_mesh_input=_mesh_input)
     planned===nothing || return planned
     entry=_extrude_entity_params(m,2,t,caller;_mesh_input,
         _mesh1d_options=_options,_size_field=size_field)

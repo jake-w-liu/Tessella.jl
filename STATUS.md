@@ -11860,3 +11860,83 @@ constraint); `Filler3D` admission failure modes are not reproduced;
 `Recombine3DLevel`/`Recombine3DConformity` remain inert (no upstream
 consumer). Unrelated uncommitted WIP in `ModelExtrude*`/`ModelNativeHybrid*`
 files preserved and not included in this work.
+
+## 2026-10-30 — NoNew shared incidences: N-owner walls, mixed partners, stacked caps (Devin subagent)
+
+**Scope.** Audited the six LAY01 residuals left by 5d06102 ("Extend NoNew
+shared laterals to connected neighbor graphs") against pinned Gmsh 4.15.2
+oracle fixtures (`_lay01_oracle/*.geo/.msh/.log`) and implemented every
+case upstream actually admits.
+
+**Upstream audit.** The oracle .msh incidence scan (each dim-2 entity's
+cells resolved against the volume-cell facet sets) shows: a literal
+Surface bounded by **three** Regions (`three_owners`: 4 wall cells, owners
+[1,2,3]) — admitted; NoNewVerts beside an ordinary `Layers+Recombine`
+sweep (`mixed_partners`), a `QuadTriAddVerts` sweep (`mixed_addverts`), or
+extruded second (`mixed_partner_rev`) — admitted, and the welded wall
+stays in **whole quadrangles** while the NoNewVerts owner fans its layers
+so its own boundary arrives on the same facets; a copied top cap consumed
+as the next sweep's literal `Surface{a[0]}` Source — admitted for equal
+**and unequal** layer records (`stacked_cap`, `stacked_cap_unequal`); a
+non-recombine layered partner (`mixed_norecomb`) — upstream emits the
+shared entity but with **nonconforming** cells (the NoNewVerts split wall
+beside the partner's opposite-diagonal prism faces); unequal lateral
+layer records (`unequal_layers`) and the grid-vs-quad mismatched catalogs
+(`grid_vs_quad`) — the oracle welds **no** multi-owner surface at all;
+the bent stack (`stacked_cap_dir`) — upstream emits a degenerate volume.
+
+**Implemented.** `_extrude_nonew_shared_for`/`_extrude_nonew_scope`
+generalized from the literal pair to N owner vectors with connected
+closure over the shared-wall neighbor graph; the joint certificate
+verifies complete symmetric owner lists, oriented incidence, emitted
+face counts and positive cells across all owners, and the wall is emitted
+once from the earliest owner under geometric shared-part equality
+(equivalent emissions with different node/column order compare by cell
+coordinate sets). Mixed ordinary/`QuadTriAddVerts` partners mark the
+shared side a whole-quad wall (`_extrude_nonew_whole_side`) so no NoNew
+diagonal contract is forced onto a partner that cannot emit it.
+`_extrude_nonew_cap_source` recognizes a generated `(2,source)` copied
+cap as a transfinite-equivalent Source (endpoint-only boundary chains
+accepted for curves carrying no Transfinite record); the two-tri catalog
+admits it, caps are exempt from the lateral catalog gate, and
+`_extrude_quadtri_lateral_recombine` generalizes to N neighbors with a
+disagreement reject. The API projection replays the joint scope for any
+`length(regions)>1` shared incidence and `_generate_higher_plan` widens
+the staged-surface part dict to `Union{Mesh,MixedMesh}` so the certified
+single emission transports.
+
+**Retained loud bounds** (upstream-equal or architectural):
+non-recombine ordinary partners — upstream welds nonconforming cells on
+one entity, which the certified welded-incidence model cannot represent
+without fabricating a mismatch; unequal lateral `Layers{}` records and
+mismatched non-generic shared-wall catalogs — the oracle itself welds no
+shared Surface (distinct coincident cells / separate entities), so the
+planner diagnostic stays; bent/nonlinear stacks — the second sweep's
+differing transform yields a degenerate upstream volume and the
+surface-loop topology stays invalid; non-literal sharing remains
+rejected as before.
+
+**Receipts** (Julia 1.12.7, normal compilation, exit 0):
+
+- `test/geometry/extrude_nonew_shared_lateral_test.jl`:
+  **496/496 pass** — prior pair/chain/corner/projection testsets plus new
+  `three Region owners weld one shared lateral` (fixture audit: shared
+  Surface tag carries owners [1,2,3], the bound part equals each owner's
+  wall cycles on x=1, and the welded Surface's part folds through
+  `mesh_model_surface` once), `ordinary and AddVerts partners keep the
+  whole-quad wall` (three orderings: NoNew-first, ordinary-first,
+  AddVerts partner — bound wall stays whole quads, NoNewVerts volume
+  boundary arrives on the same facets, positive cells), `stacked copied
+  cap is the next sweep's Source` (equal + unequal layer records weld
+  the cap bitwise; a bent `{1,0,0}` stack keeps its ArgumentError), and
+  the updated reject testset (non-recombine layered partner stays loud).
+- `test/geometry/geo_quadtri_extrude_test.jl`: **334/334 pass**.
+- `test/geometry/geo_extrude_test.jl`: **495/495 pass** (testsets
+  38+119+130+54+54+10+29+15+5+41).
+
+**Not claimed**: Concorde-free pairing bounds, transfinite-fan interior
+heuristics, and full upstream nonconforming-weld representation remain
+out of scope; the bounded suite does not prove complete Gmsh parity.
+Unrelated uncommitted WIP in `ModelNativeHybrid*`/`APIHybridBatchPublication`
+and the embedded-pool hunks of `APIGenerateHigher.jl` preserved and not
+included in this work.

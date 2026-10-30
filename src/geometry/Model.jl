@@ -9389,7 +9389,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     npasses=Int(max_periodic_passes)
     planned=_extrude_nonew_surface_mesh(m,t,caller;scope=_extrude_scope,
         min_angle_deg=min_angle_deg,max_periodic_passes=npasses,
-        size_field=size_field)
+        size_field=size_field,_mesh_input=_mesh_input)
     planned===nothing || return _recombine3d_fold_surface_part(m,t,planned)
     # A periodic curve relation whose far endpoint lives on a surface paired
     # with this one by a dim-2 relation needs no local synchronization — the

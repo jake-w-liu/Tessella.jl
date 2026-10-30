@@ -4130,7 +4130,9 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
         # the staged lower cells' explicit assembly rows; this does not mesh
         # another product or infer a public identity from coordinates.
         _higher_complete_ranks!(ranks,assembly)
-        surfaces=Dict(tag=>(tag,mesh,class,mapping) for (tag,mesh,class,mapping) in surface_parts)
+        surfaces=Dict{Int,Tuple{Int,Union{Mesh,MixedMesh},_MeshClassification,
+            Vector{Int32}}}(tag=>(tag,mesh,class,mapping)
+                            for (tag,mesh,class,mapping) in surface_parts)
         retained=_higher_assembly_authority(assembly,m,done;ranks,old_supports=high_order)
         retained=_higher_bind_producer_rows(retained,assembly,surface_parts,old)
         retained_cells=Dict(cell.tag=>cell for cell in assembly.cells)

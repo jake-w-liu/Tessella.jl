@@ -106,6 +106,7 @@ function _extrude_nonew_two_tri_catalog(m::GeoModel,source::Int,source_mesh,
         _extrude_nonew_two_tri_error(caller,
             "requires exactly four nodes and two linear triangles")
     haskey(m.meshing.transfinite_surfaces,source) ||
+        _extrude_nonew_cap_source(m,source,4,caller) ||
         _extrude_nonew_two_tri_error(caller,"requires a native transfinite surface")
     _model_surface_recombined(m,source) &&
         _extrude_nonew_two_tri_error(caller,
@@ -139,9 +140,18 @@ function _extrude_nonew_two_tri_catalog(m::GeoModel,source::Int,source_mesh,
         curve in m.meshing.degenerated && _extrude_nonew_two_tri_error(caller,
             "has a degenerated boundary curve")
         cspec=get(m.meshing.transfinite_curves,curve,nothing)
-        cspec!==nothing && _flexible_transfinite_nodes(
-            m,cspec.num_nodes,curve,caller)==2 || _extrude_nonew_two_tri_error(caller,
-            "requires endpoint-only transfinite boundary curves")
+        if cspec===nothing
+            # A shared cap's boundary curves are generated copies carrying
+            # no Transfinite record — their endpoint-only chain is the same
+            # two-node boundary grid.
+            length(_extrude_curve_nodes(m,curve,caller))==2 ||
+                _extrude_nonew_two_tri_error(caller,
+                "requires endpoint-only transfinite boundary curves")
+        else
+            _flexible_transfinite_nodes(m,cspec.num_nodes,curve,caller)==2 ||
+                _extrude_nonew_two_tri_error(caller,
+                "requires endpoint-only transfinite boundary curves")
+        end
         curve_start,curve_end=m.curves[curve]
         curve_start!=curve_end || _extrude_nonew_two_tri_error(caller,"has a closed boundary curve")
         endpoint=signed[k]>0 ? curve_start : curve_end

@@ -68,17 +68,16 @@ function _extrude_nonew_surface_projection(m::GeoModel,mesh,surface::Int,
     end
     isempty(regions) && return nothing
     if length(regions)>1
-        # Only the bounded literal-lateral pair binds one Surface to two
+        # Only a certified shared incidence binds one Surface to several
         # Regions — the same admission `_extrude_nonew_surface_mesh` applies.
         # The joint certificate stored in the operation scope already proved
-        # both partners emit this part bitwise-identically, so its classified
-        # projection is valid for both owning Regions.
-        length(regions)==2 ||
-            _extrude_nonew_shared_planner_error(caller,surface)
-        a,b=regions
-        get(_extrude_nonew_shared_for(m,a,caller),surface,0)==b &&
-            get(_extrude_nonew_shared_for(m,b,caller),surface,0)==a ||
-            _extrude_nonew_shared_planner_error(caller,surface)
+        # every owner emits this part bitwise-identically, so its classified
+        # projection is valid for every owning Region.
+        adjacent=_extrude_quadtri_regions(m,surface,caller)
+        for region in regions
+            get(_extrude_nonew_shared_for(m,region,caller),surface,Int[])==
+                adjacent || _extrude_nonew_shared_planner_error(caller,surface)
+        end
     end
     working=deepcopy(m)
     owner=regions[1]
@@ -86,11 +85,11 @@ function _extrude_nonew_surface_projection(m::GeoModel,mesh,surface::Int,
         # Tagged actual products have already taken the UID-bound projection
         # path. A naked standalone product was built from the geometric Source;
         # replay that same operation rather than substituting attached records.
-        # A certified shared lateral replays the joint scope — the same
+        # A certified shared incidence replays the joint scope — the same
         # operation scope its bound product was planned under, closed under
         # the shared-wall neighbor graph — so the replayed part is the
         # certified single emission, not an independent wall triangulation.
-        length(regions)==2 ?
+        length(regions)>1 ?
             _extrude_nonew_scope(working,caller;
                 tags=_extrude_nonew_shared_closure(working,regions,caller),
                 _working_model=true).volumes[owner] :

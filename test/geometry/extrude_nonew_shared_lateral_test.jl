@@ -461,10 +461,15 @@ end
         """)
         s=_sl_shared_tag(execution)
         @test_throws r"shared-region planner" mesh_model_volume(execution.model,2)
-        # A non-NoNew neighbor keeps the original loud diagnostic.
+        # A non-recombine layered partner keeps the original loud diagnostic —
+        # upstream (Gmsh 4.15.2 oracle) welds the same literal Surface
+        # nonconformingly: the NoNewVerts owner's split wall and the partner's
+        # opposite-diagonal prism faces coexist on one entity. The certified
+        # welded-incidence model cannot represent that without fabricating a
+        # mismatch, so the bound stays loud.
         execution=_sl_model(_sl_squares()*"""
         left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
-        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriAddVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};};
         """)
         s=_sl_shared_tag(execution)
         @test_throws r"shared-region planner" mesh_model_volume(execution.model,1)
@@ -555,6 +560,141 @@ end
         @test_throws r"shared-region planner" _sl_model(_sl_squares()*"""
         left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
         right[]=Extrude{0,0,1}{Surface{2};Layers{3};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+    end
+
+    @testset "three Region owners weld one shared lateral" begin
+        # Gmsh 4.15.2 admits one literal Surface bounded by three identical
+        # QuadTriNoNewVerts sweeps: two owners sit on the same wall side and
+        # all three emit the same wall cells (2 tris on the interior layer,
+        # the whole pyramid-base quad on the cap layer).
+        execution=_sl_model(_sl_squares()*"""
+        Point(7)={0.5,0.25,0,1};Point(8)={0.5,0.75,0,1};
+        Line(8)={3,8};Line(9)={8,7};Line(10)={7,2};
+        Curve Loop(3)={2,8,9,10};Plane Surface(3)={3};
+        Transfinite Curve{8,9,10}=2;
+        Transfinite Surface{3};Recombine Surface{3};
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        b[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        c[]=Extrude{0,0,1}{Surface{3};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        model=execution.model
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test allunique(Tuple(merged.coords[:,node]) for node in 1:nnodes(merged))
+        shared=reduce(intersect,(Int.(execution.lists[k])[3:end] for k in ("a","b","c")))
+        @test length(shared)==1
+        s=only(shared)
+        @test sort(_extrude_quadtri_regions(model,s,_SL_CALLER))==[1,2,3]
+        pass=_extrude_volume_pass(model,_SL_CALLER)
+        scope=pass.scope
+        bound=scope.surfaces[s]
+        @test validate(bound).ok
+        wall=_sl_surface_faces(bound)
+        # Every owner emitted the bound part and sees it as its own wall
+        # cells; same-side owners orient alike, the far side opposes.
+        for owner in 1:3
+            @test _sl_part_equal(scope.volumes[owner].surfaces[s],bound)
+            @test Set(keys(_sl_wall_cycles(pass.parts[owner],1.0)))==wall
+            _sl_positive(pass.parts[owner])
+        end
+        @test _sl_part_equal(mesh_model_surface(model,s),bound)
+        @test _sl_dim2_faces_on(merged,1,1.0)==wall
+    end
+
+    @testset "ordinary and AddVerts partners keep the whole-quad wall" begin
+        # Gmsh 4.15.2 welds the literal lateral and keeps whole quadrangles
+        # on it whenever a partner cannot emit the NoNewVerts split — an
+        # ordinary `Layers+Recombine` sweep and a `QuadTriAddVerts` sweep
+        # alike — while the NoNewVerts owner fans its layers so its own
+        # boundary arrives on the same quads (pyramid bases), in either
+        # extrusion order.
+        cases=(
+            # NoNewVerts first, ordinary Layers+Recombine second.
+            ("""
+            a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+            b[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;};
+            """,("a","b"),1),
+            # Ordinary partner extruded first — same welded whole-quad wall.
+            ("""
+            b[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;};
+            a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+            """,("a","b"),2),
+            # A QuadTriAddVerts partner also keeps its whole-quad wall.
+            ("""
+            a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+            b[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriAddVerts;};
+            """,("a","b"),1),
+        )
+        for (body,(nonew_tag,other_tag),nonew) in cases
+            execution=_sl_model(_sl_squares()*body;mesh_dim=3)
+            model=execution.model
+            merged=execution.mesh
+            @test validate(merged).ok
+            s=_sl_pair_tag(execution,nonew_tag,other_tag)
+            @test sort(_extrude_quadtri_regions(model,s,_SL_CALLER))==[1,2]
+            pass=_extrude_volume_pass(model,_SL_CALLER)
+            scope=pass.scope
+            bound=scope.surfaces[s]
+            @test validate(bound).ok
+            wall=_sl_surface_faces(bound)
+            @test !isempty(wall)
+            # The welded wall stays in whole quads — upstream's outcome.
+            @test all(length(key)==4 for key in wall)
+            @test _sl_dim2_faces_on(merged,1,1.0)==wall
+            # The NoNewVerts owner's boundary arrives on the identical
+            # whole-quad facets.
+            @test Set(keys(_sl_wall_cycles(pass.parts[nonew],1.0)))==wall
+            _sl_positive(pass.parts[nonew])
+        end
+    end
+
+    @testset "stacked copied cap is the next sweep's Source" begin
+        # Gmsh 4.15.2 welds the copied top cap literally as the stacked
+        # sweep's Source — equal and unequal layer records alike. Tessella
+        # emits the cap once through the top owner's plan and consumes it
+        # bitwise; a different transform (bent stack) produces a degenerate
+        # upstream volume and keeps the loud diagnostic.
+        for layers in (2,3)
+            execution=_sl_model("""
+            Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+            Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+            Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+            Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+            Transfinite Curve{:}=2;
+            Transfinite Surface{1};
+            Recombine Surface{1};
+            a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+            b[]=Extrude{0,0,1}{Surface{a[0]};Layers{$layers};Recombine;QuadTriNoNewVerts;};
+            """;mesh_dim=3)
+            model=execution.model
+            merged=execution.mesh
+            @test validate(merged).ok
+            cap=Int(execution.lists["a"][1])
+            @test sort(_extrude_quadtri_regions(model,cap,_SL_CALLER))==[1,2]
+            pass=_extrude_volume_pass(model,_SL_CALLER)
+            scope=pass.scope
+            bound=scope.surfaces[cap]
+            @test validate(bound).ok
+            cap_faces=_sl_surface_faces(bound)
+            @test !isempty(cap_faces)
+            # The welded cap is exactly the facet set both volumes bound:
+            # volume 1's top and volume 2's bottom coincide on z=1.
+            @test _sl_dim2_faces_on(merged,3,1.0)==cap_faces
+            _sl_positive(pass.parts[1]);_sl_positive(pass.parts[2])
+        end
+        # A bent stack (the second sweep turns +x) produces a degenerate
+        # upstream volume — the loud diagnostic stays.
+        @test_throws ArgumentError _sl_model("""
+        Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+        Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        Transfinite Curve{:}=2;
+        Transfinite Surface{1};
+        Recombine Surface{1};
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        b[]=Extrude{1,0,0}{Surface{a[0]};Layers{2};Recombine;QuadTriNoNewVerts;};
         """;mesh_dim=3)
     end
 end
