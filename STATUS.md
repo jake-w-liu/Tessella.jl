@@ -11808,3 +11808,55 @@ the residual costs — both linear in practice here; reducing the lattice's
 cocircular-predicate pressure is a possible follow-up, out of scope. The
 sibling `ModelExtrude.jl` `_BL_DBG_SRCMESHES` debug WIP stays uncommitted
 and unowned by this entry.
+
+## 2026-10-30 — Recombine3D reachable hex-combining arm (Devin subagent)
+
+**Scope.** Implemented the genuinely reachable `meshCombine3D` arm behind
+`Mesh.Algorithm3D=RTREE(9)` + `Recombine Volume{tag}`/`Mesh.Recombine3DAll`:
+vertex-star hexahedron candidates, approximate + exact (trilinear Bezier
+certificate) quality gates, interior-tet flood recovery, greedy
+subdivision-scaled-Jacobian selection with edge/diagonal/facet disjointness
+compatibility, emitted MSH type-5 hexes + retained type-4 tets + type-140
+trihedron odd-incidence conformalization, and boundary quadrangles spliced
+onto their owning Surface through the volume boundary write-back receipt
+(`src/meshing/Recombine3D.jl`, `ModelNativeInitialTet.jl`,
+`APIGenerateHigher.jl`, `Model.jl`, `Elements.jl`, `API.jl`, `Tessella.jl`).
+
+**Upstream audit (pinned 4.15.2).** `Generator.cpp` gates
+`meshCombine3D` on `algo3d == ALGO_3D_RTREE` + `Filler3D::treat_region`
+under `HAVE_DOMHEX && HAVE_HXT`; `Recombine3DLevel`/`Recombine3DConformity`
+are stored options with no consumer; `Recombine3DNeighborhoodSize` does not
+exist in 4.15.2. Tessella admits `Mesh.Algorithm3D=9`, routes it through
+the native Delaunay fill, and combines only flagged Delaunay-admitted
+Regions; the inert options stay verbatim-stored.
+
+**Oracle receipts** (gmsh 4.15.2, unit cube `Transfinite Curve{:}=3` +
+`Recombine Surface{:}` + `Recombine Volume{1}`): default algorithm —
+48 tris, 49 tets, no combine; `Mesh.Algorithm3D=9` on a finer unstructured
+cube (upstream RTREE fill ANN-fails on the transfinite fixture) — "6857
+Hexes found / 214 Hexes selected", output 214 hex + 963 tet + 472
+trihedron + 130 boundary quads. Tessella on the transfinite cube:
+**4 hex + 18 tet + 4 trihedron + 12 boundary quads** (all surface quads
+landed on owning Surface products; `validate(mesh).ok` true), and 48
+tris / 43 tets without the RTREE admission (boundary fold only — matches
+upstream element families).
+
+**Receipts** (Julia 1.12.7):
+
+- `test/interfaces/geo_recombine3d_fold_functional_test.jl`
+  (`--compile=min -O0`): **96/96 pass** (exit 0) — all six prior
+  fold testsets plus new `Algorithm3D=9 combines flagged volumes into
+  hex-dominant output` (9) and `stored Recombine3D controls stay inert
+  without RTREE admission` (2).
+- `test/interfaces/api_native_recombine_lifecycle_test.jl` (normal
+  compilation): **2,313/2,313 pass** (exit 0) — write-back part and
+  constructor rebuild changes regression-checked. (Under `--compile=min`
+  the suite's `GmshLibm` `llvmcall` intrinsic cannot run — environmental
+  limitation, unrelated.)
+
+**Not claimed**: upstream's HXT/RTREE candidate generation and Concorde
+matching internals are not ported (Tessella-owned pairing logic used per
+constraint); `Filler3D` admission failure modes are not reproduced;
+`Recombine3DLevel`/`Recombine3DConformity` remain inert (no upstream
+consumer). Unrelated uncommitted WIP in `ModelExtrude*`/`ModelNativeHybrid*`
+files preserved and not included in this work.

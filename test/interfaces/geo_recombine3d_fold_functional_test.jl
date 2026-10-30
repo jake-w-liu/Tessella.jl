@@ -195,6 +195,56 @@ end
     @test !haskey(counts,4) && get(counts,5,0)+get(counts,6,0)>0
 end
 
+@testset "Algorithm3D=9 combines flagged volumes into hex-dominant output" begin
+    # Upstream `Generator.cpp`: `meshCombine3D` runs only under
+    # `Mesh.Algorithm3D=RTREE(9)` on a `recombine3D` Region — hexes, retained
+    # tets, type-140 trihedron conformalization, and boundary quadrangles
+    # written back onto their owning Surface.
+    hexed=_execute_recombine3d(_GEO_CUBE * raw"""
+        Mesh.Algorithm3D=9;
+        Recombine Volume{1};
+        Mesh 3;
+        """)
+    counts=_cell_inventory(hexed.mesh)
+    @test get(counts,5,0)>0
+    @test get(counts,4,0)>0
+    @test get(counts,3,0)>0
+    @test !haskey(counts,6) && !haskey(counts,7)
+    @test Tessella.validate(hexed.mesh).ok
+    # Every emitted quadrangle lands on an owning Surface product.
+    total_quads=sum(get(_surface_part(hexed,s),3,0) for s in 1:6)
+    @test total_quads==counts[3]
+    # Each quadrangle covers two folded triangles of the original 48-triangle
+    # boundary; triangles cover themselves.
+    covered=sum(get(_surface_part(hexed,s),2,0)+2*get(_surface_part(hexed,s),3,0)
+                for s in 1:6)
+    @test covered==48
+    # The global flag drives the same combination.
+    global_hex=_execute_recombine3d(_GEO_CUBE * raw"""
+        Mesh.Algorithm3D=9; Mesh.Recombine3DAll=1;
+        Mesh 3;
+        """)
+    gcounts=_cell_inventory(global_hex.mesh)
+    @test get(gcounts,5,0)>0 && get(gcounts,3,0)>0
+    @test Tessella.validate(global_hex.mesh).ok
+end
+
+@testset "stored Recombine3D controls stay inert without RTREE admission" begin
+    # `Recombine Volume` without `Mesh.Algorithm3D=9` only folds the
+    # boundary (upstream requires the RTREE fill before `meshCombine3D`);
+    # `Recombine3DLevel`/`Recombine3DConformity` have no consumer in the
+    # 4.15.2 source and stay verbatim-stored.
+    folded=_execute_recombine3d(_GEO_CUBE * "Recombine Volume{1};\nMesh 3;\n")
+    fcounts=_cell_inventory(folded.mesh)
+    @test !haskey(fcounts,5) && !haskey(fcounts,3) && get(fcounts,4,0)>0
+    inert=_execute_recombine3d(_GEO_CUBE * raw"""
+        Mesh.Recombine3DLevel=2; Mesh.Recombine3DConformity=1;
+        Mesh 3;
+        """)
+    icounts=_cell_inventory(inert.mesh)
+    @test !haskey(icounts,5) && !haskey(icounts,140)
+end
+
 @testset "session API exposes the stored Recombine3D controls" begin
     A=Tessella.API
     A.initialize()

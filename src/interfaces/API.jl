@@ -1854,6 +1854,9 @@ end
     family===:hex && return Elements._HEX_EDGES
     family===:pri && return Elements._PRI_EDGES
     family===:pyr && return Elements._PYR_EDGES
+    # type-140 trihedron: quad perimeter (0,1),(1,2),(2,3),(3,0) plus the
+    # (1,3) collapse diagonal — `MTrihedron::getNumEdges` = 5.
+    family===:trih && return ((0,1),(1,2),(2,3),(3,0),(1,3))
     return ()
 end
 

@@ -36,6 +36,7 @@ include("core/MeshFunctionSpaces.jl") # P5: arbitrary-order nodal and order-one 
 include("meshing/WeightedMatching.jl") # checked BSD general minimum-cost matching
 include("meshing/OrderedMatching.jl") # directed ordered perfect-matching adapter
 include("meshing/Recombine.jl")   # P4: deterministic triangle-to-quad surface recombination
+include("meshing/Recombine3D.jl") # P4: tet-to-hex volume recombination + trihedra
 include("meshing/Refine.jl")      # P4: deterministic one-level uniform simplex refinement
 include("structured/StructuredNumerics.jl") # P4: shared affine-grid numerical certificates
 include("structured/Transfinite.jl") # P4: validated four-sided planar transfinite patches

@@ -7896,7 +7896,8 @@ end
 # the first two of each triangular end, a hexahedron the third vertex of each
 # quadrilateral end.
 const _VOLUME_REVERSE_SWAPS = Dict{Int,Vector{NTuple{2,Int}}}(
-    4=>[(1,2)], 5=>[(1,3),(5,7)], 6=>[(1,2),(4,5)], 7=>[(1,3)])
+    4=>[(1,2)], 5=>[(1,3),(5,7)], 6=>[(1,2),(4,5)], 7=>[(1,3)],
+    140=>[(2,4)])
 
 # Boundary nodes of a dim-3 cell set: nodes incident to faces carrying a
 # single incident volume cell. Quads count with their four-corner canonical
@@ -10490,10 +10491,10 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
                 _native_initial_births.node_high_water,
                 _native_initial_births.element_high_water,caller) : mesh
     end
-    m.meshing.algorithm_3d in (1,3) || throw(ArgumentError(
+    m.meshing.algorithm_3d in (1,3,9) || throw(ArgumentError(
         "$caller: Mesh.Algorithm3D=$(m.meshing.algorithm_3d) is not " *
         "implemented for ordinary native Volume[$t]; supported: " *
-        "1 (Delaunay), 3 (initial only)"))
+        "1 (Delaunay), 3 (initial only), 9 (RTREE hex-combining fill)"))
     if !isempty(m.volumes[t]) && !_model_factory_volume_encoding(m,t)
         hybrid=_model_native_hybrid_volume_input(m,t,_mesh_input,caller)
         if hybrid!==nothing
@@ -10626,7 +10627,7 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
                     [constraint[3] for constraint in native_constraints.embedded_faces])
         end
     end
-    if legacy_factory && m.meshing.algorithm_3d==1
+    if legacy_factory && m.meshing.algorithm_3d in (1,9)
         # A tensor-valued selected field drives the same edge-bisection fill
         # through its metric: `refine_to_size` already scores every edge by
         # the `metric_edge_length` contraction, so the scalar `size_at`
@@ -10725,7 +10726,7 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
     # Boundary/embedded recovery precedes insertion in meshGRegion. The
     # Delaunay path now uses the actual normalized circumradius cavity
     # criterion; Algorithm3 retains this recovered initial complex.
-    if m.meshing.algorithm_3d==1 && !legacy_factory
+    if m.meshing.algorithm_3d in (1,9) && !legacy_factory
         mode=_resolved_extend_from_boundary(m,3,t)
         receipt=_native_initial_births!==nothing &&
             _native_initial_births.cell_source===mesh ? _native_initial_births : nothing
@@ -10860,10 +10861,28 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
             surface_tag,nodes,edges,point_nodes,curve_entries,
             nested_points,nested_curves,caller)
     end
+    # Upstream `meshGRegion` combines the final tetrahedral fill into a
+    # hex-dominant complex for `Recombine Volume`/`Mesh.Recombine3DAll`
+    # regions — the reachable arm is gated on `Mesh.Algorithm3D=RTREE(9)`
+    # (`Generator.cpp`: `algo3d == ALGO_3D_RTREE && Filler3D::treat_region`
+    # before `meshCombine3D`). Greedy compatible candidate selection,
+    # boundary quadrangles transported onto their owning Surface through
+    # the write-back receipt, hanging interior faces conformalized by
+    # type-140 trihedra.
+    if m.meshing.algorithm_3d==9 && _model_volume_recombine3d(m,t) && mesh isa Mesh
+        effective=native_constraints===nothing ? nothing :
+            (_native_initial_births!==nothing &&
+             _native_initial_births.boundary_writeback!==nothing ?
+             _native_initial_births.boundary_writeback.constraints :
+             native_constraints)
+        mesh=_model_volume_combine3d!(m,t,mesh,native_constraints,effective,
+            initial_geometry,_mesh_input,_native_initial_births,caller)
+    end
     reversed=get(m.meshing.reverse,(3,t),false)
     diag=validate(mesh)
     diag.ok || throw(ErrorException("$caller: invalid mesh — "*join(diag.messages,"; ")))
-    ntets(mesh)>0 || throw(ErrorException("$caller: Volume[$t] produced no tetrahedra"))
+    _volume_cell_count(mesh)>0 || throw(ErrorException(
+        "$caller: Volume[$t] produced no volume cells"))
     explicit_geometry===nothing || _model_certify_explicit_volume_semantics(
         mesh,t,explicit_geometry.expected_volume,
         explicit_geometry.comparison_scale,caller)
@@ -10871,7 +10890,7 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
     # the positively-oriented complex; structural checks still apply after.
     reversed || return mesh
     mesh=_reversed_volume_mesh(mesh,caller,t)
-    post=validate(mesh;require_positive_tets=false)
+    post=mesh isa Mesh ? validate(mesh;require_positive_tets=false) : validate(mesh)
     post.ok || throw(ErrorException(
         "$caller: reversed mesh is structurally invalid — " *
         join(post.messages,"; ")))

@@ -2429,7 +2429,7 @@ function _higher_hybrid_volume_input_classification(assembly,m,production,input,
         edge_entities=edges,face_entities=faces,quad_entities=quads,node_parametric=parameters)
 end
 
-function _higher_volume_input_classification(assembly,m,mesh::Mesh,input,tag,
+function _higher_volume_input_classification(assembly,m,mesh::Union{Mesh,MixedMesh},input,tag,
                                             source_tags,caller;
                                             boundary_writeback=nothing)
     length(source_tags)==nnodes(mesh) && allunique(source_tags) || throw(ArgumentError(
@@ -2474,8 +2474,22 @@ function _higher_volume_input_classification(assembly,m,mesh::Mesh,input,tag,
     faces=Dict{NTuple{3,Int32},Tuple{Int,Int32}}()
     quads=Dict{NTuple{4,Int32},Tuple{Int,Int32}}()
     edge_conflicts=Set{NTuple{2,Int32}}();face_conflicts=Set{NTuple{3,Int32}}();quad_conflicts=Set{NTuple{4,Int32}}()
-    tetrahedra=fill(Int32(tag),ntets(mesh))
-    _api_support_cells!(edges,edge_conflicts,faces,face_conflicts,quads,quad_conflicts,4,mesh.tets,tetrahedra)
+    owners=Dict{Int,Vector{Int32}}(1=>Int32[],2=>Int32[])
+    if mesh isa Mesh
+        tetrahedra=fill(Int32(tag),ntets(mesh))
+        _api_support_cells!(edges,edge_conflicts,faces,face_conflicts,quads,quad_conflicts,4,mesh.tets,tetrahedra)
+        owners[4]=tetrahedra
+    else
+        # Recombined hex-dominant part: every dim-3 block contributes its
+        # edges to the support map, owned by this Region.
+        for block in mesh.blocks
+            block isa ElementBlock && msh_dimension(Int(block.msh))==3 || continue
+            block_owners=fill(Int32(tag),size(block.nodes,2))
+            _api_support_cells!(edges,edge_conflicts,faces,face_conflicts,
+                quads,quad_conflicts,Int(block.msh),block.nodes,block_owners)
+            owners[Int(block.msh)]=block_owners
+        end
+    end
     for owner in sort!(collect(closure))
         owner[1]<3 || continue
         wb_cells=boundary_writeback===nothing ? nothing :
@@ -2511,7 +2525,6 @@ function _higher_volume_input_classification(assembly,m,mesh::Mesh,input,tag,
     end
     _api_check_support_conflicts(edge_conflicts,face_conflicts,quad_conflicts)
     boundaries=Dict(owner=>Int32[abs(boundary) for boundary in data.entities[owner].boundaries] for owner in closure)
-    owners=Dict{Int,Vector{Int32}}(1=>Int32[],2=>Int32[],4=>tetrahedra)
     return _mixed_classification(mesh,primary,sort!(collect(closure)),node_entities,boundaries,owners;
         edge_entities=edges,face_entities=faces,quad_entities=quads,node_parametric=parameters)
 end
@@ -2580,13 +2593,11 @@ function _higher_volume_wb_rebuild_part(assembly,m,wb,mapping,source_tags,
     end
     emitted_keys=Set(Tuple(sort!(copy(conn))) for (_,conn,_) in cells_wb)
     old_traces=geometry_cells===nothing ? nothing : get(geometry_cells,mesh,nothing)
-    if mesh isa Mesh
+    if mesh isa Mesh && all(entry->entry[1]==2,cells_wb)
         tris=Matrix{Int32}(undef,3,0)
         tri_tag=Int32[]
         tri_trace=Union{Nothing,_Dim01Cell}[]
         for (msh,conn,_) in cells_wb
-            msh==2 || throw(ArgumentError(
-                "$caller: written-back Surface[$tag] cannot emit non-Triangle cells into its Triangle product"))
             key=Tuple(sort!(copy(conn)))
             previous=get(old_index,key,nothing)
             tris=hcat(tris,reshape(part_conn(conn),3,1))
@@ -2610,8 +2621,41 @@ function _higher_volume_wb_rebuild_part(assembly,m,wb,mapping,source_tags,
         end
         return (tag,new_mesh,new_class,new_mapping)
     end
-    # MixedMesh part: keep each block's emitted columns; children append to a
-    # trailing Triangle block.
+    if mesh isa Mesh
+        # A written-back quadrangle promotes the Triangle product to a
+        # mixed part: cells emit per-msh blocks in receipt order, upstream's
+        # `gf->triangles`/`gf->quadrangles` split.
+        new_blocks=ElementBlock[];new_traces=Vector{Vector{Union{Nothing,_Dim01Cell}}}()
+        group_of=Dict{Int,Int}()
+        for (msh,conn,_) in cells_wb
+            key=Tuple(sort!(copy(conn)))
+            previous=get(old_index,key,nothing)
+            gi=get(group_of,msh,0)
+            if gi==0
+                push!(new_blocks,ElementBlock(msh,Matrix{Int32}(undef,length(conn),0),Int32[]))
+                push!(new_traces,Union{Nothing,_Dim01Cell}[])
+                gi=length(new_blocks);group_of[msh]=gi
+            end
+            block=new_blocks[gi]
+            block=ElementBlock(msh,hcat(block.nodes,part_conn(conn)),block.tags)
+            tagout=previous===nothing ?
+                get(child_physical,key,_dim01_physical(m,(2,tag))) :
+                blocks[previous[1]][3][previous[2]]
+            new_blocks[gi]=ElementBlock(msh,block.nodes,push!(copy(block.tags),tagout))
+            push!(new_traces[gi],previous===nothing ?
+                get(added_cells,((2,Int32(tag)),key),nothing) :
+                (old_traces===nothing ? nothing : old_traces[previous[1]][previous[2]]))
+        end
+        new_mesh=MixedMesh(coords,new_blocks)
+        new_class=_higher_geometry_part_class(new_mesh,2,tag,node_entities)
+        if geometry_cells!==nothing
+            delete!(geometry_cells,mesh)
+            geometry_cells[new_mesh]=new_traces
+        end
+        return (tag,new_mesh,new_class,new_mapping)
+    end
+    # MixedMesh part: keep each block's emitted columns; children append as
+    # per-msh blocks in receipt order.
     new_blocks=ElementBlock[]
     new_traces=Vector{Vector{Union{Nothing,_Dim01Cell}}}()
     for (bi,(msh,cells,tags)) in enumerate(blocks)
@@ -2630,20 +2674,33 @@ function _higher_volume_wb_rebuild_part(assembly,m,wb,mapping,source_tags,
             old_traces===nothing ? nothing : old_traces[bi][column]
             for column in keep])
     end
-    child_nodes=Matrix{Int32}(undef,3,0);child_tags=Int32[]
-    child_trace=Union{Nothing,_Dim01Cell}[]
+    child_groups=Dict{Int,Tuple{Vector{Vector{Int32}},Vector{Int32},
+                                Vector{Union{Nothing,_Dim01Cell}}}}()
+    child_order=Int[]
     for (msh,conn,_) in cells_wb
         key=Tuple(sort!(copy(conn)))
         haskey(old_index,key) && continue
-        msh==2 || throw(ArgumentError(
-            "$caller: written-back Surface[$tag] cannot emit non-Triangle children"))
-        child_nodes=hcat(child_nodes,reshape(part_conn(conn),3,1))
-        push!(child_tags,get(child_physical,key,_dim01_physical(m,(2,tag))))
-        push!(child_trace,get(added_cells,((2,Int32(tag)),key),nothing))
+        msh in (2,3) || throw(ArgumentError(
+            "$caller: written-back Surface[$tag] cannot emit non-Triangle/Quadrangle children"))
+        group=get(child_groups,msh,nothing)
+        if group===nothing
+            group=(Vector{Int32}[],Int32[],Union{Nothing,_Dim01Cell}[])
+            child_groups[msh]=group;push!(child_order,msh)
+        end
+        push!(group[1],part_conn(conn))
+        push!(group[2],get(child_physical,key,_dim01_physical(m,(2,tag))))
+        push!(group[3],get(added_cells,((2,Int32(tag)),key),nothing))
     end
-    size(child_nodes,2)>0 &&
-        (push!(new_blocks,ElementBlock(2,child_nodes,child_tags));
-         push!(new_traces,child_trace))
+    for msh in child_order
+        group=child_groups[msh]
+        isempty(group[1]) && continue
+        nodes=Matrix{Int32}(undef,length(group[1][1]),length(group[1]))
+        for (column,conn) in enumerate(group[1]),slot in eachindex(conn)
+            nodes[slot,column]=conn[slot]
+        end
+        push!(new_blocks,ElementBlock(msh,nodes,group[2]))
+        push!(new_traces,group[3])
+    end
     new_mesh=MixedMesh(coords,new_blocks;physical_names=mesh.physical_names,
         elementary_entities=mesh.elementary_entities)
     new_class=_higher_geometry_part_class(new_mesh,2,tag,node_entities)
@@ -2709,13 +2766,14 @@ function _higher_volume_wb_rebuild_constructor(assembly,m,wb,mapping,source_tags
     # UID row.
     extra_uids=UInt64[];extra_entities=Tuple{Int,Int32}[];
         extra_params=Union{Nothing,Vector{Float64}}[];extra_coords=NTuple{3,Float64}[]
-    child_nodes=Matrix{Int32}(undef,3,0);child_labels=UInt64[];child_tags=Int32[]
+    child_nodes=Dict{Int,Vector{Vector{Int32}}}();child_labels=Dict{Int,Vector{UInt64}}()
+    child_tags=Dict{Int,Vector{Int32}}();child_order=Int[]
     for (msh,conn,_) in cells_wb
-        msh==2 || throw(ArgumentError(
-            "$caller: written-back Surface[$tag] constructor cannot emit non-Triangle children"))
         key=conn_uids(conn)
         key===nothing && continue
         key in old_index && continue
+        msh in (2,3) || throw(ArgumentError(
+            "$caller: written-back Surface[$tag] constructor cannot emit non-Triangle/Quadrangle children"))
         ckey=Tuple(sort(conn))
         mapped=Int32[]
         for (slot,vrow) in enumerate(conn)
@@ -2731,16 +2789,26 @@ function _higher_volume_wb_rebuild_constructor(assembly,m,wb,mapping,source_tags
             end
             push!(mapped,row)
         end
-        child_nodes=hcat(child_nodes,reshape(mapped,3,1))
+        haskey(child_nodes,msh) || (child_nodes[msh]=Vector{Int32}[];
+            child_labels[msh]=UInt64[];child_tags[msh]=Int32[];
+            push!(child_order,msh))
+        push!(child_nodes[msh],mapped)
         event=get(added_cells,(owner,ckey),nothing)
         event===nothing && throw(ArgumentError(
             "$caller: written-back Surface[$tag] constructor child lacks its actual event"))
-        push!(child_labels,event.tag)
-        push!(child_tags,get(child_physical,ckey,_dim01_physical(m,(2,tag))))
+        push!(child_labels[msh],event.tag)
+        push!(child_tags[msh],get(child_physical,ckey,_dim01_physical(m,(2,tag))))
     end
-    if size(child_nodes,2)>0
-        push!(blocks,ElementBlock(2,child_nodes,child_tags))
-        push!(labels,child_labels);push!(owners,fill(Int32(tag),length(child_labels)))
+    for msh in child_order
+        columns=child_nodes[msh]
+        isempty(columns) && continue
+        nodes=Matrix{Int32}(undef,length(columns[1]),length(columns))
+        for (column,conn) in enumerate(columns),slot in eachindex(conn)
+            nodes[slot,column]=conn[slot]
+        end
+        push!(blocks,ElementBlock(msh,nodes,child_tags[msh]))
+        push!(labels,child_labels[msh])
+        push!(owners,fill(Int32(tag),length(child_labels[msh])))
     end
     isempty(extra_uids) || allunique(extra_uids) || throw(ArgumentError(
         "$caller: written-back Surface[$tag] constructor repeats a fresh node UID"))
@@ -3198,7 +3266,8 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
     if !staged && extruded===nothing && length(meshed)>1 && all(tag->
             !haskey(m.meshing.transfinite_volumes,tag) &&
             !isempty(m.volumes[tag]) && !Model._model_factory_volume_encoding(m,tag) &&
-            Model._model_native_hybrid_volume_input(m,tag,input,assembly.caller)!==nothing,meshed)
+            Model._model_native_hybrid_volume_input(m,tag,input,assembly.caller;
+                _deferred_embeds=true)!==nothing,meshed)
         if retained_periodic && m.meshing.algorithm_3d==1
             # Only selected hybrid Regions consume retained copy events here.
             # Other retained model relations keep their own planner admission.
@@ -3315,7 +3384,8 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
             wb_receipt=production isa Model._ModelVolumeGeometryProduction ?
                 production.boundary_writeback : nothing
         end
-        native_rows=mesh isa Mesh && source_rows!==nothing &&
+        native_rows=(mesh isa Mesh || mesh isa MixedMesh) &&
+            source_rows!==nothing &&
             all(!iszero,source_rows) && allunique(source_rows)
         ordinary=extruded===nothing ? nothing : get(extruded.productions,tag,nothing)
         swept=ordinary===nothing ? nothing : _higher_ordinary_sweep_classification(

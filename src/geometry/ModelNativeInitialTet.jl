@@ -257,6 +257,7 @@ end
 end
 
 import ..RecoverCDT
+import ..Recombine3D
 
 # Receipt of the volume-boundary subdivision write-back — see
 # `_model_native_volume_boundary_writeback!` below. `constraints` is the
@@ -286,9 +287,16 @@ mutable struct _ModelNativeVolumeBirths
     element_high_water::UInt64
     cell_source::Union{Nothing,Mesh}
     boundary_writeback::Union{Nothing,_ModelVolumeBoundaryWriteback}
+    # Recombine3D receipt: when the tet fill is combined into hex-dominant
+    # output this holds the `Combine3DResult`; `element_tags` is then the
+    # per-column label vector in `_cache_native_blocks` order and
+    # `boundary_writeback` (possibly synthesized) carries the surface
+    # tri->quad substitution.
+    recombine3d::Union{Nothing,Recombine3D.Combine3DResult}
 end
 _ModelNativeVolumeBirths(node_max::UInt64=UInt64(0),element_max::UInt64=UInt64(0))=
-    _ModelNativeVolumeBirths(nothing,UInt64[],node_max,0,UInt64[],element_max,nothing,nothing)
+    _ModelNativeVolumeBirths(nothing,UInt64[],node_max,0,UInt64[],element_max,
+        nothing,nothing,nothing)
 
 function _model_native_volume_cell_births!(births,mesh)
     births===nothing && return mesh
@@ -343,7 +351,15 @@ function _model_volume_geometry_production(mesh,births,caller)
             "$caller: born volume vertex bindings do not cover producer rows"))
         labels[1:length(births.node_tags)].=births.node_tags
     end
-    cells=if births.cell_source!==nothing && births.cell_source.tets==mesh.tets
+    cells=if births.recombine3d!==nothing
+        # `element_tags` was remapped to the combined block order when the
+        # receipt was adopted; it must cover every emitted dim-3 column.
+        total=_volume_cell_count(mesh)
+        length(births.element_tags)==total && allunique(births.element_tags) &&
+            all(tag->0<tag<=births.element_high_water,births.element_tags) || throw(ArgumentError(
+            "$caller: born recombined volume cell bindings do not cover producer cells"))
+        copy(births.element_tags)
+    elseif births.cell_source!==nothing && births.cell_source.tets==mesh.tets
         length(births.element_tags)==ntets(mesh) && allunique(births.element_tags) &&
             all(tag->0<tag<=births.element_high_water,births.element_tags) || throw(ArgumentError(
             "$caller: born volume cell bindings do not cover producer cells"))
@@ -548,6 +564,102 @@ function _model_certify_native_volume_constraints(mesh,constraints,volume,caller
         for tet in eachcol(mesh.tets),first in 1:3,last in first+1:4
             edge=minmax(tet[first],tet[last])
             edge in required && push!(found,edge)
+        end
+        for (curve,label,edge) in constraints.edges
+            minmax(edge...) in found || throw(ArgumentError(
+                "$caller: Volume[$volume] lost actual Curve[$curve] Line cell $label"))
+        end
+    end
+    return nothing
+end
+
+# The dim-3 face incidence over a combined hex-dominant complex: every odd-
+# incidence triangle is a boundary face, every odd-incidence quadrangle is a
+# boundary face whose two realized triangle halves cover the consumed lower
+# cells upstream's recombined output still certifies against the faces.
+function _model_mixed_volume_faces(mesh::MixedMesh)
+    tris=Dict{NTuple{3,Int32},Int}()
+    quads=Dict{NTuple{4,Int32},Int}()
+    for block in mesh.blocks
+        block isa ElementBlock || continue
+        faces=get(_VOLUME_CELL_FACES,Int(block.msh),nothing)
+        faces===nothing && continue
+        for cell in axes(block.nodes,2),face in faces
+            if length(face)==3
+                key=_sorted_face3(block.nodes[face[1],cell],
+                                  block.nodes[face[2],cell],
+                                  block.nodes[face[3],cell])
+                tris[key]=get(tris,key,0)+1
+            else
+                key=Tuple(sort!(Int32[block.nodes[face[slot],cell]
+                                      for slot in 1:4]))
+                quads[key]=get(quads,key,0)+1
+            end
+        end
+    end
+    return tris,quads
+end
+
+# The 6 triangulation halves of a quadrilateral face set (both diagonals of
+# the (a,b,c,d) cyclic set): (a,b,c),(a,c,d),(a,b,d),(b,c,d) — every sorted
+# 3-subset of the four corners.
+@inline function _quad_face_halves(q::NTuple{4,Int32})
+    a,b,c,d=q
+    return (_sorted_face3(a,b,c),_sorted_face3(a,c,d),
+            _sorted_face3(a,b,d),_sorted_face3(b,c,d))
+end
+
+function _model_certify_native_volume_constraints(mesh::MixedMesh,constraints,
+                                                  volume,caller)
+    tris,quads=_model_mixed_volume_faces(mesh)
+    btri=Set(face for (face,count) in tris if count==1)
+    bquad=Set(face for (face,count) in quads if count==1)
+    # A boundary quadrangle covers the two triangles of whichever diagonal
+    # the consumed lower product emitted; every constraint triangle that is
+    # not itself a boundary face must be a half of a boundary quadrangle
+    # whose complementary half is also declared.
+    expected=Set(_sorted_face3(face...) for (_,_,face) in constraints.outer_faces)
+    realized=Set{NTuple{3,Int32}}(btri)
+    # A boundary quadrangle covers whichever two declared triangles actually
+    # triangulated its region — the cyclic order (and so the diagonal) is
+    # recoverable only from the declared halves themselves, so every declared
+    # 3-subset of the quad corners counts as realized.
+    quad_halves=Set{NTuple{3,Int32}}()
+    for q in bquad,h in _quad_face_halves(q)
+        push!(quad_halves,h)
+    end
+    for f in expected
+        f in quad_halves && push!(realized,f)
+    end
+    half_quad=Dict{NTuple{3,Int32},NTuple{4,Int32}}()
+    for q in bquad,h in _quad_face_halves(q)
+        half_quad[h]=q
+    end
+    for (surface,label,face) in constraints.outer_faces
+        f=_sorted_face3(face...)
+        f in realized || throw(ArgumentError(
+            "$caller: Volume[$volume] lost actual boundary Surface[$surface] " *
+            "cell $label face=$f"))
+    end
+    expected==realized || throw(ArgumentError(
+        "$caller: Volume[$volume] combined boundary differs from its actual Surface cells"))
+    for (surface,label,face) in constraints.embedded_faces
+        f=_sorted_face3(face...)
+        get(tris,f,0)==2 || get(half_quad,f,nothing)!==nothing ||
+            throw(ArgumentError(
+                "$caller: Volume[$volume] lost actual embedded Surface[$surface] cell $label"))
+    end
+    if !isempty(constraints.edges)
+        required=Set(minmax(edge...) for (_,_,edge) in constraints.edges)
+        found=Set{Tuple{Int32,Int32}}()
+        for block in mesh.blocks
+            block isa ElementBlock || continue
+            edges=get(_VOLUME_CELL_EDGES,Int(block.msh),nothing)
+            edges===nothing && continue
+            for cell in axes(block.nodes,2),e in edges
+                edge=minmax(block.nodes[e[1],cell],block.nodes[e[2],cell])
+                edge in required && push!(found,edge)
+            end
         end
         for (curve,label,edge) in constraints.edges
             minmax(edge...) in found || throw(ArgumentError(
@@ -1112,4 +1224,207 @@ function _model_native_volume_point_nodes(mesh,bindings,births,caller)
         nodes[point]=row
     end
     return nodes
+end
+
+# ---------------------------------------------------------------------------
+# Recombine3D adoption: combine the tetrahedral fill into a hex-dominant
+# `MixedMesh`, remap the births/write-back receipts into the combined row
+# space, and splice the emitted surface quadrangles into the products the
+# write-back machinery republishes.
+# ---------------------------------------------------------------------------
+
+# Every mesh-row reference inside a write-back receipt is rebuilt through
+# `old2new` (old volume row -> combined volume row). The combiner only culls
+# rows no emitted cell uses, and boundary vertices are always used.
+function _model_volume_recombine3d_remap_constraints(constraints,old2new)
+    constraints===nothing && return nothing
+    return (outer_faces=Tuple{Int,UInt64,NTuple{3,Int32}}[
+                (s,l,ntuple(i->old2new[f[i]],3)) for (s,l,f) in constraints.outer_faces],
+            embedded_faces=Tuple{Int,UInt64,NTuple{3,Int32}}[
+                (s,l,ntuple(i->old2new[f[i]],3)) for (s,l,f) in constraints.embedded_faces],
+            edges=Tuple{Int,UInt64,Tuple{Int32,Int32}}[
+                (c,l,(old2new[e[1]],old2new[e[2]])) for (c,l,e) in constraints.edges])
+end
+
+function _model_volume_recombine3d_remap_wb(wb,old2new)
+    remap(conn)=Int32[old2new[row] for row in conn]
+    surfaces=Dict{Int,Vector{Tuple{Int,Vector{Int32},UInt64}}}(
+        tag=>Tuple{Int,Vector{Int32},UInt64}[
+            (msh,remap(conn),label) for (msh,conn,label) in list]
+        for (tag,list) in wb.surfaces)
+    curves=Dict{Int,Vector{Tuple{Int,Vector{Int32},UInt64}}}(
+        tag=>Tuple{Int,Vector{Int32},UInt64}[
+            (msh,remap(conn),label) for (msh,conn,label) in list]
+        for (tag,list) in wb.curves)
+    replaced=Dict{Tuple{Int,Int32},Set{Tuple}}(
+        owner=>Set{Tuple}(Tuple(sort!(remap(conn))) for conn in conns)
+        for (owner,conns) in wb.replaced)
+    added=Dict{Tuple{Int,Int32},Vector{Tuple{Int,Vector{Int32},UInt64,Int32}}}(
+        owner=>Tuple{Int,Vector{Int32},UInt64,Int32}[
+            (msh,remap(conn),label,physical) for (msh,conn,label,physical) in list]
+        for (owner,list) in wb.added)
+    nodes=Dict{Int32,Tuple{Int,Int32}}(old2new[row]=>owner for (row,owner) in wb.nodes)
+    params=Dict{Int32,Vector{Float64}}(old2new[row]=>copy(p) for (row,p) in wb.node_params)
+    return _ModelVolumeBoundaryWriteback(
+        _model_volume_recombine3d_remap_constraints(wb.constraints,old2new),
+        nodes,params,surfaces,curves,replaced,added)
+end
+
+_recombine3d_surface_physical(m::GeoModel,s::Int32)=
+    _model_projection_legacy_tag(_model_projection_physical_tags(m,2,Int(s)))
+
+# Which diagonal split of a published Quadrangle cell is consumed by the
+# recombiner's boundary halves? Try both diagonals; a quad is consumed only
+# when both half triangles of one split appear in `halves_set`. Returns the
+# matched half pair, `nothing` when the quad survives.
+function _recombine3d_fold_pair(conn::NTuple{4,Int32},halves_set)
+    for pair in (((conn[1],conn[2],conn[3]),(conn[3],conn[4],conn[1])),
+                 ((conn[1],conn[2],conn[4]),(conn[4],conn[2],conn[3])))
+        h1=_sorted_face3(pair[1]...);h2=_sorted_face3(pair[2]...)
+        h1 in halves_set || h2 in halves_set || continue
+        (h1 in halves_set && h2 in halves_set) || throw(ArgumentError(
+            "recombined volume partially covers an actual Quadrangle cell"))
+        return (h1,h2)
+    end
+    return nothing
+end
+
+# The emitted boundary quadrangle substitution: every emitted quad replaces
+# the two covering boundary cells (fold triangles of one surface cell) in the
+# write-back's complete per-Surface cell lists, drops the consumed children
+# from `added`, deletes the consumed published cells via `replaced`, and
+# joins as a fresh labelled Quad child.
+function _model_volume_recombine3d_splice!(m,volume,res,wb,births,caller)
+    consumed=Dict{Int32,Vector{NTuple{3,Int32}}}()
+    for i in eachindex(res.quads)
+        s=res.quad_surfaces[i];h=res.halves[i]
+        push!(get!(consumed,s,NTuple{3,Int32}[]),h[1],h[2])
+    end
+    # Child physicals the write-back already assigned to consumed cells.
+    child_phys=Dict{NTuple{3,Int32},Int32}()
+    for list in values(wb.added),(msh,conn,_,physical) in list
+        msh==2 && length(conn)==3 || continue
+        child_phys[_sorted_face3(conn[1],conn[2],conn[3])]=physical
+    end
+    for (s,halves) in consumed
+        halves_set=Set(halves)
+        list=get(wb.surfaces,Int(s),nothing)
+        list===nothing && throw(ArgumentError(
+            "$caller: recombined Volume[$volume] lost the actual Surface[$s] cell list"))
+        kept=Tuple{Int,Vector{Int32},UInt64}[]
+        dead=Tuple[]          # consumed published cells (their sorted node keys)
+        dead_halves=0         # boundary triangles they cover
+        for (msh,conn,label) in list
+            if msh==2 && length(conn)==3 &&
+               _sorted_face3(conn[1],conn[2],conn[3]) in halves_set
+                push!(dead,Tuple(sort!(copy(conn))));dead_halves+=1;continue
+            elseif msh==3 && length(conn)==4
+                _recombine3d_fold_pair(ntuple(i->conn[i],4),halves_set)===nothing ||
+                    (push!(dead,Tuple(sort!(copy(conn))));dead_halves+=2;continue)
+            end
+            push!(kept,(msh,conn,label))
+        end
+        dead_halves==2*count(==(s),res.quad_surfaces) || throw(ArgumentError(
+            "$caller: recombined Volume[$volume] could not pair the Surface[$s] " *
+            "boundary triangles its quadrangles consume"))
+        added=get(wb.added,(2,Int32(s)),nothing)
+        # Consumed cells that were themselves not-yet-published `added`
+        # children are filtered out rather than pushed to `replaced`.
+        pre_added=added===nothing ? Set{Tuple}() : Set{Tuple}(
+            Tuple(sort!(copy(e[2])))
+            for e in added if
+                (e[1]==2 && length(e[2])==3 &&
+                 _sorted_face3(e[2][1],e[2][2],e[2][3]) in halves_set) ||
+                (e[1]==3 && length(e[2])==4 &&
+                 _recombine3d_fold_pair(ntuple(i->e[2][i],4),halves_set)!==nothing))
+        added===nothing || filter!(e->!(Tuple(sort!(copy(e[2]))) in pre_added),
+            added)
+        repl=get!(wb.replaced,(2,Int32(s)),Set{Tuple}())
+        for d in dead
+            d in pre_added && continue
+            push!(repl,d)
+        end
+        for i in eachindex(res.quads)
+            res.quad_surfaces[i]==s || continue
+            q=res.quads[i];conn=Int32[q[1],q[2],q[3],q[4]]
+            label=(births.element_high_water+=UInt64(1))
+            push!(kept,(3,conn,label))
+            physical=get(child_phys,res.halves[i][1],
+                _recombine3d_surface_physical(m,s))
+            push!(get!(wb.added,(2,Int32(s)),
+                Tuple{Int,Vector{Int32},UInt64,Int32}[]),
+                (3,conn,label,physical))
+        end
+        wb.surfaces[Int(s)]=kept
+    end
+    return nothing
+end
+
+# Run `Recombine3D.combine_volume_to_hexes` on the final tetrahedral fill and
+# fold the receipts into `births`. `constraints` is the declared lower-cell
+# audit triple list, `effective` its (possibly subdivided) current-row form,
+# `authority` the mesh authority whose products the write-back republishes.
+# Returns the combined `MixedMesh`, or the input `Mesh` when no hexahedron is
+# selected.
+function _model_volume_combine3d!(m,volume,mesh::Mesh,constraints,effective,
+                                  geometry,authority,births,caller)
+    boundary_owner=effective===nothing ? nothing :
+        Dict{NTuple{3,Int32},Int32}(
+            _sorted_face3(face...)=>Int32(s) for (s,_,face) in effective.outer_faces)
+    forbidden=effective===nothing ? nothing :
+        Set{NTuple{3,Int32}}(_sorted_face3(face...) for (_,_,face) in effective.embedded_faces)
+    res=Recombine3D.combine_volume_to_hexes(mesh,boundary_owner;
+        forbidden_tris=forbidden)
+    res===nothing && return mesh
+    old2new=Dict{Int32,Int32}(old=>Int32(new) for (new,old) in enumerate(res.kept_rows))
+    births===nothing && return res.mesh
+    births.recombine3d=res
+    if !isempty(births.node_tags)
+        births.node_tags=births.node_tags[res.kept_rows]
+    end
+    if !isempty(births.element_tags)
+        labels=births.element_tags[res.tet_source]
+        extra=_volume_cell_count(res.mesh)-length(res.tet_source)
+        first=births.element_high_water+UInt64(1)
+        births.element_high_water=Base.checked_add(births.element_high_water,
+            UInt64(extra))
+        births.element_tags=UInt64[labels;collect(first:births.element_high_water)]
+    else
+        births.temporary_elements=max(births.temporary_elements,
+            UInt64(_volume_cell_count(res.mesh)))
+    end
+    isempty(res.quads) && return res.mesh
+    wb=births.boundary_writeback
+    if wb===nothing
+        # The declared boundary already matched: synthesize the write-back
+        # receipt from the constraint cell lists so the emitted quadrangles
+        # still replace the consumed surface triangles atomically.
+        if constraints!==nothing && authority!==nothing
+            surface_cells,_,surface_order,_=_model_volume_wb_constraint_cells(
+                volume,constraints,geometry,authority,caller)
+            surfaces=Dict{Int,Vector{Tuple{Int,Vector{Int32},UInt64}}}()
+            consumed_surfaces=Set{Int}(Int.(res.quad_surfaces))
+            for surface in surface_order
+                surface in consumed_surfaces || continue
+                entries=Tuple{Int,Vector{Int32},UInt64}[]
+                for cell in surface_cells[surface]
+                    push!(entries,(cell.msh,Int32[old2new[row] for row in cell.conn],
+                                   cell.label))
+                end
+                surfaces[surface]=entries
+            end
+            wb=_ModelVolumeBoundaryWriteback(
+                _model_volume_recombine3d_remap_constraints(constraints,old2new),
+                Dict{Int32,Tuple{Int,Int32}}(),Dict{Int32,Vector{Float64}}(),
+                surfaces,Dict{Int,Vector{Tuple{Int,Vector{Int32},UInt64}}}(),
+                Dict{Tuple{Int,Int32},Set{Tuple}}(),
+                Dict{Tuple{Int,Int32},Vector{Tuple{Int,Vector{Int32},UInt64,Int32}}}())
+            births.boundary_writeback=wb
+        end
+    else
+        births.boundary_writeback=_model_volume_recombine3d_remap_wb(wb,old2new)
+        wb=births.boundary_writeback
+    end
+    wb===nothing || _model_volume_recombine3d_splice!(m,volume,res,wb,births,caller)
+    return res.mesh
 end
