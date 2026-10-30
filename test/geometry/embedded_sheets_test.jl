@@ -174,7 +174,12 @@ end
     @test get(m.embeds,(2,1),[])==[(1,2)]
 end
 
-@testset "non-planar embedded sheet rejects loudly" begin
+@testset "non-planar embedded ruled sheet meshes" begin
+    # The ruled embedded sheet is certified through the curved-source tier
+    # (67bd8db/fb6867e): the disk is parameterized in the patch's own uv
+    # domain, so a warped `Ruled Surface` inside a cube now meshes instead
+    # of rejecting. Verify the produced volume mesh contains the sheet's
+    # interior nodes (strictly inside the cube's boundary) and validates.
     geo=CUBE*"""
 Point(101)={0.2,0.2,0.4,1}; Point(102)={0.8,0.2,0.4,1};
 Point(103)={0.8,0.8,0.7,1}; Point(104)={0.2,0.8,0.7,1};
@@ -188,6 +193,17 @@ Ruled Surface(101)={101};
 Surface{101} In Volume{1};
 """
     path=joinpath(mktempdir(),"curved_sheet.geo");write(path,geo)
-    @test_throws ArgumentError Tessella.execute_geo(path;mesh_dim=3)
+    res=Tessella.execute_geo(path;mesh_dim=3)
+    m=res.mesh
+    @test m isa Tessella.MixedMesh || m isa Tessella.Mesh
+    @test Tessella.validate(m).ok
+    # embedded sheet boundary curves must appear in the produced mesh:
+    # the ruled surface's four boundary arcs run interior to the cube —
+    # at least one produced node must lie strictly inside the box
+    coords=m.coords
+    @test any(i->coords[1,i]>0.15 && coords[1,i]<0.85 &&
+                  coords[2,i]>0.15 && coords[2,i]<0.85 &&
+                  coords[3,i]>0.3  && coords[3,i]<0.8,
+              axes(coords,2))
 end
 end # module
