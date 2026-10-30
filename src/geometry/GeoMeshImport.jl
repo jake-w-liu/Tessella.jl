@@ -446,13 +446,20 @@ function _geo_seed_mesh_context!(context,seed)
 end
 
 function _geo_stage_mesh_merge(file,model,seed;context_lc=1.0,forced_bbox=false,
-                               switch_tags=false)
+                               switch_tags=false,match_options=nothing)
     context=_GeoNumericContext();_geo_seed_mesh_context!(context,seed)
     context.file_name=String(file)
     context.native_context_lc=context_lc
     context.native_context_forced_bbox=forced_bbox
     switch_tags &&
         (context.option_numbers[("Mesh",0,"SwitchElementTags")]=1.0)
+    # `Geometry.MatchGeomAndMesh` is a stored session option — the staged
+    # context reads it through `_geo_match_active` like a `.geo` assignment.
+    if match_options!==nothing
+        for (name,value) in match_options
+            context.option_numbers[("Geometry",0,name)]=value
+        end
+    end
     _geo_import_mesh_file!(model,context,file,"API.merge")
     return (model=model,mesh=context.mesh,params=nothing,transfinite_tri=nothing,
         mesh_node_max=context.mesh_node_max,mesh_element_max=context.mesh_element_max,
@@ -468,6 +475,10 @@ _geo_mesh_switch_tags(context)=
 
 function _geo_import_mesh_file!(m,context,file,caller)
     _geo_import_cleared_native_factory!(m,context,file,caller) && return nothing
+    # `Geometry.MatchGeomAndMesh` — `GeomMeshMatcher::match` grafts the file's
+    # mesh onto the current model's entities instead of merging it.
+    _geo_match_active(m,context) &&
+        return _geo_match_mesh_file!(m,context,file,caller)
     switch_tags=_geo_mesh_switch_tags(context)
     mixed,identities=Elements._read_mixed_msh_with_identities(file;switch_tags)
     # Native MSH4 creates ghosts at the live model dimension after ordinary

@@ -237,7 +237,7 @@ end
         # backends still reject — the rejection names the missing feature.
         # `-scale` is implemented (Mesh.ScalingFactor) and no longer
         # belongs on this list.
-        for flag in ("-swapangle","-match")
+        for flag in ("-swapangle",)
             @test occursin("not implemented",
                 _errtext(()->main([geo,"-2",flag,"1"])))
         end

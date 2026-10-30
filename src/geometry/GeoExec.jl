@@ -13557,5 +13557,6 @@ end
 
 include("GeoMeshOrientation.jl")
 include("GeoHomologyNative.jl")
+include("GeoMeshMatch.jl")
 
 end # module

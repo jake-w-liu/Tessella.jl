@@ -307,11 +307,11 @@ end
         @test imported_owners(sparse_in,true)==Int32[9,9]
 
         # Flags that stay rejected keep an informative upstream-accurate
-        # message naming the absent producer.
+        # message naming the absent producer. `-match` is implemented
+        # (Geometry.MatchGeomAndMesh → GeomMeshMatcher::match).
         for (flag,fragment) in (("-4","AdaptMesh"),
                                 ("-part_weight","Partition*Weight"),
                                 ("-swapangle","edge-swap"),
-                                ("-match","GeomMeshMatcher"),
                                 ("-watch","GUI"),
                                 ("-debugSurface","debugSurface.brep"),
                                 ("-run","ONELAB"))
@@ -325,6 +325,18 @@ end
             err isa ArgumentError &&
                 @test occursin(fragment,sprint(showerror,err))
         end
+
+        # `-match` grafts an opened .msh onto the current model's entities
+        # (GeomMeshMatcher::match) — the merged square mesh re-keys to the
+        # native square entities and saves through the session.
+        matched_out=joinpath(directory,"matched.msh")
+        @test Tessella.CLI.main([square_geo,"-merge",square_msh,"-match",
+            "-save","-o",matched_out])==matched_out
+        matched=E.read_mixed_msh(matched_out)
+        @test Tessella.validate(matched).ok
+        owners=sort!(collect(keys(matched.entity_data.entities)))
+        @test (1,1) in owners && (2,1) in owners
+        @test dim_cells(matched,1)>0 && dim_cells(matched,2)>0
     end
 end
 end

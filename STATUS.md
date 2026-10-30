@@ -62,7 +62,50 @@ support or test requirements.
   surface/1 volume owner tags and Physical Surface/Volume bindings,
   three rejection paths with failure atomicity, CLI `-4` end-to-end MSH
   output). Remaining rejected batch flags: `-part_weight`/`-partWeight`,
-  `-swapangle`, `-match`, `-watch`, `-debugSurface`, `-run`/ONELAB.
+  `-swapangle`, `-watch`, `-debugSurface`, `-run`/ONELAB.
+
+### Geometry.MatchGeomAndMesh/`-match` geometry-mesh matching (2026-10-31, working tree)
+
+- **`src/geometry/GeoMeshMatch.jl` (new)** implements
+  `GeomMeshMatcher::match` natively: when `Geometry.MatchGeomAndMesh` is set
+  and the current model is non-empty, an opened/merged `.msh` pairs onto the
+  model's entities — vertices by position within `MatchMeshTolerance`
+  (max-abs score, lowest tag on ties), curves by shared matched endpoints
+  (closed curves admit any closed candidate), faces by matched boundary-curve
+  sets, regions requiring every matched boundary face; multi-candidate ties
+  resolve on an axis-aligned box score with sorted iteration everywhere for
+  determinism. Point/curve counts compare against the mesh totals, surface
+  counts are advisory-only, region counts compare against the model total —
+  the same accounting and messages as upstream.
+- Rebinding re-keys the imported actual mesh to model tags, drops unmatched
+  entities/cells, keeps cells only when every node's owning entity matched
+  (upstream's per-entity vertex map), and applies the physical direction
+  rule: faces/regions adopt the file's memberships and `$PhysicalNames`
+  replace the model's name table while points/curves keep theirs. Previous
+  cells on matched entities are stripped (upstream `deleteMesh`), carrier
+  cells drop through the `carrier_cells` UID binding, and the merge tail
+  rebuilds products/authority/carrier rows/producer rows/done/ranks through
+  the same detached, certified path as `Merge`.
+- Surfaces: `.geo` `Geometry.MatchGeomAndMesh = 1; Merge "x.msh";`,
+  `API.option("Geometry.MatchGeomAndMesh",1)` + `API.merge`,
+  `API.open` on `.msh` over a non-empty model (slot-reusing publish), and
+  CLI `-match` (preopen session option — `tessella model.geo -merge
+  mesh.msh -match -save -o out.msh`). Failures are loud bounded
+  `ArgumentError`s (`.geo` records them as statement errors) and leave the
+  model, mesh and receipts untouched.
+- Verified: `geo_mesh_match_test.jl` 55/55 under
+  `julia --compile=min -O0` — graft onto an unmeshed box (27 entities,
+  direction-rule physicals, per-owner blocks), replace path over a meshed
+  model (fine mesh replaces, not accumulates), failure atomicity on a
+  translated mesh, and the API surface; `cli_frontends_test.jl` gained a
+  `-match -merge -save` smoke pin. Oracle `gmsh box.geo box.msh -match
+  -save` reports "Matched 8/8 nodes, 12/12 curves, 6/6 surfaces, Volumes
+  1/1" and writes the same 27-entity/68-element MSH. Bounded scope: `.msh`
+  inputs (CGNS is dependency-gated upstream too), non-partitioned files, no
+  curve/surface node reprojection (file coordinates kept — genuine matches
+  differ by less than the tolerance).
+- Remaining rejected batch flags: `-part_weight`/`-partWeight`,
+  `-swapangle`, `-watch`, `-debugSurface`, `-run`/ONELAB.
 
 ### LAY02 boundary-layer canonical-row welding + spherical/ruled admission (2026-10-30, oracle-verified)
 

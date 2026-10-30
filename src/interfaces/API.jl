@@ -261,6 +261,12 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "Mesh.ToleranceEdgeLength"=>0.0,
     "Geometry.Tolerance"=>1.0e-8,
     "Geometry.OldRuledSurface"=>0.0,
+    # `GeomMeshMatcher::match` — graft an opened MSH onto the current model's
+    # entities (upstream `matchGeomAndMesh`/`matchMeshScaleFactor`/
+    # `matchMeshTolerance` defaults in DefaultOptions.h).
+    "Geometry.MatchGeomAndMesh"=>0.0,
+    "Geometry.MatchMeshScaleFactor"=>1.0,
+    "Geometry.MatchMeshTolerance"=>1.0e-6,
     "Mesh.MeshOnlyEmpty"=>0.0,
     "Mesh.MeshOnlyVisible"=>0.0,
     "Mesh.MaxRetries"=>10.0,

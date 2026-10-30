@@ -358,7 +358,20 @@ interpolation schemes and higher-order list records reject before publication.
 function open(filename)
     path=_model_import_filename(filename,"API.open")
     return lock(STATE_LOCK) do
-        _model_locked();plan=_model_import_prepare(path,0)
+        current=_model_locked()
+        # `Geometry.MatchGeomAndMesh` — an opened `.msh` grafts onto the
+        # current model's entities through the merge stage (upstream
+        # `GeomMeshMatcher::match` keeps the current model, so the publish is
+        # slot-reusing like `API.merge`).
+        if lowercase(splitext(path)[2])==".msh" &&
+                !iszero(get(OPTIONS,"Geometry.MatchGeomAndMesh",0.0)) &&
+                _current_slot_index_locked()!=0 &&
+                !isempty(Model.model_entities(current))
+            plan=_model_merge_prepare(path)
+            _model_import_publish!(plan;legacy=true)
+            return nothing
+        end
+        plan=_model_import_prepare(path,0)
         _model_import_publish!(plan)
         nothing
     end

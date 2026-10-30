@@ -317,9 +317,7 @@ const _REJECTED_FLAGS=Dict{String,String}(
     # discrete-surface edge-swap pass (meshGFaceBDS edgeSwapTest), which
     # Tessella's surface pipelines do not expose.
     "-swapangle"=>"BDS surface edge-swap optimization (Mesh.AllowSwapAngle) is not implemented",
-    # `Geometry.MatchGeomAndMesh` runs `GeomMeshMatcher::match` — pairing an
-    # imported mesh onto existing model entities — on CGNS/MSH opens.
-    "-match"=>"geometry/mesh matching (GeomMeshMatcher) is not implemented",
+
     "-numsubedges"=>"high-order element display subdivision is GUI-only",
     # Upstream `-debugSurface` restricts surface meshing to a tagged face and
     # dumps `debugSurface.brep`; a diagnostic-only debug knob.
@@ -840,6 +838,11 @@ function _run(tokens::Vector{String})
         elseif a=="-4"
             adapt_seen && throw(ArgumentError("tessella: duplicate -4 flag"))
             adapt_seen=true
+        elseif a=="-match"
+            # Upstream sets `CTX::instance()->geom.matchGeomAndMesh = 1` — a
+            # stored session option consumed while `.msh` files are opened or
+            # merged (`GeomMeshMatcher::match`).
+            numeric_options["Geometry.MatchGeomAndMesh"]=1.0
         elseif a=="-o"
             output_seen && throw(ArgumentError("tessella: duplicate -o flag"))
             i+=1;i<=length(tokens) || throw(ArgumentError("tessella: -o needs a path"))
@@ -1786,7 +1789,8 @@ function _session_main(files,preludes,numeric_options;
     # Options consumed while files are opened/merged must be in `API.OPTIONS`
     # before the file loop — `Mesh.SwitchElementTags` swaps MSH 2.2
     # elementary/physical fields during import.
-    session_preopen_names=("Mesh.SwitchElementTags",)
+    session_preopen_names=("Mesh.SwitchElementTags","Geometry.MatchGeomAndMesh",
+        "Geometry.MatchMeshScaleFactor","Geometry.MatchMeshTolerance")
     preopen_values=Dict{String,Float64}()
     # Literal `.geo` statements need a leading `.geo` file; `(name, value)`
     # option preludes become session options when the session table knows the

@@ -6051,10 +6051,48 @@ the `cli_frontends_test` rejection pins stay green unchanged. Verified:
 MathEval-graded `.geo` box preserving 12/6/1 seg/tri/tet owner tags and both
 physical bindings, three rejection/atomicity cases, `-4` MSH output).
 Remaining rejected batch flags: `-part_weight`/`-partWeight`, `-swapangle`,
-`-match` (`GeomMeshMatcher` — next CLI01 frontend item), `-watch`,
-`-debugSurface`, `-run`/ONELAB. Bounded scope: simplex tetrahedral carriers
-only (mixed/hybrid and 2-D adaptation still reject), `meshAll!=0` warns, and
-the loop is `niter`-bounded rather than upstream's fixed-ten-round profile.
+`-watch`, `-debugSurface`, `-run`/ONELAB. Bounded scope: simplex tetrahedral
+carriers only (mixed/hybrid and 2-D adaptation still reject), `meshAll!=0`
+warns, and the loop is `niter`-bounded rather than upstream's fixed-ten-round
+profile.
+
+2026-10-31 `GeomMeshMatcher`/`-match` increment (P4/CLI01): `-match`,
+`.geo` `Geometry.MatchGeomAndMesh = 1; Merge "x.msh";`, `API.option` +
+`API.merge`, and `API.open` on `.msh` over a non-empty model are now
+implemented in `src/geometry/GeoMeshMatch.jl` (new). Matching mirrors
+upstream `GeomMeshMatcher::match` accounting: vertices by position within
+`MatchMeshTolerance` (max-abs score, lowest mesh tag on ties), curves by
+shared matched endpoints with closed-to-closed handling, faces by matched
+boundary-curve sets, regions requiring every matched boundary face;
+point/curve counts compare against *mesh* totals, surfaces are advisory-only
+(upstream never sets `ok` there), regions compare against the *model* total.
+Multi-candidate ties resolve on an axis-aligned-box distance under sorted
+iteration, so matches are deterministic. Rebinding re-keys the imported
+actual mesh to model entity tags, drops unmatched entities and cells that
+reference dropped nodes (upstream's per-entity vertex map), applies the
+physical direction rule (faces/regions adopt the file's memberships and the
+file's `$PhysicalNames` replace the model's name table; points/curves keep
+theirs), strips previous cells on matched entities (upstream `deleteMesh`)
+through both the actual mesh and the `carrier_cells`-bound carrier, then
+rebuilds products/authority through the same detached certified merge tail.
+Every failure is a bounded `ArgumentError` before model/context mutation —
+`.geo` records it as a statement error and the prior mesh survives. Surfaces
+wired: `_geo_import_mesh_file!` funnel (all `.geo` Merge + staged imports),
+`_geo_stage_mesh_merge` `match_options` seeding, `API.merge`, `API.open`
+slot-reusing publish, CLI `-match` as a `session_preopen_names` option (also
+reachable via `-setnumber Geometry.MatchGeomAndMesh`). `Geometry.*Match*`
+defaults added to `API.DEFAULT_OPTIONS` (`1e-6` tolerance, `1.0` scale,
+`0` enable). Verified: `geo_mesh_match_test.jl` 55/55 under Julia 1.12.7
+`--compile=min -O0` — graft (27 entities, direction-rule physicals,
+per-owner blocks, `validate ok`), replace path over a meshed model,
+translated-mesh failure atomicity, API merge + failing-merge atomicity;
+`cli_frontends_test.jl` `-match -merge -save` smoke (the rejection-pin entry
+was retired) and `cli_save_options_test.jl` updated. Oracle check: `gmsh
+box.geo box.msh -match -save` reports "Matched 8/8 nodes, 12/12 curves, 6/6
+surfaces, Volumes 1/1" and emits the same 27-entity/68-element MSH layout.
+Bounded scope: `.msh` only (CGNS is dependency-gated upstream), no
+partitioned inputs, no geometric node reprojection (file coordinates kept —
+genuine matches differ by less than the tolerance).
 
 ## Gotchas learned the hard way
 
