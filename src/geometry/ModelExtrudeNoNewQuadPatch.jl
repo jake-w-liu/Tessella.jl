@@ -455,6 +455,12 @@ function _extrude_nonew_quad_patch_lateral(m::GeoModel,t::Int,params::_GeoExtrud
         coordinates[3,node]=point[3]
     end
     recombine=_extrude_quadtri_lateral_recombine(m,t,params,caller)
+    if recombine && !catalog.recombined && _extrude_nonew_split_wall(m,t,caller)
+        # A wall welded between owners that all emit it split overrides the
+        # neighbor-agreed recombined-style answer: this catalog's certified
+        # diagonals still choose every boundary quadrangle's split.
+        recombine=false
+    end
     recombine==catalog.recombined || _extrude_nonew_quad_patch_error(caller,
         "lateral Surface[$t] policy differs from its retained catalog")
     cells_per_interval=recombine ? 2 : 4

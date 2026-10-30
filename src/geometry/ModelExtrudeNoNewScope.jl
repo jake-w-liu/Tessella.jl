@@ -1025,7 +1025,7 @@ function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
                 # stay in whole quads; every NoNewVerts owner fans them
                 # instead.
                 s_link[1]==1 || continue
-                _extrude_nonew_wall_split(working,owners,caller) || continue
+                _extrude_nonew_wall_split(working,s,owners,caller) || continue
                 # The earliest NoNewVerts owner bound the shared Surface —
                 # an unrecombined ordinary partner plans outside the scope
                 # and holds no diagonal contract (its subdivision receives

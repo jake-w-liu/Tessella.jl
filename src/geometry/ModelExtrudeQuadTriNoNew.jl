@@ -629,28 +629,55 @@ function _extrude_nonew_generic_source(m::GeoModel,source::Int,
 end
 
 # A welded lateral wall may keep its split emission only when every
-# NoNewVerts owner is a Region whose own catalog is the generic single-quad
-# family — the diagonal contract transports between them — and every
-# ordinary partner is unrecombined: the partner's prism subdivision emits
-# the same diagonal triangles upstream keeps for it, and the bound wall's
-# diagonals seed the global `SubdivideExtrudedMesh` edge set so both arrive
-# on one facet set. A wall with a recombined ordinary/AddVerts partner or a
-# non-generic NoNewVerts owner stays in whole quadrangles upstream (the
-# generic owners fan their layers to centroids, so the welded face is the
-# pyramid base) — the same end the mixed-partner oracle reaches.
-function _extrude_nonew_wall_split(m::GeoModel,owners,caller::AbstractString)
+# NoNewVerts owner emits the wall split — the generic single-quad catalog
+# carries a transported per-side diagonal contract, and every other
+# catalog family still splits every boundary lateral quadrangle while it is
+# not RecombLaterals (its per-quad subdivision diagonal is certified by the
+# retained plan, so its emission either transports the contract or is
+# compared bitwise by the shared-part dedup) — and every ordinary partner
+# is unrecombined: the partner's prism subdivision emits the same diagonal
+# triangles upstream keeps for it, and the bound wall's diagonals seed the
+# global `SubdivideExtrudedMesh` edge set so both arrive on one facet set.
+# A wall with a recombined ordinary/AddVerts partner or a RecombLaterals
+# NoNewVerts owner stays in whole quadrangles upstream (the generic owners
+# fan their layers to centroids, so the welded face is the pyramid base) —
+# the same end the mixed-partner oracle reaches. The oracle also keeps the
+# wall whole when `Recombine Surface{s}` constrains it directly — its
+# owners fan — while leaving every other generated lateral's split
+# emission alone, so a recombined wall joins the whole-quad side too.
+function _extrude_nonew_wall_split(m::GeoModel,s::Int,owners,
+                                   caller::AbstractString)
+    _model_surface_recombined(m,s) && return false
     for owner in owners
         entry=_extrude_entity_params(m,3,owner,caller)
         entry===nothing && return false
         o_params,_,o_link=entry
         o_link[1]==2 || return false
         if _extrude_is_nonew(o_params)
-            _extrude_nonew_generic_source(m,abs(o_link[2]),caller) || return false
+            (_extrude_nonew_generic_source(m,abs(o_link[2]),caller) ||
+             !o_params.recomb_laterals) || return false
         else
             o_params.recombine && return false
         end
     end
     return true
+end
+
+# Whether shared lateral `t` is certified between owners that all emit it
+# split — the same rule `_extrude_nonew_wall_split` applies when the
+# connected component plans the wall's transported contract, read off the
+# surface's adjacent Regions instead of a validated owner set. Regions that
+# use `t` as their sweep Source are not wall owners and never carry the
+# lateral contract, so they are left out of the test.
+function _extrude_nonew_split_wall(m::GeoModel,t::Int,caller::AbstractString)
+    owners=Int[]
+    for r in _extrude_quadtri_regions(m,t,caller)
+        source=get(m.meshing.extrude_sources,(3,r),nothing)
+        source!==nothing && abs(source[2])==t && continue
+        push!(owners,r)
+    end
+    length(owners)>=2 || return false
+    return _extrude_nonew_wall_split(m,t,owners,caller)
 end
 
 function _extrude_nonew_quad_patch_candidate(m::GeoModel,source::Int,sides::Int,
@@ -735,19 +762,21 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
     b4_strip=strip_shape!==nothing
     two_tri=!quad_patch && !quad_strip && !three_quad_strip && !four_quad_strip && !rect_grid && !b4_strip &&
         _extrude_nonew_two_tri_candidate(m,source,sides,caller)
-    # Only the generic single-quad catalog carries shared-lateral wall
-    # contracts — a copied shared cap is not a lateral and leaves every
-    # certified catalog free. A wall that stays in whole quadrangles (an
-    # ordinary/AddVerts partner or a non-generic NoNewVerts owner upstream
-    # refuses to split) carries no contract either, so a non-generic owner
+    # A copied shared cap is not a lateral and leaves every certified
+    # catalog free. A wall that stays in whole quadrangles (an
+    # ordinary/AddVerts partner or a RecombLaterals NoNewVerts owner keeps
+    # quads upstream) carries no contract either, so a non-generic owner
     # may free-emit it and let the shared-part dedup and joint incidence
-    # certificate decide; a split wall still requires the generic catalog.
+    # certificate decide. A split wall is bounded to four-sided sources:
+    # the generic catalog still carries the transported contract while a
+    # non-generic owner either binds the wall — its own certified split
+    # emission becomes the contract its partners reproduce — or free-emits
+    # it as a later owner, where the dedup decides whether its boundary
+    # diagonals coincide bitwise with the bound part.
     split_walls=[key for key in keys(shared) if
         get(m.meshing.extrude_sources,(2,key),(0,0))[1]==1 &&
-        _extrude_nonew_wall_split(m,shared[key],caller)]
-    isempty(split_walls) || (sides==4 && !quad_patch && !quad_strip &&
-        !three_quad_strip && !four_quad_strip && !rect_grid && !b4_strip &&
-        !two_tri) ||
+        _extrude_nonew_wall_split(m,key,shared[key],caller)]
+    isempty(split_walls) || sides==4 ||
         _extrude_nonew_shared_planner_error(caller,minimum(
             isempty(split_walls) ? collect(keys(shared)) : split_walls))
     grid_nodes,grid_cells_per_interval,grid_centers,grid_interval_centers=if rect_grid
@@ -890,7 +919,7 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
     for (s,owners) in shared
         s_link=get(m.meshing.extrude_sources,(2,s),nothing)
         (s_link===nothing || s_link[1]!=1) && continue
-        _extrude_nonew_wall_split(m,owners,caller) && continue
+        _extrude_nonew_wall_split(m,s,owners,caller) && continue
         side=_extrude_nonew_whole_side(m,cell,source_mesh,
             abs(s_link[2]),s,caller)
         side in whole_sides && _extrude_nonew_shared_planner_error(caller,s)

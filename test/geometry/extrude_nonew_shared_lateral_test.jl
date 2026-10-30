@@ -793,4 +793,224 @@ end
         b[]=Extrude{1,0,0}{Surface{a[0]};Layers{2};Recombine;QuadTriNoNewVerts;};
         """;mesh_dim=3)
     end
+
+    @testset "non-generic NoNewVerts owner transports the split wall" begin
+        # A two-quadrangle strip Source lands the left Region on the
+        # `_ExtrudeNoNewQuadStripCatalog` family while the right Region is
+        # the generic single-quad catalog. The Gmsh 4.15.2 oracle welds the
+        # literal lateral between them (24 nodes; both Regions remesh the
+        # wall) — its joint solver keeps layer two a whole quad while
+        # splitting layer one. Tessella's strip catalog always splits its
+        # boundary quadrangles, so the certified weld here is the strip's
+        # own all-split wall transported as a contract to the generic
+        # partner — a conforming decomposition that differs from the
+        # oracle's per-layer mixed choice only inside the welded wall.
+        execution=_sl_model("""
+        Point(1)={0,0,0,1}; Point(2)={2,0,0,1};
+        Point(3)={2,1,0,1}; Point(4)={0,1,0,1};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        Point(5)={3,0,0,1};Point(6)={3,1,0,1};
+        Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+        Curve Loop(2)={5,6,7,-2};Plane Surface(2)={2};
+        Transfinite Curve{1,3}=3;
+        Transfinite Curve{2,4,5,6,7}=2;
+        Transfinite Surface{1};Transfinite Surface{2};
+        Recombine Surface{:};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        model=execution.model
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test allunique(Tuple(merged.coords[:,node]) for node in 1:nnodes(merged))
+        @test nnodes(merged)==24
+        s=_sl_shared_tag(execution)
+        @test sort(_extrude_quadtri_regions(model,s,_SL_CALLER))==[1,2]
+        pass=_extrude_volume_pass(model,_SL_CALLER)
+        scope=pass.scope
+        @test scope!==nothing
+        bound=scope.surfaces[s]
+        @test validate(bound).ok && validate(pass.parts[1]).ok &&
+            validate(pass.parts[2]).ok
+        # The certified welded wall: the strip binder's per-layer diagonals
+        # transported through the generic partner's forced chain contract —
+        # identical bound part, identical incidences, opposite orientation.
+        wall=_sl_surface_faces(bound)
+        @test all(length(key)==3 for key in wall)
+        @test Set(keys(_sl_wall_cycles(pass.parts[1],2.0)))==
+            Set(keys(_sl_wall_cycles(pass.parts[2],2.0)))==wall
+        left=_sl_wall_cycles(pass.parts[1],2.0)
+        right=_sl_wall_cycles(pass.parts[2],2.0)
+        for key in keys(left)
+            @test _sl_reversed(left[key],right[key])
+        end
+        @test _sl_part_equal(scope.volumes[1].surfaces[s],bound)
+        @test _sl_part_equal(scope.volumes[2].surfaces[s],bound)
+        @test _sl_part_equal(mesh_model_surface(model,s),bound)
+        @test _sl_dim2_faces_on(merged,1,2.0)==wall
+        _sl_positive(pass.parts[1]);_sl_positive(pass.parts[2])
+        counts=_sl_face_counts(pass.parts[1],pass.parts[2])
+        @test all(c in (1,2) for c in values(counts))
+        interior=Set(k for (k,c) in counts if c==2)
+        @test Set(k for k in interior if all(v->v[1]==2.0,k))==wall
+        # The generic-first order binds the other way: the generic plan's
+        # all-split wall coincides bitwise with the strip's emission, so the
+        # same certified weld assembles.
+        execution=_sl_model("""
+        Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+        Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        Point(5)={3,0,0,1};Point(6)={3,1,0,1};
+        Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+        Curve Loop(2)={5,6,7,-2};Plane Surface(2)={2};
+        Transfinite Curve{5,7}=3;
+        Transfinite Curve{1,2,3,4,6}=2;
+        Transfinite Surface{1};Transfinite Surface{2};
+        Recombine Surface{:};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==24
+        s=_sl_shared_tag(execution)
+        pass=_extrude_volume_pass(execution.model,_SL_CALLER)
+        bound=pass.scope.surfaces[s]
+        wall=_sl_surface_faces(bound)
+        @test Set(keys(_sl_wall_cycles(pass.parts[1],1.0)))==
+            Set(keys(_sl_wall_cycles(pass.parts[2],1.0)))==wall
+        _sl_positive(pass.parts[1]);_sl_positive(pass.parts[2])
+        # The same strip Source swept against an unrecombined partner
+        # already welded the split wall through the seeded subdivision —
+        # pin the exact emitted facets the oracle keeps (Gmsh 4.15.2
+        # `r1_nongeneric_norecomb` capture: four triangles on the wall).
+        execution=_sl_model("""
+        Point(1)={0,0,0,1}; Point(2)={2,0,0,1};
+        Point(3)={2,1,0,1}; Point(4)={0,1,0,1};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        Point(5)={3,0,0,1};Point(6)={3,1,0,1};
+        Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+        Curve Loop(2)={5,6,7,-2};Plane Surface(2)={2};
+        Transfinite Curve{1,3}=3;
+        Transfinite Curve{2,4,5,6,7}=2;
+        Transfinite Surface{1};Transfinite Surface{2};
+        Recombine Surface{1};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==24
+        s=_sl_shared_tag(execution)
+        pass=_extrude_volume_pass(execution.model,_SL_CALLER)
+        bound=pass.scope.surfaces[s]
+        wall=_sl_surface_faces(bound)
+        @test wall==Set((
+            ((2.0,0.0,0.0),(2.0,0.0,0.5),(2.0,1.0,0.5)),
+            ((2.0,0.0,0.0),(2.0,1.0,0.0),(2.0,1.0,0.5)),
+            ((2.0,0.0,0.5),(2.0,0.0,1.0),(2.0,1.0,1.0)),
+            ((2.0,0.0,0.5),(2.0,1.0,0.5),(2.0,1.0,1.0))))
+        for tag in (1,2)
+            @test Set(keys(_sl_wall_cycles(pass.parts[tag],2.0)))==wall
+            _sl_positive(pass.parts[tag])
+        end
+        # A strip Source whose wall must stay whole — the partner is an
+        # ordinary `Layers+Recombine` sweep — cannot fan inside the retained
+        # catalog. The oracle welds that wall in whole quads (its strip
+        # boundary cells adapt); the bounded catalog keeps the loud
+        # retained-policy diagnostic instead.
+        @test_throws r"policy differs from its retained catalog" _sl_model("""
+        Point(1)={0,0,0,1}; Point(2)={2,0,0,1};
+        Point(3)={2,1,0,1}; Point(4)={0,1,0,1};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        Point(5)={3,0,0,1};Point(6)={3,1,0,1};
+        Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+        Curve Loop(2)={5,6,7,-2};Plane Surface(2)={2};
+        Transfinite Curve{1,3}=3;
+        Transfinite Curve{2,4,5,6,7}=2;
+        Transfinite Surface{1};Transfinite Surface{2};
+        Recombine Surface{:};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;};
+        """;mesh_dim=3)
+        # Two strip Sources welded on one wall: upstream's QuadToTri solve
+        # fails outright on the partner's lateral (37 errors, no volume 2
+        # cells), so the shared-part dedup keeps the loud planner
+        # diagnostic here as well.
+        @test_throws r"shared-region planner" _sl_model("""
+        Point(1)={0,0,0,1}; Point(2)={2,0,0,1};
+        Point(3)={2,1,0,1}; Point(4)={0,1,0,1};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        Point(5)={4,0,0,1};Point(6)={4,1,0,1};
+        Line(5)={3,5};Line(6)={5,6};Line(7)={6,4};
+        Curve Loop(2)={5,6,7,-3};Plane Surface(2)={2};
+        Transfinite Curve{1,3,5,7}=3;
+        Transfinite Curve{2,4,6}=2;
+        Transfinite Surface{:};
+        Recombine Surface{:};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+    end
+
+    @testset "constrained and compound shared-wall boundaries" begin
+        # `Recombine Surface{...}` applied to the generated wall — the same
+        # outcome an end-of-file `Recombine Surface{:}` reaches — makes the
+        # oracle keep the welded wall in whole quadrangles while every free
+        # lateral stays split (Gmsh 4.15.2 `r2_recomb_*` captures: both
+        # Regions fan, 2 quads on the wall). The certified owners fan their
+        # layers and the bound part is the oracle's whole-quad pair.
+        for suffix in (
+                "Recombine Surface{left[3]};\n",
+                "Recombine Surface{:};\n")
+            execution=_sl_model(_sl_squares()*"""
+            left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+            right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+            """*suffix;mesh_dim=3)
+            model=execution.model
+            merged=execution.mesh
+            @test validate(merged).ok
+            s=_sl_shared_tag(execution)
+            pass=_extrude_volume_pass(model,_SL_CALLER)
+            bound=pass.scope.surfaces[s]
+            wall=_sl_surface_faces(bound)
+            @test all(length(key)==4 for key in wall)
+            @test length(wall)==2
+            for tag in (1,2)
+                @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
+                _sl_positive(pass.parts[tag])
+            end
+        end
+        # A periodic relation declared on the shared wall or its
+        # generatrix resolves nothing geometrically — upstream reports the
+        # failed connection and welds the wall anyway; the identical
+        # certified weld assembles here.
+        execution=_sl_model(_sl_squares()*"""
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        Periodic Curve{4}={-6} Translate{2,0,0};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        s=_sl_shared_tag(execution)
+        pass=_extrude_volume_pass(execution.model,_SL_CALLER)
+        bound=pass.scope.surfaces[s]
+        wall=_sl_surface_faces(bound)
+        @test Set(keys(_sl_wall_cycles(pass.parts[1],1.0)))==
+            Set(keys(_sl_wall_cycles(pass.parts[2],1.0)))==wall
+        # Compound surfaces over the sweep Sources break upstream's
+        # extruded-vertex search outright (23 errors, no volume 2 cells),
+        # so the dedicated compound diagnostic stays.
+        @test_throws r"compound boundary entities" _sl_model(
+            _sl_squares()*"""
+            Compound Surface{1,2};
+            left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+            right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+            """;mesh_dim=3)
+    end
 end

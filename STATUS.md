@@ -24,6 +24,40 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### LAY01 residuals — non-generic shared walls, constrained/periodic/compound boundaries, nonlinear sources (2026-10-31, working tree)
+
+- **Non-generic NoNew catalogs on shared walls.** `_extrude_nonew_wall_split`
+  (`src/geometry/ModelExtrudeQuadTriNoNew.jl`) now takes the wall Surface tag
+  and admits non-`RecombLaterals` catalog owners (quad/3-quad/4-quad strips,
+  quad patch, rect grid, two-tri): their certified per-quad split emission is
+  compared bitwise by the shared-part dedup instead of being planner-rejected.
+  A direct `Recombine Surface{s}` or `Recombine Surface{:}` constraint on the
+  wall forces whole-quad emission for every owner, matching the oracle
+  (2 quads on the wall vs the default 4 triangles). New
+  `_extrude_nonew_split_wall(m,t,caller)` resolves wall ownership from
+  adjacent Regions (excluding Regions that use the surface as their sweep
+  Source) and lets every catalog lateral emitter normalize its `recombine`
+  answer to split when all wall owners emit split — the retained-catalog
+  "policy differs" diagnostic still fires when the wall must stay whole.
+- **Constrained/periodic/compound boundaries.** `Periodic Curve`/`Surface`
+  relations declared on the shared wall or its generatrix weld identically to
+  upstream (Gmsh 4.15.2 reports the failed correspondence but still meshes);
+  a `Periodic Surface` with overlapping point tags keeps the atomic
+  disjoint-point diagnostic. `Compound Surface` over sweep Sources stays
+  planner-rejected — the oracle itself produces 23 errors and no volume 2.
+- **Nonlinear retained sources.** Transfinite ruled/BSpline sources reach the
+  generic single-quad catalog and weld (20 nodes vs oracle's 20; upstream's
+  per-layer adaptive split wall — 1 quad + 2 tris — is approximated by a
+  uniform 4-tri wall; node set identical). Non-transfinite nonlinear sources
+  meshing to multiple unstructured cells keep the loud "multiple source
+  cells require the boundary-category planner" diagnostic — the oracle
+  reaches these, so it remains a documented catalog gap. A nonlinear shared
+  *generatrix* (curved welded wall) fails upstream with 15 errors, so the
+  rejection is upstream-consistent.
+- Verified: `test/geometry/extrude_nonew_shared_lateral_test.jl` 762/762,
+  `test/geometry/geo_extrude_test.jl` exit 0, `geo_quadtri_extrude_test.jl`
+  exit 0 (Julia 1.12.7 `--check-bounds=yes --compile=min -O0`).
+
 ### AdaptMesh/`-4` native adaptive remeshing (2026-10-31, working tree)
 
 - **`Mesh3D.adapt_mesh` (`src/meshing/AdaptMesh.jl`, new).** Bounded

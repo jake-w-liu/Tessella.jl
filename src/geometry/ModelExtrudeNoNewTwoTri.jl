@@ -417,6 +417,13 @@ function _extrude_nonew_two_tri_lateral(m::GeoModel,t::Int,
         coordinates[3,node]=point[3]
     end
     recombine=_extrude_quadtri_lateral_recombine(m,t,params,caller)
+    if recombine && !params.recomb_laterals &&
+            _extrude_nonew_split_wall(m,t,caller)
+        # A wall welded between owners that all emit it split overrides the
+        # neighbor-agreed recombined-style answer: the certified plan's
+        # diagonals still choose the split.
+        recombine=false
+    end
     if recombine
         nodes=Matrix{Int32}(undef,4,intervals)
         for level in 1:intervals
