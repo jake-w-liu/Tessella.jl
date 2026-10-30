@@ -12063,3 +12063,84 @@ side is deliberately not reproduced — the native conforming split is a
 documented, better-formed difference. Scratch `_emb01_audit/` probes and
 oracle fixtures remain untracked.
 
+
+## 2026-10-31 — Recombine pinned-capture environment + O(1) SoS tie-break in CDT locate (Devin subagent)
+
+Two independent resolved threads on `main`.
+
+### A. `recombine_test.jl` pinned-priority failures were a capture-environment mismatch, not a compiler-mode or production bug
+
+- Reported symptom: `test/meshing/recombine_test.jl` "Pinned native
+  directed-edge priority and public labels" (570 assertions) failed 72/570
+  under `-O2`. Investigated under both `-O2` and `--compile=min -O0`:
+  identical failures in both modes, and identical failures on a worktree
+  at `b7645a9` — predating the receipt that claimed the pins passed under
+  `--compile=min`. Mode-independent ⇒ compile-mode gating rejected.
+- Root cause: `RecombineNativePriorityRegressionTests.public_recombine`
+  left `Mesh.RecombineMinimumQuality` at its default `0.01`, while the
+  artifact `test/artifacts/recombine_priority_primary.txt` was captured
+  with the gate at `0`. With the default, Tessella's upstream-faithful
+  `_primary_postquality_split` (Gmsh `recombineIntoQuads`→`quadsToTriangles`,
+  `eta < minqual + 1e-12`) splits the pathological `{1,2,3,4}` quad
+  (raw η ≈ 0) into triangles 90007/90008 — exactly the observed output.
+- Live Gmsh 4.15.2 Python harness (installed SDK, `gmsh-4.15.2`):
+  default quality reproduced Tessella's split output on all 72 divergent
+  cases; explicit `Mesh.RecombineMinimumQuality=0` reproduced the pinned
+  artifact **exactly** (`ndiff 0`, including quad tag 90004 and the
+  element-tag high-water marks).
+- Fix (test-only): the helper now declares
+  `api.option("Mesh.RecombineMinimumQuality",0)` with a comment recording
+  the capture environment. No production change — the implementation is
+  upstream-faithful for the active default.
+- Receipts: probe 90/90 pass at `--compile=min`; full file at `-O2`
+  **exit 0** (all testsets incl. pins 570/570 and allocation budgets);
+  `--compile=min -O0` 428/443 with only the 15 documented
+  `@allocated==0` budget assertions failing (expected under interpreted
+  compilation); `recombine_matching_test.jl` all testsets pass exit 0.
+
+### B. t20 trimmed-NURBS CDT residual was `orient2_sos`'s exact-SoS cofactor enumeration in `locate` — fixed with an O(1) exact tie-break
+
+- Profile (`Profile.@profile`, `-O2`, on the dumped `_t20_pslgs.dat`
+  fixtures): ~99% of `constrained_delaunay` time on the slow faces sat in
+  `locate` → `orient2_sos` → `_orient2_sos_exact` → `_orient_nd_sos_exact`
+  (Predicates.jl:576–617) — the BigInt cofactor enumeration over partial
+  matrix matchings (Rational{BigInt} minors, Set/Vector churn). The dense
+  pcurve sampling emits long runs of *exactly collinear* uv points, so
+  nearly every walk edge test degenerated to the BigInt SoS path.
+- A counting probe (replicated A-stage filter) refuted the prior
+  incircle/BigInt hypothesis: the slowest faces had only ~1% incircle
+  exact-fallback (~300 calls); fast faces had 3–6%.
+- In `_orient_nd_sos_exact` the perturbation exponent of entry (r,c) is
+  `2^(2·rk_r − c)`; for three distinct-coordinate collinear arguments the
+  leading nonzero cofactor is always the lowest-index argument's
+  y-column (exp 1) then x-column (exp 2) entry, whose complement minors
+  are the other two arguments' `x` resp. `y` difference in argument
+  order — decidable by an exact `Float64` comparison, no arithmetic.
+- Implemented `_orient2_sos` (Mesh2D.jl:428–444): computes `orient2`
+  first (exact, cheap), and on an exact collinearity resolves the SoS
+  sign in O(1) from the lowest-index argument's position parity and the
+  other two points' coordinate order; coincident-coordinate inputs still
+  delegate to canonical `orient2_sos`. `locate` (Mesh2D.jl:481) uses it.
+- Equivalence verified exhaustively pre-implementation
+  (`_sos_fast_verify.jl`, 290,066 cases, **0 mismatches**): all 6 index
+  permutations × 40k random collinear triples, axis-aligned/vertical/
+  horizontal lines, ±0.0, subnormals (5e-324), 1e160 extremes,
+  coincident-coordinate inputs, 50k non-collinear randoms.
+- Result (`_t20_pslg_bench.jl` on all 15 dumped t20 faces): **every
+  triangulation signature byte-identical** (sha256 over sorted triangles,
+  constraints, internal edges, alive flags, interior classification and
+  all coordinates) vs the `_t20_pslg_bench_after.txt` pins, with CDT
+  aggregate ~13.5 s → ~0.6 s; worst face 10: 2.16 s → 0.022 s (~98×),
+  face 4: 3.11 s → 0.19 s (~16×). No predicate result changed — the
+  sign returned is identical by construction and by verification.
+- Receipts: `mesh2d_test.jl` 925/925 exit 0; `recover_cdt_topology_test.jl`
+  all testsets pass exit 0; `recombine_test.jl` `-O2` exit 0 (Track A);
+  `recombine_matching_test.jl` exit 0. t20 residual CDT cost is now
+  dominated by ordinary insertion work (locate walk + cavity expansion),
+  not exact-arithmetic fallback.
+
+**Not claimed.** The SoS fast path covers only the collinear-3
+`orient2_sos` case on the Mesh2D locate walk; `incircle_sos`'s deeper
+degeneracies, `orient3_sos`/`insphere_sos` and the canonical
+`_orient_nd_sos_exact` remain unchanged and available. Bounded-suite
+evidence only; no parity claim beyond the verified receipts.

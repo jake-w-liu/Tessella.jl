@@ -412,6 +412,37 @@ end
 # Point location (Lawson walk, ghost-aware)
 # ════════════════════════════════════════════════════════════════════════════════
 
+# Exact SoS orientation with an O(1) collinear tie-break. `orient2_sos` resolves
+# an exact collinearity through `_orient_nd_sos_exact`'s BigInt cofactor
+# enumeration; sampled constraint wires hand the locate walk long runs of
+# exactly collinear vertices, so that enumeration dominates dense PSLGs. For
+# three distinct-coordinate collinear arguments the canonical evaluator's first
+# nonzero cofactor is always the lowest-index argument's y-column (ε-exponent 1)
+# or x-column (exponent 2) entry, whose complement minors are the other two
+# arguments' x- resp. y-difference taken in argument order — so the sign is
+# decided by an exact coordinate comparison, with no arithmetic at all.
+# Verified exhaustively against the canonical evaluator (all index orders,
+# axis-aligned/subnormal/extreme/coincident coordinates); coincident-coordinate
+# inputs, the only case whose leading cofactor sits deeper, still take the
+# canonical path so the returned sign is identical for every input.
+@inline function _orient2_sos(pa, pb, pc, ia, ib, ic)
+    (ia != ib && ib != ic && ia != ic) || return orient2_sos(pa, pb, pc, ia, ib, ic)
+    s = orient2(pa, pb, pc)
+    s != 0 && return s
+    x1, y1 = pa; x2, y2 = pb; x3, y3 = pc
+    if ia < ib && ia < ic          # r*=arg 1 (odd pos): -sign(x2-x3), +sign(y2-y3)
+        x2 != x3 && return x2 > x3 ? -1 : 1
+        y2 != y3 && return y2 > y3 ? 1 : -1
+    elseif ib < ic                 # r*=arg 2 (even pos): +sign(x1-x3), -sign(y1-y3)
+        x1 != x3 && return x1 > x3 ? 1 : -1
+        y1 != y3 && return y1 > y3 ? -1 : 1
+    else                           # r*=arg 3 (odd pos): -sign(x1-x2), +sign(y1-y2)
+        x1 != x2 && return x1 > x2 ? -1 : 1
+        y1 != y2 && return y1 > y2 ? 1 : -1
+    end
+    return orient2_sos(pa, pb, pc, ia, ib, ic)
+end
+
 # Remembering *stochastic* walk (Devillers–Pion–Teillaud): at each triangle test
 # the three edges starting from a pseudo-random offset and cross the first edge
 # `p` is outside of, never immediately back to `prev`. Randomizing the edge order
@@ -447,7 +478,7 @@ function locate(T::Triangulation, px, py, vid; start::Integer=T.last)
             end
             a, b = _edge(T, t, k)
             # p strictly right of CCW edge a→b ⇒ outside t across edge k
-            if orient2_sos((T.x[a],T.y[a]),(T.x[b],T.y[b]),(px,py), a, b, Int32(vid)) < 0
+            if _orient2_sos((T.x[a],T.y[a]),(T.x[b],T.y[b]),(px,py), a, b, Int32(vid)) < 0
                 prev = Int32(t); t = nb; moved = true; break
             end
         end
