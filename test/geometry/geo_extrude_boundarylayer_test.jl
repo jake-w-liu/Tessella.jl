@@ -800,3 +800,147 @@ end
     @test sort!(unique!(round.(mesh.coords[3, :]; digits=12))) ≈
         [0.0, 1/3, 2/3, 1.0]
 end
+
+@testset ".geo boundary-layer curved ruled source Mesh 3" begin
+    # A ruled (non-planar) source admitted through the generic-face path:
+    # upstream's `ExtrudeSurface` resolves `BOUNDARY_LAYER` chapeau curves
+    # through `GModel::getFaceByTag`, so any meshable `MSH_SURF_REGL` is a
+    # valid source — the OpenCASCADE parser alone rejects the mode. The
+    # quarter-wall patch between a horizontal and a tilted circle arc is
+    # genuinely warped, so the native Frontal-Delaunay fill runs in the
+    # ruled `(u,v)` domain under the first-fundamental metric.
+    src = """
+        Point(1) = {1,0,0,0.2};
+        Point(2) = {0,0,0,0.2};
+        Point(3) = {0,1,0,0.2};
+        Point(4) = {1,0,1,0.2};
+        Point(5) = {0,1,1,0.2};
+        Circle(1) = {1,2,3};
+        Line(2) = {3,5};
+        Circle(3) = {4,2,5};
+        Line(4) = {1,4};
+        Curve Loop(1) = {1,2,-3,-4};
+        Ruled Surface(1) = {1};
+        out[] = Extrude { Surface{1}; Layers{3}; Recombine; };
+        """
+    r = _execute_bl_source(src; mesh_dim=3)
+    @test r.errors == String[]
+    # Entity layout is the oracle's NEWREG order — chapeau 26, volume 1 and
+    # the four lateral strips.
+    @test r.lists["out"] == [26.0, 1.0, 13.0, 17.0, 21.0, 25.0]
+    # Boundary-layer products are position-canonical: every consumer that
+    # sweeps the face mesh (chapeau, strips, volume) must reuse the rows
+    # `prepare` resolved — the ownership certificate previously rejected
+    # the chapeau here when a retained-product position one ulp off the
+    # resolved key recomputed its own top row.
+    for t in (13, 17, 21, 25)
+        @test _bl_cells(geo_entity_mesh(r, 2, t))[2] ==
+            (t == 13 ? 24 : t == 17 ? 15 : t == 21 ? 24 : 15)
+    end
+    for c in (11, 12, 16, 20)
+        @test _bl_cells(geo_entity_mesh(r, 1, c)).tris +
+              _bl_cells(geo_entity_mesh(r, 1, c)).quads == 0
+        part = geo_entity_mesh(r, 1, c)
+        @test sum(size(b.nodes, 2) for b in part.blocks if b.msh == 1;
+                  init = 0) == 3
+    end
+    # The source face and its chapeau share one triangulation; the swept
+    # volume emits one prism column per triangle and layer.
+    src_tris = _bl_cells(geo_entity_mesh(r, 2, 1)).tris
+    top_tris = _bl_cells(geo_entity_mesh(r, 2, 26)).tris
+    @test src_tris == top_tris
+    @test _bl_cells(geo_entity_mesh(r, 3, 1)).quads == 0
+    nprism = sum(size(b.nodes, 2) for b in
+                 geo_entity_mesh(r, 3, 1).blocks if b.msh == 6; init = 0)
+    @test nprism == 3 * src_tris
+    # Every displaced boundary-layer vertex sits one unit off its source
+    # point: upstream's `Extrude(u, p)` eval normalizes the gouraud row.
+    srcpts = Dict(9 => (1.0, 0.0, 0.0), 10 => (0.0, 1.0, 0.0),
+                  14 => (0.0, 1.0, 1.0), 19 => (1.0, 0.0, 1.0))
+    for (tag, srcp) in srcpts
+        part = geo_entity_mesh(r, 0, tag)
+        p = Tuple(part.coords[:, 1])
+        d = hypot(p[1]-srcp[1], p[2]-srcp[2], p[3]-srcp[3])
+        @test d ≈ 1.0 atol = 2e-2
+    end
+    # Oracle positions for the displaced corner points (gmsh 4.15.2
+    # `cyl_bl.msh`) — Tessella's gouraud normals are computed on the native
+    # source triangulation, whose interior Frontal-Delaunay sampling drifts
+    # from the oracle's on genuinely warped charts (the documented
+    # surface-circle iterate class), so the displaced corners are checked
+    # against the oracle to a modest absolute bound rather than bitwise.
+    oracle_pts = Dict(9 => (1.994203134803484, 0.1071270239393474,
+                            0.009161194726874995),
+                      10 => (0.1120950000674218, 1.993594705476814,
+                             0.01429238287788139),
+                      14 => (0.4402295447441331, 1.897174813729601,
+                             1.035711364348467),
+                      19 => (1.89686705953492, 0.4407543975256292,
+                             1.036946428555479))
+    for (tag, op) in oracle_pts
+        part = geo_entity_mesh(r, 0, tag)
+        p = Tuple(part.coords[:, 1])
+        @test hypot(p[1]-op[1], p[2]-op[2], p[3]-op[3]) < 2e-2
+    end
+end
+
+@testset ".geo boundary-layer spherical and warped ruled sources" begin
+    # Spherical ruled patch: all four generatrices are circle arcs sharing
+    # Point(2) with non-coplanar normals, so upstream's `TransfiniteSph`
+    # reprojects the blend onto the unit sphere. `Extrude{Surface}` with
+    # `Layers` admits it upstream (oracle: 225 nodes, 571 elements).
+    sph = """
+        Point(2) = {0,0,0,0.25};
+        Point(1) = {1,0,0,0.25};
+        Point(3) = {0,1,0,0.25};
+        Point(4) = {0,0,1,0.25};
+        Point(5) = {0.7071067811865475,0,0.7071067811865475,0.25};
+        Circle(1) = {1,2,3};
+        Circle(2) = {3,2,4};
+        Circle(3) = {4,2,5};
+        Circle(4) = {5,2,1};
+        Curve Loop(1) = {1,2,3,4};
+        Ruled Surface(1) = {1};
+        out[] = Extrude { Surface{1}; Layers{3}; Recombine; };
+        """
+    r = _execute_bl_source(sph; mesh_dim=3)
+    @test r.errors == String[]
+    @test r.lists["out"] == [26.0, 1.0, 13.0, 17.0, 21.0, 25.0]
+    # Every source-face node lies on the unit sphere — the sphere-projected
+    # blend and the final lift both route through the ruled evaluation.
+    sp = geo_entity_mesh(r, 2, 1)
+    for node in axes(sp.coords, 2)
+        @test hypot(sp.coords[1, node], sp.coords[2, node],
+                    sp.coords[3, node]) ≈ 1.0 atol = 1e-9
+    end
+    sp_tris = _bl_cells(sp).tris
+    @test sp_tris == _bl_cells(geo_entity_mesh(r, 2, 26)).tris
+    @test sum(size(b.nodes, 2) for b in
+              geo_entity_mesh(r, 3, 1).blocks if b.msh == 6; init = 0) ==
+              3 * sp_tris
+
+    # A warped four-line ruled source (no circles at all): still admitted
+    # upstream (oracle: 60 nodes, 160 elements) and through the same
+    # generic-face path here.
+    wrp = """
+        Point(1) = {0,0,0,0.5};
+        Point(2) = {1,0,0,0.5};
+        Point(3) = {1,1,0,0.5};
+        Point(4) = {0,1,0.5,0.5};
+        Line(1) = {1,2};
+        Line(2) = {2,3};
+        Line(3) = {3,4};
+        Line(4) = {4,1};
+        Curve Loop(1) = {1,2,3,4};
+        Ruled Surface(1) = {1};
+        out[] = Extrude { Surface{1}; Layers{3}; Recombine; };
+        """
+    r = _execute_bl_source(wrp; mesh_dim=3)
+    @test r.errors == String[]
+    @test r.lists["out"] == [26.0, 1.0, 13.0, 17.0, 21.0, 25.0]
+    wt_tris = _bl_cells(geo_entity_mesh(r, 2, 1)).tris
+    @test wt_tris == _bl_cells(geo_entity_mesh(r, 2, 26)).tris
+    @test sum(size(b.nodes, 2) for b in
+              geo_entity_mesh(r, 3, 1).blocks if b.msh == 6; init = 0) ==
+              3 * wt_tris
+end

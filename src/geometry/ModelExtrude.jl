@@ -910,6 +910,28 @@ end
 # when the consumer's mesh is a different discretization of the same face,
 # extend the row maps for its uncovered positions with the same
 # incident-element accumulation, keyed once per mesh object.
+
+# `_extrude_bl_row_lookup`'s non-throwing half: the stored row for a
+# position inside evaluation drift of a stored key, `nothing` for a
+# genuinely foreign point.
+function _extrude_bl_row_near(rows::AbstractDict{NTuple{3,Float64},V},
+                              p::NTuple{3,Float64},scale::Float64) where V
+    row=get(rows,p,nothing)
+    row===nothing || return row
+    best=nothing;bd=Inf;bd2=Inf
+    for (pos,v) in rows
+        d=hypot(p[1]-pos[1],p[2]-pos[2],p[3]-pos[3])
+        if d<bd
+            bd2=bd;bd=d;best=v
+        elseif d<bd2
+            bd2=d
+        end
+    end
+    bd<=1e-9*scale && return best
+    bd<=1e-7*scale && bd<=0.1*bd2 && return best
+    return nothing
+end
+
 function _extrude_bl_ensure_srcmesh!(m::GeoModel,dim::Int,tag::Int,
                                    caller::AbstractString,srcmesh)
     spec=get(m.meshing.extrude_specs,(dim,tag),nothing)
@@ -921,15 +943,31 @@ function _extrude_bl_ensure_srcmesh!(m::GeoModel,dim::Int,tag::Int,
     push!(ctx.seen,oid)
     levels=spec.levels;tops=spec.tops
     uvals=spec.uvals;nl=length(uvals)
+    # Rows resolved at `prepare` stay canonical: sibling boundary-layer
+    # products — the chapeau curves, lateral top rows, and earlier sweeps —
+    # already committed those displaced positions bitwise, the way
+    # upstream's `pos.find` folds every consumer's `Extrude(u, p)` eval onto
+    # the stored vertex inside `lessthanxyzv` tolerance. A live position the
+    # resolved maps cover at sub-weld drift therefore *reuses* its canonical
+    # row instead of being recomputed from the live triangulation; only
+    # positions the resolved maps never covered (e.g. interior vertices of a
+    # different discretization of the same face) get the incident-element
+    # accumulation on the live mesh.
+    base=copy(levels)
+    scale=1.0
+    for pos in keys(base)
+        scale=max(scale,abs(pos[1]),abs(pos[2]),abs(pos[3]))
+    end
     cells=_extrude_bl_face_cells(srcmesh)
     normalmap=Dict{Int,NTuple{3,Float64}}()
     changed=false
     for i in 1:nnodes(srcmesh)
         pos=(srcmesh.coords[1,i],srcmesh.coords[2,i],srcmesh.coords[3,i])
-        # The live mesh is authoritative: a position the prepare-time mesh
-        # already covered still gets recomputed — its incident elements (and
-        # therefore its angle-weighted normal and `GetAveEdgeLength` scale)
-        # belong to the discretization the consumers actually sweep.
+        canonical=_extrude_bl_row_near(base,pos,scale)
+        if canonical!==nothing
+            levels[pos]=canonical;tops[pos]=canonical[end];changed=true
+            continue
+        end
         n=_extrude_bl_live_node(srcmesh,pos,cells,normalmap,ctx)
         row=n==(0.0,0.0,0.0) ? fill(pos,nl) :
             [(pos[1]+t*n[1],pos[2]+t*n[2],pos[3]+t*n[3]) for t in uvals]

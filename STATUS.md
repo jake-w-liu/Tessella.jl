@@ -24,6 +24,64 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### LAY02 boundary-layer canonical-row welding + spherical/ruled admission (2026-10-30, oracle-verified)
+
+- **Canonical-row reuse fix (`ModelExtrude.jl`).** `Mesh 3` on a curved
+  ruled `Extrude {Surface{...}; Layers{3}; Recombine;}` source previously
+  failed the ownership certificate (`ordinary Layers entity (2,26) omits
+  lower cell UID ... owner (1,8)`): `prepare` had resolved `spec.levels`
+  at one evaluation stage while the live consumer mesh carried the same
+  positions a few ulps off, so `_extrude_bl_ensure_srcmesh!` recomputed a
+  different displaced top under the drifted key and the chapeau/lateral
+  weld rejected the lower cell. `_extrude_bl_ensure_srcmesh!` now copies
+  the prepared map as canonical `base` and resolves every live position
+  through `_extrude_bl_row_near` — exact hit, or nearest key inside
+  `1e-9·scale`, or inside `1e-7·scale` when it is also ≥10× closer than
+  the second-nearest key (mirroring upstream `pos.find` /
+  `lessthanxyzv` fold-to-stored-vertex semantics). Only genuinely
+  uncovered live positions (interior vertices of a different face
+  discretization) still get the live incident-element accumulation. The
+  cylindrical `Mesh 3` now completes with `errors: String[]`.
+- **Spherical and generic warped ruled BL sources are admitted and
+  mesh correctly.** Oracle audit: gmsh 4.15.2 meshes a unit-sphere octant
+  ruled source (225 nodes / 571 elements) and a warped ruled quad source
+  (60 nodes / 160 elements) under `Layers{3}; Recombine;`. Tessella's
+  generic-face path admits both through `TransfiniteQua`/`TransfiniteTriB`
+  (with spherical reprojection for sphere patches) and completes
+  `Mesh 3` with no errors — the spherical case emits the exact `out[]`
+  entity layout, 82 source triangles, 246 prisms, and keeps every source
+  node on the unit sphere to 1e-9. New focused testsets in
+  `geo_extrude_boundarylayer_test.jl` pin: the quarter-cylinder
+  warped-ruled `Mesh 3` (entity layout, per-strip quad counts
+  24/15/24/15, prism columns = `3·src_tris`, unit-norm displacement on
+  the four displaced corner points, oracle corner positions to 2e-2),
+  and the spherical + planar-warped ruled pair (no errors, source/chapeau
+  triangulation agreement, prism counts).
+- **Cylindrical oracle classification.** Entity and element counts on
+  the quarter-cylinder fixture match gmsh 4.15.2 (the oracle source face
+  carries 108 triangles/42 interior nodes vs Tessella's 112/44), but the
+  displaced interior nodes differ by up to ~0.14–0.43 depending on scope.
+  Direct chart comparison shows the boundary parameterization is
+  identical — the divergence is interior Frontal-Delaunay sampling in
+  the curved ruled `(u,v)` domain (the oracle's interior nodes sit off
+  the analytic cylinder, distributed through the parameter chart at
+  radii ~0.72–0.97), the same documented surface-circle iterate class
+  the warped-ruled tests already range-pin rather than bitwise-pin. The
+  BL normal field itself is not the cause: the gouraud corner-fan
+  directions land within ≈0.05 of the oracle on matching nodes, so no
+  analytic-normal path was added. Classified bound: interior displaced
+  coordinates on genuinely warped BL sources agree to ~0.05 on
+  boundary-matched nodes and are tolerance-pinned at 2e-2 on the corner
+  fans; full bitwise interior agreement requires the upstream
+  Frontal-Delaunay curved-chart insertion pattern, which remains the
+  standing native triangulation difference, not a BL defect.
+- Verification: `geo_extrude_boundarylayer_test.jl` — all earlier
+  testsets green under `--compile=min -O0` (curve 69/69, generatrix
+  10/10, top-row 7/7, View 23/23, 3-D surface 48/48, holed 43/43,
+  grading 4/4+4/4); the two new testsets green natively (25/25 curved
+  ruled `Mesh 3`, 61/61 spherical+warped). No analytic-normal code added;
+  the ownership fix is the canonical-row reuse described above.
+
 ### Pre-existing defect triage: `-part_split` physicals, torus×box Boolean PLC, STEP trimmed-wire CDT (2026-10-29, working tree)
 
 Three reported pre-existing defects were reproduced before any edit and
