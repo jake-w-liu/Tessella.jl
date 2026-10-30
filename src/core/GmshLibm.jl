@@ -230,7 +230,22 @@ const _WIN_X87_NATIVE = Sys.iswindows() && Sys.ARCH === :x86_64
         flag===nothing || return flag
         ok=false
         try
-            _win_x87_control_word();ok=true
+            # The probe must exercise every kernel the flag admits: a
+            # pkgimage can hold a native instance of one kernel (the
+            # control-word read gets inlined into compiled callers) while a
+            # sibling kernel exists only as source — under --compile=min the
+            # cached one then runs and the uncached one throws
+            # "'llvmcall' requires the compiler" past the flag check.
+            _win_x87_cli_call(_win_x87_sincos,0.5)
+            _win_x87_cli_call(_win_x87_exp,0.5)
+            _win_x87_cli_call(_win_x87_log,1.5)
+            _win_x87_atan2(0.5,1.0)
+            _win_x87_sqrt(4.0)
+            _win_x87_powlog(2.0,0.5)
+            _with_win_cli_precision() do
+                _win_x87_cli_call(_win_x87_sincos,0.5)
+            end
+            ok=true
         catch
             ok=false
         end
