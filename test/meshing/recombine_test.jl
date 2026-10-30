@@ -669,6 +669,10 @@ function public_recombine(coords,triangles,labels,algorithm)
     try
         api.initialize();api.option("Mesh.Renumber",0)
         api.option("Mesh.RecombinationAlgorithm",algorithm)
+        # The pinned captures record raw pairing and factory identities: they
+        # were taken with the minimum-quality gate off, where upstream also
+        # skips its post-match quad-to-triangle split entirely.
+        api.option("Mesh.RecombineMinimumQuality",0)
         api.model.add_discrete_entity(2,1)
         api.mesh.add_nodes(2,1,labels,vec(coords))
         api.mesh.add_elements_by_type(1,2,collect(30001:30000+size(triangles,2)),
