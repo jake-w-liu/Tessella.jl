@@ -24,6 +24,46 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### AdaptMesh/`-4` native adaptive remeshing (2026-10-31, working tree)
+
+- **`Mesh3D.adapt_mesh` (`src/meshing/AdaptMesh.jl`, new).** Bounded
+  Coupez-style loop over the current simplex carrier: short-edge interior
+  collapse → embedded-boundary-protected quality swaps
+  (`_gmsh_optimize_tetrahedra`, `relocate=false`) → metric splitting
+  (`refine_to_size`), repeated to `niter`. Collapse is conservative —
+  boundary-referenced vertices never collapse, candidate edges require a
+  common `tet_tag`, and a collapse is rejected when it produces a
+  non-positive tetrahedron, degrades local gamma below the floor, or would
+  remove an entire star. `seg_tag`/`tri_tag`/`tet_tag` ownership survives;
+  the loop reports `iterations`/`splits`/`collapses`/`swaps`/
+  `unresolved_edges` (metric residual audit) and skips a redundant
+  refinement scan after a stable pass with no topology change.
+- **`.geo AdaptMesh`** (upstream `tAdaptMesh` braced grammar): exactly one
+  technique `1` (isotropic metric adaptation), zero or one `Field[...]`
+  tag driving the field (empty → active background field; Tessella is
+  levelset-free so the second list names Fields), one optional
+  `{lcmin, lcmax}` parameter set, `{niter, meshAll}` tail (`meshAll!=0`
+  warns — only the highest mesh dimension adapts). Other techniques,
+  arities and multiple fields reject as recorded `Error` diagnostics that
+  leave the mesh untouched. The adapted carrier is re-bound through the
+  detached `:bind_completed` authority plan with reconstructed
+  `carrier_cells`, so entity ownership, physical tags, node/element
+  identity and geometry certificates survive — no regeneration.
+- **CLI `-4`** (upstream `GModel::adaptMesh`, ten rounds): session path
+  adapts the authority's simplex carrier through the same
+  `adapt_mesh`/`bind_completed` route under the API lock, resolving the
+  session background field or the model-size/`MeshSizeMax` fallback
+  (mean-edge neutral metric when unbounded). Incompatible meshes (no
+  carrier, non-simplex, non-tetrahedral) still throw `ArgumentError`
+  naming AdaptMesh, so the retained rejection pins stay green.
+- Verified: `test/functional/adapt_mesh_test.jl` 36/36 on Julia 1.12.7
+  `--compile=min -O0` (~6.3 min — split/collapse/swap on a FunctionSize
+  field, `.geo` AdaptMesh on a MathEval-graded box preserving 12 curve/6
+  surface/1 volume owner tags and Physical Surface/Volume bindings,
+  three rejection paths with failure atomicity, CLI `-4` end-to-end MSH
+  output). Remaining rejected batch flags: `-part_weight`/`-partWeight`,
+  `-swapangle`, `-match`, `-watch`, `-debugSurface`, `-run`/ONELAB.
+
 ### LAY02 boundary-layer canonical-row welding + spherical/ruled admission (2026-10-30, oracle-verified)
 
 - **Canonical-row reuse fix (`ModelExtrude.jl`).** `Mesh 3` on a curved

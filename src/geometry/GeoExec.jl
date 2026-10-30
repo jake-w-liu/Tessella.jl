@@ -118,7 +118,8 @@ using ..IO: _geo_string_index_offender, _GEO_STRING_FUNCTIONS,
             _geo_control_statement, _GEO_CONTROL_BARE
 using ..IO: GeoFieldSpec, GeoParams, _GEO_FIELD_KINDS,
             _geo_expression_field_tags
-using ..SizeField: _build_geo_field, AbstractField, AbstractSizeField
+using ..SizeField: _build_geo_field, AbstractField, AbstractSizeField,
+                   BoundedSize, ConstantSize
 import ..SizeField: field_value
 using ..Model: _ModelMesh1DOptions, _model_mesh_lc, _model_mesh_bbox,
                _model_mesh_dim01!, _model_mesh_dim01_grade!,
@@ -154,7 +155,7 @@ using ..Model: add_discrete_entity!, DiscreteEntity, _record_append_node!,
                _record_append_element!, _model_fresh_element_tag
 using ..MeshTypes: validate
 using ..Optimize: smooth_optimize, _laplacian_smooth_tri_cache
-using ..Mesh3D: _netgen_optimize_tetrahedra
+using ..Mesh3D: _netgen_optimize_tetrahedra, adapt_mesh
 using ..IO: _geo_gmsh_number
 using ..Transform: _affine_coordinate, _periodic_affine_3x4
 using LinearAlgebra: norm, svd
@@ -10596,6 +10597,398 @@ function _geo_operate_actual_mesh!(m,context,operation,caller;element_order=1)
     return nothing
 end
 
+# ─── Native adaptive remeshing (AdaptMesh / CLI `-4`) ────────────────────────
+# Bounded Coupez-style loop over the current simplex carrier. Entity ownership
+# is bound onto the carrier's `seg_tag`/`tri_tag`/`tet_tag` from the context's
+# recorded entity parts, `Mesh3D.adapt_mesh` adapts split/collapse/swap while
+# protecting those boundary supports, and the adapted carrier is re-bound
+# through the detached `bind_completed` authority plan — the same publication
+# gate an import takes — so physical tags, entity ownership and certificates
+# survive, and a failure anywhere before publish leaves the session untouched.
+
+# Build a carrier `Mesh` whose per-family tags carry the owning entity's tag.
+# `context.mesh_part_rows` index the *actual* mesh, so they are translated
+# through `authority.carrier_rows` into carrier rows before keying cells.
+function _geo_adapt_labeled_carrier(m,context,caller)
+    mesh=context.mesh
+    mesh isa Mesh || throw(ArgumentError(
+        "$caller: adaptive remeshing requires a simplex carrier mesh"))
+    authority=m.meshing.mesh_authority
+    (authority===nothing || authority.carrier!==mesh) && throw(ArgumentError(
+        "$caller: adaptive remeshing requires the mesh authority's simplex carrier"))
+    parts=context.mesh_parts;rows=context.mesh_part_rows
+    (parts===nothing || isempty(parts)) && throw(ArgumentError(
+        "$caller: adaptive remeshing requires classified entity parts"))
+    inv=zeros(Int32,nnodes(authority.mesh))
+    inv[authority.carrier_rows]=Int32.(1:length(authority.carrier_rows))
+    segtag=Dict{NTuple{2,Int32},Int32}();tritag=Dict{NTuple{3,Int32},Int32}()
+    tettag=Dict{NTuple{4,Int32},Int32}()
+    for ((dim,tag,part),prows) in zip(parts,rows)
+        dim in (1,2,3) || continue
+        for (msh,cells,_) in _geo_geometry_blocks(part)
+            msh_dimension(msh)==dim || continue
+            for column in axes(cells,2)
+                key=ntuple(k->inv[prows[cells[k,column]]],dim==1 ? 2 : dim==2 ? 3 : 4)
+                key=Tuple(sort!(Int32[k for k in key]))
+                all(>(0),key) || throw(ArgumentError(
+                    "$caller: entity ($dim,$tag) cell leaves the carrier"))
+                table=dim==1 ? segtag : dim==2 ? tritag : tettag
+                owner=Int32(tag)
+                existing=get(table,key,nothing)
+                (existing===nothing || existing==owner) || throw(ArgumentError(
+                    "$caller: entity ($dim,$tag) and ($dim,$existing) claim the same carrier cell"))
+                table[key]=owner
+            end
+        end
+    end
+    st=Vector{Int32}(undef,size(mesh.segs,2));ft=Vector{Int32}(undef,size(mesh.tris,2))
+    tt=Vector{Int32}(undef,size(mesh.tets,2))
+    for s in axes(mesh.segs,2)
+        key=(min(mesh.segs[1,s],mesh.segs[2,s]),max(mesh.segs[1,s],mesh.segs[2,s]))
+        st[s]=get(segtag,key,Int32(0))
+        st[s]!=0 || throw(ArgumentError(
+            "$caller: carrier segment $s has no owning curve entity"))
+    end
+    for f in axes(mesh.tris,2)
+        key=Tuple(sort!(Int32[mesh.tris[1,f],mesh.tris[2,f],mesh.tris[3,f]]))
+        ft[f]=get(tritag,key,Int32(0))
+        ft[f]!=0 || throw(ArgumentError(
+            "$caller: carrier triangle $f has no owning surface entity"))
+    end
+    for t in axes(mesh.tets,2)
+        key=Tuple(sort!(Int32[mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t]]))
+        tt[t]=get(tettag,key,Int32(0))
+        tt[t]!=0 || throw(ArgumentError(
+            "$caller: carrier tetrahedron $t has no owning volume entity"))
+    end
+    return Mesh(mesh.coords;segs=mesh.segs,tris=mesh.tris,tets=mesh.tets,
+        seg_tag=st,tri_tag=ft,tet_tag=tt)
+end
+
+# Rebuild `(parts, remaps, node_owner)` for `bind_completed` from an adapted
+# labeled carrier: each entity keeps its tag, cells are grouped by owner, and
+# node owners are the lowest-dimension entity referencing the node (dim-0
+# point entities are recovered by exact coordinate identity — no adaptation
+# operator moves a surviving vertex).
+function _geo_adapt_rebuild_parts(m,context,adapted::Mesh,caller)
+    mesh=context.mesh
+    authority=m.meshing.mesh_authority
+    (authority===nothing || authority.carrier!==mesh) && throw(ArgumentError(
+        "$caller: adaptive remeshing requires the mesh authority's simplex carrier"))
+    inv=zeros(Int32,nnodes(authority.mesh))
+    inv[authority.carrier_rows]=Int32.(1:length(authority.carrier_rows))
+    parts=Tuple{Int,Int,Union{Mesh,MixedMesh}}[];remaps=Vector{Int32}[]
+    # dim-0 ownership by exact coordinate (surviving vertices never move).
+    point_owner=Dict{NTuple{3,Float64},Int32}()
+    for ((dim,tag,part),prows) in zip(context.mesh_parts,context.mesh_part_rows)
+        dim==0 || continue
+        for actual_row in prows
+            row=inv[actual_row]
+            row>0 || throw(ArgumentError(
+                "$caller: point entity $tag references a node outside the carrier"))
+            key=(mesh.coords[1,row],mesh.coords[2,row],mesh.coords[3,row])
+            existing=get(point_owner,key,nothing)
+            (existing===nothing || existing==tag) || throw(ArgumentError(
+                "$caller: point entities $existing and $tag share carrier node $row"))
+            point_owner[key]=Int32(tag)
+        end
+    end
+    nnodes_a=size(adapted.coords,2)
+    node_owner=Vector{Tuple{Int,Int}}(undef,nnodes_a)
+    seg_ref=Dict{Int32,Int32}();tri_ref=Dict{Int32,Int32}();tet_ref=Dict{Int32,Int32}()
+    for s in axes(adapted.segs,2), k in 1:2
+        v=adapted.segs[k,s];tag=adapted.seg_tag[s]
+        seg_ref[v]=min(get(seg_ref,v,tag),tag)
+    end
+    for f in axes(adapted.tris,2), k in 1:3
+        v=adapted.tris[k,f];tag=adapted.tri_tag[f]
+        tri_ref[v]=min(get(tri_ref,v,tag),tag)
+    end
+    for t in axes(adapted.tets,2), k in 1:4
+        v=adapted.tets[k,t];tag=adapted.tet_tag[t]
+        tet_ref[v]=min(get(tet_ref,v,tag),tag)
+    end
+    for v in 1:nnodes_a
+        key=(adapted.coords[1,v],adapted.coords[2,v],adapted.coords[3,v])
+        point=get(point_owner,key,nothing)
+        if point!==nothing
+            node_owner[v]=(0,Int(point))
+        elseif haskey(seg_ref,v)
+            node_owner[v]=(1,Int(seg_ref[v]))
+        elseif haskey(tri_ref,v)
+            node_owner[v]=(2,Int(tri_ref[v]))
+        elseif haskey(tet_ref,v)
+            node_owner[v]=(3,Int(tet_ref[v]))
+        else
+            throw(ArgumentError(
+                "$caller: adapted carrier node $v has no owning entity"))
+        end
+    end
+    owners=Tuple{Int,Int}[]
+    seen=Set{Tuple{Int,Int}}()
+    for (dim,tag,part) in context.mesh_parts
+        owner=(dim,Int(tag))
+        owner in seen && continue
+        push!(seen,owner);push!(owners,owner)
+    end
+    for v in 1:nnodes_a
+        owner=node_owner[v]
+        owner in seen || (push!(seen,owner);push!(owners,owner))
+    end
+    for (dim,tag) in owners
+        local_cells=Matrix{Int32}(undef,dim==1 ? 2 : dim==2 ? 3 : 4,0)
+        if dim==1
+            keep=[s for s in axes(adapted.segs,2) if adapted.seg_tag[s]==tag]
+            local_cells=adapted.segs[:,keep]
+        elseif dim==2
+            keep=[f for f in axes(adapted.tris,2) if adapted.tri_tag[f]==tag]
+            local_cells=adapted.tris[:,keep]
+        elseif dim==3
+            keep=[t for t in axes(adapted.tets,2) if adapted.tet_tag[t]==tag]
+            local_cells=adapted.tets[:,keep]
+        end
+        used=Int32[]
+        if dim==0
+            used=Int32[v for v in 1:nnodes_a if node_owner[v]==(0,tag)]
+        else
+            seenv=Set{Int32}()
+            for v in local_cells
+                v in seenv || (push!(seenv,v);push!(used,v))
+            end
+            sort!(used)
+        end
+        inverse=Dict(v=>Int32(i) for (i,v) in enumerate(used))
+        cells=size(local_cells,2)==0 ? local_cells :
+            map(v->inverse[v],local_cells)
+        part=Mesh(adapted.coords[:,used];
+            segs=dim==1 ? cells : Matrix{Int32}(undef,2,0),
+            tris=dim==2 ? cells : Matrix{Int32}(undef,3,0),
+            tets=dim==3 ? cells : Matrix{Int32}(undef,4,0))
+        push!(parts,(dim,tag,part));push!(remaps,used)
+    end
+    return parts,remaps,node_owner
+end
+
+# The size/metric field driving adaptation: an explicit `Field` tag when the
+# `.geo` form names one, else the active background field. With no field at
+# all, upstream's `-4` falls back to the model size bounds — we mirror that
+# with a `BoundedSize`-clamped `ConstantSize` at `MeshSizeMax` when finite,
+# otherwise at the mean current edge length (a neutral identity metric that
+# only removes slivers).
+function _geo_adapt_field(m,context,field_tag,caller)
+    field=nothing
+    if field_tag!==nothing
+        fields=context.fields
+        (fields===nothing || !haskey(fields,field_tag)) && throw(ArgumentError(
+            "$caller: AdaptMesh references Field[$field_tag], which is not defined"))
+        spec=fields[field_tag]
+        params=GeoParams(
+            something(_geo_option_number(context,"Mesh",0,"MeshSizeMin"),0.0),
+            something(_geo_option_number(context,"Mesh",0,"MeshSizeMax"),1e22),
+            m.meshing.lc_factor,1,Dict{Tuple{Int,Int},String}(),fields,
+            context.background_field===nothing ? 0 : context.background_field,
+            copy(context.boundary_layer_fields),
+            something(_geo_option_number(context,"Geometry",0,"Tolerance"),1e-8))
+        field=_build_geo_field(
+            params,(d,name)->_geo_field_entity_mesh(m,d,name,caller),field_tag;
+            model_bbox=try _model_mesh_bbox(m,caller) catch; nothing end,
+            geometry_tolerance=something(
+                _geo_option_number(context,"Geometry",0,"Tolerance"),1e-8),
+            context_fields=(spec,config,entities,params)->
+                _geo_mesh_context_fields(m,context,spec,config,entities,params))
+        field isa AbstractSizeField || throw(ArgumentError(
+            "$caller: AdaptMesh field $field_tag does not produce a size field"))
+    else
+        field=_geo_mesh_background_field(m,context,caller)
+    end
+    if field===nothing
+        hmax=something(_geo_option_number(context,"Mesh",0,"MeshSizeMax"),1e22)
+        field=_geo_adapt_default_field(context.mesh,hmax,caller)
+    end
+    return field
+end
+
+# No-field fallback shared with the `-4` session path: `MeshSizeMax` when
+# finite, else the carrier's mean edge length — a neutral identity metric that
+# adapts only genuine outliers instead of coarsening toward the 1e22 default.
+function _geo_adapt_default_field(mesh,hmax,caller)
+    if !(0<hmax<1e21)
+        total=0.0;count=0
+        mesh isa Mesh || throw(ArgumentError(
+            "$caller: AdaptMesh has no size field and no simplex carrier to derive one from"))
+        for t in axes(mesh.tets,2)
+            for (i,j) in ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))
+                a=mesh.tets[i,t];b=mesh.tets[j,t]
+                total+=hypot(mesh.coords[1,a]-mesh.coords[1,b],
+                             mesh.coords[2,a]-mesh.coords[2,b],
+                             mesh.coords[3,a]-mesh.coords[3,b])
+                count+=1
+            end
+        end
+        count>0 || throw(ArgumentError(
+            "$caller: AdaptMesh has no size field and no current tet mesh to derive one from"))
+        hmax=total/count
+    end
+    return ConstantSize(hmax)
+end
+
+# Actual element identities bound onto the adapted carrier's geometry blocks —
+# the same `carrier_cells` contract an import or refine leaves behind, so the
+# geometry receipt can re-derive entity parts without guessing from positions.
+function _geo_adapt_carrier_cells(authority,adapted::Mesh,caller)
+    data=authority.mesh.entity_data
+    lookup=Dict{Tuple{Int,Int32,Tuple{Vararg{Int32}}},UInt64}()
+    for (block,owners,ids) in zip(authority.mesh.blocks,data.block_entities,
+                                 data.external_element_tags)
+        dim=msh_dimension(block.msh)
+        for col in axes(block.nodes,2)
+            key=(dim,owners[col],Tuple(sort!(Int32[block.nodes[k,col] for k in axes(block.nodes,1)])))
+            lookup[key]=ids[col]
+        end
+    end
+    crows=authority.carrier_rows
+    cells=Vector{UInt64}[]
+    for (conn,owners) in ((adapted.segs,adapted.seg_tag),
+                          (adapted.tris,adapted.tri_tag),
+                          (adapted.tets,adapted.tet_tag))
+        dim=size(conn,1)-1
+        ids=Vector{UInt64}(undef,size(conn,2))
+        for c in axes(conn,2)
+            key=(dim,owners[c],Tuple(sort!(Int32[crows[v] for v in conn[:,c]])))
+            id=get(lookup,key,UInt64(0))
+            id!=0 || throw(ArgumentError(
+                "$caller: adapted carrier cell lost its bound element identity"))
+            ids[c]=id
+        end
+        push!(cells,ids)
+    end
+    return cells
+end
+
+function _geo_exec_adapt_mesh!(m::GeoModel,rest::AbstractString,
+                               context::_GeoNumericContext,caller::AbstractString;
+                               field_tag=nothing,niter::Union{Nothing,Integer}=nothing,
+                               lcmin=nothing,lcmax=nothing)
+    caller="$caller: AdaptMesh"
+    context.mesh===nothing && throw(ArgumentError(
+        "$caller: no current mesh to adapt"))
+    context.mesh isa Mesh || throw(ArgumentError(
+        "$caller: adaptive remeshing currently supports simplex carriers"))
+    size(context.mesh.tets,2)>0 || throw(ArgumentError(
+        "$caller: adaptive remeshing currently supports tetrahedral meshes"))
+    isempty(context.mesh_parts) && throw(ArgumentError(
+        "$caller: adaptive remeshing requires a classified mesh"))
+    field=_geo_adapt_field(m,context,field_tag,caller)
+    (lcmin===nothing && lcmax===nothing) || (field=BoundedSize(field;
+        size_min=something(lcmin,0.0),size_max=something(lcmax,1e22)))
+    iterations=niter===nothing ? 10 : Int(niter)
+    iterations>0 || return nothing
+    labeled=_geo_adapt_labeled_carrier(m,context,caller)
+    adapted,stats=adapt_mesh(labeled,field;
+        entity_resolver=(dim,tag)->(dim,Int(tag)),
+        niter=iterations,caller=caller)
+    parts,remaps,node_owner=_geo_adapt_rebuild_parts(m,context,adapted,caller)
+    working=_geo_mesh_working_model(m,context)
+    plan=Model._model_mesh_generate_higher(working,adapted,parts,remaps,node_owner,
+        0,nothing,caller;operation=:bind_completed,
+        initial_max_node_tag=context.mesh_node_max,
+        initial_max_element_tag=context.mesh_element_max)
+    cells=_geo_adapt_carrier_cells(plan.model.meshing.mesh_authority,adapted,caller)
+    bound=plan.model.meshing.mesh_authority
+    plan.model.meshing.mesh_authority=Model._ModelMeshAuthority(bound.mesh,
+        bound.products,bound.done,bound.private_rank,bound.native_inputs,
+        bound.carrier,bound.carrier_rows,bound.producer_rows,cells,
+        bound.surface_constructor_inputs)
+    _geo_publish_actual_plan!(m,context,plan,caller;carrier=adapted)
+    context.native_element_lookup_receipt=nothing
+    stats.unresolved_edges>0 && _geo_msg_warn!(context,
+        "AdaptMesh: $(stats.unresolved_edges) edges remain above the metric target")
+    return nothing
+end
+
+# Extract the i-th top-level `{...}` group from `s` (1-based), or `nothing`
+# when fewer than `wanted` groups are present. Validates brace balance.
+function _geo_braced_groups(s::AbstractString,caller::AbstractString)
+    groups=String[];depth=0;start=0;i=firstindex(s);last=lastindex(s)
+    while i<=last
+        c=s[i]
+        if c=='{'
+            depth==0 && (start=i)
+            depth+=1
+        elseif c=='}'
+            depth-=1
+            depth<0 && throw(ArgumentError("$caller: unmatched closing brace"))
+            depth==0 && push!(groups,String(s[start+1:prevind(s,i)]))
+        end
+        i=nextind(s,i)
+    end
+    depth==0 || throw(ArgumentError("$caller: unmatched opening brace"))
+    return groups
+end
+
+function _geo_number_list(m::GeoModel,raw::AbstractString,
+                          context::_GeoNumericContext,caller::AbstractString)
+    s=strip(raw)
+    isempty(s) && return Float64[]
+    out=Float64[]
+    for piece in _geo_split_top_commas(s,caller)
+        isempty(piece) && continue
+        push!(out,Float64(_geo_eval_numeric(piece,context,caller)))
+    end
+    return out
+end
+
+# `.geo` `AdaptMesh {techniques} {fields} {{parameters}} {niter, meshAll};`
+# (upstream grammar `tAdaptMesh '{' list '}' '{' list '}' '{' listOfLists '}'
+# '{' expr ',' expr '}'`). Tessella is Gmsh-levelset-free, so the second list
+# names `Field[...]` tags instead of `gLevelset` ids — a Field is the same
+# scalar size/metric source our mesher consumes. Bounded scope: exactly one
+# technique, `1` (isotropic metric adaptation — the Coupez-style loop); an
+# empty field list means the active background field; the parameter list
+# supplies optional `{lcmin, lcmax}` clamps. Everything else fails loudly.
+function _geo_exec_adapt_mesh_stmt!(m::GeoModel,rest::AbstractString,
+                                    context::_GeoNumericContext,caller::AbstractString)
+    s=String(strip(rest));endswith(s,";") && (s=strip(s[1:end-1]))
+    groups=_geo_braced_groups(s,caller)
+    length(groups)==4 || throw(ArgumentError(
+        "$caller: AdaptMesh expects `{techniques} {fields} {{parameters}} " *
+        "{niter, meshAll}`"))
+    techniques=_geo_number_list(m,groups[1],context,caller)
+    fields=_geo_number_list(m,groups[2],context,caller)
+    (length(techniques)==1 && techniques[1]==1) || throw(ArgumentError(
+        "$caller: AdaptMesh currently supports exactly one adaptation " *
+        "technique — `1` (metric-driven isotropic adaptation); got " *
+        "$(Int.(techniques))"))
+    length(fields)<=1 || throw(ArgumentError(
+        "$caller: AdaptMesh currently supports at most one driving field"))
+    field_tag=isempty(fields) ? nothing : Int(fields[1])
+    # Third group is a list-of-lists: each `{{...}}` parameter set. Only the
+    # first is honored (bounded); extra non-empty sets are rejected loudly.
+    param_groups=_geo_braced_groups(groups[3],caller)
+    lcmin=lcmax=nothing
+    if !isempty(param_groups)
+        length(param_groups)==1 || throw(ArgumentError(
+            "$caller: AdaptMesh currently accepts one parameter set"))
+        params=_geo_number_list(m,param_groups[1],context,caller)
+        length(params)<=2 || throw(ArgumentError(
+            "$caller: AdaptMesh parameters are `{lcmin, lcmax}`"))
+        lcmin=length(params)>=1 ? params[1] : nothing
+        lcmax=length(params)>=2 ? params[2] : nothing
+    else
+        isempty(strip(groups[3])) || throw(ArgumentError(
+            "$caller: AdaptMesh parameter list must be braced per technique"))
+    end
+    tail=_geo_number_list(m,groups[4],context,caller)
+    length(tail)==2 || throw(ArgumentError(
+        "$caller: AdaptMesh expects `{niter, meshAll}`"))
+    niter=Int(tail[1]);mesh_all=tail[2]
+    mesh_all==0 || _geo_msg_warn!(context,
+        "AdaptMesh: meshAll=$mesh_all — only the highest mesh dimension is adapted")
+    _geo_exec_adapt_mesh!(m,"",context,caller;
+        field_tag=field_tag,niter=niter<=0 ? 10 : niter,lcmin,lcmax)
+    return nothing
+end
+
 include("GeoRecombineBipartite.jl")
 
 function _geo_recombine_actual_plan!(m,context,caller)
@@ -11691,10 +12084,9 @@ function _geo_exec_mesh_statement!(m::GeoModel,line::AbstractString,
         # explicit blocker rather than a silent partial implementation.
         throw(ArgumentError(
             "$caller: CreateOverlaps is not supported"))
-    elseif (mm=match(r"^AdaptMesh\b",s))!==nothing
-        throw(ArgumentError(
-            "$caller: AdaptMesh requires levelset fields, which are not " *
-            "supported"))
+    elseif (mm=match(r"^AdaptMesh\b(.*)$",s))!==nothing
+        _geo_exec_adapt_mesh_stmt!(m,mm.captures[1],context,caller)
+        return
     elseif (mm=match(r"^CreateTopology\b(.*)$",s))!==nothing
         _geo_exec_create_topology!(m,mm.captures[1],context,caller)
         return

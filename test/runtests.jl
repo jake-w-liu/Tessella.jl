@@ -89,4 +89,5 @@ include("functional/fixtures.jl")
     include("functional/occ_offset_smoke.jl")
     include("functional/occ_nurbs_smoke.jl")
     include("functional/occ_boolean_smoke.jl")
+    include("functional/adapt_mesh_test.jl")
 end

@@ -7333,5 +7333,6 @@ include("Mesh3DGmshInsertion.jl")
 include("Mesh3DGmshOptimize.jl")
 include("Mesh3DMetricBox.jl")
 include("Mesh3DPrismaticFill.jl")
+include("AdaptMesh.jl")
 
 end # module Mesh3D

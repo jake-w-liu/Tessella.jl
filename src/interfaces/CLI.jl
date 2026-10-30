@@ -34,8 +34,11 @@ wrong data.
 module CLI
 
 using ..GeoExec: execute_geo, geo_entity_mesh
+import ..GeoExec
+using ..Mesh3D: adapt_mesh
 using ..IO: write_msh, _msh_rewrite_save_options
 using ..Model: model_periodic_constraints, model_to_mixed, model_entities
+import ..Model
 using ..Elements: write_mixed_msh, read_mixed_msh, MixedMesh, MixedEntity,
                   _scaled_mesh_copy, write_partitioned_topology,
                   MixedEntityData, MixedPartitionData, MixedGhostElement, MixedPeriodicLink,
@@ -304,10 +307,6 @@ const _UNIMPLEMENTED_EXTENSIONS=Dict{String,String}(
 # loud rejection naming the missing functionality instead of falling into the
 # generic "unsupported flag" error (which stays for genuinely unknown words).
 const _REJECTED_FLAGS=Dict{String,String}(
-    # Upstream batch mode 4 runs `GModel::adaptMesh` — the Coupez-style
-    # levelset/metric edge split-collapse-swap remesher; Tessella's
-    # `AdaptMesh` .geo command rejects for the same absent producer.
-    "-4"=>"adaptive remeshing (AdaptMesh, batch mode 4) is not implemented",
     # Upstream `-part_weight` switches to partition algorithm 3 and feeds
     # per-element-family weights into its METIS graph partitioner; Tessella's
     # partition producer is a connected-region BFS, so storing the
@@ -798,6 +797,7 @@ function _run(tokens::Vector{String})
     dimension_seen=false;output_seen=false
     format_seen=false;binary_seen=false;check_seen=false
     refine_seen=false;save_seen=false;parse_seen=false;barycentric_seen=false
+    adapt_seen=false
     unroll_seen=false
     reclassify=nothing;reparam=nothing
     part=nothing;part_topo=nothing;part_ghosts=nothing;part_split=nothing
@@ -837,6 +837,9 @@ function _run(tokens::Vector{String})
                 "tessella: duplicate or conflicting dimension flag $a"))
             dim=a=="-1" ? 1 : a=="-2" ? 2 : 3
             dimension_seen=true
+        elseif a=="-4"
+            adapt_seen && throw(ArgumentError("tessella: duplicate -4 flag"))
+            adapt_seen=true
         elseif a=="-o"
             output_seen && throw(ArgumentError("tessella: duplicate -o flag"))
             i+=1;i<=length(tokens) || throw(ArgumentError("tessella: -o needs a path"))
@@ -1128,6 +1131,7 @@ function _run(tokens::Vector{String})
     # Upstream batch actions are mutually exclusive — the strict CLI rejects
     # combinations instead of keeping only the last one.
     batch_actions=(dimension_seen ? 1 : 0)+(refine_seen ? 1 : 0)+
+        (adapt_seen ? 1 : 0)+
         (save_seen ? 1 : 0)+(reclassify===nothing ? 0 : 1)+
         (reparam===nothing ? 0 : 1)+(barycentric_seen ? 1 : 0)+
         (unroll_seen ? 1 : 0)
@@ -1177,7 +1181,7 @@ function _run(tokens::Vector{String})
     foreign_output=effective_format!==nothing &&
         effective_format in _FOREIGN_OUTPUT_EXTENSIONS
     session=extension in (".msh",".pos") || length(files)>1 || refine_seen ||
-        barycentric_seen ||
+        adapt_seen || barycentric_seen ||
         save_seen || reclassify!==nothing || reparam!==nothing ||
         part!==nothing || foreign_output ||
         (geo_unrolled_output && extension!=".geo") ||
@@ -1432,7 +1436,7 @@ function _run(tokens::Vector{String})
     end
     return _session_main(files,preludes,numeric_options;
         dim,outfile,version,binary,output_flags=format_seen || binary_seen,
-        refine=refine_seen,barycentric=barycentric_seen,save=save_seen,
+        refine=refine_seen,adapt=adapt_seen,barycentric=barycentric_seen,save=save_seen,
         statreport,output_format,
         unroll=unroll_seen,bgm=[path for (path,_) in bgm_specs],
         reclassify,reparam,part,part_topo,part_ghosts,part_split,
@@ -1668,6 +1672,57 @@ function _session_stat_report(path::String,mode::Symbol,wall::Float64,
     return nothing
 end
 
+# `-4` adaptive remeshing: upstream `GModel::adaptMesh()` runs ten bounded
+# `adaptMeshGRegion` rounds — metric edge splits, collapses and quality swaps
+# driven by the active size field — on the loaded/generated mesh. The session
+# implementation adapts the authority's simplex carrier through the same
+# Tessella-owned `adapt_mesh` operators the `.geo AdaptMesh` command uses,
+# then re-binds the actual products through the detached `bind_completed`
+# plan so physical tags, entity ownership and certificates survive. A failure
+# anywhere before the final commit leaves the session untouched.
+function _session_adapt_mesh!()
+    caller="tessella: -4 (AdaptMesh)"
+    lock(API.STATE_LOCK) do
+        m=API._model_locked()
+        authority=m.meshing.mesh_authority
+        carrier=authority===nothing ? nothing : authority.carrier
+        carrier isa Mesh || throw(ArgumentError(
+            "$caller: adaptive remeshing requires a simplex carrier mesh — " *
+            "generate or load a tetrahedral mesh first"))
+        size(carrier.tets,2)>0 || throw(ArgumentError(
+            "$caller: adaptive remeshing currently supports tetrahedral meshes"))
+        parts,rows=GeoExec._geo_actual_product_parts(authority,caller)
+        owner=GeoExec._geo_actual_carrier_owners(authority,carrier)
+        ctx=(mesh=carrier,mesh_parts=parts,mesh_part_rows=rows,
+             mesh_node_owner=owner)
+        labeled=GeoExec._geo_adapt_labeled_carrier(m,ctx,caller)
+        field=API._session_size_field_locked(m)
+        field===nothing && (field=GeoExec._geo_adapt_default_field(carrier,
+            get(API.OPTIONS,"Mesh.MeshSizeMax",1e22),caller))
+        adapted,stats=adapt_mesh(labeled,field;
+            entity_resolver=(dim,tag)->(dim,Int(tag)),niter=10,caller)
+        new_parts,new_rows,new_owner=GeoExec._geo_adapt_rebuild_parts(
+            m,ctx,adapted,caller)
+        plan=Model._model_mesh_generate_higher(m,adapted,new_parts,new_rows,
+            new_owner,0,nothing,caller;operation=:bind_completed,
+            initial_max_node_tag=API.NODE_TAG_MAX[],
+            initial_max_element_tag=API.ELEMENT_TAG_MAX[])
+        cells=GeoExec._geo_adapt_carrier_cells(
+            plan.model.meshing.mesh_authority,adapted,caller)
+        bound=plan.model.meshing.mesh_authority
+        plan.model.meshing.mesh_authority=Model._ModelMeshAuthority(bound.mesh,
+            bound.products,bound.done,bound.private_rank,bound.native_inputs,
+            bound.carrier,bound.carrier_rows,bound.producer_rows,cells,
+            bound.surface_constructor_inputs)
+        API._commit_tagged_plan_locked!(plan;
+            authority=collect(keys(plan.mesh.entity_data.entities)))
+        stats.unresolved_edges>0 && println(
+            "Warning: -4 adaptation leaves $(stats.unresolved_edges) edges " *
+            "above the metric target")
+        return nothing
+    end
+end
+
 # `-barycentric_refine` refines the session's current mesh in place — the
 # Gmsh 4.15.2 action subdivides only linear simplices owned by entities at
 # the model dimension (triangles on 2-D models, tetrahedra on 3-D models);
@@ -1711,9 +1766,9 @@ function _session_main(files,preludes,numeric_options;
                        dim,outfile,version,binary,output_flags,refine,save,
                        reclassify,reparam,part,part_topo,part_ghosts,part_split,
                        part_physicals,
-                       barycentric=false,unroll=false,bgm=String[],
+                       adapt=false,barycentric=false,unroll=false,bgm=String[],
                        statreport=nothing,output_format=nothing)
-    need_output=dim>0 || refine || barycentric || unroll || save ||
+    need_output=dim>0 || refine || adapt || barycentric || unroll || save ||
         reclassify!==nothing ||
         reparam!==nothing || part!==nothing
     !need_output && outfile!==nothing && throw(ArgumentError(
@@ -1861,6 +1916,7 @@ function _session_main(files,preludes,numeric_options;
                 Float64(time_ns()-gen_t0)/1.e9,copy(API.OPTIONS))
         end
         refine && API.mesh.refine()
+        adapt && _session_adapt_mesh!()
         barycentric && _session_barycentric_refine!()
         reclassify===nothing ||
             API.mesh.classify_surfaces(reclassify*pi/180,true,false,pi)

@@ -6025,6 +6025,37 @@ Workflow per user instruction: implement each parity item, **deep-debug it**
 deterministic across Julia versions — audit every Dict/Set iteration that
 can reach output), run focused tests + allocation audit, then commit/push.
 
+2026-10-31 native AdaptMesh increment (P4/CLI01): `-4` and `.geo AdaptMesh`
+are now implemented against the 2026-10-27 audit that classified them as the
+missing Coupez-style producer. `src/meshing/AdaptMesh.jl` adds
+`Mesh3D.adapt_mesh` — a bounded collapse→swap→split loop over the current
+simplex carrier driven by an `AbstractSizeField`: interior short-edge
+collapse (boundary-referenced vertices frozen, common `tet_tag` required,
+positive-orientation + local-gamma + star-removal guards), quality swaps via
+`_gmsh_optimize_tetrahedra` with `embedded_faces`/`embedded_edges` frozen,
+and metric splitting via `refine_to_size`, reporting
+`iterations/splits/collapses/swaps/unresolved_edges`. `.geo`
+`AdaptMesh {techniques} {fields} {{params}} {niter, meshAll};` accepts
+technique `1`, ≤1 `Field[...]` tag (Fields stand in for upstream levelsets —
+Tessella is levelset-free), an optional `{lcmin, lcmax}` clamp and the
+upstream tail; every other shape is a recorded `Error` that leaves the mesh
+untouched. Adaptation re-binds through the detached `:bind_completed`
+authority plan with rebuilt `carrier_cells` — entity ownership, physical
+tags and geometry certificates survive with no regeneration. `-4` leaves
+`_REJECTED_FLAGS`, running the same route under the API lock with
+`niter=10` and the session/background or `MeshSizeMax`/mean-edge fallback
+field; incompatible meshes still throw `ArgumentError` naming AdaptMesh so
+the `cli_frontends_test` rejection pins stay green unchanged. Verified:
+`adapt_mesh_test.jl` 36/36 under `julia --compile=min -O0` on Julia 1.12.7
+(~6.3 min: FunctionSize collapse/split/swap with metric-bound audit,
+MathEval-graded `.geo` box preserving 12/6/1 seg/tri/tet owner tags and both
+physical bindings, three rejection/atomicity cases, `-4` MSH output).
+Remaining rejected batch flags: `-part_weight`/`-partWeight`, `-swapangle`,
+`-match` (`GeomMeshMatcher` — next CLI01 frontend item), `-watch`,
+`-debugSurface`, `-run`/ONELAB. Bounded scope: simplex tetrahedral carriers
+only (mixed/hybrid and 2-D adaptation still reject), `meshAll!=0` warns, and
+the loop is `niter`-bounded rather than upstream's fixed-ten-round profile.
+
 ## Gotchas learned the hard way
 
 - **Stale precompile artifacts**: a test process that started before an edit
