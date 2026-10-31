@@ -155,18 +155,31 @@ end
         @test snapshot()==before
     end
 end
-@testset "unsupported mixed-direction joint copies reject atomically" begin
+@testset "mixed-direction joint copies share corner masters per relation" begin
     session() do
         adjacent_cubes(;conflicting=true)
-        # The mixed-direction slave copies are themselves valid dim-2
-        # products; the shared interface slave UID is bound by both Regions
-        # under different masters/affines, so the joint periodic certificate
-        # rejects the conflicting copy at volume time.
+        # The shared interface corner (1,1,1) is a slave vertex of both the
+        # Z-pair (Face 2) and the Y-pair (Face 105). Joint consistency keys
+        # bindings by (slave UID, affine): each relation binds that same
+        # actual UID to a different master — distinct transforms certify as
+        # distinct relations rather than conflicting; Gmsh 4.15.2 generates
+        # the same layout.
         A.mesh.generate(2)
-        before=(A.mesh.get_nodes(),A.mesh.get_elements(),A.mesh.get_max_node_tag(),A.mesh.get_max_element_tag())
-        error=try;A.mesh.generate(3);nothing;catch failure;failure isa InterruptException && rethrow();failure;end
-        @test error isa ArgumentError && occursin("conflicting current master UID or affine",sprint(showerror,error))
-        @test (A.mesh.get_nodes(),A.mesh.get_elements(),A.mesh.get_max_node_tag(),A.mesh.get_max_element_tag())==before
+        A.mesh.generate(3)
+        link2=A.mesh.get_periodic_nodes(2,2,false)
+        @test link2.master_entity==1 && link2.affine==Z_TRANSLATION
+        @test all(first(A.mesh.get_node(s))≈first(A.mesh.get_node(m))+[0.,0.,1.]
+                  for (s,m) in zip(link2.slave_nodes,link2.master_nodes))
+        link105=A.mesh.get_periodic_nodes(2,105,false)
+        @test link105.master_entity==103 && link105.affine==Y_TRANSLATION
+        @test all(first(A.mesh.get_node(s))≈first(A.mesh.get_node(m))+[0.,1.,0.]
+                  for (s,m) in zip(link105.slave_nodes,link105.master_nodes))
+        ids,xyz,_=A.mesh.get_nodes()
+        corner=only([uid for (row,uid) in enumerate(ids) if xyz[3row-2:3row]==[1.,1.,1.]])
+        @test corner in link2.slave_nodes && corner in link105.slave_nodes
+        @test link2.master_nodes[findfirst(==(corner),link2.slave_nodes)] !=
+              link105.master_nodes[findfirst(==(corner),link105.slave_nodes)]
+        @test Tessella.validate(A.mesh.get()).ok
     end
 end
 end

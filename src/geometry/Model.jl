@@ -7175,9 +7175,14 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;
             point_nodes,curve_entries,surface_embedded_points[surface],
             surface_embedded_curves[surface],caller)
     end
+    # A relation emits local node links only when both endpoint surfaces are
+    # classified in this Region's projection; a cross-Region master's rows
+    # live on its own Region and the assembled output publishes the relation
+    # from the produced surface parts.
     periodic_links=_model_projection_periodic_surface_links(
-        m,mesh,periodic_surfaces,point_nodes,curve_entries,
-        surface_nodes,caller)
+        m,mesh,[constraint for constraint in periodic_surfaces
+            if haskey(surface_nodes,Int(constraint.master_entity))],
+        point_nodes,curve_entries,surface_nodes,caller)
 
     node_entities=fill((3,Int32(volume)),nnodes(mesh))
     for (point,node) in point_nodes
@@ -9942,13 +9947,15 @@ function _model_volume_periodic_surface_constraints(
             slave_present=slave in surface_set
             master_present=master in surface_set
             (slave_present || master_present) || continue
-            slave_present==master_present || throw(ArgumentError(
-                "$caller: periodic Surface[$slave]/Surface[$master] relation " *
-                "has only one entity on Volume[$volume]"))
-            (slave in boundary_set && master in boundary_set) ||
-                throw(ArgumentError(
-                    "$caller: periodic Surface[$slave]/Surface[$master] must " *
-                    "pair boundary surfaces of explicit Volume[$volume]"))
+            # The copy relation is a per-slave-`GFace` record upstream: a
+            # Region the relation reaches only through its master does not
+            # carry the constraint. A slave on this boundary is enforced
+            # against its actual produced copy even when the master bounds a
+            # different Region (cross-Region pair) or several (shared wall).
+            slave_present || continue
+            slave in boundary_set || throw(ArgumentError(
+                "$caller: periodic Surface[$slave] must bound explicit " *
+                "Volume[$volume]"))
             push!(constraints,constraint)
         elseif constraint.dim==3
             continue
@@ -9978,6 +9985,10 @@ function _model_volume_periodic_surface_constraints(
         master_present=master in curve_set
         (slave_present || master_present) || continue
         (slave,master) in implied && continue
+        # A relation this Region reaches only through its master certifies on
+        # the slave's own Region — same per-`GEdge` record ownership as the
+        # surface case above.
+        slave_present || continue
         slave_present==master_present || throw(ArgumentError(
             "$caller: periodic Curve[$slave]/Curve[$master] relation " *
             "has only one entity on Volume[$volume]"))
@@ -10135,12 +10146,14 @@ function _model_explicit_volume_geometry(
     isempty(boundaries) && throw(ArgumentError(
         "$caller: Volume[$t] has no explicit boundary surfaces"))
     local_meshes=Dict{Int,Union{Mesh,MixedMesh}}()
-    for signed_surface in boundaries
-        surface=abs(signed_surface)
-        # The volume PLC carries the GENERATED boundary mesh — upstream
-        # `meshGRegion` tetrahedralizes against each boundary GFace's
-        # triangles, so point sizes, curve grading and embedded constraints
-        # already resolved on the faces reach the volume verbatim.
+    # The volume PLC carries the GENERATED boundary mesh — upstream
+    # `meshGRegion` tetrahedralizes against each boundary GFace's
+    # triangles, so point sizes, curve grading and embedded constraints
+    # already resolved on the faces reach the volume verbatim. A periodic
+    # master bounding a different Region fetches its produced product
+    # through the same channel — the copy certifies its actual source,
+    # never re-derives it.
+    function fetch_surface!(surface)
         get!(local_meshes,surface) do
             produced=_mesh_input isa _ModelMeshAuthority ?
                 _model_mesh_product(_mesh_input,2,surface;caller,producer_order=true) : nothing
@@ -10150,6 +10163,9 @@ function _model_explicit_volume_geometry(
                     _boundary_regrade=_boundary_regrade) : produced
         end
     end
+    for signed_surface in boundaries
+        fetch_surface!(abs(signed_surface))
+    end
     for constraint in _model_volume_periodic_surface_constraints(m,t,caller)
         slave=Int(constraint.slave_entity)
         master=Int(constraint.master_entity)
@@ -10158,7 +10174,7 @@ function _model_explicit_volume_geometry(
         local_meshes[slave] isa MixedMesh &&
             local_meshes[slave].entity_data!==nothing && continue
         local_meshes[slave]=_model_periodic_surface_mesh(
-            m,local_meshes[master],constraint,caller)
+            m,fetch_surface!(master),constraint,caller)
     end
     coordinates=NTuple{3,Float64}[]
     node_index=Dict{NTuple{3,Float64},Int32}()
@@ -10875,6 +10891,11 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
         _model_certify_native_volume_constraints(mesh,writeback_constraints,t,caller)
     end
     for constraint in periodic_surfaces
+        # A cross-Region master has no classified vertices in this Region's
+        # own fill — the copy events already certified against the produced
+        # surface products, so the local transport check only runs when both
+        # endpoint meshes are classified here.
+        Int(constraint.master_entity) in boundary_surface_set || continue
         mapping=_model_periodic_surface_nodes(m,mesh,constraint)
         _model_mapping_matches(m,mesh,constraint,mapping,caller;exact=false)
     end

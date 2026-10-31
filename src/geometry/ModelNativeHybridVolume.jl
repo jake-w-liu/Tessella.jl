@@ -107,40 +107,38 @@ function _model_native_hybrid_volume_input(m,tag,input,caller;embedded_pool=noth
     return constructor
 end
 
-# Admit each proper-rigid boundary pair from copyMesh's actual UID events.
-# Coordinates verify those events; neither geometry nor row order selects a
-# pair. Independent directions (an x/y/z-periodic box) certify per pair —
-# upstream applies the same per-`GFace` `setMeshMaster` copy under each
-# relation and keeps per-face correspondence records, so pairs only need to
-# agree where corner nodes coincide bitwise.
+# Admit each declared affine boundary pair from copyMesh's actual UID
+# events. Coordinates verify those events; neither geometry nor row order
+# selects a pair. The declaration's corner/edge correspondence already
+# gates reachability — translations, rotations, mirrors, shears and
+# nonsingular scalings all copy under the same per-`GFace` `setMeshMaster`
+# transport, so this certificate binds the produced events to the declared
+# map instead of restricting its class. Independent directions (an
+# x/y/z-periodic box) certify per pair — upstream applies the same
+# per-face copy under each relation, so pairs only need to agree where
+# corner nodes coincide bitwise.
 function _model_native_hybrid_periodic_boundary_certificate(m,tag,constructor,pairs,caller)
     constraints=_model_volume_periodic_surface_constraints(m,tag,caller)
     isempty(constraints) && return nothing
     for constraint in constraints
         affine=constraint.affine
-        # The copy map is a certified proper rigid transform: finite applied
-        # entries, an orthonormal linear part and determinant +1. The stored
-        # fourth row is verbatim record bytes like upstream's — the applied 3×4
-        # map is what this certifies. `bound` is a Float64 rounding allowance
-        # on the declared coefficients — distinct from the geometric `atol`
-        # that the node transport check below applies.
+        # The copy map is a certified finite nonsingular affine transform:
+        # the stored fourth row is verbatim record bytes like upstream's —
+        # the applied 3×4 map is what this certifies. A singular linear part
+        # could not satisfy the declaration's corner correspondence on a
+        # non-degenerate Face, so `det != 0` bounds the reachable class; the
+        # per-node affine transport and ordered-incidence checks below still
+        # verify the actual copy rows against the declared map bitwise.
         affine!==nothing && all(isfinite,affine[i] for i in 1:12) ||
             throw(ArgumentError(
-                "$caller: hybrid periodic boundary requires a finite rigid Surface transform"))
+                "$caller: hybrid periodic boundary requires a finite affine Surface transform"))
         linear=(affine[1],affine[2],affine[3],affine[5],affine[6],affine[7],
                 affine[9],affine[10],affine[11])
-        rigid_bound=1e-12*max(1.0,maximum(abs,linear))
-        for column_i in 1:3,column_j in column_i:3
-            gram=linear[column_i]*linear[column_j]+linear[3+column_i]*linear[3+column_j]+
-                linear[6+column_i]*linear[6+column_j]
-            abs(gram-(column_i==column_j ? 1.0 : 0.0))<=rigid_bound || throw(ArgumentError(
-                "$caller: hybrid periodic boundary requires an orthonormal rigid transform"))
-        end
         determinant=linear[1]*(linear[5]*linear[9]-linear[6]*linear[8])-
             linear[2]*(linear[4]*linear[9]-linear[6]*linear[7])+
             linear[3]*(linear[4]*linear[8]-linear[5]*linear[7])
-        abs(determinant-1.0)<=rigid_bound || throw(ArgumentError(
-            "$caller: hybrid periodic boundary requires a determinant +1 rigid transform"))
+        determinant!=0.0 || throw(ArgumentError(
+            "$caller: hybrid periodic boundary requires a nonsingular affine transform"))
         slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
         event=pairs===nothing ? nothing : get(pairs,slave,nothing)
         event!==nothing && event[1]==master && !isempty(event[2]) || throw(ArgumentError(

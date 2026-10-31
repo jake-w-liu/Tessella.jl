@@ -99,23 +99,20 @@ end
     end
 end
 
-@testset "unsupported periodic hybrid planners leave actual mesh unchanged" begin
-    # The shear term vanishes on the master z=0 plane, so lower generation
-    # reaches the actual copy path. Its 3D transform still is not a translation.
-    nontranslation=[1.,0.,0.25,0.,0.,1.,0.,0.,0.,0.,1.,1.,0.,0.,0.,1.]
-    for config in ((copy_slave=true,affine=nontranslation),
-                   (copy_slave=false,affine=TRANSLATION))
-        A.initialize()
-        try
-            A.option("General.Terminal",0)
-            cube(;config...)
-            A.mesh.generate(2)
-            before=snapshot()
-            @test_throws ArgumentError A.mesh.generate(3)
-            @test snapshot()==before
-        finally
-            A.finalize()
-        end
+@testset "explicitly transfinite periodic slave leaves actual mesh unchanged" begin
+    # An explicit transfinite slave bypasses the periodic copy path — the
+    # hybrid planner cannot certify its boundary against actual copy events,
+    # so volume generation rejects atomically without touching the mesh.
+    A.initialize()
+    try
+        A.option("General.Terminal",0)
+        cube(;copy_slave=false,affine=TRANSLATION)
+        A.mesh.generate(2)
+        before=snapshot()
+        @test_throws ArgumentError A.mesh.generate(3)
+        @test snapshot()==before
+    finally
+        A.finalize()
     end
 end
 

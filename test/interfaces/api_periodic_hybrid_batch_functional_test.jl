@@ -50,6 +50,19 @@ function correspondence(slave,master,high,expected)
         for (s,t) in zip(link.slave_nodes,link.master_nodes))
     return Dict(zip(link.master_nodes,link.slave_nodes))
 end
+function map_point(affine,point)
+    p=point isa Tuple ? point : Tuple(point)
+    return [sum(affine[4(axis-1)+c]*p[c] for c in 1:3)+affine[4axis] for axis in 1:3]
+end
+function affine_link(slave,master,affine)
+    link=A.mesh.get_periodic_nodes(2,slave,false)
+    @test link.master_entity==master && link.affine==affine
+    @test length(link.slave_nodes)==length(link.master_nodes)>0
+    @test allunique(link.slave_nodes) && allunique(link.master_nodes)
+    @test all(first(A.mesh.get_node(s))≈map_point(affine,first(A.mesh.get_node(m)))
+        for (s,m) in zip(link.slave_nodes,link.master_nodes))
+    return link
+end
 
 @testset "two separated periodic hybrid Regions consume actual retained copy events" begin
     A.initialize()
@@ -141,25 +154,46 @@ end
     end
 end
 
-@testset "unsupported periodic batch copy contexts reject atomically before construction" begin
+@testset "periodic batch slave without actual copy events rejects atomically" begin
+    A.initialize()
+    try
+        A.option("General.Terminal",0)
+        A.option("Mesh.OptimizePyramids",0.)
+        two_cubes(;copy_second=false)
+        # The transfinite slave was never produced by the periodic copy
+        # path, so no actual UID events exist for the certificate to bind.
+        A.mesh.generate(2)
+        A.option("Mesh.MeshOnlyEmpty",1)
+        before=snapshot()
+        @test_throws ArgumentError A.mesh.generate(3)
+        @test snapshot()==before
+    finally
+        A.finalize()
+    end
+end
+
+@testset "shear and cross-Region batch copies certify against actual events" begin
     shear=[1.,0.,.25,0.,0.,1.,0.,0.,0.,0.,1.,1.,0.,0.,0.,1.]
     across=[1.,0.,0.,3.,0.,1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.]
-    for settings in ((copy_second=false,second_affine=TRANSLATION,cross_region=false),
-                     (copy_second=true,second_affine=shear,cross_region=false),
-                     (copy_second=true,second_affine=across,cross_region=true))
+    # Gmsh 4.15.2 accepts both: the shear's in-plane term vanishes on the
+    # flat master, and the cross-Region relation certifies the slave on
+    # Region 2 against Region 1's actual master product.
+    for (slave,master,affine,cross_region) in ((102,101,shear,false),
+                                             (101,1,across,true))
         A.initialize()
         try
             A.option("General.Terminal",0)
             A.option("Mesh.OptimizePyramids",0.)
-            two_cubes(;settings...)
-            # The cross-Region relation's derived Surface copies are valid
-            # dim-2 products like any other periodic slave; the Region
-            # certificate rejects the foreign pair at volume time.
+            two_cubes(;copy_second=true,second_affine=affine,cross_region)
             A.mesh.generate(2)
             A.option("Mesh.MeshOnlyEmpty",1)
-            before=snapshot()
-            @test_throws ArgumentError A.mesh.generate(3)
-            @test snapshot()==before
+            A.mesh.generate(3)
+            affine_link(slave,master,affine)
+            for region in (1,2)
+                kinds,_,_=A.mesh.get_elements(3,region)
+                @test Set(kinds)==Set(Int32[4,7])
+            end
+            @test Tessella.validate(A.mesh.get()).ok
         finally
             A.finalize()
         end

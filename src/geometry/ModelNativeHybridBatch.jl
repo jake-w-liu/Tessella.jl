@@ -37,9 +37,11 @@ function _model_native_hybrid_groups(m,regions,input,caller)
     return groups,receipts
 end
 
-# Periodic Regions consume actual Surface copy events, including connected
-# Regions with uniquely owned exterior periodic Faces and literal shared Tri
-# interfaces. Complete lower constructor binding precedes RNG/factory use.
+# Periodic Regions consume actual Surface copy events: uniquely owned or
+# cross-Region exterior pairs and literal shared Tri interfaces alike — the
+# slave Face bounds the Region it certifies while its master's actual
+# product may live on any Region. Complete lower constructor binding
+# precedes RNG/factory use.
 function _model_native_hybrid_batch_periodic_certificate(m,receipt,pairs,optimize_pyramids,caller)
     # Periodic copy relations are per-Face records (upstream keeps them on the
     # slave `GFace`); a corner node where several independent periodic
@@ -55,10 +57,14 @@ function _model_native_hybrid_batch_periodic_certificate(m,receipt,pairs,optimiz
         iszero(optimize_pyramids) || throw(ArgumentError(
             "$caller: periodic hybrid batches require default Pyramid optimization"))
         for constraint in constraints
-            slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
-            get(receipt.face_regions,slave,Int[])==[tag] &&
-                get(receipt.face_regions,master,Int[])==[tag] || throw(ArgumentError(
-                "$caller: periodic hybrid Faces must be uniquely owned exterior boundaries of their selected Region"))
+            slave=Int(constraint.slave_entity)
+            # The relation is a per-slave-`GFace` record: the slave must
+            # bound this Region (a literal shared Tri interface bounds two),
+            # while the master is certified from its own actual produced
+            # product wherever it lives — cross-Region pairs and shared-wall
+            # masters carry no selected-Region ownership requirement.
+            tag in get(receipt.face_regions,slave,Int[]) || throw(ArgumentError(
+                "$caller: periodic hybrid slave Face must bound its selected Region"))
         end
         constructor=_model_native_hybrid_volume_input(m,tag,receipt.input,caller;
             embedded_pool=receipt.embedded)
