@@ -110,13 +110,27 @@ SP(1,0,0){2};
 """)
         pos_new=Tessella.CLI.main(["-convert",pos_path])
         @test pos_new==pos_path*"_new" && isfile(pos_new)
-        @test length(Tessella.Post.read_pos(pos_new))==1
+        # `-convert` serializes views in the binary `.pos` layout
+        # (`$PostFormat /* Gmsh 1.3, binary */`, PView::write binary=1) —
+        # verified against Gmsh 4.15.2's own `view.pos_new`; `read_pos`
+        # only consumes the parsed `View{}` text format.
+        @test startswith(read(pos_new,String),"\$PostFormat /* Gmsh 1.3, binary */") &&
+              occursin("\$View",read(pos_new,String))
 
-        # .geo -convert writes the unrolled model script (the `-0` artifact).
+        # `.geo -convert` is `OpenProject` + `CreateOutputFile`: a
+        # geometry-only script produces no `_new` at all (verified against
+        # Gmsh 4.15.2 — there is no unrolled-script artifact), while a
+        # script whose `Mesh` directives yield a product writes binary
+        # MSH 4.1.
         geo_new=Tessella.CLI.main(["-convert",line_geo])
-        @test geo_new==line_geo*"_new" && isfile(geo_new)
-        @test occursin("Point(",read(geo_new,String))
-        @test_throws ArgumentError Tessella.CLI.main(["-convert"])
+        @test geo_new==line_geo*"_new" && !isfile(geo_new)
+        meshing_geo=joinpath(directory,"meshing.geo")
+        write(meshing_geo,LINE*"\nMesh 1;")
+        meshing_new=Tessella.CLI.main(["-convert",meshing_geo])
+        @test meshing_new==meshing_geo*"_new" && isfile(meshing_new)
+        @test startswith(read(meshing_new,String),"\$MeshFormat\n4.1 1 8")
+        # Bare `-convert` converts nothing and exits successfully upstream.
+        @test Tessella.CLI.main(["-convert"])==""
         @test_throws ArgumentError Tessella.CLI.main(
             ["-convert",joinpath(directory,"missing.msh")])
 
@@ -165,7 +179,14 @@ SP(1,0,0){2};
             "-optimize","-optimize_netgen","-optimize_threshold","0.5",
             "-degree","2","-v","3","-nt","1","-nopopup","-o",algo_out])
         @test Tessella.validate(E.read_mixed_msh(algo_out)).ok
-        @test_throws ArgumentError Tessella.CLI.main([square_geo,"-2","-algo","bamg"])
+        # `-algo bamg` selects the anisotropic (BAMG, `Mesh.Algorithm=7`)
+        # surface mesher — a real consumer since the metric-surface
+        # producer landed, and BAMG itself ships in Gmsh 4.15.2 (`BAMG
+        # succeeded` meshes the same square upstream). `delquad` (8)
+        # still has no implementation anywhere.
+        bamg_out=joinpath(directory,"bamg.msh")
+        Tessella.CLI.main([square_geo,"-2","-algo","bamg","-o",bamg_out])
+        @test Tessella.validate(E.read_mixed_msh(bamg_out)).ok
         @test_throws ArgumentError Tessella.CLI.main([square_geo,"-2","-algo","delquad"])
 
         # -bin/-vmsh/-f route through the writer.
@@ -202,7 +223,7 @@ SP(1,0,0){2};
         # Loud rejections: batch conflicts, unsupported and obsolete flags.
         @test_throws ArgumentError Tessella.CLI.main([square_geo,"-2","-refine"])
         @test_throws ArgumentError Tessella.CLI.main([line_msh,"-refine","-save","-o",classified])
-        for flag in ("-4","-rand","-ho_min",
+        for flag in ("-rand","-ho_min",
                      "-camera","-newreg","-part_weight",
                      "-aniso_max","-numsubedges","-nodb",
                      "-post_pro","-min","-listnumber","-view","-clear")
@@ -306,11 +327,18 @@ end
         @test imported_owners(sparse_in,false)==Int32[3,3]
         @test imported_owners(sparse_in,true)==Int32[9,9]
 
+        # `-4` is implemented (AdaptMesh) and composes with a dimension flag
+        # upstream — `-2 -4` is accepted by Gmsh 4.15.2, not rejected as a
+        # conflicting batch action. On this tet-free model the adaptive pass
+        # simply has no region to adapt, like upstream's zero-region run.
+        adapt_out=joinpath(directory,"adapted.msh")
+        @test Tessella.CLI.main([square_geo,"-2","-4","-o",adapt_out])==adapt_out
+        @test Tessella.validate(E.read_mixed_msh(adapt_out)).ok
+
         # Flags that stay rejected keep an informative upstream-accurate
         # message naming the absent producer. `-match` is implemented
         # (Geometry.MatchGeomAndMesh → GeomMeshMatcher::match).
-        for (flag,fragment) in (("-4","AdaptMesh"),
-                                ("-part_weight","Partition*Weight"),
+        for (flag,fragment) in (("-part_weight","Partition*Weight"),
                                 ("-swapangle","edge-swap"),
                                 ("-watch","GUI"),
                                 ("-debugSurface","debugSurface.brep"),

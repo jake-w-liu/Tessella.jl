@@ -1132,9 +1132,11 @@ function _run(tokens::Vector{String})
     end
     isempty(files) && throw(ArgumentError("tessella: missing input file"))
     # Upstream batch actions are mutually exclusive — the strict CLI rejects
-    # combinations instead of keeping only the last one.
+    # combinations instead of keeping only the last one. `-4` is not a batch
+    # action upstream: `opt_mesh_adapt3d(1)` merely flags the adaptive pass
+    # that runs after whatever generation action was requested, so `-2 -4`
+    # and even `-4` alone are accepted by Gmsh 4.15.2.
     batch_actions=(dimension_seen ? 1 : 0)+(refine_seen ? 1 : 0)+
-        (adapt_seen ? 1 : 0)+
         (save_seen ? 1 : 0)+(reclassify===nothing ? 0 : 1)+
         (reparam===nothing ? 0 : 1)+(barycentric_seen ? 1 : 0)+
         (unroll_seen ? 1 : 0)
@@ -1367,9 +1369,14 @@ function _run(tokens::Vector{String})
             if isempty(constraints) && !embedded && !explicit_shell
                 # `-save_parametric`/`-save_topology` need classified
                 # ownership/parameters — prefer the meshing authority's
-                # native `MixedMesh` when one was produced.
+                # native `MixedMesh` when one was produced. It is preferred
+                # for every output: Gmsh 4.15.2 always serializes the full
+                # elementary entity model (points, curves, surfaces,
+                # volumes) with explicit boundary lists, while the merged
+                # `result.mesh` may be a bare `Mesh` that would collapse
+                # every curve into a single entity without boundaries.
+                classified=_cli_classified_mesh(result)
                 if save_parametric!==nothing || save_topology!==nothing
-                    classified=_cli_classified_mesh(result)
                     if classified isa MixedMesh
                         classified_out=_scaled_mesh_copy(classified,scaling)
                         write_msh(destination,classified_out;version,binary,
@@ -1390,8 +1397,8 @@ function _run(tokens::Vector{String})
                             write_msh(destination,_scaled_mesh_copy(result.mesh,scaling);
                                       version)
                     end
-                elseif result.mesh isa MixedMesh
-                    mixed_out=_scaled_mesh_copy(result.mesh,scaling)
+                elseif classified isa MixedMesh
+                    mixed_out=_scaled_mesh_copy(classified,scaling)
                     write_mixed_msh(destination,mixed_out;version,binary,
                         preserve_numbering)
                     emit_topology(mixed_out)
@@ -1689,11 +1696,31 @@ function _session_adapt_mesh!()
         m=API._model_locked()
         authority=m.meshing.mesh_authority
         carrier=authority===nothing ? nothing : authority.carrier
-        carrier isa Mesh || throw(ArgumentError(
-            "$caller: adaptive remeshing requires a simplex carrier mesh — " *
-            "generate or load a tetrahedral mesh first"))
-        size(carrier.tets,2)>0 || throw(ArgumentError(
-            "$caller: adaptive remeshing currently supports tetrahedral meshes"))
+        # Upstream `GModel::adaptMesh` iterates the model's `GRegion`s — a
+        # run whose mesh carries no tetrahedra (unmeshed model, curve or
+        # surface generation, non-simplex products) adapts zero regions and
+        # is a quiet success, not an error.
+        carrier isa Mesh && size(carrier.tets,2)>0 || begin
+            bound=authority===nothing ? nothing : authority.mesh
+            # When real tetrahedral cells exist outside the simplex carrier
+            # (e.g. a loaded MixedMesh) the implementation honestly cannot
+            # adapt them — keep a loud diagnostic rather than silently
+            # skipping work upstream would perform.
+            has_tets=bound isa Mesh && size(bound.tets,2)>0
+            if !has_tets && bound isa MixedMesh
+                has_tets=any(block->begin
+                        block isa ElementBlock || return false
+                        spec=try msh_spec(block.msh) catch err
+                            err isa InterruptException && rethrow(); nothing
+                        end
+                        spec!==nothing && spec.family===:tet
+                    end, bound.blocks)
+            end
+            has_tets && throw(ArgumentError(
+                "$caller: adaptive remeshing requires a simplex carrier " *
+                "mesh — generate or load a tetrahedral mesh first"))
+            return nothing
+        end
         parts,rows=GeoExec._geo_actual_product_parts(authority,caller)
         owner=GeoExec._geo_actual_carrier_owners(authority,carrier)
         ctx=(mesh=carrier,mesh_parts=parts,mesh_part_rows=rows,
