@@ -384,6 +384,16 @@ end
 
 const MODEL_SLOTS = _ModelSlot[]
 
+# Recoverable `Error   :` diagnostics produced while input files are opened
+# or merged into the session, accumulated in statement order — the
+# session-level mirror of upstream's process-global `Msg::GetErrorCount` /
+# `_atLeastOneErrorInRun` channel for file inputs. `API.open`/`API.merge`
+# keep their void contract (upstream `gmsh::open`/`merge` do not throw on
+# parse diagnostics); the CLI batch driver converts a nonempty accumulation
+# into its nonzero-exit failure. `initialize`/`finalize` reset it with the
+# rest of the session state.
+const SESSION_INPUT_ERRORS=Ref{Vector{String}}(String[])
+
 function _new_slot(name::AbstractString)
     model=GeoModel()
     model.meshing.transfinite_tri=Int(OPTIONS["Mesh.TransfiniteTri"])
@@ -736,6 +746,7 @@ function initialize()
         empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=0
         empty!(SESSION_PLUGINS)
         empty!(SESSION_ONELAB);empty!(SESSION_ONELAB_CHANGED)
+        empty!(SESSION_INPUT_ERRORS[])
         _SESSION_START_TIME[]=time()
     end
     return nothing
@@ -752,6 +763,7 @@ function finalize()
         empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=0
         empty!(SESSION_PLUGINS)
         empty!(SESSION_ONELAB);empty!(SESSION_ONELAB_CHANGED)
+        empty!(SESSION_INPUT_ERRORS[])
     end
     return nothing
 end

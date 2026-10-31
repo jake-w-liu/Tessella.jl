@@ -296,6 +296,15 @@ function _model_import_publish!(plan;legacy=false)
     for (kind,message,options) in plan.diagnostics.events
         _native_diagnostic_emit_locked(kind,message;options)
     end
+    # `.geo` inputs record recoverable `Error   :` diagnostics on the
+    # execution result instead of failing — upstream's process-global error
+    # flag for file inputs accumulates them into `SESSION_INPUT_ERRORS` so
+    # the CLI batch driver can report the run's true exit status. An
+    # explicit `Exit 0` force-exits cleanly (upstream `Msg::Exit(n)` takes
+    # `n` regardless of the flag), suppressing that file's channel.
+    if plan.result isa GeoExec.GeoExecution && plan.result.exit_code!==0
+        append!(SESSION_INPUT_ERRORS[],plan.result.errors)
+    end
     return nothing
 end
 

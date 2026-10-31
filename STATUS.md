@@ -47,13 +47,41 @@ support or test requirements.
   `cli_curve_functional_test` 42/42; `cli_part_split_test` 69/69;
   `geo_hybrid_pyramid_options_functional_test` 35/35; optimized-mode
   `recombine_matching` 30/30 and `recombine_test` 16/16+21/21 exit 0.
-- **Pre-existing, unrelated.** `cli_precision_test.jl` fails 8/137 under
-  optimized compilation on HEAD without this slice's changes:
-  `CLI.main([invalid.geo])` (dim-0, no `-o`) returns the path instead of
-  raising on the script's `unknown_scalar` error — verified identical on a
-  clean tree (`git stash`); under `--compile=min` the file cannot run at
-  all (`llvmcall` in `_win_x87_control_word` needs the compiler). Left for
-  a separate fix.
+### CLI batch exit status for recoverable `.geo` diagnostics (2026-11-01)
+
+- **Root cause.** `9484d3b` made statement-level `.geo` errors recoverable:
+  `execute_geo` accumulates `Error   :` diagnostics on
+  `GeoExecution.errors`/`error_log` and returns. The CLI paths then
+  returned the output path unconditionally — upstream's
+  `_atLeastOneErrorInRun` process flag (set by every `Error   :`
+  diagnostic, `yymsg(0)` parse errors included) had no CLI counterpart, so
+  `CLI.main(["invalid.geo"])` returned success. Bare `Exit` additionally
+  read only `msg_error_count` and missed `yymsg(0)` diagnostics.
+- **Fix.** `CLI._cli_geo_batch_error` re-materializes a nonzero batch
+  status at each return **after** the run's products land — standalone
+  `-o`/stat-report output, the `-0` unrolled write, and `-convert` `_new`
+  payloads all stay written before the throw, like upstream's
+  `CreateOutputFile` completing before `exit(1)`. For the session path,
+  `API.SESSION_INPUT_ERRORS` accumulates per-file recoverable GEO
+  diagnostics through `open`/`merge` (`API` keeps its void contract;
+  `initialize`/`finalize` reset the channel) and `_session_main` checks a
+  pre-`finalize` copy at every return. An explicit `Exit 0` suppresses the
+  file's channel (upstream `Msg::Exit(n)` takes `n` regardless of the
+  flag); `Abort` keeps prior diagnostics (oracle: `x=bogus;Abort;` exits
+  1, clean `Abort` exits 0). Bare `Exit` now fails on the `error_log`
+  union channel like upstream's `yymsg`→`Msg::Error` flag.
+- **Exits (Julia 1.12.7).** Under `-O2 --check-bounds=yes`:
+  `cli_precision_test` 137/137 exit 0; `cli_frontends_test` 72/72+27/27
+  exit 0; `cli_save_options_test` 60/60 exit 0; `cli_information` 2/2 exit
+  0; `geo_error_continuation_test`+`geo_constraints_test` all testsets
+  exit 0. Under `--compile=min -O0` the precision file itself cannot run
+  (`llvmcall` in `_win_x87_control_word`); equivalent fixture probes pass:
+  standalone invalid throws (`Error : 'invalid.geo', line 0` diagnostic
+  preserved), `-2 -o` writes `bad.msh` before throwing, `Exit 0` and clean
+  `Abort` return the path, errors-then-`Abort` throws; session `-merge`
+  probes write `geo_unrolled` output then throw, `Exit 0` suppresses, and
+  clean merges return — all matching Gmsh 4.15.2 oracle exits (bad merge
+  exit 1, `Exit 0` exit 0, errors-then-`Abort` exit 1).
 
 ### MET01/02 residual audit + OCC `:degenerate`-curve / anisotropic arc-grading fixes (2026-11-01)
 

@@ -663,6 +663,10 @@ function _convert_file(path::String)
         # the same data upstream's `GModel::current()` mesh carries.
         mesh=_cli_classified_mesh(result)
         mesh!==nothing && _convert_write_mesh(destination,mesh)
+        # Conversion completes before the batch error status lands — the
+        # `_new` payloads stay written like upstream's `CreateOutputFile`.
+        failure=_cli_geo_batch_error(result)
+        failure===nothing || throw(failure)
         return destination
     end
     reader=get(_CONVERT_MESH_READERS,extension,nothing)
@@ -772,6 +776,23 @@ function _main(args::AbstractVector{<:AbstractString})
         IO._msg_log_close()
         IO._MSG_INFO_RESOURCES[]=false
     end
+end
+
+# Upstream's batch exit status: `Error   :` diagnostics do not stop the run —
+# each one marks the process exit nonzero after the run's work completes
+# (`Msg::GetErrorCount`/`_atLeastOneErrorInRun`; output files are still
+# written). `execute_geo` accumulates that stream on `GeoExecution.errors`
+# instead of throwing; `CLI.main`'s path-valued return is the exit-0
+# contract, so an accumulated failure is re-materialized here as a thrown
+# diagnostic — the same `join(errors)` re-materialization the `execute_geo`
+# test helpers apply. An explicit `Exit 0` force-exits cleanly (upstream
+# `Msg::Exit(n)` takes `n` regardless of the error flag), so a recorded zero
+# code suppresses the channel; nonzero codes already threw inside
+# `execute_geo`.
+function _cli_geo_batch_error(result)
+    result.exit_code===0 && return nothing
+    isempty(result.errors) || return ArgumentError(join(result.errors,"\n"))
+    return nothing
 end
 
 function _run(tokens::Vector{String})
@@ -1226,6 +1247,8 @@ function _run(tokens::Vector{String})
                     "'$effective_format'"))
             end
             write_geo_unrolled(destination,result.model)
+            failure=_cli_geo_batch_error(result)
+            failure===nothing || throw(failure)
             return destination
         end
         dim==0 && outfile!==nothing && throw(ArgumentError(
@@ -1289,6 +1312,11 @@ function _run(tokens::Vector{String})
         finally
             temporary===nothing || rm(temporary;force=true)
         end
+        # The run's accumulated `Error   :` diagnostics are the upstream
+        # batch exit status — they are surfaced at each return below, after
+        # the run's products (stat report, `-o` output) have landed, exactly
+        # like upstream's process completing its work and exiting nonzero.
+        failure=_cli_geo_batch_error(result)
         save_parametric=get(save_options,"SaveParametric",nothing)
         save_topology=get(save_options,"SaveTopology",nothing)
         # `Mesh.PreserveNumberingMsh2` (`-preserve_numbering_msh2`/in-script
@@ -1324,6 +1352,7 @@ function _run(tokens::Vector{String})
             # through the output name upstream (`FORMAT_GEO`).
             if geo_unrolled_output
                 write_geo_unrolled(destination,result.model)
+                failure===nothing || throw(failure)
                 return destination
             end
             # Upstream validates the output format inside `CreateOutputFile`
@@ -1348,6 +1377,7 @@ function _run(tokens::Vector{String})
                 write_msh(destination,_scaled_mesh_copy(authority.mesh,scaling);
                           version,binary,
                           save_parametric,save_topology,preserve_numbering)
+                failure===nothing || throw(failure)
                 return destination
             end
             constraints=model_periodic_constraints(result.model)
@@ -1440,8 +1470,10 @@ function _run(tokens::Vector{String})
                           save_parametric,save_topology,preserve_numbering)
                 emit_topology(projected_out)
             end
+            failure===nothing || throw(failure)
             return destination
         end
+        failure===nothing || throw(failure)
         return first(inputs)
     end
     return _session_main(files,preludes,numeric_options;
@@ -1886,6 +1918,14 @@ function _session_main(files,preludes,numeric_options;
             "tessella: minimum mesh size exceeds maximum"))
     API.initialize()
     temporary=nothing
+    # `.geo` inputs record recoverable `Error   :` diagnostics into the
+    # session's input-error channel rather than failing — they are the
+    # upstream process-global error flag for file inputs, surfaced at each
+    # return below like the standalone path's `failure` check (after this
+    # run's products land). Declared outside `try` so the trailing
+    # `API.finalize()` (which resets the session channel) cannot clear it
+    # before the last return checks.
+    input_errors=String[]
     try
         for (name,value) in option_preludes
             API.option(name,value)
@@ -1913,6 +1953,7 @@ function _session_main(files,preludes,numeric_options;
                 API.merge(source)
             end
         end
+        input_errors=copy(API.SESSION_INPUT_ERRORS[])
         # `-bgm`: merge the `.pos` views and point a `PostView` background
         # field at each file's last view — the same semantics the standalone
         # path's `Merge` + `Background Mesh View[i]` prelude expresses.
@@ -1990,6 +2031,8 @@ function _session_main(files,preludes,numeric_options;
             mesh isa MixedMesh || throw(ArgumentError(
                 "tessella: -0 on a mesh input requires entity metadata"))
             write_geo_unrolled(destination,mesh)
+            isempty(input_errors) || throw(ArgumentError(
+                join(input_errors,"\n")))
             return destination
         end
         if need_output
@@ -2100,6 +2143,7 @@ function _session_main(files,preludes,numeric_options;
         temporary===nothing || rm(temporary;force=true)
         API.finalize()
     end
+    isempty(input_errors) || throw(ArgumentError(join(input_errors,"\n")))
     return need_output ? destination : files[1][1]
 end
 

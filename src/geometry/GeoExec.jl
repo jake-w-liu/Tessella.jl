@@ -9104,11 +9104,13 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             context)
         return
     elseif (mm=match(r"^Exit(?:\s+(.*?))?\s*;?\s*$",line)) !== nothing
-        # `Msg::Exit`: bare `Exit` exits with `_atLeastOneErrorInRun` — the
-        # `Msg::Error` flag (`msg_error_count`); `Exit n` always exits `n`.
+        # `Msg::Exit`: bare `Exit` exits with `_atLeastOneErrorInRun` —
+        # upstream's flag is set by every `Error   :` diagnostic, `yymsg(0)`
+        # parse errors included (`yymsg` calls `Msg::Error`); `error_log` is
+        # that union channel. `Exit n` always exits `n`.
         context.stop=:exit
         context.exit_code=mm.captures[1]===nothing ?
-            (context.msg_error_count>0 ? 1 : 0) :
+            (!isempty(context.error_log) ? 1 : 0) :
             _geo_int_value(_geo_eval_numeric(mm.captures[1],context,
                 "execute_geo: Exit"),"execute_geo: Exit code")
         return
