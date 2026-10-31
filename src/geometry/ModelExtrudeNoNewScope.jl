@@ -951,17 +951,21 @@ function _extrude_nonew_shared_positive(volume,caller)
     return nothing
 end
 
-# Joint certificate over the shared Surface's complete NoNewVerts owner
+# Joint certificate over the shared Surfaces' complete NoNewVerts owner
 # set in one position registry: each Region counts its own oriented volume
 # faces, the welded wall is exactly the facets every owner emitted — each
-# once, with outward orientation on both wall sides — the bound shared
-# Surface's faces must equal that welded set, and the remaining faces each
-# singly incident in exactly one owner must equal the exterior surfaces.
-# A facet a strict subset of the owners emits cannot be the certified
-# wall and rejects. Every emitted volume cell keeps a positive typed
-# volume.
+# once, with outward orientation on both wall sides — and the bound
+# shared Surfaces' faces together must equal that welded set. Two Regions
+# may weld over several generatrices (the adjacent shared walls carry the
+# same owner set), so `ss` carries every bound Surface of this owner set:
+# each one's faces must be a subset of the interface and their union must
+# cover it exactly. The remaining faces each singly incident in exactly
+# one owner must equal the exterior surfaces. A facet a strict subset of
+# the owners emits cannot be the certified wall and rejects. Every
+# emitted volume cell keeps a positive typed volume.
 function _extrude_nonew_shared_certify(plans::Vector{_ExtrudeNoNewCompletePlan},
-        s::Int,caller::AbstractString)
+        ss::Vector{Int},caller::AbstractString)
+    s=minimum(ss)
     length(plans)>=2 || _extrude_nonew_shared_planner_error(caller,s)
     lookup=Dict{NTuple{3,Float64},Int32}()
     for plan in plans,node in 1:nnodes(plan.volume)
@@ -1007,14 +1011,22 @@ function _extrude_nonew_shared_certify(plans::Vector{_ExtrudeNoNewCompletePlan},
                 "$key is bounded by a strict subset of its owners"))
         end
     end
-    bound=Set{NTuple{4,Int32}}()
-    _extrude_nonew_surface_faces!(bound,plans[1].surfaces[s],lookup,s,caller)
-    bound==welded || throw(ArgumentError(
+    covered=Set{NTuple{4,Int32}}()
+    for bound_s in ss
+        bound=Set{NTuple{4,Int32}}()
+        _extrude_nonew_surface_faces!(bound,plans[1].surfaces[bound_s],
+            lookup,bound_s,caller)
+        bound<=welded || throw(ArgumentError(
+            "$caller: QuadTriNoNewVerts shared Surface[$bound_s] emits " *
+            "faces outside the internal wall between its Regions"))
+        union!(covered,bound)
+    end
+    covered==welded || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts shared Surface[$s] does not exactly " *
         "cover the internal wall between its Regions"))
     exterior=Set{NTuple{4,Int32}}()
     for plan in plans,(tag,part) in plan.surfaces
-        tag==s && continue
+        tag in ss && continue
         _extrude_nonew_surface_faces!(exterior,part,lookup,tag,caller)
     end
     exterior==external || throw(ArgumentError(
@@ -1148,16 +1160,22 @@ function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
     for tag in selected
         edges=get(shared_of,tag,nothing)
         edges===nothing && continue
+        # Two Regions may weld over several generatrices — adjacent
+        # shared walls then carry the same owner set. Group the bound
+        # Surfaces per owner set so the joint certificate compares the
+        # group's parts against the whole internal interface once.
+        groups=Dict{Vector{Int},Vector{Int}}()
         for (s,owners) in edges
             owners=[owner for owner in owners
                     if _extrude_is_nonew(_extrude_gate(working,3,owner))]
-            # Certify each shared incidence once, from the earliest
-            # NoNewVerts owner — a wall with a single NoNewVerts owner is
-            # already certified per-Region by its own boundary check.
             length(owners)>=2 || continue
             tag==owners[1] || continue
+            push!(get!(groups,owners,Int[]),s)
+        end
+        for owners in sort!(collect(keys(groups)))
             _extrude_nonew_shared_certify(
-                [volumes[owner] for owner in owners],s,caller)
+                [volumes[owner] for owner in owners],
+                sort!(groups[owners]),caller)
         end
     end
     # `Reverse Surface` flips only the published windings — apply it to the

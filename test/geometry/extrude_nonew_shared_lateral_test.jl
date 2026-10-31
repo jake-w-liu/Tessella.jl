@@ -239,6 +239,22 @@ function _sl_shared_tag(execution)
     return only(shared)
 end
 
+# Element-type multiset over all blocks of a completed mesh.
+_sl_msh_counts(mesh::Mesh)=Dict{Int,Int}(
+    k=>v for (k,v) in (
+        1=>size(mesh.segs,2),2=>size(mesh.tris,2),
+        4=>size(mesh.tets,2)) if v>0)
+function _sl_msh_counts(mesh::MixedMesh)
+    counts=Dict{Int,Int}()
+    for block in _sl_blocks(mesh)
+        block isa ElementBlock && msh_dimension(block.msh)>=1 ||
+            continue
+        counts[Int(block.msh)]=
+            get(counts,Int(block.msh),0)+size(block.nodes,2)
+    end
+    return counts
+end
+
 # All dim-2 cells of `mesh` lying entirely on the `axis == value` plane —
 # used on the merged product, whose blocks bucket cells by entity.
 function _sl_dim2_faces_on(mesh,axis::Int,value::Float64)
@@ -1282,20 +1298,6 @@ end
     end
 
     @testset "unstructured multi-cell prism columns" begin
-        _sl_msh_counts(mesh::Mesh)=Dict{Int,Int}(
-            k=>v for (k,v) in (
-                1=>size(mesh.segs,2),2=>size(mesh.tris,2),
-                4=>size(mesh.tets,2)) if v>0)
-        _sl_msh_counts(mesh::MixedMesh)=begin
-            counts=Dict{Int,Int}()
-            for block in _sl_blocks(mesh)
-                block isa ElementBlock && msh_dimension(block.msh)>=1 ||
-                    continue
-                counts[Int(block.msh)]=
-                    get(counts,Int(block.msh),0)+size(block.nodes,2)
-            end
-            counts
-        end
         # A multi-cell NoNew sweep against an ordinary unrecombined
         # partner (`b_multi_nonew_ord` oracle: 63 nodes): the partner's
         # prism-subdivision vote splits the shared wall, the NoNew owner
@@ -1437,8 +1439,18 @@ end
         # The minimal unstructured source — a single square carrying two
         # triangles: one column's shared interior edge plus its three
         # split boundary laterals is the twisted all-split combination
-        # the fixpoint resolves. The oracle fans this fixture to 24
-        # nodes; the native source needs no centroid.
+        # the fixpoint resolves. The oracle's default Frontal-Delaunay
+        # surface mesher inserts a centroid into this fixture's Source
+        # and fans it to four triangles (15 solo nodes, 24 nodes on the
+        # pair), but that insertion is the 2D mesher's member choice, not
+        # the sweep's: `Mesh.Algorithm=8` reproduces this native member
+        # bitwise (the same 2-4 diagonal, 12 nodes / 12 tets), a
+        # transfinite square never fans (12 nodes upstream too), and the
+        # insertion is source-geometry dependent — a parallelogram,
+        # trapezoid, skew and kite Source all stay two triangles there
+        # and match this emission bitwise. The sweep's contract is the
+        # producer's actual Source mesh, so the planner must not insert
+        # sweep-time centroids.
         execution=_sl_model("""
         Point(1)={0,0,0,3.0}; Point(2)={1,0,0,3.0};
         Point(3)={1,1,0,3.0}; Point(4)={0,1,0,3.0};
@@ -1470,6 +1482,169 @@ end
         @test nnodes(merged)==36
         @test _sl_msh_counts(merged)==Dict(1=>24,2=>28,3=>16,6=>28)
         _sl_positive(merged)
+    end
+
+    @testset "irregular boundary-curve counts" begin
+        # LAY01 residual: Sources whose boundaries carry five, six, or
+        # irregular curve counts reach the same per-column multi-cell
+        # planner — every bounded catalog answers its own side count and
+        # the actual Source mesh decides the rest. The oracle sweeps all
+        # of these natively (`d_pentagon`, `d_hexagon`, `d_lshape`,
+        # `d_lens` captures).
+        #
+        # A five-curve pentagon: the oracle's Frontal-Delaunay Source fan
+        # (five triangles around one centroid) is the native mesh
+        # bitwise, so the sweep's node/cell multiset matches the oracle
+        # exactly — 18 nodes, thirty tetrahedra.
+        execution=_sl_model("""
+        Point(1)={0,0,0,3.0};Point(2)={1,0,0,3.0};Point(3)={1,1,0,3.0};
+        Point(4)={0.5,1.25,0,3.0};Point(5)={0,1,0,3.0};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,5};Line(5)={5,1};
+        Curve Loop(1)={1,2,3,4,5};Plane Surface(1)={1};
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==18
+        @test _sl_msh_counts(merged)==Dict(1=>20,2=>30,4=>30)
+        _sl_positive(merged)
+        # A six-curve hexagon: both meshers triangulate it with two
+        # interior nodes, so the multisets match bitwise — 24 nodes, 40
+        # tetrahedra plus 4 pyramids. The pyramids are the interior-pair
+        # rule at work: the centroid-to-centroid edge joins two interior
+        # cells (no boundary edge on either), so its wall stays whole
+        # and each incident column emits a pyramid on the shared base.
+        execution=_sl_model("""
+        Point(1)={0,0,0,3.0};Point(2)={1,0,0,3.0};Point(3)={2,0.5,0,3.0};
+        Point(4)={2,1.5,0,3.0};Point(5)={1,2,0,3.0};Point(6)={0,1.5,0,3.0};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,5};Line(5)={5,6};Line(6)={6,1};
+        Curve Loop(1)={1,2,3,4,5,6};Plane Surface(1)={1};
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==24
+        @test _sl_msh_counts(merged)==Dict(1=>24,2=>40,4=>40,7=>4)
+        _sl_positive(merged)
+        # The L-shaped six-curve Source: the oracle's two-centroid fan
+        # (eight triangles, interior nodes inside both arms, the corner
+        # chord 1-4 kept whole between two interior cells) reaches 24
+        # nodes; the native four-triangle all-corner triangulation has
+        # no interior cells, splits every interior edge, and emits 18
+        # nodes / 24 tetrahedra — a certified member inside the same
+        # source-mesher family, recorded like the two-triangle square.
+        execution=_sl_model("""
+        Point(1)={0,0,0,3.0};Point(2)={2,0,0,3.0};Point(3)={2,1,0,3.0};
+        Point(4)={1,1,0,3.0};Point(5)={1,2,0,3.0};Point(6)={0,2,0,3.0};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,5};Line(5)={5,6};Line(6)={6,1};
+        Curve Loop(1)={1,2,3,4,5,6};Plane Surface(1)={1};
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==18
+        @test _sl_msh_counts(merged)==Dict(1=>24,2=>32,4=>24)
+        _sl_positive(merged)
+        # A two-curve lens (one arc, one closing chord): the oracle
+        # sweeps it to 14 nodes / 12 tetrahedra and the native emission
+        # matches that multiset bitwise. A single closed generatrix
+        # still fails upstream — its swept cap cannot be meshed — and
+        # keeps the boundary-category diagnostic here.
+        execution=_sl_model("""
+        Point(1)={0,0,0,3.0};Point(2)={1,0,0,3.0};Point(3)={0.5,-0.5,0,3.0};
+        Circle(1)={1,3,2};Line(2)={2,1};
+        Curve Loop(1)={1,2};Plane Surface(1)={1};
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==14
+        @test _sl_msh_counts(merged)==Dict(1=>12,2=>20,4=>12)
+        _sl_positive(merged)
+        @test_throws r"single-curve source boundaries" _sl_model("""
+        Point(1)={1,0,0,3.0};Point(2)={0.7,0.7,0,3.0};Point(3)={0,1,0,3.0};
+        Point(4)={-0.7,0.7,0,3.0};Point(5)={-1,0,0,3.0};
+        Point(6)={-0.7,-0.7,0,3.0};Point(7)={0,-1,0,3.0};Point(8)={0.7,-0.7,0,3.0};
+        BSpline(1)={1,2,3,4,5,6,7,8,1};
+        Curve Loop(1)={1};Plane Surface(1)={1};
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+    end
+
+    @testset "irregular shared-wall pairs" begin
+        # A pentagon welded to a heptagon over two generatrices — the
+        # same-owner multi-wall slice the joint certificate now groups
+        # per owner set. The oracle (`d_pent_pair`) emits 36 nodes and
+        # the identical element multiset: sixty tetrahedra, twelve
+        # pyramids, and two whole-quadrangle walls (four quads) — both
+        # NoNewVerts owners abstain, so the shared walls stay whole.
+        execution=_sl_model("""
+        Point(1)={0,0,0,3.0}; Point(2)={1,0,0,3.0};
+        Point(3)={1.4,0.6,0,3.0}; Point(4)={0.7,1.2,0,3.0}; Point(5)={-0.2,0.7,0,3.0};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,5};Line(5)={5,1};
+        Curve Loop(1)={1,2,3,4,5};Plane Surface(1)={1};
+        Point(6)={2.2,0.2,0,3.0}; Point(7)={2.6,0.9,0,3.0};
+        Point(8)={1.8,1.4,0,3.0}; Point(9)={0.8,1.5,0,3.0};
+        Line(6)={2,6};Line(7)={6,7};Line(8)={7,8};Line(9)={8,9};Line(10)={9,4};
+        Curve Loop(2)={6,7,8,9,10,-3,-2};Plane Surface(2)={2};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        model=execution.model
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==36
+        @test _sl_msh_counts(merged)==Dict(1=>38,2=>60,3=>4,4=>60,7=>12)
+        shared=intersect(Int.(execution.lists["left"])[3:end],
+                         Int.(execution.lists["right"])[3:end])
+        @test length(shared)==2
+        pass=_extrude_volume_pass(model,_SL_CALLER)
+        for s in shared
+            @test sort(_extrude_quadtri_regions(model,s,_SL_CALLER))==[1,2]
+            wall=_sl_surface_faces(pass.scope.surfaces[s])
+            @test length(wall)==2
+            @test all(length(key)==4 for key in wall)
+        end
+        for tag in (1,2)
+            _sl_positive(pass.parts[tag])
+        end
+        # The same pair with an ordinary unrecombined partner welds the
+        # two walls split (`d_pent_ord` oracle: 36 nodes, the identical
+        # element multiset — all tetrahedra, the partner's prism columns
+        # subdivided three apiece). The partner's vote forces the split,
+        # the bound per-segment parts transport the contract, and the
+        # seeded edge set reproduces the diagonal facets on the partner
+        # side bitwise.
+        execution=_sl_model("""
+        Point(1)={0,0,0,3.0}; Point(2)={1,0,0,3.0};
+        Point(3)={1.4,0.6,0,3.0}; Point(4)={0.7,1.2,0,3.0}; Point(5)={-0.2,0.7,0,3.0};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,5};Line(5)={5,1};
+        Curve Loop(1)={1,2,3,4,5};Plane Surface(1)={1};
+        Point(6)={2.2,0.2,0,3.0}; Point(7)={2.6,0.9,0,3.0};
+        Point(8)={1.8,1.4,0,3.0}; Point(9)={0.8,1.5,0,3.0};
+        Line(6)={2,6};Line(7)={6,7};Line(8)={7,8};Line(9)={8,9};Line(10)={9,4};
+        Curve Loop(2)={6,7,8,9,10,-3,-2};Plane Surface(2)={2};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};};
+        """;mesh_dim=3)
+        model=execution.model
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==36
+        @test _sl_msh_counts(merged)==Dict(1=>38,2=>68,4=>84)
+        shared=intersect(Int.(execution.lists["left"])[3:end],
+                         Int.(execution.lists["right"])[3:end])
+        @test length(shared)==2
+        pass=_extrude_volume_pass(model,_SL_CALLER)
+        for s in shared
+            @test sort(_extrude_quadtri_regions(model,s,_SL_CALLER))==[1,2]
+            wall=_sl_surface_faces(pass.scope.surfaces[s])
+            @test length(wall)==4
+            @test all(length(key)==3 for key in wall)
+        end
+        for tag in (1,2)
+            _sl_positive(pass.parts[tag])
+        end
     end
 
     @testset "constrained and compound shared-wall boundaries" begin

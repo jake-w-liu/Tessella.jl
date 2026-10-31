@@ -14,12 +14,20 @@
 # every owner keeps quads, or an unrecombined partner forces the split —
 # while a free lateral always takes the chain-preferred split
 # (chain-first bottom to chain-second top). An interior edge stays whole
-# only between two interior source vertices; any boundary-touching
-# interior edge splits on the canonical diagonal. The shared wall itself
-# transports through the bound Surface part — each segment quadrangle of
-# the earlier owner's emitted wall is reproduced facet-for-facet — so
-# multi-segment generatrices weld bitwise across owner boundaries, unlike
-# the generic catalog's single diagonal-per-layer contract.
+# exactly when it joins two interior cells — Source cells carrying no
+# boundary edge — whose two endpoints share one boundary class: the
+# oracle keeps the centroid-to-centroid wall of a two-centroid fan
+# (interior vertices) and the corner-to-corner chord of an L-shape
+# Source (boundary vertices) whole, and splits the corner-to-centroid
+# edges between them. A fully surrounded interior cell then retains a
+# whole prism, a cell with one such edge fans to a pyramid on the shared
+# quad base — the oracle's subregion-pair emission — and the
+# two-candidate mixed case never arises on observed oracle meshes. The
+# shared wall itself transports through the bound Surface part — each
+# segment quadrangle of the earlier owner's emitted wall is reproduced
+# facet-for-facet — so multi-segment generatrices weld bitwise across
+# owner boundaries, unlike the generic catalog's single
+# diagonal-per-layer contract.
 
 struct _ExtrudeNoNewMultiCellCatalog
     source_cells::Vector{NTuple{3,Int32}}
@@ -159,7 +167,7 @@ function _extrude_nonew_multi_cell_finish(m::GeoModel,t::Int,
     curves=_model_projection_surface_curves(m,source)
     chains=Dict{Int,Vector{NTuple{3,Float64}}}()
     seg_owner=Dict{NTuple{2,NTuple{3,Float64}},Tuple{Int,Int}}()
-    chain_positions=Set{NTuple{3,Float64}}()
+    boundary_vertex=Set{NTuple{3,Float64}}()
     for curve in curves
         c=abs(curve)
         chain=_extrude_curve_nodes(m,c,caller)
@@ -170,8 +178,8 @@ function _extrude_nonew_multi_cell_finish(m::GeoModel,t::Int,
         for seg in 1:nseg
             seg2=closed ? mod1(seg+1,length(chain)) : seg+1
             pa,pb=chain[seg],chain[seg2]
-            push!(chain_positions,pa)
-            push!(chain_positions,pb)
+            push!(boundary_vertex,pa)
+            push!(boundary_vertex,pb)
             key=_extrude_ekey(pa,pb)
             haskey(seg_owner,key) &&
                 _extrude_nonew_multi_cell_error(caller)
@@ -205,6 +213,7 @@ function _extrude_nonew_multi_cell_finish(m::GeoModel,t::Int,
     # Source-edge incidence: an edge carried by two cells is interior; an
     # edge carried by one must coincide with a generatrix chain segment.
     edge_inc=Dict{NTuple{2,Int32},Int}()
+    edge_cells=Dict{NTuple{2,Int32},Vector{Int}}()
     cell_edges=Vector{NTuple{3,NTuple{2,Int32}}}(undef,ncells)
     for (ci,cell) in enumerate(cells)
         es=ntuple(3) do side
@@ -214,13 +223,18 @@ function _extrude_nonew_multi_cell_finish(m::GeoModel,t::Int,
         cell_edges[ci]=es
         for e in es
             edge_inc[e]=get(edge_inc,e,0)+1
+            push!(get!(edge_cells,e,Int[]),ci)
         end
     end
     any(count->count>2,values(edge_inc)) &&
         _extrude_nonew_multi_cell_error(caller)
-    interior_node=falses(size(cols,2))
-    for i in axes(cols,2)
-        interior_node[i]=!(cols[1,i] in chain_positions)
+    # A boundary cell is any cell with a boundary (single-incidence) edge —
+    # the oracle keeps an interior edge's wall whole exactly when neither
+    # incident cell is a boundary cell.
+    boundary_cell=falses(ncells)
+    for (e,count) in edge_inc
+        count==1 || continue
+        boundary_cell[only(edge_cells[e])]=true
     end
     edge_meta=Dict{NTuple{2,Int32},Tuple{Int,Int,Int,Int}}()
     n_boundary=0
@@ -254,22 +268,35 @@ function _extrude_nonew_multi_cell_finish(m::GeoModel,t::Int,
         Vector{Union{Nothing,NTuple{2,NTuple{3,Float64}}}}}()
     edge_forced=Set{NTuple{2,Int32}}()
     part_cells=Dict{Int,Vector{Vector{NTuple{3,Float64}}}}()
-    for (e,count) in edge_inc
+    for e in sort!(collect(keys(edge_inc)))
+        count=edge_inc[e]
         diag=Vector{Union{Nothing,NTuple{2,NTuple{3,Float64}}}}(
             undef,intervals)
         if count==2
+            ci,cj=edge_cells[e][1],edge_cells[e][2]
             # RecombLaterals keeps every lateral quadrangle whole — the
             # oracle's emission is one retained prism per column layer
             # (b_multi_recomblat: 28 prisms, no interior splits) — so
             # interior edges stay whole too, not only between two
-            # interior source vertices.
-            if params.recomb_laterals ||
-                    (interior_node[e[1]] && interior_node[e[2]])
+            # interior source vertices. Without RecombLaterals the oracle
+            # keeps an interior wall whole when both incident cells are
+            # interior (no boundary edge) and the edge's endpoints carry
+            # the same boundary class — interior-interior and
+            # corner-corner edges qualify, the corner-to-centroid edge
+            # does not.
+            if params.recomb_laterals
                 fill!(diag,nothing)
             else
-                for layer in 1:intervals
-                    diag[layer]=_extrude_ekey(cols[layer,e[1]],
-                                              cols[layer+1,e[2]])
+                e1_boundary=cols[1,e[1]] in boundary_vertex
+                e2_boundary=cols[1,e[2]] in boundary_vertex
+                if !boundary_cell[ci] && !boundary_cell[cj] &&
+                        e1_boundary==e2_boundary
+                    fill!(diag,nothing)
+                else
+                    for layer in 1:intervals
+                        diag[layer]=_extrude_ekey(cols[layer,e[1]],
+                                                  cols[layer+1,e[2]])
+                    end
                 end
             end
             edge_state[e]=diag

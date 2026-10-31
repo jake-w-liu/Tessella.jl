@@ -740,8 +740,16 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
         "$caller: QuadTriNoNewVerts full or multiple revolutions require the cyclic/global self-intersection planner"))
     source=abs(link[2])
     sides=length(_model_projection_surface_curves(m,source))
-    sides in (3,4) || throw(ArgumentError(
-        "$caller: QuadTriNoNewVerts other source boundaries require the boundary-category planner"))
+    # Two or more generatrices reach the certified routes: a bounded
+    # catalog answers its side count, and every other triangulated Source
+    # — the oracle sweeps pentagon fans, multi-interior-node hexagons and
+    # L-shapes, and two-curve lens boundaries alike — resolves through
+    # the general per-column multi-cell planner on the actual mesh. A
+    # single closed generatrix has no partner-sided lateral pairing and
+    # fails upstream too (its swept cap cannot be meshed), so it stays on
+    # the boundary-category diagnostic.
+    sides>=2 || throw(ArgumentError(
+        "$caller: QuadTriNoNewVerts single-curve source boundaries require the boundary-category planner"))
     # Certified shared incidences of the bounded translation slice (this
     # Region may bound several such walls and one stacked cap); every other
     # incidence still rejects.
@@ -776,16 +784,21 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
     # ordinary/AddVerts partner or a RecombLaterals NoNewVerts owner keeps
     # quads upstream) carries no contract either, so a non-generic owner
     # may free-emit it and let the shared-part dedup and joint incidence
-    # certificate decide. A split wall is bounded to four-sided sources:
-    # the generic catalog still carries the transported contract while a
-    # non-generic owner either binds the wall — its own certified split
-    # emission becomes the contract its partners reproduce — or free-emits
-    # it as a later owner, where the dedup decides whether its boundary
-    # diagonals coincide bitwise with the bound part.
+    # certificate decide. A split wall is bounded to at-least-four-sided
+    # sources: the generic catalog still carries the transported contract
+    # while a non-generic owner either binds the wall — its own certified
+    # split emission becomes the contract its partners reproduce — or
+    # free-emits it as a later owner, where the dedup decides whether its
+    # boundary diagonals coincide bitwise with the bound part. The
+    # four-or-more bound is oracle-verified through the five-plus-curve
+    # family (a pentagon Source whose wall is split by an ordinary
+    # partner welds facet-for-facet through the per-segment parts
+    # transport); a two/three-sided Source with a bound split wall keeps
+    # the shared-region diagnostic.
     split_walls=[key for key in keys(shared) if
         get(m.meshing.extrude_sources,(2,key),(0,0))[1]==1 &&
         _extrude_nonew_wall_split(m,key,shared[key],caller)]
-    isempty(split_walls) || sides==4 ||
+    isempty(split_walls) || sides>=4 ||
         _extrude_nonew_shared_planner_error(caller,minimum(
             isempty(split_walls) ? collect(keys(shared)) : split_walls))
     grid_nodes,grid_cells_per_interval,grid_centers,grid_interval_centers=if rect_grid

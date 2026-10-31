@@ -150,13 +150,58 @@ support or test requirements.
   (non-transfinite BSpline source) 38 nodes; the coarse two-triangle
   native sources weld at 18 (pair) / 21 (+ordinary partner) / 12 (solo)
   nodes where the oracle fans its own sources through an extra centroid
-  to 24. Residual: sources whose boundary is not 3 or 4 curves keep the
-  loud "other source boundaries require the boundary-category planner"
-  diagnostic, and a shared generatrix meshed with segments whose welded
+  to 24. Residual: a shared generatrix meshed with segments whose welded
   quadrangle the bound part does not decompose as 1 quad / 2 tris stays
   certified-loud.
+- **Irregular source boundaries ≥2 curves (2026-10-31, working tree).**
+  The `sides in (3,4)` gate in `_extrude_nonew_plan`
+  (`src/geometry/ModelExtrudeQuadTriNoNew.jl:743`) is now `sides>=2`:
+  every triangulated Source reaches the same per-column multi-cell
+  planner — the bounded catalogs still answer their four-sided family,
+  all other triangulations emit through the actual Source mesh. A single
+  closed generatrix stays on a retargeted loud diagnostic ("single-curve
+  source boundaries require the boundary-category planner") because the
+  upstream sweep itself fails that family ("QuadToTri top surface
+  failed"). Per-edge source-cell incidence classifies interior versus
+  boundary edges; a `boundary_cell` mask derives from single-incidence
+  edges and `boundary_vertex` marks generatrix-chain positions. The
+  interior-edge rule generalizes to the oracle's observed behavior: an
+  interior wall stays whole when both incident cells are interior (carry
+  no boundary edge) and both endpoints share one boundary class —
+  centroid-to-centroid and corner-to-corner chords qualify, mixed
+  corner-to-centroid edges split (the earlier "interior vertices only"
+  rule mis-split the L-shape corner chord; an "at most one whole edge
+  per cell" cap was tried and correctly misclassified valid retained
+  prisms, so it was removed — there is no cap). Boundary edges keep the
+  shared-ownership/chain-preferred behavior. Multi-Surface welds certify
+  jointly: `_extrude_nonew_shared_certify` now takes the *group* of
+  bound Surfaces sharing one owner set (adjacent generatrices between
+  the same Regions) and checks subset+union coverage once
+  (`ModelExtrudeNoNewScope.jl`), so the pentagon pair's two adjacent
+  shared walls verify together. Split-wall admission generalizes from
+  `sides==4` to `sides>=4` (pentagon ordinary-partner walls transport
+  per-segment parts facet-for-facet). Oracle-matched (Gmsh 4.15.2,
+  identical node counts and element multisets): pentagon solo 18
+  nodes/30 tets, hexagon solo 24 nodes/40 tets + 4 pyramids, two-curve
+  lens solo 14 nodes/12 tets, L-shape solo 18 nodes/24 tets (the
+  native-triangulation member — the oracle's Frontal-Delaunay capture
+  fans the same L to 24 nodes/40 tets + 4 pyramids through an extra
+  interior vertex; both are source-mesher members), pentagon NoNew/NoNew
+  pair 36 nodes with two whole quad walls certified jointly, pentagon
+  NoNew vs ordinary partner 36 nodes/{38 segs, 68 tris, 84 tets}
+  **bitwise** (both walls split). Single-curve periodic-BSpline source
+  keeps the loud diagnostic asserted in-test.
+- **Source-mesher centroid divergence classified (2026-10-31).** The
+  oracle's default Frontal-Delaunay 2D mesher sometimes inserts
+  source-interior centroids (two-triangle square → 24-node sweep vs
+  native 12). `Mesh.Algorithm=8` reproduces the native member bitwise
+  (12 nodes/12 tets); transfinite sources never fan; the same divergence
+  family recurs on the L-shape. Centroid insertion is a producer/source
+  triangulation choice — `QuadTriNoNewVerts` is an existing-corner
+  contract, so no sweep-time insertion is added; the divergence is
+  documented in the test comments and here rather than emitted.
 - Verified: `test/geometry/extrude_nonew_shared_lateral_test.jl`
-  1919/1919 exit 0, `test/geometry/geo_extrude_test.jl` exit 0,
+  2218/2218 exit 0, `test/geometry/geo_extrude_test.jl` 495/495 exit 0,
   `geo_quadtri_extrude_test.jl` 334/334 exit 0,
   `model_warped_ruled_surface_test.jl` exit 0,
   `model_ruled_parametrization_test.jl` 471/471 exit 0 (Julia 1.12.7
