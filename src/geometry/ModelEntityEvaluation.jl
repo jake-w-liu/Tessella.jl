@@ -1392,6 +1392,19 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates;
         get(m.surface_geometry,entity_tag,nothing) : nothing
     occ_surface=surface_geometry!==nothing &&
         hasproperty(surface_geometry,:occ)
+    bl_spec=dimension==2 && !occ_surface ?
+        get(m.meshing.extrude_specs,(2,entity_tag),nothing) : nothing
+    bl_surface=bl_spec isa NamedTuple &&
+        get(bl_spec,:type,nothing)===:boundary_layer &&
+        haskey(bl_spec,:tops) && Int(get(bl_spec,:src,0))!=0 ?
+        bl_spec : nothing
+    # Upstream `boundaryLayerSurface` keys its vertex map on source-face
+    # (u,v): a query on the emitted top row delegates to the source
+    # surface's parametrization at the stored source position rather than
+    # inverting the generated ruled boundary.
+    bl_sources=bl_surface===nothing ? nothing :
+        Dict{NTuple{3,Float64},NTuple{3,Float64}}(
+            top=>pos for (pos,top) in bl_surface.tops)
     ruled_surface=dimension==2 && !occ_surface &&
         _surface_type(m,entity_tag) in (:ruled,:tric)
     plane=dimension==2 && !occ_surface && !ruled_surface ?
@@ -1401,6 +1414,8 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates;
         _model_lc(m) : 0.0
     for index in 1:3:length(values)
         coordinate=(values[index],values[index+1],values[index+2])
+        bl_source=bl_sources===nothing ? nothing :
+            _bl_surface_source_point(bl_sources,coordinate)
         if dimension==1
             if occ!==nothing
                 # `OCCEdge::parFromPoint` — the OCC projector's unclamped
@@ -1432,6 +1447,13 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates;
                 _,u=_arc_xyz_to_u(arc,coordinate,lc)
                 push!(output,u)
             end
+        elseif bl_source!==nothing
+            # `boundaryLayerSurface::parFromPoint` — the copy's parametric
+            # domain is the source face's; the stored top-row inverse names
+            # the source position, which the source surface parametrizes.
+            append!(output,model_parametrization(
+                m,2,abs(Int(bl_surface.src)),collect(bl_source);
+                old_ruled_surface=old_ruled_surface))
         elseif occ_surface
             # `OCCFace::parFromPoint` — the OCC surface projector's (u,v),
             # or `GFace::XYZtoUV`'s multi-seed Newton on failure.
@@ -1966,6 +1988,36 @@ function _bl_polyline_param(bl_row,q)
         end
     end
     return bestu
+end
+
+# `boundaryLayerSurface`'s vertex-keyed inverse: `bl_sources` maps each
+# emitted top-row position to its source position (the inverted `tops`
+# map of a resolved `:boundary_layer` Surface spec). An exact hit returns
+# the stored source position; a within-tolerance nearest key that clearly
+# dominates the runner-up is accepted for solver-evaluated drift, and a
+# genuinely foreign point returns nothing so the caller keeps its generic
+# surface inverse. Same key-tolerance contract as `_extrude_bl_row_lookup`.
+function _bl_surface_source_point(bl_sources::AbstractDict{
+        NTuple{3,Float64},NTuple{3,Float64}},p::NTuple{3,Float64})
+    source=get(bl_sources,p,nothing)
+    source===nothing || return source
+    isempty(bl_sources) && return nothing
+    scale=1.0
+    for pos in keys(bl_sources)
+        scale=max(scale,abs(pos[1]),abs(pos[2]),abs(pos[3]))
+    end
+    best=nothing;bd=Inf;bd2=Inf
+    for (pos,src) in bl_sources
+        d=hypot(p[1]-pos[1],p[2]-pos[2],p[3]-pos[3])
+        if d<bd
+            bd2=bd;bd=d;best=src
+        elseif d<bd2
+            bd2=d
+        end
+    end
+    bd<=1e-9*scale && return best
+    bd<=1e-7*scale && bd<=0.1*bd2 && return best
+    return nothing
 end
 
 function _segment_closest(p,a,b)

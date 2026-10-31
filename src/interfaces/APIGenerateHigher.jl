@@ -861,6 +861,22 @@ function _higher_ordinary_sweep_classification(assembly,m,production,input,dimen
             "$caller: ordinary Layers embedded Point[$point] is absent from emitted cells"))
     end
     _api_check_support_conflicts(edge_conflicts,face_conflicts,quad_conflicts)
+    if copied
+        # `copyMesh(GFace *from, GFace *to)` carries each copied vertex's
+        # stored par() onto the top — the copy's parametric domain IS the
+        # source face's (upstream `boundaryLayerSurface` likewise keys its
+        # vertex map on source (u,v)). Unbound interior rows therefore
+        # inherit the source row's (u,v) bitwise; re-inverting the
+        # displaced patch through the generated ruled boundary can fail to
+        # converge and is not what upstream stores.
+        for column in axes(production.column_rows,2)
+            row=production.column_rows[1,column]
+            (retained[row] || parameters[row]!==nothing) && continue
+            source_row=source_positions[production.source_node_tags[column]]
+            parameter=source_product.entity_data.node_parametric[source_row]
+            parameter===nothing || (parameters[row]=copy(parameter))
+        end
+    end
     if dimension==2
         boundary,actual_edges=Model._surface_boundary_topology(mesh,caller)
         expected_edges==actual_edges || throw(ArgumentError(

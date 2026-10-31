@@ -24,6 +24,63 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### LAY02 performance — copied-top parametric transport fixes warped ruled BL runtime (2026-10-31, working tree)
+
+- **Root cause.** `test/geometry/geo_extrude_boundarylayer_test.jl`'s warped
+  ruled source (`Ruled Surface` over four `Line`s, `Extrude {Surface{1};
+  Layers{3}; Recombine;}`) previously never finished under
+  `--compile=min -O0` (>40 min inside one fixture; `-O2` completed the same
+  `execute_geo(mesh_dim=3)` in ~954 s, mostly JIT). Phase instrumentation
+  localized the stall to `_higher_append_part!` parametrizing the chapeau
+  Surface 26's four unbound interior rows — `model_parametrization` routed
+  them through `_ruled_xyz_to_uv` on the generated ruled boundary (four
+  `boundary_layer`-typed generatrix curves). The BL-displaced top-row
+  vertices do not lie on that ruled blend, so the damped-Newton inverse
+  exhausted its 81-seed × 25-iteration search and recursive-relaxation
+  retries (~10⁴–10⁵ ruled evaluations per vertex, each evaluating four
+  boundary-layer curve rows) — minutes interpreted per vertex, and the
+  recovered `(u,v)` was only a best-fit projection, not a real parameter.
+- **Fix (`src/interfaces/APIGenerateHigher.jl`,
+  `_higher_ordinary_sweep_classification`).** For `copied` tops
+  (`dimension==2 && link[1]==2`), unbound rows now inherit the source
+  product's `node_parametric` through `production.column_rows`/
+  `source_node_tags` — upstream `copyMesh(GFace*,GFace*)` carries the
+  source vertex's stored `par()` onto the top copy, and
+  `boundaryLayerSurface`'s parametric domain *is* the source face's, so
+  the transport is the certified semantic rather than an approximation.
+  First-wins ordering matches upstream `pos.find` welding for collapsed
+  columns. Boundary rows still keep their lower-entity (curve/point)
+  binding parameters.
+- **Fix (`src/geometry/ModelEntityEvaluation.jl`,
+  `model_parametrization` + `_bl_surface_source_point`).** A resolved
+  `:boundary_layer` Surface spec (`type===:boundary_layer`, `tops`,
+  nonzero `src` — only `bl3d` chapeaux match; lateral strips key on
+  `surf`) now parametrizes by inverting the stored top row to its source
+  position and delegating to the source surface's own parametrization —
+  the vertex-keyed `parFromPoint` domain upstream uses. Exact hits return
+  immediately; the `_extrude_bl_row_lookup` tolerance contract covers
+  solver drift; genuinely foreign points fall back to the generic ruled/
+  plane inverse so off-mesh queries keep working.
+- **Timings (min-compile `-O0`).** The warped fixture's `execute_geo
+  (mesh_dim=3)` dropped from >40 min (never finished; >5 min inside a
+  single `model_parametrization` call) to ~310 s end-to-end — ~300 s
+  Julia precompile/JIT plus ~10 s of pipeline (surfaces ~4 s, volume
+  ~1 s). The full boundary-layer test file now completes routinely:
+  290/290 pass in ~10.4 min reported test time (curve 69/69, generatrix
+  10/10, top-row 7/7, View 23/23, 3-D surface 48/48, holed 43/43,
+  grading 4/4, curved ruled Mesh 3 25/25, spherical+warped 61/61 in
+  2m30s).
+- **Equivalence.** `errors=String[]`, `out=[26,1,13,17,21,25]`,
+  `nodes=56` pre- and post-fix; mesh coordinates/cells are produced by
+  unchanged generators (byte-identical); chapeau/volume topology checks
+  (`tris==tris`, `3·tris` prisms) all pass. The only changed data is
+  `node_parametric` for copied-top interior rows, which now carries the
+  upstream source-face domain instead of a non-convergent ruled
+  projection — no test asserts the old values.
+- Verified: `geo_extrude_boundarylayer_test.jl` 290/290 exit 0,
+  `geo_extrude_test.jl` 495/495 exit 0, `geo_quadtri_extrude_test.jl`
+  334/334 exit 0 — all under `--compile=min -O0 --check-bounds=yes`.
+
 ### LAY01 residuals — non-generic shared walls, constrained/periodic/compound boundaries, nonlinear sources (2026-10-31, working tree)
 
 - **Non-generic NoNew catalogs on shared walls.** `_extrude_nonew_wall_split`
