@@ -84,7 +84,17 @@ end
                 # Shipping Gmsh4.15.2 exact affine fixture: primary SHA256 2bc51a8834b4faeb6a6d14528de9470ec0b731d9ac3f9e59b6ca21f8a5ba798b.
                 @test _MIXED_QUERY_API.mesh.get_element_qualities([1],"volume")≈[23.8812164681785] atol=2e-14 rtol=0
             elseif msh!=15
-                @test_throws ArgumentError _MIXED_QUERY_API.mesh.get_element_qualities([1],"volume")
+                # Gmsh 4.15.2 getElementQualities("volume") dispatches on every
+                # catalogued solid — MHexahedron/MPrism/MPyramid::getVolume all
+                # answer, so linear hex/pri/pyr return their volumes instead of
+                # rejecting. Oracle-verified on this exact affine fixture
+                # (184.12499999999977/23.015624999999904/30.68749999999998).
+                @test _MIXED_QUERY_API.mesh.get_element_qualities([1],"volume")≈
+                    [Dict(5=>184.125,6=>23.015625,7=>30.6875)[msh]] atol=2e-12 rtol=0
+            else
+                # MPoint inherits MElement's unit 0-D integration measure
+                # (Gmsh 4.15.2 returns exactly 1.0).
+                @test _MIXED_QUERY_API.mesh.get_element_qualities([1],"volume")==[1.0]
             end
             if msh!=15
                 @test _MIXED_QUERY_API.mesh.get_element_qualities([1],"minEdge")[1]>0
@@ -110,7 +120,14 @@ end
         @test _MIXED_QUERY_API.mesh.get_local_coordinates_in_element(1,tip...)==(0.0,0.0,1.0)
         @test _MIXED_QUERY_API.mesh.get_element_by_coordinates(tip...,-1,true)[2]==7
         @test_throws ArgumentError _MIXED_QUERY_API.mesh.get_keys(7,"H1Legendre1")
-        @test_throws ArgumentError _MIXED_QUERY_API.mesh.get_jacobian(0,[0,0,0])
+        # Upstream getJacobian on an absent tag prints `Error : Unknown
+        # element 0` and raises under AbortOnError — ours throws the same
+        # diagnostic as an ErrorException, not an argument-validation error.
+        jac_err=try
+            _MIXED_QUERY_API.mesh.get_jacobian(0,[0,0,0]);nothing
+        catch err;err;end
+        @test jac_err isa ErrorException &&
+            sprint(showerror,jac_err)=="Unknown element 0"
         @test_throws ArgumentError _MIXED_QUERY_API.mesh.get_jacobian(1,[NaN,0,0])
         @test_throws ArgumentError _MIXED_QUERY_API.mesh.get_element_by_coordinates(Inf,0,0)
         @test_throws ArgumentError _MIXED_QUERY_API.mesh.get_element_by_coordinates(1000,1000,1000,-1,true)
@@ -167,7 +184,11 @@ end
         @test collect(_MIXED_QUERY_API.mesh.get_local_coordinates_in_element(1,0.5,1.125,0.0))≈
             [0.5,0.0,0.0] atol=2e-13
         @test _MIXED_QUERY_API.mesh.get_element_by_coordinates(0.5,1.125,0.0,1,true)[2]==8
-        @test_throws ArgumentError _MIXED_QUERY_API.mesh.get_element_qualities([1],"volume")
+        # MLine3 inherits MLine::getVolume — the endpoint distance, including
+        # when the quadratic support is off-chord. Gmsh 4.15.2 returns
+        # 2.23606797749979 on this exact fixture (sqrt(5), chord (-1,0,0)-(1,1,0)).
+        @test _MIXED_QUERY_API.mesh.get_element_qualities([1],"volume")≈
+            [sqrt(5.0)] atol=2e-14 rtol=0
 
         # Exact curved triangular map (u,v) -> (u,v,u*v), including its
         # independently derived tangent columns and area Jacobian.
