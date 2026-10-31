@@ -162,6 +162,55 @@ end
     @test on>=MT.nnodes(mesh)-1
 end
 
+@testset "degenerate pole edges emit no Line cells" begin
+    # Upstream marks an OCC `degenerate(0)` edge DONE at entry — the 4.15.2
+    # oracle emits zero Line elements on a `Sphere` face's pole edges, so the
+    # vertex's Point product is the only lower cell a collapsed row leaves.
+    # The earlier `N=1` reading stored a single endpoint-edge discretization
+    # whose (vertex,vertex) cell reached the merged public mesh as a
+    # zero-length Line `validate` rejects; the collapsed row's incidence
+    # inside the surface product is the welded `(uid,uid)` boundary pair
+    # keyed by the Point product, never a curve cell.
+    m=GeoModel()
+    M._model_occ_add_sphere!(m,0.0,0.0,0.0,1.0;tag=1)
+    M._model_occ_synchronize!(m)
+    degs=sort!([c for (c,k) in m.curve_types if k===:degenerate])
+    @test length(degs)==2
+    sface=findfirst(==(:sphere),m.surface_types)
+    mesh=M.mesh_model_surface(m,sface)
+    @test MT.validate(mesh).ok && MT.ntris(mesh)>0
+    # The collapsed edges grade to `:keep` — no stored discretization —
+    # while the shared meridian seam keeps its ordinary grading.
+    @test !any(deg->haskey(m.curve_params,deg),degs)
+    seam=only([c for (c,k) in m.curve_types if k!==:degenerate])
+    @test haskey(m.curve_params,seam)
+    # The merged `.geo` route agrees on both algorithm arms: the public mesh
+    # carries the meridian's Line cells and no zero-length self-loops.
+    for tail in ("","""
+Mesh.Algorithm = 7;
+Field[1] = MathEvalAniso;
+Field[1].M11 = 1;
+Field[1].M22 = 1;
+Field[1].M33 = 1;
+Field[1].M12 = 0;
+Field[1].M13 = 0;
+Field[1].M23 = 0;
+Background Field = 1;
+""")
+        src="SetFactory(\"OpenCASCADE\");\nSphere(1)={0,0,0,1};\n"*tail
+        result=mktemp() do path,io
+            write(io,src);close(io)
+            Tessella.execute_geo(path;mesh_dim=2)
+        end
+        @test result.msg_error_count==0
+        @test MT.validate(result.mesh).ok
+        @test MT.ntris(result.mesh)>0
+        @test size(result.mesh.segs,2)>0
+        @test !any(c->result.mesh.segs[1,c]==result.mesh.segs[2,c],
+                   axes(result.mesh.segs,2))
+    end
+end
+
 @testset "initial-only boundary mesh stays a loud rejection" begin
     # `Mesh.Algorithm=3` suppresses the interior uv lattice; the
     # boundary-only PSLG is then just the two seam columns plus the two

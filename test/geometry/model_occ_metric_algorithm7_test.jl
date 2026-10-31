@@ -19,6 +19,13 @@ const SF=Tessella.SizeField
 
 _error(f)=try;f();nothing catch err;err end
 
+function _geo_exec(source::AbstractString;mesh_dim=2)
+    return mktemp() do path,io
+        write(io,source);close(io)
+        Tessella.execute_geo(path;mesh_dim=mesh_dim)
+    end
+end
+
 # A full 2π OCC cylinder synchronized into explicit shell topology: surface 1
 # is the closed :cylinder lateral — the periodic-seam weld case.
 function _full_lateral()
@@ -292,4 +299,34 @@ end
     @test all(k->abs(mesh7.coords[1,k]^2+mesh7.coords[2,k]^2-1.5^2)<1e-9,
               1:MT.nnodes(mesh7))
     @test _assert_metric_cert(mesh7,field,lateral)
+end
+
+@testset ".geo higher route: anisotropic fields reach OCC arc grading" begin
+    # `generate(dim>1)` emits the boundary Curve products before the Surface
+    # phase (`_boundary_regrade=false`), so each boundary curve must already
+    # resolve the algorithm-7 certificate field at grade time. The OCC arc
+    # grader used to size circles with the scalarized `speed/h` law even
+    # while its incident face certified under the tensor — under an M=16
+    # transverse metric the rim circles came back under-resolved and the
+    # retained-boundary certificate rejected the whole assembly.
+    src="""
+SetFactory("OpenCASCADE");
+Cylinder(1) = {0,0,0, 0,0,2, 1.5};
+Mesh.Algorithm = 7;
+Field[1] = MathEvalAniso;
+Field[1].M11 = 16;
+Field[1].M22 = 16;
+Field[1].M33 = 1;
+Field[1].M12 = 0;
+Field[1].M13 = 0;
+Field[1].M23 = 0;
+Background Field = 1;
+"""
+    result=_geo_exec(src)
+    @test result.msg_error_count==0
+    mesh=result.mesh
+    @test MT.validate(mesh).ok && MT.ntris(mesh)>0
+    @test all(k->(abs(hypot(mesh.coords[1,k],mesh.coords[2,k])-1.5)<1e-9 ||
+                  abs(mesh.coords[3,k])<1e-9 || abs(mesh.coords[3,k]-2)<1e-9),
+              1:MT.nnodes(mesh))
 end

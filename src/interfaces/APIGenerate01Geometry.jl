@@ -31,7 +31,7 @@ function _dim01_geometry_curve_parameters!(birth,m,curve,actual,options,caller)
             haskey(m.curves,curve) && !haskey(m.discrete,(1,curve)) &&
             !(Model._curve_type(m,curve) in (:tensor_bezier,:tensor_bspline)) &&
             !haskey(m.meshing.extrude,(1,curve)) &&
-            Model._model_curve_degenerate_kind(m,curve) != 0
+            Model._model_curve_degenerate_kind(m,curve) == -1
         constraint=get(m.periodic,(1,curve),nothing)
         if constraint!==nothing
             master=abs(constraint.master_entity)

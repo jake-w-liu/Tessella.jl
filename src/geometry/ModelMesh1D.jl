@@ -579,11 +579,16 @@ end
 # ── Per-curve meshing ────────────────────────────────────────────────────────
 # `.geo Degenerated` sets the record flag `degenerate(1)`: meshGEdge marks the
 # curve DONE at entry and keeps any existing elements. OCC `:degenerate`
-# records are `degenerate(0)`, which still emits the single endpoint edge
-# (`N=1` inside `meshGEdgeProcessing`).
+# records are the geometric pole/apex collapse and upstream skips them at the
+# same gate — the 4.15.2 oracle emits no Line cells on a `Sphere` face's two
+# pole edges at all (only the vertex's own Point product remains). Both kinds
+# therefore grade to the same `:keep` result: emitting a single
+# (vertex,vertex) self-edge — the earlier `degenerate(0)` reading — leaves a
+# zero-length Line cell the compact validator rejects and diverges from the
+# oracle.
 function _model_curve_degenerate_kind(m::GeoModel,curve::Integer)
     curve in m.meshing.degenerated && return 1
-    get(m.curve_types,curve,:line)===:degenerate && return 0
+    get(m.curve_types,curve,:line)===:degenerate && return 1
     return -1
 end
 
@@ -1548,8 +1553,7 @@ function _model_mesh_curve!(m::GeoModel,curve::Integer,
     if record!==nothing && !_model_discrete_curve_parametrized(record)
         return :keep   # `_discretization.empty()` upstream — elements kept
     end
-    degenerate=_model_curve_degenerate_kind(m,curve)
-    degenerate==1 && return :keep
+    _model_curve_degenerate_kind(m,curve)==1 && return :keep
     if options.mesh_only_visible
         model_entity_visibility(m,1,curve)==0 && return :keep
     end
@@ -1605,7 +1609,6 @@ function _model_mesh_curve!(m::GeoModel,curve::Integer,
         # closed-`Line` shortcut evaluates `position(0.5)` to the vertex, so
         # `length=0` unconditionally and bounds stay the [0,1] line frame.
         t0,t1=0.0,1.0
-        degenerate==0 && return Float64[t0,t1]
         if options.tolerance_edge_length==0.0
             return Float64[t0,t1]
         end
@@ -1613,7 +1616,6 @@ function _model_mesh_curve!(m::GeoModel,curve::Integer,
         return collect(range(t0,t1,length=minimum+1))
     end
     t0,t1=_model_curve_param_bounds(m,curve,caller)
-    degenerate==0 && return _model_curve_single_edge_params(m,curve,caller)
     spec=get(m.meshing.transfinite_curves,curve,nothing)
     length=if spec!==nothing && kind===:line
         # The F_One prepass integrates a constant derivative on a Line. Only
@@ -1702,13 +1704,13 @@ end
 
 # The `old < 1` arm of `GModel::mesh(ask>1)`: re-run `Mesh1D` when the stored
 # 1-D state is incomplete — any native curve without stored parameters that
-# is not a `.geo Degenerated` keep (upstream's DONE-at-entry), or any
-# non-parametrized discrete curve (upstream leaves it PENDING forever, so
-# `meshDone1D` never holds).
+# is not a DONE-at-entry degenerate keep (`.geo Degenerated` or an OCC
+# geometric collapse), or any non-parametrized discrete curve (upstream
+# leaves it PENDING forever, so `meshDone1D` never holds).
 function _model_mesh_needs_dim1(m::GeoModel)
     for curve in keys(m.curves)
         haskey(m.curve_params,curve) && continue
-        curve in m.meshing.degenerated && continue
+        _model_curve_degenerate_kind(m,curve)==1 && continue
         return true
     end
     for ((dim,tag),record) in _discrete_mesh_records_model(m)

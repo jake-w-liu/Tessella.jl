@@ -1891,8 +1891,19 @@ function _occ_metric_surface_refine(m,tag,field,target,node_limit,
         "$caller: initial Surface loses its actual lower Curve-cell incidence"))
     score(edge)=metric_edge_length(field,coordinates[edge[1]],
         coordinates[edge[2]];entity=(2,tag))
-    all(edge->score(edge)<=target,boundary) || throw(ArgumentError(
+    if !all(edge->score(edge)<=target,boundary)
+        if get(ENV,"TESS_METRIC_DEBUG","")!=""
+            for edge in sort!(collect(boundary))
+                s=score(edge)
+                s>target && println(stderr,"retained-violating edge $edge s=$s at ",
+                    coordinates[edge[1]]," ",coordinates[edge[2]],
+                    " uv=",parameters[edge[1]]," ",parameters[edge[2]],
+                    " owners=",owners[edge[1]]," ",owners[edge[2]])
+            end
+        end
+        throw(ArgumentError(
         "$caller: retained boundary exceeds max_metric_edge; provide finer lower Curve cells"))
+    end
     # Planar-embedding certificate for the unwrapped sheet: the lifted weld
     # repair may leave covering-position cells (a star rebuilt across the
     # seam on the covering sheet), which is fine for the welded product but

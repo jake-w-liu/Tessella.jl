@@ -1416,7 +1416,11 @@ end
             @test owners[1]==(0,model.curves[curve][1])
             @test owners[2:end]==fill((1,curve),expected_count-1)
             @test all(diff(params).>0)
-            expected_params=Float64[2pi*k/expected_count for k in 0:expected_count-1]
+            # Stored `curve_params` keep the open-style `[t0,…,t1]` contract —
+            # both endpoint representatives — while the published part omits
+            # the repeated close node (upstream stores N=nedge+1 likewise).
+            expected_params=Float64[2pi*k/expected_count for k in 0:expected_count]
+            @test length(params)==expected_count+1
             @test maximum(abs.(params.-expected_params))<=2e-11
             @test all(node->isapprox(hypot(part.coords[1,node],part.coords[2,node]),
                                     1.0;atol=4eps(Float64),rtol=0),
@@ -1868,11 +1872,17 @@ end
         @test counts[4]>0
         @test counts[7]>0
         @test validate(execution.mesh).ok
-        err=_constraint_error(_GEO_EXTRUDE_TRI * raw"""
+        # Upstream accepts NoNew on a triangular source — there is no quad
+        # interior to weld, so the volume degrades to the unstructured
+        # fill (4.15.2 oracle: 32 nodes / 63 tets after "Remeshing lateral
+        # surfaces for QuadToTri region 1"). The multi-cell NoNew planner
+        # admits the same route; the stale loud-reject pin predates it.
+        execution=_execute_constraint_source(_GEO_EXTRUDE_TRI * raw"""
             Extrude{0,0,2}{Surface{1};Layers{3};Recombine;QuadTriNoNewVerts;}
             """;mesh_dim=3)
-        @test err !== nothing
-        @test occursin("QuadTriNoNewVerts",sprint(showerror,err))
+        @test isempty(execution.errors)
+        @test validate(execution.mesh).ok
+        @test ntets(execution.mesh)>0
     end
     @testset "no Layers falls back to unstructured filling" begin
         execution=_execute_constraint_source(_GEO_EXTRUDE_TRI * raw"""
