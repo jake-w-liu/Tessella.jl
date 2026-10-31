@@ -939,9 +939,11 @@ end
         """;mesh_dim=3)
         # Two strip Sources welded on one wall: upstream's QuadToTri solve
         # fails outright on the partner's lateral (37 errors, no volume 2
-        # cells), so the shared-part dedup keeps the loud planner
-        # diagnostic here as well.
-        @test_throws r"shared-region planner" _sl_model("""
+        # cells), so the loud planner diagnostic stays here as well — the
+        # partner's three-quad Source matches no bounded catalog and the
+        # boundary-category diagnosis now reaches it before the wall
+        # contract is consulted.
+        @test_throws r"planner" _sl_model("""
         Point(1)={0,0,0,1}; Point(2)={2,0,0,1};
         Point(3)={2,1,0,1}; Point(4)={0,1,0,1};
         Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
@@ -953,6 +955,291 @@ end
         Transfinite Curve{2,4,6}=2;
         Transfinite Surface{:};
         Recombine Surface{:};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+    end
+
+    @testset "reversed-orientation owners weld the shared lateral" begin
+        # A reversed source loop makes its whole Region inside-out — every
+        # lateral shell sign flips — while upstream still welds the shared
+        # wall. The geometric side test (generatrix × sweep against each
+        # Source's interior) admits exactly that reversal; the Gmsh 4.15.2
+        # oracle emits 18 nodes and a welded shared wall for both loop
+        # directions. Upstream's wall decomposition itself is
+        # solver-dependent across runs (all-split, split+whole-quad and
+        # all-quad walls all observed on the same fixture); the
+        # deterministic emission pinned here is the all-split member of
+        # that observed family.
+        oracle_wall=Set((
+            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,1.0,0.5)),
+            ((1.0,0.0,0.0),(1.0,1.0,0.0),(1.0,1.0,0.5)),
+            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,1.0,1.0)),
+            ((1.0,0.0,0.5),(1.0,1.0,0.5),(1.0,1.0,1.0))))
+        for (loop1,loop2) in (("{-4,-3,-2,-1}","{5,6,7,-2}"),
+                             ("{1,2,3,4}","{2,-7,-6,-5}"))
+            execution=_sl_model("""
+            Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+            Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+            Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+            Curve Loop(1)=$loop1;Plane Surface(1)={1};
+            Point(5)={2,0,0,1};Point(6)={2,1,0,1};
+            Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+            Curve Loop(2)=$loop2;Plane Surface(2)={2};
+            Transfinite Curve{:}=2;
+            Transfinite Surface{1};Transfinite Surface{2};
+            Recombine Surface{:};
+            left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+            right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+            """;mesh_dim=3)
+            model=execution.model
+            merged=execution.mesh
+            @test validate(merged).ok
+            @test nnodes(merged)==18
+            s=_sl_shared_tag(execution)
+            @test sort(_extrude_quadtri_regions(model,s,_SL_CALLER))==[1,2]
+            pass=_extrude_volume_pass(model,_SL_CALLER)
+            bound=pass.scope.surfaces[s]
+            @test validate(bound).ok
+            wall=_sl_surface_faces(bound)
+            @test wall==oracle_wall
+            @test _sl_dim2_faces_on(merged,1,1.0)==wall
+            left=_sl_wall_cycles(pass.parts[1],1.0)
+            right=_sl_wall_cycles(pass.parts[2],1.0)
+            @test Set(keys(left))==Set(keys(right))==wall
+            for key in keys(left)
+                @test _sl_reversed(left[key],right[key])
+            end
+            _sl_positive(pass.parts[1]);_sl_positive(pass.parts[2])
+            counts=_sl_face_counts(pass.parts[1],pass.parts[2])
+            @test Set(k for (k,c) in counts if c==2 &&
+                all(v->v[1]==1.0,k))==wall
+        end
+        # The inside-out partner may also be an ordinary unrecombined
+        # sweep — the seeded subdivision welds it the same way upstream
+        # (Gmsh 4.15.2 `a_rev_loop_mixed` capture: 18 nodes).
+        execution=_sl_model("""
+        Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+        Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        Point(5)={2,0,0,1};Point(6)={2,1,0,1};
+        Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+        Curve Loop(2)={2,-7,-6,-5};Plane Surface(2)={2};
+        Transfinite Curve{:}=2;
+        Transfinite Surface{1};Transfinite Surface{2};
+        Recombine Surface{1};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==18
+        s=_sl_shared_tag(execution)
+        pass=_extrude_volume_pass(execution.model,_SL_CALLER)
+        wall=_sl_surface_faces(pass.scope.surfaces[s])
+        @test wall==oracle_wall
+        for tag in (1,2)
+            @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
+            _sl_positive(pass.parts[tag])
+        end
+        # Mesh-level reversals keep the canonical plan and flip only the
+        # published windings. `Reverse Curve{2}` on the generatrix and
+        # `Reverse Surface{2}` on the Source both weld identically
+        # upstream (Gmsh 4.15.2: 18 nodes, same observed wall family).
+        for suffix in ("Reverse Curve{2};\n","Reverse Surface{2};\n")
+            execution=_sl_model(_sl_squares()*"""
+            left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+            right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+            """*suffix;mesh_dim=3)
+            merged=execution.mesh
+            @test validate(merged).ok
+            @test nnodes(merged)==18
+            s=_sl_shared_tag(execution)
+            pass=_extrude_volume_pass(execution.model,_SL_CALLER)
+            bound=pass.scope.surfaces[s]
+            wall=_sl_surface_faces(bound)
+            @test wall==oracle_wall
+            @test _sl_dim2_faces_on(merged,1,1.0)==wall
+            for tag in (1,2)
+                @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
+                _sl_positive(pass.parts[tag])
+            end
+        end
+        # `Reverse Surface` on the shared wall itself flips the published
+        # part's windings — the certificates keep canonical orientation —
+        # while the welded facet set stays the oracle's (Gmsh 4.15.2
+        # `a_rev_wall` capture: 18 nodes, same wall family).
+        canonical=_sl_model(_sl_squares()*"""
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        reversed=_sl_model(_sl_squares()*"""
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        Reverse Surface{left[3]};
+        """;mesh_dim=3)
+        @test validate(reversed.mesh).ok
+        @test nnodes(reversed.mesh)==18
+        s=_sl_shared_tag(reversed)
+        pass=_extrude_volume_pass(reversed.model,_SL_CALLER)
+        bound=pass.scope.surfaces[s]
+        wall=_sl_surface_faces(bound)
+        @test wall==oracle_wall
+        @test _sl_dim2_faces_on(reversed.mesh,1,1.0)==wall
+        for tag in (1,2)
+            @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
+            _sl_positive(pass.parts[tag])
+        end
+        # The stored scope part and the published surface mesh carry the
+        # same flipped emission — classification sees one part.
+        bound_c=_extrude_volume_pass(canonical.model,_SL_CALLER).scope.surfaces[
+            _sl_shared_tag(canonical)]
+        @test !_sl_part_equal(bound,bound_c)
+        @test _sl_part_equal(mesh_model_surface(reversed.model,s),bound)
+        @test _sl_surface_faces(geo_entity_mesh(reversed,2,s))==wall
+        # A generatrix defined in the opposite direction (Line(2)={3,2}
+        # with both loops re-ordered) welds the same wall — the solver
+        # pins the mirror diagonal, which is the diagonal orientation the
+        # oracle's own split-layer emission shows on this fixture.
+        execution=_sl_model("""
+        Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+        Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+        Line(1)={1,2};Line(2)={3,2};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,-2,3,4};Plane Surface(1)={1};
+        Point(5)={2,0,0,1};Point(6)={2,1,0,1};
+        Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+        Curve Loop(2)={5,6,7,2};Plane Surface(2)={2};
+        Transfinite Curve{:}=2;
+        Transfinite Surface{1};Transfinite Surface{2};
+        Recombine Surface{:};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==18
+        s=_sl_shared_tag(execution)
+        pass=_extrude_volume_pass(execution.model,_SL_CALLER)
+        wall=_sl_surface_faces(pass.scope.surfaces[s])
+        @test wall==Set((
+            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,1.0,0.0)),
+            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,1.0,0.5)),
+            ((1.0,0.0,0.5),(1.0,1.0,0.0),(1.0,1.0,0.5)),
+            ((1.0,0.0,1.0),(1.0,1.0,0.5),(1.0,1.0,1.0))))
+        @test _sl_dim2_faces_on(merged,1,1.0)==wall
+        for tag in (1,2)
+            @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
+            _sl_positive(pass.parts[tag])
+        end
+    end
+
+    @testset "multi-cell and strip sources on the shared lateral" begin
+        # Two-quad strip Sources on both sweeps: the 1-segment wall at
+        # x=2 welds four triangles bitwise (Gmsh 4.15.2 `b_strip_short`
+        # capture: 30 nodes, same four facets); the all-split emission is
+        # the strip catalog's own boundary policy transported through the
+        # bitwise shared-part dedup rather than a diagonal contract.
+        execution=_sl_model("""
+        Point(1)={0,0,0,1}; Point(2)={2,0,0,1};
+        Point(3)={2,1,0,1}; Point(4)={0,1,0,1};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        Point(5)={4,0,0,1};Point(6)={4,1,0,1};
+        Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+        Curve Loop(2)={5,6,7,-2};Plane Surface(2)={2};
+        Transfinite Curve{1,3,5,7}=3; Transfinite Curve{2,4,6}=2;
+        Transfinite Surface{1};Transfinite Surface{2};
+        Recombine Surface{:};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==30
+        s=_sl_shared_tag(execution)
+        pass=_extrude_volume_pass(execution.model,_SL_CALLER)
+        bound=pass.scope.surfaces[s]
+        wall=_sl_surface_faces(bound)
+        @test wall==Set((
+            ((2.0,0.0,0.0),(2.0,0.0,0.5),(2.0,1.0,0.5)),
+            ((2.0,0.0,0.0),(2.0,1.0,0.0),(2.0,1.0,0.5)),
+            ((2.0,0.0,0.5),(2.0,0.0,1.0),(2.0,1.0,1.0)),
+            ((2.0,0.0,0.5),(2.0,1.0,0.5),(2.0,1.0,1.0))))
+        @test _sl_dim2_faces_on(merged,1,2.0)==wall
+        for tag in (1,2)
+            @test Set(keys(_sl_wall_cycles(pass.parts[tag],2.0)))==wall
+            _sl_positive(pass.parts[tag])
+        end
+        # The 2-segment generatrix welds eight triangles — the oracle's
+        # `b_strip_long` capture (27 nodes) including its transfinite
+        # evaluation noise on the interior generatrix node.
+        execution=_sl_model("""
+        Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+        Point(3)={1,2,0,1}; Point(4)={0,2,0,1};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        Point(5)={2,0,0,1};Point(6)={2,2,0,1};
+        Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+        Curve Loop(2)={5,6,7,-2};Plane Surface(2)={2};
+        Transfinite Curve{1,3,5,7}=2; Transfinite Curve{2,4,6}=3;
+        Transfinite Surface{1};Transfinite Surface{2};
+        Recombine Surface{:};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==27
+        s=_sl_shared_tag(execution)
+        pass=_extrude_volume_pass(execution.model,_SL_CALLER)
+        wall=_sl_surface_faces(pass.scope.surfaces[s])
+        mid=0.9999999999973842
+        @test wall==Set((
+            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,mid,0.5)),
+            ((1.0,0.0,0.0),(1.0,mid,0.0),(1.0,mid,0.5)),
+            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,mid,1.0)),
+            ((1.0,0.0,0.5),(1.0,mid,0.5),(1.0,mid,1.0)),
+            ((1.0,mid,0.0),(1.0,mid,0.5),(1.0,2.0,0.5)),
+            ((1.0,mid,0.0),(1.0,2.0,0.0),(1.0,2.0,0.5)),
+            ((1.0,mid,0.5),(1.0,mid,1.0),(1.0,2.0,1.0)),
+            ((1.0,mid,0.5),(1.0,2.0,0.5),(1.0,2.0,1.0))))
+        @test _sl_dim2_faces_on(merged,1,1.0)==wall
+        for tag in (1,2)
+            @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
+            _sl_positive(pass.parts[tag])
+        end
+        # Unstructured multi-cell Sources are the genuine remaining gap:
+        # the oracle sweeps each source triangle into a prism column and
+        # welds the wall — whole quads between two NoNew owners
+        # (`b_multi_nonew_nonew`: 63 nodes), split triangles against an
+        # ordinary partner (`b_multi_nonew_ord`: 63 nodes). Decomposing
+        # that emission through the bounded catalogs is not possible —
+        # every catalog is a single-cell/strip template and the general
+        # per-column subdivision is exactly the boundary-category
+        # planner the diagnostic names — so the loud diagnostic stays.
+        @test_throws r"boundary-category planner" _sl_model("""
+        Point(1)={0,0,0,0.6}; Point(2)={1,0,0,0.6};
+        Point(3)={1,1,0,0.6}; Point(4)={0,1,0,0.6};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        Point(5)={2,0,0,0.6};Point(6)={2,1,0,0.6};
+        Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+        Curve Loop(2)={5,6,7,-2};Plane Surface(2)={2};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        # The oracle also rejects the minimal two-triangle unstructured
+        # pair outright (empty output on `b_tri2_pair`) — matching this
+        # diagnostic's verdict.
+        @test_throws r"boundary-category planner" _sl_model("""
+        Point(1)={0,0,0,3.0}; Point(2)={1,0,0,3.0};
+        Point(3)={1,1,0,3.0}; Point(4)={0,1,0,3.0};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        Point(5)={2,0,0,3.0};Point(6)={2,1,0,3.0};
+        Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+        Curve Loop(2)={5,6,7,-2};Plane Surface(2)={2};
         left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
         right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
         """;mesh_dim=3)

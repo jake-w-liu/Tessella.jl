@@ -54,7 +54,50 @@ support or test requirements.
   reaches these, so it remains a documented catalog gap. A nonlinear shared
   *generatrix* (curved welded wall) fails upstream with 15 errors, so the
   rejection is upstream-consistent.
-- Verified: `test/geometry/extrude_nonew_shared_lateral_test.jl` 762/762,
+- **Reversed-orientation shared walls (2026-10-31, working tree).** A
+  reversed source loop makes its whole Region inside-out — every lateral
+  shell sign flips with it — so the literal shell-sign check alone could
+  not distinguish it from same-side overlapping owners. New
+  `_extrude_nonew_shared_sides` (`src/geometry/ModelExtrudeNoNewScope.jl`)
+  computes each owner's geometric wall side as `generatrix × translation`
+  dotted against its Source-boundary corner centroid; equal shell signs are
+  now admitted only when the two Source interiors provably sit on both
+  geometric sides. Mesh-level `Reverse Curve`/`Reverse Surface`/`Reverse
+  Volume` flags no longer reject in the NoNew scope contract: plans and
+  certificates stay canonical, and the winding flip is applied to the
+  stored scope surface parts after certification and to completed volume
+  parts at publication (`_reversed_surface_mesh`/`_reversed_volume_mesh`),
+  so the projection lookup and the classified entity see the same part.
+  Oracle-verified (Gmsh 4.15.2): reversed left/right loops, reversed loop
+  + unrecombined partner, `Reverse Curve` on the generatrix, `Reverse
+  Surface` on the Source and on the wall itself all weld — 18 nodes each.
+- **Multi-cell shared walls (2026-10-31, working tree).** Non-generic
+  owners (strip catalogs) can now bind a wall whose diagonal contract a
+  generic partner transports — `_extrude_nonew_scope` checks the binder's
+  catalog via `_extrude_nonew_generic_source` before transporting. Both
+  strips on one wall certify through the bitwise shared-part dedup,
+  including a multi-segment generatrix: oracle `b_strip_short` 30 nodes /
+  4 wall tris and `b_strip_long` 27 nodes / 8 wall tris match Tessella's
+  emission **bitwise** (including the transfinite evaluation noise on the
+  interior generatrix node). A generic+strip pair welds identically
+  (oracle `b_mix_gen_strip` 24 nodes). Unstructured multi-cell Sources are
+  the genuine remaining gap: the oracle sweeps each source triangle into a
+  prism column and welds — whole quads between two NoNew owners (63 nodes),
+  split tris against an ordinary partner (63 nodes) — which requires the
+  general per-column boundary-category planner, not decomposable through
+  the bounded single-cell/strip catalogs; the loud diagnostic stays.
+  Upstream itself rejects the minimal two-triangle unstructured pair
+  (empty output), matching the same diagnostic's verdict.
+- **Adaptive per-layer wall shape.** Repeated oracle runs show the shared
+  wall decomposition is **solver-dependent run to run** — all-split,
+  split+whole-quad and all-quad walls all appear on the same fixture — so
+  there is no single upstream target to pin. Tessella emits the all-split
+  member deterministically on planar sources and it is inside the oracle's
+  observed family; on warped ruled sources (BSpline boundary) the oracle's
+  mixed runs prefer a whole-quad last layer, but those fixtures fail
+  earlier at the warped-surface plane admission (`model_to_mixed`
+  projection), a ruled-surface limitation outside the NoNew scope.
+- Verified: `test/geometry/extrude_nonew_shared_lateral_test.jl` 1085/1085,
   `test/geometry/geo_extrude_test.jl` exit 0, `geo_quadtri_extrude_test.jl`
   exit 0 (Julia 1.12.7 `--check-bounds=yes --compile=min -O0`).
 

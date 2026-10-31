@@ -42,9 +42,10 @@ function _extrude_nonew_scope_contract(m::GeoModel,t::Int,
             throw(ArgumentError(
                 "$caller: QuadTriNoNewVerts transfinite cap/lateral overrides " *
                 "require the constrained-boundary planner"))
-        get(m.meshing.reverse,(2,surface),false) && throw(ArgumentError(
-            "$caller: QuadTriNoNewVerts reversed boundary surfaces " *
-            "require the oriented-boundary planner"))
+        # A mesh-level `Reverse Surface` flag only flips the published cell
+        # windings — the scope mirrors a reversed Source through its Source
+        # mesh (the surface pass already flipped it) and flips each emitted
+        # cap/lateral part at collection, so the flag is supported here.
         for loop in m.surfaces[surface],signed in m.loops[loop]
             curve=abs(signed)
             push!(curves,curve)
@@ -52,14 +53,10 @@ function _extrude_nonew_scope_contract(m::GeoModel,t::Int,
             push!(points,a);push!(points,b)
         end
     end
-    get(m.meshing.reverse,(3,t),false) && throw(ArgumentError(
-        "$caller: QuadTriNoNewVerts reversed volumes " *
-        "require the oriented-boundary planner"))
-    for curve in curves
-        get(m.meshing.reverse,(1,curve),false) && throw(ArgumentError(
-            "$caller: QuadTriNoNewVerts reversed boundary curves " *
-            "require the oriented-boundary planner"))
-    end
+    # `Reverse Volume`/`Reverse Curve` flip only the published element
+    # windings: the volume emitter reverses its completed cells after
+    # certification and the curve segments' winding lives on the ordinary
+    # curve-meshing path outside this scope.
     for constraint in values(m.periodic)
         entities=constraint.dim==2 ? surfaces :
                  constraint.dim==1 ? curves :
@@ -522,6 +519,52 @@ function _extrude_nonew_shell_sign(m::GeoModel,t::Int,s::Int)
     return 0
 end
 
+# Geometric side of one shared lateral's owners: the wall plane contains
+# the generatrix and the sweep translation, so the generatrix × sweep
+# normal splits space into the two wall sides and each owner's Source
+# boundary centroid carries one signed side. A reversed Source loop (or a
+# mesh-level Source reversal) makes its whole Region inside-out — every
+# lateral shell sign flips with it — while the Region still sits on the
+# opposite wall side upstream welds. Returning the per-owner signed side
+# lets the shared validation admit exactly that orientation reversal and
+# keep rejecting a literal same-side incidence (overlapping owners).
+# `nothing` marks an owner whose Source interior cannot be placed.
+function _extrude_nonew_shared_sides(m::GeoModel,adjacent,
+                                     generatrix::Int,spec,
+                                     caller::AbstractString)
+    haskey(m.curves,generatrix) || return nothing
+    a,b=m.curves[generatrix]
+    (haskey(m.points,a) && haskey(m.points,b)) || return nothing
+    ga=m.points[a];gb=m.points[b]
+    nx=(gb[2]-ga[2])*spec.T[3]-(gb[3]-ga[3])*spec.T[2]
+    ny=(gb[3]-ga[3])*spec.T[1]-(gb[1]-ga[1])*spec.T[3]
+    nz=(gb[1]-ga[1])*spec.T[2]-(gb[2]-ga[2])*spec.T[1]
+    (nx!=0.0 || ny!=0.0 || nz!=0.0) || return nothing
+    sides=Int[]
+    for owner in adjacent
+        entry=_extrude_entity_params(m,3,owner,caller)
+        entry===nothing && return nothing
+        _,_,o_link=entry
+        o_link[1]==2 || return nothing
+        src=abs(o_link[2])
+        curves=_model_projection_surface_curves(m,src)
+        isempty(curves) && return nothing
+        cx=cy=cz=0.0
+        for c in curves
+            haskey(m.curves,abs(c)) || return nothing
+            ca,cb=m.curves[abs(c)]
+            corner=c>0 ? ca : cb
+            haskey(m.points,corner) || return nothing
+            p=m.points[corner]
+            cx+=p[1];cy+=p[2];cz+=p[3]
+        end
+        k=length(curves)
+        d=(cx/k-ga[1])*nx+(cy/k-ga[2])*ny+(cz/k-ga[3])*nz
+        push!(sides,d>0.0 ? 1 : d<0.0 ? -1 : 0)
+    end
+    return sides
+end
+
 # One boundary Surface of `t` is bounded by more than `t`. Two classes are
 # admitted. A shared copied cap (provenance `(2,·)`) is literally one
 # owner's copied top and the other's Source — upstream stacks Layered
@@ -630,8 +673,18 @@ function _extrude_nonew_shared_validate(m::GeoModel,t::Int,s::Int,
         push!(signs,_extrude_nonew_shell_sign(m,partner,s))
     end
     owned || _extrude_nonew_shared_planner_error(caller,s)
-    all(!iszero,signs) && length(unique(signs))>1 ||
-        _extrude_nonew_shared_planner_error(caller,s)
+    all(!iszero,signs) || _extrude_nonew_shared_planner_error(caller,s)
+    if length(unique(signs))==1
+        # Reversed-orientation Sources flip every lateral shell sign with
+        # their inside-out Region — upstream welds the wall anyway. Admit
+        # only when the owners' Source interiors still sit on both
+        # geometric sides of the generatrix; a literal same-side
+        # incidence keeps the planner diagnostic.
+        sides=_extrude_nonew_shared_sides(m,adjacent,generatrix,spec,caller)
+        (sides!==nothing && all(!iszero,sides) &&
+         length(unique(sides))>1) ||
+            _extrude_nonew_shared_planner_error(caller,s)
+    end
     return adjacent
 end
 
@@ -1035,6 +1088,14 @@ function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
                 binder_i===nothing && continue
                 binder=owners[binder_i]
                 binder==tag && continue
+                # Only the generic catalog consumes a transported diagonal
+                # contract — bounded/strip catalogs emit their wall
+                # deterministically and the shared-part bitwise check
+                # certifies the weld, so a multi-segment generatrix the
+                # contract cannot encode stays weldable here.
+                t_link=working.meshing.extrude_sources[(3,tag)]
+                _extrude_nonew_generic_source(working,abs(t_link[2]),caller) ||
+                    continue
                 # The earliest NoNewVerts owner already bound the shared
                 # Surface: read its emitted wall diagonals and constrain
                 # this plan to them.
@@ -1079,6 +1140,17 @@ function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
                 [volumes[owner] for owner in owners],s,caller)
         end
     end
+    # `Reverse Surface` flips only the published windings — apply it to the
+    # stored parts after every certificate, so the projection lookup and
+    # the published mesh see the same flipped part.
+    for plan in values(volumes),(surface,part) in plan.surfaces
+        get(m.meshing.reverse,(2,surface),false) || continue
+        plan.surfaces[surface]=_reversed_surface_mesh(part,caller,surface)
+    end
+    for (surface,part) in surfaces
+        get(m.meshing.reverse,(2,surface),false) || continue
+        surfaces[surface]=_reversed_surface_mesh(part,caller,surface)
+    end
     m.curve_params=working.curve_params
     return _ExtrudeNoNewScope(m,volumes,surfaces)
 end
@@ -1100,6 +1172,8 @@ function _extrude_nonew_surface_mesh(m::GeoModel,t::Int,
     if scope!==nothing
         _extrude_nonew_require_scope(scope,m,caller)
         part=get(scope.surfaces,t,nothing)
+        # Scope parts already carry any `Reverse Surface` winding flip —
+        # the scope applied it after certification.
         part===nothing || return part
     end
     # Do not plan a volume while meshing its plain source. The builder obtains
@@ -1135,15 +1209,19 @@ function _extrude_nonew_surface_mesh(m::GeoModel,t::Int,
                     (top=owner;break)
             end
             top!=0 || _extrude_nonew_shared_planner_error(caller,t)
-            return _extrude_nonew_complete_plan(m,top,caller;
+            part=_extrude_nonew_complete_plan(m,top,caller;
                 min_angle_deg=min_angle_deg,
                 max_periodic_passes=max_periodic_passes,
                 size_field=size_field,_mesh_input=_mesh_input).surfaces[t]
+            get(m.meshing.reverse,(2,t),false) &&
+                (part=_reversed_surface_mesh(part,caller,t))
+            return part
         end
         built=_extrude_nonew_scope(m,caller;
             tags=_extrude_nonew_shared_closure(m,owners,caller),
             min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
             size_field=size_field,_mesh_input=_mesh_input)
+        # Scope parts already carry any `Reverse Surface` winding flip.
         return built.surfaces[t]
     end
     isempty(owners) && return nothing
@@ -1152,7 +1230,10 @@ function _extrude_nonew_surface_mesh(m::GeoModel,t::Int,
         completed=_extrude_nonew_complete_plan(m,owner,caller;
             min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
             size_field=size_field,_mesh_input=_mesh_input)
-        return completed.surfaces[t]
+        part=completed.surfaces[t]
+        get(m.meshing.reverse,(2,t),false) &&
+            (part=_reversed_surface_mesh(part,caller,t))
+        return part
     end
     throw(ArgumentError(
         "$caller: QuadTriNoNewVerts Surface[$t] is absent from this mesh scope"))
@@ -1165,14 +1246,21 @@ function _extrude_nonew_volume_mesh(m::GeoModel,t::Int,
                                      max_periodic_passes=8,
                                      size_field::Union{Nothing,AbstractSizeField}=nothing)
     _extrude_is_nonew(_extrude_gate(m,3,t)) || return nothing
+    # `Reverse Volume` flips only the published cell windings — the stored
+    # plan and its certificates keep canonical positive orientation.
+    reversed=get(m.meshing.reverse,(3,t),false)
     if scope===nothing
-        return _extrude_nonew_complete_plan(m,t,caller;
+        volume=_extrude_nonew_complete_plan(m,t,caller;
             min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
             size_field=size_field).volume
+        reversed && (volume=_reversed_volume_mesh(volume,caller,t))
+        return volume
     end
     _extrude_nonew_require_scope(scope,m,caller)
     completed=get(scope.volumes,t,nothing)
     completed===nothing && throw(ArgumentError(
         "$caller: QuadTriNoNewVerts Volume[$t] is absent from this mesh scope"))
-    return completed.volume
+    volume=completed.volume
+    reversed && (volume=_reversed_volume_mesh(volume,caller,t))
+    return volume
 end
