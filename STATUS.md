@@ -24,6 +24,37 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### Residual test-failure audit: seven reported failure groups resolved (2026-11-01)
+
+| Item | Verdict | Evidence | Action |
+|---|---|---|---|
+| `recombine_test.jl` 15 "quality-underflow" fails | stale option pins | `-compile=min -O0` measured interpreter allocations on `@allocated` pins, same class as `6002e22` | gate compiled-only pin on `Base.JLOptions().compile_enabled != 3` (`741e614`) |
+| `recombine_matching_test.jl` 5 alloc fails | interpreter-only artifact | minimal compilation fails, `-O2` passes 30/30 | gate Edmonds linear-allocation pin (`6be0a61`) |
+| `api_native_matching_adapter_test.jl` 1 alloc fail | interpreter-only artifact | `2.15*previous` blow-up at `n=2048` only under `--compile=min`; `-O2` in contract | gate scaling pin to compiled mode (`e28777b`) |
+| `api_occ_native_test.jl` 6 fails | production regression | synchronize copied kernel `g.point` over public `m.points`, losing `set_coordinates` moves | `mirrored_points` ledger: kernel value propagates only while public copy still equals last import (`e7f43eb`) |
+| `api_occ_revolve_test.jl` ~3e-9 vs 1e-12 | production defect, not precision | period-shifted torus sector window misread in solid measures | recognize shifted windows (`fd53bd6`) |
+| `cli_frontends_test.jl` `.pos`/`.geo -convert`, `-algo bamg`, `-4`, `-2 -4`, `-match` | stale expectations + one production regression | oracle: `.pos -convert` writes binary `$PostFormat`, geometry-only `.geo` emits no `_new`, bare `-convert` is a no-op, `bamg`/`-4`/`-2 -4` all accepted; `-match` failed because `-o` collapsed 4 curves into one boundary-less entity | re-pin tests; serialize classified `MixedMesh` on `-o`, drop `-4` from batch-conflict, no-op tet-free adapt (`cddb629`) |
+| `api_mixed_queries_test.jl` 5 fails | stale expectations | oracle returns volume quality for MSH 5/6/7/8/15 and `ErrorException("Unknown element 0")` for Jacobian tag 0 | re-pin to oracle values incl. MSH 8 endpoint distance (`6b2ba26`) |
+
+- **Exits (all `--compile=min -O0 --check-bounds=yes` unless noted, Julia
+  1.12.7).** `cli_frontends_test` 72/72 + 27/27 exit 0;
+  `api_occ_native_test` all testsets exit 0 (incl. "Literal OCC shapes and
+  public Point lifetimes" 1025/1025, "OCC synchronization preserves live
+  mesh UIDs" 9548/9548); `api_occ_transform_test` all testsets exit 0;
+  `api_occ_revolve_test` all testsets exit 0; `geo_mesh_match_test` 55/55;
+  `adapt_mesh_test` 36/36; `functional/io` 40/40;
+  `cli_options_functional_test` 27+13+8 exit 0;
+  `cli_curve_functional_test` 42/42; `cli_part_split_test` 69/69;
+  `geo_hybrid_pyramid_options_functional_test` 35/35; optimized-mode
+  `recombine_matching` 30/30 and `recombine_test` 16/16+21/21 exit 0.
+- **Pre-existing, unrelated.** `cli_precision_test.jl` fails 8/137 under
+  optimized compilation on HEAD without this slice's changes:
+  `CLI.main([invalid.geo])` (dim-0, no `-o`) returns the path instead of
+  raising on the script's `unknown_scalar` error — verified identical on a
+  clean tree (`git stash`); under `--compile=min` the file cannot run at
+  all (`llvmcall` in `_win_x87_control_word` needs the compiler). Left for
+  a separate fix.
+
 ### MET01/02 residual audit + OCC `:degenerate`-curve / anisotropic arc-grading fixes (2026-11-01)
 
 - **Residual audit verdict.** The three nominal MET01/02 checklist residuals
