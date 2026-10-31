@@ -1,5 +1,5 @@
 module OrderedMatchingSeededTests
-using Test
+using Test, Random
 const Tessella = getfield(parentmodule(@__MODULE__), :Tessella)
 const O = Tessella.OrderedMatching
 const W = Tessella.WeightedMatching
@@ -131,5 +131,95 @@ end
     state2=O._fractional_singleton_state(O._graph(6,edges))
     @test [(vs,es) for (id,(vs,es)) in enumerate(state2.cycles) if
         state2.cycle_owner[first(vs)]==id]==live
+end
+
+# Named fixtures for each remaining production arm of the fractional
+# singleton search, so a regression fails on the arm it broke rather than
+# only through aggregate corpus counts.
+@testset "Fractional singleton search covers every production arm" begin
+    # Dual descent between two outer vertices: the (3,1) edge is non-tight
+    # until the outer-outer half-slack update tightens it, then it closes
+    # the ring. The inner vertex drops below zero through `checked_sub`.
+    state=O._fractional_singleton_state(O._graph(3,[(1,2,0),(2,3,0),(3,1,1)]))
+    @test state!==nothing && state.dual==[1,-1,1]
+    @test state.cycles==[([3,2,1],[2,1,3])]
+
+    # A ring whose base still holds its stem mate: closing releases the base
+    # and re-augments the stem (the `prefix != 0` arm), and the stored
+    # joining-edge direction publishes the flipped traversal.
+    tree=[(1,2,10),(2,3,0),(3,4,0),(3,5,0),(4,6,0),(5,7,0),(6,7,0)]
+    state=O._fractional_singleton_state(O._graph(7,tree))
+    @test state!==nothing && state.cycles==[([3,5,7,6,4],[4,6,7,5,3])]
+    @test state.mate==[1,1,0,0,0,0,0]
+    seed=O._fractional_singleton_seed(O._graph(7,tree),state)
+    @test seed.mate==[2,1,5,0,3,7,6] && seed.cycles==[[3,4,6,7,5]]
+
+    # Fractional infeasibility exits through the exhausted-delta arm: the
+    # alternating tree over the path component owns only inner partners, so
+    # neither a tight nor a slack edge remains to grow it.
+    disjoint=[(1,2,0),(2,3,0),(3,1,0),(4,5,0),(5,6,0)]
+    @test O._fractional_singleton_state(O._graph(6,disjoint))===nothing
+    @test O.ordered_perfect_matching(6,disjoint)===nothing
+    # An isolated vertex fails before the search; the cold kernel confirms
+    # no perfect matching exists either.
+    @test O._fractional_singleton_state(O._graph(4,[(1,2,0)]))===nothing
+    @test O.ordered_perfect_matching(4,[(1,2,0)])===nothing
+end
+
+# The oracle-generated 3x3 structured triangulation is a seeded two-cycle
+# graph whose optimum admits multiple members. The oracle deterministically
+# selects one member; production deterministically selects another at the
+# identical certified cost. The oracle member is not a distinct convention:
+# a single input-edge permutation of the same literal multiset reaches it,
+# so both outputs sit inside the same ordering-sensitive optimal family —
+# the corpus-wide `GENERAL_NATIVE_TIE_IDENTITY_REMAINS_OPEN` class rather
+# than a recoverable chronology divergence.
+@testset "Seeded-cycle equal-cost ties stay inside the ordering family" begin
+    edges=[(1,2,411),(4,17,513),(4,18,513),(3,15,513),(3,16,513),
+        (6,24,536),(5,26,536),(5,23,536),(6,25,536),(2,22,580),
+        (1,21,580),(1,19,580),(2,20,580),(7,9,581),(8,10,581),
+        (11,13,581),(12,14,581),(13,24,614),(8,23,614),(7,25,614),
+        (14,26,614),(9,15,679),(10,18,679),(12,16,679),(11,17,679),
+        (19,26,710),(20,24,710),(22,25,710),(21,23,710),(16,19,785),
+        (17,20,785),(18,21,785),(15,22,785),(13,11,100000),(7,9,100000),
+        (12,14,100000),(8,10,100000),(13,6,100000),(7,6,100000),
+        (9,3,100000),(12,3,100000),(14,5,100000),(8,5,100000),
+        (10,4,100000),(11,4,100000)]
+    oracle_pairs=Set([(1,21),(2,22),(3,16),(4,18),(5,23),(6,24),(7,25),
+        (8,10),(9,15),(11,13),(12,14),(17,20),(19,26)])
+    selected_pairs(list,result)=Set(Tuple(sort!([list[i][1],list[i][2]]))
+        for i in result.selected)
+
+    # The fractional state retains two half-cycles and hands an integral
+    # seed to the continuation; the deterministic output is certified
+    # optimal at the same cost as the recorded oracle member.
+    graph=O._graph(26,edges)
+    @test !O._bipartite(graph)
+    state=O._fractional_singleton_state(graph)
+    @test state!==nothing &&
+        count(id->state.cycle_owner[first(state.cycles[id][1])]==id,
+            eachindex(state.cycles))==2
+    result=O.ordered_perfect_matching(26,edges)
+    @test result!==nothing
+    @test sum(Int128(edges[i][3]) for i in result.selected)==7789
+    @test matching_objective(result.mate,edges)[2]==7789
+    # The recorded oracle member is itself a valid selection of the same
+    # literal edge multiset at the identical optimum.
+    @test all(any(minmax(edges[i][1],edges[i][2])==pair for i in
+        eachindex(edges)) for pair in oracle_pairs)
+    @test sum(minimum(edges[i][3] for i in eachindex(edges) if
+        minmax(edges[i][1],edges[i][2])==pair) for pair in oracle_pairs)==7789
+
+    # Permuting only the input edge order — the same literal multiset —
+    # reaches the oracle member, so the divergence is ordering chronology
+    # inside one optimal family, not an algorithmic gap.
+    rng=Random.MersenneTwister(12345)
+    @test any(1:20) do _
+        permuted=edges[randperm(rng,length(edges))]
+        selected_pairs(permuted,
+            O.ordered_perfect_matching(26,permuted))==oracle_pairs
+    end
+    # Determinism is preserved: the unpermuted run and its clone agree.
+    @test O.ordered_perfect_matching(26,Tuple(edges)).selected==result.selected
 end
 end

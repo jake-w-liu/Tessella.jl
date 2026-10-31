@@ -24,6 +24,66 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### MATCH01 chronology/tie audit: oracle members sit inside the ordering-optimal family (2026-10-31, working tree)
+
+- **Verdict.** The remaining matching divergence is classified, not
+  corrected: every observed difference between the deterministic output and
+  the native oracle is a certified-optimal tie inside one ordering-sensitive
+  family, so `GENERAL_NATIVE_TIE_IDENTITY_REMAINS_OPEN` remains the correct
+  classification. No deterministic tie-break rule is justified by the
+  oracle evidence.
+- **Same-graph oracle fixture (b_3x3).** A Gmsh 4.15.2-generated 3x3
+  structured triangulation (26 triangles, 45 candidate pairs + 12 periodic
+  closures, 2 retained fractional cycles) reaches the seeded Blossom path.
+  The oracle selects 13 pairs at cost 7789; production selects a different
+  member at the identical cost 7789 — 9 symmetric pair substitutions, all
+  equal-score. Decisive evidence: permuting only the input edge order of the
+  same literal multiset reaches the oracle's exact member (41/200 edge
+  permutations, 21/200 vertex renumberings; 8 distinct optimal members
+  reachable overall). The oracle output is therefore one member of the same
+  optimal family our own deterministic ordering walks — ordering
+  chronology, not an algorithmic gap.
+- **Boundary-constrained fans (c_fan6, d_fan5).** On the same-triangulation
+  comparison (tag-mapped through oracle node relocation), production
+  reproduces the oracle exactly: identical quad sets, matched-pair
+  multisets, directed quad tuples, and retained triangles.
+- **2-triangle quad (a_2tri).** The oracle inserts a center Steiner point
+  before recombination (4 source triangles), so a same-graph matching
+  comparison does not apply; the end-to-end result still reduces to one
+  quad as expected.
+- **Oracle determinism.** Byte-identical `.msh` across repeated runs on the
+  fixtures, so the oracle's member choice is a fixed convention rather than
+  randomized — the residual divergence is two deterministic solvers picking
+  different members of the same optimal family.
+- **Arm coverage.** `ordered_matching_seeded_test.jl` gains two named
+  testsets: "Fractional singleton search covers every production arm" pins
+  the previously corpus-only arms — outer-outer half-slack dual descent
+  with `checked_sub` underflow, ring close onto a stem-mated base
+  (`prefix != 0` re-augment) with the stored-direction flipped traversal,
+  the exhausted-delta `nothing` exit on a fractionally infeasible
+  component, and the isolated-vertex early exit through the cold kernel;
+  "Seeded-cycle equal-cost ties stay inside the ordering family" embeds the
+  literal b_3x3 edge multiset and oracle pair set, asserts certified-equal
+  cost (7789) on both members, and asserts a single seeded edge
+  permutation of the same multiset reaches the oracle member.
+- **No production source changed.** The seeded odd-cycle fixes and all
+  verified init/fractional/rounded-state alignment are preserved verbatim.
+- **Test exits (this worktree, `--compile=min -O0`, Julia 1.12.7).**
+  `ordered_matching_test.jl` pass (all testsets green);
+  `ordered_matching_native_state_test.jl` 778+4 pass;
+  `ordered_matching_primary_test.jl` 365+42 pass;
+  `ordered_matching_seeded_test.jl` 58 pass (24+16+9+9);
+  `weighted_matching_test.jl` pass;
+  `api_native_concorde_test.jl` 74,622 pass;
+  `mesh2d_test.jl` 608+2 pass. Unmodified files with unrelated environment
+  failures, matching the handoff's pre-existing classification:
+  `recombine_matching_test.jl` "Edmonds linear temporary allocation" 5
+  fails (`@allocated` bound under minimal compilation),
+  `recombine_test.jl` "Represented geometry survives quality underflow and
+  cancellation" 15 fails, `api_native_matching_adapter_test.jl` 1 fail
+  (`bytes <= 2.15previous` misses the bound by ~1% at n=2048 — the same
+  interpreter-allocation class).
+
 ### LAY02 performance — copied-top parametric transport fixes warped ruled BL runtime (2026-10-31, working tree)
 
 - **Root cause.** `test/geometry/geo_extrude_boundarylayer_test.jl`'s warped

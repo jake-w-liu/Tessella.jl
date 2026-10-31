@@ -5762,6 +5762,57 @@ Files: `src/geometry/GeoExec.jl`, `src/interfaces/APIPartitionBRep.jl`,
 `src/interfaces/APIPartitionProducer.jl`, `src/interfaces/API.jl`,
 `docs/partitioned_declared_brep.md`, `test/geometry/geo_partition_mesh_test.jl`.
 
+## Working-tree increment (MATCH01 chronology/tie audit; classification confirmed)
+
+**The remaining matching residual is a certified-optimal ordering tie, not a
+recoverable chronology rule — `GENERAL_NATIVE_TIE_IDENTITY_REMAINS_OPEN`
+stands, and the named fractional arms are now pinned individually.** The
+audit compared production against Gmsh 4.15.2 oracle meshes on three fixture
+classes. On the oracle-generated 3x3 structured triangulation (26
+triangles → 45 candidate pair edges + 12 periodic closures, 2 retained
+fractional cycles → the seeded Blossom path), the oracle and production
+select different matchings at the *identical* cost 7789 (9 symmetric
+equal-score pair substitutions). The decisive experiment: permuting only
+the input edge order of the same literal edge multiset reaches the
+oracle's exact member — 41/200 seeded edge permutations and 21/200 vertex
+renumberings land on it, among 8 distinct reachable optimal members. The
+oracle's fixed member therefore sits inside the ordering-sensitive optimal
+family our own deterministic chronology walks; the residual is two
+deterministic solvers picking different members, consistent with the
+corpus finding (65/2554 seeded directed misses, all certified-optimal
+ties concentrated in `expansion_search`/`clustered_expansion`). On the
+boundary-constrained fan fixtures (c_fan6, d_fan5), production reproduces
+the oracle exactly — identical quad sets, matched-pair multisets, directed
+quad tuples and retained triangles. The 2-triangle quad fixture is not a
+same-graph comparison (the oracle inserts a center Steiner point before
+recombining) but reduces to one quad end-to-end. The oracle emits
+byte-identical `.msh` across repeated runs, so its member choice is a
+fixed convention rather than randomized sampling. No deterministic
+tie-break is justified by this evidence; none was added.
+`test/meshing/ordered_matching_seeded_test.jl` gains two testsets (+18
+assertions, 58 total): the named-arm set pins the previously corpus-only
+fractional-search arms (outer-outer half-slack dual descent with
+`checked_sub` underflow, ring close onto a stem-mated base exercising the
+`prefix != 0` re-augment and the stored-direction flipped traversal,
+exhausted-delta `nothing` on a fractionally infeasible component, and the
+isolated-vertex early exit through the cold kernel); the ordering-family
+set embeds the literal b_3x3 edge multiset and recorded oracle pair set,
+asserts both members cost exactly 7789, and asserts a seeded edge
+permutation of the same multiset reaches the oracle member. Verified exits
+on this worktree (`--compile=min -O0`, Julia 1.12.7):
+`ordered_matching_test.jl` all green; `ordered_matching_native_state_test.jl`
+778+4; `ordered_matching_primary_test.jl` 365+42;
+`ordered_matching_seeded_test.jl` 58; `weighted_matching_test.jl` green;
+`api_native_concorde_test.jl` 74,622 (corpus counts and
+`GENERAL_NATIVE_TIE_IDENTITY_REMAINS_OPEN` unchanged); `mesh2d_test.jl`
+608+2. Unrelated environment failures in unmodified files match the
+pre-existing classification: `recombine_matching_test.jl` allocation
+testset 5 fails, `recombine_test.jl` quality-underflow testset 15 fails,
+`api_native_matching_adapter_test.jl` 1 fail (~1% over the
+`2.15*previous` allocation bound at n=2048 under minimal compilation).
+Files: `test/meshing/ordered_matching_seeded_test.jl`, `STATUS.md`,
+`DEVIN_HANDOFF.md`, `HANDOFF.md`.
+
 ## Verified gates
 
 - `validation/transfinite/differential.jl` Gmsh 4.15.2:
