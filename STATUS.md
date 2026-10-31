@@ -24,6 +24,117 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### MET01/02 residual audit + OCC `:degenerate`-curve / anisotropic arc-grading fixes (2026-11-01)
+
+- **Residual audit verdict.** The three nominal MET01/02 checklist residuals
+  were already implemented on HEAD, not missing: (a) the OCC-curved
+  `Mesh.Algorithm=7` producer exists as a separate chart-parameterized
+  path (`_occ_metric_surface_refine` in `ModelMetricSurfaceProducer.jl`)
+  that transports the tensor through the non-affine UV Jacobian (`J'MJ`)
+  and lifts curved boundary plus interior nodes back onto the surface with
+  lower Curve-cell incidence/ownership certificates; (b) native 3-D hybrid
+  insertion (`ModelNativeHybridVolume.jl`/`ModelNativeHybridInsertion`)
+  carries tensor-aware sizing and Delaunay predicates; (c) the
+  metric-Delaunay surface arm carries tensor connectivity *and*
+  metric-normalized sizing — the genuinely-scalar remainder is the alg-6
+  factory-encoding path (`_model_factory_surface_refine!`), which stays a
+  classified residual. Two genuine integration defects surfaced on the
+  `.geo` end-to-end routes and are fixed in this slice.
+- **OCC `:degenerate` pole/apex curves.** `_model_curve_degenerate_kind`
+  (`ModelMesh1D.jl`) previously split `.geo Degenerated` (`1`,
+  DONE-at-entry keep) from OCC `:degenerate` (`0`, the upstream `N=1`
+  single-edge arm) — the latter emitted a `(vertex,vertex)` self-loop Line
+  cell that the compact validator rejects (two such cells on every `Sphere`
+  face pole row). The 4.15.2 oracle emits **no** Line cells on a sphere's
+  pole edges (only the vertex Point product), so both kinds now grade to
+  `1`: `:keep`, no stored `curve_params`, `_model_mesh_needs_dim1` skips
+  them, and `APIGenerate01Geometry.jl` gates the ordinary-parameter path on
+  `== -1`. Pole-fan surface production is unaffected — it consumes the
+  degenerate curve's pcurve samples to bound the UV domain, lifts every
+  sample to the point-owned pole, and welding drops the collapsed row.
+  `model_occ_pole_fan_test.jl` gains a testset pinning zero self-loop
+  segments and empty pole `curve_params` on both the default and
+  `Mesh.Algorithm=7` `.geo` routes.
+- **Anisotropic arc grading for algorithm-7 faces.** `generate(dim>1)`
+  emits boundary Curve products before the Surface phase, so each boundary
+  curve must resolve the alg-7 certificate field at grade time —
+  `ModelNativeArcMesh.jl` sized OCC arcs with the scalarized `speed/h` law
+  even when an incident face certified under a tensor, leaving the `.geo`
+  anisotropic-cylinder route's rims under-resolved and tripping the
+  retained-boundary `max_metric_edge` certificate. The grader now detects
+  incident algorithm-7 anisotropic faces, builds the certificate field via
+  `_metric_surface_algorithm_field`, integrates parameter steps under the
+  endpoint vertex metrics + `_model_curve_bgm_metric` transport, applies
+  `_undershoot_metric_edges!`, verifies every produced edge against each
+  incident certificate field, and retries under `_MetricScaledAniso` when
+  the worst edge exceeds one. `model_occ_metric_algorithm7_test.jl` gains
+  the `.geo` M=16-transverse cylinder end-to-end testset.
+- **Stale `geo_constraints_test.jl` pins (two, both corrected).** The
+  closed-circle arm still expected `expected_count` stored `curve_params`;
+  the landed contract (upstream `N=nedge+1` storage) keeps the open-style
+  endpoint-inclusive list (`expected_count+1`) while the published closed
+  mesh has `expected_count` nodes — the pin now asserts `n+1` values
+  `2pi*k/n, k=0..n` exactly. The `.geo Extrude Layers` arm still expected
+  `QuadTriNoNewVerts` on a single-triangle source to reject loudly; the
+  landed multi-cell NoNew planner (`079dd27`/`94ceb7f`) admits the route,
+  and the 4.15.2 oracle also accepts it (32 nodes / 63 tets — nothing to
+  weld, unstructured fill after "Remeshing lateral surfaces for
+  QuadToTri"), so the pin now asserts the produced mesh: no errors,
+  `validate()` clean, `ntets>0`. Both stalenesses predate this slice
+  (landed contract drift), not regressions.
+- **Exits (all `--compile=min -O0 --check-bounds=yes`, Julia 1.12.7).**
+  `model_occ_metric_algorithm7_test` 55/55 exit 0;
+  `model_occ_pole_fan_test` exit 0 (incl. corrupt-degenerate-pcurve loud
+  reject); `model_occ_curved_standalone_test` exit 0;
+  `model_metric_hybrid_volume_test` 67/67 exit 0;
+  `model_metric_volume_functional_test` testsets exit 0 (metric floor
+  7/7, metric circumcenter 16/16, scalar-compatible radius 4/4, tensor-arm
+  refinement 16/16, boundary/extend certificates 6/6, tensor size_field
+  factory fill 10/10);
+  `model_metric_surface_density_test` exit 0;
+  `model_metric_delaunay_arm_test` alg-5 7/7 + alg-6 4/4 + metric queue
+  radius 8/8 exit 0; `model_occ_sector_edge_stability_test` exit 0.
+  `geo_constraints_test` exit 0 — all testsets green on the post-fix
+  re-run (`.geo Extrude Layers` 41/41 incl. the corrected NoNew pin).
+  `.geo` curved-route probes: `sphere7` 200 nodes/396 tris (10 segs, 0
+  self-loops), `cyl_aniso7` 763/1522, `cone7` 95/186, `torus7` 540/1080,
+  `disk7` 24/23 — all `msg_error_count==0` and `validate()` clean.
+  Closed-cylinder `curve_params` probes: algorithm 0 stores 8 params,
+  algorithms 1/2/4 store the endpoint-inclusive 9, max error 0.0.
+- **Still classified (unchanged).** Scalar/absent-field `Mesh.Algorithm=7`
+  on genuinely curved OCC faces stays an explicit admission error (the
+  tensor is required for the non-affine transport); the alg-6
+  factory-encoding path remains scalar-only; the Delaunay/Frontal arm's
+  scalarized min-direction queue bound stays the documented contract
+  (BAMG-style unit-edge density lives in the alg-7 producer).
+
+### PAR01 detached producers admit resolved catalog fields + RTREE volume detach (2026-11-01, landed `6be9e0a`)
+
+- **Slice.** Detached parallel curve/surface/volume production now accepts
+  resolved (immutable catalog) size fields: `APIGenerate01.jl` /
+  `APIGenerateHigher.jl` thread `size_field` through
+  `_parallel_surface_spawn!`, `_parallel_surface_fill!`, the volume-forward
+  spawn and `_parallel_volume_fill!`; `APIParallelCurves.jl`,
+  `APIParallelSurfaces.jl` and `APIParallelVolumes.jl` evaluate the field
+  inside the worker instead of forcing serial admission. Stateful
+  callbacks and mutable/shared producer contracts stay serial. Detached
+  warning/error sinks are captured per task and replayed serially at
+  adoption in deterministic order (`_parallel_replay_sinks!`), removing the
+  worker-side message-sink race. `Mesh.Algorithm3D=9` (RTREE) volume fills
+  are eligible for detachment unless `Recombine Volume` / equivalent
+  boundary write-back requires serial processing.
+- **Exits.** `api_parallel_determinism_test` 112/112 exit 0 under
+  `julia -t4` (~98 min) — byte-identical `mixed_crc` + serialized MSH4
+  bytes + validation + per-entity node/element counts + UID assignments
+  for `General.NumThreads` 1 vs 4 across 14 fixtures, including the new
+  RTREE two-box detach, RTREE `Recombine Volume` serial fallback,
+  MathEval `Background Field` Curve/Surface/Region cases and a
+  `Mesh.Recombine3DAll` Delaunay pair. `api_parallel_identity_transport_test`
+  exit 0 under `-t4` (36/36 RNG-consuming Region fills byte-identical,
+  22/22 identity/merge transports). `geo_extrude_test` 495/495 exit 0.
+  `mesh3d_test` spot regression exit 0 (587/587 Stage-3 Delaunay +
+  146173/146173 recovery-gate predicates, ~163 min).
+
 ### PER02 multi-direction/general-affine/cross-Region periodic Face contexts (2026-10-31, working tree)
 
 - **Verdict vs Gmsh 4.15.2 (oracle probes first).** Live SDK/CLI probes

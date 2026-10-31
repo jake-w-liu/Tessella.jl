@@ -5813,6 +5813,22 @@ testset 5 fails, `recombine_test.jl` quality-underflow testset 15 fails,
 Files: `test/meshing/ordered_matching_seeded_test.jl`, `STATUS.md`,
 `DEVIN_HANDOFF.md`, `HANDOFF.md`.
 
+## Working-tree increment (PAR01 resolved-field detachment + RTREE volume detach; landed `6be9e0a`, 2026-11-01)
+
+Detached parallel production now admits resolved immutable-catalog size
+fields: `size_field` threads through `APIGenerate01.jl` /
+`APIGenerateHigher.jl` surface spawn/fill and volume-forward paths and is
+evaluated inside `APIParallel{Curves,Surfaces,Volumes}.jl` workers instead
+of forcing serial admission; stateful/mutable callbacks stay serial.
+Detached warning/error sinks are captured per task and replayed serially
+in deterministic adoption order (`_parallel_replay_sinks!`), removing the
+worker message-sink race. `Mesh.Algorithm3D=9` (RTREE) volume fills detach
+unless `Recombine Volume`-class boundary write-back forces serial.
+`api_parallel_determinism_test.jl` gained slice coverage.
+Files: `src/interfaces/APIGenerate01.jl`, `APIGenerateHigher.jl`,
+`APIParallelCurves.jl`, `APIParallelSurfaces.jl`, `APIParallelVolumes.jl`,
+`test/core/api_parallel_determinism_test.jl`.
+
 ## Working-tree increment (PER02 multi-direction/general-affine/cross-Region periodic Faces; 2026-11-01)
 
 Gmsh 4.15.2 SDK/CLI probes first confirmed upstream accepts every scoped
@@ -5842,6 +5858,55 @@ Files: `src/geometry/Model.jl`, `ModelNativeHybridBatch.jl`,
 `api_periodic_hybrid_batch_functional_test.jl`,
 `api_periodic_hybrid_functional_test.jl`,
 `api_hybrid_shared_periodic_functional_test.jl`.
+
+## Working-tree increment (MET01/02 residual audit + OCC `:degenerate` / anisotropic arc grading; 2026-11-01)
+
+Audit verdict: the three nominal MET01/02 residuals were already
+implemented on HEAD — the OCC-curved `Mesh.Algorithm=7` producer
+(`_occ_metric_surface_refine`, non-affine `J'MJ` UV transport + curved
+boundary/interior on-surface lifting), native 3-D hybrid tensor
+sizing/predicates, and metric-Delaunay tensor connectivity + sizing. Two
+genuine integration defects fixed this pass:
+
+- OCC `:degenerate` pole/apex curves: `_model_curve_degenerate_kind`
+  (`ModelMesh1D.jl`) previously returned `0` (upstream `N=1` single-edge)
+  vs `.geo Degenerated`'s `1` (DONE-at-entry), emitting `(vertex,vertex)`
+  self-loop Line cells the compact validator rejects — the 4.15.2 oracle
+  emits no Line cells on a `Sphere` pole edge. Both kinds now grade `1`:
+  `:keep`, no stored `curve_params`, `_model_mesh_needs_dim1` skips,
+  `APIGenerate01Geometry.jl` gates the parameter path on `== -1`.
+  Pole-fan production still consumes the pcurve row and collapses it onto
+  the point-owned pole after welding.
+- Anisotropic arc grading: `generate(dim>1)` grades boundary curves before
+  the Surface phase, so arcs incident to algorithm-7 anisotropic faces
+  under-resolved under the scalarized `speed/h` law and tripped the
+  retained-boundary certificate on the `.geo` cylinder route.
+  `ModelNativeArcMesh.jl` now builds `_metric_surface_algorithm_field`
+  for incident alg-7 faces, grades under endpoint vertex metrics +
+  `_model_curve_bgm_metric` with `_undershoot_metric_edges!`, verifies
+  each edge against every incident certificate field and retries under
+  `_MetricScaledAniso`.
+- `geo_constraints_test.jl` stale pin corrected: closed-circle stored
+  `curve_params` are endpoint-inclusive (`n+1`); published closed mesh
+  keeps `n` nodes.
+- `ModelMetricSurfaceProducer.jl` gained a `TESS_METRIC_DEBUG`-gated
+  retained-boundary diagnostic only — no behavior change.
+
+Verified exits (`--compile=min -O0 --check-bounds=yes`, Julia 1.12.7):
+`model_occ_metric_algorithm7_test` 55/55; `model_occ_pole_fan_test` (new
+no-self-loop testset) and `model_occ_curved_standalone_test` green;
+`model_metric_hybrid_volume_test` 67/67;
+`model_metric_volume_functional_test` all testsets green;
+`model_metric_delaunay_arm_test` 7/7+4/4+8/8; `geo_constraints_test` green.
+`.geo` probes: sphere7 200 nodes/396 tris 0 self-loops, cyl_aniso7
+763/1522, cone7 95/186, torus7 540/1080, disk7 24/23 — all validate.
+Remaining classified: alg-6 factory-encoding path scalar-only;
+scalar/absent-field alg-7 on curved faces stays a loud admission error.
+Files: `src/geometry/ModelMesh1D.jl`, `ModelNativeArcMesh.jl`,
+`ModelMetricSurfaceProducer.jl`,
+`src/interfaces/APIGenerate01Geometry.jl`,
+`test/geometry/model_occ_pole_fan_test.jl`,
+`model_occ_metric_algorithm7_test.jl`, `geo_constraints_test.jl`.
 
 ## Verified gates
 
