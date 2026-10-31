@@ -961,22 +961,23 @@ function _occ_torus_sector_window(kernel,fid,rec)
     end
     isfinite(umin) || return nothing
     # The sector sweeps the full tube circle: the wire's v extent must
-    # cover the canonical v range exactly.
-    vmin<=lo_b[2]+vtol && vmax>=hi_b[2]-vtol || return nothing
+    # cover one full v period. Pcurves can sit on any period-shifted
+    # branch (seam unwrapping anchors the window wherever the profile
+    # rim landed), so compare the SPAN, not the canonical anchor points.
+    vspan=hi_b[2]-lo_b[2]
+    vmax-vmin>=vspan-vtol || return nothing
     # ... and every use must lie on a rectangle side: a v-degenerate
-    # rim spanning the u window at a v bound, or a u-degenerate
-    # meridian spanning the full v range at a window end. A curved
-    # section pcurve fails both degeneracy tests.
+    # rim spanning the u window (the shifted seam can sit at any v), or
+    # a u-degenerate meridian spanning the wire's full v extent at a
+    # window end. A curved section pcurve fails both degeneracy tests.
     for k in 1:2:length(boxes)
         lo,hi=boxes[k],boxes[k+1]
         if hi[2]-lo[2]<=vtol
-            (abs(lo[2]-lo_b[2])<=vtol || abs(lo[2]-hi_b[2])<=vtol) ||
-                return nothing
             lo[1]<=umin+vtol && hi[1]>=umax-vtol || return nothing
         elseif hi[1]-lo[1]<=vtol
             (abs(lo[1]-umin)<=vtol || abs(lo[1]-umax)<=vtol) ||
                 return nothing
-            lo[2]<=lo_b[2]+vtol && hi[2]>=hi_b[2]-vtol || return nothing
+            lo[2]<=vmin+vtol && hi[2]>=vmax-vtol || return nothing
         else
             return nothing
         end
