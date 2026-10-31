@@ -5813,6 +5813,36 @@ testset 5 fails, `recombine_test.jl` quality-underflow testset 15 fails,
 Files: `test/meshing/ordered_matching_seeded_test.jl`, `STATUS.md`,
 `DEVIN_HANDOFF.md`, `HANDOFF.md`.
 
+## Working-tree increment (PER02 multi-direction/general-affine/cross-Region periodic Faces; 2026-11-01)
+
+Gmsh 4.15.2 SDK/CLI probes first confirmed upstream accepts every scoped
+context previously gated: 2- and 3-direction periodic boxes (per-relation
+corner masters), reflection/shear/uniform-scale affines, cross-Region
+pairs, shared-wall slaves and masters, chained pairs. `Model.jl` collects
+surface relations per-slave-`GFace` (slave must bound; master may be
+foreign/shared) with lazy `fetch_surface!` for foreign masters and local
+transport checks only where both endpoints classify locally;
+`ModelNativeHybridBatch.jl` certifies "slave bounds selected Region";
+`ModelNativeHybridVolume.jl` admits any finite nonsingular affine
+(`det != 0`, det −1 flips winding) behind the unchanged copy-UID-event,
+master-tag, per-node transport and ordered-incidence certificates. Joint
+corner consistency keys `(slave UID, affine)`. Verified exits:
+`api_rigid_periodic_hybrid_functional_test` 150/150,
+`api_periodic_hybrid_functional_test` 45/45,
+`api_periodic_hybrid_batch_functional_test` 84/84,
+`api_hybrid_shared_periodic_functional_test` 68/68,
+`api_multi_periodic_pairs_test` 129/129; OCC `api_occ_*` 30/32 exit 0
+(two non-exit-0 files verified identical on a clean `76ca475` worktree —
+pre-existing, not regressions). Residuals unchanged: recombined Quad
+copies onto shared walls keep the qualified reject; chained pairs over
+point-sharing Faces stay behind the declaration guard; explicit-transfinite
+slaves reject atomically.
+Files: `src/geometry/Model.jl`, `ModelNativeHybridBatch.jl`,
+`ModelNativeHybridVolume.jl`, `test/interfaces/api_rigid_periodic_hybrid_functional_test.jl`,
+`api_periodic_hybrid_batch_functional_test.jl`,
+`api_periodic_hybrid_functional_test.jl`,
+`api_hybrid_shared_periodic_functional_test.jl`.
+
 ## Verified gates
 
 - `validation/transfinite/differential.jl` Gmsh 4.15.2:

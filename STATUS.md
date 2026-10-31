@@ -24,6 +24,78 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### PER02 multi-direction/general-affine/cross-Region periodic Face contexts (2026-10-31, working tree)
+
+- **Verdict vs Gmsh 4.15.2 (oracle probes first).** Live SDK/CLI probes
+  confirmed upstream accepts every scoped context we previously gated:
+  a box periodic in two and three directions simultaneously
+  (RZ90+TX+TY with the shared corner bound to three different masters),
+  mirror (det −1), in-plane shear, uniform scale, a cross-Region pair on
+  disjoint Regions, a shared-wall Face as periodic slave (Tri) and as
+  periodic master, and chained pairs (`104→6`, `6→101`). The one case
+  upstream also fails — a recombined Quad copy onto a shared non-manifold
+  wall — stays our loud shared-Quad reject.
+- **Model changes.** `Model.jl` `_model_volume_periodic_surface_constraints`
+  now admits a relation by per-slave-`GFace` ownership: the slave Face
+  must bound the Region, while the master may live on another Region or
+  a shared wall (curve relations keep the same ownership filter and the
+  direct-declaration guard). `_model_explicit_volume_geometry` gained a
+  lazy `fetch_surface!` so a foreign master's actual produced product (or
+  ordinary remesh) sources the copy; the volume-fill local transport check
+  and `_model_projection_periodic_surface_links` only run for masters
+  classified in the Region's own projection — cross-Region links publish
+  from the produced surface parts. `ModelNativeHybridBatch.jl` certifies
+  "slave bounds selected Region" instead of "both uniquely owned
+  exteriors". `ModelNativeHybridVolume.jl` replaced the proper-rigid gate
+  (finite + orthonormal + det +1) with a finite **nonsingular** affine
+  gate (`det != 0`); the actual-copy-UID-event, master-tag, per-node
+  affine transport and ordered-incidence certificates are unchanged, and
+  negative-determinant copies already flip winding.
+- **Joint corner semantics.** Bindings key on `(slave UID, affine)`, so
+  one corner vertex may be the slave of several directions under
+  different masters — certified per relation, not a conflict (the stale
+  "conflicting current master UID or affine" pin in the shared hybrid
+  test was corrected; only the same UID reaching two masters under the
+  SAME transform still conflicts).
+- **Tests.** `api_rigid_periodic_hybrid_functional_test.jl` grew to 13
+  testsets/150 assertions: quarter/half-turn controls, non-rigid
+  shear+reflection under the declared map, non-corresponding-map and
+  adjacent-Face declaration guards, three-direction shared corner,
+  cross-Region pair, shared Tri-wall slave, shared-wall master,
+  shared-Quad reject, uniform-scale across disjoint Regions, and a
+  cross-box chained pair. `api_periodic_hybrid_batch_functional_test.jl`
+  covers shear and cross-Region batch certification plus the atomic
+  no-copy-events and truncated-inventory rejects;
+  `api_periodic_hybrid_functional_test.jl` keeps the
+  transfinite-slave atomic reject;
+  `api_hybrid_shared_periodic_functional_test.jl` asserts
+  mixed-direction corner masters.
+- **Exits (all `--compile=min -O0 --check-bounds=yes`, Julia 1.12.7).**
+  `api_rigid_periodic_hybrid_functional_test` 150/150 exit 0;
+  `api_periodic_hybrid_functional_test` 45/45 exit 0;
+  `api_periodic_hybrid_batch_functional_test` 84/84 exit 0;
+  `api_hybrid_shared_periodic_functional_test` 68/68 exit 0;
+  `api_multi_periodic_pairs_test` 129/129 exit 0;
+  `geo_periodic_test`, `periodic_dim0_multidir_test`,
+  `api_native_periodic_curve_copy_test`, `api_periodic_high_uid_test`,
+  `api_periodic_lifecycle_functional_test` exit 0. OCC suite
+  `api_occ_*_test.jl` 30/32 files exit 0 — the two non-exit-0 files are
+  **pre-existing on HEAD**, verified identical on a clean `76ca475`
+  worktree: `api_occ_native_test` 6F (occ shape-registry gate) and
+  `api_occ_revolve_test` 1F (≈3e-9 center-of-mass vs 1e-12 atol).
+  Other pre-existing HEAD failures outside this slice, also verified
+  identical on the worktree: `api_native_periodic_surface_production_test`
+  44F+1E (native-state pins predating the landed NoNew sweep commits),
+  `model_periodic_io_test` 1F (`_recombine3d_fold_pair` method
+  ambiguity) and `model_test.jl` 1E (`_model_surface_projection`
+  extreme-scale collinear misclassify) — none touched by this slice.
+- **Residuals.** Recombined Quad copies onto a shared wall remain the
+  qualified two-Region-Pyramid reject (upstream-equivalent); chained
+  pairs whose Faces share boundary points stay behind the disjoint-tag
+  declaration guard even where upstream resolves them; genuinely
+  non-copy slave production (explicit transfinite) still rejects
+  atomically as designed.
+
 ### MATCH01 chronology/tie audit: oracle members sit inside the ordering-optimal family (2026-10-31, working tree)
 
 - **Verdict.** The remaining matching divergence is classified, not
