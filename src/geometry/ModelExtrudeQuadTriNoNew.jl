@@ -594,13 +594,14 @@ function _extrude_nonew_two_tri_candidate(m::GeoModel,source::Int,sides::Int,
     end
     curves=_model_projection_surface_curves(m,source)
     # Reject known larger grids before source/column allocation. Missing curve
-    # controls remain the ordinary native surface mesher's diagnostic.
+    # controls remain the ordinary native surface mesher's diagnostic, and a
+    # transfinite record beyond two nodes on a generatrix falls through to
+    # the general multi-cell family — the actual mesh decides there.
     for curve in curves
         control=get(m.meshing.transfinite_curves,curve,nothing)
         control===nothing && return false
         _flexible_transfinite_nodes(m,control.num_nodes,curve,caller)==2 ||
-            throw(ArgumentError(
-                "$caller: QuadTriNoNewVerts multiple source cells require the boundary-category planner"))
+            return false
     end
     return !_model_surface_recombined(m,source)
 end
@@ -648,19 +649,27 @@ end
 function _extrude_nonew_wall_split(m::GeoModel,s::Int,owners,
                                    caller::AbstractString)
     _model_surface_recombined(m,s) && return false
+    split=false
     for owner in owners
         entry=_extrude_entity_params(m,3,owner,caller)
         entry===nothing && return false
         o_params,_,o_link=entry
         o_link[1]==2 || return false
         if _extrude_is_nonew(o_params)
+            # The general per-column planner keeps a shared wall whole
+            # when every owner does — it carries no diagonal vote of its
+            # own and follows the group's split when a partner needs one.
+            _extrude_nonew_multi_cell_source(m,abs(o_link[2]),caller) &&
+                continue
             (_extrude_nonew_generic_source(m,abs(o_link[2]),caller) ||
              !o_params.recomb_laterals) || return false
+            split=true
         else
             o_params.recombine && return false
+            split=true
         end
     end
-    return true
+    return split
 end
 
 # Whether shared lateral `t` is certified between owners that all emit it
@@ -719,7 +728,7 @@ end
 function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
         min_angle_deg::Real=25.0,max_periodic_passes=8,
         size_field::Union{Nothing,AbstractSizeField}=nothing,_mesh_input=nothing,
-        _shared_diagonals=nothing)
+        _shared_diagonals=nothing,_shared_parts=nothing)
     params=_extrude_gate(m,3,t)
     _extrude_is_nonew(params) || throw(ArgumentError(
         "$caller: Volume[$t] is not a layered QuadTriNoNewVerts region"))
@@ -896,6 +905,15 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
         return _extrude_nonew_two_tri_finish(m,t,params,source,source_mesh,
             catalog,cols,top,laterals,caller)
     end
+    # The unstructured multi-cell family is decided by the actual Source
+    # mesh: two or more linear triangles sweep one prism column per cell
+    # through the general planner, while every bounded catalog above keeps
+    # its own certified route.
+    cells=_extrude_nonew_multi_cells(source_mesh,caller)
+    cells===nothing ||
+        return _extrude_nonew_multi_cell_finish(m,t,params,source,
+            source_mesh,spec,cells,top,laterals,shared,caller;
+            _shared_parts=_shared_parts)
     cell=_extrude_nonew_source_cell(source_mesh,caller)
     length(cell)==sides || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts source cell does not match its boundary category"))
@@ -1027,3 +1045,4 @@ include("ModelExtrudeNoNewFourQuadStrip.jl")
 include("ModelExtrudeNoNewRectGrid.jl")
 include("ModelExtrudeNoNewB4Strip.jl")
 include("ModelExtrudeNoNewB4Free.jl")
+include("ModelExtrudeNoNewMultiCell.jl")

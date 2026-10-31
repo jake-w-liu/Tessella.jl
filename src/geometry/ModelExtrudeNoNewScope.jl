@@ -5,7 +5,7 @@ struct _ExtrudeNoNewCompletePlan
     volume::Union{Mesh,MixedMesh}
     surfaces::Dict{Int,Union{Mesh,MixedMesh}}
     columns::Matrix{NTuple{3,Float64}}
-    catalog::Union{_ExtrudeNoNewCatalog,_ExtrudeNoNewTwoTriCatalog,_ExtrudeNoNewQuadPatchCatalog,_ExtrudeNoNewQuadStripCatalog,_ExtrudeNoNewThreeQuadStripCatalog,_ExtrudeNoNewFourQuadStripCatalog,_ExtrudeNoNewRectGridCatalog,_ExtrudeNoNewB4StripCatalog,_ExtrudeNoNewB4Free.Catalog}
+    catalog::Union{_ExtrudeNoNewCatalog,_ExtrudeNoNewTwoTriCatalog,_ExtrudeNoNewQuadPatchCatalog,_ExtrudeNoNewQuadStripCatalog,_ExtrudeNoNewThreeQuadStripCatalog,_ExtrudeNoNewFourQuadStripCatalog,_ExtrudeNoNewRectGridCatalog,_ExtrudeNoNewB4StripCatalog,_ExtrudeNoNewB4Free.Catalog,_ExtrudeNoNewMultiCellCatalog}
     column_rows::Matrix{Int32}
     # The generic single-quad catalog retains its 6×interval face-state
     # picks; shared-lateral partners read their bound wall diagonal from it.
@@ -283,13 +283,16 @@ function _extrude_nonew_catalog_face_capacity(catalog,volume)
         return _extrude_nonew_dynamic_grid_face_capacity(catalog)
     catalog isa _ExtrudeNoNewTwoTriCatalog &&
         return (volume isa Mesh ? 16 : 7)*length(catalog.layer_refs)+2
+    catalog isa _ExtrudeNoNewMultiCellCatalog &&
+        return 6*length(catalog.source_cells)*length(catalog.layer_refs)+2
     return 0
 end
 
 _extrude_nonew_catalog_oriented_internal(catalog)=
     catalog isa Union{_ExtrudeNoNewTwoTriCatalog,_ExtrudeNoNewQuadPatchCatalog,
         _ExtrudeNoNewQuadStripCatalog,_ExtrudeNoNewThreeQuadStripCatalog,
-        _ExtrudeNoNewFourQuadStripCatalog,_ExtrudeNoNewDynamicGridCatalog}
+        _ExtrudeNoNewFourQuadStripCatalog,_ExtrudeNoNewDynamicGridCatalog,
+        _ExtrudeNoNewMultiCellCatalog}
 
 # The admitted unmerged-NoNew families: every catalog the generic identity
 # binder can certify. The generic single-quad catalog carries no face capacity.
@@ -298,7 +301,7 @@ const _EXTRUDE_NONEW_UNMERGED_CATALOG_TYPES=Union{
     _ExtrudeNoNewQuadPatchCatalog,_ExtrudeNoNewQuadStripCatalog,
     _ExtrudeNoNewThreeQuadStripCatalog,_ExtrudeNoNewFourQuadStripCatalog,
     _ExtrudeNoNewRectGridCatalog,_ExtrudeNoNewB4StripCatalog,
-    _ExtrudeNoNewB4Free.Catalog}
+    _ExtrudeNoNewB4Free.Catalog,_ExtrudeNoNewMultiCellCatalog}
 
 function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
                                       caller::AbstractString;
@@ -307,12 +310,13 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
                                       size_field::Union{Nothing,AbstractSizeField}=nothing,
                                       _working_model::Bool=false,_mesh_input=nothing,
                                       _trace_columns::Bool=false,
-                                      _shared_diagonals=nothing)
+                                      _shared_diagonals=nothing,
+                                      _shared_parts=nothing)
     working=_working_model ? m : deepcopy(m)
     _extrude_nonew_scope_contract(working,t,caller)
     plan=_extrude_nonew_plan(working,t,caller;min_angle_deg=min_angle_deg,
         max_periodic_passes=max_periodic_passes,size_field=size_field,_mesh_input=_mesh_input,
-        _shared_diagonals=_shared_diagonals)
+        _shared_diagonals=_shared_diagonals,_shared_parts=_shared_parts)
     # The insertion renderer and indexed B4 constructors bind their actual
     # column rows explicitly. Other indexed families retain their existing
     # dispatch until they provide the corresponding constructor provenance.
@@ -359,6 +363,7 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
         end
     end
     two_tri=plan.catalog isa _ExtrudeNoNewTwoTriCatalog
+    multi_cell=plan.catalog isa _ExtrudeNoNewMultiCellCatalog
     for tag in plan.lateral_tags
         params,spec,link=_extrude_entity_params(working,2,tag,caller)
         surfaces[tag]=quad_patch ?
@@ -382,13 +387,14 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
         _extrude_nonew_three_quad_strip_face_capacity(plan.catalog) : four_quad_strip ?
         _extrude_nonew_four_quad_strip_face_capacity(plan.catalog) : dynamic_grid ?
         _extrude_nonew_dynamic_grid_face_capacity(plan.catalog) : two_tri ?
-        (volume isa Mesh ? 16 : 7)*length(plan.catalog.layer_refs)+2 : 0
+        (volume isa Mesh ? 16 : 7)*length(plan.catalog.layer_refs)+2 : multi_cell ?
+        6*length(plan.catalog.source_cells)*length(plan.catalog.layer_refs)+2 : 0
     if retained_b4
         _extrude_nonew_retained_b4_certificate(working,t,volume,surfaces,plan.catalog,caller;
             face_capacity)
     else
         _extrude_nonew_certify_boundary(volume,surfaces,caller;
-            oriented_internal=two_tri || quad_patch || quad_strip || three_quad_strip || four_quad_strip || dynamic_grid,
+            oriented_internal=two_tri || quad_patch || quad_strip || three_quad_strip || four_quad_strip || dynamic_grid || multi_cell,
             face_capacity=face_capacity)
     end
     _working_model || (m.curve_params=working.curve_params)
@@ -779,7 +785,13 @@ end
 # read back off the emitted Surface part instead — the wall quad on each
 # layer is split by exactly the diagonal its two triangles share, or stays
 # whole when the part keeps a quadrangle there.
-function _extrude_nonew_wall_diagonals(m::GeoModel,
+# Per-segment, per-layer wall emission of a completed plan's bound part —
+# one vector per generatrix chain segment, each holding `nothing` where
+# that segment's wall quadrangle stays whole or its emitted diagonal's
+# position pair. This is the multi-segment generalization the per-column
+# family needs: a shared generatrix discretized into several chain nodes
+# carries one independent quadrangle per segment.
+function _extrude_nonew_wall_split_states(m::GeoModel,
         completed::_ExtrudeNoNewCompletePlan,s::Int,
         caller::AbstractString)
     catalog=completed.catalog
@@ -787,7 +799,7 @@ function _extrude_nonew_wall_diagonals(m::GeoModel,
             length(catalog.source_cell)==4 && !isempty(completed.faces)
         generatrix=abs(m.meshing.extrude_sources[(2,s)][2])
         side=_extrude_nonew_shared_side(m,completed,generatrix,s,caller)
-        return _extrude_nonew_shared_diagonals(completed,side,s,caller)
+        return [_extrude_nonew_shared_diagonals(completed,side,s,caller)]
     end
     part=get(completed.surfaces,s,nothing)
     part===nothing && return nothing
@@ -796,54 +808,47 @@ function _extrude_nonew_wall_diagonals(m::GeoModel,
     s_link=get(m.meshing.extrude_sources,(2,s),nothing)
     (params===nothing || spec===nothing ||
      s_link===nothing || s_link[1]!=1) && return nothing
-    chain=_extrude_curve_nodes(m,abs(s_link[2]),caller)
-    length(chain)==2 || _extrude_nonew_shared_planner_error(caller,s)
+    generatrix=abs(s_link[2])
+    chain=_extrude_curve_nodes(m,generatrix,caller)
+    a,b=m.curves[generatrix]
+    closed=a==b
+    nseg=closed ? length(chain) : length(chain)-1
+    nseg>=1 || _extrude_nonew_shared_planner_error(caller,s)
     us=_extrude_level_us(params)
     transforms=_extrude_level_transforms(spec,us,caller)
     intervals=length(us)-1
-    cells=Vector{NTuple{3,Float64}}[]
-    if part isa Mesh
-        for column in axes(part.tris,2)
-            push!(cells,[ntuple(k->part.coords[k,part.tris[j,column]],3)
-                         for j in 1:3])
-        end
-    else
-        for block in part.blocks
-            block isa ElementBlock && msh_dimension(block.msh)==2 || continue
-            block.msh in (2,3) || _extrude_nonew_shared_planner_error(caller,s)
-            width=size(block.nodes,1)
-            for column in axes(block.nodes,2)
-                push!(cells,[ntuple(k->part.coords[k,block.nodes[j,column]],3)
-                             for j in 1:width])
+    cells=_extrude_nonew_wall_part_cells(part,s,caller)
+    return [begin
+        ga=chain[seg]
+        gb=chain[closed ? mod1(seg+1,length(chain)) : seg+1]
+        required=Vector{Union{Nothing,NTuple{2,NTuple{3,Float64}}}}(
+            undef,intervals)
+        for layer in 1:intervals
+            quad=Set((_extrude_level_at(spec,ga,us[layer],transforms,layer),
+                      _extrude_level_at(spec,gb,us[layer],transforms,layer),
+                      _extrude_level_at(spec,ga,us[layer+1],transforms,layer+1),
+                      _extrude_level_at(spec,gb,us[layer+1],transforms,layer+1)))
+            member=Vector{NTuple{3,Float64}}[]
+            for cell in cells
+                all(p->p in quad,cell) && push!(member,cell)
             end
+            required[layer]=_extrude_nonew_wall_quad_state(member,s,caller)
         end
-    end
-    required=Vector{Union{Nothing,NTuple{2,NTuple{3,Float64}}}}(undef,intervals)
-    ga,gb=chain
-    for layer in 1:intervals
-        quad=Set((_extrude_level_at(spec,ga,us[layer],transforms,layer),
-                  _extrude_level_at(spec,gb,us[layer],transforms,layer),
-                  _extrude_level_at(spec,ga,us[layer+1],transforms,layer+1),
-                  _extrude_level_at(spec,gb,us[layer+1],transforms,layer+1)))
-        member=Vector{NTuple{3,Float64}}[]
-        for cell in cells
-            all(p->p in quad,cell) && push!(member,cell)
-        end
-        if length(member)==1 && length(member[1])==4
-            required[layer]=nothing
-            continue
-        end
-        if length(member)==2 && all(cell->length(cell)==3,member)
-            shared_pts=intersect(Set(member[1]),Set(member[2]))
-            length(shared_pts)==2 ||
-                _extrude_nonew_shared_planner_error(caller,s)
-            a,b=collect(shared_pts)
-            required[layer]=_extrude_ekey(a,b)
-            continue
-        end
-        _extrude_nonew_shared_planner_error(caller,s)
-    end
-    return required
+        required
+    end for seg in 1:nseg]
+end
+
+function _extrude_nonew_wall_diagonals(m::GeoModel,
+        completed::_ExtrudeNoNewCompletePlan,s::Int,
+        caller::AbstractString)
+    states=_extrude_nonew_wall_split_states(m,completed,s,caller)
+    states===nothing && return nothing
+    # The generic catalog's transported contract encodes one diagonal per
+    # layer; a multi-segment wall instead transports through the bound
+    # Surface part to a per-column consumer, so this vector stays
+    # single-segment.
+    length(states)==1 || _extrude_nonew_shared_planner_error(caller,s)
+    return states[1]
 end
 
 # Two emissions of the shared Surface are deterministic over the same
@@ -1069,31 +1074,45 @@ function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
     for tag in selected
         edges=get(shared_of,tag,nothing)
         diagonals=nothing
+        parts=nothing
         if edges!==nothing
             for (s,owners) in edges
                 s_link=working.meshing.extrude_sources[(2,s)]
-                # Copied caps carry no lateral diagonal contract — the
-                # Source owner's plan consumes the top owner's emitted cap
+                # Copied caps carry no lateral contract — the Source
+                # owner's plan consumes the top owner's emitted cap
                 # bitwise. Walls shared with a recombined ordinary partner
                 # stay in whole quads; every NoNewVerts owner fans them
                 # instead.
                 s_link[1]==1 || continue
-                _extrude_nonew_wall_split(working,s,owners,caller) || continue
                 # The earliest NoNewVerts owner bound the shared Surface —
                 # an unrecombined ordinary partner plans outside the scope
-                # and holds no diagonal contract (its subdivision receives
-                # the bound diagonals as seeded edges instead).
+                # and holds no contract (its subdivision receives the
+                # bound diagonals as seeded edges instead).
                 binder_i=findfirst(owner->_extrude_is_nonew(
                     _extrude_gate(working,3,owner)),owners)
                 binder_i===nothing && continue
                 binder=owners[binder_i]
+                if binder!=tag
+                    t_link=working.meshing.extrude_sources[(3,tag)]
+                    if _extrude_nonew_multi_cell_source(
+                            working,abs(t_link[2]),caller)
+                        # The per-column planner reproduces the bound wall
+                        # facet-for-facet — each segment quadrangle
+                        # independently, whole or split — so the binder's
+                        # emitted part is the contract itself.
+                        parts===nothing &&
+                            (parts=Dict{Int,Union{Mesh,MixedMesh}}())
+                        parts[s]=volumes[binder].surfaces[s]
+                        continue
+                    end
+                end
+                _extrude_nonew_wall_split(working,s,owners,caller) || continue
                 binder==tag && continue
                 # Only the generic catalog consumes a transported diagonal
                 # contract — bounded/strip catalogs emit their wall
                 # deterministically and the shared-part bitwise check
                 # certifies the weld, so a multi-segment generatrix the
                 # contract cannot encode stays weldable here.
-                t_link=working.meshing.extrude_sources[(3,tag)]
                 _extrude_nonew_generic_source(working,abs(t_link[2]),caller) ||
                     continue
                 # The earliest NoNewVerts owner already bound the shared
@@ -1111,7 +1130,8 @@ function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
         completed=_extrude_nonew_complete_plan(working,tag,caller;
             min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
             size_field=size_field,_working_model=true,_mesh_input=_mesh_input,
-            _trace_columns=_trace_columns,_shared_diagonals=diagonals)
+            _trace_columns=_trace_columns,_shared_diagonals=diagonals,
+            _shared_parts=parts)
         volumes[tag]=completed
         for (surface,part) in completed.surfaces
             if haskey(surfaces,surface)

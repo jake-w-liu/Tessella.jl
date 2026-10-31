@@ -49,9 +49,10 @@ support or test requirements.
   generic single-quad catalog and weld (20 nodes vs oracle's 20; upstream's
   per-layer adaptive split wall — 1 quad + 2 tris — is approximated by a
   uniform 4-tri wall; node set identical). Non-transfinite nonlinear sources
-  meshing to multiple unstructured cells keep the loud "multiple source
-  cells require the boundary-category planner" diagnostic — the oracle
-  reaches these, so it remains a documented catalog gap. A nonlinear shared
+  meshing to multiple unstructured cells now reach the per-column planner
+  and reproduce the oracle's multiset exactly (warped BSpline source: 38
+  nodes, 24 segs / 60 tris / 56 tets / 4 prisms / 8 pyramids) — see
+  **Unstructured multi-cell Sources** below. A nonlinear shared
   *generatrix* (curved welded wall) fails upstream with 15 errors, so the
   rejection is upstream-consistent.
 - **Reversed-orientation shared walls (2026-10-31, working tree).** A
@@ -80,21 +81,20 @@ support or test requirements.
   4 wall tris and `b_strip_long` 27 nodes / 8 wall tris match Tessella's
   emission **bitwise** (including the transfinite evaluation noise on the
   interior generatrix node). A generic+strip pair welds identically
-  (oracle `b_mix_gen_strip` 24 nodes). Unstructured multi-cell Sources are
-  the genuine remaining gap: the oracle sweeps each source triangle into a
-  prism column and welds — whole quads between two NoNew owners (63 nodes),
-  split tris against an ordinary partner (63 nodes) — which requires the
-  general per-column boundary-category planner, not decomposable through
-  the bounded single-cell/strip catalogs; the loud diagnostic stays.
-  Upstream itself rejects the minimal two-triangle unstructured pair
-  (empty output), matching the same diagnostic's verdict.
+  (oracle `b_mix_gen_strip` 24 nodes). Unstructured multi-cell Sources now
+  route through the general per-column prism planner — see the
+  **Unstructured multi-cell Sources** bullet below; the oracle's whole-quad
+  (63 nodes) and split-triangle (63 nodes) walls both reproduce bitwise,
+  and the minimal two-triangle unstructured pair welds identically
+  (upstream accepts it — 24 nodes — though it fans each source through an
+  extra centroid where the native source stays at two cells).
 - **Adaptive per-layer wall shape.** Repeated oracle runs show the shared
   wall decomposition is **solver-dependent run to run** — all-split,
   split+whole-quad and all-quad walls all appear on the same fixture — so
   there is no single upstream target to pin. Tessella emits the all-split
   member deterministically on planar and warped ruled sources alike and it
   is inside the oracle's observed family (the warped-ruled admission gap
-  is closed — see the ruled-source bullet below).
+  below is closed — see the ruled-source bullet).
 - **Warped ruled/BSpline Source admission (2026-10-31, working tree).**
   `model_to_mixed`'s on-surface audit inverted ruled/tric coordinates
   through the loose `XYZtoUV` variant (`test_xyz=false`), which accepts a
@@ -116,9 +116,48 @@ support or test requirements.
   deterministic all-split member; off-patch nodes still fail the audit
   loudly. New "warped ruled and BSpline sources" testset in
   `test/geometry/extrude_nonew_shared_lateral_test.jl`.
-- Verified: `test/geometry/extrude_nonew_shared_lateral_test.jl` exit 0
-  (new warped-ruled testset 242/242), `test/geometry/geo_extrude_test.jl`
-  exit 0, `geo_quadtri_extrude_test.jl` exit 0 (334/334),
+- **Unstructured multi-cell Sources (2026-10-31, working tree).** The
+  general per-column prism planner
+  (`src/geometry/ModelExtrudeNoNewMultiCell.jl`, dispatched at
+  `ModelExtrudeQuadTriNoNew.jl:912` on the *actual* Source mesh) closes
+  the boundary-category gap: every linear source triangle sweeps its own
+  prism column through the existing-corner template relation
+  (`_EXTRUDE_NONEW_PRISM_TEMPLATES`) — a retained prism when all three
+  laterals stay whole, a pyramid+tet fan when one does, a three-tet
+  split otherwise, and a diagonal-swap fixpoint generalizing
+  `SubdivideExtrudedMesh` phase 2 resolves the twisted/apex-mismatched
+  combinations without new vertices. Per-edge wall state is decided once
+  so both incident columns emit identical facets: interior edges stay
+  whole only between two interior source vertices, boundary edges take
+  the chain-preferred split on free laterals, and shared walls either
+  stay whole (all NoNew owners) or split (an unrecombined partner votes
+  split — `_extrude_nonew_multi_cell_source` abstains from the vote so
+  the group decides). Bound-wall transport is now **per-segment**:
+  `_extrude_nonew_wall_split_states` reads each generatrix chain
+  segment's quadrangle off the binder's emitted Surface part
+  (`_shared_parts` plumbed through `_extrude_nonew_scope` →
+  `_extrude_nonew_complete_plan` → `_extrude_nonew_plan`), reproducing
+  multi-segment walls facet-for-facet — the single-diagonal contract
+  could not encode those. The catalog type threads through
+  `_ExtrudeNoNewCompletePlan.catalog`, `_EXTRUDE_NONEW_UNMERGED_CATALOG_TYPES`,
+  face capacity (`6·cells·intervals+2`), `oriented_internal`, and the
+  projection's Curve-chain provenance (`boundary_curves`/`boundary_chains`).
+  Oracle-matched (Gmsh 4.15.2, identical node counts **and** cell
+  multisets): `b_multi_nonew_nonew` 63 nodes with a 4-quad whole wall,
+  `b_multi_nonew_ord` 63 nodes with the 8-triangle split wall (same
+  mid-generatrix node `0.49999999999869194`), `b_multi_solo` 36 nodes,
+  `b_dart_solo` (four-triangle dart) 18 nodes, `b_warped_nonew`
+  (non-transfinite BSpline source) 38 nodes; the coarse two-triangle
+  native sources weld at 18 (pair) / 21 (+ordinary partner) / 12 (solo)
+  nodes where the oracle fans its own sources through an extra centroid
+  to 24. Residual: sources whose boundary is not 3 or 4 curves keep the
+  loud "other source boundaries require the boundary-category planner"
+  diagnostic, and a shared generatrix meshed with segments whose welded
+  quadrangle the bound part does not decompose as 1 quad / 2 tris stays
+  certified-loud.
+- Verified: `test/geometry/extrude_nonew_shared_lateral_test.jl`
+  1919/1919 exit 0, `test/geometry/geo_extrude_test.jl` exit 0,
+  `geo_quadtri_extrude_test.jl` 334/334 exit 0,
   `model_warped_ruled_surface_test.jl` exit 0,
   `model_ruled_parametrization_test.jl` 471/471 exit 0 (Julia 1.12.7
   `--check-bounds=yes --compile=min -O0`).

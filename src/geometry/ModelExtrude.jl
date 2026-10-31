@@ -2681,15 +2681,19 @@ function _extrude_volume_pass(m::GeoModel,caller::AbstractString;
                 binder=owners[binder_i]
                 haskey(scope.volumes,binder) ||
                     _extrude_nonew_shared_planner_error(caller,s)
-                required=_extrude_nonew_wall_diagonals(
+                required=_extrude_nonew_wall_split_states(
                     m,scope.volumes[binder],s,caller)
-                # A whole-quad layer on this wall cannot weld the partner's
-                # triangles — the certified wall must carry a split on
-                # every layer (a recombined partner keeps quads instead
-                # and never reaches this branch).
-                (required===nothing || any(isnothing,required)) &&
+                # A whole-quad segment on this wall cannot weld the
+                # partner's triangles — the certified wall must carry a
+                # split on every layer of every segment (a recombined
+                # partner keeps quads instead and never reaches this
+                # branch).
+                (required===nothing ||
+                 any(segment->any(isnothing,segment),required)) &&
                     _extrude_nonew_shared_planner_error(caller,s)
-                union!(seeds,required)
+                for segment in required
+                    union!(seeds,segment)
+                end
             end
         end
         edges=_extrude_subdivide!(subdivided,caller;seeds=seeds)

@@ -1,6 +1,53 @@
 # Devin handoff — complete Tessella's remaining implementation
 
-## 2026-10-31 landed: warped ruled/BSpline NoNew Source admission
+## 2026-10-31 landed: unstructured multi-cell NoNew Source planner (pushed to `main`)
+
+- New `src/geometry/ModelExtrudeNoNewMultiCell.jl` — the general
+  per-column prism planner for QuadTriNoNewVerts: every linear Source
+  triangle sweeps its own prism column through the existing-corner
+  `_EXTRUDE_NONEW_PRISM_TEMPLATES` relation (whole prism / pyramid+tet
+  fan / three-tet split), with a diagonal-swap fixpoint generalizing
+  `SubdivideExtrudedMesh` phase 2 for the twisted and apex-mismatched
+  states. Wall state is decided per source edge, so incident columns
+  emit identical facets; boundary edges follow the generatrix chain's
+  preferred diagonal on free laterals and the group's split/whole vote
+  on shared walls.
+- Bound-wall certification now transports **per-segment**: the scope
+  passes the earliest NoNew binder's emitted Surface part
+  (`_shared_parts`) to multi-cell owners, which reproduce each
+  generatrix chain segment's quadrangle bitwise — whole or split —
+  where the generic catalog's single-diagonal-per-layer contract could
+  not encode multi-segment walls. `_extrude_nonew_wall_split_states`
+  generalizes `_extrude_nonew_wall_diagonals` accordingly and seeds the
+  same subdivision edges for ordinary partners.
+- Dispatch is by the **actual** Source mesh (`MixedMesh` or `Mesh`,
+  ≥2 linear triangles → `_ExtrudeNoNewMultiCellCatalog`) ahead of the
+  single-cell fallback; the catalog threads identity/projection paths
+  (`boundary_curves`/`boundary_chains` for Curve provenance, face
+  capacity `6·cells·intervals+2`, `oriented_internal`, unmerged catalog
+  union), while laterals emit through `_extrude_lateral_mesh` seeded by
+  `plan.edges` — including the transported wall diagonals.
+- Oracle-matched on Gmsh 4.15.2 — identical node counts and cell
+  multisets on every shared fixture: NoNew/NoNew 63 nodes / 4-quad
+  wall, NoNew+ordinary 63 nodes / 8-tri wall (bitwise facets incl. the
+  mid-generatrix node), isolated 14-tri source 36, dart 4-tri source
+  18, non-transfinite warped BSpline source 38. The stale test claims
+  ("upstream rejects the two-triangle pair") were corrected — the
+  oracle accepts all of them.
+- Tests: the stale `@test_throws` block in
+  `test/geometry/extrude_nonew_shared_lateral_test.jl` is replaced by
+  acceptance assertions (node counts, wall facet sets, per-owner wall
+  cycles, opposite child orientation, positive volumes) plus a new
+  "unstructured multi-cell prism columns" testset covering the
+  NoNew+ordinary pairs, the isolated 14/4/2-tri sweeps, and the warped
+  source. Regressions: `geo_extrude_test.jl` exit 0,
+  `geo_quadtri_extrude_test.jl` exit 0,
+  `extrude_nonew_shared_lateral_test.jl` exit 0.
+- Residual: NoNew sources bounded by other than 3 or 4 curves keep the
+  loud boundary-category diagnostic; bound wall quadrangles the part
+  does not decompose as 1 quad / 2 tris stay certified-loud.
+
+## 2026-10-31 landed: warped ruled/BSpline NoNew Source admission (pushed to `main`)
 
 - `model_to_mixed`'s on-surface audit for `:ruled`/`:tric` patches now
   inverts coordinates through the **strict** `_ruled_xyz_to_uv` contract
@@ -23,9 +70,27 @@
   both owners' wall cycles weld; off-patch nodes still reject loudly.
 - Regressions: `geo_extrude_test.jl` exit 0, `geo_quadtri_extrude_test.jl`
   exit 0, `model_warped_ruled_surface_test.jl` exit 0,
-  `model_ruled_parametrization_test.jl` 471/471 exit 0,
-  `extrude_nonew_shared_lateral_test.jl` exit 0 (Julia 1.12.7,
+  `model_ruled_parametrization_test.jl` 471/471 exit 0 (Julia 1.12.7,
   `--check-bounds=yes --compile=min -O0`).
+- **In-flight worker note — LANDED 2026-10-31:** the uncommitted
+  multi-cell shared-wall WIP described here was completed, verified
+  oracle-matched against Gmsh 4.15.2, and pushed to `main`. The WIP
+  described above (new `_ExtrudeNoNewMultiCellCatalog` +
+  `_extrude_nonew_wall_split_states` per-segment transport) needed three
+  finishing pieces this session supplied: `_ExtrudeNoNewMultiCellCatalog`
+  in the scope's catalog union + `_EXTRUDE_NONEW_UNMERGED_CATALOG_TYPES`,
+  `_shared_parts` plumbing so a multi-cell later owner reproduces the
+  binder's emitted wall facet-for-facet (each chain segment's quadrangle
+  independently — this is what fixed the "generated entity (2, 16) has
+  no ownership metadata" failure), and actual-mesh dispatch so a
+  `MixedMesh` source picks the multi-cell route before the single-cell
+  route. The diagonal-swap fixpoint in the finish routine resolves
+  column states missing from the prism-template relation. Both formerly
+  rejected fixtures now weld; the oracle's own verdict on
+  `b_tri2_pair` was mis-recorded earlier — Gmsh 4.15.2 accepts it
+  (24 nodes). See the "Unstructured multi-cell Sources" bullet in
+  STATUS.md for the full contract and the residual boundary-category
+  cases.
 
 ## 2026-10-23 landed arc (commits `ce99742`..`7e65e3d`, all pushed to `main`)
 

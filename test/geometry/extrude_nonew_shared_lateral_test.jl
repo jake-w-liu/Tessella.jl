@@ -1209,16 +1209,14 @@ end
             @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
             _sl_positive(pass.parts[tag])
         end
-        # Unstructured multi-cell Sources are the genuine remaining gap:
-        # the oracle sweeps each source triangle into a prism column and
-        # welds the wall — whole quads between two NoNew owners
-        # (`b_multi_nonew_nonew`: 63 nodes), split triangles against an
-        # ordinary partner (`b_multi_nonew_ord`: 63 nodes). Decomposing
-        # that emission through the bounded catalogs is not possible —
-        # every catalog is a single-cell/strip template and the general
-        # per-column subdivision is exactly the boundary-category
-        # planner the diagnostic names — so the loud diagnostic stays.
-        @test_throws r"boundary-category planner" _sl_model("""
+        # Unstructured multi-cell Sources sweep each source triangle into
+        # its own prism column through the general per-column planner:
+        # boundary columns keep the shared wall whole while every owner
+        # does (`b_multi_nonew_nonew` oracle capture: 63 nodes, a 4-quad
+        # wall), and the per-segment bound part transports the identical
+        # facets to the second owner bitwise. Node and cell multisets pin
+        # the Gmsh 4.15.2 emission exactly.
+        execution=_sl_model("""
         Point(1)={0,0,0,0.6}; Point(2)={1,0,0,0.6};
         Point(3)={1,1,0,0.6}; Point(4)={0,1,0,0.6};
         Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
@@ -1229,10 +1227,34 @@ end
         left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
         right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
         """;mesh_dim=3)
-        # The oracle also rejects the minimal two-triangle unstructured
-        # pair outright (empty output on `b_tri2_pair`) — matching this
-        # diagnostic's verdict.
-        @test_throws r"boundary-category planner" _sl_model("""
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==63
+        s=_sl_shared_tag(execution)
+        pass=_extrude_volume_pass(execution.model,_SL_CALLER)
+        bound=pass.scope.surfaces[s]
+        wall=_sl_surface_faces(bound)
+        mid=0.49999999999869194
+        @test wall==Set((
+            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,mid,0.0),(1.0,mid,0.5)),
+            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,mid,0.5),(1.0,mid,1.0)),
+            ((1.0,mid,0.0),(1.0,mid,0.5),(1.0,1.0,0.0),(1.0,1.0,0.5)),
+            ((1.0,mid,0.5),(1.0,mid,1.0),(1.0,1.0,0.5),(1.0,1.0,1.0))))
+        @test _sl_dim2_faces_on(merged,1,1.0)==wall
+        for tag in (1,2)
+            @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
+            _sl_positive(pass.parts[tag])
+        end
+        left=_sl_wall_cycles(pass.parts[1],1.0)
+        right=_sl_wall_cycles(pass.parts[2],1.0)
+        for key in keys(left)
+            @test _sl_reversed(left[key],right[key])
+        end
+        # The coarse unstructured pair welds the same way: each native
+        # Source carries two triangles (the oracle fans its own sources
+        # through an extra centroid — 24 nodes — while the native pair
+        # stays at 18), the certified wall stays two whole quadrangles.
+        execution=_sl_model("""
         Point(1)={0,0,0,3.0}; Point(2)={1,0,0,3.0};
         Point(3)={1,1,0,3.0}; Point(4)={0,1,0,3.0};
         Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
@@ -1243,6 +1265,211 @@ end
         left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
         right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
         """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==18
+        s=_sl_shared_tag(execution)
+        pass=_extrude_volume_pass(execution.model,_SL_CALLER)
+        wall=_sl_surface_faces(pass.scope.surfaces[s])
+        @test wall==Set((
+            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,1.0,0.0),(1.0,1.0,0.5)),
+            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,1.0,0.5),(1.0,1.0,1.0))))
+        @test _sl_dim2_faces_on(merged,1,1.0)==wall
+        for tag in (1,2)
+            @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
+            _sl_positive(pass.parts[tag])
+        end
+    end
+
+    @testset "unstructured multi-cell prism columns" begin
+        _sl_msh_counts(mesh::Mesh)=Dict{Int,Int}(
+            k=>v for (k,v) in (
+                1=>size(mesh.segs,2),2=>size(mesh.tris,2),
+                4=>size(mesh.tets,2)) if v>0)
+        _sl_msh_counts(mesh::MixedMesh)=begin
+            counts=Dict{Int,Int}()
+            for block in _sl_blocks(mesh)
+                block isa ElementBlock && msh_dimension(block.msh)>=1 ||
+                    continue
+                counts[Int(block.msh)]=
+                    get(counts,Int(block.msh),0)+size(block.nodes,2)
+            end
+            counts
+        end
+        # A multi-cell NoNew sweep against an ordinary unrecombined
+        # partner (`b_multi_nonew_ord` oracle: 63 nodes): the partner's
+        # prism-subdivision vote splits the shared wall, the NoNew owner
+        # free-emits the same diagonal on every segment quadrangle, and
+        # the seeded `SubdivideExtrudedMesh` edge set lands the partner's
+        # tets on the identical facets — the oracle's 8-triangle wall
+        # bitwise, including its mid-generatrix node.
+        execution=_sl_model("""
+        Point(1)={0,0,0,0.6}; Point(2)={1,0,0,0.6};
+        Point(3)={1,1,0,0.6}; Point(4)={0,1,0,0.6};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        Point(5)={2,0,0,0.6};Point(6)={2,1,0,0.6};
+        Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+        Curve Loop(2)={5,6,7,-2};Plane Surface(2)={2};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};};
+        """;mesh_dim=3)
+        model=execution.model
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==63
+        @test _sl_msh_counts(merged)==Dict(1=>40,2=>112,4=>140,6=>4,7=>8)
+        s=_sl_shared_tag(execution)
+        @test sort(_extrude_quadtri_regions(model,s,_SL_CALLER))==[1,2]
+        pass=_extrude_volume_pass(model,_SL_CALLER)
+        bound=pass.scope.surfaces[s]
+        wall=_sl_surface_faces(bound)
+        mid=0.49999999999869194
+        @test wall==Set((
+            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,mid,0.5)),
+            ((1.0,0.0,0.0),(1.0,mid,0.0),(1.0,mid,0.5)),
+            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,mid,1.0)),
+            ((1.0,0.0,0.5),(1.0,mid,0.5),(1.0,mid,1.0)),
+            ((1.0,mid,0.0),(1.0,mid,0.5),(1.0,1.0,0.5)),
+            ((1.0,mid,0.0),(1.0,1.0,0.0),(1.0,1.0,0.5)),
+            ((1.0,mid,0.5),(1.0,mid,1.0),(1.0,1.0,1.0)),
+            ((1.0,mid,0.5),(1.0,1.0,0.5),(1.0,1.0,1.0))))
+        @test _sl_dim2_faces_on(merged,1,1.0)==wall
+        for tag in (1,2)
+            @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
+            _sl_positive(pass.parts[tag])
+        end
+        left=_sl_wall_cycles(pass.parts[1],1.0)
+        right=_sl_wall_cycles(pass.parts[2],1.0)
+        for key in keys(left)
+            @test _sl_reversed(left[key],right[key])
+        end
+        # The same pair on the coarse two-triangle Sources: the wall
+        # carries four triangles through the partner's vote. The twist
+        # fixpoint selects the mirror diagonal on this source — a valid
+        # certified weld the partner reproduces bitwise, oriented the
+        # opposite way from the oracle's own centroid-fanned sources.
+        execution=_sl_model("""
+        Point(1)={0,0,0,3.0}; Point(2)={1,0,0,3.0};
+        Point(3)={1,1,0,3.0}; Point(4)={0,1,0,3.0};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        Point(5)={2,0,0,3.0};Point(6)={2,1,0,3.0};
+        Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+        Curve Loop(2)={5,6,7,-2};Plane Surface(2)={2};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==21
+        s=_sl_shared_tag(execution)
+        pass=_extrude_volume_pass(execution.model,_SL_CALLER)
+        wall=_sl_surface_faces(pass.scope.surfaces[s])
+        @test wall==Set((
+            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,1.0,0.0)),
+            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,1.0,0.5)),
+            ((1.0,0.0,0.5),(1.0,1.0,0.0),(1.0,1.0,0.5)),
+            ((1.0,0.0,1.0),(1.0,1.0,0.5),(1.0,1.0,1.0))))
+        @test _sl_dim2_faces_on(merged,1,1.0)==wall
+        for tag in (1,2)
+            @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
+            _sl_positive(pass.parts[tag])
+        end
+        # The isolated sweep (`b_multi_solo` oracle: 36 nodes — the same
+        # node/cell multiset Tessella emits): fourteen prism columns, all
+        # boundary laterals split on the chain-preferred diagonal.
+        execution=_sl_model("""
+        Point(1)={0,0,0,0.6}; Point(2)={1,0,0,0.6};
+        Point(3)={1,1,0,0.6}; Point(4)={0,1,0,0.6};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==36
+        @test _sl_msh_counts(merged)==Dict(1=>24,2=>60,4=>56,6=>4,7=>8)
+        mid=0.49999999999869194
+        @test _sl_dim2_faces_on(merged,1,1.0)==Set((
+            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,mid,0.5)),
+            ((1.0,0.0,0.0),(1.0,mid,0.0),(1.0,mid,0.5)),
+            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,mid,1.0)),
+            ((1.0,0.0,0.5),(1.0,mid,0.5),(1.0,mid,1.0)),
+            ((1.0,mid,0.0),(1.0,mid,0.5),(1.0,1.0,0.5)),
+            ((1.0,mid,0.0),(1.0,1.0,0.0),(1.0,1.0,0.5)),
+            ((1.0,mid,0.5),(1.0,mid,1.0),(1.0,1.0,1.0)),
+            ((1.0,mid,0.5),(1.0,1.0,0.5),(1.0,1.0,1.0))))
+        _sl_positive(merged)
+        # A four-triangle dart Source (two boundary Steiner nodes split
+        # its long edges — `b_dart_solo` oracle: 18 nodes, the identical
+        # multiset): the reflex-corner triangulation sweeps four prism
+        # columns through the same per-column planner.
+        execution=_sl_model("""
+        Point(1)={0,0,0,1.2}; Point(2)={2,0,0,1.2};
+        Point(3)={1,0.3,0,1.2}; Point(4)={0,1,0,1.2};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==18
+        @test _sl_msh_counts(merged)==Dict(1=>20,2=>32,4=>24)
+        _sl_positive(merged)
+        # The non-transfinite warped Source (BSpline generatrix bulging
+        # to z=0.3): the former boundary-category residual — the planner
+        # needs no planar assumption, and the 38-node oracle multiset
+        # matches Tessella's emission exactly (`b_warped_nonew`).
+        execution=_sl_model("""
+        Point(1)={0,0,0,0.6}; Point(2)={1,0,0,0.6};
+        Point(3)={1,1,0,0.6}; Point(4)={0,1,0,0.6};
+        Point(5)={0.5,0.0,0.3,0.6};
+        BSpline(1)={1,5,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Ruled Surface(1)={1};
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==38
+        @test _sl_msh_counts(merged)==Dict(1=>24,2=>60,4=>56,6=>4,7=>8)
+        _sl_positive(merged)
+        # The minimal unstructured source — a single square carrying two
+        # triangles: one column's shared interior edge plus its three
+        # split boundary laterals is the twisted all-split combination
+        # the fixpoint resolves. The oracle fans this fixture to 24
+        # nodes; the native source needs no centroid.
+        execution=_sl_model("""
+        Point(1)={0,0,0,3.0}; Point(2)={1,0,0,3.0};
+        Point(3)={1,1,0,3.0}; Point(4)={0,1,0,3.0};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==12
+        @test _sl_msh_counts(merged)==Dict(1=>16,2=>20,4=>12)
+        _sl_positive(merged)
+        # `QuadTriNoNewVerts RecombLaterals` on the same unstructured
+        # source retains every lateral quadrangle whole — the oracle's
+        # `b_multi_recomblat` capture (36 nodes, 28 prisms, no splits).
+        # The per-column planner forces every interior edge whole on this
+        # record, so all fourteen columns land on the retained-prism
+        # template instead of a twisted state the fixpoint could not
+        # resolve.
+        execution=_sl_model("""
+        Point(1)={0,0,0,0.6}; Point(2)={1,0,0,0.6};
+        Point(3)={1,1,0,0.6}; Point(4)={0,1,0,0.6};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts RecombLaterals;};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==36
+        @test _sl_msh_counts(merged)==Dict(1=>24,2=>28,3=>16,6=>28)
+        _sl_positive(merged)
     end
 
     @testset "constrained and compound shared-wall boundaries" begin
