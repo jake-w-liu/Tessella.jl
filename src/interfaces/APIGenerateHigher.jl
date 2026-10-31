@@ -1923,7 +1923,8 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
             tags=volume_tags,prepared=volume_plan[1],
             pos_draws=volume_plan[2],
             results=fill!(Vector{Any}(undef,length(volume_tags)),nothing),
-            dirty=parallel_dirty,precise=GmshLibm._win_cli_precision()))
+            dirty=parallel_dirty,precise=GmshLibm._win_cli_precision(),
+            size_field=size_field))
     end
     for (ui,tags) in enumerate(units)
         work=parallel_units===nothing ? nothing : parallel_units[ui]
@@ -1934,7 +1935,7 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
             end
             _parallel_surface_fill!(parallel_results,ui:vend,m,parallel_units,
                 input,options,assembly,parallel_dirty,parallel_precise,
-                geometry_birth)
+                geometry_birth;size_field)
         end
         refs=ui<parallel_last || volume_forward!==nothing ?
             _parallel_surface_param_refs(m) : nothing
@@ -2106,7 +2107,7 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
                     periodic_surface_pairs=periodic_pairs===nothing ? nothing :
                         copy(periodic_pairs),
                     optimize_pyramids,precise=volume_forward.precise,
-                    entry_seed)
+                    size_field,entry_seed)
             end
         end
     end
@@ -3372,7 +3373,8 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
             _parallel_volume_fill!(parallel_results,vi:vend,m,parallel_units,
                 parallel_draws,input,options,assembly,parallel_dirty,
                 parallel_precise,
-                geometry_birth;periodic_surface_pairs,optimize_pyramids)
+                geometry_birth;periodic_surface_pairs,optimize_pyramids,
+                size_field)
         end
         refs=vi<parallel_last ? _parallel_surface_param_refs(m) : nothing
         mesh=extruded===nothing ? nothing : get(extruded.parts,tag,nothing)
@@ -4131,7 +4133,8 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
                 results=fill!(Vector{Any}(undef,length(forward_units)),nothing),
                 dirty=Set{Tuple{Int,Int32}}(),
                 precise=GmshLibm._win_cli_precision(),
-                ranks,old_supports=high_order,surface_parts))
+                ranks,old_supports=high_order,surface_parts,
+                size_field=size_field))
         end
         union!(discarded,_dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
             done,geometry_birth,curve_births,surface_forward))

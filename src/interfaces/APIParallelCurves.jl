@@ -25,9 +25,14 @@
 # `_dim01_native_periodic_parameters` copy and `_model_periodic_cycle_seeds`
 # cycle machinery), transfinite Curves, extrusion copies/sources and sweep
 # gates (`_extrude_gate`/`extrude_sources`), embedded or embedding Curves,
-# dim-1 compound members and Curves carrying a discrete/attached record all
-# keep the original serial arm — their producer contracts consume or publish
-# shared state outside the recorded footprint.
+# dim-1 compound members, Curves carrying a discrete/attached record and any
+# stateful user size callback all keep the original serial arm — their
+# producer contracts consume or publish shared state outside the recorded
+# footprint.  A resolved background `options.inner_field` is *not* an
+# exclusion: catalog fields are immutable read-only evaluators (the lone
+# mutable `ExternalProcessField` serializes every query on its own lock), so
+# the same object bound into `detached_options` is safe to grade against —
+# the same contract the other arms already keep for `options.inner_field`.
 #
 # The RNG ledger is uniform across arms: each detached task runs a private
 # `random_state` Ref (`_parallel_task_options`) entering at the batch's
@@ -111,9 +116,14 @@ function _parallel_curve_prepare(m::GeoModel,ordered::Vector{Int},
         options::Model._ModelMesh1DOptions;
         have_cells::Set{Tuple{Int,Int32}},reuse_curve_params::Bool)
     _parallel_curve_workers()>=2 || return nothing
-    # A stateful size callback or an opaque background field is consulted from
-    # inside the grading kernel; neither crosses a transaction copy safely.
-    (options.callback===nothing && options.inner_field===nothing &&
+    # A stateful size callback is consulted from inside the grading kernel and
+    # cannot cross a transaction copy safely — it keeps the serial arm.  The
+    # resolved `inner_field` is different: catalog fields are immutable
+    # read-only evaluators (the lone mutable `ExternalProcessField` serializes
+    # every query on its own lock), and `_parallel_task_options` already binds
+    # the same object into every detached produce — the exact contract the
+    # Surface/Region arms keep for `options.inner_field`/`size_field`.
+    (options.callback===nothing &&
         m.meshing.size_callback===nothing) || return nothing
     periodic_members=Set{Int}()
     for constraint in values(m.periodic)
@@ -258,10 +268,11 @@ function _parallel_curve_fill!(results::Vector{Any},range,m::GeoModel,
     append!(indices,eager)
     Threads.@threads for index in indices
         work=prepared[index]
-        detached_options=_parallel_task_options(options,base_seed)
+        sinks=Tuple{Symbol,String}[]
+        detached_options=_parallel_task_options(options,base_seed;sinks)
         results[index]=(_parallel_curve_attempt(
             Model._model_mesh_transaction_copy(m),work,m,detached_options,
-            base_seed,caller,precise),base_dirty,base_seed)
+            base_seed,caller,precise),base_dirty,base_seed,sinks)
     end
     return nothing
 end
@@ -296,7 +307,7 @@ end
 function _parallel_curve_result(m::GeoModel,work::_ParallelCurveWork,entry,
         dirty::Set{Tuple{Int,Int32}},options::Model._ModelMesh1DOptions,
         caller::AbstractString)
-    head,base_dirty,base_seed=entry
+    head,base_dirty,base_seed,sinks=entry
     out=head isa Task ? fetch(head) : head
     if !_parallel_curve_fresh(work,out,dirty,base_dirty,options,base_seed)
         return Model._model_mesh_curve!(m,work.tag,options,caller;
@@ -304,6 +315,7 @@ function _parallel_curve_result(m::GeoModel,work::_ParallelCurveWork,entry,
     end
     result,seed_in,seed_out,foreign=out.value
     _PARALLEL_ADOPTED[]+=1
+    _parallel_replay_sinks!(options,sinks)
     seed_out==seed_in || (options.random_state[]=seed_out)
     result===:pending && delete!(m.curve_params,work.tag)
     return result

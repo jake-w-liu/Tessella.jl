@@ -21,9 +21,13 @@
 # unit whose serial arm is the plain `mesh_model_surface` call can detach:
 # compounds (multi-tag units), periodic slaves and masters, extrusion
 # sources and gates, no-new-vertices scopes, QuadTri hybrids, sheets embedded
-# in a Region, size fields, user size callbacks and geometry-birth overlays
-# all keep the original serial arm — their producer contracts consume or
-# publish shared state outside the recorded footprint.
+# in a Region, user size callbacks and geometry-birth overlays all keep the
+# original serial arm — their producer contracts consume or publish shared
+# state outside the recorded footprint.  A resolved background `size_field`
+# is *not* an exclusion: catalog fields are immutable read-only evaluators
+# (the lone mutable `ExternalProcessField` serializes every query on its own
+# lock), so the same object is threaded into the detached produce exactly
+# like `options.inner_field` already is.
 #
 # Non-contiguous scheduling: eligible slots separated by serial units used to
 # run serially (a one-element run never paid for a detached copy).  `_parallel_
@@ -79,12 +83,35 @@ end
 # A detached task must never touch the caller's shared `random_state` Ref —
 # serial ordering reads the same position at merge.  Every other option field
 # is shared read-only, so the task-local bundle copies the `Ref` slot only;
-# `random_state` is the sole mutable field of `_ModelMesh1DOptions`.
-function _parallel_task_options(options::Model._ModelMesh1DOptions,seed::UInt32)
+# `random_state` is the sole mutable field of `_ModelMesh1DOptions`.  The
+# `warn`/`report_error` sinks are the second shared channel: they append to
+# `context.exec_warnings`/`error_log` and bump `msg_error_count` on the
+# calling context — a shared `push!`/`+=` the worker could race, and the
+# messages would interleave at produce time rather than at the unit's serial
+# merge position.  `sinks` — one task-private `Vector` per slot — captures
+# them for `_parallel_replay_sinks!` at adoption instead.
+function _parallel_task_options(options::Model._ModelMesh1DOptions,seed::UInt32;
+        sinks=nothing)
     return Model._ModelMesh1DOptions(
         (name===:random_state ? Base.RefValue{UInt32}(seed) :
+         name===:warn && sinks!==nothing ?
+             (msg->push!(sinks,(:warn,String(msg)))) :
+         name===:report_error && sinks!==nothing ?
+             (msg->push!(sinks,(:err,String(msg)))) :
             getfield(options,name)
          for name in fieldnames(Model._ModelMesh1DOptions))...)
+end
+
+# Replay one adopted receipt's captured diagnostics through the live sinks at
+# the unit's serial merge position — exactly where the serial traversal would
+# have emitted them, in merge order.  A stale or failed slot drops its buffer
+# with the receipt: the live rerun emits whatever the real state produces.
+function _parallel_replay_sinks!(options::Model._ModelMesh1DOptions,sinks)
+    for (kind,msg) in sinks
+        kind===:warn ? Model._model_mesh_warn(options,msg) :
+            Model._model_mesh_error(options,msg)
+    end
+    return nothing
 end
 
 # Non-contiguous eligible slots whose footprints are disjoint from the
@@ -200,7 +227,7 @@ function _parallel_surface_prepare(m::GeoModel,units,caller::AbstractString;
         metric_surface,scope,periodic_masters,ordinary_sources,
         unmerged_nonew_sources,size_field,geometry_birth)
     _parallel_surface_workers()>=2 || return nothing
-    (metric_surface===nothing && size_field===nothing && scope===nothing &&
+    (metric_surface===nothing && scope===nothing &&
         m.meshing.size_callback===nothing) || return nothing
     embedded_in_volumes=Set{Int}()
     for volume in keys(m.volumes),
@@ -356,11 +383,12 @@ const _PARALLEL_SEED_ADOPTED=Ref{Int}(0)
 function _parallel_surface_attempt(working::GeoModel,work::_ParallelSurfaceWork,
         m::GeoModel,input,detached_options::Model._ModelMesh1DOptions,
         base_params::Dict{Int,Vector{Float64}},geom_points,
-        hn::UInt64,hc::UInt64,base_seed::UInt32,precise::Bool)
+        hn::UInt64,hc::UInt64,base_seed::UInt32,precise::Bool;
+        size_field=nothing)
     out=try
         body=()->begin
             produced=mesh_model_surface(working,work.tag;
-                size_field=nothing,_extrude_scope=nothing,
+                size_field,_extrude_scope=nothing,
                 _mesh_input=input,_mesh1d_options=detached_options,
                 _mesh_node_high_water=hn,_mesh_element_high_water=hc,
                 _return_surface_production=true,_boundary_regrade=false,
@@ -390,7 +418,7 @@ end
 # it falls back to the serial arm by leaving its slot empty.
 function _parallel_surface_fill!(results::Vector{Any},range,m::GeoModel,
         prepared,input,options,assembly,dirty::Set{Tuple{Int,Int32}},
-        precise::Bool,geometry_birth)
+        precise::Bool,geometry_birth;size_field=nothing)
     hn=assembly.node_max;hc=assembly.cell_max
     base_params=_parallel_surface_param_refs(m)
     base_dirty=copy(dirty)
@@ -402,11 +430,13 @@ function _parallel_surface_fill!(results::Vector{Any},range,m::GeoModel,
     append!(indices,eager)
     Threads.@threads for index in indices
         work=prepared[index]
-        detached_options=_parallel_task_options(options,base_seed)
+        sinks=Tuple{Symbol,String}[]
+        detached_options=_parallel_task_options(options,base_seed;sinks)
         results[index]=(_parallel_surface_attempt(
             Model._model_mesh_transaction_copy(m),work,m,input,
-            detached_options,base_params,geom_points,hn,hc,base_seed,precise),
-            hn,hc,base_dirty,geom_points,base_seed)
+            detached_options,base_params,geom_points,hn,hc,base_seed,precise;
+            size_field),
+            hn,hc,base_dirty,geom_points,base_seed,sinks)
     end
     return nothing
 end
@@ -493,7 +523,7 @@ end
 function _parallel_surface_products(m::GeoModel,work::_ParallelSurfaceWork,
         entry,dirty::Set{Tuple{Int,Int32}},assembly;
         input,scope,options,size_field,geometry_birth,caller)
-    head,hn,hc,base_dirty,geom_points,base_seed=entry
+    head,hn,hc,base_dirty,geom_points,base_seed,sinks=entry
     out=head isa Task ? fetch(head) : head
     if !_parallel_surface_fresh(work,out,dirty,base_dirty,assembly,
             geometry_birth,geom_points,options,base_seed)
@@ -507,6 +537,7 @@ function _parallel_surface_products(m::GeoModel,work::_ParallelSurfaceWork,
     end
     produced,diffs,seed_in,seed_out,foreign=out.value
     _PARALLEL_ADOPTED[]+=1
+    _parallel_replay_sinks!(options,sinks)
     _parallel_replay_param_diffs!(m,diffs)
     seed_out==seed_in || (options.random_state[]=seed_out)
     return [(work.tag,_parallel_surface_remap_production(produced,
@@ -574,15 +605,18 @@ end
 # accumulated between the spawn and the merge still invalidates the receipt.
 function _parallel_surface_spawn!(results::Vector{Any},index::Int,m::GeoModel,
         work::_ParallelSurfaceWork,input,options,assembly,
-        dirty::Set{Tuple{Int,Int32}},geometry_birth;precise::Bool)
+        dirty::Set{Tuple{Int,Int32}},geometry_birth;precise::Bool,
+        size_field=nothing)
     working=Model._model_mesh_transaction_copy(m)
     hn=assembly.node_max;hc=assembly.cell_max
     base_params=_parallel_surface_param_refs(m)
     geom_points=_higher_geometry_source_points(assembly,geometry_birth)
     base_seed=options.random_state[]
-    detached_options=_parallel_task_options(options,base_seed)
+    sinks=Tuple{Symbol,String}[]
+    detached_options=_parallel_task_options(options,base_seed;sinks)
     task=Threads.@spawn _parallel_surface_attempt(working,work,m,input,
-        detached_options,base_params,geom_points,hn,hc,base_seed,precise)
-    results[index]=(task,hn,hc,copy(dirty),geom_points,base_seed)
+        detached_options,base_params,geom_points,hn,hc,base_seed,precise;
+        size_field)
+    results[index]=(task,hn,hc,copy(dirty),geom_points,base_seed,sinks)
     return nothing
 end

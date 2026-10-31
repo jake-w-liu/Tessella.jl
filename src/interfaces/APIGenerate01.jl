@@ -543,7 +543,8 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
             _parallel_surface_ready(m,spawn_input,work) || continue
             _parallel_surface_spawn!(surface_forward.results,wi,m,work,
                 spawn_input,options,assembly,surface_forward.dirty,
-                geometry_birth;precise=surface_forward.precise)
+                geometry_birth;precise=surface_forward.precise,
+                size_field=surface_forward.size_field)
         end
         return nothing
     end

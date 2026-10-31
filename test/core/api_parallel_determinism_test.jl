@@ -16,7 +16,14 @@
 # eager scheduler exists for.  `BOX` exercises the stale-slot serial fallback
 # (all six faces share Curves, so only the first detached receipt can stay
 # fresh).  `TWOBOX` exercises the Region arm's `Mesh.RandomSeed` ledger on
-# genuinely detached OCC-factory fills.
+# genuinely detached OCC-factory fills.  `ALG9_*` covers the RTREE fill —
+# detached on `TWOBOX`, serial-fallback on `RECOMBINE` whose `Recombine
+# Volume` boundary write-back cannot ride the merge transport.  `FIELD_*`
+# covers resolved background fields — catalog evaluators are immutable and
+# safe to share, so `options.inner_field`/`size_field` no longer gate
+# eligibility on any arm.  `BOX_RECOMBINE_DELAUNAY` keeps a
+# `Mesh.Recombine3DAll` Region eligible under Delaunay, where the flag is
+# inert inside the produce.
 
 using Test
 using Tessella
@@ -108,6 +115,127 @@ Box(1)={0,0,0, 1,1,1};
 Box(2)={2.5,0,0, 1,1.5,1};
 """
 
+# Two disjoint OCC Boxes under the RTREE fill (`Mesh.Algorithm3D = 9`), a
+# newly-admitted algorithm: it rides the same native-initial kernel and
+# `Mesh.RandomSeed` ledger as Delaunay, so both Regions detach under -tN.
+const ALG9_TWOBOX="""
+SetFactory("OpenCASCADE");
+Box(1)={0,0,0, 1,1,1};
+Box(2)={2.5,0,0, 1,1.5,1};
+Mesh.Algorithm3D=9;
+"""
+
+# A `Recombine Volume` target under RTREE keeps the serial arm — its
+# combine step splices hexes and publishes a boundary write-back receipt
+# the detached merge transport cannot remap — while the unflagged
+# neighbour stays eligible.  `Recombine Surface` gives the flagged
+# Region's boundary the quadrangles `meshCombine3D` writes back (the
+# unstructured-triangle combine is a classified serial gap upstream of
+# PAR01); -tN must reproduce the serial splice byte-identically.
+const ALG9_RECOMBINE="""
+Point(1)={0,0,0,0.4};Point(2)={1,0,0,0.4};Point(3)={1,1,0,0.4};Point(4)={0,1,0,0.4};
+Point(5)={0,0,1,0.4};Point(6)={1,0,1,0.4};Point(7)={1,1,1,0.4};Point(8)={0,1,1,0.4};
+Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+Line(5)={5,6};Line(6)={6,7};Line(7)={7,8};Line(8)={8,5};
+Line(9)={1,5};Line(10)={2,6};Line(11)={3,7};Line(12)={4,8};
+Curve Loop(1)={1,2,3,4};Curve Loop(2)={5,6,7,8};
+Curve Loop(3)={1,10,-5,-9};Curve Loop(4)={2,11,-6,-10};
+Curve Loop(5)={3,12,-7,-11};Curve Loop(6)={4,9,-8,-12};
+Plane Surface(1)={1};Plane Surface(2)={2};Plane Surface(3)={3};
+Plane Surface(4)={4};Plane Surface(5)={5};Plane Surface(6)={6};
+Surface Loop(1)={1,2,3,4,5,6};Volume(1)={1};
+Point(101)={3,0,0,0.45};Point(102)={4,0,0,0.45};Point(103)={4,1,0,0.45};Point(104)={3,1,0,0.45};
+Point(105)={3,0,1,0.45};Point(106)={4,0,1,0.45};Point(107)={4,1,1,0.45};Point(108)={3,1,1,0.45};
+Line(101)={101,102};Line(102)={102,103};Line(103)={103,104};Line(104)={104,101};
+Line(105)={105,106};Line(106)={106,107};Line(107)={107,108};Line(108)={108,105};
+Line(109)={101,105};Line(110)={102,106};Line(111)={103,107};Line(112)={104,108};
+Curve Loop(101)={101,102,103,104};Curve Loop(102)={105,106,107,108};
+Curve Loop(103)={101,110,-105,-109};Curve Loop(104)={102,111,-106,-110};
+Curve Loop(105)={103,112,-107,-111};Curve Loop(106)={104,109,-108,-112};
+Plane Surface(101)={101};Plane Surface(102)={102};Plane Surface(103)={103};
+Plane Surface(104)={104};Plane Surface(105)={105};Plane Surface(106)={106};
+Surface Loop(101)={101,102,103,104,105,106};Volume(102)={101};
+Recombine Surface{1,2,3,4,5,6};
+Mesh.Algorithm3D=9;
+Recombine Volume{1};
+"""
+
+# A `MathEval` `Background Field` resolves into `options.inner_field` for
+# the 1-D grader — previously a whole-phase exclusion, now admitted since
+# catalog fields are immutable read-only evaluators shared safely across
+# detached copies.
+const FIELD_CURVES="""
+Point(1)={0,0,0,0.25};Point(2)={1,0,0,0.25};
+Point(3)={2,0,0,0.15};Point(4)={3,0,0,0.15};
+Point(5)={4,0,0,0.2};Point(6)={5,0,0,0.2};
+Line(1)={1,2};Line(2)={3,4};Line(3)={5,6};
+Field[1]=MathEval;
+Field[1].F="0.18+0.06*x";
+Background Field=1;
+"""
+
+# The same `Background Field` also reaches the Surface/Region arms as
+# `size_field`.  Two disjoint built-in boxes keep every phase's entities
+# eligible — Curves detach under `inner_field`, Surfaces and Regions under
+# the threaded `size_field`.
+const FIELD_BOXES="""
+Point(1)={0,0,0,0.4};Point(2)={1,0,0,0.4};Point(3)={1,1,0,0.4};Point(4)={0,1,0,0.4};
+Point(5)={0,0,1,0.4};Point(6)={1,0,1,0.4};Point(7)={1,1,1,0.4};Point(8)={0,1,1,0.4};
+Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+Line(5)={5,6};Line(6)={6,7};Line(7)={7,8};Line(8)={8,5};
+Line(9)={1,5};Line(10)={2,6};Line(11)={3,7};Line(12)={4,8};
+Curve Loop(1)={1,2,3,4};Curve Loop(2)={5,6,7,8};
+Curve Loop(3)={1,10,-5,-9};Curve Loop(4)={2,11,-6,-10};
+Curve Loop(5)={3,12,-7,-11};Curve Loop(6)={4,9,-8,-12};
+Plane Surface(1)={1};Plane Surface(2)={2};Plane Surface(3)={3};
+Plane Surface(4)={4};Plane Surface(5)={5};Plane Surface(6)={6};
+Surface Loop(1)={1,2,3,4,5,6};Volume(1)={1};
+Point(101)={3,0,0,0.45};Point(102)={4,0,0,0.45};Point(103)={4,1,0,0.45};Point(104)={3,1,0,0.45};
+Point(105)={3,0,1,0.45};Point(106)={4,0,1,0.45};Point(107)={4,1,1,0.45};Point(108)={3,1,1,0.45};
+Line(101)={101,102};Line(102)={102,103};Line(103)={103,104};Line(104)={104,101};
+Line(105)={105,106};Line(106)={106,107};Line(107)={107,108};Line(108)={108,105};
+Line(109)={101,105};Line(110)={102,106};Line(111)={103,107};Line(112)={104,108};
+Curve Loop(101)={101,102,103,104};Curve Loop(102)={105,106,107,108};
+Curve Loop(103)={101,110,-105,-109};Curve Loop(104)={102,111,-106,-110};
+Curve Loop(105)={103,112,-107,-111};Curve Loop(106)={104,109,-108,-112};
+Plane Surface(101)={101};Plane Surface(102)={102};Plane Surface(103)={103};
+Plane Surface(104)={104};Plane Surface(105)={105};Plane Surface(106)={106};
+Surface Loop(101)={101,102,103,104,105,106};Volume(102)={101};
+Field[1]=MathEval;
+Field[1].F="0.5+0.1*x";
+Background Field=1;
+"""
+
+# `Mesh.Recombine3DAll` under the Delaunay fill: the stored-quad fold runs
+# at generation entry before any detached copy exists, and the flag is
+# never read inside the Region produce — so flagged Regions stay eligible
+# and both disjoint boxes detach under -tN.
+const BOX_RECOMBINE_DELAUNAY="""
+Point(1)={0,0,0,0.35};Point(2)={1,0,0,0.35};Point(3)={1,1,0,0.35};Point(4)={0,1,0,0.35};
+Point(5)={0,0,1,0.35};Point(6)={1,0,1,0.35};Point(7)={1,1,1,0.35};Point(8)={0,1,1,0.35};
+Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+Line(5)={5,6};Line(6)={6,7};Line(7)={7,8};Line(8)={8,5};
+Line(9)={1,5};Line(10)={2,6};Line(11)={3,7};Line(12)={4,8};
+Curve Loop(1)={1,2,3,4};Curve Loop(2)={5,6,7,8};
+Curve Loop(3)={1,10,-5,-9};Curve Loop(4)={2,11,-6,-10};
+Curve Loop(5)={3,12,-7,-11};Curve Loop(6)={4,9,-8,-12};
+Plane Surface(1)={1};Plane Surface(2)={2};Plane Surface(3)={3};
+Plane Surface(4)={4};Plane Surface(5)={5};Plane Surface(6)={6};
+Surface Loop(1)={1,2,3,4,5,6};Volume(1)={1};
+Point(101)={3,0,0,0.4};Point(102)={4,0,0,0.4};Point(103)={4,1,0,0.4};Point(104)={3,1,0,0.4};
+Point(105)={3,0,1,0.4};Point(106)={4,0,1,0.4};Point(107)={4,1,1,0.4};Point(108)={3,1,1,0.4};
+Line(101)={101,102};Line(102)={102,103};Line(103)={103,104};Line(104)={104,101};
+Line(105)={105,106};Line(106)={106,107};Line(107)={107,108};Line(108)={108,105};
+Line(109)={101,105};Line(110)={102,106};Line(111)={103,107};Line(112)={104,108};
+Curve Loop(101)={101,102,103,104};Curve Loop(102)={105,106,107,108};
+Curve Loop(103)={101,110,-105,-109};Curve Loop(104)={102,111,-106,-110};
+Curve Loop(105)={103,112,-107,-111};Curve Loop(106)={104,109,-108,-112};
+Plane Surface(101)={101};Plane Surface(102)={102};Plane Surface(103)={103};
+Plane Surface(104)={104};Plane Surface(105)={105};Plane Surface(106)={106};
+Surface Loop(101)={101,102,103,104,105,106};Volume(102)={101};
+Mesh.Recombine3DAll=1;
+"""
+
 # Per-entity node/element counts and actual UID assignment from the actual
 # mesh's entity data — the public contract the parallel arm must preserve.
 function _par_uid_table(mesh)
@@ -155,6 +283,12 @@ end
         ("shared-curve box Mesh2",BOX,2,""),
         ("two OCC boxes Mesh3",TWOBOX,3,""),
         ("two OCC boxes re-mesh Mesh3",TWOBOX,3,"Mesh 3;\n"),
+        ("RTREE two OCC boxes Mesh3",ALG9_TWOBOX,3,""),
+        ("RTREE + Recombine Volume serial fallback Mesh3",ALG9_RECOMBINE,3,""),
+        ("MathEval background field curves Mesh1",FIELD_CURVES,1,""),
+        ("built-in boxes + MathEval background field Mesh2",FIELD_BOXES,2,""),
+        ("built-in boxes + MathEval background field Mesh3",FIELD_BOXES,3,""),
+        ("Delaunay box + Recombine3DAll Mesh3",BOX_RECOMBINE_DELAUNAY,3,""),
     )
     try
         for (name,src,dim,extra) in cases

@@ -21,9 +21,17 @@
 # `mesh_model_volume` call can detach: extrusion gates and staged subdivision
 # (`extruded`/`scope`), the native hybrid batch and per-Region hybrid
 # constructor, transfinite Regions, dim-3 compound members, Regions whose
-# boundary or embedded Surfaces sit in a dim-2 periodic relation, size fields
-# and user size callbacks all keep the original serial arm — their producer
-# contracts consume or publish shared state outside the recorded footprint.
+# boundary or embedded Surfaces sit in a dim-2 periodic relation, user size
+# callbacks and RTREE `Recombine Volume` targets all keep the original serial
+# arm — their producer contracts consume or publish shared state outside the
+# recorded footprint.  A resolved background `size_field` is *not* an
+# exclusion: catalog fields are immutable read-only evaluators (the lone
+# mutable `ExternalProcessField` serializes every query on its own lock), so
+# the same object is threaded into the detached produce exactly like
+# `options.inner_field` already is.  RTREE fills (`Mesh.Algorithm3D = 9`)
+# ride the same native-initial kernel and seed ledger as Delaunay — only the
+# recombine3d flag is excluded, since its receipts carry a boundary
+# write-back the merge transport cannot remap.
 #
 # Non-contiguous scheduling mirrors the Surface arm: `_parallel_eager_indices`
 # lets a fill also produce later eligible slots whose footprints are disjoint
@@ -378,11 +386,11 @@ end
 function _parallel_volume_prepare(m::GeoModel,volume_tags,input,caller;
         size_field,scope,extruded,hybrid_batch,staged)
     _parallel_volume_workers()>=2 || return nothing
-    (size_field===nothing && scope===nothing && extruded===nothing &&
+    (scope===nothing && extruded===nothing &&
         hybrid_batch===nothing && !staged &&
         m.meshing.size_callback===nothing) || return nothing
     input isa Model._ModelMeshAuthority || return nothing
-    m.meshing.algorithm_3d in (1,3) || return nothing
+    m.meshing.algorithm_3d in (1,3,9) || return nothing
     compound_members=Set{Int}()
     for pair in m.meshing.compounds
         pair.first==3 || continue
@@ -394,6 +402,17 @@ function _parallel_volume_prepare(m::GeoModel,volume_tags,input,caller;
         haskey(m.meshing.transfinite_volumes,tag) && continue
         Model._extrude_gate(m,3,tag)!==nothing && continue
         tag in compound_members && continue
+        # A `Recombine Volume`/`Mesh.Recombine3DAll` target under the RTREE
+        # fill (`algorithm_3d == 9`) splices hexes into its fill and publishes
+        # boundary quadrangles through a synthesized write-back receipt —
+        # shared Surface/Curve state the merge transport cannot remap, so the
+        # produce would fail `_parallel_volume_remap_supported` every time.
+        # Under Delaunay/initial-only the flag is never read inside the
+        # produce (`_model_volume_combine3d!` is gated on `algorithm_3d==9`),
+        # so those Regions stay eligible — their boundary quad fold already
+        # ran inside `_recombine3d_fold_authority` at generation entry.
+        (m.meshing.algorithm_3d==9 &&
+            Model._model_volume_recombine3d(m,tag)) && continue
         boundary=try
             Model._model_volume_boundary_surfaces(m,tag,caller)
         catch err
@@ -490,12 +509,13 @@ function _parallel_volume_attempt(working::GeoModel,work::_ParallelVolumeWork,
         m::GeoModel,input,detached_options::Model._ModelMesh1DOptions,
         geom_points,base_params::Dict{Int,Vector{Float64}},
         hn::UInt64,hc::UInt64;
-        periodic_surface_pairs,optimize_pyramids,precise::Bool)
+        periodic_surface_pairs,optimize_pyramids,precise::Bool,
+        size_field=nothing)
     out=try
         body=()->begin
             entry_seed=detached_options.random_state[]
             produced=mesh_model_volume(working,work.tag;
-                size_field=nothing,_extrude_scope=nothing,
+                size_field,_extrude_scope=nothing,
                 _extrude_working_model=true,_mesh_input=input,
                 _mesh1d_options=detached_options,
                 _return_volume_production=true,
@@ -528,7 +548,8 @@ end
 # it falls back to the serial arm by leaving its slot empty.
 function _parallel_volume_fill!(results::Vector{Any},range,m::GeoModel,
         prepared,pos_draws,input,options,assembly,dirty::Set{Tuple{Int,Int32}},
-        precise::Bool,geometry_birth;periodic_surface_pairs,optimize_pyramids)
+        precise::Bool,geometry_birth;periodic_surface_pairs,optimize_pyramids,
+        size_field=nothing)
     hn=assembly.node_max;hc=assembly.cell_max
     base_params=_parallel_surface_param_refs(m)
     base_dirty=copy(dirty)
@@ -570,13 +591,14 @@ function _parallel_volume_fill!(results::Vector{Any},range,m::GeoModel,
     length(indices)<2 && return nothing
     Threads.@threads for index in indices
         work=prepared[index]
+        sinks=Tuple{Symbol,String}[]
         detached_options=_parallel_task_options(options,
-            get(entry_seeds,index,base_seed))
+            get(entry_seeds,index,base_seed);sinks)
         results[index]=(_parallel_volume_attempt(
             Model._model_mesh_transaction_copy(m),work,m,input,
             detached_options,geom_points,base_params,hn,hc;
-            periodic_surface_pairs,optimize_pyramids,precise),
-            hn,hc,base_dirty,geom_points,base_seed)
+            periodic_surface_pairs,optimize_pyramids,precise,size_field),
+            hn,hc,base_dirty,geom_points,base_seed,sinks)
     end
     return nothing
 end
@@ -689,7 +711,7 @@ function _parallel_volume_product(m::GeoModel,work::_ParallelVolumeWork,
         entry,dirty::Set{Tuple{Int,Int32}},assembly,options;
         input,scope,size_field,periodic_surface_pairs,optimize_pyramids,
         geometry_birth,caller)
-    head,hn,hc,base_dirty,geom_points,base_seed=entry
+    head,hn,hc,base_dirty,geom_points,base_seed,sinks=entry
     out=head isa Task ? fetch(head) : head
     fresh=_parallel_volume_fresh(work,out,dirty,base_dirty,assembly,
         geometry_birth,geom_points,options,base_seed,hn,hc)
@@ -707,6 +729,7 @@ function _parallel_volume_product(m::GeoModel,work::_ParallelVolumeWork,
     produced,diffs,seed_in,seed_out,foreign=out.value
     _PARALLEL_ADOPTED[]+=1
     seed_out!=seed_in && (_PARALLEL_SEED_ADOPTED[]+=1)
+    _parallel_replay_sinks!(options,sinks)
     _parallel_replay_param_diffs!(m,diffs)
     seed_out==seed_in || (options.random_state[]=seed_out)
     return _parallel_volume_remap_production(produced,
@@ -800,17 +823,18 @@ function _parallel_volume_spawn!(results::Vector{Any},index::Int,m::GeoModel,
         work::_ParallelVolumeWork,input,options,assembly,
         dirty::Set{Tuple{Int,Int32}},geometry_birth;
         periodic_surface_pairs,optimize_pyramids,precise::Bool,
-        entry_seed::Union{Nothing,UInt32}=nothing)
+        size_field=nothing,entry_seed::Union{Nothing,UInt32}=nothing)
     working=Model._model_mesh_transaction_copy(m)
     hn=assembly.node_max;hc=assembly.cell_max
     base_params=_parallel_surface_param_refs(m)
     geom_points=_higher_geometry_source_points(assembly,geometry_birth)
     base_seed=options.random_state[]
+    sinks=Tuple{Symbol,String}[]
     detached_options=_parallel_task_options(options,
-        entry_seed===nothing ? base_seed : entry_seed)
+        entry_seed===nothing ? base_seed : entry_seed;sinks)
     task=Threads.@spawn _parallel_volume_attempt(working,work,m,input,
         detached_options,geom_points,base_params,hn,hc;
-        periodic_surface_pairs,optimize_pyramids,precise)
-    results[index]=(task,hn,hc,copy(dirty),geom_points,base_seed)
+        periodic_surface_pairs,optimize_pyramids,precise,size_field)
+    results[index]=(task,hn,hc,copy(dirty),geom_points,base_seed,sinks)
     return nothing
 end
