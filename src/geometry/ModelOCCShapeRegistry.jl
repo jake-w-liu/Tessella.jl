@@ -210,11 +210,23 @@ function _model_occ_synchronize!(m::GeoModel)
         if !haskey(m.points,tag) && !haskey(m.discrete,(0,tag))
             m.points[tag]=g.point;m.point_size[tag]=0.0
             m.next_tag[1]=max(m.next_tag[1],tag)
+            kernel.mirrored_points[tag]=g.point
             imported=true
         elseif haskey(m.points,tag)
-            # A transform may replace a bound vertex's geometry in place —
-            # the kernel record is authoritative for bound entities.
-            m.points[tag]=g.point
+            # A public `set_coordinates` move owns the public value — the
+            # kernel record is only authoritative while the public copy
+            # still equals the last value this kernel imported, i.e. the
+            # divergence came from a kernel-side op such as an OCC
+            # transform rewriting `g.point` in place. A record the kernel
+            # never imported (a `.geo`/`gmshVertex` Point sharing the tag)
+            # keeps the public API's priority, the way upstream's vertex
+            # map outranks a colliding OCC vertex. Mirrors upstream
+            # `model.setCoordinates` durability across `occ.synchronize`.
+            last=get(kernel.mirrored_points,tag,nothing)
+            if last!==nothing && m.points[tag]==last && last!=g.point
+                m.points[tag]=g.point
+                kernel.mirrored_points[tag]=g.point
+            end
         end
         g.mesh_size>0 && (m.point_size[tag]=g.mesh_size)
     end
@@ -368,6 +380,7 @@ function _model_occ_unbind!(kernel,id,recursive)
     dimension,tag=entry
     _model_occ_entity_map_unbind!(kernel.entity_maps[first(entry)+3],last(entry))
     delete!(kernel.bindings,entry);delete!(kernel.shape_tags,id)
+    first(entry)==0 && delete!(kernel.mirrored_points,last(entry))
     push!(kernel.removed,entry)
     kernel.maxima[dimension+3]=maximum((t for (d,t) in keys(kernel.bindings)
                                       if d==dimension);init=0)
