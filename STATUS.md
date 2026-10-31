@@ -92,14 +92,36 @@ support or test requirements.
   wall decomposition is **solver-dependent run to run** — all-split,
   split+whole-quad and all-quad walls all appear on the same fixture — so
   there is no single upstream target to pin. Tessella emits the all-split
-  member deterministically on planar sources and it is inside the oracle's
-  observed family; on warped ruled sources (BSpline boundary) the oracle's
-  mixed runs prefer a whole-quad last layer, but those fixtures fail
-  earlier at the warped-surface plane admission (`model_to_mixed`
-  projection), a ruled-surface limitation outside the NoNew scope.
-- Verified: `test/geometry/extrude_nonew_shared_lateral_test.jl` 1085/1085,
-  `test/geometry/geo_extrude_test.jl` exit 0, `geo_quadtri_extrude_test.jl`
-  exit 0 (Julia 1.12.7 `--check-bounds=yes --compile=min -O0`).
+  member deterministically on planar and warped ruled sources alike and it
+  is inside the oracle's observed family (the warped-ruled admission gap
+  is closed — see the ruled-source bullet below).
+- **Warped ruled/BSpline Source admission (2026-10-31, working tree).**
+  `model_to_mixed`'s on-surface audit inverted ruled/tric coordinates
+  through the loose `XYZtoUV` variant (`test_xyz=false`), which accepts a
+  Newton iterate converged in (u,v) but lifted away from the target. On a
+  folded patch — a BSpline generatrix bowing past its own corner — an
+  exact corner node stalled 0.124 off-patch and the generated Source part
+  was rejected before any sweep ran (`c_flip_ruled`/`c_ruled_both`, the
+  `954c4a21` report). The audit now calls `_ruled_xyz_to_uv` with
+  `test_xyz=true` — the same strict on-surface+XYZ contract
+  `model::getParametrization` documents in
+  `src/geometry/ModelEntityEvaluation.jl` — so pseudo-converged seeds are
+  skipped through the 9×9 guess grid until the true inverse lands. Gmsh
+  4.15.2 oracle-matched (nodes / msh-cell multisets): solo ruled NoNew
+  sweep 14, ruled+ruled shared pair 22, ruled+planar NoNew pair 20, ruled
+  NoNew vs ordinary partner 20, three-layer ruled pair 26, ordinary
+  recombined ruled sweep 14, and a non-transfinite warped source sweep 38
+  (24 segs / 60 tris / 84 tets). The ruled Source part classifies through
+  `model_to_mixed` and both owners' wall cycles weld bitwise on the
+  deterministic all-split member; off-patch nodes still fail the audit
+  loudly. New "warped ruled and BSpline sources" testset in
+  `test/geometry/extrude_nonew_shared_lateral_test.jl`.
+- Verified: `test/geometry/extrude_nonew_shared_lateral_test.jl` exit 0
+  (new warped-ruled testset 242/242), `test/geometry/geo_extrude_test.jl`
+  exit 0, `geo_quadtri_extrude_test.jl` exit 0 (334/334),
+  `model_warped_ruled_surface_test.jl` exit 0,
+  `model_ruled_parametrization_test.jl` 471/471 exit 0 (Julia 1.12.7
+  `--check-bounds=yes --compile=min -O0`).
 
 ### AdaptMesh/`-4` native adaptive remeshing (2026-10-31, working tree)
 

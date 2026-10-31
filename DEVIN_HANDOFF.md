@@ -1,5 +1,32 @@
 # Devin handoff — complete Tessella's remaining implementation
 
+## 2026-10-31 landed: warped ruled/BSpline NoNew Source admission
+
+- `model_to_mixed`'s on-surface audit for `:ruled`/`:tric` patches now
+  inverts coordinates through the **strict** `_ruled_xyz_to_uv` contract
+  (`test_xyz=true`), the same on-surface+XYZ convergence contract
+  `model::getParametrization` documents in
+  `src/geometry/ModelEntityEvaluation.jl`. The loose variant accepted a
+  Newton iterate converged in (u,v) but 0.124 off-patch in XYZ, so a
+  folded ruled Source (BSpline generatrix bowing past its own corner)
+  misclassified an exact corner node and every `Extrude{Surface{ruled}}`
+  under a shared NoNew wall failed at classification — the `954c4a21`
+  residual. One-flag change in `src/geometry/Model.jl`; all other
+  `_ruled_xyz_to_uv` callers (transfinite ruled mesher, embedded sheets,
+  parametrization) keep their documented loose/strict variants.
+- Oracle-matched (Gmsh 4.15.2) in the new "warped ruled and BSpline
+  sources" testset of `test/geometry/extrude_nonew_shared_lateral_test.jl`:
+  solo ruled NoNew 14 nodes; ruled+ruled shared pair 22; ruled+planar 20;
+  ruled NoNew vs ordinary 20; 3-layer ruled pair 26; ordinary recombined
+  ruled sweep 14; non-transfinite warped source sweep 38 (24/60/84
+  segs/tris/tets). Wall facets pin the deterministic all-split member;
+  both owners' wall cycles weld; off-patch nodes still reject loudly.
+- Regressions: `geo_extrude_test.jl` exit 0, `geo_quadtri_extrude_test.jl`
+  exit 0, `model_warped_ruled_surface_test.jl` exit 0,
+  `model_ruled_parametrization_test.jl` 471/471 exit 0,
+  `extrude_nonew_shared_lateral_test.jl` exit 0 (Julia 1.12.7,
+  `--check-bounds=yes --compile=min -O0`).
+
 ## 2026-10-23 landed arc (commits `ce99742`..`7e65e3d`, all pushed to `main`)
 
 - `ce99742` OCC curved faces mesh via API (parametrization round-trip ≤5.6e-16),

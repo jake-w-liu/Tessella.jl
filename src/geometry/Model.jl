@@ -4743,7 +4743,15 @@ function model_to_mixed(m::GeoModel,mesh::Union{Mesh,MixedMesh},
         ruled_tol=max(geometric_tolerance,1e-8*ruled_lc)
         ruled_silent=Returns(nothing)
         ruled_offset=(coordinate)->begin
-            u,v=_ruled_xyz_to_uv(m,surface,coordinate,1.0,ruled_lc,false,
+            # The audit needs the strict inverse: a stalled Newton iterate
+            # that converges in (u,v) but lifts away from the target is not
+            # an on-surface certificate. `test_xyz=true` rejects those
+            # pseudo-converges and keeps iterating the 9×9 guess grid — the
+            # same contract `model::getParametrization` documents for ruled
+            # patches (`ModelEntityEvaluation.jl`). Without it a folded
+            # patch (a BSpline generatrix bowing past its own corner)
+            # misinverts an exact corner node and the audit fails.
+            u,v=_ruled_xyz_to_uv(m,surface,coordinate,1.0,ruled_lc,true,
                 ruled_silent,ruled_silent,caller)
             point=ruled_lift(u,v)
             hypot(point[1]-coordinate[1],point[2]-coordinate[2],

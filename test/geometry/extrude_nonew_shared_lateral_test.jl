@@ -1300,4 +1300,245 @@ end
             right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
             """;mesh_dim=3)
     end
+
+    @testset "warped ruled and BSpline sources" begin
+        # A BSpline generatrix bowing past its own patch corner folds the
+        # ruled surface — `model_to_mixed`'s on-surface audit inverted an
+        # exact corner node through the loose `XYZtoUV` variant, which
+        # accepted a stalled Newton iterate and rejected the source as
+        # 0.124 off-patch. The strict inverse (the `getParametrization`
+        # contract: on-surface and XYZ convergence together) recovers the
+        # corner and the whole extrude/shared-lateral certificate
+        # assembles. Node and cell multisets pin the Gmsh 4.15.2 captures
+        # for these fixtures.
+        _sl_msh_counts(mesh::Mesh)=Dict{Int,Int}(
+            k=>v for (k,v) in (
+                1=>size(mesh.segs,2),2=>size(mesh.tris,2),
+                4=>size(mesh.tets,2)) if v>0)
+        _sl_msh_counts(mesh::MixedMesh)=begin
+            counts=Dict{Int,Int}()
+            for block in _sl_blocks(mesh)
+                block isa ElementBlock && msh_dimension(block.msh)>=1 ||
+                    continue
+                counts[Int(block.msh)]=
+                    get(counts,Int(block.msh),0)+size(block.nodes,2)
+            end
+            counts
+        end
+        # Ruled Sources on both sweeps (`c_ruled_both`): the folded
+        # BSpline edge sits on the right Region's Source — the exact
+        # corner (2,0,0) stalled the loose inverse at 0.124 residual.
+        execution=_sl_model("""
+        Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+        Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+        Point(5)={0.5,0.0,0.3,1};
+        BSpline(1)={1,5,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Ruled Surface(1)={1};
+        Point(6)={2,0,0,1};Point(7)={2,1,0,1};
+        Point(8)={2.5,0.0,0.25,1};
+        BSpline(5)={2,8,6};Line(6)={6,7};Line(7)={7,3};
+        Curve Loop(2)={5,6,7,-2};Ruled Surface(2)={2};
+        Transfinite Curve{:}=2;
+        Transfinite Surface{1};Transfinite Surface{2};
+        Recombine Surface{:};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        model=execution.model
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==22
+        @test _sl_msh_counts(merged)==Dict(1=>26,2=>32,3=>2,4=>20,7=>2)
+        s=_sl_shared_tag(execution)
+        pass=_extrude_volume_pass(model,_SL_CALLER)
+        bound=pass.scope.surfaces[s]
+        wall=_sl_surface_faces(bound)
+        # Oracle wall facets at x=1 (the all-split member of the observed
+        # solver-dependent family — the same deterministic emission the
+        # planar-source certificates carry).
+        @test wall==Set((
+            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,1.0,0.5)),
+            ((1.0,0.0,0.0),(1.0,1.0,0.0),(1.0,1.0,0.5)),
+            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,1.0,1.0)),
+            ((1.0,0.0,0.5),(1.0,1.0,0.5),(1.0,1.0,1.0))))
+        @test _sl_dim2_faces_on(merged,1,1.0)==wall
+        for tag in (1,2)
+            @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
+            _sl_positive(pass.parts[tag])
+        end
+        # The ruled Source part classifies through `model_to_mixed` —
+        # the exact call site that rejected on the folded corner.
+        source_part=pass.scope.surfaces[2]
+        plain=MixedMesh(source_part.coords,
+            ElementBlock[ElementBlock(b.msh,b.nodes)
+                         for b in source_part.blocks
+                         if b isa ElementBlock && msh_dimension(b.msh)==2])
+        projected=model_to_mixed(model,plain,2)
+        @test validate(projected).ok
+        @test projected.coords==source_part.coords
+        # And a node lifted off the patch still fails the audit loudly —
+        # the strict inverse does not weaken the certificate.
+        offcoords=copy(source_part.coords);offcoords[3,2]+=0.01
+        @test_throws r"off Surface\[2\]" model_to_mixed(model,
+            MixedMesh(offcoords,plain.blocks),2)
+        # Ruled Source on the right of a planar partner (`c_flip_ruled`):
+        # same folded patch, same oracle multiset — 20 nodes this time
+        # (one fewer bulge column on the left's flat boundary).
+        execution=_sl_model("""
+        Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+        Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+        Point(5)={2,0,0,1};Point(6)={2,1,0,1};
+        Point(7)={2.5,0.0,0.3,1};
+        BSpline(5)={2,7,5};Line(6)={5,6};Line(7)={6,3};
+        Curve Loop(2)={5,6,7,-2};Ruled Surface(2)={2};
+        Transfinite Curve{:}=2;
+        Transfinite Surface{1};Transfinite Surface{2};
+        Recombine Surface{:};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==20
+        @test _sl_msh_counts(merged)==Dict(1=>26,2=>32,3=>2,4=>20,7=>2)
+        s=_sl_shared_tag(execution)
+        pass=_extrude_volume_pass(execution.model,_SL_CALLER)
+        wall=_sl_surface_faces(pass.scope.surfaces[s])
+        @test wall==Set((
+            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,1.0,0.5)),
+            ((1.0,0.0,0.0),(1.0,1.0,0.0),(1.0,1.0,0.5)),
+            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,1.0,1.0)),
+            ((1.0,0.0,0.5),(1.0,1.0,0.5),(1.0,1.0,1.0))))
+        @test _sl_dim2_faces_on(merged,1,1.0)==wall
+        for tag in (1,2)
+            @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
+            _sl_positive(pass.parts[tag])
+        end
+        # Ruled NoNew Source against an ordinary unrecombined partner
+        # (`c_ruled_ord`): the certified split wall welds onto the
+        # partner's prism-subdivision triangles (20 nodes oracle).
+        execution=_sl_model("""
+        Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+        Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+        Point(5)={0.5,0.0,0.3,1};
+        BSpline(1)={1,5,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Ruled Surface(1)={1};
+        Point(6)={2,0,0,1};Point(7)={2,1,0,1};
+        Line(5)={2,6};Line(6)={6,7};Line(7)={7,3};
+        Curve Loop(2)={5,6,7,-2};Plane Surface(2)={2};
+        Transfinite Curve{:}=2;
+        Transfinite Surface{1};Transfinite Surface{2};
+        Recombine Surface{1};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==20
+        @test _sl_msh_counts(merged)==Dict(1=>26,2=>34,3=>1,4=>22,7=>1)
+        s=_sl_shared_tag(execution)
+        pass=_extrude_volume_pass(execution.model,_SL_CALLER)
+        wall=_sl_surface_faces(pass.scope.surfaces[s])
+        @test wall==Set((
+            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,1.0,0.5)),
+            ((1.0,0.0,0.0),(1.0,1.0,0.0),(1.0,1.0,0.5)),
+            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,1.0,1.0)),
+            ((1.0,0.0,0.5),(1.0,1.0,0.5),(1.0,1.0,1.0))))
+        @test _sl_dim2_faces_on(merged,1,1.0)==wall
+        for tag in (1,2)
+            @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
+            _sl_positive(pass.parts[tag])
+        end
+        # Three-layer sweep on the same ruled/planar pair (`c_ruled3`):
+        # per-layer wall facets pin all three intervals, 26 nodes oracle.
+        execution=_sl_model("""
+        Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+        Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+        Point(5)={0.5,0.0,0.3,1};
+        BSpline(1)={1,5,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Ruled Surface(1)={1};
+        Point(6)={2,0,0,1};Point(7)={2,1,0,1};
+        Line(5)={2,6};Line(6)={6,7};Line(7)={7,3};
+        Curve Loop(2)={5,6,7,-2};Plane Surface(2)={2};
+        Transfinite Curve{:}=2;
+        Transfinite Surface{1};Transfinite Surface{2};
+        Recombine Surface{:};
+        left[]=Extrude{0,0,1}{Surface{1};Layers{3};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{3};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==26
+        @test _sl_msh_counts(merged)==Dict(1=>32,2=>46,3=>2,4=>32,7=>2)
+        s=_sl_shared_tag(execution)
+        pass=_extrude_volume_pass(execution.model,_SL_CALLER)
+        third=1/3
+        wall=_sl_surface_faces(pass.scope.surfaces[s])
+        @test wall==Set((
+            ((1.0,0.0,0.0),(1.0,0.0,third),(1.0,1.0,third)),
+            ((1.0,0.0,0.0),(1.0,1.0,0.0),(1.0,1.0,third)),
+            ((1.0,0.0,third),(1.0,0.0,2*third),(1.0,1.0,2*third)),
+            ((1.0,0.0,third),(1.0,1.0,third),(1.0,1.0,2*third)),
+            ((1.0,0.0,2*third),(1.0,0.0,1.0),(1.0,1.0,1.0)),
+            ((1.0,0.0,2*third),(1.0,1.0,2*third),(1.0,1.0,1.0))))
+        @test _sl_dim2_faces_on(merged,1,1.0)==wall
+        for tag in (1,2)
+            @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
+            _sl_positive(pass.parts[tag])
+        end
+        # The solo ruled NoNew sweep (`c_solo_ruled`): 14 nodes oracle,
+        # the generic single-quad catalog emission.
+        execution=_sl_model("""
+        Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+        Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+        Point(5)={0.5,0.0,0.3,1};
+        BSpline(1)={1,5,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Ruled Surface(1)={1};
+        Transfinite Curve{:}=2;
+        Transfinite Surface{1};
+        Recombine Surface{1};
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==14
+        @test _sl_msh_counts(merged)==Dict(1=>16,2=>18,3=>1,4=>10,7=>1)
+        _sl_positive(merged)
+        # The ordinary recombined sweep of the same warped Source — 14
+        # nodes oracle (16 lines/10 quads/2 hexes).
+        execution=_sl_model("""
+        Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+        Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+        Point(5)={0.5,0.0,0.3,1};
+        BSpline(1)={1,5,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Ruled Surface(1)={1};
+        Transfinite Curve{:}=2;
+        Transfinite Surface{1};
+        Recombine Surface{1};
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==14
+        @test _sl_msh_counts(merged)==Dict(1=>16,3=>10,5=>2)
+        _sl_positive(merged)
+        # The non-transfinite warped Source: the ruled mesher discretizes
+        # the (u,v) domain and the sweep welds the generatrices — 38
+        # nodes oracle, the full unstructured fill.
+        execution=_sl_model("""
+        Point(1)={0,0,0,0.6}; Point(2)={1,0,0,0.6};
+        Point(3)={1,1,0,0.6}; Point(4)={0,1,0,0.6};
+        Point(5)={0.5,0.0,0.3,0.6};
+        BSpline(1)={1,5,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4};Ruled Surface(1)={1};
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};};
+        """;mesh_dim=3)
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test nnodes(merged)==38
+        @test _sl_msh_counts(merged)==Dict(1=>24,2=>60,4=>84)
+        _sl_positive(merged)
+    end
 end
