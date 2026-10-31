@@ -43,10 +43,18 @@ end
         adj=[Int[iseven(i) ? i-1 : i+1] for i in 1:n]
         expected=Int[iseven(i) ? i-1 : i+1 for i in 1:n]
         @test R._edmonds_matching(n,adj)==expected
-        allocated=minimum(@allocated(R._edmonds_matching(n,adj)) for _ in 1:3)
-        @test allocated<=35*n+2048
-        previous==0 || @test allocated<=2.15*previous+4096
-        previous=allocated
+        # The linear-temporary contract only applies to compiled code: under
+        # --compile=min @allocated measures interpreter bookkeeping
+        # (~1.1/4.3/25.5 MB at n=256/512/1024), not the kernel
+        # (compile_enabled==3, the same minimal-compiler gate runtests.jl and
+        # mesh3d_test.jl use). Verified under -O2: 8924/17244/33804 bytes,
+        # inside both bounds at every size.
+        if Base.JLOptions().compile_enabled != 3
+            allocated=minimum(@allocated(R._edmonds_matching(n,adj)) for _ in 1:3)
+            @test allocated<=35*n+2048
+            previous==0 || @test allocated<=2.15*previous+4096
+            previous=allocated
+        end
     end
 end
 
