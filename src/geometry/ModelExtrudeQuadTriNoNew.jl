@@ -728,10 +728,15 @@ end
 function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
         min_angle_deg::Real=25.0,max_periodic_passes=8,
         size_field::Union{Nothing,AbstractSizeField}=nothing,_mesh_input=nothing,
-        _shared_diagonals=nothing,_shared_parts=nothing)
+        _shared_diagonals=nothing,_shared_parts=nothing,_union_us=nothing)
     params=_extrude_gate(m,3,t)
     _extrude_is_nonew(params) || throw(ArgumentError(
         "$caller: Volume[$t] is not a layered QuadTriNoNewVerts region"))
+    # A member of a union-grid shared-wall component sweeps on the sorted
+    # union of its owners' level sets — its wall facets then coincide
+    # bitwise with the bound union wall every other owner emits.
+    _union_us===nothing ||
+        (params=_extrude_with_levels(params,_union_us))
     spec=get(m.meshing.extrude_specs,(3,t),nothing)
     link=get(m.meshing.extrude_sources,(3,t),nothing)
     spec!==nothing && link!==nothing && link[1]==2 || throw(ArgumentError(

@@ -2682,7 +2682,8 @@ function _extrude_volume_pass(m::GeoModel,caller::AbstractString;
                 haskey(scope.volumes,binder) ||
                     _extrude_nonew_shared_planner_error(caller,s)
                 required=_extrude_nonew_wall_split_states(
-                    m,scope.volumes[binder],s,caller)
+                    m,scope.volumes[binder],s,caller;
+                    _union_us=get(scope.unions,s,nothing))
                 # A whole-quad segment on this wall cannot weld the
                 # partner's triangles — the certified wall must carry a
                 # split on every layer of every segment (a recombined

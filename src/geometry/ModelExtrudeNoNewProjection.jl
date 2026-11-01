@@ -89,7 +89,12 @@ function _extrude_nonew_surface_projection(m::GeoModel,mesh,surface::Int,
         # operation scope its bound product was planned under, closed under
         # the shared-wall neighbor graph — so the replayed part is the
         # certified single emission, not an independent wall triangulation.
-        length(regions)>1 ?
+        # A single-owner lateral of a shared-incidence Region replays the
+        # same scope too: union-grid components emit every one of the
+        # member's walls on the union level set, so only the component
+        # replay reproduces the certified part.
+        (length(regions)>1 ||
+         !isempty(_extrude_nonew_shared_for(working,owner,caller))) ?
             _extrude_nonew_scope(working,caller;
                 tags=_extrude_nonew_shared_closure(working,regions,caller),
                 _working_model=true).volumes[owner] :
@@ -214,7 +219,14 @@ function _extrude_nonew_projection_context(m::GeoModel,mesh,volume::Int,
         # Current native UID products are admitted before this geometric path.
         # Rebuild the naked mesh's geometric Source with the same inputs as its
         # standalone constructor; attached records can differ by one ULP.
-        _extrude_nonew_complete_plan(working,volume,caller;_working_model=true)
+        # A shared-incidence Region rebuilds through its component scope —
+        # union-grid owners emit the volume on the union level set.
+        isempty(_extrude_nonew_shared_for(working,volume,caller)) ?
+            _extrude_nonew_complete_plan(working,volume,caller;
+                _working_model=true) :
+            _extrude_nonew_scope(working,caller;
+                tags=_extrude_nonew_shared_closure(working,[volume],caller),
+                _working_model=true).volumes[volume]
     else
         _extrude_nonew_require_scope(scope,m,caller)
         scope.volumes[volume]

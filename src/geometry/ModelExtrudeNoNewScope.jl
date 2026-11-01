@@ -23,11 +23,51 @@ struct _ExtrudeNoNewScope
     model::GeoModel
     volumes::Dict{Int,_ExtrudeNoNewCompletePlan}
     surfaces::Dict{Int,Union{Mesh,MixedMesh}}
+    # Shared lateral tag => union level grid (`_extrude_level_us` values)
+    # its owners were re-parametrized onto; absent for equal-record walls.
+    unions::Dict{Int,Vector{Float64}}
 end
+
+_ExtrudeNoNewScope(model,volumes,surfaces)=
+    _ExtrudeNoNewScope(model,volumes,surfaces,
+        Dict{Int,Vector{Float64}}())
 
 @inline _extrude_is_nonew(params)=params!==nothing &&
     !isempty(params.layers) && params.recombine &&
     params.quad_to_tri===:no_new_verts
+
+# Two QuadTriNoNewVerts operation records may share one literal wall while
+# carrying different layer grids: every owner still sweeps the identical
+# wall geometry once each is re-parametrized to the union level set, so
+# compatibility means every non-level field matches — `layers`/`heights`
+# alone may differ — and the total normalized height (the wall's vertical
+# extent) is bitwise equal.
+@inline _extrude_nonew_level_compatible(p,q)=
+    !isempty(p.heights) && !isempty(q.heights) &&
+    isequal(p.scale_last,q.scale_last) &&
+    isequal(p.recomb_laterals,q.recomb_laterals) &&
+    isequal(p.heights[end],q.heights[end])
+
+# Whether the shared wall's own recorded operation is literally one of its
+# owners' operations: a NoNewVerts record matches any NoNewVerts owner
+# modulo the level grid (the union re-parametrization erases it); any
+# other record must compare bitwise as before.
+@inline function _extrude_nonew_shared_op_equal(s_params,o_params)
+    s_params===nothing && return false
+    _extrude_is_nonew(s_params) ||
+        return isequal(s_params,o_params)
+    _extrude_is_nonew(o_params) || return false
+    return _extrude_nonew_level_compatible(s_params,o_params)
+end
+
+# Re-express a record's level grid as `us`: one unit sublayer per union
+# interval preserves every non-level operation field, so the emitted
+# levels are exactly `us` (`_extrude_level_us` semantics) and the
+# `_extrude_nonew_levels` certificate still applies.
+@inline _extrude_with_levels(params::_GeoExtrudeParams,us::AbstractVector)=
+    (layers=fill(1,length(us)-1),heights=Float64.(us[2:end]),
+     scale_last=params.scale_last,recombine=params.recombine,
+     quad_to_tri=params.quad_to_tri,recomb_laterals=params.recomb_laterals)
 
 function _extrude_nonew_scope_contract(m::GeoModel,t::Int,
                                        caller::AbstractString)
@@ -311,12 +351,15 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
                                       _working_model::Bool=false,_mesh_input=nothing,
                                       _trace_columns::Bool=false,
                                       _shared_diagonals=nothing,
-                                      _shared_parts=nothing)
+                                      _shared_parts=nothing,
+                                      _union_us=nothing,
+                                      _wall_us=nothing)
     working=_working_model ? m : deepcopy(m)
     _extrude_nonew_scope_contract(working,t,caller)
     plan=_extrude_nonew_plan(working,t,caller;min_angle_deg=min_angle_deg,
         max_periodic_passes=max_periodic_passes,size_field=size_field,_mesh_input=_mesh_input,
-        _shared_diagonals=_shared_diagonals,_shared_parts=_shared_parts)
+        _shared_diagonals=_shared_diagonals,_shared_parts=_shared_parts,
+        _union_us=_union_us)
     # The insertion renderer and indexed B4 constructors bind their actual
     # column rows explicitly. Other indexed families retain their existing
     # dispatch until they provide the corresponding constructor provenance.
@@ -366,6 +409,15 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
     multi_cell=plan.catalog isa _ExtrudeNoNewMultiCellCatalog
     for tag in plan.lateral_tags
         params,spec,link=_extrude_entity_params(working,2,tag,caller)
+        # A union-grid owner sweeps its whole volume on the component's
+        # union level set — every one of its laterals lands on the union
+        # rungs, shared wall or free wall alike. A shared wall also carries
+        # the union record when this owner's own grid already equals it:
+        # the Surface's stored record may belong to a differently-gridded
+        # partner, so the wall's own level set comes from `wall_levels`.
+        wall_u=_wall_us===nothing ? _union_us : get(_wall_us,tag,_union_us)
+        wall_u===nothing ||
+            (params=_extrude_with_levels(params,wall_u))
         surfaces[tag]=quad_patch ?
             _extrude_nonew_quad_patch_lateral(working,tag,params,link[2],
                 plan.sweep.cols,plan.catalog,plan.edges,caller) : quad_strip ?
@@ -486,13 +538,13 @@ end
 
 # ─── Shared-surface slice (LAY01) ───────────────────────────────────────────
 # Adjacent QuadTriNoNewVerts sweeps may share literal lateral Surfaces when
-# every NoNewVerts owner records the identical linear translation operation.
-# Upstream (Gmsh 4.15.2 oracle) admits one literal Surface bounded by three
-# or more such Regions, a lateral shared with an ordinary layered Region
-# (a recombined partner keeps the welded wall in whole quads and sweeps
-# around it; an unrecombined partner welds the split wall its prism
-# subdivision emits), and a copied cap that is literally the next stacked
-# sweep's Source. Each shared
+# every NoNewVerts owner records the same linear translation operation
+# modulo the layer grid. Upstream (Gmsh 4.15.2 oracle) admits one literal
+# Surface bounded by three or more such Regions, a lateral shared with an
+# ordinary layered Region (a recombined partner keeps the welded wall in
+# whole quads and sweeps around it; an unrecombined partner welds the
+# split wall its prism subdivision emits), and a copied cap that is
+# literally the next stacked sweep's Source. Each shared
 # Surface is emitted once: the earliest NoNewVerts owner's plan binds the
 # wall's actual cells on a pure-NoNewVerts wall and transports its per-layer
 # diagonals into each later plan as a (side,state) contract, while a wall
@@ -506,12 +558,22 @@ end
 # certifies each wall's per-owner child faces, matching surface cells,
 # positive typed volumes and the closed exterior boundary — with three or
 # more owners every wall facet must arrive once per Region with mixed
-# outward orientation. Everything outside this slice (non-literal sharing,
-# partners whose recombination cannot reproduce the welded wall — such as
-# mixed recombined/unrecombined owner sets on one wall — unequal sweep
-# records on pure walls, unequal/bent cap transforms, non-generic catalogs
-# that cannot reproduce the bound emission, Sources welded onto a
-# partner's lateral) keeps the original loud diagnostic.
+# outward orientation.
+#
+# Owners whose records differ only in the layer grid (different counts or
+# heights) weld on the union level set instead of failing the way the
+# oracle does ("Could not find extruded vertex", dropped volume cells —
+# a hanging incidence upstream cannot repair): each connected component
+# of the shared-wall owner graph re-parametrizes every member onto the
+# sorted union of its level grids, so the bound wall and its transported
+# contract are emitted once on the union rungs and every owner arrives
+# on the identical conforming facetization. Everything outside this slice
+# (non-literal sharing, partners whose recombination cannot reproduce the
+# welded wall — such as mixed recombined/unrecombined owner sets on one
+# wall — an ordinary partner on a union-grid wall, unequal/bent cap
+# transforms, non-generic catalogs that cannot reproduce the bound
+# emission, Sources welded onto a partner's lateral) keeps the original
+# loud diagnostic.
 
 @noinline _extrude_nonew_shared_planner_error(caller,surface)=
     throw(ArgumentError(
@@ -643,7 +705,8 @@ function _extrude_nonew_shared_validate(m::GeoModel,t::Int,s::Int,
         _extrude_nonew_shared_planner_error(caller,s)
     s_params=get(m.meshing.extrude,(2,s),nothing)
     s_spec=get(m.meshing.extrude_specs,(2,s),nothing)
-    owned=isequal(s_params,params) && isequal(s_spec,spec)
+    owned=_extrude_nonew_shared_op_equal(s_params,params) &&
+        isequal(s_spec,spec)
     signs=Int[_extrude_nonew_shell_sign(m,t,s)]
     for partner in adjacent
         partner==t && continue
@@ -656,7 +719,14 @@ function _extrude_nonew_shared_validate(m::GeoModel,t::Int,s::Int,
         generatrix in _model_projection_surface_curves(m,p_source) ||
             _extrude_nonew_shared_planner_error(caller,s)
         if _extrude_is_nonew(p_params)
-            isequal(p_params,params) && isequal(p_spec,spec) ||
+            # Same operation modulo the layer grid: upstream fails the
+            # unequal-record shared wall outright ("Could not find
+            # extruded vertex"); Tessella welds it honestly by sweeping
+            # every NoNewVerts owner on the component's union level set,
+            # so the non-level fields, transform and total height must
+            # still match bitwise.
+            isequal(p_spec,spec) &&
+                _extrude_nonew_level_compatible(p_params,params) ||
                 _extrude_nonew_shared_planner_error(caller,s)
         else
             # An ordinary layered partner (`Layers+Recombine`) or an
@@ -675,7 +745,8 @@ function _extrude_nonew_shared_validate(m::GeoModel,t::Int,s::Int,
                 isequal(p_spec,spec) ||
                 _extrude_nonew_shared_planner_error(caller,s)
         end
-        owned=owned || (isequal(s_params,p_params) && isequal(s_spec,p_spec))
+        owned=owned || (_extrude_nonew_shared_op_equal(s_params,p_params) &&
+                        isequal(s_spec,p_spec))
         push!(signs,_extrude_nonew_shell_sign(m,partner,s))
     end
     owned || _extrude_nonew_shared_planner_error(caller,s)
@@ -793,7 +864,7 @@ end
 # carries one independent quadrangle per segment.
 function _extrude_nonew_wall_split_states(m::GeoModel,
         completed::_ExtrudeNoNewCompletePlan,s::Int,
-        caller::AbstractString)
+        caller::AbstractString;_union_us=nothing)
     catalog=completed.catalog
     if catalog isa _ExtrudeNoNewCatalog &&
             length(catalog.source_cell)==4 && !isempty(completed.faces)
@@ -814,7 +885,9 @@ function _extrude_nonew_wall_split_states(m::GeoModel,
     closed=a==b
     nseg=closed ? length(chain) : length(chain)-1
     nseg>=1 || _extrude_nonew_shared_planner_error(caller,s)
-    us=_extrude_level_us(params)
+    # A union-wall part was emitted on the component's union grid, not the
+    # Surface's own recorded grid — read its quadrangles at union levels.
+    us=_union_us===nothing ? _extrude_level_us(params) : _union_us
     transforms=_extrude_level_transforms(spec,us,caller)
     intervals=length(us)-1
     cells=_extrude_nonew_wall_part_cells(part,s,caller)
@@ -840,8 +913,9 @@ end
 
 function _extrude_nonew_wall_diagonals(m::GeoModel,
         completed::_ExtrudeNoNewCompletePlan,s::Int,
-        caller::AbstractString)
-    states=_extrude_nonew_wall_split_states(m,completed,s,caller)
+        caller::AbstractString;_union_us=nothing)
+    states=_extrude_nonew_wall_split_states(m,completed,s,caller;
+        _union_us=_union_us)
     states===nothing && return nothing
     # The generic catalog's transported contract encodes one diagonal per
     # layer; a multi-segment wall instead transports through the bound
@@ -1038,6 +1112,142 @@ function _extrude_nonew_shared_certify(plans::Vector{_ExtrudeNoNewCompletePlan},
     return nothing
 end
 
+# Connected components of the shared-lateral owner graph (NoNewVerts
+# owners only) get the sorted union of their members' level grids: an
+# owner whose operation records fewer or different rungs still sweeps the
+# identical wall once re-parametrized to the union set — upstream (Gmsh
+# 4.15.2) fails the same nonconforming records outright. Returns
+# `(owner_levels, wall_levels, components)`: `owner_levels` maps each
+# member that must be re-parametrized to the union `us` vector,
+# `wall_levels` maps each lateral of a union component to that same
+# vector (its emitted part lives on the union grid, whatever the Surface
+# record says), and `components` marks each union root for the
+# partner-wall bound below. Components whose members already share one
+# grid produce no entries — equal-record walls keep the existing
+# diagonal-contract path bit-for-bit.
+function _extrude_nonew_union_levels(m::GeoModel,shared_of,
+                                     caller::AbstractString)
+    parent=Dict{Int,Int}()
+    function root(o::Int)
+        r=o
+        while get(parent,r,r)!=r
+            r=parent[r]
+        end
+        while get(parent,o,o)!=o
+            o,parent[o]=parent[o],r
+        end
+        return r
+    end
+    for edges in values(shared_of),(s,owners) in edges
+        link=get(m.meshing.extrude_sources,(2,s),nothing)
+        (link===nothing || link[1]!=1) && continue
+        nonew=[o for o in owners if _extrude_is_nonew(_extrude_gate(m,3,o))]
+        for o in nonew
+            get!(parent,o,o)
+            o==nonew[1] && continue
+            ra,rb=root(nonew[1]),root(o)
+            ra!=rb && (parent[rb]=ra)
+        end
+    end
+    owner_levels=Dict{Int,Vector{Float64}}()
+    wall_levels=Dict{Int,Vector{Float64}}()
+    components=Set{Int}()
+    isempty(parent) && return owner_levels,wall_levels,components
+    groups=Dict{Int,Vector{Int}}()
+    for o in keys(parent)
+        push!(get!(groups,root(o),Int[]),o)
+    end
+    component_us=Dict{Int,Vector{Float64}}()
+    for (r,members) in groups
+        U=Float64[]
+        for o in members
+            append!(U,_extrude_level_us(_extrude_gate(m,3,o)))
+        end
+        sort!(U);unique!(U)
+        # The union must stay a level record every member can emit: a
+        # member whose own grid already equals U needs no
+        # re-parametrization; a differing member gets the union record.
+        needs=false
+        for o in members
+            us=_extrude_level_us(_extrude_gate(m,3,o))
+            us==U || (needs=true;owner_levels[o]=U)
+        end
+        needs || continue
+        component_us[r]=U
+        push!(components,r)
+    end
+    isempty(components) && return owner_levels,wall_levels,components
+    for edges in values(shared_of),(s,owners) in edges
+        link=get(m.meshing.extrude_sources,(2,s),nothing)
+        (link===nothing || link[1]!=1) && continue
+        nonew=[o for o in owners if _extrude_is_nonew(_extrude_gate(m,3,o))]
+        isempty(nonew) && continue
+        r=root(nonew[1])
+        r in components || continue
+        # An ordinary layered partner sweeps outside this scope on its own
+        # recorded grid — it can only weld a wall whose owners keep that
+        # grid, so a union component with an ordinary partner on this wall
+        # stays rejected (upstream fails it too).
+        for o in owners
+            _extrude_is_nonew(_extrude_gate(m,3,o)) ||
+                _extrude_nonew_shared_planner_error(caller,s)
+        end
+        wall_levels[s]=component_us[r]
+    end
+    # Every re-parameterized owner emits its generatrix Curves on the
+    # union grid, so the recorded Curve discretization and the standalone
+    # products must follow the same level record. Two union components
+    # cannot meet on one generatrix — the owners would be connected —
+    # and an unchanged owner's record equals U bitwise anyway.
+    curve_union=Dict{Int,Vector{Float64}}()
+    curve_component=Dict{Int,Int}()
+    for r in components
+        U=component_us[r]
+        for o in groups[r]
+            for s in abs.(_extrude_nonew_boundary_surfaces(m,o,caller)),
+                loop in m.surfaces[s],signed in m.loops[loop]
+                c=abs(signed)
+                link=get(m.meshing.extrude_sources,(1,c),nothing)
+                (link===nothing || link[1]!=0) && continue
+                previous=get(curve_union,c,nothing)
+                previous===nothing || previous==U ||
+                    _extrude_nonew_shared_planner_error(caller,s)
+                curve_union[c]=U
+                curve_component[c]=r
+            end
+        end
+    end
+    if !isempty(curve_union)
+        # A generatrix Curve is one entity: when a wall outside every
+        # union component — a coincident partial wall or another
+        # T-junction neighbour — bounds the same curve and demands a
+        # different level set, no single discretization satisfies both
+        # owners. Weld nothing silently: keep the loud planner diagnostic.
+        incident=Dict{Int,Set{Int}}()
+        for (s,loops) in m.surfaces,loop in loops,signed in m.loops[loop]
+            c=abs(signed)
+            haskey(curve_union,c) || continue
+            push!(get!(()->Set{Int}(),incident,c),s)
+        end
+        for (c,U) in curve_union
+            members=Set(groups[curve_component[c]])
+            for s in get(incident,c,Set{Int}())
+                for region in _extrude_quadtri_regions(m,s,caller)
+                    region in members && continue
+                    params=_extrude_gate(m,3,region)
+                    params===nothing && continue
+                    _extrude_level_us(params)==U ||
+                        _extrude_nonew_shared_planner_error(caller,s)
+                end
+            end
+        end
+    end
+    for (c,U) in curve_union
+        get(m.curve_params,c,nothing)==U || (m.curve_params[c]=U)
+    end
+    return owner_levels,wall_levels,components
+end
+
 function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
                                tags=keys(m.volumes),
                                min_angle_deg::Real=25.0,
@@ -1081,6 +1291,13 @@ function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
                 _extrude_nonew_shared_planner_error(caller,s)
         end
     end
+    # Shared laterals whose certified NoNewVerts owners carry different
+    # layer grids weld on the component's union level set instead of
+    # keeping the loud nonconforming diagnostic: every owner sweeps the
+    # same union grid, so the bound-wall part and the per-union-interval
+    # diagonal contract transport exactly like an equal-record wall.
+    owner_levels,wall_levels,_=_extrude_nonew_union_levels(
+        working,shared_of,caller)
     volumes=Dict{Int,_ExtrudeNoNewCompletePlan}()
     surfaces=Dict{Int,Union{Mesh,MixedMesh}}()
     for tag in selected
@@ -1131,7 +1348,8 @@ function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
                 # Surface: read its emitted wall diagonals and constrain
                 # this plan to them.
                 owner=volumes[binder]
-                required=_extrude_nonew_wall_diagonals(working,owner,s,caller)
+                required=_extrude_nonew_wall_diagonals(working,owner,s,
+                    caller;_union_us=get(wall_levels,s,nothing))
                 required===nothing &&
                     _extrude_nonew_shared_planner_error(caller,s)
                 diagonals===nothing && (diagonals=Dict{Int,
@@ -1143,7 +1361,8 @@ function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
             min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
             size_field=size_field,_working_model=true,_mesh_input=_mesh_input,
             _trace_columns=_trace_columns,_shared_diagonals=diagonals,
-            _shared_parts=parts)
+            _shared_parts=parts,_union_us=get(owner_levels,tag,nothing),
+            _wall_us=wall_levels)
         volumes[tag]=completed
         for (surface,part) in completed.surfaces
             if haskey(surfaces,surface)
@@ -1190,7 +1409,7 @@ function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
         surfaces[surface]=_reversed_surface_mesh(part,caller,surface)
     end
     m.curve_params=working.curve_params
-    return _ExtrudeNoNewScope(m,volumes,surfaces)
+    return _ExtrudeNoNewScope(m,volumes,surfaces,wall_levels)
 end
 
 @inline function _extrude_nonew_require_scope(scope::_ExtrudeNoNewScope,
@@ -1265,6 +1484,19 @@ function _extrude_nonew_surface_mesh(m::GeoModel,t::Int,
     isempty(owners) && return nothing
     owner=owners[1]
     if scope===nothing
+        # A private lateral of a shared-incidence Region still emits on the
+        # component's union level set — a standalone request replays the
+        # certified scope so the part equals the joint emission bitwise,
+        # and a generatrix demand conflict (T-junction) keeps the loud
+        # planner diagnostic instead of a free grid.
+        if !isempty(_extrude_nonew_shared_for(m,owner,caller))
+            built=_extrude_nonew_scope(m,caller;
+                tags=_extrude_nonew_shared_closure(m,[owner],caller),
+                min_angle_deg=min_angle_deg,
+                max_periodic_passes=max_periodic_passes,
+                size_field=size_field,_mesh_input=_mesh_input)
+            return built.surfaces[t]
+        end
         completed=_extrude_nonew_complete_plan(m,owner,caller;
             min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
             size_field=size_field,_mesh_input=_mesh_input)
@@ -1288,6 +1520,22 @@ function _extrude_nonew_volume_mesh(m::GeoModel,t::Int,
     # plan and its certificates keep canonical positive orientation.
     reversed=get(m.meshing.reverse,(3,t),false)
     if scope===nothing
+        # A Region bounding a certified shared Surface plans its whole
+        # connected component even for a single-volume request: union-grid
+        # owners emit every lateral — shared or private — on the
+        # component's union level set, and a generatrix demand conflict
+        # (T-junction) keeps the loud planner diagnostic instead of
+        # emitting a wall on the Surface's own recorded grid.
+        if !isempty(_extrude_nonew_shared_for(m,t,caller))
+            built=_extrude_nonew_scope(m,caller;
+                tags=_extrude_nonew_shared_closure(m,[t],caller),
+                min_angle_deg=min_angle_deg,
+                max_periodic_passes=max_periodic_passes,
+                size_field=size_field)
+            volume=built.volumes[t].volume
+            reversed && (volume=_reversed_volume_mesh(volume,caller,t))
+            return volume
+        end
         volume=_extrude_nonew_complete_plan(m,t,caller;
             min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
             size_field=size_field).volume

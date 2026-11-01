@@ -13426,3 +13426,91 @@ general analytic Face/Curve registry, no non-prismatic multi-height
 walls or T-junction welds; the analytic registry and general NURBS
 topology remain open CAD04 work. Bounded fixture evidence; not full
 OCC-import parity.
+
+## 2026-11-01 — NoNew shared laterals weld on the union level grid (Devin subagent)
+
+Closed the "nonconforming >2-owner shared-wall" bound: adjacent
+`QuadTriNoNewVerts` sweeps whose operation records differ only in the
+layer grid (`Layers` count or per-layer heights) now weld their literal
+shared lateral conformingly instead of keeping the loud
+nonconforming-incidence diagnostic.
+
+- **Oracle verdict (Gmsh 4.15.2, live probes):** a two-Region literal
+  shared wall with 2-vs-3, subset 2-vs-4 or 3-vs-4 layer grids fails
+  upstream with `Could not find extruded vertex` hanging-node/
+  nonconforming diagnostics and drops the second Region's volume cells
+  rather than repairing the interface; three sweeps on one lateral
+  plane and T-junction partial walls behave the same. Tessella's
+  conforming union subdivision is therefore the deliberate production
+  answer, not an oracle transcription — and merely coincident
+  (non-literal) walls are still never welded.
+- **Mechanism:** `_extrude_nonew_union_levels`
+  (`ModelExtrudeNoNewScope.jl`) builds connected components of the
+  literal shared-wall owner graph (NoNewVerts owners only), computes
+  each component's sorted-unique union `_extrude_level_us` vector, and
+  returns `(owner_levels, wall_levels, components)`. A member whose
+  grid differs gets `_union_us` reparameterization via
+  `_extrude_with_levels` — one unit sublayer per union interval, so
+  `scale_last`/`recombine`/`quad_to_tri`/`recomb_laterals` transport
+  bitwise and the `_extrude_nonew_levels` certificate still applies —
+  and every lateral of a union component (shared or private) emits on
+  `wall_levels` rungs. Generatrix Point-extruded column
+  `m.curve_params` rewrite to the union record so the standalone
+  Curve products and `model_to_mixed` classification follow the same
+  discretization (`execute_geo` ownership metadata is preserved).
+- **Admission:** `_extrude_nonew_level_compatible` +
+  `_extrude_nonew_shared_op_equal` replace the bitwise record compare
+  for NoNewVerts owners only — the shared wall's transform, every
+  non-level operation field and the total normalized height must still
+  match bitwise; non-NoNew records keep the old `isequal` contract.
+  An ordinary layered partner on a union-component wall stays rejected
+  (it sweeps outside the union on its own grid — upstream fails it
+  too), and a generatrix column shared with a Region outside every
+  union component demanding a different level set — a genuine
+  T-junction — keeps `QuadTriNoNewVerts shared Surface[..] requires
+  the shared-region planner` instead of welding a hanging edge.
+- **Transport:** `_union_us`/`_wall_us` flow through
+  `_extrude_nonew_plan`, `_extrude_nonew_complete_plan`,
+  `_extrude_nonew_wall_split_states`, `_extrude_nonew_wall_diagonals`
+  and the `_extrude_volume_pass` subdivision seeding; `scope.unions`
+  exposes the per-wall union grid for the shared-cell certificate.
+  The bound Surface is still emitted once under the earliest NoNewVerts
+  owner, bound into every owner's plan, and certified bitwise-identical
+  across owners with opposite outward cycles.
+- **Standalone parity fix:** `mesh_model_volume`,
+  `mesh_model_surface` (single-owner laterals) and both `model_to_mixed`
+  replay paths in `ModelExtrudeNoNewProjection.jl` route
+  shared-incidence Regions through
+  `_extrude_nonew_shared_closure` scope even when no scope is passed —
+  a single-entity product then equals the certified joint emission
+  bitwise, and a T-junction conflict reports the planner diagnostic on
+  every entry point instead of diverging per entry point (previously
+  `mesh_model_volume` on the wrong-side owner threw an internal
+  "node is absent from the completed volume" inconsistency).
+- **Verified on real fixtures (inline `.geo` models):** 2v3 and 2v4
+  walls emit exactly the union rungs `scope.unions[s]` records
+  ([0,1/3,1/2,2/3,1] and [0,1/4,1/2,3/4,1]); merged `execute_geo` meshes
+  have unique coordinates, `validate` clean, positive typed volume
+  cells, all 8 union wall facets at interior incidence two with
+  reversed outward cycles and zero hanging-node facets; the
+  three-Region 2v3v4 chain welds both literal walls on the full
+  seven-rung union grid; equal-grid pairs keep the previous bit-for-bit
+  behavior; the equal-grid T-junction control meshes (24 nodes) while
+  the unequal one rejects on `mesh_model_volume`,
+  `mesh_model_surface` and `execute_geo` alike; the certified union
+  wall projects through `model_to_mixed` for both owners and an alien
+  equal-grid part still rejects on the node-set check.
+- **Receipts:** `test/geometry/extrude_nonew_shared_lateral_test.jl`
+  2520/2520 exit 0 (~28min under `--compile=min -O0`;
+  `geo_extrude_test.jl` 495/495 exit 0;
+  `geo_quadtri_extrude_test.jl` 334/334 exit 0 — all under the required
+  `--check-bounds=yes` flags.
+
+**Not claimed.** Bounded slice only: linear translation sweeps whose
+records differ solely in the layer grid. Ordinary layered partners on
+union-component walls, stacked-cap unions with differing grids,
+non-literal/coincident wall welding, periodic/compound shared
+boundaries, bent or non-equal transforms, and recombination families
+that cannot reproduce the bound union emission remain behind their
+existing loud diagnostics; T-junctions stay rejected rather than
+welded. Bounded fixture evidence; not full sweep parity.

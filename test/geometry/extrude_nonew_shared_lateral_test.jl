@@ -121,6 +121,30 @@ function _sl_grid22_squares()
     """
 end
 
+# One full square next to two half-height squares: the full sweep's right
+# edge is coincident with the two partial sweeps' left edges, so the partial
+# sweeps share one literal lateral with each other while their generatrix
+# Curves are the same deduplicated entities the full sweep's walls bound —
+# a genuine T-junction at the shared edges.
+function _sl_tjunction_squares()
+    return """
+    Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+    Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+    Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+    Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+    Point(5)={1,0.5,0,1};Point(6)={2,0,0,1};
+    Point(7)={2,0.5,0,1};Point(8)={2,1,0,1};
+    Line(5)={2,6};Line(6)={6,7};Line(7)={7,5};Line(8)={5,2};
+    Line(9)={5,7};Line(10)={7,8};Line(11)={8,3};Line(12)={3,5};
+    Curve Loop(2)={5,6,7,8};Plane Surface(2)={2};
+    Curve Loop(3)={9,10,11,12};Plane Surface(3)={3};
+    Transfinite Curve{1,3,4,6,10}=2;
+    Transfinite Curve{2,5,7,8,9,11,12}=2;
+    Transfinite Surface{:};
+    Recombine Surface{:};
+    """
+end
+
 # The literal Surface two named extrusion return-lists welded together.
 function _sl_pair_tag(execution,left::AbstractString,right::AbstractString)
     shared=intersect(Int.(execution.lists[left])[3:end],
@@ -478,16 +502,6 @@ end
     end
 
     @testset "shared laterals reject outside the literal pair" begin
-        # Different layer records weld the same literal Surface but break the
-        # identical-operation contract.
-        execution=_sl_model(_sl_squares()*"""
-        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
-        right[]=Extrude{0,0,1}{Surface{2};Layers{3};Recombine;QuadTriNoNewVerts;};
-        """)
-        s=_sl_shared_tag(execution)
-        @test_throws r"shared-region planner" mesh_model_volume(execution.model,1)
-        @test_throws r"shared-region planner" mesh_model_volume(execution.model,2)
-        @test_throws r"shared-region planner" mesh_model_surface(execution.model,s)
         # A RecombLaterals asymmetry is still a different operation record.
         execution=_sl_model(_sl_squares()*"""
         left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
@@ -527,6 +541,150 @@ end
         execution.model.meshing.transfinite_surfaces[s]=
             (arrangement=:left,corners=Int[])
         @test_throws r"constrained-boundary planner" mesh_model_volume(execution.model,1)
+    end
+
+    @testset "union-grid literal shared walls" begin
+        # Owners with different layer grids on a literal shared wall weld on
+        # the sorted union level set: the oracle (Gmsh 4.15.2) answers the
+        # same input with hanging-node errors and drops the second Region's
+        # cells instead of repairing the interface, so the conforming union
+        # subdivision is Tessella's deliberate production answer rather than
+        # an oracle transcription. Every owner reparameterizes onto the
+        # union grid, the bound wall is emitted once, and the wall diagonal
+        # contract transports per union interval exactly like an
+        # equal-record wall.
+        for (ln,rn) in ((2,3),(2,4))
+            execution=_sl_model(_sl_squares()*"""
+            left[]=Extrude{0,0,1}{Surface{1};Layers{$ln};Recombine;QuadTriNoNewVerts;};
+            right[]=Extrude{0,0,1}{Surface{2};Layers{$rn};Recombine;QuadTriNoNewVerts;};
+            """;mesh_dim=3)
+            model=execution.model
+            s=_sl_shared_tag(execution)
+            @test sort(_extrude_quadtri_regions(model,s,_SL_CALLER))==[1,2]
+            merged=execution.mesh
+            @test validate(merged).ok
+            @test allunique(Tuple(merged.coords[:,node]) for node in 1:nnodes(merged))
+            pass=_extrude_volume_pass(model,_SL_CALLER)
+            scope=pass.scope
+            @test scope!==nothing
+            # The union level record is exposed on the scope: it contains
+            # both owners' rungs, so the shared wall carries union rungs.
+            union=scope.unions[s]
+            left_us=collect(0:1//ln:1);right_us=collect(0:1//rn:1)
+            expected=sort!(unique!(Float64.(vcat(left_us,right_us))))
+            @test union==expected
+            bound=scope.surfaces[s]
+            @test validate(bound).ok
+            @test _sl_part_equal(scope.volumes[1].surfaces[s],bound)
+            @test _sl_part_equal(scope.volumes[2].surfaces[s],bound)
+            @test _sl_part_equal(mesh_model_surface(model,s),bound)
+            wall=_sl_surface_faces(bound)
+            @test _sl_surface_faces(geo_entity_mesh(execution,2,s))==wall
+            @test _sl_dim2_faces_on(merged,1,1.0)==wall
+            # Union rungs actually landed on the wall: every union level is
+            # a facet level on x=1.
+            levels=sort!(unique!([v[3] for face in wall for v in face]))
+            @test levels==expected
+            # Both Regions see the identical conforming facets with
+            # reversed outward cycles — no hanging-node incidence.
+            cycles_left=_sl_wall_cycles(pass.parts[1],1.0)
+            cycles_right=_sl_wall_cycles(pass.parts[2],1.0)
+            @test Set(keys(cycles_left))==Set(keys(cycles_right))==wall
+            for key in keys(cycles_left)
+                @test _sl_reversed(cycles_left[key],cycles_right[key])
+            end
+            _sl_positive(pass.parts[1]);_sl_positive(pass.parts[2])
+            # Joint boundary: each union facet has incidence two on x=1 and
+            # the remainder is exactly the exterior boundary.
+            counts=_sl_face_counts(pass.parts[1],pass.parts[2])
+            @test all(c in (1,2) for c in values(counts))
+            interior=Set(k for (k,c) in counts if c==2)
+            @test Set(k for k in interior if all(v->v[1]==1.0,k))==wall
+        end
+        # The standalone volume products stay certified on the union grid.
+        execution=_sl_model(_sl_squares()*"""
+        left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{3};Recombine;QuadTriNoNewVerts;};
+        """)
+        @test validate(mesh_model_volume(execution.model,1)).ok
+        @test validate(mesh_model_volume(execution.model,2)).ok
+        @test validate(mesh_model_surface(execution.model,_sl_shared_tag(execution))).ok
+    end
+
+    @testset "three-Region chain unions differing grids" begin
+        # A connected component of literal shared walls unions every
+        # member's level set at once: the middle Region reparameterizes to
+        # the same grid as both neighbours, so both walls stay conforming.
+        execution=_sl_model(_sl_chain_squares()*"""
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        b[]=Extrude{0,0,1}{Surface{2};Layers{3};Recombine;QuadTriNoNewVerts;};
+        c[]=Extrude{0,0,1}{Surface{3};Layers{4};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        model=execution.model
+        s12=_sl_pair_tag(execution,"a","b")
+        s23=_sl_pair_tag(execution,"b","c")
+        @test s12!=s23
+        merged=execution.mesh
+        @test validate(merged).ok
+        @test allunique(Tuple(merged.coords[:,node]) for node in 1:nnodes(merged))
+        pass=_extrude_volume_pass(model,_SL_CALLER)
+        scope=pass.scope
+        @test scope!==nothing
+        expected=sort!(unique!(Float64.(vcat(0:1//2:1,0:1//3:1,0:1//4:1))))
+        for (s,x,lo,hi) in ((s12,1.0,1,2),(s23,2.0,2,3))
+            @test scope.unions[s]==expected
+            bound=scope.surfaces[s]
+            @test validate(bound).ok
+            @test _sl_part_equal(scope.volumes[lo].surfaces[s],bound)
+            @test _sl_part_equal(scope.volumes[hi].surfaces[s],bound)
+            @test _sl_part_equal(mesh_model_surface(model,s),bound)
+            wall=_sl_surface_faces(bound)
+            @test _sl_dim2_faces_on(merged,1,x)==wall
+            cycles_lo=_sl_wall_cycles(pass.parts[lo],x)
+            cycles_hi=_sl_wall_cycles(pass.parts[hi],x)
+            @test Set(keys(cycles_lo))==Set(keys(cycles_hi))==wall
+            for key in keys(cycles_lo)
+                @test _sl_reversed(cycles_lo[key],cycles_hi[key])
+            end
+        end
+        for tag in (1,2,3)
+            _sl_positive(pass.parts[tag])
+        end
+        counts=_sl_face_counts(pass.parts[1],pass.parts[2],pass.parts[3])
+        @test all(c in (1,2) for c in values(counts))
+        interior=Set(k for (k,c) in counts if c==2)
+        @test Set(k for k in interior if all(v->v[1]==1.0,k))==
+            _sl_surface_faces(scope.surfaces[s12])
+        @test Set(k for k in interior if all(v->v[1]==2.0,k))==
+            _sl_surface_faces(scope.surfaces[s23])
+    end
+
+    @testset "union walls leave T-junction neighbours rejected" begin
+        # The two partial sweeps share a literal wall with each other and
+        # unionize onto one grid — but their generatrix Curves are the same
+        # entities the full sweep's coincident partial walls bound, and the
+        # full sweep demands its own level set on those edges. No single
+        # Curve discretization satisfies both sides, so the whole component
+        # keeps the loud shared-region planner diagnostic instead of welding
+        # a hanging edge.
+        execution=_sl_model(_sl_tjunction_squares()*"""
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        b[]=Extrude{0,0,1}{Surface{2};Layers{3};Recombine;QuadTriNoNewVerts;};
+        c[]=Extrude{0,0,1}{Surface{3};Layers{4};Recombine;QuadTriNoNewVerts;};
+        """)
+        s=_sl_pair_tag(execution,"b","c")
+        @test sort(_extrude_quadtri_regions(execution.model,s,_SL_CALLER))==[2,3]
+        @test_throws r"shared-region planner" mesh_model_volume(execution.model,2)
+        @test_throws r"shared-region planner" mesh_model_volume(execution.model,3)
+        @test_throws r"shared-region planner" mesh_model_surface(execution.model,s)
+        # The equal-grid T-junction stays meshed: equal demands never needed
+        # a union, so the coincident partial walls keep their own cells.
+        execution=_sl_model(_sl_tjunction_squares()*"""
+        a[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+        b[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+        c[]=Extrude{0,0,1}{Surface{3};Layers{2};Recombine;QuadTriNoNewVerts;};
+        """;mesh_dim=3)
+        @test validate(execution.mesh).ok
     end
 
     @testset "certified pair classifies through the API projection" begin
@@ -590,19 +748,29 @@ end
             Dict{Int,Union{Mesh,MixedMesh}}())
         @test_throws r"absent from this mesh scope" model_to_mixed(
             model,bound,fs;_extrude_scope=empty_scope)
-        # Uncertified multi-owner incidence still rejects at API level — the
-        # planner diagnostic surfaces both from the projection and from a
-        # full execute_geo(mesh_dim=3) request.
+        # The certified union-grid wall projects through the same API:
+        # `model_to_mixed` accepts the scope's bound part for both owners
+        # while an alien (equal-grid) part still cannot impersonate it.
         bad=_sl_model(_sl_squares()*"""
         left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
         right[]=Extrude{0,0,1}{Surface{2};Layers{3};Recombine;QuadTriNoNewVerts;};
         """)
         bs=_sl_shared_tag(bad)
-        @test_throws r"shared-region planner" model_to_mixed(
+        bad_scope=_extrude_volume_pass(bad.model,_SL_CALLER).scope
+        union_bound=bad_scope.surfaces[bs]
+        for owner_scope in (nothing,bad_scope)
+            projected=model_to_mixed(bad.model,union_bound,bs;
+                _extrude_scope=owner_scope)
+            @test validate(projected).ok
+            @test _sl_surface_faces(projected)==_sl_surface_faces(union_bound)
+        end
+        @test_throws r"does not match the completed sweep" model_to_mixed(
             bad.model,_sl_plain_surface(bound),bs)
+        # An operation-record asymmetry keeps the loud planner diagnostic
+        # through a full execute_geo(mesh_dim=3) request.
         @test_throws r"shared-region planner" _sl_model(_sl_squares()*"""
         left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
-        right[]=Extrude{0,0,1}{Surface{2};Layers{3};Recombine;QuadTriNoNewVerts;};
+        right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts RecombLaterals;};
         """;mesh_dim=3)
     end
 
