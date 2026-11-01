@@ -16,7 +16,9 @@ function _gmsh_fullquad_input(m,tag,input,element_high_water,options,caller)
     # Mesh-periodic slaves copy an already generated master. This Plane
     # producer has no CAD periodic parametrization or seam to reject.
     if compound
-        return (authority=input,middles,element_high_water,admitted=false,ctx_lc=options.ctx_lc)
+        return (authority=input,middles,element_high_water,admitted=false,
+            ctx_lc=options.ctx_lc,chains=Dict{Int32,Vector{UInt64}}(),
+            parameters=Dict{UInt64,Float64}())
     end
     authority=deepcopy(input)
     source=authority.mesh
@@ -24,6 +26,13 @@ function _gmsh_fullquad_input(m,tag,input,element_high_water,options,caller)
     _,embedded=_model_surface_embedding_tags(m,tag,caller)
     curves=vcat(embedded,_gmsh_native_surface_curves(m,tag))
     high_water=UInt64(element_high_water)
+    # The committed dim-1 write-back restores each consumed Curve's own
+    # chain — the temporary paired Line constructors never leave this
+    # producer. `chains` records that pre-coarse ordered node-UID chain and
+    # `parameters` its stored Curve parameters so a genuinely grown
+    # recovered chain can splice its new vertices back at the right span.
+    chains=Dict{Int32,Vector{UInt64}}()
+    parameters=Dict{UInt64,Float64}()
     for curve in curves
         haskey(m.meshing.transfinite_curves,curve) && _model_mesh_warn(options,
             "Full-quad recombination only compatible with transfinite meshes if those are performed first")
@@ -37,6 +46,31 @@ function _gmsh_fullquad_input(m,tag,input,element_high_water,options,caller)
             block.msh==1 || throw(ArgumentError(
                 "$caller: full-quad Curve[$curve] needs linear Line constructors"))
             append!(cells,Tuple(block.nodes[:,column]) for column in axes(block.nodes,2))
+        end
+        adjacency=Dict{Int32,Int32}();incoming=Set{Int32}();consistent=true
+        for (a,b) in cells
+            haskey(adjacency,a) && (consistent=false)
+            adjacency[a]=b;push!(incoming,b)
+        end
+        heads=consistent ? Int32[a for (a,_) in cells if !(a in incoming)] : Int32[]
+        (consistent && !isempty(cells) && length(heads)<=1) || (consistent=false)
+        if consistent
+            vertex=isempty(heads) ? first(cells)[1] : only(heads)
+            start=vertex;chain=Int32[vertex]
+            for _ in eachindex(cells)
+                vertex=get(adjacency,vertex,Int32(0))
+                vertex==0 && break
+                push!(chain,vertex);vertex==start && break
+            end
+            length(chain)==length(cells)+1 &&
+                (chains[Int32(curve)]=UInt64[data.external_node_tags[original.rows[row]]
+                                             for row in chain])
+        end
+        for row in original.rows
+            data.node_entities[row]==owner || continue
+            parameter=data.node_parametric[row]
+            (parameter===nothing || isempty(parameter)) && continue
+            parameters[data.external_node_tags[row]]=parameter[1]
         end
         if isodd(length(cells))
             _model_mesh_error(options,"1D mesh cannot be divided by 2")
@@ -74,7 +108,115 @@ function _gmsh_fullquad_input(m,tag,input,element_high_water,options,caller)
         authority.products[owner]=_ModelMeshProduct(owner,original.rows,
             ElementBlock[ElementBlock(1,connectivity)],Vector{UInt64}[labels])
     end
-    return (authority,middles,element_high_water=high_water,admitted=!isempty(middles),ctx_lc=options.ctx_lc)
+    return (authority,middles,element_high_water=high_water,admitted=!isempty(middles),
+        ctx_lc=options.ctx_lc,chains,parameters)
+end
+
+# The halved Curve middles restore through `middles` — they are not coarse
+# boundary vertices, so their stored parameters must not force a fresh
+# source vertex inside a paired segment. Keep any other forced parameter
+# (periodic synchronizations, size-at-parameter points) for the ordinary
+# subdivision path to consume.
+function _gmsh_fullquad_forced(forced,quad_input)
+    consumed=Dict{Int,Vector{Float64}}()
+    for payload in values(quad_input.middles)
+        payload.owner[1]==1 || continue
+        parameter=payload.parameter
+        if parameter!==nothing && !isempty(parameter)
+            push!(get!(()->Float64[],consumed,Int(payload.owner[2])),parameter[1])
+        end
+    end
+    isempty(consumed) && return forced
+    output=Dict{Int,Vector{Float64}}()
+    for (curve,list) in forced
+        drop=get(consumed,curve,nothing)
+        if drop===nothing
+            output[curve]=list;continue
+        end
+        kept=Float64[]
+        for value in list
+            any(d->isequal(value,d) ||
+                abs(value-d)<=128eps(Float64)*max(1.0,abs(value),abs(d)),drop) &&
+                continue
+            push!(kept,value)
+        end
+        isempty(kept) || (output[curve]=kept)
+    end
+    return output
+end
+
+# The committed dim-1 product is the restored (pre-coarse) chain — the
+# temporary paired Line constructors never leave the producer. A recovered
+# chain that genuinely grew past its consumed cells (a forced periodic or
+# size-at-parameter vertex minted inside a coarse segment) splices its new
+# node UIDs back into the consumed chain at their Curve parameters. A curve
+# whose pre-coarse chain could not be reconstructed stays untouched — the
+# coarse view must never overwrite the committed product.
+function _gmsh_fullquad_restored_chains(m,source,grown,quad_input,caller)
+    restored=Dict{Int32,Vector{UInt64}}()
+    for (curve,chain) in grown
+        original=get(quad_input.chains,curve,nothing)
+        original===nothing && continue
+        members=Set{UInt64}(original)
+        inserts=UInt64[uid for uid in chain if !(uid in members)]
+        isempty(inserts) && (restored[curve]=original;continue)
+        curve_id=Int(curve)
+        t0,t1=_model_curve_param_bounds(m,curve_id,caller)
+        a,b=m.curves[curve_id]
+        closed=a==b
+        forward=true
+        if closed
+            samples=Float64[]
+            for index in 2:length(original)-1
+                value=get(quad_input.parameters,original[index],nothing)
+                value===nothing || push!(samples,value)
+            end
+            forward=length(samples)<2 || issorted(samples)
+        end
+        function parameter_at(uid,position)
+            closed && position==1 && return forward ? t0 : t1
+            closed && position==length(original) && return forward ? t1 : t0
+            stored=get(quad_input.parameters,uid,nothing)
+            stored===nothing || return stored
+            row=get(source.positions,uid,0)
+            if row!=0
+                parameter=source.parameters[row]
+                if parameter!==nothing && !isempty(parameter)
+                    return parameter[1]
+                end
+                if source.owners[row][1]==0
+                    row==get(source.point_positions,Int(a),0) && return t0
+                    row==get(source.point_positions,Int(b),0) && return t1
+                end
+                return model_parametrization(m,1,curve_id,
+                    collect(source.world[row]))[1]
+            end
+            throw(ArgumentError("$caller: full-quad restored Curve[$curve] " *
+                "vertex $uid lacks its Curve parameter"))
+        end
+        merged=UInt64[]
+        pending=copy(inserts)
+        for index in 1:length(original)-1
+            first,last=original[index],original[index+1]
+            push!(merged,first)
+            pa=parameter_at(first,index);pb=parameter_at(last,index+1)
+            lo,hi=minmax(pa,pb)
+            inside=UInt64[]
+            for uid in pending
+                value=parameter_at(uid,0)
+                lo<value<hi && push!(inside,uid)
+            end
+            isempty(inside) && continue
+            sort!(inside;by=uid->parameter_at(uid,0),rev=pa>pb)
+            append!(merged,inside)
+            filter!(uid->!(uid in inside),pending)
+        end
+        push!(merged,original[end])
+        isempty(pending) || throw(ArgumentError(
+            "$caller: full-quad restored Curve[$curve] loses a grown vertex"))
+        restored[curve]=merged
+    end
+    return restored
 end
 
 function _gmsh_fullquad_size_options(options::_ModelMesh1DOptions)

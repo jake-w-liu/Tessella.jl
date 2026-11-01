@@ -725,6 +725,12 @@ function _gmsh_native_initial_surface(m::GeoModel,tag::Int,options,input,
         element_high_water=quad_input.element_high_water
         quad_input.admitted && (options=_gmsh_fullquad_size_options(options))
     end
+    # The temporary coarse view consumed each Curve's halved middles; their
+    # stored parameters restore through `middles` instead of forcing a
+    # fresh source vertex inside a paired segment (upstream's coarse stage
+    # boundary is only the kept vertices).
+    quad_input!==nothing && quad_input.admitted && forced!==nothing &&
+        (forced=_gmsh_fullquad_forced(forced,quad_input))
     frame=_gmsh_native_surface_frame(m,tag,options,caller)
     # Forced periodic subdivisions mint fresh node labels above the consumed
     # lower-product high water; the raised limit feeds later refinements.
@@ -735,6 +741,13 @@ function _gmsh_native_initial_surface(m::GeoModel,tag::Int,options,input,
     limit=next_tag[]
     T=_gmsh_native_surface_initial(source,tag;cleanup_faces=algorithm==3)
     curve_chains=_gmsh_native_surface_curve_chains(source)
+    # The committed dim-1 write-back restores each consumed Curve's own
+    # (pre-coarse) chain — the temporary paired Line constructors never
+    # leave this producer. Genuinely grown chains splice their minted
+    # vertices back at their Curve parameters.
+    quad_input!==nothing && quad_input.admitted &&
+        (curve_chains=_gmsh_fullquad_restored_chains(m,source,curve_chains,
+            quad_input,caller))
     inside=classify_interior(T)
     numbers=source.tags
     trace=nothing

@@ -24,6 +24,55 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### ALG01 scalar full-quad lifecycle export — restored Curve halves + node catalogue (2026-11-01)
+
+- Root cause of the residual recorded in the section below (stash-verified
+  identical on `731bcb6`): the scalar initial-surface full-quad front built
+  the temporary coarse authority by pairing adjacent halved Line
+  constructors, but `production.curve_chains` reported the coarse recovered
+  chains — the committed dim-1 write-back installed corner-to-corner
+  temporary constructors in place of the restored half segments, and the
+  public node catalogue dropped the retained Curve-middle UIDs
+  ("Unknown node 5" on `API.mesh.get_node`, worst on the mesher=5/6 and
+  periodic arms of the same fixture file).
+- `_gmsh_fullquad_input` now records each consumed Curve's pre-coarse
+  ordered node-UID chain and stored Curve parameters (`chains`,
+  `parameters`). `_gmsh_fullquad_forced` removes consumed-middle
+  parameters from the forced subdivision set so restoration through
+  `middles` — not a minted source vertex inside a paired segment —
+  supplies those vertices (non-middle forced parameters are kept).
+  `_gmsh_fullquad_restored_chains` returns the original chain when the
+  recovered chain did not grow and splices genuinely minted vertices back
+  into the consumed chain at their Curve parameters (closed chains keep
+  endpoints and orientation); a curve whose pre-coarse chain could not be
+  reconstructed keeps its committed product untouched — the coarse view
+  never leaves the producer.
+- Test exits (Julia 1.12.7, `--check-bounds=yes`, `-O2`, normal
+  compilation for `GmshLibm` `llvmcall`):
+  `api_native_fullquad_generation_test` **7692/7692** (exit 0; was ~80
+  failures + 32 errors; `NATIVE_LOOKUP_QUERY_ERRORS` 0 on every arm);
+  `model_metric_algorithm7_fullquad_test` 30/30; `recombine_test` 44/44,
+  `recombine_matching_test` 30/30, `recombine3d_combine_test` 6/6,
+  `mesh2d_test` 729/729, `model_native_recombine_math_test` 265601/265601,
+  `api_native_recombine_bipartite_test` 2217/2217,
+  `api_native_recombine_lifecycle_test` 49/49,
+  `api_native_recombine_missing_curve_parameter_test` 610/610,
+  `api_native_recombine_missing_face_parameter_test` 382/382,
+  `api_native_recombine_plane_context_test` 2929/2929,
+  `api_native_recombine_point_boundary_test` 745/745,
+  `geo_recombine3d_fold_functional_test` 23/23 — all exit 0. Oracle
+  fixture SHA-256s unchanged.
+- Pre-existing classified, unrelated to this diff (all exercise the
+  `mesh.recombine` post-pass / element-tag allocator, which this generate
+  -path diff never reaches): `api_native_recombine_adapter_test`
+  degree-two testset pins `ErrorException` where the deleted-Steiner-node
+  lookup throws `ArgumentError` (36 fails); `api_public_recombine_labels_test`
+  pins `r"recombined element tags exceed Int32"` against the UInt64
+  label-migration message (3 fails); `api_native_raw_recombine_uint64_test`
+  needs the untracked sibling artifact `native_raw_recombine_uint64_states.jl`
+  (3 fails + 3 errors); `model_surface_recombine_coordinates_test` lacks a
+  `using Tessella` line — identical crash on clean `45f7815`.
+
 ### ALG01/MET02 algorithm-7 full-quad recombination 2/3 + algorithm-6 scalar-only verdict (2026-11-01)
 
 - `Mesh.Algorithm=7` with `Mesh.RecombinationAlgorithm` 2 or 3 now
@@ -67,13 +116,11 @@ support or test requirements.
   `model_metric_delaunay_arm_test` 19/19; `recombine_test` (all
   testsets); `recombine_matching_test` 67,803; `mesh2d_test` 925 —
   all exit 0.
-- Pre-existing classified (stash-verified identical on `731bcb6`,
-  unrelated to this diff): `api_native_fullquad_generation_test`
-  oracle fixtures show the temporary coarse Curve constructors
-  committed in place of the restored halved boundary on the scalar
-  initial-surface full-quad front — a lifecycle export gap recorded
-  under ALG01, plus "Unknown node" lookup errors on the mesher=5/6
-  and periodic arms of the same fixture file.
+- Resolved later the same day in the ALG01 lifecycle-export increment
+  above: `api_native_fullquad_generation_test` is now 7692/7692 —
+  the scalar front restores the halved Curve boundary into the
+  committed product and the "Unknown node" lookup errors on the
+  mesher=5/6 and periodic arms are gone.
 
 ### STEP trimmed-NURBS closed shells — nonlinear uv charts + periodic walls (2026-11-01)
 
