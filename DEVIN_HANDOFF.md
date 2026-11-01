@@ -44,6 +44,16 @@
   metric volume functional, Delaunay arm 7/7+4/4+8/8, geo_constraints);
   `.geo` curved-route probes sphere/cylinder/cone/torus/disk all validate
   with zero self-loops.
+- **t17 closed (2026-11-01, verification only — no Source changed).** The
+  last recorded t17 sub-blocker ("the run reaches the metric-surface
+  producer, which aborts at interior refinement certificates") is already
+  resolved by the landed fill (`545fa58`+`4cef4d1`+`0ebc00e`+`716dd74`):
+  the verbatim driver under `-O2` now prints
+  `GMSH_PARITY_T17_TUTORIAL_OK` — session path 4507 nodes / 8900 tris vs
+  live gmsh 1752/3462 (tri_ratio 2.57, in-band), literal `t17.geo`
+  `geo_mesh=OK:8762tri`, area 16 both. Regressions
+  `model_occ_metric_algorithm7`/`model_metric_surface_density`/
+  `model_metric_volume_functional` all exit 0 under `-O2`.
 
 ## 2026-11-01 PER02 slice: multi-direction, general-affine and cross-Region/shared periodic Faces
 

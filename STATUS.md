@@ -24,6 +24,29 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### P601 t17 tutorial parity verified — `GMSH_PARITY_T17_TUTORIAL_OK` (2026-11-01)
+
+Re-verified the t17 driver verbatim on HEAD `8768ef2` under
+`julia --project=. --check-bounds=yes -O2` (Julia 1.12.7, live gmsh 4.15.2
+oracle): the interior refinement certificate abort recorded in the
+2026-10-21 P601 entry (`edge midpoint is not a distinct representable
+Surface vertex` / `midpoint creates a flat or inverted Surface triangle`)
+no longer occurs — the landed fill (`545fa58` certified local
+retriangulation, `4cef4d1` metric-Delaunay Steiner insertion plus
+metric-flip/star-dissolution coarsening, `0ebc00e` boundary regrade)
+completes both entry points. Receipt:
+`GMSH_PARITY_T17_TUTORIAL_OK occ_square=OK area=16 views=1:TT1058
+field=PostViewAnisoField pins=10,48,11,47 mesh=OK tessella_nodes=4507
+tessella_tris=8900 tessella_area=16.00000000000003 geo_parse=OK
+geo_mesh=OK:8762tri gmsh_nodes=1752 gmsh_tris=3462 gmsh_lines=40
+gmsh_area=16.000000000000004 tri_ratio=2.57` — the session path carries
+the fixture-derived transfinite boundary pins, the literal `t17.geo`
+(no pins) completes through `_metric_surface_boundary_grade!`'s tightened
+regrade, and the 2.57x density ratio sits inside the driver's 0.2–5.0x
+BAMG band. Regressions under the same `-O2` flags:
+`model_occ_metric_algorithm7_test` 55/55, `model_metric_surface_density_test`
+10/10, `model_metric_volume_functional_test` 36/36, all exit 0.
+
 ### Residual test-failure audit: seven reported failure groups resolved (2026-11-01)
 
 | Item | Verdict | Evidence | Action |
@@ -4416,8 +4439,9 @@ support/common.jl` gained `run_gmsh_dim`, `gmsh_mixed` and `cell_metrics`.
   `$PartitionedEntities` in `Save` output verified).
 - t13: **unblocked** — `GMSH_PARITY_T13_TUTORIAL_OK` (see the t13/t19
   verification block above).
-- t17: driver `validation/gmsh_parity/t17.jl` present — OCC `Rectangle`
-  + anisotropic `.pos` background-mesh path classified.
+- t17: **unblocked** — `GMSH_PARITY_T17_TUTORIAL_OK` verbatim under `-O2`
+  (tessella 4507/8900 vs gmsh 1752/3462, tri_ratio 2.57 in-band; see the
+  2026-11-01 verification entry at the top of this file).
 - t19: **unblocked** — `GMSH_PARITY_T19_TUTORIAL_OK` (`20be4b1` loft-rim
   fillets + `1645855` write-back shell/station fixes; verbatim
   `3225/8258`, oracle parity class).
@@ -4562,6 +4586,8 @@ on this machine (`julia --project=. --compile=min -O0`, exit 0 each):
   gmsh_nodes≈1740 gmsh_tris≈3435 gmsh_lines=40 gmsh_area=16.0` (BAMG
   counts vary a little between gmsh runs). The driver escalates to full
   mesh verification automatically once the producer accepts the dataset.
+  RESOLVED 2026-11-01: the driver escalated — verbatim `-O2` run reports
+  `GMSH_PARITY_T17_TUTORIAL_OK` (receipt in the new top entry).
 - Registrations: `validation/run_all.jl` tutorial tuple now includes
   `t17`; the corpus comment was refreshed for the t8/t9 full coverage.
 
