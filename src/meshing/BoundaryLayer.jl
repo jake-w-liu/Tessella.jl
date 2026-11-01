@@ -19,6 +19,7 @@ using ..Mesh3D: delaunay3d, to_mesh3, recover_segment3, recover_triangle3,
                 _raygrid, _inside_grid, _rb_fan_steiner, _rb_orient_facets,
                 _signed_vol6
 using ..RecoverCDT: recover_boundary_cdt
+using ..GmshLibm: _gm_atan2, _gm_cos, _gm_sin
 
 export mesh_boundary_layer, mesh_boundary_layer_2d, mesh_boundary_layer_filled,
        mesh_boundary_layer_fan
@@ -313,6 +314,21 @@ end
     return (_dot3(delta,u),_dot3(delta,v))
 end
 
+# Upstream `SVector3::normalize` in 2-D: the norm is `sqrt(x²+y²+z²)` (z=0
+# here) and each component multiplies the reciprocal `1/n` — not a division.
+@inline function _sv_norm2(x,y)
+    inv=1.0/sqrt(x*x+y*y)
+    return (x*inv,y*inv)
+end
+
+# `gmshFace::point` on a planar mean plane — `origin + u·px + v·py` evaluated
+# left-associatively per component (`x + VX[i]*par1 + VY[i]*par2`).
+@inline function _lift_point(origin,u,v,px,py)
+    return ((origin[1]+u[1]*px)+v[1]*py,
+            (origin[2]+u[2]*px)+v[2]*py,
+            (origin[3]+u[3]*px)+v[3]*py)
+end
+
 @inline function _offset_point(point,u,v,dx,dy,offset)
     direction=(dx*u[1]+dy*v[1],dx*u[2]+dy*v[2],dx*u[3]+dy*v[3])
     return (point[1]+offset*direction[1],
@@ -443,6 +459,26 @@ end
 # position used, so connector and top-copy evaluators weld bitwise onto the
 # emitted strip; `id_of`/`nlevels` expose the per-level node ids so the field
 # driver can rebuild the strip's exposed boundary.
+# Mean length of the wall-chain segments incident to chain vertex `i` —
+# upstream's tail `step` (`MEdge::length()` of the BL boundary edges that
+# touch the vertex). In the kernel's working frame this is the projected
+# segment length; the parametric producer passes the physical edge lengths
+# through `tail_steps` instead.
+function _xmt_tail_step(verts,plane_points,i,closed,nchain_segs)
+    nchain=length(verts)
+    pa=plane_points[verts[i]]
+    tot=0.0; cnt=0
+    if closed || i>1
+        pb=plane_points[verts[i==1 ? nchain : i-1]]
+        tot+=hypot(pa[1]-pb[1],pa[2]-pb[2]); cnt+=1
+    end
+    if closed || i<nchain
+        pb=plane_points[verts[i==nchain ? 1 : i+1]]
+        tot+=hypot(pa[1]-pb[1],pa[2]-pb[2]); cnt+=1
+    end
+    return cnt==0 ? 0.0 : tot/cnt
+end
+
 function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
                       fans=(), fan_elements::Integer=5,
                       plane_normal=(0.0,0.0,1.0),
@@ -454,6 +490,10 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
                       normalize_dirs::Bool=true,
                       vertex_fans=nothing,
                       fan_skips=nothing,
+                      fan_types=nothing,
+                      tail_steps=nothing,
+                      seg_param_rev=nothing,
+                      plane_frame=nothing,
                       caller::AbstractString="mesh_boundary_layer_2d")
     nsegs(curve)>0 || throw(ArgumentError("$caller: curve has no segments"))
     (ntris(curve)==0 && ntets(curve)==0) || throw(ArgumentError(
@@ -547,6 +587,23 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
         v in fan_set || throw(ArgumentError(
             "$caller: fan_skips key $v is not a fan vertex"))
     end
+    # Upstream's `FanPointsSizesList` signed fan types
+    # (`boundaryLayersData.cpp` setup maps -1/-2/-3 to `fanType` 1/2/3 —
+    # cross, mix and tail): the corner carries `nlayers+1` (cross/mix) or
+    # `2·nlayers` (tail) angular columns built by the upstream bilinear /
+    # rounded-transition / tail formulas instead of rotated-ray offsets, and
+    # `meshGFace.cpp`'s fan loop emits the type's strip/fold/tail quads.
+    # `fan_types` maps wall-node index -> upstream fanType (1, 2 or 3).
+    xmt=fan_types===nothing ? Dict{Int,Int}() :
+        Dict{Int,Int}(Int(v)=>Int(t) for (v,t) in fan_types)
+    for (v,tp) in xmt
+        v in fan_set || throw(ArgumentError(
+            "$caller: fan_types key $v is not a fan vertex"))
+        1<=tp<=3 || throw(ArgumentError(
+            "$caller: fan_types[$v]=$tp is not a cross/mix/tail type (1..3)"))
+        v in fskip_set && throw(ArgumentError(
+            "$caller: fan_types[$v] conflicts with fan_skips"))
+    end
     # Per-chain-vertex column lengths and emitted levels. `vertex_offsets`
     # (upstream's per-node `getLocalInfoAtNode` schedules) may give each wall
     # vertex its own cumulative offsets — `modifyInitialMeshForBoundaryLayers`
@@ -600,8 +657,36 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
     @inbounds for i in 1:nv
         points[i]=(curve.coords[1,i],curve.coords[2,i],curve.coords[3,i])
     end
-    plane_origin=_validate_plane(points,normal,caller)
-    basis_u,basis_v=_plane_basis(normal,caller)
+    # `plane_frame=(origin, u, v)` supplies the caller's parametric frame —
+    # upstream's planar mean plane: parametric coordinates are `(P−origin)·u`,
+    # `(P−origin)·v` (its `parFromPoint`) and emitted nodes evaluate
+    # `origin + u·px + v·py` directly (its `gmshFace::point`), so the strip
+    # coordinates go through upstream's own rounding rather than a local
+    # displacement reconstruction. The frame's own normal `u×v` fixes which
+    # way "left" means in plane coordinates; when it faces opposite
+    # `plane_normal` the domain sits on each walked segment's right in param
+    # space, so the segment normals mirror to keep pointing interior.
+    if plane_frame===nothing
+        plane_origin=_validate_plane(points,normal,caller)
+        basis_u,basis_v=_plane_basis(normal,caller)
+        param_frame=false
+        frame_left=false
+    else
+        _validate_plane(points,normal,caller)
+        plane_origin,basis_u,basis_v=plane_frame
+        (all(isfinite,plane_origin) && all(isfinite,basis_u) &&
+         all(isfinite,basis_v)) || throw(ArgumentError(
+            "$caller: plane_frame is not finite"))
+        param_frame=true
+        frame_left=_dot3(_cross3(basis_u,basis_v),normal)<0
+    end
+    # `orient2`/`_positive_quad` read the working frame's own handedness;
+    # when `plane_frame`'s `u×v` is anti-parallel to `plane_normal` a
+    # physically positive cell tests negative — fold that flip into the
+    # orientation guards so they keep testing physical positivity.
+    o2s(a,b,c)=orient2(a,b,c)*(frame_left ? -1.0 : 1.0)
+    pquad(a,b,c,d)=o2s(a,b,c)>0 && o2s(b,c,d)>0 &&
+                   o2s(c,d,a)>0 && o2s(d,a,b)>0
     plane_points=Vector{NTuple{2,Float64}}(undef,nv)
     @inbounds for i in 1:nv
         plane_points[i]=_plane_point(points[i],plane_origin,basis_u,basis_v)
@@ -611,9 +696,23 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
     seg_left=Vector{NTuple{2,Float64}}(undef,nchain_segs)
     @inbounds for i in 1:nchain_segs
         a=verts[i]; b=verts[i==nchain ? 1 : i+1]
-        seg_left[i]=_left_unit(
-            plane_points[a][1],plane_points[a][2],
-            plane_points[b][1],plane_points[b][2],caller,i)
+        if param_frame
+            # `interiorNormal` arithmetic — `SVector3::normalize` scales by
+            # the reciprocal of `sqrt(Σ squares)`, not a `hypot` division.
+            tx=plane_points[b][1]-plane_points[a][1]
+            ty=plane_points[b][2]-plane_points[a][2]
+            (isfinite(tx) && isfinite(ty)) || throw(ArgumentError(
+                "$caller: segment $i coordinate span overflows Float64"))
+            tq=tx*tx+ty*ty
+            (isfinite(tq) && tq>0) || throw(ArgumentError(
+                "$caller: segment $i has zero or non-finite length"))
+            inv=1.0/sqrt(tq)
+            seg_left[i]=frame_left ? (ty*inv,-tx*inv) : (-ty*inv,tx*inv)
+        else
+            seg_left[i]=_left_unit(
+                plane_points[a][1],plane_points[a][2],
+                plane_points[b][1],plane_points[b][2],caller,i)
+        end
     end
     n_in=Vector{NTuple{2,Float64}}(undef,nchain)
     n_out=Vector{NTuple{2,Float64}}(undef,nchain)
@@ -631,9 +730,19 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
         end
         n_in[i]=nin; n_out[i]=nout
         sx,sy=nin[1]+nout[1], nin[2]+nout[2]
-        L=hypot(sx,sy)
-        L>0 || throw(ArgumentError("$caller: vertex $(verts[i]) has a zero normal"))
-        n_avg[i]=(sx/L,sy/L)
+        if param_frame
+            # `SVector3::normalize` reciprocal scaling.
+            L=sqrt(sx*sx+sy*sy)
+            L>0 || throw(ArgumentError(
+                "$caller: vertex $(verts[i]) has a zero normal"))
+            inv=1.0/L
+            n_avg[i]=(sx*inv,sy*inv)
+        else
+            L=hypot(sx,sy)
+            L>0 || throw(ArgumentError(
+                "$caller: vertex $(verts[i]) has a zero normal"))
+            n_avg[i]=(sx/L,sy/L)
+        end
     end
     # Upstream `FanPointsSizesList` semantics (`treat2Connections` in
     # boundaryLayersData.cpp): `fanSize` is an integer wedge budget for the
@@ -651,6 +760,8 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
             "$caller: fan size $f for vertex $v is negative"))
         v in fskip_set && throw(ArgumentError(
             "$caller: vertex_fans[$v] conflicts with fan_skips"))
+        haskey(xmt,v) && throw(ArgumentError(
+            "$caller: vertex_fans[$v] conflicts with fan_types"))
     end
     fanw=zeros(Int,nchain)
     fansweep=zeros(Float64,nchain)
@@ -663,6 +774,16 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
         if v in fskip_set
             # Skip type: two boundary rays only (`fanSize` clamped to 0).
             fanw[i]=1
+            fansweep[i]=θ
+        elseif haskey(xmt,v)
+            # Cross/mix/tail: upstream's column count is `nlayers+1`
+            # (`fanSize = bl_depth.size()+1` angular slots below type 3) or
+            # `2·nlayers` for tail — plus the two boundary columns they
+            # bracket, giving `bl_depth.size()+2` or `2·bl_depth.size()+3`
+            # rays total. The sweep keeps its sign: upstream's AMIN->AMAX
+            # ordering mirrors the column layout onto my ray order.
+            nd=nlens[i]
+            fanw[i]=xmt[v]==3 ? 2*nd+2 : nd+1
             fansweep[i]=θ
         elseif haskey(vfans,v)
             # Upstream `treat2Connections` always sweeps the short arc —
@@ -677,10 +798,68 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
             fansweep[i]=θ
         end
     end
+    # Upstream's `directionsN1`/`directionsN2` endpoint directions: the ray
+    # direction at each end of the sweep is the unit vector at the boundary
+    # normal's *angle* — `normalize(cos(atan2(n)),sin(atan2(n)))` — with the
+    # AMIN→AMAX sector normalized below π by the same `if(AMAX-AMIN>=π)` wrap
+    # `boundaryLayersData.cpp` uses. In a caller-supplied param frame the
+    # interior fan rays are reconstructed from these angles bitwise, matching
+    # `gf->point(par + l*n)` rather than rotating `n_in` in the plane.
+    famin=Dict{Int,Float64}(); famax=Dict{Int,Float64}()
+    if param_frame
+        for v in fan_set
+            i=pos[v]
+            α1=_gm_atan2(n_in[i][2],n_in[i][1])
+            α2=_gm_atan2(n_out[i][2],n_out[i][1])
+            amax=max(α1,α2); amin=min(α1,α2)
+            if amax-amin>=π
+                amin,amax=amax,amin+2π
+            end
+            famin[v]=amin; famax[v]=amax
+        end
+    end
+    # Per-ray emitted level counts for the cross/mix/tail vertices: the two
+    # boundary columns carry all `nlens` levels (every rung is referenced by
+    # the fan cells upstream), the interior columns carry `nlens` (cross),
+    # `nlens` or `cp-1` past the rounded fold (mix), or `L/step+1` (tail)
+    # levels. Ray index `r` maps to upstream column `c = θ>0 ? r : fanw-r`.
+    xmt_ray_levels=Dict{Int,Vector{Int}}()
+    xmt_step=Dict{Int,Float64}()
+    for (v,tp) in xmt
+        i=pos[v]; nd=nlens[i]; last=fanw[i]; θ=fansweep[i]
+        abs(θ)>1e-12 || throw(ArgumentError(
+            "$caller: fan vertex $v has a degenerate sweep for type $tp"))
+        nd>=1 || throw(ArgumentError(
+            "$caller: fan vertex $v has an empty layer schedule"))
+        tp==3 && (xmt_step[v]=tail_steps===nothing ?
+            _xmt_tail_step(verts,plane_points,i,closed,nchain_segs) :
+            get(tail_steps,v,
+                _xmt_tail_step(verts,plane_points,i,closed,nchain_segs)))
+        levels=Vector{Int}(undef,last+1)
+        for r in 0:last
+            c=θ>0 ? r : last-r
+            if c==0 || c==last
+                levels[r+1]=nd
+            elseif tp==1
+                levels[r+1]=nd
+            elseif tp==2
+                cp=(nd-1)÷2+1
+                levels[r+1]=c<=cp ? nd : cp-1
+            else
+                h=_offset_at(v,nd)
+                step=xmt_step[v]
+                step>0 || throw(ArgumentError(
+                    "$caller: tail fan vertex $v has no incident edge step"))
+                levels[r+1]=floor(Int,h/step)+1
+            end
+        end
+        xmt_ray_levels[v]=levels
+    end
     ntris_out=0
     for (idx,v) in enumerate(verts)
         v in fan_set || continue
         v in fskip_set && continue
+        haskey(xmt,v) && continue
         ntris_out=_checked_add(ntris_out,fanw[idx],caller,
                                "fan triangle count")
     end
@@ -697,6 +876,20 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
     for (idx,v) in enumerate(verts)
         v in fan_set || continue
         v in fskip_set && continue
+        if haskey(xmt,v)
+            # Upstream's emission counts: cross tiles `nbCol-1` strips of
+            # `N` quads each (`N^2`); mix skips the `i,l >= cp` quadrant
+            # (`N^2-(N-cp)^2`); tail emits `2·N·NN` rung quads.
+            tp=xmt[v]; nd=nlens[idx]
+            cells=tp==1 ? _checked_mul(nd,nd,caller,"fan quadrangle count") :
+                tp==2 ? (cp2=(nd-1)÷2+1;
+                    nd*nd-(nd-cp2)*(nd-cp2)) :
+                _checked_mul(2*nd,xmt_ray_levels[v][2],caller,
+                             "fan quadrangle count")
+            ring_quads=_checked_add(ring_quads,cells,caller,
+                                    "fan quadrangle count")
+            continue
+        end
         ring_quads=_checked_add(ring_quads,
             _checked_mul(fanw[idx],nlens[idx]-1,caller,"fan ring quadrangle count"),
             caller,"fan ring quadrangle count")
@@ -710,10 +903,18 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
     ncells>0 || throw(ArgumentError("$caller: no cells to emit"))
     new_points=0
     for (idx,v) in enumerate(verts)
-        per=v in fan_set ?
+        per=if haskey(xmt,v)
+            s=0
+            for nlevs in xmt_ray_levels[v]
+                s=_checked_add(s,nlevs,caller,"extruded node count")
+            end
+            s
+        elseif v in fan_set
             _checked_mul(emit_len[idx],_checked_add(fanw[idx],1,caller,
-                "fan ray count"),caller,"extruded node count") :
+                "fan ray count"),caller,"extruded node count")
+        else
             emit_len[idx]
+        end
         new_points=_checked_add(new_points,per,caller,"extruded node count")
     end
     npoints=_checked_add(nv,new_points,caller,"node count")
@@ -727,19 +928,38 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
     @inbounds for k in 1:maxemit, (idx,v) in enumerate(verts)
         k>emit_len[idx] && continue
         if v in fan_set
+            haskey(xmt,v) && continue
             nin=n_in[idx]
             θ=fansweep[idx]
-            for ray in 0:fanw[idx]
-                α=ray/fanw[idx]*θ
-                c,s=cos(α),sin(α)
-                dx=nin[1]*c-nin[2]*s
-                dy=nin[1]*s+nin[2]*c
-                new_point=_offset_point(
-                    points[v],basis_u,basis_v,dx,dy,_offset_at(v,k))
+            last=fanw[idx]
+            for ray in 0:last
+                if param_frame
+                    # Upstream `_dirs` entry `c` is the unit vector at
+                    # `t·AMAX + (1−t)·AMIN` with `t = c/fanSize2+1`
+                    # (= `c/last`); `gf->point(par + l·n)` evaluates the
+                    # param coordinate directly.
+                    c=θ>0 ? ray : last-ray
+                    t=c/last
+                    α=t*famax[v]+(1.0-t)*famin[v]
+                    dx,dy=_sv_norm2(_gm_cos(α),_gm_sin(α))
+                    off=_offset_at(v,k)
+                    x0,y0=plane_points[v]
+                    px=x0+off*dx; py=y0+off*dy
+                    new_point=_lift_point(
+                        plane_origin,basis_u,basis_v,px,py)
+                    new_plane_point=(px,py)
+                else
+                    α=ray/last*θ
+                    c,s=cos(α),sin(α)
+                    dx=nin[1]*c-nin[2]*s
+                    dy=nin[1]*s+nin[2]*c
+                    new_point=_offset_point(
+                        points[v],basis_u,basis_v,dx,dy,_offset_at(v,k))
+                    new_plane_point=_plane_point(
+                        new_point,plane_origin,basis_u,basis_v)
+                end
                 all(isfinite,new_point) || throw(ArgumentError(
                     "$caller: extruded node is non-finite"))
-                new_plane_point=_plane_point(
-                    new_point,plane_origin,basis_u,basis_v)
                 all(isfinite,new_plane_point) || throw(ArgumentError(
                     "$caller: projected extruded node is non-finite"))
                 push!(points,new_point)
@@ -749,21 +969,168 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
         else
             dir=dirs_over===nothing ? nothing : get(dirs_over,v,nothing)
             off=_offset_at(v,k)
-            new_point=dir===nothing ?
-                _offset_point(points[v],basis_u,basis_v,
-                              n_avg[idx][1],n_avg[idx][2],off) :
-                (points[v][1]+off*dir[1],
-                 points[v][2]+off*dir[2],
-                 points[v][3]+off*dir[3])
+            if param_frame
+                x0,y0=plane_points[v]
+                if dir===nothing
+                    px=x0+off*n_avg[idx][1]
+                    py=y0+off*n_avg[idx][2]
+                else
+                    # Upstream scales the *direction* by `|1/cos(θ/2)|`
+                    # (`x *= fabs(fact)`) then multiplies by the raw
+                    # cumulative depth — `par + L·(fact·û)`, not
+                    # `par + (L·fact)·û`.
+                    du=_dot3(dir,basis_u); dv=_dot3(dir,basis_v)
+                    s=scale_over===nothing ? 1.0 : get(scale_over,v,1.0)
+                    off_raw=(vertex_offsets===nothing ? offsets :
+                             vertex_offsets[v])[k]
+                    px=x0+off_raw*(du*s)
+                    py=y0+off_raw*(dv*s)
+                end
+                new_point=_lift_point(plane_origin,basis_u,basis_v,px,py)
+                new_plane_point=(px,py)
+            else
+                new_point=dir===nothing ?
+                    _offset_point(points[v],basis_u,basis_v,
+                                  n_avg[idx][1],n_avg[idx][2],off) :
+                    (points[v][1]+off*dir[1],
+                     points[v][2]+off*dir[2],
+                     points[v][3]+off*dir[3])
+                new_plane_point=_plane_point(
+                    new_point,plane_origin,basis_u,basis_v)
+            end
             all(isfinite,new_point) || throw(ArgumentError(
                 "$caller: extruded node is non-finite"))
-            new_plane_point=_plane_point(
-                new_point,plane_origin,basis_u,basis_v)
             all(isfinite,new_plane_point) || throw(ArgumentError(
                 "$caller: projected extruded node is non-finite"))
             push!(points,new_point)
             push!(plane_points,new_plane_point)
             id_of[(v,k,0)]=length(points)
+        end
+    end
+    # Cross/mix/tail interior columns — upstream's `buildAdditionalPoints2D`
+    # fanType 1/2/3 blocks (boundaryLayersData.cpp). My ray `r` maps to
+    # upstream column `c = θ>0 ? r : fanw-r` (upstream generates columns in
+    # its AMIN->AMAX direction order, which traverses my ray order for a CCW
+    # sweep and mirrors it for a CW one). The interior points come from the
+    # bilinear patch through (x1,x2,x3) (cross), the rounded transition
+    # (dx,dy) variant (mix), or the `l·n + ll·nc` tail construction; the two
+    # boundary columns ride their own normal rays like every other type.
+    for (idx,v) in enumerate(verts)
+        tp=get(xmt,v,0); tp==0 && continue
+        nd=nlens[idx]; last=fanw[idx]; θ=fansweep[idx]
+        if param_frame
+            # `_dirs.front()`/`_dirs.back()` — the unit vectors at the
+            # wrapped AMIN/AMAX boundary-normal angles.
+            n1=_sv_norm2(_gm_cos(famin[v]),_gm_sin(famin[v]))
+            n2=_sv_norm2(_gm_cos(famax[v]),_gm_sin(famax[v]))
+        else
+            n1=θ>0 ? n_in[idx] : n_out[idx]
+            n2=θ>0 ? n_out[idx] : n_in[idx]
+        end
+        x0,y0=plane_points[v]
+        h=_offset_at(v,nd)
+        x1=x0+h*n1[1]; y1=y0+h*n1[2]
+        x2=x0+h*n2[1]; y2=y0+h*n2[2]
+        x3=y3=0.0
+        if tp<3
+            D=n1[2]*n2[1]-n1[1]*n2[2]
+            abs(D)>1e-14 || throw(ArgumentError(
+                "$caller: fan vertex $v has parallel boundary normals"))
+            Dt=-(x2-x1)*n2[1]-(y2-y1)*n2[2]
+            t3=Dt/D
+            x3=x1-t3*n1[2]; y3=y1+t3*n1[1]
+        end
+        ncx=n1[1]+n2[1]; ncy=n1[2]+n2[2]
+        if param_frame
+            Lnc=sqrt(ncx*ncx+ncy*ncy)
+            Lnc>0 || throw(ArgumentError(
+                "$caller: fan vertex $v has antipodal boundary normals"))
+            inv=1.0/Lnc; ncx*=inv; ncy*=inv
+        else
+            Lnc=hypot(ncx,ncy)
+            Lnc>0 || throw(ArgumentError(
+                "$caller: fan vertex $v has antipodal boundary normals"))
+            ncx/=Lnc; ncy/=Lnc
+        end
+        bilin(s,t)=let xs=x0+s*(x1-x0),ys=y0+s*(y1-y0),
+                       xf=x2+s*(x3-x2),yf=y2+s*(y3-y2)
+            (xs+t*(xf-xs),ys+t*(yf-ys))
+        end
+        dc=last÷2; lc=dc-1
+        dhg=(last+1)÷2
+        step=get(xmt_step,v,0.0)
+        levels=xmt_ray_levels[v]
+        for r in 0:last
+            c=θ>0 ? r : last-r
+            for k in 1:levels[r+1]
+                px,py=if c==0
+                    off=_offset_at(v,k)
+                    (x0+off*n1[1],y0+off*n1[2])
+                elseif c==last
+                    off=_offset_at(v,k)
+                    (x0+off*n2[1],y0+off*n2[2])
+                elseif tp==1
+                    bilin(_offset_at(v,k)/h,_offset_at(v,c)/h)
+                elseif tp==2
+                    dx,dy=if c==dc && k>dc
+                        rc=_offset_at(v,c); r2=_offset_at(v,k)-rc
+                        (rc+r2/sqrt(2.0),rc+r2/sqrt(2.0))
+                    elseif c<dc && k>dc
+                        rc=_offset_at(v,dc); d=_offset_at(v,k); r2=d-rc
+                        dL=π*r2/4.0; L=rc+dL; tstar=rc/L; t=_offset_at(v,c)/rc
+                        if t<=tstar
+                            (d,L*t)
+                        else
+                            ang=(L*(t-tstar))/dL*π/4.0
+                            (rc+r2*cos(ang),rc+r2*sin(ang))
+                        end
+                    elseif c>dc && k<dc
+                        rc=_offset_at(v,dc); d=_offset_at(v,c); r2=d-rc
+                        dL=π*r2/4.0; L=rc+dL; tstar=rc/L; t=_offset_at(v,k)/rc
+                        if t<=tstar
+                            (L*t,d)
+                        else
+                            ang=(L*(t-tstar))/dL*π/4.0
+                            (rc+r2*sin(ang),rc+r2*cos(ang))
+                        end
+                    else
+                        (_offset_at(v,k),_offset_at(v,c))
+                    end
+                    bilin(dx/h,dy/h)
+                else
+                    ll=step*k
+                    if c<dhg
+                        l=_offset_at(v,dhg-c)
+                        (x0+l*n1[1]+ll*ncx,y0+l*n1[2]+ll*ncy)
+                    elseif c==dhg
+                        (x0+ll*ncx,y0+ll*ncy)
+                    else
+                        l=_offset_at(v,c-dhg)
+                        (x0+l*n2[1]+ll*ncx,y0+l*n2[2]+ll*ncy)
+                    end
+                end
+                if param_frame
+                    # `gf->point(pnew)` evaluates the param coordinate
+                    # directly — no `(px−x0)` displacement roundtrip.
+                    new_point=_lift_point(
+                        plane_origin,basis_u,basis_v,px,py)
+                    new_plane_point=(px,py)
+                else
+                    dxp=px-x0; dyp=py-y0
+                    new_point=(points[v][1]+dxp*basis_u[1]+dyp*basis_v[1],
+                               points[v][2]+dxp*basis_u[2]+dyp*basis_v[2],
+                               points[v][3]+dxp*basis_u[3]+dyp*basis_v[3])
+                    new_plane_point=_plane_point(
+                        new_point,plane_origin,basis_u,basis_v)
+                end
+                all(isfinite,new_point) || throw(ArgumentError(
+                    "$caller: extruded node is non-finite"))
+                all(isfinite,new_plane_point) || throw(ArgumentError(
+                    "$caller: projected extruded node is non-finite"))
+                push!(points,new_point)
+                push!(plane_points,new_plane_point)
+                id_of[(v,k,r)]=length(points)
+            end
         end
     end
     length(points)==npoints || throw(ErrorException("$caller: node count mismatch"))
@@ -775,6 +1142,15 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
     normalize_dirs && _validate_plane(points,normal,caller)
 
     quads=Matrix{Int32}(undef,4,nquads)
+    # Parallel upstream-order tuples: `quadsToTriangles` runs its
+    # gamma/normal comparisons and option labels on each `MQuadrangle`'s
+    # *stored* vertex order — `(v11,v21,v22,v12)` for edge quads (upstream
+    # column order = curve parameter order) and `(v11,v12,v22,v21)` for
+    # fan/cross/mix/tail quads. The floating-point rounding of those
+    # evaluations depends on that order (near-tie diagonals included), so
+    # the caller's split must see upstream's tuple, not the positive-ring
+    # emission order.
+    quads_eval=Matrix{Int32}(undef,4,nquads)
     tris=ntris_out==0 ? Matrix{Int32}(undef,3,0) : Matrix{Int32}(undef,3,ntris_out)
     qcursor=0; tcursor=0
     @inbounds for i in 1:nchain_segs
@@ -794,12 +1170,26 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
             # Raw `View[i]` vectors can grow the strip to either side of the
             # wall frame; upstream emits the quad with no Jacobian gate, so
             # the orientation check only runs for normalized directions.
-            (!normalize_dirs || _positive_quad(p1,p2,p3,p4)) ||
+            (!normalize_dirs || pquad(p1,p2,p3,p4)) ||
                 throw(ArgumentError(
                     "$caller: quadrangle on segment $i layer $k has a zero "*
                     "or reversed corner Jacobian"))
             qcursor+=1
+            # Upstream's `MQuadrangle(v11,v21,v22,v12)` stored tuple walks
+            # the quadrangle the opposite way to the canonical positive
+            # order; the emitted `.msh` triangles keep the physical-positive
+            # winding regardless (the same cyclic halves as this ring
+            # order), so the strip stores the positive order and the
+            # caller's `quadsToTriangles` split only decides the diagonal.
             quads[:,qcursor].=(Int32(b1),Int32(b2),Int32(t2),Int32(t1))
+            # Upstream's evaluation tuple `(v11,v21,v22,v12)` — first
+            # column bottom/top, then second column top/bottom — with its
+            # column order following the curve's parameter direction.
+            # `seg_param_rev[i]` marks segments whose walk runs against it.
+            spr=seg_param_rev!==nothing && seg_param_rev[i]
+            quads_eval[:,qcursor].=spr ?
+                (Int32(b2),Int32(t2),Int32(t1),Int32(b1)) :
+                (Int32(b1),Int32(t1),Int32(t2),Int32(b2))
         end
         if na!=nb && N>0
             # Unequal column heights close with one triangle — upstream's
@@ -813,7 +1203,7 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
                          _id_layer(id_of,b,N+1,ray_b,b_fan)
             p1=plane_points[v11]; p2=plane_points[v12]
             p3=plane_points[apex]
-            (!normalize_dirs || orient2(p1,p2,p3)>0) ||
+            (!normalize_dirs || o2s(p1,p2,p3)>0) ||
                 throw(ArgumentError(
                     "$caller: closing triangle on segment $i has a zero "*
                     "or reversed Jacobian"))
@@ -824,18 +1214,114 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
     @inbounds for (idx,v) in enumerate(verts)
         (v in fan_set && !(v in fskip_set)) || continue
         origin=id_of[(v,0,0)]
-        # A negative `fansweep` (upstream's short-arc wrap on a reflex
-        # sector) walks the rays clockwise — reverse each cell's winding so
-        # the emitted triangle/quadrangle keeps its positive Jacobian.
-        cw=fansweep[idx]<0
+        if haskey(xmt,v)
+            # Cross/mix/tail cell emission — upstream's `meshGFace.cpp`
+            # fanType 1/2/3 loops verbatim, with upstream column `c` mapping
+            # to my ray `uc(c)` (θ sign mirrors the column order). Quadrangles
+            # store upstream's `(v11,v12,v22,v21)` tuple — the winding may be
+            # negative; only genuinely degenerate cells are rejected, since
+            # the tuple order fixes `quadsToTriangles`' option labels.
+            tp=xmt[v]; nd=nlens[idx]; last=fanw[idx]; θ=fansweep[idx]
+            uc(c)=θ>0 ? c : last-c
+            colid(c,l)=id_of[(v,l+1,uc(c))]
+            function xq(a,b,c2,d)
+                pa=plane_points[a];pb=plane_points[b]
+                pc=plane_points[c2];pd=plane_points[d]
+                # Upstream's `MQuadrangle(v11,v12,v22,v21)` tuple may come
+                # out negative-oriented in the working frame; the emitted
+                # `.msh` keeps the physically positive halves, so store
+                # whichever ring order carries the positive Jacobian and
+                # let the caller's `quadsToTriangles` pick the diagonal.
+                # `quads_eval` always gets upstream's raw argument order —
+                # the tuple the gamma/normal split evaluates.
+                qcursor+=1
+                quads_eval[:,qcursor].=(Int32(a),Int32(b),Int32(c2),Int32(d))
+                if pquad(pa,pb,pc,pd)
+                    quads[:,qcursor].=(Int32(a),Int32(b),Int32(c2),Int32(d))
+                elseif pquad(pa,pd,pc,pb)
+                    quads[:,qcursor].=(Int32(a),Int32(d),Int32(c2),Int32(b))
+                else
+                    throw(ArgumentError(
+                        "$caller: fan quadrangle at vertex $v has a zero "*
+                        "corner Jacobian"))
+                end
+            end
+            if tp==1 || tp==2
+                clr=uc(nd+1)
+                cp=(nd-1)÷2+1
+                for i in 0:nd-1
+                    v11=v12=v21=v22=0
+                    for l in 0:nd-1
+                        (tp==2 && i>=cp && l>=cp) && continue
+                        if l==0
+                            v11=i==0 ? origin : colid(nd+1,i-1)
+                            v12=colid(nd+1,i)
+                        else
+                            v11=v21; v12=v22
+                        end
+                        if tp==2 && l==cp-1 && i>=cp
+                            v21=colid(cp,i-1); v22=colid(cp,i)
+                        else
+                            v21=colid(i,l); v22=colid(i+1,l)
+                        end
+                        xq(v11,v12,v22,v21)
+                    end
+                end
+            else
+                # Tail: `dir_half` here is the emission constant
+                # `nbCol/2+1` (not the generation one). The left loop folds
+                # interior rungs toward column 0's rungs, the right loop
+                # toward the last column's.
+                dhe=(last+1)÷2+1
+                NN=xmt_ray_levels[v][2]
+                for i in 0:NN-1
+                    v11=v12=v21=v22=0
+                    for l in 0:nd-1
+                        ku=dhe-l-1
+                        if i==0
+                            v11=l==0 ? origin : colid(0,l-1)
+                            v21=colid(0,l)
+                        else
+                            v11=colid(ku,i-1); v21=colid(ku-1,i-1)
+                        end
+                        v12=colid(ku,i); v22=colid(ku-1,i)
+                        v11==v12 && throw(ErrorException(
+                            "$caller: degenerate tail fan rung at vertex $v"))
+                        xq(v11,v12,v22,v21)
+                    end
+                end
+                for i in 0:NN-1
+                    v11=v12=v21=v22=0
+                    for l in 0:nd-1
+                        ku=dhe+l-1
+                        if i==0
+                            v11=l==0 ? origin : colid(last,l-1)
+                            v21=colid(last,l)
+                        else
+                            v11=colid(ku,i-1); v21=colid(ku+1,i-1)
+                        end
+                        v12=colid(ku,i); v22=colid(ku+1,i)
+                        v11==v12 && throw(ErrorException(
+                            "$caller: degenerate tail fan rung at vertex $v"))
+                        xq(v11,v12,v22,v21)
+                    end
+                end
+            end
+            continue
+        end
+        # `fansweep` is measured in the working `(u,v)` frame, but the
+        # emitted cells must be *physically* positive — under a
+        # left-handed `plane_frame` (`frame_left`) the two senses
+        # disagree, so the emission winding flips once more.
+        cw=(fansweep[idx]<0) != frame_left
         for ray in 0:fanw[idx]-1
             i1=id_of[(v,1,ray)]; i2=id_of[(v,1,ray+1)]
             p0=plane_points[origin]; p1=plane_points[i1]; p2=plane_points[i2]
-            # The check must test the *emitted* winding — a clockwise sweep
-            # (upstream's short-arc wrap on a reflex sector) reverses the
-            # tuple, so its positive Jacobian shows up in the (p0,p2,p1)
-            # order.
-            (cw ? orient2(p0,p2,p1) : orient2(p0,p1,p2))>0 ||
+            # The check tests the *emitted* winding — a clockwise sweep
+            # (upstream's short-arc wrap on a reflex sector, mirrored
+            # again by a left-handed frame) emits its positive Jacobian
+            # in the (p0,p2,p1) order.
+            (cw ? o2s(p0,p2,p1) : o2s(p0,p1,p2))>0 ||
                 throw(ArgumentError("$caller: inverted fan triangle at vertex $v"))
             tcursor+=1
             tris[:,tcursor].=cw ? (Int32(origin),Int32(i2),Int32(i1)) :
@@ -846,16 +1332,25 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
             t2=id_of[(v,k,ray+1)]; t1=id_of[(v,k,ray)]
             p1=plane_points[b1]; p2=plane_points[t1]
             p3=plane_points[t2]; p4=plane_points[b2]
-            # Same emitted-winding rule as the wedge triangles: the CW quad
-            # emits the reversed boundary order (b2,t2,t1,b1), i.e. the
-            # (p4,p3,p2,p1) order here.
-            (cw ? _positive_quad(p4,p3,p2,p1) : _positive_quad(p1,p2,p3,p4)) ||
+            # The fan quad's ring arcs have different radii, so its
+            # physical-positive order walks *up* the first column —
+            # (b1,t1,t2,b2) — not the strip's along-the-wall order; the
+            # guard tests the stored ring itself (the `(p4,p3,p2,p1)`
+            # walk for a physically CW sweep).
+            (cw ? pquad(p4,p3,p2,p1) : pquad(p1,p2,p3,p4)) ||
                 throw(ArgumentError(
                 "$caller: fan quadrangle at vertex $v layer $k has a zero or "*
                 "reversed corner Jacobian"))
             qcursor+=1
-            quads[:,qcursor].=cw ? (Int32(b2),Int32(t2),Int32(t1),Int32(b1)) :
+            quads[:,qcursor].=cw ?
+                (Int32(b2),Int32(t2),Int32(t1),Int32(b1)) :
                 (Int32(b1),Int32(t1),Int32(t2),Int32(b2))
+            # Upstream's `(v11,v12,v22,v21)` tuple in its own column order
+            # — the `(u,v)`-frame convention, independent of `frame_left`:
+            # a `fansweep<0` column layout maps to my rays reversed.
+            quads_eval[:,qcursor].=fansweep[idx]>0 ?
+                (Int32(b1),Int32(b2),Int32(t2),Int32(t1)) :
+                (Int32(b2),Int32(b1),Int32(t1),Int32(t2))
         end
     end
     qcursor==nquads || throw(ErrorException("$caller: quadrangle count mismatch"))
@@ -888,8 +1383,48 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
         dirs[pos]=dir
         tops[pos]=points[id_of[(v,emit_len[idx],0)]]
     end
+    # Cross/mix/tail free-boundary chains between the two boundary-column
+    # tops, in kernel ray order (ray 0's top -> ray `fanw`'s top). Derived
+    # from upstream's emitted cells' exposed edges: cross walks the interior
+    # top rungs and drops down the folded side, mix takes the rounded-fold
+    # diagonal, tail threads every interior column top at its `L/step` level.
+    fan_free=Dict{Int,Vector{Int}}()
+    for (idx,v) in enumerate(verts)
+        tp=get(xmt,v,0); tp==0 && continue
+        nd=nlens[idx]; last=fanw[idx]; θ=fansweep[idx]
+        chain=Int[id_of[(v,nd,0)]]
+        if tp==1
+            if θ>0
+                for r in 1:nd; push!(chain,id_of[(v,nd,r)]); end
+                for k in nd-1:-1:1; push!(chain,id_of[(v,k,nd)]); end
+            else
+                for k in 1:nd; push!(chain,id_of[(v,k,1)]); end
+                for r in 2:last; push!(chain,id_of[(v,nd,r)]); end
+            end
+        elseif tp==2
+            cp=(nd-1)÷2+1
+            if θ>0
+                for r in 1:cp; push!(chain,id_of[(v,nd,r)]); end
+                for k in cp-1:-1:1; push!(chain,id_of[(v,k,nd)]); end
+            else
+                for k in 1:cp-1; push!(chain,id_of[(v,k,1)]); end
+                for r in last-cp:last; push!(chain,id_of[(v,nd,r)]); end
+            end
+        else
+            NN=xmt_ray_levels[v][2]
+            for k in 1:NN; push!(chain,id_of[(v,k,1)]); end
+            for r in 2:last-1; push!(chain,id_of[(v,NN,r)]); end
+            for k in NN-1:-1:1; push!(chain,id_of[(v,k,last-1)]); end
+        end
+        push!(chain,id_of[(v,nd,last)])
+        fan_free[v]=chain
+    end
+    # `work_points`: each node's working-frame `(x,y)` — in `plane_frame`
+    # mode these are upstream's `parFromPoint`/stored `pnew` parametric
+    # coordinates, which the caller publishes as `(2,t)` surface params.
     return (mesh=mesh,verts=verts,dirs=dirs,tops=tops,
-            id_of=id_of,nlevels=nlens,fan_wedges=fanw)
+            id_of=id_of,nlevels=nlens,fan_wedges=fanw,fan_free=fan_free,
+            quads_eval=quads_eval,work_points=plane_points)
 end
 
 # Closed-manifold wall decomposition: union-find over triangles joined by shared

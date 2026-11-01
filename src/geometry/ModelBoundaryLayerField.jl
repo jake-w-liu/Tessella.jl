@@ -101,10 +101,10 @@ function _bl_field_offsets(bl::_ModelBoundaryLayerField,hwall::Float64,
         nl=bl.nb_layers
         nl>=1 || throw(ArgumentError(
             "$caller: BoundaryLayer Field[$(bl.tag)].NbLayers must be positive"))
-        zlog=log((1+beta)/(beta-1))
+        zlog=_gm_log((1+beta)/(beta-1))
         t=Vector{Float64}(undef,nl)
         for i in 1:nl
-            p=exp(zlog*(1-i/nl));t[i]=1+beta*(1-p)/(1+p)
+            p=_gm_exp(zlog*(1-i/nl));t[i]=1+beta*(1-p)/(1+p)
         end
         return Float64[hwall*t[i]/t[1] for i in 1:nl]
     end
@@ -120,7 +120,8 @@ function _bl_field_offsets(bl::_ModelBoundaryLayerField,hwall::Float64,
     while L<=bl.thickness
         push!(offsets,L)
         k+=1
-        L+=hw*bl.ratio^k
+        # `pow(ratio, ith)` — C `pow` semantics, not Julia `^`.
+        L+=hw*_gm_pow(bl.ratio,Float64(k))
         length(offsets)>100_000 && throw(ArgumentError(
             "$caller: BoundaryLayer Field[$(bl.tag)] schedule does not " *
             "reach Thickness=$(bl.thickness)"))
@@ -185,6 +186,48 @@ function _bl_vertex_hwall(v::Int,point_of::Dict{Int,Int},
     return default
 end
 
+# `qmTriangle::gamma` (qualityMeasures.cpp) — `2·r_in/R` — evaluated with
+# upstream's own arithmetic so the comparison bits match: `norm3` is a plain
+# `sqrt(x²+y²+z²)` (not a scaled `hypot`), `norme` multiplies by the
+# reciprocal `1/n`, and `prodve` keeps its component order
+# `c=(a1·b2-a2·b1, a2·b0-a0·b2, a0·b1-a1·b0)`. `quadsToTriangles` evaluates
+# each candidate split on the quad's *stored* vertex tuple, so this routine
+# is deliberately order-sensitive: on the upstream-faithful tuples emitted
+# below it reproduces upstream's comparisons — including near-ties decided
+# by rounding — instead of manufacturing exact ties upstream never saw.
+function _bl_tri_gamma(p,q,r)
+    ax,ay,az=r[1]-q[1],r[2]-q[2],r[3]-q[3]
+    bx,by,bz=p[1]-r[1],p[2]-r[2],p[3]-r[3]
+    cx,cy,cz=q[1]-p[1],q[2]-p[2],q[3]-p[3]
+    na=sqrt(ax*ax+ay*ay+az*az);nb=sqrt(bx*bx+by*by+bz*bz)
+    nc=sqrt(cx*cx+cy*cy+cz*cz)
+    (na>0 && nb>0 && nc>0) || return 0.0
+    oa=1.0/na;ax*=oa;ay*=oa;az*=oa
+    ob=1.0/nb;bx*=ob;by*=ob;bz*=ob
+    oc=1.0/nc;cx*=oc;cy*=oc;cz*=oc
+    p1x,p1y,p1z=by*cz-bz*cy,bz*cx-bx*cz,bx*cy-by*cx
+    p2x,p2y,p2z=cy*az-cz*ay,cz*ax-cx*az,cx*ay-cy*ax
+    p3x,p3y,p3z=ay*bz-az*by,az*bx-ax*bz,ax*by-ay*bx
+    sina=sqrt(p1x*p1x+p1y*p1y+p1z*p1z)
+    sinb=sqrt(p2x*p2x+p2y*p2y+p2z*p2z)
+    sinc=sqrt(p3x*p3x+p3y*p3y+p3z*p3z)
+    (sina==0.0 && sinb==0.0 && sinc==0.0) && return 0.0
+    return 2*(2*sina*sinb*sinc/(sina+sinb+sinc))
+end
+
+# `MFace::normal` (MFace.cpp via `normal3points`): `norme(prodve(v1-v0,
+# v2-v0))` — normalized, so `quadsToTriangles`' `dot(normal,normal) < 0`
+# test sees upstream's bits rather than an unnormalized cross product.
+function _bl_tri_normal(p,q,r)
+    ux,uy,uz=q[1]-p[1],q[2]-p[2],q[3]-p[3]
+    vx,vy,vz=r[1]-p[1],r[2]-p[2],r[3]-p[3]
+    nx,ny,nz=uy*vz-uz*vy,uz*vx-ux*vz,ux*vy-uy*vx
+    n=sqrt(nx*nx+ny*ny+nz*nz)
+    n==0.0 && return (0.0,0.0,0.0)
+    on=1.0/n
+    return (nx*on,ny*on,nz*on)
+end
+
 # ── 1-D end-node injection (`addBoundaryLayerPoints`/`createPoints`) ────────
 #
 # Upstream runs `addBoundaryLayerPoints` at the top of `meshGEdge` for every
@@ -238,7 +281,7 @@ function _model_curve_bl_point_params(spec,hwall::Float64,chord::Float64,
         while L<=spec.thickness && L<=0.4*chord
             push!(out,L)
             k+=1
-            L+=hwall*spec.ratio^k
+            L+=hwall*_gm_pow(spec.ratio,Float64(k))
             length(out)>100_000 && throw(ArgumentError(
                 "$caller: BoundaryLayer Field[$(spec.tag)] end-point " *
                 "schedule does not converge"))
@@ -295,10 +338,16 @@ end
 # Fields whose `CurvesList` intersects this face's boundary and whose
 # `ExcludedSurfacesList` does not suppress it — `setupFor2d(face)`'s
 # `_curveTags ∩ face.edges` test. A field listing only `PointsList` end
-# nodes contributes nothing topologically here. Like upstream, a wall
-# curve shared by more than one un-excluded surface rejects — only 2-D
-# boundary layers are supported.
-function _model_surface_bl_specs(m::GeoModel,t::Int)
+# nodes contributes nothing topologically here. Like upstream
+# `setupFor2d`, a wall curve shared by more than one un-excluded,
+# non-extruded surface is dropped from the face's copy of that field's
+# `_curveTags` — `Msg::Error` ("Only 2D Boundary Layers are supported")
+# reports the skip while the mesh continues on the surviving curves. The
+# drop is per field: each spec counts adjacencies against its own
+# `excluded_set`. Returns `(specs, drops)` — `drops[i]` holds the curve
+# tags `specs[i]` lost on this face — or `nothing` when no field keeps a
+# surviving wall curve here.
+function _model_surface_bl_specs(m::GeoModel,t::Int;report_error=nothing)
     fields=m.meshing.boundary_layer_fields
     isempty(fields) && return nothing
     # A swept lateral (`EXTRUDED_ENTITY` — a `(1, ·)` extrude-sources link)
@@ -310,40 +359,54 @@ function _model_surface_bl_specs(m::GeoModel,t::Int)
     # its strip thanks to the adjacency exemption below.
     src=get(m.meshing.extrude_sources,(2,t),nothing)
     src!==nothing && src[1]==1 && return nothing
-    boundary=Set{Int}()
+    # Upstream iterates the face's own edge list (`gf->edges()`), so the
+    # per-curve diagnostics follow boundary order, not field order.
+    boundary=Int[]
     for loop in m.surfaces[t],signed in m.loops[loop]
-        push!(boundary,abs(signed))
+        curve=abs(signed)
+        curve in boundary || push!(boundary,curve)
     end
     specs=_ModelBoundaryLayerField[]
+    drops=Set{Int}[]
     for tag in sort!(collect(keys(fields)))
         spec=fields[tag]
         t in spec.excluded_set && continue
-        shared=intersect(boundary,spec.curve_set)
+        shared=[curve for curve in boundary if curve in spec.curve_set]
         isempty(shared) && continue
         # `setupFor2d` counts the wall curve's adjacent faces that are
         # neither extruded nor excluded; more than one means the layer
-        # would grow inside a volume — upstream errors. Faces carrying an
-        # `EXTRUDED_ENTITY` mode (a `(1, ·)` `extrude_sources` link — a
-        # swept lateral, not a `COPIED_ENTITY` top) get a free pass: they
-        # are meshed by the extrusion path, which never builds columns, so
-        # the layer grows on the single genuine face only.
+        # would grow inside a volume — upstream logs the error and leaves
+        # the curve out of that face's `_curveTags` rather than failing
+        # the mesh. Faces carrying an `EXTRUDED_ENTITY` mode (a `(1, ·)`
+        # `extrude_sources` link — a swept lateral, not a `COPIED_ENTITY`
+        # top) get a free pass: they are meshed by the extrusion path,
+        # which never builds columns, so the layer grows on the single
+        # genuine face only.
+        drop=Set{Int}()
         for curve in shared
-            numf=0
+            numf=0;nadj=0
             for (stag,loops) in m.surfaces
-                stag in spec.excluded_set && continue
                 any(loop->any(signed->abs(signed)==curve,
                               m.loops[loop]),loops) || continue
+                nadj+=1  # upstream prints `fc.size()` — every adjacency
+                stag in spec.excluded_set && continue
                 src=get(m.meshing.extrude_sources,(2,stag),nothing)
                 src!==nothing && src[1]==1 && continue
                 numf+=1
             end
-            numf>1 && throw(ArgumentError(
+            numf>1 || continue
+            report_error===nothing || report_error(
                 "Only 2D Boundary Layers are supported (curve $curve " *
-                "is adjacent to $numf surfaces)"))
+                "is adjacent to $nadj surfaces)")
+            push!(drop,curve)
         end
-        push!(specs,spec)
+        # A field whose wall curves all fell out of this face's `_curveTags`
+        # contributes no layer here — upstream's emptied field leaves the
+        # face's strip pass a no-op, so take the ordinary fill path.
+        any(curve->!(curve in drop),shared) || continue
+        push!(specs,spec);push!(drops,drop)
     end
-    return isempty(specs) ? nothing : specs
+    return isempty(specs) ? nothing : (specs,drops)
 end
 
 # `_surface_pslg` twin that additionally records the ordered wire vertex
@@ -354,21 +417,51 @@ function _bl_surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
                               Dict{Tuple{Int,Float64},Float64}(),
                           plane=_model_surface_plane(m,t,caller;
                                                      allow_ruled=true),
-                          _periodic_positions=nothing)
+                          _periodic_positions=nothing,
+                          uv::Bool=false)
     xs=Float64[];ys=Float64[];mesh_sizes=Float64[]
     index=Dict{Int,Int}()
     canonical=Dict{Tuple{Float64,Float64},NTuple{3,Float64}}()
     wires=Vector{Int}[]
     wire_curves=Vector{Int}[]
+    # Per-segment sign of the owning curve's loop traversal — upstream's
+    # `MQuadrangle(v11,v21,v22,v12)` eval tuple follows each edge's `lines`
+    # in parameter order, so whether the kernel's walk agrees with that
+    # direction (per segment, through the chain reversal) fixes which
+    # stored order the `quadsToTriangles` split must evaluate.
+    wire_signs=Vector{Int}[]
     vert_curve=Dict{Int,Int}()
     # Subdivision vertex → its raw curve parameter — upstream's
     # `getLocalInfoAtNode` interpolates `hWall` along the curve parameter for
     # dim-1 mesh vertices.
     vert_param=Dict{Int,Float64}()
+    # Upstream always builds `Mesh2DWithBoundaryLayers` on the face's own
+    # parametrization — `reparamMeshEdgeOnFace`/`parFromPoint` give the
+    # working coordinates, and the lifted strip lands back through the
+    # surface evaluator. Plane surfaces take the identical working frame
+    # through the projection; ruled/tric patches take their `(u,v)` chart
+    # (`uv=true`), where every generatrix edge is straight — the case the
+    # plane projection cannot represent.
+    lc=uv ? _model_lc(m) : 0.0
+    add_point! = function (pid::Int)
+        uv && return _add_ruled_surface_point!(
+            xs,ys,mesh_sizes,index,canonical,m,t,pid,lc,caller)
+        return _add_surface_point!(xs,ys,mesh_sizes,index,canonical,m,pid,
+                                   caller,plane)
+    end
+    add_curve_point! = function (point,mesh_size::Float64,curve::Int,
+                                 parameter::Float64)
+        uv && return _add_ruled_surface_curve_point!(
+            xs,ys,mesh_sizes,index,canonical,m,t,point,mesh_size,curve,
+            parameter,lc,caller)
+        return _add_surface_curve_point!(xs,ys,mesh_sizes,index,canonical,m,
+                                         point,mesh_size,curve,caller,plane)
+    end
     for loop_id in m.surfaces[t]
         _verify_loop_closed(m,loop_id,caller,"Surface[$t]")
         loop_idx=Int[]
         loop_curve=Int[]
+        loop_sign=Int[]
         for signed in m.loops[loop_id]
             curve=abs(signed)
             a,b=m.curves[curve]
@@ -376,34 +469,36 @@ function _bl_surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
             for parameter in _surface_curve_parameters(m,forced,curve,signed,
                                                        caller)
                 vertex=if parameter==t0
-                    _add_surface_point!(xs,ys,mesh_sizes,index,canonical,
-                                        m,a,caller,plane)
+                    add_point!(a)
                 elseif parameter==t1
-                    _add_surface_point!(xs,ys,mesh_sizes,index,canonical,
-                                        m,b,caller,plane)
+                    add_point!(b)
                 else
                     point=_periodic_forced_curve_point(
                         m,curve,parameter,_periodic_positions,caller)
-                    scale=max(1.0,hypot(point...))
-                    abs(_plane_offset(plane,point))<=1e-12*scale ||
-                        throw(ArgumentError(
-                            "$caller: Curve[$curve] subdivision is not " *
-                            "coplanar with Surface[$t]"))
-                    _add_surface_curve_point!(
-                        xs,ys,mesh_sizes,index,canonical,m,point,
+                    uv || begin
+                        scale=max(1.0,hypot(point...))
+                        abs(_plane_offset(plane,point))<=1e-12*scale ||
+                            throw(ArgumentError(
+                                "$caller: Curve[$curve] subdivision is not " *
+                                "coplanar with Surface[$t]"))
+                    end
+                    add_curve_point!(
+                        point,
                         get(param_sizes,(curve,parameter),
                             _surface_curve_mesh_size(
                                 m,curve,parameter,caller)),
-                        curve,caller,plane)
+                        curve,parameter)
                 end
                 if !isempty(loop_idx) && loop_idx[end]==vertex
                     # Corner shared by two boundary curves: the slot
                     # owns the outgoing segment, so the continuing
                     # curve's tag wins.
                     loop_curve[end]=curve
+                    loop_sign[end]=signed>0 ? 1 : -1
                 else
                     push!(loop_idx,vertex)
                     push!(loop_curve,curve)
+                    push!(loop_sign,signed>0 ? 1 : -1)
                 end
                 parameter==t0 || parameter==t1 || begin
                     haskey(vert_curve,vertex) || (vert_curve[vertex]=curve)
@@ -412,20 +507,20 @@ function _bl_surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
             end
         end
         while length(loop_idx)>1 && loop_idx[end]==loop_idx[1]
-            pop!(loop_idx);pop!(loop_curve)
+            pop!(loop_idx);pop!(loop_curve);pop!(loop_sign)
         end
         nloop=length(loop_idx)
         nloop>=3 || throw(ArgumentError(
             "$caller: Loop[$loop_id] needs at least three points"))
         push!(wires,loop_idx)
         push!(wire_curves,loop_curve)
+        push!(wire_signs,loop_sign)
     end
     embedded=get(m.embeds,(2,t),NTuple{2,Int}[])
     internal=Tuple{Int,Int}[]
     for (edim,etag) in embedded
         if edim==0
-            _add_surface_point!(xs,ys,mesh_sizes,index,canonical,m,etag,
-                                caller,plane)
+            add_point!(etag)
         elseif edim!=1
             throw(ArgumentError(
                 "$caller: unsupported embedding dimension $edim"))
@@ -441,32 +536,30 @@ function _bl_surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
                    get(forced,etag,nothing)
         curve_nodes=Int[]
         if parameters===nothing
-            push!(curve_nodes,_add_surface_point!(
-                xs,ys,mesh_sizes,index,canonical,m,a,caller,plane))
-            push!(curve_nodes,_add_surface_point!(
-                xs,ys,mesh_sizes,index,canonical,m,b,caller,plane))
+            push!(curve_nodes,add_point!(a))
+            push!(curve_nodes,add_point!(b))
         else
             for parameter in parameters
                 vertex=if parameter==t0
-                    _add_surface_point!(xs,ys,mesh_sizes,index,canonical,m,a,
-                                        caller,plane)
+                    add_point!(a)
                 elseif parameter==t1
-                    _add_surface_point!(xs,ys,mesh_sizes,index,canonical,m,b,
-                                        caller,plane)
+                    add_point!(b)
                 else
                     point=_periodic_forced_curve_point(
                         m,etag,parameter,_periodic_positions,caller)
-                    scale=max(1.0,hypot(point...))
-                    abs(_plane_offset(plane,point))<=1e-12*scale ||
-                        throw(ArgumentError(
-                            "$caller: embedded Curve[$etag] subdivision is " *
-                            "not coplanar with Surface[$t]"))
-                    _add_surface_curve_point!(
-                        xs,ys,mesh_sizes,index,canonical,m,point,
+                    uv || begin
+                        scale=max(1.0,hypot(point...))
+                        abs(_plane_offset(plane,point))<=1e-12*scale ||
+                            throw(ArgumentError(
+                                "$caller: embedded Curve[$etag] subdivision " *
+                                "is not coplanar with Surface[$t]"))
+                    end
+                    add_curve_point!(
+                        point,
                         get(param_sizes,(etag,parameter),
                             _surface_curve_mesh_size(
                                 m,etag,parameter,caller)),
-                        etag,caller,plane)
+                        etag,parameter)
                 end
                 push!(curve_nodes,vertex)
             end
@@ -486,8 +579,8 @@ function _bl_surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
             haskey(vert_curve,node) || (vert_curve[node]=etag)
         end
     end
-    return xs,ys,mesh_sizes,wires,wire_curves,embedded,internal,index,
-           canonical,vert_curve,vert_param
+    return xs,ys,mesh_sizes,wires,wire_curves,wire_signs,embedded,internal,
+           index,canonical,vert_curve,vert_param
 end
 
 # Even-odd containment over the face's wires — winding-insensitive, so hole
@@ -536,7 +629,7 @@ function _bl_run_end_chain(dsign::Int,p_end::Int,adjacent_curve::Int,
                            seg_spec::Vector{Int},loop::Vector{Int},
                            loop_curve::Vector{Int},xs::Vector{Float64},
                            ys::Vector{Float64},
-                           coords3d::Vector{NTuple{3,Float64}},
+                           coordsw::Vector{NTuple{3,Float64}},
                            start0::Int,nseg::Int)
     pmod(p)=mod1(p,nseg)
     rvert(p)=loop[mod1(start0+p-1,nseg)]
@@ -555,9 +648,9 @@ function _bl_run_end_chain(dsign::Int,p_end::Int,adjacent_curve::Int,
         sl2>0 || throw(ArgumentError(
             "$caller: Surface[$t] boundary has a coincident vertex"))
         if dir3===nothing
-            s3x=coords3d[b][1]-coords3d[a][1]
-            s3y=coords3d[b][2]-coords3d[a][2]
-            s3z=coords3d[b][3]-coords3d[a][3]
+            s3x=coordsw[b][1]-coordsw[a][1]
+            s3y=coordsw[b][2]-coordsw[a][2]
+            s3z=coordsw[b][3]-coordsw[a][3]
             sl3=hypot(s3x,s3y,s3z)
             dir3=(s3x/sl3,s3y/sl3,s3z/sl3)
             d2x=s2x/sl2;d2y=s2y/sl2
@@ -617,7 +710,9 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                                 forced,
                                 param_sizes::Dict{Tuple{Int,Float64},Float64},
                                 plane,caller::AbstractString;
-                                _periodic_positions=nothing)
+                                _periodic_positions=nothing,
+                                uv::Bool=false,
+                                dropped_curves::Vector{Set{Int}}=Set{Int}[])
     # `IntersectMetrics`/`AnisoMax` are metric-operator options — upstream
     # reads `iIntersect` only inside the anisotropic `operator()(SMetric3&)`
     # (attractor-metric intersection instead of closest-only) and
@@ -629,10 +724,11 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
     # field is scalar like upstream's scalar `operator()`, which likewise
     # ignores `iIntersect`, so `Background Field`/`Min`-style scalar
     # composition matches too.
-    xs,ys,mesh_sizes,wires,wire_curves,embedded,internal,index,canonical,
-        vert_curve,vert_param=
+    xs,ys,mesh_sizes,wires,wire_curves,wire_signs,embedded,internal,index,
+        canonical,vert_curve,vert_param=
         _bl_surface_pslg(m,t,forced,caller;param_sizes=param_sizes,
-                         plane=plane,_periodic_positions=_periodic_positions)
+                         plane=plane,_periodic_positions=_periodic_positions,
+                         uv=uv)
     ax=plane.axes
     coords3d=Vector{NTuple{3,Float64}}(undef,length(xs))
     point_of=Dict{Int,Int}()
@@ -647,14 +743,54 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
             "coordinate"))
         coords3d[i]=coordinate
     end
+    # Working-frame coordinates the strip kernel sees: the plane projection
+    # keeps the physical 3-D positions (its `(x,y)` is just a dropped-axis
+    # read), while the ruled `(u,v)` frame gives the kernel `(u,v,0)` nodes
+    # and lifts them back through the surface evaluator — upstream's
+    # `Mesh2DWithBoundaryLayers` runs the identical pass on the face's own
+    # parameter coordinates (`parFromPoint`/`reparamMeshEdgeOnFace`).
+    coordsw=uv ?
+        NTuple{3,Float64}[(xs[i],ys[i],0.0) for i in eachindex(xs)] :
+        coords3d
+    lift=uv ?
+        c->_ruled_surface_point(m,t,c[1],c[2],caller) : identity
+    # Component pair that recovers a working node coordinate's `(x,y)` —
+    # dropped-plane axes in the plane frame, the literal `(u,v)` in the
+    # ruled frame.
+    axw=uv ? (1,2) : ax
     # The surface's true unit normal, signed so that a positive rotation
     # around it matches the left-hand side in the (x,y) projection frame.
-    nvec=plane.normal
-    nlen=plane.norm
-    nsurf=(nvec[1]/nlen,nvec[2]/nlen,nvec[3]/nlen)
-    nuv=ax==(1,2) ? (0.0,0.0,1.0) : ax==(1,3) ? (0.0,-1.0,0.0) : (1.0,0.0,0.0)
-    flip=nsurf[1]*nuv[1]+nsurf[2]*nuv[2]+nsurf[3]*nuv[3]
-    plane_normal=flip>0 ? nsurf : (-nsurf[1],-nsurf[2],-nsurf[3])
+    # The `(u,v)` frame is literally two-dimensional — its normal is the
+    # parametric +z, and the domain-side probe below decides which side of
+    # a wall the strip grows on regardless of the parametrization's
+    # handedness.
+    plane_normal=if uv
+        (0.0,0.0,1.0)
+    else
+        nvec=plane.normal
+        nlen=plane.norm
+        nsurf=(nvec[1]/nlen,nvec[2]/nlen,nvec[3]/nlen)
+        nuv=ax==(1,2) ? (0.0,0.0,1.0) :
+            ax==(1,3) ? (0.0,-1.0,0.0) : (1.0,0.0,0.0)
+        flip=nsurf[1]*nuv[1]+nsurf[2]*nuv[2]+nsurf[3]*nuv[3]
+        flip>0 ? nsurf : (-nsurf[1],-nsurf[2],-nsurf[3])
+    end
+    # Upstream's `parFromPoint`/`point` parametrization for builtin planar
+    # faces — `GFace::computeMeanPlane`'s edge-sample fast path plus
+    # `fillMeanPlane` — so the strip kernel's working coordinates, emitted
+    # nodes and stored surface params all live in upstream's frame rather
+    # than a locally orthonormalized one. `nothing` when the fast path
+    # cannot run (upstream falls back to its SVD mean plane, which the
+    # kernel's own orthonormal basis approximates).
+    pframe=uv ? nothing : _model_surface_meanplane_frame(m,t,caller)
+    # Mean-plane `(u,v)` of a physical point — upstream `parFromPoint`
+    # (`prosca` component order) — for `(2,t)`-owned vertices' params.
+    _mp_param=pframe===nothing ? nothing : function (c)
+        O,u,v=pframe
+        d1=c[1]-O[1]; d2=c[2]-O[2]; d3=c[3]-O[3]
+        return (d1*u[1]+d2*u[2]+d3*u[3],
+                d1*v[1]+d2*v[2]+d3*v[3])
+    end
     blmod=getfield(parentmodule(@__MODULE__),:BoundaryLayer)
     new_xs=Float64[];new_ys=Float64[]
     new_coords=NTuple{3,Float64}[]
@@ -687,7 +823,8 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                     push!(new_params,nothing)
                 else
                     push!(new_owners,(2,Int32(t)))
-                    push!(new_params,[xs[i],ys[i]])
+                    push!(new_params,_mp_param===nothing ?
+                        [xs[i],ys[i]] : collect(_mp_param(coords3d[i])))
                 end
             end
             length(new_coords)
@@ -703,14 +840,23 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                 push!(new_params,nothing)
             else
                 push!(new_owners,(2,Int32(t)))
-                push!(new_params,[x,y])
+                push!(new_params,_mp_param===nothing ?
+                    [x,y] : collect(_mp_param(coordinate)))
             end
             length(new_coords)
         end
     end
     strip_coords=NTuple{3,Float64}[]
+    # Working-frame `(x,y)` of each strip node — the surface parameters the
+    # ownership records publish for `(2,t)`-owned vertices (`(u,v)` on the
+    # ruled frame; dropped-plane components on the plane frame).
+    strip_params=Vector{Float64}[]
     strip_tris=NTuple{3,Int}[]
     strip_quads=NTuple{4,Int}[]
+    # Parallel upstream-order tuples for `quadsToTriangles`' split
+    # evaluation — the same strip-node ids as `strip_quads`, permuted to
+    # each quad's `MQuadrangle`-stored order.
+    strip_quads_eval=NTuple{4,Int}[]
     reduced_wires=Vector{Int}[]
     # Map each wire's segment index to its field (0 = ordinary boundary
     # segment). Segments carry the tag of the curve that emitted their first
@@ -719,13 +865,21 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
     hwall_maps=Dict{Int,Dict{Int,Float64}}()
     for (w,loop) in enumerate(wires)
         loop_curve=wire_curves[w]
+        loop_sign=wire_signs[w]
         nseg=length(loop)
         seg_spec=Vector{Int}(undef,nseg)
         for k in 1:nseg
             curve=loop_curve[k]
             owner=0
             for (si,spec) in enumerate(specs)
-                if curve in spec.curve_set
+                # Curves this face's `setupFor2d` dropped from spec `si`
+                # (shared across un-excluded, non-extruded surfaces) stay
+                # ordinary boundary — upstream removes them from that
+                # field's `_curveTags`, so they neither grow columns nor
+                # mark their segments as wall.
+                if curve in spec.curve_set &&
+                        !(si<=length(dropped_curves) &&
+                          curve in dropped_curves[si])
                     owner=si
                     break
                 end
@@ -834,16 +988,25 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
             hmap=get!(hwall_maps,si) do
                 _bl_hwall_map(spec,caller)
             end
-            hws=isempty(hmap) ? nothing :
-                Float64[_bl_vertex_hwall(v,point_of,vert_param,vert_curve,
+            # Upstream's `getLocalInfoAtNode` resolves a per-vertex `hWall`
+            # for EVERY column vertex, not only graded ones: a dim-1
+            # subdivision vertex always runs the quadratic endpoint
+            # interpolation `hb·(1-x)² + 2·min(hb,he)·x(1-x) + he·x²` at its
+            # stored curve parameter — with equal endpoint heights that
+            # Bernstein still drifts a rounding ulp off the constant, and
+            # those ulp shifts are observable in the emitted mesh (they
+            # break `quadsToTriangles` near-ties identically upstream).
+            hws=Float64[_bl_vertex_hwall(v,point_of,vert_param,vert_curve,
                                          hmap,spec.hwall,m,caller)
                         for v in chain]
             # Interpolating equal endpoint heights can drift by an ulp —
-            # upstream's `getLocalInfoAtNode` would emit the same values,
-            # but treating them as variable only manufactures degenerate
-            # closing triangles, so grade heterogeneity on a relative
-            # tolerance. Genuine `SizesList` variation is far larger.
-            variable=hws!==nothing && any(
+            # upstream's `getLocalInfoAtNode` emits the same values, so the
+            # schedules below carry the drift per vertex rather than
+            # collapsing it; only genuinely `SizesList`-scale variation
+            # marks the run `variable` (it is far larger than the ulp band,
+            # which would otherwise manufacture degenerate closing
+            # triangles in the topology checks downstream).
+            variable=any(
                 h->abs(h-hws[1])>1e-12*max(abs(hws[1]),eps(Float64)),hws)
             if hws!==nothing && !variable
                 # A uniformly-resolved map still overrides `Size` — every
@@ -856,26 +1019,25 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                     "$(hws[1]) at a wall vertex exceeds Thickness=" *
                     "$(spec.thickness) — the column admits no layer row"))
             end
-            # Every open run needs per-vertex schedules — the two end
-            # slots hold the adjacent edge's chain distances, not the
-            # shared `offsets` — while a closed run only needs them when
-            # `SizesList` grading actually varies.
-            voff=nothing
-            if variable || !closed_run
-                voff=Vector{Vector{Float64}}(undef,nchain)
-                for i in 1:nchain
-                    hw=hws===nothing ? spec.hwall : hws[i]
-                    voff[i]=hws===nothing && !variable ? offsets :
-                        _bl_field_offsets(spec,hw,caller)
-                    isempty(voff[i]) && throw(ArgumentError(
-                        "$caller: BoundaryLayer Field[$(spec.tag)] hWall=" *
-                        "$hw at a wall vertex exceeds Thickness=" *
-                        "$(spec.thickness) — the column admits no layer row"))
-                end
+            # Every wall vertex carries its own schedule — `voff[i]` is the
+            # cumulative offset vector `getLocalInfoAtNode`'s hWall resolves
+            # to. On an *open* run the two end slots hold the adjacent
+            # edge's chain distances (overwritten below), not the shared
+            # `offsets`; on a closed run the per-vertex schedules differ
+            # only where `hws` does — ulp noise included, matching
+            # upstream's per-column `bl_depth`/`L` accumulation.
+            voff=Vector{Vector{Float64}}(undef,nchain)
+            for i in 1:nchain
+                hw=hws[i]
+                voff[i]=_bl_field_offsets(spec,hw,caller)
+                isempty(voff[i]) && throw(ArgumentError(
+                    "$caller: BoundaryLayer Field[$(spec.tag)] hWall=" *
+                    "$hw at a wall vertex exceeds Thickness=" *
+                    "$(spec.thickness) — the column admits no layer row"))
             end
             wall_coords=Matrix{Float64}(undef,3,nchain)
             for (i,v) in enumerate(chain)
-                wall_coords[1,i],wall_coords[2,i],wall_coords[3,i]=coords3d[v]
+                wall_coords[1,i],wall_coords[2,i],wall_coords[3,i]=coordsw[v]
             end
             wall_segs=Matrix{Int32}(undef,2,closed_run ? nchain : nchain-1)
             for i in 1:(nchain-1)
@@ -885,6 +1047,16 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                 wall_segs[1,nchain]=nchain;wall_segs[2,nchain]=1
             end
             wall_mesh=Mesh(wall_coords;segs=wall_segs)
+            # The strip's base nodes lift the wall vertices back through
+            # the surface evaluator — on the ruled `(u,v)` frame that
+            # round-trip lands an ulp off the canonical curve-mesh
+            # coordinate and would weld a *new* `(2,t)`-owned node next to
+            # the seeded point/curve entry (upstream keeps the same
+            # MVertex). Every wall position is therefore a bitwise snap
+            # target like the covered run-end spans.
+            for v in chain
+                push!(snapped_coords,coords3d[v])
+            end
             # Run-end columns ride the adjacent edge — upstream's
             # `addColumnAtTheEndOfTheBL` makes the end vertex's column the
             # adjacent edge's own node chain verbatim (the boundary
@@ -913,10 +1085,10 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                     "runs — upstream requires separated layers"))
                 ch_s,dist_s,dir_s=_bl_run_end_chain(
                     -1,p_start,loop_curve[prev_seg],spec,caller,t,
-                    seg_spec,loop,loop_curve,xs,ys,coords3d,start0,nseg)
+                    seg_spec,loop,loop_curve,xs,ys,coordsw,start0,nseg)
                 ch_e,dist_e,dir_e=_bl_run_end_chain(
                     +1,p_end,loop_curve[next_seg],spec,caller,t,
-                    seg_spec,loop,loop_curve,xs,ys,coords3d,start0,nseg)
+                    seg_spec,loop,loop_curve,xs,ys,coordsw,start0,nseg)
                 # `chain` may have been reversed for orientation; attach
                 # each chain to the slot holding its end vertex and let
                 # the slot's wall-side neighbour bound the used depth
@@ -952,13 +1124,14 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
             # falling back to `Mesh.BoundaryLayerFanElements`
             # (`spec.fan_elements`). Nonnegative sizes select the standard
             # fan (`fanType -1`, `round(frac·size)+1` wedges); -1/-2/-3 select
-            # the cross/mix/tail topologies — distinct point/cell machinery
-            # kept a loud rejection — while -4 and every other negative fall
-            # to `fanType 4` (skip: boundary rays only, no wedge cells).
-            vfans=nothing;fskips=nothing
+            # upstream's cross/mix/tail topologies (`fanType` 1/2/3 — the
+            # bilinear / rounded-fold / `l·n±ll·nc` column machinery through
+            # `fan_types`); -4 and every other negative fall to `fanType 4`
+            # (skip: boundary rays only, no wedge cells).
+            vfans=nothing;fskips=nothing;ftypes=nothing
             if !isempty(fans)
                 matched=length(spec.fan_sizes)==length(spec.fan_points)
-                vfans=Dict{Int,Int}();fskips=Set{Int}()
+                vfans=Dict{Int,Int}();fskips=Set{Int}();ftypes=Dict{Int,Int}()
                 for i in fans
                     pid=get(point_of,chain[i],0)
                     f=spec.fan_elements
@@ -969,17 +1142,14 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                     if f>=0
                         vfans[i]=f
                     elseif f==-1 || f==-2 || f==-3
-                        throw(ArgumentError(
-                            "$caller: BoundaryLayer Field[$(spec.tag)]" *
-                            ".FanPointsSizesList=$f at Point[$pid] — " *
-                            "the $(f==-1 ? "cross" : f==-2 ? "mix" : "tail")" *
-                            " fan type is not implemented"))
+                        ftypes[i]=-f
                     else
                         push!(fskips,i)
                     end
                 end
                 isempty(vfans) && (vfans=nothing)
                 isempty(fskips) && (fskips=nothing)
+                isempty(ftypes) && (ftypes=nothing)
             end
             # Whether this run emits any strip cell: one wall segment with
             # two non-empty side columns, or a wedge-emitting fan (a skip
@@ -1034,8 +1204,8 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
             nseg3=closed_run ? nchain : nchain-1
             segleft=Vector{NTuple{3,Float64}}(undef,max(nseg3,1))
             for i in 1:nseg3
-                a3=coords3d[chain[i]]
-                b3=coords3d[chain[i==nchain ? 1 : i+1]]
+                a3=coordsw[chain[i]]
+                b3=coordsw[chain[i==nchain ? 1 : i+1]]
                 s=(b3[1]-a3[1],b3[2]-a3[2],b3[3]-a3[3])
                 sl=hypot(s[1],s[2],s[3])
                 sl>0 || throw(ArgumentError(
@@ -1047,12 +1217,22 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
             end
             outcurve_raw=Int[loop_curve[mod1(start0+chain_positions[j]-1,
                                              nseg)] for j in 1:nseg3]
+            outsign_raw=Int[loop_sign[mod1(start0+chain_positions[j]-1,
+                                           nseg)] for j in 1:nseg3]
             seg_curve=Vector{Int}(undef,max(nseg3,1))
+            seg_param_rev=falses(max(nseg3,1))
             for i in 1:nseg3
-                seg_curve[i]=chain_rev ?
-                    (i<nchain ? outcurve_raw[nchain-i] :
-                                outcurve_raw[nchain]) :
-                    outcurve_raw[i]
+                sidx=chain_rev ?
+                    (i<nchain ? nchain-i : nchain) : i
+                seg_curve[i]=outcurve_raw[sidx]
+                # Upstream iterates each edge's `lines` in parameter order
+                # when it stores `MQuadrangle(v11,v21,v22,v12)`; a kernel
+                # segment that walks param-decreasing (a loop-reversed
+                # curve the orientation probe kept, or a loop-forward
+                # curve the probe flipped) must evaluate its quads with
+                # the column order swapped.
+                kernel_param_positive=(outsign_raw[sidx]>0) != chain_rev
+                seg_param_rev[i]=!kernel_param_positive
             end
             # Curve parameter of a chain vertex on a specific curve —
             # subdivision vertices carry it directly; model endpoints
@@ -1100,6 +1280,34 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                 vscale===nothing && (vscale=Dict{Int,Float64}())
                 vscale[i]=ct2>0 ? 1.0/ct2 : 1.0
             end
+            # Tail fans measure `step` off the physical incident wall-edge
+            # lengths — upstream reads `MEdge::length()`, an
+            # `SVector3::norm` (`sqrt(Σ squares)`, not `hypot`); in the
+            # ruled and mean-plane frames alike the kernel's projected
+            # length is a working-frame distance, so pass the physical
+            # mean through explicitly.
+            tsteps=nothing
+            if ftypes!==nothing && any(==(3),values(ftypes))
+                tsteps=Dict{Int,Float64}()
+                for (i,tp) in ftypes
+                    tp==3 || continue
+                    pa=coords3d[chain[i]]
+                    tot=0.0;cnt=0
+                    if closed_run || i>1
+                        pb=coords3d[chain[i==1 ? nchain : i-1]]
+                        dx=pa[1]-pb[1];dy=pa[2]-pb[2];dz=pa[3]-pb[3]
+                        tot+=sqrt(dx*dx+dy*dy+dz*dz)
+                        cnt+=1
+                    end
+                    if closed_run || i<nchain
+                        pb=coords3d[chain[i==nchain ? 1 : i+1]]
+                        dx=pa[1]-pb[1];dy=pa[2]-pb[2];dz=pa[3]-pb[3]
+                        tot+=sqrt(dx*dx+dy*dy+dz*dz)
+                        cnt+=1
+                    end
+                    tsteps[i]=cnt==0 ? 0.0 : tot/cnt
+                end
+            end
             strip=blmod._bl_2d_offsets(
                 wall_mesh,offsets;fans=fans,
                 fan_elements=spec.fan_elements,
@@ -1108,6 +1316,10 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                 vertex_scale_last=vscale,
                 vertex_fans=vfans,
                 fan_skips=fskips,
+                fan_types=ftypes,
+                tail_steps=tsteps,
+                seg_param_rev=seg_param_rev,
+                plane_frame=pframe,
                 plane_normal=plane_normal,caller=caller)
             mesh=strip.mesh
             # tops keys on the wall node's exact 3-D coordinate. Run-end
@@ -1119,8 +1331,8 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                     push!(snapped_coords,new_coords[vid])
                     top_of[v]=vid
                 else
-                    top=strip.tops[coords3d[v]]
-                    top_of[v]=new_vertex!(top[ax[1]],top[ax[2]],top)
+                    top=strip.tops[coordsw[v]]
+                    top_of[v]=new_vertex!(top[axw[1]],top[axw[2]],lift(top))
                 end
             end
             if variable || !closed_run
@@ -1164,6 +1376,23 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                             for k in 1:last_level
                                 push!(ids,strip.id_of[(vn,k,re)])
                             end
+                        elseif ftypes!==nothing && haskey(ftypes,i)
+                            # Cross/mix/tail: the kernel's `fan_free` chain
+                            # threads the interior column tops from ray 0 to
+                            # ray `fanw` (kernel order — reverse it when the
+                            # loop walks the chain backwards); the entry
+                            # boundary column climbs to its top and the exit
+                            # side descends to the pair depth like upstream's
+                            # `bedges` keep the uncovered rungs free.
+                            fc=strip.fan_free[vn]
+                            ordered=chain_rev ? reverse(fc) : fc
+                            for k in entry:ni-1
+                                push!(ids,strip.id_of[(vn,k,k==0 ? 0 : rs)])
+                            end
+                            append!(ids,ordered)
+                            for k in (ni-1):-1:last_level
+                                push!(ids,strip.id_of[(vn,k,k==0 ? 0 : re)])
+                            end
                         else
                             for k in entry:ni
                                 push!(ids,strip.id_of[(vn,k,k==0 ? 0 : rs)])
@@ -1186,15 +1415,21 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                     for nid in ids
                         c=(mesh.coords[1,nid],mesh.coords[2,nid],
                            mesh.coords[3,nid])
-                        push!(nodes,new_vertex!(c[ax[1]],c[ax[2]],c))
+                        push!(nodes,new_vertex!(c[axw[1]],c[axw[2]],lift(c)))
                     end
                     wire_nodes[v]=nodes
                 end
             end
             base=length(strip_coords)
             for i in axes(mesh.coords,2)
-                push!(strip_coords,(mesh.coords[1,i],mesh.coords[2,i],
-                                    mesh.coords[3,i]))
+                kc=(mesh.coords[1,i],mesh.coords[2,i],mesh.coords[3,i])
+                push!(strip_coords,lift(kc))
+                # The `(2,t)` params are upstream's `parFromPoint` working
+                # coordinates — the kernel's mean-plane pair in `pframe`
+                # mode; the dropped-plane/`(u,v)` working pair otherwise.
+                push!(strip_params,pframe===nothing ?
+                    [kc[axw[1]],kc[axw[2]]] :
+                    collect(strip.work_points[i]))
             end
             for block in mesh.blocks
                 if block.msh==2
@@ -1209,6 +1444,14 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                             base+Int(block.nodes[2,c]),
                             base+Int(block.nodes[3,c]),
                             base+Int(block.nodes[4,c])))
+                        # `quads_eval` columns line up 1:1 with the emitted
+                        # quad block — upstream's stored vertex order for
+                        # the `quadsToTriangles` split comparisons.
+                        push!(strip_quads_eval,(
+                            base+Int(strip.quads_eval[1,c]),
+                            base+Int(strip.quads_eval[2,c]),
+                            base+Int(strip.quads_eval[3,c]),
+                            base+Int(strip.quads_eval[4,c])))
                     end
                 else
                     throw(ErrorException(
@@ -1373,8 +1616,7 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
         end
         ctag=get(covered_owner,coordinate,Int32(0))
         strip_to_pool[i]=ctag==0 ?
-            pool_id!(coordinate,(2,Int32(t)),
-                     [coordinate[ax[1]],coordinate[ax[2]]]) :
+            pool_id!(coordinate,(2,Int32(t)),strip_params[i]) :
             pool_id!(coordinate,(1,ctag),nothing)
     end
     out_tris=NTuple{3,Int32}[]
@@ -1385,18 +1627,54 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
     end
     keep_quads=_model_surface_recombined(m,t) ||
         any(spec->spec.quads,specs)
-    for quad in strip_quads
+    for (qi,quad) in enumerate(strip_quads)
         a,b,c,d=quad
         if keep_quads
             push!(out_quads,(strip_to_pool[a],strip_to_pool[b],
                              strip_to_pool[c],strip_to_pool[d]))
         else
-            # `quadsToTriangles` on the strip split: the emitted quad's
-            # (b1,b2,t2,t1) frame splits along the b1–t2 diagonal.
-            push!(out_tris,(strip_to_pool[a],strip_to_pool[b],
-                            strip_to_pool[c]))
-            push!(out_tris,(strip_to_pool[a],strip_to_pool[c],
-                            strip_to_pool[d]))
+            # Upstream `quadsToTriangles` (meshGFaceOptimize.cpp) splits
+            # each emitted quad on whichever diagonal gives the better
+            # worst-triangle `gammaShapeMeasure`, evaluated on the quad's
+            # *stored* vertex order — `t11=(v0,v1,v2)`, `t12=(v2,v3,v0)`
+            # (option 1, the `(v0,v2)` diagonal) against `t21=(v1,v2,v3)`,
+            # `t22=(v3,v0,v1)` (option 2, the `(v1,v3)` diagonal). Option 1
+            # wins on `qual1>qual2` and is forced when option 2's
+            # triangles face opposite ways (a non-convex quad, `ori2<0`);
+            # an exact tie takes option 2. `strip_quads_eval` holds
+            # upstream's stored tuple so the fp-level comparisons —
+            # including near-ties — reproduce upstream's, while `quad`
+            # keeps the positive ring order for emission.
+            e1,e2,e3,e4=strip_quads_eval[qi]
+            p1,p2,p3,p4=strip_coords[e1],strip_coords[e2],
+                        strip_coords[e3],strip_coords[e4]
+            qual1=min(_bl_tri_gamma(p1,p2,p3),_bl_tri_gamma(p3,p4,p1))
+            qual2=min(_bl_tri_gamma(p2,p3,p4),_bl_tri_gamma(p4,p1,p2))
+            n1x,n1y,n1z=_bl_tri_normal(p2,p3,p4)
+            n2x,n2y,n2z=_bl_tri_normal(p4,p1,p2)
+            ori2=n1x*n2x+n1y*n2y+n1z*n2z
+            d1,d2=if qual1>qual2 || ori2<0
+                (e1,e3)
+            else
+                (e2,e4)
+            end
+            if (d1==a && d2==c) || (d1==c && d2==a)
+                # (a,c) diagonal — positive halves (a,b,c) and (a,c,d).
+                push!(out_tris,(strip_to_pool[a],strip_to_pool[b],
+                                strip_to_pool[c]))
+                push!(out_tris,(strip_to_pool[a],strip_to_pool[c],
+                                strip_to_pool[d]))
+            else
+                ((d1==b && d2==d) || (d1==d && d2==b)) || throw(
+                    ErrorException(
+                        "$caller: quad eval tuple is not a diagonal of "*
+                        "the stored quadrangle"))
+                # (b,d) diagonal — positive halves (a,b,d) and (b,c,d).
+                push!(out_tris,(strip_to_pool[a],strip_to_pool[b],
+                                strip_to_pool[d]))
+                push!(out_tris,(strip_to_pool[b],strip_to_pool[c],
+                                strip_to_pool[d]))
+            end
         end
     end
     for c in 1:ntris(fill)

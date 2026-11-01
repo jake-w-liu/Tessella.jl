@@ -59,6 +59,25 @@ function _blf_signed_area(mesh)
     return total
 end
 
+# True when a mesh node lies at 3-D distance in `(lo,hi)` of segment
+# `a→b` — used to detect a boundary-layer strip grown off a wall (layer
+# nodes land at the field's offsets) or prove its absence on a dropped
+# shared curve.
+function _blf_any_node_within(mesh,a,b,lo,hi)
+    abx=b[1]-a[1];aby=b[2]-a[2];abz=b[3]-a[3]
+    len2=abx*abx+aby*aby+abz*abz
+    for i in 1:size(mesh.coords,2)
+        px=mesh.coords[1,i]-a[1]
+        py=mesh.coords[2,i]-a[2]
+        pz=mesh.coords[3,i]-a[3]
+        u=clamp((px*abx+py*aby+pz*abz)/len2,0.0,1.0)
+        dx=px-u*abx;dy=py-u*aby;dz=pz-u*abz
+        d=sqrt(dx*dx+dy*dy+dz*dz)
+        lo<d<hi && return true
+    end
+    return false
+end
+
 # Upstream's non-beta schedule: L = hWall; while L <= thickness
 # { push L; L += hWall·ratio^ith }.
 function _blf_schedule(hwall::Float64,ratio::Float64,thickness::Float64)
@@ -202,64 +221,132 @@ Mesh 2;
     @test nquads==2
 end
 
-@testset "BoundaryLayer Field — shared wall curve rejects like upstream" begin
-    err=_blf_error("""
-Point(1)={0,0,0,1};
-Point(2)={1,0,0,1};
-Point(3)={1,1,0,1};
-Point(4)={0,1,0,1};
-Point(5)={0,0,1,1};
-Point(6)={1,0,1,1};
-Line(1)={1,2};
-Line(2)={2,3};
-Line(3)={3,4};
-Line(4)={4,1};
-Line(5)={1,5};
-Line(6)={5,6};
-Line(7)={6,2};
-Curve Loop(1)={1,2,3,4};
-Plane Surface(1)={1};
-Curve Loop(2)={5,6,7,-1};
-Plane Surface(2)={2};
-Field[1]=BoundaryLayer;
-Field[1].CurvesList={1};
-Field[1].Size=0.05;
-Field[1].Ratio=1.2;
-Field[1].Thickness=0.25;
-BoundaryLayer Field = 1;
-Mesh 2;
-""")
-    @test err!==nothing
-    @test occursin("Only 2D Boundary Layers are supported",sprint(showerror,err))
-    # Excluding the sibling face admits the layer on surface 1.
+@testset "BoundaryLayer Field — shared wall curve drops like upstream" begin
+    # Upstream `setupFor2d` logs "Only 2D Boundary Layers are supported"
+    # per offending (face, curve) and drops the curve from that face's
+    # `_curveTags` — both faces still mesh, plain where the wall fell out
+    # (Gmsh 4.15.2 oracle on this fixture: identical plain fills and no
+    # strip anywhere near the shared edge).
     ex=_blf_execute("""
 Point(1)={0,0,0,1};
 Point(2)={1,0,0,1};
 Point(3)={1,1,0,1};
 Point(4)={0,1,0,1};
-Point(5)={0,0,1,1};
-Point(6)={1,0,1,1};
+Point(5)={2,0,0,1};
+Point(6)={2,1,0,1};
 Line(1)={1,2};
 Line(2)={2,3};
 Line(3)={3,4};
 Line(4)={4,1};
-Line(5)={1,5};
+Line(5)={2,5};
 Line(6)={5,6};
-Line(7)={6,2};
+Line(7)={6,3};
 Curve Loop(1)={1,2,3,4};
+Curve Loop(2)={5,6,7,-2};
 Plane Surface(1)={1};
-Curve Loop(2)={5,6,7,-1};
 Plane Surface(2)={2};
+Mesh.MeshSizeMin = 0.25;
+Mesh.MeshSizeMax = 0.25;
 Field[1]=BoundaryLayer;
-Field[1].CurvesList={1};
+Field[1].CurvesList={2};
 Field[1].Size=0.05;
 Field[1].Ratio=1.2;
-Field[1].Thickness=0.25;
+Field[1].Thickness=0.15;
+BoundaryLayer Field = 1;
+Mesh 2;
+""")
+    @test ex.msg_error_count>=1
+    @test any(occursin("Only 2D Boundary Layers are supported",msg) for
+              msg in ex.errors)
+    @test validate(ex.mesh).ok
+    # Dropped on both faces — neither shows a layer node at the field
+    # offsets (0.05/0.11) inboard of the shared wall (1,0,0)→(1,1,0).
+    m1=geo_entity_mesh(ex,2,1);m2=geo_entity_mesh(ex,2,2)
+    @test !_blf_any_node_within(m1,(1,0,0),(1,1,0),0.02,0.13)
+    @test !_blf_any_node_within(m2,(1,0,0),(1,1,0),0.02,0.13)
+    # Excluding the sibling face admits the layer on surface 1 — oracle
+    # strip nodes at x = 0.95 and x = 0.89 inboard of the shared edge.
+    ex=_blf_execute("""
+Point(1)={0,0,0,1};
+Point(2)={1,0,0,1};
+Point(3)={1,1,0,1};
+Point(4)={0,1,0,1};
+Point(5)={2,0,0,1};
+Point(6)={2,1,0,1};
+Line(1)={1,2};
+Line(2)={2,3};
+Line(3)={3,4};
+Line(4)={4,1};
+Line(5)={2,5};
+Line(6)={5,6};
+Line(7)={6,3};
+Curve Loop(1)={1,2,3,4};
+Curve Loop(2)={5,6,7,-2};
+Plane Surface(1)={1};
+Plane Surface(2)={2};
+Mesh.MeshSizeMin = 0.25;
+Mesh.MeshSizeMax = 0.25;
+Field[1]=BoundaryLayer;
+Field[1].CurvesList={2};
+Field[1].Size=0.05;
+Field[1].Ratio=1.2;
+Field[1].Thickness=0.15;
 Field[1].ExcludedSurfacesList={2};
 BoundaryLayer Field = 1;
 Mesh 2;
 """)
     @test validate(ex.mesh).ok
+    # The exclusion passes the face's `setupFor2d` count — no diagnostic
+    # fires anywhere — and the strip grows on surface 1's wall only.
+    @test !any(occursin("Only 2D Boundary Layers",msg) for msg in ex.errors)
+    m1=geo_entity_mesh(ex,2,1);m2=geo_entity_mesh(ex,2,2)
+    for x in (0.95,0.89),y in (0.25,0.5,0.75)
+        @test _blf_node_at(m1,x,y;atol=1e-9)!=0
+    end
+    @test !_blf_any_node_within(m2,(1,0,0),(1,1,0),0.02,0.13)
+    # A field listing a private wall alongside the shared one keeps the
+    # private strip while the shared wall drops — upstream logs the error
+    # and still completes the mesh on both faces.
+    ex=_blf_execute("""
+Point(1)={0,0,0,1};
+Point(2)={1,0,0,1};
+Point(3)={1,1,0,1};
+Point(4)={0,1,0,1};
+Point(5)={2,0,0,1};
+Point(6)={2,1,0,1};
+Line(1)={1,2};
+Line(2)={2,3};
+Line(3)={3,4};
+Line(4)={4,1};
+Line(5)={2,5};
+Line(6)={5,6};
+Line(7)={6,3};
+Curve Loop(1)={1,2,3,4};
+Curve Loop(2)={5,6,7,-2};
+Plane Surface(1)={1};
+Plane Surface(2)={2};
+Mesh.MeshSizeMin = 0.25;
+Mesh.MeshSizeMax = 0.25;
+Field[1]=BoundaryLayer;
+Field[1].CurvesList={1,2};
+Field[1].Size=0.05;
+Field[1].Ratio=1.2;
+Field[1].Thickness=0.15;
+BoundaryLayer Field = 1;
+Mesh 2;
+""")
+    @test validate(ex.mesh).ok
+    @test any(occursin("Only 2D Boundary Layers are supported",msg) for
+              msg in ex.errors)
+    m1=geo_entity_mesh(ex,2,1);m2=geo_entity_mesh(ex,2,2)
+    # Bottom wall survives — oracle strip nodes at the field offsets
+    # (0.05, 0.11) inboard of curve 1. The shared wall (curve 2) grows
+    # nothing on either face.
+    for x in (0.25,0.5,0.75),y in (0.05,0.11)
+        @test _blf_node_at(m1,x,y;atol=1e-9)!=0
+    end
+    @test !_blf_any_node_within(m1,(1,0,0),(1,1,0),0.02,0.13)
+    @test !_blf_any_node_within(m2,(1,0,0),(1,1,0),0.02,0.13)
 end
 
 @testset "BoundaryLayer Field — bounded loud rejections" begin
@@ -299,21 +386,171 @@ Mesh 2;
 """)
         @test validate(ex.mesh).ok
     end
-    # Negative `FanPointsSizesList` fan types −1/−2/−3 (cross/mix/tail)
-    # name upstream topologies this pass does not emit — they stay loud.
-    err=_blf_error(_BLF_SQUARE_HEAD*"""
-Field[1]=BoundaryLayer;
-Field[1].CurvesList={1,2};
-Field[1].FanPointsList={2};
-Field[1].FanPointsSizesList={-1};
-Field[1].Size=0.05;
+end
+
+# Negative `FanPointsSizesList` fan types −1/−2/−3 — upstream's
+# `boundaryLayersData.cpp` `fanType` 1/2/3 (cross, mix, tail). The wall
+# corner carries `nlayers+1` (cross/mix) or `2·nlayers` (tail) angular
+# columns filled by the bilinear patch / rounded-fold transition /
+# `l·n±ll·nc` formulas instead of rotated rays; the boundary columns ride
+# the wall normals like every other fan. Node assertions below are the
+# Gmsh 4.15.2 oracle's emitted coordinates on this exact L-shaped
+# fixture — matched bitwise through the mean-plane working frame.
+@testset "BoundaryLayer Field — negative FanPointsSizesList fan types" begin
+    head="""
+Point(1)={0,0,0,1};
+Point(2)={1,0,0,1};
+Point(3)={1,0.5,0,1};
+Point(4)={0.5,0.5,0,1};
+Point(5)={0.5,1,0,1};
+Point(6)={0,1,0,1};
+Line(1)={1,2};
+Line(2)={2,3};
+Line(3)={3,4};
+Line(4)={4,5};
+Line(5)={5,6};
+Line(6)={6,1};
+Curve Loop(1)={1,2,3,4,5,6};
+Plane Surface(1)={1};
+Mesh.MeshSizeMin = 0.25;
+Mesh.MeshSizeMax = 0.25;
+"""
+    tail="""
+Field[1].CurvesList={3,4};
+Field[1].FanPointsList={4};
+Field[1].Size=0.04;
 Field[1].Ratio=1.2;
-Field[1].Thickness=0.25;
+Field[1].Thickness=0.12;
+BoundaryLayer Field = 1;
+Mesh 2;
+"""
+    function fan_mesh(sizes)
+        # `FanPointsSizesList` must follow the `Field[1]=BoundaryLayer`
+        # declaration — an option ahead of it is dropped ("No field with
+        # id 1") and the corner falls back to an ordinary fan.
+        src=head*"Field[1]=BoundaryLayer;\n"*
+            "Field[1].FanPointsSizesList={"*sizes*"};"*tail
+        return _blf_execute(src).mesh
+    end
+    # Boundary columns both walls climb the shared two-level schedule
+    # (`0.04`, `0.088` cumulative) — every type emits these.
+    for mesh in (fan_mesh("-1"),fan_mesh("-2"),fan_mesh("-3"))
+        @test validate(mesh).ok
+        @test _blf_signed_area(mesh)≈0.75 atol=1e-9
+        for (x,y) in ((0.5,0.46),(0.5,0.41200000000000003),
+                      (0.46,0.5),(0.41200000000000003,0.5),
+                      (0.75,0.46),(0.75,0.41200000000000003),
+                      (0.46,0.75),(0.41200000000000003,0.75))
+            @test _blf_node_at(mesh,x,y;atol=1e-9)!=0
+        end
+    end
+    # Cross (type 1): the `nbCol−1` bilinear strips land the interior
+    # column tops on the square corner patch — oracle nodes (0.46,0.46)
+    # through (0.412,0.412).
+    m1=fan_mesh("-1")
+    for (x,y) in ((0.46,0.46),(0.46,0.41200000000000003),
+                  (0.41200000000000003,0.46),
+                  (0.41200000000000003,0.41200000000000003))
+        @test _blf_node_at(m1,x,y;atol=1e-9)!=0
+    end
+    # Mix (type 2): the rounded fold through `π·r/4` and `√2` — oracle
+    # interior fold nodes, both bitwise-shared with the oracle mesh.
+    m2=fan_mesh("-2")
+    for (x,y) in ((0.46,0.46),
+                  (0.42605887450304575,0.42605887450304575))
+        @test _blf_node_at(m2,x,y;atol=1e-9)!=0
+    end
+    # Tail (type 3): `2·nlayers` columns marching the
+    # `MEdge::length()`-scaled `nc` direction — oracle's characteristic
+    # square-lattice interior nodes.
+    m3=fan_mesh("-3")
+    for (x,y) in ((0.32322330470336313,0.2352233047033632),
+                  (0.32322330470336313,0.2832233047033632),
+                  (0.32322330470336313,0.32322330470336313),
+                  (0.2832233047033631,0.32322330470336313),
+                  (0.23522330470336314,0.32322330470336313))
+        @test _blf_node_at(m3,x,y;atol=1e-9)!=0
+    end
+    # A denser boundary discretization (MeshSize 0.05) reproduces the
+    # oracle's tail-fan interior lattice bitwise — every interior column
+    # threads its `⌊h/step⌋` rungs along `nc`.
+    ex=_blf_execute(head*"""
+Mesh.MeshSizeMin = 0.05;
+Mesh.MeshSizeMax = 0.05;
+Field[1]=BoundaryLayer;
+Field[1].CurvesList={3,4};
+Field[1].FanPointsList={4};
+Field[1].FanPointsSizesList={-3};
+Field[1].Size=0.04;
+Field[1].Ratio=1.2;
+Field[1].Thickness=0.12;
 BoundaryLayer Field = 1;
 Mesh 2;
 """)
-    @test err!==nothing
-    @test occursin("cross",sprint(showerror,err))
+    @test validate(ex.mesh).ok
+    for (x,y) in ((0.5,0.41200000000000003),
+                  (0.41200000000000003,0.5),
+                  (0.46464466094067264,0.37664466094067267),
+                  (0.46464466094067264,0.42464466094067266),
+                  (0.46464466094067264,0.46464466094067264),
+                  (0.42464466094067266,0.46464466094067264),
+                  (0.37664466094067267,0.46464466094067264))
+        @test _blf_node_at(ex.mesh,x,y;atol=1e-9)!=0
+    end
+end
+
+# A curved (ruled) wall face: the strip kernel works in the face's own
+# `(u,v)` parametrization — upstream's `Mesh2DWithBoundaryLayers` pass —
+# and lifts each emitted node back through the surface evaluator, so the
+# field-graded column spacing follows the patch coordinates rather than a
+# plane projection. Node assertions are the Gmsh 4.15.2 oracle's emitted
+# positions on this fixture; the ruled path carries a parametrization-level
+# residual (~1e-10) rather than the plane path's bitwise match.
+@testset "BoundaryLayer Field — curved ruled surface field grading" begin
+    ex=_blf_execute("""
+Point(1)={0,0,0,1};
+Point(2)={0,1,0,1};
+Point(3)={0,0,1,1};
+Point(4)={0,1,1,1};
+Point(5)={0,0.5,0.5,1};
+Circle(1)={1,5,2};
+Circle(2)={3,5,4};
+Line(3)={1,3};
+Line(4)={2,4};
+Curve Loop(1)={1,4,-2,-3};
+Surface(1)={1};
+Mesh.MeshSizeMin = 0.15;
+Mesh.MeshSizeMax = 0.15;
+Field[1]=BoundaryLayer;
+Field[1].CurvesList={3};
+Field[1].Size=0.05;
+Field[1].Ratio=1.2;
+Field[1].Thickness=0.2;
+BoundaryLayer Field = 1;
+Mesh 2;
+""")
+    mesh=ex.mesh
+    @test validate(mesh).ok
+    # Oracle strip nodes — columns off Curve 3's wall, lifted through the
+    # patch parametrization.
+    for (x,y,z) in ((0.0,0.040770881000866795,0.1159369895809042),
+                    (0.0,0.09340988706609243,0.08677199067010552),
+                    (0.0,0.10715252110940521,-0.08793780141210805),
+                    (0.0,0.3620503114569082,-0.193519922879555),
+                    (0.0,0.5000000015286769,-0.20710678118654746))
+        xs=mesh.coords[1,:];ys=mesh.coords[2,:];zs=mesh.coords[3,:]
+        @test any(i->abs(xs[i]-x)<=1e-7 && abs(ys[i]-y)<=1e-7 &&
+                     abs(zs[i]-z)<=1e-7,eachindex(xs))
+    end
+    # The field's geometric schedule is still visible off the wall: every
+    # strip node clears the wall curve and no node regresses onto it —
+    # `min(u,v)` pairing bounds the shared level count.
+    zs=mesh.coords[3,:];ys=mesh.coords[2,:]
+    interior=[i for i in eachindex(zs) if abs(ys[i])>1e-6]
+    @test !isempty(interior)
+end
+
+@testset "BoundaryLayer Field — thin channel opposing walls" begin
     # Opposing walls in a thin channel: the two strips' free boundaries
     # meet — upstream's `modifyInitialMeshForBoundaryLayers` fails the
     # same configuration with "Edge not recovered".

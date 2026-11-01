@@ -24,6 +24,63 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### LAY02 `.geo` BoundaryLayer Field — cross/mix/tail fans, ruled-surface grading, two-surface `setupFor2d` drop (2026-11-02)
+
+Resolves the prior LAY02 increment's stated residuals (negative fan
+types, genuinely parametric column construction, and the hard throw on
+walls shared by two surfaces). Oracle-driven against Gmsh 4.15.2
+source + CLI probes (`_lay02_work/` fixtures: `fan3_neg{1,2,3}{,_fine}`,
+`cyl_wall`, `two_surf{,_excl,_mixed}`).
+
+- **Negative `FanPointsSizesList` −1/−2/−3.** Upstream `fanType`
+  1/2/3 (cross, mix, tail) now land through the `vertex_offsets`/fan
+  machinery: type-1 `nbCol−1` bilinear strips, type-2 rounded fold
+  (`π·r/4`, `√2`, `cp−1`-level interior columns past the fold), type-3
+  `2·nlayers` tail columns marching the `MEdge::length()`-scaled `nc`
+  direction. Fan rays are built upstream-style
+  (`_gm_atan2`/`_gm_cos`/`_gm_sin`, normalized vectors) inside the
+  caller's `plane_frame` — the `computeMeanPlane` fast-path frame,
+  which can be left-handed, so the physical clockwise sense folds in
+  `frame_left`.
+- **Upstream-order quad evaluation.** `_bl_2d_offsets` returns a
+  parallel `quads_eval` matrix carrying each quad's
+  `MQuadrangle`-stored tuple (ordinary strips `(v11,v21,v22,v12)` per
+  `seg_param_rev`, fan strips `(v11,v12,v22,v21)`); the
+  `quadsToTriangles` split evaluates quality/orientation on the stored
+  order — `qual1>qual2 || ori2<0` picks the (v0,v2) diagonal, exact
+  ties take the other — and maps the result back onto the emitted
+  positive ring. This reproduces the fine tail-fan fixture's four
+  tie-split cells exactly.
+- **Ruled-surface field grading.** The `Surface` half-cylinder patch
+  runs the `(u,v)` frame; all 48 emitted nodes sit within 1.2e-10 of
+  the oracle's — evaluator last-ulp noise through the ruled lift, no
+  structural divergence (permanent testset pins five oracle strip
+  nodes at 1e-7).
+- **Two-surface `setupFor2d`.** A wall shared by more than one
+  un-excluded, non-extruded face no longer throws: upstream logs
+  `Msg::Error` per (face, curve), drops the curve from that face's
+  `_curveTags`, and meshes on the survivors. `_model_surface_bl_specs`
+  now computes per-spec drop sets (`ExcludedSurfacesList` and
+  `EXTRUDED_ENTITY` neighbors still pass the count) and reports through
+  `options.report_error` → `_geo_msg_error!`, landing on
+  `GeoExecution.errors`/`msg_error_count` like upstream's batch log; a
+  field with no surviving wall curve leaves the face to the ordinary
+  path. Oracle: `two_surf` → identical plain fills and no strip,
+  `two_surf_excl` → surviving strip bitwise (`x=0.95/0.89`),
+  `two_surf_mixed` → private curve-1 strip survives while shared
+  curve 2 drops on both faces.
+- **Receipts.** `cmp_bin_strip` shared-node cell audit vs the oracle
+  binaries: `fan3_neg1`/`neg2`/`neg3`/`neg3_fine` all `missing=0`
+  (every shared oracle BL cell reproduced); all fixtures
+  `validate=true`. `geo_boundary_layer_field_test` — 11 testsets,
+  all exit 0 incl. negative-fan 49, shared-wall-drop 24, curved ruled
+  7, `SizesList` ring 72 — Julia 1.12.7
+  `--compile=min -O0 --check-bounds=yes`.
+- **Bounded residuals (unchanged).** BL fields still never alter
+  transfinite/extruded/periodic-slave *surface* producers; interior
+  Steiner placement is the ordinary CDT fill, not upstream's own
+  inserter.
+
 ### STEP CAD04 residual slice — ELLIPSE trims, partial-domain splines, multi-chain swept rims, rational weights (2026-11-02)
 
 Devin landed the next bounded CAD04 slice in the prismatic-shell

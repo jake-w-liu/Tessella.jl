@@ -75,7 +75,8 @@ using ..Transform: _affine_coordinate, _transform_homogeneous,
     _periodic_affine_3x4, _periodic_affine_input
 using ..Predicates: orient2, orient3
 using ..GmshLibm: _gm_sin, _gm_cos, _gm_tan, _gm_asin, _gm_acos, _gm_atan,
-                  _gm_atan2, _gm_pow, _gm_sincos, _gm_exp, _gm87_sincos
+                  _gm_atan2, _gm_pow, _gm_sincos, _gm_exp, _gm_log,
+                  _gm87_sincos
 import LinearAlgebra
 using LinearAlgebra: Symmetric, eigen
 using Printf: @sprintf
@@ -5580,6 +5581,111 @@ function _model_surface_plane(m::GeoModel,surface::Int,caller::AbstractString;
             norm=sqrt(normal[1]^2+normal[2]^2+normal[3]^2))
 end
 
+# `GFace::computeMeanPlane`'s planar fast path (GFace.cpp 569-631) — the
+# parametrization a builtin `Plane Surface` reports through
+# `parFromPoint`/`point`: every boundary edge contributes the points at
+# 1/3 and 2/3 of its own parameter range (in the edge's forward
+# direction, unsigned); the first cross product `pts[1]-pts[0]` ×
+# `pts[i]-pts[0]` whose norm clears `sqrt(geom.tolerance)·lc` (1e-4·lc
+# upstream) fixes the plane normal `res`; the tangent frame is
+# `t1 = norm(res×e)`, `t2 = norm(t1×res)` with `e` the first coordinate
+# axis whose `res` component is exactly zero; `res[3] = pts[0]·res` and
+# the origin projects `d` onto the dominant-|coefficient| axis
+# (`fillMeanPlane`). `prodve`/`norme`/`crossprod` arithmetic is kept in
+# upstream's operation order so BL strip coordinates round identically.
+# Returns `(origin, t1, t2)` or `nothing` when the fast path cannot run
+# (collinear samples, missing parametrization) — upstream then falls back
+# to the SVD mean plane, which we do not reproduce here.
+function _model_surface_meanplane_frame(m::GeoModel,surface::Int,
+                                        caller::AbstractString)
+    pts=NTuple{3,Float64}[]
+    for loop in m.surfaces[surface]
+        haskey(m.loops,loop) || throw(ArgumentError(
+            "$caller: Surface[$surface] references unknown Loop[$loop]"))
+        for signed in m.loops[loop]
+            curve=abs(signed)
+            haskey(m.curves,curve) || return nothing
+            t0,t1=try
+                _model_curve_param_bounds(m,curve,caller)
+            catch err
+                err isa InterruptException && rethrow()
+                return nothing
+            end
+            p1=try
+                _model_curve_point(m,curve,
+                                   t0+0.333*(t1-t0),caller)
+            catch err
+                err isa InterruptException && rethrow()
+                return nothing
+            end
+            p2=try
+                _model_curve_point(m,curve,
+                                   t0+0.666*(t1-t0),caller)
+            catch err
+                err isa InterruptException && rethrow()
+                return nothing
+            end
+            push!(pts,(Float64(p1[1]),Float64(p1[2]),Float64(p1[3])))
+            push!(pts,(Float64(p2[1]),Float64(p2[2]),Float64(p2[3])))
+        end
+    end
+    length(pts)>=3 || return nothing
+    all(p->all(isfinite,p),pts) || return nothing
+    # `CTX::lc` — the model bounding-box diagonal used by the collinearity
+    # threshold.
+    xmin=ymin=zmin=Inf; xmax=ymax=zmax=-Inf
+    for (_,p) in m.points
+        xmin=min(xmin,p[1]);xmax=max(xmax,p[1])
+        ymin=min(ymin,p[2]);ymax=max(ymax,p[2])
+        zmin=min(zmin,p[3]);zmax=max(zmax,p[3])
+    end
+    lc=sqrt((xmax-xmin)^2+(ymax-ymin)^2+(zmax-zmin)^2)
+    lc>0 && isfinite(lc) || (lc=1.0)
+    d01=(pts[2][1]-pts[1][1],pts[2][2]-pts[1][2],pts[2][3]-pts[1][3])
+    res=nothing
+    thresh=sqrt(1e-8)*lc
+    for i in 3:length(pts)
+        d0i=(pts[i][1]-pts[1][1],pts[i][2]-pts[1][2],pts[i][3]-pts[1][3])
+        # `SVector3::crossprod` component order.
+        n=(d01[2]*d0i[3]-d0i[2]*d01[3],
+           -(d01[1]*d0i[3]-d0i[1]*d01[3]),
+           d01[1]*d0i[2]-d0i[1]*d01[2])
+        sqrt(n[1]*n[1]+n[2]*n[2]+n[3]*n[3])>thresh || continue
+        res=n; break
+    end
+    res===nothing && return nothing
+    ex=res[1]==0.0 ? (1.0,0.0,0.0) :
+       res[2]==0.0 ? (0.0,1.0,0.0) : (0.0,0.0,1.0)
+    t1=_mp_prodve_unit(res,ex)
+    t1===nothing && return nothing
+    t2=_mp_prodve_unit(t1,res)
+    t2===nothing && return nothing
+    d=pts[1][1]*res[1]+pts[1][2]*res[2]+pts[1][3]*res[3]
+    a,b,c=res
+    origin=if abs(a)>=abs(b) && abs(a)>=abs(c)
+        (d/a,0.0,0.0)
+    elseif abs(b)>=abs(a) && abs(b)>=abs(c)
+        (0.0,d/b,0.0)
+    else
+        (0.0,0.0,d/c)
+    end
+    all(isfinite,origin) || return nothing
+    return (origin,t1,t2)
+end
+
+# `prodve` (Numeric.h): `c = a×b` with upstream's component expressions —
+# c0 = a1·b2 − a2·b1, c1 = −a0·b2 + a2·b0, c2 = a0·b1 − a1·b0 — then
+# `norme`: components scale by `1/sqrt(Σ squares)`.
+function _mp_prodve_unit(a,b)
+    c=(a[2]*b[3]-a[3]*b[2],
+       -a[1]*b[3]+a[3]*b[1],
+       a[1]*b[2]-a[2]*b[1])
+    mod=sqrt(c[1]*c[1]+c[2]*c[2]+c[3]*c[3])
+    mod==0.0 && return nothing
+    inv=1.0/mod
+    return (c[1]*inv,c[2]*inv,c[3]*inv)
+end
+
 # Ordinary-fill plane admission shared by `mesh_model_surface`'s early gate
 # and the surface-once fallback: a declared ruled/tric patch whose boundary
 # cannot be coplanar is admissible (it routes to the parameter-domain ruled
@@ -9629,15 +9735,23 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     # extruded, periodic-slave and parametric faces keep their producers
     # (the early returns above already claimed them), while periodic-curve
     # constraints and production tracking have no BL consumer and reject.
-    bl_specs=_model_surface_bl_specs(m,t)
-    if bl_specs!==nothing && !haskey(m.meshing.transfinite_surfaces,t)
+    bl_plan=_model_surface_bl_specs(m,t;report_error=options.report_error)
+    if bl_plan!==nothing && !haskey(m.meshing.transfinite_surfaces,t)
+        bl_specs,bl_dropped=bl_plan
         isempty(constraints) || throw(ArgumentError(
             "$caller: boundary-layer field on periodic-curve Surface[$t] " *
             "is not implemented"))
         plane=_model_surface_plane(m,t,caller;allow_ruled=true)
+        # Upstream `Mesh2DWithBoundaryLayers` works on the face's own
+        # parametrization — ruled/tric patches take their `(u,v)` chart
+        # (every generatrix edge is straight there, including curved
+        # boundaries the plane projection cannot represent); plane surfaces
+        # keep the identical plane frame.
+        uv=_surface_type(m,t) in (:ruled,:tric)
         mesh,bl_owners,bl_params=_model_bl_surface_mesh(
             m,t,bl_specs,forced,param_sizes,plane,caller;
-            _periodic_positions=periodic_positions)
+            _periodic_positions=periodic_positions,uv=uv,
+            dropped_curves=bl_dropped)
         get(m.meshing.reverse,(2,t),false) &&
             (mesh=_reversed_surface_mesh(mesh,caller,t))
         mesh=_model_surface_boundary_writeback!(m,t,mesh,caller)
