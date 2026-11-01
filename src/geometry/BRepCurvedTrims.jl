@@ -449,29 +449,35 @@ function _step_shell_flip_parity(itris,tface,nfaces,what,caller)
     return tris,edge_use
 end
 
-# ── prismatic shells: two-cap extrusions with line/arc/polyline trims ────────
+# ── prismatic shells: two-cap extrusions with line/arc/spline trims ──────────
 #
 # A STEP closed shell covering a strict prism — the volume swept along one
 # axial direction z between two parallel caps — where cap wires admit LINE
-# edges, open CIRCLE arcs, closed CIRCLE edges and degree-1 B-spline
-# (polyline-equivalent) edges, and wall faces are z-parallel PLANEs (single
-# LINE/polyline loops spanning both cap heights) or z-parallel
-# CYLINDRICAL_SURFACEs (rim arcs joined by axial seams, both rims covering the
-# same angular window). A cylinder face selects the axis; cap planes are
-# perpendicular to it at exactly two heights.
+# edges, open CIRCLE arcs, closed CIRCLE edges and B-spline edges (degree-1
+# records as polyline-equivalents; higher degrees through a bounded sampled
+# whole-domain tier), and wall faces are z-parallel PLANEs (single
+# LINE/polyline loops spanning both cap heights), z-parallel
+# CYLINDRICAL_SURFACEs (rim arcs joined by axial seams, both rims covering
+# the same angular window) or z-parallel SURFACE_OF_LINEAR_EXTRUSIONs (two
+# rim chains congruent under a constant axial offset plus axial seams). A
+# cylinder or extrusion face selects the axis; cap planes are perpendicular
+# to it at exactly two heights.
 #
-# The cross-section is certified edge-by-edge: every straight segment — a
-# LINE use or one piece of a degree-1 B-spline sub-chain — is shared by
-# exactly two uses across the shell, and every circular edge is covered
-# exactly twice on its geometric circle (cap wire against wall rim, or two
-# coplanar cap faces). Each cylindrical wall's two rims must tile the same
-# angular window so the swept band pairs knot-for-knot. Emission welds one
-# canonical sampled chain per geometric edge piece — angle-keyed in the
-# shared circle frame — so `_dedup_positions` identifies shared boundary
-# vertices bitwise, then the shared flip-parity, directed-edge, volume and
-# `validate` certificates close the shell. Unsupported edge kinds (ELLIPSE,
-# higher-degree or rational splines, TRIMMED_CURVE remnants) and unsupported
-# wall surfaces stay explicit blockers through `curvekinds`.
+# The cross-section is certified edge-by-edge: every straight or sampled
+# segment — a LINE use, one piece of a degree-1 B-spline sub-chain or one
+# piece of a sampled spline chain — is shared by exactly two uses across the
+# shell, and every circular edge is covered exactly twice on its geometric
+# circle (cap wire against wall rim, or two coplanar cap faces). Each
+# cylindrical wall's two rims must tile the same angular window so the swept
+# band pairs knot-for-knot; each swept wall's two rims must agree
+# point-for-point modulo the axial offset. Emission welds one canonical
+# sampled chain per geometric edge piece — angle-keyed in the shared circle
+# frame, or the knot-span evaluation grid for splines — so
+# `_dedup_positions` identifies shared boundary vertices bitwise, then the
+# shared flip-parity, directed-edge, volume and `validate` certificates
+# close the shell. Unsupported edge kinds (ELLIPSE, partially-used or
+# non-curve trims, TRIMMED_CURVE remnants) and unsupported wall surfaces
+# stay explicit blockers through `curvekinds`.
 
 const _BREP_PRISM_ARC_SEGMENTS=48
 
@@ -539,26 +545,89 @@ function _step_polyline_subchain(entities,use)
     return a<b ? pts[a:b] : pts[b:a]
 end
 
+const _BREP_PRISM_SPLINE_SUBDIV=8
+
+# Bounded sampled tier for higher-degree B-spline trims: the edge must use
+# the curve's whole parameter domain — its vertex pair lands on the two
+# evaluated end points — and the canonical chain is the knot-span-uniform
+# evaluation grid, `_BREP_PRISM_SPLINE_SUBDIV` segments per nonzero span.
+# Same-entity uses share the chain bitwise; congruent entities weld through
+# positional deduplication. Returns the evaluated points in parameter order
+# or nothing for non-curves and partial uses.
+function _step_spline_chain(entities,use)
+    c=_step_nurbs_curve(use.base,entities)
+    c===nothing && return nothing
+    ec=use.ec
+    length(ec.args)>=3 || throw(ArgumentError(
+        "_step_prismatic_shell: EDGE_CURVE #$(ec.id) is truncated"))
+    vs=_step_vertex_point(entities,ec.args[2])
+    ve=_step_vertex_point(entities,ec.args[3])
+    (vs===nothing || ve===nothing) && throw(ArgumentError(
+        "_step_prismatic_shell: EDGE_CURVE #$(ec.id) has unresolvable "*
+        "vertex geometry"))
+    vs!=ve || return nothing
+    U=c.knots
+    u0=U[c.degree+1];u1=U[end-c.degree]
+    u1-u0>0 || return nothing
+    p0=nurbs_eval(c,u0);p1=nurbs_eval(c,u1)
+    tol=1e-9*max(_poly_scale(c.controls),1.0)
+    (_posnear(vs,p0,tol) && _posnear(ve,p1,tol)) ||
+        (_posnear(vs,p1,tol) && _posnear(ve,p0,tol)) || return nothing
+    spans=count(k->U[k+1]>U[k],c.degree+1:length(U)-c.degree-1)
+    m=max(1,_BREP_PRISM_SPLINE_SUBDIV*spans)
+    return NTuple{3,Float64}[nurbs_eval(c,u0+(u1-u0)*k/m) for k in 0:m]
+end
+
+# SURFACE_OF_LINEAR_EXTRUSION frame: (basis entity, unit sweep direction).
+function _step_swept_frame(entities,surf)
+    i=_skip_name(surf.args)
+    length(surf.args)>=i+1 || return nothing
+    basis=_deref_entity(entities,surf.args[i])
+    vec=_deref_entity(entities,surf.args[i+1])
+    (basis===nothing || vec===nothing || vec.kind!="VECTOR") &&
+        return nothing
+    d=_deref_direction(entities,vec.args[2])
+    d===nothing && return nothing
+    length(vec.args)>=3 || return nothing
+    mag=vec.args[3] isa Real ? Float64(vec.args[3]) : return nothing
+    n2=_brep_vdot(d,d)
+    (isfinite(n2) && n2>0 && isfinite(mag) && mag>0) || return nothing
+    n=sqrt(n2)
+    return (basis=basis,dir=(d[1]/n,d[2]/n,d[3]/n))
+end
+
 function _step_prismatic_shell(entities,faces,curvekinds,caller)
     length(faces)>=4 || return nothing
     all(f->f.role==1,faces) || return nothing
     all(f->f.surf!==nothing && f.rings!==nothing,faces) || return nothing
     atol=1e-9
-    # Extrusion axis: every cylindrical face must be parallel to the first.
+    # Extrusion axis: every cylindrical face and every ruled extrusion wall
+    # must be parallel to the first.
     z=nothing; cyl_f=Dict{Int,NamedTuple}()
     for (i,f) in enumerate(faces)
-        f.surf.kind=="CYLINDRICAL_SURFACE" || continue
-        c0,zc,xc,yc,R=_step_cylinder_frame(entities,f.surf,caller)
-        if z===nothing
-            z=zc
-        else
-            abs(_brep_vdot(zc,z))>=1.0-atol || return nothing
+        if f.surf.kind=="CYLINDRICAL_SURFACE"
+            c0,zc,xc,yc,R=_step_cylinder_frame(entities,f.surf,caller)
+            if z===nothing
+                z=zc
+            else
+                abs(_brep_vdot(zc,z))>=1.0-atol || return nothing
+            end
+            cyl_f[i]=(c0=c0,z=zc,x=xc,y=yc,R=R)
+        elseif f.surf.kind=="SURFACE_OF_LINEAR_EXTRUSION"
+            sf=_step_swept_frame(entities,f.surf)
+            sf===nothing && (push!(curvekinds,
+                "face surface $(_step_surface_name(f.surf))");return nothing)
+            if z===nothing
+                z=sf.dir
+            else
+                abs(_brep_vdot(sf.dir,z))>=1.0-atol || return nothing
+            end
         end
-        cyl_f[i]=(c0=c0,z=zc,x=xc,y=yc,R=R)
     end
     z===nothing && return nothing
     # Faces: caps are PLANEs perpendicular to z; walls are PLANEs parallel to
-    # z or the parallel cylinders. Anything else is not this family.
+    # z, the parallel cylinders, or z-parallel ruled extrusions. Anything
+    # else is not this family.
     cap_i=Int[];wall_i=Int[];cap_hs=Float64[];cap_plane=Dict{Int,Tuple}()
     for (i,f) in enumerate(faces)
         k=f.surf.kind
@@ -573,7 +642,7 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
             else
                 return nothing
             end
-        elseif k=="CYLINDRICAL_SURFACE"
+        elseif k=="CYLINDRICAL_SURFACE" || k=="SURFACE_OF_LINEAR_EXTRUSION"
             push!(wall_i,i)
         else
             push!(curvekinds,"face surface $(_step_surface_name(f.surf))")
@@ -589,7 +658,7 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
     # ── per-face classified uses ──────────────────────────────────────────
     # fuse[i][bound] = classified uses in wire order:
     #   (:line,u,nothing) | (:polyline,u,(pts=...,)) |
-    #   (:arc,u,arc-span) | (:circle,u,circle-frame)
+    #   (:spline,u,(pts=...,)) | (:arc,u,arc-span) | (:circle,u,circle-frame)
     fuse=Vector{Vector{Vector{NamedTuple}}}(undef,length(faces))
     for (i,f) in enumerate(faces)
         fe=_deref_entity(entities,(:ref,f.id))
@@ -621,10 +690,16 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
                         push!(out,(kind=:arc,u=u,
                             aux=_step_arc_span(entities,u,caller)))
                     end
-                elseif b=="B_SPLINE_CURVE_WITH_KNOTS"
+                elseif b=="B_SPLINE_CURVE_WITH_KNOTS" || b=="COMPLEX"
                     ch=_step_polyline_subchain(entities,u)
-                    ch===nothing && (push!(curvekinds,b);return nothing)
-                    push!(out,(kind=:polyline,u=u,aux=(pts=ch,)))
+                    if ch===nothing
+                        ch=_step_spline_chain(entities,u)
+                        ch===nothing &&
+                            (push!(curvekinds,b);return nothing)
+                        push!(out,(kind=:spline,u=u,aux=(pts=ch,)))
+                    else
+                        push!(out,(kind=:polyline,u=u,aux=(pts=ch,)))
+                    end
                 else
                     push!(curvekinds,b);return nothing
                 end
@@ -648,7 +723,7 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
         if ur.kind==:line
             r0=length(vpos)+1;push!(vpos,ur.u.v1,ur.u.v2)
             vranges[(i,bi,ui)]=r0:length(vpos)
-        elseif ur.kind==:polyline
+        elseif ur.kind in (:polyline,:spline)
             r0=length(vpos)+1;append!(vpos,ur.aux.pts)
             vranges[(i,bi,ui)]=r0:length(vpos)
         end
@@ -676,10 +751,10 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
     for i in cap_i
         p0,pn=cap_plane[i]
         for bound in fuse[i],ur in bound
-            if ur.kind==:polyline
+            if ur.kind in (:polyline,:spline)
                 for v in ur.aux.pts
                     abs(_brep_vdot(_brep_vsub(v,p0),pn))<=ptol || throw(
-                        ArgumentError("$caller: polyline edge #$(ur.u.ec.id) "*
+                        ArgumentError("$caller: sampled edge #$(ur.u.ec.id) "*
                             "leaves PLANE #$(faces[i].surf.id)"))
                 end
             else
@@ -703,6 +778,7 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
 
     # ── wall faces: single loop, axial or cap-height edges ────────────────
     wallc=Dict{Int,NamedTuple}()   # cyl walls: (c0,z,x,y,R,arcs,pieces,g0i,g1i)
+    wallex=Dict{Int,NamedTuple}()  # swept walls: (a=rim0 chain,b=rim1 chain)
     for i in wall_i
         f=faces[i]
         uses=only(fuse[i])
@@ -710,6 +786,7 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
             cf=cyl_f[i];tol=1e-9*max(cf.R,1.0)
             arcs=NamedTuple[];axial=false
             for (ui,ur) in enumerate(uses)
+                ur.kind==:spline && return nothing
                 if ur.kind==:arc
                     _step_cyl_rim_arc(entities,ur.u,cf.c0,cf.z,cf.x,cf.y,
                         cf.R,tol,atol,caller)
@@ -759,6 +836,55 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
             end
             !isempty(arcs) || return nothing
             wallc[i]=(c0=cf.c0,z=cf.z,x=cf.x,y=cf.y,R=cf.R,arcs=arcs)
+        elseif f.surf.kind=="SURFACE_OF_LINEAR_EXTRUSION"
+            # Swept wall: exactly two rims at distinct cap heights — chains
+            # congruent under a constant axial offset — plus straight axial
+            # seams joining the caps. Rims may be sampled spline chains,
+            # polylines, or single segments.
+            rims=NamedTuple[]
+            for ur in uses
+                ur.kind in (:arc,:circle) && return nothing
+                pts=ur.kind==:line ? NTuple{3,Float64}[ur.u.v1,ur.u.v2] :
+                    collect(ur.aux.pts)
+                ts=[_brep_vdot(v,z) for v in pts]
+                if all(t->abs(t-ts[1])<=htol,ts) &&
+                   (abs(ts[1]-h0)<=htol || abs(ts[1]-h1)<=htol)
+                    rim=abs(ts[1]-h0)<=htol ? 1 : 2
+                    push!(rims,(rim=rim,pts=pts))
+                    continue
+                end
+                # Otherwise the use must be an axial seam joining the caps.
+                ur.kind in (:line,:polyline) || return nothing
+                all(k->abs(_brep_vdot(_brep_vunit(
+                        _brep_vsub(pts[k+1],pts[k]),caller),z))>=1.0-atol,
+                    1:length(pts)-1) || return nothing
+                (abs(ts[1]-h0)<=htol && abs(ts[end]-h1)<=htol ||
+                 abs(ts[1]-h1)<=htol && abs(ts[end]-h0)<=htol) ||
+                    return nothing
+            end
+            (length(rims)==2 && rims[1].rim!=rims[2].rim) || return nothing
+            chA=rims[1].rim==1 ? rims[1].pts : rims[2].pts
+            chB=rims[1].rim==2 ? rims[1].pts : rims[2].pts
+            length(chA)==length(chB) || return nothing
+            ez=(z[1]*(h1-h0),z[2]*(h1-h0),z[3]*(h1-h0))
+            function _chainoffset(p,q)
+                o=_brep_vsub(p,q)
+                (abs(o[1]-ez[1])<=ptol && abs(o[2]-ez[2])<=ptol &&
+                 abs(o[3]-ez[3])<=ptol) && return o
+                return nothing
+            end
+            off=_chainoffset(first(chB),first(chA))
+            if off===nothing
+                _chainoffset(last(chB),first(chA))===nothing &&
+                    return nothing
+                chB=reverse(chB)
+                off=_chainoffset(first(chB),first(chA))
+            end
+            all(k->begin o=_brep_vsub(chB[k],chA[k]);
+                    abs(o[1]-off[1])<=ptol && abs(o[2]-off[2])<=ptol &&
+                    abs(o[3]-off[3])<=ptol end,eachindex(chA)) ||
+                return nothing
+            wallex[i]=(a=chA,b=chB)
         else
             p0,pn=_step_plane_frame(entities,f.surf,caller)
             spans=false
@@ -988,10 +1114,10 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
         for (ui,ur) in enumerate(bound)
             if ur.kind==:line
                 push!(ring,ur.u.v2)
-            elseif ur.kind==:polyline
+            elseif ur.kind in (:polyline,:spline)
                 ch=ur.aux.pts
                 fwd=_posnear(ur.u.v1,first(ch),ptol)
-                append!(ring,fwd ? ch[2:end] : reverse(ch[1:end-1]))
+                append!(ring,fwd ? ch[2:end] : reverse(collect(ch[1:end-1])))
             elseif ur.kind==:arc
                 rec=useg[(i,bi,ui)]
                 fwd=_posnear(ur.u.v1,rec.startp,ptol)
@@ -1064,7 +1190,7 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
         end
     end
     for i in wall_i
-        haskey(wallc,i) && continue
+        (haskey(wallc,i) || haskey(wallex,i)) && continue
         ring=wire_ring!(only(fuse[i]),i,1)
         length(ring)>=3 || throw(ArgumentError(
             "$caller: wall face #$(faces[i].id) is degenerate"))
@@ -1080,6 +1206,11 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
             for k in 1:length(p0v)-1
                 emit!(:quad,(p0v[k],p0v[k+1],p1v[k+1],p1v[k]),i)
             end
+        end
+    end
+    for (i,w) in wallex
+        for k in 1:length(w.a)-1
+            emit!(:quad,(w.a[k],w.a[k+1],w.b[k+1],w.b[k]),i)
         end
     end
     nodes,canon=_dedup_positions(pool,caller)

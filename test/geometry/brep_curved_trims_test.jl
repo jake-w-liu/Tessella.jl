@@ -220,4 +220,41 @@ end
     @test all(>(0),_tet_volumes(filled))
 end
 
+@testset "sampled B-spline trims weld swept extrusion walls" begin
+    # A real OCC export of a 3×2 plate whose right edge is a degree-2
+    # B-spline bulge (control points (3,0),(4,1),(3,2)) extruded dz=1: one
+    # SURFACE_OF_LINEAR_EXTRUSION wall bounded by two congruent spline rims
+    # plus LINE seams. The bounded sampled tier evaluates eight segments
+    # per nonzero knot span and welds rim-to-rim point-for-point.
+    surface=import_step(joinpath(FIXTURES,"brep_occ_prism_spline_plate.step");
+                        fill=false)
+    @test surface isa E.Mesh && validate(surface).ok
+    @test nnodes(surface)==22 && ntris(surface)==40
+    @test all(values(_edge_incidence(surface)).==(2))
+    @test vec(minimum(surface.coords,dims=2))≈[0.,0.,0.] atol=1e-12
+    @test vec(maximum(surface.coords,dims=2))≈[3.5,2.,1.] atol=1e-12
+    # The sampled grid passes through the quadratic-Bézier midpoint.
+    @test any(i->surface.coords[1,i]≈3.5 && surface.coords[2,i]≈1.0 &&
+                 surface.coords[3,i]≈0.0,axes(surface.coords,2))
+    # 8-segment polygon under the parabola: exact area 6+2/3 ≈ 6.6667.
+    @test _signed_surface_volume(surface)≈6.65625 atol=1e-9
+
+    filled=import_step(joinpath(FIXTURES,"brep_occ_prism_spline_plate.step"))
+    @test filled isa E.Mesh && validate(filled).ok && ntets(filled)>0
+    @test all(>(0),_tet_volumes(filled))
+
+    # Mismatched or partial higher-degree trims stay an explicit bound:
+    # moving the lower rim curve's end control point leaves an edge use
+    # whose vertex no longer lands on the evaluated domain end, which must
+    # reject through the curve-kind diagnostic rather than silently
+    # sampling a wrong interval.
+    _with_source("brep_occ_prism_spline_plate.step",
+        "#222 = CARTESIAN_POINT('',(3.,2.,0.));"=>
+        "#222 = CARTESIAN_POINT('',(3.,2.5,0.));") do path
+        err=try import_step(path;fill=false);nothing catch e e end
+        @test err isa ArgumentError
+        @test occursin("B_SPLINE_CURVE_WITH_KNOTS",sprint(showerror,err))
+    end
+end
+
 end # module

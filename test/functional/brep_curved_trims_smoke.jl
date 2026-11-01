@@ -17,4 +17,8 @@ let surface=import_step(joinpath(@__DIR__,"..","fixtures","brep_occ_prism_stadiu
     @test surface isa Tessella.Mesh && validate(surface).ok
     @test Tessella.MeshTypes.nnodes(surface)==100 && Tessella.MeshTypes.ntris(surface)==196
 end
+let surface=import_step(joinpath(@__DIR__,"..","fixtures","brep_occ_prism_spline_plate.step");fill=false)
+    @test surface isa Tessella.Mesh && validate(surface).ok
+    @test Tessella.MeshTypes.nnodes(surface)==22 && Tessella.MeshTypes.ntris(surface)==40
+end
 end

@@ -2607,6 +2607,13 @@ function _step_brep_solid(brep::StepEntity,entities,fill;factor::Float64=1.0)
             cylinder=_step_unit_scaled(cylinder,factor)
             return fill ? _filled(cylinder,caller) : cylinder
         end
+    elseif any(f->f.surf!==nothing &&
+               f.surf.kind=="SURFACE_OF_LINEAR_EXTRUSION",faces)
+        prism=_step_prismatic_shell(entities,faces,curvekinds,caller)
+        if prism!==nothing
+            prism=_step_unit_scaled(prism,factor)
+            return fill ? _filled(prism,caller) : prism
+        end
     end
     if any(f->f.surf!==nothing && f.surf.kind=="CONICAL_SURFACE",faces)
         cone=_step_conical_shell(entities,faces,curvekinds,caller)

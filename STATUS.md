@@ -12880,24 +12880,35 @@ NoNewVerts catalogs on such a wall keep the planner diagnostic;
 partner `PointsList`-style layer overrides remain unsupported. Bounded
 fixture evidence only.
 
-## 2026-11-01 — CAD04 prismatic curved trims: non-coaxial arcs, slit walls, degree-1 B-splines (Devin subagent)
+## 2026-11-01 — CAD04 prismatic curved trims: non-coaxial arcs, slit walls, degree-1 + sampled B-splines (Devin subagent)
 
 The second curved-trim slice admits two-cap prismatic shells — the
 extrusion-like solids OCC exports for holed/profiled plates — with
-LINE, open-arc, closed-circle and degree-1-B-spline trims on planar or
-cylindrical walls, and admits OCC's auxiliary wireframe representation
-products without letting them into solid selection.
+LINE, open-arc, closed-circle, degree-1-B-spline and bounded sampled
+higher-degree-B-spline trims on planar, cylindrical or ruled-extrusion
+walls, and admits OCC's auxiliary wireframe representation products
+without letting them into solid selection.
 
 - `_step_prismatic_shell` (`BRepCurvedTrims.jl`) certifies strict
-  prisms: faces are PLANEs or CYLINDRICAL_SURFACEs sharing one
-  certified axial direction; cap planes are perpendicular to it at
-  exactly two heights; cap wires admit LINE edges, open CIRCLE arcs
-  (centres off the cylinder axis included), closed CIRCLE rims and
-  degree-1 `B_SPLINE_CURVE_WITH_KNOTS` records resolved to control
-  sub-chains through `_step_polyline_subchain`; cylindrical walls carry
-  rim arcs whose two rims tile the same angular window plus axial
-  seams spanning both caps; planar walls are single z-parallel loops
-  reaching both cap heights.
+  prisms: faces are PLANEs, CYLINDRICAL_SURFACEs or
+  SURFACE_OF_LINEAR_EXTRUSIONs sharing one certified axial direction;
+  cap planes are perpendicular to it at exactly two heights; cap wires
+  admit LINE edges, open CIRCLE arcs (centres off the cylinder axis
+  included), closed CIRCLE rims, degree-1
+  `B_SPLINE_CURVE_WITH_KNOTS` records resolved to control sub-chains
+  through `_step_polyline_subchain`, and higher-degree B-spline edges
+  through `_step_spline_chain` — a bounded whole-domain tier that
+  requires the edge vertex pair on the two evaluated domain ends and
+  samples `_BREP_PRISM_SPLINE_SUBDIV` (8) segments per nonzero knot
+  span so same-entity uses weld bitwise and congruent entities weld
+  through positional deduplication; cylindrical walls carry rim arcs
+  whose two rims tile the same angular window plus axial seams
+  spanning both caps; swept extrusion walls carry exactly two
+  rim chains congruent under the constant axial offset plus axial
+  seams (the basis curve is certified through the boundary rims, not
+  re-evaluated); planar walls are single z-parallel loops reaching
+  both cap heights. Shells whose only axis source is an extrusion
+  face dispatch through the same certificate.
 - Welding is canonical, not positional luck: circle uses are grouped
   per geometric (centre, radius, axis-line) into shared knot
   partitions; every straight segment and every elementary circular
@@ -12925,22 +12936,28 @@ products without letting them into solid selection.
 - New real fixtures (`test/fixtures/brep_occ_prism_*.step`, OCC 7.8
   exports): stadium plate 100n/196t, D-plate 54/104, slotted plate
   108/216, rounded plate 104/204, slit pipe 148/292, bolt flange
-  288/592 — all `validate`-clean, watertight (every undirected edge
-  traversed once each way) and filled-importable; stadium's signed
-  surface volume is polygon-exact (`4.5 − 2·halfdisk`). Probe
+  288/592, spline plate 22/40 — all `validate`-clean, watertight
+  (every undirected edge traversed once each way) and
+  filled-importable; stadium's signed surface volume is
+  polygon-exact (`4.5 − 2·halfdisk`) and the spline plate's sampled
+  parabolic bulge measures 6.65625 against the exact 6+2/3. Probe
   fixtures multi-hole plate, boss plate, counterbore and slit wall
   import too.
-- Rejections stay explicit: `spline_prism` (degree-2+ B-spline edge
-  trims and `SURFACE_OF_LINEAR_EXTRUSION` walls) and
+- Rejections stay explicit: a spline edge whose vertex pair misses
+  the evaluated domain ends (partial or mismatched uses) and
   `slant_hole_plate` (ELLIPSE trim + tilted cylinder) report the
   unsupported-topology diagnostic naming the seen kinds.
 - Receipts: `brep_curved_trims_test.jl` — new
   "prismatic shells weld non-coaxial arcs and wall strips" set
   (23/23: watertight incidence, polygon-exact volumes, a
   LINE→degree-1-B-spline substitution reproducing the identical
-  shell, and a filled stadium tetrahedralization); whole file
-  10+11+50+11+4+23 = 109/109 exit 0 (the 50-assertion analytic-wall
-  projection runs ≈5min).
+  shell, and a filled stadium tetrahedralization) plus "sampled
+  B-spline trims weld swept extrusion walls" (11/11: the real OCC
+  degree-2-bulge prism, watertight incidence, bbox/midpoint/volume
+  checks, a positive-volume tetrahedralization, and the
+  control-point-mismatch rejection); whole file
+  10+11+50+11+4+23+11 = 120/120 exit 0 (the 50-assertion
+  analytic-wall projection runs ≈5min).
   `brep_step_cylinder_functional_test.jl` 40/40 exit 0;
   `brep_curved_trims_smoke.jl` extended with the stadium import;
   assembly/relationship suites exit 0 (73, 16, 137, 29, 38, 22, 28,
@@ -12948,10 +12965,13 @@ products without letting them into solid selection.
   14, 7, 10, 12 assertions).
 
 **Not claimed.** Bounded slice only: no ELLIPSE trims, no
-higher-degree or rational B-spline trims, no
-`SURFACE_OF_LINEAR_EXTRUSION`/ruled walls, no NURBS-face topology in
-this path, no nonlinear UV charts, no general analytic Face/Curve
-registry, no non-prismatic multi-height walls or T-junction welds;
-the sampled higher-order fallback and the analytic registry remain
-open CAD04 work. Bounded fixture evidence; not full OCC-import
-parity.
+partial or mismatched-domain spline uses (the sampled tier is
+whole-domain only and ignores the swept surface's basis curve — it
+certifies the wall through its two rim chains and seams; rational
+weights would evaluate through the same `nurbs_eval` path but no
+fixture exercises them), no multi-chain or closed-loop swept rims,
+no NURBS-face topology in this path, no nonlinear UV charts, no
+general analytic Face/Curve registry, no non-prismatic multi-height
+walls or T-junction welds; the analytic registry and general NURBS
+topology remain open CAD04 work. Bounded fixture evidence; not full
+OCC-import parity.
