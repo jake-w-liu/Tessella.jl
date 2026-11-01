@@ -5965,6 +5965,61 @@ Oracle-driven (`boundaryLayersData.cpp`, Gmsh 4.15.2 source + CLI probe
   `src/geometry/ModelBoundaryLayerField.jl`,
   `test/geometry/geo_boundary_layer_field_test.jl`.
 
+## Working-tree increment (ALG01/MET02 algorithm-7 ruled front + recomb; PART01 METIS tier; 2026-11-01)
+
+Two verified slices land together:
+
+- **Algorithm-7 (BAMG) ruled/tric + recombination.** The Gmsh 4.15.2
+  oracle ships BAMG and runs it on warped ruled/tric patches
+  parametrically (28 vertices / 36 tris probe), so
+  `ModelMetricSurfaceProducer.jl` gained a built-in ruled front:
+  `_metric_surface_admit(...;ruled=true)` admits `:ruled`/`:tric`,
+  `_ruled_metric_surface_refine` builds a CDT of the patch's own
+  parameter domain and refines under the finite-difference `J'MJ`
+  pullback (`_ruled_surface_point`/`_ruled_surface_d1`) with the same
+  certificate set as the planar/OCC fronts — actual lower Curve-cell
+  incidence, retained-boundary + final `metric_edge_length <= 1`,
+  (u,v)-footprint conservation, bitwise retained vertices, patch-normal
+  reorientation — and `_metric_parametric_split_helpers` factors the
+  curved-chart dyadic+ULP contract. Recombination algorithms 0/1 feed
+  the *certified* triangulation into the shared native kernel
+  (`_allow_recombine` on `_gmsh_native_initial_surface`;
+  `_native_recombine_state_lift` lifts through the chart's own `lift`);
+  full-quad 2+ keeps the loud rejection.
+  `ModelGmshCurveIntegration.jl` collects per-incident-face certificate
+  fields at grade time, measures emitted edges on the rational-exact
+  `_model_curve_point` evaluator and regrades under
+  `_MetricScaledAniso` (≤8 attempts) until the strict bound holds —
+  the one-ulp retained-boundary remnant is closed.
+  Stale pins corrected: `model_metric_algorithm7_functional_test`
+  circle/ruled arms assert valid meshes + a new recomb/determinism
+  testset; `model_occ_curved_algorithm_test` asserts `Algorithm3D=9`
+  (RTREE, `06d8df7`) fills instead of rejecting.
+- **PART01 METIS-tier partitioner (verified in-flight worker diff).**
+  `src/interfaces/APIGraphPartition.jl` adds the native multilevel
+  element-dual partitioner — the METIS-quality tier fronting the BFS
+  tier (`Mesh.MetisAlgorithm=-1` selects legacy); `Mesh.Metis*` and
+  `Mesh.Partition*Weight` are registered options; `compute_renumbering`
+  gains `"Hilbert"`/`"Metis"`; `API.mesh.partition` honors
+  `Mesh.NbPartitions`; `.geo` `PartitionMesh` scopes solver options;
+  CLI `-part_weight`/`-partWeight` parses family/weight pairs. The
+  multilevel tier's manifold-interface assignments unlock `-part_topo`
+  on native `.geo` volume meshes (real `$PartitionedEntities` children
+  + `_part{...}` names); BRep-imported `.msh` keeps its loud rejection.
+  `cli_frontends`/`cli_unrolled` pins re-pinned.
+- Exits (Julia 1.12.7, `--compile=min -O0 --check-bounds=yes`):
+  `model_metric_algorithm7_functional_test` 32/32 (and `-O2`);
+  `model_occ_metric_algorithm7_test`, `model_metric_delaunay_arm_test`
+  19/19, `mesh1d_test` 106/106, `model_metric_hybrid_volume_test` 71/71,
+  `model_metric_surface_density_test`, `model_occ_curved_algorithm_test`,
+  `cli_frontends_test` 74/74 + 28/28, `api_graph_partition_native_test`
+  44/44, `api_compute_renumbering_test` 21/21,
+  `model_metric_volume_functional_test` — all exit 0.
+- Residuals: full-quad recomb on alg-7 surfaces; embedded/periodic/
+  transfinite Surface contexts and scalar-only alg-7 on curved OCC stay
+  loud; BFS (`MetisAlgorithm=-1`) can still hit `nonmanifold interface
+  edge` on pinched partitions — a certified reject, not degradation.
+
 ## Verified gates
 
 - `validation/transfinite/differential.jl` Gmsh 4.15.2:

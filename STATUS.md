@@ -24,6 +24,120 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### ALG01/MET02 algorithm-7 (BAMG): ruled/tric parametric front + recombination routing (2026-11-01)
+
+- **Oracle verdict (Gmsh 4.15.2).** `General.BuildOptions` and
+  `General.BuildInfo` both list `Bamg` — the oracle accepts `-algo bamg`
+  and `Mesh.Algorithm=7`, produces anisotropic stretching under tensor
+  background fields, recombines the BAMG triangles through Blossom, and
+  meshes warped ruled/tric patches parametrically (warped ruled probe: 28
+  vertices / 36 triangles). Tessella's answer stays the certified
+  metric-tensor producer, not a BAMG port.
+- **Landed — built-in ruled/tric algorithm-7 front.**
+  `_metric_surface_admit(...;ruled=true)` now admits declared `:ruled` and
+  `:tric` surfaces (plane-only explicit tensor overloads unchanged).
+  `_ruled_metric_surface_refine` builds a CDT of the patch's own
+  parameter domain — the unit square (four generatrices) or the
+  three-curve triangular domain — and refines it under the
+  finite-difference `J'MJ` pullback of `_ruled_surface_point` /
+  `_ruled_surface_d1`, sharing the certified refinement core with the
+  planar and OCC fronts (`_metric_parametric_split_helpers`). Boundary
+  Curve products map into the domain through `_ruled_curve_parameters`;
+  the strict certificates all apply — actual lower Curve-cell incidence,
+  retained-boundary and final `metric_edge_length <= 1`, (u,v)-footprint
+  area preservation, bitwise retained-vertex checks — and emitted cells
+  reorient by the patch normal. The scalar/non-algorithm-7 ruled path
+  (`_model_ruled_surface_mesh`) is unchanged.
+- **Landed — recombination through the certified triangulation.**
+  `_model_surface_recombined` surfaces under algorithm 7 now suppress the
+  seed recombination (`_allow_recombine` on
+  `_gmsh_native_initial_surface`), certify the triangulation, then pair
+  it through the shared native kernel — `RecombinationAlgorithm` 0
+  (simple) and 1 (blossom) produce deterministic MixedMesh output with
+  ownership, parameters, birth rows and lower products transported
+  (`_native_recombine_state_lift` lifts through the chart's `lift`).
+  Full-quad algorithms 2+ keep the loud not-implemented rejection.
+- **Landed — certificate-driven line regrading.** In
+  `ModelGmshCurveIntegration.jl::_model_native_line_grade_params`, a
+  Curve feeding an algorithm-7 face collects per-incident-face
+  certificate fields, measures the emitted discretization against the
+  rational-exact `_model_curve_point` evaluator the surface's
+  retained-boundary certificate reads, and regrades under
+  `_MetricScaledAniso` (up to 8 attempts) while a worst-edge remnant
+  persists — closing the one-ulp certificate miss
+  (`1.0000000000000009` → now strictly ≤ 1).
+- **Stale pins corrected.** `model_metric_algorithm7_functional_test.jl`:
+  the circle-arc and warped-ruled arms expected `ArgumentError` from a
+  pre-front contract; they now assert valid meshes (arc nodes on the
+  circle, ruled (u,v) inside the domain, x/y-tensor directionality) plus
+  a new recombination-and-determinism testset.
+  `model_occ_curved_algorithm_test.jl`: `Mesh.Algorithm3D=9` (RTREE,
+  landed `06d8df7`) asserts a valid fill instead of the pre-arm
+  rejection.
+- **Exits (Julia 1.12.7, `--compile=min -O0 --check-bounds=yes` unless
+  noted).** `model_metric_algorithm7_functional_test` 32/32 exit 0
+  (incl. `-O2` re-run, exit 0); `model_occ_metric_algorithm7_test` all
+  testsets exit 0; `model_metric_delaunay_arm_test` 19/19;
+  `mesh1d_test` 106/106; `model_metric_hybrid_volume_test` 71/71;
+  `model_metric_surface_density_test` 4/4;
+  `model_occ_curved_algorithm_test` all testsets (corrected
+  Algorithm3D admission 9/9); `cli_frontends_test` incl. `-algo bamg`
+  and corrected `-part_topo`/`-part_weight` assertions;
+  `model_metric_volume_functional_test` all testsets.
+- **Residual (unchanged or clarified).** Full-quad
+  `RecombinationAlgorithm >= 2` on algorithm-7 surfaces keeps its loud
+  rejection; embedded/periodic/transfinite Surface contexts and
+  unsupported geometry kinds stay outside the metric admission;
+  scalar/absent-field algorithm 7 on curved OCC faces keeps the
+  tensor-required admission error; upstream's `meshGFace` unknown-
+  selector Bowyer-Watson/BAMG fallback remains a documented policy
+  difference. `Mesh.Algorithm3D` now meshes natively for 1/3/9;
+  4/7/10/99/-1 reject specifically.
+
+### PART01 METIS-tier partitioner + `-part_weight` + partition topology on native meshes (2026-11-01)
+
+In-flight worker slice verified independently and landed from the
+uncommitted diff (its own new test files plus the affected CLI
+regressions all exit 0):
+
+- **Landed.** `src/interfaces/APIGraphPartition.jl` adds the native
+  multilevel element-dual graph partitioner — the METIS-quality tier
+  (coarsening / k-way refinement) fronting the linear-time BFS tier
+  through the `_partition_elements` dispatcher. `Mesh.MetisAlgorithm=-1`
+  selects legacy BFS; the `Mesh.Metis*` option surface
+  (`MetisAlgorithm`, `MetisEdgeMatching`, `MetisObjective`,
+  `MetisRefinementAlgorithm`, `MetisMaxLoadImbalance`, `MetisMinConn`)
+  and per-family `Mesh.Partition*Weight` values are registered in
+  `DEFAULT_OPTIONS` and truncated like upstream. `compute_renumbering`
+  gains `"Hilbert"` (space-filling order + bounded 2-opt polish) and
+  `"Metis"` (native nested dissection, the `METIS_NodeND` contract
+  without the dependency) alongside `"RCMK"`.
+  `API.mesh.partition` falls back to `Mesh.NbPartitions` for negative
+  counts. `.geo` `PartitionMesh` scopes `Mesh.Metis*`/
+  `Mesh.Partition*Weight` into the solver call (`GeoExec.jl`);
+  CLI `-part_weight`/`-partWeight` parses `fam weight` pairs into the
+  option surface (`CLI.jl`) — the last named `-part_weight` rejection
+  from the batch-flag table is resolved.
+- **Behavioral change.** With the multilevel partitioner the
+  BRep-partition plan's manifold-interface checks pass on native
+  (non-import) volume meshes, so `-part_topo`/`-part_ghosts` now publish
+  real `$PartitionedEntities` children and `_part{...}` physical groups
+  on `.geo` models — upstream's canonical use case. The same request on
+  a BRep-imported `.msh` keeps its loud rejection; `MetisAlgorithm=-1`
+  BFS assignments can still hit `nonmanifold interface edge` on
+  partition-pinched fills, which is a certified loud reject, not silent
+  degradation.
+- **Stale pins corrected.** `cli_frontends_test.jl` asserts the
+  partition-topology production (`$PartitionedEntities`, `_part{`
+  names) on the `.geo` box and `-part_weight` pair acceptance/usage
+  rejection; `cli_unrolled_geo_test.jl` drops `-part_weight` from the
+  rejected-flag battery and pins the bare-flag usage error.
+- **Exits (Julia 1.12.7, `--compile=min -O0 --check-bounds=yes`).**
+  `api_graph_partition_native_test` 35/35 + 4/4 + 5/5 exit 0;
+  `api_compute_renumbering_test` 19/19 + 2/2 exit 0;
+  `cli_frontends_test` full file exit 0 (incl. the corrected
+  part_topo/part_weight assertions).
+
 ### LAY02 `.geo` BoundaryLayer Field — `SizesList` per-vertex grading + `treat2Connections` corner law (2026-11-01)
 
 - **Oracle semantics (Gmsh 4.15.2 source + CLI).**

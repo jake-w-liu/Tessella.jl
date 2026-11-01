@@ -1,5 +1,47 @@
 # Devin handoff — complete Tessella's remaining implementation
 
+## 2026-11-01 ALG01/MET02 algorithm-7 ruled front + recomb routing; PART01 METIS tier landed
+
+- **BAMG/algorithm-7 slice (this increment).** The Gmsh 4.15.2 oracle
+  ships BAMG (`General.BuildOptions`/`BuildInfo` list `Bamg`) and runs it
+  on warped ruled/tric patches parametrically, so the certified
+  metric-tensor producer was extended, not aliased:
+  `_metric_surface_admit(...;ruled=true)` + `_ruled_metric_surface_refine`
+  (CDT on the patch's own parameter domain, finite-difference `J'MJ`
+  pullback through `_ruled_surface_point`/`_ruled_surface_d1`, full
+  certificate set, normal-based reorientation); `_metric_parametric_split_helpers`
+  shared with the OCC front; recombination algorithms 0/1 route the
+  certified triangulation into the shared native kernel
+  (`_allow_recombine` seed suppression + `_native_recombine_state_lift`),
+  full-quad 2+ stays a loud reject; `_model_native_line_grade_params`
+  collects per-incident-face certificate fields and regrades under
+  `_MetricScaledAniso` until the strict `metric_edge_length <= 1` bound
+  holds on `_model_curve_point`-measured edges (one-ulp remnant closed).
+  `-algo bamg`, API `Mesh.Algorithm=7` and `.geo` `Mesh.Algorithm=7` all
+  reach the producer. Tests: `model_metric_algorithm7_functional_test`
+  32/32 (compile=min and `-O2`), `model_occ_metric_algorithm7_test`,
+  `model_metric_delaunay_arm_test` 19/19, `mesh1d_test` 106/106,
+  `model_metric_hybrid_volume_test` 71/71, `model_metric_surface_density_test`,
+  `model_occ_curved_algorithm_test` (RTREE-9 pin corrected),
+  `cli_frontends_test`, `model_metric_volume_functional_test` — all exit
+  0. Residuals: full-quad recomb on alg-7 faces, embedded/periodic/
+  transfinite Surface contexts, scalar-only alg-7 on curved OCC.
+- **PART01 in-flight slice (verified, landed).** An uncommitted worker
+  diff in the tree added the native multilevel graph partitioner
+  (`APIGraphPartition.jl`, the METIS-quality tier with `MetisAlgorithm=-1`
+  BFS fallback), the `Mesh.Metis*` + `Mesh.Partition*Weight` option
+  surface, `compute_renumbering` `"Hilbert"`/`"Metis"`, `Mesh.NbPartitions`
+  fallback, `.geo` solver scoping and CLI `-part_weight` parsing — verified
+  independently (`api_graph_partition_native_test` 44/44,
+  `api_compute_renumbering_test` 21/21) and committed separately. Its
+  manifold-interface-quality assignments also unlock `-part_topo` on
+  native `.geo` volume meshes (real `$PartitionedEntities` output); the
+  `cli_frontends`/`cli_unrolled` pins were re-pinned to the new contract.
+- **ALG01 audit update.** `Mesh.Algorithm` 2/3/5/6/7 mesh natively
+  (7 now covers planes, circle/arc boundaries, OCC parametric and
+  ruled/tric charts plus recomb 0/1); `Mesh.Algorithm3D` 1/3/9 mesh
+  natively — the 2026-10-29 audit's "9 rejects" note predates `06d8df7`.
+
 ## 2026-11-01 t19 re-verification on HEAD `8768ef2` — verbatim `GMSH_PARITY_T19_TUTORIAL_OK`
 
 The two blockers from the 2026-10-19 P601 classification are resolved on HEAD,
