@@ -1,5 +1,32 @@
 # Devin handoff — complete Tessella's remaining implementation
 
+## 2026-11-01 t19 re-verification on HEAD `8768ef2` — verbatim `GMSH_PARITY_T19_TUTORIAL_OK`
+
+The two blockers from the 2026-10-19 P601 classification are resolved on HEAD,
+no new Source required: (1) `occ.fillet` on lofted `tensor_bspline` faces runs
+the `20be4b1` swept rolling-ball path (`_occ_fillet_sweep_plan` /
+`_occ_fillet_sweep_stations` / `_occ_fillet_sweep_rebuild!` in
+`src/geometry/ModelOCCLoft.jl` — sampled ChFi3d-class stations welded into a
+periodic NURBS pipe face); the old `fillet needs planar faces` admission error
+is gone — the surviving gates are `fillet edge must be a line or a full circle`
+(ModelOCCLoft.jl:3568) and the line-edge planar-face contract (:3579).
+(2) The non-planar pipe wall (`Extrude { Surface } Using Wire`) meshes through
+the `ce99742` uv-parameterized OCC curved-surface production
+(`_occ_curved_surface_production` /
+`_model_occ_curved_surface_mesh_tracked`, direction-aware UV seeding); the
+`is not coplanar` throw at Model.jl:5674 is plane-path admission that OCC
+curved surfaces no longer reach. `1645855` closed the last verbatim edge
+(shell-orphan loop claim + closed-curve `t1`-station truncation).
+Driver receipt on `julia --project=. --check-bounds=yes -O2` (Julia 1.12.7):
+`GMSH_PARITY_T19_TUTORIAL_OK geo=OK nodes=3225 tets=8249 volume=1.7818869
+nofillet=OK 2387/5800 nosize=OK 346/414 gmsh 13680/57656 vol 1.7997554`
+(8249 vs the recorded 8258 tets — the tree carries other workers'
+uncommitted surface-producer WIP; nodes/volume unchanged). Regressions
+(`--compile=min -O0 --check-bounds=yes`): `api_occ_fillet_test` 79/79,
+`occ_fillet_trim_test` 52/52, `api_occ_transform_test` 220/220,
+`model_warped_ruled_surface_test` 32/32, `model_ruled_parametrization_test`
+471/471 — all exit 0. See the 2026-11-01 STATUS entry.
+
 ## 2026-11-01 MET01/02 residual audit + OCC `:degenerate` / anisotropic arc-grading fixes; PAR01 resolved-field detachment
 
 - **MET01/02 audit verdict.** The three nominal residuals in the MET

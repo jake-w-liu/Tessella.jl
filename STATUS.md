@@ -61,6 +61,32 @@ support or test requirements.
   `AnisoMax`; plane surfaces only; transfinite/extruded/periodic-slave
   exclusions preserved.
 
+### P601 t19 tutorial parity verified — `GMSH_PARITY_T19_TUTORIAL_OK` (2026-11-01)
+
+Re-verified the t19 driver verbatim on HEAD `8768ef2` under
+`julia --project=. --check-bounds=yes -O2` (Julia 1.12.7, live gmsh 4.15.2
+oracle): both blockers from the 2026-10-19 classification remain resolved —
+`occ.fillet` on lofted `tensor_bspline` faces rides the `20be4b1` swept
+rolling-ball fillet path (`_occ_fillet_sweep_*` in `ModelOCCLoft.jl`; the old
+`fillet needs planar faces` admission error no longer exists), and the
+non-planar pipe wall meshes through the `ce99742` uv-parameterized OCC curved
+surface production (`_occ_curved_surface_production` /
+`_model_occ_curved_surface_mesh_tracked` with direction-aware UV seeding — the
+surface never enters the plane-only coplanarity admission). The verbatim
+`Fillet`/`Extrude … Using Wire`/`Delete`/`MeshSizeFromCurvature` script fills
+all four volumes end-to-end at tutorial density. Receipt:
+`GMSH_PARITY_T19_TUTORIAL_OK geo=OK nodes=3225 tets=8249 volume=1.7818869
+nofillet=OK nodes=2387 tets=5800 nosize=OK nodes=346 tets=414
+gmsh_nodes=13680 gmsh_tets=57656 gmsh_volume=1.7997554` — the verbatim tet
+count reads 8249 vs the recorded 8258 — the working tree carries other
+workers' uncommitted surface-producer WIP, and nodes/volume are unchanged;
+same parity class as the oracle's different-density 57656-tet fill.
+Regressions on `--compile=min -O0 --check-bounds=yes`: `api_occ_fillet_test`
+79/79 across 4 testsets (incl. the 16 loft-rim and 10 sibling-import pins),
+`occ_fillet_trim_test` 52/52, `api_occ_transform_test` 220/220,
+`model_warped_ruled_surface_test` 32/32, `model_ruled_parametrization_test`
+471/471 — all exit 0.
+
 ### P601 t17 tutorial parity verified — `GMSH_PARITY_T17_TUTORIAL_OK` (2026-11-01)
 
 Re-verified the t17 driver verbatim on HEAD `8768ef2` under
