@@ -1,4 +1,4 @@
-using TOML
+using Test,Tessella,TOML
 
 @testset "Surface recombination uses published physical coordinates" begin
     model=Tessella.Model

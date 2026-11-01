@@ -73,8 +73,17 @@ end
             @test _rqu_snapshot() == row["states"][2]["payload"]
             @test (_RQU.NATIVE_LOOKUP_QUERY_ERRORS[],_RQU.NATIVE_MSG_LAST_ERROR[])==msg_before
             _RQU.mesh.set_recombine(2, 1, row["case"]["angle"])
-            @test _RQU.mesh.recombine() === nothing
-            @test _rqu_snapshot() == row["states"][3]["payload"]
+            expected=row["states"][3]["payload"]
+            if UInt64(expected["max_element"])<UInt64(row["case"]["sentinel_requested"])
+                # The oracle silently wraps the UInt64 element counter past the
+                # sentinel; the landed adapter refuses counter wraparound with an
+                # all-or-nothing ArgumentError and leaves the state untouched.
+                @test_throws ArgumentError _RQU.mesh.recombine()
+                @test _rqu_snapshot() == row["states"][2]["payload"]
+            else
+                @test _RQU.mesh.recombine() === nothing
+                @test _rqu_snapshot() == expected
+            end
             @test (_RQU.NATIVE_LOOKUP_QUERY_ERRORS[],_RQU.NATIVE_MSG_LAST_ERROR[])==msg_before
 
         finally

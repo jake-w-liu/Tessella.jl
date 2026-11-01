@@ -18,7 +18,9 @@ function recombine_square(;seed=true)
         API.mesh.add_elements_by_type(1,15,[777],[111])
     end
     API.mesh.set_transfinite_surface(1);mesh=API.mesh.generate(2)
-    @test mesh isa Tessella.Mesh && API.LAST_MESH[] isa Tessella.Mesh
+    # `generate` returns the public Mesh view; the authoritative cache remains
+    # the classified MixedMesh carrier.
+    @test mesh isa Tessella.Mesh && API.LAST_MESH[] isa Tessella.Elements.MixedMesh
     @test API.mesh.get_element_types(2,1)==Int32[2]
     return nothing
 end
@@ -182,7 +184,7 @@ end
             element_ids=vcat(elements...)
             mapped=UInt64[10003+7i for i in 0:length(old)-1]
             API.mesh.renumber_nodes(old,mapped)
-            @test API.LAST_MESH[] isa Tessella.Mesh
+            @test API.LAST_MESH[] isa Tessella.Elements.MixedMesh
             @test API.mesh.get_nodes()[1:2]==(mapped,coordinates)
             @test Set(vcat(API.mesh.get_elements()[2]...))==Set(element_ids)
             overlay=API.LAST_MESH_HIGH_ORDER[]

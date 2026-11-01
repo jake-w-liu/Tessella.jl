@@ -102,7 +102,7 @@ end
         @test call(A.mesh.get_max_element_tag)==parse(UInt64,f[8])
         @test call(A.mesh.get_max_node_tag)==maximum(labels)
         for row in findall(owner->owner[1]==2,owners)
-            @test_throws ErrorException call(A.mesh.get_node,labels[row])
+            @test_throws ArgumentError call(A.mesh.get_node,labels[row])
         end
         call(A.finalize)
     end
