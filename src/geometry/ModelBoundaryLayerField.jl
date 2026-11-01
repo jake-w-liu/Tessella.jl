@@ -8,27 +8,45 @@
 # strip and the ordinary constrained-Delaunay fill covers the remainder.
 #
 # Bounded scope, matching the upstream option set the field record carries:
-# - Plane surfaces only (`_model_surface_plane` admission); upstream's curved
-#   `parFromPoint` column construction is a documented gap.
+# - Plane surfaces (and `allow_ruled` projections) with straight *or* curved
+#   wall curves — the strip is built in the face's planar coordinates, so a
+#   curved wall's inward-normal columns work exactly like upstream's
+#   `parFromPoint` construction (verified on circle walls: oracle ring
+#   radii match the geometric schedule). Genuinely non-planar parametric
+#   (u,v) column construction stays a loud rejection.
 # - `Size`/`Ratio`/`Thickness`/`Quads`/`FanPointsList`/`ExcludedSurfacesList`
-#   and the `BetaLaw`/`NbLayers`/`Beta` schedule apply; `FanPointsSizesList`,
-#   `IntersectMetrics` and `AnisoMax` stay loud rejections rather than
-#   silently dropping parameters.
-# - `SizesList`/`hwall_n_nodes` per-node wall heights are ported for closed
-#   wall runs: `getLocalInfoAtNode` resolves each vertex's `hWall` (point-tag
-#   lookup, quadratic endpoint interpolation along the owning curve), the
-#   column grows that vertex's geometric/beta schedule, and the strip tiles
-#   each segment with `min` quadrangle rows plus upstream's closing
-#   triangle. Open runs keep `SizesList` a loud rejection — their end
-#   columns ride the adjacent edge's own mesh chain (p6/p7 probes), which
-#   does not exist before this pass.
-# - `PointsList`/`NodesList` end-node grading (`addBoundaryLayerPoints` in
-#   `meshGEdge.cpp`) is not ported — the field's curve targets drive the
-#   strip here; endpoint tags only mark fan membership like upstream.
-# - Transfinite, extruded, periodic-slave and parametric (OCC) surfaces keep
-#   their own producers; a `BoundaryLayer` field never alters them, matching
-#   upstream's dispatch order (transfinite/extruded paths run before the
-#   boundary-layer pass and return first).
+#   and the `BetaLaw`/`NbLayers`/`Beta` schedule apply. `IntersectMetrics`
+#   and `AnisoMax` are metric-operator options that never fire on `.geo`
+#   BoundaryLayer fields (no `SurfacesList`; the scalar size field ignores
+#   `iIntersect` upstream too) — accepted as inert.
+# - `SizesList`/`hwall_n_nodes` per-node wall heights: `getLocalInfoAtNode`
+#   resolves each vertex's `hWall` (point-tag lookup, quadratic endpoint
+#   interpolation along the owning curve), the column grows that vertex's
+#   geometric/beta schedule, and the strip tiles each segment with `min`
+#   quadrangle rows plus upstream's closing triangle. Open runs emit the
+#   same `min`-paired depth: their end columns ride the adjacent edge's
+#   own mesh chain (`addColumnAtTheEndOfTheBL`), so an uninjected
+#   adjacent edge contributes its ordinary nodes only.
+# - `PointsList`/`NodesList` end nodes drive `addBoundaryLayerPoints`
+#   grading in `ModelMesh1D` (geometric schedule capped at
+#   `min(thickness, 0.4·chord)` on straight edges, reduced-interval
+#   regrade, `filterPoints` skipped like upstream); the injected chains
+#   are what the run-end columns consume.
+# - `FanPointsSizesList` per-point fan budgets apply positionally to
+#   `FanPointsList` (default `Mesh.BoundaryLayerFanElements` on a length
+#   mismatch); signed sweeps, `fan_wedges` and `fan_skips` cover the
+#   ordinary fan and the upstream skip types (−4/auto). The cross/mix/
+#   tail fan types (−1/−2/−3) stay loud rejections.
+# - Transfinite, extruded, periodic-slave and parametric (OCC) surfaces
+#   keep their own producers; a `BoundaryLayer` field never alters them,
+#   matching upstream's dispatch order (transfinite/extruded paths run
+#   before the boundary-layer pass and return first). A swept lateral
+#   (`EXTRUDED_ENTITY`) counts as "not another face" when a wall's
+#   `setupFor2d` adjacency is audited, so a BL wall shared by a source
+#   plane and its extruded sibling still grows the source's layer —
+#   and a transfinite *curve* composes with `PointsList` injection
+#   (`addBoundaryLayerPoints` runs before `meshGEdgeProcessing`, which
+#   keeps `N = nbPointsTransfinite` over the reduced window).
 
 # Per-selected-field normalized record (`_ModelBoundaryLayerField` is
 # declared in `Model.jl` next to `ModelMeshingAttributes`, which stores the
@@ -36,10 +54,10 @@
 # intersection upstream computes in `setupFor2d` happens at mesh time in
 # `_model_surface_bl_specs` below.
 function _ModelBoundaryLayerField(tag::Integer,config,caller::AbstractString)
-    isempty(config.fan_sizes) || length(config.fan_sizes)==
-        length(config.fan_points) || throw(ArgumentError(
-        "$caller: BoundaryLayer Field[$tag].FanPointsSizesList must be " *
-        "empty or match FanPointsList length"))
+    # Upstream's `fanSize(iV)` reads `FanPointsSizesList[iV]` only when the
+    # list matches `FanPointsList` positionally; a length mismatch silently
+    # falls back to `Mesh.BoundaryLayerFanElements`, so the record keeps the
+    # raw list and the consumer applies the same match rule.
     return _ModelBoundaryLayerField(
         Int(tag),Int.(collect(config.curves)),Int.(collect(config.points)),
         Int.(collect(config.fan_points)),Int.(collect(config.fan_sizes)),
@@ -167,6 +185,113 @@ function _bl_vertex_hwall(v::Int,point_of::Dict{Int,Int},
     return default
 end
 
+# ── 1-D end-node injection (`addBoundaryLayerPoints`/`createPoints`) ────────
+#
+# Upstream runs `addBoundaryLayerPoints` at the top of `meshGEdge` for every
+# curve: a curve listed in *any* field's `CurvesList` skips injection (its
+# endpoints belong to the wall), then each `PointsList` end node grows a
+# geometric/beta point schedule along the endpoint chord capped by the
+# layer `Thickness` and `0.4·LEdge`, and the ordinary discretization fills
+# only the reduced middle interval (`filterPoints` is skipped whenever BL
+# points exist).
+function _model_curve_bl_end_nodes(m::GeoModel,curve::Integer,a::Int,b::Int,
+                                   caller::AbstractString)
+    fields=m.meshing.boundary_layer_fields
+    isempty(fields) && return nothing
+    spec_a=nothing;spec_b=nothing
+    for spec in values(fields)
+        # `setupFor1d(iE)`: a field whose `CurvesList` already walls this
+        # edge leaves `_pointTags` empty — a wall never receives the same
+        # field's `PointsList` injection. Another field's point end can
+        # still land on the edge, matching upstream's per-field gate.
+        curve in spec.curve_set && continue
+        if a in spec.points
+            spec_a===nothing || throw(ArgumentError(
+                "$caller: Different boundary layers cannot touch each " *
+                "other (curve $curve begin point $a)"))
+            spec_a=spec
+        end
+        if b in spec.points
+            spec_b===nothing || throw(ArgumentError(
+                "$caller: Different boundary layers cannot touch each " *
+                "other (curve $curve end point $b)"))
+            spec_b=spec
+        end
+    end
+    (spec_a===nothing && spec_b===nothing) && return nothing
+    return (spec_a,spec_b)
+end
+
+# `createPoints`: points at distance `L` along the chord through the end
+# vertex — the geometric law emits `L` while `L ≤ min(Thickness, 0.4·chord)`
+# with `L += hWall·ratio^ith`; the beta law emits all `NbLayers` rows
+# uncapped. For a `Line` the `parFromPoint` projection is linear in the
+# chord fraction.
+function _model_curve_bl_point_params(spec,hwall::Float64,chord::Float64,
+                                      from_begin::Bool,t0::Float64,
+                                      t1::Float64,caller::AbstractString)
+    dists=if spec.beta_law
+        _bl_field_offsets(spec,hwall,caller)
+    else
+        out=Float64[]
+        L=hwall;k=0
+        while L<=spec.thickness && L<=0.4*chord
+            push!(out,L)
+            k+=1
+            L+=hwall*spec.ratio^k
+            length(out)>100_000 && throw(ArgumentError(
+                "$caller: BoundaryLayer Field[$(spec.tag)] end-point " *
+                "schedule does not converge"))
+        end
+        out
+    end
+    return Float64[from_begin ? t0+d/chord*(t1-t0) :
+                              t1-d/chord*(t1-t0) for d in dists]
+end
+
+function _model_curve_bl_grade_params(m::GeoModel,curve::Integer,
+                                      spec_begin,spec_end,
+                                      t0::Float64,t1::Float64,chord::Float64,
+                                      options::_ModelMesh1DOptions,
+                                      caller::AbstractString;
+                                      transfinite=nothing,
+                                      _native_producer::Bool=false)
+    a,b=m.curves[curve]
+    begin_params=Float64[];end_params=Float64[]
+    if spec_begin!==nothing
+        hmap=_bl_hwall_map(spec_begin,caller)
+        begin_params=_model_curve_bl_point_params(
+            spec_begin,get(hmap,a,spec_begin.hwall),chord,true,t0,t1,caller)
+    end
+    if spec_end!==nothing
+        hmap=_bl_hwall_map(spec_end,caller)
+        end_params=_model_curve_bl_point_params(
+            spec_end,get(hmap,b,spec_end.hwall),chord,false,t0,t1,caller)
+    end
+    tb=isempty(begin_params) ? t0 : begin_params[end]
+    te=isempty(end_params) ? t1 : end_params[end]
+    tb<te || throw(ArgumentError(
+        "$caller: boundary layers overlap on Curve[$curve] — upstream " *
+        "requires separated layers"))
+    # `meshGEdgeProcessing` on the reduced interval — the vertex-size
+    # interpolation keeps the *original* param bounds (upstream's `F_Lc`
+    # reads `ge->parBounds`), so only the integration window shrinks, and
+    # `filterPoints` is skipped outright once BL points exist on the edge.
+    # A transfinite edge keeps `N = nbPointsTransfinite` over the reduced
+    # window (the BL chains then prepend/append like upstream's
+    # `mesh_vertices` splice).
+    middle=if transfinite===nothing
+        _model_curve_grade_params(m,curve,tb,te,options,caller;
+            _native_producer=_native_producer,_l1_bounds=(t0,t1),
+            _skip_filter=true)
+    else
+        _model_curve_transfinite_params(m,curve,tb,te,transfinite,caller,
+                                        options;_native_producer)
+    end
+    inner=length(middle)>2 ? middle[2:end-1] : Float64[]
+    return Float64[t0;begin_params;inner;reverse(end_params);t1]
+end
+
 # Fields whose `CurvesList` intersects this face's boundary and whose
 # `ExcludedSurfacesList` does not suppress it — `setupFor2d(face)`'s
 # `_curveTags ∩ face.edges` test. A field listing only `PointsList` end
@@ -176,6 +301,15 @@ end
 function _model_surface_bl_specs(m::GeoModel,t::Int)
     fields=m.meshing.boundary_layer_fields
     isempty(fields) && return nothing
+    # A swept lateral (`EXTRUDED_ENTITY` — a `(1, ·)` extrude-sources link)
+    # carries BL curves in its boundary but upstream's column pass produces
+    # no effective layer there: its end-of-BL tangents land on `GVertex`s
+    # (the generatrix endpoints), so no end columns exist and the per-edge
+    # `min`-depth pairing degenerates to filtered self-paired cells. Skip
+    # the layer on the lateral itself — the plane source face still grows
+    # its strip thanks to the adjacency exemption below.
+    src=get(m.meshing.extrude_sources,(2,t),nothing)
+    src!==nothing && src[1]==1 && return nothing
     boundary=Set{Int}()
     for loop in m.surfaces[t],signed in m.loops[loop]
         push!(boundary,abs(signed))
@@ -188,13 +322,19 @@ function _model_surface_bl_specs(m::GeoModel,t::Int)
         isempty(shared) && continue
         # `setupFor2d` counts the wall curve's adjacent faces that are
         # neither extruded nor excluded; more than one means the layer
-        # would grow inside a volume — upstream errors.
+        # would grow inside a volume — upstream errors. Faces carrying an
+        # `EXTRUDED_ENTITY` mode (a `(1, ·)` `extrude_sources` link — a
+        # swept lateral, not a `COPIED_ENTITY` top) get a free pass: they
+        # are meshed by the extrusion path, which never builds columns, so
+        # the layer grows on the single genuine face only.
         for curve in shared
             numf=0
             for (stag,loops) in m.surfaces
                 stag in spec.excluded_set && continue
                 any(loop->any(signed->abs(signed)==curve,
                               m.loops[loop]),loops) || continue
+                src=get(m.meshing.extrude_sources,(2,stag),nothing)
+                src!==nothing && src[1]==1 && continue
                 numf+=1
             end
             numf>1 && throw(ArgumentError(
@@ -377,122 +517,95 @@ function _bl_point_in_domain(px::Float64,py::Float64,
     return isodd(count)
 end
 
-# Walk a run end's covered span along the wire — upstream's
+# Collect a run end's column chain along the wire — upstream's
 # `addColumnAtTheEndOfTheBL` makes the end vertex's column the adjacent
-# edge's own node chain, so the covered span may cross several boundary
-# segments (the boundary write-back BL-grades the adjacent curve near the
-# end, exactly like upstream's `addBoundaryLayerPoints`). Bounded: the
-# span must stay on `adjacent_curve` (one upstream `GEdge`), must not
-# reach a wall segment or another end's claimed position ("boundary
-# layers must be separate"), and must be straight within tolerance —
-# bending end columns are a documented gap. Returns `(top_vertex,
-# dir3d)`: the vertex id the end column's top welds onto (an existing
-# wire vertex when the consumed depth lands on it, else an interpolated
-# `new_vertex!` node) and the unit 3-D direction of the first covered
-# segment — the `vertex_dirs` override for that end.
-function _bl_walk_covered!(dsign::Int,p_end::Int,adjacent_curve::Int,
-                         offend::Float64,spec,caller::AbstractString,
-                         t::Int,covered_positions::Set{Int},
-                         claimed::Set{Int},
-                         seg_cover::Dict{Int,Vector{Tuple{Float64,Float64}}},
-                         snapped_coords::Vector{NTuple{3,Float64}},
-                         covered_owner::Dict{NTuple{3,Float64},Int32},
-                         seg_spec::Vector{Int},loop::Vector{Int},
-                         loop_curve::Vector{Int},xs::Vector{Float64},
-                         ys::Vector{Float64},
-                         coords3d::Vector{NTuple{3,Float64}},
-                         start0::Int,nseg::Int,new_vertex!,vertex_id!,ax)
+# edge's own node chain verbatim (the boundary write-back BL-graded the
+# adjacent curve near the end through `addBoundaryLayerPoints`, so the
+# chain already holds the injected layer points). The walk consumes every
+# wire position interior to `adjacent_curve` — a vertex stays in the wire
+# when the segment after it in walk direction leaves the curve (the edge's
+# far endpoint or a curve junction). Returns `(positions, dists, dir3)`:
+# consumed rotated positions nearest→farthest, their cumulative 2-D
+# distances from the end vertex (the column's `vertex_offsets` entry — on
+# a straight edge the 2-D and 3-D distances agree), and the unit 3-D
+# direction of the first consumed segment — the `vertex_dirs` override.
+# Bounded: the column direction must stay straight within tolerance —
+# bending end columns are a documented gap.
+function _bl_run_end_chain(dsign::Int,p_end::Int,adjacent_curve::Int,
+                           spec,caller::AbstractString,t::Int,
+                           seg_spec::Vector{Int},loop::Vector{Int},
+                           loop_curve::Vector{Int},xs::Vector{Float64},
+                           ys::Vector{Float64},
+                           coords3d::Vector{NTuple{3,Float64}},
+                           start0::Int,nseg::Int)
     pmod(p)=mod1(p,nseg)
     rvert(p)=loop[mod1(start0+p-1,nseg)]
-    stol=1e-9*max(1.0,offend)
-    function claim_seg!(sidx::Int,covlen::Float64,seglen::Float64)
-        # Covered interval on this segment measured from its own start
-        # vertex (`loop[sidx]`); a forward walk starts at 0, a backward
-        # walk ends at seglen.
-        lo,hi=dsign>0 ? (0.0,covlen) : (seglen-covlen,seglen)
-        spans=get!(seg_cover,sidx,Tuple{Float64,Float64}[])
-        for (olo,ohi) in spans
-            (lo<ohi-stol && hi>olo+stol) && throw(ArgumentError(
-                "$caller: Surface[$t] boundary-layer run ends consume " *
-                "overlapping spans of one boundary segment — upstream " *
-                "requires separated layers"))
-        end
-        push!(spans,(lo,hi))
-        return nothing
-    end
-    pos=pmod(p_end)
-    traveled=0.0
+    positions=Int[];dists=Float64[]
     dir3=nothing
-    d2x=0.0;d2y=0.0
+    traveled=0.0;d2x=0.0;d2y=0.0
+    pos=pmod(p_end)
     while true
         npos=pmod(pos+dsign)
         sidx=dsign>0 ? mod1(start0+pos-1,nseg) :
                       mod1(start0+npos-1,nseg)
-        seg_spec[sidx]==0 || throw(ArgumentError(
-            "$caller: BoundaryLayer Field[$(spec.tag)] layer depth " *
-            "$offend on Surface[$t] reaches a wall segment — the " *
-            "adjacent non-wall run is too short"))
-        ctag=loop_curve[sidx]
-        ctag==adjacent_curve || throw(ArgumentError(
-            "$caller: BoundaryLayer Field[$(spec.tag)] layer depth " *
-            "$offend on Surface[$t] spans more than the adjacent " *
-            "Curve[$adjacent_curve] — upstream attaches the end column " *
-            "to one edge"))
+        (loop_curve[sidx]==adjacent_curve && seg_spec[sidx]==0) || break
         a=rvert(pos);b=rvert(npos)
-        s3x=coords3d[b][1]-coords3d[a][1]
-        s3y=coords3d[b][2]-coords3d[a][2]
-        s3z=coords3d[b][3]-coords3d[a][3]
-        sl3=hypot(s3x,s3y,s3z)
-        sl3>0 || throw(ArgumentError(
-            "$caller: Surface[$t] boundary has a coincident vertex"))
         s2x=xs[b]-xs[a];s2y=ys[b]-ys[a]
         sl2=hypot(s2x,s2y)
+        sl2>0 || throw(ArgumentError(
+            "$caller: Surface[$t] boundary has a coincident vertex"))
         if dir3===nothing
+            s3x=coords3d[b][1]-coords3d[a][1]
+            s3y=coords3d[b][2]-coords3d[a][2]
+            s3z=coords3d[b][3]-coords3d[a][3]
+            sl3=hypot(s3x,s3y,s3z)
             dir3=(s3x/sl3,s3y/sl3,s3z/sl3)
             d2x=s2x/sl2;d2y=s2y/sl2
         else
             cross=s2x*d2y-s2y*d2x
             abs(cross)<=1e-9*sl2 || throw(ArgumentError(
-                "$caller: BoundaryLayer Field[$(spec.tag)] covered span " *
-                "on Surface[$t] is not straight — bending end columns " *
-                "are not implemented"))
+                "$caller: BoundaryLayer Field[$(spec.tag)] end column on " *
+                "Surface[$t] bends along Curve[$adjacent_curve] — " *
+                "bending end columns are not implemented"))
         end
-        dnew=traveled+sl2
-        if dnew<offend-stol
-            npos in claimed && throw(ArgumentError(
+        # `npos` joins the column only when the segment after it (in walk
+        # direction) stays on the same non-wall curve — otherwise it is
+        # the adjacent edge's far endpoint and remains boundary.
+        farpos=pmod(npos+dsign)
+        nsidx=dsign>0 ? mod1(start0+npos-1,nseg) :
+                        mod1(start0+farpos-1,nseg)
+        (loop_curve[nsidx]==adjacent_curve && seg_spec[nsidx]==0) || break
+        traveled+=sl2
+        push!(positions,npos);push!(dists,traveled)
+        pos=npos
+    end
+    return positions,dists,dir3
+end
+
+# Mark an end column's *emitted* nodes as covered — upstream removes the
+# used chain prefix from the fill wire (it stays domain boundary since the
+# strip cells ride it). `emit` is the strip's used depth
+# `min(K, neighbour_depth+1)`; chain positions beyond it keep their place
+# in the reduced wire. Two run ends meeting on one adjacent edge may
+# share exactly their deepest node (each column a single level — the
+# `meet_nodes` case upstream writes when the covered spans partition the
+# edge); any deeper sharing is an overlapping-layers rejection.
+function _bl_mark_end_covered!(positions::Vector{Int},emit::Int,
+                               covered_positions::Set{Int},
+                               claimed::Set{Int},meet_nodes::Set{Int},
+                               caller::AbstractString,t::Int)
+    for (j,pos) in enumerate(positions)
+        j>emit && break
+        if pos in claimed
+            (emit==1 && pos in meet_nodes) && continue
+            throw(ArgumentError(
                 "$caller: Surface[$t] boundary-layer run ends consume " *
                 "overlapping spans — upstream requires separated layers"))
-            claim_seg!(sidx,sl2,sl2)
-            push!(claimed,npos);push!(covered_positions,npos)
-            push!(snapped_coords,coords3d[b])
-            covered_owner[coords3d[b]]=Int32(ctag)
-            traveled=dnew;pos=npos;continue
         end
-        npos in claimed && throw(ArgumentError(
-            "$caller: Surface[$t] boundary-layer run ends consume " *
-            "overlapping spans — upstream requires separated layers"))
-        claim_seg!(sidx,offend-traveled,sl2)
-        if abs(dnew-offend)<=stol
-            # The consumed depth lands on this wire vertex — the end
-            # column's top welds onto it and it stays in the wire.
-            push!(claimed,npos)
-            push!(snapped_coords,coords3d[b])
-            return vertex_id!(b),dir3
-        end
-        frac=(offend-traveled)/sl2
-        tc=(coords3d[a][1]+frac*s3x,
-            coords3d[a][2]+frac*s3y,
-            coords3d[a][3]+frac*s3z)
-        for s in snapped_coords
-            (abs(tc[1]-s[1])<=stol && abs(tc[2]-s[2])<=stol &&
-             abs(tc[3]-s[3])<=stol) && throw(ArgumentError(
-                "$caller: Surface[$t] boundary-layer run ends meet at " *
-                "one point — upstream requires separated layers"))
-        end
-        covered_owner[tc]=Int32(ctag)
-        push!(snapped_coords,tc)
-        return new_vertex!(tc[ax[1]],tc[ax[2]],tc),dir3
+        push!(claimed,pos);push!(covered_positions,pos)
     end
+    emit>0 && push!(meet_nodes,positions[emit])
+    return nothing
 end
 
 # Strip + fill construction for one face. Returns Mesh (all triangles) or
@@ -505,17 +618,17 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                                 param_sizes::Dict{Tuple{Int,Float64},Float64},
                                 plane,caller::AbstractString;
                                 _periodic_positions=nothing)
-    for spec in specs
-        isempty(spec.fan_sizes) || throw(ArgumentError(
-            "$caller: BoundaryLayer Field[$(spec.tag)].FanPointsSizesList " *
-            "is not implemented"))
-        spec.intersect_metrics && throw(ArgumentError(
-            "$caller: BoundaryLayer Field[$(spec.tag)].IntersectMetrics " *
-            "is not implemented"))
-        spec.aniso_max<1e9 && throw(ArgumentError(
-            "$caller: BoundaryLayer Field[$(spec.tag)].AnisoMax is not " *
-            "implemented"))
-    end
+    # `IntersectMetrics`/`AnisoMax` are metric-operator options — upstream
+    # reads `iIntersect` only inside the anisotropic `operator()(SMetric3&)`
+    # (attractor-metric intersection instead of closest-only) and
+    # `tgtAnisoRatio` only inside its dim-2 *surface*-attractor branch.
+    # `.geo` BoundaryLayer fields admit no `SurfacesList`, so `AnisoMax`
+    # can never fire, and the strip pass itself never evaluates either
+    # operator — both options are inert for `BoundaryLayer Field =`
+    # meshes exactly as upstream. The Tessella `BoundaryLayerField` size
+    # field is scalar like upstream's scalar `operator()`, which likewise
+    # ignores `iIntersect`, so `Background Field`/`Min`-style scalar
+    # composition matches too.
     xs,ys,mesh_sizes,wires,wire_curves,embedded,internal,index,canonical,
         vert_curve,vert_param=
         _bl_surface_pslg(m,t,forced,caller;param_sizes=param_sizes,
@@ -677,9 +790,15 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
         # vertex overrides.
         covered_positions=Set{Int}()
         claimed=Set{Int}()
-        seg_cover=Dict{Int,Vector{Tuple{Float64,Float64}}}()
+        meet_nodes=Set{Int}()
         top_override=Dict{Int,Int}()
-        for (si,first,last,closed_flag) in runs
+        # Runs whose strips emit no cells at all — every wall segment pairs
+        # two empty columns and no fan exists — keep their boundary
+        # verbatim (upstream's `modifyInitialMeshForBoundaryLayers` simply
+        # writes no BL cells there either).
+        dead_runs=Set{Int}()
+        rvert(p)=loop[mod1(start0+p-1,nseg)]
+        for (ri,(si,first,last,closed_flag)) in enumerate(runs)
             spec=specs[si]
             closed_run=!iszero(closed_flag)
             chain_positions=closed_run ? collect(1:nseg) :
@@ -708,10 +827,10 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
             # `SizesList` grading — upstream's `getLocalInfoAtNode`
             # resolves a per-vertex `hWall` (point-tag lookup, quadratic
             # interpolation along the owning curve), so each wall vertex
-            # grows its own column schedule. Heterogeneous values on an
-            # *open* run reach the end-column coverage upstream reads off
-            # the already meshed adjacent edge's chain — outside this
-            # bounded tier, so they stay a loud rejection there.
+            # grows its own column schedule. On an *open* run the two end
+            # vertices take no schedule of their own — upstream's
+            # `addColumnAtTheEndOfTheBL` substitutes the adjacent edge's
+            # own node chain for their column, collected below.
             hmap=get!(hwall_maps,si) do
                 _bl_hwall_map(spec,caller)
             end
@@ -726,11 +845,6 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
             # tolerance. Genuine `SizesList` variation is far larger.
             variable=hws!==nothing && any(
                 h->abs(h-hws[1])>1e-12*max(abs(hws[1]),eps(Float64)),hws)
-            variable && !closed_run && throw(ArgumentError(
-                "$caller: BoundaryLayer Field[$(spec.tag)].SizesList " *
-                "grading on open wall runs is not implemented — " *
-                "upstream's end columns consume the adjacent edge's own " *
-                "chain"))
             if hws!==nothing && !variable
                 # A uniformly-resolved map still overrides `Size` — every
                 # vertex reports the same `getLocalInfoAtNode` hWall, so the
@@ -742,11 +856,17 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                     "$(hws[1]) at a wall vertex exceeds Thickness=" *
                     "$(spec.thickness) — the column admits no layer row"))
             end
+            # Every open run needs per-vertex schedules — the two end
+            # slots hold the adjacent edge's chain distances, not the
+            # shared `offsets` — while a closed run only needs them when
+            # `SizesList` grading actually varies.
             voff=nothing
-            if variable
+            if variable || !closed_run
                 voff=Vector{Vector{Float64}}(undef,nchain)
-                for (i,hw) in enumerate(hws)
-                    voff[i]=_bl_field_offsets(spec,hw,caller)
+                for i in 1:nchain
+                    hw=hws===nothing ? spec.hwall : hws[i]
+                    voff[i]=hws===nothing && !variable ? offsets :
+                        _bl_field_offsets(spec,hw,caller)
                     isempty(voff[i]) && throw(ArgumentError(
                         "$caller: BoundaryLayer Field[$(spec.tag)] hWall=" *
                         "$hw at a wall vertex exceeds Thickness=" *
@@ -765,14 +885,19 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                 wall_segs[1,nchain]=nchain;wall_segs[2,nchain]=1
             end
             wall_mesh=Mesh(wall_coords;segs=wall_segs)
-            # Run-end columns ride the adjacent non-wall segment —
-            # upstream's `addColumnAtTheEndOfTheBL` makes the end vertex's
-            # column the adjacent edge's own node chain (graded by
-            # `addBoundaryLayerPoints` upstream). Bounded: the consumed
-            # depth `offsets[end]` must fit inside the single adjacent
-            # segment, and two run ends must not consume overlapping
-            # spans of the same segment.
+            # Run-end columns ride the adjacent edge — upstream's
+            # `addColumnAtTheEndOfTheBL` makes the end vertex's column the
+            # adjacent edge's own node chain verbatim (the boundary
+            # write-back BL-graded that edge near the end through
+            # `addBoundaryLayerPoints`, so the injected layer points are
+            # already interior wire vertices). The strip then uses the
+            # chain prefix up to `min(K, neighbour+1)` levels; chain nodes
+            # beyond the used depth keep their place in the reduced wire.
+            # Bounded: the column direction must stay straight and two
+            # ends may share only their deepest node when the covered
+            # spans partition one edge.
             vdirs=nothing
+            end_cols=nothing
             if !closed_run
                 p_start=first
                 p_end=last+1
@@ -786,30 +911,33 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                 seg_spec[next_seg]==0 || throw(ArgumentError(
                     "$caller: Surface[$t] has adjacent boundary-layer " *
                     "runs — upstream requires separated layers"))
-                # Walk the covered span on the preceding segment (backward
-                # from v_start) and on the following segment (forward from
-                # v_end). Bounded: the span stays on one adjacent curve,
-                # never reaches a wall segment, and stays straight.
-                tops_s=_bl_walk_covered!(
-                    -1,p_start,loop_curve[prev_seg],offsets[end],
-                    spec,caller,t,covered_positions,claimed,seg_cover,
-                    snapped_coords,covered_owner,seg_spec,loop,loop_curve,
-                    xs,ys,coords3d,start0,nseg,new_vertex!,vertex_id!,ax)
-                tops_e=_bl_walk_covered!(
-                    +1,p_end,loop_curve[next_seg],offsets[end],
-                    spec,caller,t,covered_positions,claimed,seg_cover,
-                    snapped_coords,covered_owner,seg_spec,loop,loop_curve,
-                    xs,ys,coords3d,start0,nseg,new_vertex!,vertex_id!,ax)
-                top_override[v_start]=tops_s[1]
-                top_override[v_end]=tops_e[1]
-                dir_s=tops_s[2];dir_e=tops_e[2]
-                vdirs=Dict{Int,NTuple{3,Float64}}()
+                ch_s,dist_s,dir_s=_bl_run_end_chain(
+                    -1,p_start,loop_curve[prev_seg],spec,caller,t,
+                    seg_spec,loop,loop_curve,xs,ys,coords3d,start0,nseg)
+                ch_e,dist_e,dir_e=_bl_run_end_chain(
+                    +1,p_end,loop_curve[next_seg],spec,caller,t,
+                    seg_spec,loop,loop_curve,xs,ys,coords3d,start0,nseg)
                 # `chain` may have been reversed for orientation; attach
-                # each direction to the slot holding its end vertex.
+                # each chain to the slot holding its end vertex and let
+                # the slot's wall-side neighbour bound the used depth
+                # (`min(K, n+1)` — upstream pairs `min(na,nb)` quadrangle
+                # rows plus the closing triangle's next level).
+                slot_s=0;slot_e=0
                 for (i,v) in enumerate(chain)
-                    v==v_start && (vdirs[i]=dir_s)
-                    v==v_end && (vdirs[i]=dir_e)
+                    v==v_start && (slot_s=i)
+                    v==v_end && (slot_e=i)
                 end
+                (slot_s==0 || slot_e==0) && throw(ErrorException(
+                    "$caller: Surface[$t] boundary-layer run end is not " *
+                    "on its wall chain"))
+                voff[slot_s]=dist_s
+                voff[slot_e]=dist_e
+                nb_s=length(voff[slot_s==1 ? min(2,nchain) : slot_s-1])
+                nb_e=length(voff[slot_e==nchain ? max(nchain-1,1) : slot_e+1])
+                end_cols=((ch_s,min(length(dist_s),nb_s+1),v_start,
+                           loop_curve[prev_seg],slot_s,dir_s),
+                          (ch_e,min(length(dist_e),nb_e+1),v_end,
+                           loop_curve[next_seg],slot_e,dir_e))
             end
             fans=Int[]
             for (i,v) in enumerate(chain)
@@ -818,6 +946,76 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                 interior=closed_run || (i>1 && i<nchain)
                 interior || continue
                 push!(fans,i)
+            end
+            # `FanPointsSizesList` — upstream `fanSize(iV)` reads the list
+            # positionally per `FanPointsList` entry, with a length mismatch
+            # falling back to `Mesh.BoundaryLayerFanElements`
+            # (`spec.fan_elements`). Nonnegative sizes select the standard
+            # fan (`fanType -1`, `round(frac·size)+1` wedges); -1/-2/-3 select
+            # the cross/mix/tail topologies — distinct point/cell machinery
+            # kept a loud rejection — while -4 and every other negative fall
+            # to `fanType 4` (skip: boundary rays only, no wedge cells).
+            vfans=nothing;fskips=nothing
+            if !isempty(fans)
+                matched=length(spec.fan_sizes)==length(spec.fan_points)
+                vfans=Dict{Int,Int}();fskips=Set{Int}()
+                for i in fans
+                    pid=get(point_of,chain[i],0)
+                    f=spec.fan_elements
+                    if matched
+                        fpos=findfirst(==(pid),spec.fan_points)
+                        fpos===nothing || (f=spec.fan_sizes[fpos])
+                    end
+                    if f>=0
+                        vfans[i]=f
+                    elseif f==-1 || f==-2 || f==-3
+                        throw(ArgumentError(
+                            "$caller: BoundaryLayer Field[$(spec.tag)]" *
+                            ".FanPointsSizesList=$f at Point[$pid] — " *
+                            "the $(f==-1 ? "cross" : f==-2 ? "mix" : "tail")" *
+                            " fan type is not implemented"))
+                    else
+                        push!(fskips,i)
+                    end
+                end
+                isempty(vfans) && (vfans=nothing)
+                isempty(fskips) && (fskips=nothing)
+            end
+            # Whether this run emits any strip cell: one wall segment with
+            # two non-empty side columns, or a wedge-emitting fan (a skip
+            # fan contributes no cells of its own). A dead run leaves its
+            # wire untouched.
+            emits=fskips===nothing ? !isempty(fans) :
+                any(i->!(i in fskips),fans)
+            nl_off=length(offsets)
+            if !emits
+                for i in 1:(closed_run ? nchain : nchain-1)
+                    na=voff===nothing ? nl_off : length(voff[i])
+                    nb=voff===nothing ? nl_off : length(voff[i==nchain ? 1 : i+1])
+                    min(na,nb)>0 && (emits=true;break)
+                end
+            end
+            if !emits
+                push!(dead_runs,ri)
+                continue
+            end
+            if end_cols!==nothing
+                for (ch,emit,v_end_v,adj,slot,dir) in end_cols
+                    _bl_mark_end_covered!(ch,emit,covered_positions,
+                                          claimed,meet_nodes,caller,t)
+                    for pos in ch[1:emit]
+                        wv=rvert(pos)
+                        push!(snapped_coords,coords3d[wv])
+                        covered_owner[coords3d[wv]]=Int32(adj)
+                    end
+                    top_override[v_end_v]=emit>0 ?
+                        vertex_id!(rvert(ch[emit])) : vertex_id!(v_end_v)
+                    if dir!==nothing
+                        vdirs===nothing &&
+                            (vdirs=Dict{Int,NTuple{3,Float64}}())
+                        vdirs[slot]=dir
+                    end
+                end
             end
             # Upstream `treat2Connections`: at a wall vertex connected to
             # two wall segments the growth direction is the *biased*
@@ -908,6 +1106,8 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                 vertex_dirs=vdirs,
                 vertex_offsets=voff,
                 vertex_scale_last=vscale,
+                vertex_fans=vfans,
+                fan_skips=fskips,
                 plane_normal=plane_normal,caller=caller)
             mesh=strip.mesh
             # tops keys on the wall node's exact 3-D coordinate. Run-end
@@ -923,38 +1123,58 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                     top_of[v]=new_vertex!(top[ax[1]],top[ax[2]],top)
                 end
             end
-            if variable
+            if variable || !closed_run
                 # The strip's exposed boundary through each wall vertex:
                 # the top free edge enters at the deepest level the
                 # preceding segment used; the uncancelled column rungs walk
                 # to the level the next segment exits at (upstream's
-                # `bedges` symmetric difference). A fan vertex instead runs
-                # up its entry ray, across the level-n ring, and down the
-                # exit ray.
+                # `bedges` symmetric difference). A zero-depth neighbour
+                # emits no cells on the segment — the free side descends
+                # the whole column to the wall vertex. A fan vertex
+                # instead runs up its entry ray, across the level-n ring,
+                # and down the exit ray. Open-run end vertices take the
+                # covered-chain top directly (`top_override`).
                 fan_set_chain=Set(fans)
-                nfan=spec.fan_elements
                 for (i,v) in enumerate(chain)
+                    !closed_run && (i==1 || i==nchain) && continue
                     iprev=i==1 ? nchain : i-1
                     inext=i==nchain ? 1 : i+1
                     ni=strip.nlevels[i]
-                    e_i=ni>strip.nlevels[iprev] ? strip.nlevels[iprev]+1 : ni
-                    x_i=ni>strip.nlevels[inext] ? strip.nlevels[inext]+1 : ni
+                    nb_p=strip.nlevels[iprev];nb_n=strip.nlevels[inext]
+                    e_i=(ni==0 || nb_p==0) ? 0 : (ni>nb_p ? nb_p+1 : ni)
+                    x_i=(ni==0 || nb_n==0) ? 0 : (ni>nb_n ? nb_n+1 : ni)
                     entry=chain_rev ? x_i : e_i
                     last_level=chain_rev ? e_i : x_i
                     ids=Int[]
                     vn=strip.verts[i]
                     if i in fan_set_chain
-                        rs=chain_rev ? nfan : 0
-                        re=chain_rev ? 0 : nfan
-                        for k in entry:ni
-                            push!(ids,strip.id_of[(vn,k,rs)])
-                        end
-                        dr=re>rs ? 1 : -1
-                        for r in (rs+dr):dr:re
-                            push!(ids,strip.id_of[(vn,ni,r)])
-                        end
-                        for k in (ni-1):-1:last_level
-                            push!(ids,strip.id_of[(vn,k,re)])
+                        fanw=strip.fan_wedges[i]
+                        rs=chain_rev ? fanw : 0
+                        re=chain_rev ? 0 : fanw
+                        if fskips!==nothing && i in fskips
+                            # Skip fan: no wedge cells cover the sector —
+                            # upstream's `bedges` keep every one-sided rung
+                            # free, so the boundary walks down the entry
+                            # ray to the wall vertex and back up the exit
+                            # ray (the fill then touches the vertex itself).
+                            for k in entry:-1:1
+                                push!(ids,strip.id_of[(vn,k,rs)])
+                            end
+                            push!(ids,strip.id_of[(vn,0,0)])
+                            for k in 1:last_level
+                                push!(ids,strip.id_of[(vn,k,re)])
+                            end
+                        else
+                            for k in entry:ni
+                                push!(ids,strip.id_of[(vn,k,k==0 ? 0 : rs)])
+                            end
+                            dr=re>rs ? 1 : -1
+                            for r in (rs+dr):dr:re
+                                push!(ids,strip.id_of[(vn,ni,r)])
+                            end
+                            for k in (ni-1):-1:last_level
+                                push!(ids,strip.id_of[(vn,k,k==0 ? 0 : re)])
+                            end
                         end
                     else
                         dk=last_level>=entry ? 1 : -1
@@ -1034,6 +1254,10 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
             end
             for p in first:last+1
                 v=loop[mod1(start0+p-1,nseg)]
+                if run_index in dead_runs
+                    push!(new_loop,vertex_id!(v))
+                    continue
+                end
                 wn=get(wire_nodes,v,nothing)
                 if wn===nothing
                     push!(new_loop,top_of[v])
@@ -1044,6 +1268,16 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
             # The run's end vertex sits at rotated position `last+1`,
             # consumed by the strip side — resume on the next segment.
             k=last+2
+        end
+        # Two run ends meeting on one adjacent edge both resolve their top
+        # to the shared chain node — drop the consecutive duplicate.
+        if !isempty(new_loop)
+            dedup=Int[]
+            for vid in new_loop
+                (!isempty(dedup) && dedup[end]==vid) || push!(dedup,vid)
+            end
+            length(dedup)>1 && dedup[1]==dedup[end] && pop!(dedup)
+            new_loop=dedup
         end
         push!(reduced_wires,new_loop)
     end
@@ -1080,8 +1314,24 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
         # `index` so it lands in the fill's vertex set.
         vertex_id!(index[etag])
     end
-    triangulation=constrained_delaunay(
-        new_xs,new_ys,segs2;internal_segments=internal2)
+    triangulation=try
+        constrained_delaunay(
+            new_xs,new_ys,segs2;internal_segments=internal2)
+    catch err
+        # A strip whose free boundary self-intersects — a convex-corner fan
+        # reaching onto the neighbour wall, or an over-thick layer whose
+        # opposing strips meet — cannot be triangulated; upstream's
+        # `modifyInitialMeshForBoundaryLayers` fails the same configuration
+        # with "edge not recovered", so surface the cause plainly.
+        if err isa ArgumentError &&
+           occursin("crosses existing constraint",sprint(showerror,err))
+            throw(ArgumentError(
+                "$caller: Surface[$t] boundary-layer strip free boundary " *
+                "self-intersects — upstream fails this configuration " *
+                "identically (edge not recovered)"))
+        end
+        rethrow()
+    end
     fill=to_mesh(
         triangulation;interior=classify_interior(triangulation))
     # Merge every vertex class into one coordinate pool: boundary and top

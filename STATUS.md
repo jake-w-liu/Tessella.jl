@@ -175,6 +175,62 @@ regressions all exit 0):
   `AnisoMax`; plane surfaces only; transfinite/extruded/periodic-slave
   exclusions preserved.
 
+### LAY02 `.geo` BoundaryLayer Field — open-run end chains, `PointsList`/`FanPointsSizesList`, inert metric options, extruded adjacency (2026-11-01)
+
+Resolves every "remaining loud rejection" from the preceding LAY02
+entry plus the curved-wall and extruded-sibling cases, verified against
+Gmsh 4.15.2 source + CLI oracles.
+
+- **Oracle semantics (Gmsh 4.15.2 source).**
+  `addColumnAtTheEndOfTheBL` consumes the adjacent non-wall edge's own
+  `mesh_vertices` (reversed where needed) as the run-end column, so an
+  open run's emitted depth is `min`-paired against the neighbouring
+  chain plus one closing triangle. `setupFor1d(iE)` gates `PointsList`
+  per field: an edge that is itself a wall of the field keeps
+  `_pointTags` empty (no self-injection), while another field's point
+  end still applies. `addBoundaryLayerPoints` grows the endpoint chain
+  (geometric `L ≤ min(Thickness, 0.4·chord)`, `L += hWall·ratio^ith`)
+  *before* `meshGEdgeProcessing` — transfinite curves included, which
+  keep `N = nbPointsTransfinite` over the reduced window — and skips
+  `filterPoints` whenever BL points exist. `setupFor2d` gives
+  `EXTRUDED_ENTITY` neighbours a free pass in the "two surfaces" audit,
+  so a wall shared by a source plane and its swept lateral still grows
+  the source's layer while the lateral's own producer meshes it.
+  `fanSize` is the signed wedge budget: positive = ordinary fan,
+  −4/other negative = skip fan, −1/−2/−3 = cross/mix/tail.
+  `IntersectMetrics` and finite `AnisoMax` never fire on `.geo`
+  BoundaryLayer fields (no `SurfacesList` metric path) — inert options.
+- **Landed.** Open-run heterogeneous `SizesList` end columns now ride
+  the adjacent curve's emitted chain (`_bl_hwall_map` heights resolved
+  per endpoint). `PointsList`/deprecated `NodesList` inject end-node
+  schedules on straight edges — `Mesh 1` selection, `dim>=1` field
+  resolution, per-field wall gating, `0.4·chord` cap, reduced-interval
+  regrade with `_l1_bounds` preserved, `_skip_filter` through
+  `mesh_curve`, and transfinite composition (verified bitwise: oracle
+  curve-2 chain `0.06/0.138/0.2394` then transfinite interior
+  `0.39152/0.54364/0.69576/0.84788` for `N=6`). `FanPointsSizesList`
+  parses signed values (`_geo_signed_int_list_opt`), drives per-point
+  wedge budgets, signed sweeps and skip fans; self-intersecting strips
+  (convex-fan `fan1`/`fan2` class) now reject with upstream's
+  edge-not-recovered explanation instead of an internal CDT error.
+  Curved wall curves (circle/disk) grow normal columns whose rings
+  match oracle radii. `IntersectMetrics`/`AnisoMax` accept as inert.
+- **Receipts.** `geo_boundary_layer_field_test` all testsets exit 0
+  (130 assertions incl. new extruded-sibling and transfinite
+  `PointsList` pins); `boundarylayer_test` 123/123;
+  `boundary_layer_fan_test` 31/31; `geo_extrude_boundarylayer_test`
+  109/109 — Julia 1.12.7 `--compile=min -O0 --check-bounds=yes`.
+  Oracle probes `fan3`/`fan3_s3`/`fan3_s7`/`fan3_neg0`/`fan3_neg4`/
+  `fan3_neg9`/`fan0`/`p1`/`p8`/`p9`/`p5_cyl`/`_t_tf_bl` all match
+  (boundary + layer nodes exactly; oracle-only deltas are its interior
+  Steiner refinement points).
+- **Remaining loud rejections (bounded).** Cross/mix/tail fan types
+  (−1/−2/−3); genuinely non-planar parametric surface column
+  construction; `BoundaryLayer` fields still never alter transfinite/
+  extruded/periodic-slave *surface* producers; a wall shared by two
+  non-extruded, non-excluded faces keeps upstream's "Only 2D Boundary
+  Layers are supported" rejection.
+
 ### P601 t19 tutorial parity verified — `GMSH_PARITY_T19_TUTORIAL_OK` (2026-11-01)
 
 Re-verified the t19 driver verbatim on HEAD `8768ef2` under

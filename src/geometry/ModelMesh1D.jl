@@ -782,7 +782,8 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
                                    t1::Float64,
                                    options::_ModelMesh1DOptions,
                                    caller::AbstractString;_native_producer::Bool=false,
-                                   _point_store=nothing)
+                                   _point_store=nothing,_l1_bounds=nothing,
+                                   _skip_filter::Bool=false)
     if _native_producer && _curve_type(m,curve)===:line &&
             get(m.curve_geometry,curve,nothing)===nothing &&
             t0==0.0 && t1==1.0 && first(m.curves[curve])!=last(m.curves[curve])
@@ -852,7 +853,11 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
     for _attempt in 1:8
         _point_store===nothing || empty!(_point_store)
         runfield=_ModelCurveEntityField(m,runopts,String(caller))
-        run_size_function=u->_model_curve_bgm(m,curve,u,γ(u),t0,t1,runopts,
+        # `F_Lc`'s vertex-size interpolation reads `ge->parBounds` — the
+        # *original* bounds — even when the integration window was reduced
+        # by `addBoundaryLayerPoints`; `_l1_bounds` carries them through.
+        vb0,vb1=_l1_bounds===nothing ? (t0,t1) : _l1_bounds
+        run_size_function=u->_model_curve_bgm(m,curve,u,γ(u),vb0,vb1,runopts,
             caller)
         run_metric_function=if aniso
             (u,xyz,entity)->begin
@@ -861,7 +866,7 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
                 dim==0 ? _model_vertex_bgm_metric(
                              m,tag,xyz,runopts,caller;_native_producer) :
                          _model_curve_bgm_metric(
-                             m,tag,u,xyz,t0,t1,runopts,caller;_native_producer)
+                             m,tag,u,xyz,vb0,vb1,runopts,caller;_native_producer)
             end
         else
             nothing
@@ -878,7 +883,7 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
             _recombination_primitive=count_primitive,
             max_integration_points=_point_store===nothing ? _DEFAULT_MAX_INTEGRATION_POINTS :
                 _GMSH_CURVE_INTEGRATION_CAPACITY,
-            _point_store)
+            _point_store,_skip_filter)
         # `mesh_curve(closed=true)` returns the nedge station list — the
         # closing `t1` stays implicit — while every `curve_params` consumer
         # holds the open-style `[t0,…,t1]` contract (`_dim01_emit_curve!`,
@@ -1642,6 +1647,21 @@ function _model_mesh_curve!(m::GeoModel,curve::Integer,
         # the collapsed position.
         minimum=_model_minimum_curve_segments(m,curve,options,caller)
         return collect(range(t0,t1,length=minimum+1))
+    end
+    # `addBoundaryLayerPoints` — `PointsList` end nodes grow a layer point
+    # schedule along the endpoint chord and the ordinary discretization
+    # fills only the reduced middle interval. Upstream runs this before any
+    # grading (transfinite included: `meshGEdgeProcessing` keeps
+    # `N = nbPointsTransfinite` over the reduced window), and upstream's
+    # own "straight line" gate applies.
+    bl_ends=_model_curve_bl_end_nodes(m,curve,a,b,caller)
+    if bl_ends!==nothing
+        kind===:line || throw(ArgumentError(
+            "$caller: Boundary layer end point should lie on a straight " *
+            "line (curve $curve)"))
+        return _model_curve_bl_grade_params(
+            m,curve,bl_ends[1],bl_ends[2],t0,t1,length,options,caller;
+            transfinite=spec,_native_producer=_native_producer)
     end
     if spec!==nothing
         if _native_producer && spec.coef!=0.0 &&

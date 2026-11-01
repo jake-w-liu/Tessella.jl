@@ -452,6 +452,8 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
                       vertex_scale_last=nothing,
                       scale_hprev::Real=0.0,
                       normalize_dirs::Bool=true,
+                      vertex_fans=nothing,
+                      fan_skips=nothing,
                       caller::AbstractString="mesh_boundary_layer_2d")
     nsegs(curve)>0 || throw(ArgumentError("$caller: curve has no segments"))
     (ntris(curve)==0 && ntets(curve)==0) || throw(ArgumentError(
@@ -531,6 +533,20 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
         interior || throw(ArgumentError("$caller: fan vertex $v is not an interior vertex"))
     end
     n_fans=length(fan_set)
+    # Upstream's skip fan type (`FanPointsSizesList` entry -4 or any other
+    # negative fallback — `fanType 4` with `fanSize` clamped to 0): the
+    # vertex still carries the two boundary rays as per-side columns, but
+    # no wedge cells are emitted — the sector between them stays domain
+    # interior and the free boundary walks down the entry ray's rungs to
+    # the wall vertex and back up the exit ray (upstream's `bedges` keep
+    # every one-sided rung free). Needed early: a skip fan's unused column
+    # levels are unreferenced and must prune like a plain column's.
+    fskip_set=fan_skips===nothing ? Set{Int}() :
+        _bounded_index_set(fan_skips,nv,caller,"fan_skips")
+    for v in fskip_set
+        v in fan_set || throw(ArgumentError(
+            "$caller: fan_skips key $v is not a fan vertex"))
+    end
     # Per-chain-vertex column lengths and emitted levels. `vertex_offsets`
     # (upstream's per-node `getLocalInfoAtNode` schedules) may give each wall
     # vertex its own cumulative offsets — `modifyInitialMeshForBoundaryLayers`
@@ -545,8 +561,10 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
         end
         vo=vertex_offsets[v]
         nvo=length(vo)
-        nvo>=1 || throw(ArgumentError(
-            "$caller: vertex_offsets[$v] is empty"))
+        # An empty entry means the wall vertex has no column of its own —
+        # upstream's open-run end points whose adjacent curve holds no 1-D
+        # interior nodes; the vertex only takes part through its neighbours'
+        # segments and stays on the strip's free boundary.
         previous=0.0
         for (k,off) in enumerate(vo)
             (isfinite(off) && off>previous) || throw(ArgumentError(
@@ -558,57 +576,26 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
     end
     emit_len=Vector{Int}(undef,nchain)
     for (idx,v) in enumerate(verts)
-        if v in fan_set
+        if v in fan_set && !(v in fskip_set)
             emit_len[idx]=nlens[idx]
             continue
         end
         depth=0
         ni=nlens[idx]
+        # A wall segment only emits cells when *both* side columns are
+        # non-empty (`min(na,nb)` quadrangles plus the deeper column's closing
+        # triangle). A zero-depth neighbour therefore contributes nothing —
+        # the vertex's free side there is exposed boundary, not a used level.
         if closed || idx>1
             nb=nlens[idx==1 ? nchain : idx-1]
-            depth=max(depth,ni>nb ? nb+1 : ni)
+            depth=max(depth,(ni==0 || nb==0) ? 0 : (ni>nb ? nb+1 : ni))
         end
         if closed || idx<nchain
             nb=nlens[idx==nchain ? 1 : idx+1]
-            depth=max(depth,ni>nb ? nb+1 : ni)
+            depth=max(depth,(ni==0 || nb==0) ? 0 : (ni>nb ? nb+1 : ni))
         end
         emit_len[idx]=depth
     end
-    ntris_out=_checked_mul(n_fans,nfan,caller,"fan triangle count")
-    main_quads=0
-    nclosing=0
-    for i in 1:nchain_segs
-        na=nlens[i];nb=nlens[i==nchain ? 1 : i+1]
-        main_quads=_checked_add(main_quads,min(na,nb),caller,
-                                "strip quadrangle count")
-        na==nb ||
-            (nclosing=_checked_add(nclosing,1,caller,"closing triangle count"))
-    end
-    ring_quads=0
-    for (idx,v) in enumerate(verts)
-        v in fan_set || continue
-        ring_quads=_checked_add(ring_quads,
-            _checked_mul(nfan,nlens[idx]-1,caller,"fan ring quadrangle count"),
-            caller,"fan ring quadrangle count")
-    end
-    ntris_out=_checked_add(ntris_out,nclosing,caller,"triangle count")
-    nquads=_checked_add(main_quads,ring_quads,caller,"quadrangle count")
-    ncells=_checked_add(ntris_out,nquads,caller,"cell count")
-    ncells<=cell_limit || throw(ArgumentError(
-        "$caller: $ncells cells exceed max_cells=$cell_limit"))
-    ncells<=typemax(Int32) || throw(ArgumentError("$caller: cell count exceeds Int32"))
-    ncells>0 || throw(ArgumentError("$caller: no cells to emit"))
-    new_points=0
-    for (idx,v) in enumerate(verts)
-        per=v in fan_set ?
-            _checked_mul(emit_len[idx],_checked_add(nfan,1,caller,
-                "fan ray count"),caller,"extruded node count") :
-            emit_len[idx]
-        new_points=_checked_add(new_points,per,caller,"extruded node count")
-    end
-    npoints=_checked_add(nv,new_points,caller,"node count")
-    npoints<=typemax(Int32) || throw(ArgumentError("$caller: node count exceeds Int32"))
-
     points=Vector{NTuple{3,Float64}}(undef,nv)
     @inbounds for i in 1:nv
         points[i]=(curve.coords[1,i],curve.coords[2,i],curve.coords[3,i])
@@ -648,15 +635,89 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
         L>0 || throw(ArgumentError("$caller: vertex $(verts[i]) has a zero normal"))
         n_avg[i]=(sx/L,sy/L)
     end
+    # Upstream `FanPointsSizesList` semantics (`treat2Connections` in
+    # boundaryLayersData.cpp): `fanSize` is an integer wedge budget for the
+    # corner sweep — `round(sweep/π·fanSize)+1` wedges where `sweep` is the
+    # angular sector between the adjacent inward normals measured through the
+    # domain (the CCW wrap for reflex sectors). Vertices listed in `vertex_fans`
+    # get the per-point size; plain `fans` keep the extrude `fan_elements`
+    # semantic. A size of 0 still emits the two boundary rays (one wedge).
+    vfans=vertex_fans===nothing ? Dict{Int,Int}() :
+        Dict{Int,Int}(Int(v)=>Int(f) for (v,f) in vertex_fans)
+    for (v,f) in vfans
+        v in fan_set || throw(ArgumentError(
+            "$caller: vertex_fans key $v is not a fan vertex"))
+        f>=0 || throw(ArgumentError(
+            "$caller: fan size $f for vertex $v is negative"))
+        v in fskip_set && throw(ArgumentError(
+            "$caller: vertex_fans[$v] conflicts with fan_skips"))
+    end
+    fanw=zeros(Int,nchain)
+    fansweep=zeros(Float64,nchain)
     for v in fan_set
         i=pos[v]
         nin=n_in[i]; nout=n_out[i]
         cr=nin[1]*nout[2]-nin[2]*nout[1]
         dt=nin[1]*nout[1]+nin[2]*nout[2]
         θ=atan(cr,dt)
-        θ>0 || throw(ArgumentError(
-            "$caller: fan vertex $v does not have a positive CCW sector"))
+        if v in fskip_set
+            # Skip type: two boundary rays only (`fanSize` clamped to 0).
+            fanw[i]=1
+            fansweep[i]=θ
+        elseif haskey(vfans,v)
+            # Upstream `treat2Connections` always sweeps the short arc —
+            # the AMIN→AMAX wrap normalizes the sector below π — and the
+            # wedge count follows `round(frac·fanSize)` with `frac=|θ|/π`.
+            fanw[i]=max(1, floor(Int, abs(θ)/π*vfans[v]+0.5)+1)
+            fansweep[i]=θ
+        else
+            θ>0 || throw(ArgumentError(
+                "$caller: fan vertex $v does not have a positive CCW sector"))
+            fanw[i]=nfan
+            fansweep[i]=θ
+        end
     end
+    ntris_out=0
+    for (idx,v) in enumerate(verts)
+        v in fan_set || continue
+        v in fskip_set && continue
+        ntris_out=_checked_add(ntris_out,fanw[idx],caller,
+                               "fan triangle count")
+    end
+    main_quads=0
+    nclosing=0
+    for i in 1:nchain_segs
+        na=nlens[i];nb=nlens[i==nchain ? 1 : i+1]
+        main_quads=_checked_add(main_quads,min(na,nb),caller,
+                                "strip quadrangle count")
+        (na!=nb && min(na,nb)>0) &&
+            (nclosing=_checked_add(nclosing,1,caller,"closing triangle count"))
+    end
+    ring_quads=0
+    for (idx,v) in enumerate(verts)
+        v in fan_set || continue
+        v in fskip_set && continue
+        ring_quads=_checked_add(ring_quads,
+            _checked_mul(fanw[idx],nlens[idx]-1,caller,"fan ring quadrangle count"),
+            caller,"fan ring quadrangle count")
+    end
+    ntris_out=_checked_add(ntris_out,nclosing,caller,"triangle count")
+    nquads=_checked_add(main_quads,ring_quads,caller,"quadrangle count")
+    ncells=_checked_add(ntris_out,nquads,caller,"cell count")
+    ncells<=cell_limit || throw(ArgumentError(
+        "$caller: $ncells cells exceed max_cells=$cell_limit"))
+    ncells<=typemax(Int32) || throw(ArgumentError("$caller: cell count exceeds Int32"))
+    ncells>0 || throw(ArgumentError("$caller: no cells to emit"))
+    new_points=0
+    for (idx,v) in enumerate(verts)
+        per=v in fan_set ?
+            _checked_mul(emit_len[idx],_checked_add(fanw[idx],1,caller,
+                "fan ray count"),caller,"extruded node count") :
+            emit_len[idx]
+        new_points=_checked_add(new_points,per,caller,"extruded node count")
+    end
+    npoints=_checked_add(nv,new_points,caller,"node count")
+    npoints<=typemax(Int32) || throw(ArgumentError("$caller: node count exceeds Int32"))
 
     id_of=Dict{Tuple{Int,Int,Int},Int}()
     @inbounds for v in verts
@@ -666,10 +727,10 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
     @inbounds for k in 1:maxemit, (idx,v) in enumerate(verts)
         k>emit_len[idx] && continue
         if v in fan_set
-            nin=n_in[idx]; nout=n_out[idx]
-            θ=atan(nin[1]*nout[2]-nin[2]*nout[1], nin[1]*nout[1]+nin[2]*nout[2])
-            for ray in 0:nfan
-                α=ray/nfan*θ
+            nin=n_in[idx]
+            θ=fansweep[idx]
+            for ray in 0:fanw[idx]
+                α=ray/fanw[idx]*θ
                 c,s=cos(α),sin(α)
                 dx=nin[1]*c-nin[2]*s
                 dy=nin[1]*s+nin[2]*c
@@ -719,7 +780,7 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
     @inbounds for i in 1:nchain_segs
         a=verts[i]; b=verts[i==nchain ? 1 : i+1]
         a_fan=a in fan_set; b_fan=b in fan_set
-        ray_a=a_fan ? nfan : 0
+        ray_a=a_fan ? fanw[i] : 0
         ray_b=0
         na=nlens[i]; nb=nlens[i==nchain ? 1 : i+1]
         N=min(na,nb)
@@ -740,10 +801,12 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
             qcursor+=1
             quads[:,qcursor].=(Int32(b1),Int32(b2),Int32(t2),Int32(t1))
         end
-        if na!=nb
+        if na!=nb && N>0
             # Unequal column heights close with one triangle — upstream's
             # `MTriangle(c1[N-1],c2[N-1],longer_column[N])`: the shared level-N
-            # nodes plus the deeper column's next level.
+            # nodes plus the deeper column's next level. With an empty side
+            # (N==0) upstream emits no cells on the segment at all — the
+            # deeper column's free rungs stay exposed boundary instead.
             v11=_id_layer(id_of,a,N,ray_a,a_fan)
             v12=_id_layer(id_of,b,N,ray_b,b_fan)
             apex=na>nb ? _id_layer(id_of,a,N+1,ray_a,a_fan) :
@@ -759,26 +822,40 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
         end
     end
     @inbounds for (idx,v) in enumerate(verts)
-        v in fan_set || continue
+        (v in fan_set && !(v in fskip_set)) || continue
         origin=id_of[(v,0,0)]
-        for ray in 0:nfan-1
+        # A negative `fansweep` (upstream's short-arc wrap on a reflex
+        # sector) walks the rays clockwise — reverse each cell's winding so
+        # the emitted triangle/quadrangle keeps its positive Jacobian.
+        cw=fansweep[idx]<0
+        for ray in 0:fanw[idx]-1
             i1=id_of[(v,1,ray)]; i2=id_of[(v,1,ray+1)]
             p0=plane_points[origin]; p1=plane_points[i1]; p2=plane_points[i2]
-            orient2(p0,p1,p2)>0 ||
+            # The check must test the *emitted* winding — a clockwise sweep
+            # (upstream's short-arc wrap on a reflex sector) reverses the
+            # tuple, so its positive Jacobian shows up in the (p0,p2,p1)
+            # order.
+            (cw ? orient2(p0,p2,p1) : orient2(p0,p1,p2))>0 ||
                 throw(ArgumentError("$caller: inverted fan triangle at vertex $v"))
             tcursor+=1
-            tris[:,tcursor].=(Int32(origin),Int32(i1),Int32(i2))
+            tris[:,tcursor].=cw ? (Int32(origin),Int32(i2),Int32(i1)) :
+                (Int32(origin),Int32(i1),Int32(i2))
         end
-        for k in 2:nlens[idx], ray in 0:nfan-1
+        for k in 2:nlens[idx], ray in 0:fanw[idx]-1
             b1=id_of[(v,k-1,ray)]; b2=id_of[(v,k-1,ray+1)]
             t2=id_of[(v,k,ray+1)]; t1=id_of[(v,k,ray)]
             p1=plane_points[b1]; p2=plane_points[t1]
             p3=plane_points[t2]; p4=plane_points[b2]
-            _positive_quad(p1,p2,p3,p4) || throw(ArgumentError(
+            # Same emitted-winding rule as the wedge triangles: the CW quad
+            # emits the reversed boundary order (b2,t2,t1,b1), i.e. the
+            # (p4,p3,p2,p1) order here.
+            (cw ? _positive_quad(p4,p3,p2,p1) : _positive_quad(p1,p2,p3,p4)) ||
+                throw(ArgumentError(
                 "$caller: fan quadrangle at vertex $v layer $k has a zero or "*
                 "reversed corner Jacobian"))
             qcursor+=1
-            quads[:,qcursor].=(Int32(b1),Int32(t1),Int32(t2),Int32(b2))
+            quads[:,qcursor].=cw ? (Int32(b2),Int32(t2),Int32(t1),Int32(b1)) :
+                (Int32(b1),Int32(t1),Int32(t2),Int32(b2))
         end
     end
     qcursor==nquads || throw(ErrorException("$caller: quadrangle count mismatch"))
@@ -812,7 +889,7 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
         tops[pos]=points[id_of[(v,emit_len[idx],0)]]
     end
     return (mesh=mesh,verts=verts,dirs=dirs,tops=tops,
-            id_of=id_of,nlevels=nlens)
+            id_of=id_of,nlevels=nlens,fan_wedges=fanw)
 end
 
 # Closed-manifold wall decomposition: union-find over triangles joined by shared

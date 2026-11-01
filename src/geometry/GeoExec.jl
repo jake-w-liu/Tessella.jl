@@ -10136,13 +10136,13 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
     context.native_element_lookup_receipt=nothing
     context.native_mesh_begin_callback===nothing || context.native_mesh_begin_callback()
     caller="execute_geo: Mesh"
-    if dim>=2 && isempty(context.boundary_layer_fields) &&
+    if dim>=1 && isempty(context.boundary_layer_fields) &&
             !isempty(m.meshing.boundary_layer_fields)
         # A cleared `BoundaryLayer Field =` selection unregisters the
         # fields — upstream's `getBoundaryLayerFields` returns the live set.
         empty!(m.meshing.boundary_layer_fields)
     end
-    if dim>=2 && !isempty(context.boundary_layer_fields)
+    if dim>=1 && !isempty(context.boundary_layer_fields)
         # `BoundaryLayer Field =` selections feed the wall-offset pass
         # upstream runs inside `meshGFace` (`Mesh2DWithBoundaryLayers`):
         # resolve each selected BoundaryLayer field once per Mesh statement

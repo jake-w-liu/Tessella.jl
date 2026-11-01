@@ -1138,6 +1138,24 @@ function _geo_int_list_opt(spec::GeoFieldSpec,name::String,deprecated::String=""
     return tags
 end
 
+# `FieldOptionList` twin that keeps any signed integer — upstream's
+# `FanPointsSizesList` encodes fan types in negative entries (-1/-2/-3 =
+# cross/mix/tail, -4/other = skip) alongside nonnegative wedge budgets.
+function _geo_signed_int_list_opt(spec::GeoFieldSpec,name::String,
+                                  deprecated::String="")
+    names=isempty(deprecated) ? (name,) : (name,deprecated)
+    option=_geo_last_alias(spec,names)
+    raws=option===nothing ? String[] : _geo_list(spec,option)
+    tags=Int[]
+    for raw in raws
+        tag=tryparse(Int,raw)
+        tag===nothing && throw(ArgumentError(
+            "build_geo_size_field: Field[$(spec.tag)].$(something(option,name)) needs integer entries (got $raw)"))
+        push!(tags,tag)
+    end
+    return tags
+end
+
 function _geo_float_list_opt(spec::GeoFieldSpec,name::String,deprecated::String="")
     names=isempty(deprecated) ? (name,) : (name,deprecated)
     option=_geo_last_alias(spec,names)
@@ -1435,7 +1453,7 @@ function _geo_boundary_layer_config(spec::GeoFieldSpec,
         "build_geo_size_field: Field[$(spec.tag)].NbLayers must be positive"))
     return (;curves=_geo_int_list_opt(spec,"CurvesList","EdgesList"),
             fan_points=_geo_int_list_opt(spec,"FanPointsList","FanNodesList"),
-            fan_sizes=_geo_int_list_opt(spec,"FanPointsSizesList"),
+            fan_sizes=_geo_signed_int_list_opt(spec,"FanPointsSizesList"),
             points=_geo_int_list_opt(spec,"PointsList","NodesList"),
             size,sizes=_geo_float_list_opt(spec,"SizesList","hwall_n_nodes"),
             ratio,size_far,thickness,quads=_geo_int(spec,"Quads";default=0),

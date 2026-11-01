@@ -1004,6 +1004,7 @@ function mesh_curve(γ, field::AbstractSizeField; t0::Real=0.0,
                     _recombine_odd_nodes::Bool=false,
                     _recombination_primitive=nothing,
                     _point_store=nothing,
+                    _skip_filter::Bool=false,
                     max_edges=_DEFAULT_MAX_EDGES)
     t0, t1, nsample = _curve_args(t0, t1, nsample, "mesh_curve")
     curve_entity = _curve_entity(entity, "mesh_curve")
@@ -1084,7 +1085,9 @@ function mesh_curve(γ, field::AbstractSizeField; t0::Real=0.0,
                                   curve_entity, total / nedge, closed,
                                   "mesh_curve")
     end
-    if !anisotropic_metric
+    # `_skip_filter` is the `addBoundaryLayerPoints` gate — upstream skips
+    # `filterPoints` outright once BL end points exist on the edge.
+    if !anisotropic_metric && !_skip_filter
         _filter_close_points!(points, parameters, γ, field, curve_entity,
                               effective_minimum, closed, force_odd,
                               size_function, "mesh_curve")
