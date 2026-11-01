@@ -520,6 +520,46 @@ function _step_arc_span(entities,use,caller)
             start=(sense ? vs : ve),stop=(sense ? ve : vs))
 end
 
+# Canonical window of an open ELLIPSE-trimmed edge in its own ellipse frame —
+# the ELLIPSE analogue of _step_arc_span: returns the frame fields plus the
+# CCW parametric span and the (start, stop) vertex positions covering
+# [theta(start), theta(start)+span]; the EDGE_CURVE same_sense flag selects
+# the complement.
+function _step_ellarc_span(entities,use,caller)
+    ec=use.ec
+    length(ec.args)>=3 || throw(ArgumentError(
+        "$caller: EDGE_CURVE #$(ec.id) is truncated"))
+    vs=_step_vertex_point(entities,ec.args[2])
+    ve=_step_vertex_point(entities,ec.args[3])
+    (vs===nothing || ve===nothing) && throw(ArgumentError(
+        "$caller: EDGE_CURVE #$(ec.id) has unresolvable vertex geometry"))
+    vs!=ve || throw(ArgumentError(
+        "$caller: closed ELLIPSE edge #$(ec.id) reached the arc-span "*
+        "certificate"))
+    sense=length(ec.args)>=5 ? _brep_enum(ec.args[5]) : nothing
+    sense===nothing && (sense=true)
+    ef=_step_ellipse_frame_full(entities,use.base,caller)
+    tol=1e-9*max(ef.r1,ef.r2,1.0)
+    for v in (vs,ve)
+        d=_brep_vsub(v,ef.center)
+        abs(_brep_vdot(d,ef.nr))<=tol || throw(ArgumentError(
+            "$caller: arc EDGE_CURVE #$(ec.id) endpoint is off its ellipse "*
+            "plane"))
+        dx=_brep_vdot(d,ef.x);dy=_brep_vdot(d,ef.y)
+        e=(dx/ef.r1)*(dx/ef.r1)+(dy/ef.r2)*(dy/ef.r2)
+        abs(e-1.0)<=1e-9 || throw(ArgumentError(
+            "$caller: arc EDGE_CURVE #$(ec.id) endpoint is off its ellipse"))
+    end
+    ds=_brep_vsub(vs,ef.center);de=_brep_vsub(ve,ef.center)
+    ta=atan(_brep_vdot(ds,ef.y)/ef.r2,_brep_vdot(ds,ef.x)/ef.r1)
+    tb=atan(_brep_vdot(de,ef.y)/ef.r2,_brep_vdot(de,ef.x)/ef.r1)
+    span=sense ? mod(tb-ta,2π) : mod(ta-tb,2π)
+    (span>1e-9 && span<2π-1e-9) || throw(ArgumentError(
+        "$caller: arc EDGE_CURVE #$(ec.id) is degenerate"))
+    return (center=ef.center,nr=ef.nr,x=ef.x,y=ef.y,r1=ef.r1,r2=ef.r2,
+            span=span,start=(sense ? vs : ve),stop=(sense ? ve : vs))
+end
+
 # Degree-1 B-spline trims are exact polylines through the control points; the
 # edge's vertex pair must land on a consecutive control sub-chain. Returns
 # the sub-chain in control order or nothing for other curve kinds.
@@ -547,13 +587,53 @@ end
 
 const _BREP_PRISM_SPLINE_SUBDIV=8
 
-# Bounded sampled tier for higher-degree B-spline trims: the edge must use
-# the curve's whole parameter domain — its vertex pair lands on the two
-# evaluated end points — and the canonical chain is the knot-span-uniform
-# evaluation grid, `_BREP_PRISM_SPLINE_SUBDIV` segments per nonzero span.
-# Same-entity uses share the chain bitwise; congruent entities weld through
-# positional deduplication. Returns the evaluated points in parameter order
-# or nothing for non-curves and partial uses.
+# Gauss–Newton closest-point inversion of a B-spline curve vertex: seeds every
+# sampled grid point of the canonical chain resolution and keeps the unique
+# converged root whose residual is within tol. Returns nothing when the point
+# is off the curve or lands on it at more than one parameter — both cases
+# defer to the next certificate's diagnostic.
+function _step_spline_param(c,P,u0,u1,tol)
+    U=c.knots;p=c.degree
+    roots=Float64[]
+    hfd=max(1e-6*(u1-u0),1e-9)
+    for k in p+1:length(U)-p-1
+        U[k+1]>U[k] || continue
+        for j in 0:_BREP_PRISM_SPLINE_SUBDIV
+            s=U[k]+(U[k+1]-U[k])*j/_BREP_PRISM_SPLINE_SUBDIV
+            t=s;conv=false
+            for _ in 1:40
+                ta=clamp(t-hfd,u0,u1);tb=clamp(t+hfd,u0,u1)
+                tb-ta>0 || break
+                ds=_brep_vsub(nurbs_eval(c,tb),nurbs_eval(c,ta))
+                den=_brep_vdot(ds,ds)
+                (isfinite(den) && den>0) || break
+                r=_brep_vsub(nurbs_eval(c,t),P)
+                t2=clamp(t-_brep_vdot(r,ds)/den*(tb-ta),u0,u1)
+                conv=abs(t2-t)<=1e-13*(u1-u0)
+                t=t2
+                conv && break
+            end
+            conv || continue
+            _posnear(nurbs_eval(c,t),P,tol) || continue
+            any(rt->abs(rt-t)<=1e-9*(u1-u0),roots) || push!(roots,t)
+        end
+    end
+    length(roots)==1 || return nothing
+    return roots[1]
+end
+
+# Bounded sampled tier for higher-degree B-spline trims: an edge whose vertex
+# pair lands on the two evaluated domain ends uses the curve's whole parameter
+# domain — the canonical chain is the knot-span-uniform evaluation grid,
+# `_BREP_PRISM_SPLINE_SUBDIV` segments per nonzero span. An edge whose
+# vertices land strictly inside the domain is a partial-domain use covering
+# [t1,t2]; its canonical chain samples the covered interval knot-aligned —
+# `_BREP_PRISM_SPLINE_SUBDIV` segments inside each overlapped nonzero span —
+# so two uses of one entity on the same interval share every sample bitwise
+# and congruent entities weld through positional deduplication, while
+# mismatched intervals produce disjoint segment sets that the incidence audit
+# rejects. Returns the evaluated points in parameter order or nothing for
+# non-curves and unresolvable uses.
 function _step_spline_chain(entities,use)
     c=_step_nurbs_curve(use.base,entities)
     c===nothing && return nothing
@@ -571,11 +651,31 @@ function _step_spline_chain(entities,use)
     u1-u0>0 || return nothing
     p0=nurbs_eval(c,u0);p1=nurbs_eval(c,u1)
     tol=1e-9*max(_poly_scale(c.controls),1.0)
-    (_posnear(vs,p0,tol) && _posnear(ve,p1,tol)) ||
-        (_posnear(vs,p1,tol) && _posnear(ve,p0,tol)) || return nothing
-    spans=count(k->U[k+1]>U[k],c.degree+1:length(U)-c.degree-1)
-    m=max(1,_BREP_PRISM_SPLINE_SUBDIV*spans)
-    return NTuple{3,Float64}[nurbs_eval(c,u0+(u1-u0)*k/m) for k in 0:m]
+    if (_posnear(vs,p0,tol) && _posnear(ve,p1,tol)) ||
+       (_posnear(vs,p1,tol) && _posnear(ve,p0,tol))
+        spans=count(k->U[k+1]>U[k],c.degree+1:length(U)-c.degree-1)
+        m=max(1,_BREP_PRISM_SPLINE_SUBDIV*spans)
+        return NTuple{3,Float64}[nurbs_eval(c,u0+(u1-u0)*k/m) for k in 0:m]
+    end
+    # Partial-domain use: invert each vertex to its unique on-curve parameter
+    # and sample the covered interval knot-aligned so same-entity uses share
+    # every sample bitwise.
+    ta=_step_spline_param(c,vs,u0,u1,tol)
+    tb=_step_spline_param(c,ve,u0,u1,tol)
+    (ta===nothing || tb===nothing) && return nothing
+    lo,hi=min(ta,tb),max(ta,tb)
+    hi-lo>0 || return nothing
+    pts=NTuple{3,Float64}[]
+    for k in c.degree+1:length(U)-c.degree-1
+        U[k+1]>U[k] || continue
+        a=max(lo,U[k]);b=min(hi,U[k+1])
+        b-a<=0 && continue
+        for j in (isempty(pts) ? 0 : 1):_BREP_PRISM_SPLINE_SUBDIV
+            push!(pts,nurbs_eval(c,a+(b-a)*j/_BREP_PRISM_SPLINE_SUBDIV))
+        end
+    end
+    length(pts)>=2 || return nothing
+    return pts
 end
 
 # SURFACE_OF_LINEAR_EXTRUSION frame: (basis entity, unit sweep direction).
@@ -597,7 +697,9 @@ function _step_swept_frame(entities,surf)
 end
 
 function _step_prismatic_shell(entities,faces,curvekinds,caller)
-    length(faces)>=4 || return nothing
+    # Three faces is the two-cap/one-wall tube shape (an elliptical or
+    # swept-profile pipe); four or more is a general prismatic solid.
+    length(faces)>=3 || return nothing
     all(f->f.role==1,faces) || return nothing
     all(f->f.surf!==nothing && f.rings!==nothing,faces) || return nothing
     atol=1e-9
@@ -690,6 +792,22 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
                         push!(out,(kind=:arc,u=u,
                             aux=_step_arc_span(entities,u,caller)))
                     end
+                elseif b=="ELLIPSE"
+                    if u.v1==u.v2
+                        ef=_step_ellipse_frame_full(entities,u.base,caller)
+                        dv=_brep_vsub(u.v1,ef.center)
+                        dx=_brep_vdot(dv,ef.x);dy=_brep_vdot(dv,ef.y)
+                        ee=(dx/ef.r1)*(dx/ef.r1)+(dy/ef.r2)*(dy/ef.r2)
+                        (abs(ee-1.0)<=1e-9 &&
+                         abs(_brep_vdot(dv,ef.nr))<=
+                             1e-9*max(ef.r1,ef.r2,1.0)) || throw(ArgumentError(
+                            "$caller: ELLIPSE #$(u.base.id) vertex is off "*
+                            "the ellipse"))
+                        push!(out,(kind=:ellipse,u=u,aux=ef))
+                    else
+                        push!(out,(kind=:ellipsearc,u=u,
+                            aux=_step_ellarc_span(entities,u,caller)))
+                    end
                 elseif b=="B_SPLINE_CURVE_WITH_KNOTS" || b=="COMPLEX"
                     ch=_step_polyline_subchain(entities,u)
                     if ch===nothing
@@ -764,14 +882,16 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
                             "PLANE #$(faces[i].surf.id)"))
                 end
             end
-            if ur.kind in (:arc,:circle)
+            if ur.kind in (:arc,:circle,:ellipse,:ellipsearc)
                 a=ur.aux
-                abs(_brep_vdot(a.nr,pn))>=1.0-atol || throw(ArgumentError(
-                    "$caller: CIRCLE #$(ur.u.base.id) is not in PLANE "*
-                    "#$(faces[i].surf.id)"))
-                abs(_brep_vdot(_brep_vsub(a.center,p0),pn))<=ptol || throw(
-                    ArgumentError("$caller: CIRCLE #$(ur.u.base.id) center "*
-                        "is off PLANE #$(faces[i].surf.id)"))
+                nk=a.nr;ct=a.center
+                abs(_brep_vdot(nk,pn))>=1.0-atol || throw(ArgumentError(
+                    "$caller: $(ur.u.base.kind) #$(ur.u.base.id) is not in "*
+                    "PLANE #$(faces[i].surf.id)"))
+                abs(_brep_vdot(_brep_vsub(ct,p0),pn))<=ptol || throw(
+                    ArgumentError("$caller: $(ur.u.base.kind) "*
+                        "#$(ur.u.base.id) center is off PLANE "*
+                        "#$(faces[i].surf.id)"))
             end
         end
     end
@@ -779,6 +899,7 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
     # ── wall faces: single loop, axial or cap-height edges ────────────────
     wallc=Dict{Int,NamedTuple}()   # cyl walls: (c0,z,x,y,R,arcs,pieces,g0i,g1i)
     wallex=Dict{Int,NamedTuple}()  # swept walls: (a=rim0 chain,b=rim1 chain)
+    wallex_ru=Dict{Int,Tuple}()    # swept walls: per-rim classified use lists
     for i in wall_i
         f=faces[i]
         uses=only(fuse[i])
@@ -786,7 +907,7 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
             cf=cyl_f[i];tol=1e-9*max(cf.R,1.0)
             arcs=NamedTuple[];axial=false
             for (ui,ur) in enumerate(uses)
-                ur.kind==:spline && return nothing
+                ur.kind in (:spline,:ellipse,:ellipsearc) && return nothing
                 if ur.kind==:arc
                     _step_cyl_rim_arc(entities,ur.u,cf.c0,cf.z,cf.x,cf.y,
                         cf.R,tol,atol,caller)
@@ -837,20 +958,31 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
             !isempty(arcs) || return nothing
             wallc[i]=(c0=cf.c0,z=cf.z,x=cf.x,y=cf.y,R=cf.R,arcs=arcs)
         elseif f.surf.kind=="SURFACE_OF_LINEAR_EXTRUSION"
-            # Swept wall: exactly two rims at distinct cap heights — chains
-            # congruent under a constant axial offset — plus straight axial
-            # seams joining the caps. Rims may be sampled spline chains,
-            # polylines, or single segments.
-            rims=NamedTuple[]
-            for ur in uses
+            # Swept wall: rims at the cap heights — each assembled from one
+            # or more contiguous edge uses whose concatenated chains must be
+            # congruent under the axial offset — plus straight axial seams
+            # joining the caps. Rim pieces may be sampled spline chains,
+            # polylines, single segments, or ellipse trims (chains resolved
+            # against the ellipse-group partition after the coverage audit).
+            rimuses=(NamedTuple[],NamedTuple[])
+            for (ui,ur) in enumerate(uses)
                 ur.kind in (:arc,:circle) && return nothing
+                if ur.kind in (:ellipse,:ellipsearc)
+                    a=ur.aux
+                    abs(_brep_vdot(a.nr,z))>=1.0-atol || return nothing
+                    hh=_brep_vdot(a.center,z)
+                    rim=abs(hh-h0)<=htol ? 1 :
+                        abs(hh-h1)<=htol ? 2 : return nothing
+                    push!(rimuses[rim],(ui=ui,ur=ur))
+                    continue
+                end
                 pts=ur.kind==:line ? NTuple{3,Float64}[ur.u.v1,ur.u.v2] :
                     collect(ur.aux.pts)
                 ts=[_brep_vdot(v,z) for v in pts]
                 if all(t->abs(t-ts[1])<=htol,ts) &&
                    (abs(ts[1]-h0)<=htol || abs(ts[1]-h1)<=htol)
                     rim=abs(ts[1]-h0)<=htol ? 1 : 2
-                    push!(rims,(rim=rim,pts=pts))
+                    push!(rimuses[rim],(ui=ui,ur=ur))
                     continue
                 end
                 # Otherwise the use must be an axial seam joining the caps.
@@ -862,29 +994,8 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
                  abs(ts[1]-h1)<=htol && abs(ts[end]-h0)<=htol) ||
                     return nothing
             end
-            (length(rims)==2 && rims[1].rim!=rims[2].rim) || return nothing
-            chA=rims[1].rim==1 ? rims[1].pts : rims[2].pts
-            chB=rims[1].rim==2 ? rims[1].pts : rims[2].pts
-            length(chA)==length(chB) || return nothing
-            ez=(z[1]*(h1-h0),z[2]*(h1-h0),z[3]*(h1-h0))
-            function _chainoffset(p,q)
-                o=_brep_vsub(p,q)
-                (abs(o[1]-ez[1])<=ptol && abs(o[2]-ez[2])<=ptol &&
-                 abs(o[3]-ez[3])<=ptol) && return o
-                return nothing
-            end
-            off=_chainoffset(first(chB),first(chA))
-            if off===nothing
-                _chainoffset(last(chB),first(chA))===nothing &&
-                    return nothing
-                chB=reverse(chB)
-                off=_chainoffset(first(chB),first(chA))
-            end
-            all(k->begin o=_brep_vsub(chB[k],chA[k]);
-                    abs(o[1]-off[1])<=ptol && abs(o[2]-off[2])<=ptol &&
-                    abs(o[3]-off[3])<=ptol end,eachindex(chA)) ||
-                return nothing
-            wallex[i]=(a=chA,b=chB)
+            (!isempty(rimuses[1]) && !isempty(rimuses[2])) || return nothing
+            wallex_ru[i]=rimuses
         else
             p0,pn=_step_plane_frame(entities,f.surf,caller)
             spans=false
@@ -1029,6 +1140,114 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
         end
     end
 
+    # ── elliptical-edge groups + coverage audit ───────────────────────────
+    # One geometric ellipse per (center, axis-line, semi-radii pair): every
+    # use's canonical coverage window is anchored by vertex position in the
+    # group reference frame — the first ellipse use's own axes — and each
+    # elementary interval must be covered exactly twice. Strict ellipses
+    # (r1 != r2) must share the group's axis directions up to per-axis sign
+    # flips; circle-like ellipses accept any in-plane frame. Mirroring the
+    # circle audit, theta is measured in the group's normalized frame via
+    # atan((d.y)/r2, (d.x)/r1) so a shared geometric ellipse welds bitwise.
+    egroups=NamedTuple[]
+    euseg=Dict{Tuple{Int,Int,Int},NamedTuple}()  # (fi,bi,ui) -> group record
+    for (i,bound) in enumerate(fuse),(bi,b) in enumerate(bound),
+            (ui,ur) in enumerate(b)
+        ur.kind in (:ellipse,:ellipsearc) || continue
+        a=ur.aux;etol=1e-9*max(a.r1,a.r2,1.0)
+        gi=0
+        for (k,g) in enumerate(egroups)
+            _posnear(a.center,g.center,etol) || continue
+            (abs(a.r1-g.r1)<=etol && abs(a.r2-g.r2)<=etol) || continue
+            abs(_brep_vdot(a.nr,g.nr))>=1.0-atol || continue
+            if abs(a.r1-a.r2)>etol
+                (abs(_brep_vdot(a.x,g.x))>=1.0-atol &&
+                 abs(_brep_vdot(a.y,g.y))>=1.0-atol) || continue
+            end
+            gi=k;break
+        end
+        if gi==0
+            push!(egroups,(center=a.center,r1=a.r1,r2=a.r2,nr=a.nr,
+                           x=a.x,y=a.y,
+                           uses=Tuple{Int,Int,Int,NamedTuple}[],
+                           knots=Float64[],
+                           pieces=Tuple{Float64,Float64}[]))
+            gi=length(egroups)
+        end
+        push!(egroups[gi].uses,(i,bi,ui,ur))
+        euseg[(i,bi,ui)]=(gi=gi,)
+    end
+    for (gi,g) in enumerate(egroups)
+        knots=Float64[];entries=NamedTuple[];nclosed=0
+        for uc in g.uses
+            ur=uc[4]
+            if ur.kind==:ellipse
+                nclosed+=1
+                push!(entries,(fi=uc[1],bi=uc[2],ui=uc[3],ur=ur,
+                               lo=0.0,hi=2π,startp=ur.u.v1))
+                continue
+            end
+            a=ur.aux
+            sgn=_brep_vdot(a.nr,g.nr)>0
+            pos=sgn ? a.start : a.stop
+            d=_brep_vsub(pos,g.center)
+            lo=mod(atan(_brep_vdot(d,g.y)/g.r2,_brep_vdot(d,g.x)/g.r1),2π)
+            hi=lo+a.span
+            push!(entries,(fi=uc[1],bi=uc[2],ui=uc[3],ur=ur,
+                           lo=lo,hi=hi,startp=pos))
+            push!(knots,lo,mod(hi,2π))
+        end
+        sort!(knots);bk=Float64[]
+        for k in knots
+            (isempty(bk) || k-bk[end]>atol) && push!(bk,k)
+        end
+        (length(bk)>1 && bk[1]+2π-bk[end]<=atol) && pop!(bk)
+        pieces=Tuple{Float64,Float64}[]
+        for j in eachindex(bk)
+            push!(pieces,(bk[j],j<length(bk) ? bk[j+1] : bk[1]+2π))
+        end
+        egroups[gi]=(;g...,knots=bk,pieces=pieces)
+        if isempty(pieces)
+            # Under/over-shared closed rims are not this certificate's
+            # family; defer to the next certificate's diagnostic.
+            nclosed==2 || return nothing
+            continue
+        end
+        cov=zeros(Int,length(pieces));covered=Dict{Int,Vector{Int}}()
+        for (k,e) in enumerate(entries)
+            e.ur.kind==:ellipse && (cov.+=1;continue)
+            lo,hi=e.lo,e.hi;list=Int[]
+            for (j,(a,b)) in enumerate(pieces)
+                hit=(a>=lo-atol && b<=hi+atol) ||
+                    (a+2π>=lo-atol && b+2π<=hi+atol) ||
+                    (a-2π>=lo-atol && b-2π<=hi+atol)
+                hit && (cov[j]+=1;push!(list,j))
+            end
+            covered[k]=list
+        end
+        for (j,c) in enumerate(cov)
+            (c==0 || c==2) || return nothing
+        end
+        for (k,e) in enumerate(entries)
+            key=(e.fi,e.bi,e.ui)
+            if e.ur.kind==:ellipse
+                euseg[key]=(gi=gi,circle=true)
+            else
+                list=covered[k]
+                isempty(list) && return nothing
+                j0=findfirst(list) do j
+                    (a,b)=pieces[j]
+                    abs(a-e.lo)<=atol || abs(a-e.lo-2π)<=atol ||
+                        abs(a+2π-e.lo)<=atol
+                end
+                j0===nothing && return nothing
+                rot=vcat(list[j0:end],list[1:j0-1])
+                euseg[key]=(gi=gi,circle=false,lo=e.lo,hi=e.hi,
+                            startp=e.startp,pieces=rot)
+            end
+        end
+    end
+
     # ── per-wall rim congruence + strip windows ───────────────────────────
     # knots_w: shared partition of the two rim circles in the common owner
     # frame — the union of the two rim groups' knots. Both groups share the
@@ -1088,6 +1307,25 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
         rng=r0:length(pool);chainmap[key]=rng
         return rng
     end
+    # Canonical sampled chain of an ellipse-group arc window [a,b] in the
+    # group frame — same bounded grid resolution as arc_chain! so shared
+    # pieces weld bitwise across caps and swept walls.
+    function ell_chain!(gi,a,b)
+        key=(~gi,a,b)
+        rng=get(chainmap,key,nothing)
+        rng===nothing || return rng
+        g=egroups[gi];w=b-a
+        m=max(1,ceil(Int,_BREP_PRISM_ARC_SEGMENTS*w/(2π)))
+        r0=length(pool)+1
+        for k in 0:m
+            th=a+w*k/m;c=cos(th);s=sin(th)
+            push!(pool,(g.center[1]+g.r1*c*g.x[1]+g.r2*s*g.y[1],
+                        g.center[2]+g.r1*c*g.x[2]+g.r2*s*g.y[2],
+                        g.center[3]+g.r1*c*g.x[3]+g.r2*s*g.y[3]))
+        end
+        rng=r0:length(pool);chainmap[key]=rng
+        return rng
+    end
     items=Tuple{Symbol,UnitRange{Int},Int}[]
     emit!(kind,pts,fi)=(push!(items,(kind,
         length(pool)+1:length(pool)+length(pts),fi));append!(pool,pts);nothing)
@@ -1106,6 +1344,19 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
             else
                 for (a,b) in g.pieces
                     rng=arc_chain!(rec.gi,a,b)
+                    append!(ring,pool[rng][1:end-1])
+                end
+            end
+            return ring
+        end
+        if length(bound)==1 && bound[1].kind==:ellipse
+            rec=euseg[(i,bi,1)];g=egroups[rec.gi]
+            if isempty(g.pieces)
+                rng=ell_chain!(rec.gi,0.0,2π)
+                append!(ring,pool[rng][1:end-1])
+            else
+                for (a,b) in g.pieces
+                    rng=ell_chain!(rec.gi,a,b)
                     append!(ring,pool[rng][1:end-1])
                 end
             end
@@ -1137,13 +1388,98 @@ function _step_prismatic_shell(entities,faces,curvekinds,caller)
                         append!(ring,reverse(pool[rng][1:end-1]))
                     end
                 end
+            elseif ur.kind==:ellipsearc
+                rec=euseg[(i,bi,ui)]
+                fwd=_posnear(ur.u.v1,rec.startp,ptol)
+                ps=rec.pieces
+                if fwd
+                    for j in ps
+                        rng=ell_chain!(rec.gi,
+                            egroups[rec.gi].pieces[j][1],
+                            egroups[rec.gi].pieces[j][2])
+                        append!(ring,pool[rng][2:end])
+                    end
+                else
+                    for j in reverse(ps)
+                        rng=ell_chain!(rec.gi,
+                            egroups[rec.gi].pieces[j][1],
+                            egroups[rec.gi].pieces[j][2])
+                        append!(ring,reverse(pool[rng][1:end-1]))
+                    end
+                end
             else
                 throw(ArgumentError(
-                    "$caller: closed CIRCLE edge #$(ur.u.ec.id) shares a "*
-                    "wire with other edges — not a prismatic cap"))
+                    "$caller: closed $(ur.u.base.kind) edge #$(ur.u.ec.id) "*
+                    "shares a wire with other edges — not a prismatic cap"))
             end
         end
         return ring
+    end
+
+    # Traversal-ordered canonical chain of one swept-wall rim use. Ellipse
+    # trims resolve through the group partition so a wall rim welds bitwise
+    # onto the cap wire emission; sampled chains keep the shared junction
+    # endpoints so concatenated rims stay weld-compatible.
+    function rim_use_chain(ur,i,ui)
+        if ur.kind==:line
+            return NTuple{3,Float64}[ur.u.v1,ur.u.v2]
+        elseif ur.kind in (:polyline,:spline)
+            ch=ur.aux.pts
+            return _posnear(ur.u.v1,first(ch),ptol) ? collect(ch) :
+                reverse(collect(ch))
+        elseif ur.kind==:ellipse
+            rec=euseg[(i,1,ui)]
+            return collect(pool[ell_chain!(rec.gi,0.0,2π)])
+        else
+            rec=euseg[(i,1,ui)]
+            fwd=_posnear(ur.u.v1,rec.startp,ptol)
+            g=egroups[rec.gi];ch=NTuple{3,Float64}[]
+            if fwd
+                for (pi,j) in enumerate(rec.pieces)
+                    (a,b)=g.pieces[j]
+                    append!(ch,pi==1 ? pool[ell_chain!(rec.gi,a,b)] :
+                        pool[ell_chain!(rec.gi,a,b)][2:end])
+                end
+            else
+                for (pi,j) in enumerate(reverse(rec.pieces))
+                    (a,b)=g.pieces[j]
+                    rv=reverse(pool[ell_chain!(rec.gi,a,b)])
+                    append!(ch,pi==1 ? rv : rv[2:end])
+                end
+            end
+            return ch
+        end
+    end
+    ez=(z[1]*(h1-h0),z[2]*(h1-h0),z[3]*(h1-h0))
+    function _chainoffset(p,q)
+        o=_brep_vsub(p,q)
+        (abs(o[1]-ez[1])<=ptol && abs(o[2]-ez[2])<=ptol &&
+         abs(o[3]-ez[3])<=ptol) && return o
+        return nothing
+    end
+    # Each swept rim may be split into N contiguous edge pieces; the two
+    # concatenated chains must be congruent under one axial offset.
+    for (i,rimuses) in wallex_ru
+        chs=[NTuple{3,Float64}[],NTuple{3,Float64}[]]
+        for r in 1:2
+            for (k,uc) in enumerate(rimuses[r])
+                piece=rim_use_chain(uc.ur,i,uc.ui)
+                append!(chs[r],k==1 ? piece : piece[2:end])
+            end
+        end
+        chA,chB=chs
+        length(chA)==length(chB) || return nothing
+        off=_chainoffset(first(chB),first(chA))
+        if off===nothing
+            _chainoffset(last(chB),first(chA))===nothing && return nothing
+            chB=reverse(chB)
+            off=_chainoffset(first(chB),first(chA))
+        end
+        all(k->begin o=_brep_vsub(chB[k],chA[k]);
+                abs(o[1]-off[1])<=ptol && abs(o[2]-off[2])<=ptol &&
+                abs(o[3]-off[3])<=ptol end,eachindex(chA)) ||
+            return nothing
+        wallex[i]=(a=chA,b=chB)
     end
 
     for i in cap_i

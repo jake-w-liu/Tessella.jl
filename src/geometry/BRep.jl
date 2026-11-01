@@ -1162,6 +1162,39 @@ function _step_circle_frame_full(entities,ent,caller)
     return center,z,x,y,r
 end
 
+# ELLIPSE placement: center, unit normal, in-plane orthonormal axes and the
+# semi-radii (r1 along x, r2 along y, in the entity's authored axis order —
+# STEP parameterizes p(theta)=center+r1*cos(theta)*x+r2*sin(theta)*y).
+function _step_ellipse_frame_full(entities,ent,caller)
+    length(ent.args)>=3 || throw(ArgumentError(
+        "$caller: ELLIPSE #$(ent.id) is truncated"))
+    r1=Float64(ent.args[end-1]); r2=Float64(ent.args[end])
+    (isfinite(r1) && r1>0 && isfinite(r2) && r2>0) || throw(ArgumentError(
+        "$caller: ELLIPSE #$(ent.id) semi-radii must be positive"))
+    center=(0.0,0.0,0.0); z=(0.0,0.0,1.0); x=nothing
+    plcref=_first_ref(ent.args)
+    if plcref!==nothing
+        plc=_deref_entity(entities,plcref)
+        if plc!==nothing && plc.kind=="AXIS2_PLACEMENT_3D"
+            p=_deref_point(entities,_first_ref(plc.args))
+            p===nothing || (center=p)
+            refs=[a for a in plc.args if a isa Tuple && a[1]===:ref]
+            if length(refs)>=2
+                d=_deref_direction(entities,refs[2]); d===nothing || (z=d)
+            end
+            if length(refs)>=3
+                x=_deref_direction(entities,refs[3])
+            end
+        end
+    end
+    all(isfinite,center) || throw(ArgumentError(
+        "$caller: ELLIPSE #$(ent.id) has a non-finite center"))
+    z=_brep_vunit(z,caller)
+    x=x===nothing ? _brep_default_x(z,caller) : _brep_ortho(x,z,caller)
+    y=_brep_vcross(z,x)
+    return (center=center,nr=z,x=x,y=y,r1=r1,r2=r2)
+end
+
 const _BREP_EDGE_USE=NamedTuple{(:ec,:v1,:v2,:base,:fwd),
     Tuple{StepEntity,NTuple{3,Float64},NTuple{3,Float64},StepEntity,Bool}}
 
