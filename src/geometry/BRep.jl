@@ -2598,6 +2598,9 @@ function _step_brep_solid(brep::StepEntity,entities,fill;factor::Float64=1.0)
             cylinder=_step_tubed_shell(entities,faces,curvekinds,caller)
         end
         if cylinder===nothing
+            cylinder=_step_prismatic_shell(entities,faces,curvekinds,caller)
+        end
+        if cylinder===nothing
             cylinder=_step_partial_cylinder_shell(entities,faces,curvekinds,caller)
         end
         if cylinder!==nothing

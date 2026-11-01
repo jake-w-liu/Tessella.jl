@@ -2,6 +2,12 @@
 # mistaken for occurrences at their original placement.
 const _STEP_OCCURRENCE_REPRESENTATIONS=("SHAPE_REPRESENTATION",
     "ADVANCED_BREP_SHAPE_REPRESENTATION","FACETED_BREP_SHAPE_REPRESENTATION")
+# Auxiliary representations OCC exporters bind alongside the solid products:
+# a wireframe model-curve product carries the same edges as geometry, never a
+# closed solid. Such products emit no occurrences but keep their literal
+# items for transform-frame membership checks.
+const _STEP_AUXILIARY_REPRESENTATIONS=(
+    "GEOMETRICALLY_BOUNDED_WIREFRAME_SHAPE_REPRESENTATION",)
 const _STEP_OCCURRENCE_IDENTITY=(((1.,0.,0.),(0.,1.,0.),(0.,0.,1.)),(0.,0.,0.))
 
 function _step_occurrence_entity(entities,reference,kind)

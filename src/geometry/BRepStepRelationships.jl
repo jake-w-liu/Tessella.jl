@@ -298,11 +298,14 @@ function _step_relationship_import(entities,fill_solids)
         definition.id in definitions && !haskey(representations,definition.id) ||
             throw(ArgumentError("import_step: ambiguous assembly product shape binding"))
         representation=_deref_entity(entities,binding.args[2])
-        representation!==nothing && representation.kind in _STEP_OCCURRENCE_REPRESENTATIONS &&
+        representation!==nothing &&
+            (representation.kind in _STEP_OCCURRENCE_REPRESENTATIONS ||
+             representation.kind in _STEP_AUXILIARY_REPRESENTATIONS) &&
             length(representation.args)==3 && representation.args[1] isa AbstractString &&
             representation.args[2] isa AbstractVector && !isempty(representation.args[2]) &&
             allunique(representation.args[2]) ||
             throw(ArgumentError("import_step: assembly representation is truncated or unsupported"))
+        auxiliary=representation.kind in _STEP_AUXILIARY_REPRESENTATIONS
         context,units,unit_witnesses=_step_relationship_context(entities,representation.args[3])
         items=StepEntity[]
         for reference in representation.args[2]
@@ -311,7 +314,7 @@ function _step_relationship_import(entities,fill_solids)
             item.kind=="AXIS2_PLACEMENT_3D" && _step_occurrence_frame(entities,reference)
             push!(items,item)
         end
-        representations[definition.id]=(;representation,context,units,unit_witnesses,items)
+        representations[definition.id]=(;representation,context,units,unit_witnesses,items,auxiliary)
         push!(shape_definitions,shape.id)
     end
     Set(keys(representations))==definitions &&
@@ -364,10 +367,12 @@ function _step_relationship_import(entities,fill_solids)
         return nothing
     end
     for definition in definitions
-        classify_rep_items(representations[definition].items,
-            direct_solids[definition],mapped_items[definition])
+        representations[definition].auxiliary ||
+            classify_rep_items(representations[definition].items,
+                direct_solids[definition],mapped_items[definition])
         definition in leaf_ids && isempty(direct_solids[definition]) &&
-            isempty(mapped_items[definition]) && throw(ArgumentError(
+            isempty(mapped_items[definition]) &&
+            !representations[definition].auxiliary && throw(ArgumentError(
             "import_step: each assembly leaf must bind an actual closed solid"))
     end
     # Mapped sources expand transitively; each carries its own declared SI
@@ -399,7 +404,8 @@ function _step_relationship_import(entities,fill_solids)
     Set(keys(solid_roots))==placed || throw(ArgumentError(
         "import_step: assembly has unplaced closed-solid definitions"))
     Set(entity.id for entity in values(entities) if entity.kind in _STEP_OCCURRENCE_REPRESENTATIONS)==
-        union(Set(info.representation.id for info in values(representations)),
+        union(Set(info.representation.id for info in values(representations)
+                  if info.representation.kind in _STEP_OCCURRENCE_REPRESENTATIONS),
               Set(keys(mapped_reps))) ||
         throw(ArgumentError("import_step: assembly has unselected shape representations"))
     placements=Dict{Int,NamedTuple}();relations=Set{Int}();transforms=Set{Int}()

@@ -12879,3 +12879,79 @@ per-volume standalone calls (which stay self-consistent); non-generic
 NoNewVerts catalogs on such a wall keep the planner diagnostic;
 partner `PointsList`-style layer overrides remain unsupported. Bounded
 fixture evidence only.
+
+## 2026-11-01 — CAD04 prismatic curved trims: non-coaxial arcs, slit walls, degree-1 B-splines (Devin subagent)
+
+The second curved-trim slice admits two-cap prismatic shells — the
+extrusion-like solids OCC exports for holed/profiled plates — with
+LINE, open-arc, closed-circle and degree-1-B-spline trims on planar or
+cylindrical walls, and admits OCC's auxiliary wireframe representation
+products without letting them into solid selection.
+
+- `_step_prismatic_shell` (`BRepCurvedTrims.jl`) certifies strict
+  prisms: faces are PLANEs or CYLINDRICAL_SURFACEs sharing one
+  certified axial direction; cap planes are perpendicular to it at
+  exactly two heights; cap wires admit LINE edges, open CIRCLE arcs
+  (centres off the cylinder axis included), closed CIRCLE rims and
+  degree-1 `B_SPLINE_CURVE_WITH_KNOTS` records resolved to control
+  sub-chains through `_step_polyline_subchain`; cylindrical walls carry
+  rim arcs whose two rims tile the same angular window plus axial
+  seams spanning both caps; planar walls are single z-parallel loops
+  reaching both cap heights.
+- Welding is canonical, not positional luck: circle uses are grouped
+  per geometric (centre, radius, axis-line) into shared knot
+  partitions; every straight segment and every elementary circular
+  interval must be covered exactly twice — or be a certified
+  partial-wall complement (count 0); an odd coverage count is a
+  family mismatch and defers to the next certificate's own
+  diagnostic, keeping the earlier certificates' pinned messages
+  (regression: the duplicated-cap mutation still reports the
+  trimmed-sector `full-cylinder certificate`, not a prismatic one).
+  Emission shares one angle-keyed chain per covered piece so
+  `_dedup_positions` welds cap-to-wall boundaries bitwise.
+- The tubed-shell closing certificate is factored into shared
+  helpers — `_step_shell_flip_parity` (flip-parity propagation over
+  the face-adjacency graph, orientability checks) and
+  `_step_shell_audit` (directed shared-edge audit, positive-volume
+  normalization, `Mesh` construction + `validate`) — used by both
+  curved-trim certificates.
+- Assembly admission: `_STEP_AUXILIARY_REPRESENTATIONS` recognises
+  `GEOMETRICALLY_BOUNDED_WIREFRAME_SHAPE_REPRESENTATION`; such
+  products keep their literal items for transform-frame membership
+  but skip solid/mapped-item classification, are exempt from the
+  leaf-must-bind-a-solid requirement, and are excluded from the
+  selected-solid completeness check. Real OCC exports that attach a
+  wireframe model-curve product now import their solids.
+- New real fixtures (`test/fixtures/brep_occ_prism_*.step`, OCC 7.8
+  exports): stadium plate 100n/196t, D-plate 54/104, slotted plate
+  108/216, rounded plate 104/204, slit pipe 148/292, bolt flange
+  288/592 — all `validate`-clean, watertight (every undirected edge
+  traversed once each way) and filled-importable; stadium's signed
+  surface volume is polygon-exact (`4.5 − 2·halfdisk`). Probe
+  fixtures multi-hole plate, boss plate, counterbore and slit wall
+  import too.
+- Rejections stay explicit: `spline_prism` (degree-2+ B-spline edge
+  trims and `SURFACE_OF_LINEAR_EXTRUSION` walls) and
+  `slant_hole_plate` (ELLIPSE trim + tilted cylinder) report the
+  unsupported-topology diagnostic naming the seen kinds.
+- Receipts: `brep_curved_trims_test.jl` — new
+  "prismatic shells weld non-coaxial arcs and wall strips" set
+  (23/23: watertight incidence, polygon-exact volumes, a
+  LINE→degree-1-B-spline substitution reproducing the identical
+  shell, and a filled stadium tetrahedralization); whole file
+  10+11+50+11+4+23 = 109/109 exit 0 (the 50-assertion analytic-wall
+  projection runs ≈5min).
+  `brep_step_cylinder_functional_test.jl` 40/40 exit 0;
+  `brep_curved_trims_smoke.jl` extended with the stadium import;
+  assembly/relationship suites exit 0 (73, 16, 137, 29, 38, 22, 28,
+  30, 24, 16, 8, 30, 11, 5, 3, 7, 22, 24, 8, 7, 20, 4, 35, 7, 10,
+  14, 7, 10, 12 assertions).
+
+**Not claimed.** Bounded slice only: no ELLIPSE trims, no
+higher-degree or rational B-spline trims, no
+`SURFACE_OF_LINEAR_EXTRUSION`/ruled walls, no NURBS-face topology in
+this path, no nonlinear UV charts, no general analytic Face/Curve
+registry, no non-prismatic multi-height walls or T-junction welds;
+the sampled higher-order fallback and the analytic registry remain
+open CAD04 work. Bounded fixture evidence; not full OCC-import
+parity.

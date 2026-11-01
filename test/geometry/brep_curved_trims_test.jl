@@ -143,8 +143,9 @@ end
         @test occursin("radius does not match",sprint(showerror,err))
     end
     # Dropping the top cap's hole wire leaves the rim unclaimed — the tube
-    # wall can no longer close and the shell rejects explicitly through the
-    # trimmed-sector certificate's boundary-wire diagnostic.
+    # wall can no longer close and the shell rejects explicitly through a
+    # certificate diagnostic: the trimmed-sector certificate reports the
+    # boundary-wire or closed-rim failure.
     _with_source("brep_occ_drilled_plate.step",
                  "#127 = ADVANCED_FACE('',(#118,#121),#126,.T.)"=>
                  "#127 = ADVANCED_FACE('',(#118),#126,.T.)") do path
@@ -153,6 +154,70 @@ end
         @test occursin("multiple boundary wires",sprint(showerror,err)) ||
               occursin("full rim",sprint(showerror,err))
     end
+end
+
+@testset "prismatic shells weld non-coaxial arcs and wall strips" begin
+    # Real OCC exports of two-cap prisms whose cap wires carry open CIRCLE
+    # arcs on off-axis circles: a waisted plate, a D-profile plate, a plate
+    # with a stadium slot and a corner-rounded plate. Every undirected edge
+    # must be traversed once in each direction and the signed volume must
+    # match the polygon-exact cross-section.
+    surface=import_step(joinpath(FIXTURES,"brep_occ_prism_stadium_plate.step");
+                        fill=false)
+    @test surface isa E.Mesh && validate(surface).ok
+    @test nnodes(surface)==100 && ntris(surface)==196
+    @test all(values(_edge_incidence(surface)).==(2))
+    @test vec(minimum(surface.coords,dims=2))≈[0.,-0.75,0.] atol=1e-12
+    @test vec(maximum(surface.coords,dims=2))≈[3.,0.75,1.] atol=1e-12
+    # 3×1.5 rectangle minus two 24-gon half-disks of radius 0.75.
+    halfdisk=12*0.75*0.75*sin(π/24)
+    @test _signed_surface_volume(surface)≈4.5-2*halfdisk atol=1e-12
+
+    surface=import_step(joinpath(FIXTURES,"brep_occ_prism_d_plate.step");
+                        fill=false)
+    @test surface isa E.Mesh && validate(surface).ok
+    @test all(values(_edge_incidence(surface)).==(2))
+    @test _signed_surface_volume(surface)≈2.25-halfdisk atol=1e-12
+
+    surface=import_step(joinpath(FIXTURES,"brep_occ_prism_slotted_plate.step");
+                        fill=false)
+    @test surface isa E.Mesh && validate(surface).ok
+    @test all(values(_edge_incidence(surface)).==(2))
+    slot=2.0-2*(12*0.5*0.5*sin(π/24))
+    @test _signed_surface_volume(surface)≈24.0-slot atol=1e-12
+
+    surface=import_step(joinpath(FIXTURES,"brep_occ_prism_rounded_plate.step");
+                        fill=false)
+    @test surface isa E.Mesh && validate(surface).ok
+    @test all(values(_edge_incidence(surface)).==(2))
+    @test 0.0<_signed_surface_volume(surface)<20.0
+
+    # A degree-1 B-spline trim is a polyline-equivalent weld: substituting
+    # an equivalent degree-1 record for one cap edge's master LINE must
+    # reproduce the identical certified shell.
+    _with_source("brep_occ_prism_stadium_plate.step",
+        "#82 = LINE('',#83,#84);"=>
+        "#82 = B_SPLINE_CURVE_WITH_KNOTS('',1,(#47,#80),.UNSPECIFIED.,.F.,.F.,(2,2),(0.,1.),.UNSPECIFIED.);") do path
+        s=import_step(path;fill=false)
+        @test s isa E.Mesh && validate(s).ok
+        @test nnodes(s)==100 && ntris(s)==196
+        @test all(values(_edge_incidence(s)).==(2))
+    end
+
+    # A slit pipe: two partial cylindrical walls bridged by planar slit
+    # faces — the arc windows are covered at both rims on each wall. Its
+    # export also carries an auxiliary geometrically-bounded wireframe
+    # product, which the assembly certificate admits without treating it
+    # as solid geometry.
+    surface=import_step(joinpath(FIXTURES,"brep_occ_prism_slit_pipe.step");
+                        fill=false)
+    @test surface isa E.Mesh && validate(surface).ok
+    @test all(values(_edge_incidence(surface)).==(2))
+    @test 0.0<_signed_surface_volume(surface)<5.9
+
+    filled=import_step(joinpath(FIXTURES,"brep_occ_prism_stadium_plate.step"))
+    @test filled isa E.Mesh && validate(filled).ok && ntets(filled)>0
+    @test all(>(0),_tet_volumes(filled))
 end
 
 end # module
