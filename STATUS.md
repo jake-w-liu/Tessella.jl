@@ -81,6 +81,88 @@ source + CLI probes (`_lay02_work/` fixtures: `fan3_neg{1,2,3}{,_fine}`,
   Steiner placement is the ordinary CDT fill, not upstream's own
   inserter.
 
+### STEP CAD04 residual slice — mixed analytic+NURBS shells and authored 2-D pcurves (2026-11-02)
+
+Devin landed the deepest CAD04 residual slice in
+`src/geometry/BRepNurbsTrims.jl`: `_step_nurbs_trimmed_shell` now admits
+closed shells mixing NURBS patches, PLANEs, `CYLINDRICAL_SURFACE` and
+`SPHERICAL_SURFACE` faces, and B-spline faces trimmed by explicit 2-D
+`PCURVE`s instead of 3-D edge geometry — closing the two remaining
+topology residuals recorded below.
+
+- **Shared chart abstraction.** `_BrepCylChart`/`_BrepSphChart` join
+  `_BrepNurbsChart` behind `_chart_lift`/`_chart_d1`/`_chart_project`/
+  `_chart_periods`/`_chart_pole_ends`: the cylinder chart lifts
+  `center + v*z + R*(cos(u)*x + sin(u)*y)` and the sphere chart lifts
+  `center + R*(cos(v)*(cos(u)*x + sin(u)*y) + sin(v)*z)`, each with a
+  closed-form project (2π u period on both). Every shared sampled chain
+  point is projected on the NURBS patch's uv chart AND inverted
+  analytically on each adjacent analytic face's parametric domain; the
+  lift-back must equal the canonical 3-D chain within the scale-aware
+  surface tolerance or the shell is rejected — both sides of every
+  shared edge are independently certified.
+- **Periodic unwrapped wires.** The uv polygon carries unwrapped seam
+  coordinates, but `_chart_lift_unwrapped`/`_chart_d1_unwrapped` (via
+  `_chart_base_u`/`_chart_base_v`) now reduce every evaluation back
+  into the base period — the earlier direct lift clamped out-of-domain
+  u onto the patch boundary, folding an entire unwrapped copy onto one
+  meridian and duplicating seam nodes. `_chart_pole_snap` canonicalizes
+  analytically equivalent pole positions so bitwise-different uv poles
+  weld to one physical node, closing the explicit seam+pole fixture
+  without self-edges.
+- **Edge classification.** LINEs, open CIRCLE arcs
+  (`_step_trim_arc_chain`), closed CIRCLE loops
+  (`_step_trim_circle_cyc`), B-spline chains (open +
+  `_step_spline_chain_closed`), and degenerate (pole) LINE edges — the
+  latter admissible only on a chart whose domain actually collapses
+  (sphere/cylinder), certified through pole snap. A bare single-use
+  closed wire ending one full u period from its start (a latitude rim)
+  closes through the collapsed pole row: two appended uv vertices carry
+  the physical pole and the domain triangulates as a pole fan.
+- **Explicit pcurve trims.** `_step_use_pcurve` resolves
+  `EDGE_CURVE→SURFACE_CURVE→PCURVE→DEFINITIONAL_REPRESENTATION` uses on
+  the face's own surface id; `_pcurve2d_curve` builds `_Pcurve2d`
+  evaluators for 2-D `LINE` (direction × VECTOR magnitude = parametric
+  speed) and 2-D `B_SPLINE_CURVE_WITH_KNOTS` (degree, controls, knot
+  multiplicities/values, rational weights). The uv wire evaluates the
+  authored pcurve directly — the canonical 3-D chain is only inverted
+  onto the parametric curve (`_pc2_param`, seeded Newton) and the
+  lifted pcurve point must still equal the canonical 3-D position, so
+  off-surface or off-chart pcurves are rejections, never silently
+  re-projected.
+
+Five generated AP214 fixtures (`scratch_cad04_mixed_fixtures.jl`,
+untracked like `scratch_cad04_fixtures.jl`):
+`brep_occ_nurbs_cyl_dome.step` (rational NURBS hemisphere over a
+CYLINDER wall + planar base — pole-fan dome, 97n/190t, V=4.176838),
+`brep_occ_nurbs_sph_cap.step` (rational spherical band + SPHERE cap +
+planar disk, 440n/876t, V=3.254730), `brep_occ_nurbs_sph_seam.step`
+(the same solid authored with meridian seam arcs + a degenerate pole
+LINE edge, 760n/1516t, V=3.511700),
+`brep_occ_nurbs_nurbs_arb.step` (two arbitrary NURBS patches sharing
+both authored quadratic seam splines + planar end caps, 158n/312t,
+V=1.894840), and `brep_occ_nurbs_pcurve_plate.step` (the bump-plate
+solid with all four top-face trims authored as PCURVEs — one 2-D LINE
+and three 2-D B-splines, 85n/166t, V=2.107791 — bitwise the projected
+twin's counts). The Gmsh 4.15.2/OCC import-and-mesh oracle accepts all
+five as closed solids (197n/439e, 134n/305e, 135n/307e, 115n/266e,
+217n/502e — topology agrees, density differs by design).
+
+Test exits on Julia 1.12.7 (`--compile=min -O0 --check-bounds=yes`):
+`test/geometry/brep_nurbs_mixed_test.jl` **1456/1456** (per-fixture
+entity audits, welded incidence, per-node on-surface residuals on the
+cylinder wall, sphere band/cap, authored seam splines and pcurve plate
+patch, pole counts, filled-tet volume certificates, the pcurve kind
+audit `:line`+3×`:bspline`, and off-surface pcurve/rim mutation
+rejections) and `brep_nurbs_mixed_smoke.jl` in the default suite.
+Regressions: `brep_curved_trims_test` 120/120 (7m16s),
+`brep_nurbs_trim_test` 348/348 (4m22s), `brep_nurbs_shell_test`
+1182/1182 (115m35s — assertion count now 1182),
+`brep_ellipse_trims_test` 338/338 (1m57s), `brep_test` 162/162
+(50m39s) — all exit 0. Remaining CAD04 residuals:
+the general analytic Face/Curve registry, general CAD assembly,
+unrecognized topology.
+
 ### STEP CAD04 residual slice — ELLIPSE trims, partial-domain splines, multi-chain swept rims, rational weights (2026-11-02)
 
 Devin landed the next bounded CAD04 slice in the prismatic-shell
