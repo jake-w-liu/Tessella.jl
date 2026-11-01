@@ -5908,6 +5908,63 @@ Files: `src/geometry/ModelMesh1D.jl`, `ModelNativeArcMesh.jl`,
 `test/geometry/model_occ_pole_fan_test.jl`,
 `model_occ_metric_algorithm7_test.jl`, `geo_constraints_test.jl`.
 
+## Working-tree increment (LAY02 `.geo` BoundaryLayer Field per-vertex grading + corner column law; 2026-11-01)
+
+Oracle-driven (`boundaryLayersData.cpp`, Gmsh 4.15.2 source + CLI probe
+`p2_closed.geo` square, `SizesList={1,0.02,2,0.05,3,0.03,4,0.04}`,
+`Ratio=1.3`, `Thickness=0.2`, `MeshSizeMin/Max=0.4`):
+
+- `getLocalInfoAtNode` gives each wall vertex its own `hWall`:
+  `SizesList` point-tag heights, quadratic interpolation
+  `hb·(1−x)²+2·min(hb,he)·x(1−x)+he·x²` along the owning curve
+  (midpoint control = the *smaller* endpoint height), `Size` fallback.
+  Neighboring columns therefore keep different depths: each wall
+  segment tiles `min(n_a,n_b)` quadrangle rows and closes with one
+  `MTriangle(c_a[N],c_b[N],deep[N+1])`; unreferenced deeper levels are
+  never emitted.
+- `treat2Connections` corner columns grow along
+  `normalize(1.01·N1+N2)` scaled by `1/cos(θ/2)` (θ = angle between the
+  two adjacent edge normals) — the wedge grows proportionally deeper.
+  `N1` is `_connections[0]`'s normal; `getEdgesData` iterates the face's
+  edges in tag order and equal multimap keys keep insertion order, so
+  the biased side is the *lower-tagged* adjacent curve — inside one
+  curve, the earlier line index (smaller-parameter side). Run-end
+  vertices keep `addColumnAtTheEndOfTheBL`'s covered-span direction;
+  fans sweep their own rays.
+- Kernel (`src/meshing/BoundaryLayer.jl`): `_bl_2d_offsets` accepts
+  `vertex_offsets` (per-node cumulative schedules, validated
+  nonempty/finite/positive/increasing), emits min-paired quad rows plus
+  the closing triangle, prunes to the deepest *used* level, and returns
+  `id_of`/`nlevels` for the exposed-boundary rebuild. `vertex_dirs` +
+  `vertex_scale_last` carry the biased corner direction and the
+  `1/cos(θ/2)` factor (applies to uniform runs too — straight
+  continuations collapse to the plain averaged normal, factor 1).
+- Producer (`src/geometry/ModelBoundaryLayerField.jl`):
+  `_bl_surface_pslg` records per-vertex curve params; `_bl_hwall_map`
+  parses `SizesList` pairs with validation; `_bl_vertex_hwall` resolves
+  point-tag heights and the quadratic curve interpolation; heterogeneous
+  grading on *open* runs stays a loud rejection (upstream's end columns
+  consume the adjacent edge's already-meshed 1-D chain — needs the mesh
+  pass first); a uniformly-resolved map overrides `Size`; the reduced
+  wire is rebuilt through the strip's exposed boundary — free top edges
+  plus uncancelled column rungs (upstream's `bedges` symmetric
+  difference).
+- Oracle receipt on the p2 ring: **every emitted Tessella node is an
+  exact subset of the oracle's 77-node set** (biased-corner first-layer
+  positions to 1e-9; the 21 oracle-only nodes are its interior-fill
+  Steiner points — fill triangulation is a different algorithm).
+- Verified exits (`--compile=min -O0 --check-bounds=yes`, Julia
+  1.12.7): `geo_boundary_layer_field_test` 101/101 incl. the new 64-pin
+  `SizesList closed-ring grading` testset; `geo_extrude_boundarylayer_test`,
+  `geo_extrude_test`, `boundarylayer_test`, `boundary_layer_fan_test`
+  all exit 0.
+- Remaining loud rejections (unchanged contract): `SizesList` grading
+  on open wall runs, `FanPointsSizesList`, `IntersectMetrics`, finite
+  `AnisoMax`; plane surfaces only; transfinite/extruded/periodic-slave
+  exclusions preserved. Files: `src/meshing/BoundaryLayer.jl`,
+  `src/geometry/ModelBoundaryLayerField.jl`,
+  `test/geometry/geo_boundary_layer_field_test.jl`.
+
 ## Verified gates
 
 - `validation/transfinite/differential.jl` Gmsh 4.15.2:

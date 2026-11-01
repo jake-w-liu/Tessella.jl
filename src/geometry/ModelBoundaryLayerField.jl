@@ -11,9 +11,17 @@
 # - Plane surfaces only (`_model_surface_plane` admission); upstream's curved
 #   `parFromPoint` column construction is a documented gap.
 # - `Size`/`Ratio`/`Thickness`/`Quads`/`FanPointsList`/`ExcludedSurfacesList`
-#   and the `BetaLaw`/`NbLayers`/`Beta` schedule apply; `SizesList`,
-#   `FanPointsSizesList`, `IntersectMetrics` and `AnisoMax` stay loud
-#   rejections rather than silently dropping parameters.
+#   and the `BetaLaw`/`NbLayers`/`Beta` schedule apply; `FanPointsSizesList`,
+#   `IntersectMetrics` and `AnisoMax` stay loud rejections rather than
+#   silently dropping parameters.
+# - `SizesList`/`hwall_n_nodes` per-node wall heights are ported for closed
+#   wall runs: `getLocalInfoAtNode` resolves each vertex's `hWall` (point-tag
+#   lookup, quadratic endpoint interpolation along the owning curve), the
+#   column grows that vertex's geometric/beta schedule, and the strip tiles
+#   each segment with `min` quadrangle rows plus upstream's closing
+#   triangle. Open runs keep `SizesList` a loud rejection — their end
+#   columns ride the adjacent edge's own mesh chain (p6/p7 probes), which
+#   does not exist before this pass.
 # - `PointsList`/`NodesList` end-node grading (`addBoundaryLayerPoints` in
 #   `meshGEdge.cpp`) is not ported — the field's curve targets drive the
 #   strip here; endpoint tags only mark fan membership like upstream.
@@ -64,7 +72,9 @@ end
 # Geometric row schedule (`L = hWall; while L <= thickness { push L;
 # L += hWall·ratio^ith }` — boundaryLayersData.cpp's non-beta branch) and its
 # Beta-law alternative (`t[i] = 1+β(1−p)/(1+p)`, `L = hWall·t[i]/t[0]`).
-function _bl_field_offsets(bl::_ModelBoundaryLayerField,
+# `hwall` is the local wall height upstream's `getLocalInfoAtNode` resolves
+# per column vertex — the field's `Size` unless `SizesList` grading applies.
+function _bl_field_offsets(bl::_ModelBoundaryLayerField,hwall::Float64,
                            caller::AbstractString)
     if bl.beta_law
         beta=bl.beta
@@ -78,9 +88,9 @@ function _bl_field_offsets(bl::_ModelBoundaryLayerField,
         for i in 1:nl
             p=exp(zlog*(1-i/nl));t[i]=1+beta*(1-p)/(1+p)
         end
-        return Float64[bl.hwall*t[i]/t[1] for i in 1:nl]
+        return Float64[hwall*t[i]/t[1] for i in 1:nl]
     end
-    hw=bl.hwall
+    hw=hwall
     (isfinite(hw) && hw>0) || throw(ArgumentError(
         "$caller: BoundaryLayer Field[$(bl.tag)].Size must be positive"))
     (isfinite(bl.ratio) && bl.ratio>1) || throw(ArgumentError(
@@ -101,6 +111,60 @@ function _bl_field_offsets(bl::_ModelBoundaryLayerField,
         "$caller: BoundaryLayer Field[$(bl.tag)] Thickness=" *
         "$(bl.thickness) admits no layer row"))
     return offsets
+end
+
+# `SizesList`/`hwall_n_nodes` — upstream's flat `{tag,h,...}` pair list feeding
+# `BoundaryLayerField::hWall(iV)`; a point tag not listed falls back to
+# `hWallN` (the field's `Size`). Like upstream's list scan, a repeated tag
+# keeps its first value.
+function _bl_hwall_map(spec::_ModelBoundaryLayerField,caller::AbstractString)
+    sizes=spec.sizes
+    isempty(sizes) && return Dict{Int,Float64}()
+    iseven(length(sizes)) || throw(ArgumentError(
+        "$caller: BoundaryLayer Field[$(spec.tag)].SizesList " *
+        "(hwall_n_nodes) must list point-tag/height pairs"))
+    hmap=Dict{Int,Float64}()
+    for i in 1:2:length(sizes)
+        tagf=sizes[i];h=sizes[i+1]
+        (isfinite(tagf) && abs(tagf)<9.0e15) || throw(ArgumentError(
+            "$caller: BoundaryLayer Field[$(spec.tag)].SizesList " *
+            "point tag $tagf is not a finite integer"))
+        ptag=round(Int,tagf)
+        ptag==tagf && ptag>=1 || throw(ArgumentError(
+            "$caller: BoundaryLayer Field[$(spec.tag)].SizesList " *
+            "point tag $tagf is not a positive integer"))
+        (isfinite(h) && h>0) || throw(ArgumentError(
+            "$caller: BoundaryLayer Field[$(spec.tag)].SizesList " *
+            "height $h must be positive"))
+        haskey(hmap,ptag) || (hmap[ptag]=h)
+    end
+    return hmap
+end
+
+# `getLocalInfoAtNode` (boundaryLayersData.cpp): a dim-0 vertex reads
+# `hWall(point_tag)` directly; a dim-1 subdivision vertex interpolates its
+# curve's endpoint heights *quadratically* through the minimum midpoint —
+# `hbeg·(1−x)² + 2·min(hbeg,hend)·x(1−x) + hend·x²` over the normalized curve
+# parameter. Anything else falls back to the field's `Size`.
+function _bl_vertex_hwall(v::Int,point_of::Dict{Int,Int},
+                          vert_param::Dict{Int,Float64},
+                          vert_curve::Dict{Int,Int},
+                          hmap::Dict{Int,Float64},default::Float64,
+                          m::GeoModel,caller::AbstractString)
+    pid=get(point_of,v,0)
+    pid!=0 && return get(hmap,pid,default)
+    parameter=get(vert_param,v,nothing)
+    if parameter!==nothing
+        curve=vert_curve[v]
+        a,b=m.curves[curve]
+        t0,t1=_model_curve_param_bounds(m,curve,caller)
+        t1>t0 || throw(ArgumentError(
+            "$caller: Curve[$curve] has a degenerate parameter range"))
+        x=(parameter-t0)/(t1-t0)
+        hb=get(hmap,a,default);he=get(hmap,b,default)
+        return hb*(1-x)*(1-x)+min(hb,he)*2*x*(1-x)+he*x*x
+    end
+    return default
 end
 
 # Fields whose `CurvesList` intersects this face's boundary and whose
@@ -157,6 +221,10 @@ function _bl_surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
     wires=Vector{Int}[]
     wire_curves=Vector{Int}[]
     vert_curve=Dict{Int,Int}()
+    # Subdivision vertex → its raw curve parameter — upstream's
+    # `getLocalInfoAtNode` interpolates `hWall` along the curve parameter for
+    # dim-1 mesh vertices.
+    vert_param=Dict{Int,Float64}()
     for loop_id in m.surfaces[t]
         _verify_loop_closed(m,loop_id,caller,"Surface[$t]")
         loop_idx=Int[]
@@ -197,8 +265,10 @@ function _bl_surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
                     push!(loop_idx,vertex)
                     push!(loop_curve,curve)
                 end
-                parameter==t0 || parameter==t1 ||
+                parameter==t0 || parameter==t1 || begin
                     haskey(vert_curve,vertex) || (vert_curve[vertex]=curve)
+                    haskey(vert_param,vertex) || (vert_param[vertex]=parameter)
+                end
             end
         end
         while length(loop_idx)>1 && loop_idx[end]==loop_idx[1]
@@ -277,7 +347,7 @@ function _bl_surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
         end
     end
     return xs,ys,mesh_sizes,wires,wire_curves,embedded,internal,index,
-           canonical,vert_curve
+           canonical,vert_curve,vert_param
 end
 
 # Even-odd containment over the face's wires — winding-insensitive, so hole
@@ -436,9 +506,6 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                                 plane,caller::AbstractString;
                                 _periodic_positions=nothing)
     for spec in specs
-        isempty(spec.sizes) || throw(ArgumentError(
-            "$caller: BoundaryLayer Field[$(spec.tag)].SizesList " *
-            "(hwall_n_nodes) is not implemented"))
         isempty(spec.fan_sizes) || throw(ArgumentError(
             "$caller: BoundaryLayer Field[$(spec.tag)].FanPointsSizesList " *
             "is not implemented"))
@@ -450,7 +517,7 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
             "implemented"))
     end
     xs,ys,mesh_sizes,wires,wire_curves,embedded,internal,index,canonical,
-        vert_curve=
+        vert_curve,vert_param=
         _bl_surface_pslg(m,t,forced,caller;param_sizes=param_sizes,
                          plane=plane,_periodic_positions=_periodic_positions)
     ax=plane.axes
@@ -534,7 +601,9 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
     reduced_wires=Vector{Int}[]
     # Map each wire's segment index to its field (0 = ordinary boundary
     # segment). Segments carry the tag of the curve that emitted their first
-    # vertex — `_bl_surface_pslg`'s per-run bookkeeping.
+    # vertex — `_bl_surface_pslg`'s per-run bookkeeping. `hwall_maps` caches
+    # each spec's `SizesList` pair-map across its runs.
+    hwall_maps=Dict{Int,Dict{Int,Float64}}()
     for (w,loop) in enumerate(wires)
         loop_curve=wire_curves[w]
         nseg=length(loop)
@@ -596,6 +665,11 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
         # A closed run covers the whole wire; otherwise run segs first..last
         # span wall vertices at rotated positions first..last+1.
         top_of=Dict{Int,Int}()
+        # Per-wall-vertex exposed boundary chains — the strip's free top
+        # edges plus the uncancelled column rungs between two neighboring
+        # segments of unequal depth (`SizesList` grading). Each entry lists
+        # the fill-boundary nodes a wire vertex contributes in walk order.
+        wire_nodes=Dict{Int,Vector{Int}}()
         # Run-end covered spans: wire positions consumed by the strip side
         # (skipped in the reduced wire), positions already claimed by an
         # end walk (two ends covering one vertex = touching layers), exact
@@ -620,15 +694,64 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
             seglen=hypot(dx,dy)
             seglen>0 || throw(ArgumentError(
                 "$caller: Surface[$t] wall curve has a coincident vertex"))
-            offsets=_bl_field_offsets(spec,caller)
+            offsets=_bl_field_offsets(spec,spec.hwall,caller)
             probe=min(0.5*offsets[1],0.05*seglen)
             lx=-dy/seglen;ly=dx/seglen
             mx=0.5*(xs[a]+xs[b])+probe*lx
             my=0.5*(ys[a]+ys[b])+probe*ly
             inside=_bl_point_in_domain(mx,my,xs,ys,wires)
+            chain_rev=false
             if !inside
-                reverse!(chain)
+                reverse!(chain);chain_rev=true
                 a=chain[1];b=chain[2]
+            end
+            # `SizesList` grading — upstream's `getLocalInfoAtNode`
+            # resolves a per-vertex `hWall` (point-tag lookup, quadratic
+            # interpolation along the owning curve), so each wall vertex
+            # grows its own column schedule. Heterogeneous values on an
+            # *open* run reach the end-column coverage upstream reads off
+            # the already meshed adjacent edge's chain — outside this
+            # bounded tier, so they stay a loud rejection there.
+            hmap=get!(hwall_maps,si) do
+                _bl_hwall_map(spec,caller)
+            end
+            hws=isempty(hmap) ? nothing :
+                Float64[_bl_vertex_hwall(v,point_of,vert_param,vert_curve,
+                                         hmap,spec.hwall,m,caller)
+                        for v in chain]
+            # Interpolating equal endpoint heights can drift by an ulp —
+            # upstream's `getLocalInfoAtNode` would emit the same values,
+            # but treating them as variable only manufactures degenerate
+            # closing triangles, so grade heterogeneity on a relative
+            # tolerance. Genuine `SizesList` variation is far larger.
+            variable=hws!==nothing && any(
+                h->abs(h-hws[1])>1e-12*max(abs(hws[1]),eps(Float64)),hws)
+            variable && !closed_run && throw(ArgumentError(
+                "$caller: BoundaryLayer Field[$(spec.tag)].SizesList " *
+                "grading on open wall runs is not implemented — " *
+                "upstream's end columns consume the adjacent edge's own " *
+                "chain"))
+            if hws!==nothing && !variable
+                # A uniformly-resolved map still overrides `Size` — every
+                # vertex reports the same `getLocalInfoAtNode` hWall, so the
+                # run keeps the shared schedule built from that value
+                # (end columns and probes read `offsets`).
+                offsets=_bl_field_offsets(spec,hws[1],caller)
+                isempty(offsets) && throw(ArgumentError(
+                    "$caller: BoundaryLayer Field[$(spec.tag)] hWall=" *
+                    "$(hws[1]) at a wall vertex exceeds Thickness=" *
+                    "$(spec.thickness) — the column admits no layer row"))
+            end
+            voff=nothing
+            if variable
+                voff=Vector{Vector{Float64}}(undef,nchain)
+                for (i,hw) in enumerate(hws)
+                    voff[i]=_bl_field_offsets(spec,hw,caller)
+                    isempty(voff[i]) && throw(ArgumentError(
+                        "$caller: BoundaryLayer Field[$(spec.tag)] hWall=" *
+                        "$hw at a wall vertex exceeds Thickness=" *
+                        "$(spec.thickness) — the column admits no layer row"))
+                end
             end
             wall_coords=Matrix{Float64}(undef,3,nchain)
             for (i,v) in enumerate(chain)
@@ -696,10 +819,95 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                 interior || continue
                 push!(fans,i)
             end
+            # Upstream `treat2Connections`: at a wall vertex connected to
+            # two wall segments the growth direction is the *biased*
+            # averaged inward normal — `normalize(1.01·N1 + N2)` — scaled
+            # by 1/cos(θ/2) where θ is the two normals' angle, so a corner
+            # column grows proportionally deeper into the wedge. Straight
+            # continuations reduce to the plain averaged normal (factor
+            # 1); run-end vertices keep the covered-span direction
+            # upstream's `addColumnAtTheEndOfTheBL` assigns; fans sweep
+            # their own rays. `N1` is the normal of `_connections[0]` —
+            # `getEdgesData` iterates the face's edges in tag order and
+            # equal multimap keys keep insertion order, so the biased side
+            # is the *lower-tagged* adjacent curve; interior to one curve
+            # it is the earlier line index (the smaller-parameter side).
+            fan_pos=Set(fans)
+            nseg3=closed_run ? nchain : nchain-1
+            segleft=Vector{NTuple{3,Float64}}(undef,max(nseg3,1))
+            for i in 1:nseg3
+                a3=coords3d[chain[i]]
+                b3=coords3d[chain[i==nchain ? 1 : i+1]]
+                s=(b3[1]-a3[1],b3[2]-a3[2],b3[3]-a3[3])
+                sl=hypot(s[1],s[2],s[3])
+                sl>0 || throw(ArgumentError(
+                    "$caller: Surface[$t] wall curve has a coincident vertex"))
+                ux,uy,uz=s[1]/sl,s[2]/sl,s[3]/sl
+                segleft[i]=(plane_normal[2]*uz-plane_normal[3]*uy,
+                            plane_normal[3]*ux-plane_normal[1]*uz,
+                            plane_normal[1]*uy-plane_normal[2]*ux)
+            end
+            outcurve_raw=Int[loop_curve[mod1(start0+chain_positions[j]-1,
+                                             nseg)] for j in 1:nseg3]
+            seg_curve=Vector{Int}(undef,max(nseg3,1))
+            for i in 1:nseg3
+                seg_curve[i]=chain_rev ?
+                    (i<nchain ? outcurve_raw[nchain-i] :
+                                outcurve_raw[nchain]) :
+                    outcurve_raw[i]
+            end
+            # Curve parameter of a chain vertex on a specific curve —
+            # subdivision vertices carry it directly; model endpoints
+            # resolve through the curve's point tags and param bounds.
+            _p_on_curve=function (v::Int,c::Int)
+                if get(vert_curve,v,0)==c && haskey(vert_param,v)
+                    return vert_param[v]
+                end
+                pid=get(point_of,v,0)
+                if pid!=0 && haskey(m.curves,c)
+                    pa,pb=m.curves[c]
+                    (pid==pa || pid==pb) || return NaN
+                    t0,t1=_model_curve_param_bounds(m,c,caller)
+                    return pid==pa ? t0 : t1
+                end
+                return NaN
+            end
+            vscale=nothing
+            for i in 1:nchain
+                interior=closed_run || (i>1 && i<nchain)
+                interior || continue
+                i in fan_pos && continue
+                iin=closed_run ? mod1(i-1,nchain) : i-1
+                nin=segleft[iin];nout=segleft[i]
+                c_in=seg_curve[iin];c_out=seg_curve[i]
+                if c_in==c_out
+                    p_in=_p_on_curve(chain[iin],c_in)
+                    p_out=_p_on_curve(chain[mod1(i+1,nchain)],c_out)
+                    bias_in=(isnan(p_in)||isnan(p_out)) || p_in<p_out
+                else
+                    bias_in=c_in<c_out
+                end
+                n1=bias_in ? nin : nout
+                n2=bias_in ? nout : nin
+                x=(1.01*n1[1]+n2[1],1.01*n1[2]+n2[2],
+                   1.01*n1[3]+n2[3])
+                xl=hypot(x[1],x[2],x[3])
+                xl>0 || continue
+                d=abs(nin[1]*nout[1]+nin[2]*nout[2]+nin[3]*nout[3])
+                d=min(d,1.0)
+                ct2=cos(acos(d)/2)
+                vdirs===nothing &&
+                    (vdirs=Dict{Int,NTuple{3,Float64}}())
+                vdirs[i]=(x[1]/xl,x[2]/xl,x[3]/xl)
+                vscale===nothing && (vscale=Dict{Int,Float64}())
+                vscale[i]=ct2>0 ? 1.0/ct2 : 1.0
+            end
             strip=blmod._bl_2d_offsets(
                 wall_mesh,offsets;fans=fans,
                 fan_elements=spec.fan_elements,
                 vertex_dirs=vdirs,
+                vertex_offsets=voff,
+                vertex_scale_last=vscale,
                 plane_normal=plane_normal,caller=caller)
             mesh=strip.mesh
             # tops keys on the wall node's exact 3-D coordinate. Run-end
@@ -713,6 +921,54 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                 else
                     top=strip.tops[coords3d[v]]
                     top_of[v]=new_vertex!(top[ax[1]],top[ax[2]],top)
+                end
+            end
+            if variable
+                # The strip's exposed boundary through each wall vertex:
+                # the top free edge enters at the deepest level the
+                # preceding segment used; the uncancelled column rungs walk
+                # to the level the next segment exits at (upstream's
+                # `bedges` symmetric difference). A fan vertex instead runs
+                # up its entry ray, across the level-n ring, and down the
+                # exit ray.
+                fan_set_chain=Set(fans)
+                nfan=spec.fan_elements
+                for (i,v) in enumerate(chain)
+                    iprev=i==1 ? nchain : i-1
+                    inext=i==nchain ? 1 : i+1
+                    ni=strip.nlevels[i]
+                    e_i=ni>strip.nlevels[iprev] ? strip.nlevels[iprev]+1 : ni
+                    x_i=ni>strip.nlevels[inext] ? strip.nlevels[inext]+1 : ni
+                    entry=chain_rev ? x_i : e_i
+                    last_level=chain_rev ? e_i : x_i
+                    ids=Int[]
+                    vn=strip.verts[i]
+                    if i in fan_set_chain
+                        rs=chain_rev ? nfan : 0
+                        re=chain_rev ? 0 : nfan
+                        for k in entry:ni
+                            push!(ids,strip.id_of[(vn,k,rs)])
+                        end
+                        dr=re>rs ? 1 : -1
+                        for r in (rs+dr):dr:re
+                            push!(ids,strip.id_of[(vn,ni,r)])
+                        end
+                        for k in (ni-1):-1:last_level
+                            push!(ids,strip.id_of[(vn,k,re)])
+                        end
+                    else
+                        dk=last_level>=entry ? 1 : -1
+                        for k in entry:dk:last_level
+                            push!(ids,strip.id_of[(vn,k,0)])
+                        end
+                    end
+                    nodes=Int[]
+                    for nid in ids
+                        c=(mesh.coords[1,nid],mesh.coords[2,nid],
+                           mesh.coords[3,nid])
+                        push!(nodes,new_vertex!(c[ax[1]],c[ax[2]],c))
+                    end
+                    wire_nodes[v]=nodes
                 end
             end
             base=length(strip_coords)
@@ -767,13 +1023,23 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
             if !iszero(closed_flag)
                 for p in 1:nseg
                     v=loop[mod1(start0+p-1,nseg)]
-                    push!(new_loop,top_of[v])
+                    wn=get(wire_nodes,v,nothing)
+                    if wn===nothing
+                        push!(new_loop,top_of[v])
+                    else
+                        append!(new_loop,wn)
+                    end
                 end
                 break
             end
             for p in first:last+1
                 v=loop[mod1(start0+p-1,nseg)]
-                push!(new_loop,top_of[v])
+                wn=get(wire_nodes,v,nothing)
+                if wn===nothing
+                    push!(new_loop,top_of[v])
+                else
+                    append!(new_loop,wn)
+                end
             end
             # The run's end vertex sits at rotated position `last+1`,
             # consumed by the strip side — resume on the next segment.

@@ -433,15 +433,22 @@ end
 # common column. Directions are renormalized unless `normalize_dirs=false`,
 # the boundary-layer `Extrude` `View[i]` mode where upstream grows along the
 # view's raw (un-normalized) vectors, magnitude included — a zero vector then
-# leaves the vertex on its source row. The returned `dirs`/`tops` maps
+# leaves the vertex on its source row. `vertex_offsets` (indexed by curve node
+# id) optionally gives each wall vertex its own cumulative offsets — upstream's
+# `getLocalInfoAtNode` per-node schedules (`SizesList`/`hwall_n_nodes` grading).
+# Each wall segment then emits min(lengths) quadrangle rows plus upstream's
+# closing triangle on the deeper column, and a column emits only its deepest
+# *used* level. The returned `dirs`/`tops` maps
 # (keyed by wall-node position) record the exact 3-D direction and last-offset
 # position used, so connector and top-copy evaluators weld bitwise onto the
-# emitted strip.
+# emitted strip; `id_of`/`nlevels` expose the per-level node ids so the field
+# driver can rebuild the strip's exposed boundary.
 function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
                       fans=(), fan_elements::Integer=5,
                       plane_normal=(0.0,0.0,1.0),
                       max_cells::Integer=10_000_000,
                       vertex_dirs=nothing,
+                      vertex_offsets=nothing,
                       vertex_scale_last=nothing,
                       scale_hprev::Real=0.0,
                       normalize_dirs::Bool=true,
@@ -455,6 +462,10 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
     for (k,off) in enumerate(offsets)
         (isfinite(off) && off>0) || throw(ArgumentError(
             "$caller: layer offset $k is not finite and positive"))
+    end
+    if vertex_offsets!==nothing
+        length(vertex_offsets)==nnodes(curve) || throw(ArgumentError(
+            "$caller: vertex_offsets must hold one entry per curve node"))
     end
     dirs_over=vertex_dirs===nothing ? nothing : Dict{Int,NTuple{3,Float64}}()
     if vertex_dirs!==nothing
@@ -496,7 +507,7 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
     # bound — every sublevel offset above it remaps, not just the last row.
     scale_prev=Float64(scale_hprev)
     @inline function _offset_at(v,k)
-        off=offsets[k]
+        off=(vertex_offsets===nothing ? offsets : vertex_offsets[v])[k]
         (scale_over!==nothing && off>scale_prev) || return off
         return scale_prev+(off-scale_prev)*get(scale_over,v,1.0)
     end
@@ -520,17 +531,81 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
         interior || throw(ArgumentError("$caller: fan vertex $v is not an interior vertex"))
     end
     n_fans=length(fan_set)
+    # Per-chain-vertex column lengths and emitted levels. `vertex_offsets`
+    # (upstream's per-node `getLocalInfoAtNode` schedules) may give each wall
+    # vertex its own cumulative offsets — `modifyInitialMeshForBoundaryLayers`
+    # then tiles each wall segment with min(n_a,n_b) quadrangles and closes
+    # the longer column with one triangle. A column emits only its deepest
+    # *used* level (upstream prunes the unreferenced remainder).
+    nlens=Vector{Int}(undef,nchain)
+    for (idx,v) in enumerate(verts)
+        if vertex_offsets===nothing
+            nlens[idx]=nl
+            continue
+        end
+        vo=vertex_offsets[v]
+        nvo=length(vo)
+        nvo>=1 || throw(ArgumentError(
+            "$caller: vertex_offsets[$v] is empty"))
+        previous=0.0
+        for (k,off) in enumerate(vo)
+            (isfinite(off) && off>previous) || throw(ArgumentError(
+                "$caller: vertex_offsets[$v] offset $k is not finite " *
+                "positive increasing"))
+            previous=off
+        end
+        nlens[idx]=nvo
+    end
+    emit_len=Vector{Int}(undef,nchain)
+    for (idx,v) in enumerate(verts)
+        if v in fan_set
+            emit_len[idx]=nlens[idx]
+            continue
+        end
+        depth=0
+        ni=nlens[idx]
+        if closed || idx>1
+            nb=nlens[idx==1 ? nchain : idx-1]
+            depth=max(depth,ni>nb ? nb+1 : ni)
+        end
+        if closed || idx<nchain
+            nb=nlens[idx==nchain ? 1 : idx+1]
+            depth=max(depth,ni>nb ? nb+1 : ni)
+        end
+        emit_len[idx]=depth
+    end
     ntris_out=_checked_mul(n_fans,nfan,caller,"fan triangle count")
-    main_quads=_checked_mul(nchain_segs,nl,caller,"strip quadrangle count")
-    ring_quads=_checked_mul(ntris_out,nl-1,caller,"fan ring quadrangle count")
+    main_quads=0
+    nclosing=0
+    for i in 1:nchain_segs
+        na=nlens[i];nb=nlens[i==nchain ? 1 : i+1]
+        main_quads=_checked_add(main_quads,min(na,nb),caller,
+                                "strip quadrangle count")
+        na==nb ||
+            (nclosing=_checked_add(nclosing,1,caller,"closing triangle count"))
+    end
+    ring_quads=0
+    for (idx,v) in enumerate(verts)
+        v in fan_set || continue
+        ring_quads=_checked_add(ring_quads,
+            _checked_mul(nfan,nlens[idx]-1,caller,"fan ring quadrangle count"),
+            caller,"fan ring quadrangle count")
+    end
+    ntris_out=_checked_add(ntris_out,nclosing,caller,"triangle count")
     nquads=_checked_add(main_quads,ring_quads,caller,"quadrangle count")
     ncells=_checked_add(ntris_out,nquads,caller,"cell count")
     ncells<=cell_limit || throw(ArgumentError(
         "$caller: $ncells cells exceed max_cells=$cell_limit"))
     ncells<=typemax(Int32) || throw(ArgumentError("$caller: cell count exceeds Int32"))
     ncells>0 || throw(ArgumentError("$caller: no cells to emit"))
-    points_per_layer=_checked_add(nchain,ntris_out,caller,"points per layer")
-    new_points=_checked_mul(nl,points_per_layer,caller,"extruded node count")
+    new_points=0
+    for (idx,v) in enumerate(verts)
+        per=v in fan_set ?
+            _checked_mul(emit_len[idx],_checked_add(nfan,1,caller,
+                "fan ray count"),caller,"extruded node count") :
+            emit_len[idx]
+        new_points=_checked_add(new_points,per,caller,"extruded node count")
+    end
     npoints=_checked_add(nv,new_points,caller,"node count")
     npoints<=typemax(Int32) || throw(ArgumentError("$caller: node count exceeds Int32"))
 
@@ -587,7 +662,9 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
     @inbounds for v in verts
         id_of[(v,0,0)]=v
     end
-    @inbounds for k in 1:nl, (idx,v) in enumerate(verts)
+    maxemit=maximum(emit_len)
+    @inbounds for k in 1:maxemit, (idx,v) in enumerate(verts)
+        k>emit_len[idx] && continue
         if v in fan_set
             nin=n_in[idx]; nout=n_out[idx]
             θ=atan(nin[1]*nout[2]-nin[2]*nout[1], nin[1]*nout[1]+nin[2]*nout[2])
@@ -644,7 +721,9 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
         a_fan=a in fan_set; b_fan=b in fan_set
         ray_a=a_fan ? nfan : 0
         ray_b=0
-        for k in 1:nl
+        na=nlens[i]; nb=nlens[i==nchain ? 1 : i+1]
+        N=min(na,nb)
+        for k in 1:N
             b1=_id_layer(id_of,a,k-1,ray_a,a_fan)
             b2=_id_layer(id_of,b,k-1,ray_b,b_fan)
             t2=_id_layer(id_of,b,k,ray_b,b_fan)
@@ -661,6 +740,23 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
             qcursor+=1
             quads[:,qcursor].=(Int32(b1),Int32(b2),Int32(t2),Int32(t1))
         end
+        if na!=nb
+            # Unequal column heights close with one triangle — upstream's
+            # `MTriangle(c1[N-1],c2[N-1],longer_column[N])`: the shared level-N
+            # nodes plus the deeper column's next level.
+            v11=_id_layer(id_of,a,N,ray_a,a_fan)
+            v12=_id_layer(id_of,b,N,ray_b,b_fan)
+            apex=na>nb ? _id_layer(id_of,a,N+1,ray_a,a_fan) :
+                         _id_layer(id_of,b,N+1,ray_b,b_fan)
+            p1=plane_points[v11]; p2=plane_points[v12]
+            p3=plane_points[apex]
+            (!normalize_dirs || orient2(p1,p2,p3)>0) ||
+                throw(ArgumentError(
+                    "$caller: closing triangle on segment $i has a zero "*
+                    "or reversed Jacobian"))
+            tcursor+=1
+            tris[:,tcursor].=(Int32(v11),Int32(v12),Int32(apex))
+        end
     end
     @inbounds for (idx,v) in enumerate(verts)
         v in fan_set || continue
@@ -673,7 +769,7 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
             tcursor+=1
             tris[:,tcursor].=(Int32(origin),Int32(i1),Int32(i2))
         end
-        for k in 2:nl, ray in 0:nfan-1
+        for k in 2:nlens[idx], ray in 0:nfan-1
             b1=id_of[(v,k-1,ray)]; b2=id_of[(v,k-1,ray+1)]
             t2=id_of[(v,k,ray+1)]; t1=id_of[(v,k,ray)]
             p1=plane_points[b1]; p2=plane_points[t1]
@@ -713,9 +809,10 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
                  nx*basis_u[3]+ny*basis_v[3])
         end
         dirs[pos]=dir
-        tops[pos]=points[id_of[(v,nl,0)]]
+        tops[pos]=points[id_of[(v,emit_len[idx],0)]]
     end
-    return (mesh=mesh,verts=verts,dirs=dirs,tops=tops)
+    return (mesh=mesh,verts=verts,dirs=dirs,tops=tops,
+            id_of=id_of,nlevels=nlens)
 end
 
 # Closed-manifold wall decomposition: union-find over triangles joined by shared

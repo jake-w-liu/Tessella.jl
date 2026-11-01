@@ -24,6 +24,43 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### LAY02 `.geo` BoundaryLayer Field — `SizesList` per-vertex grading + `treat2Connections` corner law (2026-11-01)
+
+- **Oracle semantics (Gmsh 4.15.2 source + CLI).**
+  `BoundaryLayerField::getLocalInfoAtNode` resolves a per-vertex `hWall`:
+  `SizesList` point-tag heights, quadratic interpolation
+  `hb·(1−x)²+2·min(hb,he)·x(1−x)+he·x²` along the owning curve (midpoint
+  control = the smaller endpoint height), `Size` fallback. Each wall
+  segment tiles `min(n_a,n_b)` quadrangle rows plus one closing
+  `MTriangle(c_a[N],c_b[N],deep[N+1])`; deeper unused levels prune.
+  `treat2Connections` grows corner columns along
+  `normalize(1.01·N1+N2)·(1/cos(θ/2))` — `N1` is `_connections[0]`'s
+  normal; edge insertion is tag-ordered, so the biased side is the
+  lower-tagged adjacent curve (earlier line index inside one curve).
+- **Landed.** `_bl_2d_offsets` accepts `vertex_offsets` per-node
+  schedules (min-paired rows + closing triangle + deepest-used-level
+  pruning + `id_of`/`nlevels` metadata); `vertex_dirs`/`vertex_scale_last`
+  carry the biased corner direction and `1/cos(θ/2)` factor for uniform
+  and variable runs alike. The `.geo` producer resolves `SizesList`
+  maps, per-vertex hWall, exposes rung chains on the reduced wire
+  (upstream's `bedges` symmetric difference), overrides `Size` on
+  uniformly-resolved maps, and keeps heterogeneous grading on *open*
+  runs a loud rejection (upstream's end columns consume the adjacent
+  edge's own 1-D chain).
+- **Receipt.** On the oracle fixture (`p2`-style closed ring, four
+  `SizesList` heights), every emitted Tessella strip node is an exact
+  subset of the oracle's node set — biased-corner first-layer positions
+  to 1e-9; the residual oracle nodes are its interior-fill Steiner
+  points (different fill algorithm). `geo_boundary_layer_field_test`
+  101/101 including the new 64-pin `SizesList closed-ring grading`
+  testset; `geo_extrude_boundarylayer_test`, `geo_extrude_test`,
+  `boundarylayer_test`, `boundary_layer_fan_test` — all exit 0 on Julia
+  1.12.7 `--compile=min -O0 --check-bounds=yes`.
+- **Remaining loud rejections (unchanged).** `SizesList` grading on
+  open wall runs, `FanPointsSizesList`, `IntersectMetrics`, finite
+  `AnisoMax`; plane surfaces only; transfinite/extruded/periodic-slave
+  exclusions preserved.
+
 ### P601 t17 tutorial parity verified — `GMSH_PARITY_T17_TUTORIAL_OK` (2026-11-01)
 
 Re-verified the t17 driver verbatim on HEAD `8768ef2` under
