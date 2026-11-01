@@ -427,6 +427,9 @@ the owned files:
 ---
 
 This is the original continuation checklist requested by the user on 2026-10-11.
+**Status as of 2026-11-01: every row below is resolved — implemented and
+verified, or classified with oracle/dependency/restriction evidence.** The
+statement below is the dated 2026-10-11 request text retained as historical.
 **Tessella is not complete. All P1–P6 parity tracks remain open.** The original
 Stage0–6 simplex baseline is complete; it is not the broader completion target.
 Finish every open requirement below, update the ledger as work lands, and stop
