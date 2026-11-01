@@ -6020,6 +6020,62 @@ Two verified slices land together:
   loud; BFS (`MetisAlgorithm=-1`) can still hit `nonmanifold interface
   edge` on pinched partitions — a certified reject, not degradation.
 
+## Working-tree increment (LAY02 `.geo` BoundaryLayer Field — open-run end chains + `PointsList`/`FanPointsSizesList` + extruded adjacency; 2026-11-01)
+
+Resolves the prior increment's stated residuals plus the curved-wall
+and extruded-sibling cases. Oracle-driven (`boundaryLayersData.cpp`,
+`meshGEdge.cpp`, `Field.cpp`, `meshGFaceExtruded.cpp`, Gmsh 4.15.2 CLI
+probes in `_blfield_probe/`):
+
+- **Open-run heterogeneous `SizesList`.** Upstream's
+  `addColumnAtTheEndOfTheBL` reuses the *adjacent* non-wall edge's own
+  `mesh_vertices` (reversed where needed) as the run-end column, so an
+  uninjected neighbour contributes its ordinary nodes only — the strip
+  emits `min`-paired quad rows plus the deeper column's closing
+  triangle (`p8_uniform` oracle: boundary + layer nodes exact, only
+  interior Steiner points differ).
+- **`PointsList`/`NodesList` end-node injection.** `setupFor1d(iE)`
+  gates per field — an edge walled by the field itself keeps
+  `_pointTags` empty (no self-injection), another field's point end
+  still lands. `addBoundaryLayerPoints` grows the endpoint chain
+  (geometric `L ≤ min(Thickness, 0.4·chord)`, `L += hWall·ratio^ith`)
+  *before* `meshGEdgeProcessing` — transfinite included, which keeps
+  `N = nbPointsTransfinite` over the *reduced* window — and skips
+  `filterPoints` whenever BL points exist. Landed: `dim>=1` field
+  resolution in `_geo_mesh_model`, `_model_curve_bl_end_nodes` per-field
+  gating, `_model_curve_bl_point_params` chord schedules,
+  `_model_curve_bl_grade_params` reduced-interval regrade
+  (`_l1_bounds` preserved) with a `transfinite` arm, and a
+  `_skip_filter` flag on `mesh_curve`. Straight lines only (upstream's
+  gate). Oracle `_t_tf_bl.geo` (`Transfinite Curve {2} = 6` + point-2
+  chain): curve-2 node set `0, 0.06, 0.138, 0.2394 | 0.39152, 0.54364,
+  0.69576, 0.84788 | 1` matches bitwise.
+- **`FanPointsSizesList`.** Signed positional budgets
+  (`_geo_signed_int_list_opt`): positive = per-point wedge budget,
+  −4/auto negative = skip fan (`fan_skips`), −1/−2/−3 = cross/mix/tail
+  loud rejections. Signed sweeps drive cw/ccw emission; convex-fan
+  fixtures whose strip free boundary self-intersects (`fan1`/`fan2`)
+  reject with upstream's edge-not-recovered explanation instead of an
+  internal CDT crossing. Probes `fan3`/`fan3_s3`/`fan3_s7`/`fan3_neg0`/
+  `fan3_neg4`/`fan3_neg9`/`fan0` all match.
+- **Inert options.** `IntersectMetrics` and finite `AnisoMax` accept —
+  upstream's metric-operator path never fires without a `SurfacesList`.
+- **Curved walls + extruded adjacency.** Non-line wall curves grow
+  normal columns through `parFromPoint` (disk probe: ring radii match
+  the oracle's geometric schedule). `setupFor2d` gives
+  `EXTRUDED_ENTITY` neighbours a free pass in the two-surfaces audit —
+  a wall shared by a source plane and its swept lateral grows the
+  source's layer while the lateral's own producer meshes it
+  (`p5_cyl`/`p3_box` class: source strip + ordinary lateral nodes).
+- Exits (Julia 1.12.7, `--compile=min -O0 --check-bounds=yes`):
+  `geo_boundary_layer_field_test` all testsets (130 assertions incl.
+  new extruded-sibling + transfinite `PointsList` pins),
+  `boundarylayer_test` 123/123, `boundary_layer_fan_test` 31/31,
+  `geo_extrude_boundarylayer_test` 109/109 — all exit 0.
+- Bounded residuals: cross/mix/tail fan types (−1/−2/−3); genuinely
+  non-planar parametric column construction; BL fields never alter
+  transfinite/extruded/periodic-slave *surface* producers.
+
 ## Verified gates
 
 - `validation/transfinite/differential.jl` Gmsh 4.15.2:
