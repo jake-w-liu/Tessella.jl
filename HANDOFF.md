@@ -6121,6 +6121,43 @@ probes in `_blfield_probe/`):
   non-planar parametric column construction; BL fields never alter
   transfinite/extruded/periodic-slave *surface* producers.
 
+## Working-tree increment (CAD04 residual slice — ELLIPSE trims, partial-domain splines, multi-chain rims, rational weights; landed `068b7f9`, 2026-11-02)
+
+Four bounded residuals in the prismatic-shell certificate close out:
+
+- **ELLIPSE trims** (`BRep.jl:_step_ellipse_frame_full`,
+  `BRepCurvedTrims.jl:_step_ellarc_span`): full closed ellipses and
+  open arcs group per geometric ellipse (strict radii pair also matches
+  in-plane axes up to per-axis sign), audit exact-twice coverage per
+  elementary interval, and emit canonical `ell_chain!` chains that weld
+  caps↔walls bitwise. `_step_prismatic_shell` admits the 3-face
+  two-cap/one-wall tube.
+- **Partial-domain B-spline uses** (`_step_spline_param`): vertices
+  invert to unique on-curve parameters via seeded finite-difference
+  Gauss–Newton; the covered `[t1,t2]` interval samples knot-aligned so
+  same-entity uses share every point bitwise; off-curve/ambiguous uses
+  defer to the unsupported-topology diagnostics.
+- **Multi-chain swept rims** (`wallex_ru` → `rim_use_chain`): each rim
+  may be N contiguous pieces concatenated junction-deduplicated; the
+  two rims must be congruent under one axial offset.
+- **Rational weights**: verified live — rational-quadratic semicircle
+  rim nodes satisfy the circle equation at 1e-9; the w=0.5 centre
+  weight apexes the bump patch at 15/14; all-ones rewiring changes the
+  certified shell.
+- Fixtures: seven generated AP214 solids (bottom-cap wires authored in
+  the OCC reversed-`.F.` convention — the earlier `.T.` convention was
+  geometrically wrong and only surfaced when a certificate deferral
+  reached the planar winding pre-check). Gmsh 4.15.2/OCC import+mesh
+  accepts each as one closed volume.
+- Exits (Julia 1.12.7, `--compile=min -O0 --check-bounds=yes`):
+  `brep_ellipse_trims_test` 338/338, `brep_curved_trims_test` 120/120,
+  `brep_nurbs_trim_test` 348/348, `brep_nurbs_shell_test` 1171/1171,
+  `brep_test` 162/162 — all exit 0; `brep_ellipse_trims_smoke.jl` joins
+  the default suite.
+- Remaining CAD04 residuals: NURBS faces on non-PLANE neighbours,
+  explicit 2-D pcurves, the general analytic Face/Curve registry,
+  general CAD assembly, unrecognized topology.
+
 ## Verified gates
 
 - `validation/transfinite/differential.jl` Gmsh 4.15.2:

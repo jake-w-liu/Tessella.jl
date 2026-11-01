@@ -24,6 +24,69 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### STEP CAD04 residual slice — ELLIPSE trims, partial-domain splines, multi-chain swept rims, rational weights (2026-11-02)
+
+Devin landed the next bounded CAD04 slice in the prismatic-shell
+certificate (`src/geometry/BRep.jl`, `src/geometry/BRepCurvedTrims.jl`,
+commit `068b7f9`), closing four of the residuals recorded below:
+
+- **ELLIPSE trims.** `_step_ellipse_frame_full` resolves the placement
+  center, unit normal and orthonormal in-plane axes plus positive
+  semi-radii; `p(theta)=center+r1*cos(theta)*x+r2*sin(theta)*y`. Closed
+  `ELLIPSE` edges (`v1==v2`) and open ellipse arcs classify separately —
+  `_step_ellarc_span` mirrors `_step_arc_span` with endpoint plane and
+  quadratic-equation validation and the EDGE_CURVE same_sense flag
+  selecting the complement. Uses group per geometric ellipse (center,
+  radii pair, normal; strict ellipses match in-plane axes up to
+  per-axis sign), audit each elementary interval for exactly-two
+  coverage, and emit canonical chains through `ell_chain!` on the
+  `_BREP_PRISM_ARC_SEGMENTS` grid — arcs proportional to span — so caps
+  and swept walls weld bitwise. `_step_prismatic_shell` admits the
+  three-face two-cap/one-wall tube shape (`length(faces)>=3`).
+- **Partial-domain B-spline uses.** `_step_spline_param` inverts each
+  edge vertex to a unique on-curve parameter — sampled seeds refined by
+  finite-difference Gauss–Newton — and partial uses sample only the
+  recovered `[t1,t2]` interval knot-aligned at
+  `_BREP_PRISM_SPLINE_SUBDIV` per overlapped nonzero span, sharing every
+  sample bitwise across same-entity uses. Off-curve, ambiguous,
+  zero-length and whole-domain-incompatible uses return `nothing` into
+  the existing unsupported-topology diagnostics.
+- **Multi-chain swept rims.** Swept-wall classification stores per-rim
+  use lists instead of requiring exactly two rim uses; each rim may be
+  N contiguous pieces (lines, polylines/splines, ellipse trims)
+  concatenated junction-deduplicated, and the two concatenated chains
+  must be congruent under one constant axial offset.
+- **Rational weights.** Verified live, not rewritten: the rational
+  quadratic semicircle rim is exact (every sampled node satisfies the
+  circle equation at 1e-9), the centre-weight-0.5 bump patch apexes at
+  exactly 15/14 on `nurbs_eval`, and all-ones weight rewiring changes
+  the certified shells (liveness mutation checks in the test file).
+
+Seven generated AP214 fixtures — bottom-cap wires authored in the OCC
+reversed-`.F.` convention (`scratch_cad04_fixtures.jl`, untracked like
+`scratch_nurbs_fixtures.jl`): `brep_occ_elliptical_pipe.step` (96
+nodes/188 tris), `brep_occ_ellipse_arc_plate.step` (54/104),
+`brep_occ_ellipse_hole_plate.step` (104/208),
+`brep_occ_spline_partial_plate.step`, `brep_occ_prism_multi_rim.step`
+(38/72), `brep_occ_rational_bulge_plate.step` (38/72),
+`brep_occ_nurbs_rational_bump.step`. The Gmsh 4.15.2/OCC import-and-mesh
+oracle accepts every file as one closed volume entity each (vols=1;
+282/407/827/290/406/363/246 nodes at `MeshSizeMax=0.35`).
+
+Test exits on Julia 1.12.7 (`--compile=min -O0 --check-bounds=yes`):
+`test/geometry/brep_ellipse_trims_test.jl` **338/338** (entity audits,
+ellipse weld/incidence/volumes including the 48-gon polygon-area
+certificate, partial-domain span coverage plus the off-curve vertex
+rejection, multi-chain congruence, exact-circle and rational-patch
+per-node verification, all-ones liveness mutations) and
+`brep_ellipse_trims_smoke.jl` added to the default suite — all exit 0.
+Regressions: `brep_curved_trims_test` 120/120, `brep_nurbs_trim_test`
+348/348, `brep_nurbs_shell_test` 1171/1171, `brep_test` 162/162
+(46m39s). Remaining CAD04 residuals: NURBS faces on non-PLANE
+neighbours, B-spline surfaces bounded by explicit 2-D pcurves, the
+general analytic Face/Curve registry, general CAD assembly,
+unrecognized topology.
+
 ### ALG01 scalar full-quad lifecycle export — restored Curve halves + node catalogue (2026-11-01)
 
 - Root cause of the residual recorded in the section below (stash-verified
