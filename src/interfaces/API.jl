@@ -227,6 +227,24 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     # `_part{..}_physical{X}_dim{d}` named groups (see `_partition_create_physicals!`).
     "Mesh.PartitionCreatePhysicals"=>1.0,
     "Mesh.PartitionCreateGhostCells"=>0.0,
+    # Upstream METIS option surface (DefaultOptions.h / MeshOptions_Number):
+    # `metisAlgorithm` 1=recursive bisection, 2=k-way; the Tessella extension
+    # value -1 selects the legacy linear-time BFS partitioner.
+    "Mesh.NbPartitions"=>0.0,
+    "Mesh.MetisAlgorithm"=>1.0,
+    "Mesh.MetisEdgeMatching"=>2.0,
+    "Mesh.MetisMaxLoadImbalance"=>-1.0,
+    "Mesh.MetisMinConn"=>-1.0,
+    "Mesh.MetisObjective"=>1.0,
+    "Mesh.MetisRefinementAlgorithm"=>2.0,
+    "Mesh.PartitionTriWeight"=>-1.0,
+    "Mesh.PartitionQuadWeight"=>-1.0,
+    "Mesh.PartitionTetWeight"=>-1.0,
+    "Mesh.PartitionHexWeight"=>-1.0,
+    "Mesh.PartitionPrismWeight"=>-1.0,
+    "Mesh.PartitionPyramidWeight"=>-1.0,
+    "Mesh.PartitionLineWeight"=>-1.0,
+    "Mesh.PartitionTrihedronWeight"=>0.0,
     "Mesh.MeshSizeMin"=>0.0,
     "Mesh.MeshSizeMax"=>1.0e22,
     "Mesh.MeshSizeFactor"=>1.0,
@@ -884,7 +902,14 @@ function option(name::AbstractString, value::Real)
                         "Mesh.RecombineNodeRepositioning","Mesh.Smoothing","General.AbortOnError",
                         "Mesh.Optimize","Mesh.OptimizeNetgen",
                         "Mesh.PartitionCreateTopology","Mesh.PartitionCreateGhostCells",
-                        "Mesh.PartitionCreatePhysicals",
+                        "Mesh.PartitionCreatePhysicals","Mesh.NbPartitions",
+                        "Mesh.MetisAlgorithm","Mesh.MetisEdgeMatching",
+                        "Mesh.MetisMaxLoadImbalance","Mesh.MetisMinConn",
+                        "Mesh.MetisObjective","Mesh.MetisRefinementAlgorithm",
+                        "Mesh.PartitionTriWeight","Mesh.PartitionQuadWeight",
+                        "Mesh.PartitionTetWeight","Mesh.PartitionHexWeight",
+                        "Mesh.PartitionPrismWeight","Mesh.PartitionPyramidWeight",
+                        "Mesh.PartitionLineWeight","Mesh.PartitionTrihedronWeight",
                         "Mesh.Binary","PostProcessing.Binary",
                         "General.Terminal","General.Verbosity","General.NumThreads")
             # Gmsh stores `(int)val` — truncation, not a 0/1 restriction.
@@ -7891,7 +7916,7 @@ function _compute_renumbering(method="RCMK",element_tags=())
     caller="API.mesh.compute_renumbering"
     method isa AbstractString || throw(ArgumentError(
         "$caller: method must be a string"))
-    method=="RCMK" || throw(ArgumentError(
+    method in ("RCMK","Hilbert","Metis") || throw(ArgumentError(
         "$caller: unknown renumbering method \"$method\""))
     (element_tags isa AbstractVector || element_tags isa Tuple) ||
         throw(ArgumentError(
@@ -7924,18 +7949,34 @@ function _compute_renumbering(method="RCMK",element_tags=())
         old_tags=sort!(collect(involved);by=node->_cache_node_tag(table,node))
         local_index=Dict{Int32,Int}(
             node=>index for (index,node) in enumerate(old_tags))
-        adjacency=[Set{Int}() for _ in old_tags]
-        for (offset,block) in cells
-            for column in axes(block,2)
-                (offset+column) in selected || continue
-                vertices=[local_index[block[row,column]]
-                          for row in axes(block,1)]
-                for a in vertices,b in vertices
-                    a!=b && push!(adjacency[a],b)
+        order=Int[]
+        if method=="Hilbert"
+            # Space-filling Hilbert order on the selected nodes' physical
+            # coordinates plus a deterministic bounded 2-opt locality polish
+            # (APIGraphPartition.jl). Index ties resolve by node order.
+            positions=Matrix{Float64}(undef,3,length(old_tags))
+            for (i,node) in enumerate(old_tags)
+                positions[:,i]=cached.coords[:,Int(node)]
+            end
+            order=_mesh_hilbert_node_order(positions)
+        else
+            adjacency=[Set{Int}() for _ in old_tags]
+            for (offset,block) in cells
+                for column in axes(block,2)
+                    (offset+column) in selected || continue
+                    vertices=[local_index[block[row,column]]
+                              for row in axes(block,1)]
+                    for a in vertices,b in vertices
+                        a!=b && push!(adjacency[a],b)
+                    end
                 end
             end
+            if method=="RCMK"
+                order=_mesh_rcm_node_order(adjacency)
+            else  # "Metis": native nested dissection on the same node graph
+                order=_mesh_node_nd_order(adjacency)
+            end
         end
-        order=_mesh_rcm_node_order(adjacency)
         position=Vector{Int}(undef,length(old_tags))
         for (rank,node) in enumerate(order)
             position[node]=rank
@@ -8498,8 +8539,10 @@ end
 # are adjacent when they share a node). Each partition grows breadth-first
 # from the lowest-tag unassigned element until it reaches its quota; when the
 # frontier disconnects, a fresh seed continues the same partition so every
-# element is always assigned.
-function _partition_elements(mesh::Mesh,num_partitions::Int)
+# element is always assigned. This is the linear-time simple tier — the
+# multilevel quality tier in APIGraphPartition.jl fronts it through the
+# `_partition_elements` dispatcher (`Mesh.MetisAlgorithm=-1` selects this).
+function _partition_elements_simple(mesh::Mesh,num_partitions::Int)
     total=nsegs(mesh)+ntris(mesh)+ntets(mesh)
     incidence=[Int[] for _ in 1:nnodes(mesh)]
     tag=0
@@ -8555,6 +8598,9 @@ end
 function _partition(num_part,element_tags=(),partitions=())
     caller="API.mesh.partition"
     count=_mesh_query_integer(num_part,caller,"num_part")
+    # Upstream `partition(num_part)` falls back to `Mesh.NbPartitions` (the
+    # value `-part`/the partition dialog store) when num_part is negative.
+    count<0 && (count=Int(round(get(OPTIONS,"Mesh.NbPartitions",0.0))))
     count>=0 || throw(ArgumentError("$caller: num_part must be non-negative"))
     (element_tags isa AbstractVector || element_tags isa Tuple) ||
         throw(ArgumentError(
@@ -8842,6 +8888,10 @@ include("APIMixedQueries.jl")
 include("APILegacyP2Queries.jl")
 include("APILegacyP2QualityBounds.jl")
 include("APIMixedAdvanced.jl")
+# Native multilevel element-dual graph partitioner (the METIS-quality tier)
+# plus Hilbert/nested-dissection renumbering helpers. Fronts the simple BFS
+# tier through `_partition_elements` / `_gp_options`.
+include("APIGraphPartition.jl")
 include("APIMixedRefine.jl")
 include("APIGenerate01.jl")
 include("APICurveInterpolation.jl")
@@ -11610,9 +11660,12 @@ remove_constraints(dim_tags=())=_remove_constraints(dim_tags)
 Compute a node renumbering for the cached mesh without applying it, matching
 Gmsh 4.15.2's `computeRenumbering`. `element_tags` restricts the computation to
 the given dense element tags (all elements when empty). Returns `(old_tags,
-new_tags)`: the sorted involved node tags and, for each, its new dense tag
-under a reverse Cuthill-McKee ordering of the shared-element adjacency graph.
-Only `"RCMK"` is supported; other methods and unknown element tags fail
+new_tags)`: the sorted involved node tags and, for each, its new dense tag.
+`"RCMK"` uses a reverse Cuthill-McKee ordering of the shared-element adjacency
+graph, `"Hilbert"` a space-filling Hilbert-curve order on node coordinates
+plus a deterministic bounded 2-opt locality polish, and `"Metis"` a native
+nested-dissection ordering on the same node graph (the upstream METIS_NodeND
+tier without the METIS dependency). Unknown methods and element tags fail
 explicitly. Element renumbering is not available, as in Gmsh 4.15.2.
 """
 compute_renumbering(method="RCMK",element_tags=())=

@@ -71,8 +71,16 @@ Surface Loop(1)={1,2,3,4,5,6};Volume(1)={1};""")
         Tessella.CLI.main([box_geo,"-3","-o",box_msh])
         @test_throws ArgumentError Tessella.CLI.main(
             [box_msh,"-part","2","-part_topo","-o",partitioned])
-        @test_throws ArgumentError Tessella.CLI.main(
-            [box_geo,"-3","-part","2","-part_topo","-o",partitioned])
+        # Native (non-BRep-import) volume meshes carry complete entity
+        # transport, so the partition-topology plan now publishes real
+        # $PartitionedEntities children and `_part{...}` physical groups —
+        # the canonical upstream `-part_topo` use case.
+        @test Tessella.CLI.main(
+            [box_geo,"-3","-part","2","-part_topo","-o",partitioned])==
+            partitioned
+        partitioned_text=read(partitioned,String)
+        @test occursin("\$PartitionedEntities",partitioned_text)
+        @test occursin("_part{",partitioned_text)
 
         # -merge combines sources before meshing.
         line2_geo=joinpath(directory,"line2.geo")
@@ -335,11 +343,20 @@ end
         @test Tessella.CLI.main([square_geo,"-2","-4","-o",adapt_out])==adapt_out
         @test Tessella.validate(E.read_mixed_msh(adapt_out)).ok
 
+        # `-part_weight` is implemented — it stores Mesh.Partition*Weight for
+        # the partition solver — but a bare flag without family/weight pairs
+        # keeps a loud usage rejection.
+        @test_throws ArgumentError Tessella.CLI.main(
+            [square_geo,"-2","-part_weight"])
+        weighted=joinpath(directory,"weighted.msh")
+        @test Tessella.CLI.main([square_geo,"-2","-part","2",
+            "-part_weight","tri","2","-o",weighted])==weighted
+        @test Tessella.validate(E.read_mixed_msh(weighted)).ok
+
         # Flags that stay rejected keep an informative upstream-accurate
         # message naming the absent producer. `-match` is implemented
         # (Geometry.MatchGeomAndMesh → GeomMeshMatcher::match).
-        for (flag,fragment) in (("-part_weight","Partition*Weight"),
-                                ("-swapangle","edge-swap"),
+        for (flag,fragment) in (("-swapangle","edge-swap"),
                                 ("-watch","GUI"),
                                 ("-debugSurface","debugSurface.brep"),
                                 ("-run","ONELAB"))

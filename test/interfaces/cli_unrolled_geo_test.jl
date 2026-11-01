@@ -247,16 +247,22 @@ end
             joinpath(dir,"sq.geo_unrolled")
         # `-hybrid` sets Recombine3DAll + ALGO_3D_RTREE + ALGO_2D_PACK_PRLGRMS
         # upstream; none has a native producer, so the named rejection stays.
-        for flag in ("-hybrid","-dual","-voronoi","-part_weight")
+        for flag in ("-hybrid","-dual","-voronoi")
             err=try
                 main([geo,flag]); ""
             catch e;sprint(showerror,e);end
             @test occursin("not supported",err)
         end
+        # `-part_weight`/`-partWeight` store Mesh.Partition*Weight pairs; a
+        # bare flag keeps a loud usage rejection, valid pairs parse.
         err=try
-            main([geo,"-partWeight","tet","2"]); ""
+            main([geo,"-part_weight"]); ""
         catch e;sprint(showerror,e);end
-        @test occursin("weighted graph partition",err)
+        @test occursin("family/weight",err)
+        err=try
+            main([geo,"-partWeight","tet","2"]); "ok"
+        catch e;sprint(showerror,e);end
+        @test err=="ok"
         # Every upstream `-algo` spelling parses and stores the real option
         # value; unknown names keep the named rejection.
         for name in ("bamg","front3d","delquad","quadqs","auto","hxt")

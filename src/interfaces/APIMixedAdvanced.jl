@@ -105,7 +105,7 @@ function _mixed_remove_duplicate_elements!(model,cached,pairs,records,caller)
     return nothing
 end
 
-function _partition_elements(mesh::MixedMesh,num_partitions::Int)
+function _partition_elements_simple(mesh::MixedMesh,num_partitions::Int)
     blocks=_cache_native_blocks(mesh)
     total=last(_mesh_element_offsets(mesh))
     incidence=[Int[] for _ in 1:nnodes(mesh)]

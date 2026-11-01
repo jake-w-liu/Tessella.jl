@@ -307,12 +307,6 @@ const _UNIMPLEMENTED_EXTENSIONS=Dict{String,String}(
 # loud rejection naming the missing functionality instead of falling into the
 # generic "unsupported flag" error (which stays for genuinely unknown words).
 const _REJECTED_FLAGS=Dict{String,String}(
-    # Upstream `-part_weight` switches to partition algorithm 3 and feeds
-    # per-element-family weights into its METIS graph partitioner; Tessella's
-    # partition producer is a connected-region BFS, so storing the
-    # `Mesh.Partition*Weight` values would silently do nothing.
-    "-part_weight"=>"weighted graph partitioning (Mesh.Partition*Weight) is not implemented",
-    "-partWeight"=>"weighted graph partitioning (Mesh.Partition*Weight) is not implemented",
     # `Mesh.AllowSwapAngle` is consumed upstream only by the BDS
     # discrete-surface edge-swap pass (meshGFaceBDS edgeSwapTest), which
     # Tessella's surface pipelines do not expose.
@@ -820,7 +814,7 @@ function _run(tokens::Vector{String})
     unroll_seen=false
     reclassify=nothing;reparam=nothing
     part=nothing;part_topo=nothing;part_ghosts=nothing;part_split=nothing
-    part_physicals=nothing
+    part_physicals=nothing;part_weights=nothing
     algo_seen=false;quad_seen=false
     # `-statreport`/`-append_statreport` — `(path, :write|:append)`; the last
     # occurrence wins like upstream's `createAppendMeshStatReport` store.
@@ -1051,6 +1045,32 @@ function _run(tokens::Vector{String})
             part_split!==nothing && throw(ArgumentError(
                 "tessella: duplicate or conflicting partition-split flag"))
             part_split=true
+        elseif a in ("-part_weight","-partWeight")
+            # Upstream `-part_weight [fam] [w] ...` stores per-family element
+            # weights for the graph partitioner (Mesh.Partition*Weight).
+            part_weights!==nothing && throw(ArgumentError(
+                "tessella: duplicate -part_weight flag"))
+            part_weights=Pair{String,Int}[]
+            fammap=Dict("tri"=>"Mesh.PartitionTriWeight",
+                        "quad"=>"Mesh.PartitionQuadWeight",
+                        "tet"=>"Mesh.PartitionTetWeight",
+                        "hex"=>"Mesh.PartitionHexWeight",
+                        "pri"=>"Mesh.PartitionPrismWeight",
+                        "pyr"=>"Mesh.PartitionPyramidWeight",
+                        "trih"=>"Mesh.PartitionTrihedronWeight",
+                        "lin"=>"Mesh.PartitionLineWeight")
+            while i+1<=length(tokens) &&
+                  haskey(fammap,lowercase(tokens[i+1]))
+                i+=1;fam=lowercase(tokens[i])
+                i+=1;i<=length(tokens) || throw(ArgumentError(
+                    "tessella: -part_weight needs a weight after '$fam'"))
+                w=tryparse(Float64,tokens[i])
+                w!==nothing && isinteger(w) || throw(ArgumentError(
+                    "tessella: -part_weight needs integer weights"))
+                push!(part_weights,fammap[fam]=>Int(w))
+            end
+            isempty(part_weights) && throw(ArgumentError(
+                "tessella: -part_weight needs at least one family/weight pair"))
         elseif a in ("-new","-open","-merge")
             marker=Symbol(a[2:end]);markers_seen=true
         elseif a=="-setnumber"
@@ -1482,7 +1502,7 @@ function _run(tokens::Vector{String})
         statreport,output_format,
         unroll=unroll_seen,bgm=[path for (path,_) in bgm_specs],
         reclassify,reparam,part,part_topo,part_ghosts,part_split,
-        part_physicals)
+        part_physicals,part_weights)
 end
 
 # Classified `MixedMesh` preferred for `-save_parametric`/`-save_topology`
@@ -1827,7 +1847,7 @@ end
 function _session_main(files,preludes,numeric_options;
                        dim,outfile,version,binary,output_flags,refine,save,
                        reclassify,reparam,part,part_topo,part_ghosts,part_split,
-                       part_physicals,
+                       part_physicals,part_weights=nothing,
                        adapt=false,barycentric=false,unroll=false,bgm=String[],
                        statreport=nothing,output_format=nothing)
     need_output=dim>0 || refine || adapt || barycentric || unroll || save ||
@@ -1995,6 +2015,11 @@ function _session_main(files,preludes,numeric_options;
         if reparam!==nothing
             API.mesh.classify_surfaces(reparam*pi/180,true,true,pi)
             API.mesh.create_geometry()
+        end
+        if part_weights!==nothing
+            for (key,w) in part_weights
+                API.option(key,w)
+            end
         end
         part===nothing || API.mesh.partition(part)
         if unroll

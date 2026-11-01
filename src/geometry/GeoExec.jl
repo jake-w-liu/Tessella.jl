@@ -10515,7 +10515,39 @@ function _geo_exec_partition_mesh!(m::GeoModel,args::AbstractString,
         _geo_msg_warn!(context,"No mesh elements were found")
         return nothing
     end
-    assignment=api._partition_lower_inherit(api._partition_elements(actual,count),actual)
+    # `Mesh.Metis*`/`Mesh.Partition*Weight` assignments inside the script
+    # scope the partition solver for this call (session options untouched).
+    solver_opts=(
+        MetisAlgorithm=Int(round(something(
+            _geo_option_number(context,"Mesh",0,"MetisAlgorithm"),1.0))),
+        MetisEdgeMatching=Int(round(something(
+            _geo_option_number(context,"Mesh",0,"MetisEdgeMatching"),2.0))),
+        MetisMaxLoadImbalance=Int(round(something(
+            _geo_option_number(context,"Mesh",0,"MetisMaxLoadImbalance"),-1.0))),
+        MetisMinConn=Int(round(something(
+            _geo_option_number(context,"Mesh",0,"MetisMinConn"),-1.0))),
+        MetisObjective=Int(round(something(
+            _geo_option_number(context,"Mesh",0,"MetisObjective"),1.0))),
+        MetisRefinementAlgorithm=Int(round(something(
+            _geo_option_number(context,"Mesh",0,"MetisRefinementAlgorithm"),2.0))),
+        PartitionTriWeight=Int(round(something(
+            _geo_option_number(context,"Mesh",0,"PartitionTriWeight"),-1.0))),
+        PartitionQuadWeight=Int(round(something(
+            _geo_option_number(context,"Mesh",0,"PartitionQuadWeight"),-1.0))),
+        PartitionTetWeight=Int(round(something(
+            _geo_option_number(context,"Mesh",0,"PartitionTetWeight"),-1.0))),
+        PartitionHexWeight=Int(round(something(
+            _geo_option_number(context,"Mesh",0,"PartitionHexWeight"),-1.0))),
+        PartitionPrismWeight=Int(round(something(
+            _geo_option_number(context,"Mesh",0,"PartitionPrismWeight"),-1.0))),
+        PartitionPyramidWeight=Int(round(something(
+            _geo_option_number(context,"Mesh",0,"PartitionPyramidWeight"),-1.0))),
+        PartitionLineWeight=Int(round(something(
+            _geo_option_number(context,"Mesh",0,"PartitionLineWeight"),-1.0))),
+        PartitionTrihedronWeight=Int(round(something(
+            _geo_option_number(context,"Mesh",0,"PartitionTrihedronWeight"),0.0))))
+    assignment=api._partition_lower_inherit(
+        api._partition_elements(actual,count;options=solver_opts),actual)
     # `Mesh.PartitionCreatePhysicals` gates the `_part{..}_physical{X}_dim{d}`
     # naming pass inside the production plans; scope the `.geo` context value
     # into the session option for the duration of the call.
