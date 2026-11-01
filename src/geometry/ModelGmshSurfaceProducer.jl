@@ -711,11 +711,13 @@ function _gmsh_native_initial_surface(m::GeoModel,tag::Int,options,input,
                                        high_water,caller;algorithm=3,size_field=nothing,
                                        element_high_water=UInt64(0),
                                        forced=nothing,
-                                       _periodic_positions=nothing)
+                                       _periodic_positions=nothing,
+                                       _allow_recombine::Bool=true)
     _surface_type(m,tag)===:plane || throw(ArgumentError(
         "$caller: native initial Surface[$tag] requires its actual Plane parametrization"))
     authority,limit=_gmsh_native_surface_lower_input(m,options,input,high_water,caller)
-    fullquad=_model_surface_recombined(m,tag) && m.meshing.recombine_algo in (2,3)
+    fullquad=_allow_recombine && _model_surface_recombined(m,tag) &&
+        m.meshing.recombine_algo in (2,3)
     quad_input=fullquad ? _gmsh_fullquad_input(m,tag,authority,
         element_high_water,options,caller) : nothing
     if quad_input!==nothing
@@ -839,7 +841,7 @@ function _gmsh_native_initial_surface(m::GeoModel,tag::Int,options,input,
         product,physical=_gmsh_native_surface_smooth(m,tag,product,physical,frame,caller)
         mesh=product.mesh
     end
-    if _model_surface_recombined(m,tag)
+    if _allow_recombine && _model_surface_recombined(m,tag)
         recombine_algorithm=m.meshing.recombine_algo
         recombine_algorithm in (0,1,2,3,4) || throw(ArgumentError(
             "$caller: native Surface[$tag] experimental recombination is not implemented"))

@@ -150,71 +150,125 @@ function _model_native_line_grade_params(m::GeoModel,curve::Int,
     # metric replaces `speed/h`, endpoint samples take the vertex metric, and
     # neither `smoothPrimitive` nor `filterPoints` applies.
     aniso=_model_curve_aniso_grading(m,curve)
-    evaluate=function(t,at_begin,at_end)
-        point=gamma(t)
-        speed=_model_native_line_sampling_speed(first,last,t,gamma,caller)
-        if aniso
-            metric=if at_begin
-                _model_vertex_bgm_metric(m,a,point,options,caller;_native_producer)
-            elseif at_end
-                _model_vertex_bgm_metric(m,b,point,options,caller;_native_producer)
-            else
-                _model_curve_bgm_metric(m,curve,t,point,0.0,1.0,options,caller;
-                    _native_producer)
-            end
-            lc=_metric_displacement(metric,tangent[1],tangent[2],tangent[3],caller)
-            isfinite(lc) && lc>0 || throw(ArgumentError(
-                "$caller: native Line metric density is nonpositive or not representable"))
-            return _IntegrationPoint(t,lc,0.0,speed,1.0)
+    inner=options.inner_field
+    # A Curve feeding an algorithm-7 face certifies every emitted edge by its
+    # world-chord `metric_edge_length` (the BAMG unit bound 1.0) through the
+    # surface producer's strict retained-boundary check — see
+    # `_model_curve_grade_params`, whose tightening this mirrors. The emitted
+    # discretization is measured against the producer's own certificate field
+    # and re-placed under a progressively tightened grading metric while a
+    # remnant persists, upstream of the Curve products it can no longer edit.
+    # An equal-primitive placement whose certificate total just exceeds the
+    # interval count is the common remnant — `_undershoot_metric_edges!`
+    # intentionally tolerates it (uniform spacing is the unique solution),
+    # so only a regraded count resolves it.
+    cert_fields=Tuple{Int,Any}[]
+    if aniso && inner isa AbstractAnisoField && !(inner isa _MetricScaledAniso)
+        for face in _model_curve_faces(m,curve)
+            _surface_mesh_algorithm(m,face)==7 || continue
+            push!(cert_fields,(Int(face),
+                _metric_surface_algorithm_field(m,face,options,nothing,caller)))
         end
-        endpoint=at_begin ? _model_vertex_bgm(m,a,point,options,caller;_native_producer) :
-                 at_end ? _model_vertex_bgm(m,b,point,options,caller;_native_producer) : GMSH_MAX_SIZE
-        h=min(endpoint,_model_curve_bgm(m,curve,t,point,0.0,1.0,options,caller;_native_producer))
-        lc=speed/h
-        isfinite(lc) && lc>0 || throw(ArgumentError(
-            "$caller: native Line density is nonpositive or not representable"))
-        return _IntegrationPoint(t,lc,0.0,speed,h)
     end
-    points=_gmsh_curve_integration(evaluate,0.0,1.0,options.integration_precision,caller)
-    try
-    # Upstream applies `smoothPrimitive` only away from BAMG (`algo2d !=
-    # ALGO_2D_BAMG`); the aniso primitive is used as integrated.
-    mass=aniso ? points[end].p : _gmsh_curve_smooth_primitive!(points,caller)
     minimum=_model_minimum_curve_segments(m,curve,options,caller)
-    nedge=_gmsh_edge_count(mass,minimum,10_000_000,caller)
     force_odd=m.meshing.recombine_algo!=0 && m.meshing.recombine_all
     odd_nodes=m.meshing.recombine_algo!=0 && (m.meshing.recombine_all ||
         any(face->haskey(m.meshing.recombine,(2,face)),_model_curve_faces(m,curve)))
-    if odd_nodes && iseven(nedge+1) && mass>0.75
-        nedge<10_000_000 || throw(ArgumentError("$caller: native Line edge count exceeds capacity"))
-        nedge+=1
-    end
-    params=_gmsh_curve_parameters(points,nedge+1,caller)
-    coordinates=NTuple{3,Float64}[gamma(t) for t in params]
-    field=_ModelCurveEntityField(m,options,String(caller))
-    size_function=t->_model_curve_bgm(m,curve,t,gamma(t),0.0,1.0,options,caller;_native_producer)
-    count=length(params)-2
-    rows=_birth_rows ? collect(eachindex(params)) : nothing
-    if aniso
-        # Equal-primitive marks invert a few ulps past the strict
-        # `metric_edge_length` certificate — re-bisect interior nodes to the
-        # conservative share (the endpoint stays at t1=1.0).
-        metric_of=function(u,xyz,entity)
-            dim,tag=entity===nothing ? (1,curve) :
-                (Int(entity[1]),Int(entity[2]))
-            dim==0 ? _model_vertex_bgm_metric(
-                         m,tag,xyz,options,caller;_native_producer) :
-                     _model_curve_bgm_metric(
-                         m,tag,u,xyz,0.0,1.0,options,caller;_native_producer)
+    # The certificate must be measured on the evaluator the emitted products
+    # are certified with — `_model_curve_point` carries the rational-exact
+    # Line evaluation the surface's retained-boundary check reads, not the
+    # native placement kernel's Float64 interpolation.
+    cert_gamma=u->_model_curve_point(m,curve,u,caller)
+    runopts=options
+    scale=1.0
+    local params,count,rows
+    done=false
+    for _attempt in 1:8
+        evaluate=function(t,at_begin,at_end)
+            point=gamma(t)
+            speed=_model_native_line_sampling_speed(first,last,t,gamma,caller)
+            if aniso
+                metric=if at_begin
+                    _model_vertex_bgm_metric(m,a,point,runopts,caller;_native_producer)
+                elseif at_end
+                    _model_vertex_bgm_metric(m,b,point,runopts,caller;_native_producer)
+                else
+                    _model_curve_bgm_metric(m,curve,t,point,0.0,1.0,runopts,caller;
+                        _native_producer)
+                end
+                lc=_metric_displacement(metric,tangent[1],tangent[2],tangent[3],caller)
+                isfinite(lc) && lc>0 || throw(ArgumentError(
+                    "$caller: native Line metric density is nonpositive or not representable"))
+                return _IntegrationPoint(t,lc,0.0,speed,1.0)
+            end
+            endpoint=at_begin ? _model_vertex_bgm(m,a,point,runopts,caller;_native_producer) :
+                     at_end ? _model_vertex_bgm(m,b,point,runopts,caller;_native_producer) : GMSH_MAX_SIZE
+            h=min(endpoint,_model_curve_bgm(m,curve,t,point,0.0,1.0,runopts,caller;_native_producer))
+            lc=speed/h
+            isfinite(lc) && lc>0 || throw(ArgumentError(
+                "$caller: native Line density is nonpositive or not representable"))
+            return _IntegrationPoint(t,lc,0.0,speed,h)
         end
-        _undershoot_metric_edges!(gamma,metric_of,params,coordinates,1.0,
-                                  (1,curve),mass/nedge,false,caller)
-    else
-        _filter_close_points!(coordinates,params,gamma,field,(1,curve),
-                              minimum,false,force_odd,size_function,caller;row_map=rows)
+        points=_gmsh_curve_integration(evaluate,0.0,1.0,options.integration_precision,caller)
+        try
+        # Upstream applies `smoothPrimitive` only away from BAMG (`algo2d !=
+        # ALGO_2D_BAMG`); the aniso primitive is used as integrated.
+        mass=aniso ? points[end].p : _gmsh_curve_smooth_primitive!(points,caller)
+        nedge=_gmsh_edge_count(mass,minimum,10_000_000,caller)
+        if odd_nodes && iseven(nedge+1) && mass>0.75
+            nedge<10_000_000 || throw(ArgumentError("$caller: native Line edge count exceeds capacity"))
+            nedge+=1
+        end
+        params=_gmsh_curve_parameters(points,nedge+1,caller)
+        coordinates=NTuple{3,Float64}[gamma(t) for t in params]
+        field=_ModelCurveEntityField(m,runopts,String(caller))
+        size_function=t->_model_curve_bgm(m,curve,t,gamma(t),0.0,1.0,runopts,caller;_native_producer)
+        count=length(params)-2
+        rows=_birth_rows ? collect(eachindex(params)) : nothing
+        if aniso
+            # Equal-primitive marks invert a few ulps past the strict
+            # `metric_edge_length` certificate — re-bisect interior nodes to the
+            # conservative share (the endpoint stays at t1=1.0).
+            metric_of=function(u,xyz,entity)
+                dim,tag=entity===nothing ? (1,curve) :
+                    (Int(entity[1]),Int(entity[2]))
+                dim==0 ? _model_vertex_bgm_metric(
+                             m,tag,xyz,runopts,caller;_native_producer) :
+                         _model_curve_bgm_metric(
+                             m,tag,u,xyz,0.0,1.0,runopts,caller;_native_producer)
+            end
+            _undershoot_metric_edges!(gamma,metric_of,params,coordinates,1.0,
+                                      (1,curve),mass/nedge,false,caller)
+        else
+            _filter_close_points!(coordinates,params,gamma,field,(1,curve),
+                                  minimum,false,force_odd,size_function,caller;row_map=rows)
+        end
+        if isempty(cert_fields)
+            done=true
+        else
+            worst=0.0
+            for (face,cert) in cert_fields
+                # `first` is the curve's begin vertex here, not Base.first.
+                previous=cert_gamma(params[1])
+                for u in Iterators.drop(params,1)
+                    point=cert_gamma(u)
+                    worst=max(worst,metric_edge_length(cert,previous,point;
+                                                     entity=(2,face)))
+                    previous=point
+                end
+            end
+            if worst<=1.0
+                done=true
+            else
+                scale=max(scale*1.02,worst*worst)
+                runopts=_mesh1d_options_with_inner_field(options,
+                    _MetricScaledAniso(inner,scale))
+            end
+        end
+        finally
+            _gmsh_curve_close_points!(points)
+        end
+        done && break
     end
     return _birth_rows ? _ModelNativeCurveGrade(params,rows,count) : params
-    finally
-        _gmsh_curve_close_points!(points)
-    end
 end

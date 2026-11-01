@@ -26,6 +26,18 @@ function _native_recombine_state(product,world,frame,caller)
         product.element_high_water,_GmshNativeSurfaceLift(frame),String(caller))
 end
 
+# The parametric-front variant: the state's relocation lift is the chart's own
+# `lift(u,v)` — a built-in ruled patch carries no plane frame to wrap. Node
+# relocations stay on the face through the same `s.lift` contract.
+function _native_recombine_state_lift(product,world,lift,caller)
+    mesh=product.mesh
+    return _NativeSurfaceRecombine(copy(world),copy(mesh.coords[1:2,:]),
+        copy(product.node_owners),copy(product.node_tags),
+        NTuple{3,Int32}[Tuple(mesh.tris[:,i]) for i in axes(mesh.tris,2)],
+        copy(product.element_tags),NTuple{4,Int32}[],UInt64[],trues(nnodes(mesh)),
+        product.element_high_water,lift,String(caller))
+end
+
 _native_recombine_node_order(s)=sortperm(s.node_tags)
 
 @inline _native_recombine_point(s,node)=

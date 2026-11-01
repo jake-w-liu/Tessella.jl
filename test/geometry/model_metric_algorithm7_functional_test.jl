@@ -86,10 +86,11 @@ end
     @test validate(mesh_model_surface(model,tag)).ok
 end
 
-@testset "algorithm 7 keeps unsupported surfaces loud" begin
-    # A circle-bounded face is planar but its boundary Curve is not a Line —
-    # the metric producer contract rejects it rather than substituting the
-    # scalar mesher.
+@testset "algorithm 7 reaches curved boundary and ruled charts" begin
+    # A circle-bounded face is planar and its boundary arcs carry real
+    # geometric Curve records — upstream's BAMG selector measures their
+    # actual lower products like a line's, and the native producer keeps the
+    # retained chord vertices on the circle.
     model=GeoModel()
     center=add_point!(model,.5,.5,0.;mesh_size=.5)
     rim=[add_point!(model,x,y,0.;mesh_size=.5) for (x,y) in
@@ -98,10 +99,13 @@ end
     loop=add_curve_loop!(model,arcs)
     tag=add_plane_surface!(model,[loop])
     model.meshing.algorithm_2d=7
-    @test_throws ArgumentError mesh_model_surface(model,tag)
-
-    # A curved surface kind stays rejected: a ruled filling between two
-    # skew edges is not a plane Surface.
+    mesh=mesh_model_surface(model,tag)
+    @test validate(mesh).ok && N.ntris(mesh)>0
+    @test all(point->isapprox(hypot(point[1]-.5,point[2]-.5),.5;atol=1e-12) ||
+        (abs(point[1]-.5)<.5 && abs(point[2]-.5)<.5),eachcol(mesh.coords))
+    # A declared ruled patch between skew edges meshes its own (u,v) chart —
+    # the same parametric construction upstream's BAMG runs on a
+    # `RuledSurface` GFace — rather than rejecting a non-plane Surface.
     model=GeoModel()
     p1=add_point!(model,0.,0.,0.;mesh_size=.5);p2=add_point!(model,1.,0.,0.;mesh_size=.5)
     p3=add_point!(model,0.,1.,1.;mesh_size=.5);p4=add_point!(model,1.,1.,1.;mesh_size=.5)
@@ -109,12 +113,63 @@ end
             add_line!(model,p4,p3),add_line!(model,p3,p1)]
     tag=add_ruled_surface!(model,[add_curve_loop!(model,curves)])
     model.meshing.algorithm_2d=7
-    @test_throws ArgumentError mesh_model_surface(model,tag)
+    mesh=mesh_model_surface(model,tag)
+    @test validate(mesh).ok && N.ntris(mesh)>0
+    # Every emitted vertex lies on the ruled patch: its (u,v) parameter is
+    # inside the blend's unit square.
+    lc=Tessella.Model._model_lc(model)
+    silent=Returns(nothing)
+    @test all(eachcol(mesh.coords)) do point
+        u,v=Tessella.Model._ruled_xyz_to_uv(model,tag,Tuple(point),1.0,lc,
+            true,silent,silent,"test",false)
+        isfinite(u) && isfinite(v) && -1e-9<=u<=1+1e-9 && -1e-9<=v<=1+1e-9
+    end
+    # Anisotropic background fields stretch the patch triangulation the same
+    # way they do a planar face.
+    xfield=MathEvalAnisoField(m11="16",m22="1",m33="1")
+    yfield=MathEvalAnisoField(m11="1",m22="16",m33="1")
+    xmesh=mesh_model_surface(model,tag;size_field=xfield)
+    ymesh=mesh_model_surface(model,tag;size_field=yfield)
+    @test validate(xmesh).ok && validate(ymesh).ok
+    @test !isequal(xmesh.coords,ymesh.coords) || xmesh.tris!=ymesh.tris
 
     # Unknown algorithms still reject through the same admission.
     model,tag=rectangle()
     model.meshing.algorithm_2d=9
     @test_throws ArgumentError mesh_model_surface(model,tag)
+end
+
+@testset "algorithm 7 recombination and determinism" begin
+    # Upstream's BAMG triangles recombine through `recombineIntoQuads`: the
+    # certified triangulation feeds the shared native pairing kernel, so a
+    # recombined Surface emits a MixedMesh of quads and leftover triangles.
+    model,tag=rectangle()
+    model.meshing.algorithm_2d=7
+    model.meshing.recombine[(2,tag)]=45.0
+    mesh=mesh_model_surface(model,tag)
+    @test mesh isa Tessella.MixedMesh
+    @test validate(mesh).ok
+    quads=sum(size(b.nodes,2) for b in mesh.blocks
+        if b isa Tessella.ElementBlock && b.msh==3)
+    tris=sum(size(b.nodes,2) for b in mesh.blocks
+        if b isa Tessella.ElementBlock && b.msh==2)
+    @test quads>0 && tris+quads>0
+    # Repeated generation is bitwise identical — the producer and pairing
+    # are deterministic under the same model state.
+    model2,tag2=rectangle()
+    model2.meshing.algorithm_2d=7
+    model2.meshing.recombine[(2,tag2)]=45.0
+    mesh2=mesh_model_surface(model2,tag2)
+    @test isequal(mesh.coords,mesh2.coords)
+    @test [b.nodes for b in mesh.blocks if b isa Tessella.ElementBlock] ==
+        [b.nodes for b in mesh2.blocks if b isa Tessella.ElementBlock]
+    # The full-quad subdivision pipelines keep their loud not-implemented
+    # rejection on the metric producer too.
+    model3,tag3=rectangle()
+    model3.meshing.algorithm_2d=7
+    model3.meshing.recombine[(2,tag3)]=45.0
+    model3.meshing.recombine_algo=2
+    @test_throws ArgumentError mesh_model_surface(model3,tag3)
 end
 
 @testset "API Mesh.Algorithm=7 generates through the tensor path" begin

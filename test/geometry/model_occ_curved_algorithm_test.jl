@@ -133,16 +133,22 @@ end
 end
 
 @testset "Mesh.Algorithm3D ordinary-volume admission" begin
-    # Delaunay(1) and initial-only(3) are the implemented ordinary policies;
-    # every other documented selector (Frontal 4 = netgen, MMG3D 7, R-tree 9,
-    # HXT 10) has no native kernel and keeps its loud rejection.
+    # Delaunay(1), initial-only(3) and R-tree(9) are the implemented
+    # ordinary policies — 9 aliases the Delaunay fill unless Recombine3D
+    # asks for the hex-combining arm.  The remaining documented selectors
+    # (Frontal 4 = netgen, MMG3D 7, HXT 10) have no native kernel and keep
+    # their loud rejection.
     delaunay=M.mesh_model_volume(_primitive_cylinder(6),1)
     @test MT.ntets(delaunay)>0
     m=_primitive_cylinder(6)
     m.meshing.algorithm_3d=3
     initial=M.mesh_model_volume(m,1)
     @test MT.ntets(initial)>0
-    for algorithm3d in (4,7,9,10)
+    m=_primitive_cylinder(6)
+    m.meshing.algorithm_3d=9
+    rtree=M.mesh_model_volume(m,1)
+    @test MT.ntets(rtree)>0
+    for algorithm3d in (4,7,10)
         model=_primitive_cylinder(6)
         model.meshing.algorithm_3d=algorithm3d
         err=_error(()->M.mesh_model_volume(model,1))
