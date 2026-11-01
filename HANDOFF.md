@@ -5965,6 +5965,51 @@ Oracle-driven (`boundaryLayersData.cpp`, Gmsh 4.15.2 source + CLI probe
   `src/geometry/ModelBoundaryLayerField.jl`,
   `test/geometry/geo_boundary_layer_field_test.jl`.
 
+## Working-tree increment (ALG01/MET02 algorithm-7 full-quad 2/3 + algorithm-6 scalar-only verdict; 2026-11-01)
+
+Two metric-surface residuals close out:
+
+- **Algorithm-7 full-quad recombination 2/3.** Gmsh 4.15.2 produces
+  genuine full-quad output on `Mesh.Algorithm=7` with
+  `Mesh.RecombinationAlgorithm` 2/3 (oracle probes: warped ruled face
+  44 quads / 0 triangles; planar square 48 quads). The certified
+  metric producer now runs the shared lifecycle:
+  `_metric_surface_admit` admits recombination 0–3;
+  `_metric_surface_refine` + `_ruled_metric_surface_refine` build
+  `_gmsh_fullquad_input`, mesh the coarse stage under
+  `_MetricScaledAniso(field,0.25)` (doubled size ⇔ quartered tensor)
+  and call `_gmsh_native_surface_fullquad`. `ModelGmshFullQuad.jl`
+  gained parametric transport — `lift`, `middle_uv_of`,
+  `point_lift` callbacks plus `_native_recombine_state_lift` — so the
+  ruled patch resolves boundary middles through
+  `_ruled_curve_parameters` and lifts interior middles/centers
+  on-surface at averaged parameters; planar/OCC fronts keep their
+  frame transport via `_gmsh_fullquad_boundary_middle_uv`. Lower
+  ownership, retained flags, high-water marks, parameters, birth rows,
+  source-node updates and curve chains ride the existing lifecycle;
+  embedded/transfinite/smoothing/periodic-compound contexts and
+  selectors outside {0,1,2,3} stay loud.
+- **Algorithm-6 factory path: oracle-verified scalar parity.**
+  Upstream `Mesh.Algorithm=6` (Frontal-Delaunay — the
+  Frontal-Delaunay-for-quads hybrid is selector 8; BAMG-adjacent is
+  selector 7) with an anisotropic field on a factory box face emits
+  unchanged scalar output: `_model_factory_surface_refine!` staying
+  scalar-only is exact parity, no tensor routing added. The
+  native-front alg-6 arm on user-assembled geometry already consumes
+  the tensor.
+- Exits (Julia 1.12.7, `--check-bounds=yes`, normal compilation —
+  `GmshLibm` llvmcall needs the compiler):
+  `model_metric_algorithm7_fullquad_test` (new) 30/30, `-O0` and
+  `-O2`; `model_metric_algorithm7_functional_test` 32/32;
+  `model_occ_metric_algorithm7_test` 55/55;
+  `model_metric_delaunay_arm_test` 19/19; `recombine_test`,
+  `recombine_matching_test` 67,803; `mesh2d_test` 925 — all exit 0.
+- Pre-existing (stash-verified on `731bcb6`, unchanged by this work):
+  `api_native_fullquad_generation_test` oracle fixtures report the
+  temporary coarse Curve constructors in committed products on the
+  scalar initial-surface front — a full-quad lifecycle export gap
+  recorded under ALG01.
+
 ## Working-tree increment (ALG01/MET02 algorithm-7 ruled front + recomb; PART01 METIS tier; 2026-11-01)
 
 Two verified slices land together:

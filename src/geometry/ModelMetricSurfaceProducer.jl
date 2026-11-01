@@ -46,14 +46,16 @@ function _metric_surface_admit(m,tag,caller;ruled=false)
     # `recombineIntoQuads` pass — the native metric producer feeds its
     # certified triangulation into the shared pairing kernel, so the
     # triangle-pairing policies (0 simple, 1 blossom) apply verbatim.
-    # The full-quad subdivision and bipartite pipelines keep their loud
-    # not-implemented rejections, matching the scalar producer's gate.
+    # The full-quad subdivision policies (2 simple, 3 blossom) take the same
+    # certified triangulation through the shared boundary-halving and
+    # subdivision stages upstream's `meshGFace` runs. The bipartite pipeline
+    # keeps its loud not-implemented rejection.
     if _model_surface_recombined(m,tag)
-        m.meshing.recombine_algo in (0,1) || throw(ArgumentError(
+        m.meshing.recombine_algo in (0,1,2,3) || throw(ArgumentError(
             "$caller: Mesh.RecombinationAlgorithm=$(m.meshing.recombine_algo) " *
-            "requests the full-quad subdivision pipeline on Surface[$tag], " *
-            "which is not implemented — supported values are 0 (simple) and " *
-            "1 (blossom)"))
+            "on Surface[$tag] is not implemented — supported values are " *
+            "0 (simple), 1 (blossom), 2 (simple full-quad) and " *
+            "3 (blossom full-quad)"))
     end
     isempty(get(m.embeds,(2,tag),NTuple{2,Int}[])) || throw(ArgumentError(
         "$caller: embedded Surface constraints are not supported"))
@@ -1733,6 +1735,24 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
     finally
         m.meshing.algorithm_2d=saved_algorithm
     end
+    # Full-quad recombination (Mesh.RecombinationAlgorithm=2/3): upstream's
+    # `meshGFace` halves the graded 1-D cells into temporary coarse Curve
+    # constructors and meshes the surface at twice lc before pairing,
+    # subdividing and restoring the halved segments. `_gmsh_fullquad_input`
+    # produces that temporary authority; the certificate field below is the
+    # producer's metric quartered, so the coarse boundary and the interior
+    # fill are refined and certified at the same doubled element size while
+    # the stored Curve middles restore at the true bound.
+    quad_input=_model_surface_recombined(m,tag) &&
+        m.meshing.recombine_algo in (2,3) ?
+        _gmsh_fullquad_input(m,tag,authority,element_high_water,options,caller) :
+        nothing
+    if quad_input!==nothing
+        authority=quad_input.authority
+        element_high_water=quad_input.element_high_water
+    end
+    cert_field=quad_input!==nothing && quad_input.admitted ?
+        _MetricScaledAniso(field,0.25) : field
     frame=_gmsh_native_surface_frame(m,tag,options,caller)
     source=_gmsh_native_surface_source(m,tag,authority,frame,caller;ctx_lc=options.ctx_lc)
     length(source.tags)<=node_limit || throw(ArgumentError(
@@ -1760,7 +1780,7 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
     wanted_boundary=Set(minmax(source.tags[edge[1]],source.tags[edge[2]]) for edge in source.boundaries)
     original_boundary==wanted_boundary || throw(ArgumentError(
         "$caller: initial Surface loses its actual lower Curve-cell incidence"))
-    score(edge)=metric_edge_length(field,coordinates[edge[1]],coordinates[edge[2]];entity=(2,tag))
+    score(edge)=metric_edge_length(cert_field,coordinates[edge[1]],coordinates[edge[2]];entity=(2,tag))
     all(edge->score(edge)<=target,boundary) || throw(ArgumentError(
         "$caller: retained boundary exceeds max_metric_edge; provide finer lower Curve cells"))
     data=(coordinates=coordinates,parameters=parameters,cells=cells,
@@ -1771,8 +1791,8 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
         birth_rows=copy(initial.birth_rows),
         labels=copy(initial.element_tags),
         node_max=initial.node_high_water,cell_max=initial.element_high_water)
-    state=_metric_surface_refine_core(tag,field,target,node_limit,
-        triangle_limit,caller,_metric_surface_planar_chart(frame,field,tag),
+    state=_metric_surface_refine_core(tag,cert_field,target,node_limit,
+        triangle_limit,caller,_metric_surface_planar_chart(frame,cert_field,tag),
         data)
     live=state.live;live_nodes=state.live_nodes;node_alive=state.node_alive
     node_max=state.node_max;cell_max=state.cell_max
@@ -1797,7 +1817,7 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
     output_boundary=Set((remap[edge[1]],remap[edge[2]]) for edge in boundary)
     Set(edge for (edge,hits) in final_incidence if length(hits)==1)==output_boundary || throw(ErrorException(
         "$caller: refined Surface changes its retained boundary"))
-    output_score(edge)=metric_edge_length(field,
+    output_score(edge)=metric_edge_length(cert_field,
         Tuple(output_coordinates[:,edge[1]]),Tuple(output_coordinates[:,edge[2]]);
         entity=(2,tag))
     all(edge->output_score(edge)<=target,keys(final_incidence)) ||
@@ -1815,10 +1835,17 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
         retained[live_nodes],node_max,labels[live],cell_max,
         Int32[remap[row] for row in birth_rows if node_alive[row]])
     _model_surface_recombined(m,tag) || return production
-    m.meshing.recombine_algo in (0,1) || throw(ArgumentError(
-        "$caller: Mesh.RecombinationAlgorithm=$(m.meshing.recombine_algo) " *
-        "requests the full-quad subdivision pipeline on Surface[$tag], which " *
-        "is not implemented — supported values are 0 (simple) and 1 (blossom)"))
+    if quad_input===nothing
+        m.meshing.recombine_algo in (0,1) || throw(ArgumentError(
+            "$caller: Mesh.RecombinationAlgorithm=$(m.meshing.recombine_algo) " *
+            "on Surface[$tag] is not implemented — supported values are " *
+            "0 (simple), 1 (blossom), 2 (simple full-quad) and " *
+            "3 (blossom full-quad)"))
+    else
+        # A compound Surface consumes a member's generated mesh and skips the
+        # recombination stage — the scalar native producer's same parity.
+        quad_input.admitted || return production
+    end
     # Upstream `meshGFace` pairs the freshly generated BAMG triangles through
     # `recombineIntoQuads` before its per-entity passes — the certified
     # triangulation feeds the shared native kernel in its parametric-storage
@@ -1836,6 +1863,22 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
         production.node_parameters,production.retained_nodes,
         production.node_high_water,production.element_tags,
         production.element_high_water,production.birth_rows)
+    if quad_input!==nothing
+        # Full-quad arm: pair the certified coarse triangles, subdivide each
+        # retained quad (and leftover triangle) at the doubled metric size,
+        # restore the halved Curve segments through the stored middles, and
+        # run the second pairing stage — the shared
+        # `_gmsh_native_surface_fullquad` lifecycle the scalar producer runs
+        # on the same certified triangulation.
+        rec,world_rows=_gmsh_native_surface_fullquad(m,tag,uv_product,
+            output_coordinates,nothing,frame,quad_input,caller)
+        lifted=MixedMesh(copy(world_rows),rec.mesh.blocks)
+        return _ModelSurfaceProduction(lifted,rec.node_tags,rec.node_owners,
+            rec.node_parameters,rec.retained_nodes,rec.node_high_water,
+            rec.element_tags,rec.element_high_water,rec.birth_rows,
+            production.constructor_mesh,rec.source_node_updates,
+            rec.native_recombine_events,production.curve_chains)
+    end
     state=_native_recombine_state(uv_product,output_coordinates,frame,caller)
     _native_recombine_process!(state,m,tag,nothing)
     rec=_native_recombine_export(uv_product,state,tag,caller)
@@ -2181,6 +2224,21 @@ function _ruled_metric_surface_refine(m,tag,field,target,node_limit,
     finally
         m.meshing.algorithm_2d=saved_algorithm
     end
+    # The same full-quad lifecycle the planar front runs: the graded 1-D cells
+    # halve into temporary coarse Curve constructors upstream's `meshGFace`
+    # pairs, while the producer's certificates and interior fill run at the
+    # quartered metric — the doubled element size — before the stored Curve
+    # middles restore at the true bound.
+    quad_input=_model_surface_recombined(m,tag) &&
+        m.meshing.recombine_algo in (2,3) ?
+        _gmsh_fullquad_input(m,tag,authority,element_high_water,options,caller) :
+        nothing
+    if quad_input!==nothing
+        authority=quad_input.authority
+        element_high_water=quad_input.element_high_water
+    end
+    cert_field=quad_input!==nothing && quad_input.admitted ?
+        _MetricScaledAniso(field,0.25) : field
     src=authority.mesh
     data_src=src===nothing ? nothing : src.entity_data
     lookup=Dict{Tuple{Int,Int32,NTuple{3,Float64}},UInt64}()
@@ -2325,7 +2383,7 @@ function _ruled_metric_surface_refine(m,tag,field,target,node_limit,
     wanted_boundary=_occ_metric_wanted_boundary(m,tag,authority,lookup,caller)
     original_boundary==wanted_boundary || throw(ArgumentError(
         "$caller: initial Surface loses its actual lower Curve-cell incidence"))
-    score(edge)=metric_edge_length(field,coordinates[edge[1]],
+    score(edge)=metric_edge_length(cert_field,coordinates[edge[1]],
         coordinates[edge[2]];entity=(2,tag))
     all(edge->score(edge)<=target,boundary) || throw(ArgumentError(
         "$caller: retained boundary exceeds max_metric_edge; provide finer lower Curve cells"))
@@ -2359,8 +2417,8 @@ function _ruled_metric_surface_refine(m,tag,field,target,node_limit,
     initial_uv=sum(cell->_metric_uv_area(
             parameters[cell[1]],parameters[cell[2]],parameters[cell[3]]),cells)
     birth_rows=Int32.(1:T.nreal)
-    state=_metric_surface_refine_core(tag,field,target,node_limit,
-        triangle_limit,caller,_metric_ruled_chart(m,tag,field,caller),
+    state=_metric_surface_refine_core(tag,cert_field,target,node_limit,
+        triangle_limit,caller,_metric_ruled_chart(m,tag,cert_field,caller),
         (coordinates=coordinates,parameters=parameters,cells=cells,
          incidence=incidence,boundary=boundary,
          numbers=numbers,owners=owners,node_parameters=node_parameters,
@@ -2409,7 +2467,7 @@ function _ruled_metric_surface_refine(m,tag,field,target,node_limit,
     Set(edge for (edge,hits) in final_incidence if length(hits)==1)==
         output_boundary || throw(ErrorException(
             "$caller: refined Surface changes its retained boundary"))
-    output_score(edge)=metric_edge_length(field,
+    output_score(edge)=metric_edge_length(cert_field,
         Tuple(output_coordinates[:,edge[1]]),
         Tuple(output_coordinates[:,edge[2]]);entity=(2,tag))
     all(edge->output_score(edge)<=target,keys(final_incidence)) ||
@@ -2435,10 +2493,17 @@ function _ruled_metric_surface_refine(m,tag,field,target,node_limit,
         retained[live_nodes],node_max,labels[live],cell_max,
         Int32[remap[row] for row in birth_rows if node_alive[row]])
     _model_surface_recombined(m,tag) || return production
-    m.meshing.recombine_algo in (0,1) || throw(ArgumentError(
-        "$caller: Mesh.RecombinationAlgorithm=$(m.meshing.recombine_algo) " *
-        "requests the full-quad subdivision pipeline on Surface[$tag], which " *
-        "is not implemented — supported values are 0 (simple) and 1 (blossom)"))
+    if quad_input===nothing
+        m.meshing.recombine_algo in (0,1) || throw(ArgumentError(
+            "$caller: Mesh.RecombinationAlgorithm=$(m.meshing.recombine_algo) " *
+            "on Surface[$tag] is not implemented — supported values are " *
+            "0 (simple), 1 (blossom), 2 (simple full-quad) and " *
+            "3 (blossom full-quad)"))
+    else
+        # A compound Surface consumes a member's generated mesh and skips the
+        # recombination stage — the scalar native producer's same parity.
+        quad_input.admitted || return production
+    end
     # The same post-refinement pairing the planar front runs — the certified
     # triangulation feeds the shared native kernel in its parametric-storage
     # form, with the ruled lift keeping relocations on the patch.
@@ -2452,6 +2517,31 @@ function _ruled_metric_surface_refine(m,tag,field,target,node_limit,
         production.node_parameters,production.retained_nodes,
         production.node_high_water,production.element_tags,
         production.element_high_water,production.birth_rows)
+    if quad_input!==nothing
+        # Full-quad arm on the ruled patch's own chart: boundary middles map
+        # through the generatrix parameter map (gmshEdge::reparamOnFace) or
+        # the corner vertex map, and subdivision middles/centers lift back
+        # onto the patch through `_ruled_surface_point`.
+        middle_uv_of=function(payload,point)
+            if payload.owner[1]==1
+                value=payload.parameter===nothing || isempty(payload.parameter) ?
+                    0.0 : payload.parameter[1]
+                return _ruled_curve_parameters(m,tag,Int(payload.owner[2]),value,lc,
+                    false,silent,silent,caller,false)
+            end
+            return _ruled_vertex_parameters(m,tag,Int(payload.owner[2]),lc,
+                true,silent,silent,caller,false)
+        end
+        rec,world_rows=_gmsh_native_surface_fullquad(m,tag,uv_product,
+            output_coordinates,nothing,nothing,quad_input,caller;
+            lift,middle_uv_of,point_lift=lift)
+        lifted=MixedMesh(copy(world_rows),rec.mesh.blocks)
+        return _ModelSurfaceProduction(lifted,rec.node_tags,rec.node_owners,
+            rec.node_parameters,rec.retained_nodes,rec.node_high_water,
+            rec.element_tags,rec.element_high_water,rec.birth_rows,
+            production.constructor_mesh,rec.source_node_updates,
+            rec.native_recombine_events,production.curve_chains)
+    end
     state=_native_recombine_state_lift(uv_product,output_coordinates,lift,
         caller)
     _native_recombine_process!(state,m,tag,nothing)
@@ -2486,10 +2576,14 @@ density. The output satisfies
 Actual lower Point/Line products retain their UID, XYZ and boundary incidence.
 They must already satisfy the requested bound: coarse boundary edges are rejected
 instead of replacing owned Curve cells. Straight planar boundaries, including
-holes, are supported. Transfinite/extruded/periodic/recombined Surfaces, embeddings
-and Surface smoothing are rejected. New vertices and cells have owned constructor
-births; resource and representability failures return no partial mesh or model
-mutation. The supplied field, including any explicit wrapper, is used as given.
+holes, are supported. Recombination algorithms 0–3 recombine the certified
+triangulation through the shared native pairing and full-quad subdivision
+kernels (algorithms 2/3 first halve the 1-D mesh and mesh at doubled metric
+size, then restore the stored Curve middles); transfinite/extruded/periodic
+Surfaces, embeddings and Surface smoothing are rejected. New vertices and cells
+have owned constructor births; resource and representability failures return no
+partial mesh or model mutation. The supplied field, including any explicit
+wrapper, is used as given.
 
 This explicit tensor overload leaves the existing native scalar generation path
 unchanged. It does not claim BAMG ordering, native anisotropic API generation, a

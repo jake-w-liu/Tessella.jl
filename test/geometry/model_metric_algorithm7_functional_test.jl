@@ -163,12 +163,13 @@ end
     @test isequal(mesh.coords,mesh2.coords)
     @test [b.nodes for b in mesh.blocks if b isa Tessella.ElementBlock] ==
         [b.nodes for b in mesh2.blocks if b isa Tessella.ElementBlock]
-    # The full-quad subdivision pipelines keep their loud not-implemented
-    # rejection on the metric producer too.
+    # The bipartite recombination pipeline keeps its loud not-implemented
+    # rejection on the metric producer; full-quad algorithms 2/3 run through
+    # the shared subdivision kernel instead.
     model3,tag3=rectangle()
     model3.meshing.algorithm_2d=7
     model3.meshing.recombine[(2,tag3)]=45.0
-    model3.meshing.recombine_algo=2
+    model3.meshing.recombine_algo=4
     @test_throws ArgumentError mesh_model_surface(model3,tag3)
 end
 

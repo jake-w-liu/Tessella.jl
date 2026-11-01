@@ -103,8 +103,28 @@ function _gmsh_fullquad_append_node!(state,tag,owner,parameter,point,uv,
     return Int32(length(state.node_tags))
 end
 
+# Owned-boundary middle UV resolution for the planar/OCC fronts — the
+# reparamOnFace transport `_gmsh_native_surface_add_source!` applies to the
+# same Curve/Point payloads: a Curve-owned middle maps through its stored
+# Curve parameter (`_occ_edge_reparam_on_face` on an OCC frame, the curve
+# sample projected onto the mean Plane otherwise), a Point-owned middle
+# projects its restored world position. Parametric fronts supply their own
+# `middle_uv_of` instead (e.g. the ruled patch's `_ruled_curve_parameters`).
+function _gmsh_fullquad_boundary_middle_uv(m,tag,frame,payload,point,ctx_lc,caller)
+    if payload.owner[1]==1
+        value=payload.parameter===nothing || isempty(payload.parameter) ?
+            0.0 : payload.parameter[1]
+        return frame.occ ? _occ_edge_reparam_on_face(m,m.surface_geometry[tag],
+            Int(payload.owner[2]),value,1,ctx_lc,caller) :
+            _gmsh_native_surface_parameters(frame,
+                _gmsh_native_curve_sample(m,Int(payload.owner[2]),value,caller))
+    end
+    return _gmsh_native_surface_parameters(frame,point)
+end
+
 function _gmsh_fullquad_subdivide!(state,m,tag,middles,parameters,retained,
-                                  node_high_water,frame,caller;ctx_lc=0.0)
+                                  node_high_water,frame,caller;ctx_lc=0.0,
+                                  middle_uv_of=nothing,point_lift=nothing)
     high_water=Ref(UInt64(node_high_water))
     owner=(2,Int32(tag))
     edge_rows=Dict{Tuple{UInt64,UInt64},Int32}()
@@ -145,18 +165,22 @@ function _gmsh_fullquad_subdivide!(state,m,tag,middles,parameters,retained,
         row=get(edge_rows,key,Int32(0))
         row!=0 && return row
         payload=get(middles,key,nothing)
-        point=payload===nothing ? ntuple(axis->0.5*(state.world[axis,a]+state.world[axis,b]),3) :
-            payload.world
         middle_uv=ntuple(axis->0.5*(state.uv[axis,a]+state.uv[axis,b]),2)
-        if payload!==nothing && payload.owner[1]==1
-            value=payload.parameter===nothing || isempty(payload.parameter) ? 0.0 : payload.parameter[1]
-            middle_uv=frame.occ ? _occ_edge_reparam_on_face(m,m.surface_geometry[tag],
-                Int(payload.owner[2]),value,1,ctx_lc,caller) :
-                _gmsh_native_surface_parameters(frame,
-                    _gmsh_native_curve_sample(m,Int(payload.owner[2]),value,caller))
-        elseif payload!==nothing && payload.owner[1]==0
-            middle_uv=_gmsh_native_surface_parameters(frame,point)
+        if payload!==nothing && payload.owner[1] in (0,1)
+            middle_uv=middle_uv_of===nothing ?
+                _gmsh_fullquad_boundary_middle_uv(m,tag,frame,payload,
+                    payload.world,ctx_lc,caller) :
+                middle_uv_of(payload,payload.world)
         end
+        # Interior edge middles and parametric middles store `middle_uv` on
+        # the face; the world row is the chord midpoint on a planar frame and
+        # the on-surface `point_lift` on a curved patch (upstream's
+        # MFaceVertex at the averaged parameters).
+        point=payload===nothing ?
+            (point_lift===nothing ?
+                ntuple(axis->0.5*(state.world[axis,a]+state.world[axis,b]),3) :
+                point_lift(middle_uv...)) :
+            payload.world
         uid=payload===nothing ? birth() : payload.tag
         row=get(positions,uid,Int32(0))
         if row==0
@@ -176,16 +200,19 @@ function _gmsh_fullquad_subdivide!(state,m,tag,middles,parameters,retained,
         width=length(cell)
         edge=ntuple(index->edge_middle(cell[index],cell[mod1(index+1,width)]),width)
         scale=width==3 ? 1.0/3.0 : 0.25
-        point=ntuple(axis->begin
-            value=state.world[axis,edge[1]]+state.world[axis,edge[2]]+state.world[axis,edge[3]]
-            width==4 && (value+=state.world[axis,edge[4]])
-            value*scale
-        end,3)
         center_uv=ntuple(axis->begin
             value=state.uv[axis,cell[1]]+state.uv[axis,cell[2]]+state.uv[axis,cell[3]]
             width==4 && (value+=state.uv[axis,cell[4]])
             value*scale
         end,2)
+        # The center's world row is the edge-middle mean on a planar frame —
+        # identical to `point_lift(center_uv)` under the affine lift — and the
+        # on-surface lift of the averaged parameters on a curved patch.
+        point=point_lift===nothing ? ntuple(axis->begin
+            value=state.world[axis,edge[1]]+state.world[axis,edge[2]]+state.world[axis,edge[3]]
+            width==4 && (value+=state.world[axis,edge[4]])
+            value*scale
+        end,3) : point_lift(center_uv...)
         center=_gmsh_fullquad_append_node!(state,birth(),owner,collect(center_uv),point,center_uv,
             parameters,retained,caller)
         for index in 1:width
@@ -203,8 +230,13 @@ function _gmsh_fullquad_subdivide!(state,m,tag,middles,parameters,retained,
 end
 
 function _gmsh_native_surface_fullquad(m,tag,product,world,protected,frame,input,caller;
-                                      reverse_initial::Bool=false)
-    state=_native_recombine_state(product,world,frame,caller)
+                                      reverse_initial::Bool=false,lift=nothing,
+                                      middle_uv_of=nothing,point_lift=nothing)
+    # The planar/OCC fronts relocate through the frame's lift; parametric
+    # fronts (the ruled patch's own chart) hand in `lift` plus the boundary
+    # maps `middle_uv_of`/`point_lift` since no plane frame exists.
+    state=lift===nothing ? _native_recombine_state(product,world,frame,caller) :
+        _native_recombine_state_lift(product,world,lift,caller)
     # The initial-only producer stores recovered UV triangles CCW. Native
     # subdivision consumes the already constructed GFace winding, so perform
     # that conversion before pairing and subdivision can allocate new cells.
@@ -213,7 +245,8 @@ function _gmsh_native_surface_fullquad(m,tag,product,world,protected,frame,input
     parameters=deepcopy(product.node_parameters)
     retained=copy(product.retained_nodes)
     node_high_water=_gmsh_fullquad_subdivide!(state,m,tag,input.middles,parameters,retained,
-        product.node_high_water,frame,caller;ctx_lc=input.ctx_lc)
+        product.node_high_water,frame,caller;ctx_lc=input.ctx_lc,
+        middle_uv_of,point_lift)
     # Restored Curve line segments remain protected in the second stage.
     restored=Set{Tuple{Int32,Int32}}()
     positions=Dict(uid=>Int32(row) for (row,uid) in enumerate(state.node_tags))

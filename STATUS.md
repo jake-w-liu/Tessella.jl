@@ -24,6 +24,195 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### ALG01/MET02 algorithm-7 full-quad recombination 2/3 + algorithm-6 scalar-only verdict (2026-11-01)
+
+- `Mesh.Algorithm=7` with `Mesh.RecombinationAlgorithm` 2 or 3 now
+  produces full-quad output on planar and ruled surfaces through the
+  certified metric producer. `_metric_surface_admit` admits
+  recombination algorithms 0–3; both `_metric_surface_refine` and
+  `_ruled_metric_surface_refine` grade actual lower Curve products,
+  pair adjacent cells into temporary coarse Line constructors via
+  `_gmsh_fullquad_input`, refine the coarse stage under
+  `_MetricScaledAniso(field,0.25)` (upstream's doubled full-quad
+  target ⇔ quartered tensor), and run
+  `_gmsh_native_surface_fullquad` on the certified triangulation.
+  `ModelGmshFullQuad.jl` was parameterized for non-planar fronts —
+  `lift`/`middle_uv_of`/`point_lift` callbacks and
+  `_native_recombine_state_lift` carry the ruled chart
+  (`_ruled_curve_parameters` boundary middles; on-surface lifts at
+  averaged parameters for interior middles and cell centers);
+  planar/OCC fronts keep their frame transport through the new
+  `_gmsh_fullquad_boundary_middle_uv`. Lower Point/Curve node
+  identities, retained flags, node/element high-water marks, node
+  parameters, birth rows, source-node coordinate updates and curve
+  chains are preserved; unsupported contexts (embedded/transfinite/
+  smoothing/periodic-compound, selectors outside {0,1,2,3}) reject
+  loudly as before.
+- Algorithm-6 factory verdict: Gmsh 4.15.2 `Mesh.Algorithm=6`
+  (Frontal-Delaunay — the Frontal-Delaunay-for-quads hybrid is
+  selector 8; BAMG-adjacent behavior is selector 7) ignores an
+  anisotropic field on a factory box face, emitting unchanged scalar
+  output. `_model_factory_surface_refine!` therefore stays scalar-only
+  by parity; no tensor routing added. The native-front algorithm-6
+  arm on user-assembled geometry continues to consume the tensor.
+- New coverage: `test/geometry/model_metric_algorithm7_fullquad_test.jl`
+  — planar recombination algorithms 2 and 3, ruled full-quad staying
+  on the patch chart, explicit tensor overload + OCC-plane full-quad,
+  loud rejections for algorithm 4 and transfinite tensor contexts.
+- Test exits (Julia 1.12.7, `--check-bounds=yes`, normal compilation
+  since `GmshLibm` `llvmcall` needs the compiler):
+  `model_metric_algorithm7_fullquad_test` 30/30 (exit 0 at `-O0` and
+  `-O2`); `model_metric_algorithm7_functional_test` 32/32;
+  `model_occ_metric_algorithm7_test` 55/55;
+  `model_metric_delaunay_arm_test` 19/19; `recombine_test` (all
+  testsets); `recombine_matching_test` 67,803; `mesh2d_test` 925 —
+  all exit 0.
+- Pre-existing classified (stash-verified identical on `731bcb6`,
+  unrelated to this diff): `api_native_fullquad_generation_test`
+  oracle fixtures show the temporary coarse Curve constructors
+  committed in place of the restored halved boundary on the scalar
+  initial-surface full-quad front — a lifecycle export gap recorded
+  under ALG01, plus "Unknown node" lookup errors on the mesher=5/6
+  and periodic arms of the same fixture file.
+
+### STEP trimmed-NURBS closed shells — nonlinear uv charts + periodic walls (2026-11-01)
+
+Devin landed the deepest CAD04 residual slice: closed shells carrying
+`ADVANCED_FACE`s on `B_SPLINE_SURFACE_WITH_KNOTS` (direct or complex-rational)
+mixed with `PLANE` faces import through `_step_nurbs_trimmed_shell` in the new
+`src/geometry/BRepNurbsTrims.jl`. Each NURBS face certifies on its own
+nonlinear uv chart: the shell's straight/sampled-spline boundary chains are
+classified per use (LINE, degree-1 polyline-equivalents, open and closed
+whole-domain B-splines), every chain point projects onto the patch through
+Gauss–Newton closest-point on the exact homogeneous derivative nets
+(`_brep_nurbs_patch`/`_brep_nurbs_d1`) and must lift back through
+`nurbs_eval` within a scale-aware tolerance — the on-surface certificate
+runs on the in-domain projection *before* periodic unwrapping so the
+clamped evaluator never aliases copies. Opposing parametric rows evaluated
+pointwise recover geometric u/v periods; the wire unwraps across the seam
+on the torus precedent so a tube wall triangulates as one uv strip whose
+two seam columns weld positionally. Multi-wire faces pick a unique
+containment root with hole-winding opposition; uv wires audit for
+self-intersection; a metric-scaled interior lattice (boundary 3-D spacing
+through the patch's metric, `_BREP_NURBS_TRIM_MAXSEED`-capped) seeds
+`Mesh2D.constrained_delaunay` and interior-classified triangles lift
+through `nurbs_eval`; canonical 3-D positions weld every shared chain
+bitwise; the shared flip-parity, directed-edge, positive-volume and
+`validate` audit closes the shell; `fill=true` tetrahedralizes the result.
+Explicit failures for off-surface trims, unprojectable points, open wires
+and self-intersecting charts — no silent planar/polygonal fallback.
+`_step_oriented_edge` now transports the ORIENTED_EDGE flag (`:fwd` on
+`_BREP_EDGE_USE`) so closed-loop trims traverse in the authored direction;
+the planar pre-check defers to the trimmed-NURBS certificate when a
+NURBS-mixed shell's plane faces bind curved trims with vertex-only rings.
+
+Generated AP214-context fixtures (the `SHAPE_DEFINITION_REPRESENTATION`
+root lets the OCC oracle transfer the shape):
+
+| fixture | shell | nodes | tris | signed volume | tets |
+|---|---|---|---|---|---|
+| `brep_occ_nurbs_bump_plate.step` | quadratic bump patch + 5 planes | 85 | 166 | 2.107791 | 166 |
+| `brep_occ_nurbs_pipe.step` | periodic-u B-spline tube + LINE seam + 2 caps | 112 | 220 | 2.668243 | 220 |
+| `brep_occ_nurbs_pillow.step` | two opposing B-spline patches on one rim | 130 | 256 | 0.215581 | 358 |
+
+Every undirected surface edge is bounded by exactly two triangles, every
+lifted node satisfies its patch equation (`|z|=x(1−x/2)·y(1−y)` for the
+Bézier fixtures at 1e-9; pipe wall nodes project onto the rim B-spline at
+zero residual), the pipe seam carries no duplicate column, and all three
+validate + tetrahedralize. Gmsh 4.15.2/OCC 7.8.1 (`SetFactory("OpenCASCADE")`
+`Merge` + `Mesh 2`) accepts all three files as closed solids — one volume
+entity each — and meshes them at its own density (217 nodes/430 tris,
+168/332, 118/232): topology and sealed-shell verdicts agree, element
+counts differ by design (8 samples per nonzero knot span + metric lattice
+vs the oracle's default sizing). Focused checks pass 348/348 on Julia
+1.12.7 (`test/geometry/brep_nurbs_trim_test.jl`: entity audits, incidence,
+patch-exact residuals, seam uniqueness, malformed-trim rejections) with
+`brep_nurbs_trim_smoke.jl` added to the default suite;
+`brep_curved_trims_test.jl` 120/120 and `brep_nurbs_shell_test.jl`
+1171/1171 regressions pass; `brep_test.jl` 162/162 (51m41s under
+`--compile=min -O0` with an unrelated heavy parallel job). Remaining
+CAD04 residuals: ELLIPSE trims, partial-domain/rational-untested curve
+uses, multi-chain swept rims, NURBS faces on non-PLANE neighbours,
+B-spline surfaces bounded by explicit 2-D pcurves, the analytic registry.
+Also: `Sockets` added to `Project.toml` [deps] — an unrelated untracked
+ONELAB client file (`src/interfaces/APIOnelabClient.jl`, other work in
+progress) imports it and broke precompilation mid-session.
+
+### MESH03 recombine3D deepening + UI01 ONELAB solver-client TCP (2026-11-01)
+
+Two bounded continuation items from the P1–P6 checklist, both verified
+against the Gmsh 4.15.2 oracle/SDK on small real fixtures:
+
+- **`meshCombine3D` deepening (oracle probed, bounded deltas landed).**
+  Twelve `.geo` fixtures covering the requested star census — coarse/mid/
+  fine boxes, a tet-domain volume, an L-shape, two-box, mixed-size, a
+  pyramid-domain box, `Recombine3DLevel=1`, `Recombine3DConformity=1`, and
+  two recombined-surface variants — ran under the oracle's
+  `Mesh.Algorithm3D=9` + `Recombine Volume` arm. Findings:
+  - Upstream's reachable `selectCellsGreedy` enables **hexes and retained
+    tets only** — no pyramid/prism cell type ever appears in any oracle
+    output (type-7/type-6 count zero on every fixture including the
+    pyramid domain). Tessella's fold matches: `combine_volume_to_hexes`
+    emits MSH 5/4/140 only. The "pyramids from four tets" hypothesis is
+    answered — they are not in upstream's reachable 4.15.2 surface.
+  - `Mesh.Recombine3DLevel` and `Mesh.Recombine3DConformity` are **stored
+    but inert** in 4.15.2 (defaults 0; no consumer in the reachable path;
+    `s_level1`/`s_conf1` oracle inventories identical to `s_mid`, and
+    Tessella's own outputs are identical too). They remain stored options
+    — not invented consumers.
+  - Oracle crashes: `s_recvol_surf`/`s_recall` segfault Gmsh 4.15.2
+    (exit 139) after the surface-Blossom stage when RTREE volume
+    recombination follows recombined surfaces — classified upstream
+    behavior, not imitated.
+  - Tessella matched the oracle's inventory **exactly** on the tet-domain
+    fixture (31 nodes / 47 tets / 1 hex / 5 trihedra / 1 boundary quad)
+    and near-exactly on the pyramid box (37 vs 38 tets, identical
+    hex/trihedron/quad/line counts); larger fills differ only through
+    the independent Delaunay fill, as designed.
+  - Landed deltas: `Combine3DResult` now carries `ncandidates`/`nselected`
+    (upstream's "N hexes found / M selected" log surface at API level —
+    upstream counts like 87/4, 1260/48, 7766/233 are matched in spirit
+    not in number since the fills differ); the `checkQuadFacetColor`
+    docstring now records the discovered audit semantics (a quad facet
+    spanning two nonzero surface colours kills the candidate; uncoloured
+    halves merely stay triangulated). New unit coverage
+    `test/meshing/recombine3d_combine_test.jl`: 2-tet/3-tet/prism-star
+    rejections, 5-tet/6-tet cube recovery with boundary-quad receipts on
+    6 surfaces, uncoloured/unpaired halves, adjacent-hex compatible
+    selection, mixed-quality gate driving the trihedron conformalizer,
+    folded-star Bezier-certificate rejection, forbidden embedded-sheet
+    halves, retained stray tets. Not ported (classified): HXT/RTREE
+    candidate generation, Concorde matching, Filler3D/DomHex admission
+    internals, upstream console progress lines (the mesh kernel stays
+    quiet by design — counts are API-visible on the result).
+- **ONELAB solver-client TCP landed (client side only).**
+  `src/interfaces/APIOnelabClient.jl` implements the documented public
+  wire protocol (`onelab.py` SDK reference, version 1.3): `Int32 type,
+  Int32 length, payload` frames and the NUL-separated parameter record
+  codec (insertion-ordered dict emission kept byte-exact). Exposed as
+  `API.onelab.client_*`: `client_connect`/`client_disconnect`
+  (START/STOP), `client_get/set/define_number`/`_string` (query →
+  define/update), `client_get_parameter`/`client_get_all`/`client_get_names`
+  (QUERY_ALL stream), `client_clear`, `client_get/set_changed`
+  (CLIENT_CHANGED channel), `client_send_command`/`client_merge_file`/
+  `client_open_project`, `client_info`/`_warning`/`_error`,
+  `client_preprocess` (OLPARSE), `client_run`/`client_wait`
+  (CONNECT sub-client launch + STOP reaping), `client_action` (the
+  `<name>/Action` lifecycle), `client_check_parameters` (the `check`
+  arm), `client_messages` (buffered async INFO/WARNING/ERROR/PROGRESS).
+  The session-store `onelab` API is unchanged; `onelab.run` keeps its
+  documented no-op/ArgumentError contract — the *server* role is not
+  implemented (upstream's solver-launch side stays classified).
+  `test/interfaces/api_onelab_client_test.jl` verifies three ways:
+  golden payloads byte-identical to the public `onelab.py` encoder, a
+  scripted in-process fixture socket exercising every operation, and a
+  live `gmsh -listen` server cross-checked by the reference python
+  client over a second connection (skip-gated when the tools are absent).
+  Classified/unverifiable: per-client `changed` flag *values* are
+  server-side semantics (asserted as a working channel, not a value),
+  and `PREPROCESS`/sub-client exec behavior on the real server is
+  bounded to the fixture contract.
+
 ### ALG01/MET02 algorithm-7 (BAMG): ruled/tric parametric front + recombination routing (2026-11-01)
 
 - **Oracle verdict (Gmsh 4.15.2).** `General.BuildOptions` and
@@ -2278,7 +2467,10 @@ CLI additions in `src/interfaces/CLI.jl` route through existing machinery:
 
 `APIOnelab.jl`'s `onelab.run` stays the documented no-op for `run()` and a
 loud `ArgumentError` for any client/command — no solver-client backend
-exists.
+exists. (Amended 2026-11-01: the *client-side* TCP backend has since
+landed as `API.onelab.client_*`/`APIOnelabClient.jl` — see the MESH03/UI01
+entry above; `onelab.run` itself still keeps this contract because the
+server role is unimplemented.)
 
 Verification (Julia 1.13.1, `--project=.`):
 `test/interfaces/cli_save_options_test.jl` 58/58 (MSH 4.1 flag control
