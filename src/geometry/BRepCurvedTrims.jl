@@ -48,11 +48,11 @@ function _step_tube_wire_uses(entities,be,curvekinds,caller)
         ec=_deref_entity(entities,ecref)
         (ec!==nothing && ec.kind=="EDGE_CURVE") || throw(ArgumentError(
             "$caller: ORIENTED_EDGE #$(oe.id) does not reference an EDGE_CURVE"))
-        (v1,v2),_,curve=_step_oriented_edge(entities,oe,curvekinds,caller)
+        (v1,v2),_,curve,eflag=_step_oriented_edge(entities,oe,curvekinds,caller)
         base=_step_curve_base(entities,curve,0)
         base===nothing && throw(ArgumentError(
             "$caller: EDGE_CURVE geometry of ORIENTED_EDGE #$(oe.id) is unresolvable"))
-        push!(uses,(ec=ec,v1=v1,v2=v2,base=base))
+        push!(uses,(ec=ec,v1=v1,v2=v2,base=base,fwd=eflag))
     end
     for i in 1:length(uses)-1
         uses[i].v2==uses[i+1].v1 || throw(ArgumentError(

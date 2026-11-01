@@ -559,7 +559,7 @@ function _step_oriented_edge(entities,oe,curvekinds,caller)
         "$caller: EDGE_CURVE #$(ec.id) has unresolvable vertex geometry"))
     curve=_deref_entity(entities,ec.args[4])
     straight=_step_straight_edge(entities,curve,0,curvekinds)
-    return (eflag ? (v1,v2) : (v2,v1)),straight,curve
+    return (eflag ? (v1,v2) : (v2,v1)),straight,curve,eflag
 end
 
 function _chain_ring(edges,caller)
@@ -1162,8 +1162,8 @@ function _step_circle_frame_full(entities,ent,caller)
     return center,z,x,y,r
 end
 
-const _BREP_EDGE_USE=NamedTuple{(:ec,:v1,:v2,:base),
-    Tuple{StepEntity,NTuple{3,Float64},NTuple{3,Float64},StepEntity}}
+const _BREP_EDGE_USE=NamedTuple{(:ec,:v1,:v2,:base,:fwd),
+    Tuple{StepEntity,NTuple{3,Float64},NTuple{3,Float64},StepEntity,Bool}}
 
 # Per-bound ordered edge uses of one face: each bound must be an EDGE_LOOP over
 # ORIENTED_EDGEs; a use carries its EDGE_CURVE entity, the traversal endpoints
@@ -1202,11 +1202,11 @@ function _step_face_bound_uses(entities,fe,curvekinds,caller)
             ec=_deref_entity(entities,ecref)
             (ec!==nothing && ec.kind=="EDGE_CURVE") || throw(ArgumentError(
                 "$caller: ORIENTED_EDGE #$(oe.id) does not reference an EDGE_CURVE"))
-            (v1,v2),_,curve=_step_oriented_edge(entities,oe,curvekinds,caller)
+            (v1,v2),_,curve,eflag=_step_oriented_edge(entities,oe,curvekinds,caller)
             base=_step_curve_base(entities,curve,0)
             base===nothing && throw(ArgumentError(
                 "$caller: EDGE_CURVE geometry of ORIENTED_EDGE #$(oe.id) is unresolvable"))
-            push!(uses,(ec=ec,v1=v1,v2=v2,base=base))
+            push!(uses,(ec=ec,v1=v1,v2=v2,base=base,fwd=eflag))
         end
         push!(out,uses)
     end
@@ -2631,6 +2631,7 @@ function _step_brep_solid(brep::StepEntity,entities,fill;factor::Float64=1.0)
         end
     end
     planar=!isempty(faces); ntorus=0; torus_face=nothing; nsphere=0; sphere_face=nothing
+    has_nurbs=any(f->f.surf!==nothing && _step_is_nurbs_surface(f.surf),faces)
     for face in faces
         face.rings===nothing && (planar=false; continue)
         isempty(face.rings) && (planar=false;continue)
@@ -2638,6 +2639,13 @@ function _step_brep_solid(brep::StepEntity,entities,fill;factor::Float64=1.0)
         if face.surf===nothing
             _check_poly_face(ring,face.id,caller)
         elseif face.surf.kind=="PLANE"
+            if has_nurbs && !face.straight
+                # A NURBS-mixed shell's plane faces may bound closed curved
+                # trims whose vertex-only ring is degenerate — the trimmed
+                # certificate audits them; do not let the planar pre-check
+                # hard-fail first.
+                planar=false; continue
+            end
             _check_plane_face(entities,face.surf,ring,face.sense,face.id,caller)
         elseif face.surf.kind=="TOROIDAL_SURFACE"
             planar=false; ntorus+=1; torus_face=face; continue
@@ -2672,6 +2680,13 @@ function _step_brep_solid(brep::StepEntity,entities,fill;factor::Float64=1.0)
         if nurbs_shell!==nothing
             nurbs_shell=_step_unit_scaled(nurbs_shell,factor)
             return fill ? _filled(nurbs_shell,caller) : nurbs_shell
+        end
+    end
+    if has_nurbs
+        trimmed=_step_nurbs_trimmed_shell(entities,faces,curvekinds,caller)
+        if trimmed!==nothing
+            trimmed=_step_unit_scaled(trimmed,factor)
+            return fill ? _filled(trimmed,caller) : trimmed
         end
     end
     ntorus==1 && length(faces)==1 && throw(ArgumentError(
@@ -4062,5 +4077,6 @@ function export_iges_nurbs(path::AbstractString, objects)
 end
 
 include("BRepCurvedTrims.jl")
+include("BRepNurbsTrims.jl")
 
 end # module
