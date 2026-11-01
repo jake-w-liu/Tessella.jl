@@ -62,16 +62,24 @@ support or test requirements.
   `api_native_recombine_point_boundary_test` 745/745,
   `geo_recombine3d_fold_functional_test` 23/23 — all exit 0. Oracle
   fixture SHA-256s unchanged.
-- Pre-existing classified, unrelated to this diff (all exercise the
-  `mesh.recombine` post-pass / element-tag allocator, which this generate
-  -path diff never reaches): `api_native_recombine_adapter_test`
-  degree-two testset pins `ErrorException` where the deleted-Steiner-node
-  lookup throws `ArgumentError` (36 fails); `api_public_recombine_labels_test`
-  pins `r"recombined element tags exceed Int32"` against the UInt64
-  label-migration message (3 fails); `api_native_raw_recombine_uint64_test`
-  needs the untracked sibling artifact `native_raw_recombine_uint64_states.jl`
-  (3 fails + 3 errors); `model_surface_recombine_coordinates_test` lacks a
-  `using Tessella` line — identical crash on clean `45f7815`.
+- Resolved 2026-11-01 (all test-file-only, one commit): the four stale-pin
+  items below were re-verified against actual `-O2` behavior and fixed.
+  `api_native_recombine_adapter_test` — deleted-Steiner-node lookup throws
+  `ArgumentError` by design (`_cache_node_index`'s public "unknown node tag"
+  contract; `ErrorException` was the stale pin — re-pinned, 926 passes).
+  `api_public_recombine_labels_test` — `generate` returns the public `Mesh`
+  view while `LAST_MESH[]` is the classified `MixedMesh` carrier; the stale
+  half-pin re-pinned to `Tessella.Elements.MixedMesh` at both sites (70
+  passes; the `r"exceed Int32"` message pin is correct — the fixture hits the
+  deliberate Int32-domain ceiling). `api_native_raw_recombine_uint64_test` —
+  the `test/artifacts/` fixture exists locally and is correctly referenced
+  (gitignored by policy, like all oracle captures); rows whose oracle
+  expectation wraps the UInt64 element counter past the seeded sentinel are
+  re-pinned to the landed all-or-nothing contract — `ArgumentError` plus the
+  unchanged pre-recombine snapshot (450 passes, all three testsets).
+  `model_surface_recombine_coordinates_test` — `using Tessella` (and `Test`)
+  added; 515 passes. All six files exit 0 standalone under `-O2`, including
+  `recombine_test` and `recombine_matching_test` regressions.
 
 ### ALG01/MET02 algorithm-7 full-quad recombination 2/3 + algorithm-6 scalar-only verdict (2026-11-01)
 
