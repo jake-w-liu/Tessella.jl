@@ -2685,11 +2685,12 @@ function _higher_volume_wb_rebuild_part(assembly,m,wb,mapping,source_tags,
                 gi=length(new_blocks);group_of[msh]=gi
             end
             block=new_blocks[gi]
-            block=ElementBlock(msh,hcat(block.nodes,part_conn(conn)),block.tags)
             tagout=previous===nothing ?
                 get(child_physical,key,_dim01_physical(m,(2,tag))) :
                 blocks[previous[1]][3][previous[2]]
-            new_blocks[gi]=ElementBlock(msh,block.nodes,push!(copy(block.tags),tagout))
+            new_blocks[gi]=ElementBlock(msh,
+                hcat(block.nodes,part_conn(conn)),
+                push!(copy(block.tags),tagout))
             push!(new_traces[gi],previous===nothing ?
                 get(added_cells,((2,Int32(tag)),key),nothing) :
                 (old_traces===nothing ? nothing : old_traces[previous[1]][previous[2]]))

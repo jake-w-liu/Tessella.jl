@@ -12367,7 +12367,21 @@ module onelab
 using ..API: _onelab_set,_onelab_get,_onelab_get_names,_onelab_set_number,
              _onelab_set_string,_onelab_get_number,_onelab_get_string,
              _onelab_clear,_onelab_run,_onelab_set_changed,
-             _onelab_get_changed,_onelab_clear_changed
+             _onelab_get_changed,_onelab_clear_changed,
+             _onelab_client_connect,_onelab_client_disconnect,
+             _onelab_client_get_number,_onelab_client_get_string,
+             _onelab_client_get_parameter,_onelab_client_set_number,
+             _onelab_client_set_string,_onelab_client_define_number,
+             _onelab_client_define_string,_onelab_client_get_all,
+             _onelab_client_get_names,_onelab_client_clear,
+             _onelab_client_get_changed,_onelab_client_set_changed,
+             _onelab_client_send_command,_onelab_client_merge_file,
+             _onelab_client_open_project,_onelab_client_info,
+             _onelab_client_warning,_onelab_client_error,
+             _onelab_client_preprocess,_onelab_client_run,
+             _onelab_client_wait,_onelab_client_action,
+             _onelab_client_check_parameters,_onelab_client_messages,
+             OnelabClient
 
 "Set parameter(s) from the ONELAB JSON parameter array `data`."
 set(data,format="json")=_onelab_set(data,format)
@@ -12393,6 +12407,71 @@ set_changed(name)=_onelab_set_changed(name)
 get_changed(name)=_onelab_get_changed(name)
 "Clear all changed-name flags."
 clear_changed()=_onelab_clear_changed()
+
+# --- ONELAB solver client (upstream socket protocol, client side) ---------------
+#
+# `client_connect` opens a TCP connection to an ONELAB parameter server
+# (`gmsh -listen host:port`, or any peer speaking the documented framing) and
+# performs the `GMSH_START` handshake. The returned `OnelabClient` speaks the
+# length-prefixed message protocol: parameter query/define/update, changed
+# flags, info/warning/error text, `.geo` string execution, file merge and
+# sub-client launch/stop. `client_disconnect` sends `GMSH_STOP` and closes.
+
+"Connect to an ONELAB server at `addr` (`\"host:port\"`) or `host,port`; returns an `OnelabClient`."
+client_connect(addr,port=nothing;name="tessella client")=
+    _onelab_client_connect(addr,port;name)
+"Send `GMSH_STOP`, reap outstanding sub-clients and close the connection."
+client_disconnect(c)=_onelab_client_disconnect(c)
+"Return the server-side values of number parameter `name` (`nothing` when absent)."
+client_get_number(c,name;warn=true)=_onelab_client_get_number(c,name;warn)
+"Return the server-side values of string parameter `name` (`nothing` when absent)."
+client_get_string(c,name;warn=true)=_onelab_client_get_string(c,name;warn)
+"Return the full wire parameter record for `name` (`nothing` when absent)."
+client_get_parameter(c,kind::Symbol,name)=_onelab_client_get_parameter(c,kind,name)
+"Set the server-side number parameter `name` to `values`."
+client_set_number(c,name,values)=_onelab_client_set_number(c,name,values)
+"Set the server-side string parameter `name` to `values`."
+client_set_string(c,name,values)=_onelab_client_set_string(c,name,values)
+"Define a number parameter against the server; returns the server's adopted values."
+client_define_number(c,name;kwargs...)=_onelab_client_define_number(c,name;kwargs...)
+"Define a string parameter against the server; returns the server's adopted values."
+client_define_string(c,name;kwargs...)=_onelab_client_define_string(c,name;kwargs...)
+"Return all parameter records known to the server (numbers then strings)."
+client_get_all(c)=_onelab_client_get_all(c)
+"Return the sorted server-side parameter names matching the `*`/`?` glob `search`."
+client_get_names(c;search="")=_onelab_client_get_names(c;search)
+"Ask the server to clear the parameter `name`."
+client_clear(c,name)=_onelab_client_clear(c,name)
+"Return the server-side changed flag of client/parameter `name`."
+client_get_changed(c,name)=_onelab_client_get_changed(c,name)
+"Set the server-side changed flag of client/parameter `name`."
+client_set_changed(c,name,changed=true)=_onelab_client_set_changed(c,name,changed)
+"Ask the server to execute the `.geo` string `command` (`GMSH_PARSE_STRING`)."
+client_send_command(c,command)=_onelab_client_send_command(c,command)
+"Ask the server to merge the file `path` (`GMSH_MERGE_FILE`)."
+client_merge_file(c,path)=_onelab_client_merge_file(c,path)
+"Ask the server to open the project file `path` (`GMSH_OPEN_PROJECT`)."
+client_open_project(c,path)=_onelab_client_open_project(c,path)
+"Send an `INFO` message to the server."
+client_info(c,msg)=_onelab_client_info(c,msg)
+"Send a `WARNING` message to the server."
+client_warning(c,msg)=_onelab_client_warning(c,msg)
+"Send an `ERROR` message to the server."
+client_error(c,msg)=_onelab_client_error(c,msg)
+"Ask the server to preprocess the `.ol` file `filename` for client `name`."
+client_preprocess(c,name,filename)=_onelab_client_preprocess(c,name,filename)
+"Ask the server to launch sub-client `name` with `command`; blocks by default."
+client_run(c,name,command;arguments="",block=true)=
+    _onelab_client_run(c,name,command;arguments,block)
+"Wait until every outstanding sub-client has sent its `STOP`."
+client_wait(c)=_onelab_client_wait(c)
+"Return the client's `<name>/Action` lifecycle string (or `\"\"`)."
+client_action(c)=_onelab_client_action(c)
+"""Define a batch of parameter records `(name => spec)` against the server —
+the `check` arm of the solver-client lifecycle; returns the adopted values."""
+client_check_parameters(c,defs)=_onelab_client_check_parameters(c,defs)
+"Drain buffered async `(type, text)` server messages (INFO/WARNING/ERROR/PROGRESS)."
+client_messages(c)=_onelab_client_messages(c)
 
 end # module onelab
 

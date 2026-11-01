@@ -803,3 +803,4 @@ end
 include("APIParser.jl")
 include("APIFltk.jl")
 include("APIGraphics.jl")
+include("APIOnelabClient.jl")

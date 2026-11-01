@@ -792,6 +792,8 @@ struct Combine3DResult
     quad_surfaces::Vector{Int32}
     halves::Vector{NTuple{2,NTuple{3,Int32}}}
     unpaired_boundary_quads::Int
+    ncandidates::Int      # certified candidate cells (upstream "N hexes found")
+    nselected::Int        # greedily selected cells   (upstream "M selected")
 end
 
 """
@@ -809,9 +811,12 @@ Returns `nothing` when no hexahedron is selected; otherwise the combined
 mixed mesh plus the receipts the caller needs: `kept_rows` (old -> new node
 rows), `tet_source` (source tet row per emitted tet column), and the surface
 quadrangle substitution list `quads`/`quad_surfaces`/`halves` (outward face
-order and the two consumed covering triangles per quad). Boundary quad
-facets whose halves do not share a surface stay triangulated (counted in
-`unpaired_boundary_quads` — upstream's "wrong mesh topology" warning arm).
+order and the two consumed covering triangles per quad). A quad facet whose
+two covering halves carry *different nonzero* surface colours fails the
+`checkQuadFacetColor` legality audit and kills the candidate outright;
+uncoloured halves (`nothing` owner) pass the audit but emit no quadrangle —
+they stay triangulated and are counted in `unpaired_boundary_quads`
+(upstream's "wrong mesh topology" warning arm).
 """
 function combine_volume_to_hexes(mesh::Mesh,boundary_owner=nothing;
                                  forbidden_tris=nothing,
@@ -951,7 +956,8 @@ function combine_volume_to_hexes(mesh::Mesh,boundary_owner=nothing;
               _sorted_tri(remap[h[2][1]],remap[h[2][2]],remap[h[2][3]]))
             for h in surface_halves]
     return Combine3DResult(MixedMesh(coords[:,kept_rows],blocks),kept_rows,
-                         kept_tets,quads,quad_surfaces,halves,unpaired)
+                         kept_tets,quads,quad_surfaces,halves,unpaired,
+                         length(cells),count(selected))
 end
 
 end # module
