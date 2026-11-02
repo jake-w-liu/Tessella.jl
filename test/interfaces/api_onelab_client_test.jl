@@ -238,6 +238,33 @@ end
     @test_throws ArgumentError A.onelab.client_run(1,"n","cmd")
 end
 
+@testset "fixture socket: send retry republishes a full frame" begin
+    # Regression: the retry arm used to `take!` the already-drained frame
+    # IOBuffer, writing 0 bytes on the fresh socket while reporting success.
+    # Poison the client socket so the first write throws, and require the
+    # full frame to arrive on the reconnected second connection.
+    server=Sockets.listen(Sockets.localhost,0)
+    _,port=Sockets.getsockname(server)
+    got=Channel{Any}(1)
+    @async begin
+        s1=Sockets.accept(server)
+        _fixture_recv(s1)               # START frame
+        s2=Sockets.accept(server)       # reconnect lands here
+        put!(got,_fixture_recv(s2))
+    end
+    c=A.onelab.client_connect("127.0.0.1",port;name="retry client")
+    Sockets.close(c.socket)
+    _OL._onelab_client_send(c,Int32(21),"retry-payload")
+    timed=timedwait(()->isready(got),15.0)
+    @test timed==:ok
+    if timed==:ok
+        type,msg=take!(got)
+        @test type==Int32(21) && msg=="retry-payload"
+    end
+    A.onelab.client_disconnect(c)
+    close(server)
+end
+
 @testset "fixture socket: check_parameters batch + action read" begin
     server=Sockets.listen(Sockets.localhost,0)
     _,port=Sockets.getsockname(server)

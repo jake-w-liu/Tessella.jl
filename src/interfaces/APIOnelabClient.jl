@@ -273,15 +273,18 @@ function _onelab_client_send(c::OnelabClient,type::Int32,
     frame=IOBuffer()
     write(frame,htol(Int32(type)));write(frame,htol(Int32(length(data))))
     write(frame,data)
+    bytes=take!(frame)
     for attempt in 1:2
         try
-            write(c.socket,take!(frame))
+            write(c.socket,bytes)
             flush(c.socket)
             return nothing
         catch err
             attempt==2 && rethrow()
-            # Upstream retries the send once on a fresh socket.
+            # Upstream retries the send once on a fresh socket; the frame
+            # bytes live in `bytes`, which survives the failed write.
             try
+                Sockets.close(c.socket)
                 host,port,_=_onelab_client_parse_addr(c.addr,nothing,
                     "onelab client reconnect")
                 c.socket=Sockets.connect(host,port)
