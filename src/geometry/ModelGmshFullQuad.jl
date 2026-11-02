@@ -16,6 +16,52 @@ _NativeFullQuadMiddle(tag,owner,parameter,world)=
 _NativeFullQuadMiddle(tag,owner,parameter,world,chord)=
     _NativeFullQuadMiddle(tag,owner,parameter,world,chord,false)
 
+# A supplied lower Point can split a Curve cell. Transport that actual UID
+# into the detached Curve product before pairing cells: otherwise the Point
+# splits a temporary super-edge after its stored middle has been detached,
+# and that middle can no longer restore. No vertex identity is inferred from
+# an output coordinate; the source contains only the consumed lower products.
+function _gmsh_fullquad_transport_lower!(m,tag,authority,high_water,options,caller)
+    changed=Set{Int32}()
+    (_surface_type(m,tag)===:plane && !isempty(get(m.embeds,(2,tag),NTuple{2,Int}[]))) ||
+        return changed,high_water
+    frame=_gmsh_native_surface_frame(m,tag,options,caller)
+    source=_gmsh_native_surface_source(m,tag,authority,frame,caller;ctx_lc=options.ctx_lc)
+    _gmsh_native_surface_split_constraints!(source)
+    data=authority.mesh.entity_data
+    rows=Dict(uid=>Int32(row) for (row,uid) in enumerate(data.external_node_tags))
+    for (curve,chain) in _gmsh_native_surface_curve_chains(source)
+        owner=(1,curve);original=authority.products[owner]
+        labels=Dict{Tuple{UInt64,UInt64},UInt64}()
+        members=Set{UInt64}()
+        for (block,tags) in zip(original.blocks,original.element_tags),column in axes(block.nodes,2)
+            a,b=original.rows[block.nodes[:,column]]
+            u,v=data.external_node_tags[a],data.external_node_tags[b]
+            labels[(u,v)]=tags[column];push!(members,u);push!(members,v)
+        end
+        all(in(members),chain) && continue
+        global_rows=Int32[rows[uid] for uid in unique(chain)]
+        local_rows=Dict(data.external_node_tags[row]=>Int32(i) for (i,row) in enumerate(global_rows))
+        connectivity=Matrix{Int32}(undef,2,length(chain)-1)
+        tags=UInt64[]
+        for i in 1:length(chain)-1
+            a,b=chain[i],chain[i+1]
+            connectivity[:,i].=(local_rows[a],local_rows[b])
+            label=get(labels,(a,b),UInt64(0))
+            if label==0
+                high_water<typemax(UInt64) || throw(ArgumentError(
+                    "$caller: full-quad transported Curve cells exhaust UInt64 labels"))
+                label=(high_water+=UInt64(1))
+            end
+            push!(tags,label)
+        end
+        authority.products[owner]=_ModelMeshProduct(owner,global_rows,
+            ElementBlock[ElementBlock(1,connectivity)],Vector{UInt64}[tags])
+        push!(changed,curve)
+    end
+    return changed,high_water
+end
+
 function _gmsh_fullquad_input(m,tag,input,element_high_water,options,caller)
     middles=Dict{Tuple{UInt64,UInt64},_NativeFullQuadMiddle}()
     compound=any(pair->first(pair)==2 && tag in last(pair),m.meshing.compounds)
@@ -32,6 +78,7 @@ function _gmsh_fullquad_input(m,tag,input,element_high_water,options,caller)
     _,embedded=_model_surface_embedding_tags(m,tag,caller)
     curves=vcat(embedded,_gmsh_native_surface_curves(m,tag))
     high_water=UInt64(element_high_water)
+    transported,high_water=_gmsh_fullquad_transport_lower!(m,tag,authority,high_water,options,caller)
     # The committed dim-1 write-back restores each consumed Curve's own
     # chain — the temporary paired Line constructors never leave this
     # producer. `chains` records that pre-coarse ordered node-UID chain and
@@ -80,15 +127,29 @@ function _gmsh_fullquad_input(m,tag,input,element_high_water,options,caller)
             (parameter===nothing || isempty(parameter)) && continue
             parameters[data.external_node_tags[row]]=parameter[1]
         end
-        if isodd(length(cells))
+        if isodd(length(cells)) && !(Int32(curve) in transported)
             _model_mesh_error(options,"1D mesh cannot be divided by 2")
         end
+        # Keep supplied Point rows as coarse endpoints. A transported Point
+        # can leave an unmatched literal cell; it receives a fresh Curve
+        # middle at subdivision, just like an uncoarsened collision edge.
+        groups=NTuple{3,Int32}[]
+        index=1
+        while index<=length(cells)
+            first,last=cells[index]
+            if index<length(cells) &&
+                    data.node_entities[original.rows[last]][1]!=0
+                next,finish=cells[index+1]
+                last==next || throw(ArgumentError(
+                    "$caller: Curve[$curve] consecutive Line constructors do not share their middle identity"))
+                push!(groups,(first,last,finish));index+=2
+            else
+                push!(groups,(first,Int32(0),last));index+=1
+            end
+        end
         keys=Tuple{UInt64,UInt64}[]
-        for index in 1:2:length(cells)-1
-            first,middle=cells[index]
-            next,last=cells[index+1]
-            middle==next || throw(ArgumentError(
-                "$caller: Curve[$curve] consecutive Line constructors do not share their middle identity"))
+        for (first,middle,last) in groups
+            middle==0 && continue
             a,c=original.rows[first],original.rows[last]
             key=minmax(data.external_node_tags[a],data.external_node_tags[c])
             push!(keys,key)
@@ -104,11 +165,11 @@ function _gmsh_fullquad_input(m,tag,input,element_high_water,options,caller)
         edges=Set{Tuple{UInt64,UInt64}}(
             minmax(data.external_node_tags[original.rows[cell[1]]],
                    data.external_node_tags[original.rows[cell[2]]]) for cell in cells)
-        push!(records,(curve=curve,cells=cells,keys=keys,edges=edges,original=original))
+        push!(records,(curve=curve,cells=cells,groups=groups,keys=keys,edges=edges,original=original))
     end
     node_high_water=maximum(data.external_node_tags;init=UInt64(0))
     for record in records
-        curve,cells,keys,edges,original=record
+        (;curve,cells,keys,edges,original)=record
         owner=(1,Int32(curve))
         keyset=Set(keys)
         collide=any(key->proposed[key]>1,keys) ||
@@ -150,9 +211,27 @@ function _gmsh_fullquad_input(m,tag,input,element_high_water,options,caller)
         end
         coarse=NTuple{2,Int32}[]
         labels=UInt64[]
-        for index in 1:2:length(cells)-1
-            first,middle=cells[index]
-            next,last=cells[index+1]
+        born=Dict{Tuple{UInt64,UInt64},UInt64}()
+        for (first,middle,last) in record.groups
+            if middle==0
+                a,c=original.rows[first],original.rows[last]
+                key=minmax(data.external_node_tags[a],data.external_node_tags[c])
+                chord=ntuple(axis->0.5*(source.coords[axis,a]+source.coords[axis,c]),3)
+                parameter=only(model_parametrization(m,1,Int(curve),collect(chord)))
+                isfinite(parameter) || throw(ArgumentError(
+                    "$caller: full-quad Curve[$curve] keeps a non-finite edge parameter"))
+                node_high_water<typemax(UInt64) || throw(ArgumentError(
+                    "$caller: full-quad literal Curve middles exhaust UInt64 labels"))
+                uid=(node_high_water+=UInt64(1))
+                middles[key]=_NativeFullQuadMiddle(uid,owner,Float64[parameter],
+                    _gmsh_native_curve_sample(m,Int(curve),parameter,caller),chord,true)
+                parameters[uid]=parameter;born[key]=uid
+                push!(coarse,(first,last))
+                high_water<typemax(UInt64) || throw(ArgumentError(
+                    "$caller: full-quad temporary Line constructors exhaust UInt64 labels"))
+                push!(labels,high_water+=UInt64(1))
+                continue
+            end
             a,b,c=original.rows[first],original.rows[middle],original.rows[last]
             point=ntuple(axis->0.5*(source.coords[axis,a]+source.coords[axis,c]),3)
             parameter=data.node_parametric[b]
@@ -171,6 +250,15 @@ function _gmsh_fullquad_input(m,tag,input,element_high_water,options,caller)
                 "$caller: full-quad temporary Line constructors exhaust UInt64 labels"))
             high_water+=UInt64(1)
             push!(labels,high_water)
+        end
+        if !isempty(born) && haskey(chains,Int32(curve))
+            chain=chains[Int32(curve)];grown=UInt64[]
+            for index in 1:length(chain)-1
+                push!(grown,chain[index])
+                middle=get(born,minmax(chain[index],chain[index+1]),UInt64(0))
+                middle==0 || push!(grown,middle)
+            end
+            push!(grown,chain[end]);chains[Int32(curve)]=grown
         end
         connectivity=Matrix{Int32}(undef,2,length(coarse))
         for (column,cell) in enumerate(coarse)

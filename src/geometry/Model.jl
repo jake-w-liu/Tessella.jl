@@ -7506,13 +7506,16 @@ function _on_segment(x, p, q; atol=1e-12)
     return -atol<=t<=1+atol
 end
 
-function _mesh_covers_segment(mesh::Mesh, p, q; atol=1e-12)
+function _mesh_covers_segment(mesh::Union{Mesh,MixedMesh}, p, q; atol=1e-12)
     a=_node_at(mesh,p; atol=atol); b=_node_at(mesh,q; atol=atol)
     a==0 && return false; b==0 && return false
     a==b && return true
     adj=Dict{Int,Vector{Int}}()
-    @inbounds for t in 1:ntris(mesh), e in ((1,2),(2,3),(3,1))
-        i=Int(mesh.tris[e[1],t]); j=Int(mesh.tris[e[2],t])
+    # Recombined Surfaces contain triangle and quadrangle blocks. Only the
+    # actual cell perimeters certify an embedded chain: a quad's absorbed
+    # diagonal cannot stand in for a retained Curve cell.
+    @inbounds for (first,last) in _model_projection_triangle_edges(mesh)
+        i=Int(first); j=Int(last)
         pi=(mesh.coords[1,i],mesh.coords[2,i],mesh.coords[3,i])
         pj=(mesh.coords[1,j],mesh.coords[2,j],mesh.coords[3,j])
         (_on_segment(pi,p,q; atol=atol) &&

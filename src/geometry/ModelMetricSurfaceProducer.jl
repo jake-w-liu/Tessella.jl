@@ -57,11 +57,12 @@ function _metric_surface_admit(m,tag,caller;ruled=false)
             "0 (simple), 1 (blossom), 2 (simple full-quad) and " *
             "3 (blossom full-quad)"))
     end
-    isempty(get(m.embeds,(2,tag),NTuple{2,Int}[])) || throw(ArgumentError(
-        "$caller: embedded Surface constraints are not supported"))
+    embeddings=get(m.embeds,(2,tag),NTuple{2,Int}[])
+    isempty(embeddings) || kind===:plane || throw(ArgumentError(
+        "$caller: embedded constraints on ruled Surfaces are not supported"))
     get(m.meshing.smoothing,(2,tag),0)==0 || throw(ArgumentError(
         "$caller: Surface smoothing is not supported"))
-    curves=_gmsh_native_surface_curves(m,tag)
+    curves=_metric_surface_lower_curves(m,tag,caller)
     # Upstream's BAMG selector reaches real curved boundaries on plane
     # faces — a builtin arc-bounded Plane or an OCC Plane record carries
     # circles, ellipses, splines or iso/copied edges whose actual lower
@@ -84,6 +85,34 @@ function _metric_surface_admit(m,tag,caller;ruled=false)
     # a ruled patch's own parameter domain is the certified chart instead.
     kind===:plane && _model_surface_plane(m,tag,caller)
     return nothing
+end
+
+function _metric_surface_lower_curves(m,tag,caller)
+    curves=_gmsh_native_surface_curves(m,tag)
+    _,embedded=_model_surface_embedding_tags(m,tag,caller)
+    for curve in embedded
+        curve in curves || push!(curves,curve)
+    end
+    return curves
+end
+
+# A refinement may retriangulate an arbitrary cavity, but it must preserve
+# every literal lower Curve edge with its original number of incident cells.
+# This check uses producer node rows, never a coordinate-derived identity.
+function _metric_preserves_constraints(cells,removed,added,constraints)
+    (constraints===nothing || isempty(constraints)) && return true
+    delta=Dict{NTuple{2,Int32},Int}()
+    for column in removed,edge in _metric_surface_edges(cells[column])
+        key=minmax(edge...)
+        key in constraints || continue
+        delta[key]=get(delta,key,0)-1
+    end
+    for cell in added,edge in _metric_surface_edges(cell)
+        key=minmax(edge...)
+        key in constraints || continue
+        delta[key]=get(delta,key,0)+1
+    end
+    return all(iszero,values(delta))
 end
 
 # A stored Curve discretization is stale for this producer when any edge it
@@ -161,8 +190,7 @@ function _metric_surface_boundary_grade!(m,tag,field,target,options,input,
         # the stored discretization verbatim and let an under-resolved
         # remnant reject through the strict retained-boundary certificate.
         if allow_regrade && input===nothing
-            for loop_id in m.surfaces[tag],signed in m.loops[loop_id]
-                curve=abs(signed)
+            for curve in _metric_surface_lower_curves(m,tag,caller)
                 params=get(m.curve_params,curve,nothing)
                 params===nothing && continue
                 _metric_boundary_curve_stale(m,curve,params,tag,field,target,
@@ -183,10 +211,10 @@ function _metric_surface_boundary_grade!(m,tag,field,target,options,input,
         pinned && return authority,limit
         allow_regrade || return authority,limit
         worst=0.0
-        for loop_id in m.surfaces[tag],signed in m.loops[loop_id]
-            params=get(m.curve_params,abs(signed),nothing)
+        for curve in _metric_surface_lower_curves(m,tag,caller)
+            params=get(m.curve_params,curve,nothing)
             params===nothing && continue
-            worst=max(worst,_metric_boundary_curve_worst(m,abs(signed),params,
+            worst=max(worst,_metric_boundary_curve_worst(m,curve,params,
                                                        tag,field,caller))
         end
         worst<=target && return authority,limit
@@ -219,6 +247,8 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
         triangle_limit,caller,chart,data)
     coordinates=data.coordinates;parameters=data.parameters;cells=data.cells
     incidence=data.incidence;boundary=data.boundary
+    constraints=hasproperty(data,:constraints) ? data.constraints : nothing
+    protected=constraints===nothing || isempty(constraints) ? boundary : union(boundary,constraints)
     numbers=data.numbers;owners=data.owners;node_parameters=data.node_parameters
     retained=data.retained;birth_rows=data.birth_rows;labels=data.labels
     node_max=data.node_max;cell_max=data.cell_max
@@ -234,6 +264,7 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
             "$caller: edge metric must be finite and nonnegative"))
         if violation>target
             edge in boundary && throw(ArgumentError("$caller: retained boundary metric changed"))
+            edge in protected && throw(ArgumentError("$caller: retained embedded Curve metric changed"))
             push!(queued,edge);_hpush!(heap,(violation,edge[1],edge[2]))
         end
     end
@@ -362,6 +393,7 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
         while !isempty(stack) && length(cavity)<=2048
             column=pop!(stack)
             for cav_edge in _metric_surface_edges(cells[column])
+                minmax(cav_edge...) in protected && continue
                 neighbours=get(incidence,minmax(cav_edge...),Int[])
                 length(neighbours)==2 || continue
                 for neighbour in neighbours
@@ -432,6 +464,7 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
             (isfinite(area) && area>0) || (steiner_fail[:star]=get(steiner_fail,:star,0)+1;return false)
             push!(newcells,(u,v,Int32(-1)))
         end
+        _metric_preserves_constraints(cells,cavity,newcells,constraints) || return false
         # No surviving live vertex may land strictly inside a new cell; the
         # cavity's own interior vertices are dying with it.
         near=Set{Int32}(polygon)
@@ -632,6 +665,8 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
                     area2=triangle_area(coordinates[o2],coordinates[l1],coordinates[o1])
                     (isfinite(area1) && area1>0 &&
                      isfinite(area2) && area2>0) || return false
+                    _metric_preserves_constraints(cells,hits,
+                        ((f1,o2,o1),(o2,l1,o1)),constraints) || return false
                     _metric_surface_birth(cell_max,2,caller,"cell")
                     for column in hits
                         alive[column]=false
@@ -714,6 +749,7 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
                                 delta[key]=get(delta,key,0)+1
                             end
                         end
+                        _metric_preserves_constraints(cells,hits,newcells,constraints) || continue
                         all(keys(delta)) do key
                             final=length(get(incidence,key,Int[]))+delta[key]
                             final==0 ||
@@ -845,6 +881,7 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
                         column=pop!(stack)
                         for cavity_edge in _metric_surface_edges(cells[column])
                             key=minmax(cavity_edge...)
+                            key in protected && continue
                             for neighbour in get(incidence,key,Int[])
                                 (neighbour in cluster || !alive[neighbour]) &&
                                     continue
@@ -865,6 +902,7 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
                             for cavity_edge in _metric_surface_edges(
                                     cells[column])
                                 key=minmax(cavity_edge...)
+                                key in protected && continue
                                 for neighbour in get(incidence,key,Int[])
                                     (neighbour in cavity ||
                                      !alive[neighbour]) && continue
@@ -1047,6 +1085,7 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
                     end
                     # Commit. A fan first births its Steiner vertex, then the
                     # placeholder resolves to the new row.
+                    _metric_preserves_constraints(cells,cavity,newcells,constraints) || return false
                     steiner===nothing ||
                         (_metric_surface_birth(node_max,1,caller,"node"))
                     _metric_surface_birth(cell_max,length(newcells),
@@ -1116,9 +1155,9 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
                     for column in starcells
                         cell=cells[column]
                         slot=only(index for index in 1:3 if cell[index]==u)
-                        minmax(u,cell[mod1(slot+1,3)]) in boundary &&
+                        minmax(u,cell[mod1(slot+1,3)]) in protected &&
                             return false
-                        minmax(u,cell[mod1(slot+2,3)]) in boundary &&
+                        minmax(u,cell[mod1(slot+2,3)]) in protected &&
                             return false
                         push!(link,(cell[mod1(slot+1,3)],cell[mod1(slot+2,3)]))
                     end
@@ -1180,6 +1219,7 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
                                        coordinates[nxtv])
                     (isfinite(area) && area>0) || return false
                     push!(newcells,(prev,vtx,nxtv))
+                    _metric_preserves_constraints(cells,starcells,newcells,constraints) || return false
                     _metric_surface_birth(cell_max,length(newcells),caller,"cell")
                     for column in starcells
                         alive[column]=false
@@ -1257,6 +1297,8 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
         for (first,last,other) in sides
             push!(children,(first,row,other),(row,last,other))
         end
+        _metric_preserves_constraints(cells,hits,children,constraints) ||
+            throw(ErrorException("$caller: metric split changes an embedded Curve cell"))
         push!(coordinates,splitpoint);push!(parameters,split_uv);positions[splitpoint]=row
         push!(numbers,next_node);push!(owners,(2,Int32(tag)));push!(node_parameters,collect(split_uv))
         push!(retained,false);push!(birth_rows,row);push!(node_alive,true);node_max=next_node
@@ -1341,7 +1383,7 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
     # physical area. A convex quad contains no other live vertex, so the
     # children inherit the no-inside-vertex certificate from their parents.
     function metric_flip(edge)
-        edge in boundary && return false
+        edge in protected && return false
         hits=copy(get(incidence,edge,Int[]))
         (length(hits)!=2 ||
          !alive[hits[1]] || !alive[hits[2]]) && return false
@@ -1398,8 +1440,8 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
         for column in star
             cell=cells[column]
             slot=only(index for index in 1:3 if cell[index]==vertex)
-            minmax(vertex,cell[mod1(slot+1,3)]) in boundary && return false
-            minmax(vertex,cell[mod1(slot+2,3)]) in boundary && return false
+            minmax(vertex,cell[mod1(slot+1,3)]) in protected && return false
+            minmax(vertex,cell[mod1(slot+2,3)]) in protected && return false
             push!(link,(cell[mod1(slot+1,3)],cell[mod1(slot+2,3)]))
         end
         length(unique(minmax(e...) for e in link))==length(link) ||
@@ -1506,6 +1548,7 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
         (isfinite(new_area) && isfinite(star_area) &&
          isapprox(new_area,star_area;rtol=1e-9,
                   atol=1024eps(Float64)*star_area)) || return false
+        _metric_preserves_constraints(cells,star,newcells,constraints) || return false
         _metric_surface_birth(cell_max,length(newcells),caller,"cell")
         for column in star;drop_cell(column);end
         for child in newcells;add_cell(child);end
@@ -1750,16 +1793,20 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
     if quad_input!==nothing
         authority=quad_input.authority
         element_high_water=quad_input.element_high_water
+        limit=max(limit,quad_input.node_high_water)
     end
     cert_field=quad_input!==nothing && quad_input.admitted ?
         _MetricScaledAniso(field,0.25) : field
     frame=_gmsh_native_surface_frame(m,tag,options,caller)
     source=_gmsh_native_surface_source(m,tag,authority,frame,caller;ctx_lc=options.ctx_lc)
+    _gmsh_native_surface_split_constraints!(source)
     length(source.tags)<=node_limit || throw(ArgumentError(
         "$caller: retained lower vertices exceed max_nodes"))
-    # Without interior constraints, Euler's disk-with-holes relation fixes
-    # the initial triangle count before its triangulation is allocated.
-    initial_count=length(source.tags)+2(length(m.surfaces[tag])-1)-2
+    # Euler's disk-with-holes relation counts interior vertices twice. Actual
+    # embedded Point/Curve rows and on-segment splits come from the source;
+    # their UID identities are never inferred from an output coordinate.
+    boundary_nodes=Set(vertex for edge in source.boundaries for vertex in edge)
+    initial_count=2length(source.tags)-length(boundary_nodes)+2(length(m.surfaces[tag])-1)-2
     initial_count<=triangle_limit || throw(ArgumentError(
         "$caller: initial Surface exceeds max_triangles"))
     # The initial surface is consumed as the refinement's seed triangulation,
@@ -1780,11 +1827,25 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
     wanted_boundary=Set(minmax(source.tags[edge[1]],source.tags[edge[2]]) for edge in source.boundaries)
     original_boundary==wanted_boundary || throw(ArgumentError(
         "$caller: initial Surface loses its actual lower Curve-cell incidence"))
+    row_of=Dict(uid=>Int32(row) for (row,uid) in enumerate(initial.node_tags))
+    constraints=Set{NTuple{2,Int32}}()
+    for (a,b) in source.internals
+        first=get(row_of,source.tags[a],Int32(0))
+        last=get(row_of,source.tags[b],Int32(0))
+        first>0 && last>0 || throw(ArgumentError(
+            "$caller: initial Surface loses an actual embedded Curve vertex"))
+        edge=minmax(first,last)
+        length(get(incidence,edge,Int[]))==2 || throw(ArgumentError(
+            "$caller: initial Surface loses an actual embedded Curve cell"))
+        push!(constraints,edge)
+    end
     score(edge)=metric_edge_length(cert_field,coordinates[edge[1]],coordinates[edge[2]];entity=(2,tag))
     all(edge->score(edge)<=target,boundary) || throw(ArgumentError(
         "$caller: retained boundary exceeds max_metric_edge; provide finer lower Curve cells"))
+    all(edge->score(edge)<=target,constraints) || throw(ArgumentError(
+        "$caller: retained embedded Curve exceeds max_metric_edge; provide finer lower Curve cells"))
     data=(coordinates=coordinates,parameters=parameters,cells=cells,
-        incidence=incidence,boundary=boundary,
+        incidence=incidence,boundary=boundary,constraints=constraints,
         numbers=copy(initial.node_tags),owners=copy(initial.node_owners),
         node_parameters=deepcopy(initial.node_parameters),
         retained=copy(initial.retained_nodes),
@@ -1817,6 +1878,16 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
     output_boundary=Set((remap[edge[1]],remap[edge[2]]) for edge in boundary)
     Set(edge for (edge,hits) in final_incidence if length(hits)==1)==output_boundary || throw(ErrorException(
         "$caller: refined Surface changes its retained boundary"))
+    protected=Set{NTuple{2,Int32}}()
+    for edge in constraints
+        first,last=remap[edge[1]],remap[edge[2]]
+        first>0 && last>0 || throw(ErrorException(
+            "$caller: refinement deletes an embedded Curve vertex"))
+        mapped=minmax(first,last)
+        length(get(final_incidence,mapped,Int[]))==2 || throw(ErrorException(
+            "$caller: refinement changes an actual embedded Curve cell"))
+        push!(protected,mapped)
+    end
     output_score(edge)=metric_edge_length(cert_field,
         Tuple(output_coordinates[:,edge[1]]),Tuple(output_coordinates[:,edge[2]]);
         entity=(2,tag))
@@ -1830,10 +1901,15 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
     isequal(output.coords[:,1:nnodes(mesh)],mesh.coords) &&
         numbers[live_nodes][1:nnodes(mesh)]==initial.node_tags ||
         throw(ErrorException("$caller: refinement changes a retained lower vertex"))
+    curve_chains=quad_input!==nothing && quad_input.admitted ?
+        _gmsh_fullquad_restored_chains(m,source,initial.curve_chains,quad_input,caller) :
+        initial.curve_chains
     production=_ModelSurfaceProduction(output,numbers[live_nodes],
         owners[live_nodes],node_parameters[live_nodes],
         retained[live_nodes],node_max,labels[live],cell_max,
-        Int32[remap[row] for row in birth_rows if node_alive[row]])
+        Int32[remap[row] for row in birth_rows if node_alive[row]],
+        initial.constructor_mesh,initial.source_node_updates,
+        initial.native_recombine_events,curve_chains)
     _model_surface_recombined(m,tag) || return production
     if quad_input===nothing
         m.meshing.recombine_algo in (0,1) || throw(ArgumentError(
@@ -1871,7 +1947,7 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
         # `_gmsh_native_surface_fullquad` lifecycle the scalar producer runs
         # on the same certified triangulation.
         rec,world_rows=_gmsh_native_surface_fullquad(m,tag,uv_product,
-            output_coordinates,nothing,frame,quad_input,caller)
+            output_coordinates,protected,frame,quad_input,caller)
         lifted=MixedMesh(copy(world_rows),rec.mesh.blocks)
         return _ModelSurfaceProduction(lifted,rec.node_tags,rec.node_owners,
             rec.node_parameters,rec.retained_nodes,rec.node_high_water,
@@ -1880,7 +1956,7 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
             rec.native_recombine_events,production.curve_chains)
     end
     state=_native_recombine_state(uv_product,output_coordinates,frame,caller)
-    _native_recombine_process!(state,m,tag,nothing)
+    _native_recombine_process!(state,m,tag,protected)
     rec=_native_recombine_export(uv_product,state,tag,caller)
     survivors=findall(state.alive)
     survivor_index=zeros(Int32,n_out)
@@ -2236,6 +2312,7 @@ function _ruled_metric_surface_refine(m,tag,field,target,node_limit,
     if quad_input!==nothing
         authority=quad_input.authority
         element_high_water=quad_input.element_high_water
+        limit=max(limit,quad_input.node_high_water)
     end
     cert_field=quad_input!==nothing && quad_input.admitted ?
         _MetricScaledAniso(field,0.25) : field
@@ -2573,14 +2650,16 @@ metric flip and vertex-removal sweeps so the count tracks the prescribed
 density. The output satisfies
 `metric_edge_length(field,a,b)<=max_metric_edge`.
 
-Actual lower Point/Line products retain their UID, XYZ and boundary incidence.
-They must already satisfy the requested bound: coarse boundary edges are rejected
-instead of replacing owned Curve cells. Straight planar boundaries, including
-holes, are supported. Recombination algorithms 0–3 recombine the certified
+Actual lower Point/Curve products retain their UID, XYZ and incidence. Embedded
+Points and Curves are supported on planar Surfaces; interior Curve cells remain
+Surface edges with two incident cells, and supplied Points on a Curve split its
+actual chain. Lower Curve cells must already satisfy the requested bound: coarse
+edges are rejected instead of replacing owned cells. Planar boundaries, including
+holes and geometric curved boundaries, are supported. Recombination algorithms 0–3 recombine the certified
 triangulation through the shared native pairing and full-quad subdivision
 kernels (algorithms 2/3 first halve the 1-D mesh and mesh at doubled metric
 size, then restore the stored Curve middles); transfinite/extruded/periodic
-Surfaces, embeddings and Surface smoothing are rejected. New vertices and cells
+Surfaces and Surface smoothing are rejected. New vertices and cells
 have owned constructor births; resource and representability failures return no
 partial mesh or model mutation. The supplied field, including any explicit
 wrapper, is used as given.

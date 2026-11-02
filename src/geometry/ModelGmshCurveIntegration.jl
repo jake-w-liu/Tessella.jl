@@ -164,7 +164,7 @@ function _model_native_line_grade_params(m::GeoModel,curve::Int,
     # so only a regraded count resolves it.
     cert_fields=Tuple{Int,Any}[]
     if aniso && inner isa AbstractAnisoField && !(inner isa _MetricScaledAniso)
-        for face in _model_curve_faces(m,curve)
+        for face in _model_curve_metric_faces(m,curve)
             _surface_mesh_algorithm(m,face)==7 || continue
             push!(cert_fields,(Int(face),
                 _metric_surface_algorithm_field(m,face,options,nothing,caller)))

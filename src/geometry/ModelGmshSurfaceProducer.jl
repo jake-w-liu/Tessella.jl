@@ -717,6 +717,7 @@ function _gmsh_native_initial_surface(m::GeoModel,tag::Int,options,input,
     if quad_input!==nothing
         authority=quad_input.authority
         element_high_water=quad_input.element_high_water
+        limit=max(limit,quad_input.node_high_water)
         quad_input.admitted && (options=_gmsh_fullquad_size_options(options))
     end
     # The temporary coarse view consumed each Curve's halved middles; their

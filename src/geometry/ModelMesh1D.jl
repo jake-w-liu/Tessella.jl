@@ -75,10 +75,26 @@ end
 # a strict metric certificate, so a Curve also grades anisotropically when an
 # incident Surface resolves to algorithm 7 — the producer's requirement is
 # transported into the grading instead of relaxing the certificate.
+# Embedded Curves consume their host Surface's metric too. Keep this separate
+# from `_model_curve_faces`: boundary-only rules such as recombination parity
+# and minimum boundary counts must not gain synthetic topological adjacencies.
+function _model_curve_metric_faces(m::GeoModel,curve::Integer)
+    faces=_model_curve_faces(m,Int(curve))
+    isempty(m.embeds) && return faces
+    embedded_faces=Int[]
+    for ((dim,tag),items) in m.embeds
+        dim==2 && (1,Int(curve)) in items && push!(embedded_faces,tag)
+    end
+    for face in sort!(unique!(embedded_faces))
+        face in faces || push!(faces,face)
+    end
+    return faces
+end
+
 function _model_curve_aniso_grading(m::GeoModel,curve::Integer)
     m.meshing.algorithm_2d==7 && return true
     return any(face->_surface_mesh_algorithm(m,face)==7,
-               _model_curve_faces(m,curve))
+               _model_curve_metric_faces(m,curve))
 end
 
 _model_native_random_seed(seed::Integer) = UInt32(mod(seed,Int64(1)<<32))
@@ -818,7 +834,7 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
     # parameters against a cert built from the scaled field would scale the
     # bound up with the grading and never converge.
     if aniso && inner isa AbstractAnisoField && !(inner isa _MetricScaledAniso)
-        for face in _model_curve_faces(m,curve)
+        for face in _model_curve_metric_faces(m,curve)
             _surface_mesh_algorithm(m,face)==7 || continue
             push!(cert_fields,(Int(face),
                 _metric_surface_algorithm_field(m,face,options,nothing,caller)))

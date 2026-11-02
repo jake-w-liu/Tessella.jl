@@ -125,7 +125,7 @@ function _model_native_curve_grade_with_geometry(m::GeoModel,curve::Int,
     # remnant persists, upstream of the Curve products it can no longer edit.
     cert_fields=Tuple{Int,Any}[]
     if aniso && inner isa AbstractAnisoField && !(inner isa _MetricScaledAniso)
-        for face in _model_curve_faces(m,curve)
+        for face in _model_curve_metric_faces(m,curve)
             _surface_mesh_algorithm(m,face)==7 || continue
             push!(cert_fields,(Int(face),
                 _metric_surface_algorithm_field(m,face,options,nothing,caller)))

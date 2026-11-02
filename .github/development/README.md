@@ -74,10 +74,35 @@ parse error and exited 1; they are not evidence about committed 445. The clean
 checkout checks above replace those invalid/partial runs. Continue checking
 immutable commits separately from parallel main-worktree implementation.
 
-Active next work: canonical/full-order API view probing (legacy curved-Line3
-value error reproduced), the independent tiny partition compiler hotspot,
-and the remaining whole P1–P6 checklist. No complete-parity or global-resource
-claim is supported by these scoped checks.
+Canonical probing, thin geometry, and embedded metric transport have the
+additional scoped evidence below. Confirmed raw-basis arithmetic and general
+non-partition geometry-map cases are the next active fixes. The remaining
+whole P1–P6 checklist and fresh independent audit remain open.
+
+### Probe and embedded metric implementation checkpoint
+
+The public canonical `view.probe(tag,x,y,z,...)` now shares full-order geometry
+and value bases with the legacy model-name overload. It supports component
+selection, gradients, dimensions, nearest-node distance limits, ordered element
+coordinates, aliases and sparse/empty time steps. All-step model queries and
+the public Probe plugin retain the first frame's material geometry and actual
+node/element UIDs; explicit steps retain their own geometry. Thin regular
+elements use scaled rank/solve checks instead of an absolute determinant cutoff.
+
+Final-source scoped checks: Julia 1.12.7 minimal compilation, 205/205; Julia
+1.13.1 normal `-O2`, 478/478; both actual exit 0. These include the new 106-check
+probe fixture, seven thin-geometry assertions, and nearby model, plugin, inverse
+and high-order fixtures. They do not qualify the subsequent arithmetic fixes.
+
+Planar algorithm-7 meshing now transports actual embedded Point and Curve
+products through grading, cavity refinement, recombination and full-quad
+subdivision. Lower Curve edges remain protected with their required incidence;
+supplied Points split the detached Curve chain before coarsening, preserving
+their UIDs. New Curve middles reserve UIDs before interior births. Strict metric
+and ownership certificates remain enforced. The new fixture passed 191/191
+on Julia 1.13.1 minimal compilation before expansion; final-source normal
+`-O2` checks passed 328/328 (251 new and 77 neighboring assertions), exit 0.
+Julia 1.12 and whole-package verification of this increment remain pending.
 
 ### Bounded parallel dispatch increment
 
@@ -127,7 +152,7 @@ hotspot still requires investigation; global optimization is not claimed.
 - The historical minimal-compiler GmshLibm diagnosis is stale: a fresh 16-check
   scalar/CLI task-local probe passed with exit 0 on Julia 1.12.7
   `--compile=min -O0 --check-bounds=yes`.
-- Full ordinary package checks on Julia 1.12.7 and 1.13.1 are running. The
+- Early ordinary package checks on Julia 1.12.7 and 1.13.1 were superseded. The
   initial attempt stopped before tests because the ignored local manifest
   lacked Sockets; it was backed up outside the repository and resolved. A
   superseded baseline and first 1.12 final-source run were stopped after
@@ -135,7 +160,8 @@ hotspot still requires investigation; global optimization is not claimed.
   passing receipt. Per-file diagnosis confirmed accidental default volume
   recovery work on 130-vertex and 440-vertex NURBS boundaries. Those two fills
   remain in the opt-in geometry regressions; the default keeps boundary imports.
-  Fresh package checks of that routine scope are now running on both runtimes.
+  Clean immutable-commit checks of that routine scope passed on both runtimes
+  as recorded above.
 - Prepared version 0.1.0, bounded stdlib compatibility, the owner-selected MIT
   license, and Windows/Linux CI for both supported Julia lines. Root tracked
   Markdown is now only README; feature scopes, full historical ledgers and
@@ -143,12 +169,10 @@ hotspot still requires investigation; global optimization is not claimed.
   unchanged under LICENSES. Registration is not complete; General's human
   maintainer-review prerequisite is also unverified.
 
-Next confirmed implementation gap: a separate model's three-node constant
-NodeData view used as a public PostView sizing field rejects with `view has no
-element records` instead of returning 0.5 (Julia 1.13.1 reproduction, exit 0).
-An owned model-record adapter is being implemented. AutomaticMeshSizeField's
-translated closest-point helper remains a separate unverified candidate. Full
-P1–P6 implementation and the fresh whole-codebase/resource audit remain open.
+The formerly missing model-record PostView adapter is implemented and verified
+above. AutomaticMeshSizeField's translated closest-point helper remains a
+separate unverified candidate. Full P1–P6 implementation and the fresh
+whole-codebase/resource audit remain open.
 
 The last repository state before documentation consolidation was
 [`a3c4ac3`](https://github.com/jake-w-liu/Tessella.jl/commit/a3c4ac37af44bcfe30b5bc7976a284b65f53a9a4).

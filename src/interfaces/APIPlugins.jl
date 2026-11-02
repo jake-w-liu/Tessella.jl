@@ -942,29 +942,6 @@ function _plugin_local_weights(coords,kind::Symbol,p)
     return nothing
 end
 
-# Locate the first element (in deterministic record order) containing `p` and
-# interpolate every populated step: returns (per-step value vectors, steps).
-function _plugin_probe_list(view,p,caller::AbstractString)
-    elements,steps=_plugin_list_elements(view,caller)
-    for element in elements
-        element.dim<1 && continue
-        N=_plugin_local_weights(element.geo,element.kind,p)
-        N===nothing && continue
-        arity=size(element.vcoords,2);nc=element.ncomp
-        out=Vector{Float64}[]
-        for step in 1:steps
-            acc=zeros(nc)
-            for node in 1:min(arity,length(N)),comp in 1:nc
-                acc[comp]+=N[node]*
-                    element.vals[(step-1)*arity*nc+(node-1)*nc+comp]
-            end
-            push!(out,acc)
-        end
-        return out,collect(0:steps-1)
-    end
-    return nothing,Int[]
-end
-
 # Query geometry is owned by the plugin run, including source model identities.
 # Integrators can sample thousands of times without rebuilding this snapshot.
 const _PLUGIN_MODEL_PROBE_CONTEXT_KEY=gensym(:TessellaPluginModelProbe)
@@ -1093,13 +1070,14 @@ function _plugin_exec_probe(spec::_PluginSpec,caller::AbstractString)
        _mesh_query_coordinate(numbers["Z"],caller,"Z"))
     tag,view=_plugin_view(numbers,caller)
     name=view.name*"_Probe"
-    if view.model_kind===nothing
-        values,step_nums=_plugin_probe_list(view,p,caller)
-    else
-        values,step_nums=_plugin_probe_model(view,p,caller)
-    end
-    _plugin_probe_emit(view,name,p,something(values,Vector{Float64}[]),
-                       step_nums,caller)
+    nc=_view_probe_component_count(view,caller)
+    nc==0 || haskey(_PLUGIN_COMP_HEAD,nc) || throw(ArgumentError(
+        "$caller: probe result with $nc components cannot be emitted"))
+    packed,_=_view_probe_native(tag,p...)
+    isempty(packed) || (nc=length(packed)÷_view_data_steps(view))
+    values=isempty(packed) ? Vector{Float64}[] :
+        [copy(@view packed[first:first+nc-1]) for first in 1:nc:length(packed)]
+    _plugin_probe_emit(view,name,p,values,collect(0:length(values)-1),caller)
     return nothing
 end
 

@@ -9883,104 +9883,7 @@ function _view_get_homogeneous_model_data(tag,step,model_name)
     end
 end
 
-# `probe` samples the view's step-0 data at a physical point: the owning
-# element comes from the cached element locator. On the simplex cache,
-# barycentric coordinates serve as the nodal shape functions
-# (N = (1-u-v-w, u, v, w) in MSH node order); on a mixed cache the element
-# family's own first-order corner basis applies and rows are keyed by the
-# public element/node tags. ElementNodeData rows are node-major; NodeData
-# rows are addressed by node tag; ElementData is element-constant.
-# Curved/high-order probes reduce to the linear hull.
-function _view_probe(model_name,tag,x,y,z)
-    caller="API.view.probe"
-    model_name isa AbstractString || throw(ArgumentError(
-        "$caller: modelName must be a string"))
-    px=_mesh_query_coordinate(x,caller,"x")
-    py=_mesh_query_coordinate(y,caller,"y")
-    pz=_mesh_query_coordinate(z,caller,"z")
-    return lock(STATE_LOCK) do
-        _slot_capture_locked!()
-        view=_session_view_data(tag,caller)
-        slot=_native_view_model_slot(String(model_name))
-        slot===nothing && throw(ArgumentError(
-            "$caller: Unknown model '$(String(model_name))'"))
-        mesh=slot.mesh
-        locator=if mesh isa Mesh
-            slot.locator===nothing &&
-                (slot.locator=SimplexLocator(mesh))
-            slot.locator
-        elseif mesh isa MixedMesh
-            _MixedMeshLocator(mesh)
-        else
-            throw(ArgumentError("$caller: probe requires a mesh"))
-        end
-        tags=_locate_elements(locator,(px,py,pz),-1,true,caller)
-        isempty(tags) && throw(ArgumentError(
-            "$caller: no element contains " *
-            "($px, $py, $pz)"))
-        etag=first(tags)
-        rec=mesh_element_record(mesh,etag)
-        uvw,=_local_coordinates(mesh,Int(etag),(px,py,pz),caller)
-        u,v,w=uvw
-        # A mixed cache interpolates with the element family's own corner
-        # basis and keys the view rows by public tags; the simplex cache
-        # keeps its barycentric weights and dense tags.
-        if mesh isa MixedMesh
-            N=MeshPointLocation._shape_functions(
-                msh_spec(Int(rec.element_type)).family,u,v,w,caller)
-            etag=_cache_element_tag(mesh,Int(etag))
-            node_tags=UInt64[_cache_node_tag(mesh,index)
-                             for index in rec.node_tags]
-        else
-            N=rec.dimension==1 ? (1.0-u,u) :
-              rec.dimension==2 ? (1.0-u-v,u,v) :
-                               (1.0-u-v-w,u,v,w)
-            node_tags=rec.node_tags
-        end
-        for ((s,data_type),(entity_tags,values,components)) in
-                sort!(collect(view.model_data);by=first)
-            s==0 || continue
-            ctx=get(view.model_contexts,(s,data_type),nothing)
-            ctx===nothing ||
-                get(ctx,:model_slot,nothing)===slot || continue
-            nc=max(components,1)
-            if data_type=="ElementData"
-                row=findfirst(==(etag),entity_tags)
-                row===nothing && continue
-                return collect(Float64,
-                    values[(row-1)*nc+1:row*nc])
-            elseif data_type=="ElementNodeData"
-                row=findfirst(==(etag),entity_tags)
-                row===nothing && continue
-                nn=length(node_tags)
-                width=nn*nc
-                base=values[(row-1)*width+1:row*width]
-                out=zeros(nc)
-                for i in 1:min(nn,length(N))
-                    for c in 1:nc
-                        out[c]+=N[i]*base[(i-1)*nc+c]
-                    end
-                end
-                return out
-            elseif data_type=="NodeData"
-                out=zeros(nc)
-                for i in 1:min(length(node_tags),length(N))
-                    j=findfirst(==(node_tags[i]),entity_tags)
-                    j===nothing && continue
-                    for c in 1:nc
-                        out[c]+=N[i]*values[(j-1)*nc+c]
-                    end
-                end
-                return out
-            end
-        end
-        message="$caller: view $tag holds no probe-able model data " *
-                "(step 0 ElementData/ElementNodeData/NodeData)"
-        NATIVE_LOOKUP_QUERY_ERRORS[]+=1;NATIVE_MSG_LAST_ERROR[]=message
-        _native_diagnostic_emit_locked(:error,message)
-        throw(ArgumentError(message))
-    end
-end
+include("APIViewProbe.jl")
 
 # ---- view combine / interpolation matrices --------------------------------
 #
@@ -12227,7 +12130,7 @@ using ..API: _view_add,_view_remove,_view_get_index,_view_get_tags,
              _view_add_list_data_string,_view_get_list_data_strings,
              _view_copy_options,_view_set_visibility_per_window,
              _view_add_homogeneous_model_data,
-             _view_get_homogeneous_model_data,_view_probe,
+             _view_get_homogeneous_model_data,_view_probe,_view_probe_native,
              _view_add_alias,_view_combine,_view_set_interpolation_matrices,
              _view_set_color,_view_get_color
 
@@ -12289,9 +12192,21 @@ add_homogeneous_model_data(tag,step,model_name,data_type,tags,data,
 to rows owned by `modelName`."""
 get_homogeneous_model_data(tag,step,model_name)=
     _view_get_homogeneous_model_data(tag,step,model_name)
-"""Sample view `tag`'s step-0 data at point `(x,y,z)` on `modelName`:
-barycentric interpolation inside the containing simplex element."""
-probe(model_name,tag,x,y,z)=_view_probe(model_name,tag,x,y,z)
+"""Sample model view `tag` at step 0 on `modelName`, using its complete
+geometry and nodal basis. Returns the component vector."""
+probe(model_name::AbstractString,tag,x,y,z)=_view_probe(model_name,tag,x,y,z)
+"""Return `(values, distance)` from a list or model view. `step=-1` samples
+all steps; `gradient=true` returns physical component gradients. Exact matches
+are preferred; nonzero `distance_max` enables nearest-node fallback. Model
+queries over all steps follow the first frame's material element coordinates."""
+probe(tag::Integer,x,y,z,step,num_comp=-1,gradient=false,distance_max=0.0,
+    x_element=Float64[],y_element=Float64[],z_element=Float64[],dimension=-1)=
+    _view_probe_native(tag,x,y,z,step,num_comp,gradient,distance_max,
+        x_element,y_element,z_element,dimension)
+probe(tag::Integer,x,y,z;step=-1,numComp=-1,gradient=false,distanceMax=0.0,
+    xElemCoord=Float64[],yElemCoord=Float64[],zElemCoord=Float64[],dim=-1)=
+    _view_probe_native(tag,x,y,z,step,numComp,gradient,distanceMax,
+        xElemCoord,yElemCoord,zElemCoord,dim)
 """Add a view as an alias of `refTag`: data is shared with the reference
 view while options stay per-view (copied when `copyOptions` is set). A
 positive `tag` replaces the view registered under it. Returns the tag."""

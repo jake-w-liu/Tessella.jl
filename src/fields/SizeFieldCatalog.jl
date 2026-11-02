@@ -3986,6 +3986,86 @@ end
 @inline _pv_scheme_dim(kind::UInt8)=
     kind==1 ? 1 : (kind==2 || kind==7) ? 2 : 3
 
+@inline function _pv_frame_reliable(a,b,c,determinant)
+    permanent=abs(a[1])*(abs(b[2]*c[3])+abs(b[3]*c[2]))+
+        abs(a[2])*(abs(b[1]*c[3])+abs(b[3]*c[1]))+
+        abs(a[3])*(abs(b[1]*c[2])+abs(b[2]*c[1]))
+    return isfinite(determinant) && isfinite(permanent) &&
+        abs(determinant)>64eps(Float64)*permanent+64nextfloat(0.0)
+end
+
+@inline function _pv_scaled_columns(a,b,c)
+    scales=(maximum(abs,a),maximum(abs,b),maximum(abs,c))
+    all(s->isfinite(s) && s>0,scales) || return nothing
+    return (ntuple(i->a[i]/scales[1],3),ntuple(i->b[i]/scales[2],3),
+        ntuple(i->c[i]/scales[3],3),scales)
+end
+
+@inline _pv_exact_det(a,b,c)=a[1]*(b[2]*c[3]-b[3]*c[2])-
+    a[2]*(b[1]*c[3]-b[3]*c[1])+a[3]*(b[1]*c[2]-b[2]*c[1])
+
+@noinline function _pv_exact_rank(a,b,c)
+    R=Rational{BigInt}
+    return !iszero(_pv_exact_det(map(R,a),map(R,b),map(R,c)))
+end
+
+@inline function _pv_frame_nonsingular(a,b,c)
+    all(isfinite,a) && all(isfinite,b) && all(isfinite,c) || return false
+    determinant=_postview_det(a,b,c)
+    _pv_frame_reliable(a,b,c,determinant) && return true
+    frame=_pv_scaled_columns(a,b,c)
+    frame===nothing && return false
+    aa,bb,cc,_=frame
+    _pv_frame_reliable(aa,bb,cc,_postview_det(aa,bb,cc)) && return true
+    return _pv_exact_rank(a,b,c)
+end
+
+@noinline function _pv_exact_step(a,b,c,rhs,dim)
+    R=Rational{BigInt}
+    aa=map(R,a);bb=map(R,b);cc=map(R,c);rr=map(R,rhs)
+    determinant=_pv_exact_det(aa,bb,cc)
+    iszero(determinant) && return nothing
+    step=(Float64(_pv_exact_det(rr,bb,cc)/determinant),
+        dim>=2 ? Float64(_pv_exact_det(aa,rr,cc)/determinant) : 0.0,
+        dim==3 ? Float64(_pv_exact_det(aa,bb,rr)/determinant) : 0.0)
+    return all(isfinite,step) ? step : nothing
+end
+
+@inline function _pv_frame_step(a,b,c,rhs,dim)
+    determinant=_postview_det(a,b,c)
+    if abs(determinant)>=floatmin(Float64) && _pv_frame_reliable(a,b,c,determinant)
+        step=(_postview_det(rhs,b,c)/determinant,
+            dim>=2 ? _postview_det(a,rhs,c)/determinant : 0.0,
+            dim==3 ? _postview_det(a,b,rhs)/determinant : 0.0)
+        all(isfinite,step) && return step
+    end
+    frame=_pv_scaled_columns(a,b,c)
+    frame===nothing && return nothing
+    aa,bb,cc,scales=frame
+    determinant=_postview_det(aa,bb,cc)
+    if abs(determinant)>=floatmin(Float64) && _pv_frame_reliable(aa,bb,cc,determinant)
+        size=maximum(abs,rhs)
+        size==0.0 && return (0.0,0.0,0.0)
+        rr=ntuple(i->rhs[i]/size,3)
+        step=((_postview_det(rr,bb,cc)/determinant)*(size/scales[1]),
+            dim>=2 ? (_postview_det(aa,rr,cc)/determinant)*(size/scales[2]) : 0.0,
+            dim==3 ? (_postview_det(aa,bb,rr)/determinant)*(size/scales[3]) : 0.0)
+        all(isfinite,step) && return step
+    end
+    return _pv_exact_step(a,b,c,rhs,dim)
+end
+
+@inline function _pv_normal_coordinate(residual,normal)
+    denominator=_dot3(normal,normal)
+    numerator=_dot3(residual,normal)
+    isfinite(numerator) && isfinite(denominator) && denominator>=floatmin(Float64) &&
+        return numerator/denominator
+    scale=maximum(abs,normal)
+    isfinite(scale) && scale>0 || return NaN
+    scaled=ntuple(i->normal[i]/scale,3)
+    return (_dot3(residual,scaled)/_dot3(scaled,scaled))/scale
+end
+
 function _pv_scheme_inverse_certificate(cell,u,v,w,query,base,scale)
     dim=_pv_scheme_dim(cell.kind)
     mapped=_pv_scheme_map(cell,u,v,w,base,scale)
@@ -3993,16 +4073,15 @@ function _pv_scheme_inverse_certificate(cell,u,v,w,query,base,scale)
     residual=_sub3(query,mapped)
     du,dv,dw=_pv_scheme_jacobian(cell,u,v,w,base,scale)
     all(isfinite,du) && all(isfinite,dv) && all(isfinite,dw) || return nothing
-    determinant=_postview_det(du,dv,dw)
-    isfinite(determinant) && !iszero(determinant) || return nothing
+    _pv_frame_nonsingular(du,dv,dw) || return nothing
     if dim==1
-        v=_dot3(residual,dv)/_dot3(dv,dv)
-        w=_dot3(residual,dw)/_dot3(dw,dw)
+        v=_pv_normal_coordinate(residual,dv)
+        w=_pv_normal_coordinate(residual,dw)
         residual=(muladd(-v,dv[1],muladd(-w,dw[1],residual[1])),
                   muladd(-v,dv[2],muladd(-w,dw[2],residual[2])),
                   muladd(-v,dv[3],muladd(-w,dw[3],residual[3])))
     elseif dim==2
-        w=_dot3(residual,dw)/_dot3(dw,dw)
+        w=_pv_normal_coordinate(residual,dw)
         residual=(muladd(-w,dw[1],residual[1]),
                   muladd(-w,dw[2],residual[2]),
                   muladd(-w,dw[3],residual[3]))
@@ -4026,14 +4105,9 @@ function _pv_scheme_inverse(cell,query,base,scale)
         residual_norm=hypot(residual...)
         isfinite(residual_norm) || return nothing
         du,dv,dw=_pv_scheme_jacobian(cell,u,v,w,base,scale)
-        determinant=_postview_det(du,dv,dw)
-        (isfinite(determinant) && !iszero(determinant)) ||
-            return nothing
-        delta_u=_postview_det(residual,dv,dw)/determinant
-        delta_v=dim>=2 ? _postview_det(du,residual,dw)/determinant : 0.0
-        delta_w=dim==3 ? _postview_det(du,dv,residual)/determinant : 0.0
-        all(isfinite,(delta_u,delta_v,delta_w)) ||
-            return nothing
+        step=_pv_frame_step(du,dv,dw,residual,dim)
+        step===nothing && return nothing
+        delta_u,delta_v,delta_w=step
         # A tiny backtracked step cannot establish convergence. Require the
         # full Newton correction to be small, then verify the actual map.
         if hypot(delta_u,delta_v,delta_w)<=1e-6
@@ -4157,8 +4231,7 @@ function _pv_scheme_validate(cell::_PVSchemeCell,i::Int,caller::AbstractString)
     for j in axes(nodes,2)
         du,dv,dw=_pv_scheme_jacobian(cell,nodes[1,j],nodes[2,j],nodes[3,j],
                                    base,scale)
-        determinant=_postview_det(du,dv,dw)
-        (isfinite(determinant) && !iszero(determinant)) || throw(ArgumentError(
+        _pv_frame_nonsingular(du,dv,dw) || throw(ArgumentError(
             "$caller: scheme element $i has a singular geometry map at " *
             "reference node $j"))
     end

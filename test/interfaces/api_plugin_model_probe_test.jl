@@ -67,7 +67,7 @@ end
             unknown=A.view.add("unknown UID")
             A.view.add_model_data(unknown,0,model,"ElementData",[1],[[42.]])
             types,data=probe(unknown,point)
-            @test isempty(types) && isempty(data)
+            @test types==["SP"] && only(data)≈[point...,0.]
         end
     end
 end
@@ -83,7 +83,7 @@ end
         # Same UIDs in different models denote different geometry and rows.
         types,data=probe(view,(.25,.5,0.))
         @test types==["SP"]
-        @test only(data)≈[.25,.5,0.,3.5,12.0]
+        @test only(data)≈[.25,.5,0.,3.5,14.0]
         alias=A.view.add_alias(view)
         A.view.remove(view)
         @test probe(alias,(.25,.5,0.))==(types,data)
