@@ -718,7 +718,7 @@ end
         Extrude {{0,0,1},{0,0,1},{0,0,1},Pi/2} { Point{1} }
         """)
     @test err isa ArgumentError
-    @test occursin("semicolon",sprint(showerror,err))
+    @test occursin("syntax error (})",sprint(showerror,err))
     err=_extrude_error("""
         SetFactory("OpenCASCADE");
         Point(1) = {1,0,0,1};
@@ -824,20 +824,24 @@ end
     @test err isa ArgumentError
     @test occursin("rotational",sprint(showerror,err))
 
+    # A bare shape list only prefixes the `Using Wire` pipe production —
+    # at EOF its empty lookahead reports `syntax error ()` upstream (a
+    # statement terminator would report `syntax error (;)` instead).
     err=_extrude_error("""
         Point(1) = {0,0,0,1};
         Extrude { Point{1}; }
         """)
     @test err isa ArgumentError
-    @test occursin("boundary-layer",sprint(showerror,err))
+    @test occursin("syntax error ()",sprint(showerror,err))
 
-    # The pipe form splits at the shape-list brace; the trailing
-    # `Using Wire` must reject the whole statement before side effects.
+    # The pipe form still parses its `Using Wire` suffix under the built-in
+    # factory — the action's OCC gate reports before any side effect.
     err=_extrude_error(_EXTRUDE_SQUARE * """
         Extrude { Surface{1}; } Using Wire {3}
         """)
     @test err isa ArgumentError
-    @test occursin("pipe",sprint(showerror,err))
+    @test occursin("Pipe only available with OpenCASCADE geometry kernel",
+                   sprint(showerror,err))
 
     err=_extrude_error(_EXTRUDE_SQUARE * """
         out[] = Extrude {0,0,1} { Surface{1}; };
@@ -857,13 +861,14 @@ end
         """)
     @test err===nothing
 
-    # Every entity block in the shape list must end with a semicolon.
+    # An entity block missing its `;` leaves the group's own `}` as the
+    # offending token — upstream's `ListOfShapes` reports `syntax error (})`.
     err=_extrude_error("""
         Point(1) = {0,0,0,1};
         Extrude {0,0,1} { Point{1} }
         """)
     @test err isa ArgumentError
-    @test occursin("semicolon",sprint(showerror,err))
+    @test occursin("syntax error (})",sprint(showerror,err))
 
     err=_extrude_error("""
         Point(1) = {0,0,0,1};

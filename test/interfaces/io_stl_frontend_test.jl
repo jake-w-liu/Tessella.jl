@@ -56,8 +56,12 @@ end
 
 function _geo_error(source::AbstractString;mesh_dim=0)
     try
-        _execute_geo_source(source;mesh_dim)
-        return nothing
+        ex=_execute_geo_source(source;mesh_dim)
+        # Recoverable `Error   :` diagnostics surface through
+        # `exec.errors`, not a throw — re-materialize them so the
+        # assertions below keep checking the upstream text.
+        !isempty(ex.errors) ?
+            ArgumentError(join(ex.errors,"\n")) : nothing
     catch err
         return err
     end
@@ -177,7 +181,7 @@ Curve Loop(2) = {5};
         Extrude { Surface{1}; } Using Wire {2}
         """)
     @test err isa ArgumentError
-    @test occursin("pipe",sprint(showerror,err))
+    @test occursin("Pipe only available",sprint(showerror,err))
 
     r=_execute_geo_source("SetFactory(\"OpenCASCADE\");\n" * _PIPE_SQUARE * """
         v[] = Extrude { Surface{1}; } Using Wire {2};
@@ -235,7 +239,7 @@ end
         Mesh 2;
         """)
     @test err isa ArgumentError
-    @test occursin("boundary-layer",sprint(showerror,err))
+    @test occursin("admits no layer row",sprint(showerror,err))
 
     err=_geo_error(square * """
         Field[1] = MathEval;

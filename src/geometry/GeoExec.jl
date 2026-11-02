@@ -90,7 +90,7 @@ using ..IO: _MAX_GEO_LIST_ITEMS, _MAX_GEO_SCAN_NESTING
 using ..IO: _geo_context_set_scalar!, _geo_context_set_list!
 using ..IO: _geo_apply_list_assignment!, _geo_list_term_values
 using ..IO: _geo_brace_terminated_statement, _geo_extrude_shape_group,
-            _geo_extrude_pipe_candidate
+            _geo_extrude_pipe_candidate, _geo_extrude_pending_params
 using ..IO: _GeoTagAllocatorState, _geo_context_refresh_allocators!
 using ..IO: _geo_allocator_observe_statement!,_geo_allocator_resync_model!
 using ..IO: _geo_allocator_delete_entities!, _geo_allocator_reset_model!
@@ -554,8 +554,13 @@ function _geo_exec_statements(stream::Base.IO)
     line_lfs=Bool[]
     # `Extrude {shapes}` is `}`-complete but may still take the `Using Wire`
     # pipe suffix — its emit is deferred until the next real token, even
-    # across line boundaries.
+    # across line boundaries. `extrude_pending_committed` remembers whether
+    # the held group carried an `ExtrudeParameters` block: the boundary-layer
+    # production completed at `}` (emit, like upstream's already-run action),
+    # while a bare shape list is only the pipe prefix — a non-`Using`
+    # lookahead is the `syntax error` token and stays inside the statement.
     extrude_pending=false
+    extrude_pending_committed=false
     # Emit the buffer as a statement plus its `(line0, newline-offsets)`
     # pair: leading blanks trim first, so the recorded offsets shift into
     # statement coordinates.
@@ -614,7 +619,13 @@ function _geo_exec_statements(stream::Base.IO)
                !isspace(c) && !(c=='/' && (nextc=='/' || nextc=='*'))
                 extrude_pending=false
                 if !(c=='U' &&
-                     match(r"^Using\b",SubString(raw,i,last))!==nothing)
+                     match(r"^Using\b",SubString(raw,i,last))!==nothing) &&
+                   extrude_pending_committed
+                    # A completed `ExtrudeParameters` production ends at the
+                    # `}` like upstream — the lookahead starts a fresh
+                    # statement. A bare shape list instead glues the token on:
+                    # `;`, `}`, or the next statement's head is the syntax-
+                    # error token the statement's execution reports.
                     emit!()
                 end
             end
@@ -662,6 +673,8 @@ function _geo_exec_statements(stream::Base.IO)
                         # Possibly `Extrude {shapes} Using Wire {expr}` —
                         # hold the emit until the next real token.
                         extrude_pending=true
+                        extrude_pending_committed=_geo_extrude_pending_params(
+                            String(buf.data[1:position(buf)]))
                     else
                         emit!()
                     end
@@ -4557,11 +4570,14 @@ function _geo_extrude_element!(m::GeoModel, element::AbstractString,
     elseif name in ("Extrude","Translate","Rotate","Dilate","Symmetry","Affine",
                     "Duplicata","Boundary","CombinedBoundary",
                     "OrientedBoundary","OrientedCombinedBoundary",
-                    "PointsOf","Split","Intersect","Closest")
+                    "PointsOf","Split","Intersect","Closest","BoundaryLayer")
         # `ListOfShapes` contains entity selectors and Shape definitions,
-        # never Transform or Extrude productions. Extrude expressions are
-        # still valid inside an entity's numeric tag list (`Point{Extrude
-        # {...}{Point{1};}};`), where the value-term hook evaluates them.
+        # never Transform or Extrude productions — and `BoundaryLayer` is a
+        # field keyword, not an ExtrudeParameter: `Extrude {shapes;
+        # BoundaryLayer{...}}` errors `syntax error (BoundaryLayer)` upstream.
+        # Extrude expressions are still valid inside an entity's numeric tag
+        # list (`Point{Extrude {...}{Point{1};}};`), where the value-term
+        # hook evaluates them.
         _geo_syntax_abort(name)
     end
     # Gmsh's Extrude production is `ListOfShapes ExtrudeParameters`: after
@@ -4590,9 +4606,20 @@ function _geo_extrude_shape_list!(m::GeoModel, body::AbstractString,
     blmeta=_GEO_EXTRUDE_BLMETA
     entities=NTuple{2,Int}[]
     allow_shapes=true
-    isempty(strip(body)) && return (entities,params,blmeta)
-    for element in _geo_exec_topology_query_blocks(
-            body,"Extrude shape list",caller)
+    isempty(strip(body)) && return (entities,params,blmeta,false)
+    blocks=try
+        _geo_exec_topology_query_blocks(body,"Extrude shape list",caller)
+    catch err
+        err isa InterruptException && rethrow()
+        # A `Kind{..}` entry missing its `;` leaves the group's own `}` as
+        # the offending token — the same `syntax error (})` upstream's
+        # `ListOfShapes` reports for `Extrude {Surface{1}}`.
+        err isa ArgumentError &&
+            occursin("must end with a semicolon",sprint(showerror,err)) &&
+            _geo_syntax_abort("}")
+        rethrow()
+    end
+    for element in blocks
         entries,params,blmeta=_geo_extrude_element!(
             m,element,context,params,caller,allocator_state;
             allow_shapes=allow_shapes,blmeta=blmeta)
@@ -4604,7 +4631,7 @@ function _geo_extrude_shape_list!(m::GeoModel, body::AbstractString,
         length(entities)<=_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
             "$caller: shape list expands beyond $_MAX_GEO_LIST_ITEMS entities"))
     end
-    return (entities,params,blmeta)
+    return (entities,params,blmeta,!allow_shapes)
 end
 
 # ── `Extrude {shapes; params}` — `BOUNDARY_LAYER` ────────────────────────────
@@ -5126,7 +5153,11 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
     source=String(strip(raw))
     match(r"^Extrude\b",source)===nothing && return nothing
     caller="execute_geo: Extrude"
-    endswith(source,";") &&
+    # The statement's own `;` was consumed ahead of shape parsing — the same
+    # `;` upstream's lexer hands the parser as the next lookahead once the
+    # `}`-closed prefix is on the stack.
+    terminated=endswith(source,";")
+    terminated &&
         (source=String(strip(source[firstindex(source):prevind(source,end)])))
     rest=String(strip(source[nextind(source,firstindex(source),7):end]))
     delta=(0.0,0.0,0.0);sign=1.0;shapes=nothing;nvec=0;revolve=nothing
@@ -5166,12 +5197,14 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
             break
         end
     end
-    if match(r"^Using\b",rest)!==nothing
-        return _geo_exec_extrude_pipe!(m,rest,shapes,nvec,context,caller,
+    if !isempty(rest)
+        # Tokens survived past the last `}` — the `Using Wire` pipe suffix or
+        # a bison error lookahead after a completed production (`error tEND`
+        # swallows it to `;`, so no result is ever assigned).
+        return _geo_exec_extrude_tail!(m,rest,shapes,delta,revolve,nvec,
+                                       terminated,context,caller,
                                        allocator_state)
     end
-    isempty(rest) || throw(ArgumentError(
-        "$caller: unexpected text after the shape list"))
     shapes===nothing && throw(ArgumentError(
         "$caller: expected a `{shape list}` group"))
     (nvec==0 || revolve===nothing || delta==(0.0,0.0,0.0)) ||
@@ -5179,8 +5212,89 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
     # Gmsh.y's `ListOfShapes` parses before the parser action runs — surface
     # its errors ahead of the boundary-layer/`TRANSLATE_ROTATE` gates like
     # upstream, whose OCC gate also sits between the two.
-    entities,params,blmeta=_geo_extrude_shape_list!(m,shapes,context,caller,
-                                                    allocator_state)
+    entities,params,blmeta,saw_params=_geo_extrude_shape_list!(
+        m,shapes,context,caller,allocator_state)
+    if nvec==0 && !saw_params
+        # `Extrude {shapes}` alone is only the `Using Wire` pipe prefix —
+        # the statement's own terminator is the lookahead `Using` never
+        # became. The production leaves nothing behind. At EOF upstream's
+        # empty lookahead text prints `syntax error ()`.
+        _geo_syntax_abort(terminated ? ";" : "")
+    end
+    return _geo_exec_extrude_run!(m,entities,params,blmeta,delta,revolve,
+                                  nvec,context,caller,allocator_state)
+end
+
+# The shape-list tail of an `Extrude` statement: a `Using` continuation on a
+# bare shape list still parses as the pipe production, while everything else
+# (and any tail on an already-committed transform/boundary-layer arm) is the
+# lookahead bison rejected — `error tEND` then swallows the remainder, so the
+# arm's entities persist but the statement assigns no result.
+function _geo_exec_extrude_tail!(m::GeoModel,rest::AbstractString,shapes,
+                                 delta,revolve,nvec::Int,terminated::Bool,
+                                 context::_GeoNumericContext,
+                                 caller::AbstractString,allocator_state)
+    entities=NTuple{2,Int}[]
+    params=_GEO_EXTRUDE_PARAMS
+    blmeta=_GEO_EXTRUDE_BLMETA
+    saw_params=false
+    if shapes!==nothing
+        entities,params,blmeta,saw_params=_geo_extrude_shape_list!(
+            m,shapes,context,caller,allocator_state)
+    end
+    committed=nvec>0 || saw_params
+    if !committed && match(r"^Using\b",rest)!==nothing
+        # The pipe production shifts `Using` on a bare `ListOfShapes` —
+        # `Wire` must follow, then its `FExpr` brace group.
+        urest=String(strip(rest[nextind(rest,firstindex(rest),5):end]))
+        la_token(s)=isempty(strip(s)) ?
+            (terminated ? ";" : "") : _geo_stmt_head_token(s)
+        match(r"^Wire\b",urest)!==nothing ||
+            _geo_syntax_abort(la_token(urest))
+        wrest=String(strip(urest[nextind(urest,firstindex(urest),4):end]))
+        startswith(wrest,"{") ||
+            _geo_syntax_abort(la_token(wrest))
+        (wire_group,tail)=_geo_balanced_group(wrest,caller)
+        tags=_geo_exec_extrude_pipe_run!(m,entities,wire_group,context,
+                                         caller,allocator_state)
+        isempty(strip(tail)) || throw(ArgumentError(
+            # The pipe production completed at `}` — the next token is the
+            # syntax error, not a continuation. The ArgumentError path keeps
+            # the allocator observer so the pipe's entities persist. The
+            # `execute_geo:` prefix strips in `_geo_stmt_error_text`.
+            "execute_geo: syntax error ($(_geo_stmt_head_token(tail)))"))
+        return tags
+    end
+    lookahead=_geo_stmt_head_token(rest)
+    if committed && shapes!==nothing
+        # The completed arm's action ran when `}` reduced — entities persist
+        # like upstream — before the bad lookahead is reported and the rest
+        # of the statement is discarded unassigned.
+        try
+            _geo_exec_extrude_run!(m,entities,params,blmeta,delta,revolve,
+                                   nvec,context,caller,allocator_state)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa _GeoSyntaxAbort && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_argerror_fatal(err) && rethrow()
+            _geo_yyerror!(context,_geo_stmt_error_text(err))
+        end
+        # `ArgumentError`, not `_GeoSyntaxAbort`: the arm ran, so the
+        # allocator observer must still see the statement — upstream's
+        # `error tEND` recovery also keeps the already-executed entities.
+        throw(ArgumentError("execute_geo: syntax error ($lookahead)"))
+    end
+    _geo_syntax_abort(lookahead)
+end
+
+# The `Extrude` parser action shared by the transform, revolve/twist and
+# boundary-layer arms: entity filtering, the kernel gates, and the model
+# call. Returns the flat `[top, body, laterals...]` tag list.
+function _geo_exec_extrude_run!(m::GeoModel,entities,params,blmeta,delta,
+                                revolve,nvec::Int,
+                                context::_GeoNumericContext,
+                                caller::AbstractString,allocator_state)
     # `GEO_Internals::extrude`/`ExtrudeShapes` silently skips tags that do
     # not resolve to a live entity — unlike the transform endpoints it
     # emits no per-entity diagnostic.
@@ -5382,45 +5496,28 @@ function _geo_occ_pipe_face!(m::GeoModel,tag::Int,kernel,caller)
     return fid
 end
 
-function _geo_exec_extrude_pipe!(m::GeoModel,rest::AbstractString,shapes,
-        nvec::Int,context::_GeoNumericContext,caller::AbstractString,
-        allocator_state)
-    nvec>0 && throw(ArgumentError(
-        "$caller: `Extrude .. Using Wire` does not take a motion or " *
-        "displacement group"))
-    urest=String(strip(rest[nextind(rest,firstindex(rest),5):end]))
-    match(r"^Wire\b",urest)===nothing && throw(ArgumentError(
-        "$caller: unsupported `Extrude .. Using` suffix (only " *
-        "`Using Wire {expr}` is supported)"))
-    wrest=String(strip(urest[nextind(urest,firstindex(urest),4):end]))
-    startswith(wrest,"{") || throw(ArgumentError(
-        "$caller: expected `Using Wire {expr}`"))
-    (wire_group,tail)=_geo_balanced_group(wrest,caller)
-    isempty(strip(tail)) || throw(ArgumentError(
-        "$caller: unexpected text after `Using Wire {..}`"))
-    shapes===nothing && throw(ArgumentError(
-        "$caller: expected a `{shape list}` group"))
-    # `ListOfShapes` resolves before the factory gate, matching the upstream
-    # parser action order (shape-list syntax and entity lookups surface first).
-    entities,params,blmeta=_geo_extrude_shape_list!(m,shapes,context,caller,
-                                                    allocator_state)
-    (allocator_state!==nothing &&
-        allocator_state.factory===:opencascade) || throw(ArgumentError(
-        "$caller: pipe extrusion `Extrude {..} Using Wire {..}` is " *
-        "OpenCASCADE-only"))
-    (isempty(params.layers) && isempty(params.heights) && !params.scale_last &&
-        !params.recombine && params.quad_to_tri===:none &&
-        !params.recomb_laterals) || throw(ArgumentError(
-        "$caller: `Extrude .. Using Wire` with mesh parameters " *
-        "(Layers/Recombine/QuadTri*/ScaleLast) is not implemented"))
+# `Extrude {shapes} Using Wire {expr}` — upstream's `addPipe` action. The
+# `ListOfShapes` already resolved before this arm runs; the OCC factory gate
+# sits inside the action, and a failed `addPipe` leaves `r=false` — upstream
+# then reports `Could not extrude shapes` and the production still assigns
+# its (empty) result.
+function _geo_exec_extrude_pipe_run!(m::GeoModel,entities,wire_group,
+        context::_GeoNumericContext,caller::AbstractString,allocator_state)
+    # `Using Wire '{' FExpr '}'` — the tag expression reduces inside the
+    # braces, ahead of the action's OCC gate (`yymsg` "Pipe only available
+    # with OpenCASCADE geometry kernel") like upstream's token order.
     wire_values=_geo_exec_numeric_values(wire_group,context,
                                          "$caller Using Wire")
     length(wire_values)==1 || throw(ArgumentError(
         "$caller: `Using Wire {expr}` expects one wire tag, got " *
         "$(length(wire_values))"))
     wire_tag=_geo_signed_gmsh_int_value(wire_values[1],"$caller Using Wire")
-    wire_tag>0 || throw(ArgumentError(
-        "$caller: `Using Wire` tag must be positive (got $wire_tag)"))
+    if allocator_state===nothing ||
+            allocator_state.factory!==:opencascade
+        _geo_yyerror!(context,
+            "Pipe only available with OpenCASCADE geometry kernel")
+        return Float64[]
+    end
     kernel=m.occ_kernel
     # Keep kernel tag allocation ahead of every `.geo` namespace it may emit:
     # entity maxima per dimension, loop tags for wires, and surface-loop tags
@@ -5432,21 +5529,36 @@ function _geo_exec_extrude_pipe!(m::GeoModel,rest::AbstractString,shapes,
         (kernel.maxima[2]=max(kernel.maxima[2],maximum(keys(m.loops))))
     isempty(m.surface_loops) ||
         (kernel.maxima[1]=max(kernel.maxima[1],maximum(keys(m.surface_loops))))
-    _geo_occ_pipe_wire!(m,wire_tag,kernel,caller)
+    haskey(m.loops,wire_tag) || (
+        _geo_yyerror!(context,
+            "Unknown OpenCASCADE wire with tag $wire_tag");
+        _geo_yyerror!(context,"Could not extrude shapes");
+        return Float64[])
     out=NTuple{2,Int}[]
-    for (dim,tag) in entities
-        if dim==2
-            _geo_occ_pipe_face!(m,tag,kernel,caller)
-            append!(out,Model._model_occ_add_pipe!(m,-1,(2,tag),wire_tag))
-        elseif dim==1
-            wtag=_geo_occ_pipe_profile_wire!(m,tag,kernel,caller)
-            append!(out,Model._model_occ_add_pipe!(m,-1,wtag,wire_tag))
-        else
-            throw(ArgumentError(
-                "$caller: cannot pipe-extrude $(_entity_label(dim))[$tag]"))
+    try
+        _geo_occ_pipe_wire!(m,wire_tag,kernel,caller)
+        for (dim,tag) in entities
+            if dim==2
+                _geo_occ_pipe_face!(m,tag,kernel,caller)
+                append!(out,Model._model_occ_add_pipe!(m,-1,(2,tag),wire_tag))
+            elseif dim==1
+                wtag=_geo_occ_pipe_profile_wire!(m,tag,kernel,caller)
+                append!(out,Model._model_occ_add_pipe!(m,-1,wtag,wire_tag))
+            else
+                throw(ArgumentError(
+                    "$caller: cannot pipe-extrude $(_entity_label(dim))[$tag]"))
+            end
         end
+        Model._model_occ_synchronize!(m)
+    catch err
+        err isa InterruptException && rethrow()
+        err isa _GeoSyntaxAbort && rethrow()
+        err isa ArgumentError || rethrow()
+        _geo_argerror_fatal(err) && rethrow()
+        _geo_yyerror!(context,_geo_stmt_error_text(err))
+        _geo_yyerror!(context,"Could not extrude shapes")
+        return Float64[]
     end
-    Model._model_occ_synchronize!(m)
     context.geo_changed=true
     return Float64[Float64(t) for (_,t) in out]
 end

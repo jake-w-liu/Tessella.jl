@@ -9464,6 +9464,53 @@ function _geo_extrude_shape_group(body::AbstractString)
               "QuadTriNoNewVerts|RecombLaterals|Using|Hole)\\b"),b)!==nothing
 end
 
+# The `ExtrudeParameters` heads upstream accepts inside the shape-list braces
+# (`tExtrude '{' ListOfShapes ExtrudeParameters '}'`); `BoundaryLayer` is a
+# field keyword, not a parameter — it errors inside the list upstream.
+const _GEO_EXTRUDE_PARAM_HEADS=("Layers","Recombine","ScaleLast",
+    "ScaleLastLayer","QuadTriAddVerts","QuadTriNoNewVerts",
+    "RecombLaterals","Using","Hole")
+
+# Does the `Extrude { ... }` group contain an `ExtrudeParameter` block? The
+# answer selects which production the `}` completed: parameters commit the
+# boundary-layer arm (its action already ran — a following statement token
+# parses independently), while a pure shape list is only the `Using Wire`
+# pipe prefix — the lookahead after `}` either shifts `Using` or is an
+# upstream syntax error.
+function _geo_extrude_group_params(body::AbstractString)
+    depth=0;blk=IOBuffer();i=firstindex(body);last=lastindex(body)
+    function head_is_param()
+        s=strip(String(take!(blk)))
+        isempty(s) && return false
+        hm=match(r"^[A-Za-z_][A-Za-z0-9_]*",s)
+        return hm!==nothing && hm.match in _GEO_EXTRUDE_PARAM_HEADS
+    end
+    while i<=last
+        c=body[i]
+        if c=='{'
+            depth+=1; write(blk,c)
+        elseif c=='}'
+            depth-=1; write(blk,c)
+        elseif c==';' && depth==0
+            head_is_param() && return true
+        else
+            write(blk,c)
+        end
+        i=nextind(body,i)
+    end
+    return head_is_param()
+end
+
+# The held `Extrude {..}` text's own parameter check — reads the first
+# brace group after `Extrude` (`_geo_extrude_pipe_candidate` guarantees it
+# is the shape-list group and nothing follows it yet).
+function _geo_extrude_pending_params(stmt::AbstractString)
+    rest=String(strip(stmt[nextind(stmt,firstindex(stmt),7):end]))
+    grp=_geo_brace_group(rest)
+    grp===nothing && return false
+    return _geo_extrude_group_params(grp[1])
+end
+
 # Consume one balanced `{...}` group at the start of `rest` — returns
 # `(body, tail)` or `nothing` when `rest` does not open with a balanced
 # group.
@@ -9601,8 +9648,13 @@ function _scan_geo_statements(consume,stream::Base.IO)
     depth=0
     # `Extrude {shapes}` is `}`-complete but may still take the `Using Wire`
     # pipe suffix — its emit is deferred until the next real token, even
-    # across line boundaries.
+    # across line boundaries. `extrude_pending_committed` remembers whether
+    # the held group carried an `ExtrudeParameters` block: the boundary-layer
+    # production completed at `}` (emit), while a bare shape list is only the
+    # pipe prefix — a non-`Using` lookahead is the syntax-error token and
+    # stays inside the statement.
     extrude_pending=false
+    extrude_pending_committed=false
     for raw in eachline(stream)
         i=firstindex(raw);lastindex_raw=lastindex(raw)
         while i<=lastindex_raw
@@ -9624,7 +9676,8 @@ function _scan_geo_statements(consume,stream::Base.IO)
                !isspace(c) && !(c=='/' && (nextc=='/' || nextc=='*'))
                 extrude_pending=false
                 if !(c=='U' && match(r"^Using\b",
-                        SubString(raw,i,lastindex_raw))!==nothing)
+                        SubString(raw,i,lastindex_raw))!==nothing) &&
+                   extrude_pending_committed
                     statement=strip(String(take!(buffer)))
                     isempty(statement) || consume(statement)
                     buf_has_content=false
@@ -9662,6 +9715,8 @@ function _scan_geo_statements(consume,stream::Base.IO)
                         # Possibly `Extrude {shapes} Using Wire {expr}` —
                         # hold the emit until the next real token.
                         extrude_pending=true
+                        extrude_pending_committed=_geo_extrude_pending_params(
+                            String(buffer.data[1:position(buffer)]))
                     else
                         statement=strip(String(take!(buffer)))
                         isempty(statement) || consume(statement)

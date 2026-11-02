@@ -24,6 +24,64 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### LAY02 `.geo` `Extrude` grammar — committed-vs-bare productions, `Using Wire` pipe routing, upstream diagnostics (2026-11-02)
+
+Faithful reproduction of Gmsh 4.15.2's `Extrude` grammar distinction between
+the bare `ListOfShapes` pipe prefix and the committed parameterized
+(boundary-layer/transform) arms, oracle-verified on the 4.15.2 CLI.
+
+- **Grammar.** `tExtrude '{' ListOfShapes '}' tUsing tWire '{' FExpr '}'`
+  is a distinct production from the parameterized boundary-layer arm: an
+  `Extrude` group containing `ExtrudeParameters` (`Layers`, `Recombine`,
+  `ScaleLast`, `QuadTri*`, `Using`, `Hole`) commits at its closing `}` —
+  a following token is an independent statement (statement context) or a
+  syntax error (expression context) — while a bare shape list stays open
+  only for `Using Wire`. Both splitters (`_geo_exec_statements`,
+  `_scan_geo_statements`) hold a `}`-closed *bare* `Extrude {shapes}`
+  pending the next real token and emit a committed group immediately.
+- **Single execution.** `_geo_exec_extrude_term`/`_geo_exec_extrude_tail!`/
+  `_geo_exec_extrude_run!`/`_geo_exec_extrude_pipe_run!` restructure the
+  action so a side-effectful arm runs exactly once even when the exec hook
+  is reached through both numeric-list evaluation paths. Committed arms
+  throw `ArgumentError("execute_geo: syntax error (<lookahead>)")` so the
+  allocator observer keeps already-created entities (upstream's
+  `error tEND` recovery); pre-action failures stay `_GeoSyntaxAbort`.
+- **Upstream diagnostics.** `BoundaryLayer` inside a shape list →
+  `syntax error (BoundaryLayer)`; missing shape-list `;` →
+  `syntax error (})`; bare EOF → `syntax error ()`; bare `;` lookahead →
+  `syntax error (;)`; built-in `Using Wire` →
+  `Pipe only available with OpenCASCADE geometry kernel`; the OCC
+  boundary-layer arm →
+  `Boundary layer extrusion not available with OpenCASCADE geometry kernel`.
+- **Combined pipe+BL rejected like upstream.** Oracle (OCC):
+  `Extrude {Surface{10}; Layers{3};} Using Wire{1000}` logs the
+  boundary-layer OCC diagnostic then `syntax error (Using)`; under the
+  built-in factory the arm executes and `Using` still reports
+  `syntax error (Using)`. Tessella reproduces both streams and keeps the
+  arm's entities in the latter case.
+- **Pipe.** `Using Wire` binds profile+spine into the OCC kernel and runs
+  `_model_occ_add_pipe!`; the built-in factory rejects at upstream's gate.
+- **Verification.** Oracle `Ruled Surface{1,2}` cylinder + `Layers{3}`
+  `Mesh 2` → 285 nodes / 729 elements, `nout=10`; Tessella emits the same
+  10-entity layout `[52,1,23,…,51]` and plane-disk `Layers{1}` →
+  `[32,1,19,23,27,31]`. Fresh-process runs pay a multi-minute lazy-JIT
+  cost under `--compile=min -O0` (earlier probe "stalls" were compile
+  latency — the plane-disk and cylinder BL arms both complete; the
+  cylinder's whole-model `Mesh 2` then runs its remaining passes — it was
+  still mid-flight at ~400 s CPU when last observed, consistent with the
+  slow but finite behavior the BL suite's 5m36s shows, not a proven
+  infinite loop). Suites:
+  `geo_extrude_boundarylayer_test.jl` 290/290 exit 0;
+  `geo_extrude_test.jl` all groups exit 0; stale assertions
+  (`syntax error ()`, `syntax error (})`, `Pipe only available`) updated
+  to upstream text; `.msh3` `Save` rejection re-verified.
+
+**Not claimed.** Bounded slice only: the grammar/diagnostic distinctions
+and pipe routing are oracle-verified, but a full-cylinder BL mesh has not
+been bitwise-audited against the oracle, `t19.geo` (ThruSections + Fillet
++ pipe) is not run end-to-end, and recombination/periodic walls remain
+behind their existing loud diagnostics.
+
 ### LAY02 `.geo` BoundaryLayer Field — cross/mix/tail fans, ruled-surface grading, two-surface `setupFor2d` drop (2026-11-02)
 
 Resolves the prior LAY02 increment's stated residuals (negative fan

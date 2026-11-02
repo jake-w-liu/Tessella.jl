@@ -6604,3 +6604,46 @@ genuine matches differ by less than the tolerance).
 - Remaining audit items: `.msh2` binary edge cases and `.su2` variants,
   `.pos` custom view fields beyond statistics, MED/CGNS evaluation when a
   dependency story exists.
+
+## 2026-11-02 — LAY02 `.geo` `Extrude` grammar: committed-vs-bare productions + `Using Wire` pipe
+
+- Gmsh 4.15.2's `Extrude` grammar distinguishes a bare `ListOfShapes`
+  group (the `Using Wire {expr}` pipe prefix only) from a group carrying
+  `ExtrudeParameters` (`Layers`/`Recombine`/`ScaleLast`/`QuadTri*`/`Using`/
+  `Hole`), which commits its production at the closing `}`. Both
+  statement splitters (`_geo_exec_statements`, `_scan_geo_statements`)
+  now hold a bare `Extrude {shapes}` emit until the next real token and
+  emit committed groups immediately (`_geo_extrude_group_params`,
+  `_geo_extrude_pending_params`).
+- `_geo_exec_extrude_term`/`_geo_exec_extrude_tail!`/
+  `_geo_exec_extrude_run!`/`_geo_exec_extrude_pipe_run!` restructure the
+  action so a side-effectful arm executes once even through repeated
+  exec-hook evaluation; committed arms throw
+  `ArgumentError("execute_geo: syntax error (<lookahead>)")` so the
+  allocator observer retains the already-run entities like upstream's
+  `error tEND` recovery, while pre-action failures remain
+  `_GeoSyntaxAbort`.
+- Upstream diagnostics now emitted: `BoundaryLayer` inside a shape list →
+  `syntax error (BoundaryLayer)`; missing shape-list `;` →
+  `syntax error (})`; bare `Extrude {shapes}` at EOF → `syntax error ()`,
+  at `;` → `syntax error (;)`; built-in `Using Wire` → `Pipe only
+  available with OpenCASCADE geometry kernel`; OCC boundary-layer arm →
+  `Boundary layer extrusion not available with OpenCASCADE geometry
+  kernel`.
+- Combined pipe+BL is rejected exactly like upstream (oracle-verified):
+  OCC emits the BL OCC diagnostic then `syntax error (Using)`; built-in
+  runs the arm and still reports `syntax error (Using)`.
+- Oracle receipts: `Ruled Surface{1,2}` cylinder + `Layers{3}` `Mesh 2`
+  → 285 nodes/729 elements, `nout=10`; Tessella yields the same
+  10-entity layout `[52,1,23,…,51]`; plane-disk `Layers{1}` →
+  `[32,1,19,23,27,31]`. Caution: fresh `--compile=min -O0` processes pay
+  several minutes of lazy-JIT/recompile time (earlier probe "stalls"
+  were compile latency — both BL arms verified to complete; the
+  cylinder's whole-model `Mesh 2` was still mid-flight at ~400 s CPU,
+  slow-but-finite per the BL suite's 5m36s, not a proven infinite loop).
+- Suites: `geo_extrude_boundarylayer_test.jl` 290/290 exit 0;
+  `geo_extrude_test.jl` all groups exit 0 (stale assertions updated to
+  upstream text); `.msh3` `Save` rejection re-verified.
+- Not claimed: full-cylinder BL mesh is not bitwise-audited vs the
+  oracle; `t19.geo` is not run end-to-end; recombination/periodic walls
+  keep their existing loud diagnostics.
