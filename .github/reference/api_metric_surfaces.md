@@ -37,7 +37,7 @@ anisotropic background meshing. Tiny opaque 4.15.2 observations show that
 algorithm 6 can retain identical meshes when tensor directions change, so its
 scalar behavior is not treated as a confirmed parity defect.
 
-The opt-in [public functional fixture](../test/interfaces/api_metric_surface_functional_test.jl)
+The opt-in [public functional fixture](../../test/interfaces/api_metric_surface_functional_test.jl)
 checks independent metric bounds, direction changes, lower UID ownership,
 background factor/cap behavior, and failure atomicity. No default unstructured
 generation workload is added.

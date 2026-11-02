@@ -1,3 +1,6 @@
+> Historical record preserved from `AGENTS.md` at commit `a3c4ac37af44bcfe30b5bc7976a284b65f53a9a4`.
+> Dated claims below are historical evidence, not the current work plan. See [current development instructions](../README.md).
+
 # Repository continuation instructions
 
 Read `DEVIN_HANDOFF.md` first, then `HANDOFF.md` (the latest dated section), `STATUS.md`, `PLAN.md`, and

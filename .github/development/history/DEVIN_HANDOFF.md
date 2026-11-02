@@ -1,3 +1,6 @@
+> Historical record preserved from `DEVIN_HANDOFF.md` at commit `a3c4ac37af44bcfe30b5bc7976a284b65f53a9a4`.
+> Dated claims below are historical evidence, not the current work plan. See [current development instructions](../README.md).
+
 # Devin handoff — complete Tessella's remaining implementation
 
 ## 2026-11-02 RSF01 residual audit — full-quad shared-endpoint fix landed (`1eee640`, pushed)
@@ -599,7 +602,7 @@ the first two prepared designs or call a bounded test pass full parity.
 Use current `origin/main` in `https://github.com/jake-w-liu/Tessella.jl`.
 The final batch follows parent `da92208`; its commit is recorded by Git rather
 than a self-referential hash in this file. Read this checklist, [HANDOFF](HANDOFF.md),
-[STATUS](STATUS.md), [PLAN](PLAN.md), [AGENTS](AGENTS.md) and [test instructions](test/README.md).
+[STATUS](STATUS.md), [PLAN](PLAN.md), [AGENTS](REPOSITORY_INSTRUCTIONS.md) and [test instructions](../../../test/README.md).
 Resume from checked-out Main, not an old C:/tmp candidate. No implementation
 agent or Julia reader remains active at handoff. The ~450 untracked `_probe_*`/`_repro_*`/`_test_logs`/`_tmp*`/`probe_bl*`
 scratch files were cleaned up 2026-10-23 under explicit user instruction -
@@ -610,10 +613,10 @@ The final ordinary suite passes **224/224 on both supported runtimes**, actual
 exit 0: Julia 1.12.7 **45.21 s**, body 11.5 s; Julia 1.13.1 **38.38 s**, body 10.6 s.
 Both read the same 252 Source files, aggregate raw SHA256
 `6174da34f24ab27c6c3c0afe214d249b78e0a2b564eadb5f7101e9d34d3b2bf7`.
-Portable [Source map](test/artifacts/handoff_20261011/verified_source.json)
+Portable [Source map](../../../test/artifacts/handoff_20261011/verified_source.json)
 includes normalized LF hashes for fresh checkouts. Actual receipts:
-[Julia1.12](test/artifacts/handoff_20261011/ordinary_default_224_112_20261011.receipt.json)
-and [Julia1.13](test/artifacts/handoff_20261011/ordinary_default_224_113_20261011.receipt.json).
+[Julia1.12](../../../test/artifacts/handoff_20261011/ordinary_default_224_112_20261011.receipt.json)
+and [Julia1.13](../../../test/artifacts/handoff_20261011/ordinary_default_224_113_20261011.receipt.json).
 Their separate stdout/stderr logs are in that same committed artifact directory.
 The final documentation audit covers all 70 repository Markdown files:
 335 relative file links resolve, with no missing files or heading anchors.
@@ -623,9 +626,9 @@ Current instructions supersede the explicitly dated historical evidence.
 
 The latest batch implements and qualifies:
 
-- Direct STEP product-usage graphs and [SI source/placement length transport](docs/step_relationship_si_units.md):52 focused checks. Each source and both frame origins use their actual context factors; ordinary/mapped-root units remain separate work.
-- [Connected hybrid Regions with shared Tri interfaces and translated exterior periodic pairs](docs/shared_periodic_hybrids.md):63 focused checks,21Tet4+5Pyramid5 and positive volume1 per Region, actual primary/P2 maps and MSH4 identity transport.
-- [Atomic list/model view replacement](docs/view_representations.md):26 checks, obsolete representation rows removed, display/tag/name/held models preserved, serialization valid. Two cheap checks enter the default.
+- Direct STEP product-usage graphs and [SI source/placement length transport](../../reference/step_relationship_si_units.md):52 focused checks. Each source and both frame origins use their actual context factors; ordinary/mapped-root units remain separate work.
+- [Connected hybrid Regions with shared Tri interfaces and translated exterior periodic pairs](../../reference/shared_periodic_hybrids.md):63 focused checks,21Tet4+5Pyramid5 and positive volume1 per Region, actual primary/P2 maps and MSH4 identity transport.
+- [Atomic list/model view replacement](../../reference/view_representations.md):26 checks, obsolete representation rows removed, display/tag/name/held models preserved, serialization valid. Two cheap checks enter the default.
 
 Earlier landed features include atomic GEO/MSH/plain-linear POS open/merge,
 current-model MSH export, actual view-time metadata, list/model CSV/VTK,
@@ -641,8 +644,8 @@ are fixed. Linear cell factory renewal and optional renumbering are intentional.
 
 ## Next two prepared implementation designs
 
-1. ~~Nested STEP product usages.~~ **Implemented and verified (2026-10-11).** [Design](docs/handoff/nested_step_assemblies.md) executed in `BRepStepRelationships.jl`: the complete reachable acyclic single-root product graph is expanded along every root-to-leaf path, each edge binds its actual parent/child representations, AXIS2 frames and SI unit witnesses, physical rigid transforms compose in path order, leaf geometry scales once by its own factor, and separate occurrence identities are emitted per path within the MSH physical-name bound. See `docs/step_relationship_assemblies.md` and `test/geometry/brep_step_relationship_nested_functional_test.jl` (61 assertions) plus the default smoke. CAD02 follow-ons (multiple roots, multiple solids per leaf, mixed mapped/product graphs) are implemented below.
-2. ~~Proper rigid periodic hybrid pair.~~ **Implemented and verified (2026-10-11).** [Design](docs/handoff/meshing_remaining.md) executed in `_surface_periodic_constraints` and `_model_native_hybrid_periodic_boundary_certificate`: Surface-derived cross-side Curve relations route through the owned lower producer via existing `derived` provenance, the volume admission certifies the applied 3×4 map as proper rigid (finite, orthonormal, determinant+1 within `1e-12`), and every remaining UID-event/ownership/coordinate/incidence certificate is unchanged. Directly declared cross-surface Curve relations still reject explicitly. See `test/interfaces/api_rigid_periodic_hybrid_functional_test.jl` (61 assertions matching the [Rz90/Rz180 controls](test/artifacts/handoff_20261011/native_rigid_periodic_probe.json): 24Tet4+6Pyramid5, volume1, 4/9 primary/P2 pairs, MSH4 transport, atomic invalid-map rejections) plus the `rigid_periodic_smoke.jl` default check; default suite 231/231. PER02 follow-ons (multiple directions/pairs, general affine, cross-Region contexts) remain open below.
+1. ~~Nested STEP product usages.~~ **Implemented and verified (2026-10-11).** [Design](designs/nested_step_assemblies.md) executed in `BRepStepRelationships.jl`: the complete reachable acyclic single-root product graph is expanded along every root-to-leaf path, each edge binds its actual parent/child representations, AXIS2 frames and SI unit witnesses, physical rigid transforms compose in path order, leaf geometry scales once by its own factor, and separate occurrence identities are emitted per path within the MSH physical-name bound. See `docs/step_relationship_assemblies.md` and `test/geometry/brep_step_relationship_nested_functional_test.jl` (61 assertions) plus the default smoke. CAD02 follow-ons (multiple roots, multiple solids per leaf, mixed mapped/product graphs) are implemented below.
+2. ~~Proper rigid periodic hybrid pair.~~ **Implemented and verified (2026-10-11).** [Design](designs/meshing_remaining.md) executed in `_surface_periodic_constraints` and `_model_native_hybrid_periodic_boundary_certificate`: Surface-derived cross-side Curve relations route through the owned lower producer via existing `derived` provenance, the volume admission certifies the applied 3×4 map as proper rigid (finite, orthonormal, determinant+1 within `1e-12`), and every remaining UID-event/ownership/coordinate/incidence certificate is unchanged. Directly declared cross-surface Curve relations still reject explicitly. See `test/interfaces/api_rigid_periodic_hybrid_functional_test.jl` (61 assertions matching the [Rz90/Rz180 controls](../../../test/artifacts/handoff_20261011/native_rigid_periodic_probe.json): 24Tet4+6Pyramid5, volume1, 4/9 primary/P2 pairs, MSH4 transport, atomic invalid-map rejections) plus the `rigid_periodic_smoke.jl` default check; default suite 231/231. PER02 follow-ons (multiple directions/pairs, general affine, cross-Region contexts) remain open below.
 
 These are design/evidence packets, not already qualified Source. Review and
 implement isolated deltas before promoting them. Local C:/tmp originals are
@@ -687,7 +690,7 @@ ledger rather than silently narrowing the target. Prioritize meshing/CAD value.
 ## Distinguish missing features from invalid witnesses
 
 - Shared-Quad two-Region Pyramid finalization is a pinned native unsupported case.
-- The native Quad-sheet probe returned only6 boundary Pyramids, zero Tets and no interior typed carrier. It is not evidence of successful constrained meshing. [Observation](test/artifacts/handoff_20261011/native_quad_sheet_probe.json).
+- The native Quad-sheet probe returned only6 boundary Pyramids, zero Tets and no interior typed carrier. It is not evidence of successful constrained meshing. [Observation](../../../test/artifacts/handoff_20261011/native_quad_sheet_probe.json).
 - Region reverse/smoothing and certain Cartesian-scale observations were native no-ops. Do not invent a missing successful feature from their spelling.
 - Native formats cannot encode every embedding/physical/variable-connectivity relation. Preserve supported actual records and precise format limits; never drop nodes or fabricate metadata.
 - Atomic import/conversion errors intentionally improve on native partial publication. Preserve that contract.

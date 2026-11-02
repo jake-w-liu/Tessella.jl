@@ -1,3 +1,6 @@
+> Historical record preserved from `HANDOFF.md` at commit `a3c4ac37af44bcfe30b5bc7976a284b65f53a9a4`.
+> Dated claims below are historical evidence, not the current work plan. See [current development instructions](../README.md).
+
 # Handoff — Tessella.jl work state
 
 ## Takeover (2026-10-11)
@@ -10,7 +13,7 @@ The user's current testing instruction supersedes the exhaustive closure
 requirements in older dated handoffs. Routine tests must check functionality on
 small real fixtures. Full native-oracle sweeps, source/AST audits, memory stress,
 benchmarks, the 22 HFSS cases, aggregate validation, and external ASCENT solves
-are opt-in campaigns. See [test/README.md](test/README.md).
+are opt-in campaigns. See [test/README.md](../../../test/README.md).
 
 ### OPT01 optimizer parity slice (working tree)
 
@@ -1497,9 +1500,9 @@ The final ordinary suite passes **224/224 on BOTH** supported runtimes, actual
 exit0 on the same frozen252 Source files: Julia1.12.7 **45.21 s/body11.5 s**;
 Julia1.13.1 **38.38 s/body10.6 s**. Source aggregate SHA256:
 `6174da34f24ab27c6c3c0afe214d249b78e0a2b564eadb5f7101e9d34d3b2bf7`.
-Committed [Source map](test/artifacts/handoff_20261011/verified_source.json),
-[Julia1.12 receipt](test/artifacts/handoff_20261011/ordinary_default_224_112_20261011.receipt.json)
-and [Julia1.13 receipt](test/artifacts/handoff_20261011/ordinary_default_224_113_20261011.receipt.json)
+Committed [Source map](../../../test/artifacts/handoff_20261011/verified_source.json),
+[Julia1.12 receipt](../../../test/artifacts/handoff_20261011/ordinary_default_224_112_20261011.receipt.json)
+and [Julia1.13 receipt](../../../test/artifacts/handoff_20261011/ordinary_default_224_113_20261011.receipt.json)
 allow the next owner to inspect actual outcomes on another machine.
 The final documentation audit covers70 Markdown files and335 relative links,
 with no missing files or heading anchors. Current instructions replace dated
@@ -1507,15 +1510,15 @@ historical continuation queues; those records retain their original evidence.
 
 This batch integrates four reviewed Source deltas and bounded qualifications:
 
-- [STEP relationship SI units](docs/step_relationship_si_units.md):52/52,
+- [STEP relationship SI units](../../reference/step_relationship_si_units.md):52/52,
   Julia1.13 actual0/40.37 s including loading. Source geometry and both placement
   origins use their actual context factors; full graph/shell/volume/UID guards
   remain. Ordinary/mapped unit conversion and nested products remain open.
-- [Shared-Tri periodic hybrid components](docs/shared_periodic_hybrids.md):63/63,
+- [Shared-Tri periodic hybrid components](../../reference/shared_periodic_hybrids.md):63/63,
   Julia1.12 actual0/36.98 s. Two adjacent Regions retain uniquely owned exterior
   translated pairs,21Tet4+5Pyramid5/volume1 each, actual4/9 primary/P2 maps and
   exact MSH4 identity transport. General affine/shared periodic Faces remain open.
-- [Atomic view representation replacement](docs/view_representations.md):26/26,
+- [Atomic view representation replacement](../../reference/view_representations.md):26/26,
   Julia1.13 actual0/37.08 s. Valid list/model changes discard obsolete data after
   prevalidation, preserving view identity/display state/held models. Two cheap
   assertions enter the default; no new default Volume or SDK workload is added.
@@ -1523,8 +1526,8 @@ This batch integrates four reviewed Source deltas and bounded qualifications:
 This verified batch follows published parent `da92208`. Normal commit/push to
 `main` and an exact remote SHA check publish its successor. No implementation
 agent or owned runtime remains active. Unrelated untracked files are preserved.
-Next designs are [nested STEP assemblies](docs/handoff/nested_step_assemblies.md)
-and [proper-rigid periodic hybrids](docs/handoff/meshing_remaining.md); both are
+Next designs are [nested STEP assemblies](designs/nested_step_assemblies.md)
+and [proper-rigid periodic hybrids](designs/meshing_remaining.md); both are
 unimplemented design/evidence packets. Devin must complete the full checklist,
 including the other CAD/meshing/field/layer/high-order/partition/API/UI/format and
 conformance gaps, before declaring Tessella complete.
@@ -1544,7 +1547,7 @@ Reviewed packets and actual qualifications:
 
 - `C:/tmp/tessella_step_relationship_assembly_20261011/selected_relationship_assembly_packet.json`:
   two Source paths, opt-in54, two literal STEP fixtures and
-  [direct assembly scope](docs/step_relationship_assemblies.md). Complete
+  [direct assembly scope](../../reference/step_relationship_assemblies.md). Complete
   SDR/PDS/PD/NAUO/CDSR/RRWT/IDT reference inventories bind actual child/parent
   frames and distinct3D contexts with the same actual millimetre/radian/
   steradian declarations. Source definitions are not emitted as extra solids.
@@ -1554,7 +1557,7 @@ Reviewed packets and actual qualifications:
   certificates remain. A tiny CENTI observation proved real scale conversion
   is required; this first qualified Source guards unsupported units.
 - `C:/tmp/tessella_takeover_view_time_20261011/selected_view_time_packet.json`:
-  three Source paths, opt-in35+default2 and [time scope](docs/view_time.md).
+  three Source paths, opt-in35+default2 and [time scope](../../reference/view_time.md).
   NbTimeStep derives from actual list/model data; setters are ignored. Explicit
   TimeStep truncates and wraps boundary indices; nonnegative Time finds the
   nearest physical time with first-index ties. Data updates retain display
@@ -1597,14 +1600,14 @@ Reviewed selected packets and actual bounded qualifications:
 
 - `C:/tmp/tessella_step_cartesian_rigid_20261011/selected_cartesian_rigid_packet.json`:
   one Source path, opt-in43 and two scope docs. The
-  [proper unit-scale Cartesian target](docs/step_cartesian_rigid_targets.md)
+  [proper unit-scale Cartesian target](../../reference/step_cartesian_rigid_targets.md)
   uses its actual direct basis/origin, retaining mapped-origin validation.
   Five public import controls, one rigid two-box fill, exact MSH4 UID/owner/
   ordered-node transport and six errors pass43/43, Julia1.12 actual0/5.43 s warm.
   Nonunit scaling and general relationship assemblies remain outside this packet.
   Three test-only failed receipts are preserved; Source remained frozen.
 - `C:/tmp/tessella_hybrid_polygon_sheet_20261011/ready.json`:
-  two Source paths, opt-in48 and [polygonal scope](docs/hybrid_polygon_sheets.md).
+  two Source paths, opt-in48 and [polygonal scope](../../reference/hybrid_polygon_sheets.md).
   One actual endpoint-only planar3–6-vertex disk admits `n-2` Tri3 cells after
   connected-cycle/dual-graph, exact nonoverlap and unchanged planarity checks.
   Actual public pentagon/hexagon Volume fills pass full positive-volume,
@@ -1618,7 +1621,7 @@ Reviewed selected packets and actual bounded qualifications:
   numbering and diagnostic traces remain separate from the final green receipt.
 - `C:/tmp/tessella_takeover_pos_import_20261011/selected_session_pos_import_packet.json`:
   six Source paths, opt-in28+default2, one tiny fixture and
-  [POS session scope](docs/session_pos_import.md). All24 plain linear scalar/
+  [POS session scope](../../reference/session_pos_import.md). All24 plain linear scalar/
   vector/tensor families retain actual names, coordinates, values and physical
   times. Open publishes a real empty model; merge adds views only. Held models,
   binary model-view continuity and atomic errors pass30/30, Julia1.13 actual0/
@@ -1649,7 +1652,7 @@ actual hybrid Volume, tensor production and solver campaigns remain opt-in.
 Reviewed packets and bounded qualifications:
 
 - `C:/tmp/tessella_takeover_api_metric_surface_20261011/ready.json`:
-  explicit [tensor API](docs/api_metric_surfaces.md), three Source paths,
+  explicit [tensor API](../../reference/api_metric_surfaces.md), three Source paths,
   opt-in47 and scope doc. Actual47/47, Julia1.13 exit0/49.80 s including loading.
   Selected tensor background, factor/caps once, exact retained lower cells,
   classified UID publication and regeneration pass. Earlier failures exposed
@@ -1657,7 +1660,7 @@ Reviewed packets and bounded qualifications:
   predecessor rows entering constructor capture; tensor-only transport fixes
   both. Ordinary generation and the native7/BAMG guard remain unchanged.
 - `C:/tmp/tessella_hybrid_periodic_batch_20261011/selected_periodic_batch_packet.json`:
-  three Source paths, opt-in74 and [periodic scope](docs/periodic_hybrid_boundaries.md).
+  three Source paths, opt-in74 and [periodic scope](../../reference/periodic_hybrid_boundaries.md).
   Actual74/74, Julia1.12 exit0/67.52 s. One translated actual copied Surface pair
   per separate hybrid Region, default Pyramid optimization and pre/post-volume
   lower certificates pass. Cross/shared Region, general affine and missing-copy
@@ -1665,7 +1668,7 @@ Reviewed packets and bounded qualifications:
   stores4 primary pairs. Native renumbering changes old interior tag roles.
   V1/V2 incorrect fixture assumptions remain archived; Source stayed frozen.
 - `C:/tmp/tessella_takeover_model_merge_20261011/selected_model_merge_packet.json`:
-  five Source paths, opt-in46+default2 and [merge scope](docs/model_merge.md).
+  five Source paths, opt-in46+default2 and [merge scope](../../reference/model_merge.md).
   Actual48/48, Julia1.13 exit0/44.52 s. Current slot/name/filename/view bindings,
   literal MSH2/4 four encodings and UID metadata, seeded GEO entities/fields,
   periodic geometry before meshing, clearing commands and unchanged actual
@@ -1674,7 +1677,7 @@ Reviewed packets and bounded qualifications:
   raw-node held-writer error; the fixture uses public explicit cache rebuilding,
   preserving native lookup semantics. Parse and prior failed receipts remain.
 - `C:/tmp/tessella_cli_check_20261011/cli_check_v1.receipt.json`:
-  [read-only CLI MSH checking](docs/cli_controls.md), one Source path,
+  [read-only CLI MSH checking](../../reference/cli_controls.md), one Source path,
   opt-in20+default2. Actual exit0, Julia1.13/35.63 s including loading. All four
   encodings, unchanged files, duplicate/missing-reference errors and conflicting
   flags pass. This is structural validation, not curved-Jacobian certification.
@@ -1720,7 +1723,7 @@ Selected reviewed packets and bounded qualification:
   not a proven orphan bug. The final detached stage restores covered record
   mirrors using actual cache UIDs/parameters. The genuine empty-slot tuple-return
   bug was fixed. Earlier failed receipts and77-Source packet remain.
-  See [model opening](docs/model_import.md).
+  See [model opening](../../reference/model_import.md).
 - `C:/tmp/tessella_step_mapped_occurrences_20261011/selected_mapped_occurrences_packet.json`:
   two Source files, retained public-OCC-derived fixture, opt-in31+default2 and
   doc. Final33 pass Julia1.12 actual zero/37.27 s including30.65 s precompile;
@@ -1732,7 +1735,7 @@ Selected reviewed packets and bounded qualification:
   positive-fill/shell/independence/owner/UID/MSH4 certificates remain.
   Cartesian operators/general representation relationships stay guarded;
   later read-only8-field operator observations are future work, not this gate.
-  See [mapped STEP](docs/step_mapped_occurrences.md).
+  See [mapped STEP](../../reference/step_mapped_occurrences.md).
 - `C:/tmp/tessella_hybrid_planar_sheet_20261011/selected_planar_sheet_packet.json`:
   Surface488d7a94+Sizing412f30d7, opt-in49 and14, scope doc. Preceding axis-aligned
   two-Tri49 pass Julia1.12 actual zero/66.50 s including loading; original
@@ -1744,7 +1747,7 @@ Selected reviewed packets and bounded qualification:
   body8.17 s, without volume generation. Older49+40 qualify their preceding
   gate; the packet preserves that distinction. Both actual facets and all five
   sheet edges remain protected by the unchanged recovery/final certificates.
-  See [planar sheets](docs/hybrid_embedded_surfaces.md).
+  See [planar sheets](../../reference/hybrid_embedded_surfaces.md).
 - `C:/tmp/tessella_takeover_metric_surface_20261011/ready.json`:
   one Model include and new helper6d7475b5, opt-in33 and scope doc. Final33 pass
   Julia1.12 actual zero/5.82 s warm on unchanged Source. Explicit tensor Model
@@ -1753,7 +1756,7 @@ Selected reviewed packets and bounded qualification:
   Initial fixture target2.0 correctly rejected an actual TF interval norm
   2.0000000000052314; target2.01 corrects the fixture without weakening Source.
   Failed receipt/actual boundary dump remain. No default unstructured run.
-  See [variable tensor Surface](docs/metric_model_surfaces.md).
+  See [variable tensor Surface](../../reference/metric_model_surfaces.md).
 
 Root's scoped integration manifests are
 `test/tmp/integrated_{model_import,mapped_occurrences,planar_sheet,metric_surface}_paths_20261011.json`.
@@ -1785,13 +1788,13 @@ Exact reviewed packets and their scoped qualification:
   UIDs, periodic relations, partition/ghost metadata and retained model data
   are transported atomically. Final68 opt-in+2default pass Julia1.13,
   actual zero/5.22 s warm. Earlier failed physical-projection and payload-fixture
-  receipts remain. See [model export](docs/model_export.md).
+  receipts remain. See [model export](../../reference/model_export.md).
 - `C:/tmp/tessella_takeover_partition_open_seams_20261011/ready.json`:
   complete Tri3 BRep partition seams admit nonbranching open paths only where
   their endpoints are witnessed by actual original Surface borders. All
   interface Curve edges and Region facets remain fully certified. Final26
   plus closed-default2 pass Julia1.13, actual zero/35.98 s.
-  See [open seams](docs/partitioned_open_seams.md).
+  See [open seams](../../reference/partitioned_open_seams.md).
 - `C:/tmp/tessella_hybrid_embedded_surface_20261011/selected_embedded_surface_packet.json`:
   nine Source files retain one actual interior Tri3 Surface, its Point/Line
   boundary and real cell identities. Interior faces have multiplicity2 and
@@ -1799,7 +1802,7 @@ Exact reviewed packets and their scoped qualification:
   drive carving. Final40 pass Julia1.12 actual zero/58.33 s including loading;
   original Curve32 passes on that nine-file Source, actual zero/24.86 s warm.
   The initial sizing-guard failure remains preserved. These receipts precede
-  the collection extension below. See [embedded Surface](docs/hybrid_embedded_surfaces.md).
+  the collection extension below. See [embedded Surface](../../reference/hybrid_embedded_surfaces.md).
 - `C:/tmp/tessella_hybrid_multi_constraints_20261011/selected_multi_constraints_packet.json`:
   six Source files bind every actual Point/Curve witness to the same full
   current inventory and constructor, retain the union of actual UIDs and
@@ -1807,7 +1810,7 @@ Exact reviewed packets and their scoped qualification:
   including34.53 s compilation; two Points/two Curves retain four Line2 cells,
   66Tet4+6Pyr5 and positive unit volume. Original single-Curve32 passes on the
   collection Source, actual zero/26.80 s warm. Surface-containing collections
-  and embedded multi-Region contexts remain guarded. See [constraint collections](docs/hybrid_constraint_collections.md).
+  and embedded multi-Region contexts remain guarded. See [constraint collections](../../reference/hybrid_constraint_collections.md).
 - `C:/tmp/tessella_takeover_prismatic_fill_20261011/ready.json`:
   bounded rigid prismatic recognition uses actual paired cap rows, identical
   cap triangles and literal side diagonals to produce a staircase Tet fill.
@@ -1815,7 +1818,7 @@ Exact reviewed packets and their scoped qualification:
   Final30 pass Julia1.12 actual zero/22.09 s; rotated direct/public11 body3.1 s,
   fallback quarter-turn6 body17.1 s. The old rotated-hole timeout remains
   historical. Unequal cap supports stay on the certified general fallback;
-  no coordinates are moved. See [prismatic fill](docs/prismatic_fill.md).
+  no coordinates are moved. See [prismatic fill](../../reference/prismatic_fill.md).
 
 Main is frozen for these receipts. Selected path manifests are retained under
 `test/tmp/integrated_{open_seams,surface,model_export,prismatic,multi_constraints}_paths_20261011.json`.
@@ -2020,7 +2023,7 @@ adds `mesh_dim=1`, CLI `-1`,
 `-format msh2|msh4` and `-bin`; it writes the actual classified Curve product
 with physical names, periodic node maps and supported element order. List
 views export TXT/CSV/VTK with all supported components and time steps; see
-[format semantics](docs/list_view_exports.md). Public reverse applies only
+[format semantics](../../reference/list_view_exports.md). Public reverse applies only
 to Curves/Surfaces and smoothing only to Surfaces, so region-level setters
 are native no-ops. Direct `GeoModel` extensions and hybrid certificates remain
 unchanged. An obsolete extended negative-volume assertion was corrected.
@@ -2040,8 +2043,8 @@ Published `b92e87bbab652a3fb03da9729527aa03ca348f48` (remote verified)
 implements recognized independent multi-root
 STEP/IGES mesh imports, model CSV/VTK exports and one translated copied Surface
 pair in a single explicit hybrid Region, including retained constructors.
-See [CAD scope](docs/cad_mesh_imports.md), [model format scope](docs/model_view_exports.md)
-and [periodic scope](docs/periodic_hybrid_boundaries.md) for remaining restrictions.
+See [CAD scope](../../reference/cad_mesh_imports.md), [model format scope](../../reference/model_view_exports.md)
+and [periodic scope](../../reference/periodic_hybrid_boundaries.md) for remaining restrictions.
 
 Final isolated receipts: CAD 100/100 on Julia 1.13.1, actual exit 0 in 48.05 s;
 model formats 143/143 on Julia 1.12.7, actual exit 0 in 34.49 s. Root's integrated
@@ -2062,7 +2065,7 @@ The final CAD schema guard supersedes only the earlier 95-check candidate.
 
 Published `a36070f32d2594a94911c2e7efe905d1f1745105` (remote verified)
 adds forced sizing/order flags and standalone
-help/version commands; see [controls](docs/cli_controls.md). Its focused public
+help/version commands; see [controls](../../reference/cli_controls.md). Its focused public
 regression plus default checks pass 29 assertions, actual exit 0 in 4.08 s warm.
 The current standalone default passes 173/173, actual exit 0 in 5.71 s warm;
 body 5.3 s. No new cold package timing is claimed for this increment. Logs:
@@ -2090,8 +2093,8 @@ Source and pass 180/180, actual exit 0: Julia 1.12.7 38.97 s/body7.2 s;
 Julia 1.13.1 42.20 s/body6.2 s. Logs and receipts:
 `test/tmp/final_default_112_20261011.*` and `final_default_113_20261011.*`.
 Root's earlier integrated Julia1.12 view regression passed 109/109 in 6.18 s.
-See [CAD](docs/cad_mesh_imports.md), [view](docs/model_view_exports.md) and
-[embedded Point](docs/embedded_hybrid_points.md) scopes.
+See [CAD](../../reference/cad_mesh_imports.md), [view](../../reference/model_view_exports.md) and
+[embedded Point](../../reference/embedded_hybrid_points.md) scopes.
 
 The metric/IGES/Pyramid increment was normally pushed to `main` as
 `37587962aca9dd478d5fff653c957c4b2bfc2b11`; remote SHA verified. It adds
@@ -2128,9 +2131,9 @@ Frozen selected packets and focused actual-exit-0 evidence:
  preserves unrelated API state and CLI output on local unsupported-mode errors.
  No costly generation check was added to the default suite.
 
-See [metric grids](docs/constant_metric_boxes.md), [CAD imports](docs/cad_mesh_imports.md),
-[negative factors](docs/hybrid_normal_apices.md), [relocation](docs/hybrid_relocate_modes.md)
-and [frontend context](docs/geo_pyramid_option_scope.md). Existing refinement
+See [metric grids](../../reference/constant_metric_boxes.md), [CAD imports](../../reference/cad_mesh_imports.md),
+[negative factors](../../reference/hybrid_normal_apices.md), [relocation](../../reference/hybrid_relocate_modes.md)
+and [frontend context](../../reference/geo_pyramid_option_scope.md). Existing refinement
 and Surface meshing already consume directional metrics. Structured constant-
 tensor grids add genuine bounded generation, not full native metric parity.
 Never infer roadmap closure from a package check.

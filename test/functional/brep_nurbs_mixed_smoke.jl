@@ -20,7 +20,5 @@ let surface=import_step(joinpath(@__DIR__,"..","fixtures","brep_occ_nurbs_pcurve
     @test surface isa Tessella.Mesh && validate(surface).ok
     @test Tessella.MeshTypes.nnodes(surface)==85 && Tessella.MeshTypes.ntris(surface)==166
 end
-let filled=import_step(joinpath(@__DIR__,"..","fixtures","brep_occ_nurbs_sph_cap.step"))
-    @test filled isa Tessella.Mesh && validate(filled).ok && size(filled.tets,2)>0
-end
+# Full curved-cap recovery stays in geometry/brep_nurbs_mixed_test.jl (opt-in).
 end

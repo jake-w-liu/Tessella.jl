@@ -1,3 +1,6 @@
+> Historical record preserved from `DEVELOPMENT.md` at commit `a3c4ac37af44bcfe30b5bc7976a284b65f53a9a4`.
+> Dated claims below are historical evidence, not the current work plan. See [current development instructions](../README.md).
+
 # Tessella.jl — Development & CRC Discipline
 
 This project meshes geometry that a FEM solver trusts. **A mesh is evidence, not
@@ -105,7 +108,7 @@ their claimed scope; an ordinary package check does not require every campaign.
 Historical release/parity instructions in `HANDOFF.md` describe those campaigns
 and their evidence. They do not override the concise default suite. Any claim
 of parity or production qualification still needs evidence appropriate to that
-claim. See [`test/README.md`](test/README.md) for suite boundaries and commands.
+claim. See [`test/README.md`](../../../test/README.md) for suite boundaries and commands.
 
 ## Reproducibility
 

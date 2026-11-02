@@ -44,7 +44,7 @@ variable-metric volume generation. Constant-tensor box grids and existing
 directional surface/refinement pipelines retain their separate contracts.
 
 The opt-in
-[`model_metric_surface_functional_test.jl`](../test/geometry/model_metric_surface_functional_test.jl)
+[`model_metric_surface_functional_test.jl`](../../test/geometry/model_metric_surface_functional_test.jl)
 uses small actual model boundaries. It independently checks variable diagonal
 quadratic forms, swapped tensor directions, an oblique plane with cross terms,
 area and coordinate bounds, exact boundary UID transport, hole exclusion,

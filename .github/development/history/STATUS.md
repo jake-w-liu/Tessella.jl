@@ -1,3 +1,6 @@
+> Historical record preserved from `STATUS.md` at commit `a3c4ac37af44bcfe30b5bc7976a284b65f53a9a4`.
+> Dated claims below are historical evidence, not the current work plan. See [current development instructions](../README.md).
+
 # Tessella.jl status
 
 ASCENT integration and the external HFSS full-wave campaign are tracked separately in
@@ -5334,7 +5337,7 @@ P1–P6 differential conformance harness exists and stays **opt-in**:
   supplying the binding is unverified. The aggregate `run_all.jl`
   differential therefore cannot complete here, and the heavy sweeps
   (22 HFSS cases, allocation audits, native-oracle campaigns) stay opt-in
-  per [test/README.md](test/README.md).
+  per [test/README.md](../../../test/README.md).
 - Last recorded aggregate: 2026-08-21 `run_all.jl` exit 0 vs Gmsh 4.15.2
   with per-child P6 receipts (dated sections below);
   `validation/REPORT.md` is a generated historical snapshot that does not
@@ -5775,11 +5778,11 @@ has stopped for transfer; the next owner must complete every required work area.
 The final ordinary suite passes **224/224 on both Julia1.12/1.13**, actual exit0
 on the same frozen252 Source files: **45.21 s/body11.5 s** onJulia1.12.7 and
 **38.38 s/body10.6 s** onJulia1.13.1. Committed receipts and the exact Source map
-are under [the handoff artifacts](test/artifacts/handoff_20261011/verified_source.json).
+are under [the handoff artifacts](../../../test/artifacts/handoff_20261011/verified_source.json).
 
-[STEP relationship SI scaling](docs/step_relationship_si_units.md) passes52/52,
-Julia1.13 actual0/40.37 s; [shared-Tri periodic hybrid components](docs/shared_periodic_hybrids.md)
-pass63/63, Julia1.12 actual0/36.98 s; [atomic view representation replacement](docs/view_representations.md)
+[STEP relationship SI scaling](../../reference/step_relationship_si_units.md) passes52/52,
+Julia1.13 actual0/40.37 s; [shared-Tri periodic hybrid components](../../reference/shared_periodic_hybrids.md)
+pass63/63, Julia1.12 actual0/36.98 s; [atomic view representation replacement](../../reference/view_representations.md)
 passes26/26, Julia1.13 actual0/37.08 s. Each retains existing ownership and
 geometry/serialization certificates. Two cheap assertions enter the default.
 The batch follows published parent`da92208`; routine tests remain concise and
@@ -5795,13 +5798,13 @@ on the same frozen252 Source files: **45.18 s/body11.4 s** onJulia1.12.7 and
 `test/tmp/ordinary_default_222_{112,113}_20261011.*` and
 `test/tmp/ordinary_default_222_frozen_source_20261011.json`.
 
-[Direct STEP product usages](docs/step_relationship_assemblies.md) bind complete
+[Direct STEP product usages](../../reference/step_relationship_assemblies.md) bind complete
 literal product/shape/placement graphs, actual rigid frames and distinct3D
 millimetre contexts. Separate occurrences retain actual identity and existing
 shell/separation/fill certificates. Final54/54 passesJulia1.13, actual0/44.03 s
 including loading, body7.82 s; non-millimetre conversion and nested usages remain open.
 
-[View-time metadata](docs/view_time.md) derives actual counts, wraps explicit
+[View-time metadata](../../reference/view_time.md) derives actual counts, wraps explicit
 step indices and finds nearest physical times. Updates retain cached display
 state and literal time history. A confirmed model-data kind-change bounds defect
 now resets the actual step prefix. Final35 opt-in+2default passesJulia1.12,
@@ -5822,20 +5825,20 @@ on the same frozen250 Source files: **47.05 s/body11.7 s** onJulia1.12.7 and
 `test/tmp/ordinary_default_220_{112,113}_20261011.*` and
 `test/tmp/ordinary_default_220_frozen_source_20261011.json`.
 
-[Cartesian STEP targets](docs/step_cartesian_rigid_targets.md) pass43 bounded
+[Cartesian STEP targets](../../reference/step_cartesian_rigid_targets.md) pass43 bounded
 checks, Julia1.12 actual0/5.43 s warm: five real imports, one two-box positive
 fill and exact MSH4 UID/owner/ordered-node transport. Proper rigid unit-scale
 operators use their actual direct basis/origin. General scaling/assemblies
 remain outside this qualified packet.
 
-[Polygonal planar sheets](docs/hybrid_polygon_sheets.md) pass48 bounded checks,
+[Polygonal planar sheets](../../reference/hybrid_polygon_sheets.md) pass48 bounded checks,
 Julia1.12 actual0/26.82 s, including actual pentagon/hexagon hybrid Volume fills.
 The new3–6-vertex disk admission retains actual lower constructors and full
 facet/star/link/positive-volume/exterior certificates. It exposed a real
 optimizer key mismatch that removed one cyclic facet; canonical internal
 lookup keys now preserve that constraint. The default gains no Volume workload.
 
-[Atomic POS list imports](docs/session_pos_import.md) pass28 opt-in+2default
+[Atomic POS list imports](../../reference/session_pos_import.md) pass28 opt-in+2default
 checks, Julia1.13 actual0/3.97 s warm. All24 plain linear families retain
 names, literal values and physical times. Open publishes an empty current model;
 merge adds views only. Held model views and atomic errors remain valid.
@@ -5855,23 +5858,23 @@ on the same frozen249 Source files: **45.41 s/body11.1 s** onJulia1.12.7 and
 `test/tmp/ordinary_default_218_{112,113}_20261011.*` and
 `test/tmp/ordinary_default_218_frozen_source_20261011.json`.
 
-The [explicit tensor API](docs/api_metric_surfaces.md) passes47 focused checks
+The [explicit tensor API](../../reference/api_metric_surfaces.md) passes47 focused checks
 onJulia1.13, actual0/49.80 s including loading. It retains lower Curve cell UIDs,
 correctly captures regeneration constructor rows, applies selected background
 wrappers once and publishes classification atomically. Native7/BAMG stays open.
 
-[Separate periodic hybrid Regions](docs/periodic_hybrid_boundaries.md) pass74
+[Separate periodic hybrid Regions](../../reference/periodic_hybrid_boundaries.md) pass74
 focused checks onJulia1.12, actual0/67.52 s. Each consumes its own actual copied
 translation pair with complete lower certificates. Default MSH4 retains primary
 pairs; live P2 queries include high-order pairs. General/shared contexts remain open.
 
-[Atomic current-model merging](docs/model_merge.md) passes46 focused+2default
+[Atomic current-model merging](../../reference/model_merge.md) passes46 focused+2default
 checks onJulia1.13, actual0/44.52 s. Existing slots/views/filename, literal metadata,
 seeded GEO fields/entities, unmeshed periodic declarations, clearing commands and
 actual unchanged Surface constructors pass. A pinned native stale lookup error
 is handled through the same explicit public cache rebuild in the fixture.
 
-[CLI mesh checking](docs/cli_controls.md) passes20 opt-in checks onJulia1.13,
+[CLI mesh checking](../../reference/cli_controls.md) passes20 opt-in checks onJulia1.13,
 actual0/35.63 s including loading; two read-only checks enter the default.
 It validates MSH structure and duplicates without generation or output.
 
@@ -5893,20 +5896,20 @@ actual zero on the same frozen Source: Julia1.12.7 **49.28 s**, body**11.1 s**;
 Julia1.13.1 **38.93 s**, body**10.9 s**. Receipts:
 `test/tmp/ordinary_default_214_{112,113}_20261011.*`.
 
-[Atomic model opening](docs/model_import.md) stages real GEO/MSH imports before
+[Atomic model opening](../../reference/model_import.md) stages real GEO/MSH imports before
 publishing slots/options/caches/lookup/views/diagnostics. Older models and held
 views remain alive; empty slots reuse correctly. Final88 checks pass onJulia1.13,
 actual zero/43.45 s including loading, with actual MSH2/4 ASCII/binary metadata
 and a tiny generated GEO continuity check. The midpoint fixture failure was
 rounding, not a proven orphan defect; exact UID/count/owner checks remain.
 
-[Mapped STEP occurrences](docs/step_mapped_occurrences.md) expand actual literal
+[Mapped STEP occurrences](../../reference/step_mapped_occurrences.md) expand actual literal
 representation maps and nested rigid frame placements through one explicit
 shape-definition root. Final31+default2 pass onJulia1.12, actual zero/37.27 s,
 including30.65 s precompile. Native box/origin/nesting controls are bounded;
 more general assembly transforms remain guarded.
 
-[Embedded planar sheets](docs/hybrid_embedded_surfaces.md) retain one or two
+[Embedded planar sheets](../../reference/hybrid_embedded_surfaces.md) retain one or two
 actual Tri3 cells and the complete lower Point/Line boundary. The preceding
 full two-Tri49 and original single-Tri40 pass on their gate Source. Independent
 review fixed a sign-versus-magnitude planarity error; current rotated actual
@@ -5914,7 +5917,7 @@ lower authority/constructor and nonplanar atomic14 pass onJulia1.13, actual
 zero/41.41 s, body8.17 s. Older full-volume receipts retain their own Source
 scope. No volume fixture was added to routine tests or repeated for this gate.
 
-[Variable tensor planar construction](docs/metric_model_surfaces.md) consumes
+[Variable tensor planar construction](../../reference/metric_model_surfaces.md) consumes
 actual owned lower products, preserves every boundary edge and uses conforming
 interior bisection with a final sampled metric/area/identity certificate.
 Final33 pass onJulia1.12, actual zero/5.82 s warm. The coarse-boundary fixture
@@ -5934,24 +5937,24 @@ on the same final Source: Julia1.12.7 **46.49 s**, body**11.1 s**; Julia1.13.1
 `test/tmp/ordinary_default_209_{112,113}_20261011.*`. Only two small current-model
 export assertions enter the default; volume generation stays opt-in.
 
-[Direct model MSH writing](docs/model_export.md) consumes the current actual
+[Direct model MSH writing](../../reference/model_export.md) consumes the current actual
 cache without a view, preserving configured 2.2/4.1 ASCII/binary, filtering,
 UIDs and retained metadata atomically. Final70: Julia1.13 actual zero/5.22 s warm.
-[Open partition seams](docs/partitioned_open_seams.md) use actual original
+[Open partition seams](../../reference/partitioned_open_seams.md) use actual original
 Surface borders as endpoint witnesses and retain complete interface/facet
 coverage. Final28: Julia1.13 actual zero/35.98 s.
 
-One [retained Tri3 Surface](docs/hybrid_embedded_surfaces.md) is recovered and
+One [retained Tri3 Surface](../../reference/hybrid_embedded_surfaces.md) is recovered and
 protected as an interior facet; the carving mask remains exterior-only. Final40:
 Julia1.12 actual zero/58.33 s including compilation, with existing Curve32
-actual zero/24.86 s on that Source. A later [Point/Curve collection](docs/hybrid_constraint_collections.md)
+actual zero/24.86 s on that Source. A later [Point/Curve collection](../../reference/hybrid_constraint_collections.md)
 extension passes53 on its Source, Julia1.12 actual zero/67.83 s including
 34.53 s compilation. Two Points/two Curves retain all actual lower records,
 66Tet4+6Pyr5 and unit volume; the original single-Curve32 passes once on that
 collection Source, actual zero/26.80 s warm. General sheets/Surface-containing
 collections and embedded multi-Region contexts remain open.
 
-[Literal prismatic fill](docs/prismatic_fill.md) resolves the bounded rotated
+[Literal prismatic fill](../../reference/prismatic_fill.md) resolves the bounded rotated
 holed-prism case with paired actual cap supports, source side diagonals and
 unchanged full boundary certification. Final30: Julia1.12 actual zero/22.09 s;
 rotated direct/public11 body3.1 s. Unequal supports use the existing fallback,
@@ -5965,20 +5968,20 @@ metric generation are the next isolated implementations.
 
 ### Preceding Lagrange VTK, embedded Curve and Tri3 BRep partitions (2026-10-11)
 
-Complete [higher-order VTK](docs/model_view_exports.md) cells retain every
+Complete [higher-order VTK](../../reference/model_view_exports.md) cells retain every
 catalogued Tri/Quad/TetP3–P10 and Hex/PrismP3–P9 node and value. VTK5.1 cell
 arrays prevent the confirmed reader conversion that swapped Hex edge blocks.
 Focused208: Julia1.12 actual zero/75.28 s; all40 reference lattices match and
 actual VTK9.7.1 reads all20 exported vector/time/UID files correctly. Only two
 cheap cubic-Triangle assertions enter the default; no VTK dependency is added.
 
-One real [embedded Curve](docs/hybrid_embedded_curves.md) retains its actual
+One real [embedded Curve](../../reference/hybrid_embedded_curves.md) retains its actual
 Line2 cells, endpoint Point records, UIDs/owners/coordinates and closed cyclic
 Tet edge links inside a convex hybrid shell. Final32: Julia1.12 actual
 zero/23.72 s warm; existing Point23+periodic47 pass once on that Source, actual
 zero/48.98 s warm. Actual volume generation remains opt-in.
 
-[Tri3 BRep partitions](docs/partitioned_brep.md) produce actual Surface/Region
+[Tri3 BRep partitions](../../reference/partitioned_brep.md) produce actual Surface/Region
 children, inter-partition Tri3 interfaces and closed Line2 seam Curves with
 signed incidence and unchanged original cell identities/physical groups.
 Canonical copies preserve dense ghost/data indices through block regrouping;
@@ -6008,7 +6011,7 @@ supported runtimes, actual exit zero: Julia 1.12.7 **46.00 s**, Julia 1.13.1
 compilation remains the default. No volume campaign or external tool was
 added to routine tests.
 
-[Region batches](docs/hybrid_batch_pyramids.md) transport real negative normal
+[Region batches](../../reference/hybrid_batch_pyramids.md) transport real negative normal
 births and Winslow/nonnegative relocation settings across separate components
 and shared triangular Faces. Actual global Quad births bind to each Region's
 constructor by owner, cell UID, ordered corner UIDs and exact Source/birth
@@ -6022,7 +6025,7 @@ belongs to its preceding Source, actual zero/59.37 s warm. Shared-Quad
 two-Region components retain the pinned native unsupported diagnostic;
 embedded/periodic batch and Netgen contexts remain open.
 
-[IGES plane charts](docs/iges_plane_charts.md) follow finite proper rigid124
+[IGES plane charts](../../reference/iges_plane_charts.md) follow finite proper rigid124
 matrix chains with explicit parent/child composition, identity/cycle checks,
 finite results and per-matrix/composite rigidity certificates. Focused checks:
 26, Julia 1.12, actual zero/32.48 s including compilation; body 2.7 s. Two
@@ -6046,21 +6049,21 @@ minimal compilation automatically. Logs and receipts are
 `test/tmp/ordinary_default_201_{112,113}_20261011.*`. No external mesher or
 solver runs in the default suite.
 
-- [IGES plane charts](docs/iges_plane_charts.md) map bounded UV-only142 wires
+- [IGES plane charts](../../reference/iges_plane_charts.md) map bounded UV-only142 wires
   through explicit190 Form1 frames, including one proper rigid124 surface
   transform and model-space boundary priority. Focused checks: 49 and 38,
   Julia 1.12, actual exit zero in 22.43 and 23.11 s. Arbitrary-rotation hole
   Surface import is checked; its general fill/performance remains unqualified.
-- [Model VTK](docs/model_view_exports.md) also preserves complete Quad8,
+- [Model VTK](../../reference/model_view_exports.md) also preserves complete Quad8,
   Hex20, Prism15 and Pyramid13 connectivity, UIDs and nodal values. Focused
   checks: 34, Julia 1.13, actual exit zero in 37.26 s. Pyramid14 and other
   high-order families remain open; no external VTK reader was run.
-- [Winslow Pyramid mode](docs/hybrid_winslow.md) is an actual regularized
+- [Winslow Pyramid mode](../../reference/hybrid_winslow.md) is an actual regularized
   shape/volume objective with analytic gradients, locked apex-star boundaries
   and L-BFGS optimization. Focused checks: 44, Julia 1.13, actual exit zero
   in 18.41 s warm. An additional six-check public GEO/CLI atomic control passed
   in 6.03 s. Nonzero multi-Region modes are pending integration.
-- [Tet partitions](docs/partitioned_tets.md) create actual child Regions,
+- [Tet partitions](../../reference/partitioned_tets.md) create actual child Regions,
   opposite shared Tri3 incidences and ghost query aliases. Owned cells retain
   one authoritative UID copy. ASCII/binary MSH4 and true public re-import pass;
   MSH2 rejects before opening its target. Focused checks: 66, Julia 1.13,
@@ -6078,7 +6081,7 @@ retaining every node, UID and stored value. Cubic and tenth-order fixtures
 check independently specified curved coordinates, two vector time steps,
 ElementNodeData and caller-state preservation:22/22 on Julia1.13.1,
 actual exit0 in36.94 s including precompilation (focused body4.2 s).
-See [format scope](docs/model_view_exports.md). Other higher-order families
+See [format scope](../../reference/model_view_exports.md). Other higher-order families
 and complete Pyramid14 VTK remain open; this is serialization support.
 
 Final combined ordinary `Pkg.test()` passes192/192 on both runtimes, actual
@@ -6108,14 +6111,14 @@ the tensor bound. Shared grids retain adjacent material tags, literal interface
 planes, priority and void semantics. Allocation limits conservatively cover the
 entire bounding grid before compaction. Focused checks: box43 on Julia1.12.7,
 actual exit 0 in40.86 s including precompilation; Regions40 on Julia1.13.1,
-actual exit 0 in18.10 s warm. See [metric scope](docs/constant_metric_boxes.md).
+actual exit 0 in18.10 s warm. See [metric scope](../../reference/constant_metric_boxes.md).
 General variable-metric/native mesher parity remains open.
 
 IGES143 retains multiple planar boundary groups. Representation141 accepts0/1;
 Curve142 correctly distinguishes UV and model-space curves, prioritizes a real
 model-space curve and rejects unmapped UV-only input. Existing closed-shell and
 positive-volume certificates remain. Focused/default53 pass on Julia1.13.1,
-actual exit 0 in71.51 s. See [CAD scope](docs/cad_mesh_imports.md). Explicit
+actual exit 0 in71.51 s. See [CAD scope](../../reference/cad_mesh_imports.md). Explicit
 At this earlier receipt, Type190 UV mapping was unfinished; the current plane
 chart increment supersedes that limitation. General curved trimming
 remains unfinished.
@@ -6127,8 +6130,8 @@ Focused positive/negative72 pass on Julia1.13.1, actual exit 0 in77.52 s.
 The existing cube/batch35 regression passes on integrated Julia1.12.7,
 actual exit 0 in41.18 s. GEO/CLI generation now uses local settings without
 reading or changing unrelated API state: its focused35 pass on Julia1.13.1,
-actual exit 0 in54.62 s. See [negative factors](docs/hybrid_normal_apices.md),
-[relocation](docs/hybrid_relocate_modes.md) and [frontend scope](docs/geo_pyramid_option_scope.md).
+actual exit 0 in54.62 s. See [negative factors](../../reference/hybrid_normal_apices.md),
+[relocation](../../reference/hybrid_relocate_modes.md) and [frontend scope](../../reference/geo_pyramid_option_scope.md).
 At this earlier receipt Winslow1 was still guarded; the current Winslow
 increment supersedes that limitation. Nonzero batch modes, general embedding
 and periodic composition remain open.
@@ -6146,7 +6149,7 @@ single-wire path remain. The focused run passes 159/159 on Julia 1.13.1,
 actual exit 0 in 131.50 seconds including precompilation: 59 hole checks,
 96 prior assembly checks and four default boundary-only checks. It includes a
 genuine public-OCC-exported STEP square tube of analytic volume 0.75. See
-[mesh CAD scope](docs/cad_mesh_imports.md); curved trimming remains open.
+[mesh CAD scope](../../reference/cad_mesh_imports.md); curved trimming remains open.
 
 Model VTK adds complete Quad9, Hex27 and Prism18 reference-node layouts.
 View-data row tags now use the existing checked UInt64 validator instead of a
@@ -6157,7 +6160,7 @@ Root's integrated Julia 1.12.7 full regression passes 109/109 in 6.18 seconds.
 Its package/default checks include the separate three Hex27 assertions.
 Public native observations confirm element-tag constructor normalization;
 huge native model-view calls faulted, so their Tessella support has no native
-parity claim. See [model export scope](docs/model_view_exports.md).
+parity claim. See [model export scope](../../reference/model_view_exports.md).
 
 A single strictly interior Point is now consumed from its actual Point15/UID
 constructor in one convex explicit hybrid Region. Exact coordinates, Point
@@ -6165,7 +6168,7 @@ ownership and UID survive internal Volume stages; a closed connected Tet star
 proves volume incidence. Outside/boundary Points and missing provenance reject
 atomically. Point23 plus existing periodic47 pass 70/70 on Julia 1.13.1,
 actual exit 0 in 87.07 seconds including precompilation. See
-[embedded scope](docs/embedded_hybrid_points.md); general embedded hybrid
+[embedded scope](../../reference/embedded_hybrid_points.md); general embedded hybrid
 Curves/Surfaces and multi-Region contexts remain open.
 
 The same final integrated Source passes 180/180 default package assertions on
@@ -6186,7 +6189,7 @@ The CLI adds `-clscale`, `-clmin`, `-clmax` and `-order`, plus standalone
 priority over script assignments and aliases, including in-script `Mesh 1`.
 Finite/range, duplicate and incompatible bound errors occur before execution
 or output replacement. Curve orders 1–10 are available; other generated orders
-retain their existing documented scope. See [CLI controls](docs/cli_controls.md).
+retain their existing documented scope. See [CLI controls](../../reference/cli_controls.md).
 
 The focused line regression passes 27/27, plus two default information checks,
 on Julia 1.13.1 with minimal compilation and bounds checks: actual exit 0 in
@@ -6207,7 +6210,7 @@ with separate Surface/Region owners and UIDs in a classified MixedMesh.
 Strict disjoint bounding boxes certify separation; general CAD assembly
 occurrences, analytic Face maps and trimmed/periodic NURBS remain open. The
 focused schema/import regression passes 100/100 on Julia 1.13.1, actual exit 0
-in 48.05 seconds including precompilation. See [import scope](docs/cad_mesh_imports.md).
+in 48.05 seconds including precompilation. See [import scope](../../reference/cad_mesh_imports.md).
 
 Model CSV retains complete connectivity, UID/ownership, all stored components,
 time steps and distinct dataset ordinals even when model names/UIDs repeat.
@@ -6215,14 +6218,14 @@ Legacy VTK retains sparse values with masks, full supported cell connectivity
 and exact 64-bit identities. Focused/default checks pass 143/143 on Julia
 1.12.7, actual exit 0 in 34.49 seconds including precompilation; body 5.4 seconds.
 Other high-order VTK cells still reject before opening output. See
-[format scope](docs/model_view_exports.md).
+[format scope](../../reference/model_view_exports.md).
 
 One translated periodic Surface pair in one ordinary explicit hybrid Region
 now uses the actual copied UID/cell correspondence, including retained
 Surface constructors under MeshOnlyEmpty. Boundary ownership, ordered cell
 incidence and positive whole-volume certificates remain required. General
 affine/multiple-pair and periodic multi-Region contexts remain open. See
-[periodic scope](docs/periodic_hybrid_boundaries.md).
+[periodic scope](../../reference/periodic_hybrid_boundaries.md).
 
 The integrated current Source passes 171/171 default package assertions on
 Julia 1.13.1, actual exit 0; package phase 40.61 seconds including precompilation,
@@ -6249,7 +6252,7 @@ all time steps and scalar/vector/tensor components. VTK uses independent
 element corners and real topology. Payload validation precedes opening the
 target. The focused regression plus four default checks pass 101/101 on
 Julia 1.12.7, actual exit 0 in 1.50 seconds warm. See
-[format semantics](docs/list_view_exports.md), including the intentional
+[format semantics](../../reference/list_view_exports.md), including the intentional
 CSV/VTK extension differences from the pinned SDK.
 
 Public `set_smoothing` applies only to Surfaces and `set_reverse` only to
@@ -6270,7 +6273,7 @@ qualified bounded import, model-format and periodic hybrid implementations.
 Devin's uncommitted Source is integrated into Main with reviewed curved,
 periodic, matching, compact-cap coverage and writer fixes. Routine testing now
 started with 157 small functional assertions. Historical native, resource, HFSS and
-external solver campaigns are opt-in; see [test instructions](test/README.md).
+external solver campaigns are opt-in; see [test instructions](../../../test/README.md).
 
 The corrected functional suite passes on Julia 1.12.7 at normal `-O2` with
 bounds checking: 157/157, actual exit 0, 301.75 seconds including 36.14 seconds

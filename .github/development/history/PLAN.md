@@ -1,3 +1,6 @@
+> Historical record preserved from `PLAN.md` at commit `a3c4ac37af44bcfe30b5bc7976a284b65f53a9a4`.
+> Dated claims below are historical evidence, not the current work plan. See [current development instructions](../README.md).
+
 # Tessella.jl architecture and scope
 
 Tessella is a Julia-native mesh generator for the ASCENT electromagnetics workflow.
@@ -14,7 +17,7 @@ suite now passes 224 assertions on Julia 1.12.7 and 1.13.1. Ordinary
 precompilation.
 Expensive validation campaigns are opt-in. Full Gmsh parity is still open. The
 [current handoff](HANDOFF.md#takeover-2026-10-11) records verified scopes,
-and [test/README.md](test/README.md) describes routine and extended tests.
+and [test/README.md](../../../test/README.md) describes routine and extended tests.
 The current [Devin checklist](DEVIN_HANDOFF.md) records all known remaining work
 and prepared next designs for the user-requested transfer.
 [`STATUS.md`](STATUS.md) retains dated verification evidence. Supported runtimes
@@ -154,12 +157,12 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 | 5 | native primitives, analytical CAD/imprints, healing gates, mesh CSG | DONE |
 | 6 | globally certified P2 elements, solver I/O, 22 geometry regressions | DONE |
 
-Current bounded additions include [CLI sizing/order controls](docs/cli_controls.md),
-[model CSV/VTK exports](docs/model_view_exports.md)
-and [one translated copied Surface pair in a hybrid Region](docs/periodic_hybrid_boundaries.md).
+Current bounded additions include [CLI sizing/order controls](../../reference/cli_controls.md),
+[model CSV/VTK exports](../../reference/model_view_exports.md)
+and [one translated copied Surface pair in a hybrid Region](../../reference/periodic_hybrid_boundaries.md).
 Complete Quad9, Hex27 and Prism18 and edge-only Quad8, Hex20, Prism15 and
 Pyramid13 VTK layouts, planar STEP/IGES Face holes, and
-[one embedded Point in a convex hybrid Region](docs/embedded_hybrid_points.md)
+[one embedded Point in a convex hybrid Region](../../reference/embedded_hybrid_points.md)
 are also implemented. Current additions include catalogued high-order VTK,
 retained Point/Curve collections and endpoint-only3–6-vertex Tri3 disks, and one
 translated copied Surface pair per separate hybrid Region, and one
@@ -177,12 +180,12 @@ hybrid recovery and full CAD/NURBS assembly topology remain open.
 | P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types with canonical family/order lookup and detached property metadata plus special records, mixed MSH I/O with cumulative repeated-node sections, declared MSH2 elementary ownership, persistent MSH2/MSH4 periodic links, Gmsh-compatible MSH4 surface/embedded-curve metadata, structural MSH4 partition metadata (`$PartitionedEntities`/`$GhostElements`), and verbatim ancillary/unknown-section plus tag-remapped view-data preservation across ASCII and binary MSH 2.2/4.1 round trips, plus a tagged point/curve/surface/surface-loop/volume kernel with owned entity names, presentation state, attributes, finite Point-coordinate updates, atomic live-reference retagging, dependency-safe recursive removal, explicit topology, spatial, type, plane-property, and nonpartition metadata queries, and native Point/Line/Circle/Ellipse-arc/Spline/BSpline/Bezier/Nurbs/Plane evaluation and surface reparametrization, plus exact tensor-Bernstein minimum-Jacobian certification for P2 quadrangle, hexahedron and prism, and rational collapsed-map Pyramid14 certificates for new API products |
 | P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation and STEP/IGES NURBS import (B_SPLINE / IGES 126/128) with IGES export, classified STEP/IGES box/sphere/cylinder/cone solids, expression-, numeric-list-, and tracked-tag-allocator-backed Point/Line/Circle/Ellipse/Spline/BSpline/Bezier/Nurbs/Loop/Plane Surface/Surface/Ruled Surface/Surface Loop/Volume with checked `SetMaxTag`, positive Point `MeshSize`, explicit-topology `PointsOf`, topology-derived Physical groups, global automatic Physical tags, owned operation-time Boolean operands with complete Delete cleanup, N-way
 multi-operand BooleanDifference/Union/Intersection/Fragments with OCC
-membership-cell decomposition and preserve-numbering tag rebinding, Box/Cylinder/Sphere/Cone/Torus/Boolean `.geo` solids with materialized Gmsh 4.15.2 OCC boundary layouts (rim/pole Points, closed-circle and degenerate edges, Cylinder/Sphere/Cone/Torus and Plane faces, signed surface loops), with Cylinder/Sphere/Cone retaining their compact encodings for the analytic mesher, explicit-entity Translate/Dilate/Rotate/Symmetry with Gmsh's shape-list grammar/Duplicata/Coherence, translational, rotational, and twist `Extrude` for points/curves/planar surfaces with Gmsh's tag allocation, output lists, signed-generatrix and merge semantics plus `Layers`/`Recombine`/`ScaleLastLayer`/`QuadTri*`/`Using` parameters, `Circle`/`Ellipse` arcs with Gmsh's `EndCurve` control-point/`Plane`-normal semantics and `Surface`/`Ruled Surface` filling including `In Sphere`/`Using Point` sphere-center metadata, straight/curved curve or planar-surface periodic `.geo` execution, analytic OCC evaluation/reparametrization on all materialized face kinds (Cylinder/Sphere/Cone/Torus/Plane) with OCCT's `ElSLib` contractions, stored-pcurve `CurveOnSurface` semantics, `Extrema` elementary-surface projectors, and `BRepClass_FaceClassifier` wire containment, the `.geo` meshing-constraint family (`Transfinite Curve`/`Surface`/`Volume` with signed tags, wildcards, HWall and grammar-only laws, `TransfQuadTri`, `Recombine`, `Smoother`, `MeshAlgorithm`, `MeshSizeFromBoundary`, `Reverse`/`ReverseMesh`, `Degenerated`, `Compound`, and validating `Relocate`/`Reorient`/`RecombineMesh` forms), `Delete`/`Recursive Delete`/`Delete Embedded` with `GEO_Internals::remove` per-entity semantics plus the named `Delete` lifecycle forms, and explicit `SetTag` rejection, plus mesh Booleans/transforms and classified STEP/IGES ring-torus (`TOROIDAL_SURFACE`, IGES 160/198), pole-certified closed-face `SPHERICAL_SURFACE` full sphere, rim-circle-certified `CYLINDRICAL_SURFACE`+cap-shell full cylinder, rim/apex-certified `CONICAL_SURFACE`+cap-shell full cone or frustum, meridian-certified `TOROIDAL_SURFACE`+cap-shell partial-angle torus segment, closed planar polyhedral shell (`MANIFOLD_SOLID_BREP`/`FACETED_BREP`/`BREP_WITH_VOIDS`), closed-CIRCLE-trimmed tubed shells (drilled/multi-hole plates, hollow cylinders, boss plates) and two-cap prismatic shells with LINE/open-arc/closed-circle/degree-1-B-spline cap trims plus a bounded sampled whole-domain higher-degree-B-spline tier on planar, cylindrical or ruled SURFACE_OF_LINEAR_EXTRUSION walls (non-coaxial arcs, slit walls, stadium/D/slotted/rounded profiles, degree-2-bulge spline plate) import; auxiliary `GEOMETRICALLY_BOUNDED_WIREFRAME_SHAPE_REPRESENTATION` products are admitted without solid selection; multiple explicit recognized roots certified geometrically independent or conforming-contact-welded return classified mixed meshes (see [scope](docs/cad_mesh_imports.md)); planar outer/inner wires including IGES143 boundaries, checked141/142 representations and explicit190 Form1 UV charts with proper rigid124 transform chains are supported; closed shells mixing `ADVANCED_FACE`s on `B_SPLINE_SURFACE_WITH_KNOTS` (direct or complex-rational) with `PLANE` faces import through a per-face nonlinear-uv constrained-Delaunay chart — Gauss–Newton boundary projection with an on-surface lift certificate, geometric-seam detection with periodic wire unwrapping, hole-wire containment ordering, metric-scaled interior seeding and positional weld — and single-face closed-NURBS shells plus periodic B-spline tube walls mesh and tetrahedralize (bump plate, capped pipe, two-patch pillow; Gmsh 4.15.2/OCC 7.8.1 accepts all three as closed solids); ELLIPSE trims (closed ellipses and open arcs through per-geometric-ellipse frame grouping, exact-twice interval coverage and canonical welded sampling on cap wires and swept walls), partial-domain B-spline uses (unique on-curve parameter inversion + knot-aligned interval sampling; mismatched intervals reject), multi-chain swept rims (N contiguous pieces congruent under one axial offset) and rational curve/surface weights propagated through sampled trims and trimmed patches all import (elliptical pipe, ellipse-arc plate, elliptical-hole plate, partial-spline plate, two-piece-rim extrusion, rational-bulge plate, rational bump; Gmsh 4.15.2/OCC accepts each as a closed solid); NURBS faces on non-PLANE neighbours, B-spline surfaces bounded by explicit 2-D pcurves, the general analytic Face/Curve registry, general CAD assembly and unrecognized topology remain pending implementation |
+membership-cell decomposition and preserve-numbering tag rebinding, Box/Cylinder/Sphere/Cone/Torus/Boolean `.geo` solids with materialized Gmsh 4.15.2 OCC boundary layouts (rim/pole Points, closed-circle and degenerate edges, Cylinder/Sphere/Cone/Torus and Plane faces, signed surface loops), with Cylinder/Sphere/Cone retaining their compact encodings for the analytic mesher, explicit-entity Translate/Dilate/Rotate/Symmetry with Gmsh's shape-list grammar/Duplicata/Coherence, translational, rotational, and twist `Extrude` for points/curves/planar surfaces with Gmsh's tag allocation, output lists, signed-generatrix and merge semantics plus `Layers`/`Recombine`/`ScaleLastLayer`/`QuadTri*`/`Using` parameters, `Circle`/`Ellipse` arcs with Gmsh's `EndCurve` control-point/`Plane`-normal semantics and `Surface`/`Ruled Surface` filling including `In Sphere`/`Using Point` sphere-center metadata, straight/curved curve or planar-surface periodic `.geo` execution, analytic OCC evaluation/reparametrization on all materialized face kinds (Cylinder/Sphere/Cone/Torus/Plane) with OCCT's `ElSLib` contractions, stored-pcurve `CurveOnSurface` semantics, `Extrema` elementary-surface projectors, and `BRepClass_FaceClassifier` wire containment, the `.geo` meshing-constraint family (`Transfinite Curve`/`Surface`/`Volume` with signed tags, wildcards, HWall and grammar-only laws, `TransfQuadTri`, `Recombine`, `Smoother`, `MeshAlgorithm`, `MeshSizeFromBoundary`, `Reverse`/`ReverseMesh`, `Degenerated`, `Compound`, and validating `Relocate`/`Reorient`/`RecombineMesh` forms), `Delete`/`Recursive Delete`/`Delete Embedded` with `GEO_Internals::remove` per-entity semantics plus the named `Delete` lifecycle forms, and explicit `SetTag` rejection, plus mesh Booleans/transforms and classified STEP/IGES ring-torus (`TOROIDAL_SURFACE`, IGES 160/198), pole-certified closed-face `SPHERICAL_SURFACE` full sphere, rim-circle-certified `CYLINDRICAL_SURFACE`+cap-shell full cylinder, rim/apex-certified `CONICAL_SURFACE`+cap-shell full cone or frustum, meridian-certified `TOROIDAL_SURFACE`+cap-shell partial-angle torus segment, closed planar polyhedral shell (`MANIFOLD_SOLID_BREP`/`FACETED_BREP`/`BREP_WITH_VOIDS`), closed-CIRCLE-trimmed tubed shells (drilled/multi-hole plates, hollow cylinders, boss plates) and two-cap prismatic shells with LINE/open-arc/closed-circle/degree-1-B-spline cap trims plus a bounded sampled whole-domain higher-degree-B-spline tier on planar, cylindrical or ruled SURFACE_OF_LINEAR_EXTRUSION walls (non-coaxial arcs, slit walls, stadium/D/slotted/rounded profiles, degree-2-bulge spline plate) import; auxiliary `GEOMETRICALLY_BOUNDED_WIREFRAME_SHAPE_REPRESENTATION` products are admitted without solid selection; multiple explicit recognized roots certified geometrically independent or conforming-contact-welded return classified mixed meshes (see [scope](../../reference/cad_mesh_imports.md)); planar outer/inner wires including IGES143 boundaries, checked141/142 representations and explicit190 Form1 UV charts with proper rigid124 transform chains are supported; closed shells mixing `ADVANCED_FACE`s on `B_SPLINE_SURFACE_WITH_KNOTS` (direct or complex-rational) with `PLANE` faces import through a per-face nonlinear-uv constrained-Delaunay chart — Gauss–Newton boundary projection with an on-surface lift certificate, geometric-seam detection with periodic wire unwrapping, hole-wire containment ordering, metric-scaled interior seeding and positional weld — and single-face closed-NURBS shells plus periodic B-spline tube walls mesh and tetrahedralize (bump plate, capped pipe, two-patch pillow; Gmsh 4.15.2/OCC 7.8.1 accepts all three as closed solids); ELLIPSE trims (closed ellipses and open arcs through per-geometric-ellipse frame grouping, exact-twice interval coverage and canonical welded sampling on cap wires and swept walls), partial-domain B-spline uses (unique on-curve parameter inversion + knot-aligned interval sampling; mismatched intervals reject), multi-chain swept rims (N contiguous pieces congruent under one axial offset) and rational curve/surface weights propagated through sampled trims and trimmed patches all import (elliptical pipe, ellipse-arc plate, elliptical-hole plate, partial-spline plate, two-piece-rim extrusion, rational-bulge plate, rational bump; Gmsh 4.15.2/OCC accepts each as a closed solid); NURBS faces on non-PLANE neighbours, B-spline surfaces bounded by explicit 2-D pcurves, the general analytic Face/Curve registry, general CAD assembly and unrecognized topology remain pending implementation |
 | P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined three-sided transfinite patches, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, recombined hexahedra, prismatic 3-D layers with certified remaining-core tet fill and cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight/curved curve relations for boundary or embedded curves with reusable masters and chains or cycles, synchronized planar periodic boundary surfaces on explicit volumes under translation and general affine (rotation) transforms with surface-derived curve masters matching upstream `setMeshMaster`, expression/list-backed `.geo` periodic entities and transforms, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata, plus joined multi-region 3-D boundary-layer fans stitched along shared edges and multi-arc vertices with certified core fill, warped four-sided transfinite patches on ruled surfaces via 3-D Coons interpolation with exact boundary-simplicity, orientation, and fold audits, and six-face transfinite volumes interpolating all six canonical boundary face grids — warped/non-affine blocks included — via Gmsh's `transfiniteHex` Coons volume with chord-length parameters and bitwise shared-edge/corner certification, and curved-boundary planar surface PSLG meshing with native-parameter frames, sampled chains, ownership-masked pinch audits, and bitwise periodic affine copies, plus curved `Curve In Volume` and nested `Curve In Surface`-in-Volume embedding with seeded stored discretizations, straight-chord tetrahedral edge-chain recovery, closed/self-overlapping loops, and chain-based mixed projection |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — synchronized model/mesh API with detached cache, session-independent fixed element type/property, bounded fixed-family quadrature and actual- and explicit-order nodal reference functions, atomic whole-cache uniform refinement, affine transformation, and clearing, detached bulk/connectivity-derived data, automatic and manual global edge/triangular/quadrangular-face catalogs, hierarchical H1 bases at orders 1:15 over Point, Line, Triangle, Tetrahedron, Quadrangle, Hexahedron, and Prism reference families with hierarchical H(curl) bases at orders 0:11 on Line/Triangle/Tetrahedron and 0:10 on Quadrangle/Hexahedron/Prism, orientations, and vertex/edge/face/bubble keys, plus robust cached linear-simplex point location, local coordinates, and named element qualities, deterministic topology/spatial/type/plane-property/nonpartition queries, Point/Line/Circle/Ellipse-arc/Spline/BSpline/Bezier/Nurbs/Plane evaluation and surface reparametrization, materialized OCC circle-edge and Cylinder/Sphere/Cone/Torus/Plane-face evaluation, projection, reparametrization, and wire-classified containment, owned visibility/color/attribute state, finite Point-coordinate updates, entity-name/tag/removal lifecycle, Physical-group queries, Point `set_size`, deterministic contiguous-block `task`/`num_tasks` partitioning for detached bulk/connectivity-derived, Jacobian, orientation, and element-quality queries, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI state, owned scalar nodal views, `.pos` list-format view read/write feeding `PostView` size fields, including order-2 `X2` records and two-/four-matrix `INTERPOLATION_SCHEME` bindings evaluated exactly by `PostViewField` (scalar/vector/tensor, curved geometry maps, closest-node fallback), entity-pair `model_distance`/`get_distance` queries, and synchronized in-process plugins |
 | P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus expression- and numeric-list-backed geometry/entity lists, explicit model-topology, entity-identity/removal, spatial-query, native-metadata lifecycle including plane properties, Point/Line/Plane evaluation and surface reparametrization, presentation/coordinate/attribute state, cached-refinement/clearing/affine-transform lifecycle, fixed element type/property, fixed-family quadrature, and actual- and explicit-order nodal lookup, bulk/connectivity-derived mesh-data, automatic/manual global edge/face topology, simplex and non-simplex H1 basis/orientation/key queries, higher-order hierarchical H1 and H(curl) basis/orientation/key queries across every Gmsh reference family, cached simplex point-location/local-coordinate queries, and linear-simplex quality queries, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1 square, t4 hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, materialized OCC cylinder/sphere/cone/torus evaluation, derivative, projection, reparametrization, and trimmed-face containment, native and projected single-/two-direction periodic surfaces, embedded, reusable-master/chained, and expression/list-backed periodic curves and surfaces, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic curves with MSH2/MSH4 lifecycle, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, Boolean snapshot/Delete lifecycle corpus, MSH ancillary/view-data section preservation across ASCII and binary source/output modes, and MSH partition-metadata preservation through ASCII and binary MSH 4.1 round trips, plus entity-level `.geo` differentials covering Translate/Dilate/Rotate/Symmetry, Duplicata, selectors, coherence, and Physical groups, and translational, rotational, and twist `Extrude` (entity tags, point coordinates, curve/surface/volume boundary wiring, spline generatrices, and `out[]` result lists bit-for-bit), and `Circle`/`Ellipse`/`Surface`/`Ruled Surface` arc evaluation, type strings, and sorted loop boundaries bit-for-bit, and `Spline`/`BSpline`/`Bezier`/`Nurbs` entity state, evaluations, derivatives, second derivatives, curvature, parametrization bounds, bounding boxes, `parFromPoint`/`getClosestPoint`/`isInside`, and oriented surface boundaries bit-for-bit, and `.geo` meshing-constraint/Delete differentials over entity inventory, physical state, transfinite mesh node sets, and error paths, plus entity-pair distance checks pinned to Gmsh 4.15.2 `occ.getDistance` oracle values |
 
-Explicit [constant-tensor box grids](docs/constant_metric_boxes.md) now generate
+Explicit [constant-tensor box grids](../../reference/constant_metric_boxes.md) now generate
 direction-aware meshes, including shared material interfaces and voids. They
 use conservative axis-aligned grids. Variable tensors also drive the explicit
 planar Surface constructor and API below, the native Delaunay/Frontal surface
@@ -192,21 +195,21 @@ volume edge fill's local metric bound; OCC-curved alg-7 and native 3-D hybrid
 tensor sizing remain classified open scope.
 Single convex hybrid Regions admit negative normal-offset Pyramid factors and
 nonnegative values with actual relocation or the separate
-[Winslow optimizer](docs/hybrid_winslow.md) at `1.0`, retaining existing
-certificates. [Generation option snapshots](docs/geo_pyramid_option_scope.md)
-keep API and GEO/CLI contexts independent. [Region batches](docs/hybrid_batch_pyramids.md)
+[Winslow optimizer](../../reference/hybrid_winslow.md) at `1.0`, retaining existing
+certificates. [Generation option snapshots](../../reference/geo_pyramid_option_scope.md)
+keep API and GEO/CLI contexts independent. [Region batches](../../reference/hybrid_batch_pyramids.md)
 transport nonzero Pyramid settings for separate and shared-Triangle components;
-shared-Quad two-Region components retain the pinned native unsupported error. Explicit [IGES plane charts](docs/iges_plane_charts.md)
+shared-Quad two-Region components retain the pinned native unsupported error. Explicit [IGES plane charts](../../reference/iges_plane_charts.md)
 map bounded UV wires with proper rigid124 plane transform chains. A
-[certified rigid-prism fill](docs/prismatic_fill.md) handles matching literal
+[certified rigid-prism fill](../../reference/prismatic_fill.md) handles matching literal
 cap supports before exact recovery, retaining source XYZ and full PLC
 certificates. General curved trims and CAD registry reconstruction remain open.
 Bare positive Tet4 Regions now produce actual inter-partition Tri3 interfaces
-and ghost aliases with MSH4 transport; [partition scope](docs/partitioned_tets.md)
-records the retained assignment default. [Lower-BRep production](docs/partitioned_brep.md)
+and ghost aliases with MSH4 transport; [partition scope](../../reference/partitioned_tets.md)
+records the retained assignment default. [Lower-BRep production](../../reference/partitioned_brep.md)
 adds complete Tri3 Surface children and closed interface seams.
-[Open seams](docs/partitioned_open_seams.md) additionally preserve partial
-original Surface borders by literal incidence. [Declared lower BRep](docs/partitioned_declared_brep.md)
+[Open seams](../../reference/partitioned_open_seams.md) additionally preserve partial
+original Surface borders by literal incidence. [Declared lower BRep](../../reference/partitioned_declared_brep.md)
 Line2 Curve and
 Point15 Point topology now partitions into signed Curve→Point and
 Surface→Curve child closures with literal shared `partitions` and unchanged
@@ -245,18 +248,18 @@ tables — so Tri15/Quad25 interfaces and Line5+ seams emit through the
 same certificate; incomplete/serendipity high-order cells and bare
 non-Tet4 volumes remain open.
 
-An explicit [variable-tensor ordinary Surface constructor](docs/metric_model_surfaces.md)
+An explicit [variable-tensor ordinary Surface constructor](../../reference/metric_model_surfaces.md)
 consumes actual lower Point/Line products and certifies the sampled world metric
-on every emitted edge. The [explicit API endpoint](docs/api_metric_surfaces.md)
+on every emitted edge. The [explicit API endpoint](../../reference/api_metric_surfaces.md)
 uses the selected session tensor background and publishes classification and
 UIDs atomically. Ordinary native algorithm dispatch remains unchanged.
-[Atomic model opening](docs/model_import.md) imports true GEO/MSH/POS files while
+[Atomic model opening](../../reference/model_import.md) imports true GEO/MSH/POS files while
 retaining prior slots/views and stages all API option/cache/diagnostic publication.
-[Atomic session merging](docs/model_merge.md) executes real GEO against existing
+[Atomic session merging](../../reference/model_merge.md) executes real GEO against existing
 entities/fields or merges literal MSH records while retaining current slot identity.
-[POS list imports](docs/session_pos_import.md) retain all24 plain linear families,
+[POS list imports](../../reference/session_pos_import.md) retain all24 plain linear families,
 names and physical times; POS merging publishes only prepared views.
-[CLI mesh checks](docs/cli_controls.md) validate MSH structure without generation.
+[CLI mesh checks](../../reference/cli_controls.md) validate MSH structure without generation.
 
 P1 does not yet claim octree-identical parity with Gmsh's HXT/p4est
 `AutomaticMeshSizeField` internals (the native field remains a documented
@@ -339,12 +342,12 @@ at isolated vertices — recursing through the ordinary pipeline where
 coincident interfaces weld at shared Surfaces) return
 classified mixed meshes;
 supported planar Faces can retain disjoint inner wires and triangulate their
-holes. [Mapped STEP occurrences](docs/step_mapped_occurrences.md) additionally
+holes. [Mapped STEP occurrences](../../reference/step_mapped_occurrences.md) additionally
 consume one explicit representation root and nested rigid axis-placement maps,
-including proper rigid and uniform-scale [Cartesian targets](docs/step_cartesian_rigid_targets.md).
-[Direct product-usage assemblies](docs/step_relationship_assemblies.md) now bind
+including proper rigid and uniform-scale [Cartesian targets](../../reference/step_cartesian_rigid_targets.md).
+[Direct product-usage assemblies](../../reference/step_relationship_assemblies.md) now bind
 complete NAUO/CDSR/IDT forests and actual rigid frames, with
-[SI source/placement length transport](docs/step_relationship_si_units.md) into
+[SI source/placement length transport](../../reference/step_relationship_si_units.md) into
 millimetre output coordinates. Nested product-usage DAGs expand every reachable
 root-to-leaf path with per-edge contexts/frames, path-order rigid composition and
 single leaf scaling. Multiple independent roots, per-definition solids and
@@ -355,7 +358,7 @@ Ordinary/mapped roots and assembly records convert declared SI and
 angular units, factor-resolved uncertainty aliases and ambiguous-member-context
 rejection. Other assembly
 transformations and analytic Face maps remain open. See
-[mesh import scope](docs/cad_mesh_imports.md). The entity kernel records native
+[mesh import scope](../../reference/cad_mesh_imports.md). The entity kernel records native
 boxes, cylinders, spheres, cones, toruses, Boolean volumes (operation-time
 operand snapshots for meshing plus a materialized result boundary for
 topology), and connected
@@ -608,8 +611,8 @@ embedded-curve relations) plus `$GhostElements` ownership lists resolved to flat
 internal element indices, and `write_mixed_msh` re-emits both sections in ASCII
 and binary MSH 4.1 — verified end-to-end by the Gmsh 4.15.2 partition-metadata
 differential. The API now produces actual bare-Tet4 child/interface/ghost
-entities; [partition scope](docs/partitioned_tets.md) records supported behavior.
-[Complete Tri3 BRep](docs/partitioned_brep.md) additionally produces Surface
+entities; [partition scope](../../reference/partitioned_tets.md) records supported behavior.
+[Complete Tri3 BRep](../../reference/partitioned_brep.md) additionally produces Surface
 children and closed seam Curves; multi-Surface open seams retain actual
 original borders. Remaining lower-topology, mixed/high-order and parallel
 contexts retain their explicit guards.

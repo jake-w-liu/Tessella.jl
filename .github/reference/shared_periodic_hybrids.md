@@ -21,7 +21,7 @@ final regional optimizer. The initial scope retains default
 Faces, cross-Region pairs, incompatible copy relations, arbitrary affine maps
 and general periodic component parity remain outside it.
 
-The opt-in [public fixture](../test/interfaces/api_hybrid_shared_periodic_functional_test.jl)
+The opt-in [public fixture](../../test/interfaces/api_hybrid_shared_periodic_functional_test.jl)
 uses two adjacent unit Regions with two actual shared Tri3 cells and two
 translated periodic Quad4 copies. It checks independent volumes, opposite
 interface sides, retained lower node UIDs/coordinates and cyclic incidence,

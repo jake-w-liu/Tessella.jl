@@ -1,3 +1,6 @@
+> Historical record preserved from `docs/handoff/nested_step_assemblies.md` at commit `a3c4ac37af44bcfe30b5bc7976a284b65f53a9a4`.
+> Dated claims below are historical evidence, not the current work plan. See [current development instructions](../../README.md).
+
 # Read-only nested STEP assembly design and Devin handoff
 
 The user requested an unfinished-work handoff on 2026-10-11. The next owner should implement the graph producer described below. This packet contains design and two opaque import-only
@@ -125,10 +128,10 @@ remains unfinished.
 
 Portable inputs and opaque observations are committed with this handoff:
 
-- [Reference graph](../../test/artifacts/handoff_20261011/nested_relationships/nested_reference_trace.json).
-- [Native observations](../../test/artifacts/handoff_20261011/nested_relationships/native_nested_import_observations.json).
-- [Millimetre input](../../test/artifacts/handoff_20261011/nested_relationships/nested_mm_boxes.step).
-- [Mixed-unit input](../../test/artifacts/handoff_20261011/nested_relationships/nested_m_cm_mm_shifted_boxes.step).
+- [Reference graph](../../../../test/artifacts/handoff_20261011/nested_relationships/nested_reference_trace.json).
+- [Native observations](../../../../test/artifacts/handoff_20261011/nested_relationships/native_nested_import_observations.json).
+- [Millimetre input](../../../../test/artifacts/handoff_20261011/nested_relationships/nested_mm_boxes.step).
+- [Mixed-unit input](../../../../test/artifacts/handoff_20261011/nested_relationships/nested_m_cm_mm_shifted_boxes.step).
 
 The STEP inputs have only trailing whitespace/newline normalization; non-whitespace
 STEP tokens are unchanged. The native JSON retains original input provenance.

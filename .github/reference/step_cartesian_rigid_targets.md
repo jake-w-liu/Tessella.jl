@@ -46,7 +46,7 @@ imports two separate unit-mass boxes. The shifted-origin control distinguishes
 the direct Cartesian rule from the AXIS2 rule. Observations are retained in
 `C:/tmp/tessella_step_cartesian_rigid_20261011/native_cartesian_rigid_probe.json`.
 
-The focused [functional regression](../test/geometry/brep_cartesian_rigid_functional_test.jl)
+The focused [functional regression](../../test/geometry/brep_cartesian_rigid_functional_test.jl)
 checks those five import-only cases plus doubled and mirrored scale targets,
 one actual quarter-turn fill, classified
 MSH4 ASCII/binary transport and error controls. Julia1.13.1 passed54/54,

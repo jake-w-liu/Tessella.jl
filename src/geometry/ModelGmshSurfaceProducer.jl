@@ -83,16 +83,10 @@ function _gmsh_native_surface_frame(m::GeoModel,tag::Int,options,caller)
     receipt=get(m.meshing.native_geo_kernel.plane_frames,tag,nothing)
     receipt===nothing || return _GmshNativePlaneFrame(
         receipt.origin,receipt.first,receipt.second,receipt.normal)
-    samples=NTuple{3,Float64}[]
-    for curve in _gmsh_native_surface_curves(m,tag)
-        low,high=_model_curve_param_bounds(m,curve,caller)
-        push!(samples,_gmsh_native_curve_sample(m,curve,low+0.333*(high-low),caller))
-        push!(samples,_gmsh_native_curve_sample(m,curve,low+0.666*(high-low),caller))
-    end
-    frame=_gmsh_native_plane_frame(samples,options.geometry_tolerance,options.ctx_lc)
-    frame===nothing && throw(ArgumentError(
-        "$caller: native mean Plane SVD fallback for Surface[$tag] is not implemented"))
-    return frame
+    # Models assembled through the direct Julia API have no native-GEO birth
+    # receipt. Use the same constructor fit, including its singular-vector
+    # fallback when a closed Curve supplies only two fast-path samples.
+    return _gmsh_native_plane_birth_frame(m,tag,options.geometry_tolerance,options.ctx_lc)
 end
 
 function _gmsh_native_surface_canonical_orientation(m,tag,mesh,physical,caller)
@@ -950,9 +944,8 @@ function _gmsh_native_surface_evaluation_frame(m::GeoModel,tag::Int,caller)
     end
     options=_model_default_mesh1d_options(m,caller)
     receipt=get(m.meshing.native_geo_kernel.plane_frames,tag,nothing)
-    frame=receipt===nothing ? _gmsh_native_plane_frame(samples,options.geometry_tolerance,options.ctx_lc) :
+    frame=receipt===nothing ? _gmsh_native_plane_fit(m,tag,samples,options.geometry_tolerance,options.ctx_lc) :
         _GmshNativePlaneFrame(receipt.origin,receipt.first,receipt.second,receipt.normal)
-    frame===nothing && return nothing
     point_tags=unique!(_loop_points(m,first(m.surfaces[tag])))
     append!(point_tags,[point for point in _model_points_of(m,[(2,tag)],caller)
         if !(point in point_tags)])
@@ -996,8 +989,13 @@ function _gmsh_native_plane_birth_frame(m::GeoModel,tag,tolerance,context_lc)
         push!(samples,_gmsh_native_curve_sample(m,curve,low+0.333*(high-low),caller))
         push!(samples,_gmsh_native_curve_sample(m,curve,low+0.666*(high-low),caller))
     end
+    return _gmsh_native_plane_fit(m,tag,samples,tolerance,context_lc)
+end
+
+function _gmsh_native_plane_fit(m::GeoModel,tag,samples,tolerance,context_lc)
     frame=_gmsh_native_plane_frame(samples,tolerance,context_lc)
     frame===nothing || return frame
+    curves=_gmsh_native_surface_curves(m,tag)
     vertices=sort!(unique!(Int[point for curve in curves for point in m.curves[curve]]))
     points=copy(samples);append!(points,[m.points[point] for point in vertices])
     return _gmsh_native_plane_small_svd_frame(points)

@@ -1,3 +1,6 @@
+> Historical record preserved from `docs/handoff/meshing_remaining.md` at commit `a3c4ac37af44bcfe30b5bc7976a284b65f53a9a4`.
+> Dated claims below are historical evidence, not the current work plan. See [current development instructions](../../README.md).
+
 # Implementation audit handoff to Devin — 2026-10-11
 
 The user requested a complete unfinished-work handoff. New implementation, Julia runs and SDK probes have stopped. This file records the implementation_audit agent's concrete continuation scope. The final verified batch and this handoff are published together; the next owner resumes implementation from current Main. No owned runtime remains active.
@@ -5,7 +8,7 @@ The user requested a complete unfinished-work handoff. New implementation, Julia
 This design was prepared against parent Main `da92208`. The successor224-check
 batch integrates shared periodic, STEP SI units and view representation replacement.
 Its final ordinary tests pass on both runtimes, actual exit0,45.21/38.38 s.
-Resume from current `origin/main` and [the Devin checklist](../../DEVIN_HANDOFF.md);
+Resume from current `origin/main` and [the Devin checklist](../DEVIN_HANDOFF.md);
 older candidate paths below preserve provenance. All P1–P6 remain open.
 
 ## Last completed packet: shared translated periodic hybrid Regions
@@ -117,9 +120,9 @@ This file documents unimplemented designs and remaining gaps. No production Sour
 
 ## Repository evidence
 
-- [Rigid periodic controls](../../test/artifacts/handoff_20261011/native_rigid_periodic_probe.json).
-- [Shared translated control](../../test/artifacts/handoff_20261011/native_shared_periodic_probe.json).
-- [Invalid Quad-sheet observation](../../test/artifacts/handoff_20261011/native_quad_sheet_probe.json).
+- [Rigid periodic controls](../../../../test/artifacts/handoff_20261011/native_rigid_periodic_probe.json).
+- [Shared translated control](../../../../test/artifacts/handoff_20261011/native_shared_periodic_probe.json).
+- [Invalid Quad-sheet observation](../../../../test/artifacts/handoff_20261011/native_quad_sheet_probe.json).
 
 Only the shared translated feature has a Tessella implementation here. Rigid
 rotation observations remain design evidence; native return status alone does

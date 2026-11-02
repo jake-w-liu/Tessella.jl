@@ -24,7 +24,7 @@ Region volume remain mandatory. This scope is one retained planar Surface in
 one certified convex hybrid Region; it does not add holes, Surface interior
 vertices, larger polygons, multiple sheets, or general native ordering parity.
 
-The opt-in [public fixture](../test/interfaces/api_hybrid_polygon_sheet_functional_test.jl)
+The opt-in [public fixture](../../test/interfaces/api_hybrid_polygon_sheet_functional_test.jl)
 generates actual pentagon/hexagon lower meshes through the public API, verifies
 actual lower UID/Physical incidence and independent facet/edge/volume checks,
 and rejects one publicly reversed actual Tri without publishing a Volume. No

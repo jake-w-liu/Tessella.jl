@@ -424,6 +424,7 @@ function _distance_triangle_kernel(p, a, b, c)
     (isfinite(d3) && isfinite(d4)) || return Inf
     (d3 >= 0 && d4 <= d3) && return _norm3(bp)
     vc=d1*d4-d3*d2
+    isfinite(vc) || return Inf
     if vc <= 0 && d1 >= 0 && d3 <= 0
         return _distance_segment_kernel(p,a,b)
     end
@@ -431,16 +432,29 @@ function _distance_triangle_kernel(p, a, b, c)
     (isfinite(d5) && isfinite(d6)) || return Inf
     (d6 >= 0 && d5 <= d6) && return _norm3(cp)
     vb=d5*d2-d1*d6
+    isfinite(vb) || return Inf
     if vb <= 0 && d2 >= 0 && d6 <= 0
         return _distance_segment_kernel(p,a,c)
     end
     va=d3*d6-d5*d4
+    isfinite(va) || return Inf
     if va <= 0 && (d4-d3) >= 0 && (d5-d6) >= 0
         return _distance_segment_kernel(p,b,c)
     end
-    denom=inv(va+vb+vc); v=vb*denom; w=vc*denom
-    q=_addscaled3(_addscaled3(a,ab,v),ac,w)
-    return _norm3(_sub3(p,q))
+    # The closest point is in the face interior. Reconstructing its world
+    # coordinates rounds small offsets away when the face is far from the
+    # origin, even though the distance itself is well representable. Measure
+    # the perpendicular residual in the local frame instead.
+    normal=_distance_cross3(ab,ac)
+    residual=_distance_dot3(ap,normal)
+    isfinite(residual) || return Inf
+    if residual isa Float64
+        magnitude=abs(ap[1]*normal[1])+abs(ap[2]*normal[2])+abs(ap[3]*normal[3])
+        # Cancellation in the signed plane distance needs the exact fallback;
+        # a finite, rounded zero is not proof that the query is on the plane.
+        magnitude>0 && abs(residual)<=8eps(Float64)*magnitude && return Inf
+    end
+    return abs(residual)/_norm3(normal)
 end
 
 function _distance_triangle(p, a, b, c)

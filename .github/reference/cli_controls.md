@@ -16,7 +16,7 @@ its input path; output-format flags require a dimension.
 Command-line values retain priority over script assignments, including sizing
 aliases and in-script mesh statements. This follows the pinned public Gmsh
 4.15.2 initialization/open observation. Curve generation supports orders 1–10;
-Surface/Volume orders retain the [implemented scope](../README.md).
+Surface/Volume orders retain the [implemented scope](../../README.md).
 Unsupported generated families/orders fail explicitly.
 
 `-help`/`--help` prints and returns usage; `-version`/`--version` prints and
@@ -35,7 +35,7 @@ and duplicate cells. Missing references and repeated cells raise errors.
 This mode rejects generation, sizing and output flags. It checks structure;
 curved Jacobian validity and native diagnostic chronology remain separate work.
 
-The opt-in [mesh-check fixture](../test/interfaces/cli_check_functional_test.jl)
+The opt-in [mesh-check fixture](../../test/interfaces/cli_check_functional_test.jl)
 passed all20 fixed assertions onJulia1.13.1, actual exit0/35.63 s including
 loading. It covers all four encodings, unchanged input bytes/directory contents,
 duplicate and missing-node failures, and conflicting flags. Two no-generation

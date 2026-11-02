@@ -14,7 +14,5 @@ let surface=import_step(joinpath(@__DIR__,"..","fixtures","brep_occ_nurbs_pillow
     @test surface isa Tessella.Mesh && validate(surface).ok
     @test Tessella.MeshTypes.nnodes(surface)==130 && Tessella.MeshTypes.ntris(surface)==256
 end
-let filled=import_step(joinpath(@__DIR__,"..","fixtures","brep_occ_nurbs_pillow.step"))
-    @test filled isa Tessella.Mesh && validate(filled).ok && size(filled.tets,2)>0
-end
+# Full pillow recovery stays in geometry/brep_nurbs_trim_test.jl (opt-in).
 end

@@ -366,8 +366,16 @@ end
 @inline function _unit_axis(axis,caller::AbstractString)
     x,y,z=_transform_point3(axis,caller,"axis")
     magnitude=hypot(x,y,z)
-    (isfinite(magnitude) && magnitude>0) || throw(ArgumentError(
+    magnitude>0 || throw(ArgumentError(
         "$caller: axis must have finite positive length"))
+    # A subnormal norm can lose most of its significant bits, while a large
+    # finite direction can have an overflowing norm. Normalize a scaled vector
+    # in either case; ordinary axes retain their existing arithmetic.
+    if !isfinite(magnitude) || magnitude<floatmin(Float64)
+        scale=max(abs(x),abs(y),abs(z))
+        x/=scale;y/=scale;z/=scale
+        magnitude=hypot(x,y,z)
+    end
     return (x/magnitude,y/magnitude,z/magnitude)
 end
 

@@ -27,7 +27,7 @@ supports and correctly uses that fallback. This path does not add general
 CAD, curved-prism, or arbitrary polyhedron support.
 
 The opt-in regression is
-[`prismatic_fill_functional_test.jl`](../test/meshing/prismatic_fill_functional_test.jl).
+[`prismatic_fill_functional_test.jl`](../../test/meshing/prismatic_fill_functional_test.jl).
 It checks the actual rotated IGES public fill, literal boundary supports,
 positive analytic volume, hole exclusion, output storage independence,
 translated/outer-box/triangular-prism controls, the unequal-cap public fallback,

@@ -28,4 +28,4 @@ producers also support one [Line2 Curve](hybrid_embedded_curves.md) or one
 exterior identity and signed-volume certificates also apply to this context.
 
 The opt-in regression is
-[`api_hybrid_embedded_point_functional_test.jl`](../test/interfaces/api_hybrid_embedded_point_functional_test.jl).
+[`api_hybrid_embedded_point_functional_test.jl`](../../test/interfaces/api_hybrid_embedded_point_functional_test.jl).

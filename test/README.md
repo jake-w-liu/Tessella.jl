@@ -31,6 +31,10 @@ and OCC wire/planar-face `add_wire`/`add_plane_surface`/`add_rectangle`
 creation, synchronization, bounds and boundary checks. It needs
 no external mesher or solver.
 
+NURBS smoke checks import boundary meshes. Full pillow and mixed spherical-cap
+volume recovery is opt-in in `geometry/brep_nurbs_trim_test.jl` and
+`geometry/brep_nurbs_mixed_test.jl`, both included by the extended runner.
+
 Run the default suite from the repository root. The runner automatically uses
 minimal compilation for small functional checks. Ordinary `Pkg.test()` and
 standalone invocation relaunch once with the same active project when needed,
@@ -619,7 +623,7 @@ file-merge and two read-only CLI assertions; periodic Volume, tensor production,
 campaigns remain opt-in. Portable final224 receipts and Source hashes are also
 retained locally under `test/artifacts/handoff_20261011` — the directory
 is gitignored and regenerable through the `validation/*/reconstruct`
-scripts; see the [Devin continuation checklist](../DEVIN_HANDOFF.md). The preceding214-check bodies took11.1/10.9 s and
+scripts; see the [Devin continuation checklist](../.github/development/history/DEVIN_HANDOFF.md). The preceding214-check bodies took11.1/10.9 s and
 qualify their own Source. The preceding 209-check
 bodies took 11.1/10.7 s and qualify their own Source. The preceding 207-check
 bodies took 10.1 s on both runtimes and qualify their own Source. The preceding203-check

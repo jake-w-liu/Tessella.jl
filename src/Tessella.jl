@@ -2,9 +2,8 @@
     Tessella
 
 A Julia-native, robust, memory-efficient mesh generator. Goal: *design → mesh
-always works*. See `PLAN.md` for the staged architecture, `DEVELOPMENT.md` for the
-mandatory CRC (Correctness–Robustness–Completeness) discipline, and `STATUS.md` for
-the live stage board.
+always works*. See `.github/development/README.md` for the current development
+contract and `.github/development/CHECKLIST.md` for the unfinished-work ledger.
 
 Pipeline (0-D → 3-D): exact predicates ([`Predicates`](@ref)) underpin a robust
 2-D Delaunay/CDT/refinement core ([`Mesh2D`](@ref)), 1-D edge + surface meshing
@@ -17,11 +16,11 @@ together with the *validated-or-explicit-blocker* contract.
 module Tessella
 
 # ── Version / capability banner ────────────────────────────────────────────────
-# Highest development stage whose CRC gate (STATUS.md) is green. Stage 6 includes
+# Highest implemented development stage. Stage 6 includes
 # high-order elements and solver-consumable I/O; stages 0–5 are prerequisites.
-const TESSELLA_STAGE = 6  # see STATUS.md stage board
+const TESSELLA_STAGE = 6  # full Gmsh parity remains tracked in the checklist
 
-# ── Submodules (PLAN.md §3) ────────────────────────────────────────────────────
+# ── Submodules ────────────────────────────────────────────────────────────────
 include("core/GmshLibm.jl")       # platform-libm shims for Gmsh/OCCT bit parity
 include("core/Predicates.jl")     # Stage 0: adaptive exact orient/incircle/insphere + SoS
 include("core/MeshTypes.jl")      # Stage 0: compact SoA mesh, topology, quality, CRC checksum
@@ -223,7 +222,7 @@ export P2Mesh, P2SegMesh, P2TriMesh, p2_segmesh, p2_tetmesh, p2_trimesh,
 """
     stage() -> Int
 
-Current implemented development stage (see the `STATUS.md` stage board).
+Current implemented development stage; this does not certify full Gmsh parity.
 """
 stage() = TESSELLA_STAGE
 

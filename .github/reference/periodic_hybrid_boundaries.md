@@ -49,15 +49,15 @@ Per-Region positive typed cells, exact exterior/UID ownership and analytic
 volume certificates remain required.
 
 The bounded regressions are
-[`api_periodic_hybrid_functional_test.jl`](../test/interfaces/api_periodic_hybrid_functional_test.jl)
+[`api_periodic_hybrid_functional_test.jl`](../../test/interfaces/api_periodic_hybrid_functional_test.jl)
 for the translated scope and
-[`api_rigid_periodic_hybrid_functional_test.jl`](../test/interfaces/api_rigid_periodic_hybrid_functional_test.jl)
+[`api_rigid_periodic_hybrid_functional_test.jl`](../../test/interfaces/api_rigid_periodic_hybrid_functional_test.jl)
 for the quarter-/half-turn rigid scope (24Tet4+6Pyramid5, volume1, actual
 primary/P2 pairs, MSH4 transport, atomic non-rigid and direct-relation
 rejections).
 
 The batch fixture is
-[`api_periodic_hybrid_batch_functional_test.jl`](../test/interfaces/api_periodic_hybrid_batch_functional_test.jl).
+[`api_periodic_hybrid_batch_functional_test.jl`](../../test/interfaces/api_periodic_hybrid_batch_functional_test.jl).
 It generates two small unit Regions once, checks their independent volume and
 exterior certificates, preserves lower ownership/cells, checks primary and P2
 periodic query pairs, and verifies classified MSH4 transport. The default MSH4

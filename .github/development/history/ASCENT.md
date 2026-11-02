@@ -1,3 +1,6 @@
+> Historical record preserved from `ASCENT.md` at commit `a3c4ac37af44bcfe30b5bc7976a284b65f53a9a4`.
+> Dated claims below are historical evidence, not the current work plan. See [current development instructions](../README.md).
+
 # ASCENT integration & HFSS solve campaign — status tracker
 
 ## Current testing policy (2026-10-11)
@@ -6,7 +9,7 @@ ASCENT loading, physics and HFSS solve campaigns are external opt-in validation.
 They are excluded from routine `Pkg.test()`. The historical solver values below
 remain unchanged; they were not rerun for this takeover and do not qualify the
 current code integration. See [HANDOFF.md](HANDOFF.md#takeover-2026-10-11) and
-[test/README.md](test/README.md) for current implementation and test status.
+[test/README.md](../../../test/README.md) for current implementation and test status.
 
 ## Historical continuation status (2026-10-10)
 
