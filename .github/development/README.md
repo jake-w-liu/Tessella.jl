@@ -22,11 +22,22 @@ and external solver campaigns are opt-in.
 
 ### 2026-11-02 fresh correctness and release pass
 
-`1a722d5` is pushed and its exact remote SHA verified. It contains the three
-numerical/Plane fixes and initial documentation/license/release preparation.
-`91bf429` is the next local model-view/plugin/performance checkpoint; full
-package checks of that loaded source have not completed. Registration and
-the overall completion objective remain open.
+Commits `1a722d5`, `91bf429`, and `4454182` are pushed. Exact remote main SHA:
+`4454182b2f9a76391976a8c2f21e29535cc16590`. Clean detached checkouts of that
+commit passed ordinary `Pkg.test()` with bounds checks and automatic minimal
+compilation on both supported lines:
+
+| Runtime | Assertions | Actual exit | Test body |
+| --- | ---: | ---: | ---: |
+| Julia 1.12.7 | 749/749 | 0 | 13m07.1s |
+| Julia 1.13.1 | 749/749 | 0 | 12m48.9s |
+
+Verification directories: `C:/Users/User/Tessella-verification-4454182`
+and `C:/Users/User/Tessella-verification-4454182-113`; logs are
+`C:/Users/User/Tessella-clean-4454182-112.log` and
+`C:/Users/User/Tessella-clean-4454182-113.log`. Their tracked sources stayed
+clean. This qualifies that exact published snapshot, not later main-worktree
+edits or the whole completion objective. Registration remains open.
 
 The following additional fixes have fresh scoped evidence:
 
@@ -54,13 +65,14 @@ The following additional fixes have fresh scoped evidence:
   inverse/list/scalar/tensor checks 204/204. All exits 0. Three warmed inverse
   query paths allocate 0 bytes; existing warmed high-order checks also pass.
 
-The currently running older full checks reached a torus/box Boolean integration
-case (sessions 23718/43305, logs `C:/Users/User/Tessella-combined-112.log` and
-`Tessella-combined-113.log`). That exact case is now opt-in alongside full GEO
-adaptation/matching and NURBS volume recovery; ordinary checks retain small
-box Booleans and CAD boundaries. Re-run the final ordinary suite on both lines
-after the current source checkpoint, and record actual exits; no full-pass
-receipt is claimed from the partial or deliberately superseded runs.
+Older full checks reached a torus/box Boolean integration case and were
+deliberately superseded (exit 1, not product-failure/pass receipts). That exact
+case is now opt-in alongside full GEO adaptation/matching and NURBS volume
+recovery; ordinary checks retain small box Booleans and CAD boundaries.
+Initial main-worktree 445 checks also overlapped an uncommitted probe-helper
+parse error and exited 1; they are not evidence about committed 445. The clean
+checkout checks above replace those invalid/partial runs. Continue checking
+immutable commits separately from parallel main-worktree implementation.
 
 Active next work: canonical/full-order API view probing (legacy curved-Line3
 value error reproduced), the independent tiny partition compiler hotspot,
