@@ -6,9 +6,15 @@ struct _NativeFullQuadMiddle
     parameter::Union{Nothing,Vector{Float64}}
     world::NTuple{3,Float64}
     chord_world::NTuple{3,Float64}
+    # `born` marks a middle minted for an uncoarsened Curve cell edge: it is
+    # a fresh identity absent from the lower producer, not a retained
+    # halved vertex restoring onto the coarse boundary.
+    born::Bool
 end
 _NativeFullQuadMiddle(tag,owner,parameter,world)=
-    _NativeFullQuadMiddle(tag,owner,parameter,world,world)
+    _NativeFullQuadMiddle(tag,owner,parameter,world,world,false)
+_NativeFullQuadMiddle(tag,owner,parameter,world,chord)=
+    _NativeFullQuadMiddle(tag,owner,parameter,world,chord,false)
 
 function _gmsh_fullquad_input(m,tag,input,element_high_water,options,caller)
     middles=Dict{Tuple{UInt64,UInt64},_NativeFullQuadMiddle}()
@@ -18,7 +24,7 @@ function _gmsh_fullquad_input(m,tag,input,element_high_water,options,caller)
     if compound
         return (authority=input,middles,element_high_water,admitted=false,
             ctx_lc=options.ctx_lc,chains=Dict{Int32,Vector{UInt64}}(),
-            parameters=Dict{UInt64,Float64}())
+            parameters=Dict{UInt64,Float64}(),node_high_water=UInt64(0))
     end
     authority=deepcopy(input)
     source=authority.mesh
@@ -33,6 +39,8 @@ function _gmsh_fullquad_input(m,tag,input,element_high_water,options,caller)
     # recovered chain can splice its new vertices back at the right span.
     chains=Dict{Int32,Vector{UInt64}}()
     parameters=Dict{UInt64,Float64}()
+    records=NamedTuple[]
+    proposed=Dict{Tuple{UInt64,UInt64},Int}()
     for curve in curves
         haskey(m.meshing.transfinite_curves,curve) && _model_mesh_warn(options,
             "Full-quad recombination only compatible with transfinite meshes if those are performed first")
@@ -75,13 +83,76 @@ function _gmsh_fullquad_input(m,tag,input,element_high_water,options,caller)
         if isodd(length(cells))
             _model_mesh_error(options,"1D mesh cannot be divided by 2")
         end
-        coarse=NTuple{2,Int32}[]
-        labels=UInt64[]
+        keys=Tuple{UInt64,UInt64}[]
         for index in 1:2:length(cells)-1
             first,middle=cells[index]
             next,last=cells[index+1]
             middle==next || throw(ArgumentError(
                 "$caller: Curve[$curve] consecutive Line constructors do not share their middle identity"))
+            a,c=original.rows[first],original.rows[last]
+            key=minmax(data.external_node_tags[a],data.external_node_tags[c])
+            push!(keys,key)
+            proposed[key]=get(proposed,key,0)+1
+        end
+        # Every literal cell edge is a coarse-mesh constrained edge when its
+        # Curve is left uncoarsened; `middles` (and the triangulation edge
+        # set itself) cannot hold two entries for one node pair, so a
+        # proposed super-edge colliding with another proposed super-edge —
+        # a four-cell closed Curve, or two Curves spanning the same two
+        # vertices — or with another Curve's literal cell edge leaves its
+        # Curve uncoarsened instead.
+        edges=Set{Tuple{UInt64,UInt64}}(
+            minmax(data.external_node_tags[original.rows[cell[1]]],
+                   data.external_node_tags[original.rows[cell[2]]]) for cell in cells)
+        push!(records,(curve=curve,cells=cells,keys=keys,edges=edges,original=original))
+    end
+    node_high_water=maximum(data.external_node_tags;init=UInt64(0))
+    for record in records
+        curve,cells,keys,edges,original=record
+        owner=(1,Int32(curve))
+        keyset=Set(keys)
+        collide=any(key->proposed[key]>1,keys) ||
+            any(other->!isdisjoint(keyset,other.edges),
+                other for other in records if other!==record)
+        if collide && haskey(chains,Int32(curve))
+            # The Curve keeps its literal cells in the coarse view. Each
+            # cell edge still needs its subdivision middle — born as a fresh
+            # Curve-owned vertex on the curve itself — and the committed
+            # chain records the grown sequence so the dim-1 write-back keeps
+            # pace with the bisected constraint edges.
+            chain=chains[Int32(curve)]
+            born=Dict{Tuple{UInt64,UInt64},UInt64}()
+            for cell in cells
+                a,b=original.rows[cell[1]],original.rows[cell[2]]
+                key=minmax(data.external_node_tags[a],data.external_node_tags[b])
+                wa=Tuple(source.coords[:,a]);wb=Tuple(source.coords[:,b])
+                chord=ntuple(axis->0.5*(wa[axis]+wb[axis]),3)
+                parameter=only(model_parametrization(m,1,Int(curve),collect(chord)))
+                isfinite(parameter) || throw(ArgumentError(
+                    "$caller: full-quad Curve[$curve] keeps a non-finite edge parameter"))
+                world=_gmsh_native_curve_sample(m,Int(curve),parameter,caller)
+                node_high_water<typemax(UInt64) || throw(ArgumentError(
+                    "$caller: full-quad uncoarsened Curve middles exhaust UInt64 labels"))
+                uid=(node_high_water+=UInt64(1))
+                middles[key]=_NativeFullQuadMiddle(uid,owner,Float64[parameter],
+                    world,chord,true)
+                parameters[uid]=parameter
+                born[key]=uid
+            end
+            grown=UInt64[]
+            for index in 1:length(chain)-1
+                push!(grown,chain[index])
+                push!(grown,born[minmax(chain[index],chain[index+1])])
+            end
+            push!(grown,chain[end])
+            chains[Int32(curve)]=grown
+            continue
+        end
+        coarse=NTuple{2,Int32}[]
+        labels=UInt64[]
+        for index in 1:2:length(cells)-1
+            first,middle=cells[index]
+            next,last=cells[index+1]
             a,b,c=original.rows[first],original.rows[middle],original.rows[last]
             point=ntuple(axis->0.5*(source.coords[axis,a]+source.coords[axis,c]),3)
             parameter=data.node_parametric[b]
@@ -109,7 +180,7 @@ function _gmsh_fullquad_input(m,tag,input,element_high_water,options,caller)
             ElementBlock[ElementBlock(1,connectivity)],Vector{UInt64}[labels])
     end
     return (authority,middles,element_high_water=high_water,admitted=!isempty(middles),
-        ctx_lc=options.ctx_lc,chains,parameters)
+        ctx_lc=options.ctx_lc,chains,parameters,node_high_water)
 end
 
 # The halved Curve middles restore through `middles` — they are not coarse
@@ -226,7 +297,7 @@ function _gmsh_fullquad_size_options(options::_ModelMesh1DOptions)
 end
 
 function _gmsh_fullquad_append_node!(state,tag,owner,parameter,point,uv,
-                                    parameters,retained,caller)
+                                    parameters,retained,caller;keep=owner[1]<2)
     length(state.node_tags)<typemax(Int32) || throw(ArgumentError(
         "$caller: full-quad subdivision exhausts dense node indices"))
     row=length(state.node_tags)+1
@@ -241,7 +312,7 @@ function _gmsh_fullquad_append_node!(state,tag,owner,parameter,point,uv,
     push!(state.owners,owner)
     push!(state.alive,true)
     push!(parameters,parameter)
-    push!(retained,owner[1]<2)
+    push!(retained,keep)
     return Int32(length(state.node_tags))
 end
 
@@ -329,7 +400,8 @@ function _gmsh_fullquad_subdivide!(state,m,tag,middles,parameters,retained,
             row=_gmsh_fullquad_append_node!(state,uid,
                 payload===nothing ? owner : payload.owner,
                 payload===nothing ? collect(middle_uv) : deepcopy(payload.parameter),point,middle_uv,
-                parameters,retained,caller)
+                parameters,retained,caller;
+                keep=payload===nothing ? false : !payload.born)
             positions[uid]=row
         else
             state.world[:,row].=point
@@ -386,9 +458,11 @@ function _gmsh_native_surface_fullquad(m,tag,product,world,protected,frame,input
     _native_recombine_process!(state,m,tag,protected;minimum_quality=0.1)
     parameters=deepcopy(product.node_parameters)
     retained=copy(product.retained_nodes)
+    # `input.node_high_water` sits above any identities reserved for
+    # uncoarsened-Curve middles, so fresh births cannot reuse them.
     node_high_water=_gmsh_fullquad_subdivide!(state,m,tag,input.middles,parameters,retained,
-        product.node_high_water,frame,caller;ctx_lc=input.ctx_lc,
-        middle_uv_of,point_lift)
+        max(product.node_high_water,input.node_high_water),frame,caller;
+        ctx_lc=input.ctx_lc,middle_uv_of,point_lift)
     # Restored Curve line segments remain protected in the second stage.
     restored=Set{Tuple{Int32,Int32}}()
     positions=Dict(uid=>Int32(row) for (row,uid) in enumerate(state.node_tags))
@@ -401,10 +475,12 @@ function _gmsh_native_surface_fullquad(m,tag,product,world,protected,frame,input
     _native_recombine_process!(state,m,tag,restored;minimum_quality=1e-3)
     output=_native_recombine_export(product,state,tag,caller;retained,parameters,node_high_water)
     final_positions=Dict(uid=>row for (row,uid) in enumerate(state.node_tags))
+    # Born middles are fresh identities absent from the lower producer — the
+    # source-update map only carries retained halved middles.
     updates=Dict(middle.tag=>begin
         row=get(final_positions,middle.tag,0)
         row==0 ? middle.chord_world : ntuple(axis->state.world[axis,row],3)
-    end for middle in values(input.middles))
+    end for middle in values(input.middles) if !middle.born)
     output=_ModelSurfaceProduction(output.mesh,output.node_tags,output.node_owners,
         output.node_parameters,output.retained_nodes,output.node_high_water,
         output.element_tags,output.element_high_water,output.birth_rows,output.constructor_mesh,updates)

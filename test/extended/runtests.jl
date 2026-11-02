@@ -47,6 +47,7 @@ using Tessella
     include(joinpath(@__DIR__, "..", "interfaces/api_native_plane_svd_varied_context_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_native_recombine_missing_face_parameter_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_native_fullquad_generation_test.jl"))
+    include(joinpath(@__DIR__, "..", "interfaces/api_native_fullquad_shared_endpoints_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/model_discrete_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/model_boolean_snapshot_test.jl"))
     include(joinpath(@__DIR__, "..", "geometry/model_boolean_multi_test.jl"))
