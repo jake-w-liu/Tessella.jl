@@ -78,6 +78,7 @@ include("functional/fixtures.jl")
         "functional/brep_plane190_chain_smoke.jl",
         "functional/partition_producer.jl",
         "functional/partition_brep.jl",
+        "interfaces/api_partition_parallel_dispatch_test.jl",
         "functional/rigid_periodic_smoke.jl",
         "functional/occ_circle_smoke.jl",
         "functional/occ_plane_smoke.jl",

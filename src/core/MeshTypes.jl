@@ -905,7 +905,7 @@ end
 # `MeshElementQuality`. The option lives outside this module, so the interfaces
 # layer registers a zero-argument source returning the live request; reading it
 # lazily keeps option updates and session resets effective without a second
-# store. `Threads.@threads` caps actual concurrency at the runtime pool. Every
+# store. Actual concurrency is capped by the request and runtime pool. Every
 # parallel scan writes disjoint per-element slots and reduces serially in
 # traversal order, so diagnostics are identical under any requested worker
 # count — including one worker on a multithreaded runtime.
@@ -916,6 +916,32 @@ function _parallel_workers()
     requested=source===nothing ? 1.0 : source()
     (requested isa Real && isfinite(requested) && requested>=2.0) || return 1
     return Int(requested)
+end
+
+function _parallel_for(body::F,indices,workers::Int) where {F}
+    # Keep threading macro expansion in this small function: embedding it in
+    # a large producer forces whole-function compilation under --compile=min.
+    count=length(indices)
+    count==0 && return nothing
+    tasks=min(max(workers,1),Threads.threadpoolsize(:default),count)
+    if tasks==1
+        for index in indices
+            body(index)
+        end
+        return nothing
+    end
+    width,remainder=divrem(count,tasks)
+    first_position=firstindex(indices)
+    @sync for worker in 1:tasks
+        Threads.@spawn begin
+            offset=(worker-1)*width+min(worker-1,remainder)
+            chunk_size=width+Int(worker<=remainder)
+            for position in offset:offset+chunk_size-1
+                body(indices[first_position+position])
+            end
+        end
+    end
+    return nothing
 end
 
 """
@@ -955,7 +981,7 @@ detection is the caller's job (it must count tets *per region*); `validate` repo
 global tet count so "no empty volumes" can never be vacuously true.
 """
 # Per-element validation classes. Each scan writes one disjoint slot per
-# element and reduces serially in traversal order, so `Threads.@threads`
+# element and reduces serially in traversal order, so task
 # scheduling cannot change the emitted diagnostics: non-finite measure → 1,
 # zero measure → 2, negative signed volume → 3, valid → 0.
 @inline function _validate_seg_entry(m::Mesh,allow_degenerate_segs::Bool,s::Int)
@@ -981,13 +1007,13 @@ end
 end
 
 # Each scan fills disjoint per-element slots in its own function so the
-# `Threads.@threads` closure captures only call arguments — never shared
+# parallel callback captures only call arguments — never shared
 # boxed locals that an enclosing scope could rebind (see the structure-scan
 # note below).
 function _scan_seg_entries!(keys::Vector{NTuple{2,Int32}},flags::Vector{UInt8},
                             m::Mesh,allow::Bool,workers::Int)
     if workers>1
-        Threads.@threads for s in 1:nsegs(m)
+        _parallel_for(1:nsegs(m),workers) do s
             key,flag=_validate_seg_entry(m,allow,s)
             @inbounds keys[s]=key; flags[s]=flag
         end
@@ -1002,7 +1028,7 @@ end
 
 function _scan_tet_entries!(flags::Vector{UInt8},m::Mesh,workers::Int)
     if workers>1
-        Threads.@threads for t in 1:ntets(m)
+        _parallel_for(1:ntets(m),workers) do t
             @inbounds flags[t]=_validate_tet_entry(m,t)
         end
     else
@@ -1016,7 +1042,7 @@ end
 function _scan_tri_entries!(keys::Vector{NTuple{3,Int32}},flags::Vector{UInt8},
                             m::Mesh,workers::Int)
     if workers>1
-        Threads.@threads for t in 1:ntris(m)
+        _parallel_for(1:ntris(m),workers) do t
             key,flag=_validate_tri_entry(m,t)
             @inbounds keys[t]=key; flags[t]=flag
         end
@@ -1142,14 +1168,14 @@ end
 # Parallel per-index scans write one disjoint output slot each and reduce
 # serially in traversal order, so emitted diagnostics are identical under any
 # `General.NumThreads` request — including one worker on a multithreaded
-# runtime. Every scan lives in its own function so the `Threads.@threads`
-# closure captures only call arguments: workers were observed reading a torn
+# runtime. Every scan lives in its own function so its parallel callback
+# captures only call arguments: workers were observed reading a torn
 # captured local (correct array object, stale contents) when the closure
 # shared boxed locals across an enclosing loop's iterations.
 function _scan_nonfinite_nodes!(flags::Vector{Bool},coords::Matrix{Float64},workers::Int)
     nn=size(coords,2)
     if workers>1
-        Threads.@threads for i in 1:nn
+        _parallel_for(1:nn,workers) do i
             @inbounds flags[i]=!isfinite(coords[1,i]) ||
                 !isfinite(coords[2,i]) || !isfinite(coords[3,i])
         end
@@ -1164,7 +1190,7 @@ end
 
 function _scan_negative_tags!(flags::Vector{Bool},tags::Vector{Int32},workers::Int)
     if workers>1
-        Threads.@threads for i in eachindex(tags)
+        _parallel_for(eachindex(tags),workers) do i
             @inbounds flags[i]=tags[i]<0
         end
     else
@@ -1179,7 +1205,7 @@ function _scan_out_of_range!(out::Vector{Int8},cells::AbstractMatrix{<:Integer},
                              nn::Integer,workers::Int)
     ncols=size(cells,2);nrows=size(cells,1)
     if workers>1
-        Threads.@threads for cell in 1:ncols
+        _parallel_for(1:ncols,workers) do cell
             local_index=Int8(0)
             for row in 1:nrows
                 value=cells[row,cell]

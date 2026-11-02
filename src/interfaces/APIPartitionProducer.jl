@@ -88,13 +88,18 @@ function _partition_create_physicals!(staged,part_entities,blocks,block_entities
     return nothing
 end
 
-# `General.NumThreads` requests the parallel worker count for the O(cells)
-# extraction stages below; `Threads.@threads` caps actual concurrency at the
-# runtime thread pool. Every parallel stage writes disjoint per-index slots
+# `General.NumThreads` caps the parallel worker count for the O(cells)
+# extraction stages below, also bounded by Julia's default pool and item count.
+# Every parallel stage writes disjoint per-index slots
 # and merges serially in the original traversal order, so the produced mesh
 # is identical under any requested worker count.
+function _partition_parallel_for(body::F,indices,workers::Int) where {F}
+    return MeshTypes._parallel_for(body,indices,workers)
+end
+
 function _partition_workers()
     requested=get(OPTIONS,"General.NumThreads",1.0)
+    requested==0.0 && return Threads.threadpoolsize(:default)
     (isfinite(requested) && requested>=2.0) || return 1
     return Int(requested)
 end
@@ -321,7 +326,7 @@ function _partition_tet_production_plan(model,cached,class,count,assignment,call
         cell_facets=Vector{Vector{Tuple{NTuple{3,UInt64},NamedTuple}}}(undef,total)
         facet_keys=((1,3,2),(1,2,4),(2,3,4),(3,1,4))
         if workers>1
-            Threads.@threads for index in 1:total
+            _partition_parallel_for(1:total,workers) do index
                 entries=Tuple{NTuple{3,UInt64},NamedTuple}[]
                 for face in facet_keys
                     rows=ntuple(slot->source.cells[face[slot],index],3)
@@ -403,7 +408,7 @@ function _partition_tet_production_plan(model,cached,class,count,assignment,call
         workers=_partition_workers()
         destinations=Vector{Set{Int32}}(undef,total)
         if workers>1
-            Threads.@threads for index in 1:total
+            _partition_parallel_for(1:total,workers) do index
                 parts=Set{Int32}()
                 for row in source.cells[:,index];union!(parts,node_parts[row]);end
                 destinations[index]=parts

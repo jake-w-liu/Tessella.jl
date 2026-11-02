@@ -22,7 +22,7 @@ and external solver campaigns are opt-in.
 
 ### 2026-11-02 fresh correctness and release pass
 
-Commits `1a722d5`, `91bf429`, and `4454182` are pushed. Exact remote main SHA:
+Commits `1a722d5`, `91bf429`, and `4454182` are pushed. Verified implementation checkpoint:
 `4454182b2f9a76391976a8c2f21e29535cc16590`. Clean detached checkouts of that
 commit passed ordinary `Pkg.test()` with bounds checks and automatic minimal
 compilation on both supported lines:
@@ -78,6 +78,29 @@ Active next work: canonical/full-order API view probing (legacy curved-Line3
 value error reproduced), the independent tiny partition compiler hotspot,
 and the remaining whole P1–P6 checklist. No complete-parity or global-resource
 claim is supported by these scoped checks.
+
+### Bounded parallel dispatch increment
+
+Inactive `@threads` expansions forced compilation of whole serial partition
+producers. The shared bounded dispatcher isolates that machinery and preserves
+real parallel callbacks. A cold two-Tet minimal-compilation check fell from
+202.57 seconds / 58.44 GB total allocation to 0.17–0.22 seconds. These are
+compiler/startup observations, not a steady-state mesh-memory or whole optimized
+producer claim; the separate whole-fixture `-O2` diagnostic was deliberately
+terminated after 498 CPU seconds without assertions and is not a pass/failure.
+
+The same investigation confirmed `General.NumThreads=2` allowed four concurrent
+callbacks in partitioning, structure validation, and quality scans. All now use
+joined chunks capped by request, default-pool size and item count; zero selects
+the system/default pool. Source extraction, ownership certificates and ordering
+remain intact. New 53-check regression includes caps, empty/tiny ranges, joined
+failures, and byte-identical surface/volume MSH4 products with ghosts.
+
+Scoped checks on final dispatcher/Core source: Julia 1.12.7 and 1.13.1,
+`-t4 --compile=min -O0 --check-bounds=yes`, 198 assertions each, actual exit 0;
+Julia 1.13.1 `-t4 -O2`, 39 dispatcher/scan checks, exit 0. Actual callbacks ran
+on multiple default-pool threads. The separate declared-surface cold compiler
+hotspot still requires investigation; global optimization is not claimed.
 
 #### Earlier checks in this pass
 

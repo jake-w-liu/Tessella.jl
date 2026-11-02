@@ -147,7 +147,7 @@ function _partition_brep_surface_borders(faces,caller;workers=1)
     face_edges=Vector{Vector{Tuple{Tuple{UInt64,UInt64},Tuple{UInt64,UInt64},
                                   Union{Nothing,Tuple{Vararg{UInt64}}}}}}(undef,length(faces))
     if workers>1
-        Threads.@threads for index in eachindex(faces)
+        _partition_parallel_for(eachindex(faces),workers) do index
             face=faces[index];corners,e=_partition_surface_shape(face.msh)
             entries=Tuple{Tuple{UInt64,UInt64},Tuple{UInt64,UInt64},
                           Union{Nothing,Tuple{Vararg{UInt64}}}}[]
@@ -258,7 +258,7 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
             linear=_partition_linear_base(msh)
             positive=Vector{Bool}(undef,size(cells,2))
             if workers>1
-                Threads.@threads for column in axes(cells,2)
+                _partition_parallel_for(axes(cells,2),workers) do column
                     positive[column]=Model._volume_cell_signed_volume(
                         cached.coords,cells,column,linear)>0
                 end
@@ -424,7 +424,7 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
     end
     volume_facets=Vector{Vector{Tuple{Tuple{Vararg{UInt64}},NamedTuple}}}(undef,length(volumes))
     if workers>1
-        Threads.@threads for index in eachindex(volumes)
+        _partition_parallel_for(eachindex(volumes),workers) do index
             volume=volumes[index];entries=Tuple{Tuple{Vararg{UInt64}},NamedTuple}[]
             for (face_msh,pattern) in facet_tables[volume.msh]
                 rows=ntuple(i->volume.rows[pattern[i]],length(pattern))
@@ -460,7 +460,7 @@ function _partition_brep_snapshot(model,cached,class,assignment,caller)
     end
     face_edges=Vector{Vector{Tuple{Tuple{UInt64,UInt64},NamedTuple}}}(undef,length(faces))
     if workers>1
-        Threads.@threads for index in eachindex(faces)
+        _partition_parallel_for(eachindex(faces),workers) do index
             face=faces[index];corners,e=_partition_surface_shape(face.msh)
             entries=Tuple{Tuple{UInt64,UInt64},NamedTuple}[]
             for (order,(a,b)) in enumerate(_partition_edge_patterns(face.msh))
@@ -1110,7 +1110,9 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
     end
     workers=_partition_workers()
     if workers>1
-        Threads.@threads for b in eachindex(blocks);partials[b]=incident_block(b);end
+        _partition_parallel_for(eachindex(blocks),workers) do b
+            partials[b]=incident_block(b)
+        end
     else
         for b in eachindex(blocks);partials[b]=incident_block(b);end
     end
@@ -1136,7 +1138,7 @@ function _partition_brep_production_plan(model,cached,class,count,assignment,cal
         for volume in source.volumes,row in volume.rows;push!(node_parts[row],volume.part);end
         destinations=Vector{Set{Int32}}(undef,length(source.volumes))
         if workers>1
-            Threads.@threads for index in eachindex(source.volumes)
+            _partition_parallel_for(eachindex(source.volumes),workers) do index
                 parts=Set{Int32}()
                 for row in source.volumes[index].rows;union!(parts,node_parts[row]);end
                 destinations[index]=parts
@@ -1703,7 +1705,9 @@ function _partition_surface_production_plan(model,cached,class,count,assignment,
     end
     workers=_partition_workers()
     if workers>1
-        Threads.@threads for b in eachindex(blocks);partials[b]=incident_block(b);end
+        _partition_parallel_for(eachindex(blocks),workers) do b
+            partials[b]=incident_block(b)
+        end
     else
         for b in eachindex(blocks);partials[b]=incident_block(b);end
     end
@@ -1729,7 +1733,7 @@ function _partition_surface_production_plan(model,cached,class,count,assignment,
         for face in source.faces,row in face.rows;push!(node_parts[row],face.part);end
         destinations=Vector{Set{Int32}}(undef,length(source.faces))
         if workers>1
-            Threads.@threads for index in eachindex(source.faces)
+            _partition_parallel_for(eachindex(source.faces),workers) do index
                 parts=Set{Int32}()
                 for row in source.faces[index].rows;union!(parts,node_parts[row]);end
                 destinations[index]=parts

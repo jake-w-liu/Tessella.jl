@@ -9,7 +9,7 @@ four 1-D measures that Gmsh itself does not define reliably.
 module MeshElementQuality
 
 using ..MeshTypes: Mesh, node, triangle_area, tet_signed_volume,
-    _parallel_workers
+    _parallel_workers, _parallel_for
 using ..MeshPointLocation: mesh_element_offsets
 using ..GmshLibm: _gm_atan, _gm_acos, _gm_atan2
 using LinearAlgebra: svd
@@ -865,14 +865,14 @@ end
 # Each requested element writes one disjoint slot; the value depends only on
 # that element, so `General.NumThreads`-requested workers cannot change the
 # returned vector. The scan lives in its own function so the
-# `Threads.@threads` closure captures only call arguments — never shared
+# parallel callback captures only call arguments — never shared
 # boxed locals that an enclosing scope could rebind.
 function _scan_qualities!(qualities::Vector{Float64},mesh::Mesh,
                           tags::AbstractVector{<:Integer},name::String,
                           triangle_offset::Int,tetrahedron_offset::Int,
                           workers::Int)
     if workers>1
-        Threads.@threads for index in eachindex(tags)
+        _parallel_for(eachindex(tags),workers) do index
             @inbounds qualities[index]=_element_quality(
                 mesh,tags[index],name,triangle_offset,tetrahedron_offset)
         end
