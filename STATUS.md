@@ -24,6 +24,35 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### UI01 ONELAB client send retry republishes the full frame (2026-11-02)
+
+Deep-debug audit of the assigned interface surface (`API.jl`,
+`APIGenerate*`/`APIModel*`/`APIView*`/`APIParallel*`/`APIGraphPartition`,
+`APIOnelab*`/`APINative*`, `CLI.jl`, `IO.jl`, `PostViewIO.jl`,
+`APINativeModelViewFormats`/`APINativeViewWriter`). Verify-before-fix against
+the Gmsh 4.15.2 oracle where relevant.
+
+- **Fixed (`e87eb71`).** `_onelab_client_send` extracted the framed bytes with
+  `take!(frame)` inside the retry loop: a failed first write left the buffer
+  empty, so the reconnect arm sent 0 bytes while reporting success — a
+  silently dropped ONELAB message (upstream `onelab.py` repacks and resends
+  the whole frame). The frame bytes now live outside the loop and the dead
+  socket is closed before reconnecting, matching the reference client.
+  Regression: poison the client socket; the full frame must arrive on the
+  second connection. Verified against the scripted fixture and the live
+  `gmsh -listen` oracle (81 assertions, exit 0).
+- **Discarded after verification.** `-parse_and_exit` side effects (oracle
+  matches), `onelab.get_number` throw-on-missing (tested convention; upstream
+  reports `Msg::Error`), `%.17g` MSH float precision (lossless superset),
+  `Mesh.PartitionCreateTopology=0` API default (documented divergence — the
+  `.geo` table correctly carries upstream's `1.0`), `_part{..}_dim{d}` naming
+  for physical-less parents (documented), parallel sink replay ordering
+  (per-slot buffers replayed at serial merge position), native lookup
+  catalogue staleness (invalidated on every mutation/generate), little-endian
+  frame fields (matches upstream native `ii` packing), `$PartitionedEntities`
+  boundary gating (topology flag mirrors upstream `cf0fec2` evidence), and
+  `view` TimeStep/Time option wrap semantics (upstream `PViewData` rules).
+
 ### LAY02 `.geo` `Extrude` grammar — committed-vs-bare productions, `Using Wire` pipe routing, upstream diagnostics (2026-11-02)
 
 Faithful reproduction of Gmsh 4.15.2's `Extrude` grammar distinction between
