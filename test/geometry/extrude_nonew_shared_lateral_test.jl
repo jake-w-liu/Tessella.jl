@@ -722,7 +722,8 @@ end
         """)
         model=fresh.model
         fs=_sl_shared_tag(fresh)
-        scope=_extrude_volume_pass(model,_SL_CALLER).scope
+        pass=_extrude_volume_pass(model,_SL_CALLER)
+        scope=pass.scope
         bound=scope.surfaces[fs]
         closure=Set{Tuple{Int,Int}}(((2,fs),))
         for loop in model.surfaces[fs],signed in model.loops[loop]
@@ -748,6 +749,10 @@ end
             Dict{Int,Union{Mesh,MixedMesh}}())
         @test_throws r"absent from this mesh scope" model_to_mixed(
             model,bound,fs;_extrude_scope=empty_scope)
+        # The Region projection keeps the same loud diagnostic when the
+        # scope never planned this Volume (not a bare KeyError).
+        @test_throws r"absent from this mesh scope" model_to_mixed(
+            model,pass.parts[1],3,1;_extrude_scope=empty_scope)
         # The certified union-grid wall projects through the same API:
         # `model_to_mixed` accepts the scope's bound part for both owners
         # while an alien (equal-grid) part still cannot impersonate it.

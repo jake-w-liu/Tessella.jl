@@ -229,7 +229,11 @@ function _extrude_nonew_projection_context(m::GeoModel,mesh,volume::Int,
                 _working_model=true).volumes[volume]
     else
         _extrude_nonew_require_scope(scope,m,caller)
-        scope.volumes[volume]
+        completed=get(scope.volumes,volume,nothing)
+        completed===nothing && throw(ArgumentError(
+            "$caller: QuadTriNoNewVerts Volume[$volume] is absent from " *
+            "this mesh scope"))
+        completed
     end
     lookup=_extrude_nonew_projection_lookup(mesh,completed,caller)
     two_tri=completed.catalog isa _ExtrudeNoNewTwoTriCatalog
