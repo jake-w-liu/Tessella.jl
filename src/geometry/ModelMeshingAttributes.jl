@@ -763,7 +763,10 @@ function _transfinite_automatic_surface!(
     end
     lc=Inf
     for point in points
-        lc=min(lc,get(m.point_size,point,Inf))
+        # `point_size` stores 0.0 for unsized vertices (upstream `!lc` →
+        # MAX_LC); a stored zero is not a constraining size.
+        s=get(m.point_size,point,0.0)
+        s!=0.0 && (lc=min(lc,s))
     end
     isfinite(lc) || (lc=1.0)
     counts=[max(2,round(Int,edge_lengths[k]/lc)+1) for k in 1:nedges]

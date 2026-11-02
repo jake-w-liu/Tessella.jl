@@ -24,6 +24,57 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### RSF01 residual audit — native hybrid + gmsh surface producers; full-quad shared-endpoint fix (2026-11-02)
+
+Ledger-driven audit of the residual surfaces: `ModelNativeHybrid*.jl`
+(insertion certificates, embedded Point/Surface admission, batch and
+periodic-boundary certificates, post-`19aca35` pool dedup),
+`ModelGmshSurfaceRecombine.jl`/`ModelGmshSurfaceProducer.jl` (retained
+authority, `carrier_cells`/bindings, transport),
+`ModelGmshFullQuad.jl` (restoration chains post-`65b58a5`),
+`ModelMetric*.jl` (grading, `curve_params`, undershoot repairs), and
+detached/parallel model-copy state completeness.
+
+- **Fixed (commit `1eee640`, pushed).** Full-quad coarse pairing
+  assumed every Curve's halved super-edges were representable in the
+  `middles` map and the coarse triangulation edge set. A proposed
+  super-edge colliding with another proposed super-edge (four-cell
+  closed Curve; two Curves spanning the same two vertices) or with
+  another Curve's literal cell edge was unrepresentable — the
+  Gmsh-4.15.2-verified embedded Curve digon diverged
+  (`embedded Curve[10] is not a chain of mesh edges`) under
+  `Mesh.RecombinationAlgorithm` 2/3 while algorithms 0/1 and the oracle
+  succeeded. Such Curves now stay uncoarsened: each literal cell edge
+  births a fresh Curve-owned middle at its parametrized midpoint
+  (`born` flag), the committed chain grows to match,
+  `node_high_water` is threaded into subdivision so born identities
+  cannot be reused, and born middles stay out of the producer
+  source-update map. Boundary digon Faces take the same arm.
+- **Regression.** New
+  `test/interfaces/api_native_fullquad_shared_endpoints_test.jl`
+  (extended suite): embedded digon under algorithms 2/3 keeps both
+  chains as dim-2 edges with grown 4-cell dim-1 products; boundary
+  digon Face yields all-quad output with every Curve cell a surface
+  edge. 15/15, exit 0 (~20 s under `--compile=min`).
+- **Re-verified.** `api_native_fullquad_generation_test.jl` 7692/7692
+  exit 0 (normal compile, ~12.4 min — `--compile=min` cannot run the
+  `GmshLibm` `llvmcall` path, a known gate limitation). Recombine
+  corpus exit 0. Hybrid spot checks: volume pipeline 30/30, embedded
+  surface 127/127, periodic batch 17/17 — all exit 0.
+- **Rejected/unverifiable candidates.** Retained-authority fold
+  accepting constructor drift (binding validates `isequal` node
+  sets/coords/ownership/parameters/labels/supports); embedded-surface
+  chain admission (complete-chain, winding, Tet-incidence certificates
+  verified); periodic `(slave_uid, affine)` certificates and
+  per-Region embedded pools (correct); metric `curve_params`/undershoot
+  (integrated placement, exact endpoints, honest under-resolution);
+  detached-copy producer state (transported; retag/GEO-entry tests
+  pass). Closed-Face SVD frame-fit failure is a pre-existing
+  frame-fit limitation, unrelated.
+- **Not claimed.** Full parity is not declared from this bounded
+  audit; `--compile=min` llvmcall and the native mean-Plane SVD
+  fallback gap remain open diagnostics.
+
 ### XCU01 cross-cutting audit — test integrity, configuration, shared-state/error/RNG invariants (2026-11-02)
 
 Deep-debug audit of the cross-cutting surface: test integrity across the
@@ -47,7 +98,8 @@ cheaply-detectable public-entry type instability.
   `rec_dimension_max`. The ONELAB fixture answers `PARAMETER_QUERY` with the
   server copy so `define` exercises the server-wins + `PARAMETER_UPDATE`
   branch.
-- **Reported — source defects on sibling-owned surfaces (not fixed here).**
+- **Reported — source defects on sibling-owned surfaces (both RESOLVED
+  in the follow-up Boolean fix commit).**
   - `mesh.set_transfinite_automatic` crashes `InexactError: Int64(Inf)` on
     every model whose boundary points are unsized
     (`ModelMeshingAttributes.jl:764-769`): `lc` starts `Inf`, takes
@@ -57,9 +109,9 @@ cheaply-detectable public-entry type instability.
     `_model_vertex_lc` at `ModelMesh1D.jl:259-262` and box materialization
     at `Model.jl:1849-1851` both treat `0.0`/absent as unsized). `0.0` is
     finite, so the `isfinite(lc) || (lc=1.0)` fallback never fires and
-    `edge_lengths[k]/0.0 = Inf` reaches `round(Int, ·)`. Reproducer: any
-    default `occ`/`geo` model + `set_transfinite_automatic()`. The smoke
-    test pins the working path (explicit `mesh.set_size` on the corners).
+    `edge_lengths[k]/0.0 = Inf` reaches `round(Int, ·)`. **FIXED** — the
+    loop now skips `s == 0.0` entries (unsized); verified `TFA_UNSIZED_OK`
+    on a default model.
   - Materialized Boolean results keep operand snapshots whose shared
     boundary edges appear in the *same* direction in the two incident
     surface meshes (36 same-direction pairs on a two-box union), so
@@ -67,7 +119,11 @@ cheaply-detectable public-entry type instability.
     `mesh_boolean`'s `_require_surface3(…; oriented=true)` in `Mesh3D.jl`
     when the result volume is meshed. Result-entity publication and
     operand removal work; downstream volume meshing throws
-    "surface has inconsistent winding".
+    "surface has inconsistent winding". **FIXED — root cause found was
+    different (see BRE02 ledger below):** coincident operand rims carry
+    distinct `(:e,ctag,…)` keys, so shared partition walls emitted
+    dangling curve copies; and tangent contacts over-shared one key,
+    gluing disjoint cells into a non-manifold shell.
 - **Discarded after verification.** All five `@test_skip` sites are
   conditional resource/platform gates, not silenced assertions
   (`api_onelab_client_test` executable/SDK absence, two
@@ -98,6 +154,63 @@ cheaply-detectable public-entry type instability.
   under `test/functional/` references ignored paths). Needs a
   project-level decision: vendor the fixtures, track them under a
   narrower ignore, or mark those files opt-in.
+
+### BRE02 coincident/tangent multi-operand Boolean materialization (2026-11-02)
+
+Follow-up to the XCU01 Boolean report: three distinct defects in the
+shared rim/component machinery, all oracle-verified (Gmsh 4.15.2 OCC on
+the same fixtures — coincident-face fuse yields one 6-faced volume,
+fragments two volumes, tangent fuse two volumes).
+
+- **Coincident-face operand rims stayed keyed per operand.** Two
+  face-adjacent boxes bound a shared wall under two different
+  `(:e,ctag,…)` keys (one per operand edge), so
+  `boolean_volumes_multi!`/`boolean_volumes!` fuse emitted the seam as
+  two curves that each occur on one kept face —
+  `add_surface_loop!: Curve[n] must occur once on each of two distinct
+  surfaces`. `_brep_collect_faces_n` now relabels coincident rims through
+  `_occ_shared_rim_keys` before `_brep_unify_union` (all ops; the OCC
+  mixed collector's `kept` arm likewise).
+- **`_occ_shared_rim_keys` gained the count-aware asymmetric rule and
+  direction parity.** Only a rim whose key occurs once in the kept set
+  (its coincident sibling was dropped) may weld onto a partner — both
+  sides already wired (`count ≥ 2`) belong to separate valid shells and
+  must not merge. Union-find now tracks parametrization parity: an arc
+  relabeled onto a partner's record whose own `crv` runs anti-parallel
+  flips `fwd`, so `fwd ⊻ neg` stays signed against the emitted curve's
+  direction (without this, relabeled wires fail `add_curve_loop!`
+  chaining). `res_edges` span-union now requires `ar.crv === e.curve`:
+  relabeled partners carry foreign params and the canonical span already
+  covers the coincident segment, so cross-record spans must never merge.
+- **Tangent (edge/point-only) contacts over-shared rims — pre-existing
+  defect, verified on HEAD.** The imprint machinery stamps coincident
+  rims across operands with one key; `edge_faces` union-find then joined
+  *all* faces on that key, fusing two disjoint volumes into a single
+  4-incidence shell. Both materializers (`_brep_materialize_boolean!`,
+  `_brep_materialize_multi!`) now join a key's faces unconditionally only
+  when it is shared by exactly two; for >2 they pair only faces whose
+  cell `uses` masks intersect (each operand's own pair keeps its shell;
+  faces without `uses` keep the previous behavior).
+- **Fuse pieces mesh only their member operands.** A fuse piece's
+  `boolean_operands` record now carries `members=p.srcs`;
+  `_boolean_result_surface` fuses only member snapshots — a
+  single-member (tangent) piece's boundary is its own operand's closed
+  manifold surface instead of a welded non-manifold pair that
+  `mesh_boolean` must reject. `_boolean_component_surface` extraction
+  still applies per piece.
+- **Verified battery (all MESH_OK, masses exact):** coincident-face
+  fuse→1 vol (mass 2, 6 faces), cut→1 (1, 6), intersect→empty,
+  fragments→2 ([1,1], 11 surfaces); overlap fuse→1 (1.875),
+  fragments→3 ([0.875,0.125,0.875]), cut→1 (0.875), intersect→1
+  (0.125); edge-touching fuse→2 ([1,1]); corner-touching fuse→2.
+  Same results on the GeoModel `boolean_volumes_multi!` entry and the
+  `occ` API. New regression testset "coincident-face and tangent
+  multi-operand Booleans" in `test/geometry/model_boolean_snapshot_test.jl`
+  (12 assertions) pins union/fragments/difference/tangent with
+  `mesh_model_volume` on every piece.
+- **Receipts:** `model_boolean_snapshot_test.jl` 80/80 exit 0;
+  `model_boolean_multi_test.jl` 68/68 exit 0 (both `--compile=min -O0
+  --check-bounds=yes`); `occ_boolean_smoke.jl` + OCC battery green.
 
 ### UI01 ONELAB client send retry republishes the full frame (2026-11-02)
 

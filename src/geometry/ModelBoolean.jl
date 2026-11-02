@@ -6008,7 +6008,11 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
     # fuse glues same-domain pieces on one carrier into single faces;
     # fragments/difference keep their imprint splits. Common glues only
     # regions serving the same cell set — a cross-cell merge would erase the
-    # shared wall edges that bound each piece's shell
+    # shared wall edges that bound each piece's shell. Abutting operands
+    # carry coincident rims under distinct operand keys — relabel them onto
+    # one canonical key first or the unify cannot see the shared edge and
+    # each kept partner emits its own copy (a dangling curve in the shell).
+    kept=_occ_shared_rim_keys(kept,tol)
     op===:union && (kept=_brep_unify_union(kept,tol,caller))
     op===:intersection &&
         (kept=_brep_unify_union(kept,tol,caller;same_uses=true))
@@ -6119,11 +6123,17 @@ function _brep_materialize_boolean!(m::GeoModel,t::Int,op::Symbol,
             push!(res_edges,(curve=ar.crv,t0=ar.vt0,t1=ar.vt1))
             length(res_edges)
         end
-        # a merged key spans several source pieces — widen to their union
+        # a merged key spans several source pieces — widen to their union.
+        # A rim-relabeled partner traces the same segment on its own curve
+        # record — its params are foreign, and the canonical span already
+        # covers it (both endpoints coincide), so only same-record arcs
+        # extend the stored span.
         e=res_edges[ei]
-        lo=min(e.t0,ar.vt0,ar.vt1);hi=max(e.t1,ar.vt0,ar.vt1)
-        (lo==e.t0 && hi==e.t1) ||
-            (res_edges[ei]=(curve=e.curve,t0=lo,t1=hi))
+        if ar.crv===e.curve
+            lo=min(e.t0,ar.vt0,ar.vt1);hi=max(e.t1,ar.vt0,ar.vt1)
+            (lo==e.t0 && hi==e.t1) ||
+                (res_edges[ei]=(curve=e.curve,t0=lo,t1=hi))
+        end
         if sev!==nothing && !haskey(vfix,ei) && ar.key isa Tuple &&
                 length(ar.key)>=2 && ar.key[1]===:s &&
                 1<=ar.key[2]<=length(sev)
@@ -6152,15 +6162,30 @@ function _brep_materialize_boolean!(m::GeoModel,t::Int,op::Symbol,
         end
         x
     end
-    edge_faces=Dict{Any,Int}()
+    edge_faces=Dict{Any,Vector{Int}}()
     for (fi,spec) in enumerate(kept), wire in spec.wires, ar in wire
         ei=emap[ar.key]
-        j=get(edge_faces,ei,0)
-        if j==0
-            edge_faces[ei]=fi
-        else
-            ri,rj=findroot(parent,fi),findroot(parent,j)
+        push!(get!(Vector{Int},edge_faces,ei),fi)
+    end
+    # two faces on a result edge is a manifold edge — join unconditionally.
+    # More than two is a non-manifold tangent contact through one shared
+    # key: pair only faces whose cell masks intersect so disjoint cells
+    # keep separate shells instead of gluing into a broken shell.
+    for fs in values(edge_faces)
+        if length(fs)==2
+            fi,fj=fs
+            ri,rj=findroot(parent,fi),findroot(parent,fj)
             ri!=rj && (parent[ri]=rj)
+        else
+            for i in eachindex(fs), j in i+1:length(fs)
+                fi,fj=fs[i],fs[j]
+                (hasproperty(kept[fi],:uses) &&
+                 hasproperty(kept[fj],:uses) &&
+                 isdisjoint((u[1] for u in kept[fi].uses),
+                            (u[1] for u in kept[fj].uses))) && continue
+                ri,rj=findroot(parent,fi),findroot(parent,fj)
+                ri!=rj && (parent[ri]=rj)
+            end
         end
     end
     comps=Dict{Int,Vector{Int}}()
@@ -6369,14 +6394,33 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
             end
             x
         end
-        edge_faces=Dict{Any,Int}()
+        edge_faces=Dict{Any,Vector{Int}}()
         for fi in fis, wire in kept[fi].wires, ar in wire
-            j=get(edge_faces,ar.key,0)
-            if j==0
-                edge_faces[ar.key]=fi
-            else
-                ri,rj=findroot(parent,pos[fi]),findroot(parent,pos[j])
+            push!(get!(Vector{Int},edge_faces,ar.key),fi)
+        end
+        # A key shared by two faces is an ordinary manifold edge — join them
+        # even across operands (section rims bound both cells). A key shared
+        # by MORE than two faces is a non-manifold tangent contact: a rim
+        # imprinted across operands carries ONE key, and joining all four
+        # faces would glue disjoint volumes into a broken shell. Pair only
+        # faces whose cell masks intersect — each operand's own pair then
+        # keeps its cell's shell connectivity (OCC fuse of tangent solids
+        # likewise yields separate solids sharing the edge geometrically).
+        for fs in values(edge_faces)
+            if length(fs)==2
+                fi,fj=fs
+                ri,rj=findroot(parent,pos[fi]),findroot(parent,pos[fj])
                 ri!=rj && (parent[ri]=rj)
+            else
+                for i in eachindex(fs), j in i+1:length(fs)
+                    fi,fj=fs[i],fs[j]
+                    (hasproperty(kept[fi],:uses) &&
+                     hasproperty(kept[fj],:uses) &&
+                     isdisjoint((u[1] for u in kept[fi].uses),
+                                (u[1] for u in kept[fj].uses))) && continue
+                    ri,rj=findroot(parent,pos[fi]),findroot(parent,pos[fj])
+                    ri!=rj && (parent[ri]=rj)
+                end
             end
         end
         compsd=Dict{Int,Vector{Int}}()
@@ -6520,10 +6564,15 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
                 push!(res_edges,(curve=ar.crv,t0=ar.vt0,t1=ar.vt1))
                 length(res_edges)
             end
+            # rim-relabeled partners share the key but carry their own
+            # curve record — foreign params; the canonical span already
+            # covers the coincident segment, so only same-record arcs widen it
             e=res_edges[ei]
-            lo=min(e.t0,ar.vt0,ar.vt1);hi=max(e.t1,ar.vt0,ar.vt1)
-            (lo==e.t0 && hi==e.t1) ||
-                (res_edges[ei]=(curve=e.curve,t0=lo,t1=hi))
+            if ar.crv===e.curve
+                lo=min(e.t0,ar.vt0,ar.vt1);hi=max(e.t1,ar.vt0,ar.vt1)
+                (lo==e.t0 && hi==e.t1) ||
+                    (res_edges[ei]=(curve=e.curve,t0=lo,t1=hi))
+            end
             if sev!==nothing && !haskey(vfix,ei) && ar.key isa Tuple &&
                     length(ar.key)>=2 && ar.key[1]===:s &&
                     1<=ar.key[2]<=length(sev)
@@ -6686,6 +6735,18 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
                         spec.uses[ui][2]
                     end
                     push!(stags,sgn*stag[fi])
+                end
+                if get(ENV,"BREP_DEBUG_SHELL","")=="1"
+                    println("DBGSHELL pi=$pi cf=$cf stags=$stags")
+                    for fi in cf
+                        spec=kept[fi]
+                        println("  fi=$fi sg=$(spec.sg.occ) uses=$(spec.uses)")
+                        for (wi,w) in enumerate(spec.wires), ar in w
+                            ei=get(emap,ar.key,0)
+                            c=ei!=0 ? ctag[ei] : get(reuse_ctag,ar.key,0)
+                            println("    w$wi key=$(ar.key) ei=$ei ctag=$c")
+                        end
+                    end
                 end
                 sh=add_surface_loop!(m,stags)
                 push!(shells,sh);push!(pshells,sh)
@@ -7528,7 +7589,20 @@ function _boolean_result_surface(m::GeoModel,t::Int,
         mesh_boolean(rec[1],rec[2],spec.op)
     else
         if rec.cell===nothing
-            foldl((a,b)->mesh_boolean(a,b,:union),rec.meshes)
+            # a fuse piece's boundary is the union of ITS member operands —
+            # tangent contact contributes no volume, so a single-member
+            # piece's boundary is that operand's own (closed, manifold)
+            # surface; fusing every operand would weld coincident rims into
+            # a non-manifold surface that cannot be certified or split back
+            members=hasproperty(rec,:members) ? rec.members :
+                foldl((a,i)->a|_brep_bit(i),1:length(rec.meshes);init=UInt64(0))
+            acc=nothing
+            for i in 1:length(rec.meshes)
+                (members & _brep_bit(i))==0 && continue
+                acc===nothing && (acc=rec.meshes[i];continue)
+                acc=mesh_boolean(acc,rec.meshes[i],:union)
+            end
+            acc
         else
             _boolean_cell_mesh(rec.meshes,rec.cell,caller)
         end

@@ -186,3 +186,63 @@ end
     @test _snapshot_volume(nested.mesh)≈0.5 atol=1e-12
     @test mesh_crc(nested.mesh).bbox==((1.5,0.0,0.0),(2.0,1.0,1.0))
 end
+
+@testset "coincident-face and tangent multi-operand Booleans" begin
+    # Oracle-verified against Gmsh 4.15.2 (occ.fragment / occ.fuse on the
+    # same pairs). Face-adjacent boxes share a coincident partition wall:
+    # each operand's rim on that wall carries a DIFFERENT edge key, so the
+    # multi-operand collector must canonicalize shared rims before cell
+    # materialization or the result shells dangle ("Curve[n] must occur
+    # once on each of two distinct surfaces") / fail wire chaining. The
+    # canonicalized wire must also follow the canonical record's
+    # parametrization direction (`fwd` parity flip) or `add_curve_loop!`
+    # rejects the loop.
+    model=GeoModel()
+    add_box!(model,0,0,0,1,1,1;tag=1)
+    add_box!(model,1,0,0,1,1,1;tag=2)
+    out=boolean_volumes_multi!(model,:union,[1],[2];
+                               remove_object=true,remove_tool=true)
+    @test length(out)==1
+    owned=sort!(unique!([abs(s) for shell in model.volumes[out[1]]
+        for s in model.surface_loops[shell]]))
+    @test length(owned)==6
+    @test _snapshot_volume(mesh_model_volume(model,out[1]))≈2.0 atol=1e-12
+
+    # fragment keeps both cells — the shared wall is one surface carried
+    # by both shells (eleven distinct surfaces across the two volumes)
+    model=GeoModel()
+    add_box!(model,0,0,0,1,1,1;tag=1)
+    add_box!(model,1,0,0,1,1,1;tag=2)
+    out=boolean_volumes_multi!(model,:fragments,[1],[2];
+                               remove_object=true,remove_tool=true)
+    @test length(out)==2
+    all_owned=sort!(unique!([abs(s) for v in out
+        for shell in model.volumes[v] for s in model.surface_loops[shell]]))
+    @test length(all_owned)==11
+    for v in out
+        @test _snapshot_volume(mesh_model_volume(model,v))≈1.0 atol=1e-12
+    end
+
+    # difference on the same pair: the tool's contribution to the wall
+    # cancels, leaving the object cell
+    model=GeoModel()
+    add_box!(model,0,0,0,1,1,1;tag=1)
+    add_box!(model,1,0,0,1,1,1;tag=2)
+    out=boolean_volumes_multi!(model,:difference,[1],[2];
+                               remove_object=true,remove_tool=true)
+    @test length(out)==1
+    @test _snapshot_volume(mesh_model_volume(model,out[1]))≈1.0 atol=1e-12
+
+    # edge-touching union: the shared rim belongs to BOTH operands' kept
+    # faces, so no relabeling may merge them — two disjoint volumes stay
+    # two (oracle: two output volumes, not one merged)
+    model=GeoModel()
+    add_box!(model,0,0,0,1,1,1;tag=1)
+    add_box!(model,1,0,1,1,1,1;tag=2)
+    out=boolean_volumes_multi!(model,:union,[1],[2];
+                               remove_object=true,remove_tool=true)
+    @test length(out)==2
+    for v in out
+        @test _snapshot_volume(mesh_model_volume(model,v))≈1.0 atol=1e-12
+    end
+end

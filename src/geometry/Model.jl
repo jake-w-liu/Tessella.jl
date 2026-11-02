@@ -2518,7 +2518,8 @@ function _bind_boolean_piece!(m::GeoModel,t::Int,op::Symbol,
     m.volumes[t]=p.shells
     m.booleans[t]=(op=op,operands=copy(tags))
     m.boolean_operands[t]=(meshes=meshes,
-                           cell=op===:union ? nothing : p.srcs)
+                           cell=op===:union ? nothing : p.srcs,
+                           members=p.srcs)
     return t
 end
 

@@ -1161,6 +1161,14 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
         end
     end
     if op===:union
+        # Volume faces unify the same way sheets do: abutting operands
+        # carry coincident rim edges under distinct operand keys, so a
+        # fuse that keeps both coplanar partners would otherwise emit the
+        # shared seam as two curves that each occur once in the shell.
+        # Relabel the rims first, then merge coplanar partners — OCC's
+        # same-domain unification produces one merged face.
+        kept=_occ_shared_rim_keys(kept,tol)
+        kept=_brep_unify_union(kept,tol,caller)
         sheet_out=_occ_shared_rim_keys(sheet_out,tol)
         # operands whose rims meet a merge partner are *modified* — the
         # union replaces them by a shared face, so leaving `touched`
@@ -1194,7 +1202,8 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
         sheet_out=_brep_unify_union(sheet_out,tol,caller)
     end
     op===:intersection &&
-        (kept=_brep_unify_union(kept,tol,caller;same_uses=true))
+        (kept=_brep_unify_union(
+            _occ_shared_rim_keys(kept,tol),tol,caller;same_uses=true))
     return kept,sheet_out,touched
 end
 
@@ -1207,16 +1216,33 @@ end
 # evaluated endpoints, not params: partner rims run opposite directions.
 function _occ_shared_rim_keys(specs,tol)
     locs=Tuple{Int,Int,Int}[]
+    # Relabeling matters for rims left dangling: a count-1 key references
+    # no partner in the kept set (its coincident sibling face dropped or
+    # bounds another cell), so it must weld onto the coincident partner's
+    # canon. When BOTH sides already wire a kept partner (count≥2 each)
+    # they belong to separate valid shells — unifying them would fuse
+    # faces across result cells.
+    counts=Dict{Any,Int}()
     for (si,spec) in enumerate(specs),(wi,w) in enumerate(spec.wires),
-        (ai,_) in enumerate(w)
+        (ai,ar) in enumerate(w)
         push!(locs,(si,wi,ai))
+        counts[ar.key]=get(counts,ar.key,0)+1
     end
     length(locs)<2 && return specs
     idx=Dict{Tuple{Int,Int,Int},Int}(l=>k for (k,l) in enumerate(locs))
-    uf=collect(eachindex(locs))
-    findr=function(x)
-        while uf[x]!=x;uf[x]=uf[uf[x]];x=uf[x] end
-        x
+    # parity union-find: `par[x]` is the direction flip from x to its
+    # parent — 0 when both records parametrize the shared segment in the
+    # same direction, 1 when anti-parallel. The emitted curve follows the
+    # canonical arc's record, so a relabeled arc whose own record runs
+    # opposite must flip `fwd` to keep `fwd⊻neg` signed against the
+    # canonical direction.
+    uf=collect(eachindex(locs));par=zeros(Int,length(locs))
+    function findr(x)
+        if uf[x]!=x
+            r,p=findr(uf[x])
+            uf[x]=r;par[x]=par[x]⊻p
+        end
+        return uf[x],par[x]
     end
     for x in eachindex(locs), y in x+1:length(locs)
         sx,wx,ax=locs[x];sy,wy,ay=locs[y]
@@ -1224,24 +1250,44 @@ function _occ_shared_rim_keys(specs,tol)
         a1=specs[sx].wires[wx][ax];a2=specs[sy].wires[wy][ay]
         a1.crv.kind===:degenerate && continue
         a2.crv.kind===:degenerate && continue
+        (get(counts,a1.key,0)==1 || get(counts,a2.key,0)==1) || continue
         _brep_same_curve3d(a1.crv,a2.crv,tol) || continue
         p1a=_brep_vertex_eval(a1.crv,a1.vt0)
         p1b=_brep_vertex_eval(a1.crv,a1.vt1)
         p2a=_brep_vertex_eval(a2.crv,a2.vt0)
         p2b=_brep_vertex_eval(a2.crv,a2.vt1)
-        ((_b3dist(p1a,p2a)<tol && _b3dist(p1b,p2b)<tol) ||
-         (_b3dist(p1a,p2b)<tol && _b3dist(p1b,p2a)<tol)) || continue
-        ra,rb=findr(x),findr(y)
-        ra!=rb && (uf[ra]=rb)
+        d=if _b3dist(p1a,p2a)<tol && _b3dist(p1b,p2b)<tol
+            0
+        elseif _b3dist(p1a,p2b)<tol && _b3dist(p1b,p2a)<tol
+            1
+        else
+            continue
+        end
+        get(ENV,"BREP_DEBUG_RIM","")=="1" &&
+            println("DBGRIM unite x=$x y=$y d=$d kx=$(a1.key) ky=$(a2.key) cx=$(get(counts,a1.key,0)) cy=$(get(counts,a2.key,0))")
+        ra,pa=findr(x);rb,pb=findr(y)
+        ra!=rb && (uf[ra]=rb;par[ra]=pa⊻pb⊻d)
     end
-    canon=Dict{Int,Any}()
+    canon=Dict{Int,Any}();canon_par=Dict{Int,Int}()
     out=NamedTuple[]
     for (si,spec) in enumerate(specs)
         wires=map(enumerate(spec.wires)) do (wi,w)
             map(enumerate(w)) do (ai,ar)
-                r=findr(idx[(si,wi,ai)])
-                ck=get!(canon,r,ar.key)
-                ck==ar.key ? ar : merge(ar,(key=ck,))
+                li=idx[(si,wi,ai)];r,pi=findr(li)
+                ck=get(canon,r,nothing)
+                if ck===nothing
+                    # first arc of the group becomes the canonical record —
+                    # remember its parity so partners measure direction
+                    # against it
+                    canon[r]=ar.key;canon_par[r]=pi
+                    return ar
+                end
+                ck==ar.key && return ar
+                # flip `fwd` when this arc's own record is anti-parallel to
+                # the canonical record that the emitted edge materializes
+                flip=pi⊻canon_par[r]
+                flip==1 ? merge(ar,(key=ck,fwd=!ar.fwd)) :
+                          merge(ar,(key=ck,))
             end
         end
         push!(out,merge(spec,(wires=wires,)))
@@ -1698,10 +1744,15 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
                 push!(res_edges,(curve=ar.crv,t0=ar.vt0,t1=ar.vt1))
                 length(res_edges)
             end
+            # rim-relabeled partners share the key but carry their own
+            # curve record — foreign params; the canonical span already
+            # covers the coincident segment, so only same-record arcs widen it
             e=res_edges[ei]
-            lo=min(e.t0,ar.vt0,ar.vt1);hi=max(e.t1,ar.vt0,ar.vt1)
-            (lo==e.t0 && hi==e.t1) ||
-                (res_edges[ei]=(curve=e.curve,t0=lo,t1=hi))
+            if ar.crv===e.curve
+                lo=min(e.t0,ar.vt0,ar.vt1);hi=max(e.t1,ar.vt0,ar.vt1)
+                (lo==e.t0 && hi==e.t1) ||
+                    (res_edges[ei]=(curve=e.curve,t0=lo,t1=hi))
+            end
             if sev!==nothing && !haskey(emap_sev,ei) &&
                     ar.key isa Tuple && length(ar.key)>=2 &&
                     ar.key[1]===:s && 1<=ar.key[2]<=length(sev)
