@@ -6674,3 +6674,34 @@ genuine matches differ by less than the tolerance).
   compile for the generation corpus); native mean-Plane SVD fallback
   for closed Faces is still a pre-existing loud diagnostic, not a
   regression from this arm.
+
+## 2026-11-02 — BRE02 coincident/tangent multi-operand Boolean materialization (commit `3d63c78`)
+
+- Follow-up to the XCU01 audit's reported Boolean defect. Root cause was
+  rim-key bookkeeping in the shared materialization path, not the
+  winding mismatch the report hypothesized: coincident operand rims on a
+  shared partition wall carried distinct `(:e,ctag,…)` keys and emitted
+  dangling seam copies, while tangent contacts let one key glue faces of
+  disjoint cells into a 4-incidence shell.
+- `_brep_collect_faces_n` and the OCC mixed collector (union +
+  intersection arms) now run `_occ_shared_rim_keys` before
+  `_brep_unify_union`; the relabeler gained a count-1 asymmetric rule
+  and a parity union-find that flips `fwd` for anti-parallel canonical
+  records so `fwd⊻neg` stays signed against the emitted curve.
+  `res_edges` span-union requires `ar.crv === e.curve` (foreign params
+  must never merge).
+- Both materializers join a shared key's faces pairwise-by-cell-mask
+  when incidence exceeds two; fuse pieces record `members=p.srcs` and
+  `_boolean_result_surface` unions only member snapshots — a tangent
+  piece's boundary is its operand's own closed surface.
+- Oracle-verified (Gmsh 4.15.2 OCC): coincident-face fuse 1 vol (mass
+  2, 6 faces), cut 1 vol (1.0), intersect empty, fragments 2 vols;
+  edge/corner-touching fuse 2 vols each [1.0,1.0]; all pieces MESH_OK.
+- Receipts: `model_boolean_snapshot_test.jl` 80/80 and
+  `model_boolean_multi_test.jl` 68/68 under `--compile=min -O0
+  --check-bounds=yes`; `geo_boolean_operands_test.jl` 57/57;
+  `occ_boolean_smoke.jl` exit 0; `set_transfinite_automatic` unsized
+  crash fixed in the same commit (skips `point_size == 0.0`).
+- Debug hooks for future work: `BREP_DEBUG_RIM=1` (rim relabel pairs),
+  `BREP_DEBUG_SHELL=1` (per-piece shell/curve map), `BREP_DEBUG_LOOP`
+  (existing wire-chain dump).
