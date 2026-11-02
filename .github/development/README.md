@@ -20,7 +20,54 @@ and external solver campaigns are opt-in.
 
 ## Current evidence
 
-### 2026-11-02 fresh correctness and release pass (in progress)
+### 2026-11-02 fresh correctness and release pass
+
+`1a722d5` is pushed and its exact remote SHA verified. It contains the three
+numerical/Plane fixes and initial documentation/license/release preparation.
+`91bf429` is the next local model-view/plugin/performance checkpoint; full
+package checks of that loaded source have not completed. Registration and
+the overall completion objective remain open.
+
+The following additional fixes have fresh scoped evidence:
+
+- Model-based PostView backgrounds now transport owned full-order geometry and
+  NodeData/ElementData/ElementNodeData from the actual step-0 source model.
+  Curved search bounds use conservative polynomial/rational intervals with an
+  FP/subnormal envelope; linear and high-order cells share shape precedence.
+  Actual target meshing, aliases, sparse UIDs, tensor data, warped quads, cubic
+  pyramids and large-coordinate bulges are covered by 31 public checks.
+- Model plugin sampling now uses actual family/full-order bases and per-step
+  owned source slots. It respects dimensions and UID authority, including
+  inactive models. Per-run snapshots are reused and cleaned on nested/error
+  exits. Julia 1.12.7 minimal: 49/49, exit 0; Julia 1.13.1 normal `-O2`:
+  new and existing plugin checks 104/104, exit 0.
+- Replaced a model-view export-plan comprehension with a typed loop. The same
+  cached three-node check fell from 166.9 to 1.15 seconds, compiler allocation
+  from 57.77 GB to 610.9 MB. Targeted writer/lifecycle checks: 202/202 on each
+  supported Julia line, minimal compilation, exit 0. A normal 1.13 `-O2` cold
+  check passed 4/4 but still took 335.6 seconds; optimized startup is not solved.
+- Safeguarded high-order field inversion now backtracks Newton steps and checks
+  full parameter correction plus actual map residual. A globally regular
+  monotone Line6 formerly cycled and returned 1 instead of 0.5. Independent
+  known-root, outside, normal-offset and pyramid checks pass: 1.12.7 minimal
+  model/inverse 48/48; 1.13.1 minimal inverse 17/17; 1.13.1 normal `-O2`
+  inverse/list/scalar/tensor checks 204/204. All exits 0. Three warmed inverse
+  query paths allocate 0 bytes; existing warmed high-order checks also pass.
+
+The currently running older full checks reached a torus/box Boolean integration
+case (sessions 23718/43305, logs `C:/Users/User/Tessella-combined-112.log` and
+`Tessella-combined-113.log`). That exact case is now opt-in alongside full GEO
+adaptation/matching and NURBS volume recovery; ordinary checks retain small
+box Booleans and CAD boundaries. Re-run the final ordinary suite on both lines
+after the current source checkpoint, and record actual exits; no full-pass
+receipt is claimed from the partial or deliberately superseded runs.
+
+Active next work: canonical/full-order API view probing (legacy curved-Line3
+value error reproduced), the independent tiny partition compiler hotspot,
+and the remaining whole P1–P6 checklist. No complete-parity or global-resource
+claim is supported by these scoped checks.
+
+#### Earlier checks in this pass
 
 - Fixed rotation/reflection axes with subnormal or overflowing norms by scaling
   before normalization; ordinary-axis arithmetic is unchanged. Analytic

@@ -38,6 +38,7 @@ include("functional/fixtures.jl")
         "meshing/ordered_matching_seeded_test.jl",
         "core/transform_axis_scale_test.jl",
         "fields/distance_triangle_translation_test.jl",
+        "fields/postview_inverse_convergence_test.jl",
         "geometry/model_plane_closed_curve_test.jl",
         "geometry/model_compact_atomic_coverage_test.jl",
         "functional/list_view_export.jl",

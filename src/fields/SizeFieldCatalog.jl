@@ -3986,47 +3986,115 @@ end
 @inline _pv_scheme_dim(kind::UInt8)=
     kind==1 ? 1 : (kind==2 || kind==7) ? 2 : 3
 
+function _pv_scheme_inverse_certificate(cell,u,v,w,query,base,scale)
+    dim=_pv_scheme_dim(cell.kind)
+    mapped=_pv_scheme_map(cell,u,v,w,base,scale)
+    all(isfinite,mapped) || return nothing
+    residual=_sub3(query,mapped)
+    du,dv,dw=_pv_scheme_jacobian(cell,u,v,w,base,scale)
+    all(isfinite,du) && all(isfinite,dv) && all(isfinite,dw) || return nothing
+    determinant=_postview_det(du,dv,dw)
+    isfinite(determinant) && !iszero(determinant) || return nothing
+    if dim==1
+        v=_dot3(residual,dv)/_dot3(dv,dv)
+        w=_dot3(residual,dw)/_dot3(dw,dw)
+        residual=(muladd(-v,dv[1],muladd(-w,dw[1],residual[1])),
+                  muladd(-v,dv[2],muladd(-w,dw[2],residual[2])),
+                  muladd(-v,dv[3],muladd(-w,dw[3],residual[3])))
+    elseif dim==2
+        w=_dot3(residual,dw)/_dot3(dw,dw)
+        residual=(muladd(-w,dw[1],residual[1]),
+                  muladd(-w,dw[2],residual[2]),
+                  muladd(-w,dw[3],residual[3]))
+    end
+    all(isfinite,(u,v,w)) && all(isfinite,residual) || return nothing
+    # Certify the actual normalized map after removing only the artificial
+    # normal directions. Their original reference-space bounds still apply
+    # in `_pv_scheme_inside`; an off-surface tolerance probe remains legal.
+    tolerance=max(1e-10,256eps(Float64)*max(1.0,abs(query[1]),abs(query[2]),abs(query[3])))
+    hypot(residual...)<=tolerance || return nothing
+    return (u,v,w)
+end
+
+function _pv_scheme_inverse(cell,query,base,scale)
+    dim=_pv_scheme_dim(cell.kind)
+    u=0.0;v=0.0;w=0.0
+    for _ in 1:64
+        mapped=_pv_scheme_map(cell,u,v,w,base,scale)
+        all(isfinite,mapped) || return nothing
+        residual=_sub3(query,mapped)
+        residual_norm=hypot(residual...)
+        isfinite(residual_norm) || return nothing
+        du,dv,dw=_pv_scheme_jacobian(cell,u,v,w,base,scale)
+        determinant=_postview_det(du,dv,dw)
+        (isfinite(determinant) && !iszero(determinant)) ||
+            return nothing
+        delta_u=_postview_det(residual,dv,dw)/determinant
+        delta_v=dim>=2 ? _postview_det(du,residual,dw)/determinant : 0.0
+        delta_w=dim==3 ? _postview_det(du,dv,residual)/determinant : 0.0
+        all(isfinite,(delta_u,delta_v,delta_w)) ||
+            return nothing
+        # A tiny backtracked step cannot establish convergence. Require the
+        # full Newton correction to be small, then verify the actual map.
+        if hypot(delta_u,delta_v,delta_w)<=1e-6
+            un=u+delta_u;vn=v+delta_v;wn=w+delta_w
+            if all(isfinite,(un,vn,wn))
+                certified=try
+                    _pv_scheme_inverse_certificate(cell,un,vn,wn,query,base,scale)
+                catch error
+                    (error isa DomainError || error isa OverflowError) || rethrow()
+                    nothing
+                end
+                certified===nothing || return certified
+            end
+            certified=_pv_scheme_inverse_certificate(cell,u,v,w,query,base,scale)
+            certified===nothing || return certified
+        end
+        motion=(muladd(du[1],delta_u,muladd(dv[1],delta_v,dw[1]*delta_w)),
+                muladd(du[2],delta_u,muladd(dv[2],delta_v,dw[2]*delta_w)),
+                muladd(du[3],delta_u,muladd(dv[3],delta_v,dw[3]*delta_w)))
+        ratio=hypot(motion...)/residual_norm
+        slope=isfinite(ratio) ? min(1.0,ratio)^2 : 1.0
+        alpha=1.0;advanced=false
+        for _ in 1:24
+            un=u+alpha*delta_u;vn=v+alpha*delta_v;wn=w+alpha*delta_w
+            if all(isfinite,(un,vn,wn))
+                trial=try
+                    _pv_scheme_map(cell,un,vn,wn,base,scale)
+                catch error
+                    (error isa DomainError || error isa OverflowError) || rethrow()
+                    (NaN,NaN,NaN)
+                end
+                if all(isfinite,trial)
+                    trial_norm=hypot(_sub3(query,trial)...)
+                    # Armijo decrease resolves attracting Newton cycles;
+                    # scale by intrinsic motion so permitted normal residual
+                    # does not demand an impossible relative reduction.
+                    if trial_norm<residual_norm &&
+                       trial_norm<=residual_norm*(1.0-1e-4*alpha*slope)
+                        u=un;v=vn;w=wn;advanced=true
+                        break
+                    end
+                end
+            end
+            alpha*=0.5
+        end
+        advanced || return nothing
+    end
+    return nothing
+end
+
 function _postview_scheme_value(field::PostViewField,j::Int,p,
                                 combine::C=_postview_weighted_scalar_operator) where {C}
     cell=field.scheme_cells[j]
-    dim=_pv_scheme_dim(cell.kind)
     scale=_pv_scheme_scale(cell)
     scale>0 || return _postview_cell_miss(combine)
     base=(cell.coords[1,1],cell.coords[2,1],cell.coords[3,1])
     query=_postview_scaled_query(p,base,scale)
     all(isfinite,query) || return _postview_cell_miss(combine)
-    u=0.0;v=0.0;w=0.0;error=1.0;iteration=1
-    while error>1e-6 && iteration<20
-        mapped=_pv_scheme_map(cell,u,v,w,base,scale)
-        residual=_sub3(query,mapped)
-        du,dv,dw=_pv_scheme_jacobian(cell,u,v,w,base,scale)
-        determinant=_postview_det(du,dv,dw)
-        (isfinite(determinant) && !iszero(determinant)) ||
-            return _postview_cell_miss(combine)
-        delta_u=_postview_det(residual,dv,dw)/determinant
-        delta_v=dim>=2 ? _postview_det(du,residual,dw)/determinant : 0.0
-        delta_w=dim==3 ? _postview_det(du,dv,residual)/determinant : 0.0
-        all(isfinite,(delta_u,delta_v,delta_w)) ||
-            return _postview_cell_miss(combine)
-        un=u+delta_u;vn=v+delta_v;wn=w+delta_w
-        all(isfinite,(un,vn,wn)) || return _postview_cell_miss(combine)
-        error=hypot(un-u,vn-v,wn-w)
-        u=un;v=vn;w=wn;iteration+=1
-    end
-    if dim==1
-        mapped=_pv_scheme_map(cell,u,0.0,0.0,base,scale)
-        residual=_sub3(query,mapped)
-        _,a2,a3=_pv_scheme_jacobian(cell,u,0.0,0.0,base,scale)
-        v=_dot3(residual,a2)/_dot3(a2,a2)
-        w=_dot3(residual,a3)/_dot3(a3,a3)
-        all(isfinite,(v,w)) || return _postview_cell_miss(combine)
-    elseif dim==2
-        mapped=_pv_scheme_map(cell,u,v,0.0,base,scale)
-        residual=_sub3(query,mapped)
-        _,_,n=_pv_scheme_jacobian(cell,u,v,0.0,base,scale)
-        w=_dot3(residual,n)/_dot3(n,n)
-        isfinite(w) || return _postview_cell_miss(combine)
-    end
+    coordinates=_pv_scheme_inverse(cell,query,base,scale)
+    coordinates===nothing && return _postview_cell_miss(combine)
+    u,v,w=coordinates
     _pv_scheme_inside(cell.kind,u,v,w,field.reference_tolerance) ||
         return _postview_cell_miss(combine)
     value=if combine===_postview_weighted_scalar_operator

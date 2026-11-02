@@ -4,6 +4,7 @@ using Test
 using Tessella
 
 @testset "Tessella extended regressions" begin
+    include(joinpath(@__DIR__, "..", "geometry/occ_torus_boolean_functional_test.jl"))
     include(joinpath(@__DIR__, "..", "functional/adapt_mesh_test.jl"))
     include(joinpath(@__DIR__, "..", "functional/geo_mesh_match_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/api_model_postview_field_test.jl"))
@@ -259,6 +260,7 @@ using Tessella
     include(joinpath(@__DIR__, "..", "fields/distance_triangle_translation_test.jl"))
     include(joinpath(@__DIR__, "..", "fields/postview_field_test.jl"))
     include(joinpath(@__DIR__, "..", "fields/postview_highorder_test.jl"))
+    include(joinpath(@__DIR__, "..", "fields/postview_inverse_convergence_test.jl"))
     include(joinpath(@__DIR__, "..", "meshing/mesh1d_test.jl"))
     include(joinpath(@__DIR__, "..", "meshing/meshsurface_test.jl"))
     include(joinpath(@__DIR__, "..", "meshing/mesh3d_test.jl"))

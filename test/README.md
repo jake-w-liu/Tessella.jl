@@ -28,7 +28,8 @@ julia --project=. --startup-file=no -O2 -e 'ENV["TESSELLA_TEST_COMPILER"]="optim
 
 The default covers predicates, fields, small 1D/2D/3D kernels, structured meshes,
 refinement, high order, I/O, API state, CAD boundaries, partitions, views and
-plugins. Full NURBS pillow and spherical-cap volume recovery, full `.geo`
+plugins. Torus/box curved Boolean mass integration, full NURBS pillow and
+spherical-cap volume recovery, full `.geo`
 adaptation and geometry-mesh matching, native-oracle sweeps, allocation stress,
 benchmarks, and HFSS/external solver campaigns are opt-in:
 

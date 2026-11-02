@@ -25,7 +25,7 @@ Background Field = 1;
 """
 
 function _adapt_write_geo(body::AbstractString)
-    path=joinpath(tempdir(),"tessella_adapt_"*string(hash(body),base=16)*".geo")
+    path=joinpath(mktempdir(),"adapt.geo")
     open(path,"w") do io
         print(io,_ADAPT_BOX_GEO)
         print(io,body)
@@ -91,8 +91,7 @@ _adapt_physical_tags(am)=Dict((d,t)=>copy(e.physical_tags)
 
     # ── CLI -4: session path adapts the loaded/generated mesh ──
     src=_adapt_write_geo("")
-    out=joinpath(tempdir(),"tessella_adapt4_"*string(hash(src),base=16)*".msh")
-    isfile(out) && rm(out)
+    out=joinpath(dirname(src),"adapted.msh")
     dest=Tessella.CLI.main([src,"-4","-o",out])
     @test dest==out && isfile(out)
     written=Tessella.read_mixed_msh(out)
