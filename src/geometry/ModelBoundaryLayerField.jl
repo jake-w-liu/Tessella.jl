@@ -36,7 +36,8 @@
 #   `FanPointsList` (default `Mesh.BoundaryLayerFanElements` on a length
 #   mismatch); signed sweeps, `fan_wedges` and `fan_skips` cover the
 #   ordinary fan and the upstream skip types (−4/auto). The cross/mix/
-#   tail fan types (−1/−2/−3) stay loud rejections.
+#   tail fan types (−1/−2/−3) run through `fan_types` — the bilinear /
+#   rounded-fold / `l·n±ll·nc` column machinery in `BoundaryLayer`.
 # - Transfinite, extruded, periodic-slave and parametric (OCC) surfaces
 #   keep their own producers; a `BoundaryLayer` field never alters them,
 #   matching upstream's dispatch order (transfinite/extruded paths run
