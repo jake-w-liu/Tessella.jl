@@ -1,5 +1,7 @@
 # Feature reference
 
+- [Model views as mesh-size fields](model_view_fields.md)
+
 These notes document specific implemented domains and their certificates.
 Some describe an earlier bounded increment; consult the
 [current checklist](../development/CHECKLIST.md) and current source before

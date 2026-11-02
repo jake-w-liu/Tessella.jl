@@ -881,7 +881,14 @@ function _view_write(tag,filename,append=false)
         save_mesh=!iszero(get(OPTIONS,"PostProcessing.SaveMesh",1.0))
         scheme=!iszero(get(OPTIONS,"PostProcessing.SaveInterpolationMatrices",1.0))
         groups=_native_view_writer_groups(view,filename)
-        plans=[(group=group,mesh=_native_view_writer_mesh(group.slot,caller)) for group in groups]
+        # A generator asks Julia to infer its element type before iteration.
+        # Inferring the full model-to-mesh assembly here makes even a tiny
+        # first export compile the geometry query graph under --compile=min.
+        plans=Vector{NamedTuple{(:group,:mesh),Tuple{eltype(groups),MixedMesh}}}()
+        sizehint!(plans,length(groups))
+        for group in groups
+            push!(plans,(group=group,mesh=_native_view_writer_mesh(group.slot,caller)))
+        end
         # Prevalidate all held rows, including mutable-vector revalidation,
         # before a target is opened. Live-object errors publish native prefixes.
         for plan in plans,key in plan.group.keys

@@ -10847,9 +10847,14 @@ end
 # scalar value — so a tensor-valued session view resolves to a
 # `PostViewAnisoField` (an `AbstractAnisoField` the metric surface/volume
 # producers consume through `metric_at`) while scalar views are unchanged.
+include("APIPostViewFields.jl")
+
 function _post_view_field(view::_SessionView,tag::Int;
         crop_negative::Bool=true,use_closest::Bool=true)
     caller="build_geo_size_field"
+    view=_view_data_owner(view)
+    view.model_kind===nothing || return _model_post_view_field(view,tag;
+        crop_negative,use_closest)
     parsed=_native_list_view_pos(view,caller)
     isempty(parsed.elements) && throw(ArgumentError(
         "$caller: Field[$tag] view has no element records"))

@@ -52,11 +52,16 @@ _values(v)=join((string(x) for x in v),",")
         @test_throws ArgumentError _parse("""View "v" {
           SL2(0,0,0, 1,0,0, 0.5,0,0){1,2};
         };""")
-        # Unknown record names still reject; the point family has no order-2
-        # scheme, so a suffixed point parses verbatim but binds nothing.
-        @test_throws ArgumentError _parse("""View "v" {
+        # Record-shaped unknown types are reported and skipped by the
+        # standalone reader; a following valid element must still load.
+        skipped=_parse("""View "v" {
           XX2(0,0,0){1};
+          SP(0,0,0){2};
         };""")
+        @test length(skipped.elements)==1
+        @test vec(only(skipped.elements).values)==[2.]
+        # The point family has no order-2 scheme, so a suffixed point parses
+        # verbatim but binds nothing.
         view=_parse("""View "v" {
           SP2(0,0,0){1};
         };""")
@@ -376,6 +381,36 @@ end
         @test field_value(field,0.25,0.25,1.0)≈17.5
         @test length(field.scheme_cells)==1
         @test size(field.triangles,2)==1
+    end
+
+    @testset "curved maps extend beyond every nodal/sampled coordinate" begin
+        line=_parse("""View "bulging line" {
+          SL2(-1,-8,0, 1,0,0, 0,0,0){2,2,2};
+        };""")
+        field=postview_field(line;use_closest=false)
+        # x=u, y=4u(1-u); its maximum at u=1/2 is outside the
+        # y-range [-8,0] of all stored and quadratic reference samples.
+        @test field_value(field,.5,1.,0.)≈2.
+        @test field_value(field,.5,1.,1.)==GMSH_MAX_SIZE
+
+        triangle=copy(lagrange_nodes(9))
+        triangle[3,:].=4 .* triangle[1,:].-3 .* triangle[1,:].^2
+        coords=join((_flat(triangle[:,j]) for j in axes(triangle,2)),",")
+        surface=_parse("""View "bulging triangle" {
+          ST2($coords){3,3,3,3,3,3};
+        };""")
+        # z=4u-3u^2 reaches 4/3 at u=2/3; sampled z never exceeds 5/4.
+        @test field_value(postview_field(surface;use_closest=false),2/3,.1,4/3)≈3.
+    end
+
+    @testset "scheme cells retain their shape precedence" begin
+        view=_parse("""View "mixed dimensions" {
+          SL(0,0,0, 1,0,0){0.5,0.5};
+          ST2($(_nodes(9))){0.25,0.25,0.25,0.25,0.25,0.25};
+        };""")
+        # The two-dimensional element takes priority on its shared edge,
+        # even though its high-order scheme is stored after flat cells.
+        @test field_value(postview_field(view),.25,0.,0.)≈.25
     end
 
     @testset "validation and determinism" begin

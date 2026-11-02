@@ -204,11 +204,13 @@ end
 # wrapped action failure.
 function _plugin_run_fn(pname::String,entry,spec,caller::AbstractString)
     _native_diagnostic_emit_locked(:info,"Running Plugin($pname)...")
-    try
-        entry.run_fn(spec,caller)
-    catch err
-        err isa ErrorException || rethrow()
-        _native_mesh_input_error_locked("Unknown plugin or plugin action")
+    task_local_storage(_PLUGIN_MODEL_PROBE_CONTEXT_KEY,IdDict{Any,Any}()) do
+        try
+            entry.run_fn(spec,caller)
+        catch err
+            err isa ErrorException || rethrow()
+            _native_mesh_input_error_locked("Unknown plugin or plugin action")
+        end
     end
     _native_diagnostic_emit_locked(:info,"Done running Plugin($pname)")
     return nothing
@@ -333,12 +335,27 @@ end
 # Public element tag (or dense tag when no public table exists) → dense index.
 function _plugin_element_index(mesh,public,tag)
     if public!==nothing
-        index=get(public.element_indices,UInt64(tag),0)
-        index!=0 && return index
+        return get(public.element_indices,UInt64(tag),0)
+    elseif mesh isa MixedMesh && mesh.entity_data!==nothing
+        offset=0
+        for tags in mesh.entity_data.external_element_tags
+            index=findfirst(==(UInt64(tag)),tags)
+            index===nothing || return offset+index
+            offset+=length(tags)
+        end
+        return 0
     end
     _,_,total=_mesh_element_offsets(mesh)
     1<=tag<=total || return 0
     return Int(tag)
+end
+
+function _plugin_model_public_tags(slot,mesh)
+    class=slot.class
+    class!==nothing && class.mesh===mesh && class.public_tags!==nothing &&
+        return class.public_tags
+    return mesh isa MixedMesh && mesh.entity_data!==nothing ?
+        _cache_public_tags(mesh) : nothing
 end
 
 function _plugin_model_mesh(slot,caller::AbstractString)
@@ -358,7 +375,7 @@ function _plugin_model_elements(view,key,caller::AbstractString)
     ctx=view.model_contexts[key];entity_tags,values,nc=view.model_data[key]
     nc>0 || throw(ArgumentError("$caller: malformed model data component count"))
     mesh=_plugin_model_mesh(ctx.model_slot,caller)
-    public=_mesh_public_tags(mesh)
+    public=_plugin_model_public_tags(ctx.model_slot,mesh)
     kind=view.model_kind
     counts=get(ctx,:counts,Int32[])
     offsets=Vector{Int}(undef,length(entity_tags)+1);offsets[1]=1
@@ -413,7 +430,7 @@ function _plugin_model_elements(view,key,caller::AbstractString)
             rows=Vector{Int}(undef,nn)
             covered=true
             for node in 1:nn
-                tag=_cache_node_tag(mesh,Int(rec.node_tags[node]))
+                tag=_cache_node_tag(public,Int(rec.node_tags[node]))
                 row=get(row_of,tag,0)
                 row==0 && (covered=false;break)
                 rows[node]=row
@@ -948,38 +965,64 @@ function _plugin_probe_list(view,p,caller::AbstractString)
     return nothing,Int[]
 end
 
-# Session-mesh probe over every populated step, mirroring `_view_probe`'s
-# locator + linear-hull barycentric interpolation (per-step slot resolution).
-function _plugin_probe_model(view,p,caller::AbstractString)
+# Query geometry is owned by the plugin run, including source model identities.
+# Integrators can sample thousands of times without rebuilding this snapshot.
+const _PLUGIN_MODEL_PROBE_CONTEXT_KEY=gensym(:TessellaPluginModelProbe)
+
+function _plugin_model_probe_context(slot,contexts,caller)
+    previous=get(contexts,slot,nothing)
+    if previous!==nothing && previous.source_mesh===slot.mesh &&
+            previous.source_class===slot.class && previous.source_high_order===slot.high_order
+        return previous
+    end
+    slot.mesh===nothing && throw(ArgumentError("$caller: model view has no mesh"))
+    mesh=_native_view_writer_mesh(slot,caller)
+    public=_cache_public_tags(mesh;caller)
+    context=(mesh=mesh,public=public,locator=_MixedMeshLocator(mesh),
+        source_mesh=slot.mesh,source_class=slot.class,source_high_order=slot.high_order)
+    contexts[slot]=context
+    return context
+end
+
+# Probe each populated step on its own actual model. Reference inversion and
+# interpolation use the cell's complete geometry and nodal element basis.
+function _plugin_probe_model(view,p,caller::AbstractString;dimension::Int=-1)
+    _slot_capture_locked!()
     keys=_plugin_model_keys(view)
     isempty(keys) && return nothing,Int[]
-    first_ctx=view.model_contexts[first(keys)]
-    slot=first_ctx.model_slot
-    mesh=_plugin_model_mesh(slot,caller)
-    locator=if mesh isa Mesh
-        slot.locator===nothing && (slot.locator=SimplexLocator(mesh))
-        slot.locator
-    elseif mesh isa MixedMesh
-        _MixedMeshLocator(mesh)
-    else
-        throw(ArgumentError("$caller: probe requires a mesh"))
-    end
-    tags=_locate_elements(locator,p,-1,true,caller)
-    isempty(tags) && return nothing,Int[]
-    etag=Int(first(tags))
-    rec=mesh_element_record(mesh,etag)
-    uvw,=_local_coordinates(mesh,etag,p,caller)
-    u,v,w=uvw
-    N=rec.dimension==1 ? (1.0-u,u) :
-      rec.dimension==2 ? (1.0-u-v,u,v) :
-                         (1.0-u-v-w,u,v,w)
-    public=_mesh_public_tags(mesh)
+    storage=current_task().storage
+    contexts=storage===nothing ? nothing : get(storage,_PLUGIN_MODEL_PROBE_CONTEXT_KEY,nothing)
+    contexts===nothing && (contexts=IdDict{Any,Any}())
+    located=IdDict{Any,Any}()
     kind=view.model_kind
     out=Vector{Float64}[];step_nums=Int[]
     for key in keys
         ctx=view.model_contexts[key]
-        get(ctx,:model_slot,nothing)===slot || continue
+        slot=ctx.model_slot
+        slot===nothing && throw(ArgumentError("$caller: model view has no model"))
+        sample=get!(located,slot) do
+            context=_plugin_model_probe_context(slot,contexts,caller)
+            mesh=context.mesh;public=context.public
+            tags=_locate_elements(context.locator,p,dimension,true,caller)
+            isempty(tags) && return nothing
+            index=Int(first(tags))
+            rec=mesh_element_record(mesh,index)
+            uvw,=_local_coordinates(mesh,index,p,caller)
+            spec=msh_spec(Int(rec.element_type))
+            N=if spec.order<=1
+                MeshPointLocation._shape_functions(spec.family,uvw...,caller)
+            else
+                _,values,_=mesh_basis_functions(Int(rec.element_type),collect(uvw),"Lagrange";caller)
+                values
+            end
+            length(N)==length(rec.node_tags) || throw(ArgumentError(
+                "$caller: element basis does not cover the actual nodes"))
+            (element_uid=public.element_tags[index],
+                node_uids=public.node_tags[rec.node_tags],weights=N)
+        end
+        sample===nothing && continue
         entity_tags,values,nc=view.model_data[key]
+        nc>0 || throw(ArgumentError("$caller: malformed model data component count"))
         counts=get(ctx,:counts,Int32[])
         offsets=Vector{Int}(undef,length(entity_tags)+1);offsets[1]=1
         for row in eachindex(entity_tags)
@@ -987,28 +1030,31 @@ function _plugin_probe_model(view,p,caller::AbstractString)
                 length(values)÷length(entity_tags)
             offsets[row+1]=Base.checked_add(offsets[row],width)
         end
+        offsets[end]-1==length(values) || throw(ArgumentError(
+            "$caller: malformed model data row extents"))
+        N=sample.weights
         acc=nothing
         if kind=="ElementData" || kind=="ElementNodeData"
-            for (row,tag) in enumerate(entity_tags)
-                _plugin_element_index(mesh,public,tag)==etag || continue
+            row=findfirst(==(sample.element_uid),entity_tags)
+            if row!==nothing
                 base=offsets[row]
                 if kind=="ElementData"
                     acc=collect(Float64,@view(values[base:base+nc-1]))
                 else
-                    nn=(offsets[row+1]-base)÷nc
+                    width=offsets[row+1]-base
+                    width%nc==0 || throw(ArgumentError("$caller: incomplete model nodal components"))
+                    nn=width÷nc
                     acc=zeros(nc)
                     for node in 1:min(nn,length(N)),comp in 1:nc
                         acc[comp]+=N[node]*values[base+(node-1)*nc+comp-1]
                     end
                 end
-                break
             end
         elseif kind=="NodeData"
             row_of=Dict{UInt64,Int}(tag=>row for (row,tag) in enumerate(entity_tags))
             trial=zeros(nc)
-            for node in 1:min(length(rec.node_tags),length(N))
-                tag=_cache_node_tag(mesh,Int(rec.node_tags[node]))
-                row=get(row_of,tag,0)
+            for node in eachindex(sample.node_uids)
+                row=get(row_of,sample.node_uids[node],0)
                 row==0 && continue
                 acc===nothing && (acc=trial)
                 for comp in 1:nc
@@ -2334,7 +2380,7 @@ function _plugin_probe_at(view,p,stepnum::Int,caller::AbstractString;
         end
         return nothing
     end
-    values,stepnums=_plugin_probe_model(view,p,caller)
+    values,stepnums=_plugin_probe_model(view,p,caller;dimension)
     pos=findfirst(==(stepnum),stepnums)
     pos===nothing && return nothing
     return values[pos]

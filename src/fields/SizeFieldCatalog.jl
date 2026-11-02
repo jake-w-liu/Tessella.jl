@@ -2720,6 +2720,128 @@ end
     return isfinite(value) ? value : floatmax(Float64)
 end
 
+# Bound the complete geometry map, not a finite sample of its nodal hull.
+# All native polynomial bases use nonnegative integer exponents. On simplex
+# coordinates every monomial lies in [0,1]; signed tensor coordinates add the
+# odd-power sign. On a pyramid |u|,|v| <= 1-w, hence the Bergot factor
+# u^i*v^j*w^k/(1-w)^min(i,j) also has magnitude <= 1. The apex clamp only
+# reduces that magnitude. Outward Float64 intervals enclose coefficient
+# cancellation and coordinate differences without per-cell BigInt storage.
+function _pv_scheme_monomial_range(kind::UInt8,e::NTuple{3,Float64})
+    all(x->isfinite(x) && x>=0 && isinteger(x),e) || return nothing
+    if (kind==1 && (e[2]>0 || e[3]>0)) ||
+       ((kind==2 || kind==7) && e[3]>0)
+        return (0,0)
+    end
+    all(iszero,e) && return (1,1)
+    odd1=rem(e[1],2.0)==1.0
+    odd2=rem(e[2],2.0)==1.0
+    odd3=rem(e[3],2.0)==1.0
+    signed=kind==1 ? odd1 : kind==4 ? odd1 || odd2 || odd3 :
+        kind==5 ? odd3 : (kind==6 || kind==7) ? odd1 || odd2 : false
+    return signed ? (-1,1) : (0,1)
+end
+
+# The map evaluates normalized offsets, coefficient/monomial products and
+# node-by-node FMAs. Grouping coefficients for tighter real-polynomial bounds
+# changes that evaluation order. Enclose its floating roundoff separately,
+# including normalization, basis products, accumulation, and final rescaling.
+function _pv_scheme_roundoff(cell,ranges)
+    nodes,terms=size(cell.coefgeo)
+    operations=nextfloat(32.0+nextfloat(8.0*nextfloat(Float64(nodes)*Float64(terms))))
+    for exponent in cell.expgeo,degree in exponent
+        operations=nextfloat(operations+nextfloat(16.0*degree))
+    end
+    mu=nextfloat(operations*(eps(Float64)/2))
+    isfinite(mu) && mu<0.5 || return nothing
+    gamma=nextfloat(mu/prevfloat(1.0-mu))
+    masses=zeros(Float64,nodes)
+    for node in 1:nodes,term in 1:terms
+        ranges[term]==(0,0) && continue
+        masses[node]=nextfloat(masses[node]+abs(cell.coefgeo[node,term]))
+    end
+    all(isfinite,masses) || return nothing
+    return (;operations,gamma,masses,scale=_pv_scheme_scale(cell))
+end
+
+function _pv_scheme_axis_bounds(cell,axis,ranges,roundoff)
+    extent=floatmax(Float64)
+    full=(-extent,extent)
+    base=cell.coords[axis,1]
+    lo=base;hi=base
+    for term in eachindex(cell.expgeo)
+        range=ranges[term]
+        range==(0,0) && continue
+        alpha_lo=0.0;alpha_hi=0.0
+        for node in axes(cell.coords,2)
+            coefficient=cell.coefgeo[node,term]
+            iszero(coefficient) && continue
+            coordinate=cell.coords[axis,node]
+            coordinate==base && continue
+            delta=coordinate-base
+            isfinite(delta) || return full
+            delta_lo=prevfloat(delta);delta_hi=nextfloat(delta)
+            product_lo=prevfloat(coefficient*(coefficient>0 ? delta_lo : delta_hi))
+            product_hi=nextfloat(coefficient*(coefficient>0 ? delta_hi : delta_lo))
+            alpha_lo=prevfloat(alpha_lo+product_lo)
+            alpha_hi=nextfloat(alpha_hi+product_hi)
+            isfinite(alpha_lo) && isfinite(alpha_hi) || return full
+        end
+        if range==(-1,1)
+            radius=max(abs(alpha_lo),abs(alpha_hi))
+            term_lo=-radius;term_hi=radius
+        elseif range==(1,1)
+            term_lo=alpha_lo;term_hi=alpha_hi
+        else
+            term_lo=min(0.0,alpha_lo);term_hi=max(0.0,alpha_hi)
+        end
+        lo=prevfloat(lo+term_lo);hi=nextfloat(hi+term_hi)
+        isfinite(lo) && isfinite(hi) || return full
+    end
+    magnitude=0.0;mass=0.0
+    for node in axes(cell.coords,2)
+        coordinate=cell.coords[axis,node]
+        # A zero offset is represented exactly and contributes no map error.
+        coordinate==base && continue
+        coefficient_mass=roundoff.masses[node]
+        coordinate_mass=nextfloat(abs(coordinate)+abs(base))
+        magnitude=nextfloat(magnitude+nextfloat(coordinate_mass*coefficient_mass))
+        mass=nextfloat(mass+coefficient_mass)
+    end
+    isfinite(magnitude) && isfinite(mass) || return full
+    # Include absolute subnormal errors, especially a normalized offset that
+    # underflows before multiplication by a very large cell scale.
+    tiny=nextfloat(0.0)
+    floor=nextfloat(tiny*max(1.0,roundoff.scale))
+    floor=nextfloat(floor*roundoff.operations)
+    floor=nextfloat(floor*nextfloat(mass+1.0))
+    envelope=nextfloat(nextfloat(roundoff.gamma*magnitude)+floor)
+    isfinite(envelope) || return full
+    lo=prevfloat(lo-envelope);hi=nextfloat(hi+envelope)
+    return isfinite(lo) && isfinite(hi) ? (lo,hi) : full
+end
+
+function _pv_scheme_geometry_bounds(cell)
+    ranges=Tuple{Int,Int}[]
+    for exponent in cell.expgeo
+        range=_pv_scheme_monomial_range(cell.kind,exponent)
+        # Non-polynomial user schemes need a conservative candidate box too;
+        # final inversion/domain certificates continue to decide membership.
+        if range===nothing
+            extent=floatmax(Float64)
+            return ((-extent,-extent,-extent),(extent,extent,extent))
+        end
+        push!(ranges,range)
+    end
+    roundoff=_pv_scheme_roundoff(cell,ranges)
+    if roundoff===nothing
+        extent=floatmax(Float64)
+        return ((-extent,-extent,-extent),(extent,extent,extent))
+    end
+    bounds=ntuple(axis->_pv_scheme_axis_bounds(cell,axis,ranges,roundoff),3)
+    return (ntuple(axis->bounds[axis][1],3),ntuple(axis->bounds[axis][2],3))
+end
+
 function _build_postview_bvh(coords,tetrahedra,hexahedra,prisms,pyramids,
                              triangles,quadrangles,lines,points,scheme_cells)
     nfirst=sum(size(cells,2) for cells in
@@ -2752,27 +2874,11 @@ function _build_postview_bvh(coords,tetrahedra,hexahedra,prisms,pyramids,
                 end
                 primitive_lo[k,id]=lo;primitive_hi[k,id]=hi
             end
-            # A curved geometry map can bulge outside its node hull — grow the
-            # box by the map evaluated on the family's order-2 reference
-            # lattice so candidacy still covers the element's true extent.
             if !cell.flat
-                scale=_pv_scheme_scale(cell)
-                scale>0 || continue
-                base=(ccoords[1,1],ccoords[2,1],ccoords[3,1])
-                nodes=lagrange_nodes(_POSTVIEW_SCHEME_SAMPLE_MSH[
-                    cell.kind==1 ? :line : cell.kind==2 ? :triangle :
-                    cell.kind==3 ? :tetrahedron : cell.kind==4 ? :hexahedron :
-                    cell.kind==5 ? :prism : cell.kind==6 ? :pyramid :
-                    :quadrangle])
-                for j in axes(nodes,2)
-                    mapped=_pv_scheme_map(cell,nodes[1,j],nodes[2,j],
-                                          nodes[3,j],base,scale)
-                    all(isfinite,mapped) || continue
-                    for k in 1:3
-                        value=base[k]+mapped[k]*scale
-                        primitive_lo[k,id]=min(primitive_lo[k,id],value)
-                        primitive_hi[k,id]=max(primitive_hi[k,id],value)
-                    end
+                lower,upper=_pv_scheme_geometry_bounds(cell)
+                for k in 1:3
+                    primitive_lo[k,id]=min(primitive_lo[k,id],lower[k])
+                    primitive_hi[k,id]=max(primitive_hi[k,id],upper[k])
                 end
             end
         end
@@ -4107,6 +4213,17 @@ end
     return lo[1]<=p[1]<=hi[1] && lo[2]<=p[2]<=hi[2] && lo[3]<=p[3]<=hi[3]
 end
 
+# Scheme cells retain the same shape precedence as canonical first-order
+# cells. Their separate storage must not demote a volume below its boundary.
+@inline function _postview_cell_priority(field,id::Int)
+    id==typemax(Int) && return (9,id)
+    kind,j=_postview_cell_kind(field,id)
+    kind==8 && (kind=field.scheme_cells[j].kind)
+    rank=kind==3 ? 1 : kind==4 ? 2 : kind==5 ? 3 : kind==6 ? 4 :
+         kind==2 ? 5 : kind==7 ? 6 : kind==1 ? 7 : 8
+    return (rank,id)
+end
+
 function _postview_bvh_lookup(field::PostViewField,node::Int,p,best_id::Int,
                               best,combine::C) where {C}
     _postview_in_box(p,field.bvh_lo[node],field.bvh_hi[node]) ||
@@ -4114,14 +4231,16 @@ function _postview_bvh_lookup(field::PostViewField,node::Int,p,best_id::Int,
     count=field.bvh_count[node]
     if count>0
         first=field.bvh_first[node]
+        best_priority=_postview_cell_priority(field,best_id)
         @inbounds for pos in first:first+count-1
             id=field.bvh_order[pos]
-            id>=best_id && continue
+            priority=_postview_cell_priority(field,id)
+            isless(priority,best_priority) || continue
             _postview_in_box(p,field.cell_lo[id],field.cell_hi[id]) ||
                 continue
             value=_postview_cell_value(field,id,p,combine)
             if _postview_hit(value)
-                best_id=id;best=value
+                best_id=id;best=value;best_priority=priority
             end
         end
         return best_id,best

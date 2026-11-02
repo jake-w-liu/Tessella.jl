@@ -4,6 +4,10 @@ using Test
 using Tessella
 
 @testset "Tessella extended regressions" begin
+    include(joinpath(@__DIR__, "..", "functional/adapt_mesh_test.jl"))
+    include(joinpath(@__DIR__, "..", "functional/geo_mesh_match_test.jl"))
+    include(joinpath(@__DIR__, "..", "interfaces/api_model_postview_field_test.jl"))
+    include(joinpath(@__DIR__, "..", "interfaces/api_plugin_model_probe_test.jl"))
     include(joinpath(@__DIR__, "..", "integration/validation_child_resource_test.jl"))
     include(joinpath(@__DIR__, "..", "core/predicates_test.jl"))
     include(joinpath(@__DIR__, "..", "core/gmsh_libm_test.jl"))
