@@ -6647,3 +6647,30 @@ genuine matches differ by less than the tolerance).
 - Not claimed: full-cylinder BL mesh is not bitwise-audited vs the
   oracle; `t19.geo` is not run end-to-end; recombination/periodic walls
   keep their existing loud diagnostics.
+
+## 2026-11-02 — RSF01 residual audit: full-quad shared-endpoint pairings stay uncoarsened (commit `1eee640`)
+
+- Ledger audit of `ModelNativeHybrid*.jl` insertion/embedded/batch/
+  periodic certificates, `ModelGmshSurfaceRecombine.jl` +
+  `ModelGmshSurfaceProducer.jl` transport, `ModelGmshFullQuad.jl`
+  restoration, `ModelMetric*.jl` contracts, and detached/parallel copy
+  completeness. One defect confirmed; the rest of the ledger rejected
+  with evidence (see STATUS.md RSF01 for the full table).
+- Confirmed: `_gmsh_fullquad_input` keyed `middles` and the coarse edge
+  set by endpoint pair, so a Curve whose proposed super-edge collided
+  with another proposed super-edge or another Curve's literal cell edge
+  (embedded Curve digon; boundary digon Face; four-cell closed Curve)
+  could not be represented. Gmsh 4.15.2 succeeded on the same `.geo`;
+  Tessella rejected under `RecombinationAlgorithm` 2/3.
+- Fix: colliding Curves stay uncoarsened, each literal cell edge births
+  a fresh Curve-owned middle (`born`) at its parametrized midpoint, the
+  committed chain is grown to match, and `node_high_water` plus the
+  source-update map treat born identities as fresh (no lower-producer
+  identity). Regression:
+  `test/interfaces/api_native_fullquad_shared_endpoints_test.jl` 15/15;
+  `api_native_fullquad_generation_test.jl` 7692/7692 exit 0 normal
+  compile; recombine corpus exit 0; hybrid spot checks 174/174 exit 0.
+- Open: `--compile=min` cannot run `GmshLibm` `llvmcall` (use normal
+  compile for the generation corpus); native mean-Plane SVD fallback
+  for closed Faces is still a pre-existing loud diagnostic, not a
+  regression from this arm.

@@ -1,5 +1,29 @@
 # Devin handoff — complete Tessella's remaining implementation
 
+## 2026-11-02 RSF01 residual audit — full-quad shared-endpoint fix landed (`1eee640`, pushed)
+
+Ledger audit of `ModelNativeHybrid*.jl` insertion/embedded/batch/
+periodic certificates, `ModelGmshSurfaceRecombine.jl`/
+`ModelGmshSurfaceProducer.jl` transport, `ModelGmshFullQuad.jl`
+restoration, `ModelMetric*.jl` contracts, and detached/parallel copy
+completeness landed one fix: `_gmsh_fullquad_input` could not represent
+a Curve whose proposed halved super-edge collided with another proposed
+super-edge or another Curve's literal cell edge (embedded Curve digon,
+boundary digon Face, four-cell closed Curve). Gmsh 4.15.2 meshed the
+same `.geo` under `RecombinationAlgorithm` 2/3; Tessella rejected.
+Colliding Curves now stay uncoarsened — each literal cell edge births a
+fresh Curve-owned `born` middle at its parametrized midpoint, committed
+chains grow to match, and `node_high_water`/source-update transport
+treat born identities as fresh. Evidence:
+`test/interfaces/api_native_fullquad_shared_endpoints_test.jl` 15/15
+exit 0; `api_native_fullquad_generation_test.jl` 7692/7692 exit 0
+(normal compile; `--compile=min` cannot run `GmshLibm` `llvmcall`);
+recombine corpus exit 0; hybrid spot checks 174/174 exit 0. All other
+ledger candidates were rejected with evidence — full table in STATUS.md
+(RSF01) and HANDOFF.md (2026-11-02 RSF01). Parity is not declared from
+this bounded audit; open diagnostics: `--compile=min` llvmcall, native
+mean-Plane SVD fallback for closed Faces.
+
 ## 2026-11-01 ALG01/MET02 algorithm-7 full-quad recombination 2/3 + algorithm-6 factory scalar-only verdict
 
 - **Algorithm-7 full-quad slice (this increment).** The Gmsh 4.15.2
