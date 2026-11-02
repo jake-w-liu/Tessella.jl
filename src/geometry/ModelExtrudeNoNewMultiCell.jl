@@ -394,7 +394,7 @@ function _extrude_nonew_multi_cell_finish(m::GeoModel,t::Int,
                 # side — skip flips that would turn a valid neighbor
                 # invalid when another side already fixes this column.
                 hurts=false
-                for cj in 1:ncells
+                for cj in edge_cells[e]
                     cj==ci && continue
                     sj=findfirst(isequal(e),cell_edges[cj])
                     sj===nothing && continue
