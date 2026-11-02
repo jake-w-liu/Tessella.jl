@@ -94,4 +94,5 @@ include("functional/fixtures.jl")
     include("functional/occ_boolean_smoke.jl")
     include("functional/adapt_mesh_test.jl")
     include("functional/geo_mesh_match_test.jl")
+    include("functional/api_surface_smoke.jl")
 end
