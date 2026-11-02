@@ -20,6 +20,24 @@ and external solver campaigns are opt-in.
 
 ## Current evidence
 
+### Frozen probe and embedded metric package verification
+
+Implementation commit `b358d5c` passed ordinary `Pkg.test()` with bounds checks
+and automatic minimal compilation in separate clean detached checkouts:
+
+| Runtime | Assertions | Actual exit | Test body |
+| --- | ---: | ---: | ---: |
+| Julia 1.12.7 | 1166/1166 | 0 | 17m28.0s |
+| Julia 1.13.1 | 1166/1166 | 0 | 16m03.7s |
+
+Directories: `C:/Users/User/Tessella-verification-b358d5c-112` and
+`C:/Users/User/Tessella-verification-b358d5c-113`; logs:
+`C:/Users/User/Tessella-clean-b358d5c-112.log` and
+`C:/Users/User/Tessella-clean-b358d5c-113.log`. Both tracked checkouts remained
+clean. The new default regressions cover canonical view probing, thin geometry,
+and embedded metric Surface ownership, including full-quad transport. These
+exits qualify that immutable commit, not later arithmetic or periodic changes.
+
 ### 2026-11-02 fresh correctness and release pass
 
 Commits `1a722d5`, `91bf429`, and `4454182` are pushed. Verified implementation checkpoint:
@@ -102,7 +120,8 @@ their UIDs. New Curve middles reserve UIDs before interior births. Strict metric
 and ownership certificates remain enforced. The new fixture passed 191/191
 on Julia 1.13.1 minimal compilation before expansion; final-source normal
 `-O2` checks passed 328/328 (251 new and 77 neighboring assertions), exit 0.
-Julia 1.12 and whole-package verification of this increment remain pending.
+Julia 1.12 and whole-package verification subsequently passed at the frozen
+checkpoint above.
 
 ### Bounded parallel dispatch increment
 
