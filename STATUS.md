@@ -24,6 +24,81 @@ support or test requirements.
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
 | 6 | globally certified P2 segments, triangles, and tetrahedra plus solver-consumable I/O | DONE |
 
+### XCU01 cross-cutting audit — test integrity, configuration, shared-state/error/RNG invariants (2026-11-02)
+
+Deep-debug audit of the cross-cutting surface: test integrity across the
+742-file corpus (disabled/skipped, stale, tautological, unreachable checks),
+`Project.toml`/compat/precompile/include-ordering configuration, `STATE_LOCK`
+coverage over shared mutable state, `GeoExecution.errors` vs thrown exceptions
+vs `SESSION_INPUT_ERRORS`, RNG determinism hooks, default-option sanity and
+cheaply-detectable public-entry type instability.
+
+- **Fixed (this commit).** New default-suite file
+  `test/functional/api_surface_smoke.jl` wired into `test/runtests.jl`,
+  covering public entry points the rest of the suite never reached:
+  `model.boolean_union`/`boolean_intersection` legacy operators,
+  `model.add_bezier_surface`, `occ.add_bezier_surface`, `occ.set_max_tag`,
+  `mesh.import_stl`, `mesh.set_transfinite_automatic`,
+  `mesh.set_size_at_parametric_points`, `mesh.set_compound`,
+  `mesh.add_elements`, `field.set_numbers`/`get_numbers`,
+  `field.set_as_boundary_layer`, `onelab.client_warning`/
+  `client_define_string`/`client_preprocess` (in-process fixture socket
+  speaking the documented START/STOP/PARAMETER_QUERY/OLPARSE framing), and
+  `rec_dimension_max`. The ONELAB fixture answers `PARAMETER_QUERY` with the
+  server copy so `define` exercises the server-wins + `PARAMETER_UPDATE`
+  branch.
+- **Reported — source defects on sibling-owned surfaces (not fixed here).**
+  - `mesh.set_transfinite_automatic` crashes `InexactError: Int64(Inf)` on
+    every model whose boundary points are unsized
+    (`ModelMeshingAttributes.jl:764-769`): `lc` starts `Inf`, takes
+    `min(lc, get(m.point_size, p, Inf))`, and both geo and OCC
+    synchronization write `point_size == 0.0` as the *unsized* marker for
+    every default vertex (`ModelOCCShapeRegistry.jl:211`;
+    `_model_vertex_lc` at `ModelMesh1D.jl:259-262` and box materialization
+    at `Model.jl:1849-1851` both treat `0.0`/absent as unsized). `0.0` is
+    finite, so the `isfinite(lc) || (lc=1.0)` fallback never fires and
+    `edge_lengths[k]/0.0 = Inf` reaches `round(Int, ·)`. Reproducer: any
+    default `occ`/`geo` model + `set_transfinite_automatic()`. The smoke
+    test pins the working path (explicit `mesh.set_size` on the corners).
+  - Materialized Boolean results keep operand snapshots whose shared
+    boundary edges appear in the *same* direction in the two incident
+    surface meshes (36 same-direction pairs on a two-box union), so
+    `_boolean_result_surface`/`_boolean_cell_mesh` output is rejected by
+    `mesh_boolean`'s `_require_surface3(…; oriented=true)` in `Mesh3D.jl`
+    when the result volume is meshed. Result-entity publication and
+    operand removal work; downstream volume meshing throws
+    "surface has inconsistent winding".
+- **Discarded after verification.** All five `@test_skip` sites are
+  conditional resource/platform gates, not silenced assertions
+  (`api_onelab_client_test` executable/SDK absence, two
+  `ReadOnlyMemoryError` arms in `api_occ_boolean_test`, Windows
+  `GetProcessTimes` in `api_native_geo_cpu_time_test`); no `@test_broken`,
+  no literal `@test true`, no confirmed self-comparing pin; zero-literal-
+  `@test` wrappers delegate to assertion-bearing `validation/`/`artifacts/`
+  includes (false positive); `Project.toml` deps cover every external
+  import (stdlib-only) and test extras/targets are complete; compat
+  `1.12–1.13` matches documented runtimes; `GmshLibm` keeps dynamic
+  pointers in `Ref`s repopulated by `__init__` (precompile-safe); include
+  ordering in `src/Tessella.jl` is foundational-first with no reproduced
+  world-age hazard; `STATE_LOCK` wraps public state mutation and the
+  internal `*_locked` helpers are only reached under it (parallel workers
+  run on detached option copies and merge serially);
+  `GeoExecution.errors` are harvested into `SESSION_INPUT_ERRORS` on
+  nonzero `.geo` executions while fatal API inputs still throw — channels
+  are consistent; RNG determinism holds (`Mesh.RandomSeed=1.0`, per-task
+  private seed refs replayed at deterministic merge positions,
+  `Xoshiro(0x4d657368)` local perturbations); defaults audited sane; no
+  cheaply-detectable type instability in public entry points.
+- **Escalated, unchanged — reproducibility risk.** `.gitignore` excludes
+  `/validation/`, `/test/artifacts/`, `/test/data/`, `/test/tmp/` while
+  ~56 tracked standalone test files (interfaces/geometry/meshing/
+  integration/core/tmp) `include` files under them — zero bytes of those
+  roots are tracked, so the standalone suites cannot run on a fresh
+  clone. The default `test/runtests.jl` suite is unaffected (nothing
+  under `test/functional/` references ignored paths). Needs a
+  project-level decision: vendor the fixtures, track them under a
+  narrower ignore, or mark those files opt-in.
+
 ### UI01 ONELAB client send retry republishes the full frame (2026-11-02)
 
 Deep-debug audit of the assigned interface surface (`API.jl`,
