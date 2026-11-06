@@ -152,7 +152,10 @@ function _model_mesh_bbox(m::GeoModel, caller::AbstractString)
             # chapeau's extent is its displaced top row, not the copied
             # curve record (upstream's `GEdge::bounds` unions mesh vertices
             # for `BoundaryLayerCurve` the same way).
-            grow!(_model_curve_part_point(m,curve,u,caller))
+            # A bounds scan must not infer every CAD evaluator when a model
+            # has no sampled Curves. Evaluate an actual sample through its
+            # runtime dispatch only when this loop consumes one.
+            grow!(Base.inferencebarrier(_model_curve_part_point)(m,curve,u,caller))
         end
     end
     for (_,record) in _discrete_mesh_records_model(m)
