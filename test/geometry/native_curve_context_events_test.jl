@@ -4,8 +4,9 @@ const A=Tessella.API
 include("../../validation/native_curve_events/native_curve_context_events_fixture_v1.jl")
 float_bits(value)=string(reinterpret(UInt64,Float64(value));base=16,pad=16)
 function open_text(text)
-    mktemp() do path,stream
-        write(stream,text);close(stream)
+    mktempdir() do directory
+        path=joinpath(directory,"context.geo")
+        write(path,text)
         A.open_geo!(path)
     end
 end

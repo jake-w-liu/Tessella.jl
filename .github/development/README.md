@@ -39,6 +39,14 @@ meshing memory or performance claims. A separate broader optimized query check
 remains pending; an earlier superseded diagnostic was deliberately stopped
 after 297 CPU seconds, exit -1, without assertions.
 
+The sampled-Curve context regression also passed 44/44 on Julia 1.12.7 minimal
+compilation, actual exit 0 (3m39.9s including cold parser/compiler work).
+`test/geometry/native_curve_context_events_test.jl` now gives its temporary
+input a `.geo` extension required by the public loader. The original
+extensionless fixture failed before context assertions; no production loader
+restriction was changed. Final log:
+`C:/Users/User/Tessella-context-112-min-final-20261107.log`.
+
 ### Finite cancellation recovery
 
 Public probes now use the propagated basis/data arithmetic budget to recover
