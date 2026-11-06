@@ -68,6 +68,29 @@ end
             @test A.view.probe(record.tag,.5,0.,0.;gradient=true)==([1.,0.,0.],0.)
             unchanged(record)
         end
+        @testset "finite cancellation remainders retain meaningful digits" begin
+            u=.3;coefficients=[1e100,-1e100/u,1e90]
+            expected=Float64(sum(R(coefficients[i])*R(u)^i for i in 1:3))
+            derivative=Float64(sum(i*R(coefficients[i])*R(u)^(i-1) for i in 1:3))
+            for sign in (1.,-1.)
+                # Cancellation inside one shape function, followed by a
+                # large ordinary datum, must retain its raw coefficient sum.
+                basis=list_record("finite basis cancellation",1.,
+                    [coefficients...,0.,0.,0.,0.,0.,0.],
+                    [1.,0.,0.,2.,0.,0.,3.,0.,0.],[sign,0.,0.])
+                @test A.view.probe(basis.tag,u,0.,0.)==([sign*expected],0.)
+                @test first(A.view.probe(basis.tag,u,0.,0.;gradient=true))≈[sign*derivative,0.,0.]
+                unchanged(basis)
+                # The same polynomial formed in the final value fold has
+                # individually well-conditioned monomial basis weights.
+                data=list_record("finite data cancellation",1.,
+                    [1.,0.,0.,0.,1.,0.,0.,0.,1.],
+                    [1.,0.,0.,2.,0.,0.,3.,0.,0.],sign.*coefficients)
+                @test A.view.probe(data.tag,u,0.,0.)==([sign*expected],0.)
+                @test first(A.view.probe(data.tag,u,0.,0.;gradient=true))≈[sign*derivative,0.,0.]
+                unchanged(data)
+            end
+        end
         @testset "fractional powers retain their scaled derivative" begin
             record=list_record("fractional power",h,[delta],[.5,0.,0.],[1.])
             @test A.view.probe(record.tag,h,0.,0.)==([delta],0.)

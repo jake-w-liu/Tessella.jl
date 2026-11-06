@@ -19,6 +19,20 @@ and external solver campaigns are opt-in.
 
 ## Current evidence
 
+### Finite cancellation recovery
+
+Public probes now use the propagated basis/data arithmetic budget to recover
+finite cancellation before the remainder loses significant digits. A stored
+binary polynomial at x=0.3 previously had relative error 3.6e-6 while bypassing
+the zero-crossing-only trigger. The new checks compare independent exact binary
+polynomial references for values and physical gradients.
+
+Final scoped source: Julia 1.12.7 minimal compilation, 69/69 assertions, exit 0;
+Julia 1.13.3 normal `-O2` with bounds checks, 175/175 (69 raw arithmetic and
+106 existing public probe assertions), actual exit 0. Durable optimized log:
+`C:/Users/User/Tessella-probe-cancellation-1133-O2.log`. This qualifies the
+recovery cases and neighboring probe behavior, not universal correct rounding.
+
 ### Verified arithmetic and periodic package snapshot
 
 Commit `12c681d` passed ordinary `Pkg.test()` in clean detached checkouts with

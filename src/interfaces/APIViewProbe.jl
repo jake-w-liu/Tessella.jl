@@ -351,6 +351,15 @@ end
         (product==0 && a!=0 && b!=0)
 end
 
+# A finite remainder can lose useful digits well before its error enclosure
+# crosses zero. Recover when the conservative arithmetic budget exceeds
+# 1e-12 of the result. Division avoids overflowing gamma*mass or underflowing
+# 1e-12*abs(value) while classifying large or tiny finite values.
+@inline function _view_probe_roundoff_excess(value,mass,gamma)
+    return !isfinite(value) || !isfinite(mass) ||
+        (mass>0 && abs(value)/mass<=gamma/1e-12)
+end
+
 @inline function _view_probe_rescale(value,numerator,denominator)
     iszero(value) && return value
     a,ae=frexp(value);b,be=frexp(numerator);c,ce=frexp(denominator)
@@ -393,8 +402,7 @@ function _view_probe_evaluate(record,coordinates,gradient,caller;geometry=record
         end
     end
     for index in eachindex(weights)
-        recover |= !isfinite(weights[index]) || !isfinite(masses[index]) ||
-            (masses[index]>0 && abs(weights[index])<=gamma*masses[index])
+        recover |= _view_probe_roundoff_excess(weights[index],masses[index],gamma)
     end
     reference=zeros(size(weights,1),nc)
     for component in 1:nc,axis in axes(weights,1)
@@ -406,10 +414,11 @@ function _view_probe_evaluate(record,coordinates,gradient,caller;geometry=record
             product=weights[axis,node]*delta
             recover |= !isfinite(delta) || _view_probe_product_lost(weights[axis,node],delta,product)
             value=muladd(weights[axis,node],delta,value)
-            mass+=abs(product)
+            # Carry the basis-product mass through the data fold: a small
+            # rounded weight can hide a large error amplified by its datum.
+            mass+=masses[axis,node]*abs(delta)
         end
-        recover |= !isfinite(value) || !isfinite(mass) ||
-            (mass>0 && abs(value)<=gamma*mass)
+        recover |= _view_probe_roundoff_excess(value,mass,gamma)
         reference[axis,component]=value
     end
     recover && return _view_probe_raw_evaluate(record,coordinates,gradient,caller,geometry)
