@@ -8,7 +8,7 @@ Run ordinary package tests from the repository root:
 
 ```powershell
 julia +1.12 --project=. --startup-file=no --check-bounds=yes -e 'using Pkg; Pkg.test()'
-julia +1.13.1 --project=. --startup-file=no --check-bounds=yes -e 'using Pkg; Pkg.test()'
+julia +1.13.3 --project=. --startup-file=no --check-bounds=yes -e 'using Pkg; Pkg.test()'
 ```
 
 The runner selects minimal compilation automatically before loading Tessella.

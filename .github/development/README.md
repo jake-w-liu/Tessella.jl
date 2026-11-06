@@ -19,6 +19,26 @@ and external solver campaigns are opt-in.
 
 ## Current evidence
 
+### Point creation compiler boundary
+
+Point-comprehension inference no longer traverses session mutation machinery,
+and a bounds scan dispatches actual Curve samples without inferring every CAD
+evaluator for an empty sample loop. Point returns remain typed as `Int`; actual
+sampled Curves still use their existing evaluator.
+
+The original cold four-Point comprehension on Julia 1.13.3 minimal compilation
+took 271.89s and allocated 90.96GB, almost entirely compiler work. The first
+boundary fix reduced it to 0.050s/3.07MB. Final production checks of both
+boundaries passed five identity, coordinate, native-kernel and bounds assertions
+on Julia 1.12.7 minimal compilation (0.0085s/2.09MB) and Julia 1.13.3 normal
+`-O2` (1.325s/148.55MB), actual exits 0. Logs:
+`C:/Users/User/Tessella-point-startup-final-112-min-20261107.log` and
+`C:/Users/User/Tessella-point-startup-final-1133-O2-20261107.log` with matching
+durable `.exit` files. These are scoped cold compiler observations, not general
+meshing memory or performance claims. A separate broader optimized query check
+remains pending; an earlier superseded diagnostic was deliberately stopped
+after 297 CPU seconds, exit -1, without assertions.
+
 ### Finite cancellation recovery
 
 Public probes now use the propagated basis/data arithmetic budget to recover

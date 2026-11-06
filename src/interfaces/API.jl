@@ -1503,7 +1503,7 @@ using ..API: _get_current, _set_current, _get_file_name, _set_file_name,
              _add_discrete_entity
 include("APIOCCShapeRegistry.jl")
 
-function add_point(x,y,z;tag=0,meshSize=1.0)
+function add_point(x,y,z;tag=0,meshSize=1.0)::Int
     lc=try
         Float64(meshSize)
     catch err
@@ -1512,7 +1512,10 @@ function add_point(x,y,z;tag=0,meshSize=1.0)
     end
     isfinite(lc) || throw(ArgumentError(
         "API.model.add_point: meshSize must be finite"))
-    return _with_model(invalidate=true,preserve_source_inputs=true,
+    # Collection constructors infer their generators even with minimal
+    # compilation. Keep that inference from traversing session cache and
+    # geometry synchronization machinery for every Point expression.
+    return Base.inferencebarrier(_with_model)(;invalidate=true,preserve_source_inputs=true,
         synchronize_geometry=true) do m
         # `gmshVertex` keeps the `lc` component verbatim — `lc <= 0` is the
         # unset default (`point_size` reads fall back to 0), matching
