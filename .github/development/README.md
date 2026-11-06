@@ -19,6 +19,26 @@ and external solver campaigns are opt-in.
 
 ## Current evidence
 
+### Verified arithmetic and periodic package snapshot
+
+Commit `12c681d` passed ordinary `Pkg.test()` in clean detached checkouts with
+bounds checks and automatic minimal compilation:
+
+| Runtime | Assertions | Actual exit | Test body |
+| --- | ---: | ---: | ---: |
+| Julia 1.12.7 | 1399/1399 | 0 | 15m49.5s |
+| Julia 1.13.3 | 1399/1399 | 0 | 13m48.7s |
+
+Tracked checkout files remained clean. Logs and durable exit files are
+`C:/Users/User/Tessella-clean-12c681d-112.{log,exit}` and
+`C:/Users/User/Tessella-clean-12c681d-1133.{log,exit}`. This includes the periodic
+constructor and all arithmetic tests in that snapshot; subsequent finite
+cancellation, compact tolerance, MeshAdapt and compiler changes need their own
+verification.
+
+Published checkpoint `6d5f81a` also passed all four Windows/Linux and Julia
+1.12/1.13 jobs in [CI run 41476658618](https://github.com/jake-w-liu/Tessella.jl/actions/runs/41476658618).
+
 ### Arithmetic, geometry maps, and periodic constructor checkpoint
 
 The next implementation snapshot recovers value/gradient arithmetic from raw
