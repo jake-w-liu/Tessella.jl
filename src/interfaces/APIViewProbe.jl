@@ -1,7 +1,7 @@
 # View queries retain the complete value and geometry bases. The shared
 # safeguarded scheme inverse supplies intrinsic coordinates and certifies the
 # actual physical map; derivatives are pulled back with the geometry Jacobian.
-using LinearAlgebra: svd
+using LinearAlgebra: svd, SingularException
 
 const _VIEW_PROBE_MSH=(point=15,line=1,triangle=2,quadrangle=3,
     tetrahedron=4,hexahedron=5,prism=6,pyramid=7)
@@ -16,7 +16,7 @@ function _view_probe_record(kind,coordinates,values,basis,token,caller;identity=
     end
     cell=SizeField._PVSchemeCell(SizeField._POSTVIEW_SCHEME_KIND[kind],
         isempty(basis.coefgeo),kind===:pyramid,basis.coefval,basis.expval,
-        basis.coefgeo,basis.expgeo,coordinates,values)
+        basis.coefgeo,basis.expgeo,coordinates,values;native_geometry=basis.geometry_partition)
     SizeField._pv_scheme_validate(cell,1,caller)
     return (;kind,dim=SizeField._pv_scheme_dim(cell.kind),coords=coordinates,
         values,cell,partition=basis.partition,token,identity)
@@ -25,7 +25,7 @@ end
 function _view_probe_basis(msh,constant,bases)
     return get!(bases,(msh,constant)) do
         native=_native_view_writer_basis(msh)
-        (partition=true,coefval=constant ? ones(1,1) : native.coefficients,
+        (partition=true,geometry_partition=true,coefval=constant ? ones(1,1) : native.coefficients,
          expval=constant ? [(0.0,0.0,0.0)] : _view_probe_exponents(native.exponents),
          coefgeo=native.coefficients,expgeo=_view_probe_exponents(native.exponents))
     end
@@ -112,8 +112,7 @@ end
 function _view_probe_material_record(record,values)
     cell=record.cell
     if cell!==nothing
-        cell=SizeField._PVSchemeCell(cell.kind,cell.flat,cell.pyramid,
-            cell.coefval,cell.expval,cell.coefgeo,cell.expgeo,cell.coords,values)
+        cell=SizeField._pv_scheme_with_values(cell,values)
     end
     return merge(record,(;values,cell))
 end
@@ -129,7 +128,7 @@ function _view_probe_list_records(view,step,bases,caller;elements=nothing)
         else
             geometry=isempty(scheme.coefgeo) ?
                 _view_probe_basis(_VIEW_PROBE_MSH[element.kind],false,bases) : nothing
-            (partition=false,coefval=scheme.coefval,expval=_view_probe_exponents(scheme.expval),
+            (partition=false,geometry_partition=geometry!==nothing || scheme===Post._pos_order2_scheme(element.kind),coefval=scheme.coefval,expval=_view_probe_exponents(scheme.expval),
              coefgeo=geometry===nothing ? scheme.coefgeo : geometry.coefgeo,
              expgeo=geometry===nothing ? _view_probe_exponents(scheme.expgeo) : geometry.expgeo)
         end
@@ -155,34 +154,201 @@ function _view_probe_component_count(view,caller)
     return 1 in components ? 1 : 3 in components ? 3 : 9 in components ? 9 : 0
 end
 
+const _VIEW_PROBE_RECOVERY_PRECISION=16384
+
+mutable struct _ViewProbeLocation
+    reference::NTuple{3,Float64}
+    point::NTuple{3,Float64}
+    precise::Union{Nothing,NTuple{3,BigFloat}}
+end
+
+_view_probe_cell_base(cell)=SizeField._pv_scheme_base(cell)
+
+# A bounded mantissa keeps extreme integer powers from constructing enormous
+# rational denominators. The do-blocks use Julia's task-local precision and
+# rounding scopes; they do not change the caller's arithmetic environment.
+function _view_probe_recovery(f)
+    return setprecision(BigFloat,_VIEW_PROBE_RECOVERY_PRECISION) do
+        setrounding(BigFloat,RoundNearest) do
+            f()
+        end
+    end
+end
+
+function _view_probe_precise_certificate(cell,coordinates,query,base,scale)
+    mapped=SizeField._pv_scheme_map(cell,coordinates...,base,scale)
+    all(isfinite,mapped) || return nothing
+    residual=ntuple(axis->query[axis]-mapped[axis],3)
+    derivatives=SizeField._pv_scheme_jacobian(cell,coordinates...,base,scale)
+    all(column->all(isfinite,column),derivatives) || return nothing
+    dim=SizeField._pv_scheme_dim(cell.kind)
+    reference=collect(coordinates)
+    if dim<=2
+        for axis in (dim==1 ? (2,3) : (3,))
+            normal=derivatives[axis]
+            denominator=sum(abs2,normal)
+            denominator>0 || return nothing
+            reference[axis]=sum(residual[i]*normal[i] for i in 1:3)/denominator
+            residual=ntuple(i->residual[i]-reference[axis]*normal[i],3)
+        end
+    end
+    all(isfinite,reference) || return nothing
+    tolerance=max(BigFloat(1e-10),BigFloat(256eps(Float64))*max(BigFloat(1),maximum(abs,query)))
+    hypot(residual...)<=tolerance || return nothing
+    result=Tuple(reference)
+    SizeField._pv_scheme_inside(cell.kind,result...,
+        MeshPointLocation.STRICT_REFERENCE_TOLERANCE) || return nothing
+    return result
+end
+
+function _view_probe_precise_coordinates!(location,geometry)
+    location.precise===nothing || return location.precise
+    return _view_probe_recovery() do
+        cell=geometry.cell;scale=SizeField._pv_scheme_scale(cell)
+        base=map(BigFloat,_view_probe_cell_base(cell))
+        query=ntuple(axis->(BigFloat(location.point[axis])-base[axis])/BigFloat(scale),3)
+        dim=geometry.dim
+        coordinates=ntuple(axis->axis<=dim ? BigFloat(location.reference[axis]) : BigFloat(0),3)
+        for _ in 1:64
+            mapped=SizeField._pv_scheme_map(cell,coordinates...,base,scale)
+            all(isfinite,mapped) || return nothing
+            residual=BigFloat[query[axis]-mapped[axis] for axis in 1:3]
+            derivatives=SizeField._pv_scheme_jacobian(cell,coordinates...,base,scale)
+            all(column->all(isfinite,column),derivatives) || return nothing
+            jacobian=BigFloat[derivatives[column][axis] for axis in 1:3,column in 1:dim]
+            step=try
+                (transpose(jacobian)*jacobian)\(transpose(jacobian)*residual)
+            catch error
+                error isa SingularException || rethrow()
+                return nothing
+            end
+            all(isfinite,step) || return nothing
+            limit=16eps(BigFloat)*max(BigFloat(1),maximum(abs,coordinates))
+            if maximum(abs,step)<=limit
+                certified=_view_probe_precise_certificate(cell,coordinates,query,base,scale)
+                certified===nothing && return nothing
+                location.precise=certified
+                return certified
+            end
+            previous=sum(abs2,residual);alpha=BigFloat(1);advanced=false
+            for _ in 1:24
+                candidate=ntuple(axis->axis<=dim ? coordinates[axis]+alpha*step[axis] : BigFloat(0),3)
+                trial=SizeField._pv_scheme_map(cell,candidate...,base,scale)
+                if all(isfinite,trial) && sum(abs2,query.-trial)<=previous
+                    coordinates=candidate;advanced=true;break
+                end
+                alpha/=2
+            end
+            advanced || return nothing
+        end
+        return nothing
+    end
+end
+
 function _view_probe_coordinates(record,point)
     if record.cell===nothing
         return point==Tuple(record.coords[:,1]) ? (0.0,0.0,0.0) : nothing
     end
     cell=record.cell;scale=SizeField._pv_scheme_scale(cell)
     scale>0 || return nothing
-    base=Tuple(cell.coords[:,1])
+    base=_view_probe_cell_base(cell)
     query=SizeField._postview_scaled_query(point,base,scale)
     all(isfinite,query) || return nothing
     coordinates=SizeField._pv_scheme_inverse(cell,query,base,scale)
     coordinates===nothing && return nothing
     SizeField._pv_scheme_inside(cell.kind,coordinates...,
         MeshPointLocation.STRICT_REFERENCE_TOLERANCE) || return nothing
-    return coordinates
+    location=_ViewProbeLocation(coordinates,point,nothing)
+    # Reconstructing the physical query catches a small endpoint offset lost
+    # by normalization about a far-away first node.
+    if any(axis->muladd(query[axis],scale,base[axis])!=point[axis],1:3)
+        _view_probe_precise_coordinates!(location,record)===nothing && return nothing
+    end
+    return location
 end
 
-@noinline function _view_probe_exact_gradient(jacobian,weights,record,scale)
-    R=Rational{BigInt}
-    matrix=R.(jacobian)
-    reference=zeros(R,size(weights,1),size(record.values,1))
-    for component in axes(reference,2),axis in axes(reference,1)
-        anchor=record.partition ? R(record.values[component,1]) : R(0)
-        for node in axes(weights,2)
-            reference[axis,component]+=R(weights[axis,node])*(R(record.values[component,node])-anchor)
+function _view_probe_raw_monomials(exponents,coordinates,pyramid,gradient)
+    a,b,c=map(BigFloat,exponents);u,v,w=coordinates
+    value=u^a*v^b*w^c
+    ee=pyramid ? -min(a,b) : BigFloat(0)
+    t=pyramid ? max(BigFloat(1e-14),1-w) : BigFloat(1)
+    power=t^ee
+    gradient || return (value*power,)
+    du=iszero(a) ? BigFloat(0) : a*u^(a-1)*v^b*w^c*power
+    dv=iszero(b) ? BigFloat(0) : b*u^a*v^(b-1)*w^c*power
+    dw=u^a*v^b*((iszero(c) ? BigFloat(0) : c*w^(c-1))*power+
+        (iszero(ee) ? BigFloat(0) : -ee*w^c*t^(ee-1)))
+    return du,dv,dw
+end
+
+@noinline function _view_probe_raw_evaluate(record,location,gradient,caller,geometry)
+    return _view_probe_recovery() do
+        coordinates=_view_probe_precise_coordinates!(location,geometry)
+        coordinates===nothing && throw(ArgumentError("$caller: could not certify the original physical query"))
+        cell=record.cell;nc=size(record.values,1)
+        # Products and sums of the stored binary coefficients/data are formed
+        # before powers. Duplicate monomials can cancel without evaluating an
+        # otherwise overflowing or underflowing power first.
+        groups=Dict{NTuple{3,Float64},Vector{BigFloat}}()
+        order=NTuple{3,Float64}[]
+        for term in eachindex(cell.expval)
+            exponent=map(x->iszero(x) ? 0.0 : x,cell.expval[term])
+            if !haskey(groups,exponent)
+                groups[exponent]=zeros(BigFloat,nc);push!(order,exponent)
+            end
+            coefficient=groups[exponent]
+            for component in 1:nc
+                anchor=record.partition ? BigFloat(record.values[component,1]) : BigFloat(0)
+                for node in axes(record.values,2)
+                    coefficient[component]+=BigFloat(cell.coefval[node,term])*
+                        (BigFloat(record.values[component,node])-anchor)
+                end
+            end
         end
+        reference=zeros(BigFloat,gradient ? record.dim : 1,nc)
+        if !gradient && record.partition
+            reference[1,:].=BigFloat.(record.values[:,1])
+        end
+        for exponent in order
+            coefficient=groups[exponent]
+            all(iszero,coefficient) && continue
+            monomials=_view_probe_raw_monomials(exponent,coordinates,cell.pyramid,gradient)
+            for component in 1:nc,axis in axes(reference,1)
+                iszero(coefficient[component]) && continue
+                reference[axis,component]+=coefficient[component]*monomials[axis]
+            end
+        end
+        result=if gradient
+            gc=geometry.cell;scale=SizeField._pv_scheme_scale(gc)
+            base=map(BigFloat,_view_probe_cell_base(gc))
+            derivatives=SizeField._pv_scheme_jacobian(gc,coordinates...,base,scale)
+            jacobian=BigFloat[derivatives[column][axis] for axis in 1:3,column in 1:geometry.dim]
+            jacobian*((transpose(jacobian)*jacobian)\reference)/BigFloat(scale)
+        else
+            reference
+        end
+        values=vec(Float64.(result))
+        all(isfinite,values) || throw(ArgumentError("$caller: interpolated result is not finite"))
+        return values
     end
-    result=matrix*((transpose(matrix)*matrix)\R.(reference))
-    return vec(Float64.(result./R(scale)))
+end
+
+@inline function _view_probe_nonzero_monomial(exponents,coordinates,axis,pyramid)
+    axis==0 && return all(i->coordinates[i]!=0 || exponents[i]==0,1:3)
+    if axis<=2 || !pyramid
+        exponents[axis]!=0 || return false
+        return all(i->coordinates[i]!=0 || exponents[i]-(i==axis)==0,1:3)
+    end
+    # The two w-derivative terms can cancel. A conservative uncertainty flag
+    # is enough; the recovery evaluates their actual signed sum.
+    a,b,c=exponents;u,v,w=coordinates
+    (u!=0 || a==0) && (v!=0 || b==0) || return false
+    return (c!=0 && (w!=0 || c==1)) || (min(a,b)!=0 && (w!=0 || c==0))
+end
+
+@inline function _view_probe_product_lost(a,b,product)
+    return !isfinite(product) || (0<abs(product)<floatmin(Float64)) ||
+        (product==0 && a!=0 && b!=0)
 end
 
 @inline function _view_probe_rescale(value,numerator,denominator)
@@ -194,56 +360,75 @@ end
 function _view_probe_evaluate(record,coordinates,gradient,caller;geometry=record)
     nc=size(record.values,1)
     record.cell===nothing && return gradient ? zeros(3nc) : vec(copy(record.values[:,1]))
-    cell=record.cell;u,v,w=coordinates
+    if record.partition && all(component->all(==(record.values[component,1]),
+            @view(record.values[component,:])),1:nc)
+        return gradient ? zeros(3nc) : vec(copy(record.values[:,1]))
+    end
+    cell=record.cell;u,v,w=coordinates.reference
     weights=zeros(gradient ? record.dim : 1,size(record.values,2))
+    masses=zeros(size(weights))
+    recover=coordinates.precise!==nothing || any(record.values) do value
+        magnitude=abs(value)
+        magnitude>sqrt(floatmax(Float64)) || 0<magnitude<sqrt(floatmin(Float64))
+    end
+    operations=32.0+8.0*length(cell.expval)
+    for exponent in cell.expval,degree in exponent
+        operations+=16abs(degree)
+    end
+    mu=operations*eps(Float64)
+    gamma=mu<0.5 ? mu/(1-mu) : Inf
+    recover |= mu>1e-12
     for term in eachindex(cell.expval)
         monomials=gradient ? SizeField._pv_monomial_gradient(cell.expval[term],u,v,w,cell.pyramid) :
             (SizeField._pv_monomial(cell.expval[term],u,v,w,cell.pyramid),)
         for node in axes(record.values,2),axis in axes(weights,1)
-            weights[axis,node]=muladd(cell.coefval[node,term],monomials[axis],weights[axis,node])
+            monomial=monomials[axis];coefficient=cell.coefval[node,term]
+            recover |= !isfinite(monomial) || (0<abs(monomial)<floatmin(Float64)) ||
+                (monomial==0 && _view_probe_nonzero_monomial(cell.expval[term],
+                    coordinates.reference,gradient ? axis : 0,cell.pyramid))
+            product=coefficient*monomial
+            recover |= _view_probe_product_lost(coefficient,monomial,product)
+            weights[axis,node]=muladd(coefficient,monomial,weights[axis,node])
+            masses[axis,node]+=abs(product)
         end
     end
-    all(isfinite,weights) || throw(ArgumentError("$caller: value basis is not finite"))
-    reference=zeros(size(weights,1),nc)
-    exact_gradient=gradient && any(1:nc) do component
-        largest=maximum(abs,@view(record.values[component,:]))
-        largest>sqrt(floatmax(Float64)) || 0<largest<sqrt(floatmin(Float64))
+    for index in eachindex(weights)
+        recover |= !isfinite(weights[index]) || !isfinite(masses[index]) ||
+            (masses[index]>0 && abs(weights[index])<=gamma*masses[index])
     end
+    reference=zeros(size(weights,1),nc)
     for component in 1:nc,axis in axes(weights,1)
         anchor=record.partition ? record.values[component,1] : 0.0
         value=record.partition && !gradient ? anchor : 0.0
+        mass=abs(value)
         for node in axes(weights,2)
             delta=record.values[component,node]-anchor
+            product=weights[axis,node]*delta
+            recover |= !isfinite(delta) || _view_probe_product_lost(weights[axis,node],delta,product)
             value=muladd(weights[axis,node],delta,value)
+            mass+=abs(product)
         end
-        if !isfinite(value) && !gradient
-            # Rare cancellation/overflow cases retain the same owned nodal
-            # weights without overflowing intermediate products or differences.
-            R=Rational{BigInt}
-            exact=record.partition && !gradient ? R(anchor) : R(0)
-            for node in axes(weights,2)
-                exact+=R(weights[axis,node])*(R(record.values[component,node])-R(anchor))
-            end
-            value=Float64(exact)
-        end
+        recover |= !isfinite(value) || !isfinite(mass) ||
+            (mass>0 && abs(value)<=gamma*mass)
         reference[axis,component]=value
     end
+    recover && return _view_probe_raw_evaluate(record,coordinates,gradient,caller,geometry)
     if gradient
-        !exact_gradient && all(iszero,reference) && return zeros(3nc)
+        all(iszero,reference) && return zeros(3nc)
         gc=geometry.cell;scale=SizeField._pv_scheme_scale(gc)
-        derivatives=SizeField._pv_scheme_jacobian(gc,u,v,w,Tuple(gc.coords[:,1]),scale)
+        derivatives=SizeField._pv_scheme_jacobian(gc,u,v,w,_view_probe_cell_base(gc),scale)
         jacobian=[derivatives[column][axis] for axis in 1:3,column in 1:geometry.dim]
         decomposition=svd(jacobian;full=false)
         # J' g = dV/dξ; the thin SVD gives the minimum-norm tangential
         # derivative for curves/surfaces and the full derivative in 3D.
-        result=if !exact_gradient && all(isfinite,reference) && all(s->isfinite(s) && s>0,decomposition.S) &&
+        result=if all(s->isfinite(s) && s>0,decomposition.S) &&
                 minimum(decomposition.S)>sqrt(eps(Float64))*maximum(decomposition.S)
             normalized=decomposition.U*((decomposition.Vt*reference)./decomposition.S)
             physical=[_view_probe_rescale(normalized[axis,component],1.0,scale)
                 for axis in 1:3,component in 1:nc]
-            all(isfinite,physical) ? vec(physical) : _view_probe_exact_gradient(jacobian,weights,record,scale)
+            all(isfinite,physical) ? vec(physical) : _view_probe_raw_evaluate(record,coordinates,true,caller,geometry)
         else
-            _view_probe_exact_gradient(jacobian,weights,record,scale)
+            _view_probe_raw_evaluate(record,coordinates,true,caller,geometry)
         end
     else
         result=vec(reference)

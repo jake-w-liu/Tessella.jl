@@ -1,64 +1,60 @@
-# Variable-tensor ordinary planar Surfaces
+# Tensor Surface generation
 
-The explicit tensor overload generates an ordinary planar triangle mesh from
-the model's actual lower-dimensional Point and Line products:
+The explicit tensor overload builds a planar mesh from the model's actual
+Point and Curve products:
 
 ```julia
 field = MathEvalAnisoField(m11="4+12*x", m22="1", m33="1")
 mesh = mesh_model_surface(model, surface_tag, field;
-                          max_metric_edge=2.01,
-                          max_nodes=100, max_triangles=200)
+    max_metric_edge=2.01, max_nodes=100, max_triangles=200)
 ```
 
-The boundary Curves may have prescribed transfinite grids; the Surface itself
-uses ordinary initial triangulation and conforming interior edge bisection.
-The supplied tensor is used directly, including any explicit field wrapper.
-Scalar global size caps and factors are not applied again.
+The supplied tensor, including an explicit wrapper, is consumed directly.
+Global scalar size caps and factors are not applied again. Ordinary
+`mesh_model_surface(model, tag; size_field=field)` and `API.mesh.generate(2)`
+also consume tensors when algorithm 7 is selected; those paths apply the
+session's directional size bounds, factor and anisotropy cap.
 
-For a plane with tangent columns `B`, the tangential metric is `B' * M * B`.
-The producer evaluates this norm through actual world-coordinate displacements,
-retaining tensor cross terms and directions. Every emitted edge satisfies
-`metric_edge_length(field, a, b) <= max_metric_edge`: the checked norm is the
-maximum at both endpoints and the midpoint. This is a sampled edge contract,
-not a guarantee over unsampled positions of an arbitrary variable field.
+The native producer uses metric-Delaunay Steiner insertion, conforming edge
+bisection, flips and vertex removal. It retains full world-coordinate tensor
+cross terms, equivalent to the tangential pullback `B' * M * B`. Every edge of
+the refined triangular product satisfies
+`metric_edge_length(field, a, b) <= max_metric_edge`, evaluated at its endpoints
+and midpoint. This is a sampled contract; it does not bound arbitrary unsampled
+points of a variable field or promise a minimum angle.
 
-Retained lower vertices and Curve-cell boundary supports are checked against
-the actual input UIDs. Their coordinates, classifications, and parameters
-remain owned source data. A boundary edge that already exceeds the metric bound
-is rejected with a request for finer lower Curve cells. The producer does not
-split or replace those cells. Each interior split constructs one new Surface
-vertex and two child triangles per incident parent, with checked constructor
-births. Output storage is independent of the inputs and model.
+Actual lower vertices retain their UIDs, coordinates, classifications and
+parameters. Planar faces support holes, geometric curved boundaries, embedded
+Points and Curves, and recombination algorithms 0–3. An embedded Curve retains
+literal edges with two incident Surface cells. A supplied Point on a Curve
+splits that actual chain before full-quad coarsening. Retained lower cells must
+satisfy the requested metric bound; the producer rejects under-resolution
+instead of silently replacing owned cells. The triangular edge bound above is
+checked before recombination and is not a claim about every final quad edge.
 
-Straight planar boundaries and holes are supported. The first scope rejects
-transfinite or extruded Surfaces, periodic relations, recombination, embedded
-entities, and Surface smoothing. There is no minimum-angle promise. Resource
-limits, invalid metrics, flat children, and unrepresentable midpoints fail
-before a partial result escapes. The model is meshed through a detached copy.
+The ordinary algorithm-7 dispatcher also has ruled and OCC parametric chart
+producers. Their remaining embedding, periodic, recombination and construction
+contexts are tracked in the [implementation checklist](../development/CHECKLIST.md).
+The explicit tensor overload remains planar. Transfinite and extruded Surface
+construction uses its own producer. Algorithm-7 ordering is native Julia and
+does not claim identical BAMG chronology or matching tie order.
 
-The existing two-argument `mesh_model_surface` route and native API
-`mesh.generate` remain unchanged. Their ordinary Surface and Volume background
-adapters currently reduce anisotropic fields to scalar values. This new overload
-does not implement BAMG or claim native anisotropic ordering or general
-variable-metric volume generation. Constant-tensor box grids and existing
-directional surface/refinement pipelines retain their separate contracts.
+Periodic Surface masters publish the final refined/recombined constructor to
+the ordinary owned copy producer. Per-Surface elliptic smoothing is retained as
+a transfinite attribute, as in the [Gmsh manual](https://www.gmsh.info/doc/texinfo/gmsh.html#Structured-grids).
+It does not reject ordinary algorithm-7 generation.
 
-The opt-in
-[`model_metric_surface_functional_test.jl`](../../test/geometry/model_metric_surface_functional_test.jl)
-uses small actual model boundaries. It independently checks variable diagonal
-quadratic forms, swapped tensor directions, an oblique plane with cross terms,
-area and coordinate bounds, exact boundary UID transport, hole exclusion,
-storage ownership, and atomic metric/resource failures. It performs no native
-calls or volume production.
+New vertices and cells carry constructor births. Resource limits, invalid
+metrics and representability failures return no partial mesh or model mutation;
+the explicit overload works on a detached model copy. See the
+[session endpoint](api_metric_surfaces.md) for publication and additional
+session restrictions.
 
-The final33 checks pass onJulia1.12.7 with actual exit0 in5.82 s warm,
-`--compile=min -O0` and bounds checking. Source remained unchanged between the
-initial coarse-boundary fixture rejection and the corrected fixture target.
-Actual TF3 retained intervals produced a norm2.0000000000052314, so target2.0
-was too tight; target2.01 passes the same strict independent norm certificate.
-The failed receipt and actual boundary dump remain preserved.
-
-The [explicit tensor API endpoint](api_metric_surfaces.md) exposes this
-constructor using the selected session background field and staged
-classification/UID publication. It retains the ordinary native algorithm
-dispatch and its BAMG guard.
+Small analytic and topology regressions include
+[`model_metric_surface_functional_test.jl`](../../test/geometry/model_metric_surface_functional_test.jl),
+[`model_metric_algorithm7_fullquad_test.jl`](../../test/geometry/model_metric_algorithm7_fullquad_test.jl),
+and [`api_metric_surface_embedded_test.jl`](../../test/interfaces/api_metric_surface_embedded_test.jl).
+[`api_metric_surface_periodic_test.jl`](../../test/interfaces/api_metric_surface_periodic_test.jl)
+checks translated/rotated copies and full-quad constructor transport.
+Actual runtime scopes and exits are recorded in the
+[development evidence](../development/README.md).

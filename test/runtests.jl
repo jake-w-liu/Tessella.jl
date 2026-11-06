@@ -40,6 +40,8 @@ include("functional/fixtures.jl")
         "fields/distance_triangle_translation_test.jl",
         "fields/postview_inverse_convergence_test.jl",
         "fields/postview_thin_geometry_test.jl",
+        "fields/postview_nonpartition_geometry_test.jl",
+        "fields/postview_translated_line_test.jl",
         "geometry/model_plane_closed_curve_test.jl",
         "geometry/model_compact_atomic_coverage_test.jl",
         "functional/list_view_export.jl",
@@ -102,8 +104,10 @@ include("functional/fixtures.jl")
         "functional/api_surface_smoke.jl",
         "interfaces/api_model_postview_field_test.jl",
         "interfaces/api_view_probe_basis_test.jl",
+        "interfaces/api_view_probe_raw_arithmetic_test.jl",
         "interfaces/api_plugin_model_probe_test.jl",
         "interfaces/api_metric_surface_embedded_test.jl",
+        "interfaces/api_metric_surface_periodic_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

@@ -18,4 +18,4 @@ Examples use native Julia production.
 | Periodicity | [Hybrid boundaries](periodic_hybrid_boundaries.md), [shared hybrids](shared_periodic_hybrids.md) |
 | Partitions | [Tetrahedra](partitioned_tets.md), [BRep](partitioned_brep.md), [declared topology](partitioned_declared_brep.md), [open seams](partitioned_open_seams.md) |
 | STEP/IGES | [Mapped occurrences](step_mapped_occurrences.md), [assemblies](step_relationship_assemblies.md), [units](step_relationship_si_units.md), [Cartesian targets](step_cartesian_rigid_targets.md), [plane charts](iges_plane_charts.md) |
-| Views | [POS import](session_pos_import.md), [time](view_time.md), [representations](view_representations.md), [list export](list_view_exports.md), [model export](model_view_exports.md) |
+| Views | [Probes](view_probes.md), [POS import](session_pos_import.md), [time](view_time.md), [representations](view_representations.md), [list export](list_view_exports.md), [model export](model_view_exports.md) |

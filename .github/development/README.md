@@ -1,9 +1,8 @@
 # Development
 
-Read [AGENTS.md](AGENTS.md) and the [requirement checklist](CHECKLIST.md) before
-implementation. Resume from the current `main` checkout and preserve unrelated
-work. Verified changes are normally committed and pushed to `main` without
-force-pushing.
+The [requirement checklist](CHECKLIST.md) records implementation and release
+work. The user revoked the previously provided AGENTS.md instructions on
+2026-11-06. Current work follows the active user goal and current source.
 
 The active objective covers correctness, resource efficiency, complete native
 meshing functionality, repository cleanup, and registration of version 0.1.0.
@@ -19,6 +18,31 @@ Full native sweeps, source/AST campaigns, allocation stress, benchmarks, HFSS,
 and external solver campaigns are opt-in.
 
 ## Current evidence
+
+### Arithmetic, geometry maps, and periodic constructor checkpoint
+
+The next implementation snapshot recovers value/gradient arithmetic from raw
+coefficients and data when Float64 products underflow or cancel. Physical
+queries retain small offsets lost during normalization. Custom geometry maps
+bind their actual polynomial instead of assuming partition of unity, and their
+search bounds include accepted intrinsic/normal coordinates. Plain translated
+Line fields use the nearer endpoint with exact recovery for subtraction loss.
+
+Recorded scoped checks include Julia 1.12 minimal raw arithmetic 49/49 and
+coordinated arithmetic/geometry 104/104, actual exits 0. Subsequent optimized
+runs were interrupted at the agent layer: 240 field assertions and 49 raw
+assertions were observed passing, but their final exits were not recovered.
+They are partial evidence. Fresh immutable-snapshot package checks are pending.
+
+Metric Surface masters now bind the final refined/recombined constructor to
+the ordinary periodic copy producer. Per-Surface smoothing retains its
+transfinite attribute semantics. The new translated/rotated and full-quad
+regression logs end with 129/129 on Julia 1.12.7 minimal compilation (6m51.3s)
+and Julia 1.13.3 normal `-O2` (9m58.3s). The old process handles expired before
+exit retrieval; these logs are successful test summaries, not recovered exit
+receipts. The initial stricter Curve-coordinate test was corrected after
+diagnosis showed a 2.1e-12 reparameterization difference within the existing
+placement contract. No coordinate or ownership certificate was relaxed.
 
 ### Frozen probe and embedded metric package verification
 

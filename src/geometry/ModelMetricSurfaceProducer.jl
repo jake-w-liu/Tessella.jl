@@ -60,8 +60,8 @@ function _metric_surface_admit(m,tag,caller;ruled=false)
     embeddings=get(m.embeds,(2,tag),NTuple{2,Int}[])
     isempty(embeddings) || kind===:plane || throw(ArgumentError(
         "$caller: embedded constraints on ruled Surfaces are not supported"))
-    get(m.meshing.smoothing,(2,tag),0)==0 || throw(ArgumentError(
-        "$caller: Surface smoothing is not supported"))
+    # Per-Surface elliptic smoothing belongs to transfinite construction.
+    # Ordinary native fronts retain that attribute without applying it.
     curves=_metric_surface_lower_curves(m,tag,caller)
     # Upstream's BAMG selector reaches real curved boundaries on plane
     # faces — a builtin arc-bounded Plane or an OCC Plane record carries
@@ -77,14 +77,31 @@ function _metric_surface_admit(m,tag,caller;ruled=false)
         "$caller: requires geometric boundary Curves"))
     curve_set=Set(curves)
     any(constraint->constraint.dim==2 &&
-        (abs(Int(constraint.slave_entity))==tag || abs(Int(constraint.master_entity))==tag) ||
-        constraint.dim==1 && (abs(Int(constraint.slave_entity)) in curve_set ||
-        abs(Int(constraint.master_entity)) in curve_set),model_periodic_constraints(m)) &&
-        throw(ArgumentError("$caller: periodic Surface or boundary Curve construction is not supported"))
+        abs(Int(constraint.slave_entity))==tag ||
+        constraint.dim==1 && abs(Int(constraint.slave_entity)) in curve_set,
+        model_periodic_constraints(m)) && throw(ArgumentError(
+        "$caller: a periodic slave requires the ordinary owned copy producer"))
     # The plane certificate applies to the planar front's mean-Plane frame;
     # a ruled patch's own parameter domain is the certified chart instead.
     kind===:plane && _model_surface_plane(m,tag,caller)
     return nothing
+end
+
+# Refinement and recombination replace the initial constructor's node and cell
+# sets. A periodic copy must consume the final owned product, with its actual
+# new labels; keeping the seed constructor would fail its binding certificate.
+function _metric_surface_bind_constructor(m,tag,production)
+    any(constraint->constraint.dim==2 && Int(constraint.master_entity)==tag,
+        model_periodic_constraints(m)) || return production
+    mesh=production.mesh
+    constructor=mesh isa Mesh ? Mesh(copy(mesh.coords);tris=copy(mesh.tris)) :
+        MixedMesh(copy(mesh.coords),ElementBlock[ElementBlock(block.msh,
+            copy(block.nodes),copy(block.tags)) for block in mesh.blocks])
+    return _ModelSurfaceProduction(mesh,production.node_tags,production.node_owners,
+        production.node_parameters,production.retained_nodes,production.node_high_water,
+        production.element_tags,production.element_high_water,production.birth_rows,
+        constructor,production.source_node_updates,production.native_recombine_events,
+        production.curve_chains)
 end
 
 function _metric_surface_lower_curves(m,tag,caller)
@@ -2658,8 +2675,10 @@ edges are rejected instead of replacing owned cells. Planar boundaries, includin
 holes and geometric curved boundaries, are supported. Recombination algorithms 0–3 recombine the certified
 triangulation through the shared native pairing and full-quad subdivision
 kernels (algorithms 2/3 first halve the 1-D mesh and mesh at doubled metric
-size, then restore the stored Curve middles); transfinite/extruded/periodic
-Surfaces and Surface smoothing are rejected. New vertices and cells
+size, then restore the stored Curve middles). Periodic masters retain the final
+owned constructor for the ordinary copy producer; a slave is generated through
+that producer. Transfinite and extruded Surfaces retain their separate paths.
+Per-Surface elliptic smoothing is a transfinite attribute. New vertices and cells
 have owned constructor births; resource and representability failures return no
 partial mesh or model mutation. The supplied field, including any explicit
 wrapper, is used as given.
@@ -2684,6 +2703,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer,field::AbstractAnisoField;
     product=_metric_surface_refine(working,t,field,target,node_limit,triangle_limit,
         _mesh_input,options,_mesh_node_high_water,_mesh_element_high_water,caller;
         allow_regrade=_boundary_regrade)
+    product=_metric_surface_bind_constructor(working,t,product)
     return _return_surface_production ? product : product.mesh
 end
 
@@ -2770,13 +2790,16 @@ function _metric_surface_algorithm_mesh(m::GeoModel,tag::Int,caller::AbstractStr
     # A declared ruled/tric patch meshes its own parameter domain — the same
     # certified tensor-bisection construction on the blend's (u,v) chart
     # rather than the planar frame.
-    _surface_type(m,tag) in (:ruled,:tric) &&
-        return _ruled_metric_surface_refine(m,tag,field,1.0,
+    product=if _surface_type(m,tag) in (:ruled,:tric)
+        _ruled_metric_surface_refine(m,tag,field,1.0,
             PIPELINE_DEFAULT_MAX_NODES,20_000_000,_mesh_input,options,
             _mesh_node_high_water,_mesh_element_high_water,caller;
             allow_regrade=_boundary_regrade)
-    return _metric_surface_refine(m,tag,field,1.0,
-        PIPELINE_DEFAULT_MAX_NODES,20_000_000,_mesh_input,options,
-        _mesh_node_high_water,_mesh_element_high_water,caller;
-        allow_regrade=_boundary_regrade)
+    else
+        _metric_surface_refine(m,tag,field,1.0,
+            PIPELINE_DEFAULT_MAX_NODES,20_000_000,_mesh_input,options,
+            _mesh_node_high_water,_mesh_element_high_water,caller;
+            allow_regrade=_boundary_regrade)
+    end
+    return _metric_surface_bind_constructor(m,tag,product)
 end

@@ -2262,6 +2262,17 @@ end
 # product maps reference coordinates to physical geometry, otherwise the
 # family's canonical first-order map applies. Pyramid families evaluate every
 # monomial Bergot-style as `uᵃvᵇwᶜ·(1-w)^(max(a,b)-a-b)`.
+# Native/certified-partition geometry keeps the translation-stable nodal
+# offset evaluator. A genuinely nonpartition scheme instead binds its actual
+# coordinate polynomial once, with exact dyadic coefficient accumulation.
+struct _PVGeometryMap
+    origin::NTuple{3,Float64}
+    scale::Float64
+    coefficients::Matrix{Float64}
+    exponents::Vector{NTuple{3,Float64}}
+    normal_ratio::Float64
+end
+
 struct _PVSchemeCell
     kind::UInt8
     flat::Bool
@@ -2272,7 +2283,86 @@ struct _PVSchemeCell
     expgeo::Vector{NTuple{3,Float64}}
     coords::Matrix{Float64}
     values::Matrix{Float64}
+    geometry::Union{Nothing,_PVGeometryMap}
 end
+
+@inline function _pv_geometry_zero_term(kind,e)
+    return (kind==1 && (e[2]>0 || e[3]>0)) ||
+           ((kind==2 || kind==7) && e[3]>0)
+end
+
+# Group duplicate monomials before certification. Float64 coefficients are
+# dyadic rationals; no tolerance may silently erase a supplied near-unity
+# defect. Native producers separately declare the exact partition semantics
+# of their rounded Lagrange coefficient tables.
+function _pv_geometry_groups(kind,coefficients,exponents)
+    R=Rational{BigInt}
+    groups=Dict{NTuple{3,Float64},Vector{R}}()
+    order=NTuple{3,Float64}[]
+    for term in eachindex(exponents)
+        e=ntuple(axis->iszero(exponents[term][axis]) ? 0.0 : exponents[term][axis],3)
+        _pv_geometry_zero_term(kind,e) && continue
+        if !haskey(groups,e)
+            groups[e]=zeros(R,size(coefficients,1));push!(order,e)
+        end
+        for node in axes(coefficients,1)
+            groups[e][node]+=R(coefficients[node,term])
+        end
+    end
+    partition=true
+    for e in order
+        expected=all(iszero,e) ? R(1) : R(0)
+        sum(groups[e])==expected || (partition=false)
+    end
+    haskey(groups,(0.0,0.0,0.0)) || (partition=false)
+    return groups,order,partition
+end
+
+function _pv_geometry_map(kind,coefficients,exponents,coords)
+    groups,order,partition=_pv_geometry_groups(kind,coefficients,exponents)
+    partition && return nothing
+    R=Rational{BigInt}
+    world=zeros(R,3,length(order))
+    for (term,e) in enumerate(order),axis in 1:3,node in axes(coords,2)
+        world[axis,term]+=R(coords[axis,node])*groups[e][node]
+    end
+    constant=findfirst(e->all(iszero,e),order)
+    origin=ntuple(3) do axis
+        constant===nothing && return 0.0
+        value=Float64(world[axis,constant])
+        return isfinite(value) ? value : 0.0
+    end
+    # Retain the exact constant residual after choosing a representable
+    # physical origin; dropping it would change a large translated custom
+    # map. Variation, not the untransformed control hull, sets the scale.
+    if constant!==nothing
+        for axis in 1:3;world[axis,constant]-=R(origin[axis]);end
+    end
+    magnitude=maximum(abs,world;init=R(0))
+    iszero(magnitude) && return _PVGeometryMap(origin,0.0,zeros(3,length(order)),order,1.0)
+    scale=Float64(magnitude)
+    isfinite(scale) || (scale=floatmax(Float64))
+    iszero(scale) && (scale=nextfloat(0.0))
+    normalized=Float64.(world./R(scale))
+    all(isfinite,normalized) || throw(ArgumentError(
+        "PostViewField: custom geometry exceeds normalized Float64 range"))
+    previous=_pv_control_scale(coords)
+    ratio=previous>0 ? Float64(R(scale)/R(previous)) : 1.0
+    return _PVGeometryMap(origin,scale,normalized,order,ratio)
+end
+
+function _PVSchemeCell(kind,flat,pyramid,cv,ev,cg,eg,coords,values;
+                       native_geometry::Bool=false)
+    geometry=flat || native_geometry ? nothing : _pv_geometry_map(kind,cg,eg,coords)
+    return _PVSchemeCell(kind,flat,pyramid,cv,ev,cg,eg,coords,values,geometry)
+end
+
+@inline _pv_scheme_with_values(cell::_PVSchemeCell,values)=
+    _PVSchemeCell(cell.kind,cell.flat,cell.pyramid,cell.coefval,cell.expval,
+        cell.coefgeo,cell.expgeo,cell.coords,values,cell.geometry)
+
+@inline _pv_scheme_base(cell::_PVSchemeCell)=cell.geometry===nothing ?
+    (cell.coords[1,1],cell.coords[2,1],cell.coords[3,1]) : cell.geometry.origin
 
 # `_postview_cell_kind` codes reused for the scheme-cell reference domains:
 # line=1, triangle=2, tetrahedron=3, hexahedron=4, prism=5, pyramid=6,
@@ -2821,7 +2911,62 @@ function _pv_scheme_axis_bounds(cell,axis,ranges,roundoff)
     return isfinite(lo) && isfinite(hi) ? (lo,hi) : full
 end
 
+# Bound the same rebased floating program used by the inverse. Each
+# coefficient conversion is enclosed by one outward ulp; the separate
+# arithmetic envelope covers monomials, FMAs, rescaling and origin addition.
+function _pv_rebased_geometry_bounds(cell)
+    geometry=cell.geometry
+    extent=floatmax(Float64);full=((-extent,-extent,-extent),(extent,extent,extent))
+    ranges=Tuple{Int,Int}[]
+    operations=32.0+8.0*length(geometry.exponents)
+    for e in geometry.exponents
+        range=_pv_scheme_monomial_range(cell.kind,e)
+        range===nothing && return full
+        push!(ranges,range)
+        for degree in e;operations=nextfloat(operations+nextfloat(16.0*degree));end
+    end
+    mu=nextfloat(operations*(eps(Float64)/2))
+    isfinite(mu) && mu<0.5 || return full
+    gamma=nextfloat(mu/prevfloat(1.0-mu))
+    bounds=ntuple(3) do axis
+        if all(term->iszero(geometry.coefficients[axis,term]),axes(geometry.coefficients,2))
+            value=geometry.origin[axis]
+            return (value,value)
+        end
+        lo=0.0;hi=0.0;mass=0.0
+        for term in eachindex(ranges)
+            range=ranges[term];range==(0,0) && continue
+            c=geometry.coefficients[axis,term]
+            iszero(c) && continue
+            lower=prevfloat(c);upper=nextfloat(c)
+            if range==(-1,1)
+                radius=max(abs(lower),abs(upper));lower=-radius;upper=radius
+            elseif range!=(1,1)
+                lower=min(0.0,lower);upper=max(0.0,upper)
+            end
+            lo=prevfloat(lo+lower);hi=nextfloat(hi+upper)
+            mass=nextfloat(mass+abs(c))
+        end
+        norm_floor=nextfloat(nextfloat(0.0)*operations)
+        norm_floor=nextfloat(norm_floor*nextfloat(mass+1.0))
+        norm_error=nextfloat(nextfloat(gamma*mass)+norm_floor)
+        lo=prevfloat(lo-norm_error);hi=nextfloat(hi+norm_error)
+        scale=geometry.scale;origin=geometry.origin[axis]
+        lo=prevfloat(origin+prevfloat(scale*lo));hi=nextfloat(origin+nextfloat(scale*hi))
+        # Account for query normalization too, including large physical
+        # translations perpendicular to an otherwise very thin element.
+        magnitude=nextfloat(abs(origin)+nextfloat(scale*mass))
+        floor=nextfloat(nextfloat(0.0)*max(1.0,scale))
+        floor=nextfloat(nextfloat(floor*operations)*nextfloat(mass+1.0))
+        error=nextfloat(nextfloat(gamma*magnitude)+floor)
+        lower=prevfloat(lo-error);upper=nextfloat(hi+error)
+        return isfinite(lower) && isfinite(upper) ? (lower,upper) : (-extent,extent)
+    end
+    return (ntuple(axis->bounds[axis][1],3),ntuple(axis->bounds[axis][2],3))
+end
+
 function _pv_scheme_geometry_bounds(cell)
+    cell.geometry===nothing || return _pv_rebased_geometry_bounds(cell)
     ranges=Tuple{Int,Int}[]
     for exponent in cell.expgeo
         range=_pv_scheme_monomial_range(cell.kind,exponent)
@@ -2842,8 +2987,10 @@ function _pv_scheme_geometry_bounds(cell)
     return (ntuple(axis->bounds[axis][1],3),ntuple(axis->bounds[axis][2],3))
 end
 
+include("PostViewCertificateBounds.jl")
+
 function _build_postview_bvh(coords,tetrahedra,hexahedra,prisms,pyramids,
-                             triangles,quadrangles,lines,points,scheme_cells)
+                             triangles,quadrangles,lines,points,scheme_cells,reference_tolerance)
     nfirst=sum(size(cells,2) for cells in
         (tetrahedra,hexahedra,prisms,pyramids,triangles,quadrangles,lines,points))
     ncells=nfirst+length(scheme_cells)
@@ -2874,11 +3021,11 @@ function _build_postview_bvh(coords,tetrahedra,hexahedra,prisms,pyramids,
                 end
                 primitive_lo[k,id]=lo;primitive_hi[k,id]=hi
             end
-            if !cell.flat
-                lower,upper=_pv_scheme_geometry_bounds(cell)
+            if !cell.flat || reference_tolerance>0
+                lower,upper=_pv_scheme_certificate_bounds(cell,reference_tolerance)
                 for k in 1:3
-                    primitive_lo[k,id]=min(primitive_lo[k,id],lower[k])
-                    primitive_hi[k,id]=max(primitive_hi[k,id],upper[k])
+                    primitive_lo[k,id]=cell.geometry===nothing ? min(primitive_lo[k,id],lower[k]) : lower[k]
+                    primitive_hi[k,id]=cell.geometry===nothing ? max(primitive_hi[k,id],upper[k]) : upper[k]
                 end
             end
         end
@@ -3043,7 +3190,7 @@ function PostViewField(coords::AbstractMatrix{<:Real}, values;
     isempty(nearest_coords) && throw(ArgumentError(
         "PostViewField: view contains no active nodes"))
     tree=DistanceField(;points=nearest_coords)
-    bvh=_build_postview_bvh(C,S,H,I,Y,T,Q,L,P,_scheme_cells)
+    bvh=_build_postview_bvh(C,S,H,I,Y,T,Q,L,P,_scheme_cells,tolerance)
     return PostViewField(C,vec(V),UInt8(size(V,1)),P,L,T,Q,S,H,I,Y,
                          crop_negative,use_closest,tolerance,tree,bvh...,
                          _scheme_cells)
@@ -3122,7 +3269,8 @@ step; `time` selects the active step (1-based).
 function PostViewField(records::AbstractVector;
                        time::Integer=1,crop_negative::Bool=true,
                        use_closest::Bool=true,reference_tolerance::Real=1e-6,
-                       max_nodes::Integer=1_000_000,max_elements::Integer=1_000_000)
+                       max_nodes::Integer=1_000_000,max_elements::Integer=1_000_000,
+                       _native_geometry_partition::Bool=false)
     caller="PostViewField"
     isempty(records) && throw(ArgumentError(
         "$caller: records must be a non-empty vector"))
@@ -3196,7 +3344,7 @@ function PostViewField(records::AbstractVector;
     @inbounds for i in eachindex(records)
         record=records[i];kind=kinds[i]
         if scheme_flags[i]
-            cell_obj=_postview_scheme_cell(record,kind,i,tsel,caller)
+            cell_obj=_postview_scheme_cell(record,kind,i,tsel,caller;native_geometry=_native_geometry_partition)
             nscheme_nodes+=size(cell_obj.coords,2)
             nscheme_nodes<=node_limit || throw(ArgumentError(
                 "$caller: node count exceeds max_nodes=$node_limit"))
@@ -3462,6 +3610,18 @@ end
     return hypot(x,y,z)
 end
 
+@inline function _postview_line_offset_lost(point,anchor)
+    for axis in 1:3
+        value=point[axis];base=anchor[axis]
+        difference=value-base
+        isfinite(difference) || return true
+        virtual=value-difference
+        error=(value-(difference+virtual))+(virtual-base)
+        iszero(error) || return true
+    end
+    return false
+end
+
 @inline function _postview_line_value(field::PostViewField,j::Int,p,
                                       combine::C=_postview_weighted_scalar_operator) where {C}
     cells=field.lines
@@ -3504,7 +3664,22 @@ end
         return _postview_big_combine(field,UInt8(1),j,p,combine)
     (u<-(1+tolerance)||u>1+tolerance||abs(v)>tolerance||abs(w)>tolerance) &&
         return _postview_cell_miss(combine)
-    value=combine(field,cells,j,((1-u)/2,(1+u)/2),2)
+    # Reconstruct the small endpoint weight from that endpoint's own offset;
+    # forming it as 1-u discards small physical offsets on a long Line.
+    backward=_postview_scaled_query(p,b,scale)
+    all(isfinite,backward) || return _postview_big_combine(field,UInt8(1),j,p,combine)
+    near_first=_dot3(q,q)<=_dot3(backward,backward)
+    anchor=near_first ? a : b
+    _postview_line_offset_lost(p,anchor) &&
+        return _postview_big_combine(field,UInt8(1),j,p,combine)
+    weight=near_first ? _dot3(q,d)/denominator : -_dot3(backward,d)/denominator
+    # A normalized subnormal (or vanished nonzero offset) can become
+    # representable again after multiplying the nodal data. Reuse the
+    # existing exact dyadic interpolation instead of rounding it early.
+    (issubnormal(weight) || (iszero(weight) && p!=anchor)) &&
+        return _postview_big_combine(field,UInt8(1),j,p,combine)
+    weights=near_first ? (1-weight,weight) : (weight,1-weight)
+    value=combine(field,cells,j,weights,2)
     return _postview_check_interpolant(value,"line",j)
 end
 
@@ -3799,7 +3974,11 @@ end
 end
 
 function _pv_scheme_scale(cell::_PVSchemeCell)
-    coords=cell.coords
+    cell.geometry===nothing || return cell.geometry.scale
+    return _pv_control_scale(cell.coords)
+end
+
+function _pv_control_scale(coords)
     scale=0.0
     @inbounds for i in 2:size(coords,2), d in 1:3
         delta=coords[d,i]-coords[d,1]
@@ -3817,6 +3996,16 @@ end
 # basis; curved cells use `coefgeo[i,t]·Mₜ` over `expgeo` rows.
 function _pv_scheme_map(cell::_PVSchemeCell,u,v,w,base,scale::Float64)
     mapped=(0.0,0.0,0.0)
+    geometry=cell.geometry
+    if geometry!==nothing
+        @inbounds for term in eachindex(geometry.exponents)
+            m=_pv_monomial(geometry.exponents[term],u,v,w,cell.pyramid)
+            mapped=(muladd(geometry.coefficients[1,term],m,mapped[1]),
+                    muladd(geometry.coefficients[2,term],m,mapped[2]),
+                    muladd(geometry.coefficients[3,term],m,mapped[3]))
+        end
+        return mapped
+    end
     coords=cell.coords
     if cell.flat
         kind=cell.kind
@@ -3849,7 +4038,18 @@ end
 function _pv_scheme_jacobian(cell::_PVSchemeCell,u,v,w,base,scale::Float64)
     du=(0.0,0.0,0.0);dv=(0.0,0.0,0.0);dw=(0.0,0.0,0.0)
     coords=cell.coords
-    if cell.flat
+    geometry=cell.geometry
+    if geometry!==nothing
+        @inbounds for term in eachindex(geometry.exponents)
+            gu,gv,gw=_pv_monomial_gradient(geometry.exponents[term],u,v,w,cell.pyramid)
+            q1=geometry.coefficients[1,term]
+            q2=geometry.coefficients[2,term]
+            q3=geometry.coefficients[3,term]
+            du=(muladd(q1,gu,du[1]),muladd(q2,gu,du[2]),muladd(q3,gu,du[3]))
+            dv=(muladd(q1,gv,dv[1]),muladd(q2,gv,dv[2]),muladd(q3,gv,dv[3]))
+            dw=(muladd(q1,gw,dw[1]),muladd(q2,gw,dw[2]),muladd(q3,gw,dw[3]))
+        end
+    elseif cell.flat
         kind=cell.kind
         @inbounds for i in 1:size(coords,2)
             g=_pv_canonical_gradient(kind,i,u,v,w)
@@ -3891,9 +4091,13 @@ function _pv_scheme_jacobian(cell::_PVSchemeCell,u,v,w,base,scale::Float64)
         else
             (0.0,d[3],-d[2])
         end
-        return du,artificial,_postview_cross(d,artificial)
+        normal=_postview_cross(d,artificial)
+        ratio=geometry===nothing ? 1.0 : geometry.normal_ratio
+        return du,artificial,(normal[1]*ratio,normal[2]*ratio,normal[3]*ratio)
     elseif kind==2 || kind==7
-        return du,dv,_postview_cross(du,dv)
+        normal=_postview_cross(du,dv)
+        ratio=geometry===nothing ? 1.0 : geometry.normal_ratio
+        return du,dv,(normal[1]*ratio,normal[2]*ratio,normal[3]*ratio)
     end
     return du,dv,dw
 end
@@ -4163,7 +4367,7 @@ function _postview_scheme_value(field::PostViewField,j::Int,p,
     cell=field.scheme_cells[j]
     scale=_pv_scheme_scale(cell)
     scale>0 || return _postview_cell_miss(combine)
-    base=(cell.coords[1,1],cell.coords[2,1],cell.coords[3,1])
+    base=_pv_scheme_base(cell)
     query=_postview_scaled_query(p,base,scale)
     all(isfinite,query) || return _postview_cell_miss(combine)
     coordinates=_pv_scheme_inverse(cell,query,base,scale)
@@ -4223,7 +4427,7 @@ function _pv_scheme_validate(cell::_PVSchemeCell,i::Int,caller::AbstractString)
         end
         return nothing
     end
-    base=(coords[1,1],coords[2,1],coords[3,1])
+    base=_pv_scheme_base(cell)
     nodes=lagrange_nodes(_POSTVIEW_SCHEME_SAMPLE_MSH[
         kind==1 ? :line : kind==2 ? :triangle : kind==3 ? :tetrahedron :
         kind==4 ? :hexahedron : kind==5 ? :prism : kind==6 ? :pyramid :
@@ -4279,7 +4483,7 @@ end
 # Build the `_PVSchemeCell` for record `i`: width checks against the scheme
 # matrix row counts, the active-step value slice, and geometric validation.
 function _postview_scheme_cell(record,kind::Symbol,i::Int,tsel::Int,
-                               caller::AbstractString)
+                               caller::AbstractString;native_geometry::Bool=false)
     scheme=_postview_record_property(record,:scheme,i,caller)
     cv=_postview_scheme_matrix(scheme,:coefval,i,caller)
     ev=_postview_scheme_exponents(scheme,:expval,i,caller)
@@ -4326,7 +4530,7 @@ function _postview_scheme_cell(record,kind::Symbol,i::Int,tsel::Int,
     all(isfinite,V) || throw(ArgumentError(
         "$caller: record $i values must be finite"))
     cell=_PVSchemeCell(_POSTVIEW_SCHEME_KIND[kind],!has_geo,kind===:pyramid,
-                       cv,ev,cg,eg,C,V)
+                       cv,ev,cg,eg,C,V;native_geometry)
     _pv_scheme_validate(cell,i,caller)
     return cell
 end
