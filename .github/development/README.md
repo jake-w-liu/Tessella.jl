@@ -19,6 +19,23 @@ and external solver campaigns are opt-in.
 
 ## Current evidence
 
+### Geometry query dimension dispatch
+
+Geometry-value queries now compile the selected dimension's evaluator when it
+is consumed. Point queries do not traverse Curve/Surface CAD kernels during
+inference; native Curve evaluation retains its existing producer geometry and
+dispatches only after its dimension guard. Vector return types, input
+validation, discrete Point behavior and geometry arithmetic are retained.
+
+Final source passed ten native/discrete Point, Curve, derivative, Surface and
+invalid-input assertions on Julia 1.12.7 minimal compilation, exit 0. Julia
+1.13.3 normal `-O2` passed five Point-value/type/error checks, exit 0; the cold
+Point query took 0.052s/8.20MB including compilation. Logs:
+`C:/Users/User/Tessella-dimension-query-final-112-min-20261107.log` and
+`C:/Users/User/Tessella-point-value-final-1133-O2-20261107.log`, with durable exit
+files. Broader optimized discrete-node setup and Curve queries remain a
+separate startup investigation; no overall optimized-query claim is made.
+
 ### Point creation compiler boundary
 
 Point-comprehension inference no longer traverses session mutation machinery,
@@ -36,7 +53,8 @@ on Julia 1.12.7 minimal compilation (0.0085s/2.09MB) and Julia 1.13.3 normal
 `C:/Users/User/Tessella-point-startup-final-1133-O2-20261107.log` with matching
 durable `.exit` files. These are scoped cold compiler observations, not general
 meshing memory or performance claims. A separate broader optimized query check
-remains pending; an earlier superseded diagnostic was deliberately stopped
+subsequently passed six entity/coordinate checks, actual exit 0; its additional
+cold query compilation remains a measured follow-up area. An earlier superseded diagnostic was deliberately stopped
 after 297 CPU seconds, exit -1, without assertions.
 
 The sampled-Curve context regression also passed 44/44 on Julia 1.12.7 minimal

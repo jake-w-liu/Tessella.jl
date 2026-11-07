@@ -843,10 +843,18 @@ Gmsh's angle parametrization; `Spline`/`BSpline`/`Bezier`/`Nurbs` evaluate
 with Gmsh's `InterpolateCurve` ports.
 """
 function model_value(m::GeoModel,dim,tag,parametric_coordinates;
-                     old_ruled_surface::Bool=false)
+                     old_ruled_surface::Bool=false)::Vector{Float64}
     caller="model_value"
     dimension,entity_tag=_model_evaluation_entity(
         m,dim,tag,(0,1,2),caller)
+    # Compile the selected dimension's evaluator only when it is consumed.
+    # A Point query must not infer every Curve and Surface CAD kernel.
+    return Base.inferencebarrier(_model_value_evaluated)(m,Val(dimension),
+        entity_tag,parametric_coordinates,old_ruled_surface,caller)
+end
+
+function _model_value_evaluated(m,::Val{dimension},entity_tag,
+        parametric_coordinates,old_ruled_surface,caller) where {dimension}
     if dimension==0
         if haskey(m.discrete,(0,entity_tag))
             values=_model_evaluation_values(

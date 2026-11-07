@@ -185,8 +185,13 @@ end
 
 # Public built-in Curve queries share the actual producer geometry. Other
 # entities retain their existing surface/discrete/OCC evaluation dispatch.
-function _model_native_curve_evaluate(m::GeoModel,dim,tag,parameters,operation)
+function _model_native_curve_evaluate(m::GeoModel,dim,tag,parameters,operation)::Union{Nothing,Vector{Float64}}
     dim==1 || return nothing
+    return Base.inferencebarrier(_model_native_curve_evaluate_selected)(
+        m,dim,tag,parameters,operation)
+end
+
+function _model_native_curve_evaluate_selected(m,dim,tag,parameters,operation)
     caller="model_$(operation)"
     _,entity=_model_evaluation_entity(m,dim,tag,(1,),caller)
     adapter=_model_high_order_curve_geometry(m,entity,caller)
