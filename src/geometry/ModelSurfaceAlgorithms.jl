@@ -82,19 +82,23 @@ end
 # Upstream `Mesh.Algorithm=2` (AUTO) resolves per face: Delaunay on planes
 # and MeshAdapt on every non-planar class — verified on the Gmsh 4.15.2
 # binary, where Cylinder/Sphere/ruled Surface/BSpline faces all report
-# "Meshing surface N (<kind>, MeshAdapt)". No native MeshAdapt producer
-# exists, so the implemented Frontal-Delaunay construction serves the
-# off-plane admission instead of rejecting: it is the closest native
-# producer for upstream's curved-face outcome. On the planar PSLG path
-# `:ruled`/`:tric` faces mesh through the `:frontal` arm; on OCC-curved
-# faces the parametric kernel treats 5/6 identically.
+# "Meshing surface N (<kind>, MeshAdapt)". The native local-adaptation
+# mode splits long edges, collapses short edges and improves diagonals on
+# the same owned planar/parametric charts used by the metric producer.
+# Closed sphere/cone/torus charts keep the Frontal-Delaunay arm: their pole
+# or periodic pcurves collapse under the boundary-only local-adaptation seed,
+# so those charts are not yet valid preimages for the local operator.
 function _normal_surface_mesh_algorithm(m::GeoModel,t::Int,caller;metric::Bool=false)
     algorithm=_surface_mesh_algorithm(m,t)
-    algorithm==2 && (algorithm=_surface_type(m,t)==:plane ? 5 : 6)
-    algorithm in (metric ? (3,5,6,7) : (3,5,6)) || throw(ArgumentError(
+    if algorithm==2
+        kind=_surface_type(m,t)
+        algorithm=kind===:plane ? 5 :
+            kind in (:sphere,:cone,:torus) ? 6 : 1
+    end
+    algorithm in (metric ? (1,3,5,6,7) : (1,3,5,6)) || throw(ArgumentError(
         "$caller: mesh algorithm $algorithm on Surface[$t] is not " *
         "implemented by the ordinary native surface mesher; supported: " *
-        "2 (Auto), 3 (initial only), 5 (Delaunay), " *
+        "1 (MeshAdapt), 2 (Auto), 3 (initial only), 5 (Delaunay), " *
         "6 (Frontal-Delaunay)" *
         (metric ? ", 7 (metric-driven bisection)" : "")))
     return algorithm

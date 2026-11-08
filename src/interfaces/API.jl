@@ -9468,6 +9468,20 @@ function _view_data_owner(view::_SessionView)
     return view
 end
 
+# `Delete Empty Views` removes session views with no actual list, model or
+# string records. Options, physical times and interpolation matrices alone do
+# not make a view nonempty, matching the parsed `PosView` contract.
+function _view_data_empty(view::_SessionView)
+    owner=_view_data_owner(view)
+    any(>(0),values(owner.list_counts)) && return false
+    any(entries->!isempty(entries),values(owner.list_data)) && return false
+    isempty(owner.model_data) || return false
+    any(>(0),values(owner.list_string_counts)) && return false
+    any(entries->!isempty(entries),values(owner.list_strings)) && return false
+    any(entries->!isempty(entries),values(owner.list_string_coords)) && return false
+    return true
+end
+
 function _session_view_data(tag,caller::AbstractString)
     return _view_data_owner(_session_view(tag,caller))
 end

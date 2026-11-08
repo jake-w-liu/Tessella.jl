@@ -177,6 +177,7 @@ function _model_merge_prepare(path)
     options=copy(OPTIONS);diagnostics=_model_import_diagnostics(options)
     fields=_model_merge_fields()
     extension=lowercase(splitext(path)[2])
+    view_receipt=Ref{Any}(nothing)
     result=if extension==".msh"
         GeoExec._geo_stage_mesh_merge(path,model,seed;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[],
@@ -196,13 +197,13 @@ function _model_merge_prepare(path)
             "IO.read_xao/IO.read_brep expose the envelope census"))
     else
         _model_import_execute_geo(path,0,options,diagnostics;legacy=true,
-            initial_model=model,initial_mesh_context=seed,initial_fields=fields)
+            initial_model=model,initial_mesh_context=seed,initial_fields=fields,view_receipt)
     end
     final_authority=result.model.meshing.mesh_authority
     final_mesh=final_authority===nothing ? nothing : final_authority.mesh
     incoming=_model_merge_incoming_sections(complete,final_mesh,caller)
     plan=_model_import_prepare_result(result,path,options,diagnostics;
-        caller,detached_result=true,view_sections=incoming)
+        caller,detached_result=true,view_sections=incoming,geo_views=view_receipt[])
     slot=plan.slot;slot.name=result.model.name;slot.file_name=MODEL_FILE_NAME[]
     if result.params===nothing
         slot.fields=deepcopy(FIELD_SPECS[]);slot.background_field=BACKGROUND_FIELD[]

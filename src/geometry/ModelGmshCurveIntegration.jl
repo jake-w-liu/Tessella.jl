@@ -162,14 +162,7 @@ function _model_native_line_grade_params(m::GeoModel,curve::Int,
     # interval count is the common remnant — `_undershoot_metric_edges!`
     # intentionally tolerates it (uniform spacing is the unique solution),
     # so only a regraded count resolves it.
-    cert_fields=Tuple{Int,Any}[]
-    if aniso && inner isa AbstractAnisoField && !(inner isa _MetricScaledAniso)
-        for face in _model_curve_metric_faces(m,curve)
-            _surface_mesh_algorithm(m,face)==7 || continue
-            push!(cert_fields,(Int(face),
-                _metric_surface_algorithm_field(m,face,options,nothing,caller)))
-        end
-    end
+    cert_fields=_model_curve_certificate_fields(m,curve,options,caller)
     minimum=_model_minimum_curve_segments(m,curve,options,caller)
     force_odd=m.meshing.recombine_algo!=0 && m.meshing.recombine_all
     odd_nodes=m.meshing.recombine_algo!=0 && (m.meshing.recombine_all ||

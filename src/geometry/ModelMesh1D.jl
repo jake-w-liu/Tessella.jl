@@ -93,8 +93,31 @@ end
 
 function _model_curve_aniso_grading(m::GeoModel,curve::Integer)
     m.meshing.algorithm_2d==7 && return true
-    return any(face->_surface_mesh_algorithm(m,face)==7,
+    return any(face->_model_curve_metric_algorithm(m,face) in (1,7),
                _model_curve_metric_faces(m,curve))
+end
+
+function _model_curve_metric_algorithm(m,face)
+    algorithm=_surface_mesh_algorithm(m,face)
+    return algorithm==2 ? (_surface_type(m,face)===:plane ? 5 : 1) : algorithm
+end
+
+function _model_curve_certificate_fields(m,curve,options,caller)
+    fields=Tuple{Int,Any}[]
+    inner=options.inner_field
+    inner isa _MetricScaledAniso && return fields
+    for face in _model_curve_metric_faces(m,curve)
+        algorithm=_model_curve_metric_algorithm(m,face)
+        if algorithm==1
+            field=_MetricIsotropicSize(_ModelAlgorithmBackgroundSize(m,2,
+                Int(face),options,nothing,caller))
+            push!(fields,(Int(face),field))
+        elseif algorithm==7 && inner isa AbstractAnisoField
+            push!(fields,(Int(face),
+                _metric_surface_algorithm_field(m,face,options,nothing,caller)))
+        end
+    end
+    return fields
 end
 
 _model_native_random_seed(seed::Integer) = UInt32(mod(seed,Int64(1)<<32))
@@ -831,18 +854,11 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
     # under a progressively tightened grading metric while a remnant
     # persists — the same tightening the standalone producer applies, moved
     # upstream of emission where regrading is still legal.
-    cert_fields=Tuple{Int,Any}[]
+    cert_fields=_model_curve_certificate_fields(m,curve,options,caller)
     # A `_MetricScaledAniso` inner_field is the standalone producer's own
     # regrade in flight — it owns the tightening, and measuring the emitted
     # parameters against a cert built from the scaled field would scale the
     # bound up with the grading and never converge.
-    if aniso && inner isa AbstractAnisoField && !(inner isa _MetricScaledAniso)
-        for face in _model_curve_metric_faces(m,curve)
-            _surface_mesh_algorithm(m,face)==7 || continue
-            push!(cert_fields,(Int(face),
-                _metric_surface_algorithm_field(m,face,options,nothing,caller)))
-        end
-    end
     minimum=_model_minimum_curve_segments(m,curve,options,caller)
     endpoints=((0,a),(0,b))
     # Recombination odd-N forcing (upstream counts N = elements + 1):

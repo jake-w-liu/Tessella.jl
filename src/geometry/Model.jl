@@ -6610,6 +6610,7 @@ function _model_volume_embedding_inventory(
     # A Layers-extruded volume sweeps through its boundary products instead —
     # the ordinary classification needs them registered like an explicit shell.
     boundary_surfaces=if _implicit_volume_surface(m,volume) &&
+                         !_model_volume_uses_meshadapt(m,volume,caller) &&
                          _extrude_gate(m,3,volume)===nothing
         for surface in boundary_set
             nested_points,nested_curves=
@@ -7093,7 +7094,9 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;
         nothing
 
     explicit_geometry=(nonew!==nothing || isempty(m.volumes[volume]) ||
-        _implicit_volume_surface(m,volume)) ? nothing :
+        _model_volume_box_uses_meshadapt(m,volume,caller) ||
+        (_implicit_volume_surface(m,volume) &&
+         !_model_volume_uses_meshadapt(m,volume,caller))) ? nothing :
         _model_explicit_volume_geometry(m,volume,caller;_mesh_input,
             _boundary_regrade=false)
     if nonew===nothing
@@ -7610,6 +7613,10 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
             _return_surface_production,_geometry_points),NTuple{2,Int}[]
     end
     algorithm=_normal_surface_mesh_algorithm(m,t,caller;metric=true)
+    algorithm==1 && return _meshadapt_surface_algorithm_mesh(m,t,caller;
+        size_field,_mesh_input,_mesh1d_options,_mesh_node_high_water,
+        _mesh_element_high_water,_boundary_regrade),
+        get(m.embeds,(2,t),NTuple{2,Int}[])
     # Upstream's algorithm 7 (BAMG) selects the native metric-driven surface
     # construction: the conforming tensor-bisection producer, fed by the
     # selected tensor background field or the isotropic scalar-context metric.
@@ -9647,11 +9654,12 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         # selector, which `_model_occ_metric_surface_mesh` implements on the
         # face's own (u,v) chart.
         algorithm=_normal_surface_mesh_algorithm(m,t,caller;metric=true)
-        (size_field===nothing || algorithm==7) || throw(ArgumentError(
+        (size_field===nothing || algorithm in (1,7)) || throw(ArgumentError(
             "$caller: a background size field on curved Surface[$t] is not " *
             "implemented"))
-        if algorithm==7
-            production=_model_occ_metric_surface_mesh(m,t,caller;
+        if algorithm in (1,7)
+            producer=algorithm==1 ? _model_occ_meshadapt_surface_mesh : _model_occ_metric_surface_mesh
+            production=producer(m,t,caller;
                 size_field=size_field,_mesh_input=_mesh_input,
                 _mesh1d_options=options,
                 _mesh_node_high_water=_mesh_node_high_water,
@@ -10238,14 +10246,15 @@ function _model_volume_surface_mesh(m::GeoModel,surface::Int,
         # construction. The kernel is the supported native producer for the
         # Delaunay-family policies 3/5/6 — initial-only suppresses its
         # interior (u,v) lattice seeds below, matching upstream's
-        # boundary-vertices-only initial mesh — while AUTO resolves to
-        # MeshAdapt off-plane and 1/8/9/10/11 keep the loud
+        # boundary-vertices-only initial mesh. Algorithm 1 and off-plane
+        # AUTO use the local-adaptation chart; 8/9/10/11 keep the loud
         # not-implemented rejection. `metric=true` additionally admits
         # upstream's BAMG selector: `_model_occ_metric_surface_mesh` runs the
         # certified parametric refinement on the face's own (u,v) chart and
         # returns a production record, of which the PLC consumes the mesh.
         algorithm=_normal_surface_mesh_algorithm(m,surface,caller;metric=true)
-        algorithm==7 && return _model_occ_metric_surface_mesh(m,surface,
+        producer=algorithm==1 ? _model_occ_meshadapt_surface_mesh : _model_occ_metric_surface_mesh
+        algorithm in (1,7) && return producer(m,surface,
             caller;size_field=get(kwargs,:size_field,nothing),
             _mesh_input=get(kwargs,:_mesh_input,nothing),
             _mesh1d_options=get(kwargs,:_mesh1d_options,nothing),
@@ -10398,15 +10407,38 @@ function _model_explicit_volume_geometry(
             native_order=native_identity ? sortperm(native_nodes) : nothing)
 end
 
-# A volume carrying a native curved-solid encoding meshes through the analytic
-# tessellation even though its OCC boundary topology is materialized — the
-# planar explicit-shell path cannot represent Cylinder/Sphere/Cone faces. Box
-# volumes deliberately stay explicit: their faces are planar. Boolean results
+# A volume carrying a native curved-solid encoding normally meshes through the
+# analytic tessellation even though its OCC topology is materialized. MeshAdapt
+# consumes the actual adapted boundary products instead. Box volumes keep
+# their explicit planar PLC except for algorithm 1, whose analytic box surface
+# avoids the uncertified local-chart boundary transport. Boolean results
 # likewise keep their materialized boundary for queries but mesh through the
 # operand snapshot (`m.booleans`/`m.boolean_operands`).
 _implicit_volume_surface(m::GeoModel,t::Int) =
     haskey(m.cylinders,t) || haskey(m.spheres,t) || haskey(m.cones,t) ||
     haskey(m.booleans,t)
+
+function _model_volume_faces_use_meshadapt(m::GeoModel,t::Int,caller)
+    any(_model_volume_boundary_surfaces(m,t,caller;certify_shells=false)) do signed
+        face=abs(signed)
+        _normal_surface_mesh_algorithm(m,face,caller;metric=true)==1
+    end
+end
+
+function _model_volume_uses_meshadapt(m::GeoModel,t::Int,caller)
+    # A primitive Box keeps its analytic surface: all faces are planar, and
+    # its direct explicit-volume PLC is not certified for the local chart.
+    haskey(m.box_extents,t) && return false
+    _model_volume_faces_use_meshadapt(m,t,caller)
+end
+
+# A Box whose faces request algorithm 1 consumes the analytic `box_surface`
+# instead of the explicit planar PLC; the latter has no certified local-chart
+# boundary transport for an all-planar primitive. Other selectors keep the
+# established explicit box PLC and its pinned identity/projection contracts.
+_model_volume_box_uses_meshadapt(m::GeoModel,t::Int,caller)=
+    haskey(m.box_extents,t) && length(m.volumes[t])==1 &&
+    _model_volume_faces_use_meshadapt(m,t,caller)
 
 # Primitive factories retain their established deterministic geometry encoding.
 # This provenance is independent of ordinary explicitly assembled CAD PLCs;
@@ -10417,12 +10449,16 @@ function _model_factory_surface_encoding(m::GeoModel,t::Int)
 end
 
 function _model_factory_volume_encoding(m::GeoModel,t::Int)
+    _model_volume_uses_meshadapt(m,t,"factory volume encoding") && return false
     (haskey(m.box_extents,t) || _implicit_volume_surface(m,t)) && return true
     boundaries=_model_volume_boundary_surfaces(m,t,"factory volume encoding")
     return !isempty(boundaries) && all(surface->_model_factory_surface_encoding(m,abs(surface)),boundaries)
 end
 
 function _volume_surface(m::GeoModel,t::Int,caller::AbstractString="mesh_model_volume")
+    if _implicit_volume_surface(m,t) && _model_volume_uses_meshadapt(m,t,caller)
+        return _model_explicit_volume_geometry(m,t,caller).surface
+    end
     if haskey(m.box_extents,t) || _implicit_volume_surface(m,t)
         # Primitive factory volumes tessellate their boundary analytically
         # (box_surface/cylinder_surface/...), bypassing the per-face
@@ -10720,7 +10756,9 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
         end
     end
     explicit_geometry=(isempty(m.volumes[t]) ||
-        _implicit_volume_surface(m,t)) ? nothing :
+        _model_volume_box_uses_meshadapt(m,t,caller) ||
+        (_implicit_volume_surface(m,t) &&
+         !_model_volume_uses_meshadapt(m,t,caller))) ? nothing :
         _model_explicit_volume_geometry(m,t,caller;size_field=size_field,
                                        _mesh_input,_mesh1d_options=options,
                                        _boundary_regrade=_boundary_regrade)

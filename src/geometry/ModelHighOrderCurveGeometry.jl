@@ -194,11 +194,16 @@ end
 function _model_native_curve_evaluate_selected(m,dim,tag,parameters,operation)
     caller="model_$(operation)"
     _,entity=_model_evaluation_entity(m,dim,tag,(1,),caller)
-    adapter=_model_high_order_curve_geometry(m,entity,caller)
+    adapter=Base.inferencebarrier(_model_high_order_curve_geometry)(m,entity,caller)
     adapter===nothing && return nothing
     (adapter.kind in (:line,:arc,:spline) ||
         (adapter.kind===:occ_circle && hasproperty(adapter.geometry,:native_arithmetic))) || return nothing
     values=_model_evaluation_values(parameters,1,caller,"parametric coordinates")
+    return Base.inferencebarrier(_model_native_curve_evaluate_adapter)(
+        m,adapter,values,operation,caller)
+end
+
+function _model_native_curve_evaluate_adapter(m,adapter,values,operation,caller)
     output=Float64[]
     sizehint!(output,(operation===:curvature ? 1 : 3)*length(values))
     for parameter in values

@@ -2998,6 +2998,7 @@ function _build_postview_bvh(coords,tetrahedra,hexahedra,prisms,pyramids,
     primitive_hi=Matrix{Float64}(undef,3,ncells)
     centroid=Matrix{Float64}(undef,3,ncells)
     @inbounds for id in 1:ncells
+        compact_padding=nothing
         if id<=nfirst
             cells,j,arity=_postview_cell_indices(
                 tetrahedra,hexahedra,prisms,pyramids,
@@ -3009,6 +3010,22 @@ function _build_postview_bvh(coords,tetrahedra,hexahedra,prisms,pyramids,
                     lo=min(lo,value);hi=max(hi,value)
                 end
                 primitive_lo[k,id]=lo;primitive_hi[k,id]=hi
+            end
+            dx=primitive_hi[1,id]-primitive_lo[1,id]
+            dy=primitive_hi[2,id]-primitive_lo[2,id]
+            dz=primitive_hi[3,id]-primitive_lo[3,id]
+            diagonal=hypot(dx,dy,dz)
+            compact_padding=isfinite(diagonal) ? 0.01diagonal : floatmax(Float64)
+            kind=cells===tetrahedra ? UInt8(3) : cells===hexahedra ? UInt8(4) :
+                 cells===prisms ? UInt8(5) : cells===pyramids ? UInt8(6) :
+                 cells===triangles ? UInt8(2) : cells===quadrangles ? UInt8(7) :
+                 cells===lines ? UInt8(1) : UInt8(0)
+            if kind!=0
+                lower,upper=_pv_compact_certificate_bounds(coords,cells,j,kind,reference_tolerance)
+                for k in 1:3
+                    primitive_lo[k,id]=min(primitive_lo[k,id],lower[k])
+                    primitive_hi[k,id]=max(primitive_hi[k,id],upper[k])
+                end
             end
         else
             cell=scheme_cells[id-nfirst]
@@ -3033,7 +3050,8 @@ function _build_postview_bvh(coords,tetrahedra,hexahedra,prisms,pyramids,
         dy=primitive_hi[2,id]-primitive_lo[2,id]
         dz=primitive_hi[3,id]-primitive_lo[3,id]
         diagonal=hypot(dx,dy,dz)
-        padding=isfinite(diagonal) ? 0.01diagonal : floatmax(Float64)
+        padding=compact_padding===nothing ?
+            (isfinite(diagonal) ? 0.01diagonal : floatmax(Float64)) : compact_padding
         for k in 1:3
             lo=_postview_saturating_sub(primitive_lo[k,id],padding)
             hi=_postview_saturating_add(primitive_hi[k,id],padding)
@@ -3573,15 +3591,21 @@ function _postview_cell_value_big(field::PostViewField,kind::UInt8,j::Int,p,
         if abs(jxy)>abs(jxz) && abs(jxy)>abs(jyz)
             u=(q[1]*e2[2]-q[2]*e2[1])/jxy
             v=(q[2]*e1[1]-q[1]*e1[2])/jxy
+            omitted=3
         elseif abs(jxz)>abs(jyz)
             u=(q[1]*e2[3]-q[3]*e2[1])/jxz
             v=(q[3]*e1[1]-q[1]*e1[3])/jxz
+            omitted=2
         else
             u=(q[2]*e2[3]-q[3]*e2[2])/jyz
             v=(q[3]*e1[2]-q[2]*e1[3])/jyz
+            omitted=1
         end
         (u < -tolerance || v < -tolerance || u > (1+tolerance)-v) &&
             return false,0.0
+        distance=abs(q[omitted]-u*e1[omitted]-v*e2[omitted])
+        thickness=_metric_rational(_postview_triangle_thickness(field.coords,cells,j))
+        distance<=thickness || return false,0.0
         weights=(1-u-v,u,v)
     else
         a,b,c,d=points;e1=_sub3(b,a);e2=_sub3(c,a);e3=_sub3(d,a)
@@ -3683,6 +3707,29 @@ end
     return _postview_check_interpolant(value,"line",j)
 end
 
+# Compact triangles use a two-axis inverse. The omitted physical
+# coordinate still needs a geometric certificate: the native node-box
+# thickness remains the accepted distance from the lifted triangle plane,
+# including at reference coordinates extended by the configured tolerance.
+@inline function _postview_triangle_thickness(coords,cells,j)
+    spans=ntuple(3) do axis
+        a=coords[axis,cells[1,j]];b=coords[axis,cells[2,j]];c=coords[axis,cells[3,j]]
+        max(a,b,c)-min(a,b,c)
+    end
+    diagonal=hypot(spans...)
+    isfinite(diagonal) && return 0.01diagonal
+    # A hull span can overflow while one percent of the diagonal remains
+    # representable. Normalize only this rare case, scaling before restoring
+    # the length so the certificate does not become effectively unbounded.
+    scale=maximum(abs,coords[:,cells[:,j]])
+    normalized=ntuple(3) do axis
+        a=coords[axis,cells[1,j]];b=coords[axis,cells[2,j]];c=coords[axis,cells[3,j]]
+        lo=min(a,b,c);hi=max(a,b,c);span=hi-lo
+        isfinite(span) ? span/scale : hi/scale-lo/scale
+    end
+    return (0.01scale)*hypot(normalized...)
+end
+
 @inline function _postview_triangle_value(field::PostViewField,j::Int,p,
                                           combine::C=_postview_weighted_scalar_operator) where {C}
     cells=field.triangles
@@ -3718,16 +3765,19 @@ end
             return _postview_big_combine(field,UInt8(2),j,p,combine)
         u=(q[1]*e2[2]-q[2]*e2[1])/jxy
         v=(q[2]*e1[1]-q[1]*e1[2])/jxy
+        omitted=3
     elseif abs(jxz)>abs(jyz)
         abs(jxz)<=16eps(Float64)*(abs(e1[1]*e2[3])+abs(e1[3]*e2[1])) &&
             return _postview_big_combine(field,UInt8(2),j,p,combine)
         u=(q[1]*e2[3]-q[3]*e2[1])/jxz
         v=(q[3]*e1[1]-q[1]*e1[3])/jxz
+        omitted=2
     elseif !iszero(jyz)
         abs(jyz)<=16eps(Float64)*(abs(e1[2]*e2[3])+abs(e1[3]*e2[2])) &&
             return _postview_big_combine(field,UInt8(2),j,p,combine)
         u=(q[2]*e2[3]-q[3]*e2[2])/jyz
         v=(q[3]*e1[2]-q[2]*e1[3])/jyz
+        omitted=1
     else
         return _postview_big_combine(field,UInt8(2),j,p,combine)
     end
@@ -3739,6 +3789,14 @@ end
         return _postview_big_combine(field,UInt8(2),j,p,combine)
     (u < -tolerance || v < -tolerance || u > (1+tolerance)-v) &&
         return _postview_cell_miss(combine)
+    thickness=_postview_triangle_thickness(field.coords,cells,j)/scale
+    distance=abs(muladd(-u,e1[omitted],muladd(-v,e2[omitted],q[omitted])))
+    envelope=64eps(Float64)*(abs(q[omitted])+abs(u*e1[omitted])+
+                            abs(v*e2[omitted])+thickness)
+    if !isfinite(distance) || !isfinite(envelope) || abs(distance-thickness)<=envelope
+        return _postview_big_combine(field,UInt8(2),j,p,combine)
+    end
+    distance<=thickness || return _postview_cell_miss(combine)
     value=combine(field,cells,j,(1-u-v,u,v),3)
     return _postview_check_interpolant(value,"triangle",j)
 end
@@ -4270,15 +4328,71 @@ end
     return (_dot3(residual,scaled)/_dot3(scaled,scaled))/scale
 end
 
-function _pv_scheme_inverse_certificate(cell,u,v,w,query,base,scale)
+# An intrinsic tangent can be nonzero while the product forming its
+# artificial normal underflows. Reconstruct only that rare frame exactly
+# from the already evaluated Float64 tangents. These are the original
+# reference normal columns, not normalized replacements with wider tubes.
+@noinline function _pv_virtual_frame(cell,a,b)
+    dim=_pv_scheme_dim(cell.kind)
+    dim<3 && all(isfinite,a) && all(isfinite,b) || return nothing
+    ratio=cell.geometry===nothing ? 1.0 : cell.geometry.normal_ratio
+    isfinite(ratio) && ratio>0 || return nothing
+    R=Rational{BigInt};aa=map(R,a);bb=map(R,b)
+    normal=map(x->x*R(ratio),_postview_cross(aa,bb))
+    any(!iszero,normal) || return nothing
+    return aa,bb,normal
+end
+
+@inline _pv_scheme_nonsingular(cell,a,b,c)=
+    _pv_frame_nonsingular(a,b,c) || _pv_virtual_frame(cell,a,b)!==nothing
+
+@noinline function _pv_virtual_step(cell,a,b,residual)
+    frame=_pv_virtual_frame(cell,a,b)
+    frame===nothing && return nothing
+    aa,bb,_=frame;R=Rational{BigInt};rr=map(R,residual)
+    g11=_dot3(aa,aa);r1=_dot3(aa,rr)
+    corrections=if _pv_scheme_dim(cell.kind)==1
+        (r1/g11,R(0),R(0))
+    else
+        g12=_dot3(aa,bb);g22=_dot3(bb,bb);r2=_dot3(bb,rr)
+        determinant=g11*g22-g12*g12
+        iszero(determinant) && return nothing
+        ((g22*r1-g12*r2)/determinant,(g11*r2-g12*r1)/determinant,R(0))
+    end
+    # Damping an oversized intrinsic Newton correction preserves its descent
+    # direction and avoids overflowing Float64 before line search can run.
+    factor=max(R(1),maximum(abs,corrections)/2)
+    step=map(x->Float64(x/factor),corrections)
+    return all(isfinite,step) ? step : nothing
+end
+
+@noinline function _pv_virtual_projection(cell,a,b,residual)
+    frame=_pv_virtual_frame(cell,a,b)
+    frame===nothing && return nothing
+    _,bb,normal=frame;R=Rational{BigInt};rr=map(R,residual)
+    v=_pv_scheme_dim(cell.kind)==1 ? _dot3(rr,bb)/_dot3(bb,bb) : R(0)
+    w=_dot3(rr,normal)/_dot3(normal,normal)
+    remaining=ntuple(i->rr[i]-v*bb[i]-w*normal[i],3)
+    result=(Float64(v),Float64(w),map(Float64,remaining))
+    # Line search needs the intrinsic residual even when an intermediate
+    # normal coordinate exceeds Float64. The final certificate separately
+    # requires finite normal coordinates within the reference domain.
+    return all(isfinite,result[3]) ? result : nothing
+end
+
+function _pv_scheme_inverse_certificate(cell,u,v,w,query,base,scale;precise=false)
     dim=_pv_scheme_dim(cell.kind)
     mapped=_pv_scheme_map(cell,u,v,w,base,scale)
     all(isfinite,mapped) || return nothing
     residual=_sub3(query,mapped)
     du,dv,dw=_pv_scheme_jacobian(cell,u,v,w,base,scale)
-    all(isfinite,du) && all(isfinite,dv) && all(isfinite,dw) || return nothing
-    _pv_frame_nonsingular(du,dv,dw) || return nothing
-    if dim==1
+    usable=_pv_frame_nonsingular(du,dv,dw)
+    if !usable
+        projection=_pv_virtual_projection(cell,du,dv,residual)
+        projection===nothing && return nothing
+        normal_v,w,residual=projection
+        dim==1 && (v=normal_v)
+    elseif dim==1
         v=_pv_normal_coordinate(residual,dv)
         w=_pv_normal_coordinate(residual,dw)
         residual=(muladd(-v,dv[1],muladd(-w,dw[1],residual[1])),
@@ -4294,14 +4408,20 @@ function _pv_scheme_inverse_certificate(cell,u,v,w,query,base,scale)
     # Certify the actual normalized map after removing only the artificial
     # normal directions. Their original reference-space bounds still apply
     # in `_pv_scheme_inside`; an off-surface tolerance probe remains legal.
-    tolerance=max(1e-10,256eps(Float64)*max(1.0,abs(query[1]),abs(query[2]),abs(query[3])))
+    # `residual` is reassigned during normal projection. An anonymous
+    # ntuple closure would box it and widen the ordinary inverse path.
+    intrinsic_query=precise ? (mapped[1]+residual[1],mapped[2]+residual[2],
+                              mapped[3]+residual[3]) : query
+    tolerance=precise ? max(nextfloat(0.0),64eps(Float64)*max(hypot(intrinsic_query...),hypot(mapped...))) :
+        max(1e-10,256eps(Float64)*max(1.0,abs(query[1]),abs(query[2]),abs(query[3])))
     hypot(residual...)<=tolerance || return nothing
-    return (u,v,w)
+    return (u::Float64,v::Float64,w::Float64)
 end
 
 function _pv_scheme_inverse(cell,query,base,scale)
     dim=_pv_scheme_dim(cell.kind)
     u=0.0;v=0.0;w=0.0
+    precise=false
     for _ in 1:64
         mapped=_pv_scheme_map(cell,u,v,w,base,scale)
         all(isfinite,mapped) || return nothing
@@ -4310,7 +4430,16 @@ function _pv_scheme_inverse(cell,query,base,scale)
         isfinite(residual_norm) || return nothing
         du,dv,dw=_pv_scheme_jacobian(cell,u,v,w,base,scale)
         step=_pv_frame_step(du,dv,dw,residual,dim)
+        if step===nothing && dim<3
+            step=_pv_virtual_step(cell,du,dv,residual)
+            precise=true
+        end
         step===nothing && return nothing
+        if precise
+            projection=_pv_virtual_projection(cell,du,dv,residual)
+            projection===nothing && return nothing
+            residual_norm=hypot(projection[3]...)
+        end
         delta_u,delta_v,delta_w=step
         # A tiny backtracked step cannot establish convergence. Require the
         # full Newton correction to be small, then verify the actual map.
@@ -4318,14 +4447,14 @@ function _pv_scheme_inverse(cell,query,base,scale)
             un=u+delta_u;vn=v+delta_v;wn=w+delta_w
             if all(isfinite,(un,vn,wn))
                 certified=try
-                    _pv_scheme_inverse_certificate(cell,un,vn,wn,query,base,scale)
+                    _pv_scheme_inverse_certificate(cell,un,vn,wn,query,base,scale;precise)
                 catch error
                     (error isa DomainError || error isa OverflowError) || rethrow()
                     nothing
                 end
                 certified===nothing || return certified
             end
-            certified=_pv_scheme_inverse_certificate(cell,u,v,w,query,base,scale)
+            certified=_pv_scheme_inverse_certificate(cell,u,v,w,query,base,scale;precise)
             certified===nothing || return certified
         end
         motion=(muladd(du[1],delta_u,muladd(dv[1],delta_v,dw[1]*delta_w)),
@@ -4334,7 +4463,7 @@ function _pv_scheme_inverse(cell,query,base,scale)
         ratio=hypot(motion...)/residual_norm
         slope=isfinite(ratio) ? min(1.0,ratio)^2 : 1.0
         alpha=1.0;advanced=false
-        for _ in 1:24
+        for _ in 1:(precise ? 1075 : 24)
             un=u+alpha*delta_u;vn=v+alpha*delta_v;wn=w+alpha*delta_w
             if all(isfinite,(un,vn,wn))
                 trial=try
@@ -4344,7 +4473,14 @@ function _pv_scheme_inverse(cell,query,base,scale)
                     (NaN,NaN,NaN)
                 end
                 if all(isfinite,trial)
-                    trial_norm=hypot(_sub3(query,trial)...)
+                    trial_residual=_sub3(query,trial)
+                    trial_norm=if precise
+                        tangent,second,_=_pv_scheme_jacobian(cell,un,vn,wn,base,scale)
+                        projection=_pv_virtual_projection(cell,tangent,second,trial_residual)
+                        projection===nothing ? Inf : hypot(projection[3]...)
+                    else
+                        hypot(trial_residual...)
+                    end
                     # Armijo decrease resolves attracting Newton cycles;
                     # scale by intrinsic motion so permitted normal residual
                     # does not demand an impossible relative reduction.
@@ -4435,7 +4571,7 @@ function _pv_scheme_validate(cell::_PVSchemeCell,i::Int,caller::AbstractString)
     for j in axes(nodes,2)
         du,dv,dw=_pv_scheme_jacobian(cell,nodes[1,j],nodes[2,j],nodes[3,j],
                                    base,scale)
-        _pv_frame_nonsingular(du,dv,dw) || throw(ArgumentError(
+        _pv_scheme_nonsingular(cell,du,dv,dw) || throw(ArgumentError(
             "$caller: scheme element $i has a singular geometry map at " *
             "reference node $j"))
     end

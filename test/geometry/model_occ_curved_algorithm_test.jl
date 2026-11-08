@@ -6,14 +6,14 @@
 # primitive factories' analytic boundary (implicit volumes) may silently
 # substitute their own construction for a selector naming different
 # machinery. The Delaunay-family policies 3/5/6 are admitted; AUTO resolves
-# per face to Delaunay on planes and to the native Frontal-Delaunay
-# construction off-plane (upstream's AUTO picks MeshAdapt — no native
-# producer exists — so Frontal serves the admission), and every selector
+# per face to Delaunay on planes and local MeshAdapt on open curved charts,
+# while closed sphere/cone/torus charts keep Frontal-Delaunay. Every selector
 # without a native producer keeps the loud not-implemented rejection.
 #
 # Before the admission was wired, every `Mesh.Algorithm` value produced the
 # identical mesh on a cylinder volume — a silent degradation.
 
+module ModelOCCCurvedAlgorithmChecks
 using Test
 using Tessella
 const M=Tessella.Model
@@ -39,9 +39,9 @@ _error(f)=try;f();nothing catch err;err end
 
 @testset "explicit OCC sector: curved boundary honors Mesh.Algorithm" begin
     # The sector's lateral is a `:cylinder` face meshed by the parametric
-    # OCC kernel; its four caps are ordinary planes. 5 and 6 fill a valid
-    # solid through the Delaunay-family admission.
-    for algorithm in (5,6)
+    # OCC kernel; its four caps are ordinary planes. 1 runs local adaptation,
+    # while 5 and 6 fill a valid solid through the Delaunay-family admission.
+    for algorithm in (1,5,6)
         mesh=M.mesh_model_volume(_sector(algorithm),1)
         @test MT.validate(mesh).ok
         @test MT.ntets(mesh)>0
@@ -59,17 +59,16 @@ _error(f)=try;f();nothing catch err;err end
     @test MT.nnodes(initial)<MT.nnodes(refined)
 
     # AUTO resolves per face like upstream: plane caps take Delaunay and
-    # the curved lateral takes the native Frontal-Delaunay arm (the
-    # stand-in for upstream's unimplemented MeshAdapt) — the whole solid
+    # the curved lateral takes local MeshAdapt — the whole solid
     # fills instead of rejecting.
     auto=M.mesh_model_volume(_sector(2),1)
     @test MT.validate(auto).ok
     @test MT.ntets(auto)>0
 
     # Selectors without a native producer keep the loud rejection — the
-    # lateral rejects 1, 8, 9, 10 and 11 even though the caps would accept
+    # lateral rejects 8, 9, 10 and 11 even though the caps would accept
     # several of them.
-    for algorithm in (1,8,9,10,11)
+    for algorithm in (8,9,10,11)
         err=_error(()->M.mesh_model_volume(_sector(algorithm),1))
         @test err isa ArgumentError
         @test occursin("not implemented",sprint(showerror,err))
@@ -93,18 +92,20 @@ _error(f)=try;f();nothing catch err;err end
     @test occursin("Surface[$lateral]",sprint(showerror,err))
 end
 
-@testset "implicit primitive volumes admit the Delaunay family only" begin
+@testset "primitive volumes route MeshAdapt through their actual faces" begin
     # The canned `cylinder_surface` boundary is the native analytic product
-    # serving the admitted family — the surface is the deterministic initial
-    # boundary, so AUTO and 3/5/6 all fill the solid — while every selector that
+    # serving 3/5/6. MeshAdapt and non-planar AUTO consume generated faces;
+    # every selector that
     # names machinery without a native producer now rejects loudly instead
     # of silently returning the same tessellation.
-    for algorithm in (2,3,5,6)
+    # AUTO on this cylinder resolves to the same algorithm-1 producer; the
+    # dedicated AUTO checks below and in the sector testset cover that route.
+    for algorithm in (1,3,5,6)
         mesh=M.mesh_model_volume(_primitive_cylinder(algorithm),1)
         @test MT.validate(mesh).ok
         @test MT.ntets(mesh)>0
     end
-    for algorithm in (1,7,8,9,10,11)
+    for algorithm in (7,8,9,10,11)
         err=_error(()->M.mesh_model_volume(_primitive_cylinder(algorithm),1))
         @test err isa ArgumentError
         @test occursin("not implemented",sprint(showerror,err))
@@ -118,18 +119,33 @@ end
     @test occursin("Surface[$cap]",sprint(showerror,err))
 
     # AUTO still resolves per face: an all-plane primitive box takes the
-    # Delaunay branch, and a sphere's curved face takes Frontal-Delaunay —
-    # the native stand-in for upstream's unimplemented MeshAdapt.
+    # Delaunay branch, while closed sphere/cone/torus charts keep the
+    # Frontal-Delaunay arm (their pole/periodic rows are not a valid
+    # local-adaptation preimage).
     box=GeoModel()
     add_box!(box,0.0,0.0,0.0,1.0,1.0,1.0;tag=1)
     box.meshing.algorithm_2d=2
-    mesh=M.mesh_model_volume(box,1)
-    @test MT.validate(mesh).ok && MT.ntets(mesh)>0
+    box_face=first(sort!(collect(keys(box.surfaces))))
+    mesh=M.mesh_model_surface(box,box_face)
+    @test MT.validate(mesh).ok && MT.ntris(mesh)>0
+    # An all-plane primitive Box consumes its analytic box surface under
+    # algorithm 1 instead of the uncertified explicit local-chart PLC.
+    local_box=GeoModel()
+    add_box!(local_box,0.0,0.0,0.0,1.0,1.0,1.0;tag=1)
+    local_box.meshing.algorithm_2d=1
+    local_mesh=M.mesh_model_volume(local_box,1)
+    @test MT.validate(local_mesh).ok && MT.ntets(local_mesh)>0
     sphere=GeoModel()
     add_sphere!(sphere,0.0,0.0,0.0,1.0;tag=1)
     sphere.meshing.algorithm_2d=2
     smesh=M.mesh_model_volume(sphere,1)
     @test MT.validate(smesh).ok && MT.ntets(smesh)>0
+    explicit=GeoModel()
+    add_sphere!(explicit,0.0,0.0,0.0,1.0;tag=1)
+    explicit.meshing.algorithm_2d=1
+    err=_error(()->M.mesh_model_volume(explicit,1))
+    @test err isa ArgumentError
+    @test occursin("not implemented",sprint(showerror,err))
 end
 
 @testset "Mesh.Algorithm3D ordinary-volume admission" begin
@@ -155,4 +171,5 @@ end
         @test err isa ArgumentError
         @test occursin("not implemented",sprint(showerror,err))
     end
+end
 end

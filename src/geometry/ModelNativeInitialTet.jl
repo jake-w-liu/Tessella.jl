@@ -1277,7 +1277,7 @@ _recombine3d_surface_physical(m::GeoModel,s::Int32)=
 # recombiner's boundary halves? Try both diagonals; a quad is consumed only
 # when both half triangles of one split appear in `halves_set`. Returns the
 # matched half pair, `nothing` when the quad survives.
-function _recombine3d_fold_pair(conn::NTuple{4,Int32},halves_set)
+function _recombine3d_quad_halves_pair(conn::NTuple{4,Int32},halves_set)
     for pair in (((conn[1],conn[2],conn[3]),(conn[3],conn[4],conn[1])),
                  ((conn[1],conn[2],conn[4]),(conn[4],conn[2],conn[3])))
         h1=_sorted_face3(pair[1]...);h2=_sorted_face3(pair[2]...)
@@ -1319,7 +1319,7 @@ function _model_volume_recombine3d_splice!(m,volume,res,wb,births,caller)
                _sorted_face3(conn[1],conn[2],conn[3]) in halves_set
                 push!(dead,Tuple(sort!(copy(conn))));dead_halves+=1;continue
             elseif msh==3 && length(conn)==4
-                _recombine3d_fold_pair(ntuple(i->conn[i],4),halves_set)===nothing ||
+                _recombine3d_quad_halves_pair(ntuple(i->conn[i],4),halves_set)===nothing ||
                     (push!(dead,Tuple(sort!(copy(conn))));dead_halves+=2;continue)
             end
             push!(kept,(msh,conn,label))
@@ -1336,7 +1336,7 @@ function _model_volume_recombine3d_splice!(m,volume,res,wb,births,caller)
                 (e[1]==2 && length(e[2])==3 &&
                  _sorted_face3(e[2][1],e[2][2],e[2][3]) in halves_set) ||
                 (e[1]==3 && length(e[2])==4 &&
-                 _recombine3d_fold_pair(ntuple(i->e[2][i],4),halves_set)!==nothing))
+                 _recombine3d_quad_halves_pair(ntuple(i->e[2][i],4),halves_set)!==nothing))
         added===nothing || filter!(e->!(Tuple(sort!(copy(e[2]))) in pre_added),
             added)
         repl=get!(wb.replaced,(2,Int32(s)),Set{Tuple}())

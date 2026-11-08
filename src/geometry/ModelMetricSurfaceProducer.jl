@@ -13,6 +13,29 @@ using ..Mesh3D: _EHeap, _hpush!, _hpop!
 @inline _metric_uv_signed(pa,pb,pc)=
     ((pb[1]-pa[1])*(pc[2]-pa[2])-(pb[2]-pa[2])*(pc[1]-pa[1]))/2
 
+function _meshadapt_vertex_sizes(m,tag,options,coordinates,cells,owners)
+    extend=_resolved_extend_from_boundary(m,2,tag)
+    (extend>0 || extend==-2) || return nothing
+    sizes=fill(Inf,length(coordinates))
+    for cell in cells,pair in _metric_surface_edges(cell)
+        a,b=pair;pa,pb=coordinates[a],coordinates[b]
+        distance=hypot((pb[axis]-pa[axis] for axis in 1:3)...)
+        sizes[a]=min(sizes[a],distance);sizes[b]=min(sizes[b],distance)
+    end
+    if options.from_points
+        for row in eachindex(owners)
+            owner=owners[row]
+            owner[1]==0 || continue
+            h=_model_vertex_lc(m,Int(owner[2]))
+            h=min(max(min(h,options.ctx_lc),options.lc_min),options.lc_max)*options.lc_factor
+            h>0 && (sizes[row]=min(sizes[row],h))
+        end
+    end
+    all(size->isfinite(size) && size>0,sizes) || throw(ArgumentError(
+        "MeshAdapt: initial vertex sizes must be finite and positive"))
+    return sizes
+end
+
 function _metric_surface_incidence(cells,caller)
     incidence=Dict{NTuple{2,Int32},Vector{Int}}()
     for (column,cell) in enumerate(cells),edge in _metric_surface_edges(cell)
@@ -261,16 +284,27 @@ end
 # and the retained boundary — and is refined in place; the return holds the
 # surviving rows and the consumed label high waters.
 function _metric_surface_refine_core(tag,field,target,node_limit,
-        triangle_limit,caller,chart,data)
+        triangle_limit,caller,chart,data;local_adaptation::Bool=false)
     coordinates=data.coordinates;parameters=data.parameters;cells=data.cells
     incidence=data.incidence;boundary=data.boundary
     constraints=hasproperty(data,:constraints) ? data.constraints : nothing
     protected=constraints===nothing || isempty(constraints) ? boundary : union(boundary,constraints)
+    local_sizes=local_adaptation && hasproperty(data,:local_sizes) ? data.local_sizes : nothing
     numbers=data.numbers;owners=data.owners;node_parameters=data.node_parameters
     retained=data.retained;birth_rows=data.birth_rows;labels=data.labels
     node_max=data.node_max;cell_max=data.cell_max
-    score(edge)=metric_edge_length(field,coordinates[edge[1]],
-        coordinates[edge[2]];entity=(2,tag))
+    function score(edge)
+        value=metric_edge_length(field,coordinates[edge[1]],
+            coordinates[edge[2]];entity=(2,tag))
+        if local_sizes!==nothing && !(minmax(edge...) in protected)
+            a,b=edge;pa,pb=coordinates[a],coordinates[b]
+            distance=hypot((pb[axis]-pa[axis] for axis in 1:3)...)
+            # A split transports the edge's linearly interpolated scalar
+            # size. Boundary extension remains attached to actual rows.
+            value=max(value,distance/min(local_sizes[a],local_sizes[b]))
+        end
+        return value
+    end
     alive=trues(length(cells));live_count=length(cells)
     node_alive=trues(length(coordinates))
     heap=_EHeap();queued=Set{NTuple{2,Int32}}()
@@ -603,7 +637,7 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
         # cavity commit above carries the same certificates while building
         # the connectivity the metric actually prescribes. The per-edge
         # budget keeps an unresolvable edge on the certified split path.
-        if get(steiner_budget,edge,0)<2
+        if !local_adaptation && get(steiner_budget,edge,0)<2
             steiner_budget[edge]=get(steiner_budget,edge,0)+1
             if _metric_steiner_attempt(sides,hits)
                 # The insertion point can land outside this edge's star — the
@@ -1113,6 +1147,8 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
                         next_node=_metric_surface_birth(node_max,1,caller,
                                                       "node")
                         push!(coordinates,cxyz);push!(parameters,cuv)
+                        local_sizes===nothing || push!(local_sizes,
+                            minimum(local_sizes[vertex] for column in cavity for vertex in cells[column]))
                         positions[cxyz]=row
                         push!(numbers,next_node)
                         push!(owners,(2,Int32(tag)))
@@ -1317,6 +1353,7 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
         _metric_preserves_constraints(cells,hits,children,constraints) ||
             throw(ErrorException("$caller: metric split changes an embedded Curve cell"))
         push!(coordinates,splitpoint);push!(parameters,split_uv);positions[splitpoint]=row
+        local_sizes===nothing || push!(local_sizes,(local_sizes[a]+local_sizes[b])/2)
         push!(numbers,next_node);push!(owners,(2,Int32(tag)));push!(node_parameters,collect(split_uv))
         push!(retained,false);push!(birth_rows,row);push!(node_alive,true);node_max=next_node
         for column in hits
@@ -1393,8 +1430,71 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
             push!(get!(()->Int[],vertcells,vertex),length(cells))
         end
     end
-    # Certified 2-2 diagonal flip for the post-pass: the new diagonal must be
-    # strictly shorter under the metric (so the sweep cannot cycle), the
+    function cell_quality(cell)
+        a,b,c=(coordinates[row] for row in cell)
+        ab=ntuple(axis->b[axis]-a[axis],3)
+        ac=ntuple(axis->c[axis]-a[axis],3)
+        scale=max(maximum(abs,ab),maximum(abs,ac))
+        isfinite(scale) && scale>0 || return 0.0
+        u=ntuple(axis->ab[axis]/scale,3);v=ntuple(axis->ac[axis]/scale,3)
+        cross=(u[2]*v[3]-u[3]*v[2],u[3]*v[1]-u[1]*v[3],u[1]*v[2]-u[2]*v[1])
+        denominator=sum(axis->u[axis]^2+v[axis]^2+(u[axis]-v[axis])^2,1:3)
+        return 2sqrt(3.0)*hypot(cross...)/denominator
+    end
+    # MeshAdapt collapses an actual short edge onto one surviving endpoint.
+    # The link condition and signed chart areas certify the disk topology;
+    # lower identities and their literal edge incidence remain protected.
+    function collapse_edge(edge)
+        score(edge)<target/2 || return false
+        hits=get(incidence,edge,Int[])
+        length(hits)==2 || return false
+        for (removed,kept) in (edge,reverse(edge))
+            node_alive[removed] && node_alive[kept] && !retained[removed] || continue
+            star=starcells_of(removed)
+            length(star)>=3 || continue
+            any(column->any(pair->removed in pair && minmax(pair...) in protected,
+                _metric_surface_edges(cells[column])),star) && continue
+            neighbours=Set(vertex for column in star for vertex in cells[column]
+                           if vertex!=removed)
+            other_neighbours=Set(vertex for column in starcells_of(kept)
+                for vertex in cells[column] if vertex!=kept)
+            common=intersect(neighbours,other_neighbours)
+            opposites=Set(vertex for column in hits for vertex in cells[column]
+                          if !(vertex in edge))
+            common==opposites || continue
+            children=NTuple{3,Int32}[]
+            valid=true
+            for column in star
+                cell=cells[column]
+                kept in cell && continue
+                child=ntuple(i->cell[i]==removed ? kept : cell[i],3)
+                old_winding=orient2((parameters[row] for row in cell)...)
+                new_winding=orient2((parameters[row] for row in child)...)
+                if old_winding==0 || old_winding!=new_winding ||
+                        !(triangle_area((coordinates[row] for row in child)...)>0) ||
+                        any(new_edge->score(new_edge)>target,_metric_surface_edges(child))
+                    valid=false;break
+                end
+                push!(children,child)
+            end
+            valid && length(children)==length(star)-2 || continue
+            minimum(cell_quality,children)>=minimum(column->cell_quality(cells[column]),star) || continue
+            old_area=sum(column->_metric_uv_area((parameters[row] for row in cells[column])...),star)
+            new_area=sum(child->_metric_uv_area((parameters[row] for row in child)...),children)
+            isapprox(old_area,new_area;rtol=1e-9,atol=1024eps(Float64)*old_area) || continue
+            _metric_preserves_constraints(cells,star,children,constraints) || continue
+            _metric_surface_birth(cell_max,length(children),caller,"cell")
+            for column in star;drop_cell(column);end
+            for child in children;add_cell(child);end
+            node_alive[removed]=false
+            push!(retired,coordinates[removed]);delete!(positions,coordinates[removed])
+            live_count-=2
+            return true
+        end
+        return false
+    end
+    # Certified 2-2 diagonal flip for the post-pass: MeshAdapt improves the
+    # minimum triangle quality; the metric mode shortens the diagonal. The
     # quad must be strictly convex in parameter space, the diagonal must not
     # already exist, and both children keep the winding and a positive
     # physical area. A convex quad contains no other live vertex, so the
@@ -1413,7 +1513,14 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
         f2,l2,o2=cell2[slot2],cell2[mod1(slot2+1,3)],cell2[mod1(slot2+2,3)]
         (f2,l2)==(l1,f1) && o1!=o2 || return false
         old=score((f1,l1));new=score((o1,o2))
-        (isfinite(new) && new<=target && new<old*(1-1e-9)) || return false
+        isfinite(new) && new<=target || return false
+        if local_adaptation
+            before=min(cell_quality(cell1),cell_quality(cell2))
+            after=min(cell_quality((f1,o2,o1)),cell_quality((o2,l1,o1)))
+            after>before*(1+1e-9) || return false
+        else
+            new<old*(1-1e-9) || return false
+        end
         haskey(incidence,minmax(o1,o2)) && return false
         w1=orient2(parameters[f1],parameters[l1],parameters[o1])
         w2=orient2(parameters[f2],parameters[l2],parameters[o2])
@@ -1578,6 +1685,14 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
     for _ in 1:64
         moved=false
         for edge in sort!(collect(keys(incidence)));metric_flip(edge) && (moved=true);end
+        if local_adaptation
+            short_edges=sort!(collect(keys(incidence));by=edge->(score(edge),edge))
+            for edge in short_edges
+                haskey(incidence,edge) && collapse_edge(edge) && (moved=true)
+            end
+            moved || break
+            continue
+        end
         verts=Int32[vertex for vertex in eachindex(node_alive) if
                     node_alive[vertex] && !retained[vertex]]
         shortest=Dict{Int32,Float64}()
@@ -1765,7 +1880,7 @@ end
 # ── planar front ─────────────────────────────────────────────────────────────
 function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
                                 input,options,node_high_water,element_high_water,caller;
-                                allow_regrade::Bool=true)
+                                allow_regrade::Bool=true,local_adaptation::Bool=false)
     # Boundary cells that are lazily graded while building the lower input
     # must satisfy this producer's strict `metric_edge_length` certificate
     # against `field`. The curve graders only see `options.inner_field` and
@@ -1777,7 +1892,7 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
     # caller's resolution.
     options=_mesh1d_options_with_inner_field(options,field)
     saved_algorithm=m.meshing.algorithm_2d
-    m.meshing.algorithm_2d=7
+    m.meshing.algorithm_2d=local_adaptation ? 1 : 7
     local authority, limit
     try
         # A boundary Curve may already carry parameters graded under a
@@ -1863,6 +1978,8 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
         "$caller: retained embedded Curve exceeds max_metric_edge; provide finer lower Curve cells"))
     data=(coordinates=coordinates,parameters=parameters,cells=cells,
         incidence=incidence,boundary=boundary,constraints=constraints,
+        local_sizes=local_adaptation ? _meshadapt_vertex_sizes(m,tag,options,
+            coordinates,cells,initial.node_owners) : nothing,
         numbers=copy(initial.node_tags),owners=copy(initial.node_owners),
         node_parameters=deepcopy(initial.node_parameters),
         retained=copy(initial.retained_nodes),
@@ -1871,7 +1988,7 @@ function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
         node_max=initial.node_high_water,cell_max=initial.element_high_water)
     state=_metric_surface_refine_core(tag,cert_field,target,node_limit,
         triangle_limit,caller,_metric_surface_planar_chart(frame,cert_field,tag),
-        data)
+        data;local_adaptation)
     live=state.live;live_nodes=state.live_nodes;node_alive=state.node_alive
     node_max=state.node_max;cell_max=state.cell_max
     numbers=data.numbers;owners=data.owners
@@ -2038,19 +2155,19 @@ end
 # all live on the welded world triangulation.
 function _occ_metric_surface_refine(m,tag,field,target,node_limit,
         triangle_limit,input,options,node_high_water,element_high_water,caller;
-        allow_regrade::Bool=true)
+        allow_regrade::Bool=true,local_adaptation::Bool=false)
     sg=get(m.surface_geometry,tag,nothing)
     sg===nothing && throw(ArgumentError(
         "$caller: Surface[$tag] has no parametric OCC record"))
     options=_mesh1d_options_with_inner_field(options,field)
     saved_algorithm=m.meshing.algorithm_2d
-    m.meshing.algorithm_2d=7
+    m.meshing.algorithm_2d=local_adaptation ? 1 : 7
     local authority,limit,unwrapped
     try
         authority,limit=_metric_surface_boundary_grade!(m,tag,field,target,
             options,input,node_high_water,caller,allow_regrade)
         _,_,_,unwrapped=_model_occ_curved_surface_mesh_tracked(
-            m,tag,caller;_mesh1d_options=options)
+            m,tag,caller;_mesh1d_options=options,initial_only=local_adaptation)
     finally
         m.meshing.algorithm_2d=saved_algorithm
     end
@@ -2145,9 +2262,11 @@ function _occ_metric_surface_refine(m,tag,field,target,node_limit,
         triangle_limit,caller,_metric_occ_chart(sg,field,tag),
         (coordinates=coordinates,parameters=parameters,cells=cells,
          incidence=incidence,boundary=boundary,
+         local_sizes=local_adaptation ? _meshadapt_vertex_sizes(m,tag,options,
+             coordinates,cells,owners) : nothing,
          numbers=numbers,owners=owners,node_parameters=node_parameters,
          retained=retained,birth_rows=Int32.(1:nrows),
-         labels=labels,node_max=next,cell_max=cell_max))
+         labels=labels,node_max=next,cell_max=cell_max);local_adaptation)
     live=state.live;live_nodes=state.live_nodes
     node_max=state.node_max;cell_max=state.cell_max
     # Weld the refined sheet back onto bitwise-equal world rows — the tracked
@@ -2291,6 +2410,27 @@ function _model_occ_metric_surface_mesh(m::GeoModel,tag::Int,
         allow_regrade=_boundary_regrade)
 end
 
+function _model_occ_meshadapt_surface_mesh(m::GeoModel,tag::Int,
+        caller::AbstractString;size_field=nothing,_mesh_input=nothing,
+        _mesh1d_options=nothing,_mesh_node_high_water=nothing,
+        _mesh_element_high_water=UInt64(0),_boundary_regrade::Bool=true)
+    sg=get(m.surface_geometry,tag,nothing)
+    if sg!==nothing && get(sg,:occ,nothing) in (:sphere,:cone,:torus)
+        throw(ArgumentError(
+            "$caller: Mesh.Algorithm=1 on the closed sphere/cone/torus " *
+            "Surface[$tag] is not implemented by the local-adaptation " *
+            "producer; AUTO keeps the native Frontal-Delaunay arm on this chart"))
+    end
+    options=_model_algorithm_size_options(m,_mesh1d_options,caller)
+    field=_MetricIsotropicSize(_ModelAlgorithmBackgroundSize(m,2,tag,
+        options,size_field,caller))
+    product=_occ_metric_surface_refine(m,tag,field,1.0,
+        PIPELINE_DEFAULT_MAX_NODES,20_000_000,_mesh_input,options,
+        _mesh_node_high_water,_mesh_element_high_water,caller;
+        allow_regrade=_boundary_regrade,local_adaptation=true)
+    return _metric_surface_bind_constructor(m,tag,product)
+end
+
 # ── built-in ruled parametric front ───────────────────────────────────────────
 #
 # Upstream's BAMG selector runs `RuledSurface` GFaces parametrically too —
@@ -2306,10 +2446,10 @@ end
 # periodic seam.
 function _ruled_metric_surface_refine(m,tag,field,target,node_limit,
         triangle_limit,input,options,node_high_water,element_high_water,caller;
-        allow_regrade::Bool=true)
+        allow_regrade::Bool=true,local_adaptation::Bool=false)
     options=_mesh1d_options_with_inner_field(options,field)
     saved_algorithm=m.meshing.algorithm_2d
-    m.meshing.algorithm_2d=7
+    m.meshing.algorithm_2d=local_adaptation ? 1 : 7
     local authority,limit
     try
         authority,limit=_metric_surface_boundary_grade!(m,tag,field,target,
@@ -2515,9 +2655,11 @@ function _ruled_metric_surface_refine(m,tag,field,target,node_limit,
         triangle_limit,caller,_metric_ruled_chart(m,tag,cert_field,caller),
         (coordinates=coordinates,parameters=parameters,cells=cells,
          incidence=incidence,boundary=boundary,
+         local_sizes=local_adaptation ? _meshadapt_vertex_sizes(m,tag,options,
+             coordinates,cells,owners) : nothing,
          numbers=numbers,owners=owners,node_parameters=node_parameters,
          retained=retained,birth_rows=birth_rows,
-         labels=labels,node_max=next,cell_max=cell_max))
+         labels=labels,node_max=next,cell_max=cell_max);local_adaptation)
     live=state.live;live_nodes=state.live_nodes;node_alive=state.node_alive
     node_max=state.node_max;cell_max=state.cell_max
     remap=zeros(Int32,length(coordinates))
@@ -2800,6 +2942,31 @@ function _metric_surface_algorithm_mesh(m::GeoModel,tag::Int,caller::AbstractStr
             PIPELINE_DEFAULT_MAX_NODES,20_000_000,_mesh_input,options,
             _mesh_node_high_water,_mesh_element_high_water,caller;
             allow_regrade=_boundary_regrade)
+    end
+    return _metric_surface_bind_constructor(m,tag,product)
+end
+
+# Algorithm 1 uses local edge adaptation on the initial constrained mesh.
+# Its scalar size context is distinct from the anisotropic cavity-insertion
+# policy selected by algorithm 7, while both share geometry and certificates.
+function _meshadapt_surface_algorithm_mesh(m::GeoModel,tag::Int,caller::AbstractString;
+        size_field=nothing,_mesh_input=nothing,_mesh1d_options=nothing,
+        _mesh_node_high_water=nothing,_mesh_element_high_water=UInt64(0),
+        _boundary_regrade::Bool=true)
+    _metric_surface_admit(m,tag,caller;ruled=true)
+    options=_model_algorithm_size_options(m,_mesh1d_options,caller)
+    field=_MetricIsotropicSize(_ModelAlgorithmBackgroundSize(m,2,tag,
+        options,size_field,caller))
+    product=if _surface_type(m,tag) in (:ruled,:tric)
+        _ruled_metric_surface_refine(m,tag,field,1.0,
+            PIPELINE_DEFAULT_MAX_NODES,20_000_000,_mesh_input,options,
+            _mesh_node_high_water,_mesh_element_high_water,caller;
+            allow_regrade=_boundary_regrade,local_adaptation=true)
+    else
+        _metric_surface_refine(m,tag,field,1.0,
+            PIPELINE_DEFAULT_MAX_NODES,20_000_000,_mesh_input,options,
+            _mesh_node_high_water,_mesh_element_high_water,caller;
+            allow_regrade=_boundary_regrade,local_adaptation=true)
     end
     return _metric_surface_bind_constructor(m,tag,product)
 end

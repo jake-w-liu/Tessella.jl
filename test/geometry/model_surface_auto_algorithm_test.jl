@@ -3,12 +3,12 @@
 # Verified on the Gmsh 4.15.2 binary: AUTO picks Delaunay on planar faces
 # and MeshAdapt on every non-planar class — Cylinder, Sphere, ruled
 # Surface and BSpline all report "Meshing surface N (<kind>, MeshAdapt)".
-# No native MeshAdapt producer exists, so the implemented Frontal-Delaunay
-# construction serves the off-plane admission: upstream's outcome (a
-# valid mesh) through the closest native producer. Selectors that name
-# machinery without a native producer (1/4/8/9/10/11) keep their loud
-# rejection.
+# The native local-adaptation mode runs on off-plane charts; closed
+# sphere/cone/torus charts keep the Frontal-Delaunay arm because their
+# pole/periodic rows collapse under the boundary-only seed. Selectors that name
+# machinery without a native producer (4/8/9/10/11) keep their loud rejection.
 
+module ModelSurfaceAutoAlgorithmChecks
 using Test
 using Tessella
 const M=Tessella.Model
@@ -62,10 +62,8 @@ end
     @test _mesh_area(mesh)≈4.0 atol=1e-6
 end
 
-@testset "AUTO on a ruled face selects the Frontal arm" begin
-    # Upstream's AUTO picks MeshAdapt on a ruled "Surface" — the native
-    # stand-in is Frontal-Delaunay, which fills a coplanar-bounded ruled
-    # patch through the `:frontal` refine arm.
+@testset "AUTO on a ruled face selects local adaptation" begin
+    # The same local edge operations apply in the ruled patch's own chart.
     m=_square_model(ruled=true)
     m.meshing.algorithm_2d=2
     mesh=M.mesh_model_surface(m,2)
@@ -76,7 +74,7 @@ end
 
 @testset "AUTO on a curved OCC face meshes the (u,v) domain" begin
     # Upstream: "(Cylinder, MeshAdapt)" and a valid tessellation. The
-    # parametric kernel is the native producer for the Frontal admission —
+    # local-adaptation mode uses the cylinder's parametric domain —
     # a half-sector lateral (r=1, h=2, θ∈[0,π]) yields r·h·θ = 2π area,
     # with the flat facets under-approximating the curved band by ~2%.
     m,lat=_sector_model()
@@ -90,11 +88,12 @@ end
 @testset "explicit producer-less selectors still reject under AUTO" begin
     # AUTO itself is covered above; the unchanged explicit-algorithm
     # contract keeps its loud rejection on the same curved face.
-    for algorithm in (1,4,8,9,10,11)
+    for algorithm in (4,8,9,10,11)
         m,lat=_sector_model()
         m.meshing.algorithm_2d=algorithm
         err=_error(()->M.mesh_model_surface(m,lat))
         @test err isa ArgumentError
         @test occursin("not implemented",sprint(showerror,err))
     end
+end
 end

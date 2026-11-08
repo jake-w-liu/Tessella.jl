@@ -19,6 +19,83 @@ and external solver campaigns are opt-in.
 
 ## Current evidence
 
+Final current source passed the default package suite 1638/1638 on Julia
+1.13.3 minimal compilation (`Pkg.test()`, `--check-bounds=yes`), actual exit 0,
+16m26.3s. Log: `C:/Users/User/Tessella-default-1133-final4-20261108.log`.
+
+### Native MeshAdapt and GEO view transport
+
+`Mesh.Algorithm=1` now runs a native local-adaptation producer: it splits long
+metric edges, collapses short certified edges, and improves diagonals by
+minimum-quality ascent on the same owned planar and parametric charts as the
+metric producer. AUTO resolves non-planar faces to algorithm 1 except closed
+sphere/cone/torus charts, whose pole or periodic rows are not yet a valid
+local-adaptation preimage and keep the native Frontal-Delaunay arm; explicit
+algorithm 1 on those closed charts rejects loudly. Primitive Curve grading
+measures against the same local size context. Boundary sizes
+from `Mesh.MeshSizeExtendFromBoundary` and Point sizes transport as per-vertex
+sizes; an explicit background/POST field remains the metric target.
+
+Curved primitive and Boolean volumes whose faces select local adaptation now
+build their actual materialized faces and consume those boundary products
+instead of substituting the analytic Delaunay tessellation. The OCC parametric
+arm retains its lower Curve products, UIDs and chart parameterization. A
+primitive Box keeps its analytic box surface for algorithm 1: the all-planar
+explicit PLC has no certified local-chart boundary transport. A scoped
+box-union probe produced 2295 valid tets under algorithm 1 (469.8s minimal)
+versus 28 for AUTO/Delaunay. Closed cone/torus AUTO probes also returned valid
+fills (48 tets at 11.6s and 483 tets at 351.0s, minimal compilation). Not
+claimed: the pre-existing fine-size explicit box volume PLC remains slow;
+algorithm 1's box route avoids it through the analytic surface, while other
+box selectors keep the established explicit path and its pinned contracts.
+
+Verification, all with `--check-bounds=yes --compile=min -O0` unless noted:
+`geometry/model_meshadapt_functional_test.jl` passed 74/74 on Julia 1.12.7 and
+1.13.3, actual exits 0 (planar, warped AUTO, recombined embedded Curve,
+boundary-size inheritance, retained OCC chart and primitive volume).
+`geometry/model_surface_auto_algorithm_test.jl` passed 19/19; the neighboring
+algorithm-7 suites passed 32/32, 30/30 and 55/55. The explicit-OCC selector
+suite passed 58/58 (25 sector, 24 primitive/closed-chart, 9 Algorithm3D); the
+added box algorithm-1 check passed separately with 12 valid tets. The CLI
+frontend test passed 29/29 on both runtimes. A scoped cold observation: a
+default-size primitive
+cylinder fill with algorithm 1/2 took roughly 9/8 minutes under minimal
+compilation versus 14 seconds for the analytic Delaunay arms; this is a
+correctness-first producer and not yet a performance-parity claim.
+
+GEO `Merge`/`Include` views now publish into the API session with their actual
+global tags, list data, time steps and interpolation schemes. Aliases share one
+owned data object, model-backed views keep their actual source slots, plugin
+runs harvest tag-stable data, and a fatal script leaves held identities, data
+and tag allocation untouched. `-combine` imports views, combines equal names
+into multi-step views before meshing, and remaps `-bgm` background references to
+the combined source.
+
+Scoped checks on Julia 1.12.7 and 1.13.3 minimal compilation, exits 0:
+`interfaces/api_geo_view_transport_test.jl` 26/26 and
+`interfaces/cli_meshadapt_view_frontend_test.jl` 29/29 on both.
+`interfaces/api_model_merge_functional_test.jl` passed 46/46 on 1.13.3,
+including the fatally failed GEO rollback. Eight neighboring view/list suites
+passed 454 assertions. Recoverable `Error(...)` diagnostics retain the
+established continuation contract; rollback is exercised with a nonzero
+`Exit`.
+
+### Compact PostView tolerance and virtual normals
+
+Compact PostView evaluation now keeps the accepted reference tolerance inside
+the certificate box, gates triangles against the lifted plane's one-percent
+thickness, and certifies regular intrinsic frames whose artificial normal
+product underflows Float64. The public probe and compact field paths share the
+same intrinsic-rank certificate.
+
+The recorded Julia 1.13.3 normal `-O2` catalog gate exited 0, including the
+compact-tolerance, thin-geometry, nonpartition, translated-line, high-order,
+inverse, model-PostView and field suites; the source receipt is
+`test/tmp/postview_catalog_source_receipt_20261107.json`. Final-source minimal
+checks passed 54/54 on both Julia 1.13.3 and 1.12.7 (the warmed allocation
+assertion is skipped at `-O0`); the normal `-O2` gate runs all 55. This
+qualifies those fixtures, not universal correct rounding.
+
 ### Geometry query dimension dispatch
 
 Geometry-value queries now compile the selected dimension's evaluator when it

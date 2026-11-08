@@ -73,6 +73,7 @@ Usage: tessella file.geo [-1|-2|-3] [-o output.msh] [-format format] [-bin]
        [-reclassify deg] [-reparam deg] [-open] [-merge] [-new]
        [-part_topo|-part_no_topo] [-part_ghosts|-part_no_ghosts]
        [-part_split|-part_split_files|-oneFilePerPart]
+       [-combine]
        tessella -convert file [file2 ...]
        tessella -help | -version | -info | -help_options
 
@@ -100,6 +101,8 @@ model's unrolled .geo script to <stem>.geo_unrolled (or -o), matching Gmsh
 stores Mesh.MeshSizeFromCurvatureIsotropic; -ignore_periodicity stores
 Mesh.IgnorePeriodicity. -bgm merges a .pos view file and uses its last view
 as the PostView background-mesh field.
+-combine combines input views with identical names into multi-time-step views
+before meshing; background-view references follow their combined source.
 -log file mirrors Msg-channel output into the file; -cpu appends the
 (From start: Wall, CPU, Mem) resource suffix to Info/Error messages.
 -statreport writes (truncating) and -append_statreport appends the upstream
@@ -355,8 +358,7 @@ const _REJECTED_FLAGS=Dict{String,String}(
     "-noview"=>"view visibility is GUI-only",
     "-nomesh"=>"mesh visibility is GUI-only",
     "-link"=>"view linking is GUI-only",
-    "-smoothview"=>"view smoothing is GUI-only",
-    "-combine"=>"view combination is GUI-only")
+    "-smoothview"=>"view smoothing is GUI-only")
 
 # Flags that upstream removed before 4.15.2 or that never existed there —
 # rejected with an explicit "not an upstream option" message. `-claniso` and
@@ -810,7 +812,7 @@ function _run(tokens::Vector{String})
     dimension_seen=false;output_seen=false
     format_seen=false;binary_seen=false;check_seen=false
     refine_seen=false;save_seen=false;parse_seen=false;barycentric_seen=false
-    adapt_seen=false
+    adapt_seen=false;combine_seen=false
     unroll_seen=false
     reclassify=nothing;reparam=nothing
     part=nothing;part_topo=nothing;part_ghosts=nothing;part_split=nothing
@@ -845,6 +847,9 @@ function _run(tokens::Vector{String})
             parse_seen && throw(ArgumentError(
                 "tessella: duplicate $a flag"))
             parse_seen=true
+        elseif a=="-combine"
+            combine_seen && throw(ArgumentError("tessella: duplicate -combine flag"))
+            combine_seen=true
         elseif a in ("-1","-2","-3")
             dimension_seen && throw(ArgumentError(
                 "tessella: duplicate or conflicting dimension flag $a"))
@@ -1189,7 +1194,7 @@ function _run(tokens::Vector{String})
         (dimension_seen || output_seen || format_seen || binary_seen ||
          !isempty(numeric_options) || !isempty(preludes) || bgm_seen ||
          refine_seen || barycentric_seen || unroll_seen || save_seen ||
-         parse_seen ||
+         parse_seen || combine_seen ||
          reclassify!==nothing || reparam!==nothing || part!==nothing ||
          length(files)>1) && throw(ArgumentError(
             "tessella: -check cannot be combined with generation, sizing, " *
@@ -1226,7 +1231,7 @@ function _run(tokens::Vector{String})
     geo_unrolled_output=effective_format==".geo_unrolled"
     foreign_output=effective_format!==nothing &&
         effective_format in _FOREIGN_OUTPUT_EXTENSIONS
-    session=extension in (".msh",".pos") || length(files)>1 || refine_seen ||
+    session=extension in (".msh",".pos") || length(files)>1 || refine_seen || combine_seen ||
         adapt_seen || barycentric_seen ||
         save_seen || reclassify!==nothing || reparam!==nothing ||
         part!==nothing || foreign_output ||
@@ -1499,6 +1504,7 @@ function _run(tokens::Vector{String})
     return _session_main(files,preludes,numeric_options;
         dim,outfile,version,binary,output_flags=format_seen || binary_seen,
         refine=refine_seen,adapt=adapt_seen,barycentric=barycentric_seen,save=save_seen,
+        combine=combine_seen,
         statreport,output_format,
         unroll=unroll_seen,bgm=[path for (path,_) in bgm_specs],
         reclassify,reparam,part,part_topo,part_ghosts,part_split,
@@ -1848,7 +1854,7 @@ function _session_main(files,preludes,numeric_options;
                        dim,outfile,version,binary,output_flags,refine,save,
                        reclassify,reparam,part,part_topo,part_ghosts,part_split,
                        part_physicals,part_weights=nothing,
-                       adapt=false,barycentric=false,unroll=false,bgm=String[],
+                       adapt=false,barycentric=false,unroll=false,bgm=String[],combine=false,
                        statreport=nothing,output_format=nothing)
     need_output=dim>0 || refine || adapt || barycentric || unroll || save ||
         reclassify!==nothing ||
@@ -1977,12 +1983,32 @@ function _session_main(files,preludes,numeric_options;
         # `-bgm`: merge the `.pos` views and point a `PostView` background
         # field at each file's last view — the same semantics the standalone
         # path's `Merge` + `Background Mesh View[i]` prelude expresses.
+        background_views=Tuple{Int,String}[]
         for bgm_path in bgm
             API.merge(bgm_path)
-            count=length(API.SESSION_VIEWS)
-            count>0 || continue
+            tags=API.view.get_tags()
+            isempty(tags) && continue
+            source=Int(last(tags))
+            push!(background_views,(source,API.view.get_string(source,"Name")))
+        end
+        previous_tags=Set(Int.(API.view.get_tags()))
+        if combine
+            errors_before=API.NATIVE_LOOKUP_QUERY_ERRORS[]
+            API.view.combine("steps","name")
+            API.NATIVE_LOOKUP_QUERY_ERRORS[]>errors_before &&
+                push!(input_errors,API.NATIVE_MSG_LAST_ERROR[])
+        end
+        current_tags=Int.(API.view.get_tags())
+        for (source,name) in background_views
+            if !(source in current_tags)
+                replacement=findfirst(tag->!(tag in previous_tags) &&
+                    API.view.get_string(tag,"Name")==name*"_Combine",current_tags)
+                replacement===nothing && throw(ArgumentError(
+                    "tessella: -combine lost background view '$name'"))
+                source=current_tags[replacement]
+            end
             tag=API.mesh.field.add("PostView")
-            API.mesh.field.set_number(tag,"ViewIndex",count-1)
+            API.mesh.field.set_number(tag,"ViewTag",source)
             API.mesh.field.set_as_background_mesh(tag)
         end
         for (name,value) in session_numeric

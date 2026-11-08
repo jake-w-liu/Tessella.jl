@@ -85,7 +85,7 @@ function _pv_certificate_monomial(kind,e,tol)
     return zero_range,magnitude,derivatives
 end
 
-function _pv_scheme_certificate_bounds(cell,tol)
+function _pv_scheme_certificate_bounds(cell,tol;normal_frame=nothing)
     extent=floatmax(Float64);full=((-extent,-extent,-extent),(extent,extent,extent))
     base=_pv_scheme_base(cell);scale=_pv_scheme_scale(cell)
     geometry=cell.geometry;kind=cell.kind;dim=_pv_scheme_dim(kind)
@@ -174,7 +174,11 @@ function _pv_scheme_certificate_bounds(cell,tol)
     end
     ratio=geometry===nothing ? 1.0 : abs(geometry.normal_ratio)
     normal=zeros(3)
-    if dim==1
+    if normal_frame!==nothing
+        for axis in 1:3
+            normal[axis]=_pv_up_mul(tol,_pv_up_add(normal_frame[1][axis],normal_frame[2][axis]))
+        end
+    elseif dim==1
         d=Tuple(derivatives[:,1]);a=(d[2],max(d[1],d[3]),d[2])
         for axis in 1:3
             i=mod1(axis+1,3);j=mod1(axis+2,3)
@@ -216,4 +220,38 @@ function _pv_scheme_certificate_bounds(cell,tol)
     end
     all(b->all(isfinite,b),bounds) || return full
     return (ntuple(axis->bounds[axis][1],3),ntuple(axis->bounds[axis][2],3))
+end
+
+# Compact cells use the same intrinsic maps, with distinct artificial
+# columns for Lines and Quadrangles. Bind those columns from their own
+# evaluators; a canonical scheme's derivative-based frame is not equivalent.
+function _pv_compact_certificate_bounds(coords,cells,column,kind,tol)
+    C=coords[:,cells[:,column]]
+    cell=_PVSchemeCell(kind,true,kind==6,zeros(0,0),NTuple{3,Float64}[],
+        zeros(0,0),NTuple{3,Float64}[],C,zeros(0,0))
+    scale=_pv_scheme_scale(cell);base=_pv_scheme_base(cell)
+    frame=nothing
+    if kind==1
+        d=ntuple(axis->_pv_relative(cell,2,base,axis,scale),3)
+        artificial=if (abs(d[1])>=abs(d[2]) && abs(d[1])>=abs(d[3])) ||
+                      (abs(d[2])>=abs(d[1]) && abs(d[2])>=abs(d[3]))
+            (abs(d[2]),abs(d[1]),0.0)
+        else
+            (0.0,abs(d[3]),abs(d[2]))
+        end
+        normal=ntuple(3) do axis
+            i=mod1(axis+1,3);j=mod1(axis+2,3)
+            _pv_up_mul(scale,_pv_up_add(_pv_up_mul(abs(d[i]),artificial[j]),
+                                      _pv_up_mul(abs(d[j]),artificial[i])))
+        end
+        frame=(artificial,normal)
+    elseif kind==2
+        frame=((0.,0.,0.),(0.,0.,0.))
+    elseif kind==7
+        local_cells=reshape(Int32.(1:4),4,1)
+        _,_,normal=_postview_reference_jacobian(C,local_cells,1,4,kind,0.,0.,0.,scale)
+        frame=((0.,0.,0.),map(abs,normal))
+    end
+    lower,upper=_pv_scheme_certificate_bounds(cell,tol;normal_frame=frame)
+    return lower,upper
 end

@@ -1,6 +1,7 @@
 # File execution/import prepares detached state before touching model slots,
 # options, lookup catalogues, or session views.
 import ..IO
+include("APIGeoViewTransport.jl")
 
 function _model_import_option!(options,family,member,value)
     name=string(family,'.',member)
@@ -43,13 +44,17 @@ function _model_import_diagnostics(options)
 end
 
 function _model_import_execute_geo(path,dimension,options,diagnostics;legacy=false,
-        initial_model=nothing,initial_mesh_context=nothing,initial_fields=nothing)
+        initial_model=nothing,initial_mesh_context=nothing,initial_fields=nothing,
+        view_receipt=nothing)
     # Session ONELAB bridge: the script's ONELAB exchanges operate on detached
     # scalar mirrors seeded from the parameter space (existing values win the
     # script's DefineNumber defaults, like the upstream localGmsh client);
     # only a successful run adopts the mirrors back into the session records,
     # preserving the file frontends' failure atomicity.
     onelab=_onelab_geo_seed()
+    views=_geo_import_view_seed()
+    view_receipt===nothing || (view_receipt[]=views)
+    fields=initial_fields===nothing && legacy ? _model_merge_fields() : initial_fields
     result=execute_geo(path;mesh_dim=dimension,
         _initial_mesh_algorithms=(algorithm_2d=Int(options["Mesh.Algorithm"]),
             algorithm_3d=Int(options["Mesh.Algorithm3D"]),
@@ -70,7 +75,9 @@ function _model_import_execute_geo(path,dimension,options,diagnostics;legacy=fal
         _initial_recombine_diagnostics=diagnostics.hooks,
         _initial_model_name=legacy ? nothing : splitext(basename(path))[1],
         _initial_model=initial_model,_initial_mesh_context=initial_mesh_context,
-        _initial_fields=initial_fields,
+        _initial_fields=fields,
+        _initial_views=views.views,_initial_view_tag_max=views.maximum,
+        _initial_view_tag_callback=tag->(views.next[]=max(views.next[],tag);nothing),
         _initial_onelab_numbers=onelab[1],_initial_onelab_strings=onelab[2])
     _onelab_geo_adopt!(onelab[1],onelab[2],onelab[3],onelab[4])
     return result
@@ -162,6 +169,7 @@ function _model_import_prepare(path,dimension;legacy=false)
     options=copy(OPTIONS);diagnostics=_model_import_diagnostics(options)
     extension=lowercase(splitext(path)[2])
     extension==".pos" && return _list_model_open_prepare(path,caller)
+    view_receipt=Ref{Any}(nothing)
     result=if extension==".msh"
         GeoExec._geo_stage_mesh_file(path;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[],
@@ -182,13 +190,14 @@ function _model_import_prepare(path,dimension;legacy=false)
             "reconstruction), which Tessella does not implement; " *
             "IO.read_xao/IO.read_brep expose the envelope census"))
     else
-        _model_import_execute_geo(path,dimension,options,diagnostics;legacy)
+        _model_import_execute_geo(path,dimension,options,diagnostics;legacy,view_receipt)
     end
-    return _model_import_prepare_result(result,path,options,diagnostics;legacy,caller)
+    return _model_import_prepare_result(result,path,options,diagnostics;legacy,caller,
+        geo_views=view_receipt[])
 end
 
 function _model_import_prepare_result(result,path,options,diagnostics;legacy=false,
-        caller="API.open",detached_result=false,view_sections=nothing)
+        caller="API.open",detached_result=false,view_sections=nothing,geo_views=nothing)
     extension=lowercase(splitext(path)[2])
     model=detached_result ? result.model : deepcopy(result.model)
     authority=model.meshing.mesh_authority
@@ -239,7 +248,8 @@ function _model_import_prepare_result(result,path,options,diagnostics;legacy=fal
         slot.node_counter_wrapped=NODE_COUNTER_WRAPPED[];slot.element_counter_wrapped=ELEMENT_COUNTER_WRAPPED[]
         index=_current_slot_index_locked()
         index==0 || (slot.window_visibility=MODEL_SLOTS[index].window_visibility)
-    elseif result.params!==nothing
+    end
+    if result.params!==nothing
         slot.fields=Dict(tag=>_ApiField(spec.kind,copy(spec.options),copy(spec.option_order))
             for (tag,spec) in result.params.fields)
         slot.field_tag_max=maximum(keys(slot.fields);init=0)
@@ -248,13 +258,22 @@ function _model_import_prepare_result(result,path,options,diagnostics;legacy=fal
     end
     lookup=_model_import_lookup(result.native_element_lookup_receipt,model,caller)
     views=legacy ? _SessionView[] : _model_import_views(slot,caller;sections=view_sections)
-    view_tags=Int[];next_tag=VIEW_TAG_MAX[]
+    geo_plan=geo_views===nothing ? nothing : _geo_import_view_plan(result.views,geo_views,caller)
+    if geo_plan!==nothing
+        for (_,view) in geo_plan.added
+            for context in values(view.model_contexts)
+                source=context.model_slot
+                source.model===result.model && _model_import_rebind_views!([view],source,slot)
+            end
+        end
+    end
+    view_tags=Int[];next_tag=geo_plan===nothing ? VIEW_TAG_MAX[] : geo_plan.maximum
     for _ in views
         next_tag=Base.checked_add(next_tag,1)
         while haskey(SESSION_VIEWS,next_tag);next_tag=Base.checked_add(next_tag,1);end
         push!(view_tags,next_tag)
     end
-    return (;result,slot,options,diagnostics,lookup,views,view_tags,next_tag)
+    return (;result,slot,options,diagnostics,lookup,views,view_tags,next_tag,geo_plan)
 end
 
 function _model_import_rebind_views!(views,source,target)
@@ -289,6 +308,7 @@ function _model_import_publish!(plan;legacy=false)
     merge!(OPTIONS,plan.options)
     NATIVE_CONTEXT_LC[]=plan.result.native_context_lc
     NATIVE_CONTEXT_FORCED_BBOX[]=plan.result.native_context_forced_bbox
+    plan.geo_plan===nothing || _geo_import_publish_views!(plan.geo_plan)
     for (tag,view) in zip(plan.view_tags,plan.views);SESSION_VIEWS[tag]=view;end
     VIEW_TAG_MAX[]=plan.next_tag
     NATIVE_LOOKUP_QUERY_ERRORS[]=plan.diagnostics.errors[]

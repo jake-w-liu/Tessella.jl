@@ -199,7 +199,10 @@ function exercise(directory)
             bad=joinpath(directory,"bad.msh");Base.write(bad,"\$MeshFormat\n4.1 0 8\n\$EndMeshFormat\n\$Nodes\nbad\n")
             @test_throws ArgumentError A.merge(bad)
             failed=joinpath(directory,"failed.geo")
-            Base.write(failed,"Mesh.MeshSizeFactor=9;RecombineMesh;Line(900)={9998,9999};\n")
+            # Recoverable statement diagnostics keep executing, so an explicit
+            # nonzero Exit supplies the fatal rollback path these assertions
+            # exercise.
+            Base.write(failed,"Mesh.MeshSizeFactor=9;RecombineMesh;Line(900)={9998,9999};Exit 2;\n")
             @test_throws ArgumentError A.merge(failed)
             @test snapshot()==before && A.mesh.get_ghost_elements(3,99)==(UInt64[2029],Int32[2])
         finally;A.finalize();end

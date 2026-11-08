@@ -847,6 +847,8 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
                      _initial_model=nothing,
                      _initial_mesh_context=nothing,
                      _initial_fields=nothing,
+                     _initial_views=nothing,_initial_view_tag_max=-1,
+                     _initial_view_tag_callback=nothing,
                      _initial_onelab_numbers::Union{Nothing,Dict{String,Float64}}=nothing,
                      _initial_onelab_strings::Union{Nothing,Dict{String,String}}=nothing)
     isfile(path) || throw(ArgumentError("execute_geo: missing file $path"))
@@ -865,6 +867,11 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
     model isa GeoModel || throw(ArgumentError("execute_geo: initial model must be a GeoModel"))
     _initial_model_name===nothing || (model.name=String(_initial_model_name))
     context=_GeoNumericContext()
+    if _initial_views!==nothing
+        _GEO_EXEC_VIEWS[context]=copy(_initial_views)
+        _GEO_EXEC_VIEW_MAX[context]=Int(_initial_view_tag_max)
+    end
+    _initial_view_tag_callback===nothing || (_GEO_EXEC_VIEW_CALLBACK[context]=_initial_view_tag_callback)
     _initial_mesh_context===nothing || _geo_seed_mesh_context!(context,_initial_mesh_context)
     # Session-bound runs (API `open`/`merge`/`open_geo!`) pass the session's
     # detached ONELAB scalar mirrors so `SetNumber`/`GetNumber`/`DefineNumber`
@@ -7690,7 +7697,7 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         if tm.captures[1]=="Empty" && tm.captures[2]=="Views"
             store=get(_GEO_EXEC_VIEWS,context,nothing)
             store===nothing ||
-                filter!(v->!(isempty(v.elements)&&isempty(v.texts)),store)
+                filter!(v->!_geo_view_empty(v),store)
             return nothing
         end
         _geo_yyerror!(context,
@@ -10105,6 +10112,15 @@ function _geo_mesh_context_fields(m::GeoModel,
         (store===nothing || isempty(store)) && throw(ArgumentError(
             "build_geo_size_field: Field[$(spec.tag)] references view " *
             "index $(config.view_index) but no views are loaded"))
+        selected=config.view_tag>=0 ? findfirst(view->view.tag==config.view_tag,store) : config.view_index+1
+        selected!==nothing && 1<=selected<=length(store) || throw(ArgumentError(
+            "build_geo_size_field: Field[$(spec.tag)] references an unknown view"))
+        if store[selected] isa _GeoSessionView
+            api=getfield(parentmodule(@__MODULE__),:API)
+            result=api._post_view_field(store[selected].data,spec.tag;
+                crop_negative=config.crop_negative_values,use_closest=config.use_closest)
+            return result isa fields_mod.AbstractSizeField ? result : _GeoPostViewSizeField(result)
+        end
         result=fields_mod.geo_postview_context(store)(
             spec,config,entities,params)
         # Scalar/vector views resolve to the `AbstractField` sampler —
@@ -12762,6 +12778,63 @@ end
 # `Background Mesh View[i]` and `Field[i] = "PostView"` resolve into it.
 # Weak keys drop the store with the context, so no per-run cleanup is needed.
 const _GEO_EXEC_VIEWS=WeakKeyDict()
+const _GEO_EXEC_VIEW_MAX=WeakKeyDict()
+const _GEO_EXEC_VIEW_CALLBACK=WeakKeyDict()
+
+# Existing API views enter GEO as operation-owned data, with actual global
+# tags and source-model slots. List record consumers can use their parsed
+# representation; model fields and view operations retain the model data.
+struct _GeoSessionView
+    tag::Int
+    data::Any
+end
+
+function _geo_view_empty(view)
+    view isa _GeoSessionView || return isempty(view.elements) && isempty(view.texts)
+    api=getfield(parentmodule(@__MODULE__),:API)
+    return api._view_data_empty(api._view_data_owner(view.data))
+end
+
+function Base.getproperty(view::_GeoSessionView,name::Symbol)
+    name in (:tag,:data) && return getfield(view,name)
+    name===:name && return getfield(view,:data).name
+    api=getfield(parentmodule(@__MODULE__),:API)
+    data=api._view_data_owner(getfield(view,:data))
+    data.model_kind===nothing || throw(ArgumentError(
+        "execute_geo: model-backed views require the owned view operation"))
+    return getproperty(api._native_list_view_pos(data,"execute_geo"),name)
+end
+
+function _geo_next_view_tag!(context)
+    store=get(_GEO_EXEC_VIEWS,context,Any[])
+    previous=get(_GEO_EXEC_VIEW_MAX,context,maximum((view.tag for view in store);init=-1))
+    tag=Base.checked_add(previous,1)
+    tag<=typemax(Int32) || throw(ArgumentError("execute_geo: view tag is out of range"))
+    _GEO_EXEC_VIEW_MAX[context]=tag
+    callback=get(_GEO_EXEC_VIEW_CALLBACK,context,nothing)
+    callback===nothing || callback(tag)
+    return tag
+end
+
+function _geo_retag_view(view,tag)
+    post=getfield(parentmodule(@__MODULE__),:Post)
+    return post.PosView(view.name;tag,time=view.time,elements=view.elements,texts=view.texts,
+        interpolations=view.interpolations,scheme_positions=view.scheme_positions)
+end
+
+function _geo_view_operation!(operation,context,caller)
+    api=getfield(parentmodule(@__MODULE__),:API)
+    store=get!(_GEO_EXEC_VIEWS,context,Any[])
+    maximum_tag=get(_GEO_EXEC_VIEW_MAX,context,maximum((view.tag for view in store);init=-1))
+    result,maximum_tag,errors=lock(api.STATE_LOCK) do
+        api._geo_view_operation!(operation,store,maximum_tag,caller)
+    end
+    empty!(store);append!(store,result);_GEO_EXEC_VIEW_MAX[context]=maximum_tag
+    callback=get(_GEO_EXEC_VIEW_CALLBACK,context,nothing)
+    callback===nothing || callback(maximum_tag)
+    for message in errors;_geo_msg_error!(context,message);end
+    return nothing
+end
 
 # Scalar `PostView` background adapter — upstream's `PostViewField` *is* the
 # size field (its scalar operator interpolates the view values). Tessella's
@@ -12854,6 +12927,8 @@ function _geo_plugin_run!(api,name,m,context,caller)
     lock(api.STATE_LOCK) do
         store=get!(_GEO_EXEC_VIEWS,context,Any[])
         saved_views=collect(pairs(api.SESSION_VIEWS))
+        saved_view_max=api.VIEW_TAG_MAX[]
+        saved_errors=api.NATIVE_LOOKUP_QUERY_ERRORS[];saved_message=api.NATIVE_MSG_LAST_ERROR[]
         saved_current=api.CURRENT[]
         saved_name=api.MODEL_NAME[]
         saved_file=api.MODEL_FILE_NAME[]
@@ -12876,9 +12951,10 @@ function _geo_plugin_run!(api,name,m,context,caller)
         end
         empty!(api.SESSION_VIEWS)
         try
+            api.VIEW_TAG_MAX[]=get(_GEO_EXEC_VIEW_MAX,context,
+                maximum((view.tag for view in store);init=-1))
             for (index,source) in enumerate(store)
-                api.SESSION_VIEWS[index-1]=
-                    api._session_view_from_pos(source,caller)
+                api.SESSION_VIEWS[source.tag]=api._geo_session_view(source,caller)
             end
             api.CURRENT[]=m
             api.MODEL_NAME[]=slot.name
@@ -12914,9 +12990,13 @@ function _geo_plugin_run!(api,name,m,context,caller)
             tags=sort!(collect(keys(api.SESSION_VIEWS)))
             empty!(store)
             for tag in tags
-                push!(store,api._native_list_view_pos(
-                    api.SESSION_VIEWS[tag],caller))
+                data=api.SESSION_VIEWS[tag]
+                push!(store,data.model_kind===nothing ?
+                    _geo_retag_view(api._native_list_view_pos(data,caller),tag) : _GeoSessionView(tag,data))
             end
+            _GEO_EXEC_VIEW_MAX[context]=api.VIEW_TAG_MAX[]
+            callback=get(_GEO_EXEC_VIEW_CALLBACK,context,nothing)
+            callback===nothing || callback(api.VIEW_TAG_MAX[])
         finally
             index=findfirst(==(slot),api.MODEL_SLOTS)
             index===nothing || deleteat!(api.MODEL_SLOTS,index)
@@ -12926,6 +13006,8 @@ function _geo_plugin_run!(api,name,m,context,caller)
             api.LAST_MESH[]=saved_mesh
             api.LAST_MESH_PARTITION[]=saved_partition
             empty!(api.SESSION_VIEWS)
+            api.VIEW_TAG_MAX[]=saved_view_max
+            api.NATIVE_LOOKUP_QUERY_ERRORS[]=saved_errors;api.NATIVE_MSG_LAST_ERROR[]=saved_message
             for (tag,view) in saved_views
                 api.SESSION_VIEWS[tag]=view
             end
@@ -12987,6 +13069,13 @@ function _geo_exec_save_view!(kind::AbstractString,index_src::AbstractString,
     extension=lowercase(splitext(file)[2])
     post=getfield(parentmodule(@__MODULE__),:Post)
     view=store[index+1]
+    if view isa _GeoSessionView
+        api=getfield(parentmodule(@__MODULE__),:API)
+        _geo_view_operation!(context,caller) do
+            api.view.write(view.tag,file)
+        end
+        return nothing
+    end
     if extension==".pos"
         # Upstream refuses to serialize scheme-bound datasets to old POS
         # format (its `PViewDataList::writePOS` guard) — a `Msg::Error`.
@@ -13006,10 +13095,8 @@ function _geo_exec_save_view!(kind::AbstractString,index_src::AbstractString,
     return nothing
 end
 
-# `Alias View[i]`/`AliasWithOptions View[i]` append an independent copy of
-# the indexed view to the exec list (upstream `new PView(*src)` — the alias
-# keeps the source name and records; `AliasWithOptions` additionally copies
-# the option table, which PosView views do not carry).
+# Aliases share their staged data owner. The existing API backend also keeps
+# independent names/options and the real next global view tag.
 function _geo_exec_alias_view!(kind::AbstractString,index_src::AbstractString,
                                context::_GeoNumericContext)
     caller="execute_geo: $kind"
@@ -13021,13 +13108,11 @@ function _geo_exec_alias_view!(kind::AbstractString,index_src::AbstractString,
         _geo_yyerror!(context,"Unknown view $index")
         return nothing
     end
-    post=getfield(parentmodule(@__MODULE__),:Post)
     src=store[index+1]
-    push!(store,post.PosView(src.name;
-        tag=src.tag,time=copy(src.time),
-        elements=copy(src.elements),texts=copy(src.texts),
-        interpolations=[copy(entry) for entry in src.interpolations],
-        scheme_positions=copy(src.scheme_positions)))
+    api=getfield(parentmodule(@__MODULE__),:API)
+    _geo_view_operation!(context,caller) do
+        api.view.add_alias(src.tag,kind=="AliasWithOptions")
+    end
     return nothing
 end
 
@@ -13093,17 +13178,28 @@ function _geo_exec_combine!(mode_src::AbstractString,
                             context::_GeoNumericContext)
     caller="execute_geo: Combine"
     mode=strip(mode_src)
+    mode=mode=="Views" ? "ElementsFromAllViews" :
+         mode=="TimeSteps" ? "TimeStepsByViewName" : mode
     if !(mode in ("ElementsFromAllViews","ElementsByViewName",
-                  "TimeStepsByViewName"))
+                  "TimeStepsByViewName","TimeStepsFromAllViews"))
         # `yymsg(0, "Unknown 'Combine' command")` — recoverable.
         _geo_yyerror!(context,"Unknown 'Combine' command")
         return nothing
     end
     store=get(_GEO_EXEC_VIEWS,context,nothing)
     (store===nothing || isempty(store)) && return nothing
+    if any(view->view isa _GeoSessionView,store)
+        api=getfield(parentmodule(@__MODULE__),:API)
+        _geo_view_operation!(context,caller) do
+            api.view.combine(mode in ("TimeStepsByViewName","TimeStepsFromAllViews") ? "steps" : "elements",
+                mode in ("ElementsFromAllViews","TimeStepsFromAllViews") ? "all" : "name")
+        end
+        return nothing
+    end
     post=getfield(parentmodule(@__MODULE__),:Post)
-    if mode=="ElementsFromAllViews"
-        combined=_geo_combine_view(post,store,"all_Combine",false,caller)
+    if mode in ("ElementsFromAllViews","TimeStepsFromAllViews")
+        combined=_geo_combine_view(post,store,"all_Combine",
+            mode=="TimeStepsFromAllViews",caller)
         empty!(store);push!(store,combined)
         return nothing
     end
@@ -13163,7 +13259,9 @@ function _geo_exec_include!(m::GeoModel,path::AbstractString,
         # the run.
         post=getfield(parentmodule(@__MODULE__),:Post)
         store=get!(_GEO_EXEC_VIEWS,context,Any[])
-        append!(store,post.read_pos(file))
+        for view in post.read_pos(file)
+            push!(store,_geo_retag_view(view,_geo_next_view_tag!(context)))
+        end
         return nothing
     end
     if ext==".msh" || ext==".stl"

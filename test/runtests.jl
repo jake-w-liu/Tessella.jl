@@ -42,7 +42,9 @@ include("functional/fixtures.jl")
         "fields/postview_thin_geometry_test.jl",
         "fields/postview_nonpartition_geometry_test.jl",
         "fields/postview_translated_line_test.jl",
+        "fields/postview_compact_tolerance_test.jl",
         "geometry/model_plane_closed_curve_test.jl",
+        "geometry/model_surface_auto_algorithm_test.jl",
         "geometry/model_compact_atomic_coverage_test.jl",
         "functional/list_view_export.jl",
         "functional/brep_assembly_smoke.jl",
@@ -74,6 +76,7 @@ include("functional/fixtures.jl")
         "functional/brep_ellipse_trims_smoke.jl",
         "functional/constant_metric_box.jl",
         "functional/constant_metric_regions.jl",
+        "geometry/model_meshadapt_functional_test.jl",
         "functional/pyramid_option.jl",
         "functional/brep_bounded143_smoke.jl",
         "functional/brep_plane190_uv_smoke.jl",
@@ -108,6 +111,8 @@ include("functional/fixtures.jl")
         "interfaces/api_plugin_model_probe_test.jl",
         "interfaces/api_metric_surface_embedded_test.jl",
         "interfaces/api_metric_surface_periodic_test.jl",
+        "interfaces/api_geo_view_transport_test.jl",
+        "interfaces/cli_meshadapt_view_frontend_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

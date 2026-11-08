@@ -11,6 +11,7 @@
 # non-affine chart, so the selector keeps a loud requirement rejection instead
 # of falling back to the planar isotropic context.
 
+module ModelOCCMetricAlgorithm7Checks
 using Test
 using Tessella
 const M=Tessella.Model
@@ -329,4 +330,5 @@ Background Field = 1;
     @test all(k->(abs(hypot(mesh.coords[1,k],mesh.coords[2,k])-1.5)<1e-9 ||
                   abs(mesh.coords[3,k])<1e-9 || abs(mesh.coords[3,k]-2)<1e-9),
               1:MT.nnodes(mesh))
+end
 end
