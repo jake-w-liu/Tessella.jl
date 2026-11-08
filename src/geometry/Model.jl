@@ -10882,12 +10882,13 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
     end
     if legacy_factory && m.meshing.algorithm_3d in (1,9) &&
             !(haskey(m.box_extents,t) && size_field===nothing &&
+              options.inner_field===nothing &&
               m.meshing.size_callback===nothing)
         # A plain primitive Box already carries its graded boundary nodes into
         # the explicit fill. The boundary-extension size field would refine the
         # synthetic center-star edges through many scalar queries; skip that
-        # interior pass when no explicit field or callback was requested.
-        # Tensor-valued selected fields still drive the metric edge fill.
+        # interior pass when no explicit field, background field, or callback
+        # was requested. Selected fields still drive the metric edge fill.
         metric_field=_volume_metric_edge_field(m,t,surface,size_field,options,caller)
         if metric_field!==nothing
             mesh=refine_to_size(mesh,metric_field;entity=(3,t),best_effort=true)
