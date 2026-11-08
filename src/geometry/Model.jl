@@ -10880,12 +10880,14 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
                     [constraint[3] for constraint in native_constraints.embedded_faces])
         end
     end
-    if legacy_factory && m.meshing.algorithm_3d in (1,9)
-        # A tensor-valued selected field drives the same edge-bisection fill
-        # through its metric: `refine_to_size` already scores every edge by
-        # the `metric_edge_length` contraction, so the scalar `size_at`
-        # collapse to the smallest directional size is bypassed only when a
-        # tensor is actually resolved. Scalar sizing is unchanged below.
+    if legacy_factory && m.meshing.algorithm_3d in (1,9) &&
+            !(haskey(m.box_extents,t) && size_field===nothing &&
+              m.meshing.size_callback===nothing)
+        # A plain primitive Box already carries its graded boundary nodes into
+        # the explicit fill. The boundary-extension size field would refine the
+        # synthetic center-star edges through many scalar queries; skip that
+        # interior pass when no explicit field or callback was requested.
+        # Tensor-valued selected fields still drive the metric edge fill.
         metric_field=_volume_metric_edge_field(m,t,surface,size_field,options,caller)
         if metric_field!==nothing
             mesh=refine_to_size(mesh,metric_field;entity=(3,t),best_effort=true)

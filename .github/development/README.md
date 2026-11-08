@@ -21,7 +21,14 @@ and external solver campaigns are opt-in.
 
 Final current source passed the default package suite 1638/1638 on Julia
 1.13.3 minimal compilation (`Pkg.test()`, `--check-bounds=yes`), actual exit 0,
-16m26.3s. Log: `C:/Users/User/Tessella-default-1133-final4-20261108.log`.
+17m03.7s. Log: `C:/Users/User/Tessella-default-1133-final5-20261109.log`.
+The same source passed 1638/1638 on Julia 1.12.7, actual exit 0, 16m32.6s; log
+`C:/Users/User/Tessella-default-112-final-20261109.log`.
+The default suite excludes the opt-in extended `model_volume_io_test.jl`.
+Its factory-Box embedded-sheet recovery still exceeds a bounded minimal run:
+the direct legacy fill has no native authority, and the coplanar sheet-edge
+recovery is the long pole. This is retained as an explicit extended limitation,
+not counted as a passing default check.
 
 ### Native MeshAdapt and GEO view transport
 
@@ -44,10 +51,16 @@ primitive Box keeps its analytic box surface for algorithm 1: the all-planar
 explicit PLC has no certified local-chart boundary transport. A scoped
 box-union probe produced 2295 valid tets under algorithm 1 (469.8s minimal)
 versus 28 for AUTO/Delaunay. Closed cone/torus AUTO probes also returned valid
-fills (48 tets at 11.6s and 483 tets at 351.0s, minimal compilation). Not
-claimed: the pre-existing fine-size explicit box volume PLC remains slow;
-algorithm 1's box route avoids it through the analytic surface, while other
-box selectors keep the established explicit path and its pinned contracts.
+fills (48 tets at 11.6s and 483 tets at 351.0s, minimal compilation). A
+primitive Box without an explicit size field or callback now skips the
+boundary-extension interior refinement pass: its graded boundary nodes already
+feed the explicit fill, while the synthetic center-star edges made the scalar
+field refinement effectively unbounded.
+Explicit size fields and callbacks still refine; boxes with embedded products
+take the same skip because their boundary-extension refinement was likewise
+unbounded, leaving the extended sheet-recovery limitation noted above. The fine
+explicit box PLC remains comparatively slow (scoped probe 298.6s minimal), but
+no longer hangs; algorithm 1's box route uses the analytic surface.
 
 Verification, all with `--check-bounds=yes --compile=min -O0` unless noted:
 `geometry/model_meshadapt_functional_test.jl` passed 74/74 on Julia 1.12.7 and
