@@ -21,9 +21,13 @@ and external solver campaigns are opt-in.
 
 Final current source passed the default package suite 1638/1638 on Julia
 1.13.3 minimal compilation (`Pkg.test()`, `--check-bounds=yes`), actual exit 0,
-17m03.7s. Log: `C:/Users/User/Tessella-default-1133-final5-20261109.log`.
-The same source passed 1638/1638 on Julia 1.12.7, actual exit 0, 16m32.6s; log
-`C:/Users/User/Tessella-default-112-final-20261109.log`. A clean temporary
+17m13.1s. Log: `C:/Users/User/Tessella-default-1133-final6-20261109.log`.
+The preceding box-skip source passed 1638/1638 on Julia 1.12.7, actual exit 0,
+16m32.6s; log `C:/Users/User/Tessella-default-112-final-20261109.log`. The final
+guard only narrows the skip when a background field is selected.
+`geometry/model_entity_identity_test.jl` passed on the final source, including
+16/16 primitive/Boolean volume identity assertions (4m37.3s), actual exit 0.
+A clean temporary
 environment at pushed commit `be7304d` installed through
 `Pkg.add(url="https://github.com/jake-w-liu/Tessella.jl")`, resolved Tessella
 0.1.0, precompiled and loaded on Julia 1.13.3, actual exit 0.
