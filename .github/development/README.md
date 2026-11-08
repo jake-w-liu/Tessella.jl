@@ -61,9 +61,11 @@ feed the explicit fill, while the synthetic center-star edges made the scalar
 field refinement effectively unbounded.
 Explicit size fields and callbacks still refine; boxes with embedded products
 take the same skip because their boundary-extension refinement was likewise
-unbounded, leaving the extended sheet-recovery limitation noted above. The fine
-explicit box PLC remains comparatively slow (scoped probe 298.6s minimal), but
-no longer hangs; algorithm 1's box route uses the analytic surface.
+unbounded, leaving the extended sheet-recovery limitation noted above. The
+explicit factory-box PLC without a size selection remains comparatively slow
+(scoped probe 298.6s minimal) but no longer hangs; explicit fields and callbacks
+keep the established refinement path. Algorithm 1's box route uses the analytic
+surface.
 
 Verification, all with `--check-bounds=yes --compile=min -O0` unless noted:
 `geometry/model_meshadapt_functional_test.jl` passed 74/74 on Julia 1.12.7 and
