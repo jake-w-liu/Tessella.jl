@@ -22,10 +22,8 @@
 # types fall through — buffering all four keeps the request/response state
 # clean on a real server).
 #
-# Scope: the client-side protocol only. Tessella does not implement the ONELAB
-# server role, so `API.onelab.run` (which spawns a solver on the server side
-# upstream) keeps its documented rejection; `client_run` below is the client
-# direction — it asks the connected server to launch the sub-client.
+# `APIOnelabServer.jl` supplies the native server/process role;
+# `client_run` below asks its connected server to launch a sub-client.
 
 import Sockets
 import Sockets: TCPSocket
@@ -109,7 +107,7 @@ end
 # Iterate `order` first, then any keys added by direct dict mutation.
 @inline function _onelab_dict_items(dict,order)
     seen=Set{eltype(order)}(order)
-    return Iterators.flatten(((Pair(k,dict[k]) for k in order),
+    return Iterators.flatten(((Pair(k,dict[k]) for k in order if haskey(dict,k)),
                               (Pair(k,dict[k]) for k in keys(dict) if !(k in seen))))
 end
 
@@ -120,6 +118,15 @@ function _onelab_wire_f64(v::Real)
         "onelab wire: non-finite parameter value"))
     return @sprintf("%.16g",f)
 end
+
+# UTF-8 validity without the generic `isvalid(::AbstractString)` character
+# iteration. Under `--compile=min` that fallback allocates per character, so a
+# 4 MiB wire value took seconds to validate before the pump could observe its
+# deadline. ASCII is checked by Base's fast `isascii(::String)`; other strings
+# go through a UTF-aware regex, which is strict (rejects overlongs, surrogates
+# and out-of-range code points) and scans 4 MiB in milliseconds.
+const _ONELAB_UTF8_CHECK=r"^[\s\S]*$"
+_onelab_valid_text(s::AbstractString)=isascii(s) || occursin(_ONELAB_UTF8_CHECK,s)
 
 function _onelab_wire_encode(p::_OnelabWireParameter)
     parts=String[_ONELAB_WIRE_VERSION,p.kind===:number ? "number" : "string"]
@@ -152,17 +159,32 @@ function _onelab_wire_encode(p::_OnelabWireParameter)
         push!(parts,string(length(p.choices_s)))
         append!(parts,p.choices_s)
     end
+    all(part->_onelab_valid_text(part) && !occursin('\0',part),parts) || throw(ArgumentError(
+        "onelab wire: parameter strings must be valid NUL-free UTF-8"))
     return join(parts,'\0')
 end
 
+mutable struct _OnelabWireCursor
+    items::Vector{SubString{String}}
+    position::Int
+end
+
 function _onelab_wire_pop!(items,caller::AbstractString,what::AbstractString)
-    isempty(items) && throw(ArgumentError(
+    items.position<=length(items.items) || throw(ArgumentError(
         "$caller: truncated ONELAB parameter payload ($what)"))
-    return popfirst!(items)
+    result=String(items.items[items.position]);items.position+=1
+    return result
+end
+
+function _onelab_wire_count!(items,caller,what;width=1)
+    count=parse(Int,_onelab_wire_pop!(items,caller,what))
+    0<=count<=(length(items.items)-items.position+1)÷width || throw(ArgumentError(
+        "$caller: invalid ONELAB parameter count ($what)"))
+    return count
 end
 
 function _onelab_wire_pop_list!(items,caller,what,conv)
-    n=parse(Int,_onelab_wire_pop!(items,caller,what))
+    n=_onelab_wire_count!(items,caller,what)
     out=conv===nothing ? String[] :
         conv===Float64 ? Float64[] : Any[]
     for _ in 1:n
@@ -175,7 +197,8 @@ function _onelab_wire_pop_list!(items,caller,what,conv)
 end
 
 function _onelab_wire_decode(msg::AbstractString,caller::AbstractString)
-    items=collect(String,split(String(msg),'\0'))
+    _onelab_valid_text(msg) || throw(ArgumentError("$caller: ONELAB parameter is not valid UTF-8"))
+    items=_OnelabWireCursor(split(String(msg),'\0';keepempty=true),1)
     version=_onelab_wire_pop!(items,caller,"version")
     version==_ONELAB_WIRE_VERSION || throw(ArgumentError(
         "$caller: ONELAB protocol version $(repr(version)) (expected "*
@@ -190,13 +213,13 @@ function _onelab_wire_decode(msg::AbstractString,caller::AbstractString)
     p.changed_value=parse(Int,_onelab_wire_pop!(items,caller,"changedValue"))
     p.visible=parse(Int,_onelab_wire_pop!(items,caller,"visible"))!=0
     p.read_only=parse(Int,_onelab_wire_pop!(items,caller,"readOnly"))!=0
-    nattr=parse(Int,_onelab_wire_pop!(items,caller,"attributes"))
+    nattr=_onelab_wire_count!(items,caller,"attributes";width=2)
     for _ in 1:nattr
         k=_onelab_wire_pop!(items,caller,"attributes")
         _onelab_dict_put!(p.attributes,p.attr_order,k,
             _onelab_wire_pop!(items,caller,"attributes"))
     end
-    ncli=parse(Int,_onelab_wire_pop!(items,caller,"clients"))
+    ncli=_onelab_wire_count!(items,caller,"clients";width=2)
     for _ in 1:ncli
         k=_onelab_wire_pop!(items,caller,"clients")
         _onelab_dict_put!(p.clients,p.client_order,k,
@@ -209,7 +232,7 @@ function _onelab_wire_decode(msg::AbstractString,caller::AbstractString)
         p.step=parse(Float64,_onelab_wire_pop!(items,caller,"step"))
         p.index=parse(Int,_onelab_wire_pop!(items,caller,"index"))
         p.choices_f=_onelab_wire_pop_list!(items,caller,"choices",Float64)
-        nlab=parse(Int,_onelab_wire_pop!(items,caller,"labels"))
+        nlab=_onelab_wire_count!(items,caller,"labels";width=2)
         for _ in 1:nlab
             k=parse(Float64,_onelab_wire_pop!(items,caller,"labels"))
             _onelab_dict_put!(p.value_labels,p.label_order,k,
@@ -220,6 +243,8 @@ function _onelab_wire_decode(msg::AbstractString,caller::AbstractString)
         p.kind_name=_onelab_wire_pop!(items,caller,"kind")
         p.choices_s=_onelab_wire_pop_list!(items,caller,"choices",nothing)
     end
+    items.position==length(items.items)+1 || throw(ArgumentError(
+        "$caller: trailing ONELAB parameter members"))
     return p
 end
 
@@ -299,14 +324,13 @@ end
 # Blocking exact-length read: `read(sock,UInt8)` waits for data and throws
 # `EOFError` once the peer closes the stream.
 function _onelab_client_recv_exact(sock::TCPSocket,n::Int)
-    buf=Vector{UInt8}(undef,n)
-    got=0
-    while got<n
-        while bytesavailable(sock)>0 && got<n
-            buf[got+=1]=read(sock,UInt8)
-        end
-        got<n || break
-        buf[got+=1]=read(sock,UInt8)
+    n>=0 || throw(ArgumentError("onelab client: negative byte count"))
+    buf=UInt8[];sizehint!(buf,min(n,4096))
+    while length(buf)<n
+        count=min(n-length(buf),max(1,bytesavailable(sock)),65536)
+        data=read(sock,count)
+        isempty(data) && throw(EOFError())
+        append!(buf,data)
     end
     return buf
 end
@@ -630,8 +654,8 @@ _onelab_client_warning(c,msg)=_onelab_client_send_message(c,_ONELAB_MSG.WARNING,
 _onelab_client_error(c,msg)=_onelab_client_send_message(c,_ONELAB_MSG.ERROR,
     msg,"API.onelab.client_error")
 
-# Server-side .ol preprocessing request (`OLPARSE`) — true when the server
-# parsed the file.
+# Server-side .ol preprocessing request (`OLPARSE`). The reply reports whether
+# the template resolved a parameter; plain text can be written with false.
 function _onelab_client_preprocess(c,name,filename)
     caller="API.onelab.client_preprocess"
     _onelab_client_check(c,caller)

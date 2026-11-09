@@ -850,7 +850,8 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
                      _initial_views=nothing,_initial_view_tag_max=-1,
                      _initial_view_tag_callback=nothing,
                      _initial_onelab_numbers::Union{Nothing,Dict{String,Float64}}=nothing,
-                     _initial_onelab_strings::Union{Nothing,Dict{String,String}}=nothing)
+                     _initial_onelab_strings::Union{Nothing,Dict{String,String}}=nothing,
+                     _initial_onelab_runner=nothing)
     isfile(path) || throw(ArgumentError("execute_geo: missing file $path"))
     mesh_dim isa Bool && throw(ArgumentError("execute_geo: mesh_dim must not be Bool"))
     dim=try
@@ -880,6 +881,7 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
         (context.onelab_numbers=_initial_onelab_numbers)
     _initial_onelab_strings===nothing ||
         (context.onelab_strings=_initial_onelab_strings)
+    context.native_onelab_runner=_initial_onelab_runner
     context.native_context_lc=_initial_context_lc
     context.native_context_forced_bbox=_initial_context_forced_bbox
     context.native_mesh_error_callback=_initial_mesh_error_callback
@@ -8755,8 +8757,11 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             "execute_geo: OnelabRun")
         length(nargs) in (1,2) || _geo_yyerror!(context,
             "OnelabRun takes one or two arguments")
-        length(nargs) in (1,2) && _geo_yyerror!(context,
-            "OnelabRun: external ONELAB clients are not supported")
+        if length(nargs) in (1,2)
+            api=getfield(parentmodule(@__MODULE__),:API)
+            Base.invokelatest(getfield(api,:_onelab_geo_run!),m,context,
+                nargs[1],length(nargs)==2 ? nargs[2] : "",allocator_state)
+        end
         return
     elseif (mm=match(
             r"^Boolean(Difference|Union|Intersection|Fragments|Section|Fuse|Coherence|Common|Cut)\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
@@ -12684,9 +12689,8 @@ function _geo_exec_command!(m::GeoModel,word::AbstractString,
     elseif word=="CreateDir"
         mkpath(_geo_fix_relative_path(context.file_name,arg))
     elseif word=="OnelabRun"
-        # `Msg::Error`-level upstream diagnostic — the run continues.
-        _geo_yyerror!(context,
-            "OnelabRun: external ONELAB clients are not supported")
+        api=getfield(parentmodule(@__MODULE__),:API)
+        Base.invokelatest(getfield(api,:_onelab_geo_run!),m,context,arg,"",allocator_state)
         return nothing
     elseif word=="OptimizeMesh"
         # `GModel::optimizeMesh(how)` — the method is validated before any

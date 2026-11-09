@@ -756,6 +756,7 @@ Start a fresh process-global API session, discarding any prior model or cached
 mesh and restoring supported options to their defaults.
 """
 function initialize()
+    _onelab_cancel_session_runs!()
     lock(STATE_LOCK) do
         empty!(OPTIONS);merge!(OPTIONS,DEFAULT_OPTIONS)
         _reset_native_context_locked!()
@@ -767,6 +768,7 @@ function initialize()
         empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=0
         empty!(SESSION_PLUGINS)
         empty!(SESSION_ONELAB);empty!(SESSION_ONELAB_CHANGED)
+        _onelab_reset_server_state!()
         empty!(SESSION_INPUT_ERRORS[])
         _SESSION_START_TIME[]=time()
     end
@@ -775,6 +777,7 @@ end
 
 """End the API session, discard its model and cached mesh, and restore option defaults."""
 function finalize()
+    _onelab_cancel_session_runs!()
     lock(STATE_LOCK) do
         _native_lookup_reset_locked!()
         empty!(MODEL_SLOTS)
@@ -784,6 +787,7 @@ function finalize()
         empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=0
         empty!(SESSION_PLUGINS)
         empty!(SESSION_ONELAB);empty!(SESSION_ONELAB_CHANGED)
+        _onelab_reset_server_state!()
         empty!(SESSION_INPUT_ERRORS[])
     end
     return nothing
@@ -12137,7 +12141,7 @@ function open_geo!(path::AbstractString; mesh_dim::Integer=0)
         _model_locked()
         plan=_model_import_prepare(filename,mesh_dim;legacy=true)
         _model_import_publish!(plan;legacy=true)
-        plan.result
+        hasproperty(plan.result,:geo_execution) ? plan.result.geo_execution : plan.result
     end
 end
 
@@ -12299,9 +12303,9 @@ endpoints. `clear` removes matching parameters (all when empty);
 `set_changed`/`get_changed`/`clear_changed` expose the changed-name flags a
 solver client would poll, and `.geo` `DefineNumber`/`SetNumber`/`GetNumber`
 (and the string forms) exchange with this store through `open`/`merge`/
-`open_geo!`. `run` is the documented zero-client no-op for `run()` and a loud
-rejection for an actual client name or command — ONELAB solver clients are
-not implemented.
+`open_geo!`. `run` launches a named native ONELAB socket client, waits for its
+process and nested clients, and closes the owned process tree and sockets on
+completion or failure. With no arguments it runs the registered clients.
 """
 module onelab
 
@@ -12340,8 +12344,16 @@ get_number(name)=_onelab_get_number(name)
 get_string(name)=_onelab_get_string(name)
 "Clear the whole store, or remove the parameters matching `name`."
 clear(name="")=_onelab_clear(name)
-"Run an ONELAB client: `run()` is a no-op (no clients are registered); any name or command throws — solver clients are not implemented."
-run(name="",command="")=_onelab_run(name,command)
+"""
+    run(name="", command=""; timeout=Inf, connect_timeout=60,
+        max_message_bytes=64*1024*1024, max_clients=32)
+
+Run a native ONELAB client process. The command receives `-onelab name
+127.0.0.1:port`; a later call with just `name` reuses its registered command.
+The optional limits bound elapsed time, connection startup, queued frame bytes
+and simultaneous clients. An empty registry makes `run()` a no-op.
+"""
+run(name="",command="";kwargs...)=_onelab_run(name,command;kwargs...)
 "Mark parameter `name` as changed."
 set_changed(name)=_onelab_set_changed(name)
 "Return whether parameter `name` is marked changed."

@@ -140,13 +140,11 @@ end
         A.onelab.clear()
         @test isempty(A.onelab.get_names())
         @test !A.onelab.get_changed("b")
-        # run(): zero registered clients is the upstream no-op; a real client
-        # name or command line rejects loudly (solver clients unimplemented).
+        # An empty registry is a no-op; a name needs a registered command.
         @test A.onelab.run()===nothing
-        @test occursin("solver clients are not implemented",
+        @test occursin("no command registered",
             _errtext(()->A.onelab.run("GetDP")))
-        @test occursin("solver clients are not implemented",
-            _errtext(()->A.onelab.run("","getdp solver.pro")))
+        @test_throws ArgumentError A.onelab.run("",3)
         @test_throws ArgumentError A.onelab.run(3)
         @test_throws ArgumentError A.onelab.get_names(3)
         # The store needs an initialized session.
@@ -188,7 +186,7 @@ ds = DefineString("df = 9");
 UndefineConstant[pv];
 Point(1) = {rx, 0, 0, 1};
 """)
-        A.open_geo!(path)
+        result=A.open_geo!(path)
         # pv's server value (3) drove the script; the script mirrored it back
         # into `echo_pv`, and `UndefineConstant` removed `pv` itself.
         @test A.onelab.get_number("echo_pv")==[3.0]
@@ -198,8 +196,12 @@ Point(1) = {rx, 0, 0, 1};
         # A pre-existing string parameter is not overwritten by SetString...
         @test A.onelab.get_string("gw")==["kept"]
         @test A.onelab.get_string("gs")==["fresh"]
-        # DefineString stores the full spec string under the first-word name.
-        @test A.onelab.get_string("df")==["df = 9"]
+        # Gmsh 4.15.2 control: DefineString's first argument is its value.
+        # Without a Name option it registers no ONELAB parameter; the
+        # assignment still exposes the returned value as a GEO string.
+        @test result.strings["ds"]==["df = 9"]
+        @test occursin("no ONELAB string parameter",
+            _errtext(()->A.onelab.get_string("df")))
         # Script-set parameters arrive changed; the Point used rx=3.
         @test A.onelab.get_changed("qv")
         xyz=A.model.get_value(0,1,Float64[])

@@ -2284,6 +2284,9 @@ mutable struct _GeoNumericContext
     exec_stmt_lf::Vector{Bool}
     exec_stmt_line::Int
     exec_line::Int
+    # Opaque operation-owned ONELAB parameter store/runner, supplied by API
+    # staging or created lazily by standalone GEO execution.
+    native_onelab_runner::Any
 end
 _GeoNumericContext()=_GeoNumericContext(
     Dict{String,Float64}(),Dict{String,Vector{Float64}}(),Set{String}(),
@@ -2303,7 +2306,7 @@ _GeoNumericContext()=_GeoNumericContext(
     Union{Nothing,Vector{Float64}}[],UInt64(0),UInt64(0),
     Dict{Tuple{Int,Int},Vector{Int}}(),true,true,nothing,
     Dict{Int,Any}(),nothing,false,1.0,false,nothing,nothing,nothing,nothing,
-    nothing,nothing,nothing,nothing,Int[],Bool[],0,-1)
+    nothing,nothing,nothing,nothing,Int[],Bool[],0,-1,nothing)
 
 # Thrown where the upstream grammar fails to reduce — a bison syntax error.
 # `execute_geo` catches it per statement, records `syntax error (<token>)`
@@ -6214,12 +6217,14 @@ function _geo_string_function(name::String,inner::AbstractString,
     elseif name=="DefineString"
         isempty(args) && throw(ArgumentError(
             "$caller: DefineString requires an argument"))
-        spec=_geo_string_expr(args[1],context,caller)
-        # `DefineString("name [opts]")` registers an ONELAB string parameter;
-        # the leading word is the parameter name.
-        pname=first(split(spec,' '))
-        isempty(pname) || get!(context.onelab_strings,pname,spec)
-        return spec
+        # `DefineString(StringExprVar, StringParameterOptions...)` — the first
+        # argument is the value; `Name "..."` binds the ONELAB parameter.
+        # Gmsh 4.15.2 public control: `s=DefineString("fallback",Name "n")`
+        # returns the existing server value (empty projects to "") and
+        # `DefineString("df = 9")` (no options) registers nothing.
+        value=str_arg(1)
+        return _geo_define_onelab_string(context,value,
+            length(args)>1 ? args[2:end] : nothing,caller)
     elseif name=="NameStruct"
         # `tNameStruct LP NameStruct_Arg RP` — `#tag` or `ns::#tag`; the
         # reverse tag→name lookup is `get_key_struct_from_tag` (case 1/2 are
@@ -8279,6 +8284,13 @@ function _geo_option_number_read(context::_GeoNumericContext,family::String,
     return value
 end
 
+function _geo_onelab_empty_number(context::_GeoNumericContext,name)
+    runner=context.native_onelab_runner
+    runner===nothing && return false
+    api=getfield(parentmodule(@__MODULE__),:API)
+    return Base.invokelatest(getfield(api,:_onelab_geo_empty_number),runner,name)
+end
+
 # `Msg::ExchangeOnelabParameter` — the ONELAB name is `Name`'s value (default
 # `name` is NOT used; Gmsh errors when options exist without `Name`).
 function _geo_exchange_onelab_number!(context::_GeoNumericContext,name::String,
@@ -8324,6 +8336,9 @@ function _geo_exchange_onelab_number!(context::_GeoNumericContext,name::String,
     oname===nothing && return values
     if haskey(context.onelab_numbers,oname) &&
        get(fopts,"ReadOnly",[0.0])[1]==0.0
+        # An existing empty server number keeps its empty values while the
+        # local declaration uses its default. GetNumber still projects it to0.
+        _geo_onelab_empty_number(context,oname) && return values
         # Server value overrides the default (`val = ps[0].getValues()`).
         return Float64[context.onelab_numbers[oname]]
     end
@@ -8331,26 +8346,38 @@ function _geo_exchange_onelab_number!(context::_GeoNumericContext,name::String,
     return values
 end
 
+# `StringParameterOptions` exchange shared by `DefineString(...)` and the
+# string `DefineConstant` arm. Gmsh 4.15.2 control: the first argument is the
+# value; a `Name` option binds the ONELAB string parameter and an existing
+# server value overrides the default (an empty value projects to `""`). With
+# no `Name`, the value is returned and no parameter is registered.
+function _geo_define_onelab_string(context::_GeoNumericContext,value::String,
+                                   options,caller::AbstractString)
+    options===nothing && return value
+    oname=nothing;has_options=false
+    for opt in options
+        om=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(.*?)\s*$",String(strip(opt)))
+        om===nothing && continue
+        has_options=true
+        om.captures[1]=="Name" &&
+            (oname=_geo_eval_string(om.captures[2],context,caller))
+    end
+    oname===nothing && has_options &&
+        _geo_msg_error!(context,"From now on you need to use the `Name' " *
+                      "attribute to create a ONELAB parameter")
+    oname===nothing && return value
+    haskey(context.onelab_strings,oname) &&
+        return context.onelab_strings[oname]
+    context.onelab_strings[oname]=value
+    return value
+end
+
 function _geo_exchange_onelab_string!(context::_GeoNumericContext,name::String,
                                       value::String,options,
                                       caller::AbstractString)
     options===nothing && return nothing
-    oname=nothing
-    for opt in options
-        om=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(.*?)\s*$",String(strip(opt)))
-        om===nothing && continue
-        om.captures[1]=="Name" &&
-            (oname=_geo_eval_string(om.captures[2],context,caller))
-    end
-    oname===nothing &&
-        _geo_msg_error!(context,"From now on you need to use the `Name' " *
-                      "attribute to create a ONELAB parameter")
-    oname===nothing && return nothing
-    if haskey(context.onelab_strings,oname)
-        context.strings[name][1]=context.onelab_strings[oname]
-    else
-        context.onelab_strings[oname]=value
-    end
+    value=_geo_define_onelab_string(context,value,options,caller)
+    context.strings[name][1]=value
     return nothing
 end
 

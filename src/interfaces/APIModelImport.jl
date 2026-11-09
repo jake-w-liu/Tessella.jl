@@ -47,12 +47,10 @@ end
 function _model_import_execute_geo(path,dimension,options,diagnostics;legacy=false,
         initial_model=nothing,initial_mesh_context=nothing,initial_fields=nothing,
         view_receipt=nothing)
-    # Session ONELAB bridge: the script's ONELAB exchanges operate on detached
-    # scalar mirrors seeded from the parameter space (existing values win the
-    # script's DefineNumber defaults, like the upstream localGmsh client);
-    # only a successful run adopts the mirrors back into the session records,
-    # preserving the file frontends' failure atomicity.
-    onelab=_onelab_geo_seed()
+    # Socket clients and GEO scalar exchanges share a detached full store.
+    # Its vectors, metadata, consumers and command registry publish only after
+    # the model/UID/view preparation succeeds.
+    onelab=_onelab_geo_runner(;session=true)
     views=_geo_import_view_seed()
     view_receipt===nothing || (view_receipt[]=views)
     fields=initial_fields===nothing && legacy ? _model_merge_fields() : initial_fields
@@ -79,9 +77,11 @@ function _model_import_execute_geo(path,dimension,options,diagnostics;legacy=fal
         _initial_fields=fields,
         _initial_views=views.views,_initial_view_tag_max=views.maximum,
         _initial_view_tag_callback=tag->(views.next[]=max(views.next[],tag);nothing),
-        _initial_onelab_numbers=onelab[1],_initial_onelab_strings=onelab[2])
-    _onelab_geo_adopt!(onelab[1],onelab[2],onelab[3],onelab[4])
-    return result
+        _initial_onelab_numbers=onelab.numbers,_initial_onelab_strings=onelab.strings,
+        _initial_onelab_runner=onelab)
+    _onelab_geo_sync!(onelab)
+    return merge(NamedTuple{propertynames(result)}(Tuple(getproperty(result,name)
+        for name in propertynames(result))),(;onelab_stage=onelab,geo_execution=result))
 end
 
 function _model_import_lookup(receipt,model,caller)
@@ -315,6 +315,10 @@ function _model_import_rebind_views!(views,source,target)
 end
 
 function _model_import_publish!(plan;legacy=false)
+    if hasproperty(plan.result,:onelab_stage)
+        plan.result.onelab_stage.epoch==_ONELAB_SESSION_EPOCH[] || throw(ArgumentError(
+            "ONELAB: session was reset during file preparation"))
+    end
     current=_model_locked();index=_current_slot_index_locked()
     reuse=legacy || isempty(Model.model_entities(current)) &&
         isempty(_native_lookup_node_tags_locked()) && isempty(first(_native_lookup_element_bindings_locked()))
@@ -349,9 +353,10 @@ function _model_import_publish!(plan;legacy=false)
     # the CLI batch driver can report the run's true exit status. An
     # explicit `Exit 0` force-exits cleanly (upstream `Msg::Exit(n)` takes
     # `n` regardless of the flag), suppressing that file's channel.
-    if plan.result isa GeoExec.GeoExecution && plan.result.exit_code!==0
+    if hasproperty(plan.result,:exit_code) && plan.result.exit_code!==0
         append!(SESSION_INPUT_ERRORS[],plan.result.errors)
     end
+    hasproperty(plan.result,:onelab_stage) && _onelab_geo_adopt_runner!(plan.result.onelab_stage)
     return nothing
 end
 

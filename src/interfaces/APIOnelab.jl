@@ -10,12 +10,10 @@
 # All state reads/mutations run under `STATE_LOCK`.
 #
 # `.geo` interop: `execute_geo`'s `_GeoNumericContext.onelab_*` dicts are
-# scalar (first-value) mirrors of this store. `_onelab_geo_seed` fills detached
-# dicts from the session records before execution — an existing parameter
-# value wins the script's `DefineNumber` default like the upstream localGmsh
-# client sharing the server — and `_onelab_geo_adopt!` reconciles the
-# post-execution dicts back into records on success only, keeping the API
-# file frontends' failure-atomicity contract.
+# scalar (first-value) mirrors of an operation-owned full parameter store.
+# Existing values win `DefineNumber` defaults. The native process server and
+# GEO execution share this detached store, whose values, metadata and client
+# registry publish only after the file frontend's model preparation succeeds.
 #
 # The JSON payload is the ONELAB parameter array: objects with "type"
 # ("number"/"string"), "name", "values" and optional "min"/"max"/"step",
@@ -591,50 +589,11 @@ function _onelab_geo_adopt!(numbers::Dict{String,Float64},
                             strings::Dict{String,String},
                             seedn::Dict{String,Float64},
                             seeds::Dict{String,String})
-    for name in union(keys(numbers),keys(strings))
-        in_n=haskey(numbers,name);in_s=haskey(strings,name)
-        kind=:number
-        if in_n && in_s
-            nnew=!haskey(seedn,name) || seedn[name]!=numbers[name]
-            snew=!haskey(seeds,name) || seeds[name]!=strings[name]
-            kind=if nnew && !snew
-                :number
-            elseif snew && !nnew
-                :string
-            else
-                old=get(SESSION_ONELAB,name,nothing)
-                old===nothing ? :number : old.kind
-            end
-        elseif in_s
-            kind=:string
-        end
-        old=get(SESSION_ONELAB,name,nothing)
-        if kind===:number
-            v=numbers[name]
-            if old===nothing || old.kind!==:number
-                SESSION_ONELAB[name]=_onelab_number_record(name,Float64[v])
-                push!(SESSION_ONELAB_CHANGED,name)
-            elseif !(length(old.values_f)==1 && old.values_f[1]==v)
-                old.values_f=Float64[v]
-                push!(SESSION_ONELAB_CHANGED,name)
-            end
-        else
-            s=strings[name]
-            if old===nothing || old.kind!==:string
-                SESSION_ONELAB[name]=_onelab_string_record(name,String[s])
-                push!(SESSION_ONELAB_CHANGED,name)
-            elseif !(length(old.values_s)==1 && old.values_s[1]==s)
-                old.values_s=String[s]
-                push!(SESSION_ONELAB_CHANGED,name)
-            end
-        end
-    end
-    for name in collect(keys(SESSION_ONELAB))
-        if !haskey(numbers,name) && !haskey(strings,name)
-            delete!(SESSION_ONELAB,name)
-            delete!(SESSION_ONELAB_CHANGED,name)
-        end
-    end
+    runner=_onelab_geo_runner(;session=true)
+    runner.numbers=numbers;runner.strings=strings
+    runner.seed_numbers=seedn;runner.seed_strings=seeds
+    _onelab_geo_sync!(runner)
+    _onelab_geo_adopt_runner!(runner)
     return nothing
 end
 
@@ -652,7 +611,7 @@ function _onelab_set(data,format)
         for item in items
             p=_onelab_param_from_json(item,caller)
             SESSION_ONELAB[p.name]=p
-            push!(SESSION_ONELAB_CHANGED,p.name)
+            _onelab_mark_changed!(p.name)
         end
         return nothing
     end
@@ -695,7 +654,7 @@ function _onelab_set_number(name,values)
     lock(STATE_LOCK) do
         _model_locked()
         SESSION_ONELAB[key]=_onelab_number_record(key,vals)
-        push!(SESSION_ONELAB_CHANGED,key)
+        _onelab_mark_changed!(key)
         return nothing
     end
 end
@@ -708,7 +667,7 @@ function _onelab_set_string(name,values)
     lock(STATE_LOCK) do
         _model_locked()
         SESSION_ONELAB[key]=_onelab_string_record(key,vals)
-        push!(SESSION_ONELAB_CHANGED,key)
+        _onelab_mark_changed!(key)
         return nothing
     end
 end
@@ -743,10 +702,13 @@ function _onelab_clear(name)
     lock(STATE_LOCK) do
         _model_locked()
         if isempty(key)
-            empty!(SESSION_ONELAB);empty!(SESSION_ONELAB_CHANGED)
+            for n in collect(keys(SESSION_ONELAB))
+                _onelab_store_delete!(_ONELAB_SESSION_STORE,n)
+            end
+            empty!(SESSION_ONELAB_CHANGED)
         else
             for n in collect(keys(SESSION_ONELAB))
-                _onelab_glob_match(n,key) && delete!(SESSION_ONELAB,n)
+                _onelab_glob_match(n,key) && _onelab_store_delete!(_ONELAB_SESSION_STORE,n)
             end
             filter!(n->!_onelab_glob_match(n,key),SESSION_ONELAB_CHANGED)
         end
@@ -754,29 +716,18 @@ function _onelab_clear(name)
     end
 end
 
-# `run(name, command)` runs registered ONELAB solver clients upstream. No
-# solver-client machinery exists in this session; a bare `run()` is the
-# upstream-faithful no-op (zero registered clients) while any actual client
-# name or command line is rejected loudly instead of silently succeeding.
-function _onelab_run(name,command)
-    caller="API.onelab.run"
-    client=_onelab_check_name(name,caller)
-    cmd=_onelab_check_name(command,caller)
-    lock(STATE_LOCK) do
-        _model_locked()
-        return nothing
-    end
-    (isempty(client) && isempty(cmd)) && return nothing
-    throw(ArgumentError(
-        "$caller: ONELAB solver clients are not implemented"))
-end
+_onelab_run(name,command;kwargs...)=_onelab_run_session(name,command;kwargs...)
 
 function _onelab_set_changed(name)
     caller="API.onelab.set_changed"
     key=_onelab_check_name(name,caller)
     lock(STATE_LOCK) do
         _model_locked()
-        push!(SESSION_ONELAB_CHANGED,key)
+        if haskey(_ONELAB_SESSION_STORE.client_changed,key)
+            _onelab_store_set_client_changed!(_ONELAB_SESSION_STORE,key,true)
+        else
+            _onelab_mark_changed!(key)
+        end
         return nothing
     end
 end
@@ -786,7 +737,7 @@ function _onelab_get_changed(name)
     key=_onelab_check_name(name,caller)
     return lock(STATE_LOCK) do
         _model_locked()
-        return key in SESSION_ONELAB_CHANGED
+        return get(_ONELAB_SESSION_STORE.client_changed,key,key in SESSION_ONELAB_CHANGED)
     end
 end
 
@@ -794,6 +745,9 @@ function _onelab_clear_changed()
     lock(STATE_LOCK) do
         _model_locked()
         empty!(SESSION_ONELAB_CHANGED)
+        for name in keys(_ONELAB_SESSION_STORE.client_changed)
+            _onelab_store_set_client_changed!(_ONELAB_SESSION_STORE,name,false)
+        end
         return nothing
     end
 end
@@ -804,3 +758,4 @@ include("APIParser.jl")
 include("APIFltk.jl")
 include("APIGraphics.jl")
 include("APIOnelabClient.jl")
+include("APIOnelabServer.jl")
