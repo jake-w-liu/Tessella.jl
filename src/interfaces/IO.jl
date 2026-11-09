@@ -13965,7 +13965,7 @@ end
 # Split a card's first line into (mnemonic, fields, continuation-id, large?).
 # `fields[1]` is the mnemonic; fixed lines contribute fields 2–9 (columns
 # 9–72) plus the column 73–80 continuation id, large-field lines contribute
-# fields 2–4 plus the column 65–80 continuation id, and free lines are
+# fields 2–5 (columns 9–72) plus the column 73–80 continuation id, and free lines are
 # comma-split (an empty final field marks the continuation id).
 function _bdf_fields(line::AbstractString)
     if occursin(',',line)
@@ -13978,11 +13978,14 @@ function _bdf_fields(line::AbstractString)
     large=endswith(name,'*')
     if large
         fields=String[name]
-        for a in 17:16:64
+        for a in 9:16:72
             a>n && break
             push!(fields,strip(SubString(line,a,min(a+15,n))))
         end
-        contid=n>=65 ? strip(SubString(line,65,min(80,n))) : ""
+        while length(fields)<5
+            push!(fields,"")
+        end
+        contid=n>=73 ? strip(SubString(line,73,min(80,n))) : ""
         return name,fields,contid,true,false
     end
     fields=String[name]
@@ -14012,9 +14015,10 @@ function _bdf_cont_fields(line::AbstractString,large::Bool)
     end
     n=lastindex(line)
     w=large ? 16 : 8
-    tag=strip(SubString(line,1,min(w,n)))
+    # Both fixed formats reserve eight columns for the continuation tag.
+    tag=strip(SubString(line,1,min(8,n)))
     fields=String[]
-    for a in (w+1):w:(large ? 64 : 72)
+    for a in 9:w:72
         a>n && break
         push!(fields,strip(SubString(line,a,min(a+w-1,n))))
     end
@@ -14023,7 +14027,12 @@ function _bdf_cont_fields(line::AbstractString,large::Bool)
         parts=String[part for part in split(line)]
         return parts[1],parts[2:end],""
     end
-    contid=n>(large ? 64 : 72) ? strip(SubString(line,(large ? 65 : 73),min(80,n))) : ""
+    if large
+        while length(fields)<4
+            push!(fields,"")
+        end
+    end
+    contid=n>=73 ? strip(SubString(line,73,min(80,n))) : ""
     return tag,fields,contid
 end
 
@@ -14119,6 +14128,20 @@ function _bdf_emit_element!(name::AbstractString,candidates,fields,
             nodes[k]=row
         end
         ok || continue
+        # Generic solid mnemonics admit a linear or quadratic cell. If a
+        # higher-order node field was supplied, failure to resolve it must
+        # not discard that geometry by selecting the corner-only candidate.
+        for (_,higher_arity,higher_positions) in candidates
+            higher_arity>arity || continue
+            for p in higher_positions
+                (p in positions || p>length(fields)) && continue
+                token=strip(fields[p])
+                isempty(token) && continue
+                tryparse(Int,token)==0 && continue
+                throw(ArgumentError(
+                    "$caller: malformed $name higher-order connectivity"))
+            end
+        end
         chosen=(msh,nodes);break
     end
     chosen===nothing && throw(ArgumentError(

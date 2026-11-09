@@ -36,6 +36,7 @@ still required after the current implementation work.
 | Finite blends and anisotropic Restrict | Julia 1.12.7 minimal passed 705/705 and Julia 1.13.3 normal `-O2` passed 711/711, including 576 exact-dyadic oracle cases and six normal zero-allocation checks. Bounds enabled, actual exits 0. Finite cancellation is recovered, and selected entity restrictions retain the tensor metric and original scalar operator. |
 | Surface reader records/resources | Julia 1.12.7 and 1.13.3 minimal each passed 704/704 reader/neighbor checks; focused normal `-O2` checks passed 60/60 each. Bounds enabled, actual exits 0. OFF accepts separated headers/comments and validates face counts/indices; tiny truncated OFF/PLY2/PLY/VTK files reject before reserving their declared coordinate buffers. |
 | File dispatch inference boundary | Julia 1.12.7 minimal passed 259/259 CAD, GEO-view, import and merge checks, bounds enabled, actual exit 0. The same two dispatch boundaries completed the public STEP-open/mesh/query path on Julia 1.13.3 normal `-O2`, actual exit 0. |
+| BDF large fields/connectivity | Julia 1.12.7 and 1.13.3 minimal each passed 220/220 BDF/SU2 checks; the new 43 checks also passed under normal `-O2` on both runtimes. Bounds enabled, actual exits 0. Standard sixteen-column fields retain coordinates and large identifiers, and invalid quadratic connectivity cannot silently become a linear element. |
 
 Normal allocation on the bounded truncated-file probes fell from about 2.4MB
 to 2.5–4.7KB. The resource checks remain below 100KB for declared counts through
@@ -134,6 +135,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-scalar-metric-gate-{112-min,113-optimized}-20261109.log`.
 - `Tessella-io-surface-records-gate-{112,1133}-{min,normal}-20261109.log`.
 - `Tessella-file-dispatch-gate-112-min-20261109.log` and `Tessella-cad-dispatch-barrier-20261109.log`.
+- `Tessella-io-bdf-large-gate-{112,1133}-{min,normal}-20261109.log`.
 
 ## Release and earlier evidence
 
