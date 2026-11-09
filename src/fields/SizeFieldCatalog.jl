@@ -5525,32 +5525,124 @@ end
 
 # Closest point of triangle (a,b,c) to p, with the point itself — the
 # barycentric/edge Ericson case split shared by the feature-size probe.
-function _auto_closest_point_triangle(p,a,b,c)
+function _auto_closest_triangle_kernel(p,a,b,c)
     ab=_sub3(b,a);ac=_sub3(c,a);ap=_sub3(p,a)
     d1=_distance_dot3(ab,ap);d2=_distance_dot3(ac,ap)
-    (d1<=0 && d2<=0) && return _norm3(ap),a
+    (isfinite(d1) && isfinite(d2)) || return nothing
+    (d1<=0 && d2<=0) && return _norm3(ap),a,map(-,ap)
     bp=_sub3(p,b);d3=_distance_dot3(ab,bp);d4=_distance_dot3(ac,bp)
-    (d3>=0 && d4<=d3) && return _norm3(bp),b
+    (isfinite(d3) && isfinite(d4)) || return nothing
+    (d3>=0 && d4<=d3) && return _norm3(bp),b,map(-,bp)
     vc=d1*d4-d3*d2
+    _distance_region_uncertain(d1,d4,d3,d2,vc) && return nothing
     if vc<=0 && d1>=0 && d3<=0
         t=d1/(d1-d3);q=_addscaled3(a,ab,t)
-        return _norm3(_sub3(p,q)),q
+        direction=(t*ab[1]-ap[1],t*ab[2]-ap[2],t*ab[3]-ap[3])
+        return _norm3(direction),q,direction
     end
     cp=_sub3(p,c);d5=_distance_dot3(ab,cp);d6=_distance_dot3(ac,cp)
-    (d6>=0 && d5<=d6) && return _norm3(cp),c
+    (isfinite(d5) && isfinite(d6)) || return nothing
+    (d6>=0 && d5<=d6) && return _norm3(cp),c,map(-,cp)
     vb=d5*d2-d1*d6
+    _distance_region_uncertain(d5,d2,d1,d6,vb) && return nothing
     if vb<=0 && d2>=0 && d6<=0
         t=d2/(d2-d6);q=_addscaled3(a,ac,t)
-        return _norm3(_sub3(p,q)),q
+        direction=(t*ac[1]-ap[1],t*ac[2]-ap[2],t*ac[3]-ap[3])
+        return _norm3(direction),q,direction
     end
     va=d3*d6-d5*d4
+    _distance_region_uncertain(d3,d6,d5,d4,va) && return nothing
     if va<=0 && (d4-d3)>=0 && (d5-d6)>=0
-        t=(d4-d3)/((d4-d3)+(d5-d6));q=_addscaled3(b,_sub3(c,b),t)
-        return _norm3(_sub3(p,q)),q
+        t=(d4-d3)/((d4-d3)+(d5-d6));bc=_sub3(c,b)
+        q=_addscaled3(b,bc,t)
+        direction=(t*bc[1]-bp[1],t*bc[2]-bp[2],t*bc[3]-bp[3])
+        return _norm3(direction),q,direction
     end
     denom=inv(va+vb+vc);v=vb*denom;w=vc*denom
     q=_addscaled3(_addscaled3(a,ab,v),ac,w)
-    return _norm3(_sub3(p,q)),q
+    # The world closest point can be unrepresentable even when its local
+    # perpendicular displacement is accurate. Preserve that displacement
+    # independently for both distance and the feature-size normal cone.
+    normal=_distance_cross3(ab,ac)
+    height=_distance_dot3(ap,normal)
+    isfinite(height) || return nothing
+    if height isa Float64
+        magnitude=abs(ap[1]*normal[1])+abs(ap[2]*normal[2])+abs(ap[3]*normal[3])
+        magnitude>0 && abs(height)<=8eps(Float64)*magnitude && return nothing
+    end
+    normal_length=_norm3(normal)
+    signed_distance=height/normal_length
+    direction=map(x->-signed_distance*(x/normal_length),normal)
+    return abs(signed_distance),q,direction
+end
+
+@noinline function _auto_closest_triangle_exact(p,a,b,c)
+    return setprecision(BigFloat,256) do
+        R=Rational{BigInt}
+        result=_auto_closest_triangle_kernel(map(R,p),map(R,a),map(R,b),map(R,c))
+        result===nothing && error("AutomaticMeshSizeField: invalid closest-point geometry")
+        return Float64(result[1]),map(Float64,result[2]),map(Float64,result[3])
+    end
+end
+
+function _auto_closest_triangle(p,a,b,c)
+    result=_auto_closest_triangle_kernel(p,a,b,c)
+    if result===nothing || !isfinite(result[1]) || !all(isfinite,result[2]) || !all(isfinite,result[3])
+        return _auto_closest_triangle_exact(p,a,b,c)
+    end
+    return result
+end
+
+function _auto_closest_point_triangle(p,a,b,c)
+    distance,point,_=_auto_closest_triangle(p,a,b,c)
+    return distance,point
+end
+
+@inline function _auto_scaled_tangent(edge)
+    magnitude=maximum(abs,edge)
+    isfinite(magnitude) && magnitude>0 || return nothing
+    _,exponent=frexp(magnitude)
+    scaled=(ldexp(edge[1],-exponent),ldexp(edge[2],-exponent),ldexp(edge[3],-exponent))
+    for axis in 1:3
+        edge[axis]!=0 && scaled[axis]==0 && return nothing
+    end
+    return scaled
+end
+
+@noinline function _auto_feature_cone_exact(p,a,b,c)
+    return setprecision(BigFloat,256) do
+        R=Rational{BigInt};pp=map(R,p);aa=map(R,a);bb=map(R,b);cc=map(R,c)
+        normal=_distance_cross3(_sub3(bb,aa),_sub3(cc,aa))
+        normal_squared=_dot3(normal,normal)
+        iszero(normal_squared) && return false
+        result=_auto_closest_triangle_kernel(pp,aa,bb,cc)
+        result===nothing && return false
+        approach=_sub3(result[2],pp)
+        projection=_dot3(approach,normal)
+        return 4projection^2>=_dot3(approach,approach)*normal_squared
+    end
+end
+
+@inline function _auto_feature_cone(p,a,b,c,direction)
+    first=_auto_scaled_tangent(_sub3(b,a));second=_auto_scaled_tangent(_sub3(c,a))
+    (first===nothing || second===nothing) && return _auto_feature_cone_exact(p,a,b,c)
+    normal=_distance_cross3(first,second);normal_length=_norm3(normal)
+    # Nearly parallel rounded tangents can hide small vertex differences.
+    # Decide their angle from the original coordinates instead.
+    isfinite(normal_length) && normal_length>64eps(Float64) ||
+        return _auto_feature_cone_exact(p,a,b,c)
+    normal=(normal[1]/normal_length,normal[2]/normal_length,normal[3]/normal_length)
+    scale=maximum(abs,direction)
+    isfinite(scale) && scale>=floatmin(Float64) || return _auto_feature_cone_exact(p,a,b,c)
+    approach=(direction[1]/scale,direction[2]/scale,direction[3]/scale)
+    projection=abs(_dot3(approach,normal));threshold=.5*_norm3(approach)
+    difference=projection-threshold
+    # Normalization amplifies edge-subtraction error near parallel
+    # tangents. Resolve the resulting angular uncertainty exactly.
+    uncertainty=64eps(Float64)*max(1.0,inv(normal_length))*max(projection,threshold)
+    abs(difference)<=uncertainty &&
+        return _auto_feature_cone_exact(p,a,b,c)
+    return difference>=0
 end
 
 # Per-vertex distance to the nearest non-incident triangle whose closest
@@ -5611,19 +5703,12 @@ function _auto_lfs_search(tf::DistanceField,node::Int,p,
             a=(tf.triangles[1,j],tf.triangles[2,j],tf.triangles[3,j])
             b=(tf.triangles[4,j],tf.triangles[5,j],tf.triangles[6,j])
             c=(tf.triangles[7,j],tf.triangles[8,j],tf.triangles[9,j])
-            d,q=_auto_closest_point_triangle(p,a,b,c)
+            d,_,dq=_auto_closest_triangle(p,a,b,c)
             d<best || continue
             # Facing test: the approach direction must lie inside the
             # triangle's 60° normal cone (the medial-axis heuristic; coplanar
             # continuations approach in-plane and are not gaps).
-            ab=_sub3(b,a);ac=_sub3(c,a)
-            nx=ab[2]*ac[3]-ab[3]*ac[2]
-            ny=ab[3]*ac[1]-ab[1]*ac[3]
-            nz=ab[1]*ac[2]-ab[2]*ac[1]
-            nn=sqrt(nx*nx+ny*ny+nz*nz)
-            (isfinite(nn) && nn>0) || continue
-            dq=_sub3(q,p)
-            abs(_distance_dot3(dq,(nx,ny,nz)))>=0.5*d*nn || continue
+            _auto_feature_cone(p,a,b,c,dq) || continue
             best=d
         end
         return best

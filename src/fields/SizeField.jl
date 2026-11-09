@@ -380,6 +380,17 @@ end
     _distance_cross_component(a[3],b[1],a[1],b[3]),
     _distance_cross_component(a[1],b[2],a[2],b[1]))
 
+@inline _distance_region_uncertain(a,b,c,d,value)=false
+@inline function _distance_region_uncertain(a::Float64,b::Float64,c::Float64,
+                                             d::Float64,value::Float64)
+    left=a*b;right=c*d
+    magnitude=abs(left)+abs(right)
+    return !isfinite(value) || !isfinite(magnitude) ||
+        (a!=0 && b!=0 && abs(left)<floatmin(Float64)) ||
+        (c!=0 && d!=0 && abs(right)<floatmin(Float64)) ||
+        (magnitude>0 && abs(value)<=64eps(Float64)*magnitude)
+end
+
 @inline function _distance_segment_kernel(p, a, b)
     ab = _sub3(b,a)
     den = _distance_dot3(ab,ab)
@@ -424,6 +435,7 @@ function _distance_triangle_kernel(p, a, b, c)
     (isfinite(d3) && isfinite(d4)) || return Inf
     (d3 >= 0 && d4 <= d3) && return _norm3(bp)
     vc=d1*d4-d3*d2
+    _distance_region_uncertain(d1,d4,d3,d2,vc) && return Inf
     isfinite(vc) || return Inf
     if vc <= 0 && d1 >= 0 && d3 <= 0
         return _distance_segment_kernel(p,a,b)
@@ -432,11 +444,13 @@ function _distance_triangle_kernel(p, a, b, c)
     (isfinite(d5) && isfinite(d6)) || return Inf
     (d6 >= 0 && d5 <= d6) && return _norm3(cp)
     vb=d5*d2-d1*d6
+    _distance_region_uncertain(d5,d2,d1,d6,vb) && return Inf
     isfinite(vb) || return Inf
     if vb <= 0 && d2 >= 0 && d6 <= 0
         return _distance_segment_kernel(p,a,c)
     end
     va=d3*d6-d5*d4
+    _distance_region_uncertain(d3,d6,d5,d4,va) && return Inf
     isfinite(va) || return Inf
     if va <= 0 && (d4-d3) >= 0 && (d5-d6) >= 0
         return _distance_segment_kernel(p,b,c)

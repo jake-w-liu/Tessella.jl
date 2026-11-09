@@ -26,6 +26,16 @@ still required after the current implementation work.
 | `8a1f177` extreme nonlinear inverse | Subnormal derivatives and mixed-scale residuals: Julia 1.12.7 and 1.13.3 minimal, 168/168 each; Julia 1.13.3 normal `-O2`, 358/358 including existing ordinary warmed zero-allocation checks. Bounds enabled, exits 0. Exact recovery can allocate. |
 | `fbf3451` factory Box sizing | Five production assertions passed on both Julia lines with minimal compilation. The unit box retained its boundary facets and volume, produced 1350 valid tets, and had zero oversized edges among 1818 (largest normalized length 0.98943). The same fixture on clean `e18b989` failed two assertions, including normalized length 1.63031. |
 | Simplex-coordinate increment | Julia 1.12.7 and 1.13.3 normal `-O2` each passed 1026 coordinate/reference/locator assertions; minimal functional checks passed 80/80 each. A separate validation, quality, topology and transform audit passed 3124/3124 on each runtime. Bounds enabled, actual exits 0. |
+| Triangle distance and automatic sizing | Julia 1.12.7 minimal passed 71/71 regressions. Julia 1.13.3 normal `-O2` passed 39,643/39,643 regressions, neighboring distance/automatic-constructor checks and resource checks. Bounds enabled, actual exits 0. |
+
+Triangle region predicates now recover uncertain cancellation and underflow
+through the existing exact path. Automatic sizing retains local closest-point
+displacements and certifies scaled feature cones, including nearly parallel
+tangents and the 60-degree boundary. Sampled ordinary point/segment/triangle
+BVHs, automatic closest-point and gap queries each allocate zero warmed bytes;
+the exact long-edge fallback intentionally allocates 30,448 bytes. The normal
+neighbor scope stops before the unrelated GEO frontend campaign; unsuccessful
+broad compiler/interpreter runs are excluded from these receipts.
 
 Linear-simplex inversion now filters cancelled projection/Cramer numerators and
 subnormal denominators before using the existing exact solve. Tiny nonzero
@@ -68,6 +78,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-field-audit-gate-optimized-overflow-20261109.log`, `Tessella-field-focused-gate-112-min-overflow-final-20261109.log`, and `Tessella-field-focused-gate-113-min-overflow-20261109.log`.
 - `Tessella-box-production-sizing-112-final-20261109.log`, `Tessella-box-production-sizing-1133-20261109.log`, `Tessella-boundary-cache-112-min-20261109.log`, and `Tessella-boundary-cache-1133-optimized2-20261109.log`.
 - `Tessella-core-coordinate-112-optimized-20261109.log`, `Tessella-core-coordinate-1133-optimized2-20261109.log`, `Tessella-core-coordinate-{112,1133}-min-functional-20261109.log`, and `Tessella-core-independent-{112,1133}-optimized-20261109.log`.
+- `Tessella-distance-closest-regression-112-min-final-20261109.log` and `Tessella-closest-geometry-gate-113-optimized-finalsource-20261109.log`.
 
 ## Release and earlier evidence
 
