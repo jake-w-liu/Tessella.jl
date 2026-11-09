@@ -118,18 +118,30 @@ primitive Box keeps its analytic box surface for algorithm 1: the all-planar
 explicit PLC has no certified local-chart boundary transport. A scoped
 box-union probe produced 2295 valid tets under algorithm 1 (469.8s minimal)
 versus 28 for AUTO/Delaunay. Closed cone/torus AUTO probes also returned valid
-fills (48 tets at 11.6s and 483 tets at 351.0s, minimal compilation). A
-primitive Box without an explicit size field, background field, or callback now
-skips the boundary-extension interior refinement pass: its graded boundary
-nodes already feed the explicit fill, while the synthetic center-star edges
-made the scalar field refinement effectively unbounded.
-Explicit fields, background fields, and callbacks still refine; boxes with
-embedded products take the same skip because their boundary-extension
-refinement was likewise unbounded, leaving the extended sheet-recovery
-limitation noted above. The explicit factory-box PLC without a size selection
-remains comparatively slow (scoped probe 298.6s minimal) but no longer hangs;
-selected fields keep the established refinement path. Algorithm 1's box route
-uses the analytic surface.
+fills (48 tets at 11.6s and 483 tets at 351.0s, minimal compilation).
+
+Factory Boxes again extend boundary sizing into their interiors even when no
+explicit field, background field or callback is selected. The former skip
+left oversized radial edges. The private boundary view now reuses identical
+queries in a locked cache capped at 4096 entries; eviction preserves the view
+operator, and user fields/callbacks are evaluated independently. A 640-query
+minimal-compilation observation fell from 5.63s/298MB total allocation to
+0.65s/31MB with identical values. The complete production regression has
+152 boundary nodes, 319 final nodes and 1350 valid tets, conserved unit volume,
+identical boundary facets and zero oversized edges among 1818 edges (largest
+normalized length 0.98943). It passed all five assertions on Julia 1.12.7 and
+1.13.3 minimal compilation, exits 0; runtime was approximately 149s/147s.
+The same regression on clean `e18b989` reproduced two failures, including
+normalized length 1.63031, actual exit 1 (3 passed, 2 failed).
+The separate cache checks passed 13/13 on 1.12.7 minimal and 14/14 on 1.13.3
+normal `-O2`, both `-t4` with bounds checks, including the normal warmed
+zero-allocation check. Logs: `Tessella-box-production-sizing-112-final-20261109.log`,
+`Tessella-box-production-sizing-1133-20261109.log`,
+`Tessella-boundary-cache-112-min-20261109.log`, and
+`Tessella-boundary-cache-1133-optimized2-20261109.log` in `C:/Users/User/`.
+These are scoped correctness/resource observations; broader factory embedded
+sheet recovery and compiler/mesher performance still require investigation.
+Algorithm 1's Box route remains analytic at this checkpoint.
 
 Verification, all with `--check-bounds=yes --compile=min -O0` unless noted:
 `geometry/model_meshadapt_functional_test.jl` passed 74/74 on Julia 1.12.7 and

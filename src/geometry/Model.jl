@@ -8798,6 +8798,31 @@ end
 # interior vertices only; on this boundary-node field nothing caps them —
 # prescribed Point sizes reach the field through the boundary mesh density
 # itself.
+struct _VolumeBoundarySizeCache
+    view::PostViewField
+    values::Dict{NTuple{3,Float64},Float64}
+    lock::ReentrantLock
+end
+
+function (field::_VolumeBoundarySizeCache)(x,y,z)
+    # The private view is immutable during a fill. An edge's endpoints are
+    # queried repeatedly by adjacent tetrahedra; retain exact query results
+    # without memoizing the independently evaluated user fields or callback.
+    (x isa Float64 && y isa Float64 && z isa Float64) ||
+        return field_value(field.view,x,y,z)
+    point=(x,y,z)
+    return lock(field.lock) do
+        value=get(field.values,point,NaN)
+        isnan(value) || return value
+        value=field_value(field.view,x,y,z)
+        # Bound scratch storage independently of mesh size. Clearing affects
+        # only reuse: every miss still evaluates the unchanged view operator.
+        length(field.values)<4096 || empty!(field.values)
+        field.values[point]=value
+        return value
+    end
+end
+
 function _volume_boundary_size_field(m::GeoModel,t::Int,surface::Mesh,
                                      caller::AbstractString)
     mode=_resolved_extend_from_boundary(m,3,t)
@@ -8834,9 +8859,8 @@ function _volume_boundary_size_field(m::GeoModel,t::Int,surface::Mesh,
     # extension of boundary sizes into the volume.
     view=PostViewField(surface.coords,values;triangles=surface.tris,
                        crop_negative=false)
-    return FunctionSize(function(x,y,z)
-        field_value(view,x,y,z)
-    end)
+    return FunctionSize(_VolumeBoundarySizeCache(
+        view,Dict{NTuple{3,Float64},Float64}(),ReentrantLock()))
 end
 
 # Compose the effective 3-D size source for `mesh_model_volume`: an explicit
@@ -10880,15 +10904,7 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
                     [constraint[3] for constraint in native_constraints.embedded_faces])
         end
     end
-    if legacy_factory && m.meshing.algorithm_3d in (1,9) &&
-            !(haskey(m.box_extents,t) && size_field===nothing &&
-              options.inner_field===nothing &&
-              m.meshing.size_callback===nothing)
-        # A plain primitive Box already carries its graded boundary nodes into
-        # the explicit fill. The boundary-extension size field would refine the
-        # synthetic center-star edges through many scalar queries; skip that
-        # interior pass when no explicit field, background field, or callback
-        # was requested. Selected fields still drive the metric edge fill.
+    if legacy_factory && m.meshing.algorithm_3d in (1,9)
         metric_field=_volume_metric_edge_field(m,t,surface,size_field,options,caller)
         if metric_field!==nothing
             mesh=refine_to_size(mesh,metric_field;entity=(3,t),best_effort=true)
