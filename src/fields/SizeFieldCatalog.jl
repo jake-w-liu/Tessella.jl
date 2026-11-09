@@ -2338,9 +2338,9 @@ end
 # product maps reference coordinates to physical geometry, otherwise the
 # family's canonical first-order map applies. Pyramid families evaluate every
 # monomial Bergot-style as `uᵃvᵇwᶜ·(1-w)^(max(a,b)-a-b)`.
-# Native/certified-partition geometry keeps the translation-stable nodal
-# offset evaluator. A genuinely nonpartition scheme instead binds its actual
-# coordinate polynomial once, with exact dyadic coefficient accumulation.
+# Native/certified-partition geometry keeps translation-stable nodal offsets.
+# Native pyramid maps and nonpartition schemes bind their coordinate
+# polynomials once, with exact dyadic coefficient accumulation.
 struct _PVGeometryMap
     origin::NTuple{3,Float64}
     scale::Float64
@@ -2427,9 +2427,34 @@ function _pv_geometry_map(kind,coefficients,exponents,coords)
     return _PVGeometryMap(origin,scale,normalized,order,ratio)
 end
 
+function _pv_native_pyramid_geometry(coefficients,exponents,coords)
+    origin=(coords[1,1],coords[2,1],coords[3,1])
+    scale=_pv_control_scale(coords)
+    scale>0 || return nothing
+    R=Rational{BigInt}
+    relative=[(R(coords[axis,node])-R(origin[axis]))/R(scale)
+        for axis in 1:3,node in axes(coords,2)]
+    normalized=zeros(Float64,3,size(coefficients,2))
+    # High-order edge traces have large cancelling nodal coefficients. Bind
+    # their offset polynomial before queries instead of repeating the nodal
+    # sum at each Newton step. Every supplied dyadic term is retained.
+    for term in axes(coefficients,2),axis in 1:3
+        value=R(0)
+        for node in axes(coords,2)
+            value+=R(coefficients[node,term])*relative[axis,node]
+        end
+        normalized[axis,term]=Float64(value)
+    end
+    all(isfinite,normalized) || throw(ArgumentError(
+        "PostViewField: native pyramid geometry exceeds normalized Float64 range"))
+    return _PVGeometryMap(origin,scale,normalized,exponents,1.0)
+end
+
 function _PVSchemeCell(kind,flat,pyramid,cv,ev,cg,eg,coords,values;
                        native_geometry::Bool=false)
-    geometry=flat || native_geometry ? nothing : _pv_geometry_map(kind,cg,eg,coords)
+    geometry=flat ? nothing : native_geometry ?
+        (pyramid ? _pv_native_pyramid_geometry(cg,eg,coords) : nothing) :
+        _pv_geometry_map(kind,cg,eg,coords)
     return _PVSchemeCell(kind,flat,pyramid,cv,ev,cg,eg,coords,values,geometry)
 end
 

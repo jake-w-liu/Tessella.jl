@@ -43,7 +43,7 @@ end
     A.initialize()
     try
         A.option("General.Terminal",0)
-        for msh in (125,126)
+        for msh in (125,126,131)
             name="pyramid $msh"
             A.model.add(name)
             A.model.add_discrete_entity(3,7)
@@ -87,11 +87,30 @@ end
                 mktempdir() do directory
                     path=joinpath(directory,"native-pyramid.msh")
                     for binary in (0,1)
-                        A.option("PostProcessing.Binary",binary)
-                        A.view.write(view,path)
-                        imported=Tessella.read_mixed_msh(path)
-                        @test only(imported.blocks).msh==msh
-                        @test only(imported.data_sections).values==values
+                        @testset "msh=$msh $kind binary=$binary" begin
+                            A.option("PostProcessing.Binary",binary)
+                            A.view.write(view,path)
+                            imported=Tessella.read_mixed_msh(path)
+                            @test only(imported.blocks).msh==msh
+                            @test only(imported.data_sections).values==values
+                            previous=A.view.get_tags()
+                            A.open(path)
+                            reopened=only(setdiff(A.view.get_tags(),previous))
+                            result,reopened_distance=A.view.probe(reopened,physical...)
+                            @test length(result)==1
+                            if length(result)==1
+                                @test only(result)≈expected atol=2e-9
+                            end
+                            @test iszero(reopened_distance)
+                            derivative,derivative_distance=A.view.probe(
+                                reopened,physical...;gradient=true)
+                            @test length(derivative)==3
+                            if length(derivative)==3
+                                @test derivative≈expected_gradient atol=2e-8
+                            end
+                            @test iszero(derivative_distance)
+                            A.model.set_current(name)
+                        end
                     end
                 end
             end

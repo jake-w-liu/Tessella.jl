@@ -46,6 +46,7 @@ still required after the current implementation work.
 | Cylinder/Frustum geometry | Julia 1.12.7 minimal passed 812/812 and Julia 1.13.3 normal `-O2` passed 822/822 scalar, metric and axial checks, including ten sampled ordinary zero-allocation loops. Bounds enabled, actual exits 0. Predicates retain original finite axes/endpoints, strict Cylinder and inclusive Frustum boundaries, subnormal radial/axial information and representable geometry whose intermediate length overflows. |
 | X3D surface/export frontends | Julia 1.12.7 and 1.13.3 minimal each passed 750/750 format/frontend/neighbor checks; focused normal `-O2` checks passed 143/143 each. Bounds enabled, actual exits 0. Every supported triangle/quadrangle order retains its full primary surface; source and both target paths are checked before replacement. Canonical Print.X3d selection works through API, GEO Save and CLI. |
 | OCC lower incidence results | Julia 1.13.3 minimal passed 104/104 incidence, selector and existing IGES checks; Julia 1.12.7 minimal passed 39/39 focused incidence/selector checks. Bounds enabled, actual exits 0. `highestDimOnly=false` includes each imported root's actual lower topology with repeated shared incidences, ordered by dimension and excluding unrelated existing entities. |
+| Native pyramid coordinate binding | Julia 1.13.3 normal `-O2` passed 203/203 native/reopened query, gradient and field checks plus a 547/547 neighbor/resource scope. Julia 1.12.7 minimal passed 597/597 public/neighbor/scaled checks. Bounds enabled, actual exits 0. Twelve sampled stored-field queries allocate zero warmed bytes. Exact dyadic accumulation binds native pyramid coordinate offsets once, fixing P9 point-location cancellation while preserving the strict shared inverse certificates. |
 
 Normal allocation on the bounded truncated-file probes fell from about 2.4MB
 to 2.5–4.7KB. The resource checks remain below 100KB for declared counts through
@@ -60,6 +61,14 @@ values, and ASCII/binary data sections. This is Tessella's existing native
 incomplete-pyramid extension; it does not establish compatibility with Gmsh
 readers that reject these catalog types. Complete-pyramid and P2 behavior is
 covered by the neighboring checks.
+
+The subsequent P9 failure was in native point location before export as well
+as after binary reopen, with identical coordinates. Binding its nodal-offset
+geometry polynomial with exact dyadic accumulation fixes the cancellation.
+The default regression now includes native P9 plus value/gradient round trips
+through `API.open` in both data kinds and byte formats. The shared Newton
+solver and acceptance certificates are unchanged. A separate native-probe
+near-apex denominator-clamp discrepancy remains active investigation.
 
 Algorithm 1 now adapts actual sphere, cone and torus charts, and Box volumes
 consume their actual adapted faces. Auto selects the native producer on closed
@@ -164,6 +173,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-axial-field-gate-{112-min,113-optimized}-20261109.log`.
 - `Tessella-io-x3d-order-gate-{112,1133}-{min-final,normal}-20261109.log`.
 - `Tessella-occ-incidence-gate-{1127,1133}-20261109.log`.
+- `Tessella-pyramid-public-gate-1133-O2-20261109.log` and `Tessella-pyramid-neighbor-gate-{112-min,1133-O2}-20261109.log`.
 
 ## Release and earlier evidence
 
