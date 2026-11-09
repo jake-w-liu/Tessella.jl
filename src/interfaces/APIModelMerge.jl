@@ -198,7 +198,7 @@ function _model_merge_prepare(path)
             "reconstruction), which Tessella does not implement; " *
             "IO.read_xao/IO.read_brep expose the envelope census"))
     else
-        _model_import_execute_geo(path,0,options,diagnostics;legacy=true,
+        Base.invokelatest(_model_import_execute_geo,path,0,options,diagnostics;legacy=true,
             initial_model=model,initial_mesh_context=seed,initial_fields=fields,view_receipt)
     end
     final_authority=result.model.meshing.mesh_authority

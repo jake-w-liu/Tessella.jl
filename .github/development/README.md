@@ -35,6 +35,7 @@ still required after the current implementation work.
 | Closed MeshAdapt and recovery | Both Julia lines passed 129 closed/Box/quotient checks and 32 final edited-source/P2 checks. Nearby checks passed 74 MeshAdapt assertions on 1.12.7 and 87 algorithm-7 assertions on 1.13.3, with further current first-order/P2 rechecks. All minimal compilation with bounds, actual exits 0. Direct default Model factories passed 9/9 on 1.13.3. |
 | Finite blends and anisotropic Restrict | Julia 1.12.7 minimal passed 705/705 and Julia 1.13.3 normal `-O2` passed 711/711, including 576 exact-dyadic oracle cases and six normal zero-allocation checks. Bounds enabled, actual exits 0. Finite cancellation is recovered, and selected entity restrictions retain the tensor metric and original scalar operator. |
 | Surface reader records/resources | Julia 1.12.7 and 1.13.3 minimal each passed 704/704 reader/neighbor checks; focused normal `-O2` checks passed 60/60 each. Bounds enabled, actual exits 0. OFF accepts separated headers/comments and validates face counts/indices; tiny truncated OFF/PLY2/PLY/VTK files reject before reserving their declared coordinate buffers. |
+| File dispatch inference boundary | Julia 1.12.7 minimal passed 259/259 CAD, GEO-view, import and merge checks, bounds enabled, actual exit 0. The same two dispatch boundaries completed the public STEP-open/mesh/query path on Julia 1.13.3 normal `-O2`, actual exit 0. |
 
 Normal allocation on the bounded truncated-file probes fell from about 2.4MB
 to 2.5–4.7KB. The resource checks remain below 100KB for declared counts through
@@ -57,6 +58,13 @@ Staging preserves held models/views, existing mesh UIDs, fields and forced
 bounding context, with rollback on malformed input. The checks also cover
 subsequent meshing/transforms, suffix aliases and Unicode filenames. The first
 normal block took 9m23.8s cold; no CAD compiler improvement is claimed.
+
+A later measured inference boundary keeps the GEO execution graph out of
+unrelated file dispatch. In fresh Julia 1.13.3 normal `-O2` processes, the
+sampled public STEP-open call fell from 423.25s/96.87GB total allocation to
+253.58s/68.77GB. The variant also completed native curve meshing and node
+queries. Those allocation totals include compilation and are not resident
+memory or steady-state mesh costs. Cold compilation remains substantial.
 
 STL output now honors `Mesh.Binary` through API, GEO Save and CLI paths.
 Native binary output uses explicit little-endian records, Float32 geometry,
@@ -125,6 +133,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-meshadapt-source-gate-1127-20261109.log`, `Tessella-meshadapt-metric-source-gate-1133-20261109.log`, `Tessella-meshadapt-receipt-final-gate-{1127,1133}-20261109.log`, and `Tessella-meshadapt-direct-factory-gate-1133-20261109.log`.
 - `Tessella-scalar-metric-gate-{112-min,113-optimized}-20261109.log`.
 - `Tessella-io-surface-records-gate-{112,1133}-{min,normal}-20261109.log`.
+- `Tessella-file-dispatch-gate-112-min-20261109.log` and `Tessella-cad-dispatch-barrier-20261109.log`.
 
 ## Release and earlier evidence
 

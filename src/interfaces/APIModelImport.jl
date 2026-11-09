@@ -215,7 +215,10 @@ function _model_import_prepare(path,dimension;legacy=false)
             "reconstruction), which Tessella does not implement; " *
             "IO.read_xao/IO.read_brep expose the envelope census"))
     else
-        _model_import_execute_geo(path,dimension,options,diagnostics;legacy,view_receipt)
+        # A filename selects this parser at runtime. Keep GEO's meshing/plugin
+        # graph out of inference when opening an unrelated mesh or CAD file.
+        Base.invokelatest(_model_import_execute_geo,path,dimension,options,diagnostics;
+            legacy,view_receipt)
     end
     return _model_import_prepare_result(result,path,options,diagnostics;legacy,caller,
         geo_views=view_receipt[])
