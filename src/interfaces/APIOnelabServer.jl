@@ -13,6 +13,7 @@ mutable struct _OnelabRunJob
     eof_seen::Bool
     reader_done::Bool
     notified::Bool
+    exit_at::Float64
     started::Float64
 end
 
@@ -152,7 +153,7 @@ function _onelab_spawn_job!(engine,name::String,command::String,parent_socket=no
     listener=Sockets.listen(Sockets.localhost,0)
     _,port=Sockets.getsockname(listener)
     job=_OnelabRunJob(name,command,listener,nothing,nothing,nothing,
-        parent_socket,false,false,false,false,false,_onelab_monotonic_time())
+        parent_socket,false,false,false,false,false,0.0,_onelab_monotonic_time())
     index=reusable===nothing ? length(engine.jobs)+1 : reusable
     reusable===nothing ? push!(engine.jobs,job) : (engine.jobs[index]=job)
     try
@@ -325,6 +326,7 @@ function _onelab_pump!(engine)
             process=job.process
             process===nothing && throw(ArgumentError("API.onelab.run: missing client process"))
             if _onelab_process_exited(process)
+                job.exit_at==0.0 && (job.exit_at=_onelab_monotonic_time())
                 # Let already queued STOP/parameter frames drain before judging
                 # an exit. The reader reports EOF or STOP without waiting on us.
                 if isready(engine.events)
@@ -332,8 +334,18 @@ function _onelab_pump!(engine)
                 end
                 process.exit_code==0 || throw(ArgumentError(
                     "API.onelab.run: client $(repr(job.name)) exited with status $(process.exit_code)"))
-                job.connected || throw(ArgumentError(
-                    "API.onelab.run: client $(repr(job.name)) exited without connecting"))
+                if !job.connected
+                    # A very short client can exit before its reader task is
+                    # scheduled to queue START (observed on Linux). Give the
+                    # reader a bounded turn; a genuinely non-connecting client
+                    # still reports the dedicated error.
+                    if !job.eof_seen && !job.reader_done &&
+                            _onelab_monotonic_time()-job.exit_at<0.5
+                        complete=false;continue
+                    end
+                    throw(ArgumentError(
+                        "API.onelab.run: client $(repr(job.name)) exited without connecting"))
+                end
                 if !job.stopped && !job.eof_seen && !job.reader_done
                     complete=false;continue
                 end

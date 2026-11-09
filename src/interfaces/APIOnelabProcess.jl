@@ -131,9 +131,19 @@ function _onelab_process_start(command::String,arguments::Vector{String};
     if !Sys.iswindows()
         words=Base.shell_split(command)
         isempty(words) && throw(ArgumentError("$caller: command must name an executable"))
-        program=Cmd(vcat(words,arguments);dir=directory,detach=true)
-        process=run(pipeline(program;stdin=devnull,
-            stdout=quiet ? devnull : stdout,stderr=quiet ? devnull : stderr);wait=false)
+        # The Vector{String} constructor does not accept keywords; wrap the
+        # resulting command in the keyword-bearing Cmd constructor.
+        program=Cmd(Cmd(vcat(words,arguments));dir=directory,detach=true)
+        process=try
+            run(pipeline(program;stdin=devnull,
+                stdout=quiet ? devnull : stdout,
+                stderr=quiet ? devnull : stderr);wait=false)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa Base.IOError && throw(ArgumentError(
+                "$caller: cannot launch client: $(err.msg)"))
+            rethrow()
+        end
         return _OnelabOwnedProcess(process,C_NULL,C_NULL,Int(getpid(process)),nothing,false,ReentrantLock())
     end
 

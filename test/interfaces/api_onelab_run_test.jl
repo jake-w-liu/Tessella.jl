@@ -58,6 +58,13 @@ end
     fixture=joinpath(@__DIR__,"..","fixtures","onelab_native_client.jl")
     command(args...)=join(quote_arg.(String[Base.julia_cmd().exec[1],
         "--startup-file=no","--compile=min","-O0",fixture,args...])," ")
+    # `.geo` string literals use single quotes in these scripts; POSIX
+    # `shell_escape_posixly` would embed single quotes and break the literal.
+    # Double-quoted arguments keep both platform command strings valid.
+    geo_quote(value)=Sys.iswindows() ? A._onelab_windows_quote(String(value)) :
+        "\""*replace(String(value),'\\'=>"\\\\",'"'=>"\\\"")*"\""
+    geo_command(args...)=join(geo_quote.([String(Base.julia_cmd().exec[1]),
+        "--startup-file=no","--compile=min","-O0",fixture,args...])," ")
     A.initialize();A.option("General.Terminal",0)
     try
         mktempdir() do directory
@@ -149,7 +156,7 @@ end
             # value preserves vectors, and a later failure adopts no writes.
             A.onelab.set_number("Input/seed",[2.,3.])
             geo=joinpath(directory,"runner.geo")
-            run_command=command("basic",output)
+            run_command=geo_command("basic",output)
             write(geo,"OnelabRun(\"geo client\",'$run_command');\n"*
                 "SetNumber(\"Output/geo\",GetNumber(\"Output/λ\"));\n")
             @test A.merge(geo)===nothing
