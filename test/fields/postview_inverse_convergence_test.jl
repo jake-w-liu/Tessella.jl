@@ -104,4 +104,15 @@ end
         A.finalize()
     end
 end
+
+@testset "regular volume inversion damps corrections before Float64 conversion" begin
+    # At the origin the diagonal Jacobian is alpha*I, with exact positive
+    # determinant. Its inverse applied to these finite queries overflows
+    # Float64 before any ordinary line search can reduce the correction.
+    for alpha in (1e-320,nextfloat(0.)), parameters in ((.125,.25,.125),(.25,.1,.2),(1e-40,.125,.25))
+        field=small_parameter_field(3,alpha)
+        query=map(t->t^3+alpha*t,parameters)
+        @test isapprox(F.field_value(field,query...),parameters[1];rtol=1e-8,atol=0.)
+    end
+end
 end

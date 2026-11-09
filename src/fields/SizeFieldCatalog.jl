@@ -4287,9 +4287,14 @@ end
     aa=map(R,a);bb=map(R,b);cc=map(R,c);rr=map(R,rhs)
     determinant=_pv_exact_det(aa,bb,cc)
     iszero(determinant) && return nothing
-    step=(Float64(_pv_exact_det(rr,bb,cc)/determinant),
-        dim>=2 ? Float64(_pv_exact_det(aa,rr,cc)/determinant) : 0.0,
-        dim==3 ? Float64(_pv_exact_det(aa,bb,rr)/determinant) : 0.0)
+    corrections=(_pv_exact_det(rr,bb,cc)/determinant,
+        dim>=2 ? _pv_exact_det(aa,rr,cc)/determinant : R(0),
+        dim==3 ? _pv_exact_det(aa,bb,rr)/determinant : R(0))
+    # A regular map can need an initial Newton correction above floatmax.
+    # Dampen its exact direction before conversion, just as for a virtual
+    # normal frame, so line search can reach an ordinary finite parameter.
+    factor=max(R(1),maximum(abs,corrections)/2)
+    step=map(x->Float64(x/factor),corrections)
     return all(isfinite,step) ? step : nothing
 end
 
@@ -4429,6 +4434,11 @@ function _pv_scheme_inverse_certificate(cell,u,v,w,query,base,scale;precise=fals
     return (u::Float64,v::Float64,w::Float64)
 end
 
+@noinline function _pv_inverse_exact_decrease(residual,trial)
+    R=Rational{BigInt};rr=map(R,residual);tt=map(R,trial)
+    return _dot3(tt,tt)<_dot3(rr,rr)
+end
+
 function _pv_scheme_inverse(cell,query,base,scale)
     dim=_pv_scheme_dim(cell.kind)
     u=0.0;v=0.0;w=0.0
@@ -4453,10 +4463,12 @@ function _pv_scheme_inverse(cell,query,base,scale)
         if largest>2.0
             step=(2.0*(step[1]/largest),2.0*(step[2]/largest),2.0*(step[3]/largest))
         end
+        merit_residual=residual
         if precise
             projection=_pv_virtual_projection(cell,du,dv,residual)
             projection===nothing && return nothing
-            residual_norm=hypot(projection[3]...)
+            merit_residual=projection[3]
+            residual_norm=hypot(merit_residual...)
         end
         delta_u,delta_v,delta_w=step
         # A tiny backtracked step cannot establish convergence. Require the
@@ -4492,17 +4504,25 @@ function _pv_scheme_inverse(cell,query,base,scale)
                 end
                 if all(isfinite,trial)
                     trial_residual=_sub3(query,trial)
-                    trial_norm=if precise
+                    merit_trial=if precise
                         tangent,second,_=_pv_scheme_jacobian(cell,un,vn,wn,base,scale)
                         projection=_pv_virtual_projection(cell,tangent,second,trial_residual)
-                        projection===nothing ? Inf : hypot(projection[3]...)
+                        projection===nothing ? (Inf,Inf,Inf) : projection[3]
                     else
-                        hypot(trial_residual...)
+                        trial_residual
                     end
+                    trial_norm=hypot(merit_trial...)
                     # Armijo decrease resolves attracting Newton cycles;
                     # scale by intrinsic motion so permitted normal residual
                     # does not demand an impossible relative reduction.
-                    if trial_norm<residual_norm &&
+                    # A tiny coordinate's progress can be hidden beneath
+                    # another coordinate's unchanged residual in hypot.
+                    # Resolve only rounded norm ties using exact squares;
+                    # the final certificate still checks every coordinate.
+                    decreases=trial_norm<residual_norm ||
+                        (trial_norm==residual_norm && merit_trial!=merit_residual &&
+                         _pv_inverse_exact_decrease(merit_residual,merit_trial))
+                    if decreases &&
                        trial_norm<=residual_norm*(1.0-1e-4*alpha*slope)
                         u=un;v=vn;w=wn;advanced=true
                         break

@@ -60,6 +60,22 @@ These scoped receipts do not qualify the subsequent closed-chart, view,
 box-sizing or oversized-Newton-vector work. A combined package run remains
 required after those changes.
 
+Regular volume maps with subnormal derivatives exposed a second inverse
+failure: the exact Newton correction overflowed during Float64 conversion.
+The exact vector is now damped by one positive factor before conversion.
+When a tiny coordinate improves beneath another coordinate's unchanged
+residual, rounded equal merit norms are compared with exact squared norms;
+the intrinsic-coordinate acceptance certificate remains mandatory.
+Six additional volume cases cover ordinary and tiny neighboring coordinates.
+Final scoped checks: Julia 1.12.7 and 1.13.3 minimal compilation, 168/168 each;
+Julia 1.13.3 normal `-O2`, 358/358 including the existing ordinary warmed
+zero-allocation checks; all bounds enabled, actual exits 0. Logs:
+`Tessella-field-focused-gate-112-min-overflow-final-20261109.log`,
+`Tessella-field-focused-gate-113-min-overflow-20261109.log`, and
+`Tessella-field-audit-gate-optimized-overflow-20261109.log` in `C:/Users/User/`.
+Exact-recovery allocations remain intentional; these are not all-input or
+whole-package performance claims.
+
 ### GEO plugin publication and combined field bindings
 
 Fresh regressions found five further frontend defects: a plugin detached held
