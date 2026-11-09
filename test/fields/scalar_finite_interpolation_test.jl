@@ -54,4 +54,22 @@ end
         @test F.field_value(ball,h,h,0.)≈1+sqrt(2.) rtol=8eps(Float64)
     end
 end
+
+@testset "Finite interpolation retains small endpoint and midpoint values" begin
+    R=Rational{BigInt}
+    for (a,b,t) in ((-1e16,1e16+2,.5),(1e16,1.,prevfloat(1.)),
+                    (1.,1e16,eps()/2),(-1e16,-1.,prevfloat(1.)))
+        field=F.ThresholdField(F.MathEvalField("x");dist_min=0.,dist_max=1.,size_min=a,size_max=b)
+        expected=Float64(R(a)+R(t)*(R(b)-R(a)))
+        @test F.field_value(field,t,0.,0.)≈expected rtol=8eps(Float64) atol=0.
+    end
+    box=F.BoxField(0.,0.,0.,0.,0.,0.;vin=1e16,vout=1.,thickness=1.)
+    t=prevfloat(1.);expected=Float64(R(1e16)+R(t)*(R(1.)-R(1e16)))
+    @test F.field_value(box,t,0.,0.)≈expected rtol=8eps(Float64)
+    ball=F.BallField((0.,0.,0.),1.;vin=-1e16,vout=1e16+2,thickness=1.)
+    @test F.field_value(ball,1.5,0.,0.)==1.
+    frustum=F.FrustumField((0.,0.,0.),(0.,0.,1.);inner_v1=-1e16,outer_v1=-1e16,
+        inner_v2=1e16+2,outer_v2=1e16+2)
+    @test F.field_value(frustum,.5,0.,.5)==1.
+end
 end

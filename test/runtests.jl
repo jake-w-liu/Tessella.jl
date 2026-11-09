@@ -40,6 +40,7 @@ include("functional/fixtures.jl")
         "core/mesh_coordinate_cancellation_test.jl",
         "fields/distance_triangle_translation_test.jl",
         "fields/scalar_finite_interpolation_test.jl",
+        "fields/restrict_anisotropic_test.jl",
         "fields/postview_inverse_convergence_test.jl",
         "fields/postview_thin_geometry_test.jl",
         "fields/postview_nonpartition_geometry_test.jl",

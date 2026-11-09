@@ -33,6 +33,7 @@ still required after the current implementation work.
 | Finite scalar transitions | Julia 1.12.7 minimal passed 72/72 and Julia 1.13.3 normal `-O2` passed 76/76, including four zero-allocation ordinary queries. Bounds enabled, actual exits 0. Exact recovery handles overflowed interpolation spans and Ball/Box distances, including subnormal transitions; sigmoid semantics are preserved. |
 | OFF/PLY2 surface orders | Julia 1.12.7 and 1.13.3 minimal each passed 510/510 surface-order and neighboring format checks, bounds enabled, actual exits 0. Catalog-based corner projection covers complete/incomplete orders 1–10, excludes volume cells, and rejects corrupt sources before replacing the destination. |
 | Closed MeshAdapt and recovery | Both Julia lines passed 129 closed/Box/quotient checks and 32 final edited-source/P2 checks. Nearby checks passed 74 MeshAdapt assertions on 1.12.7 and 87 algorithm-7 assertions on 1.13.3, with further current first-order/P2 rechecks. All minimal compilation with bounds, actual exits 0. Direct default Model factories passed 9/9 on 1.13.3. |
+| Finite blends and anisotropic Restrict | Julia 1.12.7 minimal passed 705/705 and Julia 1.13.3 normal `-O2` passed 711/711, including 576 exact-dyadic oracle cases and six normal zero-allocation checks. Bounds enabled, actual exits 0. Finite cancellation is recovered, and selected entity restrictions retain the tensor metric and original scalar operator. |
 
 Algorithm 1 now adapts actual sphere, cone and torus charts, and Box volumes
 consume their actual adapted faces. Auto selects the native producer on closed
@@ -117,6 +118,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-scalar-interpolation-gate-112-min-final-20261109.log` and `Tessella-scalar-interpolation-gate-113-optimized-final-20261109.log`.
 - `Tessella-io-surface-order-gate-112-min-final-20261109.log` and `Tessella-io-surface-order-gate-1133-min-public-20261109.log`.
 - `Tessella-meshadapt-source-gate-1127-20261109.log`, `Tessella-meshadapt-metric-source-gate-1133-20261109.log`, `Tessella-meshadapt-receipt-final-gate-{1127,1133}-20261109.log`, and `Tessella-meshadapt-direct-factory-gate-1133-20261109.log`.
+- `Tessella-scalar-metric-gate-{112-min,113-optimized}-20261109.log`.
 
 ## Release and earlier evidence
 

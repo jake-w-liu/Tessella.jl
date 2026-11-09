@@ -132,8 +132,20 @@ end
 @inline function _field_lerp(a,b,t)
     t==0 && return a
     t==1 && return b
-    value=muladd(b-a,t,a)
-    return isfinite(value) ? value : _field_lerp_exact(a,b,t)
+    difference=b-a
+    isfinite(difference) || return _field_lerp_exact(a,b,t)
+    if signbit(a)==signbit(b) || a==0 || b==0
+        # Evaluate from the nearer endpoint so its small value survives a
+        # wide range, e.g. 1e16 to1 near t=1.
+        return t<=.5 ? muladd(difference,t,a) : muladd(-difference,1-t,b)
+    end
+    value=muladd(difference,t,a)
+    abs(value)<=64eps(Float64)*max(abs(a),abs(b)) && return _field_lerp_exact(a,b,t)
+    # Recover the low part of the rounded subtraction before interpolating
+    # opposite signs. Deep cancellation above requires exact dyadics.
+    virtual_a=b-difference
+    error=(b-(difference+virtual_a))+(virtual_a-a)
+    return muladd(error,t,value)
 end
 
 @noinline function _field_interval_ratio_exact(value,lower,upper)

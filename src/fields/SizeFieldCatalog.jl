@@ -2017,8 +2017,17 @@ function _entity_hit(dim,tag,points,curves,surfaces,volumes,include_boundary)
     return false
 end
 
-"""Gmsh `Restrict`: apply `input` only on listed entity tags."""
+"""
+Gmsh `Restrict`: apply `input` only on listed entity tags. Anisotropic
+inputs retain their metric and their distinct scalar operator.
+"""
 struct RestrictField{F<:AbstractField} <: AbstractSizeField
+    input::F
+    points::Set{Int}; curves::Set{Int}; surfaces::Set{Int}; volumes::Set{Int}
+    include_boundary::Bool; include_embedded::Bool
+end
+
+struct RestrictAnisoField{F<:AbstractAnisoField} <: AbstractAnisoField
     input::F
     points::Set{Int}; curves::Set{Int}; surfaces::Set{Int}; volumes::Set{Int}
     include_boundary::Bool; include_embedded::Bool
@@ -2029,6 +2038,8 @@ function RestrictField(input::AbstractField; points=(), curves=(), surfaces=(), 
                        entity_embedded=Dict{Tuple{Int,Int},Vector{Tuple{Int,Int}}}())
     sets=_expanded_entity_sets(points,curves,surfaces,volumes,include_boundary,
         include_embedded,entity_boundaries,entity_embedded,"RestrictField")
+    input isa AbstractAnisoField && return RestrictAnisoField(
+        input,sets...,include_boundary,include_embedded)
     return RestrictField{typeof(input)}(input,sets...,include_boundary,include_embedded)
 end
 function field_value(field::RestrictField,x,y,z)
@@ -2041,6 +2052,24 @@ function field_value(field::RestrictField,x,y,z,entity::Tuple{T,U}) where
     _entity_hit(dim,tag,field.points,field.curves,field.surfaces,field.volumes,
                 field.include_boundary) && return field_value(field.input,x,y,z,entity)
     return GMSH_MAX_SIZE
+end
+
+field_value(field::RestrictAnisoField,x,y,z)=field_value(field.input,x,y,z)
+field_value(field::RestrictAnisoField,x,y,z,::Nothing)=field_value(field.input,x,y,z)
+function field_value(field::RestrictAnisoField,x,y,z,entity::Tuple{T,U}) where
+        {T<:Integer,U<:Integer}
+    dim=Int(entity[1]);tag=Int(entity[2])
+    _entity_hit(dim,tag,field.points,field.curves,field.surfaces,field.volumes,
+                field.include_boundary) && return field_value(field.input,x,y,z,entity)
+    return GMSH_MAX_SIZE
+end
+metric_at(field::RestrictAnisoField,x,y,z)=metric_at(field.input,x,y,z)
+function metric_at(field::RestrictAnisoField,x,y,z,entity::Tuple{T,U}) where
+        {T<:Integer,U<:Integer}
+    dim=Int(entity[1]);tag=Int(entity[2])
+    _entity_hit(dim,tag,field.points,field.curves,field.surfaces,field.volumes,
+                field.include_boundary) && return metric_at(field.input,x,y,z,entity)
+    return isotropic_metric(GMSH_MAX_SIZE)
 end
 
 """Gmsh `Constant`: `VIn` on listed entities, `VOut` elsewhere."""
