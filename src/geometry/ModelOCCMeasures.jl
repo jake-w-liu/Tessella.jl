@@ -342,8 +342,8 @@ end
 # Plane-face area, 3-D centroid and second-moment tensor T_F = ∬_F r⊗r
 # dA — the tensor via the signed fan triangulation from the face's own
 # shoelace centroid (exact for any line-bounded polygon, holes included;
-# the midpoint rule integrates quadratics exactly). Conic-edged solid
-# faces fall back to (area, centroid, nothing).
+# the midpoint rule integrates quadratics exactly). `centered=true`
+# evaluates ∬_F(r-c)⊗(r-c)dA. Conic/spline wires use boundary 1-forms.
 function _model_occ_plane_stats(kernel,id;want_tensor=false,
                                 caller="OCC.get_center_of_mass",
                                 face_rec=nothing,centered=false)
@@ -1494,18 +1494,17 @@ _model_occ_get_center_of_mass(m,dim,tag)=last(
 
 # ---- second moments: get_matrix_of_inertia -----------------------------
 #
-# Upstream's `GProps::MatrixOfInertia` is the inertia tensor about the
-# origin, I = tr(Q)I₃ − Q with Q = ∫r⊗r dμ under the same per-dim
-# Linear/Surface/VolumeProperties switch. Curves and faces integrate
-# r⊗r per record — closed forms for line/circle and the plane tensor
-# path, GL8 panels for the quadrature families (the canonical quadric
-# domain, NURBS knot spans). Solids reuse the measure split: compact
-# `primitive` records in closed form (sphere 2mr²/5·I, cylinder/cone
-# axial forms through the ∭x²dV/∭z²dV layer integrals), and all-plane
-# shells through the divergence theorem — ∭x_i x_j dV = n_k∬x_i x_j x_k
-# dA/5 with a signed-fan cubic moment exact for line-bounded polygons
-# (the degree-3 Stroud rule on the same fan). Conic wires, quadric-
-# bounded shells and other unsupported boundaries reject like
+# Gmsh's `GProps::MatrixOfInertia` is the centroidal inertia tensor,
+# I = tr(Qc)I₃ − Qc with Qc = ∫(r-c)⊗(r-c)dμ (public 4.15.2 control: a unit
+# box is diag(1/6), not the origin-moment diag(2/3) with −1/4 products).
+# Curves and faces integrate the centered tensor per record — closed forms
+# for line/circle, the plane fan or conic boundary 1-forms, and GL8 panels
+# for the quadrature families (the canonical quadric domain, NURBS knot
+# spans). Solids reuse the measure split: compact `primitive` records in
+# closed form (sphere 2mr²/5·I, cylinder/cone axial forms through the
+# ∭x²dV/∭z²dV layer integrals), and plane/cylinder/natural shells through
+# the centered divergence theorem — ∭(r-c)_i(r-c)_j dV =
+# n_k∬(r-c)_i(r-c)_j(r-c)_k dA/5. Unsupported boundaries reject like
 # `get_center_of_mass`; non-1:3 dims and empty shells report the
 # empty-GProp zero matrix.
 
@@ -1573,11 +1572,12 @@ function _model_occ_curve_moment2(kernel,id)
     return m
 end
 
-# Cubic boundary moment U_F[i,j,k] = ∬_F x_i x_j x_k dA for a plane
-# face — the divergence theorem needs ∭x_i x_j dV = n_k U_F[i,j,k]/5.
-# Same signed fan as `_model_occ_plane_stats`, evaluated with the
-# degree-3 Stroud rule (exact for cubics, hence also for the fan's
-# per-triangle integrand).
+# Cubic boundary moment U_F[i,j,k] = ∬_F (x-center)_i(x-center)_j
+# (x-center)_k dA for a plane face — the centered divergence theorem needs
+# ∭(r-c)_i(r-c)_j dV = n_k U_F[i,j,k]/5. Same signed fan as
+# `_model_occ_plane_stats`, evaluated with the degree-3 Stroud rule (exact
+# for cubics, hence also for the fan's per-triangle integrand); conic/spline
+# wires use boundary 1-forms.
 function _model_occ_plane_moment3(kernel,id;center=(0.0,0.0,0.0))
     shape=kernel.shapes[id]; rec=shape.geometry.geometry
     raw_per_wire=NamedTuple[]
@@ -1645,10 +1645,10 @@ function _model_occ_plane_moment3(kernel,id;center=(0.0,0.0,0.0))
     return U
 end
 
-# Face second-moment tensor T_F = ∬_F r⊗r dA over a trimmed parametric
-# face — the CDT quadrature of `_model_occ_trimmed_face_measure` carrying
-# the tensor integrand (the same 4×-split three-point rule). Used for any
-# face whose wire bounds a sub-domain of its base — the canonical-domain
+# Centered face second-moment tensor T_F = ∬_F(r-c)⊗(r-c)dA over a trimmed
+# parametric face — the CDT quadrature of `_model_occ_trimmed_face_measure`
+# carrying the tensor integrand (the same 4×-split three-point rule). Used for
+# any face whose wire bounds a sub-domain of its base — the canonical-domain
 # quadric arms below would otherwise integrate the carrier's whole chart.
 function _model_occ_trimmed_face_moment2(kernel,id;centroid=nothing)
     shape=kernel.shapes[id]; rec=shape.geometry.geometry
