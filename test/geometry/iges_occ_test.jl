@@ -119,7 +119,9 @@ end
     @test roots==[(1,1),(1,2),(1,3),(1,4),(1,5)]
     m,roots=_iges_import("iges_occ_curves.igs";highest_dim_only=false)
     @test count(d->d[1]==1,roots)==5
-    @test count(d->d[1]==0,roots)==1
+    # Every curve contributes both endpoint occurrences, plus the file's
+    # independent type-116 point. Shared endpoints remain repeated.
+    @test count(d->d[1]==0,roots)==11
 end
 
 @testset "IGES Merge through GEO" begin

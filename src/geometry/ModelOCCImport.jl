@@ -1253,6 +1253,27 @@ function _occ_import_step_surfaces!(m,entities,out,caller)
     return out
 end
 
+# `highestDimOnly=false` returns every lower-dimensional occurrence in the
+# imported topology, including repeated shared edges and their endpoints.
+# Existing entities outside these roots do not belong to this call's result.
+function _occ_import_results(m,roots,highest_dim_only,caller)
+    isempty(roots) && return roots
+    if highest_dim_only
+        top=maximum(first,roots)
+        return Tuple{Int,Int}[root for root in roots if first(root)==top]
+    end
+    kernel=m.occ_kernel
+    tiers=ntuple(_->Tuple{Int,Int}[],4)
+    stack=UInt64[kernel.bindings[root] for root in reverse(roots)]
+    while !isempty(stack)
+        id=pop!(stack)
+        shape=kernel.shapes[id]
+        shape.dimension>=0 && push!(tiers[shape.dimension+1],kernel.shape_tags[id])
+        append!(stack,Iterators.reverse(shape.children))
+    end
+    return reduce(vcat,reverse(tiers))
+end
+
 function _model_occ_import_shapes(m::GeoModel,path;highest_dim_only=true,
                                   format="",caller="OCC.importShapes")
     format isa AbstractString || throw(ArgumentError(
@@ -1264,8 +1285,8 @@ function _model_occ_import_shapes(m::GeoModel,path;highest_dim_only=true,
     selected=isempty(format) ? (ext in (".igs",".iges") ? "iges" :
         ext==".brep" ? "brep" : "step") : format
     if selected=="iges"
-        return _model_occ_import_iges(m,path;
-            highest_dim_only=highest_dim_only,caller=caller)
+        roots=_model_occ_import_iges(m,path;highest_dim_only=false,caller=caller)
+        return _occ_import_results(m,roots,highest_dim_only,caller)
     end
     selected=="brep" && throw(ArgumentError(
         "$caller: native BREP geometry import is not implemented"))
@@ -1300,11 +1321,7 @@ function _model_occ_import_shapes(m::GeoModel,path;highest_dim_only=true,
         "$caller: no MANIFOLD_SOLID_BREP/FACETED_BREP/BREP_WITH_VOIDS " *
         "or SHELL_BASED_SURFACE_MODEL/OPEN_SHELL/face roots found " *
         "in $path"))
-    if highest_dim_only
-        top=maximum(d for (d,_) in out)
-        out=Tuple{Int,Int}[dt for dt in out if dt[1]==top]
-    end
-    return out
+    return _occ_import_results(m,out,highest_dim_only,caller)
 end
 
 # ── `healShapes` ──────────────────────────────────────────────────────────────

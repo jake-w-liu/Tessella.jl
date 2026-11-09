@@ -66,6 +66,7 @@ include("functional/fixtures.jl")
         "functional/model_import_smoke.jl",
         "interfaces/api_cad_file_import_test.jl",
         "interfaces/api_occ_import_format_test.jl",
+        "interfaces/api_occ_import_incidence_test.jl",
         "interfaces/api_incomplete_pyramid_view_test.jl",
         "functional/model_merge_smoke.jl",
         "functional/pos_import_smoke.jl",
