@@ -1254,13 +1254,21 @@ function _occ_import_step_surfaces!(m,entities,out,caller)
 end
 
 function _model_occ_import_shapes(m::GeoModel,path;highest_dim_only=true,
-                                  caller="OCC.importShapes")
+                                  format="",caller="OCC.importShapes")
+    format isa AbstractString || throw(ArgumentError(
+        "$caller: format must be a string"))
+    format in ("","step","iges","brep") || throw(ArgumentError(
+        "$caller: unknown CAD format $(repr(format)); expected step, iges or brep"))
     isfile(path) || throw(ArgumentError("$caller: missing file $path"))
     ext=lowercase(splitext(path)[2])
-    if ext in (".igs",".iges")
+    selected=isempty(format) ? (ext in (".igs",".iges") ? "iges" :
+        ext==".brep" ? "brep" : "step") : format
+    if selected=="iges"
         return _model_occ_import_iges(m,path;
             highest_dim_only=highest_dim_only,caller=caller)
     end
+    selected=="brep" && throw(ArgumentError(
+        "$caller: native BREP geometry import is not implemented"))
     source=read(path,String)
     occursin("ISO-10303-21",source) || throw(ArgumentError(
         "$caller: $path is not an ISO-10303-21 STEP file"))

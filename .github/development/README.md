@@ -21,6 +21,7 @@ still required after the current implementation work.
 | Source | Verification |
 | --- | --- |
 | `e18b989` Opencode checkpoint | Default `Pkg.test()`: 1638/1638 on Julia 1.13.3; an independent detached checkout also passed 1638/1638 on Julia 1.12.7 (22m53.9s). Both use minimal compilation and bounds checks, actual exit 0. [Windows/Linux CI on both Julia lines](https://github.com/jake-w-liu/Tessella.jl/actions/runs/42519129163) also passed. |
+| `09bf184` combined checkpoint | Default `Pkg.test()` on detached, unchanged checkouts passed 2582/2582 on Julia 1.12.7 (29m27.8s) and 2582/2582 on Julia 1.13.3 (31m48.1s). Both use minimal compilation and bounds checks, actual exits 0. Later increments require their own final combined package run. |
 | `11aee42` finite-normal inverse | Small intrinsic parameters beside ordinary coordinates: Julia 1.12.7 minimal, 162/162; Julia 1.13.3 normal `-O2`, 352/352 including existing warmed zero-allocation checks. Bounds enabled, exits 0. |
 | `fc0f599` GEO/view publication | Julia 1.12.7 and 1.13.3 minimal each passed the 256-check view scope and 162-check import/merge/CLI scope. Normal Julia 1.13.3 passed the 52 new regressions. Bounds enabled, exits 0. The first normal plugin block took 11m13s; no compiler improvement is claimed. |
 | `8a1f177` extreme nonlinear inverse | Subnormal derivatives and mixed-scale residuals: Julia 1.12.7 and 1.13.3 minimal, 168/168 each; Julia 1.13.3 normal `-O2`, 358/358 including existing ordinary warmed zero-allocation checks. Bounds enabled, exits 0. Exact recovery can allocate. |
@@ -40,6 +41,7 @@ still required after the current implementation work.
 | Extreme metric spectra | Julia 1.12.7 minimal passed 745/745 and Julia 1.13.3 normal `-O2` passed 753/753 scalar, Restrict and spectral checks, including existing anisotropy-cap neighbors and eight sampled ordinary zero-allocation loops. Bounds enabled, actual exits 0. Physical sizes and bounded tensors survive eigenvalues outside Float64's range; uniform scaling retains exact finite tensor entries. |
 | Other native reader resources | Julia 1.12.7 and 1.13.3 minimal each passed 538/538 reader/neighbor checks; focused normal `-O2` checks passed 79/79 each. Bounds enabled, actual exits 0. P3D, MAIL, IR3, UNV and DIFF bound impossible declared payloads before reserving storage and check header arithmetic before overflow. The eight tiny-file probes fell from 0.8–6.6MB to 1.98–4.24KB normal allocation, with permanent 100KB caps. |
 | PLY count validation | Julia 1.12.7 and 1.13.3 minimal each passed 199/199 reader/neighbor checks; focused normal `-O2` checks passed 22/22 each. Bounds enabled, actual exits 0. Explicit negative counts reject in ASCII and both binary byte orders, while missing/zero face counts remain valid and failed open/merge preserve the current model. |
+| OCC explicit format dispatch | Julia 1.12.7 and 1.13.3 minimal each passed 121/121 import/CAD checks, bounds enabled, actual exits 0. Canonical `step`/`iges` selectors force the corresponding native reader despite the filename suffix; invalid selectors and incompatible payloads preserve held geometry. The genuine native BREP implementation remains active work. |
 
 Normal allocation on the bounded truncated-file probes fell from about 2.4MB
 to 2.5–4.7KB. The resource checks remain below 100KB for declared counts through
@@ -123,6 +125,7 @@ The following logs under `C:/Users/User/` have corresponding persisted `.exit`
 files. They are local artifacts, not package dependencies:
 
 - `Tessella-default-1133-final6-20261109.log` and `Tessella-verify-e18b989-112-20261109.log`.
+- `Tessella-default-09bf184-{112,1133}-20261109.log`.
 - `Tessella-field-audit-gate-optimized-20261109.log` and `Tessella-field-focused-gate-112-min-20261109.log`.
 - `Tessella-view-scoped-gates-{1127,1133}-min-20261109.log`, `Tessella-view-import-cli-{1127,1133}-min-20261109.log`, and `Tessella-view-final-gates-1133-normal-20261109.log`.
 - `Tessella-field-audit-gate-optimized-overflow-20261109.log`, `Tessella-field-focused-gate-112-min-overflow-final-20261109.log`, and `Tessella-field-focused-gate-113-min-overflow-20261109.log`.
@@ -142,6 +145,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-metric-spectral-gate-{112-min,113-optimized}-final-20261109.log`.
 - `Tessella-io-foreign-resource-gate-{112,1133}-{min-final,normal}-20261109.log`.
 - `Tessella-io-ply-header-gate-{112,1133}-{min-final,normal}-20261109.log`.
+- `Tessella-occ-format-regression-{1127,1133}-20261109.log`.
 
 ## Release and earlier evidence
 

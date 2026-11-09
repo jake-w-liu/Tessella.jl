@@ -110,7 +110,7 @@ end
 
 import_shapes(file_name;highestDimOnly=true,format="")=_with_model() do m
     Model._model_occ_import_shapes(m,String(file_name);
-                                   highest_dim_only=highestDimOnly)
+                                   highest_dim_only=highestDimOnly,format=format)
 end
 
 heal_shapes(dim_tags=Tuple{Int,Int}[];tolerance=-1.0,fixDegenerated=true,
