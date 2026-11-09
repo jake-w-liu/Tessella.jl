@@ -43,6 +43,7 @@ still required after the current implementation work.
 | PLY count validation | Julia 1.12.7 and 1.13.3 minimal each passed 199/199 reader/neighbor checks; focused normal `-O2` checks passed 22/22 each. Bounds enabled, actual exits 0. Explicit negative counts reject in ASCII and both binary byte orders, while missing/zero face counts remain valid and failed open/merge preserve the current model. |
 | OCC explicit format dispatch | Julia 1.12.7 and 1.13.3 minimal each passed 121/121 import/CAD checks, bounds enabled, actual exits 0. Canonical `step`/`iges` selectors force the corresponding native reader despite the filename suffix; invalid selectors and incompatible payloads preserve held geometry. The genuine native BREP implementation remains active work. |
 | Native incomplete pyramid views | Julia 1.12.7 minimal passed 854/854 pyramid/writer checks; Julia 1.13.3 normal `-O2` passed 858/858 with four threads. A separate eight-check normal gate verified sparse construction, zero-allocation cache hits, concurrent cache creation, copied public schemes and sampled near-apex gradients. Bounds enabled, actual exits 0. A subsequent public file-reopen probe found a query failure under investigation; these receipts do not close that lifecycle gap. |
+| Cylinder/Frustum geometry | Julia 1.12.7 minimal passed 812/812 and Julia 1.13.3 normal `-O2` passed 822/822 scalar, metric and axial checks, including ten sampled ordinary zero-allocation loops. Bounds enabled, actual exits 0. Predicates retain original finite axes/endpoints, strict Cylinder and inclusive Frustum boundaries, subnormal radial/axial information and representable geometry whose intermediate length overflows. |
 
 Normal allocation on the bounded truncated-file probes fell from about 2.4MB
 to 2.5–4.7KB. The resource checks remain below 100KB for declared counts through
@@ -158,6 +159,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-io-ply-header-gate-{112,1133}-{min-final,normal}-20261109.log`.
 - `Tessella-occ-format-regression-{1127,1133}-20261109.log`.
 - `Tessella-pyramid-final-gate-{112-min,1133-normal}-20261109.log` and `Tessella-pyramid-cache-gate-1133-normal-20261109.log`.
+- `Tessella-axial-field-gate-{112-min,113-optimized}-20261109.log`.
 
 ## Release and earlier evidence
 

@@ -846,6 +846,28 @@ struct CylinderField <: AbstractSizeField
     radius::Float64
     vin::Float64
     vout::Float64
+    axis::NTuple{3,Float64}
+end
+
+function CylinderField(center,unit_axis,half_length,radius,vin,vout)
+    axis=ntuple(i->Float64(unit_axis[i])*Float64(half_length),3)
+    return CylinderField(center,unit_axis,half_length,radius,vin,vout,axis)
+end
+
+function _field_unit_axis(axis)
+    scale=maximum(abs,axis)
+    scale>0 || return (0.,0.,0.)
+    scaled=(axis[1]/scale,axis[2]/scale,axis[3]/scale)
+    length=hypot(scaled...)
+    return (scaled[1]/length,scaled[2]/length,scaled[3]/length)
+end
+
+@noinline function _field_endpoint_unit_axis(a,b)
+    return setprecision(BigFloat,256) do
+        R=Rational{BigInt};axis=ntuple(i->R(b[i])-R(a[i]),3)
+        length=sqrt(BigFloat(_dot3(axis,axis)))
+        map(value->Float64(BigFloat(value)/length),axis)
+    end
 end
 
 function CylinderField(center,axis,radius::Real;vin::Real,
@@ -853,31 +875,40 @@ function CylinderField(center,axis,radius::Real;vin::Real,
     c=_point3(center,"CylinderField center")
     a=_point3(axis,"CylinderField axis")
     half=hypot(a...)
-    isfinite(half) || throw(ArgumentError(
-        "CylinderField: axis must have finite length"))
     r=_float_value(radius,"CylinderField","radius")
     vi=_float_value(vin,"CylinderField","vin")
     vo=_float_value(vout,"CylinderField","vout")
-    unit_axis=half>0 ? ntuple(i -> a[i]/half,3) : (0.0,0.0,0.0)
-    return CylinderField(c,unit_axis,half,abs(r),vi,vo)
+    unit_axis=_field_unit_axis(a)
+    return CylinderField(c,unit_axis,half,abs(r),vi,vo,a)
+end
+
+@noinline function _inside_cylinder_exact(field,p)
+    field.radius>0 || return false
+    R=Rational{BigInt};axis=map(R,field.axis)
+    squared_length=_dot3(axis,axis)
+    iszero(squared_length) && return false
+    delta=ntuple(i->R(p[i])-R(field.center[i]),3)
+    projection=_dot3(delta,axis)
+    abs(projection)<squared_length || return false
+    radial_squared=_dot3(delta,delta)-projection^2/squared_length
+    return radial_squared<R(field.radius)^2
 end
 
 function _inside_cylinder(field::CylinderField,p)
+    field.half_length>0 && field.radius>0 || return false
+    isfinite(field.half_length) && field.half_length>=floatmin(Float64) ||
+        return _inside_cylinder_exact(field,p)
     d=ntuple(i -> p[i]-field.center[i],3)
     axial=d[1]*field.unit_axis[1]+d[2]*field.unit_axis[2]+d[3]*field.unit_axis[3]
     radial=ntuple(i -> d[i]-axial*field.unit_axis[i],3)
     r=hypot(radial...)
-    if isfinite(axial)&&isfinite(r)
-        return abs(axial)<field.half_length && r<field.radius
-    end
-    return setprecision(BigFloat,256) do
-        db=ntuple(i -> BigFloat(p[i])-BigFloat(field.center[i]),3)
-        ub=map(BigFloat,field.unit_axis)
-        sb=db[1]*ub[1]+db[2]*ub[2]+db[3]*ub[3]
-        rb=ntuple(i -> db[i]-sb*ub[i],3)
-        abs(sb)<BigFloat(field.half_length) &&
-            sqrt(rb[1]^2+rb[2]^2+rb[3]^2)<BigFloat(field.radius)
-    end
+    all(isfinite,d) && isfinite(axial) && isfinite(r) || return _inside_cylinder_exact(field,p)
+    scale=maximum(abs,d)
+    cap_error=max(8nextfloat(0.),256eps(Float64)*max(scale,field.half_length))
+    radial_error=max(8nextfloat(0.),256eps(Float64)*max(scale,field.radius))
+    (abs(abs(axial)-field.half_length)<=cap_error || abs(r-field.radius)<=radial_error) &&
+        return _inside_cylinder_exact(field,p)
+    return abs(axial)<field.half_length && r<field.radius
 end
 
 function field_value(field::CylinderField,x,y,z)
@@ -909,6 +940,16 @@ struct FrustumField <: AbstractSizeField
     outer_v1::Float64
     inner_v2::Float64
     outer_v2::Float64
+    p2::NTuple{3,Float64}
+    has_endpoints::Bool
+end
+
+# Retain the component constructor's axis definition when rebuilding an
+# endpoint would round away a short displacement next to a large origin.
+function FrustumField(p1,unit_axis,length,inner_r1,outer_r1,inner_r2,outer_r2,
+                      inner_v1,outer_v1,inner_v2,outer_v2)
+    return FrustumField(p1,unit_axis,length,inner_r1,outer_r1,inner_r2,outer_r2,
+        inner_v1,outer_v1,inner_v2,outer_v2,(0.,0.,0.),false)
 end
 
 function FrustumField(p1,p2;inner_r1::Real=0.0,outer_r1::Real=1.0,
@@ -917,8 +958,6 @@ function FrustumField(p1,p2;inner_r1::Real=0.0,outer_r1::Real=1.0,
                       inner_v2::Real=0.1,outer_v2::Real=1.0)
     a=_point3(p1,"FrustumField p1");b=_point3(p2,"FrustumField p2")
     axis=ntuple(i -> b[i]-a[i],3); len=hypot(axis...)
-    isfinite(len) ||
-        throw(ArgumentError("FrustumField: endpoints must have finite separation"))
     r1i=_float_value(inner_r1,"FrustumField","inner_r1")
     r1o=_float_value(outer_r1,"FrustumField","outer_r1")
     r2i=_float_value(inner_r2,"FrustumField","inner_r2")
@@ -927,25 +966,62 @@ function FrustumField(p1,p2;inner_r1::Real=0.0,outer_r1::Real=1.0,
     v1o=_float_value(outer_v1,"FrustumField","outer_v1")
     v2i=_float_value(inner_v2,"FrustumField","inner_v2")
     v2o=_float_value(outer_v2,"FrustumField","outer_v2")
-    unit_axis=len>0 ? ntuple(i -> axis[i]/len,3) : (0.0,0.0,0.0)
+    unit_axis=all(isfinite,axis) ? _field_unit_axis(axis) : _field_endpoint_unit_axis(a,b)
     return FrustumField(a,unit_axis,len,r1i,r1o,r2i,r2o,
-                        v1i,v1o,v2i,v2o)
+                        v1i,v1o,v2i,v2o,b,true)
+end
+
+@noinline function _frustum_field_exact(field,p)
+    R=Rational{BigInt}
+    axis=field.has_endpoints ? ntuple(i->R(field.p2[i])-R(field.p1[i]),3) :
+        ntuple(i->R(field.unit_axis[i])*R(field.length),3)
+    squared_length=_dot3(axis,axis)
+    iszero(squared_length) && return GMSH_MAX_SIZE
+    delta=ntuple(i->R(p[i])-R(field.p1[i]),3)
+    projection=_dot3(delta,axis);u=projection/squared_length
+    0<=u<=1 || return GMSH_MAX_SIZE
+    squared=_dot3(delta,delta)-projection^2/squared_length
+    ri=R(field.inner_r1)+u*(R(field.inner_r2)-R(field.inner_r1))
+    ro=R(field.outer_r1)+u*(R(field.outer_r2)-R(field.outer_r1))
+    ri==ro && return GMSH_MAX_SIZE
+    lower=min(ri,ro);upper=max(ri,ro)
+    upper>=0 && squared<=upper^2 || return GMSH_MAX_SIZE
+    lower>0 && squared<lower^2 && return GMSH_MAX_SIZE
+    vi=R(field.inner_v1)+u*(R(field.inner_v2)-R(field.inner_v1))
+    vo=R(field.outer_v1)+u*(R(field.outer_v2)-R(field.outer_v1))
+    slope=(vo-vi)/(ro-ri)
+    return _field_sqrt_affine(vi-slope*ri,slope,squared)
 end
 
 function field_value(field::FrustumField,x,y,z)
     p=(_float_value(x,"FrustumField","x"),
        _float_value(y,"FrustumField","y"),
        _float_value(z,"FrustumField","z"))
+    field.length>0 || return GMSH_MAX_SIZE
+    isfinite(field.length) && field.length>=floatmin(Float64) || return _frustum_field_exact(field,p)
     d=ntuple(i -> p[i]-field.p1[i],3)
     axial=d[1]*field.unit_axis[1]+d[2]*field.unit_axis[2]+d[3]*field.unit_axis[3]
-    isfinite(axial) || return GMSH_MAX_SIZE
+    all(isfinite,d) && isfinite(axial) || return _frustum_field_exact(field,p)
+    scale=maximum(abs,d)
+    geometry_error=max(8nextfloat(0.),256eps(Float64)*scale)
+    end_error=max(geometry_error,256eps(Float64)*field.length)
+    (abs(axial)<=geometry_error || abs(axial-field.length)<=end_error) &&
+        return _frustum_field_exact(field,p)
     u=axial/field.length
+    (!isfinite(u) || (u==0 && axial!=0) || 0<abs(u)<floatmin(Float64)) &&
+        return _frustum_field_exact(field,p)
     0<=u<=1 || return GMSH_MAX_SIZE
     radialv=ntuple(i -> d[i]-axial*field.unit_axis[i],3)
     radial=hypot(radialv...)
-    isfinite(radial) || return GMSH_MAX_SIZE
+    isfinite(radial) || return _frustum_field_exact(field,p)
     ri=_field_lerp(field.inner_r1,field.inner_r2,u)
     ro=_field_lerp(field.outer_r1,field.outer_r2,u)
+    u_error=geometry_error/field.length+256eps(Float64)*abs(u)
+    radius_error=max(geometry_error,256eps(Float64)*max(abs(ri),abs(ro)),
+        u_error*max(abs(field.inner_r2-field.inner_r1),abs(field.outer_r2-field.outer_r1)))
+    isfinite(radius_error) || return _frustum_field_exact(field,p)
+    (abs(radial-ri)<=radius_error || abs(radial-ro)<=radius_error) &&
+        return _frustum_field_exact(field,p)
     v=_field_interval_ratio(radial,ri,ro)
     0<=v<=1 || return GMSH_MAX_SIZE
     vi=_field_lerp(field.inner_v1,field.inner_v2,u)
