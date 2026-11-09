@@ -124,6 +124,49 @@ end
     return v
 end
 
+@noinline function _field_lerp_exact(a,b,t)
+    R=Rational{BigInt}
+    return Float64(R(a)+R(t)*(R(b)-R(a)))
+end
+
+@inline function _field_lerp(a,b,t)
+    t==0 && return a
+    t==1 && return b
+    value=muladd(b-a,t,a)
+    return isfinite(value) ? value : _field_lerp_exact(a,b,t)
+end
+
+@noinline function _field_interval_ratio_exact(value,lower,upper)
+    R=Rational{BigInt}
+    return Float64((R(value)-R(lower))/(R(upper)-R(lower)))
+end
+
+@inline function _field_interval_ratio(value,lower,upper)
+    lower==upper && return NaN
+    numerator=value-lower;denominator=upper-lower
+    if isfinite(numerator) && isfinite(denominator)
+        return numerator/denominator
+    end
+    return _field_interval_ratio_exact(value,lower,upper)
+end
+
+# Evaluate an affine function of a square root without losing a small
+# result to cancellation between its two terms. Its coefficients are exact
+# dyadics or rational combinations of the original field parameters.
+@noinline function _field_sqrt_affine(offset,coefficient,squared)
+    (iszero(coefficient) || iszero(squared)) && return Float64(offset)
+    return setprecision(BigFloat,256) do
+        root=sqrt(BigFloat(squared))
+        value=if !iszero(offset) && signbit(offset)!=signbit(coefficient)
+            numerator=offset^2-coefficient^2*squared
+            BigFloat(numerator)/(BigFloat(offset)-BigFloat(coefficient)*root)
+        else
+            BigFloat(offset)+BigFloat(coefficient)*root
+        end
+        Float64(value)
+    end
+end
+
 """Uniform target size `h` everywhere."""
 struct ConstantSize <: AbstractSizeField
     h::Float64
@@ -645,11 +688,11 @@ end
 @inline function _threshold_value(field::ThresholdField, x, y, z, entity)
     d=_checked_field_result(field_value(field.input,x,y,z,entity),"ThresholdField input",x,y,z)
     field.stop_at_dist_max && d>=field.dist_max && return GMSH_MAX_SIZE
-    r=clamp((d-field.dist_min)/(field.dist_max-field.dist_min),0.0,1.0)
+    r=clamp(_field_interval_ratio(d,field.dist_min,field.dist_max),0.0,1.0)
     if field.sigmoid
         e=exp(12r-6); r=e/(1+e)
     end
-    return muladd(field.size_max-field.size_min,r,field.size_min)
+    return _field_lerp(field.size_min,field.size_max,r)
 end
 field_value(field::ThresholdField,x,y,z)=_threshold_value(field,x,y,z,nothing)
 field_value(field::ThresholdField,x,y,z,entity::Tuple{T,U}) where
@@ -681,6 +724,18 @@ function BoxField(xmin::Real,xmax::Real,ymin::Real,ymax::Real,zmin::Real,zmax::R
     return BoxField(xa,xb,ya,yb,za,zb,vi,vo,th)
 end
 
+@noinline function _box_transition_exact(field,p)
+    R=Rational{BigInt}
+    bounds=((field.xmin,field.xmax),(field.ymin,field.ymax),(field.zmin,field.zmax))
+    delta=ntuple(3) do axis
+        lower,upper=map(R,bounds[axis]);q=R(p[axis])
+        max(min(lower,upper)-q,R(0),q-max(lower,upper))
+    end
+    squared=_dot3(delta,delta);width=R(field.thickness)
+    squared<=width^2 || return field.vout
+    return _field_sqrt_affine(R(field.vin),(R(field.vout)-R(field.vin))/width,squared)
+end
+
 function field_value(field::BoxField, x, y, z)
     x=_float_value(x,"BoxField","x"); y=_float_value(y,"BoxField","y")
     z=_float_value(z,"BoxField","z")
@@ -697,8 +752,9 @@ function field_value(field::BoxField, x, y, z)
         dz=max(min(field.zmin,field.zmax)-z,0.0,
                z-max(field.zmin,field.zmax))
         d=hypot(dx,dy,dz)
+        0<d<floatmin(Float64) && return _box_transition_exact(field,(x,y,z))
         d<=field.thickness &&
-            return muladd(field.vout-field.vin,d/field.thickness,field.vin)
+            return _field_lerp(field.vin,field.vout,d/field.thickness)
     end
     return field.vout
 end
@@ -730,15 +786,34 @@ function BallField(center,radius::Real;vin::Real,vout::Real=GMSH_MAX_SIZE,
     return BallField(c,r,vi,vo,th)
 end
 
+@noinline function _ball_field_exact(field,p)
+    R=Rational{BigInt};delta=ntuple(i->R(p[i])-R(field.center[i]),3)
+    squared=_dot3(delta,delta);radius=R(field.radius);width=R(field.thickness)
+    radius>0 && squared<radius^2 && return field.vin
+    width>0 || return field.vout
+    outer=radius+width
+    outer>=0 && squared<=outer^2 || return field.vout
+    radius>=0 && squared==radius^2 && return field.vin
+    squared==outer^2 && return field.vout
+    difference=R(field.vout)-R(field.vin)
+    return _field_sqrt_affine(R(field.vin)-difference*radius/width,difference/width,squared)
+end
+
 function field_value(field::BallField,x,y,z)
     p=(_float_value(x,"BallField","x"),_float_value(y,"BallField","y"),
        _float_value(z,"BallField","z"))
     d=hypot(p[1]-field.center[1],p[2]-field.center[2],p[3]-field.center[3])
+    isfinite(d) || return _ball_field_exact(field,p)
+    0<d<floatmin(Float64) && return _ball_field_exact(field,p)
+    outside=d-field.radius
+    inner_error=max(nextfloat(0.),64eps(Float64)*max(d,abs(field.radius)))
+    abs(outside)<=inner_error && return _ball_field_exact(field,p)
     d<field.radius && return field.vin
     if field.thickness>0
-        outside=d-field.radius
+        outer_error=max(nextfloat(0.),64eps(Float64)*max(d,abs(field.radius),field.thickness))
+        abs(outside-field.thickness)<=outer_error && return _ball_field_exact(field,p)
         outside<=field.thickness &&
-            return muladd(field.vout-field.vin,outside/field.thickness,field.vin)
+            return _field_lerp(field.vin,field.vout,outside/field.thickness)
     end
     return field.vout
 end
@@ -857,13 +932,13 @@ function field_value(field::FrustumField,x,y,z)
     radialv=ntuple(i -> d[i]-axial*field.unit_axis[i],3)
     radial=hypot(radialv...)
     isfinite(radial) || return GMSH_MAX_SIZE
-    ri=muladd(u,field.inner_r2-field.inner_r1,field.inner_r1)
-    ro=muladd(u,field.outer_r2-field.outer_r1,field.outer_r1)
-    v=(radial-ri)/(ro-ri)
+    ri=_field_lerp(field.inner_r1,field.inner_r2,u)
+    ro=_field_lerp(field.outer_r1,field.outer_r2,u)
+    v=_field_interval_ratio(radial,ri,ro)
     0<=v<=1 || return GMSH_MAX_SIZE
-    vi=muladd(u,field.inner_v2-field.inner_v1,field.inner_v1)
-    vo=muladd(u,field.outer_v2-field.outer_v1,field.outer_v1)
-    return muladd(v,vo-vi,vi)
+    vi=_field_lerp(field.inner_v1,field.inner_v2,u)
+    vo=_field_lerp(field.outer_v1,field.outer_v2,u)
+    return _field_lerp(vi,vo,v)
 end
 
 # ── Composition and final size contract ───────────────────────────────────────
