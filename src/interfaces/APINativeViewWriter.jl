@@ -983,11 +983,10 @@ function _native_view_writer_pyramid_basis(msh::Int)
     spec=msh_spec(msh)
     spec.family===:pyr && spec.order>=2 || throw(ArgumentError(
         "model view writer: this rational pyramid order is not implemented"))
-    # The quadratic serendipity element only omits the (p,p,0) base bubble,
-    # which the lattice filter below removes; incomplete pyramids of order >=3
-    # omit more and fail the node-count certificate instead.
-    spec.serendipity && spec.order!=2 && throw(ArgumentError(
-        "model view writer: this rational pyramid order is not implemented"))
+    # Higher incomplete orders use the native edge-trace extension rather
+    # than the complete Bergot lattice with a single missing base bubble.
+    spec.serendipity && spec.order>2 &&
+        return _native_view_writer_edge_pyramid_basis(spec.order)
     p=spec.order
     lattice=NTuple{3,Int}[(i,j,k) for i in 0:p for j in 0:p
         for k in 0:p-max(i,j) if !(spec.serendipity && i==p && j==p)]
@@ -1004,5 +1003,105 @@ function _native_view_writer_pyramid_basis(msh::Int)
         end
     end
     coefficients=matrix\Matrix{Float64}(I,n,n)
+    return (family=6,coefficients,exponents)
+end
+
+# Expand the native incomplete pyramid's exact edge traces into the rational
+# monomials understood by PosScheme. A raw term is u^a*v^b*w^c/(1-w)^d.
+# Keeping rational coefficients until the final conversion avoids a sampled
+# Vandermonde fit and expands the native basis before Float64 conversion.
+function _native_view_pyramid_product(first,second)
+    result=Dict{NTuple{4,Int},Rational{BigInt}}()
+    for (a,x) in first,(b,y) in second
+        (iszero(x) || iszero(y)) && continue
+        key=ntuple(axis->a[axis]+b[axis],4)
+        value=get(result,key,0//BigInt(1))+x*y
+        iszero(value) ? delete!(result,key) : (result[key]=value)
+    end
+    return result
+end
+
+function _native_view_pyramid_add!(target,source,scale)
+    for (key,value) in source
+        iszero(value) && continue
+        updated=get(target,key,0//BigInt(1))+scale*value
+        iszero(updated) ? delete!(target,key) : (target[key]=updated)
+    end
+    return target
+end
+
+const _NATIVE_VIEW_EDGE_PYRAMID_BASES=Dict{Int,
+    NamedTuple{(:family,:coefficients,:exponents),
+        Tuple{Int,Matrix{Float64},Matrix{Int}}}}()
+const _NATIVE_VIEW_EDGE_PYRAMID_LOCK=ReentrantLock()
+
+function _native_view_writer_edge_pyramid_basis(p::Int)
+    3<=p<=9 || throw(ArgumentError("model view writer: invalid incomplete pyramid order"))
+    # The seven catalog orders have immutable reference bases. Internal
+    # consumers only read these matrices; PosScheme copies its inputs.
+    return lock(_NATIVE_VIEW_EDGE_PYRAMID_LOCK) do
+        get!(_NATIVE_VIEW_EDGE_PYRAMID_BASES,p) do
+            _native_view_build_edge_pyramid_basis(p)
+        end
+    end
+end
+
+function _native_view_build_edge_pyramid_basis(p::Int)
+    primary=Dict{NTuple{4,Int},Rational{BigInt}}[]
+    for (su,sv) in ((-1,-1),(1,-1),(1,1),(-1,1))
+        push!(primary,Dict((0,0,0,0)=>1//BigInt(4),
+            (0,0,1,0)=>-1//BigInt(4),(1,0,0,0)=>su//BigInt(4),
+            (0,1,0,0)=>sv//BigInt(4),(1,1,0,1)=>(su*sv)//BigInt(4)))
+    end
+    push!(primary,Dict((0,0,1,0)=>1//BigInt(1)))
+    functions=copy.(primary)
+    for (edge,(first,second)) in enumerate(Elements._PYR_EDGES)
+        du,dv,dw,offset=MeshFunctionSpaces._PYRAMID_EDGE_PARAMETERS[edge]
+        parameter=Dict((1,0,0,0)=>Rational{BigInt}(du),
+            (0,1,0,0)=>Rational{BigInt}(dv),(0,0,1,0)=>Rational{BigInt}(dw),
+            (0,0,0,0)=>Rational{BigInt}(offset))
+        for internal in 1:p-1
+            polynomial=Dict((0,0,0,0)=>1//BigInt(1))
+            for other in 1:p-1
+                other==internal && continue
+                factor=Dict(key=>p*value/(internal-other) for (key,value) in parameter)
+                factor[(0,0,0,0)]-=other//BigInt(internal-other)
+                polynomial=_native_view_pyramid_product(polynomial,factor)
+            end
+            trace=_native_view_pyramid_product(
+                _native_view_pyramid_product(primary[first+1],primary[second+1]),
+                polynomial)
+            scale=BigInt(p)^2//BigInt(internal*(p-internal))
+            for key in keys(trace);trace[key]*=scale;end
+            push!(functions,trace)
+            _native_view_pyramid_add!(functions[first+1],trace,-(p-internal)//BigInt(p))
+            _native_view_pyramid_add!(functions[second+1],trace,-internal//BigInt(p))
+        end
+    end
+    canonical=Dict{NTuple{3,Int},Rational{BigInt}}[]
+    for function_terms in functions
+        terms=Dict{NTuple{3,Int},Rational{BigInt}}()
+        for ((a,b,c,d),value) in function_terms
+            iszero(value) && continue
+            power=min(a,b)-d
+            power>=0 || error("model view writer: invalid rational pyramid exponent")
+            for k in 0:power
+                key=(a,b,c+k)
+                terms[key]=get(terms,key,0//BigInt(1))+
+                    value*binomial(power,k)*(-1)^k
+            end
+        end
+        filter!(entry->!iszero(last(entry)),terms)
+        push!(canonical,terms)
+    end
+    lattice=sort!(unique([key for terms in canonical for key in keys(terms)]))
+    exponents=Matrix{Int}(undef,length(lattice),3)
+    coefficients=zeros(Float64,length(functions),length(lattice))
+    for (column,key) in enumerate(lattice)
+        exponents[column,:].=key
+        for row in eachindex(canonical)
+            coefficients[row,column]=Float64(get(canonical[row],key,0//BigInt(1)))
+        end
+    end
     return (family=6,coefficients,exponents)
 end

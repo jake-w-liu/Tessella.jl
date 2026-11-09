@@ -42,10 +42,21 @@ still required after the current implementation work.
 | Other native reader resources | Julia 1.12.7 and 1.13.3 minimal each passed 538/538 reader/neighbor checks; focused normal `-O2` checks passed 79/79 each. Bounds enabled, actual exits 0. P3D, MAIL, IR3, UNV and DIFF bound impossible declared payloads before reserving storage and check header arithmetic before overflow. The eight tiny-file probes fell from 0.8–6.6MB to 1.98–4.24KB normal allocation, with permanent 100KB caps. |
 | PLY count validation | Julia 1.12.7 and 1.13.3 minimal each passed 199/199 reader/neighbor checks; focused normal `-O2` checks passed 22/22 each. Bounds enabled, actual exits 0. Explicit negative counts reject in ASCII and both binary byte orders, while missing/zero face counts remain valid and failed open/merge preserve the current model. |
 | OCC explicit format dispatch | Julia 1.12.7 and 1.13.3 minimal each passed 121/121 import/CAD checks, bounds enabled, actual exits 0. Canonical `step`/`iges` selectors force the corresponding native reader despite the filename suffix; invalid selectors and incompatible payloads preserve held geometry. The genuine native BREP implementation remains active work. |
+| Native incomplete pyramid views | Julia 1.12.7 minimal passed 854/854 pyramid/writer checks; Julia 1.13.3 normal `-O2` passed 858/858 with four threads. A separate eight-check normal gate verified sparse construction, zero-allocation cache hits, concurrent cache creation, copied public schemes and sampled near-apex gradients. Bounds enabled, actual exits 0. A subsequent public file-reopen probe found a query failure under investigation; these receipts do not close that lifecycle gap. |
 
 Normal allocation on the bounded truncated-file probes fell from about 2.4MB
 to 2.5–4.7KB. The resource checks remain below 100KB for declared counts through
 `typemax(Int)` and binary PLY; no giant allocation probe was used.
+
+Incomplete Pyramid P3–P9 model queries and PostView fields now use an exact
+symbolic expansion of the existing native edge-trace basis. The seven reference
+schemes are cached under a lock; sparse construction reduced the sampled P9
+build from 169.4MB to 25.9MB total allocation and warmed lookups allocate zero
+bytes. The new checks retain curved geometry and gradients, all-order nodal
+values, and ASCII/binary data sections. This is Tessella's existing native
+incomplete-pyramid extension; it does not establish compatibility with Gmsh
+readers that reject these catalog types. Complete-pyramid and P2 behavior is
+covered by the neighboring checks.
 
 Algorithm 1 now adapts actual sphere, cone and torus charts, and Box volumes
 consume their actual adapted faces. Auto selects the native producer on closed
@@ -146,6 +157,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-io-foreign-resource-gate-{112,1133}-{min-final,normal}-20261109.log`.
 - `Tessella-io-ply-header-gate-{112,1133}-{min-final,normal}-20261109.log`.
 - `Tessella-occ-format-regression-{1127,1133}-20261109.log`.
+- `Tessella-pyramid-final-gate-{112-min,1133-normal}-20261109.log` and `Tessella-pyramid-cache-gate-1133-normal-20261109.log`.
 
 ## Release and earlier evidence
 

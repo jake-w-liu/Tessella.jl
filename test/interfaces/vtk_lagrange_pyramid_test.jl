@@ -272,7 +272,18 @@ end
     end
     basis19=A._native_view_writer_pyramid_basis(19)
     @test basis19.family==6 && size(basis19.coefficients,1)==13
-    for msh in (125,127,131,7,132)
+    for msh in (125,127,131)
+        basis=A._native_view_writer_pyramid_basis(msh)
+        nodes=E.lagrange_nodes(msh)
+        terms=Matrix{Float64}(undef,size(basis.exponents,1),size(nodes,2))
+        for row in axes(terms,1),column in axes(terms,2)
+            a,b,c=basis.exponents[row,:];u,v,w=nodes[:,column]
+            terms[row,column]=w==1.0 && max(a,b)>0 ? 0.0 :
+                u^a*v^b*w^c/(1.0-w)^min(a,b)
+        end
+        @test maximum(abs,basis.coefficients*terms-I)<2e-8
+    end
+    for msh in (7,132)
         @test_throws ArgumentError A._native_view_writer_pyramid_basis(msh)
     end
 end
