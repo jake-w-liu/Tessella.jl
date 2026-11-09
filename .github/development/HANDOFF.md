@@ -52,8 +52,9 @@ Final ordinary `Pkg.test()` on clean `461f84d`:
 Linux WSL Ubuntu (Julia 1.12.7, minimal) reproduced the original Unix ONELAB
 failure and passed after the fix: ONELAB 135/135, inertia 34/34, wedge 720/720,
 natural BREP 182/182, crossed-cylinder seam 140/140, fuse images 134/134.
-Those focused files cover every new default test on Linux. GitHub CI run
-`42670241066` tests the same source on Windows and Ubuntu for 1.12/1.13.
+Those focused files cover every new default test on Linux. GitHub Actions run
+`42685928378` passed all four Ubuntu/Windows × Julia 1.12/1.13 jobs on the
+final `d75d8ef` tree (docs/checklist tree; production code is `461f84d`).
 
 Other focused receipts are listed in
 [development notes](README.md#local-verification-receipts). The exact residual
