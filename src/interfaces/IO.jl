@@ -18135,8 +18135,13 @@ function _read_obj(path,caller::AbstractString)
                 v=tryparse(Int,split(tok,"/")[1])
                 v===nothing && throw(ArgumentError(
                     "$caller: malformed OBJ face index '$tok'"))
-                # negative indices count back from the current vertex count
-                push!(idx,v<0 ? div(length(col),3)+v : v)
+                # OBJ indices are one-based: -1 names the latest vertex,
+                # and later vertex records must not change that binding.
+                available=div(length(col),3)
+                index=v<0 ? available+v+1 : v
+                index>0 && (v>0 || index<=available) || throw(ArgumentError(
+                    "$caller: OBJ face index '$tok' does not reference a defined vertex"))
+                push!(idx,index)
             end
             nv=length(idx)
             if nv==3 || nv==4
