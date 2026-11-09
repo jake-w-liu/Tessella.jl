@@ -151,7 +151,46 @@ end
            a[3]*(b[1]*c[2]-b[2]*c[1])
 end
 
-function _scaled_vectors(a,p,edges...)
+@inline function _coordinate_sum_reliable(value,permanent)
+    isfinite(value) && isfinite(permanent) || return false
+    permanent==0 && return value==0
+    return abs(value)>=floatmin(Float64) &&
+           abs(value)>_FILTER_FACTOR*permanent
+end
+
+@inline function _dot3_reliable(a,b,value)
+    permanent=abs(a[1]*b[1])+abs(a[2]*b[2])+abs(a[3]*b[3])
+    _coordinate_sum_reliable(value,permanent) || return false
+    # A zero permanent is exact only if each product has a zero factor.
+    # Otherwise underflow can erase a representable coordinate after division.
+    return permanent!=0 || ((a[1]==0 || b[1]==0) &&
+        (a[2]==0 || b[2]==0) && (a[3]==0 || b[3]==0))
+end
+
+@inline function _det3_reliable(a,b,c,value)
+    permanent=
+        abs(a[1])*(abs(b[2]*c[3])+abs(b[3]*c[2]))+
+        abs(a[2])*(abs(b[1]*c[3])+abs(b[3]*c[1]))+
+        abs(a[3])*(abs(b[1]*c[2])+abs(b[2]*c[1]))
+    _coordinate_sum_reliable(value,permanent) || return false
+    return permanent!=0 ||
+        ((a[1]==0 || b[2]==0 || c[3]==0) &&
+         (a[1]==0 || b[3]==0 || c[2]==0) &&
+         (a[2]==0 || b[1]==0 || c[3]==0) &&
+         (a[2]==0 || b[3]==0 || c[1]==0) &&
+         (a[3]==0 || b[1]==0 || c[2]==0) &&
+         (a[3]==0 || b[2]==0 || c[1]==0))
+end
+
+@inline function _difference_reliable(a,b,c,d,value)
+    permanent=abs(a*b)+abs(c*d)
+    _coordinate_sum_reliable(value,permanent) || return false
+    return permanent!=0 || ((a==0 || b==0) && (c==0 || d==0))
+end
+
+function _scaled_vectors(a,p,edges::Vararg{Any,N}) where {N}
+    # Retain the fixed simplex arity in the method instance: otherwise Julia's
+    # vararg specialization heuristic boxes the mapped triangle/tet frames.
     raw_edges=map(edge->_sub3(edge,a),edges)
     all(_finite3,raw_edges) || return nothing
     scale=maximum(_maxabs3,raw_edges)
@@ -240,7 +279,10 @@ function _segment_coordinates(a,b,p,caller::AbstractString,tag::Int)
     rhs,edges=scaled;edge=only(edges)
     denominator=_dot3(edge,edge)
     denominator>0 || return _segment_coordinates_exact(a,b,p,caller,tag)
-    parameter=_dot3(rhs,edge)/denominator
+    numerator=_dot3(rhs,edge)
+    _dot3_reliable(rhs,edge,numerator) ||
+        return _segment_coordinates_exact(a,b,p,caller,tag)
+    parameter=numerator/denominator
     residual=ntuple(i->rhs[i]-parameter*edge[i],3)
     u=muladd(2.0,parameter,-1.0)
     normalized_residual=_norm3(residual)/sqrt(denominator)
@@ -259,11 +301,19 @@ function _triangle_coordinates(a,b,c,p,caller::AbstractString,tag::Int)
     product=gram11*gram22;square=gram12*gram12
     determinant=product-square
     permanent=abs(product)+abs(square)
-    (isfinite(determinant)&&determinant>_FILTER_FACTOR*permanent) ||
+    (isfinite(determinant) && determinant>=floatmin(Float64) &&
+     determinant>_FILTER_FACTOR*permanent) ||
         return _triangle_coordinates_exact(a,b,c,p,caller,tag)
     right1=_dot3(rhs,edge1);right2=_dot3(rhs,edge2)
-    u=(right1*gram22-right2*gram12)/determinant
-    v=(right2*gram11-right1*gram12)/determinant
+    (_dot3_reliable(rhs,edge1,right1) && _dot3_reliable(rhs,edge2,right2)) ||
+        return _triangle_coordinates_exact(a,b,c,p,caller,tag)
+    numerator_u=right1*gram22-right2*gram12
+    numerator_v=right2*gram11-right1*gram12
+    (_difference_reliable(right1,gram22,right2,gram12,numerator_u) &&
+     _difference_reliable(right2,gram11,right1,gram12,numerator_v)) ||
+        return _triangle_coordinates_exact(a,b,c,p,caller,tag)
+    u=numerator_u/determinant
+    v=numerator_v/determinant
     residual=ntuple(i->rhs[i]-u*edge1[i]-v*edge2[i],3)
     edge3=_sub3(edge2,edge1)
     scale=max(sqrt(gram11),sqrt(gram22),_norm3(edge3))
@@ -280,15 +330,18 @@ function _tetrahedron_coordinates(a,b,c,d,p,
         return _tetrahedron_coordinates_exact(a,b,c,d,p,caller,tag)
     rhs,edges=scaled;edge1,edge2,edge3=edges
     determinant=_det3(edge1,edge2,edge3)
-    permanent=
-        abs(edge1[1])*(abs(edge2[2]*edge3[3])+abs(edge2[3]*edge3[2]))+
-        abs(edge1[2])*(abs(edge2[1]*edge3[3])+abs(edge2[3]*edge3[1]))+
-        abs(edge1[3])*(abs(edge2[1]*edge3[2])+abs(edge2[2]*edge3[1]))
-    (isfinite(determinant)&&abs(determinant)>_FILTER_FACTOR*permanent) ||
+    (determinant!=0 && _det3_reliable(edge1,edge2,edge3,determinant)) ||
         return _tetrahedron_coordinates_exact(a,b,c,d,p,caller,tag)
-    u=_det3(rhs,edge2,edge3)/determinant
-    v=_det3(edge1,rhs,edge3)/determinant
-    w=_det3(edge1,edge2,rhs)/determinant
+    numerator_u=_det3(rhs,edge2,edge3)
+    numerator_v=_det3(edge1,rhs,edge3)
+    numerator_w=_det3(edge1,edge2,rhs)
+    (_det3_reliable(rhs,edge2,edge3,numerator_u) &&
+     _det3_reliable(edge1,rhs,edge3,numerator_v) &&
+     _det3_reliable(edge1,edge2,rhs,numerator_w)) ||
+        return _tetrahedron_coordinates_exact(a,b,c,d,p,caller,tag)
+    u=numerator_u/determinant
+    v=numerator_v/determinant
+    w=numerator_w/determinant
     all(isfinite,(u,v,w)) ||
         return _tetrahedron_coordinates_exact(a,b,c,d,p,caller,tag)
     return (u,v,w),0.0

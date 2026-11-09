@@ -37,6 +37,7 @@ include("functional/fixtures.jl")
     for path in (
         "meshing/ordered_matching_seeded_test.jl",
         "core/transform_axis_scale_test.jl",
+        "core/mesh_coordinate_cancellation_test.jl",
         "fields/distance_triangle_translation_test.jl",
         "fields/postview_inverse_convergence_test.jl",
         "fields/postview_thin_geometry_test.jl",
