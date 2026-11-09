@@ -986,8 +986,7 @@ const MaxField = MaxSize
 @inline _min_value(::Tuple{},x,y,z)=GMSH_MAX_SIZE
 @inline function _min_child_value(child::AbstractField,x,y,z,entity)
     if child isa AbstractAnisoField
-        eigenvalues=metric_eigenvalues(metric_at(child,x,y,z,entity))
-        value=inv(sqrt(maximum(eigenvalues)))
+        value=metric_size(metric_at(child,x,y,z,entity))
         return _checked_field_result(value,"MinSize anisotropic input",x,y,z)
     end
     return _checked_field_result(field_value(child,x,y,z,entity),"MinSize input",x,y,z)
@@ -1009,8 +1008,7 @@ end
 @inline _max_value(::Tuple{},x,y,z)=-GMSH_MAX_SIZE
 @inline function _max_child_value(child::AbstractField,x,y,z,entity)
     if child isa AbstractAnisoField
-        eigenvalues=metric_eigenvalues(metric_at(child,x,y,z,entity))
-        value=inv(sqrt(minimum(eigenvalues)))
+        value=_metric_coarsest_size(metric_at(child,x,y,z,entity))
         return _checked_field_result(value,"MaxSize anisotropic input",x,y,z)
     end
     return _checked_field_result(field_value(child,x,y,z,entity),"MaxSize input",x,y,z)
@@ -1067,22 +1065,44 @@ struct BoundedAniso{F<:AbstractAnisoField} <: AbstractAnisoField
     factor::Float64
 end
 
+@noinline function _bounded_metric_extreme(field,input)
+    values,vectors=_metric_big_spectrum(input)
+    bits=max(256,maximum(precision,values))
+    return setprecision(BigFloat,bits) do
+        lower=BigFloat(field.size_min);upper=BigFloat(field.size_max)
+        factor=BigFloat(field.factor)
+        sizes=map(value->inv(sqrt(value)),values)
+        if all(h->lower<=h<=upper,sizes)
+            # Uniform scaling needs no approximate eigenvector rebuild.
+            R=Rational{BigInt};denominator=R(field.factor)^2
+            entries=(input.m11,input.m22,input.m33,input.m12,input.m13,input.m23)
+            return Metric3(map(value->Float64(R(value)/denominator),entries)...)
+        end
+        bounded=map(sizes) do h
+            hb=factor*clamp(h,lower,upper)
+            inv(hb)^2
+        end
+        return _metric_from_big_spectrum(bounded,vectors)
+    end
+end
+
 function _bounded_metric(field::BoundedAniso,x,y,z,entity)
     input=metric_at(field.input,x,y,z,entity)
     input isa Metric3 || throw(ArgumentError(
         "BoundedSize: metric_at returned $(typeof(input)), not Metric3"))
     values,vectors=_sym3_eigh(input.m11,input.m22,input.m33,
                               input.m12,input.m13,input.m23)
+    (any(!isfinite,values) || minimum(values)<floatmin(Float64)) &&
+        return _bounded_metric_extreme(field,input)
     all(>(0),values) || throw(ArgumentError(
         "BoundedSize: input metric is not positive definite at ($x,$y,$z)"))
     bounded=ntuple(3) do i
         h=inv(sqrt(values[i]))
         hb=field.factor*clamp(h,field.size_min,field.size_max)
         invh=inv(hb); value=invh*invh
-        (isfinite(value) && value>0) || throw(ArgumentError(
-            "BoundedSize: bounded anisotropic metric is not representable at ($x,$y,$z)"))
         value
     end
+    all(value->isfinite(value) && value>0,bounded) || return _bounded_metric_extreme(field,input)
     return metric_from_axes(bounded[1],bounded[2],bounded[3],vectors...)
 end
 metric_at(field::BoundedAniso,x,y,z)=_bounded_metric(field,x,y,z,nothing)

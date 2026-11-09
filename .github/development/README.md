@@ -37,6 +37,7 @@ still required after the current implementation work.
 | Surface reader records/resources | Julia 1.12.7 and 1.13.3 minimal each passed 704/704 reader/neighbor checks; focused normal `-O2` checks passed 60/60 each. Bounds enabled, actual exits 0. OFF accepts separated headers/comments and validates face counts/indices; tiny truncated OFF/PLY2/PLY/VTK files reject before reserving their declared coordinate buffers. |
 | File dispatch inference boundary | Julia 1.12.7 minimal passed 259/259 CAD, GEO-view, import and merge checks, bounds enabled, actual exit 0. The same two dispatch boundaries completed the public STEP-open/mesh/query path on Julia 1.13.3 normal `-O2`, actual exit 0. |
 | BDF large fields/connectivity | Julia 1.12.7 and 1.13.3 minimal each passed 220/220 BDF/SU2 checks; the new 43 checks also passed under normal `-O2` on both runtimes. Bounds enabled, actual exits 0. Standard sixteen-column fields retain coordinates and large identifiers, and invalid quadratic connectivity cannot silently become a linear element. |
+| Extreme metric spectra | Julia 1.12.7 minimal passed 745/745 and Julia 1.13.3 normal `-O2` passed 753/753 scalar, Restrict and spectral checks, including existing anisotropy-cap neighbors and eight sampled ordinary zero-allocation loops. Bounds enabled, actual exits 0. Physical sizes and bounded tensors survive eigenvalues outside Float64's range; uniform scaling retains exact finite tensor entries. |
 
 Normal allocation on the bounded truncated-file probes fell from about 2.4MB
 to 2.5–4.7KB. The resource checks remain below 100KB for declared counts through
@@ -136,6 +137,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-io-surface-records-gate-{112,1133}-{min,normal}-20261109.log`.
 - `Tessella-file-dispatch-gate-112-min-20261109.log` and `Tessella-cad-dispatch-barrier-20261109.log`.
 - `Tessella-io-bdf-large-gate-{112,1133}-{min,normal}-20261109.log`.
+- `Tessella-metric-spectral-gate-{112-min,113-optimized}-final-20261109.log`.
 
 ## Release and earlier evidence
 

@@ -122,14 +122,14 @@ end
     return values,vectors
 end
 
-function _sym3_eigh_high_precision(a11,a22,a33,a12,a13,a23)
-    return setprecision(BigFloat,256) do
+@noinline function _sym3_eigh_big(a11,a22,a33,a12,a13,a23;bits=256)
+    return setprecision(BigFloat,bits) do
         A=BigFloat[BigFloat(a11) BigFloat(a12) BigFloat(a13);
                    BigFloat(a12) BigFloat(a22) BigFloat(a23);
                    BigFloat(a13) BigFloat(a23) BigFloat(a33)]
         V=fill(BigFloat(0),3,3)
         V[1,1]=V[2,2]=V[3,3]=BigFloat(1)
-        tolerance=ldexp(BigFloat(1),-220)
+        tolerance=ldexp(BigFloat(1),36-bits)
         for _ in 1:80
             changed=false
             for (p,q) in ((1,2),(1,3),(2,3))
@@ -157,16 +157,45 @@ function _sym3_eigh_high_precision(a11,a22,a33,a12,a13,a23)
             end
             changed || break
         end
-        tofloat(value::BigFloat)=begin
-            result=Float64(value)
-            result==0 && !iszero(value) ?
-                (signbit(value) ? -nextfloat(0.0) : nextfloat(0.0)) : result
-        end
-        values=(tofloat(A[1,1]),tofloat(A[2,2]),tofloat(A[3,3]))
-        vectors=((Float64(V[1,1]),Float64(V[2,1]),Float64(V[3,1])),
-                 (Float64(V[1,2]),Float64(V[2,2]),Float64(V[3,2])),
-                 (Float64(V[1,3]),Float64(V[2,3]),Float64(V[3,3])))
+        values=(A[1,1],A[2,2],A[3,3])
+        vectors=((V[1,1],V[2,1],V[3,1]),
+                 (V[1,2],V[2,2],V[3,2]),
+                 (V[1,3],V[2,3],V[3,3]))
         return values,vectors
+    end
+end
+
+function _sym3_eigh_high_precision(a11,a22,a33,a12,a13,a23)
+    values,vectors=_sym3_eigh_big(a11,a22,a33,a12,a13,a23)
+    tofloat(value)=begin
+        result=Float64(value)
+        result==0 && !iszero(value) ?
+            (signbit(value) ? -nextfloat(0.0) : nextfloat(0.0)) : result
+    end
+    return map(tofloat,values),map(v->map(Float64,v),vectors)
+end
+
+@noinline function _metric_big_spectrum(m::Metric3)
+    for bits in (256,512,1024,2048,4096,8192)
+        values,vectors=_sym3_eigh_big(m.m11,m.m22,m.m33,m.m12,m.m13,m.m23;bits)
+        all(>(0),values) && return values,vectors
+    end
+    throw(ErrorException("metric eigensystem: positive spectrum could not be resolved"))
+end
+
+@noinline function _metric_principal_sizes_big(m::Metric3)
+    values,_=_metric_big_spectrum(m)
+    return setprecision(BigFloat,256) do
+        map(value->Float64(inv(sqrt(value))),values)
+    end
+end
+
+@noinline function _metric_from_big_spectrum(values,vectors)
+    bits=max(256,maximum(precision,values),maximum(v->maximum(precision,v),vectors))
+    return setprecision(BigFloat,bits) do
+        entry(i,j)=sum(values[k]*vectors[k][i]*vectors[k][j] for k in 1:3)
+        Metric3(Float64(entry(1,1)),Float64(entry(2,2)),Float64(entry(3,3)),
+                Float64(entry(1,2)),Float64(entry(1,3)),Float64(entry(2,3)))
     end
 end
 
@@ -214,10 +243,26 @@ end
 """Return the smallest directional size `1 / √λₘₐₓ` represented by `m`."""
 function metric_size(m::Metric3)
     λ=metric_eigenvalues(m)
-    minimum(λ)>0 || throw(ArgumentError("metric_size: metric is not positive definite (λ=$λ)"))
-    h=inv(sqrt(maximum(λ)))
+    h=minimum(λ)>0 && isfinite(maximum(λ)) ? inv(sqrt(maximum(λ))) :
+        minimum(_metric_principal_sizes_big(m))
     (isfinite(h) && h>0) || throw(ArgumentError("metric_size: size is not representable (λ=$λ)"))
     return h
+end
+
+function _metric_coarsest_size(m::Metric3)
+    λ=metric_eigenvalues(m);smallest=minimum(λ)
+    return isfinite(smallest) && smallest>=floatmin(Float64) ? inv(sqrt(smallest)) :
+        maximum(_metric_principal_sizes_big(m))
+end
+
+@noinline function _metric_aniso_cap_extreme(m::Metric3,amax)
+    values,vectors=_metric_big_spectrum(m)
+    return setprecision(BigFloat,max(256,maximum(precision,values))) do
+        smallest=argmin(values);cap=values[smallest]*BigFloat(amax)^2
+        maximum(values)<=cap && return m
+        bounded=ntuple(i->i==smallest ? values[i] : min(values[i],cap),3)
+        return _metric_from_big_spectrum(bounded,vectors)
+    end
 end
 
 function metric_from_axes(λ1,λ2,λ3,v1,v2,v3)
@@ -256,6 +301,8 @@ function metric_aniso_cap(m::Metric3,aniso_max::Real)
     amax=Float64(aniso_max)
     (isfinite(amax) && amax>0 && amax<1e33) || return m
     values,vectors=_sym3_eigh(m.m11,m.m22,m.m33,m.m12,m.m13,m.m23)
+    (any(!isfinite,values) || minimum(values)<floatmin(Float64)) &&
+        return _metric_aniso_cap_extreme(m,amax)
     order=sortperm(collect(values))
     λmin=values[order[1]]
     λmin>0 || return m
