@@ -18379,6 +18379,8 @@ function _read_ply(path,caller::AbstractString)
                 n=tryparse(Int,words[3])
                 n===nothing && throw(ArgumentError(
                     "$caller: invalid PLY element count '$(words[3])'"))
+                n>=0 || throw(ArgumentError(
+                    "$caller: negative PLY element count '$(words[3])'"))
                 if element=="vertex"
                     nbv<0 || throw(ArgumentError(
                         "$caller: duplicate 'element vertex' declaration"))
