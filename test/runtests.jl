@@ -72,6 +72,7 @@ include("functional/fixtures.jl")
         "interfaces/io_stl_binary_test.jl",
         "interfaces/io_obj_indices_test.jl",
         "interfaces/io_surface_order_test.jl",
+        "interfaces/io_surface_records_test.jl",
         "functional/vtk_complete_hex.jl",
         "functional/vtk_lagrange_curve.jl",
         "functional/vtk_lagrange_smoke.jl",

@@ -16784,8 +16784,31 @@ function _vtk_int(token,caller::AbstractString,context::AbstractString)
     return _unv_int(token,caller,context)
 end
 
+function _io_remaining_bytes(io::Base.IO)
+    mark=position(io)
+    try
+        seekend(io)
+        return position(io)-mark
+    finally
+        seek(io,mark)
+    end
+end
+
+# Three ASCII scalar coordinates need at least five bytes ("0 0 0"). A
+# binary vertex needs its declared property widths. Check this necessary
+# condition before allocating a coordinate buffer from an untrusted count.
+function _surface_vertex_payload(nv::Int,bytes::Integer,width::Int,
+                                 caller::AbstractString,format::AbstractString)
+    0<=nv<=typemax(Int32) || throw(ArgumentError(
+        "$caller: $format vertex count is outside Int32 indexing bounds"))
+    nv<=div(bytes,width) || throw(ArgumentError(
+        "$caller: $format vertex count cannot fit in the available file payload"))
+    return nothing
+end
+
 function _read_vtk(io::Base.IO,caller::AbstractString,node_limit::Int,
                    element_limit::Int)
+    file_bytes=_io_remaining_bytes(io)
     # Two free-form header lines (version and title), then a token stream —
     # the pinned reader's `fgets`/`fscanf` split.
     eof(io) && throw(ArgumentError("$caller: truncated .vtk file"))
@@ -16827,6 +16850,9 @@ function _read_vtk(io::Base.IO,caller::AbstractString,node_limit::Int,
         "got '$point_type'"))
     npoints<=typemax(Int32) || throw(ArgumentError(
         "$caller: .vtk point count exceeds Int32 range"))
+    # The token iterator may already have buffered coordinates from the
+    # POINTS line, so use the original stream extent rather than its cursor.
+    _surface_vertex_payload(npoints,file_bytes,5,caller,"VTK")
     coords=Vector{Float64}(undef,3*npoints)
     @inbounds for i in eachindex(coords)
         coords[i]=_unv_float(next("point coordinate"),caller,
@@ -18055,53 +18081,78 @@ function _foreign_surface_records(path,caller)
     return nothing
 end
 
+function _surface_text_lines(path)
+    lines=String[]
+    for line in eachline(path)
+        text=strip(first(split(line,'#';limit=2)))
+        isempty(text) || push!(lines,String(text))
+    end
+    return lines
+end
+
+function _surface_face_indices(words,n::Int,nv::Int,caller::AbstractString,
+                               context::AbstractString)
+    length(words)>=n || throw(ArgumentError("$caller: truncated $context"))
+    indices=Vector{Int}(undef,n)
+    for i in 1:n
+        index=_unv_int(words[i],caller,context)
+        0<=index<nv || throw(ArgumentError(
+            "$caller: $context references vertex $index outside 0:$(nv-1)"))
+        indices[i]=Int(index)+1
+    end
+    return indices
+end
+
 function _read_off(path,caller::AbstractString)
     _foreign_surface_records(path,caller)
-    lines=readlines(path)
+    lines=_surface_text_lines(path)
     isempty(lines) && throw(ArgumentError("$caller: empty OFF file"))
-    # Upstream scans `OFF %d %d %d` — find the header token allowing comments.
-    header=nothing;lno=0
-    for line in lines
-        lno+=1
-        s=strip(line)
-        (isempty(s) || startswith(s,"#")) && continue
-        header=split(s);break
-    end
-    (header!==nothing && header[1]=="OFF" && length(header)>=4) ||
+    header=split(lines[1])
+    header[1]=="OFF" ||
         throw(ArgumentError("$caller: invalid OFF header"))
-    counts=tryparse.(Int,header[2:4])
+    # OFF's magic and counts can share a line or occupy separate records;
+    # comments and blank lines are valid between the two forms.
+    first_vertex=2
+    if length(header)==1
+        length(lines)>=2 || throw(ArgumentError("$caller: missing OFF counts"))
+        counts_record=split(lines[2])
+        first_vertex=3
+    else
+        counts_record=header[2:end]
+    end
+    length(counts_record)>=3 || throw(ArgumentError("$caller: invalid OFF counts"))
+    counts=tryparse.(Int,counts_record[1:3])
     any(c->c===nothing,counts) && throw(ArgumentError(
         "$caller: invalid OFF header counts"))
     nv,nf,_=counts
     nv>=0 && nf>=0 || throw(ArgumentError("$caller: negative OFF counts"))
+    available=length(lines)-first_vertex+1
+    nv<=typemax(Int32) && nv<=available && nf<=available-nv ||
+        throw(ArgumentError("$caller: OFF counts exceed the available records"))
+    nf==available-nv || throw(ArgumentError(
+        "$caller: unexpected OFF records after the declared faces"))
     coords=zeros(Float64,3,nv)
-    vi=0
     faces=Vector{Int}[]
-    for line in lines[lno+1:end]
-        s=strip(line)
-        (isempty(s) || startswith(s,"#")) && continue
-        if vi<nv
-            f=tryparse.(Float64,split(s))
-            (length(f)>=3 && !any(x->x===nothing,f[1:3])) || throw(ArgumentError(
-                "$caller: could not read OFF vertex $(vi+1)"))
-            coords[1,vi+1],coords[2,vi+1],coords[3,vi+1]=f[1],f[2],f[3]
-            vi+=1
-        else
-            t=tryparse.(Int,split(s))
-            isempty(t) && continue
-            n=t[1]
-            n===nothing && throw(ArgumentError("$caller: could not read OFF face"))
-            # 0-based indices; 3→triangle, 4→quadrangle, else warn-and-skip
-            # (upstream prints "Ignoring n-node face").
-            if n==3 && length(t)>=4
-                push!(faces,[t[2]+1,t[3]+1,t[4]+1])
-            elseif n==4 && length(t)>=5
-                push!(faces,[t[2]+1,t[3]+1,t[4]+1,t[5]+1])
-            end
+    for vi in 1:nv
+        words=split(lines[first_vertex+vi-1])
+        length(words)>=3 || throw(ArgumentError(
+            "$caller: could not read OFF vertex $vi"))
+        for k in 1:3
+            coords[k,vi]=_unv_float(words[k],caller,"OFF vertex $vi")
         end
     end
-    vi==nv || throw(ArgumentError(
-        "$caller: OFF declares $nv vertices but only $vi were readable"))
+    for fi in 1:nf
+        words=split(lines[first_vertex+nv+fi-1])
+        n=_unv_int(words[1],caller,"OFF face $fi count")
+        0<=n<=length(words)-1 || throw(ArgumentError(
+            "$caller: truncated or invalid OFF face $fi"))
+        # Preserve the existing triangle/quadrangle projection. Other
+        # polygon widths consume a declared face record but are not emitted.
+        if n==3 || n==4
+            push!(faces,_surface_face_indices(words[2:end],Int(n),nv,caller,
+                                              "OFF face $fi"))
+        end
+    end
     # upstream `_storeVerticesInEntities` deletes vertices no face references.
     flat=vec(coords)
     flat,faces=_drop_unref_vertices(flat,faces)
@@ -18173,8 +18224,8 @@ end
 
 function _read_ply2(path,caller::AbstractString)
     _foreign_surface_records(path,caller)
-    it=Iterators.Stateful(Iterators.filter(l->!startswith(strip(l),"#") &&
-        !isempty(strip(l)),readlines(path)))
+    lines=_surface_text_lines(path)
+    it=Iterators.Stateful(lines)
     isempty(it) && throw(ArgumentError("$caller: empty ply2 file"))
     nv=tryparse(Int,strip(popfirst!(it)))
     nv===nothing && throw(ArgumentError("$caller: invalid ply2 vertex count"))
@@ -18182,6 +18233,9 @@ function _read_ply2(path,caller::AbstractString)
     nf=tryparse(Int,strip(popfirst!(it)))
     nf===nothing && throw(ArgumentError("$caller: invalid ply2 face count"))
     nv>=0 && nf>=0 || throw(ArgumentError("$caller: negative ply2 counts"))
+    available=length(lines)-2
+    nv<=typemax(Int32) && nv<=available && nf<=available-nv ||
+        throw(ArgumentError("$caller: ply2 counts exceed the available records"))
     coords=zeros(Float64,3,nv)
     for i in 1:nv
         isempty(it) && throw(ArgumentError("$caller: truncated ply2 vertices"))
@@ -18193,10 +18247,11 @@ function _read_ply2(path,caller::AbstractString)
     faces=Vector{Int}[]
     for i in 1:nf
         isempty(it) && throw(ArgumentError("$caller: truncated ply2 faces"))
-        t=tryparse.(Int,split(strip(popfirst!(it))))
-        (length(t)>=4 && t[1]==3 && !any(x->x===nothing,t[2:4])) ||
+        words=split(popfirst!(it))
+        (length(words)>=4 && tryparse(Int,words[1])==3) ||
             throw(ArgumentError("$caller: could not read ply2 face $i"))
-        push!(faces,Int.(t[2:4]).+1)
+        push!(faces,_surface_face_indices(words[2:end],3,nv,caller,
+                                          "ply2 face $i"))
     end
     # upstream drops vertices no face references.
     flat=vec(coords)
@@ -18333,6 +18388,8 @@ function _read_ply(path,caller::AbstractString)
                 "$caller: PLY face data must follow vertex data"))
         length(vprops)>=3 || throw(ArgumentError(
             "$caller: PLY vertex element needs at least x, y, z properties"))
+        vertex_width=format===:ascii ? 5 : sum(sizeof,vprops)
+        _surface_vertex_payload(nbv,_io_remaining_bytes(io),vertex_width,caller,"PLY")
         coords=zeros(Float64,3,nbv)
         faces=Vector{Int}[]
         if format==:ascii
