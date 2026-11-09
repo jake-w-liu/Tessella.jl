@@ -164,6 +164,29 @@ function _model_import_views(slot,caller;sections=nothing)
     return views
 end
 
+function _model_import_stage_cad_file(path,options;model=nothing,seed=nothing,
+                                      caller="API.open")
+    staged=model===nothing ? GeoModel() : model
+    model===nothing && (staged.name=splitext(basename(path))[1])
+    context=GeoExec._GeoNumericContext()
+    seed===nothing || GeoExec._geo_seed_mesh_context!(context,seed)
+    context.file_name=String(path)
+    context.native_context_lc=NATIVE_CONTEXT_LC[]
+    context.native_context_forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[]
+    context.option_numbers[("Geometry",0,"Tolerance")]=options["Geometry.Tolerance"]
+    # Use the same native CAD import/synchronization as GEO Merge. Keep the
+    # CAD kernel outside inference of the ordinary file dispatcher, and load
+    # the filename directly without constructing an executable GEO wrapper.
+    Base.invokelatest(Model._model_occ_import_shapes,staged,path;caller)
+    Base.invokelatest(Model._model_occ_synchronize!,staged)
+    Base.invokelatest(GeoExec._geo_sync_native_context!,staged,context)
+    return (model=staged,mesh=context.mesh,params=nothing,transfinite_tri=nothing,
+        mesh_node_max=context.mesh_node_max,mesh_element_max=context.mesh_element_max,
+        native_context_lc=context.native_context_lc,
+        native_context_forced_bbox=context.native_context_forced_bbox,
+        native_element_lookup_receipt=context.native_element_lookup_receipt)
+end
+
 function _model_import_prepare(path,dimension;legacy=false)
     caller=legacy ? "API.open_geo!" : "API.open"
     options=copy(OPTIONS);diagnostics=_model_import_diagnostics(options)
@@ -180,6 +203,8 @@ function _model_import_prepare(path,dimension;legacy=false)
     elseif extension==".stl"
         IO._stage_stl_mesh_file(path;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
+    elseif extension in (".step",".stp",".igs",".iges")
+        _model_import_stage_cad_file(path,options;caller)
     elseif extension in (".xao",".brep")
         # `.xao`/`.brep` carry an OCCT CASCADE BRep dump: publishing model
         # entities needs the analytic curve/surface boundary kernel, which is
@@ -344,8 +369,8 @@ function _model_import_filename(filename,caller;geo_only=false)
     extension==".cgns" && throw(ArgumentError(
         "$caller: .cgns import requires the CGNS library (upstream Gmsh " *
         "must be compiled with CGNS support), which Tessella does not link"))
-    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos",".unv",".mesh",".meshb",".stl",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk",".wrl",".off",".obj",".ply",".ply2",".xao",".brep",".cdf")) || throw(ArgumentError(
-        "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh, .pos, .unv, .mesh, .meshb, .stl, .su2, .bdf, .nas, .inp, .neu, .p3d, .mail, .ir3, .diff, .vtk, .wrl, .off, .obj, .ply, .ply2, .xao, .brep and .cdf")"))
+    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos",".unv",".mesh",".meshb",".stl",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk",".wrl",".off",".obj",".ply",".ply2",".step",".stp",".igs",".iges",".xao",".brep",".cdf")) || throw(ArgumentError(
+        "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh, .pos, .unv, .mesh, .meshb, .stl, .su2, .bdf, .nas, .inp, .neu, .p3d, .mail, .ir3, .diff, .vtk, .wrl, .off, .obj, .ply, .ply2, .step, .stp, .igs, .iges, .xao, .brep and .cdf")"))
     isfile(filename) || throw(ArgumentError("$caller: missing file $filename"))
     return String(filename)
 end
@@ -355,9 +380,8 @@ end
 
 Import a `.geo`, `.msh`, `.unv`, `.mesh`, `.meshb`, `.stl`, `.su2`, `.bdf`,
 `.nas`, `.inp`, `.neu`, `.p3d`, `.mail`, `.ir3`, `.diff`, `.vtk`, `.wrl`,
-`.off`, `.obj`, `.ply`, `.ply2` or
-supported
-linear-list `.pos` file into a new current model, reusing an empty
+`.off`, `.obj`, `.ply`, `.ply2`, `.step`, `.stp`, `.igs`, `.iges` or
+supported `.pos` list file into a new current model, reusing an empty
 current model. Nonempty prior models and session views remain alive. MSH
 imports keep actual UIDs, entity ownership and retained metadata; UNV and
 Medit/MESH imports (ASCII `.mesh` and binary `.meshb` alike) publish through
@@ -378,14 +402,16 @@ publish VRML 1.0/2.0 `IndexedFaceSet`/`IndexedLineSet` coordIndex geometry
 through `read_wrl` on per-set curve/surface entities like the pinned reader,
 while `.xao`/`.brep` CAD files reject at the classified OCCT BRep boundary
 kernel (`IO.read_xao`/`IO.read_brep` expose their envelope census);
-STL imports weld through
+STEP and IGES imports synchronize actual native CAD entities through the
+same importer as `model.occ.import_shapes`; unsupported CAD geometry retains
+that importer's diagnostics. STL imports weld through
 `read_stl` and publish one discrete Surface; ordinary
 model data sections create views bound to the imported model. The model name
 is the filename stem unless GEO `SetName` supplies one. Failed preparation
 leaves model slots, caches, options and views unchanged; this stricter failure
 contract differs from Gmsh's missing-file partial publication.
-POS imports preserve named list views and literal time values; text,
-interpolation schemes and higher-order list records reject before publication.
+POS imports preserve named list views, time values, text, interpolation
+schemes and supported higher-order list records.
 """
 function open(filename)
     path=_model_import_filename(filename,"API.open")

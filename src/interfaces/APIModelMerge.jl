@@ -190,6 +190,8 @@ function _model_merge_prepare(path)
     elseif extension==".stl"
         IO._stage_stl_mesh_merge(path,model,seed;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
+    elseif extension in (".step",".stp",".igs",".iges")
+        _model_import_stage_cad_file(path,options;model,seed,caller)
     elseif extension in (".xao",".brep")
         throw(ArgumentError("$caller: $extension CAD import requires the " *
             "OpenCASCADE BRep boundary kernel (TShape curve/surface " *
@@ -227,15 +229,16 @@ end
 
 Merge a `.geo`, `.msh`, `.unv`, `.mesh`, `.meshb`, `.stl`, `.su2`, `.bdf`,
 `.nas`, `.inp`, `.neu`, `.p3d`, `.mail`, `.ir3`, `.diff`, `.vtk`, `.wrl`,
-`.off`, `.obj`, `.ply`, `.ply2` or
-supported
-linear-list `.pos` file atomically. Existing models,
+`.off`, `.obj`, `.ply`, `.ply2`, `.step`, `.stp`, `.igs`, `.iges` or
+supported `.pos` list file atomically. Existing models,
 the current model slot, associated filename and held views survive. GEO executes
 against current entities, fields and options; an explicit `SetName` is honored.
 Supported literal MSH identities/periodic/partition/data metadata are retained;
 duplicate UID occurrences or incompatible partition namespaces reject before
 publication. STL welds through `read_stl` and lands on the lowest free discrete
 Surface tag.
+STEP and IGES files add their actual native CAD entities while retaining
+the current slot, mesh, fields and held views.
 Explicit external GEO actions are outside the rollback contract.
 POS adds list views only, leaving the current model and associated filename unchanged.
 """

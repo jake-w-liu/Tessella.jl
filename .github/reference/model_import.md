@@ -1,6 +1,7 @@
 # Atomic model file import
 
-`Tessella.API.open(filename)` is a session importer for `.geo`, `.msh` and `.pos` files.
+`Tessella.API.open(filename)` imports GEO, supported mesh/post-processing
+formats, and native STEP (`.step`/`.stp`) or IGES (`.igs`/`.iges`) CAD files.
 It returns `nothing`. A successful open makes the imported model current while
 retaining nonempty prior models and their views. It reuses an empty current
 model, including the initial unnamed model. Repeated opens of a nonempty file
@@ -21,9 +22,20 @@ including an explicitly empty name. The associated model filename is the
 filename passed to `open`. Nonempty older models keep their filenames, public
 mesh records, and held model-view bindings when the current model changes.
 
-[POS list imports](session_pos_import.md) publish supported literal list views
-into a real empty current model. They retain names and physical times; malformed
+[POS list imports](session_pos_import.md) publish supported list views
+into a real empty current model. They retain names, physical times, text and
+bound interpolation schemes; malformed
 or unsupported files leave the session unchanged.
+
+STEP and IGES files use the same native importer as
+`API.model.occ.import_shapes`, then synchronize their actual Point, Curve,
+Surface and Volume entities. They retain the importer's geometry coverage and
+diagnostics. No mesh or discrete CAD substitute is invented during open;
+ordinary mesh generation remains available afterwards. CAD merge adds these
+entities while retaining the current mesh, fields, filename and held view
+owners. Parsing, synchronization and bounding-context updates occur on
+detached state before publication. File suffix aliases are case insensitive,
+and filenames are passed directly to the reader as data.
 
 MSH 2.2 and 4.1 imports accept ASCII and binary files through the existing
 literal mesh importer. They retain supported actual public UIDs, entity owners,

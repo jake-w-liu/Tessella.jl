@@ -28,6 +28,14 @@ still required after the current implementation work.
 | Simplex-coordinate increment | Julia 1.12.7 and 1.13.3 normal `-O2` each passed 1026 coordinate/reference/locator assertions; minimal functional checks passed 80/80 each. A separate validation, quality, topology and transform audit passed 3124/3124 on each runtime. Bounds enabled, actual exits 0. |
 | Triangle distance and automatic sizing | Julia 1.12.7 minimal passed 71/71 regressions. Julia 1.13.3 normal `-O2` passed 39,643/39,643 regressions, neighboring distance/automatic-constructor checks and resource checks. Bounds enabled, actual exits 0. |
 | Native binary STL | Julia 1.13.3 minimal passed 58/58 format/frontend checks; Julia 1.12.7 minimal passed 113/113 including neighboring frontend checks. Julia 1.13.3 normal `-O2` passed 63/63, including five zero-allocation normal checks. Bounds enabled, actual exits 0. |
+| STEP/IGES file frontends | 74/74 CAD lifecycle checks passed on Julia 1.12.7 minimal and Julia 1.13.3 normal `-O2`. The initial 70-check scope also passed on 1.13.3 minimal; a 1.12.7 minimal runner passed those 70 plus 143 existing import/merge/native-CAD checks. Bounds enabled, actual exits 0. |
+
+`API.open` and `API.merge` now dispatch `.step`, `.stp`, `.igs` and `.iges`
+directly to the existing native CAD importer and synchronize actual geometry.
+Staging preserves held models/views, existing mesh UIDs, fields and forced
+bounding context, with rollback on malformed input. The checks also cover
+subsequent meshing/transforms, suffix aliases and Unicode filenames. The first
+normal block took 9m23.8s cold; no CAD compiler improvement is claimed.
 
 STL output now honors `Mesh.Binary` through API, GEO Save and CLI paths.
 Native binary output uses explicit little-endian records, Float32 geometry,
@@ -89,6 +97,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-core-coordinate-112-optimized-20261109.log`, `Tessella-core-coordinate-1133-optimized2-20261109.log`, `Tessella-core-coordinate-{112,1133}-min-functional-20261109.log`, and `Tessella-core-independent-{112,1133}-optimized-20261109.log`.
 - `Tessella-distance-closest-regression-112-min-final-20261109.log` and `Tessella-closest-geometry-gate-113-optimized-finalsource-20261109.log`.
 - `Tessella-io-stl-binary-1133-min-20261109.log`, `Tessella-io-stl-gate-112-min-20261109.log`, and `Tessella-io-stl-binary-1133-optimized-20261109.log`.
+- `Tessella-cad-file-frontends-112-min-final-20261109.log`, `Tessella-cad-file-frontends-1133-optimized-20261109.log`, `Tessella-cad-file-frontends-1133-min-final-20261109.log`, and `Tessella-cad-file-frontends-112-min-neighbors-20261109.log`.
 
 ## Release and earlier evidence
 

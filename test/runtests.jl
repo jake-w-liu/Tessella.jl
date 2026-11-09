@@ -60,6 +60,7 @@ include("functional/fixtures.jl")
         "functional/model_view_export.jl",
         "functional/model_export_smoke.jl",
         "functional/model_import_smoke.jl",
+        "interfaces/api_cad_file_import_test.jl",
         "functional/model_merge_smoke.jl",
         "functional/pos_import_smoke.jl",
         "functional/view_time_smoke.jl",
