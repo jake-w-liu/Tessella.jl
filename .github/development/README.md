@@ -50,6 +50,7 @@ still required after the current implementation work.
 | Native pyramid coordinate binding | Julia 1.13.3 normal `-O2` passed 203/203 native/reopened query, gradient and field checks plus a 547/547 neighbor/resource scope. Julia 1.12.7 minimal passed 597/597 public/neighbor/scaled checks. Bounds enabled, actual exits 0. Twelve sampled stored-field queries allocate zero warmed bytes. Exact dyadic accumulation binds native pyramid coordinate offsets once, fixing P9 point-location cancellation while preserving the strict shared inverse certificates. |
 | Native pyramid collapse denominator | Julia 1.12.7 minimal passed 691/691 public/neighbor checks; Julia 1.13.3 normal `-O2` passed 836/836 component/neighbor/resource checks, with twelve sampled stored queries allocating zero warmed bytes. Bounds enabled, actual exits 0. Native geometry and values retain their actual collapse denominator through the nearest Float64 reference to the apex; independent flags preserve the existing explicit POS matrix convention. The new 86-check default regression covers scalar/vector/tensor values, gradients, both model-data kinds, exact apex behavior and explicit two/four-matrix controls. |
 | Native BREP/XAO import | Julia 1.12.7 minimal and Julia 1.13.3 normal `-O2` each passed 639/639 native/neighbor checks with four threads and bounds enabled, actual exits 0. Seventeen owned source/test/fixture hashes were frozen and independently reviewed. Imports reconstruct shared analytic/spline topology and pcurves; public open/merge retain held state and bind XAO source references, names and groups. Existing native cube meshing retains positive tets and its exact boundary. Natural no-wire faces, nondegenerate pcurve-only edges and further curve/surface/orientation cases remain implementation work. |
+| Boundary inference and NoNew provenance | Julia 1.12.7 and 1.13.3 minimal each passed 3703/3703 topology, factory, periodic, provenance and retained-node assertions, bounds enabled, actual exits 0. Valid unmerged sweeps retain their literal boundary and source nodes; all 22 corruption mutations reject without changing state. A separate 15-check record/CAD gate passed on 1.13.3 in both minimal and normal `-O2` modes. The 59-check operation-provenance fixture is now part of the default suite. |
 
 Normal allocation on the bounded truncated-file probes fell from about 2.4MB
 to 2.5–4.7KB. The resource checks remain below 100KB for declared counts through
@@ -99,6 +100,17 @@ sampled public STEP-open call fell from 423.25s/96.87GB total allocation to
 253.58s/68.77GB. The variant also completed native curve meshing and node
 queries. Those allocation totals include compilation and are not resident
 memory or steady-state mesh costs. Cold compilation remains substantial.
+
+A second inference boundary isolates the exceptional unmerged-sweep admission
+from ordinary volume-boundary queries. On the same detached `eaa8b54` source,
+the sampled minimal-compilation model-record call fell from 213.33s/64.16GB
+total allocation to 8.02s/2.15GB. The final production body passed the same
+record/CAD invariants without temporary method rewrites; its normal Julia
+1.13.3 cold-record call took 3.40s/707.5MB total allocation. These are bounded
+compiler measurements, not resident-memory or whole-application speed claims.
+The admission now runs the existing complete operation-provenance certificate
+before accepting an unmerged shell, closing a confirmed bypass that admitted
+corrupted source/cap/lateral bindings.
 
 STL output now honors `Mesh.Binary` through API, GEO Save and CLI paths.
 Native binary output uses explicit little-endian records, Float32 geometry,
@@ -182,6 +194,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-pyramid-public-gate-1133-O2-20261109.log` and `Tessella-pyramid-neighbor-gate-{112-min,1133-O2}-20261109.log`.
 - `Tessella-native-pyramid-apex-final-gate-112-min-20261109.log` and `Tessella-native-pyramid-apex-component-gate-1133-O2-20261109.log`.
 - `Tessella-cad-brep-xao-gate-{1127-min,1133-normal}-20261109.log`; the seventeen-file snapshot is recorded in `Tessella-cad-brep-xao-review-hashes-20261109.json`.
+- `Tessella-central-final-neighbors-{112,1133}-min-20261109.log` and `Tessella-view-central-product-final-1133-{min,normal}-20261109.log`.
 
 ## Release and earlier evidence
 

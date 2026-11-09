@@ -18,8 +18,8 @@ const _AC_B4_FIXTURE=joinpath(@__DIR__,"..","data","native_geo_auto_coherence_v1
             literal=_AC_B4_MODEL._model_volume_boundary_surfaces(model,volume,
                 "literal B4 incidence";certify_shells=false)
             before=deepcopy(model)
-            @test_throws ArgumentError _AC_B4_MODEL._model_volume_boundary_surfaces(
-                model,volume,"strict B4 CAD shell")
+            @test _AC_B4_MODEL._model_volume_boundary_surfaces(
+                model,volume,"certified B4 operation")==literal
             @test _AC_B4_MODEL._extrude_nonew_boundary_surfaces(model,volume,
                 "recorded B4 operation")==literal
             @test length(model.points)==44 && length(model.curves)==20

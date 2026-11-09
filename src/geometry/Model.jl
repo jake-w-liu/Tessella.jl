@@ -6578,7 +6578,10 @@ function _model_volume_boundary_surfaces(
                 _validate_surface_loop(m,surfaces,caller)
             catch error
                 error isa ArgumentError || rethrow()
-                _extrude_nonew_unmerged_b4_incidence(m,volume,caller) || rethrow()
+                # Infer the sweep admission only when a stored shell fails;
+                # ordinary boundary queries do not need its meshing graph.
+                Base.invokelatest(_extrude_nonew_unmerged_b4_admission,
+                    m,volume,caller) || rethrow()
                 unmerged=true
             end
         end

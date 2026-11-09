@@ -99,6 +99,7 @@ include("functional/fixtures.jl")
         "geometry/model_meshadapt_functional_test.jl",
         "geometry/model_meshadapt_closed_test.jl",
         "geometry/model_volume_boundary_cache_test.jl",
+        "geometry/geo_auto_coherence_b4_operation_certificate_test.jl",
         "geometry/model_box_boundary_extension_test.jl",
         "functional/pyramid_option.jl",
         "functional/brep_bounded143_smoke.jl",

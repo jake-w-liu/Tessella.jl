@@ -152,13 +152,10 @@ function _extrude_nonew_unmerged_b4_incidence(m::GeoModel,t::Int,caller)
     return unmerged
 end
 
-function _extrude_nonew_boundary_surfaces(m::GeoModel,t::Int,caller)
-    try
-        return _model_volume_boundary_surfaces(m,t,caller)
-    catch error
-        error isa ArgumentError || rethrow()
-        _extrude_nonew_unmerged_b4_incidence(m,t,caller) || rethrow()
-    end
+# Certify the complete recorded operation before accepting an unmerged shell.
+# Its literal topology read disables certification to avoid reentering admission.
+function _extrude_nonew_unmerged_b4_admission(m::GeoModel,t::Int,caller)
+    _extrude_nonew_unmerged_b4_incidence(m,t,caller) || return false
     params=_extrude_gate(m,3,t)
     link=m.meshing.extrude_sources[(3,t)]
     spec=m.meshing.extrude_specs[(3,t)]
@@ -228,7 +225,11 @@ function _extrude_nonew_boundary_surfaces(m::GeoModel,t::Int,caller)
     end
     top!=0 && laterals==Set(original) || throw(ArgumentError(
         "$caller: B4 operation requires its copied cap and all Source laterals"))
-    return boundary
+    return true
+end
+
+function _extrude_nonew_boundary_surfaces(m::GeoModel,t::Int,caller)
+    return _model_volume_boundary_surfaces(m,t,caller)
 end
 
 function _extrude_nonew_region_boundary(m,t,source,caller;sides::Int=4,

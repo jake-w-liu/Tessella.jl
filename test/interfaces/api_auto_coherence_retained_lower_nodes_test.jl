@@ -21,8 +21,8 @@ bits(values)=[bytes2hex(reinterpret(UInt8,[Float64(value)])) for value in values
             volume=only(keys(model.volumes))
             literal=Tessella.Model._model_volume_boundary_surfaces(
                 model,volume,"literal retained boundary";certify_shells=false)
-            @test_throws ArgumentError Tessella.Model._model_volume_boundary_surfaces(
-                model,volume,"strict retained CAD shell")
+            @test Tessella.Model._model_volume_boundary_surfaces(
+                model,volume,"certified retained operation")==literal
             cad=deepcopy((model.points,model.curves,model.loops,model.surfaces,
                 model.surface_loops,model.volumes,model.meshing.extrude_sources,model.next_tag))
             API.mesh.generate(2)
@@ -31,8 +31,8 @@ bits(values)=[bytes2hex(reinterpret(UInt8,[Float64(value)])) for value in values
                 model.surface_loops,model.volumes,model.meshing.extrude_sources,model.next_tag))
             @test Tessella.Model._model_volume_boundary_surfaces(
                 model,volume,"literal retained boundary";certify_shells=false)==literal
-            @test_throws ArgumentError Tessella.Model._model_volume_boundary_surfaces(
-                model,volume,"strict retained CAD shell after generation")
+            @test Tessella.Model._model_volume_boundary_surfaces(
+                model,volume,"certified retained operation after generation")==literal
             @test API.model.get_entities()==[(Int(row["dimension"]),Int(row["tag"])) for row in native["entities"]]
             ids,xyz,uv=API.mesh.get_nodes()
             @test length(ids)==8052
