@@ -17631,18 +17631,13 @@ end
 #
 # `.xao` is gmsh's native OpenCASCADE interchange: an XML envelope naming the
 # model, a `<shape format="BREP">` CDATA carrying the OCCT `CASCADE Topology`
-# BRep text dump, a `<topology>` section mapping gmsh entity indices to TShape
+# BRep text dump, a `<topology>` section mapping gmsh entity indices to source
 # references (with optional entity `name`s), `<groups>` = physical groups with
-# their member entity indices, and `<fields>` = mesh fields. `.brep` is the
+# their member entity indices, and `<fields>` = topology fields. `.brep` is the
 # same CASCADE dump without the XML envelope.
 #
-# Entity publication from these formats needs the full BRep boundary kernel
-# (TShape graph → analytic curves/surfaces → trimmed faces/solids) — the same
-# classified `importShapes` boundary as upstream's OCC route; `API.open` and
-# `API.merge` reject with that named boundary instead of fabricating a model.
-# `read_xao`/`read_brep` are the honest partial contract: they parse and
-# validate the real envelope/section structure and report the census, leaving
-# the TShape geometry graph to a future kernel.
+# These IO helpers expose envelope metadata and section counts. API.open
+# and API.merge use the native Model BREP reader for CAD materialization.
 
 struct BrepFile
     header::String                    # e.g. "CASCADE Topology V1, (c) Matra-Datavision"
@@ -17661,7 +17656,7 @@ const _BREP_SECTIONS=("Locations","Curve2ds","Curves","Polygon3D",
                       "PolygonOnTriangulations","Surfaces","Triangulations")
 const _BREP_TSHAPE_KINDS=Dict{String,Symbol}(
     "Ve"=>:vertex,"Ed"=>:edge,"Wi"=>:wire,"Fa"=>:face,"Sh"=>:shell,
-    "So"=>:solid,"Cs"=>:compsolid,"Co"=>:compound)
+    "So"=>:solid,"Cs"=>:compsolid,"CS"=>:compsolid,"Co"=>:compound)
 
 # Parse the `CASCADE Topology` text envelope: header line, the section-count
 # declarations and the per-kind TShape census. Geometry sections' records are
@@ -17735,8 +17730,8 @@ end
     XaoEntity
 
 One `<topology>` entry of an `.xao` file: its model `dim` (0–3), the 0-based
-topology `index`, the published entity `tag` (`index+1`), the optional entity
-`name`, and the OCCT TShape `reference` it binds in the embedded BRep.
+topology `index`, the entity `tag` (`index+1` before a merge offset), the optional
+entity `name`, and its `reference` in the source shape's TopExp preorder.
 """
 struct XaoEntity
     dim::Int
@@ -17814,9 +17809,9 @@ Read the envelope of a gmsh XAO `.xao` CAD file: the `<XAO>` version and
 census (as a [`BrepFile`](@ref), via [`read_brep`](@ref)'s parser), the
 `<topology>` index→TShape entity map (with optional names; entity tag =
 index+1 like upstream), `<groups>` physical groups resolved to member entity
-tags, and `<fields>` rows. Entity materialization is not attempted — the
-embedded BRep needs the full OpenCASCADE boundary kernel, which is the
-classified `importShapes` boundary also enforced by `API.open`/`API.merge`.
+tags, and `<fields>` rows. Separately stored shapes retain their declared
+format without an embedded census. API.open/API.merge materialize native CAD
+geometry and bind its topology, entity names and physical groups.
 """
 function read_xao(path;max_file_bytes=typemax(Int))
     caller="read_xao"
@@ -17833,8 +17828,11 @@ function read_xao(path;max_file_bytes=typemax(Int))
     version=_xao_unescape(get(_xao_attrs(root.captures[1]),"version",""))
     geo=match(r"<geometry\b([^>]*)>",text)
     name=geo===nothing ? "" : _xao_unescape(get(_xao_attrs(geo.captures[1]),"name",""))
+    header=match(r"<shape\b([^>]*)>",text)
+    format=header===nothing ? "" :
+        _xao_unescape(get(_xao_attrs(header.captures[1]),"format",""))
     shape=match(r"(?s)<shape\b([^>]*)>(.*?)</shape>",text)
-    format="";brep=nothing
+    brep=nothing
     if shape!==nothing
         format=_xao_unescape(get(_xao_attrs(shape.captures[1]),"format",""))
         body=shape.captures[2]

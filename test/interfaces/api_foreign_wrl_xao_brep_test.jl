@@ -100,22 +100,16 @@ end
           x.brep.tshapes[:vertex]==8
 end
 
-@testset ".xao/.brep import rejects honestly at the classified boundary" begin
+@testset ".xao/.brep import publishes native CAD geometry" begin
     session() do
         A.option("General.Terminal",0)
         for path in (joinpath(FIX,"group_box.xao"),joinpath(FIX,"half_cyl.brep"))
-            err=try
-                A.open(path);nothing
-            catch caught;caught;end
-            @test err isa ArgumentError
-            text=sprint(showerror,err)
-            @test occursin("OpenCASCADE BRep boundary kernel",text)
-            @test occursin("read_xao",text) || occursin("read_brep",text)
-            err=try
-                A.merge(path);nothing
-            catch caught;caught;end
-            @test err isa ArgumentError
-            @test occursin("OpenCASCADE BRep boundary kernel",sprint(showerror,err))
+            @test A.open(path)===nothing
+            volumes=A.model.get_entities(3)
+            @test length(volumes)==1
+            @test A.model.occ.get_mass(volumes[1]...)>0.
+            @test A.merge(path)===nothing
+            @test length(A.model.get_entities(3))==2
         end
     end
 end

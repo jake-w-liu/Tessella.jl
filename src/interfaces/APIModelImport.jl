@@ -2,6 +2,7 @@
 # options, lookup catalogues, or session views.
 import ..IO
 include("APIGeoViewTransport.jl")
+include("APIModelXAOImport.jl")
 
 function _model_import_option!(options,family,member,value)
     name=string(family,'.',member)
@@ -177,7 +178,11 @@ function _model_import_stage_cad_file(path,options;model=nothing,seed=nothing,
     # Use the same native CAD import/synchronization as GEO Merge. Keep the
     # CAD kernel outside inference of the ordinary file dispatcher, and load
     # the filename directly without constructing an executable GEO wrapper.
-    Base.invokelatest(Model._model_occ_import_shapes,staged,path;caller)
+    if lowercase(splitext(path)[2])==".xao"
+        Base.invokelatest(_model_import_xao_geometry!,staged,path,caller)
+    else
+        Base.invokelatest(Model._model_occ_import_shapes,staged,path;caller)
+    end
     Base.invokelatest(Model._model_occ_synchronize!,staged)
     Base.invokelatest(GeoExec._geo_sync_native_context!,staged,context)
     return (model=staged,mesh=context.mesh,params=nothing,transfinite_tri=nothing,
@@ -203,17 +208,8 @@ function _model_import_prepare(path,dimension;legacy=false)
     elseif extension==".stl"
         IO._stage_stl_mesh_file(path;
             context_lc=NATIVE_CONTEXT_LC[],forced_bbox=NATIVE_CONTEXT_FORCED_BBOX[])
-    elseif extension in (".step",".stp",".igs",".iges")
+    elseif extension in (".step",".stp",".igs",".iges",".brep",".xao")
         _model_import_stage_cad_file(path,options;caller)
-    elseif extension in (".xao",".brep")
-        # `.xao`/`.brep` carry an OCCT CASCADE BRep dump: publishing model
-        # entities needs the analytic curve/surface boundary kernel, which is
-        # the classified `importShapes` gap — `IO.read_xao`/`IO.read_brep`
-        # expose the truthful envelope census instead of fabricating a model.
-        throw(ArgumentError("$caller: $extension CAD import requires the " *
-            "OpenCASCADE BRep boundary kernel (TShape curve/surface " *
-            "reconstruction), which Tessella does not implement; " *
-            "IO.read_xao/IO.read_brep expose the envelope census"))
     else
         # A filename selects this parser at runtime. Keep GEO's meshing/plugin
         # graph out of inference when opening an unrelated mesh or CAD file.
@@ -383,7 +379,7 @@ end
 
 Import a `.geo`, `.msh`, `.unv`, `.mesh`, `.meshb`, `.stl`, `.su2`, `.bdf`,
 `.nas`, `.inp`, `.neu`, `.p3d`, `.mail`, `.ir3`, `.diff`, `.vtk`, `.wrl`,
-`.off`, `.obj`, `.ply`, `.ply2`, `.step`, `.stp`, `.igs`, `.iges` or
+`.off`, `.obj`, `.ply`, `.ply2`, `.step`, `.stp`, `.igs`, `.iges`, `.brep`, `.xao` or
 supported `.pos` list file into a new current model, reusing an empty
 current model. Nonempty prior models and session views remain alive. MSH
 imports keep actual UIDs, entity ownership and retained metadata; UNV and
@@ -403,11 +399,11 @@ publish unstructured-grid/polydata cells on per-dimension entities like
 upstream; WRL imports
 publish VRML 1.0/2.0 `IndexedFaceSet`/`IndexedLineSet` coordIndex geometry
 through `read_wrl` on per-set curve/surface entities like the pinned reader,
-while `.xao`/`.brep` CAD files reject at the classified OCCT BRep boundary
-kernel (`IO.read_xao`/`IO.read_brep` expose their envelope census);
-STEP and IGES imports synchronize actual native CAD entities through the
-same importer as `model.occ.import_shapes`; unsupported CAD geometry retains
-that importer's diagnostics. STL imports weld through
+STEP, IGES and BREP imports synchronize actual native CAD entities through
+the same importer as `model.occ.import_shapes`. XAO imports bind the real
+BREP topology, entity names and physical groups, including separately stored
+BREP shapes. Unsupported CAD records retain the native reader's diagnostics.
+STL imports weld through
 `read_stl` and publish one discrete Surface; ordinary
 model data sections create views bound to the imported model. The model name
 is the filename stem unless GEO `SetName` supplies one. Failed preparation

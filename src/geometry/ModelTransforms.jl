@@ -549,7 +549,10 @@ function _transform_occ_surface_record(g, t::_AffineTransform, caller, what;tens
             # parameter on spheres/tori, which the separable axis reparam
             # cannot represent — keep det>0 transforms exact on both
             # channels and reject mirrors loudly.
-            _linear_det(t.linear)<0 && throw(ArgumentError(
+            # A generic tensor has no analytic shadow: its pole image
+            # preserves the same source parameter map under reflection.
+            generic_tensor=get(g,:occ,nothing) in (:tensor_bezier,:tensor_bspline)
+            _linear_det(t.linear)<0 && !generic_tensor && throw(ArgumentError(
                 "$caller: reflection of a NURBS-converted $what is " *
                     "not implemented"))
             analytic=_transform_occ_surface_record(Base.structdiff(

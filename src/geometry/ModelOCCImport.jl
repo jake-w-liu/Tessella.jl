@@ -1288,8 +1288,10 @@ function _model_occ_import_shapes(m::GeoModel,path;highest_dim_only=true,
         roots=_model_occ_import_iges(m,path;highest_dim_only=false,caller=caller)
         return _occ_import_results(m,roots,highest_dim_only,caller)
     end
-    selected=="brep" && throw(ArgumentError(
-        "$caller: native BREP geometry import is not implemented"))
+    if selected=="brep"
+        return _model_occ_import_brep(m,path;
+            highest_dim_only=highest_dim_only,caller=caller)
+    end
     source=read(path,String)
     occursin("ISO-10303-21",source) || throw(ArgumentError(
         "$caller: $path is not an ISO-10303-21 STEP file"))
@@ -1323,6 +1325,8 @@ function _model_occ_import_shapes(m::GeoModel,path;highest_dim_only=true,
         "in $path"))
     return _occ_import_results(m,out,highest_dim_only,caller)
 end
+
+include("ModelOCCBREP.jl")
 
 # ── `healShapes` ──────────────────────────────────────────────────────────────
 #

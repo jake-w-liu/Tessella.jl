@@ -49,6 +49,7 @@ still required after the current implementation work.
 | OCC lower incidence results | Julia 1.13.3 minimal passed 104/104 incidence, selector and existing IGES checks; Julia 1.12.7 minimal passed 39/39 focused incidence/selector checks. Bounds enabled, actual exits 0. `highestDimOnly=false` includes each imported root's actual lower topology with repeated shared incidences, ordered by dimension and excluding unrelated existing entities. |
 | Native pyramid coordinate binding | Julia 1.13.3 normal `-O2` passed 203/203 native/reopened query, gradient and field checks plus a 547/547 neighbor/resource scope. Julia 1.12.7 minimal passed 597/597 public/neighbor/scaled checks. Bounds enabled, actual exits 0. Twelve sampled stored-field queries allocate zero warmed bytes. Exact dyadic accumulation binds native pyramid coordinate offsets once, fixing P9 point-location cancellation while preserving the strict shared inverse certificates. |
 | Native pyramid collapse denominator | Julia 1.12.7 minimal passed 691/691 public/neighbor checks; Julia 1.13.3 normal `-O2` passed 836/836 component/neighbor/resource checks, with twelve sampled stored queries allocating zero warmed bytes. Bounds enabled, actual exits 0. Native geometry and values retain their actual collapse denominator through the nearest Float64 reference to the apex; independent flags preserve the existing explicit POS matrix convention. The new 86-check default regression covers scalar/vector/tensor values, gradients, both model-data kinds, exact apex behavior and explicit two/four-matrix controls. |
+| Native BREP/XAO import | Julia 1.12.7 minimal and Julia 1.13.3 normal `-O2` each passed 639/639 native/neighbor checks with four threads and bounds enabled, actual exits 0. Seventeen owned source/test/fixture hashes were frozen and independently reviewed. Imports reconstruct shared analytic/spline topology and pcurves; public open/merge retain held state and bind XAO source references, names and groups. Existing native cube meshing retains positive tets and its exact boundary. Natural no-wire faces, nondegenerate pcurve-only edges and further curve/surface/orientation cases remain implementation work. |
 
 Normal allocation on the bounded truncated-file probes fell from about 2.4MB
 to 2.5–4.7KB. The resource checks remain below 100KB for declared counts through
@@ -85,7 +86,7 @@ valid positive tets; Sphere1 and AutoSphere produced 204 each. That direct
 minimal run took 19m29.8s, so it establishes correctness without a meshing
 performance claim.
 
-`API.open` and `API.merge` now dispatch `.step`, `.stp`, `.igs` and `.iges`
+`API.open` and `API.merge` now dispatch `.step`, `.stp`, `.igs`, `.iges`, `.brep` and `.xao`
 directly to the existing native CAD importer and synchronize actual geometry.
 Staging preserves held models/views, existing mesh UIDs, fields and forced
 bounding context, with rollback on malformed input. The checks also cover
@@ -180,6 +181,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-occ-incidence-gate-{1127,1133}-20261109.log`.
 - `Tessella-pyramid-public-gate-1133-O2-20261109.log` and `Tessella-pyramid-neighbor-gate-{112-min,1133-O2}-20261109.log`.
 - `Tessella-native-pyramid-apex-final-gate-112-min-20261109.log` and `Tessella-native-pyramid-apex-component-gate-1133-O2-20261109.log`.
+- `Tessella-cad-brep-xao-gate-{1127-min,1133-normal}-20261109.log`; the seventeen-file snapshot is recorded in `Tessella-cad-brep-xao-review-hashes-20261109.json`.
 
 ## Release and earlier evidence
 
