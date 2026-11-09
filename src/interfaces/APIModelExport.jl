@@ -180,7 +180,7 @@ function _model_export_write(filename)
             # so the export projection always uses SaveAll semantics.
             target=_model_export_mesh(model,LAST_MESH[],LAST_MESH_CLASS[],4.1,
                 true,caller)
-            IO.write_stl(filename,target)
+            IO.write_stl(filename,target;binary=!iszero(get(OPTIONS,"Mesh.Binary",0.0)))
         else
             # The foreign writers use the complete MSH4-style projection:
             # actual UIDs, per-cell physical tags, and block entity ownership.
@@ -248,7 +248,8 @@ to select 2.2 or 4.1 while the versioned aliases force the corresponding
 dialect; `.msh1`, `.msh3` and `.msh40` reject. `Mesh.Binary` selects the
 encoding, and `Mesh.SaveAll`
 controls physical selection for MSH and the foreign formats. `.stl` writes
-ASCII surface facets (quads split on the first-third vertex diagonal) and
+ASCII or binary surface facets according to `Mesh.Binary`
+(quads split on the first-third vertex diagonal) and
 rejects volume elements; MSH4 preserves actual UIDs and retained periodic,
 partition, ghost, and data metadata; MSH2 uses its native dense numbering.
 `.unv` emits I-DEAS datasets 2411/2412 with elementary and physical tags;

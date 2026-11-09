@@ -23,7 +23,7 @@ using ..Elements: MSH_PHYSICAL_NAME_MAX_BYTES, _copy_physical_names, MixedMesh,
                   MixedEntityData, ElementBlock, SpecialElementBlock, msh_spec,
                   msh_dimension, msh_family, msh_num_nodes, msh_type,
                   simplex_to_mixed, write_mixed_msh, read_mixed_msh,
-                  _block_ncells
+                  _block_ncells, _assert_mixed_structure
 using ..Predicates: _two_diff_tail
 using ..GmshLibm: _gm87_sin, _gm87_cos, _gm_tan, _gm_asin, _gm_acos, _gm_atan,
                   _gm87_atan2, _gm_sinh, _gm_cosh, _gm_tanh, _gm87_exp, _gm87_log,
@@ -13355,10 +13355,14 @@ function _stage_stl_mesh_merge(path,model,seed;
 end
 
 """
-    write_stl(path, mesh)
+    write_stl(path, mesh; binary=false)
 
 Write the surface facets of a `Mesh` or `MixedMesh` as an ASCII STL file
-(Gmsh's default STL encoding). `Tri3` blocks emit one facet each; `Quad4`
+(Gmsh's default STL encoding), or as little-endian binary STL when `binary=true`.
+Binary facets carry Float32 coordinates and normals, and a zero attribute count.
+Coordinates outside the finite Float32 range and nondegenerate facets that
+collapse under Float32 rounding reject before the destination is replaced.
+`Tri3` blocks emit one facet each; `Quad4`
 blocks split on their first-third vertex diagonal — `(a,b,c)` then `(a,c,d)`
 — matching upstream's deterministic quad triangulation. Facet normals are
 recomputed from the wound vertices; degenerate facets emit a zero normal.
@@ -13371,12 +13375,15 @@ skipped, as upstream's face-only traversal does. A mesh with no surface
 elements at all is an error — an empty `solid` would look like a successful
 export of nothing.
 """
-function write_stl(path,m)
+function write_stl(path,m;binary=false)
     caller="write_stl"
+    binary isa Bool || throw(ArgumentError("$caller: binary must be Bool"))
     m isa Mesh && (m=simplex_to_mixed(m))
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
+    _assert_mixed_structure(m,caller)
     # Validate every block before touching the destination file.
+    facets=0
     for block in m.blocks
         block isa ElementBlock || throw(ArgumentError(
             "$caller: special MSH record type $(block.msh) is not " *
@@ -13391,45 +13398,103 @@ function write_stl(path,m)
                 "order $(msh_spec(block.msh).order)) is not representable " *
                 "in .stl"))
         end
+        count=block.msh==2 ? size(block.nodes,2) :
+              block.msh==3 ? Base.checked_mul(2,size(block.nodes,2)) : 0
+        facets=Base.checked_add(facets,count)
     end
+    facets>0 || throw(ArgumentError("$caller: mesh has no surface elements to write"))
+    binary && _stl_binary_count(facets)
     target,parent=_foreign_target(path,caller)
-    emitted=0
     mktemp(parent) do temporary,io
-        println(io,"solid tessella")
+        if binary
+            header=zeros(UInt8,80)
+            label=codeunits("Tessella binary STL")
+            copyto!(header,1,label,1,length(label))
+            write(io,header);write(io,htol(_stl_binary_count(facets)))
+        else
+            println(io,"solid tessella")
+        end
         for block in m.blocks
             block isa ElementBlock || continue
             block.msh in (2,3) || continue
             for j in axes(block.nodes,2)
                 a,b=Int(block.nodes[1,j]),Int(block.nodes[2,j])
                 c=Int(block.nodes[3,j])
-                _stl_facet!(io,m.coords,a,b,c)
-                emitted+=1
+                _stl_facet!(io,m.coords,a,b,c;binary)
                 if block.msh==3
-                    _stl_facet!(io,m.coords,a,c,Int(block.nodes[4,j]))
-                    emitted+=1
+                    _stl_facet!(io,m.coords,a,c,Int(block.nodes[4,j]);binary)
                 end
             end
         end
-        println(io,"endsolid tessella")
-        emitted==0 && throw(ArgumentError(
-            "$caller: mesh has no surface elements to write"))
+        binary || println(io,"endsolid tessella")
         flush(io);close(io)
         mv(temporary,target;force=true)
     end
     return path
 end
 
-function _stl_facet!(io,coords,a::Int,b::Int,c::Int)
-    ax,ay,az=coords[1,a],coords[2,a],coords[3,a]
-    ux,uy,uz=coords[1,b]-ax,coords[2,b]-ay,coords[3,b]-az
-    vx,vy,vz=coords[1,c]-ax,coords[2,c]-ay,coords[3,c]-az
+function _stl_binary_count(count::Integer)
+    !(count isa Bool) && 0<count<=typemax(UInt32) || throw(ArgumentError(
+        "write_stl: binary facet count must fit a positive UInt32"))
+    return UInt32(count)
+end
+
+function _stl_unit_normal_exact(a,b,c)
+    R=Rational{BigInt}
+    u=ntuple(axis->R(b[axis])-R(a[axis]),3)
+    v=ntuple(axis->R(c[axis])-R(a[axis]),3)
+    cross=(u[2]*v[3]-u[3]*v[2],u[3]*v[1]-u[1]*v[3],u[1]*v[2]-u[2]*v[1])
+    scale=maximum(abs,cross)
+    iszero(scale) && return (0.,0.,0.)
+    direction=ntuple(axis->Float64(cross[axis]/scale),3)
+    magnitude=hypot(direction...)
+    return ntuple(axis->direction[axis]/magnitude,3)
+end
+
+function _stl_unit_normal(a,b,c)
+    ux,uy,uz=b[1]-a[1],b[2]-a[2],b[3]-a[3]
+    vx,vy,vz=c[1]-a[1],c[2]-a[2],c[3]-a[3]
     nx,ny,nz=uy*vz-uz*vy,uz*vx-ux*vz,ux*vy-uy*vx
     len=sqrt(nx*nx+ny*ny+nz*nz)
-    if isfinite(len) && len>0
-        nx/=len;ny/=len;nz/=len
-    else
-        nx=ny=nz=0.0
+    permanent=abs(uy*vz)+abs(uz*vy)+abs(uz*vx)+abs(ux*vz)+abs(ux*vy)+abs(uy*vx)
+    if isfinite(len) && len>0 && isfinite(permanent) && len>16eps(Float64)*permanent
+        return (nx/len,ny/len,nz/len)
     end
+    scale=max(abs(ux),abs(uy),abs(uz),abs(vx),abs(vy),abs(vz))
+    if isfinite(scale) && scale>0
+        u=(ux/scale,uy/scale,uz/scale);v=(vx/scale,vy/scale,vz/scale)
+        cross=(u[2]*v[3]-u[3]*v[2],u[3]*v[1]-u[1]*v[3],u[1]*v[2]-u[2]*v[1])
+        magnitude=hypot(cross...)
+        bound=abs(u[2]*v[3])+abs(u[3]*v[2])+abs(u[3]*v[1])+abs(u[1]*v[3])+
+              abs(u[1]*v[2])+abs(u[2]*v[1])
+        if magnitude>0 && magnitude>16eps(Float64)*bound
+            return ntuple(axis->cross[axis]/magnitude,3)
+        end
+    end
+    return _stl_unit_normal_exact(a,b,c)
+end
+
+function _stl_binary_coordinate(value)
+    converted=Float32(value)
+    isfinite(converted) || throw(ArgumentError(
+        "write_stl: binary coordinates must remain finite as Float32"))
+    return converted
+end
+
+function _stl_facet!(io,coords,a::Int,b::Int,c::Int;binary::Bool=false)
+    points=ntuple(k->ntuple(axis->coords[axis,(a,b,c)[k]],3),3)
+    if binary
+        encoded=map(point->map(_stl_binary_coordinate,point),points)
+        rounded=map(point->map(Float64,point),encoded)
+        normal=_stl_unit_normal(rounded...)
+        all(iszero,normal) && !all(iszero,_stl_unit_normal(points...)) &&
+            throw(ArgumentError("write_stl: binary Float32 rounding collapses a nondegenerate facet"))
+        for value in normal;write(io,htol(reinterpret(UInt32,Float32(value))));end
+        for point in encoded,value in point;write(io,htol(reinterpret(UInt32,value)));end
+        write(io,htol(UInt16(0)))
+        return nothing
+    end
+    nx,ny,nz=_stl_unit_normal(points...)
     println(io," facet normal ",
         @sprintf("%.16g %.16g %.16g",nx,ny,nz))
     println(io,"  outer loop")

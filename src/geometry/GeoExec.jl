@@ -13671,7 +13671,7 @@ end
 # its historical MSH 2.2 output; the versioned aliases `.msh2`/`.msh22` and
 # `.msh4`/`.msh41` select that dialect explicitly, while `.msh1`/`.msh3`/
 # `.msh40` reject (MSH 1.x/3.x never shipped writable support and 4.0 is not
-# a stable public dialect). `.stl` writes ASCII surface facets through
+# a stable public dialect). `.stl` writes ASCII or binary surface facets through
 # `IO.write_stl`.
 function _geo_exec_save!(m::GeoModel,path::AbstractString,
                          context::_GeoNumericContext,caller::AbstractString;
@@ -13713,7 +13713,8 @@ function _geo_exec_save!(m::GeoModel,path::AbstractString,
     sf!=1.0 && (mesh=_scaled_mesh_copy(mesh,sf))
     if extension==".stl"
         io_mod=getfield(parentmodule(@__MODULE__),:IO)
-        io_mod.write_stl(file,mesh)
+        binary=!iszero(something(_geo_option_number(context,"Mesh",0,"Binary"),0.0))
+        io_mod.write_stl(file,mesh;binary)
         return nothing
     end
     if extension==".vtk"

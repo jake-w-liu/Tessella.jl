@@ -66,6 +66,7 @@ include("functional/fixtures.jl")
         "functional/view_representation_smoke.jl",
         "functional/cli_information.jl",
         "functional/cli_check_smoke.jl",
+        "interfaces/io_stl_binary_test.jl",
         "functional/vtk_complete_hex.jl",
         "functional/vtk_lagrange_curve.jl",
         "functional/vtk_lagrange_smoke.jl",

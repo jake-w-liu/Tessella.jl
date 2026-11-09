@@ -27,6 +27,15 @@ still required after the current implementation work.
 | `fbf3451` factory Box sizing | Five production assertions passed on both Julia lines with minimal compilation. The unit box retained its boundary facets and volume, produced 1350 valid tets, and had zero oversized edges among 1818 (largest normalized length 0.98943). The same fixture on clean `e18b989` failed two assertions, including normalized length 1.63031. |
 | Simplex-coordinate increment | Julia 1.12.7 and 1.13.3 normal `-O2` each passed 1026 coordinate/reference/locator assertions; minimal functional checks passed 80/80 each. A separate validation, quality, topology and transform audit passed 3124/3124 on each runtime. Bounds enabled, actual exits 0. |
 | Triangle distance and automatic sizing | Julia 1.12.7 minimal passed 71/71 regressions. Julia 1.13.3 normal `-O2` passed 39,643/39,643 regressions, neighboring distance/automatic-constructor checks and resource checks. Bounds enabled, actual exits 0. |
+| Native binary STL | Julia 1.13.3 minimal passed 58/58 format/frontend checks; Julia 1.12.7 minimal passed 113/113 including neighboring frontend checks. Julia 1.13.3 normal `-O2` passed 63/63, including five zero-allocation normal checks. Bounds enabled, actual exits 0. |
+
+STL output now honors `Mesh.Binary` through API, GEO Save and CLI paths.
+Native binary output uses explicit little-endian records, Float32 geometry,
+and checked facet counts. Invalid input, overflow and geometry collapsed by
+Float32 rounding preserve the destination. ASCII remains the default, with
+scaled/exact normal recovery for extreme finite coordinates. The normal
+frontend block took 9m12.8s cold; this establishes format correctness and the
+sampled helper allocation bounds, without a frontend compiler improvement claim.
 
 Triangle region predicates now recover uncertain cancellation and underflow
 through the existing exact path. Automatic sizing retains local closest-point
@@ -79,6 +88,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-box-production-sizing-112-final-20261109.log`, `Tessella-box-production-sizing-1133-20261109.log`, `Tessella-boundary-cache-112-min-20261109.log`, and `Tessella-boundary-cache-1133-optimized2-20261109.log`.
 - `Tessella-core-coordinate-112-optimized-20261109.log`, `Tessella-core-coordinate-1133-optimized2-20261109.log`, `Tessella-core-coordinate-{112,1133}-min-functional-20261109.log`, and `Tessella-core-independent-{112,1133}-optimized-20261109.log`.
 - `Tessella-distance-closest-regression-112-min-final-20261109.log` and `Tessella-closest-geometry-gate-113-optimized-finalsource-20261109.log`.
+- `Tessella-io-stl-binary-1133-min-20261109.log`, `Tessella-io-stl-gate-112-min-20261109.log`, and `Tessella-io-stl-binary-1133-optimized-20261109.log`.
 
 ## Release and earlier evidence
 
