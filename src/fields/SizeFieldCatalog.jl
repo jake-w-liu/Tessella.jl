@@ -4415,6 +4415,17 @@ function _pv_scheme_inverse_certificate(cell,u,v,w,query,base,scale;precise=fals
     tolerance=precise ? max(nextfloat(0.0),64eps(Float64)*max(hypot(intrinsic_query...),hypot(mapped...))) :
         max(1e-10,256eps(Float64)*max(1.0,abs(query[1]),abs(query[2]),abs(query[3])))
     hypot(residual...)<=tolerance || return nothing
+    # A small world residual alone cannot certify a parameter near a flat
+    # part of a regular nonlinear map. Check the remaining intrinsic Newton
+    # correction relative to the actual coordinates before accepting it.
+    correction=_pv_frame_step(du,dv,dw,residual,dim)
+    correction===nothing && dim<3 &&
+        (correction=_pv_virtual_step(cell,du,dv,residual))
+    correction===nothing && return nothing
+    for axis in 1:dim
+        value=(u,v,w)[axis]
+        abs(correction[axis])<=max(nextfloat(0.0),64eps(Float64)*abs(value)) || return nothing
+    end
     return (u::Float64,v::Float64,w::Float64)
 end
 
@@ -4422,7 +4433,10 @@ function _pv_scheme_inverse(cell,query,base,scale)
     dim=_pv_scheme_dim(cell.kind)
     u=0.0;v=0.0;w=0.0
     precise=false
-    for _ in 1:64
+    # A regular nonlinear coordinate can span many binary exponents while
+    # other coordinates converge first. Keep progress bounded by the
+    # Float64 positive-exponent range rather than stopping after 64 steps.
+    for _ in 1:1075
         mapped=_pv_scheme_map(cell,u,v,w,base,scale)
         all(isfinite,mapped) || return nothing
         residual=_sub3(query,mapped)
@@ -4435,6 +4449,10 @@ function _pv_scheme_inverse(cell,query,base,scale)
             precise=true
         end
         step===nothing && return nothing
+        largest=maximum(abs,step)
+        if largest>2.0
+            step=(2.0*(step[1]/largest),2.0*(step[2]/largest),2.0*(step[3]/largest))
+        end
         if precise
             projection=_pv_virtual_projection(cell,du,dv,residual)
             projection===nothing && return nothing
@@ -4463,7 +4481,7 @@ function _pv_scheme_inverse(cell,query,base,scale)
         ratio=hypot(motion...)/residual_norm
         slope=isfinite(ratio) ? min(1.0,ratio)^2 : 1.0
         alpha=1.0;advanced=false
-        for _ in 1:(precise ? 1075 : 24)
+        for _ in 1:1075
             un=u+alpha*delta_u;vn=v+alpha*delta_v;wn=w+alpha*delta_w
             if all(isfinite,(un,vn,wn))
                 trial=try

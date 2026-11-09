@@ -19,7 +19,7 @@ and external solver campaigns are opt-in.
 
 ## Current evidence
 
-Final current source passed the default package suite 1638/1638 on Julia
+The Opencode checkpoint `e18b989` passed the default package suite 1638/1638 on Julia
 1.13.3 minimal compilation (`Pkg.test()`, `--check-bounds=yes`), actual exit 0,
 17m13.1s. Log: `C:/Users/User/Tessella-default-1133-final6-20261109.log`.
 The preceding box-skip source passed 1638/1638 on Julia 1.12.7, actual exit 0,
@@ -36,6 +36,26 @@ Its factory-Box embedded-sheet recovery still exceeds a bounded minimal run:
 the direct legacy fill has no native authority, and the coplanar sheet-edge
 recovery is the long pole. This is retained as an explicit extended limitation,
 not counted as a passing default check.
+
+### Finite-normal nonlinear inverse correction
+
+A fresh audit reproduced regular polynomial maps returning a parameter many
+orders of magnitude too large near a flat center, despite finite artificial
+normals. An absolute world-residual floor had accepted the wrong root.
+Acceptance now also certifies the remaining intrinsic Newton correction;
+bounded trust steps and the Float64-range iteration budget allow the actual
+small parameter to converge beside ordinary coordinates. The regression covers
+Line, Quadrangle and Tetrahedron maps and the public view probe.
+
+Julia 1.13.3 normal `-O2 --check-bounds=yes`: 352/352 field, high-order,
+inverse and neighboring assertions, actual exit 0. Existing warmed
+zero-allocation checks passed. Julia 1.12.7 minimal compilation with bounds
+checks: 162/162 functional assertions, actual exit 0. Logs are
+`C:/Users/User/Tessella-field-audit-gate-optimized-20261109.log` and
+`C:/Users/User/Tessella-field-focused-gate-112-min-20261109.log`.
+These scoped receipts do not qualify the subsequent closed-chart, view,
+box-sizing or oversized-Newton-vector work. A combined package run remains
+required after those changes.
 
 ### Native MeshAdapt and GEO view transport
 
