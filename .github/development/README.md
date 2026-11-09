@@ -31,6 +31,7 @@ still required after the current implementation work.
 | STEP/IGES file frontends | 74/74 CAD lifecycle checks passed on Julia 1.12.7 minimal and Julia 1.13.3 normal `-O2`. The initial 70-check scope also passed on 1.13.3 minimal; a 1.12.7 minimal runner passed those 70 plus 143 existing import/merge/native-CAD checks. Bounds enabled, actual exits 0. |
 | OBJ relative indices | Julia 1.12.7 and 1.13.3 minimal each passed 120/120 OBJ and neighboring surface-format checks, bounds enabled, actual exits 0. Negative references now select the correct vertices at the face's file position; invalid zero/out-of-range references reject before publication. |
 | Finite scalar transitions | Julia 1.12.7 minimal passed 72/72 and Julia 1.13.3 normal `-O2` passed 76/76, including four zero-allocation ordinary queries. Bounds enabled, actual exits 0. Exact recovery handles overflowed interpolation spans and Ball/Box distances, including subnormal transitions; sigmoid semantics are preserved. |
+| OFF/PLY2 surface orders | Julia 1.12.7 and 1.13.3 minimal each passed 510/510 surface-order and neighboring format checks, bounds enabled, actual exits 0. Catalog-based corner projection covers complete/incomplete orders 1–10, excludes volume cells, and rejects corrupt sources before replacing the destination. |
 
 `API.open` and `API.merge` now dispatch `.step`, `.stp`, `.igs` and `.iges`
 directly to the existing native CAD importer and synchronize actual geometry.
@@ -102,6 +103,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-cad-file-frontends-112-min-final-20261109.log`, `Tessella-cad-file-frontends-1133-optimized-20261109.log`, `Tessella-cad-file-frontends-1133-min-final-20261109.log`, and `Tessella-cad-file-frontends-112-min-neighbors-20261109.log`.
 - `Tessella-io-obj-gate-{112,1133}-min-20261109.log`.
 - `Tessella-scalar-interpolation-gate-112-min-final-20261109.log` and `Tessella-scalar-interpolation-gate-113-optimized-final-20261109.log`.
+- `Tessella-io-surface-order-gate-112-min-final-20261109.log` and `Tessella-io-surface-order-gate-1133-min-public-20261109.log`.
 
 ## Release and earlier evidence
 

@@ -17898,49 +17898,52 @@ function _format16(x::Real)
     return @sprintf("%.16g",Float64(x))
 end
 
+# These polygon decks carry primary vertices, not the interpolation nodes of
+# a high-order face. Select by the catalog family so every supported order
+# follows the same rule and volume types cannot be mistaken for triangles.
+function _surface_deck_corners(block,caller::AbstractString,
+                               include_quadrangles::Bool)
+    block isa ElementBlock || return 0
+    spec=msh_spec(block.msh)
+    corners=spec.family===:tri ? 3 :
+        include_quadrangles && spec.family===:qua ? 4 : 0
+    corners==0 && return 0
+    spec.nnodes>=corners || throw(ArgumentError(
+        "$caller: element type $(block.msh) does not contain $corners corner vertices"))
+    return corners
+end
+
 """
     write_off(path, mesh)
 
 Write a `Mesh`/`MixedMesh` as an Object File Format deck (`OFF nv nf 0`,
 `%g` vertex rows, `3/4` face records over 0-based indices). Only dim-2
 triangle/quadrangle cells are emitted (upstream iterates `faces`); other
-element families are ignored, matching `GModel::writeOFF`.
+element families are ignored. Higher-order faces use their corner vertices.
 """
 function write_off(path,m;scaling_factor::Real=1.0)
     caller="write_off"
     m isa Mesh && (m=simplex_to_mixed(m))
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
-    # Upstream iterates `gf->triangles`/`gf->quadrangles` and always prints a
-    # 3- or 4-index record built from the corner vertices, so higher-order
-    # faces degrade to their corners exactly like upstream's MTriangleN.
-    _FAMILY_TRI=(2,9,21,23,24,25,31)
-    _FAMILY_QUA=(3,10,16,29,33,36,37,38)
-    for block in m.blocks
-        block isa ElementBlock || continue
-        _io_dim(block.msh)!=2 && continue
-        (block.msh in _FAMILY_TRI || block.msh in _FAMILY_QUA) ||
-            throw(ArgumentError(
-            "$caller: element type $(block.msh) is not representable in .off"))
-    end
+    _assert_mixed_structure(m,caller)
+    corners=[_surface_deck_corners(block,caller,true) for block in m.blocks]
+    # Structural validation bounds the total cell count by Int32, so this
+    # selected subset also fits Int and cannot wrap the header count.
+    nfaces=sum((size(block.nodes,2) for (block,n) in zip(m.blocks,corners)
+                if n>0);init=0)
     target,parent=_foreign_target(path,caller)
     mktemp(parent) do temporary,io
-        nfaces=0
-        for block in m.blocks
-            block isa ElementBlock && _io_dim(block.msh)==2 || continue
-            nfaces+=size(block.nodes,2)
-        end
         println(io,"OFF ",size(m.coords,2)," ",nfaces," 0")
         for i in 1:size(m.coords,2)
             println(io,@sprintf("%g %g %g",m.coords[1,i]*scaling_factor,
                 m.coords[2,i]*scaling_factor,m.coords[3,i]*scaling_factor))
         end
-        for block in m.blocks
-            block isa ElementBlock && _io_dim(block.msh)==2 || continue
-            corners=block.msh in _FAMILY_QUA ? 4 : 3
+        for (block,n) in zip(m.blocks,corners)
+            n>0 || continue
             for j in 1:size(block.nodes,2)
-                print(io,corners)
-                for k in 1:corners
+                print(io,n)
+                for k in 1:n
                     print(io," ",Int64(block.nodes[k,j])-1)
                 end
                 println(io)
@@ -17995,32 +17998,29 @@ end
 Write a `Mesh`/`MixedMesh` in the Stanford `ply2` triangulation dialect
 (vertex count line, triangle count line, `%.16g` vertex rows, `3 i j k`
 records over 0-based indices). Only triangle cells are emitted
-(`GModel::writePLY2` iterates face `triangles` only).
+and higher-order triangles use their three corner vertices.
 """
 function write_ply2(path,m)
     caller="write_ply2"
     m isa Mesh && (m=simplex_to_mixed(m))
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
+    _assert_mixed_structure(m,caller)
+    corners=[_surface_deck_corners(block,caller,false) for block in m.blocks]
+    ntri=sum((size(block.nodes,2) for (block,n) in zip(m.blocks,corners)
+              if n>0);init=0)
     target,parent=_foreign_target(path,caller)
     mktemp(parent) do temporary,io
-        ntri=0
-        for block in m.blocks
-            block isa ElementBlock && block.msh in (2,9,21,23,24,25,31) ||
-                continue
-            ntri+=size(block.nodes,2)
-        end
         println(io,size(m.coords,2));println(io,ntri)
         for i in 1:size(m.coords,2)
             println(io,_format16(m.coords[1,i])," ",_format16(m.coords[2,i]),
                 " ",_format16(m.coords[3,i]))
         end
-        for block in m.blocks
-            block isa ElementBlock && block.msh in (2,9,21,23,24,25,31) ||
-                continue
+        for (block,n) in zip(m.blocks,corners)
+            n>0 || continue
             for j in 1:size(block.nodes,2)
-                print(io,"3 ")
-                for k in 1:size(block.nodes,1)
+                print(io,n)
+                for k in 1:n
                     print(io," ",Int64(block.nodes[k,j])-1)
                 end
                 println(io)
