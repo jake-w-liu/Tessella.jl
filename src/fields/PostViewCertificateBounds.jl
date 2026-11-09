@@ -55,13 +55,14 @@ function _pv_pyramid_factor(s,d,tol,epsilon=1e-14)
     return nextfloat(max(first,last))
 end
 
-function _pv_certificate_monomial(kind,e,tol)
+function _pv_certificate_monomial(kind,e,tol,pyramid_epsilon=1e-14)
     all(x->isfinite(x) && x>=0 && isinteger(x) && x<Float64(typemax(Int)),e) || return nothing
     _pv_geometry_zero_term(kind,e) && return ((0,0),0.0,(0.0,0.0,0.0))
     zero_range=_pv_scheme_monomial_range(kind,e)
     if kind==6
         m=min(e[1],e[2]);s=e[1]+e[2];radius=_pv_up_add(1.0,tol)
-        magnitude=_pv_up_mul(_pv_pyramid_factor(s,m,tol),_pv_up_pow(radius,e[3]))
+        magnitude=_pv_up_mul(_pv_pyramid_factor(s,m,tol,pyramid_epsilon),
+            _pv_up_pow(radius,e[3]))
         signed=rem(e[1],2.)==1. || rem(e[2],2.)==1. ||
             (tol>0 && rem(e[3],2.)==1.)
         return (signed ? (-magnitude,magnitude) : (0.0,magnitude)),magnitude,(0.,0.,0.)
@@ -114,7 +115,11 @@ function _pv_scheme_certificate_bounds(cell,tol;normal_frame=nothing)
         nodes=geometry===nothing ? size(coefficients,1) : 1
         operations=nextfloat(32.0+8.0*nodes*length(exponents))
         for term in eachindex(exponents)
-            bounded=_pv_certificate_monomial(kind,exponents[term],intrinsic)
+            # Native Float64 references use the actual collapse denominator;
+            # its nearest nonzero distance from w=1 is 2^-53. Explicit POS
+            # matrices keep their independent 1e-14 denominator convention.
+            epsilon=cell.native_pyramid_geometry ? 2.0^-53 : 1e-14
+            bounded=_pv_certificate_monomial(kind,exponents[term],intrinsic,epsilon)
             bounded===nothing && return full
             range,magnitude,gradient=bounded
             for degree in exponents[term];operations=nextfloat(operations+16degree);end

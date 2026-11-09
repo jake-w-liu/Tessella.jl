@@ -22,6 +22,7 @@ still required after the current implementation work.
 | --- | --- |
 | `e18b989` Opencode checkpoint | Default `Pkg.test()`: 1638/1638 on Julia 1.13.3; an independent detached checkout also passed 1638/1638 on Julia 1.12.7 (22m53.9s). Both use minimal compilation and bounds checks, actual exit 0. [Windows/Linux CI on both Julia lines](https://github.com/jake-w-liu/Tessella.jl/actions/runs/42519129163) also passed. |
 | `09bf184` combined checkpoint | Default `Pkg.test()` on detached, unchanged checkouts passed 2582/2582 on Julia 1.12.7 (29m27.8s) and 2582/2582 on Julia 1.13.3 (31m48.1s). Both use minimal compilation and bounds checks, actual exits 0. Later increments require their own final combined package run. |
+| `acd32c0` combined checkpoint | Default `Pkg.test()` on detached, unchanged checkouts passed 3237/3237 on Julia 1.12.7 (26m58.2s) and 3237/3237 on Julia 1.13.3 (29m17.8s). Both use minimal compilation and bounds checks, actual exits 0. Later incidence, pyramid-binding and ongoing increments retain separate checks until the next combined run. |
 | `11aee42` finite-normal inverse | Small intrinsic parameters beside ordinary coordinates: Julia 1.12.7 minimal, 162/162; Julia 1.13.3 normal `-O2`, 352/352 including existing warmed zero-allocation checks. Bounds enabled, exits 0. |
 | `fc0f599` GEO/view publication | Julia 1.12.7 and 1.13.3 minimal each passed the 256-check view scope and 162-check import/merge/CLI scope. Normal Julia 1.13.3 passed the 52 new regressions. Bounds enabled, exits 0. The first normal plugin block took 11m13s; no compiler improvement is claimed. |
 | `8a1f177` extreme nonlinear inverse | Subnormal derivatives and mixed-scale residuals: Julia 1.12.7 and 1.13.3 minimal, 168/168 each; Julia 1.13.3 normal `-O2`, 358/358 including existing ordinary warmed zero-allocation checks. Bounds enabled, exits 0. Exact recovery can allocate. |
@@ -42,11 +43,12 @@ still required after the current implementation work.
 | Other native reader resources | Julia 1.12.7 and 1.13.3 minimal each passed 538/538 reader/neighbor checks; focused normal `-O2` checks passed 79/79 each. Bounds enabled, actual exits 0. P3D, MAIL, IR3, UNV and DIFF bound impossible declared payloads before reserving storage and check header arithmetic before overflow. The eight tiny-file probes fell from 0.8–6.6MB to 1.98–4.24KB normal allocation, with permanent 100KB caps. |
 | PLY count validation | Julia 1.12.7 and 1.13.3 minimal each passed 199/199 reader/neighbor checks; focused normal `-O2` checks passed 22/22 each. Bounds enabled, actual exits 0. Explicit negative counts reject in ASCII and both binary byte orders, while missing/zero face counts remain valid and failed open/merge preserve the current model. |
 | OCC explicit format dispatch | Julia 1.12.7 and 1.13.3 minimal each passed 121/121 import/CAD checks, bounds enabled, actual exits 0. Canonical `step`/`iges` selectors force the corresponding native reader despite the filename suffix; invalid selectors and incompatible payloads preserve held geometry. The genuine native BREP implementation remains active work. |
-| Native incomplete pyramid views | Julia 1.12.7 minimal passed 854/854 pyramid/writer checks; Julia 1.13.3 normal `-O2` passed 858/858 with four threads. A separate eight-check normal gate verified sparse construction, zero-allocation cache hits, concurrent cache creation, copied public schemes and sampled near-apex gradients. Bounds enabled, actual exits 0. A subsequent public file-reopen probe found a query failure under investigation; these receipts do not close that lifecycle gap. |
+| Native incomplete pyramid views | Julia 1.12.7 minimal passed 854/854 pyramid/writer checks; Julia 1.13.3 normal `-O2` passed 858/858 with four threads. A separate eight-check normal gate verified sparse construction, zero-allocation cache hits, concurrent cache creation, copied public schemes and sampled near-apex gradients. Bounds enabled, actual exits 0. The subsequent P9 query failure is covered by the coordinate-binding increment below. |
 | Cylinder/Frustum geometry | Julia 1.12.7 minimal passed 812/812 and Julia 1.13.3 normal `-O2` passed 822/822 scalar, metric and axial checks, including ten sampled ordinary zero-allocation loops. Bounds enabled, actual exits 0. Predicates retain original finite axes/endpoints, strict Cylinder and inclusive Frustum boundaries, subnormal radial/axial information and representable geometry whose intermediate length overflows. |
 | X3D surface/export frontends | Julia 1.12.7 and 1.13.3 minimal each passed 750/750 format/frontend/neighbor checks; focused normal `-O2` checks passed 143/143 each. Bounds enabled, actual exits 0. Every supported triangle/quadrangle order retains its full primary surface; source and both target paths are checked before replacement. Canonical Print.X3d selection works through API, GEO Save and CLI. |
 | OCC lower incidence results | Julia 1.13.3 minimal passed 104/104 incidence, selector and existing IGES checks; Julia 1.12.7 minimal passed 39/39 focused incidence/selector checks. Bounds enabled, actual exits 0. `highestDimOnly=false` includes each imported root's actual lower topology with repeated shared incidences, ordered by dimension and excluding unrelated existing entities. |
 | Native pyramid coordinate binding | Julia 1.13.3 normal `-O2` passed 203/203 native/reopened query, gradient and field checks plus a 547/547 neighbor/resource scope. Julia 1.12.7 minimal passed 597/597 public/neighbor/scaled checks. Bounds enabled, actual exits 0. Twelve sampled stored-field queries allocate zero warmed bytes. Exact dyadic accumulation binds native pyramid coordinate offsets once, fixing P9 point-location cancellation while preserving the strict shared inverse certificates. |
+| Native pyramid collapse denominator | Julia 1.12.7 minimal passed 691/691 public/neighbor checks; Julia 1.13.3 normal `-O2` passed 836/836 component/neighbor/resource checks, with twelve sampled stored queries allocating zero warmed bytes. Bounds enabled, actual exits 0. Native geometry and values retain their actual collapse denominator through the nearest Float64 reference to the apex; independent flags preserve the existing explicit POS matrix convention. The new 86-check default regression covers scalar/vector/tensor values, gradients, both model-data kinds, exact apex behavior and explicit two/four-matrix controls. |
 
 Normal allocation on the bounded truncated-file probes fell from about 2.4MB
 to 2.5–4.7KB. The resource checks remain below 100KB for declared counts through
@@ -67,8 +69,10 @@ as after binary reopen, with identical coordinates. Binding its nodal-offset
 geometry polynomial with exact dyadic accumulation fixes the cancellation.
 The default regression now includes native P9 plus value/gradient round trips
 through `API.open` in both data kinds and byte formats. The shared Newton
-solver and acceptance certificates are unchanged. A separate native-probe
-near-apex denominator-clamp discrepancy remains active investigation.
+solver and acceptance certificates are unchanged. Native probes now also retain
+the actual collapse denominator near the apex. Separate geometry/value producer
+flags preserve explicit POS matrix behavior. Further strict inverse false-miss
+cases remain active investigation.
 
 Algorithm 1 now adapts actual sphere, cone and torus charts, and Box volumes
 consume their actual adapted faces. Auto selects the native producer on closed
@@ -149,6 +153,7 @@ files. They are local artifacts, not package dependencies:
 
 - `Tessella-default-1133-final6-20261109.log` and `Tessella-verify-e18b989-112-20261109.log`.
 - `Tessella-default-09bf184-{112,1133}-20261109.log`.
+- `Tessella-default-acd32c0-{112,1133}-20261109.log`.
 - `Tessella-field-audit-gate-optimized-20261109.log` and `Tessella-field-focused-gate-112-min-20261109.log`.
 - `Tessella-view-scoped-gates-{1127,1133}-min-20261109.log`, `Tessella-view-import-cli-{1127,1133}-min-20261109.log`, and `Tessella-view-final-gates-1133-normal-20261109.log`.
 - `Tessella-field-audit-gate-optimized-overflow-20261109.log`, `Tessella-field-focused-gate-112-min-overflow-final-20261109.log`, and `Tessella-field-focused-gate-113-min-overflow-20261109.log`.
@@ -174,6 +179,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-io-x3d-order-gate-{112,1133}-{min-final,normal}-20261109.log`.
 - `Tessella-occ-incidence-gate-{1127,1133}-20261109.log`.
 - `Tessella-pyramid-public-gate-1133-O2-20261109.log` and `Tessella-pyramid-neighbor-gate-{112-min,1133-O2}-20261109.log`.
+- `Tessella-native-pyramid-apex-final-gate-112-min-20261109.log` and `Tessella-native-pyramid-apex-component-gate-1133-O2-20261109.log`.
 
 ## Release and earlier evidence
 

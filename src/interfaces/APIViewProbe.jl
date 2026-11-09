@@ -16,7 +16,9 @@ function _view_probe_record(kind,coordinates,values,basis,token,caller;identity=
     end
     cell=SizeField._PVSchemeCell(SizeField._POSTVIEW_SCHEME_KIND[kind],
         isempty(basis.coefgeo),kind===:pyramid,basis.coefval,basis.expval,
-        basis.coefgeo,basis.expgeo,coordinates,values;native_geometry=basis.geometry_partition)
+        basis.coefgeo,basis.expgeo,coordinates,values;native_geometry=basis.geometry_partition,
+        native_pyramid_geometry=get(basis,:native_pyramid_geometry,false),
+        native_pyramid_values=get(basis,:native_pyramid_values,false))
     SizeField._pv_scheme_validate(cell,1,caller)
     return (;kind,dim=SizeField._pv_scheme_dim(cell.kind),coords=coordinates,
         values,cell,partition=basis.partition,token,identity)
@@ -25,7 +27,9 @@ end
 function _view_probe_basis(msh,constant,bases)
     return get!(bases,(msh,constant)) do
         native=_native_view_writer_basis(msh)
-        (partition=true,geometry_partition=true,coefval=constant ? ones(1,1) : native.coefficients,
+        pyramid=Elements.msh_family(msh)===:pyr
+        (partition=true,geometry_partition=true,native_pyramid_geometry=pyramid,
+         native_pyramid_values=pyramid,coefval=constant ? ones(1,1) : native.coefficients,
          expval=constant ? [(0.0,0.0,0.0)] : _view_probe_exponents(native.exponents),
          coefgeo=native.coefficients,expgeo=_view_probe_exponents(native.exponents))
     end
@@ -128,7 +132,9 @@ function _view_probe_list_records(view,step,bases,caller;elements=nothing)
         else
             geometry=isempty(scheme.coefgeo) ?
                 _view_probe_basis(_VIEW_PROBE_MSH[element.kind],false,bases) : nothing
-            (partition=false,geometry_partition=geometry!==nothing || scheme===Post._pos_order2_scheme(element.kind),coefval=scheme.coefval,expval=_view_probe_exponents(scheme.expval),
+            (partition=false,geometry_partition=geometry!==nothing || scheme===Post._pos_order2_scheme(element.kind),
+             native_pyramid_geometry=geometry!==nothing && element.kind===:pyramid,
+             native_pyramid_values=false,coefval=scheme.coefval,expval=_view_probe_exponents(scheme.expval),
              coefgeo=geometry===nothing ? scheme.coefgeo : geometry.coefgeo,
              expgeo=geometry===nothing ? _view_probe_exponents(scheme.expgeo) : geometry.expgeo)
         end
@@ -267,11 +273,18 @@ function _view_probe_coordinates(record,point)
     return location
 end
 
-function _view_probe_raw_monomials(exponents,coordinates,pyramid,gradient)
+function _view_probe_raw_monomials(exponents,coordinates,pyramid,gradient,
+                                  native_pyramid=false)
     a,b,c=map(BigFloat,exponents);u,v,w=coordinates
+    if pyramid && native_pyramid && w==1
+        return gradient ? (a==1 && b==0 ? one(w) : zero(w),
+            a==0 && b==1 ? one(w) : zero(w),
+            a==0 && b==0 ? c : zero(w)) :
+            (a==0 && b==0 ? one(w) : zero(w),)
+    end
     value=u^a*v^b*w^c
     ee=pyramid ? -min(a,b) : BigFloat(0)
-    t=pyramid ? max(BigFloat(1e-14),1-w) : BigFloat(1)
+    t=pyramid ? (native_pyramid ? 1-w : max(BigFloat(1e-14),1-w)) : BigFloat(1)
     power=t^ee
     gradient || return (value*power,)
     du=iszero(a) ? BigFloat(0) : a*u^(a-1)*v^b*w^c*power
@@ -312,7 +325,8 @@ end
         for exponent in order
             coefficient=groups[exponent]
             all(iszero,coefficient) && continue
-            monomials=_view_probe_raw_monomials(exponent,coordinates,cell.pyramid,gradient)
+            monomials=_view_probe_raw_monomials(exponent,coordinates,cell.pyramid,gradient,
+                cell.native_pyramid_values)
             for component in 1:nc,axis in axes(reference,1)
                 iszero(coefficient[component]) && continue
                 reference[axis,component]+=coefficient[component]*monomials[axis]
@@ -388,8 +402,10 @@ function _view_probe_evaluate(record,coordinates,gradient,caller;geometry=record
     gamma=mu<0.5 ? mu/(1-mu) : Inf
     recover |= mu>1e-12
     for term in eachindex(cell.expval)
-        monomials=gradient ? SizeField._pv_monomial_gradient(cell.expval[term],u,v,w,cell.pyramid) :
-            (SizeField._pv_monomial(cell.expval[term],u,v,w,cell.pyramid),)
+        monomials=gradient ? SizeField._pv_monomial_gradient(cell.expval[term],u,v,w,
+            cell.pyramid,cell.native_pyramid_values) :
+            (SizeField._pv_monomial(cell.expval[term],u,v,w,cell.pyramid,
+                cell.native_pyramid_values),)
         for node in axes(record.values,2),axis in axes(weights,1)
             monomial=monomials[axis];coefficient=cell.coefval[node,term]
             recover |= !isfinite(monomial) || (0<abs(monomial)<floatmin(Float64)) ||

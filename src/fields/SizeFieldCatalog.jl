@@ -2360,7 +2360,12 @@ struct _PVSchemeCell
     coords::Matrix{Float64}
     values::Matrix{Float64}
     geometry::Union{Nothing,_PVGeometryMap}
+    native_pyramid_geometry::Bool
+    native_pyramid_values::Bool
 end
+
+_PVSchemeCell(kind,flat,pyramid,cv,ev,cg,eg,coords,values,geometry)=
+    _PVSchemeCell(kind,flat,pyramid,cv,ev,cg,eg,coords,values,geometry,false,false)
 
 @inline function _pv_geometry_zero_term(kind,e)
     return (kind==1 && (e[2]>0 || e[3]>0)) ||
@@ -2451,16 +2456,20 @@ function _pv_native_pyramid_geometry(coefficients,exponents,coords)
 end
 
 function _PVSchemeCell(kind,flat,pyramid,cv,ev,cg,eg,coords,values;
-                       native_geometry::Bool=false)
+                       native_geometry::Bool=false,
+                       native_pyramid_geometry::Bool=false,
+                       native_pyramid_values::Bool=false)
     geometry=flat ? nothing : native_geometry ?
         (pyramid ? _pv_native_pyramid_geometry(cg,eg,coords) : nothing) :
         _pv_geometry_map(kind,cg,eg,coords)
-    return _PVSchemeCell(kind,flat,pyramid,cv,ev,cg,eg,coords,values,geometry)
+    return _PVSchemeCell(kind,flat,pyramid,cv,ev,cg,eg,coords,values,geometry,
+        pyramid && native_pyramid_geometry,pyramid && native_pyramid_values)
 end
 
 @inline _pv_scheme_with_values(cell::_PVSchemeCell,values)=
     _PVSchemeCell(cell.kind,cell.flat,cell.pyramid,cell.coefval,cell.expval,
-        cell.coefgeo,cell.expgeo,cell.coords,values,cell.geometry)
+        cell.coefgeo,cell.expgeo,cell.coords,values,cell.geometry,
+        cell.native_pyramid_geometry,cell.native_pyramid_values)
 
 @inline _pv_scheme_base(cell::_PVSchemeCell)=cell.geometry===nothing ?
     (cell.coords[1,1],cell.coords[2,1],cell.coords[3,1]) : cell.geometry.origin
@@ -3389,7 +3398,8 @@ function PostViewField(records::AbstractVector;
                        time::Integer=1,crop_negative::Bool=true,
                        use_closest::Bool=true,reference_tolerance::Real=1e-6,
                        max_nodes::Integer=1_000_000,max_elements::Integer=1_000_000,
-                       _native_geometry_partition::Bool=false)
+                       _native_geometry_partition::Bool=false,
+                       _native_pyramid_basis::Bool=false)
     caller="PostViewField"
     isempty(records) && throw(ArgumentError(
         "$caller: records must be a non-empty vector"))
@@ -3463,7 +3473,8 @@ function PostViewField(records::AbstractVector;
     @inbounds for i in eachindex(records)
         record=records[i];kind=kinds[i]
         if scheme_flags[i]
-            cell_obj=_postview_scheme_cell(record,kind,i,tsel,caller;native_geometry=_native_geometry_partition)
+            cell_obj=_postview_scheme_cell(record,kind,i,tsel,caller;
+                native_geometry=_native_geometry_partition,native_pyramid=_native_pyramid_basis)
             nscheme_nodes+=size(cell_obj.coords,2)
             nscheme_nodes<=node_limit || throw(ArgumentError(
                 "$caller: node count exceeds max_nodes=$node_limit"))
@@ -4077,19 +4088,31 @@ end
 
 # ── Scheme-cell evaluation ────────────────────────────────────────────────────
 # Monomial/geometry basis for `_PVSchemeCell`s. Pyramid families evaluate
-# every exponent row Bergot-style — `uᵃvᵇwᶜ·(1-w)^(max(a,b)-a-b)` with the
-# same `1-w` clamp Gmsh's pyramidalBasis applies near the apex singularity.
+# every exponent row Bergot-style — `uᵃvᵇwᶜ·(1-w)^(max(a,b)-a-b)`. Explicit
+# POS matrices keep their denominator clamp; native nodal bases use the
+# actual collapse coordinate and their finite central apex convention.
 
-@inline function _pv_monomial(e::NTuple{3,Float64},u,v,w,pyramid::Bool)
+@inline function _pv_monomial(e::NTuple{3,Float64},u,v,w,pyramid::Bool,
+                             native_pyramid::Bool=false)
+    if pyramid && native_pyramid && w==1
+        return iszero(e[1]) && iszero(e[2]) ? w^e[3] : zero(w)
+    end
     value=u^e[1]*v^e[2]*w^e[3]
     pyramid || return value
-    t=max(1e-14,1.0-w)
+    t=native_pyramid ? 1.0-w : max(1e-14,1.0-w)
     return value*t^(max(e[1],e[2])-e[1]-e[2])
 end
 
 @inline function _pv_monomial_gradient(e::NTuple{3,Float64},u,v,w,
-                                       pyramid::Bool)
+                                       pyramid::Bool,native_pyramid::Bool=false)
     a,b,c=e
+    if pyramid && native_pyramid && w==1
+        # Native nodal pyramids use their central finite apex convention.
+        # Explicit POS matrices retain their separately clamped denominator.
+        return (a==1 && b==0 ? one(w) : zero(w),
+                a==0 && b==1 ? one(w) : zero(w),
+                a==0 && b==0 ? c*one(w) : zero(w))
+    end
     if !pyramid
         du=a==0 ? 0.0 : a*u^(a-1)*v^b*w^c
         dv=b==0 ? 0.0 : b*u^a*v^(b-1)*w^c
@@ -4097,7 +4120,7 @@ end
         return du,dv,dw
     end
     ee=max(a,b)-a-b
-    t=max(1e-14,1.0-w)
+    t=native_pyramid ? 1.0-w : max(1e-14,1.0-w)
     power=t^ee
     du=a==0 ? 0.0 : a*u^(a-1)*v^b*w^c*power
     dv=b==0 ? 0.0 : b*u^a*v^(b-1)*w^c*power
@@ -4158,7 +4181,8 @@ function _pv_scheme_map(cell::_PVSchemeCell,u,v,w,base,scale::Float64)
     geometry=cell.geometry
     if geometry!==nothing
         @inbounds for term in eachindex(geometry.exponents)
-            m=_pv_monomial(geometry.exponents[term],u,v,w,cell.pyramid)
+            m=_pv_monomial(geometry.exponents[term],u,v,w,cell.pyramid,
+                cell.native_pyramid_geometry)
             mapped=(muladd(geometry.coefficients[1,term],m,mapped[1]),
                     muladd(geometry.coefficients[2,term],m,mapped[2]),
                     muladd(geometry.coefficients[3,term],m,mapped[3]))
@@ -4179,7 +4203,7 @@ function _pv_scheme_map(cell::_PVSchemeCell,u,v,w,base,scale::Float64)
     cg=cell.coefgeo
     pyramid=cell.pyramid
     @inbounds for t in eachindex(cell.expgeo)
-        m=_pv_monomial(cell.expgeo[t],u,v,w,pyramid)
+        m=_pv_monomial(cell.expgeo[t],u,v,w,pyramid,cell.native_pyramid_geometry)
         for i in 1:size(coords,2)
             a=cg[i,t]*m
             mapped=(muladd(a,_pv_relative(cell,i,base,1,scale),mapped[1]),
@@ -4200,7 +4224,8 @@ function _pv_scheme_jacobian(cell::_PVSchemeCell,u,v,w,base,scale::Float64)
     geometry=cell.geometry
     if geometry!==nothing
         @inbounds for term in eachindex(geometry.exponents)
-            gu,gv,gw=_pv_monomial_gradient(geometry.exponents[term],u,v,w,cell.pyramid)
+            gu,gv,gw=_pv_monomial_gradient(geometry.exponents[term],u,v,w,
+                cell.pyramid,cell.native_pyramid_geometry)
             q1=geometry.coefficients[1,term]
             q2=geometry.coefficients[2,term]
             q3=geometry.coefficients[3,term]
@@ -4226,7 +4251,8 @@ function _pv_scheme_jacobian(cell::_PVSchemeCell,u,v,w,base,scale::Float64)
         cg=cell.coefgeo
         pyramid=cell.pyramid
         @inbounds for t in eachindex(cell.expgeo)
-            gu,gv,gw=_pv_monomial_gradient(cell.expgeo[t],u,v,w,pyramid)
+            gu,gv,gw=_pv_monomial_gradient(cell.expgeo[t],u,v,w,pyramid,
+                cell.native_pyramid_geometry)
             for i in 1:size(coords,2)
                 c=cg[i,t]
                 q1=_pv_relative(cell,i,base,1,scale)
@@ -4280,7 +4306,7 @@ function _pv_scheme_scalar(cell::_PVSchemeCell,num_components::UInt8,u,v,w)
     x=0.0;y=0.0;z=0.0
     if num_components==1
         @inbounds for t in eachindex(cell.expval)
-            m=_pv_monomial(cell.expval[t],u,v,w,pyramid)
+            m=_pv_monomial(cell.expval[t],u,v,w,pyramid,cell.native_pyramid_values)
             for i in 1:size(values,2)
                 x=muladd(cv[i,t]*m,values[1,i],x)
             end
@@ -4288,7 +4314,7 @@ function _pv_scheme_scalar(cell::_PVSchemeCell,num_components::UInt8,u,v,w)
         return x
     end
     @inbounds for t in eachindex(cell.expval)
-        m=_pv_monomial(cell.expval[t],u,v,w,pyramid)
+        m=_pv_monomial(cell.expval[t],u,v,w,pyramid,cell.native_pyramid_values)
         for i in 1:size(values,2)
             a=cv[i,t]*m
             x=muladd(a,values[1,i],x)
@@ -4307,7 +4333,7 @@ function _pv_scheme_tensor(cell::_PVSchemeCell,u,v,w)
     pyramid=cell.pyramid
     t1=0.0;t2=0.0;t3=0.0;t4=0.0;t5=0.0;t6=0.0;t7=0.0;t8=0.0;t9=0.0
     @inbounds for t in eachindex(cell.expval)
-        m=_pv_monomial(cell.expval[t],u,v,w,pyramid)
+        m=_pv_monomial(cell.expval[t],u,v,w,pyramid,cell.native_pyramid_values)
         for i in 1:size(values,2)
             a=cv[i,t]*m
             t1=muladd(a,values[1,i],t1);t2=muladd(a,values[2,i],t2)
@@ -4328,7 +4354,7 @@ function _pv_scheme_vector(cell::_PVSchemeCell,u,v,w)
     pyramid=cell.pyramid
     x=0.0;y=0.0;z=0.0
     @inbounds for t in eachindex(cell.expval)
-        m=_pv_monomial(cell.expval[t],u,v,w,pyramid)
+        m=_pv_monomial(cell.expval[t],u,v,w,pyramid,cell.native_pyramid_values)
         for i in 1:size(values,2)
             a=cv[i,t]*m
             x=muladd(a,values[1,i],x)
@@ -4758,7 +4784,8 @@ end
 # Build the `_PVSchemeCell` for record `i`: width checks against the scheme
 # matrix row counts, the active-step value slice, and geometric validation.
 function _postview_scheme_cell(record,kind::Symbol,i::Int,tsel::Int,
-                               caller::AbstractString;native_geometry::Bool=false)
+                               caller::AbstractString;native_geometry::Bool=false,
+                               native_pyramid::Bool=false)
     scheme=_postview_record_property(record,:scheme,i,caller)
     cv=_postview_scheme_matrix(scheme,:coefval,i,caller)
     ev=_postview_scheme_exponents(scheme,:expval,i,caller)
@@ -4805,7 +4832,9 @@ function _postview_scheme_cell(record,kind::Symbol,i::Int,tsel::Int,
     all(isfinite,V) || throw(ArgumentError(
         "$caller: record $i values must be finite"))
     cell=_PVSchemeCell(_POSTVIEW_SCHEME_KIND[kind],!has_geo,kind===:pyramid,
-                       cv,ev,cg,eg,C,V;native_geometry)
+                       cv,ev,cg,eg,C,V;native_geometry,
+                       native_pyramid_geometry=native_pyramid,
+                       native_pyramid_values=native_pyramid)
     _pv_scheme_validate(cell,i,caller)
     return cell
 end

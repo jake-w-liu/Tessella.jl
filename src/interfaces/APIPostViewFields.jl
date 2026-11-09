@@ -101,6 +101,7 @@ function _model_post_view_field(view,tag::Int;
     # One model-data step has a uniform component count. Construct directly
     # from the owned records: POS serialization would require rebinding family
     # schemes at every mixed-order transition and is not part of this path.
-    field=PostViewField(records;_native_geometry_partition=true,crop_negative,use_closest)
+    field=PostViewField(records;_native_geometry_partition=true,
+        _native_pyramid_basis=true,crop_negative,use_closest)
     return table.components==9 ? PostViewAnisoField(field) : field
 end
