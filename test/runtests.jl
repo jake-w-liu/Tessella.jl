@@ -83,6 +83,7 @@ include("functional/fixtures.jl")
         "functional/constant_metric_box.jl",
         "functional/constant_metric_regions.jl",
         "geometry/model_meshadapt_functional_test.jl",
+        "geometry/model_meshadapt_closed_test.jl",
         "geometry/model_volume_boundary_cache_test.jl",
         "geometry/model_box_boundary_extension_test.jl",
         "functional/pyramid_option.jl",

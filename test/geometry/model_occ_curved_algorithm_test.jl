@@ -6,8 +6,8 @@
 # primitive factories' analytic boundary (implicit volumes) may silently
 # substitute their own construction for a selector naming different
 # machinery. The Delaunay-family policies 3/5/6 are admitted; AUTO resolves
-# per face to Delaunay on planes and local MeshAdapt on open curved charts,
-# while closed sphere/cone/torus charts keep Frontal-Delaunay. Every selector
+# per face to Delaunay on planes and local MeshAdapt on curved charts,
+# including their periodic and collapsed-pole covers. Every selector
 # without a native producer keeps the loud not-implemented rejection.
 #
 # Before the admission was wired, every `Mesh.Algorithm` value produced the
@@ -119,17 +119,15 @@ end
     @test occursin("Surface[$cap]",sprint(showerror,err))
 
     # AUTO still resolves per face: an all-plane primitive box takes the
-    # Delaunay branch, while closed sphere/cone/torus charts keep the
-    # Frontal-Delaunay arm (their pole/periodic rows are not a valid
-    # local-adaptation preimage).
+    # Delaunay branch, while closed sphere/cone/torus charts adapt their
+    # periodic covers and retain the actual lower-dimensional identities.
     box=GeoModel()
     add_box!(box,0.0,0.0,0.0,1.0,1.0,1.0;tag=1)
     box.meshing.algorithm_2d=2
     box_face=first(sort!(collect(keys(box.surfaces))))
     mesh=M.mesh_model_surface(box,box_face)
     @test MT.validate(mesh).ok && MT.ntris(mesh)>0
-    # An all-plane primitive Box consumes its analytic box surface under
-    # algorithm 1 instead of the uncertified explicit local-chart PLC.
+    # An all-plane primitive Box consumes its actual algorithm-1 face PLC.
     local_box=GeoModel()
     add_box!(local_box,0.0,0.0,0.0,1.0,1.0,1.0;tag=1)
     local_box.meshing.algorithm_2d=1
@@ -143,9 +141,8 @@ end
     explicit=GeoModel()
     add_sphere!(explicit,0.0,0.0,0.0,1.0;tag=1)
     explicit.meshing.algorithm_2d=1
-    err=_error(()->M.mesh_model_volume(explicit,1))
-    @test err isa ArgumentError
-    @test occursin("not implemented",sprint(showerror,err))
+    explicit_mesh=M.mesh_model_volume(explicit,1)
+    @test MT.validate(explicit_mesh).ok && MT.ntets(explicit_mesh)>0
 end
 
 @testset "Mesh.Algorithm3D ordinary-volume admission" begin

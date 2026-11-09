@@ -3,9 +3,9 @@
 # Verified on the Gmsh 4.15.2 binary: AUTO picks Delaunay on planar faces
 # and MeshAdapt on every non-planar class — Cylinder, Sphere, ruled
 # Surface and BSpline all report "Meshing surface N (<kind>, MeshAdapt)".
-# The native local-adaptation mode runs on off-plane charts; closed
-# sphere/cone/torus charts keep the Frontal-Delaunay arm because their
-# pole/periodic rows collapse under the boundary-only seed. Selectors that name
+# The native local-adaptation mode runs on off-plane charts, including
+# periodic and pole charts whose planar cover is welded after adaptation.
+# Selectors that name
 # machinery without a native producer (4/8/9/10/11) keep their loud rejection.
 
 module ModelSurfaceAutoAlgorithmChecks

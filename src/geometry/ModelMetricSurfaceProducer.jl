@@ -20,6 +20,9 @@ function _meshadapt_vertex_sizes(m,tag,options,coordinates,cells,owners)
     for cell in cells,pair in _metric_surface_edges(cell)
         a,b=pair;pa,pb=coordinates[a],coordinates[b]
         distance=hypot((pb[axis]-pa[axis] for axis in 1:3)...)
+        # Distinct pole-row preimages denote the same actual Point. Their
+        # zero physical span supplies no sizing constraint.
+        iszero(distance) && continue
         sizes[a]=min(sizes[a],distance);sizes[b]=min(sizes[b],distance)
     end
     if options.from_points
@@ -30,6 +33,22 @@ function _meshadapt_vertex_sizes(m,tag,options,coordinates,cells,owners)
             h=min(max(min(h,options.ctx_lc),options.lc_min),options.lc_max)*options.lc_factor
             h>0 && (sizes[row]=min(sizes[row],h))
         end
+    end
+    # The retained Curve discretization is the boundary extension's actual
+    # scale. Interior scaffold spokes must not shrink its endpoints below
+    # that scale: two arbitrarily short interior spokes cannot span a fixed
+    # long Curve cell, and repeated bisection would approach that cell forever.
+    incidence=_metric_surface_incidence(cells,"MeshAdapt")
+    boundary_sizes=zeros(Float64,length(coordinates))
+    for ((a,b),hits) in incidence
+        length(hits)==1 || continue
+        pa,pb=coordinates[a],coordinates[b]
+        distance=hypot((pb[axis]-pa[axis] for axis in 1:3)...)
+        boundary_sizes[a]=max(boundary_sizes[a],distance)
+        boundary_sizes[b]=max(boundary_sizes[b],distance)
+    end
+    for row in eachindex(sizes)
+        boundary_sizes[row]>0 && (sizes[row]=boundary_sizes[row])
     end
     all(size->isfinite(size) && size>0,sizes) || throw(ArgumentError(
         "MeshAdapt: initial vertex sizes must be finite and positive"))
@@ -44,6 +63,59 @@ function _metric_surface_incidence(cells,caller)
     all(hits->length(hits) in (1,2),values(incidence)) || throw(ArgumentError(
         "$caller: initial Surface has nonmanifold edge incidence"))
     return incidence
+end
+
+# A periodic cover is a disk, while its physical quotient may be closed.
+# Test the actual quotient complex, including vertex links: disk link tests
+# alone cannot detect a collapse joining the two sides of a chart seam.
+function _metric_surface_quotient_ok(cells,coordinates,boundary)
+    canonical=Dict{NTuple{3,Float64},Int32}()
+    rows=Int32[get!(canonical,p) do;Int32(length(canonical)+1);end for p in coordinates]
+    wanted_counts=Dict{NTuple{2,Int32},Int}()
+    for (a,b) in boundary
+        rows[a]==rows[b] && continue
+        edge=minmax(rows[a],rows[b])
+        wanted_counts[edge]=get(wanted_counts,edge,0)+1
+    end
+    all(<=(2),values(wanted_counts)) || return false
+    wanted=Set(edge for (edge,count) in wanted_counts if count==1)
+    seen=Set{NTuple{3,Int32}}()
+    incidence=Dict{NTuple{2,Int32},Int}()
+    links=Dict{Int32,Dict{Int32,Set{Int32}}}()
+    for cell in cells
+        a,b,c=(rows[row] for row in cell)
+        (a==b || b==c || c==a) && continue
+        key=Tuple(sort!(Int32[a,b,c]))
+        key in seen && return false
+        push!(seen,key)
+        for (v,x,y) in ((a,b,c),(b,c,a),(c,a,b))
+            edge=minmax(v,x)
+            count=get(incidence,edge,0)+1
+            count<=2 || return false
+            incidence[edge]=count
+            link=get!(()->Dict{Int32,Set{Int32}}(),links,v)
+            push!(get!(()->Set{Int32}(),link,x),y)
+            push!(get!(()->Set{Int32}(),link,y),x)
+        end
+    end
+    Set(edge for (edge,count) in incidence if count==1)==wanted || return false
+    rim=Set(v for edge in wanted for v in edge)
+    for (vertex,link) in links
+        degrees=length.(values(link))
+        if vertex in rim
+            all(in((1,2)),degrees) && count(==(1),degrees)==2 || return false
+        else
+            all(==(2),degrees) || return false
+        end
+        reached=Set{Int32}();todo=Int32[first(keys(link))]
+        while !isempty(todo)
+            v=pop!(todo);v in reached && continue
+            push!(reached,v)
+            append!(todo,link[v])
+        end
+        length(reached)==length(link) || return false
+    end
+    return !isempty(seen)
 end
 
 function _metric_surface_birth(high,count,caller,label)
@@ -293,6 +365,14 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
     numbers=data.numbers;owners=data.owners;node_parameters=data.node_parameters
     retained=data.retained;birth_rows=data.birth_rows;labels=data.labels
     node_max=data.node_max;cell_max=data.cell_max
+    # The two ends of a collapsed pole row are distinct vertices on the
+    # cover but carry one actual Point UID. A triangle spanning that row is
+    # a carrier of the UV domain and disappears in the final quotient. Its
+    # children may keep that same collapsed edge; no other flat physical
+    # triangle is admitted.
+    pole_pair(a,b)=local_adaptation && retained[a] && retained[b] &&
+        owners[a][1]==0 && owners[a]==owners[b] && numbers[a]==numbers[b] &&
+        isequal(coordinates[a],coordinates[b])
     function score(edge)
         value=metric_edge_length(field,coordinates[edge[1]],
             coordinates[edge[2]];entity=(2,tag))
@@ -301,7 +381,8 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
             distance=hypot((pb[axis]-pa[axis] for axis in 1:3)...)
             # A split transports the edge's linearly interpolated scalar
             # size. Boundary extension remains attached to actual rows.
-            value=max(value,distance/min(local_sizes[a],local_sizes[b]))
+            h=local_sizes[a]/2+local_sizes[b]/2
+            value=max(value,distance/h)
         end
         return value
     end
@@ -322,6 +403,29 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
     for edge in sort!(collect(keys(incidence)));enqueue(edge);end
     positions=Dict{NTuple{3,Float64},Int32}()
     for (index,point) in enumerate(coordinates);positions[point]=Int32(index);end
+    quotient=local_adaptation && length(positions)<length(coordinates)
+    aliases=Set{NTuple{3,Float64}}()
+    if quotient
+        counts=Dict{NTuple{3,Float64},Int}()
+        for p in coordinates;counts[p]=get(counts,p,0)+1;end
+        union!(aliases,(p for (p,count) in counts if count>1))
+    end
+    function quotient_safe(removed,added;future=nothing)
+        quotient || return true
+        any(column->any(row->coordinates[row] in aliases,cells[column]),removed) ||
+            any(cell->any(row->row>0 && coordinates[row] in aliases,cell),added) ||
+            return true
+        old=Set(removed)
+        proposed=NTuple{3,Int32}[cells[column] for column in eachindex(cells)
+            if alive[column] && !(column in old)]
+        if future===nothing
+            append!(proposed,added)
+            return _metric_surface_quotient_ok(proposed,coordinates,boundary)
+        end
+        row=Int32(length(coordinates)+1)
+        append!(proposed,(ntuple(i->cell[i]<0 ? row : cell[i],3) for cell in added))
+        return _metric_surface_quotient_ok(proposed,vcat(coordinates,[future]),boundary)
+    end
     # Dissolved vertex positions stay reserved so a later split cannot birth a
     # vertex back onto the exact razor site the repair just removed.
     retired=Set{NTuple{3,Float64}}()
@@ -660,7 +764,10 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
                     sign(second_child)==sign(winding) || return false
                 child_areas=(triangle_area(coordinates[first],point,coordinates[other]),
                              triangle_area(point,coordinates[last],coordinates[other]))
-                all(area->isfinite(area) && area>0,child_areas) || return false
+                isfinite(child_areas[1]) &&
+                    (child_areas[1]>0 || pole_pair(first,other)) &&
+                    isfinite(child_areas[2]) &&
+                    (child_areas[2]>0 || pole_pair(last,other)) || return false
             end
             return true
         end
@@ -718,6 +825,7 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
                      isfinite(area2) && area2>0) || return false
                     _metric_preserves_constraints(cells,hits,
                         ((f1,o2,o1),(o2,l1,o1)),constraints) || return false
+                    quotient_safe(hits,((f1,o2,o1),(o2,l1,o1))) || return false
                     _metric_surface_birth(cell_max,2,caller,"cell")
                     for column in hits
                         alive[column]=false
@@ -801,6 +909,7 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
                             end
                         end
                         _metric_preserves_constraints(cells,hits,newcells,constraints) || continue
+                        quotient_safe(hits,newcells) || continue
                         all(keys(delta)) do key
                             final=length(get(incidence,key,Int[]))+delta[key]
                             final==0 ||
@@ -1137,6 +1246,8 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
                     # Commit. A fan first births its Steiner vertex, then the
                     # placeholder resolves to the new row.
                     _metric_preserves_constraints(cells,cavity,newcells,constraints) || return false
+                    quotient_safe(cavity,newcells;
+                        future=steiner===nothing ? nothing : steiner[1]) || return false
                     steiner===nothing ||
                         (_metric_surface_birth(node_max,1,caller,"node"))
                     _metric_surface_birth(cell_max,length(newcells),
@@ -1273,6 +1384,7 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
                     (isfinite(area) && area>0) || return false
                     push!(newcells,(prev,vtx,nxtv))
                     _metric_preserves_constraints(cells,starcells,newcells,constraints) || return false
+                    quotient_safe(starcells,newcells) || return false
                     _metric_surface_birth(cell_max,length(newcells),caller,"cell")
                     for column in starcells
                         alive[column]=false
@@ -1336,7 +1448,10 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
                             "$caller: midpoint creates a flat or inverted Surface triangle"))
                     child_areas=(triangle_area(coordinates[first],midpoint,coordinates[other]),
                                  triangle_area(midpoint,coordinates[last],coordinates[other]))
-                    all(area->isfinite(area) && area>0,child_areas) || throw(ArgumentError(
+                    isfinite(child_areas[1]) &&
+                        (child_areas[1]>0 || pole_pair(first,other)) &&
+                        isfinite(child_areas[2]) &&
+                        (child_areas[2]>0 || pole_pair(last,other)) || throw(ArgumentError(
                         "$caller: midpoint creates an unrepresentable physical Surface triangle"))
                 end
                 error("$caller: unreachable split-admissibility state")
@@ -1483,6 +1598,7 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
             new_area=sum(child->_metric_uv_area((parameters[row] for row in child)...),children)
             isapprox(old_area,new_area;rtol=1e-9,atol=1024eps(Float64)*old_area) || continue
             _metric_preserves_constraints(cells,star,children,constraints) || continue
+            quotient_safe(star,children) || continue
             _metric_surface_birth(cell_max,length(children),caller,"cell")
             for column in star;drop_cell(column);end
             for child in children;add_cell(child);end
@@ -1540,12 +1656,16 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
         area2=triangle_area(coordinates[o2],coordinates[l1],coordinates[o1])
         (isfinite(area1) && area1>0 && isfinite(area2) && area2>0) ||
             return false
-        isapprox(area1+area2,
-                 triangle_area(coordinates[f1],coordinates[l1],
-                               coordinates[o1])+
-                 triangle_area(coordinates[l1],coordinates[f1],
-                               coordinates[o2]);rtol=1e-9,atol=0) ||
+        # A diagonal swap on a curved patch changes the flat world facets'
+        # area. The conserved domain is its parametric quad; on an affine
+        # chart this is equivalent to the world-area certificate.
+        isapprox(_metric_uv_area(parameters[f1],parameters[o2],parameters[o1])+
+                 _metric_uv_area(parameters[o2],parameters[l1],parameters[o1]),
+                 _metric_uv_area(parameters[f1],parameters[l1],parameters[o1])+
+                 _metric_uv_area(parameters[l1],parameters[f1],parameters[o2]);
+                 rtol=1e-9,atol=0) ||
             return false
+        quotient_safe(hits,((f1,o2,o1),(o2,l1,o1))) || return false
         _metric_surface_birth(cell_max,2,caller,"cell")
         drop_cell(hits[1]);drop_cell(hits[2])
         add_cell((f1,o2,o1));add_cell((o2,l1,o1))
@@ -2167,7 +2287,9 @@ function _occ_metric_surface_refine(m,tag,field,target,node_limit,
         authority,limit=_metric_surface_boundary_grade!(m,tag,field,target,
             options,input,node_high_water,caller,allow_regrade)
         _,_,_,unwrapped=_model_occ_curved_surface_mesh_tracked(
-            m,tag,caller;_mesh1d_options=options,initial_only=local_adaptation)
+            m,tag,caller;_mesh1d_options=options,initial_only=local_adaptation,
+            raw_preimage=local_adaptation &&
+                get(sg,:occ,nothing) in (:sphere,:cone,:torus))
     finally
         m.meshing.algorithm_2d=saved_algorithm
     end
@@ -2256,7 +2378,7 @@ function _occ_metric_surface_refine(m,tag,field,target,node_limit,
         isapprox(abs(signed_a),abs_a;rtol=1e-9,atol=1e-9*max(1.0,abs_a)) &&
         isapprox(boundary_shoe/2,signed_a;rtol=1e-9,
                  atol=1e-9*max(1.0,abs_a)) || throw(
-        ArgumentError("$caller: Mesh.Algorithm=7 on Surface[$tag] requires " *
+        ArgumentError("$caller: Mesh.Algorithm=$(local_adaptation ? 1 : 7) on Surface[$tag] requires " *
             "a planar-embedded unwrapped parametric sheet"))
     state=_metric_surface_refine_core(tag,field,target,node_limit,
         triangle_limit,caller,_metric_occ_chart(sg,field,tag),
@@ -2269,6 +2391,8 @@ function _occ_metric_surface_refine(m,tag,field,target,node_limit,
          labels=labels,node_max=next,cell_max=cell_max);local_adaptation)
     live=state.live;live_nodes=state.live_nodes
     node_max=state.node_max;cell_max=state.cell_max
+    _metric_surface_quotient_ok((cells[column] for column in live),coordinates,boundary) ||
+        throw(ErrorException("$caller: refined Surface quotient is not a manifold with its retained boundary"))
     # Weld the refined sheet back onto bitwise-equal world rows — the tracked
     # builder's own contract: the lowest-dimensional preimage supplies
     # ownership, cells collapsed by degenerate rows drop, and the surviving
@@ -2414,13 +2538,6 @@ function _model_occ_meshadapt_surface_mesh(m::GeoModel,tag::Int,
         caller::AbstractString;size_field=nothing,_mesh_input=nothing,
         _mesh1d_options=nothing,_mesh_node_high_water=nothing,
         _mesh_element_high_water=UInt64(0),_boundary_regrade::Bool=true)
-    sg=get(m.surface_geometry,tag,nothing)
-    if sg!==nothing && get(sg,:occ,nothing) in (:sphere,:cone,:torus)
-        throw(ArgumentError(
-            "$caller: Mesh.Algorithm=1 on the closed sphere/cone/torus " *
-            "Surface[$tag] is not implemented by the local-adaptation " *
-            "producer; AUTO keeps the native Frontal-Delaunay arm on this chart"))
-    end
     options=_model_algorithm_size_options(m,_mesh1d_options,caller)
     field=_MetricIsotropicSize(_ModelAlgorithmBackgroundSize(m,2,tag,
         options,size_field,caller))

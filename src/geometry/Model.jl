@@ -2004,7 +2004,8 @@ closed on it, and a single `Torus` face wired `[-equator,+meridian,+equator,
 `[0,angle]`, closes the two end meridians, and caps the ends with `Plane`
 faces under shell `[torus,+start_cap,-end_cap]`. There is no compact encoding:
 entity, boundary, evaluation, and bounds queries read the materialized
-entities, while volume meshing rejects the non-planar face explicitly.
+entities. Native surface and volume meshing consume these parameterized
+boundary products, including the periodic seams of a full torus.
 """
 function add_torus!(m::GeoModel, x, y, z, r1, r2;
                     tag::Integer=0, angle::Real=2π, _zero_literal::Bool=false)
@@ -7094,7 +7095,6 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;
         nothing
 
     explicit_geometry=(nonew!==nothing || isempty(m.volumes[volume]) ||
-        _model_volume_box_uses_meshadapt(m,volume,caller) ||
         (_implicit_volume_surface(m,volume) &&
          !_model_volume_uses_meshadapt(m,volume,caller))) ? nothing :
         _model_explicit_volume_geometry(m,volume,caller;_mesh_input,
@@ -10433,9 +10433,8 @@ end
 
 # A volume carrying a native curved-solid encoding normally meshes through the
 # analytic tessellation even though its OCC topology is materialized. MeshAdapt
-# consumes the actual adapted boundary products instead. Box volumes keep
-# their explicit planar PLC except for algorithm 1, whose analytic box surface
-# avoids the uncertified local-chart boundary transport. Boolean results
+# consumes the actual adapted boundary products instead, including a Box's
+# planar faces. Boolean results
 # likewise keep their materialized boundary for queries but mesh through the
 # operand snapshot (`m.booleans`/`m.boolean_operands`).
 _implicit_volume_surface(m::GeoModel,t::Int) =
@@ -10450,19 +10449,8 @@ function _model_volume_faces_use_meshadapt(m::GeoModel,t::Int,caller)
 end
 
 function _model_volume_uses_meshadapt(m::GeoModel,t::Int,caller)
-    # A primitive Box keeps its analytic surface: all faces are planar, and
-    # its direct explicit-volume PLC is not certified for the local chart.
-    haskey(m.box_extents,t) && return false
     _model_volume_faces_use_meshadapt(m,t,caller)
 end
-
-# A Box whose faces request algorithm 1 consumes the analytic `box_surface`
-# instead of the explicit planar PLC; the latter has no certified local-chart
-# boundary transport for an all-planar primitive. Other selectors keep the
-# established explicit box PLC and its pinned identity/projection contracts.
-_model_volume_box_uses_meshadapt(m::GeoModel,t::Int,caller)=
-    haskey(m.box_extents,t) && length(m.volumes[t])==1 &&
-    _model_volume_faces_use_meshadapt(m,t,caller)
 
 # Primitive factories retain their established deterministic geometry encoding.
 # This provenance is independent of ordinary explicitly assembled CAD PLCs;
@@ -10480,7 +10468,8 @@ function _model_factory_volume_encoding(m::GeoModel,t::Int)
 end
 
 function _volume_surface(m::GeoModel,t::Int,caller::AbstractString="mesh_model_volume")
-    if _implicit_volume_surface(m,t) && _model_volume_uses_meshadapt(m,t,caller)
+    if (haskey(m.box_extents,t) || _implicit_volume_surface(m,t)) &&
+            _model_volume_uses_meshadapt(m,t,caller)
         return _model_explicit_volume_geometry(m,t,caller).surface
     end
     if haskey(m.box_extents,t) || _implicit_volume_surface(m,t)
@@ -10780,7 +10769,6 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
         end
     end
     explicit_geometry=(isempty(m.volumes[t]) ||
-        _model_volume_box_uses_meshadapt(m,t,caller) ||
         (_implicit_volume_surface(m,t) &&
          !_model_volume_uses_meshadapt(m,t,caller))) ? nothing :
         _model_explicit_volume_geometry(m,t,caller;size_field=size_field,

@@ -6898,6 +6898,7 @@ end
 function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
                                         caller::AbstractString;
                                         initial_only::Bool=false,
+                                        raw_preimage::Bool=false,
                                         _mesh1d_options=nothing)
     sg=get(m.surface_geometry,t,nothing)
     occ=sg===nothing ? nothing : get(sg,:occ,nothing)
@@ -7067,8 +7068,37 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
     # mapped through the local patch metric so lifted triangles stay local.
     umin=minimum(xs);umax=maximum(xs);vmin=minimum(ys);vmax=maximum(ys)
     uspan=umax-umin;vspan=vmax-vmin
+    if raw_preimage && (period>0 || vperiod>0) && uspan>0 && vspan>0 &&
+            length(unique(lift))<length(lift)
+        # A periodic chart needs a topological interior scaffold even before
+        # sizing adaptation: with only seam/pole rows, all corners can lift
+        # onto one meridian or one vertex. These fixed interior stations make
+        # the initial cover a genuine surface; the local producer determines
+        # the final density with its own edge operations.
+        for fu in (.25,.5,.75),fv in (.25,.5,.75)
+            u=umin+fu*uspan;v=vmin+fv*vspan
+            # The analytic support rectangle may contain trimmed-out regions
+            # and holes. Seed only strictly inside the actual wire domain;
+            # a new vertex on a lower Curve would need that Curve's UID.
+            inside=false;on_boundary=false
+            for (i,j) in segs
+                a=(xs[i],ys[i]);b=(xs[j],ys[j])
+                if orient2(a,b,(u,v))==0 &&
+                        min(a[1],b[1])<=u<=max(a[1],b[1]) &&
+                        min(a[2],b[2])<=v<=max(a[2],b[2])
+                    on_boundary=true;break
+                end
+                if (a[2]>v)!=(b[2]>v) &&
+                        u<a[1]+(v-a[2])*(b[1]-a[1])/(b[2]-a[2])
+                    inside=!inside
+                end
+            end
+            inside && !on_boundary || continue
+            emit((u,v),_occ_surface_point(sg,u,v),(2,Int32(t)),[u,v])
+        end
+    end
     # Upstream `ALGO_2D_INITIAL_ONLY` stops at the recovered 1-D boundary
-    # mesh, so initial-only suppresses every interior (u,v) lattice seed.
+    # mesh, so initial-only suppresses the size-based interior lattice.
     if !initial_only && uspan>0.0 && vspan>0.0
         # Direction-aware targets: a swept band's boundary mixes long
         # v-direction seams with short u-direction rim chords, so a single
@@ -7192,6 +7222,17 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
     end
     tris_uv=NTuple{3,Int32}[(mesh.tris[1,c],mesh.tris[2,c],mesh.tris[3,c])
                             for c in axes(mesh.tris,2)]
+    if raw_preimage
+        # The adaptive producer operates on the original planar cover. The
+        # repair below constructs a welded scalar tessellation and may move
+        # fan preimages between sheets; that result is not a UV triangulation.
+        # Preserve actual boundary coordinates and provenance until the
+        # adaptive producer performs its own final quotient and certificates.
+        unwrapped=(u=uxs,v=uys,cells=tris_uv,owners=pre_owner,params=pre_param,
+            world=NTuple{3,Float64}[Tuple(coords[:,k]) for k in axes(coords,2)],
+            period=period)
+        return nothing,nothing,nothing,unwrapped
+    end
     cells=NTuple{3,Int32}[]
     seen_cells=Set{NTuple{3,Int32}}()
     for _ in 1:(8*length(tris_uv)+8)

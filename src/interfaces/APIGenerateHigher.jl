@@ -2826,13 +2826,14 @@ function _higher_volume_wb_rebuild_constructor(assembly,m,wb,mapping,source_tags
         ckey=Tuple(sort(conn))
         mapped=Int32[]
         for (slot,vrow) in enumerate(conn)
-            uid=assembly.nodes[mapping[Int(vrow)]].tag
+            node=assembly.nodes[mapping[Int(vrow)]]
+            uid=node.tag
             row=get(row_of_uid,uid,Int32(0))
             if row==0
                 push!(extra_uids,uid)
-                push!(extra_entities,get(wb.nodes,Int32(vrow),owner))
-                push!(extra_params,nothing)
-                push!(extra_coords,assembly.nodes[mapping[Int(vrow)]].point)
+                push!(extra_entities,node.owner)
+                push!(extra_params,node.parameter===nothing ? nothing : copy(node.parameter))
+                push!(extra_coords,node.point)
                 row=Int32(length(data.external_node_tags)+length(extra_uids))
                 row_of_uid[uid]=row
             end
@@ -2881,7 +2882,8 @@ end
 # the published products match the recovered boundary exactly.
 function _higher_volume_boundary_writeback!(assembly,m,wb,mapping,source_tags,caller;
                                            geometry_parts=nothing,geometry_cells=nothing,
-                                           surface_constructor_inputs=nothing)
+                                           surface_constructor_inputs=nothing,
+                                           source_authority=nothing)
     source_tags===nothing && throw(ArgumentError(
         "$caller: native Volume boundary write-back lacks its row UID binding"))
     if !isempty(wb.replaced)
@@ -2921,6 +2923,13 @@ function _higher_volume_boundary_writeback!(assembly,m,wb,mapping,source_tags,ca
     for tag in sort!(collect(keys(wb.surfaces)))
         owner=(2,Int32(tag))
         constructor=get(surface_constructor_inputs,owner,nothing)
+        if constructor===nothing && source_authority isa Model._ModelMeshAuthority
+            # A caller edit can invalidate the old constructor while keeping
+            # a complete actual Surface product. Its pre-recovery UID/cell
+            # receipt is the authority for adopting these explicit children.
+            constructor=Model._model_mesh_product(source_authority,2,tag;
+                producer_order=true,first_order=true,caller)
+        end
         constructor===nothing && continue
         rebuilt=_higher_volume_wb_rebuild_constructor(assembly,m,wb,mapping,source_tags,
             tag,constructor,added_cells,caller)
@@ -3166,6 +3175,41 @@ end
 
 # Fresh Surface cells are actual event objects. Their final labels may change
 # during finish! even though they have no retained source_tag mapping entry.
+function _higher_surface_constructor_rows(authority,constructors,node_map,caller)
+    data=authority.mesh.entity_data
+    positions=Dict(uid=>Int32(row) for (row,uid) in enumerate(data.external_node_tags))
+    produced=copy(authority.producer_rows)
+    for (owner,constructor) in constructors
+        receipt=constructor.entity_data
+        receipt!==nothing || throw(ArgumentError(
+            "$caller: Surface constructor row receipt lacks actual UID metadata"))
+        used=falses(nnodes(constructor))
+        for block in constructor.blocks,row in block.nodes;used[row]=true;end
+        rows=Int32[]
+        for (source,uid) in enumerate(receipt.external_node_tags)
+            final=get(node_map,uid,nothing)
+            if final===nothing
+                used[source] && throw(ArgumentError(
+                    "$caller: Surface constructor row receipt loses a supported node UID"))
+                continue
+            end
+            row=get(positions,final,Int32(0))
+            row>0 && all(axis->isequal(constructor.coords[axis,source],
+                authority.mesh.coords[axis,row]),1:3) &&
+                receipt.node_entities[source]==data.node_entities[row] &&
+                isequal(receipt.node_parametric[source],data.node_parametric[row]) ||
+                throw(ArgumentError("$caller: Surface constructor row receipt changes actual node $uid"))
+            push!(rows,row)
+        end
+        allunique(rows) || throw(ArgumentError(
+            "$caller: Surface constructor row receipt aliases actual producer rows"))
+        all(in(Set(rows)),get(produced,owner,Int32[])) || throw(ArgumentError(
+            "$caller: Surface constructor row receipt loses a retained producer row"))
+        produced[owner]=rows
+    end
+    return Model._model_mesh_with_producer_rows(authority,produced;caller)
+end
+
 function _higher_surface_constructor_publication(authority,constructors,cells,node_map,caller)
     rebound=Dict{Tuple{Int,Int32},MixedMesh}()
     for (owner,source) in constructors
@@ -3495,7 +3539,8 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
         # geometry vector only collects Volume parts inside this phase).
         wb_receipt===nothing || _higher_volume_boundary_writeback!(
             assembly,m,wb_receipt,mapping,source_rows,assembly.caller;
-            geometry_parts=surface_parts,geometry_cells,surface_constructor_inputs)
+            geometry_parts=surface_parts,geometry_cells,surface_constructor_inputs,
+            source_authority=input)
         if alternate!==nothing
             geometry_cells===nothing || (geometry_cells[alternate]=geometry_cells[mesh])
             if geometry_birth!==nothing
@@ -4276,6 +4321,14 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
          surface_parts,old;node_tag_map=plan.node_tag_map,curve_births)
     m.meshing.mesh_authority=Model._model_mesh_with_curve_births(
         m.meshing.mesh_authority,curve_births;node_tag_map=plan.node_tag_map,caller)
+    # Region recovery may append primary boundary vertices to a retained
+    # Face without a new surface_parts entry. Its complete UID receipt must
+    # bind those rows at every element order, before subsequent consumers
+    # request the actual first-order Surface skeleton.
+    if !isempty(surface_constructor_inputs)
+        m.meshing.mesh_authority=_higher_surface_constructor_rows(
+            m.meshing.mesh_authority,surface_constructor_inputs,plan.node_tag_map,caller)
+    end
     if element_order==1 && !isempty(surface_constructor_inputs)
         m.meshing.mesh_authority=_higher_surface_constructor_publication(
             m.meshing.mesh_authority,surface_constructor_inputs,constructor_cells,

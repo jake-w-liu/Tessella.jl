@@ -85,15 +85,13 @@ end
 # "Meshing surface N (<kind>, MeshAdapt)". The native local-adaptation
 # mode splits long edges, collapses short edges and improves diagonals on
 # the same owned planar/parametric charts used by the metric producer.
-# Closed sphere/cone/torus charts keep the Frontal-Delaunay arm: their pole
-# or periodic pcurves collapse under the boundary-only local-adaptation seed,
-# so those charts are not yet valid preimages for the local operator.
+# Periodic charts retain their planar preimage until local adaptation finishes;
+# a minimal interior scaffold prevents a seam/pole-only seed from collapsing.
 function _normal_surface_mesh_algorithm(m::GeoModel,t::Int,caller;metric::Bool=false)
     algorithm=_surface_mesh_algorithm(m,t)
     if algorithm==2
         kind=_surface_type(m,t)
-        algorithm=kind===:plane ? 5 :
-            kind in (:sphere,:cone,:torus) ? 6 : 1
+        algorithm=kind===:plane ? 5 : 1
     end
     algorithm in (metric ? (1,3,5,6,7) : (1,3,5,6)) || throw(ArgumentError(
         "$caller: mesh algorithm $algorithm on Surface[$t] is not " *

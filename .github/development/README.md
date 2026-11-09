@@ -32,6 +32,18 @@ still required after the current implementation work.
 | OBJ relative indices | Julia 1.12.7 and 1.13.3 minimal each passed 120/120 OBJ and neighboring surface-format checks, bounds enabled, actual exits 0. Negative references now select the correct vertices at the face's file position; invalid zero/out-of-range references reject before publication. |
 | Finite scalar transitions | Julia 1.12.7 minimal passed 72/72 and Julia 1.13.3 normal `-O2` passed 76/76, including four zero-allocation ordinary queries. Bounds enabled, actual exits 0. Exact recovery handles overflowed interpolation spans and Ball/Box distances, including subnormal transitions; sigmoid semantics are preserved. |
 | OFF/PLY2 surface orders | Julia 1.12.7 and 1.13.3 minimal each passed 510/510 surface-order and neighboring format checks, bounds enabled, actual exits 0. Catalog-based corner projection covers complete/incomplete orders 1–10, excludes volume cells, and rejects corrupt sources before replacing the destination. |
+| Closed MeshAdapt and recovery | Both Julia lines passed 129 closed/Box/quotient checks and 32 final edited-source/P2 checks. Nearby checks passed 74 MeshAdapt assertions on 1.12.7 and 87 algorithm-7 assertions on 1.13.3, with further current first-order/P2 rechecks. All minimal compilation with bounds, actual exits 0. Direct default Model factories passed 9/9 on 1.13.3. |
+
+Algorithm 1 now adapts actual sphere, cone and torus charts, and Box volumes
+consume their actual adapted faces. Auto selects the native producer on closed
+curved charts. Periodic/pole preimages have explicit quotient topology guards;
+inherited boundary sizes come from retained cells rather than artificial seed
+spokes. Recovery transports actual node parameters and complete UID row
+receipts, including retained P2 and legally edited periodic sources, while the
+existing ownership audits remain enforced. Default direct Box1 produced 4197
+valid positive tets; Sphere1 and AutoSphere produced 204 each. That direct
+minimal run took 19m29.8s, so it establishes correctness without a meshing
+performance claim.
 
 `API.open` and `API.merge` now dispatch `.step`, `.stp`, `.igs` and `.iges`
 directly to the existing native CAD importer and synchronize actual geometry.
@@ -104,6 +116,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-io-obj-gate-{112,1133}-min-20261109.log`.
 - `Tessella-scalar-interpolation-gate-112-min-final-20261109.log` and `Tessella-scalar-interpolation-gate-113-optimized-final-20261109.log`.
 - `Tessella-io-surface-order-gate-112-min-final-20261109.log` and `Tessella-io-surface-order-gate-1133-min-public-20261109.log`.
+- `Tessella-meshadapt-source-gate-1127-20261109.log`, `Tessella-meshadapt-metric-source-gate-1133-20261109.log`, `Tessella-meshadapt-receipt-final-gate-{1127,1133}-20261109.log`, and `Tessella-meshadapt-direct-factory-gate-1133-20261109.log`.
 
 ## Release and earlier evidence
 
