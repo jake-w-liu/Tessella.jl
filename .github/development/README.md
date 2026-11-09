@@ -23,6 +23,7 @@ still required after the current implementation work.
 | `e18b989` Opencode checkpoint | Default `Pkg.test()`: 1638/1638 on Julia 1.13.3; an independent detached checkout also passed 1638/1638 on Julia 1.12.7 (22m53.9s). Both use minimal compilation and bounds checks, actual exit 0. [Windows/Linux CI on both Julia lines](https://github.com/jake-w-liu/Tessella.jl/actions/runs/42519129163) also passed. |
 | `09bf184` combined checkpoint | Default `Pkg.test()` on detached, unchanged checkouts passed 2582/2582 on Julia 1.12.7 (29m27.8s) and 2582/2582 on Julia 1.13.3 (31m48.1s). Both use minimal compilation and bounds checks, actual exits 0. Later increments require their own final combined package run. |
 | `acd32c0` combined checkpoint | Default `Pkg.test()` on detached, unchanged checkouts passed 3237/3237 on Julia 1.12.7 (26m58.2s) and 3237/3237 on Julia 1.13.3 (29m17.8s). Both use minimal compilation and bounds checks, actual exits 0. Later incidence, pyramid-binding and ongoing increments retain separate checks until the next combined run. |
+| `b903396` combined checkpoint | Default `Pkg.test()` on detached, unchanged checkouts passed 3584/3584 on Julia 1.12.7 (35m22.9s) and 3584/3584 on Julia 1.13.3 (39m02.9s), bounds enabled, actual exits 0. This includes the exact tracked provenance fixture; preceding `ef14b70` full runs each had 3525 passes and two missing-fixture errors. Later increments require their own combined run. |
 | `11aee42` finite-normal inverse | Small intrinsic parameters beside ordinary coordinates: Julia 1.12.7 minimal, 162/162; Julia 1.13.3 normal `-O2`, 352/352 including existing warmed zero-allocation checks. Bounds enabled, exits 0. |
 | `fc0f599` GEO/view publication | Julia 1.12.7 and 1.13.3 minimal each passed the 256-check view scope and 162-check import/merge/CLI scope. Normal Julia 1.13.3 passed the 52 new regressions. Bounds enabled, exits 0. The first normal plugin block took 11m13s; no compiler improvement is claimed. |
 | `8a1f177` extreme nonlinear inverse | Subnormal derivatives and mixed-scale residuals: Julia 1.12.7 and 1.13.3 minimal, 168/168 each; Julia 1.13.3 normal `-O2`, 358/358 including existing ordinary warmed zero-allocation checks. Bounds enabled, exits 0. Exact recovery can allocate. |
@@ -51,6 +52,7 @@ still required after the current implementation work.
 | Native pyramid collapse denominator | Julia 1.12.7 minimal passed 691/691 public/neighbor checks; Julia 1.13.3 normal `-O2` passed 836/836 component/neighbor/resource checks, with twelve sampled stored queries allocating zero warmed bytes. Bounds enabled, actual exits 0. Native geometry and values retain their actual collapse denominator through the nearest Float64 reference to the apex; independent flags preserve the existing explicit POS matrix convention. The new 86-check default regression covers scalar/vector/tensor values, gradients, both model-data kinds, exact apex behavior and explicit two/four-matrix controls. |
 | Native BREP/XAO import | Julia 1.12.7 minimal and Julia 1.13.3 normal `-O2` each passed 639/639 native/neighbor checks with four threads and bounds enabled, actual exits 0. Seventeen owned source/test/fixture hashes were frozen and independently reviewed. Imports reconstruct shared analytic/spline topology and pcurves; public open/merge retain held state and bind XAO source references, names and groups. Existing native cube meshing retains positive tets and its exact boundary. Natural no-wire faces, nondegenerate pcurve-only edges and further curve/surface/orientation cases remain implementation work. |
 | Boundary inference and NoNew provenance | Julia 1.12.7 and 1.13.3 minimal each passed 3703/3703 topology, factory, periodic, provenance and retained-node assertions, bounds enabled, actual exits 0. Valid unmerged sweeps retain their literal boundary and source nodes; all 22 corruption mutations reject without changing state. A separate 15-check record/CAD gate passed on 1.13.3 in both minimal and normal `-O2` modes. The 59-check operation-provenance fixture is now part of the default suite. |
+| Precise inverse recovery | Julia 1.12.7 minimal passed 462/462 and Julia 1.13.3 normal `-O2` passed 595/595 inverse, native-pyramid, raw/POS and neighboring field checks, with four threads and bounds enabled, actual exits 0. A separate 12-check normal resource/isolation gate passed: eight tasks retained their precision/rounding scopes with four overlapping recoveries; an ordinary query allocates zero warmed bytes. The sampled rare 16384-bit recovery took 0.0858s/83.26MB total allocation. The new 33-check default regression preserves strict world/intrinsic/domain certificates and tests actual-map boundary queries, original physical points, reopened data and arithmetic-scope isolation. |
 
 Normal allocation on the bounded truncated-file probes fell from about 2.4MB
 to 2.5–4.7KB. The resource checks remain below 100KB for declared counts through
@@ -73,8 +75,11 @@ The default regression now includes native P9 plus value/gradient round trips
 through `API.open` in both data kinds and byte formats. The shared Newton
 solver and acceptance certificates are unchanged. Native probes now also retain
 the actual collapse denominator near the apex. Separate geometry/value producer
-flags preserve explicit POS matrix behavior. Further strict inverse false-miss
-cases remain active investigation.
+flags preserve explicit POS matrix behavior. A shared high-precision inverse
+now recovers failed native boundary queries and normalization loss in actual
+stored maps. The ordinary field path retains concrete scalar/vector/tensor
+return types and its sampled zero-allocation behavior; precision recovery
+intentionally allocates and remains a separate optimization target.
 
 Algorithm 1 now adapts actual sphere, cone and torus charts, and Box volumes
 consume their actual adapted faces. Auto selects the native producer on closed
@@ -167,6 +172,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-default-1133-final6-20261109.log` and `Tessella-verify-e18b989-112-20261109.log`.
 - `Tessella-default-09bf184-{112,1133}-20261109.log`.
 - `Tessella-default-acd32c0-{112,1133}-20261109.log`.
+- `Tessella-default-b903396-{112,1133}-20261109.log` and `Tessella-provenance-fixture-checkout-{112,1133}-min-20261109.log`.
 - `Tessella-field-audit-gate-optimized-20261109.log` and `Tessella-field-focused-gate-112-min-20261109.log`.
 - `Tessella-view-scoped-gates-{1127,1133}-min-20261109.log`, `Tessella-view-import-cli-{1127,1133}-min-20261109.log`, and `Tessella-view-final-gates-1133-normal-20261109.log`.
 - `Tessella-field-audit-gate-optimized-overflow-20261109.log`, `Tessella-field-focused-gate-112-min-overflow-final-20261109.log`, and `Tessella-field-focused-gate-113-min-overflow-20261109.log`.
@@ -195,6 +201,7 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-native-pyramid-apex-final-gate-112-min-20261109.log` and `Tessella-native-pyramid-apex-component-gate-1133-O2-20261109.log`.
 - `Tessella-cad-brep-xao-gate-{1127-min,1133-normal}-20261109.log`; the seventeen-file snapshot is recorded in `Tessella-cad-brep-xao-review-hashes-20261109.json`.
 - `Tessella-central-final-neighbors-{112,1133}-min-20261109.log` and `Tessella-view-central-product-final-1133-{min,normal}-20261109.log`.
+- `Tessella-view-inverse-recovery-gate-{112-min,1133-O2}-20261109.log` and `Tessella-view-inverse-recovery-resource-1133-O2-final-20261109.log`.
 
 ## Release and earlier evidence
 

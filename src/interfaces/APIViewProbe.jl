@@ -1,7 +1,7 @@
 # View queries retain the complete value and geometry bases. The shared
 # safeguarded scheme inverse supplies intrinsic coordinates and certifies the
 # actual physical map; derivatives are pulled back with the geometry Jacobian.
-using LinearAlgebra: svd, SingularException
+using LinearAlgebra: svd
 
 const _VIEW_PROBE_MSH=(point=15,line=1,triangle=2,quadrangle=3,
     tetrahedron=4,hexahedron=5,prism=6,pyramid=7)
@@ -181,74 +181,13 @@ function _view_probe_recovery(f)
     end
 end
 
-function _view_probe_precise_certificate(cell,coordinates,query,base,scale)
-    mapped=SizeField._pv_scheme_map(cell,coordinates...,base,scale)
-    all(isfinite,mapped) || return nothing
-    residual=ntuple(axis->query[axis]-mapped[axis],3)
-    derivatives=SizeField._pv_scheme_jacobian(cell,coordinates...,base,scale)
-    all(column->all(isfinite,column),derivatives) || return nothing
-    dim=SizeField._pv_scheme_dim(cell.kind)
-    reference=collect(coordinates)
-    if dim<=2
-        for axis in (dim==1 ? (2,3) : (3,))
-            normal=derivatives[axis]
-            denominator=sum(abs2,normal)
-            denominator>0 || return nothing
-            reference[axis]=sum(residual[i]*normal[i] for i in 1:3)/denominator
-            residual=ntuple(i->residual[i]-reference[axis]*normal[i],3)
-        end
-    end
-    all(isfinite,reference) || return nothing
-    tolerance=max(BigFloat(1e-10),BigFloat(256eps(Float64))*max(BigFloat(1),maximum(abs,query)))
-    hypot(residual...)<=tolerance || return nothing
-    result=Tuple(reference)
-    SizeField._pv_scheme_inside(cell.kind,result...,
-        MeshPointLocation.STRICT_REFERENCE_TOLERANCE) || return nothing
-    return result
-end
-
 function _view_probe_precise_coordinates!(location,geometry)
     location.precise===nothing || return location.precise
-    return _view_probe_recovery() do
-        cell=geometry.cell;scale=SizeField._pv_scheme_scale(cell)
-        base=map(BigFloat,_view_probe_cell_base(cell))
-        query=ntuple(axis->(BigFloat(location.point[axis])-base[axis])/BigFloat(scale),3)
-        dim=geometry.dim
-        coordinates=ntuple(axis->axis<=dim ? BigFloat(location.reference[axis]) : BigFloat(0),3)
-        for _ in 1:64
-            mapped=SizeField._pv_scheme_map(cell,coordinates...,base,scale)
-            all(isfinite,mapped) || return nothing
-            residual=BigFloat[query[axis]-mapped[axis] for axis in 1:3]
-            derivatives=SizeField._pv_scheme_jacobian(cell,coordinates...,base,scale)
-            all(column->all(isfinite,column),derivatives) || return nothing
-            jacobian=BigFloat[derivatives[column][axis] for axis in 1:3,column in 1:dim]
-            step=try
-                (transpose(jacobian)*jacobian)\(transpose(jacobian)*residual)
-            catch error
-                error isa SingularException || rethrow()
-                return nothing
-            end
-            all(isfinite,step) || return nothing
-            limit=16eps(BigFloat)*max(BigFloat(1),maximum(abs,coordinates))
-            if maximum(abs,step)<=limit
-                certified=_view_probe_precise_certificate(cell,coordinates,query,base,scale)
-                certified===nothing && return nothing
-                location.precise=certified
-                return certified
-            end
-            previous=sum(abs2,residual);alpha=BigFloat(1);advanced=false
-            for _ in 1:24
-                candidate=ntuple(axis->axis<=dim ? coordinates[axis]+alpha*step[axis] : BigFloat(0),3)
-                trial=SizeField._pv_scheme_map(cell,candidate...,base,scale)
-                if all(isfinite,trial) && sum(abs2,query.-trial)<=previous
-                    coordinates=candidate;advanced=true;break
-                end
-                alpha/=2
-            end
-            advanced || return nothing
-        end
-        return nothing
-    end
+    certified=SizeField._pv_scheme_precise_inverse(geometry.cell,location.point,
+        location.reference,MeshPointLocation.STRICT_REFERENCE_TOLERANCE)
+    certified===nothing && return nothing
+    location.precise=certified
+    return certified
 end
 
 function _view_probe_coordinates(record,point)
@@ -261,7 +200,11 @@ function _view_probe_coordinates(record,point)
     query=SizeField._postview_scaled_query(point,base,scale)
     all(isfinite,query) || return nothing
     coordinates=SizeField._pv_scheme_inverse(cell,query,base,scale)
-    coordinates===nothing && return nothing
+    if coordinates===nothing
+        location=_ViewProbeLocation((0.,0.,0.),point,nothing)
+        _view_probe_precise_coordinates!(location,record)===nothing && return nothing
+        return location
+    end
     SizeField._pv_scheme_inside(cell.kind,coordinates...,
         MeshPointLocation.STRICT_REFERENCE_TOLERANCE) || return nothing
     location=_ViewProbeLocation(coordinates,point,nothing)

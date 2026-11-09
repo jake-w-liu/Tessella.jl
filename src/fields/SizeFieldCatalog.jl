@@ -6,6 +6,7 @@
 
 using ..Predicates: orient2, orient3
 using ..Elements: lagrange_nodes
+using LinearAlgebra: SingularException
 
 # ── Anisotropic metric ────────────────────────────────────────────────────────
 
@@ -4051,6 +4052,15 @@ end
     end
     _postview_reference_inside(kind,u,v,w,field.reference_tolerance) ||
         return _postview_cell_miss(combine)
+    if _pv_query_roundtrip_differs(p,query,a,scale)
+        derivatives=_postview_reference_jacobian(
+            field.coords,cells,j,arity,kind,u,v,w,scale)
+        if _pv_normalization_needs_precision((u,v,w),p,query,a,scale,
+                derivatives,_pv_scheme_dim(kind))
+            return _postview_precise_result(combine,
+                _postview_nonlinear_precise_value(field,kind,j,p,(u,v,w),combine))
+        end
+    end
     value=if combine===_postview_weighted_scalar_operator
         _postview_nonlinear_scalar_operator(field,cells,j,arity,kind,u,v,w)
     else
@@ -4663,6 +4673,169 @@ function _pv_scheme_inverse(cell,query,base,scale)
     return nothing
 end
 
+const _PV_PRECISE_INVERSE_BITS=16384
+
+@inline _pv_query_roundtrip_differs(point,query,base,scale)=
+    muladd(query[1],scale,base[1])!=point[1] ||
+    muladd(query[2],scale,base[2])!=point[2] ||
+    muladd(query[3],scale,base[3])!=point[3]
+
+function _pv_normalization_needs_precision(coordinates,point,query,base,scale,
+                                          derivatives,dim)
+    difference=(point[1]-muladd(query[1],scale,base[1]),
+        point[2]-muladd(query[2],scale,base[2]),
+        point[3]-muladd(query[3],scale,base[3]))
+    all(iszero,difference) && return false
+    relative=(difference[1]/scale,difference[2]/scale,difference[3]/scale)
+    all(isfinite,relative) || return true
+    any(axis->difference[axis]!=0 && relative[axis]==0,1:3) && return true
+    correction=_pv_frame_step(derivatives...,relative,dim)
+    correction===nothing && return true
+    for axis in 1:dim
+        abs(correction[axis])>max(nextfloat(0.),
+            64eps(Float64)*abs(coordinates[axis])) && return true
+    end
+    return false
+end
+
+function _pv_precise_scope(f::F) where {F}
+    return setprecision(BigFloat,_PV_PRECISE_INVERSE_BITS) do
+        setrounding(BigFloat,RoundNearest) do
+            f()
+        end
+    end
+end
+
+function _pv_scheme_precise_certificate(cell,coordinates,query,base,scale,tolerance,step)
+    mapped=_pv_scheme_map(cell,coordinates...,base,scale)
+    all(isfinite,mapped) || return nothing
+    residual=ntuple(axis->query[axis]-mapped[axis],3)
+    derivatives=_pv_scheme_jacobian(cell,coordinates...,base,scale)
+    all(column->all(isfinite,column),derivatives) || return nothing
+    dim=_pv_scheme_dim(cell.kind)
+    reference=collect(coordinates)
+    if dim<=2
+        for axis in (dim==1 ? (2,3) : (3,))
+            normal=derivatives[axis]
+            denominator=sum(abs2,normal)
+            denominator>0 || return nothing
+            reference[axis]=sum(residual[i]*normal[i] for i in 1:3)/denominator
+            residual=ntuple(i->residual[i]-reference[axis]*normal[i],3)
+        end
+    end
+    all(isfinite,reference) || return nothing
+    world_tolerance=max(BigFloat(1e-10),BigFloat(256eps(Float64))*
+        max(BigFloat(1),maximum(abs,query)))
+    hypot(residual...)<=world_tolerance || return nothing
+    # Certify intrinsic accuracy independently of a rounded world residual.
+    for axis in 1:dim
+        abs(step[axis])<=max(BigFloat(nextfloat(0.)),
+            BigFloat(64eps(Float64))*abs(coordinates[axis])) || return nothing
+    end
+    result=(reference[1],reference[2],reference[3])
+    _pv_scheme_inside(cell.kind,result...,tolerance) || return nothing
+    return result
+end
+
+@noinline function _pv_scheme_precise_inverse(cell,point,seed,tolerance)
+    scale=_pv_scheme_scale(cell)
+    scale>0 || return nothing
+    return _pv_precise_scope() do
+        base=map(BigFloat,_pv_scheme_base(cell))
+        query=ntuple(axis->(BigFloat(point[axis])-base[axis])/BigFloat(scale),3)
+        dim=_pv_scheme_dim(cell.kind)
+        coordinates=ntuple(axis->axis<=dim ? BigFloat(seed[axis]) : BigFloat(0),3)
+        for _ in 1:64
+            mapped=_pv_scheme_map(cell,coordinates...,base,scale)
+            all(isfinite,mapped) || return nothing
+            residual=BigFloat[query[axis]-mapped[axis] for axis in 1:3]
+            derivatives=_pv_scheme_jacobian(cell,coordinates...,base,scale)
+            all(column->all(isfinite,column),derivatives) || return nothing
+            jacobian=BigFloat[derivatives[column][axis] for axis in 1:3,column in 1:dim]
+            step=try
+                (transpose(jacobian)*jacobian)\(transpose(jacobian)*residual)
+            catch error
+                error isa SingularException || rethrow()
+                return nothing
+            end
+            all(isfinite,step) || return nothing
+            limit=16eps(BigFloat)*max(BigFloat(1),maximum(abs,coordinates))
+            if maximum(abs,step)<=limit
+                return _pv_scheme_precise_certificate(cell,coordinates,query,
+                    base,scale,tolerance,step)
+            end
+            previous=sum(abs2,residual);alpha=BigFloat(1);advanced=false
+            for _ in 1:24
+                candidate=ntuple(axis->axis<=dim ? coordinates[axis]+alpha*step[axis] : BigFloat(0),3)
+                trial=try
+                    _pv_scheme_map(cell,candidate...,base,scale)
+                catch error
+                    (error isa DomainError || error isa OverflowError) || rethrow()
+                    nothing
+                end
+                if trial!==nothing && all(isfinite,trial) && sum(abs2,query.-trial)<=previous
+                    coordinates=candidate;advanced=true;break
+                end
+                alpha/=2
+            end
+            advanced || return nothing
+        end
+        return nothing
+    end
+end
+
+# Keep the rare recovery branch's scalar/vector/tensor result concrete in
+# the ordinary kernel, even across the dynamically scoped arithmetic call.
+@inline _postview_precise_result(::typeof(_postview_weighted_scalar_operator),value)=value::Float64
+@inline _postview_precise_result(::typeof(_postview_vector_combine),value)=value::NTuple{3,Float64}
+@inline _postview_precise_result(::typeof(_postview_tensor_combine),value)=value::NTuple{9,Float64}
+
+@noinline function _postview_scheme_precise_value(field,j,p,seed,combine::C) where {C}
+    return _pv_precise_scope() do
+        cell=field.scheme_cells[j]
+        coordinates=_pv_scheme_precise_inverse(cell,p,seed,field.reference_tolerance)
+        coordinates===nothing && return _postview_cell_miss(combine)
+        value=if combine===_postview_weighted_scalar_operator
+            Float64(_pv_scheme_scalar(cell,field.num_components,coordinates...))
+        elseif combine===_postview_vector_combine
+            map(Float64,_pv_scheme_vector(cell,coordinates...))
+        else
+            map(Float64,_pv_scheme_tensor(cell,coordinates...))
+        end
+        return _postview_check_interpolant(value,"scheme element",j)
+    end
+end
+
+@noinline function _postview_nonlinear_precise_value(field,kind,j,p,seed,combine::C) where {C}
+    return _pv_precise_scope() do
+        cells,arity,_=_postview_nonlinear_cells(field,kind)
+        coordinates=field.coords[:,cells[:,j]]
+        empty_matrix=zeros(Float64,0,0);empty_exponents=NTuple{3,Float64}[]
+        cell=_PVSchemeCell(kind,true,kind==6,empty_matrix,empty_exponents,
+            empty_matrix,empty_exponents,coordinates,empty_matrix)
+        reference=_pv_scheme_precise_inverse(cell,p,seed,field.reference_tolerance)
+        reference===nothing && return _postview_cell_miss(combine)
+        components=Vector{BigFloat}(undef,Int(field.num_components))
+        for component in eachindex(components)
+            value=BigFloat(0)
+            for slot in 1:arity
+                weight=_pv_canonical_shape(kind,slot,reference...)
+                value+=weight*BigFloat(_postview_component(field,component,cells[slot,j]))
+            end
+            components[component]=value
+        end
+        value=if combine===_postview_weighted_scalar_operator
+            length(components)==1 ? Float64(components[1]) :
+                Float64(hypot(components[1],components[2],components[3]))
+        elseif combine===_postview_vector_combine
+            (Float64(components[1]),Float64(components[2]),Float64(components[3]))
+        else
+            ntuple(i->Float64(components[i]),9)
+        end
+        return _postview_check_interpolant(value,"nonlinear element",j)
+    end
+end
+
 function _postview_scheme_value(field::PostViewField,j::Int,p,
                                 combine::C=_postview_weighted_scalar_operator) where {C}
     cell=field.scheme_cells[j]
@@ -4672,7 +4845,16 @@ function _postview_scheme_value(field::PostViewField,j::Int,p,
     query=_postview_scaled_query(p,base,scale)
     all(isfinite,query) || return _postview_cell_miss(combine)
     coordinates=_pv_scheme_inverse(cell,query,base,scale)
-    coordinates===nothing && return _postview_cell_miss(combine)
+    coordinates===nothing && return _postview_precise_result(combine,
+        _postview_scheme_precise_value(field,j,p,(0.,0.,0.),combine))
+    if _pv_query_roundtrip_differs(p,query,base,scale)
+        derivatives=_pv_scheme_jacobian(cell,coordinates...,base,scale)
+        if _pv_normalization_needs_precision(coordinates,p,query,base,scale,
+                derivatives,_pv_scheme_dim(cell.kind))
+            return _postview_precise_result(combine,
+                _postview_scheme_precise_value(field,j,p,coordinates,combine))
+        end
+    end
     u,v,w=coordinates
     _pv_scheme_inside(cell.kind,u,v,w,field.reference_tolerance) ||
         return _postview_cell_miss(combine)
