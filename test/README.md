@@ -44,6 +44,6 @@ differential drivers under local `validation/` have their own tool requirements
 and are never production dependencies.
 
 [Current development evidence](../.github/development/README.md) records actual
-scopes and exits. [Historical testing receipts](../.github/development/history/TESTING.md)
+scopes and exits. [Historical testing receipts](https://github.com/jake-w-liu/Tessella.jl/blob/fbf34516da30408248e21a592ea599fdb9736b5c/.github/development/history/TESTING.md)
 qualify their recorded revisions, not current source. A bounded suite is not
 proof of complete mesher compatibility or global optimization.

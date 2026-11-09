@@ -4,8 +4,8 @@ This is the current requirement index, not a declaration that every row is
 unfinished or complete. Preserve the whole target while qualifying each
 subdomain against current source and fresh evidence. Detailed subitems and
 historical receipts remain in the
-[complete previous ledger](history/DEVIN_HANDOFF.md#complete-remaining-checklist)
-and [P1–P6 plan](history/PLAN.md#gmsh-parity-tracks). Dates and prior rejection
+[complete previous ledger](https://github.com/jake-w-liu/Tessella.jl/blob/fbf34516da30408248e21a592ea599fdb9736b5c/.github/development/history/DEVIN_HANDOFF.md#complete-remaining-checklist)
+and [P1–P6 plan](https://github.com/jake-w-liu/Tessella.jl/blob/fbf34516da30408248e21a592ea599fdb9736b5c/.github/development/history/PLAN.md#gmsh-parity-tracks). Dates and prior rejection
 classifications do not establish the current implementation state.
 
 ## Required domains
@@ -67,9 +67,9 @@ the full per-row ledger remains authoritative for additional subitems:
 - Systematic option/format/API conformance, optimization/resource measurements,
   and a fresh independent audit after the final fix.
 
-The two prepared designs are preserved intact:
-[nested STEP assemblies](history/designs/nested_step_assemblies.md) and
-[meshing/periodic transport](history/designs/meshing_remaining.md). Their initial
+The two original designs remain in Git history:
+[nested STEP assemblies](https://github.com/jake-w-liu/Tessella.jl/blob/fbf34516da30408248e21a592ea599fdb9736b5c/.github/development/history/designs/nested_step_assemblies.md) and
+[meshing/periodic transport](https://github.com/jake-w-liu/Tessella.jl/blob/fbf34516da30408248e21a592ea599fdb9736b5c/.github/development/history/designs/meshing_remaining.md). Their initial
 increments were subsequently implemented; follow-on requirements remain in
 the domain rows above. Do not restart completed designs from their old prose.
 
