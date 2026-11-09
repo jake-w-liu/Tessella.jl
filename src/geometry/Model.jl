@@ -1642,6 +1642,11 @@ function _validate_surface_loop(m::GeoModel,surfaces,caller::AbstractString)
             throw(ArgumentError("$caller: unknown Surface[$surface]"))
         end
     end
+    if isempty(curve_incidence) && length(unsigned)==1
+        geometry=get(m.surface_geometry,only(unsigned),nothing)
+        geometry!==nothing &&
+            Base.inferencebarrier(_occ_natural_surface_closed)(geometry) && return nothing
+    end
     isempty(curve_incidence) && throw(ArgumentError(
         "$caller: a surface loop must contain boundary curves"))
     # Two incidence patterns extend the planar-manifold rule for OCC-style
@@ -2317,7 +2322,7 @@ function boolean_volumes_multi!(m::GeoModel,op::Symbol,
                     continue                       # Extent 0 — preserved
                 elseif isempty(imgs)
                     unbind[i]=rem                  # IsDeleted
-                elseif length(imgs)==1 && rem &&
+                elseif op!==:union && length(imgs)==1 && rem &&
                         count(j->image[j]==imgs &&
                             pieces[imgs[1]].pseudo!=j,1:N)==1
                     # the operand is the unique source whose entire image is
@@ -2416,7 +2421,11 @@ function boolean_volumes_multi!(m::GeoModel,op::Symbol,
                 resize!(image_out,N)
                 for i in 1:N
                     imgs=image[i]
-                    if length(imgs)==1 && pieces[imgs[1]].pseudo==i &&
+                    if op===:union
+                        # Fuse's volume history reports bound source tags,
+                        # including retained operands outside the result.
+                        image_out[i]=haskey(m.volumes,tags[i]) ? Int[tags[i]] : Int[]
+                    elseif length(imgs)==1 && pieces[imgs[1]].pseudo==i &&
                             !unbind[i]
                         image_out[i]=Int[tags[i]]
                     elseif isempty(imgs) || !(1 in imgs)
@@ -2492,7 +2501,9 @@ function boolean_volumes_multi!(m::GeoModel,op::Symbol,
         if image_out!==nothing
             resize!(image_out,N)
             for i in 1:N
-                image_out[i]=Int[out[pi] for pi in image[i]]
+                image_out[i]=op===:union ?
+                    (haskey(m.volumes,tags[i]) ? Int[tags[i]] : Int[]) :
+                    Int[out[pi] for pi in image[i]]
             end
         end
         return out
@@ -10258,7 +10269,8 @@ end
 _model_occ_curved_surface(m::GeoModel,surface::Int) =
     (sg=get(m.surface_geometry,surface,nothing);
      sg!==nothing &&
-     (get(sg,:occ,nothing) in (:cylinder,:sphere,:cone,:torus) ||
+     (hasproperty(sg,:natural_bounds) ||
+      get(sg,:occ,nothing) in (:cylinder,:sphere,:cone,:torus) ||
       # Lofted (`addThruSections`) tensor faces carry edge pcurves, so they
       # tessellate their (u,v) domain exactly like the analytic kinds.
       (get(sg,:occ,nothing) in (:tensor_bspline,:tensor_bezier) &&

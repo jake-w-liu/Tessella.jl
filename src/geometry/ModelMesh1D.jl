@@ -205,6 +205,12 @@ function _model_mesh_bbox(m::GeoModel, caller::AbstractString)
         c=sph.center; r=sph.radius
         grow!((c[1]-r,c[2]-r,c[3]-r)); grow!((c[1]+r,c[2]+r,c[3]+r))
     end
+    for (tag,geometry) in m.surface_geometry
+        hasproperty(geometry,:natural_bounds) || continue
+        bounds=Base.inferencebarrier(_model_occ_get_bounding_box)(m,2,tag)
+        grow!((bounds[1],bounds[2],bounds[3]))
+        grow!((bounds[4],bounds[5],bounds[6]))
+    end
     for cone in values(m.cones)
         c=cone.center; ax=cone.axis; n=hypot(ax[1],ax[2],ax[3])
         n>0 || continue

@@ -73,6 +73,12 @@ function _model_occ_boolean_keep!(pub::_ModelOCCBooleanPub,dim::Int,s::Int,
                                   kid::UInt64)
     haskey(pub.staged,kid) && return nothing
     pub.staged[kid]=pub.kernel.shapes[kid]
+    # Recursive operand removal can unbind a reused face's entire subtree.
+    # Restore every existing descendant binding before restoring its parent.
+    for child in pub.kernel.shapes[kid].children
+        dimension,tag=pub.kernel.shape_tags[child]
+        _model_occ_boolean_keep!(pub,dimension,tag,child)
+    end
     push!(pub.planned,(dim,s,kid))
     return nothing
 end

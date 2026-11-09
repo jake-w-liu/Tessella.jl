@@ -14,6 +14,10 @@ using ..Mesh3D: _EHeap, _hpush!, _hpop!
     ((pb[1]-pa[1])*(pc[2]-pa[2])-(pb[2]-pa[2])*(pc[1]-pa[1]))/2
 
 function _meshadapt_vertex_sizes(m,tag,options,coordinates,cells,owners)
+    geometry=get(m.surface_geometry,tag,nothing)
+    # A natural domain has no actual lower Curve discretization. Its chart
+    # cuts seed the algorithm but do not prescribe a physical size field.
+    geometry!==nothing && hasproperty(geometry,:natural_bounds) && return nothing
     extend=_resolved_extend_from_boundary(m,2,tag)
     (extend>0 || extend==-2) || return nothing
     sizes=fill(Inf,length(coordinates))
@@ -366,13 +370,18 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
     retained=data.retained;birth_rows=data.birth_rows;labels=data.labels
     node_max=data.node_max;cell_max=data.cell_max
     # The two ends of a collapsed pole row are distinct vertices on the
-    # cover but carry one actual Point UID. A triangle spanning that row is
+    # cover but carry one actual Point UID. A natural face can instead carry
+    # a boundary fiber certified from its analytic pole or constant control
+    # row, with all rows owned by that Surface. A triangle spanning either is
     # a carrier of the UV domain and disappears in the final quotient. Its
     # children may keep that same collapsed edge; no other flat physical
     # triangle is admitted.
-    pole_pair(a,b)=local_adaptation && retained[a] && retained[b] &&
-        owners[a][1]==0 && owners[a]==owners[b] && numbers[a]==numbers[b] &&
-        isequal(coordinates[a],coordinates[b])
+    collapsed_groups=hasproperty(data,:collapsed_groups) ? data.collapsed_groups : nothing
+    pole_pair(a,b)=local_adaptation && isequal(coordinates[a],coordinates[b]) &&
+        (retained[a] && retained[b] && owners[a][1]==0 &&
+            owners[a]==owners[b] && numbers[a]==numbers[b] ||
+         collapsed_groups!==nothing && get(collapsed_groups,a,0)>0 &&
+            get(collapsed_groups,a,0)==get(collapsed_groups,b,0))
     function score(edge)
         value=metric_edge_length(field,coordinates[edge[1]],
             coordinates[edge[2]];entity=(2,tag))
@@ -2001,6 +2010,12 @@ end
 function _metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
                                 input,options,node_high_water,element_high_water,caller;
                                 allow_regrade::Bool=true,local_adaptation::Bool=false)
+    geometry=get(m.surface_geometry,tag,nothing)
+    if geometry!==nothing && hasproperty(geometry,:natural_bounds)
+        return _occ_metric_surface_refine(m,tag,field,target,node_limit,triangle_limit,
+            input,options,node_high_water,element_high_water,caller;
+            allow_regrade,local_adaptation)
+    end
     # Boundary cells that are lazily graded while building the lower input
     # must satisfy this producer's strict `metric_edge_length` certificate
     # against `field`. The curve graders only see `options.inner_field` and
@@ -2289,7 +2304,8 @@ function _occ_metric_surface_refine(m,tag,field,target,node_limit,
         _,_,_,unwrapped=_model_occ_curved_surface_mesh_tracked(
             m,tag,caller;_mesh1d_options=options,initial_only=local_adaptation,
             raw_preimage=local_adaptation &&
-                get(sg,:occ,nothing) in (:sphere,:cone,:torus))
+                (get(sg,:occ,nothing) in (:sphere,:cone,:torus) ||
+                 hasproperty(sg,:natural_bounds)))
     finally
         m.meshing.algorithm_2d=saved_algorithm
     end
@@ -2339,7 +2355,9 @@ function _occ_metric_surface_refine(m,tag,field,target,node_limit,
     incidence=_metric_surface_incidence(cells,caller)
     boundary=Set(edge for (edge,hits) in incidence if length(hits)==1)
     original_boundary=Set(minmax(numbers[edge[1]],numbers[edge[2]]) for edge in boundary)
-    wanted_boundary=_occ_metric_wanted_boundary(m,tag,authority,lookup,caller)
+    wanted_boundary=hasproperty(sg,:natural_bounds) ?
+        _occ_natural_surface_boundary(sg,parameters,numbers,caller) :
+        _occ_metric_wanted_boundary(m,tag,authority,lookup,caller)
     original_boundary==wanted_boundary || throw(ArgumentError(
         "$caller: initial Surface loses its actual lower Curve-cell incidence"))
     score(edge)=metric_edge_length(field,coordinates[edge[1]],
@@ -2386,6 +2404,8 @@ function _occ_metric_surface_refine(m,tag,field,target,node_limit,
          incidence=incidence,boundary=boundary,
          local_sizes=local_adaptation ? _meshadapt_vertex_sizes(m,tag,options,
              coordinates,cells,owners) : nothing,
+         collapsed_groups=hasproperty(sg,:natural_bounds) ?
+             _occ_natural_collapsed_groups(sg,parameters,coordinates) : nothing,
          numbers=numbers,owners=owners,node_parameters=node_parameters,
          retained=retained,birth_rows=Int32.(1:nrows),
          labels=labels,node_max=next,cell_max=cell_max);local_adaptation)
@@ -2524,7 +2544,10 @@ function _model_occ_metric_surface_mesh(m::GeoModel,tag::Int,
         _mesh_element_high_water=UInt64(0),_boundary_regrade::Bool=true)
     options=_model_algorithm_size_options(m,_mesh1d_options,caller)
     raw=options.inner_field===nothing ? size_field : options.inner_field
-    raw isa AbstractAnisoField || throw(ArgumentError(
+    geometry=get(m.surface_geometry,tag,nothing)
+    natural_plane=geometry!==nothing && get(geometry,:occ,nothing)===:plane &&
+        hasproperty(geometry,:natural_bounds)
+    (raw isa AbstractAnisoField || natural_plane) || throw(ArgumentError(
         "$caller: Mesh.Algorithm=7 on curved Surface[$tag] requires an " *
         "anisotropic (tensor) background size field"))
     field=_metric_surface_algorithm_field(m,tag,options,size_field,caller)

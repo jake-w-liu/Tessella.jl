@@ -170,6 +170,15 @@ function _model_volume_bounds(
 
     shelled || throw(ArgumentError(
         "$caller: $entity has no native solid encoding"))
+    if any(hasproperty(get(m.surface_geometry,abs(surface),nothing),:natural_bounds)
+            for shell in m.volumes[tag] for surface in m.surface_loops[shell])
+        bounds=_MODEL_EMPTY_BOUNDS
+        for shell in m.volumes[tag],surface in m.surface_loops[shell]
+            bounds=_model_bounds_union(bounds,
+                _model_entity_bounding_box(m,2,abs(surface),caller))
+        end
+        return _model_bounds_checked(bounds,caller,entity)
+    end
     bounds=_MODEL_EMPTY_BOUNDS
     for curve in _model_boundary_curves(m,3,tag,caller,entity)
         bounds=_model_bounds_union(
@@ -317,6 +326,9 @@ function _model_entity_bounding_box(
         return _model_curve_bounding_box(m,tag,caller)
     elseif dimension==2
         surface_geometry=get(m.surface_geometry,tag,nothing)
+        surface_geometry!==nothing && hasproperty(surface_geometry,:natural_bounds) &&
+            return _model_bounds_checked(_occ_natural_surface_bbox(surface_geometry),
+                caller,"Surface[$tag]")
         if _model_nurbs_surface(surface_geometry)
             controls=surface_geometry.patch.surface.controls
             return ntuple(6) do index

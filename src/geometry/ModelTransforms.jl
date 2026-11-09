@@ -535,6 +535,16 @@ function _occ_partial_face_fields(g)
 end
 
 function _transform_occ_surface_record(g, t::_AffineTransform, caller, what;tensor_cache=nothing)
+    if hasproperty(g,:natural_bounds)
+        source=Base.structdiff(g,(natural_bounds=nothing,natural_collapsed=nothing))
+        out=_transform_occ_surface_record(source,t,caller,what;tensor_cache)
+        scale=_model_occ_pcurve_vscale(source,out)
+        lo,hi=g.natural_bounds
+        bounds=((lo[1],lo[2]*scale),(hi[1],hi[2]*scale))
+        out=merge(out,(natural_bounds=bounds,reversed=get(g,:reversed,false),
+            trimmed=get(g,:trimmed,false)))
+        return merge(out,(natural_collapsed=_occ_natural_collapsed_sides(out),))
+    end
     if _model_nurbs_surface(g)
         transform_patch=function()
             surface=g.patch.surface

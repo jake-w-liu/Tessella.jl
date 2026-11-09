@@ -218,6 +218,127 @@ end
      fma(u,rec.X[2],v*rec.Y[2])+rec.center[2],
      fma(u,rec.X[3],v*rec.Y[3])+rec.center[3])
 
+# Green's-theorem planar moments through the actual pcurves (including conic
+# arcs and spline traces). Raw per-wire integrals stay in traversal
+# orientation; the aggregator normalizes outer/hole signs exactly like
+# `_model_occ_wire_shoelace`.
+const _OCC_PLANE_MOMENT_KEYS=((0,0),(1,0),(0,1),(2,0),(1,1),(0,2),
+    (3,0),(2,1),(1,2),(0,3))
+
+function _model_occ_plane_wire_moments(kernel,rec,uses)
+    m=Dict{Tuple{Int,Int},Float64}(key=>0.0 for key in _OCC_PLANE_MOMENT_KEYS)
+    for (eid,rev) in uses
+        etag=kernel.shape_tags[eid][2]
+        eg=kernel.shapes[eid].geometry.geometry
+        pc=rec.pcurves[etag].fwd
+        t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
+        if haskey(pc,:neg2d)
+            pc=pc.neg2d[1];t0,t1=-t0,-t1
+        end
+        cuts=if haskey(pc,:lin2d)
+            Float64[t0,t1]
+        else
+            base=_model_occ_pcurve_measure_panels(pc,t0,t1)
+            refined=Float64[base[1]]
+            for i in 1:length(base)-1
+                a,b=base[i],base[i+1]
+                for j in 1:8
+                    push!(refined,a+(b-a)*j/8)
+                end
+            end
+            refined
+        end
+        for k in 1:length(cuts)-1
+            a=cuts[k];h=(cuts[k+1]-a)/2;mid=a+h
+            for i in 1:4,s in (-1,1)
+                t=mid+s*h*_OCC_GL_T[i];w=_OCC_GL_W[i]*h
+                (u,v),(du,dv)=_occ_pcurve_d1(pc,t)
+                m[(0,0)]+=w*u*dv
+                m[(1,0)]+=w*(u*u/2)*dv
+                m[(0,1)]+=w*(-v*v/2)*du
+                m[(2,0)]+=w*(u^3/3)*dv
+                m[(1,1)]+=w*(u*u*v/2)*dv
+                m[(0,2)]+=w*(-v^3/3)*du
+                m[(3,0)]+=w*(u^4/4)*dv
+                m[(2,1)]+=w*(u^3*v/3)*dv
+                m[(1,2)]+=w*(u*u*v*v/2)*dv
+                m[(0,3)]+=w*(-v^4/4)*du
+            end
+        end
+    end
+    return m
+end
+
+function _model_occ_plane_boundary_moments(kernel,rec,wires)
+    A=0.0
+    total=Dict{Tuple{Int,Int},Float64}(key=>0.0 for key in _OCC_PLANE_MOMENT_KEYS)
+    for (index,uses) in enumerate(wires)
+        raw=_model_occ_plane_wire_moments(kernel,rec,uses)
+        area=raw[(0,0)]
+        abs(area)<=_OCC_CONFUSION && continue
+        sgn=area>=0 ? 1.0 : -1.0
+        weight=(index==1 ? 1.0 : -1.0)*sgn
+        A+=(index==1 ? 1.0 : -1.0)*abs(area)
+        for key in _OCC_PLANE_MOMENT_KEYS
+            total[key]+=weight*raw[key]
+        end
+    end
+    return A,total
+end
+
+function _model_occ_plane_curved(kernel,shape,rec)
+    for wire_id in shape.children,
+            (eid,rev) in kernel.shapes[wire_id].geometry.uses
+        pc=rec.pcurves[kernel.shape_tags[eid][2]].fwd
+        haskey(pc,:neg2d) && (pc=pc.neg2d[1])
+        haskey(pc,:lin2d) || return true
+    end
+    return false
+end
+
+# Expand ∬(base + du·X + dv·Y)_i(...)_j dA from the centered 2D moments.
+function _model_occ_plane_tensor(base,X,Y,m)
+    T=zeros(3,3)
+    for i in 1:3,j in 1:3
+        first=((base[i],0,0),(X[i],1,0),(Y[i],0,1))
+        second=((base[j],0,0),(X[j],1,0),(Y[j],0,1))
+        for (ci,pu,qu) in first,(cj,pv,qv) in second
+            T[i,j]+=ci*cj*m[(pu+pv,qu+qv)]
+        end
+    end
+    return T
+end
+
+function _model_occ_plane_cubic(base,X,Y,m)
+    U=zeros(3,3,3)
+    factors=((base[1],0,0),(X[1],1,0),(Y[1],0,1))
+    for i in 1:3,j in 1:3,k in 1:3
+        fi=((base[i],0,0),(X[i],1,0),(Y[i],0,1))
+        fj=((base[j],0,0),(X[j],1,0),(Y[j],0,1))
+        fk=((base[k],0,0),(X[k],1,0),(Y[k],0,1))
+        for (ci,pu,qu) in fi,(cj,pv,qv) in fj,(ck,pw,qw) in fk
+            U[i,j,k]+=ci*cj*ck*m[(pu+pv+pw,qu+qv+qw)]
+        end
+    end
+    return U
+end
+
+function _model_occ_centered_plane_moments(raw,cu,cv)
+    m=Dict{Tuple{Int,Int},Float64}()
+    A=raw[(0,0)]
+    m[(0,0)]=A;m[(1,0)]=0.0;m[(0,1)]=0.0
+    m[(2,0)]=raw[(2,0)]-2cu*raw[(1,0)]+cu*cu*A
+    m[(1,1)]=raw[(1,1)]-cu*raw[(0,1)]-cv*raw[(1,0)]+cu*cv*A
+    m[(0,2)]=raw[(0,2)]-2cv*raw[(0,1)]+cv*cv*A
+    m[(3,0)]=raw[(3,0)]-3cu*raw[(2,0)]+3cu*cu*raw[(1,0)]-cu^3*A
+    m[(2,1)]=raw[(2,1)]-cv*raw[(2,0)]-2cu*raw[(1,1)]+
+        2cu*cv*raw[(1,0)]+cu*cu*raw[(0,1)]-cu*cu*cv*A
+    m[(1,2)]=raw[(1,2)]-cu*raw[(0,2)]-2cv*raw[(1,1)]+
+        2cu*cv*raw[(0,1)]+cv*cv*raw[(1,0)]-cu*cv*cv*A
+    m[(0,3)]=raw[(0,3)]-3cv*raw[(0,2)]+3cv*cv*raw[(0,1)]-cv^3*A
+    return m
+end
+
 # Plane-face area, 3-D centroid and second-moment tensor T_F = ∬_F r⊗r
 # dA — the tensor via the signed fan triangulation from the face's own
 # shoelace centroid (exact for any line-bounded polygon, holes included;
@@ -225,7 +346,7 @@ end
 # faces fall back to (area, centroid, nothing).
 function _model_occ_plane_stats(kernel,id;want_tensor=false,
                                 caller="OCC.get_center_of_mass",
-                                face_rec=nothing)
+                                face_rec=nothing,centered=false)
     shape=kernel.shapes[id]
     rec=face_rec===nothing ? shape.geometry.geometry : face_rec
     A=0.0
@@ -251,13 +372,34 @@ function _model_occ_plane_stats(kernel,id;want_tensor=false,
     end
     c3=_model_occ_plane_eval(rec,cu,cv)
     want_tensor || return A,c3,nothing
+    # Conic and spline traces cannot use the straight-chord fan; integrate
+    # the actual boundary 1-forms instead (this also covers disk faces).
+    curved=_model_occ_plane_curved(kernel,shape,rec)
+    if curved
+        wires=[wire.uses for wire in raw_per_wire]
+        _,raw=_model_occ_plane_boundary_moments(kernel,rec,wires)
+        raw[(0,0)]>_OCC_CONFUSION || throw(ErrorException(
+            "OCC.get_mass: plane face has zero area"))
+        cu_b=raw[(1,0)]/raw[(0,0)];cv_b=raw[(0,1)]/raw[(0,0)]
+        if centered
+            mc=_model_occ_centered_plane_moments(raw,cu_b,cv_b)
+            T=_model_occ_plane_tensor((0.0,0.0,0.0),rec.X,rec.Y,mc)
+        else
+            T=_model_occ_plane_tensor(_model_occ_plane_eval(rec,cu_b,cv_b),
+                rec.X,rec.Y,raw)
+        end
+        return A,c3,T
+    end
     T=zeros(3,3)
     # Pass 2: per-wire signed fan from (cu,cv); each wire's contribution
-    # is its raw (winding-signed) tensor scaled by sign(raw area).
+    # is its raw (winding-signed) tensor scaled by sign(raw area). `centered`
+    # evaluates ∬(r-c3)⊗(r-c3)dA directly, avoiding cancellation for faces far
+    # from the origin.
+    origin=centered ? c3 : (0.0,0.0,0.0)
     for (index,wire) in enumerate(raw_per_wire)
         sgn=wire.raw[1]>=0 ? 1.0 : -1.0
         w=(index==1 ? 1.0 : -1.0)*sgn
-        c2=(cu,cv); a3=c3
+        c2=(cu,cv); a3=_occ3_sub(c3,origin)
         for (eid,rev) in wire.uses
             etag=kernel.shape_tags[eid][2]
             eg=kernel.shapes[eid].geometry.geometry
@@ -272,8 +414,8 @@ function _model_occ_plane_stats(kernel,id;want_tensor=false,
             p1=_occ_pcurve_d0(pc,t0); p2=_occ_pcurve_d0(pc,t1)
             d1=_occ2_sub(p1,c2); d2=_occ2_sub(p2,c2)
             A2=_occ2_cross(d1,d2)/2
-            b3=_model_occ_plane_eval(rec,p1[1],p1[2])
-            e3=_model_occ_plane_eval(rec,p2[1],p2[2])
+            b3=_occ3_sub(_model_occ_plane_eval(rec,p1[1],p1[2]),origin)
+            e3=_occ3_sub(_model_occ_plane_eval(rec,p2[1],p2[2]),origin)
             mab=_occ3_scale(_occ3_add(a3,b3),0.5)
             mbc=_occ3_scale(_occ3_add(b3,e3),0.5)
             mca=_occ3_scale(_occ3_add(e3,a3),0.5)
@@ -300,6 +442,22 @@ end
 # Each wire's signed integral is normalized by its raw shoelace sign so
 # the outer wire counts positive and holes negative, matching the
 # plane-face convention.
+function _model_occ_pcurve_measure_panels(pc,t0,t1)
+    panels=max(1,ceil(Int,abs(t1-t0)/(π/2)))
+    cuts=Float64[t0+(t1-t0)*i/panels for i in 0:panels]
+    inner,neg=_brep_pc_unneg(pc)
+    if hasproperty(inner,:spl2d)
+        lo,hi=minmax(t0,t1)
+        for knot in inner.spl2d[1]
+            t=neg ? -knot : knot
+            lo<t<hi && push!(cuts,t)
+        end
+    end
+    sort!(unique!(cuts))
+    t1<t0 && reverse!(cuts)
+    return cuts
+end
+
 function _model_occ_cyl_face_div(kernel,fid;want_vmoment=false)
     shape=kernel.shapes[fid]; rec=shape.geometry.geometry
     I1=Ic=Is=Iv=0.0
@@ -311,7 +469,8 @@ function _model_occ_cyl_face_div(kernel,fid;want_vmoment=false)
         for (eid,rev) in uses
             etag=kernel.shape_tags[eid][2]
             eg=kernel.shapes[eid].geometry.geometry
-            pc=rec.pcurves[etag].fwd
+            entry=rec.pcurves[etag]
+            pc=rev && entry.rev!==nothing ? entry.rev : entry.fwd
             t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
             # u is periodic: a stored pcurve picks an arbitrary
             # representative mod 2π — unwrap the wire so each edge
@@ -321,10 +480,11 @@ function _model_occ_cyl_face_div(kernel,fid;want_vmoment=false)
             shift=u_prev===nothing ? 0.0 :
                 _OCC_TWO_PI*round((u_prev-us)/_OCC_TWO_PI)
             uv_first===nothing && (uv_first=(us+shift,vs0))
-            panels=max(1,ceil(Int,abs(t1-t0)/(π/2)))
-            span=(t1-t0)/panels
-            for k in 0:panels-1
-                a=t0+k*span; h=span/2; mid=a+h
+            # A fitted spline is smooth within each knot span; a single
+            # angular panel can cross many derivative discontinuities.
+            cuts=_model_occ_pcurve_measure_panels(pc,t0,t1)
+            for k in 1:length(cuts)-1
+                a=cuts[k];h=(cuts[k+1]-a)/2;mid=a+h
                 for i in 1:4, s in (-1,1)
                     t=mid+s*h*_OCC_GL_T[i]; w=_OCC_GL_W[i]*h
                     (u,v),(du,dv)=_occ_pcurve_d1(pc,t)
@@ -356,6 +516,150 @@ function _model_occ_cyl_face_div(kernel,fid;want_vmoment=false)
         I1+=w*j1; Ic+=w*jc; Is+=w*js; want_vmoment && (Iv+=w*jv)
     end
     return I1,Ic,Is,Iv
+end
+
+# Complete Green's-theorem domain integrals for a trimmed cylinder patch,
+# used by the solid first/second boundary moments. Each integrand reduces to
+# ∮Pdu+Qdv over the stored pcurves; the artificial seam-closing chord is
+# integrated numerically with many GL4 panels (smooth polynomial-trig
+# integrands) while each real pcurve edge keeps the same knot-panel resolve
+# as `_model_occ_cyl_face_div`.
+const _OCC_CYL_INTEGRALS=(:I1,:Ic,:Is,:Icc,:Ics,:Iss,:Iccc,:Iccs,:Icss,
+    :Isss,:Iv,:Ivc,:Ivs,:Iv2,:Ivc2,:Ivcs,:Ivs2,:Ivvc,:Ivvs)
+
+function _occ_cyl_chord_integrals!(acc::AbstractDict,a,b)
+    du=b[1]-a[1];dv=b[2]-a[2]
+    (du==0.0 && dv==0.0) && return nothing
+    panels=256
+    for panel in 0:panels-1
+        mid=(panel+0.5)/panels;h=0.5/panels
+        for i in 1:4,s in (-1,1)
+            t=mid+s*h*_OCC_GL_T[i];w=_OCC_GL_W[i]*h
+            u=a[1]+t*du;v=a[2]+t*dv
+            su,cu=_gm_sincos(u)
+            v2=v*v
+            acc[:I1]+=w*u*dv
+            acc[:Ic]+=w*su*dv
+            acc[:Is]+=w*(-cu)*dv
+            acc[:Icc]+=w*((u+su*cu)/2)*dv
+            acc[:Ics]+=w*(-cu*cu/2)*dv
+            acc[:Iss]+=w*((u-su*cu)/2)*dv
+            acc[:Iccc]+=w*(su-su^3/3)*dv
+            acc[:Iccs]+=w*(-cu^3/3)*dv
+            acc[:Icss]+=w*(su^3/3)*dv
+            acc[:Isss]+=w*(-cu+cu^3/3)*dv
+            acc[:Iv]+=w*(-v2/2)*du
+            acc[:Ivc]+=w*(-v2/2*cu)*du
+            acc[:Ivs]+=w*(-v2/2*su)*du
+            acc[:Iv2]+=w*(u*v2)*dv
+            acc[:Ivc2]+=w*(-v2/2*cu*cu)*du
+            acc[:Ivcs]+=w*(-v2/2*cu*su)*du
+            acc[:Ivs2]+=w*(-v2/2*su*su)*du
+            acc[:Ivvc]+=w*(v2*su)*dv
+            acc[:Ivvs]+=w*(-v2*cu)*dv
+        end
+    end
+    return nothing
+end
+
+function _model_occ_cyl_face_integrals(kernel,fid)
+    shape=kernel.shapes[fid]; rec=shape.geometry.geometry
+    totals=Dict(name=>0.0 for name in _OCC_CYL_INTEGRALS)
+    for (wi,wire_id) in enumerate(shape.children)
+        uses=kernel.shapes[wire_id].geometry.uses
+        raw=_model_occ_wire_shoelace(kernel,rec,uses)[1]
+        local_acc=Dict(name=>0.0 for name in _OCC_CYL_INTEGRALS)
+        u_prev=nothing;uv_first=nothing;uv_last=nothing
+        for (eid,rev) in uses
+            etag=kernel.shape_tags[eid][2]
+            eg=kernel.shapes[eid].geometry.geometry
+            entry=rec.pcurves[etag]
+            pc=rev && entry.rev!==nothing ? entry.rev : entry.fwd
+            t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
+            us,vs0=_occ_pcurve_d0(pc,t0)
+            shift=u_prev===nothing ? 0.0 :
+                _OCC_TWO_PI*round((u_prev-us)/_OCC_TWO_PI)
+            uv_first===nothing && (uv_first=(us+shift,vs0))
+            cuts=_model_occ_pcurve_measure_panels(pc,t0,t1)
+            for k in 1:length(cuts)-1
+                a=cuts[k];h=(cuts[k+1]-a)/2;mid=a+h
+                for i in 1:4, s in (-1,1)
+                    t=mid+s*h*_OCC_GL_T[i];w=_OCC_GL_W[i]*h
+                    (u,v),(du,dv)=_occ_pcurve_d1(pc,t)
+                    u+=shift
+                    su,cu=_gm_sincos(u)
+                    v2=v*v
+                    local_acc[:I1]+=w*u*dv
+                    local_acc[:Ic]+=w*su*dv
+                    local_acc[:Is]+=w*(-cu)*dv
+                    local_acc[:Icc]+=w*((u+su*cu)/2)*dv
+                    local_acc[:Ics]+=w*(-cu*cu/2)*dv
+                    local_acc[:Iss]+=w*((u-su*cu)/2)*dv
+                    local_acc[:Iccc]+=w*(su-su^3/3)*dv
+                    local_acc[:Iccs]+=w*(-cu^3/3)*dv
+                    local_acc[:Icss]+=w*(su^3/3)*dv
+                    local_acc[:Isss]+=w*(-cu+cu^3/3)*dv
+                    local_acc[:Iv]+=w*(-v2/2)*du
+                    local_acc[:Ivc]+=w*(-v2/2*cu)*du
+                    local_acc[:Ivs]+=w*(-v2/2*su)*du
+                    local_acc[:Iv2]+=w*(u*v2)*dv
+                    local_acc[:Ivc2]+=w*(-v2/2*cu*cu)*du
+                    local_acc[:Ivcs]+=w*(-v2/2*cu*su)*du
+                    local_acc[:Ivs2]+=w*(-v2/2*su*su)*du
+                    local_acc[:Ivvc]+=w*(v2*su)*dv
+                    local_acc[:Ivvs]+=w*(-v2*cu)*dv
+                end
+            end
+            ue,ve=_occ_pcurve_d0(pc,t1)
+            uv_last=(ue+shift,ve)
+            u_prev=ue+shift
+        end
+        if uv_first!==nothing &&
+                (uv_first[1]!=uv_last[1] || uv_first[2]!=uv_last[2])
+            _occ_cyl_chord_integrals!(local_acc,uv_last,uv_first)
+        end
+        w=(wi==1 ? 1.0 : -1.0)*(raw>=0 ? 1.0 : -1.0)
+        for (index,name) in enumerate(_OCC_CYL_INTEGRALS)
+            totals[name]+=w*local_acc[name]
+        end
+    end
+    return NamedTuple{_OCC_CYL_INTEGRALS}(Tuple(totals[name] for name in _OCC_CYL_INTEGRALS))
+end
+
+# ∬ p (p·u_r+R) dudv, ∬ (p-offset)⊗(p-offset)((p-offset)·u_r+R) dudv and
+# J0=∬(p·u_r+R)dudv for one cylinder patch. The caller multiplies by the
+# frame handedness, shell orientation and radius.
+function _model_occ_cyl_face_moment_terms(kernel,fid,offset)
+    J=_model_occ_cyl_face_integrals(kernel,fid)
+    rec=kernel.shapes[fid].geometry.geometry
+    R=rec.radius;X=rec.X;Y=rec.Y;Z=rec.axis
+    C=_occ3_sub(rec.center,offset)
+    Cx=_dot3(C,X);Cy=_dot3(C,Y)
+    J0=Cx*J.Ic+Cy*J.Is+R*J.I1
+    Wx=Cx*J.Icc+Cy*J.Ics+R*J.Ic
+    Wy=Cx*J.Ics+Cy*J.Iss+R*J.Is
+    W=_occ3_add(_occ3_scale(X,Wx),_occ3_scale(Y,Wy))
+    K=Cx*J.Ivc+Cy*J.Ivs+R*J.Iv
+    M=_occ3_add(_occ3_scale(C,J0),
+        _occ3_add(_occ3_scale(W,R),_occ3_scale(Z,K)))
+    Axx=Cx*J.Iccc+Cy*J.Iccs+R*J.Icc
+    Axy=Cx*J.Iccs+Cy*J.Icss+R*J.Ics
+    Ayy=Cx*J.Icss+Cy*J.Isss+R*J.Iss
+    Lx=Cx*J.Ivc2+Cy*J.Ivcs+R*J.Ivc
+    Ly=Cx*J.Ivcs+Cy*J.Ivs2+R*J.Ivs
+    L=_occ3_add(_occ3_scale(X,Lx),_occ3_scale(Y,Ly))
+    K2=Cx*J.Ivvc+Cy*J.Ivvs+R*J.Iv2
+    Q=zeros(3,3)
+    for i in 1:3,j in 1:3
+        Q[i,j]+=C[i]*C[j]*J0
+        Q[i,j]+=R*(C[i]*W[j]+W[i]*C[j])
+        Q[i,j]+=R*R*(X[i]*X[j]*Axx+
+            (X[i]*Y[j]+Y[i]*X[j])*Axy+Y[i]*Y[j]*Ayy)
+        Q[i,j]+=K*(Z[i]*C[j]+C[i]*Z[j])
+        Q[i,j]+=R*(Z[i]*L[j]+L[i]*Z[j])
+        Q[i,j]+=K2*Z[i]*Z[j]
+    end
+    return J0,M,Q
 end
 
 # ---- trimmed faces ----------------------------------------------------
@@ -576,6 +880,11 @@ end
 
 function _model_occ_face_measure(kernel,id)
     shape=kernel.shapes[id]; rec=shape.geometry.geometry
+    if hasproperty(rec,:natural_bounds)
+        integrals=_occ_natural_surface_integrals(rec)
+        integrals.area>0 || throw(ArgumentError("OCC.get_mass: natural face has zero area"))
+        return integrals.area,_occ3_scale(integrals.first,1/integrals.area)
+    end
     occ=get(rec,:occ,nothing)
     # A tensor face reclassified from a genuine plane (bitwise-coplanarity
     # admission for the parametric mesher) carries its exact plane record —
@@ -802,19 +1111,21 @@ function _occ_sector_stats_sph(rec,U0,Uv,UE)
     return V,M,Q
 end
 
-# Sector solid (V, centroid, Q) — centroid measured in world coords.
+# Sector solid (V, centroid, Qc) — centroid measured in world coords and
+# Qc the centroidal second-moment tensor ∭(p-c̄)⊗(p-c̄)dV.
 function _occ_sector_stats(rec)
     U0,Uv,UE=_occ_sector_u(rec.angle,rec.X,rec.Y)
     V,M,Q=rec.occ===:sphere ? _occ_sector_stats_sph(rec,U0,Uv,UE) :
         _occ_sector_stats_axis(rec,U0,Uv,UE)
     c=rec.center
-    # Shift p→c+p: M→M+V·c, Q→Q+c⊗M+M⊗cᵀ+V·c⊗cᵀ.
-    M=(M[1]+V*c[1],M[2]+V*c[2],M[3]+V*c[3])
-    for i in 1:3,j in 1:3
-        Q[i,j]+=c[i]*M[j]+M[i]*c[j]-V*c[i]*c[j]
-    end
     abs(V)>_OCC_CONFUSION || return V,(0.0,0.0,0.0),Q
-    return V,_occ3_scale(M,1.0/V),Q
+    local_centroid=_occ3_scale(M,1.0/V)
+    # Q is about the local frame origin at the geometry center c; shift the
+    # centroidal tensor only by the (bounded) local centroid offset.
+    for i in 1:3,j in 1:3
+        Q[i,j]-=V*local_centroid[i]*local_centroid[j]
+    end
+    return V,_occ3_add(c,local_centroid),Q
 end
 
 # Divergence integral ∬_F p·(p_u×p_v) over a trimmed torus face — the
@@ -1077,6 +1388,12 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
     for (fid,rev) in uses
         rec=kernel.shapes[fid].geometry.geometry
         σ=rev ? -1.0 : 1.0
+        if hasproperty(rec,:natural_bounds)
+            integrals=_occ_natural_surface_integrals(rec)
+            V+=σ*integrals.volume
+            want_centroid && (M=_occ3_add(M,_occ3_scale(integrals.div_first,σ)))
+            continue
+        end
         if haskey(rec,:plane_rec)
             # Reclassified-from-plane tensor cap: the exact plane record
             # keeps shoelace precision on conic wires.
@@ -1121,14 +1438,17 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
             continue
         end
         if get(rec,:occ,nothing)===:cylinder
-            want_centroid && throw(ErrorException(
-                "OCC.get_center_of_mass: cylinder-bounded solids are " *
-                "not supported"))
             I1,Ic,Is,=_model_occ_cyl_face_div(kernel,fid)
             h=_dot3(_occ_cross(rec.X,_occ_frame_y(rec)),rec.axis)>=0 ?
                 1.0 : -1.0
             Cx=_dot3(rec.center,rec.X); Cy=_dot3(rec.center,rec.Y)
-            V+=σ*h*rec.radius*(Cx*Ic+Cy*Is+rec.radius*I1)/3
+            J0=Cx*Ic+Cy*Is+rec.radius*I1
+            V+=σ*h*rec.radius*J0/3
+            if want_centroid
+                _,Mf,_=_model_occ_cyl_face_moment_terms(kernel,fid,
+                    (0.0,0.0,0.0))
+                M=_occ3_add(M,_occ3_scale(Mf,σ*h*rec.radius))
+            end
             continue
         end
         n=(σ*rec.axis[1],σ*rec.axis[2],σ*rec.axis[3])
@@ -1192,8 +1512,9 @@ _model_occ_get_center_of_mass(m,dim,tag)=last(
 function _model_occ_curve_moment2(kernel,id)
     rec=kernel.shapes[id].geometry.geometry
     m=zeros(3,3)
+    _,centroid=_model_occ_curve_measure(kernel,id)
     if rec.occ===:line
-        o,d=rec.origin,rec.dir
+        o=_occ3_sub(rec.origin,centroid);d=rec.dir
         md=_occ_modulus(d)
         lo,hi=minmax(rec.t0,rec.t1)
         a=md*(hi-lo); b=md*(hi*hi-lo*lo)/2; c=md*(hi*hi*hi-lo*lo*lo)/3
@@ -1207,7 +1528,8 @@ function _model_occ_curve_moment2(kernel,id)
         Su=s1-s0; Cv=c0-c1
         C2=(Δ+s1*c1-s0*c0)/2; S2=(Δ-s1*c1+s0*c0)/2
         CS=(s1*s1-s0*s0)/2
-        C,X,Y,r=rec.center,rec.X,rec.Y,rec.r
+        C=_occ3_sub(rec.center,centroid)
+        X,Y,r=rec.X,rec.Y,rec.r
         for i in 1:3,j in 1:3
             m[i,j]=r*(C[i]*C[j]*Δ +
                 r*(C[i]*(X[j]*Su+Y[j]*Cv)+(X[i]*Su+Y[i]*Cv)*C[j]) +
@@ -1241,8 +1563,9 @@ function _model_occ_curve_moment2(kernel,id)
                 t=mid+sgn*h*_OCC_GL_T[i]; w=_OCC_GL_W[i]*h
                 pt,d=evaluator(t)
                 dw=w*_occ_modulus(d)
+                centered=_occ3_sub(pt,centroid)
                 for i2 in 1:3,j2 in 1:3
-                    m[i2,j2]+=dw*pt[i2]*pt[j2]
+                    m[i2,j2]+=dw*centered[i2]*centered[j2]
                 end
             end
         end
@@ -1255,7 +1578,7 @@ end
 # Same signed fan as `_model_occ_plane_stats`, evaluated with the
 # degree-3 Stroud rule (exact for cubics, hence also for the fan's
 # per-triangle integrand).
-function _model_occ_plane_moment3(kernel,id)
+function _model_occ_plane_moment3(kernel,id;center=(0.0,0.0,0.0))
     shape=kernel.shapes[id]; rec=shape.geometry.geometry
     raw_per_wire=NamedTuple[]
     for wire_id in shape.children
@@ -1276,7 +1599,17 @@ function _model_occ_plane_moment3(kernel,id)
         w=(index==1 ? area : -area)/A
         cu+=w*wire.raw[2]/area; cv+=w*wire.raw[3]/area
     end
-    c2=(cu,cv); a3=_model_occ_plane_eval(rec,cu,cv)
+    c2=(cu,cv); a3=_occ3_sub(_model_occ_plane_eval(rec,cu,cv),center)
+    if _model_occ_plane_curved(kernel,shape,rec)
+        wires=[kernel.shapes[w].geometry.uses for w in shape.children]
+        _,raw=_model_occ_plane_boundary_moments(kernel,rec,wires)
+        raw[(0,0)]>_OCC_CONFUSION || throw(ErrorException(
+            "OCC.get_matrix_of_inertia: plane face has zero area"))
+        cu_b=raw[(1,0)]/raw[(0,0)];cv_b=raw[(0,1)]/raw[(0,0)]
+        mc=_model_occ_centered_plane_moments(raw,cu_b,cv_b)
+        base=_occ3_sub(_model_occ_plane_eval(rec,cu_b,cv_b),center)
+        return _model_occ_plane_cubic(base,rec.X,rec.Y,mc)
+    end
     U=zeros(3,3,3)
     for (index,wire) in enumerate(raw_per_wire)
         sgn=wire.raw[1]>=0 ? 1.0 : -1.0
@@ -1294,8 +1627,8 @@ function _model_occ_plane_moment3(kernel,id)
                 "boundaries are not supported"))
             p1=_occ_pcurve_d0(pc,t0); p2=_occ_pcurve_d0(pc,t1)
             A2=_occ2_cross(_occ2_sub(p1,c2),_occ2_sub(p2,c2))/2
-            b3=_model_occ_plane_eval(rec,p1[1],p1[2])
-            e3=_model_occ_plane_eval(rec,p2[1],p2[2])
+            b3=_occ3_sub(_model_occ_plane_eval(rec,p1[1],p1[2]),center)
+            e3=_occ3_sub(_model_occ_plane_eval(rec,p2[1],p2[2]),center)
             ctr=_occ3_scale(_occ3_add(a3,_occ3_add(b3,e3)),1/3)
             f=w*A2
             for i in 1:3,j in 1:3,k in 1:3
@@ -1317,8 +1650,12 @@ end
 # the tensor integrand (the same 4×-split three-point rule). Used for any
 # face whose wire bounds a sub-domain of its base — the canonical-domain
 # quadric arms below would otherwise integrate the carrier's whole chart.
-function _model_occ_trimmed_face_moment2(kernel,id)
+function _model_occ_trimmed_face_moment2(kernel,id;centroid=nothing)
     shape=kernel.shapes[id]; rec=shape.geometry.geometry
+    if centroid===nothing
+        area,measured_centroid=_model_occ_trimmed_face_measure(kernel,id)
+        centroid=measured_centroid
+    end
     xs,ys,T,interior=_model_occ_trimmed_face_cdt(kernel,id,shape,rec)
     nodes=((1/6,1/6),(2/3,1/6),(1/6,2/3))
     m=zeros(3,3)
@@ -1337,8 +1674,9 @@ function _model_occ_trimmed_face_moment2(kernel,id)
                 v=q1[2]+s*(q2[2]-q1[2])+tt*(q3[2]-q1[2])
                 p,du,dv=_occ_surface_d1(rec,u,v)
                 w=jac/2/3*_occ_modulus(_occ_cross(du,dv))
+                d=_occ3_sub(p,centroid)
                 for i in 1:3,j in 1:3
-                    m[i,j]+=w*p[i]*p[j]
+                    m[i,j]+=w*d[i]*d[j]
                 end
             end
         end
@@ -1348,25 +1686,29 @@ end
 
 function _model_occ_face_moment2(kernel,id)
     shape=kernel.shapes[id]; rec=shape.geometry.geometry
+    hasproperty(rec,:natural_bounds) &&
+        return _occ_natural_surface_integrals(rec;centered=true).centered_second
     occ=get(rec,:occ,nothing)
+    if occ===:plane
+        _,_,T=_model_occ_plane_stats(kernel,id;want_tensor=true,
+            caller="OCC.get_matrix_of_inertia",centered=true)
+        return T
+    end
+    # Public Gmsh reports the inertia about the entity's centroid; every
+    # remaining arm integrates (r-c)⊗(r-c) directly.
+    _,centroid=_model_occ_face_measure(kernel,id)
     m=zeros(3,3)
     # A wire that bounds only a sub-domain of the base chart — STEP trims
     # and Boolean kept pieces — cannot use the canonical-domain arms
     # below: integrate the CDT of the sampled uv boundary instead. The
     # sector-window check keeps genuine canonical torus sectors on the
-    # exact arm, and trimmed planes keep `_model_occ_plane_stats`'s exact
-    # wire tensor.
-    if occ!==:plane &&
-        ((get(rec,:trimmed,false) && haskey(rec,:pcurves)) ||
+    # exact arm.
+    if (get(rec,:trimmed,false) && haskey(rec,:pcurves)) ||
          (occ===:torus && haskey(rec,:pcurves) &&
-          _occ_torus_sector_window(kernel,id,rec)===nothing))
-        return _model_occ_trimmed_face_moment2(kernel,id)
+          _occ_torus_sector_window(kernel,id,rec)===nothing)
+        return _model_occ_trimmed_face_moment2(kernel,id;centroid)
     end
-    if occ===:plane
-        _,_,T=_model_occ_plane_stats(kernel,id;want_tensor=true,
-            caller="OCC.get_matrix_of_inertia")
-        return T
-    elseif haskey(rec,:patch)
+    if haskey(rec,:patch)
         surface=rec.patch.surface
         (u0,v0),(u1,v1)=_model_nurbs_surface_bounds(rec)
         uspans=_model_occ_span_cuts(surface.knots_u,u0,u1)
@@ -1378,8 +1720,9 @@ function _model_occ_face_moment2(kernel,id)
                 w=_OCC_GL_W[i]*_OCC_GL_W[j]*hu*hv
                 p,du,dv,_,_,_=_model_nurbs_surface_d2(rec,u,v)
                 dA=_occ_modulus(_occ_cross(du,dv))
+                d=_occ3_sub(p,centroid)
                 for i2 in 1:3,j2 in 1:3
-                    m[i2,j2]+=w*dA*p[i2]*p[j2]
+                    m[i2,j2]+=w*dA*d[i2]*d[j2]
                 end
             end
         end
@@ -1410,8 +1753,9 @@ function _model_occ_face_moment2(kernel,id)
             w=_OCC_GL_W[i]*_OCC_GL_W[j]*hu*hv
             p,du,dv=_occ_surface_d1(rec,u,v)
             dA=_occ_modulus(_occ_cross(du,dv))
+            d=_occ3_sub(p,centroid)
             for i2 in 1:3,j2 in 1:3
-                m[i2,j2]+=w*dA*p[i2]*p[j2]
+                m[i2,j2]+=w*dA*d[i2]*d[j2]
             end
         end
     end
@@ -1430,18 +1774,16 @@ function _model_occ_solid_moment2(kernel,id)
         if g.primitive.occ===:cylinder
             n=_occ_dir(r.axis)
             V=π*r.radius*r.radius*r.height
-            cb=_occ3_add(r.center,_occ3_scale(n,r.height/2))
             qp=V*r.radius*r.radius/4; qa=V*r.height*r.height/12
             for i in 1:3,j in 1:3
-                m[i,j]=qp*(Float64(i==j)-n[i]*n[j])+qa*n[i]*n[j]+
-                    V*cb[i]*cb[j]
+                m[i,j]=qp*(Float64(i==j)-n[i]*n[j])+qa*n[i]*n[j]
             end
             return m
         elseif g.primitive.occ===:sphere
-            V=4π/3*r.radius^3; c=r.center
+            V=4π/3*r.radius^3
             q=V*r.radius*r.radius/5
             for i in 1:3,j in 1:3
-                m[i,j]=q*Float64(i==j)+V*c[i]*c[j]
+                m[i,j]=q*Float64(i==j)
             end
             return m
         elseif g.primitive.occ===:cone
@@ -1449,13 +1791,11 @@ function _model_occ_solid_moment2(kernel,id)
             q2=r.r1*r.r1+r.r1*r.r2+r.r2*r.r2
             V=π*r.height*q2/3
             zb=r.height*(r.r1*r.r1+2*r.r1*r.r2+3*r.r2*r.r2)/(4q2)
-            cb=_occ3_add(r.center,_occ3_scale(n,zb))
             S4=r.r1^4+r.r1^3*r.r2+r.r1^2*r.r2^2+r.r1*r.r2^3+r.r2^4
             qp=π*r.height*S4/20
             qa=π*r.height^3*(r.r1^2+3*r.r1*r.r2+6*r.r2^2)/30-V*zb*zb
             for i in 1:3,j in 1:3
-                m[i,j]=qp*(Float64(i==j)-n[i]*n[j])+qa*n[i]*n[j]+
-                    V*cb[i]*cb[j]
+                m[i,j]=qp*(Float64(i==j)-n[i]*n[j])+qa*n[i]*n[j]
             end
             return m
         end
@@ -1470,15 +1810,37 @@ function _model_occ_solid_moment2(kernel,id)
     end
     isempty(uses) && return m
     face_kind=u->get(kernel.shapes[u[1]].geometry.geometry,:occ,nothing)
-    all(u->face_kind(u)===:plane,uses) || throw(ErrorException(
+    face_ok=u->begin
+        rec=kernel.shapes[u[1]].geometry.geometry
+        face_kind(u) in (:plane,:cylinder) || hasproperty(rec,:natural_bounds)
+    end
+    all(face_ok,uses) || throw(ErrorException(
         "OCC.get_matrix_of_inertia: unsupported solid boundary"))
+    V,centroid=_model_occ_solid_measure(kernel,id)
+    abs(V)>_OCC_CONFUSION || return m
     for (fid,rev) in uses
         rec=kernel.shapes[fid].geometry.geometry
         σ=rev ? -1.0 : 1.0
-        n=(σ*rec.axis[1],σ*rec.axis[2],σ*rec.axis[3])
-        U=_model_occ_plane_moment3(kernel,fid)
-        for i in 1:3,j in 1:3,k in 1:3
-            m[i,j]+=n[k]*U[i,j,k]/5
+        if hasproperty(rec,:natural_bounds)
+            integrals=_occ_natural_surface_integrals(rec;centered=true,
+                center=centroid)
+            for i in 1:3,j in 1:3
+                m[i,j]+=σ*integrals.centered_div_second[i,j]
+            end
+        elseif rec.occ===:plane
+            n=(σ*rec.axis[1],σ*rec.axis[2],σ*rec.axis[3])
+            U=_model_occ_plane_moment3(kernel,fid;center=centroid)
+            for i in 1:3,j in 1:3,k in 1:3
+                m[i,j]+=n[k]*U[i,j,k]/5
+            end
+        else
+            h=_dot3(_occ_cross(rec.X,_occ_frame_y(rec)),rec.axis)>=0 ?
+                1.0 : -1.0
+            _,_,Q=_model_occ_cyl_face_moment_terms(kernel,fid,centroid)
+            scale=σ*h*rec.radius/5
+            for i in 1:3,j in 1:3
+                m[i,j]+=scale*Q[i,j]
+            end
         end
     end
     return m

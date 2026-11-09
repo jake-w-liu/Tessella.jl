@@ -872,8 +872,11 @@ function _model_occ_import_brep_source(m::GeoModel,source::String;
                 pcurves[tag]=(fwd=first_pc,rev=second_pc)
                 ranges[tag]=(eg.t0,eg.t1)
             end
-            isempty(pcurves) && throw(ArgumentError("$caller: native BREP face has no boundary curves"))
-            uvb=_model_occ_prim_uvb(pcurves,ranges)
+            natural=isempty(wire_ids)
+            isempty(pcurves) && !natural && throw(ArgumentError(
+                "$caller: native BREP face has no boundary curves"))
+            uvb=natural ? _occ_brep_natural_bounds(surface,caller) :
+                _model_occ_prim_uvb(pcurves,ranges)
             base,scale,shift=_occ_brep_surface_geometry(surface,uvb,caller)
             base=merge(base,(pcurves=pcurves,))
             geometry=_transform_occ_surface_record(base,
@@ -908,7 +911,16 @@ function _model_occ_import_brep_source(m::GeoModel,source::String;
                 end
             end
             geometry=merge(geometry,(pcurves=actual_pc,reversed=reversed,))
-            bounds=_model_occ_prim_uvb(actual_pc,ranges)
+            if natural
+                transform_uv=p->(p[1]*scale[1]+shift[1],
+                    vscale*(p[2]*scale[2]+shift[2]))
+                geometry=merge(geometry,(natural_bounds=(
+                    transform_uv(uvb[1]),transform_uv(uvb[2])),))
+                geometry=merge(geometry,(natural_collapsed=
+                    _occ_natural_collapsed_sides(geometry),))
+            end
+            bounds=natural ? geometry.natural_bounds :
+                _model_occ_prim_uvb(actual_pc,ranges)
             canonical=_occ_surface_bounds(geometry)
             uperiod=_brep_uperiod(geometry)
             vperiod=_occ_surface_isvperiodic(geometry) ? _OCC_TWO_PI : 0.0
@@ -919,7 +931,7 @@ function _model_occ_import_brep_source(m::GeoModel,source::String;
             trimmed=length(wire_ids)>1 || !(full_u && full_v)
             geometry=merge(geometry,(trimmed=trimmed,))
             geometry.occ==:plane && (geometry=merge(geometry,
-                (uvb=_model_occ_prim_uvb(actual_pc,ranges),)))
+                (uvb=bounds,)))
             vuv=Dict{Int,NTuple{2,Float64}}()
             for wid in wire_ids,(eid,rev) in kernel.shapes[wid].geometry.uses
                 eg=kernel.shapes[eid].geometry.geometry
@@ -1067,3 +1079,4 @@ function _occ_brep_retag_entities!(kernel,targets,imported;caller="XAO import")
 end
 
 include("ModelOCCBREPTrace.jl")
+include("ModelOCCBREPNatural.jl")

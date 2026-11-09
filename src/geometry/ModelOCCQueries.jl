@@ -92,6 +92,7 @@ function _model_occ_shape_bbox(kernel,id)
         return _model_occ_controls_box(rec.curve.curve.controls)
     elseif d==2
         rec=g.geometry
+        hasproperty(rec,:natural_bounds) && return _occ_natural_surface_bbox(rec)
         rec.occ===:sphere && (haskey(rec,:lat1) || haskey(rec,:lat2) ||
             haskey(rec,:angle)) && return _occ_sphere_face_bbox(kernel,shape,rec)
         rec.occ===:sphere && return (

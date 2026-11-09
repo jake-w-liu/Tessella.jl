@@ -1,6 +1,6 @@
-# `model.occ.add_wedge` — `BRepPrimAPI_MakeWedge`: the xz trapezoid
-# (0,0)→(dx,0)→(ltx,dz)→(0,dz) in the `gp_Ax2(p,zAxis)` frame extruded
-# `dy` along +y. `ltx==0` collapses the top edge into the ridge vertex
+# `model.occ.add_wedge` — `BRepPrimAPI_MakeWedge`: the xy trapezoid
+# (0,0)→(dx,0)→(ltx,dy)→(0,dy) in the `gp_Ax2(p,zAxis)` frame extruded
+# `dz` along +z. `ltx==0` collapses the top edge into the ridge vertex
 # (triangular profile, 5 faces); `ltx==dx` reproduces the box layout.
 # Signed extents wind outward consistently (verified through the
 # divergence-path `get_mass`), zero extents reject "Degenerate wedge",
@@ -29,7 +29,7 @@ end
 
 @testset "occ.add_wedge" begin
     occ=_occ_setup()
-    # Standard ramp: triangular profile (0,0),(2,0),(0,4) extruded 3.
+    # Standard ramp: triangular profile (0,0),(2,0),(0,3) extruded 4.
     v=occ.add_wedge(0.0,0.0,0.0,2.0,3.0,4.0)
     @test v==1
     occ.synchronize()
@@ -45,16 +45,16 @@ end
     wire_sizes=sort!([length(m.loops[only(m.surfaces[t])])
                       for t in keys(m.surfaces)])
     @test wire_sizes==[3,3,4,4,4]
-    # Volume = dz·dy·(dx+ltx)/2 = 4·3·2/2 = 12; prism centroid at the
-    # profile triangle centroid plus dy/2.
+    # Volume = dx·dy·dz/2 = 2·3·4/2 = 12; prism centroid at the profile
+    # triangle centroid plus dz/2.
     @test occ.get_mass(3,v)≈12.0
-    @test collect(occ.get_center_of_mass(3,v))≈collect((2/3,1.5,4/3))
+    @test collect(occ.get_center_of_mass(3,v))≈collect((2/3,1.0,2.0))
     xmin,ymin,zmin,xmax,ymax,zmax=A.model.get_bounding_box(3,v)
     @test collect((xmin,ymin,zmin))≈collect((0.0,0.0,0.0)) atol=1e-12
     @test collect((xmax,ymax,zmax))≈collect((2.0,3.0,4.0))
-    # Outward normals: caps ±y, bottom −z, back −x, slope (dz,0,dx)/√.
-    expected=((0.0,-1.0,0.0),(0.0,1.0,0.0),(0.0,0.0,-1.0),
-              (-1.0,0.0,0.0),(4.0,0.0,2.0)./sqrt(20.0))
+    # Outward normals: caps ±z, y=0 face −y, x=0 face −x, slope (3,2,0)/√13.
+    expected=((0.0,0.0,-1.0),(0.0,0.0,1.0),(0.0,-1.0,0.0),
+              (-1.0,0.0,0.0),(3.0,2.0,0.0)./sqrt(13.0))
     axes=[m.surface_geometry[t].axis for t in 1:5]
     @test length(axes)==5
     for e in expected
@@ -73,8 +73,8 @@ end
 
 @testset "occ.add_wedge variants" begin
     occ=_occ_setup()
-    # Truncated wedge: trapezoid (0,0),(3,0),(1,4),(0,4), area 8, V=16;
-    # polygon centroid (13/12, 5/3) in xz, dy/2 in y.
+    # Truncated wedge: trapezoid (0,0),(3,0),(1,2),(0,2), area 4, V=16;
+    # polygon centroid (13/12,5/6) in xy, dz/2 in z.
     v=occ.add_wedge(0.0,0.0,0.0,3.0,2.0,4.0;ltx=1.0)
     occ.synchronize()
     m=_current_model()
@@ -84,15 +84,15 @@ end
                  for t in keys(m.surfaces)])==[4,4,4,4,4,4]
     @test occ.get_mass(3,v)≈16.0
     @test collect(occ.get_center_of_mass(3,v))≈
-        collect((13/12,1.0,5/3))
-    # The flat top adds a +z normal to the set.
-    @test (0.0,0.0,1.0) in [m.surface_geometry[t].axis for t in keys(m.surfaces)]
+        collect((13/12,5/6,2.0))
+    # The flat trapezoid shoulder adds a +y normal to the set.
+    @test (0.0,1.0,0.0) in [m.surface_geometry[t].axis for t in keys(m.surfaces)]
     A.initialize(); occ=_occ_setup()
     # ltx==dx reproduces the box: six rectangles, V=dx·dy·dz.
     vb=occ.add_wedge(1.0,2.0,3.0,2.0,2.0,2.0;ltx=2.0)
     @test occ.get_mass(3,vb)≈8.0
     @test collect(occ.get_center_of_mass(3,vb))≈collect((2.0,3.0,4.0))
-    # ltx>dx is a valid overhanging trapezoid: area = dz·(dx+ltx)/2 = 7.
+    # ltx>dx is a valid overhanging trapezoid: area = dy·(dx+ltx)/2 = 7.
     vo=occ.add_wedge(0.0,0.0,0.0,2.0,1.0,2.0;ltx=5.0)
     @test occ.get_mass(3,vo)≈7.0
     xmin,_,_,xmax,_,_=occ.get_bounding_box(3,vo)

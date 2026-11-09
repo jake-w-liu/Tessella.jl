@@ -538,17 +538,19 @@ function _model_occ_add_wedge!(m::GeoModel,x,y,z,dx,dy,dz;
     world(lx,ly,lz)=_occ3_add(corner,_occ3_add(
         _occ3_scale(Xf,lx),_occ3_add(_occ3_scale(Yf,ly),
                                      _occ3_scale(axis_dir,lz))))
-    # BRepPrim_Wedge profile in the local xz plane, extruded along +y.
-    # ltx==0 merges the top vertices into the ridge — a triangle.
-    profile=lt==0.0 ? ((0.0,0.0),(ex,0.0),(0.0,ez)) :
-                      ((0.0,0.0),(ex,0.0),(lt,ez),(0.0,ez))
+    # Gmsh/OpenCASCADE `BRepPrimAPI_MakeWedge` profile in the local xy
+    # plane, extruded along +z. `ltx==0` collapses the top edge into the
+    # opposite vertex — a triangular prism.
+    profile=lt==0.0 ? ((0.0,0.0),(ex,0.0),(0.0,ey)) :
+                      ((0.0,0.0),(ex,0.0),(lt,ey),(0.0,ey))
     k=length(profile)
     shoelace=sum(profile[i][1]*profile[mod1(i+1,k)][2]-
                  profile[mod1(i+1,k)][1]*profile[i][2] for i in 1:k)
-    # Traversal sign: wound as (a0→b0→b1→a1) a side quad's Newell is
-    # left-normal·dy — outward exactly when sign(dy·shoelace)<0.
-    side_forward=sign(ey*shoelace)<0
-    cap0_forward=sign(shoelace)==sign(ey)
+    # Side quads (a0→b0→b1→a1) and cap windings for the xy profile extruded
+    # along +z: a CCW profile with positive dz reads outward on the forward
+    # side loop, and cap0 must face -sign(dz)·Z.
+    side_forward=sign(ez*shoelace)>0
+    cap0_forward=sign(shoelace)!=sign(ez)
     nverts,nedges,nfaces=2k,3k,k+2
     kernel.maxima[3]<=typemax(Int32)-nverts || throw(ArgumentError(
         "$caller: OCC vertex tag allocation exceeds Int32"))
@@ -569,18 +571,18 @@ function _model_occ_add_wedge!(m::GeoModel,x,y,z,dx,dy,dz;
     solid_id=ids[end]
     pending=Tuple{Int,Int,UInt64,_ModelOCCShape}[]
     for i in 1:k
-        for (ring,ly) in ((0,0.0),(k,ey))
-            px,pz=profile[i]
+        for (ring,lz) in ((0,0.0),(k,ez))
+            px,py=profile[i]
             push!(pending,(0,kernel.maxima[3]+ring+i,vertex_ids[ring+i],
-                _ModelOCCShape(0,(point=world(px,ly,pz),mesh_size=0.0),
+                _ModelOCCShape(0,(point=world(px,py,lz),mesh_size=0.0),
                                UInt64[])))
         end
     end
     for j in 1:k
         a,b=j,mod1(j+1,k)
         pa,pb=profile[a],profile[b]
-        for (ring,ly) in ((0,0.0),(k,ey))
-            w0=world(pa[1],ly,pa[2]); w1=world(pb[1],ly,pb[2])
+        for (ring,lz) in ((0,0.0),(k,ez))
+            w0=world(pa[1],pa[2],lz); w1=world(pb[1],pb[2],lz)
             diff=_arc_sub(w1,w0)
             push!(pending,(1,kernel.maxima[4]+ring+j,edge_ids[ring+j],
                 _ModelOCCShape(1,(kind=:line,geometry=
@@ -588,7 +590,7 @@ function _model_occ_add_wedge!(m::GeoModel,x,y,z,dx,dy,dz;
                      t0=0.0,t1=_occ_modulus(diff))),
                     UInt64[vertex_ids[ring+a],vertex_ids[ring+b]])))
         end
-        w0=world(pa[1],0.0,pa[2]); w1=world(pa[1],ey,pa[2])
+        w0=world(pa[1],pa[2],0.0); w1=world(pa[1],pa[2],ez)
         diff=_arc_sub(w1,w0)
         push!(pending,(1,kernel.maxima[4]+2k+j,edge_ids[2k+j],
             _ModelOCCShape(1,(kind=:line,geometry=
@@ -631,19 +633,19 @@ function _model_occ_add_wedge!(m::GeoModel,x,y,z,dx,dy,dz;
         geometry=_model_occ_plane_face_geometry(
             shape_of,tag_of,[uses],caller)
         # Outward check like add_box: side faces read the profile-edge
-        # left normal with the traversal sign; caps follow ∓sign(dy)·Y.
+        # right normal with the traversal sign; caps follow ∓sign(dz)·Z.
         if index<=k
             a,b=index,mod1(index+1,k)
             p=profile[b][1]-profile[a][1]; q=profile[b][2]-profile[a][2]
             s=sign(shoelace)
             s==0.0 && continue
-            nlocal=(q*s,0.0,-p*s)
+            nlocal=(q*s,-p*s,0.0)
             m=_occ_modulus(nlocal)
             m==0.0 && continue
             intended=_occ3_add(_occ3_scale(Xf,nlocal[1]/m),
-                _occ3_scale(axis_dir,nlocal[3]/m))
+                _occ3_scale(Yf,nlocal[2]/m))
         else
-            intended=_occ3_scale(Yf,index==k+1 ? -sign(ey) : sign(ey))
+            intended=_occ3_scale(axis_dir,index==k+1 ? -sign(ez) : sign(ez))
         end
         _dot3(geometry.axis,intended)>0.999 || throw(ArgumentError(
             "$caller: internal wedge face winding is inconsistent"))

@@ -89,7 +89,7 @@ end
     occ.synchronize()
     out,map=occ.fuse([(3,1)],[(3,2)])
     @test out==[(3,1)]
-    @test map==[[(3,1)],[(3,1)]]
+    @test map==[[(3,1)],Tuple{Int,Int}[]]
     @test occ.get_entities(3)==[(3,1)]
     @test occ.get_mass(3,1)≈1.875
     @test collect(occ.get_center_of_mass(3,1))≈collect((0.75,0.75,0.75))
@@ -210,7 +210,7 @@ end
     occ.synchronize()
     out,map=occ.fuse([(3,1),(3,2)],[])
     @test out==[(3,1)]
-    @test map==[[(3,1)],[(3,1)]]
+    @test map==[[(3,1)],Tuple{Int,Int}[]]
     @test occ.get_mass(3,1)≈1.5
 end
 

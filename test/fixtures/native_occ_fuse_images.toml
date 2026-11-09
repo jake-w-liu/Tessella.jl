@@ -1,0 +1,399 @@
+# Opaque public Gmsh 4.15.2 API control; no implementation source was read.
+# Default Geometry.OCCBooleanPreserveNumbering=1; tagged calls require one result.
+version = "4.15.2"
+
+[[cases]]
+name = "overlap_11_0"
+box = [0.5, 0.5, 0.5, 1.0, 1.0, 1.0]
+remove_object = true
+remove_tool = true
+tag = -1
+out = [[3, 1]]
+images = [[[3, 1]], []]
+
+[[cases]]
+name = "overlap_11_1"
+box = [0.5, 0.5, 0.5, 1.0, 1.0, 1.0]
+remove_object = true
+remove_tool = true
+tag = 42
+out = [[3, 42]]
+images = [[], []]
+
+[[cases]]
+name = "overlap_10_0"
+box = [0.5, 0.5, 0.5, 1.0, 1.0, 1.0]
+remove_object = true
+remove_tool = false
+tag = -1
+out = [[3, 3]]
+images = [[], [[3, 2]]]
+
+[[cases]]
+name = "overlap_10_1"
+box = [0.5, 0.5, 0.5, 1.0, 1.0, 1.0]
+remove_object = true
+remove_tool = false
+tag = 42
+out = [[3, 42]]
+images = [[], [[3, 2]]]
+
+[[cases]]
+name = "overlap_01_0"
+box = [0.5, 0.5, 0.5, 1.0, 1.0, 1.0]
+remove_object = false
+remove_tool = true
+tag = -1
+out = [[3, 2]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "overlap_01_1"
+box = [0.5, 0.5, 0.5, 1.0, 1.0, 1.0]
+remove_object = false
+remove_tool = true
+tag = 42
+out = [[3, 42]]
+images = [[[3, 1]], []]
+
+[[cases]]
+name = "overlap_00_0"
+box = [0.5, 0.5, 0.5, 1.0, 1.0, 1.0]
+remove_object = false
+remove_tool = false
+tag = -1
+out = [[3, 3]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "overlap_00_1"
+box = [0.5, 0.5, 0.5, 1.0, 1.0, 1.0]
+remove_object = false
+remove_tool = false
+tag = 42
+out = [[3, 42]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "disjoint_11_0"
+box = [2.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = true
+remove_tool = true
+tag = -1
+out = [[3, 1], [3, 2]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "disjoint_10_0"
+box = [2.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = true
+remove_tool = false
+tag = -1
+out = [[3, 1], [3, 2]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "disjoint_01_0"
+box = [2.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = false
+remove_tool = true
+tag = -1
+out = [[3, 1], [3, 2]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "disjoint_00_0"
+box = [2.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = false
+remove_tool = false
+tag = -1
+out = [[3, 1], [3, 2]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "face_11_0"
+box = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = true
+remove_tool = true
+tag = -1
+out = [[3, 1]]
+images = [[[3, 1]], []]
+
+[[cases]]
+name = "face_11_1"
+box = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = true
+remove_tool = true
+tag = 42
+out = [[3, 42]]
+images = [[], []]
+
+[[cases]]
+name = "face_10_0"
+box = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = true
+remove_tool = false
+tag = -1
+out = [[3, 3]]
+images = [[], [[3, 2]]]
+
+[[cases]]
+name = "face_10_1"
+box = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = true
+remove_tool = false
+tag = 42
+out = [[3, 42]]
+images = [[], [[3, 2]]]
+
+[[cases]]
+name = "face_01_0"
+box = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = false
+remove_tool = true
+tag = -1
+out = [[3, 2]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "face_01_1"
+box = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = false
+remove_tool = true
+tag = 42
+out = [[3, 42]]
+images = [[[3, 1]], []]
+
+[[cases]]
+name = "face_00_0"
+box = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = false
+remove_tool = false
+tag = -1
+out = [[3, 3]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "face_00_1"
+box = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = false
+remove_tool = false
+tag = 42
+out = [[3, 42]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "contained_11_0"
+box = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+remove_object = true
+remove_tool = true
+tag = -1
+out = [[3, 1]]
+images = [[[3, 1]], []]
+
+[[cases]]
+name = "contained_11_1"
+box = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+remove_object = true
+remove_tool = true
+tag = 42
+out = [[3, 42]]
+images = [[], []]
+
+[[cases]]
+name = "contained_10_0"
+box = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+remove_object = true
+remove_tool = false
+tag = -1
+out = [[3, 3]]
+images = [[], [[3, 2]]]
+
+[[cases]]
+name = "contained_10_1"
+box = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+remove_object = true
+remove_tool = false
+tag = 42
+out = [[3, 42]]
+images = [[], [[3, 2]]]
+
+[[cases]]
+name = "contained_01_0"
+box = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+remove_object = false
+remove_tool = true
+tag = -1
+out = [[3, 2]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "contained_01_1"
+box = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+remove_object = false
+remove_tool = true
+tag = 42
+out = [[3, 42]]
+images = [[[3, 1]], []]
+
+[[cases]]
+name = "contained_00_0"
+box = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+remove_object = false
+remove_tool = false
+tag = -1
+out = [[3, 3]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "contained_00_1"
+box = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+remove_object = false
+remove_tool = false
+tag = 42
+out = [[3, 42]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "contains_11_0"
+box = [-1.0, -1.0, -1.0, 3.0, 3.0, 3.0]
+remove_object = true
+remove_tool = true
+tag = -1
+out = [[3, 1]]
+images = [[[3, 1]], []]
+
+[[cases]]
+name = "contains_11_1"
+box = [-1.0, -1.0, -1.0, 3.0, 3.0, 3.0]
+remove_object = true
+remove_tool = true
+tag = 42
+out = [[3, 42]]
+images = [[], []]
+
+[[cases]]
+name = "contains_10_0"
+box = [-1.0, -1.0, -1.0, 3.0, 3.0, 3.0]
+remove_object = true
+remove_tool = false
+tag = -1
+out = [[3, 3]]
+images = [[], [[3, 2]]]
+
+[[cases]]
+name = "contains_10_1"
+box = [-1.0, -1.0, -1.0, 3.0, 3.0, 3.0]
+remove_object = true
+remove_tool = false
+tag = 42
+out = [[3, 42]]
+images = [[], [[3, 2]]]
+
+[[cases]]
+name = "contains_01_0"
+box = [-1.0, -1.0, -1.0, 3.0, 3.0, 3.0]
+remove_object = false
+remove_tool = true
+tag = -1
+out = [[3, 2]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "contains_01_1"
+box = [-1.0, -1.0, -1.0, 3.0, 3.0, 3.0]
+remove_object = false
+remove_tool = true
+tag = 42
+out = [[3, 42]]
+images = [[[3, 1]], []]
+
+[[cases]]
+name = "contains_00_0"
+box = [-1.0, -1.0, -1.0, 3.0, 3.0, 3.0]
+remove_object = false
+remove_tool = false
+tag = -1
+out = [[3, 3]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "contains_00_1"
+box = [-1.0, -1.0, -1.0, 3.0, 3.0, 3.0]
+remove_object = false
+remove_tool = false
+tag = 42
+out = [[3, 42]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "identical_11_0"
+box = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = true
+remove_tool = true
+tag = -1
+out = [[3, 1]]
+images = [[[3, 1]], []]
+
+[[cases]]
+name = "identical_11_1"
+box = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = true
+remove_tool = true
+tag = 42
+out = [[3, 42]]
+images = [[], []]
+
+[[cases]]
+name = "identical_10_0"
+box = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = true
+remove_tool = false
+tag = -1
+out = [[3, 3]]
+images = [[], [[3, 2]]]
+
+[[cases]]
+name = "identical_10_1"
+box = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = true
+remove_tool = false
+tag = 42
+out = [[3, 42]]
+images = [[], [[3, 2]]]
+
+[[cases]]
+name = "identical_01_0"
+box = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = false
+remove_tool = true
+tag = -1
+out = [[3, 2]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "identical_01_1"
+box = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = false
+remove_tool = true
+tag = 42
+out = [[3, 42]]
+images = [[[3, 1]], []]
+
+[[cases]]
+name = "identical_00_0"
+box = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = false
+remove_tool = false
+tag = -1
+out = [[3, 3]]
+images = [[[3, 1]], [[3, 2]]]
+
+[[cases]]
+name = "identical_00_1"
+box = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+remove_object = false
+remove_tool = false
+tag = 42
+out = [[3, 42]]
+images = [[[3, 1]], [[3, 2]]]

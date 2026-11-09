@@ -385,11 +385,16 @@ end
     @test all(==(2),values(_result_curve_incidence(curved,ns+1)))
     _check_materialized_pcurves(curved,ns+1)
 
-    # unsupported intersections fail explicitly rather than approximating
-    unsupported=GeoModel()
-    add_cylinder!(unsupported,0,0,0,0,0,1,0.3;tag=1)
-    add_cylinder!(unsupported,0.2,0,0,0,1,0,0.3;tag=2)
-    @test_throws ArgumentError boolean_volumes!(unsupported,:union,1,2;tag=3)
-    @test !haskey(unsupported.volumes,3)
-    @test !haskey(unsupported.booleans,3)
+    # A fitted section crosses the second cylinder's chart seam. The
+    # authoritative operand-edge pierce must remain a real result vertex.
+    crossed=GeoModel()
+    add_cylinder!(crossed,0,0,0,0,0,1,0.3;tag=1)
+    add_cylinder!(crossed,0.2,0,0,0,1,0,0.3;tag=2)
+    np=length(crossed.points);nc=length(crossed.curves);ns=length(crossed.surfaces)
+    @test boolean_volumes!(crossed,:union,1,2;tag=3)==3
+    @test (length(crossed.points)-np,length(crossed.curves)-nc,
+           length(crossed.surfaces)-ns)==(7,11,6)
+    @test all(==(2),values(_result_curve_incidence(crossed,ns+1)))
+    @test length(Tessella.Model._model_volume_boundary_surfaces(
+        crossed,3,"crossed cylinder result"))==6
 end

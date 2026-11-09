@@ -1861,6 +1861,7 @@ end
 
 # OCC-reported parametrization bounds per surface kind.
 function _occ_surface_bounds(g)
+    hasproperty(g,:natural_bounds) && return g.natural_bounds
     _model_nurbs_surface(g) && return _model_nurbs_surface_bounds(g)
     if g.occ===:cylinder
         return [0.0,0.0],[get(g,:angle,2π),g.height]

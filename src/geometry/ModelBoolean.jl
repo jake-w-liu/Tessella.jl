@@ -1518,13 +1518,15 @@ const _brep_sec_tensor_analytic=_brep_sec_msq
 # per edge crossing — every section landing there then shares bit-identical
 # uv on the partner face), falling back to a projected wire point when the
 # endpoint sits where no pierce was registered.
-function _brep_sec_vertex(solids,oi,oj,esA,esB,sec,s,tol,mscale)
+function _brep_sec_vertex(solids,oi,oj,esA,esB,sec,s,tol,mscale;
+                           seams=nothing)
     p3=_brep_curve_eval(sec.curve,s)
     snap3=1e-4*max(1.0,mscale)
     recs=Any[nothing,nothing]
     for (side,(S,fidx,spc,es)) in enumerate((
             (solids[oi],sec.fa,sec.pcA,esA),
             (solids[oj],sec.fb,sec.pcB,esB)))
+        seams!==nothing && !seams[side] && continue
         f=S.faces[fidx]
         uv=_brep_pc_eval(spc,s)
         # canonicalize on this face's chart — a seam-crossing trace's
@@ -1545,6 +1547,15 @@ function _brep_sec_vertex(solids,oi,oj,esA,esB,sec,s,tol,mscale)
         for wire in f.wires,(eidx,_,epc) in wire
             e=S.edges[eidx]
             e.curve.kind===:degenerate && continue
+            if seams!==nothing
+                # An internal chart cut may anchor only to that chart's
+                # actual seam edge, never to a nearby unrelated wire.
+                uper>0 || continue
+                ulo,uhi=_brep_pc_urange(epc,e.t0,e.t1)
+                abs(uhi-ulo)<=tol || continue
+                base=_brep_face_ubase(S.edges,f)
+                abs(rem(ulo-base,uper,RoundNearest))<=tol || continue
+            end
             for tp in get(es,eidx,Float64[])
                 cand=_brep_curve_eval(e.curve,tp)
                 d=_b3dist(p3,cand)
@@ -1589,6 +1600,14 @@ function _brep_sec_vertex(solids,oi,oj,esA,esB,sec,s,tol,mscale)
     end
     (recs[1]===nothing && recs[2]===nothing) && return nothing
     return (A=recs[1],B=recs[2])
+end
+
+# Internal periodic cuts are endpoints of result edges too. Resolve only
+# sides whose chart generated this cut; ordinary contact cuts stay unanchored.
+function _brep_sec_seam_vertex(solids,oi,oj,esA,esB,sec,s,cuts,tol,mscale)
+    sides=ntuple(side->any(c->c[2]==side && abs(c[1]-s)<tol,cuts),2)
+    any(sides) || return nothing
+    return _brep_sec_vertex(solids,oi,oj,esA,esB,sec,s,tol,mscale;seams=sides)
 end
 
 # An anchored section span end's authoritative 3-D vertex — the operand-
@@ -4057,7 +4076,10 @@ function _brep_imprint_contacts!(S,O,fidx,eOidx,mpc,neg,slo,shi,es_S,es_O,
         e2.curve.kind===:degenerate && continue
         lo2,hi2=minmax(e2.t0,e2.t1)
         for t in _brep_pc_intersect(epc2,mpc,slo,shi,tol)
-            push!(get!(Vector{Float64},es_S,eidx2),t)
+            # Mirrored conics report an equivalent negative angle. Store
+            # its lift in the actual edge domain so the shared wire is split.
+            cut=_brep_pc_iscirc(epc2) ? _brep_snap_theta(t,lo2,hi2,tol) : t
+            cut===nothing || push!(get!(Vector{Float64},es_S,eidx2),cut)
         end
         for s in _brep_pc_intersect(mpc,epc2,lo2,hi2,tol)
             ss=inrange(s)
@@ -4920,11 +4942,41 @@ end
 # boundary is not a result vertex). Every arc keyed to a member is relabeled
 # into the canonical edge's parametrization, then consecutive arcs of one
 # key inside a wire join.
+# Authoritative endpoints survive canonical reparametrization and piece joins.
+function _brep_piece_vertex(spec,ar,t)
+    t==ar.vt0 && hasproperty(ar,:v0) && return ar.v0
+    t==ar.vt1 && hasproperty(ar,:v1) && return ar.v1
+    if hasproperty(spec,:sev) && spec.sev!==nothing &&
+            ar.key isa Tuple && length(ar.key)>=2 && ar.key[1]===:s &&
+            1<=ar.key[2]<=length(spec.sev)
+        edge=spec.sev[ar.key[2]]
+        t==edge.t0 && edge.v0!==nothing && return edge.v0
+        t==edge.t1 && edge.v1!==nothing && return edge.v1
+    end
+    return _brep_vertex_eval(ar.crv,t)
+end
+
+function _brep_record_piece_vertices!(vertices,ei,spec,ar,curve)
+    # Relabeled rim partners can use foreign parameters on another evaluator.
+    ar.crv===curve || return nothing
+    lo,hi=minmax(ar.vt0,ar.vt1)
+    p0=_brep_piece_vertex(spec,ar,lo)
+    p1=_brep_piece_vertex(spec,ar,hi)
+    old=get(vertices,ei,nothing)
+    vertices[ei]=old===nothing ? (t0=lo,t1=hi,v0=p0,v1=p1) :
+        (t0=min(lo,old.t0),t1=max(hi,old.t1),
+         v0=lo<old.t0 ? p0 : old.v0,v1=hi>old.t1 ? p1 : old.v1)
+    return nothing
+end
+
 function _brep_merge_edge_pieces(kept,tol,caller)
+    # Use the same anchored vertices as result materialization. A fitted
+    # section can miss its operand-edge pierce by more than the weld tolerance.
+    endpoint=_brep_piece_vertex
     scale=1.0
     for s in kept,w in s.wires,ar in w
         for t in (ar.vt0,ar.vt1)
-            p=_brep_vertex_eval(ar.crv,t)
+            p=endpoint(s,ar,t)
             scale=max(scale,abs(p[1]),abs(p[2]),abs(p[3]))
         end
     end
@@ -4938,9 +4990,10 @@ function _brep_merge_edge_pieces(kept,tol,caller)
     for (fi,s) in enumerate(kept),w in s.wires,ar in w
         push!(get!(Set{Int},keyfaces,ar.key),fi)
         haskey(keyrep,ar.key) ||
-            (keyrep[ar.key]=(crv=ar.crv,vt0=ar.vt0,vt1=ar.vt1))
+            (keyrep[ar.key]=(crv=ar.crv,vt0=ar.vt0,vt1=ar.vt1,
+                p0=endpoint(s,ar,ar.vt0),p1=endpoint(s,ar,ar.vt1)))
         for tt in (ar.vt0,ar.vt1)
-            p=_brep_vertex_eval(ar.crv,tt)
+            p=endpoint(s,ar,tt)
             i=findfirst(q->_b3dist(q,p)<tol3,jpts)
             i===nothing && (push!(jpts,p);i=length(jpts))
             push!(get!(Set{Any},junction,jpts[i]),ar.key)
@@ -4967,9 +5020,9 @@ function _brep_merge_edge_pieces(kept,tol,caller)
         if r1.crv.kind===:bspline && r1.crv.curve===r2.crv.curve
             blo,bhi=_model_occ_curve_bounds(r1.crv.curve)
             if bhi>blo
-                for s1 in (r1.vt0,r1.vt1), s2 in (r2.vt0,r2.vt1)
-                    _b3dist(_brep_vertex_eval(r1.crv,s1),
-                            _brep_vertex_eval(r2.crv,s2))<tol3 || continue
+                for (s1,p1) in ((r1.vt0,r1.p0),(r1.vt1,r1.p1)),
+                    (s2,p2) in ((r2.vt0,r2.p0),(r2.vt1,r2.p1))
+                    _b3dist(p1,p2)<tol3 || continue
                     ((abs(s1-blo)<tol3 && abs(s2-bhi)<tol3) ||
                      (abs(s1-bhi)<tol3 && abs(s2-blo)<tol3)) &&
                         (wrap=true;break)
@@ -4978,10 +5031,8 @@ function _brep_merge_edge_pieces(kept,tol,caller)
         end
         wrap && continue
         adj=false
-        for s1 in (r1.vt0,r1.vt1), s2 in (r2.vt0,r2.vt1)
-            _b3dist(_brep_vertex_eval(r1.crv,s1),
-                    _brep_vertex_eval(r2.crv,s2))<tol3 || continue
-            p=_brep_vertex_eval(r1.crv,s1)
+        for p in (r1.p0,r1.p1), p2 in (r2.p0,r2.p1)
+            _b3dist(p,p2)<tol3 || continue
             i=findfirst(q->_b3dist(q,p)<tol3,jpts)
             # merge through this junction only when no third key ends there
             if i!==nothing && issubset(junction[jpts[i]],Set{Any}((k1,k2)))
@@ -5062,11 +5113,14 @@ function _brep_merge_edge_pieces(kept,tol,caller)
         join(last,rec)=(key=last.key,fwd=last.fwd,pc=last.pc,
                         t0=min(last.t0,rec.t0),t1=max(last.t1,rec.t1),
                         crv=last.crv,vt0=min(last.vt0,rec.vt0),
-                        vt1=max(last.vt1,rec.vt1),neg=last.neg)
+                        vt1=max(last.vt1,rec.vt1),neg=last.neg,
+                        v0=last.vt0<=rec.vt0 ? last.v0 : rec.v0,
+                        v1=last.vt1>=rec.vt1 ? last.v1 : rec.v1)
         wires=Vector{NamedTuple}[]
         for w in s.wires
             nw=NamedTuple[]
             for ar in w
+                p0=endpoint(s,ar,ar.vt0);p1=endpoint(s,ar,ar.vt1)
                 c=get(canon,ar.key,nothing)
                 rec=ar
                 if c!==nothing
@@ -5087,7 +5141,9 @@ function _brep_merge_edge_pieces(kept,tol,caller)
                               crv=keyrep[root].crv,vt0=vlo,vt1=vhi,neg=true) :
                              (key=root,fwd=fwd2,pc=pc2,t0=vlo,t1=vhi,
                               crv=keyrep[root].crv,vt0=vlo,vt1=vhi,neg=false)
+                    α<0 && ((p0,p1)=(p1,p0))
                 end
+                rec=merge(rec,(v0=p0,v1=p1))
                 if !isempty(nw) && joinable(nw[end],rec)
                     nw[end]=join(nw[end],rec)
                 else
@@ -5327,19 +5383,23 @@ function _brep_collect_faces(m::GeoModel,op::Symbol,ta::Int,tb::Int,caller)
                     get!(Vector{Float64},esplits[2],a.B[2]),a.B[3])
             end
             cuts=copy(get(sec_cuts,si,Float64[]))
-            for (S,face,spc) in ((A,A.faces[sec.fa],sec.pcA),
-                                 (B,B.faces[sec.fb],sec.pcB))
+            seamcuts=Tuple{Float64,Int}[]
+            for (side,(S,face,spc)) in enumerate(((A,A.faces[sec.fa],sec.pcA),
+                                 (B,B.faces[sec.fb],sec.pcB)))
                 uper=_brep_uperiod(face.sg)
                 uper>0 || continue
                 ulo=_brep_face_ubase(S.edges,face)
                 pieces=_brep_pc_split_all_useams(spc,lo,hi,uper,ulo,tol)
                 for p in pieces[2:end]
                     push!(cuts,p[1])
+                    push!(seamcuts,(p[1],side))
                 end
             end
             for (s0,s1) in _brep_split_ranges(lo,hi,cuts,tol)
-                a0=s0-lo<tol ? va : nothing
-                a1=s1-hi>-tol ? vb : nothing
+                a0=s0-lo<tol ? va : _brep_sec_seam_vertex(
+                    (A,B),1,2,esplits[1],esplits[2],sec,s0,seamcuts,tol,mscale)
+                a1=s1-hi>-tol ? vb : _brep_sec_seam_vertex(
+                    (A,B),1,2,esplits[1],esplits[2],sec,s1,seamcuts,tol,mscale)
                 push!(sec_edges,(curve=sec.curve,t0=s0,t1=s1,
                                  v0=_brep_sec_vfix(a0),
                                  v1=_brep_sec_vfix(a1)))
@@ -5373,11 +5433,14 @@ function _brep_collect_faces(m::GeoModel,op::Symbol,ta::Int,tb::Int,caller)
             ulo=_brep_face_ubase(S.edges,f)
             for (tend,anc) in ((sf.span[1],get(sf,:anc0,nothing)),
                                (sf.span[2],get(sf,:anc1,nothing)))
-                # an endpoint anchored on this operand's own wire edge
-                # already pushed its authoritative pierce param —
-                # re-projecting the fitted uv would add a residual-off
-                # duplicate split
-                _brep_anchor_own(sd,anc) && continue
+                # Register internal seam anchors as well as span ends.
+                # Re-projecting their fitted uv would add a residual-off split.
+                if _brep_anchor_own(sd,anc)
+                    anchor=sd==1 ? anc.A : anc.B
+                    params=get!(Vector{Float64},es,anchor[2])
+                    anchor[3] in params || push!(params,anchor[3])
+                    continue
+                end
                 uv=_brep_wrap_u(_brep_pc_eval(sf.pc,tend),ulo,uper)
                 for wire in f.wires,(eidx,sign,epc) in wire
                     e=S.edges[eidx]
@@ -5524,7 +5587,10 @@ function _brep_imprint_contacts_n!(solids,si,fidx,oi,eOidx,mpc,neg,slo,shi,
         e2.curve.kind===:degenerate && continue
         lo2,hi2=minmax(e2.t0,e2.t1)
         for t in _brep_pc_intersect(epc2,mpc,slo,shi,tol)
-            push!(get!(Vector{Float64},es_S,eidx2),t)
+            # Mirrored conics report an equivalent negative angle. Store
+            # its lift in the actual edge domain so the shared wire is split.
+            cut=_brep_pc_iscirc(epc2) ? _brep_snap_theta(t,lo2,hi2,tol) : t
+            cut===nothing || push!(get!(Vector{Float64},es_S,eidx2),cut)
         end
         for s in _brep_pc_intersect(mpc,epc2,lo2,hi2,tol)
             ss=inrange(s)
@@ -5828,7 +5894,8 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
                     esplits[sec.oj],a.B[2]),a.B[3])
             end
             cuts=copy(get(sec_cuts,si,Float64[]))
-            for k in (sec.oi,sec.oj)
+            seamcuts=Tuple{Float64,Int}[]
+            for (side,k) in enumerate((sec.oi,sec.oj))
                 S=solids[k]
                 face=k==sec.oi ? S.faces[sec.fa] : S.faces[sec.fb]
                 spc=k==sec.oi ? sec.pcA : sec.pcB
@@ -5838,11 +5905,14 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
                 pieces=_brep_pc_split_all_useams(spc,lo,hi,uper,ulo,tol)
                 for p in pieces[2:end]
                     push!(cuts,p[1])
+                    push!(seamcuts,(p[1],side))
                 end
             end
             for (s0,s1) in _brep_split_ranges(lo,hi,cuts,tol)
-                a0=s0-lo<tol ? va : nothing
-                a1=s1-hi>-tol ? vb : nothing
+                a0=s0-lo<tol ? va : _brep_sec_seam_vertex(solids,sec.oi,sec.oj,
+                    esplits[sec.oi],esplits[sec.oj],sec,s0,seamcuts,tol,mscale)
+                a1=s1-hi>-tol ? vb : _brep_sec_seam_vertex(solids,sec.oi,sec.oj,
+                    esplits[sec.oi],esplits[sec.oj],sec,s1,seamcuts,tol,mscale)
                 push!(sec_edges,(curve=sec.curve,t0=s0,t1=s1,
                                  v0=_brep_sec_vfix(a0),
                                  v1=_brep_sec_vfix(a1)))
@@ -5870,10 +5940,15 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
             ulo=_brep_face_ubase(S.edges,f)
             for (tend,anc) in ((sf.span[1],get(sf,:anc0,nothing)),
                                (sf.span[2],get(sf,:anc1,nothing)))
-                # an endpoint anchored on this operand's own wire edge
-                # already pushed its pierce param — re-projecting the
-                # fitted uv would add a residual-off duplicate split
-                _brep_anchor_own(get(sf,:myside,0),anc) && continue
+                # Register internal seam anchors as well as span ends.
+                # Re-projecting their fitted uv would add a residual-off split.
+                myside=get(sf,:myside,0)
+                if _brep_anchor_own(myside,anc)
+                    anchor=myside==1 ? anc.A : anc.B
+                    params=get!(Vector{Float64},es,anchor[2])
+                    anchor[3] in params || push!(params,anchor[3])
+                    continue
+                end
                 uv=_brep_wrap_u(_brep_pc_eval(sf.pc,tend),ulo,uper)
                 for wire in f.wires,(eidx,sign,epc) in wire
                     e=S.edges[eidx]
@@ -5990,6 +6065,11 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
                 # carries no result boundary. The cell ops keep both uses:
                 # the wall separates two different result pieces
                 if op===:union && length(uses)==2
+                    # A containing solid participates even if all its own
+                    # boundary faces survive. The fused solid has new identity.
+                    for k in 1:N
+                        ((lin|lout)&_brep_bit(k))!=0 && (touched[k]=true)
+                    end
                     empty!(uses)
                 end
                 isempty(uses) && (touched[i]=true;continue)
@@ -6107,14 +6187,7 @@ function _brep_materialize_boolean!(m::GeoModel,t::Int,op::Symbol,
         end
         push!(res_verts,p);return length(res_verts)
     end
-    # anchored section span ends materialize at the operand-edge pierce
-    # eval — every fitted trace's endpoint sits a few ulps off it, which
-    # would split one result vertex into two and dead-end the wire
-    sev=nothing
-    for spec in kept
-        hasproperty(spec,:sev) && spec.sev!==nothing &&
-            (sev=spec.sev;break)
-    end
+    # Keep terminal anchors from every canonical piece, including joined spans.
     vfix=Dict{Int,NamedTuple}()
     for spec in kept, wire in spec.wires, ar in wire
         ei=get!(emap,ar.key) do
@@ -6134,11 +6207,7 @@ function _brep_materialize_boolean!(m::GeoModel,t::Int,op::Symbol,
             (lo==e.t0 && hi==e.t1) ||
                 (res_edges[ei]=(curve=e.curve,t0=lo,t1=hi))
         end
-        if sev!==nothing && !haskey(vfix,ei) && ar.key isa Tuple &&
-                length(ar.key)>=2 && ar.key[1]===:s &&
-                1<=ar.key[2]<=length(sev)
-            vfix[ei]=sev[ar.key[2]]
-        end
+        _brep_record_piece_vertices!(vfix,ei,spec,ar,res_edges[ei].curve)
     end
     # endpoints → vertices (deduped, first appearance in wire order); the
     # endpoints of a merged edge are its span extrema — interior piece
@@ -6548,14 +6617,7 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
         end
         push!(res_verts,p);return length(res_verts)
     end
-    # anchored section span ends materialize at the operand-edge pierce
-    # eval — every fitted trace's endpoint sits a few ulps off it, which
-    # would split one result vertex into two and dead-end the wire
-    sev=nothing
-    for spec in kept
-        hasproperty(spec,:sev) && spec.sev!==nothing &&
-            (sev=spec.sev;break)
-    end
+    # Keep terminal anchors from every canonical piece, including joined spans.
     vfix=Dict{Int,NamedTuple}()
     for (fi,spec) in enumerate(kept)
         emit[fi] || continue
@@ -6573,11 +6635,7 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
                 (lo==e.t0 && hi==e.t1) ||
                     (res_edges[ei]=(curve=e.curve,t0=lo,t1=hi))
             end
-            if sev!==nothing && !haskey(vfix,ei) && ar.key isa Tuple &&
-                    length(ar.key)>=2 && ar.key[1]===:s &&
-                    1<=ar.key[2]<=length(sev)
-                vfix[ei]=sev[ar.key[2]]
-            end
+            _brep_record_piece_vertices!(vfix,ei,spec,ar,res_edges[ei].curve)
         end
     end
     edge_verts=Vector{Tuple{Int,Int}}(undef,length(res_edges))
@@ -6902,7 +6960,8 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
                                         _mesh1d_options=nothing)
     sg=get(m.surface_geometry,t,nothing)
     occ=sg===nothing ? nothing : get(sg,:occ,nothing)
-    occ in (:cylinder,:sphere,:cone,:torus,:tensor_bspline,:tensor_bezier) ||
+    (occ in (:cylinder,:sphere,:cone,:torus,:tensor_bspline,:tensor_bezier) ||
+     occ===:plane && hasproperty(sg,:natural_bounds)) ||
         throw(ArgumentError(
             "$caller: Surface[$t] has no parametric OCC record"))
     pcurves=get(sg,:pcurves,nothing)
@@ -7058,6 +7117,9 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
             i,j=loop_idx[k],loop_idx[mod1(k+1,nloop)]
             i==j || (xs[i]==xs[j] && ys[i]==ys[j]) || push!(segs,(i,j))
         end
+    end
+    if isempty(segs) && hasproperty(sg,:natural_bounds)
+        _occ_natural_surface_scaffold!(m,t,sg,emit,segs,_mesh1d_options,caller)
     end
     isempty(segs) && throw(ArgumentError(
         "$caller: Surface[$t] has an empty parametric boundary"))
