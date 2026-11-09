@@ -4,7 +4,7 @@
 # constructors; the .geo builder rejects them until their required model context
 # is available instead of pretending that a coordinate-only substitute is parity.
 
-using ..Predicates: orient2, orient3
+using ..Predicates: orient2, orient3, _two_diff_pair, _two_two_diff
 using ..Elements: lagrange_nodes
 using LinearAlgebra: SingularException
 
@@ -4675,16 +4675,28 @@ end
 
 const _PV_PRECISE_INVERSE_BITS=16384
 
+@inline function _pv_normalization_residual(point,query,base,scale)
+    product=query*scale
+    isfinite(product) || return NaN
+    # An FMA product tail is exact only when its least possible bit remains
+    # representable. Uncertain products take the retained precise query path.
+    query!=0 && abs(product)<ldexp(floatmin(Float64),53) && return NaN
+    product_tail=fma(query,scale,-product)
+    difference,difference_tail=_two_diff_pair(point,base)
+    terms=_two_two_diff(difference,difference_tail,product,product_tail)
+    all(isfinite,terms) || return NaN
+    return ((terms[1]+terms[2])+terms[3])+terms[4]
+end
+
 @inline _pv_query_roundtrip_differs(point,query,base,scale)=
-    muladd(query[1],scale,base[1])!=point[1] ||
-    muladd(query[2],scale,base[2])!=point[2] ||
-    muladd(query[3],scale,base[3])!=point[3]
+    !iszero(_pv_normalization_residual(point[1],query[1],base[1],scale)) ||
+    !iszero(_pv_normalization_residual(point[2],query[2],base[2],scale)) ||
+    !iszero(_pv_normalization_residual(point[3],query[3],base[3],scale))
 
 function _pv_normalization_needs_precision(coordinates,point,query,base,scale,
                                           derivatives,dim)
-    difference=(point[1]-muladd(query[1],scale,base[1]),
-        point[2]-muladd(query[2],scale,base[2]),
-        point[3]-muladd(query[3],scale,base[3]))
+    difference=ntuple(axis->_pv_normalization_residual(point[axis],query[axis],
+        base[axis],scale),3)
     all(iszero,difference) && return false
     relative=(difference[1]/scale,difference[2]/scale,difference[3]/scale)
     all(isfinite,relative) || return true

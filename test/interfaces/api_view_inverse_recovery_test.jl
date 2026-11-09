@@ -95,6 +95,30 @@ end
         pyramids=[(1,2,3,4,5)],crop_negative=false,use_closest=false)
     @test F.field_value(field,point...)==9/64
 end
+@testset "Rounded coordinate roundtrips retain thin-map values" begin
+    coords=Matrix{Float64}(I,3,3)
+    exponents=[1. 0. 0.;0. 1. 0.;0. 0. 1.]
+    for thinness in (1e-10,1e-12,1e-14), horizontal in (.125,.3)
+        geometry=[1. 0. 0.;1. thinness 0.;0. 0. 3.]
+        scheme=P.PosScheme(ones(1,1),[0. 1. 0.],geometry,exponents)
+        field=F.PostViewField([P.PosElement(:pyramid,coords,ones(1,1);scheme)];
+            crop_negative=false,use_closest=false)
+        point=(horizontal,horizontal+thinness*.25,3horizontal)
+        R=Rational{BigInt}
+        # Solve the declared affine map exactly from the original Float64 data.
+        expected=Float64((R(point[2])-R(point[1]))/R(thinness))
+        @test F.field_value(field,point...)≈expected atol=1e-12
+    end
+    # FMA equality itself is insufficient: the exact normalization residual is
+    # nonzero even though its rounded reconstruction equals the original point.
+    point=.3;query=point/3
+    @test muladd(query,3.,0.)==point
+    exact=Rational{BigInt}(point)-3Rational{BigInt}(query)
+    @test !iszero(exact)
+    @test F._pv_normalization_residual(point,query,0.,3.)==Float64(exact)
+    @test isnan(F._pv_normalization_residual(nextfloat(0.),nextfloat(0.),0.,1.))
+    @test isnan(F._pv_normalization_residual(1.,floatmax(Float64),0.,2.))
+end
 @testset "Concurrent precise fields preserve caller arithmetic scopes" begin
     field=retained_field[];point=retained_point[]
     saved_precision=precision(BigFloat);saved_rounding=rounding(BigFloat)
