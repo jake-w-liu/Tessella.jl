@@ -228,9 +228,9 @@ function _model_export_write(filename)
                 extension==".key" ? IO.write_key(filename,target) :
                 extension==".rad" ? IO.write_rad(filename,target) :
                 extension==".x3d" ? IO.write_x3d(filename,target;
-                    surfaces=!iszero(get(OPTIONS,"Print.X3DSurfaces",1.0)),
-                    edges=!iszero(get(OPTIONS,"Print.X3DEdges",0.0)),
-                    vertices=!iszero(get(OPTIONS,"Print.X3DVertices",0.0))) :
+                    surfaces=!iszero(get(OPTIONS,"Print.X3dSurfaces",1.0)),
+                    edges=!iszero(get(OPTIONS,"Print.X3dEdges",0.0)),
+                    vertices=!iszero(get(OPTIONS,"Print.X3dVertices",0.0))) :
                 extension==".celum" ? IO.write_celum(filename,target) :
                     IO.write_bdf(filename,target)
         end

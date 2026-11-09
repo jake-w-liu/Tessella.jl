@@ -300,6 +300,9 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "PostProcessing.Binary"=>0.0,
     "PostProcessing.SaveMesh"=>1.0,
     "PostProcessing.SaveInterpolationMatrices"=>1.0,
+    "Print.X3dSurfaces"=>1.0,
+    "Print.X3dEdges"=>0.0,
+    "Print.X3dVertices"=>0.0,
     "Mesh.ElementOrder"=>1.0,
     "Mesh.SecondOrderLinear"=>0.0,
     "Mesh.SecondOrderIncomplete"=>0.0,
@@ -911,6 +914,7 @@ function option(name::AbstractString, value::Real)
                         "Mesh.PartitionPrismWeight","Mesh.PartitionPyramidWeight",
                         "Mesh.PartitionLineWeight","Mesh.PartitionTrihedronWeight",
                         "Mesh.Binary","PostProcessing.Binary",
+                        "Print.X3dSurfaces","Print.X3dEdges","Print.X3dVertices",
                         "General.Terminal","General.Verbosity","General.NumThreads")
             # Gmsh stores `(int)val` — truncation, not a 0/1 restriction.
             v=Float64(_geo_signed_gmsh_int_value(v,"API.option"))

@@ -13672,7 +13672,7 @@ end
 # `.msh4`/`.msh41` select that dialect explicitly, while `.msh1`/`.msh3`/
 # `.msh40` reject (MSH 1.x/3.x never shipped writable support and 4.0 is not
 # a stable public dialect). `.stl` writes ASCII or binary surface facets through
-# `IO.write_stl`.
+# `IO.write_stl`; `.x3d` honors the canonical Print.X3d selection options.
 function _geo_exec_save!(m::GeoModel,path::AbstractString,
                          context::_GeoNumericContext,caller::AbstractString;
                          kind::String="Save")
@@ -13688,7 +13688,7 @@ function _geo_exec_save!(m::GeoModel,path::AbstractString,
     else
         -1.0
     end
-    if !(version>0 || extension in (".stl",".pos",".vtk"))
+    if !(version>0 || extension in (".stl",".pos",".vtk",".x3d"))
         # `CreateOutputFile` reports an unrecognized extension as a
         # `Msg::Error` and the stream continues.
         _geo_msg_error!(context,"Unknown output file format")
@@ -13720,6 +13720,14 @@ function _geo_exec_save!(m::GeoModel,path::AbstractString,
     if extension==".vtk"
         io_mod=getfield(parentmodule(@__MODULE__),:IO)
         io_mod.write_vtk(file,mesh)
+        return nothing
+    end
+    if extension==".x3d"
+        io_mod=getfield(parentmodule(@__MODULE__),:IO)
+        surfaces=!iszero(something(_geo_option_number(context,"Print",0,"X3dSurfaces"),1.0))
+        edges=!iszero(something(_geo_option_number(context,"Print",0,"X3dEdges"),0.0))
+        vertices=!iszero(something(_geo_option_number(context,"Print",0,"X3dVertices"),0.0))
+        io_mod.write_x3d(file,mesh;surfaces,edges,vertices)
         return nothing
     end
     if extension==".pos"

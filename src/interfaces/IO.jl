@@ -19016,7 +19016,9 @@ rows (quadrangles split on the first-third vertex diagonal); dim-1 cells
 become `<LineSet>` shapes and leftover dim-0 cells `<PointSet>`-style
 coordinates under `IndexedLineSet` is not emitted — only surface, edge and
 vertex geometry is written, matching upstream's surfaces/edges/vertices
-switches with the default `x3dsurfaces=1` merged behaviour.
+switches with the default `x3dsurfaces=1` merged behaviour. Higher-order
+surface cells use their primary corner vertices. The source and both
+destination paths are validated before replacing the X3D target.
 """
 function write_x3d(path,m;scaling_factor::Real=1.0,surfaces::Bool=true,
                    edges::Bool=false,vertices::Bool=false)
@@ -19026,7 +19028,11 @@ function write_x3d(path,m;scaling_factor::Real=1.0,surfaces::Bool=true,
         "$caller: mesh must be a Mesh or MixedMesh"))
     (surfaces || edges || vertices) || throw(ArgumentError(
         "$caller: no surfaces, edges or vertices to write into '$path'"))
+    _assert_mixed_structure(m,caller)
+    surface_corners=surfaces ?
+        [_surface_deck_corners(block,caller,true) for block in m.blocks] : Int[]
     target,parent=_foreign_target(path,caller)
+    htmlname,_=_foreign_target(string(splitext(target)[1],"_x3d.html"),caller)
     mktemp(parent) do temporary,io
         println(io,"<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
         println(io,"<!DOCTYPE X3D PUBLIC \"ISO//Web3D//DTD X3D 3.3//EN\" " *
@@ -19043,21 +19049,16 @@ function write_x3d(path,m;scaling_factor::Real=1.0,surfaces::Bool=true,
             println(io,"     <Appearance><Material DEF=\"matface\"></Material></Appearance>")
             println(io,"     <TriangleSet DEF=\"setface\">")
             println(io,"      <Coordinate point=\"")
-            for block in m.blocks
-                block isa ElementBlock && _io_dim(block.msh)==2 || continue
-                n=size(block.nodes,1)
+            for (block,n) in zip(m.blocks,surface_corners)
+                n>0 || continue
                 for j in 1:size(block.nodes,2)
-                    if n>=3
-                        tris=n==3 ? ((1,2,3),) :
-                            n==4 ? ((1,2,3),(1,3,4)) :
-                            ((1,2,3),)
-                        for t in tris
-                            for k in t
-                                r=block.nodes[k,j]
-                                println(io,_format16(m.coords[1,r]*scaling_factor)," ",
-                                    _format16(m.coords[2,r]*scaling_factor)," ",
-                                    _format16(m.coords[3,r]*scaling_factor))
-                            end
+                    tris=n==3 ? ((1,2,3),) : ((1,2,3),(1,3,4))
+                    for t in tris
+                        for k in t
+                            r=block.nodes[k,j]
+                            println(io,_format16(m.coords[1,r]*scaling_factor)," ",
+                                _format16(m.coords[2,r]*scaling_factor)," ",
+                                _format16(m.coords[3,r]*scaling_factor))
                         end
                     end
                 end
@@ -19113,7 +19114,6 @@ function write_x3d(path,m;scaling_factor::Real=1.0,surfaces::Bool=true,
         mv(temporary,target;force=true)
     end
     # Companion html launcher (upstream always writes it next to the x3d).
-    htmlname=string(splitext(target)[1],"_x3d.html")
     open(htmlname,"w") do io
         println(io,"<!DOCTYPE HTML\n>")
         println(io,"<html lang=\"en\"> ")

@@ -80,6 +80,7 @@ include("functional/fixtures.jl")
         "interfaces/io_bdf_large_test.jl",
         "interfaces/io_foreign_resource_test.jl",
         "interfaces/io_ply_header_test.jl",
+        "interfaces/io_x3d_order_test.jl",
         "functional/vtk_complete_hex.jl",
         "functional/vtk_lagrange_curve.jl",
         "functional/vtk_lagrange_smoke.jl",
