@@ -443,7 +443,7 @@ MeshVersionFormatted 2
                     @test_throws ArgumentError _UNV_MESH_API.open(missing)
                     @test_throws ArgumentError _UNV_MESH_API.merge(missing)
                 end
-                bad = joinpath(dir, "x.vtk")
+                bad = joinpath(dir, "x.unsupported")
                 @test_throws ArgumentError _UNV_MESH_API.write(bad)
             end
         finally

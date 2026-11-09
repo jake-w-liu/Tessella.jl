@@ -12112,11 +12112,20 @@ function _unv_read_elements!(io::Base.IO,caller::AbstractString,
                       "guessing descriptor $descriptor from $count nodes"
             end
         end
+        entry=get(_UNV_DESCRIPTOR_TABLE,descriptor,nothing)
+        if entry!==nothing
+            msh,perm=entry
+            arity=perm===nothing ? msh_num_nodes(msh) : length(perm)
+            count==arity || throw(ArgumentError(
+                "$caller: UNV descriptor $descriptor expects $arity nodes, got $count"))
+        end
         if descriptor in _UNV_BEAM_DESCRIPTORS
             eof(io) && throw(ArgumentError(
                 "$caller: truncated UNV beam orientation line"))
             readline(io)   # orientation triplet — parsed positionally, unused
         end
+        _foreign_payload_count(count,_io_remaining_bytes(io),1,caller,
+                               "UNV element $label node count")
         nodelabels=Int64[]
         count>0 && sizehint!(nodelabels,Int(count))
         while length(nodelabels)<count
@@ -12132,7 +12141,6 @@ function _unv_read_elements!(io::Base.IO,caller::AbstractString,
                 push!(nodelabels,_unv_int(tok,caller,"UNV element node label"))
             end
         end
-        entry=get(_UNV_DESCRIPTOR_TABLE,descriptor,nothing)
         if entry===nothing
             descriptor in warned || begin
                 push!(warned,descriptor)
@@ -12141,9 +12149,6 @@ function _unv_read_elements!(io::Base.IO,caller::AbstractString,
             continue
         end
         msh,perm=entry
-        arity=perm===nothing ? msh_num_nodes(msh) : length(perm)
-        count==arity || throw(ArgumentError(
-            "$caller: UNV descriptor $descriptor expects $arity nodes, got $count"))
         rows=Vector{Int32}(undef,Int(count))
         @inbounds for i in 1:count
             row=get(node_rows,nodelabels[i],Int32(0))
@@ -15596,6 +15601,7 @@ end
 # materializing the file.
 function _read_p3d(io::Base.IO,caller::AbstractString,node_limit::Int,
                    element_limit::Int)
+    file_bytes=_io_remaining_bytes(io)
     tokens=Iterators.Stateful(Iterators.flatmap(eachsplit,eachline(io)))
     next=function (what)
         it=iterate(tokens)
@@ -15615,12 +15621,16 @@ function _read_p3d(io::Base.IO,caller::AbstractString,node_limit::Int,
         (ni>=1 && nj>=1 && nk>=1) || throw(ArgumentError(
             "$caller: .p3d block $b dimensions must be positive, got " *
             "($ni,$nj,$nk)"))
-        count=Base.checked_mul(Base.checked_mul(ni,nj),nk)
-        total=Base.checked_add(total,count)
-        total<=node_limit || throw(ArgumentError(
+        # Bound the product before multiplying dimensions from the header.
+        # The first inequality also makes the intermediate ni*nj safe.
+        available=node_limit-total
+        (ni<=div(available,nj) && ni*nj<=div(available,nk)) || throw(ArgumentError(
             "$caller: .p3d node count exceeds max_nodes=$node_limit"))
+        count=ni*nj*nk
+        total+=count
         push!(dims,(ni,nj,nk))
     end
+    _surface_vertex_payload(Int(total),file_bytes,5,caller,"P3D")
     node_labels=collect(Int64(1):total)
     coords=Vector{Float64}(undef,3*total)
     records=_TextMeshCell[]
@@ -15753,6 +15763,7 @@ end
 # (tag 1) because the deck carries no entity information.
 function _read_mail(io::Base.IO,caller::AbstractString,node_limit::Int,
                    element_limit::Int)
+    file_bytes=_io_remaining_bytes(io)
     tokens=Iterators.Stateful(Iterators.flatmap(eachsplit,eachline(io)))
     next=function (what)
         it=iterate(tokens)
@@ -15770,6 +15781,8 @@ function _read_mail(io::Base.IO,caller::AbstractString,node_limit::Int,
         "$caller: .mail node count exceeds max_nodes=$node_limit"))
     nt<=element_limit || throw(ArgumentError(
         "$caller: .mail element count exceeds max_elements=$element_limit"))
+    _surface_vertex_payload(Int(nv),file_bytes,5,caller,"MAIL")
+    _foreign_payload_count(nt,file_bytes,1,caller,"MAIL triangle count")
     node_labels=collect(Int64(1):nv)
     coords=Vector{Float64}(undef,3*nv)
     @inbounds for i in 1:nv, c in 1:3
@@ -15986,6 +15999,7 @@ end
 
 function _read_ir3(io::Base.IO,caller::AbstractString,node_limit::Int,
                    element_limit::Int)
+    file_bytes=_io_remaining_bytes(io)
     eof(io) && throw(ArgumentError("$caller: truncated .ir3 file"))
     format=strip(readline(io))
     format=="33" || throw(ArgumentError(
@@ -16012,9 +16026,11 @@ function _read_ir3(io::Base.IO,caller::AbstractString,node_limit::Int,
         num2>=0 || throw(ArgumentError(
             "$caller: .ir3 element count must be non-negative, got $num2"))
     end
-    ne=num2+num3
-    ne<=element_limit || throw(ArgumentError(
+    (num2<=element_limit && num3<=element_limit-num2) || throw(ArgumentError(
         "$caller: .ir3 element count exceeds max_elements=$element_limit"))
+    ne=num2+num3
+    _surface_vertex_payload(Int(nv),file_bytes,5,caller,"IR3")
+    _foreign_payload_count(ne,file_bytes,1,caller,"IR3 element count")
     tokens=Iterators.Stateful(Iterators.flatmap(eachsplit,eachline(io)))
     next=function (what)
         it=iterate(tokens)
@@ -16314,6 +16330,7 @@ const _DIFF_NODE_PATTERN=Regex(
 
 function _read_diff(io::Base.IO,caller::AbstractString,node_limit::Int,
                    element_limit::Int)
+    file_bytes=_io_remaining_bytes(io)
     line=_diff_scan_marker(io,caller,"the 'Number of space dim.' header",
         ("Number of space dim. =",))
     _diff_header_int(line,caller,"space dimension",6)
@@ -16353,13 +16370,15 @@ function _read_diff(io::Base.IO,caller::AbstractString,node_limit::Int,
     nbi>=0 || throw(ArgumentError(
         "$caller: .diff boundary-indicator count must be non-negative, " *
         "got $nbi"))
-    length(fields)>=3+nbi || throw(ArgumentError(
+    nbi<=length(fields)-3 || throw(ArgumentError(
         "$caller: .diff boundary-indicators line lists fewer than $nbi " *
         "values"))
     @inbounds for i in 1:nbi
         _unv_int(fields[3+i],caller,".diff boundary indicator")
     end
     _diff_scan_hash(io,caller,"the nodal-coordinates '#' separator")
+    _surface_vertex_payload(Int(nv),file_bytes,5,caller,"DIFF")
+    _foreign_payload_count(ne,file_bytes,1,caller,"DIFF element count")
     node_labels=Int64[];sizehint!(node_labels,nv)
     node_rows=Dict{Int64,Int32}();sizehint!(node_rows,nv)
     coords=Vector{Float64}(undef,3*nv);nstored=0
@@ -16820,13 +16839,18 @@ end
 # Three ASCII scalar coordinates need at least five bytes ("0 0 0"). A
 # binary vertex needs its declared property widths. Check this necessary
 # condition before allocating a coordinate buffer from an untrusted count.
+function _foreign_payload_count(count::Integer,bytes::Integer,width::Int,
+                                caller::AbstractString,context::AbstractString)
+    0<=count<=typemax(Int32) || throw(ArgumentError(
+        "$caller: $context is outside Int32 indexing bounds"))
+    count<=div(bytes,width) || throw(ArgumentError(
+        "$caller: $context cannot fit in the available file payload"))
+    return nothing
+end
+
 function _surface_vertex_payload(nv::Int,bytes::Integer,width::Int,
                                  caller::AbstractString,format::AbstractString)
-    0<=nv<=typemax(Int32) || throw(ArgumentError(
-        "$caller: $format vertex count is outside Int32 indexing bounds"))
-    nv<=div(bytes,width) || throw(ArgumentError(
-        "$caller: $format vertex count cannot fit in the available file payload"))
-    return nothing
+    return _foreign_payload_count(nv,bytes,width,caller,"$format vertex count")
 end
 
 function _read_vtk(io::Base.IO,caller::AbstractString,node_limit::Int,
