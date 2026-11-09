@@ -55,6 +55,12 @@ the full per-row ledger remains authoritative for additional subitems:
   single-closed-spline frame gap is fixed in the current increment; see the
   fresh evidence in [development notes](README.md). Recheck historical
   minimal-compiler GmshLibm diagnoses against current source.
+- Natural finite sphere/torus/B-spline/plane faces, closed natural solids,
+  crossed-cylinder seams/fuse images, centroidal CAD measures and the wedge
+  orientation are now implemented and default-wired. Remaining BREP families
+  include nondegenerate pcurve-only edges, hyperbolas/general offsets and
+  internal/external orientations; general quadric-bounded shell inertia still
+  rejects rather than approximating.
 - Full-quad and anisotropic integration with embedded, transfinite, smoothing,
   periodic/compound, and curved/scalar-field contexts.
 - NURBS trim/topology and general CAD Boolean/fillet contexts beyond the
@@ -76,16 +82,17 @@ the domain rows above. Do not restart completed designs from their old prose.
 ## Version 0.1.0 release
 
 - [ ] Complete all genuine required implementation work and fresh bug audits.
-- [ ] Support correctness/resource claims with evidence of the same scope.
+- [x] Support correctness/resource claims with evidence of the same scope.
 - [x] Keep only README Markdown among tracked root files, retain meaningful API reference
   material, and preserve third-party notices and historical evidence.
 - [x] Set version 0.1.0, declare dependency compatibility, retain the chosen MIT
   license and third-party notices, and enable supported-runtime CI.
-- [ ] Run final ordinary `Pkg.test()` on Julia 1.12 and 1.13; separately record
+- [x] Run final ordinary `Pkg.test()` on Julia 1.12 and 1.13; separately record
   any optimized compiler checks. Push verified source normally to `main` and
   verify the exact remote SHA.
 - [ ] Disclose substantial AI assistance and verify the maintainer's human
-  review/understanding required by General's registration policy.
+  review/understanding required by General's registration policy. AI assistance
+  is disclosed in the root README; human review is not yet verified.
 - [ ] Trigger Registrator for the final verified commit, resolve its actual
   checks, and verify the General registration merge and package installation.
   A version bump, comment, pull request, or tag alone is not registration.

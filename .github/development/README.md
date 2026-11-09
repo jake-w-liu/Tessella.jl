@@ -53,10 +53,29 @@ still required after the current implementation work.
 | Native BREP/XAO import | Julia 1.12.7 minimal and Julia 1.13.3 normal `-O2` each passed 639/639 native/neighbor checks with four threads and bounds enabled, actual exits 0. Seventeen owned source/test/fixture hashes were frozen and independently reviewed. Imports reconstruct shared analytic/spline topology and pcurves; public open/merge retain held state and bind XAO source references, names and groups. Existing native cube meshing retains positive tets and its exact boundary. Natural no-wire faces, nondegenerate pcurve-only edges and further curve/surface/orientation cases remain implementation work. |
 | Boundary inference and NoNew provenance | Julia 1.12.7 and 1.13.3 minimal each passed 3703/3703 topology, factory, periodic, provenance and retained-node assertions, bounds enabled, actual exits 0. Valid unmerged sweeps retain their literal boundary and source nodes; all 22 corruption mutations reject without changing state. A separate 15-check record/CAD gate passed on 1.13.3 in both minimal and normal `-O2` modes. The 59-check operation-provenance fixture is now part of the default suite. |
 | Precise inverse recovery | Julia 1.12.7 minimal passed 462/462 and Julia 1.13.3 normal `-O2` passed 595/595 inverse, native-pyramid, raw/POS and neighboring field checks, with four threads and bounds enabled, actual exits 0. A separate 12-check normal resource/isolation gate passed: eight tasks retained their precision/rounding scopes with four overlapping recoveries; an ordinary query allocates zero warmed bytes. The sampled rare 16384-bit recovery took 0.0858s/83.26MB total allocation. The new 33-check default regression preserves strict world/intrinsic/domain certificates and tests actual-map boundary queries, original physical points, reopened data and arithmetic-scope isolation. |
+| `461f84d` final combined checkpoint | Default `Pkg.test()` on clean, unchanged checkouts passed **4976/4976** on Julia 1.12.7 (91m40.5s) and **4976/4976** on Julia 1.13.3 (96m60.0s reported), minimal compilation and bounds enabled, actual exits 0. The suite now includes the native ONELAB process server and no-read/backpressure regressions, 44 fuse-image controls, crossed-cylinder seam/mass/centroid/inertia controls, 182 natural-BREP checks, 34 centroidal-measure checks and 720 wedge checks. WSL Ubuntu additionally passed ONELAB 135/135, inertia 34/34, wedge 720/720, natural 182/182, seam 140/140 and fuse images 134/134 after the Unix launcher/race fixes. |
 
 Normal allocation on the bounded truncated-file probes fell from about 2.4MB
 to 2.5–4.7KB. The resource checks remain below 100KB for declared counts through
 `typemax(Int)` and binary PLY; no giant allocation probe was used.
+
+The native ONELAB process server now launches real named clients, handles
+nested CONNECT clients, adopts complete vector/metadata stores, and owns its
+process trees on Windows and Unix. `DefineString` follows the Gmsh 4.15.2
+value/`Name` option contract, including empty server values. Finite run and
+connect deadlines are enforced by an independent watchdog that kills owned
+processes before closing a blocked response socket; WSL Ubuntu reproduced and
+verified the Unix `Cmd` launch, missing-executable, short nested-client and
+signal paths. The default suite includes no-read deadline, reset-under-
+backpressure, empty-parameter and ONELAB wire regressions.
+
+Native CAD measures now report Gmsh-compatible centroidal inertia for curves,
+faces, primitives, plane/cylinder/natural solids and conic boundaries, and
+cylinder-bounded solid centers of mass. Natural no-wire sphere/torus/B-spline/
+plane faces and closed natural solids are supported, including actual Face-mesh
+consumption; `add_wedge` now matches the public xy-trapezoid extruded along z
+control. Crossed-cylinder seams and the 44-case public fuse-image control are
+part of the default suite.
 
 Incomplete Pyramid P3–P9 model queries and PostView fields now use an exact
 symbolic expansion of the existing native edge-trace basis. The seven reference
@@ -202,6 +221,8 @@ files. They are local artifacts, not package dependencies:
 - `Tessella-cad-brep-xao-gate-{1127-min,1133-normal}-20261109.log`; the seventeen-file snapshot is recorded in `Tessella-cad-brep-xao-review-hashes-20261109.json`.
 - `Tessella-central-final-neighbors-{112,1133}-min-20261109.log` and `Tessella-view-central-product-final-1133-{min,normal}-20261109.log`.
 - `Tessella-view-inverse-recovery-gate-{112-min,1133-O2}-20261109.log` and `Tessella-view-inverse-recovery-resource-1133-O2-final-20261109.log`.
+- `Tessella-final-461f84d-{112,1133}-20261110.log` and matching `.exit` files (final ordinary defaults).
+- `Tessella-onelab-linuxfix-windows-{112,1133}-min-20261110.log`, `Tessella-occ-inertia-conic-1133-O2-20261109.log`, `Tessella-occ-wedge-fixed-1133-O2-20261109.log`, `Tessella-natural-final-112-min-20261109.log`, `Tessella-boolean-seam-inertia-1133-O2-20261109.log`, and `Tessella-fuse-images-final-112-min-20261109.log` are focused receipts. The Linux WSL matrix was run directly in Ubuntu with Julia 1.12.7; its terminal output is recorded in this development log, not as a Windows file.
 
 ## Release and earlier evidence
 
