@@ -56,12 +56,16 @@ function _geo_import_view_plan(sources,seed,caller)
     for (_,view) in result
         view.alias_of===nothing || (view.alias_of=get(original_by_copy,view.alias_of,view.alias_of))
     end
+    for staged in values(seed.memo)
+        staged.alias_of===nothing ||
+            (staged.alias_of=get(original_by_copy,staged.alias_of,staged.alias_of))
+    end
     # Unregistered owners can still be held by aliases. Publish their staged
     # data as well, even when the script removed the owner's public tag.
     updates=Tuple{Any,Any}[(original,staged) for (original,staged) in seed.memo]
     added=Tuple{Int,Any}[]
     for (tag,view) in result
-        if !haskey(seed.originals,tag)
+        if !haskey(seed.originals,tag) || view!==seed.memo[seed.originals[tag]]
             push!(added,(tag,view))
         end
     end

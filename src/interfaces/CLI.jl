@@ -1846,6 +1846,52 @@ function _session_barycentric_refine!()
     end
 end
 
+# Keep positional and tagged PostView selections bound to their actual input
+# when combination removes views or changes their positions in the session.
+function _session_postview_bindings(tags)
+    bindings=Tuple{Int,Int,String}[]
+    function integer_option(spec,name,default)
+        haskey(spec.options,name) || return default
+        value=tryparse(Float64,strip(spec.options[name]))
+        value!==nothing && isfinite(value) && isinteger(value) || return nothing
+        return try
+            Int(value)
+        catch error
+            error isa InexactError || error isa OverflowError || rethrow()
+            nothing
+        end
+    end
+    for (tag,spec) in API.FIELD_SPECS[]
+        lowercase(spec.kind)=="postview" || continue
+        source=integer_option(spec,"ViewTag",-1)
+        index=integer_option(spec,"ViewIndex",0)
+        deprecated=integer_option(spec,"IView",0)
+        (source===nothing || index===nothing || deprecated===nothing) && continue
+        if source<0
+            selected=haskey(spec.options,"ViewIndex") ? index : deprecated
+            for name in Iterators.reverse(spec.order)
+                name in ("ViewIndex","IView") && haskey(spec.options,name) || continue
+                selected=name=="ViewIndex" ? index : deprecated
+                break
+            end
+            0<=selected<length(tags) || continue
+            source=tags[selected+1]
+        end
+        source in tags || continue
+        push!(bindings,(tag,source,API.view.get_string(source,"Name")))
+    end
+    return bindings
+end
+
+function _session_combined_view(source,name,previous_tags,current_tags)
+    source in current_tags && return source
+    replacement=findfirst(tag->!(tag in previous_tags) &&
+        API.view.get_string(tag,"Name")==name*"_Combine",current_tags)
+    replacement===nothing && throw(ArgumentError(
+        "tessella: -combine lost background view '$name'"))
+    return current_tags[replacement]
+end
+
 # Session path: files route through `API.open`/`API.merge`/`API.model.add`,
 # option writes through `API.option`, meshing through `API.mesh.generate`,
 # post-mesh actions through `API.mesh.refine`/`classify_surfaces`/
@@ -1991,7 +2037,9 @@ function _session_main(files,preludes,numeric_options;
             source=Int(last(tags))
             push!(background_views,(source,API.view.get_string(source,"Name")))
         end
-        previous_tags=Set(Int.(API.view.get_tags()))
+        ordered_tags=Int.(API.view.get_tags())
+        previous_tags=Set(ordered_tags)
+        postview_bindings=combine ? _session_postview_bindings(ordered_tags) : Tuple{Int,Int,String}[]
         if combine
             errors_before=API.NATIVE_LOOKUP_QUERY_ERRORS[]
             API.view.combine("steps","name")
@@ -1999,14 +2047,12 @@ function _session_main(files,preludes,numeric_options;
                 push!(input_errors,API.NATIVE_MSG_LAST_ERROR[])
         end
         current_tags=Int.(API.view.get_tags())
+        for (field,source,name) in postview_bindings
+            API.mesh.field.set_number(field,"ViewTag",
+                _session_combined_view(source,name,previous_tags,current_tags))
+        end
         for (source,name) in background_views
-            if !(source in current_tags)
-                replacement=findfirst(tag->!(tag in previous_tags) &&
-                    API.view.get_string(tag,"Name")==name*"_Combine",current_tags)
-                replacement===nothing && throw(ArgumentError(
-                    "tessella: -combine lost background view '$name'"))
-                source=current_tags[replacement]
-            end
+            source=_session_combined_view(source,name,previous_tags,current_tags)
             tag=API.mesh.field.add("PostView")
             API.mesh.field.set_number(tag,"ViewTag",source)
             API.mesh.field.set_as_background_mesh(tag)

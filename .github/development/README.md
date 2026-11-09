@@ -25,6 +25,9 @@ The Opencode checkpoint `e18b989` passed the default package suite 1638/1638 on 
 The preceding box-skip source passed 1638/1638 on Julia 1.12.7, actual exit 0,
 16m32.6s; log `C:/Users/User/Tessella-default-112-final-20261109.log`. The final
 guard only narrows the skip when a background field is selected.
+An independent detached checkout of `e18b989` also passed all 1638 assertions
+on Julia 1.12.7 with ordinary `Pkg.test()`, actual exit 0 (22m53.9s).
+Log: `C:/Users/User/Tessella-verify-e18b989-112-20261109.log`.
 `geometry/model_entity_identity_test.jl` passed on the final source, including
 16/16 primitive/Boolean volume identity assertions (4m37.3s), actual exit 0.
 A clean temporary
@@ -56,6 +59,27 @@ checks: 162/162 functional assertions, actual exit 0. Logs are
 These scoped receipts do not qualify the subsequent closed-chart, view,
 box-sizing or oversized-Newton-vector work. A combined package run remains
 required after those changes.
+
+### GEO plugin publication and combined field bindings
+
+Fresh regressions found five further frontend defects: a plugin detached held
+list aliases; an explicit replacement view tag was discarded; imported model
+views retained unpublished source slots; plugin model data substituted row
+positions for actual imported node UIDs; and CLI combination left existing
+PostView tag/index selections pointing at removed sources. The staged plugin
+carrier now retains its owner, classification and publication bindings, and
+CLI combination transports the existing field selections to the combined view.
+
+Julia 1.12.7 and 1.13.3 bounds-enabled minimal checks each passed the 256-check
+view scope and the 162-check import/merge/CLI scope, actual exits 0. Julia
+1.13.3 normal optimization passed the 52 new regression checks, exit 0.
+Logs: `Tessella-view-scoped-gates-{1127,1133}-min-20261109.log`,
+`Tessella-view-import-cli-{1127,1133}-min-20261109.log`, and
+`Tessella-view-final-gates-1133-normal-20261109.log` in `C:/Users/User/`.
+The first normal plugin block took 11m13s; no compiler performance improvement
+is claimed. The import rollback fixture now supplies explicit fatal `Exit 2`
+while preserving all assertions: its old recoverable-error fixture also failed
+66/74 on clean `e18b989`. These receipts qualify this frontend increment.
 
 ### Native MeshAdapt and GEO view transport
 

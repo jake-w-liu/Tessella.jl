@@ -125,4 +125,26 @@ end
         @test Tessella.validate(E.read_mixed_msh(bgm_output)).ok
     end
 end
+
+@testset "CLI combination preserves GEO PostView selectors" begin
+    mktempdir() do dir
+        views=joinpath(dir,"sizes.pos")
+        write(views,"View \"same\" { SL(0,0,0,1,0,0){.5,.5}; };" *
+            "View \"same\" { SL(0,0,0,1,0,0){.5,.5}; };" *
+            "View \"other\" { SL(0,0,0,1,0,0){.9,.9}; };")
+        before=read(views)
+        source=joinpath(dir,"line.geo");output=joinpath(dir,"line.msh")
+        prefix="General.Terminal=0;Mesh.MeshSizeFromPoints=0;" *
+            "Mesh.MeshSizeExtendFromBoundary=0;Merge \"sizes.pos\";" *
+            "Point(1)={0,0,0,1};Point(2)={1,0,0,1};Line(1)={1,2};Field[1]=PostView;"
+        for selection in ("ViewTag=1;","ViewIndex=0;","IView=0;",
+                "IView=2;Field[1].ViewIndex=0;","ViewIndex=2;Field[1].IView=0;","")
+            field=isempty(selection) ? "" : "Field[1]."*selection
+            write(source,prefix*field*"Background Field=1;")
+            @test C.main([source,"-combine","-1","-o",output])==output
+            @test size(E.read_mixed_msh(output).coords,2)==3
+        end
+        @test read(views)==before
+    end
+end
 end

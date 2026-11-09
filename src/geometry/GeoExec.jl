@@ -12926,6 +12926,8 @@ end
 function _geo_plugin_run!(api,name,m,context,caller)
     lock(api.STATE_LOCK) do
         store=get!(_GEO_EXEC_VIEWS,context,Any[])
+        owned_views=haskey(_GEO_EXEC_VIEW_CALLBACK,context) ||
+            any(view->view isa _GeoSessionView,store)
         saved_views=collect(pairs(api.SESSION_VIEWS))
         saved_view_max=api.VIEW_TAG_MAX[]
         saved_errors=api.NATIVE_LOOKUP_QUERY_ERRORS[];saved_message=api.NATIVE_MSG_LAST_ERROR[]
@@ -12933,6 +12935,7 @@ function _geo_plugin_run!(api,name,m,context,caller)
         saved_name=api.MODEL_NAME[]
         saved_file=api.MODEL_FILE_NAME[]
         saved_mesh=api.LAST_MESH[]
+        saved_class=api.LAST_MESH_CLASS[]
         saved_partition=api.LAST_MESH_PARTITION[]
         slot=api._new_slot(m.name)
         slot.model=m;slot.mesh=context.mesh
@@ -12947,7 +12950,9 @@ function _geo_plugin_run!(api,name,m,context,caller)
                 caller;initial_max_node_tag=context.mesh_node_max,
                 initial_max_element_tag=context.mesh_element_max)
             actual_input[2]===nothing && (actual_input=nothing)
-            actual_input!==nothing && (slot.mesh=actual_input[2])
+            if actual_input!==nothing
+                slot.mesh=actual_input[2];slot.class=actual_input[3]
+            end
         end
         empty!(api.SESSION_VIEWS)
         try
@@ -12960,6 +12965,7 @@ function _geo_plugin_run!(api,name,m,context,caller)
             api.MODEL_NAME[]=slot.name
             api.MODEL_FILE_NAME[]=context.file_name
             api.LAST_MESH[]=slot.mesh
+            api.LAST_MESH_CLASS[]=slot.class
             api.LAST_MESH_PARTITION[]=nothing
             push!(api.MODEL_SLOTS,slot)
             api._plugin_entry(name,caller).run_fn(
@@ -12991,7 +12997,10 @@ function _geo_plugin_run!(api,name,m,context,caller)
             empty!(store)
             for tag in tags
                 data=api.SESSION_VIEWS[tag]
-                push!(store,data.model_kind===nothing ?
+                # Session-backed execution must retain the staged owner and
+                # alias links. Flattening a list alias into a PosView loses
+                # the object binding used by the import publication plan.
+                push!(store,!owned_views && data.model_kind===nothing && data.alias_of===nothing ?
                     _geo_retag_view(api._native_list_view_pos(data,caller),tag) : _GeoSessionView(tag,data))
             end
             _GEO_EXEC_VIEW_MAX[context]=api.VIEW_TAG_MAX[]
@@ -13004,6 +13013,7 @@ function _geo_plugin_run!(api,name,m,context,caller)
             api.MODEL_NAME[]=saved_name
             api.MODEL_FILE_NAME[]=saved_file
             api.LAST_MESH[]=saved_mesh
+            api.LAST_MESH_CLASS[]=saved_class
             api.LAST_MESH_PARTITION[]=saved_partition
             empty!(api.SESSION_VIEWS)
             api.VIEW_TAG_MAX[]=saved_view_max

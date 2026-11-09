@@ -261,7 +261,7 @@ function _model_import_prepare_result(result,path,options,diagnostics;legacy=fal
     geo_plan=geo_views===nothing ? nothing : _geo_import_view_plan(result.views,geo_views,caller)
     if geo_plan!==nothing
         for (_,view) in geo_plan.added
-            for context in values(view.model_contexts)
+            for context in values(_view_data_owner(view).model_contexts)
                 source=context.model_slot
                 source.model===result.model && _model_import_rebind_views!([view],source,slot)
             end
@@ -278,7 +278,8 @@ end
 
 function _model_import_rebind_views!(views,source,target)
     source===target && return nothing
-    for view in views
+    for source_view in views
+        view=_view_data_owner(source_view)
         view.model_step_ranges=[_NativeViewStepRange(range.first,range.last,
             range.model_slot===source ? target : range.model_slot,range.components)
             for range in view.model_step_ranges]
@@ -295,6 +296,8 @@ function _model_import_publish!(plan;legacy=false)
         isempty(_native_lookup_node_tags_locked()) && isempty(first(_native_lookup_element_bindings_locked()))
     slot=reuse && index!=0 ? MODEL_SLOTS[index] : plan.slot
     _model_import_rebind_views!(plan.views,plan.slot,slot)
+    plan.geo_plan===nothing || _model_import_rebind_views!(
+        (view for (_,view) in plan.geo_plan.added),plan.slot,slot)
     # All parsing, row transport, lookup validation and allocation plans are
     # complete. Existing held view slots retain their identities.
     _slot_capture_locked!()

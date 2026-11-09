@@ -108,4 +108,111 @@ end
         @test empty!=used
     end
 end
+
+@testset "GEO plugin output retains held and newly created list aliases" begin
+    session() do dir
+        source=A.view.add("source",100)
+        A.view.add_list_data(source,"SP",1,[0.,0.,0.,1.])
+        alias=A.view.add_alias(source,false,200)
+        owner=A.SESSION_VIEWS[source];alias_object=A.SESSION_VIEWS[alias]
+        geo=joinpath(dir,"plugin.geo")
+        write(geo,"Plugin(Probe).View=100;Plugin(Probe).X=0;" *
+            "Plugin(Probe).Y=0;Plugin(Probe).Z=0;Plugin(Probe).Run;Alias View[0];")
+        A.merge(geo)
+        @test A.view.get_tags()==[100,200,201,202]
+        @test A.SESSION_VIEWS[source]===owner && A.SESSION_VIEWS[alias]===alias_object
+        @test A.SESSION_VIEWS[alias].alias_of===owner
+        @test A.SESSION_VIEWS[202].alias_of===owner
+        @test first(A.view.probe(201,0.,0.,0.))==[1.]
+        A.view.add_list_data(source,"SP",1,[0.,0.,0.,2.])
+        @test A.view.get_list_data(alias)==A.view.get_list_data(source)
+        @test A.view.get_list_data(202)==A.view.get_list_data(source)
+        # A fatal script can mutate staged owners and create plugin output;
+        # neither operation may detach a held alias or publish partial data.
+        before=A.view.get_tags();values=A.view.get_list_data(source)
+        write(geo,"Plugin(Probe).View=100;Plugin(Probe).Run;Delete View[0];Exit 2;")
+        @test_throws ArgumentError A.merge(geo)
+        @test A.view.get_tags()==before && A.view.get_list_data(source)==values
+        @test A.SESSION_VIEWS[alias].alias_of===owner
+        A.view.remove(source)
+        @test first(A.view.probe(alias,0.,0.,0.))==[2.]
+        @test first(A.view.probe(202,0.,0.,0.))==[2.]
+    end
+end
+
+@testset "GEO plugin model views publish replacements and live source slots" begin
+    line=raw"""
+$MeshFormat
+2.2 0 8
+$EndMeshFormat
+$Nodes
+2
+11 0 0 0
+21 1 0 0
+$EndNodes
+$Elements
+1
+31 1 2 0 1 11 21
+$EndElements
+"""
+    for import_file in (A.open,A.merge)
+        session() do dir
+            retained=nothing;retained_owner=nothing;retained_slot=nothing
+            if import_file===A.merge
+                # Merge into a populated model whose already held model view
+                # must keep its source slot while the new model view is bound.
+                existing=replace(line,"11 0 0 0"=>"101 0 1 0",
+                    "21 1 0 0"=>"121 1 1 0","31 1 2 0 1 11 21"=>"131 1 2 0 1 101 121")
+                existing_path=joinpath(dir,"existing.msh");write(existing_path,existing)
+                A.open(existing_path)
+                retained=A.view.add("retained model",250)
+                A.view.add_model_data(retained,0,A.model.get_current(),"NodeData",
+                    [101,121],[[3.],[3.]])
+                retained_owner=A.SESSION_VIEWS[retained]
+                retained_slot=only(values(retained_owner.model_contexts)).model_slot
+            end
+            source=A.view.add("old source",100)
+            A.view.add_list_data(source,"SP",1,[0.,0.,0.,1.])
+            alias=A.view.add_alias(source,false,200);old=A.SESSION_VIEWS[source]
+            write(joinpath(dir,"line.msh"),line)
+            geo=joinpath(dir,"model-view.geo")
+            create="Merge \"line.msh\";Plugin(NewView).ViewTag=100;" *
+                "Plugin(NewView).Value=7;Plugin(NewView).Run;"
+            # Replacing a tag publishes a new view at that tag; a held alias
+            # keeps the old owner's data, as direct Plugin(NewView) does.
+            write(geo,create);import_file(geo)
+            @test A.SESSION_VIEWS[source]!==old
+            @test A.SESSION_VIEWS[source].model_kind=="NodeData"
+            @test Set(A.view.get_model_data(source,0)[2])==
+                Set(import_file===A.merge ? UInt64[11,21,101,121] : UInt64[11,21])
+            @test A.SESSION_VIEWS[alias].alias_of===old
+            @test first(A.view.probe(alias,0.,0.,0.))==[1.]
+            context=only(values(A.SESSION_VIEWS[source].model_contexts))
+            @test context.model_slot===A.MODEL_SLOTS[A._current_slot_index_locked()]
+            @test first(A.view.probe(source,.25,0.,0.))==[7.]
+            if retained!==nothing
+                @test A.SESSION_VIEWS[retained]===retained_owner
+                @test only(values(retained_owner.model_contexts)).model_slot===retained_slot
+                @test first(A.view.probe(retained,.25,1.,0.))==[3.]
+            end
+            held=A.SESSION_VIEWS[source];data=A.view.get_model_data(source,0)
+            write(geo,"Plugin(NewView).ViewTag=100;Plugin(NewView).Value=9;" *
+                "Plugin(NewView).Run;Exit 2;")
+            @test_throws ArgumentError A.merge(geo)
+            @test A.SESSION_VIEWS[source]===held && A.view.get_model_data(source,0)==data
+        end
+        session() do dir
+            write(joinpath(dir,"line.msh"),line)
+            geo=joinpath(dir,"model-alias.geo")
+            write(geo,"Merge \"line.msh\";Plugin(NewView).Value=5;" *
+                "Plugin(NewView).Run;Alias View[0];Delete View[0];")
+            import_file(geo)
+            alias=only(A.view.get_tags());owner=A._view_data_owner(A.SESSION_VIEWS[alias])
+            @test A.SESSION_VIEWS[alias].alias_of===owner
+            @test only(values(owner.model_contexts)).model_slot===
+                A.MODEL_SLOTS[A._current_slot_index_locked()]
+            @test first(A.view.probe(alias,.25,0.,0.))==[5.]
+        end
+    end
+end
 end

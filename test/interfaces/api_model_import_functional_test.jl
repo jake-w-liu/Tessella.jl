@@ -128,8 +128,10 @@ function exercise(directory)
             @test A.option("Mesh.MeshSizeFactor")==2.5 && A.option("Mesh.CharacteristicLengthFactor")==2.5
             A.logger.start();before=state()
             failure=joinpath(directory,"failure.geo")
-            Base.write(failure,"Mesh.MeshSizeFactor=8;General.AbortOnError=0;RecombineMesh;Point(91)={0,0,0,1};Point(92)={4,0,0,1};Line(2)={99,100};\n")
+            Base.write(failure,"Mesh.MeshSizeFactor=8;General.AbortOnError=0;RecombineMesh;Point(91)={0,0,0,1};Point(92)={4,0,0,1};Line(2)={99,100};Exit 2;\n")
             # Empty RecombineMesh produces diagnostic events without generating a mesh.
+            # Statement diagnostics are recoverable; a nonzero Exit supplies
+            # the fatal execution required to check publication rollback.
             for endpoint in (A.open,A.open_geo!)
                 @test_throws ArgumentError endpoint(failure)
                 @test state()==before
