@@ -2,7 +2,7 @@
     MeshTypes
 
 Compact, cache-friendly mesh container and its topology / quality / checksum
-machinery (PLAN.md §3 "MeshTypes"; DEVELOPMENT.md "Mesh-CRC checksum").
+machinery.
 
 Storage is column-major and index-compact:
 
@@ -970,7 +970,7 @@ Base.show(io::IO, d::MeshDiagnostic) =
     validate(m; require_positive_tets=true,
              require_manifold_tris=(ntets(m)==0)) -> MeshDiagnostic
 
-Completeness contract (DEVELOPMENT.md): a mesh is either validated or carries a
+Completeness contract: a mesh is either validated or carries a
 precise diagnostic — never a silent defect. Checks index bounds (already enforced
 at construction), non-degenerate cells, positive tet volumes, finite coordinates,
 and non-manifold cells. Standalone surface meshes require a 2-manifold by default.
@@ -1319,7 +1319,7 @@ end
 """
     mesh_crc(m) -> NamedTuple
 
-Deterministic regression checksum (DEVELOPMENT.md "Mesh-CRC checksum"):
+Deterministic regression checksum:
 `(n_nodes, n_segs, n_tris, n_tets, bbox, dihedral (min,mean), radius-edge
 (min,mean), n_boundary_faces, sha)` where `sha` is the SHA-256 of the mesh's
 *canonically sorted* connectivity (invariant to per-cell vertex order and cell

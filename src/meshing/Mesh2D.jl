@@ -1,7 +1,7 @@
 """
     Mesh2D
 
-Stage-1 planar meshing (PLAN.md §3 "Mesh2D"): incremental **Delaunay**
+Planar meshing: incremental **Delaunay**
 triangulation (Bowyer–Watson) with a symbolic point at infinity, **constrained
 Delaunay** (CDT) for planar straight-line graphs, and **Ruppert** quality
 refinement.

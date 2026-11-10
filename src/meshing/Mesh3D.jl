@@ -1,8 +1,7 @@
 """
     Mesh3D
 
-Stage-3 three-dimensional meshing (PLAN.md §3 "Mesh3D") — the robustness
-milestone. This module owns the 3-D Delaunay kernel, constrained
+Three-dimensional meshing. This module owns the 3-D Delaunay kernel, constrained
 tetrahedralization / **boundary recovery** (recovering a given closed surface
 triangulation as facets of the tet mesh), and sliver handling. It is exactly the
 layer where gmsh 4.13/4.15 fail on the enclosure coax junction.
@@ -5783,8 +5782,8 @@ end
     tets_per_region(m) -> Dict{Int32,Int}
 
 Tet count per `tet_tag` region — the mandatory anti-false-positive check: a valid
-multi-region volume mesh has a *positive* count in every region (DEVELOPMENT.md:
-"No empty volumes" is vacuous if a region is empty).
+multi-region volume mesh has a *positive* count in every region.
+A global nonempty-volume check is insufficient if an individual region is empty.
 """
 function tets_per_region(m::Mesh)
     d = Dict{Int32,Int}()

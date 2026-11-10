@@ -1,7 +1,7 @@
 """
     HighOrder
 
-Stage-6 high-order (curved) elements (PLAN.md §4 Stage 6). This module generates
+High-order (curved) elements. This module generates
 **quadratic (10-node, P2) tetrahedra** from a linear tet [`Mesh`](@ref) by adding
 one shared node at the midpoint of every edge, in Gmsh's type-11 node order
 (4 corners, then the 6 edge nodes on edges `(1,2),(2,3),(3,1),(1,4),(3,4),(2,4)`).

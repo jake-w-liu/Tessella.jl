@@ -1,7 +1,7 @@
 """
     MeshSurface
 
-Stage-2 surface meshing (PLAN.md §3, "mesh the flat/patch/coax faces"). Two
+Surface meshing. Two
 routes, both reducing a surface to the exact 2-D machinery of [`Mesh2D`](@ref):
 
 * **Planar faces** — a face bounded by coplanar loops (outer + holes). Boundary

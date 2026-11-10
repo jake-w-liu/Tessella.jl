@@ -1,7 +1,7 @@
 """
     Optimize
 
-Stage-4 mesh optimization and quality reporting (PLAN.md §3 "Optimize"). Operates
+Mesh optimization and quality reporting. Operates
 on finalized tetrahedral [`Mesh`](@ref)es:
 
 * [`mesh_quality`](@ref) — dihedral-angle and radius-edge statistics, minimum tet

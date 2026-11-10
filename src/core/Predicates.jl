@@ -2,7 +2,7 @@
     Predicates
 
 Exact, adaptive geometric predicates — the correctness foundation of the whole
-mesher (PLAN.md §3, DEVELOPMENT.md "Predicate policy"). Floating-point predicate
+mesher. Floating-point predicate
 inconsistency is *the* root cause of the "overlapping facets / empty volume"
 failures we are building Tessella to defeat, so every sign returned here is
 provably the true sign of an exact determinant.
