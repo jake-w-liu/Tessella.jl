@@ -354,14 +354,6 @@ function _plugin_element_index(mesh,public,tag)
     return Int(tag)
 end
 
-function _plugin_model_public_tags(slot,mesh)
-    class=slot.class
-    class!==nothing && class.mesh===mesh && class.public_tags!==nothing &&
-        return class.public_tags
-    return mesh isa MixedMesh && mesh.entity_data!==nothing ?
-        _cache_public_tags(mesh) : nothing
-end
-
 function _plugin_model_mesh(slot,caller::AbstractString)
     slot===nothing && throw(ArgumentError("$caller: model view has no model"))
     return _plugin_model_mesh_context(slot,_plugin_model_contexts(),caller).mesh
@@ -378,8 +370,8 @@ end
 function _plugin_model_elements(view,key,caller::AbstractString)
     ctx=view.model_contexts[key];entity_tags,values,nc=view.model_data[key]
     nc>0 || throw(ArgumentError("$caller: malformed model data component count"))
-    mesh=_plugin_model_mesh(ctx.model_slot,caller)
-    public=_plugin_model_public_tags(ctx.model_slot,mesh)
+    mesh_context=_plugin_model_mesh_context(ctx.model_slot,_plugin_model_contexts(),caller)
+    mesh=mesh_context.mesh;public=mesh_context.public
     kind=view.model_kind
     counts=get(ctx,:counts,Int32[])
     offsets=Vector{Int}(undef,length(entity_tags)+1);offsets[1]=1
@@ -946,6 +938,7 @@ end
 end
 
 function _plugin_model_mesh_context(slot,contexts,caller)
+    slot===nothing && throw(ArgumentError("$caller: model view has no model"))
     previous=get(contexts,slot,nothing)
     _plugin_model_context_matches(previous,slot) && return previous
     mesh=_native_view_writer_mesh(slot,caller)
@@ -987,16 +980,16 @@ function _plugin_probe_model(view,p,caller::AbstractString;dimension::Int=-1)
             rec=mesh_element_record(mesh,index)
             uvw,=_local_coordinates(mesh,index,p,caller)
             spec=msh_spec(Int(rec.element_type))
-            N=if spec.order<=1
+            cell_weights=if spec.order<=1
                 MeshPointLocation._shape_functions(spec.family,uvw...,caller)
             else
-                _,values,_=mesh_basis_functions(Int(rec.element_type),collect(uvw),"Lagrange";caller)
-                values
+                _,basis_values,_=mesh_basis_functions(Int(rec.element_type),collect(uvw),"Lagrange";caller)
+                basis_values
             end
-            length(N)==length(rec.node_tags) || throw(ArgumentError(
+            length(cell_weights)==length(rec.node_tags) || throw(ArgumentError(
                 "$caller: element basis does not cover the actual nodes"))
             (element_uid=public.element_tags[index],
-                node_uids=public.node_tags[rec.node_tags],weights=N)
+                node_uids=public.node_tags[rec.node_tags],weights=cell_weights)
         end
         sample===nothing && continue
         entity_tags,values,nc=view.model_data[key]
@@ -1525,10 +1518,10 @@ function _plugin_exec_new_view(spec::_PluginSpec,caller::AbstractString)
     index=_current_slot_index_locked()
     index==0 && throw(ArgumentError("$caller: no current model"))
     slot=MODEL_SLOTS[index]
-    mesh=slot.mesh
-    mesh===nothing && throw(ArgumentError(
+    mesh_context=_plugin_model_mesh_context(slot,_plugin_model_contexts(),caller)
+    mesh=mesh_context.mesh;public=mesh_context.public
+    nnodes(mesh)>0 || throw(ArgumentError(
         "$caller: no mesh available to create the view: please mesh your model"))
-    public=_mesh_public_tags(mesh)
     tags=public===nothing ?
         UInt64[UInt64(i) for i in 1:nnodes(mesh)] : copy(public.node_tags)
     flat=fill(Float64(value),length(tags)*ncomp)
@@ -2428,8 +2421,21 @@ end
 # Owning entity `(dim, tag)` of dense element `index` from the mesh
 # classification, for `PhysicalGroup` filtering on model views — the
 # `ge->physicals` lookup of the upstream entity-bucket scan. `nothing` when
-# the classification is absent or has no owners for the family.
+# neither actual mesh metadata nor classification has an owner for the family.
 function _plugin_element_entity(mesh,class,index::Int)
+    if mesh isa MixedMesh && mesh.entity_data!==nothing &&
+            (class===nothing || class.mesh!==mesh)
+        offset=0
+        for (bi,block) in enumerate(mesh.blocks)
+            count=size(block.nodes,2)
+            if offset<index<=offset+count
+                return (Int(msh_dimension(block.msh)),
+                    Int(mesh.entity_data.block_entities[bi][index-offset]))
+            end
+            offset+=count
+        end
+        return nothing
+    end
     class===nothing && return nothing
     if mesh isa Mesh
         tri_off,tet_off,_=_mesh_element_offsets(mesh)
@@ -2576,9 +2582,8 @@ function _plugin_exec_matheval(spec::_PluginSpec,caller::AbstractString)
     if pgroup>0 && view.model_kind!==nothing
         keys=_plugin_model_keys(view)
         slot=view.model_contexts[first(keys)].model_slot
-        mesh=slot.mesh;class=slot.class
-        public=mesh===nothing ? nothing : _mesh_public_tags(mesh)
-        entity_lookup=(mesh,class,public,slot.model)
+        mesh_context=_plugin_model_mesh_context(slot,_plugin_model_contexts(),caller)
+        entity_lookup=(mesh_context.mesh,nothing,mesh_context.public,slot.model)
     end
     drop_all=pgroup>0 && entity_lookup===nothing
     vars=_PluginEvalVars(zeros(9),zeros(9))
@@ -4934,12 +4939,8 @@ function _plugin_exec_meshvolume(spec::_PluginSpec,caller::AbstractString)
     index=_current_slot_index_locked()
     index==0 && throw(ArgumentError("$caller: no current model"))
     slot=MODEL_SLOTS[index]
-    mesh=slot.mesh
-    mesh===nothing && throw(ArgumentError(
-        "$caller: Plugin(MeshVolume) needs a mesh"))
-    class=slot.class===nothing ? _cached_classification_locked(mesh) :
-        slot.class
-    public=_mesh_public_tags(mesh)
+    mesh_context=_plugin_model_mesh_context(slot,_plugin_model_contexts(),caller)
+    mesh=mesh_context.mesh
     _,_,total=_mesh_element_offsets(mesh)
     total>0 || throw(ArgumentError("$caller: Plugin(MeshVolume) needs a mesh"))
     vol=0.0;nelem=0
@@ -4950,11 +4951,9 @@ function _plugin_exec_meshvolume(spec::_PluginSpec,caller::AbstractString)
         (dim<0 || rec.dimension==dim) || continue
         # Upstream collects `groups[physical]` entities unless physical == -1.
         if physical != -1
-            entity=_plugin_element_entity(mesh,class,index)
+            entity=_plugin_element_entity(mesh,nothing,index)
             entity===nothing && continue
-            phys=get(class.physicals,entity,Int32[])
-            isempty(phys) && continue
-            Int32(physical) in phys || continue
+            entity[2] in get(slot.model.physical,(entity[1],physical),Int[]) || continue
         end
         spec_rec=msh_spec(Int(rec.element_type))
         kind=get(_PLUGIN_FAMILY_KIND,spec_rec.family,nothing)
@@ -7551,11 +7550,8 @@ function _plugin_exec_gausspoints(spec::_PluginSpec,caller::AbstractString)
     index=_current_slot_index_locked()
     index==0 && throw(ArgumentError("$caller: no current model"))
     slot=MODEL_SLOTS[index]
-    mesh=slot.mesh
-    mesh===nothing && throw(ArgumentError("$caller: No entities"))
-    class=slot.class===nothing ? _cached_classification_locked(mesh) :
-        slot.class
-    public=_mesh_public_tags(mesh)
+    mesh_context=_plugin_model_mesh_context(slot,_plugin_model_contexts(),caller)
+    mesh=mesh_context.mesh;public=mesh_context.public
     _,_,total=_mesh_element_offsets(mesh)
     total>0 || throw(ArgumentError("$caller: No entities"))
     flat=Float64[]
@@ -7564,11 +7560,9 @@ function _plugin_exec_gausspoints(spec::_PluginSpec,caller::AbstractString)
         rec.dimension==dim || continue
         # Upstream filters to `groups[physical]` whenever `physical` is set.
         if physical!=0
-            entity=_plugin_element_entity(mesh,class,index)
+            entity=_plugin_element_entity(mesh,nothing,index)
             entity===nothing && continue
-            phys=get(class.physicals,entity,Int32[])
-            isempty(phys) && continue
-            Int32(physical) in phys || continue
+            entity[2] in get(slot.model.physical,(entity[1],physical),Int[]) || continue
         end
         etag=public===nothing ? UInt64(index) :
             get(public.element_tags,index,UInt64(index))
@@ -7653,9 +7647,8 @@ function _plugin_exec_analyzemeshquality(spec::_PluginSpec,
     index=_current_slot_index_locked()
     index==0 && throw(ArgumentError("$caller: no current model"))
     slot=MODEL_SLOTS[index]
-    mesh=slot.mesh
-    mesh===nothing && throw(ArgumentError(
-        "$caller: Plugin(AnalyseMeshQuality) needs a mesh"))
+    mesh_context=_plugin_model_mesh_context(slot,_plugin_model_contexts(),caller)
+    mesh=mesh_context.mesh
     _,_,total=_mesh_element_offsets(mesh)
     total>0 || throw(ArgumentError(
         "$caller: Plugin(AnalyseMeshQuality) needs a mesh"))
@@ -7663,7 +7656,7 @@ function _plugin_exec_analyzemeshquality(spec::_PluginSpec,
     (asked<0 || asked>4) && (asked=model_dim)
     dims=asked==4 ? [2,3] : [asked]
     filter!(d->d<=model_dim,dims)
-    public=_mesh_public_tags(mesh)
+    public=mesh_context.public
     # Per-dim tag vectors preserving mesh order.
     per_dim=Dict{Int,Vector{UInt64}}(d=>UInt64[] for d in dims)
     for index in 1:total
@@ -7678,23 +7671,24 @@ function _plugin_exec_analyzemeshquality(spec::_PluginSpec,
     for d in dims
         tags=per_dim[d]
         isempty(tags) && continue
+        indices=[_plugin_element_index(mesh,public,tag) for tag in tags]
         # Upstream `jacobianBasedQuality::minMaxJacobianDeterminant` on a
         # straight segment gives the constant det J = length/2 (reference
         # length 2); a zero-length segment collapses to 0.
         if d==1
-            lens=mesh_element_qualities(mesh,tags,"minEdge")
+            lens=mesh_element_qualities(mesh,indices,"minEdge")
             minj=lens./2;maxj=copy(minj)
             ige=compute_ige ?
-                mesh_element_qualities(mesh,tags,"minSIGE") : Float64[]
+                mesh_element_qualities(mesh,indices,"minSIGE") : Float64[]
             icn=compute_icn ?
-                mesh_element_qualities(mesh,tags,"minSICN") : Float64[]
+                mesh_element_qualities(mesh,indices,"minSICN") : Float64[]
         else
-            minj=mesh_element_qualities(mesh,tags,"minDetJac")
-            maxj=mesh_element_qualities(mesh,tags,"maxDetJac")
+            minj=mesh_element_qualities(mesh,indices,"minDetJac")
+            maxj=mesh_element_qualities(mesh,indices,"maxDetJac")
             ige=compute_ige ?
-                mesh_element_qualities(mesh,tags,"minSIGE") : Float64[]
+                mesh_element_qualities(mesh,indices,"minSIGE") : Float64[]
             icn=compute_icn ?
-                mesh_element_qualities(mesh,tags,"minSICN") : Float64[]
+                mesh_element_qualities(mesh,indices,"minSICN") : Float64[]
         end
         if create_view
             # The minJ/maxJ view exists only when `JacobianDeterminant` set;
