@@ -43,6 +43,7 @@ include("functional/fixtures.jl")
         "fields/finite_difference_range_test.jl",
         "fields/restrict_anisotropic_test.jl",
         "fields/metric_spectral_range_test.jl",
+        "fields/metric_spectrum_certificate_test.jl",
         "fields/axial_field_geometry_test.jl",
         "fields/postview_inverse_convergence_test.jl",
         "fields/postview_thin_geometry_test.jl",

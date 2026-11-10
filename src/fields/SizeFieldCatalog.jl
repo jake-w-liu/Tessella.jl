@@ -176,12 +176,44 @@ function _sym3_eigh_high_precision(a11,a22,a33,a12,a13,a23)
     return map(tofloat,values),map(v->map(Float64,v),vectors)
 end
 
+function _metric_spectrum_certified(m::Metric3,values,vectors)
+    all(value->isfinite(value) && value>0,values) || return false
+    all(vector->all(isfinite,vector),vectors) || return false
+    bits=max(maximum(precision,values),maximum(v->maximum(precision,v),vectors))
+    # Rational(BigFloat) scales through ldexp in the current precision. Retain
+    # every held mantissa bit before forming exact dyadic residuals.
+    return setprecision(BigFloat,bits) do
+        R=Rational{BigInt};tolerance=R(BigInt(1),BigInt(1)<<80)
+        matrix=((R(m.m11),R(m.m12),R(m.m13)),
+                (R(m.m12),R(m.m22),R(m.m23)),
+                (R(m.m13),R(m.m23),R(m.m33)))
+        axes=map(vector->map(R,vector),vectors)
+        for index in 1:3
+            vector=axes[index]
+            abs(sum(abs2,vector)-1)<=tolerance || return false
+            for other in 1:index-1
+                abs(sum(vector[k]*axes[other][k] for k in 1:3))<=tolerance || return false
+            end
+            eigenvalue=R(values[index])
+            residual=sum(abs(sum(matrix[row][column]*vector[column] for column in 1:3)-
+                eigenvalue*vector[row]) for row in 1:3)
+            residual<=tolerance*eigenvalue*maximum(abs,vector) || return false
+        end
+        return true
+    end
+end
+
 @noinline function _metric_big_spectrum(m::Metric3)
     for bits in (256,512,1024,2048,4096,8192)
         values,vectors=_sym3_eigh_big(m.m11,m.m22,m.m33,m.m12,m.m13,m.m23;bits)
-        all(>(0),values) && return values,vectors
+        _metric_spectrum_certified(m,values,vectors) && return values,vectors
     end
-    throw(ErrorException("metric eigensystem: positive spectrum could not be resolved"))
+    throw(ErrorException("metric eigensystem: positive spectrum could not be certified"))
+end
+
+@noinline function _metric_eigenvalues_precise(m::Metric3)
+    values,_=_metric_big_spectrum(m)
+    return _sort3(map(Float64,values))
 end
 
 @noinline function _metric_principal_sizes_big(m::Metric3)
@@ -237,7 +269,10 @@ end
 end
 """Return the three eigenvalues of `m` in ascending order."""
 function metric_eigenvalues(m::Metric3)
+    m.m12==0 && m.m13==0 && m.m23==0 && return _sort3((m.m11,m.m22,m.m33))
     λ,_=_sym3_eigh(m.m11,m.m22,m.m33,m.m12,m.m13,m.m23)
+    (!all(isfinite,λ) || minimum(λ)<=4096eps(Float64)*maximum(abs,λ)) &&
+        return _metric_eigenvalues_precise(m)
     return _sort3(λ)
 end
 
@@ -302,7 +337,8 @@ function metric_aniso_cap(m::Metric3,aniso_max::Real)
     amax=Float64(aniso_max)
     (isfinite(amax) && amax>0 && amax<1e33) || return m
     values,vectors=_sym3_eigh(m.m11,m.m22,m.m33,m.m12,m.m13,m.m23)
-    (any(!isfinite,values) || minimum(values)<floatmin(Float64)) &&
+    (any(!isfinite,values) || minimum(values)<floatmin(Float64) ||
+        minimum(values)<=4096eps(Float64)*maximum(abs,values)) &&
         return _metric_aniso_cap_extreme(m,amax)
     order=sortperm(collect(values))
     λmin=values[order[1]]
@@ -1617,8 +1653,8 @@ function _matheval_aniso_metric(field::MathEvalAnisoField,x,y,z,entity)
     z=_float_value(z,"MathEvalAnisoField","z")
     ev(n)=_eval_matheval_entity(n,x,y,z,field.fields,entity)
     m=Metric3(ev(field.m11),ev(field.m22),ev(field.m33),ev(field.m12),ev(field.m13),ev(field.m23))
-    λ=metric_eigenvalues(m)
-    minimum(λ)>0 || throw(ArgumentError("MathEvalAnisoField: metric is not positive definite at ($x,$y,$z)"))
+    # Metric3 certifies positivity from its held entries. A positive eigenvalue
+    # can round to zero in the public Float64 spectrum without invalidating it.
     return m
 end
 metric_at(field::MathEvalAnisoField,x,y,z)=
