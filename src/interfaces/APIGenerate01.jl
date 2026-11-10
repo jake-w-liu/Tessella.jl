@@ -566,7 +566,7 @@ function _dim01_curve_phase!(assembly,m,options,entities,first_nodes,high_order;
         # Cross-phase slots share this ledger: every Curve mutation marked
         # here also invalidates any Surface spawned mid-phase that read the
         # old state.
-        parallel_dirty=surface_forward===nothing ? Set{Tuple{Int,Int32}}() :
+        parallel_dirty=surface_forward===nothing ? _ParallelDirty() :
             surface_forward.dirty
         parallel_last=prepared===nothing ? 0 :
             something(findlast(!isnothing,prepared),0)

@@ -547,7 +547,7 @@ end
 # in-order merge.  A batch of one would pay the copy for no concurrency, so
 # it falls back to the serial arm by leaving its slot empty.
 function _parallel_volume_fill!(results::Vector{Any},range,m::GeoModel,
-        prepared,pos_draws,input,options,assembly,dirty::Set{Tuple{Int,Int32}},
+        prepared,pos_draws,input,options,assembly,dirty::_ParallelDirty,
         precise::Bool,geometry_birth;periodic_surface_pairs,optimize_pyramids,
         size_field=nothing)
     hn=assembly.node_max;hc=assembly.cell_max
@@ -649,7 +649,7 @@ end
 # congruent only when nothing earlier minted (verbatim adoption matches the
 # serial run's identical lift).
 function _parallel_volume_fresh(work::_ParallelVolumeWork,out,
-        dirty::Set{Tuple{Int,Int32}},base_dirty::Set{Tuple{Int,Int32}},
+        dirty::_ParallelDirty,base_dirty::_ParallelDirty,
         assembly,geometry_birth,geom_points,options,base_seed,hn,hc)
     reason=nothing
     if !out.ok
@@ -657,8 +657,8 @@ function _parallel_volume_fresh(work::_ParallelVolumeWork,out,
     else
         dirty_hit=nothing
         for entity in work.footprint
-            entity in base_dirty && continue
-            entity in dirty && (dirty_hit=entity;break)
+            _parallel_dirty_changed(dirty,base_dirty,entity) &&
+                (dirty_hit=entity;break)
         end
         if dirty_hit!==nothing
             reason=:dirty
@@ -708,7 +708,7 @@ end
 # the state it always owned.  A `Task` head (`Threads.@spawn` cross-phase
 # arms) is fetched at the slot's merge position.
 function _parallel_volume_product(m::GeoModel,work::_ParallelVolumeWork,
-        entry,dirty::Set{Tuple{Int,Int32}},assembly,options;
+        entry,dirty::_ParallelDirty,assembly,options;
         input,scope,size_field,periodic_surface_pairs,optimize_pyramids,
         geometry_birth,caller)
     head,hn,hc,base_dirty,geom_points,base_seed,sinks=entry
@@ -742,7 +742,7 @@ end
 # Region merges never relocate consumed source nodes — the volume receipts
 # carry no `source_node_updates` — so only the stored Curve discretizations
 # need the diff scan.
-function _parallel_volume_mark_dirty!(dirty::Set{Tuple{Int,Int32}},
+function _parallel_volume_mark_dirty!(dirty::_ParallelDirty,
         m::GeoModel,refs::Dict{Int,Vector{Float64}})
     for (curve,params) in m.curve_params
         before=get(refs,curve,nothing)
@@ -821,7 +821,7 @@ end
 
 function _parallel_volume_spawn!(results::Vector{Any},index::Int,m::GeoModel,
         work::_ParallelVolumeWork,input,options,assembly,
-        dirty::Set{Tuple{Int,Int32}},geometry_birth;
+        dirty::_ParallelDirty,geometry_birth;
         periodic_surface_pairs,optimize_pyramids,precise::Bool,
         size_field=nothing,entry_seed::Union{Nothing,UInt32}=nothing)
     working=Model._model_mesh_transaction_copy(m)

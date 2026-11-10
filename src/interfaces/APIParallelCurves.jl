@@ -259,7 +259,7 @@ end
 # ledger is needed.
 function _parallel_curve_fill!(results::Vector{Any},range,m::GeoModel,
         prepared,options::Model._ModelMesh1DOptions,
-        dirty::Set{Tuple{Int,Int32}},precise::Bool,caller::AbstractString)
+        dirty::_ParallelDirty,precise::Bool,caller::AbstractString)
     base_dirty=copy(dirty)
     base_seed=options.random_state[]
     eager=_parallel_eager_indices(prepared,results,range)
@@ -283,12 +283,11 @@ end
 # the contract as in the other arms: a consumed seed is admissible only when
 # the live serial position still equals the recorded entry value.
 function _parallel_curve_fresh(work::_ParallelCurveWork,out,
-        dirty::Set{Tuple{Int,Int32}},base_dirty::Set{Tuple{Int,Int32}},
+        dirty::_ParallelDirty,base_dirty::_ParallelDirty,
         options::Model._ModelMesh1DOptions,base_seed::UInt32)
     out.ok || return false
     for entity in work.footprint
-        entity in base_dirty && continue
-        entity in dirty && return false
+        _parallel_dirty_changed(dirty,base_dirty,entity) && return false
     end
     _,seed_in,seed_out,foreign=out.value
     foreign && return false
@@ -305,7 +304,7 @@ end
 # and returns the transported value for the unchanged emit arm.  Anything
 # else re-runs the identical live serial call.
 function _parallel_curve_result(m::GeoModel,work::_ParallelCurveWork,entry,
-        dirty::Set{Tuple{Int,Int32}},options::Model._ModelMesh1DOptions,
+        dirty::_ParallelDirty,options::Model._ModelMesh1DOptions,
         caller::AbstractString)
     head,base_dirty,base_seed,sinks=entry
     out=head isa Task ? fetch(head) : head

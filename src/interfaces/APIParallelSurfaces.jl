@@ -71,6 +71,31 @@
 
 import ..GmshLibm
 
+# A set loses a second write to an entity already dirty at batch creation.
+# Keep an entity revision instead: detached receipts compare the revisions
+# they observed, including across Curve/Surface/Volume phase handoffs.
+struct _ParallelDirty <: AbstractSet{Tuple{Int,Int32}}
+    revisions::Dict{Tuple{Int,Int32},UInt64}
+end
+_ParallelDirty()=_ParallelDirty(Dict{Tuple{Int,Int32},UInt64}())
+Base.length(dirty::_ParallelDirty)=length(dirty.revisions)
+Base.iterate(dirty::_ParallelDirty,state...)=iterate(keys(dirty.revisions),state...)
+Base.in(entity,dirty::_ParallelDirty)=haskey(dirty.revisions,entity)
+Base.copy(dirty::_ParallelDirty)=_ParallelDirty(copy(dirty.revisions))
+function Base.push!(dirty::_ParallelDirty,entity)
+    key=convert(Tuple{Int,Int32},entity)
+    dirty.revisions[key]=Base.checked_add(get(dirty.revisions,key,UInt64(0)),UInt64(1))
+    return dirty
+end
+function Base.union!(dirty::_ParallelDirty,other::_ParallelDirty)
+    for (entity,revision) in other.revisions
+        dirty.revisions[entity]=max(get(dirty.revisions,entity,UInt64(0)),revision)
+    end
+    return dirty
+end
+_parallel_dirty_changed(dirty::_ParallelDirty,snapshot::_ParallelDirty,entity)=
+    get(dirty.revisions,entity,UInt64(0))!=get(snapshot.revisions,entity,UInt64(0))
+
 struct _ParallelSurfaceWork
     tag::Int
     footprint::Set{Tuple{Int,Int32}}
@@ -417,7 +442,7 @@ end
 # in-order merge.  A batch of one would pay the copy for no concurrency, so
 # it falls back to the serial arm by leaving its slot empty.
 function _parallel_surface_fill!(results::Vector{Any},range,m::GeoModel,
-        prepared,input,options,assembly,dirty::Set{Tuple{Int,Int32}},
+        prepared,input,options,assembly,dirty::_ParallelDirty,
         precise::Bool,geometry_birth;size_field=nothing)
     hn=assembly.node_max;hc=assembly.cell_max
     base_params=_parallel_surface_param_refs(m)
@@ -495,12 +520,11 @@ end
 # still equals that entry value (the exit state is then written back at
 # merge), otherwise the slot is stale and re-runs serially.
 function _parallel_surface_fresh(work::_ParallelSurfaceWork,out,
-        dirty::Set{Tuple{Int,Int32}},base_dirty::Set{Tuple{Int,Int32}},
+        dirty::_ParallelDirty,base_dirty::_ParallelDirty,
         assembly,geometry_birth,geom_points,options,base_seed::UInt32)
     out.ok || return false
     for entity in work.footprint
-        entity in base_dirty && continue
-        entity in dirty && return false
+        _parallel_dirty_changed(dirty,base_dirty,entity) && return false
     end
     geom_points===nothing ||
         _higher_geometry_source_points(assembly,geometry_birth)==geom_points ||
@@ -521,7 +545,7 @@ end
 # exactly the state it always owned.  A `Task` head (`Threads.@spawn`
 # cross-phase arms) is fetched at the slot's merge position.
 function _parallel_surface_products(m::GeoModel,work::_ParallelSurfaceWork,
-        entry,dirty::Set{Tuple{Int,Int32}},assembly;
+        entry,dirty::_ParallelDirty,assembly;
         input,scope,options,size_field,geometry_birth,caller)
     head,hn,hc,base_dirty,geom_points,base_seed,sinks=entry
     out=head isa Task ? fetch(head) : head
@@ -548,12 +572,15 @@ end
 # produce reads: stored discretization changes (boundary writeback, lazy
 # grading, remesh parameter sync) and actual source-node relocations through
 # `source_node_updates` (whose owner entity carries the changed coordinates).
-function _parallel_surface_mark_dirty!(dirty::Set{Tuple{Int,Int32}},
+function _parallel_surface_mark_dirty!(dirty::_ParallelDirty,
         m::GeoModel,assembly,products,refs::Dict{Int,Vector{Float64}})
     for (curve,params) in m.curve_params
         before=get(refs,curve,nothing)
         before!==nothing && before==params && continue
         push!(dirty,(1,Int32(curve)))
+    end
+    for curve in keys(refs)
+        haskey(m.curve_params,curve) || push!(dirty,(1,Int32(curve)))
     end
     for (_,produced) in products
         binding=produced isa Model._ModelSurfaceGeometryProduction ?
@@ -605,7 +632,7 @@ end
 # accumulated between the spawn and the merge still invalidates the receipt.
 function _parallel_surface_spawn!(results::Vector{Any},index::Int,m::GeoModel,
         work::_ParallelSurfaceWork,input,options,assembly,
-        dirty::Set{Tuple{Int,Int32}},geometry_birth;precise::Bool,
+        dirty::_ParallelDirty,geometry_birth;precise::Bool,
         size_field=nothing)
     working=Model._model_mesh_transaction_copy(m)
     hn=assembly.node_max;hc=assembly.cell_max

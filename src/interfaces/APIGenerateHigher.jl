@@ -1884,7 +1884,7 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
         unmerged_nonew_sources,size_field,geometry_birth)
     parallel_results=parallel_units===nothing ? nothing :
         fill!(Vector{Any}(undef,length(units)),nothing)
-    parallel_dirty=Set{Tuple{Int,Int32}}()
+    parallel_dirty=_ParallelDirty()
     parallel_precise=parallel_units===nothing ? false :
         GmshLibm._win_cli_precision()
     # Cross-phase adoption: `_dim01_curve_phase!` may already have spawned
@@ -3386,7 +3386,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
     parallel_draws=parallel_plan===nothing ? nothing : parallel_plan[2]
     parallel_results=parallel_units===nothing ? nothing :
         fill!(Vector{Any}(undef,length(volume_tags)),nothing)
-    parallel_dirty=Set{Tuple{Int,Int32}}()
+    parallel_dirty=_ParallelDirty()
     parallel_precise=parallel_units===nothing ? false :
         GmshLibm._win_cli_precision()
     # Cross-phase adoption: the Surface merge loop may already have spawned
@@ -4177,7 +4177,7 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
             forward_prepared===nothing || (surface_forward=(
                 units=forward_units,prepared=forward_prepared,
                 results=fill!(Vector{Any}(undef,length(forward_units)),nothing),
-                dirty=Set{Tuple{Int,Int32}}(),
+                dirty=_ParallelDirty(),
                 precise=GmshLibm._win_cli_precision(),
                 ranks,old_supports=high_order,surface_parts,
                 size_field=size_field))
