@@ -3562,7 +3562,8 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
         # State this Region left behind that a later detached produce still
         # reads: stored Curve discretizations (embedded-curve lazy grading and
         # boundary writeback replayed or written during the merge).
-        refs===nothing || _parallel_volume_mark_dirty!(parallel_dirty,m,refs)
+        refs===nothing || _parallel_volume_mark_dirty!(parallel_dirty,m,refs;
+            boundary_writeback=wb_receipt)
     end
     laterals=extruded===nothing ? Set{Int}() : copy(extruded.remesh)
     if scope!==nothing

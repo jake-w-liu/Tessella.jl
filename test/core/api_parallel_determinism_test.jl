@@ -17,8 +17,9 @@
 # (all six faces share Curves, so only the first detached receipt can stay
 # fresh).  `TWOBOX` exercises the Region arm's `Mesh.RandomSeed` ledger on
 # genuinely detached OCC-factory fills.  `ALG9_*` covers the RTREE fill —
-# detached on `TWOBOX`, serial-fallback on `RECOMBINE` whose `Recombine
-# Volume` boundary write-back cannot ride the merge transport.  `FIELD_*`
+# detached on `TWOBOX` and `RECOMBINE`, including the latter's exact
+# `Recombine Volume` boundary write-back. Shared-Face Regions additionally
+# check that actual product ownership and serial UID bytes stay consistent.  `FIELD_*`
 # covers resolved background fields — catalog evaluators are immutable and
 # safe to share, so `options.inner_field`/`size_field` no longer gate
 # eligibility on any arm.  `BOX_RECOMBINE_DELAUNAY` keeps a
@@ -132,33 +133,10 @@ Mesh.Algorithm3D=9;
 # Region's boundary the quadrangles `meshCombine3D` writes back (the
 # unstructured-triangle combine is a classified serial gap upstream of
 # PAR01); -tN must reproduce the serial splice byte-identically.
-const ALG9_RECOMBINE="""
-Point(1)={0,0,0,0.4};Point(2)={1,0,0,0.4};Point(3)={1,1,0,0.4};Point(4)={0,1,0,0.4};
-Point(5)={0,0,1,0.4};Point(6)={1,0,1,0.4};Point(7)={1,1,1,0.4};Point(8)={0,1,1,0.4};
-Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
-Line(5)={5,6};Line(6)={6,7};Line(7)={7,8};Line(8)={8,5};
-Line(9)={1,5};Line(10)={2,6};Line(11)={3,7};Line(12)={4,8};
-Curve Loop(1)={1,2,3,4};Curve Loop(2)={5,6,7,8};
-Curve Loop(3)={1,10,-5,-9};Curve Loop(4)={2,11,-6,-10};
-Curve Loop(5)={3,12,-7,-11};Curve Loop(6)={4,9,-8,-12};
-Plane Surface(1)={1};Plane Surface(2)={2};Plane Surface(3)={3};
-Plane Surface(4)={4};Plane Surface(5)={5};Plane Surface(6)={6};
-Surface Loop(1)={1,2,3,4,5,6};Volume(1)={1};
-Point(101)={3,0,0,0.45};Point(102)={4,0,0,0.45};Point(103)={4,1,0,0.45};Point(104)={3,1,0,0.45};
-Point(105)={3,0,1,0.45};Point(106)={4,0,1,0.45};Point(107)={4,1,1,0.45};Point(108)={3,1,1,0.45};
-Line(101)={101,102};Line(102)={102,103};Line(103)={103,104};Line(104)={104,101};
-Line(105)={105,106};Line(106)={106,107};Line(107)={107,108};Line(108)={108,105};
-Line(109)={101,105};Line(110)={102,106};Line(111)={103,107};Line(112)={104,108};
-Curve Loop(101)={101,102,103,104};Curve Loop(102)={105,106,107,108};
-Curve Loop(103)={101,110,-105,-109};Curve Loop(104)={102,111,-106,-110};
-Curve Loop(105)={103,112,-107,-111};Curve Loop(106)={104,109,-108,-112};
-Plane Surface(101)={101};Plane Surface(102)={102};Plane Surface(103)={103};
-Plane Surface(104)={104};Plane Surface(105)={105};Plane Surface(106)={106};
-Surface Loop(101)={101,102,103,104,105,106};Volume(102)={101};
-Recombine Surface{1,2,3,4,5,6};
-Mesh.Algorithm3D=9;
-Recombine Volume{1};
-"""
+const ALG9_RECOMBINE=read(joinpath(@__DIR__,"..","fixtures",
+    "geo_parallel_recombine_rtree.geo"),String)
+const ALG9_SHARED_RECOMBINE=read(joinpath(@__DIR__,"..","fixtures",
+    "geo_parallel_recombine_rtree_shared.geo"),String)
 
 # A `MathEval` `Background Field` resolves into `options.inner_field` for
 # the 1-D grader — previously a whole-phase exclusion, now admitted since
@@ -284,7 +262,8 @@ end
         ("two OCC boxes Mesh3",TWOBOX,3,""),
         ("two OCC boxes re-mesh Mesh3",TWOBOX,3,"Mesh 3;\n"),
         ("RTREE two OCC boxes Mesh3",ALG9_TWOBOX,3,""),
-        ("RTREE + Recombine Volume serial fallback Mesh3",ALG9_RECOMBINE,3,""),
+        ("RTREE + Recombine Volume transport Mesh3",ALG9_RECOMBINE,3,""),
+        ("RTREE + Recombine Volume shared Face Mesh3",ALG9_SHARED_RECOMBINE,3,""),
         ("MathEval background field curves Mesh1",FIELD_CURVES,1,""),
         ("built-in boxes + MathEval background field Mesh2",FIELD_BOXES,2,""),
         ("built-in boxes + MathEval background field Mesh3",FIELD_BOXES,3,""),

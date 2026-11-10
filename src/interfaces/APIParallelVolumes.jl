@@ -8,9 +8,9 @@
 # (`Model._model_mesh_transaction_copy`) inside `Threads.@threads`, each task
 # writing a disjoint result slot while the shared model, authority and
 # assembly stay untouched.  At merge time each slot is checked for staleness:
-# an earlier merged unit can invalidate a detached receipt only by changing
-# `m.curve_params` for one of its footprint entities (embedded-curve lazy
-# grading or an embedded/missing-boundary Surface produce's writeback).  A
+# an earlier merged unit invalidates a detached receipt by changing curve
+# parameters or publishing boundary products for one of its footprint owners
+# (including embedded-curve grading and boundary Surface writeback).  A
 # stale or unsupported slot is recomputed by the identical live serial call,
 # so the produced mesh is bit-identical to the serial one; a fresh slot has
 # its detached `m.curve_params` writeback replayed and every freshly-minted
@@ -22,16 +22,16 @@
 # (`extruded`/`scope`), the native hybrid batch and per-Region hybrid
 # constructor, transfinite Regions, dim-3 compound members, Regions whose
 # boundary or embedded Surfaces sit in a dim-2 periodic relation, user size
-# callbacks and RTREE `Recombine Volume` targets all keep the original serial
+# callbacks all keep the original serial
 # arm — their producer contracts consume or publish shared state outside the
 # recorded footprint.  A resolved background `size_field` is *not* an
 # exclusion: catalog fields are immutable read-only evaluators (the lone
 # mutable `ExternalProcessField` serializes every query on its own lock), so
 # the same object is threaded into the detached produce exactly like
 # `options.inner_field` already is.  RTREE fills (`Mesh.Algorithm3D = 9`)
-# ride the same native-initial kernel and seed ledger as Delaunay — only the
-# recombine3d flag is excluded, since its receipts carry a boundary
-# write-back the merge transport cannot remap.
+# ride the same native-initial kernel and seed ledger as Delaunay. Recombined
+# fills carry exact boundary substitutions through the same UID transport;
+# later consumers observe affected-owner revisions.
 #
 # Non-contiguous scheduling mirrors the Surface arm: `_parallel_eager_indices`
 # lets a fill also produce later eligible slots whose footprints are disjoint
@@ -402,17 +402,9 @@ function _parallel_volume_prepare(m::GeoModel,volume_tags,input,caller;
         haskey(m.meshing.transfinite_volumes,tag) && continue
         Model._extrude_gate(m,3,tag)!==nothing && continue
         tag in compound_members && continue
-        # A `Recombine Volume`/`Mesh.Recombine3DAll` target under the RTREE
-        # fill (`algorithm_3d == 9`) splices hexes into its fill and publishes
-        # boundary quadrangles through a synthesized write-back receipt —
-        # shared Surface/Curve state the merge transport cannot remap, so the
-        # produce would fail `_parallel_volume_remap_supported` every time.
-        # Under Delaunay/initial-only the flag is never read inside the
-        # produce (`_model_volume_combine3d!` is gated on `algorithm_3d==9`),
-        # so those Regions stay eligible — their boundary quad fold already
-        # ran inside `_recombine3d_fold_authority` at generation entry.
-        (m.meshing.algorithm_3d==9 &&
-            Model._model_volume_recombine3d(m,tag)) && continue
+        # RTREE recombination carries its exact boundary substitutions in
+        # the geometry receipt; the merge transports their born cell UIDs
+        # and invalidates later work that consumed the replaced products.
         boundary=try
             Model._model_volume_boundary_surfaces(m,tag,caller)
         catch err
@@ -607,13 +599,37 @@ end
 # production the serial arm would have returned: transfinite, hybrid, swept
 # and plain-mesh receipts revert to the live serial call rather than
 # smuggling an unmapped product past the allocator ledger.
-# A boundary write-back mutates shared Surface/Curve products and stored
-# curve discretizations on the detached copy — that state cannot be remapped
-# into the live merge, so such receipts revert to the serial arm like the
-# transfinite/hybrid/swept cases.
 _parallel_volume_remap_supported(produced)=
-    produced isa Model._ModelVolumeGeometryProduction &&
-    produced.boundary_writeback===nothing
+    produced isa Model._ModelVolumeGeometryProduction
+
+# Connectivity and ownership in a boundary receipt use producer-local row
+# indices. Only born element labels share the serial allocator's namespace.
+function _parallel_volume_remap_constraints(constraints,dc::UInt64,hc::UInt64)
+    shift(label)=label>hc ? label+dc : label
+    return (outer_faces=[(owner,shift(label),conn)
+            for (owner,label,conn) in constraints.outer_faces],
+        embedded_faces=[(owner,shift(label),conn)
+            for (owner,label,conn) in constraints.embedded_faces],
+        edges=[(owner,shift(label),conn)
+            for (owner,label,conn) in constraints.edges])
+end
+
+function _parallel_volume_remap_boundary(wb,dc::UInt64,hc::UInt64)
+    (wb===nothing || dc==0) && return wb
+    shift(label)=label>hc ? label+dc : label
+    remapped=_parallel_volume_remap_constraints(wb.constraints,dc,hc)
+    surfaces=Dict{Int,Vector{Tuple{Int,Vector{Int32},UInt64}}}(
+        owner=>[(msh,conn,shift(label)) for (msh,conn,label) in cells]
+        for (owner,cells) in wb.surfaces)
+    curves=Dict{Int,Vector{Tuple{Int,Vector{Int32},UInt64}}}(
+        owner=>[(msh,conn,shift(label)) for (msh,conn,label) in cells]
+        for (owner,cells) in wb.curves)
+    added=Dict{Tuple{Int,Int32},Vector{Tuple{Int,Vector{Int32},UInt64,Int32}}}(
+        owner=>[(msh,conn,shift(label),physical)
+            for (msh,conn,label,physical) in cells] for (owner,cells) in wb.added)
+    return Model._ModelVolumeBoundaryWriteback(remapped,wb.nodes,wb.node_params,
+        surfaces,curves,wb.replaced,added)
+end
 
 # Shift every UID the detached produce minted past the batch's allocator base
 # by the amount the serial allocator advanced to this merge position.
@@ -629,7 +645,8 @@ function _parallel_volume_remap_production(produced,dn::UInt64,dc::UInt64,
         UInt64[tag>hc ? tag+dc : tag for tag in produced.element_tags]
     return Model._ModelVolumeGeometryProduction(produced.mesh,boundary_tags,
         produced.node_high_water+dn,produced.temporary_elements,
-        element_tags,produced.element_high_water+dc,produced.boundary_writeback)
+        element_tags,produced.element_high_water+dc,
+        _parallel_volume_remap_boundary(produced.boundary_writeback,dc,hc))
 end
 
 # Staleness is measured against dirt accumulated after the batch's snapshot —
@@ -739,11 +756,11 @@ end
 # Every mutation a merged unit leaves on the shared state a later detached
 # produce reads: stored discretization changes (embedded-curve grading and
 # boundary writeback replayed from receipts, or written live by a serial arm).
-# Region merges never relocate consumed source nodes — the volume receipts
-# carry no `source_node_updates` — so only the stored Curve discretizations
-# need the diff scan.
+# Recovered/recombined boundaries can also replace Surface and Curve
+# products. Later receipts must observe those changes even when all stored
+# Curve parameters remain equal.
 function _parallel_volume_mark_dirty!(dirty::_ParallelDirty,
-        m::GeoModel,refs::Dict{Int,Vector{Float64}})
+        m::GeoModel,refs::Dict{Int,Vector{Float64}};boundary_writeback=nothing)
     for (curve,params) in m.curve_params
         before=get(refs,curve,nothing)
         before!==nothing && before==params && continue
@@ -751,6 +768,20 @@ function _parallel_volume_mark_dirty!(dirty::_ParallelDirty,
     end
     for curve in keys(refs)
         haskey(m.curve_params,curve) || push!(dirty,(1,Int32(curve)))
+    end
+    if boundary_writeback!==nothing
+        for surface in keys(boundary_writeback.surfaces)
+            push!(dirty,(2,Int32(surface)))
+        end
+        for curve in keys(boundary_writeback.curves)
+            push!(dirty,(1,Int32(curve)))
+        end
+        for owner in keys(boundary_writeback.replaced)
+            push!(dirty,owner)
+        end
+        for owner in keys(boundary_writeback.added)
+            push!(dirty,owner)
+        end
     end
     return nothing
 end

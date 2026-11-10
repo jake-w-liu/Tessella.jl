@@ -67,9 +67,9 @@ the full per-row ledger remains authoritative for additional subitems:
   periodic/compound, and curved/scalar-field contexts.
 - NURBS trim/topology and general CAD Boolean/fillet contexts beyond the
   recently verified tutorial and coincident/tangent fixes.
-- Parallel eligibility beyond the established detached producer classes,
-  including RTREE recombined boundary write-back; stateful callbacks retain
-  their documented serial contract.
+- Parallel eligibility beyond the established detached producer classes.
+  RTREE recombined boundary write-back now transports actual product labels
+  and owner revisions; stateful callbacks retain their documented serial contract.
 - Full GUI/session services and native matching tie identity. A certified
   optimum proves cost correctness, not upstream chronological tie identity.
 - Systematic option/format/API conformance, optimization/resource measurements,

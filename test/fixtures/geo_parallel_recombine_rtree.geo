@@ -1,0 +1,26 @@
+
+Point(1)={0,0,0,0.4};Point(2)={1,0,0,0.4};Point(3)={1,1,0,0.4};Point(4)={0,1,0,0.4};
+Point(5)={0,0,1,0.4};Point(6)={1,0,1,0.4};Point(7)={1,1,1,0.4};Point(8)={0,1,1,0.4};
+Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+Line(5)={5,6};Line(6)={6,7};Line(7)={7,8};Line(8)={8,5};
+Line(9)={1,5};Line(10)={2,6};Line(11)={3,7};Line(12)={4,8};
+Curve Loop(1)={1,2,3,4};Curve Loop(2)={5,6,7,8};
+Curve Loop(3)={1,10,-5,-9};Curve Loop(4)={2,11,-6,-10};
+Curve Loop(5)={3,12,-7,-11};Curve Loop(6)={4,9,-8,-12};
+Plane Surface(1)={1};Plane Surface(2)={2};Plane Surface(3)={3};
+Plane Surface(4)={4};Plane Surface(5)={5};Plane Surface(6)={6};
+Surface Loop(1)={1,2,3,4,5,6};Volume(1)={1};
+Point(101)={3,0,0,0.45};Point(102)={4,0,0,0.45};Point(103)={4,1,0,0.45};Point(104)={3,1,0,0.45};
+Point(105)={3,0,1,0.45};Point(106)={4,0,1,0.45};Point(107)={4,1,1,0.45};Point(108)={3,1,1,0.45};
+Line(101)={101,102};Line(102)={102,103};Line(103)={103,104};Line(104)={104,101};
+Line(105)={105,106};Line(106)={106,107};Line(107)={107,108};Line(108)={108,105};
+Line(109)={101,105};Line(110)={102,106};Line(111)={103,107};Line(112)={104,108};
+Curve Loop(101)={101,102,103,104};Curve Loop(102)={105,106,107,108};
+Curve Loop(103)={101,110,-105,-109};Curve Loop(104)={102,111,-106,-110};
+Curve Loop(105)={103,112,-107,-111};Curve Loop(106)={104,109,-108,-112};
+Plane Surface(101)={101};Plane Surface(102)={102};Plane Surface(103)={103};
+Plane Surface(104)={104};Plane Surface(105)={105};Plane Surface(106)={106};
+Surface Loop(101)={101,102,103,104,105,106};Volume(102)={101};
+Recombine Surface{1,2,3,4,5,6};
+Mesh.Algorithm3D=9;
+Recombine Volume{1};
