@@ -81,10 +81,11 @@ function _model_import_execute_geo(path,dimension,options,diagnostics;legacy=fal
         _initial_onelab_numbers=onelab.numbers,_initial_onelab_strings=onelab.strings,
         _initial_onelab_runner=onelab,
         _initial_onelab_action=onelab.remote===nothing ? "" : onelab.remote.action,
+        _initial_parser_context_callback=initial_model===nothing ? nothing : _onelab_geo_seed_namespace!,
         _execution_context_callback=(context,allocator)->
             (namespace[]=_onelab_geo_namespace_stage(context,allocator);nothing))
     _onelab_geo_sync!(onelab)
-    _onelab_remote_geo_status!(onelab,result.exit_code===nothing ? :run : :exit,
+    _onelab_geo_status!(onelab,result.exit_code===nothing ? :run : :exit,
         something(result.exit_code,0))
     return merge(NamedTuple{propertynames(result)}(Tuple(getproperty(result,name)
         for name in propertynames(result))),(;onelab_stage=onelab,geo_execution=result,
@@ -364,7 +365,12 @@ function _model_import_publish!(plan;legacy=false)
         append!(SESSION_INPUT_ERRORS[],plan.result.errors)
     end
     hasproperty(plan.result,:onelab_stage) && _onelab_geo_adopt_runner!(plan.result.onelab_stage)
-    hasproperty(plan.result,:geo_namespace_stage) && _onelab_geo_adopt_namespace!(plan.result.geo_namespace_stage)
+    if hasproperty(plan.result,:geo_namespace_stage)
+        _onelab_geo_adopt_namespace!(plan.result.geo_namespace_stage)
+    elseif !legacy
+        _parser_reset_session!()
+        _ONELAB_LIVE_GEO[]=nothing
+    end
     return nothing
 end
 

@@ -265,6 +265,22 @@ function _onelab_remote_run!(runner,name,command)
     return nothing
 end
 
+function _onelab_remote_attach(name,address,socket,timeout,epoch)
+    session=_OnelabRemoteSession(String(name),String(address),socket,current_task(),epoch,timeout,
+        Threads.Atomic{Bool}(false),Threads.Atomic{Bool}(false),Threads.Atomic{Bool}(false),
+        Threads.Atomic{Float64}(Inf),Tuple{Int32,String}[],0,nothing,false,0,"",false,false,"")
+    try
+        lock(_ONELAB_RUN_LOCK) do
+            _ONELAB_ACTIVE_REMOTE[session]=nothing
+        end
+        session.watchdog=@async _onelab_remote_watchdog(session)
+        return session
+    catch
+        _onelab_remote_end!(session;notify=false)
+        rethrow()
+    end
+end
+
 function _onelab_remote_begin(name,address;timeout=60.,epoch=_ONELAB_SESSION_EPOCH[])
     caller="ONELAB remote client"
     timeout=_onelab_run_limit(timeout,caller,"socket timeout")
@@ -272,13 +288,7 @@ function _onelab_remote_begin(name,address;timeout=60.,epoch=_ONELAB_SESSION_EPO
     host,port,canonical=tcp ? _onelab_client_parse_addr(address,nothing,caller) :
         (String(address),nothing,String(address))
     socket=tcp ? TCPSocket() : Base.PipeEndpoint()
-    session=_OnelabRemoteSession(String(name),canonical,socket,current_task(),epoch,timeout,
-        Threads.Atomic{Bool}(false),Threads.Atomic{Bool}(false),Threads.Atomic{Bool}(false),
-        Threads.Atomic{Float64}(Inf),Tuple{Int32,String}[],0,nothing,false,0,"",false,false,"")
-    lock(_ONELAB_RUN_LOCK) do
-        _ONELAB_ACTIVE_REMOTE[session]=nothing
-    end
-    session.watchdog=@async _onelab_remote_watchdog(session)
+    session=_onelab_remote_attach(name,canonical,socket,timeout,epoch)
     try
         _onelab_remote_io(session) do
             port===nothing ? Sockets.connect(socket,host) : Sockets.connect(socket,host,port)
@@ -293,11 +303,13 @@ function _onelab_remote_begin(name,address;timeout=60.,epoch=_ONELAB_SESSION_EPO
     end
 end
 
-function _onelab_remote_geo_status!(runner,stop,code)
-    (runner===nothing || runner.remote===nothing) && return nothing
+function _onelab_geo_status!(runner,stop,code)
+    runner===nothing && return nothing
+    session=runner.remote===nothing ? _onelab_listener_current() : runner.remote
+    session===nothing && return nothing
     if stop===:exit
-        runner.remote.exit_requested=true
-        runner.remote.exit_code=Int(code)
+        session.exit_requested=true
+        session.exit_code=Int(code)
     end
     return nothing
 end

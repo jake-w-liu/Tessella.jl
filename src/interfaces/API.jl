@@ -255,6 +255,7 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     # 1e33 is the upstream unbounded default.
     "Mesh.AnisoMax"=>1e33,
     "Mesh.BoundaryLayerFanElements"=>5.0,
+    "Solver.AlwaysListen"=>0.0,
     "Mesh.FlexibleTransfinite"=>0.0,
     "Mesh.RecombineAll"=>0.0,
     "Mesh.RecombinationAlgorithm"=>1.0,
@@ -929,6 +930,8 @@ function option(name::AbstractString, value::Real)
             v=Float64(max(minimum,_geo_signed_gmsh_int_value(v,"API.option")))
         elseif key=="Mesh.BoundaryLayerFanElements"
             v=_geo_option_store_value("Mesh","BoundaryLayerFanElements",v,"API.option")
+        elseif key=="Solver.AlwaysListen"
+            v=_geo_option_store_value("Solver","AlwaysListen",v,"API.option")
         elseif key=="Mesh.HighOrderOptimize"
             # Upstream signed-int semantics: -1 elastic smoothing, 0 off,
             # 1 relocation optimization, 2 both (truncation like other ints).

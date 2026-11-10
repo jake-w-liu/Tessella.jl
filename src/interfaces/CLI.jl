@@ -77,6 +77,7 @@ Usage: tessella file.geo [-1|-2|-3] [-o output.msh] [-format format] [-bin]
        tessella file.geo -run
        tessella file.geo -onelab name address [-1|-2|-3|-parse_and_exit]
        tessella [-socket address] [file.geo]
+       tessella [file.geo] -listen [address]
        tessella -convert file [file2 ...]
        tessella -help | -version | -info | -help_options
 
@@ -112,6 +113,8 @@ Solver.AutoLoadDatabase reloads <stem>.db before the check pass;
 Solver.AutoSaveDatabase controls the final native parameter database write.
 -onelab exchanges parameters and messages with its controller during the batch;
 -socket serves native GEO/file commands until Exit or controller disconnection.
+-listen serves incoming clients and retains the model and parameters between
+connections; its default address is Solver.SocketName (127.0.0.1:0).
 Addresses are host:port, local Unix sockets, or Windows named pipes.
 -log file mirrors Msg-channel output into the file; -cpu appends the
 (From start: Wall, CPU, Mem) resource suffix to Info/Error messages.
@@ -329,7 +332,6 @@ const _REJECTED_FLAGS=Dict{String,String}(
     # Upstream `-debugSurface` restricts surface meshing to a tagged face and
     # dumps `debugSurface.brep`; a diagnostic-only debug knob.
     "-debugSurface"=>"per-surface mesh debugging (debugSurface.brep) is not implemented",
-    "-listen"=>"solver socket listeners are not implemented",
     "-minterpreter"=>"Octave interpreters are not implemented",
     "-pyinterpreter"=>"Python interpreters are not implemented",
     "-watch"=>"file watching is GUI-only",
@@ -727,6 +729,9 @@ parameters for its second, `check` pass. `-onelab name address` connects this
 mesher to an ONELAB controller for live parameters, diagnostics and delegated
 solver processes. `-socket address` also executes incoming GEO/file commands
 until `Exit` or controller disconnection, unless a batch action was requested.
+`-listen [address]` serves incoming clients after loading the input and retains
+the model and parameter database across reconnects. `Solver.AlwaysListen=0`
+stops the service; an omitted address uses `Solver.SocketName`.
 Addresses accept TCP `host:port`, Unix sockets and Windows named pipes.
 `file.msh -check` validates the mesh without writing. `-`, `-parse_and_exit`,
 `-help`/`--help`, `-version`/`--version`, `-info`/`--info`, `-help_options`
@@ -781,8 +786,9 @@ function _main(args::AbstractVector{<:AbstractString})
     IO._MSG_START_NS[]=time_ns()
     try
         selected,ordinary=_onelab_cli_flags(tokens)
-        return selected===nothing || selected.address===nothing ? _run(ordinary) :
-            _run_onelab_remote_cli(ordinary,selected)
+        return selected===nothing ? _run(ordinary) : selected.listening ?
+            _run_onelab_listener_cli(ordinary,selected) : selected.address===nothing ?
+            _run(ordinary) : _run_onelab_remote_cli(ordinary,selected)
     finally
         IO._msg_log_close()
         IO._MSG_INFO_RESOURCES[]=false
@@ -1205,7 +1211,7 @@ function _run(tokens::Vector{String};_reuse_session::Bool=false)
     end
     if isempty(files) && _reuse_session
         remote=API._onelab_remote_current()
-        default=API._onelab_remote_default_file(remote)
+        default=remote===nothing ? nothing : API._onelab_remote_default_file(remote)
         if default!==nothing
             push!(files,(String(default),:none))
         elseif !(dimension_seen || output_seen || format_seen || binary_seen || check_seen ||
@@ -2059,12 +2065,13 @@ function _session_main(files,preludes,numeric_options;
                 splitext(basename(files[index+1][1]))[1] : "newmodel")
             if index==1 || file_marker==:open
                 API.open(source)
+                source==file || API.model.set_file_name(file)
             else
                 API.merge(source)
             end
         end
         remote=_reuse_session ? API._onelab_remote_current() : nothing
-        remote===nothing || API._onelab_remote_model_info!(remote;path=first(files)[1])
+        remote===nothing || API._onelab_remote_model_info!(remote;path=API.model.get_file_name())
         input_errors=copy(API.SESSION_INPUT_ERRORS[])
         # `-bgm`: merge the `.pos` views and point a `PostView` background
         # field at each file's last view — the same semantics the standalone

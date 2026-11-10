@@ -1,5 +1,11 @@
 include("APIOnelabProcess.jl")
 
+# A listener peer has independently bounded output IO. Solver jobs retain
+# this writer only as their completion destination, never as a process owner.
+struct _OnelabBoundWriter{T}
+    transport::T
+end
+
 mutable struct _OnelabRunJob
     name::String
     command::String
@@ -7,7 +13,7 @@ mutable struct _OnelabRunJob
     socket::Union{Nothing,TCPSocket}
     process::Union{Nothing,_OnelabOwnedProcess}
     reader::Union{Nothing,Task}
-    parent_socket::Union{Nothing,TCPSocket}
+    parent_socket::Union{Nothing,TCPSocket,Base.PipeEndpoint,_OnelabBoundWriter}
     connected::Bool
     stopped::Bool
     eof_seen::Bool
@@ -35,6 +41,7 @@ mutable struct _OnelabRunEngine
     command_hook::Any
     log_hook::Any
     epoch::Union{Nothing,UInt64}
+    reply_hook::Any
 end
 
 const _ONELAB_RUN_LOCK=ReentrantLock()
@@ -255,6 +262,7 @@ function _onelab_cancel_session_runs!()
     end
     foreach(_onelab_engine_cancel!,engines)
     _onelab_cancel_remote_sessions!()
+    _onelab_cancel_listeners!()
     return nothing
 end
 
@@ -272,7 +280,8 @@ function _onelab_dispatch!(engine,index,socket,kind,payload)
         job.eof_seen=false
     elseif kind==_ONELAB_MSG.STOP
         job.connected || throw(ArgumentError("ONELAB server: STOP before START"))
-        any(child->child.parent_socket===socket && !child.notified,engine.jobs) &&
+        reply=_onelab_reply_socket(engine,socket)
+        any(child->child.parent_socket===reply && !child.notified,engine.jobs) &&
             throw(ArgumentError("ONELAB server: client stopped with unfinished sub-clients"))
         job.stopped=true
         isopen(socket) && close(socket)
@@ -285,19 +294,23 @@ function _onelab_dispatch!(engine,index,socket,kind,payload)
             name=_onelab_command_text(fields[1],"API.onelab.run","client name")
             command=_onelab_command_text(fields[2],"API.onelab.run","command")
             isempty(name) && throw(ArgumentError("ONELAB server: empty sub-client name"))
-            _onelab_spawn_job!(engine,name,command,socket)
+            _onelab_spawn_job!(engine,name,command,_onelab_reply_socket(engine,socket))
         elseif kind in _ONELAB_ASYNC
             Base.invokelatest(engine.log_hook,kind,job.name,payload)
         elseif kind in (_ONELAB_MSG.MERGE_FILE,_ONELAB_MSG.PARSE_STRING,
                         _ONELAB_MSG.OPEN_PROJECT,_ONELAB_MSG.OLPARSE)
             result=Base.invokelatest(engine.command_hook,kind,payload,job.name)
-            kind==_ONELAB_MSG.OLPARSE && _onelab_server_send(socket,kind,result ? "true" : "false")
+            kind==_ONELAB_MSG.OLPARSE && _onelab_server_send(
+                _onelab_reply_socket(engine,socket),kind,result ? "true" : "false")
         else
-            Base.invokelatest(_onelab_server_parameter!,engine.store,job.name,socket,kind,payload,engine.epoch)
+            Base.invokelatest(_onelab_server_parameter!,engine.store,job.name,
+                _onelab_reply_socket(engine,socket),kind,payload,engine.epoch)
         end
     end
     return nothing
 end
+
+_onelab_reply_socket(engine,socket)=engine.reply_hook===nothing ? socket : engine.reply_hook(socket)
 
 include("APIOnelabStore.jl")
 include("APIOnelabRemote.jl")
@@ -306,6 +319,7 @@ include("APIOnelabGeo.jl")
 include("APIOnelabMetadata.jl")
 include("APIOnelabDatabase.jl")
 include("APIOnelabRemoteGeo.jl")
+include("APIOnelabListener.jl")
 
 function _onelab_engine_failure(engine,exception)
     engine.timed_out[] && return ArgumentError(
@@ -317,6 +331,52 @@ function _onelab_engine_failure(engine,exception)
     engine.cancelled[] && return ArgumentError(
         "API.onelab.run: session was reset or client was cancelled")
     return exception
+end
+
+function _onelab_jobs_complete!(engine)
+    complete=true
+    for job in engine.jobs
+        job.notified && continue
+        process=job.process
+        process===nothing && throw(ArgumentError("API.onelab.run: missing client process"))
+        if _onelab_process_exited(process)
+            job.exit_at==0.0 && (job.exit_at=_onelab_monotonic_time())
+            # Let already queued STOP/parameter frames drain before judging
+            # an exit. The reader reports EOF or STOP without waiting on us.
+            if isready(engine.events)
+                complete=false;continue
+            end
+            process.exit_code==0 || throw(ArgumentError(
+                "API.onelab.run: client $(repr(job.name)) exited with status $(process.exit_code)"))
+            if !job.connected
+                # A very short client can exit before its reader task is
+                # scheduled to queue START (observed on Linux). Give the
+                # reader a bounded turn; a genuinely non-connecting client
+                # still reports the dedicated error.
+                if !job.eof_seen && !job.reader_done &&
+                        _onelab_monotonic_time()-job.exit_at<0.5
+                    complete=false;continue
+                end
+                throw(ArgumentError(
+                    "API.onelab.run: client $(repr(job.name)) exited without connecting"))
+            end
+            if !job.stopped && !job.eof_seen && !job.reader_done
+                complete=false;continue
+            end
+            job.stopped || throw(ArgumentError(
+                "API.onelab.run: client $(repr(job.name)) disconnected without STOP"))
+            _onelab_process_close!(process)
+            isopen(job.listener) && close(job.listener)
+            job.notified=true
+            job.parent_socket===nothing || _onelab_server_send(
+                job.parent_socket,_ONELAB_MSG.STOP,job.name)
+        else
+            complete=false
+            !job.connected && _onelab_monotonic_time()-job.started>engine.connect_timeout && throw(ArgumentError(
+                "API.onelab.run: client $(repr(job.name)) did not connect before its deadline"))
+        end
+    end
+    return complete
 end
 
 function _onelab_pump!(engine)
@@ -348,51 +408,44 @@ function _onelab_pump!(engine)
                 engine.jobs[event[2]].eof_seen=true
             end
         end
-        complete=true
-        for job in engine.jobs
-            job.notified && continue
-            process=job.process
-            process===nothing && throw(ArgumentError("API.onelab.run: missing client process"))
-            if _onelab_process_exited(process)
-                job.exit_at==0.0 && (job.exit_at=_onelab_monotonic_time())
-                # Let already queued STOP/parameter frames drain before judging
-                # an exit. The reader reports EOF or STOP without waiting on us.
-                if isready(engine.events)
-                    complete=false;continue
-                end
-                process.exit_code==0 || throw(ArgumentError(
-                    "API.onelab.run: client $(repr(job.name)) exited with status $(process.exit_code)"))
-                if !job.connected
-                    # A very short client can exit before its reader task is
-                    # scheduled to queue START (observed on Linux). Give the
-                    # reader a bounded turn; a genuinely non-connecting client
-                    # still reports the dedicated error.
-                    if !job.eof_seen && !job.reader_done &&
-                            _onelab_monotonic_time()-job.exit_at<0.5
-                        complete=false;continue
-                    end
-                    throw(ArgumentError(
-                        "API.onelab.run: client $(repr(job.name)) exited without connecting"))
-                end
-                if !job.stopped && !job.eof_seen && !job.reader_done
-                    complete=false;continue
-                end
-                job.stopped || throw(ArgumentError(
-                    "API.onelab.run: client $(repr(job.name)) disconnected without STOP"))
-                _onelab_process_close!(process)
-                isopen(job.listener) && close(job.listener)
-                job.notified=true
-                job.parent_socket===nothing || _onelab_server_send(
-                    job.parent_socket,_ONELAB_MSG.STOP,job.name)
-            else
-                complete=false
-                !job.connected && _onelab_monotonic_time()-job.started>engine.connect_timeout && throw(ArgumentError(
-                    "API.onelab.run: client $(repr(job.name)) did not connect before its deadline"))
-            end
-        end
-        complete && return nothing
+        _onelab_jobs_complete!(engine) && return nothing
         sleep(.001)
     end
+end
+
+function _onelab_engine_start(store;command_hook,log_hook,epoch=nothing,directory=pwd(),
+        quiet=false,timeout=Inf,connect_timeout=60.,max_message_bytes=64*1024*1024,max_clients=32,
+        reply_hook=nothing)
+    duration=Float64(timeout);startup=Float64(connect_timeout)
+    engine=_OnelabRunEngine(_OnelabRunJob[],Channel{Any}(64),Threads.Atomic{Bool}(false),
+        Threads.Atomic{Bool}(false),Threads.Atomic{Bool}(false),Ref(""),
+        Threads.Atomic{Int}(0),Int(max_message_bytes),Int(max_clients),startup,
+        isfinite(duration) ? _onelab_monotonic_time()+duration : Inf,String(directory),quiet,store,
+        command_hook,log_hook,epoch,reply_hook)
+    watchdog=nothing
+    try
+        lock(_ONELAB_RUN_LOCK) do
+            _ONELAB_ACTIVE_ENGINES[engine]=nothing
+        end
+        watchdog=@async _onelab_watchdog!(engine)
+        return engine,watchdog
+    catch
+        _onelab_engine_finish!(engine,watchdog)
+        rethrow()
+    end
+end
+
+function _onelab_engine_finish!(engine,watchdog)
+    _onelab_engine_cancel!(engine)
+    close(engine.events)
+    for job in engine.jobs
+        job.reader===nothing || try wait(job.reader) catch end
+    end
+    watchdog===nothing || try wait(watchdog) catch end
+    lock(_ONELAB_RUN_LOCK) do
+        delete!(_ONELAB_ACTIVE_ENGINES,engine)
+    end
+    return nothing
 end
 
 function _onelab_run_engine(store,name::String,command::String;
@@ -405,29 +458,14 @@ function _onelab_run_engine(store,name::String,command::String;
         1<=max_message_bytes<=typemax(Int32) || throw(ArgumentError("$caller: invalid max_message_bytes"))
     max_clients isa Integer && !(max_clients isa Bool) &&
         1<=max_clients<=1024 || throw(ArgumentError("$caller: invalid max_clients"))
-    engine=_OnelabRunEngine(_OnelabRunJob[],Channel{Any}(64),Threads.Atomic{Bool}(false),
-        Threads.Atomic{Bool}(false),Threads.Atomic{Bool}(false),Ref(""),
-        Threads.Atomic{Int}(0),Int(max_message_bytes),Int(max_clients),startup,
-        isfinite(duration) ? _onelab_monotonic_time()+duration : Inf,String(directory),quiet,store,
-        command_hook,log_hook,epoch)
-    lock(_ONELAB_RUN_LOCK) do
-        _ONELAB_ACTIVE_ENGINES[engine]=nothing
-    end
-    watchdog=@async _onelab_watchdog!(engine)
+    engine,watchdog=_onelab_engine_start(store;command_hook,log_hook,epoch,directory,quiet,
+        timeout=duration,connect_timeout=startup,max_message_bytes,max_clients)
     try
         _onelab_engine_valid(engine) || throw(ArgumentError("$caller: session was reset"))
         _onelab_spawn_job!(engine,name,command)
         _onelab_pump!(engine)
     finally
-        _onelab_engine_cancel!(engine)
-        close(engine.events)
-        for job in engine.jobs
-            job.reader===nothing || try wait(job.reader) catch end
-        end
-        try wait(watchdog) catch end
-        lock(_ONELAB_RUN_LOCK) do
-            delete!(_ONELAB_ACTIVE_ENGINES,engine)
-        end
+        _onelab_engine_finish!(engine,watchdog)
     end
     return nothing
 end

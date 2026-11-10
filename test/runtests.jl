@@ -96,6 +96,8 @@ include("functional/fixtures.jl")
         "interfaces/api_onelab_database_test.jl",
         "interfaces/api_onelab_remote_transport_test.jl",
         "interfaces/cli_onelab_remote_test.jl",
+        "interfaces/cli_onelab_listener_test.jl",
+        "interfaces/api_geo_namespace_lifecycle_test.jl",
         "interfaces/cli_onelab_run_test.jl",
         "interfaces/api_parser_live_test.jl",
         "interfaces/api_xao_native_import_test.jl",

@@ -853,6 +853,7 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
                      _initial_onelab_strings::Union{Nothing,Dict{String,String}}=nothing,
                      _initial_onelab_runner=nothing,
                      _initial_onelab_action::AbstractString="",
+                     _initial_parser_context_callback=nothing,
                      _execution_context_callback=nothing)
     isfile(path) || throw(ArgumentError("execute_geo: missing file $path"))
     mesh_dim isa Bool && throw(ArgumentError("execute_geo: mesh_dim must not be Bool"))
@@ -966,7 +967,8 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
     # entity-selector expressions (`Point{t}`, `Physical X{...}`, `BoundingBox
     # X{...}`, ...) are side-effecting or model-reading value terms in the
     # `.geo` grammar; the numeric evaluator calls back through this hook.
-    allocator_state=_GeoTagAllocatorState()
+    allocator_state=_initial_parser_context_callback===nothing ? _GeoTagAllocatorState() :
+        _initial_parser_context_callback(context)::_GeoTagAllocatorState
     if _initial_model!==nothing
         _geo_allocator_resync_model!(allocator_state,model)
         allocator_state.physical_group_max=model.physical_tag_max
@@ -993,9 +995,9 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
     if context.stop===:exit
         code=context.exit_code
         runner=context.native_onelab_runner
-        if runner!==nothing && runner.remote!==nothing
+        if runner!==nothing
             api=getfield(parentmodule(@__MODULE__),:API)
-            Base.invokelatest(getfield(api,:_onelab_remote_geo_status!),runner,:exit,code)
+            Base.invokelatest(getfield(api,:_onelab_geo_status!),runner,:exit,code)
         end
         code==0 || throw(ArgumentError(
             "execute_geo: Exit $code (script requested a nonzero exit)"))

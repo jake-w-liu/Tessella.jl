@@ -113,7 +113,7 @@ function _onelab_geo_source!(model,context,allocator,source;filename=nothing)
     context.soft_unknown_reads=true
     result=GeoExec._exec_geo_statements!(model,statements,locations,firstindex(statements),
         lastindex(statements),context,allocator,Ref(0))
-    _onelab_remote_geo_status!(context.native_onelab_runner,context.stop,context.exit_code)
+    _onelab_geo_status!(context.native_onelab_runner,context.stop,context.exit_code)
     context.stop===:toomany && throw(ArgumentError("ONELAB: too many GEO parse errors"))
     context.stop===:exit && context.exit_code!=0 && throw(ArgumentError("ONELAB: GEO Exit $(context.exit_code)"))
     GeoExec._geo_sync_physical_view!(model,context)
@@ -171,14 +171,8 @@ function _onelab_geo_run!(model,context,name,command,allocator)
     return nothing
 end
 
-function _onelab_live_parse_string!(source;filename=nothing)
-    caller=filename===nothing ? "ONELAB ParseString" : "API.parser.parse"
-    current=_model_locked();index=_current_slot_index_locked()
-    original=MODEL_SLOTS[index];model=Model._model_mesh_transaction_copy(current)
-    complete=_model_merge_complete(current,LAST_MESH[],LAST_MESH_CLASS[],caller)
-    model.meshing.mesh_authority=_model_merge_authority(model,complete,caller)
-    seed=_model_merge_seed(model,original,caller)
-    context=GeoExec._GeoNumericContext();allocator=GeoExec._GeoTagAllocatorState()
+function _onelab_geo_seed_namespace!(context)
+    allocator=GeoExec._GeoTagAllocatorState()
     previous=_ONELAB_LIVE_GEO[]
     if previous!==nothing
         for field in (:values,:lists,:list_variables,:unavailable,:unavailable_lists,
@@ -207,6 +201,18 @@ function _onelab_live_parse_string!(source;filename=nothing)
         haskey(_PARSER_STRINGS,name) || delete!(context.strings,name)
     end
     merge!(context.strings,deepcopy(_PARSER_STRINGS))
+    return allocator
+end
+
+function _onelab_live_parse_string!(source;filename=nothing)
+    caller=filename===nothing ? "ONELAB ParseString" : "API.parser.parse"
+    current=_model_locked();index=_current_slot_index_locked()
+    original=MODEL_SLOTS[index];model=Model._model_mesh_transaction_copy(current)
+    complete=_model_merge_complete(current,LAST_MESH[],LAST_MESH_CLASS[],caller)
+    model.meshing.mesh_authority=_model_merge_authority(model,complete,caller)
+    seed=_model_merge_seed(model,original,caller)
+    context=GeoExec._GeoNumericContext()
+    allocator=_onelab_geo_seed_namespace!(context)
     GeoExec._geo_seed_mesh_context!(context,seed)
     GeoExec._geo_allocator_resync_model!(allocator,model)
     options=copy(OPTIONS);diagnostics=_model_import_diagnostics(options)

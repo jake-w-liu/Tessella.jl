@@ -64,7 +64,15 @@ function _onelab_cli_flags(tokens)
     ordinary=String[];selected=nothing;index=1;batch=false;metamodel=false
     while index<=length(tokens)
         flag=tokens[index]
-        if flag in ("-onelab","-socket")
+        if flag=="-listen"
+            selected===nothing || throw(ArgumentError("tessella: duplicate or conflicting ONELAB flags"))
+            address=nothing
+            if index<length(tokens) && !startswith(tokens[index+1],'-')
+                index+=1;address=tokens[index]
+                isempty(address) && throw(ArgumentError("tessella: -listen needs a nonempty address"))
+            end
+            selected=(name="Listen",address=address,service=true,listening=true)
+        elseif flag in ("-onelab","-socket")
             selected===nothing || throw(ArgumentError("tessella: duplicate or conflicting ONELAB client flags"))
             index+=1
             index<=length(tokens) && !startswith(tokens[index],'-') && !isempty(tokens[index]) ||
@@ -75,7 +83,7 @@ function _onelab_cli_flags(tokens)
                 index+=1;address=tokens[index]
             end
             address===nothing || !isempty(address) || throw(ArgumentError("tessella: $flag needs an address"))
-            selected=(;name,address,service=flag=="-socket")
+            selected=(;name,address,service=flag=="-socket",listening=false)
         else
             batch|=flag in _ONELAB_CLI_BATCH_FLAGS
             metamodel|=flag=="-run"
@@ -91,6 +99,46 @@ function _onelab_cli_flags(tokens)
         index+=1
     end
     return (selected===nothing ? nothing : merge(selected,(;batch,metamodel))),ordinary
+end
+
+function _run_onelab_listener_cli(tokens,selected)
+    selected.metamodel && throw(ArgumentError("tessella: -listen cannot be combined with -run"))
+    epoch=lock(API.STATE_LOCK) do
+        API.initialize();API.option("Solver.AlwaysListen",1.)
+        API._ONELAB_SESSION_EPOCH[]
+    end
+    try
+        status=API._OnelabFrontendStatus(current_task(),false,0)
+        storage=task_local_storage();previous=get(storage,API._ONELAB_LISTENER_KEY,nothing)
+        storage[API._ONELAB_LISTENER_KEY]=status
+        result=try
+            lock(API.STATE_LOCK) do
+                epoch==API._ONELAB_SESSION_EPOCH[] || throw(ArgumentError("tessella: listener session was reset"))
+                _run(tokens;_reuse_session=true)
+            end
+        finally
+            previous===nothing ? delete!(storage,API._ONELAB_LISTENER_KEY) :
+                (storage[API._ONELAB_LISTENER_KEY]=previous)
+        end
+        status.exit_requested && (status.exit_code==0 ? (return result) :
+            throw(ArgumentError("tessella: listener GEO Exit $(status.exit_code)")))
+        iszero(API.OPTIONS["Solver.AlwaysListen"]) && return result
+        address=selected.address
+        if address===nothing
+            address=lock(API.STATE_LOCK) do
+                namespace=API._ONELAB_LIVE_GEO[]
+                namespace===nothing ? IO._GEO_STRING_OPTION_TABLE["Solver"]["SocketName"] :
+                    IO._geo_option_string(namespace.context,"Solver",0,"SocketName","tessella: -listen")
+            end
+        end
+        code=API._onelab_listen(address;option_controlled=true)
+        code==0 || throw(ArgumentError("tessella: listener GEO Exit $code"))
+        return result
+    finally
+        lock(API.STATE_LOCK) do
+            epoch==API._ONELAB_SESSION_EPOCH[] && API.finalize()
+        end
+    end
 end
 
 function _run_onelab_empty(preludes,numeric_options)

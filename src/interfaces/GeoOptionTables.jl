@@ -823,6 +823,7 @@ const _GEO_STRING_OPTION_TABLE=Dict{String,Dict{String,String}}(
         "Name9"=>"",
         "OctaveInterpreter"=>"octave",
         "PythonInterpreter"=>"python",
+        "SocketName"=>"127.0.0.1:0",
         "RemoteLogin0"=>"",
         "RemoteLogin1"=>"",
         "RemoteLogin2"=>"",
