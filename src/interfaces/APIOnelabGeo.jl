@@ -15,10 +15,12 @@ function _onelab_geo_runner(;session=false)
         # Existing records are immutable within this operation: scalar writes
         # and received wire records replace a copied record before mutation.
         _OnelabServerStore(copy(source.parameters),copy(source.changed),
-            deepcopy(source.wire),copy(source.client_changed),copy(source.commands),ReentrantLock())
+            copy(source.typed_changed),deepcopy(source.wire),copy(source.client_changed),
+            copy(source.commands),ReentrantLock())
     else
-        _OnelabServerStore(Dict{String,_OnelabParameter}(),Set{String}(),
-            Dict{String,_OnelabWireParameter}(),Dict{String,Bool}(),Dict{String,String}(),ReentrantLock())
+        _OnelabServerStore(Dict{_OnelabParameterKey,_OnelabParameter}(),Set{String}(),
+            Set{_OnelabParameterKey}(),Dict{_OnelabParameterKey,_OnelabWireParameter}(),
+            Dict{String,Bool}(),Dict{String,String}(),ReentrantLock())
     end
     runner=_OnelabGeoRunner(store,Dict{String,Float64}(),Dict{String,String}(),
         Dict{String,Float64}(),Dict{String,String}(),session ? _ONELAB_SESSION_EPOCH[] : nothing)
@@ -28,7 +30,7 @@ end
 
 function _onelab_geo_refresh!(runner)
     empty!(runner.numbers);empty!(runner.strings)
-    for (name,parameter) in runner.store.parameters
+    for ((_,name),parameter) in runner.store.parameters
         if parameter.kind===:number
             runner.numbers[name]=isempty(parameter.values_f) ? 0. : first(parameter.values_f)
         else
@@ -42,42 +44,40 @@ end
 
 function _onelab_geo_sync!(runner)
     numbers=runner.numbers;strings=runner.strings;store=runner.store
-    for name in union(keys(numbers),keys(strings))
-        old=get(store.parameters,name,nothing)
-        in_n=haskey(numbers,name);in_s=haskey(strings,name)
-        nnew=in_n && (!haskey(runner.seed_numbers,name) || runner.seed_numbers[name]!=numbers[name])
-        snew=in_s && (!haskey(runner.seed_strings,name) || runner.seed_strings[name]!=strings[name])
-        kind=in_n && in_s ? (nnew && !snew ? :number : snew && !nnew ? :string :
-            old===nothing ? :number : old.kind) : in_n ? :number : :string
-        changed=kind===:number ? nnew : snew
-        if old===nothing || old.kind!==kind || changed
-            parameter=old===nothing || old.kind!==kind ? _OnelabParameter(name,kind) : deepcopy(old)
-            if kind===:number
-                parameter.values_f=Float64[numbers[name]];parameter.values_s=String[]
-            else
-                parameter.values_s=String[strings[name]];parameter.values_f=Float64[]
+    for (kind,values,seeds) in ((:number,numbers,runner.seed_numbers),
+                               (:string,strings,runner.seed_strings))
+        for (name,value) in values
+            key=(kind,name);old=get(store.parameters,key,nothing)
+            changed=!haskey(seeds,name) || seeds[name]!=value
+            if old===nothing || changed
+                parameter=old===nothing ? _OnelabParameter(name,kind) : deepcopy(old)
+                if kind===:number
+                    parameter.values_f=Float64[value]
+                else
+                    parameter.values_s=String[value]
+                end
+                store.parameters[key]=parameter
+                _onelab_store_mark_changed!(store,key)
             end
-            store.parameters[name]=parameter
-            _onelab_store_mark_changed!(store,name)
+        end
+        for name in keys(seeds)
+            haskey(values,name) || _onelab_store_delete!(store,(kind,name))
         end
     end
     # Empty and multi-value records retain their complete values when their
     # scalar projection is unchanged.
-    for name in union(keys(runner.seed_numbers),keys(runner.seed_strings))
-        haskey(numbers,name) || haskey(strings,name) || _onelab_store_delete!(store,name)
-    end
     return nothing
 end
 
 function _onelab_geo_empty_number(runner,name)
-    parameter=get(runner.store.parameters,name,nothing)
+    parameter=get(runner.store.parameters,(:number,name),nothing)
     return parameter!==nothing && parameter.kind===:number && isempty(parameter.values_f)
 end
 
 function _onelab_geo_adopt_runner!(runner)
     runner.epoch==_ONELAB_SESSION_EPOCH[] || throw(ArgumentError("ONELAB: session was reset"))
     target=_ONELAB_SESSION_STORE;source=runner.store
-    for field in (:parameters,:changed,:wire,:client_changed,:commands)
+    for field in (:parameters,:changed,:typed_changed,:wire,:client_changed,:commands)
         destination=getfield(target,field)
         empty!(destination);merge_or_union=destination isa AbstractSet ? union! : merge!
         merge_or_union(destination,getfield(source,field))
@@ -119,13 +119,18 @@ function _onelab_geo_command!(runner,model,context,allocator,kind,payload,client
     return true
 end
 
-function _onelab_geo_run!(model,context,name,command,allocator)
+function _onelab_geo_context_runner!(context)
     runner=context.native_onelab_runner
     if runner===nothing
         runner=_onelab_geo_runner()
         runner.numbers=context.onelab_numbers;runner.strings=context.onelab_strings
         context.native_onelab_runner=runner
     end
+    return runner
+end
+
+function _onelab_geo_run!(model,context,name,command,allocator)
+    runner=_onelab_geo_context_runner!(context)
     _onelab_geo_sync!(runner)
     logger=(kind,client,message)->begin
         kind==_ONELAB_MSG.ERROR ? GeoExec._geo_msg_error!(context,"$client: $message") :

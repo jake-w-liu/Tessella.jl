@@ -28,7 +28,8 @@ end
 
 function _onelab_template_value(state,raw)
     name=String(strip(raw))
-    parameter=get(state.store.parameters,name,nothing)
+    key=_onelab_preferred_key(state.store.parameters,name)
+    parameter=key===nothing ? nothing : state.store.parameters[key]
     if parameter===nothing || parameter.kind===:number && isempty(parameter.values_f) ||
             parameter.kind===:string && isempty(parameter.values_s)
         state.diagnostics("OL.get: unknown or empty parameter $(repr(name))")
@@ -39,18 +40,25 @@ function _onelab_template_value(state,raw)
     return parameter.kind===:number ? _onelab_wire_f64(first(parameter.values_f)) : first(parameter.values_s)
 end
 
-function _onelab_template_substitute(state,source)
-    output=IOBuffer();index=firstindex(source)
+function _onelab_template_append!(output,text,limit)
+    count=ncodeunits(text)
+    position(output)<=limit-count || throw(ArgumentError("ONELAB preprocessing: output exceeds64MiB"))
+    write(output,text)
+    return nothing
+end
+
+function _onelab_template_substitute(state,source;limit=64*1024*1024-state.output_bytes)
+    output=IOBuffer(;maxsize=limit);index=firstindex(source)
     while index<=lastindex(source)
         location=findnext("OL.",source,index)
-        location===nothing && (write(output,SubString(source,index));break)
+        location===nothing && (_onelab_template_append!(output,SubString(source,index),limit);break)
         start=first(location)
-        write(output,SubString(source,index,prevind(source,start)))
+        _onelab_template_append!(output,SubString(source,index,prevind(source,start)),limit)
         command,argument,after=_onelab_template_call(source,start,"ONELAB preprocessing")
         command=="get" || throw(ArgumentError("ONELAB preprocessing: unknown inline OL.$command"))
         value=_onelab_template_value(state,argument)
         value===nothing && return "??"
-        write(output,value);index=after
+        _onelab_template_append!(output,value,limit);index=after
     end
     return String(take!(output))
 end
@@ -72,9 +80,9 @@ function _onelab_template_file!(state,output,path,depth=0)
     state.bytes+=size
     push!(state.active,path)
     branches=Tuple{Bool,Bool,Bool}[] # parent active, condition, else seen
-    active=true
     try
         Base.open(path,"r") do input
+            active=true
             while !eof(input)
                 line=readline(input)
                 _onelab_valid_text(line) || throw(ArgumentError("ONELAB preprocessing: template is not valid UTF-8"))
@@ -101,7 +109,7 @@ function _onelab_template_file!(state,output,path,depth=0)
                 elseif startswith(text,"OL.include(")
                     command,argument,after=_onelab_template_call(String(text),firstindex(text),"ONELAB preprocessing")
                     isempty(strip(SubString(text,after))) || throw(ArgumentError("ONELAB preprocessing: text after include"))
-                    included=_onelab_template_substitute(state,String(strip(argument)))
+                    included=_onelab_template_substitute(state,String(strip(argument));limit=64*1024*1024)
                     _onelab_template_file!(state,output,joinpath(dirname(path),included),depth+1)
                 else
                     _onelab_template_write!(state,output,_onelab_template_substitute(state,line)*"\n")

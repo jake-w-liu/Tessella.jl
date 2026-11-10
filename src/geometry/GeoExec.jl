@@ -882,6 +882,12 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
     _initial_onelab_strings===nothing ||
         (context.onelab_strings=_initial_onelab_strings)
     context.native_onelab_runner=_initial_onelab_runner
+    if context.native_onelab_runner===nothing
+        # Execution owns a full parameter store even before its first client
+        # starts. The separate parameter pre-pass keeps its scalar mirrors.
+        api=getfield(parentmodule(@__MODULE__),:API)
+        Base.invokelatest(getfield(api,:_onelab_geo_context_runner!),context)
+    end
     context.native_context_lc=_initial_context_lc
     context.native_context_forced_bbox=_initial_context_forced_bbox
     context.native_mesh_error_callback=_initial_mesh_error_callback

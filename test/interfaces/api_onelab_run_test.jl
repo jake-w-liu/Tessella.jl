@@ -100,6 +100,10 @@ end
                 @test A.onelab.client_get_number(client,"Input/new")==[3.,4.]
                 A.onelab.client_set_string(client,"Input/string",["one","two"])
                 @test A.onelab.client_get_string(client,"Input/string")==["one","two"]
+                A.onelab.client_set_number(client,"shared",[7.,8.])
+                A.onelab.client_set_string(client,"shared",["alpha","beta"])
+                @test A.onelab.client_get_number(client,"shared")==[7.,8.]
+                @test A.onelab.client_get_string(client,"shared")==["alpha","beta"]
                 @test "Input/new" in A.onelab.client_get_names(client)
                 A.onelab.client_set_changed(client,"native relay",false)
                 @test !A.onelab.client_get_changed(client,"native relay")

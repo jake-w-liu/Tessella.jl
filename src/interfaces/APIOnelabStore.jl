@@ -1,19 +1,21 @@
 mutable struct _OnelabServerStore
-    parameters::Dict{String,_OnelabParameter}
+    parameters::Dict{_OnelabParameterKey,_OnelabParameter}
     changed::Set{String}
-    wire::Dict{String,_OnelabWireParameter}
+    typed_changed::Set{_OnelabParameterKey}
+    wire::Dict{_OnelabParameterKey,_OnelabWireParameter}
     client_changed::Dict{String,Bool}
     commands::Dict{String,String}
     lock::Union{Nothing,ReentrantLock}
 end
 
 const _ONELAB_SESSION_STORE=_OnelabServerStore(SESSION_ONELAB,
-    SESSION_ONELAB_CHANGED,Dict{String,_OnelabWireParameter}(),
+    SESSION_ONELAB_CHANGED,Set{_OnelabParameterKey}(),Dict{_OnelabParameterKey,_OnelabWireParameter}(),
     Dict{String,Bool}(),Dict{String,String}(),nothing)
 
 function _onelab_reset_server_state!()
     Threads.atomic_add!(_ONELAB_SESSION_EPOCH,UInt64(1))
     empty!(_ONELAB_SESSION_STORE.wire)
+    empty!(_ONELAB_SESSION_STORE.typed_changed)
     empty!(_ONELAB_SESSION_STORE.client_changed)
     empty!(_ONELAB_SESSION_STORE.commands)
     _ONELAB_LIVE_GEO[]=nothing
@@ -28,9 +30,9 @@ function _onelab_store_locked(action,store,epoch=nothing)
     end
 end
 
-function _onelab_store_mark_changed!(store,name)
-    push!(store.changed,name)
-    metadata=get(store.wire,name,nothing)
+function _onelab_store_mark_changed!(store,key::_OnelabParameterKey)
+    push!(store.changed,key[2]);push!(store.typed_changed,key)
+    metadata=get(store.wire,key,nothing)
     if metadata!==nothing
         for client in keys(metadata.clients)
             metadata.clients[client]=1
@@ -40,24 +42,41 @@ function _onelab_store_mark_changed!(store,name)
     return nothing
 end
 
+function _onelab_store_mark_changed!(store,name::String)
+    push!(store.changed,name)
+    for kind in (:number,:string)
+        key=(kind,name)
+        haskey(store.parameters,key) && _onelab_store_mark_changed!(store,key)
+    end
+    return nothing
+end
+
 _onelab_mark_changed!(name)=_onelab_store_mark_changed!(_ONELAB_SESSION_STORE,name)
 
-function _onelab_store_delete!(store,name)
-    _onelab_store_mark_changed!(store,name)
-    delete!(store.parameters,name);delete!(store.changed,name);delete!(store.wire,name)
+function _onelab_store_delete!(store,key::_OnelabParameterKey)
+    _onelab_store_mark_changed!(store,key)
+    delete!(store.parameters,key);delete!(store.typed_changed,key);delete!(store.wire,key)
+    any(other->other[2]==key[2],store.typed_changed) || delete!(store.changed,key[2])
+    return nothing
+end
+
+function _onelab_store_delete!(store,name::AbstractString)
+    key=_onelab_preferred_key(store.parameters,String(name))
+    key===nothing ? delete!(store.changed,name) : _onelab_store_delete!(store,key)
     return nothing
 end
 
 function _onelab_store_register_client!(store,parameter,client)
-    metadata=get(store.wire,parameter.name,nothing)
+    key=(parameter.kind,parameter.name)
+    metadata=get(store.wire,key,nothing)
     if metadata===nothing || metadata.kind!==parameter.kind
         metadata=_OnelabWireParameter(parameter.kind,parameter.name)
-        store.wire[parameter.name]=metadata
+        store.wire[key]=metadata
     end
     if !isempty(client) && !haskey(metadata.clients,client)
         _onelab_dict_put!(metadata.clients,metadata.client_order,client,0)
         store.client_changed[client]=get(store.client_changed,client,false) ||
-            parameter.name in store.changed
+            key in store.typed_changed
     end
     return metadata
 end
@@ -89,7 +108,8 @@ function _onelab_store_receive!(store,wire,client)
         all(isfinite,(wire.min,wire.max,wire.step)) &&
         all(isfinite,keys(wire.value_labels)) || throw(ArgumentError(
             "ONELAB server: parameter numbers must be finite"))
-    old=get(store.parameters,wire.name,nothing)
+    key=(wire.kind,wire.name)
+    old=get(store.parameters,key,nothing)
     parameter=old===nothing || old.kind!==wire.kind ?
         _OnelabParameter(wire.name,wire.kind) : deepcopy(old)
     changed=old===nothing || old.kind!==wire.kind ||
@@ -103,7 +123,7 @@ function _onelab_store_receive!(store,wire,client)
     parameter.choices_f=wire.choices_f;parameter.choices_s=wire.choices_s
     parameter.value_labels=Dict(_onelab_wire_f64(value)=>label for (value,label) in wire.value_labels)
     parameter.kind_name=wire.kind_name
-    previous=get(store.wire,wire.name,nothing)
+    previous=get(store.wire,key,nothing)
     if previous!==nothing
         for (name,value) in previous.clients
             haskey(wire.clients,name) || _onelab_dict_put!(wire.clients,wire.client_order,name,value)
@@ -113,9 +133,9 @@ function _onelab_store_receive!(store,wire,client)
     # The metadata keeps ownership/ordering without a duplicate values buffer.
     wire.values_f=Float64[];wire.values_s=String[]
     wire.choices_f=Float64[];wire.choices_s=String[]
-    store.parameters[parameter.name]=parameter
-    store.wire[parameter.name]=wire
-    changed && _onelab_store_mark_changed!(store,parameter.name)
+    store.parameters[key]=parameter
+    store.wire[key]=wire
+    changed && _onelab_store_mark_changed!(store,key)
     return nothing
 end
 
@@ -131,7 +151,7 @@ function _onelab_server_parameter!(store,client,socket,kind,payload,epoch=nothin
     return _onelab_store_locked(store,epoch) do
         if kind==_ONELAB_MSG.PARAMETER_QUERY
             query=_onelab_wire_decode(payload,"ONELAB server")
-            parameter=get(store.parameters,query.name,nothing)
+            parameter=get(store.parameters,(query.kind,query.name),nothing)
             if parameter===nothing || parameter.kind!==query.kind
                 _onelab_server_send(socket,_ONELAB_MSG.PARAMETER_NOT_FOUND,query.name)
             else

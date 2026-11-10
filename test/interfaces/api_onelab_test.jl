@@ -1,5 +1,5 @@
 # `onelab` module UI01: session parameter records, JSON exchange, glob name
-# queries, changed flags, clear, honest `run` rejection, and the `.geo`
+# queries, changed flags, clear, native process clients, and the `.geo`
 # DefineNumber/SetNumber/GetNumber exchange through the session file frontends.
 module OnelabChecks
 using Test, Tessella
@@ -25,16 +25,15 @@ end
         @test A.onelab.get_number("Group/b")==[2.0,3.0]
         A.onelab.set_string("Group/s","hello")
         @test A.onelab.get_string("Group/s")==["hello"]
-        # Name uniqueness across types: set_string replaces the number record.
+        # Number and string records retain independent values at a shared name.
         A.onelab.set_string("Group/a","now a string")
         @test A.onelab.get_string("Group/a")==["now a string"]
-        @test occursin("no ONELAB number parameter",
-            _errtext(()->A.onelab.get_number("Group/a")))
+        @test A.onelab.get_number("Group/a")==[1.5]
         A.onelab.set_number("Group/a",4.0)
         # Glob name queries.
-        @test A.onelab.get_names()==["Group/a","Group/b","Group/s"]
-        @test A.onelab.get_names("Group/*")==["Group/a","Group/b","Group/s"]
-        @test A.onelab.get_names("Group/?")==["Group/a","Group/b","Group/s"]
+        @test A.onelab.get_names()==["Group/a","Group/a","Group/b","Group/s"]
+        @test A.onelab.get_names("Group/*")==["Group/a","Group/a","Group/b","Group/s"]
+        @test A.onelab.get_names("Group/?")==["Group/a","Group/a","Group/b","Group/s"]
         @test A.onelab.get_names("*/b")==["Group/b"]
         @test A.onelab.get_names("nothing*")==String[]
         # Missing/type-mismatched getters fail loudly.

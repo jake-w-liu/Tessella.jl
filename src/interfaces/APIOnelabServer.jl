@@ -301,6 +301,7 @@ end
 include("APIOnelabStore.jl")
 include("APIOnelabPreprocess.jl")
 include("APIOnelabGeo.jl")
+include("APIOnelabMetadata.jl")
 
 function _onelab_engine_failure(engine,exception)
     engine.timed_out[] && return ArgumentError(

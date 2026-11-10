@@ -1,9 +1,8 @@
 # ---- session ONELAB parameter store -------------------------------------------
 #
-# Gmsh 4.15.2 `onelab` module support. `SESSION_ONELAB` holds one
-# `_OnelabParameter` record per parameter name — the upstream parameter space
-# keys parameters by name across types, so `set_string` on a number name
-# replaces the whole record. `SESSION_ONELAB_CHANGED` is the changed-name flag
+# Gmsh 4.15.2 `onelab` module support. Number and string parameters have
+# independent namespaces: the same name can hold a record of each type.
+# `SESSION_ONELAB_CHANGED` is the compatibility changed-name flag
 # set that solver clients poll through `set_changed`/`get_changed`/
 # `clear_changed`. Both tables are emptied by `initialize`/`finalize`;
 # `clear` preserves the parameter space like upstream's model/view-only reset.
@@ -52,8 +51,17 @@ _OnelabParameter(name::String,kind::Symbol)=_OnelabParameter(
     Float64[],String[],Dict{String,String}(),Dict{String,String}(),
     nothing,nothing,nothing,false,true,false,"parameter")
 
-const SESSION_ONELAB = Dict{String,_OnelabParameter}()
+const _OnelabParameterKey=Tuple{Symbol,String}
+const SESSION_ONELAB = Dict{_OnelabParameterKey,_OnelabParameter}()
 const SESSION_ONELAB_CHANGED = Set{String}()
+
+function _onelab_preferred_key(parameters,name)
+    for kind in (:number,:string)
+        key=(kind,name)
+        haskey(parameters,key) && return key
+    end
+    return nothing
+end
 
 # ---- minimal JSON decoder ------------------------------------------------------
 
@@ -560,43 +568,6 @@ function _onelab_glob_match(name::String,pattern::String)
     return pi>pn
 end
 
-# ---- geo context bridge -----------------------------------------------------------
-
-# Detached scalar mirrors of the session records for one `execute_geo` run —
-# the `.geo` context exchanges first values only, matching the batch localGmsh
-# client's number/string store. Returns (live_numbers, live_strings, seed
-# copies for the post-execution diff in `_onelab_geo_adopt!`).
-function _onelab_geo_seed()
-    numbers=Dict{String,Float64}();strings=Dict{String,String}()
-    for (name,p) in SESSION_ONELAB
-        if p.kind===:number
-            numbers[name]=isempty(p.values_f) ? 0.0 : first(p.values_f)
-        else
-            strings[name]=isempty(p.values_s) ? "" : first(p.values_s)
-        end
-    end
-    return numbers,strings,copy(numbers),copy(strings)
-end
-
-# Reconcile the post-execution mirrors into the parameter records. Called only
-# after a successful `execute_geo`, so a failed script leaves the store
-# untouched (the live dicts are discarded). New/changed names mark changed;
-# names the script removed (e.g. `UndefineConstant`) leave the store. A name
-# present in both mirrors arises only when the script set the other type —
-# the side that moved relative to its seed wins; a genuine both-new write is
-# resolved to :number deterministically.
-function _onelab_geo_adopt!(numbers::Dict{String,Float64},
-                            strings::Dict{String,String},
-                            seedn::Dict{String,Float64},
-                            seeds::Dict{String,String})
-    runner=_onelab_geo_runner(;session=true)
-    runner.numbers=numbers;runner.strings=strings
-    runner.seed_numbers=seedn;runner.seed_strings=seeds
-    _onelab_geo_sync!(runner)
-    _onelab_geo_adopt_runner!(runner)
-    return nothing
-end
-
 # ---- session endpoints --------------------------------------------------------------
 
 function _onelab_set(data,format)
@@ -610,8 +581,8 @@ function _onelab_set(data,format)
         items=parsed isa Vector ? parsed : Any[parsed]
         for item in items
             p=_onelab_param_from_json(item,caller)
-            SESSION_ONELAB[p.name]=p
-            _onelab_mark_changed!(p.name)
+            SESSION_ONELAB[(p.kind,p.name)]=p
+            _onelab_mark_changed!((p.kind,p.name))
         end
         return nothing
     end
@@ -623,11 +594,13 @@ function _onelab_get(name,format)
     _onelab_check_format(format,caller)
     return lock(STATE_LOCK) do
         _model_locked()
-        names=isempty(key) ? sort!(collect(keys(SESSION_ONELAB))) :
-            (haskey(SESSION_ONELAB,key) ? String[key] : String[])
-        isempty(names) && return "[]"
+        preferred=isempty(key) ? nothing : _onelab_preferred_key(SESSION_ONELAB,key)
+        parameters=isempty(key) ? sort!(collect(keys(SESSION_ONELAB));
+            by=item->(item[2],item[1]===:number ? 0 : 1)) :
+            preferred===nothing ? _OnelabParameterKey[] : [preferred]
+        isempty(parameters) && return "[]"
         io=IOBuffer();write(io,"[\n")
-        for (i,n) in enumerate(names)
+        for (i,n) in enumerate(parameters)
             i>1 && write(io,",\n")
             _onelab_param_json!(io,SESSION_ONELAB[n],caller)
         end
@@ -641,7 +614,7 @@ function _onelab_get_names(search)
     pattern=_onelab_check_name(search,caller)
     return lock(STATE_LOCK) do
         _model_locked()
-        return sort!(String[n for n in keys(SESSION_ONELAB)
+        return sort!(String[n for (_,n) in keys(SESSION_ONELAB)
                             if _onelab_glob_match(n,pattern)])
     end
 end
@@ -653,8 +626,8 @@ function _onelab_set_number(name,values)
     vals=_onelab_floats(values,caller)
     lock(STATE_LOCK) do
         _model_locked()
-        SESSION_ONELAB[key]=_onelab_number_record(key,vals)
-        _onelab_mark_changed!(key)
+        SESSION_ONELAB[(:number,key)]=_onelab_number_record(key,vals)
+        _onelab_mark_changed!((:number,key))
         return nothing
     end
 end
@@ -666,8 +639,8 @@ function _onelab_set_string(name,values)
     vals=_onelab_strings(values,caller)
     lock(STATE_LOCK) do
         _model_locked()
-        SESSION_ONELAB[key]=_onelab_string_record(key,vals)
-        _onelab_mark_changed!(key)
+        SESSION_ONELAB[(:string,key)]=_onelab_string_record(key,vals)
+        _onelab_mark_changed!((:string,key))
         return nothing
     end
 end
@@ -677,7 +650,7 @@ function _onelab_get_number(name)
     key=_onelab_check_name(name,caller)
     return lock(STATE_LOCK) do
         _model_locked()
-        p=get(SESSION_ONELAB,key,nothing)
+        p=get(SESSION_ONELAB,(:number,key),nothing)
         (p===nothing || p.kind!==:number) && throw(ArgumentError(
             "$caller: no ONELAB number parameter $(repr(key))"))
         return copy(p.values_f)
@@ -689,7 +662,7 @@ function _onelab_get_string(name)
     key=_onelab_check_name(name,caller)
     return lock(STATE_LOCK) do
         _model_locked()
-        p=get(SESSION_ONELAB,key,nothing)
+        p=get(SESSION_ONELAB,(:string,key),nothing)
         (p===nothing || p.kind!==:string) && throw(ArgumentError(
             "$caller: no ONELAB string parameter $(repr(key))"))
         return copy(p.values_s)
@@ -707,7 +680,7 @@ function _onelab_clear(name)
             end
             empty!(SESSION_ONELAB_CHANGED)
         else
-            for n in collect(keys(SESSION_ONELAB))
+            for n in unique!([name for (_,name) in keys(SESSION_ONELAB)])
                 _onelab_glob_match(n,key) && _onelab_store_delete!(_ONELAB_SESSION_STORE,n)
             end
             filter!(n->!_onelab_glob_match(n,key),SESSION_ONELAB_CHANGED)
@@ -745,6 +718,7 @@ function _onelab_clear_changed()
     lock(STATE_LOCK) do
         _model_locked()
         empty!(SESSION_ONELAB_CHANGED)
+        empty!(_ONELAB_SESSION_STORE.typed_changed)
         for name in keys(_ONELAB_SESSION_STORE.client_changed)
             _onelab_store_set_client_changed!(_ONELAB_SESSION_STORE,name,false)
         end

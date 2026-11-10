@@ -79,6 +79,8 @@ include("functional/fixtures.jl")
         "interfaces/api_occ_boolean_seam_test.jl",
         "interfaces/api_occ_fuse_images_test.jl",
         "interfaces/api_onelab_run_test.jl",
+        "interfaces/api_onelab_typed_test.jl",
+        "interfaces/api_onelab_metadata_test.jl",
         "interfaces/api_onelab_cancellation_test.jl",
         "interfaces/api_parser_live_test.jl",
         "interfaces/api_xao_native_import_test.jl",

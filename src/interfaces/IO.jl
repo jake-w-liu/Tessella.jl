@@ -8290,47 +8290,71 @@ end
 
 # `Msg::ExchangeOnelabParameter` — the ONELAB name is `Name`'s value (default
 # `name` is NOT used; Gmsh errors when options exist without `Name`).
-function _geo_exchange_onelab_number!(context::_GeoNumericContext,name::String,
-                                      values::Vector{Float64},options,
-                                      caller::AbstractString)
-    options===nothing && return values
-    oname=nothing;fopts=Dict{String,Vector{Float64}}()
+function _geo_onelab_options(context::_GeoNumericContext,options,caller;
+                             string_choices=false)
+    fopts=Dict{String,Vector{Float64}}();copts=Dict{String,Vector{String}}()
+    labels=Dict{Float64,String}()
     for opt in options
         om=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(.*?)\s*$",
                  String(strip(opt)))
         om===nothing && throw(ArgumentError(
             "$caller: malformed ONELAB option $(repr(opt))"))
         key=String(om.captures[1]);arg=String(strip(om.captures[2]))
-        if key=="Name" || key=="Label"
-            v=_geo_eval_string(arg,context,caller)
-            key=="Name" && (oname=v)
+        if key in ("Name","Label","Help","ShortHelp","LongHelp","Kind",
+                   "Highlight","Loop","Graph","GmshOption","Macro","MultipleSelection")
+            copts[key]=String[_geo_eval_string(arg,context,caller)]
+        elseif key=="Choices" && string_choices
+            inner=startswith(arg,"{") && endswith(arg,"}") ? chop(arg;head=1,tail=1) : arg
+            copts[key]=_geo_eval_string_list(inner,context,caller)
         elseif isempty(arg)
             fopts[key]=[1.0]
         elseif startswith(arg,"{") && occursin('=',arg)
             # `Choices {v = "label", ...}` — `Enumeration`: numbers to
             # fopts, labels to the char side.
             fopts[key]=Float64[]
+            copts[key]=String[]
             inner=String(chop(arg;head=1,tail=1))
             for enum in _geo_split_args(inner,caller)
                 em=match(r"^(.*?)\s*=\s*(.*?)\s*$",String(enum))
                 em===nothing && throw(ArgumentError(
                     "$caller: malformed enumeration item $(repr(enum))"))
-                push!(fopts[key],_geo_eval_numeric(em.captures[1],context,
-                    caller))
+                value=_geo_eval_numeric(em.captures[1],context,caller)
+                label=_geo_eval_string(em.captures[2],context,caller)
+                push!(fopts[key],value);push!(copts[key],label)
+                labels[value]=label
             end
         elseif startswith(arg,"{")
             fopts[key]=_geo_numeric_list_values(arg,context,caller;
                                                 allow_multiplier=true)
         elseif _geo_string_rhs(arg)
-            _geo_eval_string(arg,context,caller)
+            copts[key]=String[_geo_eval_string(arg,context,caller)]
         else
             fopts[key]=[_geo_eval_numeric(arg,context,caller)]
         end
     end
-    oname===nothing &&
+    return fopts,copts,labels
+end
+
+function _geo_onelab_declare(context,kind,values,fopts,copts,labels,caller)
+    context.native_onelab_runner===nothing && return nothing
+    api=getfield(parentmodule(@__MODULE__),:API)
+    return Base.invokelatest(getfield(api,:_onelab_geo_declare!),context.native_onelab_runner,
+        kind,values,fopts,copts,labels,caller)
+end
+
+function _geo_exchange_onelab_number!(context::_GeoNumericContext,name::String,
+                                      values::Vector{Float64},options,
+                                      caller::AbstractString)
+    options===nothing && return values
+    fopts,copts,labels=_geo_onelab_options(context,options,caller)
+    oname=get(copts,"Name",String[])
+    (isempty(oname) || isempty(first(oname))) &&
         _geo_msg_error!(context,"From now on you need to use the `Name' " *
                       "attribute to create a ONELAB parameter")
-    oname===nothing && return values
+    (isempty(oname) || isempty(first(oname))) && return values
+    oname=first(oname)
+    declared=_geo_onelab_declare(context,:number,values,fopts,copts,labels,caller)
+    declared===nothing || return declared
     if haskey(context.onelab_numbers,oname) &&
        get(fopts,"ReadOnly",[0.0])[1]==0.0
         # An existing empty server number keeps its empty values while the
@@ -8351,19 +8375,16 @@ end
 function _geo_define_onelab_string(context::_GeoNumericContext,value::String,
                                    options,caller::AbstractString)
     options===nothing && return value
-    oname=nothing;has_options=false
-    for opt in options
-        om=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(.*?)\s*$",String(strip(opt)))
-        om===nothing && continue
-        has_options=true
-        om.captures[1]=="Name" &&
-            (oname=_geo_eval_string(om.captures[2],context,caller))
-    end
-    oname===nothing && has_options &&
+    fopts,copts,labels=_geo_onelab_options(context,options,caller;string_choices=true)
+    oname=get(copts,"Name",String[])
+    (isempty(oname) || isempty(first(oname))) && !isempty(options) &&
         _geo_msg_error!(context,"From now on you need to use the `Name' " *
                       "attribute to create a ONELAB parameter")
-    oname===nothing && return value
-    haskey(context.onelab_strings,oname) &&
+    (isempty(oname) || isempty(first(oname))) && return value
+    oname=first(oname)
+    declared=_geo_onelab_declare(context,:string,String[value],fopts,copts,labels,caller)
+    declared===nothing || return declared
+    haskey(context.onelab_strings,oname) && get(fopts,"ReadOnly",[0.0])[1]==0. &&
         return context.onelab_strings[oname]
     context.onelab_strings[oname]=value
     return value

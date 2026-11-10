@@ -77,6 +77,14 @@ elseif mode=="file"
 elseif mode=="preprocess"
     frame(socket,28,name*"\0"*ARGS[3])
     write(output,string(reply(socket)))
+elseif mode=="metadata"
+    records=String[]
+    for (kind,key) in (("number","Controls/N"),("string","Controls/S"))
+        message,payload=query(socket,key;kind)
+        message==23 || error("missing metadata parameter")
+        push!(records,payload)
+    end
+    write(output,join(records,'\n'))
 elseif mode=="noread"
     # Request the full string list and then never read: the server's response
     # write backpressures. Exercise the finite watchdog and cleanup paths.
