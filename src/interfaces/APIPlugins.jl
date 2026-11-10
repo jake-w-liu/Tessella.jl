@@ -5226,40 +5226,22 @@ end
 # `DistanceType > 0` solves the Legrand diffusion PDE upstream under
 # HAVE_SOLVER; that arm is not yet ported.
 
-function _plugin_point_seg_dist(px,py,pz,a,b)
-    abx=b[1]-a[1];aby=b[2]-a[2];abz=b[3]-a[3]
-    ab2=abx*abx+aby*aby+abz*abz
-    α=ab2>0 ? ((px-a[1])*abx+(py-a[2])*aby+(pz-a[3])*abz)/ab2 : 0.0
-    α=clamp(α,0.0,1.0)
-    return hypot(px-(a[1]+α*abx),py-(a[2]+α*aby),pz-(a[3]+α*abz))
+# These use the same guarded geometric kernels as DistanceField, without its
+# mesh-size cap: plugin output contains physical distances in model units.
+function _plugin_geometric_distance(kernel::F,p,vertices::Vararg{Any,N}) where {F,N}
+    distance=kernel(p,vertices...)
+    isfinite(distance) && return Float64(distance)
+    return setprecision(BigFloat,256) do
+        exact=map(point->map(Rational{BigInt},point),(p,vertices...))
+        Float64(kernel(exact...))
+    end
 end
 
-# Unsigned point-triangle distance: |normal component| when the projection
-# lands inside the triangle, otherwise the minimum edge distance (upstream
-# `signedDistancesPointsTriangle` magnitude — the plugin takes abs()).
-function _plugin_point_tri_dist(px,py,pz,a,b,c)
-    e1x=b[1]-a[1];e1y=b[2]-a[2];e1z=b[3]-a[3]
-    e2x=c[1]-a[1];e2y=c[2]-a[2];e2z=c[3]-a[3]
-    nx=e1y*e2z-e1z*e2y;ny=e1z*e2x-e1x*e2z;nz=e1x*e2y-e1y*e2x
-    n2=nx*nx+ny*ny+nz*nz
-    if n2>0
-        # Barycentric coordinates of the orthogonal projection.
-        d11=e1x*e1x+e1y*e1y+e1z*e1z;d12=e1x*e2x+e1y*e2y+e1z*e2z
-        d22=e2x*e2x+e2y*e2y+e2z*e2z
-        px1=px-a[1];py1=py-a[2];pz1=pz-a[3]
-        b1=px1*e1x+py1*e1y+pz1*e1z;b2=px1*e2x+py1*e2y+pz1*e2z
-        det=d11*d22-d12*d12
-        if det>0
-            u=(b1*d22-b2*d12)/det;v=(b2*d11-b1*d12)/det
-            if u>=0 && v>=0 && u+v<=1
-                return abs(px1*nx+py1*ny+pz1*nz)/sqrt(n2)
-            end
-        end
-    end
-    return min(_plugin_point_seg_dist(px,py,pz,a,b),
-               _plugin_point_seg_dist(px,py,pz,a,c),
-               _plugin_point_seg_dist(px,py,pz,b,c))
-end
+@inline _plugin_point_seg_dist(px,py,pz,a,b)=
+    _plugin_geometric_distance(SizeField._distance_segment_kernel,(px,py,pz),a,b)
+
+@inline _plugin_point_tri_dist(px,py,pz,a,b,c)=
+    _plugin_geometric_distance(SizeField._distance_triangle_kernel,(px,py,pz),a,b,c)
 
 function _plugin_exec_distance(spec::_PluginSpec,caller::AbstractString)
     numbers=spec.numbers
@@ -5272,11 +5254,8 @@ function _plugin_exec_distance(spec::_PluginSpec,caller::AbstractString)
     index=_current_slot_index_locked()
     index==0 && throw(ArgumentError("$caller: no current model"))
     slot=MODEL_SLOTS[index]
-    mesh=slot.mesh
-    mesh===nothing && throw(ArgumentError(
-        "$caller: Plugin(Distance) needs a mesh"))
-    class=slot.class===nothing ? _cached_classification_locked(mesh) :
-        slot.class
+    mesh_context=_plugin_model_mesh_context(slot,_plugin_model_contexts(),caller)
+    mesh=mesh_context.mesh
     _,_,total=_mesh_element_offsets(mesh)
     total==0 && throw(ArgumentError(
         "$caller: Plugin(Distance) needs a mesh"))
@@ -5291,7 +5270,7 @@ function _plugin_exec_distance(spec::_PluginSpec,caller::AbstractString)
     noids=id_point==0 && id_line==0 && id_face==0
     if dtype<=0.0
         for index in 1:total
-            ent=_plugin_element_entity(mesh,class,index)
+            ent=_plugin_element_entity(mesh,nothing,index)
             ent===nothing && continue
             if noids
                 ent[1]==maxdim-1 || continue
@@ -5350,7 +5329,7 @@ function _plugin_exec_distance(spec::_PluginSpec,caller::AbstractString)
     counts=Dict{String,Int}();order=String[]
     byent=Dict{Tuple{Int,Int},Vector{Int}}()
     for index in 1:total
-        ent=_plugin_element_entity(mesh,class,index)
+        ent=_plugin_element_entity(mesh,nothing,index)
         ent===nothing && continue
         ent[1]==maxdim || continue
         push!(get!(byent,ent,Int[]),index)
@@ -5363,7 +5342,9 @@ function _plugin_exec_distance(spec::_PluginSpec,caller::AbstractString)
             kind===nothing && continue
             type=_plugin_record_type(kind,1)
             type===nothing && continue
-            nvert=length(rec.node_tags)
+            # The native Distance primitive output uses primary vertices;
+            # retained higher-order geometry stays on the source model.
+            nvert=min(Elements._msh_primary_nodes(spec_rec.family),length(rec.node_tags))
             haskey(by_type,type) ||
                 (by_type[type]=Float64[];counts[type]=0;push!(order,type))
             flat=by_type[type]
