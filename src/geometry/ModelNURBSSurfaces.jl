@@ -42,6 +42,12 @@ end
 function _model_nurbs_deboor_h(points,degree,knots,u)
     count=length(points)
     span=clamp(searchsortedlast(knots,u)-1,degree,count-1)
+    # A periodic spline's active upper endpoint can precede repeated knots
+    # in its cyclic extension. Evaluate its last nonzero span, including a
+    # writer-rounded edge endpoint just beyond the active knot domain.
+    while span>degree && knots[span+1]==knots[span+2]
+        span-=1
+    end
     buffer=NTuple{4,Float64}[points[span-degree+j+1] for j in 0:degree]
     for level in 1:degree,j in degree:-1:level
         lower=knots[span-degree+j+1]

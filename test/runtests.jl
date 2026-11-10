@@ -59,6 +59,7 @@ include("functional/fixtures.jl")
         "fields/postview_translated_line_test.jl",
         "fields/postview_compact_tolerance_test.jl",
         "interfaces/api_occ_brep_hyperbola_test.jl",
+        "interfaces/api_occ_periodic_spline_endpoints_test.jl",
         "geometry/model_plane_closed_curve_test.jl",
         "geometry/model_surface_auto_algorithm_test.jl",
         "geometry/boundary_layer_curved_end_test.jl",

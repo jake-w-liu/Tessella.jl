@@ -28,26 +28,6 @@ const _OCC_GL_W=(0.1012285362903763,0.2223810344533745,
 @inline _occ3_sub(a,b)=(a[1]-b[1],a[2]-b[2],a[3]-b[3])
 @inline _occ3_scale(a,s)=(a[1]*s,a[2]*s,a[3]*s)
 
-# GL8 on each panel of [t0,t1] — `f` maps a parameter to (value, weight)
-# and the accumulators ride the weighted sum. Panel subdivision keeps
-# oscillatory speed integrands (ellipse eccentricity, spline knot
-# boundaries) at machine-precision rather than single-panel accuracy.
-function _model_occ_quad1d(visit,t0,t1,panels)
-    panels<1 && return 0.0,(0.0,0.0,0.0)
-    L=0.0; M=(0.0,0.0,0.0)
-    span=(t1-t0)/panels
-    for k in 0:panels-1
-        a=t0+k*span; h=span/2; mid=a+h
-        for i in 1:4, sgn in (-1,1)
-            t=mid+sgn*h*_OCC_GL_T[i]; w=_OCC_GL_W[i]*h
-            p,speed=visit(t)
-            dw=w*speed
-            L+=dw; M=_occ3_add(M,_occ3_scale(p,dw))
-        end
-    end
-    return L,M
-end
-
 # Distinct interior breakpoints of a NURBS curve's knot range — the
 # natural smoothness panels for the measure quadrature.
 function _model_occ_curve_panels(curve,t0,t1)
@@ -72,6 +52,8 @@ end
 
 # ---- curves ----------------------------------------------------------
 
+include("ModelOCCCurveMeasures.jl")
+
 function _model_occ_curve_measure(kernel,id)
     rec=kernel.shapes[id].geometry.geometry
     if rec.occ===:line
@@ -90,33 +72,8 @@ function _model_occ_curve_measure(kernel,id)
         tag=kernel.shape_tags[id][2]
         return 0.0,_occ_degenerate_point(rec,tag,rec.t0)
     end
-    evaluator=rec.occ===:ellipse ?
-        t->(_occ_ellipse_point(rec,t),_occ_ellipse_derivative(rec,t)) :
-        rec.occ===:copied_curve ?
-        t->begin values=_model_occ_curve_d2(rec.curve,t)
-            (values[1],values[2]) end :
-        rec.occ===:surface_iso ?
-        t->(_model_surface_iso_point(rec,t),_model_surface_iso_d1(rec,t)) :
-        throw(ErrorException(
-            "OCC.get_mass: unsupported OCC curve kind $(rec.occ)"))
-    # GL8 per knot span for splines; 8 uniform panels for the conic/iso
-    # families — panel subdivision keeps oscillatory speed integrands at
-    # machine precision.
-    cuts=rec.occ===:copied_curve ?
-        _model_occ_curve_panels(rec.curve,rec.t0,rec.t1) : Float64[]
-    bounds=Float64[rec.t0]
-    append!(bounds,cuts)
-    push!(bounds,rec.t1)
-    L=0.0; M=(0.0,0.0,0.0)
-    for k in 1:length(bounds)-1
-        l,m=_model_occ_quad1d(t->begin p,d=evaluator(t)
-            (p,_occ_modulus(d)) end,bounds[k],bounds[k+1],
-            isempty(cuts) ? 8 : 1)
-        L+=l; M=_occ3_add(M,m)
-    end
-    c=L>_OCC_CONFUSION ? _occ3_scale(M,1.0/L) :
-        evaluator((rec.t0+rec.t1)/2)[1]
-    return L,c
+    stats=_model_occ_curve_stats(rec)
+    return stats.area,_occ3_add(stats.origin,stats.centroid)
 end
 
 # ---- plane-face shoelace ---------------------------------------------
@@ -1565,6 +1522,8 @@ _model_occ_get_center_of_mass(m,dim,tag)=last(
 
 function _model_occ_curve_moment2(kernel,id)
     rec=kernel.shapes[id].geometry.geometry
+    rec.occ in (:line,:circle,:degenerate) ||
+        return _model_occ_curve_stats(rec;want_second=true).second
     m=zeros(3,3)
     _,centroid=_model_occ_curve_measure(kernel,id)
     if rec.occ===:line
@@ -1592,37 +1551,6 @@ function _model_occ_curve_moment2(kernel,id)
         return m
     elseif rec.occ===:degenerate
         return m
-    end
-    evaluator=rec.occ===:ellipse ?
-        t->(_occ_ellipse_point(rec,t),_occ_ellipse_derivative(rec,t)) :
-        rec.occ===:copied_curve ?
-        t->begin values=_model_occ_curve_d2(rec.curve,t)
-            (values[1],values[2]) end :
-        rec.occ===:surface_iso ?
-        t->(_model_surface_iso_point(rec,t),_model_surface_iso_d1(rec,t)) :
-        throw(ErrorException("OCC.get_matrix_of_inertia: unsupported " *
-            "OCC curve kind $(rec.occ)"))
-    cuts=rec.occ===:copied_curve ?
-        _model_occ_curve_panels(rec.curve,rec.t0,rec.t1) : Float64[]
-    bounds=Float64[rec.t0]
-    append!(bounds,cuts)
-    push!(bounds,rec.t1)
-    for k in 1:length(bounds)-1
-        a,bk=bounds[k],bounds[k+1]
-        panels=isempty(cuts) ? 8 : 1
-        span=(bk-a)/panels
-        for p in 0:panels-1
-            aa=a+p*span; h=span/2; mid=aa+h
-            for i in 1:4, sgn in (-1,1)
-                t=mid+sgn*h*_OCC_GL_T[i]; w=_OCC_GL_W[i]*h
-                pt,d=evaluator(t)
-                dw=w*_occ_modulus(d)
-                centered=_occ3_sub(pt,centroid)
-                for i2 in 1:3,j2 in 1:3
-                    m[i2,j2]+=dw*centered[i2]*centered[j2]
-                end
-            end
-        end
     end
     return m
 end

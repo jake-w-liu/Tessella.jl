@@ -579,3 +579,4 @@ test/data/native_hybrid_import_events_4152_v1/native_hybrid_import_source_4152_v
 # Preserve native BREP fixture bytes, including writer-emitted terminal spaces.
 /test/fixtures/brep_native_pcurve_edge_*.brep -text whitespace=-blank-at-eol
 /test/fixtures/brep_native_trimmed_planar_curve.brep -text whitespace=-blank-at-eol
+/test/fixtures/brep_native_periodic_circle.brep -text whitespace=-blank-at-eol
