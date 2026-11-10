@@ -128,40 +128,73 @@ end
 const _ONELAB_UTF8_CHECK=r"^[\s\S]*$"
 _onelab_valid_text(s::AbstractString)=isascii(s) || occursin(_ONELAB_UTF8_CHECK,s)
 
-function _onelab_wire_encode(p::_OnelabWireParameter)
-    parts=String[_ONELAB_WIRE_VERSION,p.kind===:number ? "number" : "string"]
-    push!(parts,p.name,p.label,p.help,
+function _onelab_wire_fields!(output,limit,parts::AbstractString...)
+    for part in parts
+        _onelab_valid_text(part) && !occursin('\0',part) || throw(ArgumentError(
+            "onelab wire: parameter strings must be valid NUL-free UTF-8"))
+        separator=position(output)>0
+        count=ncodeunits(part)+Int(separator)
+        count<=limit-position(output) || throw(ArgumentError("onelab wire: parameter exceeds byte capacity"))
+        separator && write(output,UInt8(0))
+        write(output,part)
+    end
+    return nothing
+end
+
+function _onelab_wire_count_capacity(output,limit,count,width)
+    count<=div(limit-position(output),width) || throw(ArgumentError(
+        "onelab wire: parameter exceeds byte capacity"))
+    return nothing
+end
+
+function _onelab_wire_encode(p::_OnelabWireParameter;max_bytes::Int=typemax(Int))
+    max_bytes>=0 || throw(ArgumentError("onelab wire: byte capacity must be nonnegative"))
+    output=IOBuffer(;maxsize=max_bytes)
+    _onelab_wire_fields!(output,max_bytes,_ONELAB_WIRE_VERSION,p.kind===:number ? "number" : "string")
+    _onelab_wire_fields!(output,max_bytes,p.name,p.label,p.help,
           string(p.changed_value),string(p.visible ? 1 : 0),
           string(p.read_only ? 1 : 0))
-    push!(parts,string(length(p.attributes)))
+    _onelab_wire_fields!(output,max_bytes,string(length(p.attributes)))
+    _onelab_wire_count_capacity(output,max_bytes,length(p.attributes),2)
     for kv in _onelab_dict_items(p.attributes,p.attr_order)
-        push!(parts,kv.first,kv.second)
+        _onelab_wire_fields!(output,max_bytes,kv.first,kv.second)
     end
-    push!(parts,string(length(p.clients)))
+    _onelab_wire_fields!(output,max_bytes,string(length(p.clients)))
+    _onelab_wire_count_capacity(output,max_bytes,length(p.clients),3)
     for kv in _onelab_dict_items(p.clients,p.client_order)
-        push!(parts,kv.first,string(kv.second))
+        _onelab_wire_fields!(output,max_bytes,kv.first,string(kv.second))
     end
     if p.kind===:number
-        push!(parts,string(length(p.values_f)))
-        append!(parts,(_onelab_wire_f64(v) for v in p.values_f))
-        push!(parts,_onelab_wire_f64(p.min),_onelab_wire_f64(p.max),
+        _onelab_wire_fields!(output,max_bytes,string(length(p.values_f)))
+        _onelab_wire_count_capacity(output,max_bytes,length(p.values_f),2)
+        for value in p.values_f
+            _onelab_wire_fields!(output,max_bytes,_onelab_wire_f64(value))
+        end
+        _onelab_wire_fields!(output,max_bytes,_onelab_wire_f64(p.min),_onelab_wire_f64(p.max),
               _onelab_wire_f64(p.step),string(p.index))
-        push!(parts,string(length(p.choices_f)))
-        append!(parts,(_onelab_wire_f64(v) for v in p.choices_f))
-        push!(parts,string(length(p.value_labels)))
+        _onelab_wire_fields!(output,max_bytes,string(length(p.choices_f)))
+        _onelab_wire_count_capacity(output,max_bytes,length(p.choices_f),2)
+        for value in p.choices_f
+            _onelab_wire_fields!(output,max_bytes,_onelab_wire_f64(value))
+        end
+        _onelab_wire_fields!(output,max_bytes,string(length(p.value_labels)))
+        _onelab_wire_count_capacity(output,max_bytes,length(p.value_labels),3)
         for kv in _onelab_dict_items(p.value_labels,p.label_order)
-            push!(parts,_onelab_wire_f64(kv.first),kv.second)
+            _onelab_wire_fields!(output,max_bytes,_onelab_wire_f64(kv.first),kv.second)
         end
     else
-        push!(parts,string(length(p.values_s)))
-        append!(parts,p.values_s)
-        push!(parts,p.kind_name)
-        push!(parts,string(length(p.choices_s)))
-        append!(parts,p.choices_s)
+        _onelab_wire_fields!(output,max_bytes,string(length(p.values_s)))
+        _onelab_wire_count_capacity(output,max_bytes,length(p.values_s),1)
+        for value in p.values_s
+            _onelab_wire_fields!(output,max_bytes,value)
+        end
+        _onelab_wire_fields!(output,max_bytes,p.kind_name,string(length(p.choices_s)))
+        _onelab_wire_count_capacity(output,max_bytes,length(p.choices_s),1)
+        for value in p.choices_s
+            _onelab_wire_fields!(output,max_bytes,value)
+        end
     end
-    all(part->_onelab_valid_text(part) && !occursin('\0',part),parts) || throw(ArgumentError(
-        "onelab wire: parameter strings must be valid NUL-free UTF-8"))
-    return join(parts,'\0')
+    return String(take!(output))
 end
 
 mutable struct _OnelabWireCursor
@@ -359,6 +392,12 @@ end
 
 # ---- parameter exchange ---------------------------------------------------------
 
+function _onelab_client_match_reply(reply,request,caller)
+    reply.kind===request.kind && reply.name==request.name || throw(ArgumentError(
+        "$caller: ONELAB reply does not identify the requested $(request.kind) parameter $(repr(request.name))"))
+    return reply
+end
+
 # Upstream `defineParameter`: QUERY then either PARAMETER (server copy wins —
 # we reply PARAMETER_UPDATE and adopt the server's record) or
 # PARAMETER_NOT_FOUND (define by sending PARAMETER). Returns the server's
@@ -368,7 +407,7 @@ function _onelab_client_define(c::OnelabClient,p::_OnelabWireParameter,
     _onelab_client_send(c,_ONELAB_MSG.PARAMETER_QUERY,_onelab_wire_encode(p))
     type,msg=_onelab_client_receive(c)
     if type==_ONELAB_MSG.PARAMETER
-        server=_onelab_wire_decode(msg,caller)
+        server=_onelab_client_match_reply(_onelab_wire_decode(msg,caller),p,caller)
         _onelab_client_send(c,_ONELAB_MSG.PARAMETER_UPDATE,
             _onelab_wire_encode(server))
         return server
@@ -386,7 +425,7 @@ function _onelab_client_fetch(c::OnelabClient,p::_OnelabWireParameter,
     _onelab_client_send(c,_ONELAB_MSG.PARAMETER_QUERY,_onelab_wire_encode(p))
     type,msg=_onelab_client_receive(c)
     if type==_ONELAB_MSG.PARAMETER
-        q=_onelab_wire_decode(msg,caller)
+        q=_onelab_client_match_reply(_onelab_wire_decode(msg,caller),p,caller)
         for f in fieldnames(_OnelabWireParameter); setfield!(p,f,getfield(q,f)); end
         return true
     elseif type==_ONELAB_MSG.PARAMETER_NOT_FOUND
@@ -574,9 +613,14 @@ function _onelab_client_get_all(c)
             _onelab_wire_encode(_OnelabWireParameter(kind,"dummy")))
         type,msg=_onelab_client_receive(c)
         while type==_ONELAB_MSG.PARAMETER_QUERY_ALL
-            push!(out,_onelab_wire_decode(msg,caller))
+            parameter=_onelab_wire_decode(msg,caller)
+            parameter.kind===kind || throw(ArgumentError(
+                "$caller: ONELAB list reply has the wrong parameter type"))
+            push!(out,parameter)
             type,msg=_onelab_client_receive(c)
         end
+        type==_ONELAB_MSG.PARAMETER_QUERY_END || throw(ArgumentError(
+            "$caller: unexpected ONELAB list completion type $type"))
     end
     return out
 end

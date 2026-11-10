@@ -2284,6 +2284,7 @@ mutable struct _GeoNumericContext
     # Opaque operation-owned ONELAB parameter store/runner, supplied by API
     # staging or created lazily by standalone GEO execution.
     native_onelab_runner::Any
+    native_onelab_action::String
 end
 _GeoNumericContext()=_GeoNumericContext(
     Dict{String,Float64}(),Dict{String,Vector{Float64}}(),Set{String}(),
@@ -2303,7 +2304,7 @@ _GeoNumericContext()=_GeoNumericContext(
     Union{Nothing,Vector{Float64}}[],UInt64(0),UInt64(0),
     Dict{Tuple{Int,Int},Vector{Int}}(),true,true,nothing,
     Dict{Int,Any}(),nothing,false,1.0,false,nothing,nothing,nothing,nothing,
-    nothing,nothing,nothing,nothing,Int[],Bool[],0,-1,nothing)
+    nothing,nothing,nothing,nothing,Int[],Bool[],0,-1,nothing,"")
 
 # Thrown where the upstream grammar fails to reduce — a bison syntax error.
 # `execute_geo` catches it per statement, records `syntax error (<token>)`
@@ -5864,7 +5865,7 @@ function _geo_string_dispatch(name::String,rest::String,
         name=="CodeName" && return "Gmsh"
         name=="GmshExecutableName" &&
             return joinpath(Sys.BINDIR,Base.julia_exename())
-        name=="OnelabAction" && return ""
+        name=="OnelabAction" && return context.native_onelab_action
         name=="CurrentFileName" && return basename(context.file_name)
         (name=="CurrentDirectory" || name=="CurrentDir") &&
             return isempty(context.file_name) ?
@@ -8281,13 +8282,6 @@ function _geo_option_number_read(context::_GeoNumericContext,family::String,
     return value
 end
 
-function _geo_onelab_empty_number(context::_GeoNumericContext,name)
-    runner=context.native_onelab_runner
-    runner===nothing && return false
-    api=getfield(parentmodule(@__MODULE__),:API)
-    return Base.invokelatest(getfield(api,:_onelab_geo_empty_number),runner,name)
-end
-
 # `Msg::ExchangeOnelabParameter` — the ONELAB name is `Name`'s value (default
 # `name` is NOT used; Gmsh errors when options exist without `Name`).
 function _geo_onelab_options(context::_GeoNumericContext,options,caller;
@@ -8357,9 +8351,6 @@ function _geo_exchange_onelab_number!(context::_GeoNumericContext,name::String,
     declared===nothing || return declared
     if haskey(context.onelab_numbers,oname) &&
        get(fopts,"ReadOnly",[0.0])[1]==0.0
-        # An existing empty server number keeps its empty values while the
-        # local declaration uses its default. GetNumber still projects it to0.
-        _geo_onelab_empty_number(context,oname) && return values
         # Server value overrides the default (`val = ps[0].getValues()`).
         return Float64[context.onelab_numbers[oname]]
     end
@@ -10318,7 +10309,7 @@ functions, CSG and Boolean geometry are deliberately not evaluated. Numeric
 field options are normalized to literals; geometric references and string or
 point-dependent field expressions remain source strings.
 """
-function read_geo_params(path;max_file_bytes=typemax(Int))
+function read_geo_params(path;max_file_bytes=typemax(Int),_onelab_action::AbstractString="")
     caller="read_geo_params"
     path isa AbstractString || throw(ArgumentError(
         "$caller: path must be a string"))
@@ -10351,6 +10342,7 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
     option_order=Dict{Int,Vector{String}}()
     creation_curvature=Dict{Int,Int}()
     context=_GeoNumericContext()
+    context.native_onelab_action=String(_onelab_action)
     # Scan diagnostics are returned in `GeoParams.scan_*` — the execution pass
     # replays each statement and prints them once, so the scan stays quiet.
     context.stderr_diagnostics=false

@@ -69,11 +69,6 @@ function _onelab_geo_sync!(runner)
     return nothing
 end
 
-function _onelab_geo_empty_number(runner,name)
-    parameter=get(runner.store.parameters,(:number,name),nothing)
-    return parameter!==nothing && parameter.kind===:number && isempty(parameter.values_f)
-end
-
 function _onelab_geo_adopt_runner!(runner)
     runner.epoch==_ONELAB_SESSION_EPOCH[] || throw(ArgumentError("ONELAB: session was reset"))
     target=_ONELAB_SESSION_STORE;source=runner.store

@@ -23,6 +23,13 @@ function query(socket,name;kind="number")
     payload=kind=="number" ? number(name,[0.]) : text(name,[""])
     frame(socket,24,payload);return reply(socket)
 end
+function first_value(payload)
+    fields=split(payload,'\0');index=9
+    index+=1+2parse(Int,fields[index]) # attributes
+    index+=1+2parse(Int,fields[index]) # clients
+    parse(Int,fields[index])>0 || error("empty parameter")
+    return fields[index+1]
+end
 
 function main()
 mode=ARGS[1];output=ARGS[2]
@@ -85,6 +92,15 @@ elseif mode=="metadata"
         push!(records,payload)
     end
     write(output,join(records,'\n'))
+elseif mode=="phase"
+    message,payload=query(socket,"Phase";kind="string")
+    message==23 || error("missing phase")
+    phase=first_value(payload)
+    message,payload=query(socket,"Controls/N")
+    message==23 || error("missing phase parameter")
+    value=first_value(payload)
+    open(output,"a") do io;println(io,phase,':',value);end
+    isempty(phase) && frame(socket,23,number("Controls/N",[7.,8.]))
 elseif mode=="noread"
     # Request the full string list and then never read: the server's response
     # write backpressures. Exercise the finite watchdog and cleanup paths.

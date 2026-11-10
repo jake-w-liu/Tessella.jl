@@ -74,6 +74,7 @@ Usage: tessella file.geo [-1|-2|-3] [-o output.msh] [-format format] [-bin]
        [-part_topo|-part_no_topo] [-part_ghosts|-part_no_ghosts]
        [-part_split|-part_split_files|-oneFilePerPart]
        [-combine]
+       tessella file.geo -run
        tessella -convert file [file2 ...]
        tessella -help | -version | -info | -help_options
 
@@ -103,6 +104,10 @@ Mesh.IgnorePeriodicity. -bgm merges a .pos view file and uses its last view
 as the PostView background-mesh field.
 -combine combines input views with identical names into multi-time-step views
 before meshing; background-view references follow their combined source.
+-run executes the GEO metamodel and its ONELAB clients, then checks it with
+OnelabAction set to "check", retaining server parameters across both passes.
+Solver.AutoLoadDatabase reloads <stem>.db before the check pass;
+Solver.AutoSaveDatabase controls the final native parameter database write.
 -log file mirrors Msg-channel output into the file; -cpu appends the
 (From start: Wall, CPU, Mem) resource suffix to Info/Error messages.
 -statreport writes (truncating) and -append_statreport appends the upstream
@@ -319,7 +324,6 @@ const _REJECTED_FLAGS=Dict{String,String}(
     # Upstream `-debugSurface` restricts surface meshing to a tagged face and
     # dumps `debugSurface.brep`; a diagnostic-only debug knob.
     "-debugSurface"=>"per-surface mesh debugging (debugSurface.brep) is not implemented",
-    "-run"=>"ONELAB solver clients are not implemented",
     "-onelab"=>"ONELAB solver clients are not implemented",
     "-socket"=>"ONELAB solver clients are not implemented",
     "-listen"=>"solver socket listeners are not implemented",
@@ -813,6 +817,7 @@ function _run(tokens::Vector{String})
     format_seen=false;binary_seen=false;check_seen=false
     refine_seen=false;save_seen=false;parse_seen=false;barycentric_seen=false
     adapt_seen=false;combine_seen=false
+    run_seen=false
     unroll_seen=false
     reclassify=nothing;reparam=nothing
     part=nothing;part_topo=nothing;part_ghosts=nothing;part_split=nothing
@@ -850,6 +855,9 @@ function _run(tokens::Vector{String})
         elseif a=="-combine"
             combine_seen && throw(ArgumentError("tessella: duplicate -combine flag"))
             combine_seen=true
+        elseif a=="-run"
+            run_seen && throw(ArgumentError("tessella: duplicate -run flag"))
+            run_seen=true
         elseif a in ("-1","-2","-3")
             dimension_seen && throw(ArgumentError(
                 "tessella: duplicate or conflicting dimension flag $a"))
@@ -1175,6 +1183,14 @@ function _run(tokens::Vector{String})
             marker = marker==:new ? :merge : marker
         end
         i+=1
+    end
+    if run_seen
+        (dimension_seen || parse_seen || output_seen || format_seen || binary_seen ||
+         check_seen || refine_seen || save_seen || barycentric_seen || adapt_seen ||
+         combine_seen || unroll_seen || reclassify!==nothing || reparam!==nothing ||
+         part!==nothing || bgm_seen || statreport!==nothing) && throw(ArgumentError(
+            "tessella: -run cannot be combined with other batch actions or output options"))
+        return _run_onelab_cli(files,preludes,numeric_options)
     end
     isempty(files) && throw(ArgumentError("tessella: missing input file"))
     # Upstream batch actions are mutually exclusive — the strict CLI rejects
@@ -2704,5 +2720,7 @@ function _write_partition_files(destination::String;version,binary,
     end
     return destination
 end
+
+include("CLIOnelab.jl")
 
 end # module

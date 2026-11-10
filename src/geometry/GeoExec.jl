@@ -851,7 +851,8 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
                      _initial_view_tag_callback=nothing,
                      _initial_onelab_numbers::Union{Nothing,Dict{String,Float64}}=nothing,
                      _initial_onelab_strings::Union{Nothing,Dict{String,String}}=nothing,
-                     _initial_onelab_runner=nothing)
+                     _initial_onelab_runner=nothing,
+                     _initial_onelab_action::AbstractString="")
     isfile(path) || throw(ArgumentError("execute_geo: missing file $path"))
     mesh_dim isa Bool && throw(ArgumentError("execute_geo: mesh_dim must not be Bool"))
     dim=try
@@ -861,13 +862,14 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
         throw(ArgumentError("execute_geo: mesh_dim exceeds the platform Int range"))
     end
     dim in 0:3 || throw(ArgumentError("execute_geo: mesh_dim must be in 0:3"))
-    params=read_geo_params(path)
+    params=read_geo_params(path;_onelab_action=_initial_onelab_action)
     # A model-file merge supplies an operation-owned detached model and context.
     # Ordinary standalone/open execution still starts with an empty model.
     model=_initial_model===nothing ? GeoModel() : _initial_model
     model isa GeoModel || throw(ArgumentError("execute_geo: initial model must be a GeoModel"))
     _initial_model_name===nothing || (model.name=String(_initial_model_name))
     context=_GeoNumericContext()
+    context.native_onelab_action=String(_initial_onelab_action)
     if _initial_views!==nothing
         _GEO_EXEC_VIEWS[context]=copy(_initial_views)
         _GEO_EXEC_VIEW_MAX[context]=Int(_initial_view_tag_max)
