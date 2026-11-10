@@ -2457,16 +2457,21 @@ _p2opt_certify(::Val, coords, conn, t) = false
         j21+=y*g[1]; j22+=y*g[2]; j23+=y*g[3]
         j31+=z*g[1]; j32+=z*g[2]; j33+=z*g[3]
     end
+    # Divide each column before taking products: this dimensionless measure
+    # must not overflow or underflow with the physical element volume/area.
+    n1=hypot(j11,j21,j31);n2=hypot(j12,j22,j32)
+    (isfinite(n1) && n1>0 && isfinite(n2) && n2>0) || return -Inf
+    j11/=n1;j21/=n1;j31/=n1
+    j12/=n2;j22/=n2;j32/=n2
     if fam.volume
-        den = hypot(j11,j21,j31)*hypot(j12,j22,j32)*hypot(j13,j23,j33)
-        (isfinite(den) && den > 0) || return -Inf
-        return (j11*(j22*j33-j23*j32) - j12*(j21*j33-j23*j31) +
-                j13*(j21*j32-j22*j31)) / den
+        n3=hypot(j13,j23,j33)
+        (isfinite(n3) && n3>0) || return -Inf
+        j13/=n3;j23/=n3;j33/=n3
+        return j11*(j22*j33-j23*j32) - j12*(j21*j33-j23*j31) +
+               j13*(j21*j32-j22*j31)
     else
-        den = hypot(j11,j21,j31)*hypot(j12,j22,j32)
-        (isfinite(den) && den > 0) || return -Inf
         return hypot(j21*j32-j31*j22, j31*j12-j11*j32,
-                     j11*j22-j21*j12) / den
+                     j11*j22-j21*j12)
     end
 end
 
